@@ -59,7 +59,7 @@ pub fn multi_residents(models_dir: Option<&Path>, gpus: &[(u32, u64)], reserved:
                 let assembly = match resolved_assembly_for(models_dir, &model) {
                     Some(Ok(a)) => a,
                     Some(Err(err)) => {
-                        eprintln!("brain: {model} not served ({err})");
+                        residency::log::not_served(&format!("brain: {model} not served ({err})"));
                         return Vec::new();
                     }
                     None => empty_assembly(),

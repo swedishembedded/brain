@@ -61,19 +61,19 @@ impl JanusProResident {
         let cfg = match januspro::model::decoder_config(std::path::Path::new(&dir)) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("brain: januspro not served ({e})");
+                residency::log::not_served(&format!("brain: januspro not served ({e})"));
                 return None;
             }
         };
         let Some(room) = gpus.iter().map(|&(_, free)| free.saturating_sub(reserved)).max() else {
-            eprintln!("brain: januspro not served (no GPU)");
+            residency::log::not_served("brain: januspro not served (no GPU)");
             return None;
         };
         let card = [(0, room)];
         let fp = Footprint::of(&cfg, januspro::model::SIGLIP_TOWER_BYTES);
         let understanding = deepseekvl::model::place(&fp, &card)
             .map(|p| Plan { bytes: fp.tower + fp.decoder_placed(&p), context: p.context, int8: p.int8, parallel: 1 })
-            .map_err(|e| eprintln!("brain: januspro chat not served ({e})"))
+            .map_err(|e| residency::log::not_served(&format!("brain: januspro chat not served ({e})")))
             .ok();
         let gen_fp = Footprint::of(&cfg, 0);
         // As many images per batch as leave a useful context on the card.
@@ -81,7 +81,7 @@ impl JanusProResident {
             .into_iter()
             .find_map(|parallel| januspro::t2i::place(&gen_fp, parallel, &card).ok().map(|(_, context)| Plan { bytes: gen_fp.decoder_at(2 * parallel * context) + januspro::t2i::GENERATION_EXTRA_BYTES, context, int8: false, parallel }));
         if generation.is_none() {
-            eprintln!("brain: januspro text2image not served (no card holds the decoder, the heads and a useful context)");
+            residency::log::not_served("brain: januspro text2image not served (no card holds the decoder, the heads and a useful context)");
         }
         if understanding.is_none() && generation.is_none() {
             return None;

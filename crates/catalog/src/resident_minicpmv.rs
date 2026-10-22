@@ -42,7 +42,7 @@ impl MiniCpmVResident {
         let cfg = match minicpmv::MiniCpmVConfig::from_dir(std::path::Path::new(&dir)) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("brain: minicpmv not served ({e})");
+                residency::log::not_served(&format!("brain: minicpmv not served ({e})"));
                 return None;
             }
         };
@@ -50,7 +50,7 @@ impl MiniCpmVResident {
         match pick_card(gpus, reserved, bytes) {
             Some(card) => Some(MiniCpmVResident { id: MODEL.to_string(), dir, tune: None, bytes, card }),
             None => {
-                eprintln!("brain: minicpmv not served (needs {} MiB on one card)", bytes >> 20);
+                residency::log::not_served(&format!("brain: minicpmv not served (needs {} MiB on one card)", bytes >> 20));
                 None
             }
         }

@@ -65,7 +65,7 @@ impl ScrfdResident {
         let missing: Vec<&str> =
             scrfd::caps::ScrfdProvider::RELEASE_FILES.iter().copied().filter(|f| !d.join(f).exists()).collect();
         if !missing.is_empty() {
-            eprintln!("brain: scrfd not served ({dir} is missing {missing:?})");
+            residency::log::not_served(&format!("brain: scrfd not served ({dir} is missing {missing:?})"));
             return None;
         }
         Some(ScrfdResident { dir })

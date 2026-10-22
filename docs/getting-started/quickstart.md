@@ -54,7 +54,7 @@ This runs `Qwen/Qwen3-0.6B`, a real instruct/chat model, over brain's
 OpenAI-compatible HTTP API — no manual download or conversion step:
 
 ```bash
-brain serve --openai 8788 --autofetch &   # --autofetch: allow the one-time fetch below
+brain serve --autofetch &   # the OpenAI API on 127.0.0.1:8788; --autofetch: allow the one-time fetch below
 # brain prints a line like: APIKEY openai sk-brain-...  -- copy that key
 
 curl http://localhost:8788/v1/chat/completions \

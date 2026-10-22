@@ -97,7 +97,7 @@ impl ArcFaceResident {
         let missing: Vec<&str> =
             arcface::caps::ArcFaceProvider::RELEASE_FILES.iter().copied().filter(|f| !d.join(f).exists()).collect();
         if !missing.is_empty() {
-            eprintln!("brain: arcface not served ({dir} is missing {missing:?})");
+            residency::log::not_served(&format!("brain: arcface not served ({dir} is missing {missing:?})"));
             return None;
         }
         Some(ArcFaceResident { dir })

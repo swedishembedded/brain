@@ -57,7 +57,7 @@ impl WorldMirror2Resident {
     pub fn from_env() -> Option<WorldMirror2Resident> {
         let path = std::env::var("BRAIN_WORLDMIRROR2_WEIGHTS").ok().filter(|p| !p.is_empty())?;
         if !std::path::Path::new(&path).exists() {
-            eprintln!("brain: worldmirror2 not served ({path} does not exist)");
+            residency::log::not_served(&format!("brain: worldmirror2 not served ({path} does not exist)"));
             return None;
         }
         Some(WorldMirror2Resident { path })

@@ -41,6 +41,24 @@ pub fn warn(msg: &str) {
     }
 }
 
+/// Why each model family left out of this process's catalog was left out, in
+/// the order they were found. A server has dozens of families and a machine
+/// holds few of them, so an absent one is the normal case, not news.
+static NOT_SERVED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// A model family the catalog leaves out, with the reason: recorded for
+/// [`not_served_count`] and shown as a [`warn`] (level 1+). The startup
+/// summary counts these at the default level instead of listing them.
+pub fn not_served(msg: &str) {
+    NOT_SERVED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(msg.to_string());
+    warn(msg);
+}
+
+/// How many families [`not_served`] has recorded so far.
+pub fn not_served_count() -> usize {
+    NOT_SERVED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len()
+}
+
 /// Level 2+: routine lifecycle events an operator would want when actually
 /// watching the server — model activate/resident/evict, the events this
 /// module exists for (see `executor.rs`'s `on_msg`/`assign` call sites).

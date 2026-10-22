@@ -87,7 +87,7 @@ pub struct ParamSpec {
     /// that RUNS the action - a checkpoint directory, a weights file, a
     /// tokenizer - and is therefore host configuration, not a caller's choice.
     /// The value is the environment variable that machine publishes it under
-    /// (`"BRAIN_SDXL_DIR"`, `"BRAIN_QWEN_WEIGHTS"`, …).
+    /// (`"BRAIN_SDXL_DIR"`, `"BRAIN_LFM2"`, …).
     ///
     /// Two things follow from it, both mechanical:
     /// * [`ActionSpec::validate`] fills the param from that variable when the

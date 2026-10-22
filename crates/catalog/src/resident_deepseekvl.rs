@@ -43,7 +43,7 @@ impl DeepseekVlResident {
         match placed {
             Ok((footprint, placement)) => Some(DeepseekVlResident { id: MODEL.to_string(), dir, tuned: std::env::var_os("BRAIN_DEEPSEEKVL_TUNED").map(Into::into), footprint, placement }),
             Err(e) => {
-                eprintln!("brain: deepseekvl not served ({e})");
+                residency::log::not_served(&format!("brain: deepseekvl not served ({e})"));
                 None
             }
         }

@@ -53,7 +53,7 @@ impl Florence2Resident {
         let d = std::path::Path::new(&dir);
         let missing: Vec<&str> = florence2::caps::Florence2Provider::RELEASE_FILES.iter().copied().filter(|f| !d.join(f).exists()).collect();
         if !missing.is_empty() {
-            eprintln!("brain: florence2 not served ({dir} is missing {missing:?})");
+            residency::log::not_served(&format!("brain: florence2 not served ({dir} is missing {missing:?})"));
             return None;
         }
         Some(Florence2Resident { dir })

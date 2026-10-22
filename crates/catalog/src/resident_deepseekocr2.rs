@@ -70,7 +70,7 @@ impl DeepseekOcr2Resident {
         match deepseekocr2::import::Files::locate(&dir) {
             Ok(_) => Some(DeepseekOcr2Resident { dir }),
             Err(e) => {
-                eprintln!("brain: deepseek-ocr-2 not served ({e})");
+                residency::log::not_served(&format!("brain: deepseek-ocr-2 not served ({e})"));
                 None
             }
         }

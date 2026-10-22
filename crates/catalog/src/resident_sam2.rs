@@ -50,7 +50,7 @@ impl Sam2Resident {
     pub fn new(path: impl Into<String>, variant: impl Into<String>) -> Option<Sam2Resident> {
         let (path, variant) = (path.into(), variant.into());
         if !std::path::Path::new(&path).exists() {
-            eprintln!("brain: sam2 not served ({path} does not exist)");
+            residency::log::not_served(&format!("brain: sam2 not served ({path} does not exist)"));
             return None;
         }
         Some(Sam2Resident { path, variant })

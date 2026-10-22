@@ -135,7 +135,7 @@ pub fn served_assembly(models_dir: Option<&Path>, arch: &str, spec: &dyn ArchSpe
     let mut assembly = match resolution {
         Resolution::Resolved(assembly) => *assembly,
         Resolution::Ambiguous(a) => {
-            eprintln!("brain: {arch} not served over the scheduler - {}", describe_served_ambiguity(&a, bindings));
+            residency::log::not_served(&format!("brain: {arch} not served over the scheduler - {}", describe_served_ambiguity(&a, bindings)));
             return None;
         }
         Resolution::Missing(_) => return None,
@@ -179,7 +179,7 @@ pub fn served_assemblies(models_dir: Option<&Path>, arch: &str, spec: &dyn ArchS
         let mut assembly = match resolution {
             Resolution::Resolved(assembly) => *assembly,
             Resolution::Ambiguous(a) => {
-                eprintln!("brain: {id} ({arch}) not served over the scheduler - {}", describe_served_ambiguity(&a, bindings));
+                residency::log::not_served(&format!("brain: {id} ({arch}) not served over the scheduler - {}", describe_served_ambiguity(&a, bindings)));
                 continue;
             }
             Resolution::Missing(_) => continue,

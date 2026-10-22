@@ -98,7 +98,7 @@ fn ensure_default_weights_with(arch: &str, store: &Store, hub: &dyn Hub, policy:
         let r = ModelRef::parse(default_ref).map_err(|e| format!("{default_ref}: {e}"))?;
         let Some(local) = store.local(&r) else {
             return Err(format!(
-                "{arch}: {default_ref} is not pulled. Fetch with `brain pull {default_ref}`, or rerun with --autofetch (BRAIN_AUTO_FETCH=1)."
+                "{arch}: {default_ref} is not pulled. Fetch with `brain pull {default_ref}`, or rerun with --autofetch."
             ));
         };
         default_weights_from_local(arch, &local)

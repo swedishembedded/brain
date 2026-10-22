@@ -1,34 +1,38 @@
 # Configuration
 
-Every choice - which models `brain serve` activates, where they run, and how
-they're tuned - is a `BRAIN_*` environment variable. This page is the complete
-reference, grouped by purpose.
+Ordinary use needs no configuration: `brain serve` serves what the model store
+holds on every device it finds, and a local client finds the server by itself
+(see [Serving](../guides/serving/serving.md#local-clients)). Choices are flags,
+which a config file can persist. Some settings are still `BRAIN_*` environment
+variables; this page lists every one of them, grouped by purpose.
 
 Unset variables take documented defaults; a model whose weights variable is
 unset simply isn't served (no error, it's just absent from `brain caps`).
 
 ## Config file (optional)
 
-`--config <FILE>` (or `$BRAIN_CONFIG`, global, valid on any subcommand) loads
-a flat YAML mapping of these SAME `BRAIN_*` variable names to values, before
-anything else runs. It is not a second configuration system - every variable
-below is still read the same way everywhere in this codebase - it is just
-another way to populate the environment, for a deployment that wants one
-reviewable file instead of a pile of exports.
+`~/.config/brain/config.yaml` (`$XDG_CONFIG_HOME/brain/config.yaml`) is read
+when it exists; `--config <FILE>` (global, valid on any subcommand) names
+another. It holds two kinds of key:
 
-It fills gaps, never overrides: a variable already exported by the caller
-(shell, `systemd`'s `Environment=`, a container's `--env-file`) always wins
-over the same key named in the file.
+- a subcommand (`serve`, `qwen3 infer`, ...) mapping that command's flags,
+  written without the leading dashes, to values: a list for a repeatable
+  flag, `true` for a switch. A flag given on the command line always wins
+  over the file. The longest matching subcommand applies.
+- a `BRAIN_*` variable from the tables below, set for the run. It fills gaps:
+  a variable the caller already exported always wins over the file.
 
 ```yaml
-# config.yaml
-BRAIN_API_KEY: sk-brain-your-own-fixed-key
+# ~/.config/brain/config.yaml
+serve:
+  api-key-file: /etc/brain/key
+  checkpoint: checkpoints/qwen3.8-27b
 BRAIN_QWEN35MOE_CTX: 8192
 ```
 
-```
-brain serve --config config.yaml --openai
-```
+A variable brain no longer reads (`BRAIN_API_KEY`, `BRAIN_QWEN_WEIGHTS`,
+`BRAIN_QWEN_TOKENIZER`, `BRAIN_RUNTIME_DIR`) is refused in the file, naming
+the flag that replaced it, and has no effect in the environment.
 
 ## Device selection
 
@@ -103,7 +107,6 @@ served, with no error.
 
 | Variable | Serves | Value |
 | --- | --- | --- |
-| `BRAIN_QWEN_WEIGHTS` + `BRAIN_QWEN_TOKENIZER` (deprecated for the weights: use `brain serve --checkpoint PATH`, which wins when both are given) | the `brain serve` scheduler's Qwen3 resident ONLY (`crate::resident_llm::QwenResident`, see `docs/reference/models/qwen3.md`); the target of `--adapter`, `--adapter-manifest` and `--watch-adapters` | checkpoint + `tokenizer.json`. The `brain caps`/`brain do qwen …` capability path (`generate`/`lora_train`/`lora_gate`/`embed`) does NOT read this variable - it is resolved from the model store instead (`qwen3::spec::Qwen3Spec`), same as the `FLUX2`/`S3DIT` rows below; an explicit `weights`/`tokenizer` param on the request still overrides the resolver's own pick |
 | `BRAIN_QWEN35MOE_WEIGHTS` + `BRAIN_QWEN35MOE_TOKENIZER` | Qwen3.5 MoE chat | checkpoint (produced by `brain import`) + `tokenizer.json` |
 | `BRAIN_GPT2_WEIGHTS` | char-level GPT baseline | checkpoint (embeds its vocab) |
 | `BRAIN_GLMDSA_WEIGHTS` | GLM decoder | checkpoint (char-level) |
@@ -149,7 +152,6 @@ The two admission deadlines are `brain serve` flags, not variables: `--admit-dea
 | Variable | Meaning | Default |
 | --- | --- | --- |
 | `BRAIN_MODELS_DIR` | model directory scanned at startup (also `--models-dir`) | `$XDG_DATA_HOME/brain/models` |
-| `BRAIN_API_KEY` | a fixed API key, shared by every OpenAI/Anthropic/OpenRouter surface `brain serve` binds, instead of a fresh random key per dialect per launch | unset (each dialect gets its own random `sk-brain-...` key) |
 | `BRAIN_AUTO_FETCH` | `1`/`true`/`on` enables on-demand fetching of missing model files (`--autofetch` publishes the same thing and wins over an exported `0`); a pulled model still resolves with the gate off | disabled |
 | `BRAIN_CONF` | stdio-loop YOLO confidence threshold (also `--conf`) | 0.25 |
 | `BRAIN_SCHED_MAX_BATCH` | maximum jobs the scheduler groups into one batch | 8 |
@@ -235,7 +237,6 @@ page under `docs/reference/models/`.
 | Variable | Meaning | Default |
 | --- | --- | --- |
 | `BRAIN_MODELS_DIR` | model directory scanned at startup | `$XDG_DATA_HOME/brain/models` |
-| `BRAIN_RUNTIME_DIR` | directory for `brain serve`'s runtime files (socket, pid) | `$XDG_RUNTIME_DIR/brain`, else `<tmpdir>/brain-<uid>` |
 | `BRAIN_PIPELINE_CACHE_DIR` | GPU pipeline/shader cache directory | backend default |
 | `BRAIN_OV_CACHE` | OpenVINO compiled-graph cache directory | `$TMPDIR/brain_ov_cache` |
 | `BRAIN_MINILM_DIR` | encoder checkpoint directory for the `salesconv_embed` developer binary | the MiniLM checkpoint under the models directory |

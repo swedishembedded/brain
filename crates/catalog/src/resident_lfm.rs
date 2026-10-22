@@ -51,7 +51,7 @@ impl LfmResident {
         match Self::new(&weights, &tokenizer) {
             Ok(r) => Some(r),
             Err(e) => {
-                eprintln!("brain: lfm not served over the scheduler ({e})");
+                residency::log::not_served(&format!("brain: lfm not served over the scheduler ({e})"));
                 None
             }
         }

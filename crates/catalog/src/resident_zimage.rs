@@ -63,14 +63,14 @@ impl ZImageResident {
         let paths = match Paths::from_assembly(&assembly) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("brain: z-image not served over the scheduler ({e})");
+                residency::log::not_served(&format!("brain: z-image not served over the scheduler ({e})"));
                 return None;
             }
         };
         match Self::from_paths(s3dit::caps::MODEL, paths) {
             Ok(r) => Some(r),
             Err(e) => {
-                eprintln!("brain: z-image not served over the scheduler ({e})");
+                residency::log::not_served(&format!("brain: z-image not served over the scheduler ({e})"));
                 None
             }
         }

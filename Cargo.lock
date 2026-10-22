@@ -475,6 +475,7 @@ dependencies = [
  "bytes",
  "futures",
  "jsonschema",
+ "libc",
  "rand",
  "serde",
  "serde_json",

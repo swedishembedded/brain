@@ -14,9 +14,9 @@
 //! `activate` places the build on the assigned card via a scoped device-registry
 //! selection ([`on_device`]), exactly like z-image.
 //!
-//! Model SELECTION is env-only: `BRAIN_GPT2_WEIGHTS`, `BRAIN_GLMDSA_WEIGHTS`,
-//! `BRAIN_QWEN_WEIGHTS` + `BRAIN_QWEN_TOKENIZER` name WHICH checkpoint to
-//! serve; each `from_env` returns `None` when its primary weights var is
+//! Model SELECTION: `--checkpoint` (+ `--tokenizer`) names the Qwen3
+//! checkpoint to serve; `BRAIN_GPT2_WEIGHTS` and `BRAIN_GLMDSA_WEIGHTS` still
+//! name theirs, and each `from_env` returns `None` when its variable is
 //! unset/empty. HOW to serve Qwen3 - context length, batching, KV/weight
 //! precision - is [`QwenServeConfig`], which `run_cli.rs`'s serving-policy
 //! flags build; see that struct's own doc for every field and its default.
@@ -470,21 +470,22 @@ impl Instance for GlmInstance {
 
 // ---------------------------------------------------------------- qwen
 
-/// Every tunable that used to be its own `BRAIN_QWEN_*` env var, now the
-/// explicit config `brain serve`'s own serving-policy flags build and pass down
-/// -- model SELECTION (`BRAIN_QWEN_WEIGHTS`/`BRAIN_QWEN_TOKENIZER`, which
-/// checkpoint to serve at all) stays env-only, everything about HOW to
-/// serve it is a flag. `Default` reproduces every historical env-var
+/// Every Qwen3 serving choice `brain serve`'s flags build and pass down:
+/// which checkpoint to serve (`--checkpoint`, `--tokenizer`) and how to
+/// serve it (the serving-policy flags). `Default` reproduces every historical env-var
 /// default byte for byte, so a caller that builds `QwenServeConfig::
 /// default()` (every test, `perf_cli.rs`, `model_dir.rs`'s catalog scan,
 /// `continuous_train.rs`) is unaffected by this existing at all.
 #[derive(Clone, Debug)]
 pub struct QwenServeConfig {
     /// `--checkpoint PATH`: the checkpoint (file, or the repo directory
-    /// holding it) the Qwen3 resident serves. `None` falls back to the
-    /// deprecated `BRAIN_QWEN_WEIGHTS` variable; the flag wins when both name
-    /// one.
+    /// holding it) the Qwen3 resident serves. `None` serves no such resident;
+    /// the model store's Qwen3 checkpoints are served from the store scan.
     pub weights: Option<String>,
+    /// `--tokenizer PATH`: the `tokenizer.json` for a `--checkpoint` that has
+    /// none beside it. `None` uses the one beside the checkpoint (or a GGUF's
+    /// embedded tokenizer).
+    pub tokenizer: Option<String>,
     /// `--ctx N`. `None` means "size it automatically" - see
     /// [`QwenResident::resolve_ctx`]. Historical default when NEITHER this
     /// nor `auto_budget_bytes` is given: 24576.
@@ -617,7 +618,7 @@ impl QwenServeConfig {
 
 impl Default for QwenServeConfig {
     fn default() -> QwenServeConfig {
-        QwenServeConfig { weights: None, ctx: None, auto_budget_bytes: None, card_budget_bytes: None, max_batch: 16, kv_int8: true, kv_fp8: false, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: None, weights_bf16: false, max_prefill_cap: 512, kv_tokens: None, gemm_precision: gpu_core::provider::library::GemmPrecision::Auto, fuse_residual_norm: true, adapter_bank: None, adapter_targets_named: false, refused: None }
+        QwenServeConfig { weights: None, tokenizer: None, ctx: None, auto_budget_bytes: None, card_budget_bytes: None, max_batch: 16, kv_int8: true, kv_fp8: false, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: None, weights_bf16: false, max_prefill_cap: 512, kv_tokens: None, gemm_precision: gpu_core::provider::library::GemmPrecision::Auto, fuse_residual_norm: true, adapter_bank: None, adapter_targets_named: false, refused: None }
     }
 }
 
@@ -802,9 +803,8 @@ fn auto_ctx_for_budget(weight_bytes: u64, budget_bytes: u64, cfg: &qwen3::config
     best
 }
 
-/// The Qwen3 BPE decoder behind the scheduler (`BRAIN_QWEN_WEIGHTS` +
-/// `BRAIN_QWEN_TOKENIZER` name WHICH checkpoint; [`QwenServeConfig`]'s
-/// serving-policy flags configure HOW to serve it). Runs the CPU/GPU forward
+/// The Qwen3 BPE decoder behind the scheduler ([`QwenServeConfig`] names
+/// WHICH checkpoint, `--checkpoint`, and HOW to serve it). Runs the CPU/GPU forward
 /// `generate` path (never the NPU branch).
 ///
 /// One resident is one copy of the weights, however many LoRA adapters ride
@@ -836,7 +836,7 @@ pub struct QwenResident {
     refused: Option<String>,
 }
 
-/// What `BRAIN_QWEN_WEIGHTS` names, as the `(path to open, repo directory,
+/// What `--checkpoint` names, as the `(path to open, repo directory,
 /// base id)` a [`QwenResident`] serves. A directory is what every other
 /// weights variable takes, so accept one here too: `resolve_base` turns a repo
 /// directory into the checkpoint inside it (for a Hugging Face directory its
@@ -864,18 +864,15 @@ impl AdapterHost for QwenResident {
 }
 
 impl QwenResident {
-    /// `cfg` carries every serving-policy flag `brain serve` parsed, including
-    /// `--checkpoint`, which selects the checkpoint; the deprecated
-    /// `BRAIN_QWEN_WEIGHTS` variable still does when the flag is absent.
-    /// The tokenizer is the one beside the checkpoint, else
-    /// `BRAIN_QWEN_TOKENIZER`.
-    pub fn from_env(cfg: QwenServeConfig) -> Option<QwenResident> {
-        let spec = cfg.weights.clone().filter(|p| !p.is_empty()).or_else(|| std::env::var("BRAIN_QWEN_WEIGHTS").ok().filter(|p| !p.is_empty()))?;
+    /// The resident `--checkpoint` selects, `None` when no checkpoint was
+    /// named. `cfg` carries every serving-policy flag `brain serve` parsed.
+    /// The tokenizer is `--tokenizer`, else the one beside the checkpoint.
+    pub fn from_config(cfg: QwenServeConfig) -> Option<QwenResident> {
+        let spec = cfg.weights.clone().filter(|p| !p.is_empty())?;
 
         let (path, dir, base_id) = resolve_served_base(&spec);
 
-        // A tokenizer beside the checkpoint needs no second variable.
-        let tokenizer = match std::env::var("BRAIN_QWEN_TOKENIZER").ok().filter(|t| !t.is_empty()) {
+        let tokenizer = match cfg.tokenizer.clone().filter(|t| !t.is_empty()) {
             Some(t) => t,
             None => dir
                 .map(|d| d.join("tokenizer.json"))
@@ -884,8 +881,8 @@ impl QwenResident {
                 .unwrap_or_default(),
         };
 
-        // See GptResident::from_env's comment: env-loaded, no upstream provenance.
-        // Adapters are bound to the id the spelling resolved to, the id a
+        // See GptResident::from_env's comment: named by path, no upstream
+        // provenance. Adapters are bound to the id the spelling resolved to, the id a
         // trainer resolving the same spelling writes on an adapter's card.
         Some(Self::build(&path, "brain/qwen3".to_string(), base_id, &tokenizer, cfg))
     }
@@ -1297,7 +1294,7 @@ impl ResidentModel for QwenResident {
         } else if let Some(gt) = gguf_tok {
             (data::qwen_tokenizer::QwenBpe::from_gguf(&gt).map_err(|e| format!("qwen: {e}"))?, None, gt.eos)
         } else {
-            return Err("qwen: no tokenizer (set BRAIN_QWEN_TOKENIZER, or use a GGUF with an embedded tokenizer)".to_string());
+            return Err("qwen: no tokenizer (put tokenizer.json beside the checkpoint, pass --tokenizer, or use a GGUF with an embedded tokenizer)".to_string());
         };
         // Prompts render in the checkpoint's own chat format; generation stops
         // on its eos ids and on that format's end-of-turn marker.
@@ -1587,7 +1584,7 @@ mod tests {
         assert_eq!(cfg.refused.as_deref(), Some(e.as_str()));
     }
 
-    /// `BRAIN_QWEN_WEIGHTS` naming a Hugging Face repo directory serves the
+    /// `--checkpoint` naming a Hugging Face repo directory serves the
     /// directory itself, the form `open_checkpoint` reads (its `config.json`
     /// holds the architecture); a carded brain checkpoint serves as its
     /// file, and a path that resolves to nothing travels on verbatim.

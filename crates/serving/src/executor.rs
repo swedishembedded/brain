@@ -42,8 +42,8 @@ use crate::Machine;
 /// a copy is a model no instance ever serves.
 pub struct Serving {
     pub executor: Executor,
-    /// `None` when `BRAIN_QWEN_WEIGHTS` names no checkpoint, i.e. this
-    /// process serves no env-selected Qwen3 for an adapter flag to apply to.
+    /// `None` when `--checkpoint` names no checkpoint, i.e. this process
+    /// serves no flag-selected Qwen3 for an adapter flag to apply to.
     pub qwen: Option<Arc<QwenResident>>,
     /// The released Qwen3.8 GGUFs the model scan registered, as concrete
     /// handles for the same reason: an adapter flag (or a watcher) offers its
@@ -157,13 +157,13 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     // from_store`'s own doc).
     match ZImageResident::from_store(models_dir) {
         Some(z) => models.push(Arc::new(z)),
-        None => eprintln!("brain: z-image not served over the scheduler (set BRAIN_S3DIT_DIT/_VAE/_QWEN/_TOKENIZER, or place a checkpoint under the model dir)"),
+        None => residency::log::not_served("brain: z-image not served over the scheduler (set BRAIN_S3DIT_DIT/_VAE/_QWEN/_TOKENIZER, or place a checkpoint under the model dir)"),
     }
     // yolo object detection if a checkpoint is configured (BRAIN_YOLOV8).
     if let Some(y) = YoloResident::from_env() {
         models.push(Arc::new(y));
     } else {
-        eprintln!("brain: yolo not served over the scheduler (set BRAIN_YOLOV8 to a checkpoint)");
+        residency::log::not_served("brain: yolo not served over the scheduler (set BRAIN_YOLOV8 to a checkpoint)");
     }
     // Text-generation LLMs (each gated on its own weights env var).
     if let Some(g) = catalog::resident_llm::GptResident::from_env() {
@@ -181,7 +181,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     // explicit value first, so filling this in unconditionally is harmless
     // when it is, and is what makes auto-sizing real when it is not.
     let qwen_cfg = catalog::resident_llm::QwenServeConfig { auto_budget_bytes: gpus.iter().map(|&(_, total)| total.saturating_sub(reserved)).max(), card_budget_bytes: gpus.iter().map(|&(_, total)| total.saturating_sub(reserved)).max(), ..qwen_cfg };
-    let mut qwen = register_qwen(&mut models, QwenResident::from_env(qwen_cfg.clone()));
+    let mut qwen = register_qwen(&mut models, QwenResident::from_config(qwen_cfg.clone()));
     // Qwen3.5-35B-A3B hybrid Gated-DeltaNet/GQA sparse-MoE decoder
     // (BRAIN_QWEN35MOE_WEIGHTS + BRAIN_QWEN35MOE_TOKENIZER) -- single-GPU,
     // fp32 weights + KV only (see resident_qwen35moe.rs's own module doc for
@@ -199,19 +199,19 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     match loader::resolver::try_resolve(models_dir, "qwen35", &qwen35::spec::Qwen35Fp32Spec, &Default::default()) {
         Ok(assembly) => {
             if let Some(why) = qwen35.fp32_refused.as_ref().filter(|_| qwen35.fp32.refused) {
-                eprintln!("brain: qwen35 (brain checkpoint) not served: {why}");
+                residency::log::not_served(&format!("brain: qwen35 (brain checkpoint) not served: {why}"));
             } else if let Some(q) = catalog::resident_qwen35::Qwen35Resident::from_assembly_sized(&assembly, qwen35.fp32.sanitized()) {
                 models.push(Arc::new(q));
             }
         }
-        Err(e) => eprintln!("brain: qwen35 not served over the scheduler ({e})"),
+        Err(e) => residency::log::not_served(&format!("brain: qwen35 not served over the scheduler ({e})")),
     }
     // LFM2.5-Encoder (BRAIN_LFM2 + BRAIN_LFM2_TOKENIZER): fill-mask + embeddings
     // with equal-length true batching (see resident_lfm.rs).
     if let Some(l) = catalog::resident_lfm::LfmResident::from_env() {
         models.push(Arc::new(l));
     } else {
-        eprintln!("brain: lfm not served over the scheduler (set BRAIN_LFM2 + BRAIN_LFM2_TOKENIZER)");
+        residency::log::not_served("brain: lfm not served over the scheduler (set BRAIN_LFM2 + BRAIN_LFM2_TOKENIZER)");
     }
     // FLUX.2 Klein (BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}, else every
     // independent `dit` checkpoint the model store holds, each its own
@@ -219,7 +219,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     // reference-image editing, LoRA training (see resident_flux2.rs).
     let flux2_residents = catalog::resident_flux2::Flux2Resident::all_from_store(models_dir);
     if flux2_residents.is_empty() {
-        eprintln!("brain: flux2-klein not served over the scheduler (set BRAIN_FLUX2_DIT/_VAE/_TE/_TOKENIZER, or place a checkpoint under the model dir)");
+        residency::log::not_served("brain: flux2-klein not served over the scheduler (set BRAIN_FLUX2_DIT/_VAE/_TE/_TOKENIZER, or place a checkpoint under the model dir)");
     }
     for f in flux2_residents {
         models.push(Arc::new(f));
@@ -229,7 +229,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     if let Some(w) = catalog::resident_wan::WanResident::from_env() {
         models.push(Arc::new(w));
     } else {
-        eprintln!("brain: wan not served over the scheduler (set BRAIN_WAN_DIT/_VAE/_T5/_TOKENIZER)");
+        residency::log::not_served("brain: wan not served over the scheduler (set BRAIN_WAN_DIT/_VAE/_T5/_TOKENIZER)");
     }
     // MiniMax-H3 joint video+audio (BRAIN_MINIMAXH3_DIR):
     // ONE hot 33B transformer shared across every request shape (no compiled
@@ -246,7 +246,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     if let Some(l) = catalog::resident_ltxv::LtxvResident::from_env() {
         models.push(Arc::new(l));
     } else {
-        eprintln!("brain: ltxv not served over the scheduler (set BRAIN_LTXV_VAE)");
+        residency::log::not_served("brain: ltxv not served over the scheduler (set BRAIN_LTXV_VAE)");
     }
     // Monocular depth (BRAIN_ZIPDEPTH_WEIGHTS).
     if let Some(d) = catalog::resident_depth::DepthResident::from_env() {
@@ -304,7 +304,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     let fastvlm_weights = match loader::resolver::try_resolve(models_dir, "fastvlm", &fastvlm::spec::FastvlmSpec, &Default::default()) {
         Ok(assembly) => assembly.roles.get("weights").map(|p| p.to_string_lossy().into_owned()),
         Err(e) => {
-            eprintln!("brain: fastvlm serving no default checkpoint ({e})");
+            residency::log::not_served(&format!("brain: fastvlm serving no default checkpoint ({e})"));
             None
         }
     };
@@ -324,7 +324,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
                 models.push(Arc::new(m));
             }
         }
-        Err(e) => eprintln!("brain: moondream3 not served over the scheduler ({e})"),
+        Err(e) => residency::log::not_served(&format!("brain: moondream3 not served over the scheduler ({e})")),
     }
     // Janus-Pro: registered directly, like Moondream 3, because its plan
     // needs the cards' budgets (see `catalog::resident_januspro`).
@@ -334,7 +334,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
                 models.push(Arc::new(m));
             }
         }
-        Err(e) => eprintln!("brain: januspro not served over the scheduler ({e})"),
+        Err(e) => residency::log::not_served(&format!("brain: januspro not served over the scheduler ({e})")),
     }
     // LLaVA-1.5-13B captioning: same stateless-resident shape as FastVLM
     // above - the provider manages its own weight residency lazily, per
@@ -447,7 +447,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     if let Some(t) = catalog::resident_omni::int8_thinker_multi_from_env(gpus, reserved) {
         exec.register_multi(Arc::new(t));
     } else {
-        eprintln!("brain: {} not served over the scheduler (set BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT)", qwen3omnimoe::int8_thinker_resident::MODEL);
+        residency::log::not_served(&format!("brain: {} not served over the scheduler (set BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT)", qwen3omnimoe::int8_thinker_resident::MODEL));
     }
     // Released Qwen3.8 GGUFs found by the model scan: INT8 straight from the
     // file, layer-sharded across as many of the allowed cards as their real

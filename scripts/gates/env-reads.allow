@@ -1,4 +1,3 @@
-crates/apiserve/src/surface.rs	BRAIN_API_KEY
 crates/arcface/src/caps.rs	BRAIN_ARCFACE_DIR
 crates/arch/src/lib.rs	BRAIN_CAMPPLUS_DIR
 crates/arch/src/lib.rs	BRAIN_DEEPSEEKOCR2_DIR
@@ -98,8 +97,6 @@ crates/catalog/src/resident_lfm.rs	BRAIN_LFM2_TOKENIZER
 crates/catalog/src/resident_llm.rs	BRAIN_DEVICE
 crates/catalog/src/resident_llm.rs	BRAIN_GLMDSA_WEIGHTS
 crates/catalog/src/resident_llm.rs	BRAIN_GPT2_WEIGHTS
-crates/catalog/src/resident_llm.rs	BRAIN_QWEN_TOKENIZER
-crates/catalog/src/resident_llm.rs	BRAIN_QWEN_WEIGHTS
 crates/catalog/src/resident_llm.rs	MOE_SKIP_GPU_TESTS
 crates/catalog/src/resident_llm.rs	QWEN3_DIR
 crates/catalog/src/resident_llm.rs	QWEN_TOKENIZER
@@ -158,13 +155,14 @@ crates/cli/src/forecast_cli.rs	BRAIN_KRONOS_TEMPERATURE
 crates/cli/src/forecast_cli.rs	BRAIN_KRONOS_TOP_P
 crates/cli/src/main.rs	<&key>
 crates/cli/src/main.rs	BRAIN_AUTO_FETCH
-crates/cli/src/main.rs	BRAIN_CONFIG
 crates/cli/src/main.rs	BRAIN_MODELS_DIR
 crates/cli/src/main.rs	BRAIN_TEST_CONFIG_BOOL
 crates/cli/src/main.rs	BRAIN_TEST_CONFIG_FILLED
 crates/cli/src/main.rs	BRAIN_TEST_CONFIG_INHERITED
 crates/cli/src/main.rs	BRAIN_TEST_CONFIG_NUMBER
 crates/cli/src/main.rs	BRAIN_VERBOSE
+crates/cli/src/main.rs	HOME
+crates/cli/src/main.rs	XDG_CONFIG_HOME
 crates/cli/src/perf_cli.rs	<var>
 crates/cli/src/perf_cli.rs	BRAIN_FLUX2_DIT
 crates/cli/src/perf_cli.rs	BRAIN_FLUX2_TE
@@ -186,7 +184,6 @@ crates/cli/src/run_cli.rs	BRAIN_AUTO_FETCH
 crates/cli/src/run_cli.rs	BRAIN_CONF
 crates/cli/src/run_cli.rs	BRAIN_GPT2
 crates/cli/src/run_cli.rs	BRAIN_YOLOV8
-crates/cli/src/serve_daemon.rs	BRAIN_RUNTIME_DIR
 crates/cli/src/serve_daemon.rs	XDG_RUNTIME_DIR
 crates/cli/src/supply.rs	<var>
 crates/cli/src/supply.rs	BRAIN_AUTO_FETCH
@@ -227,7 +224,6 @@ crates/cli/tests/serve_cli.rs	BRAIN_BACKEND
 crates/cli/tests/serve_cli.rs	BRAIN_DEVICE
 crates/cli/tests/serve_cli.rs	BRAIN_MODELS_DIR
 crates/cli/tests/serve_cli.rs	BRAIN_QWEN_WEIGHTS
-crates/cli/tests/serve_cli.rs	BRAIN_RUNTIME_DIR
 crates/cli/tests/yolov8_eval.rs	BRAIN_DEVICE
 crates/cli/tests/zipdepth_smoke.rs	BRAIN_DEVICE
 crates/cli/tests/zipdepth_smoke.rs	ZIPDEPTH_PTH

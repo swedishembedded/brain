@@ -45,7 +45,7 @@ impl ControlnetResident {
     pub fn new(sdxl_root: impl Into<String>, control_root: impl Into<String>) -> Option<ControlnetResident> {
         let sdxl_root = sdxl_root.into();
         if !std::path::Path::new(&sdxl_root).join("unet").exists() {
-            eprintln!("brain: sdxl-controlnet not served ({sdxl_root} holds no unet/)");
+            residency::log::not_served(&format!("brain: sdxl-controlnet not served ({sdxl_root} holds no unet/)"));
             return None;
         }
         Some(ControlnetResident { sdxl_root, control_root: control_root.into() })

@@ -98,7 +98,7 @@ impl PulidResident {
     ) -> Option<PulidResident> {
         let flux1_root = flux1_root.into();
         if !std::path::Path::new(&flux1_root).join("transformer").exists() {
-            eprintln!("brain: flux1-pulid not served ({flux1_root} holds no transformer/)");
+            residency::log::not_served(&format!("brain: flux1-pulid not served ({flux1_root} holds no transformer/)"));
             return None;
         }
         Some(PulidResident {

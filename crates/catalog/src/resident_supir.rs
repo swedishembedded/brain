@@ -57,7 +57,7 @@ impl SupirResident {
     pub fn new(sdxl_root: impl Into<String>, supir_ckpt: impl Into<String>) -> Option<SupirResident> {
         let sdxl_root = sdxl_root.into();
         if !std::path::Path::new(&sdxl_root).join("unet").exists() {
-            eprintln!("brain: supir not served ({sdxl_root} holds no unet/)");
+            residency::log::not_served(&format!("brain: supir not served ({sdxl_root} holds no unet/)"));
             return None;
         }
         Some(SupirResident { sdxl_root, supir_ckpt: supir_ckpt.into() })

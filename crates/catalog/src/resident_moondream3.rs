@@ -107,7 +107,7 @@ impl Moondream3Resident {
     pub fn new(dir: impl Into<String>) -> Option<Moondream3Resident> {
         let dir = dir.into();
         if !std::path::Path::new(&dir).is_dir() {
-            eprintln!("brain: moondream3 not served ({dir} is not a directory)");
+            residency::log::not_served(&format!("brain: moondream3 not served ({dir} is not a directory)"));
             return None;
         }
         Some(Moondream3Resident { dir })

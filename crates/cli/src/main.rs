@@ -148,16 +148,19 @@ MEMORY CEILINGS (global - valid on any subcommand)
   Example: brain --limit-vram-total 8G qwen3 infer --weights model.safetensors
 
 CONFIG FILE (global - valid on any subcommand)
-  --config <FILE>          a flat YAML mapping of BRAIN_* variable names to
-                           values, loaded before anything else parses.
-                           Fills GAPS in the environment only:
-                           a variable already exported by the caller (shell,
-                           systemd Environment=, a container's --env-file)
-                           always wins over the same key in this file.
-                           Else $BRAIN_CONFIG.
+  --config <FILE>          a YAML file of settings, loaded before anything
+                           else parses. Default: ~/.config/brain/config.yaml
+                           ($XDG_CONFIG_HOME/brain/config.yaml) when it exists.
+                           A subcommand key (`serve`, `qwen3 infer`) maps that
+                           command's flags, without the dashes, to values (a
+                           list for a repeatable flag, true for a switch); a
+                           flag on the command line always wins. A BRAIN_* key
+                           sets a variable still read from the environment,
+                           filling gaps only.
   Example config.yaml:
-    BRAIN_API_KEY: sk-brain-your-own-fixed-key
-    BRAIN_QWEN_WEIGHTS: checkpoints/qwen3.8-27b
+    serve:
+      api-key-file: /etc/brain/key
+      checkpoint: checkpoints/qwen3.8-27b
 
   Per-model serving tunables (context, batching, KV storage) are command-line
   flags, not config keys - `brain serve --ctx 8192` and friends; run
@@ -1150,9 +1153,10 @@ fn apply_data_dir(root: Option<String>) {
     brain_modelstore::publish_data_root(Some(root));
 }
 
-/// Extract the global `--config <FILE>` flag from anywhere in `argv`,
-/// falling back to `$BRAIN_CONFIG` when absent, and return `(path,
-/// remaining args)`. Pure - no process-global side effect - so it is
+/// Extract the global `--config <FILE>` flag from anywhere in `argv` and
+/// return `(path, remaining args)`. With no flag, the user's own config file
+/// is used when one exists: `$XDG_CONFIG_HOME/brain/config.yaml`, else
+/// `~/.config/brain/config.yaml`. Pure but for that existence check, so it is
 /// testable like [`parse_data_dir`]; [`main`] is the sole caller of
 /// [`apply_config`] with this result.
 fn parse_config(argv: Vec<String>) -> (Option<String>, Vec<String>) {
@@ -1172,63 +1176,181 @@ fn parse_config(argv: Vec<String>) -> (Option<String>, Vec<String>) {
             i += 1;
         }
     }
-    let path = path.or_else(|| std::env::var("BRAIN_CONFIG").ok().filter(|s| !s.is_empty()));
+    let path = path.or_else(|| user_config_path().filter(|p| p.is_file()).map(|p| p.to_string_lossy().into_owned()));
     (path, rest)
 }
 
-/// Load `path` - a flat YAML mapping of `BRAIN_*` variable names to scalar
-/// values - and publish every entry into the process environment.
+/// Where the user's own config file lives (it need not exist).
+fn user_config_path() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()).map(std::path::PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))?;
+    Some(base.join("brain").join("config.yaml"))
+}
+
+/// Variables brain no longer reads, each with the flag (or config-section
+/// key) that replaced it. Naming one in a config file is refused, so a file
+/// written for an older brain does not silently stop doing what it says.
+const RETIRED_VARIABLES: &[Retired] = &[
+    Retired { name: "BRAIN_API_KEY", replacement: "serve: {api-key-file: FILE}" },
+    Retired { name: "BRAIN_QWEN_WEIGHTS", replacement: "serve: {checkpoint: PATH}" },
+    Retired { name: "BRAIN_QWEN_TOKENIZER", replacement: "serve: {tokenizer: PATH}" },
+    Retired { name: "BRAIN_RUNTIME_DIR", replacement: "serve: {runtime-dir: DIR}" },
+];
+
+/// One entry of [`RETIRED_VARIABLES`].
+struct Retired {
+    name: &'static str,
+    replacement: &'static str,
+}
+
+/// A subcommand's flags as a config file sets them: `--flag value` pairs (a
+/// `true` switch is a bare `--flag`) appended to that subcommand's command
+/// line, in file order, for every flag the command line does not name itself.
+#[derive(Debug, Default, PartialEq)]
+struct ConfigSections(Vec<ConfigSection>);
+
+/// One subcommand's section: the command words (`["qwen3", "infer"]`) and
+/// each flag's name with its values (none for a switch).
+type ConfigSection = (Vec<String>, Vec<(String, Vec<String>)>);
+
+/// Load `path` and apply what it holds.
 ///
-/// brain has no OTHER config file: every one of its ~100 `BRAIN_*`
-/// variables is read directly, all over this workspace, via
-/// `std::env::var*` - this function's only job is to get values INTO
-/// that environment before any of those reads happen, never to become a
-/// second source of truth those reads have to know about. That is also why
-/// it fills gaps rather than overriding: a variable the caller already
-/// exported (from a shell, a `systemd` `Environment=` line, a container's
-/// `--env-file`) always wins over the same key named in this file - the
-/// same flag-beats-inherited-env precedence `--brain-data-dir` already
-/// applies one level up, just one level further down since a config file
-/// is now the thing UNDER the environment rather than a flag above it.
+/// The file is a YAML mapping of two kinds of key:
+///
+/// * a subcommand path, lowercase (`serve`, `qwen3 infer`): a mapping of that
+///   command's long flag names (without `--`) to a value, a list of values
+///   (a repeatable flag) or a bool (a switch). Returned as [`ConfigSections`]
+///   for [`inject_config_flags`]; a flag on the command line always wins.
+/// * a `BRAIN_*` variable name: a setting that is still read from the
+///   environment, published into it here. It fills gaps only: a variable the
+///   caller already exported always wins. A variable brain no longer reads
+///   ([`RETIRED_VARIABLES`]) is refused, naming its replacement.
 ///
 /// Must run before every other `parse_*`/`apply_*` call in [`main`] that
 /// reads a `BRAIN_*` variable as its own default (`parse_verbosity` reads
 /// `BRAIN_VERBOSE` directly) - so this is `main`'s FIRST call, not merely an
 /// early one.
 ///
-/// Hard-exits on a missing/unreadable/unparseable file, or a value that is
-/// not a flat string/number/bool: the operator just named this file, so
-/// silently ignoring a mistake in it would start a run configured
-/// differently than they believe, which is worse than refusing to start.
-fn apply_config(path: Option<String>) {
-    let Some(path) = path else { return };
+/// Hard-exits on a missing/unreadable/unparseable file or a value of the
+/// wrong shape: the operator named this file, so silently ignoring a mistake
+/// in it would start a run configured differently than they believe.
+fn apply_config(path: Option<String>) -> ConfigSections {
+    let Some(path) = path else { return ConfigSections::default() };
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
         eprintln!("brain: --config {path}: {e}");
         std::process::exit(2);
     });
-    let map: std::collections::BTreeMap<String, serde_norway::Value> = serde_norway::from_str(&text).unwrap_or_else(|e| {
+    parse_config_text(&text).unwrap_or_else(|e| {
         eprintln!("brain: --config {path}: {e}");
         std::process::exit(2);
-    });
+    })
+}
+
+/// The scalar a config value stands for, `None` for an explicit `null`.
+fn config_scalar(value: &serde_norway::Value) -> Result<Option<String>, String> {
+    Ok(Some(match value {
+        serde_norway::Value::String(s) => s.clone(),
+        serde_norway::Value::Bool(b) => b.to_string(),
+        serde_norway::Value::Number(n) => n.to_string(),
+        // An explicit `null` means "leave this unset", not "set to the empty
+        // string" - a caller who wants a real empty value writes `""`.
+        serde_norway::Value::Null => return Ok(None),
+        other => return Err(format!("expected a plain string, number or bool, got {other:?}")),
+    }))
+}
+
+/// [`apply_config`] on the file's text: publishes the variables, returns the
+/// sections.
+fn parse_config_text(text: &str) -> Result<ConfigSections, String> {
+    let map: std::collections::BTreeMap<String, serde_norway::Value> = serde_norway::from_str(text).map_err(|e| e.to_string())?;
+    let mut sections = ConfigSections::default();
     for (key, value) in map {
-        if std::env::var_os(&key).is_some() {
-            continue; // an inherited/exported value always outranks the file
-        }
-        let value = match value {
-            serde_norway::Value::String(s) => s,
-            serde_norway::Value::Bool(b) => b.to_string(),
-            serde_norway::Value::Number(n) => n.to_string(),
-            // An explicit `null` means "leave this unset", not "set to the
-            // empty string" - a caller who wants a real empty value writes
-            // `""` instead.
-            serde_norway::Value::Null => continue,
-            other => {
-                eprintln!("brain: --config {path}: {key}: expected a plain string, number or bool, got {other:?}");
-                std::process::exit(2);
+        if key.starts_with("BRAIN_") {
+            if let Some(retired) = RETIRED_VARIABLES.iter().find(|r| r.name == key) {
+                return Err(format!("{key} is no longer read; set `{}` instead", retired.replacement));
             }
+            if std::env::var_os(&key).is_some() {
+                continue; // an inherited/exported value always outranks the file
+            }
+            if let Some(value) = config_scalar(&value).map_err(|e| format!("{key}: {e}"))? {
+                std::env::set_var(key, value);
+            }
+            continue;
+        }
+        let command: Vec<String> = key.split_whitespace().map(str::to_string).collect();
+        if command.is_empty() || !command.iter().all(|w| w.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')) {
+            return Err(format!("{key:?} is neither a BRAIN_* variable nor a subcommand (e.g. `serve`)"));
+        }
+        let serde_norway::Value::Mapping(flags) = value else {
+            return Err(format!("{key}: expected a mapping of flag names to values"));
         };
-        std::env::set_var(key, value);
+        let mut parsed = Vec::new();
+        for (flag, value) in flags {
+            let Some(flag) = flag.as_str().map(str::to_string) else {
+                return Err(format!("{key}: a flag name must be a string"));
+            };
+            if flag.starts_with('-') || flag.is_empty() {
+                return Err(format!("{key}: write the flag {flag:?} without its leading dashes"));
+            }
+            let values = match &value {
+                serde_norway::Value::Bool(false) | serde_norway::Value::Null => continue,
+                serde_norway::Value::Bool(true) => Vec::new(),
+                serde_norway::Value::Sequence(items) => {
+                    items.iter().map(|v| config_scalar(v).and_then(|v| v.ok_or_else(|| "null in a list".to_string()))).collect::<Result<_, _>>().map_err(|e| format!("{key}.{flag}: {e}"))?
+                }
+                v => vec![config_scalar(v).map_err(|e| format!("{key}.{flag}: {e}"))?.unwrap_or_default()],
+            };
+            parsed.push((flag, values));
+        }
+        sections.0.push((command, parsed));
     }
+    Ok(sections)
+}
+
+/// Global flags that take a value and may stand before the subcommand when
+/// [`subcommand_index`] runs (the others are stripped before it).
+const GLOBAL_VALUE_FLAGS: &[&str] = &["--device", "--backend"];
+
+/// Where the subcommand starts in `argv`: past the program name and any
+/// leading global flag with its value.
+fn subcommand_index(argv: &[String]) -> usize {
+    let mut i = 1;
+    while let Some(arg) = argv.get(i) {
+        if GLOBAL_VALUE_FLAGS.contains(&arg.as_str()) {
+            i += 2;
+        } else {
+            break;
+        }
+    }
+    i
+}
+
+/// Append the flags of the config section that names this command (the
+/// longest match, so `qwen3 infer` wins over `qwen3`) for every flag the
+/// command line does not already give. A repeatable flag given on the command
+/// line replaces the file's list rather than adding to it.
+fn inject_config_flags(mut argv: Vec<String>, sections: &ConfigSections) -> Vec<String> {
+    let start = subcommand_index(&argv);
+    let words = &argv[start.min(argv.len())..];
+    let Some((_, flags)) = sections.0.iter().filter(|(command, _)| words.starts_with(command)).max_by_key(|(command, _)| command.len()) else {
+        return argv;
+    };
+    let mut extra = Vec::new();
+    for (flag, values) in flags {
+        let flag = format!("--{flag}");
+        if argv.contains(&flag) {
+            continue;
+        }
+        if values.is_empty() {
+            extra.push(flag);
+        } else {
+            for value in values {
+                extra.push(flag.clone());
+                extra.push(value.clone());
+            }
+        }
+    }
+    argv.extend(extra);
+    argv
 }
 
 /// The full "about to terminate" sequence every one-shot CLI path that may
@@ -1267,7 +1389,7 @@ fn main() {
     // default, so the config file has to be in the environment before any
     // of them run - see apply_config's own doc.
     let (config_path, argv) = parse_config(argv);
-    apply_config(config_path);
+    let config_sections = apply_config(config_path);
     let argv = install_tracing(argv);
     let (verbosity, argv) = parse_verbosity(argv);
     residency::log::set_verbosity(verbosity);
@@ -1296,7 +1418,11 @@ fn main() {
     // instance exists produces a daemon that inherits the cached device
     // registry but not the instance behind it, and silently runs every model
     // on a software rasteriser. See `serve_daemon::lifecycle`.
-    let argv = serve_daemon::lifecycle(argv);
+    // The config file's subcommand flags join the command line before
+    // anything parses it, lifecycle included (`serve: {runtime-dir: …}`).
+    let argv = inject_config_flags(argv, &config_sections);
+    let subcommand = subcommand_index(&argv);
+    let argv = serve_daemon::lifecycle(argv, subcommand);
     let argv = select_backend(argv);
     // After `--device` is resolved (so the candidate set is exactly what the
     // user made schedulable) and before any model is built. This is what
@@ -1377,7 +1503,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_autofetch, apply_config, parse_autofetch, parse_config, parse_data_dir, parse_limits, parse_verbosity, HELP};
+    use super::{apply_autofetch, apply_config, inject_config_flags, parse_autofetch, parse_config, parse_config_text, parse_data_dir, parse_limits, parse_verbosity, ConfigSections, HELP, RETIRED_VARIABLES};
     use brain_testutil::env_lock;
 
     /// The opt-in fetch flag is stripped from anywhere in `argv`, consumes
@@ -1503,26 +1629,66 @@ mod tests {
         assert_eq!(root.as_deref(), Some("/x"));
     }
 
-    /// `--config` strips from anywhere and consumes its value, and falls
-    /// back to `$BRAIN_CONFIG` only when the flag itself is absent.
+    /// `--config` strips from anywhere and consumes its value; with no flag
+    /// the user's own file is read when it exists, and `$BRAIN_CONFIG` names
+    /// nothing.
     #[test]
-    fn parse_config_strips_the_flag_from_anywhere_and_falls_back_to_the_env_var() {
+    fn parse_config_strips_the_flag_and_falls_back_to_the_user_file() {
         let argv = ["brain", "serve", "--config", "/etc/brain/config.yaml", "--openai"].map(String::from).to_vec();
         let (path, rest) = parse_config(argv);
         assert_eq!(path.as_deref(), Some("/etc/brain/config.yaml"));
         assert_eq!(rest, ["brain", "serve", "--openai"].map(String::from).to_vec());
 
         let _serial = brain_testutil::env_lock();
-        std::env::set_var("BRAIN_CONFIG", "/from/env.yaml");
+        let home = std::env::temp_dir().join(format!("brain-config-home-{}", std::process::id()));
+        std::fs::create_dir_all(home.join("brain")).unwrap();
+        let saved = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", &home);
+        // The variable that once named the config file, set to show it names nothing.
+        const RETIRED_CONFIG_VARIABLE: &str = "BRAIN_CONFIG";
+        std::env::set_var(RETIRED_CONFIG_VARIABLE, "/from/env.yaml");
+        let (path, _) = parse_config(["brain", "caps"].map(String::from).to_vec());
+        assert_eq!(path, None, "no user file and no flag: nothing, whatever $BRAIN_CONFIG says");
+        std::fs::write(home.join("brain/config.yaml"), "serve: {}\n").unwrap();
         let (path, rest) = parse_config(["brain", "caps"].map(String::from).to_vec());
-        assert_eq!(path.as_deref(), Some("/from/env.yaml"));
+        assert_eq!(path.map(std::path::PathBuf::from), Some(home.join("brain/config.yaml")));
         assert_eq!(rest, ["brain", "caps"].map(String::from).to_vec());
-        std::env::remove_var("BRAIN_CONFIG");
+        std::env::remove_var(RETIRED_CONFIG_VARIABLE);
+        match saved {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        std::fs::remove_dir_all(&home).ok();
+    }
 
-        // Neither flag nor env var: no-op.
-        let (path, rest) = parse_config(["brain", "caps"].map(String::from).to_vec());
-        assert_eq!(path, None);
-        assert_eq!(rest, ["brain", "caps"].map(String::from).to_vec());
+    /// A subcommand section supplies that command's flags, after the command
+    /// line's own and never in place of one it gives; the longest matching
+    /// section wins, and a leading global flag does not hide the subcommand.
+    #[test]
+    fn a_config_section_supplies_the_flags_its_command_line_does_not_give() {
+        let sections = parse_config_text("serve:\n  api-key-file: /k\n  openai: 9000\n  autofetch: true\n  stdio: false\n  decision-model: [a, b]\nqwen3:\n  seed: 1\nqwen3 infer:\n  seed: 2\n").unwrap();
+        let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            inject_config_flags(argv(&["brain", "--device", "cpu", "serve", "--openai", "8000"]), &sections),
+            argv(&["brain", "--device", "cpu", "serve", "--openai", "8000", "--api-key-file", "/k", "--autofetch", "--decision-model", "a", "--decision-model", "b"])
+        );
+        assert_eq!(inject_config_flags(argv(&["brain", "qwen3", "infer"]), &sections), argv(&["brain", "qwen3", "infer", "--seed", "2"]));
+        assert_eq!(inject_config_flags(argv(&["brain", "caps"]), &sections), argv(&["brain", "caps"]));
+    }
+
+    /// A retired variable, a key that is neither a variable nor a command, or
+    /// a flag written with its dashes is a mistake the file's author made:
+    /// refused, naming what to write instead.
+    #[test]
+    fn a_config_file_written_for_a_retired_variable_is_refused_naming_its_replacement() {
+        let retired = RETIRED_VARIABLES[1].name;
+        let e = parse_config_text(&format!("{retired}: /w\n")).unwrap_err();
+        assert!(e.contains(retired) && e.contains("checkpoint"), "{e}");
+        let e = parse_config_text("BRAIN_API_KEY: sk\n").unwrap_err();
+        assert!(e.contains("api-key-file"), "{e}");
+        assert!(parse_config_text("Serve: {}\n").is_err());
+        assert!(parse_config_text("serve:\n  --openai: 1\n").unwrap_err().contains("dashes"));
+        assert!(parse_config_text("serve: 3\n").is_err());
     }
 
     /// The file fills gaps in the environment but never overrides an
@@ -1539,7 +1705,7 @@ mod tests {
         let path = dir.join("config.yaml");
         std::fs::write(&path, "BRAIN_TEST_CONFIG_FILLED: from-file\nBRAIN_TEST_CONFIG_INHERITED: from-file\nBRAIN_TEST_CONFIG_NUMBER: 16\nBRAIN_TEST_CONFIG_BOOL: true\n").unwrap();
 
-        apply_config(Some(path.to_string_lossy().into_owned()));
+        assert_eq!(apply_config(Some(path.to_string_lossy().into_owned())), ConfigSections::default());
 
         assert_eq!(std::env::var("BRAIN_TEST_CONFIG_FILLED").as_deref(), Ok("from-file"), "an unset variable must be filled from the file");
         assert_eq!(std::env::var("BRAIN_TEST_CONFIG_INHERITED").as_deref(), Ok("from-shell"), "an inherited value must outrank the file");
@@ -1557,7 +1723,7 @@ mod tests {
     #[test]
     fn the_config_flag_is_documented_and_stripped() {
         assert!(HELP.contains("--config"), "--config is implemented but absent from `brain help`");
-        assert!(HELP.contains("BRAIN_CONFIG"), "BRAIN_CONFIG is implemented but absent from `brain help`");
+        assert!(HELP.contains("~/.config/brain/config.yaml"), "the default config file is absent from `brain help`");
         let (path, rest) = parse_config(["brain".to_string(), "--config".to_string(), "/x.yaml".to_string(), "caps".to_string()].to_vec());
         assert_eq!(rest, ["brain", "caps"].map(String::from).to_vec(), "`brain help` documents --config, which parse_config does not strip");
         assert_eq!(path.as_deref(), Some("/x.yaml"));

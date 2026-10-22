@@ -69,7 +69,7 @@ impl ClipResident {
         let dir = dir.into();
         let d = std::path::Path::new(&dir);
         if !d.join("tokenizer").exists() && !d.join("tokenizer_2").exists() {
-            eprintln!("brain: clip not served ({dir} holds neither tokenizer/ nor tokenizer_2/)");
+            residency::log::not_served(&format!("brain: clip not served ({dir} holds neither tokenizer/ nor tokenizer_2/)"));
             return None;
         }
         Some(ClipResident { dir })

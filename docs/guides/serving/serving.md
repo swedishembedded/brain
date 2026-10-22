@@ -7,9 +7,13 @@ one scheduler, and exposes them over one or more transports at once.
 ```
 brain serve [--openai[:PORT]] [--anthropic[:PORT]] [--openrouter[:PORT]] \
             [--dbus] [--models-dir DIR] [--api-keys-out FILE] \
-            [--ready-file PATH] \
+            [--api-key-file FILE] [--runtime-dir DIR] [--ready-file PATH] \
+            [--checkpoint PATH [--tokenizer PATH]] \
             [--adapter FILE | --adapter-manifest FILE | --watch-adapters DIR]
 ```
+
+With no surface flag, `brain serve` serves the OpenAI-compatible API on
+`127.0.0.1:8788`; `brain serve --stdio` is the event-driven stdio controller.
 
 - `--openai[:PORT]` - serve an OpenAI-compatible HTTP API (default port if
   omitted). Every route is served both with and without the `/v1` prefix -
@@ -24,6 +28,13 @@ brain serve [--openai[:PORT]] [--anthropic[:PORT]] [--openrouter[:PORT]] \
 - `--api-keys-out FILE` - write the generated API keys to `FILE` (mode 0600). The stdout
   `APIKEY` lines then name the file and omit the keys, so server logs on a shared
   machine do not hold them.
+- `--api-key-file FILE` - serve every dialect with the one key `FILE` holds
+  (surrounding whitespace trimmed) instead of a fresh key per dialect per launch.
+- `--runtime-dir DIR` - where the pid file, log and connection record live
+  (default `$XDG_RUNTIME_DIR/brain`, else `<tmpdir>/brain-<uid>`). A server under
+  its own `DIR` is not found by clients looking in the default one.
+- `--checkpoint PATH`, `--tokenizer PATH` - also serve this Qwen3 checkpoint
+  (file or repo directory), with this `tokenizer.json` when none is beside it.
 - `--ready-file PATH` - see **Readiness** below.
 - `--adapter FILE`, `--adapter-manifest FILE`, `--watch-adapters DIR`,
   `--adapter-slots N`, `--adapter-rank-cap R`, `--adapter-targets LIST` - see
@@ -32,8 +43,8 @@ brain serve [--openai[:PORT]] [--anthropic[:PORT]] [--openrouter[:PORT]] \
   decision models beyond the ones found in the model store, and name the one
   `auto` resolves to. See [Decision models](../../reference/models/decision.md).
 
-At least one surface flag is meaningful for a useful server; an unknown flag
-is a hard error (exit 2), not a warning. Run `brain serve --help` for the
+An unknown flag is a hard error (exit 2), not a warning; so is a stdio-only
+flag (`--gpt`, `--yolo`, `--conf`) without `--stdio`. Run `brain serve --help` for the
 authoritative flag list.
 
 ## The serving policy
@@ -90,7 +101,7 @@ Three things put an adapter in front of the base:
   `<vendor>/<repo>/adapters/<owner>/<name>/<tag>/` for a served Qwen3 base
   offers each as `<vendor>/<repo>:<owner>:<name>:<tag>`;
 - `--adapter FILE`, `--adapter-manifest FILE` or `--watch-adapters DIR` (below)
-  for the Qwen3 selected with `--checkpoint PATH` (the checkpoint file or its repo directory; the older `BRAIN_QWEN_WEIGHTS` variable still works when no flag is given), or, when there is none, for
+  for the Qwen3 selected with `--checkpoint PATH` (the checkpoint file or its repo directory), or, when there is none, for
   the one released Qwen3.8 GGUF the model directory serves (several are
   ambiguous and refused by name: put the adapter in the model directory under
   the id of the one it rides on).
@@ -184,6 +195,25 @@ surface gets its own freshly generated API key at startup: printed to
 stdout as `APIKEY <provider> <key>` lines, or - if `--api-keys-out FILE` is given -
 written to `FILE` (the lines then read `APIKEY <provider> written to FILE`). Both the keys and the file are written before any socket
 binds, so a client can never race the server up.
+
+## Local clients
+
+A client on the same machine needs neither the key nor the port. Once every
+HTTP surface is bound, the server writes its connection record,
+`<runtime dir>/serve-<pid>.json`, owner-only (mode 0600), and removes it when
+it stops:
+
+```json
+{"pid": 4242, "surfaces": [{"provider": "openai", "url": "http://127.0.0.1:8788", "key": "sk-brain-..."}]}
+```
+
+There is one entry per bound address; `url` is the address the listener
+actually holds (a `:0` request is reported as the port it got, an unspecified
+bind as loopback). The OpenAI and OpenRouter routes answer under `url` and
+`url/v1`, the Anthropic ones under `url/v1`. Several servers may run at once,
+each with its own record; one whose process is gone (a crash leaves its record
+behind) is to be skipped. A server started with its own `--runtime-dir` is
+private to whoever reads that directory.
 
 ## Admission and backpressure
 

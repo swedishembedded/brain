@@ -47,7 +47,7 @@ impl T5encoderResident {
         let has_flux = d.join("text_encoder_2").exists() && d.join("tokenizer_2").join("tokenizer.json").exists();
         let has_wan = d.join("wan").join("models_t5_umt5-xxl-enc-bf16.pth").exists();
         if !has_flux && !has_wan {
-            eprintln!("brain: t5encoder not served ({dir} holds neither the flux_xxl nor the wan_umt5 layout)");
+            residency::log::not_served(&format!("brain: t5encoder not served ({dir} holds neither the flux_xxl nor the wan_umt5 layout)"));
             return None;
         }
         Some(T5encoderResident { dir })

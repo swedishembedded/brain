@@ -39,7 +39,7 @@ impl SdxlResident {
     pub fn new(root: impl Into<String>) -> Option<SdxlResident> {
         let root = root.into();
         if !std::path::Path::new(&root).join("unet").exists() {
-            eprintln!("brain: sdxl not served ({root} holds no unet/)");
+            residency::log::not_served(&format!("brain: sdxl not served ({root} holds no unet/)"));
             return None;
         }
         Some(SdxlResident { root })

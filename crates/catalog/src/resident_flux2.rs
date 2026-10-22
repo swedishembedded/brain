@@ -82,14 +82,14 @@ impl Flux2Resident {
         let paths = match flux2::Paths::from_assembly(&assembly) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("brain: flux2-klein not served over the scheduler ({e})");
+                residency::log::not_served(&format!("brain: flux2-klein not served over the scheduler ({e})"));
                 return None;
             }
         };
         match Flux2Resident::from_paths(flux2::caps::MODEL.to_string(), paths) {
             Ok(r) => Some(r),
             Err(e) => {
-                eprintln!("brain: flux2-klein not served over the scheduler (BRAIN_FLUX2_DIT: {e})");
+                residency::log::not_served(&format!("brain: flux2-klein not served over the scheduler (BRAIN_FLUX2_DIT: {e})"));
                 None
             }
         }
@@ -126,14 +126,14 @@ impl Flux2Resident {
             let paths = match flux2::Paths::from_assembly(&assembly) {
                 Ok(p) => p,
                 Err(e) => {
-                    eprintln!("brain: {id} not served over the scheduler ({e})");
+                    residency::log::not_served(&format!("brain: {id} not served over the scheduler ({e})"));
                     return None;
                 }
             };
             match Flux2Resident::from_paths(id.clone(), paths) {
                 Ok(r) => Some(r),
                 Err(e) => {
-                    eprintln!("brain: {id} not served over the scheduler ({e})");
+                    residency::log::not_served(&format!("brain: {id} not served over the scheduler ({e})"));
                     None
                 }
             }

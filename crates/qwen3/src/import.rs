@@ -318,7 +318,7 @@ pub fn import_as(hf_dir: &str, out_path: &str, block_size: Option<u32>, id_overr
         cfg.param_list().into_iter().map(|(name, numel)| (name, vec![numel as u64])).collect();
     let param_count: u64 = plan.iter().map(|(_, s)| s.iter().product::<u64>()).sum();
     // A card so this file auto-serves from the global model directory (P2) with
-    // no BRAIN_QWEN_WEIGHTS env var — id defaults to the output filename stem,
+    // no --checkpoint flag - id defaults to the output filename stem,
     // matching how the model dir keys catalog entries, unless the caller
     // overrides it (the auto-fetch dispatcher needs the vendor/repo ref).
     let id = id_override.unwrap_or_else(|| Path::new(out_path).file_stem().and_then(|s| s.to_str()).unwrap_or("qwen"));

@@ -65,9 +65,9 @@ const HELP: &str = "\
 brain serve - serve brain's models over HTTP, D-Bus, or stdio
 
 USAGE:
+  brain serve                             # the OpenAI API on 127.0.0.1:8788
   brain serve [SURFACE ...] [options]     # one or more serving surfaces
   brain serve --stdio                     # the event-driven stdio JSONL loop
-  brain serve                             # NO surface flag: same as --stdio
 
 HTTP INFERENCE APIS  (each behind its own key)
   --openai [ADDR]        OpenAI-compatible dialect       (default port 8788)
@@ -99,8 +99,14 @@ HTTP INFERENCE APIS  (each behind its own key)
   A fresh key per DIALECT per launch by default, printed on stdout as
   `APIKEY <provider> <key>`; --api-keys-out writes the keys as JSON, 0600, and the
   lines then name that file instead of repeating the keys.
-  $BRAIN_API_KEY pins a fixed key instead (e.g. via --config) - every dialect
-  then shares that SAME key rather than each getting its own random one.
+  --api-key-file FILE pins a fixed key instead (the file's one word) - every
+  dialect then shares that SAME key rather than each getting its own random one.
+
+  LOCAL CLIENTS need none of this: once every surface is bound, the server
+  writes <runtime dir>/serve-<pid>.json (mode 0600) and removes it on exit:
+      {\"pid\": N, \"surfaces\": [{\"provider\": \"openai\",
+                               \"url\": \"http://127.0.0.1:8788\", \"key\": \"sk-brain-...\"}]}
+  one entry per bound address, `url` the port actually bound (never a `:0`).
 
   With no ADDR given, a surface binds 127.0.0.1 (unchanged default). There is
   no --listen / --host / --bind flag -- the address goes directly after the
@@ -141,8 +147,11 @@ PROCESS LIFECYCLE
   At most one server runs per user at a time, enforced by an exclusive lock on
   the pidfile rather than by matching process names, so a crash leaves nothing
   to clean up and one user's server never blocks another's. State lives under
-  $BRAIN_RUNTIME_DIR, else $XDG_RUNTIME_DIR/brain, else <tmpdir>/brain-<uid>:
-  serve.pid, serve.log and (when -d is used without --ready-file) serve.ready.
+  the runtime dir: serve.pid, serve.log, (when -d is used without --ready-file)
+  serve.ready, and every server's connection record.
+  --runtime-dir DIR      the runtime dir (default $XDG_RUNTIME_DIR/brain, else
+                         <tmpdir>/brain-<uid>). A server run under its own DIR
+                         is invisible to clients looking in the default one.
 
 SERVING OPTIONS
   --models-dir DIR       the model store every served model is resolved from
@@ -224,9 +233,10 @@ SERVING POLICY  (one model-agnostic policy for every model that serves it.
                  and the values chosen are reported at startup.)
   --checkpoint PATH      serve this LLM checkpoint: the file or the repo
                          directory holding it (a tokenizer.json beside a
-                         directory is picked up). The older BRAIN_QWEN_WEIGHTS
-                         variable still works when no flag is given. The target
-                         of --adapter, --adapter-manifest and --watch-adapters.
+                         directory is picked up). The target of --adapter,
+                         --adapter-manifest and --watch-adapters.
+  --tokenizer PATH       the tokenizer.json of a --checkpoint that has none
+                         beside it.
   --weight-format SPEC   weight storage format: f32|bf16|f16|int8|q4|nf4, or per
                          leaf `int8,blk.0.attn_q=f32` where the model supports
                          rules. Default: the model's own (a checkpoint that does
@@ -267,7 +277,7 @@ DECISION MODELS  (decide + Laya; every servable one in the model store is
                          Without it `auto` serves a validated Laya model, else
                          a validated decide model, else fails with the reason.
 
-STDIO CONTROLLER  (the default, with no surface flag)
+STDIO CONTROLLER  (--stdio)
   --gpt PATH             GPT checkpoint (else $BRAIN_GPT2; else a fake echo model)
   --yolo PATH             YOLO checkpoint (else $BRAIN_YOLOV8; else a fake detector)
   --conf X                detection confidence threshold (else $BRAIN_CONF, 0.25)
@@ -275,18 +285,18 @@ STDIO CONTROLLER  (the default, with no surface flag)
   Reads JSONL events on stdin, writes JSONL events on stdout, one per line.
   Example: printf '{\"event\":\"user_text\",\"text\":\"hi\"}\\n' | brain serve --stdio
 
-MODEL CONFIGURATION (WHICH models: env vars; HOW to serve one: flags)
+MODEL CONFIGURATION
   Which models this server serves: every model in the model store, each
-  under its store id, plus those named by BRAIN_* env vars
-  (BRAIN_QWEN_WEIGHTS, BRAIN_LFM2, BRAIN_NEMOTRONASR, ...) - a model whose
-  weights var is unset is simply not served. Tuning an already-selected
+  under its store id, the --checkpoint, plus those some families still take
+  from BRAIN_* env vars (BRAIN_LFM2, BRAIN_NEMOTRONASR, ...). A family with
+  nothing on this machine is counted in one startup line; -v lists each. Tuning an already-selected
   model (context length, batching, precision, ...) is a flag where one
   exists - see QWEN3 / QWEN3.8 SERVING above. Run
   `brain serve --help` for the full reference table of every serving
   variable.
 
   FETCHING: a request for a model that is not pulled errors with zero network
-  I/O unless --autofetch (or $BRAIN_AUTO_FETCH=1) was passed; `brain pull`
+  I/O unless --autofetch was passed; `brain pull`
   fetches without it.
 
 GLOBAL
@@ -308,7 +318,7 @@ GLOBAL
   -h, --help                                 this text
 
 EXAMPLES
-  brain serve --openai                       # OpenAI API on http://127.0.0.1:8788
+  brain serve                                # OpenAI API on http://127.0.0.1:8788
   brain serve --openai 9000 --api-keys-out /run/brain/keys.json \\
               --ready-file /run/brain/ready
   brain serve --openai 0.0.0.0:8788          # OpenAI API on every interface
@@ -471,10 +481,49 @@ fn register_synth(registry: &mut Registry) {
 #[cfg(not(feature = "qwen3tts-synth"))]
 fn register_synth(_registry: &mut Registry) {}
 
+/// The OpenAI dialect's port, the surface `brain serve` binds when it is
+/// asked for none.
+const DEFAULT_OPENAI_PORT: u16 = 8788;
+
+/// What a `brain serve` command line serves.
+#[derive(Debug, PartialEq, Eq)]
+enum SurfaceChoice {
+    /// `--stdio`: the event-driven controller on stdin/stdout.
+    Stdio,
+    /// The HTTP/D-Bus surfaces the flags name.
+    Named,
+    /// None named: the OpenAI dialect on 127.0.0.1, the one a local client
+    /// expects with no configuration.
+    DefaultOpenAi,
+}
+
+/// Decide [`SurfaceChoice`]. `--stdio` and a surface flag are two different
+/// servers, so naming both is refused, as is a stdio-only flag (`--gpt`,
+/// `--yolo`, `--conf`) without `--stdio`, which would otherwise be ignored.
+fn surface_choice(stdio: bool, any_surface: bool, stdio_only: Option<&str>) -> Result<SurfaceChoice, String> {
+    match (stdio, any_surface, stdio_only) {
+        (true, true, _) => Err("--stdio serves stdin/stdout; it cannot be combined with --openai, --anthropic, --openrouter or --dbus".to_string()),
+        (true, false, _) => Ok(SurfaceChoice::Stdio),
+        (false, _, Some(flag)) => Err(format!("{flag} applies to the stdio controller; add --stdio")),
+        (false, true, None) => Ok(SurfaceChoice::Named),
+        (false, false, None) => Ok(SurfaceChoice::DefaultOpenAi),
+    }
+}
+
+/// The connection record this process publishes in its runtime directory.
+fn serve_daemon_record(runtime_dir: Option<&Path>) -> PathBuf {
+    crate::serve_daemon::record_path(&crate::serve_daemon::state_dir(runtime_dir))
+}
+
 pub fn run_serve(args: &[String]) {
     let (seed, rest) = crate::args::split_seed(args, "brain serve");
     let args = &rest[..];
     let mut gpt_path = std::env::var("BRAIN_GPT2").ok();
+    // `--stdio` selects the event-driven controller; every other run serves
+    // HTTP and/or D-Bus. The first stdio-only flag given is kept so a run that
+    // names one without `--stdio` is refused instead of ignoring it.
+    let mut stdio = false;
+    let mut stdio_only: Option<&'static str> = None;
     let mut yolo_path = std::env::var("BRAIN_YOLOV8").ok();
     let mut cfg = GenConfig { max_new: 256, temperature: 0.0, top_k: 0, eos: None, seed };
     // Optional detection confidence threshold for the YOLO detector. A tiny model
@@ -527,6 +576,13 @@ pub fn run_serve(args: &[String]) {
     let mut openai: Option<Vec<SocketAddr>> = None;
     let mut openrouter: Option<Vec<SocketAddr>> = None;
     let mut api_keys_out: Option<String> = None;
+    // `--api-key-file FILE`: one fixed key every dialect shares, instead of a
+    // fresh one per dialect per launch.
+    let mut fixed_key: Option<String> = None;
+    // `--runtime-dir DIR`: where the lifecycle files and the connection
+    // record live (see `serve_daemon::state_dir`); `main` reads it too, for
+    // `-d`/`--status`/`--stop`.
+    let mut runtime_dir: Option<PathBuf> = None;
     let mut ready_file: Option<String> = None;
     // `--admit-deadline-ms` / `--cold-build-admit-deadline-ms`: how long a
     // request may wait to start before it is shed with a 429.
@@ -548,19 +604,25 @@ pub fn run_serve(args: &[String]) {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--gpt" => gpt_path = Some(val(args, &mut i, "--gpt")),
-            "--yolo" => yolo_path = Some(val(args, &mut i, "--yolo")),
+            "--gpt" => {
+                gpt_path = Some(val(args, &mut i, "--gpt"));
+                stdio_only.get_or_insert("--gpt");
+            }
+            "--yolo" => {
+                yolo_path = Some(val(args, &mut i, "--yolo"));
+                stdio_only.get_or_insert("--yolo");
+            }
             "--max-new" => cfg.max_new = parsed(args, &mut i, "--max-new"),
             "--temp" | "--temperature" => {
                 let flag = args[i].clone();
                 cfg.temperature = parsed(args, &mut i, &flag);
             }
             "--top-k" => cfg.top_k = parsed(args, &mut i, "--top-k"),
-            "--conf" => conf = Some(parsed(args, &mut i, "--conf")),
-            // The stdio JSONL controller is what runs when no surface flag
-            // is given below; `--stdio` names that path explicitly rather
-            // than leaving it as a silent default a reader has to infer.
-            "--stdio" => {}
+            "--conf" => {
+                conf = Some(parsed(args, &mut i, "--conf"));
+                stdio_only.get_or_insert("--conf");
+            }
+            "--stdio" => stdio = true,
             "--dbus" => dbus = true,
             "--dbus-system" => {
                 dbus = true;
@@ -647,6 +709,15 @@ pub fn run_serve(args: &[String]) {
             "--openai" => openai = Some(take_addrs(args, &mut i, 8788)),
             "--openrouter" => openrouter = Some(take_addrs(args, &mut i, 8789)),
             "--api-keys-out" => api_keys_out = Some(val(args, &mut i, "--api-keys-out")),
+            "--api-key-file" => {
+                let file = val(args, &mut i, "--api-key-file");
+                fixed_key = Some(apiserve::surface::read_key_file(Path::new(&file)).unwrap_or_else(|e| {
+                    eprintln!("brain serve: --api-key-file {e}");
+                    std::process::exit(2);
+                }));
+            }
+            "--runtime-dir" => runtime_dir = Some(PathBuf::from(val(args, &mut i, "--runtime-dir"))),
+            "--tokenizer" => qwen_cfg.tokenizer = Some(val(args, &mut i, "--tokenizer")),
             "--ready-file" => ready_file = Some(val(args, &mut i, "--ready-file")),
             "--admit-deadline-ms" => deadlines.admit = positive_ms(args, &mut i, "--admit-deadline-ms"),
             "--cold-build-admit-deadline-ms" => deadlines.cold_build = positive_ms(args, &mut i, "--cold-build-admit-deadline-ms"),
@@ -673,6 +744,17 @@ pub fn run_serve(args: &[String]) {
     // parser above so an unknown-flag error is never raised for them; by the
     // time this runs, their work is done.
     let _ = (detach, reload, do_stop, do_status);
+
+    let any_surface = dbus || anthropic.is_some() || openai.is_some() || openrouter.is_some();
+    match surface_choice(stdio, any_surface, stdio_only) {
+        Ok(SurfaceChoice::Stdio | SurfaceChoice::Named) => {}
+        Ok(SurfaceChoice::DefaultOpenAi) => openai = Some(vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), DEFAULT_OPENAI_PORT)]),
+        Err(e) => {
+            eprintln!("brain serve: {e}\n");
+            eprint!("{HELP}");
+            std::process::exit(2);
+        }
+    }
 
     let adapter_mode = match crate::continuous_train::AdapterMode::from_flags(adapter.map(PathBuf::from), adapter_manifest.map(PathBuf::from), watch_adapters.map(PathBuf::from)) {
         Ok(mode) => mode,
@@ -713,9 +795,9 @@ pub fn run_serve(args: &[String]) {
         None => brain_shutdown::ready::Gate::disabled(),
     };
 
-    // The D-Bus control surface replaces the stdio loop when requested: it serves
-    // every registered model over `com.swedishembedded.Brain1` until Ctrl-C.
-    if dbus || anthropic.is_some() || openai.is_some() || openrouter.is_some() {
+    // Any surface replaces the stdio loop: it serves every registered model
+    // over HTTP and/or `com.swedishembedded.Brain1` until Ctrl-C.
+    if !stdio {
         return run_apis(RunApis {
             dbus,
             dbus_system,
@@ -727,6 +809,8 @@ pub fn run_serve(args: &[String]) {
             openai,
             openrouter,
             api_keys_out,
+            fixed_key,
+            record: serve_daemon_record(runtime_dir.as_deref()),
             ready,
             deadlines,
             adapter_mode,
@@ -781,7 +865,12 @@ pub fn run_serve(args: &[String]) {
 
     // Expose the generic capability providers over the event API (manifest_request
     // / action_request) - the same actions `brain do` runs, now network-reachable.
-    ctrl.register_provider(std::sync::Arc::new(s3dit::caps::ZImageProvider::load().expect("z-image provider")));
+    // A capability whose weights are absent is left out, not a failed start:
+    // the controller serves whatever this machine holds.
+    match s3dit::caps::ZImageProvider::load() {
+        Ok(provider) => ctrl.register_provider(std::sync::Arc::new(provider)),
+        Err(e) => residency::log::not_served(&format!("brain: z-image not served ({e})")),
+    }
     ctrl.register_provider(std::sync::Arc::new(lfm2::caps::LfmProvider::new()));
 
     let stdin = std::io::stdin();
@@ -880,6 +969,12 @@ struct RunApis {
     openai: Option<Vec<SocketAddr>>,
     openrouter: Option<Vec<SocketAddr>>,
     api_keys_out: Option<String>,
+    /// `--api-key-file`'s key, shared by every dialect; `None` draws one per
+    /// dialect.
+    fixed_key: Option<String>,
+    /// Where the connection record is published once every HTTP surface has
+    /// bound (see `apiserve::surface::record_json`).
+    record: PathBuf,
     /// Notified once per bound surface (HTTP + D-Bus); disabled unless
     /// `--ready-file` was given. See `brain_shutdown::ready::Gate`.
     ready: brain_shutdown::ready::Gate,
@@ -943,7 +1038,7 @@ const SHUTDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 /// surface racing its own download.
 fn build_auto_fetch_supplier(models_dir: Option<&Path>) -> Option<Arc<dyn residency::ModelSupplier>> {
     if !crate::supply::auto_fetch_enabled() {
-        eprintln!("brain serve: auto-fetch off -- a request for a model that is not pulled errors (pass --autofetch or set BRAIN_AUTO_FETCH=1 to enable on-demand fetching)");
+        eprintln!("brain serve: auto-fetch off -- a request for a model that is not pulled errors (pass --autofetch to enable on-demand fetching)");
         return None;
     }
     // The SAME models directory `build_serving_executor`'s startup scan
@@ -968,6 +1063,14 @@ fn served_models_line(served: &[&str], models_dir: Option<&Path>) -> String {
     )
 }
 
+/// The one startup line that stands in for every model family left out of
+/// the catalog: a machine holds few of the families brain can serve, so at
+/// the default verbosity they are counted, not listed. With `-v` each was
+/// already printed with its reason, and this line would only repeat them.
+fn unserved_line(count: usize, verbosity: u8) -> Option<String> {
+    (count > 0 && verbosity == 0).then(|| format!("brain serve: {count} model families have nothing to serve on this machine (-v lists each and why)"))
+}
+
 fn run_apis(a: RunApis) {
     // Resolved ONCE (`--models-dir`, else `BRAIN_MODELS_DIR`/XDG/HOME - see
     // `loader::model_dir::resolve`) and handed to everything that reads the
@@ -979,6 +1082,9 @@ fn run_apis(a: RunApis) {
     let manifests = executor.manifests();
     let served: Vec<&str> = manifests.iter().map(|m| m.model.as_str()).collect();
     eprintln!("{}", served_models_line(&served, models_dir.as_deref()));
+    if let Some(line) = unserved_line(residency::log::not_served_count(), residency::log::verbosity()) {
+        eprintln!("{line}");
+    }
 
     // `--autofetch` also proactively heals what the scan above already found
     // broken (an interrupted download, a GGUF still needing its one-time
@@ -1089,7 +1195,7 @@ fn run_apis(a: RunApis) {
             (a.openrouter, apiserve::Provider::OpenRouter),
         ] {
             if let Some(addrs) = addrs {
-                let key = apiserve::surface::resolved_key();
+                let key = apiserve::surface::resolved_key(a.fixed_key.as_deref());
                 for addr in addrs {
                     surfaces.push(apiserve::Surface::new(provider, addr, key.clone()));
                 }
@@ -1156,7 +1262,7 @@ fn run_apis(a: RunApis) {
             eprintln!("brain serve: the surfaces did not drain within {}s of the shutdown signal; exiting", SHUTDOWN_DRAIN_TIMEOUT.as_secs());
             brain_shutdown::exit_now(0);
         });
-        let opts = apiserve::ServeOpts::new().with_shutdown(shutdown).with_supplier(supplier).with_ready(a.ready).with_deadlines(a.deadlines);
+        let opts = apiserve::ServeOpts::new().with_shutdown(shutdown).with_supplier(supplier).with_ready(a.ready).with_deadlines(a.deadlines).with_record(Some(a.record));
         if let Err(e) = apiserve::serve_all(executor, surfaces, opts) {
             eprintln!("brain serve: {e}");
             std::process::exit(1);
@@ -1213,6 +1319,31 @@ pub(crate) fn query_ram_bytes() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use super::{surface_choice, unserved_line, SurfaceChoice};
+
+    /// With nothing named, `brain serve` is the OpenAI API a local client
+    /// expects; `--stdio` is the controller; mixing the two, or a stdio-only
+    /// flag without `--stdio`, is refused rather than half-honoured.
+    #[test]
+    fn serve_with_no_surface_named_is_the_openai_api() {
+        assert_eq!(surface_choice(false, false, None), Ok(SurfaceChoice::DefaultOpenAi));
+        assert_eq!(surface_choice(false, true, None), Ok(SurfaceChoice::Named));
+        assert_eq!(surface_choice(true, false, None), Ok(SurfaceChoice::Stdio));
+        assert_eq!(surface_choice(true, false, Some("--gpt")), Ok(SurfaceChoice::Stdio));
+        assert!(surface_choice(true, true, None).unwrap_err().contains("--stdio"));
+        let e = surface_choice(false, false, Some("--yolo")).unwrap_err();
+        assert!(e.contains("--yolo") && e.contains("--stdio"), "{e}");
+    }
+
+    /// Families with nothing on disk are one counted line at the default
+    /// level, and no line at all once `-v` lists them.
+    #[test]
+    fn unserved_families_are_counted_once_at_the_default_level() {
+        assert_eq!(unserved_line(0, 0), None);
+        assert!(unserved_line(12, 0).is_some_and(|l| l.contains("12") && l.contains("-v")));
+        assert_eq!(unserved_line(12, 1), None);
+    }
+
     #[test]
     fn a_server_with_models_lists_them_and_one_without_says_so_and_names_the_check() {
         use super::served_models_line;

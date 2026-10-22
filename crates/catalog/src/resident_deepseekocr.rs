@@ -102,7 +102,7 @@ impl DeepseekOcrResident {
         let dir = match deepseek2ocr::spec::dir_from_assembly(assembly) {
             Ok(d) => d,
             Err(e) => {
-                eprintln!("brain: deepseek-ocr not served ({e})");
+                residency::log::not_served(&format!("brain: deepseek-ocr not served ({e})"));
                 return None;
             }
         };
@@ -120,7 +120,7 @@ impl DeepseekOcrResident {
                 Some(DeepseekOcrResident { dir, vision_gpu, decoder })
             }
             Err(e) => {
-                eprintln!("brain: deepseek-ocr not served ({e})");
+                residency::log::not_served(&format!("brain: deepseek-ocr not served ({e})"));
                 None
             }
         }

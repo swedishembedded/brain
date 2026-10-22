@@ -265,7 +265,7 @@ impl Instance for OmniInstance {
 pub fn int8_thinker_multi_from_env(gpus: &[(u32, u64)], reserved: u64) -> Option<qwen3omnimoe::int8_thinker_resident::Int8ThinkerResident> {
     let checkpoint_path = std::env::var("BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT").ok().filter(|p| !p.is_empty())?;
     if gpus.is_empty() {
-        eprintln!("brain: {} not served (no GPU budgeted -- it is GPU-sharded only, no CPU path)", qwen3omnimoe::int8_thinker_resident::MODEL);
+        residency::log::not_served(&format!("brain: {} not served (no GPU budgeted -- it is GPU-sharded only, no CPU path)", qwen3omnimoe::int8_thinker_resident::MODEL));
         return None;
     }
     let devices: Vec<(Device, u64)> = gpus.iter().map(|&(i, total)| (Device::Gpu(i), total.saturating_sub(reserved))).collect();

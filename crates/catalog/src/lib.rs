@@ -438,8 +438,7 @@ pub fn models() -> Vec<ModelEntry> {
             resident: None,
         },
         // `weights`/`tokenizer` are resolved through `qwen3::spec::Qwen3Spec`
-        // (see that module's doc) instead of `BRAIN_QWEN_WEIGHTS`/
-        // `BRAIN_QWEN_TOKENIZER` - same shape as `qwen35`'s own entry above.
+        // (see that module's doc) - same shape as `qwen35`'s own entry above.
         ModelEntry {
             manifest: qwen3::caps::manifest,
             provider: |assembly: &Assembly| {

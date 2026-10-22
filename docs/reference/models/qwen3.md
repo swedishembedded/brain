@@ -44,7 +44,7 @@ brain qwen3 infer --weights /path/to/Qwen3-8B-Q8_0.gguf \
 ```
 
 and the same goes for `brain serve`'s resident (below) -- `--checkpoint`
-(and the deprecated `BRAIN_QWEN_WEIGHTS`) also accepts a `.gguf` path directly.
+also accepts a `.gguf` path directly.
 
 The generic converter is still there if you want it -- `brain import
 /path/to/Qwen3-8B-Q8_0.gguf --out qwen3-8b.safetensors`, which picks the
@@ -68,9 +68,9 @@ pays that expansion at all -- the download saving is the whole story, the
 same as FLUX.2's text encoder, below.
 
 To make a checkpoint a `brain serve` resident, pass `--checkpoint PATH`
-(the deprecated `BRAIN_QWEN_WEIGHTS` variable still works when no flag is
-given; `BRAIN_QWEN_TOKENIZER` names a tokenizer that is not beside the
-checkpoint) -- a `.gguf` file works here too.
+(`--tokenizer PATH` names a tokenizer that is not beside the checkpoint) -- a
+`.gguf` file works here too. A checkpoint in the model store needs neither: the
+store scan serves it under its store id.
 
 ### As FLUX.2's text encoder
 
@@ -180,9 +180,9 @@ weights when it is loaded.
 
 ## Options
 
-Which checkpoint/tokenizer to serve is still selected through env vars
-(`BRAIN_QWEN_WEIGHTS`, `BRAIN_QWEN_TOKENIZER`, `BRAIN_FLUX2_TE`, above) -
-everything about HOW to serve it is a `brain serve` flag:
+Which checkpoint to serve is the model store, or `brain serve --checkpoint`
+(with `--tokenizer`); FLUX.2's text encoder still takes `BRAIN_FLUX2_TE`,
+above. Everything about HOW to serve it is a `brain serve` flag:
 
 - `--lora N` - LoRA rank for `finetune`.
 - `--lora-targets LIST` - the projections a `finetune --lora` adapter

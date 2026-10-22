@@ -53,7 +53,7 @@ impl Flux1Resident {
     pub fn new(root: impl Into<String>) -> Option<Flux1Resident> {
         let root = root.into();
         if !std::path::Path::new(&root).join("transformer").exists() {
-            eprintln!("brain: flux1 not served ({root} holds no transformer/)");
+            residency::log::not_served(&format!("brain: flux1 not served ({root} holds no transformer/)"));
             return None;
         }
         Some(Flux1Resident { root })

@@ -86,7 +86,7 @@ pub const QWEN35_FAMILY: &str = "qwen35";
 
 impl ServedBase {
     /// The Qwen3 base at `path`, served under `id` when it has one (a catalog
-    /// id, or the id `BRAIN_QWEN_WEIGHTS` resolved to).
+    /// id, or the id `--checkpoint` resolved to).
     pub fn new(path: impl Into<PathBuf>, id: Option<String>) -> ServedBase {
         ServedBase::of_family(QWEN_FAMILY, path, id)
     }

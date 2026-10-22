@@ -174,6 +174,10 @@ pub struct ServeOpts {
     /// Defaults to [`residency::admission::Deadlines::default`]; `brain serve`
     /// passes the operator's `--admit-deadline-ms` values.
     pub deadlines: residency::admission::Deadlines,
+    /// Where to publish the connection record ([`surface::record_json`]) once
+    /// every surface has bound, removed again when serving ends. `None`
+    /// publishes nothing.
+    pub record: Option<std::path::PathBuf>,
 }
 
 impl ServeOpts {
@@ -196,7 +200,35 @@ impl ServeOpts {
         self.deadlines = deadlines;
         self
     }
+    pub fn with_record(mut self, record: Option<std::path::PathBuf>) -> ServeOpts {
+        self.record = record;
+        self
+    }
 }
+
+/// The addresses every surface actually bound, gathered as each listener
+/// comes up; the last one to bind writes the connection record, so a client
+/// that finds the record finds every listener already accepting.
+struct Publication {
+    path: std::path::PathBuf,
+    expected: usize,
+    bound: std::sync::Mutex<Vec<(Provider, std::net::SocketAddr, String)>>,
+}
+
+impl Publication {
+    fn bound(&self, provider: Provider, addr: std::net::SocketAddr, key: &str) {
+        let mut bound = self.bound.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        bound.push((provider, addr, key.to_string()));
+        if bound.len() != self.expected {
+            return;
+        }
+        let body = surface::record_json(std::process::id(), &bound).to_string();
+        if let Err(e) = surface::write_private(&self.path, body.as_bytes()) {
+            eprintln!("brain serve: the connection record {} could not be written ({e}); local clients will not find this server", self.path.display());
+        }
+    }
+}
+
 
 /// How long a stopping server waits for in-flight requests to finish after the
 /// shutdown fires and their jobs are cancelled. Cancellation is polled between
@@ -211,8 +243,16 @@ pub const SHUTDOWN_DRAIN: std::time::Duration = std::time::Duration::from_secs(3
 /// concurrently on a [`tokio::task::JoinSet`]. Blocks the calling thread.
 pub fn serve_all(exec: Executor, surfaces: Vec<Surface>, opts: ServeOpts) -> anyhow::Result<()> {
     let shutdown = opts.shutdown.unwrap_or_else(brain_shutdown::Shutdown::from_signals);
-    let ServeOpts { supplier, ready, deadlines, .. } = opts;
+    let ServeOpts { supplier, ready, deadlines, record, .. } = opts;
+    let publication = record.and_then(|path| {
+        if let Err(e) = path.parent().map_or(Ok(()), surface::private_dir) {
+            eprintln!("brain serve: no connection record is published ({e}); local clients will not find this server");
+            return None;
+        }
+        Some(std::sync::Arc::new(Publication { path, expected: surfaces.len(), bound: std::sync::Mutex::new(Vec::new()) }))
+    });
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let published = publication.clone();
     let result = rt.block_on(async move {
         let mut set = tokio::task::JoinSet::new();
         for s in surfaces {
@@ -230,14 +270,19 @@ pub fn serve_all(exec: Executor, surfaces: Vec<Surface>, opts: ServeOpts) -> any
                 jobs.cancel_all();
             });
             let app = router(state);
-            let (addr, provider) = (s.addr, s.provider);
+            let (addr, provider, key) = (s.addr, s.provider, s.api_key);
             let sd = shutdown.clone();
             let ready = ready.clone();
+            let publication = published.clone();
             set.spawn(async move {
                 let listener = tokio::net::TcpListener::bind(addr)
                     .await
                     .map_err(|e| anyhow::anyhow!("bind {addr} ({provider}): {e}"))?;
+                let addr = listener.local_addr().unwrap_or(addr);
                 eprintln!("brain apiserve: {provider} on http://{addr}");
+                if let Some(publication) = &publication {
+                    publication.bound(provider, addr, &key);
+                }
                 // AFTER the bind and after the line every existing harness greps
                 // for, and BEFORE serving: the marker means "the listener existed",
                 // nothing stronger.
@@ -273,5 +318,10 @@ pub fn serve_all(exec: Executor, surfaces: Vec<Surface>, opts: ServeOpts) -> any
     // Not a plain drop: that waits for every blocking task, and a request
     // abandoned at the drain bound may still hold one.
     rt.shutdown_background();
+    // Serving has ended: withdraw the record before the caller exits. Not
+    // left to a drop, since an abandoned task may still hold a handle to it.
+    if let Some(publication) = &publication {
+        std::fs::remove_file(&publication.path).ok();
+    }
     result
 }

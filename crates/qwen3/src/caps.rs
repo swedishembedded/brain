@@ -26,8 +26,7 @@
 //! here the only filesystem facts are the base checkpoint and its tokenizer,
 //! both `host_resolved` params `Manifest::for_serving` projects out of every
 //! off-machine surface exactly like `host_env` does - resolved through the
-//! model store (`crate::spec::Qwen3Spec`) rather than a bare
-//! `BRAIN_QWEN_WEIGHTS`/`BRAIN_QWEN_TOKENIZER` env var, so `brain do qwen
+//! model store (`crate::spec::Qwen3Spec`), so `brain do qwen
 //! generate` and the generic `ARCH_TO_MODEL` dispatch get the same
 //! scan/resolve/fetch-if-missing convenience `brain pull` and every other
 //! resolver-migrated architecture already have. Progress on this action is
@@ -822,7 +821,7 @@ impl Action for LoraGateAction {
 /// `lora_train -> lora_gate` graph this action exists for; gating cycle k
 /// against cycle k-1's promoted adapter means pointing `weights` at a
 /// checkpoint that adapter has already been folded into, and the host owns
-/// that fact (`BRAIN_QWEN_WEIGHTS`), not the request. Comparing a candidate
+/// that fact (`brain serve --checkpoint`), not the request. Comparing a candidate
 /// against a base that is not what is actually being served would make every
 /// number here describe a comparison nobody is running.
 pub fn gate_lora(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
@@ -2016,8 +2015,7 @@ mod tests {
 
     /// The resolved-default path: a provider bound via `with_defaults` serves
     /// a request that names no `weights` at all, using the bound path - the
-    /// whole point of moving `weights`/`tokenizer` off `BRAIN_QWEN_WEIGHTS`/
-    /// `BRAIN_QWEN_TOKENIZER` and onto the model-store resolver
+    /// whole point of resolving `weights`/`tokenizer` through the model store
     /// (`crate::spec::Qwen3Spec`). Covers `generate` and `embed`, the two
     /// actions with their own resident state to key by the resolved path.
     #[test]

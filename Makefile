@@ -616,11 +616,9 @@ test/e2e/samples: build/debug
 test/e2e/ready: build/debug
 	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/ready.bats
 
-# End-to-end: drive the real `claude` CLI against a local `brain serve --anthropic`,
-# proving brain works as a Claude Code backend. Skips cleanly unless `claude` is
-# installed AND a served qwen model is configured:
-#   BRAIN_QWEN_WEIGHTS=... BRAIN_QWEN_TOKENIZER=... make test/e2e/claude-code
-# (import one first: brain qwen3 import --hf <hf_qwen_dir> --out qwen.safetensors)
+# End-to-end: drive the real `claude` CLI against a local `brain serve --anthropic`
+# on the BRAIN_MOCK model, proving brain works as a Claude Code backend. Skips
+# cleanly unless `claude` is installed.
 ## test/e2e/claude-code - OPT-IN: drive the real `claude` CLI against a local `brain serve --anthropic`
 test/e2e/claude-code: build/release
 	bats tests/e2e/claude_code.bats

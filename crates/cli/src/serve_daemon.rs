@@ -53,15 +53,16 @@ pub const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 /// binds, so this is minutes, not seconds.
 pub const READY_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// Where the pidfile, log and default ready file live.
+/// Where the pidfile, log, default ready file and connection records live.
 ///
-/// `$XDG_RUNTIME_DIR` when the platform provides one (per-user, cleaned on
-/// logout, which is exactly what this state is), else a per-user directory
-/// inside the environment's temp dir. The uid suffix matters: the path must
-/// never be shared, or two users' servers would collide on one lock.
-pub fn state_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("BRAIN_RUNTIME_DIR") {
-        return PathBuf::from(dir);
+/// `--runtime-dir DIR` when given, else `$XDG_RUNTIME_DIR/brain` when the
+/// platform provides one (per-user, cleaned on logout, which is exactly what
+/// this state is), else a per-user directory inside the environment's temp
+/// dir. The uid suffix matters: the path must never be shared, or two users'
+/// servers would collide on one lock.
+pub fn state_dir(runtime_dir: Option<&Path>) -> PathBuf {
+    if let Some(dir) = runtime_dir {
+        return dir.to_path_buf();
     }
     if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
         return PathBuf::from(dir).join("brain");
@@ -69,14 +70,26 @@ pub fn state_dir() -> PathBuf {
     std::env::temp_dir().join(format!("brain-{}", unsafe { libc::getuid() }))
 }
 
-pub fn pid_path() -> PathBuf {
-    state_dir().join("serve.pid")
+/// The connection record a server publishes in its state directory, one per
+/// serving process: foreground servers do not take the single-server lock,
+/// so several can run at once and each needs its own.
+pub fn record_path(state: &Path) -> PathBuf {
+    state.join(format!("serve-{}.json", std::process::id()))
 }
-pub fn log_path() -> PathBuf {
-    state_dir().join("serve.log")
+
+/// The `--runtime-dir` value in `brain serve`'s argv, if any.
+pub fn runtime_dir_arg(argv: &[String]) -> Option<PathBuf> {
+    argv.iter().position(|a| a == "--runtime-dir").and_then(|i| argv.get(i + 1)).map(PathBuf::from)
 }
-pub fn default_ready_path() -> PathBuf {
-    state_dir().join("serve.ready")
+
+pub fn pid_path(state: &Path) -> PathBuf {
+    state.join("serve.pid")
+}
+pub fn log_path(state: &Path) -> PathBuf {
+    state.join("serve.log")
+}
+pub fn default_ready_path(state: &Path) -> PathBuf {
+    state.join("serve.ready")
 }
 
 /// An exclusive claim on "the brain server on this machine", held for as long
@@ -220,8 +233,8 @@ pub fn stop(path: &Path, timeout: Duration) -> io::Result<Option<i32>> {
 ///
 /// A detached run always gets a `--ready-file`, appended here when the caller
 /// did not name one, because that file is what the parent waits on.
-pub fn lifecycle(mut argv: Vec<String>) -> Vec<String> {
-    if argv.get(1).map(String::as_str) != Some("serve") {
+pub fn lifecycle(mut argv: Vec<String>, subcommand: usize) -> Vec<String> {
+    if argv.get(subcommand).map(String::as_str) != Some("serve") {
         return argv;
     }
     let has = |flag: &str| argv.iter().any(|a| a == flag);
@@ -231,7 +244,8 @@ pub fn lifecycle(mut argv: Vec<String>) -> Vec<String> {
         return argv;
     }
 
-    let pid_file = pid_path();
+    let state = state_dir(runtime_dir_arg(&argv).as_deref());
+    let pid_file = pid_path(&state);
     if status {
         // The answer goes in the exit code as well as on stdout: `--status` is
         // a query, and a caller asking "is one running?" should not have to
@@ -240,7 +254,7 @@ pub fn lifecycle(mut argv: Vec<String>) -> Vec<String> {
         // error), which this command can also produce.
         match running(&pid_file) {
             Some(pid) => {
-                println!("brain serve: running, pid {pid} (log {})", log_path().display());
+                println!("brain serve: running, pid {pid} (log {})", log_path(&state).display());
                 std::process::exit(0);
             }
             None => {
@@ -279,15 +293,15 @@ pub fn lifecycle(mut argv: Vec<String>) -> Vec<String> {
 
     if detach {
         let ready = match argv.iter().position(|a| a == "--ready-file") {
-            Some(i) => argv.get(i + 1).map(PathBuf::from).unwrap_or_else(default_ready_path),
+            Some(i) => argv.get(i + 1).map(PathBuf::from).unwrap_or_else(|| default_ready_path(&state)),
             None => {
-                let p = default_ready_path();
+                let p = default_ready_path(&state);
                 argv.push("--ready-file".to_string());
                 argv.push(p.to_string_lossy().into_owned());
                 p
             }
         };
-        let log = log_path();
+        let log = log_path(&state);
         if let Err(e) = detach_process(&ready, &pid_file, &log, READY_TIMEOUT) {
             eprintln!("brain serve: -d: {e}");
             std::process::exit(1);

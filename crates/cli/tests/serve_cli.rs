@@ -165,6 +165,23 @@ fn status_exits_nonzero_when_no_server_is_running() {
     std::fs::remove_dir_all(&state).ok();
 }
 
+/// The lifecycle flags work whatever global flag stands before `serve`, and
+/// answer from the directory `--runtime-dir` names.
+#[test]
+fn status_reads_the_runtime_dir_flag_after_a_leading_global_flag() {
+    let dir = Scratch::new("status-runtime-dir");
+    let out = Command::new(bin())
+        .args(["--device", "cpu", "serve", "--status", "--runtime-dir"])
+        .arg(&dir.0)
+        .stdin(Stdio::null())
+        .env_remove("BRAIN_DEVICE")
+        .output()
+        .expect("run brain serve --status");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(3), "stdout: {stdout}; stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(stdout.contains("not running"), "stdout: {stdout}");
+}
+
 /// A scratch directory for one test, removed when it ends.
 struct Scratch(std::path::PathBuf);
 
@@ -221,11 +238,11 @@ fn serve_command(dir: &std::path::Path, base: &std::path::Path, extra: &[&str]) 
     std::fs::create_dir_all(&models).unwrap();
     let mut cmd = Command::new(bin());
     cmd.args(["serve", "--openai", "127.0.0.1:0", "--seed", "1", "--models-dir", models.to_str().unwrap(), "--checkpoint", base.to_str().unwrap()])
+        .arg("--runtime-dir")
+        .arg(dir.join("run"))
         .args(extra)
         .stdin(Stdio::null())
         .env("BRAIN_DEVICE", "cpu")
-        .env_remove("BRAIN_QWEN_WEIGHTS")
-        .env("BRAIN_RUNTIME_DIR", dir.join("run"))
         .env_remove("BRAIN_AUTO_FETCH");
     cmd
 }
@@ -266,31 +283,26 @@ fn a_pinned_adapter_is_reported_by_digest_at_startup() {
     assert!(found, "expected {expected:?} on stderr; server exit status {exited:?}; saw:\n{}", seen.join("\n"));
 }
 
-/// The checkpoint to serve is a flag; the old environment variable stays as a
-/// fallback for existing deployments, and the flag wins when both name one.
+/// The checkpoint is named by `--checkpoint` alone: `BRAIN_QWEN_WEIGHTS` in
+/// the environment selects nothing, so an adapter with no flag is refused.
 #[test]
-fn the_environment_variable_still_names_the_checkpoint_when_no_flag_does() {
+fn the_environment_names_no_checkpoint() {
     let dir = Scratch::new("pin-env");
     let (base, adapter) = write_base_and_adapter(&dir.0, 1.0, None);
-    let digest = brain_modelstore::fetch::file_digest(&adapter).unwrap();
     let models = dir.0.join("models");
     std::fs::create_dir_all(&models).unwrap();
-    let mut child = Command::new(bin())
-        .args(["serve", "--openai", "127.0.0.1:0", "--seed", "1", "--models-dir", models.to_str().unwrap(), "--adapter", adapter.to_str().unwrap()])
+    let run_dir = dir.0.join("run");
+    let out = Command::new(bin())
+        .args(["serve", "--openai", "127.0.0.1:0", "--seed", "1", "--models-dir", models.to_str().unwrap(), "--runtime-dir", run_dir.to_str().unwrap(), "--adapter", adapter.to_str().unwrap()])
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
         .env("BRAIN_DEVICE", "cpu")
         .env("BRAIN_QWEN_WEIGHTS", &base)
-        .env("BRAIN_RUNTIME_DIR", dir.0.join("run"))
         .env_remove("BRAIN_AUTO_FETCH")
-        .spawn()
-        .expect("spawn brain serve");
-    let expected = format!("brain serve: {ADAPTER_ID} adapter={ADAPTER_ID} digest={digest}");
-    let found = std::io::BufRead::lines(std::io::BufReader::new(child.stderr.take().unwrap())).map_while(Result::ok).any(|l| l == expected);
-    child.kill().ok();
-    child.wait().ok();
-    assert!(found, "the environment variable must still select the checkpoint");
+        .output()
+        .expect("run brain serve");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "the variable must not select the checkpoint; stderr:\n{stderr}");
+    assert!(stderr.contains("--checkpoint"), "the remedy is the flag; stderr:\n{stderr}");
 }
 
 /// With no flag and no variable, `--adapter` says how to name the checkpoint,
@@ -303,10 +315,11 @@ fn an_adapter_with_no_checkpoint_names_the_flag_that_selects_one() {
     std::fs::create_dir_all(&models).unwrap();
     let out = Command::new(bin())
         .args(["serve", "--openai", "127.0.0.1:0", "--seed", "1", "--models-dir", models.to_str().unwrap(), "--adapter", adapter.to_str().unwrap()])
+        .arg("--runtime-dir")
+        .arg(dir.0.join("run"))
         .stdin(Stdio::null())
         .env("BRAIN_DEVICE", "cpu")
         .env_remove("BRAIN_QWEN_WEIGHTS")
-        .env("BRAIN_RUNTIME_DIR", dir.0.join("run"))
         .env_remove("BRAIN_AUTO_FETCH")
         .output()
         .expect("run brain serve");
@@ -397,13 +410,14 @@ fn every_startup_resolver_scans_the_models_dir_flag_not_the_environment_store() 
     let ready = dir.0.join("ready");
     let mut child = Command::new(bin())
         .args(["serve", "--openai", "127.0.0.1:0", "--models-dir", flag_store.to_str().unwrap(), "--ready-file", ready.to_str().unwrap()])
+        .arg("--runtime-dir")
+        .arg(dir.0.join("run"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .env("BRAIN_DEVICE", "cpu")
         .env("BRAIN_MODELS_DIR", &env_store)
         .env("HOME", &home)
-        .env("BRAIN_RUNTIME_DIR", dir.0.join("run"))
         .env_remove("XDG_DATA_HOME")
         .env_remove("BRAIN_AUTO_FETCH")
         .spawn()

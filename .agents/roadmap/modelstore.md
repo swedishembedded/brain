@@ -36,3 +36,29 @@ src/supply.rs`). GGUF v2/v3 reader, HF fetch over a host allowlist, and now
       config for a **non-default** token file path or a `HF_HOME` override -
       only `HF_TOKEN` and the fixed `~/.cache/huggingface/token` location the
       `hf`/`huggingface-cli` login flow writes.
+
+## Selection by the store alone
+
+`brain serve` serves the OpenAI API with no flags, publishes a connection
+record (address and key) for local clients, and selects Qwen3 by the store
+or `--checkpoint`/`--tokenizer`; `BRAIN_QWEN_WEIGHTS`, `BRAIN_QWEN_TOKENIZER`,
+`BRAIN_API_KEY` and `BRAIN_RUNTIME_DIR` are no longer read. A family with
+nothing on the machine is one counted startup line. Still selected by a
+variable instead of the store, each to move onto a resolver spec and the
+`model_dir` scan, its variable deleted outright:
+
+- [ ] TimesFM-3 serving (`BRAIN_TIMESFM3`; `brain pull` fetches it but serving
+      cannot find it).
+- [ ] Kronos serving (`BRAIN_KRONOS_TOKENIZER` + `_DECODER`; `brain forecast
+      predict` already resolves both from the store).
+- [ ] DeepSeek-OCR-2 (`BRAIN_DEEPSEEKOCR2_DIR`).
+- [ ] Qwen3-VL serving (`BRAIN_QWEN3VL_WEIGHTS`; `brain caps`/`brain do`
+      already resolve it from the store).
+- [ ] The scheduler families the startup line counts with a variable as the
+      remedy: Z-Image (`BRAIN_S3DIT_*`), FLUX.2 overrides, LFM2, Wan, LTX-Video,
+      YOLO, the Qwen3-Omni int8 checkpoint.
+- [ ] `BRAIN_MODELS_DIR` and `BRAIN_AUTO_FETCH`: a flag exists for each
+      (`--models-dir`/`--brain-data-dir`, `--autofetch`), but `main` still
+      hands them on through the environment; pass the value down instead.
+- [ ] The config file's `BRAIN_*` keys shrink with the allowlist: every
+      variable that becomes a flag moves to its subcommand section.

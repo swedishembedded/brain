@@ -268,7 +268,7 @@ fn ensure_env_weights_with(arch: &str, store: &Store, hub: &dyn Hub) -> Result<(
             unset.iter().filter(|(_, role)| !roles.contains_key(*role)).map(|(var, _)| *var).collect();
         if !missing.is_empty() {
             return Err(format!(
-                "{arch}: not pulled: {} unset and no local copy of {default_ref} in the model store. Fetch with `brain pull {default_ref}`, or rerun with --autofetch (BRAIN_AUTO_FETCH=1).",
+                "{arch}: not pulled: {} unset and no local copy of {default_ref} in the model store. Fetch with `brain pull {default_ref}`, or rerun with --autofetch.",
                 missing.join(", ")
             ));
         }

@@ -91,7 +91,7 @@ impl Qwen3VlResident {
     pub fn new(dir: impl Into<String>) -> Option<Qwen3VlResident> {
         let dir = dir.into();
         if !std::path::Path::new(&dir).exists() {
-            eprintln!("brain: qwen3vl not served ({dir} does not exist)");
+            residency::log::not_served(&format!("brain: qwen3vl not served ({dir} does not exist)"));
             return None;
         }
         Some(Qwen3VlResident { dir })
