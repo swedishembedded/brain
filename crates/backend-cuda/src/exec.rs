@@ -385,12 +385,10 @@ impl Context {
                 // of a fenced buffer pays - and from then on nothing foreign is
                 // pending, so the new owner starts unfenced. The same stream
                 // needs no wait: it orders its own work.
-                if let Some(f) = held.fence {
-                    if f.stream_id != self.stream_id {
-                        self.wait_event(&f.event)?;
-                    }
+                for f in held.fence.iter().filter(|f| f.stream_id != self.stream_id) {
+                    self.wait_event(&f.event)?;
                 }
-                (held.ptr, None)
+                (held.ptr, Fences::default())
             }
             None => {
                 self.make_current()?;
@@ -404,7 +402,7 @@ impl Context {
                 }
                 self.d.check(rc, "cuMemAlloc")?;
                 crate::live::device_alloc(len);
-                (ptr, None)
+                (ptr, Fences::default())
             }
         };
         Ok(DeviceMem {
@@ -417,6 +415,7 @@ impl Context {
             graph_epoch: self.graph_epoch.clone(),
             graph_pinned: std::sync::atomic::AtomicBool::new(false),
             fence: std::sync::Mutex::new(fence),
+            rows_shared: std::sync::atomic::AtomicBool::new(false),
             origin: Origin::Driver { cache: self.cache.clone() },
             _primary: self.primary.clone(),
         })
@@ -470,7 +469,8 @@ impl Context {
             epoch: self.alloc_epoch.clone(),
             graph_epoch: self.graph_epoch.clone(),
             graph_pinned: std::sync::atomic::AtomicBool::new(false),
-            fence: std::sync::Mutex::new(None),
+            fence: std::sync::Mutex::new(Fences::default()),
+            rows_shared: std::sync::atomic::AtomicBool::new(false),
             origin: Origin::Pool(pool.clone()),
             _primary: self.primary.clone(),
         })
@@ -531,7 +531,8 @@ impl Context {
             epoch: self.alloc_epoch.clone(),
             graph_epoch: self.graph_epoch.clone(),
             graph_pinned: std::sync::atomic::AtomicBool::new(false),
-            fence: std::sync::Mutex::new(None),
+            fence: std::sync::Mutex::new(Fences::default()),
+            rows_shared: std::sync::atomic::AtomicBool::new(false),
             origin,
             _primary: self.primary.clone(),
         }
@@ -1449,13 +1450,54 @@ pub fn several_contexts_open() -> bool {
     OPEN_CONTEXTS.load(Ordering::Acquire) > 1
 }
 
-/// The last work some handle's stream did to a buffer: the event it recorded
+/// Work some handle's stream did to a buffer: the event it recorded
 /// afterwards, and which stream that was. Another handle's stream waits on the
-/// event before using the buffer; the same stream needs no wait, because a
-/// stream orders its own work.
+/// event before a use that conflicts with that work; the same stream needs no
+/// wait, because a stream orders its own work.
 pub struct Fence {
     pub stream_id: u64,
     pub event: std::sync::Arc<Event>,
+}
+
+/// The work other streams may still be doing to an allocation, split by what
+/// it does: the last WRITE, and the READS since it (the latest per stream).
+///
+/// A read only conflicts with a write, so it waits for the writer alone and two
+/// streams reading one buffer - a weight both a decode and a prefill stream
+/// multiply by - never wait for each other. A write conflicts with everything,
+/// so it waits for the writer and every reader, and then is the only work left
+/// to order against.
+#[derive(Default)]
+pub struct Fences {
+    pub writer: Option<Fence>,
+    pub readers: Vec<Fence>,
+}
+
+impl Fences {
+    /// The events a use waits for before it may run: the writer's for a read,
+    /// every one for a write.
+    pub fn conflicting(&self, write: bool) -> impl Iterator<Item = &Fence> {
+        self.writer.iter().chain(self.readers.iter().filter(move |_| write))
+    }
+
+    /// Record `fence` as a use: the new writer (no read before it is pending any
+    /// more - the write waited for them), or this stream's latest read.
+    pub fn record(&mut self, fence: Fence, write: bool) {
+        if write {
+            self.readers.clear();
+            self.writer = Some(fence);
+        } else if let Some(r) = self.readers.iter_mut().find(|r| r.stream_id == fence.stream_id) {
+            *r = fence;
+        } else {
+            self.readers.push(fence);
+        }
+    }
+
+    /// Every pending event, for whoever takes the allocation over next (a new
+    /// owner writes it, so it waits for all of them).
+    pub fn into_all(self) -> Vec<Fence> {
+        self.writer.into_iter().chain(self.readers).collect()
+    }
 }
 
 /// A CUDA event, destroyed when dropped. It is a timestamp on a stream: record
@@ -1606,9 +1648,12 @@ pub struct DeviceMem {
     graph_epoch: Arc<AtomicU64>,
     /// Set once a captured graph has recorded this block's address.
     graph_pinned: std::sync::atomic::AtomicBool,
-    /// The last work any handle's stream did to this allocation, when more than
-    /// one handle is open. See [`Fence`].
-    pub(crate) fence: std::sync::Mutex<Option<Fence>>,
+    /// The work handles' streams did to this allocation, when more than one
+    /// handle is open. See [`Fences`].
+    pub(crate) fence: std::sync::Mutex<Fences>,
+    /// Set by [`DeviceMem::share_rows`]: the streams that use this allocation
+    /// touch disjoint parts of it, so no use is ordered against another.
+    pub(crate) rows_shared: std::sync::atomic::AtomicBool,
     /// Where this block goes when dropped.
     origin: Origin,
     /// Keeps the context this allocation lives in alive until it is freed.
@@ -1657,10 +1702,24 @@ enum Origin {
     Pool(Arc<PoolRef>),
 }
 
+impl DeviceMem {
+    /// Stop ordering other streams' uses of this allocation against each other
+    /// (see `backend_api::Backend::share_rows`), once the work already pending
+    /// on it - its zeroing, an upload - has completed.
+    pub(crate) fn share_rows(&self) -> Result<(), String> {
+        let pending = std::mem::take(&mut *self.fence.lock().unwrap_or_else(|e| e.into_inner()));
+        for f in pending.into_all() {
+            f.event.synchronize()?;
+        }
+        self.rows_shared.store(true, Ordering::Release);
+        Ok(())
+    }
+}
+
 impl Drop for DeviceMem {
     fn drop(&mut self) {
         let len = self.len.max(1);
-        let fence = self.fence.get_mut().unwrap_or_else(|e| e.into_inner()).take();
+        let fence = std::mem::take(self.fence.get_mut().unwrap_or_else(|e| e.into_inner())).into_all();
         match &self.origin {
             // A block worth keeping goes to the cache, carrying the fence that says
             // which stream last touched it, so its next owner waits on that work
@@ -1708,7 +1767,7 @@ impl Drop for DeviceMem {
                 // from `alloc_zeroed` with this layout and is freed once.
                 unsafe {
                     let mut idle = (self.fns.ctx_set_current)(self.ctx) == 0 && (self.fns.stream_synchronize)(stream.stream) == 0;
-                    if let Some(f) = fence {
+                    for f in &fence {
                         idle = idle && (self.fns.event_synchronize)(f.event.ev) == 0;
                     }
                     if idle {
@@ -1864,14 +1923,14 @@ impl PoolRef {
 
     /// Enqueue the free on the pool's stream, after any work another handle's
     /// stream did on the block.
-    fn free(&self, ptr: CuDevicePtr, len: usize, fence: Option<Fence>) {
+    fn free(&self, ptr: CuDevicePtr, len: usize, fence: Vec<Fence>) {
         // SAFETY: the context outlives the pool (`_primary`), the stream lives
         // as long as `self`, and `ptr` came from this pool.
         unsafe {
             if (self.fns.ctx_set_current)(self.ctx) != 0 {
                 return;
             }
-            if let Some(f) = fence.filter(|f| f.stream_id != self.stream_id) {
+            for f in fence.iter().filter(|f| f.stream_id != self.stream_id) {
                 let rc = (self.fns.stream_wait_event)(self.stream.stream, f.event.ev, 0);
                 if rc != 0 {
                     tracing::warn!("cuStreamWaitEvent before a pooled free failed: {}", self.d.error_text(rc));
@@ -1976,7 +2035,8 @@ struct Held {
 
 struct HeldBlock {
     ptr: CuDevicePtr,
-    fence: Option<Fence>,
+    /// Everything other streams may still be doing to the block.
+    fence: Vec<Fence>,
 }
 
 /// The cache cap for a card with `total` bytes of memory: a sixteenth of it,
@@ -2021,7 +2081,7 @@ impl BlockCache {
     }
 
     /// Hold the block if it is worth it and fits; `false` means the caller frees it.
-    fn keep(&self, ptr: CuDevicePtr, len: usize, fence: Option<Fence>) -> bool {
+    fn keep(&self, ptr: CuDevicePtr, len: usize, fence: Vec<Fence>) -> bool {
         let cap = self.cap();
         if !self.enabled.load(Ordering::Acquire) || len as u64 > cap / 2 {
             return false;

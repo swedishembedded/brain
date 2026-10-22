@@ -1316,6 +1316,14 @@ pub trait Backend: Send + Sync {
     fn flush_writes(&self, bufs: &[&DeviceBuffer]) {
         let _ = bufs;
     }
+    /// Declare that the handles using `buf` from now on touch DISJOINT parts of it - a KV pool or a
+    /// recurrent-state pool whose rows belong to different sequences, written by a decode stream and a prefill
+    /// stream at once - so no use of it is ordered against another handle's. Everything already pending on it
+    /// completes first. The caller owns the disjointness: two handles touching the same rows race. A no-op where
+    /// handles cannot overlap.
+    fn share_rows(&self, buf: &DeviceBuffer) {
+        let _ = buf;
+    }
     /// Record a dispatch with a fresh single-use uniform buffer.
     fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step;
     /// Record a dispatch where each buffer binds the sub-range `offsets[i]`.

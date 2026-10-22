@@ -162,6 +162,9 @@ pub(crate) struct Compiled {
     /// index arithmetic is written against - never a tuning knob either way.
     pub(crate) block_dim: u32,
     n_bindings: usize,
+    /// Per storage binding, in order: whether the kernel may write it. What
+    /// orders a use against other streams' work (see [`exec::Fences`]).
+    pub(crate) writes: Vec<bool>,
     takes_uniform: bool,
     /// Whether the entry point takes the bound range lengths after its
     /// pointers: true for a generated kernel (see `wgsl_cuda::Kernel`), false
@@ -732,6 +735,7 @@ impl CudaBackend {
             func: func.raw(),
             block_dim: gen.block_dim,
             n_bindings: gen.bindings.len(),
+            writes: gen.writable.clone(),
             takes_uniform: gen.uniform_bytes > 0,
             takes_lengths: true,
             shape: exec::Shape::default(),
@@ -1027,14 +1031,17 @@ impl CudaBackend {
     /// concurrently, so a buffer one handle is still writing may be read by the
     /// other early unless it is ordered here. Free while only one handle is
     /// open: a stream orders its own work.
-    fn fence_in<'a>(&self, bufs: impl IntoIterator<Item = &'a Arc<exec::DeviceMem>>) {
+    fn fence_in<'a>(&self, uses: impl IntoIterator<Item = (&'a Arc<exec::DeviceMem>, bool)>) {
         if !exec::several_contexts_open() {
             return;
         }
         let mut waited: Vec<*const exec::Event> = Vec::new();
-        for m in bufs {
+        for (m, write) in uses {
+            if m.rows_shared.load(Ordering::Acquire) {
+                continue;
+            }
             let guard = m.fence.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(f) = guard.as_ref() {
+            for f in guard.conflicting(write) {
                 if f.stream_id != self.ctx.stream_id() && !waited.contains(&Arc::as_ptr(&f.event)) {
                     waited.push(Arc::as_ptr(&f.event));
                     if let Err(e) = self.ctx.wait_event(&f.event) {
@@ -1050,14 +1057,14 @@ impl CudaBackend {
     /// this handle's stream and otherwise lands after that handle's own writes.
     fn wrap_initialised(&self, mem: exec::DeviceMem) -> DeviceBuffer {
         let buf = CudaBuf::wrap(mem);
-        self.fence_out([&CudaBuf::of(&buf).mem]);
+        self.fence_out([(&CudaBuf::of(&buf).mem, true)]);
         buf
     }
 
     /// Record that this handle's stream has just done work on `bufs`, so any
     /// other handle that uses one of them first waits for it. See
     /// [`Self::fence_in`].
-    fn fence_out<'a>(&self, bufs: impl IntoIterator<Item = &'a Arc<exec::DeviceMem>>) {
+    fn fence_out<'a>(&self, uses: impl IntoIterator<Item = (&'a Arc<exec::DeviceMem>, bool)>) {
         if !exec::several_contexts_open() {
             return;
         }
@@ -1068,9 +1075,11 @@ impl CudaBackend {
                 return;
             }
         };
-        for m in bufs {
-            *m.fence.lock().unwrap_or_else(|e| e.into_inner()) =
-                Some(exec::Fence { stream_id: self.ctx.stream_id(), event: Arc::clone(&event) });
+        for (m, write) in uses {
+            if m.rows_shared.load(Ordering::Acquire) {
+                continue;
+            }
+            m.fence.lock().unwrap_or_else(|e| e.into_inner()).record(exec::Fence { stream_id: self.ctx.stream_id(), event: Arc::clone(&event) }, write);
         }
     }
 
@@ -1177,7 +1186,9 @@ impl CudaBackend {
         // The uniform blocks too: a step recorded on another handle brings its
         // zeroed uniform, and the parameters this submission uploads into it
         // must not overtake that handle's kernel still reading the old ones.
-        let touched = || clears.iter().chain(resolved.iter().flat_map(|r| r.bufs.iter().map(|(m, _)| m).chain(r.uniform.as_ref())));
+        let touched = || {
+            clears.iter().map(|c| (c, true)).chain(resolved.iter().flat_map(|r| r.uses()))
+        };
         self.fence_in(touched());
 
         let mut handled = false;
@@ -1449,7 +1460,7 @@ impl backend_api::Backend for CudaBackend {
                 .upload(mem, bytes)
                 .unwrap_or_else(|e| panic!("backend-cuda: uploading '{name}' failed: {e}"));
             // Another handle that uses this buffer waits for the copy.
-            self.fence_out([mem]);
+            self.fence_out([(mem, true)]);
         } else {
             self.ctx.zero(mem).unwrap_or_else(|e| panic!("backend-cuda: zeroing '{name}' failed: {e}"));
         }
@@ -1481,11 +1492,11 @@ impl backend_api::Backend for CudaBackend {
         self.issue_held();
         self.counters.writes.fetch_add(1, Ordering::Relaxed);
         let mem = &CudaBuf::of(buf).mem;
-        self.fence_in([mem]);
+        self.fence_in([(mem, true)]);
         self.ctx
             .upload_at(mem, (offset_words * 4) as usize, bytemuck_words(data))
             .unwrap_or_else(|e| panic!("backend-cuda: write failed: {e}"));
-        self.fence_out([mem]);
+        self.fence_out([(mem, true)]);
     }
 
     fn enable_staged_writes(&self, bytes: u64) -> Result<bool, String> {
@@ -1510,12 +1521,17 @@ impl backend_api::Backend for CudaBackend {
         self.counters.writes.fetch_add(1, Ordering::Relaxed);
         let mem = &CudaBuf::of(buf).mem;
         // The buffer's last user may be another handle (the allocation's own zeroing, a kernel that ran on it).
-        self.fence_in([mem]);
+        self.fence_in([(mem, true)]);
         ring.write(&self.ctx, mem, (offset_words * 4) as usize, data).unwrap_or_else(|e| panic!("backend-cuda: staged write failed: {e}"));
     }
 
     fn flush_writes(&self, bufs: &[&DeviceBuffer]) {
-        self.fence_out(bufs.iter().map(|b| &CudaBuf::of(b).mem));
+        self.fence_out(bufs.iter().map(|b| (&CudaBuf::of(b).mem, true)));
+    }
+
+    fn share_rows(&self, buf: &DeviceBuffer) {
+        self.issue_held();
+        CudaBuf::of(buf).mem.share_rows().unwrap_or_else(|e| panic!("backend-cuda: waiting out the work pending on a shared pool failed: {e}"));
     }
 
     fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
@@ -1607,9 +1623,9 @@ impl backend_api::Backend for CudaBackend {
         let mut best = vec![f64::INFINITY; stamps.len()];
         // One launch to warm the graph (first launch uploads and may stall), then `reps` measured.
         let measured = (0..=reps).try_for_each(|rep| -> Result<(), String> {
-            self.fence_in(frozen.touched.iter());
+            self.fence_in(frozen.touched.iter().map(|(m, w)| (m, *w)));
             self.ctx.launch_graph(&frozen.exec)?;
-            self.fence_out(frozen.touched.iter());
+            self.fence_out(frozen.touched.iter().map(|(m, w)| (m, *w)));
             self.ctx.sync()?;
             if rep == 0 {
                 return Ok(());
@@ -1641,12 +1657,12 @@ impl backend_api::Backend for CudaBackend {
         }
         let f = program.downcast_ref::<Frozen>();
         let t0 = std::time::Instant::now();
-        self.fence_in(f.touched.iter());
+        self.fence_in(f.touched.iter().map(|(m, w)| (m, *w)));
         if let Err(e) = self.ctx.launch_graph(&f.exec) {
             tracing::warn!(reason = %e, "backend-cuda: launching a frozen program failed; submitting its steps one by one");
             return false;
         }
-        self.fence_out(f.touched.iter());
+        self.fence_out(f.touched.iter().map(|(m, w)| (m, *w)));
         self.counters.submits.fetch_add(1, Ordering::Relaxed);
         self.counters.dispatches.fetch_add(f.dispatches as u64, Ordering::Relaxed);
         self.counters.host_launches.fetch_add(1, Ordering::Relaxed);
@@ -1769,6 +1785,7 @@ impl backend_api::Backend for CudaBackend {
             // `bindings` list never includes it). Counting it here would
             // make every dispatch look one buffer short.
             n_bindings: bindings.iter().filter(|b| **b != backend_api::BindKind::Uniform).count(),
+            writes: bindings.iter().filter(|b| **b != backend_api::BindKind::Uniform).map(|b| *b == backend_api::BindKind::StorageReadWrite).collect(),
             // The uniform (if any) is the kernel's first argument, exactly as
             // it is for a generated one.
             takes_uniform: bindings.contains(&backend_api::BindKind::Uniform),
@@ -1954,7 +1971,7 @@ impl backend_api::Backend for CudaBackend {
         // synchronise is where a faulting kernel is actually reported - and it
         // must happen before the copy, not as part of it.
         let mem = &CudaBuf::of(buf).mem;
-        self.fence_in([mem]);
+        self.fence_in([(mem, false)]);
         self.poll_wait();
         let mut out = vec![0f32; n];
         // SAFETY: `out` owns `n * 4` writable bytes with no padding, and the
@@ -2075,7 +2092,7 @@ impl backend_api::Backend for CudaBackend {
     fn prefetch(&self, buf: &DeviceBuffer, offset_bytes: u64, bytes: u64, target: backend_api::PrefetchTarget) -> Result<(), String> {
         let mem = &CudaBuf::of(buf).mem;
         self.ctx.prefetch(mem, offset_bytes as usize, bytes as usize, target == backend_api::PrefetchTarget::Device)?;
-        self.fence_out([mem]);
+        self.fence_out([(mem, true)]);
         Ok(())
     }
 
@@ -2310,10 +2327,41 @@ mod tests {
         let (Ok(a), Ok(_b)) = (CudaBackend::try_new(&[]), CudaBackend::try_new(&[])) else { return };
         let fenced_by_a = |buf: &DeviceBuffer| {
             let fence = CudaBuf::of(buf).mem.fence.lock().unwrap();
-            fence.as_ref().is_some_and(|f| f.stream_id == a.ctx.stream_id())
+            fence.writer.as_ref().is_some_and(|f| f.stream_id == a.ctx.stream_id())
         };
         assert!(fenced_by_a(&a.storage(4)), "zeroed storage");
         assert!(fenced_by_a(&a.buffer("b", 16, BufUsage::STORAGE)), "zeroed buffer");
         assert!(fenced_by_a(&a.uniform_dynamic(4)), "zeroed dynamic uniform");
+    }
+
+    /// Two streams reading one buffer (a weight a decode stream and a prefill
+    /// stream both multiply by) must not be ordered against each other: a read
+    /// waits only for the last write. A write waits for every read since, and
+    /// then is the only work pending. A pool shared by rows records nothing.
+    #[test]
+    fn reads_wait_only_for_the_writer_and_a_write_waits_for_every_read() {
+        use backend_api::Backend as _;
+        let (Ok(a), Ok(b)) = (CudaBackend::try_new(&[]), CudaBackend::try_new(&[])) else { return };
+        let buf = a.storage(4);
+        let mem = &CudaBuf::of(&buf).mem;
+        let (sa, sb) = (a.ctx.stream_id(), b.ctx.stream_id());
+        a.fence_out([(mem, false)]);
+        b.fence_out([(mem, false)]);
+        {
+            let f = mem.fence.lock().unwrap();
+            assert_eq!(f.readers.iter().map(|r| r.stream_id).collect::<Vec<_>>(), vec![sa, sb], "one read per stream");
+            assert_eq!(f.conflicting(false).map(|c| c.stream_id).collect::<Vec<_>>(), vec![sa], "a read waits only for the zeroing write");
+            assert_eq!(f.conflicting(true).count(), 3, "a write waits for the write and both reads");
+        }
+        b.fence_out([(mem, true)]);
+        {
+            let f = mem.fence.lock().unwrap();
+            assert!(f.writer.as_ref().is_some_and(|w| w.stream_id == sb) && f.readers.is_empty(), "the write is all that is pending");
+        }
+        a.share_rows(&buf);
+        a.fence_out([(mem, true)]);
+        b.fence_out([(mem, false)]);
+        let f = mem.fence.lock().unwrap();
+        assert!(f.writer.is_none() && f.readers.is_empty(), "a buffer shared by rows orders nothing");
     }
 }

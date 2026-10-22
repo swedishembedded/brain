@@ -1622,6 +1622,11 @@ mod native_facade {
         pub fn flush_writes(&self, bufs: &[&DeviceBuffer]) {
             self.inner.flush_writes(bufs)
         }
+        /// See `backend_api::Backend::share_rows`: the handles using `buf` touch disjoint parts of it, so
+        /// their work on it is not ordered against each other.
+        pub fn share_rows(&self, buf: &DeviceBuffer) {
+            self.inner.share_rows(buf)
+        }
         /// [`Self::write_at`] for a host `f32` slice.
         pub fn write_f32_at(&self, buf: &DeviceBuffer, offset_words: u64, data: &[f32]) {
             self.write_at(buf, offset_words, bytemuck::cast_slice(data))

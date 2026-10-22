@@ -94,6 +94,10 @@ pub struct Kernel {
     /// than the allocation reintroduces out-of-bounds accesses; one that
     /// passes zero reads and writes element 0 only.
     pub bindings: Vec<u32>,
+    /// Per entry of [`Self::bindings`]: whether the kernel may write it
+    /// (`var<storage, read_write>`). A launcher orders concurrent streams on
+    /// it - readers need not wait for each other.
+    pub writable: Vec<bool>,
     /// Size of the uniform `Params` block in bytes, under **WGSL** layout
     /// rules. 0 when the kernel declares no uniform.
     pub uniform_bytes: usize,
@@ -506,6 +510,7 @@ impl<'a> Gen<'a> {
 
         // Bindings and workgroup scratch, in a stable order.
         let mut bindings: Vec<(u32, String, Ty, u32)> = Vec::new();
+        let mut writable: Vec<(u32, bool)> = Vec::new();
         let mut shared: Vec<(String, Ty, u32)> = Vec::new();
         let mut shared_scalars: Vec<(String, Ty)> = Vec::new();
         let mut uniform_bytes = 0usize;
@@ -515,8 +520,9 @@ impl<'a> Gen<'a> {
                     uniform_bytes = self.struct_size(gv.ty)?;
                     self.globals.insert(h, GlobalKind::Uniform(gv.ty));
                 }
-                AddressSpace::Storage { .. } => {
+                AddressSpace::Storage { access } => {
                     let b = gv.binding.as_ref().map(|b| b.binding).ok_or("storage without binding")?;
+                    writable.push((b, access.contains(naga::StorageAccess::STORE)));
                     if let Some((elem, stride)) = struct_array_elem(self.m, gv.ty) {
                         // A binding of structs is word-addressed memory: its
                         // elements mix scalar kinds, so no one element type
@@ -554,6 +560,7 @@ impl<'a> Gen<'a> {
             }
         }
         bindings.sort_by_key(|(b, ..)| *b);
+        writable.sort_by_key(|(b, _)| *b);
 
         self.locals = self.declare_locals(self.func, "")?;
 
@@ -668,6 +675,7 @@ impl<'a> Gen<'a> {
             source,
             block_dim: self.block_dim,
             bindings: bindings.iter().map(|(b, ..)| *b).collect(),
+            writable: writable.into_iter().map(|(_, w)| w).collect(),
             uniform_bytes,
         })
     }
@@ -2101,6 +2109,7 @@ fn main(@builtin(local_invocation_id) li: vec3<u32>) {
 "#;
         let k = generate("clamp", SRC).expect("generate");
         assert_eq!(k.bindings, vec![1, 3]);
+        assert_eq!(k.writable, vec![false, true], "only the read_write binding is written");
         assert!(k.source.contains("__b1[__brain_clamp("), "{}", k.source);
         assert!(k.source.contains("__b3[__brain_clamp("), "{}", k.source);
         assert!(k.source.contains("__wg_tile[__brain_clamp("), "{}", k.source);

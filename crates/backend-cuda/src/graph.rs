@@ -248,6 +248,16 @@ pub(crate) struct Resolved {
     pub library: Option<backend_api::LibraryGemm>,
 }
 
+impl Resolved {
+    /// Every allocation the dispatch uses and whether it writes it: the storage
+    /// bindings as the kernel declares them, and the uniform block, which the
+    /// submission writes its parameters into.
+    pub(crate) fn uses(&self) -> impl Iterator<Item = (&Arc<exec::DeviceMem>, bool)> {
+        let writes = &self.compiled.writes;
+        self.bufs.iter().enumerate().map(move |(i, (m, _))| (m, writes.get(i).copied().unwrap_or(true))).chain(self.uniform.iter().map(|u| (u, true)))
+    }
+}
+
 // `func` is an opaque driver handle, valid for as long as `compiled`'s module
 // is loaded (which `compiled` guarantees) and not thread-affine - the context is
 // made current before every call that uses it. Everything else is `Send`. A
@@ -684,7 +694,8 @@ pub(crate) struct Frozen {
     _graph: exec::Graph,
     pub(crate) exec: exec::GraphExec,
     /// Buffers (and their allocator-visible owners) the nodes read or write.
-    pub(crate) touched: Vec<Arc<exec::DeviceMem>>,
+    /// Every allocation the program uses, and whether any of its steps writes it.
+    pub(crate) touched: Vec<(Arc<exec::DeviceMem>, bool)>,
     _uniforms: Vec<exec::DeviceMem>,
     _modules: Vec<Arc<crate::backend::Compiled>>,
     /// Dispatches in the program, for the host-cost counters.
@@ -753,13 +764,13 @@ impl Frozen {
         if let Some((start, _)) = &stamps {
             ctx.record_in_capture(start)?;
         }
-        let mut touched: Vec<Arc<exec::DeviceMem>> = Vec::new();
+        let mut touched: Vec<(Arc<exec::DeviceMem>, bool)> = Vec::new();
         let mut modules: Vec<Arc<crate::backend::Compiled>> = Vec::new();
         let mut dispatches = 0usize;
         for ((clears, steps), idx) in segments.iter().zip(&private) {
             for c in clears {
                 ctx.zero(c)?;
-                touched.push(c.clone());
+                touched.push((c.clone(), true));
             }
             for (s, own) in steps.iter().zip(idx) {
                 let mut args = s.args.clone();
@@ -774,8 +785,7 @@ impl Frozen {
                 // (dynamic shared memory, cluster) is part of the launch: dropping it
                 // runs a kernel that needs more than the static allotment with none.
                 unsafe { ctx.launch_shaped(s.func, (gx, gy, 1), (s.compiled.block_dim, 1, 1), &s.compiled.shape, &args)? };
-                touched.extend(s.bufs.iter().map(|(m, _)| m.clone()));
-                touched.extend(s.uniform.iter().cloned());
+                touched.extend(s.uses().map(|(m, w)| (m.clone(), w)));
                 modules.push(s.compiled.clone());
                 dispatches += 1;
                 if let Some((_, out)) = stamps.as_mut() {
@@ -789,8 +799,13 @@ impl Frozen {
         let exec = ctx.instantiate(&graph)?;
         modules.sort_by_key(|m| Arc::as_ptr(m) as usize);
         modules.dedup_by_key(|m| Arc::as_ptr(m) as usize);
-        touched.sort_by_key(|m| Arc::as_ptr(m) as usize);
-        touched.dedup_by_key(|m| Arc::as_ptr(m) as usize);
+        // One entry per allocation, a write if any step writes it.
+        touched.sort_by_key(|(m, _)| Arc::as_ptr(m) as usize);
+        touched.dedup_by(|(m, w), (keep, keep_w)| {
+            let same = Arc::ptr_eq(m, keep);
+            *keep_w |= same && *w;
+            same
+        });
         Ok((Frozen { _graph: graph, exec, touched, _uniforms: uniforms, _modules: modules, dispatches }, ()))
     }
 }
