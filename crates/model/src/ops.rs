@@ -1785,15 +1785,24 @@ impl Ops {
                     "Ops::matmul: this activation was built with Ops::act_f32, which promises no \
                      quantized weight reads it - build it with Ops::act or Ops::act_kq instead",
                 );
-                let xgs = act
-                    .xgs
-                    .borrow_mut()
-                    .get_or_insert_with(|| {
-                        let xgs = self.gpu.storage((act.xr0 + m) as u64 * (k as u64 / crate::int8::GROUP as u64));
-                        s.push(self.gpu.step_sliced(self.idx[kname::QUANT_GROUP_SUM], &[quant.xq_for(k), &xgs], &[xo, go], &[m, k], m * k / crate::int8::GROUP as u32));
-                        xgs
-                    })
-                    .clone();
+                // A native kernel serving this product sums the activation
+                // groups itself, so the prepass is made only for a kernel that
+                // reads it; the native one gets the scales as a placeholder.
+                let native = self.gpu.native_kernel_for(self.idx[self.matmul_kernel(w, m)], &[m, k, n]).is_some();
+                let (xgs, go) = if native {
+                    (quant.sx.clone(), so)
+                } else {
+                    let xgs = act
+                        .xgs
+                        .borrow_mut()
+                        .get_or_insert_with(|| {
+                            let xgs = self.gpu.storage((act.xr0 + m) as u64 * (k as u64 / crate::int8::GROUP as u64));
+                            s.push(self.gpu.step_sliced(self.idx[kname::QUANT_GROUP_SUM], &[quant.xq_for(k), &xgs], &[xo, go], &[m, k], m * k / crate::int8::GROUP as u32));
+                            xgs
+                        })
+                        .clone();
+                    (xgs, go)
+                };
                 let xgs = &xgs;
                 // `k` (RAW LOGICAL K, not a packed word count) - see the
                 // long comment on the `I8`/`Q4` arm above for why this is

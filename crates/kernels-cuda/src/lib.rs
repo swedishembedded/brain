@@ -919,6 +919,42 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/matmul_q4_gemv.cu"),
     },
     CudaKernel {
+        name: "matmul_kq4_gemv",
+        op: Op::MatMul,
+        weight: Dtype::Q4K,
+        by_name: false,
+        source: ImplSource::Tuned,
+        min_cc: DP4A_MIN_CC,
+        entry: "brain_matmul_kq4_gemv",
+        what: "affine K-quant (Q4_K) skinny-M GEMV (up to 8 rows of x per weight pass); one 32-element group per 8 B vector load, exact int32 group dot and activation sum, two roundings a group",
+        reported: "native:matmul_kq4_gemv",
+        block_dim: 256,
+        // 8 rows of x by 16 weight rows per block.
+        tile: (8, 16),
+        // The double-buffered tile of x the batched rows read (`BrainKqXTile`).
+        shared_bytes: 2 * 8 * 64 * 16,
+        programmatic: true,
+        src: include_str!("../cu/matmul_kq_gemv.cu"),
+    },
+    CudaKernel {
+        name: "matmul_kq8_gemv",
+        op: Op::MatMul,
+        weight: Dtype::Q8K,
+        by_name: false,
+        source: ImplSource::Tuned,
+        min_cc: DP4A_MIN_CC,
+        entry: "brain_matmul_kq8_gemv",
+        what: "affine K-quant (Q5_K) skinny-M GEMV (up to 8 rows of x per weight pass); one 32-element group per 16 B vector load, exact int32 group dot and activation sum, two roundings a group",
+        reported: "native:matmul_kq8_gemv",
+        block_dim: 256,
+        // 8 rows of x by 16 weight rows per block.
+        tile: (8, 16),
+        // The double-buffered tile of x the batched rows read (`BrainKqXTile`).
+        shared_bytes: 2 * 8 * 64 * 16,
+        programmatic: true,
+        src: include_str!("../cu/matmul_kq_gemv.cu"),
+    },
+    CudaKernel {
         name: "matmul_f32_reg",
         // The native twin of `matmul_reg3.wgsl`, redirected to BY NAME by
         // `gpu_core::native_upgrade`; the (MatMul, F32) operator answer stays

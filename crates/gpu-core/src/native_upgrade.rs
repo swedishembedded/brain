@@ -101,6 +101,19 @@ const I8_GEMV_BINDINGS: &[BindKind] = &[
     BindKind::StorageReadWrite,
 ];
 
+/// `matmul_kq_gemv.wgsl`'s bindings: params, `xq`, `wq`, `sx`, `wsm`, `wd`,
+/// `xgs`, `out`.
+const KQ_GEMV_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+];
+
 /// `Params { m, kg, n }`. The kernel needs `K` to be a whole number of 32
 /// element weight-scale groups (`kg % 8 == 0`, the WGSL kernel's own
 /// contract). It serves the whole decode regime the WGSL GEMV does: a block
@@ -115,8 +128,9 @@ fn serves_i8_gemv(p: &[u32]) -> bool {
     (1..=backend_api::select::DECODE_REGIME_MAX_ROWS).contains(&m) && n >= 1 && kg >= 8 && kg % 8 == 0
 }
 
-/// `matmul_q4_gemv`'s `Params { m, k, n }` with the RAW `k`: the int8 GEMV's
-/// decode regime, `K` a whole number of 32-element weight-scale groups.
+/// `matmul_q4_gemv`'s (and `matmul_kq_gemv`'s) `Params { m, k, n }` with the
+/// RAW `k`: the int8 GEMV's decode regime, `K` a whole number of 32-element
+/// weight-scale groups.
 fn serves_q4_gemv(p: &[u32]) -> bool {
     match p {
         [m, k, n, ..] => (1..=backend_api::select::DECODE_REGIME_MAX_ROWS).contains(m) && *n >= 1 && *k >= 32 && k % 32 == 0,
@@ -597,6 +611,27 @@ pub(crate) const ROWS: &[Row] = &[
         serves: serves_q4_gemv,
         blocks: gemm_blocks,
         requires_wgsl_upgrade: true,
+    },
+    // The affine K-quant (Q4_K / Q5_K) decode GEMVs. They round once per
+    // 32-element group where the WGSL tier rounds per quad, so they are held
+    // to the fp32 summation bound against an f64 oracle rather than to the
+    // WGSL tier's bits (`tests/kq_gemv_native.rs`). No WGSL upgrade precedes
+    // them: the WGSL kernel is already the GEMV.
+    Row {
+        slow: "matmul_kq_gemv#CODE_BITS=4",
+        target: Target::Operator { op: Op::MatMul, weight: Dtype::Q4K },
+        bindings: KQ_GEMV_BINDINGS,
+        serves: serves_q4_gemv,
+        blocks: gemm_blocks,
+        requires_wgsl_upgrade: false,
+    },
+    Row {
+        slow: "matmul_kq_gemv#CODE_BITS=8",
+        target: Target::Operator { op: Op::MatMul, weight: Dtype::Q8K },
+        bindings: KQ_GEMV_BINDINGS,
+        serves: serves_q4_gemv,
+        blocks: gemm_blocks,
+        requires_wgsl_upgrade: false,
     },
     // The prefill/DiT GEMM, at every shape the WGSL kernel serves. Its
     // grouped int32 sums are exact and folded in the reference's order with
