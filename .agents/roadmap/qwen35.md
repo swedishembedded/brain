@@ -2736,6 +2736,45 @@ tok/s. Per sequence the attention is 14.8 ms (f32), 6.6 (bf16), 5.0 (int8).
   runs barrier kernels; everything else, and the CPU backend, keeps the triad.
   wgpu/Vulkan backends were not run (this node has only CUDA).
 
+### M31 (DONE): teacher-forced per-token scores on BOTH sides - the served GGUF and the trainer's own forward
+
+A model trained as bf16 and served as Q8_0 (plus a LoRA adapter in a bank) can
+serve a different adapter than the one it trained. Answering that needs one
+quantity from each side over the same records: the log-probability of every
+recorded assistant token and the token the model itself would pick there.
+
+- **Served side.** `Qwen35GgufInstance::teacher_forced_scores` scores a WHOLE
+  record in one chunked prefill (the same `prefill_chunk_stage`, final norm and
+  int8 head the serving path runs), reading the head back eight rows at a time;
+  `Qwen35GgufEngine::score_supervised` keeps the mask's positions and drives the
+  adapter bank exactly as a scheduler admits an adapter (upload quanta bounded,
+  then pin, `slot_of`, and unpin after). The bin is
+  `qwen35_gguf_score <Q8_0.gguf> <records.jsonl> [--adapter FILE]`, one JSONL
+  object per record (`record`, `tokens`, and parallel `positions`/`logprob`/
+  `argmax` arrays); the summary goes to stderr.
+- **In-process side.** `HeadCe::forward_steps_with` reduces each head chunk's
+  argmax before its logits are reused (`ArgmaxOut`, off by default because
+  ordinary training never reads it), `Qwen35::enable_token_argmax`/
+  `batch_token_argmax` expose it, `qwen35::score::score_records` walks records
+  through `TokenDataset::new_examples`/`example_rows` (the trainer's own
+  batching) reading `batch_token_logprobs` and the argmax, and
+  `brain::score_tokens_qwen35` builds the trainer (bf16 frozen base + the
+  adapter's factors read from its card) and scores with no optimizer step.
+- **Records.** One JSONL form for both sides, read by one function
+  (`qwen35::score::read_records`): `{"ids", "mask"}` token records scored as
+  written (what a training run should emit - it may have rendered a record
+  differently from its JSON) or chat records encoded through the checkpoint's
+  own template (`ChatSample::encode`).
+
+Measured: `tests/gguf_score.rs` on a 2-layer random GGUF gives a mean
+|log-probability difference| of 1.9e-4 (worst 5.0e-3) between the one-prefill
+readout and the pre-existing decode-tape reference, with every argmax matching
+where the reference row had a margin; an adapter in the bank moves every scored
+position (mean 0.77, min 0.059), and a base score after it is bitwise the
+base's. `tests/score_readout.rs` on a tiny CPU model shows
+`sum(per-token NLL) / positions` equal to the trainer's own reported loss and
+every argmax equal to `logits_all`'s pick at that position.
+
 ## Not yet done
 
 
