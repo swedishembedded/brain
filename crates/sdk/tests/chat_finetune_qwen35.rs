@@ -21,20 +21,7 @@ use brain::{ChatFineTune, ChatFullFineTune, FineTuneStatus, PreferenceFineTune};
 
 #[path = "chat_fixture/common.rs"]
 mod common;
-use common::{cpu, write_tokenizer, TempDir};
-
-/// The model directory of a `Qwen35Config::tiny` checkpoint (hybrid
-/// Gated-DeltaNet and attention layers, random weights) at the real
-/// vocabulary size, in `model.safetensors` form.
-fn qwen35_chat_model_dir(tag: &str) -> TempDir {
-    let dir = TempDir::new(tag);
-    let cfg = qwen35::config::Qwen35Config { vocab: 151_936, block_size: 128, max_position_embeddings: 128, ..qwen35::config::Qwen35Config::tiny() };
-    let init = qwen35::init::init_weights(&cfg, 11); // seed: any weights serve, the test reads the training, not the model
-    let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg.param_list().into_iter().map(|(name, numel)| (name.clone(), vec![numel as u64], init[&name].clone())).collect();
-    checkpoint::st::save_safetensors(dir.join("model.safetensors").to_str().unwrap(), &tensors, &cfg.to_json(), None).unwrap();
-    write_tokenizer(&dir);
-    dir
-}
+use common::{cpu, qwen35_model_dir as qwen35_chat_model_dir};
 
 fn write_dataset(dir: &Path) -> PathBuf {
     let path = dir.join("train.jsonl");

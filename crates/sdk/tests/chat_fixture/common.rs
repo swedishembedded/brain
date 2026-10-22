@@ -8,6 +8,10 @@
 //! specials, and its template is a minimal ChatML: enough for every stage of
 //! a fine-tune to run for real on the CPU backend.
 
+// Each test binary includes this file and uses the helpers it needs; the rest
+// are for its siblings.
+#![allow(dead_code)]
+
 use std::path::{Path, PathBuf};
 
 /// A temp directory removed when the test ends.
@@ -53,4 +57,30 @@ pub fn write_tokenizer(dir: &Path) {
 
 pub fn cpu() -> brain::Device {
     brain::Device::parse("cpu").unwrap()
+}
+
+/// The model directory of a `Qwen35Config::tiny` checkpoint (hybrid
+/// Gated-DeltaNet and attention layers, random weights) at the real vocabulary
+/// size, in `model.safetensors` form.
+pub fn qwen35_model_dir(tag: &str) -> TempDir {
+    let dir = TempDir::new(tag);
+    let cfg = qwen35::config::Qwen35Config { vocab: 151_936, block_size: 128, max_position_embeddings: 128, ..qwen35::config::Qwen35Config::tiny() };
+    // seed: any weights serve; a test reads a training or a score, never the model's quality.
+    let init = qwen35::init::init_weights(&cfg, 11);
+    let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg.param_list().into_iter().map(|(name, numel)| (name.clone(), vec![numel as u64], init[&name].clone())).collect();
+    checkpoint::st::save_safetensors(dir.join("model.safetensors").to_str().unwrap(), &tensors, &cfg.to_json(), None).unwrap();
+    write_tokenizer(&dir);
+    dir
+}
+
+/// A chat dataset of one-line question/answer pairs, one record per line, the
+/// answer supervised and the question not.
+pub fn write_chat_dataset(dir: &Path, pairs: &[(&str, &str)]) -> PathBuf {
+    let path = dir.join("chat.jsonl");
+    let rows: Vec<String> = pairs
+        .iter()
+        .map(|(u, a)| serde_json::json!({ "messages": [{"role": "user", "content": u, "train": false}, {"role": "assistant", "content": a, "train": true}], "tools": [] }).to_string())
+        .collect();
+    std::fs::write(&path, rows.join("\n")).unwrap();
+    path
 }

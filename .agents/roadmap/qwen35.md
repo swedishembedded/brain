@@ -2773,7 +2773,10 @@ where the reference row had a margin; an adapter in the bank moves every scored
 position (mean 0.77, min 0.059), and a base score after it is bitwise the
 base's. `tests/score_readout.rs` on a tiny CPU model shows
 `sum(per-token NLL) / positions` equal to the trainer's own reported loss and
-every argmax equal to `logits_all`'s pick at that position.
+every argmax equal to `logits_all`'s pick at that position; the SDK's own
+`tests/score_tokens_qwen35.rs` (toy qwen35, CPU) shows the same mean equal to
+the loss `ChatFineTune` reports for those records at the same base tier, and
+the adapter a run wrote loaded back by the readout.
 
 ## Not yet done
 
