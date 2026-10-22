@@ -37,7 +37,7 @@
 // against a word of ones), so a group costs two roundings - `fma(ds, A, acc)`
 // then `fma(-dm, S, acc)` - where the WGSL kernel rounds once per 4-element
 // quad. The two tiers therefore agree to the fp32 summation bound, not
-// bitwise; the gate is `tests/kq_gemv_native.rs`, against an f64 oracle.
+// bitwise; the gate is `tests/kq_native.rs`, against an f64 oracle.
 //
 // No `__restrict__` anywhere, deliberately: brain's device buffers alias by
 // design (a sliced step binds ranges of one allocation).

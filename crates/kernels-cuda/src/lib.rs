@@ -1264,6 +1264,44 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/matmul_i8_dp4a.cu"),
     },
     CudaKernel {
+        name: "matmul_kq4_dp4a",
+        // The int8 GEMM's block over affine K-quant (Q4_K) codes, asked for by
+        // name by `gpu_core::native_upgrade` in place of `matmul_kq_dyn`.
+        op: Op::MatMul,
+        weight: Dtype::Q4K,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: DP4A_MIN_CC,
+        entry: "brain_matmul_kq4_dp4a",
+        what: "affine K-quant (Q4_K) GEMM: the int8 GEMM's 128x128 dp4a block with codes unpacked while staging, exact group sums of the staged activations, ds*A - dm*S folded per group with two fmas",
+        reported: "native:matmul_kq4_dp4a",
+        block_dim: 256,
+        tile: (128, 128),
+        // The int8 tiles plus each column's group mins and each row's group sums.
+        shared_bytes: 2 * 2 * 16 * (128 + 4) * 4 + 3 * 2 * 2 * 128 * 4,
+        programmatic: false,
+        src: include_str!("../cu/matmul_i8_dp4a.cu"),
+    },
+    CudaKernel {
+        name: "matmul_kq8_dp4a",
+        // The int8 GEMM's block over affine K-quant (Q5_K) codes, asked for by
+        // name by `gpu_core::native_upgrade` in place of `matmul_kq_dyn`.
+        op: Op::MatMul,
+        weight: Dtype::Q8K,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: DP4A_MIN_CC,
+        entry: "brain_matmul_kq8_dp4a",
+        what: "affine K-quant (Q5_K) GEMM: the int8 GEMM's 128x128 dp4a block with codes unpacked while staging, exact group sums of the staged activations, ds*A - dm*S folded per group with two fmas",
+        reported: "native:matmul_kq8_dp4a",
+        block_dim: 256,
+        tile: (128, 128),
+        // The int8 tiles plus each column's group mins and each row's group sums.
+        shared_bytes: 2 * 2 * 16 * (128 + 4) * 4 + 3 * 2 * 2 * 128 * 4,
+        programmatic: false,
+        src: include_str!("../cu/matmul_i8_dp4a.cu"),
+    },
+    CudaKernel {
         name: "moe_i8_grouped_mma",
         // The native twin of `moe_i8_grouped.wgsl`, redirected to by
         // `gpu_core::native_upgrade`: the (MoeExpertLinear, I8) answer. The decode

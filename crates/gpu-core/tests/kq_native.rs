@@ -1,18 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The gate for the native affine K-quant decode GEMVs (`kernels_cuda`,
-//! `cu/matmul_kq_gemv.cu`), which `gpu_core::native_upgrade` substitutes for
-//! `matmul_kq_gemv.wgsl` (Q4_K's 4-bit and Q5_K's 8-bit code slots) on a CUDA
-//! device.
+//! The gate for the native affine K-quant kernels (`kernels_cuda`): the
+//! decode GEMVs (`cu/matmul_kq_gemv.cu`) and the prefill GEMMs (the int8
+//! GEMM's block in `cu/matmul_i8_dp4a.cu`), which `gpu_core::native_upgrade`
+//! substitutes for `matmul_kq_gemv.wgsl` and `matmul_kq_dyn.wgsl` (Q4_K's
+//! 4-bit and Q5_K's 8-bit code slots) on a CUDA device.
 //!
 //! Swedish Embedded AB implements native kernels for serving GGUF K-quant
 //! models. If your team needs expertise in 4-bit LLM decode that is both fast
 //! and accountable to an oracle, you can procure our services by sending an
 //! email to info@swedishembedded.com.
 //!
-//! The native kernel sums a 32-element group exactly in integers and rounds
-//! twice per group; the WGSL tier rounds once per 4-element quad. So the claim
+//! The native kernels sum a 32-element group exactly in integers and round
+//! twice per group; the WGSL tiers round differently. So the claim
 //! is accuracy, not bits: against an f64 oracle over the same inputs, every
 //! output is within the fp32 summation bound of its terms, and no worse than
 //! the WGSL tier's own error on the same case. The cases cover what the vector
@@ -23,14 +24,35 @@
 
 use gpu_core::{Dispatch, Gpu};
 
-/// Rows of x the native kernel serves: the decode regime of the WGSL GEMV.
+/// Rows of x the native GEMV serves: the decode regime of the WGSL GEMV.
 const NATIVE_ROWS: u32 = backend_api::select::DECODE_REGIME_MAX_ROWS;
 
+/// Which of the two WGSL kernels a case dispatches.
+#[derive(Clone, Copy)]
+enum Kernel {
+    /// `matmul_kq_gemv`: one workgroup per weight row.
+    Gemv,
+    /// `matmul_kq_dyn`: one workgroup per 128 x 128 output tile.
+    Dyn,
+}
+
+impl Kernel {
+    fn workgroups(self, m: u32, n: u32) -> u32 {
+        match self {
+            Kernel::Gemv => n,
+            Kernel::Dyn => m.div_ceil(128) * n.div_ceil(128),
+        }
+    }
+}
+
 /// The WGSL kernel under its upgraded name and under a name no table knows.
-fn device(bits: u32) -> Gpu {
-    let (name, src) = kernels::template::interned("matmul_kq_gemv", kernels::MATMUL_KQ_GEMV, &[("CODE_BITS", bits)]).expect("the K-quant GEMV template");
-    let alias = if bits == 4 { "kq4_gemv_ref" } else { "kq8_gemv_ref" };
-    gpu_core::testgpu::dev(Box::leak(Box::new([(name, src), (alias, src)])))
+fn device(kernel: Kernel, bits: u32) -> Gpu {
+    let (base, src) = match kernel {
+        Kernel::Gemv => ("matmul_kq_gemv", kernels::MATMUL_KQ_GEMV),
+        Kernel::Dyn => ("matmul_kq_dyn", kernels::MATMUL_KQ_DYN),
+    };
+    let (name, src) = kernels::template::interned(base, src, &[("CODE_BITS", bits)]).expect("the K-quant kernel template");
+    gpu_core::testgpu::dev(Box::leak(Box::new([(name, src), ("kq_reference", src)])))
 }
 
 fn is_cuda(gpu: &Gpu) -> bool {
@@ -101,7 +123,7 @@ impl Case {
 }
 
 /// Both tiers' outputs for `case`: (native, WGSL).
-fn run(gpu: &Gpu, case: &Case) -> (Vec<f32>, Vec<f32>) {
+fn run(gpu: &Gpu, kernel: Kernel, case: &Case) -> (Vec<f32>, Vec<f32>) {
     let as_f32 = |v: &[u32]| v.iter().map(|&w| f32::from_bits(w)).collect::<Vec<_>>();
     let (m, k, n) = (case.m, case.k, case.n);
     let xq = gpu.storage_init("xq", &as_f32(&case.xq));
@@ -118,7 +140,7 @@ fn run(gpu: &Gpu, case: &Case) -> (Vec<f32>, Vec<f32>) {
         .collect();
     let xgs = gpu.storage_init("xgs", &xgs);
     let outs = [gpu.storage((m * n) as u64), gpu.storage((m * n) as u64)];
-    let steps: Vec<_> = (0..2).map(|kind| gpu.dispatch(kind, &[&xq, &wq, &sx, &wsm, &wd, &xgs, &outs[kind]], &[m, k, n], Dispatch::Workgroups(n))).collect();
+    let steps: Vec<_> = (0..2).map(|kind| gpu.dispatch(kind, &[&xq, &wq, &sx, &wsm, &wd, &xgs, &outs[kind]], &[m, k, n], Dispatch::Workgroups(kernel.workgroups(m, n)))).collect();
     gpu.submit(&[], &steps);
     gpu.poll_wait();
     (gpu.read(&outs[0], (m * n) as usize), gpu.read(&outs[1], (m * n) as usize))
@@ -126,9 +148,9 @@ fn run(gpu: &Gpu, case: &Case) -> (Vec<f32>, Vec<f32>) {
 
 /// Native within the fp32 summation bound of the oracle, and no further from
 /// it than the WGSL tier (up to the same bound).
-fn check(gpu: &Gpu, bits: u32, m: u32, k: u32, n: u32, seed: u64) {
+fn check(gpu: &Gpu, kernel: Kernel, bits: u32, m: u32, k: u32, n: u32, seed: u64) {
     let case = Case::new(bits, m, k, n, seed);
-    let (native, wgsl) = run(gpu, &case);
+    let (native, wgsl) = run(gpu, kernel, &case);
     // One rounding per group term and per accumulation step: a group count's
     // worth of f32 epsilons over the terms' magnitude.
     let groups = f64::from(k / 32);
@@ -148,51 +170,65 @@ fn check(gpu: &Gpu, bits: u32, m: u32, k: u32, n: u32, seed: u64) {
 
 #[test]
 fn the_native_kernels_are_offered_exactly_where_they_serve() {
-    for (bits, name) in [(4u32, "matmul_kq4_gemv"), (8, "matmul_kq8_gemv")] {
-        let gpu = device(bits);
+    for (bits, gemv, gemm) in [(4u32, "matmul_kq4_gemv", "matmul_kq4_dp4a"), (8, "matmul_kq8_gemv", "matmul_kq8_dp4a")] {
+        let gpu = device(Kernel::Gemv, bits);
         if !is_cuda(&gpu) {
             assert_eq!(gpu.native_kernel_for(0, &[1, 5120, 1024]), None, "only a CUDA device takes a native kernel");
-            brain_testutil::skip_unavailable("native K-quant GEMV needs a CUDA device with a packed int8 dot");
+            brain_testutil::skip_unavailable("native K-quant kernels need a CUDA device with a packed int8 dot");
             return;
         }
         for m in 1..=NATIVE_ROWS {
-            assert_eq!(gpu.native_kernel_for(0, &[m, 5120, 1024]), Some(name), "bits={bits} m={m}");
+            assert_eq!(gpu.native_kernel_for(0, &[m, 5120, 1024]), Some(gemv), "bits={bits} m={m}");
         }
         assert_eq!(gpu.native_kernel_for(0, &[NATIVE_ROWS + 1, 5120, 1024]), None, "past the decode regime");
         assert_eq!(gpu.native_kernel_for(0, &[1, 5136, 1024]), None, "K not a whole number of groups");
         assert_eq!(gpu.native_kernel_for(1, &[1, 5120, 1024]), None, "the reference alias is not upgraded");
+        let gpu = device(Kernel::Dyn, bits);
+        for m in [1u32, 33, 512, 4096] {
+            assert_eq!(gpu.native_kernel_for(0, &[m, 5120, 1024]), Some(gemm), "bits={bits} m={m}");
+        }
+        assert_eq!(gpu.native_kernel_for(0, &[512, 5136, 1024]), None, "K not a whole number of groups");
     }
 }
 
 #[test]
-fn the_native_gemvs_meet_the_oracle_over_shapes() {
+fn the_native_kernels_meet_the_oracle_over_shapes() {
     for bits in [4u32, 8] {
-        let gpu = device(bits);
+        let gpu = device(Kernel::Gemv, bits);
         if !is_cuda(&gpu) {
-            brain_testutil::skip_unavailable("native K-quant GEMV needs a CUDA device with a packed int8 dot");
+            brain_testutil::skip_unavailable("native K-quant kernels need a CUDA device with a packed int8 dot");
             return;
         }
-        // 32 and 96 are under one stride (96: an odd group count); 544 and
-        // 1056 leave ragged strides; 2624 spans several.
+        // 32 and 96 are under one stride or chunk (96: an odd group count);
+        // 544 and 1056 leave ragged strides and chunks; 2624 spans several.
         for (k, n) in [(32u32, 1u32), (96, 7), (544, 17), (1056, 33), (2624, 16)] {
             for m in [1u32, 2, 3, 5, 8, 9, 17, NATIVE_ROWS] {
-                check(&gpu, bits, m, k, n, u64::from(bits * 1000 + m * 31 + k + n));
+                check(&gpu, Kernel::Gemv, bits, m, k, n, u64::from(bits * 1000 + m * 31 + k + n));
+            }
+        }
+        let gpu = device(Kernel::Dyn, bits);
+        // Partial row and column tiles, one tile, several tiles.
+        for (k, n) in [(32u32, 1u32), (96, 130), (544, 128), (1056, 257)] {
+            for m in [1u32, 33, 128, 129, 300] {
+                check(&gpu, Kernel::Dyn, bits, m, k, n, u64::from(bits * 1000 + m * 31 + k + n));
             }
         }
     }
 }
 
-/// The Qwen3.8-27B decode projections `(K, N)`.
+/// The Qwen3.8-27B projections `(K, N)` at decode and at a prefill round.
 #[test]
 fn the_real_27b_shapes_meet_the_oracle() {
-    let gpu = device(4);
-    if !is_cuda(&gpu) {
-        brain_testutil::skip_unavailable("native K-quant GEMV needs a CUDA device with a packed int8 dot");
+    let gemv = device(Kernel::Gemv, 4);
+    if !is_cuda(&gemv) {
+        brain_testutil::skip_unavailable("native K-quant kernels need a CUDA device with a packed int8 dot");
         return;
     }
+    let gemm = device(Kernel::Dyn, 4);
     for (k, n) in [(5120u32, 48u32), (5120, 1024), (5120, 6144), (6144, 5120), (5120, 10240), (17408, 5120), (5120, 17408)] {
         for m in [1u32, 8] {
-            check(&gpu, 4, m, k, n, u64::from(k + n + m));
+            check(&gemv, Kernel::Gemv, 4, m, k, n, u64::from(k + n + m));
         }
+        check(&gemm, Kernel::Dyn, 4, 256, k, n, u64::from(k + n));
     }
 }

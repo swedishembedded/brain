@@ -101,8 +101,8 @@ const I8_GEMV_BINDINGS: &[BindKind] = &[
     BindKind::StorageReadWrite,
 ];
 
-/// `matmul_kq_gemv.wgsl`'s bindings: params, `xq`, `wq`, `sx`, `wsm`, `wd`,
-/// `xgs`, `out`.
+/// `matmul_kq_gemv.wgsl`'s and `matmul_kq_dyn.wgsl`'s bindings: params, `xq`,
+/// `wq`, `sx`, `wsm`, `wd`, `xgs`, `out`.
 const KQ_GEMV_BINDINGS: &[BindKind] = &[
     BindKind::Uniform,
     BindKind::StorageRead,
@@ -134,6 +134,16 @@ fn serves_i8_gemv(p: &[u32]) -> bool {
 fn serves_q4_gemv(p: &[u32]) -> bool {
     match p {
         [m, k, n, ..] => (1..=backend_api::select::DECODE_REGIME_MAX_ROWS).contains(m) && *n >= 1 && *k >= 32 && k % 32 == 0,
+        _ => false,
+    }
+}
+
+/// `matmul_kq_dyn`'s `Params { m, k, n }` with the RAW `k`: any non-empty
+/// output whose `K` is a whole number of 32-element groups, inside the
+/// kernel's 32-bit row arithmetic.
+fn serves_kq_dyn(p: &[u32]) -> bool {
+    match p {
+        [m, k, n] => *m >= 1 && *n >= 1 && *k >= 32 && k % 32 == 0 && u64::from(*m) * u64::from(*n) <= u64::from(u32::MAX),
         _ => false,
     }
 }
@@ -615,7 +625,7 @@ pub(crate) const ROWS: &[Row] = &[
     // The affine K-quant (Q4_K / Q5_K) decode GEMVs. They round once per
     // 32-element group where the WGSL tier rounds per quad, so they are held
     // to the fp32 summation bound against an f64 oracle rather than to the
-    // WGSL tier's bits (`tests/kq_gemv_native.rs`). No WGSL upgrade precedes
+    // WGSL tier's bits (`tests/kq_native.rs`). No WGSL upgrade precedes
     // them: the WGSL kernel is already the GEMV.
     Row {
         slow: "matmul_kq_gemv#CODE_BITS=4",
@@ -642,6 +652,25 @@ pub(crate) const ROWS: &[Row] = &[
         target: Target::Named("matmul_i8_dp4a"),
         bindings: I8_GEMV_BINDINGS,
         serves: serves_i8_dyn,
+        blocks: gemm_blocks,
+        requires_wgsl_upgrade: false,
+    },
+    // The affine K-quant prefill GEMMs: the int8 GEMM's block over K-quant
+    // codes, held to the fp32 summation bound against an f64 oracle rather
+    // than to the WGSL tier's bits (`tests/kq_native.rs`).
+    Row {
+        slow: "matmul_kq_dyn#CODE_BITS=4",
+        target: Target::Named("matmul_kq4_dp4a"),
+        bindings: KQ_GEMV_BINDINGS,
+        serves: serves_kq_dyn,
+        blocks: gemm_blocks,
+        requires_wgsl_upgrade: false,
+    },
+    Row {
+        slow: "matmul_kq_dyn#CODE_BITS=8",
+        target: Target::Named("matmul_kq8_dp4a"),
+        bindings: KQ_GEMV_BINDINGS,
+        serves: serves_kq_dyn,
         blocks: gemm_blocks,
         requires_wgsl_upgrade: false,
     },
