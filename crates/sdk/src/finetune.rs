@@ -1294,6 +1294,230 @@ pub fn score_tokens_qwen35(base: &str, adapter: Option<&Path>, records: &Path, t
     })
 }
 
+/// The held-out split of a chat dataset, written as the ids and masks the
+/// trainer encodes, one JSONL line per record.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HeldOutRecords {
+    /// The records file written (`{"ids":[...],"mask":[...]}` per line).
+    pub out: PathBuf,
+    /// The manifest beside it: the dataset's digest, the rule, and the counts.
+    pub manifest: PathBuf,
+    /// Raw dataset records the rule held out (before a record is split into one
+    /// example per supervised answer).
+    pub held_out: usize,
+    /// Lines written: the examples the trainer would encode for them.
+    pub emitted: usize,
+    /// Tokens and supervised positions in all the emitted examples.
+    pub tokens: usize,
+    pub positions: usize,
+}
+
+/// The fractions a run's held-out split is made by: a tenth of the examinable
+/// records, whole groups, grown to eight groups within a quarter - the rule
+/// `split_dataset_file` applies before a run carves its monitoring set, and so
+/// the split whose positions a run reports as its held-out score.
+const HELD_OUT_SHARE: f64 = 0.1;
+const HELD_OUT_MIN_GROUPS: usize = 8;
+const HELD_OUT_MOST: f64 = 0.25;
+/// The fewest records the rule splits at all (one to train on, one to hold out).
+const SPLIT_MIN_RECORDS: usize = 2;
+
+/// What one dataset record says about where it belongs (see [`held_out_flags`]).
+struct Membership {
+    /// `metadata.group`: the source text records share. `None` is its own.
+    group: Option<String>,
+    /// `metadata.task` or a non-empty `metadata.experiences`: it has a question
+    /// a model can be examined on. One that has not follows its group.
+    examinable: bool,
+    /// `metadata.split`: a side the producer fixed, which no rule moves.
+    side: Option<FixedSide>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FixedSide {
+    Train,
+    HeldOut,
+}
+
+impl Membership {
+    fn of(record: &str) -> Membership {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(record) else {
+            return Membership { group: None, examinable: true, side: None };
+        };
+        let metadata = &value["metadata"];
+        Membership {
+            group: metadata["group"].as_str().map(str::to_string),
+            examinable: metadata["task"].is_string() || metadata["experiences"].as_array().is_some_and(|e| !e.is_empty()),
+            side: match metadata["split"].as_str() {
+                Some("train") => Some(FixedSide::Train),
+                Some("held_out") => Some(FixedSide::HeldOut),
+                _ => None,
+            },
+        }
+    }
+}
+
+/// Which records of `records` a run holds out: `None` when there are too few
+/// records to split.
+///
+/// The rule is the one a training run applies before it carves its monitoring
+/// set: whole groups only (a group divided between training and scoring would
+/// train on what it is later judged by), a tenth of the examinable records or
+/// one whole group at least, grown to [`HELD_OUT_MIN_GROUPS`] groups while the
+/// set stays within [`HELD_OUT_MOST`] of them - walked from the LAST record
+/// backwards, so the split is a pure function of the file, with no seed and no
+/// clock in it. A record whose producer fixed its side stays there, and a
+/// record sharing its group follows it.
+fn held_out_flags(records: &[String]) -> Option<Vec<bool>> {
+    if records.len() < SPLIT_MIN_RECORDS {
+        return None;
+    }
+    let memberships: Vec<Membership> = records.iter().map(|r| Membership::of(r)).collect();
+    let mut fixed: std::collections::HashMap<&str, FixedSide> = std::collections::HashMap::new();
+    for m in &memberships {
+        if let (Some(group), Some(side)) = (m.group.as_deref(), m.side) {
+            let entry = fixed.entry(group).or_insert(side);
+            if side == FixedSide::Train {
+                *entry = FixedSide::Train;
+            }
+        }
+    }
+    let followed = |m: &Membership| m.group.as_deref().and_then(|g| fixed.get(g)).copied();
+    let free: Vec<usize> = (0..memberships.len()).filter(|&n| memberships[n].side.is_none() && followed(&memberships[n]).is_none()).collect();
+    let mut held: Vec<bool> = memberships.iter().map(|m| m.side.or_else(|| followed(m)) == Some(FixedSide::HeldOut)).collect();
+    if free.len() < SPLIT_MIN_RECORDS {
+        return Some(held);
+    }
+    let loose: Vec<&Membership> = free.iter().map(|&n| &memberships[n]).collect();
+    for (&n, chosen) in free.iter().zip(choose_held_out(&loose)) {
+        held[n] = chosen;
+    }
+    Some(held)
+}
+
+/// Which of `memberships` (no side fixed) the held-out rule takes out.
+fn choose_held_out(memberships: &[&Membership]) -> Vec<bool> {
+    let keys: Vec<String> = memberships.iter().enumerate().map(|(n, m)| m.group.clone().unwrap_or_else(|| format!("\u{0}sample-{n}"))).collect();
+    // The units and the counts are the examinable records'.
+    let units: Vec<usize> = (0..memberships.len()).filter(|&n| memberships[n].examinable).collect();
+    let mut sizes: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for &n in &units {
+        *sizes.entry(keys[n].as_str()).or_default() += 1;
+    }
+    let of_units = |share: f64| (units.len() as f64 * share).floor() as usize;
+    let wanted = of_units(HELD_OUT_SHARE).max(1);
+    let half = units.len() / 2;
+    let most = of_units(HELD_OUT_MOST);
+    let mut held: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut count = 0;
+    for &n in units.iter().rev() {
+        if count >= wanted && held.len() >= HELD_OUT_MIN_GROUPS {
+            break;
+        }
+        let key = keys[n].as_str();
+        if held.contains(key) {
+            continue;
+        }
+        let size = sizes[key];
+        let for_the_tenth = count < wanted && count + size <= half;
+        let for_the_groups = held.len() < HELD_OUT_MIN_GROUPS && count + size <= most;
+        if for_the_tenth || for_the_groups {
+            held.insert(key);
+            count += size;
+        }
+    }
+    keys.iter().map(|key| held.contains(key.as_str())).collect()
+}
+
+/// The held-out split of the chat dataset at `dataset`, written as the ids and
+/// masks the trainer encodes (`{"ids":[...],"mask":[...]}` per line, in dataset
+/// order) to `out`, with a manifest naming the dataset, the rule and the counts
+/// beside it.
+///
+/// This is the set a run reports as its held-out score: the records the rule
+/// holds out whole, read exactly as `ChatFineTune` reads them for that run
+/// (`.thinking(thinking)` decides whether a supervised answer follows the
+/// model's no-think block, and a record with several supervised answers - a tool
+/// trajectory - becomes one example per answer, as training encodes it). The
+/// ids and masks are therefore the ones the evidence was measured on, not a
+/// re-rendering of the chat JSON, and the same file scores the served and the
+/// in-process side of a train-serve comparison.
+///
+/// The split is deterministic: the rule reads the dataset's `metadata.group`,
+/// `metadata.task`/`metadata.experiences` and `metadata.split` in file order,
+/// with no seed and no clock, so the same dataset emits the same bytes.
+pub fn emit_held_out_records(base: &str, dataset: &Path, out: &Path, thinking: bool, models_dir: Option<&Path>) -> Result<HeldOutRecords> {
+    let store_root = loader::model_dir::resolve(models_dir.and_then(|d| d.to_str()));
+    let (_weights, model_dir, _) = loader::model_dir::resolve_base(base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
+    let (tok, tmpl) = tokenizer_and_template(&model_dir)?;
+    let text = std::fs::read_to_string(dataset).map_err(|e| Error::Backend(format!("{}: {e}", dataset.display())))?;
+    let raw: Vec<String> = text.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect();
+    let flags = held_out_flags(&raw).ok_or_else(|| Error::Backend(format!("{}: holds {} record(s); a split needs at least {SPLIT_MIN_RECORDS}", dataset.display(), raw.len())))?;
+    let held: Vec<&String> = raw.iter().zip(&flags).filter(|(_, &h)| h).map(|(r, _)| r).collect();
+    if held.is_empty() {
+        return Err(Error::Backend(format!(
+            "{}: no whole group could be held out ({} record(s), {} group(s)): dividing a group would train on what a score measures",
+            dataset.display(),
+            raw.len(),
+            raw.iter().map(|r| Membership::of(r).group).collect::<std::collections::BTreeSet<_>>().len()
+        )));
+    }
+    let held_groups: std::collections::BTreeSet<Option<String>> = held.iter().map(|r| Membership::of(r).group).collect();
+    let kept_groups: std::collections::BTreeSet<Option<String>> = raw.iter().zip(&flags).filter(|(_, &h)| !h).map(|(r, _)| Membership::of(r).group).collect();
+    // The trainer reads its records from a file; so does this, through the SAME
+    // reader, so the rendering (per-answer examples, the no-think block) cannot
+    // differ from the run's.
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let tmp = std::env::temp_dir().join(format!("brain-held-out-{}-{}.jsonl", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    std::fs::write(&tmp, held.iter().map(|r| r.as_str()).collect::<Vec<_>>().join("\n")).map_err(|e| Error::Backend(format!("{}: {e}", tmp.display())))?;
+    let no_think = if thinking { None } else { tmpl.no_think_block() };
+    let render = data::chat::RenderOpts { keep_reasoning: no_think.is_some() };
+    let asked = Asked { tok: &tok, tmpl: &tmpl, no_think: no_think.as_deref(), render, pack: false };
+    let samples = asked.read(&tmp);
+    std::fs::remove_file(&tmp).ok();
+    let samples = samples?;
+    let (mut tokens, mut positions, mut lines) = (0usize, 0usize, String::new());
+    for (at, sample) in samples.iter().enumerate() {
+        let (ids, mask) = sample.encode_with(&tok, &tmpl, render).map_err(|e| Error::Backend(format!("{}: held-out example {} cannot be encoded: {e}", dataset.display(), at + 1)))?;
+        let supervised = mask.iter().enumerate().skip(1).filter(|(_, &m)| m).count();
+        if supervised == 0 {
+            return Err(Error::Backend(format!("{}: held-out example {} encodes to {} token(s) with no supervised position, so it would score nothing", dataset.display(), at + 1, ids.len())));
+        }
+        tokens += ids.len();
+        positions += supervised;
+        let ids_json: Vec<String> = ids.iter().map(u32::to_string).collect();
+        let mask_json: Vec<&str> = mask.iter().map(|&m| if m { "true" } else { "false" }).collect();
+        lines.push_str(&format!("{{\"ids\":[{}],\"mask\":[{}]}}\n", ids_json.join(","), mask_json.join(",")));
+    }
+    if let Some(dir) = out.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir).map_err(|e| Error::Backend(format!("{}: {e}", dir.display())))?;
+    }
+    std::fs::write(out, &lines).map_err(|e| Error::Backend(format!("{}: {e}", out.display())))?;
+    let manifest = out.with_extension("manifest.json");
+    let record = serde_json::json!({
+        "emitter": "brain::emit_held_out_records",
+        "code_revision": format!("brain {}", env!("CARGO_PKG_VERSION")),
+        "dataset": { "path": dataset.display().to_string(), "sha256": digest(dataset)?, "records": raw.len() },
+        "rule": {
+            "by": "metadata.group, whole groups only",
+            "share": HELD_OUT_SHARE,
+            "min_groups": HELD_OUT_MIN_GROUPS,
+            "most": HELD_OUT_MOST,
+            "min_records": SPLIT_MIN_RECORDS,
+            "walk": "last record backwards, no seed",
+        },
+        "held_out": {
+            "records": held.len(),
+            "groups": held_groups.len(),
+            "train_groups": kept_groups.len(),
+            "group_names": held_groups.iter().map(|g| g.clone().unwrap_or_else(|| "(ungrouped)".to_string())).collect::<Vec<_>>(),
+        },
+        "emitted": { "records": samples.len(), "tokens": tokens, "positions": positions, "thinking": thinking, "out": out.display().to_string() },
+    });
+    std::fs::write(&manifest, serde_json::to_vec_pretty(&record).map_err(|e| Error::Backend(e.to_string()))?).map_err(|e| Error::Backend(format!("{}: {e}", manifest.display())))?;
+    Ok(HeldOutRecords { out: out.to_path_buf(), manifest, held_out: held.len(), emitted: samples.len(), tokens, positions })
+}
+
 /// The LoRA rank and alpha of a run, and the digest of the adapter it
 /// continues: a fresh adapter is rank 8 (or `rank`) at alpha `2 * rank`; a
 /// continued one is its own rank - a different requested rank is refused -

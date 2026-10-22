@@ -243,6 +243,16 @@ served half is `qwen35_gguf_score <Q8_0.gguf> <records.jsonl>` in
 ids from the served engine (optionally with an adapter in its bank) as one
 JSONL object per record.
 
+`brain::emit_held_out_records` produces the records both sides score: the
+held-out split of a chat dataset (whole `metadata.group`s, the run's own 10%
+rule, deterministic in file order), written as the ids and mask the trainer
+encodes - one `{"ids":[...],"mask":[...]}` line per record - with a manifest
+beside it naming the dataset's digest, the rule and the counts. The split is
+the one a fine-tune reports its held-out score on, so the emitted positions
+match that score's own count; the served and in-process sides of a
+train-serve comparison then score exactly the same tokens.
+`crates/sdk/examples/emit_held_out_records.rs` is the command-line form.
+
 The three fine-tuners (`ChatFineTune`, `ChatFullFineTune`,
 `PreferenceFineTune`) take `.arch("qwen3")` or `.arch("qwen35")`, the
 architecture's `brain_arch` id. `ChatFineTune` on `qwen35`, the Qwen3.8-27B
@@ -567,7 +577,7 @@ Name the surfaces you use and you get their dependencies and nothing else:
 | `creature` | `Creature`, `View` - a connectome running a body, and a window onto it |
 | `forecast` | `ForecastPipeline` - time-series forecasting |
 | `text` | `TextGenerationPipeline` - text generation, from a local checkpoint path or a hub id; `ChatPipeline` - multi-turn chat with tool calling, streaming and cancellation; also the Qwen3/LFM2.5-Encoder backbones of `EmbeddingPipeline` (32768-token context), `EmbeddingTrainer` (contrastive fine-tuning over frozen embeddings), and `EncoderFineTuner` (full-encoder contrastive fine-tuning, LFM2 only) |
-| `study` | `ChatFineTune`, `score_chat`, `score_tokens`, `score_tokens_qwen35` (per-position log-probability and argmax from the 27B trainer's own forward, for train-serve agreement) - LoRA fine-tuning of a Qwen3 chat model and its held-out score; `ChatFullFineTune`, `merge_adapter` - full-parameter fine-tuning into a checkpoint directory, and folding an adapter into the weights; `PreferenceFineTune`, `score_preference` - its DPO counterpart; `DocumentStudy` - teaching a model documents behind a gate; `promote` - the promotion gate and its paired sign test (`promote::stats::sign_test`) for deciding whether a trained model replaces the one before |
+| `study` | `ChatFineTune`, `score_chat`, `score_tokens`, `score_tokens_qwen35` (per-position log-probability and argmax from the 27B trainer's own forward, for train-serve agreement), `emit_held_out_records` (a dataset's held-out split as the ids and masks the trainer encodes) - LoRA fine-tuning of a Qwen3 chat model and its held-out score; `ChatFullFineTune`, `merge_adapter` - full-parameter fine-tuning into a checkpoint directory, and folding an adapter into the weights; `PreferenceFineTune`, `score_preference` - its DPO counterpart; `DocumentStudy` - teaching a model documents behind a gate; `promote` - the promotion gate and its paired sign test (`promote::stats::sign_test`) for deciding whether a trained model replaces the one before |
 | `vision` | `EmbeddingPipeline` - CLIP text embedding (named for CLIP's registered domain, not the capability) |
 | `audio` | `ResidentTts` - Qwen3-TTS loaded once for many short pieces, on the device when there is one (the host otherwise), with chunks handed out as the utterance grows (the first after 8 frames, 0.64 s of speech) and cancellation; `TranscribePipeline` - speech-to-text (qwen3-asr, offline; or nemotron-asr, one-shot): the checkpoint asked for selects the model; `TranscribePipeline::features` - Qwen3-ASR's encoder features of a clip of any length; with `study`, `SpeechIngress` (teach a language model to listen by training a projector alone, the model and its adapter frozen), `SpeechProjector` (the trained projector on the host) and `ChatPipeline::generate_with_rows` (answer a prompt in which a run of positions is embedding rows) | <!-- perf-number: arithmetic from the audio frame rate (8 frames), not a timing result -->
 | `full` | every surface; this is the default |

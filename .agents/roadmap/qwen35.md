@@ -2778,6 +2778,20 @@ every argmax equal to `logits_all`'s pick at that position; the SDK's own
 the loss `ChatFineTune` reports for those records at the same base tier, and
 the adapter a run wrote loaded back by the readout.
 
+The records themselves come from `brain::emit_held_out_records`: a chat
+dataset's held-out split (whole `metadata.group`s, a tenth grown to eight
+groups within a quarter, walked from the last record backwards - no seed, so
+the same dataset emits the same bytes), written as `{"ids","mask"}` lines from
+the ids and masks `ChatSample::encode` gives the run's own reading of those
+records (per-answer examples, the no-think block), with a manifest naming the
+dataset digest, the rule and the counts. Measured on the CE8-T dataset
+(132 records, `sha256:bc179016...`): 33 held-out records in 5 whole families
+become 354 examples, 2,596,119 tokens and **68,407 supervised positions** -
+exactly the `base_score.positions` the training run reported, which is what
+makes the emitted set the one the evidence was measured on.
+`crates/sdk/examples/score_tokens_qwen35.rs` is the in-process side's
+command-line form, with the served bin's own JSONL shape.
+
 ## Not yet done
 
 
