@@ -13,6 +13,7 @@ path = "src/lib.rs"
 brain-arch.workspace = true
 brain-backend-cpu.workspace = true
 brain-checkpoint.workspace = true
+brain-gpu-core.workspace = true
 brain-model.workspace = true
 half.workspace = true
 serde_json.workspace = true

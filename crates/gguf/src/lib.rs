@@ -51,6 +51,7 @@ pub mod kquant;
 pub mod kv;
 pub mod leaf;
 pub mod route;
+pub mod upload;
 
 pub use gdn_order::{GdnFixSource, GdnHeadOrder, GdnLeaf};
 pub use import::{ImportStats, Mapped};
@@ -59,3 +60,4 @@ pub use kquant::{try_kq_rect, KqLayout, KqRect};
 pub use kv::{architecture, ArchKv};
 pub use leaf::{role, Role};
 pub use route::{route, route_path, Route};
+pub use upload::{held_tier, held_tier_of, upload_weight};
