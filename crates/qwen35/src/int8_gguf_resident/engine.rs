@@ -347,6 +347,9 @@ impl Qwen35GgufEngine {
         if ids.len() != mask.len() {
             return Err(format!("{MODEL}: a record has {} tokens and {} mask entries", ids.len(), mask.len()));
         }
+        // The scoring prefill resets the instance's KV rows and recurrent state,
+        // so no cached prompt describes what the cache says it does any more.
+        self.clear_prefix_cache();
         let slot = match adapter {
             None => LORA_SLOT_NONE,
             Some(id) => {
@@ -360,6 +363,13 @@ impl Qwen35GgufEngine {
             self.purge_namespace(purged);
         }
         Ok(scored?.into_iter().filter(|s| mask[s.position as usize]).collect())
+    }
+
+    /// Drop every cached prompt and give its retained block back to the allocator.
+    fn clear_prefix_cache(&mut self) {
+        while let Some(table) = self.cache.evict_lru() {
+            self.release_retired([table]);
+        }
     }
 
     /// Drive a registered adapter's upload to completion and pin it for one call.

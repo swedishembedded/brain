@@ -25,7 +25,8 @@ use model::adapter::bank::{AdapterBankRequest, AdapterTargets, VerifiedAdapter};
 use model::adapter::sites::LoraSites;
 use model::lora::device_adapter::{AdapterSite, DeviceAdapter};
 use model::ops::TierPolicy;
-use model::serve::AdapterId;
+use model::paged::BlockTable;
+use model::serve::{AdapterId, PagedDecoder};
 use qwen35::int8_gguf_resident::{budgeted_gpus, Qwen35GgufEngine, Qwen35GgufResident};
 
 const CAP: u32 = 256;
@@ -36,7 +37,7 @@ fn engine() -> Qwen35GgufEngine {
     let devices = budgeted_gpus(&gpu_core::devices::ambient_compute_set().gpus, 2 << 30);
     let device = devices.first().expect("this check needs a GPU").0;
     let bank = AdapterBankRequest { slots: 2, rank_cap: 4, targets: AdapterTargets::ALL, max_registered: 4 };
-    let resident = Qwen35GgufResident::new(path.clone(), devices, CAP, TierPolicy::uniform(Dtype::I8)).with_adapter_bank(bank);
+    let resident = Qwen35GgufResident::new(path.clone(), devices, CAP, TierPolicy::uniform(Dtype::I8)).with_prefix_slots(4).with_adapter_bank(bank);
     let (engine, ..) = resident.activate_engine(&[device]).expect("the tiny GGUF loads");
     std::fs::remove_file(path).ok();
     engine
@@ -129,4 +130,25 @@ fn load_adapter(e: &mut Qwen35GgufEngine) -> AdapterId {
     e.load_adapter(VerifiedAdapter { label: "score-adapter".to_string(), digest: "sha256:score".to_string(), adapter }).expect("the adapter fits the tiny GGUF's sites")
 }
 
-gpu_core::card_tests!(a_score_is_the_log_softmax_of_the_served_logits, an_adapter_slot_scores_the_whole_record_under_the_adapter);
+/// SPEC: a scoring pass resets the instance's KV rows and recurrent state, so
+/// the prompts the engine had cached are dropped rather than resumed from rows
+/// scoring has rewritten since.
+fn scoring_drops_the_prompts_the_engine_had_cached() {
+    let mut engine = engine();
+    // A prompt long enough to leave a checkpoint behind (a whole 64-token chunk,
+    // 16 tokens short of its end).
+    let prompt: Vec<u32> = (0..152u32).map(|i| 3 + (i * 7 + 1) % 26).collect();
+    let mut table = BlockTable::new();
+    engine.prefill(&mut table, &prompt);
+    engine.release_table(&mut table);
+    assert_eq!(engine.prefix_stats().2, 1, "the long prompt left a cached checkpoint");
+    let (ids, mask) = record();
+    engine.score_supervised(&ids, &mask, None).expect("the record scores");
+    assert_eq!(engine.prefix_stats().2, 0, "scoring dropped the cached prompt");
+}
+
+gpu_core::card_tests!(
+    a_score_is_the_log_softmax_of_the_served_logits,
+    an_adapter_slot_scores_the_whole_record_under_the_adapter,
+    scoring_drops_the_prompts_the_engine_had_cached
+);
