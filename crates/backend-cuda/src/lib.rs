@@ -67,3 +67,29 @@ pub fn enumerate_physical_gpus() -> Result<Vec<backend_api::GpuIdentity>, String
     let d = driver::driver().map_err(|e| e.to_string())?;
     Ok(d.devices()?.iter().map(|dev| dev.identity()).collect())
 }
+
+/// A card the CUDA backend can run on.
+#[derive(Clone, Debug)]
+pub struct UsableGpu {
+    pub identity: backend_api::GpuIdentity,
+    /// `(major, minor)`, as the driver reports it.
+    pub compute_capability: (u32, u32),
+}
+
+/// The cards the CUDA backend can run on: the driver enumerates them AND
+/// kernels can be had for them - NVRTC to compile, or an ahead-of-time store to
+/// load. `Err` says which is missing, the ordinary answer on a box without the
+/// NVIDIA driver or toolkit.
+pub fn usable_gpus() -> Result<Vec<UsableGpu>, String> {
+    let d = driver::driver().map_err(|e| e.to_string())?;
+    let cards: Vec<_> = d.devices()?.iter().map(|dev| UsableGpu { identity: dev.identity(), compute_capability: (dev.cc_major, dev.cc_minor) }).collect();
+    if cards.is_empty() {
+        return Err("the CUDA driver exposes no device".into());
+    }
+    let aot = aot::global().ok().flatten().is_some_and(|store| !store.entries().is_empty());
+    match nvrtc::version() {
+        Ok(_) => Ok(cards),
+        Err(_) if aot => Ok(cards),
+        Err(e) => Err(format!("no NVRTC to compile kernels and no ahead-of-time kernel store ({e})")),
+    }
+}

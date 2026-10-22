@@ -21,6 +21,7 @@ fn short_uuid(u: &Option<[u8; 16]>) -> String {
 /// Which backends can bind this card, verified against each backend's own
 /// enumeration by identity (never by position).
 fn backends_seeing(
+    index: u32,
     id: &gpu_core::devices::GpuIdentity,
     wgpu_ids: &[gpu_core::devices::GpuIdentity],
 ) -> String {
@@ -30,6 +31,10 @@ fn backends_seeing(
     }
     if wgpu_ids.iter().any(|w| w.same_device(id)) {
         seen.push("wgpu");
+    }
+    let hw = gpu_core::defaults::Hardware::detected();
+    if hw.cuda_unusable.is_none() && hw.cards.iter().any(|c| c.index == index && c.compute_capability.is_some()) {
+        seen.push("cuda");
     }
     if seen.is_empty() { "-".into() } else { seen.join("+") }
 }
@@ -56,7 +61,7 @@ pub fn run_devices(_args: &[String]) {
             id.pci_bus.as_deref().unwrap_or("-"),
             short_uuid(&id.uuid),
             id.vram_bytes as f64 / (1u64 << 30) as f64,
-            backends_seeing(id, &wgpu_ids),
+            backends_seeing(d.index, id, &wgpu_ids),
         );
     }
     match gpu_core::devices::ambient_gpu() {
@@ -77,6 +82,11 @@ pub fn run_devices(_args: &[String]) {
             let d = gpu_core::devices::selected_device().unwrap_or(&devs[0]);
             println!("ambient selection: none pinned - Gpu::new lands on gpu{} ({})", d.index, d.identity.name);
         }
+    }
+    let (backend, why) = gpu_core::defaults::candidates(gpu_core::defaults::BACKEND, gpu_core::defaults::Hardware::detected());
+    println!("default backend: {} ({why}; --backend overrides)", backend[0].name());
+    if let Some(why) = &gpu_core::defaults::Hardware::detected().cuda_unusable {
+        println!("cuda: not usable here - {why}");
     }
     print_npus();
 }

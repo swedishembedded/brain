@@ -277,6 +277,11 @@ pub mod scratch;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod lane;
 
+/// Defaults chosen from the hardware: ranked candidates per setting, the first
+/// that fits the machine wins.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod defaults;
+
 /// Per-iteration device objects that reclaim their own memory - the one
 /// correct shape for a loop that streams a layer at a time. See the module
 /// doc for why polling without dropping first is the trap it removes.

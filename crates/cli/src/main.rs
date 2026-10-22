@@ -121,9 +121,12 @@ boots), shared by --device gpuN, shard placement and residency budgets.
 the ambient selection resolves to.
 
 --backend selects HOW THAT HARDWARE IS DRIVEN - a separate axis from --device,
-which picks the hardware itself. Omit it for wgpu.
+which picks the hardware itself. Omitted, it is chosen from the hardware:
+cuda where every card is NVIDIA's and CUDA can run (driver plus NVRTC or the
+ahead-of-time kernels), wgpu on any other GPU, cpu without one. `brain devices`
+prints the choice and why.
 
-  wgpu      portable WebGPU/wgpu path (default)
+  wgpu      portable WebGPU/wgpu path
   vulkan    native Vulkan compute (ash, WGSL -> SPIR-V)
   cuda      native CUDA driver API; kernels compile through NVRTC on first
             dispatch, so it needs the CUDA toolkit's NVRTC beside the driver
@@ -563,7 +566,8 @@ Or drive everything via the Makefile:  make gpt/calculator/data gpt/calculator/t
 /// * `--device` (`BRAIN_DEVICE`) - **which hardware** is schedulable:
 ///   `cpu | gpu | npu | gpu0 | cpu0-7 | gpu1,cpu0-3`, unions of those.
 /// * `--backend` - **how that hardware is driven**:
-///   `wgpu` (default) `| vulkan | cuda | cpu`.
+///   `wgpu | vulkan | cuda | cpu`, chosen from the hardware when omitted
+///   (`gpu_core::defaults::BACKEND`).
 ///
 /// Two axes, and only the first one picks hardware. `--backend` writes the
 /// `backend` field the resolved `ComputeSet` has always carried, leaving the

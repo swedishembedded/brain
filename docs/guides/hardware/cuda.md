@@ -92,7 +92,7 @@ conflicts with a few of its math headers; the installer patches them, so
 | `--backend cuda` | drive the selected GPUs with CUDA; fails by name if it cannot, never falls back |
 | `BRAIN_BACKEND=cuda` | the same, for a process with no CLI (an embedding application, an older test binary); the flag wins |
 | `cargo test ... -- --device gpu1 --backend cuda` | a native-kernel gate (`gpu_core::card_tests!`): the card and backend are its arguments, and without `--device` it opens no card |
-| nothing | wgpu where Vulkan or wgpu sees the GPU; **CUDA where CUDA is the only API that does** (a driver-only machine); the CPU without a GPU |
+| nothing | **CUDA where every card is NVIDIA's and CUDA can run** (the driver plus NVRTC or the ahead-of-time kernels); wgpu on any other GPU; the CPU without a GPU. `brain devices` prints the choice and, when CUDA cannot run, why |
 
 `--device gpu0` still says *which* card; the backend says *how* it is driven.
 

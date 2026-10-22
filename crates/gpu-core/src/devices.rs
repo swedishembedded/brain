@@ -911,9 +911,9 @@ pub struct Inventory {
     pub gpus: u32,
     pub cpu_cores: usize,
     pub npus: u32,
-    /// The backend that drives a GPU when the request names none: wgpu where
-    /// Vulkan or wgpu enumerates the cards, CUDA where CUDA is the only API
-    /// that does.
+    /// The backend that drives a GPU when the request names none: the first
+    /// of [`crate::defaults::BACKEND`] that holds on this machine (CUDA where
+    /// every card can run it, the portable backend otherwise).
     pub gpu_backend: Backend,
 }
 
@@ -928,7 +928,7 @@ impl Inventory {
             gpus: crate::visible_gpu_count() as u32,
             cpu_cores: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
             npus: npu_count(),
-            gpu_backend: if registry().source() == "cuda" { Backend::Cuda } else { Backend::Wgpu },
+            gpu_backend: crate::defaults::candidates(crate::defaults::BACKEND, crate::defaults::Hardware::detected()).0[0],
         }
     }
 }
