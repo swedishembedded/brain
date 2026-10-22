@@ -57,6 +57,11 @@
 //! adapter an uninterrupted run would have produced. A state from a run with
 //! different data, options or starting point is refused, never continued.
 
+/// One position's teacher-forced readout, re-exported from the qwen35 model
+/// crate so both scoring sides of a train-serve agreement check report the same
+/// type.
+pub use qwen35::score::TokenScore;
+
 use std::path::{Path, PathBuf};
 
 use data::chat::ChatSample;
@@ -76,6 +81,11 @@ const RECORD_FILE: &str = "training.json";
 /// Training rows are at least this long, so a tiny dataset does not train on
 /// a degenerate row.
 const MIN_BLOCK: u32 = 64;
+
+/// The learning rate a scoring pass's [`model::FitOpts`] carries. Scoring takes
+/// no step, so the value is never applied; it is the fine-tune default's
+/// neighbourhood so nothing downstream sees an unusual setting.
+const SCORE_LR: f32 = 1e-4;
 
 /// A LoRA fine-tune of a Qwen3 chat model. See this module's doc.
 #[derive(Clone, Debug)]
@@ -1212,6 +1222,76 @@ pub fn score_tokens(base: &str, adapter: Option<&Path>, tokens: &[u32], targets:
 fn score_records(weights: &str, adapter: Option<&str>, tok: &QwenBpe, tmpl: &ChatTemplate, records: &[ChatSample], block: u32, tier: qwen3::Dtype, render: data::chat::RenderOpts) -> HeldOutScore {
     let s = qwen3::eval::score_chat_rendered(weights, adapter, tok, tmpl, records, block, tier, render);
     HeldOutScore { loss: (s.positions > 0).then_some(s.loss), token_accuracy: s.token_accuracy, positions: s.positions, records: s.samples, skipped: s.skipped }
+}
+
+/// One record's teacher-forced readout.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecordReadout {
+    /// Index of the record in the file (0-based, input order).
+    pub record: usize,
+    /// Tokens the record encoded to.
+    pub tokens: usize,
+    /// Its supervised positions, ascending: each the model's log-probability of
+    /// the recorded token and the token it would have picked itself.
+    pub positions: Vec<TokenScore>,
+}
+
+/// A teacher-forced scoring pass over a record set.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TokenReadout {
+    /// One entry per record, in the file's order.
+    pub records: Vec<RecordReadout>,
+    /// Supervised positions scored in all.
+    pub positions: usize,
+    /// Mean log-probability over those positions: higher means the model finds
+    /// the records more likely (the mean log-probability, not the loss).
+    pub mean_logprob: Option<f32>,
+}
+
+/// Teacher-forced per-position readouts of the records in `records` under the
+/// 27B (`qwen35`) trainer's OWN forward, with `adapter` loaded and NO optimizer
+/// step - the in-process side of a train-serve agreement measurement.
+///
+/// `base` is resolved like [`ChatFineTune::from_pretrained`]'s; the tokenizer
+/// and chat template come from its directory, so a chat record is rendered the
+/// way this checkpoint does (a file of `{"ids", "mask"}` token records is scored
+/// as written instead - the form to use when the training run rendered a record
+/// differently from its JSON). The records are laid out and walked by the same
+/// batching a training step uses, so a position scored here is a position
+/// trained there.
+///
+/// The model is built as a fine-tune builds it - the frozen base at bf16 with
+/// LoRA adapters - and `adapter`'s rank and scale are read from its own card;
+/// `tuning` supplies what the card does not carry (the adapter method and
+/// whether its scale is rsLoRA's). With no adapter the fresh zero-delta
+/// initialisation leaves the base's logits unchanged, so the base arm scores
+/// the base exactly. The scoring row is the longest record (at least 64
+/// tokens), one record at a time.
+pub fn score_tokens_qwen35(base: &str, adapter: Option<&Path>, records: &Path, tuning: model::adapter::device::AdapterTuning, device: &Device) -> Result<TokenReadout> {
+    let store_root = loader::model_dir::resolve(None);
+    let (weights, model_dir, _) = loader::model_dir::resolve_base(base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
+    let open = qwen3::store_checkpoint_path(&weights, &model_dir);
+    let (tok, tmpl) = tokenizer_and_template(&model_dir)?;
+    let read = qwen35::score::read_records(records, &tok, &tmpl).map_err(Error::Backend)?;
+    crate::device::resolve(device)?;
+    let longest = read.iter().map(|r| r.ids.len()).max().unwrap_or(0);
+    let block = u32::try_from(longest).map_err(|_| Error::Backend(format!("the longest record is {longest} tokens, past the largest supported row")))?.max(MIN_BLOCK);
+    let seed = resolve_seed(None, None)?;
+    let opts = fit_opts(0, block, SCORE_LR, seed);
+    let run = qwen35::finetune::StreamedRun { dtype: qwen3::Dtype::BF16, recompute: true, long: qwen35::finetune::LongSeqOverrides::default() };
+    let scored = qwen35::finetune::score_records_streamed(&open, adapter, tuning, &read, &opts, &run).map_err(|e| Error::Backend(format!("scoring {}: {e}", records.display())))?;
+    let positions = scored.positions;
+    let sum: f64 = scored.records.iter().flatten().map(|s| s.logprob as f64).sum();
+    Ok(TokenReadout {
+        records: read
+            .iter()
+            .zip(scored.records)
+            .enumerate()
+            .map(|(record, (r, positions))| RecordReadout { record, tokens: r.ids.len(), positions })
+            .collect(),
+        positions,
+        mean_logprob: (positions > 0).then(|| (sum / positions as f64) as f32),
+    })
 }
 
 /// The LoRA rank and alpha of a run, and the digest of the adapter it
