@@ -6,6 +6,7 @@
 //! can be exercised with an in-memory [`std::io::Read`] in tests -- no live
 //! server required to prove the atomic-write and sha256 behavior.
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::Path;
 
@@ -113,6 +114,70 @@ pub fn file_digest(path: &Path) -> std::io::Result<String> {
 /// fine-tune records it and a server recomputes it to bind an adapter to the
 /// base it was trained on, so both must call this one function.
 pub fn base_digest(path: &Path) -> std::io::Result<String> {
+    base_digest_with(path, &mut |p| file_digest(p))
+}
+
+/// [`base_digest`], with each file's digest kept in the cache file `cache`
+/// under the file's identity - canonical path, size and modification time -
+/// so a base is read and hashed once, and again only when its file changes.
+/// Hashing a released checkpoint reads all of it (tens of gigabytes), which a
+/// server naming its base at every start would otherwise repeat. The cache is
+/// best effort: one that cannot be read or written costs a re-hash, never the
+/// digest.
+pub fn base_digest_cached(path: &Path, cache: &Path) -> std::io::Result<String> {
+    let mut known = read_digest_cache(cache);
+    let before = known.len();
+    let digest = base_digest_with(path, &mut |p| {
+        let Some(id) = file_identity(p) else { return file_digest(p) };
+        if let Some(d) = known.get(&id) {
+            return Ok(d.clone());
+        }
+        let d = file_digest(p)?;
+        known.insert(id, d.clone());
+        Ok(d)
+    })?;
+    if known.len() != before {
+        write_digest_cache(cache, &known);
+    }
+    Ok(digest)
+}
+
+/// What a cached digest is valid for: the file's canonical path, size and
+/// modification time in nanoseconds.
+type FileIdentity = (String, u64, u128);
+
+fn file_identity(p: &Path) -> Option<FileIdentity> {
+    let meta = std::fs::metadata(p).ok()?;
+    let mtime = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
+    Some((std::fs::canonicalize(p).ok()?.to_str()?.to_string(), meta.len(), mtime))
+}
+
+/// The cache file's entries: one `digest<TAB>size<TAB>mtime_ns<TAB>path` a line.
+fn read_digest_cache(cache: &Path) -> HashMap<FileIdentity, String> {
+    let Ok(text) = std::fs::read_to_string(cache) else { return HashMap::new() };
+    text.lines()
+        .filter_map(|line| {
+            let mut f = line.splitn(4, '\t');
+            let (digest, len, mtime, path) = (f.next()?, f.next()?.parse().ok()?, f.next()?.parse().ok()?, f.next()?);
+            digest.starts_with("sha256:").then(|| ((path.to_string(), len, mtime), digest.to_string()))
+        })
+        .collect()
+}
+
+/// Replace the cache file atomically (write a sibling, rename over it), so a
+/// concurrent reader sees the old or the new set, never half of one.
+fn write_digest_cache(cache: &Path, known: &HashMap<FileIdentity, String>) {
+    let mut lines: Vec<String> = known.iter().map(|((path, len, mtime), d)| format!("{d}\t{len}\t{mtime}\t{path}")).collect();
+    lines.sort();
+    let tmp = cache.with_extension(format!("tmp{}", std::process::id()));
+    let written = cache.parent().is_some_and(|d| std::fs::create_dir_all(d).is_ok()) && std::fs::write(&tmp, lines.join("\n") + "\n").is_ok();
+    if !written || std::fs::rename(&tmp, cache).is_err() {
+        std::fs::remove_file(&tmp).ok();
+    }
+}
+
+/// [`base_digest`] over a per-file digest function.
+fn base_digest_with(path: &Path, file_digest: &mut dyn FnMut(&Path) -> std::io::Result<String>) -> std::io::Result<String> {
     if !path.is_dir() {
         return file_digest(path);
     }
@@ -220,6 +285,39 @@ mod tests {
         std::fs::write(dir.join("config.json"), b"{\"layers\":1}").unwrap();
         assert_ne!(base_digest(&dir).unwrap(), named, "a config change is another base");
         assert!(base_digest(&dir.join("absent")).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A base is read and hashed once: the digest is kept in the cache file
+    /// under the file's identity (path, size, modification time) and served
+    /// from there until the file changes. A cache that cannot be written
+    /// costs a re-hash, never the digest.
+    #[test]
+    fn a_base_is_hashed_once_and_again_only_when_its_file_changes() {
+        let dir = std::env::temp_dir().join(format!("modelstore-fetch-test-digest-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (file, cache) = (dir.join("weights.bin"), dir.join("cache").join("digests.txt"));
+        std::fs::write(&file, b"abc").unwrap();
+        let real = file_digest(&file).unwrap();
+        assert_eq!(base_digest_cached(&file, &cache).unwrap(), real);
+
+        // A cached entry is what answers: forge it and the forgery comes back.
+        let hex = real.trim_start_matches("sha256:");
+        let forged = "0".repeat(64);
+        std::fs::write(&cache, std::fs::read_to_string(&cache).unwrap().replace(hex, &forged)).unwrap();
+        assert_eq!(base_digest_cached(&file, &cache).unwrap(), format!("sha256:{forged}"), "the file was not read again");
+
+        // Another file at the same path is hashed again.
+        std::fs::write(&file, b"abcd").unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options().write(true).open(&file).unwrap().set_modified(later).unwrap();
+        assert_eq!(base_digest_cached(&file, &cache).unwrap(), file_digest(&file).unwrap());
+
+        // A directory base caches each of its files; an unwritable cache still answers.
+        std::fs::write(dir.join("config.json"), b"{}").unwrap();
+        assert_eq!(base_digest_cached(&dir, &cache).unwrap(), base_digest(&dir).unwrap());
+        assert_eq!(base_digest_cached(&file, &file.join("not-a-dir").join("digests.txt")).unwrap(), file_digest(&file).unwrap());
         std::fs::remove_dir_all(&dir).ok();
     }
 

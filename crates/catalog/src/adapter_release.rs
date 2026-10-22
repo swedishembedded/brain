@@ -126,9 +126,18 @@ impl ServedBase {
         self.digest.get().and_then(|d| d.as_ref().ok().cloned())
     }
 
+    /// Read and hashed once per file, ever: the digest is cached under brain's
+    /// cache directory against the file's identity, since a released base is
+    /// tens of gigabytes that every server start would otherwise read again.
     fn digest(&self) -> Result<&str, String> {
         self.digest
-            .get_or_init(|| brain_modelstore::fetch::base_digest(&self.path).map_err(|e| format!("the served base {}: {e}", self.path.display())))
+            .get_or_init(|| {
+                let digest = match gpu_core::tune::cache_dir() {
+                    Some(dir) => brain_modelstore::fetch::base_digest_cached(&self.path, &dir.join("base-digests.txt")),
+                    None => brain_modelstore::fetch::base_digest(&self.path),
+                };
+                digest.map_err(|e| format!("the served base {}: {e}", self.path.display()))
+            })
             .as_deref()
             .map_err(Clone::clone)
     }
