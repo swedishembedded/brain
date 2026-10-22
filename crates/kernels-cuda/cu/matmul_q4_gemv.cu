@@ -309,10 +309,12 @@ brain_matmul_q4_gemv(const unsigned int* params, const unsigned int* xq, const u
 
     // Flat 1-D block count the host may wrap into a second grid dimension.
     const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
-    const unsigned int tiles_n = (n + BRAIN_Q4G_COLS - 1u) / BRAIN_Q4G_COLS;
-    if (tiles_n == 0u) { return; }
-    const unsigned int tile_m = blk / tiles_n;
-    const unsigned int tile_n = blk - tile_m * tiles_n;
+    // Row tiles of one weight tile are adjacent in launch order, so they
+    // run together and the weights they share are read from memory once.
+    const unsigned int tiles_m = (m + BRAIN_Q4G_ROWS - 1u) / BRAIN_Q4G_ROWS;
+    if (tiles_m == 0u || n == 0u) { return; }
+    const unsigned int tile_n = blk / tiles_m;
+    const unsigned int tile_m = blk - tile_n * tiles_m;
     brain_q4g_block(xq, wq, sx, sw, out, m, k, n, tile_m, tile_n);
 }
 
@@ -356,8 +358,7 @@ brain_matmul_q4_gemv_multi(const unsigned int* params, const unsigned int* xq, c
     }
     if (n == 0u) { return; }  // past the last matrix's blocks; block-uniform
 
-    const unsigned int tiles_n = (n + BRAIN_Q4G_COLS - 1u) / BRAIN_Q4G_COLS;
-    const unsigned int tile_m = local / tiles_n;
-    const unsigned int tile_n = local - tile_m * tiles_n;
+    const unsigned int tile_n = local / tiles_m;
+    const unsigned int tile_m = local - tile_n * tiles_m;
     brain_q4g_block(xq, wq, sx, sw, out, m, k, n, tile_m, tile_n);
 }

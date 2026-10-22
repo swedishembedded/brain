@@ -244,10 +244,12 @@ __device__ __forceinline__ void brain_kqg_block(const unsigned int* params, cons
     const unsigned int n = params[2];
     // Flat 1-D block count the host may wrap into a second grid dimension.
     const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
-    const unsigned int tiles_n = (n + BRAIN_KQG_COLS - 1u) / BRAIN_KQG_COLS;
-    if (tiles_n == 0u) { return; }
-    const unsigned int tile_m = blk / tiles_n;
-    const unsigned int tile_n = blk - tile_m * tiles_n;
+    // Row tiles of one weight tile are adjacent in launch order, so they
+    // run together and the weights they share are read from memory once.
+    const unsigned int tiles_m = (m + BRAIN_KQG_ROWS - 1u) / BRAIN_KQG_ROWS;
+    if (tiles_m == 0u || n == 0u) { return; }
+    const unsigned int tile_n = blk / tiles_m;
+    const unsigned int tile_m = blk - tile_n * tiles_m;
     const unsigned int m0 = tile_m * BRAIN_KQG_ROWS;
     if (m0 >= m) { return; }  // block-uniform
     const unsigned int mrows = min(m - m0, (unsigned int)BRAIN_KQG_ROWS);
