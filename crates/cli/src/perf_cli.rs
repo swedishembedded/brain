@@ -153,7 +153,7 @@ targets (--target):
                                      over random weights of that shape (needs a real tokenizer).
                                      The shape, incl. HeadDim/NKvHeads, is honoured -- it becomes
                                      the written checkpoint's real config; :i8w/:kvf32 are NOT --
-                                     KV/weights dtype come from BRAIN_QWEN_KV_INT8 same as
+                                     KV/weights dtype come from the serving policy same as
                                      `brain serve`, since this measures the REAL served default.
   http:qwen:<weights.brain>:<tokenizer.json>
                                      the REAL served path over a real checkpoint -- this is what
@@ -809,14 +809,14 @@ fn build_http(rest: &str, workload: &str, input_override: Option<usize>, output_
 /// `spec.weights_int8`/`spec.kv_fp32` are deliberately UNUSED here: this
 /// target writes a real checkpoint and serves it through the real
 /// `QwenResident`/residency executor, which decides KV/weights dtype from
-/// `BRAIN_QWEN_KV_INT8`/`--weights-int8` same as `brain serve` -- exactly the
+/// its serving policy (`--kv-cache`, `--weight-format`) same as `brain serve` -- exactly the
 /// point of measuring the REAL served path rather than a direct-engine
 /// stand-in. `spec.head_dim`/`n_kv_heads` ARE honoured, via `cfg.to_json()`
 /// in the written checkpoint.
 fn build_http_qwen_synth(shape: &str, tokenizer: &str, workload: &str, input_override: Option<usize>, output_override: Option<usize>) -> Result<Box<dyn PerfTarget>, String> {
     // Only `spec.config()` (architecture) is used below -- the pool fields
     // this parse ALSO computes are irrelevant here, since this target's real
-    // serving pool comes from `QwenResident::pool_sizing` (BRAIN_QWEN_CTX),
+    // serving pool comes from `QwenResident::pool_sizing` (`--ctx` or the budget-sized default),
     // not from a workload preset. Still threaded for signature consistency
     // and because a bad override should still error the same way.
     let spec = SynthSpec::parse(shape, workload, input_override, output_override)?;

@@ -172,7 +172,6 @@ See [`docs/guides/serving/serving.md`](../guides/serving/serving.md) for what ad
 | `BRAIN_NVRTC` | exact NVRTC library to load for the CUDA backend (a path or a SONAME); the only library tried when set | search `CUDA_PATH`, then the system loader |
 | `BRAIN_CUDA_AOT_DIR` | directory of ahead-of-time CUDA images and their manifest (`make cuda/aot`) | `cuda-aot` under the pipeline cache directory |
 | `BRAIN_CUDA_AOT` | `0` ignores the ahead-of-time directory so kernels compile with NVRTC | on |
-| `BRAIN_QWEN_KV_INT8` | int8 KV cache (`0` opts out) | on |
 | `BRAIN_QWEN35MOE_CTX` | Qwen3.5 MoE built context length | model default |
 | `BRAIN_QWEN35MOE_MAX_BATCH` | Qwen3.5 MoE serving batch slots | model default |
 | `BRAIN_LFM2_BATCH` | LFM batched-forward slots per instance | 2 |

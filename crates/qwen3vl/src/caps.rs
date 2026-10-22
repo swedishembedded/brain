@@ -175,7 +175,7 @@ pub const DEFAULT_SERVE_MAX_PIXELS: u32 = 1024 * 1024;
 /// clamping to the checkpoint's own declared ceiling (see
 /// [`load_hf_resident`]/[`load_gguf_resident`]).
 ///
-/// `$BRAIN_QWEN3VL_CTX`, mirroring `qwen3`'s own `BRAIN_QWEN_CTX`
+/// `$BRAIN_QWEN3VL_CTX`, the counterpart of `qwen3`'s served `--ctx`
 /// (`crates/catalog/src/resident_llm.rs`) - an env-level operator knob, not a
 /// per-request parameter, because it sizes a real device allocation the
 /// resident is built with once, not something a caller picks per call.

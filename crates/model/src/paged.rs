@@ -1012,7 +1012,7 @@ mod batched_tests {
         // REGRESSION guard for a dispatch-width bug in attention scratch
         // sizing: `max_bt` deliberately exceeds `ceil(max(lens)/bs)` (5) so `cap` is
         // strictly greater than every sequence's real length -- exactly the
-        // shape (a buffer sized for the engine's `BRAIN_QWEN_CTX`, actual
+        // shape (a buffer sized for the engine's served context, actual
         // sequences much shorter) the dispatch-width question was about.
         // Before this, `cap == max(lens)` exactly, so a kernel that
         // mistakenly used `cap` as a per-thread COMPUTE bound instead of a

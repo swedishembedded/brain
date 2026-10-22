@@ -435,7 +435,7 @@ async fn get_model_by_id_and_404_when_not_exposed() {
 }
 
 /// A model that reports its REAL serving capacity (`Manifest::max_context_tokens`,
-/// e.g. `QwenResident` advertising the engine's actual `BRAIN_QWEN_CTX`-derived
+/// e.g. `QwenResident` advertising the engine's actual configured
 /// capacity — see `resident_llm.rs`) must have that exact number reach `/models`,
 /// so a client reading it can trust a prompt within it will actually be admitted.
 /// A model that does NOT report it (the plain `chat_manifest()` used elsewhere in

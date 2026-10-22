@@ -432,7 +432,7 @@ pub struct Manifest {
     /// Maximum tokens (prompt + completion) this instance can actually serve
     /// right now, when known. Populated by chat-capable resident models from
     /// their REAL configured engine capacity (e.g. the paged KV-cache sizing
-    /// derived from `BRAIN_QWEN_CTX`) - deliberately NOT the checkpoint's
+    /// derived from `--ctx` or the memory budget) - deliberately NOT the checkpoint's
     /// architectural `max_position_embeddings`, which the engine may not
     /// actually be able to hold (this is what advertising the wrong number
     /// looks like: a client builds a prompt the model claims to support, the

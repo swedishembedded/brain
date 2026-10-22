@@ -1356,7 +1356,7 @@ fn eval_chat(args: &[String]) {
 /// writes the actual usable `KvCalib` clip table (`model::kvcalib`, shared
 /// with any future paged-attention model, not Qwen-specific) - save it as
 /// `kv_calib.json` next to the checkpoint and pass `--kv-calib` to `brain
-/// qwen serve` (`BRAIN_QWEN_KV_CALIB=1` for `brain serve`'s resident) to opt
+/// qwen serve` (`--kv-calibration` for `brain serve`'s resident) to opt
 /// IN to it (`KvCalib::from_model_dir`); calibration is NOT picked up
 /// automatically -- measurement found that
 /// a small (10-prompt) calibration set makes things WORSE, so the serving
