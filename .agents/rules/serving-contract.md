@@ -3,8 +3,7 @@
 A model in brain is not done when it trains and passes parity. It is done when it can
 be **discovered, scheduled, batched, and driven over D-Bus** like every other model.
 This is the checklist every new model must satisfy *in the same change that adds it*,
-and the rule is mirrored as an invariant in `AGENTS.md` (Conventions & invariants →
-"Every new model ships the full serving contract"). Keep the two in sync.
+and `AGENTS.md` states it in one line and points here.
 
 This is the CLI/D-Bus/scheduler half of "done." The embeddable-library half -
 whether a caller can reach the capability through `crates/sdk` with no CLI process
@@ -97,6 +96,16 @@ Implement `capability::Action` for each action and advertise them in a
     ratchet: it carries the list of models that currently ignore cancellation and
     fails when a new streaming action joins them. A new model must not be added to
     that list.
+- **A served model is named `<vendor>/<repo>[-<QUANT>]`, matching its upstream
+  URL exactly, case included** (`Qwen/Qwen3-0.6B`, `Qwen/Qwen3-0.6B-Q4_K_M`).
+  `brain/`, `local/` and `test/` are reserved vendors for built-ins, hand-placed
+  files and test mocks. The grammar and reserved list are `crates/modelref`
+  (`ModelRef`, `Quant`); the on-disk `<vendor>/<repo>/...` layout and the fetch
+  ladder are `crates/modelstore`. A manifest's `model` field is always the
+  canonical id. A model that already shipped under a short name gets a row in
+  `modelref::alias::ROWS`, consumed only where a client-supplied name is
+  resolved (`apiserve::catalog::candidates`, the D-Bus and `brain <arch>` model
+  argument) - never in a manifest or a test fixture.
 
 ### 2. Residency — be scheduled, budgeted, swappable
 Add a `residency::ResidentModel` adapter under `crates/catalog/src/resident_*.rs` and

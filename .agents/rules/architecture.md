@@ -1,7 +1,7 @@
 # brain - workspace architecture
 
 brain is a Cargo **workspace** of many small, single-responsibility crates
-(currently in the neighborhood of 90). The engine is pure Rust + raw WGSL,
+(the layer table below lists them all). The engine is pure Rust + raw WGSL,
 **core-compute-only** (single bind group, <=8 storage buffers/kernel, no
 atomics/subgroups, no `shader-f16` extension, `@workgroup_size(64)` apart from
 the register-tiled matmuls at 256) so the exact same kernels run on old desktop
@@ -32,9 +32,9 @@ the fallback; it is never the only path:
   fine-tune is fp32. The placement of these concepts is in "Where the
   quantized load/train concepts live" below.
 
-`AGENTS.md` is the routing guide (which crate does what, task → file); this
-document is the *shape* of the workspace: how the layers stack and what may
-depend on what.
+`AGENTS.md` routes a task to the file that owns it; this document is the
+*shape* of the workspace: how the layers stack, what each crate is for, and
+what may depend on what.
 
 ## Crate graph
 
@@ -304,6 +304,33 @@ layer 6 - serving, front ends, SDK, samples
 Distinct from `backend-vulkan`: `crates/vulkan` is the older cooperative-matrix
 *acceleration* experiment, while `backend-vulkan` is a full eager backend behind
 `backend-api`. Only the latter is a default member.
+
+## Serving path
+
+One request path serves every model; a new model plugs into it rather than
+growing a second one.
+
+- **Front ends**: `apiserve` (OpenAI/Anthropic HTTP), `dbus`
+  (`com.swedishembedded.Brain1`, frames passed by fd), `server` (JSONL over
+  stdio/TCP/unix socket) and `cli` (`brain <arch> <verb>`) all dispatch a
+  `capability::Manifest`'s actions; none has per-model code.
+- **Admission and residency**: `residency::admission` is the one
+  concurrency-ceiling and admit-deadline policy both HTTP and D-Bus apply;
+  `residency::Executor` places, budgets, evicts and schedules the models the
+  `catalog` registers.
+- **Text LLMs**: `llmserve` is the one resident glue for every decoder LM. It
+  feeds a `run_batch` group into `model::serve::Scheduler<D: PagedDecoder>`
+  (continuous batching, one batched decode step per iteration, sampling,
+  speculation in `model::serve::speculate`) over the paged KV cache
+  (`model::paged`, incl. `PrefixCache`). A decoder joins by implementing
+  `PagedDecoder`, never by copying the scheduler. Chat templates, tool-call and
+  stop-string streaming live once in `qwen3::chat`; many LoRA adapters on one
+  resident base are `model::adapter::bank`.
+- **Stats**: `stats` assembles a self-describing `StatsSnapshot` from
+  `StatsSource` contributors (`stats::build::ExecutorSource` reads the
+  executor); D-Bus publishes it (`StatsSnapshot`, `StatsStream`) and `braintop`
+  renders it. A new metric is a field in `stats::snapshot` or an `extra` map
+  entry; nothing hardcodes a count of devices or models.
 
 ## Multi-GPU scaling (in `brain-model`)
 

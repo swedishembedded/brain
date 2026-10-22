@@ -107,7 +107,7 @@ assumption that "I'll just look at the shapes."
 
 Re-run this checklist's spirit whenever: a new model crate lands (add its
 row to `docs/compliance/third-party-models.md` in the same PR that adds the
-crate  -  same discipline as updating `AGENTS.md`'s model table), or roughly
+crate), or roughly
 annually as a full sweep. Ledger findings in
 `.agents/roadmap/licensing-audit.md`, the same pattern as `.agents/rules/
 .agents/knowledge/`.

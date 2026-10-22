@@ -125,7 +125,7 @@ escape hatch may still exist for callers who need to force a format).
 
 **One canonical representation per domain, reused, not duplicated.** This is
 not a new rule - it's the workspace's existing "one implementation" law
-(`AGENTS.md` Conventions: `rmsnorm` existed seven times before it didn't)
+(`AGENTS.md`, "Conventions & invariants")
 applied to the SDK's own output types. `capability::Media`'s image/audio
 blob conventions and `crates/imaging`'s pixel helpers are the ONE
 representation every pipeline and every `Provider` normalizes into; a new
@@ -241,9 +241,8 @@ handler, the SDK (or `capability::Action`) is incomplete, not the CLI
 merely "thin already."
 
 The same law applies across every front-end this workspace has: `brain-py`
-(today an event-driven subprocess client, not a direct binding -
-`AGENTS.md`'s own crate table says so; that's an acknowledged gap against
-this rule, not the target shape), `crates/dbus`, `crates/apiserve`, and any
+(today an event-driven subprocess client, not a direct binding - an
+acknowledged gap against this rule, not the target shape), `crates/dbus`, `crates/apiserve`, and any
 future language binding must all resolve to the same underlying call brain's
 own CLI makes, so a fix or a feature lands once. This is the SDK-facing
 half of `.agents/rules/serving-contract.md`'s "one capability interface, one

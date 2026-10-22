@@ -26,17 +26,6 @@ order exactly and must be kept in step with `Lcg`.
 
 ## 1. Per-crate unit tests (`cargo test`)
 
-| Crate | What's covered |
-|---|---|
-| `kernels` | every WGSL kernel present + non-empty; `src()` lookup round-trips |
-| `data` | RNG determinism/range; `meta.json` round-trip; char + **GPT-2 BPE** tokenizers (BPE pinned to exact vectors: `"hello world"`→`[31373,995]`, lossless round-trip); every generator (line ≤64 chars, one `=`, count, determinism; `number_to_words`); loader masking + line-aligned sampling; `prepare()` produces valid datasets |
-| `gpu-core`/`paramstore`/`optim` | real GPU dispatch + readback; AdamW+clip vs hand computation |
-| `moe`/`pid` | forward finite/deterministic; grads finite; (pid) param-list, config round-trip, inference timing |
-| `gpt` | param shapes; config round-trip; forward deterministic & ≈ln(vocab); grads finite; **50-step overfit reduces loss**; end-to-end calculator training drops loss; cosine-LR schedule |
-| `federated` | SHA-256 vectors; expert-id parsing; **split→assemble identity**; last-wins overlay |
-| `gradcheck` | the correctness gate (below) |
-| `eval` | perplexity definition sanity |
-
 Run with `make test` (or `cargo test`). On a machine with no GPU, set
 `MOE_SKIP_GPU_TESTS=1`; a device-dependent test then calls
 `brain_testutil::gpu_tests_skipped()`, which prints `SKIP: ...` naming the test
@@ -81,7 +70,7 @@ either way.
 
 Populate `testdata/` with `make testdata/fetch` (hard-links goldens and media from
 a local mirror - `BRAIN_*_MIRROR` env vars, the ONE place a machine-specific path
-may appear in this repo, per `AGENTS.md`). It does **not** download or copy the
+may appear in this repo). It does **not** download or copy the
 store's checkpoints: it reports each one present or absent and names the
 `brain fetch <vendor>/<repo>` that fetches it, because `$BRAIN_MODELS_DIR` is
 usually on a different filesystem from any mirror, where the hard link fails and
@@ -117,14 +106,32 @@ shows up as a new skip, not a failure, which is itself the bug to look for.
 
 ## 2. Backprop correctness gate - numerical gradient check
 
-`crates/gradcheck` replaces the dropped PyTorch oracle. For each parameter
-tensor it compares the analytic WGSL directional derivative `⟨∇L, v⟩` to a
-central finite difference `(L(w+εv) − L(w−εv))/2ε` (ε=5e-3), over several random
-directions, with an `allclose`-style `|a−n| ≤ atol + rtol·max(|a|,|n|)` criterion
-(atol=4e-3, rtol=8e-2 - fp32 on a software GPU). This validates the GPT's GELU
-MLP, causal attention, LayerNorm, embeddings, and untied head across all 29
-tensors. Run with `make test/gradcheck`. (Extending the `CheckModel` impl to MoE/PID
-needs a `write_weight` on those models - a small follow-up.)
+`crates/gradcheck` is the backprop oracle: finite differences against the
+analytic WGSL gradient, no PyTorch. Run it with `make test/gradcheck`, and after
+any forward or backward math change.
+
+- **Full backward plus a `gradcheck` entry point is the default for every new
+  model.** Forward-only is an exception that names its constraint in the
+  model's roadmap ledger, in the same change. The entry points are
+  `grep 'pub fn check_' crates/gradcheck/src/`; one that is not wired into
+  `crates/gradcheck/tests/` is not a gate.
+- **The default directional check does not catch a partially wrong
+  gradient.** It contracts a tensor onto random ±1 directions and keeps the
+  best-agreeing one, so a folded or shared parameter accumulated over only some of its
+  contributors can pass (knowledge #187). Use `gradcheck::elementwise_check`
+  (per-entry central differences) for every folded or shared parameter.
+- **`Builder::push_step` is not differentiable.** A stage emitted past the
+  tape has no backward at all rather than an unchecked one (knowledge #55,
+  #89); record it.
+- **Forward is SSA-style**: each stage writes a fresh buffer that doubles as
+  the backprop activation cache. Preserve that when adding stages.
+- **One device per test binary**: tests take their device from
+  `gpu_core::testgpu::dev(KERNELS)`, a shared weak pool, never a per-crate
+  fixture (a device per model object deadlocks the driver under concurrency).
+
+Imported models are additionally parity-gated stage by stage against dumped
+goldens (`tools/goldens/*_dump_reference.py`); parity proves the forward,
+never the backward.
 
 ## 3. Federated round-trip & integrity
 
@@ -355,6 +362,15 @@ config but in this codebase only ever gate whole test suites):
 `BRAIN_SDXL_VAE_DEVICE` (the SDXL UNet has no CLI or serving surface at all
 today - these two exist only for the dev-only `sdxl` binary).
 
+**Config-loader fixtures:** `BRAIN_TEST_CONFIG_FILLED`, `BRAIN_TEST_CONFIG_INHERITED`,
+`BRAIN_TEST_CONFIG_NUMBER`, `BRAIN_TEST_CONFIG_BOOL` are read only by
+`crates/cli/src/main.rs`'s own config-file tests, which write a config naming
+them and assert that the loader exported each one into the process
+environment with the right type. They configure nothing and no shipped code
+path reads them - they are here because `make check/scripts` requires every
+`BRAIN_*` variable read anywhere under `crates/` to be documented, and a
+test fixture's variable is documented by saying it is one.
+
 ## Internal engine-tuning environment variables
 
 Real production reads, but kernel-selection A/B switches and debug/benchmark
@@ -478,14 +494,3 @@ serialised-submit path the wgpu backend otherwise selects per adapter).
 environment, unlike `brain perf`):** `tools/bench/bench_qwen_inference.py`
 runs brain's CPU/GPU/NPU Qwen3 inference head-to-head against HF Transformers
 on the same prompt.
-
-## Test-only environment variables
-
-`BRAIN_TEST_CONFIG_FILLED`, `BRAIN_TEST_CONFIG_INHERITED`,
-`BRAIN_TEST_CONFIG_NUMBER`, `BRAIN_TEST_CONFIG_BOOL` are read only by
-`crates/cli/src/main.rs`'s own config-file tests, which write a config naming
-them and assert that the loader exported each one into the process
-environment with the right type. They configure nothing and no shipped code
-path reads them - they are here because `make check/scripts` requires every
-`BRAIN_*` variable read anywhere under `crates/` to be documented, and a
-test fixture's variable is documented by saying it is one.

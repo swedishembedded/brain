@@ -10,7 +10,11 @@ Run the pass with the repo `security-review` skill over `crates/apiserve` +
 `crates/dbus` (+ the CLI wiring in `crates/cli/src/run_cli.rs`), fix every finding, and
 note the audit in the change. Write automated tests for whatever the audit finds —
 a checklist item that is only ever verified by eye will regress silently the next
-time a route changes. These surfaces are internet-reachable when the operator binds
+time a route changes. The tests live in two places, and a new route or field adds
+its assertions to both: the socket-level `tests/e2e/api_conformance.bats` (against
+the `BRAIN_MOCK` model: auth matrix including no enumeration, no key leak, 413,
+error hygiene, input-bound 400s, admission 429) and the in-process
+`crates/apiserve/tests/api.rs`. These surfaces are internet-reachable when the operator binds
 them, so treat all request input as hostile.
 
 ## Checklist
@@ -179,5 +183,8 @@ them, so treat all request input as hostile.
 - Adding/removing/altering any route, handler, auth path, error shape, admission
   policy, or D-Bus method.
 - Adopting a new upstream spec field via the spec-sync command (`api-sync`) that
-  changes accepted input.
+  changes accepted input. brain keeps at most two sources of truth for an API:
+  its code and the vendored upstream OpenAPI specs in
+  `crates/apiserve/tests/specs/`, validated against each other by the
+  conformance tests. There is no separate hand-maintained brain spec.
 - Before any release that changes the API surface.

@@ -312,6 +312,47 @@ existing caller. Assume nothing about units.
   readback.** Multi-GB uploads must flush periodically (~1 GiB) or the device
   OOMs at well under its VRAM — `paramstore`'s upload loop does this.
 - After adding/removing a `.wgsl`: **`make generate/kernels/registry`**.
+- **Every kernel declares its catalogue row in its own header**, and the
+  catalogue (`docs/reference/kernels/index.md`, the list A tells you to check)
+  is generated from it with `make generate/kernels/wgsl-table` - edit the
+  kernel, never the table:
+
+  ```wgsl
+  // @what  Register-tiled matmul (out = x @ Wᵀ), ...
+  // @how   register block per thread, 256-thread workgroup tile, 3 barriers
+  // @opt   5             // 1-5, structural: see the catalogue legend
+  // @cpu   native-only   // yes | no | native | native-only
+  // @gpu   yes-wg256     // yes | yes-wg256 | no
+  // @npu   yes           // can crates/npu's ONNX DSL emit an equivalent op?
+  // @quant none          // int8 | none
+  ```
+
+  `scripts/build/seed-kernel-meta.py` seeds the block for a new kernel; refine
+  it by hand, and update it whenever the kernel's structure (barriers,
+  register tiles, workgroup stages) changes. `make
+  check/generated/kernels-wgsl-table` fails on a missing field, a drifted table,
+  and a declaration the code contradicts (`@cpu` against the barrier count,
+  `@gpu` against `@workgroup_size`, `@quant` against `dot4I8Packed`, `@opt 5`
+  against a register block).
+- **The WGSL rules above constrain the on-disk WGSL, which is the reference
+  provider - not every implementation an operator may have.** Tensor-core
+  library GEMMs, hand-written CUDA (`crates/kernels-cuda`), cooperative-matrix
+  and native-f16 providers are reached through the `gpu_core::provider` seam,
+  are selected on queried capability, and are gated for correctness against
+  the WGSL reference. A call site reaches a non-WGSL provider only once it is
+  migrated onto that seam; until then the rules here hold there without
+  exception. WGSL has no bf16 type, so no file under `crates/kernels/wgsl/`
+  may contain `enable bf16` or claim a bf16 compute tier; bf16 compute belongs
+  to a non-WGSL provider.
+- **Weight-only quantization is group-wise, never whole-channel.** One
+  outlier in a channel-wide scale sets the step for every weight in that
+  channel (knowledge #65). `model::int8::GROUP` (32) is the one granularity
+  constant: `model::int8::quantize_weight` and `model::int4::quantize_weight_q4`
+  emit `[n, k/32]` scales, a quantized `k` must be a whole number of groups
+  (asserted, never padded; a model's eligibility check keeps the rest in
+  fp32), and `model::int8::check_scale_len` refuses a pre-group-wise
+  checkpoint by its old `[n]` scale shape. Every NPU topology's quantized
+  linear goes through the one emitter `npu::topo::linear_quant`.
 
 ## E. Optimizing: measure first, because the guess is wrong
 
