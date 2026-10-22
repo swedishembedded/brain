@@ -1,5 +1,7 @@
 # qwen3 - roadmap
 
+Scope: Qwen3 dense decoder and its paged-KV serving engine (`crates/qwen3`).
+
 Qwen3 dense decoder transformer (GQA, QK-norm, RoPE, SwiGLU) with a
 concurrent paged-KV serving engine. Training, LoRA fine-tuning, INT8 weights,
 INT8 KV cache, sharding, and continuous batching are built and verified

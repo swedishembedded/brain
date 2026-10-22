@@ -1,5 +1,7 @@
 # qwen3tts - roadmap
 
+Scope: Qwen3-TTS synthesis stack (`crates/qwen3tts`, `mimi`, `ecapatdnn`).
+
 Qwen3-TTS voice synthesis stack (Talker + MTP + Mimi-style codec + ECAPA
 speaker encoder): speaker-free synthesis, voice cloning (x-vector and
 in-context), instruct-style voice design, NPU/CPU/GPU backends, and LoRA

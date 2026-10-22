@@ -1,5 +1,7 @@
 # npu - roadmap
 
+Scope: The Intel NPU export and runtime path (`crates/npu`).
+
 ## Real bug: `npu_model_parity` test hangs under a full `make test` run, not seen when tests run to completion in isolation
 
 `crates/catalog/tests/npu_model_parity.rs` hung during a full `make test` run on

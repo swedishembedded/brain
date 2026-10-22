@@ -1,5 +1,7 @@
 # deepseek2ocr - roadmap
 
+Scope: DeepSeek-OCR (`crates/deepseek2ocr`, `deepseek2`, `sam1`).
+
 DeepSeek-OCR: a document-image-in, text/markdown-out model. DeepEncoder (SAM
 ViT-B windowed+global tower with decomposed relative position bias -> a 16x
 conv token compressor -> CLIP-L/14 with its patch embed bypassed in favor of

@@ -1,5 +1,7 @@
 # pulid - roadmap
 
+Scope: PuLID-FLUX identity conditioning (`crates/pulid`).
+
 PuLID-FLUX identity conditioning (`crates/pulid`): the `IDFormer` Perceiver
 resampler (face embedding → 32 ID tokens) and the injected
 `PerceiverAttentionCA`, cross-attended into the FLUX.1 image stream at 20

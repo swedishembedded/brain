@@ -1,5 +1,7 @@
 # Licensing & copyright provenance audit - 2026-09-03
 
+Scope: Code and weight provenance audit of the workspace.
+
 Full-repo forensic audit of code and weight/checkpoint provenance across
 ~90 crates, triggered by a second-hand external analysis alleging brain's
 blanket `Apache-2.0` claim conflicted with several model ports being direct

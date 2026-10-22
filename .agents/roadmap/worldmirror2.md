@@ -1,5 +1,7 @@
 # worldmirror2 - roadmap
 
+Scope: WorldMirror-2 multi-view 3D reconstruction (`crates/worldmirror2`).
+
 Port of HY-WorldMirror-2.0, a DINOv2-based multi-frame 3D scene
 reconstruction model that predicts Gaussian splats, depth/normal maps, and
 camera pose from one or more images, with an NPU export path. Forward parity

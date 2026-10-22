@@ -1,4 +1,6 @@
-# vqgan — roadmap
+# vqgan - roadmap
+
+Scope: VQGAN / LlamaGen VQ autoencoder (`crates/vqgan`).
 
 VQ autoencoder (`crates/vqgan`) behind CodeFormer blind face restoration:
 encoder, nearest-neighbour vector quantizer, and generator. Forward and

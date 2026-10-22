@@ -1,5 +1,7 @@
 # deepseekocr2 - roadmap
 
+Scope: DeepSeek-OCR-2 (`crates/deepseekocr2`).
+
 DeepSeek-OCR-2: the successor to DeepSeek-OCR (`crates/deepseek2ocr`,
 `.agents/roadmap/deepseek2ocr.md`), released 2026-01-27, Apache 2.0. Same
 document-image-in, text/markdown-out task. The decoder is unchanged from v1;

@@ -1,5 +1,7 @@
 # fly - roadmap
 
+Scope: The fruit-fly connectome simulation (`crates/fly`, `connectome`, `neuro`, `flybody`, `mujoco`).
+
 Running a real *Drosophila* connectome in brain: real wiring, fetched weights, a
 real body, learning to walk and to fly.
 

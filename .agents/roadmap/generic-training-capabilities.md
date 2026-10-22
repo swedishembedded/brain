@@ -1,5 +1,7 @@
 # generic training capabilities - roadmap
 
+Scope: Generic LoRA/QLoRA/DPO/GRPO/distillation over capability traits.
+
 A model that implements a few capability traits gets LoRA/QLoRA SFT, DPO, GRPO,
 distillation and the conformance suite without per-model glue. What exists:
 `model::training::TokenObjectives` (with the logit scale), the typed

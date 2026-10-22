@@ -1,5 +1,7 @@
 # vlm - roadmap
 
+Scope: Vision-language models: Qwen3-VL, FastVLM, Moondream 3 (`crates/qwen3vl`, `fastvlm`, `moondream3`).
+
 Vision-language models: an image (and, for one variant, more) plus text in,
 text out.
 

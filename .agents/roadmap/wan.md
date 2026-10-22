@@ -1,5 +1,7 @@
 # wan - roadmap
 
+Scope: Wan2.1/2.2 text-to-video (`crates/wan`).
+
 Wan2.1/2.2 video diffusion: a DiT denoising a 3D `(frame, height, width)` latent
 volume under flow matching, with per-block text cross-attention from umT5-XXL and
 a causal 3D VAE at (4, 8, 8) stride. `wan` names the family, not the release --

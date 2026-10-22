@@ -1,5 +1,7 @@
 # gguf - roadmap
 
+Scope: GGUF as container and execution representation (`checkpoint::gguf`, import, quantize).
+
 GGUF, from container/interchange format to execution representation. Brain's
 GGUF reader (`crates/checkpoint/src/gguf.rs`) has been a solid mmap-backed
 loader for a while: full v2/v3 KV metadata, bounded per-tensor and per-range

@@ -1,5 +1,7 @@
 # glmdsa - roadmap
 
+Scope: GLM-5.2 decoder (`crates/glmdsa`).
+
 GLM-5.2 (`glm_moe_dsa`) decoder - MLA + sigmoid `noaux_tc` MoE + DSA indexer +
 MTP - on brain's fp32/WGSL engine. Core forward/backward, learnability,
 indexer distillation, KV-cache decode, and HF import are done and

@@ -1,5 +1,7 @@
 # quantized training, PEFT and memory-bounded loading - roadmap
 
+Scope: Quantized training, PEFT and memory-bounded loading over any checkpoint precision.
+
 Goal: any brain model that exposes compatible operations and objectives can use
 any registered adapter method or full fine-tuning over any compatible checkpoint
 precision, on any backend that has an optimized path or a verified portable

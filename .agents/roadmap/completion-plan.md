@@ -1,11 +1,13 @@
 # completion-plan - finishing the incomplete work
 
+Scope: Cross-cutting plan for finishing incomplete work across the per-model ledgers.
+
 A cross-cutting plan, as opposed to the per-model ledgers next to it. It exists
 because the per-model ledgers cannot be read as a work list on their own: five
 of them assert gaps that are demonstrably closed (§0), so any prioritisation
 built directly on them is prioritising fiction.
 
-Scope: every `- [ ]` in `.agents/roadmap/*`, plus the gaps found by checking the
+It covers every `- [ ]` in `.agents/roadmap/*`, plus the gaps found by checking the
 tree against the invariants in `AGENTS.md` rather than against the ledgers.
 
 ---

@@ -1,5 +1,7 @@
 # continual-reader
 
+Scope: The self-driving continual-learner sample.
+
 **Status: designed. R0 landed 2026-09-23; R1 onwards not started.** A
 self-driving continual learner as a brain sample: point it at a directory or a
 stream, leave it running unattended, and it decides what to learn, what to

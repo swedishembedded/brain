@@ -1,5 +1,7 @@
 # rlcd - roadmap
 
+Scope: Reinforcement learning for calibrated decisions (`crates/rlcd`).
+
 RLCD (reinforcement learning for calibrated decisions): a model emits a
 calibrated probability distribution, and the action taken on it is a
 separate, explicit function of that probability and the actual cost of being

@@ -1,5 +1,7 @@
 # lfm2 - roadmap
 
+Scope: LFM2.5-Encoder (`crates/lfm2`).
+
 LFM2.5-Encoder: a bidirectional embedding encoder ported to brain's Rust+WGSL
 engine, with chunked long-context inference, training, an NPU export path,
 and a partial residency/serving integration. Forward parity is verified

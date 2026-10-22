@@ -1,5 +1,7 @@
 # laya - roadmap
 
+Scope: Laya decision model on a ModernBERT backbone (`crates/modernbert`).
+
 Laya (`convaiinnovations/laya`, Apache-2.0): a **System-1 decision model** -
 state plus a typed question with runtime-supplied options in, one calibrated
 probability per option out, in a single forward pass. It never generates

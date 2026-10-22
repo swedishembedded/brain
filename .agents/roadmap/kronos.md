@@ -1,4 +1,6 @@
-# kronos — roadmap
+# kronos - roadmap
+
+Scope: Kronos financial candlestick model (`crates/kronos`).
 
 Kronos financial candlestick foundation model: a BSQ tokenizer (OHLCV bar to
 hierarchical discrete tokens) plus a causal autoregressive decoder with a

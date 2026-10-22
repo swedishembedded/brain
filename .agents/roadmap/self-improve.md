@@ -1,5 +1,7 @@
 # self-improve - roadmap
 
+Scope: Self-improvement and training regimes over agent trajectories (`crates/rl`, `crates/atif`).
+
 Continuous self-improvement for brain's production models, generic over any
 `model::Model`-implementing architecture with thin per-model wiring, fed by
 the trajectories an agent runtime records as ATIF - not brain's own toy

@@ -1,5 +1,7 @@
 # t5encoder - roadmap
 
+Scope: T5-XXL / umT5 text encoder (`crates/t5encoder`).
+
 T5-XXL text encoder port (`crates/t5encoder`), the text conditioning FLUX.1
 runs on: bidirectional encoder-only T5 (RMSNorm, no bias, **no** `1/sqrt(d_kv)`
 attention scale, a learned relative-position bucket bias shared by every

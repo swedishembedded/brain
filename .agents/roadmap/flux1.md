@@ -1,5 +1,7 @@
 # flux1 - roadmap
 
+Scope: FLUX.1 / Kontext text-to-image (`crates/flux1`).
+
 FLUX.1 / Kontext (`crates/flux1`): the 12B MMDiT (19 double-stream +
 38 single-stream blocks, per-block modulation, 3-axis interleaved RoPE),
 its sampler loop and VAE/text-encoder glue (`pipeline::Flux1::generate` -

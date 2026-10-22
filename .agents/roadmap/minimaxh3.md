@@ -1,5 +1,7 @@
 # minimaxh3 - roadmap
 
+Scope: MiniMax-H3 joint video+audio diffusion (`crates/minimaxh3`).
+
 MiniMax-H3: a 33B joint video+audio rectified-flow diffusion transformer -
 **one packed self-attention stack**, not a two-stream architecture like
 `ltxv`. A single 50-block transformer denoises video and audio latent rows

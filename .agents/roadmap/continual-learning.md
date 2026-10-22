@@ -1,5 +1,7 @@
 # continual-state - roadmap
 
+Scope: Durable recurrent state and cheap, undoable adapter updates for the hybrid decoders.
+
 **Status: planned. Nothing below has been started.**
 
 ## Goal

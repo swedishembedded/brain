@@ -1,5 +1,7 @@
 # gauntlet - roadmap
 
+Scope: Design of a capability-acquisition benchmark (`crates/gauntlet`, not yet a crate).
+
 **Status: designed, not implemented.** Nothing in this file is code today,
 and no directory or file under `crates/` names `alien*` or `gauntlet*` -
 verified 2026-09-20. The training-regime substrate this depends on

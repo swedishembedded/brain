@@ -30,9 +30,10 @@
 #     stale silently. That's the actual distinction this gate exists to
 #     enforce, so this small tree is the one place doing the opposite is
 #     correct;
-#   - and it exempts scripts/build/gen-knowledge-index.py by name, for that
-#     same reason one step further: that script's INPUT is .agents/knowledge/
-#     and its OUTPUT is a file inside it, so the path is what the script
+#   - and it exempts scripts/build/gen-knowledge-index.py and
+#     gen-roadmap-index.py by name, for that same reason one step further:
+#     each one's INPUT is an .agents/ directory and its OUTPUT is a file
+#     inside it, so the path is what the script
 #     operates on rather than something it refers to, and the generated file
 #     is itself an .agents/ document (which this gate has never restricted
 #     from linking to its neighbours). Named individually rather than
@@ -48,13 +49,13 @@ set -u
 cd "$(dirname "$0")/../.."
 
 PATTERN='\.agents/|docs/[A-Za-z0-9_./-]+\.md'
-EXEMPT_RE='^scripts/(gates|hooks)/|^scripts/build/gen-knowledge-index\.py:'
+EXEMPT_RE='^scripts/(gates|hooks)/|^scripts/build/gen-(knowledge|roadmap)-index\.py:'
 
 if [ "$#" -gt 0 ]; then
   files=()
   for f in "$@"; do
     case "$f" in
-      scripts/gates/*|scripts/hooks/*|scripts/build/gen-knowledge-index.py) continue ;;
+      scripts/gates/*|scripts/hooks/*|scripts/build/gen-knowledge-index.py|scripts/build/gen-roadmap-index.py) continue ;;
       crates/*|scripts/*|tools/*|samples/*|brain-py/*) files+=("$f") ;;
     esac
   done

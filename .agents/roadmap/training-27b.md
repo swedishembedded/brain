@@ -1,5 +1,7 @@
 # Training the 27B on one card, generically - roadmap
 
+Scope: Training Qwen3.8-27B on one card.
+
 Ledger for training Qwen3.8-27B (crate `qwen35`) with LoRA on a frozen bf16 base
 ("normal LoRA") and on a frozen 4-bit NF4 base ("QLoRA"), on ONE CUDA card (GH200,
 95 GiB HBM) at the longest sequence length the card allows, and for making every

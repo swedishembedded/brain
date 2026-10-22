@@ -1,5 +1,7 @@
 # MiniMax-H3: audit of the pipeline glue around the DiT
 
+Scope: Audit of the MiniMax-H3 pipeline glue around the DiT.
+
 ## Why this pass happened
 
 A real generation (128x128 canvas, 124 frames, 20 real denoising steps, real

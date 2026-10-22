@@ -1,5 +1,7 @@
 # ltxv - roadmap
 
+Scope: LTX-2.5 video+audio diffusion and its Gemma-4 text encoder (`crates/ltxv`, `gemma4`).
+
 LTX-2.5: a **two-stream** (video + audio) PixArt-alpha-style DiT, 48 layers, video
 stream 32 heads x 128 = 4096 dim / audio stream 32 x 64 = 2048 dim, coupled every
 block by bidirectional audio<->video cross-attention, with **per-token timesteps**

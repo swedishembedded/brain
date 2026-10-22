@@ -1,5 +1,7 @@
 # s3dit - roadmap
 
+Scope: Z-Image text-to-image (`crates/s3dit`, `dit`, `diffusion`, `vae`).
+
 Z-Image (S³-DiT) text-to-image diffusion transformer, with fp32/int8/sharded
 device engines, a VAE, a flow-matching scheduler, backward + LoRA fine-tuning,
 and tiered weight-residency streaming so the checkpoint never has to be

@@ -1,5 +1,7 @@
 # dtype - roadmap
 
+Scope: Keeping measured numbers out of `docs/` and attached to the tests that assert them.
+
 Docs-honesty program: `docs/**/*.md` accumulates real, measured performance
 numbers (wall-clock times, throughput, speedups) as optimization passes land.
 Those numbers are true of the specific machine/driver/checkpoint they were

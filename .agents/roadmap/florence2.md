@@ -1,5 +1,7 @@
 # florence2
 
+Scope: Florence-2 vision-language model (`crates/florence2`).
+
 **Status: M1-M7 all done.** M1: tokenizer. M2: DaViT vision tower
 (patch embed, SpatialBlock, ChannelBlock, full tower, vision-token
 projection - all verified against real weights end to end). M3: BART

@@ -1,5 +1,7 @@
 # modelstore - roadmap
 
+Scope: Model store resolution ladder: plan, download, convert (`crates/modelstore`).
+
 The model store's resolution ladder (`crates/modelstore`): plan → download →
 convert, driving every `default_ref`/`weights_env` auto-fetch (`crates/cli/
 src/supply.rs`). GGUF v2/v3 reader, HF fetch over a host allowlist, and now

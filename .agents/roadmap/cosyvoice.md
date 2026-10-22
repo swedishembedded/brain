@@ -1,5 +1,7 @@
 # cosyvoice - roadmap
 
+Scope: CosyVoice 2/3 zero-shot voice cloning (`crates/cosyvoice`, `s3tokenizer`, `campplus`).
+
 CosyVoice (`FunAudioLLM/CosyVoice`): LLM-based streaming zero-shot TTS. Two
 released generations, both 0.5B, ported behind ONE architecture id
 (`cosyvoice` names the family, not the release - see `crates/arch`'s naming

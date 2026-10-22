@@ -1,5 +1,7 @@
 # peft - roadmap
 
+Scope: Parameter-efficient fine-tuning methods beyond vanilla LoRA.
+
 brain has a correctness-oriented vanilla LoRA implementation (host-side
 `model::lora::Pair` used by 8 diffusion/audio crates, plus a deliberately
 separate device-side `ParamStore` `.lora_a`/`.lora_b` representation used by

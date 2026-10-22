@@ -1,4 +1,6 @@
-# chronos2 — roadmap
+# chronos2 - roadmap
+
+Scope: Chronos-2 time-series forecaster (`crates/chronos2`).
 
 From-scratch reimplementation of Amazon's Chronos-2 (encoder-only T5-style
 patch transformer) plugged into the forecasting API with native quantile output.

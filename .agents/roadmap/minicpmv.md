@@ -1,5 +1,7 @@
 # minicpmv - roadmap
 
+Scope: MiniCPM-V 4.6 (`crates/minicpmv`).
+
 MiniCPM-V 4.6 (`openbmb/MiniCPM-V-4.6`, Apache-2.0, ~1.3B parameters): a
 NaViT-style SigLIP vision tower with an in-tower token merger, a two-stage
 token compressor, and a Qwen3.5-0.8B hybrid Gated-DeltaNet/GQA decoder.

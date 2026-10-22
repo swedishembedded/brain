@@ -1,5 +1,7 @@
 # 27B LoRA / QLoRA training throughput - plan to 1,000-2,000 trained tokens/s
 
+Scope: Qwen3.8-27B LoRA/QLoRA training throughput.
+
 Ledger and execution plan for making one Qwen3.8-27B LoRA step (crate `qwen35`,
 frozen bf16 base and frozen NF4 base, rank 16 on all 12 projections, recompute on)
 train at **at least 1,000 tokens/s on one GH200, with 2,000 as the stretch**, on

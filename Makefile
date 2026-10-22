@@ -895,7 +895,7 @@ check/make-targets:
 # target fails when the file has drifted from what its `generate/*` twin would
 # write; a stale table is wrong silently, which no accuracy metric shows.
 ## check/generated - default: every generated-file drift check below (read-only)
-check/generated: check/generated/kernels-wgsl-table check/generated/kernels-cuda-table check/generated/samples-manifest check/generated/knowledge-index
+check/generated: check/generated/kernels-wgsl-table check/generated/kernels-cuda-table check/generated/samples-manifest check/generated/knowledge-index check/generated/roadmap-index
 
 # Every column of docs/reference/kernels/index.md is derived from the sources, so the
 # table cannot be edited by hand - and this check is what stops it drifting
@@ -917,6 +917,10 @@ check/generated/samples-manifest:
 ## check/generated/knowledge-index - .agents/knowledge/index.md matches the findings beside it
 check/generated/knowledge-index:
 	scripts/build/gen-knowledge-index.py --check
+
+## check/generated/roadmap-index - .agents/roadmap/index.md matches the ledgers beside it
+check/generated/roadmap-index:
+	scripts/build/gen-roadmap-index.py --check
 
 # ---------------------------------------------------------------------------
 ##@ Models and datasets
@@ -1817,6 +1821,15 @@ generate/knowledge:
 ## generate/knowledge/index - regenerate .agents/knowledge/index.md from the findings beside it
 generate/knowledge/index:
 	scripts/build/gen-knowledge-index.py
+
+## generate/roadmap - lists the roadmap generators; writes nothing
+generate/roadmap:
+	$(LIST_CHILDREN)
+
+# Regenerate `.agents/roadmap/index.md`, the listing of every status ledger.
+## generate/roadmap/index - regenerate .agents/roadmap/index.md from the ledgers beside it
+generate/roadmap/index:
+	scripts/build/gen-roadmap-index.py
 
 ## testdata - lists the test-data targets; does nothing
 testdata:

@@ -1,5 +1,7 @@
 # qwen3omnimoe - roadmap
 
+Scope: Qwen3-Omni-30B (`crates/qwen3omnimoe`).
+
 Qwen3-Omni-30B-A3B port: a multimodal (text/image/audio/video in, text/speech
 out) sparse-MoE model composed of a Thinker (MoE text decoder), a Talker (MoE
 speech decoder), an audio tower, a vision tower, a code predictor, and a

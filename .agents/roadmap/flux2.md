@@ -1,4 +1,6 @@
-# flux2 — roadmap
+# flux2 - roadmap
+
+Scope: FLUX.2 Klein text-to-image and editing (`crates/flux2`).
 
 FLUX.2 Klein text-to-image / image-editing diffusion transformer (Qwen3 text
 encoder + VAE + MMDiT), ported to brain's own kernels and serving stack.

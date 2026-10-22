@@ -1,5 +1,7 @@
 # horizon - roadmap
 
+Scope: Continuous-time subject-timeline model (`crates/horizon`).
+
 `crates/horizon` - brain's **continuous-time subject-timeline model** (phases 1
 and 2 below are done; the temporal backbone, evaluation arithmetic,
 uncertainty and serving are not): it reads the irregular history of one subject

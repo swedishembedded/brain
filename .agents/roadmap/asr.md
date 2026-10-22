@@ -1,4 +1,6 @@
-# asr — roadmap
+# asr - roadmap
+
+Scope: Speech-to-text: Nemotron 3.5 ASR streaming and Qwen3-ASR (`crates/nemotronasr`, `crates/qwen3asr`, `audio::asr_caps`).
 
 Two speech-to-text models (Nemotron 3.5 ASR streaming, Qwen3-ASR) on the shared
 engine, imported from HF and served over the capability/residency/D-Bus stack.

@@ -1,5 +1,7 @@
 # visualclick - roadmap
 
+Scope: Validation experiment: splicing rendered-scene rows into the decision encoder.
+
 A validation experiment, not a shipped capability: can a row `Decide`'s
 encoder never produced - a rendered scene's color, projected by a small
 trainable `Linear -> LayerNorm` host-side and spliced directly into the

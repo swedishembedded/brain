@@ -1,5 +1,7 @@
 # qwen35moe - roadmap
 
+Scope: Qwen3.5-35B-A3B hybrid MoE decoder (`crates/qwen35moe`).
+
 Qwen3.5-35B-A3B: a hybrid decoder mixing Gated DeltaNet (chunked linear-attention) layers with GQA full-attention layers, a 256-expert sparse MoE on every layer, and a natively-multimodal vision tower.
 
 ## Not yet done

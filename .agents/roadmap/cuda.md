@@ -1,5 +1,7 @@
 # backend-cuda - roadmap
 
+Scope: The native CUDA backend and hand-written CUDA kernels (`crates/backend-cuda`, `kernels-cuda`, `wgsl-cuda`, `cuda-aot`).
+
 Ledger for native CUDA support. brain reaches NVIDIA hardware today through
 WGSL -> SPIR-V (`backend-wgpu`/`backend-vulkan`); the goal is a real
 `backend-cuda` on the CUDA Driver API, free to use warp intrinsics, DP4A,

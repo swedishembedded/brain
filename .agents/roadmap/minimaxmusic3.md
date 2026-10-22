@@ -1,5 +1,7 @@
 # minimaxmusic3 - roadmap
 
+Scope: MiniMax Music 3 song generation (`crates/minimaxmusic3`).
+
 MiniMax Music 3 (`MiniMaxAI/MiniMax-Music3`): lyrics + a structured music
 description in, a full song out (up to 5 minutes, 44.1 kHz stereo). No
 official inference code exists upstream - only an unmerged `diffusers` PR

@@ -1,6 +1,8 @@
 # MiniMax-H3 streaming loader: a slowdown hunt that ended in three dead
 # hypotheses, one retracted finding, and a measurement harness
 
+Scope: MiniMax-H3 streaming-loader performance investigation.
+
 Kept out of `minimaxh3.md` deliberately - that file was being written
 concurrently while this ran, and a separate file is one merge instead of one
 guaranteed conflict. Fold it in whenever convenient.

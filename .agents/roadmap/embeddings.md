@@ -1,5 +1,7 @@
 # embeddings - roadmap
 
+Scope: Text embedding, retrieval, RAG and contrastive fine-tuning through the SDK.
+
 Long-context text embedding, retrieval, retrieval-augmented generation, and
 contrastive fine-tuning over frozen embeddings, reachable through the public
 `brain` SDK. Written in terms of "a caller" throughout - nothing here names a

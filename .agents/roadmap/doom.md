@@ -1,5 +1,7 @@
 # doom - roadmap: search, then compression, to UV-Max
 
+Scope: The DOOM decision sample (`samples/decision/doom`) and the search runtime it drives.
+
 `samples/decision/doom` plays DOOM from the engine's own structured state
 through `brain::ControlPipeline`. The target this file plans toward is
 **UV-Max on every level of episode 1**: Ultra-Violence, 100% kills, 100%

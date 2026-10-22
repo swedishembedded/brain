@@ -1,5 +1,7 @@
 # backend-vulkan - roadmap
 
+Scope: The native Vulkan backend (`crates/backend-vulkan`).
+
 ## Fixed (partially - see below): `kernel_timing` test hangs under a full `make test` run, not reproducible standalone
 
 `crates/backend-vulkan/tests/kernel_timing.rs` (3 small tests - largest

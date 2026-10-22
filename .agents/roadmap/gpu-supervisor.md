@@ -1,5 +1,7 @@
 # gpu-supervisor - roadmap
 
+Scope: A killable supervisor for un-cancellable device operations.
+
 A killable, supervised owner for the device operations that cannot be
 cancelled. This is the designed successor to
 `backend_api::hardware::bounded`'s "time out and abandon the worker thread"

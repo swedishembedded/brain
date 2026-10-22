@@ -1,5 +1,7 @@
 # decide - roadmap
 
+Scope: The decision model (`crates/decide`, `crates/decisions`).
+
 `crates/decide` - brain's **decision model**: a bidirectional state encoder plus a
 trainable candidate-to-state cross-attention head that returns a calibrated
 probability distribution over **developer-defined, runtime-supplied options**

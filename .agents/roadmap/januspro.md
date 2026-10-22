@@ -1,5 +1,7 @@
 # januspro - roadmap
 
+Scope: Janus-Pro-7B understanding and text-to-image (`crates/januspro`).
+
 Janus-Pro-7B (`crates/januspro`): understanding through `brain-deepseekvl`'s
 composite with one SigLIP-L tower, and text to image by classifier-free
 guided sampling of 576 VQ-16 tokens on the serving engine at bf16. Both

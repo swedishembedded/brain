@@ -1,5 +1,7 @@
 # sdk-design sweep - roadmap
 
+Scope: Bringing the workspace in line with `.agents/rules/sdk-design.md`.
+
 The tracking document for bringing the whole workspace into line with
 `.agents/rules/sdk-design.md`, across as many sessions as it takes. Read this
 file FIRST before touching anything SDK-surface-shaped; it is meant to be

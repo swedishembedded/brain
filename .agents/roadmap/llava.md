@@ -1,5 +1,7 @@
 # llava - roadmap
 
+Scope: LLaVA-1.5-13B (`crates/llava`).
+
 LLaVA-1.5-13B: a CLIP-L/14@336 vision tower spliced into a Vicuna-1.5
 (LLaMA-2 13B) decoder by a two-layer `mm_projector`. Brought into this
 workspace as [`supir`](supir.md)'s optional captioner - see that ledger's

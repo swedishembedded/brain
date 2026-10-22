@@ -1,5 +1,7 @@
 # controlnet - roadmap
 
+Scope: The backbone-agnostic control seam and its SDXL ControlNet producer (`crates/controlnet`).
+
 Backbone-agnostic `ControlAdapter` seam (`adapter.rs`: named `InjectionPoint`s
 matched by name and element count, so a permutation type-checks rather than
 silently producing a plausible image) plus the SDXL `ControlNetModel` that is

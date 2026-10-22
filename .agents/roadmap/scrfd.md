@@ -1,5 +1,7 @@
 # scrfd - roadmap
 
+Scope: Face detection and recognition (`crates/scrfd`, `crates/arcface`).
+
 Face recognition (`crates/scrfd` + `crates/arcface`): insightface antelopev2 -
 SCRFD-10GF detection + 5-point alignment + ArcFace IResNet-100 embedding, split
 into one crate and one served model per architecture, imported and

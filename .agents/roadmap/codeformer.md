@@ -1,5 +1,7 @@
 # codeformer - roadmap
 
+Scope: CodeFormer blind face restoration (`crates/codeformer`).
+
 CodeFormer blind face restoration (`crates/codeformer`): builds on `crates/vqgan`'s
 VQ autoencoder and adds the code-prediction transformer, the controllable
 feature transformation (CFT), and the fidelity dial `w`. Forward parity is

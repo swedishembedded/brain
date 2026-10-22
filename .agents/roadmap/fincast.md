@@ -1,4 +1,6 @@
-# fincast — roadmap
+# fincast - roadmap
+
+Scope: FinCast forecaster (`crates/fincast`).
 
 FinCast: a TimesFM-style patched decoder with a sparse top-2 MoE and a
 probabilistic-quantile head, imported 1:1 from the reference checkpoint.

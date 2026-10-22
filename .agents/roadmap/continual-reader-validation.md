@@ -1,5 +1,7 @@
 # continual-reader: the validation run
 
+Scope: Hand-off brief for the continual reader's real-weight validation run.
+
 Paste the block below into a fresh session on a machine that has real
 weights and a network. It is the whole starting context.
 

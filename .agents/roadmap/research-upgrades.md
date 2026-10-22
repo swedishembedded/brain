@@ -1,5 +1,7 @@
 # research-to-stack - brain share
 
+Scope: brain's share of the cross-project research upgrades.
+
 **Status: planned. Nothing below has been started.** Update this file in the same commit that
 finishes or changes an item. Evidence and citations for each item are in the cross-project
 research note (items U3, U5, U6, U11, U13, U15); this file is the brain share. Brain provides

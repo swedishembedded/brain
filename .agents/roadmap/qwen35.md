@@ -1,5 +1,7 @@
 # qwen35 - roadmap
 
+Scope: Qwen3.8-27B dense hybrid decoder (`crates/qwen35`).
+
 Qwen3.8-27B (HF `architectures: ["Qwen3_5ForConditionalGeneration"]`, `model_type:
 "qwen3_5"`; llama.cpp `general.architecture = "qwen35"`) - the **dense** sibling of
 `crates/qwen35moe` (`LLM_ARCH_QWEN35MOE`). Same hybrid 3:1 Gated-DeltaNet : gated-GQA

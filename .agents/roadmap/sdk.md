@@ -1,5 +1,7 @@
 # sdk - roadmap
 
+Scope: The public `brain` SDK (`crates/sdk`).
+
 The rules this crate (and every future pipeline/CLI/Python surface) is held to
 are `.agents/rules/sdk-design.md`. Several "not yet done" items below are that
 document's own review checklist failing today, tracked here rather than

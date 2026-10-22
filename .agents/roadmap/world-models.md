@@ -1,4 +1,6 @@
-# world-models — roadmap
+# world-models - roadmap
+
+Scope: Playable world models: DIAMOND and GenieRedux-G (`crates/diamond`, `genieredux`, `wm-core`, `wm-display`).
 
 Action-conditioned video world models playable in real time from a window
 (WASD control, session recording, full and LoRA fine-tuning): DIAMOND

@@ -1,5 +1,7 @@
 # timesfm3 - roadmap
 
+Scope: TimesFM-3 forecaster (`crates/timesfm3`).
+
 Google's TimesFM-3: a stacked mixing transformer with BOTH sequence attention
 (over time, causal, RoPE + QK-norm) and cross-variate attention (over
 variates, non-causal), CPM iterative RevIN, linear detrending and forecast

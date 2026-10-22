@@ -1,5 +1,7 @@
 # sdxlunet - roadmap
 
+Scope: SDXL UNet and the discrete diffusion schedulers (`crates/sdxlunet`, `diffusion::discrete`).
+
 Port of the SDXL UNet2DConditionModel diffusion backbone, plus the shared
 discrete-step diffusion schedulers (DDIM, Euler, Euler-ancestral,
 DPM-Solver++ x {eps, v-pred}) in `diffusion::discrete`.

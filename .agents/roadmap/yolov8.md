@@ -1,5 +1,7 @@
 # yolov8 - roadmap
 
+Scope: YOLOv8 detector (`crates/yolov8`).
+
 From-scratch anchor-free YOLO detector (CSP backbone, PAN-FPN neck, decoupled
 DFL head), byte-compatible with the canonical yolov8n checkpoint format, with
 the full serving contract (capability, residency, batching, D-Bus, example)

@@ -1,4 +1,6 @@
-# forecast — roadmap
+# forecast - roadmap
+
+Scope: The shared forecasting seam, serving and backtester (`crates/forecast`, `fcbench`).
 
 The forecasting foundation models (chronos2, fincast, kronos) are served over
 the shared D-Bus surface and the residency scheduler, including NPU

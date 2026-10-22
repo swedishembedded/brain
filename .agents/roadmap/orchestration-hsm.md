@@ -1,5 +1,7 @@
 # orchestration: HSM + effects for residency/serving - roadmap
 
+Scope: Design proposal: residency and serving as an HSM with effects.
+
 Not started. This is a research/design proposal for a future initiative,
 recorded here so it survives past this conversation and so the sdk-design
 sweep's remaining work (Phase 2's new pipelines, M10-full) can be shaped with

@@ -1,5 +1,7 @@
 # supir - roadmap
 
+Scope: SUPIR image restoration (`crates/supir`).
+
 SUPIR ("Scaling Up to Excellence", CVPR 2024): photo-realistic blind image
 restoration over a **frozen SDXL 1.0 base UNet**, a 1.24B control trunk
 (`GLVControl`), and 12 adaptor modules (10 `ZeroSFT` + 2 `ZeroCrossAttn`).

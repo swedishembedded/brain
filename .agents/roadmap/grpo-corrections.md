@@ -1,5 +1,7 @@
 # GRPO corrections - roadmap
 
+Scope: Remaining corrections to the GRPO objective (`crates/rl`).
+
 The objective in `crates/rl/src/objective/grpo.rs` now trains the distribution
 that sampled, never steps on an empty batch and normalises per token (knowledge
 290). What is left:

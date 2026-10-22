@@ -1,5 +1,7 @@
 # probe - roadmap
 
+Scope: Per-device GEMM capability probe and roofline (`model::probe`, `gpu_core::roof`).
+
 `model::probe` (the per-accelerator, per-dtype GEMM capability measurement
 an orchestrator's node status report publishes) and `gpu_core::roof` (the measured silicon
 ceiling every "% of peak" divides by).

@@ -1,5 +1,7 @@
 # zipdepth - roadmap
 
+Scope: ZipDepth monocular depth (`crates/zipdepth`).
+
 Monocular depth support: train/quantize/infer ZipDepth (pure-conv, 6.1M
 params) on CPU/GPU/NPU, load open pretrained weights, and run a realtime
 camera/image depth demo. Depth Anything 3 was originally in scope and has

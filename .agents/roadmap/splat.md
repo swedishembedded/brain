@@ -1,4 +1,6 @@
-# splat — roadmap
+# splat - roadmap
+
+Scope: Gaussian splatting, structure from motion and multi-view stereo (`crates/splat`, `sfm`, `mvs`, `recon`).
 
 Gaussian-splatting renderer/trainer (device sort/scan primitives, tiled
 rasterizer, interactive viewer, and a differentiable backward pass), used for

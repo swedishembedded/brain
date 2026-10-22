@@ -1,5 +1,7 @@
 # kernel-performance - roadmap
 
+Scope: Cross-cutting kernel and execution-architecture work (selection, fusion, providers, precision tiers).
+
 The cross-cutting kernel/execution-architecture campaign: closing the gap
 between "a substantially-better-than-naive WGSL inference engine" (which brain
 already is - register-tiled FP32 GEMMs, DP4A INT8 at 5/5, paged KV, INT8 KV,

@@ -3,6 +3,8 @@
 
 # cancellation - roadmap
 
+Scope: Cooperative cancellation of every served action (`CancelToken`, `ActionSpec::cancellable`).
+
 Goal: EVERY served action stops when its caller's `CancelToken` fires, the
 manifest says so (`ActionSpec::cancellable`), and a behavioural gate proves
 it. Today the token is cooperative (`crates/capability/src/lib.rs`,
