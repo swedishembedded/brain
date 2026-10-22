@@ -42,3 +42,7 @@ brain-backend-cuda.workspace = true
 [[test]]
 name = "gguf_conformance"
 harness = false
+
+[[test]]
+name = "gguf_score"
+harness = false

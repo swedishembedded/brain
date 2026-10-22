@@ -83,6 +83,10 @@ const TOPK_CAPACITY: usize = 32;
 /// Weight of the newest sequence in the running mean of MTP prefill-feed time.
 const FEED_EWMA: f64 = 0.3;
 
+/// Bound on the upload quanta one scoring call drives before reporting that the
+/// adapter cannot become resident (see [`Qwen35GgufEngine::score_supervised`]).
+const ADAPTER_UPLOAD_STEPS: u32 = 1 << 20;
+
 /// [`Qwen35GgufInstance`] behind the paged-decoder seam. See the module doc.
 pub struct Qwen35GgufEngine {
     inst: Qwen35GgufInstance,
@@ -282,6 +286,54 @@ impl Qwen35GgufEngine {
     /// Every registered adapter, oldest first.
     pub fn adapters(&self) -> Vec<AdapterInfo> {
         adapters::infos(self.inst.stage_models())
+    }
+
+    /// Teacher-forced per-token scores of one record under the base (`None`) or a
+    /// registered adapter, keeping the positions `mask` supervises.
+    ///
+    /// A registered adapter is uploaded and pinned for the call exactly as a
+    /// scheduler admits one, so what is scored is what serving that adapter
+    /// produces; the pin is released before returning. The record goes through
+    /// one chunked prefill - see
+    /// [`Qwen35GgufInstance::teacher_forced_scores`], whose readout this is.
+    pub fn score_supervised(&mut self, ids: &[u32], mask: &[bool], adapter: Option<AdapterId>) -> Result<Vec<crate::score::TokenScore>, String> {
+        if ids.len() != mask.len() {
+            return Err(format!("{MODEL}: a record has {} tokens and {} mask entries", ids.len(), mask.len()));
+        }
+        let slot = match adapter {
+            None => LORA_SLOT_NONE,
+            Some(id) => {
+                self.admit_adapter(id)?;
+                adapters::slot_of(self.inst.stage_models(), id.kv_namespace())
+            }
+        };
+        let scored = self.inst.teacher_forced_scores(ids, slot);
+        if let Some(id) = adapter {
+            let purged = adapters::unpin(self.inst.stage_models(), id);
+            self.purge_namespace(purged);
+        }
+        Ok(scored?.into_iter().filter(|s| mask[s.position as usize]).collect())
+    }
+
+    /// Drive a registered adapter's upload to completion and pin it for one call.
+    ///
+    /// Each availability call moves one upload quantum. A bank with no slot for
+    /// the adapter's rank answers [`AdapterAvailability::Loading`] forever, so the
+    /// loop is bounded and reports that instead of spinning.
+    fn admit_adapter(&mut self, id: AdapterId) -> Result<(), String> {
+        for _ in 0..ADAPTER_UPLOAD_STEPS {
+            let (answer, purged) = adapters::availability(self.inst.stage_models(), id);
+            self.purge_namespace(purged);
+            match answer {
+                AdapterAvailability::Resident => {
+                    adapters::pin(self.inst.stage_models(), id);
+                    return Ok(());
+                }
+                AdapterAvailability::Loading => {}
+                AdapterAvailability::Unknown => return Err(format!("{MODEL}: adapter {} is not registered on every stage", id.kv_namespace())),
+            }
+        }
+        Err(format!("{MODEL}: adapter {} did not become resident within {ADAPTER_UPLOAD_STEPS} upload steps (its rank may not fit any free bank slot)", id.kv_namespace()))
     }
 
     /// Drop the cached prompts of an adapter that is gone.

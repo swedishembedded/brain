@@ -288,6 +288,12 @@ const MAX_PREFILL_TOKENS: u32 = 256;
 /// for a prompt that is rarely a multiple of the round anyway.
 const TENSOR_CORE_PREFILL_TOKENS: u32 = 1024;
 
+/// Hidden rows one head readback of [`Qwen35GgufInstance::teacher_forced_scores`]
+/// projects at once. The readback is `[rows, vocab]` on the host, which at this
+/// model's vocabulary is 993 KB per row: eight rows keep it under 8 MB while
+/// amortising the head GEMM's weight stream across them.
+const SCORE_HEAD_ROWS: usize = 8;
+
 // ------------------------------------------------------------ byte accounting
 //
 // The per-layer decode-state formula (`Qwen35Config::layer_decode_state_bytes`)
@@ -1928,6 +1934,47 @@ impl Qwen35GgufInstance {
             pos += 1;
         }
         Ok(rows)
+    }
+
+    /// Per-position teacher-forced scores of a WHOLE record in one prefill: the
+    /// log-probability of every recorded token and the token the model itself
+    /// picks, for positions `1..tokens.len()` (position `p` is predicted from
+    /// `tokens[..p]`; nothing predicts position 0).
+    ///
+    /// This is [`Self::teacher_forced_logits`]'s scoring form, and it differs
+    /// from it in exactly the two ways a scoring pass wants: the whole stream
+    /// goes through ONE chunked prefill (which leaves the same K/V and recurrent
+    /// state a token-by-token replay does) instead of a prefill followed by
+    /// decode steps, and the head is projected in row batches, so eight logits
+    /// rows are alive at a time instead of every position's. The math is the
+    /// served path's: the same
+    /// `prefill_chunk_stage`, the same final norm and int8 head
+    /// ([`Self::head_logits_rows`]), and `adapter_slot` is the bank slot every
+    /// row of the prefill runs under ([`LORA_SLOT_NONE`] for the base).
+    pub fn teacher_forced_scores(&self, tokens: &[u32], adapter_slot: u32) -> Result<Vec<crate::score::TokenScore>, String> {
+        if tokens.len() < 2 {
+            return Err(format!("{MODEL}: a scored record needs at least two tokens, got {}", tokens.len()));
+        }
+        if tokens.len() as u64 > self.cap as u64 {
+            return Err(format!("{MODEL}: a record of {} tokens exceeds this instance's context capacity {}", tokens.len(), self.cap));
+        }
+        let d = self.cfg.d_model as usize;
+        self.reset();
+        let mut hidden = Vec::with_capacity(tokens.len() * d);
+        self.prefill_adapter_slot.set(adapter_slot);
+        let prefilled = self.prefill_hidden(tokens, 0, tokens.len(), 0, false, Some(&mut hidden));
+        self.prefill_adapter_slot.set(LORA_SLOT_NONE);
+        prefilled?;
+        assert_eq!(hidden.len(), tokens.len() * d, "{MODEL}: the prefill collected {} hidden values for {} rows", hidden.len() / d, tokens.len());
+        let mut out = Vec::with_capacity(tokens.len() - 1);
+        for (first, rows) in (0..tokens.len() - 1).step_by(SCORE_HEAD_ROWS).map(|r| (r, SCORE_HEAD_ROWS.min(tokens.len() - 1 - r))) {
+            let logits = self.head_logits_rows(&hidden[first * d..(first + rows) * d], rows as u32);
+            for (i, row) in logits.chunks(self.cfg.vocab as usize).enumerate() {
+                let position = (first + i + 1) as u32;
+                out.push(crate::score::readout(position, row, tokens[position as usize]));
+            }
+        }
+        Ok(out)
     }
 
     /// [`Self::teacher_forced_logits`] for several sequences decoded TOGETHER: sequence `i` is prefilled into slot
