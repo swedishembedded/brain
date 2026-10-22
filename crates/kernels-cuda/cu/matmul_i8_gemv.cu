@@ -113,8 +113,9 @@
 #define BRAIN_I8G_UNROLL_NARROW2 2
 #endif
 #define BRAIN_I8G_UNROLL_WIDE 2
-// 16-byte vectors of x per row in one stage of the shared tile.
+// 16-byte vectors of x, and activation scales, per row in one stage of the shared tile.
 #define BRAIN_I8G_XTILE (2 * BRAIN_I8G_UNROLL_WIDE * BRAIN_I8G_LANES)
+#define BRAIN_I8G_SXTILE (BRAIN_I8G_UNROLL_WIDE * BRAIN_I8G_LANES)
 // Up to this many rows of x are staged in registers with the weights.
 #define BRAIN_I8G_STAGED_ROWS 2
 
@@ -301,6 +302,7 @@ __device__ __forceinline__ void brain_gemv_tile(const unsigned int* xq, const un
 // (the barrier needs them), live or not.
 template <int MR, int UNROLL, bool VEC>
 __device__ __forceinline__ void brain_gemv_tile_shared_x(uint4 (*xs)[BRAIN_I8G_ROWS][BRAIN_I8G_XTILE],
+                                                         float (*sxs)[BRAIN_I8G_ROWS][BRAIN_I8G_SXTILE],
                                                          const unsigned int* xq, const unsigned int* wq,
                                                          const float* sx, const float* sw, float* out,
                                                          unsigned int mrows, unsigned int m0,
@@ -315,12 +317,7 @@ __device__ __forceinline__ void brain_gemv_tile_shared_x(uint4 (*xs)[BRAIN_I8G_R
 
     const unsigned int* wrow = wq + (unsigned long long)(live ? col : 0u) * kg;
     const float* srow = sw + (unsigned long long)(live ? col : 0u) * groups;
-    const float* sxrow[MR];
-#pragma unroll
-    for (int r = 0; r < MR; ++r) {
-        const unsigned int row = (static_cast<unsigned int>(r) < mrows) ? m0 + r : m0;
-        sxrow[r] = sx + (unsigned long long)row * groups;
-    }
+    constexpr int SXS = UNROLL * BRAIN_I8G_LANES;  // groups of each row in one stage
 
     float acc[MR][BRAIN_I8G_VLANES];
 #pragma unroll
@@ -344,6 +341,17 @@ __device__ __forceinline__ void brain_gemv_tile_shared_x(uint4 (*xs)[BRAIN_I8G_R
                 xs[buf][r][v] = brain_load_x<VEC>(xq + (unsigned long long)(m0 + r) * kg + 4ull * gv);
             }
         }
+        // The stage's activation scales, the same way: one per row and group.
+#pragma unroll
+        for (int e0 = 0; e0 < MR * SXS; e0 += BRAIN_I8G_THREADS) {
+            const int e = e0 + threadIdx.x;
+            const int r = e / SXS;
+            const int v = e - r * SXS;
+            const unsigned int gg = i0 * BRAIN_I8G_LANES + v;
+            if (static_cast<unsigned int>(r) < mrows && gg < groups) {
+                sxs[buf][r][v] = __ldg(sx + (unsigned long long)(m0 + r) * groups + gg);
+            }
+        }
         __syncthreads();
 #pragma unroll
         for (int u = 0; u < UNROLL; ++u) {
@@ -353,7 +361,7 @@ __device__ __forceinline__ void brain_gemv_tile_shared_x(uint4 (*xs)[BRAIN_I8G_R
 #pragma unroll
                 for (int r = 0; r < MR; ++r) {
                     const BrainGroup xv{xs[buf][r][v], xs[buf][r][v + 1]};
-                    brain_group_terms(acc[r], xv, st.w[u], __fmul_rn(st.s[u], __ldg(sxrow[r] + g)));
+                    brain_group_terms(acc[r], xv, st.w[u], __fmul_rn(st.s[u], sxs[buf][r][v / 2]));
                 }
             }
         }
@@ -362,28 +370,29 @@ __device__ __forceinline__ void brain_gemv_tile_shared_x(uint4 (*xs)[BRAIN_I8G_R
 }
 
 typedef uint4 BrainXTile[2][BRAIN_I8G_ROWS][BRAIN_I8G_XTILE];
+typedef float BrainSxTile[2][BRAIN_I8G_ROWS][BRAIN_I8G_SXTILE];
 
 template <int MR, bool VEC>
-__device__ __forceinline__ void brain_gemv_launch(BrainXTile xs, const unsigned int* xq, const unsigned int* wq,
+__device__ __forceinline__ void brain_gemv_launch(BrainXTile xs, BrainSxTile sxs, const unsigned int* xq, const unsigned int* wq,
                                                   const float* sx, const float* sw, float* out,
                                                   unsigned int mrows, unsigned int m0,
                                                   unsigned int kg, unsigned int n, unsigned int col) {
     if (MR <= BRAIN_I8G_STAGED_ROWS) {
         brain_gemv_tile<MR, (MR == 1 ? BRAIN_I8G_UNROLL_NARROW : BRAIN_I8G_UNROLL_NARROW2), VEC>(xq, wq, sx, sw, out, mrows, m0, kg, n, col);
     } else {
-        brain_gemv_tile_shared_x<MR, BRAIN_I8G_UNROLL_WIDE, VEC>(xs, xq, wq, sx, sw, out, mrows, m0, kg, n, col);
+        brain_gemv_tile_shared_x<MR, BRAIN_I8G_UNROLL_WIDE, VEC>(xs, sxs, xq, wq, sx, sw, out, mrows, m0, kg, n, col);
     }
 }
 
 template <bool VEC>
-__device__ __forceinline__ void brain_gemv_select(BrainXTile xs, const unsigned int* xq, const unsigned int* wq,
+__device__ __forceinline__ void brain_gemv_select(BrainXTile xs, BrainSxTile sxs, const unsigned int* xq, const unsigned int* wq,
                                                   const float* sx, const float* sw, float* out,
                                                   unsigned int mrows, unsigned int m0,
                                                   unsigned int kg, unsigned int n, unsigned int col) {
-    if (mrows <= 1u)      { brain_gemv_launch<1, VEC>(xs, xq, wq, sx, sw, out, mrows, m0, kg, n, col); }
-    else if (mrows <= 2u) { brain_gemv_launch<2, VEC>(xs, xq, wq, sx, sw, out, mrows, m0, kg, n, col); }
-    else if (mrows <= 4u) { brain_gemv_launch<4, VEC>(xs, xq, wq, sx, sw, out, mrows, m0, kg, n, col); }
-    else                  { brain_gemv_launch<8, VEC>(xs, xq, wq, sx, sw, out, mrows, m0, kg, n, col); }
+    if (mrows <= 1u)      { brain_gemv_launch<1, VEC>(xs, sxs, xq, wq, sx, sw, out, mrows, m0, kg, n, col); }
+    else if (mrows <= 2u) { brain_gemv_launch<2, VEC>(xs, sxs, xq, wq, sx, sw, out, mrows, m0, kg, n, col); }
+    else if (mrows <= 4u) { brain_gemv_launch<4, VEC>(xs, sxs, xq, wq, sx, sw, out, mrows, m0, kg, n, col); }
+    else                  { brain_gemv_launch<8, VEC>(xs, sxs, xq, wq, sx, sw, out, mrows, m0, kg, n, col); }
 }
 
 #ifdef BRAIN_I8G_USE_MMA
@@ -552,12 +561,13 @@ __device__ __forceinline__ void brain_gemv_block(const unsigned int* xq, const u
 
     // One staging tile for whichever row-count instance the block runs.
     __shared__ BrainXTile xs;
+    __shared__ BrainSxTile sxs;
     const bool aligned = ((reinterpret_cast<unsigned long long>(xq) |
                            reinterpret_cast<unsigned long long>(wq)) & 15ull) == 0ull;
     if (aligned) {
-        brain_gemv_select<true>(xs, xq, wq, sx, sw, out, mrows, m0, kg, n, col);
+        brain_gemv_select<true>(xs, sxs, xq, wq, sx, sw, out, mrows, m0, kg, n, col);
     } else {
-        brain_gemv_select<false>(xs, xq, wq, sx, sw, out, mrows, m0, kg, n, col);
+        brain_gemv_select<false>(xs, sxs, xq, wq, sx, sw, out, mrows, m0, kg, n, col);
     }
 }
 
