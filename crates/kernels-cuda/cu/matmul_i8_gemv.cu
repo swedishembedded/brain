@@ -62,11 +62,12 @@
 // `f32(dot4(x, w)) * (sw[g/8] * sx[m, g/8])` in ascending g, then folds the
 // 64 partials in ascending lane order. f32 addition is not associative, so
 // matching it means
-// keeping those 64 virtual accumulators and that fold order exactly. Here 16
-// threads serve one weight row and thread j owns virtual lanes 4j..4j+3: in
-// iteration i the words 64i+4j .. 64i+4j+3 are one 16-byte vector, so the
-// vector load IS the four virtual lanes' words. The fold walks the 16 threads
-// in ascending order with warp shuffles, four accumulators each - ascending
+// keeping those 64 virtual accumulators and that fold order exactly. Here 8
+// threads serve one weight row and thread j owns virtual lanes 8j..8j+7: in
+// iteration i the words 64i+8j .. 64i+8j+7 are one 32-element scale group,
+// two 16-byte vectors, so the loads ARE the eight virtual lanes' words and the
+// group's two scales are one load each. The fold walks the 8 threads in
+// ascending order with warp shuffles, eight accumulators each - ascending
 // virtual lane. `--fmad=false` is the backend's default and the products and
 // sums are written as explicit round-to-nearest operations, so no contraction
 // can change a bit either.
@@ -83,9 +84,13 @@
 // No `__restrict__` anywhere, deliberately: brain's device buffers alias by
 // design (a sliced step binds ranges of one allocation).
 
-// Output columns (weight rows) one block covers, and threads per weight row.
+// Output columns (weight rows) one block covers, threads per weight row, and
+// the virtual lanes of the reference each thread owns: a thread takes one
+// 32-element group (eight words) per step, so its weight and activation scales
+// are one load each per group.
 #define BRAIN_I8G_COLS 16
-#define BRAIN_I8G_LANES 16
+#define BRAIN_I8G_LANES 8
+#define BRAIN_I8G_VLANES 8
 #define BRAIN_I8G_THREADS (BRAIN_I8G_COLS * BRAIN_I8G_LANES)
 // Rows of x one block covers; larger m is split over blocks by the grid.
 #define BRAIN_I8G_ROWS 8
@@ -100,13 +105,16 @@
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && !defined(BRAIN_I8G_NO_MMA)
 #define BRAIN_I8G_USE_MMA 1
 #endif
-// 16-byte vectors per thread in one stage of loads. Five divides the 20
-// vectors a thread reads of a 5120-wide row, the hottest decode width.
-#define BRAIN_I8G_UNROLL_NARROW 5
+// Groups per thread in one stage of loads.
+#ifndef BRAIN_I8G_UNROLL_NARROW
+#define BRAIN_I8G_UNROLL_NARROW 2
+#endif
 #ifndef BRAIN_I8G_UNROLL_NARROW2
-#define BRAIN_I8G_UNROLL_NARROW2 3
+#define BRAIN_I8G_UNROLL_NARROW2 2
 #endif
 #define BRAIN_I8G_UNROLL_WIDE 2
+// 16-byte vectors of x per row in one stage of the shared tile.
+#define BRAIN_I8G_XTILE (2 * BRAIN_I8G_UNROLL_WIDE * BRAIN_I8G_LANES)
 // Up to this many rows of x are staged in registers with the weights.
 #define BRAIN_I8G_STAGED_ROWS 2
 
@@ -145,37 +153,87 @@ __device__ __forceinline__ float brain_term(float acc, unsigned int x, unsigned 
     return __fadd_rn(acc, __fmul_rn(d, s));
 }
 
-// What one thread has in flight for `UNROLL` consecutive 16-byte vectors of its
-// weight row: the weights, their scales and - for the rows of x that are
-// staged (`XROWS` of them) - the matching vectors of x.
-template <int XROWS, int UNROLL>
-struct BrainStage {
-    uint4 w[UNROLL];
-    float s[UNROLL];
-    // A zero-length array is not standard C++, so an unstaged build keeps one
-    // unused row that the compiler drops.
-    uint4 x[XROWS > 0 ? XROWS : 1][UNROLL];
+// One 32-element group: two 16-byte vectors.
+struct BrainGroup {
+    uint4 lo, hi;
 };
 
-// Issue every load of the stage `i0 .. i0 + UNROLL` before any is consumed.
-// Out-of-range vectors (the row tail, a dead row) load nothing.
-template <int XROWS, int UNROLL, bool VEC>
-__device__ __forceinline__ void brain_load_stage(BrainStage<XROWS, UNROLL>& st, unsigned int i0, unsigned int lane,
-                                                 bool live, unsigned int granules, const unsigned int* wrow,
-                                                 const float* srow, const unsigned int* const* xrow) {
+template <bool VEC>
+__device__ __forceinline__ BrainGroup brain_load_wg(const unsigned int* p) {
+    return BrainGroup{brain_load_w<VEC>(p), brain_load_w<VEC>(p + 4)};
+}
+
+template <bool VEC>
+__device__ __forceinline__ BrainGroup brain_load_xg(const unsigned int* p) {
+    return BrainGroup{brain_load_x<VEC>(p), brain_load_x<VEC>(p + 4)};
+}
+
+// A group's eight terms into virtual lanes 8j .. 8j+7 of one row, `s` the
+// group's combined scale `sw * sx`.
+__device__ __forceinline__ void brain_group_terms(float (&acc)[BRAIN_I8G_VLANES], const BrainGroup& x, const BrainGroup& w, float s) {
+    acc[0] = brain_term(acc[0], x.lo.x, w.lo.x, s);
+    acc[1] = brain_term(acc[1], x.lo.y, w.lo.y, s);
+    acc[2] = brain_term(acc[2], x.lo.z, w.lo.z, s);
+    acc[3] = brain_term(acc[3], x.lo.w, w.lo.w, s);
+    acc[4] = brain_term(acc[4], x.hi.x, w.hi.x, s);
+    acc[5] = brain_term(acc[5], x.hi.y, w.hi.y, s);
+    acc[6] = brain_term(acc[6], x.hi.z, w.hi.z, s);
+    acc[7] = brain_term(acc[7], x.hi.w, w.hi.w, s);
+}
+
+// Fold row r's 64 virtual lanes in ascending order: thread j's eight in turn,
+// for j ascending. Every lane runs the shuffles; only the row's first thread
+// of a live row writes.
+template <int MR>
+__device__ __forceinline__ void brain_gemv_fold(const float (&acc)[MR][BRAIN_I8G_VLANES], float* out, unsigned int lane, bool live,
+                                                unsigned int mrows, unsigned int m0, unsigned int n, unsigned int col) {
 #pragma unroll
-    for (int u = 0; u < UNROLL; ++u) {
-        const unsigned int g = (i0 + u) * BRAIN_I8G_LANES + lane;
-        if (live && g < granules) {
-            st.w[u] = brain_load_w<VEC>(wrow + 4ull * g);
-            st.s[u] = srow[g >> 1];
+    for (int r = 0; r < MR; ++r) {
+        float total = 0.0f;
 #pragma unroll
-            for (int r = 0; r < XROWS; ++r) { st.x[r][u] = brain_load_x<VEC>(xrow[r] + 4ull * g); }
+        for (int j = 0; j < BRAIN_I8G_LANES; ++j) {
+#pragma unroll
+            for (int c = 0; c < BRAIN_I8G_VLANES; ++c) {
+                total = __fadd_rn(total, __shfl_sync(0xffffffffu, acc[r][c], j, BRAIN_I8G_LANES));
+            }
+        }
+        if (lane == 0 && live && static_cast<unsigned int>(r) < mrows) {
+            out[(unsigned long long)(m0 + r) * n + col] = total;
         }
     }
 }
 
-// `MR` rows of x against one weight row per 16 threads.
+// What one thread has in flight for `UNROLL` consecutive groups of its weight
+// row: the weights, their scales and - for the rows of x that are staged
+// (`XROWS` of them) - the matching groups of x.
+template <int XROWS, int UNROLL>
+struct BrainStage {
+    BrainGroup w[UNROLL];
+    float s[UNROLL];
+    // A zero-length array is not standard C++, so an unstaged build keeps one
+    // unused row that the compiler drops.
+    BrainGroup x[XROWS > 0 ? XROWS : 1][UNROLL];
+};
+
+// Issue every load of the stage `i0 .. i0 + UNROLL` before any is consumed.
+// Out-of-range groups (the row tail, a dead row) load nothing.
+template <int XROWS, int UNROLL, bool VEC>
+__device__ __forceinline__ void brain_load_stage(BrainStage<XROWS, UNROLL>& st, unsigned int i0, unsigned int lane,
+                                                 bool live, unsigned int groups, const unsigned int* wrow,
+                                                 const float* srow, const unsigned int* const* xrow) {
+#pragma unroll
+    for (int u = 0; u < UNROLL; ++u) {
+        const unsigned int g = (i0 + u) * BRAIN_I8G_LANES + lane;
+        if (live && g < groups) {
+            st.w[u] = brain_load_wg<VEC>(wrow + 8ull * g);
+            st.s[u] = srow[g];
+#pragma unroll
+            for (int r = 0; r < XROWS; ++r) { st.x[r][u] = brain_load_xg<VEC>(xrow[r] + 8ull * g); }
+        }
+    }
+}
+
+// `MR` rows of x against one weight row per BRAIN_I8G_LANES threads.
 template <int MR, int UNROLL, bool VEC>
 __device__ __forceinline__ void brain_gemv_tile(const unsigned int* xq, const unsigned int* wq,
                                                 const float* sx, const float* sw, float* out,
@@ -184,68 +242,47 @@ __device__ __forceinline__ void brain_gemv_tile(const unsigned int* xq, const un
     constexpr int XROWS = (MR <= BRAIN_I8G_STAGED_ROWS) ? MR : 0;
     const unsigned int lane = threadIdx.x % BRAIN_I8G_LANES;
     const bool live = col < n;
-    const unsigned int granules = kg >> 2;                         // 16-byte vectors per row
-    const unsigned int iters = (granules + BRAIN_I8G_LANES - 1) / BRAIN_I8G_LANES;
+    const unsigned int groups = kg >> 3;
+    const unsigned int iters = (groups + BRAIN_I8G_LANES - 1) / BRAIN_I8G_LANES;
 
     const unsigned int* wrow = wq + (unsigned long long)(live ? col : 0u) * kg;
-    const float* srow = sw + (unsigned long long)(live ? col : 0u) * (kg >> 3);
+    const float* srow = sw + (unsigned long long)(live ? col : 0u) * groups;
     const unsigned int* xrow[MR];
     const float* sxrow[MR];
 #pragma unroll
     for (int r = 0; r < MR; ++r) {
         const unsigned int row = (static_cast<unsigned int>(r) < mrows) ? m0 + r : m0;
         xrow[r] = xq + (unsigned long long)row * kg;
-        sxrow[r] = sx + (unsigned long long)row * (kg >> 3);
+        sxrow[r] = sx + (unsigned long long)row * groups;
     }
 
-    float acc[MR][4];
+    float acc[MR][BRAIN_I8G_VLANES];
 #pragma unroll
     for (int r = 0; r < MR; ++r) {
 #pragma unroll
-        for (int c = 0; c < 4; ++c) { acc[r][c] = 0.0f; }
+        for (int c = 0; c < BRAIN_I8G_VLANES; ++c) { acc[r][c] = 0.0f; }
     }
 
     for (unsigned int i0 = 0; i0 < iters; i0 += UNROLL) {
         BrainStage<XROWS, UNROLL> st;
-        brain_load_stage<XROWS, UNROLL, VEC>(st, i0, lane, live, granules, wrow, srow, xrow);
+        brain_load_stage<XROWS, UNROLL, VEC>(st, i0, lane, live, groups, wrow, srow, xrow);
 #pragma unroll
         for (int u = 0; u < UNROLL; ++u) {
             const unsigned int g = (i0 + u) * BRAIN_I8G_LANES + lane;
-            if (live && g < granules) {
+            if (live && g < groups) {
 #pragma unroll
                 for (int r = 0; r < MR; ++r) {
-                    const uint4 xv = (r < XROWS) ? st.x[r < XROWS ? r : 0][u] : brain_load_x<VEC>(xrow[r] + 4ull * g);
-                    const float sm = __fmul_rn(st.s[u], __ldg(sxrow[r] + (g >> 1)));
-                    acc[r][0] = brain_term(acc[r][0], xv.x, st.w[u].x, sm);
-                    acc[r][1] = brain_term(acc[r][1], xv.y, st.w[u].y, sm);
-                    acc[r][2] = brain_term(acc[r][2], xv.z, st.w[u].z, sm);
-                    acc[r][3] = brain_term(acc[r][3], xv.w, st.w[u].w, sm);
+                    const BrainGroup xv = (r < XROWS) ? st.x[r < XROWS ? r : 0][u] : brain_load_xg<VEC>(xrow[r] + 8ull * g);
+                    brain_group_terms(acc[r], xv, st.w[u], __fmul_rn(st.s[u], __ldg(sxrow[r] + g)));
                 }
             }
         }
     }
-
-    // Fold the 64 virtual lanes in ascending order. Every lane of the warp
-    // runs the shuffles (a dead row's lanes simply fold zeros); only the
-    // first thread of a live row writes.
-#pragma unroll
-    for (int r = 0; r < MR; ++r) {
-        float total = 0.0f;
-#pragma unroll
-        for (int j = 0; j < BRAIN_I8G_LANES; ++j) {
-#pragma unroll
-            for (int c = 0; c < 4; ++c) {
-                total = __fadd_rn(total, __shfl_sync(0xffffffffu, acc[r][c], j, BRAIN_I8G_LANES));
-            }
-        }
-        if (lane == 0 && live && static_cast<unsigned int>(r) < mrows) {
-            out[(unsigned long long)(m0 + r) * n + col] = total;
-        }
-    }
+    brain_gemv_fold<MR>(acc, out, lane, live, mrows, m0, n, col);
 }
 
-// `MR` > BRAIN_I8G_STAGED_ROWS rows of x against one weight row per 16 threads,
-// with the rows of x shared through shared memory.
+// `MR` > BRAIN_I8G_STAGED_ROWS rows of x against one weight row per
+// BRAIN_I8G_LANES threads, with the rows of x shared through shared memory.
 //
 // Why. Every thread of a block walks the same stretch of K, so the sixteen
 // weight rows of a block all want the SAME vectors of x, once per row of x. Read
@@ -254,7 +291,7 @@ __device__ __forceinline__ void brain_gemv_tile(const unsigned int* xq, const un
 // (not the arithmetic, which was measured to be free) held the kernel to half
 // the memory system's bandwidth. Here the block loads each stage's slice of x
 // once, cooperatively, and the threads read it from shared memory, where the
-// two weight rows of a warp (the same 16 vectors twice) are a broadcast.
+// weight rows of a warp (the same vectors several times) are a broadcast.
 //
 // The arithmetic, the order of every accumulation and the fold are those of
 // `brain_gemv_tile`: only where x comes from changes, so the result is bit for
@@ -263,46 +300,47 @@ __device__ __forceinline__ void brain_gemv_tile(const unsigned int* xq, const un
 // stage against this stage's fill. Every thread of a block runs every stage
 // (the barrier needs them), live or not.
 template <int MR, int UNROLL, bool VEC>
-__device__ __forceinline__ void brain_gemv_tile_shared_x(uint4 (*xs)[BRAIN_I8G_ROWS][BRAIN_I8G_UNROLL_WIDE * BRAIN_I8G_LANES],
+__device__ __forceinline__ void brain_gemv_tile_shared_x(uint4 (*xs)[BRAIN_I8G_ROWS][BRAIN_I8G_XTILE],
                                                          const unsigned int* xq, const unsigned int* wq,
                                                          const float* sx, const float* sw, float* out,
                                                          unsigned int mrows, unsigned int m0,
                                                          unsigned int kg, unsigned int n, unsigned int col) {
-    constexpr int VECS = UNROLL * BRAIN_I8G_LANES;  // vectors of x per row in one stage
-    static_assert(UNROLL == BRAIN_I8G_UNROLL_WIDE && MR <= BRAIN_I8G_ROWS, "the shared tile is sized for the widest instance");
+    constexpr int VECS = 2 * UNROLL * BRAIN_I8G_LANES;  // 16-byte vectors of x per row in one stage
+    static_assert(UNROLL == BRAIN_I8G_UNROLL_WIDE && MR <= BRAIN_I8G_ROWS && VECS == BRAIN_I8G_XTILE, "the shared tile is sized for the widest instance");
     const unsigned int lane = threadIdx.x % BRAIN_I8G_LANES;
     const bool live = col < n;
-    const unsigned int granules = kg >> 2;
-    const unsigned int iters = (granules + BRAIN_I8G_LANES - 1) / BRAIN_I8G_LANES;
+    const unsigned int vectors = kg >> 2;
+    const unsigned int groups = kg >> 3;
+    const unsigned int iters = (groups + BRAIN_I8G_LANES - 1) / BRAIN_I8G_LANES;
 
     const unsigned int* wrow = wq + (unsigned long long)(live ? col : 0u) * kg;
-    const float* srow = sw + (unsigned long long)(live ? col : 0u) * (kg >> 3);
+    const float* srow = sw + (unsigned long long)(live ? col : 0u) * groups;
     const float* sxrow[MR];
 #pragma unroll
     for (int r = 0; r < MR; ++r) {
         const unsigned int row = (static_cast<unsigned int>(r) < mrows) ? m0 + r : m0;
-        sxrow[r] = sx + (unsigned long long)row * (kg >> 3);
+        sxrow[r] = sx + (unsigned long long)row * groups;
     }
 
-    float acc[MR][4];
+    float acc[MR][BRAIN_I8G_VLANES];
 #pragma unroll
     for (int r = 0; r < MR; ++r) {
 #pragma unroll
-        for (int c = 0; c < 4; ++c) { acc[r][c] = 0.0f; }
+        for (int c = 0; c < BRAIN_I8G_VLANES; ++c) { acc[r][c] = 0.0f; }
     }
 
     int buf = 0;
     for (unsigned int i0 = 0; i0 < iters; i0 += UNROLL, buf ^= 1) {
         BrainStage<0, UNROLL> st;
-        brain_load_stage<0, UNROLL, VEC>(st, i0, lane, live, granules, wrow, srow, nullptr);
+        brain_load_stage<0, UNROLL, VEC>(st, i0, lane, live, groups, wrow, srow, nullptr);
         // Rows of x past `mrows` are not loaded: their outputs are discarded.
 #pragma unroll
         for (int e0 = 0; e0 < MR * VECS; e0 += BRAIN_I8G_THREADS) {
             const int e = e0 + threadIdx.x;
             const int r = e / VECS;
             const int v = e - r * VECS;
-            const unsigned int gv = i0 * BRAIN_I8G_LANES + v;
-            if (static_cast<unsigned int>(r) < mrows && gv < granules) {
+            const unsigned int gv = 2u * i0 * BRAIN_I8G_LANES + v;
+            if (static_cast<unsigned int>(r) < mrows && gv < vectors) {
                 xs[buf][r][v] = brain_load_x<VEC>(xq + (unsigned long long)(m0 + r) * kg + 4ull * gv);
             }
         }
@@ -310,38 +348,20 @@ __device__ __forceinline__ void brain_gemv_tile_shared_x(uint4 (*xs)[BRAIN_I8G_R
 #pragma unroll
         for (int u = 0; u < UNROLL; ++u) {
             const unsigned int g = (i0 + u) * BRAIN_I8G_LANES + lane;
-            if (live && g < granules) {
+            if (live && g < groups) {
+                const int v = 2 * (u * BRAIN_I8G_LANES + static_cast<int>(lane));
 #pragma unroll
                 for (int r = 0; r < MR; ++r) {
-                    const uint4 xv = xs[buf][r][u * BRAIN_I8G_LANES + lane];
-                    const float sm = __fmul_rn(st.s[u], __ldg(sxrow[r] + (g >> 1)));
-                    acc[r][0] = brain_term(acc[r][0], xv.x, st.w[u].x, sm);
-                    acc[r][1] = brain_term(acc[r][1], xv.y, st.w[u].y, sm);
-                    acc[r][2] = brain_term(acc[r][2], xv.z, st.w[u].z, sm);
-                    acc[r][3] = brain_term(acc[r][3], xv.w, st.w[u].w, sm);
+                    const BrainGroup xv{xs[buf][r][v], xs[buf][r][v + 1]};
+                    brain_group_terms(acc[r], xv, st.w[u], __fmul_rn(st.s[u], __ldg(sxrow[r] + g)));
                 }
             }
         }
     }
-
-    // Fold the 64 virtual lanes in ascending order, as `brain_gemv_tile` does.
-#pragma unroll
-    for (int r = 0; r < MR; ++r) {
-        float total = 0.0f;
-#pragma unroll
-        for (int j = 0; j < BRAIN_I8G_LANES; ++j) {
-#pragma unroll
-            for (int c = 0; c < 4; ++c) {
-                total = __fadd_rn(total, __shfl_sync(0xffffffffu, acc[r][c], j, BRAIN_I8G_LANES));
-            }
-        }
-        if (lane == 0 && live && static_cast<unsigned int>(r) < mrows) {
-            out[(unsigned long long)(m0 + r) * n + col] = total;
-        }
-    }
+    brain_gemv_fold<MR>(acc, out, lane, live, mrows, m0, n, col);
 }
 
-typedef uint4 BrainXTile[2][BRAIN_I8G_ROWS][BRAIN_I8G_UNROLL_WIDE * BRAIN_I8G_LANES];
+typedef uint4 BrainXTile[2][BRAIN_I8G_ROWS][BRAIN_I8G_XTILE];
 
 template <int MR, bool VEC>
 __device__ __forceinline__ void brain_gemv_launch(BrainXTile xs, const unsigned int* xq, const unsigned int* wq,

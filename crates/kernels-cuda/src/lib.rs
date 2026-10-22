@@ -850,7 +850,7 @@ pub const ALL: &[CudaKernel] = &[
         entry: "brain_matmul_i8_gemv",
         what: "packed-int8 skinny-M GEMV (up to 8 rows of x per weight pass); 16 B weight loads and dp4a, bit-identical to matmul_i8_gemv_reg below 5 rows (and everywhere without int8 tensor cores), int8 tensor cores (mma.sync m16n8k32) from 5 rows on compute capability 8.0+",
         reported: "native:matmul_i8_gemv",
-        block_dim: 256,
+        block_dim: 128,
         // 8 rows of x by 16 weight rows per block.
         tile: (8, 16),
         shared_bytes: 0,
@@ -873,7 +873,7 @@ pub const ALL: &[CudaKernel] = &[
         entry: "brain_matmul_i8_gemv_multi",
         what: "up to four int8 projections of one activation in one launch (blocks of every matrix fill the card together); runs the single GEMV's own block function, bit-identical to separate launches",
         reported: "native:matmul_i8_gemv_multi",
-        block_dim: 256,
+        block_dim: 128,
         tile: (8, 16),
         shared_bytes: 0,
         programmatic: true,
