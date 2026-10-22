@@ -83,15 +83,31 @@ fn an_int8_group_is_one_step_on_cuda_and_bit_identical_everywhere() {
 }
 
 #[test]
+fn a_q4_group_is_one_step_on_cuda_and_bit_identical_everywhere() {
+    let gpu = gpu_core::testgpu::dev(model::ops::kernel_list());
+    let cuda = is_cuda(&gpu) && gpu.caps().numeric.int8_dot;
+    drop(gpu);
+    for (m, k, ns) in [(1u32, 256u32, vec![96u32, 8, 8, 64]), (1, 512, vec![130, 17, 33]), (4, 256, vec![40, 9])] {
+        let dtypes = vec![Dtype::Q4; ns.len()];
+        let pushed = check(m, k, &ns, &dtypes, 0x51ed ^ u64::from(m * 131 + ns[0]));
+        if cuda {
+            assert_eq!(pushed, 1, "an eligible q4 group (m={m} ns={ns:?}) should be ONE launch");
+        }
+    }
+}
+
+#[test]
 fn a_group_that_cannot_merge_is_the_separate_matmuls() {
     let gpu = gpu_core::testgpu::dev(model::ops::kernel_list());
     let cuda = is_cuda(&gpu) && gpu.caps().numeric.int8_dot;
     drop(gpu);
-    // A mixed tier, a batch past the GEMV's tile, and more than four weights.
+    // Mixed tiers, and a batch past the GEMV's tile.
     let mixed = check(1, 256, &[64, 64], &[Dtype::I8, Dtype::F32], 77);
     let big_m = check(9, 256, &[64, 64], &[Dtype::I8, Dtype::I8], 78);
+    let packed_mix = check(1, 256, &[64, 64], &[Dtype::I8, Dtype::Q4], 79);
     if cuda {
         assert!(mixed >= 2, "a mixed-tier group must not be merged");
+        assert!(packed_mix >= 2, "an int8 and a q4 weight must not share a multi launch");
         assert!(big_m >= 2, "a batch past the GEMV tile must not be merged");
     }
 }

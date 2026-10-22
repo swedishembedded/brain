@@ -2170,8 +2170,9 @@ impl Ops {
     /// into its own output buffer (whole, `yoff = 0`) - a decode layer's qkv/b/a/z,
     /// q/k/v or gate/up projections.
     ///
-    /// Where the device is offered `matmul_i8_gemv_multi` and every weight is a
-    /// standard int8 one that [`Self::matmul`] would run as the decode GEMV, the
+    /// Where the device is offered `matmul_i8_gemv_multi` (`matmul_q4_gemv_multi`)
+    /// and every weight is a standard int8 (q4) one that [`Self::matmul`] would
+    /// run as the decode GEMV, the
     /// whole group is ONE launch whose blocks fill the card together instead of
     /// one launch per matrix, each with an empty last wave (the 48-row b and a
     /// projections run six blocks). Each output element is the one a separate
@@ -2197,11 +2198,17 @@ impl Ops {
         }
         let quant = act.quant.as_ref()?;
         let (m, k) = (act.m, act.k);
-        let kg = k / 4;
-        let mut params = vec![m, kg];
+        // Every weight of the group must be the same tier, run as that tier's
+        // decode GEMV; the multi kernel takes the single GEMV's own `k` word.
+        let (fused, gemv, kparam) = match group[0].0 {
+            Weight::I8 { .. } => (gpu_core::Fused::I8GemvMulti, kname::MATMUL_I8_GEMV, k / 4),
+            Weight::Q4 { .. } => (gpu_core::Fused::Q4GemvMulti, kname::MATMUL_Q4_GEMV, k),
+            _ => return None,
+        };
+        let mut params = vec![m, kparam];
         for (w, _) in group {
-            let Weight::I8 { n, k: wk, .. } = w else { return None };
-            if *wk != k || w.group() != 32 || self.matmul_kernel(w, m) != kname::MATMUL_I8_GEMV {
+            let (Weight::I8 { n, k: wk, .. } | Weight::Q4 { n, k: wk, .. }) = w else { return None };
+            if *wk != k || w.group() != 32 || self.matmul_kernel(w, m) != gemv {
                 return None;
             }
             params.push(*n);
@@ -2215,11 +2222,11 @@ impl Ops {
         let mut bufs: Vec<&DeviceBuffer> = vec![xq, sx];
         for i in 0..4 {
             match group.get(i) {
-                Some((Weight::I8 { w, s, .. }, y)) => bufs.extend([w, s, *y]),
+                Some((Weight::I8 { w, s, .. } | Weight::Q4 { w, s, .. }, y)) => bufs.extend([w, s, *y]),
                 _ => bufs.extend([xq, sx, &unused[i - group.len()]]),
             }
         }
-        self.gpu.fused_step(gpu_core::Fused::I8GemvMulti, &bufs, &params)
+        self.gpu.fused_step(fused, &bufs, &params)
     }
 
     /// `dX[m, k] = sum_n dY[m, n] * W[n, k]` (`accumulate` selects overwrite

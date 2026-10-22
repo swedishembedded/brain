@@ -880,6 +880,45 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/matmul_i8_gemv.cu"),
     },
     CudaKernel {
+        name: "matmul_q4_gemv",
+        op: Op::MatMul,
+        weight: Dtype::Q4,
+        by_name: false,
+        source: ImplSource::Tuned,
+        // `__dp4a` is the only instruction above the toolchain baseline.
+        min_cc: DP4A_MIN_CC,
+        entry: "brain_matmul_q4_gemv",
+        what: "packed-int4 (W4A8) skinny-M GEMV (up to 8 rows of x per weight pass); 16 B weight loads, nibbles unpacked to dp4a operands, bit-identical to matmul_q4_gemv_reg",
+        reported: "native:matmul_q4_gemv",
+        block_dim: 256,
+        // 8 rows of x by 16 weight rows per block.
+        tile: (8, 16),
+        // The double-buffered tile of x the batched rows read (`BrainQ4XTile`).
+        shared_bytes: 2 * 8 * 64 * 16,
+        programmatic: true,
+        src: include_str!("../cu/matmul_q4_gemv.cu"),
+    },
+    CudaKernel {
+        name: "matmul_q4_gemv_multi",
+        // Up to four q4 matrices that read one activation, in one launch: the
+        // q4 twin of `matmul_i8_gemv_multi`, a second entry point of the
+        // single-matrix kernel's file sharing its block function, asked for by
+        // name (`gpu_core::Fused`).
+        op: Op::MatMul,
+        weight: Dtype::Q4,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: DP4A_MIN_CC,
+        entry: "brain_matmul_q4_gemv_multi",
+        what: "up to four q4 projections of one activation in one launch; runs the single q4 GEMV's own block function, bit-identical to separate launches",
+        reported: "native:matmul_q4_gemv_multi",
+        block_dim: 256,
+        tile: (8, 16),
+        shared_bytes: 2 * 8 * 64 * 16,
+        programmatic: true,
+        src: include_str!("../cu/matmul_q4_gemv.cu"),
+    },
+    CudaKernel {
         name: "matmul_f32_reg",
         // The native twin of `matmul_reg3.wgsl`, redirected to BY NAME by
         // `gpu_core::native_upgrade`; the (MatMul, F32) operator answer stays
@@ -2523,10 +2562,13 @@ mod tests {
         // at all, while fp32 still is.
         assert!(find(Op::MatMul, Dtype::I8, (6, 0)).is_none());
         assert!(find(Op::MatMul, Dtype::F32, (6, 0)).is_some());
+        // The q4 GEMV is its own entry, never the int8 one.
+        assert_eq!(find(Op::MatMul, Dtype::Q4, (9, 0)).map(|k| k.name), Some("matmul_q4_gemv"));
         // A tier nothing ships resolves to nothing.
-        assert!(find(Op::MatMul, Dtype::Q4, (9, 0)).is_none());
-        // The tier-blind lookup the policy ledger uses sees the higher floor.
-        assert_eq!(best_for_any_tier(ALL, Op::MatMul, (9, 0)).map(|k| k.name), Some("matmul_i8_gemv"));
+        assert!(find(Op::MatMul, Dtype::NF4, (9, 0)).is_none());
+        // The tier-blind lookup the policy ledger uses sees the higher floor
+        // (which of the packed-dot GEMVs sharing it answers is table order).
+        assert_eq!(best_for_any_tier(ALL, Op::MatMul, (9, 0)).map(|k| k.min_cc), Some(DP4A_MIN_CC));
     }
 
     /// A kernel's header explaining which instructions it avoids is PROSE,

@@ -256,6 +256,17 @@ existing caller. Assume nothing about units.
     BITS. *Before widening a conv's tile, remove its staging and time what is
     left.*
 
+12. **A narrower weight makes the activation the bigger read - stage it at
+    every row count, not only the batched ones.** The native q4 decode GEMV
+    first copied the int8 one, which reads x per thread from L1 up to two rows
+    and stages it in shared memory only beyond. At 4-bit weights and int8
+    activations a thread reads twice as many bytes of x as of weights, and the
+    one-row case ran at 90-207 GB/s on a P40 while the four-row case, staged,
+    beat it. Staging x at every row count took one row to 270-314 GB/s, the
+    int8 kernel's own figures (`tests/q4_gemv_native_bench.rs`). *Before
+    porting a kernel to a narrower tier, recompute the per-thread bytes of
+    every operand against the weights.*
+
 ## D. Constraints that will bite you
 
 - **No atomics, no subgroups, no f16** — a tree reduction is

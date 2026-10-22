@@ -115,6 +115,15 @@ fn serves_i8_gemv(p: &[u32]) -> bool {
     (1..=backend_api::select::DECODE_REGIME_MAX_ROWS).contains(&m) && n >= 1 && kg >= 8 && kg % 8 == 0
 }
 
+/// `matmul_q4_gemv`'s `Params { m, k, n }` with the RAW `k`: the int8 GEMV's
+/// decode regime, `K` a whole number of 32-element weight-scale groups.
+fn serves_q4_gemv(p: &[u32]) -> bool {
+    match p {
+        [m, k, n, ..] => (1..=backend_api::select::DECODE_REGIME_MAX_ROWS).contains(m) && *n >= 1 && *k >= 32 && k % 32 == 0,
+        _ => false,
+    }
+}
+
 /// `matmul_i8_dyn`'s `Params { m, kg, n }` (same bindings as the GEMV): any
 /// non-empty output whose `K` is a whole number of 32-element weight-scale
 /// groups, the WGSL kernel's own contract, with every operand inside the
@@ -579,6 +588,16 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: gemm_blocks,
         requires_wgsl_upgrade: true,
     },
+    // The q4 (W4A8) decode GEMV: the int8 row's structure over 4-bit weights,
+    // bit-identical to `matmul_q4_gemv_reg` (`tests/q4_gemv_native.rs`).
+    Row {
+        slow: "matmul_q4_gemv",
+        target: Target::Operator { op: Op::MatMul, weight: Dtype::Q4 },
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_q4_gemv,
+        blocks: gemm_blocks,
+        requires_wgsl_upgrade: true,
+    },
     // The prefill/DiT GEMM, at every shape the WGSL kernel serves. Its
     // grouped int32 sums are exact and folded in the reference's order with
     // the reference's two roundings, so this row is bit-identical too
@@ -936,6 +955,12 @@ pub enum Fused {
     /// n3]` (`n_i == 0` leaves set `i` unused); bindings `xq`, `sx`, then for
     /// each set its `wq`, `sw` (read) and `out` (written).
     I8GemvMulti,
+    /// `matmul_q4_gemv_multi`: [`Fused::I8GemvMulti`] for q4 (W4A8) weights - up
+    /// to four q4 matrices that read ONE packed int8 activation, in one launch,
+    /// each output bit-identical to the single `matmul_q4_gemv`. Params `[m, k,
+    /// n0, n1, n2, n3]` with the RAW `k` (the q4 GEMV's own contract); bindings
+    /// as [`Fused::I8GemvMulti`].
+    Q4GemvMulti,
     /// `conv2d_dw_partial`: the dense conv weight gradient over `S` slices of
     /// `chunk` output positions each. Params: the conv uniform `[N, Cin, H, W,
     /// Cout, K, stride, pad, Ho, Wo]` then `[S, chunk]`; bindings `dy`, `x`
@@ -1190,6 +1215,7 @@ impl Fused {
             Fused::GqaDecodePrep => "gqa_decode_prep",
             Fused::MoeNvfp4GateUp => "moe_nvfp4_gateup_silu",
             Fused::I8GemvMulti => "matmul_i8_gemv_multi",
+            Fused::Q4GemvMulti => "matmul_q4_gemv_multi",
             Fused::Conv2dDwPartial => "conv2d_dw_partial_f32",
             Fused::Conv2dDwReduce => "conv2d_dw_reduce_f32",
             Fused::I8wDx => "matmul_i8w_dx",
@@ -1211,7 +1237,7 @@ impl Fused {
             Fused::GdnCommitPool => GDN_COMMIT_POOL_BINDINGS,
             Fused::GqaDecodePrep => GQA_DECODE_PREP_BINDINGS,
             Fused::MoeNvfp4GateUp => MOE_NVFP4_GATEUP_BINDINGS,
-            Fused::I8GemvMulti => I8_GEMV_MULTI_BINDINGS,
+            Fused::I8GemvMulti | Fused::Q4GemvMulti => I8_GEMV_MULTI_BINDINGS,
             Fused::Conv2dDwPartial => CONV2D_DW_PARTIAL_BINDINGS,
             Fused::Conv2dDwReduce => CONV2D_DW_REDUCE_BINDINGS,
             Fused::I8wDx => I8W_DX_BINDINGS,
@@ -1251,6 +1277,10 @@ impl Fused {
                 let rows = kernels_cuda::get("matmul_i8_gemv").map_or(0, |k| k.tile.0);
                 matches!(params, [m, kg, n0, ..] if params.len() == 6 && *m >= 1 && *m <= rows && *kg >= 8 && kg % 8 == 0 && *n0 >= 1)
             }
+            Fused::Q4GemvMulti => {
+                let rows = self.tile().0;
+                matches!(params, [m, k, n0, ..] if params.len() == 6 && *m >= 1 && *m <= rows && *k >= 32 && k % 32 == 0 && *n0 >= 1)
+            }
             // The dense conv uniform plus a split whose slices are whole
             // stages and together cover every position, none of them empty.
             Fused::Conv2dDwPartial => {
@@ -1285,8 +1315,8 @@ impl Fused {
             Fused::GdnCommitPool => params[0] * params[1].div_ceil(GDN_COMMIT_TILE),
             Fused::GqaDecodePrep => (params[0] + params[1]) * params[6],
             Fused::MoeNvfp4GateUp => params[0] * params[2].div_ceil(QGEMV_COLS),
-            Fused::I8GemvMulti => {
-                let (rows, cols) = kernels_cuda::get("matmul_i8_gemv").map_or((1, 1), |k| k.tile);
+            Fused::I8GemvMulti | Fused::Q4GemvMulti => {
+                let (rows, cols) = self.tile();
                 params[0].div_ceil(rows) * params[2..6].iter().map(|n| n.div_ceil(cols)).sum::<u32>()
             }
             // Channel tiles x column tiles x slices; the kernel numbers them
