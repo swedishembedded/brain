@@ -20,9 +20,10 @@
 //!
 //! Usage:
 //!   qwen35_decode_profile <path to Qwen3.8-27B*.gguf> [steps] [json-out]
-//!       [--device gpu0,gpu1] [--backend wgpu|vulkan|cuda]
+//!       [--device gpu0,gpu1] [--backend wgpu|vulkan|cuda] [--weight-format SPEC]
 //!
-//! `steps` defaults to 8 profiled decode passes per region. `json-out`, when
+//! `steps` defaults to 8 profiled decode passes per region. `--weight-format`
+//! takes `brain serve`'s weight-tier grammar (default uniform `int8`). `json-out`, when
 //! given, writes a `brain perf`-shaped baseline artifact to that path.
 //! `--device` and `--backend` take `brain serve`'s grammar and default to every
 //! GPU on the backend the machine prefers.
@@ -68,7 +69,7 @@ fn main() {
     let set = gpu_core::select_compute(flag("--device").as_deref().unwrap_or("gpu"), flag("--backend").as_deref()).unwrap_or_else(|e| panic!("{e}"));
 
     let Some(path) = a.get(1).filter(|s| s.ends_with(".gguf") || std::path::Path::new(s).is_file()).cloned() else {
-        eprintln!("usage: qwen35_decode_profile <path to Qwen3.8-27B*.gguf> [steps] [json-out] [--kv f32|bf16|int8|fp8]");
+        eprintln!("usage: qwen35_decode_profile <path to Qwen3.8-27B*.gguf> [steps] [json-out] [--kv f32|bf16|int8|fp8] [--weight-format int8|q4|...]");
         std::process::exit(2);
     };
     let devices = real_devices(&set.gpus);
@@ -77,7 +78,11 @@ fn main() {
         std::process::exit(2);
     }
 
-    let tier = model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8);
+    let mut policy = model::policy::ServePolicy::default();
+    if let Some(v) = flag("--weight-format") {
+        policy.set("--weight-format", &v).unwrap_or_else(|e| panic!("{e}"));
+    }
+    let tier = policy.weights.unwrap_or_else(|| model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8));
     println!("weight tier: {}", tier.describe());
     if batch.is_some() || context.is_some() {
         return synthetic_context(&path, devices, &tier, kv, context.unwrap_or(CAP), batch.unwrap_or(1), steps);
