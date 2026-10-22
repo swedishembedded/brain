@@ -79,7 +79,7 @@ const N: u32 = 32768;
 const BINDINGS: &[BindKind] = &[BindKind::StorageReadWrite];
 
 fn spec(entry: &'static str, launch: CudaLaunch) -> NativeSpec {
-    NativeSpec::Cuda { src: SRC, entry, block_dim: BLOCK, bindings: BINDINGS, shared_bytes: 0, launch }
+    NativeSpec::Cuda { name: entry, src: SRC, entry, block_dim: BLOCK, bindings: BINDINGS, shared_bytes: 0, launch }
 }
 
 fn launch(dynamic_bytes: u32, opt_in: bool, cluster: Option<[u32; 3]>) -> CudaLaunch {
@@ -173,6 +173,7 @@ fn scalars_and_a_uniform_block_cannot_both_be_declared() {
     let _s = serial();
     let Some(b) = backend() else { return };
     let both = NativeSpec::Cuda {
+        name: "native:brain_dsmem_scalar",
         src: SRC,
         entry: "brain_dsmem_scalar",
         block_dim: BLOCK,

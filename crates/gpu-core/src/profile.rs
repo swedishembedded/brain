@@ -498,12 +498,12 @@ pub fn profile(gpu: &Gpu, label: &str, steps: &[Step], reps: usize) -> PassProfi
         // kernel (e.g. max_abs_row -> max_abs_rows) those differ, and the
         // caller-name lookup silently reported zero time for the redirected kernel
         // while inflating every other row's share. Translate through the
-        // upgrade map first. (If two caller slots redirect to one physical
+        // upgrade maps (WGSL and native) first. (If two caller slots redirect to one physical
         // kernel their combined time lands on each row — a visible
         // over-attribution rather than an invisible zero.)
         for r in rows.iter_mut() {
             let physical = match gpu.kernel_index(&r.name) {
-                Some(k) => gpu.physical_kernel_names(k),
+                Some(k) => gpu.timed_kernel_names(k),
                 None => vec![r.name.as_str()],
             };
             let hits: Vec<_> = physical.iter().filter_map(|n| d.get(*n)).collect();
@@ -628,12 +628,12 @@ pub fn profile_live(gpu: &Gpu, label: &str, reps: usize, mut run: impl FnMut()) 
 
     // Rows carry the CALLER's kernel name; the backend's timing map is keyed by
     // the PHYSICAL pipeline that ran, which differs for an upgrade-redirected
-    // kernel. Translate, exactly as `profile` does. (Two caller slots redirected
+    // or natively served kernel. Translate, exactly as `profile` does. (Two caller slots redirected
     // onto one physical kernel would each show the combined time - a visible
     // over-attribution rather than an invisible zero.)
     let secs_of = |name: &str| -> f64 {
         let physical = match gpu.kernel_index(name) {
-            Some(k) => gpu.physical_kernel_names(k),
+            Some(k) => gpu.timed_kernel_names(k),
             None => vec![name],
         };
         physical.iter().filter_map(|n| times.get(*n)).sum()

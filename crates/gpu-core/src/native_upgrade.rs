@@ -1480,6 +1480,7 @@ pub(crate) fn resolve_fused(backend: &dyn Backend, which: Fused) -> Option<Nativ
     }
     let k = kernels_cuda::get(which.registry_name_on(cc))?;
     backend.register_native(&NativeSpec::Cuda {
+        name: k.reported,
         src: k.src,
         entry: k.entry,
         block_dim: k.block_dim,
@@ -1522,6 +1523,8 @@ pub(crate) struct Active {
     pub id: NativeId,
     /// The registry entry's name, for diagnostics.
     pub kernel: &'static str,
+    /// The name the backend times its launches under.
+    pub reported: &'static str,
     /// Output tile a block covers, as the registry entry declares it.
     pub tile: (u32, u32),
     serves: fn(&[u32]) -> bool,
@@ -1551,6 +1554,7 @@ pub(crate) fn resolve(
             }
             let k = row.target.resolve(cc)?;
             let id = backend.register_native(&NativeSpec::Cuda {
+                name: k.reported,
                 src: k.src,
                 entry: k.entry,
                 block_dim: k.block_dim,
@@ -1558,7 +1562,7 @@ pub(crate) fn resolve(
                 shared_bytes: k.shared_bytes,
                 launch: CudaLaunch { programmatic: k.programmatic, ..CudaLaunch::NONE },
             })?;
-            Some(Active { slow, id, kernel: k.name, tile: k.tile, serves: row.serves, blocks: row.blocks })
+            Some(Active { slow, id, kernel: k.name, reported: k.reported, tile: k.tile, serves: row.serves, blocks: row.blocks })
         })
         .collect()
 }

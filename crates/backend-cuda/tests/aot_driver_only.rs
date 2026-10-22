@@ -160,6 +160,7 @@ fn child_cubins_run_with_no_nvrtc() {
 
     // A native kernel through register_native.
     let spec = backend_api::NativeSpec::Cuda {
+        name: "native:aot_fill",
         src: FILL,
         entry: "aot_fill",
         block_dim: 32,
@@ -225,6 +226,7 @@ fn child_missing_image_is_a_clear_error() {
 
     let b = CudaBackend::try_new(CATALOGUE).expect("backend");
     let spec = backend_api::NativeSpec::Cuda {
+        name: "native:aot_fill",
         src: FILL_OTHER,
         entry: "aot_fill",
         block_dim: 32,

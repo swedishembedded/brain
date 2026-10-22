@@ -456,6 +456,7 @@ fn registered_native_kernels_are_unloaded_with_the_backend() {
     let _s = serial();
     let Some(p) = probe() else { return };
     let spec = backend_api::NativeSpec::Cuda {
+        name: "native:touch",
         src: TOUCH,
         entry: "touch",
         block_dim: 32,

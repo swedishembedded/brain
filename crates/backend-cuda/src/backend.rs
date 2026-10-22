@@ -1688,7 +1688,7 @@ impl backend_api::Backend for CudaBackend {
     /// memory than the kernel declares, never because of anything written
     /// down about any architecture.
     fn register_native(&self, spec: &backend_api::NativeSpec) -> Option<backend_api::NativeId> {
-        let backend_api::NativeSpec::Cuda { src, entry, block_dim, bindings, shared_bytes, launch } = spec else {
+        let backend_api::NativeSpec::Cuda { name, src, entry, block_dim, bindings, shared_bytes, launch } = spec else {
             // SPIR-V is a Vulkan pipeline image and `HostFn` is a CPU
             // provider's own function; neither is source this driver can
             // compile. See `NativeSpec`'s own doc.
@@ -1790,7 +1790,7 @@ impl backend_api::Backend for CudaBackend {
             // it is for a generated one.
             takes_uniform: bindings.contains(&backend_api::BindKind::Uniform),
             takes_lengths: false,
-            name: format!("native:{entry}"),
+            name: name.to_string(),
             native_key: Some(key),
             _module: module,
         });
@@ -1875,6 +1875,7 @@ impl backend_api::Backend for CudaBackend {
         // The placeholder only carries the three bindings through the same
         // fencing, signature and lifetime machinery as every other step.
         let id = self.register_native(&backend_api::NativeSpec::Cuda {
+            name: "native:library_gemm_placeholder",
             src: LIBRARY_GEMM_PLACEHOLDER,
             entry: "brain_library_gemm_placeholder",
             block_dim: 32,

@@ -558,6 +558,10 @@ pub enum NativeSpec {
     /// explicitly because CUDA C++ has no attribute a backend could read it
     /// off.
     Cuda {
+        /// The name the kernel's launches are timed and reported under
+        /// (`kernels_cuda::CudaKernel::reported` for a registry kernel), so a
+        /// profile row and a dispatch record name it the same way.
+        name: &'static str,
         src: &'static str,
         entry: &'static str,
         block_dim: u32,

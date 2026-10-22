@@ -2184,6 +2184,7 @@ mod native_facade {
             let mut offered = self.natives.lock().unwrap_or_else(|e| e.into_inner());
             *offered.entry(kernel.name).or_insert_with(|| {
                 self.register_native(&backend_api::NativeSpec::Cuda {
+                    name: kernel.reported,
                     src: kernel.src,
                     entry: kernel.entry,
                     block_dim: kernel.block_dim,
@@ -2390,6 +2391,16 @@ mod native_facade {
                 }
             }
             self.names.get(kind).map(|s| vec![s.as_str()]).unwrap_or_default()
+        }
+
+        /// Every name the backend may time a dispatch of slot `kind` under:
+        /// its physical WGSL pipelines ([`Self::physical_kernel_names`]) and
+        /// each native kernel [`crate::native_upgrade`] redirects some of its
+        /// dispatches to. A profile sums these to bill the slot its whole time.
+        pub fn timed_kernel_names(&self, kind: usize) -> Vec<&str> {
+            let mut names = self.physical_kernel_names(kind);
+            names.extend(self.native_upgrades.iter().filter(|a| a.slow == kind).map(|a| a.reported));
+            names
         }
 
         /// The native step for a dispatch of kernel slot `kind`, when

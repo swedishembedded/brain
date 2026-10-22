@@ -288,3 +288,25 @@ fn the_real_27b_projection_shapes_are_byte_identical() {
         }
     }
 }
+
+/// A pass profile bills the native kernel's device time to the kernel the
+/// model dispatched: the redirect changes which kernel runs, never whether
+/// its time shows up in the table.
+#[test]
+fn a_profiled_pass_reports_the_native_kernels_time() {
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda(&gpu) || !gpu.caps().numeric.int8_dot || gpu.native_kernel_for(K_GEMV, &[1, 1280, 5120]).is_none() {
+        brain_testutil::skip_unavailable("native int8 GEMV needs a CUDA device");
+        return;
+    }
+    let (m, kg, n) = (1u32, 1280u32, 5120u32);
+    let x = gpu.storage(u64::from(m * kg));
+    let w = gpu.storage(u64::from(n * kg));
+    let sx = gpu.storage(u64::from(m));
+    let sw = gpu.storage(u64::from(n * kg / 8));
+    let out = gpu.storage(u64::from(m * n));
+    let steps = [gpu.dispatch(K_GEMV, &[&x, &w, &sx, &sw, &out], &[m, kg, n], Dispatch::Workgroups(n))];
+    let p = gpu_core::profile::profile(&gpu, "native gemv", &steps, 3);
+    let row = p.rows.iter().find(|r| r.name == "matmul_i8_gemv").expect("the dispatched kernel has a row");
+    assert!(p.device_timed && row.secs > 0.0, "the natively served GEMV reports {} s", row.secs);
+}

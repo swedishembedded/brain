@@ -333,6 +333,7 @@ fn registering_a_native_kernel_twice_reuses_the_loaded_module() {
     use backend_api::{BindKind, NativeSpec};
     const SRC: &str = "extern \"C\" __global__ void brain_probe_noop(const unsigned int* p, float* out) { }";
     const SPEC: NativeSpec = NativeSpec::Cuda {
+        name: "native:brain_probe_noop",
         src: SRC,
         entry: "brain_probe_noop",
         block_dim: 32,
