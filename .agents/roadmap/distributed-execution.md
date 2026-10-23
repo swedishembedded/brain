@@ -41,6 +41,15 @@ Scope: Running one training job as ranks across machines - the job plan every ra
       Tests: the `job::tests` commit cases (a generation, a crashed commit, a
       tampered file).
 
+- [x] **Gradients are reduced across the group before the model's own
+      optimizer runs.** `Model::write_grad` exposes the replacement (Gpt's
+      paramstore does), `reduce_grads` averages every parameter's gradient over
+      the ranks, and `fit_controlled_sync` applies it before `adamw_step` so
+      the model's schedule, clipping, moments and save path are unchanged. A
+      one-rank reduction is the identity; exact resume with a sync is refused
+      until the world size is part of the state's identity. Tests: the mean a
+      reduction writes, the one-rank identity, and a fit run through the hook.
+
 ## Decisions
 
 - A cluster job's authority is its durable job record and its checkpoint
@@ -54,8 +63,9 @@ Scope: Running one training job as ranks across machines - the job plan every ra
 - [ ] No training verb takes the plan yet. A launcher starts
       `brain <arch> train ...` with `--job-plan FILE --job-rank N`; the flag
       names must not be `--rank`, which every trainer already uses for LoRA
-      rank. The driver then builds `JobContext::collective` and runs
-      `DdpOptimizer` over it.
+      rank. The driver builds `JobContext::collective`, passes
+      `fit_controlled_sync` the group, and gives each rank its own shard of the
+      batch stream (the reduction exists; the data split does not).
 - [ ] The distributed driver is reachable as a library only: `DdpOptimizer`,
       `DataParallel` and `federated_average` have no production caller. The
       first one should be the LoRA chat fine-tune, which today plans pipeline
