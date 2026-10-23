@@ -126,7 +126,7 @@ fn train_dp(world: usize, targets: Vec<Vec<f32>>, make_coll: impl Fn(usize) -> A
                     model.zero_grads();
                     model.forward();
                     model.backward();
-                    opt.step(&model, &*coll, r, t, 0.05, 0.0, model::Adam::default(), None);
+                    opt.step(&model, &*coll, r, t, 0.05, 0.0, model::Adam::default(), None).expect("collective step");
                 }
                 *out[r].lock().unwrap() = model.read_weight("w");
             });
@@ -190,11 +190,11 @@ fn federated_round_averages_node_models() {
     let (wa, wb) = std::thread::scope(|s| {
         let coll = &coll;
         let h0 = s.spawn(move || {
-            federated_average(&a, &**coll, 0, 1.0);
+            federated_average(&a, &**coll, 0, 1.0).expect("federated round");
             a.read_weight("w")
         });
         let h1 = s.spawn(move || {
-            federated_average(&b, &**coll, 1, 1.0);
+            federated_average(&b, &**coll, 1, 1.0).expect("federated round");
             b.read_weight("w")
         });
         (h0.join().unwrap(), h1.join().unwrap())

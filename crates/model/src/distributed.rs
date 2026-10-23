@@ -23,7 +23,7 @@
 //! ([`FlatAdam`], [`fed_avg_flat`]) is split out and unit-tested against a
 //! collective directly; the `Model`-generic wrappers are thin flatten/scatter glue.
 
-use crate::collective::Payload;
+use crate::collective::{CollectiveResult, Payload};
 use crate::{Collective, Model};
 
 // ---- testable numeric core (operates on flat parameter vectors) ----------------
@@ -55,17 +55,18 @@ impl FlatAdam {
     // hyperparameters. Boxing the latter into a struct would need the same
     // struct threaded through `DataParallel::step` and every caller in
     // `crates/{qwen,gpt,moe}`; the flat list matches `optim`'s existing API.
+    ///
+    /// A failed collective returns its error and leaves the weights untouched:
+    /// the driver decides whether to checkpoint the last committed step and
+    /// restart the job, and a half-updated replica would make that decision
+    /// unsound.
     #[allow(clippy::too_many_arguments)]
-    pub fn step(&mut self, coll: &dyn Collective, rank: usize, local_grad: Vec<f32>, t: u32, lr: f32, wd: f32, adam: crate::Adam, clip: Option<f32>) -> &[f32] {
+    pub fn step(&mut self, coll: &dyn Collective, rank: usize, local_grad: Vec<f32>, t: u32, lr: f32, wd: f32, adam: crate::Adam, clip: Option<f32>) -> CollectiveResult<&[f32]> {
         assert_eq!(local_grad.len(), self.master.len(), "grad/param length mismatch");
-        // `Collective::all_reduce` is async and `Result`-based (M7.2); every
-        // caller here is a plain OS thread, not an async task, so this bridges
-        // the same way this repo's own native async boundary already does
-        // (`pollster::block_on`, see `collective`'s module doc) - a collective
-        // failure mid training-step is exactly as fatal as the old panic was,
-        // so `expect` rather than widening this fn's own signature to
-        // `Result` (real follow-up work, not this milestone's).
-        let summed = pollster::block_on(coll.all_reduce(rank, Payload::f32(local_grad))).expect("collective all_reduce failed").data;
+        // `Collective::all_reduce` is async and `Result`-based; every caller
+        // here is a plain OS thread, so this bridges with `pollster::block_on`
+        // the same way this crate's other native async boundaries do.
+        let summed = pollster::block_on(coll.all_reduce(rank, Payload::f32(local_grad)))?.data;
         let world = coll.world_size() as f32;
         let mean_scale = 1.0 / world;
 
@@ -75,19 +76,19 @@ impl FlatAdam {
 
         let n = self.master.len();
         adam.update_slice(t, lr, wd, eff, &mut self.master, &mut self.m, &mut self.v, &summed[..n]);
-        &self.master
+        Ok(&self.master)
     }
 }
 
 /// FedAvg over a flat weight vector: the sample-count-weighted average across the
 /// collective, `Σ(wᵢ·nᵢ) / Σ nᵢ`. One numerator all-reduce + one scalar denominator
 /// all-reduce. Every rank receives the same averaged weights.
-pub fn fed_avg_flat(coll: &dyn Collective, rank: usize, weights: &[f32], local_samples: f32) -> Vec<f32> {
+pub fn fed_avg_flat(coll: &dyn Collective, rank: usize, weights: &[f32], local_samples: f32) -> CollectiveResult<Vec<f32>> {
     let scaled: Vec<f32> = weights.iter().map(|&w| w * local_samples).collect();
-    let num = pollster::block_on(coll.all_reduce(rank, Payload::f32(scaled))).expect("collective all_reduce failed").data;
-    let den = pollster::block_on(coll.all_reduce(rank, Payload::f32(vec![local_samples]))).expect("collective all_reduce failed").data[0];
+    let num = pollster::block_on(coll.all_reduce(rank, Payload::f32(scaled)))?.data;
+    let den = pollster::block_on(coll.all_reduce(rank, Payload::f32(vec![local_samples])))?.data[0];
     let inv = 1.0 / den.max(1e-12);
-    num.iter().map(|&x| x * inv).collect()
+    Ok(num.iter().map(|&x| x * inv).collect())
 }
 
 // ---- Model-generic glue (flatten from / scatter to the model) ------------------
@@ -127,18 +128,21 @@ impl DdpOptimizer {
     /// One optimiser step: flatten this replica's grads, all-reduce + AdamW via
     /// [`FlatAdam::step`], scatter the new weights back to the model.
     // Same AdamW hyperparameter list as [`FlatAdam::step`], which it forwards to.
+    /// A failed collective returns its error and leaves the model's weights
+    /// untouched (neither the replica nor the optimiser advances).
     #[allow(clippy::too_many_arguments)]
-    pub fn step<M: Model>(&mut self, model: &M, coll: &dyn Collective, rank: usize, t: u32, lr: f32, wd: f32, adam: crate::Adam, clip: Option<f32>) {
+    pub fn step<M: Model>(&mut self, model: &M, coll: &dyn Collective, rank: usize, t: u32, lr: f32, wd: f32, adam: crate::Adam, clip: Option<f32>) -> CollectiveResult<()> {
         let mut flat = Vec::with_capacity(self.adam.master.len());
         for n in &self.names {
             flat.extend(model.read_grad(n));
         }
-        self.adam.step(coll, rank, flat, t, lr, wd, adam, clip);
+        self.adam.step(coll, rank, flat, t, lr, wd, adam, clip)?;
         let w = self.adam.weights();
         for (n, &(o, l)) in self.names.iter().zip(&self.offs) {
             model.write_weight(n, &w[o..o + l]);
         }
         model.poll_wait();
+        Ok(())
     }
 
     pub fn weights(&self) -> &[f32] {
@@ -150,8 +154,8 @@ impl DdpOptimizer {
 /// sample-count-weighted average across the collective (FedAvg). Call every K
 /// local steps; `local_samples` is how many examples this node trained on in the
 /// round. Works identically in-process or across machines — only the collective
-/// differs.
-pub fn federated_average<M: Model>(model: &M, coll: &dyn Collective, rank: usize, local_samples: f32) {
+/// differs. On a collective failure the model keeps the weights it had.
+pub fn federated_average<M: Model>(model: &M, coll: &dyn Collective, rank: usize, local_samples: f32) -> CollectiveResult<()> {
     let names = model.param_names();
     let mut flat = Vec::new();
     let mut offs = Vec::with_capacity(names.len());
@@ -160,11 +164,12 @@ pub fn federated_average<M: Model>(model: &M, coll: &dyn Collective, rank: usize
         offs.push((flat.len(), w.len()));
         flat.extend(w);
     }
-    let avg = fed_avg_flat(coll, rank, &flat, local_samples);
+    let avg = fed_avg_flat(coll, rank, &flat, local_samples)?;
     for (n, &(o, l)) in names.iter().zip(&offs) {
         model.write_weight(n, &avg[o..o + l]);
     }
     model.poll_wait();
+    Ok(())
 }
 
 #[cfg(test)]
@@ -206,7 +211,7 @@ mod tests {
             run(2, move |c, r| {
                 let mut opt = FlatAdam::new(w0.clone());
                 for t in 1..=5 {
-                    opt.step(c, r, g[r].clone(), t, lr, wd, crate::Adam::default(), None);
+                    opt.step(c, r, g[r].clone(), t, lr, wd, crate::Adam::default(), None).expect("host collective");
                 }
                 opt.weights().to_vec()
             })
@@ -216,7 +221,7 @@ mod tests {
         let solo = HostCollective::new(1);
         let mean: Vec<f32> = (0..3).map(|i| (g[0][i] + g[1][i]) / 2.0).collect();
         for t in 1..=5 {
-            base.step(&*solo, 0, mean.clone(), t, lr, wd, crate::Adam::default(), None);
+            base.step(&*solo, 0, mean.clone(), t, lr, wd, crate::Adam::default(), None).expect("host collective");
         }
         assert_eq!(out[0], out[1], "replicas diverged");
         for (a, b) in out[0].iter().zip(base.weights()) {
@@ -232,7 +237,7 @@ mod tests {
         let ns = [1.0f32, 3.0];
         let out = {
             let ws = ws.clone();
-            run(2, move |c, r| fed_avg_flat(c, r, &ws[r], ns[r]))
+            run(2, move |c, r| fed_avg_flat(c, r, &ws[r], ns[r]).expect("host collective"))
         };
         for row in &out {
             assert!((row[0] - 2.5).abs() < 1e-6 && (row[1] - 5.0).abs() < 1e-6, "fedavg wrong: {row:?}");

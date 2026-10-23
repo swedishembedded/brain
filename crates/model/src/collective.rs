@@ -56,12 +56,11 @@
 //! the exchange primitive itself (an async-aware barrier / non-blocking socket
 //! read), which is real follow-up work, not a trait-shape change.
 //!
-//! Widening `distributed`/`parallel`/`grid`'s own Model-facing APIs
-//! (`DdpOptimizer::step`, `federated_average`, …) to `Result` is *also*
-//! follow-up work this milestone does not take on - they stay synchronous and
-//! infallible from a `Model`'s point of view, bridging to the new trait via
-//! `pollster::block_on(..).expect(..)` internally (a collective failure mid
-//! training step is exactly as fatal as the old panic was).
+//! The Model-facing distributed optimiser APIs (`DdpOptimizer::step`,
+//! `federated_average`, `FlatAdam::step`) are `Result`-based over the same
+//! [`CollectiveError`]: a lost peer or a rejected payload stops the step and
+//! leaves the replica's weights untouched, so a driver can checkpoint the last
+//! committed step and restart the job instead of taking the process down.
 
 use gpu_core::select::Dtype;
 use std::fmt;
