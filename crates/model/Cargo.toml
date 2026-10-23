@@ -21,6 +21,7 @@ brain-data.workspace = true
 # model already depends on directly - no circular dependency (`audio` does
 # not depend on `model`).
 brain-audio.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 # `half::f32_to_f16` (B5) reuses the `half` crate's well-tested f32<->f16
 # conversion for the HOST-side pack/unpack rather than hand-rolling a second

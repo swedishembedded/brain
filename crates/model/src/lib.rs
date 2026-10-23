@@ -48,6 +48,8 @@ pub mod serve;
 pub mod snapshot_prefix;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod distributed;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod job;
 pub mod fp8;
 pub mod gradnorm;
 pub mod gdn;
@@ -104,6 +106,8 @@ pub use optim::{grad_multiplier, Adam};
 pub use distributed::{federated_average, DdpOptimizer};
 #[cfg(not(target_arch = "wasm32"))]
 pub use netcollective::NetworkCollective;
+#[cfg(not(target_arch = "wasm32"))]
+pub use job::{JobContext, JobPlan};
 pub use grid::{Coord, Grid, LocalGroups};
 #[cfg(not(target_arch = "wasm32"))]
 pub use parallel::DataParallel;
