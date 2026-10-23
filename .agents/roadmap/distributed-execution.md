@@ -50,6 +50,28 @@ Scope: Running one training job as ranks across machines - the job plan every ra
       until the world size is part of the state's identity. Tests: the mean a
       reduction writes, the one-rank identity, and a fit run through the hook.
 
+- [x] **A distributed driver with a real data-parallel data split.**
+      `model::train::fit_distributed` builds the model and dataset exactly as
+      `fit` does and reduces every step's gradients over the caller's
+      `GradSync` group. `Objective::shard` gives each rank its own shard of the
+      deterministic batch stream: rank `r` of `world` trains on batches `r`,
+      `r + world`, ...; the shards are disjoint and their interleaving is the
+      unsharded stream, so averaging their gradients is data parallelism rather
+      than the same batch on every rank. `fit_controlled_sharded` applies the
+      shard and refuses one that disagrees with the gradient group's rank.
+      `gpt2::train::train_distributed` is the GPT binding. Only rank 0 writes
+      the checkpoint (the replicas are bit-identical); every rank reads it to
+      resume. Tests: the disjoint-shard/union and one-rank-identity cases in
+      `crates/model/src/train.rs`, and
+      `crates/gpt2/tests/distributed_train.rs`, which starts two OS processes
+      over loopback and asserts their trained replicas are bit-identical.
+
+- [x] **A train verb takes a job plan.** `brain gpt2 train <data_dir>
+      --job-plan FILE --job-rank N` joins the plan's collective, announces the
+      job and rank, and runs the distributed driver; giving only one of the
+      pair is a usage error. The flag is `--job-rank` because `--rank` is LoRA
+      rank throughout the CLI.
+
 ## Decisions
 
 - A cluster job's authority is its durable job record and its checkpoint
@@ -58,18 +80,24 @@ Scope: Running one training job as ranks across machines - the job plan every ra
   control surface: a worker never opens it, and a multi-node run does not
   create sessions on its workers.
 
+- Batch-stream sharding is index-based: every rank draws the whole stream and
+  keeps batch `n` only when `n % world == rank`. That keeps every rank on one
+  byte-for-byte identical schedule (the epoch order and the token generator
+  advance the same way everywhere) at the cost of `world` host-side batch
+  draws per used batch, which is sampling work, not model work.
+
 ## Open
 
-- [ ] No training verb takes the plan yet. A launcher starts
-      `brain <arch> train ...` with `--job-plan FILE --job-rank N`; the flag
-      names must not be `--rank`, which every trainer already uses for LoRA
-      rank. The driver builds `JobContext::collective`, passes
-      `fit_controlled_sync` the group, and gives each rank its own shard of the
-      batch stream (the reduction exists; the data split does not).
-- [ ] The distributed driver is reachable as a library only: `DdpOptimizer`,
-      `DataParallel` and `federated_average` have no production caller. The
-      first one should be the LoRA chat fine-tune, which today plans pipeline
-      stages across local cards inside one process.
+- [ ] Only the GPT trainer takes a job plan. The Qwen, GLM and LoRA trainers
+      still run single-process; the LoRA chat fine-tune is the next driver
+      worth wiring, since it already plans pipeline stages across local cards
+      inside one process.
+- [ ] Exact resume is still refused for a distributed run: the training state
+      names one rank's step and options but not the world size, so a resumed
+      job could change its group without being refused.
+- [ ] `DdpOptimizer`, `DataParallel` and `federated_average` have no
+      production caller; the shipped driver reduces through `reduce_grads` so
+      each model keeps its own optimizer and schedule.
 - [ ] Device-resident collectives and an NCCL provider (the `Collective` seam
       and the CUDA provider table are where they belong); today every payload
       is staged through host fp32.
