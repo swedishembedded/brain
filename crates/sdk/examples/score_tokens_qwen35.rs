@@ -16,11 +16,16 @@
 //!
 //! ```text
 //! cargo run --release -p brain --example score_tokens_qwen35 -- \
-//!   --base local:Qwen/Qwen3.8-27B-FP8 --records held-out.jsonl --out inproc-base.jsonl --device gpu0
+//!   --base local:Qwen/Qwen3.8-27B-FP8 --records held-out.jsonl --out inproc-base.jsonl \
+//!   --device gpu0 --backend cuda
 //! cargo run --release -p brain --example score_tokens_qwen35 -- \
 //!   --base local:Qwen/Qwen3.8-27B-FP8 --adapter adapter.brain.safetensors \
-//!   --records held-out.jsonl --out inproc-ce8t.jsonl --device gpu0
+//!   --records held-out.jsonl --out inproc-ce8t.jsonl --device gpu0 --backend cuda
 //! ```
+//!
+//! `--backend` matters: without it the process runs on the probe's preferred
+//! backend (Vulkan), and a 27B embedding table is larger than the wgpu binding
+//! limit, so the pass fails in `create_bind_group` after loading the base.
 //!
 //! `--variant plain|rs` and `--adapter-kind lora|ia3|lokr|dora` must name the
 //! tuning the adapter trained with: the card carries its rank and scale, not
@@ -39,7 +44,7 @@ fn die(why: &str) -> ! {
 fn main() {
     let mut args = std::env::args().skip(1);
     let (mut base, mut adapter, mut records, mut out, mut device) = (None, None, None, None, None);
-    let (mut variant, mut kind) = (None, None);
+    let (mut variant, mut kind, mut backend) = (None, None, None);
     while let Some(flag) = args.next() {
         let mut value = || args.next().unwrap_or_else(|| die(&format!("{flag} needs a value")));
         match flag.as_str() {
@@ -50,13 +55,19 @@ fn main() {
             "--device" => device = Some(value()),
             "--variant" => variant = Some(value()),
             "--adapter-kind" => kind = Some(value()),
+            "--backend" => backend = Some(value()),
             other => die(&format!("unknown flag {other}")),
         }
     }
     let (Some(base), Some(records), Some(out)) = (base, records, out) else {
-        die("usage: score_tokens_qwen35 --base <model> --records <held-out.jsonl> --out <scores.jsonl> [--adapter FILE] [--device D] [--variant plain|rs] [--adapter-kind KIND]")
+        die("usage: score_tokens_qwen35 --base <model> --records <held-out.jsonl> --out <scores.jsonl> [--adapter FILE] [--device D] [--backend wgpu|vulkan|cuda|cpu] [--variant plain|rs] [--adapter-kind KIND]")
     };
     let tuning = AdapterTuning::parse(variant.as_deref(), None, kind.as_deref()).unwrap_or_else(|e| die(&e));
+    // The selection must happen before the first pipeline is built: it is the
+    // `--backend` flag of the CLI, for a program that is not the CLI.
+    if let Some(backend) = backend.as_deref() {
+        brain::select_backend(backend).unwrap_or_else(|e| die(&e.to_string()));
+    }
     let device = Device::parse(device.as_deref().unwrap_or("gpu0")).unwrap_or_else(|e| die(&e));
     let readout = score_tokens_qwen35(&base, adapter.as_deref(), &records, tuning, &device).unwrap_or_else(|e| die(&e.to_string()));
     let mut lines = String::new();
