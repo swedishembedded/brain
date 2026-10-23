@@ -32,6 +32,23 @@ Scope: Running one training job as ranks across machines - the job plan every ra
       hanging), and a rank started with another plan (refused before any
       tensor moves).
 
+- [x] **A committed checkpoint generation.** `CheckpointCommit` names the
+      job, the plan identity, the global step, the world and every file with
+      its length and `sha256`. Rank 0 writes it once, atomically, after the
+      files are durable; a crashed commit leaves the previous generation the
+      newest, a reader verifies every file against the manifest before
+      resuming, and a manifest from another plan or world size is refused.
+      Tests: the `job::tests` commit cases (a generation, a crashed commit, a
+      tampered file).
+
+## Decisions
+
+- A cluster job's authority is its durable job record and its checkpoint
+  commit, not a per-worker session store. The durable session engine
+  (`crates/session`, content-addressed artifacts) is a single-writer local
+  control surface: a worker never opens it, and a multi-node run does not
+  create sessions on its workers.
+
 ## Open
 
 - [ ] No training verb takes the plan yet. A launcher starts
@@ -46,9 +63,10 @@ Scope: Running one training job as ranks across machines - the job plan every ra
 - [ ] Device-resident collectives and an NCCL provider (the `Collective` seam
       and the CUDA provider table are where they belong); today every payload
       is staged through host fp32.
-- [ ] A distributed checkpoint commit: rank 0 writes the weights and the
-      exact-resume state with a manifest naming the global step and the plan;
-      replicas are bit-identical, so one writer is enough until tensor
+- [ ] Wire the commit into a trainer: rank 0 writes the weights and the
+      exact-resume state, calls `CheckpointCommit::build`/`write`, and the
+      driver resumes from `CheckpointCommit::latest` after verifying it.
+      Replicas are bit-identical, so one writer is enough until tensor
       parallelism shards the weights.
 - [ ] Ring/tree all-reduce for worlds where the coordinator star's bandwidth
       matters, and cross-rank validation of every op on the worker side (the
