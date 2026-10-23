@@ -448,6 +448,14 @@ struct CausalLm {
     /// begun: epochs of every example once. `None` before [`Objective::begin`]
     /// and for a plain token stream, which is sampled in windows.
     order: Option<EpochOrder>,
+    /// This rank's part of the deterministic batch stream, `(rank, world)`:
+    /// the rank keeps batches `rank`, `rank + world`, ... and drops the rest.
+    /// `None` trains on the whole stream.
+    shard: Option<(usize, usize)>,
+    /// How many batches have been drawn from the whole stream, used and
+    /// dropped alike. Every rank advances it in the same steps, so the batch
+    /// at a given position is the same batch on every rank.
+    drawn_batches: u64,
 }
 
 /// Which example each draw takes: the examples shuffled once per epoch, every
@@ -509,7 +517,7 @@ pub fn causal_lm<M: Model>(
     batch_cfg: BatchConfig,
     itos: Option<Vec<char>>,
 ) -> impl Objective<M> {
-    CausalLm { train, val, batch_cfg, itos, order: None }
+    CausalLm::new(train, val, batch_cfg, itos)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -520,6 +528,22 @@ impl<M: Model> Objective<M> for CausalLm {
 
     fn begin(&mut self, seed: u64, draws_done: u64) {
         self.order = self.train.example_count().filter(|&n| n > 0).map(|n| EpochOrder::new(seed, n, draws_done));
+    }
+
+    /// Shard the batch stream. The stream itself is fixed by the run's seed:
+    /// [`EpochOrder`] is a pure function of the seed and the draw count, and a
+    /// token stream advances from the run's seeded generator, so batch `n` is
+    /// the same batch on every rank. Rank `r` keeps batch `n` exactly when
+    /// `n % world == r`, which splits the stream into `world` disjoint shards
+    /// whose interleaving is the unsharded stream. Every rank still draws
+    /// every batch (and drops its peers'), so their generators and epoch
+    /// orders stay on the same stream.
+    fn shard(&mut self, rank: usize, world: usize) -> std::io::Result<()> {
+        if world == 0 || rank >= world {
+            return Err(std::io::Error::other(format!("rank {rank} is not one of a world of {world}")));
+        }
+        self.shard = Some((rank, world));
+        Ok(())
     }
 
     fn micro_step(&mut self, model: &M, rng: &mut Rng) -> f32 {
@@ -597,9 +621,27 @@ impl<M: Model> Objective<M> for CausalLm {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl CausalLm {
-    /// The next training batch: the next examples of the epoch order, else
-    /// (before the run has begun, or for a stream of tokens) a random draw.
+    fn new(train: TokenDataset, val: TokenDataset, batch_cfg: BatchConfig, itos: Option<Vec<char>>) -> CausalLm {
+        CausalLm { train, val, batch_cfg, itos, order: None, shard: None, drawn_batches: 0 }
+    }
+
+    /// This rank's next training batch: the next batch of the stream that
+    /// belongs to its shard, or every batch when the run is not sharded.
     fn draw(&mut self, rng: &mut Rng) -> (Vec<u32>, Vec<i32>) {
+        loop {
+            let index = self.drawn_batches;
+            self.drawn_batches += 1;
+            let batch = self.draw_next(rng);
+            if self.shard.is_none_or(|(rank, world)| index % world as u64 == rank as u64) {
+                return batch;
+            }
+        }
+    }
+
+    /// The next batch of the whole (unsharded) stream: the next examples of
+    /// the epoch order, else (before the run has begun, or for a stream of
+    /// tokens) a random draw.
+    fn draw_next(&mut self, rng: &mut Rng) -> (Vec<u32>, Vec<i32>) {
         if let Some(order) = self.order.as_mut() {
             let picks: Vec<Option<usize>> = (0..self.batch_cfg.batch_size).map(|_| Some(order.next())).collect();
             if let Some(batch) = self.train.example_batch(&self.batch_cfg, &picks) {
@@ -1217,9 +1259,44 @@ pub struct GradSync<'a> {
 ///
 /// Exact resume is refused with a sync: the state is one rank's, and a world
 /// size is not part of its identity yet.
-pub fn fit_controlled_sync<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts: &FitOpts, out: Option<&Path>, mut control: FitControl<'_>, grad_sync: Option<GradSync<'_>>) -> std::io::Result<(FitReport, M)> {
+pub fn fit_controlled_sync<M: Model, O: Objective<M>>(model: M, obj: O, opts: &FitOpts, out: Option<&Path>, control: FitControl<'_>, grad_sync: Option<GradSync<'_>>) -> std::io::Result<(FitReport, M)> {
+    fit_controlled_sharded(model, obj, opts, out, control, grad_sync, None)
+}
+
+/// [`fit_controlled_sync`] with each rank training on its own shard of the
+/// batch stream ([`Objective::shard`]), so the gradients being averaged come
+/// from different batches rather than the same one computed `world` times.
+///
+/// `shard` is `(rank, world)` and must describe the same rank and group as
+/// `grad_sync` when both are given: a rank training on one shard while
+/// contributing to another position's group would combine batches that do not
+/// belong together.
+pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
+    mut model: M,
+    mut obj: O,
+    opts: &FitOpts,
+    out: Option<&Path>,
+    mut control: FitControl<'_>,
+    grad_sync: Option<GradSync<'_>>,
+    shard: Option<(usize, usize)>,
+) -> std::io::Result<(FitReport, M)> {
     if grad_sync.is_some() && control.state.is_some() {
         return Err(std::io::Error::other("exact resume is not supported for a distributed run yet"));
+    }
+    if let Some((rank, world)) = shard {
+        if world == 0 || rank >= world {
+            return Err(std::io::Error::other(format!("shard rank {rank} is not one of a world of {world}")));
+        }
+        if let Some(sync) = &grad_sync {
+            let group = sync.collective.world_size();
+            if (sync.rank, group) != (rank, world) {
+                return Err(std::io::Error::other(format!(
+                    "the batch shard {rank}/{world} disagrees with the gradient group's rank {}/{group}; every rank must train on the shard that matches its position in the group",
+                    sync.rank
+                )));
+            }
+        }
+        obj.shard(rank, world)?;
     }
     obj.prepare(&mut model)?;
     model.pin_rounding_seed(opts.seed);
@@ -1484,7 +1561,7 @@ pub fn fit_controlled_sync<M: Model, O: Objective<M>>(mut model: M, mut obj: O, 
 pub fn fit<M: Model>(dir: &Path, cfg: M::Config, opts: &FitOpts, out: Option<&Path>) -> std::io::Result<(f32, f32)> {
     let loaded = load(dir, opts)?;
     let model = build_or_resume::<M>(cfg, opts, out, loaded.vocab);
-    let obj = CausalLm { train: loaded.train, val: loaded.val, batch_cfg: loaded.batch_cfg, itos: loaded.itos, order: None };
+    let obj = CausalLm::new(loaded.train, loaded.val, loaded.batch_cfg, loaded.itos);
     fit_with(model, obj, opts, out)
 }
 
@@ -1549,8 +1626,36 @@ pub fn fit_from<M: Model>(
         }
     }
     let model = M::new(cfg, opts.batch_size, opts.block_size, &weights);
-    let obj = CausalLm { train: loaded.train, val: loaded.val, batch_cfg: loaded.batch_cfg, itos: loaded.itos, order: None };
+    let obj = CausalLm::new(loaded.train, loaded.val, loaded.batch_cfg, loaded.itos);
     fit_with(model, obj, opts, out)
+}
+
+/// Train `M` on one rank's shard of the dataset in `dir`, averaging every
+/// step's gradients over `grad_sync`'s group - the library entry point a
+/// distributed launcher drives (`gpt2::train::train_distributed` is the GPT
+/// binding of it).
+///
+/// The model and the dataset are built exactly as [`fit`] builds them, so
+/// every rank starts from the same weights (an existing checkpoint at `out`
+/// is resumed, else the run's seed initialises them), and each rank trains on
+/// its own interleaved shard of the batch stream ([`Objective::shard`]). Only
+/// rank 0 writes `out`: the replicas are bit-identical, so one writer is
+/// enough, and several ranks writing one path at once would corrupt it. The
+/// other ranks still read `out` to resume.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn fit_distributed<M: Model>(
+    dir: &Path,
+    cfg: M::Config,
+    opts: &FitOpts,
+    out: Option<&Path>,
+    grad_sync: GradSync<'_>,
+) -> std::io::Result<(FitReport, M)> {
+    let (train, val, batch_cfg, vocab, itos) = load_dataset_with_itos(dir, opts)?;
+    let model = build_or_resume::<M>(cfg, opts, out, vocab);
+    let obj = CausalLm::new(train, val, batch_cfg, itos);
+    let shard = (grad_sync.rank, grad_sync.collective.world_size());
+    let write = if grad_sync.rank == 0 { out } else { None };
+    fit_controlled_sharded(model, obj, opts, write, FitControl::default(), Some(grad_sync), Some(shard))
 }
 
 /// Generate `max_new` tokens continuing `prompt` for any token-head [`Model`].
@@ -1952,6 +2057,65 @@ mod tests {
         assert_eq!(*indices.borrow(), vec![1, 2, 3]);
     }
 
+    /// The ranks of a world draw disjoint shards of one deterministic batch
+    /// stream, and interleaved the shards are exactly the stream an unsharded
+    /// run draws: rank `r` trains on batches `r`, `r + world`, ... so
+    /// averaging the ranks' gradients is data parallelism rather than the same
+    /// batch computed twice.
+    #[test]
+    fn the_ranks_draw_disjoint_shards_that_union_to_the_unsharded_stream() {
+        const EXAMPLES: usize = 8;
+        const WORLD: usize = 2;
+        let drawn = |obj: &mut CausalLm, batches: u32| {
+            Objective::<Recorder>::begin(obj, 11, 0); // seed: a fixed order makes two ranks' streams comparable
+            let model = Recorder::new(RecorderCfg, 1, 4, &HashMap::new());
+            let mut rng = Rng::new(1); // seed: the shard is a property of the stream, not of the generator
+            Objective::<Recorder>::micro_steps(obj, &model, &mut rng, batches);
+            let seen: Vec<u32> = model.drawn.borrow().clone();
+            seen
+        };
+        let whole = drawn(&mut examples_objective(&[4; EXAMPLES], 4), EXAMPLES as u32);
+        assert_eq!(whole.len(), EXAMPLES);
+
+        let mut shards = Vec::new();
+        for rank in 0..WORLD {
+            let mut obj = examples_objective(&[4; EXAMPLES], 4);
+            Objective::<Recorder>::shard(&mut obj, rank, WORLD).expect("an example stream shards");
+            let seen = drawn(&mut obj, (EXAMPLES / WORLD) as u32);
+            let expected: Vec<u32> = whole.iter().skip(rank).step_by(WORLD).copied().collect();
+            assert_eq!(seen, expected, "rank {rank} must take every {WORLD}th batch from batch {rank}");
+            shards.push(seen);
+        }
+        let mut interleaved = Vec::with_capacity(EXAMPLES);
+        for i in 0..EXAMPLES / WORLD {
+            for shard in &shards {
+                interleaved.push(shard[i]);
+            }
+        }
+        assert_eq!(interleaved, whole, "the union of the shards must be the whole stream");
+        let mut every: Vec<u32> = shards.iter().flatten().copied().collect();
+        every.sort_unstable();
+        every.dedup();
+        assert_eq!(every.len(), EXAMPLES, "the shards must not overlap");
+    }
+
+    /// A shard of one is the whole stream: a run through the sharded path
+    /// draws exactly the batches, in exactly the order, of an unsharded run.
+    #[test]
+    fn a_shard_of_one_trains_exactly_like_an_unsharded_run() {
+        let opts = FitOpts { steps: 4, eval_interval: 0, ..Default::default() };
+        let plain = Recorder::new(RecorderCfg, 1, 4, &HashMap::new());
+        let plain_drawn = std::rc::Rc::clone(&plain.drawn);
+        fit_controlled(plain, examples_objective(&[4; 6], 4), &opts, None, FitControl::default()).expect("fit");
+
+        let sharded = Recorder::new(RecorderCfg, 1, 4, &HashMap::new());
+        let sharded_drawn = std::rc::Rc::clone(&sharded.drawn);
+        let coll = crate::HostCollective::new(1);
+        let sync = GradSync { collective: &*coll, rank: 0 };
+        fit_controlled_sharded(sharded, examples_objective(&[4; 6], 4), &opts, None, FitControl::default(), Some(sync), Some((0, 1))).expect("fit");
+        assert_eq!(*sharded_drawn.borrow(), *plain_drawn.borrow(), "a one-rank shard must draw the whole stream");
+    }
+
     /// The applied count is part of the exact-resume state: a run stopped
     /// after a skipped step continues the index where it left off.
     #[test]
@@ -2259,7 +2423,7 @@ mod tests {
             data.extend(std::iter::repeat_n(10 + i as u32, len));
         }
         let dataset = || TokenDataset::new_examples(data.clone(), vec![true; data.len()], &starts, 0, &cfg).unwrap();
-        CausalLm { train: dataset(), val: dataset(), batch_cfg: cfg.clone(), itos: None, order: None }
+        CausalLm::new(dataset(), dataset(), cfg.clone(), None)
     }
 
     /// A pass over the data takes every example once before any is taken

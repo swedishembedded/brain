@@ -69,6 +69,21 @@ pub trait Objective<M: Model> {
     /// resumed run continues the order a straight run would have followed.
     fn begin(&mut self, _seed: u64, _draws_done: u64) {}
 
+    /// Restrict this objective's training batches to one rank's shard of its
+    /// deterministic batch stream: rank `rank` of `world` trains on batches
+    /// `rank`, `rank + world`, `rank + 2 * world`, ... of the stream it would
+    /// draw unsharded. The shards are disjoint and their union is that stream,
+    /// which is what makes a data-parallel run average genuinely different
+    /// gradients instead of repeating one rank's batch on every rank.
+    ///
+    /// The default refuses: an objective whose batches come from somewhere
+    /// other than a reproducible stream this seam can index (a rollout, a
+    /// fixed replay buffer) cannot split one, and training it whole on every
+    /// rank would silently duplicate the data rather than parallelise it.
+    fn shard(&mut self, _rank: usize, _world: usize) -> Result<(), std::io::Error> {
+        Err(std::io::Error::other("this training objective cannot split its batch stream across ranks"))
+    }
+
     /// Run exactly one micro-step: draw a batch, upload it via
     /// [`Model::set_batch`], forward, decide any per-position loss weights,
     /// and backward - returning the scalar loss [`Model::forward`] produced.
@@ -169,6 +184,9 @@ impl<M: Model, O: Objective<M> + ?Sized> Objective<M> for Box<O> {
     fn begin(&mut self, seed: u64, draws_done: u64) {
         (**self).begin(seed, draws_done)
     }
+    fn shard(&mut self, rank: usize, world: usize) -> Result<(), std::io::Error> {
+        (**self).shard(rank, world)
+    }
     fn micro_step(&mut self, model: &M, rng: &mut Rng) -> f32 {
         (**self).micro_step(model, rng)
     }
@@ -206,6 +224,9 @@ impl<M: Model, O: Objective<M> + ?Sized> Objective<M> for &mut O {
     }
     fn begin(&mut self, seed: u64, draws_done: u64) {
         (**self).begin(seed, draws_done)
+    }
+    fn shard(&mut self, rank: usize, world: usize) -> Result<(), std::io::Error> {
+        (**self).shard(rank, world)
     }
     fn micro_step(&mut self, model: &M, rng: &mut Rng) -> f32 {
         (**self).micro_step(model, rng)
