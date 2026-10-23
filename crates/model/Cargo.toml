@@ -23,6 +23,9 @@ brain-data.workspace = true
 brain-audio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# The checkpoint commit names each file by its sha256, the spelling brain's
+# model store and adapter manifests already use for the same bytes.
+sha2.workspace = true
 # `half::f32_to_f16` (B5) reuses the `half` crate's well-tested f32<->f16
 # conversion for the HOST-side pack/unpack rather than hand-rolling a second
 # round-to-nearest-even/overflow/subnormal routine - already a workspace

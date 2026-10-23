@@ -107,7 +107,7 @@ pub use distributed::{federated_average, DdpOptimizer};
 #[cfg(not(target_arch = "wasm32"))]
 pub use netcollective::NetworkCollective;
 #[cfg(not(target_arch = "wasm32"))]
-pub use job::{JobContext, JobPlan};
+pub use job::{CheckpointCommit, CommitFile, JobContext, JobPlan};
 pub use grid::{Coord, Grid, LocalGroups};
 #[cfg(not(target_arch = "wasm32"))]
 pub use parallel::DataParallel;
