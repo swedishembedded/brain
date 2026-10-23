@@ -5,7 +5,8 @@
 //! shared `args` grammar; `infer` is the canonical verb for `gen`.
 //!
 //!   brain gpt train <data_dir> [--out F --steps N --batch B --block T --lr X
-//!                               --layers L --d-model D --heads H --mask = --align]
+//!                               --layers L --d-model D --heads H --mask = --align
+//!                               --job-plan FILE --job-rank N]
 //!   brain gpt infer --weights F [--data <dir>] [--prompt "..." --max-new N
 //!                               --temp X --top-k K]
 //!   brain gpt eval  --weights F --data <dir> [--batches N --samples M]
@@ -75,20 +76,87 @@ fn train(args: &[String]) {
     cfg.n_layers = a.u32_or("--layers", cfg.n_layers);
     cfg.d_model = a.u32_or("--d-model", cfg.d_model);
     cfg.n_heads = a.u32_or("--heads", cfg.n_heads);
-    o.seed = a.seed("gpt2 train");
     if let Some(m) = a.char_opt("--mask") {
         o.mask_before = Some(m);
         o.mask_per_line = true;
     }
     o.align_to_lines = a.take_flag("--align");
+    // The distributed pair. `--rank` is LoRA rank everywhere else in the CLI,
+    // so this process's place in a job is `--job-rank`.
+    let job_plan = a.take_str("--job-plan");
+    let job_rank = a.take_str("--job-rank").map(|value| match value.parse::<usize>() {
+        Ok(rank) => rank,
+        Err(_) => {
+            eprintln!("--job-rank {value:?} is not a rank number");
+            std::process::exit(2);
+        }
+    });
+    let job = match (job_plan, job_rank) {
+        (None, None) => None,
+        (Some(plan), Some(rank)) => Some((plan, rank)),
+        _ => {
+            eprintln!("usage: --job-plan FILE and --job-rank N must be given together (the plan every rank shares, and this rank's place in it)");
+            std::process::exit(2);
+        }
+    };
+    // Every rank of a job must start from the same weights and draw the same
+    // batch stream, so it must train with the same seed. A rank that drew its
+    // own random one would diverge from its peers before the first reduction.
+    // The plan file is the value every rank shares, so its digest is the seed
+    // when none was given.
+    o.seed = match (job.as_ref().map(|(plan, _)| plan), a.seed_opt("--seed")) {
+        (_, Some(seed)) => seed,
+        (Some(plan), None) => match plan_seed(Path::new(plan)) {
+            Ok(seed) => seed,
+            Err(e) => {
+                eprintln!("error: reading {plan}: {e}");
+                std::process::exit(1);
+            }
+        },
+        (None, None) => a.seed("gpt2 train"),
+    };
     a.finish();
     o.decay_iters = o.steps;
     println!(
         "training gpt on {dir}: steps={} batch={} block={} layers={} d_model={} heads={}",
         o.steps, o.batch_size, o.block_size, cfg.n_layers, cfg.d_model, cfg.n_heads
     );
-    match gpt2::train::train(Path::new(&dir), cfg, &o, out.as_deref()) {
-        Ok((i0, i1)) => println!("done: train loss {i0:.4} -> {i1:.4}"),
+    let Some((plan, rank)) = job else {
+        match gpt2::train::train(Path::new(&dir), cfg, &o, out.as_deref()) {
+            Ok((i0, i1)) => println!("done: train loss {i0:.4} -> {i1:.4}"),
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    };
+    let context = match model::JobContext::from_plan_file(Path::new(&plan), rank) {
+        Ok(context) => context,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    };
+    println!(
+        "distributed job {:?} rank {}/{}",
+        context.plan().job,
+        context.rank(),
+        context.plan().world_size
+    );
+    let collective = match context.collective() {
+        Ok(collective) => collective,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    };
+    let sync = model::GradSync { collective: &collective, rank: context.rank() };
+    match gpt2::train::train_distributed(Path::new(&dir), cfg, &o, out.as_deref(), sync) {
+        Ok((report, _)) => {
+            let final_loss = report.final_loss.unwrap_or(report.initial_loss);
+            println!("done: train loss {:.4} -> {final_loss:.4}", report.initial_loss);
+        }
         Err(e) => {
             eprintln!("error: {e}");
             std::process::exit(1);
@@ -144,4 +212,36 @@ fn gen(args: &[String]) {
 /// Read the block size from a checkpoint header so the decoder is sized right.
 fn model_block(weights: &str) -> u32 {
     GptConfig::from_json(&checkpoint::read_config(weights)).block_size
+}
+
+/// The seed a distributed rank trains with when `--seed` was not given: the
+/// digest of the plan file, which every rank of the job holds byte for byte.
+/// Same plan, same starting weights and batch order on every rank.
+fn plan_seed(plan: &Path) -> std::io::Result<u64> {
+    use sha2::{Digest as _, Sha256};
+    let digest = Sha256::digest(std::fs::read(plan)?);
+    let seed = u64::from_le_bytes(digest[..8].try_into().expect("a SHA-256 digest holds eight bytes"));
+    eprintln!("gpt2 train: no --seed given, using seed {seed} from the job plan {}", plan.display());
+    Ok(seed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plan_seed;
+
+    /// The same plan file must give every rank the same seed, or the ranks
+    /// start from different weights and train on different batch streams.
+    #[test]
+    fn the_plan_file_yields_one_seed_and_a_different_plan_a_different_one() {
+        let dir = std::env::temp_dir().join(format!("brain-gpt2-plan-seed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.json");
+        let b = dir.join("b.json");
+        std::fs::write(&a, br#"{"job":"a"}"#).unwrap();
+        std::fs::write(&b, br#"{"job":"b"}"#).unwrap();
+        assert_eq!(plan_seed(&a).unwrap(), plan_seed(&a).unwrap(), "one plan, one seed");
+        assert_ne!(plan_seed(&a).unwrap(), plan_seed(&b).unwrap(), "a different plan must not replay the same stream");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

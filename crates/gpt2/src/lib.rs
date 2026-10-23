@@ -14,7 +14,7 @@ pub mod train;
 
 pub use init::init_weights;
 pub use model::{Gpt, GptConfig, Shard};
-pub use train::{train, TrainOpts};
+pub use train::{train, train_distributed, TrainOpts};
 /// Generic multi-GPU pipeline sharding (see [`::model::Pipeline`]); use as
 /// `Pipeline::<Gpt>::new(..)`.
 pub use ::model::Pipeline;

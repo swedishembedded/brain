@@ -32,6 +32,26 @@ pub fn train(dir: &Path, cfg: GptConfig, opts: &TrainOpts, out: Option<&Path>) -
     model::train::fit::<crate::model::Gpt>(dir, cfg, opts, out)
 }
 
+/// Train a GPT as one rank of a distributed job: the same model and dataset
+/// [`train`] builds, with every optimizer step's gradients averaged over the
+/// group `sync` names and each rank training on its own shard of the batch
+/// stream. See [`model::train::fit_distributed`], which owns the semantics;
+/// this is the GPT binding.
+///
+/// Hands the trained replica back so a caller can export it (the rank that
+/// owns `out` has already written the same weights there). Only rank 0 writes
+/// `out`; every rank reads it when it exists, so a resumed job starts from
+/// the committed replica.
+pub fn train_distributed(
+    dir: &Path,
+    cfg: GptConfig,
+    opts: &TrainOpts,
+    out: Option<&Path>,
+    sync: model::GradSync<'_>,
+) -> std::io::Result<(model::FitReport, crate::model::Gpt)> {
+    model::train::fit_distributed::<crate::model::Gpt>(dir, cfg, opts, out, sync)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
