@@ -33,6 +33,7 @@ heading and a `Scope: <one sentence>` line under it, then run `make generate/roa
 | [`deepseek2ocr`](deepseek2ocr.md) | deepseek2ocr | DeepSeek-OCR (`crates/deepseek2ocr`, `deepseek2`, `sam1`). |
 | [`deepseekocr2`](deepseekocr2.md) | deepseekocr2 | DeepSeek-OCR-2 (`crates/deepseekocr2`). |
 | [`deepseekvl`](deepseekvl.md) | deepseekvl | DeepSeek-VL-7B-chat (`crates/deepseekvl`). |
+| [`distributed-execution`](distributed-execution.md) | distributed-execution | Running one training job as ranks across machines - the job plan every rank agrees on, the process group it joins, the transport's failure semantics, and the tests that start a cluster as real processes (`crates/model`: `job`, `collective`, `netcollective`, `distributed`, `grid`). |
 | [`doom`](doom.md) | doom - roadmap: search, then compression, to UV-Max | The DOOM decision sample (`samples/decision/doom`) and the search runtime it drives. |
 | [`dtype`](dtype.md) | dtype | Keeping measured numbers out of `docs/` and attached to the tests that assert them. |
 | [`embeddings`](embeddings.md) | embeddings | Text embedding, retrieval, RAG and contrastive fine-tuning through the SDK. |
