@@ -96,6 +96,10 @@ impl Model for Lin {
     fn write_weight(&self, _n: &str, data: &[f32]) {
         self.w.borrow_mut().copy_from_slice(data);
     }
+    fn write_grad(&self, _n: &str, data: &[f32]) -> Result<(), String> {
+        self.grad.borrow_mut().copy_from_slice(data);
+        Ok(())
+    }
     fn read_grad(&self, _n: &str) -> Vec<f32> {
         self.grad.borrow().clone()
     }
@@ -201,4 +205,46 @@ fn federated_round_averages_node_models() {
     });
     assert_eq!(wa, vec![5.0, 2.0]);
     assert_eq!(wb, vec![5.0, 2.0]);
+}
+
+/// A collective whose peers contribute a fixed vector, so the averaging a
+/// reduction performs is visible without a second process.
+struct Constant(Vec<f32>);
+
+impl Collective for Constant {
+    fn world_size(&self) -> usize {
+        2
+    }
+    fn all_reduce<'a>(&'a self, _rank: usize, _local: model::collective::Payload) -> model::collective::CollectiveFuture<'a, model::collective::Payload> {
+        let out = model::collective::Payload::f32(self.0.clone());
+        Box::pin(async move { Ok(out) })
+    }
+    fn all_gather<'a>(&'a self, _rank: usize, local: model::collective::Payload) -> model::collective::CollectiveFuture<'a, model::collective::Payload> {
+        Box::pin(async move { Ok(local) })
+    }
+    fn reduce_scatter<'a>(&'a self, _rank: usize, local: model::collective::Payload) -> model::collective::CollectiveFuture<'a, model::collective::Payload> {
+        Box::pin(async move { Ok(local) })
+    }
+    fn broadcast<'a>(&'a self, _rank: usize, local: model::collective::Payload, _root: usize) -> model::collective::CollectiveFuture<'a, model::collective::Payload> {
+        Box::pin(async move { Ok(local) })
+    }
+}
+
+#[test]
+fn reduce_grads_writes_the_mean_of_the_reduced_gradient() {
+    // The collective reports a sum of [10, 20] for a world of two; each rank
+    // then holds the mean [5, 10] as its gradient.
+    let model = Lin::with_target(vec![0.0, 0.0], vec![1.0, 1.0]);
+    model.grad.borrow_mut().copy_from_slice(&[1.0, 1.0]);
+    model::reduce_grads(&model, &Constant(vec![10.0, 20.0]), 0).expect("reduce");
+    assert_eq!(model.read_grad("w"), vec![5.0, 10.0]);
+}
+
+#[test]
+fn reduce_grads_over_one_rank_keeps_the_gradient() {
+    let model = Lin::with_target(vec![0.0], vec![2.0]);
+    model.grad.borrow_mut().copy_from_slice(&[3.0]);
+    let coll = HostCollective::new(1);
+    model::reduce_grads(&model, &*coll, 0).expect("reduce");
+    assert_eq!(model.read_grad("w"), vec![3.0]);
 }

@@ -417,6 +417,13 @@ impl ParamStore {
     pub fn read_grad(&self, gpu: &Gpu, name: &str) -> Vec<f32> {
         gpu.read(self.g(name), self.numel(name))
     }
+    /// Replace a parameter's gradient, e.g. with a gradient another rank
+    /// contributed to. The length must equal the parameter's.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn write_grad(&self, gpu: &Gpu, name: &str, data: &[f32]) {
+        assert_eq!(data.len(), self.numel(name), "gradient length mismatch for {name}");
+        gpu.write(self.g(name), bytemuck::cast_slice(data));
+    }
 
     /// The AdamW first and second moments of the device-optimised parameter
     /// `name`, or `None` when it has none on the device (frozen, or offloaded

@@ -103,7 +103,7 @@ pub mod yarn;
 pub use collective::{Collective, HostCollective};
 pub use optim::{grad_multiplier, Adam};
 #[cfg(not(target_arch = "wasm32"))]
-pub use distributed::{federated_average, DdpOptimizer};
+pub use distributed::{federated_average, reduce_grads, DdpOptimizer};
 #[cfg(not(target_arch = "wasm32"))]
 pub use netcollective::NetworkCollective;
 #[cfg(not(target_arch = "wasm32"))]
@@ -121,7 +121,7 @@ pub use trainprec::{ResidentRequest, StateSupport, TrainPrecision, TrainPrecisio
 pub use score::{score_base, score_dataset, score_tuned, supervised_positions, ScoredSet};
 pub use train::{cosine_lr, generate, FitOpts, LrSchedule, IGNORE};
 #[cfg(not(target_arch = "wasm32"))]
-pub use train::{build_or_resume, causal_lm, fit, fit_controlled, fit_from, fit_with, load_dataset, load_dataset_with_itos, AdapterSnapshots, FitControl, FitReport, StepReport};
+pub use train::{build_or_resume, causal_lm, fit, fit_controlled, fit_controlled_sync, fit_from, fit_with, load_dataset, load_dataset_with_itos, AdapterSnapshots, FitControl, FitReport, GradSync, StepReport};
 
 /// What a batch looks like for a given model. Decoder-LM and seq2seq differ in
 /// whether there is a separate source sequence; this enum keeps `set_batch`
@@ -368,6 +368,13 @@ pub trait Model {
     fn read_weight(&self, name: &str) -> Vec<f32>;
     fn write_weight(&self, name: &str, data: &[f32]);
     fn read_grad(&self, name: &str) -> Vec<f32>;
+
+    /// Replace `name`'s gradient, as a data-parallel reduction needs to. The
+    /// default refuses; a model that cannot expose its gradients cannot be
+    /// trained through a [`crate::Collective`].
+    fn write_grad(&self, name: &str, _data: &[f32]) -> Result<(), String> {
+        Err(format!("{name}: this model does not expose its gradients for a reduction"))
+    }
 
     // ---- inference / scoring ----
     /// Per-position logits for one sequence, row-major `[len * vocab]` (decoder

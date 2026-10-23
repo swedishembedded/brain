@@ -1200,7 +1200,27 @@ fn load_train_state<M: Model>(model: &M, path: &Path, opts: &FitOpts, identity: 
 /// and read back at the end; with neither the run is refused at the first improvement, since
 /// returning the last step as the selection would silently defeat early stopping. The selection is
 /// part of the exact-resume state.
-pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts: &FitOpts, out: Option<&Path>, mut control: FitControl<'_>) -> std::io::Result<(FitReport, M)> {
+pub fn fit_controlled<M: Model, O: Objective<M>>(model: M, obj: O, opts: &FitOpts, out: Option<&Path>, control: FitControl<'_>) -> std::io::Result<(FitReport, M)> {
+    fit_controlled_sync(model, obj, opts, out, control, None)
+}
+
+/// Where a run's gradients are reduced: the group, and this rank in it.
+pub struct GradSync<'a> {
+    /// The ranks to reduce with.
+    pub collective: &'a dyn crate::Collective,
+    /// This process's rank.
+    pub rank: usize,
+}
+
+/// [`fit_controlled`] with every optimizer step's gradients averaged across
+/// `grad_sync`'s ranks first, which is what a data-parallel run needs.
+///
+/// Exact resume is refused with a sync: the state is one rank's, and a world
+/// size is not part of its identity yet.
+pub fn fit_controlled_sync<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts: &FitOpts, out: Option<&Path>, mut control: FitControl<'_>, grad_sync: Option<GradSync<'_>>) -> std::io::Result<(FitReport, M)> {
+    if grad_sync.is_some() && control.state.is_some() {
+        return Err(std::io::Error::other("exact resume is not supported for a distributed run yet"));
+    }
     obj.prepare(&mut model)?;
     model.pin_rounding_seed(opts.seed);
     let mut rng = Rng::new(opts.seed ^ 0xA5A5_5A5A);
@@ -1255,6 +1275,9 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
                 let scale = 1.0 / opts.grad_accum.max(1) as f32;
                 let clip = (opts.grad_clip > 0.0).then_some(opts.grad_clip);
                 applied += 1;
+                if let Some(sync) = &grad_sync {
+                    crate::distributed::reduce_grads(&model, sync.collective, sync.rank).map_err(std::io::Error::other)?;
+                }
                 model.adamw_step(applied, lr, opts.weight_decay, opts.adam, clip, scale);
             }
             StepVerdict::Skip(why) => println!("step {:>6}: no optimiser step taken: {why}", step + 1),
@@ -1803,6 +1826,9 @@ mod tests {
         fn read_grad(&self, _name: &str) -> Vec<f32> {
             vec![0.0]
         }
+        fn write_grad(&self, _name: &str, _data: &[f32]) -> Result<(), String> {
+            Ok(())
+        }
         fn logits_all(&self, _t: &[u32]) -> Option<Vec<f32>> {
             None
         }
@@ -1909,6 +1935,20 @@ mod tests {
         let script = [StepVerdict::Apply, StepVerdict::Skip("empty".into()), StepVerdict::Apply, StepVerdict::Apply];
         let opts = FitOpts { steps: 4, eval_interval: 0, ..Default::default() };
         fit_controlled(model, Verdicts(script.into()), &opts, None, FitControl::default()).expect("fit");
+        assert_eq!(*indices.borrow(), vec![1, 2, 3]);
+    }
+
+    /// A distributed step reduces the gradients across the group before the
+    /// model's own optimiser runs; over one rank that reduction is the
+    /// identity, so the run is unchanged.
+    #[test]
+    fn a_one_rank_gradient_sync_leaves_the_step_unchanged() {
+        let opts = FitOpts { steps: 3, eval_interval: 0, ..Default::default() };
+        let model = Recorder::new(RecorderCfg, 1, 1, &HashMap::new());
+        let indices = std::rc::Rc::clone(&model.indices);
+        let coll = crate::HostCollective::new(1);
+        let sync = GradSync { collective: &*coll, rank: 0 };
+        fit_controlled_sync(model, Verdicts(Default::default()), &opts, None, FitControl::default(), Some(sync)).expect("fit");
         assert_eq!(*indices.borrow(), vec![1, 2, 3]);
     }
 

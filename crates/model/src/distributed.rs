@@ -23,7 +23,7 @@
 //! ([`FlatAdam`], [`fed_avg_flat`]) is split out and unit-tested against a
 //! collective directly; the `Model`-generic wrappers are thin flatten/scatter glue.
 
-use crate::collective::{CollectiveResult, Payload};
+use crate::collective::{CollectiveError, CollectiveResult, Payload};
 use crate::{Collective, Model};
 
 // ---- testable numeric core (operates on flat parameter vectors) ----------------
@@ -89,6 +89,24 @@ pub fn fed_avg_flat(coll: &dyn Collective, rank: usize, weights: &[f32], local_s
     let den = pollster::block_on(coll.all_reduce(rank, Payload::f32(vec![local_samples])))?.data[0];
     let inv = 1.0 / den.max(1e-12);
     Ok(num.iter().map(|&x| x * inv).collect())
+}
+
+/// Replace every parameter's gradient with the mean of the replicas' gradients,
+/// which is the update a data-parallel step applies. Used before the model's own
+/// optimiser step, so its schedule, clipping and resume state stay the model's.
+///
+/// Every rank must call this after its backward pass. The averaging is what
+/// makes the replicas bit-identical: they start equal, reduce to the same
+/// vector, and run the same optimiser.
+pub fn reduce_grads<M: Model>(model: &M, coll: &dyn Collective, rank: usize) -> CollectiveResult<()> {
+    let world = coll.world_size() as f32;
+    for name in model.param_names() {
+        let local = model.read_grad(&name);
+        let summed = pollster::block_on(coll.all_reduce(rank, Payload::f32(local)))?.data;
+        let mean: Vec<f32> = summed.iter().map(|value| value / world).collect();
+        model.write_grad(&name, &mean).map_err(CollectiveError::Transport)?;
+    }
+    Ok(())
 }
 
 // ---- Model-generic glue (flatten from / scatter to the model) ------------------

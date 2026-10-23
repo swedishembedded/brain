@@ -960,6 +960,10 @@ impl Gpt {
     pub fn read_grad(&self, name: &str) -> Vec<f32> {
         self.ps.read_grad(&self.gpu, name)
     }
+    /// Replace `name`'s gradient.
+    pub fn write_grad(&self, name: &str, data: &[f32]) {
+        self.ps.write_grad(&self.gpu, name, data);
+    }
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
         self.ps.read_weight(&self.gpu, name)
     }
@@ -1300,6 +1304,11 @@ impl model::Model for Gpt {
     }
     fn read_grad(&self, name: &str) -> Vec<f32> {
         Gpt::read_grad(self, name)
+    }
+
+    fn write_grad(&self, name: &str, data: &[f32]) -> Result<(), String> {
+        Gpt::write_grad(self, name, data);
+        Ok(())
     }
 
     fn logits_all(&self, tokens: &[u32]) -> Option<Vec<f32>> {
