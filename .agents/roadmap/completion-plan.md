@@ -531,8 +531,9 @@ copies.
 - [x] `minimaxmusic3`'s vocoder/DiT/depth adapters are `model::lora::Pair`:
       its `LoraW`, delta, apply and gradient projection are the shared ones
       (2026-10-24).
-- [ ] `deepseekocr2`'s device LoRA onto `AdapterRuntime`, and `minicpmv`'s
-      `TowerLora` onto a vision-tower adapter seam (neither exists yet).
+- [x] `deepseekocr2`'s device LoRA onto `AdapterRuntime` (2026-10-24). Still
+      open: `minicpmv`'s `TowerLora`, which needs a vision-tower adapter seam
+      (the runtime's scratch is sized for a decoder's rows).
 - [x] One `vae::blocks::train_kernel_set` for sdxlunet, supir, controlnet,
       rrdbnet and vqgan (2026-10-24).
 - [x] `optim::NamedMoments` owns the host trainer's AdamW state; SUPIR steps
@@ -541,6 +542,11 @@ copies.
       random one per run, so whether a rank-2 adapter reached a fixed bar
       depended on the draw (the DiT case measured 0.61-0.85 of its starting
       loss across seeds at an unchanged bar that demanded 0.6) (2026-10-24).
+- [ ] `deepseekocr2`'s composite finite-difference check fails at HEAD
+      (analytic 9.4e-6 against numeric 1.19e-5, rel 0.21): the loss's
+      gradient through the splice is small enough that the FD step's own
+      rounding dominates, so the check needs a larger perturbation or a
+      larger signal, not a looser tolerance.
 - [ ] `qwen35moe`'s caps tests panic in `model::int8` ("activation K must be a
       multiple of 32 (got 24)") on a GPU box: the tiny config is built at the
       hardware default precision, and its narrow contraction width is one the
