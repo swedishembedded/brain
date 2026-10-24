@@ -114,6 +114,27 @@ Scope: Running one training job as ranks across machines - the job plan every ra
       point), and `crates/bench/tests/distributed_profile.rs`, which runs the
       profile small and parses its report.
 
+- [x] **A distributed run reports its own collective cost.**
+      `brain gpt2 train` and `brain qwen3 finetune --lora` take
+      `--profile-collectives FILE` alongside `--job-plan`/`--job-rank`. Each
+      rank wraps its joined transport in `collective::TimedCollective` for the
+      run and writes `FILE.rank<rank>.json`: the plan identity, rank, world,
+      the training call's wall time and the collective's share of it, plus per
+      op kind the call count, staged bytes, total and p50/p95/p99. The
+      reported share is of the whole call (a checkpoint load and dataset
+      render included); a per-step share is measured by differencing two step
+      counts so the fixed part cancels. The wrapper lives
+      only in the verb's own scope, so a run without the flag constructs no
+      wrapper and writes no file (the `FitControl`/`GradSync` seam is
+      unchanged); a flag without a job plan is a usage error, since a
+      one-process run has no collective to measure and `distributed_profile`
+      already covers world 1. The document is `Snapshot::to_json`, the same
+      accounting shape the profile bench emits. Tests: the flag's refusal on
+      both verbs, its acceptance with a job plan, and the two-process
+      distributed training test, which writes one document per rank and
+      asserts they agree on world and plan identity with a non-zero op count
+      and byte count, and that the run without the flag writes none.
+
 - [x] **A base is hashed once, not once per rank and per save.**
       `fetch::file_digest_sidecar` records `sha256:<hex>` with the file's length
       and nanosecond modification time in a `<file>.sha256` sibling and reuses
@@ -204,6 +225,18 @@ Scope: Running one training job as ranks across machines - the job plan every ra
   - fixed per-run overhead was dominated by the per-process SHA-256 of the
     2.2 GiB base (about 14 s), which every rank recomputed at save time; a
     validated sidecar now serves it after the first process hashes it.
+- **Qwen3-0.6B LoRA, two P40s, world 2, `--profile-collectives`**
+  (LoRA 4, block 128, batch 1, Vulkan, eval-free): 20,185,088 bytes and 784
+  all-reduce calls per rank over two steps - 10,092,544 bytes (9.63 MiB) and
+  392 reductions per step, the same volume the traced run above saw. Rank 0
+  spent 170.1 ms in the collective over the run (85.0 ms/step), rank 1
+  364.2 ms (182.1 ms/step): the star is asymmetric, the worker waiting on the
+  coordinator's compute. Differencing a 4-step run (4552.8 ms) against the
+  2-step one (3325.0 ms) puts a step at 613.9 ms with about 2.10 s of fixed
+  setup, so the collective is 13.9% of a step on rank 0 and 29.7% on rank 1;
+  the share of the whole training call is 5.1% and 10.9%. Per-step reduction
+  time varies between runs (rank 1 measured 94.7 ms/step at 4 steps), so the
+  fixed part is differenced rather than assumed.
 
 ## Open
 
@@ -232,9 +265,6 @@ Scope: Running one training job as ranks across machines - the job plan every ra
       driver resumes from `CheckpointCommit::latest` after verifying it.
       Replicas are bit-identical, so one writer is enough until tensor
       parallelism shards the weights.
-- [ ] The trainer prints no collective timings; the comm share above came from
-      tracing sockets. Wire `TimedCollective` into the distributed fit behind a
-      flag so a run reports its own comm bytes, time and share.
 - [ ] Ring/tree all-reduce for worlds where the coordinator star's bandwidth
       matters, and cross-rank validation of every op on the worker side (the
       coordinator validates today; a worker's own rank/length is checked
