@@ -8,7 +8,8 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest, Sha256};
 
@@ -108,13 +109,55 @@ pub fn file_digest(path: &Path) -> std::io::Result<String> {
     Ok(format!("sha256:{}", sha256_file(path)?))
 }
 
+/// [`file_digest`], reusing a validated digest recorded in a sidecar next to
+/// the file (see [`base_digest_sidecar`] for the whole-base form).
+///
+/// The sidecar (`<file>.sha256`) records the digest with the length and
+/// modification time in nanoseconds the file had when it was hashed. It is
+/// trusted only when both still match the file, so a hit returns the digest
+/// those bytes gave when they were hashed; a file whose length or marker moved
+/// is hashed again. A same-length rewrite that also restores the modification
+/// time is indistinguishable from an unchanged file - the limit of a stat
+/// marker. When the filesystem reports no modification time there is no marker
+/// to prove a hit, so every call recomputes and no sidecar is written.
+///
+/// A missing, unreadable, corrupt or mismatched sidecar costs one re-hash, and
+/// the sidecar is replaced. Writes go to a per-process temporary and are
+/// renamed into place, so several ranks hashing the same base at once can only
+/// leave a complete sidecar behind.
+pub fn file_digest_sidecar(path: &Path) -> std::io::Result<String> {
+    let meta = std::fs::metadata(path)?;
+    let Some((len, mtime)) = change_marker(&meta) else {
+        return file_digest(path);
+    };
+    let sidecar = sidecar_path(path);
+    if let Some(recorded) = read_sidecar(&sidecar, len, mtime) {
+        return Ok(recorded);
+    }
+    let digest = file_digest(path)?;
+    write_sidecar(&sidecar, &digest, len, mtime);
+    Ok(digest)
+}
+
 /// The content digest naming a base: a file's own ([`file_digest`]), or for a
 /// `transformers` directory the digest of its `config.json` and weight files'
 /// digests in name order, so a change to any of them is a different base. A
 /// fine-tune records it and a server recomputes it to bind an adapter to the
-/// base it was trained on, so both must call this one function.
+/// base it was trained on, so both must come from this one naming rule;
+/// [`base_digest_sidecar`] is the cached form, answering the same digest.
 pub fn base_digest(path: &Path) -> std::io::Result<String> {
     base_digest_with(path, &mut |p| file_digest(p))
+}
+
+/// [`base_digest`] with each file's digest reused from its validated sidecar
+/// ([`file_digest_sidecar`]). Hashing a released checkpoint reads the whole
+/// file (seconds per gigabyte), which every rank of a distributed fine-tune,
+/// and every save of the same base, would otherwise repeat; the sidecar makes
+/// the second and later reads a stat. The digest is the same one
+/// [`base_digest`] returns - only the reading is skipped, and only while the
+/// file's length and modification time still match.
+pub fn base_digest_sidecar(path: &Path) -> std::io::Result<String> {
+    base_digest_with(path, &mut |p| file_digest_sidecar(p))
 }
 
 /// [`base_digest`], with each file's digest kept in the cache file `cache`
@@ -147,9 +190,63 @@ pub fn base_digest_cached(path: &Path, cache: &Path) -> std::io::Result<String> 
 type FileIdentity = (String, u64, u128);
 
 fn file_identity(p: &Path) -> Option<FileIdentity> {
-    let meta = std::fs::metadata(p).ok()?;
+    let (len, mtime) = change_marker(&std::fs::metadata(p).ok()?)?;
+    Some((std::fs::canonicalize(p).ok()?.to_str()?.to_string(), len, mtime))
+}
+
+/// A file's change marker: its length and modification time in nanoseconds.
+/// `None` when the platform reports no modification time, which callers read
+/// as "no marker, so never trust a cached digest".
+fn change_marker(meta: &std::fs::Metadata) -> Option<(u64, u128)> {
     let mtime = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
-    Some((std::fs::canonicalize(p).ok()?.to_str()?.to_string(), meta.len(), mtime))
+    Some((meta.len(), mtime))
+}
+
+/// Where a file's digest sidecar lives: the file's own name plus `.sha256`.
+fn sidecar_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".sha256");
+    PathBuf::from(name)
+}
+
+/// The digest a sidecar records, if it is a well-formed record that still
+/// describes a file of `len` bytes modified at `mtime` (nanoseconds). Anything
+/// else - unreadable, truncated, not lowercase hex, another length or another
+/// marker - is `None`, which the caller answers by hashing the file again.
+fn read_sidecar(sidecar: &Path, len: u64, mtime: u128) -> Option<String> {
+    let text = std::fs::read_to_string(sidecar).ok()?;
+    let mut fields = text.trim_end().split('\t');
+    let digest = fields.next()?;
+    let recorded_len: u64 = fields.next()?.parse().ok()?;
+    let recorded_mtime: u128 = fields.next()?.parse().ok()?;
+    if fields.next().is_some() || recorded_len != len || recorded_mtime != mtime {
+        return None;
+    }
+    let hex = digest.strip_prefix("sha256:")?;
+    (hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+        .then(|| digest.to_string())
+}
+
+/// Record `digest` for a `len`-byte file modified at `mtime`, atomically. A
+/// failure costs the next call a re-hash, never the digest.
+fn write_sidecar(sidecar: &Path, digest: &str, len: u64, mtime: u128) {
+    write_atomic(sidecar, &format!("{digest}\t{len}\t{mtime}\n"));
+}
+
+/// Replace `path` with `contents` through a sibling temporary that is renamed
+/// over it, so a concurrent reader sees the old file or the complete new one.
+/// The temporary name carries the process id and a per-call sequence, so ranks
+/// and threads writing the same path never share one.
+fn write_atomic(path: &Path, contents: &str) -> bool {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let mut name = path.as_os_str().to_os_string();
+    name.push(format!(".{}.{}.tmp", std::process::id(), SEQUENCE.fetch_add(1, Ordering::Relaxed)));
+    let temporary = PathBuf::from(name);
+    let written = std::fs::write(&temporary, contents).is_ok() && std::fs::rename(&temporary, path).is_ok();
+    if !written {
+        std::fs::remove_file(&temporary).ok();
+    }
+    written
 }
 
 /// The cache file's entries: one `digest<TAB>size<TAB>mtime_ns<TAB>path` a line.
@@ -169,10 +266,9 @@ fn read_digest_cache(cache: &Path) -> HashMap<FileIdentity, String> {
 fn write_digest_cache(cache: &Path, known: &HashMap<FileIdentity, String>) {
     let mut lines: Vec<String> = known.iter().map(|((path, len, mtime), d)| format!("{d}\t{len}\t{mtime}\t{path}")).collect();
     lines.sort();
-    let tmp = cache.with_extension(format!("tmp{}", std::process::id()));
-    let written = cache.parent().is_some_and(|d| std::fs::create_dir_all(d).is_ok()) && std::fs::write(&tmp, lines.join("\n") + "\n").is_ok();
-    if !written || std::fs::rename(&tmp, cache).is_err() {
-        std::fs::remove_file(&tmp).ok();
+    let parent_ready = cache.parent().is_none_or(|d| d.as_os_str().is_empty() || std::fs::create_dir_all(d).is_ok());
+    if parent_ready {
+        write_atomic(cache, &(lines.join("\n") + "\n"));
     }
 }
 
@@ -318,6 +414,148 @@ mod tests {
         std::fs::write(dir.join("config.json"), b"{}").unwrap();
         assert_eq!(base_digest_cached(&dir, &cache).unwrap(), base_digest(&dir).unwrap());
         assert_eq!(base_digest_cached(&file, &file.join("not-a-dir").join("digests.txt")).unwrap(), file_digest(&file).unwrap());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Read and set the marker a sidecar test asserts against.
+    fn marker_of(path: &Path) -> std::time::SystemTime {
+        std::fs::metadata(path).unwrap().modified().unwrap()
+    }
+
+    fn set_marker(path: &Path, at: std::time::SystemTime) {
+        std::fs::File::options().write(true).open(path).unwrap().set_modified(at).unwrap();
+    }
+
+    /// The first call hashes the file and records the digest with the length
+    /// and nanosecond marker it was hashed at; the returned digest is the
+    /// content digest.
+    #[test]
+    fn a_sidecar_is_written_on_the_first_call_and_records_the_digest() {
+        let dir = std::env::temp_dir().join(format!("modelstore-fetch-test-sidecar-first-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("weights.bin");
+        std::fs::write(&file, b"abc").unwrap();
+        let real = file_digest(&file).unwrap();
+        assert_eq!(file_digest_sidecar(&file).unwrap(), real);
+
+        let sidecar = sidecar_path(&file);
+        let text = std::fs::read_to_string(&sidecar).unwrap();
+        let fields: Vec<&str> = text.trim_end().split('\t').collect();
+        assert_eq!(fields.len(), 3, "{text:?}");
+        assert_eq!(fields[0], real);
+        let (len, mtime) = change_marker(&std::fs::metadata(&file).unwrap()).unwrap();
+        assert_eq!(fields[1], len.to_string());
+        assert_eq!(fields[2], mtime.to_string());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A recorded digest answers only while the file's length and marker are
+    /// still the ones it was hashed at. The reuse is proved without timing: the
+    /// bytes are replaced with content that hashes differently while the
+    /// original marker is restored, and the old digest still comes back - which
+    /// can only happen if the file was not read. Moving the marker (same
+    /// length) makes the next call hash the new bytes.
+    #[test]
+    fn a_sidecar_is_reused_only_while_length_and_marker_match() {
+        let dir = std::env::temp_dir().join(format!("modelstore-fetch-test-sidecar-reuse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("weights.bin");
+        std::fs::write(&file, b"abc").unwrap();
+        let real = file_digest(&file).unwrap();
+        let original = marker_of(&file);
+        assert_eq!(file_digest_sidecar(&file).unwrap(), real);
+
+        std::fs::write(&file, b"abd").unwrap();
+        set_marker(&file, original);
+        assert_ne!(file_digest(&file).unwrap(), real, "the bytes differ");
+        assert_eq!(file_digest_sidecar(&file).unwrap(), real, "same length and marker: the recorded digest answers");
+
+        let later = original + std::time::Duration::from_secs(5);
+        set_marker(&file, later);
+        assert_eq!(file_digest_sidecar(&file).unwrap(), file_digest(&file).unwrap(), "a moved marker is hashed again");
+        assert_ne!(file_digest_sidecar(&file).unwrap(), real);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A sidecar that is not a well-formed record for this exact file is
+    /// ignored and replaced: garbage, a truncation, a stale length and a stale
+    /// marker all cost one re-hash and never a wrong digest.
+    #[test]
+    fn a_corrupt_or_mismatched_sidecar_is_ignored_and_rewritten() {
+        let dir = std::env::temp_dir().join(format!("modelstore-fetch-test-sidecar-corrupt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("weights.bin");
+        std::fs::write(&file, b"abc").unwrap();
+        let real = file_digest(&file).unwrap();
+        let sidecar = sidecar_path(&file);
+        let (len, mtime) = change_marker(&std::fs::metadata(&file).unwrap()).unwrap();
+        for corrupt in [
+            "not a digest".to_string(),
+            format!("sha256:{}", "z".repeat(64)),
+            format!("sha256:{}\t{}\t{mtime}\tunexpected", "0".repeat(64), len),
+            format!("{}\t{}\t{mtime}", real, len + 1),
+            format!("{}\t{len}\t{}", real, mtime + 1),
+        ] {
+            std::fs::write(&sidecar, &corrupt).unwrap();
+            assert_eq!(file_digest_sidecar(&file).unwrap(), real, "{corrupt:?} was ignored");
+            let repaired = std::fs::read_to_string(&sidecar).unwrap();
+            assert_eq!(repaired, format!("{real}\t{len}\t{mtime}\n"), "{corrupt:?} was replaced");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Several writers hashing the same file at once leave one complete sidecar
+    /// and no temporary behind: each temporary is per-process-unique across
+    /// calls, and the rename publishes only a whole record.
+    #[test]
+    fn concurrent_writers_leave_one_complete_sidecar() {
+        let dir = std::env::temp_dir().join(format!("modelstore-fetch-test-sidecar-concurrent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("weights.bin");
+        std::fs::write(&file, b"concurrent writers").unwrap();
+        let real = file_digest(&file).unwrap();
+        let (len, mtime) = change_marker(&std::fs::metadata(&file).unwrap()).unwrap();
+
+        let expected = real.as_str();
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let file = &file;
+                scope.spawn(move || {
+                    for _ in 0..8 {
+                        assert_eq!(file_digest_sidecar(file).unwrap().as_str(), expected);
+                    }
+                });
+            }
+        });
+
+        let sidecar = sidecar_path(&file);
+        assert_eq!(std::fs::read_to_string(&sidecar).unwrap(), format!("{real}\t{len}\t{mtime}\n"));
+        let temporaries: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(temporaries.is_empty(), "temporaries left behind: {temporaries:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A base directory reuses each file's sidecar while answering exactly the
+    /// digest the uncached form gives.
+    #[test]
+    fn a_directory_base_reuses_each_files_sidecar() {
+        let dir = std::env::temp_dir().join(format!("modelstore-fetch-test-base-sidecar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), b"{}").unwrap();
+        std::fs::write(dir.join("model.safetensors"), b"weights").unwrap();
+        assert_eq!(base_digest_sidecar(&dir).unwrap(), base_digest(&dir).unwrap());
+        assert!(sidecar_path(&dir.join("config.json")).is_file());
+        assert!(sidecar_path(&dir.join("model.safetensors")).is_file());
         std::fs::remove_dir_all(&dir).ok();
     }
 

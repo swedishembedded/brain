@@ -723,7 +723,7 @@ fn train_in(scratch: &Path, weights: &str, inv: &Invocation, progress: &mut dyn 
     let ck = checkpoint::load(&full.to_string_lossy());
     let trained_cfg = crate::config::QwenConfig::from_json_checked(&ck.header["config"]).map_err(|e| format!("qwen lora_train: {e}"))?;
     let trained = Qwen::new(trained_cfg, 1, 1, &ck.by_role(""));
-    let base_digest = brain_modelstore::fetch::base_digest(Path::new(weights)).map_err(|e| format!("qwen lora_train: hashing the base {weights}: {e}"))?;
+    let base_digest = brain_modelstore::fetch::base_digest_sidecar(Path::new(weights)).map_err(|e| format!("qwen lora_train: hashing the base {weights}: {e}"))?;
     let provenance = checkpoint::st::TrainingProvenance::on_base("sft_lora", seed, gpu_core::backend_name(), base_digest);
     crate::lora::save_adapter_with_lineage(&adapter_path.to_string_lossy(), &trained, &card_id, &base_id, dataset_id.as_deref(), Some(provenance))
         .map_err(|e| format!("qwen lora_train: save_adapter: {e}"))?;

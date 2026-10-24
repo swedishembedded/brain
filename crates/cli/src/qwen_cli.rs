@@ -1156,7 +1156,10 @@ fn finetune_lora(args: &[String]) {
         }
     };
     println!("trained: loss {:.4} -> {}", report.initial_loss, report.final_loss.map_or("n/a".to_string(), |l| format!("{l:.4}")));
-    let base_digest = match brain_modelstore::fetch::base_digest(Path::new(&base_open)) {
+    // Every rank reaches this point and every save of the same base would
+    // otherwise read the whole checkpoint again; the validated sidecar makes a
+    // repeat read a stat, and still answers the true content digest.
+    let base_digest = match brain_modelstore::fetch::base_digest_sidecar(Path::new(&base_open)) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("hashing the base {base_open}: {e}");

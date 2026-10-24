@@ -324,7 +324,7 @@ pub fn finetune_streamed_named(base: &Path, dir: &Path, opts: &FitOpts, mode: &M
     let resume_from = resume.then(|| Path::new(out)).filter(|p| p.exists());
     let mut progress = step_progress();
     let (report, m) = finetune_lora_tuned(base, dir, opts, *rank, *alpha, *tuning, resume_from, run, step_progress_control(&mut progress))?;
-    let provenance = checkpoint::st::TrainingProvenance::on_base("sft_lora", opts.seed, gpu_core::backend_name(), brain_modelstore::fetch::base_digest(base)?);
+    let provenance = checkpoint::st::TrainingProvenance::on_base("sft_lora", opts.seed, gpu_core::backend_name(), brain_modelstore::fetch::base_digest_sidecar(base)?);
     crate::lora::save_adapter_with_lineage(out, &m, &card_id, &base_id, None, Some(provenance))?;
     Ok((report.initial_loss, report.final_loss.unwrap_or(report.initial_loss)))
 }
