@@ -66,6 +66,8 @@ use gpu_core::select::Dtype;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 /// One rank's payload for a collective op: raw data plus the [`Dtype`] tag it
 /// was staged at, so an op can validate that every participating rank agrees on
@@ -320,6 +322,343 @@ impl Collective for HostCollective {
     }
 }
 
+// ---- measurement ------------------------------------------------------------------
+
+/// Bytes one rank's [`Payload`] occupies at its staged dtype: elements times
+/// [`Dtype::bits`], rounded up to a whole byte so the sub-byte tiers (`Q4`,
+/// `Q4K`, `NF4`, `F4E2M1`) are counted as the bytes they need rather than
+/// truncated to zero for a single element.
+pub fn payload_bytes(payload: &Payload) -> u64 {
+    (payload.data.len() as u64)
+        .saturating_mul(payload.dtype.bits() as u64)
+        .div_ceil(8)
+}
+
+/// The collective ops a [`TimedCollective`] accounts for. The discriminants
+/// index [`Snapshot::ops`], so declaration order is part of the API.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum OpKind {
+    AllReduce = 0,
+    AllGather = 1,
+    ReduceScatter = 2,
+    Broadcast = 3,
+}
+
+impl OpKind {
+    /// Every op, in [`Snapshot::ops`] order.
+    pub const ALL: [OpKind; 4] = [OpKind::AllReduce, OpKind::AllGather, OpKind::ReduceScatter, OpKind::Broadcast];
+
+    /// The stable lowercase name used in reports.
+    pub fn name(self) -> &'static str {
+        match self {
+            OpKind::AllReduce => "all_reduce",
+            OpKind::AllGather => "all_gather",
+            OpKind::ReduceScatter => "reduce_scatter",
+            OpKind::Broadcast => "broadcast",
+        }
+    }
+}
+
+/// What one op kind cost on one rank. `total` is the sum of the raw per-op
+/// samples the percentiles are drawn from.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OpSnapshot {
+    /// Calls of this op kind.
+    pub count: u64,
+    /// Payload bytes this rank contributed, summed over those calls.
+    pub bytes: u64,
+    /// Wall time of those calls, summed.
+    pub total: Duration,
+    /// Nearest-rank percentiles of the per-call wall time.
+    pub p50: Duration,
+    pub p95: Duration,
+    pub p99: Duration,
+}
+
+/// [`TimedCollective`]'s accounting, as of the moment it was taken.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Snapshot {
+    /// Per-op accounting, indexed by [`OpKind`]'s discriminant.
+    pub ops: [OpSnapshot; 4],
+    /// Calls across every op kind.
+    pub count: u64,
+    /// Payload bytes across every op kind.
+    pub bytes: u64,
+    /// Wall time across every op kind.
+    pub total: Duration,
+}
+
+impl Snapshot {
+    pub fn op(&self, kind: OpKind) -> &OpSnapshot {
+        &self.ops[kind as usize]
+    }
+}
+
+/// Nearest-rank percentile of an ascending sample slice: the smallest sample
+/// at or above `p` percent of the distribution. An empty slice has no sample,
+/// so it reports zero rather than an invented value.
+fn percentile(sorted: &[Duration], p: u32) -> Duration {
+    if sorted.is_empty() {
+        return Duration::ZERO;
+    }
+    let n = sorted.len() as u128;
+    let rank = ((p as u128) * n).div_ceil(100).max(1).min(n) as usize;
+    sorted[rank - 1]
+}
+
+#[derive(Clone, Debug, Default)]
+struct OpSample {
+    count: u64,
+    bytes: u64,
+    total: Duration,
+    /// Raw per-call wall times; the snapshot's percentiles are computed from
+    /// these, so nothing is pre-aggregated in a way that loses the tail.
+    durations: Vec<Duration>,
+}
+
+impl OpSample {
+    fn record(&mut self, bytes: u64, elapsed: Duration) {
+        self.count += 1;
+        self.bytes += bytes;
+        self.total += elapsed;
+        self.durations.push(elapsed);
+    }
+
+    fn snapshot(&self) -> OpSnapshot {
+        let mut sorted = self.durations.clone();
+        sorted.sort_unstable();
+        OpSnapshot {
+            count: self.count,
+            bytes: self.bytes,
+            total: self.total,
+            p50: percentile(&sorted, 50),
+            p95: percentile(&sorted, 95),
+            p99: percentile(&sorted, 99),
+        }
+    }
+}
+
+/// A [`Collective`] that times every op and accounts for what each rank
+/// staged. Wrap the transport you want measured; nothing global is touched, so
+/// a run that does not construct one pays nothing for its existence.
+///
+/// The sample is taken *inside* the op's async block - from just before the
+/// inner call to just after it resolves - so it is the op's own wall time
+/// (including the transport's wait for its peers), not the time the caller
+/// spent around it.
+pub struct TimedCollective<'a> {
+    inner: &'a dyn Collective,
+    stats: Mutex<[OpSample; 4]>,
+}
+
+impl<'a> TimedCollective<'a> {
+    pub fn new(inner: &'a dyn Collective) -> TimedCollective<'a> {
+        TimedCollective { inner, stats: Mutex::new(Default::default()) }
+    }
+
+    /// The accounting so far. Percentiles are computed here, from the raw
+    /// samples, so taking a snapshot never changes the measurement.
+    pub fn snapshot(&self) -> Snapshot {
+        let stats = self.stats.lock().unwrap();
+        let mut out = Snapshot::default();
+        for (slot, kind) in out.ops.iter_mut().zip(OpKind::ALL) {
+            *slot = stats[kind as usize].snapshot();
+            out.count += slot.count;
+            out.bytes += slot.bytes;
+            out.total += slot.total;
+        }
+        out
+    }
+
+    /// Forget every sample (a run-to-run reset that keeps the same wrapper).
+    pub fn reset(&self) {
+        *self.stats.lock().unwrap() = Default::default();
+    }
+
+    fn record(&self, kind: OpKind, bytes: u64, elapsed: Duration) {
+        self.stats.lock().unwrap()[kind as usize].record(bytes, elapsed);
+    }
+}
+
+impl Collective for TimedCollective<'_> {
+    fn world_size(&self) -> usize {
+        self.inner.world_size()
+    }
+
+    fn all_reduce<'a>(&'a self, rank: usize, local: Payload) -> CollectiveFuture<'a, Payload> {
+        Box::pin(async move {
+            let bytes = payload_bytes(&local);
+            let started = Instant::now();
+            let out = self.inner.all_reduce(rank, local).await;
+            self.record(OpKind::AllReduce, bytes, started.elapsed());
+            out
+        })
+    }
+
+    fn all_gather<'a>(&'a self, rank: usize, local: Payload) -> CollectiveFuture<'a, Payload> {
+        Box::pin(async move {
+            let bytes = payload_bytes(&local);
+            let started = Instant::now();
+            let out = self.inner.all_gather(rank, local).await;
+            self.record(OpKind::AllGather, bytes, started.elapsed());
+            out
+        })
+    }
+
+    fn reduce_scatter<'a>(&'a self, rank: usize, local: Payload) -> CollectiveFuture<'a, Payload> {
+        Box::pin(async move {
+            let bytes = payload_bytes(&local);
+            let started = Instant::now();
+            let out = self.inner.reduce_scatter(rank, local).await;
+            self.record(OpKind::ReduceScatter, bytes, started.elapsed());
+            out
+        })
+    }
+
+    fn broadcast<'a>(&'a self, rank: usize, local: Payload, root: usize) -> CollectiveFuture<'a, Payload> {
+        Box::pin(async move {
+            let bytes = payload_bytes(&local);
+            let started = Instant::now();
+            let out = self.inner.broadcast(rank, local, root).await;
+            self.record(OpKind::Broadcast, bytes, started.elapsed());
+            out
+        })
+    }
+}
+
+// ---- link shaping -----------------------------------------------------------------
+
+/// SplitMix64's finalizer. Used as a pure hash of `(seed, op index)`, so the
+/// same run replays the same jitter without carrying an RNG.
+fn splitmix64(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^ (x >> 31)
+}
+
+/// A synthetic link a [`ShapedCollective`] charges each op for. Every field is
+/// explicit and deterministic: nothing is read from the environment or from a
+/// mutable RNG, so a run is reproducible from this value alone.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SimulatedLink {
+    /// One-way propagation delay. An op pays it in both directions.
+    pub one_way_latency: Duration,
+    /// Sustained transfer rate, bytes per second. The transfer term is
+    /// `payload / bandwidth`; `f64::INFINITY` models a link with no transfer
+    /// cost.
+    pub bandwidth_bytes_per_sec: f64,
+    /// Upper bound of the deterministic jitter added per op.
+    pub jitter: Duration,
+    /// Seeds the jitter hash; two runs with the same seed see the same
+    /// sequence of jitter values.
+    pub seed: u64,
+    /// Fail every op at or after this index with
+    /// [`CollectiveError::Transport`], without touching the wrapped
+    /// collective. `None` never fails.
+    pub fail_after_ops: Option<u64>,
+}
+
+impl SimulatedLink {
+    /// The delay charged for op `op_index` moving `payload_bytes`. Deterministic
+    /// in `(seed, op_index)`.
+    pub fn delay_for(&self, op_index: u64, payload_bytes: u64) -> Duration {
+        let round_trip_ns = 2.0 * self.one_way_latency.as_nanos() as f64;
+        let transfer_ns = if self.bandwidth_bytes_per_sec.is_finite() && self.bandwidth_bytes_per_sec > 0.0 {
+            (payload_bytes as f64 / self.bandwidth_bytes_per_sec) * 1e9
+        } else {
+            0.0
+        };
+        let jitter_ns = self.jitter_ns(op_index);
+        let total = (round_trip_ns + transfer_ns + jitter_ns).min(u64::MAX as f64);
+        Duration::from_nanos(total.round() as u64)
+    }
+
+    /// The jitter draw in `[0, jitter)`, from the hash of `seed ^ op_index`.
+    fn jitter_ns(&self, op_index: u64) -> f64 {
+        if self.jitter.is_zero() {
+            return 0.0;
+        }
+        let fraction = (splitmix64(self.seed ^ op_index) >> 11) as f64 / (1u64 << 53) as f64;
+        fraction * self.jitter.as_nanos() as f64
+    }
+}
+
+/// A [`Collective`] that charges the wrapped transport a simulated network
+/// delay before every op, for measuring how a training step's cost decomposes
+/// between computation and communication on a link other than the one under
+/// the desk.
+///
+/// Each op sleeps [`SimulatedLink::delay_for`]'s delay and then runs the inner
+/// op unchanged, so the exchange itself is still whatever the wrapped
+/// collective does (a host-staged barrier, a TCP round trip). A
+/// [`SimulatedLink::fail_after_ops`] returns a transport error at its firing
+/// point *before* the inner op is touched, which lets a caller verify a
+/// failure path without a real broken peer.
+pub struct ShapedCollective<'a> {
+    inner: &'a dyn Collective,
+    link: SimulatedLink,
+    op_index: AtomicU64,
+}
+
+impl<'a> ShapedCollective<'a> {
+    pub fn new(inner: &'a dyn Collective, link: SimulatedLink) -> ShapedCollective<'a> {
+        ShapedCollective { inner, link, op_index: AtomicU64::new(0) }
+    }
+
+    pub fn link(&self) -> SimulatedLink {
+        self.link
+    }
+
+    /// Count this op and return the delay it pays. A configured failure point
+    /// is checked here, before the inner collective sees the op.
+    fn schedule(&self, bytes: u64) -> CollectiveResult<Duration> {
+        let index = self.op_index.fetch_add(1, Ordering::Relaxed);
+        if let Some(limit) = self.link.fail_after_ops {
+            if index >= limit {
+                return Err(CollectiveError::Transport(format!(
+                    "simulated link: op {index} is past the configured failure point of {limit} op(s)"
+                )));
+            }
+        }
+        Ok(self.link.delay_for(index, bytes))
+    }
+}
+
+impl Collective for ShapedCollective<'_> {
+    fn world_size(&self) -> usize {
+        self.inner.world_size()
+    }
+
+    fn all_reduce<'a>(&'a self, rank: usize, local: Payload) -> CollectiveFuture<'a, Payload> {
+        Box::pin(async move {
+            std::thread::sleep(self.schedule(payload_bytes(&local))?);
+            self.inner.all_reduce(rank, local).await
+        })
+    }
+
+    fn all_gather<'a>(&'a self, rank: usize, local: Payload) -> CollectiveFuture<'a, Payload> {
+        Box::pin(async move {
+            std::thread::sleep(self.schedule(payload_bytes(&local))?);
+            self.inner.all_gather(rank, local).await
+        })
+    }
+
+    fn reduce_scatter<'a>(&'a self, rank: usize, local: Payload) -> CollectiveFuture<'a, Payload> {
+        Box::pin(async move {
+            std::thread::sleep(self.schedule(payload_bytes(&local))?);
+            self.inner.reduce_scatter(rank, local).await
+        })
+    }
+
+    fn broadcast<'a>(&'a self, rank: usize, local: Payload, root: usize) -> CollectiveFuture<'a, Payload> {
+        Box::pin(async move {
+            std::thread::sleep(self.schedule(payload_bytes(&local))?);
+            self.inner.broadcast(rank, local, root).await
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,5 +796,189 @@ mod tests {
 
         let err = pollster::block_on(c.broadcast(0, Payload::f32(vec![1.0]), 9));
         assert_eq!(err, Err(CollectiveError::RankOutOfRange { rank: 9, world_size: 1 }));
+    }
+
+    // ---- measurement and link shaping ----
+
+    /// A one-rank collective that only counts how many ops reached it, so a
+    /// shape's failure point can be shown to fire before the inner op runs.
+    struct Counting {
+        ops: AtomicU64,
+    }
+
+    impl Counting {
+        fn new() -> Counting {
+            Counting { ops: AtomicU64::new(0) }
+        }
+
+        fn ops(&self) -> u64 {
+            self.ops.load(Ordering::Relaxed)
+        }
+
+        fn count(&self) -> u64 {
+            self.ops.fetch_add(1, Ordering::Relaxed) + 1
+        }
+    }
+
+    impl Collective for Counting {
+        fn world_size(&self) -> usize {
+            1
+        }
+
+        fn all_reduce<'a>(&'a self, _rank: usize, local: Payload) -> CollectiveFuture<'a, Payload> {
+            Box::pin(async move {
+                self.count();
+                Ok(local)
+            })
+        }
+
+        fn all_gather<'a>(&'a self, _rank: usize, local: Payload) -> CollectiveFuture<'a, Payload> {
+            Box::pin(async move {
+                self.count();
+                Ok(local)
+            })
+        }
+
+        fn reduce_scatter<'a>(&'a self, _rank: usize, local: Payload) -> CollectiveFuture<'a, Payload> {
+            Box::pin(async move {
+                self.count();
+                Ok(local)
+            })
+        }
+
+        fn broadcast<'a>(&'a self, _rank: usize, local: Payload, _root: usize) -> CollectiveFuture<'a, Payload> {
+            Box::pin(async move {
+                self.count();
+                Ok(local)
+            })
+        }
+    }
+
+    fn link() -> SimulatedLink {
+        SimulatedLink { one_way_latency: Duration::ZERO, bandwidth_bytes_per_sec: f64::INFINITY, jitter: Duration::ZERO, seed: 1, fail_after_ops: None }
+    }
+
+    #[test]
+    fn payload_bytes_use_each_tier_s_width_and_round_up() {
+        // 32-bit tier: 3 elements are 12 bytes.
+        assert_eq!(payload_bytes(&Payload::new(Dtype::F32, vec![0.0; 3])), 12);
+        // 16-bit tiers: 3 elements are 6 bytes.
+        assert_eq!(payload_bytes(&Payload::new(Dtype::BF16, vec![0.0; 3])), 6);
+        assert_eq!(payload_bytes(&Payload::new(Dtype::F16, vec![0.0; 3])), 6);
+        // 8-bit tiers: bytes == elements.
+        assert_eq!(payload_bytes(&Payload::new(Dtype::I8, vec![0.0; 5])), 5);
+        assert_eq!(payload_bytes(&Payload::new(Dtype::F8E4M3, vec![0.0; 5])), 5);
+        // 4-bit tiers: half a byte per element, rounded up for an odd count.
+        assert_eq!(payload_bytes(&Payload::new(Dtype::Q4, vec![0.0; 1])), 1);
+        assert_eq!(payload_bytes(&Payload::new(Dtype::Q4, vec![0.0; 3])), 2);
+        assert_eq!(payload_bytes(&Payload::new(Dtype::Q4K, vec![0.0; 8])), 4);
+        // An empty payload moves nothing.
+        assert_eq!(payload_bytes(&Payload::f32(Vec::new())), 0);
+    }
+
+    #[test]
+    fn timed_collective_accounts_per_op_count_bytes_and_time() {
+        let inner = HostCollective::new(1);
+        let timed = TimedCollective::new(&*inner);
+        pollster::block_on(timed.all_reduce(0, Payload::f32(vec![1.0; 4]))).unwrap();
+        pollster::block_on(timed.all_reduce(0, Payload::new(Dtype::BF16, vec![1.0; 3]))).unwrap();
+        pollster::block_on(timed.all_gather(0, Payload::f32(vec![1.0; 2]))).unwrap();
+
+        let snap = timed.snapshot();
+        let reduce = snap.op(OpKind::AllReduce);
+        assert_eq!(reduce.count, 2);
+        assert_eq!(reduce.bytes, 16 + 6);
+        assert!(reduce.total > Duration::ZERO);
+        assert!(reduce.p50 <= reduce.p99, "the fastest sample is at or below the slowest");
+        assert_eq!(snap.op(OpKind::AllGather).count, 1);
+        assert_eq!(snap.op(OpKind::AllGather).bytes, 8);
+        assert_eq!(snap.op(OpKind::ReduceScatter).count, 0);
+        assert_eq!(snap.count, 3);
+        assert_eq!(snap.bytes, 16 + 6 + 8);
+        assert!(snap.total >= reduce.total);
+
+        timed.reset();
+        assert_eq!(timed.snapshot().count, 0);
+    }
+
+    #[test]
+    fn percentiles_use_nearest_rank() {
+        let samples: Vec<Duration> = (1..=100).map(Duration::from_millis).collect();
+        assert_eq!(percentile(&samples, 50), Duration::from_millis(50));
+        assert_eq!(percentile(&samples, 95), Duration::from_millis(95));
+        assert_eq!(percentile(&samples, 99), Duration::from_millis(99));
+        assert_eq!(percentile(&samples[..1], 99), Duration::from_millis(1));
+        assert_eq!(percentile(&[], 50), Duration::ZERO);
+    }
+
+    #[test]
+    fn shaped_link_pays_latency_in_both_directions() {
+        let mut l = link();
+        l.one_way_latency = Duration::from_millis(2);
+        assert_eq!(l.delay_for(0, 1 << 20), Duration::from_millis(4));
+    }
+
+    #[test]
+    fn shaped_link_caps_transfer_at_bandwidth() {
+        let mut l = link();
+        l.bandwidth_bytes_per_sec = 1e9;
+        // The transfer term is payload divided by bandwidth: a payload of
+        // 1_000_000 bytes on a link of 1e9 bytes per second costs 1e6 ns.
+        let delay = l.delay_for(0, 1_000_000).as_nanos() as i128;
+        assert!((delay - 1_000_000).abs() <= 1, "got {delay} ns");
+        // Twice the bytes, twice the transfer time.
+        let double = l.delay_for(0, 2_000_000).as_nanos() as i128;
+        assert!((double - 2_000_000).abs() <= 1, "got {double} ns");
+    }
+
+    #[test]
+    fn shaped_jitter_is_seeded_bounded_and_reproducible() {
+        let mut l = link();
+        l.jitter = Duration::from_millis(5);
+        l.seed = 0x5EED;
+
+        // Two links with the same seed charge the same delay for the same op.
+        let same = l;
+        for index in [0u64, 1, 7, 1234] {
+            assert_eq!(l.delay_for(index, 1000), same.delay_for(index, 1000));
+        }
+
+        // The draw stays within the configured bound and is not always the same.
+        let mut seen = Vec::new();
+        for index in 0..16u64 {
+            let delay = l.delay_for(index, 0);
+            assert!(delay <= l.jitter, "jitter {delay:?} over bound {:?}", l.jitter);
+            seen.push(delay);
+        }
+        assert!(seen.windows(2).any(|w| w[0] != w[1]), "the jitter draw never changed across op indices");
+
+        // A different seed is a different stream.
+        l.seed ^= 1;
+        assert_ne!(same.delay_for(0, 0), l.delay_for(0, 0));
+    }
+
+    #[test]
+    fn shaped_collective_fails_before_the_inner_op_at_its_firing_point() {
+        let inner = Counting::new();
+        let mut l = link();
+        l.fail_after_ops = Some(2);
+        let shaped = ShapedCollective::new(&inner, l);
+
+        assert_eq!(pollster::block_on(shaped.all_reduce(0, Payload::f32(vec![1.0]))), Ok(Payload::f32(vec![1.0])));
+        assert_eq!(pollster::block_on(shaped.all_reduce(0, Payload::f32(vec![2.0]))), Ok(Payload::f32(vec![2.0])));
+        let third = pollster::block_on(shaped.all_reduce(0, Payload::f32(vec![3.0])));
+        assert!(matches!(third, Err(CollectiveError::Transport(_))), "expected a transport error, got {third:?}");
+        assert_eq!(inner.ops(), 2, "the failure must fire before the inner op runs");
+    }
+
+    #[test]
+    fn shaped_collective_charges_the_simulated_delay() {
+        let inner = HostCollective::new(1);
+        let mut l = link();
+        l.one_way_latency = Duration::from_millis(1);
+        let shaped = ShapedCollective::new(&*inner, l);
+        let started = Instant::now();
+        pollster::block_on(shaped.all_reduce(0, Payload::f32(vec![1.0]))).unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(2), "the op did not pay the round trip");
     }
 }
