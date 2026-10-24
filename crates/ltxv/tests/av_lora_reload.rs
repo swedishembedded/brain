@@ -112,7 +112,7 @@ fn av_lora_reload_survives_a_fresh_process() {
     std::fs::create_dir_all(&dir).expect("tmp dir");
     let path = dir.join("adapter.brain");
     let path_str = path.to_str().expect("utf-8 path").to_string();
-    save_adapter(&path_str, &adapter);
+    save_adapter(&path_str, &adapter).expect("save");
 
     let logits_live = eval_model(&cfg, &adapter.apply(&base));
     let logits_base = eval_model(&cfg, &base);

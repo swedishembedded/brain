@@ -21,7 +21,6 @@ crates/ecapatdnn/src/model.rs	1	class T: one whole tensor as fp32 on the host, t
 crates/federated/src/shard.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/fincast/src/import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
 crates/fincast/src/model.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
-crates/flux2/src/lora.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/flux2/src/pipeline.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/flux2/src/weights.rs	1	flux2 DitWeights wrapper and fp32 rectangle fallback (knowledge 337 class T)
 crates/gemma4/src/block.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
@@ -35,12 +34,10 @@ crates/kronos/src/import.rs	2	offline importer: one whole tensor per call into a
 crates/lfm2/src/import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
 crates/lfm2/src/model.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/ltxv/src/audio_vae.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
-crates/ltxv/src/av_lora.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/ltxv/src/av_stream.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/ltxv/src/block.rs	4	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/ltxv/src/dit.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/ltxv/src/gguf_src.rs	1	delegating TensorSource wrapper: forwards the call to the wrapped source (knowledge 337 section 1)
-crates/ltxv/src/lora.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/ltxv/src/pipeline.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/mimi/src/decode_stream.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/mimi/src/model.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
@@ -83,7 +80,6 @@ crates/rl/src/continual.rs	6	class T: one whole tensor as fp32 on the host, then
 crates/rl/src/improve.rs	6	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/rl/src/reader.rs	6	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/s3dit/src/block.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
-crates/s3dit/src/finetune.rs	1	delegating TensorSource wrapper: forwards the call to the wrapped source (knowledge 337 section 1)
 crates/s3dit/src/pipeline.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/sdk/src/reader.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/sdk/src/text.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)

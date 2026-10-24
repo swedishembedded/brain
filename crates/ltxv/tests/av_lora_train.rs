@@ -130,7 +130,7 @@ fn an_av_adapter_round_trips_through_the_checkpoint_container() {
     std::fs::create_dir_all(&dir).expect("tmp dir");
     let path = dir.join("adapter.brain");
     let p = path.to_str().expect("utf-8 path");
-    ltxv::av_lora::save_adapter(p, &ad);
+    ltxv::av_lora::save_adapter(p, &ad).expect("save");
     let back = ltxv::av_lora::load_adapter(p, &cfg).expect("reload");
     assert_eq!(back.rank(), ad.rank());
     assert!(ad.apply(&base) == back.apply(&base), "a reloaded AV adapter must produce the same effective weights");

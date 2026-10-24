@@ -120,26 +120,30 @@ pub fn run(cfg: &AvCfg, base: &AvModelWeights<f32>, clips: &[SyntheticAvClip], o
     progress(0, total, format!("{} clip(s) at tv={} ta={}", clips.len(), cfg.tv, cfg.ta));
 
     let mut adapter = LoraAdapter::new(cfg, LoraCfg::new(opts.rank, opts.seed));
-    for step in 0..opts.steps {
-        if cancel.is_cancelled() {
-            return Err("cancelled".into());
-        }
-        let clip = &clips[step as usize % clips.len()];
-        // Independent per-stream sigma, uniform on (0,1] - the clamp keeps
-        // the model time off the exact 0 the samplers never evaluate.
-        let v_sigma = rng.next_f64().clamp(1e-3, 1.0);
-        let a_sigma = rng.next_f64().clamp(1e-3, 1.0);
-        let v_noise: Vec<f32> = (0..clip.v_latent.len()).map(|_| rng.next_gaussian() as f32).collect();
-        let a_noise: Vec<f32> = (0..clip.a_latent.len()).map(|_| rng.next_gaussian() as f32).collect();
-        let b = make_av_flow_batch(cfg, &clip.v_latent, &clip.a_latent, &clip.v_ctx, &clip.a_ctx, v_sigma, a_sigma, &v_noise, &a_noise);
-        let (loss, g) = grads(cfg, &adapter.apply(base), &b);
-        adapter.step(&g, opts.lr);
-        progress(step + 1, total, format!("step {}/{}  loss {loss:.6}", step + 1, opts.steps));
-        if opts.ckpt_every > 0 && (step + 1).is_multiple_of(opts.ckpt_every) && step + 1 < opts.steps {
-            save_adapter(&opts.save_path, &adapter);
-        }
-    }
-    save_adapter(&opts.save_path, &adapter);
+    let fit = model::flow::LoraFitOpts { steps: opts.steps, lr: opts.lr, ckpt_every: opts.ckpt_every };
+    model::flow::train(
+        &mut rng,
+        &fit,
+        &mut adapter,
+        || cancel.is_cancelled(),
+        |step, rng| {
+            let clip = &clips[step as usize % clips.len()];
+            // Independent per-stream sigma, uniform on (0,1] - the clamp keeps
+            // the model time off the exact 0 the samplers never evaluate.
+            let v_sigma = rng.next_f64().clamp(1e-3, 1.0);
+            let a_sigma = rng.next_f64().clamp(1e-3, 1.0);
+            let v_noise: Vec<f32> = (0..clip.v_latent.len()).map(|_| rng.next_gaussian() as f32).collect();
+            let a_noise: Vec<f32> = (0..clip.a_latent.len()).map(|_| rng.next_gaussian() as f32).collect();
+            make_av_flow_batch(cfg, &clip.v_latent, &clip.a_latent, &clip.v_ctx, &clip.a_ctx, v_sigma, a_sigma, &v_noise, &a_noise)
+        },
+        |adapter, b, lr| {
+            let (loss, g) = grads(cfg, &adapter.apply(base), b);
+            adapter.step(&g, lr);
+            loss
+        },
+        |adapter| save_adapter(&opts.save_path, adapter),
+        |done, steps, loss| progress(done, steps, format!("step {done}/{steps}  loss {loss:.6}")),
+    )?;
     progress(total, total, format!("saved AV adapter -> {}", opts.save_path));
     Ok(adapter.to_tensors())
 }

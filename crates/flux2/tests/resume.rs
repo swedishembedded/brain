@@ -65,7 +65,7 @@ fn a_saved_adapter_reloads_its_factors_and_its_step_count() {
     let c = cfg();
     let path = tmp("roundtrip");
     let before = trained(&c, 613);
-    save_adapter(&path, &before);
+    save_adapter(&path, &before).expect("save");
     let after = load_adapter(&path, &c).expect("reload");
 
     assert_eq!(after.rank(), before.rank(), "rank");
@@ -120,7 +120,7 @@ fn a_checkpoint_without_a_step_count_still_loads() {
 fn resuming_at_a_different_rank_is_refused() {
     let c = cfg();
     let path = tmp("rankguard");
-    save_adapter(&path, &trained(&c, 10));
+    save_adapter(&path, &trained(&c, 10)).expect("save");
     let loaded = load_adapter(&path, &c).expect("reload");
     assert_eq!(loaded.rank(), RANK);
     // This is the comparison `finetune::run` makes before it will continue.
@@ -144,7 +144,7 @@ fn rs_lr_ratio_and_freeze_a_round_trip_through_save_and_load() {
     let path = tmp("hpguard");
     let hp = TargetHp { rank: RANK, alpha: RANK as f32 * 2.0, rank_stabilized: true, dropout: 0.0, lr_ratio: 4.0, freeze_a: true };
     let ad = LoraAdapter::new_with_hp(&c, hp, 7);
-    save_adapter(&path, &ad);
+    save_adapter(&path, &ad).expect("save");
 
     let loaded = load_adapter(&path, &c).expect("reload");
     let got = loaded.hp();

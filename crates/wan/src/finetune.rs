@@ -369,28 +369,29 @@ pub fn run(
     let resident = trainer.begin_lora(&base, opts.rank);
     let route = if resident { " (base resident, on-device LoRA)" } else { "" };
     progress(encode_budget, total, format!("training on {}{route}", trainer.label()));
-    for step in 0..opts.steps {
-        if cancel.is_cancelled() {
-            return Err("cancelled".into());
-        }
-        // The sample index is drawn fresh from `rng` (D7) rather than cycled
-        // deterministically (`step % len`): a deterministic cycle correlates
-        // sample order with the σ draw below, since both come from walking
-        // the same counter in lockstep every `encoded.len()` steps.
-        let idx = rng.gen_range_inclusive(0, encoded.len() as i64 - 1) as usize;
-        let s = &encoded[idx];
-        // σ is drawn uniformly on (0, 1]; the clamp keeps the model time off
-        // the exact 0 the samplers never evaluate.
-        let sigma = (rng.next_f64() as f32).clamp(1e-3, 1.0) as f64;
-        let noise: Vec<f32> = (0..s.latent.len()).map(|_| rng.next_gaussian() as f32).collect();
-        let b = make_flow_batch(&tcfg, &s.latent, &s.ctx, cfg.text_len, sigma, &noise);
-        let loss = trainer.lora_step(&base, &mut adapter, &b, opts.lr);
-        progress(encode_budget + step + 1, total, format!("step {}/{}  loss {loss:.5}", step + 1, opts.steps));
-        if opts.ckpt_every > 0 && (step + 1).is_multiple_of(opts.ckpt_every) && step + 1 < opts.steps {
-            save_adapter(&opts.save_path, &adapter)?;
-        }
-    }
-    save_adapter(&opts.save_path, &adapter)?;
+    let fit = model::flow::LoraFitOpts { steps: opts.steps, lr: opts.lr, ckpt_every: opts.ckpt_every };
+    model::flow::train(
+        &mut rng,
+        &fit,
+        &mut adapter,
+        || cancel.is_cancelled(),
+        |_step, rng| {
+            // The sample index is drawn fresh from `rng` (D7) rather than cycled
+            // deterministically (`step % len`): a deterministic cycle correlates
+            // sample order with the σ draw below, since both come from walking
+            // the same counter in lockstep every `encoded.len()` steps.
+            let idx = rng.gen_range_inclusive(0, encoded.len() as i64 - 1) as usize;
+            let s = &encoded[idx];
+            // σ is drawn uniformly on (0, 1]; the clamp keeps the model time off
+            // the exact 0 the samplers never evaluate.
+            let sigma = (rng.next_f64() as f32).clamp(1e-3, 1.0) as f64;
+            let noise: Vec<f32> = (0..s.latent.len()).map(|_| rng.next_gaussian() as f32).collect();
+            make_flow_batch(&tcfg, &s.latent, &s.ctx, cfg.text_len, sigma, &noise)
+        },
+        |adapter, b, lr| trainer.lora_step(&base, adapter, b, lr) as f64,
+        |adapter| save_adapter(&opts.save_path, adapter),
+        |done, steps, loss| progress(encode_budget + done, total, format!("step {done}/{steps}  loss {loss:.5}")),
+    )?;
     progress(total, total, format!("saved adapter -> {}", opts.save_path));
     Ok(adapter.to_tensors())
 }

@@ -287,19 +287,18 @@ impl LoraAdapter {
 }
 
 /// Save an adapter to brain's checkpoint container, header
-/// `{"model":"ltxv-av-lora","rank":R,"alpha":A}`.
-pub fn save_adapter(path: &str, ad: &LoraAdapter) {
-    let t: Vec<(String, Vec<u64>, Vec<f32>)> = ad.to_tensors().into_iter().map(|(n, s, d)| (n, s.iter().map(|&x| x as u64).collect(), d)).collect();
-    checkpoint::save(path, serde_json::json!({"model": "ltxv-av-lora", "rank": ad.rank(), "alpha": ad.alpha()}), &t);
+/// `{"model":"ltxv-av-lora","rank":R,"alpha":A}` ([`model::adapter::pair_file`]
+/// owns the format).
+pub fn save_adapter(path: &str, ad: &LoraAdapter) -> Result<(), String> {
+    let config = serde_json::json!({"model": "ltxv-av-lora", "rank": ad.rank(), "alpha": ad.alpha()});
+    model::adapter::pair_file::write(path, config, &ad.to_tensors()).map_err(|e| format!("ltxv av lora: {e}"))
 }
 
-/// Load an adapter written by [`save_adapter`].
+/// Load an adapter written by [`save_adapter`], shapes included so an A/B
+/// swap is refused rather than folded.
 pub fn load_adapter(path: &str, cfg: &AvCfg) -> Result<LoraAdapter, String> {
-    let c = checkpoint::load(path);
-    let rank = c.header["config"]["rank"].as_u64().ok_or("av adapter: missing rank in header")? as usize;
-    let alpha = c.header["config"]["alpha"].as_f64().unwrap_or(rank as f64) as f32;
-    let map: std::collections::HashMap<String, (Vec<usize>, Vec<f32>)> = c.tensors.into_iter().map(|t| (t.name, (Vec::new(), t.data))).collect();
-    LoraAdapter::from_tensors(cfg, LoraCfg::loaded(rank, alpha), &map)
+    let f = model::adapter::pair_file::read(path, "ltxv-av-lora").map_err(|e| format!("ltxv av lora: {e}"))?;
+    LoraAdapter::from_tensors(cfg, LoraCfg::loaded(f.rank, f.alpha), &f.map())
 }
 
 #[cfg(test)]

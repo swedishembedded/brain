@@ -151,8 +151,14 @@ layer 6 - serving, front ends, SDK, samples
                            PackedTensorReader/TensorSink (bounded tiled I/O,
                            never a whole tensor), MemoryBudget (shared staging
                            accounting) and the Preserve/Repack/Convert load
-                           executor with its LoadPlan report. Model crates
-                           supply names and shapes, never codecs or loaders.
+                           executor with its LoadPlan report.
+                           `checkpoint::coverage` is the two-way check every
+                           importer runs on what it produced: each declared
+                           tensor present with its shape and element count,
+                           no source tensor unused (materialized maps,
+                           shapes-only for a streaming loader, element counts
+                           for a flattened source). Model crates supply names
+                           and shapes, never codecs or loaders.
    autodiff                shared SSA forward-cache scaffolding (placeholder)
    data                    char + GPT-2 BPE tokenizers, dataset generators,
                            loaders, masking/alignment, normalization
@@ -199,7 +205,14 @@ layer 6 - serving, front ends, SDK, samples
                            encodings and a tiny instance; `ModelStep` for any
                            Model), so wiring a model in implements a trait and
                            never edits the check.
-                           `score.rs` is held-out scoring over any Model
+                           `score.rs` is held-out scoring over any Model.
+                           `flow.rs` is the step loop of a flow-matching LoRA
+                           fine-tune (`LoraFitOpts`/`train` own the order,
+                           cancel, save cadence and final save; a family
+                           supplies its batch convention and its step), and
+                           `adapter::pair_file` is the saved host-Pair adapter
+                           file, read back with the shapes it recorded so an
+                           A/B swap is refused rather than folded.
    promote                 the model-agnostic promote/reject decision: the
                            Environment/Verifier reward seam, the exact paired
                            sign test, the four-bar gate over already-scored

@@ -81,7 +81,7 @@ fn brain_adapter(c: &Cfg, seed: u64, name: &str) -> String {
         }
     }
     let path = tmp(name);
-    save_adapter(path.to_str().unwrap(), &ad);
+    save_adapter(path.to_str().unwrap(), &ad).expect("save");
     path.to_str().unwrap().to_string()
 }
 

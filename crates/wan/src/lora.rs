@@ -288,10 +288,8 @@ impl LoraAdapter {
 /// checkpoint (disk full, permissions) must be visible to the caller, not
 /// discovered only when the run finishes and the adapter is missing.
 pub fn save_adapter(path: &str, ad: &LoraAdapter) -> Result<(), String> {
-    let t: Vec<(String, Vec<u64>, Vec<f32>)> =
-        ad.to_tensors().into_iter().map(|(n, s, d)| (n, s.iter().map(|&x| x as u64).collect(), d)).collect();
     let config = serde_json::json!({"model": "wan-lora", "rank": ad.rank(), "alpha": ad.alpha()});
-    checkpoint::st::save_safetensors(path, &t, &config, None).map_err(|e| format!("wan lora: cannot write {path}: {e}"))
+    model::adapter::pair_file::write(path, config, &ad.to_tensors()).map_err(|e| format!("wan lora: {e}"))
 }
 
 /// Load an adapter written by [`save_adapter`]. Reads the header (for

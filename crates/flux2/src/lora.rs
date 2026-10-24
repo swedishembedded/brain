@@ -674,24 +674,16 @@ pub fn fold_external_adapter(
 /// Save an adapter to brain's checkpoint format (header
 /// `{"model":"flux2-lora","rank":R,"alpha":A}`), reloadable by
 /// [`load_adapter`].
-pub fn save_adapter(path: &str, ad: &LoraAdapter) {
-    let t: Vec<(String, Vec<u64>, Vec<f32>)> = ad
-        .to_tensors()
-        .into_iter()
-        .map(|(n, s, d)| (n, s.iter().map(|&x| x as u64).collect(), d))
-        .collect();
+pub fn save_adapter(path: &str, ad: &LoraAdapter) -> Result<(), String> {
     let hp = ad.hp();
-    checkpoint::save(
-        path,
-        serde_json::json!({
-            "model": "flux2-lora", "rank": ad.rank(), "alpha": ad.alpha(), "steps": ad.steps_done(),
-            // Additive: a reader from before these existed uses their
-            // documented defaults (see load_adapter) and gets plain LoRA -
-            // exactly what every adapter saved before this change was.
-            "rs": hp.rank_stabilized, "lr_ratio": hp.lr_ratio, "freeze_a": hp.freeze_a,
-        }),
-        &t,
-    );
+    let config = serde_json::json!({
+        "model": "flux2-lora", "rank": ad.rank(), "alpha": ad.alpha(), "steps": ad.steps_done(),
+        // Additive: a reader from before these existed uses their
+        // documented defaults (see load_adapter) and gets plain LoRA -
+        // exactly what every adapter saved before this change was.
+        "rs": hp.rank_stabilized, "lr_ratio": hp.lr_ratio, "freeze_a": hp.freeze_a,
+    });
+    model::adapter::pair_file::write(path, config, &ad.to_tensors()).map_err(|e| format!("flux2 lora: {e}"))
 }
 
 /// Load an adapter saved by [`save_adapter`] (rank/alpha from the header).
@@ -704,23 +696,16 @@ pub fn save_adapter(path: &str, ad: &LoraAdapter) {
 /// `1 - beta^t`, so the first resumed updates are small and grow back) rather
 /// than a wrong answer.
 pub fn load_adapter(path: &str, cfg: &Cfg) -> Result<LoraAdapter, String> {
-    let c = checkpoint::load(path);
-    if c.header["config"]["model"] != "flux2-lora" {
-        return Err(format!("{path}: not a flux2-lora checkpoint"));
-    }
-    let rank = c.header["config"]["rank"].as_u64().ok_or("adapter: missing rank in header")? as usize;
-    let alpha = c.header["config"]["alpha"].as_f64().unwrap_or(rank as f64) as f32;
+    let f = model::adapter::pair_file::read(path, "flux2-lora")?;
     // Additive fields, defaulting to plain LoRA for a file saved before they
     // existed: no rank-stabilization, no LoRA+ ratio, A trainable.
-    let rank_stabilized = c.header["config"]["rs"].as_bool().unwrap_or(false);
-    let lr_ratio = c.header["config"]["lr_ratio"].as_f64().unwrap_or(1.0) as f32;
-    let freeze_a = c.header["config"]["freeze_a"].as_bool().unwrap_or(false);
-    let hp = TargetHp { rank, alpha, rank_stabilized, dropout: 0.0, lr_ratio, freeze_a };
-    let map: std::collections::HashMap<String, Vec<f32>> =
-        c.tensors.into_iter().map(|t| (t.name, t.data)).collect();
-    let steps = c.header["config"]["steps"].as_u64().unwrap_or(0);
+    let rank_stabilized = f.config["rs"].as_bool().unwrap_or(false);
+    let lr_ratio = f.config["lr_ratio"].as_f64().unwrap_or(1.0) as f32;
+    let freeze_a = f.config["freeze_a"].as_bool().unwrap_or(false);
+    let hp = TargetHp { rank: f.rank, alpha: f.alpha, rank_stabilized, dropout: 0.0, lr_ratio, freeze_a };
+    let map: std::collections::HashMap<String, Vec<f32>> = f.tensors.into_iter().map(|t| (t.name, t.data)).collect();
     let mut ad = LoraAdapter::from_tensors_with_hp(cfg, hp, &map)?;
-    ad.set_steps_done(steps);
+    ad.set_steps_done(f.config["steps"].as_u64().unwrap_or(0));
     Ok(ad)
 }
 

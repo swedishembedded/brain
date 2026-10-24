@@ -97,7 +97,7 @@ fn lora_only_descends_with_base_frozen_and_roundtrips() {
     // reproduces the same effective weights.
     let path = std::env::temp_dir().join(format!("flux2_lora_test_{}.safetensors", std::process::id()));
     let path = path.to_str().unwrap().to_string();
-    save_adapter(&path, &ad);
+    save_adapter(&path, &ad).expect("save");
     let re = load_adapter(&path, &c).expect("reload");
     std::fs::remove_file(&path).ok();
     assert_eq!(re.rank(), ad.rank());

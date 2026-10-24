@@ -18,6 +18,7 @@ pub mod device;
 pub mod exec;
 pub mod file;
 pub mod kind;
+pub mod pair_file;
 pub mod plan;
 pub mod select;
 pub mod sites;

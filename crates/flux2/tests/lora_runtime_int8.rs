@@ -122,7 +122,7 @@ fn brain_adapter(fc: &Flux2Config, ts: &flux2::Tensors, frac: f64, seed: u64, na
         }
     }
     let path = tmp(name);
-    save_adapter(path.to_str().unwrap(), &ad);
+    save_adapter(path.to_str().unwrap(), &ad).expect("save");
     path.to_str().unwrap().to_string()
 }
 

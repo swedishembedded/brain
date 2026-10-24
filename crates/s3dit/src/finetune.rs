@@ -205,23 +205,18 @@ pub fn encode_samples(
 }
 
 /// Save a LoRA adapter (its `to_tensors` output + rank/alpha) to brain's
-/// checkpoint format. Reloadable by [`load_adapter_folded`] and inspectable via
-/// `checkpoint::load`.
-pub fn save_adapter(path: &str, tensors: &[(String, Vec<usize>, Vec<f32>)], rank: usize, alpha: f32) {
-    let t: Vec<(String, Vec<u64>, Vec<f32>)> =
-        tensors.iter().map(|(n, s, d)| (n.clone(), s.iter().map(|&x| x as u64).collect(), d.clone())).collect();
-    checkpoint::save(path, serde_json::json!({"model": "z-image-lora", "rank": rank, "alpha": alpha}), &t);
+/// checkpoint format ([`model::adapter::pair_file`] owns the format).
+/// Reloadable by [`load_adapter_folded`].
+pub fn save_adapter(path: &str, tensors: &[(String, Vec<usize>, Vec<f32>)], rank: usize, alpha: f32) -> Result<(), String> {
+    let config = serde_json::json!({"model": "z-image-lora", "rank": rank, "alpha": alpha});
+    model::adapter::pair_file::write(path, config, tensors).map_err(|e| format!("z-image lora: {e}"))
 }
 
 /// Load an adapter saved by [`save_adapter`] and fold it into an inference tensor
 /// map, so the generation path produces adapter-conditioned images unchanged.
 pub fn load_adapter_folded(path: &str, cfg: &Cfg, tensors: &mut crate::block::Tensors) -> Result<(), String> {
-    let c = checkpoint::load(path);
-    let rank = c.header["config"]["rank"].as_u64().ok_or("adapter: missing rank in header")? as usize;
-    let alpha = c.header["config"]["alpha"].as_f64().unwrap_or(rank as f64) as f32;
-    let map: std::collections::HashMap<String, (Vec<usize>, Vec<f32>)> =
-        c.tensors.into_iter().map(|t| (t.name, (Vec::new(), t.data))).collect();
-    let ad = LoraAdapter::from_tensors(cfg, LoraCfg::loaded(rank, alpha), &map)?;
+    let f = model::adapter::pair_file::read(path, "z-image-lora").map_err(|e| format!("z-image lora: {e}"))?;
+    let ad = LoraAdapter::from_tensors(cfg, LoraCfg::loaded(f.rank, f.alpha), &f.map())?;
     ad.fold_into_comfy(tensors)
 }
 
@@ -309,11 +304,11 @@ pub fn run(
         progress(step + 1, opts.steps + 1, format!("step {}/{}  loss {loss:.5}", step + 1, opts.steps));
         // periodic checkpoint so a long run is resumable / inspectable mid-flight.
         if opts.ckpt_every > 0 && (step + 1) % opts.ckpt_every == 0 && step + 1 < opts.steps {
-            save_adapter(&opts.save_path, &adapter.to_tensors(), opts.rank, alpha);
+            save_adapter(&opts.save_path, &adapter.to_tensors(), opts.rank, alpha)?;
         }
     }
     let tensors = adapter.to_tensors();
-    save_adapter(&opts.save_path, &tensors, opts.rank, alpha);
+    save_adapter(&opts.save_path, &tensors, opts.rank, alpha)?;
     progress(opts.steps + 1, opts.steps + 1, format!("saved adapter → {}", opts.save_path));
     Ok(tensors)
 }

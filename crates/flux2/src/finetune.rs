@@ -1163,10 +1163,10 @@ pub fn run(
         );
         // periodic checkpoint so a long run is resumable / inspectable mid-flight
         if opts.ckpt_every > 0 && (step + 1) % opts.ckpt_every == 0 && step + 1 < opts.steps {
-            save_adapter(&opts.save_path, &adapter);
+            save_adapter(&opts.save_path, &adapter)?;
         }
     }
-    save_adapter(&opts.save_path, &adapter);
+    save_adapter(&opts.save_path, &adapter)?;
     progress(opts.steps + 1, opts.steps + 1, format!("saved adapter → {}", opts.save_path));
     Ok(adapter)
 }
