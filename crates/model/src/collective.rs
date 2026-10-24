@@ -613,6 +613,13 @@ impl<'a> ShapedCollective<'a> {
     /// Count this op and return the delay it pays. A configured failure point
     /// is checked here, before the inner collective sees the op.
     fn schedule(&self, bytes: u64) -> CollectiveResult<Duration> {
+        // A one-rank group exchanges nothing: there is no link to shape and no
+        // peer that can fail. Charging the simulated link here would make the
+        // world-1 baseline of a profile slower than the world that actually
+        // communicates, and every speedup derived from it too optimistic.
+        if self.inner.world_size() <= 1 {
+            return Ok(Duration::ZERO);
+        }
         let index = self.op_index.fetch_add(1, Ordering::Relaxed);
         if let Some(limit) = self.link.fail_after_ops {
             if index >= limit {
@@ -821,8 +828,10 @@ mod tests {
     }
 
     impl Collective for Counting {
+        /// A group with a peer, so the shaped-link schedule applies. The stub
+        /// answers locally; nothing here waits on a second thread.
         fn world_size(&self) -> usize {
-            1
+            2
         }
 
         fn all_reduce<'a>(&'a self, _rank: usize, local: Payload) -> CollectiveFuture<'a, Payload> {
@@ -973,12 +982,23 @@ mod tests {
 
     #[test]
     fn shaped_collective_charges_the_simulated_delay() {
-        let inner = HostCollective::new(1);
+        let inner = Counting::new();
         let mut l = link();
         l.one_way_latency = Duration::from_millis(1);
-        let shaped = ShapedCollective::new(&*inner, l);
+        let shaped = ShapedCollective::new(&inner, l);
         let started = Instant::now();
         pollster::block_on(shaped.all_reduce(0, Payload::f32(vec![1.0]))).unwrap();
         assert!(started.elapsed() >= Duration::from_millis(2), "the op did not pay the round trip");
+    }
+
+    #[test]
+    fn a_one_rank_group_pays_no_simulated_link_delay() {
+        let inner = HostCollective::new(1);
+        let link = SimulatedLink { one_way_latency: Duration::from_millis(200), bandwidth_bytes_per_sec: 1e6, jitter: Duration::ZERO, seed: 7, fail_after_ops: Some(0) };
+        let shaped = ShapedCollective::new(&*inner, link);
+        let started = std::time::Instant::now();
+        let out = pollster::block_on(shaped.all_reduce(0, Payload::f32(vec![1.0, 2.0]))).expect("one rank cannot fail");
+        assert_eq!(out.data, vec![1.0, 2.0]);
+        assert!(started.elapsed() < Duration::from_millis(50), "a one-rank op slept for the simulated link: {:?}", started.elapsed());
     }
 }
