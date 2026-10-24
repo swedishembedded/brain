@@ -2683,6 +2683,7 @@ dependencies = [
  "brain-imaging",
  "brain-kernels",
  "brain-model",
+ "brain-optim",
  "brain-sdxlunet",
  "brain-testutil",
  "brain-vae",

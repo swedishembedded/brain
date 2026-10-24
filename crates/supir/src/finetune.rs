@@ -44,7 +44,6 @@
 //! example per round - proving the optimizer drives down loss averaged over
 //! more than one example, not a single-tensor batch dimension.
 
-use std::collections::HashMap;
 
 use crate::train::SupirTrainer;
 
@@ -62,7 +61,7 @@ pub fn is_frozen_for_adaptor_only(name: &str) -> bool {
 /// A [`SupirTrainer`] plus host-side Adam moments and a freeze predicate.
 pub struct Finetuner {
     trainer: SupirTrainer,
-    moments: HashMap<String, (Vec<f32>, Vec<f32>)>,
+    moments: optim::NamedMoments,
     t: u64,
     frozen: fn(&str) -> bool,
 }
@@ -70,12 +69,12 @@ pub struct Finetuner {
 impl Finetuner {
     /// Upstream's own recipe - see [`is_frozen_for_adaptor_only`].
     pub fn adaptor_only(trainer: SupirTrainer) -> Finetuner {
-        Finetuner { trainer, moments: HashMap::new(), t: 0, frozen: is_frozen_for_adaptor_only }
+        Finetuner { trainer, moments: optim::NamedMoments::new(optim::Adam::default()), t: 0, frozen: is_frozen_for_adaptor_only }
     }
 
     /// Every recorded parameter trains.
     pub fn full_backbone(trainer: SupirTrainer) -> Finetuner {
-        Finetuner { trainer, moments: HashMap::new(), t: 0, frozen: |_| false }
+        Finetuner { trainer, moments: optim::NamedMoments::new(optim::Adam::default()), t: 0, frozen: |_| false }
     }
 
     pub fn trainer(&self) -> &SupirTrainer {
@@ -97,9 +96,12 @@ impl Finetuner {
             }
             let g = self.trainer.read_grad(&name);
             let mut w = self.trainer.read_weight(&name);
-            let (m, v) =
-                self.moments.entry(name.clone()).or_insert_with(|| (vec![0.0f32; g.len()], vec![0.0f32; g.len()]));
-            model::lora::adam(&mut w, m, v, &g, lr, t);
+            // The weights and gradient come from the same recorded parameter,
+            // so a shape disagreement is a bug in this trainer, not input:
+            // `NamedMoments` refuses it loudly rather than stepping partially.
+            self.moments
+                .step(t as u32, lr, 0.0, 1.0, &name, &mut w, &g)
+                .unwrap_or_else(|e| panic!("supir finetune: {e}"));
             self.trainer.write_weight(&name, &w);
         }
         loss

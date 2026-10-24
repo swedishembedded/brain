@@ -143,6 +143,59 @@ impl Adam {
     }
 }
 
+/// AdamW state for a trainer whose parameters live in HOST memory, keyed by
+/// parameter name.
+///
+/// A host trainer that owns its weights as a `name -> values` map (SUPIR's
+/// fine-tune, and any future host-side trainer) needs exactly two things from
+/// the optimiser: the moments for a parameter, allocated on first use, and a
+/// step that IS [`Adam::update_slice`]. Owning the map here is what stops a
+/// trainer from keeping its own `HashMap<String, (m, v)>` and re-deciding the
+/// first step's initialisation and the shape checks.
+pub struct NamedMoments {
+    adam: Adam,
+    moments: std::collections::HashMap<String, (Vec<f32>, Vec<f32>)>,
+}
+
+impl NamedMoments {
+    pub fn new(adam: Adam) -> NamedMoments {
+        NamedMoments { adam, moments: std::collections::HashMap::new() }
+    }
+
+    /// Step `name`'s weights `w` in place from gradient `g`: allocate the
+    /// moments on first use, then [`Adam::update_slice`] with `scale` on the
+    /// gradient (an accumulation average and/or clip coefficient).
+    ///
+    /// Refuses a gradient whose length differs from `w`, or from the moments
+    /// already stored for `name` - a trainer that mixed up two parameters
+    /// must see that as an error, not as a silent partial update.
+    pub fn step(&mut self, t: u32, lr: f32, wd: f32, scale: f32, name: &str, w: &mut [f32], g: &[f32]) -> Result<(), String> {
+        let (m, v) = self.moments.entry(name.to_string()).or_insert_with(|| (vec![0.0; w.len()], vec![0.0; w.len()]));
+        if g.len() != w.len() {
+            return Err(format!("{name}: {} gradient values for {} weights", g.len(), w.len()));
+        }
+        if m.len() != w.len() || v.len() != w.len() {
+            return Err(format!("{name}: moments hold {} and {} values for {} weights", m.len(), v.len(), w.len()));
+        }
+        self.adam.update_slice(t, lr, wd, scale, w, m, v, g);
+        Ok(())
+    }
+
+    /// The moments stored for `name`, when it has been stepped.
+    pub fn moments(&self, name: &str) -> Option<(&[f32], &[f32])> {
+        self.moments.get(name).map(|(m, v)| (&m[..], &v[..]))
+    }
+
+    /// How many parameters have state.
+    pub fn len(&self) -> usize {
+        self.moments.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.moments.is_empty()
+    }
+}
+
 /// The optimiser dispatch graph, built once and reused. The bind groups (and
 /// the storage buffers they reference) are fixed; only the uniform *contents*
 /// change between steps (lr, bias corrections, clip factor), so each
