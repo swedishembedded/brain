@@ -167,7 +167,12 @@ fn train(args: &[String]) {
         Some(timed) => timed,
         None => &collective,
     };
-    let sync = model::GradSync { collective: group, rank: context.rank() };
+    let plan_identity = context.plan().identity();
+    let sync = model::GradSync {
+        collective: group,
+        rank: context.rank(),
+        checkpoint: Some(model::CheckpointIdentity { job: context.plan().job.as_str(), plan: &plan_identity }),
+    };
     let started = std::time::Instant::now();
     let result = gpt2::train::train_distributed(Path::new(&dir), cfg, &o, out.as_deref(), sync);
     let run = started.elapsed();

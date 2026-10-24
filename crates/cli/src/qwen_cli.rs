@@ -1170,10 +1170,20 @@ fn finetune_lora(args: &[String]) {
         Some(timed) => Some(timed),
         None => collective.as_ref().map(|collective| collective as &dyn model::Collective),
     };
-    let control = model::FitControl {
-        grad_sync: context.as_ref().zip(group).map(|(context, collective)| model::GradSync { collective, rank: context.rank() }),
-        ..Default::default()
+    let plan_identity = context.as_ref().map(|context| context.plan().identity());
+    let grad_sync = match (context.as_ref(), group, plan_identity.as_deref()) {
+        (Some(context), Some(collective), Some(plan)) => Some(model::GradSync {
+            collective,
+            rank: context.rank(),
+            checkpoint: Some(model::CheckpointIdentity { job: context.plan().job.as_str(), plan }),
+        }),
+        (Some(_), Some(_), None) => {
+            eprintln!("error: the job plan has no identity to file a checkpoint under");
+            std::process::exit(1);
+        }
+        _ => None,
     };
+    let control = model::FitControl { grad_sync, ..Default::default() };
     let started = std::time::Instant::now();
     let trained = qwen3::finetune::finetune_lora_tuned(&base_open, scratch, &opts, rank, alpha, tuning, &start, control, base_dtype);
     let run = started.elapsed();
@@ -1204,6 +1214,36 @@ fn finetune_lora(args: &[String]) {
         return;
     }
     println!("saved: {full_ref_str} -> {}", adapter_out_path.display());
+    // One writer publishes the generation: every rank holds the same adapter,
+    // so a second manifest would only describe the same bytes. A job whose
+    // artifact cannot be committed must not report success.
+    if let (Some(context), Some(plan)) = (&context, plan_identity.as_deref()) {
+        if context.rank() == 0 {
+            let absolute = match std::fs::canonicalize(&adapter_out_path) {
+                Ok(path) => path,
+                Err(e) => {
+                    eprintln!("committing {}: {e}", adapter_out_path.display());
+                    std::process::exit(1);
+                }
+            };
+            let Some(dir) = absolute.parent() else {
+                eprintln!("committing {}: it has no directory", adapter_out_path.display());
+                std::process::exit(1);
+            };
+            let commit = match model::CheckpointCommit::build(context.plan().job.as_str(), plan, report.steps_completed, context.plan().world_size, dir, &[("adapter", &absolute)]) {
+                Ok(commit) => commit,
+                Err(e) => {
+                    eprintln!("committing {}: {e}", adapter_out_path.display());
+                    std::process::exit(1);
+                }
+            };
+            if let Err(e) = commit.write(dir) {
+                eprintln!("committing {}: {e}", adapter_out_path.display());
+                std::process::exit(1);
+            }
+            println!("committed step {} -> {}", commit.step, dir.display());
+        }
+    }
 }
 
 
