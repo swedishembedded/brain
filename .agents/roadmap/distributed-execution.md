@@ -164,6 +164,16 @@ Scope: Running one training job as ranks across machines - the job plan every ra
       two-rank `HostCollective`, plus the unchanged single-process case, in
       `crates/model/src/train.rs`.
 
+- [x] **The trainer commits what it saves, and a resume verifies it.**
+      Every periodic and final save publishes `CheckpointCommit` beside the
+      checkpoint; a resume refuses a generation that is missing, fails
+      verification, or names another job, plan or world, and a distributed
+      resume must name its world size in the run identity so a changed group is
+      refused. The Qwen CLI commits its adapter (written into the model store,
+      not the run directory) from rank 0 after saving. Tests: the published
+      commit and its three refusals, the world-identity refusal, and the
+      two-rank run below.
+
 ## Decisions
 
 - A cluster job's authority is its durable job record and its checkpoint
@@ -237,6 +247,15 @@ Scope: Running one training job as ranks across machines - the job plan every ra
   the share of the whole training call is 5.1% and 10.9%. Per-step reduction
   time varies between runs (rank 1 measured 94.7 ms/step at 4 steps), so the
   fixed part is differenced rather than assumed.
+
+- **End to end through a durable job controller.** An orchestrator submitted
+      two Qwen3-0.6B LoRA ranks on one machine (eval-free, 2 steps, one P40
+      each); the job completed 6.6 s after launch with exit 0, the adapters in
+      `out0` and `out1` are byte-identical (`sha256:f5e70fce...`), rank 0
+      published the step-2 commit, and the controller registered the adapter
+      (10,140,344 bytes, matching sha256) from the manifest beside the nested
+      model-store copy. The per-rank profiles report 168 and 186 ms of
+      collective time in a 3,132 ms call (5.4% and 5.9%).
 
 ## Open
 
