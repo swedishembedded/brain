@@ -140,6 +140,41 @@ Scope: Running one training job as ranks across machines - the job plan every ra
   held-out set, so replicas agree on the held-out loss and on an early-stop
   decision.
 
+## Measured
+
+- **Single-machine profile** (`make bench/distributed ARGS="--steps 3"`): a
+  1-layer GPT (d_model 32, block 16, batch 2) on the CPU backend, 3 steps,
+  world 1/2/4, all replicas bit-identical. Shaped link = 100 Gb/s, 100 us
+  one-way, no jitter.
+  - host (threads, shared RAM): 1880/2294/3112 tok/s at world 1/2/4,
+    speedup 1.00/1.22/1.66, efficiency 1.00/0.61/0.41, comm share
+    1.1/5.9/5.5%.
+  - loopback TCP: 1655/2136/2387 tok/s, speedup 1.00/1.29/1.44,
+    efficiency 1.00/0.65/0.36, comm share 0.0/12.6/23.7%.
+  - shaped: 1550/1406/2075 tok/s, speedup 1.00/**0.91**/1.34,
+    efficiency 1.00/0.45/0.34, comm share 0.9/**42.5**/42.6%.
+  The shaped world-2 row is the surprise the method exists to catch: at
+  realistic latency the reduction costs more than the second rank adds, for a
+  model this small. The tiny model exaggerates the share; the method must be
+  repeated at the target model size before drawing conclusions about larger
+  models.
+- **Qwen3-0.6B LoRA, two P40s, world 2** (LoRA 4, block 128, batch 1, 2 steps,
+  Vulkan, three repeats, medians):
+  - eval-free steady state 1.862 steps/s (1 process) vs 2.050 (2 ranks):
+    throughput speedup 1.98, parallel efficiency about 99%; the two adapters
+    are byte-identical (`sha256:4b77add9...`), held-out scores identical on
+    both ranks, train losses differ per shard.
+  - default cadence with one eval per step: 0.315 vs 0.283 steps/s; each eval
+    costs 2.6-3.0 s at block 128 over 20 batches, and is replicated on every
+    rank, so it is about 83% of the default 2-step time and gains nothing from
+    a second rank.
+  - reduction: 392 LoRA tensors, 9.63 MiB of host fp32 per rank per step; the
+    worker's socket time is about 0.24 s per step traced, about 2.5% of wall
+    in the eval-free run and about 27% of the reduction window. The star is
+    asymmetric: the coordinator rarely blocks, the worker waits.
+  - fixed per-run overhead is dominated by the per-process SHA-256 of the
+    2.2 GiB base (about 14 s), which every rank recomputes at save time.
+
 ## Open
 
 - [ ] The one-machine profile cannot see a real network. The loopback
@@ -167,6 +202,16 @@ Scope: Running one training job as ranks across machines - the job plan every ra
       driver resumes from `CheckpointCommit::latest` after verifying it.
       Replicas are bit-identical, so one writer is enough until tensor
       parallelism shards the weights.
+- [ ] Every rank hashes the base checkpoint at save time: the per-process
+      SHA-256 of a 2.2 GiB base is about 14 s, repeated world-size times. Compute
+      it once for a job and share it, or memoize it per process at minimum.
+- [ ] Evaluation is replicated on every rank: about 2.6-3.0 s per eval at
+      block 128, unsharded by design so the parity check is direct. A
+      production distributed run should evaluate on rank 0 (or shard and
+      reduce) and broadcast the score, and keep the parity check as a test.
+- [ ] The trainer prints no collective timings; the comm share above came from
+      tracing sockets. Wire `TimedCollective` into the distributed fit behind a
+      flag so a run reports its own comm bytes, time and share.
 - [ ] Ring/tree all-reduce for worlds where the coordinator star's bandwidth
       matters, and cross-rank validation of every op on the worker side (the
       coordinator validates today; a worker's own rank/length is checked
