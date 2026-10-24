@@ -42,7 +42,7 @@
 //! reference and a real caller's [`sam_tokens_from_nchw`] both feed (SAM has
 //! its own gate; nothing here re-derives it).
 
-use gpu_core::{f, DeviceBuffer, Gpu, Step};
+use gpu_core::{DeviceBuffer, Gpu, Step};
 use model::block::{self, Bidir, BidirIds, KernelIds, UNREGISTERED};
 use paramstore::{ParamStore, Role};
 
@@ -253,6 +253,10 @@ pub struct Resampler {
     ids: Ids,
     cfg: DeepseekOcr2VisionConfig,
     opt: optim::Optim,
+    /// The LoRA correction's forward and backward (`model::adapter::exec`), the
+    /// same runtime `deepseek2` and the qwen decoders use; `None` without an
+    /// adapter or outside training.
+    adapter: Option<model::adapter::exec::AdapterRuntime>,
 }
 
 impl Resampler {
@@ -290,7 +294,14 @@ impl Resampler {
         }
         let idx = |name: &str| gpu.kernel_index(name).unwrap_or_else(|| panic!("deepseekocr2: {name} not registered - is it missing from PIPELINES?"));
         let opt = optim::Optim::new(idx("adamw"), idx("gradnorm_sq"), idx("grad_scale"), idx("clip_coef"), idx("grad_scale_buf"));
-        Resampler { gpu, ps, ids, cfg, opt }
+        // Sized for the widest call this tower makes: `2 * n_query` rows (the
+        // longest view), and the widest targeted linear.
+        let adapter = cfg.lora.as_ref().filter(|_| train).map(|lora| {
+            let rows = 2 * cfg.encoder.n_query_local.max(cfg.encoder.n_query_global);
+            let max_out = crate::config::Qwen2EncoderConfig::lora_leaves().iter().filter_map(|leaf| cfg.encoder.linear_shape(leaf)).map(|(out, _)| out as u32).max().unwrap_or(cfg.encoder.d_model);
+            model::adapter::exec::AdapterRuntime::new(&gpu, lora, rows, max_out)
+        });
+        Resampler { gpu, ps, ids, cfg, opt, adapter }
     }
 
     pub fn gpu(&self) -> &Gpu {
@@ -645,15 +656,9 @@ impl Resampler {
     /// these buffers.
     #[allow(clippy::too_many_arguments)]
     fn lora_fwd(&self, s: &mut Vec<Step>, leaf: &str, x: &DeviceBuffer, wname: &str, y: &DeviceBuffer, m: u32, k: u32, nout: u32) {
-        let Some((r, scale)) = self.lora_for(leaf) else { return };
-        let g = &self.gpu;
-        let a = format!("{wname}.lora_a");
-        let bnm = format!("{wname}.lora_b");
-        let xa = g.storage((m * r) as u64);
-        s.push(g.step(self.ids.matmul, &[x, self.ps.w(&a), &xa], &[m, k, r], m * r));
-        let delta = g.storage((m * nout) as u64);
-        s.push(g.step(self.ids.matmul, &[&xa, self.ps.w(&bnm), &delta], &[m, r, nout], m * nout));
-        s.push(g.step(self.ids.axpy, &[y, &delta], &[m * nout, f(scale)], m * nout));
+        if let Some(rt) = self.adapter.as_ref().filter(|rt| rt.hits(leaf)) {
+            rt.forward(rt.reference_gemm(), s, &self.ps, wname, x, y, m, k, nout);
+        }
     }
 
     /// Backward for the OPTIONAL LoRA delta on a targeted linear - the base
@@ -668,19 +673,12 @@ impl Resampler {
     /// `da = scale*(d_out*B)`, `gA += daᵀ*x`, `dx += da*A`).
     #[allow(clippy::too_many_arguments)]
     fn lora_bwd(&self, s: &mut Vec<Step>, leaf: &str, d_out: &DeviceBuffer, x: &DeviceBuffer, wname: &str, dx: &DeviceBuffer, m: u32, k: u32, nout: u32) {
-        let Some((r, scale)) = self.lora_for(leaf) else { return };
-        let g = &self.gpu;
-        let a = format!("{wname}.lora_a");
-        let bnm = format!("{wname}.lora_b");
-        let xa = g.storage((m * r) as u64);
-        s.push(g.step(self.ids.matmul, &[x, self.ps.w(&a), &xa], &[m, k, r], m * r));
-        s.push(g.step(self.ids.grad_scale, &[&xa], &[m * r, f(scale)], m * r));
-        s.push(g.step(self.ids.matmul_dw, &[d_out, &xa, self.ps.g(&bnm)], &[m, r, nout], nout * r));
-        let da = g.storage((m * r) as u64);
-        s.push(g.step(self.ids.matmul_dx, &[d_out, self.ps.w(&bnm), &da], &[m, r, nout, 0], m * r));
-        s.push(g.step(self.ids.grad_scale, &[&da], &[m * r, f(scale)], m * r));
-        s.push(g.step(self.ids.matmul_dw, &[&da, x, self.ps.g(&a)], &[m, k, r], r * k));
-        s.push(g.step(self.ids.matmul_dx, &[&da, self.ps.w(&a), dx], &[m, k, r, 1], m * k));
+        if let Some(rt) = self.adapter.as_ref().filter(|rt| rt.hits(leaf)) {
+            assert!(rt.cfg().kind != model::adapter::DeviceKind::Ia3, "deepseekocr2: IA3 rescales the gradient before the base, which this tower's base backward cannot take");
+            // The base's input gradient was recorded before this call, so this
+            // ACCUMULATES into `dx`.
+            rt.backward(rt.reference_gemm(), s, &self.ps, wname, d_out, x, dx, m, k, nout, &|_, _| {});
+        }
     }
 
     /// Names of every trainable parameter this tower owns - the encoder

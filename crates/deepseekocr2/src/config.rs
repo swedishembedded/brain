@@ -121,7 +121,7 @@ impl Qwen2EncoderConfig {
     /// `(out, in)` for one [`Self::lora_leaves`] entry, or `None` for
     /// anything else (norms, biases, the query banks - none of which is a
     /// `[out, in]` linear a LoRA pair can attach to).
-    fn linear_shape(&self, leaf: &str) -> Option<(usize, usize)> {
+    pub fn linear_shape(&self, leaf: &str) -> Option<(usize, usize)> {
         let (d, kv, ff) = (self.d_model as usize, self.kv_dim() as usize, self.ffn_hidden as usize);
         match leaf {
             "attn.q" | "attn.out" => Some((d, d)),

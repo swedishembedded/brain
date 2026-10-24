@@ -6,7 +6,6 @@
 # delete the line in the commit that routes the file through model::adapter. A
 # new match is a design defect, not an allowlist addition.
 crates/deepseekocr2/src/config.rs	2	per-model adapter param list, init, export or rollout spelling the suffix; derive from the adapter parameter specs
-crates/deepseekocr2/src/encoder.rs	4	per-model device LoRA wiring spelling the .lora_a/.lora_b suffix in param lists, fold and training code; replace with parameter-set driven calls into model::adapter
 crates/deepseekocr2/src/init.rs	1	per-model adapter param list, init, export or rollout spelling the suffix; derive from the adapter parameter specs
 crates/gradcheck/src/minicpmv.rs	7	test support spelling the suffix to build or read adapters; use the adapter module's naming helpers
 crates/minicpmv/src/export.rs	3	per-model adapter param list, init, export or rollout spelling the suffix; derive from the adapter parameter specs
