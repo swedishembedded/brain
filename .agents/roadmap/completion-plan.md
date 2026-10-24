@@ -511,30 +511,41 @@ copies.
       vqgan, sam2, yolov8 and horizon use it (2026-10-24).
 - [x] `s3dit::train::ZTrainModel` honours `Model::adamw_step` instead of
       silently not training (2026-10-24).
-- [ ] Migrate the remaining hand-held hot caches to `capability::hot::Hot`:
-      controlnet, flux2 (its `HotKey`), glmdsa, lfm2, lpips, pulid, qwen3,
-      qwen35, qwen35moe, s3dit, splat, wan, worldmirror2, zipdepth, and the
-      `resident_minimaxh3` device-keyed one (which needs a key type, not a
-      string).
-- [ ] Migrate the flow-matching loop's remaining copies: `s3dit` (its own RNG
-      draw order), and `flux2`'s richer schedule/resume path as a visitor over
-      whatever it keeps.
+- [x] Every capability provider caches through `capability::hot::Hot`,
+      including the remaining hand-held ones (controlnet, flux2, glmdsa,
+      lfm2, lpips, pulid, qwen3, qwen35, qwen35moe, s3dit, splat, wan,
+      worldmirror2, zipdepth, `resident_minimaxh3`) (2026-10-24).
+- [x] Every flow-matching family runs `model::flow::train`: wan, ltxv (video
+      and AV), s3dit and flux2; the driver leaves randomness and the per-step
+      rate to the family and takes a `start` step for a resumed run
+      (2026-10-24).
 - [ ] `minicpmv`'s hand-written fit loop (epoch order, accumulation, resume,
       eval, checkpoint) onto `ChatTrainer` + a `ModelFit` visitor.
 - [ ] The causal-LM + aligner loops of `qwen3vl`, `deepseekvl` and `januspro`
       onto one multi-part `ModelFit`; two optimizers is the blocker, so the
       aligner needs an explicit secondary optimizer seam first.
-- [ ] `kronos` and `timesfm3`: one forecast fine-tune driver (their
-      `FinetuneOpts`/`FinetuneReport`/loop/promotion gate are field-for-field
-      copies).
-- [ ] `minimaxmusic3`: its own `LoraW` fold/projection onto `model::lora`
-      (`Pair`/`AdapterSet`) with a per-component field map; it imports neither
-      today.
+- [x] `kronos` and `timesfm3` share `forecast::finetune`: one
+      `FinetuneOpts<L>`, one `FinetuneReport`, one promotion rule. The loops
+      stay model-specific (they draw different windows and objectives)
+      (2026-10-24).
+- [x] `minimaxmusic3`'s vocoder/DiT/depth adapters are `model::lora::Pair`:
+      its `LoraW`, delta, apply and gradient projection are the shared ones
+      (2026-10-24).
 - [ ] `deepseekocr2`'s device LoRA onto `AdapterRuntime`, and `minicpmv`'s
       `TowerLora` onto a vision-tower adapter seam (neither exists yet).
-- [ ] The `TRAIN_KERNELS`/`train_kernel_set()` clone in sdxlunet, supir,
-      controlnet, rrdbnet and vqgan: one helper in `vae::blocks`.
-- [ ] `supir`'s private host AdamW (a `HashMap` of moments) onto `optim`.
+- [x] One `vae::blocks::train_kernel_set` for sdxlunet, supir, controlnet,
+      rrdbnet and vqgan (2026-10-24).
+- [x] `optim::NamedMoments` owns the host trainer's AdamW state; SUPIR steps
+      through it (2026-10-24).
+- [x] The `minimaxmusic3` convergence tests pin their batch: they drew a new
+      random one per run, so whether a rank-2 adapter reached a fixed bar
+      depended on the draw (the DiT case measured 0.61-0.85 of its starting
+      loss across seeds at an unchanged bar that demanded 0.6) (2026-10-24).
+- [ ] `qwen35moe`'s caps tests panic in `model::int8` ("activation K must be a
+      multiple of 32 (got 24)") on a GPU box: the tiny config is built at the
+      hardware default precision, and its narrow contraction width is one the
+      int8 kernel refuses. Either the tiny config must be int8-legal or the
+      test must pin fp32.
 - [ ] Build health: the CPU backend selects the `max_abs_rows` upgrade (a
       work-group kernel with no barrier and no `global_invocation_id`), and
       `wgsl-cpu` classifies work-group execution only by `var<workgroup>` or a
