@@ -90,6 +90,30 @@ Scope: Running one training job as ranks across machines - the job plan every ra
       `crates/cli/src/qwen_cli.rs`, and a two-process Qwen3-0.6B LoRA smoke
       that must end with byte-identical adapters.
 
+- [x] **A distributed run is measurable on one machine.**
+      `collective::TimedCollective` wraps any transport and times each op
+      inside its async block, accounting per op kind for call count, staged
+      payload bytes (elements times the dtype's bit width, rounded up, so the
+      sub-byte tiers count) and total wall time, with p50/p95/p99 computed
+      from the raw per-call samples. A run that does not construct one pays
+      nothing. `collective::ShapedCollective` charges a deterministic link
+      model before the wrapped op - two one-way propagation delays plus
+      payload/bandwidth plus jitter drawn from `seed ^ op_index` through
+      SplitMix64, with no mutable RNG and no environment - and can fail at a
+      configured op index with a transport error without touching the inner
+      collective. `crates/bench/src/distributed.rs` trains the tiny GPT of the
+      distributed tests as world 1/2/4 over the host, loopback TCP and shaped
+      transports through the public fit seam, and emits one JSON document:
+      per-run step times, tokens/s, communication bytes/time/share, throughput
+      speedup and parallel efficiency against the same transport's world-1
+      run, and whether the replicas ended bit-identical. `make
+      bench/distributed` runs it, and it selects the CPU backend by name so a
+      run needs no device and no environment variable. Tests: the collective
+      unit tests (accounting, dtype widths, percentile ranks, the link's
+      latency/bandwidth/seeded-jitter properties, and the failure firing
+      point), and `crates/bench/tests/distributed_profile.rs`, which runs the
+      profile small and parses its report.
+
 ## Decisions
 
 - A cluster job's authority is its durable job record and its checkpoint
@@ -97,6 +121,13 @@ Scope: Running one training job as ranks across machines - the job plan every ra
   (`crates/session`, content-addressed artifacts) is a single-writer local
   control surface: a worker never opens it, and a multi-node run does not
   create sessions on its workers.
+
+- The one-machine profile's speedup is a tokens-per-second ratio against the
+  same transport's world-1 run, so parallel efficiency (speedup / world) is
+  the step-time ratio for a fixed amount of work per rank. Its communication
+  figures are the payload one rank staged and the time its collective wrapper
+  measured, not bytes on a NIC; the host transport moves those bytes through
+  host RAM.
 
 - Training-stream sharding is index-based: every rank consumes the whole
   stream and keeps record `n` only when `n % world == rank`. On a dataset with
@@ -110,6 +141,14 @@ Scope: Running one training job as ranks across machines - the job plan every ra
   decision.
 
 ## Open
+
+- [ ] The one-machine profile cannot see a real network. The loopback
+      transport's latency is the kernel's TCP stack on one host, there is no
+      NIC and no scheduler, and the host transport stages payloads through host
+      RAM. The shaped transport is a model of a link, not a measurement of one:
+      it charges the transfer term once per op and carries no protocol
+      overhead, so it ranks transports and decomposes a step's cost, but it
+      cannot predict a cluster's absolute step time.
 
 - [ ] Only the GPT trainer and the Qwen3 LoRA fine-tune take a job plan. The
       GLM trainer, the full-parameter fine-tunes and the other model families
