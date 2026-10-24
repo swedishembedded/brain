@@ -114,6 +114,18 @@ Scope: Running one training job as ranks across machines - the job plan every ra
       point), and `crates/bench/tests/distributed_profile.rs`, which runs the
       profile small and parses its report.
 
+- [x] **A base is hashed once, not once per rank and per save.**
+      `fetch::file_digest_sidecar` records `sha256:<hex>` with the file's length
+      and nanosecond modification time in a `<file>.sha256` sibling and reuses
+      it only while both still match; a missing, corrupt or stale sidecar is
+      ignored and rewritten, and a cache hit answers exactly the digest the
+      file's bytes give. Writes go through a per-call temporary and a rename,
+      so ranks hashing the same base concurrently leave one complete sidecar.
+      `fetch::base_digest_sidecar` applies it to every file of a
+      `transformers` directory base. The fine-tune save paths use it (the Qwen3
+      CLI and capability action, and the Qwen3.5 streamed fine-tune), so the
+      first process pays the hash and the rest stat the file.
+
 ## Decisions
 
 - A cluster job's authority is its durable job record and its checkpoint
@@ -172,8 +184,9 @@ Scope: Running one training job as ranks across machines - the job plan every ra
     worker's socket time is about 0.24 s per step traced, about 2.5% of wall
     in the eval-free run and about 27% of the reduction window. The star is
     asymmetric: the coordinator rarely blocks, the worker waits.
-  - fixed per-run overhead is dominated by the per-process SHA-256 of the
-    2.2 GiB base (about 14 s), which every rank recomputes at save time.
+  - fixed per-run overhead was dominated by the per-process SHA-256 of the
+    2.2 GiB base (about 14 s), which every rank recomputed at save time; a
+    validated sidecar now serves it after the first process hashes it.
 
 ## Open
 
@@ -202,9 +215,6 @@ Scope: Running one training job as ranks across machines - the job plan every ra
       driver resumes from `CheckpointCommit::latest` after verifying it.
       Replicas are bit-identical, so one writer is enough until tensor
       parallelism shards the weights.
-- [ ] Every rank hashes the base checkpoint at save time: the per-process
-      SHA-256 of a 2.2 GiB base is about 14 s, repeated world-size times. Compute
-      it once for a job and share it, or memoize it per process at minimum.
 - [ ] Evaluation is replicated on every rank: about 2.6-3.0 s per eval at
       block 128, unsharded by design so the parity check is direct. A
       production distributed run should evaluate on rank 0 (or shard and
