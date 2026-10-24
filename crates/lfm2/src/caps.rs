@@ -18,10 +18,10 @@
 //! alongside.
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use capability::{
-    Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType,
+    hot::Hot, Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType,
     Progress, Provider,
 };
 use data::qwen_tokenizer::QwenBpe;
@@ -71,11 +71,10 @@ pub fn manifest() -> Manifest {
 }
 
 /// The resident (hot) model + tokenizer and the key that fixes them.
-struct Hot {
-    weights: String,
-    tokenizer_path: String,
-    cap: u32,
-    tok: QwenBpe,
+struct LfmResident {
+    /// The parsed tokenizer this build was made with, kept for the special
+    /// ids `fill_mask` decodes with. Shared with the tokenizer cache.
+    tok: std::sync::Arc<QwenBpe>,
     model: Lfm,
 }
 
@@ -83,7 +82,8 @@ struct Hot {
 /// checkpoint loads lazily on the first run and stays resident.
 #[derive(Default)]
 pub struct LfmProvider {
-    hot: Arc<Mutex<Option<Hot>>>,
+    hot: Arc<Hot<(String, u32), LfmResident>>,
+    tok_hot: Arc<Hot<String, std::sync::Arc<QwenBpe>>>,
 }
 
 impl LfmProvider {
@@ -98,7 +98,7 @@ impl Provider for LfmProvider {
     }
     fn action(&self, name: &str) -> Option<Arc<dyn Action>> {
         match name {
-            "fill_mask" | "embed" => Some(Arc::new(EncoderAction { name: name.to_string(), hot: self.hot.clone() }) as Arc<dyn Action>),
+            "fill_mask" | "embed" => Some(Arc::new(EncoderAction { name: name.to_string(), hot: self.hot.clone(), tok_hot: self.tok_hot.clone() }) as Arc<dyn Action>),
             _ => None,
         }
     }
@@ -106,7 +106,10 @@ impl Provider for LfmProvider {
 
 struct EncoderAction {
     name: String,
-    hot: Arc<Mutex<Option<Hot>>>,
+    hot: Arc<Hot<(String, u32), LfmResident>>,
+    /// Parsed tokenizers by path, separate from the model cache: a request of a
+    /// different length rebuilds the model but never re-parses the tokenizer.
+    tok_hot: Arc<Hot<String, std::sync::Arc<QwenBpe>>>,
 }
 
 /// Input text: the `text` param, else the `text` blob (long documents).
@@ -133,22 +136,9 @@ impl Action for EncoderAction {
         let tokenizer_path = inv.get_str("tokenizer").ok_or("lfm: missing required param 'tokenizer'")?;
         let text = input_text(inv)?;
 
-        // Tokenize outside the lock-heavy section (needs the cached tokenizer,
-        // so take the lock once and do everything hot under it — the encoder is
-        // one-shot and the executor batches concurrency above this level).
-        let mut guard = self.hot.lock().map_err(|_| "lfm: hot model lock poisoned")?;
-        let tok_reusable = matches!(&*guard, Some(h) if h.tokenizer_path == tokenizer_path);
-        if !tok_reusable {
-            *guard = None;
-        }
-        let tok_tmp;
-        let tok: &QwenBpe = match &*guard {
-            Some(h) => &h.tok,
-            None => {
-                tok_tmp = QwenBpe::from_file(&tokenizer_path)?;
-                &tok_tmp
-            }
-        };
+        // The parsed tokenizer lives in its own cache: a request of a new
+        // length rebuilds the model but reuses the tokenizer.
+        let tok = self.tok_hot.get_cloned(tokenizer_path.clone(), || Ok(std::sync::Arc::new(QwenBpe::from_file(&tokenizer_path)?)))?;
 
         let mut ids: Vec<u32> = tok.template_prefix().to_vec();
         ids.extend(tok.encode(&text));
@@ -166,97 +156,92 @@ impl Action for EncoderAction {
         // batched-serving phase. Rebuilds cost one weight upload when the
         // length changes; fixed-length callers (perf) build once.
         let need = ids.len() as u32;
+        // The graph is built at the EXACT request length (see the comment
+        // above): the key is the checkpoint plus that length.
+        self.hot.try_get_mut(
+            (weights.clone(), need),
+            || Ok(LfmResident { tok: tok.clone(), model: Lfm::load_inference_chunked(&weights, 1, need, SLAB_BUDGET, PROBE_CAP) }),
+            |hot| {
+                let (model, tok) = (&hot.model, &hot.tok);
+                let cap = need;
+                let n = ids.len();
+            debug_assert_eq!(n as u32, cap);
+            model.set_tokens(&ids);
+            progress(Progress::step(1, 2, "encode"));
 
-        let reuse = matches!(&*guard, Some(h) if h.weights == weights && h.cap == need);
-        if !reuse {
-            let old_tok = guard.take().map(|h| h.tok);
-            let tok = match old_tok {
-                Some(t) if tok_reusable => t,
-                _ => QwenBpe::from_file(&tokenizer_path)?,
-            };
-            let model = Lfm::load_inference_chunked(&weights, 1, need, SLAB_BUDGET, PROBE_CAP);
-            *guard = Some(Hot { weights: weights.clone(), tokenizer_path: tokenizer_path.clone(), cap: need, tok, model });
-        }
-        let hot = guard.as_ref().expect("hot model present");
-        let (model, tok) = (&hot.model, &hot.tok);
-        let cap = hot.cap;
-
-        let n = ids.len();
-        debug_assert_eq!(n as u32, cap);
-        model.set_tokens(&ids);
-        progress(Progress::step(1, 2, "encode"));
-
-        match self.name.as_str() {
-            "fill_mask" => {
-                let mask_id = tok.special_id("<|mask|>").ok_or("lfm: tokenizer has no <|mask|>")?;
-                let rows: Vec<u32> = ids.iter().enumerate().filter_map(|(i, &t)| (t == mask_id).then_some(i as u32)).collect();
-                if rows.is_empty() {
-                    return Err("lfm fill_mask: no <|mask|> in the input".to_string());
-                }
-                if rows.len() as u32 > PROBE_CAP {
-                    return Err(format!("lfm fill_mask: {} masks > capacity {PROBE_CAP}", rows.len()));
-                }
-                model.set_probe_rows(&rows);
-                model.forward();
-                let logits = model.read_probe_logits();
-                let topk = inv.get_i64("topk").unwrap_or(5).clamp(1, 64) as usize;
-                let v = model.cfg.vocab as usize;
-                let results: Vec<serde_json::Value> = rows
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &row)| {
-                        let lrow = &logits[i * v..(i + 1) * v];
-                        let mut idx: Vec<u32> = (0..v as u32).collect();
-                        idx.sort_unstable_by(|&x, &y| lrow[y as usize].total_cmp(&lrow[x as usize]));
-                        let toks: Vec<serde_json::Value> = idx[..topk]
-                            .iter()
-                            .map(|&id| json!({"id": id, "token": tok.decode(&[id]), "logit": lrow[id as usize]}))
-                            .collect();
-                        json!({"row": row, "tokens": toks})
-                    })
-                    .collect();
-                let payload = serde_json::to_vec(&results).map_err(|e| e.to_string())?;
-                Ok(Outcome::new()
-                    .set("masks", json!(rows.len()))
-                    .set("predictions", json!(results))
-                    .blob("predictions", Blob::new(Media::Text, payload)))
-            }
-            "embed" => {
-                model.forward();
-                let d = model.cfg.d_model as usize;
-                let hidden = &model.read_hidden()[..n * d];
-                let mut mean = vec![0.0f32; d];
-                for row in hidden.chunks_exact(d) {
-                    for (m, &x) in mean.iter_mut().zip(row) {
-                        *m += x;
+            match self.name.as_str() {
+                "fill_mask" => {
+                    let mask_id = tok.special_id("<|mask|>").ok_or("lfm: tokenizer has no <|mask|>")?;
+                    let rows: Vec<u32> = ids.iter().enumerate().filter_map(|(i, &t)| (t == mask_id).then_some(i as u32)).collect();
+                    if rows.is_empty() {
+                        return Err("lfm fill_mask: no <|mask|> in the input".to_string());
                     }
+                    if rows.len() as u32 > PROBE_CAP {
+                        return Err(format!("lfm fill_mask: {} masks > capacity {PROBE_CAP}", rows.len()));
+                    }
+                    model.set_probe_rows(&rows);
+                    model.forward();
+                    let logits = model.read_probe_logits();
+                    let topk = inv.get_i64("topk").unwrap_or(5).clamp(1, 64) as usize;
+                    let v = model.cfg.vocab as usize;
+                    let results: Vec<serde_json::Value> = rows
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &row)| {
+                            let lrow = &logits[i * v..(i + 1) * v];
+                            let mut idx: Vec<u32> = (0..v as u32).collect();
+                            idx.sort_unstable_by(|&x, &y| lrow[y as usize].total_cmp(&lrow[x as usize]));
+                            let toks: Vec<serde_json::Value> = idx[..topk]
+                                .iter()
+                                .map(|&id| json!({"id": id, "token": tok.decode(&[id]), "logit": lrow[id as usize]}))
+                                .collect();
+                            json!({"row": row, "tokens": toks})
+                        })
+                        .collect();
+                    let payload = serde_json::to_vec(&results).map_err(|e| e.to_string())?;
+                    Ok(Outcome::new()
+                        .set("masks", json!(rows.len()))
+                        .set("predictions", json!(results))
+                        .blob("predictions", Blob::new(Media::Text, payload)))
                 }
-                for x in &mut mean {
-                    *x /= n as f32;
-                }
-                // `false` by default: the raw, un-normalized mean stays
-                // byte-identical for every caller that predates this param -
-                // see `EmbeddingPipeline`'s own doc for why the SDK's Qwen3
-                // backbone always normalizes but this one does not by default
-                // (a genuinely different existing-caller compatibility bar).
-                if inv.get_bool("normalize").unwrap_or(false) {
-                    let norm = mean.iter().map(|x| *x as f64 * *x as f64).sum::<f64>().sqrt();
-                    if norm > 0.0 {
-                        for x in &mut mean {
-                            *x = (*x as f64 / norm) as f32;
+                "embed" => {
+                    model.forward();
+                    let d = model.cfg.d_model as usize;
+                    let hidden = &model.read_hidden()[..n * d];
+                    let mut mean = vec![0.0f32; d];
+                    for row in hidden.chunks_exact(d) {
+                        for (m, &x) in mean.iter_mut().zip(row) {
+                            *m += x;
                         }
                     }
+                    for x in &mut mean {
+                        *x /= n as f32;
+                    }
+                    // `false` by default: the raw, un-normalized mean stays
+                    // byte-identical for every caller that predates this param -
+                    // see `EmbeddingPipeline`'s own doc for why the SDK's Qwen3
+                    // backbone always normalizes but this one does not by default
+                    // (a genuinely different existing-caller compatibility bar).
+                    if inv.get_bool("normalize").unwrap_or(false) {
+                        let norm = mean.iter().map(|x| *x as f64 * *x as f64).sum::<f64>().sqrt();
+                        if norm > 0.0 {
+                            for x in &mut mean {
+                                *x = (*x as f64 / norm) as f32;
+                            }
+                        }
+                    }
+                    let bytes: Vec<u8> = hidden.iter().flat_map(|f| f.to_le_bytes()).collect();
+                    let blob = Blob::new(Media::Bytes, bytes).with_meta(json!({"shape": [n, d], "dtype": "f32le"}));
+                    Ok(Outcome::new()
+                        .set("tokens", json!(n))
+                        .set("dim", json!(d))
+                        .set("mean", json!(mean))
+                        .blob("embeddings", blob))
                 }
-                let bytes: Vec<u8> = hidden.iter().flat_map(|f| f.to_le_bytes()).collect();
-                let blob = Blob::new(Media::Bytes, bytes).with_meta(json!({"shape": [n, d], "dtype": "f32le"}));
-                Ok(Outcome::new()
-                    .set("tokens", json!(n))
-                    .set("dim", json!(d))
-                    .set("mean", json!(mean))
-                    .blob("embeddings", blob))
+                other => Err(format!("lfm: unknown action {other}")),
             }
-            other => Err(format!("lfm: unknown action {other}")),
-        }
+            },
+        )
     }
 }
 

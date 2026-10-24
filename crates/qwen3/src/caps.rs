@@ -66,7 +66,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use capability::{Action, ActionResult, ActionSpec, Blob, BlobSpec, CancelToken, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress, Provider};
+use capability::{hot::Hot, Action, ActionResult, ActionSpec, Blob, BlobSpec, CancelToken, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress, Provider};
 use data::chat::ChatSample;
 use data::chat_template::ChatTemplate;
 use data::qwen_tokenizer::QwenBpe;
@@ -314,9 +314,7 @@ pub fn manifest() -> Manifest {
 /// The resident (hot) model: the loaded inference graph plus the key that fixes
 /// it. Reused while the weights path matches and the built context capacity
 /// covers the request; rebuilt (freeing the old weights first) otherwise.
-struct Hot {
-    precision: String,
-    weights: String,
+struct QwenResident {
     cap: u32,
     model: Qwen,
     /// The LM head, read once when this resident is (re)built -- see
@@ -324,6 +322,11 @@ struct Hot {
     /// re-reading it every call otherwise pays.
     head: Vec<f32>,
 }
+
+/// What a built [`QwenResident`] is reused for: its checkpoint, the context it
+/// was built with, and the precision. A request with a smaller context hits the
+/// same resident (the acceptance rule, not equality, decides).
+type HotKey = (String, u32, String);
 
 /// The executable Qwen model behind the manifest. Construction is free — the
 /// checkpoint loads lazily on the first `generate` and stays resident.
@@ -335,7 +338,7 @@ struct Hot {
 /// explicitly).
 #[derive(Default)]
 pub struct QwenProvider {
-    hot: Arc<Mutex<Option<Hot>>>,
+    hot: Arc<Hot<HotKey, QwenResident>>,
     /// `embed`'s own resident slot, deliberately separate from `hot`: it is a
     /// decode-only build (a different graph shape entirely), and in
     /// practice usually a different checkpoint file from `generate`'s (an
@@ -385,7 +388,7 @@ impl Provider for QwenProvider {
 }
 
 struct GenerateAction {
-    hot: Arc<Mutex<Option<Hot>>>,
+    hot: Arc<Hot<HotKey, QwenResident>>,
     default_weights: Option<String>,
     default_tokenizer: Option<String>,
 }
@@ -475,52 +478,50 @@ impl Action for GenerateAction {
             .checked_add(max_new)
             .and_then(|n| u32::try_from(n).ok())
             .ok_or_else(|| format!("qwen generate: a {prompt_len}-token prompt plus {max_new} new tokens is beyond any context"))?;
-        // `lock_resident`, not `lock()`: this mutex is held for the WHOLE of a
-        // generation, so one panicking request (a backend fault, a lost
-        // device) would otherwise poison it and make every later caller of
-        // this model fail for the life of the process. The resident the panic
-        // touched is discarded and the `!reuse` path below rebuilds it.
-        let mut guard = capability::lock_resident(&self.hot);
-        let reuse = matches!(&*guard, Some(h) if h.weights == weights && h.cap >= need && h.precision == precision);
-        if !reuse {
-            *guard = None; // free the old resident weights before loading new
-            let cap = need.max(64);
-            // Refuse an over-budget checkpoint legibly BEFORE dispatching a
-            // device allocation, instead of letting `Qwen::load_inference*`
-            // OOM the driver - see `crate::footprint`'s own doc.
-            let dt = if precision == "int8" { gpu_core::select::Dtype::I8 } else { gpu_core::select::Dtype::F32 };
-            // A GGUF is served STRAIGHT off its own mapping, under brain's
-            // parameter names, with no ahead-of-time conversion: see
-            // `crate::open_checkpoint`. `brain import` would first
-            // write an fp32 checkpoint ~4x the GGUF's size (15 GiB from a
-            // 4 GiB Q8_0 Qwen3-4B) purely to rename tensors, and the fp32
-            // build then does not fit an integrated GPU at all. The
-            // quantized bytes on disk are already what a reduced-precision
-            // build wants.
-            let (cfg, src) = crate::open_checkpoint(&weights).map_err(|e| format!("qwen generate: {e}"))?;
-            let shard = crate::model::Shard::whole(cfg.n_layers as usize);
-            let (build_cfg, build_shard) = (cfg.clone(), shard.clone());
-            let model = crate::footprint::place_and_build(&cfg, &shard, dt, 1, cap, false, false, "qwen3", move || {
-                Qwen::new_shard_dt(build_cfg, 1, cap, &*src, build_shard, dt)
-            })?;
-            // An incremental decoder re-records its WHOLE tape every token -
-            // roughly 800 dispatches for Qwen3-0.6B - and on wgpu each one
-            // builds a fresh uniform buffer plus a fresh bind group, both
-            // host-side driver calls. Measured on an Arc iGPU: 7826 uniforms
-            // and 7826 bind groups for 19 tokens. `stepcache` exists for
-            // exactly this shape (see its own module doc, which names the
-            // incremental decoder) and returns the dispatch a miss would have
-            // built, bit for bit. Armed here because this handle's buffers are
-            // a resident model's weights and scratch, which outlive the cache
-            // anyway - the condition `enable_step_cache` asks for.
-            if step_cache_enabled() {
-                model.gpu().enable_step_cache(STEP_CACHE_ENTRIES);
-            }
-            let head = model.read_weight(model.cfg.head_weight());
-            *guard = Some(Hot { precision: precision.clone(), weights: weights.clone(), cap, model, head });
-        }
-        let hot = guard.as_ref().unwrap();
-        let model = &hot.model;
+        let key: HotKey = (weights.clone(), need.max(64), precision.clone());
+        // Reuse is a RELATION, not equality: a resident built for at least
+        // this request's context serves it too.
+        self.hot.try_get_with_mut(
+            |k: &HotKey| k.0 == weights && k.1 >= need && k.2 == precision,
+            key,
+            || {
+                let cap = need.max(64);
+                // Refuse an over-budget checkpoint legibly BEFORE dispatching a
+                // device allocation, instead of letting `Qwen::load_inference*`
+                // OOM the driver - see `crate::footprint`'s own doc.
+                let dt = if precision == "int8" { gpu_core::select::Dtype::I8 } else { gpu_core::select::Dtype::F32 };
+                // A GGUF is served STRAIGHT off its own mapping, under brain's
+                // parameter names, with no ahead-of-time conversion: see
+                // `crate::open_checkpoint`. `brain import` would first
+                // write an fp32 checkpoint ~4x the GGUF's size (15 GiB from a
+                // 4 GiB Q8_0 Qwen3-4B) purely to rename tensors, and the fp32
+                // build then does not fit an integrated GPU at all. The
+                // quantized bytes on disk are already what a reduced-precision
+                // build wants.
+                let (cfg, src) = crate::open_checkpoint(&weights).map_err(|e| format!("qwen generate: {e}"))?;
+                let shard = crate::model::Shard::whole(cfg.n_layers as usize);
+                let (build_cfg, build_shard) = (cfg.clone(), shard.clone());
+                let model = crate::footprint::place_and_build(&cfg, &shard, dt, 1, cap, false, false, "qwen3", move || {
+                    Qwen::new_shard_dt(build_cfg, 1, cap, &*src, build_shard, dt)
+                })?;
+                // An incremental decoder re-records its WHOLE tape every token -
+                // roughly 800 dispatches for Qwen3-0.6B - and on wgpu each one
+                // builds a fresh uniform buffer plus a fresh bind group, both
+                // host-side driver calls. Measured on an Arc iGPU: 7826 uniforms
+                // and 7826 bind groups for 19 tokens. `stepcache` exists for
+                // exactly this shape (see its own module doc, which names the
+                // incremental decoder) and returns the dispatch a miss would have
+                // built, bit for bit. Armed here because this handle's buffers are
+                // a resident model's weights and scratch, which outlive the cache
+                // anyway - the condition `enable_step_cache` asks for.
+                if step_cache_enabled() {
+                    model.gpu().enable_step_cache(STEP_CACHE_ENTRIES);
+                }
+                let head = model.read_weight(model.cfg.head_weight());
+                Ok(QwenResident { cap, model, head })
+            },
+            |hot| {
+                let model = &hot.model;
 
         match plan {
             Plan::Chat { req, eos } => {
@@ -561,6 +562,8 @@ impl Action for GenerateAction {
                     .blob("text", Blob::new(Media::Text, text.into_bytes())))
             }
         }
+            },
+        )
     }
 }
 

@@ -46,10 +46,10 @@
 //! `brain glmdsa infer` uses, so the served path and the CLI path cannot
 //! disagree about how this model samples.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use capability::{
-    Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType,
+    hot::Hot, Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType,
     Progress, Provider,
 };
 use data::rng::Rng;
@@ -113,8 +113,7 @@ pub fn sampling(inv: &Invocation) -> Result<(usize, f32, usize, u64), String> {
 
 /// The resident (hot) model + its char vocabulary, and the checkpoint path that
 /// fixes them.
-struct Hot {
-    weights: String,
+struct GlmModel {
     tok: CharTokenizer,
     model: Glm,
 }
@@ -124,7 +123,7 @@ struct Hot {
 /// costs nothing and a repeated `brain glmdsa generate` pays the load once.
 #[derive(Default)]
 pub struct GlmProvider {
-    hot: Arc<Mutex<Option<Hot>>>,
+    hot: Arc<Hot<String, GlmModel>>,
 }
 
 impl GlmProvider {
@@ -146,7 +145,7 @@ impl Provider for GlmProvider {
 }
 
 struct GenerateAction {
-    hot: Arc<Mutex<Option<Hot>>>,
+    hot: Arc<Hot<String, GlmModel>>,
 }
 
 impl Action for GenerateAction {
@@ -161,8 +160,7 @@ impl Action for GenerateAction {
         }
         let (max_new, temp, top_k, seed) = sampling(inv)?;
 
-        let mut guard = self.hot.lock().map_err(|_| "glmdsa: model lock poisoned")?;
-        if guard.as_ref().map(|h| h.weights != weights).unwrap_or(true) {
+        self.hot.try_get(weights.clone(), || {
             // A char-level checkpoint that carries no embedded vocabulary
             // cannot be decoded at all, and there is no request parameter that
             // could supply one - so this is a named error, never a fallback to
@@ -171,22 +169,21 @@ impl Action for GenerateAction {
                 .ok_or_else(|| format!("glmdsa: checkpoint has no embedded char vocab: {weights}"))?;
             let block = GlmConfig::from_json(&checkpoint::load(&weights).header["config"]).block_size;
             let model = Glm::load_inference(&weights, 1, block);
-            *guard = Some(Hot { weights: weights.clone(), tok: CharTokenizer::from_itos(itos), model });
-        }
-        let hot = guard.as_ref().expect("just populated");
+            Ok(GlmModel { tok: CharTokenizer::from_itos(itos), model })
+        }, |hot| {
+            // An empty prompt seeds with a newline, matching `brain glmdsa infer`.
+            let prompt = inv.get_str("prompt").unwrap_or_default();
+            let prompt_text = if prompt.is_empty() { "\n".to_string() } else { prompt };
+            let ids = hot.tok.encode(&prompt_text);
 
-        // An empty prompt seeds with a newline, matching `brain glmdsa infer`.
-        let prompt = inv.get_str("prompt").unwrap_or_default();
-        let prompt_text = if prompt.is_empty() { "\n".to_string() } else { prompt };
-        let ids = hot.tok.encode(&prompt_text);
+            progress(Progress::step(0, max_new as u32, "generating"));
+            let mut rng = Rng::new(seed);
+            let gen = crate::sample::generate_kv(&hot.model, &ids, max_new, temp, top_k, None, &mut rng);
+            progress(Progress::step(max_new as u32, max_new as u32, "done"));
 
-        progress(Progress::step(0, max_new as u32, "generating"));
-        let mut rng = Rng::new(seed);
-        let gen = crate::sample::generate_kv(&hot.model, &ids, max_new, temp, top_k, None, &mut rng);
-        progress(Progress::step(max_new as u32, max_new as u32, "done"));
-
-        let text = hot.tok.decode(&gen);
-        Ok(Outcome::new().set("seed", json!(seed)).blob("text", Blob::new(Media::Text, text.into_bytes())))
+            let text = hot.tok.decode(&gen);
+            Ok(Outcome::new().set("seed", json!(seed)).blob("text", Blob::new(Media::Text, text.into_bytes())))
+        })
     }
 }
 

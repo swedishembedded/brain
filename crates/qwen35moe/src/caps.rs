@@ -35,9 +35,9 @@
 //!   complete "deliberately deferred" list this action does not attempt.
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use capability::{Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress, Provider};
+use capability::{hot::Hot, Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress, Provider};
 use data::qwen_tokenizer::QwenBpe;
 use data::rng::Rng;
 use data::tokenizer::Tokenizer;
@@ -116,23 +116,26 @@ pub fn manifest() -> Manifest {
 /// it. Reused while the weights path/precision match and the built context
 /// capacity covers the request; rebuilt (freeing the old weights first)
 /// otherwise — the exact same caching key `qwen3::caps::Hot` uses.
-struct Hot {
-    precision: String,
-    weights: String,
+struct QwenResident {
     cap: u32,
     model: Qwen35,
-    /// The LM head, read once when this resident is (re)built — see
+    /// The LM head, read once when this resident is (re)built - see
     /// `crate::sample::generate_kv_stream_with_head`'s doc comment for the
     /// per-request cost re-reading it every call otherwise pays.
     head: Vec<f32>,
 }
+
+/// What a built [`QwenResident`] is reused for: its checkpoint, the context it
+/// was built with, and the precision. A request needing less context hits the
+/// same resident (the acceptance rule, not equality, decides).
+type HotKey = (String, u32, String);
 
 /// The executable Qwen3.5-35B-A3B model behind the manifest. Construction is
 /// free — the checkpoint loads lazily on the first `generate` and stays
 /// resident.
 #[derive(Default)]
 pub struct Qwen35Provider {
-    hot: Arc<Mutex<Option<Hot>>>,
+    hot: Arc<Hot<HotKey, QwenResident>>,
 }
 
 impl Qwen35Provider {
@@ -151,7 +154,7 @@ impl Provider for Qwen35Provider {
 }
 
 struct GenerateAction {
-    hot: Arc<Mutex<Option<Hot>>>,
+    hot: Arc<Hot<HotKey, QwenResident>>,
 }
 
 impl Action for GenerateAction {
@@ -221,20 +224,23 @@ impl Action for GenerateAction {
             Plan::Chat { req, .. } => (req.ids.len() + req.max_new) as u32,
             Plan::Raw { ids, max_new, .. } => (ids.len() + max_new) as u32,
         };
-        let mut guard = self.hot.lock().map_err(|_| "qwen35moe: hot model lock poisoned")?;
-        let reuse = matches!(&*guard, Some(h) if h.weights == weights && h.cap >= need && h.precision == precision);
-        if !reuse {
-            *guard = None; // free the old resident weights before loading new
-            let cap = need.max(64);
-            let container = checkpoint::load(&weights);
-            let cfg = Qwen35Config::from_json(&container.header["config"]);
-            let init = container.by_role("");
-            let model = if precision == "int8" { Qwen35::new_i8(cfg, 1, cap, &init) } else { Qwen35::new(cfg, 1, cap, &init) };
-            let head = model.read_weight(model.cfg.head_weight());
-            *guard = Some(Hot { precision: precision.clone(), weights: weights.clone(), cap, model, head });
-        }
-        let hot = guard.as_ref().unwrap();
-        let model = &hot.model;
+        let key: HotKey = (weights.clone(), need.max(64), precision.clone());
+        // Reuse is a RELATION, not equality: a resident built for at least
+        // this request's context serves it too.
+        self.hot.try_get_with_mut(
+            |k: &HotKey| k.0 == weights && k.1 >= need && k.2 == precision,
+            key,
+            || {
+                let cap = need.max(64);
+                let container = checkpoint::load(&weights);
+                let cfg = Qwen35Config::from_json(&container.header["config"]);
+                let init = container.by_role("");
+                let model = if precision == "int8" { Qwen35::new_i8(cfg, 1, cap, &init) } else { Qwen35::new(cfg, 1, cap, &init) };
+                let head = model.read_weight(model.cfg.head_weight());
+                Ok(QwenResident { cap, model, head })
+            },
+            |hot| {
+                let model = &hot.model;
 
         match plan {
             Plan::Chat { req, eos } => {
@@ -276,6 +282,8 @@ impl Action for GenerateAction {
                     .blob("text", Blob::new(Media::Text, text.into_bytes())))
             }
         }
+            },
+        )
     }
 }
 

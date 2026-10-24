@@ -23,7 +23,7 @@
 //! diffusion models behind a memory-budgeted scheduler, you can procure our
 //! services by sending an email to info@swedishembedded.com.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use capability::{ActionResult, Invocation, Manifest, Progress};
 use minimaxh3::config::H3TransformerConfig;
@@ -45,7 +45,7 @@ pub struct MiniMaxH3Resident {
     /// `WanResident::hot` (one `HotDit` per `(variant, extent, device)` key)
     /// this needs splitting only by DEVICE, not by request shape - see this
     /// module's own doc.
-    hot: Arc<Mutex<Option<(String, minimaxh3::model::H3Transformer)>>>,
+    hot: Arc<capability::hot::Hot<String, minimaxh3::model::H3Transformer>>,
 }
 
 impl MiniMaxH3Resident {
@@ -55,12 +55,12 @@ impl MiniMaxH3Resident {
     /// serves under `id`. `serving::model_dir::resident_for_compound`'s
     /// `"minimaxh3"` arm builds one of these per scanned compound model.
     pub fn from_paths(id: String, paths: minimaxh3::caps::Paths) -> MiniMaxH3Resident {
-        MiniMaxH3Resident { id, paths, hot: Arc::new(Mutex::new(None)) }
+        MiniMaxH3Resident { id, paths, hot: Arc::new(capability::hot::Hot::new()) }
     }
 
     /// `None` (not registered) unless `BRAIN_MINIMAXH3_DIR` is set.
     pub fn from_env() -> Option<MiniMaxH3Resident> {
-        minimaxh3::caps::Paths::from_env().ok().map(|paths| MiniMaxH3Resident { id: minimaxh3::caps::MODEL.to_string(), paths, hot: Arc::new(Mutex::new(None)) })
+        minimaxh3::caps::Paths::from_env().ok().map(|paths| MiniMaxH3Resident { id: minimaxh3::caps::MODEL.to_string(), paths, hot: Arc::new(capability::hot::Hot::new()) })
     }
 }
 
@@ -255,7 +255,7 @@ fn device_name(device: Device) -> Option<String> {
 struct MiniMaxH3Instance {
     paths: minimaxh3::caps::Paths,
     device: Device,
-    hot: Arc<Mutex<Option<(String, minimaxh3::model::H3Transformer)>>>,
+    hot: Arc<capability::hot::Hot<String, minimaxh3::model::H3Transformer>>,
 }
 
 impl MiniMaxH3Instance {
@@ -265,16 +265,15 @@ impl MiniMaxH3Instance {
     /// for why this model's residency is sequential by design, same as
     /// `resident_wan.rs::WanInstance::run_batch`'s reasoning.
     fn with_hot_dit<R>(&self, body: impl FnOnce(&minimaxh3::model::H3Transformer) -> Result<R, String>) -> Result<R, String> {
-        let mut guard = self.hot.lock().map_err(|_| "minimaxh3: hot DiT lock poisoned")?;
         let want = device_key(self.device);
-        let needs_load = !matches!(&*guard, Some((dk, _)) if dk == &want);
-        if needs_load {
-            let dit_reader = minimaxh3::caps::open_dit_reader(&self.paths.dit)?;
-            let model = minimaxh3::model::H3Transformer::load(&dit_reader, H3TransformerConfig::real(), device_name(self.device).as_deref());
-            *guard = Some((want, model));
-        }
-        let (_, model) = guard.as_ref().expect("just ensured");
-        body(model)
+        self.hot.try_get(
+            want,
+            || {
+                let dit_reader = minimaxh3::caps::open_dit_reader(&self.paths.dit)?;
+                Ok(minimaxh3::model::H3Transformer::load(&dit_reader, H3TransformerConfig::real(), device_name(self.device).as_deref()))
+            },
+            body,
+        )
     }
 }
 
@@ -368,7 +367,7 @@ mod tests {
         MiniMaxH3Resident {
             id: minimaxh3::caps::MODEL.to_string(),
             paths: minimaxh3::caps::Paths::resolve("/test-root"),
-            hot: Arc::new(Mutex::new(None)),
+            hot: Arc::new(capability::hot::Hot::new()),
         }
     }
 

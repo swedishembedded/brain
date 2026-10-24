@@ -35,9 +35,9 @@
 //!   "deliberately deferred" list this action does not attempt.
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use capability::{Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress, Provider};
+use capability::{hot::Hot, Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress, Provider};
 use data::qwen_tokenizer::QwenBpe;
 use data::rng::Rng;
 use data::tokenizer::Tokenizer;
@@ -191,9 +191,7 @@ pub fn manifest() -> Manifest {
 /// fixes it. Reused while the weights path matches and the built context
 /// capacity covers the request; rebuilt (freeing the old weights first)
 /// otherwise.
-struct Hot {
-    precision: String,
-    weights: String,
+struct QwenResident {
     cap: u32,
     model: Qwen35,
     /// The LM head, read once when this resident is (re)built - see
@@ -201,6 +199,11 @@ struct Hot {
     /// per-request cost re-reading it every call otherwise pays.
     head: Vec<f32>,
 }
+
+/// What a built [`QwenResident`] is reused for: its checkpoint, the context it
+/// was built with, and the precision. A request needing less context hits the
+/// same resident (the acceptance rule, not equality, decides).
+type HotKey = (String, u32, String);
 
 /// The executable Qwen3.8-27B model behind the manifest. Construction is
 /// free - the checkpoint loads lazily on the first `generate` and stays
@@ -211,7 +214,7 @@ struct Hot {
 /// corresponding param - see [`GenerateAction::run`].
 #[derive(Default)]
 pub struct Qwen35Provider {
-    hot: Arc<Mutex<Option<Hot>>>,
+    hot: Arc<Hot<HotKey, QwenResident>>,
     default_weights: Option<String>,
     default_tokenizer: Option<String>,
 }
@@ -244,7 +247,7 @@ impl Provider for Qwen35Provider {
 }
 
 struct GenerateAction {
-    hot: Arc<Mutex<Option<Hot>>>,
+    hot: Arc<Hot<HotKey, QwenResident>>,
     default_weights: Option<String>,
     default_tokenizer: Option<String>,
 }
@@ -339,35 +342,38 @@ impl Action for GenerateAction {
             Plan::Chat { req, .. } => (req.ids.len() + req.max_new) as u32,
             Plan::Raw { ids, max_new, .. } => (ids.len() + max_new) as u32,
         };
-        let mut guard = self.hot.lock().map_err(|_| "qwen35: hot model lock poisoned")?;
-        let reuse = matches!(&*guard, Some(h) if h.weights == weights && h.cap >= need && h.precision == precision);
-        if !reuse {
-            *guard = None; // free the old resident weights before loading new
-            let cap = need.max(64);
-            // `read_config` alone (a header parse, no tensor data) is enough
-            // to estimate the build BEFORE paying for `checkpoint::load`'s
-            // eager whole-checkpoint-to-host-RAM read - at this model's real
-            // ~108 GB fp32 scale, refusing here instead of after that load
-            // saves minutes on top of the driver-crash `place_and_build`
-            // itself prevents (see its own doc).
-            let cfg = Qwen35Config::from_json(&checkpoint::read_config(&weights));
-            let tier =
-                if precision == "int8" { model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8) } else { model::ops::TierPolicy::uniform(gpu_core::select::Dtype::F32) };
-            let bytes = cfg.infer_footprint_bytes(&tier, cap);
-            let model = place_and_build(bytes, || {
-                let container = checkpoint::load(&weights);
-                let init = container.by_role("");
-                Ok(if precision == "int8" {
-                    Qwen35::new_i8(cfg.clone(), 1, cap, &init)
-                } else {
-                    Qwen35::new_on(gpu_core::Gpu::new(crate::model::pipelines()), cfg.clone(), 1, cap, &init)
-                })
-            })?;
-            let head = model.read_weight(model.cfg.head_weight());
-            *guard = Some(Hot { precision: precision.clone(), weights: weights.clone(), cap, model, head });
-        }
-        let hot = guard.as_ref().unwrap();
-        let model = &hot.model;
+        let key: HotKey = (weights.clone(), need.max(64), precision.clone());
+        // Reuse is a RELATION, not equality: a resident built for at least
+        // this request's context serves it too.
+        self.hot.try_get_with_mut(
+            |k: &HotKey| k.0 == weights && k.1 >= need && k.2 == precision,
+            key,
+            || {
+                let cap = need.max(64);
+                // `read_config` alone (a header parse, no tensor data) is enough
+                // to estimate the build BEFORE paying for `checkpoint::load`'s
+                // eager whole-checkpoint-to-host-RAM read - at this model's real
+                // ~108 GB fp32 scale, refusing here instead of after that load
+                // saves minutes on top of the driver-crash `place_and_build`
+                // itself prevents (see its own doc).
+                let cfg = Qwen35Config::from_json(&checkpoint::read_config(&weights));
+                let tier =
+                    if precision == "int8" { model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8) } else { model::ops::TierPolicy::uniform(gpu_core::select::Dtype::F32) };
+                let bytes = cfg.infer_footprint_bytes(&tier, cap);
+                let model = place_and_build(bytes, || {
+                    let container = checkpoint::load(&weights);
+                    let init = container.by_role("");
+                    Ok(if precision == "int8" {
+                        Qwen35::new_i8(cfg.clone(), 1, cap, &init)
+                    } else {
+                        Qwen35::new_on(gpu_core::Gpu::new(crate::model::pipelines()), cfg.clone(), 1, cap, &init)
+                    })
+                })?;
+                let head = model.read_weight(model.cfg.head_weight());
+                Ok(QwenResident { cap, model, head })
+            },
+            |hot| {
+                let model = &hot.model;
 
         match plan {
             Plan::Chat { req, eos } => {
@@ -409,6 +415,8 @@ impl Action for GenerateAction {
                     .blob("text", Blob::new(Media::Text, text.into_bytes())))
             }
         }
+            },
+        )
     }
 }
 
