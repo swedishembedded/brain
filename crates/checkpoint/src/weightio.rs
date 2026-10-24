@@ -201,6 +201,13 @@ impl WeightReader {
     /// opportunity to be wrong about something the filesystem already knows.
     /// A GGUF opened this way keeps its own `config()`/`card()`/`tokenizer()`,
     /// since a GGUF genuinely carries them.
+    /// [`Self::open_hf_dir`] for a path that may be a file or a directory -
+    /// the shape every importer's `--weights` actually has. The eager twin is
+    /// [`crate::safetensors::read_any`].
+    pub fn open_any(path: &str) -> io::Result<WeightReader> {
+        Self::open_hf_dir(Path::new(path))
+    }
+
     pub fn open_hf_dir(dir: &Path) -> io::Result<WeightReader> {
         if !dir.is_dir() {
             let path = dir.to_str().ok_or_else(|| inval("non-utf8 checkpoint path".to_string()))?;
@@ -886,6 +893,23 @@ mod tests {
             .to_str()
             .unwrap()
             .to_string()
+    }
+
+    /// An importer's `--weights` is a FILE or the directory holding one; the
+    /// streaming and eager openers accept both, and agree on what they read.
+    #[test]
+    fn open_any_accepts_a_file_and_the_directory_holding_it() {
+        let dir = std::env::temp_dir().join(format!("brain-open-any-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("tmp dir");
+        let file = dir.join("model.safetensors");
+        let path = file.to_str().expect("utf-8 path");
+        crate::st::save_safetensors(path, &[("w".to_string(), vec![2u64], vec![1.0, 2.0])], &serde_json::json!({}), None).expect("write");
+        let names = |r: &WeightReader| r.names().map(str::to_string).collect::<Vec<_>>();
+        assert_eq!(names(&WeightReader::open_any(path).expect("file")), vec!["w"]);
+        assert_eq!(names(&WeightReader::open_any(dir.to_str().unwrap()).expect("dir")), vec!["w"]);
+        assert_eq!(crate::safetensors::read_any(path).expect("file").len(), 1);
+        assert_eq!(crate::safetensors::read_any(dir.to_str().unwrap()).expect("dir").len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ---- StWriter round-trips ----

@@ -22,12 +22,7 @@ fn is_non_persistent(name: &str) -> bool {
 /// Read `amazon/chronos-2` weights (a single safetensors file or an HF dir) into
 /// a name→values map, validated strictly against `cfg.param_list()`.
 pub fn load_hf(cfg: &Chronos2Config, path: &str) -> Result<HashMap<String, Vec<f32>>, String> {
-    let p = Path::new(path);
-    let tensors = if p.is_dir() {
-        checkpoint::safetensors::read_model_dir(p)
-    } else {
-        checkpoint::safetensors::read(path)
-    }?;
+    let tensors = checkpoint::safetensors::read_any(path)?;
 
     let mut have: HashMap<String, Vec<f32>> = HashMap::new();
     for t in tensors {

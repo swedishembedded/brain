@@ -12,19 +12,13 @@
 //! never reach us; the single stored buffer imports under its own name.
 
 use std::collections::HashMap;
-use std::path::Path;
 
 use crate::config::MirrorConfig;
 
 /// Read a safetensors file (or a HF model dir with an optional shard index)
 /// and return the init map for a model of shape `cfg`.
 pub fn load(path: &str, cfg: &MirrorConfig) -> Result<HashMap<String, Vec<f32>>, String> {
-    let p = Path::new(path);
-    let tensors = if p.is_dir() {
-        checkpoint::safetensors::read_model_dir(p)?
-    } else {
-        checkpoint::safetensors::read(path)?
-    };
+    let tensors = checkpoint::safetensors::read_any(path)?;
     let expected: HashMap<String, Vec<usize>> = cfg.param_list().into_iter().collect();
 
     let mut out: HashMap<String, Vec<f32>> = HashMap::new();
@@ -93,12 +87,7 @@ pub fn convert(src: &str, out_path: &str, cfg: &MirrorConfig) -> Result<usize, S
     let mut writer = checkpoint::weightio::StWriter::create(out_path, &plan, &config, None)
         .map_err(|e| format!("convert: creating output: {e}"))?;
 
-    let p = Path::new(src);
-    let reader = if p.is_dir() {
-        checkpoint::weightio::WeightReader::open_hf_dir(p)
-    } else {
-        checkpoint::weightio::WeightReader::open(src)
-    }
+    let reader = checkpoint::weightio::WeightReader::open_any(src)
     .map_err(|e| format!("convert: opening checkpoint: {e}"))?;
 
     let mut unexpected: Vec<String> = Vec::new();

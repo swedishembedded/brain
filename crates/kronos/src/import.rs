@@ -21,12 +21,7 @@ fn is_non_persistent(name: &str) -> bool {
 /// Read a safetensors file/dir into a name→values map, validated strictly
 /// against `param_list` (missing / wrong-numel / leftover are hard errors).
 pub fn load_hf(param_list: &[(String, Vec<usize>)], path: &str) -> Result<HashMap<String, Vec<f32>>, String> {
-    let p = Path::new(path);
-    let tensors = if p.is_dir() {
-        checkpoint::safetensors::read_model_dir(p)
-    } else {
-        checkpoint::safetensors::read(path)
-    }?;
+    let tensors = checkpoint::safetensors::read_any(path)?;
     let mut have: HashMap<String, Vec<f32>> = HashMap::new();
     for t in tensors {
         if is_non_persistent(&t.name) {

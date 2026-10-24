@@ -454,6 +454,19 @@ pub fn has_model_weights(dir: &std::path::Path) -> bool {
     ["model.safetensors", "diffusion_pytorch_model.safetensors"].into_iter().any(|n| dir.join(n).is_file())
 }
 
+/// Read a checkpoint path that may be a single (`sharded`) safetensors FILE or
+/// the HuggingFace directory that holds one - the shape every importer's
+/// `--weights` actually has. The streaming twin is
+/// [`crate::weightio::WeightReader::open_any`].
+pub fn read_any(path: &str) -> Result<Vec<StTensor>, String> {
+    let p = std::path::Path::new(path);
+    if p.is_dir() {
+        read_model_dir(p)
+    } else {
+        read(path)
+    }
+}
+
 pub fn read_model_dir(dir: &std::path::Path) -> Result<Vec<StTensor>, String> {
     // A component can be shipped as a bare file rather than a directory - a
     // swapped-in text encoder is the usual case. Mirrors

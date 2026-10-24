@@ -535,6 +535,16 @@ copies.
 - [ ] The `TRAIN_KERNELS`/`train_kernel_set()` clone in sdxlunet, supir,
       controlnet, rrdbnet and vqgan: one helper in `vae::blocks`.
 - [ ] `supir`'s private host AdamW (a `HashMap` of moments) onto `optim`.
+- [ ] Build health: the CPU backend selects the `max_abs_rows` upgrade (a
+      work-group kernel with no barrier and no `global_invocation_id`), and
+      `wgsl-cpu` classifies work-group execution only by `var<workgroup>` or a
+      barrier - so that kernel takes the per-invocation path, which requires
+      `global_invocation_id`, and the build fails. Any test that constructs a
+      `Gpu` with the int8 kernels panics on a CPU-only box (`s3dit` `dev`,
+      `flux2` `dev_grad`, `wan` `block`). Fix in one of two places: classify by
+      the builtins the kernel takes, or synthesise `workgroup_id`/
+      `local_invocation_id` from the invocation index for a barrier-free
+      work-group kernel.
 
 ---
 

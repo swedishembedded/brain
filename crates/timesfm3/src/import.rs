@@ -19,12 +19,7 @@ use std::path::Path;
 /// Read TimesFM-3 weights (a single safetensors file or an HF-style dir)
 /// into a name->values map, validated strictly against `cfg.param_list()`.
 pub fn load_hf(cfg: &Timesfm3Config, path: &str) -> Result<HashMap<String, Vec<f32>>, String> {
-    let p = Path::new(path);
-    let tensors = if p.is_dir() {
-        checkpoint::safetensors::read_model_dir(p)
-    } else {
-        checkpoint::safetensors::read(path)
-    }?;
+    let tensors = checkpoint::safetensors::read_any(path)?;
 
     let mut have: HashMap<String, Vec<f32>> = HashMap::new();
     for t in tensors {
@@ -91,12 +86,7 @@ fn import_cfg(cfg: &Timesfm3Config, ckpt: &str, out_path: &str) -> Result<(), St
     let mut writer = checkpoint::weightio::StWriter::create(out_path, &plan, &cfg.to_json(), None)
         .map_err(|e| format!("import: creating output: {e}"))?;
 
-    let p = Path::new(ckpt);
-    let reader = if p.is_dir() {
-        checkpoint::weightio::WeightReader::open_hf_dir(p)
-    } else {
-        checkpoint::weightio::WeightReader::open(ckpt)
-    }
+    let reader = checkpoint::weightio::WeightReader::open_any(ckpt)
     .map_err(|e| format!("import: opening checkpoint: {e}"))?;
 
     let mut extra: Vec<String> = Vec::new();
