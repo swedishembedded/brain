@@ -983,6 +983,19 @@ impl<M: Shardable> Pipeline<M> {
         }
     }
 
+    /// Replace `name`'s gradient, which [`Self::reduced_grad`] reads as the SUM
+    /// over the stages that hold it. A parameter split across stages (a tied
+    /// embedding) must therefore receive `data / holders` on each holder, so
+    /// the sum the optimiser reads back is exactly `data`.
+    pub fn write_grad(&mut self, name: &str, data: &[f32]) -> Result<(), String> {
+        let (_, hs) = self.holders.iter().find(|(n, _)| n == name).ok_or_else(|| format!("no stage of this pipeline holds {name}"))?;
+        let share: Vec<f32> = data.iter().map(|value| value / hs.len() as f32).collect();
+        for &si in hs {
+            self.stages[si].write_grad(name, &share)?;
+        }
+        Ok(())
+    }
+
     /// The true gradient for `name` (summed across replicas / read from its owner).
     pub fn reduced_grad(&self, name: &str) -> Vec<f32> {
         let (_, hs) = self.holders.iter().find(|(n, _)| n == name).unwrap_or_else(|| panic!("no stage holds {name}"));
@@ -1140,6 +1153,11 @@ impl<M: Shardable> Model for PipelineModel<M> {
     }
     fn read_grad(&self, name: &str) -> Vec<f32> {
         self.pipe.borrow().reduced_grad(name)
+    }
+    /// Write the reduced gradient back to every stage that holds the parameter,
+    /// so the pipeline's fused optimiser applies the group's mean.
+    fn write_grad(&self, name: &str, data: &[f32]) -> Result<(), String> {
+        self.pipe.borrow_mut().write_grad(name, data)
     }
     fn logits_all(&self, _tokens: &[u32]) -> Option<Vec<f32>> {
         None

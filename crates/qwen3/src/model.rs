@@ -4301,6 +4301,16 @@ impl model::Model for Qwen {
     fn read_grad(&self, name: &str) -> Vec<f32> {
         Qwen::read_grad(self, name)
     }
+    /// Replace a trainable parameter's gradient with the group's mean, which is
+    /// what a data-parallel step applies. Only the optimised set has a gradient
+    /// buffer; a frozen base parameter has none to write.
+    fn write_grad(&self, name: &str, data: &[f32]) -> Result<(), String> {
+        if !self.param_names().iter().any(|n| n == name) {
+            return Err(format!("{name}: not a trainable parameter of this qwen3 model, so it has no gradient to reduce"));
+        }
+        Qwen::write_grad(self, name, data);
+        Ok(())
+    }
     fn logits_all(&self, tokens: &[u32]) -> Option<Vec<f32>> {
         Some(Qwen::logits_all(self, tokens))
     }

@@ -868,7 +868,7 @@ impl ChatFineTune {
             }
             None => None,
         };
-        let control = model::FitControl { on_step: Some(&mut on_step), state: Some(&state_path), state_every: self.checkpoint_every, identity, snapshots };
+        let control = model::FitControl { on_step: Some(&mut on_step), state: Some(&state_path), state_every: self.checkpoint_every, identity, snapshots, grad_sync: None };
         let held_out_refs: Vec<&Path> = held_out_dirs.iter().map(PathBuf::as_path).collect();
         let (report, trained, scored) = family.train(&open, &prepared_dir, &opts, rank, alpha, self.tuning, self.continue_from.as_deref(), control, &held_out_refs).map_err(|e| Error::Backend(format!("training: {e}")))?;
         // In-process scores (qwen35): the sets come back in the order they were given.

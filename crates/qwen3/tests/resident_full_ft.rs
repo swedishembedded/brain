@@ -137,7 +137,7 @@ fn a_resumed_resident_run_ends_exactly_where_the_uninterrupted_run_does() {
 
         let state = scratch.join(format!("{value:?}.state"));
         let mut stop_at_4 = |s: &model::StepReport| s.step < 4;
-        let control = model::FitControl { on_step: Some(&mut stop_at_4), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None };
+        let control = model::FitControl { on_step: Some(&mut stop_at_4), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, grad_sync: None };
         let (first, _) = model::fit_controlled(build(value, state_format), objective::<Qwen>(&scratch, &opts), &opts, None, control).unwrap();
         assert!(first.interrupted && state.is_file(), "stopped at step 4 with a state file");
         assert!(state.with_extension("offdevice").is_dir(), "the master copies are committed beside it");

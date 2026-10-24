@@ -103,7 +103,7 @@ fn a_resumed_full_finetune_ends_exactly_where_the_uninterrupted_run_does() {
 
         let state = scratch.join(format!("{}.state", label.replace(' ', "-")));
         let mut stop_at_4 = |s: &model::StepReport| s.step < 4;
-        let control = model::FitControl { on_step: Some(&mut stop_at_4), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None };
+        let control = model::FitControl { on_step: Some(&mut stop_at_4), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, grad_sync: None };
         let (first, _) = model::fit_controlled(build(&run, offload), objective::<Qwen>(&scratch, &run), &run, None, control).unwrap();
         assert!(first.interrupted && state.is_file(), "{label}: stopped at step 4 with a state file");
 
@@ -128,7 +128,7 @@ fn a_corrupt_off_device_generation_is_refused_not_replaced_by_an_older_one() {
     let identity = serde_json::json!({"test": "full-ft-corrupt"});
     let state = scratch.join("run.state");
     let mut stop_at_4 = |s: &model::StepReport| s.step < 4;
-    let control = model::FitControl { on_step: Some(&mut stop_at_4), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None };
+    let control = model::FitControl { on_step: Some(&mut stop_at_4), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, grad_sync: None };
     model::fit_controlled(build(&run, true), objective::<Qwen>(&scratch, &run), &run, None, control).unwrap();
     let generation = std::fs::read_dir(state.with_extension("offdevice")).unwrap().filter_map(Result::ok).map(|e| e.path()).find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("gen-"))).expect("a committed generation");
     let victim = generation.join("state.bin");

@@ -138,7 +138,7 @@ fn a_resumed_layer_streamed_run_ends_exactly_where_the_uninterrupted_run_does() 
     let (straight_report, straight) = model::fit_controlled(build(value, Some(1), ClipPass::TwoPass), objective::<Qwen>(&scratch, &opts), &opts, None, model::FitControl::default()).unwrap();
     let state = scratch.join("run.state");
     let mut stop_at_4 = |s: &model::StepReport| s.step < 4;
-    let control = model::FitControl { on_step: Some(&mut stop_at_4), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None };
+    let control = model::FitControl { on_step: Some(&mut stop_at_4), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, grad_sync: None };
     let (first, _) = model::fit_controlled(build(value, Some(1), ClipPass::TwoPass), objective::<Qwen>(&scratch, &opts), &opts, None, control).unwrap();
     assert!(first.interrupted && state.is_file());
     let control = model::FitControl { state: Some(&state), identity, ..Default::default() };

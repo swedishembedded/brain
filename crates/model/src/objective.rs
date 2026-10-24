@@ -69,12 +69,13 @@ pub trait Objective<M: Model> {
     /// resumed run continues the order a straight run would have followed.
     fn begin(&mut self, _seed: u64, _draws_done: u64) {}
 
-    /// Restrict this objective's training batches to one rank's shard of its
-    /// deterministic batch stream: rank `rank` of `world` trains on batches
-    /// `rank`, `rank + world`, `rank + 2 * world`, ... of the stream it would
-    /// draw unsharded. The shards are disjoint and their union is that stream,
-    /// which is what makes a data-parallel run average genuinely different
-    /// gradients instead of repeating one rank's batch on every rank.
+    /// Restrict this objective's training stream to one rank's shard of it:
+    /// rank `rank` of `world` trains on record `n` exactly when
+    /// `n % world == rank`, while every rank still consumes the whole stream
+    /// so their positions stay aligned. The shards are disjoint and their
+    /// union is that stream, which is what makes a data-parallel run average
+    /// genuinely different gradients instead of repeating one rank's batch on
+    /// every rank. Evaluation is never sharded.
     ///
     /// The default refuses: an objective whose batches come from somewhere
     /// other than a reproducible stream this seam can index (a rollout, a

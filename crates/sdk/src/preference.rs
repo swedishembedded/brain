@@ -347,7 +347,7 @@ impl PreferenceFineTune {
             on_progress(&FineTuneProgress { step: s.step, steps: s.steps, loss: s.loss, lr: s.lr });
             !cancel.is_cancelled()
         };
-        let control = model::FitControl { on_step: Some(&mut on_step), state: Some(&state_path), state_every: self.checkpoint_every, identity, snapshots: None };
+        let control = model::FitControl { on_step: Some(&mut on_step), state: Some(&state_path), state_every: self.checkpoint_every, identity, snapshots: None, grad_sync: None };
         let adapter_path = out_dir.join(ADAPTER_FILE);
         let adapter_id = self.adapter_id.clone().unwrap_or_else(|| format!("{base_id}:local:dpo:latest"));
         let provenance = checkpoint::st::TrainingProvenance {

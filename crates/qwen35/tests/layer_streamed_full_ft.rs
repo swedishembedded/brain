@@ -157,7 +157,7 @@ fn a_resumed_layer_streamed_run_ends_exactly_where_the_uninterrupted_run_does() 
     let (straight_report, straight) = fit(fresh(), &scratch, &opts);
     let state = scratch.join("run.state");
     let mut stop_at_3 = |s: &model::StepReport| s.step < 3;
-    let control = model::FitControl { on_step: Some(&mut stop_at_3), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None };
+    let control = model::FitControl { on_step: Some(&mut stop_at_3), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, grad_sync: None };
     let (first, _) = model::fit_controlled(fresh(), objective::<Qwen35>(&scratch, &opts), &opts, None, control).unwrap();
     assert!(first.interrupted && state.is_file());
     assert!(state.with_extension("offdevice").is_dir(), "the master copies are committed beside the state file");
