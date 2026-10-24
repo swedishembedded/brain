@@ -81,7 +81,7 @@ Scope: Running one training job as ranks across machines - the job plan every ra
       usage error, and a rank without `--seed` derives one from the plan bytes.
       The record strategy is index-based and explicit: record `n` belongs to
       rank `n % world`, every rank consumes the whole stream, and evaluation is
-      never sharded (every rank scores the same held-out set). An objective
+      never sharded (rank 0 scores it and broadcasts the result). An objective
       that cannot shard, or a model that cannot write reduced gradients, fails
       by name instead of falling back to a single process. Only rank 0 writes
       the shared checkpoint and evaluation snapshots. Tests: the record
@@ -125,6 +125,23 @@ Scope: Running one training job as ranks across machines - the job plan every ra
       `transformers` directory base. The fine-tune save paths use it (the Qwen3
       CLI and capability action, and the Qwen3.5 streamed fine-tune), so the
       first process pays the hash and the rest stat the file.
+
+- [x] **Held-out evaluation runs once per job, not once per rank.**
+      Rank 0 scores a due evaluation and broadcasts the scalar over the
+      gradient group; every rank drives selection and early stopping from the
+      same value. A step with no evaluation broadcasts that fact as its own
+      value, so no rank waits on a root that skipped the call, and a failed
+      broadcast fails the run with the transport error. The replicas hold
+      identical weights, so the replicated evaluation measured the same number
+      world-size times: 2.6-3.0 s each at block 128 over 20 batches, about 83%
+      of the default 2-step wall, with no gain from a second rank. What
+      remains: the evaluation stays on rank 0's critical path, so sharding it
+      across ranks and reducing the partial losses would shorten it - a
+      distinct change from removing the duplication. Tests:
+      `only_rank_zero_evaluates_and_every_rank_selects_the_same` and
+      `every_rank_agrees_when_the_objective_reports_no_evaluation` over a
+      two-rank `HostCollective`, plus the unchanged single-process case, in
+      `crates/model/src/train.rs`.
 
 ## Decisions
 
@@ -177,9 +194,9 @@ Scope: Running one training job as ranks across machines - the job plan every ra
     are byte-identical (`sha256:4b77add9...`), held-out scores identical on
     both ranks, train losses differ per shard.
   - default cadence with one eval per step: 0.315 vs 0.283 steps/s; each eval
-    costs 2.6-3.0 s at block 128 over 20 batches, and is replicated on every
-    rank, so it is about 83% of the default 2-step time and gains nothing from
-    a second rank.
+    cost 2.6-3.0 s at block 128 over 20 batches and was replicated on every
+    rank, about 83% of the default 2-step time with no gain from a second
+    rank. It now runs on rank 0 only and is broadcast.
   - reduction: 392 LoRA tensors, 9.63 MiB of host fp32 per rank per step; the
     worker's socket time is about 0.24 s per step traced, about 2.5% of wall
     in the eval-free run and about 27% of the reduction window. The star is
@@ -215,10 +232,6 @@ Scope: Running one training job as ranks across machines - the job plan every ra
       driver resumes from `CheckpointCommit::latest` after verifying it.
       Replicas are bit-identical, so one writer is enough until tensor
       parallelism shards the weights.
-- [ ] Evaluation is replicated on every rank: about 2.6-3.0 s per eval at
-      block 128, unsharded by design so the parity check is direct. A
-      production distributed run should evaluate on rank 0 (or shard and
-      reduce) and broadcast the score, and keep the parity check as a test.
 - [ ] The trainer prints no collective timings; the comm share above came from
       tracing sockets. Wire `TimedCollective` into the distributed fit behind a
       flag so a run reports its own comm bytes, time and share.
