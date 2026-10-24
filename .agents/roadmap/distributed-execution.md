@@ -257,6 +257,15 @@ Scope: Running one training job as ranks across machines - the job plan every ra
       model-store copy. The per-rank profiles report 168 and 186 ms of
       collective time in a 3,132 ms call (5.4% and 5.9%).
 
+- **Two serving replicas, one per card**, serving the distributed-trained LoRA
+      adapter through two independent `brain serve` processes (no gateway; a
+      client splits requests). The first window was cold-start dominated
+      (p50 11.6 s); after three warmup requests each, 8+8 concurrent 16-token
+      chats gave 8.29 req/s and 132.6 tok/s per replica, p50 921-961 ms, and
+      16.57 req/s and 265.2 tok/s combined, 2.0x one replica. Both servers
+      list the adapter id. This is replica distribution, not model sharding:
+      no request spans cards and no routing layer is implied.
+
 ## Open
 
 - [ ] The one-machine profile cannot see a real network. The loopback
