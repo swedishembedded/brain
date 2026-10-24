@@ -61,38 +61,12 @@ use gpu_core::Gpu;
 /// about the model that will be served.
 const CLOSE: usize = 3;
 
-/// Fine-tune hyper-parameters. Field-for-field `kronos::train::FinetuneOpts`,
-/// so one CLI verb configures either model from one set of flags.
-#[derive(Clone, Debug)]
-pub struct FinetuneOpts {
-    pub epochs: u32,
-    pub lr: f32,
-    pub wd: f32,
-    pub clip: f32,
-    pub lora: Option<LoraCfg>,
-    pub batch: u32,
-    pub progress: bool,
-}
+/// Fine-tuning hyper-parameters: the shared forecaster contract
+/// ([`forecast::finetune`]), with this model's adapter configuration.
+pub type FinetuneOpts = forecast::finetune::FinetuneOpts<LoraCfg>;
 
-impl Default for FinetuneOpts {
-    fn default() -> FinetuneOpts {
-        FinetuneOpts { epochs: 8, lr: 4e-5, wd: 0.1, clip: 3.0, lora: None, batch: 1, progress: false }
-    }
-}
-
-/// The gate decision: whether the fine-tune beat the base on held-out data,
-/// and by how much. Field-for-field `kronos::train::FinetuneReport`, so the
-/// CLI prints one gate line whichever model ran.
-#[derive(Clone, Debug)]
-pub struct FinetuneReport {
-    pub promoted: bool,
-    pub base_val: f32,
-    pub ft_val: f32,
-    pub steps: u32,
-    /// The seed the LoRA adapters were initialised from; `None` for a full
-    /// fine-tune, which draws nothing. Passing it back reproduces the run.
-    pub lora_seed: Option<u64>,
-}
+/// The gate decision of one fine-tune ([`forecast::finetune`]).
+pub type FinetuneReport = forecast::finetune::FinetuneReport;
 
 /// One training example: everything `core_forward` consumes for one window,
 /// plus everything [`objective`] needs to score its output.
@@ -359,7 +333,7 @@ pub fn finetune_universe(cfg: &Timesfm3Config, base: &HashMap<String, Vec<f32>>,
     // Lower held-out pinball loss wins, and a non-finite number never does -
     // `kronos::train::finetune`'s rule, so one CLI gate line means the same
     // thing whichever model produced it.
-    let promoted = ft_val.is_finite() && base_val.is_finite() && ft_val < base_val;
+    let promoted = forecast::finetune::promoted(base_val, ft_val);
     (FinetuneReport { promoted, base_val, ft_val, steps, lora_seed: opts.lora.as_ref().map(|lc| lc.seed) }, Some(weights))
 }
 

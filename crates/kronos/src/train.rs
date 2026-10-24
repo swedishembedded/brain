@@ -989,40 +989,12 @@ impl KronosTrain {
     }
 }
 
-/// Fine-tuning hyperparameters (small LR + the anti-overfit defaults from the
-/// reference recipe). `lora = Some(..)` freezes the base and trains adapters only.
-#[derive(Clone)]
-pub struct FinetuneOpts {
-    pub epochs: u32,
-    pub lr: f32,
-    pub wd: f32,
-    pub clip: f32,
-    pub lora: Option<LoraCfg>,
-    /// Windows trained per optimizer step (the batch dim `b`). `1` = the original
-    /// one-window-per-step path. Higher `b` amortises the per-step overhead and
-    /// fills the AVX/GPU lanes; the step is mathematically the mean of the `b`
-    /// single steps (validated by the batch-parity gate). Uses drop_last — a
-    /// trailing partial group of `< b` windows is skipped each epoch.
-    pub batch: u32,
-    /// Print per-batch progress (epoch, step/total, running loss, elapsed + ETA).
-    pub progress: bool,
-}
+/// Fine-tuning hyper-parameters: the shared forecaster contract
+/// ([`forecast::finetune`]), with this model's adapter configuration.
+pub type FinetuneOpts = forecast::finetune::FinetuneOpts<LoraCfg>;
 
-impl Default for FinetuneOpts {
-    fn default() -> Self {
-        FinetuneOpts { epochs: 8, lr: 4e-5, wd: 0.1, clip: 3.0, lora: None, batch: 1, progress: false }
-    }
-}
-
-/// The gate decision: whether the fine-tuned checkpoint beat the base on held-out
-/// data (and by how much).
-#[derive(Clone, Debug)]
-pub struct FinetuneReport {
-    pub promoted: bool,
-    pub base_val: f32,
-    pub ft_val: f32,
-    pub steps: u32,
-}
+/// The gate decision of one fine-tune ([`forecast::finetune`]).
+pub type FinetuneReport = forecast::finetune::FinetuneReport;
 
 /// Fine-tune the Kronos decoder on `train`, then **promote only if the held-out
 /// `val` loss beats the untouched base model** — the walk-forward gate that makes
@@ -1097,8 +1069,8 @@ pub fn finetune(
     } else {
         KronosTrain::with_lora_on(Gpu::new(PIPELINES), cfg, t, &ft_weights, None).mean_loss(val)
     };
-    let promoted = ft_val.is_finite() && base_val.is_finite() && ft_val < base_val;
+    let promoted = forecast::finetune::promoted(base_val, ft_val);
     // Return the fine-tuned weights unconditionally so the caller can also evaluate
     // generalization (held-out names); the caller saves iff `promoted`.
-    (FinetuneReport { promoted, base_val, ft_val, steps: step }, Some(ft_weights))
+    (FinetuneReport { promoted, base_val, ft_val, steps: step, lora_seed: opts.lora.as_ref().map(|lc| lc.seed) }, Some(ft_weights))
 }

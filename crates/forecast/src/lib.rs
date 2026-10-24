@@ -29,6 +29,7 @@ pub mod backtest;
 pub mod chart;
 pub mod convert;
 pub mod csv;
+pub mod finetune;
 pub mod forecast;
 pub mod metrics;
 pub mod panel;
@@ -36,6 +37,7 @@ pub mod train_data;
 
 pub use backtest::{BacktestReport, BacktestRow, BacktestSpec};
 pub use csv::{parse_ohlcv, Bar, OhlcvSeries, Split, Stamp};
+pub use finetune::{promoted, FinetuneOpts, FinetuneReport};
 pub use forecast::{Block, Forecast, TargetForecast};
 pub use panel::{Item, Kind, Panel, Role, Variate};
 
