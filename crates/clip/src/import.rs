@@ -33,29 +33,7 @@ use crate::config::{ClipTextConfig, EvaVisionConfig};
 pub type Tensors = HashMap<String, (Vec<usize>, Vec<f32>)>;
 
 fn validate(map: Tensors, manifest: &[(String, Vec<usize>)]) -> Result<Tensors, String> {
-    for (name, shape) in manifest {
-        match map.get(name) {
-            None => return Err(format!("clip import: missing tensor {name}")),
-            Some((s, d)) => {
-                if s != shape {
-                    return Err(format!("clip import: {name} shape {s:?}, expected {shape:?}"));
-                }
-                let n: usize = shape.iter().product();
-                if d.len() != n {
-                    return Err(format!("clip import: {name} has {} values, expected {n}", d.len()));
-                }
-            }
-        }
-    }
-    if map.len() != manifest.len() {
-        let expected: std::collections::HashSet<&str> =
-            manifest.iter().map(|(n, _)| n.as_str()).collect();
-        let mut extra: Vec<&String> =
-            map.keys().filter(|k| !expected.contains(k.as_str())).collect();
-        extra.sort();
-        return Err(format!("clip import: unused source tensors: {extra:?}"));
-    }
-    Ok(map)
+    checkpoint::coverage::validate(&map, manifest, "clip import").map(|()| map)
 }
 
 /// Insert, refusing to overwrite (a duplicate mapping is a bug, not a merge).

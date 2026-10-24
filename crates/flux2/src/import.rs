@@ -33,38 +33,11 @@ pub fn validate_manifest(
     present: &[String],
     cfg: &Flux2Config,
 ) -> Result<(), String> {
-    let manifest = cfg.tensor_manifest();
-    for (name, shape) in &manifest {
-        match shape_of(name) {
-            None => return Err(format!("import: missing tensor {name}")),
-            Some(s) => {
-                if &s != shape {
-                    return Err(format!("import: {name} shape {s:?}, expected {shape:?}"));
-                }
-            }
-        }
-    }
-    if present.len() != manifest.len() {
-        let expected: std::collections::HashSet<&str> = manifest.iter().map(|(n, _)| n.as_str()).collect();
-        let extra: Vec<&String> = present.iter().filter(|k| !expected.contains(k.as_str())).collect();
-        return Err(format!("import: unused source tensors: {extra:?}"));
-    }
-    Ok(())
+    checkpoint::coverage::validate_shapes(shape_of, present, &cfg.tensor_manifest(), "import")
 }
 
 fn validate(map: Tensors, cfg: &Flux2Config) -> Result<Tensors, String> {
-    let names: Vec<String> = map.keys().cloned().collect();
-    validate_manifest(&|n| map.get(n).map(|(s, _)| s.clone()), &names, cfg)?;
-    // Shapes agree; now check each tensor actually carries that many values -
-    // something only a materialized map can be asked.
-    for (name, shape) in cfg.tensor_manifest() {
-        let n: usize = shape.iter().product();
-        let d = &map[&name].1;
-        if d.len() != n {
-            return Err(format!("import: {name} has {} values, expected {n}", d.len()));
-        }
-    }
-    Ok(map)
+    checkpoint::coverage::validate(&map, &cfg.tensor_manifest(), "import").map(|()| map)
 }
 
 /// Import a checkpoint already using the BFL reference names (the single-file

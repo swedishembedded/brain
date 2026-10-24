@@ -173,23 +173,8 @@ pub fn dit_manifest(cfg: &ZImageConfig) -> Vec<(String, Vec<usize>)> {
 /// how the source chose to punctuate them. The declared shape is still what
 /// gets reported, so a genuine width mismatch stays readable.
 fn validate_dit_shapes(shapes: &HashMap<String, Vec<usize>>, cfg: &ZImageConfig) -> Result<(), String> {
-    let manifest = dit_manifest(cfg);
-    for (name, want) in &manifest {
-        let Some(got) = shapes.get(name) else {
-            return Err(format!("z-image dit import: missing tensor {name}"));
-        };
-        let n: usize = want.iter().product();
-        if got.iter().product::<usize>() != n {
-            return Err(format!("z-image dit import: {name} shape {got:?}, expected {want:?}"));
-        }
-    }
-    if shapes.len() != manifest.len() {
-        let expected: std::collections::HashSet<&str> = manifest.iter().map(|(n, _)| n.as_str()).collect();
-        let mut extra: Vec<&str> = shapes.keys().map(String::as_str).filter(|k| !expected.contains(k)).collect();
-        extra.sort_unstable();
-        return Err(format!("z-image dit import: unused source tensors: {extra:?}"));
-    }
-    Ok(())
+    let present: Vec<String> = shapes.keys().cloned().collect();
+    checkpoint::coverage::validate_counts(|n| shapes.get(n).cloned(), &present, &dit_manifest(cfg), "z-image dit import")
 }
 
 /// Read the config off the checkpoint's own tensor shapes instead of assuming

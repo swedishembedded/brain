@@ -35,34 +35,7 @@ pub type Tensors = HashMap<String, (Vec<usize>, Vec<f32>)>;
 type FusedParts = HashMap<String, (usize, Vec<Option<Vec<f32>>>)>;
 
 fn validate(map: Tensors, cfg: &Flux1Config) -> Result<Tensors, String> {
-    let manifest = cfg.tensor_manifest();
-    for (name, shape) in &manifest {
-        match map.get(name) {
-            None => return Err(format!("import: missing tensor {name}")),
-            Some((s, d)) => {
-                if s != shape {
-                    return Err(format!("import: {name} shape {s:?}, expected {shape:?}"));
-                }
-                let n: usize = shape.iter().product();
-                if d.len() != n {
-                    return Err(format!("import: {name} has {} values, expected {n}", d.len()));
-                }
-            }
-        }
-    }
-    if map.len() != manifest.len() {
-        let expected: std::collections::HashSet<&str> =
-            manifest.iter().map(|(n, _)| n.as_str()).collect();
-        let mut extra: Vec<&str> =
-            map.keys().map(String::as_str).filter(|k| !expected.contains(k)).collect();
-        extra.sort_unstable();
-        extra.truncate(16);
-        return Err(format!(
-            "import: {} unused source tensors, e.g. {extra:?}",
-            map.len() - manifest.len()
-        ));
-    }
-    Ok(map)
+    checkpoint::coverage::validate(&map, &cfg.tensor_manifest(), "import").map(|()| map)
 }
 
 /// Import a checkpoint already using the BFL reference names (the single-file

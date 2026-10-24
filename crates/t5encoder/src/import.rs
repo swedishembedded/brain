@@ -38,30 +38,7 @@ pub fn read_encoder_pth(path: &std::path::Path) -> Result<Vec<StTensor>, String>
 }
 
 fn validate(map: Tensors, cfg: &T5Config) -> Result<Tensors, String> {
-    let manifest = cfg.tensor_manifest();
-    for (name, shape) in &manifest {
-        match map.get(name) {
-            None => return Err(format!("import: missing tensor {name}")),
-            Some((s, d)) => {
-                if s != shape {
-                    return Err(format!("import: {name} shape {s:?}, expected {shape:?}"));
-                }
-                let n: usize = shape.iter().product();
-                if d.len() != n {
-                    return Err(format!("import: {name} has {} values, expected {n}", d.len()));
-                }
-            }
-        }
-    }
-    if map.len() != manifest.len() {
-        let expected: std::collections::HashSet<&str> =
-            manifest.iter().map(|(n, _)| n.as_str()).collect();
-        let mut extra: Vec<&str> =
-            map.keys().map(|k| k.as_str()).filter(|k| !expected.contains(k)).collect();
-        extra.sort_unstable();
-        return Err(format!("import: unused source tensors: {extra:?}"));
-    }
-    Ok(map)
+    checkpoint::coverage::validate(&map, &cfg.tensor_manifest(), "import").map(|()| map)
 }
 
 /// The q/k/v slot a split HF projection occupies in the fused qkv weight.

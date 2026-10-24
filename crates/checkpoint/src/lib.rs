@@ -10,6 +10,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
+pub mod coverage;
 pub mod safetensors;
 pub mod st;
 pub mod gguf;

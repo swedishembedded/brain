@@ -64,28 +64,7 @@ fn put(map: &mut Tensors, name: String, shape: Vec<usize>, data: Vec<f32>) -> Re
 }
 
 fn validate(map: &Tensors, manifest: &[(String, Vec<usize>)], what: &str) -> Result<(), String> {
-    for (name, shape) in manifest {
-        match map.get(name) {
-            None => return Err(format!("pulid import: {what} missing tensor {name}")),
-            Some((s, d)) => {
-                if s != shape {
-                    return Err(format!("pulid import: {what} {name} shape {s:?}, expected {shape:?}"));
-                }
-                let n: usize = shape.iter().product();
-                if d.len() != n {
-                    return Err(format!("pulid import: {what} {name} has {} values, expected {n}", d.len()));
-                }
-            }
-        }
-    }
-    if map.len() != manifest.len() {
-        let expected: std::collections::HashSet<&str> =
-            manifest.iter().map(|(n, _)| n.as_str()).collect();
-        let mut extra: Vec<&String> = map.keys().filter(|k| !expected.contains(k.as_str())).collect();
-        extra.sort();
-        return Err(format!("pulid import: {what} unused source tensors: {extra:?}"));
-    }
-    Ok(())
+    checkpoint::coverage::validate(map, manifest, &format!("pulid import ({what})"))
 }
 
 /// `nn.Sequential` ordinal -> brain leaf name, for the 7-member

@@ -175,27 +175,7 @@ fn classify(name: &str) -> SourceKind {
 /// errors by name, shape mismatch errors with both shapes, nothing is ever
 /// zero-filled).
 fn validate_manifest(map: Tensors, manifest: &[(String, Vec<usize>)], who: &str) -> Result<Tensors, String> {
-    for (name, shape) in manifest {
-        match map.get(name) {
-            None => return Err(format!("gemma4 {who} import: missing tensor {name}")),
-            Some((s, d)) => {
-                if s != shape {
-                    return Err(format!("gemma4 {who} import: {name} shape {s:?}, expected {shape:?}"));
-                }
-                let n: usize = shape.iter().product();
-                if d.len() != n {
-                    return Err(format!("gemma4 {who} import: {name} has {} values, expected {n}", d.len()));
-                }
-            }
-        }
-    }
-    if map.len() != manifest.len() {
-        let expected: std::collections::HashSet<&str> = manifest.iter().map(|(n, _)| n.as_str()).collect();
-        let mut extra: Vec<&String> = map.keys().filter(|k| !expected.contains(k.as_str())).collect();
-        extra.sort();
-        return Err(format!("gemma4 {who} import: unused source tensors: {extra:?}"));
-    }
-    Ok(map)
+    checkpoint::coverage::validate(&map, manifest, &format!("gemma4 {who} import")).map(|()| map)
 }
 
 /// Import the Gemma-4 text tower from the real (or a synthetic, same-shape)
