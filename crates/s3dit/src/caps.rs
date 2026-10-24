@@ -104,9 +104,9 @@ pub fn manifest() -> Manifest {
 
 // ===================== execution =====================
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use capability::{Action, ActionResult, Invocation, Outcome, Progress, Provider};
+use capability::{hot::Hot, Action, ActionResult, Invocation, Outcome, Progress, Provider};
 
 /// Cache key for a resident text-to-image pipeline: everything that fixes the
 /// built graphs. The caption CAPACITY is one of them - prompts are masked-padded
@@ -121,7 +121,7 @@ type HotKey = (u32, u32, bool, Option<String>, u32); // (width, height, hifi, ad
 /// generations are fast. Weight paths are BOUND at construction (see
 /// [`ZImageProvider::from_paths`]) - never re-resolved per request.
 pub struct ZImageProvider {
-    hot: Arc<Mutex<Option<(HotKey, crate::pipeline::HotPipeline)>>>,
+    hot: Arc<Hot<HotKey, crate::pipeline::HotPipeline>>,
     paths: crate::pipeline::Paths,
 }
 
@@ -134,7 +134,7 @@ impl ZImageProvider {
     }
 
     pub fn from_paths(paths: crate::pipeline::Paths) -> ZImageProvider {
-        ZImageProvider { hot: Arc::new(Mutex::new(None)), paths }
+        ZImageProvider { hot: Arc::new(Hot::new()), paths }
     }
 }
 
@@ -160,7 +160,7 @@ impl Provider for ZImageProvider {
 /// pending rather than fabricating an image.
 struct ZAction {
     name: String,
-    hot: Arc<Mutex<Option<(HotKey, crate::pipeline::HotPipeline)>>>,
+    hot: Arc<Hot<HotKey, crate::pipeline::HotPipeline>>,
     paths: crate::pipeline::Paths,
 }
 
@@ -186,16 +186,23 @@ impl Action for ZAction {
                 let key = text2image_key(paths, inv)?;
                 let steps = inv.get_i64("steps").unwrap_or(8).max(1) as u32;
 
-                let mut guard = self.hot.lock().map_err(|_| "hot pipeline lock poisoned")?;
                 let (width, height, hifi, adapter, cap_len) = key.clone();
-                ensure_hot(&mut guard, key, || {
-                    on(0, 1, "loading weights (first call for this size)");
-                    // A fixed caption CAPACITY so any prompt that fits reuses the
-                    // built graphs; one that does not is refused, not cropped.
-                    crate::pipeline::HotPipeline::build_adapted(paths, width, height, cap_len, hifi, adapter.as_deref(), |m| on(0, 1, m))
-                })?;
-                let pipe = &guard.as_ref().expect("ensure_hot leaves the slot filled on success").1;
-                emit(pipe.generate(&prompt, seed, steps, &inv.cancel, &mut on)?, seed)
+                // Both closures report through the same sink, so it is shared
+                // rather than borrowed twice.
+                let sink = std::cell::RefCell::new(&mut on);
+                self.hot.try_get(
+                    key,
+                    || {
+                        (sink.borrow_mut())(0, 1, "loading weights (first call for this size)");
+                        // A fixed caption CAPACITY so any prompt that fits reuses the
+                        // built graphs; one that does not is refused, not cropped.
+                        crate::pipeline::HotPipeline::build_adapted(paths, width, height, cap_len, hifi, adapter.as_deref(), |m| (sink.borrow_mut())(0, 1, m))
+                    },
+                    |pipe| {
+                        let mut on = sink.borrow_mut();
+                        emit(pipe.generate(&prompt, seed, steps, &inv.cancel, &mut *on)?, seed)
+                    },
+                )
             }
             "image2image" => {
                 let (image, w, h) = capability::blob::decode_image(inv, "image")?;
@@ -291,23 +298,6 @@ fn text2image_key(paths: &crate::pipeline::Paths, inv: &Invocation) -> Result<Ho
     let adapter = inv.get_str("adapter").filter(|s| !s.is_empty());
     crate::pipeline::check_build_shape(&paths.dit, width, height, cap_len)?;
     Ok((width, height, hifi, adapter, cap_len))
-}
-
-/// Make `slot` hold a pipeline built for `key`, building one only when the
-/// cached entry is for a different key.
-///
-/// The cached pipeline is dropped BEFORE `build` runs, because two full
-/// Z-Image residents (~20 GB each) do not fit one card. That is only safe
-/// because [`text2image_key`] has already settled every up-front reason the
-/// build could be refused, so `build` is reached only for a shape this DiT can
-/// actually be built for.
-fn ensure_hot<K: PartialEq, P>(slot: &mut Option<(K, P)>, key: K, build: impl FnOnce() -> Result<P, String>) -> Result<(), String> {
-    if matches!(slot, Some((k, _)) if *k == key) {
-        return Ok(());
-    }
-    *slot = None; // free the old resident weights before building new
-    *slot = Some((key, build()?));
-    Ok(())
 }
 
 /// The request's seed, or a freshly drawn one when it names none. A `seed`
@@ -474,24 +464,20 @@ mod tests {
         assert_eq!(k, (1024, 1024, false, None, 1024));
     }
 
-    /// The cache slot itself: a matching key must not rebuild (that is the
-    /// whole point of a resident), and a rebuild must replace what it evicted.
+    /// The resident's cache: a matching key must not rebuild (that is the
+    /// whole point of a resident), and a new key must.
     #[test]
     fn a_matching_key_reuses_the_resident_instead_of_rebuilding() {
+        let hot: Hot<u32, &'static str> = Hot::new();
         let mut builds = 0;
-        let mut slot: Option<(u32, &str)> = None;
-        let build = |slot: &mut Option<(u32, &'static str)>, key: u32, builds: &mut u32| {
-            ensure_hot(slot, key, || {
-                *builds += 1;
-                Ok("weights")
-            })
+        let mut use_key = |key: u32, builds: &mut u32| {
+            hot.get(key, || { *builds += 1; Ok("weights") }, |_| ()).unwrap();
         };
-        build(&mut slot, 1, &mut builds).unwrap();
-        build(&mut slot, 1, &mut builds).unwrap();
+        use_key(1, &mut builds);
+        use_key(1, &mut builds);
         assert_eq!(builds, 1, "a matching key must reuse the resident, not reload it");
-        build(&mut slot, 2, &mut builds).unwrap();
+        use_key(2, &mut builds);
         assert_eq!(builds, 2);
-        assert_eq!(slot, Some((2, "weights")));
     }
 
     #[test]

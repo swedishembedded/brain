@@ -45,10 +45,10 @@
 //! device, the resident adapter builds one on the scheduler-assigned device -
 //! one import/construction path serves both.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use capability::{
-    Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType,
+    hot::Hot, Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType,
     Progress, Provider,
 };
 use gpu_core::Gpu;
@@ -236,17 +236,12 @@ pub fn run_reconstruct(session: &mut Session, inv: &Invocation) -> ActionResult 
 /// Run one `reconstruct` invocation (already validated against
 /// [`reconstruct_spec`]), rebuilding `hot` only when `weights` changed, then
 /// deferring to [`run_reconstruct`] for the actual work.
-fn reconstruct(inv: &Invocation, hot: &Mutex<Option<Session>>) -> ActionResult {
+fn reconstruct(inv: &Invocation, hot: &Hot<String, Session>) -> ActionResult {
     let weights = inv.get_str("weights").unwrap_or_default();
     if weights.is_empty() {
         return Err("worldmirror2 reconstruct: 'weights' is required (path to a brain-format WorldMirror-2 checkpoint)".into());
     }
-    let mut guard = hot.lock().map_err(|_| "worldmirror2 reconstruct: session lock poisoned")?;
-    if guard.as_ref().map(|s| s.weights != weights).unwrap_or(true) {
-        *guard = None; // free the old ~5GB ParamStore before allocating the new one
-        *guard = Some(load(&weights, Gpu::new(crate::model::PIPELINES))?);
-    }
-    run_reconstruct(guard.as_mut().expect("built above"), inv)
+    hot.try_get_mut(weights.clone(), || load(&weights, Gpu::new(crate::model::PIPELINES)), |s| run_reconstruct(s, inv))
 }
 
 // ===================== the provider =====================
@@ -257,7 +252,7 @@ fn reconstruct(inv: &Invocation, hot: &Mutex<Option<Session>>) -> ActionResult {
 /// repeated `brain do worldmirror2 reconstruct` pays the load once.
 #[derive(Default)]
 pub struct WorldMirror2Provider {
-    hot: Arc<Mutex<Option<Session>>>,
+    hot: Arc<Hot<String, Session>>,
 }
 
 impl WorldMirror2Provider {
@@ -271,7 +266,7 @@ impl WorldMirror2Provider {
     /// to drive `reconstruct` against a TINY synthetic-weight model without
     /// touching a real checkpoint.
     pub fn with_session(session: Session) -> WorldMirror2Provider {
-        WorldMirror2Provider { hot: Arc::new(Mutex::new(Some(session))) }
+        WorldMirror2Provider { hot: Arc::new(Hot::with(session.weights.clone(), session)) }
     }
 }
 
@@ -288,7 +283,7 @@ impl Provider for WorldMirror2Provider {
 }
 
 struct ReconstructAction {
-    hot: Arc<Mutex<Option<Session>>>,
+    hot: Arc<Hot<String, Session>>,
 }
 
 impl Action for ReconstructAction {

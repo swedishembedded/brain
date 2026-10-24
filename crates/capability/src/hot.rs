@@ -40,9 +40,26 @@ impl<K, V> Hot<K, V> {
     pub const fn new() -> Hot<K, V> {
         Hot { cell: Mutex::new(None) }
     }
+
+    /// A cache already holding `value`, as if built for `key`.
+    pub const fn with(key: K, value: V) -> Hot<K, V> {
+        Hot { cell: Mutex::new(Some((key, value))) }
+    }
 }
 
 impl<K: PartialEq, V> Hot<K, V> {
+    /// The slot, with the value for `key` built if `accept` does not already
+    /// hold for what is cached.
+    fn ready_with(&self, accept: impl Fn(&K) -> bool, key: K, build: impl FnOnce() -> Result<V, String>) -> Result<std::sync::MutexGuard<'_, Option<(K, V)>>, String> {
+        let mut guard = self.cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !matches!(&*guard, Some((k, _)) if accept(k)) {
+            *guard = None;
+            let value = build()?;
+            *guard = Some((key, value));
+        }
+        Ok(guard)
+    }
+
     /// The slot, with the value for `key` built if it was not already.
     fn ready(&self, key: K, build: impl FnOnce() -> Result<V, String>) -> Result<std::sync::MutexGuard<'_, Option<(K, V)>>, String> {
         let mut guard = self.cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -71,6 +88,14 @@ impl<K: PartialEq, V> Hot<K, V> {
         Ok(use_it(&guard.as_ref().expect("built above").1))
     }
 
+    /// Free whatever is cached. A caller that built the value for one scoped
+    /// use (a one-shot generation) drops it here, before a later phase
+    /// allocates its own large buffers.
+    pub fn clear(&self) {
+        let mut guard = self.cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = None;
+    }
+
     /// [`Hot::get`] for a use that needs the value mutably.
     pub fn get_mut<R>(&self, key: K, build: impl FnOnce() -> Result<V, String>, use_it: impl FnOnce(&mut V) -> R) -> Result<R, String> {
         let mut guard = self.ready(key, build)?;
@@ -87,6 +112,18 @@ impl<K: PartialEq, V> Hot<K, V> {
     /// [`Hot::get_mut`] for a use that can itself fail.
     pub fn try_get_mut<R>(&self, key: K, build: impl FnOnce() -> Result<V, String>, use_it: impl FnOnce(&mut V) -> Result<R, String>) -> Result<R, String> {
         self.get_mut(key, build, use_it)?
+    }
+
+    /// [`Hot::try_get_mut`] with a caller-chosen acceptance rule for the
+    /// cached key: `accept(&cached_key)` decides a hit.
+    ///
+    /// For a resident whose reuse condition is a RELATION between the request
+    /// and what was built - a context capacity that must be at least what this
+    /// request needs, say - rather than equality. On a miss `key` is what gets
+    /// stored, so the next request is judged against this one's build.
+    pub fn try_get_with_mut<R>(&self, accept: impl Fn(&K) -> bool, key: K, build: impl FnOnce() -> Result<V, String>, use_it: impl FnOnce(&mut V) -> Result<R, String>) -> Result<R, String> {
+        let mut guard = self.ready_with(accept, key, build)?;
+        use_it(&mut guard.as_mut().expect("built above").1)
     }
 
     /// Build (or reuse) the value for `key` and hand back a CLONE of it.
@@ -151,6 +188,28 @@ mod tests {
             Ok(Tracked(live.clone()))
         }, |_| ())
         .expect("built");
+    }
+
+    #[test]
+    fn an_acceptance_rule_decides_a_hit() {
+        let hot: Hot<(String, u32), u32> = Hot::new();
+        let mut built = 0;
+        let run = |hot: &Hot<(String, u32), u32>, name: &str, cap: u32, built: &mut u32| {
+            hot.try_get_with_mut(|k: &(String, u32)| k.0 == name && k.1 >= cap, (name.to_string(), cap), || {
+                *built += 1;
+                Ok(cap)
+            }, |v| Ok(*v))
+            .expect("run")
+        };
+        assert_eq!(run(&hot, "a", 64, &mut built), 64);
+        // A smaller request is served by the larger resident: the rule is a
+        // relation, not equality.
+        assert_eq!(run(&hot, "a", 32, &mut built), 64);
+        assert_eq!(built, 1);
+        // A larger one, or another checkpoint, rebuilds.
+        assert_eq!(run(&hot, "a", 128, &mut built), 128);
+        assert_eq!(run(&hot, "b", 8, &mut built), 8);
+        assert_eq!(built, 3);
     }
 
     #[test]

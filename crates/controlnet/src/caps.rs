@@ -23,7 +23,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use capability::{Action, ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress, Provider};
+use capability::{hot::Hot, Action, ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress, Provider};
 use gpu_core::Gpu;
 use serde_json::json;
 use vae::config::VaeConfig;
@@ -241,7 +241,7 @@ impl Session {
 
 // ===================== the provider =====================
 
-type HotSession = Arc<Mutex<Option<((String, String), Arc<Session>)>>>;
+type HotSession = Arc<Hot<(String, String), Arc<Session>>>;
 
 /// The executable SDXL+ControlNet stack behind the manifest.
 pub struct ControlnetProvider {
@@ -252,7 +252,7 @@ pub struct ControlnetProvider {
 
 impl ControlnetProvider {
     pub fn new(sdxl_root: impl Into<String>, control_root: impl Into<String>) -> ControlnetProvider {
-        ControlnetProvider { sdxl_root: sdxl_root.into(), control_root: control_root.into(), hot: Arc::new(Mutex::new(None)) }
+        ControlnetProvider { sdxl_root: sdxl_root.into(), control_root: control_root.into(), hot: Arc::new(Hot::new()) }
     }
 
     /// `BRAIN_SDXL_DIR` (the backbone) + `BRAIN_CONTROLNET_DIR` (the control
@@ -288,15 +288,8 @@ impl Action for ControlnetAction {
         text2image_spec()
     }
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let session = {
-            let mut guard = self.hot.lock().map_err(|_| "controlnet: hot session lock poisoned")?;
-            let key = (self.sdxl_root.clone(), self.control_root.clone());
-            if !matches!(&*guard, Some((k, _)) if *k == key) {
-                *guard = None;
-                *guard = Some((key.clone(), Arc::new(Session::new(key.0.clone(), key.1.clone()))));
-            }
-            guard.as_ref().expect("built above").1.clone()
-        };
+        let key = (self.sdxl_root.clone(), self.control_root.clone());
+        let session = self.hot.get_cloned(key.clone(), || Ok(Arc::new(Session::new(key.0.clone(), key.1.clone()))))?;
         session.run("text2image", inv)
     }
 }

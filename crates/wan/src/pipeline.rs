@@ -361,15 +361,8 @@ const TEXT_MLP_TENSORS: [&str; 4] = ["text_embedding.0.weight", "text_embedding.
 /// change the "the three models are never resident together" staging this
 /// module is built around for a fraction of the win.
 pub struct HotDit {
-    key: DitKey,
     dev: WanDitDev,
     text_mlp: crate::model::Tensors,
-}
-
-impl HotDit {
-    pub fn key(&self) -> &DitKey {
-        &self.key
-    }
 }
 
 /// Text to video. `progress(done, total, phase)` is called before each phase
@@ -388,8 +381,8 @@ pub fn generate(
     // A one-shot caller (the CLI) has nothing to reuse: the cache is local,
     // and `keep = false` frees the DiT before the VAE builds, exactly as this
     // pipeline did before the cache existed.
-    let mut hot = None;
-    run(cfg, paths, prompt, o, cancel, &mut hot, false, progress)
+    let hot = capability::hot::Hot::new();
+    run(cfg, paths, prompt, o, cancel, &hot, false, progress)
 }
 
 /// [`generate`], reusing (and refreshing) a caller-owned resident DiT. `hot`
@@ -407,7 +400,7 @@ pub fn generate_hot(
     prompt: &str,
     o: &GenOpts,
     cancel: &capability::CancelToken,
-    hot: &mut Option<HotDit>,
+    hot: &capability::hot::Hot<DitKey, HotDit>,
     progress: impl FnMut(u32, u32, &str),
 ) -> Result<(Video, Timings), String> {
     run(cfg, paths, prompt, o, cancel, hot, true, progress)
@@ -420,7 +413,7 @@ fn run(
     prompt: &str,
     o: &GenOpts,
     cancel: &capability::CancelToken,
-    hot: &mut Option<HotDit>,
+    hot: &capability::hot::Hot<DitKey, HotDit>,
     keep: bool,
     mut progress: impl FnMut(u32, u32, &str),
 ) -> Result<(Video, Timings), String> {
@@ -460,114 +453,124 @@ fn run(
     // ---- phase 2: denoise ------------------------------------------------
     let key: DitKey = (cfg.name, lf, lh, lw, o.device.clone(), o.adapter.clone(), o.dit_dtype);
     let t = Instant::now();
-    if !matches!(hot.as_ref(), Some(h) if h.key == key) {
-        progress(1, total, "load transformer");
-        *hot = None; // free the old resident weights BEFORE building new
+    // One sink for both closures: the build reports "load transformer" and the
+    // denoise loop reports each step, and the two closures are handed to the
+    // same cache call, so neither may borrow the caller's progress exclusively.
+    let report = std::cell::RefCell::new(&mut progress as &mut dyn FnMut(u32, u32, &str));
+    let latent = hot.try_get_mut(
+        key,
+        || {
+            (&mut **report.borrow_mut())(1, total, "load transformer");
 
-        // **How the adapter reaches this build, decided once from the tier its
-        // base weights will be stored at.** A dense tier folds the delta into
-        // the weights; a quantized tier must not, because the quantizer would
-        // re-round the sum onto the base weight's own 256-level grid and
-        // discard most of the correction (`tests/lora_int8_delivery.rs`), so
-        // it takes the low-rank correction at runtime instead. The shared
-        // `model::adapter` layer owns that decision - this is a `match` on its
-        // answer, not a second copy of the rule.
-        let adapter = match &o.adapter {
-            None => None,
-            Some(path) => {
-                let tcfg = crate::modelgrad::Cfg::from_wan(cfg, lf, lh, lw);
-                Some(crate::lora::load_adapter(path, &tcfg).map_err(|e| format!("wan: loading adapter {path}: {e}"))?)
+            // **How the adapter reaches this build, decided once from the tier its
+            // base weights will be stored at.** A dense tier folds the delta into
+            // the weights; a quantized tier must not, because the quantizer would
+            // re-round the sum onto the base weight's own 256-level grid and
+            // discard most of the correction (`tests/lora_int8_delivery.rs`), so
+            // it takes the low-rank correction at runtime instead. The shared
+            // `model::adapter` layer owns that decision - this is a `match` on its
+            // answer, not a second copy of the rule.
+            let adapter = match &o.adapter {
+                None => None,
+                Some(path) => {
+                    let tcfg = crate::modelgrad::Cfg::from_wan(cfg, lf, lh, lw);
+                    Some(crate::lora::load_adapter(path, &tcfg).map_err(|e| format!("wan: loading adapter {path}: {e}"))?)
+                }
+            };
+            let (mut fold, mut runtime) = (None, None);
+            if let Some(ad) = &adapter {
+                match ad.delivery(o.dit_dtype.base_storage(), 1.0).map_err(|e| format!("wan: adapter: {e}"))? {
+                    model::adapter::Delivery::Fold(f) => fold = Some(f),
+                    model::adapter::Delivery::Runtime(d) => runtime = Some(d),
+                }
+            }
+
+            let is_gguf = std::path::Path::new(&paths.dit).extension().is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
+            let dit_weights: DitWeights = if is_gguf {
+                if fold.is_some() {
+                    // A read-only mmap has nothing to fold a LoRA delta INTO: the
+                    // host `Tensors` map every other path builds is exactly what
+                    // `import_gguf` (the ahead-of-time converter) produces for
+                    // finetune/LoRA use - convert once, then run with `--dit` on
+                    // the converted safetensors. A QUANTIZED tier never reaches
+                    // this: it folds nothing, so the mmap serves it unchanged and
+                    // the correction rides beside the packed weights.
+                    return Err(format!(
+                        "wan: --adapter with a .gguf transformer ({}) needs --dit-dtype int8 or int4, which applies the adapter beside the weights instead of folding it into them - or convert the checkpoint with `brain import` and pass the converted safetensors as --dit",
+                        paths.dit
+                    ));
+                }
+                let src = crate::gguf_src::WanGgufSource::open(&paths.dit)?;
+                if src.config().name != cfg.name {
+                    return Err(format!(
+                        "wan: {} is a {} checkpoint but --variant asked for {}",
+                        paths.dit,
+                        src.config().name,
+                        cfg.name
+                    ));
+                }
+                DitWeights::Gguf(Box::new(src))
+            } else {
+                let raw = read_any(&paths.dit)?;
+                let mut weights = crate::import::import_dit(raw, cfg)?;
+                if let Some(f) = fold.take() {
+                    f.into_tensors(&mut weights).map_err(|e| format!("wan: folding adapter: {e}"))?;
+                }
+                DitWeights::Host(weights)
+            };
+
+            // The text MLP runs on the host from these four tensors, and it runs
+            // once per generation - so they are kept while the rest of the 5.7 GB
+            // source (host map or GGUF mmap) is dropped at the end of this block.
+            let src: &dyn checkpoint::TensorSource = dit_weights.as_source();
+            let mut text_mlp = crate::model::Tensors::new();
+            for name in TEXT_MLP_TENSORS {
+                let mut data = None;
+                if !src.with_tensor(name, &mut |d| data = Some(d.to_vec())) {
+                    return Err(format!("wan: checkpoint has no {name}"));
+                }
+                let data = data.expect("with_tensor found the tensor, so it must have set data");
+                text_mlp.insert(name.to_string(), (vec![data.len()], data));
+            }
+            let dev = WanDitDev::build_adapted(cfg, src, lf as u32, lh as u32, lw as u32, o.device.as_deref(), &[], o.dit_dtype, runtime.as_ref())?;
+            Ok(HotDit { dev, text_mlp })
+        },
+        |resident| {
+            let mut report = report.borrow_mut();
+            let progress = &mut *report;
+        let dit = &resident.dev;
+        let emb_cond = crate::model::text_embed(cfg, &resident.text_mlp, &ctx_cond, cfg.text_len);
+        let emb_uncond = crate::model::text_embed(cfg, &resident.text_mlp, &ctx_uncond, cfg.text_len);
+        drop(ctx_cond);
+        drop(ctx_uncond);
+        timings.load_dit = t.elapsed().as_secs_f32();
+
+        let mut latent = seeded_noise(n_latent, o.seed);
+        let cfg_on = o.guidance > 1.0;
+        let t = Instant::now();
+        let timesteps: Vec<f32> = match o.solver {
+            Solver::UniPc => {
+                let mut s = diffusion::flowsolvers::FlowUniPcScheduler::new(Default::default());
+                s.set_timesteps(o.steps, o.shift as f64);
+                let ts = s.timesteps().to_vec();
+                latent = denoise(dit, &mut s, latent, &ts, &emb_cond, &emb_uncond, o, cfg_on, total, cancel, progress)?;
+                ts
+            }
+            Solver::DpmPp => {
+                let mut s = diffusion::flowsolvers::FlowDpmSolverPlusPlusScheduler::new(Default::default());
+                s.set_timesteps(o.steps, o.shift as f64);
+                let ts = s.timesteps().to_vec();
+                latent = denoise(dit, &mut s, latent, &ts, &emb_cond, &emb_uncond, o, cfg_on, total, cancel, progress)?;
+                ts
             }
         };
-        let (mut fold, mut runtime) = (None, None);
-        if let Some(ad) = &adapter {
-            match ad.delivery(o.dit_dtype.base_storage(), 1.0).map_err(|e| format!("wan: adapter: {e}"))? {
-                model::adapter::Delivery::Fold(f) => fold = Some(f),
-                model::adapter::Delivery::Runtime(d) => runtime = Some(d),
-            }
-        }
-
-        let is_gguf = std::path::Path::new(&paths.dit).extension().is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
-        let dit_weights: DitWeights = if is_gguf {
-            if fold.is_some() {
-                // A read-only mmap has nothing to fold a LoRA delta INTO: the
-                // host `Tensors` map every other path builds is exactly what
-                // `import_gguf` (the ahead-of-time converter) produces for
-                // finetune/LoRA use - convert once, then run with `--dit` on
-                // the converted safetensors. A QUANTIZED tier never reaches
-                // this: it folds nothing, so the mmap serves it unchanged and
-                // the correction rides beside the packed weights.
-                return Err(format!(
-                    "wan: --adapter with a .gguf transformer ({}) needs --dit-dtype int8 or int4, which applies the adapter beside the weights instead of folding it into them - or convert the checkpoint with `brain import` and pass the converted safetensors as --dit",
-                    paths.dit
-                ));
-            }
-            let src = crate::gguf_src::WanGgufSource::open(&paths.dit)?;
-            if src.config().name != cfg.name {
-                return Err(format!(
-                    "wan: {} is a {} checkpoint but --variant asked for {}",
-                    paths.dit,
-                    src.config().name,
-                    cfg.name
-                ));
-            }
-            DitWeights::Gguf(Box::new(src))
-        } else {
-            let raw = read_any(&paths.dit)?;
-            let mut weights = crate::import::import_dit(raw, cfg)?;
-            if let Some(f) = fold.take() {
-                f.into_tensors(&mut weights).map_err(|e| format!("wan: folding adapter: {e}"))?;
-            }
-            DitWeights::Host(weights)
-        };
-
-        // The text MLP runs on the host from these four tensors, and it runs
-        // once per generation - so they are kept while the rest of the 5.7 GB
-        // source (host map or GGUF mmap) is dropped at the end of this block.
-        let src: &dyn checkpoint::TensorSource = dit_weights.as_source();
-        let mut text_mlp = crate::model::Tensors::new();
-        for name in TEXT_MLP_TENSORS {
-            let mut data = None;
-            if !src.with_tensor(name, &mut |d| data = Some(d.to_vec())) {
-                return Err(format!("wan: checkpoint has no {name}"));
-            }
-            let data = data.expect("with_tensor found the tensor, so it must have set data");
-            text_mlp.insert(name.to_string(), (vec![data.len()], data));
-        }
-        let dev = WanDitDev::build_adapted(cfg, src, lf as u32, lh as u32, lw as u32, o.device.as_deref(), &[], o.dit_dtype, runtime.as_ref())?;
-        *hot = Some(HotDit { key, dev, text_mlp });
-    }
-    let resident = hot.as_ref().expect("just built");
-    let dit = &resident.dev;
-    let emb_cond = crate::model::text_embed(cfg, &resident.text_mlp, &ctx_cond, cfg.text_len);
-    let emb_uncond = crate::model::text_embed(cfg, &resident.text_mlp, &ctx_uncond, cfg.text_len);
-    drop(ctx_cond);
-    drop(ctx_uncond);
-    timings.load_dit = t.elapsed().as_secs_f32();
-
-    let mut latent = seeded_noise(n_latent, o.seed);
-    let cfg_on = o.guidance > 1.0;
-    let t = Instant::now();
-    let timesteps: Vec<f32> = match o.solver {
-        Solver::UniPc => {
-            let mut s = diffusion::flowsolvers::FlowUniPcScheduler::new(Default::default());
-            s.set_timesteps(o.steps, o.shift as f64);
-            let ts = s.timesteps().to_vec();
-            latent = denoise(dit, &mut s, latent, &ts, &emb_cond, &emb_uncond, o, cfg_on, total, cancel, &mut progress)?;
-            ts
-        }
-        Solver::DpmPp => {
-            let mut s = diffusion::flowsolvers::FlowDpmSolverPlusPlusScheduler::new(Default::default());
-            s.set_timesteps(o.steps, o.shift as f64);
-            let ts = s.timesteps().to_vec();
-            latent = denoise(dit, &mut s, latent, &ts, &emb_cond, &emb_uncond, o, cfg_on, total, cancel, &mut progress)?;
-            ts
-        }
-    };
-    timings.denoise = t.elapsed().as_secs_f32();
-    timings.steps = timesteps.len();
-    timings.tokens = tokens;
-    timings.forwards_per_step = if cfg_on { 2 } else { 1 };
+        timings.denoise = t.elapsed().as_secs_f32();
+        timings.steps = timesteps.len();
+        timings.tokens = tokens;
+        timings.forwards_per_step = if cfg_on { 2 } else { 1 };
+            Ok(latent)
+        },
+    )?;
 
     // ---- phase 3: decode -------------------------------------------------
     // The one-shot path frees the DiT here, before the VAE decoder allocates
@@ -575,7 +578,7 @@ fn run(
     // largest single allocation this pipeline makes, and 5.7 GB of transformer
     // nobody will read again is not something to hold next to it.
     if !keep {
-        *hot = None;
+        hot.clear();
     }
     if cancel.is_cancelled() {
         return Err("cancelled".into());

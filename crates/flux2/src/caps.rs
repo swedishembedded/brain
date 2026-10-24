@@ -123,9 +123,9 @@ pub fn manifest() -> Manifest {
 // (`crates/catalog/src/resident_flux2.rs`) run actions through these - ONE
 // implementation of param decoding, license gating, and generation.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use capability::{Action, ActionResult, Invocation, Outcome, Progress, Provider};
+use capability::{hot::Hot, Action, ActionResult, Invocation, Outcome, Progress, Provider};
 
 /// Decoded generation request: the variant config + name, [`GenOpts`], and an
 /// optional LoRA adapter path. Validates sizes (/16); does NOT gate the 9B
@@ -387,13 +387,13 @@ type HotKey = (String, &'static str, u32, u32, u32, Option<crate::AdapterSpec>);
 /// `ActionRequest`s. Weight paths are BOUND at construction (see
 /// [`Flux2Provider::new`]) - never re-resolved per request.
 pub struct Flux2Provider {
-    hot: Arc<Mutex<Option<(HotKey, Pipeline)>>>,
+    hot: Arc<Hot<HotKey, Pipeline>>,
     paths: Paths,
 }
 
 impl Flux2Provider {
     pub fn new(paths: Paths) -> Flux2Provider {
-        Flux2Provider { hot: Arc::new(Mutex::new(None)), paths }
+        Flux2Provider { hot: Arc::new(Hot::new()), paths }
     }
 }
 
@@ -415,7 +415,7 @@ impl Provider for Flux2Provider {
 /// re-resolved per request.
 struct Flux2Action {
     name: String,
-    hot: Arc<Mutex<Option<(HotKey, Pipeline)>>>,
+    hot: Arc<Hot<HotKey, Pipeline>>,
     paths: Paths,
 }
 
@@ -448,18 +448,21 @@ impl Action for Flux2Action {
                 let n_ref = ref_tokens(&refs, &p.opts);
                 let key: HotKey = (variant, p.precision.name(), p.opts.width, p.opts.height, n_ref, p.adapter.clone());
 
-                let mut guard = self.hot.lock().map_err(|_| "hot pipeline lock poisoned")?;
-                if !matches!(&*guard, Some((k, _)) if *k == key) {
-                    *guard = None; // free the old resident weights before building new
-                    progress(Progress::step(0, 1, "loading weights (first call for this variant/size)"));
-                    // One adapter at most over the wire: the `adapter` param
-                    // is a single string, so a served call cannot express the
-                    // stack `Pipeline` folds (`brain flux2 generate` can).
-                    let adapters: &[crate::AdapterSpec] = p.adapter.as_slice();
-                    let pipe = Pipeline::build_sized(&cfg, paths, n_gen + n_ref, n_gen, adapters, p.precision, 1)?;
-                    *guard = Some((key, pipe));
-                }
-                generate_on(&guard.as_ref().unwrap().1, inv, &refs, &p.opts, progress)
+                // Both closures report through the same sink, so it is shared
+                // rather than borrowed twice.
+                let sink = std::cell::RefCell::new(progress);
+                self.hot.try_get(
+                    key,
+                    || {
+                        (&mut **sink.borrow_mut())(Progress::step(0, 1, "loading weights (first call for this variant/size)"));
+                        // One adapter at most over the wire: the `adapter` param
+                        // is a single string, so a served call cannot express the
+                        // stack `Pipeline` folds (`brain flux2 generate` can).
+                        let adapters: &[crate::AdapterSpec] = p.adapter.as_slice();
+                        Pipeline::build_sized(&cfg, paths, n_gen + n_ref, n_gen, adapters, p.precision, 1)
+                    },
+                    |pipe| generate_on(pipe, inv, &refs, &p.opts, &mut **sink.borrow_mut())
+                )
             }
             "lora_train" => train_action(&self.paths, inv, progress),
             other => Err(format!("flux2-klein '{other}': unknown action")),

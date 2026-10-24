@@ -18,9 +18,9 @@
 //! our services by sending an email to info@swedishembedded.com.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use capability::{Action, ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, Outcome, Progress, Provider};
+use capability::{hot::Hot, Action, ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, Outcome, Progress, Provider};
 use gpu_core::Gpu;
 use serde_json::json;
 
@@ -48,7 +48,7 @@ pub fn manifest() -> Manifest {
 pub struct LpipsProvider {
     trunk: PathBuf,
     heads: PathBuf,
-    metric: Arc<Mutex<Option<Lpips>>>,
+    metric: Arc<Hot<(), Lpips>>,
 }
 
 impl LpipsProvider {
@@ -72,7 +72,7 @@ impl Provider for LpipsProvider {
 struct DistanceAction {
     trunk: PathBuf,
     heads: PathBuf,
-    metric: Arc<Mutex<Option<Lpips>>>,
+    metric: Arc<Hot<(), Lpips>>,
 }
 
 impl Action for DistanceAction {
@@ -89,12 +89,12 @@ impl Action for DistanceAction {
             return Err(format!("lpips distance: the images must be the same size (a is {w}x{h}, b is {bw}x{bh})"));
         }
 
-        let mut guard = self.metric.lock().map_err(|_| "lpips: resident metric lock poisoned")?;
-        if guard.is_none() {
+        self.metric.try_get_mut((), || {
             let weights = crate::import::read(&self.trunk, &self.heads)?;
-            *guard = Some(Lpips::new(Gpu::new(PIPELINES), &weights)?);
-        }
-        let d = guard.as_mut().expect("built above").distance(&a, &b, w, h, None)?;
-        Ok(Outcome::new().set("distance", json!(d.total)).set("layers", json!(d.layers)))
+            Lpips::new(Gpu::new(PIPELINES), &weights)
+        }, |metric| {
+            let d = metric.distance(&a, &b, w, h, None)?;
+            Ok(Outcome::new().set("distance", json!(d.total)).set("layers", json!(d.layers)))
+        })
     }
 }

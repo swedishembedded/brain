@@ -52,5 +52,5 @@ pub use config::{Task, WanConfig};
 pub use dev::{WanDitDev, WanDtype};
 pub use gguf_src::WanGgufSource;
 pub use model::WanDit;
-pub use pipeline::{generate, generate_hot, GenOpts, HotDit, Paths, Solver, Timings, Video};
+pub use pipeline::{generate, generate_hot, DitKey, GenOpts, HotDit, Paths, Solver, Timings, Video};
 pub use vae3d::{WanVaeConfig, WanVaeDecoder, WanVaeEncoder};

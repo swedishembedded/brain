@@ -199,7 +199,7 @@ impl ResidentModel for WanResident {
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         if let Some(variant) = key.config.strip_prefix("train:") {
             wan::caps::config_from_name(variant)?;
-            return Ok(Box::new(WanInstance { paths: self.paths.clone(), device, hot: None }));
+            return Ok(Box::new(WanInstance { paths: self.paths.clone(), device, hot: capability::hot::Hot::new() }));
         }
         let (variant, _, _, _, _, _) = parse_key(&key.config).ok_or_else(|| format!("wan: bad instance key {:?}", key.config))?;
         // Validate the variant at activation, not at the first run: a key
@@ -210,7 +210,7 @@ impl ResidentModel for WanResident {
         // it needs the request's own latent extent AND its text conditioning
         // ordering (the text encoder must run and be dropped first - see
         // `wan::pipeline`'s memory note). What `activate` fixes is the device.
-        Ok(Box::new(WanInstance { paths: self.paths.clone(), device, hot: None }))
+        Ok(Box::new(WanInstance { paths: self.paths.clone(), device, hot: capability::hot::Hot::new() }))
     }
 }
 
@@ -219,7 +219,7 @@ impl ResidentModel for WanResident {
 struct WanInstance {
     paths: wan::Paths,
     device: Device,
-    hot: Option<wan::HotDit>,
+    hot: capability::hot::Hot<wan::DitKey, wan::HotDit>,
 }
 
 impl WanInstance {
@@ -242,7 +242,7 @@ impl Instance for WanInstance {
             "t2v" => {
                 let mut p = wan::caps::gen_params_from(inv)?;
                 p.opts.device = self.device_name();
-                crate::resident_llm::on_device(self.device, || wan::caps::generate_on(&self.paths, &mut self.hot, inv, &p, progress))?
+                crate::resident_llm::on_device(self.device, || wan::caps::generate_on(&self.paths, &self.hot, inv, &p, progress))?
             }
             "lora_train" => wan::caps::train_action(&self.paths, inv, progress),
             other => Err(format!("wan: unknown action '{other}'")),

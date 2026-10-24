@@ -39,7 +39,7 @@ use capability::{ActionSpec, BlobSpec, Manifest, Media, ParamSpec, ParamType};
 use serde_json::json;
 
 use crate::config::WanConfig;
-use crate::pipeline::{GenOpts, HotDit, Paths, Solver};
+use crate::pipeline::{DitKey, GenOpts, HotDit, Paths, Solver};
 
 /// The model id used on the CLI (`brain do brain/wan …`) and the event API.
 pub const MODEL: &str = "brain/wan";
@@ -115,9 +115,9 @@ pub fn manifest() -> Manifest {
 // (`crates/catalog/src/resident_wan.rs`) run `t2v` through these - ONE
 // implementation of param decoding, generation and outcome shaping.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use capability::{Action, ActionResult, Invocation, Outcome, Progress, Provider};
+use capability::{hot::Hot, Action, ActionResult, Invocation, Outcome, Progress, Provider};
 
 /// A decoded `t2v` request: the variant config, its name, and the per-call
 /// [`GenOpts`].
@@ -173,7 +173,7 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
 /// as a video-output [`Outcome`] (the shared `capability::blob` wire format).
 /// Cancellation rides in `inv.cancel` - [`crate::pipeline`] polls it per
 /// denoise step.
-pub fn generate_on(paths: &Paths, hot: &mut Option<HotDit>, inv: &Invocation, p: &GenParams, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+pub fn generate_on(paths: &Paths, hot: &Hot<DitKey, HotDit>, inv: &Invocation, p: &GenParams, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let prompt = inv.get_str("prompt").ok_or("'prompt' is required")?;
     let (video, timings) = crate::pipeline::generate_hot(&p.cfg, paths, &prompt, &p.opts, &inv.cancel, hot, |done, total, phase| {
         progress(Progress::step(done, total, phase.to_string()))
@@ -258,13 +258,13 @@ pub fn train_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Pr
 /// `ActionRequest`s. Weight paths are BOUND at construction (see
 /// [`WanProvider::from_paths`]) - never re-resolved per request.
 pub struct WanProvider {
-    hot: Arc<Mutex<Option<HotDit>>>,
+    hot: Arc<Hot<DitKey, HotDit>>,
     paths: Paths,
 }
 
 impl WanProvider {
     pub fn from_paths(paths: Paths) -> WanProvider {
-        WanProvider { hot: Arc::new(Mutex::new(None)), paths }
+        WanProvider { hot: Arc::new(Hot::new()), paths }
     }
 }
 
@@ -286,7 +286,7 @@ impl Provider for WanProvider {
 /// re-resolved per request.
 struct WanAction {
     name: String,
-    hot: Arc<Mutex<Option<HotDit>>>,
+    hot: Arc<Hot<DitKey, HotDit>>,
     paths: Paths,
 }
 
@@ -298,8 +298,7 @@ impl Action for WanAction {
         match self.name.as_str() {
             "t2v" => {
                 let p = gen_params_from(inv)?;
-                let mut guard = self.hot.lock().map_err(|_| "hot DiT lock poisoned")?;
-                generate_on(&self.paths, &mut guard, inv, &p, progress)
+                generate_on(&self.paths, &self.hot, inv, &p, progress)
             }
             "lora_train" => train_action(&self.paths, inv, progress),
             other => Err(format!("wan '{other}': unknown action")),

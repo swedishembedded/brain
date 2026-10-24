@@ -59,7 +59,7 @@
 use std::sync::{Arc, Mutex};
 
 use arcface::caps::ArcFaceSession;
-use capability::{Action, ActionResult, ActionSpec, Invocation, Manifest, Outcome, ParamSpec, ParamType, Progress, Provider};
+use capability::{hot::Hot, Action, ActionResult, ActionSpec, Invocation, Manifest, Outcome, ParamSpec, ParamType, Progress, Provider};
 use clip::config::EvaVisionConfig;
 use clip::model::EvaVision;
 use flux1::config::Flux1Config;
@@ -438,7 +438,7 @@ impl Session {
 // ===================== the provider =====================
 
 type Roots = (String, String, String, String, String);
-type HotSession = Arc<Mutex<Option<(Roots, Arc<Session>)>>>;
+type HotSession = Arc<Hot<Roots, Arc<Session>>>;
 
 pub struct PulidProvider {
     roots: Roots,
@@ -453,7 +453,7 @@ impl PulidProvider {
         clip_root: impl Into<String>,
         bisenet_root: impl Into<String>,
     ) -> PulidProvider {
-        PulidProvider { roots: (flux1_root.into(), pulid_root.into(), arcface_root.into(), clip_root.into(), bisenet_root.into()), hot: Arc::new(Mutex::new(None)) }
+        PulidProvider { roots: (flux1_root.into(), pulid_root.into(), arcface_root.into(), clip_root.into(), bisenet_root.into()), hot: Arc::new(Hot::new()) }
     }
 
     /// `BRAIN_FLUX1_DIR` + `BRAIN_PULID_DIR` (a `pulid_flux_v0.9.1.safetensors`
@@ -499,15 +499,10 @@ impl Action for PulidAction {
         text2image_spec()
     }
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let session = {
-            let mut guard = self.hot.lock().map_err(|_| "pulid: hot session lock poisoned")?;
-            if !matches!(&*guard, Some((r, _)) if *r == self.roots) {
-                *guard = None;
-                let (a, b, c, d, e) = self.roots.clone();
-                *guard = Some((self.roots.clone(), Arc::new(Session::new(a, b, c, d, e))));
-            }
-            guard.as_ref().expect("built above").1.clone()
-        };
+        let session = self.hot.get_cloned(self.roots.clone(), || {
+            let (a, b, c, d, e) = self.roots.clone();
+            Ok(Arc::new(Session::new(a, b, c, d, e)))
+        })?;
         session.run("text2image", inv)
     }
 }

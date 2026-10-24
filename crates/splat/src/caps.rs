@@ -26,10 +26,10 @@
 //! with no request/response shape a capability call can express, and is not
 //! served.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use capability::{
-    Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType,
+    hot::Hot, Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType,
     Progress, Provider,
 };
 use gpu_core::Gpu;
@@ -177,7 +177,7 @@ fn camera_from_params(inv: &Invocation, bounds: ([f32; 3], [f32; 3]), width: u32
 
 /// Run one `render` invocation (already validated against [`render_spec`]),
 /// reusing `hot` when `(scene, width, height)` matches the last call.
-fn render(inv: &Invocation, hot: &Mutex<Option<(u64, RenderSession)>>) -> ActionResult {
+fn render(inv: &Invocation, hot: &Hot<u64, RenderSession>) -> ActionResult {
     let width = inv.get_i64("width").unwrap_or(960).max(0) as u32;
     let height = inv.get_i64("height").unwrap_or(720).max(0) as u32;
     check_size(width, height)?;
@@ -185,25 +185,26 @@ fn render(inv: &Invocation, hot: &Mutex<Option<(u64, RenderSession)>>) -> Action
     let scene_blob = inv.get_blob("scene").ok_or("splat render: missing required input 'scene'")?;
     let key = scene_key(&scene_blob.bytes, width, height);
 
-    let mut guard = hot.lock().map_err(|_| "splat render: session lock poisoned")?;
-    if !matches!(&*guard, Some((k, _)) if *k == key) {
-        let scene = crate::ply::parse(&scene_blob.bytes)?;
-        *guard = None; // free the old build before allocating the new one
-        *guard = Some((key, build_render_session(&scene, width, height)));
-    }
-    let sess = &mut guard.as_mut().expect("built above").1;
-
-    let cam = camera_from_params(inv, sess.bounds, width, height, fov)?;
-    let opts = RenderOpts {
-        bg: get_vec3_or(inv, "bg", [0.0; 3])?,
-        mode: if inv.get_bool("depth").unwrap_or(false) { Mode::Depth } else { Mode::Color },
-        antialiased: inv.get_bool("antialiased").unwrap_or(RenderOpts::default().antialiased),
-        ..Default::default()
-    };
-    sess.renderer.render(&sess.gpu, &sess.gs, &cam, &opts);
-    let rgba = sess.renderer.read_rgba(&sess.gpu, width, height);
-    let rgb = rgba_to_rgb(&rgba);
-    Ok(Outcome::new().set("width", json!(width)).set("height", json!(height)).blob("image", capability::blob::image_blob(&rgb, width, height, 3)))
+    hot.try_get_mut(
+        key,
+        || {
+            let scene = crate::ply::parse(&scene_blob.bytes)?;
+            Ok(build_render_session(&scene, width, height))
+        },
+        |sess| {
+            let cam = camera_from_params(inv, sess.bounds, width, height, fov)?;
+            let opts = RenderOpts {
+                bg: get_vec3_or(inv, "bg", [0.0; 3])?,
+                mode: if inv.get_bool("depth").unwrap_or(false) { Mode::Depth } else { Mode::Color },
+                antialiased: inv.get_bool("antialiased").unwrap_or(RenderOpts::default().antialiased),
+                ..Default::default()
+            };
+            sess.renderer.render(&sess.gpu, &sess.gs, &cam, &opts);
+            let rgba = sess.renderer.read_rgba(&sess.gpu, width, height);
+            let rgb = rgba_to_rgb(&rgba);
+            Ok(Outcome::new().set("width", json!(width)).set("height", json!(height)).blob("image", capability::blob::image_blob(&rgb, width, height, 3)))
+        },
+    )
 }
 
 // ===================== fit: no caching - a fresh optimization every call =====================
@@ -268,12 +269,12 @@ fn fit(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
 /// weights to load - every request supplies its own scene.
 pub struct SplatProvider {
     /// `render`'s built-renderer cache - see [`RenderSession`].
-    hot: Arc<Mutex<Option<(u64, RenderSession)>>>,
+    hot: Arc<Hot<u64, RenderSession>>,
 }
 
 impl SplatProvider {
     pub fn new() -> SplatProvider {
-        SplatProvider { hot: Arc::new(Mutex::new(None)) }
+        SplatProvider { hot: Arc::new(Hot::new()) }
     }
 }
 
@@ -297,7 +298,7 @@ impl Provider for SplatProvider {
 }
 
 struct RenderAction {
-    hot: Arc<Mutex<Option<(u64, RenderSession)>>>,
+    hot: Arc<Hot<u64, RenderSession>>,
 }
 
 impl Action for RenderAction {

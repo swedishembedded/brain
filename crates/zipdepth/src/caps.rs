@@ -16,10 +16,10 @@
 //! device state.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use capability::{
-    Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType,
+    hot::Hot, Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType,
     Progress, Provider,
 };
 use gpu_core::Gpu;
@@ -125,8 +125,7 @@ pub fn manifest() -> Manifest {
 /// The resident state: the engine plus the imported host-RAM weight map for one
 /// checkpoint (the model's Hot footprint). Per call a transient `ParamStore` +
 /// `Predictor` are materialised from it — the `DepthResident` pattern.
-struct Hot {
-    weights: String,
+struct DepthModel {
     gpu: Gpu,
     init: HashMap<String, Vec<f32>>,
     cfg: ZipConfig,
@@ -136,7 +135,7 @@ struct Hot {
 /// the checkpoint imports lazily on the first `infer` and stays resident.
 #[derive(Default)]
 pub struct DepthProvider {
-    hot: Arc<Mutex<Option<Hot>>>,
+    hot: Arc<Hot<String, DepthModel>>,
 }
 
 impl DepthProvider {
@@ -155,7 +154,7 @@ impl Provider for DepthProvider {
 }
 
 struct InferAction {
-    hot: Arc<Mutex<Option<Hot>>>,
+    hot: Arc<Hot<String, DepthModel>>,
 }
 
 impl Action for InferAction {
@@ -168,35 +167,32 @@ impl Action for InferAction {
         let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
 
         // Hot path: engine + imported weight map resident per checkpoint path.
-        let mut guard = self.hot.lock().map_err(|_| "depth: hot model lock poisoned")?;
-        if !matches!(&*guard, Some(hot) if hot.weights == weights) {
-            *guard = None; // free the old resident weights before importing new
+        self.hot.try_get(weights.clone(), || {
             let cfg = crate::import::cfg_for_checkpoint(&weights)?;
             let gpu = Gpu::new(crate::net::PIPELINES);
             let init = crate::import::load(&weights, &cfg)?;
-            *guard = Some(Hot { weights: weights.clone(), gpu, init, cfg });
-        }
-        let hot = guard.as_ref().unwrap();
-
-        // Optional smaller input (fully convolutional: any x32 side is valid).
-        let mut cfg = hot.cfg.clone();
-        if let Some(n) = inv.get_i64("input") {
-            if n > 0 {
-                cfg.input = n as u32;
+            Ok(DepthModel { gpu, init, cfg })
+        }, |hot| {
+            // Optional smaller input (fully convolutional: any x32 side is valid).
+            let mut cfg = hot.cfg.clone();
+            if let Some(n) = inv.get_i64("input") {
+                if n > 0 {
+                    cfg.input = n as u32;
+                }
             }
-        }
 
-        // Transient device state from the resident host weights, then the same
-        // reference pipeline `brain depth --image` runs.
-        let out = predict_normalized(&hot.gpu, &cfg, &hot.init, &hwc, w, h);
+            // Transient device state from the resident host weights, then the same
+            // reference pipeline `brain depth --image` runs.
+            let out = predict_normalized(&hot.gpu, &cfg, &hot.init, &hwc, w, h);
 
-        let bytes: Vec<u8> = out.values.iter().flat_map(|v| v.to_le_bytes()).collect();
-        Ok(Outcome::new()
-            .set("width", json!(out.width))
-            .set("height", json!(out.height))
-            .set("min", json!(out.min))
-            .set("max", json!(out.max))
-            .blob("depth", Blob::new(Media::Image, bytes).with_meta(json!({"w": out.width, "h": out.height, "c": 1, "min": out.min, "max": out.max}))))
+            let bytes: Vec<u8> = out.values.iter().flat_map(|v| v.to_le_bytes()).collect();
+            Ok(Outcome::new()
+                .set("width", json!(out.width))
+                .set("height", json!(out.height))
+                .set("min", json!(out.min))
+                .set("max", json!(out.max))
+                .blob("depth", Blob::new(Media::Image, bytes).with_meta(json!({"w": out.width, "h": out.height, "c": 1, "min": out.min, "max": out.max}))))
+        })
     }
 }
 
