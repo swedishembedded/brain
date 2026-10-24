@@ -657,6 +657,9 @@ pub struct ZTrainModel {
     names: Vec<String>,
     idx: HashMap<String, usize>,
     grad_acc: RefCell<Vec<Vec<f32>>>,
+    /// AdamW first and second moments, allocated on the first [`ZTrainModel`]'s
+    /// first [`Model::adamw_step`] so a forward-only user pays nothing.
+    moments: RefCell<Option<(Vec<Vec<f32>>, Vec<Vec<f32>>)>>,
     stash: RefCell<Option<ModelGradsF32>>,
     batch: RefCell<Option<Batch>>,
     loss: RefCell<f32>,
@@ -675,6 +678,7 @@ impl ZTrainModel {
             names,
             idx,
             grad_acc: RefCell::new(grad_acc),
+            moments: RefCell::new(None),
             stash: RefCell::new(None),
             batch: RefCell::new(None),
             loss: RefCell::new(0.0),
@@ -730,10 +734,33 @@ impl Model for ZTrainModel {
             slot.iter_mut().for_each(|x| *x = 0.0);
         }
     }
-    fn adamw_step(&self, _t: u32, _lr: f32, _wd: f32, _adam: model::Adam, _clip: Option<f32>, _extra: f32) {
-        // The distributed path drives the optimiser via model::DdpOptimizer (grads
-        // reduced through a Collective); a single-device local optimiser can be
-        // added here later if needed.
+    fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra: f32) {
+        // A real step, not a placeholder: this type is a `Model`, and a caller
+        // that runs it through `fit_controlled`/`ModelFit` must actually train.
+        // The distributed path reaches the weights through `DdpOptimizer`
+        // instead, which owns its own flat state and never calls this.
+        let mut moments = self.moments.borrow_mut();
+        let (m_all, v_all) = moments.get_or_insert_with(|| {
+            let m = self.names.iter().map(|n| vec![0f32; self.read_weight(n).len()]).collect();
+            let v = self.names.iter().map(|n| vec![0f32; self.read_weight(n).len()]).collect();
+            (m, v)
+        });
+        let grads = self.grad_acc.borrow();
+        // The clip bounds the norm of the gradients the step sees, i.e. after
+        // the accumulation scale - the same order every other model's step
+        // applies them in.
+        let mut scale = extra;
+        if let Some(c) = clip {
+            let norm = grads.iter().flat_map(|g| g.iter()).map(|g| (g * extra) * (g * extra)).sum::<f32>().sqrt();
+            if norm > c {
+                scale *= c / norm;
+            }
+        }
+        for i in 0..self.names.len() {
+            let mut w = self.read_weight(&self.names[i]);
+            adam.update_slice(t, lr, wd, scale, &mut w, &mut m_all[i], &mut v_all[i], &grads[i]);
+            self.write_weight(&self.names[i], &w);
+        }
     }
     fn poll_wait(&self) {}
     fn param_names(&self) -> Vec<String> {
