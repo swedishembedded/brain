@@ -106,7 +106,7 @@ fn train(args: &[String]) {
     // when none was given.
     o.seed = match (job.as_ref().map(|(plan, _)| plan), a.seed_opt("--seed")) {
         (_, Some(seed)) => seed,
-        (Some(plan), None) => match plan_seed(Path::new(plan)) {
+        (Some(plan), None) => match crate::args::plan_seed(Path::new(plan), "gpt2 train") {
             Ok(seed) => seed,
             Err(e) => {
                 eprintln!("error: reading {plan}: {e}");
@@ -214,20 +214,9 @@ fn model_block(weights: &str) -> u32 {
     GptConfig::from_json(&checkpoint::read_config(weights)).block_size
 }
 
-/// The seed a distributed rank trains with when `--seed` was not given: the
-/// digest of the plan file, which every rank of the job holds byte for byte.
-/// Same plan, same starting weights and batch order on every rank.
-fn plan_seed(plan: &Path) -> std::io::Result<u64> {
-    use sha2::{Digest as _, Sha256};
-    let digest = Sha256::digest(std::fs::read(plan)?);
-    let seed = u64::from_le_bytes(digest[..8].try_into().expect("a SHA-256 digest holds eight bytes"));
-    eprintln!("gpt2 train: no --seed given, using seed {seed} from the job plan {}", plan.display());
-    Ok(seed)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::plan_seed;
+    use crate::args::plan_seed;
 
     /// The same plan file must give every rank the same seed, or the ranks
     /// start from different weights and train on different batch streams.
@@ -240,8 +229,8 @@ mod tests {
         let b = dir.join("b.json");
         std::fs::write(&a, br#"{"job":"a"}"#).unwrap();
         std::fs::write(&b, br#"{"job":"b"}"#).unwrap();
-        assert_eq!(plan_seed(&a).unwrap(), plan_seed(&a).unwrap(), "one plan, one seed");
-        assert_ne!(plan_seed(&a).unwrap(), plan_seed(&b).unwrap(), "a different plan must not replay the same stream");
+        assert_eq!(plan_seed(&a, "gpt2 train").unwrap(), plan_seed(&a, "gpt2 train").unwrap(), "one plan, one seed");
+        assert_ne!(plan_seed(&a, "gpt2 train").unwrap(), plan_seed(&b, "gpt2 train").unwrap(), "a different plan must not replay the same stream");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

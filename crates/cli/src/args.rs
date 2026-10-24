@@ -11,7 +11,22 @@
 //! What stays is the part that is genuinely about THIS binary: how `--out`
 //! spells a blob name, and how a verb is canonicalised.
 
+use std::path::Path;
+
 pub use appopts::Args;
+
+/// The seed a distributed rank trains with when `--seed` was not given: the
+/// digest of the plan file, which every rank of the job holds byte for byte.
+/// Same plan, same starting weights and batch order on every rank; ranks that
+/// drew different seeds would diverge before the first reduction. `what` names
+/// the verb in the notice.
+pub(crate) fn plan_seed(plan: &Path, what: &str) -> std::io::Result<u64> {
+    use sha2::{Digest as _, Sha256};
+    let digest = Sha256::digest(std::fs::read(plan)?);
+    let seed = u64::from_le_bytes(digest[..8].try_into().expect("a SHA-256 digest holds eight bytes"));
+    eprintln!("{what}: no --seed given, using seed {seed} from the job plan {}", plan.display());
+    Ok(seed)
+}
 
 /// Resolve `--seed` for a verb that walks its own flag loop: the value given,
 /// or a freshly drawn random one printed to stderr (see [`Args::seed`]), plus
