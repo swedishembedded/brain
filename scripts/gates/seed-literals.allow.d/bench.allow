@@ -1,0 +1,2 @@
+crates/bench/src/distributed.rs	ProfileConfig::default:seed=0xD1_57_AB_1E	default	bench-input: the fixed jitter seed makes the shaped transport's per-op delay sequence reproducible across runs
+crates/bench/src/distributed.rs	ProfileConfig::default:seed=7	default	bench-input: one fixed weight and batch-order seed so every transport profiles the same tiny model and stream

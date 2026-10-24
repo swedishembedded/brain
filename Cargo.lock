@@ -632,6 +632,7 @@ dependencies = [
  "brain-fcbench",
  "brain-glmdsa",
  "brain-gpt2",
+ "brain-gpu-core",
  "brain-horizon",
  "brain-model",
  "brain-promote",

@@ -9,9 +9,17 @@ description = "Model-agnostic architecture-evaluation benchmark suite (registry 
 name = "bench"
 path = "src/lib.rs"
 
+# The single-machine distributed profile (`distributed_profile`): it selects
+# the CPU backend by name so the profile never depends on a device being
+# present, and reads backend identity into its report.
+[[bin]]
+name = "distributed_profile"
+path = "src/bin/distributed_profile.rs"
+
 [dependencies]
 brain-data.workspace = true
 brain-model.workspace = true
+brain-gpu-core.workspace = true
 brain-gpt2.workspace = true
 brain-toymoe.workspace = true
 brain-qwen3.workspace = true

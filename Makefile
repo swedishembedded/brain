@@ -1323,6 +1323,16 @@ $(BENCH_RUN_TARGETS): bench/run/%: build/release
 bench/scaling: build/release
 	$(BRAIN) bench scaling $(SEED_FLAG)
 
+# `make bench/distributed` runs the single-machine distributed-training
+# profile: a tiny GPT trained as world 1/2/4 over the host staging collective,
+# loopback TCP and a shaped link (propagation delay + bandwidth cap), each
+# wrapped by the measured collective, and prints one JSON document with step
+# times, throughput, communication cost/share, speedup and replica identity.
+# Pass flags through ARGS, e.g. `ARGS="--steps 5 --worlds 1,2"`.
+## bench/distributed - distributed-training profile on one machine: world 1/2/4 x host/loopback/shaped, one JSON document (ARGS="--steps 5")
+bench/distributed:
+	cargo run --release --offline -p brain-bench --bin distributed_profile -- $(ARGS)
+
 # `make bench/eval ARCH=<name>` runs the turn-key architecture-eval harness: the
 # WHOLE registered battery against one architecture, aggregated per capability
 # axis, writing a structured artifact to results/<arch>-<seed>.json. Add a new
@@ -2024,7 +2034,7 @@ help:
         mirror mirror/import mirror/infer mirror/demo splat splat/view tts tts/data \
         flux2 flux2/generate flux2/edit wan wan/t2v forecast forecast/compare forecast/serve \
         wm wm/play wm/fixtures federated federated/demo web web/dev web/build \
-        bench bench/run $(BENCH_RUN_TARGETS) bench/scaling bench/eval bench/scale bench/advise \
+        bench bench/run $(BENCH_RUN_TARGETS) bench/scaling bench/distributed bench/eval bench/scale bench/advise \
         bench/compare bench/char \
         perf perf/scenario $(PERF_SCENARIO_TARGETS) perf/compare perf/smoke \
         perf/model perf/model/lfm perf/model/flux2 perf/model/wan \
