@@ -27,10 +27,10 @@
 //! pair of constants ([`Preprocess`]), one normalise kernel (`film_chan`, via
 //! `imaging::Ctx`), and no second copy of the arithmetic.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use capability::{
-    Action, ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType,
+    hot::Hot, Action, ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType,
     Progress, Provider,
 };
 use gpu_core::Gpu;
@@ -194,13 +194,13 @@ impl ScrfdSession {
 /// graph imports lazily on the first call and stays resident.
 pub struct ScrfdProvider {
     dir: String,
-    hot: Arc<Mutex<Option<(String, ScrfdSession)>>>,
+    hot: Arc<Hot<String, ScrfdSession>>,
 }
 
 impl ScrfdProvider {
     /// `dir` holds `scrfd_10g_bnkps.onnx` (the antelopev2 release layout).
     pub fn new(dir: impl Into<String>) -> ScrfdProvider {
-        ScrfdProvider { dir: dir.into(), hot: Arc::new(Mutex::new(None)) }
+        ScrfdProvider { dir: dir.into(), hot: Arc::new(Hot::new()) }
     }
     /// The released file this detector needs, by its antelopev2 name.
     pub const RELEASE_FILES: [&str; 1] = [crate::import::RELEASE_FILE];
@@ -226,7 +226,7 @@ impl Provider for ScrfdProvider {
 
 struct DetectAction {
     dir: String,
-    hot: Arc<Mutex<Option<(String, ScrfdSession)>>>,
+    hot: Arc<Hot<String, ScrfdSession>>,
 }
 
 impl Action for DetectAction {
@@ -234,13 +234,11 @@ impl Action for DetectAction {
         detect_spec()
     }
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let mut guard = self.hot.lock().map_err(|_| "scrfd: hot model lock poisoned")?;
-        if !matches!(&*guard, Some((d, _)) if *d == self.dir) {
-            *guard = None; // free the old build before importing another directory
-            let gpu = Gpu::new(&SERVING_PIPELINES);
-            *guard = Some((self.dir.clone(), ScrfdSession::load(&self.dir, gpu)?));
-        }
-        guard.as_ref().expect("built above").1.run("detect", inv)
+        self.hot.try_get(
+            self.dir.clone(),
+            || ScrfdSession::load(&self.dir, Gpu::new(&SERVING_PIPELINES)),
+            |s| s.run("detect", inv),
+        )
     }
 }
 

@@ -24,10 +24,10 @@
 //! preserving) resize to `768x768`, bicubic (`resample: 3` is PIL's
 //! `BICUBIC`), then per-channel `(x-mean)/std`.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use capability::{
-    Action, ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType,
+    hot::Hot, Action, ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType,
     Progress, Provider,
 };
 use gpu_core::Gpu;
@@ -195,14 +195,14 @@ impl FlorenceSession {
 /// checkpoint imports lazily on the first call and stays resident.
 pub struct Florence2Provider {
     dir: String,
-    hot: Arc<Mutex<Option<(String, FlorenceSession)>>>,
+    hot: Arc<Hot<String, FlorenceSession>>,
 }
 
 impl Florence2Provider {
     /// `dir` holds `config.json`, `model.safetensors` and `tokenizer.json`
     /// (the `microsoft/Florence-2-base` release layout).
     pub fn new(dir: impl Into<String>) -> Florence2Provider {
-        Florence2Provider { dir: dir.into(), hot: Arc::new(Mutex::new(None)) }
+        Florence2Provider { dir: dir.into(), hot: Arc::new(Hot::new()) }
     }
 
     pub const RELEASE_FILES: [&str; 3] = ["config.json", "model.safetensors", "tokenizer.json"];
@@ -227,7 +227,7 @@ impl Provider for Florence2Provider {
 
 struct GroundAction {
     dir: String,
-    hot: Arc<Mutex<Option<(String, FlorenceSession)>>>,
+    hot: Arc<Hot<String, FlorenceSession>>,
 }
 
 impl Action for GroundAction {
@@ -235,13 +235,11 @@ impl Action for GroundAction {
         ground_spec()
     }
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let mut guard = self.hot.lock().map_err(|_| "florence2: hot model lock poisoned")?;
-        if !matches!(&*guard, Some((d, _)) if *d == self.dir) {
-            *guard = None; // free the old build before importing another directory
-            let gpu = Gpu::new(&SERVING_PIPELINES);
-            *guard = Some((self.dir.clone(), FlorenceSession::load(&self.dir, gpu)?));
-        }
-        guard.as_ref().expect("built above").1.run("ground", inv)
+        self.hot.try_get(
+            self.dir.clone(),
+            || FlorenceSession::load(&self.dir, Gpu::new(&SERVING_PIPELINES)),
+            |s| s.run("ground", inv)
+        )
     }
 }
 

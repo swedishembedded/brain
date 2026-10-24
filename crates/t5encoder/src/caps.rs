@@ -37,7 +37,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use capability::{
-    Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType,
+    hot::Hot, Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType,
     Progress, Provider,
 };
 use data::unigram::UnigramTokenizer;
@@ -230,7 +230,7 @@ fn f32_le(v: &[f32]) -> Vec<u8> {
 
 // ===================== the provider =====================
 
-type HotSession = Arc<Mutex<Option<(String, Arc<Session>)>>>;
+type HotSession = Arc<Hot<String, Arc<Session>>>;
 
 /// The executable T5/umT5 stack behind the manifest. Construction is free -
 /// encoders import lazily on first use and stay resident.
@@ -241,7 +241,7 @@ pub struct T5encoderProvider {
 
 impl T5encoderProvider {
     pub fn new(dir: impl Into<String>) -> T5encoderProvider {
-        T5encoderProvider { dir: dir.into(), hot: Arc::new(Mutex::new(None)) }
+        T5encoderProvider { dir: dir.into(), hot: Arc::new(Hot::new()) }
     }
 
     /// `BRAIN_T5ENCODER_DIR` - `None` when unset, or when the directory holds
@@ -272,15 +272,7 @@ impl Action for T5encoderAction {
         encode_spec()
     }
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let session = {
-            let mut guard = self.hot.lock().map_err(|_| "t5encoder: hot model lock poisoned")?;
-            if !matches!(&*guard, Some((d, _)) if *d == self.dir) {
-                *guard = None; // free the old build before importing another directory
-                let gpu = Gpu::new(crate::model::PIPELINES);
-                *guard = Some((self.dir.clone(), Arc::new(Session::load(&self.dir, gpu)?)));
-            }
-            guard.as_ref().expect("built above").1.clone()
-        };
+        let session = self.hot.get_cloned(self.dir.clone(), || Ok(Arc::new(Session::load(&self.dir, Gpu::new(crate::model::PIPELINES))?)))?;
         session.run("encode", inv)
     }
 }

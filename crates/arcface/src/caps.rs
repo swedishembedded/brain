@@ -35,10 +35,10 @@
 //! pair of constants ([`Preprocess`]), one normalise kernel (`film_chan`, via
 //! `imaging::Ctx`), and no second copy of the arithmetic.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use capability::{
-    Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType,
+    hot::Hot, Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType,
     Progress, Provider,
 };
 use gpu_core::Gpu;
@@ -276,14 +276,14 @@ impl ArcFaceSession {
 /// graphs import lazily on the first call and stay resident.
 pub struct ArcFaceProvider {
     dir: String,
-    hot: Arc<Mutex<Option<(String, ArcFaceSession)>>>,
+    hot: Arc<Hot<String, ArcFaceSession>>,
 }
 
 impl ArcFaceProvider {
     /// `dir` holds `glintr100.onnx` (the antelopev2 release layout), and - for
     /// the default aligned path - `scrfd_10g_bnkps.onnx` beside it.
     pub fn new(dir: impl Into<String>) -> ArcFaceProvider {
-        ArcFaceProvider { dir: dir.into(), hot: Arc::new(Mutex::new(None)) }
+        ArcFaceProvider { dir: dir.into(), hot: Arc::new(Hot::new()) }
     }
     /// The released file this embedder needs. The detector's graph is NOT in
     /// this list: it is needed by `align = true` only, so a directory without it
@@ -311,7 +311,7 @@ impl Provider for ArcFaceProvider {
 
 struct EmbedAction {
     dir: String,
-    hot: Arc<Mutex<Option<(String, ArcFaceSession)>>>,
+    hot: Arc<Hot<String, ArcFaceSession>>,
 }
 
 impl Action for EmbedAction {
@@ -319,13 +319,11 @@ impl Action for EmbedAction {
         embed_spec()
     }
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let mut guard = self.hot.lock().map_err(|_| "arcface: hot model lock poisoned")?;
-        if !matches!(&*guard, Some((d, _)) if *d == self.dir) {
-            *guard = None; // free the old build before importing another directory
-            let gpu = Gpu::new(&SERVING_PIPELINES);
-            *guard = Some((self.dir.clone(), ArcFaceSession::load(&self.dir, gpu)?));
-        }
-        guard.as_ref().expect("built above").1.run("embed", inv)
+        self.hot.try_get(
+            self.dir.clone(),
+            || ArcFaceSession::load(&self.dir, Gpu::new(&SERVING_PIPELINES)),
+            |s| s.run("embed", inv)
+        )
     }
 }
 

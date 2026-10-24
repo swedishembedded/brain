@@ -12,10 +12,10 @@
 //! stays resident across calls (keyed by weights path), mirroring `s3dit::caps`.
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use capability::{
-    Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType,
+    hot::Hot, Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType,
     Progress, Provider,
 };
 use serde_json::{json, Value};
@@ -41,7 +41,7 @@ pub fn manifest() -> Manifest {
 /// default, like `brain yolo detect`).
 #[derive(Default)]
 pub struct YoloProvider {
-    hot: Arc<Mutex<Option<(String, Yolo)>>>,
+    hot: Arc<Hot<String, Yolo>>,
 }
 
 impl YoloProvider {
@@ -60,7 +60,7 @@ impl Provider for YoloProvider {
 }
 
 struct DetectAction {
-    hot: Arc<Mutex<Option<(String, Yolo)>>>,
+    hot: Arc<Hot<String, Yolo>>,
 }
 
 impl Action for DetectAction {
@@ -78,23 +78,18 @@ impl Action for DetectAction {
         let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
 
         // Hot path: keep the loaded model resident; rebuild only on a new path.
-        let mut guard = self.hot.lock().map_err(|_| "yolo: hot model lock poisoned")?;
-        if !matches!(&*guard, Some((p, _)) if *p == weights) {
-            *guard = None; // free the old resident model before loading new
-            *guard = Some((weights.clone(), Yolo::load(&weights, 1)));
-        }
-        let model = &guard.as_ref().unwrap().1;
-
-        let dets = model.detect(&hwc, w, h, conf, iou);
-        let objects: Vec<Value> = dets
-            .iter()
-            .map(|d| json!({"bbox": [d[0], d[1], d[2], d[3]], "conf": d[4], "class": d[5] as u32}))
-            .collect();
-        let text = serde_json::to_string(&objects).map_err(|e| e.to_string())?;
-        Ok(Outcome::new()
-            .set("count", json!(objects.len()))
-            .set("detections", json!(objects))
-            .blob("detections", Blob::new(Media::Text, text.into_bytes())))
+        self.hot.try_get(weights.clone(), || Ok(Yolo::load(&weights, 1)), |model| {
+            let dets = model.detect(&hwc, w, h, conf, iou);
+            let objects: Vec<Value> = dets
+                .iter()
+                .map(|d| json!({"bbox": [d[0], d[1], d[2], d[3]], "conf": d[4], "class": d[5] as u32}))
+                .collect();
+            let text = serde_json::to_string(&objects).map_err(|e| e.to_string())?;
+            Ok(Outcome::new()
+                .set("count", json!(objects.len()))
+                .set("detections", json!(objects))
+                .blob("detections", Blob::new(Media::Text, text.into_bytes())))
+        })
     }
 }
 

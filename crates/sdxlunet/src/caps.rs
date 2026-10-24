@@ -29,7 +29,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use capability::{Action, ActionResult, ActionSpec, Invocation, Manifest, Outcome, ParamSpec, ParamType, Progress, Provider};
+use capability::{hot::Hot, Action, ActionResult, ActionSpec, Invocation, Manifest, Outcome, ParamSpec, ParamType, Progress, Provider};
 use serde_json::json;
 
 use crate::pipeline::{GenerateOptions, Sdxl};
@@ -108,7 +108,7 @@ impl Session {
 
 // ===================== the provider =====================
 
-type HotSession = Arc<Mutex<Option<(String, Arc<Session>)>>>;
+type HotSession = Arc<Hot<String, Arc<Session>>>;
 
 /// The executable SDXL stack behind the manifest. Construction is free -
 /// pipelines import lazily on first use, per requested size.
@@ -119,7 +119,7 @@ pub struct SdxlProvider {
 
 impl SdxlProvider {
     pub fn new(root: impl Into<String>) -> SdxlProvider {
-        SdxlProvider { root: root.into(), hot: Arc::new(Mutex::new(None)) }
+        SdxlProvider { root: root.into(), hot: Arc::new(Hot::new()) }
     }
 
     /// `BRAIN_SDXL_DIR` - `None` when unset, or when the directory holds no
@@ -150,14 +150,7 @@ impl Action for SdxlAction {
         text2image_spec()
     }
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let session = {
-            let mut guard = self.hot.lock().map_err(|_| "sdxl: hot session lock poisoned")?;
-            if !matches!(&*guard, Some((r, _)) if *r == self.root) {
-                *guard = None; // free the old build before pointing at another directory
-                *guard = Some((self.root.clone(), Arc::new(Session::new(self.root.clone()))));
-            }
-            guard.as_ref().expect("built above").1.clone()
-        };
+        let session = self.hot.get_cloned(self.root.clone(), || Ok(Arc::new(Session::new(self.root.clone()))))?;
         session.run("text2image", inv)
     }
 }

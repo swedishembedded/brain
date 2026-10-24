@@ -30,10 +30,10 @@
 //! wiring the wrong template would silently degrade every restoration. An
 //! unaligned photo still restores; it just is not the reference recipe.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use capability::{
-    Action, ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress,
+    hot::Hot, Action, ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress,
     Provider,
 };
 use gpu_core::Gpu;
@@ -197,14 +197,14 @@ impl Session {
 /// checkpoint imports lazily on the first call and stays resident.
 pub struct RestoreProvider {
     weights: String,
-    hot: Arc<Mutex<Option<(String, Session)>>>,
+    hot: Arc<Hot<String, Session>>,
 }
 
 impl RestoreProvider {
     /// `weights` is `codeformer.pth` or the directory holding it; it comes from
     /// a CLI flag or `BRAIN_CODEFORMER_WEIGHTS`, never a baked-in path.
     pub fn new(weights: impl Into<String>) -> RestoreProvider {
-        RestoreProvider { weights: weights.into(), hot: Arc::new(Mutex::new(None)) }
+        RestoreProvider { weights: weights.into(), hot: Arc::new(Hot::new()) }
     }
     /// `BRAIN_CODEFORMER_WEIGHTS` - `None` when unset or when it does not resolve to
     /// a file that exists. Deliberately NOT falling back to `BRAIN_VQGAN_WEIGHTS`:
@@ -229,7 +229,7 @@ impl Provider for RestoreProvider {
 
 struct RestoreAction {
     weights: String,
-    hot: Arc<Mutex<Option<(String, Session)>>>,
+    hot: Arc<Hot<String, Session>>,
 }
 
 impl Action for RestoreAction {
@@ -237,13 +237,11 @@ impl Action for RestoreAction {
         restore_spec()
     }
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let mut guard = self.hot.lock().map_err(|_| "restore: hot model lock poisoned")?;
-        if !matches!(&*guard, Some((p, _)) if *p == self.weights) {
-            *guard = None; // free the old build before importing another checkpoint
-            let gpu = Gpu::new(&SERVING_PIPELINES);
-            *guard = Some((self.weights.clone(), Session::new(load(&self.weights, gpu)?)));
-        }
-        guard.as_ref().expect("built above").1.restore_face(inv)
+        self.hot.try_get(
+            self.weights.clone(),
+            || Ok(Session::new(load(&self.weights, Gpu::new(&SERVING_PIPELINES))?)),
+            |s| s.restore_face(inv)
+        )
     }
 }
 

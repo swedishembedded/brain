@@ -37,6 +37,7 @@ use serde_json::{json, Value};
 
 pub mod blob;
 pub mod failure;
+pub mod hot;
 pub mod presentation;
 
 pub use failure::{classify, tag, FailureClass};

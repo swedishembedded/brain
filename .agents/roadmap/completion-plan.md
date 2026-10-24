@@ -486,6 +486,58 @@ Record these so they stop reading as backlog:
 
 ---
 
+## Model-family consolidation: what a new architecture must supply
+
+The invariant is `AGENTS.md`'s: a model crate supplies its graph, its parameter
+manifest, its I/O and its objectives - never another trainer, adapter file,
+checkpoint validator or serving lifecycle. The work below is the gap between
+that invariant and the tree, found by auditing every model crate's training,
+adapter, import and serving code. Closed items name the seam that replaced the
+copies.
+
+- [x] Training and adapter capabilities are declared in the architecture's
+      `Arch::caps` row and held to the capability matrix by
+      `crates/arch/tests/caps_vs_matrix.rs` (2026-10-24).
+- [x] One checkpoint-coverage validator, `checkpoint::coverage`, replaces the
+      hand-written two-way checks in clip, ltxv, gemma4, t5encoder, flux1,
+      flux2, pulid and s3dit (2026-10-24).
+- [x] The saved host-`Pair` adapter file is `model::adapter::pair_file`; flux2,
+      LTX, LTX AV and Z-Image read shapes back, refuse another family's file by
+      name, and propagate write failures (2026-10-24).
+- [x] The flow-matching LoRA step loop is `model::flow::train`; Wan and LTX
+      video supply their batch and their step only (2026-10-24).
+- [x] The lazy model cache of a capability provider is `capability::hot::Hot`;
+      scrfd, arcface, florence2, codeformer, clip, flux1, sdxlunet, t5encoder,
+      vqgan, sam2, yolov8 and horizon use it (2026-10-24).
+- [x] `s3dit::train::ZTrainModel` honours `Model::adamw_step` instead of
+      silently not training (2026-10-24).
+- [ ] Migrate the remaining hand-held hot caches to `capability::hot::Hot`:
+      controlnet, flux2 (its `HotKey`), glmdsa, lfm2, lpips, pulid, qwen3,
+      qwen35, qwen35moe, s3dit, splat, wan, worldmirror2, zipdepth, and the
+      `resident_minimaxh3` device-keyed one (which needs a key type, not a
+      string).
+- [ ] Migrate the flow-matching loop's remaining copies: `s3dit` (its own RNG
+      draw order), and `flux2`'s richer schedule/resume path as a visitor over
+      whatever it keeps.
+- [ ] `minicpmv`'s hand-written fit loop (epoch order, accumulation, resume,
+      eval, checkpoint) onto `ChatTrainer` + a `ModelFit` visitor.
+- [ ] The causal-LM + aligner loops of `qwen3vl`, `deepseekvl` and `januspro`
+      onto one multi-part `ModelFit`; two optimizers is the blocker, so the
+      aligner needs an explicit secondary optimizer seam first.
+- [ ] `kronos` and `timesfm3`: one forecast fine-tune driver (their
+      `FinetuneOpts`/`FinetuneReport`/loop/promotion gate are field-for-field
+      copies).
+- [ ] `minimaxmusic3`: its own `LoraW` fold/projection onto `model::lora`
+      (`Pair`/`AdapterSet`) with a per-component field map; it imports neither
+      today.
+- [ ] `deepseekocr2`'s device LoRA onto `AdapterRuntime`, and `minicpmv`'s
+      `TowerLora` onto a vision-tower adapter seam (neither exists yet).
+- [ ] The `TRAIN_KERNELS`/`train_kernel_set()` clone in sdxlunet, supir,
+      controlnet, rrdbnet and vqgan: one helper in `vae::blocks`.
+- [ ] `supir`'s private host AdamW (a `HashMap` of moments) onto `optim`.
+
+---
+
 ## Working rules for this campaign
 
 Inherited from `AGENTS.md`, restated because a long campaign is exactly where

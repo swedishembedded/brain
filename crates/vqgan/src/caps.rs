@@ -27,10 +27,10 @@
 //! never a host loop. The graph is built for a fixed square side (any multiple
 //! of the 32× downscale), so `size` is part of the residency instance key.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use capability::{
-    Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType,
+    hot::Hot, Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType,
     Progress, Provider,
 };
 use gpu_core::Gpu;
@@ -233,14 +233,14 @@ impl Session {
 /// checkpoint imports lazily on the first call and stays resident per `size`.
 pub struct VqganProvider {
     weights: String,
-    hot: Arc<Mutex<Option<(String, Session)>>>,
+    hot: Arc<Hot<String, Session>>,
 }
 
 impl VqganProvider {
     /// `weights` is a released checkpoint or the directory holding one; it comes
     /// from a CLI flag or `BRAIN_VQGAN_WEIGHTS`, never a baked-in path.
     pub fn new(weights: impl Into<String>) -> VqganProvider {
-        VqganProvider { weights: weights.into(), hot: Arc::new(Mutex::new(None)) }
+        VqganProvider { weights: weights.into(), hot: Arc::new(Hot::new()) }
     }
     /// `BRAIN_VQGAN_WEIGHTS` — `None` when unset or when it does not resolve to
     /// a file that exists.
@@ -263,7 +263,7 @@ impl Provider for VqganProvider {
 struct VqAction {
     name: String,
     weights: String,
-    hot: Arc<Mutex<Option<(String, Session)>>>,
+    hot: Arc<Hot<String, Session>>,
 }
 
 impl Action for VqAction {
@@ -277,13 +277,7 @@ impl Action for VqAction {
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let size = inv.get_i64("size").unwrap_or(DEFAULT_SIZE).max(0) as u32;
         let key = format!("{}:{size}", self.weights);
-        let mut guard = self.hot.lock().map_err(|_| "vqgan: hot model lock poisoned")?;
-        if !matches!(&*guard, Some((k, _)) if *k == key) {
-            *guard = None; // free the old build before importing/rebuilding
-            let gpu = Gpu::new(&SERVING_PIPELINES);
-            *guard = Some((key, Session::new(load(&self.weights, size, gpu)?)));
-        }
-        guard.as_ref().expect("built above").1.run(&self.name, inv)
+        self.hot.try_get(key, || Ok(Session::new(load(&self.weights, size, Gpu::new(&SERVING_PIPELINES))?)), |s| s.run(&self.name, inv))
     }
 }
 

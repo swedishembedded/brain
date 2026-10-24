@@ -34,12 +34,12 @@
 //!    (`imaging::mask::threshold`), which is not in [`crate::model::PIPELINES`].
 //!    `prob > 0.5` is exactly `logit > 0`, so the client can threshold for free.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use capability::presentation::maturity;
 use capability::ModelPresentation;
 use capability::{
-    Action, ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress,
+    hot::Hot, Action, ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress,
     Provider,
 };
 use gpu_core::Gpu;
@@ -396,7 +396,7 @@ fn parse_floats(s: &str) -> Result<Vec<f32>, String> {
 /// call names a different checkpoint.
 pub struct Sam2Provider {
     weights: String,
-    hot: Arc<Mutex<Option<(String, Session)>>>,
+    hot: Arc<Hot<String, Session>>,
 }
 
 impl Sam2Provider {
@@ -404,7 +404,7 @@ impl Sam2Provider {
     /// (see [`crate::spec::Sam2Spec`]) from the models directory, never a
     /// baked-in path or an env var read directly here.
     pub fn new(weights: impl Into<String>) -> Sam2Provider {
-        Sam2Provider { weights: weights.into(), hot: Arc::new(Mutex::new(None)) }
+        Sam2Provider { weights: weights.into(), hot: Arc::new(Hot::new()) }
     }
 }
 
@@ -421,7 +421,7 @@ impl Provider for Sam2Provider {
 
 struct SegmentAction {
     weights: String,
-    hot: Arc<Mutex<Option<(String, Session)>>>,
+    hot: Arc<Hot<String, Session>>,
 }
 
 impl Action for SegmentAction {
@@ -433,14 +433,11 @@ impl Action for SegmentAction {
         parse_prompt(inv)?;
         let variant = inv.get_str("variant").unwrap_or_else(|| "tiny".into());
         let key = format!("{}:{variant}", self.weights);
-        let mut guard = self.hot.lock().map_err(|_| "sam2: hot model lock poisoned")?;
-        if !matches!(&*guard, Some((k, _)) if *k == key) {
-            *guard = None; // free the old build before importing the new one
-            let cfg = variant_config(&variant)?;
-            let gpu = Gpu::new(PIPELINES);
-            *guard = Some((key, Session::new(load(&self.weights, cfg, gpu)?)));
-        }
-        guard.as_mut().expect("built above").1.segment(inv)
+        self.hot.try_get_mut(
+            key,
+            || Ok(Session::new(load(&self.weights, variant_config(&variant)?, Gpu::new(PIPELINES))?)),
+            |s| s.segment(inv),
+        )
     }
 }
 

@@ -39,7 +39,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use capability::{
-    Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType,
+    hot::Hot, Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType,
     Progress, Provider,
 };
 use gpu_core::Gpu;
@@ -263,7 +263,7 @@ fn f32_le(v: &[f32]) -> Vec<u8> {
 /// The lazily-built session, keyed by the directory it was built from. `Arc` so
 /// an [`Action`] can clone it out of the lock and run without holding the lock
 /// across a forward.
-type HotSession = Arc<Mutex<Option<(String, Arc<Session>)>>>;
+type HotSession = Arc<Hot<String, Arc<Session>>>;
 
 /// The executable CLIP stack behind the manifest. Construction is free — towers
 /// import lazily on first use and stay resident.
@@ -274,7 +274,7 @@ pub struct ClipProvider {
 
 impl ClipProvider {
     pub fn new(dir: impl Into<String>) -> ClipProvider {
-        ClipProvider { dir: dir.into(), hot: Arc::new(Mutex::new(None)) }
+        ClipProvider { dir: dir.into(), hot: Arc::new(Hot::new()) }
     }
 
     /// `BRAIN_CLIP_DIR` — `None` when unset, or when the directory holds neither
@@ -309,26 +309,20 @@ impl Action for ClipAction {
         if self.name == "embed_text" { embed_text_spec() } else { embed_image_spec() }
     }
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let session = {
-            let mut guard = self.hot.lock().map_err(|_| "clip: hot model lock poisoned")?;
-            if !matches!(&*guard, Some((d, _)) if *d == self.dir) {
-                *guard = None; // free the old build before importing another directory
-                // `Gpu::share` - one device for every tower (text and EVA vision
-                // alike) plus `embed_image`'s own device-side resize, so the
-                // pipeline set has to cover all three; EVA's conv2d/bidir-
-                // attention/rope2d and the resize kernels are absent from
-                // TEXT_PIPELINES alone.
-                let kernels: Vec<(&str, &str)> = crate::model::TEXT_PIPELINES
-                    .iter()
-                    .chain(crate::model::VISION_PIPELINES.iter())
-                    .chain(imaging::PIPELINES.iter())
-                    .copied()
-                    .collect();
-                let gpu = Gpu::new(&kernels);
-                *guard = Some((self.dir.clone(), Arc::new(Session::load(&self.dir, gpu)?)));
-            }
-            guard.as_ref().expect("built above").1.clone()
-        };
+        let session = self.hot.get_cloned(self.dir.clone(), || {
+            // `Gpu::share` - one device for every tower (text and EVA vision
+            // alike) plus `embed_image`'s own device-side resize, so the
+            // pipeline set has to cover all three; EVA's conv2d/bidir-
+            // attention/rope2d and the resize kernels are absent from
+            // TEXT_PIPELINES alone.
+            let kernels: Vec<(&str, &str)> = crate::model::TEXT_PIPELINES
+                .iter()
+                .chain(crate::model::VISION_PIPELINES.iter())
+                .chain(imaging::PIPELINES.iter())
+                .copied()
+                .collect();
+            Ok(Arc::new(Session::load(&self.dir, Gpu::new(&kernels))?))
+        })?;
         session.run(&self.name, inv)
     }
 }

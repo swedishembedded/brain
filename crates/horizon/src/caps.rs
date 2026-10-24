@@ -42,7 +42,7 @@
 //! caller's parameter.
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use capability::{
     Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome,
@@ -429,7 +429,7 @@ pub fn predict_batch(loaded: &impl Members, invs: &[Invocation]) -> Vec<ActionRe
 }
 
 /// The model loaded on first use, kept with the directory it came from.
-type Hot = Arc<Mutex<Option<(String, Loaded)>>>;
+type Hot = Arc<capability::hot::Hot<String, Loaded>>;
 
 /// The executable timeline model behind the manifest. Construction is free:
 /// the model loads on the first `predict` and stays resident until another
@@ -473,20 +473,14 @@ impl Action for PredictAction {
         let dir = inv
             .get_str("weights")
             .ok_or("horizon: missing required param 'weights'")?;
-        let mut guard = self
-            .hot
-            .lock()
-            .map_err(|_| "horizon: model lock poisoned")?;
-        if !matches!(&*guard, Some((d, _)) if *d == dir) {
-            *guard = None;
-            *guard = Some((
-                dir.clone(),
-                Loaded::load(Path::new(&dir)).map_err(|e| format!("horizon: {e}"))?,
-            ));
-        }
-        progress(Progress::step(1, 1, "predict"));
-        let (_, loaded) = guard.as_ref().ok_or("horizon: no model loaded")?;
-        predict(loaded, inv)
+        self.hot.try_get(
+            dir.clone(),
+            || Loaded::load(Path::new(&dir)).map_err(|e| format!("horizon: {e}")),
+            |loaded| {
+                progress(Progress::step(1, 1, "predict"));
+                predict(loaded, inv)
+            },
+        )
     }
 }
 
