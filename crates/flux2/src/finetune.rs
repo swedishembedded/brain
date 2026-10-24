@@ -1088,85 +1088,98 @@ pub fn run(
             lr.decay_iters
         ),
     );
-    for step in done..opts.steps {
-        if cancel.is_cancelled() {
-            return Err("cancelled".into());
-        }
-        let t0 = std::time::Instant::now();
-        let s = &encoded[sample_index(n_samples, step as u64, opts.seed)];
-        let sigma = step_sigma(&sched, step as u64, opts.seed);
-        let lr_now = lr.at(step);
-        let noise = model::hostmath::randn(s.x0.len(), opts.seed ^ (0xa5a5 + step as u64));
-        let mut batch: Batch<f32> = make_flow_batch_paired(&cfg, &s.x0, &s.refs, &s.ctx, sigma, &noise);
-        let dropped = !s.refs.is_empty() && ref_dropped(step as u64, opts.seed, opts.ref_dropout);
-        if dropped {
-            blank_references(&mut batch, &cfg);
-        }
-        // Region-aware weights, if this run asked for them. Per step rather
-        // than cached per sample: it is one pass over the target latent
-        // against a forward+backward through the whole DiT.
-        //
-        // NOT on a dropped step: the weights say "spend the gradient where
-        // this pair's edit is", and a step with no reference has no edit to
-        // speak of - it is being asked to produce the whole target, so every
-        // token of it counts the same.
-        let edit = if dropped {
-            Vec::new()
-        } else {
-            change_weights(&s.x0, &s.refs, cfg.in_channels, opts.edit_weight)
-        };
-        // Detail weighting is a property of the target alone, so it applies on a
-        // dropped step too - the target still has texture that the flow loss
-        // would otherwise let the adapter average away.
-        let detail = detail_weights(&s.x0, cfg.in_channels, lh, lw, opts.detail_weight);
-        batch.w = combine_weights(&edit, &detail);
-        let loss = match (&dev, &host) {
-            (Some(t), _) => t.step(&mut adapter, &batch, lr_now),
-            (None, Some(b)) => {
-                let w_eff = adapter.apply(b);
-                // Streamed, not collected. A LoRA step reduces each block's
-                // dense `dW` to its rank-r projection and is done with it, so
-                // the whole-model `ModelGrads` `grads` returns is a third fp32
-                // copy of the model held for no reason - at klein-9B that is
-                // the difference between a training step that fits this box
-                // beside the frozen base and its effective copy, and one that
-                // does not. `grads_into` runs the identical backward and hands
-                // each block over as it completes.
-                let mut step = adapter.stepper(lr_now);
-                let (loss, _globals) = modelgrad::grads_into(&cfg, &w_eff, &batch, &mut step);
-                loss
+    let fit = model::flow::LoraFitOpts { steps: opts.steps, start: done, lr: opts.lr, ckpt_every: opts.ckpt_every };
+    // `flow::train` owns order, cancellation, the checkpoint cadence and the
+    // final save; this family keeps its sampler, its per-step rate and its
+    // log line.
+    let started = std::cell::Cell::new(std::time::Instant::now());
+    model::flow::train(
+        &fit,
+        &mut adapter,
+        || cancel.is_cancelled(),
+        |step| {
+            started.set(std::time::Instant::now());
+            let s = &encoded[sample_index(n_samples, step as u64, opts.seed)];
+            let sigma = step_sigma(&sched, step as u64, opts.seed);
+            let noise = model::hostmath::randn(s.x0.len(), opts.seed ^ (0xa5a5 + step as u64));
+            let mut batch: Batch<f32> = make_flow_batch_paired(&cfg, &s.x0, &s.refs, &s.ctx, sigma, &noise);
+            let dropped = !s.refs.is_empty() && ref_dropped(step as u64, opts.seed, opts.ref_dropout);
+            if dropped {
+                blank_references(&mut batch, &cfg);
             }
-            (None, None) => unreachable!("one of the two trainers is always built"),
-        };
-        // σ is on the line because a single step's loss is not comparable to
-        // the next one's without it. The velocity target `ε − x₀` gets harder
-        // to predict as σ falls and the input still carries some x₀ to
-        // separate out, so ONE adapter evaluated at klein's four scheduled σ
-        // produces four quite different losses - a spread that can rival what
-        // a whole short run moves the mean by. A log carrying only the number
-        // therefore invites reading a σ draw as progress. With σ on the line,
-        // a run's log can be stratified after the fact, which at batch size 1
-        // is the only way to see a trend rather than a draw.
-        progress(
-            step + 1,
-            opts.steps + 1,
-            format!(
-                "step {}/{}  loss {loss:.5}  sigma {sigma:.4}  lr {lr_now:.3e}{}  ({:.1} s)",
-                step + 1,
-                opts.steps,
-                // A dropped step's loss is a different quantity - no reference
-                // to condition on - so it is marked, not silently averaged in
-                // with the rest by whoever reads the log.
-                if dropped { "  [ref dropped]" } else { "" },
-                t0.elapsed().as_secs_f64()
-            ),
-        );
-        // periodic checkpoint so a long run is resumable / inspectable mid-flight
-        if opts.ckpt_every > 0 && (step + 1) % opts.ckpt_every == 0 && step + 1 < opts.steps {
-            save_adapter(&opts.save_path, &adapter)?;
-        }
-    }
-    save_adapter(&opts.save_path, &adapter)?;
+            // Region-aware weights, if this run asked for them. Per step rather
+            // than cached per sample: it is one pass over the target latent
+            // against a forward+backward through the whole DiT.
+            //
+            // NOT on a dropped step: the weights say "spend the gradient where
+            // this pair's edit is", and a step with no reference has no edit to
+            // speak of - it is being asked to produce the whole target, so every
+            // token of it counts the same.
+            let edit = if dropped {
+                Vec::new()
+            } else {
+                change_weights(&s.x0, &s.refs, cfg.in_channels, opts.edit_weight)
+            };
+            // Detail weighting is a property of the target alone, so it applies on a
+            // dropped step too - the target still has texture that the flow loss
+            // would otherwise let the adapter average away.
+            let detail = detail_weights(&s.x0, cfg.in_channels, lh, lw, opts.detail_weight);
+            batch.w = combine_weights(&edit, &detail);
+            (batch, dropped, sigma, step)
+        },
+        |adapter, (batch, _dropped, _sigma, step), _lr| {
+            let lr_now = lr.at(*step as u32);
+            match (&dev, &host) {
+                (Some(t), _) => t.step(adapter, batch, lr_now),
+                (None, Some(b)) => {
+                    let w_eff = adapter.apply(b);
+                    // Streamed, not collected. A LoRA step reduces each block's
+                    // dense `dW` to its rank-r projection and is done with it, so
+                    // the whole-model `ModelGrads` `grads` returns is a third fp32
+                    // copy of the model held for no reason - at klein-9B that is
+                    // the difference between a training step that fits this box
+                    // beside the frozen base and its effective copy, and one that
+                    // does not. `grads_into` runs the identical backward and hands
+                    // each block over as it completes.
+                    let mut stepper = adapter.stepper(lr_now);
+                    let (loss, _globals) = modelgrad::grads_into(&cfg, &w_eff, batch, &mut stepper);
+                    loss
+                }
+                (None, None) => unreachable!("one of the two trainers is always built"),
+            }
+        },
+        |adapter| save_adapter(&opts.save_path, adapter),
+        |done, steps, loss| {
+            // The step's σ and dropped flag are recomputed from its index -
+            // `step_sigma`/`ref_dropped` are pure functions of (seed, step), so
+            // this is the same draw the batch was built with.
+            let step = done - 1;
+            let sigma = step_sigma(&sched, step as u64, opts.seed);
+            let lr_now = lr.at(step);
+            let dropped = !encoded[sample_index(n_samples, step as u64, opts.seed)].refs.is_empty() && ref_dropped(step as u64, opts.seed, opts.ref_dropout);
+            // σ is on the line because a single step's loss is not comparable to
+            // the next one's without it. The velocity target `ε − x₀` gets harder
+            // to predict as σ falls and the input still carries some x₀ to
+            // separate out, so ONE adapter evaluated at klein's four scheduled σ
+            // produces four quite different losses - a spread that can rival what
+            // a whole short run moves the mean by. A log carrying only the number
+            // therefore invites reading a σ draw as progress. With σ on the line,
+            // a run's log can be stratified after the fact, which at batch size 1
+            // is the only way to see a trend rather than a draw.
+            progress(
+                done,
+                steps + 1,
+                format!(
+                    "step {done}/{steps}  loss {loss:.5}  sigma {sigma:.4}  lr {lr_now:.3e}{}  ({:.1} s)",
+                    // A dropped step's loss is a different quantity - no reference
+                    // to condition on - so it is marked, not silently averaged in
+                    // with the rest by whoever reads the log.
+                    if dropped { "  [ref dropped]" } else { "" },
+                    started.get().elapsed().as_secs_f64()
+                ),
+            );
+        },
+    )?;
     progress(opts.steps + 1, opts.steps + 1, format!("saved adapter → {}", opts.save_path));
     Ok(adapter)
 }

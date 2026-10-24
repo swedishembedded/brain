@@ -76,13 +76,12 @@ pub fn run(cfg: &Cfg, base: &ModelWeights<f32>, opts: &TrainOpts, cancel: &capab
     progress(0, total, format!("{} synthetic clip(s) at t={} context_len={}", clips.len(), cfg.t, cfg.context_len));
 
     let mut adapter = LoraAdapter::new(cfg, LoraCfg::new(opts.rank, opts.seed));
-    let fit = model::flow::LoraFitOpts { steps: opts.steps, lr: opts.lr, ckpt_every: opts.ckpt_every };
+    let fit = model::flow::LoraFitOpts { steps: opts.steps, start: 0, lr: opts.lr, ckpt_every: opts.ckpt_every };
     model::flow::train(
-        &mut rng,
         &fit,
         &mut adapter,
         || cancel.is_cancelled(),
-        |step, rng| {
+        |step| {
             let clip = &clips[step as usize % clips.len()];
             // σ is drawn uniformly on (0, 1]; the clamp keeps the model time off
             // the exact 0 the samplers never evaluate.

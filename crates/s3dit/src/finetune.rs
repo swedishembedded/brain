@@ -290,25 +290,27 @@ pub fn run(
 
     // 5. flow-matching loop
     let alpha = adapter.alpha();
-    for step in 0..opts.steps {
-        if cancel.is_cancelled() {
-            return Err("cancelled".into());
-        }
-        let s = &encoded[step as usize % n_samples];
-        let sigma = uniform01(&mut rng).clamp(1e-3, 1.0) as f64;
-        let noise: Vec<f64> = (0..s.latent.len()).map(|_| gauss(&mut rng)).collect();
-        let batch = make_flow_batch(&cfg, &rope, &s.latent, &s.cap, sigma, &noise);
-        let w_eff = adapter.apply(&base);
-        let (loss, grads) = trainer.grads(&w_eff, &batch);
-        adapter.step(&grads, opts.lr);
-        progress(step + 1, opts.steps + 1, format!("step {}/{}  loss {loss:.5}", step + 1, opts.steps));
-        // periodic checkpoint so a long run is resumable / inspectable mid-flight.
-        if opts.ckpt_every > 0 && (step + 1) % opts.ckpt_every == 0 && step + 1 < opts.steps {
-            save_adapter(&opts.save_path, &adapter.to_tensors(), opts.rank, alpha)?;
-        }
-    }
+    let fit = model::flow::LoraFitOpts { steps: opts.steps, start: 0, lr: opts.lr, ckpt_every: opts.ckpt_every };
+    model::flow::train(
+        &fit,
+        &mut adapter,
+        || cancel.is_cancelled(),
+        |step| {
+            let s = &encoded[step as usize % n_samples];
+            let sigma = uniform01(&mut rng).clamp(1e-3, 1.0) as f64;
+            let noise: Vec<f64> = (0..s.latent.len()).map(|_| gauss(&mut rng)).collect();
+            make_flow_batch(&cfg, &rope, &s.latent, &s.cap, sigma, &noise)
+        },
+        |adapter, batch, lr| {
+            let w_eff = adapter.apply(&base);
+            let (loss, grads) = trainer.grads(&w_eff, batch);
+            adapter.step(&grads, lr);
+            loss
+        },
+        |adapter| save_adapter(&opts.save_path, &adapter.to_tensors(), opts.rank, alpha),
+        |done, steps, loss| progress(done, steps + 1, format!("step {done}/{steps}  loss {loss:.5}")),
+    )?;
     let tensors = adapter.to_tensors();
-    save_adapter(&opts.save_path, &tensors, opts.rank, alpha)?;
     progress(opts.steps + 1, opts.steps + 1, format!("saved adapter → {}", opts.save_path));
     Ok(tensors)
 }

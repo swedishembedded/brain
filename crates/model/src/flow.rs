@@ -21,12 +21,14 @@
 //! needs expertise in diffusion fine-tuning infrastructure, you can procure
 //! our services by sending an email to info@swedishembedded.com.
 
-use data::rng::Rng;
-
 /// The hyper-parameters of a flow-matching LoRA run.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LoraFitOpts {
+    /// The run's last step (exclusive).
     pub steps: u32,
+    /// The first step to run: more than 0 when a family resumes a run that
+    /// stopped after `start` completed steps.
+    pub start: u32,
     pub lr: f32,
     /// Save every this many completed steps; `0` saves only at the end. The
     /// periodic save is skipped on the last step, whose final save follows.
@@ -35,12 +37,12 @@ pub struct LoraFitOpts {
 
 /// Run the loop of a flow-matching LoRA fine-tune.
 ///
-/// `rng` is the run's stream, supplied by the caller so a family that draws
-/// its samples from it first (LTX's synthetic clips) keeps the exact seeded
-/// sequence its adapters were trained with.
+/// Randomness is the caller's: `draw` closes over the family's own seeded
+/// stream, so a family that also draws its samples from it first (LTX's
+/// synthetic clips) keeps the exact sequence its adapters were trained with.
 ///
-/// * `draw(step, rng)` builds step `step`'s batch (σ, noise and the model
-///   input, in the family's convention);
+/// * `draw(step)` builds step `step`'s batch (σ, noise and the model input, in
+///   the family's convention);
 /// * `step(adapter, batch, lr)` takes one optimizer step and returns the loss
 ///   (f64: the flow families compute it in f64 and report it rounded);
 /// * `save(adapter)` writes a checkpoint - every `ckpt_every` steps and once
@@ -51,20 +53,19 @@ pub struct LoraFitOpts {
 /// it already wrote left in place, so a long run is inspectable and resumable
 /// mid-flight.
 pub fn train<A, B>(
-    rng: &mut Rng,
     opts: &LoraFitOpts,
     adapter: &mut A,
     cancelled: impl Fn() -> bool,
-    mut draw: impl FnMut(u32, &mut Rng) -> B,
+    mut draw: impl FnMut(u32) -> B,
     mut step: impl FnMut(&mut A, &B, f32) -> f64,
     mut save: impl FnMut(&A) -> Result<(), String>,
     mut progress: impl FnMut(u32, u32, f64),
 ) -> Result<(), String> {
-    for s in 0..opts.steps {
+    for s in opts.start..opts.steps {
         if cancelled() {
             return Err("cancelled".into());
         }
-        let batch = draw(s, rng);
+        let batch = draw(s);
         let loss = step(adapter, &batch, opts.lr);
         progress(s + 1, opts.steps, loss);
         if opts.ckpt_every > 0 && (s + 1).is_multiple_of(opts.ckpt_every) && s + 1 < opts.steps {
@@ -79,7 +80,7 @@ mod tests {
     use super::*;
 
     fn opts(steps: u32, ckpt_every: u32) -> LoraFitOpts {
-        LoraFitOpts { steps, lr: 0.5, ckpt_every }
+        LoraFitOpts { steps, start: 0, lr: 0.5, ckpt_every }
     }
 
     /// Train a counter: each step adds `lr` and reports it as the loss. The
@@ -90,11 +91,10 @@ mod tests {
         let mut losses = Vec::new();
         let mut saves = Vec::new();
         let r = train(
-            &mut Rng::new(7),
             &o,
             &mut 0u32,
             || cancel_at.is_some_and(|c| seen.get() >= c),
-            |s, _rng| s,
+            |s| s,
             |taken, s, lr| {
                 *taken += 1;
                 seen.set(*taken);
@@ -137,18 +137,8 @@ mod tests {
     #[test]
     fn a_save_failure_reaches_the_caller() {
         let mut taken = 0u32;
-        let r = train(&mut Rng::new(7), &opts(2, 0), &mut taken, || false, |s, _| s, |t, s, _| { *t += 1; *s as f64 }, |_| Err("disk full".into()), |_, _, _| {});
+        let r = train(&opts(2, 0), &mut taken, || false, |s| s, |t, s, _| { *t += 1; *s as f64 }, |_| Err("disk full".into()), |_, _, _| {});
         assert_eq!(r, Err("disk full".to_string()));
     }
 
-    #[test]
-    fn the_seeded_draw_is_reproducible() {
-        let draw = |seed: u64| {
-            let mut seen = Vec::new();
-            train(&mut Rng::new(seed), &opts(4, 0), &mut 0u32, || false, |_, rng| { seen.push(rng.next_f64()); }, |t, _, _| { *t += 1; *t as f64 }, |_| Ok(()), |_, _, _| {}).expect("run");
-            seen
-        };
-        assert_eq!(draw(11), draw(11));
-        assert_ne!(draw(11), draw(12));
-    }
 }

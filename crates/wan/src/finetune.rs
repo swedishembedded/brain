@@ -369,13 +369,12 @@ pub fn run(
     let resident = trainer.begin_lora(&base, opts.rank);
     let route = if resident { " (base resident, on-device LoRA)" } else { "" };
     progress(encode_budget, total, format!("training on {}{route}", trainer.label()));
-    let fit = model::flow::LoraFitOpts { steps: opts.steps, lr: opts.lr, ckpt_every: opts.ckpt_every };
+    let fit = model::flow::LoraFitOpts { steps: opts.steps, start: 0, lr: opts.lr, ckpt_every: opts.ckpt_every };
     model::flow::train(
-        &mut rng,
         &fit,
         &mut adapter,
         || cancel.is_cancelled(),
-        |_step, rng| {
+        |_step| {
             // The sample index is drawn fresh from `rng` (D7) rather than cycled
             // deterministically (`step % len`): a deterministic cycle correlates
             // sample order with the σ draw below, since both come from walking
