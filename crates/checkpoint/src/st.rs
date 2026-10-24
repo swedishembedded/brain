@@ -479,7 +479,10 @@ pub fn save_safetensors(
             std::fs::create_dir_all(parent)?;
         }
     }
-    let tmp = format!("{path}.tmp");
+    // The temporary is per-process: several ranks of one job may write the same
+    // path (their replicas are bit-identical), and a shared temporary would let
+    // them interleave into a corrupt file before the rename.
+    let tmp = format!("{path}.{}.tmp", std::process::id());
     {
         let mut file = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
         file.write_all(&out)?;
