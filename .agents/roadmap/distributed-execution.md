@@ -72,6 +72,24 @@ Scope: Running one training job as ranks across machines - the job plan every ra
       pair is a usage error. The flag is `--job-rank` because `--rank` is LoRA
       rank throughout the CLI.
 
+- [x] **The LoRA chat fine-tune takes a job plan.** `FitControl::grad_sync`
+      turns the shared `fit_controlled` loop into a data-parallel run: every
+      rank reduces each step's gradients over the group and trains on its own
+      shard of the training-record stream, derived from the group's rank and
+      world size. `brain qwen3 finetune --lora ... --job-plan FILE
+      --job-rank N` joins the plan's collective and sets it; half the pair is a
+      usage error, and a rank without `--seed` derives one from the plan bytes.
+      The record strategy is index-based and explicit: record `n` belongs to
+      rank `n % world`, every rank consumes the whole stream, and evaluation is
+      never sharded (every rank scores the same held-out set). An objective
+      that cannot shard, or a model that cannot write reduced gradients, fails
+      by name instead of falling back to a single process. Only rank 0 writes
+      the shared checkpoint and evaluation snapshots. Tests: the record
+      disjointness/union and one-rank-identity cases in
+      `crates/model/src/train.rs`, the half-pair usage case in
+      `crates/cli/src/qwen_cli.rs`, and a two-process Qwen3-0.6B LoRA smoke
+      that must end with byte-identical adapters.
+
 ## Decisions
 
 - A cluster job's authority is its durable job record and its checkpoint
@@ -80,18 +98,22 @@ Scope: Running one training job as ranks across machines - the job plan every ra
   control surface: a worker never opens it, and a multi-node run does not
   create sessions on its workers.
 
-- Batch-stream sharding is index-based: every rank draws the whole stream and
-  keeps batch `n` only when `n % world == rank`. That keeps every rank on one
-  byte-for-byte identical schedule (the epoch order and the token generator
-  advance the same way everywhere) at the cost of `world` host-side batch
-  draws per used batch, which is sampling work, not model work.
+- Training-stream sharding is index-based: every rank consumes the whole
+  stream and keeps record `n` only when `n % world == rank`. On a dataset with
+  example boundaries (the prepared JSONL a fine-tune trains on) a record is one
+  example; a plain token stream has no record boundaries, so there one drawn
+  batch is one record. That keeps every rank on one byte-for-byte identical
+  schedule (the epoch order and the token generator advance the same way
+  everywhere) at the cost of `world` times the host-side sampling work, which
+  is not model work. Evaluation is never sharded: every rank scores the same
+  held-out set, so replicas agree on the held-out loss and on an early-stop
+  decision.
 
 ## Open
 
-- [ ] Only the GPT trainer takes a job plan. The Qwen, GLM and LoRA trainers
-      still run single-process; the LoRA chat fine-tune is the next driver
-      worth wiring, since it already plans pipeline stages across local cards
-      inside one process.
+- [ ] Only the GPT trainer and the Qwen3 LoRA fine-tune take a job plan. The
+      GLM trainer, the full-parameter fine-tunes and the other model families
+      still run single-process.
 - [ ] Exact resume is still refused for a distributed run: the training state
       names one rank's step and options but not the world size, so a resumed
       job could change its group without being refused.
