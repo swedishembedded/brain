@@ -226,7 +226,7 @@ fn rank_process() {
         Some(timed) => timed,
         None => &collective,
     };
-    let sync = GradSync { collective: group, rank };
+    let sync = GradSync { collective: group, rank, checkpoint: None };
     let started = Instant::now();
     let trained = gpt2::train::train_distributed(Path::new(&data), test_config(), &test_opts(), None, sync);
     let run = started.elapsed();

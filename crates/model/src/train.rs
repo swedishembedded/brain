@@ -1306,6 +1306,20 @@ pub struct GradSync<'a> {
     pub collective: &'a dyn crate::Collective,
     /// This process's rank.
     pub rank: usize,
+    /// The job and plan a checkpoint commit names, when the caller knows them.
+    /// Without it a distributed run still trains, but publishes no commit and
+    /// cannot verify what it resumes from.
+    pub checkpoint: Option<CheckpointIdentity<'a>>,
+}
+
+/// What a checkpoint commit is filed under: the job's durable identity and the
+/// exact plan every rank ran. A resume only continues a commit that names both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CheckpointIdentity<'a> {
+    /// The job's identity, as the launcher named it.
+    pub job: &'a str,
+    /// The plan identity every rank joined under.
+    pub plan: &'a str,
 }
 
 /// The held-out evaluation a step is due, agreed across `grad_sync`'s group.
@@ -1371,6 +1385,43 @@ pub fn fit_controlled_sync<M: Model, O: Objective<M>>(model: M, obj: O, opts: &F
 /// held-out split adds nothing to the number and costs a full evaluation on
 /// every replica. The scalar is broadcast to the rest of the group, so every
 /// rank drives its selection and early stopping from the same value.
+#[cfg(target_arch = "wasm32")]
+fn publish_commit(_: CheckpointIdentity<'_>, _: &Path, _: u32, _: usize) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn verify_resume(_: CheckpointIdentity<'_>, _: &Path, _: usize) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Publish the checkpoint `out` as a committed generation for `identity`, so a
+/// restart can verify what it resumes from and another system can find it.
+#[cfg(not(target_arch = "wasm32"))]
+fn publish_commit(identity: CheckpointIdentity<'_>, out: &Path, step: u32, world: usize) -> std::io::Result<()> {
+    let absolute = std::fs::canonicalize(out).map_err(|e| std::io::Error::other(format!("locating {} for its commit: {e}", out.display())))?;
+    let dir = absolute.parent().ok_or_else(|| std::io::Error::other(format!("{} has no directory to commit into", out.display())))?;
+    let commit = crate::job::CheckpointCommit::build(identity.job, identity.plan, step, world, dir, &[("weights", &absolute)])
+        .map_err(|e| std::io::Error::other(format!("committing {}: {e}", out.display())))?;
+    commit.write(dir).map_err(|e| std::io::Error::other(format!("committing {}: {e}", out.display())))?;
+    Ok(())
+}
+
+/// Refuse to resume unless the newest committed generation beside `out` agrees
+/// with this job, plan and world and every file still verifies.
+#[cfg(not(target_arch = "wasm32"))]
+fn verify_resume(identity: CheckpointIdentity<'_>, out: &Path, world: usize) -> std::io::Result<()> {
+    let dir = out.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    let Some(commit) = crate::job::CheckpointCommit::latest(dir).map_err(|e| std::io::Error::other(format!("reading the commits in {}: {e}", dir.display())))? else {
+        return Err(std::io::Error::other(format!("{} holds a training state but no committed checkpoint; refusing to resume from an unverified state", dir.display())));
+    };
+    commit.verify(dir).map_err(|e| std::io::Error::other(format!("the checkpoint to resume is not valid: {e}")))?;
+    if !commit.compatible_with(identity.job, identity.plan, world) {
+        return Err(std::io::Error::other("the newest committed checkpoint belongs to a different job, plan or world; refusing to resume"));
+    }
+    Ok(())
+}
+
 pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
     mut model: M,
     mut obj: O,
@@ -1406,8 +1457,24 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
     // only race the first.
     let writer = grad_sync.as_ref().is_none_or(|sync| sync.rank == 0);
     let out = out.filter(|_| writer);
-    if grad_sync.is_some() && control.state.is_some() {
-        return Err(std::io::Error::other("exact resume is not supported for a distributed run yet"));
+    // A writer publishes what it saved, so a later attempt can verify exactly
+    // what it resumes from and another system can find the artifact.
+    let commit = |path: &Path, step: u32| -> std::io::Result<()> {
+        match grad_sync.as_ref().and_then(|sync| sync.checkpoint.map(|identity| (identity, sync.collective.world_size()))) {
+            Some((identity, world)) => publish_commit(identity, path, step, world),
+            None => Ok(()),
+        }
+    };
+    if let (Some(sync), Some(_)) = (&grad_sync, control.state) {
+        let world = sync.collective.world_size();
+        // A resumed group must be the same group. The caller's identity is what
+        // the state loader compares, so the world size has to be in it, not
+        // inferred from whatever the resume happens to run with.
+        if control.identity.get("world_size").and_then(serde_json::Value::as_u64) != Some(world as u64) {
+            return Err(std::io::Error::other(format!(
+                "a distributed run that keeps exact resume state must name its world size ({world}) in the run identity"
+            )));
+        }
     }
     if let Some((rank, world)) = shard {
         if world == 0 || rank >= world {
@@ -1435,6 +1502,11 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
     let mut resumed_at = None;
     let mut selection = Selection::new(opts);
     if let Some(state) = control.state.filter(|p| p.exists()) {
+        if let (Some(sync), Some(path)) = (grad_sync.as_ref(), out) {
+            if let Some(identity) = sync.checkpoint {
+                verify_resume(identity, path, sync.collective.world_size())?;
+            }
+        }
         let (step, saved_applied, saved_rng, saved) = load_train_state(&model, state, opts, &control.identity)?;
         println!("resuming at step {step} from {}", state.display());
         first_step = step;
@@ -1606,6 +1678,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
                     ts.elapsed().as_secs_f64()
                 );
                 last_save = std::time::Instant::now();
+                commit(p, completed)?;
             }
         }
 
@@ -1646,6 +1719,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
             let ts = std::time::Instant::now();
             model.save_with_itos(p.to_str().expect("utf-8 path"), obj.itos());
             println!("restored the best parameters -> {} ({:.1} s)", p.display(), ts.elapsed().as_secs_f64());
+            commit(p, completed)?;
         }
         kept_best = true;
         if let Some(path) = &spill {
@@ -1659,6 +1733,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         let ts = std::time::Instant::now();
         model.save_with_itos(p.to_str().expect("utf-8 path"), obj.itos());
         println!("saved checkpoint -> {} ({:.1} s)", p.display(), ts.elapsed().as_secs_f64());
+        commit(p, completed)?;
     } else if kept_best {
         println!(
             "kept the checkpoint with the best held-out loss ({:.4}){}",
@@ -2199,7 +2274,7 @@ mod tests {
         let model = Recorder::new(RecorderCfg, 1, 1, &HashMap::new());
         let indices = std::rc::Rc::clone(&model.indices);
         let coll = crate::HostCollective::new(1);
-        let sync = GradSync { collective: &*coll, rank: 0 };
+        let sync = GradSync { collective: &*coll, rank: 0, checkpoint: None };
         fit_controlled_sync(model, Verdicts(Default::default()), &opts, None, FitControl::default(), Some(sync)).expect("fit");
         assert_eq!(*indices.borrow(), vec![1, 2, 3]);
     }
@@ -2258,7 +2333,7 @@ mod tests {
         let sharded = Recorder::new(RecorderCfg, 1, 4, &HashMap::new());
         let sharded_drawn = std::rc::Rc::clone(&sharded.drawn);
         let coll = crate::HostCollective::new(1);
-        let sync = GradSync { collective: &*coll, rank: 0 };
+        let sync = GradSync { collective: &*coll, rank: 0, checkpoint: None };
         fit_controlled_sharded(sharded, examples_objective(&[4; 6], 4), &opts, None, FitControl::default(), Some(sync), Some((0, 1))).expect("fit");
         assert_eq!(*sharded_drawn.borrow(), *plain_drawn.borrow(), "a one-rank shard must draw the whole stream");
     }
@@ -2329,7 +2404,7 @@ mod tests {
         fit_controlled(plain, examples_objective_batched(&[4; 6], 4, 2), &opts, None, FitControl::default()).expect("fit");
 
         let coll = crate::HostCollective::new(1);
-        let control = FitControl { grad_sync: Some(GradSync { collective: &*coll, rank: 0 }), ..Default::default() };
+        let control = FitControl { grad_sync: Some(GradSync { collective: &*coll, rank: 0, checkpoint: None }), ..Default::default() };
         let sharded = Recorder::new(RecorderCfg, 2, 4, &HashMap::new());
         let sharded_drawn = std::rc::Rc::clone(&sharded.drawn);
         fit_controlled(sharded, examples_objective_batched(&[4; 6], 4, 2), &opts, None, control).expect("fit");
@@ -2384,7 +2459,7 @@ mod tests {
                     scope.spawn(move || {
                         let opts = eval_options();
                         let obj = EvalCurve { evals, next: 0, evals_run: count };
-                        let sync = GradSync { collective: &*coll, rank };
+                        let sync = GradSync { collective: &*coll, rank, checkpoint: None };
                         fit_controlled_sharded(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), obj, &opts, None, FitControl::default(), Some(sync), Some((rank, 2)))
                             .expect("fit")
                             .0
@@ -2441,7 +2516,7 @@ mod tests {
     fn a_group_over_an_objective_that_cannot_shard_is_refused_by_name() {
         let opts = FitOpts { steps: 1, eval_interval: 0, ..Default::default() };
         let coll = crate::HostCollective::new(1);
-        let control = FitControl { grad_sync: Some(GradSync { collective: &*coll, rank: 0 }), ..Default::default() };
+        let control = FitControl { grad_sync: Some(GradSync { collective: &*coll, rank: 0, checkpoint: None }), ..Default::default() };
         let err = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Whole, &opts, None, control)
             .err()
             .expect("an objective with no shard must refuse");
@@ -2917,5 +2992,38 @@ mod tests {
         let opts = FitOpts { block_size: 16, ..Default::default() };
         let Err(err) = load_dataset(&dir, &opts) else { panic!("expected an error for a too-short validation split") };
         assert!(err.to_string().contains("validation"), "{err}");
+    }
+
+    #[test]
+    fn a_published_commit_is_what_a_resume_verifies() {
+        let dir = tmp("commit");
+        let weights = dir.join("weights.bin");
+        std::fs::write(&weights, b"weights").unwrap();
+        let identity = CheckpointIdentity { job: "job", plan: "plan" };
+        publish_commit(identity, &weights, 3, 2).unwrap();
+        verify_resume(identity, &weights, 2).unwrap();
+
+        // Another plan, another world, or altered bytes are all refused.
+        assert!(verify_resume(CheckpointIdentity { job: "job", plan: "other" }, &weights, 2).is_err());
+        assert!(verify_resume(identity, &weights, 4).is_err());
+        std::fs::write(&weights, b"altered").unwrap();
+        assert!(verify_resume(identity, &weights, 2).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_distributed_resume_must_name_its_world_in_the_identity() {
+        let dir = tmp("world-identity");
+        let state = dir.join("train.state");
+        let coll = crate::HostCollective::new(1);
+        let sync = GradSync { collective: &*coll, rank: 0, checkpoint: None };
+        let opts = FitOpts { steps: 1, eval_interval: 0, ..Default::default() };
+        let control = FitControl { state: Some(&state), identity: serde_json::json!({ "run": 1 }), ..Default::default() };
+        let err = match fit_controlled_sharded(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Verdicts(Default::default()), &opts, None, control, Some(sync), None) {
+            Ok(_) => panic!("a distributed resume without a world size must be refused"),
+            Err(error) => error,
+        };
+        assert!(err.to_string().contains("world size"), "{err}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -212,7 +212,7 @@ fn train_rank(timed: &TimedCollective<'_>, rank: usize, world: usize, cfg: &Prof
         true
     };
     let control = FitControl { on_step: Some(&mut hook), ..Default::default() };
-    let sync = GradSync { collective: timed as &dyn Collective, rank };
+    let sync = GradSync { collective: timed as &dyn Collective, rank, checkpoint: None };
 
     let (report, model) = fit_controlled_sharded(model, objective, &opts, None, control, Some(sync), Some((rank, world)))
         .map_err(|e| format!("rank {rank}: the distributed run failed: {e}"))?;
