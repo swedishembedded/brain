@@ -654,7 +654,8 @@ mod tests {
         let cfg = VocoderConfig::tiny();
         let w = random_weights(&cfg, 31);
         let (batch, length) = (1, 4);
-        let mut r = Lcg::new(data::rng::random_seed());
+        // seed: fixed data, so the convergence bar is a bar rather than a draw.
+        let mut r = Lcg::new(31);
         let latents = r.vec_scaled(batch * cfg.latent_channels as usize * length, 0.5);
         let out_len = length * cfg.upsampling_ratios.iter().product::<u32>() as usize;
         let target = r.vec_scaled(batch * 2 * out_len, 0.5);

@@ -34,7 +34,7 @@ pub fn effective_weights(base: &DepthDecoderWeights, adapters: &HashMap<String, 
     let mut eff = base.clone();
     for (name, w) in adapters {
         let slot = eff.linear_mut(name).unwrap_or_else(|| panic!("depth_lora: {name:?} is not a linear weight"));
-        crate::lora::apply(slot, w, scale);
+        w.delta(scale, slot);
     }
     eff
 }
@@ -75,7 +75,7 @@ pub fn step(cfg: &DepthDecoderConfig, base: &DepthDecoderWeights, adapters: &Has
         .iter()
         .map(|(name, w)| {
             let d_w_eff = read_layer_grad(&d_layers, name);
-            (name.clone(), crate::lora::backward(w, d_w_eff, scale))
+            (name.clone(), w.project(d_w_eff, scale))
         })
         .collect();
     (loss, grads)
@@ -93,7 +93,7 @@ mod tests {
             .into_iter()
             .map(|name| {
                 let (rows, cols) = linear_shape(cfg, &name);
-                (name, LoraW::zero_init(rows, cols, 2, |_| r.signed() * 0.1))
+                (name, model::lora::Pair::new(rows, cols, 2, || r.signed() * 0.1))
             })
             .collect()
     }
@@ -164,7 +164,8 @@ mod tests {
         let mut adapters = rank2_adapters(&cfg, &base, 7);
         let scale = 1.0f32;
         let s = cfg.num_codebooks as usize;
-        let mut r = Lcg::new(data::rng::random_seed());
+        // seed: fixed data, so the convergence bar is a bar rather than a draw.
+        let mut r = Lcg::new(7);
         let inputs_embeds = r.vec_scaled(s * cfg.hidden_size as usize, 0.4);
         let target = r.vec_scaled(s * cfg.hidden_size as usize, 0.4);
         let lr = 0.2f32;

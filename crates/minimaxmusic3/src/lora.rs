@@ -59,81 +59,11 @@ pub fn conv_weight_shape(cfg: &VocoderConfig, name: &str) -> (usize, usize) {
     }
 }
 
-/// One conv's LoRA adapter. `b` is `[rows, rank]`; `a` is `[rank, cols]`.
-/// Standard LoRA init: `b` starts at all zeros, so [`apply`] is an exact
-/// no-op until the first update actually changes it.
-#[derive(Clone)]
-pub struct LoraW {
-    pub rows: usize,
-    pub cols: usize,
-    pub rank: usize,
-    pub a: Vec<f32>,
-    pub b: Vec<f32>,
-}
-
-impl LoraW {
-    pub fn zero_init(rows: usize, cols: usize, rank: usize, a_init: impl FnMut(usize) -> f32) -> LoraW {
-        LoraW { rows, cols, rank, a: (0..rank * cols).map(a_init).collect(), b: vec![0.0; rows * rank] }
-    }
-}
-
-/// `delta[r,c] = scale * sum_k b[r,k]*a[k,c]` - `ΔW` flattened to `[rows,
-/// cols]` row-major, matching every conv weight's own storage order.
-pub fn delta(w: &LoraW, scale: f32) -> Vec<f32> {
-    let mut out = vec![0.0f32; w.rows * w.cols];
-    for r in 0..w.rows {
-        for k in 0..w.rank {
-            let bv = w.b[r * w.rank + k] * scale;
-            if bv == 0.0 {
-                continue;
-            }
-            let a_row = &w.a[k * w.cols..(k + 1) * w.cols];
-            let out_row = &mut out[r * w.cols..(r + 1) * w.cols];
-            for (o, &av) in out_row.iter_mut().zip(a_row) {
-                *o += bv * av;
-            }
-        }
-    }
-    out
-}
-
-/// `W_eff = base + delta(w, scale)`, in place.
-pub fn apply(base: &mut [f32], w: &LoraW, scale: f32) {
-    let d = delta(w, scale);
-    for (o, di) in base.iter_mut().zip(&d) {
-        *o += di;
-    }
-}
-
-/// `(dA, dB)` from `dW_eff` (the gradient the base conv's own backward
-/// already computed, as if the whole flattened `[rows, cols]` weight were
-/// directly trainable): `dB = scale * dW_eff @ A^T`, `dA = scale * B^T @
-/// dW_eff`.
-pub fn backward(w: &LoraW, d_w_eff: &[f32], scale: f32) -> (Vec<f32>, Vec<f32>) {
-    let mut db = vec![0.0f32; w.rows * w.rank];
-    for r in 0..w.rows {
-        for k in 0..w.rank {
-            let mut acc = 0.0f32;
-            let a_row = &w.a[k * w.cols..(k + 1) * w.cols];
-            let dw_row = &d_w_eff[r * w.cols..(r + 1) * w.cols];
-            for (dwv, av) in dw_row.iter().zip(a_row) {
-                acc += dwv * av;
-            }
-            db[r * w.rank + k] = acc * scale;
-        }
-    }
-    let mut da = vec![0.0f32; w.rank * w.cols];
-    for k in 0..w.rank {
-        for c in 0..w.cols {
-            let mut acc = 0.0f32;
-            for r in 0..w.rows {
-                acc += w.b[r * w.rank + k] * d_w_eff[r * w.cols + c];
-            }
-            da[k * w.cols + c] = acc * scale;
-        }
-    }
-    (da, db)
-}
+/// One conv's LoRA adapter: the shared host-side low-rank pair
+/// ([`model::lora::Pair`]), whose `ΔW = (α/r)·B·A`, in-place delta and
+/// `dW → (dA, dB)` projection are the same arithmetic every other
+/// host-adapter trainer in the tree runs.
+pub type LoraW = model::lora::Pair;
 
 /// Every `train::flatten`-style name that names a conv `.weight` leaf (the
 /// only tensors LoRA ever adapts - never a bias, never a Snake alpha).
@@ -147,7 +77,7 @@ pub fn effective_weights(base: &VocoderWeights, adapters: &std::collections::Has
     let mut eff = base.clone();
     for (name, w) in adapters {
         let slot = eff.conv_weight_mut(name).unwrap_or_else(|| panic!("lora: {name:?} is not a conv weight"));
-        apply(slot, w, scale);
+        w.delta(scale, slot);
     }
     eff
 }
@@ -164,7 +94,7 @@ mod tests {
             .into_iter()
             .map(|name| {
                 let (rows, cols) = conv_weight_shape(cfg, &name);
-                let w = LoraW::zero_init(rows, cols, 2, |_| r.signed() * 0.1);
+                let w = model::lora::Pair::new(rows, cols, 2, || r.signed() * 0.1);
                 (name, w)
             })
             .collect()
@@ -196,11 +126,8 @@ mod tests {
 
         let mut folded = base.clone();
         for (name, w) in &adapters {
-            let d = delta(w, 0.5);
             let slot = folded.conv_weight_mut(name).unwrap();
-            for (s, di) in slot.iter_mut().zip(&d) {
-                *s += di;
-            }
+            w.delta(0.5, slot);
         }
         for name in conv_weight_names(&base) {
             let a = applied.clone().conv_weight_mut(&name).unwrap().clone();
@@ -245,7 +172,7 @@ mod tests {
         let mut checked = 0;
         for (name, w) in &adapters {
             let d_w_eff = trainer.read_grad(name);
-            let (da, db) = backward(w, &d_w_eff, scale);
+            let (da, db) = w.project(&d_w_eff, scale);
 
             // One representative index each for A and B is enough here - the
             // conv backward itself (dW_eff) is already gradchecked in
@@ -321,7 +248,7 @@ mod tests {
             trainer.backward();
             for (name, w) in adapters.iter_mut() {
                 let d_w_eff = trainer.read_grad(name);
-                let (da, db) = backward(w, &d_w_eff, scale);
+                let (da, db) = w.project(&d_w_eff, scale);
                 for (ai, dai) in w.a.iter_mut().zip(&da) {
                     *ai -= lr * dai;
                 }
