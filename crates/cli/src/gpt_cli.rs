@@ -6,7 +6,8 @@
 //!
 //!   brain gpt train <data_dir> [--out F --steps N --batch B --block T --lr X
 //!                               --layers L --d-model D --heads H --mask = --align
-//!                               --job-plan FILE --job-rank N]
+//!                               --job-plan FILE --job-rank N
+//!                               --profile-collectives FILE]
 //!   brain gpt infer --weights F [--data <dir>] [--prompt "..." --max-new N
 //!                               --temp X --top-k K]
 //!   brain gpt eval  --weights F --data <dir> [--batches N --samples M]
@@ -99,6 +100,13 @@ fn train(args: &[String]) {
             std::process::exit(2);
         }
     };
+    let profile = match crate::collective_profile::take_flag(&mut a, job.is_some()) {
+        Ok(profile) => profile,
+        Err(message) => {
+            eprintln!("usage: {message}");
+            std::process::exit(2);
+        }
+    };
     // Every rank of a job must start from the same weights and draw the same
     // batch stream, so it must train with the same seed. A rank that drew its
     // own random one would diverge from its peers before the first reduction.
@@ -151,8 +159,22 @@ fn train(args: &[String]) {
             std::process::exit(1);
         }
     };
-    let sync = model::GradSync { collective: &collective, rank: context.rank() };
-    match gpt2::train::train_distributed(Path::new(&dir), cfg, &o, out.as_deref(), sync) {
+    // A requested profile wraps this rank's transport; the wrapper lives until
+    // the run returns so its snapshot covers the whole run. Without the flag
+    // the group is the constructed collective itself and nothing is written.
+    let timed = profile.as_ref().map(|_| model::TimedCollective::new(&collective));
+    let group: &dyn model::Collective = match &timed {
+        Some(timed) => timed,
+        None => &collective,
+    };
+    let sync = model::GradSync { collective: group, rank: context.rank() };
+    let started = std::time::Instant::now();
+    let result = gpt2::train::train_distributed(Path::new(&dir), cfg, &o, out.as_deref(), sync);
+    let run = started.elapsed();
+    if let (Some(base), Some(timed)) = (&profile, &timed) {
+        crate::collective_profile::write(base, context.rank(), context.plan().world_size, &context.plan().identity(), run, &timed.snapshot());
+    }
+    match result {
         Ok((report, _)) => {
             let final_loss = report.final_loss.unwrap_or(report.initial_loss);
             println!("done: train loss {:.4} -> {final_loss:.4}", report.initial_loss);

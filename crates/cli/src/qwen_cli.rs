@@ -10,7 +10,8 @@
 //!   brain qwen3 finetune <data_dir> --weights BASE --out F [--steps N --lr X ...]
 //!   brain qwen3 finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG] --dataset DIR
 //!                     [--alpha A --lora-variant V --lora-plus-ratio X --adapter-kind K --steps N --lr X --batch B --block T --seed S
-//!                      --models-dir DIR --dataset-id ID]
+//!                      --models-dir DIR --dataset-id ID --job-plan FILE --job-rank N
+//!                      --profile-collectives FILE]
 //!   brain qwen3 eval --weights BASE --jsonl FILE [--adapter OWNER/NAME[:TAG]
 //!                     --block T --models-dir DIR]
 //!   brain qwen3 calib --weights BASE --jsonl FILE [--report --out kv_calib.json
@@ -832,10 +833,21 @@ fn job_pair(plan: Option<String>, rank: Option<String>) -> Result<Option<(String
 /// the same seed, which is derived from the plan when `--seed` is absent).
 /// Rank 0 writes the shared checkpoint; each rank saves the adapter its own
 /// `--adapter`/`--models-dir` names, and the replicas are bit-identical.
+///
+/// `--profile-collectives FILE` needs that job pair: the run's collective is
+/// wrapped in `model::TimedCollective`, and when it returns this rank writes
+/// its own accounting to `FILE.rank<rank>.json`.
 fn finetune_lora(args: &[String]) {
     let mut parsed = crate::args::Args::new(args);
     let job = match job_pair(parsed.take_str("--job-plan"), parsed.take_str("--job-rank")) {
         Ok(job) => job,
+        Err(e) => {
+            eprintln!("usage: {e}");
+            std::process::exit(2);
+        }
+    };
+    let profile = match crate::collective_profile::take_flag(&mut parsed, job.is_some()) {
+        Ok(profile) => profile,
         Err(e) => {
             eprintln!("usage: {e}");
             std::process::exit(2);
@@ -956,7 +968,7 @@ fn finetune_lora(args: &[String]) {
              [--patience N] [--lora-targets wq,wk,...] [--keep-reasoning] [--base-format f32|bf16|int8|nf4|fp8] [--grad-accum N] \
              [--weight-decay W --grad-clip C --warmup N --min-lr X --beta1 B --beta2 B --adam-eps E] \
              [--alpha A --steps N --lr X --batch B --block T --seed S --models-dir DIR --dataset-id ID] [--fresh] \
-             [--job-plan FILE --job-rank N]"
+             [--job-plan FILE --job-rank N --profile-collectives FILE]"
         );
         return;
     }
@@ -1123,7 +1135,7 @@ fn finetune_lora(args: &[String]) {
     // Join the job's collective before the first tensor moves. The group lives
     // for the whole run, and the control hands it to the shared fit loop, which
     // shards the record stream by rank and averages every step's gradients.
-    let collective = match &job {
+    let context = match &job {
         Some((plan, rank)) => {
             let context = match model::JobContext::from_plan_file(Path::new(plan), *rank) {
                 Ok(context) => context,
@@ -1133,21 +1145,41 @@ fn finetune_lora(args: &[String]) {
                 }
             };
             println!("distributed job {:?} rank {}/{}", context.plan().job, context.rank(), context.plan().world_size);
-            match context.collective() {
-                Ok(collective) => Some(collective),
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                }
-            }
+            Some(context)
         }
         None => None,
     };
+    let collective = match &context {
+        Some(context) => match context.collective() {
+            Ok(collective) => Some(collective),
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        },
+        None => None,
+    };
+    // A requested profile wraps this rank's transport for the whole fit; the
+    // wrapper and the collective it borrows live to the end of this function.
+    // Without the flag the group is the constructed collective itself and no
+    // document is written.
+    let timed = profile
+        .as_ref()
+        .map(|_| model::TimedCollective::new(collective.as_ref().expect("a profile needs the job plan's collective")));
+    let group: Option<&dyn model::Collective> = match &timed {
+        Some(timed) => Some(timed),
+        None => collective.as_ref().map(|collective| collective as &dyn model::Collective),
+    };
     let control = model::FitControl {
-        grad_sync: job.as_ref().zip(collective.as_ref()).map(|((_, rank), collective)| model::GradSync { collective, rank: *rank }),
+        grad_sync: context.as_ref().zip(group).map(|(context, collective)| model::GradSync { collective, rank: context.rank() }),
         ..Default::default()
     };
+    let started = std::time::Instant::now();
     let trained = qwen3::finetune::finetune_lora_tuned(&base_open, scratch, &opts, rank, alpha, tuning, &start, control, base_dtype);
+    let run = started.elapsed();
+    if let (Some(base), Some(timed), Some(context)) = (&profile, &timed, &context) {
+        crate::collective_profile::write(base, context.rank(), context.plan().world_size, &context.plan().identity(), run, &timed.snapshot());
+    }
     let (report, trained) = match trained {
         Ok(r) => r,
         Err(e) => {

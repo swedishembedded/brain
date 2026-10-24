@@ -101,7 +101,7 @@ pub mod rope_scaling;
 pub mod yarn;
 
 pub use collective::{Collective, HostCollective};
-pub use collective::{payload_bytes, OpKind, OpSnapshot, ShapedCollective, SimulatedLink, Snapshot, TimedCollective};
+pub use collective::{payload_bytes, CollectiveProfile, OpKind, OpSnapshot, ShapedCollective, SimulatedLink, Snapshot, TimedCollective};
 pub use optim::{grad_multiplier, Adam};
 #[cfg(not(target_arch = "wasm32"))]
 pub use distributed::{federated_average, reduce_grads, DdpOptimizer};

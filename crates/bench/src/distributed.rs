@@ -48,7 +48,7 @@ use std::time::{Duration, Instant};
 use gpt2::GptConfig;
 use model::collective::{SimulatedLink, TimedCollective};
 use model::train::{build_or_resume, causal_lm, fit_controlled_sharded, load_dataset_with_itos, FitOpts, FitControl, StepReport};
-use model::{Collective, GradSync, HostCollective, Model, NetworkCollective, OpKind, ShapedCollective, Snapshot};
+use model::{Collective, GradSync, HostCollective, Model, NetworkCollective, ShapedCollective, Snapshot};
 
 use serde_json::{json, Value};
 
@@ -293,7 +293,7 @@ pub fn run_profile(cfg: &ProfileConfig) -> Result<Value, String> {
                 "step_times_ms": run.step_times.iter().map(duration_ms).collect::<Vec<f64>>(),
                 "mean_step_ms": duration_ms(&mean(&run.step_times)),
                 "tokens_per_s": tokens_per_s,
-                "comm": comm_json(&run.snapshot),
+                "comm": run.snapshot.to_json(),
                 "comm_share": comm_share(run),
                 "speedup": speedup,
                 "parallel_efficiency": parallel_efficiency,
@@ -424,32 +424,6 @@ fn mean(samples: &[Duration]) -> Duration {
 
 fn duration_ms(d: &Duration) -> f64 {
     d.as_secs_f64() * 1e3
-}
-
-fn comm_json(snapshot: &Snapshot) -> Value {
-    let ops: serde_json::Map<String, Value> = OpKind::ALL
-        .into_iter()
-        .map(|kind| {
-            let op = snapshot.op(kind);
-            (
-                kind.name().to_string(),
-                json!({
-                    "count": op.count,
-                    "bytes": op.bytes,
-                    "time_ms": duration_ms(&op.total),
-                    "p50_ms": duration_ms(&op.p50),
-                    "p95_ms": duration_ms(&op.p95),
-                    "p99_ms": duration_ms(&op.p99),
-                }),
-            )
-        })
-        .collect();
-    json!({
-        "bytes": snapshot.bytes,
-        "time_ms": duration_ms(&snapshot.total),
-        "count": snapshot.count,
-        "ops": ops,
-    })
 }
 
 fn comm_share(run: &RunResult) -> f64 {

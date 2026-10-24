@@ -65,6 +65,8 @@
 use gpu_core::select::Dtype;
 use std::fmt;
 use std::future::Future;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -391,6 +393,110 @@ pub struct Snapshot {
 impl Snapshot {
     pub fn op(&self, kind: OpKind) -> &OpSnapshot {
         &self.ops[kind as usize]
+    }
+
+    /// This accounting as the JSON object a profile reports: call count,
+    /// staged bytes and wall time across every op, plus one entry per op kind
+    /// with its count, bytes, total and p50/p95/p99. Durations are
+    /// milliseconds.
+    ///
+    /// The shape lives here rather than in a caller so the single-machine
+    /// profile and a distributed run's per-rank document cannot drift into two
+    /// spellings of the same measurement.
+    pub fn to_json(&self) -> serde_json::Value {
+        let ops: serde_json::Map<String, serde_json::Value> = OpKind::ALL
+            .into_iter()
+            .map(|kind| {
+                let op = self.op(kind);
+                (
+                    kind.name().to_string(),
+                    serde_json::json!({
+                        "count": op.count,
+                        "bytes": op.bytes,
+                        "time_ms": millis(op.total),
+                        "p50_ms": millis(op.p50),
+                        "p95_ms": millis(op.p95),
+                        "p99_ms": millis(op.p99),
+                    }),
+                )
+            })
+            .collect();
+        serde_json::json!({
+            "count": self.count,
+            "bytes": self.bytes,
+            "time_ms": millis(self.total),
+            "ops": ops,
+        })
+    }
+}
+
+/// `d` in milliseconds, the unit every profile document reports.
+fn millis(d: Duration) -> f64 {
+    d.as_secs_f64() * 1e3
+}
+
+/// One rank's collective profile: the accounting over its [`TimedCollective`]
+/// plus the identity of the run that produced it.
+///
+/// A distributed run writes one document per rank so the cost can be compared
+/// across ranks; the [`plan`](Self::plan) field is the job plan's identity, so
+/// documents from different jobs cannot be mistaken for one measurement. The
+/// run's own wall time turns the accounting into a share, so a reader does not
+/// need a second measurement of the same run.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CollectiveProfile {
+    /// This document's rank.
+    pub rank: usize,
+    /// How many ranks the job had.
+    pub world: usize,
+    /// The identity bytes every rank of the job agreed on.
+    pub plan: String,
+    /// Wall time of the training call the snapshot covers, as its caller
+    /// measured it. It includes whatever the call does besides the steps (a
+    /// checkpoint load, a dataset render), so the reported share is of this
+    /// call, not of one optimizer step.
+    pub run: Duration,
+    /// The rank's accounting, as of the end of its run.
+    pub snapshot: Snapshot,
+}
+
+impl CollectiveProfile {
+    pub fn new(rank: usize, world: usize, plan: impl Into<String>, run: Duration, snapshot: Snapshot) -> CollectiveProfile {
+        CollectiveProfile { rank, world, plan: plan.into(), run, snapshot }
+    }
+
+    /// The file a rank's document goes to: `base` with `.rank<rank>.json`
+    /// appended, so every rank of one run writes its own file.
+    pub fn path_for(base: &Path, rank: usize) -> PathBuf {
+        PathBuf::from(format!("{}.rank{rank}.json", base.display()))
+    }
+
+    /// This rank's document: the identity fields and the snapshot's
+    /// accounting in one JSON object.
+    pub fn to_json(&self) -> serde_json::Value {
+        let serde_json::Value::Object(mut document) = self.snapshot.to_json() else {
+            unreachable!("a snapshot's JSON is always an object");
+        };
+        let share = if self.run.is_zero() { 0.0 } else { self.snapshot.total.as_secs_f64() / self.run.as_secs_f64() };
+        document.insert("rank".to_string(), serde_json::json!(self.rank));
+        document.insert("world".to_string(), serde_json::json!(self.world));
+        document.insert("plan".to_string(), serde_json::json!(self.plan));
+        document.insert("run_ms".to_string(), serde_json::json!(millis(self.run)));
+        document.insert("share_of_run".to_string(), serde_json::json!(share));
+        serde_json::Value::Object(document)
+    }
+
+    /// Write this rank's document beside `base` (see [`Self::path_for`]),
+    /// returning the path written. A temporary file and a rename mean a reader
+    /// sees the whole document or none of it.
+    pub fn write(&self, base: &Path) -> io::Result<PathBuf> {
+        let path = Self::path_for(base, self.rank);
+        let mut body = serde_json::to_vec_pretty(&self.to_json()).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        body.push(b'\n');
+        let temporary = path.with_extension("json.tmp");
+        std::fs::write(&temporary, &body)?;
+        std::fs::rename(&temporary, &path)?;
+        Ok(path)
     }
 }
 
@@ -908,6 +1014,53 @@ mod tests {
 
         timed.reset();
         assert_eq!(timed.snapshot().count, 0);
+    }
+
+    #[test]
+    fn a_snapshot_reports_count_bytes_and_milliseconds_per_op_and_in_total() {
+        let inner = HostCollective::new(1);
+        let timed = TimedCollective::new(&*inner);
+        pollster::block_on(timed.all_reduce(0, Payload::f32(vec![1.0; 4]))).unwrap();
+
+        let json = timed.snapshot().to_json();
+        assert_eq!(json["count"], 1);
+        assert_eq!(json["bytes"], 16);
+        assert!(json["time_ms"].as_f64().expect("a total") >= 0.0);
+        let reduce = &json["ops"]["all_reduce"];
+        assert_eq!(reduce["count"], 1);
+        assert_eq!(reduce["bytes"], 16);
+        assert!(reduce["time_ms"].as_f64().expect("a total") >= 0.0);
+        assert!(reduce["p99_ms"].as_f64().expect("a p99") >= reduce["p50_ms"].as_f64().expect("a p50"));
+        assert_eq!(json["ops"]["broadcast"]["count"], 0);
+    }
+
+    #[test]
+    fn a_rank_profile_names_its_own_file_and_carries_the_run_identity() {
+        let profile = CollectiveProfile::new(1, 2, "plan-bytes", Duration::from_millis(100), Snapshot::default());
+        assert_eq!(CollectiveProfile::path_for(Path::new("collectives.json"), 1), PathBuf::from("collectives.json.rank1.json"));
+
+        let json = profile.to_json();
+        assert_eq!(json["rank"], 1);
+        assert_eq!(json["world"], 2);
+        assert_eq!(json["plan"], "plan-bytes");
+        assert_eq!(json["run_ms"], 100.0);
+        assert_eq!(json["share_of_run"], 0.0);
+        assert_eq!(json["count"], 0);
+        assert_eq!(json["bytes"], 0);
+    }
+
+    #[test]
+    fn a_rank_profile_writes_one_document_at_its_own_path() {
+        let dir = std::env::temp_dir().join(format!("brain-collective-profile-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("run.json");
+        let profile = CollectiveProfile::new(0, 2, "plan", Duration::from_millis(5), Snapshot::default());
+        let path = profile.write(&base).unwrap();
+        assert_eq!(path, CollectiveProfile::path_for(&base, 0));
+        let parsed: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(parsed["rank"], 0);
+        assert_eq!(parsed["world"], 2);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

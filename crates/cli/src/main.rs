@@ -14,6 +14,7 @@
 
 mod args;
 mod caps_cli;
+mod collective_profile;
 mod data_cli;
 mod decide_cli;
 mod depth_cli;
@@ -255,7 +256,8 @@ DECIDE (decision-model training on outcome-labelled examples)
 
 GPT2 (dense baseline)
   brain gpt2 train <data_dir> [--out F --steps N --batch B --block T
-                              --layers L --d-model D --heads H --lr X --mask = --align]
+                              --layers L --d-model D --heads H --lr X --mask = --align
+                              --job-plan FILE --job-rank N --profile-collectives FILE]
   brain gpt2 eval  --weights F --data <dir> [--batches N --samples M]
   brain gpt2 infer --weights F [--data <dir>] [--prompt \"...\" --max-new N --temp X --top-k K]
                               (vocab is read from the checkpoint; --data only for old ones)
