@@ -21,10 +21,11 @@
 //! `model_id` alone picks it, the same way it picks flux2 vs s3dit.
 //!
 //! [`VideoPipeline`] holds the denoise transformer resident across calls
-//! (`wan::pipeline::HotDit`, behind a `Mutex` for the same `&self`-only
-//! public-method reason [`crate::SegmentPipeline`]'s own `Mutex<sam2::caps::
-//! Session>` does) - a cold call pays a slow load plus several GB of upload;
-//! a second call at the same variant/resolution pays neither.
+//! (`wan::pipeline::HotDit`, in the shared `capability::hot::Hot` cache so a
+//! `&self` method can still take it - the same cell
+//! [`crate::SegmentPipeline`]'s `sam2` session uses) - a cold call pays a slow
+//! load plus several GB of upload; a second call at the same
+//! variant/resolution pays neither.
 //!
 //! ```no_run
 //! let pipe = brain::VideoPipeline::from_pretrained("Wan-AI/Wan2.1-T2V-1.3B")?;
@@ -35,7 +36,6 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::Mutex;
 
 use capability::CancelToken;
 
@@ -185,11 +185,14 @@ impl VideoOptions {
 pub struct VideoPipeline {
     cfg: wan::config::WanConfig,
     paths: wan::pipeline::Paths,
-    hot: Mutex<Option<wan::pipeline::HotDit>>,
+    /// The resident DiT, by the build it was made for - the same cache every
+    /// capability provider uses, so two calls that differ only in size do not
+    /// keep two transformers alive.
+    hot: capability::hot::Hot<wan::DitKey, wan::pipeline::HotDit>,
 }
 
-/// Explicit, not derived: the resident `HotDit` behind the `Mutex` has
-/// no `Debug` impl (a live device handle), the same reason
+/// Explicit, not derived: the resident `HotDit` in the cache has no `Debug`
+/// impl (a live device handle), the same reason
 /// [`crate::UpscalePipeline`]'s own `Debug` is explicit.
 impl std::fmt::Debug for VideoPipeline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -223,9 +226,8 @@ impl VideoPipeline {
     /// [`VideoPipeline::generate`] plus [`VideoOptions`].
     pub fn generate_with(&self, prompt: &str, opts: VideoOptions) -> Result<Video> {
         let gen_opts = opts.to_gen_opts(&self.cfg);
-        let mut hot = self.hot.lock().map_err(|_| Error::Backend("wan: hot DiT lock poisoned".to_string()))?;
         let (video, _timings) =
-            wan::pipeline::generate_hot(&self.cfg, &self.paths, prompt, &gen_opts, &CancelToken::default(), &mut hot, |_, _, _| {}).map_err(Error::Backend)?;
+            wan::pipeline::generate_hot(&self.cfg, &self.paths, prompt, &gen_opts, &CancelToken::default(), &self.hot, |_, _, _| {}).map_err(Error::Backend)?;
         Ok(Video { width: video.width, height: video.height, fps: video.fps, frames: video.frames })
     }
 }
@@ -292,6 +294,6 @@ impl VideoPipelineBuilder {
         let cfg = wan::caps::config_from_name(variant).map_err(Error::Backend)?;
         let paths = wan::pipeline::Paths::from_assembly(&assembly).map_err(Error::Backend)?;
 
-        Ok(VideoPipeline { cfg, paths, hot: Mutex::new(None) })
+        Ok(VideoPipeline { cfg, paths, hot: capability::hot::Hot::new() })
     }
 }
