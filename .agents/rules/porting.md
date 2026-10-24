@@ -10,7 +10,13 @@ that is "mostly right".
 
 - **Register the canonical id first, before any other code.** Add the
   architecture's row to `crates/arch/src/lib.rs`'s `ARCHS` table before
-  writing a line of the port itself. Pick the id per the naming rule:
+  writing a line of the port itself, and declare in the same row what the
+  architecture supports (`caps`: full fine-tune, the frozen-base formats its
+  LoRA trainer accepts, `other`). A capability is declared only once the
+  capability matrix (`scripts/gates/training-capabilities.tsv`) names the test
+  that backs it - `crates/arch/tests/caps_vs_matrix.rs` fails when the two
+  disagree in either direction, so the registry can never claim more than the
+  evidence. Pick the id per the naming rule:
   `[a-z0-9]+`, no underscore/hyphen - llama.cpp's `LLM_ARCH_*` vocabulary
   lowercased when an entry exists there, otherwise a brain-defined name in
   the same style. That id becomes the crate directory name, the `brain-<id>`

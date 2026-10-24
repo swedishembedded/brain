@@ -40,6 +40,10 @@
 //! A repo-wide gate keeps all of those in sync, and porting a new
 //! architecture starts by adding its row here, before any other code.
 
+pub mod caps;
+
+pub use caps::{BaseTier, Caps};
+
 /// The broad kind of task an architecture performs - used to group
 /// `brain caps` output and the README quick-start, and to decide what a
 /// generic `infer` verb should even mean for a given architecture.
@@ -212,6 +216,12 @@ pub struct Arch {
     /// family already equals `id` (the common case: `wan`, `kronos`, every
     /// `FilesRecipe` row named after its own arch).
     pub families: &'static [&'static str],
+    /// What this architecture can DO: its training modes, the frozen-base
+    /// formats its adapter trainer accepts, and its serving precision tiers.
+    /// [`Caps::NONE`] is an inference-only architecture. The declaration is
+    /// machine-readable and held to the capability matrix's evidence
+    /// (`crates/arch/tests/caps_vs_matrix.rs`); see the `caps` module.
+    pub caps: Caps,
 }
 
 /// One upstream repo plus the quantizations it publishes - see
@@ -253,6 +263,7 @@ const DEFAULT: Arch = Arch {
     weights_env: &[],
     variants: &[],
     families: &[],
+    caps: Caps::NONE,
 };
 
 macro_rules! arch {
@@ -289,7 +300,7 @@ pub const ARCHS: &[Arch] = &[
     // -- Timeline -------------------------------------------------------
     arch!("horizon", "Horizon continuous-time subject-timeline model (time-to-event)", Timeline, Brain, "brain-horizon"),
     // -- Text decoders --------------------------------------------------
-    arch!("gpt2", "GPT-2 (nanoGPT parity baseline)", Text, LlamaCpp, "brain-gpt2", hf: &["GPT2LMHeadModel"]),
+    arch!("gpt2", "GPT-2 (nanoGPT parity baseline)", Text, LlamaCpp, "brain-gpt2", hf: &["GPT2LMHeadModel"], caps: Caps::NONE.other()),
     // "qwen3" is the real config.json `model_type` fallback value (used when
     // `architectures[0]` is absent), alongside the real `architectures[0]`
     // class name.
@@ -303,6 +314,7 @@ pub const ARCHS: &[Arch] = &[
     // `crates/catalog/src/lib.rs`'s `resolver_spec_for`, same shape as
     // `qwen35`'s own row.
     arch!("qwen3", "Qwen3 dense decoder", Text, LlamaCpp, "brain-qwen3", hf: &["Qwen3ForCausalLM", "qwen3"], default_ref: Some("Qwen/Qwen3-0.6B"),
+        caps: Caps::NONE.full_ft().lora(&[BaseTier::F32, BaseTier::Bf16, BaseTier::I8, BaseTier::Nf4, BaseTier::Fp8]).other(),
         variants: &[
             Variant { reference: "Qwen/Qwen3-0.6B", params: 596_000_000, quants: &["Q8_0"], license: None },
             Variant { reference: "Qwen/Qwen3-1.7B", params: 1_700_000_000, quants: &["Q8_0"], license: None },
@@ -343,7 +355,8 @@ pub const ARCHS: &[Arch] = &[
     // `hf` carries the real `architectures[0]` classes of the Qwen3.5/3.6 MoE releases (the
     // multimodal wrapper and the text-only class) and the `model_type` fallback spelling, same
     // convention as the dense `qwen35` row below.
-    arch!("qwen35moe", "Qwen3.5-35B-A3B hybrid GDN/GQA MoE decoder", Text, LlamaCpp, "brain-qwen35moe", gguf: Some("qwen35moe"), hf: &["Qwen3_5MoeForConditionalGeneration", "Qwen3_5MoeForCausalLM", "qwen3_5_moe"]),
+    arch!("qwen35moe", "Qwen3.5-35B-A3B hybrid GDN/GQA MoE decoder", Text, LlamaCpp, "brain-qwen35moe", gguf: Some("qwen35moe"), hf: &["Qwen3_5MoeForConditionalGeneration", "Qwen3_5MoeForCausalLM", "qwen3_5_moe"],
+        caps: Caps::NONE.full_ft().lora(&[BaseTier::F32])),
     // The DENSE sibling of qwen35moe - llama.cpp registers the two as
     // separate architectures (`LLM_ARCH_QWEN35` vs `LLM_ARCH_QWEN35MOE`)
     // despite sharing one HF `model_type` ("qwen3_5"): same hybrid Gated
@@ -364,8 +377,10 @@ pub const ARCHS: &[Arch] = &[
     // `weights`/`tokenizer` roles instead - see `crates/catalog/src/lib.rs`'s
     // `resolved_assembly_for`; the serving path finds a GGUF release in the
     // model store.
-    arch!("qwen35", "Qwen3.5/3.8-27B dense hybrid GDN/GQA decoder + MTP + ViT", Multimodal, LlamaCpp, "brain-qwen35", gguf: Some("qwen35"), hf: &["Qwen3_5ForConditionalGeneration", "qwen3_5"], default_ref: Some("Qwen/Qwen3.8-27B-FP8")),
-    arch!("glmdsa", "GLM-5.2 (glm_moe_dsa: MLA + sigmoid noaux_tc MoE + DSA)", Text, LlamaCpp, "brain-glmdsa", hf: &["GlmMoeDsaForCausalLM", "glm_moe_dsa"]),
+    arch!("qwen35", "Qwen3.5/3.8-27B dense hybrid GDN/GQA decoder + MTP + ViT", Multimodal, LlamaCpp, "brain-qwen35", gguf: Some("qwen35"), hf: &["Qwen3_5ForConditionalGeneration", "qwen3_5"], default_ref: Some("Qwen/Qwen3.8-27B-FP8"),
+        caps: Caps::NONE.full_ft().lora(&[BaseTier::F32, BaseTier::Bf16, BaseTier::Nf4, BaseTier::Fp8]).other()),
+    arch!("glmdsa", "GLM-5.2 (glm_moe_dsa: MLA + sigmoid noaux_tc MoE + DSA)", Text, LlamaCpp, "brain-glmdsa", hf: &["GlmMoeDsaForCausalLM", "glm_moe_dsa"],
+        caps: Caps::NONE.full_ft()),
     arch!("deepseek2", "DeepSeek-V2-family MoE decoder", Text, LlamaCpp, "brain-deepseek2"),
     arch!("lfm2", "LiquidAI LFM2.5-Encoder", Text, LlamaCpp, "brain-lfm2", hf: &["Lfm2ForCausalLM"], default_ref: Some("LiquidAI/LFM2.5-350M"),
         variants: &[
@@ -608,7 +623,8 @@ pub const ARCHS: &[Arch] = &[
     // through `s3dit::spec::S3ditSpec` (the model-store resolver) instead,
     // the same migration `flux2`/`wan` already went through. The FIELD stays
     // on `Arch` for the other architectures not yet migrated.
-    arch!("s3dit", "Z-Image S3-DiT text-to-image", Image, Brain, "brain-s3dit", default_ref: Some("Tongyi-MAI/Z-Image-Turbo"), weights_env: &[], families: &["zimage"]),
+    arch!("s3dit", "Z-Image S3-DiT text-to-image", Image, Brain, "brain-s3dit", default_ref: Some("Tongyi-MAI/Z-Image-Turbo"), weights_env: &[], families: &["zimage"],
+        caps: Caps::NONE.lora(&[BaseTier::F32]).other()),
     // `black-forest-labs/FLUX.2-klein-4B` ships the same shape
     // `ZimageRecipe` already matches generically (`model_index.json` +
     // transformer/vae/text_encoder/tokenizer role dirs) and even reuses
@@ -622,6 +638,7 @@ pub const ARCHS: &[Arch] = &[
     // names what `brain pull flux2`/`brain models list` fetch/display.
     arch!("flux2", "FLUX.2 Klein MMDiT text-to-image + editing", Image, Brain, "brain-flux2",
           default_ref: Some("black-forest-labs/FLUX.2-klein-4B"),
+          caps: Caps::NONE.lora(&[BaseTier::F32, BaseTier::I8]).other(),
           variants: &[
               Variant { reference: "black-forest-labs/FLUX.2-klein-4B", params: 3_875_544_576, quants: &[], license: None },
               // Gated under a non-commercial license, unlike the 4B row above.
@@ -692,6 +709,7 @@ pub const ARCHS: &[Arch] = &[
           hf: &["WanTransformer3DModel"],
           default_ref: Some("Wan-AI/Wan2.1-T2V-1.3B"),
           weights_env: &[],
+          caps: Caps::NONE.lora(&[BaseTier::F32]).other(),
           variants: &[
               Variant { reference: "Wan-AI/Wan2.1-T2V-1.3B", params: 1_418_996_800, quants: &[], license: None },
               Variant { reference: "Wan-AI/Wan2.1-T2V-14B", params: 14_288_491_584, quants: &[], license: None },
