@@ -545,8 +545,9 @@ impl<M: Model> Objective<M> for CausalLm {
     /// boundaries, so there one drawn batch is one record.
     ///
     /// Held-out records are deliberately NOT sharded: [`Self::eval`] scores the
-    /// whole validation split on every rank, so every replica reports the same
-    /// held-out loss.
+    /// whole validation split, and a distributed run has rank 0 score it once
+    /// and broadcast the result, so every replica selects on the same held-out
+    /// loss.
     fn shard(&mut self, rank: usize, world: usize) -> std::io::Result<()> {
         if world == 0 || rank >= world {
             return Err(std::io::Error::other(format!("rank {rank} is not one of a world of {world}")));
@@ -607,9 +608,10 @@ impl<M: Model> Objective<M> for CausalLm {
         model.forward()
     }
 
-    /// Held-out records are intentionally not sharded: every rank scores the
-    /// whole validation split, so every replica reports the same held-out loss
-    /// and early stopping decides the same thing everywhere.
+    /// Held-out records are intentionally not sharded: the whole validation
+    /// split is scored as one held-out loss. A distributed run has rank 0 do
+    /// the scoring and shares the value, so early stopping decides the same
+    /// thing on every replica.
     fn eval(&mut self, model: &M, rng: &mut Rng, batches: u32) -> Option<f32> {
         if batches == 0 {
             if let Some(count) = self.val.example_count() {
@@ -1306,6 +1308,38 @@ pub struct GradSync<'a> {
     pub rank: usize,
 }
 
+/// The held-out evaluation a step is due, agreed across `grad_sync`'s group.
+///
+/// Without a group this is the objective's own evaluation, unchanged. With
+/// one, rank 0 scores the held-out batches and the scalar is broadcast to
+/// every rank, because the replicas hold identical weights: a second rank
+/// evaluating the same split would repeat the work for the same number.
+///
+/// The broadcast is called on every rank whenever the step is due, including
+/// when the objective reports no evaluation: a rank 0 that skipped it while
+/// its peers waited for the result would deadlock the group. The root's
+/// "no evaluation" is therefore itself the broadcast value.
+fn agreed_eval<M: Model, O: Objective<M>>(obj: &mut O, model: &M, rng: &Rng, batches: u32, grad_sync: Option<&GradSync<'_>>) -> std::io::Result<Option<f32>> {
+    let Some(sync) = grad_sync else {
+        return Ok(obj.eval(model, &mut rng.clone(), batches));
+    };
+    // Only the root computes; everyone else sends a placeholder the root's
+    // value replaces. `broadcast` ignores it, so its contents do not matter.
+    let local = if sync.rank == 0 {
+        match obj.eval(model, &mut rng.clone(), batches) {
+            Some(loss) => crate::collective::Payload::f32(vec![1.0, loss]),
+            None => crate::collective::Payload::f32(vec![0.0, 0.0]),
+        }
+    } else {
+        crate::collective::Payload::f32(Vec::new())
+    };
+    let agreed = pollster::block_on(sync.collective.broadcast(sync.rank, local, 0)).map_err(std::io::Error::other)?;
+    if agreed.data.len() != 2 {
+        return Err(std::io::Error::other(format!("the evaluation broadcast from rank 0 carried {} values, expected 2", agreed.data.len())));
+    }
+    Ok((agreed.data[0] != 0.0).then_some(agreed.data[1]))
+}
+
 /// [`fit_controlled`] with every optimizer step's gradients averaged across
 /// `grad_sync`'s ranks first, which is what a data-parallel run needs. A group
 /// already named by [`FitControl::grad_sync`] is the same request; naming a
@@ -1331,6 +1365,12 @@ pub fn fit_controlled_sync<M: Model, O: Objective<M>>(model: M, obj: O, opts: &F
 /// Only rank 0 writes: the checkpoint (`out`) and the evaluation snapshots. The
 /// replicas are bit-identical, so one writer is enough, and several ranks
 /// writing one path at once would corrupt it.
+///
+/// For the same reason rank 0 alone scores a due held-out evaluation: the
+/// replicas hold identical weights, so a second rank's pass over the same
+/// held-out split adds nothing to the number and costs a full evaluation on
+/// every replica. The scalar is broadcast to the rest of the group, so every
+/// rank drives its selection and early stopping from the same value.
 pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
     mut model: M,
     mut obj: O,
@@ -1460,7 +1500,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         let cooled = selection.cooldown.is_some_and(|c| c.ends_at(step));
         let due = opts.eval_interval > 0 && ((step + 1) % opts.eval_interval == 0 || ((last || cooled) && selection.selecting()));
         if due {
-            if let Some(eval_loss) = obj.eval(&model, &mut rng.clone(), opts.eval_batches) {
+            if let Some(eval_loss) = agreed_eval(&mut obj, &model, &rng, opts.eval_batches, grad_sync.as_ref())? {
                 let train_loss = selection.take_interval();
                 selection.evaluations.push(Evaluation { step: step + 1, train_loss, eval_loss });
                 println!("step {:>6}  lr {:.2e}  train {:.4}  eval {:.4}", step + 1, lr, loss, eval_loss);
@@ -1770,6 +1810,9 @@ pub fn generate<M: Model>(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
     use super::*;
     use crate::training::TokenObjectives;
 
@@ -2292,6 +2335,103 @@ mod tests {
         fit_controlled(sharded, examples_objective_batched(&[4; 6], 4, 2), &opts, None, control).expect("fit");
         assert!(!plain_drawn.borrow().is_empty());
         assert_eq!(*sharded_drawn.borrow(), *plain_drawn.borrow(), "a one-rank group must draw exactly the unsharded stream");
+    }
+
+    /// An objective whose held-out curve is scripted, counting its
+    /// evaluations so a test can see which rank actually ran them.
+    struct EvalCurve {
+        evals: Vec<f32>,
+        next: usize,
+        evals_run: Arc<AtomicUsize>,
+    }
+    impl Objective<Recorder> for EvalCurve {
+        fn regime(&self) -> &'static str {
+            "eval-curve"
+        }
+        /// There is no batch stream to split here; the test is about the
+        /// evaluation, so every rank may be given the same shard.
+        fn shard(&mut self, _rank: usize, _world: usize) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn micro_step(&mut self, _m: &Recorder, _r: &mut Rng) -> f32 {
+            0.0
+        }
+        fn eval(&mut self, _m: &Recorder, _r: &mut Rng, _b: u32) -> Option<f32> {
+            self.evals_run.fetch_add(1, Ordering::SeqCst);
+            let i = self.next;
+            self.next += 1;
+            self.evals.get(i).copied()
+        }
+    }
+
+    /// Every step of a short run is a due evaluation, so the curve below
+    /// bottoms out and the patience runs out inside the budget.
+    fn eval_options() -> FitOpts {
+        FitOpts { steps: 4, eval_interval: 1, eval_batches: 1, patience: 2, ..Default::default() }
+    }
+
+    /// One [`EvalCurve`] run per rank over a real two-rank [`crate::HostCollective`],
+    /// returning each rank's report and how many evaluations it ran itself.
+    fn two_rank_run(evals: Vec<f32>) -> (Vec<FitReport>, Vec<usize>) {
+        let coll = crate::HostCollective::new(2);
+        let counts: Vec<Arc<AtomicUsize>> = (0..2).map(|_| Arc::new(AtomicUsize::new(0))).collect();
+        let reports = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..2)
+                .map(|rank| {
+                    let coll = Arc::clone(&coll);
+                    let count = Arc::clone(&counts[rank]);
+                    let evals = evals.clone();
+                    scope.spawn(move || {
+                        let opts = eval_options();
+                        let obj = EvalCurve { evals, next: 0, evals_run: count };
+                        let sync = GradSync { collective: &*coll, rank };
+                        fit_controlled_sharded(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), obj, &opts, None, FitControl::default(), Some(sync), Some((rank, 2)))
+                            .expect("fit")
+                            .0
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|handle| handle.join().expect("a rank's thread")).collect::<Vec<FitReport>>()
+        });
+        let counts = counts.iter().map(|c| c.load(Ordering::SeqCst)).collect();
+        (reports, counts)
+    }
+
+    /// Replicas hold identical weights, so a held-out evaluation repeated on
+    /// every rank measures the same number twice. Rank 0 scores it and
+    /// broadcasts the scalar; every rank then selects, stops and reports the
+    /// same thing.
+    #[test]
+    fn only_rank_zero_evaluates_and_every_rank_selects_the_same() {
+        let (reports, evals_run) = two_rank_run(vec![1.0, 0.8, 0.9, 1.0]);
+        assert_eq!(evals_run, vec![4, 0], "rank 0 runs every due evaluation; a replica must not repeat it");
+        assert_eq!(reports[0], reports[1], "the broadcast must leave every rank with the same selection and score");
+        assert!(reports[0].stopped_early && reports[0].steps_completed == 4, "{:?}", reports[0]);
+        assert_eq!(reports[1].kept_best, Some(KeptBest { step: 2, eval_loss: 0.8 }));
+    }
+
+    /// A due step the objective has no evaluation for must still be agreed:
+    /// the root broadcasts "none" rather than skipping the collective its
+    /// peers wait on.
+    #[test]
+    fn every_rank_agrees_when_the_objective_reports_no_evaluation() {
+        let (reports, evals_run) = two_rank_run(Vec::new());
+        assert_eq!(evals_run, vec![4, 0], "the root still asks its objective at every due step");
+        assert_eq!(reports[0], reports[1]);
+        assert!(reports[0].evaluations.is_empty(), "no evaluation was reported, so none is recorded");
+        assert_eq!(reports[0].steps_completed, 4);
+    }
+
+    /// Without a group the loop evaluates on the one process at every due
+    /// step, exactly as before the distributed path existed.
+    #[test]
+    fn a_single_process_run_still_evaluates_every_due_step() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let obj = EvalCurve { evals: vec![1.0, 0.8, 0.9, 1.0], next: 0, evals_run: Arc::clone(&count) };
+        let (report, _) = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), obj, &eval_options(), None, FitControl::default()).expect("fit");
+        assert_eq!(count.load(Ordering::SeqCst), 4, "a single process keeps evaluating every due step");
+        let (distributed, _) = two_rank_run(vec![1.0, 0.8, 0.9, 1.0]);
+        assert_eq!(report, distributed[0], "the single-process run must be unchanged by the distributed path");
     }
 
     /// A requested group cannot be reduced to a single-process run: an
