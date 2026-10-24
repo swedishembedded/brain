@@ -213,6 +213,38 @@ pub const BWD_KERNELS: [(&str, &str); 38] = [
     ("scale_add_dexp", kernels::SCALE_ADD_DEXP),
 ];
 
+/// The training kernel set of a model whose INFERENCE set is `model`: those,
+/// then [`BWD_KERNELS`], then `extra` - the model's own seam and loss kernels,
+/// in the order its call sites index them.
+///
+/// `TOTAL` is spelled in the binding's type (`[..; TAIL + 2]`); the assert
+/// below keeps it equal to the three parts at compile time, so a kernel added
+/// to one side is a compile error rather than a silently short registration.
+///
+/// A crate that trains these blocks used to restate this loop and the loss
+/// pair in its own `const fn`; the ordering rule (and the "never register a
+/// second definition of a shared kernel" rule) lives here once.
+pub const fn train_kernel_set<const TOTAL: usize>(model: &[(&'static str, &'static str)], extra: &[(&'static str, &'static str)]) -> [(&'static str, &'static str); TOTAL] {
+    assert!(model.len() + BWD_KERNELS.len() + extra.len() == TOTAL, "train_kernel_set: TOTAL must be the model's kernel count + BWD_KERNELS + the extra kernels");
+    let mut k = [("", ""); TOTAL];
+    let mut i = 0;
+    while i < model.len() {
+        k[i] = model[i];
+        i += 1;
+    }
+    let mut j = 0;
+    while j < BWD_KERNELS.len() {
+        k[model.len() + j] = BWD_KERNELS[j];
+        j += 1;
+    }
+    let mut e = 0;
+    while e < extra.len() {
+        k[model.len() + BWD_KERNELS.len() + e] = extra[e];
+        e += 1;
+    }
+    k
+}
+
 /// Row-chunks per column for the two-stage `bias_grad_part`/`bias_grad_final`
 /// pair - the same fixed, ungated split `GN_P` already uses for the identical
 /// barrier-free partial-reduction shape (`gn_dsum_part`/`gn_dgb_part`). No

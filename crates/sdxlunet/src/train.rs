@@ -78,28 +78,12 @@ const K_MSE_GRAD: usize = TAIL + 1;
 /// NOT restated here: a second registration of one kernel name is what the CPU
 /// backend's Cranelift JIT rejects outright (`DuplicateDefinition`), which is
 /// silently fine on a GPU and a hard failure on `BRAIN_DEVICE=cpu`.
-pub const TRAIN_KERNELS: [(&str, &str); TAIL + 2] = train_kernel_set();
+pub const TRAIN_KERNELS: [(&str, &str); TAIL + 2] = vae::blocks::train_kernel_set::<{ TAIL + 2 }>(&crate::model::KERNELS, &[("mse_value", kernels::MSE_VALUE), ("mse_grad", kernels::MSE_GRAD)]);
 
 /// [`TRAIN_KERNELS`] as a `'static` slice - what `gpu_core::testgpu::dev` and
 /// `Gpu::new_like` want.
 pub const TRAIN_PIPELINES: &[(&str, &str)] = &TRAIN_KERNELS;
 
-const fn train_kernel_set() -> [(&'static str, &'static str); TAIL + 2] {
-    let mut k = [("", ""); TAIL + 2];
-    let mut i = 0;
-    while i < crate::model::KERNELS.len() {
-        k[i] = crate::model::KERNELS[i];
-        i += 1;
-    }
-    let mut j = 0;
-    while j < vae::blocks::BWD_KERNELS.len() {
-        k[BWD_BASE + j] = vae::blocks::BWD_KERNELS[j];
-        j += 1;
-    }
-    k[K_MSE_VALUE] = ("mse_value", kernels::MSE_VALUE);
-    k[K_MSE_GRAD] = ("mse_grad", kernels::MSE_GRAD);
-    k
-}
 
 /// A trainable SDXL UNet at one latent resolution and one text-token count: one
 /// forward step list, one reverse step list, one gradient buffer per tensor.

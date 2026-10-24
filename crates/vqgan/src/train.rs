@@ -154,32 +154,22 @@ const K_ADD2: usize = vae::blocks::ADD2_SLOT;
 /// This model's TRAINING kernel set: the inference set ([`crate::KERNELS`] —
 /// shared blocks, the two VQ assignment kernels, `embed`, `l2norm_scale`), then
 /// the shared block backward set, then the quantiser-seam and loss kernels.
-pub const TRAIN_KERNELS: [(&str, &str); TAIL + 6] = train_kernel_set();
+pub const TRAIN_KERNELS: [(&str, &str); TAIL + 6] = vae::blocks::train_kernel_set::<{ TAIL + 6 }>(
+    &crate::KERNELS,
+    &[
+        ("emb_bwd", kernels::EMB_BWD),
+        ("masked_l1", kernels::MASKED_L1),
+        ("masked_l1_grad", kernels::MASKED_L1_GRAD),
+        ("mse_value", kernels::MSE_VALUE),
+        ("mse_grad", kernels::MSE_GRAD),
+        ("l2norm_scale_dx", kernels::L2NORM_SCALE_DX),
+    ],
+);
 
 /// [`TRAIN_KERNELS`] as a `'static` slice — what `gpu_core::testgpu::dev` and
 /// `Gpu::new_like` want.
 pub const TRAIN_PIPELINES: &[(&str, &str)] = &TRAIN_KERNELS;
 
-const fn train_kernel_set() -> [(&'static str, &'static str); TAIL + 6] {
-    let mut k = [("", ""); TAIL + 6];
-    let mut i = 0;
-    while i < crate::KERNELS.len() {
-        k[i] = crate::KERNELS[i];
-        i += 1;
-    }
-    let mut j = 0;
-    while j < vae::blocks::BWD_KERNELS.len() {
-        k[BWD_BASE + j] = vae::blocks::BWD_KERNELS[j];
-        j += 1;
-    }
-    k[K_EMB_BWD] = ("emb_bwd", kernels::EMB_BWD);
-    k[K_MASKED_L1] = ("masked_l1", kernels::MASKED_L1);
-    k[K_MASKED_L1_GRAD] = ("masked_l1_grad", kernels::MASKED_L1_GRAD);
-    k[K_MSE_VALUE] = ("mse_value", kernels::MSE_VALUE);
-    k[K_MSE_GRAD] = ("mse_grad", kernels::MSE_GRAD);
-    k[K_L2NORM_DX] = ("l2norm_scale_dx", kernels::L2NORM_SCALE_DX);
-    k
-}
 
 /// The weights `(codebook term, commitment term)` of the two VQ losses:
 /// `beta` on the one [`VqganConfig::beta_on`] names, 1 on the other.

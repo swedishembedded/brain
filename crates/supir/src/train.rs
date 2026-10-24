@@ -65,26 +65,10 @@ const K_MSE_GRAD: usize = TAIL + 1;
 /// it (the caller supplies `edm_mix`/`scale_row` out of band via
 /// `MixIds` - see `crate::model`'s own doc) - so there is no duplicate name
 /// for the CPU backend's Cranelift JIT to reject.
-pub const TRAIN_KERNELS: [(&str, &str); TAIL + 2] = train_kernel_set();
+pub const TRAIN_KERNELS: [(&str, &str); TAIL + 2] = vae::blocks::train_kernel_set::<{ TAIL + 2 }>(&crate::model::KERNELS, &[("mse_value", kernels::MSE_VALUE), ("mse_grad", kernels::MSE_GRAD)]);
 
 pub const TRAIN_PIPELINES: &[(&str, &str)] = &TRAIN_KERNELS;
 
-const fn train_kernel_set() -> [(&'static str, &'static str); TAIL + 2] {
-    let mut k = [("", ""); TAIL + 2];
-    let mut i = 0;
-    while i < crate::model::KERNELS.len() {
-        k[i] = crate::model::KERNELS[i];
-        i += 1;
-    }
-    let mut j = 0;
-    while j < vae::blocks::BWD_KERNELS.len() {
-        k[BWD_BASE + j] = vae::blocks::BWD_KERNELS[j];
-        j += 1;
-    }
-    k[K_MSE_VALUE] = ("mse_value", kernels::MSE_VALUE);
-    k[K_MSE_GRAD] = ("mse_grad", kernels::MSE_GRAD);
-    k
-}
 
 /// A trainable SUPIR graph (trunk + adaptors + backbone) at one latent
 /// resolution and one text-token count, at a fixed `control_scale` - see
