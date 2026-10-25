@@ -57,9 +57,12 @@ curl -s http://127.0.0.1:8792/v1/chat/completions \
          "max_tokens": 256}'
 ```
 
-A request with a short budget and reasoning left on can spend the whole
-budget inside a reasoning block; the served request's `enable_thinking:
-false` switch turns that off where the runtime sets it.
+Sampling matters for these checkpoints: a near-greedy request (temperature
+0.2, an agent runtime's usual default) loops on repeated tokens over a
+multi-turn tool conversation, while 0.7-0.8 answers cleanly. A request with
+a short budget and reasoning left on can also spend the whole budget inside
+a reasoning block; the served request's `enable_thinking: false` switch turns
+that off where the runtime sets it.
 
 ## Licence
 

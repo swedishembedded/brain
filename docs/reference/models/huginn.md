@@ -88,7 +88,9 @@ curl -s http://127.0.0.1:8795/v1/chat/completions \
          "max_tokens": 24}'
 ```
 
-The model answers chat questions through this path. It does not call tools
+A near-greedy request (temperature 0.2, an agent runtime's usual default)
+loops on these checkpoints; ask for 0.7-0.8. The model answers chat questions
+through this path. It does not call tools
 (they are not part of its training), so a coding-agent loop over this
 checkpoint is out of reach at the depths a 24 GB card can serve; the
 released depth needs a larger card.
