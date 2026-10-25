@@ -18,6 +18,8 @@ Plans (the protocol section of the paper registers them):
   primary   the three primary configurations, three random seeds each
   pilot     the wide control and the channel pilots, one random seed each
   qwen      Qwen3-0.6B: zero-shot bits per byte
+  qwen-ft   Qwen3-0.6B continued on the training stories for QWEN_FT_STEPS
+            steps of the shared schedule, then scored
   spectrum  Qwen3-0.6B residual-stream projection study
   systems   training-step device time of the spectral mixer, dense basis
             product against FFT, over several (m, D, C)
@@ -25,8 +27,9 @@ Plans (the protocol section of the paper registers them):
 Each job is one command of the sample; a training job is followed by scoring
 its checkpoint. Jobs run one per GPU at a time. Every record lands in
 papers/spectral-lm/data/<plan>/ and carries the commit, the commands, the
-seed, the device, and the job's peak device memory (sampled from nvidia-smi
-for the job's process every second). Checkpoints and logs go to --work, which
+seed, the device, and the job's peak device memory (the card's memory in use
+above its idle use, sampled from nvidia-smi every second while the job runs
+alone on the card). Checkpoints and logs go to --work, which
 is outside the repository.
 """
 
@@ -50,7 +53,7 @@ QWEN = Path.home() / ".local" / "share" / "brain" / "models" / "Qwen" / "Qwen3-0
 SHAPE = ["--d-model", "256", "--layers", "6", "--heads", "8", "--kv-heads", "4", "--head-dim", "32"]
 SCHEDULE = ["--batch", "16", "--block", "512", "--warmup", "100", "--weight-decay", "0.1", "--clip", "1.0"]
 STEPS = "4096"
-MAX_DOC_BYTES = "2000"
+MAX_DOC_BYTES = "1500"
 
 FAMILIES = {
     "S-256-512-24": SHAPE + ["--mixer", "spectral", "--signal-len", "512", "--channels", "24"],
@@ -63,6 +66,12 @@ FAMILIES = {
 PRIMARY = ["S-256-512-24", "Q-256-24", "Q-256-1024"]
 PILOT = ["Q-512-2048", "S-256-512-8", "S-256-512-96"]
 LR_GRID = ["1e-3", "3e-3", "6e-3"]
+# Qwen3-0.6B continued training: the budget is set from a measured
+# throughput probe and registered in the protocol before the run.
+QWEN_FT_STEPS = "0"
+QWEN_FT_BATCH = "4"
+QWEN_FT_LR = "3e-5"
+QWEN_FT_STORIES = "200000"
 SYSTEMS = [(256, 512, 8), (256, 512, 24), (256, 512, 96), (128, 256, 24), (256, 1024, 24)]
 
 
@@ -104,6 +113,8 @@ def jobs_for(plan, work):
                 jobs.append({"id": f"{fam}-{seed}", "family": fam, "lr": chosen_lr(fam), "steps": STEPS, "seed": seed, "eval": True})
     elif plan == "qwen":
         jobs.append({"id": "qwen3-0.6b-zero-shot", "command": ["qwen-eval", "--weights", str(QWEN), "--text", str(CORPUS / "valid.txt"), "--max-doc-bytes", MAX_DOC_BYTES, "--batch", "8"]})
+    elif plan == "qwen-ft":
+        jobs.append({"id": "qwen3-0.6b-tinystories", "qwen_ft": True, "seed": str(secrets.randbits(63))})
     elif plan == "systems":
         seed = str(secrets.randbits(63))
         for m, d, c in SYSTEMS:
@@ -121,6 +132,12 @@ def jobs_for(plan, work):
     return jobs
 
 
+def card_memory(gpu):
+    """Device memory in use on card `gpu`, MiB."""
+    out = subprocess.run(["nvidia-smi", "-i", str(gpu), "--query-gpu=memory.used", "--format=csv,noheader,nounits"], capture_output=True, text=True)
+    return int(out.stdout.strip())
+
+
 def run_measured(cmd, gpu, log):
     """Run `cmd` (already pinned to `gpu` by its `--gpu` flag), returning
     (last JSON line, peak MiB, seconds)."""
@@ -130,6 +147,11 @@ def run_measured(cmd, gpu, log):
         lf.write("$ " + " ".join(cmd) + "\n")
         lf.flush()
         p = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=lf, text=True)
+        # nvidia-smi reports PIDs of another PID namespace inside a container,
+        # so the job's own process cannot be looked up. A job has its card to
+        # itself, so its device memory is the card's use above the idle use
+        # measured before the job started.
+        idle = card_memory(gpu)
         peak = 0
         lines = []
         stdout = p.stdout
@@ -137,11 +159,7 @@ def run_measured(cmd, gpu, log):
         reader = threading.Thread(target=lambda: lines.extend(stdout), daemon=True)
         reader.start()
         while p.poll() is None:
-            out = subprocess.run(["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"], capture_output=True, text=True).stdout
-            for row in out.splitlines():
-                parts = [x.strip() for x in row.split(",")]
-                if len(parts) == 2 and parts[0] == str(p.pid):
-                    peak = max(peak, int(parts[1]))
+            peak = max(peak, card_memory(gpu) - idle)
             time.sleep(1.0)
         reader.join()
         lf.writelines(lines)
@@ -157,7 +175,21 @@ def execute(job, gpu, plan, commit):
     work = Path(job["work"])
     log = work / f"{job['id']}.log"
     rec = {"commit": commit, "device": f"gpu{gpu} {device_name(gpu)}", "plan": plan, "id": job["id"]}
-    if "command" in job:
+    if job.get("qwen_ft"):
+        corpus = work / "qwen-corpus"
+        enc = [str(SAMPLE), "qwen-corpus", "--weights", str(QWEN), "--text", str(CORPUS / "train.txt"), "--valid", str(CORPUS / "valid.txt"),
+               "--out", str(corpus), "--stories", QWEN_FT_STORIES, "--gpu", str(gpu)]
+        corp, _, _ = run_measured(enc, gpu, log)
+        ckpt = work / f"{job['id']}.safetensors"
+        train = [str(SAMPLE), "qwen-train", "--weights", str(QWEN), str(corpus), "--out", str(ckpt), "--batch", QWEN_FT_BATCH, "--block", "512",
+                 "--warmup", "20", "--weight-decay", "0.1", "--clip", "1.0", "--steps", QWEN_FT_STEPS, "--lr", QWEN_FT_LR, "--seed", job["seed"], "--gpu", str(gpu)]
+        result, peak, _ = run_measured(train, gpu, log)
+        ev = [str(SAMPLE), "qwen-eval", "--weights", str(ckpt), "--tokenizer", str(QWEN.parent), "--text", str(CORPUS / "valid.txt"),
+              "--max-doc-bytes", MAX_DOC_BYTES, "--batch", "8", "--gpu", str(gpu)]
+        score, _, _ = run_measured(ev, gpu, log)
+        rec.update({"seed": int(job["seed"]), "corpus_command": " ".join(enc), "corpus": corp, "command": " ".join(train), "train": result,
+                    "peak_mem_mib": peak, "eval_command": " ".join(ev), "result": score})
+    elif "command" in job:
         cmd = [str(SAMPLE)] + job["command"] + ["--gpu", str(gpu)]
         result, peak, _ = run_measured(cmd, gpu, log)
         rec.update({"command": " ".join(cmd), "result": result, "peak_mem_mib": peak})

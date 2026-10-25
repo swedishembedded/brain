@@ -79,10 +79,14 @@ $\{1, 3, 6\}\times10^{-3}$ by the lowest final training loss of a 300-step run
 with one seed, and fixed before the comparison runs. Each primary
 configuration is trained with three seeds drawn at random and recorded.
 
-\paragraph{Scoring.} Validation documents of at most 2000 UTF-8 bytes (98.5\%
-of the split; the rule is on bytes so that every tokenizer scores the same
-documents) are scored one per row, each preceded by its tokenizer's
-end-of-text token and every one of its tokens predicted.
+\paragraph{Scoring.} Validation documents of at most 1500 UTF-8 bytes (95.7\%
+of the split's 27{,}630 documents; the rule is on bytes so that every
+tokenizer scores the same documents) are scored one per row, each preceded by
+its tokenizer's end-of-text token and every one of its tokens predicted. The
+limit was registered as 2000 bytes and lowered before any scored run: under
+the 4096-token BPE the longest document of at most 2000 bytes is 591 tokens
+and of at most 1800 bytes 513, more than the 512-token context the models
+are trained at.
 
 \paragraph{Hypotheses.}
 \begin{description}

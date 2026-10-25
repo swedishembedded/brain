@@ -28,9 +28,20 @@ families, each with a forward and a backward kernel:
   transpose of channel expand.
 \end{enumerate}
 The transforms have two implementations: a dense product with the stored
-basis, which is the reference, and a radix-2 real fast Fourier transform with
-one workgroup per row. The fast path is accepted only where it agrees with the
-dense one (\cref{sec:protocol}, H4).
+basis, which is the reference and runs on every backend, and an in-place
+radix-2 complex FFT of the Hermitian spectrum with one 256-thread workgroup
+per row, which needs workgroup barriers and is selected only on a device that
+runs them. The fast path is accepted only where it agrees with the dense one
+(\cref{sec:protocol}, H4). A variant that shared a precomputed twiddle table
+among several rows per workgroup measured slower than computing the twiddles
+in the butterfly, and was not kept.
+
+\paragraph{Attention and loss.} At training sequence lengths both SpectralLM
+and its controls take the engine's causal flash attention, forward and
+backward, and a row-cooperative cross-entropy that computes the loss and the
+per-row softmax statistics the gradient reads in one pass; short sequences and
+the CPU backend take the materialized reference kernels, which a test holds
+to the same loss and gradients.
 
 \paragraph{Decoding.} Incremental decoding runs the same block once per new
 token against the cached keys and values, which are $m$ wide.

@@ -1,0 +1,42 @@
+% SPDX-License-Identifier: CC-BY-4.0
+% Copyright (c) 2026 Martin Schr\"oder <info@swedishembedded.com>
+
+\section{Gradients of the spectral mixer}
+\label{sec:gradients}
+
+For one row $h\in\R^m$ and one channel $c$, write the forward pass of
+\cref{eq:mixer} as
+\begin{align}
+\hat g_c &= G_c\odot h, & \hat u_c &= U_c\odot h, \nonumber\\
+a_c &= S\hat g_c, & b_c &= S\hat u_c, \nonumber\\
+s_c &= \silu(a_c)\odot b_c, & t_c &= S^\top s_c, \nonumber\\
+y &= \textstyle\sum_c W_c\odot t_c. \label{eq:mixer-steps}
+\end{align}
+Given the upstream gradient $\bar y=\partial L/\partial y$, the chain rule
+gives, in reverse order,
+\begin{align}
+\bar W_c &= \textstyle\sum_{\text{rows}} \bar y\odot t_c, & \bar t_c &= W_c\odot\bar y, \nonumber\\
+\bar s_c &= S\,\bar t_c, \nonumber\\
+\bar a_c &= \bar s_c\odot b_c\odot\silu'(a_c), & \bar b_c &= \bar s_c\odot\silu(a_c), \nonumber\\
+\bar{\hat g}_c &= S^\top\bar a_c, & \bar{\hat u}_c &= S^\top\bar b_c, \nonumber\\
+\bar G_c &= \textstyle\sum_{\text{rows}} h\odot\bar{\hat g}_c, & \bar U_c &= \textstyle\sum_{\text{rows}} h\odot\bar{\hat u}_c, \nonumber\\
+\bar h &= \textstyle\sum_c \big(G_c\odot\bar{\hat g}_c + U_c\odot\bar{\hat u}_c\big), \label{eq:mixer-grad}
+\end{align}
+with $\silu'(a)=\sigma(a)\,(1+a(1-\sigma(a)))$. Three structural facts make
+the backward pass as cheap as the forward:
+\begin{enumerate}
+\item The adjoint of synthesis $S$ is analysis $S^\top$ and vice versa, so
+  the backward pass uses the same two transform kernels as the forward, in the
+  opposite order, and no transposed basis or separate backward kernel is
+  needed.
+\item The filter gradients $\bar W,\bar G,\bar U$ are reductions over rows of
+  elementwise products, one kernel for all three, which adds into the
+  parameter gradient so that a parameter used by several kernels accumulates
+  every use.
+\item The input gradient is the transpose of the filter expansion: the
+  contraction kernel that computes $y$ from $t$ also computes $\bar h$ from
+  $\bar{\hat g}$ and $\bar{\hat u}$, the second call accumulating into the
+  first.
+\end{enumerate}
+Counting operations, the backward pass performs one synthesis and two
+analyses per channel, as many transforms as the forward pass.
