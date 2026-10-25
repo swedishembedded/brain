@@ -482,8 +482,11 @@ fn compile_one(
 
     // Resolve which function argument carries which builtin vec3.
     let ba = builtin_args(func);
-    let gid_arg = ba.gid.ok_or("kernel missing global_invocation_id arg")?;
-    let nwg_arg = ba.nwg.ok_or("kernel missing num_workgroups arg")?;
+    // A kernel may address itself by workgroup and local id instead of by the
+    // global id (`max_abs_rows` does: one workgroup per row). Both sets are
+    // synthesised below from the linear invocation index, so neither builtin
+    // has to be declared for this path to compile.
+    let wgsize = entry.workgroup_size[0].max(1);
 
     // Base pointer of each storage binding (binding 1.. -> bufs[binding-1]).
     let mut buf_base: HashMap<u32, Value> = HashMap::new();
@@ -530,6 +533,15 @@ fn compile_one(
     let one32 = builder.ins().iconst(types::I32, 1);
     let gid = [gid_x, gid_y, zero32];
     let nwg = [gx, gy, one32];
+    // The same linear index seen as (workgroup, local): `gidx = wg*W + lid`,
+    // so a kernel that indexes with `workgroup_id`/`local_invocation_id`
+    // (one workgroup per row, say) reads the same element it would on the
+    // device. `W` is the entry's own workgroup size.
+    let wgsize64 = builder.ins().iconst(types::I64, wgsize as i64);
+    let lid64 = builder.ins().urem(gidx, wgsize64);
+    let wgid64 = builder.ins().udiv(gidx, wgsize64);
+    let lid_x = builder.ins().ireduce(types::I32, lid64);
+    let wgid_x = builder.ins().ireduce(types::I32, wgid64);
 
     let empty_wg = HashMap::new();
     let env = Env {
@@ -539,9 +551,9 @@ fn compile_one(
         uniform_ptr,
         gid,
         nwg,
-        local_id: [zero32, zero32, zero32],
-        wgid: [zero32, zero32, zero32],
-        ba: BuiltinArgs { gid: Some(gid_arg), nwg: Some(nwg_arg), local_id: None, wgid: None },
+        local_id: [lid_x, zero32, zero32],
+        wgid: [wgid_x, zero32, zero32],
+        ba,
         fns: &fns,
         latch,
         active_addr: None,
