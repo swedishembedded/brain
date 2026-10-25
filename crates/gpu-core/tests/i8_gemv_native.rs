@@ -310,3 +310,63 @@ fn a_profiled_pass_reports_the_native_kernels_time() {
     let row = p.rows.iter().find(|r| r.name == "matmul_i8_gemv").expect("the dispatched kernel has a row");
     assert!(p.device_timed && row.secs > 0.0, "the natively served GEMV reports {} s", row.secs);
 }
+
+/// A row of a batched decode step is the token it would be as a single row:
+/// the batch shares the weight read, and nothing about the row's own
+/// activation or scales may change with the row count. The batched kernel's
+/// output is held to the same f32-rounding bar
+/// [`assert_native_agrees`] uses against the WGSL tier, because the batched
+/// row count runs the tensor-core block.
+#[test]
+fn each_row_of_a_batch_is_that_row_decoded_alone() {
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda(&gpu) || !gpu.caps().numeric.int8_dot {
+        brain_testutil::skip_unavailable("native int8 GEMV needs a CUDA device");
+        return;
+    }
+    let (kg, n) = (1280u32, 1024u32);
+    let ng = kg / WPG as u32;
+    let (rows, lead) = (8u32, [0u64; 5]);
+    let x = Windowed::new(&gpu, &packed((rows * kg) as usize, 0x51ed), lead[0]);
+    let w = Windowed::new(&gpu, &packed((n * kg) as usize, 0x1234), lead[1]);
+    let sx = Windowed::new(&gpu, &f32_words(&scales((rows * ng) as usize, 0x99, 1e-3, 1e-5)), lead[2]);
+    let sw = Windowed::new(&gpu, &f32_words(&scales((n * ng) as usize, 0x77, 1e-3, 1e-5)), lead[3]);
+    let batched = Windowed::new(&gpu, &vec![SENTINEL; (rows * n) as usize], lead[4]);
+    gpu.submit(
+        &[],
+        &[gpu.dispatch_sliced(
+            K_GEMV,
+            &[&x.buf, &w.buf, &sx.buf, &sw.buf, &batched.buf],
+            &[x.range(), w.range(), sx.range(), sw.range(), batched.range()],
+            &[rows, kg, n],
+            Dispatch::Workgroups(n),
+        )],
+    );
+    gpu.poll_wait();
+    let batched = batched.window(&batched.read_bits(&gpu));
+
+    for row in 0..rows {
+        let alone = Windowed::new(&gpu, &vec![SENTINEL; n as usize], lead[4]);
+        // The same activation row and its own scales, multiplied alone.
+        gpu.submit(
+            &[],
+            &[gpu.dispatch_sliced(
+                K_GEMV,
+                &[&x.buf, &w.buf, &sx.buf, &sw.buf, &alone.buf],
+                &[
+                    (u64::from(row) * u64::from(kg), u64::from(kg)),
+                    w.range(),
+                    (u64::from(row) * u64::from(ng), u64::from(ng)),
+                    sw.range(),
+                    alone.range(),
+                ],
+                &[1, kg, n],
+                Dispatch::Workgroups(n),
+            )],
+        );
+        gpu.poll_wait();
+        let alone = alone.window(&alone.read_bits(&gpu));
+        let got = &batched[row as usize * n as usize..(row as usize + 1) * n as usize];
+        assert_native_agrees(&gpu, rows, got, &alone, &format!("row {row} of a {rows}-row batch differs from that row decoded alone"));
+    }
+}
