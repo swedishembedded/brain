@@ -12,10 +12,11 @@
 //! accumulation, learning-rate schedule, resume position, checkpoint cadence
 //! and evaluation arithmetic by hand, identically, once per model.
 //!
-//! [`run`] is that lifecycle once. A family supplies [`SampleTrainer`]: what
-//! one sample's gradient accumulation does, and what one optimizer step
-//! applies. Everything else - order, schedule, accumulation count, resume,
-//! cadence, evaluation points, the progress stream - is the session's.
+//! [`run`] is that lifecycle once. A family supplies [`SampleTrainer`]:
+//! [`SampleTrainer::batch_step`], one optimizer step over the samples the
+//! session drew. Everything else - order, schedule, accumulation count,
+//! resume, cadence, evaluation points, the progress stream - is the
+//! session's.
 //!
 //! Swedish Embedded AB implements training lifecycles that a new multi-part
 //! model plugs into by supplying its own step, for its clients. If your team
@@ -113,13 +114,11 @@ pub struct Outcome {
     pub position: u64,
 }
 
-/// Run the session: order, schedule, accumulation, resume, cadence and
-/// evaluation over a [`SampleTrainer`].
+/// Run the session without a held-out evaluation - order, schedule,
+/// accumulation, resume and cadence over a [`SampleTrainer`].
 ///
 /// `schedule` maps the *step count* to a rate; `schedule.at(step)` is the
 /// factor the family multiplies its peak learning rate by.
-/// `eval` is called once before training (when the run starts at the
-/// beginning) and at the end of every epoch.
 #[allow(clippy::too_many_arguments)]
 pub fn run<T: SampleTrainer>(
     trainer: &mut T,

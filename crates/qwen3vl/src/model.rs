@@ -1869,6 +1869,10 @@ mod tests {
     /// first image and the text prompt held fixed, must change the output.
     #[test]
     fn two_image_generate_runs_and_second_image_changes_output() {
+        // seed: every draw this fixture makes is pinned - with a fresh random
+        // seed per run, the weights, both images AND the two sampling streams
+        // all changed, so the "second image matters" assertion was a coin flip
+        // on whether a tiny random model happened to emit one constant token.
         let vcfg = VisionConfig {
             depth: 2,
             hidden: 32,
@@ -1929,11 +1933,11 @@ mod tests {
         for (n, s, o) in &block_leaf_dims {
             vspecs.push((n.as_str(), *s, *o));
         }
-        let vweights = rand_map(Rng::new(random_seed()), &vspecs);
+        let vweights = rand_map(Rng::new(31), &vspecs);
 
         let merged = c * 4;
         let mweights = rand_map(
-            Rng::new(random_seed()),
+            Rng::new(32),
             &[
                 ("ln.weight", c, true),
                 ("ln.bias", c, false),
@@ -1946,7 +1950,7 @@ mod tests {
         let ds_mweights: Vec<HashMap<String, Vec<f32>>> = (0..vcfg.deepstack_indexes.len() as u64)
             .map(|_| {
                 rand_map(
-                    Rng::new(random_seed()),
+                    Rng::new(32),
                     &[
                         ("ln.weight", merged, true),
                         ("ln.bias", merged, false),
@@ -1993,13 +1997,13 @@ mod tests {
         };
 
         let pv_total = (16 * vcfg.patch_vec_dim()) as usize;
-        let image0: Vec<f32> = { let mut r = Rng::new(random_seed()); (0..pv_total).map(|_| r.next_f32() - 0.5).collect() };
-        let image1_a: Vec<f32> = { let mut r = Rng::new(random_seed()); (0..pv_total).map(|_| r.next_f32() - 0.5).collect() };
-        let image1_b: Vec<f32> = { let mut r = Rng::new(random_seed()); (0..pv_total).map(|_| r.next_f32() - 0.5).collect() };
+        let image0: Vec<f32> = { let mut r = Rng::new(34); (0..pv_total).map(|_| r.next_f32() - 0.5).collect() };
+        let image1_a: Vec<f32> = { let mut r = Rng::new(35); (0..pv_total).map(|_| r.next_f32() - 0.5).collect() };
+        let image1_b: Vec<f32> = { let mut r = Rng::new(36); (0..pv_total).map(|_| r.next_f32() - 0.5).collect() };
 
         let model = build_model();
         let images_a = [ImageInput { grid: (4, 4), pixels: &image0 }, ImageInput { grid: (4, 4), pixels: &image1_a }];
-        let mut rng_a = Rng::new(random_seed());
+        let mut rng_a = Rng::new(37);
         let out_a = model.generate(&tokens, &images_a, max_new, &[], SampleParams::greedy(), &mut rng_a);
         assert!(!out_a.is_empty(), "two-image generate produced no tokens");
         assert!(out_a.len() as u32 <= max_new);
@@ -2013,7 +2017,7 @@ mod tests {
         // first image's rows ever read).
         let model2 = build_model();
         let images_b = [ImageInput { grid: (4, 4), pixels: &image0 }, ImageInput { grid: (4, 4), pixels: &image1_b }];
-        let mut rng_b = Rng::new(random_seed());
+        let mut rng_b = Rng::new(38);
         let out_b = model2.generate(&tokens, &images_b, max_new, &[], SampleParams::greedy(), &mut rng_b);
         assert_ne!(out_a, out_b, "changing only the SECOND image did not change the generated sequence -- it is not actually influencing output");
     }
