@@ -29,3 +29,4 @@ tools/goldens/worldmirror2_dump_reference.py	main:seed=77	python-default	world: 
 tools/goldens/worldmirror2_dump_reference.py	main:seed=88	python-default	world: picks which entries are spot-checked; the chosen indices are written beside the values
 tools/goldens/worldmirror2_dump_reference.py	sample:seed=0	python-default	world: picks which entries are spot-checked; the chosen indices are written beside the values
 tools/goldens/ouro_dump_reference.py	-:SEED=4242	python-const	frozen: the seed fixes the tiny reference checkpoint initialization, so the dumped hidden states, gates and logits are reproducible
+tools/goldens/huginn_dump_reference.py	-:SEED=2027	python-const	frozen: the seed fixes the tiny reference checkpoint initialization and the fixed latent starting state, so the dumped per-step logits and latents are reproducible
