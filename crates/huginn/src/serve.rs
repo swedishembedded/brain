@@ -126,9 +126,6 @@ pub struct Engine {
     ps: ParamStore,
     /// Recurrent iterations the core runs per position.
     steps: u32,
-    /// Length of the KV-sharing ring, in recurrent stages (`None` = one
-    /// history per stage). See `Engine::open_with_sharing`.
-    share: Option<u32>,
     /// One allocator per KV plane: each plane is its own paged pool, so a
     /// sequence's block tables draw from independent pools of the same
     /// capacity.
@@ -343,7 +340,6 @@ impl Engine {
             cfg,
             ps,
             steps,
-            share,
             allocs,
             block_size,
             max_bt,

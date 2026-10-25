@@ -417,7 +417,7 @@ impl Engine {
         // (block, offset) slot for the batched scatter.
         table.reserve(n, &mut self.allocs[0]).expect("out of KV blocks");
         let mut pass_slots: Vec<(Vec<u32>, Vec<u32>)> = Vec::with_capacity(cfg.total_ut_steps as usize);
-        let mut slots = |t: &BlockTable| {
+        let slots = |t: &BlockTable| {
             let mut b = vec![0u32; n as usize];
             let mut o = vec![0u32; n as usize];
             for i in 0..n as usize {
@@ -441,7 +441,7 @@ impl Engine {
         let (hq, hkv) = (cfg.q_dim() as u64, cfg.kv_dim() as u64);
         let nn = n as u64;
         let st = |x: u64| gpu.storage(x);
-        let mut b = PrefillBufs {
+        let b = PrefillBufs {
             tokens: gpu.buffer("ouro_prefill_tokens", nn * 4, BufUsage::STORAGE | BufUsage::COPY_DST),
             h: [st(nn * d), st(nn * d)],
             hs: (0..cfg.total_ut_steps).map(|_| st(nn * d)).collect(),
@@ -715,6 +715,3 @@ fn argmax(s: &[f32]) -> u32 {
     bi as u32
 }
 
-fn rope_at(g: &Gpu, buf: &DeviceBuffer, n_heads: u32, head_dim: u32, row_stride: u32, pos: u32, theta: f32) -> Step {
-    g.step(model::ROPE_AT_ID, &[buf], &[1, n_heads, head_dim, row_stride, 0, pos, gpu_core::f(theta)], n_heads * (head_dim / 2))
-}
