@@ -1624,6 +1624,26 @@ impl Qwen35GgufInstance {
     /// that length, and the logits are not meaningful. A caller that wants
     /// meaningful logits builds the context with [`Self::generate_batch`].
     pub fn decode_batch_at(&self, tokens: &[u32], positions: &[u32]) -> Result<Vec<Vec<f32>>, String> {
+        self.check_batch_at(tokens, positions)?;
+        self.stack_step_batch(tokens, positions)
+    }
+
+    /// [`Self::decode_batch_at`] for the tape a served GREEDY request runs:
+    /// the same layer stack, then the device head
+    /// ([`Self::stack_decode_hidden`] followed by the greedy reduction) - so
+    /// only the winning token ids come back, never a `[bsz, vocab]` block.
+    /// `forward_batched_greedy` is this call with the scheduler's own
+    /// positions.
+    pub fn decode_batch_greedy_at(&self, tokens: &[u32], positions: &[u32]) -> Result<Vec<u32>, String> {
+        self.check_batch_at(tokens, positions)?;
+        let slots: Vec<u32> = (0..tokens.len() as u32).collect();
+        let hidden = self.stack_decode_hidden(tokens, &slots, positions)?;
+        Ok(self.head_argmax_rows(&hidden, tokens.len() as u32))
+    }
+
+    /// [`Self::decode_batch_at`]'s input contract, shared with the greedy
+    /// sibling so both refuse the same shapes identically.
+    fn check_batch_at(&self, tokens: &[u32], positions: &[u32]) -> Result<(), String> {
         if tokens.len() != positions.len() || tokens.is_empty() {
             return Err(format!("{MODEL}: decode_batch_at needs one position per token ({} tokens, {} positions)", tokens.len(), positions.len()));
         }
@@ -1633,7 +1653,7 @@ impl Qwen35GgufInstance {
         if let Some(&p) = positions.iter().find(|&&p| p >= self.cap) {
             return Err(format!("{MODEL}: position {p} is beyond this instance's context capacity {}", self.cap));
         }
-        self.stack_step_batch(tokens, positions)
+        Ok(())
     }
 
     /// **Replay a whole prompt**, leaving every stage's GQA cache and GDN
@@ -2424,8 +2444,24 @@ impl Qwen35GgufInstance {
     /// own timestamp pair does not move. This is how a long-context decode step
     /// is priced when prefilling the context for real would take hours.
     pub fn profile_decode_batch_at(&self, batch: u32, position: u32, steps: u32) -> Result<DecodeProfile, String> {
+        self.profile_batch_at(batch, position, steps, |tokens, positions| self.decode_batch_at(tokens, positions).map(|_| ()))
+    }
+
+    /// [`Self::profile_decode_batch_at`] for the tape a served GREEDY request
+    /// runs: the layer stack followed by the device head
+    /// ([`Self::decode_batch_greedy_at`]), so no `[bsz, vocab]` block is read
+    /// back and the measurement is the production step, not the
+    /// logits-returning sibling's.
+    pub fn profile_decode_batch_greedy_at(&self, batch: u32, position: u32, steps: u32) -> Result<DecodeProfile, String> {
+        self.profile_batch_at(batch, position, steps, |tokens, positions| self.decode_batch_greedy_at(tokens, positions).map(|_| ()))
+    }
+
+    /// The shared body of the two batch-at profiles: validate, one unrecorded
+    /// pass through `pass` (pipeline compilation is not decode time), then the
+    /// two measured regions.
+    fn profile_batch_at(&self, batch: u32, position: u32, steps: u32, mut pass: impl FnMut(&[u32], &[u32]) -> Result<(), String>) -> Result<DecodeProfile, String> {
         if batch == 0 || steps == 0 {
-            return Err(format!("{MODEL}: profile_decode_batch_at needs a batch and a step count (got {batch} x {steps})"));
+            return Err(format!("{MODEL}: a batch profile needs a batch and a step count (got {batch} x {steps})"));
         }
         let last = position as u64 + 2 * steps as u64;
         if last >= self.cap as u64 {
@@ -2433,12 +2469,12 @@ impl Qwen35GgufInstance {
         }
         let tokens = vec![1u32; batch as usize];
         // One unrecorded pass first: pipeline compilation is not decode time.
-        self.decode_batch_at(&tokens, &vec![position; batch as usize])?;
+        pass(&tokens, &vec![position; batch as usize])?;
         self.poll_wait();
         let mut failure = None;
         let profile = self.profile_regions(steps, |i| {
             if failure.is_none() {
-                if let Err(e) = self.decode_batch_at(&tokens, &vec![position + 1 + i; batch as usize]) {
+                if let Err(e) = pass(&tokens, &vec![position + 1 + i; batch as usize]) {
                     failure = Some(e);
                 }
             }
@@ -2447,6 +2483,75 @@ impl Qwen35GgufInstance {
             Some(e) => Err(e),
             None => Ok(profile),
         }
+    }
+
+    /// **The head alone, priced separately** - the epilogue
+    /// [`Self::profile_decode_batch_at`]'s table cannot split out, because the
+    /// head projection is the same `matmul_i8_gemv`/`_mma` kernel the layer
+    /// linears dispatch and merges into their rows.
+    ///
+    /// Runs one real decode pass to obtain the batch's `[bsz, d_model]`
+    /// pre-norm hidden block, then times the production head for `steps`
+    /// passes: the final RMSNorm, the `[bsz, d_model] x [d_model, vocab]`
+    /// projection and the greedy reduction (`Self::head_argmax_rows`, exactly
+    /// what `forward_batched_greedy` runs). One head pass is one decode step's
+    /// head cost, so `wall_s / steps` is already that step's head time.
+    ///
+    /// The table is the last stage's alone - the head lives on the last card
+    /// and is the only work this region runs - so its total is that card's
+    /// head device time, not the model's.
+    pub fn profile_head_at(&self, batch: u32, position: u32, steps: u32) -> Result<DecodeProfile, String> {
+        if batch == 0 || steps == 0 {
+            return Err(format!("{MODEL}: profile_head_at needs a batch and a step count (got {batch} x {steps})"));
+        }
+        if position as u64 >= self.cap as u64 {
+            return Err(format!("{MODEL}: profile_head_at: position {position} is beyond this instance's capacity {}", self.cap));
+        }
+        let slots: Vec<u32> = (0..batch).collect();
+        let tokens = vec![1u32; batch as usize];
+        // The pass's own hidden block: a real decode step's output, so the head
+        // is priced at the shape and magnitudes production gives it.
+        let hidden = self.stack_decode_hidden(&tokens, &slots, &vec![position; batch as usize])?;
+        let head = self.shards.last().expect("a plan always has at least one stage");
+        let g = &head.qwen35.gpu;
+        // One unrecorded pass first: pipeline compilation is not head time.
+        self.head_argmax_rows(&hidden, batch);
+        self.poll_wait();
+
+        let totals0 = gpu_core::cuda_call_totals();
+        let t0 = std::time::Instant::now();
+        let mut step_s = Vec::with_capacity(steps as usize);
+        for _ in 0..steps {
+            let ts = std::time::Instant::now();
+            self.head_argmax_rows(&hidden, batch);
+            step_s.push(ts.elapsed().as_secs_f64());
+        }
+        self.poll_wait();
+        let wall_s = t0.elapsed().as_secs_f64();
+        let totals1 = gpu_core::cuda_call_totals();
+
+        let timed = g.set_kernel_timing(true);
+        g.reset_kernel_times();
+        let t1 = std::time::Instant::now();
+        for _ in 0..steps {
+            self.head_argmax_rows(&hidden, batch);
+        }
+        self.poll_wait();
+        let timed_wall_s = t1.elapsed().as_secs_f64();
+        let mut rows: Vec<(String, f64, u64)> = if timed { g.kernel_times().unwrap_or_default() } else { Vec::new() };
+        g.set_kernel_timing(false);
+        rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+        Ok(DecodeProfile {
+            steps,
+            wall_s,
+            step_s,
+            alloc_calls: totals1.device_alloc_calls - totals0.device_alloc_calls,
+            host_launches: totals1.host_launches - totals0.host_launches,
+            graph_replays: totals1.graph_replays - totals0.graph_replays,
+            timed_wall_s,
+            rows,
+        })
     }
 
     /// **The CHUNK tape at a chosen row count**, profiled the same way
@@ -2775,6 +2880,122 @@ impl DecodeProfile {
         self.rows.iter().map(|(_, ms, _)| ms).sum()
     }
 }
+
+/// The phase of a decode step a kernel belongs to.
+///
+/// A decode step's kernel table is merged across every layer and every
+/// projection, so the largest row of it says a kernel name but not which part
+/// of the step it is. These phases are the split an optimization needs: what
+/// streams the weights ([`DecodePhase::Linear`]), what touches the paged KV
+/// ([`DecodePhase::Attention`]), the recurrent mixer ([`DecodePhase::Gdn`]),
+/// the norms/adds/quantisers between them ([`DecodePhase::NormEpilogue`]), the
+/// head's greedy/top-k reduction ([`DecodePhase::Sampling`]), and everything
+/// the classifier does not recognise - reported rather than silently dropped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DecodePhase {
+    /// Weight-streaming matrix products: `matmul_*`, the GEMV/GEMM variants,
+    /// the fused multi-GEMV and any vendor-library GEMM.
+    Linear,
+    /// Paged GQA decode attention: scores/softmax/apply, the KV append, the
+    /// fused prep and its partial rotation.
+    Attention,
+    /// Gated-DeltaNet's stateful mixer (conv, L2 norm, gates, delta-rule
+    /// `bmm`, recurrent state and its pool staging).
+    Gdn,
+    /// RMSNorm, residual add, activation quantisation and the elementwise
+    /// glue between two linears.
+    NormEpilogue,
+    /// The head's greedy/top-k reduction.
+    Sampling,
+    /// A kernel the classifier does not recognise.
+    Other,
+}
+
+impl DecodePhase {
+    /// Every phase, in report order (largest expected share first).
+    pub const ALL: [DecodePhase; 6] =
+        [DecodePhase::Linear, DecodePhase::Attention, DecodePhase::Gdn, DecodePhase::NormEpilogue, DecodePhase::Sampling, DecodePhase::Other];
+
+    /// The phase's name in a report.
+    pub fn label(self) -> &'static str {
+        match self {
+            DecodePhase::Linear => "linear (gemv/gemm)",
+            DecodePhase::Attention => "attention + kv append",
+            DecodePhase::Gdn => "gdn mixer",
+            DecodePhase::NormEpilogue => "norm/add/quant",
+            DecodePhase::Sampling => "sampling (head reduce)",
+            DecodePhase::Other => "other",
+        }
+    }
+
+    /// Which phase a kernel name belongs to, by the family its name carries -
+    /// what the backend records (`native:...`, a WGSL catalogue name, or
+    /// `library_gemm ...`) rather than a per-call-site label, so no dispatch
+    /// site has to change for the profile to attribute its time.
+    pub fn of_kernel(name: &str) -> DecodePhase {
+        let n = name.to_ascii_lowercase();
+        let any = |pats: &[&str]| pats.iter().any(|p| n.contains(p));
+        if any(&["matmul", "gemv", "gemm", "nvfp4"]) {
+            // Weight-streaming products first: no attention, mixer or glue
+            // name below contains one of these, and a vendor library's
+            // `library_gemm` label is a product too.
+            DecodePhase::Linear
+        } else if any(&["attn", "attention", "gqa", "kv_append", "flash", "softmax", "paged", "rope"]) {
+            DecodePhase::Attention
+        } else if any(&["gdn", "bmm", "conv1d", "causal_conv", "kv_expand", "pool_rows"]) {
+            DecodePhase::Gdn
+        } else if any(&["rms", "norm", "add", "quant", "silu", "sigmoid", "concat", "splice", "l2", "decay", "gather", "scatter", "sub", "mul", "scale_row", "max_abs"]) {
+            DecodePhase::NormEpilogue
+        } else if any(&["argmax", "topk", "sample"]) {
+            DecodePhase::Sampling
+        } else {
+            DecodePhase::Other
+        }
+    }
+}
+
+/// One phase's device time over a profiled decode table.
+#[derive(Clone, Debug)]
+pub struct PhaseCost {
+    pub phase: DecodePhase,
+    /// Device milliseconds summed over every kernel the phase owns.
+    pub ms: f64,
+    /// Invocations summed the same way.
+    pub calls: u64,
+}
+
+impl PhaseCost {
+    /// Device milliseconds this phase costs per decode step.
+    pub fn ms_per_step(&self, steps: u32) -> f64 {
+        if steps > 0 {
+            self.ms / steps as f64
+        } else {
+            0.0
+        }
+    }
+}
+
+/// Roll a [`DecodeProfile`]'s merged kernel table up into phases, largest
+/// first.
+///
+/// The rollup is a partition: every row lands in exactly one phase, so the
+/// summed milliseconds and calls are those of the table (the profile's own
+/// documented upper bound on real device time, per-dispatch timing being
+/// measured alone).
+pub fn decode_phases(rows: &[(String, f64, u64)]) -> Vec<PhaseCost> {
+    let mut out: Vec<PhaseCost> = DecodePhase::ALL.iter().map(|&phase| PhaseCost { phase, ms: 0.0, calls: 0 }).collect();
+    for (name, ms, calls) in rows {
+        let phase = DecodePhase::of_kernel(name);
+        let slot = out.iter_mut().find(|p| p.phase == phase).expect("ALL covers every phase");
+        slot.ms += ms;
+        slot.calls += calls;
+    }
+    out.retain(|p| p.calls > 0 || p.ms > 0.0);
+    out.sort_by(|a, b| b.ms.total_cmp(&a.ms).then(a.phase.cmp(&b.phase)));
+    out
+}
+
+
 
 /// Decode steps run before the measured region of
 /// [`Qwen35GgufInstance::profile_decode`] so it measures steady state.
@@ -3819,5 +4040,89 @@ mod tests {
 
         std::fs::remove_file(complete).ok();
         std::fs::remove_file(tokenizerless).ok();
+    }
+}
+
+#[cfg(test)]
+mod decode_phase_tests {
+    use super::*;
+
+    /// The classifier is what makes a merged kernel table readable as the
+    /// phases a decode step is made of, so every kernel family the served
+    /// path dispatches is pinned to its phase by name.
+    #[test]
+    fn every_decode_kernel_lands_in_the_phase_whose_bytes_it_streams() {
+        for (name, want) in [
+            // Weight-streaming products: layers, the head, multi/fused variants.
+            ("native:matmul_i8_gemv", DecodePhase::Linear),
+            ("matmul_i8_gemv_reg", DecodePhase::Linear),
+            ("native:matmul_i8_gemv_multi", DecodePhase::Linear),
+            ("native:matmul_i8_mma_m16", DecodePhase::Linear),
+            ("matmul_i8_dyn", DecodePhase::Linear),
+            ("library_gemm 8x5120x5120 F32.F32.F32 b1", DecodePhase::Linear),
+            // Paged GQA attention, its KV append and its fused prep.
+            ("native:decode_attn_batched_i8", DecodePhase::Attention),
+            ("native:paged_flash_decode_gqa_hd256_kv8", DecodePhase::Attention),
+            ("native:paged_flash_decode_gqa_combine", DecodePhase::Attention),
+            ("native:kv_append_i8_clipped", DecodePhase::Attention),
+            ("paged_kv_append_i8_clipped_batched", DecodePhase::Attention),
+            ("native:gqa_decode_prep", DecodePhase::Attention),
+            ("rope2d_partial", DecodePhase::Attention),
+            ("paged_decode_scores_i8_batched", DecodePhase::Attention),
+            ("decode_softmax_batched", DecodePhase::Attention),
+            // Gated-DeltaNet's stateful mixer, its delta-rule bmm and its state staging.
+            ("native:gdn_decode_pool", DecodePhase::Gdn),
+            ("native:gdn_commit_pool", DecodePhase::Gdn),
+            ("gdn_causal_conv1d_step", DecodePhase::Gdn),
+            ("gdn_recurrent_step", DecodePhase::Gdn),
+            ("bmm", DecodePhase::Gdn),
+            ("bmm_acc", DecodePhase::Gdn),
+            ("causal_conv1d_step", DecodePhase::Gdn),
+            ("kv_expand", DecodePhase::Gdn),
+            ("pool_rows_gather2", DecodePhase::Gdn),
+            ("pool_rows_scatter2", DecodePhase::Gdn),
+            // Norm, residual add, activation quantisation and the glue between them.
+            ("native:add_rms_quant", DecodePhase::NormEpilogue),
+            ("native:quant_epilogue", DecodePhase::NormEpilogue),
+            ("rmsnorm_rows", DecodePhase::NormEpilogue),
+            ("add2", DecodePhase::NormEpilogue),
+            ("silu_mul", DecodePhase::NormEpilogue),
+            ("concat_split", DecodePhase::NormEpilogue),
+            ("max_abs_rows", DecodePhase::NormEpilogue),
+            ("quant_pack", DecodePhase::NormEpilogue),
+            // The head's greedy/top-k reduction.
+            ("argmax_final", DecodePhase::Sampling),
+            ("argmax_part", DecodePhase::Sampling),
+            ("topk_rows", DecodePhase::Sampling),
+            // Nothing is dropped silently: an unknown name is reported.
+            ("something_new", DecodePhase::Other),
+        ] {
+            assert_eq!(DecodePhase::of_kernel(name), want, "kernel {name}");
+        }
+    }
+
+    /// The rollup is a partition of the measured table: every millisecond and
+    /// every call appears exactly once, largest phase first, so a share of the
+    /// step can be read off it without losing what the table said.
+    #[test]
+    fn the_phase_rollup_is_a_partition_of_the_kernel_table() {
+        let rows = vec![
+            ("native:matmul_i8_gemv".to_string(), 10.0, 100),
+            ("native:matmul_i8_mma_m16".to_string(), 5.0, 20),
+            ("native:decode_attn_batched_i8".to_string(), 2.0, 16),
+            ("native:gdn_decode_pool".to_string(), 3.0, 48),
+            ("add2".to_string(), 1.0, 640),
+            ("argmax_final".to_string(), 0.25, 8),
+            ("something_new".to_string(), 0.5, 1),
+        ];
+        let phases = decode_phases(&rows);
+        assert!((phases.iter().map(|p| p.ms).sum::<f64>() - 21.75).abs() < 1e-12);
+        assert_eq!(phases.iter().map(|p| p.calls).sum::<u64>(), 833);
+        assert_eq!(phases[0].phase, DecodePhase::Linear);
+        assert!((phases[0].ms - 15.0).abs() < 1e-12);
+        assert_eq!(phases[0].calls, 120);
+        assert_eq!(phases.iter().find(|p| p.phase == DecodePhase::Sampling).map(|p| p.calls), Some(8));
+        assert_eq!(phases.iter().find(|p| p.phase == DecodePhase::Other).map(|p| p.calls), Some(1));
+        assert!(phases.windows(2).all(|w| w[0].ms >= w[1].ms), "phases are ordered by time");
     }
 }

@@ -29,13 +29,19 @@
 //! `--device` and `--backend` take `brain serve`'s grammar and default to every
 //! GPU on the backend the machine prefers.
 //!
-//! **Batches and long contexts** - `--batch <n>` and/or `--context <tokens>`
-//! switch to a SYNTHETIC context (fresh caches, decode work at a real position,
-//! as `brain perf run longctx` does) with `n` rows (default 1) at that context
-//! (default 512); the KV cache storage comes from `--kv <f32|bf16|int8|fp8>`
-//! (default f32). The report is the per-kernel DEVICE time per decode step,
-//! which a loaded host cannot distort the way it stretches the wall clock, and
-//! the weight bandwidth that step achieved.
+//! **Batches and long contexts** - `--batch <n>` or `--batches a,b,c` and/or
+//! `--context <tokens>` switch to a SYNTHETIC context (fresh caches, decode
+//! work at a real position, as `brain perf run longctx` does) with `n` rows
+//! (default 1) at that context (default 512); the KV cache storage comes from
+//! `--kv <f32|bf16|int8|fp8>` (default f32). One activation serves every batch
+//! in the list, so a sweep pays the model load once.
+//!
+//! The report is the production GREEDY tape's wall time per step (the only
+//! figure an optimization may be judged by), the per-kernel DEVICE time
+//! (which RANKS, and is an upper bound - each dispatch is drained alone), the
+//! step rolled up into phases with the head measured on its own, and the
+//! weight bandwidth that step achieved. `--kernels` prints the full per-kernel
+//! table behind the phase rollup.
 
 use std::time::Instant;
 
@@ -66,11 +72,17 @@ fn main() {
         kv = Some(model::kv_tier::KvTier::parse(&v).unwrap_or_else(|e| panic!("{e}")));
     }
     let batch: Option<u32> = flag("--batch").map(|v| v.parse().unwrap_or_else(|_| panic!("--batch takes a count, got {v:?}")));
+    let batches: Option<Vec<u32>> = flag("--batches").map(|v| {
+        let list: Vec<u32> = v.split(',').map(|s| s.trim().parse().unwrap_or_else(|_| panic!("--batches takes counts, got {v:?}"))).collect();
+        assert!(!list.is_empty(), "--batches needs at least one count");
+        list
+    });
+    let batches = batches.or_else(|| batch.map(|b| vec![b]));
     let context: Option<u32> = flag("--context").map(|v| v.parse().unwrap_or_else(|_| panic!("--context takes a token count, got {v:?}")));
     let set = gpu_core::select_compute(flag("--device").as_deref().unwrap_or("gpu"), flag("--backend").as_deref()).unwrap_or_else(|e| panic!("{e}"));
 
     let Some(path) = a.get(1).filter(|s| s.ends_with(".gguf") || std::path::Path::new(s).is_file()).cloned() else {
-        eprintln!("usage: qwen35_decode_profile <path to Qwen3.8-27B*.gguf> [steps] [json-out] [--kv f32|bf16|int8|fp8] [--weight-format int8|q4|...]");
+        eprintln!("usage: qwen35_decode_profile <path to Qwen3.8-27B*.gguf> [steps] [json-out] [--kv f32|bf16|int8|fp8] [--weight-format int8|q4|...] [--batches 1,8,12] [--context N] [--kernels]");
         std::process::exit(2);
     };
     let devices = real_devices(&set.gpus);
@@ -86,8 +98,9 @@ fn main() {
     // Unset, every tensor as the checkpoint stores it - `brain serve`'s default.
     let tier = policy.weights.unwrap_or_else(|| qwen35::int8_gguf_resident::held_tiers_at(&path).unwrap_or_else(|e| panic!("{e}")));
     println!("weight tier: {}", tier.summary());
-    if batch.is_some() || context.is_some() {
-        return synthetic_context(&path, devices, &tier, kv, context.unwrap_or(CAP), batch.unwrap_or(1), steps);
+    if batches.is_some() || context.is_some() {
+        let kernels = a.iter().any(|s| s == "--kernels");
+        return synthetic_sweep(&path, devices, &tier, kv, context.unwrap_or(CAP), &batches.unwrap_or_else(|| vec![1]), steps, kernels);
     }
 
     let mg = MmapGguf::open(&path).unwrap_or_else(|e| panic!("open the checkpoint: {e}"));
@@ -167,39 +180,160 @@ fn weights_streamed_per_step(path: &str, context: u32, tier: &model::ops::TierPo
     head + cfg.layer_types().into_iter().map(|ty| cfg.layer_weight_bytes(ty, tier)).sum::<u64>()
 }
 
-/// `batch` rows decoding at a synthetic `context`: the per-kernel device time
-/// per step, and what share the attention kernels (the ones the KV tier changes)
-/// take.
-fn synthetic_context(path: &str, devices: Vec<(Device, u64)>, tier: &model::ops::TierPolicy, kv: Option<model::kv_tier::KvTier>, context: u32, batch: u32, steps: u32) {
+/// The head's resident bytes, the part of [`weights_streamed_per_step`] the
+/// separately-profiled head reads.
+fn head_bytes(path: &str, context: u32, tier: &model::ops::TierPolicy) -> u64 {
+    let cfg = resident_config(&MmapGguf::open(path).expect("open the checkpoint"), context).expect("resident_config");
+    layer_cost(&cfg, context, tier, model::kv_tier::KvTier::F32, 1).head
+}
+
+/// One batch's measured decode step, as a row of the sweep table.
+struct BatchStep {
+    batch: u32,
+    /// MEDIAN wall milliseconds of one step on the production greedy tape. The
+    /// median, not the mean: the first measured passes of each batch size pay
+    /// graph capture, which no served token pays, and the min/max are printed
+    /// beside it so the spread is visible rather than hidden.
+    step_ms: f64,
+    best_ms: f64,
+    worst_ms: f64,
+    /// Summed device time per step (a per-dispatch-timed upper bound; see
+    /// [`qwen35::int8_gguf_resident::DecodeProfile`]).
+    device_ms: f64,
+    /// The head alone, measured on its own (ms/step): the epilogue the merged
+    /// table cannot split out, because it dispatches the same matmul kernel
+    /// the layer linears do.
+    head_ms: f64,
+    /// Host-side calls per step: allocations, individual launches and graph
+    /// replays. A steady-state step should show no allocation, no individual
+    /// launch and one replay; anything else is a host- or graph-bound step and
+    /// is the first thing to read when a batch is slower than its kernel table
+    /// explains.
+    allocs_per_step: f64,
+    launches_per_step: f64,
+    replays_per_step: f64,
+    phases: Vec<qwen35::int8_gguf_resident::PhaseCost>,
+    /// `(kernel, ms/step, calls/step)` of the whole step, for the full table.
+    rows: Vec<(String, f64, u64)>,
+}
+
+/// Batches decoding at a synthetic `context`: per-step wall and device time,
+/// effective weight bandwidth, and the step split into phases with the head
+/// measured on its own. One activation, one table per batch.
+fn synthetic_sweep(path: &str, devices: Vec<(Device, u64)>, tier: &model::ops::TierPolicy, kv: Option<model::kv_tier::KvTier>, context: u32, batches: &[u32], steps: u32, kernels: bool) {
     let kv = kv.unwrap_or(model::kv_tier::KvTier::F32);
-    let r = Qwen35GgufResident::new(path.to_string(), devices, context, tier.clone()).with_kv_tier(kv).with_max_batch(batch);
+    let max_batch = batches.iter().copied().max().expect("a non-empty batch list");
+    let r = Qwen35GgufResident::new(path.to_string(), devices, context, tier.clone()).with_kv_tier(kv).with_max_batch(max_batch);
     let placed: Vec<Device> = r.estimate_multi(&r.instance_key("generate", &capability::Invocation::new())).devices().collect();
     if placed.is_empty() {
-        eprintln!("batch {batch} x {context} tokens with a {kv} KV cache does not fit these GPUs");
+        eprintln!("batch {max_batch} x {context} tokens with a {kv} KV cache does not fit these GPUs");
         std::process::exit(3);
     }
     let t0 = Instant::now();
     let inst = r.activate_owned(&placed).expect("activate the real checkpoint");
-    println!("synthetic context {context}, batch {batch}, kv {kv}: cold load {:.1} s over {:?}", t0.elapsed().as_secs_f64(), placed);
-    let position = context - 2 * steps - 2;
-    let p = inst.profile_decode_batch_at(batch, position, steps).unwrap_or_else(|e| panic!("{e}"));
-    let step_ms = 1e3 * p.wall_s / p.steps as f64;
+    println!("synthetic context {context}, batches {batches:?}, kv {kv}: cold load {:.1} s over {:?}", t0.elapsed().as_secs_f64(), placed);
+
     let weight_bytes = weights_streamed_per_step(path, context, tier);
-    println!(
-        "  backend {}: wall (production flush path) {step_ms:.2} ms/step, {:.2} tok/s aggregate, {:.1} GB/s weights over both stages in series",
-        gpu_core::backend_name(),
-        batch as f64 * 1e3 / step_ms,
-        weight_bytes as f64 / 1e6 / step_ms
-    );
-    if p.rows.is_empty() {
-        println!("  (per-kernel device timing unavailable on this backend)");
-        return;
+    let head_weight_bytes = head_bytes(path, context, tier);
+    let position = context - 2 * steps - 2;
+    let mut measured: Vec<BatchStep> = Vec::with_capacity(batches.len());
+    for &batch in batches {
+        let p = inst.profile_decode_batch_greedy_at(batch, position, steps).unwrap_or_else(|e| panic!("{e}"));
+        let h = inst.profile_head_at(batch, position, steps).unwrap_or_else(|e| panic!("{e}"));
+        measured.push(BatchStep {
+            batch,
+            step_ms: p.step_ms_at(0.5),
+            best_ms: p.step_ms_at(0.0),
+            worst_ms: p.step_ms_at(1.0),
+            device_ms: p.device_ms() / p.steps as f64,
+            head_ms: h.step_ms_at(0.5),
+            allocs_per_step: p.alloc_calls as f64 / p.steps as f64,
+            launches_per_step: p.host_launches as f64 / p.steps as f64,
+            replays_per_step: p.graph_replays as f64 / p.steps as f64,
+            phases: qwen35::int8_gguf_resident::decode_phases(&p.rows),
+            rows: p.rows.iter().map(|(name, ms, calls)| (name.clone(), ms / p.steps as f64, calls / p.steps as u64)).collect(),
+        });
+        // The head's own table names the kernels, so a change there is visible.
+        let head_kernels: Vec<String> = h.rows.iter().map(|(name, ms, calls)| format!("{name} {:.3}/{:.0}", ms / h.steps as f64, *calls as f64 / h.steps as f64)).collect();
+        if let Some(last) = measured.last_mut() {
+            last.rows.push((format!("# head: {}", head_kernels.join(", ")), 0.0, 0));
+        }
     }
-    let total = p.device_ms() / steps as f64;
-    println!("  device time {total:.2} ms/step ({:.2} tok/s total, {:.3} tok/s per stream)", batch as f64 * 1e3 / total, 1e3 / total);
-    println!("{:<44} {:>12} {:>8} {:>7}", "kernel", "ms/step", "calls", "%");
-    for (name, ms, calls) in p.rows.iter().take(12) {
-        println!("{name:<44} {:>12.3} {:>8} {:>6.1}%", ms / steps as f64, calls / steps as u64, 100.0 * ms / p.device_ms().max(1e-9));
+
+    println!();
+    println!("backend {}; {steps} profiled step(s) per batch; weights per step {:.2} GiB (head {:.2} GiB)", gpu_core::backend_name(), weight_bytes as f64 / (1u64 << 30) as f64, head_weight_bytes as f64 / (1u64 << 30) as f64);
+    println!();
+    println!(
+        "{:>5} {:>10} {:>10} {:>10} {:>10} {:>10} {:>12} {:>12} {:>12} {:>14} {:>9} {:>9}",
+        "batch", "ms/step", "best ms", "worst ms", "agg tok/s", "tok/s/stream", "dev ms/step", "GB/s weights", "head ms/step", "launch/step", "replay/step", "calls/step"
+    );
+    for m in &measured {
+        println!(
+            "{:>5} {:>10.2} {:>10.2} {:>10.2} {:>10.1} {:>10.1} {:>12.2} {:>12.0} {:>12.2} {:>14.1} {:>9.2} {:>9.0}",
+            m.batch,
+            m.step_ms,
+            m.best_ms,
+            m.worst_ms,
+            m.batch as f64 * 1e3 / m.step_ms,
+            1e3 / m.step_ms,
+            m.device_ms,
+            weight_bytes as f64 / 1e6 / m.step_ms,
+            m.head_ms,
+            m.launches_per_step,
+            m.replays_per_step,
+            m.phases.iter().map(|p| p.calls).sum::<u64>() as f64 / steps as f64
+        );
+    }
+
+    // The step split into phases. `linear` includes the head (same kernel
+    // family), so the layer-only share is derived by subtraction - the head is
+    // measured on its own above, on the production greedy tape.
+    let layer_weight_bytes = weight_bytes.saturating_sub(head_weight_bytes);
+    for m in &measured {
+        if m.phases.is_empty() {
+            println!("\nbatch {}: (per-kernel device timing unavailable on this backend)", m.batch);
+            continue;
+        }
+        println!();
+        println!(
+            "=== batch {}: phases ({steps} step(s), device time {:.2} ms/step; per step {:.1} alloc / {:.1} launch / {:.2} replay) ===",
+            m.batch, m.device_ms, m.allocs_per_step, m.launches_per_step, m.replays_per_step
+        );
+        println!("{:<24} {:>10} {:>8} {:>10} {:>12}", "phase", "ms/step", "%dev", "calls/step", "GB/s weights");
+        for ph in &m.phases {
+            let ms = ph.ms_per_step(steps);
+            let gbs = match ph.phase {
+                qwen35::int8_gguf_resident::DecodePhase::Linear => weight_bytes as f64 / 1e6 / ms.max(1e-9),
+                _ => f64::NAN,
+            };
+            println!(
+                "{:<24} {:>10.2} {:>7.1}% {:>10.0} {:>12}",
+                ph.phase.label(),
+                ms,
+                100.0 * ms / m.device_ms.max(1e-9),
+                ph.calls as f64 / steps as f64,
+                if gbs.is_finite() { format!("{gbs:.0}") } else { "-".to_string() }
+            );
+        }
+        let linear_ms = m.phases.iter().find(|p| p.phase == qwen35::int8_gguf_resident::DecodePhase::Linear).map_or(0.0, |p| p.ms_per_step(steps));
+        let layer_linear_ms = linear_ms - m.head_ms;
+        if layer_linear_ms > 0.0 {
+            println!(
+                "{:<24} {:>10.2} {:>7.1}% {:>10} {:>12.0}",
+                "  of which layers",
+                layer_linear_ms,
+                100.0 * layer_linear_ms / m.device_ms.max(1e-9),
+                "-",
+                layer_weight_bytes as f64 / 1e6 / layer_linear_ms
+            );
+        }
+        println!("(linear includes the head; layers = linear - head, measured apart)");
+        if kernels {
+            println!("\n{:<44} {:>10} {:>8}", "kernel", "ms/step", "calls/step");
+            for (name, ms, calls) in &m.rows {
+                println!("{name:<44} {ms:>10.3} {calls:>8}");
+            }
+        }
     }
 }
 
