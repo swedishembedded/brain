@@ -663,6 +663,13 @@ fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, qwen_c
                 None
             }
         },
+        "huginn" => match catalog::resident_huginn::HuginnResident::from_card(weights, card, tokenizer) {
+            Ok(h) => Some(Arc::new(h.with_sizing(qwen35_sizing.ctx, catalog::resident_huginn::DEFAULT_BLOCK, qwen35_sizing.max_batch))),
+            Err(e) => {
+                eprintln!("brain: skip {} ({e})", card.id);
+                None
+            }
+        },
         "yolo" => Some(Arc::new(catalog::resident_yolo::YoloResident::from_card(weights, card, tokenizer))),
         "depth" => Some(Arc::new(catalog::resident_depth::DepthResident::from_card(weights, card, tokenizer))),
         // What `crate::gguf_import`'s registry-driven conversion stamps on the
@@ -769,6 +776,11 @@ fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<St
             let dir = roles.get("weights").and_then(|p| p.to_str()).ok_or("compound manifest missing role \"weights\"")?;
             catalog::resident_ouro::OuroResident::from_card(dir, card, None)
                 .map(|o| Arc::new(o.with_sizing(qwen35_sizing.ctx, catalog::resident_ouro::DEFAULT_BLOCK, qwen35_sizing.max_batch)) as Arc<dyn ResidentModel>)
+        }
+        "huginn" => {
+            let dir = roles.get("weights").and_then(|p| p.to_str()).ok_or("compound manifest missing role \"weights\"")?;
+            catalog::resident_huginn::HuginnResident::from_card(dir, card, None)
+                .map(|h| Arc::new(h.with_sizing(qwen35_sizing.ctx, catalog::resident_huginn::DEFAULT_BLOCK, qwen35_sizing.max_batch)) as Arc<dyn ResidentModel>)
         }
         "zimage" => {
             let paths = zimage_paths_from_roles(roles)?;

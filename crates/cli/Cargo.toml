@@ -69,6 +69,7 @@ brain-januspro.workspace = true
 brain-glmdsa.workspace = true
 brain-lfm2.workspace = true
 brain-ouro.workspace = true
+brain-huginn.workspace = true
 brain-qwen3tts.workspace = true
 brain-minimaxmusic3.workspace = true
 brain-cosyvoice.workspace = true

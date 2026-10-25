@@ -35,6 +35,7 @@ brain-llmserve.workspace = true
 brain-horizon.workspace = true
 brain-lfm2.workspace = true
 brain-ouro.workspace = true
+brain-huginn.workspace = true
 brain-fastvlm.workspace = true
 brain-llava.workspace = true
 brain-qwen3vl.workspace = true

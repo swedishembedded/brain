@@ -68,6 +68,7 @@ pub mod resident_januspro;
 pub mod resident_horizon;
 pub mod resident_lfm;
 pub mod resident_ouro;
+pub mod resident_huginn;
 pub mod resident_llm;
 pub mod resident_ltxv;
 pub mod resident_minimaxh3;
@@ -524,6 +525,12 @@ pub fn models() -> Vec<ModelEntry> {
         ModelEntry {
             manifest: resident_ouro::manifest,
             provider: always!(resident_ouro::OuroProvider::new()),
+            spec: None,
+            resident: None,
+        },
+        ModelEntry {
+            manifest: resident_huginn::manifest,
+            provider: always!(resident_huginn::HuginnProvider::new()),
             spec: None,
             resident: None,
         },

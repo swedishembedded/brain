@@ -49,6 +49,7 @@ const ARCH_HANDLERS: &[(&str, Handler)] = &[
     ("glmdsa", crate::glm_cli::run_glm),
     ("lfm2", crate::lfm_cli::run_lfm),
     ("ouro", crate::ouro_cli::run_ouro),
+    ("huginn", crate::huginn_cli::run_huginn),
     ("qwen3tts", crate::tts_cli::run_tts),
     ("yolov8", crate::yolo_cli::run_yolo),
     ("zipdepth", crate::depth_cli::run_depth),
@@ -382,6 +383,7 @@ const RESOLVER_MIGRATED_ARCHS: &[&str] = &[
     "cosyvoice",
     "minimaxmusic3",
     "ouro",
+    "huginn",
 ];
 
 fn dispatch_arch(arch: &str, rest: Vec<String>) {
