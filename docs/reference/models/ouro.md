@@ -16,7 +16,31 @@ brain ouro import --hf <hf checkpoint dir> --out ouro.safetensors
 
 # Run the paged serving engine locally (greedy).
 brain ouro generate --checkpoint <hf checkpoint dir> --prompt "The capital of France is" --max-new 32
+
+# Train it in place: one AdamW step per batch over the released objective.
+brain ouro train --checkpoint <checkpoint> --steps 32 --seq 128 --batch 2 --lr 2e-5 \
+    --out trained.safetensors
 ```
+
+## Training
+
+The objective is the released one: every pass's cross-entropy weighted by
+that pass's exit probability, summed over passes, averaged over supervised
+rows, through the analytic backward. `brain ouro train` runs it and prints
+the loss every step; the gradient itself is gated by finite differences over
+every parameter on cpu, wgpu and cuda. Measured: the tiny fixture checkpoint
+falls from 3.37 to 1.99 nats in 40 steps; the released 2.6 B checkpoint falls
+from 1.76 to 0.20 in 6 steps on a single 64-token batch (it overfits by
+construction, and the six-step update visibly shifts its style - it answers a
+completion request with tool syntax). The saved checkpoint loads and serves
+through the OpenAI endpoint like any other; serve it at a context the card
+holds (the 2.6 B's four-pass KV needs about 3 GB per 1 k tokens on top of its
+13 GB of weights).
+
+Full fine-tuning of the released checkpoint does not fit one 24 GB card -
+weights, gradients and AdamW moments are four times its 10.7 GB of fp32
+weights - so a real run updates on the host tier; the gradients and the
+update are the same arithmetic on any backend.
 
 `brain serve` picks up an imported `ouro` checkpoint from the model store and
 exposes the same `generate` action as the other text models over HTTP, D-Bus

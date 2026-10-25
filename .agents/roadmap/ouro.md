@@ -54,6 +54,24 @@ gate and a pass-selected or exit-weighted head.
   on every parameter (the shared 2-layer stack visited three times) on cpu,
   wgpu, native Vulkan and CUDA.
 
+## Training
+
+- The objective is the reference's: every pass's cross-entropy weighted by
+  that pass's exit probability, summed over passes, averaged over supervised
+  rows; the gate's gradient is derived analytically (product-exclusion form,
+  valid when a gate saturates).
+- Gated by finite differences on every parameter on cpu, wgpu and cuda, and by
+  the host-recomputed reference arithmetic for the weighted loss.
+- `brain ouro train` runs it end to end: the tiny fixture checkpoint falls
+  3.37 -> 1.99 nats in 40 AdamW steps; the released 2.6B checkpoint falls
+  1.76 -> 0.20 in 6 steps on one 64-token batch and the saved checkpoint is
+  served. Full fine-tuning of the released checkpoint does not fit one 24 GB
+  card (weights, gradients and AdamW moments are four times its fp32
+  weights), so that run updates on the host tier.
+- Two bugs the first real run exposed were in the new verb, not the model:
+  the batch was never set, and AdamW's one-based bias correction was given a
+  zero-based step.
+
 ## Left to do
 
 - End-to-end serving has one measured turn: an agent runtime against the
