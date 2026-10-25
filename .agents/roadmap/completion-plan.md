@@ -519,11 +519,12 @@ copies.
       and AV), s3dit and flux2; the driver leaves randomness and the per-step
       rate to the family and takes a `start` step for a resumed run
       (2026-10-24).
-- [ ] `minicpmv`'s hand-written fit loop (epoch order, accumulation, resume,
-      eval, checkpoint) onto `ChatTrainer` + a `ModelFit` visitor.
-- [ ] The causal-LM + aligner loops of `qwen3vl`, `deepseekvl` and `januspro`
-      onto one multi-part `ModelFit`; two optimizers is the blocker, so the
-      aligner needs an explicit secondary optimizer seam first.
+- [x] Every sample-drawing trainer runs `model::session::run`: MiniCPM-V,
+      Qwen3-VL, DeepSeek-VL and Janus-Pro supply `SampleTrainer::batch_step`
+      only (2026-10-25).
+- [x] The causal-LM + aligner loops of `qwen3vl`, `deepseekvl` and `januspro`
+      are the same session; the two-part optimiser stays in each family's
+      `batch_step` (2026-10-25).
 - [x] `kronos` and `timesfm3` share `forecast::finetune`: one
       `FinetuneOpts<L>`, one `FinetuneReport`, one promotion rule. The loops
       stay model-specific (they draw different windows and objectives)
@@ -547,21 +548,26 @@ copies.
       gradient through the splice is small enough that the FD step's own
       rounding dominates, so the check needs a larger perturbation or a
       larger signal, not a looser tolerance.
-- [ ] `qwen35moe`'s caps tests panic in `model::int8` ("activation K must be a
-      multiple of 32 (got 24)") on a GPU box: the tiny config is built at the
-      hardware default precision, and its narrow contraction width is one the
-      int8 kernel refuses. Either the tiny config must be int8-legal or the
-      test must pin fp32.
-- [ ] Build health: the CPU backend selects the `max_abs_rows` upgrade (a
-      work-group kernel with no barrier and no `global_invocation_id`), and
-      `wgsl-cpu` classifies work-group execution only by `var<workgroup>` or a
-      barrier - so that kernel takes the per-invocation path, which requires
-      `global_invocation_id`, and the build fails. Any test that constructs a
-      `Gpu` with the int8 kernels panics on a CPU-only box (`s3dit` `dev`,
-      `flux2` `dev_grad`, `wan` `block`). Fix in one of two places: classify by
-      the builtins the kernel takes, or synthesise `workgroup_id`/
-      `local_invocation_id` from the invocation index for a barrier-free
-      work-group kernel.
+- [ ] A model whose activation width is not a multiple of
+      `model::int8::GROUP` (32) cannot be built at ANY precision: `Ops::act`
+      packs every activation it feeds a linear with, unconditionally, and
+      `int8::quant_rows_steps` asserts the width. `qwen35moe`'s tiny config
+      (d_model 24) hits it in the GDN pre-conv path, and widening one dim only
+      moves the assert to the next linear (12 wide). The façade should use a
+      non-quantized activation for a width the packed path cannot hold, the way
+      it already picks a kernel variant by shape.
+- [ ] The CPU JIT's `dot4I8Packed` path disagrees with the host reference
+      (`wgsl-cpu`'s `dot4i8packed_matches_host_reference`: -32191.5 against
+      -66089.5), while the workgroup `matmul_i8_gemv` it compiles is unchanged
+      from the device path. A packed-int8 GEMV on the CPU backend is therefore
+      unverified, and the test is red at HEAD.
+- [x] The CPU JIT derives `workgroup_id`/`local_invocation_id` from the
+      invocation index, so a barrier-free work-group kernel compiles and
+      `max_abs_rows` no longer fails every int8 build (2026-10-25).
+- [x] `deepseekocr2`'s composite check now states its measurement floor (one
+      ULP of the loss over 2*eps) instead of failing inside it (2026-10-25).
+- [x] Qwen3-VL's text-only build (no visual rows) no longer enables an empty
+      splice run (2026-10-25).
 
 ---
 

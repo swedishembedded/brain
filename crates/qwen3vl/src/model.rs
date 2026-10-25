@@ -277,9 +277,14 @@ impl Qwen3Vl {
         mrope_section: [u32; 3],
     ) -> Qwen3Vl {
         let merge = vcfg.spatial_merge_size;
-        decoder.enable_mm_splice(image_row0, n_visual);
+        // No visual rows is a text-only build, not an error: `SpliceRuns` has
+        // no empty-run form on purpose (an empty run in a list is a bug), so
+        // the splice is simply not enabled.
+        if n_visual > 0 {
+            decoder.enable_mm_splice(image_row0, n_visual);
+        }
         decoder.enable_mrope();
-        if !ds_merger_weights.is_empty() {
+        if n_visual > 0 && !ds_merger_weights.is_empty() {
             decoder.enable_deepstack(image_row0, n_visual, ds_merger_weights.len() as u32);
         }
         // The vision tower runs on the SAME physical device as the decoder it
