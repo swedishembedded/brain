@@ -37,10 +37,11 @@ struct Case<'a> {
     steps: Vec<Step>,
     bytes: u64,
     calls: usize,
-    xq: DeviceBuffer,
-    sx: DeviceBuffer,
-    out: DeviceBuffer,
-    w: Vec<(DeviceBuffer, DeviceBuffer)>,
+    // Kept alive for the steps that name them: the kernel reads these buffers.
+    _xq: DeviceBuffer,
+    _sx: DeviceBuffer,
+    _out: DeviceBuffer,
+    _w: Vec<(DeviceBuffer, DeviceBuffer)>,
     gpu: &'a Gpu,
 }
 
@@ -78,7 +79,7 @@ fn setup<'a>(gpu: &'a Gpu, id: backend_api::NativeId, m: u32, k: u32, n: u32) ->
         .collect();
     gpu.submit(&[], &steps);
     gpu.poll_wait();
-    Case { steps, bytes: wbytes, calls, xq, sx, out, w, gpu }
+    Case { steps, bytes: wbytes, calls, _xq: xq, _sx: sx, _out: out, _w: w, gpu }
 }
 
 impl Case<'_> {

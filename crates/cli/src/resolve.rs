@@ -763,6 +763,7 @@ mod tests {
             weights_env: &[("BRAIN_RESOLVETESTARCH_DIT", "dit"), ("BRAIN_RESOLVETESTARCH_VAE", "vae")],
             variants: &[],
             families: &[],
+            caps: brain_arch::Caps::NONE,
         }
     }
 
