@@ -14,6 +14,7 @@ and the TinyStories preparation the sample's README describes):
 
 Plans (the protocol section of the paper registers them):
 
+  corpus    the prepared TinyStories corpus: statistics and raw-file checksums
   lr        300-step learning-rate selection runs, one seed per family and rate
   primary   the three primary configurations, three random seeds each
   pilot     the wide control and the channel pilots, one random seed each
@@ -210,6 +211,26 @@ def execute(job, gpu, plan, commit):
     print(f"[gpu{gpu}] wrote {out.relative_to(ROOT)}", flush=True)
 
 
+def record_corpus(commit):
+    """The corpus record: what `brain data gen tinystories` wrote, and the
+    checksums of the raw files it read."""
+    import hashlib
+    sums = {}
+    for name in ("train.txt", "valid.txt"):
+        h = hashlib.sha256()
+        with open(CORPUS / name, "rb") as f:
+            for block in iter(lambda: f.read(1 << 24), b""):
+                h.update(block)
+        sums[name] = h.hexdigest()
+    rec = {"commit": commit, "device": "host", "command": "brain data gen tinystories --out data/tinystories",
+           "source": "huggingface.co/datasets/roneneldan/TinyStories@f54c09fd23315a6f9c86f9dc80f725de7d8f9c64 (TinyStoriesV2-GPT4-{train,valid}.txt), CDLA-Sharing-1.0",
+           "sha256": sums, "stats": json.loads((CORPUS / "stats.json").read_text())}
+    out = DATA / "corpus" / "tinystories.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(rec, indent=1) + "\n")
+    print(f"wrote {out.relative_to(ROOT)}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("plan")
@@ -221,6 +242,9 @@ def main():
     commit = git_commit()
     if commit.endswith("-dirty"):
         sys.exit("the tracked tree has uncommitted changes; records must name a commit that reproduces them")
+    if a.plan == "corpus":
+        record_corpus(commit)
+        return
     jobs = queue.Queue()
     for j in jobs_for(a.plan, work):
         jobs.put(j)
