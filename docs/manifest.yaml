@@ -290,6 +290,8 @@ navigation:
         path: examples/study/document.md
       - source: samples/study/timeline/README.md
         path: examples/study/timeline.md
+      - source: samples/text/chat-full-finetune/README.md
+        path: examples/text/chat-full-finetune.md
       - source: samples/text/embed-train/README.md
         path: examples/text/embed-train.md
       - source: samples/text/embed/README.md
