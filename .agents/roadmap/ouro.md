@@ -37,9 +37,10 @@ gate and a pass-selected or exit-weighted head.
   `m = n`), gated against the full-sequence forward; per-pass index buffers
   keep every pass's attention on its own block table.
 - Paged continuous-batching engine (`crate::serve::Engine`): `T` pools per
-  layer, one block table per pass per sequence, admission charged
-  `passes × blocks_for`; prefill and greedy/top-k decode go through the same
-  paged step. Two interleaved sequences with different prompt lengths
+  layer, one allocator and block table per pass per sequence (a shared
+  allocator charged a sequence `T x` its context against one plane's blocks,
+  which exhausted the pool); prefill and greedy/top-k decode go through the
+  same paged step. Two interleaved sequences with different prompt lengths
   reproduce the model's own full-sequence greedy stream exactly.
 - Incremental decode with one KV history per `(pass, layer)`: a step runs the
   new token through every pass, each appending its own K/V at the absolute
@@ -55,13 +56,18 @@ gate and a pass-selected or exit-weighted head.
 
 ## Left to do
 
-- End-to-end serving on the real checkpoint: measure prefill/decode
-  throughput, and run the brain-served model through an agent workload.
+- End-to-end serving on the real checkpoint: an agent runtime's system prompt
+  plus tool schemas is about 5.4k tokens (3.4k in chat mode), so the served
+  context must reach ~6k before a tool-using run can start; the 2.6B in fp32
+  holds 4096 only on a host, not on a 24 GB card. Lower-precision serving
+  weights (bf16 storage) are the step that puts a 6k context on one card.
   Prefix reuse and host offload stay off for the looped path until they are
   pass-aware.
-- Prefill memory: the whole-prompt path materializes `[heads, n, n]` scores,
-  fine at agent prompt lengths but not at the checkpoint's full context; a
-  chunked path (paged chunk attention) is the next scaling step.
+- Prefill speed: the whole-prompt path uses the flash causal attention kernel
+  (no score slabs) for the attention, but its linears still dispatch the naive
+  matmul, so a ~5.4k-token prefill takes minutes on a P40. Selecting the tiled
+  GEMMs through the shared `model::ops` seam (which the other decoders use) is
+  the next speed step; chunked paged prefill bounds the memory after that.
 - LoRA fine-tuning: adapter sites on the shared stack's linears, with the
   frozen-base path (full-weight training allocates gradients and AdamW moments
   for every parameter and does not fit a 2.6B model on one card).

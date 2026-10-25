@@ -78,3 +78,22 @@ fn paged_engine_reproduces_the_models_own_greedy_streams() {
     }
     let _ = passes;
 }
+
+/// A prompt long enough to select the register-tiled GEMM in prefill (128+
+/// rows): the same engine, the same greedy token as the model's own forward.
+#[test]
+fn a_long_prompt_prefill_selects_the_tiled_linear_and_still_matches() {
+    let mut cfg = OuroConfig::tiny();
+    cfg.block_size = 256;
+    let w = init_weights(&cfg, 41);
+    let mut eng = Engine::from_source(cfg.clone(), &w, 256, 4);
+    let prompt: Vec<u32> = (0..160u32).map(|i| (i * 7 + 3) % 29).collect();
+    let mut table = BlockTable::new();
+    let hidden = eng.prefill(&mut table, &prompt);
+    let first = eng.admit_greedy(&hidden);
+    let mut seq = prompt.clone();
+    seq.push(first);
+    let mut refs = [&mut table];
+    let next = eng.forward_batched_greedy(&mut refs, &[first])[0];
+    assert_eq!(next, reference_next(&cfg, &w, &seq));
+}
