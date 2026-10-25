@@ -63,6 +63,36 @@ more with the sharing ring; a card with more memory serves the released
 depth. Prefill allocates a slab of the prompt's length, so a prompt close to
 the context capacity needs that much headroom on top of the numbers above.
 
+## Using it from an agent runtime
+
+An agent runtime that speaks the OpenAI chat API reaches the served model
+through brain's endpoint; the checkpoint's own template renders the
+conversation. On a 24 GB card the weights leave room for about 7.7 GB of KV,
+so serve with a context the depth fits (12 steps at 4096), and give the
+runtime a system prompt that fits that window - a stock agent system prompt
+is larger than 4096 tokens:
+
+```bash
+brain huginn import --hf <hf checkpoint dir> \
+    --out <models>/brain/huginn-0125/model.brain.safetensors --id brain/huginn-0125
+cp <hf checkpoint dir>/tokenizer*.json <hf checkpoint dir>/generation_config.json \
+    <models>/brain/huginn-0125/
+brain serve --device gpu --models-dir <models> --ctx 4096 --reserve-gb 0 \
+    --openai 8795 --api-keys-out /tmp/keys.json
+
+curl -s http://127.0.0.1:8795/v1/chat/completions \
+    -H "Authorization: Bearer $(jq -r .openai /tmp/keys.json)" \
+    -H 'Content-Type: application/json' \
+    -d '{"model": "brain/huginn-0125",
+         "messages": [{"role": "user", "content": "What is the capital of France?"}],
+         "max_tokens": 24}'
+```
+
+The model answers chat questions through this path. It does not call tools
+(they are not part of its training), so a coding-agent loop over this
+checkpoint is out of reach at the depths a 24 GB card can serve; the
+released depth needs a larger card.
+
 ## Licence
 
 The checkpoint is published under Apache-2.0. Check the model card before
