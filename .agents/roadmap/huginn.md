@@ -13,26 +13,33 @@ un-embeds the final latent state into the tied head.
 ## Done
 
 - Config and parameter layout pinned to the released `huginn-0125` manifest:
-  9 tensors per block (four RMSNorms, fused QKV, output projection, Q/K bias,
-  fused gate/up FC, projection), the injection adapter, the final norm and the
-  tied embedding table; `lm_head.weight` is dropped as a tied copy and
-  `freqs_cis` as a rebuilt buffer.
+  10 tensors per block (four RMSNorms, fused QKV, output projection, the two
+  Q/K bias halves, fused gate/up FC, projection), the injection adapter, the
+  final norm and the tied embedding table; `lm_head.weight` is dropped as a
+  tied copy and `freqs_cis` as a rebuilt buffer. The checkpoint stores the
+  Q/K bias as one `[2, 1, heads, dim]` tensor; the import splits it, because a
+  device binding needs wider alignment than one head-width offset.
 - Hugging Face import with two-way coverage and sharded safetensors support.
 - Deterministic initialization for tiny configs and the gradient check.
+- Execution graph: embeddings scaled by `sqrt(width)`, prelude blocks, the
+  recurrent core re-entered with `adapter(concat(state, prelude_out))`, the
+  final norm, the coda, the norm again and the tied head. Sandwich blocks
+  (`x = norm_2(attn(norm_1(x)) + x); x = norm_4(mlp(norm_3(x)) + x)`), fused
+  QKV with a per-head Q/K bias, fused gate/up FC and interleaved-pair RoPE
+  (the `rope_train` kernel, not the half-split `rope_base`).
+- Parity against the tiny golden in `testdata/golden/huginn/tiny`, which is
+  driven by a fixed starting state and records the raw state, the normed
+  latent and the logits of each of three steps. Green on cpu, wgpu and cuda.
+- Incremental decode with one KV history per stage (prelude block, every
+  recurrent step's blocks, coda blocks) - the core's repeated use means the
+  keys of step 3 cannot share a history with step 2. A cached step equals the
+  full forward's row at the same position because every position's recurrence
+  starts from the model's initial state; green on cpu, wgpu and cuda.
 
 ## Left to do
 
-- Execution graph: prelude, recurrent core with the `cat(x, embeds)` adapter,
-  coda, tied head; `like-init` latent state (the reference draws it from
-  `init_values["std"]`, so a parity run fixes the same draw). Block shape is
-  pinned: `x = norm_2(attn(norm_1(x)) + x); x = norm_4(mlp(norm_3(x)) + x)`,
-  fused QKV with a per-head Q/K bias, fused gate/up FC, interleaved-pair RoPE
-  (brain's `rope_train` kernel, not the half-split `rope_base`). The tiny
-  golden in `testdata/golden/huginn/tiny` is driven by a fixed starting state
-  and records each of three steps.
-- Per-step parity against the tiny golden (the released checkpoint's golden
-  follows the graph); incremental decode with one KV history per recurrent
-  step; paged serving.
+- Paged serving engine (`crates/huginn/src/serve.rs`) over the same stage
+  list, then the catalog resident, the CLI and the docs entry.
 - Training: backward through the sampled recurrence (the reference backprops
   the last `mean_backprop_depth` steps and runs the earlier ones under
   `no_grad`), then LoRA.

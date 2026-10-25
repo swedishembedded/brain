@@ -332,6 +332,15 @@ pub const ARCHS: &[Arch] = &[
         variants: &[
             Variant { reference: "ByteDance/Ouro-2.6B-Thinking", params: 2_667_974_657, quants: &[], license: Some("apache-2.0") },
         ]),
+    // Huginn (Raven): a prelude embeds the tokens, four shared core blocks are
+    // re-applied with the embedded input re-injected through a linear adapter,
+    // and a coda un-embeds the final latent state into the tied head. Every
+    // application of the core needs its own attention history, so the serving
+    // engine's cost scales with `mean_recurrence` (32 as released).
+    arch!("huginn", "Huginn recurrent-depth decoder", Text, Brain, "brain-huginn", hf: &["RavenForCausalLM", "huginn_raven"], default_ref: Some("tomg-group-umd/huginn-0125"),
+        variants: &[
+            Variant { reference: "tomg-group-umd/huginn-0125", params: 3_564_976_800, quants: &[], license: Some("apache-2.0") },
+        ]),
     // Llama and Qwen2 are CONFIGURATIONS of the dense decoder `brain-qwen3`
     // implements, not crates of their own: identical HF tensor names, told
     // apart only by q/k/v bias, QK-norm and RoPE scaling (`QwenConfig`'s
