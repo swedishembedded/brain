@@ -444,6 +444,9 @@ fn exact_decode_groups_make_every_batch_row_bit_identical_to_the_same_row_alone(
         }
         let grouped = out.window(&out.read_bits(&gpu));
         let want = &alone[..(m * n) as usize];
-        assert_eq!(grouped, want, "exact-decode grouping differs from the rows decoded alone at m={m} step={step}");
+        // Only the first `m` rows were written by this round's groups; the rest
+        // of the buffer still holds the batched step's rows.
+        let got = &grouped[..(m * n) as usize];
+        assert_eq!(got, want, "exact-decode grouping differs from the rows decoded alone at m={m} step={step}");
     }
 }
