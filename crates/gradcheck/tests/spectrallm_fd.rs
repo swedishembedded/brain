@@ -15,6 +15,14 @@ const RTOL: f32 = 8.0e-2;
 
 fn gate(report: Report, what: &str) {
     report.print();
+    // One machine-readable line per check, for the spectral-lm paper's
+    // correctness table: the largest relative error over every tensor.
+    println!(
+        "GATE {{\"name\": \"finite-difference gradients, {what}\", \"metric\": \"max relative error over {} tensors\", \"value\": {:e}, \"tolerance\": {RTOL:e}, \"pass\": {}}}",
+        report.checks.len(),
+        report.max_rel(),
+        report.all_within(ATOL, RTOL)
+    );
     let fails = report.failures(ATOL, RTOL);
     assert!(fails.is_empty(), "{what}: gradient check failed for {:?}", fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>());
     let dead = report.dead_gradients();
@@ -71,5 +79,11 @@ fn tied_embedding_gradient_is_complete_elementwise() {
     model::Model::set_batch(&model, model::Batch::Lm { tokens: &x, targets: &y });
     let report = elementwise_check(&model, "tok.weight", 1e-3);
     let fails = report.failures(ATOL, RTOL);
+    println!(
+        "GATE {{\"name\": \"finite-difference gradient, tied embedding element by element\", \"metric\": \"entries outside tolerance of {}\", \"value\": {}, \"tolerance\": 0, \"pass\": {}}}",
+        report.checks.len(),
+        fails.len(),
+        fails.is_empty()
+    );
     assert!(fails.is_empty(), "tok.weight elementwise: {} of {} entries off", fails.len(), report.checks.len());
 }

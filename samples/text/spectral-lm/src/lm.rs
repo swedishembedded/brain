@@ -198,9 +198,22 @@ pub fn profile(a: &mut Args) {
     println!("{:?}, transform {:?}, batch {b} x {t}", cfg.mixer, m.transform());
     let (fwd, bwd) = m.profile(reps);
     fwd.print_top(None, 16);
-    if let Some(bwd) = bwd {
-        bwd.print_top(None, 16);
-        let step = fwd.total_secs + bwd.total_secs;
-        println!("\nstep {:.1} ms, {:.0} tokens/s from the device pass times", step * 1e3, (b * t) as f64 / step);
-    }
+    let bwd = bwd.expect("a training build profiles its backward");
+    bwd.print_top(None, 16);
+    let step = fwd.total_secs + bwd.total_secs;
+    println!(
+        "{}",
+        serde_json::json!({
+            "event": "profile",
+            "config": cfg.to_json(),
+            "transform": m.transform().map(|t| format!("{t:?}")),
+            "batch": b,
+            "block": t,
+            "reps": reps,
+            "forward_ms": fwd.total_secs * 1e3,
+            "backward_ms": bwd.total_secs * 1e3,
+            "step_ms": step * 1e3,
+            "tokens_per_s": (b * t) as f64 / step,
+        })
+    );
 }

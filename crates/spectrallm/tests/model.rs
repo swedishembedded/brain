@@ -34,6 +34,13 @@ fn fft_capable(g: &Gpu) -> bool {
     false
 }
 
+/// Assert `value <= tol` and print the measurement as one `GATE` line, which
+/// the spectral-lm paper's correctness table is generated from.
+fn gate(name: &str, metric: &str, value: f64, tol: f64) {
+    println!("GATE {}", serde_json::json!({ "name": name, "metric": metric, "value": value, "tolerance": tol, "pass": value <= tol }));
+    assert!(value <= tol, "{name}: {metric} {value} exceeds {tol}");
+}
+
 fn rand(n: usize, seed: u64) -> Vec<f32> {
     let mut r = data::rng::Lcg::new(seed);
     (0..n).map(|_| r.signed()).collect()
@@ -75,8 +82,8 @@ fn fft_kernels_compute_the_basis_products() {
         let wg = Dispatch::Workgroups(spectrallm::mixer::fft_workgroups(rows as u32, d as u32));
         g.submit(&[], &[g.dispatch(synth, &[&zb, &xo], &params, wg), g.dispatch(analysis, &[&xb, &zo], &params, wg)]);
         let (got_x, got_z) = (g.read(&xo, rows * d), g.read(&zo, rows * m));
-        assert!(max_diff(&got_x, &want_x) < 2e-5, "synthesis D={d} m={m}: max diff {}", max_diff(&got_x, &want_x));
-        assert!(max_diff(&got_z, &want_z) < 5e-5, "analysis D={d} m={m}: max diff {}", max_diff(&got_z, &want_z));
+        gate(&format!("FFT synthesis D={d} m={m}"), "max abs diff vs basis product", max_diff(&got_x, &want_x) as f64, 2e-5);
+        gate(&format!("FFT analysis D={d} m={m}"), "max abs diff vs basis product", max_diff(&got_z, &want_z) as f64, 5e-5);
     }
 }
 
@@ -96,7 +103,7 @@ fn fft_and_dense_paths_give_the_same_model() {
         m.logits_all(&x).unwrap()
     };
     let (dense, fft) = (logits(TransformPath::Dense), logits(TransformPath::Fft));
-    assert!(max_diff(&dense, &fft) < 1e-4, "fft vs dense logits: max diff {}", max_diff(&dense, &fft));
+    gate("model logits, FFT vs dense transforms", "max abs diff", max_diff(&dense, &fft) as f64, 1e-4);
 }
 
 /// The SwiGLU-mixer model and `qwen3::Qwen` on one weight map.
@@ -136,7 +143,7 @@ fn swiglu_control_is_the_qwen3_decoder() {
     let (x, _) = batch(12, cfg.vocab, 2);
     let ours = SpectralLm::new_inference(cfg, 1, 12, &init).logits_all(&x).unwrap();
     let theirs = qwen3::Qwen::new(qcfg, 1, 12, &init).logits_all(&x);
-    assert!(max_diff(&ours, &theirs) < 1e-4, "spectrallm(swiglu) vs qwen3 logits: max diff {}", max_diff(&ours, &theirs));
+    gate("SwiGLU control vs brain's Qwen3", "max abs logit diff", max_diff(&ours, &theirs) as f64, 1e-4);
 }
 
 /// Token-by-token decoding gives the full-sequence forward's logits at every
@@ -151,11 +158,13 @@ fn incremental_decode_matches_the_full_forward() {
         let m = SpectralLm::new_on(g.share(), cfg.clone(), 1, t, &init, false);
         let full = m.logits_all(&x).unwrap();
         let v = cfg.vocab as usize;
+        let mut worst = 0.0f32;
         for (pos, tok) in x.iter().enumerate() {
             let step = m.step(*tok);
-            let row = &full[pos * v..(pos + 1) * v];
-            assert!(max_diff(&step, row) < 1e-4, "{:?} position {pos}: decode vs forward max diff {}", cfg.mixer, max_diff(&step, row));
+            worst = worst.max(max_diff(&step, &full[pos * v..(pos + 1) * v]));
         }
+        let kind = if matches!(cfg.mixer, Mixer::Spectral { .. }) { "spectral" } else { "SwiGLU" };
+        gate(&format!("incremental decode vs full forward ({kind})"), "max abs logit diff", worst as f64, 1e-4);
         assert_eq!(m.cache_pos(), t);
         m.reset_cache();
         assert!(max_diff(&m.step(x[0]), &full[..v]) < 1e-4, "decode after reset restarts at position 0");
@@ -180,9 +189,8 @@ fn cpu_and_gpu_backends_agree() {
     };
     let (lc, gc, ec) = run(Gpu::new_cpu(spectrallm::PIPELINES));
     let (lg, gg, eg) = run(g.share());
-    assert!((lc - lg).abs() < 1e-5, "loss: cpu {lc} vs gpu {lg}");
-    assert!(max_diff(&gc, &gg) < 1e-5, "gate filter grad: max diff {}", max_diff(&gc, &gg));
-    assert!(max_diff(&ec, &eg) < 1e-5, "embedding grad: max diff {}", max_diff(&ec, &eg));
+    gate("CPU vs GPU backend, loss", "abs diff", (lc - lg).abs() as f64, 1e-5);
+    gate("CPU vs GPU backend, gradients", "max abs diff", max_diff(&gc, &gg).max(max_diff(&ec, &eg)) as f64, 1e-5);
 }
 
 /// A fixed batch is memorized: the optimizer path, every gradient and the
@@ -207,7 +215,7 @@ fn training_memorizes_a_fixed_batch() {
     }
     last = last.min(m.forward());
     assert!(first > 2.5, "an untrained model should be near uniform over 23 tokens, got {first}");
-    assert!(last < 0.05, "fixed batch not memorized: loss {first} -> {last}");
+    gate("fixed batch memorized in 400 steps", "final loss (nats)", last as f64, 0.05);
 }
 
 /// At a training-length sequence the GPU takes flash attention and the
@@ -232,9 +240,11 @@ fn flash_attention_path_matches_the_materialized_reference() {
     };
     let (lc, qc, vc, ec) = run(Gpu::new_cpu(spectrallm::PIPELINES));
     let (lg, qg, vg, eg) = run(g.share());
-    assert!((lc - lg).abs() < 1e-4, "loss: materialized {lc} vs flash {lg}");
-    for (what, a, b) in [("wq", &qc, &qg), ("wv", &vc, &vg), ("tok", &ec, &eg)] {
+    gate("flash vs materialized attention, loss", "abs diff", (lc - lg).abs() as f64, 1e-4);
+    let mut worst = 0.0f32;
+    for (a, b) in [(&qc, &qg), (&vc, &vg), (&ec, &eg)] {
         let scale = a.iter().map(|v| v.abs()).fold(0.0, f32::max).max(1e-6);
-        assert!(max_diff(a, b) / scale < 1e-3, "{what} grad: max diff {} at scale {scale}", max_diff(a, b));
+        worst = worst.max(max_diff(a, b) / scale);
     }
+    gate("flash vs materialized attention, gradients", "max diff / max magnitude", worst as f64, 1e-3);
 }

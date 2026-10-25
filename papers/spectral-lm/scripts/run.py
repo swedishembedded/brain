@@ -19,6 +19,8 @@ Plans (the protocol section of the paper registers them):
   pilot     the wide control and the channel pilots, one random seed each
   qwen      Qwen3-0.6B: zero-shot bits per byte
   spectrum  Qwen3-0.6B residual-stream projection study
+  systems   training-step device time of the spectral mixer, dense basis
+            product against FFT, over several (m, D, C)
 
 Each job is one command of the sample; a training job is followed by scoring
 its checkpoint. Jobs run one per GPU at a time. Every record lands in
@@ -61,6 +63,7 @@ FAMILIES = {
 PRIMARY = ["S-256-512-24", "Q-256-24", "Q-256-1024"]
 PILOT = ["Q-512-2048", "S-256-512-8", "S-256-512-96"]
 LR_GRID = ["1e-3", "3e-3", "6e-3"]
+SYSTEMS = [(256, 512, 8), (256, 512, 24), (256, 512, 96), (128, 256, 24), (256, 1024, 24)]
 
 
 def git_commit():
@@ -100,10 +103,17 @@ def jobs_for(plan, work):
                 seed = str(secrets.randbits(63))
                 jobs.append({"id": f"{fam}-{seed}", "family": fam, "lr": chosen_lr(fam), "steps": STEPS, "seed": seed, "eval": True})
     elif plan == "qwen":
-        jobs.append({"id": "qwen3-0.6b-zero-shot", "qwen": ["qwen-eval", "--weights", str(QWEN), "--text", str(CORPUS / "valid.txt"), "--max-doc-bytes", MAX_DOC_BYTES, "--batch", "8"]})
+        jobs.append({"id": "qwen3-0.6b-zero-shot", "command": ["qwen-eval", "--weights", str(QWEN), "--text", str(CORPUS / "valid.txt"), "--max-doc-bytes", MAX_DOC_BYTES, "--batch", "8"]})
+    elif plan == "systems":
+        seed = str(secrets.randbits(63))
+        for m, d, c in SYSTEMS:
+            heads = ["--d-model", str(m), "--layers", "6", "--heads", "8", "--kv-heads", "4", "--head-dim", str(m // 8)]
+            for path in ("dense", "fft"):
+                jobs.append({"id": f"S-{m}-{d}-{c}-{path}", "command": ["profile", *heads, "--mixer", "spectral", "--signal-len", str(d),
+                             "--channels", str(c), "--transform", path, "--batch", "16", "--block", "512", "--reps", "3", "--seed", seed]})
     elif plan == "spectrum":
         seed = str(secrets.randbits(63))
-        jobs.append({"id": "qwen3-0.6b-layer14", "qwen": ["qwen-spectrum", "--weights", str(QWEN), "--fit-text", str(CORPUS / "train.txt"), "--text", str(CORPUS / "valid.txt"), "--layer", "14", "--widths", "64,128,256,512", "--fit-docs", "256", "--docs", "256", "--max-doc-bytes", MAX_DOC_BYTES, "--batch", "8", "--seed", seed]})
+        jobs.append({"id": "qwen3-0.6b-layer14", "command": ["qwen-spectrum", "--weights", str(QWEN), "--fit-text", str(CORPUS / "train.txt"), "--text", str(CORPUS / "valid.txt"), "--layer", "14", "--widths", "64,128,256,512", "--fit-docs", "256", "--docs", "256", "--max-doc-bytes", MAX_DOC_BYTES, "--batch", "8", "--seed", seed]})
     else:
         sys.exit(f"unknown plan {plan!r}")
     for j in jobs:
@@ -147,8 +157,8 @@ def execute(job, gpu, plan, commit):
     work = Path(job["work"])
     log = work / f"{job['id']}.log"
     rec = {"commit": commit, "device": f"gpu{gpu} {device_name(gpu)}", "plan": plan, "id": job["id"]}
-    if "qwen" in job:
-        cmd = [str(SAMPLE)] + job["qwen"] + ["--gpu", str(gpu)]
+    if "command" in job:
+        cmd = [str(SAMPLE)] + job["command"] + ["--gpu", str(gpu)]
         result, peak, _ = run_measured(cmd, gpu, log)
         rec.update({"command": " ".join(cmd), "result": result, "peak_mem_mib": peak})
     else:
