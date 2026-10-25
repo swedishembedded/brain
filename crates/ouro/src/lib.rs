@@ -40,5 +40,6 @@ pub mod decode;
 pub mod import;
 pub mod init;
 pub mod model;
+pub mod serve;
 
 pub use config::OuroConfig;

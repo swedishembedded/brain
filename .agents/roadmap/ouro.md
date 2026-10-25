@@ -26,6 +26,14 @@ gate and a pass-selected or exit-weighted head.
   same weights, CPU fp32, on the tiny shape.
 - Exit rule: cumulative exit mass over the gate outputs, released threshold
   (1.0 selects the final pass).
+- Released-checkpoint parity: the real 2.6B weights imported from the Hugging
+  Face directory reproduce the reference's per-pass hidden state and logits at
+  rel_l2 3-8e-6 on the first four passes (Tesla P40, wgpu).
+- Paged continuous-batching engine (`crate::serve::Engine`): `T` pools per
+  layer, one block table per pass per sequence, admission charged
+  `passes × blocks_for`; prefill and greedy/top-k decode go through the same
+  paged step. Two interleaved sequences with different prompt lengths
+  reproduce the model's own full-sequence greedy stream exactly.
 - Incremental decode with one KV history per `(pass, layer)`: a step runs the
   new token through every pass, each appending its own K/V at the absolute
   position, and the gated result equals the full-sequence forward at every
@@ -42,10 +50,12 @@ gate and a pass-selected or exit-weighted head.
 
 - Real-checkpoint import and parity on a short prompt at fp32 (the tiny golden
   proves the math; the real weights prove the import).
-- Serving: a `PagedDecoder` over the contiguous per-pass caches, admission
-  reporting `passes × blocks_for`, a capability/action, residency, catalog row
-  and CLI verb. Prefix reuse and host offload stay off for the looped path
-  until they are pass-aware.
+- Capability, residency, catalog row, CLI verb and the docs page over the
+  paged engine; serve the real checkpoint and measure prefill/decode
+  throughput. Prefix reuse and host offload stay off for the looped path until
+  they are pass-aware.
+- Chunked prefill: the current engine reads a prompt one token at a time
+  through the decode step, which is correct but slow for long agent prompts.
 - LoRA fine-tuning: adapter sites on the shared stack's linears, with the
   frozen-base path (full-weight training allocates gradients and AdamW moments
   for every parameter and does not fit a 2.6B model on one card).

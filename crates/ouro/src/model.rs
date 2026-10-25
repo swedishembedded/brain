@@ -82,6 +82,10 @@ const ATTN_DECODE_SCORES: usize = 34;
 const DECODE_SOFTMAX: usize = 35;
 const ATTN_DECODE_APPLY: usize = 36;
 const ROPE_AT: usize = 37;
+const PAGED_KV_APPEND_BATCHED: usize = 38;
+const PAGED_DECODE_SCORES_BATCHED: usize = 39;
+const DECODE_SOFTMAX_BATCHED: usize = 40;
+const PAGED_DECODE_APPLY_BATCHED: usize = 41;
 
 pub const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -122,7 +126,20 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("decode_softmax", kernels::DECODE_SOFTMAX),
     ("attn_decode_apply", kernels::ATTN_DECODE_APPLY),
     ("rope_at", kernels::ROPE_AT),
+    ("paged_kv_append_batched", kernels::PAGED_KV_APPEND_BATCHED),
+    ("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED),
+    ("decode_softmax_batched", kernels::DECODE_SOFTMAX_BATCHED),
+    ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),
 ];
+
+pub(crate) fn decode_batched_ids() -> block::GqaDecodeBatchedIds {
+    block::GqaDecodeBatchedIds {
+        kv_append_batched: PAGED_KV_APPEND_BATCHED,
+        scores_batched: PAGED_DECODE_SCORES_BATCHED,
+        softmax_batched: DECODE_SOFTMAX_BATCHED,
+        apply_batched: PAGED_DECODE_APPLY_BATCHED,
+    }
+}
 
 pub(crate) fn decode_ids() -> block::GqaDecodeIds {
     block::GqaDecodeIds {
@@ -925,6 +942,10 @@ mod tests {
             (AXPY, "axpy"),
             (BIAS_GRAD, "bias_grad"),
             (ROPE_AT, "rope_at"),
+            (PAGED_KV_APPEND_BATCHED, "paged_kv_append_batched"),
+            (PAGED_DECODE_SCORES_BATCHED, "paged_decode_scores_batched"),
+            (DECODE_SOFTMAX_BATCHED, "decode_softmax_batched"),
+            (PAGED_DECODE_APPLY_BATCHED, "paged_decode_apply_batched"),
         ] {
             assert_eq!(PIPELINES[slot].0, want, "slot {slot} is not {want}");
         }
