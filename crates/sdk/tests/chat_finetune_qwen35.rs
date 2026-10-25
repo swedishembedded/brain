@@ -252,3 +252,50 @@ fn a_qwen35_preference_fine_tune_exports_a_dpo_adapter() {
     assert_eq!((score.pairs, score.skipped), (4, 0));
     assert!(score.mean_margin.is_some_and(|m| m > 0.0), "the trained policy prefers chosen over rejected more than its start did: {score:?}");
 }
+
+/// Every step reports the seconds its four phases took and the tokens it
+/// accounted for, its record carries them, and the record's totals are the
+/// sum of them: what an optimization of the step is measured against, without
+/// adding a profiler to the run.
+#[test]
+fn a_run_records_every_step_s_phases_and_token_accounting() {
+    let model = qwen35_chat_model_dir("q35-work");
+    let outcome = fine_tune(&model, &model.join("run")).run().expect("the fine-tune runs");
+    assert_eq!(outcome.status, FineTuneStatus::Completed);
+    assert_eq!(outcome.step_work.len(), outcome.steps_completed as usize, "one entry per completed step");
+
+    let record: serde_json::Value = serde_json::from_slice(&std::fs::read(outcome.record.as_ref().expect("the record is written")).unwrap()).unwrap();
+    // Additive: the fields the record always carried are still there.
+    assert_eq!(record["block"], serde_json::json!(outcome.block));
+    assert_eq!(record["steps_completed"], serde_json::json!(outcome.steps_completed));
+    let per_step = record["step_work"].as_array().expect("the record carries every step's work");
+    assert_eq!(per_step.len(), outcome.steps_completed as usize);
+    for (i, s) in per_step.iter().enumerate() {
+        assert_eq!(s["step"], serde_json::json!(i as u32 + 1), "the steps of a straight run are consecutive from 1");
+        let (useful, computed, supervised) = (s["useful_tokens"].as_u64().expect("useful tokens"), s["computed_tokens"].as_u64().expect("computed tokens"), s["supervised_positions"].as_u64().expect("supervised positions"));
+        assert!(useful > 0 && supervised > 0 && supervised <= useful, "step {}: {s}", i + 1);
+        // A one-record micro-step is computed at its own length rounded up to a
+        // whole GDN chunk (64), not at the block the run was built for.
+        assert!(computed <= useful + 64 && computed + 64 >= useful, "step {}: computed {computed} tokens for {useful} useful ones", i + 1);
+        assert_eq!(s["padded_tokens"].as_u64().unwrap(), computed.saturating_sub(useful), "padding is what was computed and not useful");
+        let step_secs = s["step_s"].as_f64().expect("step seconds");
+        assert!(step_secs > 0.0, "step {}: a step takes time", i + 1);
+        let phases: f64 = ["prepare_s", "forward_s", "backward_s", "optimizer_s"].iter().map(|k| s[k].as_f64().unwrap_or(f64::NAN)).sum();
+        assert!(phases.is_finite() && (phases - step_secs).abs() < 1e-6, "step {}: the phases partition the step", i + 1);
+    }
+
+    // The totals are the sum of the steps, and the rates follow from them.
+    let total = &record["work"];
+    let sum_f = |k: &str| per_step.iter().map(|s| s[k].as_f64().unwrap()).sum::<f64>();
+    let sum_u = |k: &str| per_step.iter().map(|s| s[k].as_u64().unwrap()).sum::<u64>();
+    for k in ["prepare_s", "forward_s", "backward_s", "optimizer_s", "step_s"] {
+        assert!((total[k].as_f64().unwrap() - sum_f(k)).abs() < 1e-6, "{k}: {} vs {}", total[k], sum_f(k));
+    }
+    for k in ["useful_tokens", "computed_tokens", "padded_tokens", "supervised_positions"] {
+        assert_eq!(total[k].as_u64().unwrap(), sum_u(k), "{k}: totals are the sum of the steps");
+    }
+    assert_eq!(total["steps"].as_u64(), Some(u64::from(outcome.steps_completed)));
+    let (useful, computed, step_secs) = (total["useful_tokens"].as_u64().unwrap() as f64, total["computed_tokens"].as_u64().unwrap() as f64, total["step_s"].as_f64().unwrap());
+    assert!((total["useful_tokens_per_s"].as_f64().unwrap() - useful / step_secs).abs() < 1e-6);
+    assert!((total["computed_tokens_per_s"].as_f64().unwrap() - computed / step_secs).abs() < 1e-6);
+}

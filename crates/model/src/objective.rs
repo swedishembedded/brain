@@ -99,6 +99,16 @@ pub trait Objective<M: Model> {
         (0..k).map(|_| self.micro_step(model, rng)).sum()
     }
 
+    /// What the [`Self::micro_steps`] just run measured: the seconds its
+    /// phases took and the tokens it accounted for
+    /// ([`crate::StepWork`]). The loop asks once per step, right after the
+    /// micro-steps, and reports the answer on [`crate::StepReport`] with the
+    /// optimizer's own time added. Default: nothing measured, so only the
+    /// optimizer phase is reported for this objective.
+    fn step_work(&mut self) -> Option<crate::StepWork> {
+        None
+    }
+
     /// Whether the optimiser step after the [`Self::micro_steps`] just run
     /// may be taken. Asked once per step, after the gradients are accumulated
     /// and before they are applied. The default always applies, which is what

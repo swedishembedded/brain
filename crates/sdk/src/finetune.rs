@@ -856,7 +856,9 @@ impl ChatFineTune {
             "repeats": repeats,
             "grad_accum": self.grad_accum,
         });
+        let mut step_work: Vec<model::StepWork> = Vec::new();
         let mut on_step = |s: &model::StepReport| {
+            step_work.push(s.work);
             on_progress(&FineTuneProgress { step: s.step, steps: s.steps, loss: s.loss, lr: s.lr });
             !cancel.is_cancelled()
         };
@@ -917,6 +919,7 @@ impl ChatFineTune {
             tuned_text_score: None,
             base_tier: family.tier_name().to_string(),
             base_tier_reason,
+            step_work,
         };
         if report.interrupted {
             outcome.status = FineTuneStatus::Cancelled;
@@ -1072,6 +1075,12 @@ pub struct ChatFineTuneOutcome {
     /// automatic choice ([`choose_base_tier`]) with its reason.
     pub base_tier: String,
     pub base_tier_reason: String,
+    /// What every completed step of this call measured, in step order: the
+    /// seconds its phases took and the tokens it accounted for
+    /// ([`model::StepWork`]). A resumed run reports the steps it took, not
+    /// those the state it resumed already trained. The training record carries
+    /// the same, with the totals, under `step_work` and `work`.
+    pub step_work: Vec<model::StepWork>,
 }
 
 impl ChatFineTuneOutcome {
@@ -1111,6 +1120,66 @@ impl ChatFineTuneOutcome {
             "tuned_text_score": score(&self.tuned_text_score),
             "base_tier": self.base_tier,
             "base_tier_reason": self.base_tier_reason,
+            "step_work": self.step_work_json(),
+            "work": self.work_json(),
+        })
+    }
+
+    /// The first step this call trained (a resumed call continues the count).
+    fn first_step(&self) -> u32 {
+        self.resumed_at.unwrap_or(0) + 1
+    }
+
+    /// One object per completed step of this call: `step`, the four phases and
+    /// their `step_s`, and the token accounting. Additive to the record; what
+    /// [`Self::step_work`] measured, in the same order.
+    fn step_work_json(&self) -> Vec<serde_json::Value> {
+        self.step_work
+            .iter()
+            .enumerate()
+            .map(|(i, w)| {
+                serde_json::json!({
+                    "step": self.first_step() + i as u32,
+                    "prepare_s": w.prepare_secs,
+                    "forward_s": w.forward_secs,
+                    "backward_s": w.backward_secs,
+                    "optimizer_s": w.optimizer_secs,
+                    "step_s": w.step_secs(),
+                    "useful_tokens": w.useful_tokens,
+                    "computed_tokens": w.computed_tokens,
+                    "padded_tokens": w.padded_tokens(),
+                    "supervised_positions": w.supervised_positions,
+                })
+            })
+            .collect()
+    }
+
+    /// The totals of [`Self::step_work_json`] and the rates that follow from
+    /// them: the numbers an optimization of the step is compared on.
+    fn work_json(&self) -> serde_json::Value {
+        let sum_secs = |k: fn(&model::StepWork) -> f64| self.step_work.iter().map(k).sum::<f64>();
+        let (prepare, forward, backward, optimizer) = (sum_secs(|w| w.prepare_secs), sum_secs(|w| w.forward_secs), sum_secs(|w| w.backward_secs), sum_secs(|w| w.optimizer_secs));
+        let useful: u64 = self.step_work.iter().map(|w| w.useful_tokens).sum();
+        let computed: u64 = self.step_work.iter().map(|w| w.computed_tokens).sum();
+        // Each step's padding is what it paid over its own useful tokens, so a
+        // step that computed fewer than it held is not credited against one
+        // that overran.
+        let padded: u64 = self.step_work.iter().map(model::StepWork::padded_tokens).sum();
+        let supervised: u64 = self.step_work.iter().map(|w| w.supervised_positions).sum();
+        let step_secs = prepare + forward + backward + optimizer;
+        serde_json::json!({
+            "steps": self.step_work.len(),
+            "prepare_s": prepare,
+            "forward_s": forward,
+            "backward_s": backward,
+            "optimizer_s": optimizer,
+            "step_s": step_secs,
+            "useful_tokens": useful,
+            "computed_tokens": computed,
+            "padded_tokens": padded,
+            "supervised_positions": supervised,
+            "useful_tokens_per_s": if step_secs > 0.0 { useful as f64 / step_secs } else { 0.0 },
+            "computed_tokens_per_s": if step_secs > 0.0 { computed as f64 / step_secs } else { 0.0 },
         })
     }
 }

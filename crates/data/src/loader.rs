@@ -227,6 +227,17 @@ impl TokenDataset {
         self.example_batch(cfg, &picks)
     }
 
+    /// The record lengths of the examples `picks` names, in order: `0` for a
+    /// row of padding (`None`) and for an example past the last. `None` for a
+    /// plain token stream, whose rows carry no record boundary. This is what a
+    /// row's padding is the difference from: [`Self::example_batch`] lays each
+    /// example out in a `block_size` row, and its own length is the token count
+    /// that row actually holds.
+    pub fn example_lengths(&self, picks: &[Option<usize>]) -> Option<Vec<usize>> {
+        let ex = self.examples.as_ref()?;
+        Some(picks.iter().map(|pick| pick.and_then(|p| ex.bounds.get(p)).map_or(0, |&(a, e)| e - a)).collect())
+    }
+
     /// The batch whose row `b` is example `picks[b]` - `None` is a row of
     /// padding with [`IGNORE`] targets throughout, as is any example past the
     /// last - laid out as [`TokenDataset::get_batch`] lays a drawn example

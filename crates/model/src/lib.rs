@@ -124,7 +124,7 @@ pub use trainprec::{ResidentRequest, StateSupport, TrainPrecision, TrainPrecisio
 pub use score::{score_base, score_dataset, score_tuned, supervised_positions, ScoredSet};
 pub use train::{cosine_lr, generate, FitOpts, LrSchedule, IGNORE};
 #[cfg(not(target_arch = "wasm32"))]
-pub use train::{build_or_resume, causal_lm, fit, fit_controlled, fit_controlled_sharded, fit_controlled_sync, fit_distributed, fit_from, fit_with, load_dataset, load_dataset_with_itos, AdapterSnapshots, CheckpointIdentity, FitControl, FitReport, GradSync, StepReport};
+pub use train::{build_or_resume, causal_lm, fit, fit_controlled, fit_controlled_sharded, fit_controlled_sync, fit_distributed, fit_from, fit_with, load_dataset, load_dataset_with_itos, AdapterSnapshots, CheckpointIdentity, FitControl, FitReport, GradSync, StepReport, StepWork};
 
 /// What a batch looks like for a given model. Decoder-LM and seq2seq differ in
 /// whether there is a separate source sequence; this enum keeps `set_batch`
@@ -270,6 +270,16 @@ pub trait Model {
 
     /// Upload one batch (shape must match how the model was constructed).
     fn set_batch(&self, batch: Batch);
+
+    /// Tokens the most recent [`Self::forward`] actually computed, when the
+    /// model trims a batch to what its targets need (a causal model computes
+    /// nothing past the last supervised position of a row): rows times the run
+    /// length each row got. `None` (the default) means the model computes the
+    /// whole batch, which is what the step accounting
+    /// ([`crate::StepWork`]) then assumes.
+    fn computed_tokens(&self) -> Option<u64> {
+        None
+    }
 
     /// Forward and backward every batch of `batches` as one accumulation,
     /// the gradients adding up, and return the summed loss: for a model that

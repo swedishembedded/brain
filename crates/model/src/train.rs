@@ -457,6 +457,24 @@ struct CausalLm {
     /// is the same record on every rank. A plain token stream has no record
     /// boundaries, so there one drawn batch is one record.
     drawn_records: u64,
+    /// What the micro-steps since the last [`Objective::step_work`] measured.
+    work: Option<StepWork>,
+}
+
+/// One drawn training batch: its rows, their targets, and how many of the rows'
+/// tokens are real record tokens. A row is laid out in a `block_size` row and
+/// holds its example's tokens followed by padding, which is not useful.
+#[cfg(not(target_arch = "wasm32"))]
+struct Drawn {
+    x: Vec<u32>,
+    y: Vec<i32>,
+    useful_tokens: u64,
+}
+
+/// The token half of a micro-step's [`StepWork`]: what the drawn batch holds.
+#[cfg(not(target_arch = "wasm32"))]
+fn work_of(drawn: &Drawn, targets: &[u32]) -> StepWork {
+    StepWork { useful_tokens: drawn.useful_tokens, supervised_positions: targets.iter().filter(|&&t| t != IGNORE).count() as u64, ..StepWork::default() }
 }
 
 /// Which example each draw takes: the examples shuffled once per epoch, every
@@ -564,11 +582,20 @@ impl<M: Model> Objective<M> for CausalLm {
     }
 
     fn micro_step(&mut self, model: &M, rng: &mut Rng) -> f32 {
-        let (x, y) = self.draw(rng);
-        let targets = targets_to_u32(&y);
-        model.set_batch(Batch::Lm { tokens: &x, targets: &targets });
+        let clock = std::time::Instant::now();
+        let drawn = self.draw(rng);
+        let targets = targets_to_u32(&drawn.y);
+        model.set_batch(Batch::Lm { tokens: &drawn.x, targets: &targets });
+        let mut work = work_of(&drawn, &targets);
+        work.prepare_secs = clock.elapsed().as_secs_f64();
+        let pass = std::time::Instant::now();
         let loss = model.forward();
+        work.forward_secs = pass.elapsed().as_secs_f64();
+        work.computed_tokens = model.computed_tokens().unwrap_or(drawn.x.len() as u64);
+        let pass = std::time::Instant::now();
         model.backward();
+        work.backward_secs = pass.elapsed().as_secs_f64();
+        self.work = Some(work);
         loss
     }
 
@@ -580,32 +607,52 @@ impl<M: Model> Objective<M> for CausalLm {
     /// in - and the loss it reports is that per-token mean, the quantity a
     /// held-out evaluation measures.
     fn micro_steps(&mut self, model: &M, rng: &mut Rng, k: u32) -> f32 {
-        let drawn: Vec<(Vec<u32>, Vec<u32>)> = (0..k)
-            .map(|_| {
-                let (x, y) = self.draw(rng);
-                (x, targets_to_u32(&y))
-            })
-            .collect();
-        let batches: Vec<Batch> = drawn.iter().map(|(x, y)| Batch::Lm { tokens: x, targets: y }).collect();
+        // Data preparation is the draws and the uploads; the forward and
+        // backward passes are measured around each call.
+        let clock = std::time::Instant::now();
+        let drawn: Vec<Drawn> = (0..k).map(|_| self.draw(rng)).collect();
+        let targets: Vec<Vec<u32>> = drawn.iter().map(|d| targets_to_u32(&d.y)).collect();
+        let mut work = StepWork { useful_tokens: drawn.iter().map(|d| d.useful_tokens).sum(), supervised_positions: targets.iter().flatten().filter(|&&t| t != IGNORE).count() as u64, ..StepWork::default() };
         if k > 1 {
+            let batches: Vec<Batch> = drawn.iter().zip(&targets).map(|(d, y)| Batch::Lm { tokens: &d.x, targets: y }).collect();
+            let drew = clock.elapsed().as_secs_f64();
+            let pass = std::time::Instant::now();
             if let Some(total) = model.accumulate_overlapped(&batches) {
+                // An overlapped pass runs the micro-steps' forwards and
+                // backwards together, so its whole time is the backward's.
+                work.prepare_secs = drew;
+                work.backward_secs = pass.elapsed().as_secs_f64();
+                work.computed_tokens = drawn.iter().map(|d| d.x.len() as u64).sum();
+                self.work = Some(work);
                 return total;
             }
         }
-        let supervised: usize = drawn.iter().map(|(_, y)| y.iter().filter(|&&t| t != IGNORE).count()).sum();
-        let mean_supervised = supervised as f32 / k.max(1) as f32;
+        work.prepare_secs = clock.elapsed().as_secs_f64();
+        let mean_supervised = work.supervised_positions as f32 / k.max(1) as f32;
         let mut total = 0.0;
-        for batch in batches {
-            model.set_batch(batch);
+        for (drawn, targets) in drawn.iter().zip(&targets) {
+            let pass = std::time::Instant::now();
+            model.set_batch(Batch::Lm { tokens: &drawn.x, targets });
             if mean_supervised > 0.0 {
                 if let Some(objectives) = model.token_objectives() {
                     objectives.set_loss_denominator(mean_supervised);
                 }
             }
+            work.prepare_secs += pass.elapsed().as_secs_f64();
+            let pass = std::time::Instant::now();
             total += model.forward();
+            work.forward_secs += pass.elapsed().as_secs_f64();
+            work.computed_tokens += model.computed_tokens().unwrap_or(drawn.x.len() as u64);
+            let pass = std::time::Instant::now();
             model.backward();
+            work.backward_secs += pass.elapsed().as_secs_f64();
         }
+        self.work = Some(work);
         total
+    }
+
+    fn step_work(&mut self) -> Option<StepWork> {
+        self.work.take()
     }
 
     fn loss_probe(&mut self, model: &M, rng: &mut Rng) -> f32 {
@@ -643,13 +690,13 @@ impl<M: Model> Objective<M> for CausalLm {
 #[cfg(not(target_arch = "wasm32"))]
 impl CausalLm {
     fn new(train: TokenDataset, val: TokenDataset, batch_cfg: BatchConfig, itos: Option<Vec<char>>) -> CausalLm {
-        CausalLm { train, val, batch_cfg, itos, order: None, shard: None, drawn_records: 0 }
+        CausalLm { train, val, batch_cfg, itos, order: None, shard: None, drawn_records: 0, work: None }
     }
 
     /// This rank's next training batch: `batch_size` records of the stream that
     /// belong to its shard, or the next whole batch when the run is not
     /// sharded.
-    fn draw(&mut self, rng: &mut Rng) -> (Vec<u32>, Vec<i32>) {
+    fn draw(&mut self, rng: &mut Rng) -> Drawn {
         let Some((rank, world)) = self.shard else {
             return self.draw_next(rng);
         };
@@ -666,7 +713,7 @@ impl CausalLm {
                     picks.push(Some(pick));
                 }
             }
-            return self.train.example_batch(&self.batch_cfg, &picks).expect("a stream with an epoch order has example rows");
+            return self.draw_examples(&picks).expect("a stream with an epoch order has example rows");
         }
         // A plain token stream has no record boundaries: its drawn batch is the
         // record, so the rank keeps one batch out of every `world`.
@@ -683,14 +730,25 @@ impl CausalLm {
     /// The next batch of the whole (unsharded) stream: the next examples of
     /// the epoch order, else (before the run has begun, or for a stream of
     /// tokens) a random draw.
-    fn draw_next(&mut self, rng: &mut Rng) -> (Vec<u32>, Vec<i32>) {
+    fn draw_next(&mut self, rng: &mut Rng) -> Drawn {
         if let Some(order) = self.order.as_mut() {
             let picks: Vec<Option<usize>> = (0..self.batch_cfg.batch_size).map(|_| Some(order.next())).collect();
-            if let Some(batch) = self.train.example_batch(&self.batch_cfg, &picks) {
-                return batch;
+            if let Some(drawn) = self.draw_examples(&picks) {
+                return drawn;
             }
         }
-        self.train.get_batch(&self.batch_cfg, rng)
+        let (x, y) = self.train.get_batch(&self.batch_cfg, rng);
+        // A window drawn from a token stream is all real tokens: the stream has
+        // no record boundary to pad at.
+        Drawn { useful_tokens: x.len() as u64, x, y }
+    }
+
+    /// The example batch `picks` names, with the number of its rows' own tokens.
+    /// `None` for a plain token stream, which has no examples.
+    fn draw_examples(&self, picks: &[Option<usize>]) -> Option<Drawn> {
+        let (x, y) = self.train.example_batch(&self.batch_cfg, picks)?;
+        let useful_tokens = self.train.example_lengths(picks)?.iter().sum::<usize>() as u64;
+        Some(Drawn { x, y, useful_tokens })
     }
 
     /// The mean per-position loss over every supervised position of the
@@ -1016,6 +1074,72 @@ pub fn fit_with<M: Model, O: Objective<M>>(model: M, obj: O, opts: &FitOpts, out
     Ok((report.initial_loss, report.final_loss.unwrap_or(report.initial_loss)))
 }
 
+/// What one completed optimizer step did, measured: the seconds each phase of
+/// the step took and the tokens it accounted for.
+///
+/// The four phases partition the step's wall time - the objective measures the
+/// batches it prepares and the forward and backward passes it runs, and
+/// [`fit_controlled`] measures the optimizer, gradients reduction included. A
+/// phase an objective does not measure is `0`; the periodic evaluation, when a
+/// step is due one, is not part of any phase. The loss estimate a run takes
+/// before its first step is not a step and is not counted either.
+///
+/// `useful_tokens` against `computed_tokens` is what makes padding
+/// measurable: a record padded up to a longer row's length is paid for in the
+/// second and not in the first, and [`Self::padded_tokens`] is the
+/// difference.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct StepWork {
+    /// Seconds drawing the step's batches from the dataset and uploading them.
+    pub prepare_secs: f64,
+    /// Seconds in the step's forward passes.
+    pub forward_secs: f64,
+    /// Seconds in the step's backward passes.
+    pub backward_secs: f64,
+    /// Seconds in the optimizer: zeroing gradients, reducing them across
+    /// ranks, AdamW, and waiting for the device to finish the step.
+    pub optimizer_secs: f64,
+    /// Tokens of the records this step trained on, row padding excluded.
+    pub useful_tokens: u64,
+    /// Tokens the model actually computed: the run length of every row the
+    /// step's forward saw ([`Model::computed_tokens`]), so row padding and
+    /// the rounding to whole GDN chunks appear here.
+    pub computed_tokens: u64,
+    /// Positions carrying a supervised target (the loss denominator).
+    pub supervised_positions: u64,
+}
+
+impl StepWork {
+    /// Tokens computed that carried no record token: the padded work the step
+    /// paid for.
+    pub fn padded_tokens(&self) -> u64 {
+        self.computed_tokens.saturating_sub(self.useful_tokens)
+    }
+
+    /// The step's measured wall time: its four phases.
+    pub fn step_secs(&self) -> f64 {
+        self.prepare_secs + self.forward_secs + self.backward_secs + self.optimizer_secs
+    }
+
+    /// Record tokens per second of step time.
+    pub fn useful_tokens_per_s(&self) -> f64 {
+        rate(self.useful_tokens, self.step_secs())
+    }
+
+    /// Tokens computed per second of step time.
+    pub fn computed_tokens_per_s(&self) -> f64 {
+        rate(self.computed_tokens, self.step_secs())
+    }
+}
+
+fn rate(tokens: u64, secs: f64) -> f64 {
+    if secs > 0.0 {
+        tokens as f64 / secs
+    } else {
+        0.0
+    }
+}
+
 /// One completed optimizer step, as [`fit_controlled`] hands it to
 /// [`FitControl::on_step`].
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1032,6 +1156,8 @@ pub struct StepReport {
     /// The global gradient norm the step's clip measured, when the model reports it
     /// ([`Model::last_grad_norm`]).
     pub grad_norm: Option<f32>,
+    /// What the step measured: its phases' seconds and its token accounting.
+    pub work: StepWork,
 }
 
 /// What a caller controls about a [`fit_controlled`] run beyond [`FitOpts`].
@@ -1549,6 +1675,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
 
     for step in first_step..opts.steps {
         let lr = selection.cooldown.map_or_else(|| cosine_lr(step, opts), |c| c.lr(step, opts.min_lr));
+        let step_clock = std::time::Instant::now();
         model.zero_grads();
         let step_loss = obj.micro_steps(&model, &mut rng, opts.grad_accum.max(1));
         match obj.step_verdict() {
@@ -1568,6 +1695,11 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         model.poll_wait();
         let grad_norm = model.last_grad_norm();
         let loss = step_loss / opts.grad_accum.max(1) as f32;
+        // The optimizer's share of the step: everything the objective did not
+        // measure, which is zeroing gradients, reducing them, AdamW and the
+        // device wait above. The evaluation a step is due is not part of it.
+        let mut work = obj.step_work().unwrap_or_default();
+        work.optimizer_secs = (step_clock.elapsed().as_secs_f64() - work.prepare_secs - work.forward_secs - work.backward_secs).max(0.0);
         if let Some(norm) = grad_norm {
             println!("step {:>6}  loss {loss:.4}  grad_norm {norm:.4}  lr {lr:.2e}", step + 1);
         }
@@ -1690,7 +1822,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         }
 
         let keep_going = match control.on_step.as_mut() {
-            Some(on_step) => on_step(&StepReport { step: completed, steps: opts.steps, loss, lr, grad_norm }),
+            Some(on_step) => on_step(&StepReport { step: completed, steps: opts.steps, loss, lr, grad_norm, work }),
             None => true,
         };
         if let Some(state) = control.state {

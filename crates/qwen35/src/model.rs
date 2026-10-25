@@ -5598,6 +5598,9 @@ impl model::Model for Qwen35 {
     fn forward(&self) -> f32 {
         Qwen35::forward(self)
     }
+    fn computed_tokens(&self) -> Option<u64> {
+        Some(u64::from(self.b) * u64::from(self.run_len()))
+    }
     fn backward(&self) {
         Qwen35::backward(self)
     }

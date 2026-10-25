@@ -150,13 +150,26 @@ pub fn build_resident(cfg: Qwen35Config, opts: &FitOpts, src: &dyn checkpoint::T
 }
 
 /// An `on_step` callback printing one line per optimizer step to stderr: the
-/// step, the loss, the learning rate and the seconds the step took.
+/// step, the loss, the learning rate, and where the step's seconds went
+/// ([`model::StepWork`] - its four phases) with the tokens it was charged for
+/// against the tokens its records hold.
 fn step_progress() -> impl FnMut(&model::StepReport) -> bool {
-    let mut last = std::time::Instant::now();
     move |r| {
-        let now = std::time::Instant::now();
-        eprintln!("qwen35 finetune: step {}/{} loss {:.4} lr {:.2e} {:.1}s", r.step, r.steps, r.loss, r.lr, now.duration_since(last).as_secs_f64());
-        last = now;
+        let w = r.work;
+        eprintln!(
+            "qwen35 finetune: step {}/{} loss {:.4} lr {:.2e} {:.1}s (prepare {:.2} forward {:.1} backward {:.1} optimizer {:.1}; {} useful / {} computed tok)",
+            r.step,
+            r.steps,
+            r.loss,
+            r.lr,
+            w.step_secs(),
+            w.prepare_secs,
+            w.forward_secs,
+            w.backward_secs,
+            w.optimizer_secs,
+            w.useful_tokens,
+            w.computed_tokens
+        );
         true
     }
 }
