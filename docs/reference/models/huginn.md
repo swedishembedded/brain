@@ -57,10 +57,9 @@ about 7.7 GB - is the pool. That is what sets the depth a card can serve:
 | 12 | 52 | 9.0 GB | 23.3 GB |
 | 32 (released) | 132 | 22.8 GB | 37.1 GB |
 
-The resident serves 12 steps. At a 6144-token serving context (an agent's
-system prompt and tool schemas) only 4-6 steps fit with the full history, or
-more with the sharing ring; a card with more memory serves the released
-depth. Prefill allocates a slab of the prompt's length, so a prompt close to
+The resident serves 6 steps, which fits `brain serve`'s default 2 GB reserve
+at both 4096 and 6144 tokens. A 24 GB card reaches 12 steps at 4096 only with
+`--reserve-gb 0`, and a card with more memory serves the released depth. Prefill allocates a slab of the prompt's length, so a prompt close to
 the context capacity needs that much headroom on top of the numbers above.
 
 ## Using it from an agent runtime

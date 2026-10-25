@@ -50,8 +50,10 @@ pub const DEFAULT_BATCH: u32 = 4;
 /// any depth (its card: fewer than 4 gives coarse answers, gains continue to
 /// about 64) and its own `compress-sN` KV sharing halves the pool again, at a
 /// divergence the served correctness gate would have to characterise first -
-/// `huginn::serve::Engine::open_with_sharing` exposes it.
-pub const DEFAULT_STEPS: u32 = 12;
+/// `huginn::serve::Engine::open_with_sharing` exposes it. Six steps is what
+/// `brain serve`'s default 2 GB reserve leaves room for at a 6144-token
+/// context; a larger card serves more.
+pub const DEFAULT_STEPS: u32 = 6;
 
 pub const MODEL_ID: &str = "brain/huginn";
 
