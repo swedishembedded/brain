@@ -657,7 +657,7 @@ fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, qwen_c
             }
         },
         "ouro" => match catalog::resident_ouro::OuroResident::from_card(weights, card, tokenizer) {
-            Ok(o) => Some(Arc::new(o)),
+            Ok(o) => Some(Arc::new(o.with_sizing(qwen35_sizing.ctx, catalog::resident_ouro::DEFAULT_BLOCK, qwen35_sizing.max_batch))),
             Err(e) => {
                 eprintln!("brain: skip {} ({e})", card.id);
                 None
@@ -722,7 +722,7 @@ fn build_for_local(local: &brain_modelstore::LocalModel, qwen_cfg: catalog::resi
         return Err(format!("{}: an adapter is served by the base it rides on, not built as a model of its own", card.id));
     }
     if let Some(roles) = &local.roles {
-        return resident_for_compound(card, roles, qwen_cfg);
+        return resident_for_compound(card, roles, qwen_cfg, qwen35_sizing);
     }
     let weights = local.weights.to_str().ok_or_else(|| "weights path is not valid UTF-8".to_string())?;
     let tokenizer = local.tokenizer.as_deref().and_then(|p| p.to_str());
@@ -735,7 +735,7 @@ fn build_for_local(local: &brain_modelstore::LocalModel, qwen_cfg: catalog::resi
 /// A checkpoint of a family whose model reads a downloaded Hugging Face
 /// directory (the qwen3 decoder and its `llama`/`qwen2` rows, glmdsa, lfm2)
 /// is served straight from the directory its `weights` role names.
-fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<String, PathBuf>, qwen_cfg: catalog::resident_llm::QwenServeConfig) -> Result<Built, String> {
+fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<String, PathBuf>, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing) -> Result<Built, String> {
     let implementation = brain_arch::by_id(&card.family).map(|a| a.implementation().id);
     if matches!(implementation, Some("qwen3" | "glmdsa" | "lfm2" | "qwen3omnimoe")) {
         let dir = roles.get("weights").ok_or("compound manifest missing role \"weights\"")?;
@@ -767,7 +767,8 @@ fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<St
         // safetensors, read as pulled.
         "ouro" => {
             let dir = roles.get("weights").and_then(|p| p.to_str()).ok_or("compound manifest missing role \"weights\"")?;
-            catalog::resident_ouro::OuroResident::from_card(dir, card, None).map(|o| Arc::new(o) as Arc<dyn ResidentModel>)
+            catalog::resident_ouro::OuroResident::from_card(dir, card, None)
+                .map(|o| Arc::new(o.with_sizing(qwen35_sizing.ctx, catalog::resident_ouro::DEFAULT_BLOCK, qwen35_sizing.max_batch)) as Arc<dyn ResidentModel>)
         }
         "zimage" => {
             let paths = zimage_paths_from_roles(roles)?;

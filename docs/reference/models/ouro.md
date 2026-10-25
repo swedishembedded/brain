@@ -28,9 +28,13 @@ ChatML template declared by the checkpoint is used for chat requests.
 Attention history is per pass, not shared: a sequence with `T` recurrent
 passes owns `T` KV histories, one block table per pass. The serving engine's
 shared KV capacity is therefore divided by `T` among passes, and raising the
-context multiplies KV memory by `T` on top of the usual per-token cost. The
-default serving capacity (1024 tokens) is sized so the 2.6B checkpoint's four
-passes stay inside one 24 GB card.
+context multiplies KV memory by `T` on top of the usual per-token cost.
+
+`brain serve --ctx N` sets that capacity. At 4096 tokens the 1.4B checkpoint's
+four passes need about 6.4 GB of pool beside 5.4 GB of weights; the 2.6B
+checkpoint needs about 12.9 GB beside 10.7 GB, so on a 24 GB card serve it
+with `--ctx 2048` (or import and serve the 1.4B when a long prompt, such as an
+agent's tool schema, has to fit).
 
 ## Licence
 

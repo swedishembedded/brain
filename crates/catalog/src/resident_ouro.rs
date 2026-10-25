@@ -31,7 +31,7 @@ use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use crate::resident_llm::{est_vram, generate_spec, on_device};
 
 /// Default shared KV capacity (tokens) and page size.
-pub const DEFAULT_CTX: u32 = 1024;
+pub const DEFAULT_CTX: u32 = 4096;
 pub const DEFAULT_BLOCK: u32 = 16;
 pub const DEFAULT_BATCH: u32 = 8;
 
@@ -96,8 +96,9 @@ impl OuroResident {
 
     /// Override the shared KV capacity / page / batch (serving policy).
     pub fn with_sizing(mut self, ctx: u32, block_size: u32, max_batch: u32) -> OuroResident {
-        self.ctx = ctx.max(block_size);
         self.block_size = block_size.max(1);
+        // The pool is a whole number of pages; round a policy cap up to one.
+        self.ctx = ctx.max(self.block_size).div_ceil(self.block_size) * self.block_size;
         self.max_batch = max_batch.max(1);
         self
     }
