@@ -27,6 +27,7 @@
 //! serving engine and training of the recurrent core follow.
 
 pub mod config;
+pub mod decode;
 pub mod import;
 pub mod init;
 pub mod model;

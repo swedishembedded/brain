@@ -53,6 +53,25 @@ const ADD2: usize = 8;
 const BIAS_ADD: usize = 9;
 const COPY_COLS: usize = 10;
 const SCALE_ROW: usize = 11;
+const ROPE_AT: usize = 12;
+const KV_APPEND: usize = 13;
+const ATTN_DECODE_SCORES: usize = 14;
+const DECODE_SOFTMAX: usize = 15;
+const ATTN_DECODE_APPLY: usize = 16;
+
+// Slots the decode engine composes its own graph from.
+pub(crate) const EMBED_ID: usize = EMBED;
+pub(crate) const MATMUL_ID: usize = MATMUL;
+pub(crate) const ADD2_ID: usize = ADD2;
+pub(crate) const BIAS_ADD_ID: usize = BIAS_ADD;
+pub(crate) const COPY_COLS_ID: usize = COPY_COLS;
+pub(crate) const ROPE_AT_ID: usize = ROPE_AT;
+pub(crate) const SILU_MUL_ID: usize = SILU_MUL;
+pub(crate) const SCALE_ROW_ID: usize = SCALE_ROW;
+pub(crate) const KV_APPEND_ID: usize = KV_APPEND;
+pub(crate) const ATTN_DECODE_SCORES_ID: usize = ATTN_DECODE_SCORES;
+pub(crate) const DECODE_SOFTMAX_ID: usize = DECODE_SOFTMAX;
+pub(crate) const ATTN_DECODE_APPLY_ID: usize = ATTN_DECODE_APPLY;
 
 pub const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -67,9 +86,14 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("bias_add", kernels::BIAS_ADD),
     ("copy_cols", kernels::COPY_COLS),
     ("scale_row", kernels::SCALE_ROW),
+    ("rope_at", kernels::ROPE_AT),
+    ("kv_append", kernels::KV_APPEND),
+    ("attn_decode_scores", kernels::ATTN_DECODE_SCORES),
+    ("decode_softmax", kernels::DECODE_SOFTMAX),
+    ("attn_decode_apply", kernels::ATTN_DECODE_APPLY),
 ];
 
-fn ids() -> KernelIds {
+pub(crate) fn kernel_ids() -> KernelIds {
     KernelIds {
         rmsnorm: RMSNORM,
         rms_inv: block::UNREGISTERED,
@@ -240,7 +264,7 @@ impl Huginn {
     /// One sandwich block: `name` is `prelude.{i}` / `core.{i}` / `coda.{i}`.
     fn block_steps(&self, steps: &mut Vec<Step>, name: &str, x_in: &DeviceBuffer, x_out: &DeviceBuffer) {
         let cfg = &self.cfg;
-        let k = ids();
+        let k = kernel_ids();
         let n = self.rows();
         let (d, ff) = (cfg.d_model, cfg.d_ff);
         let (nh, hd) = (cfg.n_heads, cfg.head_dim);
@@ -279,7 +303,7 @@ impl Huginn {
     /// Record embed → prelude → recurrence → norm → coda → norm → head.
     fn record(&self, steps: u32) -> Vec<Step> {
         let cfg = &self.cfg;
-        let k = ids();
+        let k = kernel_ids();
         let n = self.rows();
         let d = cfg.d_model;
         let mut g: Vec<Step> = Vec::new();
