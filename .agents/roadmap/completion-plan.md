@@ -547,11 +547,6 @@ copies.
       random one per run, so whether a rank-2 adapter reached a fixed bar
       depended on the draw (the DiT case measured 0.61-0.85 of its starting
       loss across seeds at an unchanged bar that demanded 0.6) (2026-10-24).
-- [ ] `deepseekocr2`'s composite finite-difference check fails at HEAD
-      (analytic 9.4e-6 against numeric 1.19e-5, rel 0.21): the loss's
-      gradient through the splice is small enough that the FD step's own
-      rounding dominates, so the check needs a larger perturbation or a
-      larger signal, not a looser tolerance.
 - [x] `Ops::act` leaves an activation unpacked when its width is not a whole
       number of `int8::GROUP`s (a product that needs the packed rows refuses
       by name), so a narrow model builds at fp32 - `qwen35moe`'s tiny config
