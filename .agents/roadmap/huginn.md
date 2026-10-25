@@ -24,7 +24,12 @@ un-embeds the final latent state into the tied head.
 
 - Execution graph: prelude, recurrent core with the `cat(x, embeds)` adapter,
   coda, tied head; `like-init` latent state (the reference draws it from
-  `init_values["std"]`, so a parity run fixes the same draw).
+  `init_values["std"]`, so a parity run fixes the same draw). Block shape is
+  pinned: `x = norm_2(attn(norm_1(x)) + x); x = norm_4(mlp(norm_3(x)) + x)`,
+  fused QKV with a per-head Q/K bias, fused gate/up FC, interleaved-pair RoPE
+  (brain's `rope_train` kernel, not the half-split `rope_base`). The tiny
+  golden in `testdata/golden/huginn/tiny` is driven by a fixed starting state
+  and records each of three steps.
 - Reference golden (tiny and released) and per-step parity; incremental
   decode with one KV history per recurrent step; paged serving.
 - Training: backward through the sampled recurrence (the reference backprops
