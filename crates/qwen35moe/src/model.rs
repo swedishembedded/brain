@@ -3457,6 +3457,7 @@ impl Qwen35 {
             block_size: caches.gqa_cap,
             max_bt: 1,
             cap,
+            pin_splits: false,
         };
 
         // Where the residual add, the norm and the activation quantisation that sit

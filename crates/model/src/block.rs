@@ -565,6 +565,7 @@ pub fn gqa_decode_batched_step_kv(
     block_size: u32,
     max_bt: u32,
     cap: u32,
+    pin_splits: bool,
     q: &DeviceBuffer,
     k_new: &DeviceBuffer,
     v_new: &DeviceBuffer,
@@ -578,7 +579,7 @@ pub fn gqa_decode_batched_step_kv(
     assert!(batch > 0, "gqa_decode_batched_step_kv: empty batch");
     let append = KvAppend { batch, kv_stride: n_kv_heads * head_dim, block_size, head_dim };
     let mut steps = vec![kv.append(g, &layer.k, k_new, blocks, offsets, append), kv.append(g, &layer.v, v_new, blocks, offsets, append)];
-    steps.extend(gqa_decode_batched_attend_steps_kv(g, kv, softmax, n_heads, n_kv_heads, head_dim, batch, block_size, max_bt, cap, q, layer, block_tables, seq_lens, ctx));
+    steps.extend(gqa_decode_batched_attend_steps_kv(g, kv, softmax, n_heads, n_kv_heads, head_dim, batch, block_size, max_bt, cap, pin_splits, q, layer, block_tables, seq_lens, ctx));
     steps
 }
 
@@ -600,6 +601,7 @@ pub fn gqa_decode_batched_attend_steps_kv(
     block_size: u32,
     max_bt: u32,
     cap: u32,
+    pin_splits: bool,
     q: &DeviceBuffer,
     layer: &KvLayer,
     block_tables: &DeviceBuffer,
@@ -612,7 +614,7 @@ pub fn gqa_decode_batched_attend_steps_kv(
     let kv_stride = n_kv_heads * head_dim;
     let shape = PagedDecodeShape { batch, n_heads, group: n_heads / n_kv_heads, head_dim, block_size, kv_stride, cap, max_bt, scale: 1.0 / (head_dim as f32).sqrt() };
     if kv.flash_decode_available(g, head_dim, n_heads / n_kv_heads) {
-        let fused = FlashDecodeShape { batch, n_heads, n_kv_heads, head_dim, block_size, max_bt, cap };
+        let fused = FlashDecodeShape { batch, n_heads, n_kv_heads, head_dim, block_size, max_bt, cap, pin_splits };
         return kv.flash_decode(g, q, &layer.k, &layer.v, block_tables, seq_lens, ctx, fused);
     }
     let scores = g.storage(batch as u64 * n_heads as u64 * cap as u64);

@@ -99,6 +99,9 @@ pub struct Qwen35Sizing {
     /// `max_concurrent`, i.e. `num_blocks`) and so decode together in one
     /// batched step.
     pub max_batch: u32,
+    /// Run every decode row independently of its co-batch (`--exact-decode`) -
+    /// see [`Qwen35GgufServeConfig::exact_decode`].
+    pub exact_decode: bool,
     /// The serving policy cannot be honoured by this resident (the reason is
     /// [`Qwen35ServeConfig::fp32_refused`]): it is not built.
     pub refused: bool,
@@ -106,7 +109,7 @@ pub struct Qwen35Sizing {
 
 impl Default for Qwen35Sizing {
     fn default() -> Self {
-        Qwen35Sizing { ctx: 4096, max_batch: 4, refused: false }
+        Qwen35Sizing { ctx: 4096, max_batch: 4, exact_decode: false, refused: false }
     }
 }
 
@@ -114,7 +117,7 @@ impl Qwen35Sizing {
     /// Clamp both knobs to their 1 floor - what the old env readers did to
     /// any parsed value, now applied to the parsed struct once, here.
     pub fn sanitized(self) -> Qwen35Sizing {
-        Qwen35Sizing { ctx: self.ctx.max(1), max_batch: self.max_batch.max(1), refused: self.refused }
+        Qwen35Sizing { ctx: self.ctx.max(1), max_batch: self.max_batch.max(1), exact_decode: self.exact_decode, refused: self.refused }
     }
 }
 
@@ -242,10 +245,16 @@ impl ResidentModel for Qwen35Resident {
         let stop = data::generation::stop_ids(tok_dir, &tok, gguf_eos, Some("<|im_end|>")).map_err(|e| format!("qwen35: {e}"))?;
         let ctx = self.ctx();
         let max_concurrent = self.max_concurrent();
+        let exact_decode = self.sizing.exact_decode;
         let front = Arc::new(TextFrontend { tok, stop, label: "qwen35", parse: parse_qwen35 });
         let (config, host) = HostWeights::open(&self.path, |config| Qwen35Config::from_json(config).param_list().into_iter().map(|(name, _)| name).collect())?;
         let build: Build = Box::new(move |host, device| {
-            let sched = on_device(device, || engine_from(host.source(), &config, ctx, max_concurrent).map(|engine| Scheduler::new(engine, max_concurrent as usize)))??;
+            let sched = on_device(device, || {
+                engine_from(host.source(), &config, ctx, max_concurrent).map(|mut engine| {
+                    engine.set_exact_decode(exact_decode);
+                    Scheduler::new(engine, max_concurrent as usize)
+                })
+            })??;
             Ok(Box::new(ScheduledInstance::new(front.clone(), sched, max_concurrent as usize)))
         });
         Ok(Box::new(ParkableInstance::activate(Arc::new(host), device, build)?))
@@ -312,6 +321,14 @@ pub struct Qwen35GgufServeConfig {
     /// Speculative decoding (`--speculative`). `None` takes the best of
     /// [`SPECULATION_DEFAULTS`] that fits.
     pub speculative: Option<qwen35::int8_gguf_resident::SpeculativeMode>,
+    /// Run every decode row independently of its co-batch (`--exact-decode`):
+    /// group the projections so each row takes the bit-identical int8 kernel
+    /// and size every row's attention from the configured context, so a
+    /// request's tokens do not depend on which sequences share its step.
+    /// Turns speculation off (its verify pass is not grouped). Default off:
+    /// today's numerics and throughput. See
+    /// [`Qwen35GgufResident::with_exact_decode`](qwen35::int8_gguf_resident::Qwen35GgufResident::with_exact_decode).
+    pub exact_decode: bool,
     /// Prompt tokens one sequence gets of each scheduler iteration's prefill
     /// while others wait (`the prefill-slice setting`). `None` takes the engine's
     /// default ([`PrefillPolicy::default`](qwen35::int8_gguf_resident::PrefillPolicy)).
@@ -341,6 +358,7 @@ pub const QWEN35_GGUF_POLICY: model::policy::PolicySupport = model::policy::Poli
     gemm: false,
     fuse_norm: false,
     kv_calibration: false,
+    exact_decode: true,
 };
 
 /// What the brain-checkpoint Qwen3.8 resident honours of a serving policy: the weight tier is the checkpoint's own
@@ -353,6 +371,7 @@ pub const QWEN35_FP32_POLICY: model::policy::PolicySupport = model::policy::Poli
     gemm: false,
     fuse_norm: false,
     kv_calibration: false,
+    exact_decode: true,
 };
 
 impl Qwen35ServeConfig {
@@ -372,6 +391,7 @@ impl Qwen35ServeConfig {
             if let Some(b) = p.limits.max_batch {
                 self.fp32.max_batch = b;
             }
+            self.fp32.exact_decode = p.exact_decode;
         }
         match (gguf, fp32) {
             (Err(a), Err(b)) => Err(format!("{a}; {b}")),
@@ -391,6 +411,7 @@ impl Qwen35GgufServeConfig {
             self.tier = p.weights.clone();
         }
         self.kv = p.kv_cache.or(self.kv);
+        self.exact_decode = p.exact_decode;
         let l = &p.limits;
         self.ctx = l.ctx.or(self.ctx);
         self.max_batch = l.max_batch.or(self.max_batch);
@@ -527,6 +548,12 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
     if let Some(why) = &cfg.refused {
         return Err(why.clone());
     }
+    if cfg.exact_decode && bank.is_some() {
+        // A grouped step indexes adapter rows by position within its dispatch;
+        // grouping would hand a row its neighbour's correction, and not
+        // grouping would silently defeat --exact-decode. Refuse instead.
+        return Err(format!("{MODEL}: --exact-decode is not supported with an adapter bank: a grouped decode step cannot carry per-row adapter slots"));
+    }
     let max_batch = cfg.max_batch_or_default();
     let mg = checkpoint::gguf::MmapGguf::open(gguf_path).map_err(|e| format!("cannot open '{gguf_path}': {e}"))?;
     let model_cfg = resident_config(&mg, 1).map_err(|e| format!("'{gguf_path}' is not a servable Qwen3.8 GGUF: {e}"))?;
@@ -545,7 +572,7 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
     }
     let build = |kv, mode, prefix_slots, cap| {
         let spec = SpecServing { mode, ..SpecServing::default() };
-        let r = Qwen35GgufResident::new(gguf_path.to_string(), devices.clone(), cap, tier.clone()).with_kv_tier(kv).with_max_batch(max_batch).with_prefix_slots(prefix_slots).with_speculation(spec);
+        let r = Qwen35GgufResident::new(gguf_path.to_string(), devices.clone(), cap, tier.clone()).with_kv_tier(kv).with_max_batch(max_batch).with_prefix_slots(prefix_slots).with_speculation(spec).with_exact_decode(cfg.exact_decode);
         match &bank {
             Some(bank) => r.with_adapter_bank(bank.request()),
             None => r,
@@ -569,6 +596,9 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
     let probe_cap = cfg.ctx.unwrap_or(1).max(1);
     let kv = given_or_chosen(cfg.kv, "--kv-cache", KV_DEFAULTS, hw, &mut chosen, |kv| fits(build(kv, SpeculativeMode::Off, 0, probe_cap)));
     let mode = given_or_chosen(cfg.speculative, "--speculative", SPECULATION_DEFAULTS, hw, &mut chosen, |mode| fits(build(kv, mode, 0, probe_cap)));
+    if cfg.exact_decode && mode != SpeculativeMode::Off {
+        chosen.push("--exact-decode: speculation is off in this regime (a verify pass is not grouped)".to_string());
+    }
     let prefix_slots = given_or_chosen(cfg.prefix_slots.map(PrefixCache::Slots), "prefix slots", PREFIX_SLOT_DEFAULTS, hw, &mut chosen, |cache| fits(build(kv, mode, cache.slots(max_batch), probe_cap))).slots(max_batch);
     let resident = match cfg.ctx {
         Some(_) => build(kv, mode, prefix_slots, probe_cap),
@@ -718,13 +748,29 @@ mod tests {
         assert!(gguf_resident("none.gguf", "t/x", &[], 0, &cfg.gguf).err().unwrap().contains("--gemm"), "a refused resident must not build");
     }
 
+    /// `--exact-decode` reaches both Qwen3.8 residents and stays off when it is
+    /// not asked for; with an adapter bank it is refused rather than silently
+    /// serving a grouped step that would lose the per-row adapter slots.
+    #[test]
+    fn exact_decode_reaches_both_residents_and_is_refused_with_an_adapter_bank() {
+        let mut cfg = Qwen35ServeConfig::default();
+        assert!(!cfg.gguf.exact_decode && !cfg.fp32.exact_decode, "off by default: today's numerics");
+        let mut p = model::policy::ServePolicy::default();
+        p.switch("--exact-decode").unwrap();
+        cfg.apply_policy(&p).expect("both Qwen3.8 residents honour --exact-decode");
+        assert!(cfg.gguf.exact_decode && cfg.fp32.exact_decode);
+        let bank = AdapterBankSettings::default();
+        let e = gguf_resident_banked("none.gguf", "t/x", &[], 0, &cfg.gguf, Some(bank)).err().unwrap();
+        assert!(e.contains("--exact-decode") && e.contains("adapter"), "{e}");
+    }
+
     /// The sizing knobs are constructor data with the historical defaults,
     /// sanitized to their 1 floor - never read from the environment.
     #[test]
     fn sizing_defaults_and_sanitization() {
         let d = Qwen35Sizing::default();
         assert_eq!((d.ctx, d.max_batch), (4096, 4));
-        let s = Qwen35Sizing { ctx: 0, max_batch: u32::MAX, refused: false }.sanitized();
+        let s = Qwen35Sizing { ctx: 0, max_batch: u32::MAX, exact_decode: false, refused: false }.sanitized();
         assert_eq!((s.ctx, s.max_batch), (1, u32::MAX));
     }
 

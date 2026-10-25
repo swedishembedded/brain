@@ -370,3 +370,80 @@ fn each_row_of_a_batch_is_that_row_decoded_alone() {
         assert_native_agrees(&gpu, rows, got, &alone, &format!("row {row} of a {rows}-row batch differs from that row decoded alone"));
     }
 }
+
+/// The exact-decode regime's contract at the op level: with the rows cut into
+/// groups of [`backend_api::select::exact_decode_group_rows`], every row of a
+/// batch is BIT-identical to that row decoded alone - at the batch-1 form, at
+/// the tensor-core block's first row count ([`kernels_cuda::I8_GEMV_MMA_MIN_ROWS`]),
+/// and at a full batch. The ungrouped batch is still allowed the documented
+/// f32-rounding tolerance ([`assert_native_agrees`]), which is what the
+/// grouping removes.
+#[test]
+fn exact_decode_groups_make_every_batch_row_bit_identical_to_the_same_row_alone() {
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda(&gpu) || !gpu.caps().numeric.int8_dot {
+        brain_testutil::skip_unavailable("native int8 GEMV needs a CUDA device");
+        return;
+    }
+    let (kg, n) = (1280u32, 1024u32);
+    let ng = kg / WPG as u32;
+    let rows = 8u32;
+    let step = backend_api::select::exact_decode_group_rows(&gpu.caps());
+    assert!((1..=rows).contains(&step), "the exact group size {step} is outside the decode batch");
+    let x = Windowed::new(&gpu, &packed((rows * kg) as usize, 0x51ed), 0);
+    let w = Windowed::new(&gpu, &packed((n * kg) as usize, 0x1234), 0);
+    let sx = Windowed::new(&gpu, &f32_words(&scales((rows * ng) as usize, 0x99, 1e-3, 1e-5)), 0);
+    let sw = Windowed::new(&gpu, &f32_words(&scales((n * ng) as usize, 0x77, 1e-3, 1e-5)), 0);
+    let out = Windowed::new(&gpu, &vec![SENTINEL; (rows * n) as usize], 0);
+
+    // One dispatch of `len` rows starting at row `row0`, writing at `row0`.
+    let dispatch = |gpu: &Gpu, row0: u32, len: u32| {
+        gpu.submit(
+            &[],
+            &[gpu.dispatch_sliced(
+                K_GEMV,
+                &[&x.buf, &w.buf, &sx.buf, &sw.buf, &out.buf],
+                &[
+                    (u64::from(row0) * u64::from(kg), u64::from(len) * u64::from(kg)),
+                    w.range(),
+                    (u64::from(row0) * u64::from(ng), u64::from(len) * u64::from(ng)),
+                    sw.range(),
+                    (u64::from(row0) * u64::from(n), u64::from(len) * u64::from(n)),
+                ],
+                &[len, kg, n],
+                Dispatch::Workgroups(n),
+            )],
+        );
+        gpu.poll_wait();
+    };
+
+    // Every row decoded alone, concatenated in row order. The dispatch writes
+    // the row at its own slot of the window, so that slot is what is read.
+    let mut alone = Vec::with_capacity((rows * n) as usize);
+    for row in 0..rows {
+        dispatch(&gpu, row, 1);
+        let bits = out.window(&out.read_bits(&gpu));
+        alone.extend_from_slice(&bits[(row * n) as usize..((row + 1) * n) as usize]);
+    }
+
+    // The default batched step: one kernel instance for all rows, which the
+    // tensor-core block serves to f32 rounding rather than bit for bit.
+    dispatch(&gpu, 0, rows);
+    let batched = out.window(&out.read_bits(&gpu));
+    assert_native_agrees(&gpu, rows, &batched, &alone, "the default 8-row step against each row decoded alone");
+
+    // The exact regime: groups of at most `step`, each the same kernel instance
+    // a single row runs, so the bits match at every row count.
+    for m in [1u32, step, step + 1, kernels_cuda::I8_GEMV_MMA_MIN_ROWS, rows] {
+        if m > rows {
+            continue;
+        }
+        for start in (0..m).step_by(step as usize) {
+            let len = step.min(m - start);
+            dispatch(&gpu, start, len);
+        }
+        let grouped = out.window(&out.read_bits(&gpu));
+        let want = &alone[..(m * n) as usize];
+        assert_eq!(grouped, want, "exact-decode grouping differs from the rows decoded alone at m={m} step={step}");
+    }
+}

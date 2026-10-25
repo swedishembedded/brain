@@ -570,6 +570,33 @@ pub fn i8_gemv_max_rows(caps: &DeviceCaps) -> u32 {
     }
 }
 
+/// Rows of one group in the exact-decode regime: the widest row count whose
+/// int8 projections are the same arithmetic as a single row's.
+///
+/// A decode step normally sends every sequence of the batch through one
+/// `[bsz, d] x [d, *]` product, sharing one weight read. The int8 GEMV that
+/// serves it switches to its int8 tensor-core block from
+/// [`I8_GEMV_MMA_MIN_ROWS`] rows (`cu/matmul_i8_gemv.cu`), which applies each
+/// group's scale once per 32 products instead of folding the reference's 64
+/// virtual accumulators - so a row's result would depend on how many other
+/// sequences happened to share its step. A caller that needs a row to be a row
+/// regardless of its co-batch runs the step in groups of at most this many
+/// rows, each group on the bit-identical block, and pays one extra pass over
+/// the weights per group beyond the first in exchange.
+///
+/// One fewer than the tensor-core block's first row count where the device has
+/// it (4 on a GH200, so eight rows are two groups and double the weight
+/// traffic); the GEMV's whole row range on a device without int8 tensor cores,
+/// where every row count is already bit for bit the reference.
+pub fn exact_decode_group_rows(caps: &DeviceCaps) -> u32 {
+    let tensor_core = caps.arch.compute_capability.is_some_and(|cc| cc >= I8_MMA_MIN_CC);
+    if tensor_core {
+        (I8_GEMV_MMA_MIN_ROWS - 1).min(I8_GEMV_MAX_ROWS)
+    } else {
+        I8_GEMV_MAX_ROWS
+    }
+}
+
 /// The fp32/storage-tier register-tiled GEMM ([`KernelVariant::RegisterTiled`])
 /// needs at least this many rows to be worth it - below it the 128×128 tile is
 /// mostly idle and the naive one-thread-per-output kernel wins outright.

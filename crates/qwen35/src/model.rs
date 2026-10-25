@@ -50,7 +50,7 @@
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 
-use gpu_core::select::{Dtype, DECODE_REGIME_MAX_ROWS, I8_GEMV_MAX_ROWS};
+use gpu_core::select::{Dtype, DECODE_REGIME_MAX_ROWS};
 use gpu_core::provider::library;
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 
@@ -1223,6 +1223,11 @@ pub struct Qwen35 {
     /// Whether a short chunk round runs as plain decode steps - see
     /// [`Self::set_exact_rounds`].
     exact_rounds: Cell<bool>,
+    /// The exact-decode regime's configured per-sequence context, when on:
+    /// every batched decode step runs in groups whose int8 projections are the
+    /// bit-identical kernel and sizes its attention from this context rather
+    /// than the batch - see [`Self::set_exact_decode`].
+    exact_decode: Cell<Option<u32>>,
     /// Whether a decode step may use the native fused kernels where the device
     /// offers them - see [`Self::set_decode_fusion`].
     decode_fusion: Cell<bool>,
@@ -1954,6 +1959,7 @@ impl Qwen35 {
             chunk_arena_min_rows: Cell::new(CHUNK_ARENA_MIN_ROWS),
             chunk_arena_drain: Cell::new(None),
             exact_rounds: Cell::new(true),
+            exact_decode: Cell::new(None),
             decode_fusion: Cell::new(true),
         }
     }
@@ -2003,6 +2009,49 @@ impl Qwen35 {
     /// exact round on that distance is zero.
     pub fn set_exact_rounds(&self, on: bool) {
         self.exact_rounds.set(on);
+    }
+
+    /// **Serve every decode row independently of its co-batch**, or go back to
+    /// one batched step.
+    ///
+    /// A decode step normally sends all `bsz` rows through one set of
+    /// projections and one paged attention dispatch, sharing the weight reads.
+    /// That makes a row's arithmetic a function of the batch: the int8 GEMV
+    /// switches to its int8 tensor-core block from
+    /// [`gpu_core::select::I8_GEMV_MMA_MIN_ROWS`] rows, and the fused decode's split
+    /// count and key partition are chosen from the batch and the longest
+    /// sequence. On, [`Self::run_decode_batch`] runs the rows in groups of
+    /// [`Self::exact_group_rows`] (each on the bit-identical block) and sizes
+    /// every row's attention from `configured_ctx`, so the same request
+    /// produces the same bits alone, beside one neighbour, or beside seven.
+    ///
+    /// `configured_ctx` is the per-sequence `prompt + max_new` ceiling the KV
+    /// cache was built for; it becomes every row's attention `cap`, so
+    /// over-splitting a short sequence is the only cost of not knowing its
+    /// neighbours' lengths. On a device running the fused decode that is a few
+    /// empty split records per (sequence, kv head); on one running the
+    /// scores/softmax/apply triad it also sizes their scratch and dispatch, so
+    /// a large configured context is paid for there.
+    ///
+    /// The price is the weight traffic the grouping adds: one pass over every
+    /// linear's weights per group, on the bit-identical dp4a block. At `bsz` 8
+    /// on a device with int8 tensor cores (groups of 4) that is two passes
+    /// where the step made one, and those passes stream at the dp4a rate the
+    /// kernel was measured at rather than the batched tensor-core block's, so
+    /// the projection weight time grows by roughly 2.4-3x and batch-8 aggregate
+    /// throughput falls to about the batch-4 level
+    /// (`crates/gpu-core/tests/i8_gemv_batched_variants.rs` has the rates).
+    /// A speculative verify pass is not grouped
+    /// (its rows are a sequence's consecutive tokens, not unrelated
+    /// sequences); a serving caller turns speculation off in this regime.
+    pub fn set_exact_decode(&self, configured_ctx: Option<u32>) {
+        self.exact_decode.set(configured_ctx.map(|c| c.max(1)));
+    }
+
+    /// The exact-decode group size on this device, `None` when the regime is
+    /// off.
+    pub(crate) fn exact_decode_step(&self) -> Option<u32> {
+        self.exact_decode.get().map(|_| gpu_core::select::exact_decode_group_rows(&self.gpu.caps()))
     }
 
     /// **Turn the decode step's native fused kernels off (or back on).** On by
@@ -3913,12 +3962,52 @@ impl Qwen35 {
         self.run_decode_batch_with(tokens, caches, input_override, None)
     }
 
+    /// [`Self::run_decode_batch`] in exact-decode groups of at most `step` rows.
+    ///
+    /// One `run_decode_batch` per group, each a complete pass over every layer
+    /// (so the group's state hand-off is a decode step's own) and each sized
+    /// from the configured context rather than the batch. Groups are read back
+    /// and concatenated in the caller's row order. The extra device round trip
+    /// per group is exact mode's own cost on top of the second weight pass: it
+    /// is opt-in, and a caller that needs a row to be a row pays for it.
+    fn run_decode_batch_exact_groups(&self, tokens: &[u32], caches: &BatchDecodeCaches, input_override: Option<&[f32]>, step: u32) -> DeviceBuffer {
+        let d = self.cfg.d_model as usize;
+        let step = step as usize;
+        let mut out = Vec::with_capacity(tokens.len() * d);
+        for start in (0..tokens.len()).step_by(step) {
+            let end = (start + step).min(tokens.len());
+            let seqs: Vec<BatchSeq> = caches.seqs[start..end]
+                .iter()
+                .map(|s| BatchSeq { window: s.window, slot: s.slot, pos: s.pos, gdn_state: s.gdn_state, gdn_hist: s.gdn_hist })
+                .collect();
+            let pool = caches.gdn_pool.as_ref().map(|p| GdnPoolStore { state: p.state, hist: p.hist });
+            let group = BatchDecodeCaches { gqa_kv: caches.gqa_kv, gqa_cap: caches.gqa_cap, seqs: &seqs, one_sequence: false, gdn_pool: pool };
+            let x = input_override.map(|x| &x[start * d..end * d]);
+            let hidden = self.run_decode_batch_with(&tokens[start..end], &group, x, None);
+            out.extend(self.gpu.read(&hidden, (end - start) * d));
+        }
+        self.gpu.storage_init("qwen35.exact_decode.hidden", &out)
+    }
+
     /// [`Self::run_decode_batch`], optionally as a speculative VERIFY step
     /// ([`verify::VerifyBatch`]): the rows are then several consecutive tokens
     /// of each sequence rather than one token of each, and the Gated-DeltaNet
     /// layers take a sequence's rows in order and snapshot the state between
     /// them. Everything else in the pass is row-agnostic.
     fn run_decode_batch_with(&self, tokens: &[u32], caches: &BatchDecodeCaches, input_override: Option<&[f32]>, verify: Option<&verify::VerifyBatch>) -> DeviceBuffer {
+        // The exact-decode regime (see `set_exact_decode`): a batch wider than
+        // one bit-identical group runs as several whole steps, in order. Each
+        // group's hidden block is read before the next is issued - the same
+        // drain every caller of this function already makes between steps -
+        // and the rows are put back in the caller's order.
+        // Adapter rows are indexed by position within the dispatch, so a
+        // group's rows would read the wrong adapter's correction: exact
+        // grouping stays off while a bank corrects this step (`adapter_rows`
+        // is 0 otherwise, and a serving caller refuses the combination).
+        let group = if verify.is_none() && !caches.one_sequence && self.adapter_rows.get() == 0 { self.exact_decode_step() } else { None };
+        if let Some(step) = group.filter(|&step| tokens.len() as u32 > step) {
+            return self.run_decode_batch_exact_groups(tokens, caches, input_override, step);
+        }
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
@@ -4004,7 +4093,18 @@ impl Qwen35 {
         // Each row's block table is its sequence's blocks in logical order,
         // padded to the longest (a single entry for a one-block sequence).
         let windows: Vec<Vec<u32>> = caches.seqs.iter().map(|s| s.window.blocks()).collect();
-        let max_bt = windows.iter().map(Vec::len).max().unwrap_or(1).max(1) as u32;
+        // The exact-decode regime sizes every row's attention from the
+        // configured context, not from the longest sequence that happens to
+        // share this step: `cap` and the block-table width are then the same
+        // for a row whatever its neighbours are, so its split count and key
+        // partition cannot move. Unused block-table entries are never read
+        // (`seq_lens` bounds every access), and a split past a sequence's live
+        // length is one degenerate record.
+        let exact_ctx = self.exact_decode.get().filter(|_| verify.is_none());
+        let max_bt = match exact_ctx {
+            Some(ctx) => ctx.div_ceil(caches.gqa_cap).max(1),
+            None => windows.iter().map(Vec::len).max().unwrap_or(1).max(1) as u32,
+        };
         let bs = caches.gqa_cap;
         let blocks = g.storage(bsz as u64);
         g.write(&blocks, &caches.seqs.iter().zip(&windows).map(|(s, w)| w[(s.pos / bs) as usize]).collect::<Vec<u32>>());
@@ -4020,6 +4120,7 @@ impl Qwen35 {
         // step's inputs (a write after the first dispatch would split the pass).
         let verify_layout = verify.map(|v| v.upload(g));
         let longest = caches.seqs.iter().map(|s| s.pos + 1).max().unwrap_or(1);
+        let cap_bound = caches.gqa_cap * max_bt;
         let paged = model::gqa_mixer::PagedDecodeBatch {
             blocks: &blocks,
             offsets: &offsets,
@@ -4035,7 +4136,8 @@ impl Qwen35 {
             // the next. Sized exactly it changed every token: a fresh buffer
             // and a new grid per attention layer, which defeats both the arena
             // and the replayed graph. Now both change once per bucket.
-            cap: longest.next_multiple_of(DECODE_CAP_BUCKET).min(caches.gqa_cap * max_bt),
+            cap: exact_ctx.unwrap_or(longest).next_multiple_of(DECODE_CAP_BUCKET).min(cap_bound),
+            pin_splits: exact_ctx.is_some(),
         };
 
         if let Some(tok_buf) = &tok_buf {
@@ -4635,18 +4737,13 @@ impl Qwen35 {
         }
     }
 
-    /// Rows of one group of an exact round: [`I8_GEMV_MAX_ROWS`] where the int8 GEMV
-    /// is the same arithmetic at every row count, one fewer than the tensor-core
-    /// block's first row count where the device has it. A round of more rows costs
-    /// one more pass over the weights per group, and stays bit-identical to the
-    /// decode steps it stands for (`tests/chunk_tape_decode_parity.rs`).
+    /// Rows of one group of an exact round: [`gpu_core::select::exact_decode_group_rows`],
+    /// the widest group whose int8 GEMV is the same arithmetic at every row
+    /// count. A round of more rows costs one more pass over the weights per
+    /// group, and stays bit-identical to the decode steps it stands for
+    /// (`tests/chunk_tape_decode_parity.rs`).
     fn exact_group_rows(&self) -> usize {
-        let tensor_core = self.gpu.caps().arch.compute_capability.is_some_and(|cc| cc >= gpu_core::select::I8_MMA_MIN_CC);
-        if tensor_core {
-            (gpu_core::select::I8_GEMV_MMA_MIN_ROWS - 1).min(I8_GEMV_MAX_ROWS) as usize
-        } else {
-            I8_GEMV_MAX_ROWS as usize
-        }
+        gpu_core::select::exact_decode_group_rows(&self.gpu.caps()) as usize
     }
 
     /// Whether a round of `n` rows runs as plain decode steps
@@ -5176,6 +5273,29 @@ impl Qwen35 {
     /// `rows` GEMVs, the head-side counterpart of what
     /// [`Self::run_decode_batch`] does for the body.
     pub(crate) fn head_logits_rows_dev(&self, hidden: &DeviceBuffer, rows: u32) -> DeviceBuffer {
+        // The head is the largest weight in the model and its own row-count
+        // gate is the same one the decode projections have, so the exact-decode
+        // regime projects it in the same groups: a row's logits may not depend
+        // on how many other rows share the step.
+        if let Some(step) = self.exact_decode_step().filter(|&step| rows > step) {
+            let d = self.cfg.d_model as usize;
+            let v = self.cfg.vocab as usize;
+            let host = self.gpu.read(hidden, rows as usize * d);
+            let mut out = Vec::with_capacity(rows as usize * v);
+            for start in (0..rows as usize).step_by(step as usize) {
+                let end = (start + step as usize).min(rows as usize);
+                let x = self.gpu.storage_init("qwen35.exact_decode.head.in", &host[start * d..end * d]);
+                let logits = self.head_logits_rows_ungrouped(&x, (end - start) as u32);
+                out.extend(self.gpu.read(&logits, (end - start) * v));
+            }
+            return self.gpu.storage_init("qwen35.exact_decode.head.logits", &out);
+        }
+        self.head_logits_rows_ungrouped(hidden, rows)
+    }
+
+    /// [`Self::head_logits_rows_dev`] for one group: one `MATMUL` over `rows`
+    /// rows of `hidden`.
+    fn head_logits_rows_ungrouped(&self, hidden: &DeviceBuffer, rows: u32) -> DeviceBuffer {
         let g = &self.gpu;
         let d = self.cfg.d_model;
         let v = self.cfg.vocab;

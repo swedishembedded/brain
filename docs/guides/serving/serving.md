@@ -59,6 +59,7 @@ every model that serves it; no flag is spelled with an architecture name.
 | `--kv-cache TIER` | KV-cache storage: `f32`, `bf16`, `int8`, `fp8` |
 | `--gemm auto\|fp32` | `fp32` pins exact fp32 arithmetic (the reference tier); `auto` uses tensor cores where the device has them |
 | `--kv-calibration` | use a `kv_calib.json` beside the checkpoint |
+| `--exact-decode` | make a decode row's result independent of which other requests share its batch: int8 projections (and the head) run in groups small enough to stay on the bit-identical kernel and every row's attention is sized from `--ctx`, at the cost of one extra pass over the weights per group; speculation is off in this regime. Default off |
 | `--ctx N` | cap the context window below the model's declared one |
 | `--max-batch N` | the concurrency the server must carry |
 | `--kv-offload-gb N` | host RAM granted for preempted sessions' KV |

@@ -444,6 +444,22 @@ fn every_startup_resolver_scans_the_models_dir_flag_not_the_environment_store() 
     assert!(flag_store.join(cache).exists(), "no startup resolver scanned the --models-dir store; stderr:\n{stderr}");
 }
 
+/// `--exact-decode` is a model-agnostic serving policy switch: accepted by the
+/// parser, documented in `--help`, and reported as part of the policy line.
+/// (Which families honour it is their own declaration; the Qwen3 families that
+/// do not are refused by name when a model is actually served.)
+#[test]
+fn exact_decode_is_a_serving_policy_switch_and_appears_in_help() {
+    let out = run(&["serve", "--help"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("--exact-decode"), "brain serve --help must document --exact-decode:\n{stdout}");
+
+    let out = run(&["serve", "--exact-decode", "--help"]);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stderr).is_empty(), "--exact-decode must be a known flag: {}", String::from_utf8_lossy(&out.stderr));
+}
+
 #[test]
 fn a_bad_serving_policy_value_names_its_flag_and_exits_2() {
     for (flag, value) in [("--kv-cache", "fp4"), ("--gemm", "tf32"), ("--weight-format", "q9"), ("--ctx", "many")] {

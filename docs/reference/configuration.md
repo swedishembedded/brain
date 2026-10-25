@@ -226,7 +226,9 @@ See [`docs/guides/serving/serving.md`](../guides/serving/serving.md) for what ad
 The Qwen3 and Qwen3.8 serving sizes are `brain serve` flags, not variables:
 `--ctx` (default: auto-sized to the card), `--max-batch` (default
 16), the KV pool size (default: batch x half a context when it fits), `--kv-calibration`, `--kv-cache fp8`, `--ctx` (default: the longest the cards hold)
-and `--max-batch` (default 8); a Qwen3.8 GGUF's unset `--kv-cache`,
+and `--max-batch` (default 8); `--exact-decode` makes a decode row's tokens and
+per-token log-probabilities independent of its co-batch (default off); a
+Qwen3.8 GGUF's unset `--kv-cache`,
 `--speculative` and prompt cache are chosen from the hardware and logged at startup. See the
 [Qwen3](models/qwen3.md) and [Qwen3.8](models/qwen35.md) pages.
 

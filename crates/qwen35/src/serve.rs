@@ -487,6 +487,13 @@ impl Engine {
         self.block_size as usize
     }
 
+    /// **Run every decode row independently of its co-batch** (`--exact-decode`):
+    /// [`Qwen35::set_exact_decode`] at this engine's per-sequence cap. Costs one
+    /// extra pass over the weights per group at a batch wider than one group.
+    pub fn set_exact_decode(&mut self, on: bool) {
+        self.model.set_exact_decode(on.then_some(self.block_size));
+    }
+
     pub fn vocab(&self) -> usize {
         self.model.cfg.vocab as usize
     }

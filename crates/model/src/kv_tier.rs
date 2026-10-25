@@ -596,6 +596,17 @@ pub struct FlashDecodeShape {
     pub max_bt: u32,
     /// An upper bound on every `seq_lens` entry; it sizes the split count.
     pub cap: u32,
+    /// Compute the split count for a batch of ONE sequence instead of this
+    /// shape's `batch` - the exact-decode regime.
+    ///
+    /// The online-softmax grouping of a row's keys must not move when another
+    /// sequence joins its step: with the splits pinned and `cap` held to the
+    /// configured context, every row sees the same tile boundaries and the same
+    /// number of partial records however many sequences share the batch, so its
+    /// attention result is its own. A split past a sequence's live length costs
+    /// one degenerate record, which is why sizing by the context is cheap
+    /// (see [`flash_splits_for`]).
+    pub pin_splits: bool,
 }
 
 /// Keys per tile of the fused decode kernel (`paged_flash_decode_gqa_hd256`'s
@@ -616,7 +627,13 @@ const FLASH_TARGET_WORKGROUPS: u32 = 128;
 /// [`FLASH_TARGET_WORKGROUPS`]. A split past a sequence's live length costs one
 /// degenerate partial record, so over-splitting a short sequence is cheap.
 fn flash_splits(cap: u32, batch: u32, n_kv_heads: u32) -> (u32, u32) {
-    flash_splits_for(FLASH_TARGET_WORKGROUPS, cap, batch, n_kv_heads)
+    flash_splits_for(FLASH_TARGET_WORKGROUPS, cap, batch, n_kv_heads, false)
+}
+
+/// [`flash_splits`] with the exact-decode pin: the count a batch of ONE
+/// sequence gets, whatever `batch` is (`FlashDecodeShape::pin_splits`).
+fn flash_splits_pinned(cap: u32, n_kv_heads: u32) -> (u32, u32) {
+    flash_splits_for(FLASH_TARGET_WORKGROUPS, cap, 1, n_kv_heads, true)
 }
 
 /// Blocks per multiprocessor a native decode dispatch aims for: the native
@@ -625,10 +642,13 @@ fn flash_splits(cap: u32, batch: u32, n_kv_heads: u32) -> (u32, u32) {
 /// the WGSL tier's (which measured no gain from it: knowledge 350).
 const FLASH_NATIVE_BLOCKS_PER_SM: u32 = 2;
 
-/// [`flash_splits`] towards `target` workgroups.
-fn flash_splits_for(target: u32, cap: u32, batch: u32, n_kv_heads: u32) -> (u32, u32) {
+/// [`flash_splits`] towards `target` workgroups. `pin_one` computes the count
+/// for a batch of ONE sequence: the exact-decode regime's split, which must not
+/// move when another sequence shares the step.
+fn flash_splits_for(target: u32, cap: u32, batch: u32, n_kv_heads: u32, pin_one: bool) -> (u32, u32) {
     let tiles = cap.max(1).div_ceil(FLASH_TILE);
-    let wanted = target.div_ceil((batch * n_kv_heads).max(1)).max(1);
+    let groups = (if pin_one { 1 } else { batch } * n_kv_heads).max(1);
+    let wanted = target.div_ceil(groups).max(1);
     let per_split = tiles.div_ceil(wanted).clamp(1, FLASH_TILES_PER_SPLIT);
     (tiles.div_ceil(per_split), per_split)
 }
@@ -739,13 +759,13 @@ impl KvKernels {
         let group = s.n_heads / s.n_kv_heads;
         assert!(self.flash_decode_available(g, s.head_dim, group), "KvKernels::flash_decode: not available for head_dim {} group {group} on this device", s.head_dim);
         let decode = self.decode.iter().find(|&&(gr, _)| gr == group).expect("checked by flash_decode_available").1;
-        let (n_splits, tiles_per_split) = flash_splits(s.cap, s.batch, s.n_kv_heads);
+        let (n_splits, tiles_per_split) = if s.pin_splits { flash_splits_pinned(s.cap, s.n_kv_heads) } else { flash_splits(s.cap, s.batch, s.n_kv_heads) };
         let mut params = [s.batch, s.n_heads, s.n_kv_heads, s.head_dim, group, s.block_size, s.max_bt, n_splits, tiles_per_split];
         // A native kernel's grid fills the device several blocks deep (the split count is a free choice: every split
         // writes its own record, and the combine merges any number of them).
         if g.native_kernel_for(decode, &params).is_some() {
             let target = g.caps().compute_units.map_or(FLASH_TARGET_WORKGROUPS, |cu| cu * FLASH_NATIVE_BLOCKS_PER_SM);
-            (params[7], params[8]) = flash_splits_for(target, s.cap, s.batch, s.n_kv_heads);
+            (params[7], params[8]) = flash_splits_for(target, s.cap, s.batch, s.n_kv_heads, s.pin_splits);
         }
         let n_splits = params[7];
         // Every (sequence, head, split) record is written, a split with no live key included, so the slab needs no clear.
@@ -821,6 +841,26 @@ mod tests {
             assert!(n * per * FLASH_TILE >= cap, "splits cover the cap");
             assert!((n - 1) * per * FLASH_TILE < cap.max(1), "no wholly empty trailing split");
         }
+    }
+
+    /// The exact-decode regime pins the split count to the batch-1 value, so a
+    /// row's key partition is a function of `cap` and `n_kv_heads` alone. The
+    /// unpinned count is batch-dependent by design (it aims the dispatch at the
+    /// workgroup target), which is exactly what a row must not see.
+    #[test]
+    fn pinned_splits_are_the_single_sequence_splits_at_every_batch() {
+        for (cap, nkv) in [(1u32, 1u32), (127, 2), (1288, 2), (4096, 4), (8192, 2), (32_768, 4), (131_072, 2)] {
+            for target in [FLASH_TARGET_WORKGROUPS, FLASH_TARGET_WORKGROUPS * 8] {
+                let one = flash_splits_for(target, cap, 1, nkv, true);
+                for batch in 1..=8 {
+                    assert_eq!(flash_splits_for(target, cap, batch, nkv, true), one, "cap {cap} batch {batch} nkv {nkv} target {target}");
+                }
+            }
+            assert_eq!(flash_splits_pinned(cap, nkv), flash_splits(cap, 1, nkv));
+        }
+        // The pinned answer is not vacuous: at this shape the unpinned count
+        // moves with the batch, which is the co-batch dependence being removed.
+        assert_ne!(flash_splits(8192, 8, 2), flash_splits(8192, 1, 2));
     }
 
     #[test]

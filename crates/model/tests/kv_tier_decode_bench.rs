@@ -134,7 +134,7 @@ fn fused_decode_against_the_triad_per_layer_at_a_long_context() {
                 ];
                 arms.push(Arm { name: "triad", steps, bytes, ms: Vec::new() });
             }
-            let fused = FlashDecodeShape { batch, n_heads: N_HEADS, n_kv_heads: N_KV, head_dim: HEAD_DIM, block_size: rows, max_bt: 1, cap: context };
+            let fused = FlashDecodeShape { batch, n_heads: N_HEADS, n_kv_heads: N_KV, head_dim: HEAD_DIM, block_size: rows, max_bt: 1, cap: context, pin_splits: false };
             let name = tier.as_str();
             arms.push(Arm { name, steps: kernels.flash_decode(&g, &q, &k, &v, &block_tables, &seq_lens, &ctx, fused), bytes, ms: Vec::new() });
             planes.push((k, v));

@@ -108,6 +108,10 @@ brain --device gpu0,gpu1 serve --openai
 #                            same bytes and scales as int8). Default: chosen
 #                            from the hardware (see "Defaults" below)
 #   --max-batch N     concurrent decode slots (default 8)
+#   --exact-decode    make a decode row's tokens and per-token logits
+#                            independent of which sequences share its step
+#                            (default off; costs one extra weight pass per
+#                            group and turns speculation off)
 #   --ctx N      context for the resident served from a brain
 #                            checkpoint (default 4096)
 #   --max-batch N

@@ -1158,6 +1158,11 @@ pub struct Qwen35GgufInstance {
     /// `prompt + max_new` ceiling for one sequence (the cache capacity every
     /// stage was built with).
     cap: u32,
+    /// The exact-decode regime (`--exact-decode`): every stage groups its
+    /// decode rows and sizes their attention from [`Self::cap`], and the head
+    /// projects the batch in the same groups - see
+    /// [`Qwen35::set_exact_decode`](crate::model::Qwen35::set_exact_decode).
+    exact_decode: bool,
     /// How many sequences one [`Self::generate_batch`] call may carry - every
     /// stage's [`ShardCaches`] was built with exactly this many slots, and the
     /// placement was charged for them ([`layer_cost`]). `1` is the default and
@@ -1183,6 +1188,14 @@ pub struct Qwen35GgufInstance {
     spec_rows: u32,
     /// The checkpoint's multi-token-prediction head, when loaded - see [`mtp`].
     mtp: Option<mtp::MtpDrafter>,
+}
+
+/// Row groups `[start, end)` of an exact-decode head projection over `rows`
+/// rows, at most `step` rows each.
+fn head_groups(rows: u32, step: u32) -> impl Iterator<Item = (usize, usize)> {
+    let rows = rows as usize;
+    let step = step as usize;
+    (0..rows).step_by(step).map(move |start| (start, (start + step).min(rows)))
 }
 
 impl Qwen35GgufInstance {
@@ -1571,22 +1584,57 @@ impl Qwen35GgufInstance {
         (&last.qwen35.gpu, &self.head.ops, &self.head.norm, &self.head.w)
     }
 
+    /// The exact-decode group size for the head, `None` when the regime is off:
+    /// the resident head is int8 here, so its row-count gate is the decode
+    /// projections' own and it takes the same groups.
+    fn exact_head_step(&self) -> Option<u32> {
+        if !self.exact_decode {
+            return None;
+        }
+        let last = self.shards.last()?;
+        Some(gpu_core::select::exact_decode_group_rows(&last.qwen35.gpu.caps()))
+    }
+
     /// `[rows, vocab]` logits of a `[rows, d_model]` hidden block, on the host.
     fn head_logits_rows(&self, hidden: &[f32], rows: u32) -> Vec<f32> {
         let (g, ops, norm, w) = self.head_parts();
-        crate::stream::head_logits_rows_on(g, ops, &self.cfg, norm, w, hidden, rows)
+        let d = self.cfg.d_model as usize;
+        let Some(step) = self.exact_head_step().filter(|&s| rows > s) else {
+            return crate::stream::head_logits_rows_on(g, ops, &self.cfg, norm, w, hidden, rows);
+        };
+        let mut out = Vec::with_capacity(rows as usize * self.cfg.vocab as usize);
+        for (start, end) in head_groups(rows, step) {
+            out.extend(crate::stream::head_logits_rows_on(g, ops, &self.cfg, norm, w, &hidden[start * d..end * d], (end - start) as u32));
+        }
+        out
     }
 
     /// Each row's greedy token, picked on the device.
     fn head_argmax_rows(&self, hidden: &[f32], rows: u32) -> Vec<u32> {
         let (g, ops, norm, w) = self.head_parts();
-        crate::stream::head_argmax_rows_on(g, ops, &self.cfg, norm, w, hidden, rows)
+        let d = self.cfg.d_model as usize;
+        let Some(step) = self.exact_head_step().filter(|&s| rows > s) else {
+            return crate::stream::head_argmax_rows_on(g, ops, &self.cfg, norm, w, hidden, rows);
+        };
+        let mut out = Vec::with_capacity(rows as usize);
+        for (start, end) in head_groups(rows, step) {
+            out.extend(crate::stream::head_argmax_rows_on(g, ops, &self.cfg, norm, w, &hidden[start * d..end * d], (end - start) as u32));
+        }
+        out
     }
 
     /// Each row's top-`cap` candidates, extracted on the device.
     fn head_topk_rows(&self, hidden: &[f32], rows: u32, cap: u32) -> Vec<Vec<(u32, f32)>> {
         let (g, ops, norm, w) = self.head_parts();
-        crate::stream::head_topk_rows_on(g, ops, &self.cfg, norm, w, hidden, rows, cap)
+        let d = self.cfg.d_model as usize;
+        let Some(step) = self.exact_head_step().filter(|&s| rows > s) else {
+            return crate::stream::head_topk_rows_on(g, ops, &self.cfg, norm, w, hidden, rows, cap);
+        };
+        let mut out = Vec::with_capacity(rows as usize);
+        for (start, end) in head_groups(rows, step) {
+            out.extend(crate::stream::head_topk_rows_on(g, ops, &self.cfg, norm, w, &hidden[start * d..end * d], (end - start) as u32, cap));
+        }
+        out
     }
 
     /// Prefill `prompt` into slot 0 through the same path a request takes
@@ -3066,6 +3114,9 @@ pub struct Qwen35GgufResident {
     bank: Option<AdapterBankRequest>,
     /// Speculative decoding - [`Self::with_speculation`].
     spec: SpecServing,
+    /// Run every decode row independently of its co-batch -
+    /// [`Self::with_exact_decode`].
+    exact_decode: bool,
     /// How the engine spends prefill - [`Self::with_prefill_policy`].
     prefill: PrefillPolicy,
     plan: OnceLock<Plan>,
@@ -3073,7 +3124,21 @@ pub struct Qwen35GgufResident {
 
 impl Qwen35GgufResident {
     pub fn new(gguf_path: String, devices: Vec<(Device, u64)>, cap: u32, tier: TierPolicy) -> Qwen35GgufResident {
-        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, prefix_slots: 0, kv_tier: KvTier::F32, kv_block_rows: 0, kv_pool_rows: 0, model_id: MODEL.to_string(), bank: None, spec: SpecServing::default(), prefill: PrefillPolicy::default(), plan: OnceLock::new() }
+        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, prefix_slots: 0, kv_tier: KvTier::F32, kv_block_rows: 0, kv_pool_rows: 0, model_id: MODEL.to_string(), bank: None, spec: SpecServing::default(), exact_decode: false, prefill: PrefillPolicy::default(), plan: OnceLock::new() }
+    }
+
+    /// **Run every decode row independently of its co-batch** (`--exact-decode`):
+    /// each stage groups the batch into rows whose int8 projections are the
+    /// bit-identical kernel, sizes every row's attention from this resident's
+    /// per-sequence context, and the head projects in the same groups - so a
+    /// request's tokens and per-token logits are the same alone as beside any
+    /// batch of neighbours. Speculation is turned off in this regime (its
+    /// verify pass is not grouped). Costs one extra pass over the weights per
+    /// group: two at `max_batch` 8 on a device with int8 tensor cores. Must be
+    /// set before the first `estimate_multi` call.
+    pub fn with_exact_decode(mut self, on: bool) -> Qwen35GgufResident {
+        self.exact_decode = on;
+        self
     }
 
     /// How the serving engine spends prefill between decode steps - the slice one
@@ -3336,7 +3401,9 @@ impl Qwen35GgufResident {
         ServingShape {
             prefix_slots: self.prefix_slots,
             kv_pool_rows: self.paged_pool_rows(),
-            spec: self.spec.cost(mtp::checkpoint_has_mtp(mg, cfg), verify),
+            // Exact decode runs plain steps, so the verify scratch is not
+            // charged: the placement must describe what will be allocated.
+            spec: if self.exact_decode { SpecCost::NONE } else { self.spec.cost(mtp::checkpoint_has_mtp(mg, cfg), verify) },
             ..ServingShape::new(self.cap, self.tier.clone(), self.kv_tier, self.max_batch)
         }
     }
@@ -3533,6 +3600,10 @@ impl Qwen35GgufResident {
             // below, at `self.cap` - the same split `crate::serve::Engine`
             // makes for the same reason.
             let qwen35 = Qwen35::new_shard_dt(cfg.clone(), 1, 1, &src, shard.clone(), &self.tier);
+            // Exact decode is a property of the STEP, not of one card: every
+            // stage groups its rows and sizes its attention from this
+            // instance's per-sequence context.
+            qwen35.set_exact_decode(self.exact_decode.then_some(self.cap));
             let caches = ShardCaches::new(&qwen35.gpu, &cfg, shard, self.cap, state_rows, self.prefix_slots, self.kv_tier, layout);
             shards.push(DeviceShard { qwen35, caches });
         }
@@ -3562,9 +3633,32 @@ impl Qwen35GgufResident {
         };
         let embed = EmbedTable { name: embed_name, d };
 
-        let mut inst = Qwen35GgufInstance { cfg, shards, mg, embed, head, tok, eos, cap: self.cap, max_batch: self.max_batch, prefix_slots: self.prefix_slots, kv_tier: self.kv_tier, tier: self.tier.clone(), kv_layout: layout, taps: RefCell::new(None), prefill_adapter_slot: Cell::new(LORA_SLOT_NONE), spec_rows: 0, mtp: None };
+        let mut inst = Qwen35GgufInstance {
+            cfg,
+            shards,
+            mg,
+            embed,
+            head,
+            tok,
+            eos,
+            cap: self.cap,
+            exact_decode: self.exact_decode,
+            max_batch: self.max_batch,
+            prefix_slots: self.prefix_slots,
+            kv_tier: self.kv_tier,
+            tier: self.tier.clone(),
+            kv_layout: layout,
+            taps: RefCell::new(None),
+            prefill_adapter_slot: Cell::new(LORA_SLOT_NONE),
+            spec_rows: 0,
+            mtp: None,
+        };
         let last_gpu = plan.stages.last().map(|(_, s, _)| s.gpu_index).unwrap_or(0);
-        inst.enable_speculation(self.spec, &self.gguf_path, &self.tier, last_gpu)?;
+        // A verify pass is a sequence's consecutive tokens, not unrelated
+        // sequences, and the exact regime does not group it: turn speculation
+        // off rather than promise an exactness its tape does not have.
+        let spec = if self.exact_decode { SpecServing { mode: SpeculativeMode::Off, ..self.spec } } else { self.spec };
+        inst.enable_speculation(spec, &self.gguf_path, &self.tier, last_gpu)?;
         Ok(inst)
     }
 }

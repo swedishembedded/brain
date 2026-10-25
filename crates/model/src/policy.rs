@@ -21,7 +21,11 @@
 //! - `--kv-cache TIER` ([`ServePolicy::kv_cache`]): `f32|bf16|int8|fp8`
 //!   ([`crate::kv_tier::KvTier`]).
 //! - `--gemm auto|fp32` ([`ServePolicy::gemm`]) and `--no-fuse-norm`,
-//!   `--kv-calibration`: arithmetic and calibration switches.
+//!   `--kv-calibration`, `--exact-decode`: arithmetic, calibration and
+//!   batch-independence switches. `--exact-decode` makes a decode row's result
+//!   independent of its co-batch (the row-count-gated int8 kernels run in
+//!   bit-identical groups, attention is sized from the configured context);
+//!   it costs an extra pass over the weights per group and is off by default.
 //! # Limits: only what a person decides is a flag
 //! `--ctx` (cap the window below the model's declared one), `--max-batch` (the
 //! concurrency the service must carry) and `--kv-offload-gb` (host RAM granted
@@ -71,13 +75,17 @@ pub struct ServePolicy {
     pub gemm: Option<GemmPrecision>,
     /// `Some(false)` turns the residual-add plus norm fusion off (an A/B switch).
     pub fuse_norm: Option<bool>,
+    /// `--exact-decode`: make a decode row's result independent of which other
+    /// sequences share its batch (see [`PolicySupport`] models that honour it).
+    /// Off by default: today's batched numerics, unchanged.
+    pub exact_decode: bool,
     pub limits: ServeLimits,
 }
 
 /// The public flags that take a value.
 pub const VALUE_FLAGS: &[&str] = &["--weight-format", "--kv-cache", "--gemm", "--ctx", "--max-batch", "--kv-offload-gb"];
 /// The public switches (no value).
-pub const SWITCH_FLAGS: &[&str] = &["--kv-calibration"];
+pub const SWITCH_FLAGS: &[&str] = &["--kv-calibration", "--exact-decode"];
 /// Settings that are derived by default and exist only as the target of a
 /// deprecated alias (see the module docs). Not accepted on the command line.
 pub const DERIVED_SETTINGS: &[&str] = &["kv-tokens", "prefix-slots", "max-prefill", "prefill-slice", "prefill-batch", "no-fuse-norm"];
@@ -135,6 +143,9 @@ impl ServePolicy {
         if self.kv_calibration {
             v.push("kv-calibration".into());
         }
+        if self.exact_decode {
+            v.push("exact-decode".into());
+        }
         let l = &self.limits;
         for (name, x) in [("ctx", l.ctx), ("max-batch", l.max_batch), ("kv-tokens", l.kv_tokens), ("prefix-slots", l.prefix_slots), ("max-prefill", l.max_prefill), ("prefill-slice", l.prefill_slice), ("prefill-batch", l.prefill_batch)] {
             if let Some(x) = x {
@@ -154,6 +165,7 @@ impl ServePolicy {
     pub fn switch(&mut self, flag: &str) -> Result<(), String> {
         match flag {
             "--kv-calibration" => self.kv_calibration = true,
+            "--exact-decode" => self.exact_decode = true,
             "no-fuse-norm" => self.fuse_norm = Some(false),
             other => return Err(format!("{other} is not a serving policy switch")),
         }
@@ -179,6 +191,8 @@ pub struct PolicySupport {
     pub fuse_norm: bool,
     /// `--kv-calibration` honoured.
     pub kv_calibration: bool,
+    /// `--exact-decode` honoured.
+    pub exact_decode: bool,
 }
 
 impl PolicySupport {
@@ -209,6 +223,9 @@ impl PolicySupport {
         }
         if policy.kv_calibration && !self.kv_calibration {
             return Err(format!("{}: --kv-calibration is not supported", self.model));
+        }
+        if policy.exact_decode && !self.exact_decode {
+            return Err(format!("{}: --exact-decode is not supported", self.model));
         }
         Ok(())
     }
@@ -368,6 +385,7 @@ mod tests {
         gemm: true,
         fuse_norm: false,
         kv_calibration: false,
+        exact_decode: false,
     };
 
     #[test]
@@ -380,11 +398,13 @@ mod tests {
         p.set("--kv-offload-gb", "1.5").unwrap();
         p.switch("no-fuse-norm").unwrap();
         p.switch("--kv-calibration").unwrap();
+        p.switch("--exact-decode").unwrap();
         assert_eq!(p.weights, Some(TierPolicy::uniform(Dtype::I8)));
         assert_eq!(p.kv_cache, Some(KvTier::FP8));
         assert_eq!(p.gemm, Some(GemmPrecision::Fp32Reference));
         assert_eq!((p.limits.ctx, p.limits.kv_offload_gb), (Some(4096), Some(1.5)));
-        assert_eq!((p.fuse_norm, p.kv_calibration), (Some(false), true));
+        assert_eq!((p.fuse_norm, p.kv_calibration, p.exact_decode), (Some(false), true, true));
+        assert!(p.describe().contains("exact-decode"), "{}", p.describe());
         for (flag, bad) in [("--ctx", "-1"), ("--kv-cache", "fp4"), ("--gemm", "tf32"), ("--kv-offload-gb", "nan"), ("--weight-format", "q9")] {
             let e = ServePolicy::default().set(flag, bad).unwrap_err();
             assert!(e.contains(flag), "{e}");
@@ -410,6 +430,10 @@ mod tests {
         let mut p = ServePolicy::default();
         p.switch("no-fuse-norm").unwrap();
         assert!(LLM.check(&p).unwrap_err().contains("fusion"));
+
+        let mut p = ServePolicy::default();
+        p.switch("--exact-decode").unwrap();
+        assert!(LLM.check(&p).unwrap_err().contains("--exact-decode"));
     }
 
     #[test]

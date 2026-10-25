@@ -139,7 +139,7 @@ fn check(g: &Gpu, c: &Case, seed: u64) {
     g.write(&block_tables, &[phys]);
     let seq_lens = g.storage(1);
     g.write(&seq_lens, &[ctx_len + 1]);
-    let paged = PagedDecodeBatch { blocks: &blocks, offsets: &offsets, block_tables: &block_tables, seq_lens: &seq_lens, block_size, max_bt: 1, cap: block_size };
+    let paged = PagedDecodeBatch { blocks: &blocks, offsets: &offsets, block_tables: &block_tables, seq_lens: &seq_lens, block_size, max_bt: 1, cap: block_size, pin_splits: false };
 
     let kv = KvKernels::resolve(g, KvTier::F32).expect("the f32 KV kernels are registered");
     let softmax = idx(g, "decode_softmax_batched");
@@ -168,7 +168,7 @@ fn the_fused_prep_is_offered_only_where_it_can_run() {
     let shape = GqaMixerShape { b: 1, t: 1, n_heads: 4, n_kv_heads: 2, head_dim: 64, rotary_half: 8, rms_eps: 1e-6 };
     let dummy = g.storage(1024);
     let w = GqaMixerWeights { q_norm: &dummy, k_norm: &dummy, cos: &dummy, sin: &dummy };
-    let paged = PagedDecodeBatch { blocks: &dummy, offsets: &dummy, block_tables: &dummy, seq_lens: &dummy, block_size: 4, max_bt: 1, cap: 4 };
+    let paged = PagedDecodeBatch { blocks: &dummy, offsets: &dummy, block_tables: &dummy, seq_lens: &dummy, block_size: 4, max_bt: 1, cap: 4, pin_splits: false };
     let kv = KvKernels::resolve(&g, KvTier::F32).expect("the f32 KV kernels are registered");
     let softmax = idx(&g, "decode_softmax_batched");
     let layer_in = |tier: KvTier| KvLayer::new(&g, tier, 16, u64::from(shape.kvd()), 64);
@@ -251,7 +251,7 @@ fn check_rows(g: &Gpu, rows: u32, layout: Rows, seed: u64) {
     g.write(&block_tables, &phys);
     let seq_lens = g.storage(u64::from(rows));
     g.write(&seq_lens, &depth.iter().map(|d| d + 1).collect::<Vec<u32>>());
-    let paged = PagedDecodeBatch { blocks: &blocks, offsets: &offsets, block_tables: &block_tables, seq_lens: &seq_lens, block_size, max_bt: 1, cap: block_size };
+    let paged = PagedDecodeBatch { blocks: &blocks, offsets: &offsets, block_tables: &block_tables, seq_lens: &seq_lens, block_size, max_bt: 1, cap: block_size, pin_splits: false };
 
     let kv = KvKernels::resolve(g, KvTier::F32).expect("the f32 KV kernels are registered");
     let softmax = idx(g, "decode_softmax_batched");

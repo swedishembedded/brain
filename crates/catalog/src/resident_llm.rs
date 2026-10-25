@@ -568,6 +568,7 @@ pub const QWEN3_POLICY: model::policy::PolicySupport = model::policy::PolicySupp
     gemm: true,
     fuse_norm: true,
     kv_calibration: true,
+    exact_decode: false,
 };
 
 impl QwenServeConfig {

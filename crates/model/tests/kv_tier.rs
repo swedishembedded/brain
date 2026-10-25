@@ -285,7 +285,7 @@ fn fused_decode_equals_exact_attention_over_the_decoded_planes(g: &Gpu, tier: Kv
     let (q, table, seq_lens) = (g.storage_init("q", &q_h), u32s(g, &table_h), u32s(g, &lens));
     let ctx = g.storage((batch * s.n_heads * s.head_dim) as u64);
     let kernels = KvKernels::resolve(g, tier).unwrap();
-    let shape = FlashDecodeShape { batch, n_heads: s.n_heads, n_kv_heads: s.n_kv, head_dim: s.head_dim, block_size: s.block_size, max_bt, cap: *lens.iter().max().unwrap() };
+    let shape = FlashDecodeShape { batch, n_heads: s.n_heads, n_kv_heads: s.n_kv, head_dim: s.head_dim, block_size: s.block_size, max_bt, cap: *lens.iter().max().unwrap(), pin_splits: false };
     assert!(kernels.flash_decode_available(g, s.head_dim, s.n_heads / s.n_kv), "{label} {tier}: the fused decode must be available for this shape");
     g.submit(&[], &kernels.flash_decode(g, &q, &kc, &vc, &table, &seq_lens, &ctx, shape));
     let got = g.read(&ctx, (batch * s.n_heads * s.head_dim) as usize);
@@ -588,7 +588,7 @@ fn native_decode_is_exact_at_agent_contexts(g: &Gpu, tier: KvTier, lens: &[u32],
     let (q, table, seq_lens) = (g.storage_init("q", &q_h), u32s(g, &table_h), u32s(g, lens));
     let ctx = g.storage((batch * n_heads * 256) as u64);
     let kernels = KvKernels::resolve(g, tier).unwrap();
-    let shape = FlashDecodeShape { batch, n_heads, n_kv_heads: n_kv, head_dim: 256, block_size, max_bt, cap: *lens.iter().max().unwrap() };
+    let shape = FlashDecodeShape { batch, n_heads, n_kv_heads: n_kv, head_dim: 256, block_size, max_bt, cap: *lens.iter().max().unwrap(), pin_splits: false };
     assert!(kernels.flash_decode_available(g, 256, n_heads / n_kv), "{label}: the fused decode must be available");
     let (slow, native) = match () {
         _ if tier == KvTier::INT8 => ("paged_flash_decode_gqa_hd256#GRP=6#kv=int8", "paged_flash_decode_gqa_hd256_kv8"),
@@ -670,7 +670,7 @@ fn time_decode(g: &Gpu, tier: KvTier, batch: u32, len: u32) -> f64 {
     let (q, table, seq_lens) = (g.storage_init("q", &q_h), u32s(g, &table_h), u32s(g, &vec![len; batch as usize]));
     let ctx = g.storage((batch * n_heads * 256) as u64);
     let kernels = KvKernels::resolve(g, tier).unwrap();
-    let shape = FlashDecodeShape { batch, n_heads, n_kv_heads: n_kv, head_dim: 256, block_size, max_bt: per, cap: len };
+    let shape = FlashDecodeShape { batch, n_heads, n_kv_heads: n_kv, head_dim: 256, block_size, max_bt: per, cap: len, pin_splits: false };
     let steps = kernels.flash_decode(g, &q, &kc, &vc, &table, &seq_lens, &ctx, shape);
     g.submit(&[], &steps);
     g.poll_wait();

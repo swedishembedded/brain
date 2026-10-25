@@ -266,6 +266,16 @@ SERVING POLICY  (one model-agnostic policy for every model that serves it.
                          one batched step and keeps the longest prefix the
                          model agrees with, so greedy output is unchanged; it
                          falls back to plain decoding when the batch is large.
+  --exact-decode         make a decode row's result independent of which other
+                         requests share its batch: the int8 projections and the
+                         head run in groups small enough to stay on the
+                         bit-identical kernel, and every row's attention is
+                         sized from --ctx, so an identical request returns
+                         identical tokens and per-token log-probabilities alone
+                         or beside any batch of neighbours. Costs one extra
+                         pass over the weights per group (two at --max-batch 8
+                         on int8 tensor cores) and turns speculation off.
+                         Default off: today's batched numerics unchanged.
   Not flags any more (derived, reported at startup): the KV pool size, the
   prefix-cache slots, the prefill slice, batch and row cap, the norm fusion.
   Deprecated spellings (--qwen-*, --qwen35-*) still work, with a warning, until

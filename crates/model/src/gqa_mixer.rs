@@ -310,6 +310,10 @@ pub struct PagedDecodeBatch<'a> {
     pub max_bt: u32,
     /// The `scores`/`probs` row stride; `>=` every `seq_lens` entry.
     pub cap: u32,
+    /// The exact-decode regime: size the fused decode's split count as a batch
+    /// of one, so a row's online-softmax grouping is its own and not the
+    /// batch's (see [`FlashDecodeShape::pin_splits`](crate::kv_tier::FlashDecodeShape::pin_splits)).
+    pub pin_splits: bool,
 }
 
 /// [`gqa_mixer_fwd`] for one DECODE token of each of `batch` INDEPENDENT
@@ -503,6 +507,7 @@ pub fn gqa_mixer_decode_batched_kv_attend(
             paged.block_size,
             paged.max_bt,
             paged.cap,
+            paged.pin_splits,
             &prep.q_normed,
             &prep.k_normed,
             v,
@@ -576,6 +581,7 @@ pub fn gqa_mixer_decode_fused_kv_attend(
             paged.block_size,
             paged.max_bt,
             paged.cap,
+            paged.pin_splits,
             &q_out,
             layer,
             paged.block_tables,
