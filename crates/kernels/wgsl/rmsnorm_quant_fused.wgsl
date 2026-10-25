@@ -5,7 +5,7 @@
 //        the normalized fp32 row is never written to memory at all
 // @how   64-thread workgroup tile, 1 barrier
 // @opt   4
-// @cpu   no
+// @cpu   yes
 // @gpu   yes
 // @npu   no
 // @quant int8

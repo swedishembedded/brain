@@ -3,7 +3,7 @@
 
 // @what  Per-(row, 32-group) max/x/ -> int8 activation scale, one WORKGROUP per row - the cooperative form of `max_abs_row.wgsl`
 // @how   64-thread workgroup, no barrier
-// @opt   4
+// @opt   2
 // @cpu   yes
 // @gpu   yes
 // @npu   no

@@ -3,8 +3,8 @@
 
 // @what  SwiGLU and group-wise int8 activation quantisation in one pass: out = quant(SiLU(gate) * up), one workgroup per row
 // @how   128-thread workgroup, a lane per 32-element scale group, two passes over each group
-// @opt   4
-// @cpu   no
+// @opt   2
+// @cpu   yes
 // @gpu   yes
 // @npu   no
 // @quant int8
