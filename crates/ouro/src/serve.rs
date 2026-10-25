@@ -125,6 +125,12 @@ pub struct Engine {
     scores: DeviceBuffer,
     probs: DeviceBuffer,
     last_pass: Cell<usize>,
+    /// One token's whole graph, recorded once: only the position (two rope
+    /// uniforms), the new K/V slot and the block table change per step.
+    decode: Vec<Step>,
+    heads: Vec<Vec<Step>>,
+    rope_q_uni: Vec<DeviceBuffer>,
+    rope_k_uni: Vec<DeviceBuffer>,
 }
 
 impl Engine {
@@ -210,8 +216,10 @@ impl Engine {
         let idx_lens = (0..cfg.total_ut_steps).map(|_| gpu.buffer("ouro_lens", 4, BufUsage::STORAGE | BufUsage::COPY_DST)).collect();
         let scores = st(nh * cap as u64);
         let probs = st(nh * cap as u64);
+        let rope_q_uni = (0..cfg.total_ut_steps).map(|_| gpu.uniform_dynamic(7)).collect();
+        let rope_k_uni = (0..cfg.total_ut_steps).map(|_| gpu.uniform_dynamic(7)).collect();
 
-        Engine {
+        let mut m = Engine {
             gpu,
             cfg,
             ps,
@@ -237,7 +245,14 @@ impl Engine {
             scores,
             probs,
             last_pass: Cell::new(0),
-        }
+            decode: Vec::new(),
+            heads: Vec::new(),
+            rope_q_uni,
+            rope_k_uni,
+        };
+        m.decode = m.decode_steps();
+        m.heads = (0..m.cfg.total_ut_steps as usize).map(|p| m.head_steps(p)).collect();
+        m
     }
 
     fn ensure_row(&mut self, table: &mut BlockTable) -> Result<u32, String> {
@@ -268,9 +283,11 @@ impl Engine {
         }
     }
 
-    /// One token through every pass, appending its K/V to each pass's table.
-    /// Returns the logits of the selected pass.
-    fn advance(&mut self, table: &mut BlockTable, row: u32, token: u32) -> Vec<f32> {
+    /// The decode graph, recorded once: one new token through every pass,
+    /// appending its K/V at the absolute position. The position reaches the
+    /// two rope dispatches through a uniform buffer written per step, so the
+    /// per-token cost is buffer writes and one submit, not a graph rebuild.
+    fn decode_steps(&self) -> Vec<Step> {
         let cfg = &self.cfg;
         let gpu = &self.gpu;
         let ids = model::kernel_ids();
@@ -281,30 +298,8 @@ impl Engine {
         let t = cfg.total_ut_steps as usize;
         let l_count = cfg.n_layers as usize;
 
-        gpu.write(&self.token, &[token]);
         let mut steps = vec![gpu.step(model::EMBED_ID, &[&self.token, self.ps.w("tok.weight"), &self.h[0]], &[d, 1], d)];
         for p in 0..t {
-            let pos = if p == 0 { table.len() } else { self.rows[&row].extra[p - 1].len() };
-            // Pass 0 appends into the scheduler's table; every other pass
-            // appends into its own table, from that pass's own allocator, so
-            // each paged plane is charged exactly the sequence's page count.
-            let appended = if p == 0 {
-                table.append(&mut self.allocs[0])
-            } else {
-                let ex = &mut self.rows.get_mut(&row).expect("row").extra[p - 1];
-                ex.append(&mut self.allocs[p])
-            };
-            let (blk, off) = appended.expect("out of KV blocks");
-            gpu.write(&self.idx_blocks[p], &[blk]);
-            gpu.write(&self.idx_offsets[p], &[off]);
-            gpu.write(&self.idx_lens[p], &[pos + 1]);
-            let mut bt = vec![0u32; self.max_bt as usize];
-            let blocks = if p == 0 { table.blocks() } else { self.rows[&row].extra[p - 1].blocks() };
-            for (i, b) in blocks.iter().enumerate() {
-                bt[i] = *b;
-            }
-            gpu.write(&self.idx_tables[p], &bt);
-
             let mut prev: &DeviceBuffer = if p == 0 { &self.h[0] } else { &self.hs[p - 1] };
             for l in 0..l_count {
                 let out: &DeviceBuffer = if p == 0 { &self.h[(l + 1) % 2] } else { &self.h[l % 2] };
@@ -313,8 +308,8 @@ impl Engine {
                 self.linear(&mut steps, &s.xn1, &pfx("attn.wq.weight"), &s.q, 1, d, hq);
                 self.linear(&mut steps, &s.xn1, &pfx("attn.wk.weight"), &s.k, 1, d, hkv);
                 self.linear(&mut steps, &s.xn1, &pfx("attn.wv.weight"), &s.v, 1, d, hkv);
-                steps.push(rope_at(gpu, &s.q, nh, hd, hq, pos, cfg.rope_theta));
-                steps.push(rope_at(gpu, &s.k, nkv, hd, hkv, pos, cfg.rope_theta));
+                steps.push(gpu.step_buf(model::ROPE_AT_ID, &self.rope_q_uni[p], &[&s.q], nh * hd / 2));
+                steps.push(gpu.step_buf(model::ROPE_AT_ID, &self.rope_k_uni[p], &[&s.k], nkv * hd / 2));
                 steps.extend(::model::block::gqa_decode_batched_step(
                     gpu,
                     &dec,
@@ -354,13 +349,57 @@ impl Engine {
             self.linear(&mut steps, &self.hs[p], "gate.weight", &self.gates[p], 1, d, 1);
             steps.push(gpu.step(model::BIAS_ADD_ID, &[&self.gates[p], self.ps.w("gate.bias")], &[1, 1], 1));
         }
-        gpu.submit(&[], &steps);
+        steps
+    }
+
+    fn head_steps(&self, pass: usize) -> Vec<Step> {
+        let (d, v) = (self.cfg.d_model, self.cfg.vocab);
+        let mut steps = Vec::new();
+        self.linear(&mut steps, &self.hs[pass], "lm_head.weight", &self.logits, 1, d, v);
+        steps
+    }
+
+    fn set_rope_pos(&self, pass: usize, pos: u32) {
+        let c = &self.cfg;
+        let (nh, nkv, hd, theta) = (c.n_heads, c.n_kv_heads, c.head_dim, gpu_core::f(c.rope_theta));
+        self.gpu.write(&self.rope_q_uni[pass], &[1, nh, hd, c.q_dim(), 0, pos, theta]);
+        self.gpu.write(&self.rope_k_uni[pass], &[1, nkv, hd, c.kv_dim(), 0, pos, theta]);
+    }
+
+    /// One token through every pass, appending its K/V to each pass's table.
+    /// Returns the logits of the selected pass.
+    fn advance(&mut self, table: &mut BlockTable, row: u32, token: u32) -> Vec<f32> {
+        let t = self.cfg.total_ut_steps as usize;
+        let cfg = &self.cfg;
+        self.gpu.write(&self.token, &[token]);
+        for p in 0..t {
+            let pos = if p == 0 { table.len() } else { self.rows[&row].extra[p - 1].len() };
+            // Pass 0 appends into the scheduler's table; every other pass
+            // appends into its own table, from that pass's own allocator, so
+            // each paged plane is charged exactly the sequence's page count.
+            let appended = if p == 0 {
+                table.append(&mut self.allocs[0])
+            } else {
+                let ex = &mut self.rows.get_mut(&row).expect("row").extra[p - 1];
+                ex.append(&mut self.allocs[p])
+            };
+            let (blk, off) = appended.expect("out of KV blocks");
+            self.gpu.write(&self.idx_blocks[p], &[blk]);
+            self.gpu.write(&self.idx_offsets[p], &[off]);
+            self.gpu.write(&self.idx_lens[p], &[pos + 1]);
+            let mut bt = vec![0u32; self.max_bt as usize];
+            let blocks = if p == 0 { table.blocks() } else { self.rows[&row].extra[p - 1].blocks() };
+            for (i, b) in blocks.iter().enumerate() {
+                bt[i] = *b;
+            }
+            self.gpu.write(&self.idx_tables[p], &bt);
+            self.set_rope_pos(p, pos);
+        }
+        self.gpu.submit(&[], &self.decode);
         let pass = self.choose_exit();
-        let mut head = Vec::new();
-        self.linear(&mut head, &self.hs[pass], "lm_head.weight", &self.logits, 1, d, cfg.vocab);
-        gpu.submit(&[], &head);
+        self.gpu.submit(&[], &self.heads[pass]);
         self.last_pass.set(pass);
-        gpu.read(&self.logits, cfg.vocab as usize)
+        self.gpu.read(&self.logits, cfg.vocab as usize)
     }
 
     /// Prefill the whole prompt in one pass per recurrent step: matmuls run

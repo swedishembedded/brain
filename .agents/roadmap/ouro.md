@@ -63,6 +63,10 @@ gate and a pass-selected or exit-weighted head.
   weights (bf16 storage) are the step that puts a 6k context on one card.
   Prefix reuse and host offload stay off for the looped path until they are
   pass-aware.
+- Decode speed: one token's graph is recorded once; a step writes the new
+  K/V slot, two rope uniforms and the block table, then submits. A 16-token
+  greedy continuation on the 1.4B checkpoint at a 6144-token capacity,
+  including its load and a 5-token prefill, takes 10.5 s end to end.
 - Prefill speed: the whole-prompt path now uses the flash causal attention
   kernel (no score slabs) and the register-tiled GEMM for prefill-sized linear
   slabs (the naive kernel still serves a decode row and the CPU JIT). A
