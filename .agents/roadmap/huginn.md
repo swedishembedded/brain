@@ -84,3 +84,6 @@ un-embeds the final latent state into the tied head.
   the `compress-sN` cache to gate the sharing ring.
 - bf16 weights would halve the weight side and buy depth; the model was
   trained and is benchmarked in bf16.
+- A serve-time depth knob: the resident's 12 steps are a compile-time
+  constant today, and the trade against the card is exactly what an
+  operator needs to make per machine.
