@@ -198,7 +198,7 @@ pub fn run_evaluated<T: SampleTrainer, E: FnMut(&mut T) -> Result<f32, String>>(
                     position += chunk.len() as u64;
                     progress(Event::Step { step: taken, steps, epoch: epoch + 1, loss, lr: factor });
                     if let Cadence::Steps(every) = spec.cadence {
-                        if every > 0 && taken % every == 0 {
+                        if every > 0 && taken.is_multiple_of(every) {
                             trainer.checkpoint(state, position)?;
                             progress(Event::Checkpoint { step: taken });
                         }
@@ -252,7 +252,7 @@ pub fn run_evaluated<T: SampleTrainer, E: FnMut(&mut T) -> Result<f32, String>>(
                     }
                 }
                 if let Cadence::Steps(every) = spec.cadence {
-                    if every > 0 && taken % every == 0 {
+                    if every > 0 && taken.is_multiple_of(every) {
                         trainer.checkpoint(state, position)?;
                         progress(Event::Checkpoint { step: taken });
                     }
