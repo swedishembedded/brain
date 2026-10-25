@@ -36,10 +36,25 @@ un-embeds the final latent state into the tied head.
   full forward's row at the same position because every position's recurrence
   starts from the model's initial state; green on cpu, wgpu and cuda.
 
+- Paged serving engine (`crates/huginn/src/serve.rs`) over the same stage
+  list: one allocator and one paged K/V plane per stage, one recorded token
+  graph, batched prefill with a batched paged scatter. Depth is a serving
+  setting (`open_with_steps`): the released 32 iterations are 132 stages,
+  which cannot share a card with fp32 weights at a serving context.
+- The catalog resident (checkpoint Jinja template, tool schemas described in
+  a system turn), the provider/manifest entry, the model-directory scan's
+  simple and compound arms, `brain huginn import|generate`, and the docs
+  page.
+- Training: forward and analytic backward through the sampled recurrence,
+  every boundary residual kept per application and shared gradients
+  accumulating over all of them; a finite-difference gate over every
+  parameter on cpu, wgpu and cuda, plus an AdamW-step test that the loss
+  falls and the shared core moves.
+
 ## Left to do
 
-- Paged serving engine (`crates/huginn/src/serve.rs`) over the same stage
-  list, then the catalog resident, the CLI and the docs entry.
-- Training: backward through the sampled recurrence (the reference backprops
-  the last `mean_backprop_depth` steps and runs the earlier ones under
-  `no_grad`), then LoRA.
+- Truncated backprop as the reference's sampled-depth mode runs it (run the
+  leading steps under no-grad when `mean_backprop_depth` is smaller than the
+  depth), and LoRA.
+- A generated golden of the released checkpoint's continuation, so the
+  served engine is gated beyond the tiny fixture.
