@@ -56,13 +56,16 @@ gate and a pass-selected or exit-weighted head.
 
 ## Left to do
 
-- End-to-end serving on the real checkpoint: an agent runtime's system prompt
-  plus tool schemas is about 5.4k tokens (3.4k in chat mode), so the served
-  context must reach ~6k before a tool-using run can start; the 2.6B in fp32
-  holds 4096 only on a host, not on a 24 GB card. Lower-precision serving
-  weights (bf16 storage) are the step that puts a 6k context on one card.
-  Prefix reuse and host offload stay off for the looped path until they are
-  pass-aware.
+- End-to-end serving has one measured turn: an agent runtime against the
+  served 1.4B checkpoint at a 6144-token context completed a tool-using task -
+  it called the file-read tool, the tool returned the file's content, and its
+  answer carried the number the file held (about 292 s, two model requests and
+  one compaction retry). The turn needs the served template's reasoning block
+  off: with it on, the model spent its whole output budget thinking and never
+  answered. A 2.6B checkpoint in fp32 holds 4096 tokens only on a host, not on
+  a 24 GB card; lower-precision serving weights (bf16 storage) are the step
+  that puts a 6k context on one card. Prefix reuse and host offload stay off
+  for the looped path until they are pass-aware.
 - Decode speed: one token's graph is recorded once; a step writes the new
   K/V slot, two rope uniforms and the block table, then submits. A 16-token
   greedy continuation on the 1.4B checkpoint at a 6144-token capacity,
