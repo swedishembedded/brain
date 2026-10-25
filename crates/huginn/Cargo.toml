@@ -1,0 +1,26 @@
+[package]
+name = "brain-huginn"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Huginn (Raven): a recurrent-depth decoder with a prelude, a shared recurrent core and a coda."
+
+[lib]
+name = "huginn"
+path = "src/lib.rs"
+
+[dependencies]
+brain-checkpoint.workspace = true
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-model.workspace = true
+brain-paramstore.workspace = true
+brain-optim.workspace = true
+brain-capability.workspace = true
+brain-data.workspace = true
+brain-modelstore.workspace = true
+serde_json.workspace = true
+bytemuck.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true

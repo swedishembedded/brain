@@ -1601,6 +1601,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-huginn"
+version = "3.0.0"
+dependencies = [
+ "brain-capability",
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-modelstore",
+ "brain-optim",
+ "brain-paramstore",
+ "brain-testutil",
+ "bytemuck",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-imaging"
 version = "3.0.0"
 dependencies = [
