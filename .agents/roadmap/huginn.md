@@ -30,8 +30,9 @@ un-embeds the final latent state into the tied head.
   (brain's `rope_train` kernel, not the half-split `rope_base`). The tiny
   golden in `testdata/golden/huginn/tiny` is driven by a fixed starting state
   and records each of three steps.
-- Reference golden (tiny and released) and per-step parity; incremental
-  decode with one KV history per recurrent step; paged serving.
+- Per-step parity against the tiny golden (the released checkpoint's golden
+  follows the graph); incremental decode with one KV history per recurrent
+  step; paged serving.
 - Training: backward through the sampled recurrence (the reference backprops
   the last `mean_backprop_depth` steps and runs the earlier ones under
   `no_grad`), then LoRA.
