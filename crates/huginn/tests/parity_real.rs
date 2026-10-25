@@ -59,7 +59,10 @@ fn the_released_checkpoint_matches_the_reference_at_every_step() {
 
     let model = Huginn::new(cfg.clone(), 1, n as u32, &src);
     model.set_tokens(&tokens);
-    model.set_state(&state.repeat(n));
+    // The golden's starting state is already `[n, d]`: the reference's
+    // `input_states` is per position.
+    assert_eq!(state.len(), n * d);
+    model.set_state(state);
 
     for step in 1..=steps {
         let logits = model.forward_rows(step);
@@ -68,6 +71,14 @@ fn the_released_checkpoint_matches_the_reference_at_every_step() {
         let want_s = &golden[&format!("state_{step}")].1;
         let want_l = &golden[&format!("latent_{step}")].1;
         let want_g = &golden[&format!("logits_{step}")].1;
+        eprintln!(
+            "step {step}: state rel_l2 {:.2e} max_abs {:.2e}, latent rel_l2 {:.2e}, logits rel_l2 {:.2e} max_abs {:.2e}",
+            rel_l2(&raw, want_s),
+            max_abs(&raw, want_s),
+            rel_l2(&latent, want_l),
+            rel_l2(&logits, want_g),
+            max_abs(&logits, want_g)
+        );
         assert!(
             rel_l2(&raw, want_s) < 1e-4 && max_abs(&raw, want_s) < 2e-3,
             "step {step} state rel_l2 {} max_abs {}",
