@@ -1,0 +1,208 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+#
+# Swedish Embedded AB implements reproducible research pipelines and reporting
+# for its clients. If your team needs expertise in measurement campaigns whose
+# every number names the commit and command that produced it, you can procure
+# our services by sending an email to info@swedishembedded.com.
+"""Run the paper's registered measurements and write their result records.
+
+Usage (from the repository root, after `make samples/text/spectral-lm/build`
+and the TinyStories preparation the sample's README describes):
+
+  python3 papers/spectral-lm/scripts/run.py <plan> [--gpus 0,1] [--work DIR]
+
+Plans (the protocol section of the paper registers them):
+
+  lr        300-step learning-rate selection runs, one seed per family and rate
+  primary   the three primary configurations, three random seeds each
+  pilot     the wide control and the channel pilots, one random seed each
+  qwen      Qwen3-0.6B: zero-shot bits per byte
+  spectrum  Qwen3-0.6B residual-stream projection study
+
+Each job is one command of the sample; a training job is followed by scoring
+its checkpoint. Jobs run one per GPU at a time. Every record lands in
+papers/spectral-lm/data/<plan>/ and carries the commit, the commands, the
+seed, the device, and the job's peak device memory (sampled from nvidia-smi
+for the job's process every second). Checkpoints and logs go to --work, which
+is outside the repository.
+"""
+
+import argparse
+import json
+import os
+import queue
+import secrets
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[3]
+DATA = ROOT / "papers" / "spectral-lm" / "data"
+SAMPLE = ROOT / "target" / "release" / "sample-text-spectral-lm"
+CORPUS = ROOT / "data" / "tinystories"
+QWEN = Path.home() / ".local" / "share" / "brain" / "models" / "Qwen" / "Qwen3-0.6B" / "model.brain.safetensors"
+
+SHAPE = ["--d-model", "256", "--layers", "6", "--heads", "8", "--kv-heads", "4", "--head-dim", "32"]
+SCHEDULE = ["--batch", "16", "--block", "512", "--warmup", "100", "--weight-decay", "0.1", "--clip", "1.0"]
+STEPS = "4096"
+MAX_DOC_BYTES = "2000"
+
+FAMILIES = {
+    "S-256-512-24": SHAPE + ["--mixer", "spectral", "--signal-len", "512", "--channels", "24"],
+    "Q-256-24": SHAPE + ["--mixer", "swiglu", "--d-ff", "24"],
+    "Q-256-1024": SHAPE + ["--mixer", "swiglu", "--d-ff", "1024"],
+    "Q-512-2048": ["--d-model", "512", "--layers", "6", "--heads", "8", "--kv-heads", "4", "--head-dim", "64", "--mixer", "swiglu", "--d-ff", "2048"],
+    "S-256-512-8": SHAPE + ["--mixer", "spectral", "--signal-len", "512", "--channels", "8"],
+    "S-256-512-96": SHAPE + ["--mixer", "spectral", "--signal-len", "512", "--channels", "96"],
+}
+PRIMARY = ["S-256-512-24", "Q-256-24", "Q-256-1024"]
+PILOT = ["Q-512-2048", "S-256-512-8", "S-256-512-96"]
+LR_GRID = ["1e-3", "3e-3", "6e-3"]
+
+
+def git_commit():
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip()
+    dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip()
+    return head + ("-dirty" if dirty else "")
+
+
+def device_name(gpu):
+    out = subprocess.run(["nvidia-smi", "-i", str(gpu), "--query-gpu=name", "--format=csv,noheader"], capture_output=True, text=True)
+    return out.stdout.strip() or "unknown"
+
+
+def chosen_lr(family):
+    """The registered rate: the lowest final training loss of the lr plan."""
+    best = None
+    for rec in (DATA / "lr").glob(f"{family}-lr*.json"):
+        r = json.loads(rec.read_text())
+        loss = r["train"]["final_loss"]
+        if best is None or loss < best[0]:
+            best = (loss, str(r["train"]["lr"]))
+    if best is None:
+        sys.exit(f"no learning-rate records for {family}; run the lr plan first")
+    return best[1]
+
+
+def jobs_for(plan, work):
+    jobs = []
+    if plan == "lr":
+        for fam in PRIMARY + PILOT:
+            for lr in LR_GRID:
+                jobs.append({"id": f"{fam}-lr{lr}", "family": fam, "lr": lr, "steps": "300", "seed": str(secrets.randbits(63)), "eval": False})
+    elif plan in ("primary", "pilot"):
+        fams, seeds = (PRIMARY, 3) if plan == "primary" else (PILOT, 1)
+        for fam in fams:
+            for _ in range(seeds):
+                seed = str(secrets.randbits(63))
+                jobs.append({"id": f"{fam}-{seed}", "family": fam, "lr": chosen_lr(fam), "steps": STEPS, "seed": seed, "eval": True})
+    elif plan == "qwen":
+        jobs.append({"id": "qwen3-0.6b-zero-shot", "qwen": ["qwen-eval", "--weights", str(QWEN), "--text", str(CORPUS / "valid.txt"), "--max-doc-bytes", MAX_DOC_BYTES, "--batch", "8"]})
+    elif plan == "spectrum":
+        seed = str(secrets.randbits(63))
+        jobs.append({"id": "qwen3-0.6b-layer14", "qwen": ["qwen-spectrum", "--weights", str(QWEN), "--fit-text", str(CORPUS / "train.txt"), "--text", str(CORPUS / "valid.txt"), "--layer", "14", "--widths", "64,128,256,512", "--fit-docs", "256", "--docs", "256", "--max-doc-bytes", MAX_DOC_BYTES, "--batch", "8", "--seed", seed]})
+    else:
+        sys.exit(f"unknown plan {plan!r}")
+    for j in jobs:
+        j["work"] = str(work)
+    return jobs
+
+
+def run_measured(cmd, gpu, log):
+    """Run `cmd` on `gpu`, returning (last JSON line, peak MiB, seconds)."""
+    env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu))
+    start = time.time()
+    with open(log, "a") as lf:
+        lf.write("$ " + " ".join(cmd) + "\n")
+        lf.flush()
+        p = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=lf, text=True)
+        peak = 0
+        lines = []
+        stdout = p.stdout
+        assert stdout is not None
+        reader = threading.Thread(target=lambda: lines.extend(stdout), daemon=True)
+        reader.start()
+        while p.poll() is None:
+            out = subprocess.run(["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"], capture_output=True, text=True).stdout
+            for row in out.splitlines():
+                parts = [x.strip() for x in row.split(",")]
+                if len(parts) == 2 and parts[0] == str(p.pid):
+                    peak = max(peak, int(parts[1]))
+            time.sleep(1.0)
+        reader.join()
+        lf.writelines(lines)
+    if p.returncode != 0:
+        raise RuntimeError(f"{' '.join(cmd)} exited {p.returncode}; see {log}")
+    record = next((json.loads(l) for l in reversed(lines) if l.startswith("{")), None)
+    if record is None:
+        raise RuntimeError(f"{' '.join(cmd)} printed no record; see {log}")
+    return record, peak, time.time() - start
+
+
+def execute(job, gpu, plan, commit):
+    work = Path(job["work"])
+    log = work / f"{job['id']}.log"
+    rec = {"commit": commit, "device": f"gpu{gpu} {device_name(gpu)}", "plan": plan, "id": job["id"]}
+    if "qwen" in job:
+        cmd = [str(SAMPLE)] + job["qwen"]
+        result, peak, _ = run_measured(cmd, gpu, log)
+        rec.update({"command": " ".join(cmd), "result": result, "peak_mem_mib": peak})
+    else:
+        ckpt = work / f"{job['id']}.safetensors"
+        train = [str(SAMPLE), "train", str(CORPUS), "--out", str(ckpt), *FAMILIES[job["family"]], *SCHEDULE,
+                 "--steps", job["steps"], "--lr", job["lr"], "--seed", job["seed"]]
+        result, peak, _ = run_measured(train, gpu, log)
+        rec.update({"family": job["family"], "seed": int(job["seed"]), "command": " ".join(train), "train": result, "peak_mem_mib": peak})
+        if job["eval"]:
+            ev = [str(SAMPLE), "eval", "--checkpoint", str(ckpt), "--tokenizer", str(CORPUS / "tokenizer.json"),
+                  "--text", str(CORPUS / "valid.txt"), "--max-doc-bytes", MAX_DOC_BYTES, "--batch", "16"]
+            score, _, _ = run_measured(ev, gpu, log)
+            rec.update({"eval_command": " ".join(ev), "eval": score})
+    out = DATA / plan / f"{job['id']}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(rec, indent=1) + "\n")
+    print(f"[gpu{gpu}] wrote {out.relative_to(ROOT)}", flush=True)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("plan")
+    ap.add_argument("--gpus", default="0,1")
+    ap.add_argument("--work", required=True, help="checkpoint and log directory outside the repository")
+    a = ap.parse_args()
+    work = Path(a.work)
+    work.mkdir(parents=True, exist_ok=True)
+    commit = git_commit()
+    if commit.endswith("-dirty"):
+        sys.exit("the tracked tree has uncommitted changes; records must name a commit that reproduces them")
+    jobs = queue.Queue()
+    for j in jobs_for(a.plan, work):
+        jobs.put(j)
+    failures = []
+
+    def worker(gpu):
+        while True:
+            try:
+                job = jobs.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                execute(job, gpu, a.plan, commit)
+            except Exception as e:  # a failed job is reported, never silently dropped
+                failures.append(f"{job['id']}: {e}")
+                print(f"[gpu{gpu}] FAILED {job['id']}: {e}", flush=True)
+
+    threads = [threading.Thread(target=worker, args=(int(g),)) for g in a.gpus.split(",")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    if failures:
+        sys.exit("failed jobs:\n" + "\n".join(failures))
+
+
+if __name__ == "__main__":
+    main()

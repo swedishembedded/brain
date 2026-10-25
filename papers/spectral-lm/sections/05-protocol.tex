@@ -36,12 +36,53 @@ feed-forward sublayer.
   fine-tuning on the training split for the token budget of the trained models.
 \end{itemize}
 
+\paragraph{Configurations.} Every trained model has 6 blocks, residual width
+$m=256$, 8 query and 4 key-value heads of dimension 32, rotary base $10^4$, a
+tied embedding and head over a 4096-token byte-level BPE vocabulary learned on
+the first 30{,}000 training stories, and a 512-token context.
+\Cref{tab:configs} lists the feed-forward sublayers. $\mathcal{S}$ has
+virtual signal length $D=512=2m$ and $C=24$ channels. The two narrow controls
+bracket it: $\mathcal{Q}(256,1024)$ has a conventional $4m$ hidden width and
+nearly the same analytic arithmetic per token as $\mathcal{S}$ when its
+transforms are counted as FFTs; $\mathcal{Q}(256,24)$ has a SwiGLU of hidden
+width $C$ and exactly the parameter count of $\mathcal{S}$ ($3\cdot 24\cdot
+256$ per block either way), so it is $f_{\mathrm{par}}$ and
+$\mathcal{Q}(256,1024)$ is $f_{\mathrm{std}}$. The wide control
+$\mathcal{Q}(512,2048)$ uses 8 heads of dimension 64.
+
+\begin{table}[ht]
+\centering\small
+\caption{Registered feed-forward sublayers. Parameters are per block; the
+attention sublayer, embedding and head are identical across the three
+narrow models.}
+\label{tab:configs}
+\begin{tabular}{llrrl}
+\toprule
+Model & Feed-forward & Params/block & Seeds & Role \\
+\midrule
+$\mathcal{S}(256,512,24)$ & spectral, $C=24$ & 18{,}432 & 3 & primary \\
+$\mathcal{Q}(256,24)$ & SwiGLU, $f=24$ & 18{,}432 & 3 & parameter-matched control \\
+$\mathcal{Q}(256,1024)$ & SwiGLU, $f=1024$ & 786{,}432 & 3 & arithmetic-matched control \\
+$\mathcal{Q}(512,2048)$ & SwiGLU, $f=2048$ & 3{,}145{,}728 & 1 & wide control (pilot) \\
+$\mathcal{S}(256,512,8)$, $\mathcal{S}(256,512,96)$ & spectral & 6{,}144; 73{,}728 & 1 & channel pilot \\
+\bottomrule
+\end{tabular}
+\end{table}
+
 \paragraph{Training.} All trained models use the same tokenizer, context
-length, batch size, token budget, AdamW settings, cosine schedule and
-precision (fp32). The learning rate is chosen per model family from the same
-grid on a short run, scored on a slice of the training split, and fixed before
-the comparison runs. Each comparison configuration is trained with three
-seeds drawn at random and recorded.
+length (512), batch (16 sequences, 8192 tokens per step), token budget (4096
+steps, 33.6M tokens, about 6\% of the training split, so no sequence is seen
+twice in expectation), AdamW ($\beta=(0.9,0.999)$, weight decay 0.1, gradient
+clip 1.0), 100 warm-up steps, a cosine schedule to a tenth of the peak rate,
+and fp32 arithmetic. The peak learning rate is chosen per model family from
+$\{1, 3, 6\}\times10^{-3}$ by the lowest final training loss of a 300-step run
+with one seed, and fixed before the comparison runs. Each primary
+configuration is trained with three seeds drawn at random and recorded.
+
+\paragraph{Scoring.} Validation documents of at most 2000 UTF-8 bytes (98.5\%
+of the split; the rule is on bytes so that every tokenizer scores the same
+documents) are scored one per row, each preceded by its tokenizer's
+end-of-text token and every one of its tokens predicted.
 
 \paragraph{Hypotheses.}
 \begin{description}
