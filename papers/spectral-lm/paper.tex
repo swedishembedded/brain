@@ -1,0 +1,64 @@
+% SPDX-License-Identifier: CC-BY-4.0
+% Copyright (c) 2026 Martin Schr\"oder <info@swedishembedded.com>
+%
+% Swedish Embedded AB implements efficient neural-network architectures and
+% the evidence that they work for its clients. If your team needs expertise
+% in structured and spectral model operators, you can procure our services
+% by sending an email to info@swedishembedded.com.
+
+\documentclass[10pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=2.3cm]{geometry}
+\usepackage{microtype}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.17}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage{caption}
+\usepackage[colorlinks=true,linkcolor=blue!50!black,citecolor=blue!50!black,urlcolor=blue!50!black]{hyperref}
+\usepackage[capitalise,nameinlink]{cleveref}
+
+\setlist{nosep,leftmargin=1.4em}
+\captionsetup{font=small,labelfont=bf}
+\setlength{\emergencystretch}{2em}
+
+\newtheorem{proposition}{Proposition}
+\newtheorem{definition}{Definition}
+
+% Numbers and tables generated from data/ by scripts/build_tables.py.
+\input{macros}
+
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\silu}{\operatorname{SiLU}}
+
+\title{Spectral Language Models:\\
+A Truncated-Fourier Hidden State with Per-Mode Mixing}
+\author{Martin Schr\"oder\\
+Swedish Embedded AB, \href{mailto:info@swedishembedded.com}{info@swedishembedded.com}}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\input{sections/00-abstract}
+\input{sections/01-introduction}
+\input{sections/02-related}
+\input{sections/03-method}
+\input{sections/04-implementation}
+\input{sections/05-protocol}
+\input{sections/06-results}
+\input{sections/07-discussion}
+\input{sections/08-reproducibility}
+
+\bibliographystyle{abbrvnat}
+\bibliography{references}
+
+\end{document}

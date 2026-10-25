@@ -1,0 +1,19 @@
+% SPDX-License-Identifier: CC-BY-4.0
+% Copyright (c) 2026 Martin Schr\"oder <info@swedishembedded.com>
+
+\begin{abstract}
+A language model's hidden state could be stored as a few Fourier coefficients
+of a longer virtual signal and processed by per-frequency operators, which
+would cut parameters and arithmetic. We first show that a basis change alone
+cannot do this: a decoder whose maps on the residual stream are dense absorbs
+any orthogonal basis into its weights, and truncating its spectrum yields an
+ordinary narrow decoder. We then define SpectralLM, a decoder whose residual
+stream is the lowest $m$ coefficients of a real Fourier basis and whose
+feed-forward networks are replaced by a spectral mixer with $3Cm$ parameters:
+per-mode filters around a gated product taken in the signal domain, which
+couples frequencies through spectral convolution. We implement it in an
+existing training and inference engine with gradient-checked operators and a
+fast-transform path gated against a dense reference, and register a
+comparison on TinyStories against width-matched conventional decoders and
+against Qwen3-0.6B in bits per byte. \StatusAbstract
+\end{abstract}

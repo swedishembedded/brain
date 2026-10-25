@@ -47,6 +47,7 @@ Enforced by `make check/scope`; `CHANGELOG.md` is exempt.
 | `tools/` | developer utilities run by hand (golden dumpers, converters) |
 | `tests/` | bats suites: `tests/e2e` (real sockets and processes), `tests/gates` (gate specs) |
 | `brain-py/` | Python client driving the `brain` binary as a subprocess |
+| `papers/` | research papers, one scope each (`papers/README.md`); `make papers/<name>/pdf` builds one into `build/papers/` |
 
 ## Rules to read before you start
 
@@ -60,6 +61,7 @@ Enforced by `make check/scope`; `CHANGELOG.md` is exempt.
 | add or change a public SDK type, CLI verb or Python surface | `.agents/rules/sdk-design.md` |
 | touch `crates/apiserve` or `crates/dbus` | `.agents/rules/api-security.md` |
 | bring in third-party code or weights | `.agents/rules/licensing.md` |
+| write or change a paper, or change a finding one states | `.agents/rules/papers.md` |
 | design a gate, or call a number an architecture's ceiling | `.agents/knowledge/index.md` |
 
 ## Commands

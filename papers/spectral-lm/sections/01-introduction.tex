@@ -1,0 +1,60 @@
+% SPDX-License-Identifier: CC-BY-4.0
+% Copyright (c) 2026 Martin Schr\"oder <info@swedishembedded.com>
+
+\section{Introduction}
+\label{sec:intro}
+
+A transformer language model \citep{vaswani2017attention} treats the $d$
+coordinates of its hidden state as unrelated numbers: every map that reads or
+writes the residual stream is a dense learned matrix, and permuting the
+coordinates, with the matching permutation of the weights, changes nothing.
+The feed-forward sublayers hold most of the parameters and arithmetic of a
+small model, and at width $d$ they cost $\Theta(d^2)$ per token.
+
+Fourier methods replace dense maps with structured ones elsewhere in deep
+learning. Fourier neural operators learn per-frequency weights for operators
+on functions \citep{li2020fno}; FNet and adaptive Fourier neural operators mix
+tokens along the sequence with Fourier transforms \citep{leethorp2021fnet,
+guibas2021afno}; FourierFT stores fine-tuning updates as a few spectral
+coefficients of the weight change \citep{gao2024fourierft}. None of these makes
+the hidden state of a language model itself a spectrum. Doing so is tempting:
+a hidden state of $m$ Fourier coefficients of a longer virtual signal is
+cheap to store and cache, and per-frequency operators are cheap to apply.
+
+The obstacle is that a basis change by itself does nothing.
+\Cref{prop:absorption} shows that a decoder whose maps on the residual stream
+are dense and learned absorbs any orthogonal basis into its weights, and that
+truncating the spectrum of such a model yields an ordinary narrow model. A
+spectral language model can only differ from a conventional one through
+operators that are defined relative to the basis.
+
+\paragraph{Scope.} This paper is about language models whose hidden state is
+a truncated real Fourier spectrum and whose feed-forward mixing is done by
+per-mode filters around a signal-domain nonlinearity: the representation, the
+operators and their gradients, the training and decoding path, the spectral
+structure of a conventional model's hidden states, and matched comparisons
+against conventional transformers. It does not study Fourier token mixing
+along the sequence axis or spectral compression of weights.
+
+\paragraph{Question.} At a fixed hidden width, does a feed-forward mixer that
+is diagonal in a Fourier basis around a signal-domain gated product reach the
+language-modeling quality of a dense feed-forward network, and at what
+parameter and arithmetic cost?
+
+\paragraph{Contributions.}
+\begin{itemize}
+\item The basis-absorption argument (\cref{prop:absorption}), which identifies
+  the controls a spectral model must beat: a conventional decoder at the
+  spectral model's retained width, not at its virtual signal length.
+\item SpectralLM (\cref{sec:method}): a decoder with an $m$-coefficient
+  spectral residual stream and a $C$-channel spectral mixer with $3Cm$
+  parameters, implemented in an existing training and inference engine with
+  gradient-checked operators, a fast-transform path gated against a dense
+  reference, and incremental decoding (\cref{sec:implementation}).
+\item A registered comparison (\cref{sec:protocol}) against width-matched
+  conventional decoders trained identically, against the pretrained Qwen3-0.6B
+  \citep{qwen3report} on the same held-out text in bits per byte, and a
+  measurement of how much of Qwen3-0.6B's hidden-state energy and predictive
+  information a truncated Fourier basis retains compared with principal
+  components and random orthogonal bases.
+\end{itemize}

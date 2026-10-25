@@ -1,0 +1,59 @@
+% SPDX-License-Identifier: CC-BY-4.0
+% Copyright (c) 2026 Martin Schr\"oder <info@swedishembedded.com>
+
+\section{Related work}
+\label{sec:related}
+
+\paragraph{Spectral operators on functions.} Fourier neural operators
+\citep{li2020fno} parameterize an integral operator by complex weights on a
+truncated set of Fourier modes, with pointwise nonlinearities applied in the
+physical domain between transforms. Transform Once \citep{poli2022transformonce}
+argues that repeated forward and inverse transforms are wasted work and keeps
+the computation in the frequency domain across layers. Our mixer borrows the
+FNO layer shape but applies it to the feature axis of each token, and it
+keeps the residual stream in the frequency domain throughout, as Transform
+Once recommends, transforming only around the nonlinearity.
+
+\paragraph{Fourier token mixing.} FNet \citep{leethorp2021fnet} replaces
+self-attention in an encoder with a parameter-free two-dimensional Fourier
+transform over the sequence and hidden dimensions, keeping its real part, and
+leaves the dense feed-forward networks in place; adaptive Fourier neural
+operators \citep{guibas2021afno} mix tokens with learned block-diagonal
+spectral weights. Hyena \citep{poli2023hyena} builds causal long convolutions
+evaluated with FFTs as an attention replacement in language models. In all
+three the Fourier transform is the token mixer and has no learned per-mode
+structure on the hidden axis. SpectralLM keeps causal attention as the token
+mixer and puts learned spectral structure on the feature axis, where it
+replaces the feed-forward network instead.
+
+\paragraph{Structured and spectral parameterizations of weights.} Monarch
+matrices \citep{dao2022monarch} replace dense layers by products of two
+block-diagonal matrices, a hardware-efficient family that can represent many
+common transforms. FourierFT \citep{gao2024fourierft} learns a few spectral
+coefficients of a weight update instead of a low-rank update. These compress
+weights while the activations stay dense; SpectralLM changes the activations'
+representation.
+
+\paragraph{Spectral factorization of the embedding.} The closest prior work is
+the L-Transformer of \citet{elichi2026structured}, which reshapes token
+representations into third-order tensor slices, runs attention and
+feed-forward operations in a transform domain, and proves that the result is
+equivalent to $p$ parallel transformers on embeddings of $1/p$ the width,
+which is where its parameter reduction comes from. That equivalence is the
+tensor counterpart of \cref{prop:absorption}: a transform-domain model whose
+operators are dense within each slice is a set of narrower conventional
+models. It is instantiated with a discrete cosine transform and evaluated on
+IMDB and AG~News text classification with an encoder. SpectralLM differs in
+keeping one residual stream, in coupling all modes through a signal-domain
+product, and in being an autoregressive language model.
+
+\paragraph{Fourier features.} Random Fourier feature maps help coordinate
+networks fit high-frequency functions of low-dimensional inputs
+\citep{tancik2020fourierfeatures}. That is a statement about inputs that are
+coordinates; the coordinates of a language model's hidden state carry no
+geometry, which is why \cref{sec:absorption} matters here.
+
+\paragraph{Small language models.} TinyStories \citep{eldan2023tinystories}
+showed that models of a few million parameters learn fluent English on a
+corpus of simple stories, which makes it a corpus on which architecture
+differences at small scale are measurable with modest compute.

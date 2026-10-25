@@ -86,6 +86,7 @@ heading and a `Scope: <one sentence>` line under it, then run `make generate/roa
 | [`sdk`](sdk.md) | sdk | The public `brain` SDK (`crates/sdk`). |
 | [`sdxlunet`](sdxlunet.md) | sdxlunet | SDXL UNet and the discrete diffusion schedulers (`crates/sdxlunet`, `diffusion::discrete`). |
 | [`self-improve`](self-improve.md) | self-improve | Self-improvement and training regimes over agent trajectories (`crates/rl`, `crates/atif`). |
+| [`spectrallm`](spectrallm.md) | spectrallm | SpectralLM, the decoder with a truncated real-Fourier residual stream and per-mode spectral mixers (`crates/spectrallm`), its operators, and the comparisons its paper reports (`papers/spectral-lm`). |
 | [`splat`](splat.md) | splat | Gaussian splatting, structure from motion and multi-view stereo (`crates/splat`, `sfm`, `mvs`, `recon`). |
 | [`supir`](supir.md) | supir | SUPIR image restoration (`crates/supir`). |
 | [`t5encoder`](t5encoder.md) | t5encoder | T5-XXL / umT5 text encoder (`crates/t5encoder`). |

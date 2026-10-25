@@ -1,0 +1,74 @@
+% SPDX-License-Identifier: CC-BY-4.0
+% Copyright (c) 2026 Martin Schr\"oder <info@swedishembedded.com>
+
+\section{Evaluation protocol}
+\label{sec:protocol}
+
+The protocol below was fixed before any comparison run was trained. Anything
+not listed here is exploratory and is labelled so where it appears.
+
+\paragraph{Corpus and metric.} All models are trained on the TinyStories
+training split \citep{eldan2023tinystories} and evaluated on its validation
+split, which no model or tokenizer sees during training. The primary metric is
+bits per byte (BPB) on the validation split: the summed next-token negative
+log-likelihood in bits divided by the UTF-8 byte count of the evaluated text.
+BPB does not depend on the tokenizer, so models with different vocabularies,
+including the pretrained Qwen3-0.6B, are scored on the same text.
+
+\paragraph{Models.} Every trained model is a pre-norm decoder with the
+attention sublayer of \cref{sec:method}; they differ only in width and in the
+feed-forward sublayer.
+\begin{itemize}
+\item \textbf{SpectralLM} $\mathcal{S}(m,D,C)$: residual width $m$, virtual
+  signal length $D$, $C$ mixer channels.
+\item \textbf{Narrow control} $\mathcal{Q}(m,f)$: the same decoder with a
+  SwiGLU feed-forward network of hidden width $f$, at the same residual width
+  $m$, same attention shape, same embedding and head. By
+  \cref{prop:absorption} this is also the ``truncated spectrum with dense
+  maps'' model. It is run at two hidden widths: $f_{\mathrm{std}}$, a
+  conventional ratio, and $f_{\mathrm{par}}$, chosen so that its non-embedding
+  parameter count matches $\mathcal{S}$.
+\item \textbf{Wide control} $\mathcal{Q}(D,f)$: a conventional decoder at the
+  virtual signal width $D$, the model a spectral state of length $D$ would be
+  compressing.
+\item \textbf{Pretrained reference}: Qwen3-0.6B \citep{qwen3report}, scored
+  zero-shot on the validation split with its own tokenizer, and after
+  fine-tuning on the training split for the token budget of the trained models.
+\end{itemize}
+
+\paragraph{Training.} All trained models use the same tokenizer, context
+length, batch size, token budget, AdamW settings, cosine schedule and
+precision (fp32). The learning rate is chosen per model family from the same
+grid on a short run, scored on a slice of the training split, and fixed before
+the comparison runs. Each comparison configuration is trained with three
+seeds drawn at random and recorded.
+
+\paragraph{Hypotheses.}
+\begin{description}
+\item[H1 (primary).] At equal residual width, equal attention, and equal
+  training tokens, $\mathcal{S}(m,D,C)$ reaches a mean validation BPB no
+  worse than $\mathcal{Q}(m,f_{\mathrm{par}})$ by more than $0.02$ BPB. It is
+  rejected if the mean difference over seeds exceeds $0.02$ BPB.
+\item[H2.] $\mathcal{S}(m,D,C)$ does not reach the quality of
+  $\mathcal{Q}(m,f_{\mathrm{std}})$, which has more parameters; the gap is
+  reported with its uncertainty either way.
+\item[H3.] On Qwen3-0.6B's residual stream, the lowest $m$ modes of a real
+  Fourier basis retain no more energy, and no more next-token information, than
+  $m$ random orthogonal directions, and less than the top $m$ principal
+  components.
+\item[H4.] The fast-transform mixer and the dense-product mixer compute the
+  same function within single-precision tolerance, and the fast one is faster
+  at every evaluated $(m,D,C)$.
+\end{description}
+
+\paragraph{Correctness gates.} Before any comparison run: the basis
+satisfies orthonormality and Parseval's identity to rounding error; every new
+operator and the whole model pass a finite-difference gradient check; the CPU
+and GPU backends agree; and the model drives the loss of a fixed small batch
+to near zero.
+
+\paragraph{Reporting.} For every configuration we report the mean and range
+over seeds of validation BPB, the non-embedding and embedding parameter
+counts, the analytic arithmetic per token, measured training throughput, and
+peak device memory. Every number is generated from a result record that names
+the commit, command, seeds and device.

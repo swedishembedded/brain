@@ -1,0 +1,40 @@
+% SPDX-License-Identifier: CC-BY-4.0
+% Copyright (c) 2026 Martin Schr\"oder <info@swedishembedded.com>
+
+\section{Implementation}
+\label{sec:implementation}
+
+SpectralLM is implemented in brain, a Rust training and inference engine whose
+device arithmetic is written as WGSL compute kernels. It reuses the engine's
+shared decoder building blocks (RMS normalization, rotary embedding,
+grouped-query attention and its backward pass, the key-value cache), its
+parameter store, its AdamW optimizer and its architecture-independent training
+loop, so the spectral model and its conventional controls differ only in the
+feed-forward sublayer. The controls are the engine's existing Qwen3-shaped
+decoder trained from scratch.
+
+\paragraph{Mixer operators.} \Cref{eq:mixer} decomposes into four operator
+families, each with a forward and a backward kernel:
+\begin{enumerate}
+\item \emph{channel expand}, $u_{n,c,k}=F_{c,k}\,h_{n,k}$, which applies the
+  filters $G$ and $U$; its input gradient is a channel contraction and its
+  filter gradient a reduction over rows;
+\item \emph{synthesis} $S$ and \emph{analysis} $S^\top$; because $S$ has
+  orthonormal columns, the backward pass of synthesis is analysis and the
+  backward pass of analysis is synthesis, so two kernels serve both
+  directions;
+\item the gated product $\silu(a)\odot b$, which the engine already has;
+\item \emph{channel contract}, $y_{n,k}=\sum_c W_{c,k}\,t_{n,c,k}$, the
+  transpose of channel expand.
+\end{enumerate}
+The transforms have two implementations: a dense product with the stored
+basis, which is the reference, and a radix-2 real fast Fourier transform with
+one workgroup per row. The fast path is accepted only where it agrees with the
+dense one (\cref{sec:protocol}, H4).
+
+\paragraph{Decoding.} Incremental decoding runs the same block once per new
+token against the cached keys and values, which are $m$ wide.
+
+\paragraph{Checkpoint metadata.} A checkpoint records $D$, $m$, the basis
+ordering of \cref{eq:basis} and $C$ with the weights, so a loader cannot
+interpret coefficients in a different basis than the one they were trained in.

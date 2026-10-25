@@ -1783,6 +1783,24 @@ docs/clean:
 docs/pdf:
 	python3 docs/pandoc/build-docs.py
 
+# Research papers: one directory per paper under papers/, each with its own
+# Makefile over papers/paper.mk. Adding a directory adds its targets.
+PAPER_DIRS := $(patsubst %/Makefile,%,$(wildcard papers/*/Makefile))
+PAPER_TARGETS := $(addsuffix /pdf,$(PAPER_DIRS))
+
+## papers - default: papers/pdf (every paper's PDF -> build/papers/)
+papers: papers/pdf
+
+## papers/pdf - build every paper's PDF -> build/papers/<name>.pdf
+papers/pdf: $(PAPER_TARGETS)
+
+## papers/<name> - build that paper's PDF (same as papers/<name>/pdf)
+$(PAPER_DIRS): %: %/pdf
+
+## papers/<name>/pdf - build one paper's PDF (LaTeX via latexmk; tables from its data/)
+$(PAPER_TARGETS): papers/%/pdf:
+	$(MAKE) -C papers/$*
+
 # Regenerates README.md's Quick start assets: every one-liner in it, run for
 # real against auto-fetched weights (tens of GB on a cold cache), writing
 # docs/getting-started/img/*.png and the *.txt/*.json outputs the README quotes.
@@ -2044,6 +2062,7 @@ help:
         crates $(EXAMPLE_CRATE_TARGETS) $(EXAMPLE_GROUP_TARGETS) $(EXAMPLE_NAME_TARGETS) \
         $(EXAMPLE_BUILD_TARGETS) $(EXAMPLE_RUN_TARGETS) \
         docs docs/build docs/check docs/clean docs/pdf docs/quickstart \
+        papers papers/pdf $(PAPER_DIRS) $(PAPER_TARGETS) \
         generate generate/kernels generate/kernels/registry generate/kernels/wgsl-table \
         generate/kernels/cuda-table generate/samples generate/samples/manifest \
         generate/knowledge generate/knowledge/index \

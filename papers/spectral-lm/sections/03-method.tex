@@ -1,0 +1,137 @@
+% SPDX-License-Identifier: CC-BY-4.0
+% Copyright (c) 2026 Martin Schr\"oder <info@swedishembedded.com>
+
+\section{Method}
+\label{sec:method}
+
+\subsection{When does a Fourier basis matter at all?}
+\label{sec:absorption}
+
+A decoder transformer keeps a residual stream $x_t\in\R^{d}$ per token. Every
+map applied to that stream is either a learned dense linear map (the
+attention projections $W_Q,W_K,W_V,W_O$ and the feed-forward projections) or
+a normalization. Let $Q\in\R^{d\times d}$ be any orthogonal matrix, for
+instance a real Fourier basis, and write the stream in that basis, $z_t=Q^\top
+x_t$.
+
+\begin{proposition}[Basis absorption]
+\label{prop:absorption}
+Let $f$ be a pre-norm decoder whose only operations on the residual stream are
+(i) addition, (ii) dense linear maps $W$ into or out of the stream and (iii)
+RMS normalization $\operatorname{RMSNorm}_\gamma(x)=\gamma\odot x/\operatorname{rms}(x)$.
+Then $f$ with residual stream $z=Q^\top x$ computes the same function as $f$
+with residual stream $x$ after the substitutions $W_{\mathrm{in}}\mapsto
+W_{\mathrm{in}}Q$, $W_{\mathrm{out}}\mapsto Q^\top W_{\mathrm{out}}$, token
+embedding $E\mapsto EQ$, and $\operatorname{diag}(\gamma)\mapsto
+Q^\top\operatorname{diag}(\gamma)Q$ for every normalization gain.
+\end{proposition}
+
+\begin{proof}
+$\operatorname{rms}(Qz)=\operatorname{rms}(z)$ because $Q$ is orthogonal, so
+$\operatorname{RMSNorm}_\gamma(Qz)=Q\,(Q^\top\operatorname{diag}(\gamma)Q)\,z/\operatorname{rms}(z)$.
+A map reading the stream sees $W_{\mathrm{in}}x=W_{\mathrm{in}}Qz$; a map
+writing it adds $W_{\mathrm{out}}u$ to $x$, that is $Q^\top W_{\mathrm{out}}u$
+to $z$. Addition commutes with $Q$. Induction over the layers gives the claim.
+\end{proof}
+
+Two consequences fix the design and the controls of this paper. First, a
+model that merely stores its hidden state as Fourier coefficients and keeps
+dense learned maps everywhere is a conventional transformer: the basis is
+absorbed into the weights, apart from the normalization gain, which becomes a
+dense symmetric matrix instead of a diagonal one. Second, keeping only $m<d$
+coefficients of such a model is a conventional transformer of width $m$. A
+``rotated'' transformer and a ``truncated-spectrum'' transformer with dense
+maps therefore need no new architecture: they are a conventional decoder of
+width $d$ and of width $m$, and those are the controls we train
+(\cref{sec:protocol}). A Fourier basis can only change what a model computes
+through an operator that is defined relative to the basis: a map that is
+structured in it (diagonal per frequency mode) or a nonlinearity applied in
+the signal domain rather than the coefficient domain. The spectral mixer below
+has both.
+
+\subsection{The truncated real Fourier representation}
+
+Fix a signal length $D$ (even) and a retained width $m\le D$. The real
+orthonormal Fourier basis of $\R^D$, ordered by frequency, is
+\begin{equation}
+\label{eq:basis}
+\varphi_0(j)=\tfrac{1}{\sqrt D},\quad
+\varphi_{2k-1}(j)=\sqrt{\tfrac2D}\cos\tfrac{2\pi kj}{D},\quad
+\varphi_{2k}(j)=\sqrt{\tfrac2D}\sin\tfrac{2\pi kj}{D},\quad
+\varphi_{D-1}(j)=\tfrac{(-1)^j}{\sqrt D},
+\end{equation}
+for $k=1,\dots,D/2-1$ and $j=0,\dots,D-1$. The synthesis matrix
+$S=[\varphi_0,\dots,\varphi_{m-1}]\in\R^{D\times m}$ keeps the $m$ lowest
+modes; its columns are orthonormal, $S^\top S=I_m$, and the analysis map is
+$S^\top$. A coefficient vector $z\in\R^m$ represents the band-limited signal
+$Sz\in\R^D$, and Parseval's identity $\lVert Sz\rVert_2=\lVert z\rVert_2$
+holds exactly. We count capacity in real degrees of freedom: $m$ coefficients
+are $m$ real numbers, with no conjugate-symmetric duplicate stored.
+
+\subsection{Spectral language model}
+
+The spectral language model (SpectralLM) is a pre-norm decoder whose residual
+stream is $z_t\in\R^m$, the retained coefficients of a virtual signal of
+length $D$. It never materializes a $D$-wide residual stream.
+
+\paragraph{Embedding and head.} A table $E\in\R^{V\times m}$ maps tokens
+directly to coefficients, and the head computes logits $E_{\mathrm{out}}
+\operatorname{RMSNorm}(z_t)$ with $E_{\mathrm{out}}\in\R^{V\times m}$. No
+transform is involved.
+
+\paragraph{Attention.} Each block applies grouped-query causal attention with
+rotary position embedding \citep{su2021roformer} and per-head QK
+normalization, as in Qwen3 \citep{qwen3report}, to $\operatorname{RMSNorm}(z_t)$.
+By \cref{prop:absorption} attention is indifferent to the basis, so it is
+identical in SpectralLM and in the width-$m$ control, and its key-value cache
+holds $m$-wide coefficient states by construction.
+
+\paragraph{Spectral mixer.} The feed-forward sublayer is replaced by a mixer
+with $C$ channels. For $h=\operatorname{RMSNorm}(z)\in\R^m$ and learned
+per-mode filters $G,U,W\in\R^{C\times m}$,
+\begin{equation}
+\label{eq:mixer}
+M(h)=\sum_{c=1}^{C} W_c\odot S^\top\!\Big[\silu\big(S(G_c\odot h)\big)\odot S(U_c\odot h)\Big].
+\end{equation}
+Read from the inside out: each channel filters the input spectrum twice
+(diagonal maps, $2m$ parameters), synthesizes both filtered spectra into
+$D$-sample signals, applies the SwiGLU product \citep{shazeer2020glu} pointwise
+in the signal domain, analyses the result back to $m$ coefficients, and
+weights it per mode. The mixer has $3Cm$ parameters, against $3mf$ for a
+SwiGLU of hidden width $f$.
+
+The signal-domain product is where frequencies interact. Pointwise
+multiplication of two signals is circular convolution of their spectra, so a
+mode of the output depends on pairs of input modes whose frequencies add or
+subtract to it; no diagonal map could produce that coupling, and it is what a
+per-mode filter bank alone lacks. If both factors are band-limited to the
+lowest $m$ modes their product occupies at most the lowest $2m$, so with
+$D\ge 2m$ the bilinear part of \cref{eq:mixer} is computed without aliasing
+before $S^\top$ projects it back. The $\silu$ factor is not band-limited, so
+$D/m$ is a hyperparameter that trades aliasing against cost rather than a
+condition for exactness.
+
+\paragraph{Relation to Fourier neural operators.} \Cref{eq:mixer} is a
+one-dimensional Fourier neural operator layer \citep{li2020fno} along the
+embedding axis rather than along space or sequence: per-mode weights in the
+spectral domain, a pointwise nonlinearity in the signal domain, and fixed
+transforms between them. It differs in three respects: the operator runs on
+the feature axis of each token independently, its spectral weights are
+diagonal per channel instead of a per-mode channel-mixing matrix, and its
+nonlinearity is a gated product rather than a pointwise activation of a
+linear lift.
+
+\subsection{Cost}
+\label{sec:cost}
+
+Per token and layer, ignoring normalization, a SwiGLU of hidden width $f$
+costs $6mf$ floating-point operations and $3mf$ parameters. The mixer costs
+$O(Cm)$ operations for its filters, $O(CD)$ for the signal-domain product, and
+$3C$ transforms of length $D$: two syntheses and one analysis per channel. Computed as dense products with $S$,
+the transforms cost $6CDm$ operations in total; computed with a fast real
+Fourier transform they cost $O(CD\log D)$. The mixer therefore saves
+parameters at any $C<f$, but saves arithmetic only with a fast transform: at
+equal arithmetic, a dense-product mixer can afford only $C=f/D$ channels,
+while an FFT mixer can afford $C=\Theta(fm/(D\log D))$. This is why the
+implementation (\cref{sec:implementation}) carries both transform paths and
+gates the fast one against the dense one.
