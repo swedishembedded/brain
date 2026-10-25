@@ -18,6 +18,7 @@ use gpu_core::select::Dtype;
 use gpu_core::Gpu;
 use model::ops::TierPolicy;
 use model::saved::{SavedFormat, SavedPolicy};
+use model::Model;
 use qwen35::config::{lora_cfg, Qwen35Config};
 use qwen35::model::{pipelines, Qwen35, TrainOpts};
 
@@ -144,5 +145,59 @@ fn a_batch_supervised_only_early_runs_only_its_prefix() {
         let (x, y) = batch_of(long);
         loss_and_grads_on(&full, &x, &y);
         assert_eq!(full.run_len(), long as u32, "the next, fully supervised batch runs the whole row again");
+    }
+}
+
+fn build_rows(cfg: &Qwen35Config, init: &std::collections::HashMap<String, Vec<f32>>, b: u32, t: usize, opts: &TrainOpts) -> Qwen35 {
+    Qwen35::new_train_opts_on(Gpu::new_cpu(pipelines()), cfg.clone(), b, t as u32, init, opts)
+}
+
+/// A micro-batch of several rows runs only as far as its LONGEST row needs,
+/// rounded up to whole GDN chunks: everything is causal, so a row's tail past
+/// its last supervised position changes no loss and no gradient. A step of
+/// several records therefore computes the longest record in it, not the block
+/// the run was built for, and any padding in those tails contributes nothing:
+/// the loss and every gradient equal a build sized to the run length whose
+/// tails are padding rather than real (unsupervised) tokens.
+#[test]
+fn a_multi_row_batch_runs_only_as_far_as_its_longest_row_needs() {
+    // Rows supervised up to 100 and 140 tokens: the longest needs 140, which
+    // rounds up to 192 = 3 whole GDN chunks, from a 256-token block.
+    let (block, rows, run) = (256usize, [100usize, 140], 192usize);
+    let cfg = Qwen35Config { block_size: block as u32, ..long_config(false) };
+    let init = weights(&cfg, 0.3);
+    let (mut x, mut y) = (Vec::new(), Vec::new());
+    for &supervised in &rows {
+        let (row_x, mut row_y) = batch_of(block);
+        row_y[supervised..].fill(model::IGNORE);
+        x.extend(row_x);
+        y.extend(row_y);
+    }
+    // A Gated-DeltaNet segment cuts the token axis, so it is a one-row setting
+    // (`streamed_train_opts` refuses it with a wider batch); the recompute
+    // policy is the long-sequence setting a multi-row batch can use.
+    let settings = [TrainOpts::default(), TrainOpts { saved: SavedPolicy::Recompute, ..TrainOpts::default() }];
+    for opts in &settings {
+        let full = build_rows(&cfg, &init, rows.len() as u32, block, opts);
+        let got = loss_and_grads_on(&full, &x, &y);
+        assert_eq!(full.run_len(), run as u32, "a micro-batch whose longest row needs {run} tokens runs {run}, not the {block}-token block");
+        assert_eq!(full.computed_tokens(), Some(rows.len() as u64 * run as u64), "the step reports the {} tokens it computed", rows.len() * run);
+
+        // The same problem as a build sized to the run, its tails padded: the
+        // tails are outside the loss and reach nothing, so both agree - which
+        // is also what shows the block-sized tails the batch arrived with were
+        // pure padding.
+        let cfg_run = Qwen35Config { block_size: run as u32, ..cfg.clone() };
+        let (mut padded_x, mut padded_y) = (Vec::new(), Vec::new());
+        for (r, &supervised) in rows.iter().enumerate() {
+            let row = &x[r * block..(r + 1) * block];
+            let row_y = &y[r * block..(r + 1) * block];
+            padded_x.extend_from_slice(&row[..supervised]);
+            padded_x.resize((r + 1) * run, 0);
+            padded_y.extend_from_slice(&row_y[..supervised]);
+            padded_y.resize((r + 1) * run, model::IGNORE);
+        }
+        let want = loss_and_grads_on(&build_rows(&cfg_run, &init, rows.len() as u32, run, opts), &padded_x, &padded_y);
+        assert_same_training_signal(got, want, 1e-5, 0.99999);
     }
 }

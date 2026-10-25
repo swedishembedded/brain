@@ -1061,6 +1061,11 @@ pub struct Qwen35 {
     /// same plain sequential position per sequence.
     cos: DeviceBuffer,
     sin: DeviceBuffer,
+    /// True when `cos`/`sin` hold the compact table a trimmed multi-row batch
+    /// uploaded (see [`Self::set_batch`]) and a full-length row therefore has
+    /// to put the `t`-row table back first. Always false for a one-row build,
+    /// which addresses the construction table directly.
+    rope_compact: Cell<bool>,
 
     logits: DeviceBuffer,
     /// The chunked LM head + cross-entropy of a training build without MTP;
@@ -1827,18 +1832,7 @@ impl Qwen35 {
 
         // Text-only: every axis of the M-RoPE table carries the same plain
         // sequential position, reset per sequence (row = batch*t + pos).
-        let positions: Vec<[u32; 3]> = (0..b).flat_map(|_| (0..t).map(|ti| [ti, ti, ti])).collect();
-        // `rope_table()` is `None` unless `cfg.rope_scaling` is set, which
-        // makes this call bit-for-bit today's plain `mrope_tables` output -
-        // see `Qwen35Config::rope_table`'s own doc.
-        let yarn = cfg.rope_table();
-        let (cos, sin) = qwen3vl::mrope::mrope_tables_scaled(
-            &positions,
-            cfg.mrope_section,
-            cfg.rotary_dim(),
-            cfg.rope_theta,
-            yarn.as_ref().map(|(f, a)| (f.as_slice(), *a)),
-        );
+        let (cos, sin) = Self::mrope_tables(&cfg, b, t);
         let cos = gpu.storage_init("qwen35.rope_cos", &cos);
         let sin = gpu.storage_init("qwen35.rope_sin", &sin);
 
@@ -1921,6 +1915,7 @@ impl Qwen35 {
             ones_khd,
             cos,
             sin,
+            rope_compact: Cell::new(false),
             logits,
             head_ce,
             ce_buf,
@@ -2291,40 +2286,87 @@ impl Qwen35 {
         }
     }
 
+    /// The per-row M-RoPE tables `rows` sequences of `row_len` tokens read,
+    /// each sequence's positions starting at zero: one table row per token, at
+    /// the token's index in the batch, which is what
+    /// [`rope2d_partial_fwd`](model::block::rope2d_partial_fwd) addresses.
+    /// Text-only, so every axis carries the same plain sequential position.
+    /// `rope_table()` is `None` unless `cfg.rope_scaling` is set, which makes
+    /// this bit-for-bit the plain `mrope_tables` output - see
+    /// [`Qwen35Config::rope_table`]'s own doc.
+    fn mrope_tables(cfg: &Qwen35Config, rows: u32, row_len: u32) -> (Vec<f32>, Vec<f32>) {
+        let positions: Vec<[u32; 3]> = (0..rows).flat_map(|_| (0..row_len).map(|ti| [ti, ti, ti])).collect();
+        let yarn = cfg.rope_table();
+        qwen3vl::mrope::mrope_tables_scaled(&positions, cfg.mrope_section, cfg.rotary_dim(), cfg.rope_theta, yarn.as_ref().map(|(f, a)| (f.as_slice(), *a)))
+    }
+
     /// The tokens per sequence worth computing for `targets` (`b` rows of `t_user`):
-    /// a training batch of ONE sequence needs nothing past its last supervised
-    /// position. The model is causal, so the tail changes no earlier activation,
-    /// and it adds no loss and no gradient; skipping it makes a record padded to
-    /// the longest one's block cost its own length. Rounded up to whole GDN
-    /// chunks (the same padding `new_impl_on` applies to an awkward `t`). Batches of
-    /// several sequences, MTP builds (their head shifts across the whole row),
-    /// weighted-loss builds (their weights are laid out at `t`) and inference
-    /// builds keep the full row.
+    /// a training micro-batch needs nothing past the last supervised position of
+    /// its LONGEST row. The model is causal and every row attends only to
+    /// itself, so a row's tail past its last supervised position changes no
+    /// earlier activation and adds no loss and no gradient; skipping it makes a
+    /// record padded to the longest one's block cost its own length, and a
+    /// micro-batch of several records cost the longest record in it. Rounded up
+    /// to whole GDN chunks (the same padding `new_impl_on` applies to an awkward
+    /// `t`), and never past the caller's own row length. MTP builds (their head
+    /// shifts across the whole row), weighted-loss builds (their weights are laid
+    /// out at `t`) and inference builds keep the full row.
     fn needed_len(&self, targets: &[u32]) -> u32 {
-        let whole = self.is_train && self.b == 1 && !self.cfg.mtp && !self.objectives.is_weighted() && self.t > GDN_PAD_QUANTUM;
-        if !whole {
+        let trimmable = self.is_train && !self.cfg.mtp && !self.objectives.is_weighted() && self.t > GDN_PAD_QUANTUM;
+        if !trimmable {
             return self.t;
         }
-        let last = targets.iter().rposition(|&v| v != model::IGNORE).map_or(1, |i| i + 1) as u32;
-        last.next_multiple_of(GDN_PAD_QUANTUM).min(self.t)
+        let row = self.t_user as usize;
+        let last = (0..self.b as usize)
+            .map(|s| targets[s * row..(s + 1) * row].iter().rposition(|&v| v != model::IGNORE).map_or(0, |i| i + 1))
+            .max()
+            .expect("a batch has at least one row") as u32;
+        last.max(1).next_multiple_of(GDN_PAD_QUANTUM).min(self.t_user)
     }
 
     pub fn set_batch(&self, tokens: &[u32], targets: &[u32]) {
         let c = targets.iter().filter(|&&v| v != model::IGNORE).count();
-        self.t_run.set(self.needed_len(targets));
-        if self.t_user == self.t {
-            self.gpu.write(&self.tokens, tokens);
-            self.gpu.write(&self.targets, targets);
-        } else {
-            let (tu, tp, b) = (self.t_user as usize, self.t as usize, self.b as usize);
-            assert!(tokens.len() == b * tu && targets.len() == b * tu, "qwen35::set_batch: {} tokens / {} targets for {b} sequences of {tu}", tokens.len(), targets.len());
-            let (mut padded_tokens, mut padded_targets) = (vec![0u32; b * tp], vec![model::IGNORE; b * tp]);
-            for s in 0..b {
-                padded_tokens[s * tp..s * tp + tu].copy_from_slice(&tokens[s * tu..(s + 1) * tu]);
-                padded_targets[s * tp..s * tp + tu].copy_from_slice(&targets[s * tu..(s + 1) * tu]);
+        let (tu, b) = (self.t_user as usize, self.b as usize);
+        assert!(tokens.len() == b * tu && targets.len() == b * tu, "qwen35::set_batch: {} tokens / {} targets for {b} sequences of {tu}", tokens.len(), targets.len());
+        let run = self.needed_len(targets) as usize;
+        self.t_run.set(run as u32);
+        if run == self.t as usize {
+            if self.t_user == self.t {
+                self.gpu.write(&self.tokens, tokens);
+                self.gpu.write(&self.targets, targets);
+            } else {
+                // The construction's own padding to a whole GDN chunk, nothing
+                // trimmed: the row the caller sent, in a `t`-long device row.
+                let (tp, b) = (self.t as usize, b);
+                let (mut padded_tokens, mut padded_targets) = (vec![0u32; b * tp], vec![model::IGNORE; b * tp]);
+                for s in 0..b {
+                    padded_tokens[s * tp..s * tp + tu].copy_from_slice(&tokens[s * tu..(s + 1) * tu]);
+                    padded_targets[s * tp..s * tp + tu].copy_from_slice(&targets[s * tu..(s + 1) * tu]);
+                }
+                self.gpu.write(&self.tokens, &padded_tokens);
+                self.gpu.write(&self.targets, &padded_targets);
             }
-            self.gpu.write(&self.tokens, &padded_tokens);
-            self.gpu.write(&self.targets, &padded_targets);
+        } else {
+            // The rows are laid out at the run length, which is what every
+            // forward and backward reads: `n = b * run_len`, row after row.
+            let (mut packed_tokens, mut packed_targets) = (Vec::with_capacity(b * run), Vec::with_capacity(b * run));
+            for s in 0..b {
+                packed_tokens.extend_from_slice(&tokens[s * tu..s * tu + run]);
+                packed_targets.extend_from_slice(&targets[s * tu..s * tu + run]);
+            }
+            self.gpu.write(&self.tokens, &packed_tokens);
+            self.gpu.write(&self.targets, &packed_targets);
+        }
+        // A multi-row batch packed to its run length addresses the M-RoPE table
+        // by the token's own index, so the table becomes one block of `run`
+        // positions per row; a full-length batch puts the `t`-row table back.
+        // A one-row build addresses the construction table directly either way
+        // (its run length is the table length the kernel is told).
+        if self.b > 1 && (run < self.t as usize || self.rope_compact.get()) {
+            let (cos, sin) = Self::mrope_tables(&self.cfg, self.b, run as u32);
+            self.gpu.write_f32(&self.cos, &cos);
+            self.gpu.write_f32(&self.sin, &sin);
+            self.rope_compact.set(run < self.t as usize);
         }
         self.count.set(c.max(1) as f32);
 

@@ -2792,6 +2792,51 @@ makes the emitted set the one the evidence was measured on.
 `crates/sdk/examples/score_tokens_qwen35.rs` is the in-process side's
 command-line form, with the served bin's own JSONL shape.
 
+### M32 (DONE): a step's cost is measured, and a micro-batch of any width computes only what it needs
+
+The 27B LoRA step is the rate limiter of every learning cycle, and the
+2026-10-24 profiling report could only infer its padding from the block size.
+Two changes make it a measured quantity:
+
+- **Step accounting.** `model::StepWork` on `StepReport`: the seconds each of
+  the step's four phases took (data preparation, forward, backward,
+  optimizer), and `useful_tokens` / `computed_tokens` / `supervised_positions`
+  (padding is computed minus useful). `CausalLm` measures its own draw, upload
+  and passes; `Model::computed_tokens` reports the run length a model actually
+  ran (qwen35: `b * run_len`); `ChatFineTuneOutcome::step_work` carries every
+  step, and the training record gains additive `step_work` (one object per
+  step) and `work` (the totals and the two rates) blocks. The evaluation a
+  step is due and the run's initial loss probe are not part of a step's
+  phases. `crates/sdk/tests/chat_finetune_qwen35.rs` pins that every step
+  emits the fields, that the phases partition the step, and that the totals
+  are the sum of the steps. The record a real-corpus run writes carries the
+  s/step, useful tok/s and padded tok/s an A/B is read from.
+- **Prefix trimming is the rule for a micro-batch of any width.** The one-row
+  trim (2026-10-21) computed a training row only up to its last supervised
+  position; a wider batch kept the whole block. `needed_len` is now the LONGEST
+  row's last supervised position, rounded up to whole GDN chunks, and
+  `set_batch` packs the rows to that length - which is what every forward and
+  backward reads (`n = b * run_len`, row after row). A multi-row trimmed batch
+  also rebuilds the M-RoPE table in that layout (`Qwen35::mrope_tables`): the
+  RoPE kernel addresses the table by the token's own index, so a table of
+  `b` blocks of `run` positions is what the packed rows read, and a later
+  full-length batch puts the `t`-row table back. One-row builds (the 27B
+  recipe) never rewrite it, so their behaviour is unchanged.
+  `crates/qwen35/tests/lora_head.rs::a_multi_row_batch_runs_only_as_far_as_its_longest_row_needs`
+  holds it exact: two rows supervised to 100 and 140 tokens of a 256-token
+  block run 192 tokens each with the same loss and the same every-gradient as
+  a build sized to 192 whose tails are padding, under the default and the
+  recompute policies. Deleting the table rebuild from that test drops the
+  GQA layer's adapter-gradient cosine to 0.9975, so the test pins the rebuild
+  and not just the length.
+
+What the block still costs after this: the run is BUILT at the longest
+record's row, so the block sizes memory, not a step's arithmetic; a record
+that is shorter than the block, or shorter than the longest record in its
+micro-batch, is no longer computed at the block. On the 27B recipe (batch 1,
+`--records-per-step` as gradient accumulation) the prefix trim has been in
+place since 2026-10-21, so the accounting is the part that shows it per step.
+
 ## Not yet done
 
 
