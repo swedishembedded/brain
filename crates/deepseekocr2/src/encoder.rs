@@ -76,7 +76,6 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("silu_mul", kernels::SILU_MUL),
     ("silu_bwd_da", kernels::SILU_BWD_DA),
     ("silu_bwd_db", kernels::SILU_BWD_DB),
-    ("axpy", kernels::AXPY),
     ("adamw", kernels::ADAMW),
     ("gradnorm_sq", kernels::GRADNORM_SQ),
     ("grad_scale", kernels::GRAD_SCALE),
@@ -112,8 +111,6 @@ struct Ids {
     silu_mul: usize,
     silu_da: usize,
     silu_db: usize,
-    axpy: usize,
-    grad_scale: usize,
 }
 
 impl Ids {
@@ -145,8 +142,6 @@ impl Ids {
             silu_mul: idx("silu_mul"),
             silu_da: idx("silu_bwd_da"),
             silu_db: idx("silu_bwd_db"),
-            axpy: idx("axpy"),
-            grad_scale: idx("grad_scale"),
         }
     }
 
@@ -632,14 +627,6 @@ impl Resampler {
     /// `trainable` exactly.
     fn trainable(&self, name: &str) -> bool {
         self.ps.grad.contains_key(name)
-    }
-
-    /// `Some((rank, alpha/rank))` when `leaf` (one of
-    /// [`crate::config::Qwen2EncoderConfig::lora_leaves`]) is one of
-    /// `self.cfg.lora`'s targets, `None` otherwise - mirrors
-    /// `deepseek2::model::DeepseekV2`'s own `lora_for` exactly.
-    fn lora_for(&self, leaf: &str) -> Option<(u32, f32)> {
-        self.cfg.lora.as_ref().filter(|lc| lc.targets_leaf(leaf)).map(|lc| (lc.rank, lc.alpha / lc.rank as f32))
     }
 
     /// Forward LoRA delta for a targeted linear: `y += (alpha/r)*(x*Aᵀ)*Bᵀ`,
