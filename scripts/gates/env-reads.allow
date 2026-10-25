@@ -1351,3 +1351,4 @@ crates/zipdepth/tests/p5_stereo_render.rs	STEREO_OUT_DOTS
 crates/zipdepth/tests/p5_stereo_render.rs	STEREO_OUT_TEX
 crates/zipdepth/tests/p5_stereo_render.rs	STEREO_PPM
 crates/zipdepth/tests/p5_stereo_render.rs	ZIPDEPTH_NPU_PTH
+crates/huginn/tests/parity.rs	BRAIN_BACKEND

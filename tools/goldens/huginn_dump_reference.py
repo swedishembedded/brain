@@ -113,7 +113,17 @@ def main():
         "input_states": state.squeeze(0).float(),
     }
     with torch.no_grad():
+        freqs = model.freqs_cis[:, : ids.shape[1]]
+        # The recurrent core re-injects the PRELUDE output, not the embedding.
+        embeds = model.transformer.wte(ids) * model.emb_scale
+        for block in model.transformer.prelude:
+            embeds = block(embeds, freqs, torch.tensor(0), None, None)
         for k in range(1, STEPS + 1):
+            # Re-run the reference's own recurrence to capture its raw state.
+            x = state.clone()
+            for _ in range(k):
+                x, _ = model.core_block_forward(x, embeds, freqs, None, None, torch.tensor(-1), 0)
+            state_k = x
             out_k = model(
                 ids,
                 input_states=state,
@@ -123,6 +133,8 @@ def main():
             )
             goldens[f"logits_{k}"] = out_k.logits.squeeze(0).float().contiguous()
             goldens[f"latent_{k}"] = out_k.latent_states.squeeze(0).float().contiguous()
+            # The raw (pre-`ln_f`) state the next step consumes.
+            goldens[f"state_{k}"] = state_k.detach().squeeze(0).float().contiguous()
     save_file(goldens, os.path.join(out, "golden.safetensors"))
     manifest = {
         "model": "huginn",

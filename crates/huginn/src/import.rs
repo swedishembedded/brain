@@ -70,16 +70,30 @@ pub fn config_from_hf(json: &str) -> Result<HuginnConfig, String> {
 }
 
 /// The rename plan for a checkpoint whose tensors are `names`.
-pub fn plan<'n>(names: impl IntoIterator<Item = &'n str>) -> Result<HashMap<String, Fetch>, String> {
+///
+/// The checkpoint keeps the Q and K bias in one `[2, 1, heads, dim]` tensor;
+/// the plan splits it into the two halves the attention adds, so every brain
+/// parameter is a contiguous tensor that a dispatch can bind whole.
+pub fn plan<'n>(cfg: &HuginnConfig, names: impl IntoIterator<Item = &'n str>) -> Result<HashMap<String, Fetch>, String> {
     let mut plan = HashMap::new();
     let mut unmapped = Vec::new();
+    let mut insert = |bn: String, fetch: Fetch| -> Result<(), String> {
+        if plan.insert(bn.clone(), fetch).is_some() {
+            return Err(format!("import: duplicate mapping to {bn}"));
+        }
+        Ok(())
+    };
     for n in names {
+        if n.ends_with(".attn.qk_bias") {
+            let brain = hf_to_brain(n).expect("qk_bias maps");
+            let prefix = brain.strip_suffix("qk_bias").expect("qk_bias suffix");
+            let d = cfg.d_model as usize;
+            insert(format!("{prefix}q_bias"), Fetch::Slice { name: n.to_string(), start: 0, len: d })?;
+            insert(format!("{prefix}k_bias"), Fetch::Slice { name: n.to_string(), start: d, len: d })?;
+            continue;
+        }
         match hf_to_brain(n) {
-            Some(bn) => {
-                if plan.insert(bn.clone(), Fetch::Whole(n.to_string())).is_some() {
-                    return Err(format!("import: duplicate mapping to {bn}"));
-                }
-            }
+            Some(bn) => insert(bn, Fetch::Whole(n.to_string()))?,
             None if matches!(n, "lm_head.weight" | "freqs_cis") => {}
             None => unmapped.push(n.to_string()),
         }
@@ -96,7 +110,7 @@ pub fn open_dir(dir: &Path) -> Result<(HuginnConfig, RemapSource<'static>), Stri
         &std::fs::read_to_string(dir.join("config.json")).map_err(|e| format!("{}: {e}", dir.join("config.json").display()))?,
     )?;
     let reader = checkpoint::weightio::WeightReader::open_hf_dir(dir).map_err(|e| format!("open {}: {e}", dir.display()))?;
-    let plan = plan(reader.names())?;
+    let plan = plan(&cfg, reader.names())?;
     let src = RemapSource::owning(Box::new(reader), plan);
     src.validate(&cfg.param_list())?;
     Ok((cfg, src))
@@ -158,7 +172,7 @@ mod tests {
     #[test]
     fn every_brain_parameter_has_exactly_one_hf_source() {
         let cfg = HuginnConfig::tiny();
-        let plan = plan(names().iter().map(String::as_str)).expect("plan");
+        let plan = plan(&cfg, names().iter().map(String::as_str)).expect("plan");
         assert_eq!(plan.len(), cfg.param_list().len());
         for (name, _) in cfg.param_list() {
             assert!(plan.contains_key(&name), "no source for {name}");
@@ -169,7 +183,7 @@ mod tests {
     fn an_unknown_tensor_is_named_not_dropped() {
         let mut n = names();
         n.push("transformer.rotary_emb.inv_freq".to_string());
-        let err = plan(n.iter().map(String::as_str)).expect_err("unknown tensor must fail");
+        let err = plan(&HuginnConfig::tiny(), n.iter().map(String::as_str)).expect_err("unknown tensor must fail");
         assert!(err.contains("transformer.rotary_emb.inv_freq"), "{err}");
     }
 }

@@ -25,7 +25,7 @@ pub fn init_weights(cfg: &HuginnConfig, seed: u64) -> HashMap<String, Vec<f32>> 
     for (name, numel) in cfg.param_list() {
         let v = if is_norm(&name) {
             vec![1.0; numel]
-        } else if name.ends_with("attn.qk_bias") {
+        } else if name.ends_with("attn.q_bias") || name.ends_with("attn.k_bias") {
             vec![0.0; numel]
         } else {
             (0..numel).map(|_| (rng.next_gaussian() as f32) * 0.02).collect()
@@ -47,6 +47,7 @@ mod tests {
         assert_eq!(a, b);
         assert_eq!(a.len(), cfg.param_list().len());
         assert!(a["ln_f.weight"].iter().all(|v| *v == 1.0));
-        assert!(a["core.0.attn.qk_bias"].iter().all(|v| *v == 0.0));
+        assert!(a["core.0.attn.q_bias"].iter().all(|v| *v == 0.0));
+        assert!(a["core.0.attn.k_bias"].iter().all(|v| *v == 0.0));
     }
 }

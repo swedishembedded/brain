@@ -55,7 +55,10 @@ pub struct HuginnConfig {
     /// Standard deviation of the reference's initial latent state
     /// (`init_values["std"]`); `like-init` draws from it.
     pub init_std: f32,
-    /// The reference scales embeddings by this before the prelude.
+    /// The reference scales embeddings by this before the prelude. The
+    /// reference derives it (`emb_scale` is `sqrt(n_embd)`) instead of reading
+    /// a setting, so it is derived here too; `init_values["embed_scale"]` is
+    /// descriptive and is not trusted.
     pub emb_scale: f32,
 }
 
@@ -79,7 +82,7 @@ impl HuginnConfig {
             qk_bias: true,
             mean_recurrence: 3,
             init_std: 0.02,
-            emb_scale: 1.0,
+            emb_scale: 4.0,
         }
     }
 
@@ -113,9 +116,6 @@ impl HuginnConfig {
     pub fn qkv_dim(&self) -> u32 {
         3 * self.d_model
     }
-    pub fn qk_bias_len(&self) -> u32 {
-        2 * self.d_model
-    }
 
     /// HF `config.json` -> config. Every key a shape depends on is required.
     pub fn from_json(v: &Value) -> Result<HuginnConfig, String> {
@@ -136,7 +136,7 @@ impl HuginnConfig {
             qk_bias: v["qk_bias"].as_bool().unwrap_or(true),
             mean_recurrence: v["mean_recurrence"].as_u64().unwrap_or(32) as u32,
             init_std: v["init_values"]["std"].as_f64().unwrap_or(0.02) as f32,
-            emb_scale: v["init_values"]["embed_scale"].as_f64().unwrap_or(1.0) as f32,
+            emb_scale: ((v["n_embd"].as_f64().unwrap_or(0.0)) as f32).sqrt(),
         };
         cfg.validate()?;
         Ok(cfg)
@@ -202,7 +202,12 @@ impl HuginnConfig {
                 out.push((p("attn.wqkv.weight"), self.qkv_dim() as usize * d));
                 out.push((p("attn.wo.weight"), d * d));
                 if self.qk_bias {
-                    out.push((p("attn.qk_bias"), self.qk_bias_len() as usize));
+                    // The checkpoint stores one `[2, 1, heads, dim]` tensor;
+                    // it is imported as the two halves the attention adds, so
+                    // no dispatch has to bind a sub-range at a head-width
+                    // offset (device buffer bindings require wider alignment).
+                    out.push((p("attn.q_bias"), d));
+                    out.push((p("attn.k_bias"), d));
                 }
                 out.push((p("ln3.weight"), d));
                 out.push((p("ln4.weight"), d));
@@ -226,19 +231,20 @@ mod tests {
 
     #[test]
     fn the_released_layout_matches_the_checkpoint_manifest() {
-        // Facts from the checkpoint: 9 tensors per block (4 norms, fused QKV,
-        // output projection, Q/K bias, fused FC, projection), plus the
-        // embedding, the final norm and the injection adapter. `lm_head` and
-        // `freqs_cis` are dropped: the head is tied and the rotary table is
-        // rebuilt from `rope_base`.
+        // Facts from the checkpoint: 10 tensors per block (4 norms, fused QKV,
+        // output projection, the two Q/K bias halves, fused FC, projection),
+        // plus the embedding, the final norm and the injection adapter.
+        // `lm_head` and `freqs_cis` are dropped: the head is tied and the
+        // rotary table is rebuilt from `rope_base`.
         let cfg = HuginnConfig::huginn_0125();
         let list = cfg.param_list();
-        assert_eq!(list.len(), 3 + 9 * 8);
+        assert_eq!(list.len(), 3 + 10 * 8);
         assert_eq!(list.iter().find(|(n, _)| n == "tok.weight").unwrap().1, 65536 * 5280);
         assert_eq!(list.iter().find(|(n, _)| n == "adapter.weight").unwrap().1, 5280 * 10560);
         assert_eq!(list.iter().find(|(n, _)| n == "prelude.0.attn.wqkv.weight").unwrap().1, 15840 * 5280);
         assert_eq!(list.iter().find(|(n, _)| n == "core.3.mlp.fc.weight").unwrap().1, 35840 * 5280);
-        assert_eq!(list.iter().find(|(n, _)| n == "coda.1.attn.qk_bias").unwrap().1, 2 * 5280);
+        assert_eq!(list.iter().find(|(n, _)| n == "coda.1.attn.q_bias").unwrap().1, 5280);
+        assert_eq!(list.iter().find(|(n, _)| n == "coda.1.attn.k_bias").unwrap().1, 5280);
     }
 
     #[test]
