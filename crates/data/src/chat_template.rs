@@ -137,6 +137,25 @@ fn write_pystr(s: &str, out: &mut String) {
 /// A compiled chat template, ready to render. Cheap to keep around (one per
 /// distinct `chat_template` string in use); NOT cheap to reconstruct per
 /// call — `compile` parses the Jinja source.
+/// Rewrite the `transformers`-only `generation` tags to the no-op block they
+/// render as (see [`ChatTemplate::compile`]).
+fn without_generation_tags(src: &str) -> String {
+    let mut out = src.to_string();
+    for (tag, block) in [("generation", "if true"), ("endgeneration", "endif")] {
+        for lp in ["{%", "{%-"] {
+            for rp in ["%}", "-%}"] {
+                let from = format!("{lp} {tag} {rp}");
+                let to = format!("{lp} {block} {rp}");
+                out = out.replace(&from, &to);
+                let from = format!("{lp}{tag}{rp}");
+                let to = format!("{lp}{block}{rp}");
+                out = out.replace(&from, &to);
+            }
+        }
+    }
+    out
+}
+
 pub struct ChatTemplate {
     env: Environment<'static>,
     /// Context defaults injected under every render, overridable per call via
@@ -163,6 +182,13 @@ impl ChatTemplate {
     ///   this module exists for.
     /// * undefined is CHAINABLE (`transformers` uses `ChainableUndefined`):
     ///   `a.b.c` over an undefined renders empty instead of erroring.
+    /// * `{% generation %}`/`{% endgeneration %}` are rewritten to a no-op
+    ///   block: they are a `transformers` Jinja *extension* that marks the
+    ///   assistant span of the rendered text for the returned loss mask and
+    ///   emits nothing. minijinja has no such tag, so without the rewrite a
+    ///   checkpoint shipping one (locally trained templates do) fails to
+    ///   compile and the model silently loses its chat format. Rewriting to
+    ///   `if`/`endif` keeps the tag's own whitespace control.
     ///
     /// Registers the globals real HF templates reference: `raise_exception`
     /// (a template's own validation errors surface as a [`TemplateError`],
@@ -195,7 +221,7 @@ impl ChatTemplate {
             write_pyjson(&v, &mut out);
             out
         });
-        env.add_template_owned("chat", jinja_src.to_string()).map_err(|e| TemplateError(format!("{e:#}")))?;
+        env.add_template_owned("chat", without_generation_tags(jinja_src)).map_err(|e| TemplateError(format!("{e:#}")))?;
         Ok(ChatTemplate { env, defaults: BTreeMap::new(), source: jinja_src.to_string() })
     }
 
@@ -571,6 +597,20 @@ fn strftime_utc(fmt: &str, unix_secs: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `transformers`' `{% generation %}` extension marks the assistant span
+    /// and emits nothing; a template shipping it must render exactly like the
+    /// same template with the markers removed - same text, same newlines.
+    #[test]
+    fn generation_tags_render_as_nothing() {
+        let plain = "{% for m in messages %}<{{ m.role }}>{{ m.content }}{% endfor %}{% if add_generation_prompt %}<A>{% endif %}";
+        let marked = "{% for m in messages %}<{{ m.role }}>{% generation %}{{ m.content }}{% endgeneration %}{% endfor %}{% if add_generation_prompt %}<A>{% endif %}";
+        let msgs = parse_json_ordered(r#"[{"role":"user","content":"hi"}]"#).unwrap();
+        let a = ChatTemplate::compile(plain).unwrap().render(msgs.clone(), None, true, &BTreeMap::new()).unwrap();
+        let b = ChatTemplate::compile(marked).unwrap().render(msgs, None, true, &BTreeMap::new()).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a, "<user>hi<A>");
+    }
 
     fn tiny_env() -> ChatTemplate {
         ChatTemplate::compile(
