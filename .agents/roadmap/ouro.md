@@ -26,6 +26,10 @@ gate and a pass-selected or exit-weighted head.
   same weights, CPU fp32, on the tiny shape.
 - Exit rule: cumulative exit mass over the gate outputs, released threshold
   (1.0 selects the final pass).
+- Incremental decode with one KV history per `(pass, layer)`: a step runs the
+  new token through every pass, each appending its own K/V at the absolute
+  position, and the gated result equals the full-sequence forward at every
+  position and every pass on cpu, wgpu, native Vulkan and CUDA.
 - Training objective and backward: every pass's CE weighted by that pass's exit
   probability, the gate's own gradient included (and zero on the final pass,
   whose probability is the remaining mass), accumulated into the one shared
@@ -38,10 +42,10 @@ gate and a pass-selected or exit-weighted head.
 
 - Real-checkpoint import and parity on a short prompt at fp32 (the tiny golden
   proves the math; the real weights prove the import).
-- Per-pass paged KV decode and serving: a sequence owns one block table per
-  pass, the decoder reports `passes × blocks_for` to admission, prefix reuse
-  and host offload are disabled for the looped path until they are
-  pass-aware, and the forward runs the passes over the current token.
+- Serving: a `PagedDecoder` over the contiguous per-pass caches, admission
+  reporting `passes × blocks_for`, a capability/action, residency, catalog row
+  and CLI verb. Prefix reuse and host offload stay off for the looped path
+  until they are pass-aware.
 - LoRA fine-tuning: adapter sites on the shared stack's linears, with the
   frozen-base path (full-weight training allocates gradients and AdamW moments
   for every parameter and does not fit a 2.6B model on one card).

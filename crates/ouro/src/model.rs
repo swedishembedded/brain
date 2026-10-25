@@ -36,6 +36,13 @@ use crate::config::OuroConfig;
 /// Cross-entropy ignore index (unsupervised positions).
 pub const IGNORE: u32 = 0xFFFF_FFFF;
 
+// Slots the decode engine composes its own graph from.
+pub(crate) const EMBED_ID: usize = EMBED;
+pub(crate) const MATMUL_ID: usize = MATMUL;
+pub(crate) const ADD2_ID: usize = ADD2;
+pub(crate) const BIAS_ADD_ID: usize = BIAS_ADD;
+pub(crate) const ROPE_AT_ID: usize = ROPE_AT;
+
 // ---- kernel indices (order matches PIPELINES) ----
 const EMBED: usize = 0;
 const MATMUL: usize = 1;
@@ -70,6 +77,11 @@ const GRAD_SCALE_BUF: usize = 29;
 const SCALE_ROW: usize = 30;
 const AXPY: usize = 31;
 const BIAS_GRAD: usize = 32;
+const KV_APPEND: usize = 33;
+const ATTN_DECODE_SCORES: usize = 34;
+const DECODE_SOFTMAX: usize = 35;
+const ATTN_DECODE_APPLY: usize = 36;
+const ROPE_AT: usize = 37;
 
 pub const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -105,7 +117,25 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("scale_row", kernels::SCALE_ROW),
     ("axpy", kernels::AXPY),
     ("bias_grad", kernels::BIAS_GRAD),
+    ("kv_append", kernels::KV_APPEND),
+    ("attn_decode_scores", kernels::ATTN_DECODE_SCORES),
+    ("decode_softmax", kernels::DECODE_SOFTMAX),
+    ("attn_decode_apply", kernels::ATTN_DECODE_APPLY),
+    ("rope_at", kernels::ROPE_AT),
 ];
+
+pub(crate) fn decode_ids() -> block::GqaDecodeIds {
+    block::GqaDecodeIds {
+        kv_append: KV_APPEND,
+        attn_decode_scores: ATTN_DECODE_SCORES,
+        decode_softmax: DECODE_SOFTMAX,
+        attn_decode_apply: ATTN_DECODE_APPLY,
+    }
+}
+
+pub(crate) fn kernel_ids() -> KernelIds {
+    ids()
+}
 
 fn ids() -> KernelIds {
     KernelIds {
@@ -400,7 +430,7 @@ impl Ouro {
     /// One layer of the shared stack: sandwich RMSNorm, MHA with half-split
     /// RoPE, SwiGLU, two residual adds. Writes `h_out` and fills the reusable
     /// scratch the backward pass will differentiate.
-    fn layer_steps_into(&self, steps: &mut Vec<Step>, l: usize, h_in: &DeviceBuffer, h_out: &DeviceBuffer) {
+    fn layer_steps_into(&self, steps: &mut Vec<Step>, l: usize, h_in: &DeviceBuffer, h_out: &DeviceBuffer, kv: Option<(&DeviceBuffer, &DeviceBuffer)>) {
         let cfg = &self.cfg;
         let ids = self.k();
         let n = self.rows();
@@ -415,6 +445,10 @@ impl Ouro {
         steps.push(self.gpu.step(MATMUL, &[&s.xn1, self.ps.w(&format!("blocks.{l}.attn.wv.weight")), &s.v], &[n, d, hkv], n * hkv));
         steps.push(block::rope_fwd(&self.gpu, &ids, &s.q, n, nh, hd, hq, self.t, cfg.rope_theta));
         steps.push(block::rope_fwd(&self.gpu, &ids, &s.k, n, nkv, hd, hkv, self.t, cfg.rope_theta));
+        if let Some((kc, vc)) = kv {
+            steps.push(block::kv_cache_fill(&self.gpu, KV_APPEND, &s.k, kc, n, nkv, hd));
+            steps.push(block::kv_cache_fill(&self.gpu, KV_APPEND, &s.v, vc, n, nkv, hd));
+        }
         steps.extend(block::gqa_fwd(&self.gpu, &ids, &ga, &s.q, &s.k, &s.v, &s.scores, &s.probs, &s.ctx));
         steps.push(self.gpu.step(MATMUL, &[&s.ctx, self.ps.w(&format!("blocks.{l}.attn.wo.weight")), &s.proj], &[n, hq, d], n * d));
         // Sandwich normalization: the attention output is normalized before the
@@ -448,7 +482,7 @@ impl Ouro {
                 // at the end of every pass, so pass p > 0 consumes the previous
                 // pass's NORMED output, not its pre-norm residual.
                 let h_in: &DeviceBuffer = if l == 0 && p > 0 { &self.hs[p - 1] } else { &self.res[i] };
-                self.layer_steps_into(&mut steps, l, h_in, &self.res[i + 1]);
+                self.layer_steps_into(&mut steps, l, h_in, &self.res[i + 1], None);
             }
             let last = &self.res[(p + 1) * cfg.n_layers as usize];
             steps.push(block::rmsnorm_fwd(&self.gpu, &ids, last, self.ps.w("norm.weight"), &self.hs[p], d, n, cfg.norm_eps));
@@ -524,7 +558,7 @@ impl Ouro {
                 let i = p * l_count + l;
                 let h_in: &DeviceBuffer = if l == 0 && p > 0 { &self.hs[p - 1] } else { &self.res[i] };
                 // Rebuild the layer's internals from its boundary residual.
-                self.layer_steps_into(&mut steps, l, h_in, &self.res[i + 1]);
+                self.layer_steps_into(&mut steps, l, h_in, &self.res[i + 1], None);
                 self.layer_bwd_into(&mut steps, l, h_in, &g.dres[i + 1], if l == 0 && p > 0 { &g.dhs[p - 1] } else { &g.dres[i] }, l == 0 && p > 0);
             }
         }
@@ -890,6 +924,7 @@ mod tests {
             (SCALE_ROW, "scale_row"),
             (AXPY, "axpy"),
             (BIAS_GRAD, "bias_grad"),
+            (ROPE_AT, "rope_at"),
         ] {
             assert_eq!(PIPELINES[slot].0, want, "slot {slot} is not {want}");
         }

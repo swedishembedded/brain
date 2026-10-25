@@ -36,6 +36,7 @@
 //! execution graph lives in [`model`].
 
 pub mod config;
+pub mod decode;
 pub mod import;
 pub mod init;
 pub mod model;
