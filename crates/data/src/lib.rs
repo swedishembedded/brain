@@ -21,6 +21,7 @@ pub mod preference;
 pub mod prompting;
 pub mod toolcall;
 pub mod bpe;
+pub mod bytebpe;
 pub mod clip_bpe;
 pub mod episode;
 pub mod fim;

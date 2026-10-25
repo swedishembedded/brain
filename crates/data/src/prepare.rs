@@ -28,6 +28,9 @@ pub enum Dataset {
     Gpt,
     /// Synthetic 3-phase signal, float-valued.
     Timeseries,
+    /// TinyStories under a byte-level BPE trained on it (needs the raw
+    /// `train.txt`/`valid.txt` in the output dir); see [`write_tinystories`].
+    TinyStories,
     /// Synthetic Qwen3-TTS `text -> codebook-0 codes` stream (large-vocab `u32`).
     Tts,
     /// Synthetic object-detection scenes (RGB shapes + exact boxes). Carries the
@@ -50,6 +53,7 @@ impl Dataset {
             "wordcalc" => Dataset::Wordcalc,
             "gpt" => Dataset::Gpt,
             "timeseries" => Dataset::Timeseries,
+            "tinystories" => Dataset::TinyStories,
             "tts" => Dataset::Tts,
             // `detect` (and per-preset names) map to a default tiny-config scene:
             // 128px, 3 classes, multi-object — the geometry the tiny YOLO uses.
@@ -70,6 +74,7 @@ impl Dataset {
             Dataset::Wordcalc => "wordcalc",
             Dataset::Gpt => "gpt",
             Dataset::Timeseries => "timeseries",
+            Dataset::TinyStories => "tinystories",
             Dataset::Tts => "tts",
             Dataset::Detect { preset, .. } => preset.name(),
         }
@@ -108,6 +113,7 @@ pub fn prepare(ds: Dataset, dir: &Path, n_examples: usize, seed: u64) -> io::Res
             write_bpe_dataset(&text, dir)
         }
         Dataset::Timeseries => write_timeseries_dataset(dir, n_examples.max(1), seed),
+        Dataset::TinyStories => write_tinystories(dir, n_examples),
         Dataset::Tts => {
             let mut cfg = crate::gen_tts::TtsGenConfig::default();
             if n_examples > 0 {
@@ -160,6 +166,61 @@ fn write_bpe_dataset(text: &str, dir: &Path) -> io::Result<()> {
     let (train_text, val_text) = char_split(text, TRAIN_SPLIT);
     binio::write_u16_bin(&dir.join("train.bin"), &to_u16(tok.encode(&train_text)))?;
     binio::write_u16_bin(&dir.join("val.bin"), &to_u16(tok.encode(&val_text)))?;
+    Ok(())
+}
+
+/// Vocabulary of the TinyStories byte-level BPE.
+pub const TINYSTORIES_VOCAB: usize = 4096;
+/// Training stories the TinyStories tokenizer is learned from (the first ones
+/// of the training split).
+pub const TINYSTORIES_TOKENIZER_STORIES: usize = 30_000;
+
+/// The documents of a TinyStories text file: the segments between
+/// [`crate::bytebpe::END_OF_TEXT`] separators, trimmed, empty ones dropped.
+/// Every tokenizer that is scored on the corpus splits it with this rule, so
+/// they all see the same documents and the same bytes.
+pub fn split_documents(text: &str) -> impl Iterator<Item = &str> {
+    text.split(crate::bytebpe::END_OF_TEXT).map(str::trim).filter(|d| !d.is_empty())
+}
+
+/// TinyStories: learn a [`TINYSTORIES_VOCAB`]-token byte-level BPE on the first
+/// [`TINYSTORIES_TOKENIZER_STORIES`] training stories, then encode the first
+/// `n_stories` training stories (`0`: all) and every validation story as one
+/// stream each, every document preceded by the end-of-text id. Writes
+/// `train.bin`/`val.bin` (`u16`), `meta.json`, `tokenizer.json` and
+/// `stats.json` (document, token and byte counts).
+fn write_tinystories(dir: &Path, n_stories: usize) -> io::Result<()> {
+    let read = |name: &str| {
+        fs::read_to_string(dir.join(name))
+            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e} (fetch the raw TinyStories text first)", dir.join(name).display())))
+    };
+    let (train, valid) = (read("train.txt")?, read("valid.txt")?);
+    let sample: Vec<&str> = split_documents(&train).take(TINYSTORIES_TOKENIZER_STORIES).collect();
+    let bpe = crate::bytebpe::ByteBpe::train(&sample.join("\n"), TINYSTORIES_VOCAB);
+    bpe.save(&dir.join("tokenizer.json"))?;
+    let encode = |docs: &mut dyn Iterator<Item = &str>| {
+        let (mut ids, mut n, mut bytes) = (Vec::new(), 0usize, 0usize);
+        for doc in docs {
+            ids.push(bpe.end_of_text() as u16);
+            ids.extend(bpe.encode(doc).into_iter().map(|t| t as u16));
+            n += 1;
+            bytes += doc.len();
+        }
+        (ids, n, bytes)
+    };
+    let limit = if n_stories == 0 { usize::MAX } else { n_stories };
+    let (train_ids, train_docs, train_bytes) = encode(&mut split_documents(&train).take(limit));
+    let (val_ids, val_docs, val_bytes) = encode(&mut split_documents(&valid));
+    binio::write_u16_bin(&dir.join("train.bin"), &train_ids)?;
+    binio::write_u16_bin(&dir.join("val.bin"), &val_ids)?;
+    fs::write(dir.join("meta.json"), Meta::vocab_only(TINYSTORIES_VOCAB))?;
+    let stats = serde_json::json!({
+        "vocab_size": TINYSTORIES_VOCAB,
+        "tokenizer_stories": sample.len(),
+        "train": { "documents": train_docs, "tokens": train_ids.len(), "bytes": train_bytes },
+        "val": { "documents": val_docs, "tokens": val_ids.len(), "bytes": val_bytes },
+    });
+    fs::write(dir.join("stats.json"), serde_json::to_string_pretty(&stats)?)?;
     Ok(())
 }
 

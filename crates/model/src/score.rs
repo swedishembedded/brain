@@ -73,6 +73,78 @@ pub fn score_base<M: Model>(m: &M, sets: &[&Path], opts: &FitOpts, continuing: b
         .collect()
 }
 
+/// One document scored for bits per byte: `tokens[0]` is a context-only
+/// separator, `tokens[1..]` the document's tokens, `bytes` its UTF-8 length.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ByteDoc {
+    pub tokens: Vec<u32>,
+    pub bytes: usize,
+}
+
+/// The summed next-token negative log-likelihood of a document set and what
+/// it was summed over.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ByteScore {
+    /// Total negative log-likelihood, nats.
+    pub nats: f64,
+    pub bytes: u64,
+    /// Predicted tokens.
+    pub tokens: u64,
+    pub documents: u64,
+}
+
+impl ByteScore {
+    /// Bits per UTF-8 byte: independent of the tokenizer, so models with
+    /// different vocabularies are compared on the same text.
+    pub fn bits_per_byte(&self) -> f64 {
+        self.nats / std::f64::consts::LN_2 / self.bytes as f64
+    }
+}
+
+/// The documents of a TinyStories-style text (split by
+/// `data::prepare::split_documents`) whose UTF-8 length is at most
+/// `max_bytes`, each tokenized by `tok` and preceded by `separator`. The
+/// length rule is on bytes, so every tokenizer is scored on the same subset.
+pub fn byte_docs(text: &str, tok: &dyn data::tokenizer::Tokenizer, separator: u32, max_bytes: usize) -> Vec<ByteDoc> {
+    data::prepare::split_documents(text)
+        .filter(|d| d.len() <= max_bytes)
+        .map(|d| {
+            let mut tokens = vec![separator];
+            tokens.extend(tok.encode(d));
+            ByteDoc { tokens, bytes: d.len() }
+        })
+        .collect()
+}
+
+/// Score `docs` with `m`, built for `b` rows of `t` positions: one document per
+/// row, every one of its tokens predicted from the separator and the tokens
+/// before it, padding unsupervised. A document longer than `t` is refused,
+/// not truncated - a caller selects documents that fit by a rule that does
+/// not depend on any one tokenizer.
+pub fn score_bytes<M: Model>(m: &M, docs: &[ByteDoc], b: u32, t: u32) -> Result<ByteScore, String> {
+    let (b, t) = (b as usize, t as usize);
+    let ignore = crate::train::IGNORE;
+    let mut score = ByteScore::default();
+    for chunk in docs.chunks(b) {
+        let mut x = vec![0u32; b * t];
+        let mut y = vec![ignore; b * t];
+        for (row, doc) in chunk.iter().enumerate() {
+            if doc.tokens.len() < 2 || doc.tokens.len() > t {
+                return Err(format!("document of {} tokens does not fit a {t}-position row with a separator", doc.tokens.len()));
+            }
+            x[row * t..row * t + doc.tokens.len()].copy_from_slice(&doc.tokens);
+            y[row * t..row * t + doc.tokens.len() - 1].copy_from_slice(&doc.tokens[1..]);
+            score.tokens += doc.tokens.len() as u64 - 1;
+            score.bytes += doc.bytes as u64;
+            score.documents += 1;
+        }
+        let supervised = y.iter().filter(|&&v| v != ignore).count();
+        m.set_batch(crate::Batch::Lm { tokens: &x, targets: &y });
+        score.nats += m.forward() as f64 * supervised as f64;
+    }
+    Ok(score)
+}
+
 /// Fill in the tuned loss of each of `scored` on the model the run returned.
 pub fn score_tuned<M: Model>(m: &M, sets: &[&Path], opts: &FitOpts, scored: &mut [ScoredSet]) -> std::io::Result<()> {
     for (set, slot) in sets.iter().zip(scored.iter_mut()) {

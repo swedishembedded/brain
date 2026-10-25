@@ -32,7 +32,7 @@ fn gen(args: &[String]) {
     }
     let Some(ds) = Dataset::from_name(name) else {
         eprintln!(
-            "unknown dataset {name:?}; expected one of: shakespeare_char calculator reverser wordcalc gpt timeseries tts pong detect localization classification scale multi_object background"
+            "unknown dataset {name:?}; expected one of: shakespeare_char calculator reverser wordcalc gpt timeseries tinystories tts pong detect localization classification scale multi_object background"
         );
         return;
     };
@@ -47,6 +47,8 @@ fn gen(args: &[String]) {
         Dataset::Detect { .. } => 256,
         // TTS `text->codes`: examples (each ~14 tokens); a few thousand suffice.
         Dataset::Tts => 4_000,
+        // TinyStories: the number of training stories to encode; 0 is all.
+        Dataset::TinyStories => 0,
         _ => 100_000,
     };
     let mut i = 1;

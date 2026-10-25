@@ -254,7 +254,7 @@ fn is_space(c: char) -> bool {
 /// Returns the list of substrings (pre-tokens), in order, that together
 /// reconstruct `text`. The scanner is greedy and tries each alternative in the
 /// pattern's order at every position.
-fn pre_tokenize(text: &str) -> Vec<String> {
+pub(crate) fn pre_tokenize(text: &str) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     let n = chars.len();
     let mut tokens: Vec<String> = Vec::new();
