@@ -533,15 +533,12 @@ copies.
       its `LoraW`, delta, apply and gradient projection are the shared ones
       (2026-10-24).
 - [x] `deepseekocr2`'s device LoRA onto `AdapterRuntime` (2026-10-24).
-- [ ] `minicpmv`'s `TowerLora` is the last adapter implementation of its own
-      kind: a FOLD adapter (weights folded to `W0 + s·B·A` for a pre-recorded
-      forward tape, gradients projected back after the backward), where
-      `AdapterRuntime` injects at the linear's output instead. The shared
-      seam it needs is `model::adapter::fold` - the three-step fold and
-      four-step projection over a list of (weight, base copy, A, B) targets,
-      with the kernel ids a tower supplies - so that a second pre-recorded
-      tower does not restate the choreography. Its store, init and base
-      copies stay model-specific.
+- [x] `model::adapter::fold` is the FOLD choreography a pre-recorded tape
+      needs (three dispatches to write `W0 + s·B·A`, four to project `dW` back
+      onto the factors), and `minicpmv`'s `TowerLora` calls it instead of
+      carrying its own (2026-10-25). Every adapter kind is now either
+      `AdapterRuntime` (injection) or `adapter::fold`, chosen by whether the
+      model records its forward per call or once.
 - [x] One `vae::blocks::train_kernel_set` for sdxlunet, supir, controlnet,
       rrdbnet and vqgan (2026-10-24).
 - [x] `optim::NamedMoments` owns the host trainer's AdamW state; SUPIR steps

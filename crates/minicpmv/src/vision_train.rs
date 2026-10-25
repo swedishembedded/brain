@@ -365,6 +365,11 @@ impl Tower {
 /// The tower linears LoRA can target, by leaf name.
 pub const LORA_LEAVES: &[&str] = &["attn.qkv", "attn.proj", "mlp.fc1", "mlp.fc2"];
 
+/// The tower's own kernel indices in the shared fold's shape.
+fn fold_kernels(tower: &Tower) -> model::adapter::fold::FoldKernels {
+    model::adapter::fold::FoldKernels { matmul: tower.k("matmul"), matmul_dx: tower.k("matmul_dx"), matmul_dw: tower.k("matmul_dw"), axpy: tower.k("axpy") }
+}
+
 /// LoRA adapters on the tower's linears: frozen base weights `W0` (kept
 /// aside), trainable factors `A [r, in]` and `B [out, r]` in their own store,
 /// `W = W0 + (alpha / r) B A` folded into the tower before each forward.
@@ -427,47 +432,51 @@ impl TowerLora {
         self.alpha / self.rank as f32
     }
 
-    /// Write `W0 + s B A` into every targeted weight of `tower`.
+    /// Write `W0 + s B A` into every targeted weight of `tower`, then
+    /// project the backward's dense gradients back onto the factors - the
+    /// shared `model::adapter::fold` choreography, over this store's buffers.
     pub fn fold(&self, tower: &Tower) {
         let g = &tower.gpu;
-        let r = self.rank;
-        for (name, o, i) in &self.targets {
-            let ba = g.storage((o * i) as u64);
-            let w = tower.ps.w(name);
-            g.submit(
-                &[w],
-                &[
-                    g.step(tower.k("matmul_dx"), &[self.ps.w(&format!("{name}.lora_b")), self.ps.w(&format!("{name}.lora_a")), &ba], &[*o, *i, r, 0], o * i),
-                    g.step(tower.k("axpy"), &[w, &self.base[name]], &[o * i, f(1.0)], o * i),
-                    g.step(tower.k("axpy"), &[w, &ba], &[o * i, f(self.scale())], o * i),
-                ],
-            );
-        }
+        let k = fold_kernels(tower);
+        let targets: Vec<model::adapter::fold::Target<'_>> = self
+            .targets
+            .iter()
+            .map(|(name, o, i)| model::adapter::fold::Target {
+                weight: tower.ps.w(name),
+                base: &self.base[name],
+                a: self.ps.w(&format!("{name}.lora_a")),
+                b: self.ps.w(&format!("{name}.lora_b")),
+                out: *o,
+                inn: *i,
+            })
+            .collect();
+        model::adapter::fold::fold(g, &k, &targets, self.rank, self.scale());
     }
 
     /// Accumulate the factors' gradients from the dense weight gradients the
     /// tower's backward left in its targeted weights' gradient buffers.
     pub fn project(&self, tower: &Tower) {
         let g = &tower.gpu;
-        let (r, s) = (self.rank, self.scale());
-        for (name, o, i) in &self.targets {
-            let dw = tower.gr(name).expect("checked at construction");
-            let (a, b) = (self.ps.w(&format!("{name}.lora_a")), self.ps.w(&format!("{name}.lora_b")));
-            let (ga, gb) = (self.ps.g(&format!("{name}.lora_a")), self.ps.g(&format!("{name}.lora_b")));
-            let (db, da) = (g.storage((o * r) as u64), g.storage((r * i) as u64));
-            g.submit(
-                &[&da],
-                &[
-                    // dB = dW A^T: `matmul` computes x W^T with x = dW [o, i], W = A [r, i].
-                    g.step(tower.k("matmul"), &[dw, a, &db], &[*o, *i, r], o * r),
-                    g.step(tower.k("axpy"), &[gb, &db], &[o * r, f(s)], o * r),
-                    // dA = B^T dW: `matmul_dw` accumulates dY^T X with dY = B [o, r], X = dW [o, i].
-                    g.step(tower.k("matmul_dw"), &[b, dw, &da], &[*o, *i, r], r * i),
-                    g.step(tower.k("axpy"), &[ga, &da], &[r * i, f(s)], r * i),
-                ],
-            );
-        }
+        let k = fold_kernels(tower);
+        let targets: Vec<model::adapter::fold::GradTarget<'_>> = self
+            .targets
+            .iter()
+            .map(|(name, o, i)| {
+                let (a, b) = (format!("{name}.lora_a"), format!("{name}.lora_b"));
+                model::adapter::fold::GradTarget {
+                    dw: tower.gr(name).expect("checked at construction"),
+                    a: self.ps.w(&a),
+                    b: self.ps.w(&b),
+                    ga: self.ps.g(&a),
+                    gb: self.ps.g(&b),
+                    out: *o,
+                    inn: *i,
+                }
+            })
+            .collect();
+        model::adapter::fold::project(g, &k, &targets, self.rank, self.scale());
     }
+
 
     /// Every adapter tensor, host-side, by name.
     pub fn tensors(&self, gpu: &Gpu) -> Vec<(String, Vec<f32>)> {

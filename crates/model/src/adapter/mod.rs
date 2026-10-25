@@ -16,6 +16,7 @@
 pub mod bank;
 pub mod device;
 pub mod exec;
+pub mod fold;
 pub mod file;
 pub mod kind;
 pub mod pair_file;
