@@ -552,14 +552,14 @@ copies.
       gradient through the splice is small enough that the FD step's own
       rounding dominates, so the check needs a larger perturbation or a
       larger signal, not a looser tolerance.
-- [ ] A model whose activation width is not a multiple of
-      `model::int8::GROUP` (32) cannot be built at ANY precision: `Ops::act`
-      packs every activation it feeds a linear with, unconditionally, and
-      `int8::quant_rows_steps` asserts the width. `qwen35moe`'s tiny config
-      (d_model 24) hits it in the GDN pre-conv path, and widening one dim only
-      moves the assert to the next linear (12 wide). The façade should use a
-      non-quantized activation for a width the packed path cannot hold, the way
-      it already picks a kernel variant by shape.
+- [x] `Ops::act` leaves an activation unpacked when its width is not a whole
+      number of `int8::GROUP`s (a product that needs the packed rows refuses
+      by name), so a narrow model builds at fp32 - `qwen35moe`'s tiny config
+      stopped panicking in the GDN path (2026-10-25).
+- [x] `qwen35moe`'s GGUF source test asserted "a transformed leaf must not be
+      lent", which stopped being true when `RemapSource::raw_blocks` learned
+      `RowPermute`; it now checks the lent bytes ARE the regrouped tensor
+      (2026-10-25).
 - [ ] The CPU JIT's `dot4I8Packed` path disagrees with the host reference
       (`wgsl-cpu`'s `dot4i8packed_matches_host_reference`: -32191.5 against
       -66089.5), while the workgroup `matmul_i8_gemv` it compiles is unchanged

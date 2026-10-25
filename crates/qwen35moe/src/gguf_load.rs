@@ -208,7 +208,16 @@ mod tests {
         for (g, w) in dt_bias.iter().zip([0.1f32, 0.3, 0.2, 0.4]) {
             assert!((g - w).abs() < 1e-5, "{dt_bias:?}");
         }
-        assert!(src.raw_blocks("blocks.0.linear_attn.in_proj_z.weight").is_none(), "a transformed leaf must not be lent");
+        // A row-permuted leaf IS lent, as its regrouped block rows (the
+        // permutation needs no decode). The lent bytes must therefore BE the
+        // regrouped tensor `with_tensor` serves - not the source's own order.
+        let (layout, lent) = src.raw_blocks("blocks.0.linear_attn.in_proj_z.weight").expect("a row-permuted leaf is lent, regrouped");
+        let mut want = Vec::new();
+        assert!(src.with_tensor("blocks.0.linear_attn.in_proj_z.weight", &mut |d| want = d.to_vec()));
+        assert_eq!(layout.numel as usize, want.len());
+        let got: Vec<f32> = lent.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+        assert_eq!(got.len(), want.len(), "the lent bytes hold one value per element");
+        assert_eq!(got, want, "the lent blocks must be the regrouped tensor");
         std::fs::remove_file(&path).ok();
     }
 }

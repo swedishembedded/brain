@@ -1443,6 +1443,15 @@ impl Ops {
     /// asserts.
     pub fn act(&self, s: &mut Vec<Step>, x: &DeviceBuffer, xr0: u32, rows: u32, k: u32) -> Act {
         assert!(rows > 0, "Ops::act: rows must be > 0 (got 0)");
+        // A width the packed path cannot hold (not a whole number of
+        // `crate::int8::GROUP`s) simply is not packed: [`Self::act_f32`] is
+        // what a dense product reads, and a product that REQUIRES the packed
+        // rows (`Weight::I8`, `Q4`) refuses by name when it finds none. This
+        // is what lets a narrow model - a toy config, a small test tower -
+        // build at all.
+        if k % crate::int8::GROUP as u32 != 0 {
+            return self.act_f32(x, xr0, rows, k);
+        }
         let total = (xr0 + rows) as u64;
         let quant = I8Scratch::new(&self.gpu, total, total, &[k]);
         quant.quant_rows(&self.gpu, [self.idx[kname::MAX_ABS_ROW], self.idx[kname::QUANT_PACK]], s, x, xr0, xr0 + rows, k);
