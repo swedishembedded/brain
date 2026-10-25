@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+#
+# brain's sources are formatted by hand (long single-line expressions), not by
+# rustfmt, and no hook or gate runs rustfmt. Formatting is off so that
+# `cargo fmt` - run by an editor, an agent or out of habit - agrees with that
+# and never rewrites files nobody changed.
+disable_all_formatting = true
