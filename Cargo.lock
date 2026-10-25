@@ -6239,6 +6239,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "sample-text-spectral-lm"
+version = "3.0.0"
+dependencies = [
+ "brain-appopts",
+ "brain-checkpoint",
+ "brain-data",
+ "brain-model",
+ "brain-qwen3",
+ "brain-sfm",
+ "brain-spectrallm",
+ "serde_json",
+]
+
+[[package]]
 name = "sample-tts-clone"
 version = "3.0.0"
 dependencies = [

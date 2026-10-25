@@ -78,7 +78,8 @@ layer 6 - serving, front ends, SDK, samples
     generate, sample-learning-reader, sample-learning-rlcd, sample-learning-visualclick, sample-
     reconstruction-splat, sample-study-chat, sample-study-document, sample-study-timeline,
     sample-text-embed, sample-text-embed-train, sample-text-encoder-finetune, sample-text-
-    retrieve, sample-text-retrieve-json, sample-tts-clone, server, serving, web
+    retrieve, sample-text-retrieve-json, sample-text-spectral-lm, sample-tts-clone, server,
+    serving, web
 ```
 <!-- crate-layers:end -->
 

@@ -1,0 +1,26 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/text/spectral-lm` -> `sample-text-spectral-lm`.
+name = "sample-text-spectral-lm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: train SpectralLM and its Qwen3-shaped control on a document corpus, score them and Qwen3-0.6B in bits per byte, and sample text."
+publish = false
+
+[dependencies]
+# A research architecture the SDK does not wrap, so the sample links the
+# engine crates it demonstrates directly (samples/README.md rule 1).
+brain-spectrallm.workspace = true
+brain-qwen3.workspace = true
+brain-model.workspace = true
+brain-data.workspace = true
+brain-checkpoint.workspace = true
+brain-appopts.workspace = true
+# The symmetric eigensolver the principal-component baseline needs.
+brain-sfm.workspace = true
+serde_json.workspace = true
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+max-brain-crates = 40

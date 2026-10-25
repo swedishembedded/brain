@@ -42,7 +42,7 @@ Enforced by `make check/scope`; `CHANGELOG.md` is exempt.
 | `.agents/rules/` | how to work here (table below) |
 | `.agents/roadmap/` | status, open work and measured numbers, one ledger per model or workstream; start at `index.md` |
 | `.agents/knowledge/` | defects already paid for, one finding per file, cited as `#NNN`; start at `index.md` |
-| `samples/` | standalone Rust samples on the SDK, plus Python and shell clients; contract in `samples/README.md` |
+| `samples/` | standalone Rust samples on the SDK or engine crates, plus Python and shell clients; contract in `samples/README.md` |
 | `scripts/` | repo automation, run only by a make target or a bats test; `scripts/gates/` holds the quality gates |
 | `tools/` | developer utilities run by hand (golden dumpers, converters) |
 | `tests/` | bats suites: `tests/e2e` (real sockets and processes), `tests/gates` (gate specs) |

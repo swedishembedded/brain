@@ -215,6 +215,7 @@ sample-study-timeline	6
 sample-text-embed	6
 sample-text-embed-train	6
 sample-text-encoder-finetune	6
+sample-text-spectral-lm	6
 sample-text-retrieve	6
 sample-text-retrieve-json	6
 sample-tts-clone	6

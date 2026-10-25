@@ -14,8 +14,8 @@ There are three kinds, one per way of reaching brain:
 | | `samples/<category>/<name>/` | `samples/python/<pipeline>/<name>/` | `samples/shell/<pipeline>/<name>/` |
 |---|---|---|---|
 | what it is | a **Rust application** | a **Python** client script | a **shell** client/CLI script |
-| how it reaches brain | by linking the `brain` SDK crate | over D-Bus / HTTP (`brain_py`) | over D-Bus (via `tools/dbus-session.sh`) or the `brain` CLI directly |
-| what it proves | the SDK is a real, usable library | the served surface works off-process | the CLI/served surface works off-process, no Python needed |
+| how it reaches brain | by linking the `brain` SDK crate, or brain's engine crates directly | over D-Bus / HTTP (`brain_py`) | over D-Bus (via `tools/dbus-session.sh`) or the `brain` CLI directly |
+| what it proves | brain is a real, usable library | the served surface works off-process | the CLI/served surface works off-process, no Python needed |
 | built by | `make samples/<category>/<name>/build` | nothing - run against a running brain | nothing - run against a running brain |
 
 A capability is only fully demonstrated when the ways that apply to it work:
@@ -66,13 +66,15 @@ Cargo closure to police; their contract is the directory shape above, plus
 `make check/samples`' structural checks - README present, entry script
 executable and SPDX-headed, no stray committed fixtures.)
 
-1. **A sample depends on `brain` (the SDK crate), not on `brain-<short>` engine
-   crates.** The SDK is where the *feature vocabulary* lives - it is this
-   workspace's Kconfig symbol table. If a sample needs something the SDK does
-   not expose, the fix is to widen the SDK; that is what samples are *for*. A
-   sample may depend freely on third-party crates.
+1. **A sample depends on whatever brain crates it demonstrates.** The `brain`
+   SDK crate is the task-level library and the natural dependency for a
+   sample that shows a pipeline; a sample that demonstrates a model or an
+   engine mechanism the SDK does not wrap (a research architecture, a
+   training loop over `model::fit`) depends on those `brain-<short>` crates
+   directly. A sample may depend freely on third-party crates.
 
-2. **A sample must NAME the SDK surfaces it uses, and only those.**
+2. **A sample that uses the SDK must NAME the SDK surfaces it uses, and only
+   those.**
 
    ```toml
    brain = { workspace = true, features = ["image"] }

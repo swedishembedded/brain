@@ -2,14 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 #
-# Gate for samples/ - the standalone applications built on the public `brain`
-# SDK. Invoked by `make check/samples`.
+# Gate for samples/ - the standalone applications built on brain, through the
+# public `brain` SDK or its engine crates directly. Invoked by
+# `make check/samples`.
 #
 # Enforces samples/README.md. The manifest checks are cheap reads; the two that
 # matter are measurements:
 #
 #   CLOSURE     - a sample's real `cargo tree` graph contains nothing reachable
-#                 ONLY through an SDK surface it did not enable. This is the
+#                 ONLY through an SDK surface it did not enable (an engine
+#                 crate it depends on directly, and that crate's own closure,
+#                 is enabled by naming it). This is the
 #                 check that literally enforces "pull in only its required
 #                 dependencies", and the surface -> crate mapping is DERIVED
 #                 from the SDK's own manifest, so it cannot drift from what the
@@ -50,15 +53,6 @@ for m in "${manifests[@]}"; do
 
 	# The Makefile's samples/%/{build,run} rules resolve the package this way.
 	[ "$got" = "$want" ] || bad "$m: package is '$got', path implies '$want'"
-
-	# Rule 1: the only brain dependency is the SDK facade.
-	while read -r dep; do
-		case "$dep" in
-			brain) : ;;
-			brain-*) bad "$dep: $dir reaches past the SDK into an engine crate (samples/README.md rule 1)" ;;
-		esac
-	done < <(sed -n '/^\[dependencies\]/,/^\[/p' "$m" \
-		| sed -n 's/^\([A-Za-z0-9_-]*\)[ .=].*/\1/p' | grep '^brain' || true)
 
 	[ -f "$dir/README.md" ] || bad "$dir: no README.md"
 	while read -r src; do
@@ -207,16 +201,20 @@ for m in sys.argv[1:]:
     d = m.rsplit("/", 1)[0]
     pkg = "sample-" + d[len("samples/"):].replace("/", "-")
     man = tomllib.load(open(m, "rb"))
-    dep = man.get("dependencies", {}).get("brain")
+    deps = man.get("dependencies", {})
+    dep = deps.get("brain")
+    # Engine crates the sample names directly are its own decision; they and
+    # their closure are enabled exactly like a named surface's crates.
+    direct = {name for name in deps if name.startswith("brain-")}
 
-    if not isinstance(dep, dict) or not dep.get("features"):
+    if dep is not None and (not isinstance(dep, dict) or not dep.get("features")):
         print(f"FAIL {m}: must NAME the SDK surfaces it uses, e.g. "
               f'brain = {{ workspace = true, features = ["image"] }} '
               f"(samples/README.md rule 2)")
         ok = False
         continue
 
-    named = set(dep["features"])
+    named = set(dep["features"]) if dep is not None else set()
     for f in sorted(named):
         if f in TIERS:
             print(f"FAIL {m}: names '{f}', an infrastructure tier rather than a "
@@ -258,7 +256,7 @@ for m in sys.argv[1:]:
     # creature-only sample. They are nothing of the sort; they are the
     # transitive closure of a dependency the sample legitimately asked for.
     # So the enabled set is expanded through its REAL graph before subtracting.
-    allowed = set()
+    allowed = set(direct)
     for f in named:
         allowed |= crates_of(f)
     for crate in sorted(allowed):
@@ -286,7 +284,8 @@ for m in sys.argv[1:]:
         ok = False
     else:
         print(f"  {pkg}: {len(present)} brain crates "
-              f"(budget {budget}, surfaces: {', '.join(sorted(named))})")
+              f"(budget {budget}, surfaces: {', '.join(sorted(named)) or '-'}, "
+              f"engine crates: {', '.join(sorted(direct)) or '-'})")
 
 sys.exit(0 if ok else 1)
 PY
