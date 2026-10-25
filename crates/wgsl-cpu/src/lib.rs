@@ -1762,7 +1762,9 @@ mod tests {
         };
         let mut xq = pack(&xq_i);
         let mut wq = pack(&wq_i);
-        let mut sx: Vec<f32> = vec![0.5, 0.25];
+        // One activation scale per (row, 32-element group) - the kernel's own
+        // `sx[m * (kg/8) + g/8]`, distinct so a wrong group index shows.
+        let mut sx: Vec<f32> = (0..m * ng).map(|i| 0.5 / (i as f32 + 1.0)).collect();
         // [n, ng], every entry distinct so a wrong group index shows.
         let mut sw: Vec<f32> = vec![1.0, 4.0, 2.0, 8.0, 0.125, 0.5];
         assert_eq!(sw.len(), n * ng);
@@ -1781,15 +1783,16 @@ mod tests {
             for col in 0..n {
                 // Group-wise dequant: each 32-element block carries its own
                 // scale, so the sum is per group and then folded.
+                // Per group: the weight block's scale and the activation's own
+                // group scale, both applied inside the group's sum.
                 let want: f32 = (0..ng)
                     .map(|g| {
                         let acc: i32 = (g * 32..g * 32 + 32)
                             .map(|kk| xq_i[row * k + kk] as i32 * wq_i[col * k + kk] as i32)
                             .sum();
-                        acc as f32 * sw[col * ng + g]
+                        acc as f32 * sw[col * ng + g] * sx[row * ng + g]
                     })
-                    .sum::<f32>()
-                    * sx[row];
+                    .sum::<f32>();
                 let got = out[row * n + col];
                 assert!(
                     (got - want).abs() <= want.abs() * 1e-5 + 1e-3,

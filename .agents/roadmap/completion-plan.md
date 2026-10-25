@@ -555,11 +555,12 @@ copies.
       lent", which stopped being true when `RemapSource::raw_blocks` learned
       `RowPermute`; it now checks the lent bytes ARE the regrouped tensor
       (2026-10-25).
-- [ ] The CPU JIT's `dot4I8Packed` path disagrees with the host reference
-      (`wgsl-cpu`'s `dot4i8packed_matches_host_reference`: -32191.5 against
-      -66089.5), while the workgroup `matmul_i8_gemv` it compiles is unchanged
-      from the device path. A packed-int8 GEMV on the CPU backend is therefore
-      unverified, and the test is red at HEAD.
+- [x] The CPU JIT's packed-int8 GEMV test was failing against a stale
+      reference, not a miscompile: `matmul_i8_gemv` applies a per-(row, group)
+      activation scale while the test multiplied one per-row scale outside the
+      group sum and handed a too-short `sx`. The reference now follows the
+      kernel's own contract, with distinct per-group scales so a wrong index
+      shows (2026-10-25).
 - [x] The CPU JIT derives `workgroup_id`/`local_invocation_id` from the
       invocation index, so a barrier-free work-group kernel compiles and
       `max_abs_rows` no longer fails every int8 build (2026-10-25).
