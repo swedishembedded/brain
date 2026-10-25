@@ -385,14 +385,26 @@ impl ChatFullFineTuneOutcome {
 /// step's activations. The activation term is calibrated on the 27B (`crate::finetune::activation_bytes`) and
 /// included when the checkpoint's config names its depth and width. No selected card (a CPU run) is not checked.
 fn plan_before_load(open: &Path, block: u32, set: &gpu_core::devices::ComputeSet) -> Result<()> {
-    use model::memplan::{plan, training_demands, Authorized, Capacity, Category, Demand, TrainingFootprint};
     let cards: Vec<u64> = gpu_core::devices::gpus().iter().filter(|d| set.gpus.contains(&d.index)).map(|d| d.identity.vram_bytes).collect();
     if cards.is_empty() {
         return Ok(());
     }
-    let reader = checkpoint::weightio::WeightReader::open(open.to_str().ok_or_else(|| Error::Backend(format!("{}: not valid UTF-8", open.display())))?).map_err(|e| Error::Backend(format!("{}: {e}", open.display())))?;
+    plan_on_cards(open, block, &cards)
+}
+
+/// [`plan_before_load`]'s arithmetic for cards of `cards` bytes. `open` is a checkpoint file or a checkpoint
+/// directory (a `transformers` one, single-file or sharded, whose depth and width are in its `config.json`).
+fn plan_on_cards(open: &Path, block: u32, cards: &[u64]) -> Result<()> {
+    use model::memplan::{plan, training_demands, Authorized, Capacity, Category, Demand, TrainingFootprint};
+    let reader = checkpoint::weightio::WeightReader::open_any(open.to_str().ok_or_else(|| Error::Backend(format!("{}: not valid UTF-8", open.display())))?).map_err(|e| Error::Backend(format!("{}: {e}", open.display())))?;
     let trainable: Vec<(String, usize)> = reader.names().map(|n| (n.to_string(), reader.shape(n).map_or(0, |s| s.iter().product::<u64>() as usize))).collect();
-    let config = reader.config();
+    let config = if open.is_dir() {
+        let path = open.join("config.json");
+        let text = std::fs::read_to_string(&path).map_err(|e| Error::Backend(format!("{}: {e}", path.display())))?;
+        serde_json::from_str(&text).map_err(|e| Error::Backend(format!("{}: {e}", path.display())))?
+    } else {
+        reader.config()
+    };
     let dim = |keys: &[&str]| keys.iter().find_map(|k| config.get(*k).and_then(|v| v.as_u64()));
     let activation_bytes = match (dim(&["num_hidden_layers", "n_layers"]), dim(&["hidden_size", "d_model"])) {
         (Some(layers), Some(width)) => crate::finetune::activation_bytes(block, layers, width),
@@ -456,4 +468,29 @@ pub struct MergedCheckpoint {
     pub weights: PathBuf,
     /// `sha256:<hex>` of the weights file.
     pub weights_digest: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plan_on_cards;
+
+    /// A `transformers` checkpoint directory: weights with no embedded config, and the config beside them.
+    fn hf_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("brain-sdk-full-plan-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let tensors = vec![("model.embed_tokens.weight".to_string(), vec![64, 32], vec![0.0f32; 64 * 32]), ("lm_head.weight".to_string(), vec![64, 32], vec![0.0f32; 64 * 32])];
+        checkpoint::st::save_safetensors(dir.join("model.safetensors").to_str().unwrap(), &tensors, &serde_json::Value::Null, None).unwrap();
+        std::fs::write(dir.join("config.json"), r#"{"num_hidden_layers": 2, "hidden_size": 32}"#).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_checkpoint_directory_is_planned_and_refused_only_when_it_does_not_fit() {
+        let dir = hf_dir("fit");
+        plan_on_cards(&dir, 64, &[1 << 40]).expect("a checkpoint directory fits a large card");
+        let refused = plan_on_cards(&dir, 64, &[1024]).expect_err("nothing fits a 1 KiB card");
+        assert!(refused.to_string().contains("refusing to load"), "{refused}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
