@@ -532,9 +532,16 @@ copies.
 - [x] `minimaxmusic3`'s vocoder/DiT/depth adapters are `model::lora::Pair`:
       its `LoraW`, delta, apply and gradient projection are the shared ones
       (2026-10-24).
-- [x] `deepseekocr2`'s device LoRA onto `AdapterRuntime` (2026-10-24). Still
-      open: `minicpmv`'s `TowerLora`, which needs a vision-tower adapter seam
-      (the runtime's scratch is sized for a decoder's rows).
+- [x] `deepseekocr2`'s device LoRA onto `AdapterRuntime` (2026-10-24).
+- [ ] `minicpmv`'s `TowerLora` is the last adapter implementation of its own
+      kind: a FOLD adapter (weights folded to `W0 + s·B·A` for a pre-recorded
+      forward tape, gradients projected back after the backward), where
+      `AdapterRuntime` injects at the linear's output instead. The shared
+      seam it needs is `model::adapter::fold` - the three-step fold and
+      four-step projection over a list of (weight, base copy, A, B) targets,
+      with the kernel ids a tower supplies - so that a second pre-recorded
+      tower does not restate the choreography. Its store, init and base
+      copies stay model-specific.
 - [x] One `vae::blocks::train_kernel_set` for sdxlunet, supir, controlnet,
       rrdbnet and vqgan (2026-10-24).
 - [x] `optim::NamedMoments` owns the host trainer's AdamW state; SUPIR steps
