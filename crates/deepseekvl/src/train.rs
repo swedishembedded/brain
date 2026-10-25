@@ -27,7 +27,7 @@ use checkpoint::TensorSource;
 use data::tokenizer::Tokenizer;
 use imaging::pixels::Rgb8;
 use model::projector::ProjectorConfig;
-use model::{cosine_lr, Adam};
+use model::Adam;
 use qwen3::finetune::Trained;
 use qwen3::{Dtype, QwenConfig, IGNORE};
 
@@ -346,6 +346,30 @@ pub fn read_dataset(dir: &Path) -> Result<Vec<PathExample>, String> {
 /// (an adapter over the frozen base, or whole when `opts.rank` is 0) and the
 /// aligner train on the cached features for `opts.steps` steps, the examples
 /// taken in a seeded order.
+/// The decoder + aligner as the shared session sees it: sample indices in,
+/// one step over them out. Ordering, the schedule and the step count are the
+/// session's; the two-part optimiser is this trainer's.
+struct VlSession<'a> {
+    t: Trainer,
+    prepared: &'a [Prepared],
+    aligner_ratio: f32,
+    weight_decay: f32,
+    grad_clip: f32,
+    steps: u32,
+}
+
+impl model::session::SampleTrainer for VlSession<'_> {
+    fn batch_step(&mut self, samples: &[usize], lr: f32) -> Result<f32, String> {
+        let batch: Vec<&Prepared> = samples.iter().map(|&i| &self.prepared[i]).collect();
+        self.steps += 1;
+        let h = Hyper { lr, aligner_lr: lr * self.aligner_ratio, weight_decay: self.weight_decay, grad_clip: self.grad_clip };
+        Ok(self.t.step_batch(&batch, self.steps, &h))
+    }
+    fn steps(&self) -> u32 {
+        self.steps
+    }
+}
+
 pub fn run(frontend: Frontend, rd: &WeightReader, aligner_prefix: &str, examples: Vec<(Vec<Rgb8>, Vec<Turn>)>, opts: &Options, progress: &mut dyn FnMut(&StepInfo)) -> Result<Outcome, String> {
     let prepared = examples.iter().map(|(images, turns)| frontend.prepare(images, turns)).collect::<Result<Vec<_>, String>>()?;
     let aligner_cfg = frontend.tower.aligner_config();
@@ -368,27 +392,26 @@ pub fn run(frontend: Frontend, rd: &WeightReader, aligner_prefix: &str, examples
     let mut trainer = Trainer::new(decoder_cfg, Box::new(base), opts.dtype, block, aligner_cfg, aligner_weights, rows, opts.seed)?;
 
     let fit = opts.hyper.fit_opts(opts.steps, 1, block, opts.lr, opts.seed);
-    let hyper_at = |step: u32| Hyper { lr: cosine_lr(step, &fit), aligner_lr: cosine_lr(step, &fit) * opts.aligner_lr.map_or(0.1, |a| a / opts.lr), weight_decay: fit.weight_decay, grad_clip: fit.grad_clip };
+    let schedule = model::train::LrSchedule::from(&fit);
+    let aligner_ratio = opts.aligner_lr.map_or(0.1, |a| a / opts.lr);
     let initial_loss = prepared.iter().map(|p| trainer.loss(p)).sum::<f32>() / prepared.len() as f32;
-    let mut order = data::rng::Rng::new(opts.seed ^ 0x5eed);
-    let mut queue: Vec<usize> = Vec::new();
+    let session = model::session::SessionSpec {
+        samples: prepared.len(),
+        batch: opts.batch.max(1) as usize,
+        steps: opts.steps,
+        order: model::session::Order::ShuffledStream,
+        cadence: model::session::Cadence::Steps(0),
+        seed: opts.seed,
+    };
+    let mut run = VlSession { t: trainer, prepared: &prepared, aligner_ratio, weight_decay: fit.weight_decay, grad_clip: fit.grad_clip, steps: 0 };
     let mut final_loss = None;
-    for step in 0..opts.steps {
-        let h = hyper_at(step);
-        let mut batch = Vec::with_capacity(opts.batch as usize);
-        for _ in 0..opts.batch.max(1) {
-            if queue.is_empty() {
-                queue = (0..prepared.len()).collect();
-                for i in (1..queue.len()).rev() {
-                    queue.swap(i, (order.next_u64() % (i as u64 + 1)) as usize);
-                }
-            }
-            batch.push(&prepared[queue.pop().expect("refilled")]);
+    model::session::run(&mut run, &session, &schedule, None, Path::new(""), || false, &mut |e| {
+        if let model::session::Event::Step { step, steps, loss, lr, .. } = e {
+            final_loss = Some(loss);
+            progress(&StepInfo { step, steps, loss, lr });
         }
-        let loss = trainer.step_batch(&batch, step + 1, &h);
-        final_loss = Some(loss);
-        progress(&StepInfo { step: step + 1, steps: opts.steps, loss, lr: h.lr });
-    }
+    })?;
+    let trainer = run.t;
     Ok(Outcome { initial_loss, final_loss, examples: prepared.len(), block, trainer })
 }
 

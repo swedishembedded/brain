@@ -35,7 +35,6 @@
 //! fact through to the patch grid rather than a new restriction.
 
 use std::path::Path;
-use std::time::Instant;
 
 use data::qwen_tokenizer::QwenBpe;
 use data::tokenizer::Tokenizer;
@@ -108,6 +107,45 @@ impl Default for TrainOpts {
 /// Fine-tune a LoRA adapter for `base_dir`'s decoder on the captioned-image
 /// folder `data_dir`, writing the adapter checkpoint to `save_path`. Returns
 /// `(initial_loss, final_loss)`.
+/// The model as the shared session sees it: a sample INDEX in, the
+/// accumulation and optimizer step out. Ordering, the schedule, cancellation
+/// and the checkpoint cadence are the session's.
+struct Qwen3VlSession<'a> {
+    model: Qwen3Vl,
+    examples: &'a [(Vec<u32>, Vec<u32>, Vec<f32>)],
+    grid: (u32, u32),
+    steps: u32,
+    weight_decay: f32,
+    adam: model::Adam,
+    clip: Option<f32>,
+    save_path: String,
+    base_dir: String,
+    data_dir: String,
+}
+
+impl model::session::SampleTrainer for Qwen3VlSession<'_> {
+    fn batch_step(&mut self, samples: &[usize], lr: f32) -> Result<f32, String> {
+        let mut loss = 0.0;
+        for &sample in samples {
+            let (tokens, targets, pixels) = &self.examples[sample];
+            self.model.zero_grads();
+            loss += self.model.forward(tokens, targets, self.grid, pixels);
+            self.model.backward();
+        }
+        self.steps += 1;
+        self.model.adamw_step(self.steps, lr, self.weight_decay, self.adam, self.clip, 1.0);
+        Ok(loss / samples.len() as f32)
+    }
+    fn steps(&self) -> u32 {
+        self.steps
+    }
+    fn checkpoint(&self, _out: &Path, _position: u64) -> Result<(), String> {
+        self.model
+            .save_lora_adapter(&self.save_path, "qwen3vl-lora", &self.base_dir, Some(&self.data_dir))
+            .map_err(|e| format!("qwen3vl finetune: save: {e}"))
+    }
+}
+
 pub fn run(
     base_dir: &str,
     data_dir: &Path,
@@ -164,7 +202,6 @@ pub fn run(
 
     // 7. Train.
     let fit = model::FitOpts { steps: opts.steps, lr: opts.lr, min_lr: opts.min_lr, warmup: opts.warmup, decay_iters: opts.steps.max(1), weight_decay: opts.weight_decay, grad_clip: opts.grad_clip, ..Default::default() };
-    let mut rng = data::rng::Rng::new(opts.seed ^ 0xA5A5_5A5A);
 
     let initial = {
         let mut sum = 0.0f32;
@@ -175,34 +212,34 @@ pub fn run(
         sum / n as f32
     };
 
+    let schedule = model::LrSchedule::from(&fit);
+    let session = model::session::SessionSpec {
+        samples: examples.len(),
+        batch: 1,
+        steps: opts.steps,
+        order: model::session::Order::Stream,
+        cadence: if opts.checkpoint_secs > 0 { model::session::Cadence::Secs(opts.checkpoint_secs) } else { model::session::Cadence::Steps(0) },
+        seed: opts.seed,
+    };
+    let mut trainer = Qwen3VlSession {
+        model,
+        examples: &examples,
+        grid: (gh, gw),
+        steps: 0,
+        weight_decay: opts.weight_decay,
+        adam: opts.adam,
+        clip: (opts.grad_clip > 0.0).then_some(opts.grad_clip),
+        save_path: save_path.to_string(),
+        base_dir: base_dir.to_string(),
+        data_dir: data_dir.to_string_lossy().to_string(),
+    };
     let mut last = initial;
-    let mut last_save = Instant::now();
-    for step in 0..opts.steps {
-        if cancel.is_cancelled() {
-            return Err("cancelled".to_string());
+    model::session::run(&mut trainer, &session, &schedule, None, Path::new(save_path), || cancel.is_cancelled(), &mut |e| {
+        if let model::session::Event::Step { step, steps, loss, .. } = e {
+            last = loss;
+            progress(step, steps, format!("step {step} loss {loss:.4}"));
         }
-        let lr = model::cosine_lr(step, &fit);
-        let idx = rng.gen_range_inclusive(0, examples.len() as i64 - 1) as usize;
-        let (tokens, targets, pixels) = &examples[idx];
-
-        model.zero_grads();
-        let loss = model.forward(tokens, targets, (gh, gw), pixels);
-        model.backward();
-        let clip = (opts.grad_clip > 0.0).then_some(opts.grad_clip);
-        model.adamw_step(step + 1, lr, opts.weight_decay, opts.adam, clip, 1.0);
-        last = loss;
-        progress(step + 1, opts.steps, format!("step {} loss {:.4}", step + 1, loss));
-
-        if opts.checkpoint_secs > 0 && last_save.elapsed().as_secs() >= opts.checkpoint_secs {
-            model
-                .save_lora_adapter(save_path, "qwen3vl-lora", base_dir, Some(data_dir.to_string_lossy().as_ref()))
-                .map_err(|e| format!("qwen3vl finetune: checkpoint save: {e}"))?;
-            last_save = Instant::now();
-        }
-    }
-    model
-        .save_lora_adapter(save_path, "qwen3vl-lora", base_dir, Some(data_dir.to_string_lossy().as_ref()))
-        .map_err(|e| format!("qwen3vl finetune: save: {e}"))?;
+    })?;
     Ok((initial, last))
 }
 

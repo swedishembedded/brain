@@ -21,7 +21,6 @@
 
 use std::path::{Path, PathBuf};
 
-use data::rng::Rng;
 use gpu_core::Gpu;
 use model::train::LrSchedule;
 
@@ -174,15 +173,6 @@ impl Builder {
 
 /// Epoch `epoch`'s order of `n` turns: a Fisher-Yates shuffle seeded by the
 /// run's seed and the epoch, so a resumed run draws the same order.
-fn epoch_order(n: usize, seed: u64, epoch: u32) -> Vec<usize> {
-    let mut rng = Rng::new(seed ^ (0x9e37_79b9_7f4a_7c15u64.wrapping_mul(epoch as u64 + 1)));
-    let mut order: Vec<usize> = (0..n).collect();
-    for i in (1..n).rev() {
-        order.swap(i, (rng.next_u64() % (i as u64 + 1)) as usize);
-    }
-    order
-}
-
 /// The mean loss over every turn of `split`.
 fn evaluate(t: &mut Trainer, b: &Builder, split: &Split) -> Result<f32, String> {
     let mut sum = 0.0f64;
@@ -197,6 +187,36 @@ fn checkpoint(t: &Trainer, out: &Path, position: u64) -> Result<(), String> {
     let tmp = out.join(format!("{STATE_FILE}.tmp"));
     t.save_state(&tmp, position)?;
     std::fs::rename(&tmp, out.join(STATE_FILE)).map_err(|e| format!("{}: {e}", out.display()))
+}
+
+/// The trainer as the shared session sees it: a sample INDEX in, the rest is
+/// the session's. What stays model-specific is mapping that index to its
+/// encoded sample (the builder's own records/turns).
+struct SessionTrainer<'a> {
+    t: Trainer,
+    b: &'a Builder,
+    split: &'a Split,
+}
+
+impl model::session::SampleTrainer for SessionTrainer<'_> {
+    fn batch_step(&mut self, samples: &[usize], lr: f32) -> Result<f32, String> {
+        let mut loss = 0.0;
+        for &sample in samples {
+            let s = self.b.sample(self.split, self.split.turns[sample])?;
+            loss += self.t.accumulate(&s)?;
+        }
+        self.t.step(lr, samples.len());
+        Ok(loss / samples.len() as f32)
+    }
+    fn steps(&self) -> u32 {
+        self.t.steps
+    }
+    fn restore(&mut self, state: &Path) -> Result<u64, String> {
+        self.t.restore(state)
+    }
+    fn checkpoint(&self, out: &Path, position: u64) -> Result<(), String> {
+        checkpoint(&self.t, out, position)
+    }
 }
 
 /// Which checkpoint a run tunes, on what, and where the result goes.
@@ -255,7 +275,7 @@ fn run(gpu: &Gpu, job: Job, opts: &Options, progress: &mut dyn FnMut(&Event)) ->
     };
     let vision = crate::import::vision_weights(dir, &cfg)?;
     let decoder = qwen35::base_source::BaseCheckpoint { cfg: cfg.text.clone(), src: Box::new(crate::import::open_decoder(dir, &cfg)?) };
-    let mut t = Trainer::new(gpu, cfg, &vision, decoder, spec)?;
+    let t = Trainer::new(gpu, cfg, &vision, decoder, spec)?;
     drop(vision);
 
     let n = train_split.turns.len();
@@ -271,51 +291,36 @@ fn run(gpu: &Gpu, job: Job, opts: &Options, progress: &mut dyn FnMut(&Event)) ->
     };
 
     let state = out.join(STATE_FILE);
-    let mut position = 0u64;
-    if opts.resume && state.is_file() {
-        position = t.restore(&state)?;
-        if position > (n * opts.epochs as usize) as u64 {
-            return Err(format!("{}: position {position} is past this dataset's {} epochs of {n} turns", state.display(), opts.epochs));
-        }
-    }
-    let initial_eval = match (&eval_split, position) {
-        (Some(e), 0) => {
-            let loss = evaluate(&mut t, &b, e)?;
-            progress(&Event::Eval { epoch: 0, loss });
-            Some(loss)
-        }
-        _ => None,
+    let resume_from = opts.resume.then_some(state.as_path());
+    let spec = model::session::SessionSpec {
+        samples: n,
+        batch,
+        steps: 0,
+        order: model::session::Order::Epochs { epochs: opts.epochs },
+        cadence: model::session::Cadence::Steps(opts.checkpoint_every),
+        seed: opts.seed,
     };
-    let mut final_eval = None;
-    let start_epoch = (position / n as u64) as u32;
-    for epoch in start_epoch..opts.epochs {
-        let order = epoch_order(n, opts.seed, epoch);
-        let mut i = (position - epoch as u64 * n as u64) as usize;
-        while i < n {
-            let chunk = &order[i..(i + batch).min(n)];
-            let mut loss = 0.0;
-            for &k in chunk {
-                loss += t.accumulate(&b.sample(&train_split, train_split.turns[k])?)?;
-            }
-            let factor = schedule.at(t.steps);
-            t.step(factor, chunk.len());
-            i += chunk.len();
-            position += chunk.len() as u64;
-            progress(&Event::Step { step: t.steps, steps, epoch: epoch + 1, loss: loss / chunk.len() as f32, lr: factor * opts.lr });
-            if opts.checkpoint_every > 0 && t.steps % opts.checkpoint_every == 0 {
-                checkpoint(&t, out, position)?;
-                progress(&Event::Checkpoint { step: t.steps });
-            }
-        }
-        checkpoint(&t, out, position)?;
-        if let Some(e) = &eval_split {
-            let loss = evaluate(&mut t, &b, e)?;
-            progress(&Event::Eval { epoch: epoch + 1, loss });
-            final_eval = Some(loss);
-        }
-    }
-    t.save_tune(out, base_id, label)?;
-    Ok(Outcome { turns: n, block, steps: t.steps, initial_eval, final_eval })
+    let mut session = SessionTrainer { t, b: &b, split: &train_split };
+    let mut report = |ev: model::session::Event| match ev {
+        model::session::Event::Step { step, steps, epoch, loss, lr } => progress(&Event::Step { step, steps, epoch, loss, lr: lr * opts.lr }),
+        model::session::Event::Checkpoint { step } => progress(&Event::Checkpoint { step }),
+        model::session::Event::Eval { epoch, loss } => progress(&Event::Eval { epoch, loss }),
+    };
+    let outcome = match eval_split.as_ref() {
+        Some(e) => model::session::run_evaluated(
+            &mut session,
+            &spec,
+            &schedule,
+            resume_from,
+            &state,
+            Some(|st: &mut SessionTrainer<'_>| evaluate(&mut st.t, &b, e)),
+            || false,
+            &mut report,
+        )?,
+        None => model::session::run(&mut session, &spec, &schedule, resume_from, &state, || false, &mut report)?,
+    };
+    session.t.save_tune(out, base_id, label)?;
+    Ok(Outcome { turns: n, block, steps: outcome.steps, initial_eval: outcome.initial_eval, final_eval: outcome.final_eval })
 }
 
 /// Where the model store keeps a fine-tune labelled `owner:name:tag` of the
@@ -365,12 +370,12 @@ mod tests {
 
     #[test]
     fn every_epoch_is_a_permutation_reproducible_from_the_seed() {
-        let a = epoch_order(50, 9, 0);
+        let a = model::train::epoch_order(9, 50, 0);
         let mut sorted = a.clone();
         sorted.sort();
         assert_eq!(sorted, (0..50).collect::<Vec<_>>());
-        assert_eq!(a, epoch_order(50, 9, 0));
-        assert_ne!(a, epoch_order(50, 9, 1), "each epoch draws its own order");
+        assert_eq!(a, model::train::epoch_order(9, 50, 0));
+        assert_ne!(a, model::train::epoch_order(9, 50, 1), "each epoch draws its own order");
     }
 
     #[test]

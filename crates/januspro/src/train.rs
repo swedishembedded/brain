@@ -30,7 +30,7 @@ use checkpoint::TensorSource;
 use data::qwen_tokenizer::QwenBpe;
 use deepseekvl::train::{Hyper, Options, Outcome, StepInfo, TrainableProjector};
 use model::projector::ProjectorConfig;
-use model::{cosine_lr, grad_multiplier, Adam};
+use model::{grad_multiplier, Adam};
 use qwen3::finetune::Trained;
 use qwen3::{Dtype, QwenConfig, IGNORE};
 use vqgan::config::VqganConfig;
@@ -352,6 +352,50 @@ pub fn read_generation_dataset(dir: &Path) -> Result<Vec<(String, std::path::Pat
 /// every image is encoded once by the frozen VQ-16, which is then released,
 /// and the decoder's adapter, the generation head, the aligner and the code
 /// embedding train on the codes.
+/// The generation trainer as the shared session sees it: sample indices in,
+/// one step over them out. The unconditional-prompt draw (cfg dropout) is
+/// this adapter's own stream, seeded from the run.
+struct GenSession<'a> {
+    t: GenTrainer,
+    examples: &'a [(Vec<u32>, Vec<u32>, usize)],
+    pad_id: u32,
+    cfg_dropout: f32,
+    rng: data::rng::Rng,
+    aligner_ratio: f32,
+    weight_decay: f32,
+    grad_clip: f32,
+    steps: u32,
+}
+
+impl GenSession<'_> {
+    fn prepared(&self, i: usize, unconditional: bool) -> GenPrepared {
+        let (tokens, codes, tag) = &self.examples[i];
+        let mut tokens = tokens.clone();
+        if unconditional {
+            let uncond = unconditional_prompt(&tokens[..*tag], self.pad_id);
+            tokens[..*tag].copy_from_slice(&uncond);
+        }
+        GenPrepared { tokens, codes: codes.clone() }
+    }
+}
+
+impl model::session::SampleTrainer for GenSession<'_> {
+    fn batch_step(&mut self, samples: &[usize], lr: f32) -> Result<f32, String> {
+        let mut batch = Vec::with_capacity(samples.len());
+        for &i in samples {
+            let unconditional = self.rng.next_f32() < self.cfg_dropout;
+            batch.push(self.prepared(i, unconditional));
+        }
+        self.steps += 1;
+        let h = Hyper { lr, aligner_lr: lr * self.aligner_ratio, weight_decay: self.weight_decay, grad_clip: self.grad_clip };
+        let refs: Vec<&GenPrepared> = batch.iter().collect();
+        Ok(self.t.step_batch(&refs, self.steps, &h))
+    }
+    fn steps(&self) -> u32 {
+        self.steps
+    }
+}
+
 pub fn finetune_generation(dir: &Path, dataset: &Path, opts: &GenOptions, progress: &mut dyn FnMut(&StepInfo)) -> Result<GenOutcome, String> {
     let (cfg, rd) = crate::model::open(dir)?;
     let base_cfg = qwen3::hf::decoder_config_as(&cfg.language.to_string(), "llama")?;
@@ -410,36 +454,36 @@ pub fn finetune_generation(dir: &Path, dataset: &Path, opts: &GenOptions, progre
     let mut trainer = GenTrainer::new(decoder_cfg, Box::new(base), o.dtype, block, parts, o.seed)?;
 
     let fit = o.hyper.fit_opts(o.steps, 1, block, o.lr, o.seed);
-    let hyper_at = |step: u32| Hyper { lr: cosine_lr(step, &fit), aligner_lr: cosine_lr(step, &fit) * o.aligner_lr.map_or(0.1, |x| x / o.lr), weight_decay: fit.weight_decay, grad_clip: fit.grad_clip };
-    let prepared = |i: usize, unconditional: bool| {
-        let (tokens, codes, tag) = &examples[i];
-        let mut tokens = tokens.clone();
-        if unconditional {
-            let uncond = unconditional_prompt(&tokens[..*tag], pad_id);
-            tokens[..*tag].copy_from_slice(&uncond);
-        }
-        GenPrepared { tokens, codes: codes.clone() }
+    let schedule = model::train::LrSchedule::from(&fit);
+    let aligner_ratio = o.aligner_lr.map_or(0.1, |x| x / o.lr);
+    let cfg_dropout = opts.cfg_dropout;
+    let initial_loss = (0..examples.len()).map(|i| trainer.loss(&GenPrepared { tokens: examples[i].0.clone(), codes: examples[i].1.clone() })).sum::<f32>() / examples.len() as f32;
+    let session = model::session::SessionSpec {
+        samples: examples.len(),
+        batch: o.batch.max(1) as usize,
+        steps: o.steps,
+        order: model::session::Order::ShuffledStream,
+        cadence: model::session::Cadence::Steps(0),
+        seed: o.seed,
     };
-    let initial_loss = (0..examples.len()).map(|i| trainer.loss(&prepared(i, false))).sum::<f32>() / examples.len() as f32;
-    let mut order = data::rng::Rng::new(o.seed ^ 0x5eed);
-    let mut queue: Vec<usize> = Vec::new();
+    let mut run = GenSession {
+        t: trainer,
+        examples: &examples,
+        pad_id,
+        cfg_dropout,
+        rng: data::rng::Rng::new(o.seed ^ 0x5eed_cf9d),
+        aligner_ratio,
+        weight_decay: fit.weight_decay,
+        grad_clip: fit.grad_clip,
+        steps: 0,
+    };
     let mut final_loss = None;
-    for step in 0..o.steps {
-        let h = hyper_at(step);
-        let mut batch = Vec::with_capacity(o.batch as usize);
-        for _ in 0..o.batch.max(1) {
-            if queue.is_empty() {
-                queue = (0..examples.len()).collect();
-                for i in (1..queue.len()).rev() {
-                    queue.swap(i, (order.next_u64() % (i as u64 + 1)) as usize);
-                }
-            }
-            let unconditional = order.next_f32() < opts.cfg_dropout;
-            batch.push(prepared(queue.pop().expect("refilled"), unconditional));
+    model::session::run(&mut run, &session, &schedule, None, Path::new(""), || false, &mut |e| {
+        if let model::session::Event::Step { step, steps, loss, lr, .. } = e {
+            final_loss = Some(loss);
+            progress(&StepInfo { step, steps, loss, lr });
         }
-        let loss = trainer.step_batch(&batch.iter().collect::<Vec<_>>(), step + 1, &h);
-        final_loss = Some(loss);
-        progress(&StepInfo { step: step + 1, steps: o.steps, loss, lr: h.lr });
-    }
+    })?;
+    let trainer = run.t;
     Ok(GenOutcome { initial_loss, final_loss, examples: examples.len(), block, trainer })
 }

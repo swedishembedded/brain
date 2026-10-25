@@ -42,6 +42,7 @@ pub mod conformance_head;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod finetune;
 pub mod flow;
+pub mod session;
 pub mod paged;
 pub mod policy;
 pub mod rowemit;

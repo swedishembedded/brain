@@ -476,6 +476,13 @@ struct EpochOrder {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+/// The order `examples` are trained in during `epoch`: a fresh shuffle per
+/// epoch, seeded by the run's seed and the epoch number, so a resumed run
+/// continues the order a straight run would have followed.
+pub fn epoch_order(seed: u64, examples: usize, epoch: u64) -> Vec<usize> {
+    EpochOrder::shuffled(seed, examples, epoch)
+}
+
 impl EpochOrder {
     fn new(seed: u64, examples: usize, drawn: u64) -> Self {
         assert!(examples > 0, "an order over no examples");
