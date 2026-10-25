@@ -508,10 +508,15 @@ impl JobFeed for CountingFeed<'_> {
     }
 }
 
-/// Request parsing for a family with no adapters: a plain function from
-/// tokenizer and invocation to a parsed request (a family's chat template
-/// flavour is chosen inside it).
-pub type ParseFn = fn(&QwenBpe, &Invocation) -> Result<ParsedRequest, String>;
+/// Request parsing for a family with no adapters: a function from tokenizer and
+/// invocation to a parsed request (a family's chat template flavour is chosen
+/// inside it).
+///
+/// A boxed closure rather than a plain `fn` pointer because a model whose chat
+/// format is a *compiled* artifact (a checkpoint's own Jinja template) has to
+/// keep that artifact between requests; a bare function could only recompile
+/// it per call.
+pub type ParseFn = std::sync::Arc<dyn Fn(&QwenBpe, &Invocation) -> Result<ParsedRequest, String> + Send + Sync>;
 
 /// The [`Frontend`] of a base-model-only family.
 pub struct TextFrontend {

@@ -160,7 +160,7 @@ impl Qwen35Resident {
         let tok = QwenBpe::from_file(&self.tokenizer)?;
         let stop = data::generation::stop_ids(Some(dir), &tok, None, Some("<|im_end|>")).map_err(|e| format!("qwen35moe: {e}"))?;
         let (ctx, max_concurrent) = (Self::ctx(), Self::max_concurrent());
-        let front = Arc::new(TextFrontend { tok, stop, label: "qwen35moe", parse: parse_request });
+        let front = Arc::new(TextFrontend { tok, stop, label: "qwen35moe", parse: Arc::new(parse_request) });
         let src = qwen35moe::hf_source::open_dir(dir, &cfg)?;
         let names = src.names().into_iter().map(str::to_string).collect();
         let host = HostWeights::from_source(Box::new(src), names);
@@ -244,7 +244,7 @@ impl ResidentModel for Qwen35Resident {
         let stop = data::generation::stop_ids(tok_dir, &tok, gguf_eos, Some("<|im_end|>")).map_err(|e| format!("qwen35moe: {e}"))?;
         let ctx = Self::ctx();
         let max_concurrent = Self::max_concurrent();
-        let front = Arc::new(TextFrontend { tok, stop, label: "qwen35moe", parse: parse_request });
+        let front = Arc::new(TextFrontend { tok, stop, label: "qwen35moe", parse: Arc::new(parse_request) });
         let (config, host) = HostWeights::open(&self.path, |config| Qwen35Config::from_json(config).param_list().into_iter().map(|(name, _)| name).collect())?;
         let build: Build = Box::new(move |host, device| {
             let sched = on_device(device, || engine_from(host.source(), &config, ctx, max_concurrent).map(|engine| Scheduler::new(engine, max_concurrent as usize)))??;

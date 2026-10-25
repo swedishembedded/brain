@@ -160,7 +160,7 @@ impl ResidentModel for OuroResident {
         let tok = data::qwen_tokenizer::QwenBpe::from_file(&self.tokenizer)?;
         let dir = Path::new(&self.tokenizer).parent();
         let stop = data::generation::stop_ids(dir, &tok, None, Some("<|im_end|>")).map_err(|e| format!("ouro: {e}"))?;
-        let front = Arc::new(TextFrontend { tok, stop, label: "ouro", parse: qwen3::chat::parse_request });
+        let front = Arc::new(TextFrontend { tok, stop, label: "ouro", parse: Arc::new(qwen3::chat::parse_request) });
         let path = self.path.clone();
         let (ctx, block, batch) = (self.ctx, self.block_size, self.max_batch);
         let inst = on_device(device, move || {

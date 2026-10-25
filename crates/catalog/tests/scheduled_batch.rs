@@ -33,7 +33,7 @@ fn raw_parse(tok: &QwenBpe, inv: &Invocation) -> Result<qwen3::chat::ParsedReque
 }
 
 fn front() -> TextFrontend {
-    TextFrontend { tok: byte_tokenizer(), stop: Vec::new(), label: "test", parse: raw_parse }
+    TextFrontend { tok: byte_tokenizer(), stop: Vec::new(), label: "test", parse: std::sync::Arc::new(raw_parse) }
 }
 
 fn cfg() -> Qwen35Config {

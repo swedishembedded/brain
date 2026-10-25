@@ -3520,7 +3520,7 @@ impl MultiDeviceResidentModel for Qwen35GgufResident {
         let (engine, tok, stop) = self.activate_engine(devices)?;
         let mut sched = model::serve::Scheduler::new(engine, self.max_batch as usize);
         self.configure_scheduler(&mut sched);
-        Ok(Box::new(llmserve::ScheduledInstance::new(llmserve::TextFrontend { tok, stop, label: "qwen35", parse: parse_request }, sched, self.max_batch as usize)))
+        Ok(Box::new(llmserve::ScheduledInstance::new(llmserve::TextFrontend { tok, stop, label: "qwen35", parse: std::sync::Arc::new(parse_request) }, sched, self.max_batch as usize)))
     }
 }
 
