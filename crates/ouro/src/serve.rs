@@ -282,9 +282,9 @@ impl Engine {
         let mut steps = vec![gpu.step(model::EMBED_ID, &[&self.token, self.ps.w("tok.weight"), &self.h[0]], &[d, 1], d)];
         for p in 0..t {
             let pos = if p == 0 { table.len() } else { self.rows[&row].extra[p - 1].len() };
-            // Pass 0 appends into the scheduler's table; the other passes into
-            // their own tables, allocated from the same pool so admission's
-            // `passes × blocks_for` is what is actually consumed.
+            // Pass 0 appends into the scheduler's table; every other pass
+            // appends into its own table, from that pass's own allocator, so
+            // each paged plane is charged exactly the sequence's page count.
             let appended = if p == 0 {
                 table.append(&mut self.allocs[0])
             } else {

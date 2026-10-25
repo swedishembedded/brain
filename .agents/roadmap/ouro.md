@@ -63,11 +63,11 @@ gate and a pass-selected or exit-weighted head.
   weights (bf16 storage) are the step that puts a 6k context on one card.
   Prefix reuse and host offload stay off for the looped path until they are
   pass-aware.
-- Prefill speed: the whole-prompt path uses the flash causal attention kernel
-  (no score slabs) for the attention, but its linears still dispatch the naive
-  matmul, so a ~5.4k-token prefill takes minutes on a P40. Selecting the tiled
-  GEMMs through the shared `model::ops` seam (which the other decoders use) is
-  the next speed step; chunked paged prefill bounds the memory after that.
+- Prefill speed: the whole-prompt path now uses the flash causal attention
+  kernel (no score slabs) and the register-tiled GEMM for prefill-sized linear
+  slabs (the naive kernel still serves a decode row and the CPU JIT). A
+  160-token prompt takes that path and matches the model's own greedy tokens;
+  chunked paged prefill bounds memory beyond ~6k tokens.
 - LoRA fine-tuning: adapter sites on the shared stack's linears, with the
   frozen-base path (full-weight training allocates gradients and AdamW moments
   for every parameter and does not fit a 2.6B model on one card).
