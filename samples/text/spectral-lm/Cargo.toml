@@ -16,6 +16,7 @@ brain-qwen3.workspace = true
 brain-model.workspace = true
 brain-data.workspace = true
 brain-checkpoint.workspace = true
+brain-gpu-core.workspace = true
 brain-appopts.workspace = true
 # The symmetric eigensolver the principal-component baseline needs.
 brain-sfm.workspace = true

@@ -6245,6 +6245,7 @@ dependencies = [
  "brain-appopts",
  "brain-checkpoint",
  "brain-data",
+ "brain-gpu-core",
  "brain-model",
  "brain-qwen3",
  "brain-sfm",

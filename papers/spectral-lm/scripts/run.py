@@ -112,8 +112,9 @@ def jobs_for(plan, work):
 
 
 def run_measured(cmd, gpu, log):
-    """Run `cmd` on `gpu`, returning (last JSON line, peak MiB, seconds)."""
-    env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu))
+    """Run `cmd` (already pinned to `gpu` by its `--gpu` flag), returning
+    (last JSON line, peak MiB, seconds)."""
+    env = dict(os.environ)
     start = time.time()
     with open(log, "a") as lf:
         lf.write("$ " + " ".join(cmd) + "\n")
@@ -147,18 +148,18 @@ def execute(job, gpu, plan, commit):
     log = work / f"{job['id']}.log"
     rec = {"commit": commit, "device": f"gpu{gpu} {device_name(gpu)}", "plan": plan, "id": job["id"]}
     if "qwen" in job:
-        cmd = [str(SAMPLE)] + job["qwen"]
+        cmd = [str(SAMPLE)] + job["qwen"] + ["--gpu", str(gpu)]
         result, peak, _ = run_measured(cmd, gpu, log)
         rec.update({"command": " ".join(cmd), "result": result, "peak_mem_mib": peak})
     else:
         ckpt = work / f"{job['id']}.safetensors"
         train = [str(SAMPLE), "train", str(CORPUS), "--out", str(ckpt), *FAMILIES[job["family"]], *SCHEDULE,
-                 "--steps", job["steps"], "--lr", job["lr"], "--seed", job["seed"]]
+                 "--steps", job["steps"], "--lr", job["lr"], "--seed", job["seed"], "--gpu", str(gpu)]
         result, peak, _ = run_measured(train, gpu, log)
         rec.update({"family": job["family"], "seed": int(job["seed"]), "command": " ".join(train), "train": result, "peak_mem_mib": peak})
         if job["eval"]:
             ev = [str(SAMPLE), "eval", "--checkpoint", str(ckpt), "--tokenizer", str(CORPUS / "tokenizer.json"),
-                  "--text", str(CORPUS / "valid.txt"), "--max-doc-bytes", MAX_DOC_BYTES, "--batch", "16"]
+                  "--text", str(CORPUS / "valid.txt"), "--max-doc-bytes", MAX_DOC_BYTES, "--batch", "16", "--gpu", str(gpu)]
             score, _, _ = run_measured(ev, gpu, log)
             rec.update({"eval_command": " ".join(ev), "eval": score})
     out = DATA / plan / f"{job['id']}.json"

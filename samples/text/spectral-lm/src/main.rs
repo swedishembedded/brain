@@ -18,6 +18,8 @@
 //!   spectral-lm qwen-train --weights W <qwen corpus dir> --out F [schedule flags]
 //!   spectral-lm qwen-spectrum --weights W --fit-text train.txt --text valid.txt [--layer L --widths 64,128]
 //!
+//! Every subcommand takes `--gpu N` to run on card N.
+//!
 //! `train` with `--mixer swiglu` trains the conventional control, which is
 //! the Qwen3 decoder (the crate's parity test holds it to brain's Qwen3
 //! implementation). Every measuring subcommand ends with one JSON line.
@@ -32,6 +34,11 @@ fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let rest = argv.get(1..).unwrap_or(&[]);
     let mut a = Args::new(rest);
+    // `--gpu N` pins every model this process builds to card N (brain's
+    // ambient device selection); without it the first card is used.
+    if let Some(gpu) = a.opt_u32("--gpu") {
+        gpu_core::devices::set_ambient_gpu(Some(gpu));
+    }
     match argv.first().map(String::as_str) {
         Some("train") => lm::train(&mut a),
         Some("eval") => lm::eval(&mut a),
