@@ -1,0 +1,44 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- Copyright (c) 2026 Martin Schröder <info@swedishembedded.com> -->
+
+# ouro
+
+Scope: The Ouro looped language model (`crates/ouro`).
+
+Brain's share of the looped-decoder work: Ouro reuses one 48-layer stack for
+`total_ut_steps` passes per token, with per-pass attention history, an exit
+gate and a pass-selected or exit-weighted head.
+
+## Done
+
+- Configuration and parameter layout pinned against the released
+  `ByteDance/Ouro-2.6B-Thinking` header: 48 layers, hidden 2048, 16 query and
+  16 KV heads of width 128, SwiGLU 5632, four passes, untied head, gated exit.
+  The layout test checks 533 tensors and 2,667,974,657 parameters, so a shape
+  drift fails before a 5 GiB import does.
+- Hugging Face safetensors import (single file and sharded), whole-tensor
+  rename with two-way coverage, no transpose.
+- Forward graph: embedding applied once; each pass runs the shared stack,
+  final RMSNorm and exit gate; the next pass consumes the previous pass's
+  **normed** output (the reference reassigns `hidden_states = norm(...)`).
+- Tiny reference parity (`tools/goldens/ouro_dump_reference.py`): every pass's
+  hidden state, gate logit and head output match `modeling_ouro.py` at the
+  same weights, CPU fp32, on the tiny shape.
+- Exit rule: cumulative exit mass over the gate outputs, released threshold
+  (1.0 selects the final pass).
+
+## Left to do
+
+- Real-checkpoint import and parity on a short prompt at fp32 (the tiny golden
+  proves the math; the real weights prove the import).
+- Per-pass paged KV decode and serving: a sequence owns one block table per
+  pass, the decoder reports `passes × blocks_for` to admission, prefix reuse
+  and host offload are disabled for the looped path until they are
+  pass-aware, and the forward runs the passes over the current token.
+- Backward: per-pass losses weighted by the exit distribution, accumulated
+  into the one shared parameter set, with a finite-difference gradient check
+  on the tiny config; then LoRA fine-tuning.
+- Capability, residency, CLI verb, sample and the docs page (the arch row is
+  deliberately absent until those exist).
+- Threshold-selected decode across a batch whose rows exit on different
+  passes.

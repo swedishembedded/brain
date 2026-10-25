@@ -63,7 +63,7 @@ layer 4 - models
     ecapatdnn, eval, fastvlm, fincast, florence2, flux1, flux2, fly, flybody, gemma4,
     genieredux, glmdsa, gpt2, horizon, imaging, imgpipe, instantid, januspro, kronos, lfm2,
     llava, llmserve, lpips, ltxv, mimi, minicpmv, minimaxh3, minimaxmusic3, modernbert,
-    moondream3, mujoco, mvs, nemotronasr, npu, pulid, qwen3, qwen35, qwen35moe, qwen3asr,
+    moondream3, mujoco, mvs, nemotronasr, npu, ouro, pulid, qwen3, qwen35, qwen35moe, qwen3asr,
     qwen3omnimoe, qwen3tts, qwen3vl, qwen3vlmoe, recon, rrdbnet, s3dit, s3tokenizer, sam1, sam2,
     scrfd, sdxlunet, sfm, splat, supir, t5encoder, timesfm3, toyautoencoder, toymoe, toypid,
     toyseq2seq, viewport, vqgan, wan, wm-core, wm-display, worldmirror2, yolov8, zipdepth

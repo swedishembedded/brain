@@ -222,6 +222,7 @@ crates/cli/tests/qwen_lora_finetune.rs	QWEN3_DIR
 crates/cli/tests/serve_cli.rs	BRAIN_AUTO_FETCH
 crates/cli/tests/serve_cli.rs	BRAIN_BACKEND
 crates/cli/tests/serve_cli.rs	BRAIN_DEVICE
+crates/ouro/tests/forward.rs	BRAIN_BACKEND
 crates/cli/tests/serve_cli.rs	BRAIN_MODELS_DIR
 crates/cli/tests/serve_cli.rs	BRAIN_QWEN_WEIGHTS
 crates/cli/tests/yolov8_eval.rs	BRAIN_DEVICE

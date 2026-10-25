@@ -67,6 +67,7 @@ heading and a `Scope: <one sentence>` line under it, then run `make generate/roa
 | [`modelstore`](modelstore.md) | modelstore | Model store resolution ladder: plan, download, convert (`crates/modelstore`). |
 | [`npu`](npu.md) | npu | The Intel NPU export and runtime path (`crates/npu`). |
 | [`orchestration-hsm`](orchestration-hsm.md) | orchestration: HSM + effects for residency/serving | Design proposal: residency and serving as an HSM with effects. |
+| [`ouro`](ouro.md) | ouro | The Ouro looped language model (`crates/ouro`). |
 | [`peft`](peft.md) | peft | Parameter-efficient fine-tuning methods beyond vanilla LoRA. |
 | [`probe`](probe.md) | probe | Per-device GEMM capability probe and roofline (`model::probe`, `gpu_core::roof`). |
 | [`pulid`](pulid.md) | pulid | PuLID-FLUX identity conditioning (`crates/pulid`). |

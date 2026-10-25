@@ -1,0 +1,28 @@
+[package]
+name = "brain-ouro"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Ouro (ByteDance): a looped language model that reuses one transformer stack across recurrent steps."
+
+[lib]
+name = "ouro"
+path = "src/lib.rs"
+
+[dependencies]
+brain-checkpoint.workspace = true
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-model.workspace = true
+brain-paramstore.workspace = true
+brain-optim.workspace = true
+brain-capability.workspace = true
+brain-data.workspace = true
+brain-modelstore.workspace = true
+serde_json.workspace = true
+bytemuck.workspace = true
+
+[dev-dependencies]
+# `testutil::skip` / `skip_unavailable` - an absent fixture can be made fatal
+# and absent hardware cannot.
+brain-testutil.workspace = true

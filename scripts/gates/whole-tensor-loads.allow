@@ -96,3 +96,4 @@ crates/web/src/web.rs	2	class T: one whole tensor as fp32 on the host, then Weig
 crates/worldmirror2/src/import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
 crates/yolov8/src/import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
 crates/model/src/ops/upload_source.rs	2	fallback of upload_from_source for a source with no packed view (a plain f32 map, a computed or wrapped source): one tensor at a time, delete as sources gain packed views
+crates/ouro/src/import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
