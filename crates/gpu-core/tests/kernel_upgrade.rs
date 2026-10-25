@@ -39,7 +39,9 @@ fn fill(m: u32, k: u32) -> Vec<f32> {
 /// exact — that is asserted in `bench_max_abs_row.rs`, which can register both.
 fn host_scales(x: &[f32], m: u32, k: u32) -> Vec<f32> {
     x[..(m * k) as usize]
-        .chunks_exact(32)
+        .as_chunks::<32>()
+        .0
+        .iter()
         .map(|group| group.iter().fold(0f32, |a, &v| a.max(v.abs())).max(1e-8) / 127.0)
         .collect()
 }
