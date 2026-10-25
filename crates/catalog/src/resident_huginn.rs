@@ -234,9 +234,12 @@ impl ResidentModel for HuginnResident {
         });
         let path = self.path.clone();
         let (ctx, block, batch) = (self.ctx, self.block_size, self.max_batch);
-        let steps = self.steps;
+        // The depth is resolved here, not left to the engine's own default:
+        // `mean_recurrence` is the training-time mean (32 for the released
+        // checkpoint), and each iteration is another core stage of KV.
+        let steps = self.steps_for(&self.cfg()?);
         let inst = on_device(device, move || {
-            let engine = huginn::serve::Engine::open_with_steps(&path, ctx, block, steps)?;
+            let engine = huginn::serve::Engine::open_with_steps(&path, ctx, block, Some(steps))?;
             let sched = Scheduler::new(engine, batch as usize);
             Ok::<Box<dyn Instance>, String>(Box::new(ScheduledInstance::new(front, sched, batch as usize)))
         })??;

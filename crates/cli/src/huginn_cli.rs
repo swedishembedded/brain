@@ -8,7 +8,7 @@
 
 //! `brain huginn …` - import and run the Huginn recurrent-depth decoder.
 //!
-//!   brain huginn import   --hf <dir> --out huginn.safetensors
+//!   brain huginn import   --hf <dir> --out huginn.safetensors [--id <vendor>/<repo>]
 //!   brain huginn generate --checkpoint <hf dir | checkpoint> --prompt "…"
 //!                         [--tokenizer tokenizer.json] [--max-new 64] [--ctx 1024]
 //!                         [--steps N]
@@ -37,12 +37,15 @@ fn import(argv: &[String]) {
     let mut a = Args::new(argv);
     let hf = a.take_str("--hf");
     let out = a.str_or("--out", "huginn.safetensors");
+    // The store serves a checkpoint under the id its card carries; a pull names
+    // it `<vendor>/<repo>`, so an import into a store layout passes the same.
+    let id = a.take_str("--id");
     a.finish();
     let Some(hf) = hf else {
         eprintln!("usage: brain huginn import --hf <hf checkpoint dir> --out huginn.safetensors");
         std::process::exit(2);
     };
-    if let Err(e) = huginn::import::import(&hf, &out) {
+    if let Err(e) = huginn::import::import_as(&hf, &out, id.as_deref()) {
         eprintln!("huginn import: {e}");
         std::process::exit(1);
     }
