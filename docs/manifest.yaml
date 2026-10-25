@@ -76,6 +76,7 @@ navigation:
           - docs/reference/models/lfm2.md
           - docs/reference/models/ouro.md
           - docs/reference/models/huginn.md
+          - docs/reference/models/spectrallm.md
           - docs/reference/models/qwen3omnimoe/readme.md
           - docs/reference/models/qwen3vl.md
           - docs/reference/models/qwen3vlmoe.md

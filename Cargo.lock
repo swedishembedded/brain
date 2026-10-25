@@ -1566,6 +1566,7 @@ dependencies = [
  "brain-sam1",
  "brain-sam2",
  "brain-sdxlunet",
+ "brain-spectrallm",
  "brain-supir",
  "brain-t5encoder",
  "brain-testutil",
@@ -2684,6 +2685,22 @@ dependencies = [
  "brain-paramstore",
  "brain-seed",
  "bytemuck",
+ "serde_json",
+]
+
+[[package]]
+name = "brain-spectrallm"
+version = "3.0.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-optim",
+ "brain-paramstore",
+ "brain-qwen3",
+ "brain-testutil",
  "serde_json",
 ]
 

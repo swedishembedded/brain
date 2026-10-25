@@ -68,6 +68,7 @@ default-members = [
     "crates/qwen35",
     "crates/lfm2",
     "crates/ouro",
+    "crates/spectrallm",
     "crates/huginn",
     "crates/modernbert",
     "crates/qwen3vl",
@@ -235,6 +236,7 @@ brain-qwen35moe = { path = "crates/qwen35moe" }
 brain-qwen35 = { path = "crates/qwen35" }
 brain-lfm2 = { path = "crates/lfm2" }
 brain-ouro = { path = "crates/ouro" }
+brain-spectrallm = { path = "crates/spectrallm" }
 brain-huginn = { path = "crates/huginn" }
 brain-modernbert = { path = "crates/modernbert" }
 brain-nemotronasr = { path = "crates/nemotronasr" }

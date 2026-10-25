@@ -341,6 +341,10 @@ pub const ARCHS: &[Arch] = &[
         variants: &[
             Variant { reference: "tomg-group-umd/huginn-0125", params: 3_564_976_800, quants: &[], license: Some("apache-2.0") },
         ]),
+    // SpectralLM: brain's own decoder whose residual stream is a truncated
+    // real Fourier spectrum and whose feed-forward sublayers are spectral
+    // mixers. No upstream checkpoint; models are trained from scratch.
+    arch!("spectrallm", "SpectralLM spectral-mixer decoder", Text, Brain, "brain-spectrallm"),
     // Llama and Qwen2 are CONFIGURATIONS of the dense decoder `brain-qwen3`
     // implements, not crates of their own: identical HF tensor names, told
     // apart only by q/k/v bias, QK-norm and RoPE scaling (`QwenConfig`'s

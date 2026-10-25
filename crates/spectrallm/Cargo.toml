@@ -1,0 +1,24 @@
+[package]
+name = "brain-spectrallm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SpectralLM: a decoder with a truncated real-Fourier residual stream and per-mode spectral mixers."
+
+[lib]
+name = "spectrallm"
+path = "src/lib.rs"
+
+[dependencies]
+brain-checkpoint.workspace = true
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-model.workspace = true
+brain-paramstore.workspace = true
+brain-optim.workspace = true
+brain-data.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true
+brain-qwen3.workspace = true

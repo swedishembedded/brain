@@ -104,6 +104,8 @@ pub use sam_hd::{check_sam_hd, check_sam_hd_shared};
 pub mod horizon;
 pub mod ouro;
 pub use ouro::check_ouro;
+pub mod spectrallm;
+pub use spectrallm::check_spectrallm;
 pub mod huginn;
 pub use huginn::check_huginn;
 pub mod timesfm3;
