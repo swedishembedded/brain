@@ -61,6 +61,9 @@ fn train(argv: &[String]) {
     let checkpoint = a.take_str("--checkpoint").or_else(|| a.take_str("--weights"));
     let tokenizer = a.take_str("--tokenizer");
     let text = a.str_or("--text", DEFAULT_TRAIN_TEXT);
+    // Raw token ids, for a vocabulary no tokenizer here produces (a tiny
+    // fixture checkpoint, a unit-scale run).
+    let ids = a.take_str("--ids");
     let steps = a.u32_or("--steps", 32);
     let seq = a.u32_or("--seq", 128);
     let batch = a.u32_or("--batch", 2);
@@ -74,26 +77,44 @@ fn train(argv: &[String]) {
         eprintln!("usage: brain ouro train --checkpoint <hf dir|checkpoint> [--steps N --seq N --batch N --lr F --clip F --out PATH]");
         std::process::exit(2);
     };
-    let tokenizer = tokenizer.or_else(|| {
-        let p = std::path::Path::new(&checkpoint);
-        let dir = if p.is_dir() { p.to_path_buf() } else { p.parent()?.to_path_buf() };
-        let t = dir.join("tokenizer.json");
-        t.exists().then(|| t.to_string_lossy().to_string())
-    });
-    let Some(tokenizer) = tokenizer else {
-        eprintln!("ouro: no tokenizer.json next to {checkpoint}; pass --tokenizer");
-        std::process::exit(2);
+    let tokenizer = match ids {
+        Some(_) => None,
+        None => tokenizer.or_else(|| {
+            let p = std::path::Path::new(&checkpoint);
+            let dir = if p.is_dir() { p.to_path_buf() } else { p.parent()?.to_path_buf() };
+            let t = dir.join("tokenizer.json");
+            t.exists().then(|| t.to_string_lossy().to_string())
+        }),
     };
-    let tok = match QwenBpe::from_file(&tokenizer) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("tokenizer {tokenizer}: {e}");
-            std::process::exit(1);
+    let tokenizer = match tokenizer {
+        Some(t) => t,
+        None if ids.is_some() => String::new(),
+        None => {
+            eprintln!("ouro: no tokenizer.json next to {checkpoint}; pass --tokenizer or --ids");
+            std::process::exit(2);
         }
     };
-    let mut corpus = tok.encode(&text);
+    let mut corpus = match &ids {
+        Some(raw) => match raw.split(',').map(|t| t.trim().parse::<u32>()).collect::<Result<Vec<u32>, _>>() {
+            Ok(v) => v,
+            Err(_) => {
+                eprintln!("ouro train: --ids takes comma-separated token ids (got {raw:?})");
+                std::process::exit(2);
+            }
+        },
+        None => {
+            let tok = match QwenBpe::from_file(&tokenizer) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("tokenizer {tokenizer}: {e}");
+                    std::process::exit(1);
+                }
+            };
+            tok.encode(&text)
+        }
+    };
     if corpus.len() < 2 {
-        eprintln!("ouro train: the training text encodes to {} token(s)", corpus.len());
+        eprintln!("ouro train: the training data is {} token(s)", corpus.len());
         std::process::exit(2);
     }
     // Causal-LM rows: every row predicts the next token of the corpus, the
@@ -142,12 +163,14 @@ fn train(argv: &[String]) {
     };
     let t0 = Instant::now();
     let model = ouro::model::Ouro::new_train(cfg, b, t, src.as_ref());
+    model::Model::set_batch(&model, model::Batch::Lm { tokens: &tokens, targets: &targets });
     let mut first = None;
     for step in 0..steps {
         model::Model::zero_grads(&model);
         let loss = model::Model::forward(&model);
         model::Model::backward(&model);
-        model::Model::adamw_step(&model, step, lr, 0.0, model::Adam::default(), (clip > 0.0).then_some(clip), 1.0);
+        // AdamW's bias correction is 1-based: step 0 would divide by zero.
+        model::Model::adamw_step(&model, step + 1, lr, 0.0, model::Adam::default(), (clip > 0.0).then_some(clip), 1.0);
         if first.is_none() {
             first = Some(loss);
         }
