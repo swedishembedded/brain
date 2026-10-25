@@ -150,3 +150,52 @@ fn the_weighted_training_loss_matches_the_reference_arithmetic() {
     let want = (loss / count) as f32;
     assert!((got - want).abs() < 2e-4, "weighted loss {got} vs reference {want}");
 }
+
+/// The released 2.6B checkpoint: import from the Hugging Face directory as
+/// downloaded, and match the reference on the same token ids at every pass.
+///
+/// Gated on `BRAIN_OURO_DIR` (the HF checkpoint directory) and the matching
+/// golden, because a plain `make test` must not load a 2.6B model. Set both to
+/// prove the import:
+///
+/// ```text
+/// python tools/goldens/ouro_dump_reference.py \
+///     --checkpoint <hf checkpoint dir> --out testdata/golden/ouro/2.6b
+/// BRAIN_OURO_DIR=<hf checkpoint dir> cargo test -p brain-ouro --test parity
+/// ```
+#[test]
+fn the_released_checkpoint_matches_the_reference_at_every_pass() {
+    use std::path::Path as P;
+    let Some(dir) = std::env::var_os("BRAIN_OURO_DIR").filter(|v| !v.is_empty()) else {
+        brain_testutil::skip("BRAIN_OURO_DIR unset (the released 2.6B checkpoint)");
+        return;
+    };
+    let fixture = brain_testutil::testdata_path("golden/ouro/2.6b");
+    if !fixture.join("golden.safetensors").exists() {
+        brain_testutil::skip("testdata/golden/ouro/2.6b absent (run the dumper with --checkpoint)");
+        return;
+    }
+    let golden = load_golden(&fixture.join("golden.safetensors").to_string_lossy());
+    let (cfg, src) = ouro::import::open_dir(P::new(&dir)).expect("open the released checkpoint");
+    let tokens: Vec<u32> = golden["tokens"].1.iter().map(|v| *v as u32).collect();
+    let n = tokens.len() as u32;
+
+    let model = Ouro::new_inference(cfg.clone(), 1, n, &src);
+    model.set_tokens(&tokens);
+    model.trunk_forward();
+    let (t, d, v) = (cfg.total_ut_steps as usize, cfg.d_model as usize, cfg.vocab as usize);
+    for pass in 0..t {
+        let want_h = &golden["hidden"].1[pass * n as usize * d..(pass + 1) * n as usize * d];
+        let got_h = model.read_hidden(pass);
+        eprintln!("pass {pass}: hidden rel_l2 {:.3e}", rel_l2(&got_h, want_h));
+        assert!(rel_l2(&got_h, want_h) < 2e-3, "pass {pass} hidden rel_l2 {}", rel_l2(&got_h, want_h));
+        let want_g = &golden["gates"].1[pass * n as usize..(pass + 1) * n as usize];
+        let got_g = model.read_gate(pass);
+        assert!(max_abs(&got_g, want_g) < 5e-2, "pass {pass} gate max_abs {}", max_abs(&got_g, want_g));
+        model.head_forward(pass);
+        let got_l = model.read_logits();
+        let want_l = &golden["logits"].1[pass * n as usize * v..(pass + 1) * n as usize * v];
+        eprintln!("pass {pass}: logits rel_l2 {:.3e}", rel_l2(&got_l, want_l));
+        assert!(rel_l2(&got_l, want_l) < 2e-3, "pass {pass} logits rel_l2 {}", rel_l2(&got_l, want_l));
+    }
+}

@@ -20,7 +20,15 @@ writes the checkpoint in Hugging Face layout (`config.json` + custom modules +
 The tiny shape keeps the golden small enough to regenerate quickly while still
 exercising all passes, the gate, the sandwich norms and the RoPE convention.
 
-usage: ouro_dump_reference.py <ouro_reference_dir> [out_dir]
+usage:
+  ouro_dump_reference.py <ouro_reference_dir> [out_dir]
+      Tiny shape, generated checkpoint (the fast math gate).
+
+  ouro_dump_reference.py --checkpoint <hf_dir> --out <out_dir>
+      The released checkpoint, loaded as published (the import gate). The
+      prompt is tokenized by the checkpoint's own tokenizer and the token ids
+      are dumped, so the brain side tests the weights and the math, not a
+      second tokenizer implementation.
 
 `<ouro_reference_dir>` holds the released `configuration_ouro.py` and
 `modeling_ouro.py` (downloaded from the checkpoint repo), which are copied into
@@ -59,7 +67,63 @@ TOKENS = [3, 4, 5, 6]
 SEED = 4242
 
 
+def real_main(checkpoint, out, prompt):
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    tok = AutoTokenizer.from_pretrained(checkpoint, trust_remote_code=True)
+    ids = tok(prompt)["input_ids"]
+    ids = ids[:16]
+    model = AutoModelForCausalLM.from_pretrained(
+        checkpoint, trust_remote_code=True, torch_dtype=torch.float32).float().eval()
+    tokens = torch.tensor([ids], dtype=torch.long)
+    with torch.no_grad():
+        (_base, hs_list, gate_list) = model.model(input_ids=tokens, use_cache=False)
+        hidden = torch.stack([h.squeeze(0) for h in hs_list], 0).contiguous()
+        gates = torch.stack([g.reshape(-1) for g in gate_list], 0).contiguous()
+        logits = torch.stack([model.lm_head(h.squeeze(0)) for h in hs_list], 0).contiguous()
+    cfg = model.config
+    os.makedirs(out, exist_ok=True)
+    golden = {
+        "tokens": torch.tensor(ids, dtype=torch.int32),
+        "hidden": hidden.float(),
+        "gates": gates.float(),
+        "logits": logits.float(),
+    }
+    save_file(golden, os.path.join(out, "golden.safetensors"))
+    manifest = {
+        "model": "ouro",
+        "kind": "released",
+        "tokens": ids,
+        "prompt": prompt,
+        "source": source_block(
+            checkpoint="ByteDance/Ouro-2.6B-Thinking",
+            files=[os.path.join(checkpoint, "model.safetensors")],
+            identity={
+                "d_model": cfg.hidden_size,
+                "n_layers": cfg.num_hidden_layers,
+                "n_heads": cfg.num_attention_heads,
+                "n_kv_heads": cfg.num_key_value_heads,
+                "head_dim": cfg.head_dim,
+                "d_ff": cfg.intermediate_size,
+                "vocab": cfg.vocab_size,
+                "total_ut_steps": cfg.total_ut_steps,
+                "n_tokens": len(ids),
+            },
+        ),
+    }
+    with open(os.path.join(out, "manifest.json"), "w") as f:
+        json.dump(manifest, f, indent=2)
+    print(f"wrote {out} ({len(ids)} tokens, {hidden.numel()} hidden, {logits.numel()} logits)")
+
+
 def main():
+    if "--checkpoint" in sys.argv:
+        import argparse
+        ap = argparse.ArgumentParser()
+        ap.add_argument("--checkpoint", required=True)
+        ap.add_argument("--out", required=True)
+        ap.add_argument("--prompt", default="The capital of France is")
+        a = ap.parse_args()
+        return real_main(a.checkpoint, a.out, a.prompt)
     if len(sys.argv) < 2:
         sys.exit(__doc__)
     ref = sys.argv[1]
