@@ -1353,3 +1353,5 @@ crates/zipdepth/tests/p5_stereo_render.rs	STEREO_PPM
 crates/zipdepth/tests/p5_stereo_render.rs	ZIPDEPTH_NPU_PTH
 crates/huginn/tests/parity.rs	BRAIN_BACKEND
 crates/huginn/tests/decode.rs	BRAIN_BACKEND
+crates/huginn/tests/parity_real.rs	BRAIN_HUGINN_DIR
+crates/huginn/tests/serve.rs	BRAIN_BACKEND

@@ -22,6 +22,13 @@ Driving the reference with an explicit `input_states` is what makes the
 comparison exact: its own `like-init` state is a random draw.
 
 usage: huginn_dump_reference.py <huginn_ref_dir> [out_dir]
+
+The released checkpoint is dumped by the same fixed-state procedure:
+
+  huginn_dump_reference.py <ref_dir> <out_dir> --real <hf checkpoint dir> [--steps N]
+
+which runs a fixed eight-token sequence through the real weights and records
+the same per-step tensors, for the parity ladder's second rung.
 """
 import json
 import os
@@ -72,7 +79,73 @@ STEPS = 3
 SEED = 2027
 
 
+REAL_TOKENS = [3, 5, 7, 11, 13, 17, 19, 23]
+
+
+def dump_real(ckpt_dir, out, steps):
+    """Dump `state_k` / `latent_k` / `logits_k` for the released weights."""
+    from transformers import AutoConfig, AutoModelForCausalLM
+    cfg = AutoConfig.from_pretrained(ckpt_dir, trust_remote_code=True)
+    torch_dtype = torch.float32
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = AutoModelForCausalLM.from_pretrained(
+        ckpt_dir, trust_remote_code=True, torch_dtype=torch_dtype
+    ).to(device).eval()
+    ids = torch.tensor([REAL_TOKENS], dtype=torch.long, device=device)
+    g = torch.Generator().manual_seed(SEED + 1)
+    state = torch.randn(1, len(REAL_TOKENS), cfg.n_embd, generator=g).to(device)
+    goldens = {
+        "tokens": torch.tensor(REAL_TOKENS, dtype=torch.int32),
+        "input_states": state.squeeze(0).float().cpu(),
+    }
+    freqs = model.freqs_cis[:, : ids.shape[1]]
+    embeds = model.transformer.wte(ids) * model.emb_scale
+    with torch.no_grad():
+        for block in model.transformer.prelude:
+            embeds = block(embeds, freqs, torch.tensor(0, device=device), None, None)
+        for k in range(1, steps + 1):
+            x = state.clone()
+            for _ in range(k):
+                x, _ = model.core_block_forward(x, embeds, freqs, None, None, torch.tensor(-1, device=device), 0)
+            out_k = model(
+                ids,
+                input_states=state,
+                num_steps=k,
+                use_cache=False,
+                output_details={"return_logits": True, "return_latents": True, "return_head": False, "return_stats": False},
+            )
+            goldens[f"state_{k}"] = x.squeeze(0).float().cpu().contiguous()
+            goldens[f"latent_{k}"] = out_k.latent_states.squeeze(0).float().cpu().contiguous()
+            goldens[f"logits_{k}"] = out_k.logits.squeeze(0).float().cpu().contiguous()
+    save_file(goldens, os.path.join(out, "golden.safetensors"))
+    with open(os.path.join(out, "manifest.json"), "w") as f:
+        json.dump({
+            "model": "huginn",
+            "kind": "released",
+            "seed": SEED,
+            "tokens": REAL_TOKENS,
+            "steps": steps,
+            "checkpoint": ckpt_dir,
+        }, f, indent=2)
+    print(f"wrote {out} ({steps} steps, {len(REAL_TOKENS)} tokens)")
+
+
 def main():
+    args = [a for a in sys.argv[1:]]
+    if "--real" in args:
+        i = args.index("--real")
+        ckpt_dir = args[i + 1]
+        del args[i : i + 2]
+        steps = 2
+        if "--steps" in args:
+            j = args.index("--steps")
+            steps = int(args[j + 1])
+            del args[j : j + 2]
+        if len(args) != 2:
+            sys.exit(__doc__)
+        os.makedirs(args[1], exist_ok=True)
+        dump_real(ckpt_dir, args[1], steps)
+        return
     if len(sys.argv) < 2:
         sys.exit(__doc__)
     ref = sys.argv[1]

@@ -22,14 +22,16 @@
 //! `init_values["std"]` (`state_init: like-init`), so a parity run must use
 //! the same draw as the reference.
 //!
-//! This crate owns the config/parameter layout, checkpoint import and the
-//! execution graph (see [`model`]). Decoding one token at a time, the paged
-//! serving engine and training of the recurrent core follow.
+//! This crate owns the config/parameter layout, checkpoint import, the
+//! execution graph ([`model`], forward and the analytic backward through the
+//! recurrent core), token-at-a-time decoding with one attention history per
+//! stage ([`decode`]) and the paged continuous-batching engine ([`serve`]).
 
 pub mod config;
 pub mod decode;
 pub mod import;
 pub mod init;
 pub mod model;
+pub mod serve;
 
 pub use config::HuginnConfig;
