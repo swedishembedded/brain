@@ -22,7 +22,7 @@ fn finite(v: &[f32]) -> bool {
 fn every_pass_reads_the_shared_stack_and_produces_a_distinct_state() {
     let cfg = OuroConfig::tiny();
     let w = init_weights(&cfg, 11);
-    let model = Ouro::new(cfg.clone(), 1, 4, &w);
+    let model = Ouro::new_inference(cfg.clone(), 1, 4, &w);
     assert_eq!(model.steps(), 3);
 
     model.set_tokens(&[3, 4, 5, 6]);
@@ -57,7 +57,7 @@ fn every_pass_reads_the_shared_stack_and_produces_a_distinct_state() {
 fn the_released_threshold_selects_the_final_pass() {
     let cfg = OuroConfig::tiny();
     let w = init_weights(&cfg, 12);
-    let model = Ouro::new(cfg.clone(), 1, 4, &w);
+    let model = Ouro::new_inference(cfg.clone(), 1, 4, &w);
     model.set_tokens(&[1, 2, 3, 4]);
     model.trunk_forward();
     let steps = model.exit_steps();
@@ -74,7 +74,7 @@ fn the_embedding_is_applied_once_not_per_pass() {
     // that a zero-depth read is the raw embedding.
     let cfg = OuroConfig::tiny();
     let w = init_weights(&cfg, 13);
-    let model = Ouro::new(cfg.clone(), 1, 4, &w);
+    let model = Ouro::new_inference(cfg.clone(), 1, 4, &w);
     model.set_tokens(&[7, 8, 9, 10]);
     model.trunk_forward();
     let e = model.read_res(0, 0);
@@ -98,7 +98,7 @@ fn the_model_runs_on_the_backend_the_run_requested() {
     }
     let cfg = OuroConfig::tiny();
     let w = init_weights(&cfg, 17);
-    let _model = Ouro::new(cfg, 1, 2, &w);
+    let _model = Ouro::new_inference(cfg, 1, 2, &w);
     let got = gpu_core::backend_name();
     eprintln!("requested backend {want:?}, running on {got:?}");
     assert_eq!(got, want, "asked for {want}, ran on {got}");

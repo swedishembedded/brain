@@ -49,7 +49,7 @@ fn tiny_checkpoint_matches_the_reference_at_every_pass() {
     let d = cfg.d_model as usize;
     let v = cfg.vocab as usize;
 
-    let model = Ouro::new(cfg.clone(), 1, n as u32, &src);
+    let model = Ouro::new_inference(cfg.clone(), 1, n as u32, &src);
     model.set_tokens(&tokens);
     model.trunk_forward();
 
@@ -79,10 +79,74 @@ fn the_exit_rule_agrees_with_the_reference_gates() {
         return;
     }
     let (cfg, src) = ouro::import::open_dir(&dir.join("checkpoint")).expect("open tiny ouro checkpoint");
-    let model = Ouro::new(cfg.clone(), 1, 4, &src);
+    let model = Ouro::new_inference(cfg.clone(), 1, 4, &src);
     model.set_tokens(&[3, 4, 5, 6]);
     model.trunk_forward();
     // Released threshold 1.0: the normalized mass reaches 1 only on the final
     // pass, so every row exits there.
     assert_eq!(model.exit_steps(), vec![cfg.total_ut_steps - 1; 4]);
+}
+
+/// The training objective: every pass's CE weighted by that pass's exit
+/// probability, averaged over supervised rows. Recomputed here on the host
+/// from the reference's own per-pass logits and gates, so the device path
+/// (CE kernels + exit probabilities + weighted sum) is checked against the
+/// released arithmetic rather than against itself.
+#[test]
+fn the_weighted_training_loss_matches_the_reference_arithmetic() {
+    let dir = brain_testutil::testdata_path("golden/ouro/tiny");
+    if !dir.join("golden.safetensors").exists() {
+        brain_testutil::skip("testdata/golden/ouro/tiny absent (run tools/goldens/ouro_dump_reference.py)");
+        return;
+    }
+    let golden = load_golden(&dir.join("golden.safetensors").to_string_lossy());
+    let (cfg, src) = ouro::import::open_dir(&dir.join("checkpoint")).expect("open tiny ouro checkpoint");
+    let tokens: Vec<u32> = golden["tokens"].1.iter().map(|v| *v as u32).collect();
+    let n = tokens.len();
+    let t = cfg.total_ut_steps as usize;
+    let v = cfg.vocab as usize;
+    // Next-token targets within the row; the last position is unsupervised.
+    let targets: Vec<u32> = tokens[1..].iter().copied().chain(std::iter::once(ouro::model::IGNORE)).collect();
+    let count = targets.iter().filter(|x| **x != ouro::model::IGNORE).count() as f64;
+
+    let model = ouro::model::Ouro::new_train(cfg.clone(), 1, n as u32, &src);
+    model::Model::set_batch(&model, model::Batch::Lm { tokens: &tokens, targets: &targets });
+    let got = model::Model::forward(&model);
+
+    // Host reference: p_t from the dumped gates, CE_t from the dumped logits.
+    let gates = &golden["gates"].1;
+    let logits = &golden["logits"].1;
+    let mut lambda = vec![vec![0.0f64; n]; t];
+    for p in 0..t {
+        for r in 0..n {
+            lambda[p][r] = 1.0 / (1.0 + (-(gates[p * n + r] as f64)).exp());
+        }
+    }
+    let mut p = vec![vec![0.0f64; n]; t];
+    let mut remaining = vec![1.0f64; n];
+    for pass in 0..t {
+        for r in 0..n {
+            if pass + 1 < t {
+                p[pass][r] = lambda[pass][r] * remaining[r];
+                remaining[r] *= 1.0 - lambda[pass][r];
+            } else {
+                p[pass][r] = remaining[r];
+            }
+        }
+    }
+    let mut loss = 0.0f64;
+    for pass in 0..t {
+        for r in 0..n {
+            if targets[r] == ouro::model::IGNORE {
+                continue;
+            }
+            let row = &logits[pass * n * v + r * v..pass * n * v + (r + 1) * v];
+            let max = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max) as f64;
+            let sum: f64 = row.iter().map(|x| ((*x as f64) - max).exp()).sum();
+            let ce = (max + sum.ln()) - row[targets[r] as usize] as f64;
+            loss += p[pass][r] * ce;
+        }
+    }
+    let want = (loss / count) as f32;
+    assert!((got - want).abs() < 2e-4, "weighted loss {got} vs reference {want}");
 }

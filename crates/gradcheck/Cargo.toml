@@ -27,6 +27,7 @@ brain-toypid.workspace = true
 brain-toyseq2seq.workspace = true
 brain-toyautoencoder.workspace = true
 brain-horizon.workspace = true
+brain-ouro.workspace = true
 brain-flux2.workspace = true
 # `check_wan` / `check_wan_conditioning` (src/lib.rs) - the Wan video DiT's host
 # training reference.

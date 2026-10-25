@@ -26,6 +26,13 @@ gate and a pass-selected or exit-weighted head.
   same weights, CPU fp32, on the tiny shape.
 - Exit rule: cumulative exit mass over the gate outputs, released threshold
   (1.0 selects the final pass).
+- Training objective and backward: every pass's CE weighted by that pass's exit
+  probability, the gate's own gradient included (and zero on the final pass,
+  whose probability is the remaining mass), accumulated into the one shared
+  parameter set. The weighted loss matches the reference arithmetic recomputed
+  from its own logits and gates; finite differences of the same forward pass
+  on every parameter (the shared 2-layer stack visited three times) on cpu,
+  wgpu, native Vulkan and CUDA.
 
 ## Left to do
 
@@ -35,9 +42,9 @@ gate and a pass-selected or exit-weighted head.
   pass, the decoder reports `passes × blocks_for` to admission, prefix reuse
   and host offload are disabled for the looped path until they are
   pass-aware, and the forward runs the passes over the current token.
-- Backward: per-pass losses weighted by the exit distribution, accumulated
-  into the one shared parameter set, with a finite-difference gradient check
-  on the tiny config; then LoRA fine-tuning.
+- LoRA fine-tuning: adapter sites on the shared stack's linears, with the
+  frozen-base path (full-weight training allocates gradients and AdamW moments
+  for every parameter and does not fit a 2.6B model on one card).
 - Capability, residency, CLI verb, sample and the docs page (the arch row is
   deliberately absent until those exist).
 - Threshold-selected decode across a batch whose rows exit on different
