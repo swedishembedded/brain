@@ -112,12 +112,11 @@ pub fn manifest() -> Manifest {
     Manifest::new(MODEL, "Qwen3.5-35B-A3B hybrid Gated-DeltaNet/GQA sparse-MoE decoder — autoregressive text generation with per-token streaming.", vec![generate])
 }
 
-/// The resident (hot) model: the loaded inference graph plus the key that fixes
-/// it. Reused while the weights path/precision match and the built context
+/// The resident (hot) model: the loaded inference graph; the key that fixes
+/// it (weights, context capacity, precision) is the cache's [`HotKey`]. Reused while the weights path/precision match and the built context
 /// capacity covers the request; rebuilt (freeing the old weights first)
 /// otherwise — the exact same caching key `qwen3::caps::Hot` uses.
 struct QwenResident {
-    cap: u32,
     model: Qwen35,
     /// The LM head, read once when this resident is (re)built - see
     /// `crate::sample::generate_kv_stream_with_head`'s doc comment for the
@@ -237,7 +236,7 @@ impl Action for GenerateAction {
                 let init = container.by_role("");
                 let model = if precision == "int8" { Qwen35::new_i8(cfg, 1, cap, &init) } else { Qwen35::new(cfg, 1, cap, &init) };
                 let head = model.read_weight(model.cfg.head_weight());
-                Ok(QwenResident { cap, model, head })
+                Ok(QwenResident { model, head })
             },
             |hot| {
                 let model = &hot.model;
