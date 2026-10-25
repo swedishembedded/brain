@@ -394,6 +394,29 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (m, k, n) = (p(0)?, p(1)?, p(2)?);
             f(2 * m * k * n, 4 * (m * k + n * k + m * n))
         }
+        // Per-channel feature scaling (spectral filter banks), params
+        // [rows, channels, m(, accumulate)]: expand writes rows*C*m products,
+        // contract and the filter gradient each do a multiply-add per
+        // (row, channel, feature).
+        "chan_scale_expand" => {
+            let (rows, ch, m) = (p(0)?, p(1)?, p(2)?);
+            f(rows * ch * m, 4 * (rows * m + ch * m + rows * ch * m))
+        }
+        "chan_scale_contract" => {
+            let (rows, ch, m, acc) = (p(0)?, p(1)?, p(2)?, p(3).unwrap_or(0));
+            f(2 * rows * ch * m, 4 * (rows * ch * m + ch * m + rows * m * (1 + acc.min(1))))
+        }
+        "chan_scale_grad" => {
+            let (rows, ch, m) = (p(0)?, p(1)?, p(2)?);
+            f(2 * rows * ch * m, 4 * (rows * m + rows * ch * m + 2 * ch * m))
+        }
+        // Truncated real Fourier synthesis/analysis by complex radix-2 FFT,
+        // params [rows, D, m, log2 D]: (D/2) log2 D butterflies per row at
+        // 10 flops each (one complex multiply, two complex adds).
+        "rdft_synth" | "rdft_analysis" => {
+            let (rows, d, m, log2d) = (p(0)?, p(1)?, p(2)?, p(3)?);
+            f(rows * 5 * d * log2d, 4 * rows * (d + m))
+        }
         // Column tile of a wide output: params [m, k, n_full, n_off, n_tile].
         "matmul_tile" => {
             let (m, k, nt) = (p(0)?, p(1)?, p(4)?);

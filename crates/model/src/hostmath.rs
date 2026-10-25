@@ -342,6 +342,40 @@ pub fn rope_neox_row(buf: &mut [f32], heads: usize, hd: usize, pos: usize, theta
     rope_neox(buf, 1, heads, hd, pos, theta);
 }
 
+/// The lowest `m` functions of the real orthonormal Fourier basis of `R^d`,
+/// as the `[d, m]` row-major synthesis matrix `S` (`S[j, i] = phi_i(j)`).
+///
+/// Frequency order: `phi_0 = 1/sqrt(d)`, then for `k = 1 .. d/2-1` the pair
+/// `phi_{2k-1}(j) = sqrt(2/d) cos(2 pi k j/d)`, `phi_{2k}(j) = sqrt(2/d)
+/// sin(2 pi k j/d)`, and last the Nyquist `phi_{d-1}(j) = (-1)^j/sqrt(d)`.
+/// The columns are orthonormal (`SᵀS = I_m`), so `x = S z` and `z = Sᵀ x`
+/// are each other's adjoints. Read as a `matmul.wgsl` weight (`[out, in]`),
+/// `S` maps `m` coefficients to `d` samples and its transpose maps back;
+/// `rdft_synth.wgsl`/`rdft_analysis.wgsl` compute the same products by FFT.
+/// Evaluated in f64; `d` must be even and `m <= d`.
+pub fn real_fourier_basis(d: usize, m: usize) -> Vec<f32> {
+    assert!(d >= 2 && d.is_multiple_of(2), "real_fourier_basis: d = {d} must be even and at least 2");
+    assert!(m >= 1 && m <= d, "real_fourier_basis: m = {m} must be in 1..=d ({d})");
+    let df = d as f64;
+    let (dc, pair) = (1.0 / df.sqrt(), (2.0 / df).sqrt());
+    let mut s = vec![0.0f32; d * m];
+    for j in 0..d {
+        for i in 0..m {
+            let v = if i == 0 {
+                dc
+            } else if i == d - 1 {
+                if j % 2 == 0 { dc } else { -dc }
+            } else {
+                let k = i.div_ceil(2) as f64;
+                let theta = 2.0 * std::f64::consts::PI * k * j as f64 / df;
+                if i % 2 == 1 { pair * theta.cos() } else { pair * theta.sin() }
+            };
+            s[j * m + i] = v as f32;
+        }
+    }
+    s
+}
+
 /// `out[o] = Σ_k w[o*inn + k] * x[k]` — `y = x·Wᵀ` with `W: [out, inn]`
 /// row-major, matching `matmul.wgsl`'s weight layout at `m = 1`.
 pub fn matvec(w: &[f32], x: &[f32], out: usize, inn: usize) -> Vec<f32> {
@@ -586,6 +620,34 @@ mod tests {
         assert_eq!(cfg_blend(&cond, &uncond, 1.0), cond);
         assert_eq!(cfg_blend(&cond, &uncond, 0.0), uncond);
         assert_eq!(cfg_blend(&cond, &uncond, 3.0), [2.0, -7.0, 8.0], "guidance extrapolates past the conditional branch");
+    }
+
+    /// The basis is orthonormal for every retained width, including the full
+    /// basis with its Nyquist column, and its columns are the documented
+    /// frequencies in the documented order.
+    #[test]
+    fn real_fourier_basis_is_orthonormal_and_frequency_ordered() {
+        for (d, m) in [(2usize, 2usize), (8, 8), (16, 5), (64, 64), (64, 17), (512, 256)] {
+            let s = real_fourier_basis(d, m);
+            for a in 0..m {
+                for b in 0..m {
+                    let dot: f64 = (0..d).map(|j| s[j * m + a] as f64 * s[j * m + b] as f64).sum();
+                    let want = if a == b { 1.0 } else { 0.0 };
+                    assert!((dot - want).abs() < 1e-5, "d={d} m={m}: <phi_{a}, phi_{b}> = {dot}");
+                }
+            }
+        }
+        let (d, m) = (16usize, 16usize);
+        let s = real_fourier_basis(d, m);
+        let (dc, pair) = (1.0 / (d as f64).sqrt(), (2.0 / d as f64).sqrt());
+        for j in 0..d {
+            let theta = 2.0 * std::f64::consts::PI * 3.0 * j as f64 / d as f64;
+            assert!((s[j * m] as f64 - dc).abs() < 1e-6, "phi_0 is constant");
+            assert!((s[j * m + 5] as f64 - pair * theta.cos()).abs() < 1e-6, "phi_5 is cos(3)");
+            assert!((s[j * m + 6] as f64 - pair * theta.sin()).abs() < 1e-6, "phi_6 is sin(3)");
+            let nyq = if j % 2 == 0 { dc } else { -dc };
+            assert!((s[j * m + d - 1] as f64 - nyq).abs() < 1e-6, "phi_(d-1) is the Nyquist alternation");
+        }
     }
 
     /// The point of this module: the host result must equal what the WGSL

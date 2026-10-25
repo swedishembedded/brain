@@ -270,6 +270,12 @@ pub const CE_VALUE_MASKED: &str = include_str!("../wgsl/ce_value_masked.wgsl");
 pub const CE_VALUE_STATS_ROWS: &str = include_str!("../wgsl/ce_value_stats_rows.wgsl");
 /// `wgsl/chan_place.wgsl`
 pub const CHAN_PLACE: &str = include_str!("../wgsl/chan_place.wgsl");
+/// `wgsl/chan_scale_contract.wgsl`
+pub const CHAN_SCALE_CONTRACT: &str = include_str!("../wgsl/chan_scale_contract.wgsl");
+/// `wgsl/chan_scale_expand.wgsl`
+pub const CHAN_SCALE_EXPAND: &str = include_str!("../wgsl/chan_scale_expand.wgsl");
+/// `wgsl/chan_scale_grad.wgsl`
+pub const CHAN_SCALE_GRAD: &str = include_str!("../wgsl/chan_scale_grad.wgsl");
 /// `wgsl/ciou.wgsl`
 pub const CIOU: &str = include_str!("../wgsl/ciou.wgsl");
 /// `wgsl/ciou_grad.wgsl`
@@ -989,6 +995,10 @@ pub const QUANT_PACK: &str = include_str!("../wgsl/quant_pack.wgsl");
 pub const QUICK_GELU: &str = include_str!("../wgsl/quick_gelu.wgsl");
 /// `wgsl/quick_gelu_bwd.wgsl`
 pub const QUICK_GELU_BWD: &str = include_str!("../wgsl/quick_gelu_bwd.wgsl");
+/// `wgsl/rdft_analysis.wgsl`
+pub const RDFT_ANALYSIS: &str = include_str!("../wgsl/rdft_analysis.wgsl");
+/// `wgsl/rdft_synth.wgsl`
+pub const RDFT_SYNTH: &str = include_str!("../wgsl/rdft_synth.wgsl");
 /// `wgsl/region_copy.wgsl`
 pub const REGION_COPY: &str = include_str!("../wgsl/region_copy.wgsl");
 /// `wgsl/rel_shift.wgsl`
@@ -1433,6 +1443,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("ce_value_masked", CE_VALUE_MASKED),
     ("ce_value_stats_rows", CE_VALUE_STATS_ROWS),
     ("chan_place", CHAN_PLACE),
+    ("chan_scale_contract", CHAN_SCALE_CONTRACT),
+    ("chan_scale_expand", CHAN_SCALE_EXPAND),
+    ("chan_scale_grad", CHAN_SCALE_GRAD),
     ("ciou", CIOU),
     ("ciou_grad", CIOU_GRAD),
     ("clip_coef", CLIP_COEF),
@@ -1775,6 +1788,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("quant_pack", QUANT_PACK),
     ("quick_gelu", QUICK_GELU),
     ("quick_gelu_bwd", QUICK_GELU_BWD),
+    ("rdft_analysis", RDFT_ANALYSIS),
+    ("rdft_synth", RDFT_SYNTH),
     ("region_copy", REGION_COPY),
     ("rel_shift", REL_SHIFT),
     ("rel_shift_bwd", REL_SHIFT_BWD),
