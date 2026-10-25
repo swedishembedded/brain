@@ -14,6 +14,7 @@ named on the model's own page (see
 | Architecture | Solves | Infer | Train | LoRA |
 |---|---|:---:|:---:|:---:|
 | [`qwen3`](qwen3.md) ⤓ | instruct/chat LLM, tool calls, paged-KV serving | [x] | [x] | [x] |
+| [`ouro`](ouro.md) | looped decoder: one shared stack run four times per token | [x] | [ ] | [ ] |
 | [`qwen35moe`](qwen35moe.md) | hybrid GDN/GQA sparse-MoE decoder | [x] | [ ] | [x] |
 | [`qwen35`](qwen35.md) | dense hybrid GDN/GQA decoder + MTP + vision splice | [x] | [x] | [x] |
 | [`gpt2`](gpt2.md) | dense nanoGPT-parity baseline | [x] | [x] | [ ] |

@@ -74,6 +74,7 @@ navigation:
           - docs/reference/models/glmdsa/npu.md
           - docs/reference/models/deepseek2.md
           - docs/reference/models/lfm2.md
+          - docs/reference/models/ouro.md
           - docs/reference/models/qwen3omnimoe/readme.md
           - docs/reference/models/qwen3vl.md
           - docs/reference/models/qwen3vlmoe.md

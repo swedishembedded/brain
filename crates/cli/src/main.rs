@@ -30,6 +30,7 @@ mod gguf_cli;
 mod gpt_cli;
 mod image_io;
 mod lfm_cli;
+mod ouro_cli;
 mod load_line;
 mod ltxv_cli;
 mod minicpmv_cli;

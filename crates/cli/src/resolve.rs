@@ -48,6 +48,7 @@ const ARCH_HANDLERS: &[(&str, Handler)] = &[
     ("minicpmv", crate::minicpmv_cli::run_minicpmv),
     ("glmdsa", crate::glm_cli::run_glm),
     ("lfm2", crate::lfm_cli::run_lfm),
+    ("ouro", crate::ouro_cli::run_ouro),
     ("qwen3tts", crate::tts_cli::run_tts),
     ("yolov8", crate::yolo_cli::run_yolo),
     ("zipdepth", crate::depth_cli::run_depth),
@@ -380,6 +381,7 @@ const RESOLVER_MIGRATED_ARCHS: &[&str] = &[
     "t5encoder",
     "cosyvoice",
     "minimaxmusic3",
+    "ouro",
 ];
 
 fn dispatch_arch(arch: &str, rest: Vec<String>) {

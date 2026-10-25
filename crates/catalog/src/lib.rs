@@ -67,6 +67,7 @@ pub mod resident_forecast;
 pub mod resident_januspro;
 pub mod resident_horizon;
 pub mod resident_lfm;
+pub mod resident_ouro;
 pub mod resident_llm;
 pub mod resident_ltxv;
 pub mod resident_minimaxh3;
@@ -517,6 +518,12 @@ pub fn models() -> Vec<ModelEntry> {
         ModelEntry {
             manifest: lfm2::caps::manifest,
             provider: always!(lfm2::caps::LfmProvider::new()),
+            spec: None,
+            resident: None,
+        },
+        ModelEntry {
+            manifest: resident_ouro::manifest,
+            provider: always!(resident_ouro::OuroProvider::new()),
             spec: None,
             resident: None,
         },

@@ -323,6 +323,15 @@ pub const ARCHS: &[Arch] = &[
             Variant { reference: "Qwen/Qwen3-14B", params: 14_800_000_000, quants: &["Q4_K_M", "Q5_0", "Q5_K_M", "Q6_K", "Q8_0"], license: None },
             Variant { reference: "Qwen/Qwen3-32B", params: 32_800_000_000, quants: &["Q4_K_M", "Q5_0", "Q5_K_M", "Q6_K", "Q8_0"], license: None },
         ]),
+    // Ouro: one shared transformer stack executed `total_ut_steps` times per
+    // token. llama.cpp has no `LLM_ARCH_OURO`, so the id is the upstream
+    // architecture name in brain's own spelling. Four passes of the 48-layer
+    // stack are four attention histories per sequence, which is the serving
+    // engine's distinguishing cost.
+    arch!("ouro", "Ouro looped decoder", Text, Brain, "brain-ouro", hf: &["OuroForCausalLM"], default_ref: Some("ByteDance/Ouro-2.6B-Thinking"),
+        variants: &[
+            Variant { reference: "ByteDance/Ouro-2.6B-Thinking", params: 2_667_974_657, quants: &[], license: Some("apache-2.0") },
+        ]),
     // Llama and Qwen2 are CONFIGURATIONS of the dense decoder `brain-qwen3`
     // implements, not crates of their own: identical HF tensor names, told
     // apart only by q/k/v bias, QK-norm and RoPE scaling (`QwenConfig`'s

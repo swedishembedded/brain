@@ -51,6 +51,8 @@ fn paged_engine_reproduces_the_models_own_greedy_streams() {
     for (table, prompt) in tables.iter_mut().zip(&prompts) {
         let hidden = eng.prefill(table, prompt);
         let first = eng.admit_greedy(&hidden);
+        let want_first = reference_next(&cfg, &w, prompt);
+        assert_eq!(first, want_first, "first token after prefill");
         let mut s = prompt.clone();
         s.push(first);
         streams.push(s);

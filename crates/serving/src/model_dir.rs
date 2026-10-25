@@ -656,6 +656,13 @@ fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, qwen_c
                 None
             }
         },
+        "ouro" => match catalog::resident_ouro::OuroResident::from_card(weights, card, tokenizer) {
+            Ok(o) => Some(Arc::new(o)),
+            Err(e) => {
+                eprintln!("brain: skip {} ({e})", card.id);
+                None
+            }
+        },
         "yolo" => Some(Arc::new(catalog::resident_yolo::YoloResident::from_card(weights, card, tokenizer))),
         "depth" => Some(Arc::new(catalog::resident_depth::DepthResident::from_card(weights, card, tokenizer))),
         // What `crate::gguf_import`'s registry-driven conversion stamps on the
@@ -756,6 +763,12 @@ fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<St
         return Ok(Built::Other(Arc::new(catalog::resident_yolo::YoloResident::from_card(pt, card, None))));
     }
     let other: Result<Arc<dyn ResidentModel>, String> = match brain_family(&card.family) {
+        // A looped decoder's HF directory is the model: config + tokenizer +
+        // safetensors, read as pulled.
+        "ouro" => {
+            let dir = roles.get("weights").and_then(|p| p.to_str()).ok_or("compound manifest missing role \"weights\"")?;
+            catalog::resident_ouro::OuroResident::from_card(dir, card, None).map(|o| Arc::new(o) as Arc<dyn ResidentModel>)
+        }
         "zimage" => {
             let paths = zimage_paths_from_roles(roles)?;
             catalog::resident_zimage::ZImageResident::from_paths(card.id.clone(), paths).map(|z| Arc::new(z) as Arc<dyn ResidentModel>)

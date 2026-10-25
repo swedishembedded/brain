@@ -29,6 +29,13 @@ gate and a pass-selected or exit-weighted head.
 - Released-checkpoint parity: the real 2.6B weights imported from the Hugging
   Face directory reproduce the reference's per-pass hidden state and logits at
   rel_l2 3-8e-6 on the first four passes (Tesla P40, wgpu).
+- `brain ouro import|generate`, the arch row, the docs page and the model
+  index row; a `catalog` resident that serves the same engine over HTTP,
+  D-Bus and the SDK with the checkpoint's own BPE tokenizer and ChatML
+  rendering.
+- Whole-prompt prefill through the paged pools (one pass per recurrent step,
+  `m = n`), gated against the full-sequence forward; per-pass index buffers
+  keep every pass's attention on its own block table.
 - Paged continuous-batching engine (`crate::serve::Engine`): `T` pools per
   layer, one block table per pass per sequence, admission charged
   `passes × blocks_for`; prefill and greedy/top-k decode go through the same
@@ -48,18 +55,16 @@ gate and a pass-selected or exit-weighted head.
 
 ## Left to do
 
-- Real-checkpoint import and parity on a short prompt at fp32 (the tiny golden
-  proves the math; the real weights prove the import).
-- Capability, residency, catalog row, CLI verb and the docs page over the
-  paged engine; serve the real checkpoint and measure prefill/decode
-  throughput. Prefix reuse and host offload stay off for the looped path until
-  they are pass-aware.
-- Chunked prefill: the current engine reads a prompt one token at a time
-  through the decode step, which is correct but slow for long agent prompts.
+- End-to-end serving on the real checkpoint: measure prefill/decode
+  throughput, and run the brain-served model through an agent workload.
+  Prefix reuse and host offload stay off for the looped path until they are
+  pass-aware.
+- Prefill memory: the whole-prompt path materializes `[heads, n, n]` scores,
+  fine at agent prompt lengths but not at the checkpoint's full context; a
+  chunked path (paged chunk attention) is the next scaling step.
 - LoRA fine-tuning: adapter sites on the shared stack's linears, with the
   frozen-base path (full-weight training allocates gradients and AdamW moments
   for every parameter and does not fit a 2.6B model on one card).
-- Capability, residency, CLI verb, sample and the docs page (the arch row is
-  deliberately absent until those exist).
+- A runnable sample and its e2e registration.
 - Threshold-selected decode across a batch whose rows exit on different
   passes.
