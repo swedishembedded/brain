@@ -252,12 +252,15 @@ impl Engine {
         Ok(id)
     }
 
-    /// A linear over `m` rows: the register-tiled kernel for a prefill-sized
-    /// slab where the device can run its 256-thread workgroup, the naive
-    /// per-element kernel elsewhere (decode's single row, the CPU JIT).
+    /// A linear over `m` rows: one workgroup per output column for a decode
+    /// row (the kernel reads each weight row once for all m rows), the
+    /// register-tiled kernel for a prefill-sized slab on a device with its
+    /// 256-thread workgroup, the naive per-element kernel elsewhere.
     fn linear(&self, steps: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, out: &DeviceBuffer, m: u32, k: u32, n: u32) {
         let w = self.ps.w(wname);
-        if m >= 128 && self.gpu.caps().max_workgroup_size >= 256 {
+        if m <= 32 {
+            steps.push(self.gpu.dispatch(model::MATMUL_GEMV_ID, &[x, w, out], &[m, k, n], gpu_core::Dispatch::Workgroups(n)));
+        } else if m >= 128 && self.gpu.caps().max_workgroup_size >= 256 {
             let (kernel, grid) = ::model::block::pick_gemm(m as usize, n as usize, model::MATMUL_ID, model::MATMUL_REG2_ID, false);
             steps.push(self.gpu.dispatch(kernel, &[x, w, out], &[m, k, n], grid));
         } else {
@@ -307,9 +310,9 @@ impl Engine {
                 let out: &DeviceBuffer = if p == 0 { &self.h[(l + 1) % 2] } else { &self.h[l % 2] };
                 let pfx = |name: &str| format!("blocks.{l}.{name}");
                 steps.push(::model::block::rmsnorm_fwd(gpu, &ids, prev, self.ps.w(&pfx("ln1.weight")), &s.xn1, d, 1, cfg.norm_eps));
-                steps.push(gpu.step(model::MATMUL_ID, &[&s.xn1, self.ps.w(&pfx("attn.wq.weight")), &s.q], &[1, d, hq], hq));
-                steps.push(gpu.step(model::MATMUL_ID, &[&s.xn1, self.ps.w(&pfx("attn.wk.weight")), &s.k], &[1, d, hkv], hkv));
-                steps.push(gpu.step(model::MATMUL_ID, &[&s.xn1, self.ps.w(&pfx("attn.wv.weight")), &s.v], &[1, d, hkv], hkv));
+                self.linear(&mut steps, &s.xn1, &pfx("attn.wq.weight"), &s.q, 1, d, hq);
+                self.linear(&mut steps, &s.xn1, &pfx("attn.wk.weight"), &s.k, 1, d, hkv);
+                self.linear(&mut steps, &s.xn1, &pfx("attn.wv.weight"), &s.v, 1, d, hkv);
                 steps.push(rope_at(gpu, &s.q, nh, hd, hq, pos, cfg.rope_theta));
                 steps.push(rope_at(gpu, &s.k, nkv, hd, hkv, pos, cfg.rope_theta));
                 steps.extend(::model::block::gqa_decode_batched_step(
@@ -335,25 +338,26 @@ impl Engine {
                     &self.probs,
                     &s.ctx,
                 ));
-                steps.push(gpu.step(model::MATMUL_ID, &[&s.ctx, self.ps.w(&pfx("attn.wo.weight")), &s.proj], &[1, hq, d], d));
+                self.linear(&mut steps, &s.ctx, &pfx("attn.wo.weight"), &s.proj, 1, hq, d);
                 steps.push(::model::block::rmsnorm_fwd(gpu, &ids, &s.proj, self.ps.w(&pfx("ln1_2.weight")), &s.xn1_2, d, 1, cfg.norm_eps));
                 steps.push(gpu.step(model::ADD2_ID, &[prev, &s.xn1_2, &s.xmid], &[d], d));
                 steps.push(::model::block::rmsnorm_fwd(gpu, &ids, &s.xmid, self.ps.w(&pfx("ln2.weight")), &s.xn2, d, 1, cfg.norm_eps));
-                steps.push(gpu.step(model::MATMUL_ID, &[&s.xn2, self.ps.w(&pfx("mlp.gate.weight")), &s.gate_pre], &[1, d, ff], ff));
-                steps.push(gpu.step(model::MATMUL_ID, &[&s.xn2, self.ps.w(&pfx("mlp.up.weight")), &s.up], &[1, d, ff], ff));
+                self.linear(&mut steps, &s.xn2, &pfx("mlp.gate.weight"), &s.gate_pre, 1, d, ff);
+                self.linear(&mut steps, &s.xn2, &pfx("mlp.up.weight"), &s.up, 1, d, ff);
                 steps.push(::model::block::swiglu_fwd(gpu, &ids, &s.gate_pre, &s.up, &s.mlp_h, ff));
-                steps.push(gpu.step(model::MATMUL_ID, &[&s.mlp_h, self.ps.w(&pfx("mlp.down.weight")), &s.mlp_out], &[1, ff, d], d));
+                self.linear(&mut steps, &s.mlp_h, &pfx("mlp.down.weight"), &s.mlp_out, 1, ff, d);
                 steps.push(::model::block::rmsnorm_fwd(gpu, &ids, &s.mlp_out, self.ps.w(&pfx("ln2_2.weight")), &s.xn2_2, d, 1, cfg.norm_eps));
                 steps.push(gpu.step(model::ADD2_ID, &[&s.xmid, &s.xn2_2, out], &[d], d));
                 prev = out;
             }
             steps.push(::model::block::rmsnorm_fwd(gpu, &ids, prev, self.ps.w("norm.weight"), &self.hs[p], d, 1, cfg.norm_eps));
-            steps.push(gpu.step(model::MATMUL_ID, &[&self.hs[p], self.ps.w("gate.weight"), &self.gates[p]], &[1, d, 1], 1));
+            self.linear(&mut steps, &self.hs[p], "gate.weight", &self.gates[p], 1, d, 1);
             steps.push(gpu.step(model::BIAS_ADD_ID, &[&self.gates[p], self.ps.w("gate.bias")], &[1, 1], 1));
         }
         gpu.submit(&[], &steps);
         let pass = self.choose_exit();
-        let head = vec![gpu.step(model::MATMUL_ID, &[&self.hs[pass], self.ps.w("lm_head.weight"), &self.logits], &[1, d, cfg.vocab], cfg.vocab)];
+        let mut head = Vec::new();
+        self.linear(&mut head, &self.hs[pass], "lm_head.weight", &self.logits, 1, d, cfg.vocab);
         gpu.submit(&[], &head);
         self.last_pass.set(pass);
         gpu.read(&self.logits, cfg.vocab as usize)
@@ -590,7 +594,8 @@ impl PagedDecoder for Engine {
     fn logits(&self, hidden: &[f32]) -> Vec<f32> {
         self.gpu.write_f32(&self.hrow, hidden);
         let (d, v) = (self.cfg.d_model, self.cfg.vocab);
-        let steps = vec![self.gpu.step(model::MATMUL_ID, &[&self.hrow, self.ps.w("lm_head.weight"), &self.logits], &[1, d, v], v)];
+        let mut steps = Vec::new();
+        self.linear(&mut steps, &self.hrow, "lm_head.weight", &self.logits, 1, d, v);
         self.gpu.submit(&[], &steps);
         self.gpu.read(&self.logits, v as usize)
     }
