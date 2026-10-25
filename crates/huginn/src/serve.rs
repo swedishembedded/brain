@@ -126,7 +126,10 @@ pub struct Engine {
     ps: ParamStore,
     /// Recurrent iterations the core runs per position.
     steps: u32,
-    /// One allocator per stage: each stage has its own paged plane, so a
+    /// Length of the KV-sharing ring, in recurrent stages (`None` = one
+    /// history per stage). See `Engine::open_with_sharing`.
+    share: Option<u32>,
+    /// One allocator per KV plane: each plane is its own paged pool, so a
     /// sequence's block tables draw from independent pools of the same
     /// capacity.
     allocs: Vec<BlockAllocator>,
@@ -136,7 +139,11 @@ pub struct Engine {
     cap: u32,
     /// Weight prefix of each stage, in execution order.
     stages: Vec<String>,
-    /// One `[max_tokens, d]` K/V plane per stage.
+    /// The KV plane each stage reads and writes. Without sharing this is the
+    /// stage's own index; under a ring, several recurrent stages map to the
+    /// same plane and the later one overwrites the earlier one's history.
+    stage_plane: Vec<usize>,
+    /// `[max_tokens, d]` K/V planes, one per plane index.
     k_pool: Vec<DeviceBuffer>,
     v_pool: Vec<DeviceBuffer>,
     rows: HashMap<u32, Row>,
@@ -192,6 +199,24 @@ impl Engine {
     /// history, so a long context and the released depth compete for the same
     /// card.
     pub fn open_with_steps(path: &str, max_tokens: u32, block_size: u32, depth: Option<u32>) -> Result<Engine, String> {
+        Engine::open_with_sharing(path, max_tokens, block_size, depth, None)
+    }
+
+    /// [`Engine::open`] with recurrent depth and KV sharing chosen by the
+    /// caller.
+    ///
+    /// `share` is the length, in recurrent stages, of the ring of attention
+    /// histories: stage `k` of the flattened core sequence (iteration `k /
+    /// n_recurrent`, block `k % n_recurrent`) uses plane `k % share`, so a
+    /// later iteration overwrites the history of the one `share /
+    /// n_recurrent` earlier. This is the released model's own `compress-sN`
+    /// KV strategy: it cuts the pool from `steps` iterations' histories to
+    /// `share / n_recurrent` of them at a small divergence from the full
+    /// history, which is what lets the trained depth (32 iterations) run
+    /// beside fp32 weights on one card. `None` keeps every stage's own
+    /// history, and a `share` at least as large as the core's stage count is
+    /// the same thing.
+    pub fn open_with_sharing(path: &str, max_tokens: u32, block_size: u32, depth: Option<u32>, share: Option<u32>) -> Result<Engine, String> {
         let gpu = Gpu::new(model::PIPELINES);
         let (cfg, ps) = if std::path::Path::new(path).is_dir() {
             let (cfg, src) = crate::import::open_dir(std::path::Path::new(path))?;
@@ -206,21 +231,35 @@ impl Engine {
             (cfg, ps)
         };
         let steps = depth.filter(|d| *d > 0).unwrap_or(cfg.mean_recurrence);
-        Ok(Engine::build(gpu, cfg, ps, steps, max_tokens, block_size))
+        Ok(Engine::build(gpu, cfg, ps, steps, max_tokens, block_size, share))
     }
 
     /// Build from an in-memory weight source for a chosen number of recurrent
     /// iterations (tests use `init::init_weights`).
     pub fn from_source(cfg: HuginnConfig, steps: u32, src: &dyn checkpoint::TensorSource, max_tokens: u32, block_size: u32) -> Engine {
+        Engine::from_source_sharing(cfg, steps, None, src, max_tokens, block_size)
+    }
+
+    /// [`Engine::from_source`] with a KV-sharing ring (`None` = one history
+    /// per stage).
+    pub fn from_source_sharing(
+        cfg: HuginnConfig,
+        steps: u32,
+        share: Option<u32>,
+        src: &dyn checkpoint::TensorSource,
+        max_tokens: u32,
+        block_size: u32,
+    ) -> Engine {
         let gpu = Gpu::new(model::PIPELINES);
         let roles = cfg.param_list().into_iter().map(|(n, c)| (n, c, paramstore::Role::Frozen)).collect();
         let ps = ParamStore::new_with_roles_src(&gpu, roles, src);
-        Engine::build(gpu, cfg, ps, steps, max_tokens, block_size)
+        Engine::build(gpu, cfg, ps, steps, max_tokens, block_size, share)
     }
 
-    fn build(gpu: Gpu, cfg: HuginnConfig, ps: ParamStore, steps: u32, max_tokens: u32, block_size: u32) -> Engine {
+    fn build(gpu: Gpu, cfg: HuginnConfig, ps: ParamStore, steps: u32, max_tokens: u32, block_size: u32, share: Option<u32>) -> Engine {
         cfg.validate().expect("huginn config");
         assert!(steps > 0, "the recurrent core must run at least once");
+        let share = share.filter(|r| *r > 0);
         assert!(block_size > 0 && max_tokens > 0 && max_tokens.is_multiple_of(block_size));
         let num_blocks = max_tokens / block_size;
         let max_bt = num_blocks;
@@ -244,9 +283,27 @@ impl Engine {
         }
         let stage_count = stages.len();
 
-        let allocs = (0..stage_count).map(|_| BlockAllocator::new(num_blocks, block_size)).collect();
-        let k_pool = (0..stage_count).map(|_| gpu.storage(max_tokens as u64 * d as u64)).collect();
-        let v_pool = (0..stage_count).map(|_| gpu.storage(max_tokens as u64 * d as u64)).collect();
+        // The plane each stage reads and writes. Prelude and coda stages always
+        // own theirs; the recurrent stages wrap around a ring of `share` when
+        // one is asked for.
+        let core_stages = (steps * cfg.n_recurrent) as usize;
+        let core_planes = share.map_or(core_stages, |r| (r as usize).min(core_stages));
+        let mut stage_plane = Vec::with_capacity(stage_count);
+        for i in 0..cfg.n_prelude as usize {
+            stage_plane.push(i);
+        }
+        for k in 0..core_stages {
+            stage_plane.push(cfg.n_prelude as usize + k % core_planes.max(1));
+        }
+        for i in 0..cfg.n_coda as usize {
+            stage_plane.push(cfg.n_prelude as usize + core_planes + i);
+        }
+        let planes = cfg.n_prelude as usize + core_planes + cfg.n_coda as usize;
+        debug_assert_eq!(stage_plane.len(), stage_count);
+
+        let allocs = (0..planes).map(|_| BlockAllocator::new(num_blocks, block_size)).collect();
+        let k_pool = (0..planes).map(|_| gpu.storage(max_tokens as u64 * d as u64)).collect();
+        let v_pool = (0..planes).map(|_| gpu.storage(max_tokens as u64 * d as u64)).collect();
 
         let token = gpu.buffer("huginn_serve_token", 4, BufUsage::STORAGE | BufUsage::COPY_DST);
         let scale = gpu.buffer("huginn_serve_scale", 4, BufUsage::STORAGE | BufUsage::COPY_DST);
@@ -286,11 +343,13 @@ impl Engine {
             cfg,
             ps,
             steps,
+            share,
             allocs,
             block_size,
             max_bt,
             cap,
             stages,
+            stage_plane,
             k_pool,
             v_pool,
             rows: HashMap::new(),
@@ -331,9 +390,19 @@ impl Engine {
         self.gpu.write_f32(&self.state, state);
     }
 
-    /// Free pooled blocks in every stage's allocator, in stage order.
-    pub fn stage_free_blocks(&self) -> Vec<u32> {
+    /// Free pooled blocks in every KV plane's allocator, in plane order.
+    pub fn plane_free_blocks(&self) -> Vec<u32> {
         self.allocs.iter().map(|a| a.free_blocks()).collect()
+    }
+
+    /// KV planes this engine owns (`prelude + shared core planes + coda`).
+    pub fn planes(&self) -> usize {
+        self.allocs.len()
+    }
+
+    /// The plane every stage reads and writes, in execution order.
+    pub fn stage_planes(&self) -> &[usize] {
+        &self.stage_plane
     }
 
     fn ensure_row(&mut self, table: &mut BlockTable) -> u32 {
@@ -343,7 +412,7 @@ impl Engine {
         let id = self.next_row;
         self.next_row += 1;
         table.set_state_row(id);
-        let extra = (1..self.stages.len()).map(|_| BlockTable::new()).collect();
+        let extra = (1..self.planes()).map(|_| BlockTable::new()).collect();
         self.rows.insert(id, Row { extra });
         id
     }
@@ -437,6 +506,7 @@ impl Engine {
         let mut stage = 0usize;
 
         let mut attention = |steps: &mut Vec<Step>, stage: usize, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, ctx: &DeviceBuffer| {
+            let plane = self.stage_plane[stage];
             steps.push(gpu.step_buf(model::ROPE_AT_ID, &self.rope_uni[stage], &[q], nh * hd / 2));
             steps.push(gpu.step_buf(model::ROPE_AT_ID, &self.rope_uni[stage], &[k], nh * hd / 2));
             steps.extend(block::gqa_decode_batched_step(
@@ -452,8 +522,8 @@ impl Engine {
                 q,
                 k,
                 v,
-                &self.k_pool[stage],
-                &self.v_pool[stage],
+                &self.k_pool[plane],
+                &self.v_pool[plane],
                 &self.idx_blocks[stage],
                 &self.idx_offsets[stage],
                 &self.idx_tables[stage],
@@ -523,25 +593,29 @@ impl Engine {
         let theta = gpu_core::f(self.cfg.rope_theta);
         self.gpu.write(&self.token, &[token]);
         for stage in 0..self.stages.len() {
-            // Stage 0 appends into the scheduler's table; every other stage
+            // Plane 0 appends into the scheduler's table; every other plane
             // appends into its own table, from its own allocator, so each
-            // paged plane is charged exactly the sequence's page count.
-            let pos = if stage == 0 { table.len() } else { self.rows[&row].extra[stage - 1].len() };
-            let appended = if stage == 0 {
+            // paged plane is charged exactly the sequence's page count. A
+            // stage reads and writes its plane, so under a ring the stage that
+            // reuses a plane appends the new row at that plane's length, which
+            // is the same position for every plane.
+            let plane = self.stage_plane[stage];
+            let pos = if plane == 0 { table.len() } else { self.rows[&row].extra[plane - 1].len() };
+            let appended = if plane == 0 {
                 table.append(&mut self.allocs[0])
             } else {
-                let ex = &mut self.rows.get_mut(&row).expect("row").extra[stage - 1];
-                ex.append(&mut self.allocs[stage])
+                let ex = &mut self.rows.get_mut(&row).expect("row").extra[plane - 1];
+                ex.append(&mut self.allocs[plane])
             };
             let (blk, off) = appended.expect("paged KV pool exhausted");
             self.gpu.write(&self.idx_blocks[stage], &[blk]);
             self.gpu.write(&self.idx_offsets[stage], &[off]);
             self.gpu.write(&self.idx_lens[stage], &[pos + 1]);
             let mut bt = vec![0u32; self.max_bt as usize];
-            let blocks = if stage == 0 {
+            let blocks = if plane == 0 {
                 table.blocks()
             } else {
-                self.rows[&row].extra[stage - 1].blocks()
+                self.rows[&row].extra[plane - 1].blocks()
             };
             bt[..blocks.len()].copy_from_slice(blocks);
             self.gpu.write(&self.idx_tables[stage], &bt);
@@ -567,11 +641,20 @@ impl Engine {
         // Reserve the chunk in every stage's table, then record each token's
         // (block, offset) slot for the batched scatter.
         table.reserve(n, &mut self.allocs[0]).expect("paged KV pool exhausted");
+        let mut reserved = vec![false; self.planes()];
+        reserved[0] = true;
+        // Slots are recorded per stage (each stage scatters its own chunk),
+        // but a plane is reserved once however many stages share it.
         let mut slots: Vec<(Vec<u32>, Vec<u32>)> = Vec::with_capacity(self.stages.len());
         slots.push(locate_all(table, n, bs));
         for stage in 1..self.stages.len() {
-            let ex = &mut self.rows.get_mut(&row).expect("row").extra[stage - 1];
-            ex.reserve(n, &mut self.allocs[stage]).expect("paged KV pool exhausted");
+            let plane = self.stage_plane[stage];
+            if !reserved[plane] {
+                let ex = &mut self.rows.get_mut(&row).expect("row").extra[plane - 1];
+                ex.reserve(n, &mut self.allocs[plane]).expect("paged KV pool exhausted");
+                reserved[plane] = true;
+            }
+            let ex = &self.rows[&row].extra[plane - 1];
             slots.push(locate_all(ex, n, bs));
         }
 
@@ -624,8 +707,9 @@ impl Engine {
             // kernel its materialized forward dispatches.
             steps.push(block::rope_fwd(gpu, &ids, q, n, nh, hd, d as u32, n, theta));
             steps.push(block::rope_fwd(gpu, &ids, k, n, nh, hd, d as u32, n, theta));
-            steps.push(gpu.step(dec.kv_append_batched, &[k, &b.blocks[stage], &b.offsets[stage], &self.k_pool[stage]], &[n, d as u32, bs], n * d as u32));
-            steps.push(gpu.step(dec.kv_append_batched, &[v, &b.blocks[stage], &b.offsets[stage], &self.v_pool[stage]], &[n, d as u32, bs], n * d as u32));
+            let plane = self.stage_plane[stage];
+            steps.push(gpu.step(dec.kv_append_batched, &[k, &b.blocks[stage], &b.offsets[stage], &self.k_pool[plane]], &[n, d as u32, bs], n * d as u32));
+            steps.push(gpu.step(dec.kv_append_batched, &[v, &b.blocks[stage], &b.offsets[stage], &self.v_pool[plane]], &[n, d as u32, bs], n * d as u32));
             if flash {
                 steps.push(block::flash_gqa_causal_fwd_portable(gpu, model::FLASH_GQA_ID, &ga, q, k, v, ctx, &b.lse));
             } else {
@@ -808,7 +892,7 @@ impl PagedDecoder for Engine {
 
     fn kv_pool_bytes(&self) -> u64 {
         let per_plane = self.cap as u64 * self.cfg.d_model as u64 * 4;
-        per_plane * 2 * self.stages.len() as u64
+        per_plane * 2 * self.planes() as u64
     }
 
     fn kv_pool_capacity_tokens(&self) -> u64 {

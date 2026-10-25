@@ -136,7 +136,7 @@ fn two_sequences_interleaved_serve_like_run_alone() {
 }
 
 #[test]
-fn a_sequence_charges_one_page_per_stage() {
+fn a_sequence_charges_one_page_per_plane() {
     let cfg = HuginnConfig::tiny();
     let w = init_weights(&cfg, 43);
     let (max_tokens, block_size) = (64u32, 4u32);
@@ -146,16 +146,77 @@ fn a_sequence_charges_one_page_per_stage() {
     let mut table = BlockTable::new();
     let _ = eng.prefill(&mut table, &prompt);
 
-    let stages = (cfg.n_prelude + cfg.mean_recurrence * cfg.n_recurrent + cfg.n_coda) as usize;
+    let planes = (cfg.n_prelude + cfg.mean_recurrence * cfg.n_recurrent + cfg.n_coda) as usize;
     let used = (prompt.len() as u32).div_ceil(block_size);
-    let free = eng.stage_free_blocks();
-    assert_eq!(free.len(), stages, "one allocator per stage");
+    let free = eng.plane_free_blocks();
+    assert_eq!(free.len(), planes, "one allocator per plane");
     let want = max_tokens / block_size - used;
-    for (stage, f) in free.iter().enumerate() {
-        assert_eq!(*f, want, "stage {stage} free blocks");
+    for (plane, f) in free.iter().enumerate() {
+        assert_eq!(*f, want, "plane {plane} free blocks");
     }
     assert_eq!(eng.free_blocks(), want);
     assert_eq!(eng.blocks_for(prompt.len() as u32), used);
+}
+
+/// The KV-sharing ring is the released model's own `compress-sN` strategy:
+/// recurrent stage `k` uses plane `k % share`, so a later iteration
+/// overwrites the history of the one `share / n_recurrent` earlier. A ring at
+/// least as long as the core's stage count is the full history and must
+/// produce the same tokens as one; a shorter ring still generates, with the
+/// plane count the ring implies.
+#[test]
+fn a_ring_at_least_as_long_as_the_core_is_the_full_history() {
+    let cfg = HuginnConfig::tiny();
+    let w = init_weights(&cfg, 47);
+    let (max_tokens, block_size, steps) = (64u32, 4u32, 3u32);
+    let prompt = vec![2u32, 4, 6, 8, 10];
+
+    let mut full = Engine::from_source(cfg.clone(), steps, &w, max_tokens, block_size);
+    let mut ring = Engine::from_source_sharing(cfg.clone(), steps, Some(64), &w, max_tokens, block_size);
+    assert_eq!(full.planes(), ring.planes());
+    assert_eq!(full.stage_planes(), ring.stage_planes());
+    // Both engines must start from the same latent state: each draws one at
+    // construction otherwise.
+    let state = state_vector(&cfg);
+    full.set_state(&state);
+    ring.set_state(&state);
+
+    let mut a = BlockTable::new();
+    let mut b = BlockTable::new();
+    let ha = full.prefill(&mut a, &prompt);
+    let hb = ring.prefill(&mut b, &prompt);
+    assert!(ha.iter().zip(&hb).all(|(x, y)| (x - y).abs() < 1e-6));
+    for tok in [1u32, 7, 3] {
+        let mut ra: [&mut BlockTable; 1] = [&mut a];
+        let mut rb: [&mut BlockTable; 1] = [&mut b];
+        assert_eq!(full.forward_batched_greedy(&mut ra, &[tok]), ring.forward_batched_greedy(&mut rb, &[tok]));
+    }
+}
+
+#[test]
+fn a_shorter_ring_shares_planes_and_still_generates() {
+    let cfg = HuginnConfig::tiny();
+    let w = init_weights(&cfg, 53);
+    let (max_tokens, block_size, steps, share) = (64u32, 4u32, 6u32, 8u32);
+    let mut eng = Engine::from_source_sharing(cfg.clone(), steps, Some(share), &w, max_tokens, block_size);
+    let core = (steps * cfg.n_recurrent) as usize;
+    assert_eq!(eng.planes(), cfg.n_prelude as usize + share as usize + cfg.n_coda as usize);
+    let planes = eng.stage_planes();
+    for k in 0..core {
+        let stage = cfg.n_prelude as usize + k;
+        assert_eq!(planes[stage], cfg.n_prelude as usize + k % share as usize, "core stage {k} wraps the ring");
+    }
+    let prompt = vec![2u32, 4, 6, 8, 10];
+    let mut table = BlockTable::new();
+    let hidden = eng.prefill(&mut table, &prompt);
+    assert_eq!(hidden.len(), cfg.d_model as usize);
+    let mut refs: [&mut BlockTable; 1] = [&mut table];
+    let next = eng.forward_batched_greedy(&mut refs, &[1]);
+    assert_eq!(next.len(), 1);
+    let used = (prompt.len() as u32 + 1).div_ceil(block_size);
+    for f in eng.plane_free_blocks() {
+        assert_eq!(f, max_tokens / block_size - used);
+    }
 }
 
 /// The backend the test binary actually got, not the one the run intended.

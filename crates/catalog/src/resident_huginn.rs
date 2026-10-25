@@ -41,9 +41,15 @@ pub const DEFAULT_BLOCK: u32 = 16;
 pub const DEFAULT_BATCH: u32 = 4;
 
 /// Recurrent steps served unless the checkpoint's own `mean_recurrence` is
-/// smaller. Each step costs one more core block per layer in compute and one
-/// more attention history per block in memory.
-pub const DEFAULT_STEPS: u32 = 4;
+/// smaller. Each step costs one core block per layer in compute and one more
+/// attention history per block in memory, so on a 24 GB card the depth and
+/// the serving context trade against each other: 6 steps at 6144 tokens is
+/// about 20 GiB beside fp32 weights. The released model is trained to accept
+/// any depth (its card: fewer than 4 gives coarse answers, gains continue to
+/// about 64) and its own `compress-sN` KV sharing halves the pool again, at a
+/// divergence the served correctness gate would have to characterise first -
+/// `huginn::serve::Engine::open_with_sharing` exposes it.
+pub const DEFAULT_STEPS: u32 = 6;
 
 pub const MODEL_ID: &str = "brain/huginn";
 
@@ -208,14 +214,18 @@ impl ResidentModel for HuginnResident {
     }
 
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
-        let cost = est_vram(&self.path);
-        let Ok(cfg) = self.cfg() else { return cost };
+        let Ok(cfg) = self.cfg() else { return est_vram(&self.path) };
+        // The engine holds every parameter as fp32 whatever the file was
+        // written as, so the weight side is exact from the parameter list -
+        // the generic file-size estimate's margin would put the released
+        // checkpoint over a 24 GB card's budget at a serving context it fits.
+        let weights: u64 = cfg.param_list().iter().map(|(_, n)| *n as u64).sum::<u64>() * 4;
         // Every stage owns a plane of the whole context: one per prelude block,
         // one per core block per recurrent step, one per coda block.
         let steps = self.steps_for(&cfg) as u64;
-        let stages = cfg.n_prelude as u64 + steps * cfg.n_recurrent as u64 + cfg.n_coda as u64;
-        let kv = self.ctx as u64 * cfg.d_model as u64 * 2 * stages * 4;
-        MemCost::new(cost.vram + kv, cost.ram)
+        let planes = cfg.n_prelude as u64 + steps * cfg.n_recurrent as u64 + cfg.n_coda as u64;
+        let kv = self.ctx as u64 * cfg.d_model as u64 * 2 * planes * 4;
+        MemCost::new(weights + kv, 0)
     }
 
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
