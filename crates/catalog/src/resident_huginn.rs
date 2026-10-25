@@ -14,10 +14,12 @@
 //! rendered by [`data::chat_template`] - the template ships with the
 //! checkpoint, so no per-family Rust transcription exists here.
 //!
-//! The released template has no slot for tool schemas. A request that carries
-//! tools therefore gets them described in a system turn and is told the wire
-//! form to answer in (`<tool_call>` JSON, the form brain's scanner reads);
-//! requests without tools render exactly as the checkpoint's template says.
+//! The released template has no slot for tool schemas and the model was not
+//! post-trained for tool calling, so a request's `tools` are dropped: a
+//! schema block injected into a system turn was measured to derail the
+//! model's answer, while the agent's own system text already describes its
+//! tools. An answer that nevertheless carries a `<tool_call>` block is parsed
+//! by the scanner as usual.
 //!
 //! Capacity: `ctx` is the shared KV capacity in tokens, and every stage owns a
 //! plane of it. There are `n_prelude + steps * n_recurrent + n_coda` stages,
@@ -49,7 +51,7 @@ pub const DEFAULT_BATCH: u32 = 4;
 /// about 64) and its own `compress-sN` KV sharing halves the pool again, at a
 /// divergence the served correctness gate would have to characterise first -
 /// `huginn::serve::Engine::open_with_sharing` exposes it.
-pub const DEFAULT_STEPS: u32 = 6;
+pub const DEFAULT_STEPS: u32 = 12;
 
 pub const MODEL_ID: &str = "brain/huginn";
 
@@ -157,43 +159,18 @@ fn sibling_tokenizer(weights: &str) -> Option<String> {
     t.exists().then(|| t.to_string_lossy().to_string())
 }
 
-/// Render a request through the checkpoint's template, describing any tools
-/// in a system turn first.
+/// Render a request through the checkpoint's template. Tool schemas are
+/// dropped (see the module doc) - the model has no tool protocol to render
+/// them into.
 fn parse(tok: &data::qwen_tokenizer::QwenBpe, format: &qwen3::chat::ChatFormat, inv: &Invocation) -> Result<ParsedRequest, String> {
-    let tools = inv.get_str("tools").filter(|t| !t.is_empty());
-    let mut req = match tools {
-        None => qwen3::chat::parse_request_as(tok, format, inv)?,
-        Some(tools) => {
-            // The released template has no slot for tool schemas, and the
-            // model has no tool tokens: the schemas go into a system turn and
-            // the reply is asked for in the wire form brain's scanner reads.
-            let mut bare = inv.clone();
-            {
-                let params = bare.params.as_object_mut().ok_or("huginn: params must be an object")?;
-                params.remove("tools");
-                params.remove("tool_choice");
-            }
-            let note = format!(
-                "You can call these tools. To call one, reply with \
-                 <tool_call>{{\"name\": \"<tool name>\", \"arguments\": {{...}}}}</tool_call>.\nTools (JSON): {tools}"
-            );
-            let messages = match bare.get_str("messages").filter(|m| !m.is_empty()) {
-                Some(raw) => {
-                    let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| format!("messages JSON: {e}"))?;
-                    let mut turns = vec![serde_json::json!({"role": "system", "content": note})];
-                    turns.extend(v.as_array().ok_or("messages must be a JSON array")?.iter().cloned());
-                    serde_json::Value::Array(turns)
-                }
-                None => serde_json::Value::Array(vec![
-                    serde_json::json!({"role": "system", "content": note}),
-                    serde_json::json!({"role": "user", "content": inv.get_str("prompt").unwrap_or_default()}),
-                ]),
-            };
-            let params = bare.params.as_object_mut().expect("object");
-            params.insert("messages".into(), serde_json::Value::String(messages.to_string()));
-            params.remove("prompt");
-            qwen3::chat::parse_request_as(tok, format, &bare)?
-        }
+    let mut req = if inv.get_str("tools").is_some_and(|t| !t.is_empty()) {
+        let mut bare = inv.clone();
+        let params = bare.params.as_object_mut().ok_or("huginn: params must be an object")?;
+        params.remove("tools");
+        params.remove("tool_choice");
+        qwen3::chat::parse_request_as(tok, format, &bare)?
+    } else {
+        qwen3::chat::parse_request_as(tok, format, inv)?
     };
     // The checkpoint's template closes an assistant turn with `<|end_turn|>`.
     req.stops.push("<|end_turn|>".to_string());
@@ -221,7 +198,9 @@ impl ResidentModel for HuginnResident {
         // checkpoint over a 24 GB card's budget at a serving context it fits.
         let weights: u64 = cfg.param_list().iter().map(|(_, n)| *n as u64).sum::<u64>() * 4;
         // Every stage owns a plane of the whole context: one per prelude block,
-        // one per core block per recurrent step, one per coda block.
+        // one per core block per recurrent step, one per coda block. The
+        // prefill slab is prompt-sized and is not charged here - a prompt
+        // close to the context capacity needs that much headroom on top.
         let steps = self.steps_for(&cfg) as u64;
         let planes = cfg.n_prelude as u64 + steps * cfg.n_recurrent as u64 + cfg.n_coda as u64;
         let kv = self.ctx as u64 * cfg.d_model as u64 * 2 * planes * 4;

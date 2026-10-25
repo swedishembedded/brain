@@ -26,29 +26,42 @@ D-Bus and the SDK. Chat requests are rendered with the checkpoint's own Jinja
 `chat_template` (`<|begin_header|>User<|end_header|>` turns, `<|end_turn|>`),
 which ships with the checkpoint - nothing is transcribed per family here.
 
-The released template has no slot for tool schemas. A request that carries
-tools gets them described in a system turn, with the reply asked for in
-`<tool_call>` JSON - the wire form brain's scanner reads. A checkpoint whose
-template does carry a tools slot is unaffected.
+The released template has no slot for tool schemas and the model was not
+post-trained for tool calling, so a request's `tools` are dropped rather than
+described in a system turn (measured: a schema block derails the answer). A
+`<tool_call>` block the model emits anyway is parsed as usual. A checkpoint
+whose template does carry a tools slot is unaffected.
 
 ## Recurrence and staging
 
-`num_steps` is a serving setting (`--steps` on the CLI action, the
-checkpoint's `mean_recurrence` when absent). Every step applies the same four
-core blocks to a different residual stream, so each *stage* - a prelude
-block, a core block within one step, a coda block - owns its own attention
-history. There are `n_prelude + steps * n_recurrent + n_coda` stages.
+`num_steps` is a serving setting (`--steps` on the CLI action). Every step
+applies the same four core blocks to a different residual stream, so each
+*stage* - a prelude block, a core block within one step, a coda block - owns
+its own attention history. There are `n_prelude + steps * n_recurrent +
+n_coda` stages. The engine can also wrap the recurrent stages around a ring
+of histories (the released model's own `compress-sN` KV strategy), which cuts
+the pool but diverges from the full history - it is available
+(`Engine::open_with_sharing`) and not yet the served default.
 
 ## Cost
 
-KV memory is `stages` times a conventional decoder's at the same context:
-each stage has a paged plane of the whole context capacity. At 2048 tokens
-the 3.57 B checkpoint's 20 stages (4 recurrent steps) need about 1.7 GB of
-pool beside 14.3 GB of weights and fit one 24 GB card; the released default
-of 32 steps is 132 stages, about 11.4 GB at the same context, and does not
-fit beside fp32 weights - serve the released depth with a larger card, or a
-shorter `num_steps` (the reference itself treats the depth as a runtime
-choice).
+Weights are fp32 (14.3 GB) whatever the file holds, and each stage owns a
+paged plane of the whole context: `stages * context * 2 * width * 4` bytes.
+On a 24 GB card, with 2 GB kept free, whatever is left after the weights -
+about 7.7 GB - is the pool. That is what sets the depth a card can serve:
+
+| steps | stages | pool at 4096 | total |
+|---:|---:|---:|---:|
+| 4 | 20 | 3.5 GB | 17.8 GB |
+| 6 | 28 | 4.8 GB | 19.1 GB |
+| 12 | 52 | 9.0 GB | 23.3 GB |
+| 32 (released) | 132 | 22.8 GB | 37.1 GB |
+
+The resident serves 12 steps. At a 6144-token serving context (an agent's
+system prompt and tool schemas) only 4-6 steps fit with the full history, or
+more with the sharing ring; a card with more memory serves the released
+depth. Prefill allocates a slab of the prompt's length, so a prompt close to
+the context capacity needs that much headroom on top of the numbers above.
 
 ## Licence
 

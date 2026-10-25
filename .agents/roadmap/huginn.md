@@ -51,10 +51,36 @@ un-embeds the final latent state into the tied head.
   parameter on cpu, wgpu and cuda, plus an AdamW-step test that the loss
   falls and the shared core moves.
 
+## Serving findings (released checkpoint, one 24 GB card)
+
+- Weights are fp32 (14.3 GB) whatever the file holds, so the card leaves
+  about 7.7 GB for KV at a 2 GB reserve. The traded quantity is
+  `depth x context`: 12 steps fit at 4096 tokens, 4-6 at 6144. The released
+  depth (32) needs 34 GB beside the weights at 4096.
+- The model's own `compress-sN` KV sharing (a ring of histories that later
+  iterations overwrite) is implemented (`Engine::open_with_sharing`) and is
+  **not** quality-preserving in measurement: at ring 16/32/48 and depths
+  12-32 the served answers collapse into repeated tokens where the
+  full-history engine answers coherently. It stays available, off by
+  default, and needs a correctness gate against the reference before it is
+  offered.
+- The released chat template has no tool slot and the model is not
+  tool-trained: injected tool schemas derailed the answer, so request tools
+  are dropped. A coding-agent loop over this checkpoint is out of reach at
+  card-feasible depths; chat (Q&A) through an agent's short system prompt
+  works and is the demonstrated path.
+- Prefill allocates a slab of the prompt's length, which the resident's
+  estimate does not charge: a bounded (chunked) prefill is the fix.
+
 ## Left to do
 
+- Bounded prefill: chunk the prompt through `paged_flash_prefill` so the slab
+  is chunk-sized instead of prompt-sized, and charge it in the estimate.
 - Truncated backprop as the reference's sampled-depth mode runs it (run the
   leading steps under no-grad when `mean_backprop_depth` is smaller than the
   depth), and LoRA.
 - A generated golden of the released checkpoint's continuation, so the
-  served engine is gated beyond the tiny fixture.
+  served engine is gated beyond the tiny fixture; and a reference golden for
+  the `compress-sN` cache to gate the sharing ring.
+- bf16 weights would halve the weight side and buy depth; the model was
+  trained and is benchmarked in bf16.
