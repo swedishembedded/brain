@@ -347,6 +347,10 @@ impl std::ops::Index<usize> for Residuals {
 /// change the loss (the stream is rounded at every boundary) by at most the format's precision, keep every gradient
 /// pointing the same way (cosine above 0.99 for bf16, 0.95 for FP8, the tolerances the qwen trainers are held to),
 /// and, where the backend accounts for its allocations, hold fewer live device bytes in that order.
+///
+/// The batch must sum enough tokens for the per-element rounding to average out in each gradient: a few dozen for a
+/// small tensor such as a head-width norm weight, more for routed experts, where FP8 also flips some top-k choices
+/// against the f32 build.
 pub fn check_quantized_boundaries<M: crate::Model>(name: &str, build: impl Fn() -> M, step: impl Fn(&M) -> f32) -> Result<(), String> {
     let live = |m: &M| m.optimizer_parts().and_then(|p| p.gpu.memory_usage()).map(|u| u.live);
     let grads = |m: &M| -> Vec<(String, Vec<f32>)> {
@@ -445,19 +449,16 @@ pub fn check_recompute<M: crate::Model>(name: &str, build: impl Fn() -> M, step:
     Ok(())
 }
 
-/// The contract of a model whose backward always rebuilds each layer from its f32 input boundary (one scratch set
-/// serves every layer): it accepts [`SavedPolicy::Recompute`] as what it already does and refuses keeping every layer
-/// and narrower boundaries by its own name, never ignoring them.
+/// The contract of a model whose backward always rebuilds each layer from its input boundary (one scratch set serves
+/// every layer): it accepts [`SavedPolicy::Recompute`] as what it already does and refuses keeping every layer by its
+/// own name, never ignoring it. Narrow boundaries are a separate offer ([`check_quantized_boundaries`]).
 pub fn check_always_recomputes<M: crate::Model>(name: &str, model: &mut M) -> Result<(), String> {
     model.set_saved_policy(SavedPolicy::Recompute).map_err(|e| format!("{name}: recompute refused: {e}"))?;
-    for refused in [SavedPolicy::Keep, SavedPolicy::Quantized(SavedFormat::Bf16), SavedPolicy::Quantized(SavedFormat::Fp8)] {
-        match model.set_saved_policy(refused) {
-            Ok(()) => return Err(format!("{name}: {refused:?} accepted by a backward that always recomputes in f32")),
-            Err(e) if !e.contains(name) => return Err(format!("{name}: the refusal of {refused:?} does not name the model: {e}")),
-            Err(_) => {}
-        }
+    match model.set_saved_policy(SavedPolicy::Keep) {
+        Ok(()) => Err(format!("{name}: Keep accepted by a backward that always recomputes")),
+        Err(e) if !e.contains(name) => Err(format!("{name}: the refusal of Keep does not name the model: {e}")),
+        Err(_) => Ok(()),
     }
-    Ok(())
 }
 
 #[cfg(test)]

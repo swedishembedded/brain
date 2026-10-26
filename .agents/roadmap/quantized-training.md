@@ -126,9 +126,10 @@ The per-cell matrix and its tests are `docs/reference/training-capabilities.md`.
   `Model::set_saved_policy`): deepseek2, glmdsa, gpt2, lfm2 and horizon share one activation buffer set per layer kind
   and replay each layer (routed experts included) before its backward, bit-equal to keeping every
   layer (`model::saved::check_recompute`); qwen3 and qwen35 answer from their build; spectrallm, ouro
-  and huginn always rebuild each layer and accept only recompute (`check_always_recomputes`); every other
+  and huginn always rebuild each layer and refuse keep (`check_always_recomputes`); every other
   model keeps every layer and refuses by name. Narrow boundaries through the shared
-  `model::saved::Residuals` (`check_quantized_boundaries`): gpt2, deepseek2, glmdsa. Open: the recompute pattern in the vision trainers; narrow boundaries in the other recomputing trainers.
+  `model::saved::Residuals` (`check_quantized_boundaries`): gpt2, deepseek2, glmdsa, spectrallm.
+  Open: the recompute pattern in the vision trainers; narrow boundaries in lfm2, horizon, ouro, huginn.
 - D Memory: `model::saved` saved-activation policy (keep, recompute, bf16/fp8 boundaries)
   priced in memplan and wired into qwen3 and qwen35 LoRA training (a4a1242bc); flash attention
   backward without `[H,T,T]` probabilities for qwen35moe (fc6df1080) and flux2, including the

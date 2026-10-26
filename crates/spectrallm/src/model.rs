@@ -29,6 +29,7 @@ use std::collections::HashMap;
 
 use gpu_core::{BufUsage, DeviceBuffer, Gpu, Step};
 use model::block::{self, FlashGqaIds, Gqa, KernelIds};
+use model::saved::{Residuals, SavedFormat, SavedPolicy};
 use paramstore::ParamStore;
 
 use crate::config::SpectralConfig;
@@ -95,7 +96,7 @@ pub struct SpectralLm {
     count: Cell<f32>,
     tokens: DeviceBuffer,
     targets: DeviceBuffer,
-    res: Vec<DeviceBuffer>,
+    res: Residuals,
     xf: DeviceBuffer,
     logits: DeviceBuffer,
     ce_rows: DeviceBuffer,
@@ -190,7 +191,7 @@ impl SpectralLm {
         let mut m = SpectralLm {
             tokens: gpu.buffer("tokens", n * 4, BufUsage::STORAGE | BufUsage::COPY_DST),
             targets: gpu.buffer("targets", n * 4, BufUsage::STORAGE | BufUsage::COPY_DST),
-            res: (0..=cfg.n_layers).map(|_| st(n * d)).collect(),
+            res: Residuals::new((0..=cfg.n_layers).map(|_| st(n * d)).collect(), 0..cfg.n_layers as usize + 1),
             xf: st(n * d),
             logits: st(n * v),
             ce_rows: st(n),
@@ -335,8 +336,10 @@ impl SpectralLm {
     fn trunk_steps(&self) -> Vec<Step> {
         let (n, d) = (self.rows(), self.cfg.d_model);
         let mut s = vec![self.gpu.step(EMBED, &[&self.tokens, self.ps.w("tok.weight"), &self.res[0]], &[d, n], n * d)];
+        self.res.round_trip(&self.gpu, &mut s, 0);
         for l in 0..self.cfg.n_layers as usize {
             self.layer_fwd(&mut s, l, &self.res[l], &self.res[l + 1]);
+            self.res.round_trip(&self.gpu, &mut s, l + 1);
         }
         let last = &self.res[self.cfg.n_layers as usize];
         s.push(block::rmsnorm_fwd(&self.gpu, &self.ids, last, self.ps.w("norm.weight"), &self.xf, d, n, self.cfg.rms_eps));
@@ -375,8 +378,10 @@ impl SpectralLm {
         let mut s = vec![self.gpu.step_buf(CE_GRAD_STATS, &self.ce_grad_uniform, &[&self.logits, &self.targets, &self.ce_stats, &g.dlogits], n * v)];
         self.linear_dw(&mut s, &g.dlogits, &self.xf, self.head_grad(), n, d, v);
         self.linear_dx(&mut s, &g.dlogits, self.head_weight(), &g.d_xf, n, d, v, false);
+        self.res.restore(&self.gpu, &mut s, layers);
         s.extend(block::rmsnorm_bwd(&self.gpu, &self.ids, &self.res[layers], self.ps.w("norm.weight"), &g.d_xf, &g.dres[layers], &g.rms_inv, Some(self.ps.g("norm.weight")), d, n, self.cfg.rms_eps));
         for l in (0..layers).rev() {
+            self.res.restore(&self.gpu, &mut s, l);
             self.layer_fwd(&mut s, l, &self.res[l], &self.res[l + 1]);
             self.layer_bwd(&mut s, l, &self.res[l], &g.dres[l + 1], &g.dres[l]);
         }
@@ -417,6 +422,7 @@ impl SpectralLm {
     /// `[b*t, d_model]` residual stream entering layer `layer` (`n_layers`
     /// is the pre-norm output) after the last forward.
     pub fn read_res(&self, layer: usize) -> Vec<f32> {
+        assert!(self.res.format() == SavedFormat::F32, "spectrallm: narrow boundary residuals keep no per-layer stream to read");
         self.gpu.read(&self.res[layer], self.rows() as usize * self.cfg.d_model as usize)
     }
 
@@ -453,13 +459,24 @@ impl model::Model for SpectralLm {
         Some(model::OptimizerParts { gpu: &self.gpu, store: &self.ps, optim: self.opt.as_ref()? })
     }
 
-    /// SpectralLM keeps the f32 residual between layers and rebuilds each layer before its backward (one scratch set
-    /// serves every layer), so recompute is the only policy it runs.
-    fn set_saved_policy(&mut self, policy: model::saved::SavedPolicy) -> Result<(), String> {
-        match policy {
-            model::saved::SavedPolicy::Recompute => Ok(()),
-            other => Err(format!("spectrallm recomputes each layer from its f32 residual in the backward; {other:?} is not available")),
+    /// SpectralLM keeps only the residual between layers and rebuilds each layer before its backward (one scratch set
+    /// serves every layer): it runs recompute, with the residuals in f32 or, once narrowed, in bf16 or FP8
+    /// ([`Residuals`]). Keeping every layer is refused by name.
+    fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        let current = SavedPolicy::recompute_with(self.res.format());
+        if !current.narrows_to(policy) {
+            return Err(format!("spectrallm recomputes each layer from its {:?} residual in the backward; {policy:?} is not available", self.res.format()));
         }
+        if let SavedPolicy::Quantized(format) = policy {
+            if policy != current {
+                self.res.quantize(&self.gpu, format, self.rows(), self.cfg.d_model).map_err(|e| format!("spectrallm: {e}"))?;
+                self.trunk = self.trunk_steps();
+                if self.train {
+                    self.bwd_steps = self.backward_steps();
+                }
+            }
+        }
+        Ok(())
     }
 
     type Config = SpectralConfig;
