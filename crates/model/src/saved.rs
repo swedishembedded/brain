@@ -307,6 +307,21 @@ pub fn check_recompute<M: crate::Model>(name: &str, build: impl Fn() -> M, step:
     Ok(())
 }
 
+/// The contract of a model whose backward always rebuilds each layer from its f32 input boundary (one scratch set
+/// serves every layer): it accepts [`SavedPolicy::Recompute`] as what it already does and refuses keeping every layer
+/// and narrower boundaries by its own name, never ignoring them.
+pub fn check_always_recomputes<M: crate::Model>(name: &str, model: &mut M) -> Result<(), String> {
+    model.set_saved_policy(SavedPolicy::Recompute).map_err(|e| format!("{name}: recompute refused: {e}"))?;
+    for refused in [SavedPolicy::Keep, SavedPolicy::Quantized(SavedFormat::Bf16), SavedPolicy::Quantized(SavedFormat::Fp8)] {
+        match model.set_saved_policy(refused) {
+            Ok(()) => return Err(format!("{name}: {refused:?} accepted by a backward that always recomputes in f32")),
+            Err(e) if !e.contains(name) => return Err(format!("{name}: the refusal of {refused:?} does not name the model: {e}")),
+            Err(_) => {}
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -866,6 +866,15 @@ impl model::Model for Huginn {
         Some(model::OptimizerParts { gpu: &self.gpu, store: &self.ps, optim: self.opt.as_ref()? })
     }
 
+    /// Huginn keeps the f32 residual between block applications and rebuilds each block before its backward (one
+    /// scratch set serves every application), so recompute is the only policy it runs.
+    fn set_saved_policy(&mut self, policy: model::saved::SavedPolicy) -> Result<(), String> {
+        match policy {
+            model::saved::SavedPolicy::Recompute => Ok(()),
+            other => Err(format!("huginn recomputes each block application from its f32 residual in the backward; {other:?} is not available")),
+        }
+    }
+
     type Config = HuginnConfig;
 
     fn new(cfg: Self::Config, b: u32, t: u32, init: &std::collections::HashMap<String, Vec<f32>>) -> Self {

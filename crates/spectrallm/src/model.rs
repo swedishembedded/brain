@@ -453,6 +453,15 @@ impl model::Model for SpectralLm {
         Some(model::OptimizerParts { gpu: &self.gpu, store: &self.ps, optim: self.opt.as_ref()? })
     }
 
+    /// SpectralLM keeps the f32 residual between layers and rebuilds each layer before its backward (one scratch set
+    /// serves every layer), so recompute is the only policy it runs.
+    fn set_saved_policy(&mut self, policy: model::saved::SavedPolicy) -> Result<(), String> {
+        match policy {
+            model::saved::SavedPolicy::Recompute => Ok(()),
+            other => Err(format!("spectrallm recomputes each layer from its f32 residual in the backward; {other:?} is not available")),
+        }
+    }
+
     type Config = SpectralConfig;
 
     fn new(cfg: Self::Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {

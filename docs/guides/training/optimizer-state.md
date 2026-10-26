@@ -117,7 +117,9 @@ forward: every layer's intermediates, or only the residual between layers (f32,
 or bf16/fp8 where the build holds them so) with each layer replayed before its
 backward. The fit loop hands it to the model (`Model::set_saved_policy`);
 deepseek2, glmdsa and gpt2 then share one set of activation buffers across their
-layers, qwen3 and qwen35 answer from what they were built with, and a model
+layers, qwen3 and qwen35 answer from what they were built with, spectrallm, ouro
+and huginn always rebuild each layer from its f32 residual and accept only
+`recompute`, and a model
 that keeps every layer refuses any other choice by name.
 
 The memory planner decides the optimizer-state format before anything loads
