@@ -29,6 +29,16 @@ pub trait ResidentModel: Send + Sync {
     /// what the manager budgets against (reuse `model::plan` where a shape is known).
     fn estimate(&self, key: &InstanceKey) -> MemCost;
 
+    /// How many instances of this model the host can run at once, each on its own devices. The
+    /// executor spreads jobs over the replicas (a job goes to the least loaded one); replica `i` is
+    /// the build named by `instance_key(..).replica(i)`, and [`Self::estimate`] and
+    /// [`Self::activate`] receive that key and place replica `i` where this model decided at
+    /// construction. A model that can use spare capacity (a free card) says how many it can hold;
+    /// the default is the one instance every model has had. Constant for the life of the model.
+    fn replicas(&self) -> usize {
+        1
+    }
+
     /// The most queued jobs one [`Instance::run_batch`] call of this model
     /// should receive, when that differs from the scheduler policy's
     /// `max_batch`. A model that decodes many requests per step (a
@@ -117,6 +127,9 @@ impl<M: ResidentModel + ?Sized> ResidentModel for Alias<M> {
     }
     fn batch_limit(&self) -> Option<usize> {
         self.inner.batch_limit()
+    }
+    fn replicas(&self) -> usize {
+        self.inner.replicas()
     }
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         self.inner.activate(key, device)

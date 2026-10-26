@@ -158,6 +158,32 @@ impl InstanceKey {
     pub fn new(model: impl Into<String>, config: impl Into<String>) -> InstanceKey {
         InstanceKey { model: model.into(), config: config.into() }
     }
+
+    /// The marker a replica's config carries; replica 0 is the key itself.
+    const REPLICA: &'static str = "#replica=";
+
+    /// Replica `i` of the build this key names: the same model and config on its own instance, which the
+    /// manager places and runs separately (see [`ResidentModel::replicas`]). Replica 0 is `self`.
+    pub fn replica(&self, i: usize) -> InstanceKey {
+        let base = self.base();
+        if i == 0 {
+            return base;
+        }
+        InstanceKey { model: base.model, config: format!("{}{}{i}", base.config, Self::REPLICA) }
+    }
+
+    /// Which replica this key names (0 for a key that is not a replica's).
+    pub fn replica_index(&self) -> usize {
+        self.config.rsplit_once(Self::REPLICA).and_then(|(_, i)| i.parse().ok()).unwrap_or(0)
+    }
+
+    /// The key of replica 0 of this key's build: the key the model itself derived.
+    pub fn base(&self) -> InstanceKey {
+        match self.config.rsplit_once(Self::REPLICA) {
+            Some((base, i)) if i.parse::<usize>().is_ok() => InstanceKey { model: self.model.clone(), config: base.to_string() },
+            _ => self.clone(),
+        }
+    }
 }
 
 impl std::fmt::Display for InstanceKey {

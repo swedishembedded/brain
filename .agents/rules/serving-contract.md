@@ -133,6 +133,11 @@ set it, and the base's own `stamp` removes it), and names itself in
 such an id after its last job. Never fold an adapter into a second copy of the
 weights.
 
+A model that can use spare cards says so with `ResidentModel::replicas()`: the executor
+spreads jobs over replicas `instance_key(..).replica(0..n)` (each its own instance, the least
+loaded gets the next job), and `estimate`/`activate` read `key.replica_index()` to place replica
+`i`. A model that does not override it keeps its one instance.
+
 ### 3. Batching — a real batched forward where the architecture allows
 Override `Instance::run_batch`. When the model has a batchable forward (a shared
 encoder, a per-frame matmul stack), do a **genuine** batch — one device forward over N

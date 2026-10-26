@@ -64,7 +64,7 @@ fn sharded_two_gpu_forward_matches_unsharded_single_gpu_forward() {
     let resident = Arc::new(Int8ThinkerResident::new(path.to_str().unwrap().to_string(), qwen3omnimoe::config::ThinkerConfig::defaults().with_text(cfg.clone()), caps));
     mgr.register_multi(resident);
 
-    let (claimed, devices, key) = mgr.claim_multi(qwen3omnimoe::int8_thinker_resident::MODEL, "forward", &capability::Invocation::new(), &Default::default()).expect("claim_multi");
+    let (claimed, devices, key) = mgr.claim_multi(qwen3omnimoe::int8_thinker_resident::MODEL, "forward", &capability::Invocation::new(), 0, &Default::default()).expect("claim_multi");
     assert_eq!(devices, vec![Device::Gpu(0), Device::Gpu(1)], "even 4-layer split over 2 devices");
     let instance = match claimed {
         ClaimedMulti::Hot(h) => h,

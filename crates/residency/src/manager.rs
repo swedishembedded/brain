@@ -373,6 +373,12 @@ impl ResidencyManager {
             .or_else(|| self.multi_models.get(model).filter(|_| !self.retiring.contains(model)).map(|m| m.instance_key(action, inv)))
     }
 
+    /// How many replicas `model` runs at once ([`ResidentModel::replicas`]), under either registry; 1 for an
+    /// unknown model.
+    pub fn replicas(&self, model: &str) -> usize {
+        self.models.get(model).map(|m| m.replicas()).or_else(|| self.multi_models.get(model).map(|m| m.replicas())).unwrap_or(1).max(1)
+    }
+
     /// Whether `model` is registered as a [`MultiDeviceResidentModel`] - the
     /// executor's `assign` uses this to pick between the `claim`/`placeable`
     /// and `claim_multi`/`placeable_multi` branches for a queued group.
@@ -743,7 +749,7 @@ impl ResidencyManager {
     /// [`claim`](Self::claim) + build inline when needed - for synchronous callers
     /// that are not a scheduler dispatcher.
     fn claim_built(&mut self, model: &str, action: &str, inv: &Invocation) -> Result<(InstanceHandle, InstanceKey), String> {
-        let (claimed, device, key) = self.claim(model, action, inv, &no_exclude()).map_err(String::from)?;
+        let (claimed, device, key) = self.claim(model, action, inv, 0, &no_exclude()).map_err(String::from)?;
         let handle = match claimed {
             Claimed::Hot(h) => h,
             Claimed::Build(m) => match m.activate(&key, device) {
@@ -772,13 +778,15 @@ impl ResidencyManager {
     /// (outside the manager lock, so other lanes proceed) and MUST call
     /// [`release`](Self::release) after - or, for a deferred build,
     /// [`adopt`](Self::adopt) / [`build_failed`](Self::build_failed) first.
-    /// `exclude` names devices a concurrent lane is already using (so this
-    /// placement avoids them).
+    /// `replica` selects which of the model's [`ResidentModel::replicas`] this
+    /// claim is for (0 for a model with one). `exclude` names devices a concurrent
+    /// lane is already using (so this placement avoids them).
     pub fn claim(
         &mut self,
         model: &str,
         action: &str,
         inv: &Invocation,
+        replica: usize,
         exclude: &HashSet<Device>,
     ) -> Result<(Claimed, Device, InstanceKey), ClaimError> {
         let m = self
@@ -786,7 +794,7 @@ impl ResidencyManager {
             .get(model)
             .ok_or_else(|| ClaimError::Activate(format!("no model '{model}'")))?
             .clone();
-        let key = m.instance_key(action, inv);
+        let key = m.instance_key(action, inv).replica(replica);
         // Cross-registry guard: a key resident as a MULTI-device instance
         // must never be claimed through the single-device path - before this
         // check, the handle lookup below found the shared `instances` entry,
@@ -933,6 +941,7 @@ impl ResidencyManager {
         model: &str,
         action: &str,
         inv: &Invocation,
+        replica: usize,
         exclude: &HashSet<Device>,
     ) -> Result<(ClaimedMulti, Vec<Device>, InstanceKey), ClaimError> {
         let m = self
@@ -940,7 +949,7 @@ impl ResidencyManager {
             .get(model)
             .ok_or_else(|| ClaimError::Activate(format!("no multi-device model '{model}'")))?
             .clone();
-        let key = m.instance_key(action, inv);
+        let key = m.instance_key(action, inv).replica(replica);
         // Cross-registry guard, symmetric to `claim`'s: a key resident as a
         // SINGLE-device instance must not be claimed through the multi path
         // (the old expect("multi-resident") below panicked the dispatcher).
@@ -1753,7 +1762,7 @@ mod tests {
 
         // Resident via the multi path -> the single-device claim must refuse.
         let (_handle, key) = claim_multi_built(&mut mgr, "x").unwrap();
-        let err = mgr.claim("x", "run", &Invocation::new(), &no_exclude()).err().expect("must be refused");
+        let err = mgr.claim("x", "run", &Invocation::new(), 0, &no_exclude()).err().expect("must be refused");
         assert!(matches!(err, ClaimError::Activate(_)), "expected Activate, got {err:?}");
         assert!(err.to_string().contains("claim_multi"), "{err}");
         mgr.release_multi(&key);
@@ -1761,7 +1770,7 @@ mod tests {
 
         // Resident via the single path -> the multi claim must refuse.
         mgr.run("x", "run", &Invocation::new(), &mut |_| {}).unwrap();
-        let err = mgr.claim_multi("x", "run", &Invocation::new(), &HashSet::new()).err().expect("must be refused");
+        let err = mgr.claim_multi("x", "run", &Invocation::new(), 0, &HashSet::new()).err().expect("must be refused");
         assert!(matches!(err, ClaimError::Activate(_)), "expected Activate, got {err:?}");
         assert!(err.to_string().contains("via claim"), "{err}");
     }
@@ -1784,7 +1793,7 @@ mod tests {
         mgr.run("small", "run", &Invocation::new(), &mut |_| {}).unwrap();
         assert_eq!(live.load(Ordering::SeqCst), 1);
 
-        let err = mgr.claim("huge", "run", &Invocation::new(), &no_exclude()).err().expect("must be refused");
+        let err = mgr.claim("huge", "run", &Invocation::new(), 0, &no_exclude()).err().expect("must be refused");
         assert!(matches!(err, ClaimError::TooLarge(_)), "expected TooLarge, got {err:?}");
 
         // Nothing was evicted or touched to serve a claim that could never succeed.
@@ -1817,7 +1826,7 @@ mod tests {
             "must let the group through to claim() rather than hang it in the queue forever"
         );
 
-        let err = mgr.claim("llm", "run", &Invocation::new(), &no_exclude()).err().expect("must be refused");
+        let err = mgr.claim("llm", "run", &Invocation::new(), 0, &no_exclude()).err().expect("must be refused");
         assert!(matches!(err, ClaimError::TooLarge(_)), "expected TooLarge, got {err:?}");
     }
 
@@ -1871,7 +1880,7 @@ mod tests {
     }
 
     fn claim_multi_built(mgr: &mut ResidencyManager, model: &str) -> Result<(InstanceHandle, InstanceKey), String> {
-        let (claimed, devices, key) = mgr.claim_multi(model, "run", &Invocation::new(), &HashSet::new()).map_err(String::from)?;
+        let (claimed, devices, key) = mgr.claim_multi(model, "run", &Invocation::new(), 0, &HashSet::new()).map_err(String::from)?;
         let handle = match claimed {
             ClaimedMulti::Hot(h) => h,
             ClaimedMulti::Build(m) => match m.activate_multi(&key, &devices) {

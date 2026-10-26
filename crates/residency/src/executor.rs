@@ -787,6 +787,7 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
     match msg {
         Msg::Submit(mut job) => match mgr.instance_key_for(&job.model, &job.action, &job.inv) {
             Some(key) => {
+                let key = least_loaded_replica(mgr.replicas(&job.model), key, queue, running_jobs);
                 mgr.stamp(&job.model, &mut job.inv);
                 let id = *next_id;
                 *next_id += 1;
@@ -953,6 +954,18 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
 
 /// Assign as many runnable groups as there are free device lanes.
 #[allow(clippy::too_many_arguments)]
+/// The replica of `key`'s build with the fewest jobs queued or running (the lowest index on a tie): a model
+/// that can run `replicas` instances at once gets its jobs spread over them, so spare capacity is used
+/// without the model, or the caller, choosing.
+fn least_loaded_replica(replicas: usize, key: InstanceKey, queue: &[Pending], running_jobs: &[RunningJob]) -> InstanceKey {
+    if replicas <= 1 {
+        return key;
+    }
+    let base = key.base();
+    let load = |k: &InstanceKey| queue.iter().filter(|p| &p.key == k).count() + running_jobs.iter().filter(|r| &r.key == k).count();
+    (0..replicas).map(|i| base.replica(i)).min_by_key(load).unwrap_or(base)
+}
+
 fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy, lanes: &HashMap<Device, Sender<RunReq>>, running: &mut HashSet<InstanceKey>, busy: &mut HashSet<Device>, stats: &Arc<Mutex<Stats>>, running_jobs: &mut Vec<RunningJob>, open_groups: &mut HashMap<InstanceKey, OpenGroup>) {
     // Groups whose claim came back `NoCapacity` THIS round. They are skipped
     // for the rest of it, and reconsidered on the next one (a lane finishing,
@@ -1011,9 +1024,9 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
         };
         let is_multi = mgr.is_multi(&model);
         let claim_result = if is_multi {
-            mgr.claim_multi(&model, &action, &inv, busy).map(|(w, d, k)| (ClaimOutcome::Multi(w, d), k))
+            mgr.claim_multi(&model, &action, &inv, key.replica_index(), busy).map(|(w, d, k)| (ClaimOutcome::Multi(w, d), k))
         } else {
-            mgr.claim(&model, &action, &inv, busy).map(|(w, d, k)| (ClaimOutcome::Single(w, d), k))
+            mgr.claim(&model, &action, &inv, key.replica_index(), busy).map(|(w, d, k)| (ClaimOutcome::Single(w, d), k))
         };
         let (outcome, ckey) = match claim_result {
             Ok(x) => x,
@@ -1713,6 +1726,50 @@ mod tests {
         let elapsed = submit_wait(&exec, &["a", "b"]);
         assert!(elapsed < Duration::from_millis(210), "expected the two to overlap, took {elapsed:?}");
         assert!(exec.stats().max_parallel >= 2, "expected 2 lanes at once, stats={:?}", exec.stats());
+    }
+
+    /// A model that can run two replicas at once gets its concurrent jobs spread over both: each
+    /// replica is its own instance on its own card, so the two overlap instead of queueing.
+    #[test]
+    fn jobs_of_a_replicated_model_spread_over_its_replicas() {
+        struct Replicated {
+            builds: Arc<Mutex<Vec<usize>>>,
+        }
+        struct ReplicaInst;
+        impl ResidentModel for Replicated {
+            fn manifest(&self) -> Manifest {
+                Manifest::new("rep", "replicated", vec![ActionSpec::new("run", "run")])
+            }
+            fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+                InstanceKey::new("rep", "default")
+            }
+            fn replicas(&self) -> usize {
+                2
+            }
+            fn estimate(&self, _k: &InstanceKey) -> MemCost {
+                MemCost::new(14 * GB, 0)
+            }
+            fn activate(&self, k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+                self.builds.lock().unwrap().push(k.replica_index());
+                Ok(Box::new(ReplicaInst))
+            }
+        }
+        impl Instance for ReplicaInst {
+            fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+                std::thread::sleep(Duration::from_millis(150));
+                Ok(Outcome::new().blob("out", Blob::new(Media::Bytes, vec![1])))
+            }
+        }
+        let builds = Arc::new(Mutex::new(Vec::new()));
+        let mut budgets = Budgets::new();
+        // One replica fills a card (14 of 16 usable), so the second must take the other one.
+        budgets.set(Device::Gpu(0), 16 * GB, 0).set(Device::Gpu(1), 16 * GB, 0);
+        let exec = Executor::start(vec![Arc::new(Replicated { builds: builds.clone() })], budgets, Policy::default());
+        let elapsed = submit_wait(&exec, &["rep", "rep"]);
+        let mut built = builds.lock().unwrap().clone();
+        built.sort_unstable();
+        assert_eq!(built, vec![0, 1], "both replicas are built, one per job");
+        assert!(elapsed < Duration::from_millis(280), "the two jobs ran one after the other ({elapsed:?}), not on two replicas");
     }
 
     /// Regression test for a real deadlock in an earlier version of
