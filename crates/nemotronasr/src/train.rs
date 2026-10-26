@@ -19,6 +19,8 @@
 
 use std::collections::HashMap;
 
+use model::memplan::ParamPrecision;
+
 use crate::config::NemotronConfig;
 use crate::reference as rf;
 
@@ -65,9 +67,7 @@ pub struct Transducer {
     tcfg: TransducerConfig,
     w: std::cell::RefCell<HashMap<String, Vec<f32>>>,
     g: std::cell::RefCell<HashMap<String, Vec<f32>>>,
-    // AdamW moments
-    m: std::cell::RefCell<HashMap<String, Vec<f32>>>,
-    v: std::cell::RefCell<HashMap<String, Vec<f32>>>,
+    opt: std::cell::RefCell<model::hostopt::HostAdam>,
     // current batch
     enc: std::cell::RefCell<Vec<f32>>,    // [t_frames, enc_dim]
     labels: std::cell::RefCell<Vec<u32>>, // [n_labels]
@@ -75,13 +75,13 @@ pub struct Transducer {
 
 impl Transducer {
     pub fn new_from(tcfg: TransducerConfig, init: &W) -> Transducer {
-        let zeros: HashMap<String, Vec<f32>> = tcfg.param_list().iter().map(|(n, sz)| (n.clone(), vec![0.0; *sz])).collect();
+        let params = tcfg.param_list();
+        let zeros: HashMap<String, Vec<f32>> = params.iter().map(|(n, sz)| (n.clone(), vec![0.0; *sz])).collect();
         Transducer {
             tcfg,
             w: std::cell::RefCell::new(init.clone()),
-            g: std::cell::RefCell::new(zeros.clone()),
-            m: std::cell::RefCell::new(zeros.clone()),
-            v: std::cell::RefCell::new(zeros),
+            g: std::cell::RefCell::new(zeros),
+            opt: std::cell::RefCell::new(model::hostopt::HostAdam::new(&params, ParamPrecision::FP32).expect("an f32 host optimizer takes any parameter list")),
             enc: std::cell::RefCell::new(Vec::new()),
             labels: std::cell::RefCell::new(Vec::new()),
         }
@@ -225,24 +225,12 @@ impl model::Model for Transducer {
         }
     }
     fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
-        // The clip and scale every optimiser in the tree applies.
-        let extra_scale = model::grad_multiplier(if clip.is_some() { self.g.borrow().values().flatten().map(|&x| (x as f64).powi(2)).sum() } else { 0.0 }, clip, extra_scale);
-        let model::Adam { beta1: b1, beta2: b2, eps } = adam;
-        let (mut m, mut v) = (self.m.borrow_mut(), self.v.borrow_mut());
-        let g = self.g.borrow();
-        let bc1 = 1.0 - b1.powi(t as i32);
-        let bc2 = 1.0 - b2.powi(t as i32);
-        for (name, w) in self.w_mut().iter_mut() {
-            let (gg, mm, vv) = (&g[name], m.get_mut(name).unwrap(), v.get_mut(name).unwrap());
-            for i in 0..w.len() {
-                let grad = gg[i] * extra_scale;
-                mm[i] = b1 * mm[i] + (1.0 - b1) * grad;
-                vv[i] = b2 * vv[i] + (1.0 - b2) * grad * grad;
-                let mhat = mm[i] / bc1;
-                let vhat = vv[i] / bc2;
-                w[i] -= lr * (mhat / (vhat.sqrt() + eps) + wd * w[i]);
-            }
-        }
+        let args = model::resident_ft::StepArgs { step: t, lr, wd, adam, clip, extra_scale };
+        self.opt.borrow_mut().step_named(&mut self.w_mut(), &self.g.borrow(), &args).unwrap_or_else(|e| panic!("nemotronasr transducer: {e}"));
+    }
+    fn set_host_optimizer(&mut self, precision: ParamPrecision) -> Result<(), String> {
+        *self.opt.get_mut() = model::hostopt::HostAdam::new(&self.tcfg.param_list(), precision)?;
+        Ok(())
     }
     fn poll_wait(&self) {}
     fn param_names(&self) -> Vec<String> {
@@ -448,8 +436,7 @@ pub struct AcousticModel {
     acfg: AcousticConfig,
     w: std::cell::RefCell<HashMap<String, Vec<f32>>>,
     g: std::cell::RefCell<HashMap<String, Vec<f32>>>,
-    m: std::cell::RefCell<HashMap<String, Vec<f32>>>,
-    v: std::cell::RefCell<HashMap<String, Vec<f32>>>,
+    opt: std::cell::RefCell<model::hostopt::HostAdam>,
     feats: std::cell::RefCell<Vec<f32>>,  // [t_frames, hidden]
     labels: std::cell::RefCell<Vec<u32>>, // [n_labels]
 }
@@ -564,13 +551,13 @@ impl model::ModelConfig for AcousticConfig {
 impl model::Model for AcousticModel {
     type Config = AcousticConfig;
     fn new(acfg: AcousticConfig, _b: u32, _t: u32, init: &W) -> Self {
-        let zeros: HashMap<String, Vec<f32>> = acfg.param_list().iter().map(|(n, sz)| (n.clone(), vec![0.0; *sz])).collect();
+        let params = acfg.param_list();
+        let zeros: HashMap<String, Vec<f32>> = params.iter().map(|(n, sz)| (n.clone(), vec![0.0; *sz])).collect();
         AcousticModel {
             acfg,
             w: std::cell::RefCell::new(init.clone()),
-            g: std::cell::RefCell::new(zeros.clone()),
-            m: std::cell::RefCell::new(zeros.clone()),
-            v: std::cell::RefCell::new(zeros),
+            g: std::cell::RefCell::new(zeros),
+            opt: std::cell::RefCell::new(model::hostopt::HostAdam::new(&params, ParamPrecision::FP32).expect("an f32 host optimizer takes any parameter list")),
             feats: std::cell::RefCell::new(Vec::new()),
             labels: std::cell::RefCell::new(Vec::new()),
         }
@@ -600,22 +587,13 @@ impl model::Model for AcousticModel {
             v.iter_mut().for_each(|x| *x = 0.0);
         }
     }
-    fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra: f32) {
-        // The clip and scale every optimiser in the tree applies.
-        let extra = model::grad_multiplier(if clip.is_some() { self.g.borrow().values().flatten().map(|&x| (x as f64).powi(2)).sum() } else { 0.0 }, clip, extra);
-        let model::Adam { beta1: b1, beta2: b2, eps } = adam;
-        let (mut m, mut v) = (self.m.borrow_mut(), self.v.borrow_mut());
-        let g = self.g.borrow();
-        let (bc1, bc2) = (1.0 - b1.powi(t as i32), 1.0 - b2.powi(t as i32));
-        for (name, w) in self.w.borrow_mut().iter_mut() {
-            let (gg, mm, vv) = (&g[name], m.get_mut(name).unwrap(), v.get_mut(name).unwrap());
-            for i in 0..w.len() {
-                let grad = gg[i] * extra;
-                mm[i] = b1 * mm[i] + (1.0 - b1) * grad;
-                vv[i] = b2 * vv[i] + (1.0 - b2) * grad * grad;
-                w[i] -= lr * (mm[i] / bc1 / ((vv[i] / bc2).sqrt() + eps) + wd * w[i]);
-            }
-        }
+    fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
+        let args = model::resident_ft::StepArgs { step: t, lr, wd, adam, clip, extra_scale };
+        self.opt.borrow_mut().step_named(&mut self.w.borrow_mut(), &self.g.borrow(), &args).unwrap_or_else(|e| panic!("nemotronasr acoustic model: {e}"));
+    }
+    fn set_host_optimizer(&mut self, precision: ParamPrecision) -> Result<(), String> {
+        *self.opt.get_mut() = model::hostopt::HostAdam::new(&self.acfg.param_list(), precision)?;
+        Ok(())
     }
     fn poll_wait(&self) {}
     fn param_names(&self) -> Vec<String> {
