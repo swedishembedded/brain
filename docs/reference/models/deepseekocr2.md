@@ -83,6 +83,7 @@ Reference client: [`samples/python/vision/deepseek-ocr/`](../../../samples/pytho
 | `prompt` | the instruction after the image. Default `<\|grounding\|>Convert the document to markdown.` |
 | `messages` | flattened chat messages (JSON array string); the last user turn becomes the instruction |
 | `max_new` | tokens to generate, default 2048 (a page that finishes earlier stops at its end-of-sequence token) |
+| `max_tiles` | the most 768 px tiles a large page is cut into (default 6); `0` reads the page as one 1024 px global view |
 | `weights` | a checkpoint directory for one request, instead of the model store's own pick |
 
 The `<|grounding|>` marker and the `<|ref|>`/`<|det|>`/table-tag markers are
@@ -95,10 +96,13 @@ The vision encoder (SAM and the resampler) builds on one card and the
 decoder on a card with room for it, the same card, or the host; a server
 places it inside the `--device` set it was given.
 
-**Global view only.** A document image is fit into the model's one
-`1024x1024` global view. The real DeepSeek-OCR-2 model additionally supports
-a multi-tile layout for higher-resolution reading, which brain does not do
-yet; dense pages lose small text to it.
+**How a page is read.** An image no larger than 768 px on both sides is one aspect-fitted `768 x 768` view through
+the local query bank (145 image rows). A larger image is read the way the reference's dynamic crops do: the grid of
+768 px tiles closest to the page's aspect ratio (two to six; Pillow's bicubic resize and pad, byte for byte), each
+through SAM at its own 48x48 patch grid and the resampler's 144 local queries, then the whole page as one 1024 px
+global view (256 queries), then one separator. The embedding order is the reference's: local tiles, global view,
+separator. `max_tiles = 0` reads the page as the global view alone (257 rows). Grounding boxes are relative to the
+original image in every reading.
 
 **LoRA fine-tuning works, with one caveat worth stating plainly.** LoRA
 freezes a base and learns a small rank-limited correction on top of it - a

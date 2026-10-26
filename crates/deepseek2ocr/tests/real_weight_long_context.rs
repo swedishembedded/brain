@@ -79,7 +79,7 @@ fn chunked_and_batched_composites_agree_at_real_scale() {
     let (gh, _gw) = cfg.token_grid();
 
     let tok = tokenizer_from_gguf(lm.to_str().expect("utf-8 path")).expect("tokenizer");
-    let prompt = build_prompt(&tok, "", "\n<|grounding|>Convert the document to markdown.", gh).expect("prompt");
+    let prompt = build_prompt(&tok, "", "\n<|grounding|>Convert the document to markdown.", gh, 10, deepseek2ocr::ViewGrid::global_only()).expect("prompt");
     let (row0, n_rows) = prompt.image_run();
     assert_eq!(n_rows, 273, "the real global view is 16*(16+1) + 1 rows");
     let seq = prompt.len() as u32 + N_NEW;

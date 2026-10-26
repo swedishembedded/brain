@@ -772,3 +772,30 @@ The int8 and fp8 KV tiers read 256-channel rows and keep the triad at head_dim 1
 
 Same-window step times, batch 1 at a 1300-token context: 121 ms before, 10.3 ms after; batch 8: 175 ms before, 10.9 ms
 after; batch 1 at 283 tokens: 63 ms before (loaded box) and 9.8 ms after.
+
+## 2026-10-26 tiled reading (the reference's "Gundam" mode) and the global-view order
+
+Facts read from the reference code (`modeling_deepseekocr.py`, not from llama.cpp): the image embeddings are laid out
+`[local tiles, global view, view separator]` (`torch.cat([local_features, global_features, self.view_seperator])`), so
+the global-first order `crate::rows` had assumed was backwards; it is local first now, with the tile mosaic's rows
+(one newline per mosaic row, the tiles of a tile-row interleaved by token row) and the global view's rows each
+newline-terminated, and the projector row to (view, token) map in `RowPlan::locate`. Reading policy
+(`serve::Reading`): both sides at most 640 px is one aspect-fitted 640 view (111 rows, the reference's "Small" mode);
+larger images are `tile_grid(640, at most 9)` tiles plus the 1024 global view; `max_tiles = 0` is the old global-only
+reading. Views are prepared by `imaging::views` (Pillow bicubic and `ImageOps.pad`, byte-pinned; the old preprocess
+used a non-antialiased device bicubic, which aliases a 2480 px scan down to 1024). The tile tower is a second
+`DeepEncoder` at a 40x40 SAM grid whose absolute position table is resampled at load (`sam1::resample::GridSource`).
+
+Grounding boxes are relative to the original image in every reading (a 1009x417 page is boxed over y 29-959 of 999,
+not inside the padded square's band), which is what the reference's post-processing assumes; nothing is transformed.
+
+Dense-page regression (synthetic 1654x2339 page, 15 px text, 930 reference words, `Free OCR.`, 1500 tokens, word error
+rate against the rendered text): DeepSeek-OCR global view 0.884 -> tiled 0.520. A real 1960 newspaper page
+(`ww1960-0601-v02n11.pdf`, page 2, rotated upright, 2x3 tiles, 908 prompt tokens) reads headlines, columns and article
+text in order.
+
+Encoder profile (GH200, CUDA, fp32 CUDA-core kernels, per view): SAM at 1024 px 1.57 s of device time of which the
+attention (scores, rel-pos bias, softmax, apply: unfused WGSL) is 1.1 s and the GEMMs 0.09 s; the 640 px tile 0.63 s;
+CLIP at the tile's 101 tokens 0.66 s because its small-M GEMM picks the plain `matmul` kernel, which the native
+upgrade table does not cover, where the 257-token global CLIP gets `matmul_f32_reg`. Open: fused rel-pos flash
+attention for SAM, `matmul` -> native GEMM for small M, bf16 tensor cores for the linears.

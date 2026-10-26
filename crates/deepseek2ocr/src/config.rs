@@ -176,6 +176,13 @@ impl DeepseekOcrConfig {
         }
     }
 
+    /// The same pipeline with the SAM tower at another patch grid (a local tile's:
+    /// 40x40 for a 640 px crop); CLIP follows the compressor's grid, so the whole
+    /// encoder reads the one checkpoint at the tile's token grid.
+    pub fn at_sam_grid(&self, grid_h: u32, grid_w: u32) -> DeepseekOcrConfig {
+        DeepseekOcrConfig { sam: self.sam.at_grid(grid_h, grid_w), ..self.clone() }
+    }
+
     /// The checkpoint-free golden fixture's config.
     ///
     /// Every number is the corresponding `params.tiny` entry of

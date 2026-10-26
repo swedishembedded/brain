@@ -368,6 +368,100 @@ impl Resampler {
         ViewTrace { concat_in, layers, query_slice, projected }
     }
 
+    /// The serving forward: every view's SAM tokens through the tower and the projector, with no taps,
+    /// no read-backs and no retained activations. `views` are `[n_query, d_model]` SAM token grids of the
+    /// same kind (`local` picks the query bank); the result is each view's `[n_query, decoder_hidden]` rows.
+    ///
+    /// The views are one batch: the weight matmuls run over all `views * 2 * n_query` rows, the attention
+    /// kernels over `views` independent sequences. Everything is queued as ONE submission and read back
+    /// once, where [`Self::resample_view`] (the training-shaped tap forward the gradient checks and the
+    /// golden parity use) syncs and reads back several tensors per layer. The two dispatch the same
+    /// kernels in the same order; `tests/composite.rs` pins them to each other.
+    pub fn encode_views(&self, views: &[&[f32]], local: bool) -> Vec<Vec<f32>> {
+        let e = &self.cfg.encoder;
+        let bsz = views.len() as u32;
+        if bsz == 0 {
+            return Vec::new();
+        }
+        let n_query = if local { e.n_query_local } else { e.n_query_global };
+        let (d, kv, ff, hd, nh, nkv) = (e.d_model, e.kv_dim(), e.ffn_hidden, e.head_dim(), e.n_heads, e.n_kv_heads);
+        let t = 2 * n_query;
+        let rows = bsz * t;
+        let g = &self.gpu;
+        let ids = &self.ids;
+        let bids = ids.as_block_ids();
+
+        let bank = self.ps.read_weight(g, if local { "vision.query_local.weight" } else { "vision.query_global.weight" });
+        let mut concat = Vec::with_capacity((rows * d) as usize);
+        for v in views {
+            assert_eq!(v.len(), (n_query * d) as usize, "each view's tokens must be [n_query, d_model]");
+            concat.extend_from_slice(v);
+            concat.extend_from_slice(&bank);
+        }
+        let x = g.storage((rows * d) as u64);
+        g.write_f32(&x, &concat);
+
+        // Scratch, allocated once and reused by every layer (each layer's steps run in order).
+        let (xn, q, k, v) = (g.storage((rows * d) as u64), g.storage((rows * d) as u64), g.storage((rows * kv) as u64), g.storage((rows * kv) as u64));
+        let (qkv, ctx, delta) = (g.storage((rows * 3 * d) as u64), g.storage((rows * d) as u64), g.storage((rows * d) as u64));
+        let (scores, probs) = (g.storage((bsz * nh * t * t) as u64), g.storage((bsz * nh * t * t) as u64));
+        let (gate, up, h) = (g.storage((rows * ff) as u64), g.storage((rows * ff) as u64), g.storage((rows * ff) as u64));
+        let group = e.group();
+
+        let mut steps: Vec<Step> = Vec::new();
+        for l in 0..e.n_layers {
+            let w = |leaf: &str| self.ps.w(&format!("vision.encoder.blocks.{l}.{leaf}"));
+            let wn = |leaf: &str| format!("vision.encoder.blocks.{l}.{leaf}");
+            steps.push(block::rmsnorm_fwd(g, &bids, &x, w("norm1.weight"), &xn, d, rows, e.rms_eps));
+            steps.push(g.step(ids.matmul, &[&xn, w("attn.q.weight"), &q], &[rows, d, d], rows * d));
+            self.lora_fwd(&mut steps, "attn.q", &xn, &wn("attn.q.weight"), &q, rows, d, d);
+            steps.push(g.step(ids.bias_add, &[&q, w("attn.q.bias")], &[rows, d], rows * d));
+            steps.push(g.step(ids.matmul, &[&xn, w("attn.k.weight"), &k], &[rows, d, kv], rows * kv));
+            self.lora_fwd(&mut steps, "attn.k", &xn, &wn("attn.k.weight"), &k, rows, d, kv);
+            steps.push(g.step(ids.bias_add, &[&k, w("attn.k.bias")], &[rows, kv], rows * kv));
+            steps.push(g.step(ids.matmul, &[&xn, w("attn.v.weight"), &v], &[rows, d, kv], rows * kv));
+            self.lora_fwd(&mut steps, "attn.v", &xn, &wn("attn.v.weight"), &v, rows, d, kv);
+            steps.push(g.step(ids.bias_add, &[&v, w("attn.v.bias")], &[rows, kv], rows * kv));
+            steps.push(block::rope_fwd(g, &bids, &q, rows, nh, hd, d, t, e.rope_theta));
+            steps.push(block::rope_fwd(g, &bids, &k, rows, nkv, hd, kv, t, e.rope_theta));
+            steps.push(block::kv_expand_fwd(g, ids.kv_expand, &q, &qkv, rows, nh, 1, hd, 3 * d, 0));
+            steps.push(block::kv_expand_fwd(g, ids.kv_expand, &k, &qkv, rows, nh, group, hd, 3 * d, d));
+            steps.push(block::kv_expand_fwd(g, ids.kv_expand, &v, &qkv, rows, nh, group, hd, 3 * d, 2 * d));
+            steps.push(g.step(ids.scores, &[&qkv, &scores], &[bsz, nh, t, hd, 3 * d, 0, d], bsz * nh * t * t));
+            steps.push(g.step(ids.mask, &[&scores], &[bsz, nh, t, n_query], bsz * nh * t * t));
+            steps.push(g.step(ids.softmax, &[&scores, &probs], &[bsz, nh, t], bsz * nh * t));
+            steps.push(g.step(ids.apply, &[&probs, &qkv, &ctx], &[bsz, nh, t, hd, 3 * d, 2 * d, d], bsz * nh * t * hd));
+            steps.push(g.step(ids.matmul, &[&ctx, w("attn.out.weight"), &delta], &[rows, d, d], rows * d));
+            self.lora_fwd(&mut steps, "attn.out", &ctx, &wn("attn.out.weight"), &delta, rows, d, d);
+            steps.push(g.step(ids.add_inplace, &[&x, &delta], &[rows * d], rows * d));
+            steps.push(block::rmsnorm_fwd(g, &bids, &x, w("norm2.weight"), &xn, d, rows, e.rms_eps));
+            steps.push(g.step(ids.matmul, &[&xn, w("mlp.gate.weight"), &gate], &[rows, d, ff], rows * ff));
+            self.lora_fwd(&mut steps, "mlp.gate", &xn, &wn("mlp.gate.weight"), &gate, rows, d, ff);
+            steps.push(g.step(ids.matmul, &[&xn, w("mlp.up.weight"), &up], &[rows, d, ff], rows * ff));
+            self.lora_fwd(&mut steps, "mlp.up", &xn, &wn("mlp.up.weight"), &up, rows, d, ff);
+            steps.push(g.step(ids.silu_mul, &[&gate, &up, &h], &[rows * ff], rows * ff));
+            steps.push(g.step(ids.matmul, &[&h, w("mlp.down.weight"), &delta], &[rows, ff, d], rows * d));
+            self.lora_fwd(&mut steps, "mlp.down", &h, &wn("mlp.down.weight"), &delta, rows, ff, d);
+            steps.push(g.step(ids.add_inplace, &[&x, &delta], &[rows * d], rows * d));
+        }
+        steps.push(block::rmsnorm_fwd(g, &bids, &x, self.ps.w("vision.encoder.norm.weight"), &xn, d, rows, e.rms_eps));
+        g.submit(&[], &steps);
+
+        // The projector runs over every row (the image half's are dropped on the host: a few percent of the
+        // tower's work, against slicing a device buffer per view).
+        let (pin, pout) = (e.d_model, self.cfg.decoder_hidden);
+        let proj = g.storage((rows * pout) as u64);
+        g.submit(
+            &[],
+            &[
+                g.step(ids.matmul, &[&xn, self.ps.w("vision.projector.fc.weight"), &proj], &[rows, pin, pout], rows * pout),
+                g.step(ids.bias_add, &[&proj, self.ps.w("vision.projector.fc.bias")], &[rows, pout], rows * pout),
+            ],
+        );
+        let all = g.read(&proj, (rows * pout) as usize);
+        all.chunks((t * pout) as usize).map(|view| view[(n_query * pout) as usize..].to_vec()).collect()
+    }
+
     /// One prefix-LM GQA block, in place on the `[t, d_model]` residual `x`.
     /// Returns this layer's taps (read back before the next layer's dispatch
     /// overwrites the scratch buffers) plus the retained device buffers

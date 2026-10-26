@@ -146,12 +146,10 @@ Reference client: [`samples/python/vision/deepseek-ocr/`](../../../samples/pytho
 | `prompt` | the instruction after the image. Default `<\|grounding\|>Convert the document to markdown.` - the reference model's own prompt |
 | `messages` | flattened chat messages (JSON array string); the last user turn becomes the instruction |
 | `max_new` | tokens to generate, default 2048 (`deepseek2ocr::caps::DEFAULT_MAX_NEW`). Decode is KV-cached and stops early on EOS - see below |
+| `max_tiles` | the most 640 px tiles a large page is cut into (default 9); `0` reads the page as one 1024 px global view |
 | `weights` | override the model-store resolver's own pick for one request |
 
-`BRAIN_DEEPSEEK_OCR_NGRAM_SIZE` (default 30) and `BRAIN_DEEPSEEK_OCR_WINDOW_SIZE`
-(default 90) tune the decode loop's n-gram anti-repetition filter: a
-generated n-gram already seen within the trailing `WINDOW_SIZE` tokens is
-suppressed. Set `NGRAM_SIZE=0` to disable the filter entirely.
+The decode runs vLLM's anti-repetition recipe for this model, set per request: no 30-gram may repeat within a 90-token window (the `<td>`/`</td>` table tags are exempt).
 
 The reserved markers are ordinary text in the instruction and are tokenized
 atomically: `<|grounding|>` turns on grounding mode (the model then emits
@@ -160,10 +158,10 @@ atomically: `<|grounding|>` turns on grounding mode (the model then emits
 
 ## Hardware and limits
 
-**Both halves on the GPU, on a host that has one.** `caps::Session::load`
-builds the vision encoder (SAM+CLIP+glue) with `gpu_core::Gpu::new` (the
+**Both halves on the GPU, on a host that has one.** `serve::load`
+builds the vision encoders (SAM+CLIP+glue, at the global and the tile grid) with `gpu_core::Gpu::new` (the
 server's default backend: CUDA on NVIDIA cards) and the decoder on whichever
-device `caps::plan_placement` picks. That is a real
+device `ocrserve::plan_placement` picks. That is a real
 card by default: on two Tesla P40s the served build places the tower on one
 and the DeepSeek-V2 MoE decoder on the other.
 <!-- perf-number: the comparison this default rests on, measured on one host -->
@@ -282,9 +280,14 @@ returns `false` on the model's end-of-sentence id, which stops the loop from
 dispatching any further decode steps - wall time now tracks how early the
 model actually stopped, not always the full `max_new` budget.
 
-**One image, one view.** The image block is one contiguous run, so only
-DeepSeek-OCR's *global* (overview) view is served: the multi-tile "Base"/"Gundam"
-modes, which interleave a second token stream at 640², are not.
+**How a page is read.** An image no larger than 640 px on both sides is one aspect-fitted
+`640 x 640` view (111 image rows), so a region crop or a line costs a tenth of a page. A larger image is read
+the way the reference's "Gundam" mode does: cut into the grid of 640 px tiles whose aspect ratio is closest to the
+page's (two to nine tiles; the resize and the pad are Pillow's bicubic, byte for byte), plus the whole page as one
+1024 px global view. The image block is the tile mosaic's rows (one newline per mosaic row), then the global view's,
+then one separator - the reference's order. A 2x3-tile A4 scan is 908 prompt tokens. `max_tiles = 0` turns tiling off
+(273 rows for any size). Grounding boxes (`<|det|>` coordinates, 0 to 999) are relative to the original image in every
+reading, which is what the reference's own post-processing assumes.
 
 **Concurrent requests are batched.** Each request's image is encoded once on the
 vision card, then the generic scheduler (`model::serve`, through `llmserve`)

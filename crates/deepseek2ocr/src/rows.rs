@@ -31,18 +31,17 @@
 //!   newline. It is NOT "each tile, whole, followed by a newline". There is
 //!   **no separator** in the local branch.
 //!
-//! ## The one thing that is NOT verified here
+//! ## Block order
 //!
-//! The **order of the two blocks** -- global-then-local, as implemented -- is not
-//! settled by the graph builder, because llama.cpp builds one graph per view and
-//! the preprocessor that orders them is outside the file above. It is the order
-//! this model's roadmap sketches, and it is the reading consistent with the
-//! separator being attached to the *global* view and to nothing else (a
-//! separator is a boundary; a trailing separator on the last block would be
-//! pointless). Re-confirm it against the reference preprocessor when the real
-//! image pipeline lands -- a swap changes no row COUNT, so only a real forward
-//! can catch it. `RowPlan::rows` is a plain `Vec`, so reversing the two blocks
-//! is a local change here and nowhere else.
+//! The reference model (`modeling_deepseekocr.py`) concatenates its image
+//! embeddings as `[local tiles, global view, view separator]`
+//! (`torch.cat([local_features, global_features, self.view_seperator[None, :]])`)
+//! and scatters them over the image placeholder tokens in that order. The
+//! placeholder ids are all the same, so only the embedding order matters, and it
+//! is **local first, then global**: the local block's tiles, one newline per
+//! token row of the whole tile mosaic; the global view, one newline per token
+//! row; one separator, last. llama.cpp's graph builders say nothing about it
+//! (one graph per view); the reference's own code does.
 
 /// Which vector occupies one row of the decoder's image-embedding block.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -88,9 +87,11 @@ impl ViewGrid {
 pub struct RowPlan {
     /// One entry per decoder row, in order.
     pub rows: Vec<Src>,
-    /// Projector tokens per view side (`grid_h/4`, and `grid_w/4`, which are
-    /// equal for every real view -- both the overview and a tile are square).
+    /// Projector tokens per side of the global view (`grid_h/4`; both views are square).
     pub tokens_per_side: u32,
+    /// Projector tokens per side of a local tile (10 for a 640 px tile, against the
+    /// global view's 16).
+    pub tile_tokens_per_side: u32,
     pub grid: ViewGrid,
 }
 
@@ -104,7 +105,17 @@ impl RowPlan {
     /// Projector rows the encoder must produce to fill this plan -- one view's
     /// worth per view, global included.
     pub fn projector_rows(&self) -> u32 {
-        (1 + self.grid.tiles()) * self.tokens_per_side * self.tokens_per_side
+        self.tokens_per_side * self.tokens_per_side + self.grid.tiles() * self.tile_tokens_per_side * self.tile_tokens_per_side
+    }
+    /// The `(view, token)` projector row `i` reads: view 0 is the global view, view
+    /// `1 + t` the `t`-th tile (row-major), and `token` the row within that view's own output.
+    pub fn locate(&self, i: u32) -> (usize, usize) {
+        let global = self.tokens_per_side * self.tokens_per_side;
+        if i < global {
+            return (0, i as usize);
+        }
+        let tile = self.tile_tokens_per_side * self.tile_tokens_per_side;
+        (1 + ((i - global) / tile) as usize, ((i - global) % tile) as usize)
     }
     /// How many rows are `Newline` / `Separator` (i.e. not projector output).
     pub fn special_rows(&self) -> usize {
@@ -139,41 +150,43 @@ pub fn local_row_rows(tokens_per_side: u32, tiles_w: u32) -> u32 {
 }
 
 /// Total decoder rows one image occupies, in closed form.
-pub fn n_rows(tokens_per_side: u32, grid: ViewGrid) -> u32 {
-    global_rows(tokens_per_side) + grid.tiles_h * local_row_rows(tokens_per_side, grid.tiles_w)
+pub fn n_rows(tokens_per_side: u32, tile_tokens_per_side: u32, grid: ViewGrid) -> u32 {
+    global_rows(tokens_per_side) + grid.tiles_h * local_row_rows(tile_tokens_per_side, grid.tiles_w)
 }
 
 /// Build the full row layout for one image.
 ///
-/// `tokens_per_side` is the projector tokens along one side of a view -- the SAM
-/// compressor quarters the patch grid, so it is `grid_side / 4` (16 for the real
-/// 1024² overview).
-pub fn row_plan(tokens_per_side: u32, grid: ViewGrid) -> RowPlan {
-    let g = tokens_per_side;
-    assert!(g > 0, "a view must have at least one token per side");
-    let view_len = g * g;
-    let mut rows: Vec<Src> = Vec::with_capacity(n_rows(g, grid) as usize);
+/// `tokens_per_side` is the projector tokens along one side of the global view --
+/// the SAM compressor quarters the patch grid, so it is `grid_side / 4` (16 for
+/// the real 1024² overview); `tile_tokens_per_side` is the same for a local tile
+/// (10 for a 640² tile). Projector row `i` belongs to the global view when
+/// `i < g*g`, and to tile `(i - g*g) / (t*t)` after it.
+pub fn row_plan(tokens_per_side: u32, tile_tokens_per_side: u32, grid: ViewGrid) -> RowPlan {
+    let (g, t) = (tokens_per_side, tile_tokens_per_side);
+    assert!(g > 0 && t > 0, "a view must have at least one token per side");
+    let (view_len, tile_len) = (g * g, t * t);
+    let mut rows: Vec<Src> = Vec::with_capacity(n_rows(g, t, grid) as usize);
 
-    // ---- global view: one newline per token row, then the view separator ----
+    // ---- local tiles first: tiles of one tile-row interleaved BY TOKEN ROW ----
+    for ty in 0..grid.tiles_h {
+        for y in 0..t {
+            for tx in 0..grid.tiles_w {
+                let base = view_len + (ty * grid.tiles_w + tx) * tile_len;
+                rows.extend((0..t).map(|x| Src::Projector(base + y * t + x)));
+            }
+            rows.push(Src::Newline);
+        }
+    }
+
+    // ---- then the global view: one newline per token row, then the view separator ----
     for y in 0..g {
         rows.extend((0..g).map(|x| Src::Projector(y * g + x)));
         rows.push(Src::Newline);
     }
     rows.push(Src::Separator);
 
-    // ---- local tiles: tiles of one tile-row interleaved BY TOKEN ROW ----
-    for ty in 0..grid.tiles_h {
-        for y in 0..g {
-            for tx in 0..grid.tiles_w {
-                let base = (1 + ty * grid.tiles_w + tx) * view_len;
-                rows.extend((0..g).map(|x| Src::Projector(base + y * g + x)));
-            }
-            rows.push(Src::Newline);
-        }
-    }
-
-    debug_assert_eq!(rows.len() as u32, n_rows(g, grid));
-    RowPlan { rows, tokens_per_side: g, grid }
+    debug_assert_eq!(rows.len() as u32, n_rows(g, t, grid));
+    RowPlan { rows, tokens_per_side: g, tile_tokens_per_side: t, grid }
 }
 
 #[cfg(test)]
@@ -195,96 +208,90 @@ mod tests {
     /// is what actually fills it, and they are computed independently.
     #[test]
     fn closed_form_matches_the_built_layout() {
-        for g in [1u32, 2, 4, 16] {
+        for (g, t) in [(1u32, 1u32), (2, 3), (4, 2), (16, 10)] {
             for grid in [ViewGrid::global_only(), ViewGrid::new(1, 1), ViewGrid::new(3, 2), ViewGrid::new(2, 3)] {
-                let p = row_plan(g, grid);
-                assert_eq!(p.len() as u32, n_rows(g, grid), "g={g} grid={grid:?}");
+                let p = row_plan(g, t, grid);
+                assert_eq!(p.len() as u32, n_rows(g, t, grid), "g={g} t={t} grid={grid:?}");
             }
         }
     }
 
-    /// The two per-view counts, against llama.cpp's own `clip_n_output_tokens`
-    /// arithmetic for `PROJECTOR_TYPE_DEEPSEEKOCR`, at the REAL geometry: a
-    /// 1024² overview compresses to 16x16 tokens.
+    /// The per-view counts, against the reference's own arithmetic at the REAL
+    /// geometry: a 1024² overview compresses to 16x16 tokens, a 640² tile to 10x10.
     #[test]
-    fn per_view_counts_match_the_reference_consumer() {
-        // overview: n_patches = h*(h+1) + 1 with h = 16
-        assert_eq!(global_rows(16), 16 * 17 + 1);
+    fn per_view_counts_match_the_reference() {
+        // overview: h*(w+1) + 1 with h = w = 16
         assert_eq!(global_rows(16), 273);
-        // tile row: (tile_patches*grid_w + 1) * h, tile_patches = h = 16
-        assert_eq!(local_row_rows(16, 3), (16 * 3 + 1) * 16);
-        assert_eq!(local_row_rows(16, 3), 784);
-        // Gundam: one 3x2 tile grid plus the overview.
-        assert_eq!(n_rows(16, ViewGrid::new(3, 2)), 273 + 2 * 784);
+        // the tile mosaic: (10 * tiles_w + 1) * (10 * tiles_h)
+        assert_eq!(local_row_rows(10, 3), 31 * 10);
+        // Gundam: a 3x2 mosaic of 640 px tiles plus the overview.
+        assert_eq!(n_rows(16, 10, ViewGrid::new(3, 2)), 273 + 2 * 310);
     }
 
-    /// Every projector row is used exactly once and in ascending order WITHIN a
+    /// Every projector row is used exactly once, in ascending order within a
     /// view -- a layout that dropped, duplicated or transposed a token row would
     /// break one of the two.
     #[test]
     fn every_projector_row_is_used_exactly_once() {
-        let g = 3;
-        let grid = ViewGrid::new(2, 2);
-        let p = row_plan(g, grid);
+        let p = row_plan(4, 3, ViewGrid::new(2, 2));
         let mut idx = projector_indices(&p);
         assert_eq!(idx.len() as u32, p.projector_rows());
         idx.sort_unstable();
         assert_eq!(idx, (0..p.projector_rows()).collect::<Vec<u32>>());
     }
 
-    /// The global block comes first, is terminated by exactly one separator, and
-    /// carries exactly one newline per token row. Newlines total one per token
-    /// row of every view; separators total exactly one for the whole image.
+    /// The reference concatenates `[local tiles, global view, separator]`: the
+    /// image block ends with the global view's rows and exactly one separator,
+    /// and has one newline per token row of the tile mosaic and of the global view.
     #[test]
-    fn newlines_and_the_single_separator_land_where_the_reference_puts_them() {
-        let g = 4;
+    fn the_local_block_comes_first_and_the_global_block_ends_with_the_one_separator() {
+        let (g, t) = (4, 3);
         let grid = ViewGrid::new(3, 2);
-        let p = row_plan(g, grid);
+        let p = row_plan(g, t, grid);
         let seps: Vec<usize> = p.rows.iter().enumerate().filter(|(_, s)| **s == Src::Separator).map(|(i, _)| i).collect();
-        assert_eq!(seps, vec![(global_rows(g) - 1) as usize], "exactly one separator, ending the global block");
+        assert_eq!(seps, vec![p.len() - 1], "exactly one separator, ending the image block");
         let newlines = p.rows.iter().filter(|s| **s == Src::Newline).count();
-        // g rows in the global view + g rows per tile-row.
-        assert_eq!(newlines as u32, g + grid.tiles_h * g);
-        // Every newline is preceded by a full row of projector tokens.
+        assert_eq!(newlines as u32, g + grid.tiles_h * t);
+        let local_len = (grid.tiles_h * local_row_rows(t, grid.tiles_w)) as usize;
+        // Every newline is preceded by a full row of projector tokens: the mosaic's width, then the global view's.
         for (i, s) in p.rows.iter().enumerate() {
             if *s != Src::Newline {
                 continue;
             }
-            let width = if i < global_rows(g) as usize { g } else { g * grid.tiles_w };
+            let width = if i < local_len { t * grid.tiles_w } else { g };
             for k in 1..=width as usize {
                 assert!(matches!(p.rows[i - k], Src::Projector(_)), "row {} before a newline is not a token", i - k);
             }
         }
+        // The first projector row of the block is a TILE token (view 1 starts at g*g), the global view's first follows the local block.
+        assert_eq!(p.rows[0], Src::Projector(g * g));
+        assert_eq!(p.rows[local_len], Src::Projector(0));
         assert_eq!(p.special_rows(), newlines + 1);
     }
 
     /// The tiles of one tile-row are interleaved BY TOKEN ROW, not concatenated
-    /// whole. This is the property most likely to be got wrong, so it is spelled
-    /// out on a 2-tile row at `g = 2`: the first layout row must be tile 0's row
-    /// 0 followed by tile 1's row 0.
+    /// whole: the first layout row is tile 0's row 0 followed by tile 1's row 0.
     #[test]
     fn tiles_in_a_row_are_interleaved_by_token_row() {
-        let g = 2;
-        let p = row_plan(g, ViewGrid::new(2, 1));
-        let local = &p.rows[global_rows(g) as usize..];
-        // view 1 = tile (0,0) at base 4, view 2 = tile (0,1) at base 8.
+        let (g, t) = (3, 2);
+        let p = row_plan(g, t, ViewGrid::new(2, 1));
+        // view 0 = global (9 tokens); tile (0,0) = [9, 13), tile (0,1) = [13, 17).
         assert_eq!(
-            local,
+            &p.rows[..local_row_rows(t, 2) as usize],
             &[
-                Src::Projector(4), Src::Projector(5), Src::Projector(8), Src::Projector(9), Src::Newline,
-                Src::Projector(6), Src::Projector(7), Src::Projector(10), Src::Projector(11), Src::Newline,
+                Src::Projector(9), Src::Projector(10), Src::Projector(13), Src::Projector(14), Src::Newline,
+                Src::Projector(11), Src::Projector(12), Src::Projector(15), Src::Projector(16), Src::Newline,
             ]
         );
     }
 
-    /// `runs()` is what a caller hands the decoder's splice seam. It must break
-    /// at every newline AND at every view boundary, and cover every projector row.
+    /// `runs()` is what a caller hands a splice seam. It must break at every
+    /// newline AND at every view boundary, and cover every projector row.
     #[test]
     fn runs_break_at_newlines_and_view_boundaries() {
-        let g = 2;
-        let p = row_plan(g, ViewGrid::new(2, 1));
+        let p = row_plan(2, 2, ViewGrid::new(2, 1));
         let runs = p.runs();
-        assert_eq!(runs, vec![(0, 0, 2), (3, 2, 2), (7, 4, 2), (9, 8, 2), (12, 6, 2), (14, 10, 2)]);
+        assert_eq!(runs, vec![(0, 4, 2), (2, 8, 2), (5, 6, 2), (7, 10, 2), (10, 0, 2), (13, 2, 2)]);
         let covered: u32 = runs.iter().map(|(_, _, n)| n).sum();
         assert_eq!(covered, p.projector_rows());
         for (d0, p0, n) in runs {
@@ -294,10 +301,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn locate_names_the_view_and_the_token_of_a_projector_row() {
+        let p = row_plan(4, 3, ViewGrid::new(2, 1));
+        // 16 global tokens, then two 9-token tiles.
+        assert_eq!([0, 15, 16, 24, 25, 33].map(|i| p.locate(i)), [(0, 0), (0, 15), (1, 0), (1, 8), (2, 0), (2, 8)]);
+    }
+
     /// A global-only mode is one uninterrupted view: `g` runs of `g` tokens.
     #[test]
     fn global_only_mode_has_no_local_block() {
-        let p = row_plan(16, ViewGrid::global_only());
+        let p = row_plan(16, 10, ViewGrid::global_only());
         assert_eq!(p.len(), 273);
         assert_eq!(p.projector_rows(), 256);
         assert_eq!(p.runs().len(), 16);

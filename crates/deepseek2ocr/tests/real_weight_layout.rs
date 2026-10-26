@@ -105,7 +105,7 @@ fn real_weight_full_row_layout() {
 
     // ---- the real prompt: header KV only, no weights ---------------------
     let tok = tokenizer_from_gguf(lm.to_str().expect("utf-8 path")).expect("tokenizer");
-    let prompt = build_prompt(&tok, "", "\n<|grounding|>Convert the document to markdown.", gh).expect("prompt");
+    let prompt = build_prompt(&tok, "", "\n<|grounding|>Convert the document to markdown.", gh, 10, deepseek2ocr::ViewGrid::global_only()).expect("prompt");
     let (row0, n_rows) = prompt.image_run();
     println!("== deepseek-ocr real-weight FULL row layout");
     println!("  prompt {} ids, image run [{row0}, {})", prompt.len(), row0 + n_rows);

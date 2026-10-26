@@ -151,9 +151,9 @@ fn real_tokenizer_reserved_tokens_and_prompt() {
     // The reference's own prompt, split on `<image>`: nothing before it, the
     // grounding instruction after it.
     let (before, after) = ("", "\n<|grounding|>Convert the document to markdown.");
-    let p = build_prompt(&tok, before, after, g).expect("build the prompt");
+    let p = build_prompt(&tok, before, after, g, 10, deepseek2ocr::ViewGrid::global_only()).expect("build the prompt");
 
-    let plan = deepseek2ocr::row_plan(g, deepseek2ocr::ViewGrid::global_only());
+    let plan = deepseek2ocr::row_plan(g, 10, deepseek2ocr::ViewGrid::global_only());
     let (before_ids, after_ids) = (tok.encode(before), tok.encode(after));
     // Length is exactly BOS + before + the row plan + after - no hidden extras.
     assert_eq!(p.len(), 1 + before_ids.len() + plan.len() + after_ids.len());

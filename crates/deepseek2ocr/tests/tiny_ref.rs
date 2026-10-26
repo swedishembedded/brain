@@ -666,7 +666,7 @@ fn the_real_layout_splices_the_learned_rows_verbatim_and_trains_them() {
         ids: ids.clone(),
         row0,
         n_rows,
-        plan: RowPlan { rows: plan_rows.clone(), tokens_per_side: gw, grid: ViewGrid::global_only() },
+        plan: RowPlan { rows: plan_rows.clone(), tokens_per_side: gw, tile_tokens_per_side: gw, grid: ViewGrid::global_only() },
     };
 
     let m = DeepseekOcr::new_with_prompt(&|p| gpu_core::testgpu::dev(p), cfg.clone(), &init, &init, 7, seq, &prompt, true);
@@ -801,7 +801,7 @@ fn every_device_placement_matches_all_cpu() {
         ids: ids.clone(),
         row0,
         n_rows,
-        plan: RowPlan { rows: plan_rows, tokens_per_side: gw, grid: ViewGrid::global_only() },
+        plan: RowPlan { rows: plan_rows, tokens_per_side: gw, tile_tokens_per_side: gw, grid: ViewGrid::global_only() },
     };
 
     let cpu_dev = |p: &'static [(&'static str, &'static str)]| gpu_core::Gpu::new_cpu(p);
@@ -885,7 +885,7 @@ fn long_context_sized_composite_matches_the_batched_one() {
         ids: ids.clone(),
         row0,
         n_rows,
-        plan: RowPlan { rows: plan_rows, tokens_per_side: gw, grid: ViewGrid::global_only() },
+        plan: RowPlan { rows: plan_rows, tokens_per_side: gw, tile_tokens_per_side: gw, grid: ViewGrid::global_only() },
     };
     let seq = ids.len() as u32 + n_new;
     // Forces >= 3 rounds under `batched = false`: [0,row0) is its own round

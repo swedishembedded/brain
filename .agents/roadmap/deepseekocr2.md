@@ -772,3 +772,15 @@ hidden:**
 - Open: multi-tile (Gundam) layout (needs the sam1 pos-embed / rel-pos resamples), lean inference
   forward for the resampler, batched encode, a measured footprint (the 8 GiB vision figure in
   `caps::FOOTPRINT` is an estimate).
+
+## 2026-10-26 dynamic crops, the lean encoder forward
+
+Reading (`serve::Reading`, official `dynamic_preprocess` with 768 px tiles, 2 to 6 of them): both sides at most 768 px
+is one aspect-fitted 768 view through the local query bank (145 rows); larger images are the tile mosaic (each tile
+through SAM at a 48x48 grid, `GridSource`, and the resampler's 144 local queries), the 1024 global view (256 queries),
+one separator, in that order (`gather_rows`); `max_tiles = 0` reads the global view alone. `Resampler::encode_views` is
+the serving forward: one submission over a batch of views (matmuls over `views * 2 * n_query` rows, the bidirectional
+attention kernels over `views` sequences), one read-back, against `resample_view`'s per-layer syncs and read-backs; it
+equals `resample_view` per view at batch 1, 2, 4, 8 and 16 and for both query banks (`tests/encode_views.rs`).
+Same synthetic dense page as the v1 ledger: global view word error rate 1.000 (the 1024 view cannot resolve 15 px text,
+427 words of hallucination), dynamic crops 0.174.

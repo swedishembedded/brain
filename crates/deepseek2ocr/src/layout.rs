@@ -258,6 +258,30 @@ fn index_buffer(g: &Gpu, label: &str, idx: &[u32]) -> DeviceBuffer {
     b
 }
 
+/// The image block of one request on the host: `plan`'s rows filled from each
+/// view's projector output (`views[0]` the global view, `views[1 + t]` tile `t`,
+/// each `[tokens, d]`) and the two learned vectors.
+///
+/// What a served request needs, where the block's size varies per image; the
+/// device-side [`RowGather`] is the fixed-layout twin the training path
+/// differentiates through.
+pub fn assemble_block(plan: &crate::rows::RowPlan, views: &[Vec<f32>], newline: &[f32], separator: &[f32]) -> Vec<f32> {
+    let d = newline.len();
+    assert_eq!(separator.len(), d, "the learned vectors differ in width");
+    let mut out = Vec::with_capacity(plan.len() * d);
+    for src in &plan.rows {
+        match *src {
+            Src::Projector(i) => {
+                let (view, token) = plan.locate(i);
+                out.extend_from_slice(&views[view][token * d..(token + 1) * d]);
+            }
+            Src::Newline => out.extend_from_slice(newline),
+            Src::Separator => out.extend_from_slice(separator),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,7 +308,7 @@ mod tests {
     impl Fixture {
         fn new() -> Fixture {
             let gpu = gpu_core::testgpu::dev(LAYOUT_PIPELINES);
-            let rows = row_plan(G, ViewGrid::global_only()).rows;
+            let rows = row_plan(G, G, ViewGrid::global_only()).rows;
             let p = G * G;
             let rg = RowGather::new(&gpu, &rows, p, D);
             Fixture {
@@ -475,5 +499,24 @@ mod tests {
         assert!(msg.contains("used by no layout row"), "got {msg:?}");
         let msg = refused(&[Src::Projector(5)]);
         assert!(msg.contains("but the encoder produces 2"), "got {msg:?}");
+    }
+
+    /// The host block follows the plan: tile tokens first (interleaved by token
+    /// row), a newline after each mosaic row, then the global view, then the separator.
+    #[test]
+    fn the_host_block_follows_the_plan() {
+        let plan = row_plan(2, 2, ViewGrid::new(2, 1));
+        // Each token's vector is [view, token] so a misplaced row is visible.
+        let view = |v: usize, n: usize| -> Vec<f32> { (0..n).flat_map(|t| [v as f32, t as f32]).collect() };
+        let views = vec![view(0, 4), view(1, 4), view(2, 4)];
+        let (nl, sep) = ([-1.0, -1.0], [-2.0, -2.0]);
+        let block = assemble_block(&plan, &views, &nl, &sep);
+        let rows: Vec<&[f32]> = block.chunks(2).collect();
+        assert_eq!(rows.len(), plan.len());
+        // Mosaic row 0: tile 0 tokens 0,1 then tile 1 tokens 0,1, then a newline.
+        assert_eq!(rows[..5], [&[1.0, 0.0][..], &[1.0, 1.0], &[2.0, 0.0], &[2.0, 1.0], &nl]);
+        // The global view follows the mosaic (2 mosaic rows of 5), the separator ends the block.
+        assert_eq!(rows[10], [0.0, 0.0]);
+        assert_eq!(*rows.last().unwrap(), sep);
     }
 }

@@ -33,13 +33,12 @@
 //! because that is the shape a caller needs and the shape that stays honest if
 //! a later checkpoint ever does split them.
 //!
-//! ## Scope: one contiguous run, global view only
+//! ## One contiguous run, any tile grid
 //!
-//! `deepseek2::DeepseekV2::enable_mm_splice` takes ONE `(row0, n_rows)` run,
-//! so this builds the global (overview) view only -
-//! [`ViewGrid::global_only`], 273 rows at the real `tokens_per_side = 16`.
-//! Gundam/multi-tile prompts are a `rows`-level layout this decoder cannot
-//! splice yet.
+//! The image rows of a request are one contiguous run of the prompt: the local
+//! tiles' rows, then the global view's, then the separator ([`crate::rows`]).
+//! `grid` sizes it - [`ViewGrid::global_only`] is 273 rows at the real
+//! `tokens_per_side = 16`, a Gundam page adds the tile mosaic's rows in front.
 //!
 //! **`n_rows` is the whole block (273), not the 256 projector rows.** The 17
 //! newline/separator rows sit *inside* the run, so whoever fills the splice
@@ -178,11 +177,15 @@ impl Prompt {
 /// `<|ref|>`, …) is matched atomically by the tokenizer's own special table -
 /// they need no special-casing here.
 ///
+/// `grid` is the local tile grid ([`ViewGrid::global_only`] for a page read as one view).
+///
+/// `tile_tokens_per_side` is the same for a local tile (unused without tiles).
+///
 /// `tokens_per_side` is the projector's token grid side, i.e.
 /// `DeepseekOcrConfig::token_grid().0` (16 for the real 1024² view, giving 273
 /// image rows). [`BOS`] is prepended, matching both the reference
 /// implementation and the file's `add_bos_token`.
-pub fn build_prompt(tok: &QwenBpe, text_before: &str, text_after: &str, tokens_per_side: u32) -> Result<Prompt, String> {
+pub fn build_prompt(tok: &QwenBpe, text_before: &str, text_after: &str, tokens_per_side: u32, tile_tokens_per_side: u32, grid: ViewGrid) -> Result<Prompt, String> {
     let img = ImageTokens::resolve(tok)?;
     let bos = tok.special_id(BOS).ok_or_else(|| format!("this tokenizer has no reserved {BOS:?} token"))?;
     // A stray `<image>` in the TEXT would encode to the placeholder id outside
@@ -198,7 +201,7 @@ pub fn build_prompt(tok: &QwenBpe, text_before: &str, text_after: &str, tokens_p
 
     let before = tok.encode(text_before);
     let after = tok.encode(text_after);
-    let plan = row_plan(tokens_per_side, ViewGrid::global_only());
+    let plan = row_plan(tokens_per_side, tile_tokens_per_side, grid);
 
     let mut ids = Vec::with_capacity(1 + before.len() + plan.len() + after.len());
     ids.push(bos);
@@ -286,7 +289,7 @@ mod tests {
         let t = QwenBpe::from_gguf(&gt).unwrap();
         let e = ImageTokens::resolve(&t).unwrap_err();
         assert!(e.contains("<image>"), "{e}");
-        assert!(build_prompt(&t, "", "", 2).is_err());
+        assert!(build_prompt(&t, "", "", 2, 2, ViewGrid::global_only()).is_err());
     }
 
     /// The assembled sequence: BOS, the text before, the whole row plan, the
@@ -297,11 +300,11 @@ mod tests {
         let t = toy();
         let img = ImageTokens::resolve(&t).unwrap();
         let g = 3;
-        let p = build_prompt(&t, "ab", "a", g).unwrap();
+        let p = build_prompt(&t, "ab", "a", g, g, ViewGrid::global_only()).unwrap();
 
         let before = t.encode("ab");
         let after = t.encode("a");
-        assert_eq!(p.len(), 1 + before.len() + row_plan(g, ViewGrid::global_only()).len() + after.len());
+        assert_eq!(p.len(), 1 + before.len() + row_plan(g, g, ViewGrid::global_only()).len() + after.len());
         assert_eq!(p.n_rows, g * (g + 1) + 1, "the global view is g*(g+1) + 1 rows");
         assert_eq!(p.row0, 1 + before.len() as u32);
         assert_eq!(p.image_run(), (p.row0, p.n_rows));
@@ -327,9 +330,9 @@ mod tests {
     #[test]
     fn the_marker_may_not_be_left_in_the_text() {
         let t = toy();
-        let e = build_prompt(&t, "", "a<image>b", 2).unwrap_err();
+        let e = build_prompt(&t, "", "a<image>b", 2, 2, ViewGrid::global_only()).unwrap_err();
         assert!(e.contains("text_after") && e.contains("<image>"), "{e}");
-        assert!(build_prompt(&t, "<image>", "", 2).is_err());
+        assert!(build_prompt(&t, "<image>", "", 2, 2, ViewGrid::global_only()).is_err());
     }
 
     /// The real geometry, checkpoint-free: 16 tokens per side is 273 rows, of
@@ -337,7 +340,7 @@ mod tests {
     #[test]
     fn the_real_geometry_is_273_rows_of_which_256_are_projector_rows() {
         let t = toy();
-        let p = build_prompt(&t, "", "a", 16).unwrap();
+        let p = build_prompt(&t, "", "a", 16, 10, ViewGrid::global_only()).unwrap();
         assert_eq!((p.n_rows, p.plan.projector_rows(), p.plan.special_rows()), (273, 256, 17));
         assert_eq!(p.row0, 1, "no text before the image: the block starts right after BOS");
         assert_eq!(p.len(), 1 + 273 + t.encode("a").len());
