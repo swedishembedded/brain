@@ -394,17 +394,28 @@ struct Names {
 /// The tier-independent merge pass of the fused decode.
 const FLASH_COMBINE: &str = "paged_flash_decode_gqa_combine";
 
-/// The GQA group sizes (query heads per kv head) the fused decode is
+/// The `(head_dim, GQA group)` pairs (group = query heads per kv head) the fused decode is
 /// specialised for - its loops over a group's heads are unrolled into
-/// registers, so each group is its own pipeline. 6 is Qwen3.8-27B (24 heads /
-/// 4 kv), 8 the 35B-A3B sibling (16 / 2); any other group keeps the triad.
-const FLASH_GROUPS: [u32; 2] = [6, 8];
+/// registers, so each pair is its own pipeline. Group 6 at head_dim 256 is Qwen3.8-27B
+/// (24 heads / 4 kv), group 8 the 35B-A3B sibling (16 / 2); head_dim 128 with group 1 is plain
+/// multi-head attention (DeepSeek-OCR's decoder: 10 heads of 128). Any other shape keeps the triad.
+const FLASH_SHAPES: [(u32, u32); 3] = [(256, 6), (256, 8), (128, 1)];
 
-/// The pipeline name of the fused decode for `tier` at GQA group `group`:
-/// `GRP` specialisation first, then the tier's storage rewrite - the names
+/// The compile-time constants of the fused decode kernel for one shape: `GRP`, and for the
+/// non-native head width `HD` and its 4-channel piece count `HD4`.
+fn decode_params(head_dim: u32, group: u32) -> Vec<(&'static str, u32)> {
+    if head_dim == 256 {
+        vec![("GRP", group)]
+    } else {
+        vec![("GRP", group), ("HD", head_dim), ("HD4", head_dim / 4)]
+    }
+}
+
+/// The pipeline name of the fused decode for `tier` at `head_dim` and GQA group `group`:
+/// the constants' specialisation first, then the tier's storage rewrite - the names
 /// `kernels::template::interned` and `kv_tier_variant` give them.
-fn decode_name(tier: KvTier, group: u32) -> String {
-    let base = kernels::template::variant_name("paged_flash_decode_gqa_hd256", &[("GRP", group)]);
+fn decode_name(tier: KvTier, head_dim: u32, group: u32) -> String {
+    let base = kernels::template::variant_name("paged_flash_decode_gqa_hd256", &decode_params(head_dim, group));
     match tier.element {
         KvElement::F32 => base,
         KvElement::Bf16 => format!("{base}#kv=bf16"),
@@ -469,12 +480,15 @@ pub fn kernel_list(existing: &[(&str, &str)]) -> Vec<(&'static str, &'static str
     let fp8_scores = fp8_kv_variant("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED, "pool_k", "k_scales", "p.head_dim").expect("pool_k is templatable");
     let fp8_apply = fp8_kv_variant("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED, "pool_v", "v_scales", "p.head_dim").expect("pool_v is templatable");
     let mut decode = Vec::new();
-    for group in FLASH_GROUPS {
-        let base = interned("paged_flash_decode_gqa_hd256", kernels::PAGED_FLASH_DECODE_GQA_HD256, &[("GRP", group)]).expect("the decode kernel declares GRP");
+    for (head_dim, group) in FLASH_SHAPES {
+        let base = interned("paged_flash_decode_gqa_hd256", kernels::PAGED_FLASH_DECODE_GQA_HD256, &decode_params(head_dim, group)).expect("the decode kernel declares its constants");
         decode.push(base);
         decode.push(kv_tier_variant(base.0, base.1, CompactKv::Bf16).expect("the decode kernel marks its kv-tier blocks"));
-        decode.push(kv_tier_variant(base.0, base.1, CompactKv::Int8).expect("the decode kernel marks its kv-tier blocks"));
-        decode.push(kv_tier_variant(base.0, base.1, CompactKv::Fp8).expect("the decode kernel marks its kv-tier blocks"));
+        // The int8 and fp8 row loaders read 256-channel rows; at head_dim 128 those tiers keep the triad.
+        if head_dim == 256 {
+            decode.push(kv_tier_variant(base.0, base.1, CompactKv::Int8).expect("the decode kernel marks its kv-tier blocks"));
+            decode.push(kv_tier_variant(base.0, base.1, CompactKv::Fp8).expect("the decode kernel marks its kv-tier blocks"));
+        }
     }
     let all: Vec<(&'static str, &'static str)> = vec![
         (FLASH_COMBINE, kernels::PAGED_FLASH_DECODE_GQA_COMBINE),
@@ -551,10 +565,10 @@ pub struct KvKernels {
     /// it off for a caller that needs the fp32 pipeline's own arithmetic (a test
     /// comparing tiers against it).
     native_prefill: bool,
-    /// `(group, pipeline)` of the fused decode, for the groups this device was
+    /// `(head_dim, group, pipeline)` of the fused decode, for the shapes this device was
     /// given a specialisation of; empty when the model did not register them
     /// (a missing fused decode is a slower decode, never a wrong one).
-    decode: Vec<(u32, usize)>,
+    decode: Vec<(u32, u32, usize)>,
     decode_combine: Option<usize>,
 }
 
@@ -614,7 +628,6 @@ pub struct FlashDecodeShape {
 /// 128 splits per (sequence, kv head) and even one sequence fills the device.
 const FLASH_TILE: u32 = 128;
 const FLASH_TILES_PER_SPLIT: u32 = 8;
-const FLASH_HEAD_DIM: u32 = 256;
 /// Workgroups a decode dispatch aims for: a card's SMs several times over, so a
 /// short context is not left to a handful of workgroups each walking its keys
 /// serially (at 1k tokens one sequence's two kv heads made FOUR workgroups and a
@@ -676,7 +689,7 @@ impl KvKernels {
             apply: find(names.apply)?,
             prefill_hd256: find(names.prefill_hd256)?,
             native_prefill: true,
-            decode: FLASH_GROUPS.iter().filter_map(|&group| gpu.kernel_index(&decode_name(tier, group)).map(|i| (group, i))).collect(),
+            decode: FLASH_SHAPES.iter().filter_map(|&(hd, group)| gpu.kernel_index(&decode_name(tier, hd, group)).map(|i| (hd, group, i))).collect(),
             decode_combine: gpu.kernel_index(FLASH_COMBINE),
         })
     }
@@ -739,12 +752,11 @@ impl KvKernels {
         }
     }
 
-    /// Whether [`Self::flash_decode`] can run this shape on `g`: head_dim 256,
-    /// a GQA group the model registered a specialisation for
-    /// ([`FLASH_GROUPS`]), and a device that runs workgroup-barrier kernels
-    /// (not the CPU JIT, which keeps the scores/softmax/apply triad).
+    /// Whether [`Self::flash_decode`] can run this shape on `g`: a head width and GQA group the
+    /// model registered a specialisation for ([`FLASH_SHAPES`]), and a device that runs
+    /// workgroup-barrier kernels (not the CPU JIT, which keeps the scores/softmax/apply triad).
     pub fn flash_decode_available(&self, g: &Gpu, head_dim: u32, group: u32) -> bool {
-        head_dim == FLASH_HEAD_DIM && self.decode_combine.is_some() && self.decode.iter().any(|&(gr, _)| gr == group) && g.caps().workgroup_reductions
+        self.decode_combine.is_some() && self.decode.iter().any(|&(hd, gr, _)| hd == head_dim && gr == group) && g.caps().workgroup_reductions
     }
 
     /// Fused decode attention over `k`/`v` planes: attends each sequence's
@@ -758,7 +770,7 @@ impl KvKernels {
         self.check(v);
         let group = s.n_heads / s.n_kv_heads;
         assert!(self.flash_decode_available(g, s.head_dim, group), "KvKernels::flash_decode: not available for head_dim {} group {group} on this device", s.head_dim);
-        let decode = self.decode.iter().find(|&&(gr, _)| gr == group).expect("checked by flash_decode_available").1;
+        let decode = self.decode.iter().find(|&&(hd, gr, _)| hd == s.head_dim && gr == group).expect("checked by flash_decode_available").2;
         let (n_splits, tiles_per_split) = if s.pin_splits { flash_splits_pinned(s.cap, s.n_kv_heads) } else { flash_splits(s.cap, s.batch, s.n_kv_heads) };
         let mut params = [s.batch, s.n_heads, s.n_kv_heads, s.head_dim, group, s.block_size, s.max_bt, n_splits, tiles_per_split];
         // A native kernel's grid fills the device several blocks deep (the split count is a free choice: every split
@@ -769,7 +781,7 @@ impl KvKernels {
         }
         let n_splits = params[7];
         // Every (sequence, head, split) record is written, a split with no live key included, so the slab needs no clear.
-        let part = g.storage_uninit(s.batch as u64 * s.n_heads as u64 * n_splits as u64 * (FLASH_HEAD_DIM as u64 + 2));
+        let part = g.storage_uninit(s.batch as u64 * s.n_heads as u64 * n_splits as u64 * (s.head_dim as u64 + 2));
         let grid = Dispatch::Workgroups(s.batch * s.n_kv_heads * n_splits);
         let split = match (&k.scales, &v.scales) {
             (None, None) => g.dispatch(decode, &[q, &k.data, &v.data, block_tables, seq_lens, &part], &params, grid),

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Fused GQA decode attention at head_dim 256: one workgroup per (sequence, kv head, key split) attends every query head of the group and writes a partial online-softmax state
+// @what  Fused GQA decode attention at head_dim 256 (or 128 by specialisation): one workgroup per (sequence, kv head, key split) attends every query head of the group and writes a partial online-softmax state
 // @how   128-thread workgroup, 128-key tiles, a thread-per-key score pass over 16-byte row loads and a thread-per-channel-pair weighted sum
 // @opt   4
 // @cpu   no
@@ -90,7 +90,7 @@
 // bit-identical to the triad (a different reduction order); gated against exact
 // f64 attention at 2e-4 relative.
 
-const HD: u32 = 256u;
+const HD: u32 = 256u;      // head_dim: 256, or 128 (HD4 = 32) through `kernels::template::specialize`
 const HD4: u32 = 64u;      // 4-channel pieces per head row
 const TILE: u32 = 128u;    // keys per tile, and threads per workgroup
 const GMAX: u32 = 8u;      // most query heads one kv head may serve
@@ -178,6 +178,7 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     var o: array<vec2<f32>, 8>;
     for (var g = 0u; g < GRP; g = g + 1u) { o[g] = vec2<f32>(0.0, 0.0); }
 
+    let own = t < HD / 2u;  // this thread owns a channel pair of the output
     let sg = t / 16u;       // softmax: this thread's head
     let si = t % 16u;       // and its lane within that head's 16 threads
 
@@ -267,7 +268,9 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
         for (var g = 0u; g < GRP; g = g + 1u) { o[g] = o[g] * corr[g]; }
         let nlive = min(TILE, tlen - kt * TILE);
         var rr = 0u;
-        for (; rr + 4u <= nlive; rr = rr + 4u) {
+        // Thread `t` owns channels `2t, 2t + 1`: with `head_dim` 128 the upper half of the workgroup owns none (and
+        // reading a value row at its index would run into the next head's channels).
+        for (; own && rr + 4u <= nlive; rr = rr + 4u) {
             let r0 = rowb[rr];
             let r1 = rowb[rr + 1u];
             let r2 = rowb[rr + 2u];
@@ -286,7 +289,7 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
                 o[g] = vec2<f32>(ox, oy);
             }
         }
-        for (; rr < nlive; rr = rr + 1u) {
+        for (; own && rr < nlive; rr = rr + 1u) {
             let r0 = rowb[rr];
             let v0 = v2(r0, t) * v_scale(r0);
             for (var g = 0u; g < GRP; g = g + 1u) {
@@ -298,10 +301,12 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
         workgroupBarrier();
     }
 
-    for (var g = 0u; g < GRP; g = g + 1u) {
-        let base = ((b * p.n_heads + kvh * GRP + g) * p.n_splits + s) * (HD + 2u);
-        part[base + 2u * t] = o[g].x;
-        part[base + 2u * t + 1u] = o[g].y;
+    if (own) {
+        for (var g = 0u; g < GRP; g = g + 1u) {
+            let base = ((b * p.n_heads + kvh * GRP + g) * p.n_splits + s) * (HD + 2u);
+            part[base + 2u * t] = o[g].x;
+            part[base + 2u * t + 1u] = o[g].y;
+        }
     }
     if (t < GRP) {
         let base = ((b * p.n_heads + kvh * GRP + t) * p.n_splits + s) * (HD + 2u);

@@ -60,7 +60,7 @@ use checkpoint::TensorSource;
 use gpu_core::select::Dtype;
 use gpu_core::{BufUsage, DeviceBuffer, Gpu, Step};
 use model::block::{self, ChunkPaging};
-use model::kv_tier::{self, KvAppend, KvKernels, KvLayer, KvTier};
+use model::kv_tier::{self, FlashDecodeShape, KvAppend, KvKernels, KvLayer, KvTier};
 use model::moe::{self, GroupedExpertFwdIds, GroupedExpertScratch, MoeIds, MoeShape, RouterKind};
 use model::moe_i8::{self, I8Bank, I8Experts, SlotKernels, SlotRouter, SlotScratch};
 use model::ops::{Ops, PagedDecodeShape, Weight};
@@ -600,14 +600,24 @@ impl Engine {
             s.push(e.gpu.step(e.ids.rope_paged, &[buf, &e.sc.positions], &[b, nh, hd, d, f(theta)], b * nh * (hd / 2)));
         };
         let shape = PagedDecodeShape { batch: b, n_heads: nh, group: 1, head_dim: hd, block_size: self.ec.block_size, kv_stride: d, cap, max_bt: self.max_bt, scale: 1.0 / (hd as f32).sqrt() };
+        // The fast tier reads the keys with the split-key fused decode, where the triad's softmax is one
+        // thread per (sequence, head) walking every key: its step time grows with the context several times
+        // faster than the bytes it reads. The splits are pinned to the configured context, so a row's
+        // attention does not depend on which other sequences share its step.
+        let fused = self.fast && self.kvk.flash_decode_available(&self.gpu, hd, 1);
+        let flash = FlashDecodeShape { batch: b, n_heads: nh, n_kv_heads: nh, head_dim: hd, block_size: self.ec.block_size, max_bt: self.max_bt, cap: self.ec.max_seq, pin_splits: true };
         let attend = |e: &Engine, s: &mut Vec<Step>, l: usize| {
             let (g, sc) = (&e.gpu, &e.sc);
             let append = KvAppend { batch: b, kv_stride: d, block_size: e.ec.block_size, head_dim: hd };
             s.push(e.kvk.append(g, &e.kv[l].k, &sc.k, &sc.blocks, &sc.offsets, append));
             s.push(e.kvk.append(g, &e.kv[l].v, &sc.v, &sc.blocks, &sc.offsets, append));
-            s.push(e.kvk.scores(g, &sc.q, &e.kv[l].k, &sc.tables, &sc.seq_lens, &sc.scores, shape));
-            s.push(g.step(e.ids.softmax, &[&sc.scores, &sc.seq_lens, &sc.probs], &[b, nh, cap], b * nh));
-            s.push(e.kvk.apply(g, &sc.probs, &e.kv[l].v, &sc.tables, &sc.seq_lens, &sc.ctx, shape));
+            if fused {
+                s.extend(e.kvk.flash_decode(g, &sc.q, &e.kv[l].k, &e.kv[l].v, &sc.tables, &sc.seq_lens, &sc.ctx, flash));
+            } else {
+                s.push(e.kvk.scores(g, &sc.q, &e.kv[l].k, &sc.tables, &sc.seq_lens, &sc.scores, shape));
+                s.push(g.step(e.ids.softmax, &[&sc.scores, &sc.seq_lens, &sc.probs], &[b, nh, cap], b * nh));
+                s.push(e.kvk.apply(g, &sc.probs, &e.kv[l].v, &sc.tables, &sc.seq_lens, &sc.ctx, shape));
+            }
         };
         let out = self.layers(&mut s, b, &rope, &attend);
         self.head(&mut s, &self.sc.res[out], b);

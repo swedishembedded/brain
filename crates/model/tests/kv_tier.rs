@@ -247,8 +247,13 @@ fn fused_prefill_over_compact_planes_equals_f32_over_their_decoded_values(g: &Gp
 /// sequences of different lengths, the longest crossing several key splits and
 /// not a multiple of the tile, blocks scattered through the pool, `n_heads / n_kv`
 /// query heads sharing each kv head.
-fn fused_decode_equals_exact_attention_over_the_decoded_planes(g: &Gpu, tier: KvTier, label: &str, n_heads: u32, n_kv: u32) {
-    let s = Shape { n_heads, n_kv, head_dim: 256, block_size: 64, num_blocks: 80 };
+fn fused_decode_equals_exact_attention_over_the_decoded_planes(g: &Gpu, tier: KvTier, label: &str, n_heads: u32, n_kv: u32, head_dim: u32) {
+    // The 8-bit tiers' row loaders read 256-channel rows: at head_dim 128 they keep the triad (the kernel is not registered).
+    if head_dim == 128 && (tier == KvTier::INT8 || tier == KvTier::FP8) {
+        assert!(!KvKernels::resolve(g, tier).unwrap().flash_decode_available(g, head_dim, n_heads / n_kv), "{label} {tier}: no fused decode is registered at head_dim 128");
+        return;
+    }
+    let s = Shape { n_heads, n_kv, head_dim, block_size: 64, num_blocks: 80 };
     let group = (s.n_heads / s.n_kv) as usize;
     let lens = [3000u32, 70, 1500, 1];
     let max_bt = (*lens.iter().max().unwrap()).div_ceil(s.block_size);
@@ -312,7 +317,7 @@ fn fused_decode_equals_exact_attention_over_the_decoded_planes(g: &Gpu, tier: Kv
             }
         }
     }
-    eprintln!("{label} {tier} fused decode, group {group}: worst relative error to exact {worst:.2e}");
+    eprintln!("{label} {tier} fused decode, head_dim {head_dim}, group {group}: worst relative error to exact {worst:.2e}");
 }
 
 /// Gate 3: the whole attention (scores, softmax, apply) over a compact plane against the
@@ -517,9 +522,10 @@ fn fused_decode_reads_compact_planes_as_exact_attention_reads_their_decoded_valu
             brain_testutil::skip_unavailable("this device does not run workgroup-barrier kernels");
             return;
         }
-        // Qwen3.8-27B's group of six, and the 35B-A3B sibling's eight.
-        for (n_heads, n_kv) in [(12, 2), (16, 2)] {
-            fused_decode_equals_exact_attention_over_the_decoded_planes(g, tier, label, n_heads, n_kv);
+        // Qwen3.8-27B's group of six, the 35B-A3B sibling's eight (both head_dim 256), and plain multi-head
+        // attention at head_dim 128 (DeepSeek-OCR's decoder: ten heads, one per kv head).
+        for (n_heads, n_kv, head_dim) in [(12, 2, 256), (16, 2, 256), (10, 10, 128)] {
+            fused_decode_equals_exact_attention_over_the_decoded_planes(g, tier, label, n_heads, n_kv, head_dim);
         }
     });
 }

@@ -755,3 +755,20 @@ unscheduled device through to `claim_multi` for a clean error, and
 - One replica on an idle card: 16 concurrent pages, 66.6 pages/min.
 - Two replicas (one per GH200, 19.4 GB each, one process): 21 to 45 pages/min while peer jobs held both cards at 80 to 100% SM. Contended, not a clean comparison; rerun on idle cards.
 - Open: vision encode runs serially inside request parsing (about 300 ms per page) and stalls decode; needs an encode prefetch worker. Serving policy flags (`--max-batch`, `--kv-tokens`, `--gemm fp32`) are not yet plumbed into the OCR resident. No fp32-fallback gate or tensor-core share profile yet (CUDA has no per-kernel timestamps).
+
+## 2026-10-26 decode attention at long context: the fused split-key decode at head_dim 128
+
+Profile first: `engine_bench --batch 1 --steps 40 --prompt N` (GH200, CUDA, fast tier, f32 KV, the box shared with a
+peer's jobs, so only same-window ratios are quoted) put one decode step at 38 / 69 / 113 ms for a context of 283 / 1300 /
+2500 tokens - the step cost grew with the context several times faster than the bytes it reads. The cause is the
+batched decode triad's softmax (one thread per (sequence, head) walking every key) and its apply kernel; the
+`paged_flash_decode_gqa_hd256` kernel documents the same defect at 128k tokens and fixes it for Qwen3.8's head_dim 256.
+That kernel is now specialised at head_dim 128 with one head per kv head (`HD`/`HD4` constants, the upper half of the
+workgroup owns no output channel) and `deepseek2::serve::Engine` runs it in the fast tier with the splits pinned to the
+configured context (a row's attention does not depend on its batch-mates). Exactness against f64 attention at
+head_dim 128, f32 and bf16 KV: worst relative error 1.3e-6 and 1.8e-6 (`model/tests/kv_tier.rs`); the real decoder's
+fast tier still tracks the reference (`serve_real`: cosine 0.99995 or better, 24 of 24 greedy tokens identical).
+The int8 and fp8 KV tiers read 256-channel rows and keep the triad at head_dim 128.
+
+Same-window step times, batch 1 at a 1300-token context: 121 ms before, 10.3 ms after; batch 8: 175 ms before, 10.9 ms
+after; batch 1 at 283 tokens: 63 ms before (loaded box) and 9.8 ms after.
