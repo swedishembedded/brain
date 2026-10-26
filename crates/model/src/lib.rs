@@ -94,6 +94,8 @@ pub mod rollout;
 pub mod saved;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod shard;
+pub mod streamed;
+pub mod tape;
 pub mod train;
 pub mod trainprec;
 pub mod training;
@@ -358,6 +360,15 @@ pub trait Model {
     /// a model that keeps no such pair; such a model refuses a non-default optimizer-state precision by name.
     fn optimizer_state(&mut self) -> Option<OptimizerState<'_>> {
         None
+    }
+
+    /// Stream this model's per-layer tensors through a device window under `cfg` (a full fine-tune whose weights,
+    /// their f32 values on the host and their optimizer state there, need not all fit the device; see
+    /// [`streamed::StreamedStore`]). Called before the first forward when the run asks for resident weights
+    /// (`weights=`); the model's [`Model::off_device_state`] then reports the streamed state. The default refuses by
+    /// name, never training every layer on the device instead.
+    fn set_resident(&mut self, _cfg: &resident_ft::ResidentFtConfig) -> Result<(), String> {
+        Err("this model has no layer-streamed full fine-tune".into())
     }
 
     /// Keep what `policy` names of the forward for the backward ([`saved::SavedPolicy`]): every layer's intermediates,

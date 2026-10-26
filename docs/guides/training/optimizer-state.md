@@ -206,6 +206,35 @@ clips each layer by the norm accumulated so far (the head first), which never
 clips harder than the global clip and equals it when nothing clips. Without a
 clip there is one pass.
 
+### Layer streaming for any parameter-store model
+
+A model whose own kernels read f32 weights from its `ParamStore` streams its
+layers through the same state with `weights=f32`: the value is its own master
+(`ResidentValue::F32`, no second copy), so the host holds each streamed tensor's
+f32 value and moments and the device holds the window. `Model::set_resident`
+converts a built model (`model::streamed::StreamedStore::convert`): every trained
+`blocks.{l}.*` tensor moves into the state, the store's weight and gradient
+entries become handles to the window's slots and lanes, and the model records
+its passes again, so its kernels run unchanged. The model marks where its layers
+begin and end in its passes (`model::tape::LayerTape`), loads each layer before
+its forward segment (`StreamedStore::forward`) and hands its backward to the
+shared update (`StreamedStore::backward_events`, `resident_ft::adamw_step`). The
+embeddings, the head and the final norm stay in the store under the model's
+device optimizer, by the step's same multiplier. The state talks to the model's
+own handle (`ops::StoreDevice`, which needs `copy_cols` and the gradient-norm
+kernels), so its slot uploads are ordered with the model's recorded work.
+
+`model::streamed::check_layer_streaming` is the contract: a one-layer window
+gives the losses and values of the build holding every layer in the state, bit
+for bit, with and without an active clip; both train what the plain f32 build
+trains (the host and device AdamW round differently, so losses agree to 1e-5
+and values to 1% of how far the plain build moved them); and the streamed build
+holds fewer device bytes. `trainprec::check_exact_resume` holds a streamed run
+to exact resume through the fit loop. gpt2 runs both
+(`gpt2/tests/layer_streamed.rs`). The conversion happens after the model is
+built, so loading still needs the whole model on the device once; the window
+bounds what training adds and what stays resident.
+
 The run asks for it with one model-agnostic value (the SDK's
 `train_precision`, the CLI's `--train-precision`):
 `state=int8,master=f32,weights=fp8,window=2,clip=two-pass`. Every trainer

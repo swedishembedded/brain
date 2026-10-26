@@ -308,9 +308,22 @@ pub fn apply_train_precision<M: crate::Model>(model: &mut M, precision: &TrainPr
     if let Some(policy) = precision.activations {
         model.set_saved_policy(policy).map_err(|e| format!("{name}: {e}"))?;
     }
-    if precision.resident.is_some() && model.off_device_state().is_none() {
-        return Err(format!("{name}: resident low-precision weights were requested, but this build keeps no off-device training state"));
-    }
+    let resident_store;
+    let precision = match precision.resident_config(None)? {
+        Some(cfg) => {
+            // A model built with its own resident state keeps it; any other streams its layers now.
+            if model.off_device_state().is_none() {
+                if precision.wants_host_moments() {
+                    return Err(format!("{name}: a layer-streamed build keeps its streamed tensors' moments on the host already; the rest of its store keeps its moments on the device"));
+                }
+                model.set_resident(&cfg).map_err(|e| format!("{name}: {e}"))?;
+            }
+            // What is left in the store trains f32 under the run's state format.
+            resident_store = precision.resident_store();
+            &resident_store
+        }
+        None => precision,
+    };
     let uniform_f32 = precision.policy.rules.is_empty() && precision.policy.default == ParamPrecision::FP32;
     let Some(state) = model.optimizer_state() else {
         return if uniform_f32 { Ok(()) } else { Err(format!("{name}: this model does not expose its optimizer state, so it trains only with f32 moments")) };
@@ -407,12 +420,18 @@ pub fn check_optimizer_state_formats<M: crate::Model>(name: &str, build: impl Fn
     Ok(())
 }
 
-/// The exact-resume contract of a model whose optimizer state lives in host memory, for its own test to run: a run of
-/// six steps with `moments=host`, stopped after three and resumed from its state file in a fresh model, ends with the
-/// loss and every weight of the uninterrupted run, bit for bit. `build` makes a fresh trainable model (the same
-/// initial weights every call) for a vocabulary of at least 16 and a block of `block` tokens; `scratch` is an empty
-/// directory the run may write.
+/// The exact-resume contract of a model whose optimizer state lives in host memory, for its own test to run
+/// ([`check_exact_resume`] under `moments=host`).
 pub fn check_resume_with_host_moments<M: crate::Model>(name: &str, build: impl Fn() -> M, block: u32, scratch: &std::path::Path) -> Result<(), String> {
+    check_exact_resume(name, build, block, scratch, "moments=host")
+}
+
+/// The exact-resume contract of a run whose state lives partly off the device (`precision`: host moments, or layers
+/// streamed through a window), for a model's own test to run: a run of six steps, stopped after three and resumed
+/// from its state file in a fresh model, ends with the loss and every weight of the uninterrupted run, bit for bit.
+/// `build` makes a fresh trainable model (the same initial weights every call) for a vocabulary of at least 16, a
+/// batch of one and a block of `block` tokens; `scratch` is an empty directory the run may write.
+pub fn check_exact_resume<M: crate::Model>(name: &str, build: impl Fn() -> M, block: u32, scratch: &std::path::Path, precision: &str) -> Result<(), String> {
     use data::binio::{self, Meta};
     let err = |e: std::io::Error| format!("{name}: {e}");
     // A masked prompt/answer corpus over tokens 2..=15.
@@ -440,7 +459,7 @@ pub fn check_resume_with_host_moments<M: crate::Model>(name: &str, build: impl F
         eval_batches: 0,
         // One drawn seed for the three runs: the comparison is between them, not against a fixed trajectory.
         seed: data::rng::random_seed(),
-        precision: TrainPrecision::parse("moments=host")?,
+        precision: TrainPrecision::parse(precision)?,
         ..Default::default()
     };
     let objective = || -> Result<_, String> {
@@ -459,7 +478,7 @@ pub fn check_resume_with_host_moments<M: crate::Model>(name: &str, build: impl F
     let control = crate::FitControl { on_step: Some(&mut stop_at_3), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, grad_sync: None };
     let (first, _) = crate::fit_controlled(build(), objective()?, &opts, None, control).map_err(err)?;
     if !first.interrupted || !state.with_extension("offdevice").is_dir() {
-        return Err(format!("{name}: the stopped run left no resume state with its host optimizer generation"));
+        return Err(format!("{name}: the stopped run left no resume state with its off-device generation"));
     }
     let control = crate::FitControl { state: Some(&state), identity, ..Default::default() };
     let (second, resumed) = crate::fit_controlled(build(), objective()?, &opts, None, control).map_err(err)?;

@@ -25,6 +25,8 @@ use serde_json::Value;
 
 use gpu_core::{f, Gpu, Step};
 use model::saved::{Residuals, SavedPolicy};
+use model::streamed::StreamedStore;
+use model::tape::LayerTape;
 use optim::Optim;
 use paramstore::ParamStore;
 pub use model::Shard;
@@ -190,6 +192,9 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("unpack_bf16", kernels::UNPACK_BF16),
     ("pack_fp8_rows", kernels::PACK_FP8_ROWS),
     ("unpack_fp8_rows", kernels::UNPACK_FP8_ROWS),
+    // A layer-streamed full fine-tune's device side (`model::ops::store_device_kernels`; `gradnorm_part` is above).
+    ("copy_cols", kernels::COPY_COLS),
+    ("gradnorm_part_bf16", kernels::GRADNORM_PART_BF16),
 ];
 
 /// Pick the forward-linear GEMM kernel + its dispatch thread count for an
@@ -423,12 +428,17 @@ pub struct Gpt {
     ln_mean: gpu_core::DeviceBuffer,
     ln_inv: gpu_core::DeviceBuffer,
 
-    fwd_steps: Vec<Step>,
-    bwd_steps: Vec<Step>,
+    fwd_steps: LayerTape,
+    bwd_steps: LayerTape,
     /// What the backward keeps of the forward: every layer's activations, or (recompute) the residual between layers,
     /// every layer sharing one set of activation buffers its replay before its backward refills
     /// ([`model::Model::set_saved_policy`]).
     saved: SavedPolicy,
+    /// The per-layer tensors held in a device window of layers, when the run streams them
+    /// ([`model::Model::set_resident`]); `None` keeps every layer in the store.
+    streamed: Option<StreamedStore>,
+    /// A streamed build runs its backward inside the update: set by `backward`, taken by `adamw_step`.
+    backward_pending: Cell<bool>,
     ce_grad_uni: gpu_core::DeviceBuffer,
 
     // Incremental KV-cache decode state (lazily built on first `step`).
@@ -613,9 +623,11 @@ impl Gpt {
             d_fc: st(n * ff),
             ln_mean: st(n),
             ln_inv: st(n),
-            fwd_steps: Vec::new(),
-            bwd_steps: Vec::new(),
+            fwd_steps: LayerTape::default(),
+            bwd_steps: LayerTape::default(),
             saved: SavedPolicy::Keep,
+            streamed: None,
+            backward_pending: Cell::new(false),
             ce_grad_uni,
             dec: RefCell::new(None),
             dec_pos: Cell::new(0),
@@ -678,11 +690,13 @@ impl Gpt {
             .collect()
     }
 
-    fn forward_steps(&self, b_use: u32, t_use: u32) -> Vec<Step> {
+    /// The batched forward, one segment per layer (a layer-streamed build loads each layer before its segment).
+    fn forward_steps(&self, b_use: u32, t_use: u32) -> LayerTape {
         let c = &self.cfg;
         let n = b_use * t_use;
         let d = c.d_model;
         let v = c.vocab;
+        let mut tape = LayerTape::default();
         let mut s: Vec<Step> = Vec::new();
 
         // Token+positional embedding: only the embed stage; other stages receive
@@ -693,14 +707,16 @@ impl Gpt {
         }
 
         self.res.round_trip(&self.gpu, &mut s, self.shard.start);
+        tape.segment(&mut s, None);
         for l in self.shard.start..self.shard.end {
             self.layer_forward(l, b_use, t_use, &mut s);
             self.res.round_trip(&self.gpu, &mut s, l + 1);
+            tape.segment(&mut s, Some(l));
         }
 
         // Head epilogue (final norm + lm_head + CE): only the head stage.
         if !self.shard.head {
-            return s;
+            return tape;
         }
         let last = c.n_layers as usize;
         s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &self.res[last], self.w("ln.weight"), self.w("ln.bias"), &self.xn_final, d, n, 1e-5));
@@ -710,7 +726,8 @@ impl Gpt {
             scale.hook(&self.gpu, &mut s, GRAD_SCALE_BUF, &self.logits, n * v);
         }
         s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, v, IGNORE], n));
-        s
+        tape.segment(&mut s, None);
+        tape
     }
 
     /// Layer `l`'s forward over `b_use` sequences of `t_use` tokens, from `res[l]` into `res[l + 1]`.
@@ -747,7 +764,15 @@ impl Gpt {
     }
 
     pub fn forward_submit(&self) {
-        self.gpu.submit(&[], &self.fwd_steps);
+        self.submit_forward(&self.fwd_steps);
+    }
+
+    /// Submit a recorded forward; a layer-streamed build loads each layer into its window slot as it is reached.
+    fn submit_forward(&self, tape: &LayerTape) {
+        match &self.streamed {
+            Some(stream) => stream.forward(&self.gpu, tape).unwrap_or_else(|e| panic!("gpt2 layer-streamed forward: {e}")),
+            None => tape.submit(&self.gpu),
+        }
     }
 
     /// The full `[B*T, vocab]` logits from the last `forward_submit` (blocking
@@ -784,7 +809,13 @@ impl Gpt {
             None => self.count.get(),
         };
         self.gpu.write(&self.ce_grad_uni, &[n, v, IGNORE, f(divisor)]);
-        self.gpu.submit(&[], &self.bwd_steps);
+        if self.streamed.as_ref().is_some_and(StreamedStore::is_layer_streamed) {
+            // The weights of a layer-streamed build are not all on the device: the backward runs layer by layer in
+            // `adamw_step`, where the layers it loads are the ones it updates.
+            assert!(!self.backward_pending.replace(true), "gpt2 layer-streamed full fine-tune: a second backward before the update (gradient accumulation) is not supported; every micro-batch is its own step");
+            return;
+        }
+        self.bwd_steps.submit(&self.gpu);
     }
 
     // ---- pipeline-parallel cross-stage seam (see `crate::shard`) ----
@@ -808,7 +839,8 @@ impl Gpt {
         self.gpu.write(&self.dres[self.shard.end], bytemuck::cast_slice(data));
     }
 
-    fn build_backward_steps(&self) -> Vec<Step> {
+    /// The batched backward: the head, one segment per layer from the last down, then the embeddings.
+    fn build_backward_steps(&self) -> LayerTape {
         let c = &self.cfg;
         let n = self.b * self.t;
         let d = c.d_model;
@@ -817,6 +849,7 @@ impl Gpt {
         let hd = c.head_dim();
         let g = |name: &str| self.ps.g(name);
         let p = |l: usize, name: &str| format!("blocks.{l}.{name}");
+        let mut tape = LayerTape::default();
         let mut s: Vec<Step> = Vec::new();
 
         // head (no bias) + final layernorm — head stage only; other stages receive
@@ -846,6 +879,7 @@ impl Gpt {
             s.push(model::block::layernorm_dx_bwd(&self.gpu, &LN_IDS, &self.res[last], self.w("ln.weight"), &self.d_xn, &self.dres[last], d, n, 1e-5));
         }
 
+        tape.segment(&mut s, None);
         for l in (self.shard.start..self.shard.end).rev() {
             if self.saved.recomputes() {
                 // Every layer shares one set of activation buffers: rebuild this layer's from `res[l]` first.
@@ -892,6 +926,7 @@ impl Gpt {
             s.push(self.gpu.step(LN_DBETA, &[&self.d_branch, g(&p(l, "ln1.bias"))], &[d, n], d));
             s.push(model::block::layernorm_dx_bwd(&self.gpu, &LN_IDS, &self.res[l], self.w(&p(l, "ln1.weight")), &self.d_branch, &self.d_tmp, d, n, 1e-5));
             s.push(self.gpu.step(ADD2, &[&self.dxmid, &self.d_tmp, &self.dres[l]], &[n * d], n * d));
+            tape.segment(&mut s, Some(l));
         }
 
         // embeddings backward — only the embed stage (owns tok/pos and dres[0]).
@@ -899,7 +934,8 @@ impl Gpt {
             s.push(self.gpu.step(POS_BWD, &[&self.dres[0], g("pos.weight")], &[self.b, self.t, d], self.t * d));
             s.push(self.gpu.step(EMB_BWD, &[&self.tokens, &self.dres[0], g("tok.weight")], &[n, d, c.vocab], c.vocab * d));
         }
-        s
+        tape.segment(&mut s, None);
+        tape
     }
 
     pub fn zero_grads(&self) {
@@ -927,7 +963,7 @@ impl Gpt {
         let n = (self.b * self.t) as u64;
         let v = self.cfg.vocab as u64;
         self.weighted_ce = Some(model::lossw::WeightedCe::new(&self.gpu, n, v));
-        if !self.bwd_steps.is_empty() {
+        if !self.bwd_steps.steps().is_empty() {
             self.bwd_steps = self.build_backward_steps();
         }
     }
@@ -1001,30 +1037,70 @@ impl Gpt {
     /// list, executes nothing. Per this device/stage (a sharded instance
     /// reports only its own layers); see `gpu_core::cost`.
     pub fn cost_fwd(&self) -> gpu_core::cost::CostReport {
-        self.gpu.cost_of(&self.fwd_steps)
+        self.gpu.cost_of(self.fwd_steps.steps())
     }
 
     /// OFFLINE cost of the recorded backward pass.
     pub fn cost_bwd(&self) -> gpu_core::cost::CostReport {
-        self.gpu.cost_of(&self.bwd_steps)
+        self.gpu.cost_of(self.bwd_steps.steps())
     }
 
     pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
-        self.opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale);
+        match &self.streamed {
+            Some(stream) => {
+                if stream.is_layer_streamed() {
+                    assert!(self.backward_pending.replace(false), "gpt2 layer-streamed full fine-tune: adamw_step without a backward");
+                }
+                let args = model::resident_ft::StepArgs { step: t, lr, wd, adam, clip, extra_scale };
+                stream.adamw_step(&self.gpu, self, &args).unwrap_or_else(|e| panic!("gpt2 layer-streamed update: {e}"));
+            }
+            None => self.opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale),
+        }
     }
 
     pub fn read_grad(&self, name: &str) -> Vec<f32> {
+        assert!(!self.is_streamed(name), "gpt2: {name} streams through a layer window; no gradient outlives its layer");
         self.ps.read_grad(&self.gpu, name)
     }
     /// Replace `name`'s gradient.
     pub fn write_grad(&self, name: &str, data: &[f32]) {
+        assert!(!self.is_streamed(name), "gpt2: {name} streams through a layer window; no gradient outlives its layer");
         self.ps.write_grad(&self.gpu, name, data);
     }
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
-        self.ps.read_weight(&self.gpu, name)
+        match &self.streamed {
+            Some(stream) if stream.holds(name) => stream.read_weight(&self.gpu, name).unwrap_or_else(|e| panic!("gpt2: reading {name}: {e}")),
+            _ => self.ps.read_weight(&self.gpu, name),
+        }
     }
     pub fn write_weight(&self, name: &str, data: &[f32]) {
-        self.gpu.write(self.w(name), bytemuck::cast_slice(data));
+        match &self.streamed {
+            Some(stream) if stream.holds(name) => stream.write_weight(&self.gpu, name, data).unwrap_or_else(|e| panic!("gpt2: writing {name}: {e}")),
+            _ => self.gpu.write(self.w(name), bytemuck::cast_slice(data)),
+        }
+    }
+
+    fn is_streamed(&self, name: &str) -> bool {
+        self.streamed.as_ref().is_some_and(|s| s.holds(name))
+    }
+
+    /// Stream every per-layer tensor through a device window under `cfg` (see [`model::streamed`]): the layers'
+    /// f32 values and optimizer state move to the host, the device keeps the window's slots. The embeddings, the
+    /// head and the final norm stay in the store under its own optimizer.
+    pub fn set_resident(&mut self, cfg: &model::resident_ft::ResidentFtConfig) -> Result<(), String> {
+        if self.streamed.is_some() {
+            return Err("gpt2: the layers already stream".into());
+        }
+        let shard = self.shard.clone();
+        let layer_of = |name: &str| model::streamed::blocks_layer(name).filter(|&l| shard.owns(l as usize));
+        let stream = StreamedStore::convert(&self.gpu, &mut self.ps, cfg.clone(), &layer_of).map_err(|e| format!("gpt2: {e}"))?;
+        self.opt.invalidate();
+        self.streamed = Some(stream);
+        // The recorded passes bound the store's buffers as they were: record them again over the window's slots
+        // (which also releases the per-layer buffers they held).
+        self.fwd_steps = self.forward_steps(self.b, self.t);
+        self.bwd_steps = self.build_backward_steps();
+        Ok(())
     }
 
     /// Logits for every position of a single sequence (B must be 1, t>=len).
@@ -1033,8 +1109,7 @@ impl Gpt {
         assert!(t_use <= self.t && self.b == 1, "decoder sized too small");
         let ignore = vec![IGNORE; t_use as usize];
         self.set_batch(tokens, &ignore);
-        let s = self.forward_steps(1, t_use);
-        self.gpu.submit(&[], &s);
+        self.submit_forward(&self.forward_steps(1, t_use));
         self.gpu.read(&self.logits, (t_use * self.cfg.vocab) as usize)
     }
 
@@ -1058,6 +1133,7 @@ impl Gpt {
         if self.dec.borrow().is_some() {
             return;
         }
+        assert!(self.streamed.is_none(), "gpt2: a layer-streamed build holds a window of its layers; save it and load the checkpoint to decode");
         assert!(self.shard.is_whole(self.cfg.n_layers as usize), "step() requires a whole-model shard");
         let c = &self.cfg;
         let d = c.d_model as u64;
@@ -1296,6 +1372,12 @@ impl model::Model for Gpt {
     fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
         Gpt::set_saved_policy(self, policy)
     }
+    fn set_resident(&mut self, cfg: &model::resident_ft::ResidentFtConfig) -> Result<(), String> {
+        Gpt::set_resident(self, cfg)
+    }
+    fn off_device_state(&self) -> Option<&dyn model::OffDeviceState> {
+        self.streamed.as_ref().map(|_| self as &dyn model::OffDeviceState)
+    }
 
     type Config = GptConfig;
 
@@ -1390,6 +1472,48 @@ impl model::Model for Gpt {
     }
     fn config_json(&self) -> Value {
         self.cfg.to_json()
+    }
+}
+
+/// The part of a layer-streamed gpt2 the shared update drives (`model::resident_ft::adamw_step`): the store's own
+/// parameters (embeddings, head, final norm) under the device optimizer, and the backward one layer segment at a time.
+impl model::resident_ft::ResidentBackward for Gpt {
+    fn flush_backward(&self) {
+        self.gpu.flush();
+    }
+
+    fn zero_remainder_grads(&self) {
+        self.ps.zero_grads(&self.gpu);
+    }
+
+    fn remainder_grad_sum_sq(&self, norm: &model::gradnorm::DeviceGradNorm) -> f64 {
+        let items: Vec<model::gradnorm::NormItem<'_>> =
+            self.ps.opt_params().iter().map(|(name, numel)| model::gradnorm::NormItem { buf: self.ps.g(name), numel: *numel, dtype: model::ops::GradDtype::F32 }).collect();
+        norm.sum_sq(&self.gpu, &items)
+    }
+
+    fn backward_pass(&self, on: &mut dyn FnMut(model::resident_ft::LayerEvent) -> std::io::Result<()>) -> std::io::Result<()> {
+        let stream = self.streamed.as_ref().expect("a backward pass of a layer-streamed build");
+        stream.backward_events(&self.gpu, &self.bwd_steps, on)
+    }
+
+    fn update_remainder(&self, args: &model::resident_ft::StepArgs, grad_multiplier: f32) {
+        // The clip is already in the multiplier: the device optimizer must not clip again.
+        self.opt.step(&self.gpu, &self.ps, args.step, args.lr, args.wd, args.adam, None, grad_multiplier);
+    }
+}
+
+impl model::OffDeviceState for Gpt {
+    fn commit(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
+        let stream = self.streamed.as_ref().ok_or_else(|| std::io::Error::other("gpt2: no streamed state to commit"))?;
+        self.gpu.flush();
+        stream.commit(&self.gpu, dir, step)
+    }
+
+    fn restore(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
+        let stream = self.streamed.as_ref().ok_or_else(|| std::io::Error::other("gpt2: no streamed state to restore"))?;
+        self.gpu.flush();
+        stream.restore(&self.gpu, dir, step)
     }
 }
 
