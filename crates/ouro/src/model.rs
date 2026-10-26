@@ -29,6 +29,7 @@ use std::cell::{Cell, RefCell};
 
 use gpu_core::{BufUsage, DeviceBuffer, Gpu, Step};
 use model::block::{self, Gqa, KernelIds};
+use model::saved::{Residuals, SavedFormat, SavedPolicy};
 use paramstore::ParamStore;
 
 use crate::config::OuroConfig;
@@ -139,6 +140,11 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("flash_attn_causal_gqa", kernels::FLASH_ATTN_CAUSAL_GQA),
     ("matmul_reg2", kernels::MATMUL_REG2),
     ("matmul_gemv", kernels::MATMUL_GEMV),
+    // Narrow boundary residuals (`model::saved::Residuals`), resolved by name.
+    ("pack_bf16", kernels::PACK_BF16),
+    ("unpack_bf16", kernels::UNPACK_BF16),
+    ("pack_fp8_rows", kernels::PACK_FP8_ROWS),
+    ("unpack_fp8_rows", kernels::UNPACK_FP8_ROWS),
 ];
 
 pub(crate) fn decode_batched_ids() -> block::GqaDecodeBatchedIds {
@@ -254,7 +260,7 @@ pub struct Ouro {
     tokens: DeviceBuffer,
     targets: DeviceBuffer,
     /// `T * L + 1` boundary residuals, `[n, d]` each.
-    res: Vec<DeviceBuffer>,
+    res: Residuals,
     /// `T` pass outputs: the final-normed hidden state each pass ends on.
     hs: Vec<DeviceBuffer>,
     /// `T` exit-gate logits, `[n]` each (pre-sigmoid).
@@ -320,7 +326,7 @@ impl Ouro {
         let tokens = gpu.buffer("tokens", n * 4, BufUsage::STORAGE | BufUsage::COPY_DST);
         let targets = gpu.buffer("targets", n * 4, BufUsage::STORAGE | BufUsage::COPY_DST);
         let boundaries = (cfg.total_ut_steps * cfg.n_layers + 1) as usize;
-        let res = (0..boundaries).map(|_| st(n * d)).collect::<Vec<_>>();
+        let res = Residuals::new((0..boundaries).map(|_| st(n * d)).collect(), 0..boundaries);
         let hs = (0..cfg.total_ut_steps).map(|_| st(n * d)).collect::<Vec<_>>();
         let gates = (0..cfg.total_ut_steps).map(|_| st(n)).collect::<Vec<_>>();
         let logits = if train {
@@ -501,6 +507,7 @@ impl Ouro {
         let t = cfg.total_ut_steps;
 
         let mut steps = vec![self.gpu.step(EMBED, &[&self.tokens, self.ps.w("tok.weight"), &self.res[0]], &[d, n], n * d)];
+        self.res.round_trip(&self.gpu, &mut steps, 0);
         for p in 0..t as usize {
             for l in 0..cfg.n_layers as usize {
                 let i = p * cfg.n_layers as usize + l;
@@ -509,6 +516,7 @@ impl Ouro {
                 // pass's NORMED output, not its pre-norm residual.
                 let h_in: &DeviceBuffer = if l == 0 && p > 0 { &self.hs[p - 1] } else { &self.res[i] };
                 self.layer_steps_into(&mut steps, l, h_in, &self.res[i + 1], None);
+                self.res.round_trip(&self.gpu, &mut steps, i + 1);
             }
             let last = &self.res[(p + 1) * cfg.n_layers as usize];
             steps.push(block::rmsnorm_fwd(&self.gpu, &ids, last, self.ps.w("norm.weight"), &self.hs[p], d, n, cfg.norm_eps));
@@ -578,11 +586,15 @@ impl Ouro {
         // one producer except `dhs[p]`, which the head wrote and the next
         // pass's first layer accumulates into.
         for p in (0..t).rev() {
+            self.res.restore(&self.gpu, &mut steps, (p + 1) * l_count);
             let last = &self.res[(p + 1) * l_count];
             steps.extend(block::rmsnorm_bwd(&self.gpu, &ids, last, self.ps.w("norm.weight"), &g.dhs[p], &g.dres[(p + 1) * l_count], &g.rms_inv, Some(self.ps.g("norm.weight")), d, n, cfg.norm_eps));
             for l in (0..l_count).rev() {
                 let i = p * l_count + l;
                 let h_in: &DeviceBuffer = if l == 0 && p > 0 { &self.hs[p - 1] } else { &self.res[i] };
+                if !(l == 0 && p > 0) {
+                    self.res.restore(&self.gpu, &mut steps, i);
+                }
                 // Rebuild the layer's internals from its boundary residual.
                 self.layer_steps_into(&mut steps, l, h_in, &self.res[i + 1], None);
                 self.layer_bwd_into(&mut steps, l, h_in, &g.dres[i + 1], if l == 0 && p > 0 { &g.dhs[p - 1] } else { &g.dres[i] }, l == 0 && p > 0);
@@ -744,6 +756,7 @@ impl Ouro {
     /// `[n, d]` residual stream entering layer `layer` of pass `pass` (layer
     /// `n_layers` is that pass's pre-norm output).
     pub fn read_res(&self, pass: usize, layer: usize) -> Vec<f32> {
+        assert!(self.res.format() == SavedFormat::F32, "ouro: narrow boundary residuals keep no per-layer stream to read");
         let i = pass * self.cfg.n_layers as usize + layer;
         self.gpu.read(&self.res[i], self.rows() as usize * self.cfg.d_model as usize)
     }
@@ -758,13 +771,25 @@ impl model::Model for Ouro {
         Some(model::OptimizerParts { gpu: &self.gpu, store: &self.ps, optim: self.opt.as_ref()? })
     }
 
-    /// Ouro keeps the f32 residual between the layers of every pass and rebuilds each layer before its backward (one
-    /// scratch set serves every layer of every pass), so recompute is the only policy it runs.
-    fn set_saved_policy(&mut self, policy: model::saved::SavedPolicy) -> Result<(), String> {
-        match policy {
-            model::saved::SavedPolicy::Recompute => Ok(()),
-            other => Err(format!("ouro recomputes each layer of every pass from its f32 residual in the backward; {other:?} is not available")),
+    /// Ouro keeps only the residual between the layers of every pass and rebuilds each layer before its backward (one
+    /// scratch set serves every layer of every pass): it runs recompute, with the residuals in f32 or, once narrowed,
+    /// in bf16 or FP8 ([`Residuals`]; each pass's normed output stays f32). Keeping every layer is refused by name.
+    fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        let current = SavedPolicy::recompute_with(self.res.format());
+        if !current.narrows_to(policy) {
+            return Err(format!("ouro recomputes each layer of every pass from its {:?} residual in the backward; {policy:?} is not available", self.res.format()));
         }
+        if let SavedPolicy::Quantized(format) = policy {
+            if policy != current {
+                self.res.quantize(&self.gpu, format, self.rows(), self.cfg.d_model).map_err(|e| format!("ouro: {e}"))?;
+                self.trunk = self.trunk_steps();
+                if self.train {
+                    self.fwd_steps = self.training_forward_steps();
+                    self.bwd_steps = self.training_backward_steps();
+                }
+            }
+        }
+        Ok(())
     }
 
     type Config = OuroConfig;
