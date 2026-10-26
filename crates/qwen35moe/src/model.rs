@@ -138,7 +138,7 @@ use model::gdn::{GdnBwdIds, GdnConvIds, GdnIds, GdnShape};
 pub use model::gdn::gdn_chunk_size;
 use model::kv_tier::{KvKernels, KvLayer, KvTier};
 use model::moe::{
-    expert_fwd, expert_fwd_grouped, moe_layer_bwd, router_fwd_kind, shared_expert_fwd, ExpertBwdScratch,
+    expert_fwd, expert_fwd_grouped, experts_fwd_train, moe_layer_bwd, router_fwd_kind, shared_expert_fwd, ExpertBwdScratch,
     ExpertGrads, ExpertScratch, ExpertWeights, GroupedExpertFwdIds, GroupedExpertScratch, MoeActs,
     MoeIds, MoeIdsBwd, MoeShape, RouterBwdIds, RouterKind, SharedExpertIds, SharedExpertScratch,
 };
@@ -348,6 +348,9 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         let mut v = STATIC_PIPELINES.to_vec();
         // Device AdamW over bf16 or blockwise-int8 moments (`optim::Optim` resolves them by name).
         v.extend(optim::MOMENT_KERNELS);
+        // The row-compacted expert training path (`model::moe::MoeActs::compact`), resolved by name.
+        let missing: Vec<_> = model::moe::COMPACT_TRAIN_KERNELS.iter().filter(|(n, _)| !v.iter().any(|(have, _)| have == n)).copied().collect();
+        v.extend(missing);
         v.push(("matmul_gemv", kernels::MATMUL_GEMV));
         v.push(("matmul_reg2", kernels::MATMUL_REG3));
         v.push(("matmul_i8_gemv", kernels::MATMUL_I8_GEMV));
@@ -2318,28 +2321,12 @@ impl Qwen35 {
         // for a training, non-int8 build (asserted mutually exclusive at
         // construction).
         let moe_acts: Option<MoeActs> = if self.is_train {
-            let acts = MoeActs::new(g, &shape);
-            for ei in 0..e {
-                let (gn, un, dn) = &self.moe_expert_names[l][ei as usize];
-                steps.extend(expert_fwd(
-                    g,
-                    &moe_ids(),
-                    &shape,
-                    &xn2,
-                    &gate,
-                    self.w(gn),
-                    self.w(un),
-                    self.w(dn),
-                    &acts.at(ei as usize),
-                    &moe_acc,
-                    ei,
-                    // Each expert owns its own weight tensors here (this
-                    // crate's import fans the GGUF stack out per expert), so
-                    // there is no bank offset to apply.
-                    0,
-                    ei != 0,
-                ));
-            }
+            // Each expert keeps the activations of the rows routed to it and no others (`MoeActs::compact`): the
+            // routing is read back once per layer, then every expert runs on its rows and adds its output into the
+            // zeroed `moe_acc`.
+            g.submit(&[], &std::mem::take(&mut steps));
+            let acts = MoeActs::compact(g, &shape, &g.read(&gate, (n * e) as usize));
+            steps.extend(experts_fwd_train(g, &moe_ids(), &shape, &xn2, &gate, &self.expert_weights(l), &acts, &moe_acc));
             Some(acts)
         } else if n == 1 {
             // Decode's sparse dispatch -- see `Self::moe_sublayer_decode_sparse`'s
@@ -2957,6 +2944,15 @@ impl Qwen35 {
     /// `d_xn2`'s value; the shared expert's OWN backward (no composed helper
     /// exists for it in `model::moe` -- hand-derived here) runs SECOND, its
     /// three `d_xn2` touches all `acc=1` on top of the routed-MoE total.
+    /// Layer `l`'s routed experts' weights. `w_off = 0`: this crate's import fans the stacked experts out into one
+    /// tensor per expert, not a fused bank.
+    fn expert_weights(&self, l: usize) -> Vec<ExpertWeights> {
+        self.moe_expert_names[l]
+            .iter()
+            .map(|(gn, un, dn)| ExpertWeights { gate_w: self.w(gn).clone(), up_w: self.w(un).clone(), down_w: self.w(dn).clone(), w_off: 0 })
+            .collect()
+    }
+
     fn moe_sublayer_bwd(&self, l: usize, la: &MoeLayerActs, d_moe_out: &DeviceBuffer, n: u32) -> DeviceBuffer {
         let g = &self.gpu;
         let c = &self.cfg;
@@ -2977,13 +2973,7 @@ impl Qwen35 {
             self.proj_bwd(&mut s, "router", &d_router_logits, &la.xn2, &p("mlp.router.weight"), &d_xn2, n, d, e, 0);
             s
         };
-        let expert_weights: Vec<ExpertWeights> = (0..e)
-            .map(|ei| {
-                let (gn, un, dn) = &self.moe_expert_names[l][ei as usize];
-                // `w_off = 0`: one tensor per expert, not a fused bank.
-                ExpertWeights { gate_w: self.w(gn).clone(), up_w: self.w(un).clone(), down_w: self.w(dn).clone(), w_off: 0 }
-            })
-            .collect();
+        let expert_weights = self.expert_weights(l);
         // Never a LoRA target (per the standing LoRA task's own scope note:
         // the 256-expert MoE linears are out of scope) -- Frozen under a LoRA
         // build, so each field is `None` there (`ExpertGrads`' own contract).

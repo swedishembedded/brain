@@ -377,9 +377,31 @@ pub struct MoeActs {
     up: Vec<DeviceBuffer>,
     h: Vec<DeviceBuffer>,
     expert_out: Vec<DeviceBuffer>,
+    /// `Some` for row-compacted activations ([`Self::compact`]): expert `e` holds only its routed rows.
+    routed: Option<RoutedRows>,
+}
+
+/// Which rows each expert of a row-compacted [`MoeActs`] holds: one index upload with every expert's region
+/// ([`route_rows`]), and expert `e`'s `(start, count)` in it.
+struct RoutedRows {
+    idx: DeviceBuffer,
+    regions: Vec<(u32, u32)>,
+}
+
+/// The kernels the row-compacted training path dispatches beside a model's own MoE kernels, resolved by name: the
+/// row gather (`embed.wgsl`), the gate-scaled scatter of an expert's output (`moe_scatter_scaled_add.wgsl`) and the
+/// scatter-add of its gradients (`rows_scatter_add.wgsl`). A model training through [`MoeActs::compact`] registers
+/// these.
+pub const COMPACT_TRAIN_KERNELS: &[(&str, &str)] =
+    &[("embed", kernels::EMBED), ("moe_scatter_scaled_add", kernels::MOE_SCATTER_SCALED_ADD), ("rows_scatter_add", kernels::ROWS_SCATTER_ADD)];
+
+fn compact_kernel(g: &Gpu, name: &str) -> usize {
+    g.kernel_index(name).unwrap_or_else(|| panic!("model::moe: row-compacted training needs the `{name}` kernel registered (model::moe::COMPACT_TRAIN_KERNELS)"))
 }
 
 impl MoeActs {
+    /// Every expert's activations for every row: `n_experts * rows * (3 * moe_ff + d_model)` floats a layer, most of
+    /// them for rows the expert was not routed. [`Self::compact`] holds only the routed rows.
     pub fn new(g: &Gpu, shape: &MoeShape) -> MoeActs {
         let n = shape.n_experts as usize;
         let (rows, ff, d) = (shape.rows as u64, shape.moe_ff as u64, shape.d_model as u64);
@@ -388,6 +410,28 @@ impl MoeActs {
             up: (0..n).map(|_| g.storage(rows * ff)).collect(),
             h: (0..n).map(|_| g.storage(rows * ff)).collect(),
             expert_out: (0..n).map(|_| g.storage(rows * d)).collect(),
+            routed: None,
+        }
+    }
+
+    /// Row-compacted activations: expert `e` holds `(3 * moe_ff + d_model)` floats for each row routed to it and no
+    /// others, `rows * top_k * (3 * moe_ff + d_model)` a layer in all instead of `n_experts` times `rows`. Built from
+    /// the host readback of the layer's dense gate (`[rows, n_experts]`), the same routing the forward
+    /// ([`experts_fwd_train`]) and [`moe_layer_bwd`] then follow.
+    pub fn compact(g: &Gpu, shape: &MoeShape, host_gate: &[f32]) -> MoeActs {
+        assert_eq!(host_gate.len(), (shape.rows * shape.n_experts) as usize, "MoeActs::compact: host_gate must be the full [rows, n_experts] gate");
+        let (combined, regions) = route_rows(shape, host_gate);
+        let idx = g.storage(combined.len().max(1) as u64);
+        g.write(&idx, &combined);
+        let (ff, d) = (shape.moe_ff as u64, shape.d_model as u64);
+        let rows = |e: usize| regions[e].1.max(1) as u64;
+        let n = shape.n_experts as usize;
+        MoeActs {
+            gate_pre: (0..n).map(|e| g.storage(rows(e) * ff)).collect(),
+            up: (0..n).map(|e| g.storage(rows(e) * ff)).collect(),
+            h: (0..n).map(|e| g.storage(rows(e) * ff)).collect(),
+            expert_out: (0..n).map(|e| g.storage(rows(e) * d)).collect(),
+            routed: Some(RoutedRows { idx, regions }),
         }
     }
 
@@ -397,6 +441,41 @@ impl MoeActs {
     pub fn at(&self, e: usize) -> ExpertScratch<'_> {
         ExpertScratch { gate_pre: &self.gate_pre[e], up: &self.up[e], h: &self.h[e], expert_out: &self.expert_out[e] }
     }
+}
+
+/// The routed experts' training forward, accumulating every expert's gate-weighted output into `acc` (which the
+/// caller zeroes) and saving what [`moe_layer_bwd`] reads into `acts`. Over row-compacted activations
+/// ([`MoeActs::compact`]) each expert runs on its routed rows only: they are gathered, the expert's projections run on
+/// them, and its output is scattered back gate-scaled. `weights[e]` is expert `e`'s ([`ExpertWeights`]).
+pub fn experts_fwd_train(g: &Gpu, ids: &MoeIds, shape: &MoeShape, x: &DeviceBuffer, gate: &DeviceBuffer, weights: &[ExpertWeights], acts: &MoeActs, acc: &DeviceBuffer) -> Vec<Step> {
+    assert_eq!(weights.len(), shape.n_experts as usize, "experts_fwd_train: one ExpertWeights per expert");
+    let mut steps = Vec::new();
+    let Some(routed) = &acts.routed else {
+        for (e, w) in weights.iter().enumerate() {
+            steps.extend(expert_fwd(g, ids, shape, x, gate, &w.gate_w, &w.up_w, &w.down_w, &acts.at(e), acc, e as u32, w.w_off, true));
+        }
+        return steps;
+    };
+    let (d, ne) = (shape.d_model, shape.n_experts);
+    let (gather, scatter) = (compact_kernel(g, "embed"), compact_kernel(g, "moe_scatter_scaled_add"));
+    let most = routed.regions.iter().map(|r| r.1).max().unwrap_or(0).max(1) as u64;
+    let (x_c, gate_c) = (g.storage(most * d as u64), g.storage(most * ne as u64));
+    let full = (0u64, 0u64);
+    for (e, (w, &(start, count))) in weights.iter().zip(&routed.regions).enumerate() {
+        if count == 0 {
+            continue;
+        }
+        let rows = (start as u64, count as u64);
+        steps.push(g.step_sliced(gather, &[&routed.idx, x, &x_c], &[rows, full, full], &[d, count], count * d));
+        steps.push(g.step_sliced(gather, &[&routed.idx, gate, &gate_c], &[rows, full, full], &[ne, count], count * ne));
+        let sub = MoeShape { rows: count, ..*shape };
+        // The expert's projections over its rows; its dense combine (the fifth step) gives way to the gate-scaled
+        // scatter of the compacted output back to the rows it came from.
+        let [gate_pre, up, silu, down, _combine] = expert_fwd(g, ids, &sub, &x_c, &gate_c, &w.gate_w, &w.up_w, &w.down_w, &acts.at(e), acc, e as u32, w.w_off, true);
+        steps.extend([gate_pre, up, silu, down]);
+        steps.push(g.step_sliced(scatter, &[&routed.idx, gate, &acts.expert_out[e], acc], &[rows, full, full, full], &[count, d, ne, e as u32, 1], count * d));
+    }
+    steps
 }
 
 /// Kernel indices [`expert_dgate`]/[`expert_bwd`] dispatch, resolved by the
@@ -610,6 +689,14 @@ pub fn moe_layer_bwd(
 ) -> Vec<Step> {
     assert_eq!(expert_weights.len(), shape.n_experts as usize, "moe_layer_bwd: expert_weights.len() must equal shape.n_experts");
     assert_eq!(expert_grads.len(), shape.n_experts as usize, "moe_layer_bwd: expert_grads.len() must equal shape.n_experts");
+    if let Some(routed) = &acts.routed {
+        let ctx = CompactBwd { g, ids: expert_bwd_ids, shape, routed, acts, x, gate, weights: expert_weights, grads: expert_grads, sb, d_moe_acc, d_x };
+        let mut steps = ctx.dgate(d_gate);
+        steps.extend(router_bwd(g, router_bwd_ids, kind, shape, logits, gate, d_gate, d_router_logits, fe));
+        steps.extend_from_slice(router_weight_bwd);
+        ctx.experts(&mut steps);
+        return steps;
+    }
 
     let mut steps = Vec::new();
 
@@ -648,6 +735,82 @@ pub fn moe_layer_bwd(
     }
 
     steps
+}
+
+/// [`moe_layer_bwd`] over row-compacted activations: every expert's phases run on its routed rows, gathered from the
+/// layer's buffers, and its gradients are added back to the rows they came from. `d_gate` must hold zeros (its
+/// columns are added into, one expert each); `d_x` holds the router's input gradient, as for the dense form.
+struct CompactBwd<'a> {
+    g: &'a Gpu,
+    ids: &'a MoeIdsBwd,
+    shape: &'a MoeShape,
+    routed: &'a RoutedRows,
+    acts: &'a MoeActs,
+    x: &'a DeviceBuffer,
+    gate: &'a DeviceBuffer,
+    weights: &'a [ExpertWeights],
+    grads: &'a [ExpertGrads<'a>],
+    sb: &'a ExpertBwdScratch<'a>,
+    d_moe_acc: &'a DeviceBuffer,
+    d_x: &'a DeviceBuffer,
+}
+
+impl CompactBwd<'_> {
+    fn most_rows(&self) -> u64 {
+        self.routed.regions.iter().map(|r| r.1).max().unwrap_or(0).max(1) as u64
+    }
+
+    /// `src`'s rows routed to the expert at `rows` (`(start, count)` in the index list), into `dst`.
+    fn gather(&self, rows: (u32, u32), src: &DeviceBuffer, dst: &DeviceBuffer, width: u32) -> Step {
+        let (start, count) = rows;
+        let full = (0u64, 0u64);
+        self.g.step_sliced(compact_kernel(self.g, "embed"), &[&self.routed.idx, src, dst], &[(start as u64, count as u64), full, full], &[width, count], count * width)
+    }
+
+    /// `out[row, col0 .. col0 + width] += src[i, col0 .. col0 + width]` for the expert's rows.
+    fn scatter_add(&self, rows: (u32, u32), src: &DeviceBuffer, out: &DeviceBuffer, width: u32, stride: u32, col0: u32) -> Step {
+        let (start, count) = rows;
+        let full = (0u64, 0u64);
+        self.g.step_sliced(
+            compact_kernel(self.g, "rows_scatter_add"),
+            &[&self.routed.idx, src, out],
+            &[(start as u64, count as u64), full, full],
+            &[count, width, stride, stride, col0],
+            count * width,
+        )
+    }
+
+    /// Phase A: every expert's column of `d_gate`, from its saved compacted output.
+    fn dgate(&self, d_gate: &DeviceBuffer) -> Vec<Step> {
+        let (d, ne) = (self.shape.d_model, self.shape.n_experts);
+        let most = self.most_rows();
+        let (d_acc_c, d_gate_c) = (self.g.storage(most * d as u64), self.g.storage(most * ne as u64));
+        let mut steps = Vec::new();
+        for (e, &rows) in self.routed.regions.iter().enumerate().filter(|(_, r)| r.1 > 0) {
+            let sub = MoeShape { rows: rows.1, ..*self.shape };
+            steps.push(self.gather(rows, self.d_moe_acc, &d_acc_c, d));
+            steps.push(expert_dgate(self.g, self.ids, &sub, &self.acts.at(e), &d_acc_c, &d_gate_c, e as u32));
+            steps.push(self.scatter_add(rows, &d_gate_c, d_gate, 1, ne, e as u32));
+        }
+        steps
+    }
+
+    /// Phase C: every expert's SwiGLU backward on its rows, its input gradient added into `d_x`.
+    fn experts(&self, steps: &mut Vec<Step>) {
+        let (d, ne) = (self.shape.d_model, self.shape.n_experts);
+        let most = self.most_rows();
+        let g = self.g;
+        let (x_c, gate_c, d_acc_c, dx_c) = (g.storage(most * d as u64), g.storage(most * ne as u64), g.storage(most * d as u64), g.storage(most * d as u64));
+        for (e, &rows) in self.routed.regions.iter().enumerate().filter(|(_, r)| r.1 > 0) {
+            let sub = MoeShape { rows: rows.1, ..*self.shape };
+            steps.push(self.gather(rows, self.x, &x_c, d));
+            steps.push(self.gather(rows, self.gate, &gate_c, ne));
+            steps.push(self.gather(rows, self.d_moe_acc, &d_acc_c, d));
+            let w = &self.weights[e];
+            expert_bwd(g, self.ids, &sub, &x_c, &gate_c, &w.gate_w, &w.up_w, &w.down_w, &self.grads[e], &self.acts.at(e), self.sb, &d_acc_c, &dx_c, e as u32, w.w_off, false, steps);
+            steps.push(self.scatter_add(rows, &dx_c, self.d_x, d, d, 0));
+        }
+    }
 }
 
 /// int8 kernel indices, parallel to [`MoeIds`]. `max_abs_row`/`quant_pack` are
@@ -1419,6 +1582,33 @@ pub fn expert_fwd_compact(
     count as usize
 }
 
+/// Every expert's routed rows, from the host readback of the dense gate (`[rows, n_experts]`, nonzero at a row's
+/// `top_k` experts): one index list holding every expert's rows back to back, and expert `e`'s `(start, count)` in
+/// it. Each region starts on a 64-word (256-byte) boundary, the storage-binding offset alignment a sliced dispatch of
+/// it needs; the padding words are never bound.
+pub fn route_rows(shape: &MoeShape, host_gate: &[f32]) -> (Vec<u32>, Vec<(u32, u32)>) {
+    let e = shape.n_experts;
+    let mut per_expert_rows: Vec<Vec<u32>> = vec![Vec::new(); e as usize];
+    for r in 0..shape.rows {
+        for ei in 0..e {
+            if host_gate[(r * e + ei) as usize] > 0.0 {
+                per_expert_rows[ei as usize].push(r);
+            }
+        }
+    }
+    let mut combined: Vec<u32> = Vec::with_capacity((shape.rows * shape.top_k) as usize);
+    let regions = per_expert_rows
+        .iter()
+        .map(|rows| {
+            let start = crate::block::pad64(combined.len() as u64) as u32;
+            combined.resize(start as usize, 0);
+            combined.extend_from_slice(rows);
+            (start, rows.len() as u32)
+        })
+        .collect();
+    (combined, regions)
+}
+
 /// One MoE layer's ENTIRE row-compacted sparse expert forward, as a SINGLE
 /// `Vec<Step>` for the caller to fold into its own per-layer (or per-forward)
 /// submit - the real fix this section's header comment names. Unlike
@@ -1503,24 +1693,7 @@ pub fn expert_fwd_compact_layer(
     // region's own `(start, count)` slice stops at its real row count), so
     // their content is irrelevant - `resize` fills them with 0 only because
     // `Vec` cannot have gaps.
-    let mut per_expert_rows: Vec<Vec<u32>> = vec![Vec::new(); e as usize];
-    for r in 0..shape.rows {
-        for ei in 0..e {
-            if host_gate[(r * e + ei) as usize] > 0.0 {
-                per_expert_rows[ei as usize].push(r);
-            }
-        }
-    }
-    let mut combined: Vec<u32> = Vec::with_capacity((shape.rows * shape.top_k) as usize);
-    let regions: Vec<(u32, u32)> = per_expert_rows
-        .iter()
-        .map(|rows| {
-            let start = crate::block::pad64(combined.len() as u64) as u32;
-            combined.resize(start as usize, 0);
-            combined.extend_from_slice(rows);
-            (start, rows.len() as u32)
-        })
-        .collect();
+    let (combined, regions) = route_rows(shape, host_gate);
     g.write(&scratch.idx, &combined);
 
     let full = (0u64, 0u64);

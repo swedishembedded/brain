@@ -1093,6 +1093,8 @@ pub const ROUTER_TOPK_COMPACT: &str = include_str!("../wgsl/router_topk_compact.
 pub const ROW_DOT: &str = include_str!("../wgsl/row_dot.wgsl");
 /// `wgsl/row_scatter.wgsl`
 pub const ROW_SCATTER: &str = include_str!("../wgsl/row_scatter.wgsl");
+/// `wgsl/rows_scatter_add.wgsl`
+pub const ROWS_SCATTER_ADD: &str = include_str!("../wgsl/rows_scatter_add.wgsl");
 /// `wgsl/scale_add.wgsl`
 pub const SCALE_ADD: &str = include_str!("../wgsl/scale_add.wgsl");
 /// `wgsl/scale_add_dexp.wgsl`
@@ -1839,6 +1841,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("router_topk_compact", ROUTER_TOPK_COMPACT),
     ("row_dot", ROW_DOT),
     ("row_scatter", ROW_SCATTER),
+    ("rows_scatter_add", ROWS_SCATTER_ADD),
     ("scale_add", SCALE_ADD),
     ("scale_add_dexp", SCALE_ADD_DEXP),
     ("scale_add_dgate", SCALE_ADD_DGATE),

@@ -24,8 +24,8 @@ use data::rng::Lcg;
 use gpu_core::{DeviceBuffer, Gpu};
 use gradcheck::{elementwise_check, CheckModel};
 use model::moe::{
-    expert_fwd, moe_layer_bwd, router_fwd_kind, ExpertBwdScratch, ExpertGrads, ExpertWeights, MoeActs, MoeIds, MoeIdsBwd, MoeShape, RouterBwdIds,
-    RouterKind,
+    expert_fwd, experts_fwd_train, moe_layer_bwd, router_fwd_kind, ExpertBwdScratch, ExpertGrads, ExpertWeights, MoeActs, MoeIds, MoeIdsBwd, MoeShape,
+    RouterBwdIds, RouterKind, COMPACT_TRAIN_KERNELS,
 };
 
 const PIPES: &[(&str, &str)] = &[
@@ -88,7 +88,10 @@ struct MoeLayerCheck {
     gate: DeviceBuffer,
     probs: Option<DeviceBuffer>,
     acc: DeviceBuffer,
-    acts: MoeActs,
+    /// Every expert's activations for every row, or (`compact`) for its routed rows only, rebuilt from each
+    /// forward's routing.
+    acts: RefCell<MoeActs>,
+    compact: bool,
 
     d_gate: DeviceBuffer,
     d_router_logits: DeviceBuffer,
@@ -107,8 +110,9 @@ struct MoeLayerCheck {
 }
 
 impl MoeLayerCheck {
-    fn new(kind: RouterKind, top_k: u32, seed: u64) -> MoeLayerCheck {
-        let g = Gpu::new_cpu(PIPES);
+    fn new(kind: RouterKind, top_k: u32, seed: u64, compact: bool) -> MoeLayerCheck {
+        let pipes: Vec<(&str, &str)> = PIPES.iter().chain(COMPACT_TRAIN_KERNELS).copied().collect();
+        let g = Gpu::new_cpu(&pipes);
         let shape = MoeShape { rows: ROWS, d_model: D, moe_ff: FF, n_experts: E, top_k };
         let fwd_ids = MoeIds {
             router_gate: idx(&g, if matches!(kind, RouterKind::Softmax { .. }) { "router_gate" } else { "router_gate_sigmoid" }),
@@ -162,7 +166,8 @@ impl MoeLayerCheck {
             gate: g.storage((ROWS * E) as u64),
             probs: matches!(kind, RouterKind::SigmoidNoAuxTc { .. }).then(|| g.storage((ROWS * E) as u64)),
             acc: g.storage((ROWS * D) as u64),
-            acts: MoeActs::new(&g, &shape),
+            acts: RefCell::new(MoeActs::new(&g, &shape)),
+            compact,
             d_gate: g.storage((ROWS * E) as u64),
             d_router_logits: g.storage((ROWS * E) as u64),
             fe: matches!(kind, RouterKind::Softmax { .. }).then(|| g.storage(E as u64)),
@@ -219,6 +224,10 @@ impl MoeLayerCheck {
         }
     }
 
+    fn expert_weights(&self) -> Vec<ExpertWeights> {
+        self.expert_w.iter().map(|(gw, uw, dw)| ExpertWeights { gate_w: gw.clone(), up_w: uw.clone(), down_w: dw.clone(), w_off: 0 }).collect()
+    }
+
     fn parse_expert_name(name: &str) -> (usize, &str) {
         let rest = name.strip_prefix("expert").expect("param name");
         let (e_str, field) = rest.split_once('.').expect("param name");
@@ -249,12 +258,20 @@ impl CheckModel for MoeLayerCheck {
         steps.push(router_fwd_kind(g, &self.fwd_ids, self.kind, &self.shape, &self.logits, self.bias.as_ref(), &self.gate, self.probs.as_ref()));
         g.submit(&[], &steps);
 
-        for e in 0..E as usize {
-            let (gw, uw, dw) = &self.expert_w[e];
-            let scratch = self.acts.at(e);
-            // `w_off = 0`: this harness gives every expert its own buffers.
-            let fwd_steps = expert_fwd(g, &self.fwd_ids, &self.shape, &self.x, &self.gate, gw, uw, dw, &scratch, &self.acc, e as u32, 0, e != 0);
-            g.submit(&[], &fwd_steps);
+        if self.compact {
+            // Each expert holds and computes its routed rows only; every row's top-k experts add into `acc`.
+            let acts = MoeActs::compact(g, &self.shape, &g.read(&self.gate, (ROWS * E) as usize));
+            g.submit(&[&self.acc], &experts_fwd_train(g, &self.fwd_ids, &self.shape, &self.x, &self.gate, &self.expert_weights(), &acts, &self.acc));
+            *self.acts.borrow_mut() = acts;
+        } else {
+            for e in 0..E as usize {
+                let (gw, uw, dw) = &self.expert_w[e];
+                let acts = self.acts.borrow();
+                let scratch = acts.at(e);
+                // `w_off = 0`: this harness gives every expert its own buffers.
+                let fwd_steps = expert_fwd(g, &self.fwd_ids, &self.shape, &self.x, &self.gate, gw, uw, dw, &scratch, &self.acc, e as u32, 0, e != 0);
+                g.submit(&[], &fwd_steps);
+            }
         }
 
         let acc = g.read(&self.acc, (ROWS * D) as usize);
@@ -284,11 +301,10 @@ impl CheckModel for MoeLayerCheck {
         let expert_grads: Vec<ExpertGrads> = self.expert_grad.iter().map(|(gw, uw, dw)| ExpertGrads { gate_w: Some(gw), up_w: Some(uw), down_w: Some(dw) }).collect();
         let sb = ExpertBwdScratch { d_expert_out: &self.d_expert_out, d_h: &self.d_h, d_gate_pre: &self.d_gate_pre, d_up: &self.d_up };
 
-        let expert_weights: Vec<ExpertWeights> = self
-            .expert_w
-            .iter()
-            .map(|(gw, uw, dw)| ExpertWeights { gate_w: gw.clone(), up_w: uw.clone(), down_w: dw.clone(), w_off: 0 })
-            .collect();
+        let expert_weights = self.expert_weights();
+        // The compacted backward adds each expert's column into `d_gate`.
+        g.submit(&[&self.d_gate], &[]);
+        let acts = self.acts.borrow();
         let steps = moe_layer_bwd(
             g,
             &self.router_bwd_ids,
@@ -304,7 +320,7 @@ impl CheckModel for MoeLayerCheck {
             &self.x,
             &expert_weights,
             &expert_grads,
-            &self.acts,
+            &acts,
             &sb,
             &self.d_moe_acc,
             &self.d_x,
@@ -333,7 +349,11 @@ impl CheckModel for MoeLayerCheck {
 /// large absolute error, or a non-router-weight parameter failing -- this
 /// gate would catch that; it does not paper over it.
 fn run_case(kind: RouterKind, top_k: u32, seed: u64) {
-    let m = MoeLayerCheck::new(kind, top_k, seed);
+    run_case_on(kind, top_k, seed, false);
+}
+
+fn run_case_on(kind: RouterKind, top_k: u32, seed: u64, compact: bool) {
+    let m = MoeLayerCheck::new(kind, top_k, seed, compact);
     let mut checked = 0usize;
     let mut worst_rel = 0.0f32;
     for name in m.param_names() {
@@ -412,4 +432,37 @@ fn sigmoid_noaux_router_gradcheck_unnormalized() {
     // norm_topk_prob=false: a second real combine-weight branch
     // (router_gate_sigmoid.wgsl / router_bwd_sigmoid.wgsl's `norm` flag).
     run_case(RouterKind::SigmoidNoAuxTc { n_group: 1, topk_group: 1, norm_topk_prob: false, routed_scaling: 1.0 }, 2, 0x519D);
+}
+
+// ---- row-compacted activations (each expert holds its routed rows only) ----
+
+/// The compacted training path is the same function: its gradients pass the finite-difference check, for both router
+/// kinds with `top_k < n_experts` (where compaction drops rows).
+#[test]
+fn compacted_experts_pass_the_gradcheck() {
+    run_case_on(RouterKind::Softmax { aux_coef: 0.01, z_coef: 0.001, norm_topk_prob: true, routed_scaling: 1.0 }, 2, 0xC0A1, true);
+    run_case_on(RouterKind::SigmoidNoAuxTc { n_group: 1, topk_group: 1, norm_topk_prob: true, routed_scaling: 1.5 }, 2, 0xC0A2, true);
+}
+
+/// The compacted path computes what the dense one does: the layer output, every weight gradient and the input
+/// gradient agree, while the saved activations shrink to the routed rows.
+#[test]
+fn compacted_experts_match_the_dense_path() {
+    let kind = RouterKind::Softmax { aux_coef: 0.01, z_coef: 0.001, norm_topk_prob: true, routed_scaling: 1.0 };
+    let (dense, compact) = (MoeLayerCheck::new(kind, 2, 0xC0A3, false), MoeLayerCheck::new(kind, 2, 0xC0A3, true));
+    let (want, got) = (dense.loss(), compact.loss());
+    assert!((want - got).abs() <= 1e-5 * want.abs().max(1.0), "loss {got} vs {want}");
+    for m in [&dense, &compact] {
+        m.zero_grads();
+        m.backward();
+    }
+    for name in dense.param_names() {
+        for (i, (a, b)) in dense.read_grad(&name).iter().zip(compact.read_grad(&name)).enumerate() {
+            assert!((a - b).abs() <= 1e-5 * a.abs().max(1e-3), "{name}[{i}]: compact {b} vs dense {a}");
+        }
+    }
+    let (dx, cx) = (dense.last_dx.borrow().clone().unwrap(), compact.last_dx.borrow().clone().unwrap());
+    for (i, (a, b)) in dx.iter().zip(&cx).enumerate() {
+        assert!((a - b).abs() <= 1e-5 * a.abs().max(1e-3), "d_x[{i}]: compact {b} vs dense {a}");
+    }
 }

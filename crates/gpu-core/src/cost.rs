@@ -689,6 +689,11 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (rows, d, u) = (p(0)?, p(1)?, p(2)?);
             f(d * (rows + u), 4 * u * d + 4 * (rows * d + rows + u))
         }
+        // params [n_idx, width, src_stride, dst_stride, col0]: one add per element moved.
+        "rows_scatter_add" => {
+            let (ni, w) = (p(0)?, p(1)?);
+            f(ni * w, 12 * ni * w + 4 * ni)
+        }
         // params [n_idx, d, n_rows_out].
         "row_scatter" => {
             let (ni, d) = (p(0)?, p(1)?);
