@@ -73,6 +73,26 @@ the fine-tuned reference. `qwen-spectrum` measures how much of Qwen3-0.6B's
 residual stream a truncated Fourier basis keeps, against principal
 components, random orthonormal directions and coordinates.
 
+`qwen-slice-fit` and `qwen-slice-eval` follow that measurement to its use:
+shrinking a pretrained Qwen3 to a narrower standard Qwen3 by its residual
+stream's principal directions (`qwen3::slice`). `fetch-data.sh` fetches the
+general text and question set they use (WikiText-103 and ARC-Easy, from
+their original distributions, into `data/`):
+
+```sh
+samples/text/spectral-lm/fetch-data.sh
+W=~/.local/share/brain/models/Qwen/Qwen3-0.6B/model.brain.safetensors
+# One basis for the whole stream, fitted on calibration text.
+$S qwen-slice-fit --weights $W --calib data/wikitext/calib.txt --out /tmp/basis.f32
+# Perplexity on the test split and zero-shot ARC-Easy accuracy, of the
+# original and of its slice to 768 directions.
+$S qwen-slice-eval --weights $W --text data/wikitext/test.txt --choice data/arc-easy/test.jsonl
+$S qwen-slice-eval --weights $W --basis /tmp/basis.f32 --width 768 --text data/wikitext/test.txt --choice data/arc-easy/test.jsonl
+```
+
+Both take `--stages S` to split a model too large for one card over cards
+`0..S`, and `--dtype bf16` to hold its linears in bfloat16.
+
 Every training and scoring subcommand ends with one JSON line holding the
 numbers a comparison records (losses, tokens, time, parameter counts,
 arithmetic per token, bits per byte and what it was computed over). The seed

@@ -17,6 +17,8 @@
 //!   spectral-lm qwen-corpus --weights W --text train.txt --valid valid.txt --out DIR [--stories N]
 //!   spectral-lm qwen-train --weights W <qwen corpus dir> --out F [schedule flags]
 //!   spectral-lm qwen-spectrum --weights W --fit-text train.txt --text valid.txt [--layer L --widths 64,128]
+//!   spectral-lm qwen-slice-fit --weights W --calib calib.txt --out basis.f32 [--windows N --window T --stages S]
+//!   spectral-lm qwen-slice-eval --weights W [--basis basis.f32 --width K] --text test.txt --choice arc.jsonl [--dtype bf16 --stages S]
 //!
 //! Every subcommand takes `--gpu N` to run on card N.
 //!
@@ -26,6 +28,7 @@
 
 mod lm;
 mod qwen;
+mod slice;
 mod spectrum;
 
 use appopts::Args;
@@ -49,8 +52,10 @@ fn main() {
         Some("qwen-corpus") => qwen::corpus(&mut a),
         Some("qwen-train") => qwen::train(&mut a),
         Some("qwen-spectrum") => spectrum::run(&mut a),
+        Some("qwen-slice-fit") => slice::fit(&mut a),
+        Some("qwen-slice-eval") => slice::eval(&mut a),
         other => {
-            eprintln!("usage: spectral-lm <train|eval|generate|cost|profile|qwen-eval|qwen-corpus|qwen-train|qwen-spectrum> ... (got {other:?}); see README.md");
+            eprintln!("usage: spectral-lm <train|eval|generate|cost|profile|qwen-eval|qwen-corpus|qwen-train|qwen-spectrum|qwen-slice-fit|qwen-slice-eval> ... (got {other:?}); see README.md");
             std::process::exit(2);
         }
     }
