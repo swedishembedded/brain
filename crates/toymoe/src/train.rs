@@ -272,10 +272,31 @@ impl Trainer {
 
     /// Build on an existing device handle - see `Gpt::new_on`.
     pub(crate) fn new_on(gpu: Gpu, cfg: Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Trainer {
+        Trainer::build(gpu, cfg, b, t, init, None).unwrap_or_else(|e| panic!("toymoe: {e}"))
+    }
+
+    /// A build whose per-layer tensors (every expert included) stream through a device window under `resident` from
+    /// the start (see [`model::streamed`]): they are read from `init` into the window's host state and never all
+    /// reach the device, so a model larger than it trains. The embedding (the tied head) and the final norm load as
+    /// usual.
+    pub fn new_resident_on(cfg: Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, resident: &model::resident_ft::ResidentFtConfig) -> Result<Trainer, String> {
+        Trainer::build(Gpu::new(&optim::with_moment_kernels(PIPELINES)), cfg, b, t, init, Some(resident))
+    }
+
+    fn build(gpu: Gpu, cfg: Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, resident: Option<&model::resident_ft::ResidentFtConfig>) -> Result<Trainer, String> {
         let c = cfg.clone();
         // Parameter weights/grads/Adam-moment buffers (all zero-initialised) live
         // in the shared ParamStore; the shared Optim drives the AdamW + clip path.
-        let ps = ParamStore::new(&gpu, param_list(&c), init);
+        let layer_of = |name: &str| model::streamed::blocks_layer(name);
+        let roles = param_list(&c)
+            .into_iter()
+            .map(|(name, numel)| {
+                let role = if resident.is_some() && layer_of(&name).is_some() { paramstore::Role::Streamed } else { paramstore::Role::Trainable };
+                (name, numel, role)
+            })
+            .collect();
+        let mut ps = ParamStore::new_with_roles_src(&gpu, roles, init);
+        let streamed = resident.map(|r| StreamedStore::attach(&gpu, &mut ps, r.clone(), init, &layer_of)).transpose()?;
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
 
         let n = (b * t) as u64;
@@ -353,11 +374,11 @@ impl Trainer {
             gpu,
             fwd_steps: LayerTape::default(),
             bwd_steps: LayerTape::default(),
-            streamed: None,
+            streamed,
             backward_pending: Cell::new(false),
         };
         trainer.build_graphs();
-        trainer
+        Ok(trainer)
     }
 
     /// Build the forward, backward, and AdamW dispatch graphs once. Called from
@@ -785,6 +806,10 @@ impl model::Model for Trainer {
 
     fn new(cfg: Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {
         Trainer::new(cfg, b, t, init)
+    }
+
+    fn new_resident(cfg: Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, resident: &model::resident_ft::ResidentFtConfig) -> Result<Self, String> {
+        Trainer::new_resident_on(cfg, b, t, init, resident)
     }
 
     fn init_weights(cfg: &Config, seed: u64) -> HashMap<String, Vec<f32>> {
