@@ -1,0 +1,59 @@
+{
+ "commit": "f1f1291a728ce83ec0dde008c8f222fc41b02011",
+ "device": "gpu0 Tesla P40",
+ "plan": "primary",
+ "id": "S-256-512-24-5651191025060493230",
+ "family": "S-256-512-24",
+ "seed": 5651191025060493230,
+ "command": "target/release/sample-text-spectral-lm train data/tinystories --out <work>/S-256-512-24-5651191025060493230.safetensors --d-model 256 --layers 6 --heads 8 --kv-heads 4 --head-dim 32 --mixer spectral --signal-len 512 --channels 24 --batch 16 --block 512 --warmup 100 --weight-decay 0.1 --clip 1.0 --steps 4096 --lr 0.0010000000474974513 --seed 5651191025060493230 --gpu 0",
+ "train": {
+  "batch": 16,
+  "block": 512,
+  "checkpoint": "<work>/S-256-512-24-5651191025060493230.safetensors",
+  "config": {
+   "block_size": 512,
+   "d_model": 256,
+   "head_dim": 32,
+   "mixer": {
+    "basis": "real-fourier-orthonormal-frequency-ordered",
+    "channels": 24,
+    "kind": "spectral",
+    "signal_len": 512
+   },
+   "model": "spectrallm",
+   "n_heads": 8,
+   "n_kv_heads": 4,
+   "n_layers": 6,
+   "rms_norm_eps": 9.999999974752427e-07,
+   "rope_theta": 10000.0,
+   "tie_embeddings": true,
+   "vocab_size": 4096
+  },
+  "event": "train",
+  "final_loss": 1.8919129371643066,
+  "flops_per_token": 16501760,
+  "initial_loss": 8.372517585754395,
+  "lr": 0.0010000000474974513,
+  "params_embed": 1048576,
+  "params_nonembed": 1293952,
+  "seconds": 4276.655486671,
+  "seed": 5651191025060493230,
+  "steps": 4096,
+  "tokens": 33554432,
+  "tokens_per_s": 7845.951609751753,
+  "transform": "Fft"
+ },
+ "peak_mem_mib": 4119,
+ "eval_command": "target/release/sample-text-spectral-lm eval --checkpoint <work>/S-256-512-24-5651191025060493230.safetensors --tokenizer data/tinystories/tokenizer.json --text data/tinystories/valid.txt --max-doc-bytes 1500 --batch 16 --gpu 0",
+ "eval": {
+  "bits_per_byte": 0.6585933853585045,
+  "bytes": 19721848,
+  "checkpoint": "<work>/S-256-512-24-5651191025060493230.safetensors",
+  "documents": 26439,
+  "event": "eval",
+  "max_doc_bytes": 1500,
+  "nats": 9003065.978408337,
+  "seconds": 200.468860605,
+  "tokens": 4935406
+ }
+}
