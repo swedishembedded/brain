@@ -1,0 +1,19 @@
+{
+ "commit": "4c01a82f77d27069513e9a1840dcc760a63c5148",
+ "device": "gpu0 Tesla P40",
+ "plan": "qwen",
+ "id": "qwen3-0.6b-zero-shot",
+ "command": "target/release/sample-text-spectral-lm qwen-eval --weights <models>/Qwen/Qwen3-0.6B/model.brain.safetensors --text data/tinystories/valid.txt --max-doc-bytes 1500 --batch 8 --gpu 0",
+ "result": {
+  "bits_per_byte": 0.7665110436510026,
+  "bytes": 19721848,
+  "checkpoint": "<models>/Qwen/Qwen3-0.6B/model.brain.safetensors",
+  "documents": 26439,
+  "event": "eval",
+  "max_doc_bytes": 1500,
+  "nats": 10478315.835820436,
+  "seconds": 2014.734222272,
+  "tokens": 4744557
+ },
+ "peak_mem_mib": 5413
+}
