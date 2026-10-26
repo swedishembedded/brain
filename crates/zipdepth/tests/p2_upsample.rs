@@ -219,20 +219,20 @@ fn fd_both(kind: UpsampleKind, weights: &[&str]) {
 
     // `depth`'s own gradient — elementwise, since it reaches every output pixel.
     let gd = gpu.read(&dde, d.numel() as usize);
-    let loss_d = |dvv: &[f32]| -> f32 {
+    let loss_d = |dvv: &[f32]| -> f64 {
         let ctx = Ctx::new(&gpu, zipdepth::net::ids());
         let m = FastConvexUpsample::new(&ctx, "u", kind, feat, d, 2, 1.0, true);
         let fb = gpu.storage_init("f", &fv);
         let db = gpu.storage_init("d", dvv);
         m.forward(&ctx, &ps, &fb, &db);
-        gpu.read(m.out(), no).iter().zip(&r).map(|(a, b)| a * b).sum()
+        gpu.read(m.out(), no).iter().zip(&r).map(|(a, b)| *a as f64 * *b as f64).sum()
     };
     let eps = 1e-3f32;
     for i in 0..dv.len() {
         let (mut a, mut b) = (dv.clone(), dv.clone());
         a[i] += eps;
         b[i] -= eps;
-        let numeric = (loss_d(&a) - loss_d(&b)) / (2.0 * eps);
+        let numeric = ((loss_d(&a) - loss_d(&b)) / (a[i] - b[i]) as f64) as f32;
         let tol = 4e-3 + 8e-2 * gd[i].abs().max(numeric.abs()).max(1e-3);
         assert!((gd[i] - numeric).abs() <= tol, "d_depth[{i}]: analytic {} vs fd {numeric}", gd[i]);
     }
