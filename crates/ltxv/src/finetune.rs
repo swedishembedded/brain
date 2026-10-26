@@ -25,7 +25,7 @@
 //! fine-tune run would be invoked once a real checkpoint exists.
 
 use crate::lora::{save_adapter, LoraAdapter, LoraCfg};
-use crate::modelgrad::{grads, make_flow_batch, Cfg, ModelWeights};
+use crate::modelgrad::{grads_saved, make_flow_batch, Cfg, ModelWeights};
 use data::rng::Rng;
 
 /// One named tensor: `(name, shape, row-major f32 data)`.
@@ -59,6 +59,8 @@ pub struct TrainOpts {
     pub save_path: String,
     /// Write a checkpoint every N steps (0 = final only).
     pub ckpt_every: u32,
+    /// What each step's backward keeps of its forward (`model::saved::BlockStack`).
+    pub saved: model::saved::SavedPolicy,
 }
 
 /// Fine-tune a LoRA adapter over `base` on synthetic data. Returns the
@@ -70,6 +72,7 @@ pub fn run(cfg: &Cfg, base: &ModelWeights<f32>, opts: &TrainOpts, cancel: &capab
     if opts.samples == 0 {
         return Err("ltxv finetune: samples must be >= 1".into());
     }
+    model::saved::BlockStack::<(), ()>::new("ltxv finetune", opts.saved)?;
     let total = opts.steps + 1;
     let mut rng = Rng::new(opts.seed);
     let clips: Vec<SyntheticClip> = (0..opts.samples).map(|_| synthetic_clip(cfg, &mut rng)).collect();
@@ -90,7 +93,7 @@ pub fn run(cfg: &Cfg, base: &ModelWeights<f32>, opts: &TrainOpts, cancel: &capab
             make_flow_batch(cfg, &clip.latent, &clip.ctx, sigma, &noise)
         },
         |adapter, b, lr| {
-            let (loss, g) = grads(cfg, &adapter.apply(base), b);
+            let (loss, g) = grads_saved(cfg, &adapter.apply(base), b, opts.saved).expect("the policy was accepted before the first step");
             adapter.step(&g, lr);
             loss
         },
@@ -118,7 +121,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("tmp dir");
         let path = dir.join("adapter.brain");
         // seed: the single-endpoint loss descent over 20 steps was measured at this seed; other draws can end above the start
-        let opts = TrainOpts { steps: 20, rank: 4, lr: 3e-3, samples: 1, seed: 11, save_path: path.to_str().expect("utf-8 path").into(), ckpt_every: 0 };
+        let opts = TrainOpts { steps: 20, rank: 4, lr: 3e-3, samples: 1, seed: 11, save_path: path.to_str().expect("utf-8 path").into(), ckpt_every: 0, saved: model::saved::SavedPolicy::Keep };
 
         let mut losses = Vec::new();
         let cancel = capability::CancelToken::default();
@@ -156,7 +159,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("tmp dir");
         let initial = |seed: u64| {
             let save_path = dir.join(format!("adapter-{seed}.brain")).to_str().expect("utf-8 path").to_string();
-            let opts = TrainOpts { steps: 0, rank: 4, lr: 3e-3, samples: 1, seed, save_path, ckpt_every: 0 };
+            let opts = TrainOpts { steps: 0, rank: 4, lr: 3e-3, samples: 1, seed, save_path, ckpt_every: 0, saved: model::saved::SavedPolicy::Keep };
             run(&cfg, &base, &opts, &capability::CancelToken::default(), |_, _, _| {}).expect("finetune run")
         };
         let (a, a_again, b) = (initial(1), initial(1), initial(2));

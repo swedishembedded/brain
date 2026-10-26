@@ -55,6 +55,7 @@
 use crate::config::LtxDitConfig;
 use crate::grad::{block_backward, block_forward, dsilu, linear, linear_bwd, silu, BlockCache, BlockGrads, BlockW, Dims, Fp, Lin};
 use crate::rope::ltx_rope_tables;
+use model::saved::{BlockStack, SavedPolicy};
 
 /// Shape of the training problem: the [`LtxDitConfig`] fields the host path
 /// needs plus the token/context extent being trained on.
@@ -195,6 +196,42 @@ pub fn timestep_embedding<T: Fp>(t: f64, dim: usize) -> Vec<T> {
     e
 }
 
+/// The block forward's inputs other than the block input, held by a recomputing cache.
+struct Rebuild<T> {
+    adaln_shared: Vec<T>,
+    context: Vec<T>,
+    cos: Vec<T>,
+    sin: Vec<T>,
+}
+
+impl<T> ModelCache<T> {
+    /// Block caches this cache holds: one per block when keeping, none when recomputing.
+    pub fn held_block_caches(&self) -> usize {
+        self.blocks.held_caches()
+    }
+}
+
+/// The model inputs [`forward`] reads. `latent`: `[t*in_channels]` (already tokens - see this module's doc).
+/// `timesteps`: `[t]`, per-token `denoise_mask*sigma` (RAW, matching `crate::dit::LtxDit::forward`'s own contract -
+/// the `timestep_scale_multiplier` scaling happens inside). `keyframes_mask`: `[t]`, non-zero marks a keyframe token.
+/// `context`: `[context_len*dim]` raw text context. `cos`/`sin`: `[nh, t, hd/2]` (`crate::rope::LtxRopeTables`'s
+/// layout).
+pub struct Inputs<'a, T> {
+    pub latent: &'a [T],
+    pub timesteps: &'a [f64],
+    pub keyframes_mask: &'a [f64],
+    pub context: &'a [T],
+    pub cos: &'a [T],
+    pub sin: &'a [T],
+}
+
+impl<T> Batch<T> {
+    /// This batch as [`forward`]'s inputs.
+    pub fn inputs(&self) -> Inputs<'_, T> {
+        Inputs { latent: &self.latent, timesteps: &self.timesteps, keyframes_mask: &self.keyframes_mask, context: &self.ctx, cos: &self.cos, sin: &self.sin }
+    }
+}
+
 /// Saved forward state for the backward pass.
 pub struct ModelCache<T> {
     te_all: Vec<T>,
@@ -205,31 +242,20 @@ pub struct ModelCache<T> {
     flat: Vec<T>,
     x_pre_blocks: Vec<T>,
     keyframes_mask: Vec<f64>,
-    blocks: Vec<BlockCache<T>>,
+    blocks: BlockStack<Vec<T>, BlockCache<T>>,
+    /// What a recomputing backward rebuilds a block's cache from besides its input; `None` when keeping.
+    rebuild: Option<Rebuild<T>>,
     xhat_out: Vec<T>,
     inv_out: Vec<T>,
     xo: Vec<T>,
 }
 
-/// Full forward. `latent`: `[t*in_channels]` (already tokens - see this
-/// module's doc). `timesteps`: `[t]`, per-token `denoise_mask*sigma`
-/// (RAW, matching `crate::dit::LtxDit::forward`'s own contract - the
-/// `timestep_scale_multiplier` scaling happens inside). `keyframes_mask`:
-/// `[t]`, non-zero marks a keyframe token. `context`: `[context_len*dim]`
-/// raw text context. `cos`/`sin`: `[nh, t, hd/2]`
-/// (`crate::rope::LtxRopeTables`'s layout). Returns the velocity prediction
-/// `[t*out_channels]` plus the cache.
-#[allow(clippy::too_many_arguments)]
-pub fn forward<T: Fp>(
-    cfg: &Cfg,
-    w: &ModelWeights<T>,
-    latent: &[T],
-    timesteps: &[f64],
-    keyframes_mask: &[f64],
-    context: &[T],
-    cos: &[T],
-    sin: &[T],
-) -> (Vec<T>, ModelCache<T>) {
+/// Full forward over `inputs`, keeping what `saved` names for [`backward`]: every block's cache
+/// ([`SavedPolicy::Keep`]) or only every block's input, each block's cache rebuilt as the backward reaches it
+/// ([`SavedPolicy::Recompute`], `model::saved::BlockStack`). Returns the velocity prediction `[t*out_channels]` plus
+/// the cache; a narrow saved format is refused.
+pub fn forward<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, inputs: &Inputs<'_, T>, saved: SavedPolicy) -> Result<(Vec<T>, ModelCache<T>), String> {
+    let Inputs { latent, timesteps, keyframes_mask, context, cos, sin } = *inputs;
     let (t, dim, ctx_len) = (cfg.t, cfg.dim, cfg.context_len);
     assert_eq!(latent.len(), t * cfg.in_channels, "latent size");
     assert_eq!(timesteps.len(), t, "timesteps size");
@@ -263,12 +289,13 @@ pub fn forward<T: Fp>(
 
     // --- block stack ---
     let d = cfg.dims();
-    let mut caches = Vec::with_capacity(w.blocks.len());
+    let mut blocks = BlockStack::new("ltxv", saved)?;
     for bw in &w.blocks {
         let (o, c) = block_forward(d, bw, &x, &adaln_shared, context, cos, sin);
+        blocks.push(&x, c);
         x = o;
-        caches.push(c);
     }
+    let rebuild = saved.recomputes().then(|| Rebuild { adaln_shared, context: context.to_vec(), cos: cos.to_vec(), sin: sin.to_vec() });
 
     // --- output stage: LayerNorm(no affine) -> modulate by
     // (scale_shift_table + embedded_timestep) -> proj_out ---
@@ -289,9 +316,9 @@ pub fn forward<T: Fp>(
 
     let cache = ModelCache {
         te_all, h0pre, h0, embedded, embedded_silu, flat, x_pre_blocks,
-        keyframes_mask: keyframes_mask.to_vec(), blocks: caches, xhat_out, inv_out, xo,
+        keyframes_mask: keyframes_mask.to_vec(), blocks, rebuild, xhat_out, inv_out, xo,
     };
-    (pred, cache)
+    Ok((pred, cache))
 }
 
 /// Affine-free LayerNorm over the last `d` of `[rows,d]` (population
@@ -394,14 +421,18 @@ pub fn backward<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, cache: &ModelCache<T>, dp
     let mut dadaln_shared = vec![T::ZERO; t * 9 * dim];
     let mut dx = dx_from_out;
     let mut blocks: Vec<BlockGrads<T>> = Vec::with_capacity(w.blocks.len());
-    for (bw, bc) in w.blocks.iter().zip(&cache.blocks).rev() {
-        let g = block_backward(d, bw, bc, &dx);
+    let rebuild = |i: usize, x: &Vec<T>| {
+        let r = cache.rebuild.as_ref().expect("a recomputing cache holds what its blocks rebuild from");
+        block_forward(d, &w.blocks[i], x, &r.adaln_shared, &r.context, &r.cos, &r.sin).1
+    };
+    cache.blocks.rev_for_each(rebuild, |i, bc| {
+        let g = block_backward(d, &w.blocks[i], bc, &dx);
         dx = g.dx.clone();
         for (acc, &gi) in dadaln_shared.iter_mut().zip(&g.dadaln_shared) {
             *acc += gi;
         }
         blocks.push(g);
-    }
+    });
     blocks.reverse();
 
     // --- adaLN-single: adaln_shared -> SiLU(embedded) -> embedded (+ the
@@ -496,9 +527,14 @@ pub fn make_flow_batch<T: Fp>(cfg: &Cfg, x0: &[T], ctx: &[T], sigma: f64, noise:
 /// One training evaluation: forward + loss + backward. The f32
 /// instantiation is the finetune trainer's step core.
 pub fn grads<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, b: &Batch<T>) -> (f64, ModelGrads<T>) {
-    let (pred, cache) = forward(cfg, w, &b.latent, &b.timesteps, &b.keyframes_mask, &b.ctx, &b.cos, &b.sin);
+    grads_saved(cfg, w, b, SavedPolicy::Keep).expect("keeping every block is always available")
+}
+
+/// [`grads`] keeping what `saved` names of the forward for the backward (see [`forward`]).
+pub fn grads_saved<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, b: &Batch<T>, saved: SavedPolicy) -> Result<(f64, ModelGrads<T>), String> {
+    let (pred, cache) = forward(cfg, w, &b.inputs(), saved)?;
     let (l, dpred) = loss(&pred, &b.target);
-    (l, backward(cfg, w, &cache, &dpred))
+    Ok((l, backward(cfg, w, &cache, &dpred)))
 }
 
 // ---- weight construction ----

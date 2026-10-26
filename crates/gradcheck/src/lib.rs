@@ -1140,7 +1140,7 @@ impl LtxvFixture {
     }
 
     fn loss_of(&self, w: &ltxv::modelgrad::ModelWeights<f64>) -> f64 {
-        let (pred, _) = ltxv::modelgrad::forward(&self.cfg, w, &self.b.latent, &self.b.timesteps, &self.b.keyframes_mask, &self.b.ctx, &self.b.cos, &self.b.sin);
+        let (pred, _) = ltxv::modelgrad::forward(&self.cfg, w, &self.b.inputs(), model::saved::SavedPolicy::Keep).expect("keeping every block is always available");
         ltxv::modelgrad::loss(&pred, &self.b.target).0
     }
 

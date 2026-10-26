@@ -18,7 +18,7 @@
 
 use std::path::Path;
 
-use ltxv::modelgrad::{forward, Cfg, ModelWeights};
+use ltxv::modelgrad::{forward, Cfg, Inputs, ModelWeights};
 use ltxv::{load_tiny_weights, LtxDit, LtxDitConfig};
 
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
@@ -70,7 +70,8 @@ fn host_training_forward_matches_the_gpu_dispatched_forward() {
     let timesteps: Vec<f64> = timesteps_f32.iter().map(|&v| v as f64).collect();
     let keyframes_mask: Vec<f64> = keyframes_mask_f32.iter().map(|&v| v as f64).collect();
     let tables = cfg.rope_tables_f32(positions);
-    let (host_pred, _cache) = forward(&cfg, &host_w, latent, &timesteps, &keyframes_mask, context, &tables.cos, &tables.sin);
+    let inputs = Inputs { latent, timesteps: &timesteps, keyframes_mask: &keyframes_mask, context, cos: &tables.cos, sin: &tables.sin };
+    let (host_pred, _cache) = forward(&cfg, &host_w, &inputs, model::saved::SavedPolicy::Keep).unwrap();
 
     let c = cosine(&host_pred, &gpu_taps.out);
     let max_abs = host_pred.iter().zip(&gpu_taps.out).map(|(&a, &b)| (a - b).abs()).fold(0.0f32, f32::max);
