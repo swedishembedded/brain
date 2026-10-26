@@ -184,19 +184,27 @@ mod tests {
         for (name, _, _) in &tensors {
             assert!(name.starts_with("diffusion_model.transformer_blocks."), "{name}");
         }
-        println!("av finetune loop: loss {:.6} -> {:.6} over {} steps", losses[0], losses[losses.len() - 1], losses.len());
-        // Compare the mean of the first/last 10 steps rather than the two
-        // single endpoints - Adam over a single noisy synthetic example
-        // does not monotonically improve step-to-step (the AV model's
-        // larger parameter count is noisier here than the video-only
-        // path's own single-endpoint check tolerates), but the TREND is
-        // still real and this is robust to that noise.
-        let head = losses[..10].iter().sum::<f64>() / 10.0;
-        let tail = losses[losses.len() - 10..].iter().sum::<f64>() / 10.0;
-        assert!(tail < head * 0.97, "loss must trend down: first-10 avg {head:.6} -> last-10 avg {tail:.6}: {losses:?}");
+        assert_eq!(losses.len(), 59, "one loss per step");
 
         let reloaded = crate::av_lora::load_adapter(path.to_str().expect("utf-8 path"), &cfg).expect("reload adapter");
         assert_eq!(reloaded.rank(), 4);
+        // Each step draws its own sigma and noise, so the per-step losses are too noisy to show a trend over 60
+        // steps. The trained adapter is measured instead on one fixed set of probe batches drawn like the training
+        // ones: it lowers their mean loss against the base weights by 5-9% (measured over eight random draws), so a
+        // 2% bar holds with room.
+        let clip = &clips[0];
+        let probes: Vec<_> = (0..16)
+            .map(|_| {
+                let (v_sigma, a_sigma) = (rng.next_f64().clamp(1e-3, 1.0), rng.next_f64().clamp(1e-3, 1.0));
+                let v_noise: Vec<f32> = (0..clip.v_latent.len()).map(|_| rng.next_gaussian() as f32).collect();
+                let a_noise: Vec<f32> = (0..clip.a_latent.len()).map(|_| rng.next_gaussian() as f32).collect();
+                make_av_flow_batch(&cfg, &clip.v_latent, &clip.a_latent, &clip.v_ctx, &clip.a_ctx, v_sigma, a_sigma, &v_noise, &a_noise)
+            })
+            .collect();
+        let mean_loss = |w: &crate::av_modelgrad::AvModelWeights<f32>| probes.iter().map(|b| crate::av_modelgrad::grads(&cfg, w, b).0).sum::<f64>() / probes.len() as f64;
+        let (before, after) = (mean_loss(&base), mean_loss(&reloaded.apply(&base)));
+        println!("av finetune probes: mean loss {before:.6} -> {after:.6} ({:.4})", after / before);
+        assert!(after < 0.98 * before, "the trained adapter must lower the probe loss: {before:.6} -> {after:.6}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
