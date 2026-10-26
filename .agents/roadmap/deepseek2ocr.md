@@ -848,3 +848,27 @@ Server numbers: `brain serve --device gpu1`, DeepSeek-OCR v1, 8 omni-mixed pages
 
 The same tokens come out either way (`engine_bench --tapes on|off` digests agree at B=1, 8, 32). Server, one client: 43 -> 187
 tokens/s. The engine decodes 6,700 tokens/s at B=32; the server is bounded by the encoder (next entries).
+
+## 2026-10-26 throughput lane: the encoder's linears on tensor cores
+
+`encode_bench` (`BRAIN_BACKEND=cuda`, with the NVRTC environment `build-env.sh` sets; `BRAIN_PROFILE=1` prints a per-kernel table on
+CUDA too). A peer's job was running on both cards (12 to 97% SM), so absolute numbers move 2x with it; `--gemm fp32` against
+`--gemm auto` alternated in one window is the comparison.
+
+- SAM and CLIP linears ran the fp32 register-tiled kernel (64 of ~121 ms device time). They are now TF32 library products of the
+  fp32 weights as stored (no copy, fp32 accumulate): `SamEncoder::linear`, `model::vit::vit_block_fwd_tc`. A training build, and a
+  CLIP build that keeps the per-block taps, stay the fp32 reference. `set_gemm_precision(Fp32Reference)` pins it.
+- The served CLIP is `ClipVision::new_serving_on_src`: one shared block scratch and the fused `flash_attn_bidir` (the resident
+  graph kept every block's activations and ran the materialized score chain for inference).
+
+| view (CUDA, GH200) | before | after | same-window fp32 vs tensor cores |
+|---|---|---|---|
+| global 1024 px | 137 ms | 69 ms | 278 -> 138 ms (2.0x) |
+| tile 640 px | 78 ms | 28 ms | 255 -> 70 ms (3.6x) |
+
+Device time of the global view after the change (profile): SAM 58.6 ms, of which `flash_attn_cross_relpos` 41.8 ms (71%), bias_add 4.4,
+attn_relpos_qr 3.6, all library GEMMs together 3.3; CLIP 8.0 ms, of which `flash_attn_bidir_reg2` 3.7. Next cost: SAM's fused
+relative-position attention (fp32 CUDA cores, ~5 TFLOP/s on the four global blocks).
+
+`deepseekocr2` `train_overfit::full_finetune_overfits_a_small_batch` fails on `02334b411^`, before this campaign touched the repo:
+a seed-calibrated from-scratch overfit that plateaus (2.93 -> 2.36 at 600 epochs); not caused by this lane.

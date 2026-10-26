@@ -56,6 +56,7 @@
 
 use std::collections::HashMap;
 
+use gpu_core::provider::library::{GemmPrecision, LibraryGemmProvider};
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::block;
 use paramstore::{ParamStore, Role};
@@ -1284,6 +1285,22 @@ pub const CLIP_VISION_PIPELINES: &[(&str, &str)] = &[
     ("matmul_rows", kernels::MATMUL_ROWS),
 ];
 
+/// The fused bidirectional attention kernels `model::vit::flash_ids` resolves by name.
+const FLASH_KERNELS: &[(&str, &str)] = &[
+    ("flash_attn_bidir", kernels::FLASH_ATTN_BIDIR),
+    ("flash_attn_bidir_reg", kernels::FLASH_ATTN_BIDIR_REG),
+    ("flash_attn_bidir_reg2", kernels::FLASH_ATTN_BIDIR_REG2),
+    ("flash_attn_bidir_split", kernels::FLASH_ATTN_BIDIR_SPLIT),
+];
+
+/// [`CLIP_VISION_PIPELINES`] plus the fused attention: the kernel set of a [`ClipVision::new_serving_on_src`] build,
+/// which attends with it where the device runs it. The tap-keeping builds do not register it - their per-block
+/// parity taps are stated against the materialized chain.
+pub fn serving_pipelines() -> &'static [(&'static str, &'static str)] {
+    static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| CLIP_VISION_PIPELINES.iter().chain(FLASH_KERNELS).copied().collect())
+}
+
 /// Entries of [`CLIP_VISION_PIPELINES`] a handle may leave out: the tiled GEMM
 /// is an opt-in the block builders resolve by name themselves, falling back to
 /// the reference kernel for the same values.
@@ -1513,7 +1530,7 @@ impl Graph {
     fn cached(&self) -> (&[model::vit::VitBlockCache], &DeviceBuffer) {
         match &self.blocks {
             Blocks::Cached { caches, x_last, .. } => (caches, x_last),
-            Blocks::Shared { .. } => unreachable!("the resident graph is always the cached form"),
+            Blocks::Shared { .. } => panic!("this ClipVision was built for serving (new_serving_on_src): it keeps no per-block activations"),
         }
     }
 
@@ -1592,6 +1609,9 @@ pub struct ClipVision {
     /// `None` for a [`Self::new_encoder_on`] build.
     graph: Option<Graph>,
     bwd: Option<VisionBwd>,
+    /// The tensor-core GEMM an inference build's block linears run on, when the device has one. `None` for a
+    /// training build (its gradient checks are stated against the fp32 kernels) and under a pinned reference.
+    tensor_cores: Option<LibraryGemmProvider>,
 }
 
 impl ClipVision {
@@ -1604,7 +1624,7 @@ impl ClipVision {
         src: PatchSource,
         init: &HashMap<String, Vec<f32>>,
     ) -> ClipVision {
-        ClipVision::build(gpu, cfg, src, init, Some((b, false)))
+        ClipVision::build(gpu, cfg, src, init, Some((b, false)), true)
     }
 
     /// Trainable build: every parameter `Role::Trainable` plus the reverse step
@@ -1616,7 +1636,7 @@ impl ClipVision {
         src: PatchSource,
         init: &HashMap<String, Vec<f32>>,
     ) -> ClipVision {
-        ClipVision::build(gpu, cfg, src, init, Some((b, true)))
+        ClipVision::build(gpu, cfg, src, init, Some((b, true)), true)
     }
 
     /// The one builder [`Self::new_on`] and [`Self::new_train_on`] delegate to,
@@ -1635,7 +1655,37 @@ impl ClipVision {
         weights: &dyn checkpoint::TensorSource,
         train: bool,
     ) -> ClipVision {
-        ClipVision::build(gpu, cfg, src, weights, Some((b, train)))
+        ClipVision::build(gpu, cfg, src, weights, Some((b, train)), true)
+    }
+
+    /// Inference build for serving: one shared block scratch, the fused attention where the device runs it
+    /// and the block linears on tensor cores. It keeps no per-block activations, so [`Self::read_block_out`]
+    /// (the parity taps) is not available; everything a forward needs is.
+    pub fn new_serving_on_src(
+        gpu: Gpu,
+        cfg: crate::config::ClipVisionConfig,
+        b: u32,
+        src: PatchSource,
+        weights: &dyn checkpoint::TensorSource,
+    ) -> ClipVision {
+        ClipVision::build(gpu, cfg, src, weights, Some((b, false)), false)
+    }
+
+    /// Pin the arithmetic of an inference build's block linears: [`GemmPrecision::Fp32Reference`] runs the fp32
+    /// kernels (what parity gates are stated against), anything else the tensor cores where the device has them.
+    /// Training builds and builds that serve the per-block taps are always the fp32 reference.
+    pub fn set_gemm_precision(&mut self, precision: GemmPrecision) {
+        let serving = self.bwd.is_none() && self.graph.as_ref().is_some_and(|g| matches!(g.blocks, Blocks::Shared { .. }));
+        self.tensor_cores = serving.then(|| LibraryGemmProvider::for_gpu(&self.gpu, precision)).filter(LibraryGemmProvider::tf32_enabled);
+        if let Some(mut graph) = self.graph.take() {
+            graph.steps = self.record(&graph);
+            self.graph = Some(graph);
+        }
+    }
+
+    /// Whether the block linears run on tensor cores (TF32 products of the fp32 weights as stored).
+    pub fn uses_tensor_cores(&self) -> bool {
+        self.tensor_cores.is_some()
     }
 
     /// Weights only, `Frozen`, no resident graph: the build [`Self::encode`] is
@@ -1648,7 +1698,7 @@ impl ClipVision {
         src: PatchSource,
         weights: &dyn checkpoint::TensorSource,
     ) -> ClipVision {
-        ClipVision::build(gpu, cfg, src, weights, None)
+        ClipVision::build(gpu, cfg, src, weights, None, true)
     }
 
     fn build(
@@ -1657,6 +1707,7 @@ impl ClipVision {
         src: PatchSource,
         init: &dyn checkpoint::TensorSource,
         resident: Option<(u32, bool)>,
+        taps: bool,
     ) -> ClipVision {
         let want_pos = cfg.native_patches() + cfg.stem.prefix_tokens();
         assert_eq!(
@@ -1674,7 +1725,8 @@ impl ClipVision {
             .map(|(name, s)| (name, s.iter().product::<usize>(), role))
             .collect();
         let ps = ParamStore::new_with_roles_src(&gpu, roles, init);
-        let mut m = ClipVision { gpu, cfg, ps, src, graph: None, bwd: None };
+        let tensor_cores = (!train && !taps).then(|| LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Auto)).filter(LibraryGemmProvider::tf32_enabled);
+        let mut m = ClipVision { gpu, cfg, ps, src, graph: None, bwd: None, tensor_cores };
         // Refuse a handle that lacks a kernel now, by name, rather than at the
         // first `encode` or as an out-of-range pipeline index at submit.
         for (name, _) in CLIP_VISION_PIPELINES.iter().filter(|(n, _)| !OPTIONAL_KERNELS.contains(n)) {
@@ -1682,7 +1734,9 @@ impl ClipVision {
         }
         let Some((b, train)) = resident else { return m };
 
-        let mut graph = Graph::new(&m.gpu, &m.cfg, src, b, true);
+        // A training build (or one that serves the per-block parity taps) keeps every block's intermediates; a
+        // serving build shares one scratch and attends with the fused kernel where the device runs it.
+        let mut graph = Graph::new(&m.gpu, &m.cfg, src, b, taps || train);
         graph.steps = m.record(&graph);
         if train {
             let g = &m.gpu;
@@ -1867,7 +1921,7 @@ impl ClipVision {
             Blocks::Shared { x, scr } => {
                 for l in 0..c.layers() {
                     let bw = self.block_weights(l);
-                    model::vit::vit_block_fwd(g, &ids, &sh, &bw, x, n, &gr.spans, gr.seq, scr, &mut s);
+                    model::vit::vit_block_fwd_tc(g, self.tensor_cores.as_ref(), &ids, &sh, &bw, x, n, &gr.spans, gr.seq, scr, &mut s);
                 }
             }
         }
@@ -2045,8 +2099,10 @@ impl ClipVision {
         let gr = self.resident();
         // Every `cache.qkv` is `axpy`-accumulated by `vit_block_fwd_cached`, so
         // it MUST be zeroed each forward or a second forward doubles it.
-        let (caches, _) = gr.cached();
-        let clears: Vec<&DeviceBuffer> = caches.iter().map(|c| &c.qkv).collect();
+        let clears: Vec<&DeviceBuffer> = match &gr.blocks {
+            Blocks::Cached { caches, .. } => caches.iter().map(|c| &c.qkv).collect(),
+            Blocks::Shared { .. } => Vec::new(),
+        };
         self.gpu.submit(&clears, &gr.steps);
     }
 

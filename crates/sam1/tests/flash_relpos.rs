@@ -14,11 +14,14 @@
 //! `kh != kw`), which is what exposes a swapped height/width in the bias; a second config adds a table
 //! resampled to another grid (`SamViTConfig::at_grid`), the tile tower's shape.
 
+use gpu_core::provider::library::GemmPrecision;
 use sam1::init::init_dense;
 use sam1::{SamEncoder, SamViTConfig, PIPELINES};
 
 fn run(cfg: &SamViTConfig, weights: &std::collections::HashMap<String, Vec<f32>>, train: bool, image: &[f32]) -> Vec<f32> {
-    let enc = SamEncoder::new_on(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), weights, 0, train);
+    let mut enc = SamEncoder::new_on(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), weights, 0, train);
+    // This spec is about the attention: both builds multiply in fp32 (the linears' own spec is `tensor_core.rs`).
+    enc.set_gemm_precision(GemmPrecision::Fp32Reference);
     enc.write_image(image);
     enc.run();
     enc.gpu.read(enc.output(), enc.out_len())

@@ -11,7 +11,7 @@
 //! `--runs`, after one warm-up), printing one JSON line.
 //!
 //! ```text
-//! cargo run --release -p brain-deepseek2ocr --example encode_bench -- --dir <model dir> [--runs 5]
+//! cargo run --release -p brain-deepseek2ocr --example encode_bench -- --dir <model dir> [--runs 5] [--gemm auto|fp32]
 //! ```
 //!
 //! `BRAIN_PROFILE=1` adds the per-kernel table of each tower.
@@ -19,6 +19,7 @@
 use deepseek2ocr::config::DeepseekOcrConfig;
 use deepseek2ocr::encoder::DeepEncoder;
 use deepseek2ocr::serve::TILE_SIDE;
+use gpu_core::provider::library::GemmPrecision;
 use gpu_core::Gpu;
 use sam1::resample::GridSource;
 use std::time::Instant;
@@ -34,11 +35,17 @@ fn main() {
     let cfg: DeepseekOcrConfig = deepseek2ocr::import::config(&files, 1).expect("config");
     let vision = deepseek2ocr::import::encoder_weights_for(&files, &cfg).expect("vision weights");
     let dev = |k: &'static [(&'static str, &'static str)]| Gpu::new(k);
-    let global = DeepEncoder::new(&dev, cfg.clone(), &vision, 0, false);
+    let mut global = DeepEncoder::new(&dev, cfg.clone(), &vision, 0, false);
     let tile_grid = TILE_SIDE / cfg.sam.patch_size;
     let tile_weights = GridSource::new(&vision, (cfg.sam.grid_h, cfg.sam.grid_w), (tile_grid, tile_grid), cfg.sam.d_model);
-    let tile = DeepEncoder::new(&dev, cfg.at_sam_grid(tile_grid, tile_grid), &tile_weights, 0, false);
+    let mut tile = DeepEncoder::new(&dev, cfg.at_sam_grid(tile_grid, tile_grid), &tile_weights, 0, false);
 
+    // `--gemm fp32` pins the fp32 kernels (the reference tier), `auto` takes the tensor cores where the device has them.
+    if arg("--gemm", "auto") == "fp32" {
+        global.set_gemm_precision(GemmPrecision::Fp32Reference);
+        tile.set_gemm_precision(GemmPrecision::Fp32Reference);
+    }
+    let tensor_cores = global.uses_tensor_cores() && tile.uses_tensor_cores();
     let time = |enc: &DeepEncoder, side: u32| -> f64 {
         let image: Vec<f32> = (0..3 * (side * side) as usize).map(|i| (((i * 2654435761usize) >> 9) % 2001) as f32 / 1000.0 - 1.0).collect();
         let _ = enc.forward(&image);
@@ -58,5 +65,5 @@ fn main() {
         let image = vec![0.1f32; 3 * (side * side) as usize];
         gpu_core::profile::device_table(&enc.sam().gpu, &format!("{label}: sam"), || gpu_core::profile::device_table(&enc.clip().gpu, &format!("{label}: clip"), || enc.forward(&image)));
     }
-    println!("{{\"global_1024_ms\":{g:.1},\"tile_{TILE_SIDE}_ms\":{t:.1},\"backend\":\"{}\"}}", gpu_core::backend_name());
+    println!("{{\"global_1024_ms\":{g:.1},\"tile_{TILE_SIDE}_ms\":{t:.1},\"backend\":\"{}\",\"tensor_cores\":{tensor_cores}}}", gpu_core::backend_name());
 }

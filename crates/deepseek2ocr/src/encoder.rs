@@ -49,7 +49,7 @@
 //! involved are `[N, width]` -- the smallest things in the pipeline. A
 //! same-device fast path is additive.
 
-use clip::model::{ClipVision, PatchSource, CLIP_VISION_PIPELINES};
+use clip::model::{serving_pipelines, ClipVision, PatchSource, CLIP_VISION_PIPELINES};
 use gpu_core::{DeviceBuffer, Gpu};
 use paramstore::{ParamStore, Role};
 use sam1::model::SamEncoder;
@@ -145,14 +145,12 @@ impl DeepEncoder {
         let sam = SamEncoder::new_on(dev(sam1::model::PIPELINES), cfg.sam.clone(), init, seed, train);
         assert_eq!(sam.out_len(), (n * cfg.compressor_out()) as usize, "compressor output disagrees with the token grid");
 
-        let clip = ClipVision::new_on_src(
-            dev(CLIP_VISION_PIPELINES),
-            cfg.clip.clone(),
-            1,
-            PatchSource::Tokens { grid: (gh, gw) },
-            init,
-            train,
-        );
+        let (clip_cfg, clip_src) = (cfg.clip.clone(), PatchSource::Tokens { grid: (gh, gw) });
+        let clip = if train {
+            ClipVision::new_on_src(dev(CLIP_VISION_PIPELINES), clip_cfg, 1, clip_src, init, true)
+        } else {
+            ClipVision::new_serving_on_src(dev(serving_pipelines()), clip_cfg, 1, clip_src, init)
+        };
         assert_eq!(clip.seq_len(), n + 1, "CLIP must run at 1 + image_tokens rows");
 
         let gpu = dev(GLUE_PIPELINES);
@@ -186,6 +184,17 @@ impl DeepEncoder {
     /// `[image_tokens * d_model]` -- the projector output's element count.
     pub fn out_len(&self) -> usize {
         (self.n * self.cfg.projector_out()) as usize
+    }
+
+    /// Pin the arithmetic of both towers' linears (see [`SamEncoder::set_gemm_precision`]).
+    pub fn set_gemm_precision(&mut self, precision: gpu_core::provider::library::GemmPrecision) {
+        self.sam.set_gemm_precision(precision);
+        self.clip.set_gemm_precision(precision);
+    }
+
+    /// Whether both towers' linears run on tensor cores.
+    pub fn uses_tensor_cores(&self) -> bool {
+        self.sam.uses_tensor_cores() && self.clip.uses_tensor_cores()
     }
 
     pub fn sam(&self) -> &SamEncoder {

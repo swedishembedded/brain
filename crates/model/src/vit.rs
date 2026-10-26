@@ -20,6 +20,7 @@
 // buffer + Params list, not a design smell.
 #![allow(clippy::too_many_arguments)]
 
+use gpu_core::provider::library::{LibraryGemmProvider, Operand};
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 
 /// Kernel-pipeline indices a model supplies from its own PIPELINES list.
@@ -268,6 +269,29 @@ fn gemm_step(
     }
 }
 
+/// One large linear of an inference block: a TF32 tensor-core product where `tc` offers one for these shapes, else
+/// [`gemm_step`]'s fp32 kernel. The product reads the fp32 weight and activation as stored and accumulates in fp32.
+#[allow(clippy::too_many_arguments)]
+fn linear_step(
+    g: &Gpu,
+    tc: Option<&LibraryGemmProvider>,
+    k: &VitKernelIds,
+    reg: Option<usize>,
+    steps: &mut Vec<Step>,
+    x: &DeviceBuffer,
+    w: &DeviceBuffer,
+    out: &DeviceBuffer,
+    (m, kdim, n): (u32, u32, u32),
+) {
+    let whole = |buf| Operand { buf, range: (0, 0) };
+    if let Some(tc) = tc {
+        if tc.forward_tf32(g, steps, &whole(x), &whole(w), &whole(out), m, n, kdim) {
+            return;
+        }
+    }
+    steps.push(gemm_step(g, k, reg, x, w, out, m, kdim, n));
+}
+
 /// [`gemm_step`] for [`vit_block_fwd_cached`], whose reference kernel is
 /// `matmul` rather than `matmul_rows`.
 ///
@@ -474,6 +498,24 @@ pub fn vit_block_fwd(
     scr: &VitScratch,
     steps: &mut Vec<Step>,
 ) {
+    vit_block_fwd_tc(g, None, k, sh, w, x, rows, spans, chunk, scr, steps);
+}
+
+/// [`vit_block_fwd`] whose four large linears run on `tc`'s tensor-core products where the device offers them.
+#[allow(clippy::too_many_arguments)]
+pub fn vit_block_fwd_tc(
+    g: &Gpu,
+    tc: Option<&LibraryGemmProvider>,
+    k: &VitKernelIds,
+    sh: &VitShape,
+    w: &VitBlockWeights,
+    x: &DeviceBuffer,
+    rows: u32,
+    spans: &[(u32, u32)],
+    chunk: u32,
+    scr: &VitScratch,
+    steps: &mut Vec<Step>,
+) {
     let c = sh.dim;
     // The coalesced workgroup-per-row LayerNorm where the model registered
     // it (2.3-9.1x on a P40); reference otherwise. See `block::LayerNormIds`.
@@ -485,7 +527,7 @@ pub fn vit_block_fwd(
 
     // ---- attention half ----
     steps.push(crate::block::layernorm_fwd(g, &ln, x, w.norm1_w, w.norm1_b, &scr.ln, c, rows, sh.eps));
-    steps.push(gemm_step(g, k, reg, &scr.ln, w.qkv_w, &scr.qkv, rows, c, stride));
+    linear_step(g, tc, k, reg, steps, &scr.ln, w.qkv_w, &scr.qkv, (rows, c, stride));
     steps.push(g.step(k.bias_add, &[&scr.qkv, w.qkv_b], &[rows, stride], rows * stride));
     if let Some(qk) = &w.qk_norm {
         steps.push(g.step(k.ln_head, &[&scr.qkv, qk.q_w, qk.q_b], &[rows, sh.heads, hd, stride, 0, f(sh.eps)], rows * sh.heads));
@@ -504,7 +546,7 @@ pub fn vit_block_fwd(
         Some(f) => crate::block::flash_bidir_fwd(g, f, sh.heads, hd, c, &scr.qkv, stride, 0, c, 2 * c, &scr.ctx, spans, steps),
         None => chunked_attn_fwd(g, k, sh, &scr.qkv, &scr.ctx, &scr.scores, &scr.probs, &scr.kt, spans, chunk, steps),
     }
-    steps.push(gemm_step(g, k, reg, &scr.ctx, w.proj_w, &scr.ln, rows, c, c));
+    linear_step(g, tc, k, reg, steps, &scr.ctx, w.proj_w, &scr.ln, (rows, c, c));
     steps.push(g.step(k.bias_add, &[&scr.ln, w.proj_b], &[rows, c], rows * c));
     let branch: &DeviceBuffer = if let Some(ls1) = w.ls1 {
         steps.push(g.step(k.scale_chan, &[&scr.ln, ls1, &scr.ctx], &[rows * c, c, 1], rows * c));
@@ -516,10 +558,10 @@ pub fn vit_block_fwd(
 
     // ---- MLP half ----
     steps.push(crate::block::layernorm_fwd(g, &ln, &scr.res, w.norm2_w, w.norm2_b, &scr.ln, c, rows, sh.eps));
-    steps.push(gemm_step(g, k, reg, &scr.ln, w.fc1_w, &scr.h, rows, c, sh.mlp));
+    linear_step(g, tc, k, reg, steps, &scr.ln, w.fc1_w, &scr.h, (rows, c, sh.mlp));
     steps.push(g.step(k.bias_add, &[&scr.h, w.fc1_b], &[rows, sh.mlp], rows * sh.mlp));
     steps.push(g.step(k.mlp_act, &[&scr.h, &scr.h2], &[rows * sh.mlp], rows * sh.mlp));
-    steps.push(gemm_step(g, k, reg, &scr.h2, w.fc2_w, &scr.ln, rows, sh.mlp, c));
+    linear_step(g, tc, k, reg, steps, &scr.h2, w.fc2_w, &scr.ln, (rows, sh.mlp, c));
     steps.push(g.step(k.bias_add, &[&scr.ln, w.fc2_b], &[rows, c], rows * c));
     let branch: &DeviceBuffer = if let Some(ls2) = w.ls2 {
         steps.push(g.step(k.scale_chan, &[&scr.ln, ls2, &scr.ctx], &[rows * c, c, 1], rows * c));

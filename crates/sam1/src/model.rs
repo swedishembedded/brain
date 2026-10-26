@@ -71,6 +71,7 @@
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 
+use gpu_core::provider::library::{GemmPrecision, LibraryGemmProvider, Operand};
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::block::{self, CrossBwdIds, CrossIds, LayerNormIds};
 use model::vit::{
@@ -718,6 +719,9 @@ pub struct SamEncoder {
     fwd_done: Cell<bool>,
     /// Tower-level backward scratch -- `None` for an inference build.
     bwd: Option<SamBwd>,
+    /// The tensor-core GEMM the inference build's linears run on, when the device has one. `None` for the
+    /// training build (its gradient checks are stated against the fp32 kernels) and under a pinned reference.
+    tensor_cores: Option<LibraryGemmProvider>,
 }
 
 impl SamEncoder {
@@ -820,6 +824,7 @@ impl SamEncoder {
             d_image: gpu.storage(img.numel() as u64),
             d_embed_nchw: gpu.storage(rows as u64 * c as u64),
         });
+        let tensor_cores = (!train).then(|| LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Auto)).filter(LibraryGemmProvider::tf32_enabled);
         SamEncoder {
             image: gpu.storage_init("sam1_image", &image),
             patch_nlc: gpu.storage(rows as u64 * c as u64),
@@ -837,7 +842,20 @@ impl SamEncoder {
             head,
             hd,
             blocks,
+            tensor_cores,
         }
+    }
+
+    /// Pin the arithmetic of the inference build's linears: [`GemmPrecision::Fp32Reference`] runs the fp32
+    /// kernels (what parity gates are stated against), anything else the tensor cores where the device has them.
+    /// The training build is always the fp32 reference.
+    pub fn set_gemm_precision(&mut self, precision: GemmPrecision) {
+        self.tensor_cores = (self.bwd.is_none()).then(|| LibraryGemmProvider::for_gpu(&self.gpu, precision)).filter(LibraryGemmProvider::tf32_enabled);
+    }
+
+    /// Whether the linears run on tensor cores (TF32 products of the fp32 weights as stored).
+    pub fn uses_tensor_cores(&self) -> bool {
+        self.tensor_cores.is_some()
     }
 
     /// Frozen (forward-only) build: every parameter `Role::Frozen`, no backward
@@ -883,6 +901,19 @@ impl SamEncoder {
     /// composite (`crates/clip`, `crates/deepseekv2`) but never wired in here.
     fn gemm(&self, m: u32, n: u32) -> (usize, gpu_core::Dispatch) {
         block::pick_gemm(m as usize, n as usize, self.ids.matmul, self.ids.matmul_reg3, false)
+    }
+
+    /// `out[rows, n] = x[rows, k] . w[n, k]^T`: a tensor-core TF32 product where the device runs one, else the
+    /// fp32 kernel [`Self::gemm`] picks.
+    fn linear(&self, steps: &mut Vec<Step>, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, (rows, k, n): (u32, u32, u32)) {
+        let whole = |buf| Operand { buf, range: (0, 0) };
+        if let Some(tc) = &self.tensor_cores {
+            if tc.forward_tf32(&self.gpu, steps, &whole(x), &whole(w), &whole(out), rows, n, k) {
+                return;
+            }
+        }
+        let (kernel, threads) = self.gemm(rows, n);
+        steps.push(self.gpu.dispatch(kernel, &[x, w, out], &[rows, k, n], threads));
     }
 
     /// `[rows, C]` NLC -> `[1, C, grid_h, grid_w]` NCHW (and back).
@@ -975,8 +1006,7 @@ impl SamEncoder {
             }
             _ => &b.ln1,
         };
-        let (mk, mt) = self.gemm(ar, 3 * c);
-        steps.push(g.dispatch(mk, &[attn_in, w("attn.qkv.weight"), &b.qkv], &[ar, c, 3 * c], mt));
+        self.linear(&mut steps, attn_in, w("attn.qkv.weight"), &b.qkv, (ar, c, 3 * c));
         steps.push(g.step(self.ids.bias_add, &[&b.qkv, w("attn.qkv.bias")], &[ar, 3 * c], ar * 3 * c));
 
         let rel = b.relpos(&self.ids, false);
@@ -1001,8 +1031,7 @@ impl SamEncoder {
             }
         }
 
-        let (mk, mt) = self.gemm(ar, c);
-        steps.push(g.dispatch(mk, &[&b.ctx, w("attn.proj.weight"), &b.proj], &[ar, c, c], mt));
+        self.linear(&mut steps, &b.ctx, w("attn.proj.weight"), &b.proj, (ar, c, c));
         steps.push(g.step(self.ids.bias_add, &[&b.proj, w("attn.proj.bias")], &[ar, c], ar * c));
         let branch: &DeviceBuffer = match &b.win {
             Some(wi) => {
@@ -1014,12 +1043,10 @@ impl SamEncoder {
         steps.push(g.step(self.ids.add2, &[x, branch, &b.res], &[rows * c], rows * c));
 
         steps.push(block::layernorm_fwd(g, &self.ids.ln, &b.res, w("norm2.weight"), w("norm2.bias"), &b.ln2, c, rows, cfg.eps));
-        let (mk, mt) = self.gemm(rows, m);
-        steps.push(g.dispatch(mk, &[&b.ln2, w("mlp.fc1.weight"), &b.h], &[rows, c, m], mt));
+        self.linear(&mut steps, &b.ln2, w("mlp.fc1.weight"), &b.h, (rows, c, m));
         steps.push(g.step(self.ids.bias_add, &[&b.h, w("mlp.fc1.bias")], &[rows, m], rows * m));
         steps.push(g.step(self.ids.gelu, &[&b.h, &b.h2], &[rows * m], rows * m));
-        let (mk, mt) = self.gemm(rows, c);
-        steps.push(g.dispatch(mk, &[&b.h2, w("mlp.fc2.weight"), &b.mlp_out], &[rows, m, c], mt));
+        self.linear(&mut steps, &b.h2, w("mlp.fc2.weight"), &b.mlp_out, (rows, m, c));
         steps.push(g.step(self.ids.bias_add, &[&b.mlp_out, w("mlp.fc2.bias")], &[rows, c], rows * c));
         steps.push(g.step(self.ids.add2, &[&b.res, &b.mlp_out, &b.out], &[rows * c], rows * c));
         g.submit(&[&b.ln1], &steps);
