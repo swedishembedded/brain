@@ -197,6 +197,21 @@ impl DecoderLayer {
         &self.normed3
     }
 
+    /// Use `other`'s intermediates instead of this layer's own, keeping only this layer's output (`normed3`, the
+    /// next layer's input): for a tower that rebuilds a layer's intermediates before its backward.
+    fn share_internals_from(&mut self, other: &DecoderLayer) {
+        self.self_attn.share_buffers_from(&other.self_attn);
+        self.cross_attn.share_buffers_from(&other.cross_attn);
+        self.sum1 = other.sum1.clone();
+        self.normed1 = other.normed1.clone();
+        self.sum2 = other.sum2.clone();
+        self.normed2 = other.normed2.clone();
+        self.ff_hidden = other.ff_hidden.clone();
+        self.ff_act = other.ff_act.clone();
+        self.ff_out = other.ff_out.clone();
+        self.sum3 = other.sum3.clone();
+    }
+
     /// Same math as [`Self::forward`], with an optional LoRA delta fused
     /// onto every attention projection and the two FFN linears.
     #[allow(clippy::too_many_arguments)]
@@ -360,6 +375,8 @@ pub struct Decoder {
     embedded: DeviceBuffer,
     layers: Vec<DecoderLayer>,
     train: Option<DecoderTrain>,
+    /// The layers share one set of intermediates, rebuilt before each layer's backward ([`Decoder::set_recompute`]).
+    recompute: bool,
 }
 
 impl Decoder {
@@ -380,6 +397,7 @@ impl Decoder {
             embedded: gpu.storage((max_t * d_model) as u64),
             layers: (0..layers).map(|_| DecoderLayer::new(gpu, heads, d_model, ffn_dim, max_t, t_enc)).collect(),
             train: None,
+            recompute: false,
         }
     }
 
@@ -458,6 +476,15 @@ impl Decoder {
         cur
     }
 
+    /// Share one set of layer intermediates across the tower, each layer keeping only its output, and rebuild a
+    /// layer's intermediates (its [`Self::forward_train`] step, bit for bit) before its backward reads them.
+    pub fn set_recompute(&mut self) {
+        if let Some((first, rest)) = self.layers.split_first_mut() {
+            rest.iter_mut().for_each(|l| l.share_internals_from(first));
+        }
+        self.recompute = true;
+    }
+
     /// The buffer [`Self::forward`]/[`Self::forward_train`] last returned -
     /// see `text::encoder::Encoder::last_hidden`'s doc for why this exists.
     pub fn last_hidden(&self) -> &DeviceBuffer {
@@ -481,6 +508,9 @@ impl Decoder {
         for (i, layer) in self.layers.iter().enumerate().rev() {
             let prefix = format!("language_model.model.decoder.layers.{i}");
             let x: &DeviceBuffer = if i == 0 { &self.embedded } else { &self.layers[i - 1].normed3 };
+            if self.recompute {
+                layer.forward_train(gpu, k, ps, &prefix, x, enc, t, t_enc, d, self.ffn_dim, self.eps, lora_ctx.as_ref());
+            }
             d_cur = layer.backward(gpu, k, bwd, ps, &prefix, x, enc, d_cur, &train.d_enc_out, &train.attn_scratch, &train.layer_scratch, t, t_enc, d, self.ffn_dim, self.eps, lora_ctx.as_ref());
         }
 

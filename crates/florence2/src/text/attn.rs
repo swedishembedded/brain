@@ -67,6 +67,8 @@ pub struct BartAttn {
     head_dim: u32,
     d_model: u32,
     causal: bool,
+    /// The query and key/value lengths the buffers are sized for.
+    max_t: (u32, u32),
     q: DeviceBuffer,
     k: DeviceBuffer,
     v: DeviceBuffer,
@@ -90,6 +92,7 @@ impl BartAttn {
             head_dim,
             d_model,
             causal,
+            max_t: (max_tq, max_tkv),
             q: gpu.storage((max_tq * d_model) as u64),
             k: gpu.storage((max_tkv * d_model) as u64),
             v: gpu.storage((max_tkv * d_model) as u64),
@@ -98,6 +101,19 @@ impl BartAttn {
             ctx: gpu.storage((max_tq * d_model) as u64),
             out: gpu.storage((max_tq * d_model) as u64),
         }
+    }
+
+    /// Use `other`'s intermediates (q/k/v, scores, probabilities, context and output) instead of this instance's own,
+    /// for layers that rebuild them from their input before every read. Both must have the same shape.
+    pub fn share_buffers_from(&mut self, other: &BartAttn) {
+        assert_eq!((self.heads, self.d_model, self.causal, self.max_t), (other.heads, other.d_model, other.causal, other.max_t), "florence2: attention instances of different shapes cannot share buffers");
+        self.q = other.q.clone();
+        self.k = other.k.clone();
+        self.v = other.v.clone();
+        self.scores = other.scores.clone();
+        self.probs = other.probs.clone();
+        self.ctx = other.ctx.clone();
+        self.out = other.out.clone();
     }
 
     /// `prefix`: e.g. `"language_model.model.encoder.layers.0.self_attn"`

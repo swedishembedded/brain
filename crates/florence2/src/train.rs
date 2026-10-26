@@ -29,6 +29,7 @@
 use std::collections::HashMap;
 
 use gpu_core::{DeviceBuffer, Gpu};
+use model::saved::SavedPolicy;
 use paramstore::{ParamStore, Role};
 
 use crate::text::attn::BartAttnKernelIds;
@@ -225,6 +226,8 @@ pub struct Florence2Trainer {
     d_logits: DeviceBuffer,
     d_hidden: DeviceBuffer,
     opt: optim::Optim,
+    /// What the backward keeps of the forward ([`Florence2Trainer::set_saved_policy`]).
+    saved: SavedPolicy,
 }
 
 impl Florence2Trainer {
@@ -279,7 +282,27 @@ impl Florence2Trainer {
             decoder_idx,
             targets_idx,
             opt,
+            saved: SavedPolicy::Keep,
         }
+    }
+
+    /// Keep what `policy` names of the forward: every layer's intermediates ([`SavedPolicy::Keep`]), or only each
+    /// layer's output, the encoder's and decoder's layers each sharing one set of intermediates that the backward
+    /// rebuilds before differentiating a layer ([`SavedPolicy::Recompute`]). A BART layer boundary is its f32 output,
+    /// so a narrow saved format is refused by name, as is going back to keeping everything.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        if let SavedPolicy::Quantized(format) = policy {
+            return Err(format!("florence2 recomputes its layers from their f32 inputs; {format:?} saved boundaries do not apply"));
+        }
+        if !self.saved.narrows_to(policy) {
+            return Err(format!("florence2: a trainer keeping {:?} cannot go back to {policy:?}", self.saved));
+        }
+        if policy.recomputes() && !self.saved.recomputes() {
+            self.encoder.set_recompute();
+            self.decoder.set_recompute();
+        }
+        self.saved = policy;
+        Ok(())
     }
 
     /// Upload one training example. `prompt_ids.len() == t_prompt`,
