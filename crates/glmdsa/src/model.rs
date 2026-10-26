@@ -527,6 +527,18 @@ impl Glm {
     }
 
     fn new_impl_on(gpu: Gpu, cfg: GlmConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, train: bool) -> Glm {
+        Glm::build(gpu, cfg, b, t, src, train, None).unwrap_or_else(|e| panic!("glmdsa: {e}"))
+    }
+
+    /// A training build whose per-layer tensors (routed and shared experts included) stream through a device window
+    /// under `resident` from the start (see [`model::streamed`]): they are read from `src` into the window's host
+    /// state and never all reach the device, so a model larger than it trains. The embedding, the head, the final
+    /// norm and the MTP head load as usual.
+    pub fn new_resident_on(gpu: Gpu, cfg: GlmConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, resident: &model::resident_ft::ResidentFtConfig) -> Result<Glm, String> {
+        Glm::build(gpu, cfg, b, t, src, true, Some(resident))
+    }
+
+    fn build(gpu: Gpu, cfg: GlmConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, train: bool, resident: Option<&model::resident_ft::ResidentFtConfig>) -> Result<Glm, String> {
         // `router_gate_sigmoid.wgsl`'s forward router used to hard-cap at
         // `n_experts <= 64` via fixed-size `array<f32,64>` locals -- silently
         // out-of-bounds above that, which `GlmConfig::glm5_2()` (256 routed
@@ -549,6 +561,7 @@ impl Glm {
         // router selection bias (`e_score_correction_bias`), which is never
         // updated by backprop (matches the reference - a load-balance heuristic
         // would drive it), so it stays Frozen and out of the optimiser.
+        let layer_of = |name: &str| model::streamed::blocks_layer(name);
         let roles: Vec<_> = cfg
             .param_list()
             .into_iter()
@@ -558,13 +571,19 @@ impl Glm {
                 // stay out of the optimiser and the gradient-checked set.
                 let role = if !train || n.ends_with("moe.router.bias") || n.contains(".idx.") {
                     Role::Frozen
+                } else if resident.is_some() && layer_of(&n).is_some() {
+                    Role::Streamed
                 } else {
                     Role::Trainable
                 };
                 (n, c, role)
             })
             .collect();
-        let ps = ParamStore::new_with_roles_src(&gpu, roles, src);
+        if resident.is_some() && !train {
+            return Err("only a training build streams its layers".into());
+        }
+        let mut ps = ParamStore::new_with_roles_src(&gpu, roles, src);
+        let streamed = resident.map(|r| StreamedStore::attach(&gpu, &mut ps, r.clone(), src, &layer_of)).transpose()?;
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
 
         let n = (b * t) as u64;
@@ -747,7 +766,7 @@ impl Glm {
             fwd_steps: Vec::new(),
             bwd_steps: Vec::new(),
             saved: SavedPolicy::Keep,
-            streamed: None,
+            streamed,
             backward_pending: Cell::new(false),
             kpass_cache,
             krot_cache,
@@ -757,7 +776,7 @@ impl Glm {
         };
         m.fwd_steps = m.build_forward(m.b, m.t);
         m.bwd_steps = if train { m.build_backward() } else { Vec::new() };
-        m
+        Ok(m)
     }
 
     fn w(&self, name: &str) -> &DeviceBuffer {
@@ -1931,6 +1950,9 @@ impl model::Model for Glm {
 
     fn new(cfg: GlmConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {
         Glm::new(cfg, b, t, init)
+    }
+    fn new_resident(cfg: GlmConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, resident: &model::resident_ft::ResidentFtConfig) -> Result<Self, String> {
+        Glm::new_resident_on(Gpu::new(&optim::with_moment_kernels(PIPELINES)), cfg, b, t, init, resident)
     }
     fn init_weights(cfg: &GlmConfig, seed: u64) -> HashMap<String, Vec<f32>> {
         crate::init::init_weights(cfg, seed)

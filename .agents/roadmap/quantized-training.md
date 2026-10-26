@@ -140,8 +140,7 @@ The per-cell matrix and its tests are `docs/reference/training-capabilities.md`.
   `PassSeg` passes through `streamed::LayeredPass`) and qwen35moe (eager: its passes report the edges) and lfm2 adopt it.
   ouro and huginn refuse a window by name (each layer runs in every step of the recurrence). Open: horizon;
   Construction-time streaming (`Role::Streamed`, `StreamedStore::attach`, `Model::new_resident`,
-  `check_streamed_construction`): gpt2. Open: the other models' constructors (the MoE models first, whose f32
-  weights exceed a card).
+  `check_streamed_construction`): gpt2, deepseek2, glmdsa. Open: the other models' constructors.
 - D Memory: `model::saved` saved-activation policy (keep, recompute, bf16/fp8 boundaries)
   priced in memplan and wired into qwen3 and qwen35 LoRA training (a4a1242bc); flash attention
   backward without `[H,T,T]` probabilities for qwen35moe (fc6df1080) and flux2, including the

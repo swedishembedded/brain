@@ -777,6 +777,19 @@ impl DeepseekV2 {
     }
 
     fn new_impl_on(gpu: Gpu, cfg: DeepseekV2Config, sizes: Sizes, src: &dyn checkpoint::TensorSource, train: bool, shard: Shard) -> DeepseekV2 {
+        DeepseekV2::build(gpu, cfg, sizes, src, train, shard, None).unwrap_or_else(|e| panic!("deepseek2: {e}"))
+    }
+
+    /// A training build whose per-layer tensors (routed and shared experts included) stream through a device window
+    /// under `resident` from the start (see [`model::streamed`]): they are read from `src` into the window's host
+    /// state and never all reach the device, so a model larger than it trains. The embedding, the head and the final
+    /// norm load as usual.
+    pub fn new_resident_on(gpu: Gpu, cfg: DeepseekV2Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource, resident: &model::resident_ft::ResidentFtConfig) -> Result<DeepseekV2, String> {
+        let shard = Shard::whole(cfg.n_layers() as usize);
+        DeepseekV2::build(gpu, cfg, Sizes { b, t, ctx: t, chunk: 1, batched: true }, src, true, shard, Some(resident))
+    }
+
+    fn build(gpu: Gpu, cfg: DeepseekV2Config, sizes: Sizes, src: &dyn checkpoint::TensorSource, train: bool, shard: Shard, resident: Option<&model::resident_ft::ResidentFtConfig>) -> Result<DeepseekV2, String> {
         let Sizes { b, t, ctx, chunk, batched } = sizes;
         assert!(
             !batched || ctx >= t,
@@ -813,6 +826,10 @@ impl DeepseekV2 {
         //    -- is Frozen.
         //  - full training (`train && cfg.lora.is_none()`): every weight
         //    Role::Trainable, unchanged from before this field existed.
+        if resident.is_some() && (!train || !batched || cfg.lora.is_some()) {
+            return Err("only a batched full fine-tune streams its layers (a LoRA build keeps its frozen base and small adapters on the device)".into());
+        }
+        let layer_of = |name: &str| model::streamed::blocks_layer(name).filter(|&l| shard.owns(l as usize));
         let roles: Vec<_> = shard_param_list(&cfg, &shard)
             .into_iter()
             .map(|(n, c)| {
@@ -820,6 +837,8 @@ impl DeepseekV2 {
                     Role::Frozen
                 } else if cfg.lora.is_some() {
                     model::adapter::device::role_of(&n, &cfg.lora.as_ref().expect("checked by the branch").hp())
+                } else if resident.is_some() && layer_of(&n).is_some() {
+                    Role::Streamed
                 } else {
                     Role::Trainable
                 };
@@ -839,6 +858,7 @@ impl DeepseekV2 {
         let t_ps = std::time::Instant::now();
         let n_params = roles.len();
         let mut ps = ParamStore::new_with_roles_src(&gpu, roles, src);
+        let streamed = resident.map(|r| StreamedStore::attach(&gpu, &mut ps, r.clone(), src, &layer_of)).transpose()?;
         if let Some(lora) = cfg.lora.as_ref().filter(|_| train) {
             model::adapter::device::apply_groups(&mut ps, &lora.hp());
         }
@@ -978,7 +998,7 @@ impl DeepseekV2 {
             fwd_steps: Vec::new(),
             bwd_steps: Vec::new(),
             saved: SavedPolicy::Keep,
-            streamed: None,
+            streamed,
             backward_pending: Cell::new(false),
             dec: RefCell::new(None),
             dec_pos: Cell::new(0),
@@ -993,7 +1013,7 @@ impl DeepseekV2 {
         if profile {
             eprintln!("deepseekv2: new_on: tape build (fwd{}): {:.1} ms", if train { "+bwd" } else { "" }, t_tape.elapsed().as_secs_f64() * 1e3);
         }
-        m
+        Ok(m)
     }
 
     // ---- small dispatch helpers ----
@@ -2404,6 +2424,9 @@ impl model::Model for DeepseekV2 {
 
     fn new(cfg: DeepseekV2Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {
         DeepseekV2::new(cfg, b, t, init)
+    }
+    fn new_resident(cfg: DeepseekV2Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, resident: &model::resident_ft::ResidentFtConfig) -> Result<Self, String> {
+        DeepseekV2::new_resident_on(Gpu::new(&pipelines()), cfg, b, t, init, resident)
     }
     fn init_weights(cfg: &DeepseekV2Config, seed: u64) -> HashMap<String, Vec<f32>> {
         crate::init::init_weights(cfg, seed)
