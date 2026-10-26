@@ -30,20 +30,21 @@ use model::serve::{PagedDecoder, PrefillProgress, Request, Scheduler};
 /// weight scale (0.9999 and up).
 const LOGITS_COSINE: f32 = 0.999;
 
-fn cfg() -> DeepseekV2Config {
+/// `heads` attention heads of `head_dim`: d_model is their product, as in the served checkpoints.
+fn shaped(heads: u32, head_dim: u32) -> DeepseekV2Config {
     DeepseekV2Config::from_shape(
         DeepseekOcrConfig {
             vocab: 96,
             n_layers: 3,
-            d_model: 64,
+            d_model: heads * head_dim,
             max_position_embeddings: 128,
             rms_eps: 1e-6,
             tie_embeddings: false,
-            n_heads: 2,
-            n_kv_heads: 2,
-            head_dim: 32,
+            n_heads: heads,
+            n_kv_heads: heads,
+            head_dim,
             rope_theta: 10_000.0,
-            rotary_dim: 32,
+            rotary_dim: head_dim,
             n_dense_layers: 1,
             ffn_hidden: 96,
             n_experts: 8,
@@ -57,10 +58,13 @@ fn cfg() -> DeepseekV2Config {
     )
 }
 
+fn cfg() -> DeepseekV2Config {
+    shaped(2, 32)
+}
+
 /// Random weights with enough spread that the next token depends on the prompt.
-fn weights() -> std::collections::HashMap<String, Vec<f32>> {
-    let c = cfg();
-    let mut w = deepseek2::init_weights(&c, 11);
+fn weights(c: &DeepseekV2Config) -> std::collections::HashMap<String, Vec<f32>> {
+    let mut w = deepseek2::init_weights(c, 11);
     for (name, v) in w.iter_mut() {
         if !name.ends_with("norm.weight") && !name.ends_with("ln1.weight") && !name.ends_with("ln2.weight") {
             v.iter_mut().for_each(|x| *x *= 12.0);
@@ -70,13 +74,17 @@ fn weights() -> std::collections::HashMap<String, Vec<f32>> {
 }
 
 fn engine(precision: Precision) -> Option<Engine> {
+    engine_of(cfg(), precision)
+}
+
+fn engine_of(c: DeepseekV2Config, precision: Precision) -> Option<Engine> {
     let gpu = Gpu::new(&pipelines());
     if !gpu.caps().workgroup_reductions {
         brain_testutil::skip_unavailable("the tensor-core tier needs workgroup reductions");
         return None;
     }
     let ec = EngineConfig { max_seq: 96, pool_tokens: 4 * 96, max_batch: 8, chunk: 16, block_size: 8, kv: KvTier::F32, topk: 8, precision };
-    Some(Engine::new(gpu, cfg(), &weights(), ec).expect("engine"))
+    Some(Engine::new(gpu, c.clone(), &weights(&c), ec).expect("engine"))
 }
 
 fn prompt(seed: u32, len: usize) -> Vec<u32> {
@@ -143,4 +151,30 @@ fn a_batch_in_the_fast_tier_decodes_what_each_decodes_alone() {
     for (p, id) in prompts.iter().zip(ids) {
         assert_eq!(together[&id], alone(p), "a batched request must decode as it does alone (prompt of {})", p.len());
     }
+}
+
+/// The fused decode step is recorded once per row count and replayed: what a recorded engine decodes is
+/// what an engine that builds every step decodes, across a batch that shrinks as its sequences finish.
+#[test]
+fn a_replayed_decode_step_decodes_what_a_rebuilt_one_does() {
+    // Head width 128 is where the fused split-key attention, the recordable step, applies.
+    let make = |tapes: bool| {
+        let mut e = engine_of(shaped(1, 128), Precision::Fast)?;
+        e.set_decode_tapes(tapes);
+        Some(e)
+    };
+    let (Some(recorded), Some(rebuilt)) = (make(true), make(false)) else { return };
+    let run = |engine: Engine| {
+        let mut sched = Scheduler::new(engine, 4);
+        let ids: Vec<u64> = [(1u32, 5usize, 12usize), (2, 12, 6), (3, 30, 3)].iter().map(|&(s, n, new)| sched.submit(Request { prompt: prompt(s, n), max_new: new, stop: Vec::new() })).collect();
+        let out = sched.run();
+        let tokens: Vec<Vec<u32>> = ids.iter().map(|id| out[id].clone()).collect();
+        (tokens, sched.into_decoder().tape_stats())
+    };
+    let ((got, stats), (want, _)) = (run(recorded), run(rebuilt));
+    assert_eq!(got, want, "a replayed step must decode what a rebuilt one decodes");
+    if stats.recordings == 0 {
+        return brain_testutil::skip_unavailable("this device has no fused decode attention, so no step is recorded");
+    }
+    assert!(stats.replays > stats.recordings, "later steps of a shape must replay its recording: {stats:?}");
 }

@@ -13,7 +13,7 @@
 //!
 //! ```text
 //! cargo run --release -p brain-deepseek2ocr --example engine_bench -- \
-//!     --dir <model dir> --batch 8 --steps 32 [--max-seq 8192] [--kv f32|bf16] [--precision auto|reference|fast]
+//!     --dir <model dir> --batch 8 --steps 32 [--max-seq 8192] [--kv f32|bf16] [--precision auto|reference|fast] [--tapes on|off]
 //! ```
 
 use deepseek2::serve::{pipelines, Engine, EngineConfig, Precision};
@@ -30,6 +30,7 @@ fn main() {
     let batch: u32 = arg("--batch", "1").parse().expect("--batch");
     let steps: usize = arg("--steps", "32").parse().expect("--steps");
     let prompt_len: usize = arg("--prompt", "283").parse().expect("--prompt");
+    let tapes = arg("--tapes", "on") != "off";
     let kv = KvTier::parse(&arg("--kv", "f32")).expect("--kv");
     let precision = match arg("--precision", "auto").as_str() {
         "auto" => Precision::Auto,
@@ -49,6 +50,7 @@ fn main() {
     let t0 = Instant::now();
     let mut engine = Engine::new(Gpu::new(&pipelines()), cfg.decoder.clone(), &src, ec).expect("engine");
     eprintln!("engine built in {:.1}s", t0.elapsed().as_secs_f64());
+    engine.set_decode_tapes(tapes);
     let d = cfg.decoder.d_model() as usize;
     let vocab = cfg.decoder.vocab();
 
@@ -77,6 +79,7 @@ fn main() {
         eprintln!("device counters after prefill: {s:?}");
     }
     let mut per_step = Vec::new();
+    let mut digest = 0xcbf29ce484222325u64;
     // Under BRAIN_PROFILE the decode steps run with the device's per-kernel table.
     let profiled = gpu_core::profile::enabled();
     let timed = profiled && engine.gpu().set_kernel_timing(true);
@@ -86,6 +89,7 @@ fn main() {
         let t = Instant::now();
         let mut refs: Vec<&mut BlockTable> = tables.iter_mut().collect();
         last = engine.forward_batched_greedy(&mut refs, &last);
+        last.iter().for_each(|t| digest = (digest ^ *t as u64).wrapping_mul(0x100000001b3));
         per_step.push(t.elapsed().as_secs_f64() * 1e3);
     }
     if profiled {
@@ -99,7 +103,8 @@ fn main() {
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let p50 = sorted.get(sorted.len() / 2).copied().unwrap_or(0.0);
     println!(
-        "{{\"batch\":{batch},\"steps\":{steps},\"prefill_ms_per_seq\":{:.1},\"step_ms_mean\":{mean:.2},\"step_ms_p50\":{p50:.2},\"tok_per_s\":{:.1}}}",
+        "{{\"backend\":\"{}\",\"digest\":\"{digest:016x}\",\"batch\":{batch},\"steps\":{steps},\"prefill_ms_per_seq\":{:.1},\"step_ms_mean\":{mean:.2},\"step_ms_p50\":{p50:.2},\"tok_per_s\":{:.1}}}",
+        gpu_core::backend_name(),
         pre * 1e3 / batch as f64,
         batch as f64 * 1e3 / mean
     );

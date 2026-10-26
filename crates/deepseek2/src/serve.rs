@@ -58,6 +58,7 @@
 
 use checkpoint::TensorSource;
 use gpu_core::select::Dtype;
+use gpu_core::tape::Tape;
 use gpu_core::{BufUsage, DeviceBuffer, Gpu, Step};
 use model::block::{self, ChunkPaging};
 use model::kv_tier::{self, FlashDecodeShape, KvAppend, KvKernels, KvLayer, KvTier};
@@ -279,6 +280,11 @@ struct Scratch {
 
 /// The paged batched serving engine. See the module doc.
 pub struct Engine {
+    /// Recorded decode steps by row count, least recently used first. Declared before `gpu`: a recording
+    /// pins buffers that must be released before the device.
+    tapes: Vec<(u32, Tape)>,
+    decode_tapes: bool,
+    tape_stats: TapeStats,
     gpu: Gpu,
     /// The linears' tier: the vendor library's tensor-core GEMM for a bf16 weight in the fast tier, fp32 in the reference one.
     ops: Ops,
@@ -301,6 +307,17 @@ pub struct Engine {
     slot_kernels: Option<SlotKernels>,
     grouped_ids: GroupedExpertFwdIds,
     moe_ids: MoeIds,
+}
+
+/// Recorded decode steps kept: one per row count up to this many, least recently used dropped first.
+/// A recording pins the activation temporaries of a whole step, so the cache is bounded.
+const MAX_DECODE_TAPES: usize = 64;
+
+/// How often a decode step was replayed from a recording or had to be recorded.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TapeStats {
+    pub replays: u64,
+    pub recordings: u64,
 }
 
 fn u32_buf(g: &Gpu, label: &str, n: u64) -> DeviceBuffer {
@@ -327,6 +344,12 @@ impl Engine {
         let mut ops = Ops::new(g.share_or_new(&pipelines()))?;
         let mut exact = Ops::new(g.share_or_new(&pipelines()))?;
         exact.set_gemm_precision(gpu_core::provider::library::GemmPrecision::Fp32Reference);
+        // A step allocates its activation temporaries (the bf16 operand casts, the uniform slots) and frees
+        // them again; on CUDA a driver free waits for the whole device, so each step would stall on it. Held
+        // freed blocks make a free a bookkeeping entry and the next step reuses them.
+        for handle in [g, ops.gpu(), exact.gpu()] {
+            handle.hold_freed_blocks(true);
+        }
         let int8_shaped = d.is_multiple_of(32) && c.moe_ff().is_multiple_of(32);
         let fast = match ec.precision {
             Precision::Reference => false,
@@ -454,12 +477,24 @@ impl Engine {
         let ro = ReadoutKernels::resolve(g)?;
         let slot_kernels = fast.then(|| SlotKernels::resolve(g)).transpose()?;
         let alloc = BlockAllocator::new(num_blocks, ec.block_size);
-        Ok(Engine { gpu, ops, exact, cfg, ec, fast, ids, tok, norm, head, layers, kvk, kv, alloc, max_bt, sc, ro, slot_kernels, grouped_ids, moe_ids })
+        Ok(Engine { tapes: Vec::new(), decode_tapes: true, tape_stats: TapeStats::default(), gpu, ops, exact, cfg, ec, fast, ids, tok, norm, head, layers, kvk, kv, alloc, max_bt, sc, ro, slot_kernels, grouped_ids, moe_ids })
     }
 
     /// Whether this engine runs the tensor-core tier.
     pub fn is_fast(&self) -> bool {
         self.fast
+    }
+
+    /// Record decode steps and replay them, or build every step: the same answer at a very different host
+    /// cost. Drops what was recorded.
+    pub fn set_decode_tapes(&mut self, on: bool) {
+        self.tapes.clear();
+        self.decode_tapes = on;
+    }
+
+    /// Replays and recordings of decode steps so far.
+    pub fn tape_stats(&self) -> TapeStats {
+        self.tape_stats
     }
 
     /// The device the engine runs on, for its profile and op counters.
@@ -585,13 +620,51 @@ impl Engine {
             host_tables[i * bt..i * bt + t.blocks().len()].copy_from_slice(t.blocks());
         }
         let cap = *seq_lens.iter().max().expect("a non-empty batch");
-        let (g, sc, c) = (&self.gpu, &self.sc, &self.cfg);
+        let (g, sc) = (&self.gpu, &self.sc);
         g.write(&sc.tok_ids, inputs);
         g.write(&sc.positions, &positions);
         g.write(&sc.blocks, &blocks);
         g.write(&sc.offsets, &offsets);
         g.write(&sc.seq_lens, &seq_lens);
         g.write(&sc.tables, &host_tables);
+        let fused = self.fused_decode();
+        // The fused step's every parameter is fixed by the row count: which sequences the rows are, their
+        // positions and block tables are data it reads from the metadata buffers written above. Such a step is
+        // recorded once per row count and replayed, so the host does not rebuild its ~500 dispatches per token.
+        if !(self.decode_tapes && fused) {
+            let s = self.decode_steps(b, cap);
+            self.gpu.submit(&[], &s);
+            return;
+        }
+        let at = match self.tapes.iter().position(|(rows, _)| *rows == b) {
+            Some(at) => at,
+            None => {
+                self.gpu.begin_tape();
+                let s = self.decode_steps(b, cap);
+                self.gpu.submit(&[], &s);
+                let tape = self.gpu.end_tape();
+                if self.tapes.len() >= MAX_DECODE_TAPES {
+                    self.tapes.remove(0);
+                }
+                self.tapes.push((b, tape));
+                self.tape_stats.recordings += 1;
+                self.tapes.len() - 1
+            }
+        };
+        let hit = self.tapes.remove(at);
+        self.gpu.replay_tape(&hit.1);
+        self.tapes.push(hit);
+        self.tape_stats.replays += 1;
+    }
+
+    /// Whether decode attention takes the fused split-key kernel (head_dim 128, fast tier).
+    fn fused_decode(&self) -> bool {
+        self.fast && self.kvk.flash_decode_available(&self.gpu, self.cfg.head_dim(), 1)
+    }
+
+    /// The dispatches of one decode step over `b` rows whose longest sequence is `cap` keys.
+    fn decode_steps(&self, b: u32, cap: u32) -> Vec<Step> {
+        let (g, sc, c) = (&self.gpu, &self.sc, &self.cfg);
         let (d, nh, hd) = (c.d_model(), c.n_heads(), c.head_dim());
         let theta = c.rope_theta();
         let mut s: Vec<Step> = Vec::new();
@@ -604,7 +677,7 @@ impl Engine {
         // thread per (sequence, head) walking every key: its step time grows with the context several times
         // faster than the bytes it reads. The splits are pinned to the configured context, so a row's
         // attention does not depend on which other sequences share its step.
-        let fused = self.fast && self.kvk.flash_decode_available(&self.gpu, hd, 1);
+        let fused = self.fused_decode();
         let flash = FlashDecodeShape { batch: b, n_heads: nh, n_kv_heads: nh, head_dim: hd, block_size: self.ec.block_size, max_bt: self.max_bt, cap: self.ec.max_seq, pin_splits: true };
         let attend = |e: &Engine, s: &mut Vec<Step>, l: usize| {
             let (g, sc) = (&e.gpu, &e.sc);
@@ -621,7 +694,7 @@ impl Engine {
         };
         let out = self.layers(&mut s, b, &rope, &attend);
         self.head(&mut s, &self.sc.res[out], b);
-        self.gpu.submit(&[], &s);
+        s
     }
 
     /// Read the next slice of `prompt` (at most `budget` rows) into `table`; when it is

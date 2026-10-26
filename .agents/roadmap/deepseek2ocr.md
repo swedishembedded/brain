@@ -825,3 +825,26 @@ of 5 after a warm-up, a peer's jobs on the other card):
 
 Open: bf16 tensor-core linears for SAM, CLIP and the DeepSeek-OCR-2 resampler through `model::ops` (the linears are now ~16% of
 SAM's device time; the rest is the elementwise glue: bias add, residual add, layer norm, window gather).
+
+## 2026-10-26 throughput lane: the decode step off the host
+
+Method: `engine_bench` (`BRAIN_BACKEND=cuda BRAIN_DEVICE=gpu1`; without them an example runs on wgpu, which is not what the server
+runs), prefill of B sequences then 64 batched greedy steps, mean ms/step. GH200 gpu1, a peer's jobs at 5 to 15% SM on that card.
+Server numbers: `brain serve --device gpu1`, DeepSeek-OCR v1, 8 omni-mixed pages, max_tokens 1024, one client per row.
+
+- A stack sample of the server's scheduler thread showed it inside `cuMemFree` per step: the engine's activation temporaries (the
+  bf16 operand casts, uniform slots) were freed to the driver every step, and a driver free waits for the whole device. The engine
+  now holds freed blocks (`Gpu::hold_freed_blocks`), as the other serving engines do.
+- Its decode step is rebuilt on the host every token (~500 dispatches, tens of ms of host time against a few ms of device time). A
+  fused-attention step takes nothing from the token (positions, block tables, sequence lengths are buffers it reads), so it is
+  recorded once per row count (`Gpu::begin_tape`) and replayed as one graph launch: 80 us of host time per step.
+- Recorded programs ran the library GEMM's *placeholder* kernel instead of cuBLAS (`graph::Frozen::capture` did not handle a library
+  product; why every tape-recording engine so far declined the library). Fixed, with `a_frozen_program_holding_a_library_product_runs_the_product`.
+
+| decode step, ms (CUDA) | B=1 | B=8 | B=32 |
+|---|---|---|---|
+| before (per-step build, freed blocks to the driver, measured in the server: ~23 ms at 1 row) | 7.0 | 7.6 | 10.2 |
+| recorded and replayed | 2.3 | 3.3 | 4.8 |
+
+The same tokens come out either way (`engine_bench --tapes on|off` digests agree at B=1, 8, 32). Server, one client: 43 -> 187
+tokens/s. The engine decodes 6,700 tokens/s at B=32; the server is bounded by the encoder (next entries).
