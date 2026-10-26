@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use gpu_core::{f, Gpu, Step};
+use model::saved::SavedPolicy;
 use optim::Optim;
 use paramstore::ParamStore;
 pub use model::Shard;
@@ -358,6 +359,7 @@ impl GptConfig {
     }
 }
 
+#[derive(Clone)]
 struct Layer {
     ln1_out: gpu_core::DeviceBuffer,
     qkv: gpu_core::DeviceBuffer,
@@ -418,6 +420,10 @@ pub struct Gpt {
 
     fwd_steps: Vec<Step>,
     bwd_steps: Vec<Step>,
+    /// What the backward keeps of the forward: every layer's activations, or (recompute) the residual between layers,
+    /// every layer sharing one set of activation buffers its replay before its backward refills
+    /// ([`model::Model::set_saved_policy`]).
+    saved: SavedPolicy,
     ce_grad_uni: gpu_core::DeviceBuffer,
 
     // Incremental KV-cache decode state (lazily built on first `step`).
@@ -603,6 +609,7 @@ impl Gpt {
             ln_inv: st(n),
             fwd_steps: Vec::new(),
             bwd_steps: Vec::new(),
+            saved: SavedPolicy::Keep,
             ce_grad_uni,
             dec: RefCell::new(None),
             dec_pos: Cell::new(0),
@@ -669,9 +676,7 @@ impl Gpt {
         let c = &self.cfg;
         let n = b_use * t_use;
         let d = c.d_model;
-        let ff = c.d_ff;
         let v = c.vocab;
-        let hd = c.head_dim();
         let mut s: Vec<Step> = Vec::new();
 
         // Token+positional embedding: only the embed stage; other stages receive
@@ -682,30 +687,7 @@ impl Gpt {
         }
 
         for l in self.shard.start..self.shard.end {
-            let lb = &self.layers[l];
-            let p = |name: &str| format!("blocks.{l}.{name}");
-            // attention
-            s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &self.res[l], self.w(&p("ln1.weight")), self.w(&p("ln1.bias")), &lb.ln1_out, d, n, 1e-5));
-            let (mk, mt) = linear_kernel(n as usize, (3 * d) as usize);
-            s.push(self.gpu.dispatch(mk, &[&lb.ln1_out, self.w(&p("attn.qkv.weight")), &lb.qkv], &[n, d, 3 * d], mt));
-            s.push(self.gpu.step(BIAS_ADD, &[&lb.qkv, self.w(&p("attn.qkv.bias"))], &[n, 3 * d], n * 3 * d));
-            s.push(self.gpu.step(ATTN_SCORES, &[&lb.qkv, &lb.scores], &[b_use, c.n_heads, t_use, hd, 3 * d, 0, d], b_use * c.n_heads * t_use * t_use));
-            s.push(self.gpu.step(ATTN_SOFTMAX, &[&lb.scores, &lb.probs], &[b_use, c.n_heads, t_use], b_use * c.n_heads * t_use));
-            s.push(self.gpu.step(ATTN_APPLY, &[&lb.probs, &lb.qkv, &lb.attn_ctx], &[b_use, c.n_heads, t_use, hd, 3 * d, 2 * d, d], b_use * c.n_heads * t_use * hd));
-            let (mk, mt) = linear_kernel(n as usize, d as usize);
-            s.push(self.gpu.dispatch(mk, &[&lb.attn_ctx, self.w(&p("attn.out.weight")), &self.proj], &[n, d, d], mt));
-            s.push(self.gpu.step(BIAS_ADD, &[&self.proj, self.w(&p("attn.out.bias"))], &[n, d], n * d));
-            s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
-            // MLP: fc -> GELU -> proj
-            s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &lb.xmid, self.w(&p("ln2.weight")), self.w(&p("ln2.bias")), &lb.ln2_out, d, n, 1e-5));
-            let (mk, mt) = linear_kernel(n as usize, ff as usize);
-            s.push(self.gpu.dispatch(mk, &[&lb.ln2_out, self.w(&p("mlp.fc.weight")), &lb.fc], &[n, d, ff], mt));
-            s.push(self.gpu.step(BIAS_ADD, &[&lb.fc, self.w(&p("mlp.fc.bias"))], &[n, ff], n * ff));
-            s.push(self.gpu.step(GELU, &[&lb.fc, &lb.gelu], &[n * ff], n * ff));
-            let (mk, mt) = linear_kernel(n as usize, d as usize);
-            s.push(self.gpu.dispatch(mk, &[&lb.gelu, self.w(&p("mlp.proj.weight")), &self.ffn_out], &[n, ff, d], mt));
-            s.push(self.gpu.step(BIAS_ADD, &[&self.ffn_out, self.w(&p("mlp.proj.bias"))], &[n, d], n * d));
-            s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.ffn_out, &self.res[l + 1]], &[n * d], n * d));
+            self.layer_forward(l, b_use, t_use, &mut s);
         }
 
         // Head epilogue (final norm + lm_head + CE): only the head stage.
@@ -721,6 +703,39 @@ impl Gpt {
         }
         s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, v, IGNORE], n));
         s
+    }
+
+    /// Layer `l`'s forward over `b_use` sequences of `t_use` tokens, from `res[l]` into `res[l + 1]`.
+    fn layer_forward(&self, l: usize, b_use: u32, t_use: u32, s: &mut Vec<Step>) {
+        let c = &self.cfg;
+        let n = b_use * t_use;
+        let d = c.d_model;
+        let ff = c.d_ff;
+        let hd = c.head_dim();
+        let lb = &self.layers[l];
+        let p = |name: &str| format!("blocks.{l}.{name}");
+        // attention
+        s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &self.res[l], self.w(&p("ln1.weight")), self.w(&p("ln1.bias")), &lb.ln1_out, d, n, 1e-5));
+        let (mk, mt) = linear_kernel(n as usize, (3 * d) as usize);
+        s.push(self.gpu.dispatch(mk, &[&lb.ln1_out, self.w(&p("attn.qkv.weight")), &lb.qkv], &[n, d, 3 * d], mt));
+        s.push(self.gpu.step(BIAS_ADD, &[&lb.qkv, self.w(&p("attn.qkv.bias"))], &[n, 3 * d], n * 3 * d));
+        s.push(self.gpu.step(ATTN_SCORES, &[&lb.qkv, &lb.scores], &[b_use, c.n_heads, t_use, hd, 3 * d, 0, d], b_use * c.n_heads * t_use * t_use));
+        s.push(self.gpu.step(ATTN_SOFTMAX, &[&lb.scores, &lb.probs], &[b_use, c.n_heads, t_use], b_use * c.n_heads * t_use));
+        s.push(self.gpu.step(ATTN_APPLY, &[&lb.probs, &lb.qkv, &lb.attn_ctx], &[b_use, c.n_heads, t_use, hd, 3 * d, 2 * d, d], b_use * c.n_heads * t_use * hd));
+        let (mk, mt) = linear_kernel(n as usize, d as usize);
+        s.push(self.gpu.dispatch(mk, &[&lb.attn_ctx, self.w(&p("attn.out.weight")), &self.proj], &[n, d, d], mt));
+        s.push(self.gpu.step(BIAS_ADD, &[&self.proj, self.w(&p("attn.out.bias"))], &[n, d], n * d));
+        s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
+        // MLP: fc -> GELU -> proj
+        s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &lb.xmid, self.w(&p("ln2.weight")), self.w(&p("ln2.bias")), &lb.ln2_out, d, n, 1e-5));
+        let (mk, mt) = linear_kernel(n as usize, ff as usize);
+        s.push(self.gpu.dispatch(mk, &[&lb.ln2_out, self.w(&p("mlp.fc.weight")), &lb.fc], &[n, d, ff], mt));
+        s.push(self.gpu.step(BIAS_ADD, &[&lb.fc, self.w(&p("mlp.fc.bias"))], &[n, ff], n * ff));
+        s.push(self.gpu.step(GELU, &[&lb.fc, &lb.gelu], &[n * ff], n * ff));
+        let (mk, mt) = linear_kernel(n as usize, d as usize);
+        s.push(self.gpu.dispatch(mk, &[&lb.gelu, self.w(&p("mlp.proj.weight")), &self.ffn_out], &[n, ff, d], mt));
+        s.push(self.gpu.step(BIAS_ADD, &[&self.ffn_out, self.w(&p("mlp.proj.bias"))], &[n, d], n * d));
+        s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.ffn_out, &self.res[l + 1]], &[n * d], n * d));
     }
 
     pub fn forward_submit(&self) {
@@ -823,6 +838,10 @@ impl Gpt {
         }
 
         for l in (self.shard.start..self.shard.end).rev() {
+            if self.saved.recomputes() {
+                // Every layer shares one set of activation buffers: rebuild this layer's from `res[l]` first.
+                self.layer_forward(l, self.b, self.t, &mut s);
+            }
             let lb = &self.layers[l];
             // MLP backward (input grad = dres[l+1])
             s.push(self.gpu.step(BIAS_GRAD, &[&self.dres[l + 1], g(&p(l, "mlp.proj.bias"))], &[n, d], d));
@@ -917,6 +936,30 @@ impl Gpt {
             self.fwd_steps = self.forward_steps(self.b, self.t);
         }
         self.logit_scale.as_ref().expect("created above").set(&self.gpu, scale);
+    }
+
+    /// Keep what `policy` names of the forward: every layer's activations ([`SavedPolicy::Keep`]), or only the residual
+    /// between layers ([`SavedPolicy::Recompute`]), where every layer shares one set of activation buffers (the others
+    /// are released) and the backward replays each layer from its residual before its own backward. Residuals held
+    /// below f32 are refused by name.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        if let SavedPolicy::Quantized(format) = policy {
+            return Err(format!("gpt2 keeps its layer residuals in f32; {format:?} residuals are not supported"));
+        }
+        if policy == self.saved {
+            return Ok(());
+        }
+        if !policy.recomputes() {
+            return Err("gpt2: a build that recomputes cannot go back to keeping every layer's activations".into());
+        }
+        // The first owned layer's buffers serve every owned layer (a stage without layers has none to share).
+        if let Some(shared) = self.layers[self.shard.start..self.shard.end].first().cloned() {
+            self.layers[self.shard.start..self.shard.end].fill(shared);
+        }
+        self.saved = policy;
+        self.fwd_steps = self.forward_steps(self.b, self.t);
+        self.bwd_steps = self.build_backward_steps();
+        Ok(())
     }
 
     pub fn set_loss_denominator(&self, tokens: f32) {
@@ -1236,6 +1279,9 @@ impl model::Model for Gpt {
 
     fn optimizer_parts(&self) -> Option<model::OptimizerParts<'_>> {
         Some(model::OptimizerParts { gpu: &self.gpu, store: &self.ps, optim: &self.opt })
+    }
+    fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        Gpt::set_saved_policy(self, policy)
     }
 
     type Config = GptConfig;
