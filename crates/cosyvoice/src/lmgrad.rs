@@ -74,6 +74,7 @@
 //! identically, by construction - under both `BRAIN_DEVICE` settings rather
 //! than skipped for one of them.
 
+use model::saved::{BlockStack, SavedPolicy};
 use std::ops::{Add, AddAssign, Div, Mul, Neg, Sub};
 
 /// Scalar type the reference math is generic over - see the module doc.
@@ -707,7 +708,7 @@ pub fn layer_backward<T: Fp>(d: &LmDims, w: &LayerW<T>, c: &LayerCache<T>, dout:
 pub struct LmCache<T> {
     kinds: Vec<TokKind>,
     ids: Vec<usize>,
-    layer_caches: Vec<LayerCache<T>>,
+    layer_caches: BlockStack<Vec<T>, LayerCache<T>>,
     pre_final: Vec<T>,
     hidden_final: Vec<T>,
     inv_f: Vec<T>,
@@ -715,7 +716,22 @@ pub struct LmCache<T> {
     pred_start: usize,
 }
 
+impl<T> LmCache<T> {
+    /// Layer caches this cache holds: one per layer when keeping, none when recomputing.
+    pub fn held_layer_caches(&self) -> usize {
+        self.layer_caches.held_caches()
+    }
+}
+
+/// [`forward_saved`] keeping every layer's cache.
 pub fn forward<T: Fp>(d: &LmDims, w: &LmWeights<T>, ex: &Example) -> LmCache<T> {
+    forward_saved(d, w, ex, SavedPolicy::Keep).expect("keeping every layer is always available")
+}
+
+/// The forward over `ex`, keeping what `saved` names for [`backward`]: every layer's cache ([`SavedPolicy::Keep`])
+/// or only every layer's input, each layer rebuilt as the backward reaches it ([`SavedPolicy::Recompute`],
+/// `model::saved::BlockStack`). A narrow saved format is refused.
+pub fn forward_saved<T: Fp>(d: &LmDims, w: &LmWeights<T>, ex: &Example, saved: SavedPolicy) -> Result<LmCache<T>, String> {
     assert!(!ex.speech_tokens.is_empty(), "an example needs at least one speech token to predict");
     let n_text = ex.text_ids.len();
     let n_speech_in = ex.speech_tokens.len() - 1;
@@ -741,10 +757,10 @@ pub fn forward<T: Fp>(d: &LmDims, w: &LmWeights<T>, ex: &Example) -> LmCache<T> 
         let row = embed_row(d, w, kinds[t], ids[t]);
         x[t * dm..(t + 1) * dm].copy_from_slice(row);
     }
-    let mut layer_caches = Vec::with_capacity(d.n_layers);
+    let mut layer_caches = BlockStack::new("cosyvoice", saved)?;
     for l in 0..d.n_layers {
         let (out, c) = layer_forward(d, &w.layers[l], &x, n);
-        layer_caches.push(c);
+        layer_caches.push(&x, c);
         x = out;
     }
     let pre_final = x;
@@ -766,7 +782,7 @@ pub fn forward<T: Fp>(d: &LmDims, w: &LmWeights<T>, ex: &Example) -> LmCache<T> 
         let lo = linear_fwd(&w.decoder_w, bias, hrow, v, dm);
         logits[i * v..(i + 1) * v].copy_from_slice(&lo);
     }
-    LmCache { kinds, ids, layer_caches, pre_final, hidden_final, inv_f, logits, pred_start }
+    Ok(LmCache { kinds, ids, layer_caches, pre_final, hidden_final, inv_f, logits, pred_start })
 }
 
 /// Mean cross-entropy over the predicted positions. Returns `(loss, dlogits)`.
@@ -823,9 +839,7 @@ pub fn backward<T: Fp>(d: &LmDims, w: &LmWeights<T>, cache: &LmCache<T>, dlogits
         acc(&mut g.norm_f, &dgamma);
         d_x[t * dm..(t + 1) * dm].copy_from_slice(&dx);
     }
-    for l in (0..d.n_layers).rev() {
-        d_x = layer_backward(d, &w.layers[l], &cache.layer_caches[l], &d_x, n, &mut g.layers[l]);
-    }
+    cache.layer_caches.rev_for_each(|l, x| layer_forward(d, &w.layers[l], x, n).1, |l, c| d_x = layer_backward(d, &w.layers[l], c, &d_x, n, &mut g.layers[l]));
     for t in 0..n {
         let dst = embed_row_grad_mut(d, &mut g, cache.kinds[t], cache.ids[t]);
         acc(dst, &d_x[t * dm..(t + 1) * dm]);
@@ -836,10 +850,15 @@ pub fn backward<T: Fp>(d: &LmDims, w: &LmWeights<T>, cache: &LmCache<T>, dlogits
 /// Forward + loss + backward on one example - the unit `gradcheck` and the
 /// host trainer both drive.
 pub fn grads<T: Fp>(d: &LmDims, w: &LmWeights<T>, ex: &Example) -> (f64, LmGrads<T>) {
-    let cache = forward(d, w, ex);
+    grads_saved(d, w, ex, SavedPolicy::Keep).expect("keeping every layer is always available")
+}
+
+/// [`grads`] keeping what `saved` names of the forward for the backward (see [`forward_saved`]).
+pub fn grads_saved<T: Fp>(d: &LmDims, w: &LmWeights<T>, ex: &Example, saved: SavedPolicy) -> Result<(f64, LmGrads<T>), String> {
+    let cache = forward_saved(d, w, ex, saved)?;
     let (l, dlogits) = loss(d, &cache, &ex.speech_tokens);
     let g = backward(d, w, &cache, &dlogits);
-    (l, g)
+    Ok((l, g))
 }
 
 /// Every trainable tensor, named, in a fixed order - the FD loop's and the
