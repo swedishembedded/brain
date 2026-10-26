@@ -46,6 +46,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use gpu_core::{Gpu, Step};
+use model::saved::SavedPolicy;
 use optim::Optim;
 use paramstore::ParamStore;
 
@@ -187,6 +188,9 @@ pub struct Autoencoder {
     d_enc_pre: gpu_core::DeviceBuffer, // grad wrt enc_pre [B, hidden]
     d_x: gpu_core::DeviceBuffer,   // grad wrt x (unused downstream) [B, in_dim]
 
+    /// What the backward keeps of the forward ([`model::Model::set_saved_policy`]).
+    saved: SavedPolicy,
+
     fwd_steps: Vec<Step>,
     bwd_steps: Vec<Step>,
 }
@@ -242,6 +246,7 @@ impl Autoencoder {
             d_h: st(bh),
             d_enc_pre: st(bh),
             d_x: st(bi),
+            saved: SavedPolicy::Keep,
             fwd_steps: Vec::new(),
             bwd_steps: Vec::new(),
             gpu,
@@ -347,12 +352,38 @@ impl Autoencoder {
         s.push(self.gpu.step(MATMUL_DW, &[&self.d_z, &self.h, g("bottleneck.weight")], &[b, h, z], z * h));
         s.push(self.gpu.step(MATMUL_DX, &[&self.d_z, self.w("bottleneck.weight"), &self.d_h], &[b, h, z, 0], bh));
         // h = GELU(enc_pre)  ->  d_enc_pre
+        if self.saved.recomputes() {
+            // The decoder's pre-activation overwrote the shared buffer: rebuild the encoder's from `x`.
+            s.push(self.gpu.step(MATMUL, &[&self.x, self.w("enc.weight"), &self.enc_pre], &[b, i, h], bh));
+            s.push(self.gpu.step(BIAS_ADD, &[&self.enc_pre, self.w("enc.bias")], &[b, h], bh));
+        }
         s.push(self.gpu.step(GELU_BWD, &[&self.enc_pre, &self.d_h, &self.d_enc_pre], &[bh], bh));
         // enc_pre = x @ We^T + be  ->  d_x (unused), dWe, dbe
         s.push(self.gpu.step(BIAS_GRAD, &[&self.d_enc_pre, g("enc.bias")], &[b, h], h));
         s.push(self.gpu.step(MATMUL_DW, &[&self.d_enc_pre, &self.x, g("enc.weight")], &[b, i, h], h * i));
         s.push(self.gpu.step(MATMUL_DX, &[&self.d_enc_pre, self.w("enc.weight"), &self.d_x], &[b, i, h, 0], bi));
         s
+    }
+
+    /// Keep every pre-activation ([`SavedPolicy::Keep`]) or let the encoder and decoder share one pre-activation
+    /// buffer ([`SavedPolicy::Recompute`]), the backward rebuilding the encoder's from the input before it is read.
+    /// The other buffers are layer outputs the next layer's backward reads, so none is narrower to hold. A build
+    /// only narrows what it keeps; a narrow format and going back to keeping everything are refused by name.
+    fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        if !self.saved.narrows_to(policy) {
+            return Err(format!("toyautoencoder: a build keeping {:?} cannot go back to {policy:?}", self.saved));
+        }
+        if matches!(policy, SavedPolicy::Quantized(_)) {
+            return Err(format!("toyautoencoder keeps no layer-boundary residual stream to narrow; {policy:?} is not available"));
+        }
+        if policy == self.saved {
+            return Ok(());
+        }
+        self.dec_pre = self.enc_pre.clone();
+        self.saved = policy;
+        self.fwd_steps = self.forward_steps();
+        self.bwd_steps = self.build_backward_steps();
+        Ok(())
     }
 
     pub fn zero_grads(&self) {
@@ -455,6 +486,9 @@ impl model::Model for Autoencoder {
 
     fn forward(&self) -> f32 {
         Autoencoder::forward(self)
+    }
+    fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        Autoencoder::set_saved_policy(self, policy)
     }
     fn backward(&self) {
         Autoencoder::backward(self)
