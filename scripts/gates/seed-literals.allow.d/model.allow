@@ -2,3 +2,5 @@ crates/model/src/lora.rs	LoraCfg::loaded:seed=0	default	frozen: the factors are 
 crates/model/src/serve.rs	Scheduler::submit:submit_sampled#2=0	positional	greedy: SampleParams::greedy never consults the RNG
 crates/model/src/serve/conformance.rs	adapters_never_share_kv_with_the_base:submit_for_adapter#3=0	positional	greedy: SampleParams::greedy never consults the RNG
 crates/model/src/serve/conformance.rs	held_behind_check:submit_for_adapter#3=0	positional	greedy: SampleParams::greedy never consults the RNG
+crates/model/src/serve/conformance.rs	alone_embedded:submit_embedded#3=0	positional	greedy: SampleParams::greedy never consults the RNG
+crates/model/src/serve/conformance.rs	embedded_prompts_batch_and_never_share_a_prefix:submit_embedded#3=0	positional	greedy: SampleParams::greedy never consults the RNG

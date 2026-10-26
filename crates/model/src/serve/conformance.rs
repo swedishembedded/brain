@@ -30,6 +30,12 @@
 //! * [`adapters_never_share_kv_with_the_base`]: K/V computed under an adapter
 //!   is never served to the base or to another adapter, in either direction.
 //!
+//! * [`embedded_prompts_batch_and_never_share_a_prefix`]: a decoder that takes
+//!   embedding rows in a prompt ([`PagedDecoder::embed_width`]) decodes
+//!   batched embedded requests as it does each alone, and never serves a cached
+//!   prefix across differing rows (nor rows' blocks to a token-only prompt with
+//!   the same token ids); a decoder that takes tokens only refuses an embedded
+//!   request cleanly and keeps serving.
 //! * [`speculation_equals_plain_greedy`]: a decoder that declares speculation
 //!   ([`PagedDecoder::spec_max_draft`] above 0) decodes, under a drafter that
 //!   is right, half right and always wrong, exactly the tokens plain greedy
@@ -50,7 +56,7 @@
 //! that lives in the process layer (`brain_shutdown::bound_drain`), not the
 //! decoder, and has its own test there.
 
-use super::{AdapterId, DraftQuery, Drafter, PagedDecoder, Request, SampleParams, Scheduler, SpecPolicy};
+use super::{AdapterId, DraftQuery, Drafter, PagedDecoder, PromptEmbeds, RejectReason, Request, SampleParams, Scheduler, SpecPolicy};
 
 /// How a decoder is brought to the suite.
 pub struct Conformance<D: PagedDecoder> {
@@ -107,6 +113,7 @@ pub fn run_all<D: PagedDecoder>(c: &Conformance<D>) {
     if c.load_adapter.is_some() {
         adapters_never_share_kv_with_the_base(c);
     }
+    embedded_prompts_batch_and_never_share_a_prefix(c);
     speculation_equals_plain_greedy(c);
 }
 
@@ -278,4 +285,59 @@ fn plain_greedy<D: PagedDecoder>(c: &Conformance<D>, prompt: &[u32], max_new: us
     sched.set_speculation(SpecPolicy { enabled: false, ..SpecPolicy::default() });
     let id = sched.submit(request(prompt.to_vec(), max_new));
     complete(&mut sched, id)
+}
+
+/// Rows for the embedded properties: `n` rows of `width`, deterministic per
+/// `seed`, large enough to move any decoder's output.
+fn rows(width: usize, n: usize, seed: usize) -> Vec<f32> {
+    (0..n * width).map(|i| (((i * 37 + seed * 101 + (i / width) * 13) % 29) as f32 / 29.0 - 0.5) * 6.0).collect()
+}
+
+/// Greedy output of one embedded request alone on a fresh decoder.
+fn alone_embedded<D: PagedDecoder>(c: &Conformance<D>, prompt: &[u32], e: &PromptEmbeds, max_new: usize) -> Vec<u32> {
+    let mut sched = Scheduler::new((c.make)(), 4);
+    let id = sched.submit_embedded(request(prompt.to_vec(), max_new), e.clone(), SampleParams::greedy(), 0);
+    complete(&mut sched, id)
+}
+
+pub fn embedded_prompts_batch_and_never_share_a_prefix<D: PagedDecoder>(c: &Conformance<D>) {
+    let mut sched = Scheduler::new((c.make)(), 4);
+    let vocab = sched.decoder_mut().vocab();
+    let Some(width) = sched.decoder_mut().embed_width() else {
+        // Tokens only: an embedded request is refused cleanly and a plain one still runs.
+        let e = PromptEmbeds::run(4, 1, rows(4, 3, 1)).expect("rows");
+        let refused = sched.submit_embedded(request(tokens(vocab, 1, 12), 3), e, SampleParams::greedy(), 0);
+        let plain = sched.submit(request(tokens(vocab, 2, 8), 3));
+        let report = sched.step_report();
+        assert!(matches!(report.rejected.as_slice(), [(id, RejectReason::InvalidEmbeds { .. })] if *id == refused), "a decoder without rows must refuse an embedded request: {:?}", report.rejected);
+        let mut done: std::collections::HashMap<u64, Vec<u32>> = report.completed.into_iter().collect();
+        done.extend(sched.run());
+        assert_eq!(done[&plain].len(), 3, "the token-only request must be unaffected by the refusal");
+        return;
+    };
+    let len = c.prefix_prompt_tokens.max(24);
+    let prompt = tokens(vocab, 7, len);
+    let run = |seed: usize| PromptEmbeds::run(width, 4, rows(width, 12, seed)).expect("rows");
+    let (ea, eb) = (run(1), run(2));
+    let (out_a, out_b) = (alone_embedded(c, &prompt, &ea, 6), alone_embedded(c, &prompt, &eb, 6));
+    let out_tokens = alone(c, &prompt, 6);
+    assert!(out_a != out_b && out_a != out_tokens, "the rows must decide the output (decoder ignores them?): {out_a:?} {out_b:?} {out_tokens:?}");
+
+    // Batched together, each decodes as it does alone.
+    let mut batch = Scheduler::new((c.make)(), 4);
+    let ids = [ea.clone(), eb.clone()].map(|e| batch.submit_embedded(request(prompt.clone(), 6), e, SampleParams::greedy(), 0));
+    let done = batch.run();
+    assert_eq!(done[&ids[0]], out_a, "a batched embedded request must decode exactly as it does alone");
+    assert_eq!(done[&ids[1]], out_b, "a batched embedded request must decode exactly as it does alone");
+
+    // One scheduler, one after another: the cache of the first never answers the second.
+    let mut seq = Scheduler::new((c.make)(), 4);
+    let first = seq.submit_embedded(request(prompt.clone(), 6), ea.clone(), SampleParams::greedy(), 0);
+    assert_eq!(complete(&mut seq, first), out_a);
+    let second = seq.submit_embedded(request(prompt.clone(), 6), eb.clone(), SampleParams::greedy(), 0);
+    assert_eq!(complete(&mut seq, second), out_b, "a prompt with the same tokens and different rows adopted another prompt's cached K/V");
+    let plain = seq.submit(request(prompt.clone(), 6));
+    assert_eq!(complete(&mut seq, plain), out_tokens, "a token-only prompt adopted K/V computed from embedding rows");
+    let again = seq.submit_embedded(request(prompt, 6), ea, SampleParams::greedy(), 0);
+    assert_eq!(complete(&mut seq, again), out_a, "the same rows must still decode the same after other prompts ran");
 }

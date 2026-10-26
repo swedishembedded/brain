@@ -70,6 +70,87 @@ impl DryParams {
     }
 }
 
+/// The most tokens a [`NoRepeatNgram`] exempts from its ban.
+pub const MAX_NGRAM_ALLOW: usize = 4;
+
+/// The no-repeat n-gram filter (vLLM's `NoRepeatNGramLogitsProcessor`, which
+/// DeepSeek-OCR's reference recipe wires in): a token that would complete an
+/// `ngram_size`-gram already present in the last `window` generated tokens is
+/// banned, except the `allow`ed tokens (table-cell tags legitimately repeat).
+/// It looks at the GENERATED tokens only, never the prompt. `ngram_size == 0`
+/// is off.
+///
+/// Unlike the penalties it never needs the decoder's whole candidate list:
+/// the scheduler knows the banned set from the history BEFORE the step, so it
+/// asks for exactly `1 + banned` candidates (a plain greedy step when none is
+/// banned, which is almost always) and takes the best one that is not banned.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NoRepeatNgram {
+    pub ngram_size: u32,
+    pub window: u32,
+    allow: [u32; MAX_NGRAM_ALLOW],
+    n_allow: u8,
+}
+
+impl Default for NoRepeatNgram {
+    fn default() -> NoRepeatNgram {
+        NoRepeatNgram::off()
+    }
+}
+
+impl NoRepeatNgram {
+    pub const fn off() -> NoRepeatNgram {
+        NoRepeatNgram { ngram_size: 0, window: 0, allow: [0; MAX_NGRAM_ALLOW], n_allow: 0 }
+    }
+
+    /// At most [`MAX_NGRAM_ALLOW`] allowed tokens are kept.
+    pub fn new(ngram_size: u32, window: u32, allow: &[u32]) -> NoRepeatNgram {
+        let mut set = [0u32; MAX_NGRAM_ALLOW];
+        let n = allow.len().min(MAX_NGRAM_ALLOW);
+        set[..n].copy_from_slice(&allow[..n]);
+        NoRepeatNgram { ngram_size, window, allow: set, n_allow: n as u8 }
+    }
+
+    pub fn active(&self) -> bool {
+        self.ngram_size > 0
+    }
+
+    pub fn allowed(&self) -> &[u32] {
+        &self.allow[..self.n_allow as usize]
+    }
+
+    /// The tokens that may not follow `generated` (see [`ngram_followers`]),
+    /// less the allowed ones.
+    pub fn banned(&self, generated: &[u32]) -> Vec<u32> {
+        let mut out = ngram_followers(generated, self.ngram_size as usize, self.window as usize);
+        out.retain(|t| !self.allowed().contains(t));
+        out
+    }
+}
+
+/// The tokens that followed an earlier occurrence, inside the last `window`
+/// of `generated`, of its trailing `ngram_size - 1` tokens: the tokens that
+/// would complete an n-gram already seen. Distinct, in order of appearance;
+/// empty until `ngram_size` tokens exist. The one definition both the
+/// scheduler's [`NoRepeatNgram`] and the logits form
+/// ([`super::apply_no_repeat_ngram`]) use.
+pub fn ngram_followers(generated: &[u32], ngram_size: usize, window: usize) -> Vec<u32> {
+    if ngram_size == 0 || generated.len() < ngram_size {
+        return Vec::new();
+    }
+    let prefix = &generated[generated.len() - (ngram_size - 1)..];
+    let start = generated.len().saturating_sub(window);
+    let end = generated.len() - ngram_size + 1;
+    let mut out: Vec<u32> = Vec::new();
+    for i in start..end {
+        let next = generated[i + ngram_size - 1];
+        if generated[i..i + ngram_size - 1] == *prefix && !out.contains(&next) {
+            out.push(next);
+        }
+    }
+    out
+}
+
 /// A thinking budget: once `max_tokens` tokens have been generated inside an
 /// open think block the scheduler forces an optional lead-in (a last thought
 /// that tells the model to answer from what it has, still inside the block)
@@ -221,6 +302,14 @@ impl SampleContext<'_> {
 pub fn apply_processors(candidates: &mut [(u32, f32)], params: &SampleParams, ctx: &SampleContext<'_>) {
     if !params.has_processors() || ctx.context.is_empty() {
         return;
+    }
+    if params.no_repeat.active() {
+        let banned = params.no_repeat.banned(ctx.generated());
+        for (t, l) in candidates.iter_mut() {
+            if banned.contains(t) {
+                *l = f32::NEG_INFINITY;
+            }
+        }
     }
     if params.repetition_penalty != 1.0 && params.repetition_penalty > 0.0 {
         let seen: std::collections::HashSet<u32> = ctx.context.iter().copied().collect();

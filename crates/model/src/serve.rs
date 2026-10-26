@@ -22,11 +22,13 @@ use std::collections::{HashMap, VecDeque};
 
 use crate::paged::{BlockAllocator, BlockTable, KvNamespace};
 
+mod embeds;
 mod sampler;
 mod speculate;
 pub mod rows;
 pub mod conformance;
-pub use sampler::{apply_processors, DryParams, SampleContext, ThinkingBudget, MAX_DRY_BREAKERS, MAX_THINK_CLOSE, MAX_THINK_LEAD};
+pub use embeds::PromptEmbeds;
+pub use sampler::{apply_processors, ngram_followers, DryParams, NoRepeatNgram, SampleContext, ThinkingBudget, MAX_DRY_BREAKERS, MAX_NGRAM_ALLOW, MAX_THINK_CLOSE, MAX_THINK_LEAD};
 pub use speculate::{verify_proposals, DraftQuery, Drafter, NgramDrafter, SpecPolicy, SpecStats, Verdict};
 
 /// The seam a model's paged serving engine implements. Every method mirrors
@@ -190,6 +192,32 @@ pub trait PagedDecoder {
         PrefillProgress::Done(self.prefill(table, prompt))
     }
 
+    // ---- prompts with embedding rows (optional) ----
+    //
+    // A multimodal prompt carries rows from an encoder at some positions
+    // ([`PromptEmbeds`]). A decoder that reads them says so with `embed_width`;
+    // the scheduler then admits such requests and hands every prefill slice
+    // (`prefill_chunk_embeds`, or the `embeds` of a [`PrefillJob`]) the rows. A
+    // decoder that does not is never asked: the scheduler refuses the request
+    // at admission. A decoder with prefix reuse must never serve a prefix across
+    // differing rows: key reuse by [`PromptEmbeds::digest`] or keep embedding
+    // spans out of it (the conformance suite checks this).
+
+    /// Floats per embedding row a prompt may carry, or `None` (the default) if
+    /// this decoder takes tokens only.
+    fn embed_width(&self) -> Option<usize> {
+        None
+    }
+
+    /// [`Self::prefill_chunk`] for a prompt some of whose positions are
+    /// embedding rows: the row at position `p` is `embeds.row_at(p)`, and the
+    /// prompt's token there is a placeholder the decoder does not look up. Only
+    /// called when [`Self::embed_width`] is `Some`.
+    fn prefill_chunk_embeds(&mut self, table: &mut BlockTable, prompt: &[u32], embeds: &PromptEmbeds, budget: usize) -> PrefillProgress {
+        let _ = (table, prompt, embeds, budget);
+        unreachable!("a decoder that declares embed_width must implement prefill_chunk_embeds")
+    }
+
     // ---- prefill of several sequences in one forward (optional) ----
     //
     // A decoder whose forward is cheaper per row the more rows it carries (every
@@ -213,7 +241,12 @@ pub trait PagedDecoder {
     /// job; a decoder that overrides [`Self::prefill_batch_tokens`] overrides this
     /// to run the jobs' rows as one forward.
     fn prefill_chunks(&mut self, jobs: &mut [PrefillJob<'_>]) -> Vec<PrefillProgress> {
-        jobs.iter_mut().map(|j| self.prefill_chunk(j.table, j.prompt, j.budget)).collect()
+        jobs.iter_mut()
+            .map(|j| match j.embeds {
+                Some(e) => self.prefill_chunk_embeds(j.table, j.prompt, e, j.budget),
+                None => self.prefill_chunk(j.table, j.prompt, j.budget),
+            })
+            .collect()
     }
 
     // ---- prefill in the background (optional) ----
@@ -424,6 +457,8 @@ pub struct PrefillJob<'a> {
     pub prompt: &'a [u32],
     /// At most this many more prompt tokens (>= 1).
     pub budget: usize,
+    /// The embedding rows of the prompt, when it carries any.
+    pub embeds: Option<&'a PromptEmbeds>,
 }
 
 /// What one [`PagedDecoder::prefill_chunk`] call achieved.
@@ -499,6 +534,8 @@ pub struct SampleParams {
     pub dry: DryParams,
     /// Force the closing tag after this many tokens inside a think block.
     pub thinking: Option<ThinkingBudget>,
+    /// Ban tokens that would repeat an n-gram of the generated text.
+    pub no_repeat: NoRepeatNgram,
 }
 
 impl Default for SampleParams {
@@ -509,7 +546,7 @@ impl Default for SampleParams {
 
 impl SampleParams {
     pub fn greedy() -> SampleParams {
-        SampleParams { temp: 0.0, top_k: 0, top_p: 1.0, min_p: 0.0, presence_penalty: 0.0, frequency_penalty: 0.0, repetition_penalty: 1.0, dry: DryParams::off(), thinking: None }
+        SampleParams { temp: 0.0, top_k: 0, top_p: 1.0, min_p: 0.0, presence_penalty: 0.0, frequency_penalty: 0.0, repetition_penalty: 1.0, dry: DryParams::off(), thinking: None, no_repeat: NoRepeatNgram::off() }
     }
     pub fn is_greedy(&self) -> bool {
         self.temp <= 0.0
@@ -517,14 +554,20 @@ impl SampleParams {
     /// Whether any logit processor (penalty or DRY) is asked for. Off by
     /// default; a request that asks for none samples exactly as it always did.
     pub fn has_processors(&self) -> bool {
+        self.has_penalties() || self.no_repeat.active()
+    }
+    /// The processors that reorder the whole candidate list (penalties and DRY).
+    fn has_penalties(&self) -> bool {
         self.presence_penalty != 0.0 || self.frequency_penalty != 0.0 || (self.repetition_penalty != 1.0 && self.repetition_penalty > 0.0) || self.dry.active()
     }
     /// Whether the step must see the decoder's candidate list instead of taking
     /// its on-device argmax: real sampling, or a processor that changes which
     /// token is the best (a penalised greedy decode is an argmax of the
-    /// penalised logits, so it needs the candidates too).
+    /// penalised logits, so it needs the candidates too). The no-repeat filter
+    /// is not here: it bans a known handful of tokens, so a step asks for just
+    /// that many extra candidates only when the history bans one.
     pub fn needs_candidates(&self) -> bool {
-        !self.is_greedy() || self.has_processors()
+        !self.is_greedy() || self.has_penalties()
     }
 }
 
@@ -663,20 +706,7 @@ fn truncated_weights(candidates: &[(u32, f32)], params: SampleParams) -> (Vec<f3
 /// already seen inside the window), except tokens in `whitelist`. A no-op
 /// once `history.len() < ngram_size` (not enough tokens yet to form one).
 pub fn apply_no_repeat_ngram(logits: &mut [f32], history: &[u32], ngram_size: usize, window_size: usize, whitelist: &std::collections::HashSet<u32>) {
-    if ngram_size == 0 || history.len() < ngram_size {
-        return;
-    }
-    let current_prefix = &history[history.len() - (ngram_size - 1)..];
-    let search_start = history.len().saturating_sub(window_size);
-    let search_end = history.len() - ngram_size + 1;
-
-    let mut banned: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    for i in search_start..search_end {
-        if history[i..i + ngram_size - 1] == *current_prefix {
-            banned.insert(history[i + ngram_size - 1]);
-        }
-    }
-    for tok in banned {
+    for tok in sampler::ngram_followers(history, ngram_size, window_size) {
         if whitelist.contains(&tok) {
             continue;
         }
@@ -726,6 +756,9 @@ pub enum RejectReason {
     /// [`AdapterAvailability::Unknown`]). Refusing beats answering with the
     /// base model's weights.
     AdapterUnavailable { adapter: AdapterId },
+    /// The embedding rows do not fit the request or the decoder (see
+    /// [`PromptEmbeds::refusal`]).
+    InvalidEmbeds { why: String },
 }
 
 impl std::fmt::Display for RejectReason {
@@ -741,6 +774,7 @@ impl std::fmt::Display for RejectReason {
             RejectReason::AdapterUnavailable { adapter } => {
                 write!(f, "adapter {} is not available", adapter.kv_namespace())
             }
+            RejectReason::InvalidEmbeds { why } => write!(f, "invalid embedding rows: {why}"),
         }
     }
 }
@@ -865,6 +899,10 @@ struct Waiting {
     /// recompute: `req.prompt` is then the context whose KV must be rebuilt and
     /// `req.max_new` is still the request's whole token budget.
     resume: Option<Resume>,
+    /// Embedding rows of the prompt. They index the ORIGINAL prompt, which a
+    /// preempted sequence's context starts with, so they stay valid through a
+    /// recompute.
+    embeds: Option<std::sync::Arc<PromptEmbeds>>,
 }
 
 /// What a sequence preempted by recompute carries through the waiting queue so
@@ -898,6 +936,7 @@ struct Prefilling {
     seed: u64,
     table: BlockTable,
     resume: Option<Resume>,
+    embeds: Option<std::sync::Arc<PromptEmbeds>>,
 }
 
 /// A sequence the scheduler is actively decoding.
@@ -929,6 +968,8 @@ struct Running {
     /// requeued as the request it was.
     seed: u64,
     rng: data::rng::Rng,
+    /// The prompt's embedding rows, kept for a recompute (see [`Waiting::embeds`]).
+    embeds: Option<std::sync::Arc<PromptEmbeds>>,
 }
 
 /// Accept a freshly sampled token into `r`.
@@ -1091,6 +1132,26 @@ impl<D: PagedDecoder> Scheduler<D> {
     }
 
     fn enqueue(&mut self, req: Request, adapter: Option<AdapterId>, sample: SampleParams, seed: u64) -> u64 {
+        self.enqueue_embedded(req, None, adapter, sample, seed)
+    }
+
+    /// [`Self::submit_sampled`] for a prompt some of whose positions are
+    /// embedding rows (a multimodal request). `embeds` must fit the prompt and
+    /// the decoder ([`PagedDecoder::embed_width`]); a request that does not is
+    /// reported in the next [`StepReport::rejected`] as
+    /// [`RejectReason::InvalidEmbeds`] and never queued. The rows travel with the
+    /// request through chunked prefill and preemption by recompute.
+    pub fn submit_embedded(&mut self, req: Request, embeds: PromptEmbeds, sample: SampleParams, seed: u64) -> u64 {
+        if let Some(why) = embeds.refusal(req.prompt.len(), self.dec.embed_width()) {
+            let id = self.next_id;
+            self.next_id += 1;
+            self.pending_rejects.push((id, RejectReason::InvalidEmbeds { why }));
+            return id;
+        }
+        self.enqueue_embedded(req, Some(std::sync::Arc::new(embeds)), None, sample, seed)
+    }
+
+    fn enqueue_embedded(&mut self, req: Request, embeds: Option<std::sync::Arc<PromptEmbeds>>, adapter: Option<AdapterId>, sample: SampleParams, seed: u64) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         let state = QueueState {
@@ -1104,7 +1165,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             return id;
         }
         self.started.insert(id, std::time::Instant::now());
-        self.waiting.push_back(Waiting { id, req, adapter, sample, seed, resume: None });
+        self.waiting.push_back(Waiting { id, req, adapter, sample, seed, resume: None, embeds });
         id
     }
 
@@ -1483,7 +1544,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             self.unpin(p.adapter);
         }
         let req = Request { prompt: p.prompt, max_new: p.max_new, stop: p.stop };
-        self.waiting.push_front(Waiting { id: p.id, req, adapter: p.adapter, sample: p.sample, seed: p.seed, resume: p.resume });
+        self.waiting.push_front(Waiting { id: p.id, req, adapter: p.adapter, sample: p.sample, seed: p.seed, resume: p.resume, embeds: p.embeds });
     }
 
     /// Preempt a decoding sequence by recompute (see [`Self::ensure_decode_room`]):
@@ -1493,11 +1554,11 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// as part of the context to prefill.
     fn requeue_for_recompute(&mut self, mut r: Running) {
         self.dec.release_table(&mut r.table);
-        let Running { id, adapter, generated, logprobs, max_new, stop, next_input, mut context, spec, sample, seed, rng, think, .. } = r;
+        let Running { id, adapter, generated, logprobs, max_new, stop, next_input, mut context, spec, sample, seed, rng, think, embeds, .. } = r;
         let uncached = context.pop();
         debug_assert_eq!(uncached, Some(next_input), "the newest token is the one with no cache entry yet");
         let req = Request { prompt: context, max_new, stop };
-        self.waiting.push_front(Waiting { id, req, adapter, sample, seed, resume: Some(Resume { generated, logprobs, next_input, spec, rng, think }) });
+        self.waiting.push_front(Waiting { id, req, adapter, sample, seed, resume: Some(Resume { generated, logprobs, next_input, spec, rng, think }), embeds });
     }
 
     /// Index of the first waiting request that can be admitted this
@@ -1552,6 +1613,13 @@ impl<D: PagedDecoder> Scheduler<D> {
         }
     }
 
+    /// Why `embeds` cannot belong to a prompt of `req` for this decoder (a row
+    /// outside the prompt, the wrong width, a decoder that takes tokens only),
+    /// without queueing it: the refusal [`Self::submit_embedded`] would report.
+    pub fn embeds_refusal(&self, req: &Request, embeds: &PromptEmbeds) -> Option<RejectReason> {
+        embeds.refusal(req.prompt.len(), self.dec.embed_width()).map(|why| RejectReason::InvalidEmbeds { why })
+    }
+
     /// A prompt that exceeds the engine's capacity, or a token outside the vocabulary.
     ///
     /// A sequence can only ever run alone in the pool, so it must fit it: the KV
@@ -1578,13 +1646,13 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// A fully prefilled request becomes a running sequence: its first token is
     /// picked from the prefill's final hidden state.
     fn start_running(&mut self, p: Prefilling, hidden: Vec<f32>, report: &mut StepReport) {
-        let Prefilling { id, prompt, max_new, stop, adapter, sample, seed, table, resume, .. } = p;
+        let Prefilling { id, prompt, max_new, stop, adapter, sample, seed, table, resume, embeds, .. } = p;
         if let Some(Resume { generated, logprobs, next_input, spec, rng, think }) = resume {
             // The cache is whole again; the token to decode next was chosen
             // before the preemption, so the prefill's own output is not used.
             let mut context = prompt;
             context.push(next_input);
-            self.running.push(Running { id, table, adapter, generated, logprobs, max_new, stop, next_input, context, spec, done: false, sample, think, seed, rng });
+            self.running.push(Running { id, table, adapter, generated, logprobs, max_new, stop, next_input, context, spec, done: false, sample, think, seed, rng, embeds });
             return;
         }
         let mut rng = data::rng::Rng::new(seed);
@@ -1603,7 +1671,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             let candidates = self.dec.admit_topk(&hidden, k);
             sample_in_context(&candidates, sample, &SampleContext { context: &prompt, prompt_len: prompt.len() }, &mut rng)
         };
-        let mut r = Running { id, table, adapter, generated: Vec::new(), logprobs: Vec::new(), max_new, stop, next_input: first, context: prompt, spec: speculate::SeqSpec::new(), done: false, sample, think, seed, rng };
+        let mut r = Running { id, table, adapter, generated: Vec::new(), logprobs: Vec::new(), max_new, stop, next_input: first, context: prompt, spec: speculate::SeqSpec::new(), done: false, sample, think, seed, rng, embeds };
         accept_token(&mut r, first, first_logprob);
         report.admitted.push(id);
         self.running.push(r);
@@ -1641,7 +1709,7 @@ impl<D: PagedDecoder> Scheduler<D> {
         if self.dec.free_blocks() < want {
             return false;
         }
-        let Waiting { id, req, adapter, sample, seed, resume } = self.waiting.remove(pos).expect("admissible position");
+        let Waiting { id, req, adapter, sample, seed, resume, embeds } = self.waiting.remove(pos).expect("admissible position");
         let table = match adapter {
             Some(adapter) => {
                 // A resumed sequence never gave its pin back.
@@ -1652,7 +1720,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             }
             None => BlockTable::new(),
         };
-        self.prefilling.push_back(Prefilling { id, prompt: req.prompt, done: 0, max_new: req.max_new, stop: req.stop, adapter, sample, seed, table, resume });
+        self.prefilling.push_back(Prefilling { id, prompt: req.prompt, done: 0, max_new: req.max_new, stop: req.stop, adapter, sample, seed, table, resume, embeds });
         true
     }
 
@@ -1679,7 +1747,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             }
         }
         let mut jobs: Vec<PrefillJob<'_>> =
-            self.prefilling.iter_mut().zip(&takes).filter(|(_, &take)| take > 0).map(|(p, &take)| PrefillJob { table: &mut p.table, prompt: &p.prompt, budget: take }).collect();
+            self.prefilling.iter_mut().zip(&takes).filter(|(_, &take)| take > 0).map(|(p, &take)| PrefillJob { table: &mut p.table, prompt: &p.prompt, budget: take, embeds: p.embeds.as_deref() }).collect();
         let progress = self.dec.prefill_chunks(&mut jobs);
         drop(jobs);
         assert_eq!(progress.len(), takes.iter().filter(|&&t| t > 0).count(), "prefill_chunks answers every job");
@@ -1716,7 +1784,7 @@ impl<D: PagedDecoder> Scheduler<D> {
         }
         let wait = self.running.iter().all(|r| r.done);
         let mut jobs: Vec<PrefillJob<'_>> =
-            self.prefilling.iter_mut().map(|p| PrefillJob { table: &mut p.table, prompt: &p.prompt, budget: p.prompt.len() - p.done }).collect();
+            self.prefilling.iter_mut().map(|p| PrefillJob { table: &mut p.table, prompt: &p.prompt, budget: p.prompt.len() - p.done, embeds: p.embeds.as_deref() }).collect();
         let progress = self.dec.prefill_background(&mut jobs, wait);
         drop(jobs);
         assert_eq!(progress.len(), self.prefilling.len(), "prefill_background answers every job");
@@ -1769,7 +1837,12 @@ impl<D: PagedDecoder> Scheduler<D> {
                     if worked && budget_left == 0 {
                         break;
                     }
-                    let consumed = match self.dec.prefill_chunk(&mut p.table, &p.prompt, budget_left.max(1)) {
+                    let slice = budget_left.max(1);
+                    let progress = match p.embeds.as_deref() {
+                        Some(e) => self.dec.prefill_chunk_embeds(&mut p.table, &p.prompt, e, slice),
+                        None => self.dec.prefill_chunk(&mut p.table, &p.prompt, slice),
+                    };
+                    let consumed = match progress {
                         PrefillProgress::Partial { consumed } => {
                             p.done += consumed;
                             consumed
@@ -1832,9 +1905,15 @@ impl<D: PagedDecoder> Scheduler<D> {
             // k=1 for everyone this iteration. Purely-greedy batches (today's
             // only case, and the common one) take the exact path they always
             // did, untouched.
-            let all_greedy = active.iter().all(|&i| !self.running[i].sample.needs_candidates());
-            // A thinking budget is checked on the host after every token, so such a batch takes no window either.
-            let host_checked = active.iter().any(|&i| self.running[i].think.is_some_and(|t| t.watching()));
+            //
+            // The no-repeat filter bans a handful of tokens known from the history before the step: a
+            // step whose history bans none is plain greedy, one that bans some asks for that many extra
+            // candidates and takes the best that is not banned.
+            let banned_max = active.iter().map(|&i| self.running[i].sample.no_repeat.banned(&self.running[i].generated).len()).max().unwrap_or(0);
+            let all_greedy = banned_max == 0 && active.iter().all(|&i| !self.running[i].sample.needs_candidates());
+            // A thinking budget is checked on the host after every token, so such a batch takes no window either;
+            // neither does a filter that must see each token before the next is chosen.
+            let host_checked = active.iter().any(|&i| self.running[i].think.is_some_and(|t| t.watching()) || self.running[i].sample.no_repeat.active());
             let mut k = if self.waiting.is_empty() && self.prefilling.is_empty() && all_greedy && !host_checked { remaining_min.min(self.dec.decode_window_capacity()) } else { 1 };
             // Every append must succeed mid-window (no host decisions there):
             // require a comfortable block reserve, else fall back to one step.
@@ -1856,6 +1935,9 @@ impl<D: PagedDecoder> Scheduler<D> {
                 };
                 greedy.into_iter().map(|row| row.into_iter().map(|t| (t, 0.0)).collect()).collect()
             } else {
+                // Real sampling and the penalties read the whole candidate list; a step that only
+                // has banned tokens to step over needs those and one more.
+                let wide = active.iter().any(|&i| self.running[i].sample.needs_candidates());
                 let candidates = {
                     let mut refs: Vec<&mut BlockTable> = Vec::new();
                     for (idx, r) in self.running.iter_mut().enumerate() {
@@ -1863,7 +1945,8 @@ impl<D: PagedDecoder> Scheduler<D> {
                             refs.push(&mut r.table);
                         }
                     }
-                    self.dec.forward_batched_topk(&mut refs, &inputs, self.dec.topk_capacity())
+                    let k = if wide { self.dec.topk_capacity() } else { (banned_max + 1).min(self.dec.topk_capacity()) };
+                    self.dec.forward_batched_topk(&mut refs, &inputs, k)
                 };
                 active
                     .iter()
@@ -2093,6 +2176,7 @@ mod tests {
             think: None,
             seed: 0,
             rng: data::rng::Rng::new(0),
+            embeds: None,
         }
     }
 
