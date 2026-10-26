@@ -13,7 +13,7 @@
 //!
 //! ```text
 //! cargo run --release -p brain-deepseek2ocr --example engine_bench -- \
-//!     --dir <model dir> --batch 8 --steps 32 [--kv f32|bf16] [--precision auto|reference|fast]
+//!     --dir <model dir> --batch 8 --steps 32 [--max-seq 8192] [--kv f32|bf16] [--precision auto|reference|fast]
 //! ```
 
 use deepseek2::serve::{pipelines, Engine, EngineConfig, Precision};
@@ -44,7 +44,8 @@ fn main() {
     let reader = deepseek2ocr::import::decoder_reader(&files, &cfg).expect("reader");
     let src = deepseek2ocr::import::decoder_source(&files, &reader, &cfg).expect("source");
     let seq = (prompt_len + steps + 64).next_multiple_of(64) as u32;
-    let ec = EngineConfig { max_seq: seq.max(2048), pool_tokens: batch.max(1) * seq, max_batch: batch.max(1), chunk: 512, block_size: 64, kv, topk: 64, precision };
+    let max_seq: u32 = arg("--max-seq", "2048").parse().expect("--max-seq");
+    let ec = EngineConfig { max_seq: seq.max(max_seq), pool_tokens: batch.max(1) * seq, max_batch: batch.max(1), chunk: 512, block_size: 64, kv, topk: 64, precision };
     let t0 = Instant::now();
     let mut engine = Engine::new(Gpu::new(&pipelines()), cfg.decoder.clone(), &src, ec).expect("engine");
     eprintln!("engine built in {:.1}s", t0.elapsed().as_secs_f64());
@@ -76,11 +77,21 @@ fn main() {
         eprintln!("device counters after prefill: {s:?}");
     }
     let mut per_step = Vec::new();
+    // Under BRAIN_PROFILE the decode steps run with the device's per-kernel table.
+    let profiled = gpu_core::profile::enabled();
+    let timed = profiled && engine.gpu().set_kernel_timing(true);
+    engine.gpu().reset_kernel_times();
+    let t_all = Instant::now();
     for _ in 0..steps {
         let t = Instant::now();
         let mut refs: Vec<&mut BlockTable> = tables.iter_mut().collect();
         last = engine.forward_batched_greedy(&mut refs, &last);
         per_step.push(t.elapsed().as_secs_f64() * 1e3);
+    }
+    if profiled {
+        let rows = timed.then(|| engine.gpu().kernel_times()).flatten();
+        gpu_core::profile::print_device_table("decode steps", t_all.elapsed().as_secs_f64() * 1e3, rows);
+        engine.gpu().set_kernel_timing(false);
     }
     let warm = &per_step[per_step.len().min(3)..];
     let mean = warm.iter().sum::<f64>() / warm.len().max(1) as f64;
@@ -95,5 +106,4 @@ fn main() {
     if let Some(s) = engine.gpu().stats() {
         eprintln!("device counters at the end: {s:?}");
     }
-    engine.gpu().dump_profile();
 }
