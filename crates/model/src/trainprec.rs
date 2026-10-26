@@ -102,6 +102,16 @@ impl TrainPrecision {
         }))
     }
 
+    /// The precision of the tensors a resident full fine-tune leaves in the parameter store (the norms): the run's
+    /// precision governs the resident linears and tables through [`Self::resident_config`], while the store tensors
+    /// train as the store runs them, f32 value and gradient with no master, their moments in the run's state format.
+    /// A resident run's other knobs (`value`, `grad`, `master`, `sr`) therefore do not reach the store; a state format
+    /// the device optimizer does not run is still refused by [`Self::resolve`], by parameter name.
+    pub fn resident_store(&self) -> TrainPrecision {
+        let store = ParamPrecision { state: self.policy.default.state, ..ParamPrecision::FP32 };
+        TrainPrecision { policy: PrecisionPolicy::uniform(store), ..self.clone() }
+    }
+
     /// Parse `key=value,...` with keys `state` (`f32`, `bf16`, `int8[:block]`, `log8[:block]`), `master`
     /// (`none`, `bf16`, `f32`), `value` and `grad` (`f32`, `bf16`), `sr` and `narrow` (`on`, `off`), `moments` (`device`,
     /// `host`: where the parameter store's optimizer state lives), and for a resident
@@ -548,6 +558,22 @@ mod tests {
         assert!(TrainPrecision::parse("state=fp4").unwrap_err().contains("state"));
         assert!(TrainPrecision::parse("moment=f32").unwrap_err().contains("moment"));
         assert!(TrainPrecision::parse("master").unwrap_err().contains("key=value"));
+    }
+
+    /// Spec: in a resident run the precision governs the resident tensors; the store tensors left over (the norms)
+    /// run f32 with no master whatever `value`, `grad` and `master` say, and keep the run's state format.
+    #[test]
+    fn resident_store_runs_f32_with_the_runs_state() {
+        let norms = vec![("final_norm.weight".to_string(), 64usize)];
+        for spec in ["weights=bf16,grad=bf16,state=bf16,master=f32", "weights=bf16,state=int8", "weights=bf16,value=bf16,sr=on"] {
+            let run = TrainPrecision::parse(spec).unwrap();
+            assert!(run.resolve(&norms, false).is_err() || spec.ends_with("state=int8"), "{spec}: the uniform policy must not already fit the store");
+            let store = run.resident_store().resolve(&norms, false).unwrap_or_else(|e| panic!("{spec}: {e}"));
+            assert_eq!((store[0].value, store[0].grad, store[0].master), (ValueDtype::F32, GradDtype::F32, MasterPolicy::None));
+            assert_eq!(store[0].state, run.policy.default.state);
+        }
+        let log8 = TrainPrecision::parse("weights=bf16,state=log8").unwrap();
+        assert!(log8.resident_store().resolve(&norms, false).unwrap_err().contains("final_norm.weight"));
     }
 
     /// Spec: a choice the trainer does not run is an error naming the parameter, not a panic; a host-offloaded

@@ -1453,6 +1453,17 @@ pub(crate) fn is_quantizable_linear(name: &str) -> bool {
     LEAVES.iter().any(|leaf| name.ends_with(leaf))
 }
 
+/// The precision of each tensor a resident full fine-tune of `shard` leaves in the parameter store (the norms and
+/// recurrent-mixer parameters), checked against what the store trains: the run's precision governs the resident
+/// linears and tables, not these ([`model::TrainPrecision::resident_store`]). A choice the optimizer does not run is
+/// an `Err` naming the tensor.
+pub fn check_resident_store_precision(cfg: &Qwen35Config, shard: &Shard, precision: &model::TrainPrecision) -> Result<Vec<paramstore::precision::ParamPrecision>, String> {
+    let resident: std::collections::HashSet<String> = resident_specs(cfg, shard).into_iter().map(|s| s.name).collect();
+    let store: Vec<(String, usize)> = shard_param_list(cfg, shard).into_iter().filter(|(n, _)| !resident.contains(n)).collect();
+    let store_precision = precision.resident_store();
+    store_precision.resolve(&store, store_precision.wants_host_moments())
+}
+
 /// The tensors of `shard` a resident full fine-tune holds in its own state: every matrix
 /// [`Qwen35Config::layer_leaves`] names, layer by layer, in the run's encoding, then the vocabulary tables the shard
 /// owns (the embedding table, and an untied LM head) in bf16. The norms stay in the parameter store.
@@ -1546,7 +1557,9 @@ impl Qwen35 {
         if cfg.lora.is_some() || cfg.mtp {
             return Err("qwen35: a resident full fine-tune is adapter-free and has no multi-token head".into());
         }
-        model::resident_ft::check_fits(&plan.cfg, &resident_specs(&cfg, &Shard::whole(cfg.n_layers as usize)), &plan.budget())?;
+        let shard = Shard::whole(cfg.n_layers as usize);
+        check_resident_store_precision(&cfg, &shard, &opts.precision)?;
+        model::resident_ft::check_fits(&plan.cfg, &resident_specs(&cfg, &shard), &plan.budget())?;
         Ok(Qwen35::new_train_opts_on(gpu, cfg, b, t, src, opts))
     }
 
@@ -1745,6 +1758,8 @@ impl Qwen35 {
             // no device moment is ever allocated. Anything else is refused with the parameter's name.
             let params: Vec<(String, usize)> = roles.iter().map(|(n, c, _)| (n.clone(), *c)).collect();
             let precision = train_opts.map(|o| o.precision.clone()).unwrap_or_default();
+            // A resident build's store holds only what the resident state does not: those tensors train as the store runs them.
+            let precision = if resident_plan.is_some() { precision.resident_store() } else { precision };
             let host = precision.wants_host_moments();
             precision.resolve(&params, host).unwrap_or_else(|e| panic!("qwen35 full fine-tune (unvalidated build): {e}"));
             if host {
@@ -5902,6 +5917,20 @@ type PrefillMixer<'a> = dyn FnMut(usize, LayerType, &DeviceBuffer, Option<Act>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Spec: a resident full fine-tune accepts the documented resident precisions. The run's `grad`/`master`/`value`
+    /// govern the resident linears and tables; the tensors left in the store train f32 with no master, and the tables
+    /// are never checked as store tensors.
+    #[test]
+    fn resident_precision_governs_resident_tensors_and_leaves_the_store_f32() {
+        let cfg = Qwen35Config::tiny();
+        let shard = Shard::whole(cfg.n_layers as usize);
+        for spec in ["weights=bf16,grad=bf16,state=bf16,master=f32", "weights=bf16,state=int8", "weights=bf16"] {
+            let run = model::TrainPrecision::parse(spec).unwrap();
+            let store = check_resident_store_precision(&cfg, &shard, &run).unwrap_or_else(|e| panic!("{spec}: {e}"));
+            assert!(!store.is_empty() && store.iter().all(|p| p.value == paramstore::precision::ValueDtype::F32 && p.master == paramstore::precision::MasterPolicy::None), "{spec}");
+        }
+    }
 
     /// One decode step of ONE pipeline stage, driven by hand: the same
     /// `DecodeCaches` [`Qwen35::step`] builds from this instance's own

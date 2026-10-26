@@ -647,6 +647,16 @@ pub fn check_resident_fits(cfg: &QwenConfig, shard: &Shard, plan: &ResidentPlan)
     model::resident_ft::check_fits(&plan.cfg, &resident_specs(cfg, shard), &plan.budget())
 }
 
+/// The precision of each tensor a resident full fine-tune of `shard` leaves in the parameter store (the norms),
+/// checked against what the store trains: the run's precision governs the resident linears and tables, not these
+/// ([`model::TrainPrecision::resident_store`]). A choice the device optimizer does not run is an `Err` naming the
+/// tensor.
+pub fn check_resident_store_precision(cfg: &QwenConfig, shard: &Shard, precision: &model::TrainPrecision) -> Result<Vec<paramstore::precision::ParamPrecision>, String> {
+    let resident: std::collections::HashSet<String> = resident_specs(cfg, shard).into_iter().map(|s| s.name).collect();
+    let store: Vec<(String, usize)> = shard_param_list(cfg, shard).into_iter().filter(|(n, _)| !resident.contains(n)).collect();
+    precision.resident_store().resolve(&store, false)
+}
+
 pub struct Qwen {
     pub gpu: Gpu,
     pub cfg: QwenConfig,
@@ -1176,10 +1186,11 @@ impl Qwen {
     /// returned before anything is allocated.
     pub fn new_full(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, gemm: GemmPrecision, full: &FullFtBuild) -> Result<Qwen, String> {
         let shard = Shard::whole(cfg.n_layers as usize);
-        let params: Vec<(String, usize)> = shard_param_list(&cfg, &shard).into_iter().filter(|(n, _)| full.resident.is_none() || !crate::q8::Q8::is_i8_linear(n)).collect();
-        full.precision.resolve(&params, full.offload)?;
         if let Some(plan) = &full.resident {
+            check_resident_store_precision(&cfg, &shard, &full.precision)?;
             check_resident_fits(&cfg, &shard, plan)?;
+        } else {
+            full.precision.resolve(&shard_param_list(&cfg, &shard), full.offload)?;
         }
         Ok(Qwen::new_impl(cfg, b, t, init, true, shard, &TierPolicy::uniform(Dtype::F32), false, gemm, SavedPolicy::Recompute, full))
     }
@@ -1398,9 +1409,11 @@ impl Qwen {
             }
             ps
         } else {
-            full.precision.resolve(&plist, false).unwrap_or_else(|e| panic!("qwen3 full fine-tune (unvalidated build): {e}"));
+            // A resident build's store holds only what the resident state does not: those tensors train as the store runs them.
+            let precision = if resident.is_some() { full.precision.resident_store() } else { full.precision.clone() };
+            precision.resolve(&plist, false).unwrap_or_else(|e| panic!("qwen3 full fine-tune (unvalidated build): {e}"));
             let roles: Vec<_> = plist.into_iter().map(|(n, c)| (n, c, paramstore::Role::Trainable)).collect();
-            ParamStore::new_with_policy_src(&gpu, roles, src, &full.precision.policy)
+            ParamStore::new_with_policy_src(&gpu, roles, src, &precision.policy)
         };
         if let Some(lora) = cfg.lora.as_ref().filter(|_| train) {
             model::adapter::device::apply_groups(&mut ps, &lora.hp());
@@ -4327,6 +4340,22 @@ impl model::Model for Qwen {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Spec: a resident full fine-tune accepts the documented resident precisions. The run's `grad`/`master`/`value`
+    /// govern the resident linears and tables; the norms left in the store train f32 with no master, the tables are
+    /// never checked as store tensors. A state the device optimizer does not run is refused by name.
+    #[test]
+    fn resident_precision_governs_resident_tensors_and_leaves_the_store_f32() {
+        let cfg = QwenConfig::tiny();
+        let shard = Shard::whole(cfg.n_layers as usize);
+        for spec in ["weights=bf16,grad=bf16,state=bf16,master=f32", "weights=bf16,state=int8", "weights=bf16"] {
+            let run = model::TrainPrecision::parse(spec).unwrap();
+            let store = check_resident_store_precision(&cfg, &shard, &run).unwrap_or_else(|e| panic!("{spec}: {e}"));
+            assert!(!store.is_empty() && store.iter().all(|p| p.value == paramstore::precision::ValueDtype::F32 && p.master == paramstore::precision::MasterPolicy::None), "{spec}");
+        }
+        let err = check_resident_store_precision(&cfg, &shard, &model::TrainPrecision::parse("weights=bf16,state=log8").unwrap()).unwrap_err();
+        assert!(err.contains("ln1.weight") && err.contains("Log8Block"), "{err}");
+    }
 
     fn gpu_disabled() -> bool {
         std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
