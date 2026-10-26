@@ -63,6 +63,7 @@ pub mod grid;
 pub mod head_ce;
 /// bf16 pack/unpack (B4's storage tier) - see this module's own doc comment.
 pub mod half;
+pub mod eigen;
 pub mod hostmath;
 pub mod int4;
 pub mod int8;

@@ -163,7 +163,7 @@ pub fn run(a: &mut Args) {
         }
     }
     drop(fit_rows);
-    let (values, vectors) = sfm::linalg::eigh(&cov, d);
+    let (values, vectors) = model::eigen::symmetric_eigen(&cov, d);
     eprintln!("fitted mean and covariance on {n} positions, eigendecomposed in {:.0}s", start.elapsed().as_secs_f64());
     let top: Vec<usize> = (0..d).rev().collect::<Vec<_>>();
     let explained: f64 = values.iter().sum();

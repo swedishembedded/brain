@@ -6248,7 +6248,6 @@ dependencies = [
  "brain-gpu-core",
  "brain-model",
  "brain-qwen3",
- "brain-sfm",
  "brain-spectrallm",
  "serde_json",
 ]
