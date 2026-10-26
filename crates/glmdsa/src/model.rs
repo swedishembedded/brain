@@ -24,7 +24,7 @@
 use std::cell::{Cell, RefCell};
 
 use model::moe::{ExpertBwdScratch, ExpertGrads, ExpertStage, ExpertWeights, MoeActs, MoeIds, MoeIdsBwd, MoeShape, PassSeg, RouterBwdIds, RouterKind};
-use model::saved::SavedPolicy;
+use model::saved::{Residuals, SavedPolicy};
 use std::collections::HashMap;
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
@@ -250,6 +250,11 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("moe_linear_gated_dx", kernels::MOE_LINEAR_GATED_DX),
     ("moe_linear_gated_dw", kernels::MOE_LINEAR_GATED_DW),
     ("rows_scatter_add", kernels::ROWS_SCATTER_ADD),
+    // Narrow boundary residuals (`model::saved::Residuals`), resolved by name.
+    ("pack_bf16", kernels::PACK_BF16),
+    ("unpack_bf16", kernels::UNPACK_BF16),
+    ("pack_fp8_rows", kernels::PACK_FP8_ROWS),
+    ("unpack_fp8_rows", kernels::UNPACK_FP8_ROWS),
 ];
 
 /// MLP variant per layer (cached activations for backprop).
@@ -350,7 +355,7 @@ pub struct Glm {
     targets: DeviceBuffer,
     ce_grad_uni: DeviceBuffer,
 
-    res: Vec<DeviceBuffer>,
+    res: Residuals,
     dres: Vec<DeviceBuffer>,
     layers: Vec<LayerBufs>,
     xn_final: DeviceBuffer,
@@ -585,6 +590,7 @@ impl Glm {
             res.push(st(n * d));
             dres.push(st(n * d));
         }
+        let res = Residuals::new(res, 0..cfg.n_layers as usize + 1);
         let mut layers = Vec::new();
         for l in 0..cfg.n_layers {
             let mlp = if cfg.is_dense_layer(l) {
@@ -871,9 +877,11 @@ impl Glm {
 
         s.push(self.gpu.step(EMBED, &[&self.tokens, self.w("tok.weight"), &self.res[0]], &[d, n], n * d));
 
+        self.res.round_trip(&self.gpu, &mut s, 0);
         for l in 0..c.n_layers as usize {
             // A pass that replays every layer before its backward keeps no expert activations here.
             self.layer_forward(l, b_use, t_use, !self.saved.recomputes(), &mut segs, &mut s);
+            self.res.round_trip(&self.gpu, &mut s, l + 1);
         }
 
         // final norm + untied lm_head + masked CE
@@ -1028,6 +1036,7 @@ impl Glm {
         s.push(self.gpu.step_buf(CE_GRAD, &self.ce_grad_uni, &[&self.logits, &self.targets, &self.d_logits], n * v));
         self.mm_bwd(&mut s, &self.d_logits, &self.xn_final, head, &self.d_xn, n, d, v, 0);
         let last = c.n_layers as usize;
+        self.res.restore(&self.gpu, &mut s, last);
         self.norm_bwd(&mut s, &self.res[last], "norm.weight", &self.d_xn, &self.dres[last], d, n);
 
         // ---- MTP head backward (adds into dres[last], the shared head grad, and
@@ -1065,6 +1074,7 @@ impl Glm {
         for l in (0..c.n_layers as usize).rev() {
             if self.saved.recomputes() {
                 // Every layer shares one set of activation buffers: rebuild this layer's from `res[l]` first.
+                self.res.restore(&self.gpu, &mut s, l);
                 self.layer_forward(l, b_use, t_use, true, &mut segs, &mut s);
             }
             let lb = &self.layers[l];
@@ -1267,20 +1277,22 @@ impl Glm {
     /// (the others are released) and the backward replays each layer from its residual before its own backward.
     /// Residuals held below f32 are refused by name.
     pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
-        if let SavedPolicy::Quantized(format) = policy {
-            return Err(format!("glmdsa keeps its layer residuals in f32; {format:?} residuals are not supported"));
+        if !self.saved.narrows_to(policy) {
+            return Err(format!("glmdsa: a build keeping {:?} cannot go back to {policy:?}", self.saved));
         }
         if policy == self.saved {
             return Ok(());
         }
-        if !policy.recomputes() {
-            return Err("glmdsa: a build that recomputes cannot go back to keeping every layer's activations".into());
+        if !self.saved.recomputes() {
+            let first_of = |moe: bool| self.layers.iter().position(|lb| matches!(lb.mlp, Mlp::Moe { .. }) == moe);
+            let (dense, moe) = (first_of(false), first_of(true));
+            self.layers = (0..self.layers.len())
+                .map(|l| self.layers[if matches!(self.layers[l].mlp, Mlp::Moe { .. }) { moe } else { dense }.expect("a layer of this kind exists")].share())
+                .collect();
         }
-        let first_of = |moe: bool| self.layers.iter().position(|lb| matches!(lb.mlp, Mlp::Moe { .. }) == moe);
-        let (dense, moe) = (first_of(false), first_of(true));
-        self.layers = (0..self.layers.len())
-            .map(|l| self.layers[if matches!(self.layers[l].mlp, Mlp::Moe { .. }) { moe } else { dense }.expect("a layer of this kind exists")].share())
-            .collect();
+        if let SavedPolicy::Quantized(format) = policy {
+            self.res.quantize(&self.gpu, format, self.b * self.t, self.cfg.d_model).map_err(|e| format!("glmdsa: {e}"))?;
+        }
         self.saved = policy;
         self.fwd_steps = self.build_forward(self.b, self.t);
         if !self.bwd_steps.is_empty() {

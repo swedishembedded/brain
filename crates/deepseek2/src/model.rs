@@ -72,7 +72,7 @@
 
 use std::cell::{Cell, RefCell};
 
-use model::saved::SavedPolicy;
+use model::saved::{Residuals, SavedPolicy};
 use std::collections::HashMap;
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
@@ -290,6 +290,11 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // (`embed` above is the row gather).
     ("moe_scatter_scaled_add", kernels::MOE_SCATTER_SCALED_ADD),
     ("rows_scatter_add", kernels::ROWS_SCATTER_ADD),
+    // Narrow boundary residuals (`model::saved::Residuals`), resolved by name.
+    ("pack_bf16", kernels::PACK_BF16),
+    ("unpack_bf16", kernels::UNPACK_BF16),
+    ("pack_fp8_rows", kernels::PACK_FP8_ROWS),
+    ("unpack_fp8_rows", kernels::UNPACK_FP8_ROWS),
 ];
 
 fn kernel_ids() -> KernelIds {
@@ -591,7 +596,7 @@ pub struct DeepseekV2 {
     /// embedding row is never trained on the image.
     splice: model::vlm::SpliceRuns,
 
-    res: Vec<DeviceBuffer>,
+    res: Residuals,
     dres: Vec<DeviceBuffer>,
     layers: Vec<LayerBufs>,
     xn_final: DeviceBuffer,
@@ -871,6 +876,7 @@ impl DeepseekV2 {
             res.push(st(n * d));
             dres.push(st(bn * d));
         }
+        let res = Residuals::new(res, shard.start..shard.end + 1);
         let mut layers = Vec::new();
         for l in 0..cfg.n_layers() {
             let mlp = if cfg.is_moe_layer(l) {
@@ -1102,9 +1108,11 @@ impl DeepseekV2 {
             s.extend(self.splice.fwd(&self.gpu, SPLICE, &self.res[0], 0, n));
         }
 
+        self.res.round_trip(&self.gpu, &mut s, self.shard.start);
         for l in self.shard.start..self.shard.end {
             // A pass that replays every layer before its backward keeps no expert activations here.
             self.layer_forward(l, b_use, t_use, !self.saved.recomputes(), &mut segs, &mut s);
+            self.res.round_trip(&self.gpu, &mut s, l + 1);
         }
 
         // final norm + untied lm_head + masked CE - head stage only. A
@@ -1233,12 +1241,14 @@ impl DeepseekV2 {
             s.push(self.gpu.step_buf(CE_GRAD, &self.ce_grad_uni, &[&self.logits, &self.targets, &self.d_logits], n * v));
             self.mm_bwd(&mut s, &self.d_logits, &self.xn_final, head, &self.d_xn, n, d, v, 0);
             let last = c.n_layers() as usize;
+            self.res.restore(&self.gpu, &mut s, last);
             self.norm_bwd(&mut s, &self.res[last], "norm.weight", &self.d_xn, &self.dres[last], d, n);
         }
 
         for l in (self.shard.start..self.shard.end).rev() {
             if self.saved.recomputes() {
                 // Every layer shares one set of activation buffers: rebuild this layer's from `res[l]` first.
+                self.res.restore(&self.gpu, &mut s, l);
                 self.layer_forward(l, b_use, t_use, true, &mut segs, &mut s);
             }
             let lb = &self.layers[l];
@@ -1400,16 +1410,17 @@ impl DeepseekV2 {
 
     /// Keep what `policy` names of the forward: every layer's activations ([`SavedPolicy::Keep`]), or only the residual
     /// between layers ([`SavedPolicy::Recompute`]), where every layer of a kind shares one set of activation buffers
-    /// (the others are released) and the backward replays each layer from its residual before its own backward.
-    /// Residuals held below f32 are refused by name.
+    /// (the others are released) and the backward replays each layer from its residual before its own backward, those
+    /// residuals optionally held in bf16 or FP8 ([`SavedPolicy::Quantized`], see [`Residuals`]). A build only narrows
+    /// what it keeps; widening again is refused by name.
     pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
-        if let SavedPolicy::Quantized(format) = policy {
-            return Err(format!("deepseek2 keeps its layer residuals in f32; {format:?} residuals are not supported"));
+        if !self.saved.narrows_to(policy) {
+            return Err(format!("deepseek2: a build keeping {:?} cannot go back to {policy:?}", self.saved));
         }
         if policy == self.saved {
             return Ok(());
         }
-        if policy.recomputes() {
+        if !self.saved.recomputes() {
             // One buffer set per kind of layer: the first dense and the first MoE layer's, shared by every layer.
             let first_of = |moe: bool| self.layers.iter().position(|lb| matches!(lb.mlp, Mlp::Moe { .. }) == moe);
             let (dense, moe) = (first_of(false), first_of(true));
@@ -1419,8 +1430,9 @@ impl DeepseekV2 {
                     src.share()
                 })
                 .collect();
-        } else {
-            return Err("deepseek2: a build that recomputes cannot go back to keeping every layer's activations".into());
+        }
+        if let SavedPolicy::Quantized(format) = policy {
+            self.res.quantize(&self.gpu, format, self.b * self.t, self.cfg.d_model()).map_err(|e| format!("deepseek2: {e}"))?;
         }
         self.saved = policy;
         if self.batched {
@@ -2193,6 +2205,7 @@ impl DeepseekV2 {
     /// The residual stream entering layer `l`; `l == n_layers` is the stream
     /// leaving the last layer. `res[0]` is the token embedding AFTER the splice.
     pub fn read_res(&self, l: usize) -> Vec<f32> {
+        assert!(self.res.format() == model::saved::SavedFormat::F32, "deepseek2: narrow boundary residuals keep no per-layer stream to read");
         self.gpu.read(&self.res[l], (self.b * self.t * self.cfg.d_model()) as usize)
     }
 
@@ -2212,6 +2225,7 @@ impl DeepseekV2 {
     /// term in any max_abs computed from this, and a parity test reporting one
     /// should say so rather than attribute it to the model.
     pub fn read_attn_out(&self, l: usize) -> Vec<f32> {
+        assert!(self.saved == SavedPolicy::Keep, "deepseek2: a recomputing build shares one xmid across its layers");
         let n = (self.b * self.t * self.cfg.d_model()) as usize;
         let xmid = self.gpu.read(&self.layers[l].xmid, n);
         let res = self.gpu.read(&self.res[l], n);

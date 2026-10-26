@@ -118,8 +118,8 @@ or bf16/fp8) with each layer replayed before its backward. A narrow residual is
 rounded as the forward writes it, so the backward replays exactly the input the
 forward used (`model::saved::Residuals`). The fit loop hands the choice to the
 model (`Model::set_saved_policy`); deepseek2, glmdsa, gpt2 and lfm2 then share
-one set of activation buffers across their layers (gpt2 also holds bf16 or fp8
-residuals), qwen3 and qwen35 answer from what they were built with, spectrallm,
+one set of activation buffers across their layers (deepseek2, glmdsa and gpt2
+also hold bf16 or fp8 residuals), qwen3 and qwen35 answer from what they were built with, spectrallm,
 ouro and huginn always rebuild each layer from its f32 residual and accept only
 `recompute`, and a model that keeps every layer refuses any other choice by
 name. A built model only narrows what it keeps.
