@@ -1357,6 +1357,19 @@ pub trait Backend: Send + Sync {
     fn submit(&self, clears: &[&DeviceBuffer], steps: &[Step]);
     /// Block, copy `buf` back to the host, and return it as f32.
     fn read(&self, buf: &DeviceBuffer, n: usize) -> Vec<f32>;
+    /// Block and copy words `[offset_words, offset_words + out.len())` of `buf` into `out`: the form a caller that
+    /// walks a large buffer in tiles uses, into one warm host buffer instead of a fresh allocation per tile. The
+    /// default reads the prefix up to the range; a backend that can copy a sub-range directly overrides it.
+    fn read_into(&self, buf: &DeviceBuffer, offset_words: u64, out: &mut [f32]) {
+        let start = offset_words as usize;
+        out.copy_from_slice(&self.read(buf, start + out.len())[start..]);
+    }
+    /// Whether [`Self::read_into`] copies only the range asked for. A caller that reads a large buffer tile by tile
+    /// then pays for each tile once; where this is `false` (the default) each tile read costs the buffer's prefix, and
+    /// the caller reads the buffer whole instead.
+    fn reads_ranges(&self) -> bool {
+        false
+    }
     /// Block until all submitted device work has completed.
     fn poll_wait(&self);
     /// Wait for all submitted device work to complete, but give up after

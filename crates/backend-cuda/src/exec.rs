@@ -833,6 +833,26 @@ impl Context {
         self.sync()
     }
 
+    /// [`Self::download`] of the bytes starting `offset` bytes into the allocation.
+    pub fn download_at(&self, mem: &DeviceMem, offset: usize, dst: &mut [u8]) -> Result<(), String> {
+        let end = offset.checked_add(dst.len()).ok_or("download offset + length overflows")?;
+        if end > mem.len {
+            return Err(format!("download of {} bytes at offset {offset} from a {}-byte allocation", dst.len(), mem.len));
+        }
+        if dst.is_empty() {
+            return Ok(());
+        }
+        self.make_current()?;
+        // SAFETY: `dst` is writable for `dst.len()` bytes and the bound above proves the source range lies inside the
+        // allocation. The copy is enqueued behind every dispatch on this stream, and the wait below makes `dst`
+        // complete on return.
+        self.d.check(
+            unsafe { (self.fns.memcpy_dtoh_async)(dst.as_mut_ptr() as *mut c_void, mem.ptr + offset as CuDevicePtr, dst.len(), self.stream) },
+            "cuMemcpyDtoHAsync",
+        )?;
+        self.sync()
+    }
+
     /// A new event with timing enabled.
     pub fn event(&self) -> Result<Event, String> {
         self.event_with(0)

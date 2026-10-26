@@ -1509,12 +1509,13 @@ impl backend_api::Backend for CudaBackend {
     fn write_bytes_at(&self, buf: &DeviceBuffer, offset_words: u64, data: &[u8]) {
         assert!(data.len().is_multiple_of(4), "backend-cuda: {} bytes is not a whole number of words", data.len());
         let Some(ring) = self.upload_ring.get() else {
-            // No ring: the plain synchronous path, converted in bounded chunks.
-            const CHUNK_WORDS: usize = 1 << 18;
-            for (i, chunk) in data.chunks(CHUNK_WORDS * 4).enumerate() {
-                let words: Vec<u32> = chunk.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect();
-                self.write_at(buf, offset_words + (i * CHUNK_WORDS) as u64, &words);
-            }
+            // No ring: the plain synchronous path. The device is little-endian, so the bytes are the words.
+            self.issue_held();
+            self.counters.writes.fetch_add(1, Ordering::Relaxed);
+            let mem = &CudaBuf::of(buf).mem;
+            self.fence_in([(mem, true)]);
+            self.ctx.upload_at(mem, (offset_words * 4) as usize, data).unwrap_or_else(|e| panic!("backend-cuda: write failed: {e}"));
+            self.fence_out([(mem, true)]);
             return;
         };
         self.issue_held();
@@ -1990,6 +1991,25 @@ impl backend_api::Backend for CudaBackend {
             .download(mem, bytes)
             .unwrap_or_else(|e| panic!("backend-cuda: read-back of {n} f32 failed: {e}"));
         out
+    }
+
+    fn reads_ranges(&self) -> bool {
+        true
+    }
+
+    fn read_into(&self, buf: &DeviceBuffer, offset_words: u64, out: &mut [f32]) {
+        self.issue_held();
+        self.refuse_during_capture("read_into");
+        self.counters.readbacks.fetch_add(1, Ordering::Relaxed);
+        let mem = &CudaBuf::of(buf).mem;
+        self.fence_in([(mem, false)]);
+        self.poll_wait();
+        // SAFETY: `out` owns `out.len() * 4` writable bytes with no padding, and the download bounds-checks against
+        // the allocation's own length.
+        let bytes = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut u8, out.len() * 4) };
+        self.ctx
+            .download_at(mem, (offset_words * 4) as usize, bytes)
+            .unwrap_or_else(|e| panic!("backend-cuda: read-back of {} f32 at word {offset_words} failed: {e}", out.len()));
     }
 
     /// Block until the device has finished everything submitted so far.

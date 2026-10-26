@@ -1438,6 +1438,17 @@ impl Backend for CpuBackend {
     fn read(&self, buf: &DeviceBuffer, n: usize) -> Vec<f32> {
         CpuBackend::read(self, buf.downcast_ref::<CpuBuffer>(), n)
     }
+    fn reads_ranges(&self) -> bool {
+        true
+    }
+    fn read_into(&self, buf: &DeviceBuffer, offset_words: u64, out: &mut [f32]) {
+        self.stats.readbacks.fetch_add(1, Ordering::Relaxed);
+        let words = buf.downcast_ref::<CpuBuffer>().words_mut();
+        let (from, len) = (offset_words as usize, out.len());
+        for (o, w) in out.iter_mut().zip(&words[from..from + len]) {
+            *o = f32::from_bits(*w);
+        }
+    }
     fn poll_wait(&self) {
         CpuBackend::poll_wait(self)
     }

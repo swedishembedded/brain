@@ -1705,6 +1705,18 @@ mod native_facade {
             assert!(!self.taping.load(std::sync::atomic::Ordering::Relaxed), "Gpu::read while a tape is being recorded: the recorded dispatches have not run, so the data would be stale");
             self.be().read(buf, n)
         }
+        /// [`Self::read`] of words `[offset_words, offset_words + out.len())` into `out`, which the caller reuses
+        /// from tile to tile: a fresh multi-megabyte `Vec` per read is faulted in page by page while the copy
+        /// engine waits on it, a warm one is copied into at the link's speed.
+        pub fn read_into(&self, buf: &DeviceBuffer, offset_words: u64, out: &mut [f32]) {
+            assert!(!self.taping.load(std::sync::atomic::Ordering::Relaxed), "Gpu::read_into while a tape is being recorded: the recorded dispatches have not run, so the data would be stale");
+            self.be().read_into(buf, offset_words, out)
+        }
+        /// Whether [`Self::read_into`] copies only the range asked for on this device; see
+        /// `backend_api::Backend::reads_ranges`.
+        pub fn reads_ranges(&self) -> bool {
+            self.be().reads_ranges()
+        }
         pub fn poll_wait(&self) {
             assert!(!self.taping.load(std::sync::atomic::Ordering::Relaxed), "Gpu::poll_wait while a tape is being recorded: nothing recorded has been submitted");
             self.be().poll_wait()

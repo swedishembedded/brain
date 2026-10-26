@@ -14,6 +14,8 @@ path = "src/lib.rs"
 brain-backend-api.workspace = true
 brain-wgsl-cpu.workspace = true
 rayon = "1"
+# Linux CPU affinity for `par::with_cores` (the same pure-Rust binding `gpu-core` pins `--device cpu<N>` with).
+libc.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true

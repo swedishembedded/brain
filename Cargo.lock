@@ -572,6 +572,7 @@ dependencies = [
  "brain-kernels",
  "brain-testutil",
  "brain-wgsl-cpu",
+ "libc",
  "rayon",
 ]
 

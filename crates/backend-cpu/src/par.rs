@@ -19,6 +19,111 @@
 
 use rayon::prelude::*;
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+thread_local! {
+    /// The pool the calling thread's parallel loops are confined to by [`with_cores`], if any.
+    static NEAR: RefCell<Option<Arc<rayon::ThreadPool>>> = const { RefCell::new(None) };
+}
+
+/// Run `f` on the pool [`with_cores`] confined this thread to, or on the process pool.
+fn routed<R: Send>(f: impl FnOnce() -> R + Send) -> R {
+    match NEAR.with(|n| n.borrow().clone()) {
+        Some(pool) => pool.install(f),
+        None => f(),
+    }
+}
+
+/// The cores this process may run on.
+pub fn allowed_cores() -> Vec<usize> {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: a zeroed cpu_set_t is the empty set; sched_getaffinity fills it for the calling thread.
+        let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+        if unsafe { libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set) } == 0 {
+            return (0..libc::CPU_SETSIZE as usize).filter(|&c| unsafe { libc::CPU_ISSET(c, &set) }).collect();
+        }
+    }
+    (0..std::thread::available_parallelism().map_or(1, |n| n.get())).collect()
+}
+
+/// The affinity of the calling thread, or `None` where it cannot be read.
+#[cfg(target_os = "linux")]
+fn thread_affinity() -> Option<libc::cpu_set_t> {
+    // SAFETY: see `allowed_cores`.
+    let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+    (unsafe { libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set) } == 0).then_some(set)
+}
+
+/// Pin the calling thread to `cores`; best effort (a refused mask leaves the thread where it was).
+#[cfg(target_os = "linux")]
+fn pin_thread(cores: &[usize]) {
+    // SAFETY: CPU_SET writes only inside the set for ids below CPU_SETSIZE, which the filter guarantees.
+    let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+    for &c in cores.iter().filter(|&&c| c < libc::CPU_SETSIZE as usize) {
+        unsafe { libc::CPU_SET(c, &mut set) };
+    }
+    unsafe { libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) };
+}
+
+/// Run `f` with this thread and the parallel loops it starts confined to `cores`, in a pool of one thread per core that
+/// is kept for the next call with the same cores. For host work that moves data to and from an accelerator: on a
+/// machine of several CPU/GPU modules the cores next to the card reach the card's memory path and their own memory
+/// without crossing to another module, which is several times the bandwidth of the same work spread over every core.
+///
+/// Memory first touched inside `f` (by this thread or the pool) is placed on the cores' own node by the kernel's local
+/// policy. Only the calling thread's loops are routed; other threads keep the process pool. An empty `cores` runs `f`
+/// unchanged.
+pub fn with_cores<R>(cores: &[usize], f: impl FnOnce() -> R) -> R {
+    static POOLS: Mutex<Option<HashMap<Vec<usize>, Arc<rayon::ThreadPool>>>> = Mutex::new(None);
+    if cores.is_empty() {
+        return f();
+    }
+    let pool = {
+        let mut pools = POOLS.lock().unwrap_or_else(|e| e.into_inner());
+        pools
+            .get_or_insert_with(HashMap::new)
+            .entry(cores.to_vec())
+            .or_insert_with(|| {
+                let pinned = cores.to_vec();
+                let builder = rayon::ThreadPoolBuilder::new().num_threads(cores.len()).thread_name(|i| format!("brain-near-{i}"));
+                #[cfg(target_os = "linux")]
+                let builder = builder.start_handler(move |_| pin_thread(&pinned));
+                #[cfg(not(target_os = "linux"))]
+                let _ = pinned;
+                Arc::new(builder.build().expect("a rayon pool"))
+            })
+            .clone()
+    };
+    /// Restores the thread's pool and affinity, also when `f` unwinds.
+    struct Restore {
+        pool: Option<Arc<rayon::ThreadPool>>,
+        #[cfg(target_os = "linux")]
+        affinity: Option<libc::cpu_set_t>,
+    }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            NEAR.with(|n| *n.borrow_mut() = self.pool.take());
+            #[cfg(target_os = "linux")]
+            if let Some(set) = &self.affinity {
+                // SAFETY: `set` came from sched_getaffinity.
+                unsafe { libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), set) };
+            }
+        }
+    }
+    let _restore = Restore {
+        pool: NEAR.with(|n| n.borrow_mut().replace(pool)),
+        #[cfg(target_os = "linux")]
+        affinity: thread_affinity(),
+    };
+    #[cfg(target_os = "linux")]
+    pin_thread(cores);
+    f()
+}
+
+
 /// Apply `f(row_index, row)` to each `row_len`-sized row of `buf`, in parallel.
 ///
 /// The row split is exact: `buf.len()` must be a multiple of `row_len` for the
@@ -26,6 +131,12 @@ use rayon::prelude::*;
 /// `chunks_mut`), never dropped.
 pub fn rows_mut(buf: &mut [f32], row_len: usize, f: impl Fn(usize, &mut [f32]) + Sync) {
     chunks_mut(buf, row_len, f)
+}
+
+/// Threads the parallel loops fan out over right now: the process pool, or the pool of the enclosing
+/// [`with_threads`]. A caller sizing its work items to the pool asks here rather than the machine.
+pub fn threads() -> usize {
+    routed(rayon::current_num_threads)
 }
 
 /// Run `f` with the CPU backend's parallel loops confined to a pool of `threads`
@@ -57,7 +168,7 @@ pub fn set_global_threads(threads: usize) -> Result<(), String> {
 /// numerical one. A short tail chunk is passed as-is, never dropped.
 pub fn chunks_mut<T: Send>(buf: &mut [T], chunk_len: usize, f: impl Fn(usize, &mut [T]) + Sync) {
     assert!(chunk_len > 0, "chunks_mut: chunk_len must be non-zero");
-    buf.par_chunks_mut(chunk_len).enumerate().for_each(|(i, c)| f(i, c));
+    routed(|| buf.par_chunks_mut(chunk_len).enumerate().for_each(|(i, c)| f(i, c)));
 }
 
 /// [`chunks_mut`] over TWO outputs at once, each with its OWN chunk length:
@@ -77,24 +188,24 @@ pub fn chunks_mut<T: Send>(buf: &mut [T], chunk_len: usize, f: impl Fn(usize, &m
 pub fn chunks2_mut<T: Send, U: Send>(a: &mut [T], a_len: usize, b: &mut [U], b_len: usize, f: impl Fn(usize, &mut [T], &mut [U]) + Sync) {
     assert!(a_len > 0 && b_len > 0, "chunks2_mut: chunk lengths must be non-zero");
     assert_eq!(a.len().div_ceil(a_len), b.len().div_ceil(b_len), "chunks2_mut: {} chunks of a but {} of b", a.len().div_ceil(a_len), b.len().div_ceil(b_len));
-    a.par_chunks_mut(a_len).zip(b.par_chunks_mut(b_len)).enumerate().for_each(|(i, (ca, cb))| f(i, ca, cb));
+    routed(|| a.par_chunks_mut(a_len).zip(b.par_chunks_mut(b_len)).enumerate().for_each(|(i, (ca, cb))| f(i, ca, cb)));
 }
 
 /// Apply `f(index, element)` to every element of `buf`, in parallel.
 pub fn each_mut(buf: &mut [f32], f: impl Fn(usize, &mut f32) + Sync) {
-    buf.par_iter_mut().enumerate().for_each(|(i, v)| f(i, v));
+    routed(|| buf.par_iter_mut().enumerate().for_each(|(i, v)| f(i, v)));
 }
 
 /// `(0..n).map(f)` in parallel, one `f32` per index - the shape of a matvec
 /// fanned out over output rows.
 pub fn map_f32(n: usize, f: impl Fn(usize) -> f32 + Sync + Send) -> Vec<f32> {
-    (0..n).into_par_iter().map(f).collect()
+    routed(|| (0..n).into_par_iter().map(f).collect())
 }
 
 /// `(0..n).flat_map(f)` in parallel, preserving index order - the shape of a
 /// per-head attention fan-out.
 pub fn flat_map_f32(n: usize, f: impl Fn(usize) -> Vec<f32> + Sync + Send) -> Vec<f32> {
-    (0..n).into_par_iter().map(f).flatten().collect()
+    routed(|| (0..n).into_par_iter().map(f).flatten().collect())
 }
 
 /// `(0..n).map(f)` in parallel, index-ordered, returning any `Send` value - the
@@ -105,7 +216,7 @@ pub fn flat_map_f32(n: usize, f: impl Fn(usize) -> Vec<f32> + Sync + Send) -> Ve
 /// cpuN` sizing/affinity still governs it, and it fans out over the machine's
 /// cores automatically at runtime.
 pub fn map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync + Send) -> Vec<T> {
-    (0..n).into_par_iter().map(f).collect()
+    routed(|| (0..n).into_par_iter().map(f).collect())
 }
 
 /// Sum of squares over a set of tensors, accumulated in `f64` - the global
@@ -119,10 +230,12 @@ pub fn map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync + Send) -> Vec<T> {
 /// last bit scales every weight update differently.
 pub fn sum_sq_f64(tensors: &[Vec<f32>]) -> f64 {
     const SUM_CHUNK: usize = 16 * 1024;
-    let partials: Vec<Vec<f64>> = tensors
-        .par_iter()
-        .map(|t| t.par_chunks(SUM_CHUNK).map(|c| c.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>()).collect())
-        .collect();
+    let partials: Vec<Vec<f64>> = routed(|| {
+        tensors
+            .par_iter()
+            .map(|t| t.par_chunks(SUM_CHUNK).map(|c| c.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>()).collect())
+            .collect()
+    });
     partials.iter().flatten().sum()
 }
 
@@ -130,7 +243,7 @@ pub fn sum_sq_f64(tensors: &[Vec<f32>]) -> f64 {
 /// shape of an optimizer step over (state, grad) tensor pairs.
 pub fn zip_each<T: Send, U: Sync>(a: &mut [T], b: &[U], f: impl Fn(&mut T, &U) + Sync) {
     assert_eq!(a.len(), b.len(), "zip_each: length mismatch {} vs {}", a.len(), b.len());
-    a.par_iter_mut().zip(b.par_iter()).for_each(|(x, y)| f(x, y));
+    routed(|| a.par_iter_mut().zip(b.par_iter()).for_each(|(x, y)| f(x, y)));
 }
 
 /// [`zip_each`] over three mutable state slices driven by one shared read-only
@@ -140,11 +253,13 @@ pub fn zip3_mut(a: &mut [f32], b: &mut [f32], c: &mut [f32], d: &[f32], f: impl 
     assert_eq!(a.len(), b.len(), "zip3_mut: length mismatch {} vs {}", a.len(), b.len());
     assert_eq!(a.len(), c.len(), "zip3_mut: length mismatch {} vs {}", a.len(), c.len());
     assert_eq!(a.len(), d.len(), "zip3_mut: length mismatch {} vs {}", a.len(), d.len());
-    a.par_iter_mut()
-        .zip(b.par_iter_mut())
-        .zip(c.par_iter_mut())
-        .zip(d.par_iter())
-        .for_each(|(((x, y), z), w)| f(x, y, z, w));
+    routed(|| {
+        a.par_iter_mut()
+            .zip(b.par_iter_mut())
+            .zip(c.par_iter_mut())
+            .zip(d.par_iter())
+            .for_each(|(((x, y), z), w)| f(x, y, z, w))
+    });
 }
 
 #[cfg(test)]
@@ -224,6 +339,30 @@ mod tests {
         let mut v = vec![0u32; 100];
         with_threads(2, || chunks_mut(&mut v, 10, |i, c| c.iter_mut().for_each(|x| *x = i as u32)));
         assert_eq!(v[99], 9);
+    }
+
+    /// `with_cores` confines the calling thread's loops to the named cores for the duration of the call and nothing
+    /// after it: the loop bodies run on those cores, and the thread's affinity and pool are back as they were.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn with_cores_runs_the_loops_on_those_cores_and_restores_the_thread() {
+        let allowed = allowed_cores();
+        if allowed.len() < 2 {
+            return brain_testutil::skip_unavailable("fewer than two cores are available to this process");
+        }
+        let chosen = vec![allowed[0], allowed[allowed.len() - 1]];
+        let (pool_threads, cores) = with_cores(&chosen, || {
+            // Enough items that every pool thread is likely to take some; each reports the core it ran on.
+            (threads(), map(512, |_| {
+                std::thread::sleep(std::time::Duration::from_micros(200));
+                // SAFETY: sched_getcpu has no preconditions.
+                unsafe { libc::sched_getcpu() as usize }
+            }))
+        });
+        assert_eq!(pool_threads, 2, "one pool thread per core");
+        assert!(cores.iter().all(|c| chosen.contains(c)), "ran on {cores:?}, asked for {chosen:?}");
+        assert_eq!(allowed_cores(), allowed, "the thread's affinity is restored");
+        assert_eq!(threads(), rayon::current_num_threads(), "the process pool serves loops again");
     }
 
     #[test]

@@ -200,6 +200,41 @@ pub fn device(index: u32) -> Result<&'static DeviceId, String> {
         .ok_or_else(|| format!("gpu{index} requested but this machine has {} GPU(s)", devs.len()))
 }
 
+/// The host cores next to card `index`: those of the CPU module the card is wired to, which reach it and their own
+/// memory without crossing to another module (on a machine of several CPU/GPU modules this is several times the
+/// bandwidth of the same host work spread over every core). The kernel's `local_cpulist` of the card's PCI device,
+/// restricted to the cores this process may run on. `None` where it is not known (no PCI id, a non-Linux host, no
+/// sysfs entry) or where fewer than two cores are left, so there is nothing to choose between.
+pub fn host_cores_near(index: u32) -> Option<Vec<usize>> {
+    let pci = device(index).ok()?.identity.pci_bus.as_deref()?;
+    let list = std::fs::read_to_string(format!("/sys/bus/pci/devices/{}/local_cpulist", sysfs_pci_name(pci))).ok()?;
+    let allowed = backend_cpu::par::allowed_cores();
+    let near: Vec<usize> = parse_cpulist(&list)?.into_iter().filter(|c| allowed.contains(c)).collect();
+    (near.len() >= 2).then_some(near)
+}
+
+/// A PCI bus id as sysfs names the device: lowercase `dddd:bb:dd.f`, the domain padded or trimmed to four digits
+/// (drivers report it as `00000009:01:00.0` as well as `0009:01:00.0`).
+fn sysfs_pci_name(pci: &str) -> String {
+    let lower = pci.trim().to_ascii_lowercase();
+    match lower.split_once(':') {
+        Some((domain, rest)) => format!("{:0>4}:{rest}", domain.trim_start_matches('0')),
+        None => lower,
+    }
+}
+
+/// The cores of a kernel cpu list (`0-71,144-215`), ascending; `None` if it does not parse.
+fn parse_cpulist(list: &str) -> Option<Vec<usize>> {
+    let mut cores = Vec::new();
+    for part in list.trim().split(',').filter(|p| !p.is_empty()) {
+        match part.split_once('-') {
+            Some((a, b)) => cores.extend(a.parse::<usize>().ok()?..=b.parse::<usize>().ok()?),
+            None => cores.push(part.parse().ok()?),
+        }
+    }
+    Some(cores)
+}
+
 /// The registry entry whose PCI bus id matches `pci` (case-insensitive,
 /// tolerant of nvidia-smi's `00000000:81:00.0` zero-padding).
 pub fn device_by_pci(pci: &str) -> Option<&'static DeviceId> {
@@ -1377,6 +1412,21 @@ impl fmt::Display for ComputeSet {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_kernel_cpu_list_parses_to_its_cores() {
+        assert_eq!(parse_cpulist("0-3,8,10-11\n"), Some(vec![0, 1, 2, 3, 8, 10, 11]));
+        assert_eq!(parse_cpulist(""), Some(vec![]));
+        assert_eq!(parse_cpulist("0-x"), None);
+    }
+
+    #[test]
+    fn a_pci_bus_id_is_named_the_way_sysfs_names_the_device() {
+        assert_eq!(sysfs_pci_name("00000009:01:00.0"), "0009:01:00.0");
+        assert_eq!(sysfs_pci_name("0009:01:00.0"), "0009:01:00.0");
+        assert_eq!(sysfs_pci_name("0000:81:00.0"), "0000:81:00.0");
+        assert_eq!(sysfs_pci_name("00000000:0A:00.0"), "0000:0a:00.0");
+    }
     #[test]
     fn a_library_caller_cannot_request_a_backend_that_does_not_exist() {
         let err = request_backend("tensor-core-9000").unwrap_err();
