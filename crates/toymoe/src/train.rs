@@ -24,6 +24,9 @@ use std::cell::Cell;
 use std::collections::HashMap;
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
+use model::saved::{Residuals, SavedPolicy};
+use model::streamed::StreamedStore;
+use model::tape::LayerTape;
 use model::IGNORE;
 use optim::Optim;
 use paramstore::ParamStore;
@@ -116,6 +119,14 @@ const PIPELINES: &[(&str, &str)] = &[
     // them BY NAME, so appending them here (and only here) is the whole opt-in.
     ("gradnorm_part", kernels::GRADNORM_PART),
     ("clip_coef_wg", kernels::CLIP_COEF_WG),
+    // Narrow boundary residuals (`model::saved::Residuals`), resolved by name.
+    ("pack_bf16", kernels::PACK_BF16),
+    ("unpack_bf16", kernels::UNPACK_BF16),
+    ("pack_fp8_rows", kernels::PACK_FP8_ROWS),
+    ("unpack_fp8_rows", kernels::UNPACK_FP8_ROWS),
+    // A layer-streamed full fine-tune's device side (`model::ops::store_device_kernels`; `gradnorm_part` is above).
+    ("copy_cols", kernels::COPY_COLS),
+    ("gradnorm_part_bf16", kernels::GRADNORM_PART_BF16),
 ];
 
 /// MoE's AdamW recipe (the values matched against the PyTorch reference).
@@ -163,6 +174,7 @@ fn param_list(c: &Config) -> Vec<(String, usize)> {
     v
 }
 
+#[derive(Clone)]
 struct LayerBufs {
     xn1: DeviceBuffer,
     qkv: DeviceBuffer,
@@ -201,9 +213,13 @@ pub struct Trainer {
     /// rewritten per batch (the count varies with the masking) before backward.
     ce_grad_uni: DeviceBuffer,
 
-    res: Vec<DeviceBuffer>,  // residual stream, len n_layers+1 (res[0]=emb out, res[L]=x_final)
+    res: Residuals,          // residual stream, len n_layers+1 (res[0]=emb out, res[L]=x_final)
     dres: Vec<DeviceBuffer>, // its gradient
     layers: Vec<LayerBufs>,
+    /// What the backward keeps of the forward: every layer's activations, or (recompute) the residual between layers,
+    /// every layer sharing one set of activation buffers its replay before its backward refills
+    /// ([`model::Model::set_saved_policy`]).
+    saved: SavedPolicy,
     xn_final: DeviceBuffer,
     logits: DeviceBuffer,
 
@@ -237,8 +253,13 @@ pub struct Trainer {
     // keep their referenced buffers alive; only the *contents* of
     // `tokens`/`targets` (set_batch) change in place via `write_buffer`. The
     // AdamW graph is cached inside the shared `Optim`.
-    fwd_steps: Vec<Step>,
-    bwd_steps: Vec<Step>,
+    fwd_steps: LayerTape,
+    bwd_steps: LayerTape,
+    /// The per-layer tensors (every expert included) held in a device window of layers, when the run streams them
+    /// ([`model::Model::set_resident`]); `None` keeps every layer in the store.
+    streamed: Option<StreamedStore>,
+    /// A streamed build runs its backward inside the update: set by `backward`, taken by `adamw_step`.
+    backward_pending: Cell<bool>,
 }
 
 impl Trainer {
@@ -274,6 +295,7 @@ impl Trainer {
             res.push(st(n * d));
             dres.push(st(n * d));
         }
+        let res = Residuals::new(res, 0..c.n_layers as usize + 1);
         let mut layers = Vec::new();
         for _ in 0..c.n_layers {
             layers.push(LayerBufs {
@@ -307,6 +329,7 @@ impl Trainer {
             res,
             dres,
             layers,
+            saved: SavedPolicy::Keep,
             xn_final: st(n * d),
             logits: st(n * cfg.vocab as u64),
             scores: st(bht2),
@@ -328,8 +351,10 @@ impl Trainer {
             d_expert_out: st(n * d),
             inv: st(n),
             gpu,
-            fwd_steps: Vec::new(),
-            bwd_steps: Vec::new(),
+            fwd_steps: LayerTape::default(),
+            bwd_steps: LayerTape::default(),
+            streamed: None,
+            backward_pending: Cell::new(false),
         };
         trainer.build_graphs();
         trainer
@@ -365,7 +390,7 @@ impl Trainer {
     /// transient staging buffers this step allocated.
     pub fn forward(&self) -> f32 {
         let n = self.b * self.t;
-        self.gpu.submit(&[], &self.fwd_steps);
+        self.submit_forward(&self.fwd_steps);
         let losses = self.gpu.read(&self.ce_buf, n as usize);
         // Masked CE writes 0 for IGNORE rows; mean over the non-ignored count.
         losses.iter().sum::<f32>() / self.count.get()
@@ -373,7 +398,35 @@ impl Trainer {
 
     /// Build the forward dispatch graph; caches all activations. Buffers and
     /// uniform contents are identical every step, so this is built once.
-    fn build_forward(&self) -> Vec<Step> {
+    /// The forward, one segment per layer (a layer-streamed build loads each layer before its segment).
+    fn build_forward(&self) -> LayerTape {
+        let c = &self.cfg;
+        let n = self.b * self.t;
+        let d = c.d_model;
+        let mut tape = LayerTape::default();
+        let mut s: Vec<Step> = Vec::new();
+
+        // embedding -> res[0]
+        s.push(self.gpu.step(EMBED, &[&self.tokens, self.w("token_emb.weight"), &self.res[0]], &[d, n], n * d));
+
+        self.res.round_trip(&self.gpu, &mut s, 0);
+        tape.segment(&mut s, None);
+        for l in 0..c.n_layers as usize {
+            self.layer_forward(l, &mut s);
+            self.res.round_trip(&self.gpu, &mut s, l + 1);
+            tape.segment(&mut s, Some(l));
+        }
+
+        // final norm + tied lm_head
+        s.push(self.gpu.step(RMSNORM, &[&self.res[c.n_layers as usize], self.w("norm.weight"), &self.xn_final], &[d, n, f(crate::RMS_EPS)], n));
+        s.push(self.gpu.step(MATMUL, &[&self.xn_final, self.w("token_emb.weight"), &self.logits], &[n, d, c.vocab], n * c.vocab));
+        s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, c.vocab, IGNORE], n));
+        tape.segment(&mut s, None);
+        tape
+    }
+
+    /// Layer `l`'s forward, from `res[l]` into `res[l + 1]`.
+    fn layer_forward(&self, l: usize, s: &mut Vec<Step>) {
         let c = &self.cfg;
         let n = self.b * self.t;
         let d = c.d_model;
@@ -381,49 +434,35 @@ impl Trainer {
         let e = c.n_experts;
         let hd = c.head_dim();
         let half = hd / 2;
-        let mut s: Vec<Step> = Vec::new();
-
-        // embedding -> res[0]
-        s.push(self.gpu.step(EMBED, &[&self.tokens, self.w("token_emb.weight"), &self.res[0]], &[d, n], n * d));
-
-        for l in 0..c.n_layers as usize {
-            let lb = &self.layers[l];
-            let pn = |name: &str| format!("blocks.{l}.{name}");
-            // attention
-            s.push(self.gpu.step(RMSNORM, &[&self.res[l], self.w(&pn("norm1.weight")), &lb.xn1], &[d, n, f(crate::RMS_EPS)], n));
-            s.push(self.gpu.step(MATMUL, &[&lb.xn1, self.w(&pn("attn.qkv.weight")), &lb.qkv], &[n, d, 3 * d], n * 3 * d));
-            s.push(self.gpu.step(ROPE, &[&lb.qkv], &[n, c.n_heads, hd, 3 * d, 0, self.t, f(ROPE_THETA)], n * c.n_heads * half));
-            s.push(self.gpu.step(ROPE, &[&lb.qkv], &[n, c.n_heads, hd, 3 * d, d, self.t, f(ROPE_THETA)], n * c.n_heads * half));
-            s.push(self.gpu.step(ATTN_SCORES, &[&lb.qkv, &self.scores], &[self.b, c.n_heads, self.t, hd, 3 * d, 0, d], self.b * c.n_heads * self.t * self.t));
-            s.push(self.gpu.step(ATTN_SOFTMAX, &[&self.scores, &lb.probs], &[self.b, c.n_heads, self.t], self.b * c.n_heads * self.t));
-            s.push(self.gpu.step(ATTN_APPLY, &[&lb.probs, &lb.qkv, &lb.attn_out], &[self.b, c.n_heads, self.t, hd, 3 * d, 2 * d, d], self.b * c.n_heads * self.t * hd));
-            s.push(self.gpu.step(MATMUL, &[&lb.attn_out, self.w(&pn("attn.out.weight")), &self.proj], &[n, d, d], n * d));
-            s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
-            // moe
-            s.push(self.gpu.step(RMSNORM, &[&lb.xmid, self.w(&pn("norm2.weight")), &lb.xn2], &[d, n, f(crate::RMS_EPS)], n));
-            s.push(self.gpu.step(MATMUL, &[&lb.xn2, self.w(&pn("moe.router.weight")), &lb.router_logits], &[n, d, e], n * e));
-            // norm=1, scale=1.0: `router_gate_train.wgsl`'s renormalised
-            // Switch/Mixtral gate -- this model's behaviour since it was
-            // written, now spelled rather than implied.
-            s.push(self.gpu.step(ROUTER, &[&lb.router_logits, &lb.gate, &lb.router_probs], &[n, e, c.top_k, 1, f(1.0)], n));
-            for ei in 0..e as usize {
-                let ep = |name: &str| format!("blocks.{l}.moe.experts.{ei}.{name}");
-                s.push(self.gpu.step(MATMUL, &[&lb.xn2, self.w(&ep("w_gate.weight")), &lb.gate_pre[ei]], &[n, d, ff], n * ff));
-                s.push(self.gpu.step(MATMUL, &[&lb.xn2, self.w(&ep("w_up.weight")), &lb.up[ei]], &[n, d, ff], n * ff));
-                s.push(self.gpu.step(SILU, &[&lb.gate_pre[ei], &lb.up[ei], &lb.h[ei]], &[n * ff], n * ff));
-                s.push(self.gpu.step(MATMUL, &[&lb.h[ei], self.w(&ep("w_down.weight")), &lb.expert_out[ei]], &[n, ff, d], n * d));
-                let acc = if ei == 0 { 0 } else { 1 };
-                s.push(self.gpu.step(SCALE_ADD, &[&lb.gate, &lb.expert_out[ei], &self.moe_acc], &[n, d, e, ei as u32, acc], n * d));
-            }
-            s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.moe_acc, &self.res[l + 1]], &[n * d], n * d));
+        let lb = &self.layers[l];
+        let pn = |name: &str| format!("blocks.{l}.{name}");
+        // attention
+        s.push(self.gpu.step(RMSNORM, &[&self.res[l], self.w(&pn("norm1.weight")), &lb.xn1], &[d, n, f(crate::RMS_EPS)], n));
+        s.push(self.gpu.step(MATMUL, &[&lb.xn1, self.w(&pn("attn.qkv.weight")), &lb.qkv], &[n, d, 3 * d], n * 3 * d));
+        s.push(self.gpu.step(ROPE, &[&lb.qkv], &[n, c.n_heads, hd, 3 * d, 0, self.t, f(ROPE_THETA)], n * c.n_heads * half));
+        s.push(self.gpu.step(ROPE, &[&lb.qkv], &[n, c.n_heads, hd, 3 * d, d, self.t, f(ROPE_THETA)], n * c.n_heads * half));
+        s.push(self.gpu.step(ATTN_SCORES, &[&lb.qkv, &self.scores], &[self.b, c.n_heads, self.t, hd, 3 * d, 0, d], self.b * c.n_heads * self.t * self.t));
+        s.push(self.gpu.step(ATTN_SOFTMAX, &[&self.scores, &lb.probs], &[self.b, c.n_heads, self.t], self.b * c.n_heads * self.t));
+        s.push(self.gpu.step(ATTN_APPLY, &[&lb.probs, &lb.qkv, &lb.attn_out], &[self.b, c.n_heads, self.t, hd, 3 * d, 2 * d, d], self.b * c.n_heads * self.t * hd));
+        s.push(self.gpu.step(MATMUL, &[&lb.attn_out, self.w(&pn("attn.out.weight")), &self.proj], &[n, d, d], n * d));
+        s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
+        // moe
+        s.push(self.gpu.step(RMSNORM, &[&lb.xmid, self.w(&pn("norm2.weight")), &lb.xn2], &[d, n, f(crate::RMS_EPS)], n));
+        s.push(self.gpu.step(MATMUL, &[&lb.xn2, self.w(&pn("moe.router.weight")), &lb.router_logits], &[n, d, e], n * e));
+        // norm=1, scale=1.0: `router_gate_train.wgsl`'s renormalised
+        // Switch/Mixtral gate -- this model's behaviour since it was
+        // written, now spelled rather than implied.
+        s.push(self.gpu.step(ROUTER, &[&lb.router_logits, &lb.gate, &lb.router_probs], &[n, e, c.top_k, 1, f(1.0)], n));
+        for ei in 0..e as usize {
+            let ep = |name: &str| format!("blocks.{l}.moe.experts.{ei}.{name}");
+            s.push(self.gpu.step(MATMUL, &[&lb.xn2, self.w(&ep("w_gate.weight")), &lb.gate_pre[ei]], &[n, d, ff], n * ff));
+            s.push(self.gpu.step(MATMUL, &[&lb.xn2, self.w(&ep("w_up.weight")), &lb.up[ei]], &[n, d, ff], n * ff));
+            s.push(self.gpu.step(SILU, &[&lb.gate_pre[ei], &lb.up[ei], &lb.h[ei]], &[n * ff], n * ff));
+            s.push(self.gpu.step(MATMUL, &[&lb.h[ei], self.w(&ep("w_down.weight")), &lb.expert_out[ei]], &[n, ff, d], n * d));
+            let acc = if ei == 0 { 0 } else { 1 };
+            s.push(self.gpu.step(SCALE_ADD, &[&lb.gate, &lb.expert_out[ei], &self.moe_acc], &[n, d, e, ei as u32, acc], n * d));
         }
-
-        // final norm + tied lm_head
-        s.push(self.gpu.step(RMSNORM, &[&self.res[c.n_layers as usize], self.w("norm.weight"), &self.xn_final], &[d, n, f(crate::RMS_EPS)], n));
-        s.push(self.gpu.step(MATMUL, &[&self.xn_final, self.w("token_emb.weight"), &self.logits], &[n, d, c.vocab], n * c.vocab));
-        s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, c.vocab, IGNORE], n));
-
-        s
+        s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.moe_acc, &self.res[l + 1]], &[n * d], n * d));
     }
 
     /// Run the (cached) backward pass: accumulate every parameter gradient
@@ -435,11 +474,26 @@ impl Trainer {
         // count (rewritten per batch since the masking varies).
         let n = self.b * self.t;
         self.gpu.write(&self.ce_grad_uni, &[n, self.cfg.vocab, IGNORE, f(self.count.get())]);
-        self.gpu.submit(&[], &self.bwd_steps);
+        if self.streamed.as_ref().is_some_and(StreamedStore::is_layer_streamed) {
+            // The weights of a layer-streamed build are not all on the device: the backward runs layer by layer in
+            // `adamw_step`, where the layers it loads are the ones it updates.
+            assert!(!self.backward_pending.replace(true), "toymoe layer-streamed full fine-tune: a second backward before the update (gradient accumulation) is not supported; every micro-batch is its own step");
+            return;
+        }
+        self.bwd_steps.submit(&self.gpu);
     }
 
-    /// Build the backward dispatch graph (constant across steps).
-    fn build_backward(&self) -> Vec<Step> {
+    /// Submit a recorded forward; a layer-streamed build loads each layer into its window slot as it is reached.
+    fn submit_forward(&self, tape: &LayerTape) {
+        match &self.streamed {
+            Some(stream) => stream.forward(&self.gpu, tape).unwrap_or_else(|e| panic!("toymoe layer-streamed forward: {e}")),
+            None => tape.submit(&self.gpu),
+        }
+    }
+
+    /// Build the backward dispatch graph (constant across steps): the head, one segment per layer from the last down,
+    /// then the embedding.
+    fn build_backward(&self) -> LayerTape {
         let c = &self.cfg;
         let n = self.b * self.t;
         let d = c.d_model;
@@ -448,8 +502,11 @@ impl Trainer {
         let hd = c.head_dim();
         let half = hd / 2;
         let n_layers = c.n_layers as usize;
+        let mut tape = LayerTape::default();
         // ---- output: cross-entropy grad, lm_head, final norm ----
-        let mut s: Vec<Step> = vec![
+        let mut s: Vec<Step> = Vec::new();
+        self.res.restore(&self.gpu, &mut s, n_layers);
+        s.extend([
             // Masked CE-grad reads its `[n, vocab, IGNORE, count]` from the dynamic
             // uniform (written per batch in `backward`), since `count` varies.
             self.gpu.step_buf(CE_GRAD, &self.ce_grad_uni, &[&self.logits, &self.targets, &self.d_logits], n * c.vocab),
@@ -460,9 +517,15 @@ impl Trainer {
             self.gpu.step(RMS_INV, &[&self.res[n_layers], &self.inv], &[d, n, f(crate::RMS_EPS)], n),
             self.gpu.step(RMSNORM_DW, &[&self.d_xn, &self.res[n_layers], &self.inv, self.g("norm.weight")], &[d, n], d),
             self.gpu.step(RMSNORM_DX, &[&self.res[n_layers], self.w("norm.weight"), &self.d_xn, &self.dres[n_layers]], &[d, n, f(crate::RMS_EPS)], n),
-        ];
+        ]);
+        tape.segment(&mut s, None);
 
         for l in (0..n_layers).rev() {
+            if self.saved.recomputes() {
+                // Every layer shares one set of activation buffers: rebuild this layer's from `res[l]` first.
+                self.res.restore(&self.gpu, &mut s, l);
+                self.layer_forward(l, &mut s);
+            }
             let lb = &self.layers[l];
             let pn = |name: &str| format!("blocks.{l}.{name}");
 
@@ -513,36 +576,98 @@ impl Trainer {
             s.push(self.gpu.step(RMSNORM_DW, &[&self.d_xn, &self.res[l], &self.inv, self.g(&pn("norm1.weight"))], &[d, n], d));
             s.push(self.gpu.step(RMSNORM_DX, &[&self.res[l], self.w(&pn("norm1.weight")), &self.d_xn, &self.d_tmp], &[d, n, f(crate::RMS_EPS)], n));
             s.push(self.gpu.step(ADD2, &[&lb.dxmid, &self.d_tmp, &self.dres[l]], &[n * d], n * d));
+            tape.segment(&mut s, Some(l));
         }
 
         // embedding backward (accumulates onto grad_emb which holds lm_head grad)
         s.push(self.gpu.step(EMB_BWD, &[&self.tokens, &self.dres[0], self.g("token_emb.weight")], &[n, d, c.vocab], c.vocab * d));
-
-        s
+        tape.segment(&mut s, None);
+        tape
     }
 
     /// One AdamW step matching the unified [`model::Model`] signature (optional
     /// global-norm clip + grad-accum scale); MoE trains with [`MOE_ADAM`].
     pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
-        self.opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale);
+        match &self.streamed {
+            Some(stream) => {
+                if stream.is_layer_streamed() {
+                    assert!(self.backward_pending.replace(false), "toymoe layer-streamed full fine-tune: adamw_step without a backward");
+                }
+                let args = model::resident_ft::StepArgs { step: t, lr, wd, adam, clip, extra_scale };
+                stream.adamw_step(&self.gpu, &self.ps, &self.opt, &self.bwd_steps, &args).unwrap_or_else(|e| panic!("toymoe layer-streamed update: {e}"));
+            }
+            None => self.opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale),
+        }
     }
 
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
-        self.ps.read_weight(&self.gpu, name)
+        match &self.streamed {
+            Some(stream) if stream.holds(name) => stream.read_weight(&self.gpu, name).unwrap_or_else(|e| panic!("toymoe: reading {name}: {e}")),
+            _ => self.ps.read_weight(&self.gpu, name),
+        }
     }
     pub fn read_grad(&self, name: &str) -> Vec<f32> {
+        self.assert_not_streamed_tensor(name);
         self.ps.read_grad(&self.gpu, name)
+    }
+
+    fn assert_not_streamed_tensor(&self, name: &str) {
+        assert!(!self.streamed.as_ref().is_some_and(|s| s.holds(name)), "toymoe: {name} streams through a layer window; no gradient outlives its layer");
     }
 
     /// Write a parameter's weights from host data (required by gradcheck via the
     /// `Model` trait, and by any host-driven weight surgery).
     pub fn write_weight(&self, name: &str, data: &[f32]) {
-        self.gpu.write(self.w(name), bytemuck::cast_slice(data));
+        match &self.streamed {
+            Some(stream) if stream.holds(name) => stream.write_weight(&self.gpu, name, data).unwrap_or_else(|e| panic!("toymoe: writing {name}: {e}")),
+            _ => self.gpu.write(self.w(name), bytemuck::cast_slice(data)),
+        }
     }
 
     /// Names of all trainable parameters.
     pub fn param_names(&self) -> Vec<String> {
         self.ps.params.iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    /// Keep what `policy` names of the forward: every layer's activations ([`SavedPolicy::Keep`]), or only the residual
+    /// between layers ([`SavedPolicy::Recompute`]), where every layer shares one set of activation buffers (the others
+    /// are released) and the backward replays each layer, every expert included, from its residual before its own
+    /// backward, those residuals optionally held in bf16 or FP8 ([`SavedPolicy::Quantized`], see [`Residuals`]). A
+    /// build only narrows what it keeps; widening again is refused by name.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        if !self.saved.narrows_to(policy) {
+            return Err(format!("toymoe: a build keeping {:?} cannot go back to {policy:?}", self.saved));
+        }
+        if policy == self.saved {
+            return Ok(());
+        }
+        if !self.saved.recomputes() {
+            if let Some(shared) = self.layers.first().cloned() {
+                self.layers.fill(shared);
+            }
+        }
+        if let SavedPolicy::Quantized(format) = policy {
+            self.res.quantize(&self.gpu, format, self.b * self.t, self.cfg.d_model).map_err(|e| format!("toymoe: {e}"))?;
+        }
+        self.saved = policy;
+        self.build_graphs();
+        Ok(())
+    }
+
+    /// Stream every per-layer tensor (every expert included) through a device window under `cfg` (see
+    /// [`model::streamed`]): the layers' f32 values and optimizer state move to the host, the device keeps the
+    /// window's slots. The embedding (the tied head) and the final norm stay in the store under its own optimizer.
+    pub fn set_resident(&mut self, cfg: &model::resident_ft::ResidentFtConfig) -> Result<(), String> {
+        if self.streamed.is_some() {
+            return Err("toymoe: the layers already stream".into());
+        }
+        let stream = StreamedStore::convert(&self.gpu, &mut self.ps, cfg.clone(), &model::streamed::blocks_layer).map_err(|e| format!("toymoe: {e}"))?;
+        self.opt.invalidate();
+        self.streamed = Some(stream);
+        // The recorded passes bound the store's buffers as they were: record them again over the window's slots
+        // (which also releases the per-layer buffers they held).
+        self.build_graphs();
+        Ok(())
     }
 
     /// Zero every parameter's gradient (call once per effective batch, before the
@@ -553,6 +678,7 @@ impl Trainer {
 
     /// Zero one parameter's gradient buffer (host-driven).
     pub fn zero_grad(&self, name: &str) {
+        self.assert_not_streamed_tensor(name);
         let numel = self.ps.numel(name);
         self.gpu.write(self.g(name), &vec![0u32; numel]);
     }
@@ -564,6 +690,7 @@ impl Trainer {
     /// gradient and no weight decay is a no-op - so a worker can train expert
     /// `e` against an immutable shared backbone, then return only its shard.
     pub fn freeze_grads_except_expert(&self, e: u32) {
+        assert!(self.streamed.is_none(), "toymoe: a layer-streamed build keeps no gradient past its layer, so there is none to freeze");
         let names = self.param_names();
         for name in &names {
             if expert_id_of(name) != Some(e) {
@@ -621,6 +748,20 @@ impl model::ModelConfig for Config {
     }
 }
 
+impl model::OffDeviceState for Trainer {
+    fn commit(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
+        let stream = self.streamed.as_ref().ok_or_else(|| std::io::Error::other("toymoe: no streamed state to commit"))?;
+        self.gpu.flush();
+        stream.commit(&self.gpu, dir, step)
+    }
+
+    fn restore(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
+        let stream = self.streamed.as_ref().ok_or_else(|| std::io::Error::other("toymoe: no streamed state to restore"))?;
+        self.gpu.flush();
+        stream.restore(&self.gpu, dir, step)
+    }
+}
+
 impl model::Model for Trainer {
     fn optimizer_state(&mut self) -> Option<model::OptimizerState<'_>> {
         Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: &self.opt })
@@ -628,6 +769,16 @@ impl model::Model for Trainer {
 
     fn optimizer_parts(&self) -> Option<model::OptimizerParts<'_>> {
         Some(model::OptimizerParts { gpu: &self.gpu, store: &self.ps, optim: &self.opt })
+    }
+
+    fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        Trainer::set_saved_policy(self, policy)
+    }
+    fn set_resident(&mut self, cfg: &model::resident_ft::ResidentFtConfig) -> Result<(), String> {
+        Trainer::set_resident(self, cfg)
+    }
+    fn off_device_state(&self) -> Option<&dyn model::OffDeviceState> {
+        self.streamed.as_ref().map(|_| self as &dyn model::OffDeviceState)
     }
 
     type Config = Config;
