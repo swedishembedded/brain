@@ -43,7 +43,7 @@ fn ops() -> Ops {
 /// Tensor `2l` and `2l + 1` are layer `l`'s two square linears: the same shape twice in a layer, so a slot pool
 /// must keep them apart.
 fn specs() -> Vec<ResidentSpec> {
-    (0..LAYERS).flat_map(|l| [("a", l), ("b", l)].map(|(leaf, l)| ResidentSpec { name: format!("layer{l}.{leaf}"), n: D as u32, k: D as u32, layer: l as u32 })).collect()
+    (0..LAYERS).flat_map(|l| [("a", l), ("b", l)].map(|(leaf, l)| ResidentSpec::linear(format!("layer{l}.{leaf}"), D as u32, D as u32, l as u32))).collect()
 }
 
 struct Task {
@@ -304,5 +304,151 @@ fn a_restored_layer_streamed_run_continues_exactly() {
         assert_eq!(masters(&ops, &mut a), masters(&ops, &mut b), "{value:?}");
         assert_eq!(a.step_count(), b.step_count());
     }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// ---- a table beside the streamed layers ------------------------------------------------------------------------
+
+/// The table every head test adds after the layers: a `[D, D]` output projection held as a [`ResidentSpec::table`].
+const HEAD: usize = 2 * LAYERS;
+
+fn specs_with_head() -> Vec<ResidentSpec> {
+    let mut specs = specs();
+    specs.push(ResidentSpec::table("head", D as u32, D as u32));
+    specs
+}
+
+fn task_with_head() -> Task {
+    let mut task = task();
+    task.init.insert("head".into(), Lcg::random().vec_scaled(D * D, 0.15));
+    task
+}
+
+fn build_with_head(ops: &Ops, cfg: ResidentFtConfig, task: &Task) -> ResidentFullFt {
+    ResidentFullFt::new(ops, cfg, specs_with_head(), &task.init, &roomy()).unwrap()
+}
+
+/// The stack, then the head: the head's input joins the activations and `out` is the head's output.
+fn head_forward(ops: &Ops, ft: &mut ResidentFullFt, task: &Task, load: impl FnMut(&mut ResidentFullFt, usize)) -> Acts {
+    let mut acts = run_forward(ops, ft, task, load);
+    let x = upload(ops, &acts.out);
+    let y = ops.gpu().storage((M * D) as u64);
+    forward(ops, ft.weight(HEAD), &x, &y);
+    acts.out = ops.gpu().read(&y, M * D);
+    acts.inputs.push(x);
+    acts
+}
+
+fn head_backward(ops: &Ops, ft: &ResidentFullFt, acts: &Acts, dy: &DeviceBuffer) -> DeviceBuffer {
+    let dx = ops.gpu().storage((M * D) as u64);
+    let mut s = Vec::new();
+    ops.matmul_dx(&mut s, ft.weight(HEAD), dy, M as u32, &dx, false);
+    ft.weight_grad(ops, &mut s, HEAD, &acts.inputs[HEAD], dy, M as u32);
+    ops.gpu().submit(&[], &s);
+    dx
+}
+
+fn resident_head_step(ops: &Ops, ft: &mut ResidentFullFt, task: &Task, clip: Option<f32>) -> f64 {
+    let acts = head_forward(ops, ft, task, |_, _| {});
+    let mut dy = head_backward(ops, ft, &acts, &dout(ops, &acts, task));
+    for l in (0..LAYERS).rev() {
+        dy = layer_backward(ops, ft, &acts, l, &dy);
+    }
+    let sum_sq = if clip.is_some() { ft.grad_sum_sq(ops).unwrap() } else { 0.0 };
+    ft.step_scaled(ops, LR, optim::grad_multiplier(sum_sq, clip, 1.0)).unwrap();
+    loss(&acts.out, &task.target)
+}
+
+/// A layer-streamed step with a table: each pass covers the layers; the table's gradient joins the global norm and the
+/// table is updated once the backward is complete, by the step's final multiplier.
+fn streamed_head_step(ops: &Ops, ft: &mut ResidentFullFt, task: &Task, clip: Option<f32>) -> f64 {
+    let acts = head_forward(ops, ft, task, |ft, l| ft.load_layer(ops, l).unwrap());
+    let backward = |ft: &mut ResidentFullFt, p: StreamPass| {
+        ft.zero_grads(ops);
+        ft.begin_pass(p);
+        let mut dy = head_backward(ops, ft, &acts, &dout(ops, &acts, task));
+        for l in (0..LAYERS).rev() {
+            ft.begin_layer_backward(ops, l).unwrap();
+            dy = layer_backward(ops, ft, &acts, l, &dy);
+            ft.finish_layer(ops, l).unwrap();
+        }
+        ft.end_pass().unwrap()
+    };
+    let multiplier = match clip {
+        None => {
+            backward(ft, StreamPass::Update { lr: LR, grad_multiplier: 1.0 });
+            1.0
+        }
+        Some(_) => {
+            let measured = backward(ft, StreamPass::Measure);
+            let multiplier = optim::grad_multiplier(measured.sum_sq + ft.table_grad_sum_sq(ops), clip, 1.0);
+            backward(ft, StreamPass::Update { lr: LR, grad_multiplier: multiplier });
+            multiplier
+        }
+    };
+    ft.update_tables(ops, LR, multiplier).unwrap();
+    loss(&acts.out, &task.target)
+}
+
+fn all_masters(ops: &Ops, ft: &mut ResidentFullFt) -> Vec<Vec<u32>> {
+    (0..=HEAD).map(|i| ft.read_master(ops, i).unwrap().into_iter().map(f32::to_bits).collect()).collect()
+}
+
+/// Spec: a table lives in the resident state in bf16 whatever the linears' encoding, stays on the device while the
+/// layers stream (the window's bytes plus the table's), trains, and a layer-streamed step with it gives the resident
+/// step's bits, with no clip and with an active clip that spans the table.
+#[test]
+fn a_table_trains_in_bf16_beside_streamed_layers_with_the_resident_steps_bits() {
+    let ops = ops();
+    let task = task_with_head();
+    let table_bytes = ResidentValue::Bf16.device_bytes(D as u64, D as u64);
+    for value in VALUES {
+        for clip in [None, Some(1e-3f32)] {
+            let mut resident = build_with_head(&ops, config(value, None, ClipPass::TwoPass), &task);
+            let mut streamed = build_with_head(&ops, config(value, Some(1), ClipPass::TwoPass), &task);
+            for ft in [&resident, &streamed] {
+                assert!(matches!(ft.weight(HEAD), Weight::BF16 { .. }), "{value:?}: the table is held in bf16");
+            }
+            assert_eq!(streamed.device_weight_bytes(), 2 * value.device_bytes(D as u64, D as u64) + table_bytes, "{value:?}: one layer and the table");
+            for step in 0..4 {
+                let want = resident_head_step(&ops, &mut resident, &task, clip);
+                let got = streamed_head_step(&ops, &mut streamed, &task, clip);
+                assert_eq!(want.to_bits(), got.to_bits(), "{value:?} clip {clip:?} step {step}: loss");
+            }
+            let (a, b) = (all_masters(&ops, &mut resident), all_masters(&ops, &mut streamed));
+            assert_eq!(a, b, "{value:?} clip {clip:?}: masters");
+            let init: Vec<u32> = task.init["head"].iter().map(|v| v.to_bits()).collect();
+            assert_ne!(a[HEAD], init, "{value:?} clip {clip:?}: the table trained");
+        }
+    }
+}
+
+/// Spec: a layer-streamed run with a table restored from a committed checkpoint continues exactly: the restored table
+/// reaches its device slot (it never reloads on its own), so the continued steps match the uninterrupted run.
+#[test]
+fn a_restored_layer_streamed_run_with_a_table_continues_exactly() {
+    let ops = ops();
+    let task = task_with_head();
+    let dir = std::env::temp_dir().join(format!("brain-layer-ft-table-resume-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ckpt = CheckpointDir::new(&dir).unwrap();
+    let cfg = || config(ResidentValue::Fp8E4M3 { block: 128 }, Some(1), ClipPass::TwoPass);
+    let mut a = build_with_head(&ops, cfg(), &task);
+    for _ in 0..2 {
+        streamed_head_step(&ops, &mut a, &task, Some(1e-3));
+    }
+    a.commit(&ops, &ckpt, &a.run_state(0, vec![])).unwrap();
+    let mut b = build_with_head(&ops, cfg(), &task);
+    // A different history first, so the table's device slot holds a stale value when the checkpoint is restored.
+    for _ in 0..3 {
+        streamed_head_step(&ops, &mut b, &task, None);
+    }
+    b.restore(&ops, &ckpt).unwrap().expect("a checkpoint exists");
+    for step in 0..2 {
+        let want = streamed_head_step(&ops, &mut a, &task, Some(1e-3));
+        let got = streamed_head_step(&ops, &mut b, &task, Some(1e-3));
+        assert_eq!(want.to_bits(), got.to_bits(), "step {step} after the restore: loss");
+    }
+    assert_eq!(all_masters(&ops, &mut a), all_masters(&ops, &mut b));
     std::fs::remove_dir_all(&dir).unwrap();
 }

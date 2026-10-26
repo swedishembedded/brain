@@ -145,8 +145,12 @@ A master is required (a resident low-precision value loses sub-spacing
 updates), and the planner refuses a configuration before loading
 (`resident_ft::check_fits` over the weights, gradients, host-side master and
 state and the caller's other demands). qwen3 and qwen35 wire it as
-`train_full_resident` / `new_resident`; the embedding, head and norms train in
-fp32 on the device, and the clip spans both groups. The step itself is one
+`train_full_resident` / `new_resident`. The vocabulary tables (the embedding
+and an untied LM head, `ResidentRole::Table`) live in the same state in bf16,
+whatever the linears' encoding, with their master and moments off the device;
+the embedding gradient scatters over the distinct looked-up rows only
+(`Ops::embedding_grad`). Only the norms train in fp32 on the device, and the
+clip spans both groups. The step itself is one
 generic function, `resident_ft::adamw_step`: a model supplies its backward and
 its device optimizer through `ResidentBackward`, and the global gradient norm
 is reduced on the device (`model::gradnorm`: `gradnorm_part`, with a bf16 twin
@@ -160,8 +164,10 @@ in its device encoding; a layer's tensors are copied into one of a bounded set o
 device slots when the forward or the backward reaches it
 (`ResidentFullFt::load_layer`), and the gradients of a layer go to one
 gradient lane per tensor shape that the next layer reuses. The device holds
-`window` layers of weights and one layer of gradients, whatever the depth, and
-the planner prices exactly that (`resident_ft::demands`).
+`window` layers of weights and one layer of gradients, whatever the depth, plus
+the bf16 tables and their gradients, which stay resident for the whole step and
+are updated once the backward is complete, by the step's final multiplier; the
+planner prices exactly that (`resident_ft::demands`).
 
 A layer is updated between the backward segments, as soon as its gradient is
 complete (`begin_pass` / `finish_layer` / `end_pass`): nothing later in the

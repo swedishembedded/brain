@@ -26,6 +26,10 @@
 // Still no atomics and still no race: one invocation owns each output element,
 // exactly as in emb_bwd.
 //
+// An entry of 0xFFFFFFFF is padding and is skipped: a caller whose dispatch
+// shape must not change from batch to batch (a recorded tape) passes the list
+// padded to a fixed length (`model::ops::uniq_padded`).
+//
 // **`uniq` must contain every distinct value in `tokens`.** A missing id is
 // not an error this kernel can see - its gradient is simply never scattered,
 // and the parameter it belongs to stops learning while everything else keeps
@@ -57,6 +61,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let total = p.n_uniq * p.d_model;
     if (gidx >= total) { return; }
     let v = uniq[gidx / p.d_model];
+    if (v == 0xFFFFFFFFu) { return; }
     let c = gidx % p.d_model;
     var acc = 0.0;
     for (var n: u32 = 0u; n < p.n_rows; n = n + 1u) {

@@ -98,8 +98,12 @@ impl Default for TrainOpts {
 /// bits, so a narrower request for the base gives them bf16. MTP shares the
 /// tables with its own fp32 path and keeps them fp32.
 pub(crate) fn table_tier(tier: &TierPolicy, cfg: &Qwen35Config, train: bool, name: &str) -> Option<Dtype> {
-    let is_table = name == "tok.weight" || name == cfg.head_weight();
-    (train && cfg.lora.is_some() && !cfg.mtp && tier.quantizes_anything() && is_table).then_some(Dtype::BF16)
+    (train && cfg.lora.is_some() && !cfg.mtp && tier.quantizes_anything() && is_table(cfg, name)).then_some(Dtype::BF16)
+}
+
+/// Whether `name` is one of the `[vocab, d_model]` tables: the embedding, or an untied LM head.
+pub(crate) fn is_table(cfg: &Qwen35Config, name: &str) -> bool {
+    name == "tok.weight" || name == cfg.head_weight()
 }
 
 /// `true` when `w` is read with fp32 (unquantized) activations: the tiers

@@ -49,7 +49,7 @@ TABLES = [
     ("Language models", ["qwen3", "qwen35", "qwen35moe", "glmdsa", "gpt2"],
      [("full_ft", "Full fine-tune"), ("lora_f32", "LoRA, fp32 base"), ("lora_bf16", "LoRA, bf16 base"),
       ("lora_int8", "LoRA, int8 base"), ("lora_nf4", "LoRA, NF4 base (QLoRA)"), ("lora_fp8", "LoRA, FP8 base"), ("other", "Other")],
-     "No architecture offers a full fine-tune over a quantized or fp8 base, and\nnone stores trainable parameters or optimizer moments below fp32.\n"),
+     "No architecture offers a full fine-tune over a quantized or fp8 base. Trainable\nparameters, gradients and optimizer moments are held below fp32 only where a\ncell says so.\n"),
     ("Image and video generators", ["flux2", "s3dit", "wan"],
      [("lora_f32", "LoRA, fp32 base"), ("lora_int8", "LoRA, int8 base"), ("other", "Other")], ""),
     ("Serving adapters and KV tiers", ["qwen3", "qwen35", "qwen35moe"],

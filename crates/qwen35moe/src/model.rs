@@ -3088,7 +3088,7 @@ impl Qwen35 {
                 // Chunked: recompute each chunk's logits, turn them into the logit gradient and
                 // apply the head, never holding n * vocab.
                 let name = self.cfg.head_weight();
-                let dw = self.trainable(name).then(|| self.g(name));
+                let dw = self.trainable(name).then(|| model::head_ce::HeadGrad { buf: self.g(name), dtype: model::ops::GradDtype::F32 });
                 let mut s = Vec::new();
                 head.backward_steps(
                     &self.ops,

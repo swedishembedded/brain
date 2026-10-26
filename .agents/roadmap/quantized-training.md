@@ -90,6 +90,15 @@ The per-cell matrix and its tests are `docs/reference/training-capabilities.md`.
   planner refusal, streamed export and transactional resume (b87dd8e0d, 4ce2d9357); one typed
   `FitOpts` precision, the planner narrowing optimizer state only when authorized, and exact
   resume for every full fine-tune (24ada03fa, adab58541).
+- D Vocabulary tables in the resident state: the embedding table and an untied LM head are
+  `ResidentRole::Table` tensors (bf16 whatever the linears' encoding, master and moments off the
+  device, bf16 or f32 gradient), resident for the whole step and updated after the backward in a
+  layer-streamed one; the head's bf16 gradient is produced in bounded vocabulary runs
+  (`HeadGrad`), the embedding gradient scatters over the distinct looked-up rows
+  (`Ops::embedding_grad`, a padded list a tape replays), the host update reads gradients through
+  a bounded window (`Ops::read_range`), and a tensor wider than one storage binding is refused by
+  name. Wired into qwen3 and qwen35: at the 27B shape this removes the fp32 table value, gradient
+  and two moments (16 bytes a parameter, about 40 GB) from the device.
 - D Memory: `model::saved` saved-activation policy (keep, recompute, bf16/fp8 boundaries)
   priced in memplan and wired into qwen3 and qwen35 LoRA training (a4a1242bc); flash attention
   backward without `[H,T,T]` probabilities for qwen35moe (fc6df1080) and flux2, including the
@@ -132,7 +141,21 @@ The per-cell matrix and its tests are `docs/reference/training-capabilities.md`.
 - O Native FP8 and NVFP4 tensor-core GEMMs through the provider (portable decode path today).
 - O Removal of the deprecated `--<architecture>-<option>` aliases (`model-flags.allow`).
 - O PiSSA, EVA and LoftQ initialization; LoHa, OFT and VeRA.
-- O Full fine-tune on qwen35moe and glmdsa over resident packed weights (qwen35 has it).
+- O Full fine-tune on qwen35moe and glmdsa over resident packed weights (qwen35 has it). qwen35moe
+  first needs bf16 storage variants of its expert training kernels (`model::moe` reads fp32 expert
+  buffers), and its training forward keeps every expert's activations for every row
+  (`MoeActs`: `n * n_experts * moe_ff` words per projection).
+- O Device memory telemetry: live, reserved (allocator cache), and peak bytes per step, from every
+  backend, in the step report; today only the CUDA backend counts live driver blocks
+  (`backend_cuda::live`) and nothing reports a high-water mark. The freed-block cache trades
+  throughput for about 14 GiB of reserved memory at 8K tokens (knowledge 310, 311).
+- O Training state sharded over two devices (optimizer state and masters split by tensor, global
+  clip over both); only the layer pipeline splits a model across devices today.
+- O The value read of `DeviceTiles` (commit, export, a tensor without a master) still decodes a
+  whole tensor on the host; gradients are read through a bounded window.
+- O Generic optimizer-state precision for every `ParamStore` trainer: only qwen3 and qwen35 build
+  their store under the run's policy; the other full trainers (qwen35moe, glmdsa, gpt2, ...) keep
+  fp32 device moments.
 
 ## Phases
 

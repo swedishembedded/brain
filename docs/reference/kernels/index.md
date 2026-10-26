@@ -237,6 +237,7 @@ load of it must already be bare-identifier-indexed.
 | [`emb_bwd`](../../../crates/kernels/wgsl/emb_bwd.wgsl) | Embedding backward (also the tied lm_head's weight) | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`emb_bwd_part`](../../../crates/kernels/wgsl/emb_bwd_part.wgsl) | Stage one of the embedding backward: per block of rows, each vocabulary row's partial gradient | one thread per (row block, vocabulary row, channel), serial scan of its block | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`emb_bwd_uniq`](../../../crates/kernels/wgsl/emb_bwd_uniq.wgsl) | Embedding backward over the DISTINCT looked-up rows only - compact twin of emb_bwd | one thread per (distinct row, channel), serial scan of the tokens | 3/5 | ✓ | ✓ | - | - | f32 |
+| [`emb_bwd_uniq_bf16`](../../../crates/kernels/wgsl/emb_bwd_uniq_bf16.wgsl) | Embedding backward into a packed bf16 gradient, over the DISTINCT looked-up rows only | one thread per (distinct row, channel pair), serial scan of the tokens, round to nearest even | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`embed`](../../../crates/kernels/wgsl/embed.wgsl) | Embedding gather: x[t, c] = emb[token[t], c] | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32\|bf16\|f16 |
 | [`embed_tile`](../../../crates/kernels/wgsl/embed_tile.wgsl) | Embedding gather over a VOCAB TILE | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32\|bf16\|f16 |
 | [`exp`](../../../crates/kernels/wgsl/exp.wgsl) | Elementwise exponential | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |

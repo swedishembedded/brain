@@ -683,6 +683,12 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (rows, d, u) = (p(0)?, p(1)?, p(2)?);
             f(d * (rows + u), 4 * (2 * u * d + rows * d + rows + u))
         }
+        // params [n_rows, d_model, n_uniq]: emb_bwd_uniq into a packed bf16
+        // gradient, two bytes read and written per element.
+        "emb_bwd_uniq_bf16" => {
+            let (rows, d, u) = (p(0)?, p(1)?, p(2)?);
+            f(d * (rows + u), 4 * u * d + 4 * (rows * d + rows + u))
+        }
         // params [n_idx, d, n_rows_out].
         "row_scatter" => {
             let (ni, d) = (p(0)?, p(1)?);

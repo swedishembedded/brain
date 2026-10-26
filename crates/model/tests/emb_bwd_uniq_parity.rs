@@ -104,3 +104,65 @@ fn the_selector_keeps_the_reference_when_every_row_is_looked_up() {
     let step = block::emb_bwd_step(&gpu, &ids, &idx, None, &dx, &gr, 8, 2, 8);
     assert_eq!(step.meta().unwrap().kernel, ids.emb_bwd);
 }
+
+fn to_bf16_bits(v: f32) -> u16 {
+    let b = v.to_bits();
+    if v.is_nan() {
+        return ((b >> 16) | 0x40) as u16;
+    }
+    ((b + 0x7FFF + ((b >> 16) & 1)) >> 16) as u16
+}
+
+/// Spec: `Ops::embedding_grad` over a distinct-id list padded to a fixed length (the form a recorded tape replays)
+/// scatters exactly what the reference scatters into an fp32 gradient, and into a bf16 gradient adds each row's f32
+/// sum (ascending token order) to the stored value with one round to nearest even. Rows never looked up keep their
+/// bits in both.
+#[test]
+fn the_embedding_gradient_op_matches_the_reference_in_f32_and_bf16() {
+    use model::ops::{training_kernel_list, uniq_padded, EmbeddingGrad, GradDtype, Ops};
+    // The reference kernel beside the training set the op draws on.
+    let list: &'static [(&str, &str)] = Box::leak(training_kernel_list().iter().copied().chain([("emb_bwd", kernels::EMB_BWD)]).collect::<Vec<_>>().into_boxed_slice());
+    let ops = Ops::new(gpu_core::Gpu::new(list)).expect("Ops::new");
+    let gpu = ops.gpu();
+    let kref = gpu.kernel_index("emb_bwd").unwrap();
+    for &(rows, d, table) in SHAPES {
+        let tok = tokens(rows, table, 3);
+        let uniq = uniq_padded(&tok, rows as usize);
+        let base: Vec<f32> = (0..table * d).map(|i| ((i % 19) as f32 - 9.0) * 0.375).collect();
+        let dx: Vec<f32> = (0..rows * d).map(|i| ((i % 29) as f32 - 14.0) * 0.0625).collect();
+        let idx = gpu.storage(rows as u64);
+        gpu.write(&idx, &tok);
+        let ub = gpu.storage(rows as u64);
+        gpu.write(&ub, &uniq);
+        let dxb = gpu.storage(dx.len() as u64);
+        gpu.write_f32(&dxb, &dx);
+        let grad = |dw: &gpu_core::DeviceBuffer, dtype| {
+            let mut s = Vec::new();
+            ops.embedding_grad(&mut s, &EmbeddingGrad { tokens: &idx, uniq: &ub, n_uniq: rows, d_x: &dxb, n_rows: rows, width: d, dw, grad: dtype });
+            gpu.submit(&[], &s);
+        };
+
+        let want = gpu.storage(base.len() as u64);
+        gpu.write_f32(&want, &base);
+        gpu.submit(&[], &[gpu.step(kref, &[&idx, &dxb, &want], &[rows, d, table], table * d)]);
+        let got = gpu.storage(base.len() as u64);
+        gpu.write_f32(&got, &base);
+        grad(&got, GradDtype::F32);
+        let (want, got) = (gpu.read(&want, base.len()), gpu.read(&got, base.len()));
+        assert!(want.iter().zip(&got).all(|(a, b)| a.to_bits() == b.to_bits()), "rows {rows} d {d} table {table}: f32 gradient");
+
+        let packed: Vec<u32> = base.chunks(2).map(|p| u32::from(to_bf16_bits(p[0])) | (u32::from(to_bf16_bits(p[1])) << 16)).collect();
+        let bf16 = gpu.storage(packed.len() as u64);
+        gpu.write(&bf16, &packed);
+        grad(&bf16, GradDtype::Bf16);
+        let got: Vec<u16> = gpu.read(&bf16, packed.len()).iter().flat_map(|w| [(w.to_bits() & 0xFFFF) as u16, (w.to_bits() >> 16) as u16]).collect();
+        for v in 0..table as usize {
+            for c in 0..d as usize {
+                let stored = f32::from_bits(u32::from(to_bf16_bits(base[v * d as usize + c])) << 16);
+                let sum = tok.iter().enumerate().filter(|(_, &t)| t as usize == v).fold(0f32, |acc, (n, _)| acc + dx[n * d as usize + c]);
+                let want = if tok.contains(&(v as u32)) { to_bf16_bits(stored + sum) } else { to_bf16_bits(stored) };
+                assert_eq!(got[v * d as usize + c], want, "rows {rows} d {d} table {table}: bf16 gradient at row {v} channel {c}");
+            }
+        }
+    }
+}

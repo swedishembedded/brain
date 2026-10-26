@@ -82,7 +82,7 @@ const CE_VALUE: usize = 19;
 const CE_GRAD: usize = 20;
 const MATMUL_DX: usize = 21;
 const MATMUL_DW: usize = 22;
-const EMB_BWD: usize = 23;
+// 23 is `emb_bwd`, kept registered so the positions after it hold; the embedding gradient is `Ops::embedding_grad`.
 const ADAMW: usize = 24;
 const GRADNORM_SQ: usize = 25;
 const GRAD_SCALE: usize = 26;
@@ -621,20 +621,31 @@ fn linear_dims(cfg: &QwenConfig, leaf: &str) -> (u32, u32) {
     }
 }
 
-/// The linears of `shard` a resident full fine-tune holds on the device in its own encoding.
+/// The tensors of `shard` a resident full fine-tune holds in its own state: the linears in the run's encoding, then
+/// the vocabulary tables the shard owns (the embedding table, and an untied LM head) in bf16. The norms stay in the
+/// parameter store.
 pub fn resident_specs(cfg: &QwenConfig, shard: &Shard) -> Vec<model::resident_ft::ResidentSpec> {
+    use model::resident_ft::ResidentSpec;
     let mut specs = Vec::new();
     for l in shard.start..shard.end {
         for leaf in crate::q8::Q8::LINEARS {
             let (n, k) = linear_dims(cfg, leaf);
-            specs.push(model::resident_ft::ResidentSpec { name: format!("blocks.{l}.{leaf}"), n, k, layer: l as u32 });
+            specs.push(ResidentSpec::linear(format!("blocks.{l}.{leaf}"), n, k, l as u32));
         }
+    }
+    let head = cfg.head_weight();
+    let tied = head == "tok.weight";
+    if shard.embed || (tied && shard.head) {
+        specs.push(ResidentSpec::table("tok.weight", cfg.vocab, cfg.d_model));
+    }
+    if !tied && shard.head {
+        specs.push(ResidentSpec::table(head, cfg.vocab, cfg.d_model));
     }
     specs
 }
 
 /// Refuse a resident full fine-tune that does not fit, before anything is loaded: the planner's arithmetic over the
-/// resident weights, gradients, host-side master and state, and the demands of the fp32 remainder.
+/// resident weights, gradients, host-side master and state, and the demands of the fp32 norms.
 pub fn check_resident_fits(cfg: &QwenConfig, shard: &Shard, plan: &ResidentPlan) -> Result<model::memplan::PlanReport, String> {
     model::resident_ft::check_fits(&plan.cfg, &resident_specs(cfg, shard), &plan.budget())
 }
@@ -662,6 +673,10 @@ pub struct Qwen {
     count: Cell<f32>,
 
     tokens: DeviceBuffer,
+    /// The distinct ids of `tokens`, padded to `b * t` entries ([`model::ops::uniq_padded`]): the embedding gradient
+    /// scatters over these rows only, with one dispatch shape the recorded backward replays. A training build's embed
+    /// stage has one.
+    tok_uniq: Option<DeviceBuffer>,
     targets: DeviceBuffer,
     res: Vec<DeviceBuffer>,
     /// The layer-boundary residuals in a narrow format ([`SavedPolicy::Quantized`]). `res` then holds two
@@ -1175,8 +1190,8 @@ impl Qwen {
         Ok(Qwen::new_impl(cfg, b, t, init, true, shard, &TierPolicy::uniform(Dtype::F32), false, gemm, SavedPolicy::Recompute, full))
     }
 
-    /// A resident low-precision full fine-tune build (see [`ResidentPlan`]): whole model, fp32 remainder, the
-    /// per-layer linears at `plan.cfg.value` with their master copy off the device. Refuses, before allocating, a
+    /// A resident low-precision full fine-tune build (see [`ResidentPlan`]): whole model, fp32 norms, the per-layer
+    /// linears at `plan.cfg.value` and the bf16 tables with their master copy off the device. Refuses, before allocating, a
     /// plan that does not fit.
     pub fn new_resident(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, plan: &ResidentPlan, gemm: GemmPrecision) -> Result<Qwen, String> {
         Qwen::new_full(cfg, b, t, init, gemm, &FullFtBuild { precision: model::TrainPrecision::default(), offload: false, resident: Some(plan.clone()) })
@@ -1341,7 +1356,7 @@ impl Qwen {
         // them out so no fp32 copy is ever uploaded alongside the packed one.
         // Without this filter an f16 build would be BIGGER than fp32 (1.0x
         // master copy + 0.5x packed), not half the size.
-        assert!(resident.is_none() || (train && cfg.lora.is_none() && !tiers.quantizes_anything() && !decode_only), "a resident low-precision build is a full fine-tune: training, no adapter, fp32 remainder");
+        assert!(resident.is_none() || (train && cfg.lora.is_none() && !tiers.quantizes_anything() && !decode_only), "a resident low-precision build is a full fine-tune: training, no adapter, an fp32 base");
         let quantized = tiers.quantizes_anything() || resident.is_some();
         // A LoRA build freezes the embedding and the head, so a bf16 base
         // holds them in bf16 as well (on a device that runs the tier).
@@ -1349,8 +1364,10 @@ impl Qwen {
         // An int8 base reads fp32 activations (its kernels decode the weight): the frozen int8 base of a LoRA build
         // and the resident int8 weights of a quantization-aware full fine-tune.
         let int8_base = lora_base_tier && tiers.dtypes().any(|dt| dt == Dtype::I8) || resident.is_some_and(|r| r.cfg.value == model::resident_ft::ResidentValue::Int8);
-        // The tables of a half-precision or int8 base are held in bf16.
-        let half_tables = lora_base_tier && Dtype::BF16.promote(&ops.caps().numeric) == Dtype::BF16;
+        // The tables of a half-precision or int8 base are held in bf16, and so are the trained tables of a resident
+        // full fine-tune (its own state holds them).
+        let half_tables = (lora_base_tier || resident.is_some()) && Dtype::BF16.promote(&ops.caps().numeric) == Dtype::BF16;
+        assert!(resident.is_none() || half_tables, "a resident full fine-tune holds its tables in bf16, which this device does not run");
         assert!(!half_tables || cfg.d_model.is_multiple_of(2), "a bf16 table packs two values to a word, so d_model must be even");
         let is_table = |name: &str| name == "tok.weight" || name == "lm_head.weight";
         let plist: Vec<(String, usize)> = shard_param_list(&cfg, &shard)
@@ -1424,6 +1441,7 @@ impl Qwen {
             n * 4,
             gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST,
         );
+        let tok_uniq = (train && shard.embed).then(|| gpu.storage(n));
         let targets = gpu.buffer(
             "targets",
             n * 4,
@@ -1585,7 +1603,11 @@ impl Qwen {
         }
 
         let mut tables: HashMap<String, DeviceBuffer> = HashMap::new();
-        if half_tables {
+        if let Some(ft) = &resident_ft {
+            for i in ft.tables() {
+                tables.insert(ft.specs()[i].name.clone(), ft.table_words(i).clone());
+            }
+        } else if half_tables {
             for (name, _) in shard_param_list(&cfg, &shard).into_iter().filter(|(n, _)| is_table(n)) {
                 let built = model::ops::upload_from_source(&ops, src, &name, v as usize, d as usize, Dtype::BF16, &staging);
                 assert!(built.is_some(), "qwen: missing init weight {name}");
@@ -1650,6 +1672,7 @@ impl Qwen {
             rounding_seed: Cell::new(None),
             opt,
             tokens,
+            tok_uniq,
             targets,
             res,
             layers,
@@ -1742,6 +1765,9 @@ impl Qwen {
             panic!("batched-forward token id {bad} exceeds vocab {} (checkpoint/tokenizer mismatch?)", self.cfg.vocab);
         }
         self.gpu.write(&self.tokens, x);
+        if let Some(uniq) = &self.tok_uniq {
+            self.gpu.write(uniq, &model::ops::uniq_padded(x, (self.b * self.t) as usize));
+        }
         self.gpu.write(&self.targets, y);
         let c = y.iter().filter(|&&v| v != IGNORE).count();
         self.count.set(c.max(1) as f32);
@@ -1763,6 +1789,18 @@ impl Qwen {
     }
     fn g(&self, name: &str) -> &DeviceBuffer {
         self.ps.g(name)
+    }
+
+    /// The gradient of table `name` (the embedding, an untied head) and its dtype: the resident state's on a resident
+    /// full fine-tune, the parameter store's fp32 one where the table trains there, `None` for a frozen table.
+    fn table_grad(&self, name: &str) -> Option<(DeviceBuffer, model::ops::GradDtype)> {
+        if let Some(ft) = &self.resident {
+            let ft = ft.borrow();
+            if let Some(i) = ft.index_of(name) {
+                return Some((ft.grad_buffer(i).clone(), ft.grad_dtype()));
+            }
+        }
+        self.trainable(name).then(|| (self.g(name).clone(), model::ops::GradDtype::F32))
     }
 
     /// The embedding / LM-head table `name`: its packed bf16 buffer on a
@@ -2542,6 +2580,7 @@ impl Qwen {
     /// Load `layer` into its device slots.
     fn stream_load(&self, layer: usize) {
         let mut ft = self.resident.as_ref().expect("layer-streamed builds are resident").borrow_mut();
+        self.gpu.flush();
         ft.load_layer(&self.ops, layer).unwrap_or_else(|e| panic!("qwen3 layer-streamed full fine-tune: loading layer {layer}: {e}"));
     }
 
@@ -2561,7 +2600,6 @@ impl Qwen {
         let n = self.b * self.t;
         let d = c.d_model;
         let ff = c.d_ff;
-        let v = c.vocab;
         let hd = c.head_dim;
         let hq = c.q_dim();
         let hkv = c.kv_dim();
@@ -2584,7 +2622,7 @@ impl Qwen {
             // never change with the batch. `enable_weighted_loss()` opts into
             // scaling the rows' gradient by their weights.
             if !self.external_head.get() {
-                let head = c.head_weight();
+                let head_dw = self.table_grad(c.head_weight());
                 let row_weights = self.weighted_ce.as_ref().map(|w| RowWeights { weights: w.weights(), scratch: w.scratch() });
                 self.head_ce().backward_steps(
                     &self.ops,
@@ -2597,7 +2635,7 @@ impl Qwen {
                         grad_scale: GradScale::Buf(&self.inv_count),
                         logit_scale: 1.0,
                         row_weights,
-                        dw: self.trainable(head).then(|| self.g(head)),
+                        dw: head_dw.as_ref().map(|(buf, dtype)| model::head_ce::HeadGrad { buf, dtype: *dtype }),
                         forward_state_held: true,
                     },
                 );
@@ -2685,8 +2723,9 @@ impl Qwen {
 
         // embedding backward (tied: accumulates onto the head grad in tok.weight);
         // only the embed stage, which owns the embedding rows and dres[0].
-        if self.shard.embed && self.trainable("tok.weight") {
-            s.push(self.gpu.step(EMB_BWD, &[&self.tokens, &self.dres[0], self.g("tok.weight")], &[n, d, v], v * d));
+        if let Some((dw, grad)) = self.table_grad("tok.weight").filter(|_| self.shard.embed) {
+            let ids = self.tok_uniq.as_ref().expect("a training build's embed stage keeps the distinct ids");
+            self.ops.embedding_grad(&mut s, &model::ops::EmbeddingGrad { tokens: &self.tokens, uniq: ids, n_uniq: n, d_x: &self.dres[0], n_rows: n, width: d, dw: &dw, grad });
         }
         Tape { steps: s, ends }
     }
@@ -2695,6 +2734,7 @@ impl Qwen {
         self.backward_pending.set(false);
         self.ps.zero_grads(&self.gpu);
         if let Some(ft) = &self.resident {
+            self.gpu.flush();
             ft.borrow().zero_grads(&self.ops);
         }
     }
@@ -2718,6 +2758,7 @@ impl Qwen {
     pub fn export_resident(&self, path: &std::path::Path, encoding: &checkpoint::packed::QuantEncoding) -> Result<model::resident_ft::ResidentExport, String> {
         use checkpoint::packed::{QuantEncoding, TensorDescriptor, TensorSink};
         let ft = self.resident.as_ref().ok_or("export_resident: this model was not built as a resident low-precision full fine-tune")?;
+        self.gpu.flush();
         let mut ft = ft.borrow_mut();
         let encodings = vec![encoding.clone(); ft.specs().len()];
         let linear_descs = ft.export_descriptors(&encodings).map_err(|e| e.to_string())?;
@@ -2777,6 +2818,7 @@ impl Qwen {
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
         if let Some(i) = self.resident_index(name) {
             // The master copy: the highest-precision weight, which is what a saved checkpoint should carry.
+            self.gpu.flush();
             return self.resident.as_ref().expect("indexed").borrow_mut().read_master(&self.ops, i).unwrap_or_else(|e| panic!("qwen3 resident full fine-tune: reading {name}: {e}"));
         }
         match self.tables.get(name) {
@@ -2790,6 +2832,7 @@ impl Qwen {
     }
     pub fn write_weight(&self, name: &str, data: &[f32]) {
         if let Some(i) = self.resident_index(name) {
+            self.gpu.flush();
             self.resident.as_ref().expect("indexed").borrow_mut().write_master(&self.ops, i, data).unwrap_or_else(|e| panic!("qwen3 resident full fine-tune: writing {name}: {e}"));
             return;
         }
@@ -4030,6 +4073,10 @@ impl Qwen {
 }
 
 impl model::resident_ft::ResidentBackward for Qwen {
+    fn flush_backward(&self) {
+        self.gpu.flush();
+    }
+
     fn zero_remainder_grads(&self) {
         self.ps.zero_grads(&self.gpu);
     }
@@ -4070,6 +4117,7 @@ impl model::OffDeviceState for Qwen {
     fn commit(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
         let ckpt = optim::checkpoint::CheckpointDir::new(dir)?;
         if let Some(ft) = &self.resident {
+            self.gpu.flush();
             let mut ft = ft.borrow_mut();
             let run = ft.run_state(0, Vec::new());
             if run.step != step {
@@ -4088,6 +4136,7 @@ impl model::OffDeviceState for Qwen {
 
     fn restore(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
         let ckpt = optim::checkpoint::CheckpointDir::new(dir)?;
+        self.gpu.flush();
         let restored = match &self.resident {
             Some(ft) => ft.borrow_mut().restore_at(&self.ops, &ckpt, step)?.is_some(),
             None => self.with_offload_opt(|opt| opt.restore_at(&self.gpu, &self.ps, &ckpt, step))?.is_some(),

@@ -188,3 +188,31 @@ fn a_plan_that_does_not_fit_is_refused_and_the_window_makes_it_fit() {
     tight(&mut windowed, device);
     try_build(windowed, SavedPolicy::Keep).expect("a window fits where the whole model does not");
 }
+
+/// Spec: a resident full fine-tune holds the vocabulary tables (the embedding table and the untied LM head) in its own
+/// bf16 state with the master off the device, not as fp32 parameters with fp32 gradients and moments: both are bf16
+/// device weights, neither is a parameter-store tensor, and both train, resident or layer-streamed.
+#[test]
+fn the_vocabulary_tables_train_in_bf16_outside_the_parameter_store() {
+    let scratch = tmp("tables");
+    write_dataset(&scratch);
+    let opts = opts(3, 0.0);
+    for window in [None, Some(1)] {
+        let m = build(ResidentValue::Fp8E4M3 { block: 128 }, window, ClipPass::TwoPass, SavedPolicy::Keep);
+        let tables = ["tok.weight", "lm_head.weight"];
+        for name in tables {
+            assert_eq!(m.linear_dtype(name), Some(gpu_core::select::Dtype::BF16), "window {window:?}: {name} is a bf16 device weight");
+        }
+        let report = m.precision_report();
+        for name in tables {
+            let row = report.get(name).unwrap_or_else(|| panic!("window {window:?}: {name} is not in the precision report"));
+            assert_eq!(row.format, checkpoint::packed::QuantEncoding::bf16().to_string(), "window {window:?}: {name} is held as {}", row.format);
+        }
+        let before: Vec<Vec<f32>> = tables.iter().map(|n| m.read_weight(n)).collect();
+        let (_, m) = fit(m, &scratch, &opts);
+        for (name, before) in tables.iter().zip(before) {
+            assert_ne!(m.read_weight(name), before, "window {window:?}: {name} trained");
+        }
+    }
+    std::fs::remove_dir_all(&scratch).unwrap();
+}

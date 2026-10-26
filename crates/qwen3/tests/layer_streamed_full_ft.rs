@@ -117,12 +117,13 @@ fn a_layer_streamed_run_ends_exactly_where_the_resident_run_does() {
     std::fs::remove_dir_all(&scratch).unwrap();
 }
 
-/// Spec: the device holds the window's layers, not the model.
+/// Spec: the device holds the window's layers, not the model, beside the bf16 embedding table (tied to the head),
+/// which stays resident whatever the window.
 #[test]
 fn the_device_holds_the_window_not_the_model() {
-    let resident = build(ResidentValue::Bf16, None, ClipPass::TwoPass).resident_device_weight_bytes().unwrap();
-    let one = build(ResidentValue::Bf16, Some(1), ClipPass::TwoPass).resident_device_weight_bytes().unwrap();
-    let two = build(ResidentValue::Bf16, Some(2), ClipPass::TwoPass).resident_device_weight_bytes().unwrap();
+    let table = ResidentValue::Bf16.device_bytes(u64::from(cfg().vocab), u64::from(cfg().d_model));
+    let layers = |window| build(ResidentValue::Bf16, window, ClipPass::TwoPass).resident_device_weight_bytes().unwrap() - table;
+    let (resident, two, one) = (layers(None), layers(Some(2)), layers(Some(1)));
     assert_eq!((resident, two, one), (3 * one, 2 * one, one), "three layers resident, a window of two, a window of one");
 }
 

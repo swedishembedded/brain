@@ -142,7 +142,7 @@ fn config(value: ResidentValue, master: MasterPolicy, state: StateFormat, grad: 
 }
 
 fn specs() -> Vec<ResidentSpec> {
-    vec![ResidentSpec { name: "l1.weight".into(), n: H as u32, k: K0 as u32, layer: 0 }, ResidentSpec { name: "l2.weight".into(), n: O as u32, k: H as u32, layer: 1 }]
+    vec![ResidentSpec::linear("l1.weight", H as u32, K0 as u32, 0), ResidentSpec::linear("l2.weight", O as u32, H as u32, 1)]
 }
 
 fn roomy() -> ResidentBudget<'static> {

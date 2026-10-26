@@ -241,6 +241,59 @@ fn an_f32_head_accumulates_its_weight_gradient() {
     }
 }
 
+/// Spec: a trained bf16 head (a resident full fine-tune's table) accumulates its weight gradient into a bf16 buffer
+/// equal to the f64 reference of the weight it holds accumulated the same way (one rounding per chunk of tokens), up to
+/// one bf16 step per rounding, with the vocabulary in one window or several and
+/// with a tile budget small enough that each window's gradient is produced in several bounded runs of rows.
+#[test]
+fn a_bf16_head_accumulates_a_bf16_weight_gradient() {
+    use model::head_ce::{GradScale, HeadBackward, HeadGrad};
+    use model::ops::GradDtype;
+    let mut ops = ops();
+    // 37 vocabulary rows of 96 floats per bounded run: neither the window nor the vocabulary is a multiple of it.
+    ops.set_tile_budget_bytes(37 * 96 * 4);
+    let g = ops.gpu();
+    let p = problem(150, 96, 1000);
+    let w = head(&ops, &p, Dtype::BF16);
+    // The head accumulates one chunk of 64 tokens at a time into the bf16 gradient: the host reference adds each
+    // chunk's f64 product and rounds to bf16 after it.
+    let head_w = effective(&p.raw, p.v, p.d, Dtype::BF16);
+    let mut expected = vec![0f32; p.v * p.d];
+    // The largest value each element was rounded at: a rounding's error is half a bf16 step of the value rounded.
+    let mut largest = vec![0f64; p.v * p.d];
+    let mut roundings = 0;
+    for r0 in (0..p.n).step_by(64) {
+        let rows = 64.min(p.n - r0);
+        let part = reference(&p.hidden[r0 * p.d..(r0 + rows) * p.d], &head_w, rows, p.d, p.v, &p.labels[r0..r0 + rows], None, 1.0, 0.01);
+        for ((e, big), &x) in expected.iter_mut().zip(largest.iter_mut()).zip(&part.d_w) {
+            let sum = *e as f64 + x;
+            *big = big.max(sum.abs());
+            *e = f32::from_bits((model::half::f32_to_bf16(sum as f32) as u32) << 16);
+        }
+        roundings += 1;
+    }
+    for windows in [false, true] {
+        let hc = build(&ops, &p, &w, 64, windows);
+        let hidden = g.storage_init("hidden", &p.hidden);
+        let labels = g.storage(p.n as u64);
+        g.write(&labels, &p.labels);
+        let (d_hidden, dw) = (g.storage((p.n * p.d) as u64), g.storage((p.v * p.d / 2) as u64));
+        let mut s = Vec::new();
+        let grad = HeadGrad { buf: &dw, dtype: GradDtype::Bf16 };
+        let b = HeadBackward { hidden: &hidden, d_hidden: &d_hidden, n: p.n as u32, labels: &labels, grad_scale: GradScale::Const(0.01), logit_scale: 1.0, row_weights: None, dw: Some(grad), forward_state_held: false };
+        hc.backward_steps(&ops, &mut s, &b);
+        g.submit(&[], &s);
+        let got: Vec<f32> = g.read(&dw, p.v * p.d / 2).iter().flat_map(|w| [f32::from_bits(w.to_bits() << 16), f32::from_bits(w.to_bits() & 0xFFFF_0000)]).collect();
+        for (i, (&got, &want)) in got.iter().zip(&expected).enumerate() {
+            // The same accumulation in f64 per chunk, rounded to bf16 after each: where the f32 product and the f64
+            // reference round across a boundary differently, each rounding may differ by one bf16 step of the largest
+            // value rounded.
+            let step = f64::from(f32::from_bits(((largest[i] as f32).to_bits() & 0x7F80_0000).max(1 << 23))) / 128.0;
+            assert!((got - want).abs() as f64 <= roundings as f64 * step, "dW[{i}] windows={windows}: {got} vs {want}");
+        }
+    }
+}
+
 /// The extra device memory is the per-chunk scratch only: it does not grow with
 /// the number of tokens, and is far below the `n x vocab` logits it replaces.
 #[test]

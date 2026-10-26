@@ -193,16 +193,16 @@ pub fn plan_full_precision(cfg: &QwenConfig, opts: &FitOpts, offload: bool, capa
 }
 
 /// The resident low-precision full fine-tune model of `cfg` at `opts`' batch and context, placed through the
-/// planner: the resident weights and gradients on the device, the master copy and optimizer state in host memory,
-/// the fp32 embedding/head/norms and the activations on the device. A configuration the machine cannot hold is
+/// planner: the resident weights (the linears and the bf16 tables) and gradients on the device, the master copy and
+/// optimizer state in host memory, the fp32 norms and the activations on the device. A configuration the machine cannot hold is
 /// refused here, with the planner's arithmetic, before anything is allocated.
 pub fn build_resident(cfg: QwenConfig, opts: &FitOpts, init: &dyn TensorSource, resident: &model::resident_ft::ResidentFtConfig) -> std::io::Result<Qwen> {
     use model::memplan::{Category, Demand};
     let shard = crate::model::Shard::whole(cfg.n_layers as usize);
-    let linear_numel: u64 = crate::model::resident_specs(&cfg, &shard).iter().map(|s| s.n as u64 * s.k as u64).sum();
+    let resident_numel: u64 = crate::model::resident_specs(&cfg, &shard).iter().map(|s| s.n as u64 * s.k as u64).sum();
     let all_numel: u64 = crate::shard_param_list(&cfg, &shard).iter().map(|(_, n)| *n as u64).sum();
-    // fp32 remainder: value, gradient and the two AdamW moments on the device.
-    let remainder = Demand::fixed(Category::Weights, "fp32 embedding, head and norms (with gradients and moments)", (all_numel - linear_numel) * 4 * 4);
+    // fp32 remainder (the norms): value, gradient and the two AdamW moments on the device.
+    let remainder = Demand::fixed(Category::Weights, "fp32 norms (with gradients and moments)", (all_numel - resident_numel) * 4 * 4);
     let activations = crate::footprint::footprint_demands(&cfg, &shard, Dtype::F32, opts.batch_size, opts.block_size, true, false).into_iter().find(|d| d.category == Category::Activations).expect("a footprint always has activations");
     let plan = crate::model::ResidentPlan { cfg: resident.clone(), capacity: model::memplan::Capacity::measured(), others: vec![remainder, activations] };
     crate::model::check_resident_fits(&cfg, &shard, &plan).map_err(std::io::Error::other)?;

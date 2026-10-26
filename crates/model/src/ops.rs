@@ -465,7 +465,7 @@ pub fn kernel_list() -> &'static [(&'static str, &'static str)] {
 
 /// The kernels a frozen-base trainer needs beyond the [`REQUIRED_KERNELS`]
 /// facade set: the tiled bf16 input gradient and the kernels of the quantized-execution contract (the
-/// `weight_decode` variant of every stored tier, `copy_cols`, `accum_bf16`). A model that builds its own kernel
+/// `weight_decode` variant of every stored tier, `copy_cols`, `accum_bf16`, the embedding gradient). A model that builds its own kernel
 /// list appends this slice; [`training_kernel_list`] is the ready-made union
 /// with [`kernel_list`]. Kept out of [`REQUIRED_KERNELS`] on purpose: an `Ops`
 /// that never trains over a quantized or bf16 base must not have to register them.
@@ -480,6 +480,9 @@ pub fn frozen_base_kernels() -> &'static [(&'static str, &'static str)] {
             // that gathers and scatters tiles, and the bf16 gradient accumulation.
             ("copy_cols", kernels::COPY_COLS),
             ("accum_bf16", kernels::ACCUM_BF16),
+            // The embedding-table gradient over the distinct looked-up rows (`Ops::embedding_grad`).
+            ("emb_bwd_uniq", kernels::EMB_BWD_UNIQ),
+            ("emb_bwd_uniq_bf16", kernels::EMB_BWD_UNIQ_BF16),
             // The per-row reduction of `Ops::row_sq_norms`.
             ("row_dot", kernels::ROW_DOT),
             // The cooperative device gradient norm of a full fine-tune's weight gradients (`model::gradnorm`).
@@ -1206,7 +1209,7 @@ mod decoded;
 pub use sink::{rewrite_tile, upload_micro_bank, DeviceWeightSink, MicroBank};
 pub use upload_source::{stored_tier, stored_tier_policy, upload_fused_from_source, upload_from_source, upload_group_preserved, upload_preserved, FusedGroup};
 pub use upload_source::{conversion_policy, encoding_for};
-pub use tiled::{plan_linear, tile_rows, GradDtype, LinearPlan, DEFAULT_TILE_BUDGET_BYTES, GEMV_MAX_ROWS};
+pub use tiled::{plan_linear, tile_rows, uniq_padded, EmbeddingGrad, GradDtype, LinearPlan, DEFAULT_TILE_BUDGET_BYTES, GEMV_MAX_ROWS, UNIQ_PAD};
 
 impl Ops {
     /// [`Ops::with_selector`] with the default policy

@@ -37,7 +37,7 @@
 
 use gpu_core::{DeviceBuffer, Dispatch, Gpu, Step};
 
-use crate::ops::{Act, Ops, Weight};
+use crate::ops::{tile_rows, Act, GradDtype, Ops, Weight};
 
 pub use crate::train::IGNORE;
 
@@ -156,12 +156,20 @@ pub struct HeadBackward<'a> {
     pub grad_scale: GradScale<'a>,
     pub logit_scale: f32,
     pub row_weights: Option<RowWeights<'a>>,
-    /// `[V, d]` f32 gradient of an f32 head, accumulated into; `None` for a frozen head.
-    pub dw: Option<&'a DeviceBuffer>,
+    /// The head's `[V, d]` weight gradient, accumulated into; `None` for a frozen head.
+    pub dw: Option<HeadGrad<'a>>,
     /// True when `n` fits one chunk and the forward ran in the same recording
     /// context so its logits (and statistics, on a cooperative device) are still
     /// in the scratch: the backward then skips recomputing them.
     pub forward_state_held: bool,
+}
+
+/// A trained head's weight gradient: `[V, d]` elements stored as `dtype` (a bf16 gradient is two elements per word).
+/// It never depends on the head's own tier: `dW = d_logits^T hidden` does not read the weight.
+#[derive(Clone, Copy)]
+pub struct HeadGrad<'a> {
+    pub buf: &'a DeviceBuffer,
+    pub dtype: GradDtype,
 }
 
 /// The chunked LM head. See the module documentation.
@@ -187,6 +195,8 @@ pub struct HeadCe {
     /// up by their canonical names on this head's device; `None` on a model that
     /// does not register them, where the readout is simply unavailable.
     argmax: Option<(usize, usize)>,
+    /// The scratch of a bf16 weight gradient ([`Self::bf16_dw_scratch`]), allocated on first use.
+    bf16_dw: std::cell::RefCell<Option<(DeviceBuffer, DeviceBuffer)>>,
 }
 
 /// Partial `(value, index)` pairs per row the argmax readout reduces a logits row
@@ -300,6 +310,7 @@ impl HeadCe {
             coop,
             scale_buf: None,
             argmax: gpu.kernel_index("argmax_part").zip(gpu.kernel_index("argmax_final")),
+            bf16_dw: std::cell::RefCell::new(None),
         })
     }
 
@@ -505,17 +516,50 @@ impl HeadCe {
         }
     }
 
-    /// `dW[first.., :] += dy^T @ hidden[rows]`, `dy` dense `[rows, cols]`.
+    /// `dW[first.., :] += dy^T @ hidden[rows]`, `dy` dense `[rows, cols]`. An fp32 gradient is one product into its
+    /// window; a bf16 gradient is produced a bounded run of vocabulary rows at a time into an f32 scratch of
+    /// [`Ops::tile_budget_bytes`] and added with round to nearest even, so no `[V, d]` f32 copy ever exists.
     #[allow(clippy::too_many_arguments)]
-    fn dw_step(&self, ops: &Ops, s: &mut Vec<Step>, dy: &DeviceBuffer, hidden: &DeviceBuffer, dw: &DeviceBuffer, x: (u64, u64), rows: u32, cols: u32, first: u32) {
-        assert!(matches!(self.head, Weight::F32 { .. }), "HeadCe: only an f32 head has a weight gradient ({:?})", self.head.dtype());
+    fn dw_step(&self, ops: &Ops, s: &mut Vec<Step>, dy: &DeviceBuffer, hidden: &DeviceBuffer, dw: HeadGrad, x: (u64, u64), rows: u32, cols: u32, first: u32) {
         let d = self.d;
-        let (kind, grid) = match self.k.matmul_dw_reg {
-            Some(reg) if ops.fills_tile(cols, d) => (reg, Dispatch::Workgroups(cols.div_ceil(128) * d.div_ceil(128))),
-            _ => (self.k.matmul_dw, Dispatch::Threads(cols * d)),
+        let product = |s: &mut Vec<Step>, dy: &DeviceBuffer, out: &DeviceBuffer, window: (u64, u64), cols: u32| {
+            let (kind, grid) = match self.k.matmul_dw_reg {
+                Some(reg) if ops.fills_tile(cols, d) => (reg, Dispatch::Workgroups(cols.div_ceil(128) * d.div_ceil(128))),
+                _ => (self.k.matmul_dw, Dispatch::Threads(cols * d)),
+            };
+            s.push(ops.gpu().dispatch_sliced(kind, &[dy, hidden, out], &[(0, 0), x, window], &[rows, d, cols], grid));
         };
-        let window = (first as u64 * d as u64, cols as u64 * d as u64);
-        s.push(ops.gpu().dispatch_sliced(kind, &[dy, hidden, dw], &[(0, 0), x, window], &[rows, d, cols], grid));
+        match dw.dtype {
+            GradDtype::F32 => product(s, dy, dw.buf, (first as u64 * d as u64, cols as u64 * d as u64), cols),
+            GradDtype::Bf16 => {
+                assert!(d.is_multiple_of(2), "HeadCe: a bf16 head gradient needs an even d_model (got {d})");
+                let (scratch, sub_dy, sub) = self.bf16_dw_scratch(ops, cols);
+                for j0 in (0..cols).step_by(sub as usize) {
+                    let c = sub.min(cols - j0);
+                    let src = if sub < cols {
+                        s.push(ops.gpu().step(self.k.copy_cols, &[dy, &sub_dy], &[rows, c, cols, j0, c, 0], rows * c));
+                        &sub_dy
+                    } else {
+                        dy
+                    };
+                    product(s, src, &scratch, (0, c as u64 * d as u64), c);
+                    ops.accumulate_bf16(s, &scratch, dw.buf, c as u64 * d as u64, (first + j0) as u64 * d as u64);
+                }
+            }
+        }
+    }
+
+    /// The zeroed f32 product scratch and the `dy` column scratch of a bf16 head gradient over `cols` vocabulary
+    /// rows, with the rows one product covers. Allocated once per build; the accumulation clears the product scratch
+    /// after every use, so it stays zero between calls.
+    fn bf16_dw_scratch(&self, ops: &Ops, cols: u32) -> (DeviceBuffer, DeviceBuffer, u32) {
+        let mut slot = self.bf16_dw.borrow_mut();
+        let sub = tile_rows(self.vocab, self.d, ops.tile_budget_bytes(), 4);
+        let (scratch, sub_dy) = slot.get_or_insert_with(|| {
+            let gpu = ops.gpu();
+            (gpu.storage(sub as u64 * self.d as u64), gpu.storage_uninit(self.rows as u64 * sub as u64))
+        });
+        (scratch.clone(), sub_dy.clone(), sub.min(cols))
     }
 
     /// Immediate cross-entropy of `labels` over `hidden` (`[n, d]`): the loss,
@@ -559,7 +603,7 @@ impl HeadCe {
                 grad_scale: GradScale::Const(d_scale),
                 logit_scale,
                 row_weights: wbuf.as_ref().zip(scratch.as_ref()).map(|(weights, scratch)| RowWeights { weights, scratch }),
-                dw,
+                dw: dw.map(|buf| HeadGrad { buf, dtype: GradDtype::F32 }),
                 forward_state_held: false,
             },
         );

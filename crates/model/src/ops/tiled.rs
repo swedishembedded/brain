@@ -45,6 +45,38 @@ pub const DEFAULT_TILE_BUDGET_BYTES: u64 = 256 << 20;
 /// precision descriptors of `paramstore`.
 pub use paramstore::precision::GradDtype;
 
+/// The padding entry of a distinct-id list: the embedding-gradient kernels skip it.
+pub const UNIQ_PAD: u32 = u32::MAX;
+
+/// The distinct values of `ids`, ascending, padded with [`UNIQ_PAD`] to `capacity` entries: the `uniq` list of an
+/// [`EmbeddingGrad`] whose dispatch must keep one shape from batch to batch (a recorded tape passes `capacity` as
+/// `n_uniq`). Panics when `ids` holds more distinct values than `capacity`, or holds the padding value itself.
+pub fn uniq_padded(ids: &[u32], capacity: usize) -> Vec<u32> {
+    let mut v = ids.to_vec();
+    v.sort_unstable();
+    v.dedup();
+    assert!(v.len() <= capacity, "uniq_padded: {} distinct ids for a list of {capacity}", v.len());
+    assert!(v.last() != Some(&UNIQ_PAD), "uniq_padded: id {UNIQ_PAD} is the padding value, not a token");
+    v.resize(capacity, UNIQ_PAD);
+    v
+}
+
+/// One embedding-table gradient: `dw[uniq[u], :] += sum_{n : tokens[n] == uniq[u]} d_x[n, :]` over the `n_rows`
+/// looked-up tokens, into `dw` (`[rows, width]`) stored as `grad`. `uniq` holds the `n_uniq` distinct token ids
+/// (`model::block::uniq_u32` or [`uniq_padded`] of the same ids, which must all be present: a missing one's gradient
+/// is dropped; [`UNIQ_PAD`] entries are skipped), so the cost is `distinct * width * n_rows` whatever the table's row
+/// count.
+pub struct EmbeddingGrad<'a> {
+    pub tokens: &'a DeviceBuffer,
+    pub uniq: &'a DeviceBuffer,
+    pub n_uniq: u32,
+    pub d_x: &'a DeviceBuffer,
+    pub n_rows: u32,
+    pub width: u32,
+    pub dw: &'a DeviceBuffer,
+    pub grad: GradDtype,
+}
+
 /// How a product against a weight runs, decided from formats, shapes and the device alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LinearPlan {
@@ -240,6 +272,24 @@ impl Ops {
         s.push(self.gpu.step(self.tiled_kernel("copy_cols"), &[src, dst], &[rows, cnt, src_stride, src_off, dst_stride, dst_off], rows * cnt));
     }
 
+    /// `words` 32-bit words of `buf` from word `start`, through a bounded device copy: only a window around the range
+    /// is bound (so a buffer larger than one storage binding can be read) and only the range reaches the host.
+    pub fn read_range(&self, buf: &DeviceBuffer, start: u64, words: usize) -> Vec<f32> {
+        // A bound sub-range starts on a 256-byte boundary.
+        const ALIGN_WORDS: u64 = 64;
+        if words == 0 {
+            return Vec::new();
+        }
+        let window0 = start / ALIGN_WORDS * ALIGN_WORDS;
+        let lead = u32::try_from(start - window0).expect("an alignment remainder fits u32");
+        let count = u32::try_from(words).expect("Ops::read_range: a range exceeds u32 words");
+        let staging = self.gpu.storage_uninit(words as u64);
+        let params = [1, count, lead + count, lead, count, 0];
+        let copy = self.gpu.step_sliced(self.tiled_kernel("copy_cols"), &[buf, &staging], &[(window0, (lead + count) as u64), WHOLE], &params, count);
+        self.gpu.submit(&[], &[copy]);
+        self.gpu.read(&staging, words)
+    }
+
     /// The values `w` stores, as host f32: a dense weight is read as it is, every other tier is
     /// decoded on the device a bounded tile of rows at a time ([`Self::decode_tile`], the scratch is
     /// [`Self::tile_budget_bytes`], not the size of the tensor), so one read serves every tier a
@@ -364,11 +414,32 @@ impl Ops {
                             self.dw_f32_overwrite_or_add(s, x, dt, m, c, k, &scratch);
                         }
                     }
-                    let elems = c as u64 * k as u64;
-                    let elem0 = u32::try_from(done as u64 * k as u64).expect("Ops::weight_grad: gradient exceeds u32 elements");
-                    s.push(self.gpu.step(self.tiled_kernel("accum_bf16"), &[&scratch, dw], &[(elems / 2) as u32, elem0], (elems / 2) as u32));
+                    self.accumulate_bf16(s, &scratch, dw, c as u64 * k as u64, done as u64 * k as u64);
                     done += c;
                 }
+            }
+        }
+    }
+
+    /// `dw[elem0 .. elem0 + elems] += tile[0 .. elems]` into a bf16 gradient (round to nearest even), clearing the
+    /// f32 `tile` so the next product can accumulate into it again. `elem0` and `elems` are even.
+    pub fn accumulate_bf16(&self, s: &mut Vec<Step>, tile: &DeviceBuffer, dw: &DeviceBuffer, elems: u64, elem0: u64) {
+        assert!(elems.is_multiple_of(2) && elem0.is_multiple_of(2), "Ops::accumulate_bf16: a bf16 word holds two elements (elems {elems}, elem0 {elem0})");
+        let words = u32::try_from(elems / 2).expect("Ops::accumulate_bf16: tile exceeds u32 words");
+        let elem0 = u32::try_from(elem0).expect("Ops::accumulate_bf16: gradient exceeds u32 elements");
+        s.push(self.gpu.step(self.tiled_kernel("accum_bf16"), &[tile, dw], &[words, elem0], words));
+    }
+
+    /// The gradient of an embedding table: see [`EmbeddingGrad`]. Like [`Self::weight_grad`] it accumulates and never
+    /// reads the table's values, so every tier shares it.
+    pub fn embedding_grad(&self, s: &mut Vec<Step>, g: &EmbeddingGrad<'_>) {
+        let params = [g.n_rows, g.width, g.n_uniq];
+        let binds = [g.tokens, g.uniq, g.d_x, g.dw];
+        match g.grad {
+            GradDtype::F32 => s.push(self.gpu.step(self.tiled_kernel("emb_bwd_uniq"), &binds, &params, g.n_uniq * g.width)),
+            GradDtype::Bf16 => {
+                assert!(g.width.is_multiple_of(2), "Ops::embedding_grad: a bf16 gradient needs an even width (got {})", g.width);
+                s.push(self.gpu.step(self.tiled_kernel("emb_bwd_uniq_bf16"), &binds, &params, g.n_uniq * (g.width / 2)));
             }
         }
     }

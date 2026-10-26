@@ -123,18 +123,18 @@ pub fn activation_bytes(cfg: &Qwen35Config, b: u32, t: u32, recompute: bool) -> 
 }
 
 /// The resident low-precision full fine-tune of `cfg` at `opts`' batch and context, placed through the planner: the
-/// linears (every layer, or the window's layers) and their gradients on the device, the master copy and optimizer
-/// state in host memory, the fp32 embedding, head and norms and the activations on the device. A window of layers
+/// linears (every layer, or the window's layers), the bf16 vocabulary tables and their gradients on the device, the
+/// master copy and optimizer state in host memory, the fp32 norms and the activations on the device. A window of layers
 /// recomputes each layer's activations in the backward. A configuration the machine cannot hold is refused here, with
 /// the planner's arithmetic, before anything is allocated.
 pub fn build_resident(cfg: Qwen35Config, opts: &FitOpts, src: &dyn checkpoint::TensorSource, resident: &model::resident_ft::ResidentFtConfig) -> std::io::Result<Qwen35> {
     use model::memplan::{Capacity, Category, Demand};
     let shard = model::Shard::whole(cfg.n_layers as usize);
-    let linear_numel: u64 = crate::model::resident_specs(&cfg, &shard).iter().map(|s| u64::from(s.n) * u64::from(s.k)).sum();
+    let resident_numel: u64 = crate::model::resident_specs(&cfg, &shard).iter().map(|s| u64::from(s.n) * u64::from(s.k)).sum();
     let all_numel: u64 = crate::model::shard_param_list(&cfg, &shard).iter().map(|(_, n)| *n as u64).sum();
     let recompute = resident.window.is_some();
-    // fp32 remainder: value, gradient and the two AdamW moments on the device.
-    let remainder = Demand::fixed(Category::Weights, "fp32 embedding, head and norms (with gradients and moments)", (all_numel - linear_numel) * 4 * 4);
+    // fp32 remainder (the norms): value, gradient and the two AdamW moments on the device.
+    let remainder = Demand::fixed(Category::Weights, "fp32 norms (with gradients and moments)", (all_numel - resident_numel) * 4 * 4);
     let activations = Demand::fixed(Category::Activations, "activations and scratch", activation_bytes(&cfg, opts.batch_size, opts.block_size, recompute));
     let plan = model::resident_ft::ResidentPlan { cfg: resident.clone(), capacity: Capacity::measured(), others: vec![remainder, activations] };
     let saved = if recompute { SavedPolicy::Recompute } else { SavedPolicy::Keep };
