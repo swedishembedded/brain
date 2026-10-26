@@ -360,6 +360,11 @@ pub fn check_optimizer_state_formats<M: crate::Model>(name: &str, build: impl Fn
         if let Some((n, _)) = held.iter().find(|(n, _)| std::mem::discriminant(&st.store.precision_of(n).state) != std::mem::discriminant(&state)) {
             return Err(format!("{name} {spec}: {n} keeps {:?} moments", st.store.precision_of(n).state));
         }
+        // Where the moments live changes no parameter the model lists, and the comparison must cover them all.
+        let names = |v: &NamedValues| v.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
+        if want.is_empty() || names(&want) != names(&got) {
+            return Err(format!("{name} {spec}: lists {} trained parameters, the f32 run {}", got.len(), want.len()));
+        }
         for ((n, w), (_, g)) in want.iter().zip(&got) {
             if let Some((i, (a, b))) = w.iter().zip(g).enumerate().find(|(_, (a, b))| (*a - *b).abs() > 0.05 * lr) {
                 return Err(format!("{name} {spec}: {n}[{i}] moved by {b}, the f32 run by {a}"));

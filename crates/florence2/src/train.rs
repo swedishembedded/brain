@@ -377,7 +377,7 @@ impl Florence2Trainer {
     }
 
     pub fn param_names(&self) -> Vec<String> {
-        self.ps.trainable.iter().map(|(n, _)| n.clone()).collect()
+        self.ps.trained_params().map(|(n, _)| n.clone()).collect()
     }
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
         self.ps.read_weight(&self.gpu, name)

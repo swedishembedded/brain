@@ -4290,13 +4290,7 @@ impl model::Model for Qwen {
         // The optimised set: full-training `trainable` plus any `offload` params
         // (both carry a gradient; frozen params do not). LoRA -> adapters only.
         let resident: Vec<String> = self.resident.as_ref().map(|ft| ft.borrow().specs().iter().map(|s| s.name.clone()).collect()).unwrap_or_default();
-        self.ps
-            .trainable
-            .iter()
-            .chain(self.ps.offload.iter())
-            .map(|(n, _)| n.clone())
-            .chain(resident)
-            .collect()
+        self.ps.trained_params().map(|(n, _)| n.clone()).chain(resident).collect()
     }
     fn frozen_adapter_param_names(&self) -> Vec<String> {
         model::adapter::device::frozen_adapter_params(&self.ps)

@@ -5499,7 +5499,7 @@ impl Qwen35 {
     /// Mirrors `qwen35moe::model::Qwen35::param_names` exactly.
     pub fn param_names(&self) -> Vec<String> {
         if self.is_train && self.cfg.lora.is_some() {
-            self.ps.trainable.iter().map(|(n, _)| n.clone()).collect()
+            self.ps.trained_params().map(|(n, _)| n.clone()).collect()
         } else {
             let resident = self.resident.iter().flat_map(|ft| ft.borrow().specs().iter().map(|s| s.name.clone()).collect::<Vec<_>>());
             self.ps.params.iter().map(|(n, _)| n.clone()).chain(resident).collect()

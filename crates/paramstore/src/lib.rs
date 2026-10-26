@@ -424,6 +424,13 @@ impl ParamStore {
         &self.trainable
     }
 
+    /// Every parameter the run trains, wherever its optimizer state lives: the device-optimised ones
+    /// ([`Self::opt_params`]), then those whose moments are held by the host optimizer ([`Self::offload`]). What a
+    /// model lists as its trained parameters; moving the moments to the host changes no name in it.
+    pub fn trained_params(&self) -> impl Iterator<Item = &(String, usize)> {
+        self.trainable.iter().chain(&self.offload)
+    }
+
     pub fn w(&self, name: &str) -> &gpu_core::DeviceBuffer {
         self.weight.get(name).unwrap_or_else(|| panic!("no weight {name}"))
     }

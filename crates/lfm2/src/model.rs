@@ -1639,7 +1639,7 @@ impl model::Model for Lfm {
         Lfm::poll_wait(self)
     }
     fn param_names(&self) -> Vec<String> {
-        self.ps.trainable.iter().map(|(n, _)| n.clone()).collect()
+        self.ps.trained_params().map(|(n, _)| n.clone()).collect()
     }
     fn read_weight(&self, name: &str) -> Vec<f32> {
         Lfm::read_weight(self, name)

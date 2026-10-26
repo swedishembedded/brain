@@ -3953,7 +3953,7 @@ impl Qwen35 {
     /// panic. Mirrors `qwen3::model.rs`'s own `param_names` filter.
     pub fn param_names(&self) -> Vec<String> {
         if self.is_train && self.cfg.lora.is_some() {
-            self.ps.trainable.iter().map(|(n, _)| n.clone()).collect()
+            self.ps.trained_params().map(|(n, _)| n.clone()).collect()
         } else {
             self.ps.params.iter().map(|(n, _)| n.clone()).collect()
         }
