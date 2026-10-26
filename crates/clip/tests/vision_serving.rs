@@ -72,3 +72,28 @@ fn the_serving_build_tracks_the_tap_build() {
     assert!(fast != reference, "identical output means the products did not run on tensor cores");
     assert!(err < 5e-3, "TF32 products drifted {err} of scale from the fp32 reference");
 }
+
+/// **No product of the serving tower falls back to fp32 CUDA cores.** The tower has no convolution on the served path (the patch
+/// tokens come from SAM), so every product is a tensor-core one on the device's own kernel timer.
+#[test]
+fn the_serving_tower_runs_its_products_on_tensor_cores() {
+    let cfg = config();
+    let init = clip::init::init_vision_weights(&cfg, 79);
+    let gpu = gpu_core::testgpu::dev(serving_pipelines());
+    let v = ClipVision::new_serving_on_src(gpu, cfg, 2, PatchSource::Tokens { grid: (8, 8) }, &init);
+    if !v.uses_tensor_cores() {
+        return brain_testutil::skip_unavailable("this device has no tensor-core GEMM");
+    }
+    if !v.gpu.set_kernel_timing(true) {
+        return brain_testutil::skip_unavailable("this backend cannot time kernels");
+    }
+    let tokens: Vec<f32> = (0..2 * 64 * 64).map(|i| ((i * 37 % 101) as f32 - 50.0) / 50.0).collect();
+    v.set_tokens(&tokens);
+    v.forward();
+    let rows = v.gpu.kernel_times().expect("timing was switched on");
+    let audit = gpu_core::profile::ArithmeticAudit::of(&rows);
+    eprintln!("clip serving tower: {}", audit.summary());
+    let fallbacks = audit.fallbacks(&[]);
+    assert!(fallbacks.is_empty(), "products on CUDA cores in the serving tower: {fallbacks:?}\n{}", audit.summary());
+    assert!(audit.tensor_core_ms > 0.0, "no tensor-core kernel ran at all: {rows:?}");
+}

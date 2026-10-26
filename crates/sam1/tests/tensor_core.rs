@@ -57,3 +57,28 @@ fn tf32_linears_track_the_fp32_reference() {
 fn the_training_build_never_uses_tensor_cores() {
     assert!(!encoder(GemmPrecision::Auto, true).uses_tensor_cores());
 }
+
+/// The convolutions (patch embedding, the neck's 1x1 and 3x3, the compressor's two strided 3x3) are direct CUDA-core kernels:
+/// about 4% of the tower's device time at the served size. They are the declared exception; every other product is a
+/// tensor-core one.
+const CONVOLUTIONS: &[&str] = &["conv2d", "conv2d_fwd_f32", "conv2d_bias_fwd_f32", "conv2d_fwd3x3_f32"];
+
+/// **No product of the inference tower falls back to fp32 CUDA cores** except the declared convolutions: the QKV, projection and
+/// MLP linears and the global blocks' attention products are tensor-core kernels on the device's own kernel timer.
+#[test]
+fn the_tower_runs_its_products_on_tensor_cores() {
+    let enc = encoder(GemmPrecision::Auto, false);
+    if !enc.uses_tensor_cores() {
+        return brain_testutil::skip_unavailable("this device has no tensor-core GEMM");
+    }
+    if !enc.gpu.set_kernel_timing(true) {
+        return brain_testutil::skip_unavailable("this backend cannot time kernels");
+    }
+    output(&enc);
+    let rows = enc.gpu.kernel_times().expect("timing was switched on");
+    let audit = gpu_core::profile::ArithmeticAudit::of(&rows);
+    eprintln!("sam1 tower: {}", audit.summary());
+    let fallbacks = audit.fallbacks(CONVOLUTIONS);
+    assert!(fallbacks.is_empty(), "products on CUDA cores in the inference tower: {fallbacks:?}\n{}", audit.summary());
+    assert!(audit.tensor_core_ms > 0.0, "no tensor-core kernel ran at all: {rows:?}");
+}

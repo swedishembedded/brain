@@ -1415,7 +1415,7 @@ fn query_caps(ctx: &exec::Context) -> Result<DeviceCaps, String> {
 /// skinny LoRA ones instead of averaging them (`library_gemm 5120x8192x17408 bf16.bf16.f32 b1`).
 fn library_gemm_label(g: &backend_api::LibraryGemm) -> String {
     format!(
-        "library_gemm {}x{}x{} {:?}.{:?}.{:?}{}{} b{}",
+        "library_gemm {}x{}x{} {:?}.{:?}.{:?}{}{}{} b{}",
         g.m,
         g.n,
         g.k,
@@ -1424,6 +1424,8 @@ fn library_gemm_label(g: &backend_api::LibraryGemm) -> String {
         g.c,
         if g.trans_a { " tA" } else { "" },
         if g.trans_b { " tB" } else { "" },
+        // A binary32 product is a CUDA-core product unless it is allowed to multiply as TF32.
+        if g.tf32 { " tf32" } else { "" },
         g.batch
     )
 }

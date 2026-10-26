@@ -896,3 +896,28 @@ A stack sample of the encoder thread and of the scheduler thread showed host wor
   cache-hostile vertical pass: 124 ms for a 1767x2446 page, 6 tiles. The vertical pass now accumulates whole source rows and the passes
   spread over the cores (`backend_cpu::par`), byte-identical (the Pillow and torch goldens in `imaging/tests/resize_reference.rs` pass):
   30 ms.
+
+## 2026-10-26 throughput lane: the tensor-core check and the share
+
+`gpu_core::profile::ArithmeticAudit` classifies a pass's per-kernel device rows by what multiplies (a library product on bf16/fp16/fp8/TF32
+operands or a `*_mma` kernel is a tensor-core kernel; `matmul*`, `conv2d*`, `*gemv*` and exact-binary32 library products are CUDA-core
+products; attention kernels on CUDA cores are listed apart). The device table of `BRAIN_PROFILE=1` runs now prints its line, and three tests
+fail by kernel name when a product falls back:
+
+- `deepseek2/tests/serve_fast.rs::the_fast_tier_runs_its_products_on_tensor_cores` (decode and prefill; the fp32 router is the declared
+  exception; below `GROUPED_MIN_ROWS` rows the experts run the bandwidth-bound int8 GEMV, which is why the test decodes 8 rows),
+- `sam1/tests/tensor_core.rs::the_tower_runs_its_products_on_tensor_cores` (the convolutions are the declared exception),
+- `clip/tests/vision_serving.rs::the_serving_tower_runs_its_products_on_tensor_cores` (no exception).
+
+Share of device time at the served sizes (`encode_bench`, `engine_bench --batch 32`, GH200):
+
+| pass | tensor cores | CUDA-core products | CUDA-core attention | the rest (memory-bound) |
+|---|---|---|---|---|
+| decode step, 32 rows | 34.8% | 4.3% (fp32 router) | 30.3% (paged decode attention) | 30.6% |
+| SAM, global view | 13.1% | 3.7% (convolutions) | 15.4% (windowed relpos attention) | 67.8% |
+| SAM, 640 px tile | 13.8% | 9.5% (convolutions) | 17.3% | 59.4% |
+| CLIP, global view | 22.9% | 0 | 45.3% (`flash_attn_bidir_reg2`) | 31.8% |
+
+The tensor-core products are a small share because they are fast: every GEMM of the encoders together is ~5 ms of the SAM view's 39.5.
+What is left on CUDA cores: the windowed blocks' fused attention (6 ms), CLIP's fused attention (3.7 ms), the convolutions (1.5 ms), and the
+memory-bound passes around them (`attn_relpos_add` + `softmax_rows` of the global blocks 14 ms, `bias_add` 4.4, `attn_relpos_qr` 3.6).

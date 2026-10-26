@@ -413,6 +413,7 @@ pub fn print_device_table(label: &str, wall_ms: f64, rows: Option<Vec<(String, f
     rows.sort_by(|a, b| b.1.total_cmp(&a.1));
     let total: f64 = rows.iter().map(|r| r.1).sum();
     eprintln!("kernel table [{label}]: {total:.1} ms device over {} kernel kinds, {wall_ms:.1} ms wall", rows.len());
+    eprintln!("  arithmetic: {}", ArithmeticAudit::of(&rows).summary());
     for (name, ms, calls) in &rows {
         eprintln!("  {name:<44} {ms:>10.2} ms {calls:>7} calls {:>5.1}%", 100.0 * ms / total.max(f64::MIN_POSITIVE));
     }
@@ -785,5 +786,132 @@ mod tests {
 
         // A row under the share threshold is not reported however bad it is.
         assert!(p.defects(roofs, 99.0).len() <= 1);
+    }
+}
+
+/// What multiplies in a kernel, judged from the name a profile row carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Arithmetic {
+    /// Tensor cores: a vendor-library product on bf16, fp16, fp8 or TF32 operands, or a native `*_mma` kernel.
+    TensorCore,
+    /// A product or convolution on the CUDA cores in fp32 or integer arithmetic: a `matmul*`, `conv2d*` or `*gemv*`
+    /// kernel, or a library product on exact binary32 operands.
+    CudaCoreProduct,
+    /// An attention kernel that multiplies on the CUDA cores (`flash_attn*`, `paged_flash_decode*`, `attn_scores*`,
+    /// `attn_apply*`): reported apart from the products, because decode attention is bandwidth-bound by design and
+    /// a prefill or ViT attention on CUDA cores is the open item it names.
+    CudaCoreAttention,
+    /// Anything else: normalisations, elementwise work, routing, readouts.
+    Other,
+}
+
+/// The arithmetic a profile row's kernel runs on. `name` is a row of [`print_device_table`]: `native:` marks a provider's own
+/// kernel, `#...` a specialisation suffix, and a library product reads `library_gemm MxNxK A.B.C [tA] [tB] [tf32] bN`.
+pub fn arithmetic_of(name: &str) -> Arithmetic {
+    if let Some(product) = name.strip_prefix("library_gemm ") {
+        let exact_fp32 = product.split_whitespace().nth(1).is_some_and(|t| t == "F32.F32.F32") && !product.split_whitespace().any(|t| t == "tf32");
+        return if exact_fp32 { Arithmetic::CudaCoreProduct } else { Arithmetic::TensorCore };
+    }
+    let base = name.strip_prefix("native:").unwrap_or(name).split('#').next().unwrap_or(name);
+    if base.contains("mma") {
+        Arithmetic::TensorCore
+    } else if base.starts_with("matmul") || base.starts_with("conv2d") || base.contains("gemv") {
+        Arithmetic::CudaCoreProduct
+    } else if base.contains("flash_attn") || base.starts_with("paged_flash_decode") || base.starts_with("attn_scores") || base.starts_with("attn_apply") {
+        Arithmetic::CudaCoreAttention
+    } else {
+        Arithmetic::Other
+    }
+}
+
+/// Where a pass's device time went by [`Arithmetic`], from `(kernel, ms, calls)` rows.
+#[derive(Clone, Debug, Default)]
+pub struct ArithmeticAudit {
+    pub total_ms: f64,
+    pub tensor_core_ms: f64,
+    pub cuda_core_product_ms: f64,
+    pub cuda_core_attention_ms: f64,
+    /// `(kernel, ms)` of every CUDA-core product, slowest first.
+    pub cuda_core_products: Vec<(String, f64)>,
+}
+
+impl ArithmeticAudit {
+    pub fn of(rows: &[(String, f64, u64)]) -> ArithmeticAudit {
+        let mut audit = ArithmeticAudit::default();
+        for (name, ms, _) in rows {
+            audit.total_ms += ms;
+            match arithmetic_of(name) {
+                Arithmetic::TensorCore => audit.tensor_core_ms += ms,
+                Arithmetic::CudaCoreProduct => {
+                    audit.cuda_core_product_ms += ms;
+                    audit.cuda_core_products.push((name.clone(), *ms));
+                }
+                Arithmetic::CudaCoreAttention => audit.cuda_core_attention_ms += ms,
+                Arithmetic::Other => {}
+            }
+        }
+        audit.cuda_core_products.sort_by(|a, b| b.1.total_cmp(&a.1));
+        audit
+    }
+
+    /// Share of the pass's device time spent in tensor-core kernels.
+    pub fn tensor_core_share(&self) -> f64 {
+        self.tensor_core_ms / self.total_ms.max(f64::MIN_POSITIVE)
+    }
+
+    /// The CUDA-core products no declared exception covers: the hot kernels that fell back to fp32. `exceptions` are kernel
+    /// names (specialisation suffixes and the `native:` prefix ignored) a pass is allowed to run on CUDA cores, each with a
+    /// reason at the call site.
+    pub fn fallbacks<'a>(&'a self, exceptions: &[&str]) -> Vec<&'a (String, f64)> {
+        let base = |n: &str| n.strip_prefix("native:").unwrap_or(n).split('#').next().unwrap_or(n).to_string();
+        self.cuda_core_products.iter().filter(|(n, _)| !exceptions.iter().any(|e| base(n) == *e)).collect()
+    }
+
+    /// One line for a report.
+    pub fn summary(&self) -> String {
+        format!(
+            "tensor cores {:.1}% of {:.1} ms device time; CUDA-core products {:.1}% ({}); CUDA-core attention {:.1}%",
+            100.0 * self.tensor_core_share(),
+            self.total_ms,
+            100.0 * self.cuda_core_product_ms / self.total_ms.max(f64::MIN_POSITIVE),
+            self.cuda_core_products.iter().take(3).map(|(n, ms)| format!("{n} {ms:.2} ms")).collect::<Vec<_>>().join(", "),
+            100.0 * self.cuda_core_attention_ms / self.total_ms.max(f64::MIN_POSITIVE)
+        )
+    }
+}
+
+#[cfg(test)]
+mod arithmetic_tests {
+    use super::*;
+
+    #[test]
+    fn rows_are_judged_by_what_multiplies() {
+        for tc in ["library_gemm 1280x32x1280 Bf16.Bf16.F32 tA b1", "library_gemm 768x4096x3072 F32.F32.F32 tA tf32 b1", "native:moe_i8_grouped_mma", "native:matmul_i8_mma_m16"] {
+            assert_eq!(arithmetic_of(tc), Arithmetic::TensorCore, "{tc}");
+        }
+        for cc in ["library_gemm 8x8x8 F32.F32.F32 tA b1", "matmul_reg3", "matmul_gemv_reg#MREG=32", "native:matmul_f32_tiled", "native:conv2d_fwd_f32", "matmul_i8_gemv"] {
+            assert_eq!(arithmetic_of(cc), Arithmetic::CudaCoreProduct, "{cc}");
+        }
+        for attn in ["flash_attn_cross_relpos", "paged_flash_decode_gqa_hd256#GRP=1,HD=128,HD4=32", "attn_scores_cross_kt"] {
+            assert_eq!(arithmetic_of(attn), Arithmetic::CudaCoreAttention, "{attn}");
+        }
+        for other in ["rmsnorm_rows", "native:softmax_rows_f32_k64", "bias_add", "native:cast_f32_bf16"] {
+            assert_eq!(arithmetic_of(other), Arithmetic::Other, "{other}");
+        }
+    }
+
+    #[test]
+    fn a_cuda_core_product_is_a_fallback_unless_declared() {
+        let rows = vec![
+            ("library_gemm 1280x32x1280 Bf16.Bf16.F32 tA b1".to_string(), 6.0, 10),
+            ("matmul_gemv_reg#MREG=32".to_string(), 2.0, 10),
+            ("matmul_reg3".to_string(), 1.0, 1),
+            ("rmsnorm_rows".to_string(), 1.0, 10),
+        ];
+        let audit = ArithmeticAudit::of(&rows);
+        assert!((audit.tensor_core_share() - 0.6).abs() < 1e-9);
+        let fallbacks = audit.fallbacks(&["matmul_gemv_reg"]);
+        assert_eq!(fallbacks.iter().map(|f| f.0.as_str()).collect::<Vec<_>>(), ["matmul_reg3"]);
+        assert!(audit.fallbacks(&["matmul_gemv_reg", "matmul_reg3"]).is_empty());
     }
 }

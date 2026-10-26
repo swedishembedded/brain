@@ -178,3 +178,42 @@ fn a_replayed_decode_step_decodes_what_a_rebuilt_one_does() {
     }
     assert!(stats.replays > stats.recordings, "later steps of a shape must replay its recording: {stats:?}");
 }
+
+/// Kernels a fast-tier step may run on CUDA cores, with the reason: the router's logits are fp32 on purpose (the experts it
+/// picks are a hard decision that a rounded logit can flip), and its product is `[rows, d_model] x [d_model, n_experts]`.
+const FP32_BY_DESIGN: &[&str] = &["matmul_gemv_reg", "matmul_reg3"];
+
+/// **No hot kernel of the fast tier falls back to fp32 CUDA cores.** A decode step and a prefill chunk are profiled on the
+/// device's own kernel timer; every product in them is a tensor-core kernel (the library's bf16 GEMM for the dense linears
+/// and the head, the int8 grouped MMA for the experts) except the declared fp32 router. A linear that quietly took a
+/// CUDA-core kernel - an unaligned shape, a declined library product, a changed tier - fails here, by name.
+#[test]
+fn the_fast_tier_runs_its_products_on_tensor_cores() {
+    let Some(mut engine) = engine_of(shaped(1, 128), Precision::Fast) else { return };
+    if !engine.gpu().set_kernel_timing(true) {
+        return brain_testutil::skip_unavailable("this backend cannot time kernels");
+    }
+    engine.set_decode_tapes(false);
+    // Eight rows: from `GROUPED_MIN_ROWS` up the experts take the grouped MMA, below it the bandwidth-bound int8 GEMV.
+    let prompts: Vec<Vec<u32>> = (0..8).map(|s| prompt(s + 1, 40)).collect();
+    let mut tables: Vec<BlockTable> = prompts.iter().map(|_| BlockTable::new()).collect();
+    let mut last: Vec<u32> = Vec::new();
+    for (table, p) in tables.iter_mut().zip(&prompts) {
+        let hidden = loop {
+            if let PrefillProgress::Done(h) = engine.prefill_chunk(table, p, usize::MAX) {
+                break h;
+            }
+        };
+        last.push(engine.admit_greedy(&hidden));
+    }
+    for _ in 0..4 {
+        let mut refs: Vec<&mut BlockTable> = tables.iter_mut().collect();
+        last = engine.forward_batched_greedy(&mut refs, &last);
+    }
+    let rows = engine.gpu().kernel_times().expect("timing was switched on");
+    let audit = gpu_core::profile::ArithmeticAudit::of(&rows);
+    eprintln!("fast tier: {}", audit.summary());
+    let fallbacks = audit.fallbacks(FP32_BY_DESIGN);
+    assert!(fallbacks.is_empty(), "products on CUDA cores in the fast tier: {fallbacks:?}\n{}", audit.summary());
+    assert!(audit.tensor_core_ms > 0.0, "no tensor-core kernel ran at all: {rows:?}");
+}

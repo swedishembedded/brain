@@ -102,11 +102,13 @@ fn main() {
     let mut sorted = warm.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let p50 = sorted.get(sorted.len() / 2).copied().unwrap_or(0.0);
+    // The fastest step: the work is deterministic, and a card shared with other jobs only ever adds to it.
+    let min = sorted.first().copied().unwrap_or(0.0);
     println!(
-        "{{\"backend\":\"{}\",\"digest\":\"{digest:016x}\",\"batch\":{batch},\"steps\":{steps},\"prefill_ms_per_seq\":{:.1},\"step_ms_mean\":{mean:.2},\"step_ms_p50\":{p50:.2},\"tok_per_s\":{:.1}}}",
+        "{{\"backend\":\"{}\",\"digest\":\"{digest:016x}\",\"batch\":{batch},\"steps\":{steps},\"prefill_ms_per_seq\":{:.1},\"step_ms_mean\":{mean:.2},\"step_ms_p50\":{p50:.2},\"step_ms_min\":{min:.2},\"tok_per_s_at_min\":{:.1}}}",
         gpu_core::backend_name(),
         pre * 1e3 / batch as f64,
-        batch as f64 * 1e3 / mean
+        batch as f64 * 1e3 / min.max(1e-9)
     );
     if let Some(s) = engine.gpu().stats() {
         eprintln!("device counters at the end: {s:?}");
