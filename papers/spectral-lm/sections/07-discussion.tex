@@ -1,20 +1,73 @@
 % SPDX-License-Identifier: CC-BY-4.0
 % Copyright (c) 2026 Martin Schr\"oder <info@swedishembedded.com>
 
+\section{Discussion}
+\label{sec:discussion}
+
+\paragraph{What the mixer does well.} With the parameter count of a SwiGLU
+whose hidden width equals the channel count, the spectral mixer predicts
+held-out text at least as well and, on every seed we ran, better. Its
+parameters are per-mode gains, but its computation is that of a much wider
+layer: each channel synthesizes a $D$-sample signal and multiplies two of them,
+which couples every pair of retained modes through spectral convolution. The
+mixer therefore trades parameters for arithmetic and activation memory. Where
+parameters are the binding constraint (storage, a parameter budget for
+adapters, memory traffic of weights during decoding), that trade can be the
+right one.
+
+\paragraph{What it does not do.} The trade is unfavourable when arithmetic is
+the constraint. At about the same analytic arithmetic per token a dense
+SwiGLU spends it on four and a half times as many parameters and is far
+better, and the implementation makes the gap larger: the spectral model trains
+at half the control's speed and holds several times its memory, because its
+signal-domain activations are $C\cdot D$ wide per token. The fast transform
+recovers only a small part of its arithmetic advantage over the dense basis
+product with our kernels. Nothing measured here supports the hope that a
+Fourier representation of the hidden state makes a language model cheaper to
+compute.
+
+\paragraph{Why a pretrained model cannot simply be truncated.} The
+residual-stream study (\cref{sec:res-compress}) closes the other route: a
+pretrained model's coordinates carry no frequency order, so its lowest
+Fourier modes are about as uninformative as random directions, as
+\cref{prop:absorption} predicts. A spectral representation, if it is useful
+at all, has to be learned, as SpectralLM learns it, not imposed on a trained
+model.
+
+\paragraph{Alternative explanations.} The learning rate was chosen with one
+seed per rate over 300 steps, and SpectralLM's losses were not monotone in the
+rate, so its selected rate may not be its best; a better rate could only
+widen its advantage over the parameter-matched control, but it could also
+narrow its gap to the arithmetic-matched one. The channel pilots suggest that
+quality saturates near $C=24$ at the selected rate, but one seed per pilot
+cannot separate saturation from seed variation.
+
 \section{Limitations}
 \label{sec:limitations}
 
-The comparisons are at small scale: models of a few million parameters, one
-corpus of simple English, a fixed token budget, and single-precision training
-on two Tesla P40 cards. They say nothing about how the quality gap, in either
-direction, changes with scale or with a broader corpus. The mixer is one
-member of a larger family; channel-mixing spectral weights, sparse
-cross-frequency terms and dense escape channels are not evaluated. Fourier
-structure on the feature axis has no semantic justification of its own
-(\cref{sec:absorption}); any advantage the mixer shows is an advantage of its
-operator structure, not evidence that hidden states are naturally periodic.
+The comparisons are at small scale: decoders of one to twenty-four million
+non-embedding parameters, one corpus of simple synthetic English, one token
+budget, one context length, and single-precision training on Tesla P40
+cards. They say nothing about how the gaps change with scale, with a broader
+corpus, or with a longer context. Three seeds per primary model give wide
+intervals; non-inferiority is established, superiority is not. The pretrained
+reference was continued for an eighth of the trained models' token budget at a
+conventional rate that was not tuned. The transform-cost measurements are of
+our kernels on one card and do not bound what a better FFT implementation
+could reach. The mixer is one member of a larger family; channel-mixing
+spectral weights, sparse cross-frequency terms and dense escape channels were
+not evaluated, and neither was spectral structure along the sequence axis.
 
 \section{Conclusion}
 \label{sec:conclusion}
 
-\StatusConclusion
+A Fourier basis changes what a language model computes only through operators
+defined relative to it. With such an operator, a feed-forward sublayer of
+per-mode filters around a signal-domain gated product, a decoder of the same
+width and parameter count as a Qwen3 control predicts held-out text at least
+as well, but a dense feed-forward network with the same arithmetic is clearly
+better, faster and smaller in memory. The spectral hidden state is a way to
+spend fewer parameters, not less compute. The most consequential open
+question is whether the same structure on the sequence axis, where attention's
+pairwise cost lives, can move the quality-per-compute frontier that the
+feature axis did not. \StatusConclusion
