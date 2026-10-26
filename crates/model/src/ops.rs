@@ -886,6 +886,50 @@ impl Weight {
     }
 }
 
+impl Weight {
+    /// [`Weight::upload`] for the dense tiers (`F32`, `BF16`, `F16`; `I8` through
+    /// [`crate::int8::quantize_from`]'s own bounded reader) straight from a checkpoint, without ever
+    /// holding the tensor on the host in full: the source is read in bounded chunks (at most
+    /// `paramstore::UPLOAD_CHUNK_WORDS` values) and each is packed and written at its place in the
+    /// device buffer. The result equals `Weight::upload` of the whole tensor, element for element.
+    pub fn upload_from(ops: &Ops, source: &dyn checkpoint::TensorSource, name: &str, n: usize, k: usize, want: Dtype) -> Result<Weight, String> {
+        let numel = n * k;
+        let tier = want.promote(&ops.caps.numeric);
+        // A half tier packs two values to a word, so a chunk is cut on an even element count and lands on a word boundary.
+        let chunk = paramstore::UPLOAD_CHUNK_WORDS & !1;
+        let gpu = ops.upload_gpu();
+        /// Writes one chunk (the `off`-th element on) of the tensor into the buffer being built.
+        type WriteChunk<'a> = &'a dyn Fn(&Gpu, &DeviceBuffer, u64, &[f32]);
+        let stream = |words: usize, write: WriteChunk<'_>| -> Result<DeviceBuffer, String> {
+            let buf = gpu.storage(words as u64);
+            let mut seen = 0usize;
+            let found = source.with_tensor_chunks(name, chunk, &mut |off, part| {
+                write(gpu, &buf, off, part);
+                seen += part.len();
+            });
+            if !found {
+                return Err(format!("Weight::upload_from: the checkpoint has no tensor '{name}'"));
+            }
+            if seen != numel {
+                return Err(format!("Weight::upload_from: tensor '{name}' holds {seen} values, expected {numel} ({n}x{k})"));
+            }
+            Ok(buf)
+        };
+        match tier {
+            Dtype::F32 => Ok(Weight::F32 { w: stream(numel, &|g, b, off, part| g.write_f32_at(b, off, part))?, n: n as u32, k: k as u32 }),
+            Dtype::BF16 => {
+                assert!(numel.is_multiple_of(2), "Weight::upload_from: a half-precision tensor needs an even element count");
+                Ok(Weight::BF16 { w: stream(numel / 2, &|g, b, off, part| g.write_at(b, off / 2, &crate::half::pack_bf16(part)))?, n: n as u32, k: k as u32 })
+            }
+            Dtype::F16 => {
+                assert!(numel.is_multiple_of(2), "Weight::upload_from: a half-precision tensor needs an even element count");
+                Ok(Weight::F16 { w: stream(numel / 2, &|g, b, off, part| g.write_at(b, off / 2, &crate::half::pack_f16(part)))?, n: n as u32, k: k as u32 })
+            }
+            other => Err(format!("Weight::upload_from: {other:?} has no bounded loader (F32, BF16 and F16 do; int8 banks go through model::int8::quantize_from)")),
+        }
+    }
+}
+
 /// Which storage tier each quantizable leaf uploads at - a per-leaf
 /// generalization of the single [`Dtype`] `qwen3::Qwen::new_shard_dt` takes.
 /// `Qwen35::new_impl_on`'s old `i8: bool` could not express "Q4 on the MLP,
