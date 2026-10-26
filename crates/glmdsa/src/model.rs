@@ -25,6 +25,8 @@ use std::cell::{Cell, RefCell};
 
 use model::moe::{ExpertBwdScratch, ExpertGrads, ExpertStage, ExpertWeights, MoeActs, MoeIds, MoeIdsBwd, MoeShape, PassSeg, RouterBwdIds, RouterKind};
 use model::saved::{Residuals, SavedPolicy};
+use model::streamed::{LayeredPass, StreamedStore};
+use model::tape::TapeEdge;
 use std::collections::HashMap;
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
@@ -255,6 +257,9 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("unpack_bf16", kernels::UNPACK_BF16),
     ("pack_fp8_rows", kernels::PACK_FP8_ROWS),
     ("unpack_fp8_rows", kernels::UNPACK_FP8_ROWS),
+    // A layer-streamed full fine-tune's device side (`model::ops::store_device_kernels`; `gradnorm_part` is above).
+    ("copy_cols", kernels::COPY_COLS),
+    ("gradnorm_part_bf16", kernels::GRADNORM_PART_BF16),
 ];
 
 /// MLP variant per layer (cached activations for backprop).
@@ -449,6 +454,11 @@ pub struct Glm {
     /// every layer sharing one set of activation buffers its replay before its backward refills
     /// ([`model::Model::set_saved_policy`]).
     saved: SavedPolicy,
+    /// The per-layer tensors held in a device window of layers, when the run streams them
+    /// ([`model::Model::set_resident`]); `None` keeps every layer in the store.
+    streamed: Option<StreamedStore>,
+    /// A streamed build runs its backward inside the update: set by `backward`, taken by `adamw_step`.
+    backward_pending: Cell<bool>,
 
     // ---- incremental KV-cache decode (single new token vs the growing cache) ----
     // MLA "materialised per-head" cache: per layer store the up-projected per-head
@@ -737,6 +747,8 @@ impl Glm {
             fwd_steps: Vec::new(),
             bwd_steps: Vec::new(),
             saved: SavedPolicy::Keep,
+            streamed: None,
+            backward_pending: Cell::new(false),
             kpass_cache,
             krot_cache,
             v_cache,
@@ -879,9 +891,13 @@ impl Glm {
 
         self.res.round_trip(&self.gpu, &mut s, 0);
         for l in 0..c.n_layers as usize {
+            segs.push(PassSeg::Steps(std::mem::take(&mut s)));
+            segs.push(PassSeg::LayerBegin(l));
             // A pass that replays every layer before its backward keeps no expert activations here.
             self.layer_forward(l, b_use, t_use, !self.saved.recomputes(), &mut segs, &mut s);
             self.res.round_trip(&self.gpu, &mut s, l + 1);
+            segs.push(PassSeg::Steps(std::mem::take(&mut s)));
+            segs.push(PassSeg::LayerEnd(l));
         }
 
         // final norm + untied lm_head + masked CE
@@ -1072,6 +1088,8 @@ impl Glm {
         }
 
         for l in (0..c.n_layers as usize).rev() {
+            segs.push(PassSeg::Steps(std::mem::take(&mut s)));
+            segs.push(PassSeg::LayerBegin(l));
             if self.saved.recomputes() {
                 // Every layer shares one set of activation buffers: rebuild this layer's from `res[l]` first.
                 self.res.restore(&self.gpu, &mut s, l);
@@ -1163,6 +1181,8 @@ impl Glm {
             // input_ln backward -> d_tmp ; dres[l] = dxmid + d_tmp
             self.norm_bwd(&mut s, &self.res[l], &p("input_ln.weight"), &self.d_xn1, &self.d_tmp, d, n);
             s.push(self.gpu.step(ADD2, &[&self.dxmid, &self.d_tmp, &self.dres[l]], &[n * d], n * d));
+            segs.push(PassSeg::Steps(std::mem::take(&mut s)));
+            segs.push(PassSeg::LayerEnd(l));
         }
 
         // embedding backward (untied: only the embedding path writes tok.weight)
@@ -1263,13 +1283,10 @@ impl Glm {
 
     /// Run a pass: its fixed dispatches in order, each MoE layer's experts as the pass reaches them.
     fn run(&self, segs: &[PassSeg]) {
-        for seg in segs {
-            match seg {
-                PassSeg::Steps(steps) => self.gpu.submit(&[], steps),
-                PassSeg::Experts { layer, rows, stage: ExpertStage::Forward { keep } } => self.moe_fwd(*layer, *rows, *keep),
-                PassSeg::Experts { layer, rows, stage: ExpertStage::Backward } => self.moe_bwd(*layer, *rows),
-                PassSeg::LayerBegin(_) | PassSeg::LayerEnd(_) => {}
-            }
+        let pass = Pass { model: self, segs };
+        match &self.streamed {
+            Some(stream) => stream.forward(&self.gpu, &pass).unwrap_or_else(|e| panic!("glmdsa layer-streamed forward: {e}")),
+            None => pass.submit_hooked(&self.gpu, &mut |_| {}),
         }
     }
 
@@ -1317,7 +1334,13 @@ impl Glm {
     pub fn backward(&self) {
         let n = self.b * self.t;
         self.gpu.write(&self.ce_grad_uni, &[n, self.cfg.vocab, IGNORE, f(self.count.get())]);
-        self.run(&self.bwd_steps);
+        if self.streamed.as_ref().is_some_and(StreamedStore::is_layer_streamed) {
+            // The weights of a layer-streamed build are not all on the device: the backward runs layer by layer in
+            // `adamw_step`, where the layers it loads are the ones it updates.
+            assert!(!self.backward_pending.replace(true), "glmdsa layer-streamed full fine-tune: a second backward before the update (gradient accumulation) is not supported; every micro-batch is its own step");
+            return;
+        }
+        Pass { model: self, segs: &self.bwd_steps }.submit_hooked(&self.gpu, &mut |_| {});
     }
 
     pub fn zero_grads(&self) {
@@ -1327,19 +1350,66 @@ impl Glm {
         self.gpu.poll_wait();
     }
     pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
-        self.opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale);
+        match &self.streamed {
+            Some(stream) => {
+                if stream.is_layer_streamed() {
+                    assert!(self.backward_pending.replace(false), "glmdsa layer-streamed full fine-tune: adamw_step without a backward");
+                }
+                let args = model::resident_ft::StepArgs { step: t, lr, wd, adam, clip, extra_scale };
+                let pass = Pass { model: self, segs: &self.bwd_steps };
+                stream.adamw_step(&self.gpu, &self.ps, &self.opt, &pass, &args).unwrap_or_else(|e| panic!("glmdsa layer-streamed update: {e}"));
+            }
+            None => self.opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale),
+        }
     }
     pub fn read_grad(&self, name: &str) -> Vec<f32> {
+        assert!(!self.is_streamed(name), "glmdsa: {name} streams through a layer window; no gradient outlives its layer");
         self.ps.read_grad(&self.gpu, name)
     }
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
-        self.ps.read_weight(&self.gpu, name)
+        match &self.streamed {
+            Some(stream) if stream.holds(name) => stream.read_weight(&self.gpu, name).unwrap_or_else(|e| panic!("glmdsa: reading {name}: {e}")),
+            _ => self.ps.read_weight(&self.gpu, name),
+        }
     }
     pub fn write_weight(&self, name: &str, data: &[f32]) {
-        self.gpu.write(self.w(name), bytemuck::cast_slice(data));
+        match &self.streamed {
+            Some(stream) if stream.holds(name) => stream.write_weight(&self.gpu, name, data).unwrap_or_else(|e| panic!("glmdsa: writing {name}: {e}")),
+            _ => self.gpu.write(self.w(name), bytemuck::cast_slice(data)),
+        }
     }
     pub fn param_names(&self) -> Vec<String> {
-        self.ps.trained_params().map(|(n, _)| n.clone()).collect()
+        let streamed = self.streamed.iter().flat_map(|s| s.names().map(str::to_string));
+        self.ps.trained_params().map(|(n, _)| n.clone()).chain(streamed).collect()
+    }
+
+    fn is_streamed(&self, name: &str) -> bool {
+        self.streamed.as_ref().is_some_and(|s| s.holds(name))
+    }
+
+    /// Asserts a path that reads the per-layer weights outside the recorded passes runs on a build holding them all.
+    fn assert_not_streamed(&self, what: &str) {
+        assert!(self.streamed.is_none(), "glmdsa: {what} reads every layer's weights; a layer-streamed build holds a window of them (save it and load the checkpoint)");
+    }
+
+    /// Stream every per-layer tensor (routed and shared experts included) through a device window under `cfg` (see
+    /// [`model::streamed`]): the layers' f32 values and optimizer state move to the host, the device keeps the
+    /// window's slots. The embedding, the head, the final norm and the MTP head stay in the store under its own
+    /// optimizer.
+    pub fn set_resident(&mut self, cfg: &model::resident_ft::ResidentFtConfig) -> Result<(), String> {
+        if self.bwd_steps.is_empty() {
+            return Err("glmdsa: only a training build streams its layers".into());
+        }
+        if self.streamed.is_some() {
+            return Err("glmdsa: the layers already stream".into());
+        }
+        let stream = StreamedStore::convert(&self.gpu, &mut self.ps, cfg.clone(), &model::streamed::blocks_layer).map_err(|e| format!("glmdsa: {e}"))?;
+        self.opt.invalidate();
+        self.streamed = Some(stream);
+        // The recorded passes bound the store's buffers as they were: record them again over the window's slots.
+        self.fwd_steps = self.build_forward(self.b, self.t);
+        self.bwd_steps = self.build_backward();
+        Ok(())
     }
 
     pub fn ctx_len(&self) -> usize {
@@ -1376,6 +1446,7 @@ impl Glm {
 
     /// Inference-only forward, row-compacted MoE - see [`Self::logits_all_compact`].
     fn forward_compact(&self, b_use: u32, t_use: u32) {
+        self.assert_not_streamed("the compacted inference forward");
         let c = &self.cfg;
         let n = b_use * t_use;
         let d = c.d_model;
@@ -1552,6 +1623,7 @@ impl Glm {
     /// are projected once, appended to the persistent per-layer cache, and attended
     /// by a single query over cached positions `0..=pos`. Requires `b == 1`.
     pub fn step(&self, token_id: u32) -> Vec<f32> {
+        self.assert_not_streamed("incremental decode");
         let pos = self.dec_pos.get();
         let hidden = self.decode_at(token_id, pos);
         self.dec_pos.set(pos + 1);
@@ -1692,6 +1764,7 @@ impl Glm {
     /// minuscule). Pass `lr = 0` to just measure the loss. Returns the mean
     /// distillation cross-entropy.
     pub fn distill_step(&self, lr: f32) -> f32 {
+        self.assert_not_streamed("indexer distillation");
         use crate::distill::{layer_distill, IdxDims, IdxWeights};
         let c = &self.cfg;
         let n = (self.b * self.t) as usize;
@@ -1801,6 +1874,41 @@ impl model::ModelConfig for GlmConfig {
     }
 }
 
+/// A recorded pass of [`Glm`]: its fixed dispatches in order and each MoE layer's experts as the pass reaches them,
+/// reporting where each layer's part begins and ends.
+struct Pass<'a> {
+    model: &'a Glm,
+    segs: &'a [PassSeg],
+}
+
+impl LayeredPass for Pass<'_> {
+    fn submit_hooked(&self, gpu: &gpu_core::Gpu, edge: &mut dyn FnMut(TapeEdge)) {
+        for (index, seg) in self.segs.iter().enumerate() {
+            match seg {
+                PassSeg::Steps(steps) => gpu.submit(&[], steps),
+                PassSeg::Experts { layer, rows, stage: ExpertStage::Forward { keep } } => self.model.moe_fwd(*layer, *rows, *keep),
+                PassSeg::Experts { layer, rows, stage: ExpertStage::Backward } => self.model.moe_bwd(*layer, *rows),
+                PassSeg::LayerBegin(layer) => edge(TapeEdge::Before { index, layer: Some(*layer) }),
+                PassSeg::LayerEnd(layer) => edge(TapeEdge::After { index, layer: Some(*layer) }),
+            }
+        }
+    }
+}
+
+impl model::OffDeviceState for Glm {
+    fn commit(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
+        let stream = self.streamed.as_ref().ok_or_else(|| std::io::Error::other("glmdsa: no streamed state to commit"))?;
+        self.gpu.flush();
+        stream.commit(&self.gpu, dir, step)
+    }
+
+    fn restore(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
+        let stream = self.streamed.as_ref().ok_or_else(|| std::io::Error::other("glmdsa: no streamed state to restore"))?;
+        self.gpu.flush();
+        stream.restore(&self.gpu, dir, step)
+    }
+}
+
 impl model::Model for Glm {
     fn optimizer_state(&mut self) -> Option<model::OptimizerState<'_>> {
         Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: &self.opt })
@@ -1811,6 +1919,12 @@ impl model::Model for Glm {
     }
     fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
         Glm::set_saved_policy(self, policy)
+    }
+    fn set_resident(&mut self, cfg: &model::resident_ft::ResidentFtConfig) -> Result<(), String> {
+        Glm::set_resident(self, cfg)
+    }
+    fn off_device_state(&self) -> Option<&dyn model::OffDeviceState> {
+        self.streamed.as_ref().map(|_| self as &dyn model::OffDeviceState)
     }
 
     type Config = GlmConfig;

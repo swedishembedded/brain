@@ -136,8 +136,8 @@ The per-cell matrix and its tests are `docs/reference/training-capabilities.md`.
   master), `ops::DeviceIo`/`StoreDevice` (the state on the model's own handle), `model::tape::LayerTape` (per-layer
   segments), `model::streamed::StreamedStore` (converts a built store, aliases its entries to the window, drives
   the shared `resident_ft::adamw_step`), `Model::set_resident` from `apply_train_precision`. Specs:
-  `streamed::check_layer_streaming`, `trainprec::check_exact_resume`. gpt2, spectrallm and deepseek2 (its
-  `PassSeg` passes through `streamed::LayeredPass`) adopt it. Open: lfm2, horizon, glmdsa, qwen35moe (eager);
+  `streamed::check_layer_streaming`, `trainprec::check_exact_resume`. gpt2, spectrallm, deepseek2 and glmdsa (their
+  `PassSeg` passes through `streamed::LayeredPass`) adopt it. Open: lfm2, horizon, qwen35moe (eager);
   ouro and huginn run one layer in every pass, so a layer's gradient completes only after the last;
   construction-time streaming so loading never holds the whole model on the device.
 - D Memory: `model::saved` saved-activation policy (keep, recompute, bf16/fp8 boundaries)
