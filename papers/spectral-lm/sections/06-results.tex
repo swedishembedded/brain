@@ -57,6 +57,16 @@ each of three forward buffers, and three more in the backward pass, where the
 dense control holds 1024 hidden units; \cref{sec:res-systems} prices the
 transforms that produce them.
 
+The pilots, one seed each, bound this result. The spectral mixer's quality
+is not monotone in its channel count at the selected rates: $C=8$ scores
+\BpbSEight{}, $C=24$ \BpbS{} and $C=96$ \BpbSNinetySix{}, the last at
+\MemSNinetySix{} MiB of device memory against \MemS{} for $C=24$, so adding
+channels beyond 24 bought nothing measurable here while multiplying the
+signal-domain activations. A single seed per pilot cannot say whether $C=96$
+is worse than $C=24$ or merely no better. The wide control
+$\mathcal{Q}(512,2048)$, with \ParamsQwide{} non-embedding parameters, scores
+\BpbQwide{}, the best of the trained models.
+
 \subsection{Comparison with Qwen3-0.6B}
 \label{sec:res-qwen}
 

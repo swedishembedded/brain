@@ -339,6 +339,10 @@ def macros(data, groups):
     m("QwenFtLossFrom", f"{qf[0]['train']['initial_loss']:.2f}" if qf else "--")
     m("QwenFtLossTo", f"{qf[0]['train']['final_loss']:.2f}" if qf else "--")
     m("QwenZsBytesPerToken", f"{q[0]['result']['bytes'] / q[0]['result']['tokens']:.2f}" if q else "--")
+    for f, name in (("S-256-512-8", "SEight"), ("S-256-512-96", "SNinetySix")):
+        g = groups.get(f)
+        m(f"Bpb{name}", f"{g[0]['eval']['bits_per_byte']:.3f}" if g else "--")
+        m(f"Mem{name}", num(g[0]["peak_mem_mib"]) if g else "--")
     w = groups.get("Q-512-2048")
     m("BpbQwide", f"{w[0]['eval']['bits_per_byte']:.3f}" if w else "--")
     m("ParamsQwide", num(w[0]["train"]["params_nonembed"]) if w else "--")
