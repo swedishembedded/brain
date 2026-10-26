@@ -85,14 +85,11 @@ pub const COMPOSITE_PEAK_BYTES: u64 = HOST_BYTES_CPU_DECODER + VISION_DEVICE_BYT
 /// [`Self::from_assembly`]).
 pub struct DeepseekOcrResident {
     dir: String,
-    /// The canonical card the vision tower is placed on, or `None` when the
-    /// caller budgeted no GPU that could hold it (see [`deepseek2ocr::caps::plan_placement`]).
-    vision_gpu: Option<u32>,
-    /// Where the decoder half goes - decided ONCE, at construction, and both
-    /// budgeted by [`Self::estimate_multi`] and handed to
-    /// `deepseek2ocr::serve::load` by [`Self::activate_multi`], so the reservation
-    /// and the allocation cannot name different devices.
-    decoder: DecoderDevice,
+    /// One placement per replica, decided ONCE, at construction: the card the vision tower is on (`None`
+    /// when no budgeted GPU could hold it) and where the decoder half goes. Both budgeted by
+    /// [`Self::estimate_multi`] and handed to `deepseek2ocr::serve::load` by [`Self::activate_multi`], so the
+    /// reservation and the allocation cannot name different devices. See [`deepseek2ocr::caps::plan_replicas`].
+    plans: Vec<deepseek2ocr::caps::Placement>,
 }
 
 impl DeepseekOcrResident {
@@ -117,14 +114,26 @@ impl DeepseekOcrResident {
         match deepseek2ocr::import::Files::locate(&dir) {
             Ok(_) => {
                 let cards: Vec<(u32, u64)> = gpus.iter().map(|&(i, total)| (i, total.saturating_sub(reserved))).collect();
-                let deepseek2ocr::caps::Placement { vision: vision_gpu, decoder } = deepseek2ocr::caps::plan_placement(&cards);
-                Some(DeepseekOcrResident { dir, vision_gpu, decoder })
+                Some(DeepseekOcrResident { dir, plans: deepseek2ocr::caps::plan_replicas(&cards) })
             }
             Err(e) => {
                 residency::log::not_served(&format!("brain: deepseek-ocr not served ({e})"));
                 None
             }
         }
+    }
+}
+
+impl DeepseekOcrResident {
+    #[cfg(test)]
+    fn new_with(gpus: &[(u32, u64)]) -> DeepseekOcrResident {
+        let cards: Vec<(u32, u64)> = gpus.iter().map(|&(i, total)| (i, total.saturating_sub(2 << 30))).collect();
+        DeepseekOcrResident { dir: "/tmp".into(), plans: deepseek2ocr::caps::plan_replicas(&cards) }
+    }
+
+    /// The placement of the replica `key` names.
+    fn plan_of(&self, key: &InstanceKey) -> deepseek2ocr::caps::Placement {
+        self.plans[key.replica_index().min(self.plans.len() - 1)]
     }
 }
 
@@ -136,6 +145,11 @@ impl ResidentModel for DeepseekOcrResident {
         // see `deepseek2ocr::caps::manifest_resident`'s doc. The instance
         // never reads `weights` from `inv` either.
         deepseek2ocr::caps::manifest_resident()
+    }
+
+    /// One replica per card that holds the whole model when there are two or more.
+    fn replicas(&self) -> usize {
+        self.plans.len()
     }
 
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
@@ -166,12 +180,13 @@ impl ResidentModel for DeepseekOcrResident {
 }
 
 impl MultiDeviceResidentModel for DeepseekOcrResident {
-    fn estimate_multi(&self, _key: &InstanceKey) -> MultiDeviceCost {
+    fn estimate_multi(&self, key: &InstanceKey) -> MultiDeviceCost {
         // Cheap and panic-free by construction (a little arithmetic over four
         // consts, an Option<u32> and an enum decided at construction) -- this
         // runs on the dispatcher thread on every scheduling round, and a panic
         // there kills serving for every OTHER model too, not just this one.
-        let Some(v) = self.vision_gpu else {
+        let deepseek2ocr::caps::Placement { vision: vision_gpu, decoder } = self.plan_of(key);
+        let Some(v) = vision_gpu else {
             // With no card big enough for the tower, `Gpu::new_gpu` resolves
             // to whatever wgpu offers -- a software rasteriser on a GPU-less
             // box -- whose buffers ARE host RAM. Everything this model holds
@@ -185,7 +200,7 @@ impl MultiDeviceResidentModel for DeepseekOcrResident {
         // the CPU out of compute. Naming `Device::Cpu` here instead made the
         // model unplaceable under `--device gpu0` (a claim on a device with
         // no budget).
-        let (cost, ram) = match self.decoder {
+        let (cost, ram) = match decoder {
             DecoderDevice::Cpu => (vec![(Device::Gpu(v), VISION_DEVICE_BYTES), (Device::Cpu, HOST_BYTES_CPU_DECODER)], 0),
             // A `Card(i)` that happens to name the vision card is the same
             // pool as `SameCard`, and must be charged once rather than as two
@@ -212,10 +227,11 @@ impl MultiDeviceResidentModel for DeepseekOcrResident {
         // card. A decoder on its OWN card enters a nested `with_gpu` inside
         // that call, and a decoder on the CPU names that backend explicitly;
         // neither is affected by this scope.
-        let placement = self.decoder;
-        let instance = match self.vision_gpu {
-            Some(i) => crate::resident_llm::on_device(Device::Gpu(i), || deepseek2ocr::serve::load(&key.config, placement))?,
-            None => deepseek2ocr::serve::load(&key.config, placement),
+        let deepseek2ocr::caps::Placement { vision, decoder } = self.plan_of(key);
+        let dir = key.base().config;
+        let instance = match vision {
+            Some(i) => crate::resident_llm::on_device(Device::Gpu(i), || deepseek2ocr::serve::load(&dir, decoder))?,
+            None => deepseek2ocr::serve::load(&dir, decoder),
         }?;
         Ok(Box::new(instance))
     }
@@ -238,7 +254,7 @@ mod tests {
     /// hardware it last ran on; naming the placement is what makes each case
     /// below a statement about the accounting rather than about a machine.
     fn resident_with(gpus: &[(u32, u64)], decoder: DecoderDevice) -> DeepseekOcrResident {
-        DeepseekOcrResident { dir: "/tmp".into(), vision_gpu: deepseek2ocr::caps::plan_placement(&usable(gpus)).vision, decoder }
+        DeepseekOcrResident { dir: "/tmp".into(), plans: vec![deepseek2ocr::caps::Placement { vision: deepseek2ocr::caps::plan_placement(&usable(gpus)).vision, decoder }] }
     }
 
     /// What the scheduler offers: each card's total less the reserve.
@@ -353,7 +369,7 @@ mod tests {
     #[test]
     fn the_largest_usable_card_is_chosen_not_index_zero() {
         let r = resident(&[(0, 8 * GB), (1, 24 * GB)]);
-        assert_eq!(r.vision_gpu, Some(1));
+        assert_eq!(r.plans[0].vision, Some(1));
     }
 
     /// The single-device path is structurally refused, so this model cannot be
@@ -374,5 +390,26 @@ mod tests {
         let r = resident(&two_cards());
         let e = r.activate_multi(&key(&r), &[Device::Cpu]).err().unwrap_or_default();
         assert!(e.contains("but the plan placed"), "{e}");
+    }
+
+    /// Two cards that each hold the whole model run one replica each, and `estimate_multi` charges each
+    /// replica to its own card alone - so two replicas never compete for a card.
+    #[test]
+    fn two_whole_cards_are_two_replicas_each_charged_to_its_own_card() {
+        let r = DeepseekOcrResident::new_with(&[(0, 90 * GB), (1, 90 * GB)]);
+        assert_eq!(r.replicas(), 2);
+        let base = key(&r);
+        for i in 0..2usize {
+            let cost = r.estimate_multi(&base.replica(i));
+            assert_eq!(cost.devices().collect::<Vec<_>>(), vec![Device::Gpu(i as u32)], "replica {i}");
+            assert_eq!(cost.on(Device::Gpu(i as u32)), VISION_DEVICE_BYTES + DECODER_DEVICE_BYTES);
+        }
+    }
+
+    /// One card that holds the model is one replica, however many cards are offered.
+    #[test]
+    fn one_whole_card_is_one_replica() {
+        let r = DeepseekOcrResident::new_with(&[(0, 90 * GB), (1, 12 * GB)]);
+        assert_eq!(r.replicas(), 1);
     }
 }

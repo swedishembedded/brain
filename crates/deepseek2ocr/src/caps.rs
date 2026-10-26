@@ -199,6 +199,20 @@ pub fn plan_placement(cards: &[(u32, u64)]) -> Placement {
     Placement { vision: Some(v), decoder }
 }
 
+/// The placements of every replica the offered `cards` can run at once: one self-contained replica (the
+/// vision tower and the decoder on the same card) on each card that holds both, when there are two or
+/// more such cards - the spare capacity is then used, and two replicas never wait on each other's card.
+/// With fewer, the one placement of [`plan_placement`]. Never empty.
+pub fn plan_replicas(cards: &[(u32, u64)]) -> Vec<Placement> {
+    let whole: Vec<Placement> =
+        cards.iter().filter(|&&(_, usable)| usable >= VISION_DEVICE_BYTES + DECODER_DEVICE_BYTES).map(|&(i, _)| Placement { vision: Some(i), decoder: DecoderDevice::SameCard }).collect();
+    if whole.len() >= 2 {
+        whole
+    } else {
+        vec![plan_placement(cards)]
+    }
+}
+
 /// [`plan_placement`] for a one-shot process that has no scheduler: the cards
 /// the process may use are the ambient pin when `--device gpuN` set one, else
 /// every discrete card. Capacity, not free memory, because wgpu exposes no
@@ -434,6 +448,17 @@ mod tests {
         assert_eq!(p, Placement { vision: Some(0), decoder: DecoderDevice::SameCard });
         let p = plan_placement(&[(1, 90 * GIB)]);
         assert_eq!(p, Placement { vision: Some(1), decoder: DecoderDevice::SameCard }, "an offered card keeps its own index");
+    }
+
+    /// Spare cards are used: a replica on every card that holds the whole model, but a single
+    /// replica when only one does (its decoder may then go to a second card).
+    #[test]
+    fn a_replica_runs_on_every_card_that_holds_the_whole_model() {
+        let whole = Placement { vision: Some(0), decoder: DecoderDevice::SameCard };
+        assert_eq!(plan_replicas(&[(0, 90 * GIB), (1, 90 * GIB)]), vec![whole, Placement { vision: Some(1), decoder: DecoderDevice::SameCard }]);
+        assert_eq!(plan_replicas(&[(0, 90 * GIB), (1, 12 * GIB)]), vec![plan_placement(&[(0, 90 * GIB), (1, 12 * GIB)])], "one whole card is one replica");
+        assert_eq!(plan_replicas(&[(0, 90 * GIB), (1, 60 * GIB), (3, 8 * GIB)]).len(), 2, "a card that cannot hold the model is left out");
+        assert_eq!(plan_replicas(&[]), vec![Placement { vision: None, decoder: DecoderDevice::Cpu }]);
     }
 
     #[test]
