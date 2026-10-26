@@ -51,10 +51,12 @@ parameter and arithmetic cost?
   parameters, implemented in an existing training and inference engine with
   gradient-checked operators, a fast-transform path gated against a dense
   reference, and incremental decoding (\cref{sec:implementation}).
-\item A registered comparison (\cref{sec:protocol}) against width-matched
-  conventional decoders trained identically, against the pretrained Qwen3-0.6B
-  \citep{qwen3report} on the same held-out text in bits per byte, and a
-  measurement of how much of Qwen3-0.6B's hidden-state energy and predictive
-  information a truncated Fourier basis retains compared with principal
-  components and random orthogonal bases.
+\item A registered comparison (\cref{sec:protocol}) on TinyStories against
+  Qwen3-architecture controls of the same width, trained identically, and
+  against the pretrained Qwen3-0.6B in bits per byte. SpectralLM is
+  non-inferior to the control with its parameter count and clearly worse than
+  the control with its arithmetic (\cref{sec:res-primary}).
+\item A measurement of Qwen3-0.6B's residual stream showing that its lowest
+  Fourier modes keep about as much of it as random directions do while its
+  principal components keep nearly all (\cref{sec:res-compress}).
 \end{itemize}
