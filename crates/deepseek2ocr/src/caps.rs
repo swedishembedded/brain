@@ -53,9 +53,9 @@
 //!   incremental step, not a full re-run of the whole sequence so far.
 //! * **Both halves on the GPU, on a host that has one.** [`Session::load`]
 //!   builds the vision encoder (SAM+CLIP+glue) with `gpu_core::Gpu::new_gpu`
-//!   and picks the decoder's device with [`decoder_device`] - a real card by
+//!   and picks the decoder's device with [`plan_placement`] - a real card by
 //!   default, the CPU Cranelift JIT when there is none or when an operator
-//!   asks for it (`$BRAIN_DEEPSEEK_OCR_DECODER_DEVICE`). Both backends are
+//!   asks for it (`--device`). Both backends are
 //!   gated against the same llama.cpp reference
 //!   (`crates/deepseek2/tests/{parity,generate}.rs`), so the choice is a
 //!   placement decision, not a correctness one.
@@ -186,7 +186,7 @@ fn default_window_size() -> usize {
 /// alone). 7 GiB rounds that up.
 ///
 /// `crates/catalog/src/resident_deepseekocr.rs` budgets it; the constant lives
-/// here because [`decoder_device`] needs it to decide whether one card can
+/// here because [`plan_placement`] needs it to decide whether one card can
 /// hold both halves.
 pub const VISION_DEVICE_BYTES: u64 = 7u64 << 30;
 
@@ -228,97 +228,55 @@ pub enum DecoderDevice {
     Card(u32),
 }
 
-/// Which device the decoder half is built on, given the card the vision tower
-/// is going to (`None` when the caller has not chosen one, i.e. whatever the
-/// ambient selection resolves to).
-///
-/// `$BRAIN_DEEPSEEK_OCR_DECODER_DEVICE` is the operator override, in the same
-/// spirit as [`default_ctx_len`]'s `$BRAIN_DEEPSEEK_OCR_CTX`: it sizes a real
-/// device allocation the resident is built with once, so it is an env-level
-/// knob rather than a per-request parameter. It takes `cpu`, `gpu` (the
-/// ambient card), a bare card index or `gpu<i>` (that card), or `auto`. An
-/// unparseable value is a warning and `auto`, never a hard failure of a
-/// server's activation.
-///
-/// `auto` - the default - resolves as:
-///
-/// 1. **No discrete GPU: [`DecoderDevice::Cpu`].** `Gpu::new_gpu` on such a
-///    box resolves to a software rasteriser whose buffers ARE host RAM, which
-///    is strictly worse than the Cranelift JIT that is already there.
-/// 2. **A second discrete card that can hold [`DECODER_DEVICE_BYTES`]:
-///    [`DecoderDevice::Card`] on the largest such card.** Keeping the two
-///    halves on separate cards is what makes the placement fit comfortably
-///    rather than at 83% of one 24 GiB card.
-/// 3. **One card big enough for both halves: [`DecoderDevice::SameCard`].**
-/// 4. **Otherwise [`DecoderDevice::Cpu`]** - a decoder that does not fit is
-///    not a decoder that runs slowly, it is one that fails to allocate.
-///
-/// Those steps reason about each card's CAPACITY (`GpuIdentity::vram_bytes`,
-/// the largest DEVICE_LOCAL heap), never its free memory - wgpu exposes no
-/// portable free-VRAM query, so there is nothing honest to read. A card
-/// another process is already sitting on therefore still looks empty here.
-/// That is the scheduler's job on a served host, where
-/// `crates/catalog/src/resident_deepseekocr.rs` passes the budgeted figures in,
-/// and the operator's on a shared one, where
-/// `$BRAIN_DEEPSEEK_OCR_DECODER_DEVICE=gpu<i>` names the card outright.
-///
-/// The GPU is the default where it fits because it is measured faster, not
-/// assumed, and measured against the CPU backend at ITS best rather than at
-/// its default: with `crates/backend-cpu`'s rayon/GEMV scheduling fix in
-/// place:
-/// on the one host it was measured on - not a throughput promise for another:
-/// a real page (283-token prompt, 512 generated tokens) on two Tesla P40s
-/// is markedly faster with the decoder on a card than on the 48-thread
-/// Cranelift JIT, and the 283-row prefill likewise.
-/// Both produce the same ids, which
-/// `crates/deepseek2/tests/decode_throughput.rs` asserts rather than assumes.
-///
-/// Throughput is not the only reason it is the default. The CPU decoder
-/// reaches its number with all 48 cores and ~13.5 GiB of host RAM busy; the
-/// GPU one beats it on roughly one host thread and ~2.7 GiB, which is 47
-/// cores and 11 GiB left for every other resident a server is holding.
-pub fn decoder_device(vision_card: Option<u32>) -> DecoderDevice {
-    match std::env::var("BRAIN_DEEPSEEK_OCR_DECODER_DEVICE").ok().map(|s| s.trim().to_ascii_lowercase()) {
-        None => auto_decoder_device(vision_card),
-        Some(s) if s.is_empty() || s == "auto" => auto_decoder_device(vision_card),
-        Some(s) if s == "cpu" => DecoderDevice::Cpu,
-        Some(s) if s == "gpu" || s == "wgpu" => DecoderDevice::SameCard,
-        Some(s) => match s.strip_prefix("gpu").unwrap_or(&s).parse::<u32>() {
-            Ok(i) => DecoderDevice::Card(i),
-            Err(_) => {
-                eprintln!("brain: BRAIN_DEEPSEEK_OCR_DECODER_DEVICE={s:?} is not cpu|gpu|gpu<i>|<i>|auto - using auto");
-                auto_decoder_device(vision_card)
-            }
-        },
-    }
+/// Where the two halves of the composite go.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Placement {
+    /// The card the vision tower is built on, or `None` when no offered card can hold it.
+    pub vision: Option<u32>,
+    /// Where the decoder is built.
+    pub decoder: DecoderDevice,
 }
 
-fn auto_decoder_device(vision_card: Option<u32>) -> DecoderDevice {
-    let cards = gpu_core::devices::gpus();
-    let discrete: Vec<&gpu_core::devices::DeviceId> =
-        cards.iter().filter(|d| d.identity.class == gpu_core::DeviceClass::DiscreteGpu).collect();
-    if discrete.is_empty() {
-        return DecoderDevice::Cpu;
-    }
-    let ambient = vision_card.or_else(gpu_core::devices::current_gpu);
-    if let Some(other) = discrete
-        .iter()
-        .filter(|d| Some(d.index) != ambient && d.identity.vram_bytes >= DECODER_DEVICE_BYTES)
-        .max_by_key(|d| d.identity.vram_bytes)
-    {
-        return DecoderDevice::Card(other.index);
-    }
-    let host_card = match ambient {
-        Some(i) => discrete.iter().find(|d| d.index == i).copied(),
-        None => discrete.first().copied(),
+/// Place the composite on the `cards` it may use, each `(index, usable bytes)`.
+///
+/// The caller owns which cards those are: a server passes the cards it
+/// schedules (`--device`), so a placement can never name a card the
+/// residency budgets do not hold - a cost naming an unbudgeted card is
+/// refused by the scheduler, and used to be parked in its queue forever.
+///
+/// 1. The vision tower goes on the card with the most usable bytes that can
+///    hold [`VISION_DEVICE_BYTES`] at all (it is a single-image graph and
+///    cannot be spread).
+/// 2. The decoder goes on another card that can hold [`DECODER_DEVICE_BYTES`]
+///    (largest first) so the two pools do not compete, else on the vision card
+///    when it holds both, else on the CPU backend - a decoder that does not fit
+///    is not one that runs slowly, it is one that fails to allocate.
+/// 3. With no card for the tower, everything is host-side.
+pub fn plan_placement(cards: &[(u32, u64)]) -> Placement {
+    let vision = cards.iter().filter(|&&(_, usable)| usable >= VISION_DEVICE_BYTES).max_by_key(|&&(_, usable)| usable).map(|&(i, _)| i);
+    let Some(v) = vision else { return Placement { vision: None, decoder: DecoderDevice::Cpu } };
+    let other = cards.iter().filter(|&&(i, usable)| i != v && usable >= DECODER_DEVICE_BYTES).max_by_key(|&&(_, usable)| usable);
+    let own = cards.iter().find(|&&(i, _)| i == v).map_or(0, |&(_, usable)| usable);
+    let decoder = match other {
+        Some(&(i, _)) => DecoderDevice::Card(i),
+        None if own >= VISION_DEVICE_BYTES + DECODER_DEVICE_BYTES => DecoderDevice::SameCard,
+        None => DecoderDevice::Cpu,
     };
-    match host_card {
-        Some(d) if d.identity.vram_bytes >= VISION_DEVICE_BYTES + DECODER_DEVICE_BYTES => DecoderDevice::SameCard,
-        // A card whose size the registry could not read (`vram_bytes == 0`)
-        // is not evidence that it fits; refusing to guess keeps a failed
-        // allocation from being this function's doing.
-        _ => DecoderDevice::Cpu,
-    }
+    Placement { vision: Some(v), decoder }
+}
+
+/// [`plan_placement`] for a one-shot process that has no scheduler: the cards
+/// the process may use are the ambient pin when `--device gpuN` set one, else
+/// every discrete card. Capacity, not free memory, because wgpu exposes no
+/// portable free-VRAM query; a server uses its budgets instead.
+fn placement_for_process() -> Placement {
+    let pinned = gpu_core::devices::ambient_gpu();
+    let cards: Vec<(u32, u64)> = gpu_core::devices::gpus()
+        .iter()
+        .filter(|d| d.identity.class == gpu_core::DeviceClass::DiscreteGpu && pinned.is_none_or(|p| p == d.index))
+        .map(|d| (d.index, d.identity.vram_bytes))
+        .collect();
+    plan_placement(&cards)
 }
 
 pub fn generate_spec() -> ActionSpec {
@@ -412,14 +370,14 @@ impl Session {
     /// [`HOST_BYTES_GPU_DECODER`] once it is up.
     ///
     /// **The vision encoder (SAM+CLIP+glue) builds on `Gpu::new_gpu`** and
-    /// **the decoder on whatever [`decoder_device`] picks** - a real card
+    /// **the decoder on whatever [`plan_placement`] picks** - a real card
     /// wherever one fits, the CPU Cranelift JIT otherwise or on an operator's
     /// say-so.
     /// On two Tesla P40s a real page is markedly faster that way than
     /// with the decoder on the 48-thread JIT, on roughly one host
     /// thread instead of 48 - and decodes the same ids
     /// (`crates/deepseek2/tests/decode_throughput.rs`). See
-    /// [`decoder_device`] for what that comparison is against.
+    /// [`plan_placement`] for what that comparison is against.
     ///
     /// Neither device is selected by mutating `BRAIN_DEVICE`: this object
     /// lives for the life of a server process, and a process-global env write
@@ -434,7 +392,11 @@ impl Session {
     /// on two different cards, is a device-selection change and not an
     /// architectural one.
     pub fn load(dir: &str) -> Result<Session, String> {
-        Session::load_with(dir, decoder_device(None))
+        let placement = placement_for_process();
+        match placement.vision {
+            Some(i) => gpu_core::devices::with_gpu(i, || Session::load_with(dir, placement.decoder))?,
+            None => Session::load_with(dir, placement.decoder),
+        }
     }
 
     /// [`Session::load`] with the decoder's placement chosen by the caller
@@ -791,53 +753,25 @@ mod tests {
         }
     }
 
-    /// The operator override must actually reach [`decoder_device`], and each
-    /// spelling must mean what its doc says. A typo in the variable name, or
-    /// an arm that silently fell through to `auto`, would leave an operator
-    /// unable to put this decoder back on the CPU on a box where that is what
-    /// they want - and the failure would be invisible, because `auto` picks a
-    /// plausible answer too.
-    ///
-    /// The `auto` path itself is deliberately NOT asserted to a fixed value:
-    /// it reads this box's real device registry, so a test that pinned it
-    /// would only be pinning the machine it last ran on. What IS asserted
-    /// about `auto` is the one property that holds on every host - it never
-    /// names a card the registry does not have.
+    const GIB: u64 = 1 << 30;
+
+    /// The placement only ever names cards it was offered. A server offers the
+    /// cards `--device` schedules; naming any other card made the residency
+    /// claim wait for a budget that does not exist.
     #[test]
-    fn the_decoder_device_override_is_honoured_and_auto_names_a_real_card() {
-        // SAFETY: no other test in this crate reads this var.
-        let restore = std::env::var("BRAIN_DEEPSEEK_OCR_DECODER_DEVICE").ok();
-        let set = |v: Option<&str>| unsafe {
-            match v {
-                Some(v) => std::env::set_var("BRAIN_DEEPSEEK_OCR_DECODER_DEVICE", v),
-                None => std::env::remove_var("BRAIN_DEEPSEEK_OCR_DECODER_DEVICE"),
-            }
-        };
+    fn placement_names_only_offered_cards() {
+        let p = plan_placement(&[(0, 90 * GIB)]);
+        assert_eq!(p, Placement { vision: Some(0), decoder: DecoderDevice::SameCard });
+        let p = plan_placement(&[(1, 90 * GIB)]);
+        assert_eq!(p, Placement { vision: Some(1), decoder: DecoderDevice::SameCard }, "an offered card keeps its own index");
+    }
 
-        set(Some("cpu"));
-        assert_eq!(decoder_device(None), DecoderDevice::Cpu);
-        set(Some("CPU"));
-        assert_eq!(decoder_device(None), DecoderDevice::Cpu, "the value is case-insensitive");
-        set(Some("gpu"));
-        assert_eq!(decoder_device(None), DecoderDevice::SameCard);
-        set(Some("gpu1"));
-        assert_eq!(decoder_device(None), DecoderDevice::Card(1));
-        set(Some("3"));
-        assert_eq!(decoder_device(None), DecoderDevice::Card(3), "a bare index names a card");
-
-        // An unparseable value must not take a server's activation down.
-        set(Some("banana"));
-        let fallback = decoder_device(None);
-        set(None);
-        assert_eq!(fallback, decoder_device(None), "an unparseable override must resolve exactly as `auto` does");
-
-        let n = gpu_core::devices::gpus().len() as u32;
-        match decoder_device(None) {
-            DecoderDevice::Card(i) => assert!(i < n, "auto named gpu{i} on a box with {n} card(s)"),
-            DecoderDevice::SameCard => assert!(n > 0, "auto chose a card on a box with none"),
-            DecoderDevice::Cpu => {}
-        }
-
-        set(restore.as_deref());
+    #[test]
+    fn the_decoder_prefers_a_second_offered_card_then_the_vision_card_then_the_cpu() {
+        assert_eq!(plan_placement(&[(0, 24 * GIB), (1, 30 * GIB)]), Placement { vision: Some(1), decoder: DecoderDevice::Card(0) });
+        assert_eq!(plan_placement(&[(0, 24 * GIB)]), Placement { vision: Some(0), decoder: DecoderDevice::SameCard });
+        assert_eq!(plan_placement(&[(0, 10 * GIB)]).decoder, DecoderDevice::Cpu, "the tower fits, the decoder does not");
+        assert_eq!(plan_placement(&[(0, 2 * GIB)]), Placement { vision: None, decoder: DecoderDevice::Cpu });
+        assert_eq!(plan_placement(&[]), Placement { vision: None, decoder: DecoderDevice::Cpu });
     }
 }

@@ -25,7 +25,8 @@
 //! are depends on the placement, and all three shapes are budgeted:
 //!
 //! * decoder on a second card - `(Gpu(v), `[`VISION_DEVICE_BYTES`]`)`,
-//!   `(Gpu(d), `[`DECODER_DEVICE_BYTES`]`)`, `(Cpu, `[`HOST_BYTES_GPU_DECODER`]`)`.
+//!   `(Gpu(d), `[`DECODER_DEVICE_BYTES`]`)` and [`HOST_BYTES_GPU_DECODER`] of host
+//!   staging as the cost's `ram` (not a named CPU placement).
 //! * decoder on the vision card - one GPU entry holding both, plus the same
 //!   host figure.
 //! * decoder on the CPU - `(Gpu(v), `[`VISION_DEVICE_BYTES`]`)` and
@@ -85,7 +86,7 @@ pub const COMPOSITE_PEAK_BYTES: u64 = HOST_BYTES_CPU_DECODER + VISION_DEVICE_BYT
 pub struct DeepseekOcrResident {
     dir: String,
     /// The canonical card the vision tower is placed on, or `None` when the
-    /// caller budgeted no GPU that could hold it (see [`Self::pick_vision_gpu`]).
+    /// caller budgeted no GPU that could hold it (see [`deepseek2ocr::caps::plan_placement`]).
     vision_gpu: Option<u32>,
     /// Where the decoder half goes - decided ONCE, at construction, and both
     /// budgeted by [`Self::estimate_multi`] and handed to
@@ -115,8 +116,8 @@ impl DeepseekOcrResident {
         let dir = dir.into();
         match deepseek2ocr::import::Files::locate(&dir) {
             Ok(_) => {
-                let vision_gpu = Self::pick_vision_gpu(gpus, reserved);
-                let decoder = deepseek2ocr::caps::decoder_device(vision_gpu);
+                let cards: Vec<(u32, u64)> = gpus.iter().map(|&(i, total)| (i, total.saturating_sub(reserved))).collect();
+                let deepseek2ocr::caps::Placement { vision: vision_gpu, decoder } = deepseek2ocr::caps::plan_placement(&cards);
                 Some(DeepseekOcrResident { dir, vision_gpu, decoder })
             }
             Err(e) => {
@@ -124,25 +125,6 @@ impl DeepseekOcrResident {
                 None
             }
         }
-    }
-
-    /// The card the vision tower goes on: the budgeted GPU with the most usable
-    /// capacity that can hold [`VISION_DEVICE_BYTES`] at all, or `None`.
-    ///
-    /// `residency::multi::pick_devices` deliberately does NOT renegotiate the
-    /// device set a `MultiDeviceCost` names (see its doc: the set is the
-    /// caller's placement decision), so this model has to choose, once, up
-    /// front. Choosing the largest card rather than card 0 unconditionally is
-    /// what keeps a machine with a small carve-out iGPU at index 0 and a big
-    /// discrete card at index 1 from being permanently unplaceable. The tower is
-    /// only ~6 GiB, so this is a fits-at-all decision, not load balancing;
-    /// spreading it is not a thing a single ViT graph can do.
-    fn pick_vision_gpu(gpus: &[(u32, u64)], reserved: u64) -> Option<u32> {
-        gpus.iter()
-            .map(|&(i, total)| (i, total.saturating_sub(reserved)))
-            .filter(|&(_, usable)| usable >= VISION_DEVICE_BYTES)
-            .max_by_key(|&(_, usable)| usable)
-            .map(|(i, _)| i)
     }
 }
 
@@ -197,24 +179,23 @@ impl MultiDeviceResidentModel for DeepseekOcrResident {
             // is then host bytes, which is exactly [`COMPOSITE_PEAK_BYTES`].
             return MultiDeviceCost::new(vec![(Device::Cpu, COMPOSITE_PEAK_BYTES)], 0);
         };
-        let cost = match self.decoder {
-            DecoderDevice::Cpu => vec![(Device::Gpu(v), VISION_DEVICE_BYTES), (Device::Cpu, HOST_BYTES_CPU_DECODER)],
-            DecoderDevice::SameCard => {
-                vec![(Device::Gpu(v), VISION_DEVICE_BYTES + DECODER_DEVICE_BYTES), (Device::Cpu, HOST_BYTES_GPU_DECODER)]
-            }
+        // A decoder on a card holds only its small working set on the host
+        // (tokenizer, preprocessor, per-token work). That is staging, not a
+        // CPU placement, so it is the cost's `ram` figure: the budget charges
+        // it when the host is scheduled and ignores it when `--device` left
+        // the CPU out of compute. Naming `Device::Cpu` here instead made the
+        // model unplaceable under `--device gpu0` (a claim on a device with
+        // no budget).
+        let (cost, ram) = match self.decoder {
+            DecoderDevice::Cpu => (vec![(Device::Gpu(v), VISION_DEVICE_BYTES), (Device::Cpu, HOST_BYTES_CPU_DECODER)], 0),
             // A `Card(i)` that happens to name the vision card is the same
             // pool as `SameCard`, and must be charged once rather than as two
             // entries the budget would see as two devices.
-            DecoderDevice::Card(i) if i == v => {
-                vec![(Device::Gpu(v), VISION_DEVICE_BYTES + DECODER_DEVICE_BYTES), (Device::Cpu, HOST_BYTES_GPU_DECODER)]
-            }
-            DecoderDevice::Card(i) => vec![
-                (Device::Gpu(v), VISION_DEVICE_BYTES),
-                (Device::Gpu(i), DECODER_DEVICE_BYTES),
-                (Device::Cpu, HOST_BYTES_GPU_DECODER),
-            ],
+            DecoderDevice::SameCard => (vec![(Device::Gpu(v), VISION_DEVICE_BYTES + DECODER_DEVICE_BYTES)], HOST_BYTES_GPU_DECODER),
+            DecoderDevice::Card(i) if i == v => (vec![(Device::Gpu(v), VISION_DEVICE_BYTES + DECODER_DEVICE_BYTES)], HOST_BYTES_GPU_DECODER),
+            DecoderDevice::Card(i) => (vec![(Device::Gpu(v), VISION_DEVICE_BYTES), (Device::Gpu(i), DECODER_DEVICE_BYTES)], HOST_BYTES_GPU_DECODER),
         };
-        MultiDeviceCost::new(cost, 0)
+        MultiDeviceCost::new(cost, ram)
     }
 
     fn activate_multi(&self, key: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
@@ -277,7 +258,12 @@ mod tests {
     /// hardware it last ran on; naming the placement is what makes each case
     /// below a statement about the accounting rather than about a machine.
     fn resident_with(gpus: &[(u32, u64)], decoder: DecoderDevice) -> DeepseekOcrResident {
-        DeepseekOcrResident { dir: "/tmp".into(), vision_gpu: DeepseekOcrResident::pick_vision_gpu(gpus, 2 * GB), decoder }
+        DeepseekOcrResident { dir: "/tmp".into(), vision_gpu: deepseek2ocr::caps::plan_placement(&usable(gpus)).vision, decoder }
+    }
+
+    /// What the scheduler offers: each card's total less the reserve.
+    fn usable(gpus: &[(u32, u64)]) -> Vec<(u32, u64)> {
+        gpus.iter().map(|&(i, total)| (i, total.saturating_sub(2 * GB))).collect()
     }
 
     fn resident(gpus: &[(u32, u64)]) -> DeepseekOcrResident {
@@ -309,22 +295,37 @@ mod tests {
         assert_eq!(cost.on(Device::Gpu(1)), VISION_DEVICE_BYTES);
         assert_eq!(cost.on(Device::Cpu), HOST_BYTES_CPU_DECODER);
 
-        // Decoder on its own card: THREE devices, each with its own figure.
+        // Decoder on its own card: two cards, each with its own figure; the
+        // host working set is staging (`ram`), never a named CPU placement.
         let r = resident_with(&two_cards(), DecoderDevice::Card(0));
         let cost = r.estimate_multi(&key(&r));
-        assert_eq!(cost.on(Device::Gpu(1)), VISION_DEVICE_BYTES, "the tower stays on the card pick_vision_gpu chose");
+        assert_eq!(cost.devices().collect::<Vec<_>>(), vec![Device::Gpu(1), Device::Gpu(0)]);
+        assert_eq!(cost.on(Device::Gpu(1)), VISION_DEVICE_BYTES, "the tower stays on the card plan_placement chose");
         assert_eq!(cost.on(Device::Gpu(0)), DECODER_DEVICE_BYTES);
-        assert_eq!(cost.on(Device::Cpu), HOST_BYTES_GPU_DECODER, "the host keeps only the working set once the weights are on a card");
+        assert_eq!(cost.ram(), HOST_BYTES_GPU_DECODER, "the host keeps only the working set once the weights are on a card");
 
         // Decoder on the tower's own card: ONE card entry holding both, not
         // two entries the budget would read as two separate pools.
         for placement in [DecoderDevice::SameCard, DecoderDevice::Card(1)] {
             let r = resident_with(&two_cards(), placement);
             let cost = r.estimate_multi(&key(&r));
-            assert_eq!(cost.devices().collect::<Vec<_>>(), vec![Device::Gpu(1), Device::Cpu], "{placement:?}");
+            assert_eq!(cost.devices().collect::<Vec<_>>(), vec![Device::Gpu(1)], "{placement:?}");
             assert_eq!(cost.on(Device::Gpu(1)), VISION_DEVICE_BYTES + DECODER_DEVICE_BYTES, "{placement:?}");
-            assert_eq!(cost.on(Device::Cpu), HOST_BYTES_GPU_DECODER, "{placement:?}");
+            assert_eq!(cost.ram(), HOST_BYTES_GPU_DECODER, "{placement:?}");
         }
+    }
+
+    /// Under `--device gpu0` the scheduler budgets one card and no CPU
+    /// placement. A cost that names a card it was not offered, or `Device::Cpu`
+    /// for host staging, can never be reserved; the claim then waits for a
+    /// budget that does not exist.
+    #[test]
+    fn a_single_offered_card_is_costed_on_that_card_alone() {
+        let offered = [(0, 90 * GB)];
+        let r = resident_with(&offered, deepseek2ocr::caps::plan_placement(&usable(&offered)).decoder);
+        let cost = r.estimate_multi(&key(&r));
+        assert_eq!(cost.devices().collect::<Vec<_>>(), vec![Device::Gpu(0)]);
+        assert_eq!(cost.on(Device::Gpu(0)), VISION_DEVICE_BYTES + DECODER_DEVICE_BYTES);
     }
 
     /// Moving the decoder onto a card must MOVE its ~11.4 GiB of fp32
@@ -345,15 +346,14 @@ mod tests {
         let gpu = resident_with(&two_cards(), DecoderDevice::Card(0));
         let (a, b) = (cpu.estimate_multi(&key(&cpu)), gpu.estimate_multi(&key(&gpu)));
         assert_eq!(a.total_accelerator_bytes(), COMPOSITE_PEAK_BYTES);
-        let freed = a.on(Device::Cpu) - b.on(Device::Cpu);
+        let freed = a.on(Device::Cpu) - b.ram();
         assert!(
             freed >= 10 * GB,
             "moving the decoder to a card freed only {freed} host bytes - the fp32 weights alone are ~11.4 GiB, so they did not move"
         );
         assert!(b.on(Device::Gpu(0)) >= 10 * GB, "and those bytes must be charged to the card that now holds them");
-        for c in [&a, &b] {
-            assert_eq!(c.ram(), 0, "the host figure is a named device, not the descriptive `ram` field claim_multi never budgets");
-        }
+        assert_eq!(a.ram(), 0, "the CPU decoder names the host as a placement");
+        assert_eq!(b.ram(), HOST_BYTES_GPU_DECODER);
     }
 
     /// A card too small for the tower is not named at all - naming it would

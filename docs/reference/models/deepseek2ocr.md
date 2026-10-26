@@ -212,17 +212,13 @@ the fp32 noise floor, and `crates/deepseek2/tests/decode_throughput.rs`
 asserts they decode the same ids at the served `ctx = 8192`/`chunk = 512`
 shape while reporting each one's cost.
 
-**`$BRAIN_DEEPSEEK_OCR_DECODER_DEVICE` is the operator knob**, alongside
-`$BRAIN_DEEPSEEK_OCR_CTX`/`$BRAIN_DEEPSEEK_OCR_CHUNK`: `cpu`, `gpu` (the
-vision tower's own card), `gpu<i>` or a bare index (that card), or `auto`
-(the default). `auto` prefers a second discrete card, falls back to sharing
-the tower's card when one is big enough for both, and falls back to the CPU
-when there is no discrete GPU at all - on such a box `Gpu::new_wgpu` resolves
-to a software rasteriser whose buffers ARE host RAM, which is strictly worse
-than the Cranelift JIT already there. It reasons about each card's capacity,
-not its free memory (wgpu exposes no portable free-VRAM query), so on a
-shared box name the card outright. The CPU decoder is a supported placement,
-not a deprecated one.
+**Placement is automatic and stays inside the devices the server schedules
+(`--device`).** The vision tower takes the offered card with the most room;
+the decoder takes another offered card that can hold it, else shares the
+tower's card, else falls back to the CPU backend (a supported placement). It
+reasons about each card's capacity less the reserve, never a card that is not
+offered, and a placement that cannot be reserved is refused with a clear
+error instead of waiting in the queue.
 
 <!-- perf-number: hardware requirement, not a throughput claim -->
 **~7 GiB + ~14 GiB of VRAM and ~3 GiB of RAM**, measured on the served build

@@ -723,3 +723,29 @@ token fails loudly.
       composing `model::block::{rmsnorm,rope,gqa,swiglu}` + `model::moe`
       end-to-end (dense layer 0, MoE layers 1..N via `router_fwd_kind` +
       `expert_fwd`/`moe_layer_bwd` + `share
+## Served batching campaign (2026-10-26)
+
+Baseline, GH200 (gpu0, `--device gpu0`, no env), v1 GGUF Q8 resident, vision on
+wgpu/Vulkan, decoder on the same card (fp32-expanded weights), greedy,
+`omni-mixed/000.jpg` (a table page, 283 prompt tokens, 239 generated), HTTP
+`/v1/chat/completions`, one request per page:
+
+| concurrency | wall | pages/min | output tok/s |
+|---|---|---|---|
+| 1 (warm) | 7.6 s | 7.9 | 31.5 |
+| 4 | 30.7 s | 7.8 | 31.1 |
+| 8 | 61.1 s | 7.9 | 31.3 |
+
+Cold first request including the model load: 52 s. The throughput is flat in
+the concurrency: the resident runs requests one after the other (`run_batch`
+is the serial default), so the ceiling is one stream's decode rate.
+
+Placement defect fixed first: `--device gpu0` made the composite name a card
+the server did not schedule (the decoder was placed from every card in the
+registry) and a host-RAM figure under `Device::Cpu`, which has no budget under
+`--device gpu0`. `ResidencyManager::placeable_multi` treated a device without a
+budget as "not placeable yet", so the claim waited forever with no error.
+Now: placement (`deepseek2ocr::caps::plan_placement`) only uses the offered
+cards, host staging is the cost's `ram`, `placeable_multi` lets a cost naming an
+unscheduled device through to `claim_multi` for a clean error, and
+`BRAIN_DEEPSEEK_OCR_DECODER_DEVICE` is deleted.
