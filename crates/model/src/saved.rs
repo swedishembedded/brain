@@ -128,6 +128,17 @@ impl SavedPolicy {
         !matches!(self, SavedPolicy::Keep)
     }
 
+    /// Whether a built model holding `self` can change to `next` in place: only by keeping less (every layer, then
+    /// the boundaries in f32, then in a narrow format). Keeping more again needs buffers a build has released.
+    pub fn narrows_to(self, next: SavedPolicy) -> bool {
+        match (self, next) {
+            (a, b) if a == b => true,
+            (SavedPolicy::Keep, _) => true,
+            (SavedPolicy::Recompute, SavedPolicy::Quantized(_)) => true,
+            _ => false,
+        }
+    }
+
     /// The format the boundary residuals are held in.
     pub fn boundary_format(self) -> SavedFormat {
         match self {
@@ -262,6 +273,133 @@ impl BoundaryStore {
     pub fn load(&self, gpu: &Gpu, l: usize, dst: &DeviceBuffer) {
         gpu.submit(&[], &[self.load_step(gpu, l, dst)]);
     }
+}
+
+/// The residual stream between a trainer's layers: boundary `l` is layer `l`'s input and layer `l - 1`'s output.
+///
+/// Held in f32, every boundary has its own buffer. Held in a narrow [`SavedFormat`] ([`Residuals::quantize`]), the
+/// boundaries live in a [`BoundaryStore`] and the f32 buffers collapse to two the layers alternate between: the forward
+/// rounds each boundary through the store as it is written ([`Residuals::round_trip`]), so the next layer continues
+/// from the value the backward will decode, and the backward decodes a layer's input boundary before replaying it
+/// ([`Residuals::restore`]). Only a backward that recomputes every layer from its input boundary can use the narrow
+/// form, since no layer's other activations survive.
+pub struct Residuals {
+    bufs: Vec<DeviceBuffer>,
+    /// The boundaries this trainer owns (a pipeline stage owns a contiguous run); the store holds exactly these.
+    live: std::ops::Range<usize>,
+    store: Option<BoundaryStore>,
+}
+
+impl Residuals {
+    /// An f32 stream of `bufs.len()` boundaries, the ones in `live` holding real buffers.
+    pub fn new(bufs: Vec<DeviceBuffer>, live: std::ops::Range<usize>) -> Residuals {
+        assert!(live.end <= bufs.len() && live.start < live.end, "residuals: live boundaries {live:?} out of 0..{}", bufs.len());
+        Residuals { bufs, live, store: None }
+    }
+
+    /// Hold the live boundaries (`rows x width` each) in `format` from now on, releasing all but two f32 buffers.
+    /// The device needs [`kernels`] registered.
+    pub fn quantize(&mut self, gpu: &Gpu, format: SavedFormat, rows: u32, width: u32) -> Result<(), String> {
+        if self.store.is_some() {
+            return Err("residuals: the boundary stream is already held narrow".into());
+        }
+        let store = BoundaryStore::new(gpu, format, self.live.len(), rows, width)?;
+        // The first two live buffers become the pair; a stage with one boundary keeps the one.
+        let second = if self.live.len() > 1 { self.live.start + 1 } else { self.live.start };
+        let pair = [self.bufs[self.live.start].clone(), self.bufs[second].clone()];
+        for l in self.live.clone() {
+            self.bufs[l] = pair[l % 2].clone();
+        }
+        self.store = Some(store);
+        Ok(())
+    }
+
+    /// The format the boundaries are held in.
+    pub fn format(&self) -> SavedFormat {
+        self.store.as_ref().map_or(SavedFormat::F32, BoundaryStore::format)
+    }
+
+    /// Store boundary `l` as just written and decode it back over itself (no step with f32 boundaries).
+    pub fn round_trip(&self, gpu: &Gpu, s: &mut Vec<Step>, l: usize) {
+        if let Some(store) = &self.store {
+            s.push(store.store_step(gpu, l - self.live.start, &self.bufs[l]));
+            s.push(store.load_step(gpu, l - self.live.start, &self.bufs[l]));
+        }
+    }
+
+    /// Decode boundary `l` into its working buffer before a step reads it (no step with f32 boundaries).
+    pub fn restore(&self, gpu: &Gpu, s: &mut Vec<Step>, l: usize) {
+        if let Some(store) = &self.store {
+            s.push(store.load_step(gpu, l - self.live.start, &self.bufs[l]));
+        }
+    }
+}
+
+impl std::ops::Index<usize> for Residuals {
+    type Output = DeviceBuffer;
+    fn index(&self, l: usize) -> &DeviceBuffer {
+        &self.bufs[l]
+    }
+}
+
+/// The narrow-boundary contract every model that offers [`SavedPolicy::Quantized`] honours, for its own test to run
+/// (`build` and `step` as for [`check_recompute`]): against the f32 recomputing build, bf16 and FP8 boundaries
+/// change the loss (the stream is rounded at every boundary) by at most the format's precision, keep every gradient
+/// pointing the same way (cosine above 0.99 for bf16, 0.95 for FP8, the tolerances the qwen trainers are held to),
+/// and, where the backend accounts for its allocations, hold fewer live device bytes in that order.
+pub fn check_quantized_boundaries<M: crate::Model>(name: &str, build: impl Fn() -> M, step: impl Fn(&M) -> f32) -> Result<(), String> {
+    let live = |m: &M| m.optimizer_parts().and_then(|p| p.gpu.memory_usage()).map(|u| u.live);
+    let grads = |m: &M| -> Vec<(String, Vec<f32>)> {
+        let mut names = m.param_names();
+        names.sort();
+        names.into_iter().map(|n| (n.clone(), m.read_grad(&n))).collect()
+    };
+    let cosine = |a: &[f32], b: &[f32]| {
+        let dot: f64 = a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum();
+        let norm = |v: &[f32]| v.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+        dot / (norm(a) * norm(b))
+    };
+    let built = |policy: SavedPolicy| -> Result<M, String> {
+        let mut m = build();
+        m.set_saved_policy(policy).map_err(|e| format!("{name}: {policy:?} refused: {e}"))?;
+        Ok(m)
+    };
+    let reference = built(SavedPolicy::Recompute)?;
+    let mut bytes = vec![live(&reference)];
+    let want_loss = step(&reference);
+    let want = grads(&reference);
+    drop(reference);
+    for (format, loss_tol, min_cos) in [(SavedFormat::Bf16, 2e-2, 0.99), (SavedFormat::Fp8, 1.5e-1, 0.95)] {
+        let m = built(SavedPolicy::Quantized(format))?;
+        bytes.push(live(&m));
+        let loss = step(&m);
+        if loss.to_bits() == want_loss.to_bits() {
+            return Err(format!("{name}: {format:?} boundaries give the f32 loss {loss} exactly: the stream is not rounded"));
+        }
+        if (loss - want_loss).abs() >= loss_tol * want_loss.abs().max(1.0) {
+            return Err(format!("{name}: {format:?} boundaries give loss {loss}, f32 boundaries {want_loss}"));
+        }
+        let mut compared = 0;
+        for ((n, g), (_, w)) in grads(&m).iter().zip(&want) {
+            if w.iter().all(|x| *x == 0.0) {
+                continue;
+            }
+            compared += 1;
+            let c = cosine(g, w);
+            if c.is_nan() || c <= min_cos {
+                return Err(format!("{name}: {format:?} boundaries: {n} gradient cosine {c} to the f32 boundaries' (bound {min_cos})"));
+            }
+        }
+        if compared == 0 {
+            return Err(format!("{name}: no trained parameter received a gradient to compare"));
+        }
+    }
+    if let [Some(f32_bytes), Some(bf16), Some(fp8)] = bytes[..] {
+        if !(fp8 < bf16 && bf16 < f32_bytes) {
+            return Err(format!("{name}: live device bytes f32 {f32_bytes}, bf16 {bf16}, fp8 {fp8}: narrower boundaries must hold fewer"));
+        }
+    }
+    Ok(())
 }
 
 /// The activation-recompute contract every model that offers [`SavedPolicy::Recompute`] honours, for its own test to

@@ -114,13 +114,15 @@ blocks of 64, and any state format (also log8) is held by the host optimizer.
 runs implies it.
 `activations=keep|recompute|bf16|fp8` says what the backward keeps of the
 forward: every layer's intermediates, or only the residual between layers (f32,
-or bf16/fp8 where the build holds them so) with each layer replayed before its
-backward. The fit loop hands it to the model (`Model::set_saved_policy`);
-deepseek2, glmdsa, gpt2 and lfm2 then share one set of activation buffers across their
-layers, qwen3 and qwen35 answer from what they were built with, spectrallm, ouro
-and huginn always rebuild each layer from its f32 residual and accept only
-`recompute`, and a model
-that keeps every layer refuses any other choice by name.
+or bf16/fp8) with each layer replayed before its backward. A narrow residual is
+rounded as the forward writes it, so the backward replays exactly the input the
+forward used (`model::saved::Residuals`). The fit loop hands the choice to the
+model (`Model::set_saved_policy`); deepseek2, glmdsa, gpt2 and lfm2 then share
+one set of activation buffers across their layers (gpt2 also holds bf16 or fp8
+residuals), qwen3 and qwen35 answer from what they were built with, spectrallm,
+ouro and huginn always rebuild each layer from its f32 residual and accept only
+`recompute`, and a model that keeps every layer refuses any other choice by
+name. A built model only narrows what it keeps.
 
 The memory planner decides the optimizer-state format before anything loads
 (`TrainPrecision::plan` over `memplan::training_demands`): the requested format

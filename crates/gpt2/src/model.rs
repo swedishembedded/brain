@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use gpu_core::{f, Gpu, Step};
-use model::saved::SavedPolicy;
+use model::saved::{Residuals, SavedPolicy};
 use optim::Optim;
 use paramstore::ParamStore;
 pub use model::Shard;
@@ -185,6 +185,11 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("embed_tile", kernels::EMBED_TILE),
     ("attn_bwd_dscores_rows", kernels::ATTN_BWD_DSCORES_ROWS),
     ("scale_row", kernels::SCALE_ROW),
+    // Narrow boundary residuals (`model::saved::Residuals`), resolved by name.
+    ("pack_bf16", kernels::PACK_BF16),
+    ("unpack_bf16", kernels::UNPACK_BF16),
+    ("pack_fp8_rows", kernels::PACK_FP8_ROWS),
+    ("unpack_fp8_rows", kernels::UNPACK_FP8_ROWS),
 ];
 
 /// Pick the forward-linear GEMM kernel + its dispatch thread count for an
@@ -385,7 +390,7 @@ pub struct Gpt {
 
     tokens: gpu_core::DeviceBuffer,
     targets: gpu_core::DeviceBuffer,
-    res: Vec<gpu_core::DeviceBuffer>,
+    res: Residuals,
     layers: Vec<Layer>,
     proj: gpu_core::DeviceBuffer,
     ffn_out: gpu_core::DeviceBuffer,
@@ -572,6 +577,7 @@ impl Gpt {
         }
         // Head-only buffers (final norm + lm_head + CE): only the last stage; the
         // `n*vocab` logits buffers dominate the saving on other stages.
+        let res = Residuals::new(res, shard.start..shard.end + 1);
         let head = shard.head;
         let hd_v = |x: u64| if head { st(x) } else { st(1) };
         let mut m = Gpt {
@@ -686,8 +692,10 @@ impl Gpt {
             s.push(self.gpu.step(POS_ADD, &[&self.res[0], self.w("pos.weight")], &[n * d, d, t_use], n * d));
         }
 
+        self.res.round_trip(&self.gpu, &mut s, self.shard.start);
         for l in self.shard.start..self.shard.end {
             self.layer_forward(l, b_use, t_use, &mut s);
+            self.res.round_trip(&self.gpu, &mut s, l + 1);
         }
 
         // Head epilogue (final norm + lm_head + CE): only the head stage.
@@ -831,6 +839,7 @@ impl Gpt {
             let (bk, bt) = dx_kernel(n as usize, d as usize);
             s.push(self.gpu.dispatch(bk, &[d_logits_bw, self.w("lm_head.weight"), &self.d_xn], &[n, d, v, 0], bt));
             let last = c.n_layers as usize;
+            self.res.restore(&self.gpu, &mut s, last);
             s.push(model::block::ln_stats_fwd(&self.gpu, &LN_IDS, &self.res[last], &self.ln_mean, &self.ln_inv, d, n, 1e-5));
             s.push(self.gpu.step(LN_DGAMMA, &[&self.d_xn, &self.res[last], &self.ln_mean, &self.ln_inv, g("ln.weight")], &[d, n], d));
             s.push(self.gpu.step(LN_DBETA, &[&self.d_xn, g("ln.bias")], &[d, n], d));
@@ -840,6 +849,7 @@ impl Gpt {
         for l in (self.shard.start..self.shard.end).rev() {
             if self.saved.recomputes() {
                 // Every layer shares one set of activation buffers: rebuild this layer's from `res[l]` first.
+                self.res.restore(&self.gpu, &mut s, l);
                 self.layer_forward(l, self.b, self.t, &mut s);
             }
             let lb = &self.layers[l];
@@ -940,21 +950,24 @@ impl Gpt {
 
     /// Keep what `policy` names of the forward: every layer's activations ([`SavedPolicy::Keep`]), or only the residual
     /// between layers ([`SavedPolicy::Recompute`]), where every layer shares one set of activation buffers (the others
-    /// are released) and the backward replays each layer from its residual before its own backward. Residuals held
-    /// below f32 are refused by name.
+    /// are released) and the backward replays each layer from its residual before its own backward, those residuals
+    /// optionally held in bf16 or FP8 ([`SavedPolicy::Quantized`], see [`Residuals`]). A build only narrows what it
+    /// keeps; widening again is refused by name.
     pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
-        if let SavedPolicy::Quantized(format) = policy {
-            return Err(format!("gpt2 keeps its layer residuals in f32; {format:?} residuals are not supported"));
+        if !self.saved.narrows_to(policy) {
+            return Err(format!("gpt2: a build keeping {:?} cannot go back to {policy:?}", self.saved));
         }
         if policy == self.saved {
             return Ok(());
         }
-        if !policy.recomputes() {
-            return Err("gpt2: a build that recomputes cannot go back to keeping every layer's activations".into());
+        if !self.saved.recomputes() {
+            // The first owned layer's buffers serve every owned layer (a stage without layers has none to share).
+            if let Some(shared) = self.layers[self.shard.start..self.shard.end].first().cloned() {
+                self.layers[self.shard.start..self.shard.end].fill(shared);
+            }
         }
-        // The first owned layer's buffers serve every owned layer (a stage without layers has none to share).
-        if let Some(shared) = self.layers[self.shard.start..self.shard.end].first().cloned() {
-            self.layers[self.shard.start..self.shard.end].fill(shared);
+        if let SavedPolicy::Quantized(format) = policy {
+            self.res.quantize(&self.gpu, format, self.b * self.t, self.cfg.d_model).map_err(|e| format!("gpt2: {e}"))?;
         }
         self.saved = policy;
         self.fwd_steps = self.forward_steps(self.b, self.t);
