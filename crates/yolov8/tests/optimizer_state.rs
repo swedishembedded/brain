@@ -7,7 +7,7 @@
 
 //! The run's optimizer-state precision reaches YOLOv8 through the generic path every `ParamStore` trainer shares
 //! (`model::trainprec::check_optimizer_state_formats`): bf16 and int8-block moments train like f32 on the first step,
-//! and a host-only format is refused by name.
+//! and a precision no optimizer runs is refused by name.
 
 use yolov8::{GtBox, LossMode, Yolo, YoloConfig};
 

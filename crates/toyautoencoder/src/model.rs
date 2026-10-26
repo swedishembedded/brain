@@ -428,6 +428,10 @@ impl model::Model for Autoencoder {
         Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: &self.opt })
     }
 
+    fn optimizer_parts(&self) -> Option<model::OptimizerParts<'_>> {
+        Some(model::OptimizerParts { gpu: &self.gpu, store: &self.ps, optim: &self.opt })
+    }
+
     type Config = AutoencoderConfig;
 
     fn new(cfg: AutoencoderConfig, b: u32, _t: u32, init: &HashMap<String, Vec<f32>>) -> Self {

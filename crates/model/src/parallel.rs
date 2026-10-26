@@ -83,10 +83,10 @@ impl<M: Model + Send> DataParallel<M> {
     /// full model's weights, uploaded to each card.
     pub fn new(cfg: M::Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, gpus: &[usize]) -> DataParallel<M> {
         assert!(!gpus.is_empty(), "data-parallel needs at least one GPU");
-        // Ask models that support it (qwen) to keep only weight+grad on the GPU -
-        // the moments live here in host RAM. Models that ignore it simply keep
-        // their (unused) on-GPU moment buffers; correctness is unaffected.
-        let replicas: Vec<M> = crate::offload::with_adam_offloaded(true, || {
+        // The moments live here in host RAM: a replica keeps only weight and gradient on its card. The build scope
+        // lets a model skip allocating device moments at all; `release_device_moments` frees them for every other
+        // model with an optimizer state.
+        let mut replicas: Vec<M> = crate::offload::with_adam_offloaded(true, || {
             gpus.iter()
                 .map(|&g| {
                     // Scoped (thread-local, race-free) placement on canonical card `g`.
@@ -94,6 +94,7 @@ impl<M: Model + Send> DataParallel<M> {
                 })
                 .collect()
         });
+        replicas.iter_mut().for_each(crate::trainprec::release_device_moments);
         let names = replicas[0].param_names();
         DataParallel { replicas, names, fused: None }
     }

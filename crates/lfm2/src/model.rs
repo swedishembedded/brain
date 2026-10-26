@@ -1597,6 +1597,10 @@ impl model::Model for Lfm {
         Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: self.opt.as_ref()? })
     }
 
+    fn optimizer_parts(&self) -> Option<model::OptimizerParts<'_>> {
+        Some(model::OptimizerParts { gpu: &self.gpu, store: &self.ps, optim: self.opt.as_ref()? })
+    }
+
     type Config = LfmConfig;
 
     /// Trait construction is the TRAINABLE model - what the generic trainer

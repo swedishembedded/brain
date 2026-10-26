@@ -1122,6 +1122,10 @@ impl model::Model for Yolo {
         Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: &self.opt })
     }
 
+    fn optimizer_parts(&self) -> Option<model::OptimizerParts<'_>> {
+        Some(model::OptimizerParts { gpu: &self.gpu, store: &self.ps, optim: &self.opt })
+    }
+
     type Config = YoloConfig;
 
     fn new(cfg: YoloConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {

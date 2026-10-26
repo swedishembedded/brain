@@ -6,8 +6,9 @@
 // sending an email to info@swedishembedded.com.
 
 //! The run's optimizer-state precision reaches GLM through the generic path every `ParamStore` trainer shares
-//! (`model::trainprec::check_optimizer_state_formats`): bf16 and int8-block moments train like f32 on the first step,
-//! and a host-only format is refused by name.
+//! (`model::trainprec::check_optimizer_state_formats`): bf16 and int8-block moments on the device and f32 or log8 moments in host memory
+//! train like f32 on the first step, a run with host moments resumes exactly,
+//! and a precision no optimizer runs is refused by name.
 
 use glmdsa::{Glm, GlmConfig};
 
@@ -33,4 +34,18 @@ fn glm_trains_with_narrow_optimizer_state() {
         m.poll_wait();
     };
     model::trainprec::check_optimizer_state_formats("glmdsa", build, step, lr).unwrap();
+}
+
+/// A run whose moments live in host memory resumes exactly: the fit loop commits the host optimizer beside the
+/// resume file (`model::trainprec::check_resume_with_host_moments`).
+#[test]
+fn glm_resumes_exactly_with_host_moments() {
+    let cfg = GlmConfig { vocab: 16, block_size: 8, ..GlmConfig::tiny() };
+    let init = glmdsa::init_weights(&cfg, 5);
+    let scratch = std::env::temp_dir().join(format!("brain-glm-host-moments-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(&scratch).unwrap();
+    let build = || Glm::new_on(gpu_core::testgpu::dev(pipelines()), cfg.clone(), 1, 8, &init);
+    model::trainprec::check_resume_with_host_moments("glmdsa", build, 8, &scratch).unwrap();
+    std::fs::remove_dir_all(&scratch).unwrap();
 }

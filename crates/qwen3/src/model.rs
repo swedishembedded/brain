@@ -653,9 +653,8 @@ pub struct Qwen {
     pub ps: ParamStore,
     /// Pipeline shard this instance owns (whole model on GPU 0 by default).
     pub shard: Shard,
+    /// The device optimizer, and the host one over the parameters whose moments are offloaded (`Role::Offload`).
     opt: Optim,
-    /// Host AdamW for offloaded params (RAM-resident moments); None otherwise.
-    offload_opt: std::cell::RefCell<Option<optim::OffloadAdam>>,
     /// The per-layer linears of a resident low-precision full fine-tune, their master copies and state.
     resident: Option<std::cell::RefCell<model::resident_ft::ResidentFullFt>>,
     /// The global gradient norm of the latest clipped resident step (it spans both parameter groups).
@@ -663,8 +662,6 @@ pub struct Qwen {
     /// A layer-streamed build defers its backward to [`Qwen::adamw_step`] (which runs it once per pass over the
     /// layers); set by `backward`, cleared by the step and by `zero_grads`.
     backward_pending: Cell<bool>,
-    /// The run's stochastic-rounding seed once [`Model::pin_rounding_seed`](model::Model::pin_rounding_seed) set it.
-    rounding_seed: Cell<Option<u64>>,
     b: u32,
     t: u32,
     count: Cell<f32>,
@@ -1409,9 +1406,6 @@ impl Qwen {
             model::adapter::device::apply_groups(&mut ps, &lora.hp());
         }
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
-        // Lazily-built host optimiser for the offloaded params (None unless any
-        // parameter took Role::Offload).
-        let offload_opt: std::cell::RefCell<Option<optim::OffloadAdam>> = std::cell::RefCell::new(None);
 
         // Decode-only: activations for one prefill chunk instead of b·t, and
         // the score/prob extent at n_heads·ctx instead of n_heads·ctx² - the
@@ -1662,11 +1656,9 @@ impl Qwen {
             count: Cell::new(1.0),
             ps,
             shard,
-            offload_opt,
             resident: resident_ft.map(std::cell::RefCell::new),
             resident_norm: Cell::new(None),
             backward_pending: Cell::new(false),
-            rounding_seed: Cell::new(None),
             opt,
             tokens,
             tok_uniq,
@@ -2790,24 +2782,17 @@ impl Qwen {
         self.update_device_params(&model::resident_ft::StepArgs { step: t, lr, wd, adam, clip: None, extra_scale: 1.0 }, clip, extra_scale);
     }
 
-    /// The device optimizer over the parameters held in the store (all of them for a plain full fine-tune; the
-    /// embedding, head and norms of a resident build), clipping by `clip` and scaling by `scale`; and the host
-    /// optimizer over the offloaded ones.
+    /// The optimizer over the parameters held in the store (all of them for a plain full fine-tune; the norms of a
+    /// resident build), on the device or, for offloaded moments, on the host, clipping by `clip` and scaling by `scale`.
     fn update_device_params(&self, args: &model::resident_ft::StepArgs, clip: Option<f32>, scale: f32) {
         let model::resident_ft::StepArgs { step: t, lr, wd, adam, .. } = *args;
-        // GPU optimiser for `Trainable` params.
         self.opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, scale);
-        // Host (RAM-resident) optimiser for the offloaded params - built lazily on the
-        // first step from the store's current weights.
-        if !self.ps.offload.is_empty() {
-            self.with_offload_opt(|o| o.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, scale));
-        }
     }
     /// Physical bytes of the host-offloaded optimizer state and the host staging
     /// its update holds; `None` before the first offloaded step or when no
     /// parameter is offloaded.
     pub fn offload_host_bytes(&self) -> Option<(u64, usize)> {
-        self.offload_opt.borrow().as_ref().map(|o| o.host_bytes())
+        self.opt.host_bytes()
     }
     pub fn read_grad(&self, name: &str) -> Vec<f32> {
         self.ps.read_grad(&self.gpu, name)
@@ -4053,22 +4038,6 @@ impl Qwen {
     }
 }
 
-/// The host optimizer state of a build that offloads its AdamW moments, created on first use and, when the run pinned a
-/// rounding seed, keyed on it.
-impl Qwen {
-    fn with_offload_opt<R>(&self, f: impl FnOnce(&mut optim::OffloadAdam) -> R) -> R {
-        let mut slot = self.offload_opt.borrow_mut();
-        let opt = slot.get_or_insert_with(|| {
-            let mut o = optim::OffloadAdam::new(&self.gpu, &self.ps);
-            if let Some(seed) = self.rounding_seed.get() {
-                o.streamed().set_position(0, seed);
-            }
-            o
-        });
-        f(opt)
-    }
-}
-
 impl model::resident_ft::ResidentBackward for Qwen {
     fn flush_backward(&self) {
         self.gpu.flush();
@@ -4122,13 +4091,7 @@ impl model::OffDeviceState for Qwen {
             }
             return ft.commit(&self.ops, &ckpt, &run).map(drop);
         }
-        self.with_offload_opt(|opt| {
-            let absorbed = opt.streamed().step_count();
-            if absorbed != step {
-                return Err(std::io::Error::other(format!("the run has absorbed {step} updates, the host optimizer state {absorbed}")));
-            }
-            opt.commit(&self.gpu, &self.ps, &ckpt).map(drop)
-        })
+        Err(std::io::Error::other("qwen3: no resident state to commit"))
     }
 
     fn restore(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
@@ -4136,7 +4099,7 @@ impl model::OffDeviceState for Qwen {
         self.gpu.flush();
         let restored = match &self.resident {
             Some(ft) => ft.borrow_mut().restore_at(&self.ops, &ckpt, step)?.is_some(),
-            None => self.with_offload_opt(|opt| opt.restore_at(&self.gpu, &self.ps, &ckpt, step))?.is_some(),
+            None => return Err(std::io::Error::other("qwen3: no resident state to restore")),
         };
         if restored {
             Ok(())
@@ -4229,6 +4192,10 @@ impl model::Model for Qwen {
         Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: &self.opt })
     }
 
+    fn optimizer_parts(&self) -> Option<model::OptimizerParts<'_>> {
+        Some(model::OptimizerParts { gpu: &self.gpu, store: &self.ps, optim: &self.opt })
+    }
+
     type Config = QwenConfig;
 
     fn new(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {
@@ -4296,33 +4263,15 @@ impl model::Model for Qwen {
         Qwen::poll_wait(self)
     }
     fn off_device_state(&self) -> Option<&dyn model::OffDeviceState> {
-        (self.resident.is_some() || !self.ps.offload.is_empty()).then_some(self as &dyn model::OffDeviceState)
+        self.resident.is_some().then_some(self as &dyn model::OffDeviceState)
     }
     fn pin_rounding_seed(&self, seed: u64) {
         // Domain-separated from the batch generator, which the run keys on the same seed.
         let seed = seed ^ 0x5eed_0000_1234_9876;
-        self.rounding_seed.set(Some(seed));
         self.opt.set_rounding_seed(seed);
     }
     fn last_grad_norm(&self) -> Option<f32> {
         self.resident.as_ref().and_then(|_| self.resident_norm.get())
-    }
-    fn optimized_params(&self) -> Option<Vec<String>> {
-        // The device-optimised parameters; offloaded ones keep their state in host memory, which
-        // `off_device_state` commits and restores.
-        Some(self.ps.opt_params().iter().map(|(n, _)| n.clone()).collect())
-    }
-    fn read_moments(&self, name: &str) -> Option<(Vec<f32>, Vec<f32>)> {
-        if self.ps.moment_scales.contains_key(name) {
-            return optim::read_moments_q8(&self.gpu, &self.ps, name);
-        }
-        self.ps.read_moments(&self.gpu, name)
-    }
-    fn write_moments(&self, name: &str, m: &[f32], v: &[f32]) -> Result<(), String> {
-        if self.ps.moment_scales.contains_key(name) {
-            return optim::write_moments_q8(&self.gpu, &self.ps, name, m, v);
-        }
-        self.ps.write_moments(&self.gpu, name, m, v)
     }
     fn param_names(&self) -> Vec<String> {
         // The optimised set: full-training `trainable` plus any `offload` params

@@ -99,7 +99,7 @@ returns the newest generation that verifies.
 
 What a full fine-tune stores each trainable parameter as is ONE typed value,
 `FitOpts::precision` (`model::TrainPrecision`; `ChatFullFineTune::train_precision`
-in the SDK). It is parsed once from `state=int8:64,master=f32,sr=on,narrow=on`
+in the SDK). It is parsed once from `state=int8:64,master=f32,sr=on,narrow=on,moments=host`
 (`TrainPrecision::parse`), carried to the model's builder, and part of the
 identity a saved training state is resumed under. Nothing is read from the
 calling thread (the old thread-scoped policy is gone); `OptimizerState` still
@@ -109,8 +109,9 @@ The builder resolves the precision parameter by parameter
 (`TrainPrecision::resolve`) and returns an error naming the parameter for a
 choice the trainer does not run: weights and gradients are f32 device buffers
 with no master copy on this path, the device AdamW keeps f32, bf16 or int8
-blocks of 64, and any state format (also log8) needs the host-offloaded state.
-qwen3 and qwen35 honour it; qwen35moe refuses a non-default precision.
+blocks of 64, and any state format (also log8) is held by the host optimizer.
+`moments=host` asks for the host optimizer with any format; a format only it
+runs implies it.
 
 The memory planner decides the optimizer-state format before anything loads
 (`TrainPrecision::plan` over `memplan::training_demands`): the requested format
@@ -120,9 +121,11 @@ refusal with the arithmetic.
 
 Resume is exact wherever the state lives. The generic fit loop writes the
 resume file (weights and moments of the device-optimised parameters, step, batch
-generator) and, for a model that keeps state off the device
-(`Model::off_device_state`: the host-offloaded AdamW state, the master copies of
-a resident build), commits it as one `CheckpointDir` generation keyed by the
+generator, read through `Model::optimizer_parts` for any model with a store)
+and commits the state kept off the device (the host optimizer of an offloaded
+store, through `Optim::host_commit`, for every model; the master copies of a
+resident build, through `Model::off_device_state`) as one `CheckpointDir`
+generation keyed by the
 applied-step count first; a resume restores exactly the generation its file
 names and refuses (naming the generation) one that no longer verifies. The
 stochastic rounding of the device state is keyed on the run's seed
@@ -199,7 +202,12 @@ path. A model that keeps a `ParamStore` and the fused device `Optim` exposes the
 the first step or resume (`trainprec::apply_train_precision`): each trainable
 tensor gets f32, bf16 or int8-block moments as asked, the update graph is
 recorded again, and a model whose build already holds that format is left as it
-is. A model that exposes no optimizer state, a format the device optimizer does
+is. With `moments=host` (or a host-only format) every trainable tensor moves to
+the host optimizer instead (`ParamStore::offload_all`): its device moment
+buffers are released and `Optim::step` updates it from host memory, so the
+device holds each weight and its gradient only. A data-parallel replica or a
+pipeline stage, whose updates the trainer's own host optimizer runs, releases
+its device moments the same way (`trainprec::release_device_moments`). A model that exposes no optimizer state, a format the device optimizer does
 not run (log8, another int8 block size), or a moment kernel the model did not
 register (`optim::MOMENT_KERNELS`, which `optim::with_moment_kernels` appends to
 a kernel list) is refused by name, never trained in fp32 instead.

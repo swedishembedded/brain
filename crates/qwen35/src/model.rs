@@ -1740,12 +1740,19 @@ impl Qwen35 {
             })
             .collect();
         let mut ps = if train && cfg.lora.is_none() {
-            // A full fine-tune keeps its AdamW state on the device with the formats the run's policy names and
-            // the fused kernels run (f32, bf16, int8 blocks); anything else is refused with the parameter's name.
+            // A full fine-tune keeps its AdamW state with the formats the run's policy names: on the device where the
+            // fused kernels run them (f32, bf16, int8 blocks), else (or when asked) in host memory, built offloaded so
+            // no device moment is ever allocated. Anything else is refused with the parameter's name.
             let params: Vec<(String, usize)> = roles.iter().map(|(n, c, _)| (n.clone(), *c)).collect();
             let precision = train_opts.map(|o| o.precision.clone()).unwrap_or_default();
-            precision.resolve(&params, false).unwrap_or_else(|e| panic!("qwen35 full fine-tune (unvalidated build): {e}"));
-            ParamStore::new_with_policy_src(&gpu, roles, src, &precision.policy)
+            let host = precision.wants_host_moments();
+            precision.resolve(&params, host).unwrap_or_else(|e| panic!("qwen35 full fine-tune (unvalidated build): {e}"));
+            if host {
+                let roles = roles.into_iter().map(|(n, c, role)| (n, c, if role == Role::Trainable { Role::Offload } else { role })).collect();
+                ParamStore::new_with_roles_src(&gpu, roles, src)
+            } else {
+                ParamStore::new_with_policy_src(&gpu, roles, src, &precision.policy)
+            }
         } else {
             ParamStore::new_with_roles_src(&gpu, roles, src)
         };
@@ -5784,6 +5791,10 @@ impl model::Model for Qwen35 {
         Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: &self.opt })
     }
 
+    fn optimizer_parts(&self) -> Option<model::OptimizerParts<'_>> {
+        Some(model::OptimizerParts { gpu: &self.gpu, store: &self.ps, optim: &self.opt })
+    }
+
     type Config = Qwen35Config;
 
     /// The training build (weights trainable, or a frozen base with trainable
@@ -5853,16 +5864,6 @@ impl model::Model for Qwen35 {
     }
     fn poll_wait(&self) {
         Qwen35::poll_wait(self)
-    }
-    fn optimized_params(&self) -> Option<Vec<String>> {
-        // Offloaded params keep their moments in host RAM, out of reach here.
-        self.ps.offload.is_empty().then(|| self.ps.opt_params().iter().map(|(n, _)| n.clone()).collect())
-    }
-    fn read_moments(&self, name: &str) -> Option<(Vec<f32>, Vec<f32>)> {
-        self.ps.read_moments(&self.gpu, name)
-    }
-    fn write_moments(&self, name: &str, m: &[f32], v: &[f32]) -> Result<(), String> {
-        self.ps.write_moments(&self.gpu, name, m, v)
     }
     fn param_names(&self) -> Vec<String> {
         Qwen35::param_names(self)

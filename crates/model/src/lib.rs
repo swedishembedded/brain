@@ -119,7 +119,7 @@ pub use plan::{plan_tp, Hardware, ModelShape, TpPlan};
 pub use shard::{plan_balanced, Pipeline, PipelineModel, Shard, ShardCost, Shardable, StreamPlan};
 
 pub use objective::{Objective, StepVerdict};
-pub use trainprec::{apply_train_precision, OptimizerState, ResidentRequest, StateSupport, TrainPrecision, TrainPrecisionSupport};
+pub use trainprec::{apply_train_precision, OptimizerParts, OptimizerState, ResidentRequest, StateSupport, TrainPrecision, TrainPrecisionSupport};
 #[cfg(not(target_arch = "wasm32"))]
 pub use score::{score_base, score_dataset, score_tuned, supervised_positions, ScoredSet};
 pub use train::{cosine_lr, generate, FitOpts, LrSchedule, IGNORE};
@@ -340,7 +340,9 @@ pub trait Model {
     /// than with its moments reset. `None` (the default) for a model that
     /// cannot, including one whose moments live off the device.
     fn optimized_params(&self) -> Option<Vec<String>> {
-        None
+        // The device-optimised parameters of the store; offloaded ones keep their state in the host optimizer, which
+        // the fit loop commits beside the resume file.
+        self.optimizer_parts().map(|p| p.store.opt_params().iter().map(|(n, _)| n.clone()).collect())
     }
 
     /// Training state kept off the device that a resume must restore beside [`Model::optimized_params`]:
@@ -358,14 +360,21 @@ pub trait Model {
         None
     }
 
-    /// `name`'s AdamW `(m, v)` moments; `None` when it has none to give.
-    fn read_moments(&self, _name: &str) -> Option<(Vec<f32>, Vec<f32>)> {
+    /// [`Model::optimizer_state`] read-only: what the fit loop commits and restores the host-held optimizer state of
+    /// an offloaded store through, for a model that keeps no [`OffDeviceState`] of its own.
+    fn optimizer_parts(&self) -> Option<OptimizerParts<'_>> {
         None
     }
 
+    /// `name`'s AdamW `(m, v)` moments; `None` when it has none to give.
+    fn read_moments(&self, name: &str) -> Option<(Vec<f32>, Vec<f32>)> {
+        self.optimizer_parts().and_then(|p| optim::read_moments(p.gpu, p.store, name))
+    }
+
     /// Restore `name`'s AdamW moments, as [`Model::read_moments`] returned them.
-    fn write_moments(&self, name: &str, _m: &[f32], _v: &[f32]) -> Result<(), String> {
-        Err(format!("{name}: this model does not expose its optimizer state"))
+    fn write_moments(&self, name: &str, m: &[f32], v: &[f32]) -> Result<(), String> {
+        let p = self.optimizer_parts().ok_or_else(|| format!("{name}: this model does not expose its optimizer state"))?;
+        optim::write_moments(p.gpu, p.store, name, m, v)
     }
 
     // ---- parameter access (also satisfies gradcheck::CheckModel) ----

@@ -7,7 +7,7 @@
 
 //! The run's optimizer-state precision reaches Ouro through the generic path every `ParamStore` trainer shares
 //! (`model::trainprec::check_optimizer_state_formats`): bf16 and int8-block moments train like f32 on the first step,
-//! and a host-only format is refused by name. `Ouro::new_train` builds its own device with the moment kernels linked.
+//! and a precision no optimizer runs is refused by name. `Ouro::new_train` builds its own device with the moment kernels linked.
 
 use model::{Batch, Model as _};
 use ouro::model::Ouro;

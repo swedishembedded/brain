@@ -1442,6 +1442,10 @@ impl model::Model for Horizon {
         Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: &self.opt })
     }
 
+    fn optimizer_parts(&self) -> Option<model::OptimizerParts<'_>> {
+        Some(model::OptimizerParts { gpu: &self.gpu, store: &self.ps, optim: &self.opt })
+    }
+
     type Config = HorizonConfig;
 
     fn new(cfg: HorizonConfig, b: u32, _t: u32, init: &HashMap<String, Vec<f32>>) -> Self {

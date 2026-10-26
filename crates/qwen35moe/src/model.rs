@@ -4093,6 +4093,10 @@ impl model::Model for Qwen35 {
         Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: &self.opt })
     }
 
+    fn optimizer_parts(&self) -> Option<model::OptimizerParts<'_>> {
+        Some(model::OptimizerParts { gpu: &self.gpu, store: &self.ps, optim: &self.opt })
+    }
+
     type Config = Qwen35Config;
 
     /// The training build (weights trainable, or a frozen base with trainable

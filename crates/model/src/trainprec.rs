@@ -34,6 +34,10 @@ pub struct TrainPrecision {
     pub narrow_state: bool,
     /// Hold the per-layer linears in a low-precision encoding with an off-device master ([`crate::resident_ft`]).
     pub resident: Option<ResidentRequest>,
+    /// Keep the optimizer state of the parameter store in host memory (`moments=host`): the device holds each weight
+    /// and its gradient only. A state format only the host optimizer runs (log8, int8 blocks of another size) implies
+    /// it.
+    pub host_moments: bool,
 }
 
 /// How the per-layer linears of a full fine-tune are held: their encoding and, when the model is larger than the
@@ -50,18 +54,25 @@ pub struct ResidentRequest {
 impl Default for TrainPrecision {
     /// The historical layout: everything fp32, no master, no narrowing.
     fn default() -> Self {
-        TrainPrecision { policy: PrecisionPolicy::uniform(ParamPrecision::FP32), narrow_state: false, resident: None }
+        TrainPrecision { policy: PrecisionPolicy::uniform(ParamPrecision::FP32), narrow_state: false, resident: None, host_moments: false }
     }
 }
 
 impl TrainPrecision {
     pub fn uniform(p: ParamPrecision) -> TrainPrecision {
-        TrainPrecision { policy: PrecisionPolicy::uniform(p), narrow_state: false, resident: None }
+        TrainPrecision { policy: PrecisionPolicy::uniform(p), narrow_state: false, resident: None, host_moments: false }
+    }
+
+    /// Whether the parameter store's optimizer state lives in host memory: asked for (`moments=host`), or a state
+    /// format only the host optimizer runs (log8, int8 blocks of another size than the device kernels').
+    pub fn wants_host_moments(&self) -> bool {
+        let device_runs = |s: StateFormat| matches!(s, StateFormat::F32 | StateFormat::Bf16) || s == StateFormat::Int8Block { block: paramstore::DEVICE_INT8_BLOCK };
+        self.host_moments || !device_runs(self.policy.default.state) || self.policy.rules.iter().any(|(_, p)| !device_runs(p.state))
     }
 
     /// Whether this is the default (all fp32): a resume file only records a precision that departs from it.
     pub fn is_default(&self) -> bool {
-        self.policy.rules.is_empty() && self.policy.default == ParamPrecision::FP32 && !self.narrow_state && self.resident.is_none()
+        self.policy.rules.is_empty() && self.policy.default == ParamPrecision::FP32 && !self.narrow_state && self.resident.is_none() && !self.host_moments
     }
 
     /// The resident full fine-tune this precision asks for, `None` for a plain one: the encoding and window of the
@@ -92,12 +103,14 @@ impl TrainPrecision {
     }
 
     /// Parse `key=value,...` with keys `state` (`f32`, `bf16`, `int8[:block]`, `log8[:block]`), `master`
-    /// (`none`, `bf16`, `f32`), `value` and `grad` (`f32`, `bf16`), `sr` and `narrow` (`on`, `off`), and for a resident
+    /// (`none`, `bf16`, `f32`), `value` and `grad` (`f32`, `bf16`), `sr` and `narrow` (`on`, `off`), `moments` (`device`,
+    /// `host`: where the parameter store's optimizer state lives), and for a resident
     /// full fine-tune `weights` (`bf16`, `fp8[:block]`, `int8`, `nf4`), `window` (layers resident at once) and `clip`
     /// (`two-pass`, `running`). Unnamed keys keep the fp32 default. The result is uniform over every parameter.
     pub fn parse(spec: &str) -> Result<TrainPrecision, String> {
         let mut p = ParamPrecision::FP32;
         let mut narrow_state = false;
+        let mut host_moments = false;
         let (mut weights, mut window, mut clip_pass) = (None, None, ClipPass::TwoPass);
         for item in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
             let (key, value) = item.split_once('=').ok_or_else(|| format!("train precision '{item}': expected key=value"))?;
@@ -132,6 +145,13 @@ impl TrainPrecision {
                 }
                 "sr" => p.stochastic_rounding = flag(value)?,
                 "narrow" => narrow_state = flag(value)?,
+                "moments" => {
+                    host_moments = match value {
+                        "host" => true,
+                        "device" => false,
+                        other => return Err(format!("train precision 'moments': '{other}' is not host or device")),
+                    }
+                }
                 "weights" => weights = Some(parse_resident_value(value)?),
                 "window" => {
                     window = Some(value.parse::<u32>().ok().filter(|&n| n > 0).ok_or_else(|| format!("train precision 'window': '{value}' is not a layer count of at least 1"))?)
@@ -143,14 +163,14 @@ impl TrainPrecision {
                         other => return Err(format!("train precision 'clip': '{other}' is not two-pass or running")),
                     }
                 }
-                other => return Err(format!("train precision: unknown key '{other}' (state, master, value, grad, sr, narrow, weights, window, clip)")),
+                other => return Err(format!("train precision: unknown key '{other}' (state, master, value, grad, sr, narrow, moments, weights, window, clip)")),
             }
         }
         if weights.is_none() && (window.is_some() || item_named(spec, "clip")) {
             return Err("train precision: 'window' and 'clip' describe a resident full fine-tune and need 'weights' (bf16, fp8, int8 or nf4)".into());
         }
         let resident = weights.map(|weights| ResidentRequest { weights, window, clip_pass });
-        Ok(TrainPrecision { policy: PrecisionPolicy::uniform(p), narrow_state, resident })
+        Ok(TrainPrecision { policy: PrecisionPolicy::uniform(p), narrow_state, resident, host_moments })
     }
 
     /// The precision of each of `params` under this policy, checked against what the trainer runs. The device
@@ -179,7 +199,7 @@ impl TrainPrecision {
 
     /// This precision with the optimizer state in `state` for every parameter (a uniform policy only).
     fn with_state(&self, state: StateFormat) -> TrainPrecision {
-        TrainPrecision { policy: PrecisionPolicy::uniform(ParamPrecision { state, ..self.policy.default }), narrow_state: self.narrow_state, resident: self.resident }
+        TrainPrecision { policy: PrecisionPolicy::uniform(ParamPrecision { state, ..self.policy.default }), narrow_state: self.narrow_state, resident: self.resident, host_moments: self.host_moments }
     }
 
     /// Plan the device footprint of a full fine-tune before anything loads. The optimizer state is held in the
@@ -226,6 +246,23 @@ pub struct OptimizerState<'a> {
     pub optim: &'a optim::Optim,
 }
 
+/// [`OptimizerState`] read-only ([`crate::Model::optimizer_parts`]).
+pub struct OptimizerParts<'a> {
+    pub gpu: &'a gpu_core::Gpu,
+    pub store: &'a paramstore::ParamStore,
+    pub optim: &'a optim::Optim,
+}
+
+/// Move `model`'s optimizer state to host memory, so the device holds only its weights and gradients: for a model
+/// whose updates another optimizer runs (a data-parallel replica, a pipeline stage), whose device moments would
+/// otherwise sit allocated and unread. A no-op for a model with no [`OptimizerState`].
+pub fn release_device_moments<M: crate::Model>(model: &mut M) {
+    if let Some(state) = model.optimizer_state() {
+        state.store.offload_all();
+        state.optim.invalidate();
+    }
+}
+
 /// Bring `model`'s optimizer state to what `precision` asks, before the first optimizer step: every trainable
 /// parameter of its store gets its moments in the requested format (f32, bf16 or int8 blocks on the device), the
 /// update graph is recorded again, and a model whose build already holds that format is left as it is. A request
@@ -244,6 +281,19 @@ pub fn apply_train_precision<M: crate::Model>(model: &mut M, precision: &TrainPr
     let Some(state) = model.optimizer_state() else {
         return if uniform_f32 { Ok(()) } else { Err(format!("{name}: this model does not expose its optimizer state, so it trains only with f32 moments")) };
     };
+    let wanted: Vec<(String, ParamPrecision)> = state.store.trainable.iter().chain(&state.store.offload).map(|(n, numel)| (n.clone(), precision.policy.resolve(n, *numel).precision)).collect();
+    if precision.wants_host_moments() || !state.store.offload.is_empty() {
+        // The host optimizer keeps the moments: the device holds the weight and its gradient only.
+        if let Some((n, p)) = wanted.iter().find(|(_, p)| p.value != ValueDtype::F32 || p.master != MasterPolicy::None) {
+            return Err(format!("{name}: {n}: the host optimizer updates the f32 device weight with no master copy; got {p:?}"));
+        }
+        state.store.offload_all();
+        for (n, p) in wanted {
+            state.store.set_precision(&n, p);
+        }
+        state.optim.invalidate();
+        return Ok(());
+    }
     let formats = state.store.trainable.iter().map(|(n, numel)| precision.policy.resolve(n, *numel).precision.state);
     let missing = optim::missing_moment_kernels(state.gpu, formats);
     if !missing.is_empty() {
@@ -256,22 +306,27 @@ pub fn apply_train_precision<M: crate::Model>(model: &mut M, precision: &TrainPr
     Ok(())
 }
 
+/// Every named parameter's values, in name order.
+type NamedValues = Vec<(String, Vec<f32>)>;
+
 /// The optimizer-state contract every model with an [`OptimizerState`] honours, for its own test to run: `build`
 /// makes a fresh trainable model (the same initial weights every call) and `step` runs one optimizer step on a fixed
 /// batch (`zero_grads`, the batch, `forward`, `backward`, `adamw_step` at learning rate `lr`).
 ///
-/// * bf16 moments and int8 blocks are each applied to every trainable tensor of the store;
-/// * the first update in each format equals the f32 run's within the format's quantization: a first AdamW step
+/// * bf16 moments and int8 blocks are held on the device for every trainable tensor;
+/// * `moments=host` and the host-only log8 format move every tensor's moments to host memory: no moment buffer is
+///   left on the device;
+/// * the first update in each layout equals the f32 run's within the format's quantization: a first AdamW step
 ///   moves every weight by about `lr * sign(g)` whatever holds the moments, so the two may differ by 5% of `lr`;
-/// * a format only the host-offloaded optimizer runs (log8) is refused by parameter name and leaves the store as it
-///   was.
+/// * a precision no optimizer runs (a bf16 value without a master) is refused by parameter name and leaves the store
+///   as it was.
 pub fn check_optimizer_state_formats<M: crate::Model>(name: &str, build: impl Fn() -> M, step: impl Fn(&M), lr: f32) -> Result<(), String> {
-    let snapshot = |m: &M| -> Vec<(String, Vec<f32>)> {
+    let snapshot = |m: &M| -> NamedValues {
         let mut names = m.param_names();
         names.sort();
         names.into_iter().map(|n| (n.clone(), m.read_weight(&n))).collect()
     };
-    let first_update = |precision: &TrainPrecision| -> Result<(Vec<(String, Vec<f32>)>, M), String> {
+    let first_update = |precision: &TrainPrecision| -> Result<(NamedValues, M), String> {
         let mut m = build();
         apply_train_precision(&mut m, precision, name)?;
         let before = snapshot(&m);
@@ -280,10 +335,19 @@ pub fn check_optimizer_state_formats<M: crate::Model>(name: &str, build: impl Fn
         Ok((before.into_iter().zip(after).map(|((n, b), (_, a))| (n, a.iter().zip(&b).map(|(x, y)| x - y).collect())).collect(), m))
     };
     let (want, _) = first_update(&TrainPrecision::default())?;
-    for (spec, state) in [("state=bf16", StateFormat::Bf16), ("state=int8", StateFormat::Int8Block { block: paramstore::DEVICE_INT8_BLOCK })] {
+    let int8 = StateFormat::Int8Block { block: paramstore::DEVICE_INT8_BLOCK };
+    let layouts = [("state=bf16", StateFormat::Bf16, false), ("state=int8", int8, false), ("moments=host", StateFormat::F32, true), ("state=log8", StateFormat::Log8Block { block: 256 }, true)];
+    for (spec, state, host) in layouts {
         let (got, mut m) = first_update(&TrainPrecision::parse(spec)?)?;
         let st = m.optimizer_state().ok_or_else(|| format!("{name}: no optimizer state"))?;
-        if let Some((n, _)) = st.store.trainable.iter().find(|(n, _)| st.store.precision_of(n).state != state) {
+        let (held, other) = if host { (&st.store.offload, &st.store.trainable) } else { (&st.store.trainable, &st.store.offload) };
+        if held.is_empty() || !other.is_empty() {
+            return Err(format!("{name} {spec}: {} tensors hold moments where asked, {} elsewhere", held.len(), other.len()));
+        }
+        if host && !st.store.adam_m.is_empty() {
+            return Err(format!("{name} {spec}: {} moment buffers stayed on the device", st.store.adam_m.len()));
+        }
+        if let Some((n, _)) = held.iter().find(|(n, _)| std::mem::discriminant(&st.store.precision_of(n).state) != std::mem::discriminant(&state)) {
             return Err(format!("{name} {spec}: {n} keeps {:?} moments", st.store.precision_of(n).state));
         }
         for ((n, w), (_, g)) in want.iter().zip(&got) {
@@ -293,13 +357,82 @@ pub fn check_optimizer_state_formats<M: crate::Model>(name: &str, build: impl Fn
         }
     }
     let mut m = build();
-    let refusal = apply_train_precision(&mut m, &TrainPrecision::parse("state=log8")?, name).err().ok_or_else(|| format!("{name}: log8 moments on the device were accepted"))?;
+    let refusal = apply_train_precision(&mut m, &TrainPrecision::parse("value=bf16")?, name).err().ok_or_else(|| format!("{name}: a bf16 value without a master was accepted"))?;
     let st = m.optimizer_state().ok_or_else(|| format!("{name}: no optimizer state"))?;
     if !st.store.trainable.iter().any(|(n, _)| refusal.contains(n.as_str())) {
         return Err(format!("{name}: the refusal names no parameter: {refusal}"));
     }
     if let Some((n, _)) = st.store.trainable.iter().find(|(n, _)| st.store.precision_of(n) != ParamPrecision::FP32) {
         return Err(format!("{name}: the refused request still changed {n}"));
+    }
+    Ok(())
+}
+
+/// The exact-resume contract of a model whose optimizer state lives in host memory, for its own test to run: a run of
+/// six steps with `moments=host`, stopped after three and resumed from its state file in a fresh model, ends with the
+/// loss and every weight of the uninterrupted run, bit for bit. `build` makes a fresh trainable model (the same
+/// initial weights every call) for a vocabulary of at least 16 and a block of `block` tokens; `scratch` is an empty
+/// directory the run may write.
+pub fn check_resume_with_host_moments<M: crate::Model>(name: &str, build: impl Fn() -> M, block: u32, scratch: &std::path::Path) -> Result<(), String> {
+    use data::binio::{self, Meta};
+    let err = |e: std::io::Error| format!("{name}: {e}");
+    // A masked prompt/answer corpus over tokens 2..=15.
+    let (mut tokens, mut mask) = (Vec::new(), Vec::new());
+    for i in 0..200u32 {
+        tokens.extend_from_slice(&[2 + i % 5, 7, 9, 15]);
+        mask.extend_from_slice(&[false, false, false, true]);
+    }
+    binio::write_u32_bin(&scratch.join("train.u32.bin"), &tokens).map_err(err)?;
+    binio::write_mask_bin(&scratch.join("train.mask.bin"), &mask).map_err(err)?;
+    binio::write_u32_bin(&scratch.join("val.u32.bin"), &[]).map_err(err)?;
+    binio::write_mask_bin(&scratch.join("val.mask.bin"), &[]).map_err(err)?;
+    std::fs::write(scratch.join("meta.json"), Meta::vocab_only(16)).map_err(err)?;
+    let opts = crate::FitOpts {
+        steps: 6,
+        batch_size: 1,
+        block_size: block,
+        lr: 1e-2,
+        min_lr: 1e-3,
+        warmup: 2,
+        decay_iters: 6,
+        weight_decay: 0.0,
+        grad_clip: 1.0,
+        eval_interval: 0,
+        eval_batches: 0,
+        // One drawn seed for the three runs: the comparison is between them, not against a fixed trajectory.
+        seed: data::rng::random_seed(),
+        precision: TrainPrecision::parse("moments=host")?,
+        ..Default::default()
+    };
+    let objective = || -> Result<_, String> {
+        let (train, val, bcfg, _, itos) = crate::load_dataset_with_itos(scratch, &opts).map_err(err)?;
+        Ok(crate::causal_lm::<M>(train, val, bcfg, itos))
+    };
+    let weights = |m: &M| -> Vec<(String, Vec<u32>)> {
+        let mut names = m.param_names();
+        names.sort();
+        names.into_iter().map(|n| (n.clone(), m.read_weight(&n).into_iter().map(f32::to_bits).collect())).collect()
+    };
+    let (straight, straight_model) = crate::fit_controlled(build(), objective()?, &opts, None, crate::FitControl::default()).map_err(err)?;
+    let state = scratch.join("run.state");
+    let identity = serde_json::json!({"test": name});
+    let mut stop_at_3 = |r: &crate::StepReport| r.step < 3;
+    let control = crate::FitControl { on_step: Some(&mut stop_at_3), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, grad_sync: None };
+    let (first, _) = crate::fit_controlled(build(), objective()?, &opts, None, control).map_err(err)?;
+    if !first.interrupted || !state.with_extension("offdevice").is_dir() {
+        return Err(format!("{name}: the stopped run left no resume state with its host optimizer generation"));
+    }
+    let control = crate::FitControl { state: Some(&state), identity, ..Default::default() };
+    let (second, resumed) = crate::fit_controlled(build(), objective()?, &opts, None, control).map_err(err)?;
+    if second.resumed_at != Some(3) {
+        return Err(format!("{name}: resumed at {:?}, not 3", second.resumed_at));
+    }
+    let (a, b) = (straight.final_loss.unwrap_or(f32::NAN), second.final_loss.unwrap_or(f32::NAN));
+    if a.to_bits() != b.to_bits() {
+        return Err(format!("{name}: the resumed run ends at loss {b}, the uninterrupted one at {a}"));
+    }
+    if let Some(((n, _), _)) = weights(&straight_model).into_iter().zip(weights(&resumed)).find(|((_, x), (_, y))| x != y) {
+        return Err(format!("{name}: {n} differs between the resumed and the uninterrupted run"));
     }
     Ok(())
 }

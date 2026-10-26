@@ -862,6 +862,10 @@ impl model::Model for Huginn {
         Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: self.opt.as_ref()? })
     }
 
+    fn optimizer_parts(&self) -> Option<model::OptimizerParts<'_>> {
+        Some(model::OptimizerParts { gpu: &self.gpu, store: &self.ps, optim: self.opt.as_ref()? })
+    }
+
     type Config = HuginnConfig;
 
     fn new(cfg: Self::Config, b: u32, t: u32, init: &std::collections::HashMap<String, Vec<f32>>) -> Self {

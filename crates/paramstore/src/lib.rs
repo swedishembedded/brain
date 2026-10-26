@@ -332,6 +332,22 @@ impl ParamStore {
         Ok(changed)
     }
 
+    /// Move the optimizer state of every trainable parameter to host memory ([`Role::Offload`]): its device moment
+    /// buffers are released, its gradient stays on the device for the backward to write. Returns how many parameters
+    /// moved. The host optimizer (`optim::Optim` over [`Self::offload`]) keeps their moments from then on; call before
+    /// the first optimizer step.
+    pub fn offload_all(&mut self) -> usize {
+        let moved = std::mem::take(&mut self.trainable);
+        for (name, _) in &moved {
+            self.adam_m.remove(name);
+            self.adam_v.remove(name);
+            self.moment_scales.remove(name);
+        }
+        let n = moved.len();
+        self.offload.extend(moved);
+        n
+    }
+
     /// Withdraw every trainable parameter whose name satisfies `pred` from the
     /// optimiser, returning how many were withdrawn. THE freeze mechanism: the
     /// optimiser iterates [`Self::opt_params`], so a withdrawn tensor is never

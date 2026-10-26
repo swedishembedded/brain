@@ -1234,6 +1234,10 @@ impl model::Model for Gpt {
         Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: &self.opt })
     }
 
+    fn optimizer_parts(&self) -> Option<model::OptimizerParts<'_>> {
+        Some(model::OptimizerParts { gpu: &self.gpu, store: &self.ps, optim: &self.opt })
+    }
+
     type Config = GptConfig;
 
     fn new(cfg: GptConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {

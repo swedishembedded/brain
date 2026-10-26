@@ -612,8 +612,9 @@ impl<M: Shardable> Pipeline<M> {
 
     /// Build every stage with `make`, each on its shard's card.
     fn from_stages(cfg: M::Config, shards: Vec<Shard>, make: impl Fn(M::Config, Shard) -> M) -> Pipeline<M> {
-        // Stages keep weight+grad on the GPU; the moments live in host RAM.
-        let stages: Vec<M> = crate::offload::with_adam_offloaded(true, || {
+        // Stages keep weight+grad on the GPU; the moments live in host RAM (the fused optimizer below), so no stage
+        // keeps device moments (`release_device_moments` after the build).
+        let mut stages: Vec<M> = crate::offload::with_adam_offloaded(true, || {
             shards
                 .iter()
                 .map(|sh| {
@@ -627,6 +628,7 @@ impl<M: Shardable> Pipeline<M> {
                 })
                 .collect()
         });
+        stages.iter_mut().for_each(crate::trainprec::release_device_moments);
         // param name -> holder stage indices, in a stable (first-seen) order.
         let mut holders: Vec<(String, Vec<usize>)> = Vec::new();
         let mut idx: HashMap<String, usize> = HashMap::new();

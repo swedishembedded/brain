@@ -104,6 +104,13 @@ The per-cell matrix and its tests are `docs/reference/training-capabilities.md`.
   the first step (`trainprec::apply_train_precision`, `ParamStore::apply_state_policy`); the bf16
   and int8 moment kernels are one list (`optim::MOMENT_KERNELS`); one shared spec
   (`trainprec::check_optimizer_state_formats`) runs per model.
+- D Generic host-held optimizer state: `moments=host` (or a host-only format such as log8) moves
+  every trainable tensor's moments to the host optimizer inside `Optim` (`ParamStore::offload_all`,
+  no device moment buffer left), exact resume commits it for any model
+  (`Optim::host_commit`, `trainprec::check_resume_with_host_moments`), the default
+  `optimized_params`/`read_moments`/`write_moments` of every model read the store in any format,
+  and data-parallel replicas and pipeline stages release their unused device moments; qwen3's own
+  offload optimizer is gone.
 - D Memory: `model::saved` saved-activation policy (keep, recompute, bf16/fp8 boundaries)
   priced in memplan and wired into qwen3 and qwen35 LoRA training (a4a1242bc); flash attention
   backward without `[H,T,T]` probabilities for qwen35moe (fc6df1080) and flux2, including the

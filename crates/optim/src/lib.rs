@@ -277,6 +277,9 @@ pub struct Optim {
     rounding_seed: Cell<u64>,
     /// The `extra_scale` of the latest clipped [`Self::step`], which scaled the norm it measured.
     last_scale: Cell<f32>,
+    /// The host optimizer of the store's offloaded parameters ([`paramstore::Role::Offload`]): their moments live in
+    /// host memory. Built on the first step that has such parameters, seeded with [`Self::rounding_seed`].
+    host: RefCell<Option<OffloadAdam>>,
 }
 
 impl Optim {
@@ -289,13 +292,48 @@ impl Optim {
     ) -> Optim {
         use std::hash::{BuildHasher, Hasher};
         let random = std::collections::hash_map::RandomState::new().build_hasher().finish();
-        Optim { adamw, gradnorm_sq, grad_scale, clip_coef, grad_scale_buf, cache: RefCell::new(None), rounding_seed: Cell::new(random), last_scale: Cell::new(1.0) }
+        Optim { adamw, gradnorm_sq, grad_scale, clip_coef, grad_scale_buf, cache: RefCell::new(None), rounding_seed: Cell::new(random), last_scale: Cell::new(1.0), host: RefCell::new(None) }
     }
 
     /// Drop the recorded update graph: the next [`Self::step`] records it again from the store. Call after the store's
     /// moment buffers were replaced (`ParamStore::apply_state_policy`).
     pub fn invalidate(&self) {
         *self.cache.borrow_mut() = None;
+        *self.host.borrow_mut() = None;
+    }
+
+    /// Run `f` on the host optimizer of `ps`'s offloaded parameters, building it on first use.
+    fn with_host<R>(&self, gpu: &Gpu, ps: &ParamStore, f: impl FnOnce(&mut OffloadAdam) -> R) -> R {
+        let mut slot = self.host.borrow_mut();
+        let host = slot.get_or_insert_with(|| {
+            let mut host = OffloadAdam::new(gpu, ps);
+            host.streamed().set_position(0, self.rounding_seed.get());
+            host
+        });
+        f(host)
+    }
+
+    /// Commit the host optimizer state of the offloaded parameters (with their values) as the generation of update
+    /// `step` in `dir`. An error when the state has absorbed a different number of updates than the run.
+    pub fn host_commit(&self, gpu: &Gpu, ps: &ParamStore, dir: &crate::checkpoint::CheckpointDir, step: u32) -> std::io::Result<()> {
+        self.with_host(gpu, ps, |host| {
+            let absorbed = host.streamed().step_count();
+            if absorbed != step {
+                return Err(std::io::Error::other(format!("the run has absorbed {step} updates, the host optimizer state {absorbed}")));
+            }
+            host.commit(gpu, ps, dir).map(drop)
+        })
+    }
+
+    /// Restore the generation of update `step` from `dir` into the host optimizer and the offloaded values; `false`
+    /// when no such generation was committed.
+    pub fn host_restore_at(&self, gpu: &Gpu, ps: &ParamStore, dir: &crate::checkpoint::CheckpointDir, step: u32) -> std::io::Result<bool> {
+        self.with_host(gpu, ps, |host| host.restore_at(gpu, ps, dir, step)).map(|run| run.is_some())
+    }
+
+    /// Host bytes of the offloaded parameters' optimizer state and its staging; `None` before their first step.
+    pub fn host_bytes(&self) -> Option<(u64, usize)> {
+        self.host.borrow().as_ref().map(OffloadAdam::host_bytes)
     }
 
     /// Pin the stochastic-rounding seed of int8 moments (checkpoint resume).
@@ -488,6 +526,17 @@ impl Optim {
         clip: Option<f32>,
         extra_scale: f32,
     ) {
+        if !ps.offload.is_empty() {
+            // The global clip spans every parameter: a store split between device and host moments has no single norm.
+            assert!(
+                clip.is_none() || ps.opt_params().is_empty(),
+                "Optim::step: a clipped step over a store whose moments are split between the device and the host"
+            );
+            self.with_host(gpu, ps, |host| host.step(gpu, ps, t, lr, wd, adam, clip, extra_scale));
+            if ps.opt_params().is_empty() {
+                return;
+            }
+        }
         let (bc1, bc2) = adam.bias_corrections(t);
         let clipped = clip.is_some();
 
@@ -527,6 +576,23 @@ impl Optim {
 
         gpu.submit(&[], &g.steps);
     }
+}
+
+/// `name`'s AdamW moments as f32, whatever format the device holds them in (f32, bf16, int8 blocks); `None` for a
+/// parameter with no device moments (frozen, or offloaded to the host optimizer).
+pub fn read_moments(gpu: &Gpu, ps: &ParamStore, name: &str) -> Option<(Vec<f32>, Vec<f32>)> {
+    if ps.moment_scales.contains_key(name) {
+        return read_moments_q8(gpu, ps, name);
+    }
+    ps.read_moments(gpu, name)
+}
+
+/// Restore [`read_moments`]'s values into `name`'s device moments, re-encoded to the format they are held in.
+pub fn write_moments(gpu: &Gpu, ps: &ParamStore, name: &str, m: &[f32], v: &[f32]) -> Result<(), String> {
+    if ps.moment_scales.contains_key(name) {
+        return write_moments_q8(gpu, ps, name, m, v);
+    }
+    ps.write_moments(gpu, name, m, v)
 }
 
 /// Decode the blockwise-int8 moments of `name` from the device into f32

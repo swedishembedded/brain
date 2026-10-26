@@ -1330,6 +1330,9 @@ fn save_train_state<M: Model>(model: &M, path: &Path, step: u32, applied: u32, r
     // the previous resume file and a generation it does not use, never a file naming a state that is missing.
     if let Some(off) = model.off_device_state() {
         off.commit(&off_device_dir(path), applied)?;
+    } else if let Some(host) = model.optimizer_parts().filter(|p| !p.store.offload.is_empty()) {
+        // The moments of an offloaded store live in its host optimizer: committed beside the resume file the same way.
+        host.optim.host_commit(host.gpu, host.store, &optim::checkpoint::CheckpointDir::new(off_device_dir(path))?, applied)?;
     }
     let tmp = path.with_extension("tmp");
     let tmp_str = tmp.to_str().ok_or_else(|| std::io::Error::other(format!("{}: not a UTF-8 path", tmp.display())))?;
@@ -1394,6 +1397,11 @@ fn load_train_state<M: Model>(model: &M, path: &Path, opts: &FitOpts, identity: 
     }
     if let Some(off) = model.off_device_state() {
         off.restore(&off_device_dir(path), applied)?;
+    } else if let Some(host) = model.optimizer_parts().filter(|p| !p.store.offload.is_empty()) {
+        let dir = off_device_dir(path);
+        if !host.optim.host_restore_at(host.gpu, host.store, &optim::checkpoint::CheckpointDir::new(&dir)?, applied)? {
+            return Err(invalid(format!("{}: no host optimizer state was committed at update {applied}", dir.display())));
+        }
     }
     model.poll_wait();
     let selection = match (&header["selection"], opts.patience > 0) {

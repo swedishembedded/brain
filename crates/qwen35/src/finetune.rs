@@ -103,7 +103,7 @@ fn build_full(cfg: Qwen35Config, opts: &FitOpts, src: &dyn checkpoint::TensorSou
         return build_resident(cfg, opts, src, &resident);
     }
     let params = crate::model::shard_param_list(&cfg, &model::Shard::whole(cfg.n_layers as usize));
-    opts.precision.resolve(&params, false).map_err(std::io::Error::other)?;
+    opts.precision.resolve(&params, opts.precision.wants_host_moments()).map_err(std::io::Error::other)?;
     let train = TrainOpts { precision: opts.precision.clone(), gemm_precision: opts.gemm_precision, ..TrainOpts::default() };
     Ok(Qwen35::new_train_opts_on(Gpu::new(pipelines()), cfg, opts.batch_size, opts.block_size, src, &train))
 }
@@ -418,7 +418,7 @@ pub struct Qwen35Trainer;
 impl model::finetune::ChatTrainer for Qwen35Trainer {
     type Trained = Qwen35;
     const LORA_BASES: model::policy::TrainBases = model::policy::TrainBases { model: "qwen35", bases: crate::base_source::LORA_BASES };
-    const TRAIN_PRECISION: model::TrainPrecisionSupport = model::TrainPrecisionSupport { model: "qwen35", state: model::StateSupport::DeviceFused, resident: true, layer_streamed: true };
+    const TRAIN_PRECISION: model::TrainPrecisionSupport = model::TrainPrecisionSupport { model: "qwen35", state: model::StateSupport::Any, resident: true, layer_streamed: true };
 
     fn checkpoint_path(weights: &Path, model_dir: &Path) -> std::path::PathBuf {
         qwen3::store_checkpoint_path(weights, model_dir)
@@ -433,7 +433,7 @@ impl model::finetune::ChatTrainer for Qwen35Trainer {
         let BaseCheckpoint { cfg, src } = open_base(base).map_err(std::io::Error::other)?;
         // The device AdamW runs the fused kernels only: refuse by name what it does not before anything loads.
         let params = crate::model::shard_param_list(&cfg, &model::Shard::whole(cfg.n_layers as usize));
-        opts.precision.resolve(&params, false).map_err(std::io::Error::other)?;
+        opts.precision.resolve(&params, opts.precision.wants_host_moments()).map_err(std::io::Error::other)?;
         let train = TrainOpts { precision: opts.precision.clone(), ..TrainOpts::default() };
         let m = state.scope(|| Qwen35::new_train_opts_on(Gpu::new(pipelines()), cfg, opts.batch_size, opts.block_size, &*src, &train));
         fit.fit(m)

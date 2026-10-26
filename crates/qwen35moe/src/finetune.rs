@@ -89,7 +89,7 @@ impl model::finetune::ChatTrainer for Qwen35MoeTrainer {
     type Trained = Qwen35;
     /// The experts have no narrow training tier: the base is fp32.
     const LORA_BASES: model::policy::TrainBases = model::policy::TrainBases { model: "qwen35moe", bases: &[gpu_core::select::Dtype::F32] };
-    const TRAIN_PRECISION: model::TrainPrecisionSupport = model::TrainPrecisionSupport { model: "qwen35moe", state: model::StateSupport::DeviceFused, resident: false, layer_streamed: false };
+    const TRAIN_PRECISION: model::TrainPrecisionSupport = model::TrainPrecisionSupport { model: "qwen35moe", state: model::StateSupport::Any, resident: false, layer_streamed: false };
 
     fn checkpoint_path(weights: &Path, model_dir: &Path) -> PathBuf {
         qwen3::store_checkpoint_path(weights, model_dir)
@@ -150,7 +150,7 @@ mod tests {
     #[test]
     fn a_train_precision_it_does_not_run_is_refused_by_name_before_anything_is_opened() {
         let nowhere = Path::new("/nonexistent/qwen35moe-base");
-        for spec in ["state=log8", "weights=fp8", "weights=bf16,window=2"] {
+        for spec in ["weights=fp8", "weights=bf16,window=2"] {
             let opts = FitOpts { precision: model::TrainPrecision::parse(spec).unwrap(), ..FitOpts::default() };
             let e = model::finetune::fit_full::<Qwen35MoeTrainer>(nowhere, nowhere, &opts, nowhere, OptimizerState::HostOffload, model::FitControl::default()).expect_err(spec);
             assert_eq!(e.kind(), std::io::ErrorKind::Unsupported, "{spec}: {e}");
