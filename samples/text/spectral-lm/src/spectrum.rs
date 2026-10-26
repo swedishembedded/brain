@@ -85,10 +85,12 @@ fn live(docs: &[ByteDoc], t: usize) -> Vec<usize> {
     docs.iter().enumerate().flat_map(|(r, d)| (0..d.tokens.len()).map(move |i| r * t + i)).collect()
 }
 
+/// The first `count` documents of `path` within the byte limit, tokenized.
+/// Selected before tokenizing: the training file is gigabytes.
 fn documents(path: &str, tok: &dyn Tokenizer, eot: u32, max_bytes: usize, count: usize) -> Vec<ByteDoc> {
-    let mut docs = model::score::byte_docs(&read_text(path), tok, eot, max_bytes);
-    docs.truncate(count);
-    docs
+    let text = read_text(path);
+    let kept: Vec<&str> = data::prepare::split_documents(&text).filter(|d| d.len() <= max_bytes).take(count).collect();
+    model::score::byte_docs(&kept.join(data::bytebpe::END_OF_TEXT), tok, eot, max_bytes)
 }
 
 /// `n` orthonormal rows of length `d` from Gaussian draws (Gram-Schmidt).
