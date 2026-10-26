@@ -74,6 +74,7 @@ pub mod lora;
 pub mod lossw;
 pub mod lut4;
 pub mod moe;
+pub mod moe_i8;
 pub mod objective;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod score;
