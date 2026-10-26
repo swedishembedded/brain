@@ -38,6 +38,10 @@ pub struct TrainPrecision {
     /// and its gradient only. A state format only the host optimizer runs (log8, int8 blocks of another size) implies
     /// it.
     pub host_moments: bool,
+    /// What the backward keeps of the forward (`activations=keep|recompute|bf16|fp8`): every layer's intermediates,
+    /// or only the residual between layers (in f32, bf16 or fp8) with each layer replayed before its backward.
+    /// `None` leaves the build's own choice.
+    pub activations: Option<crate::saved::SavedPolicy>,
 }
 
 /// How the per-layer linears of a full fine-tune are held: their encoding and, when the model is larger than the
@@ -54,13 +58,13 @@ pub struct ResidentRequest {
 impl Default for TrainPrecision {
     /// The historical layout: everything fp32, no master, no narrowing.
     fn default() -> Self {
-        TrainPrecision { policy: PrecisionPolicy::uniform(ParamPrecision::FP32), narrow_state: false, resident: None, host_moments: false }
+        TrainPrecision { policy: PrecisionPolicy::uniform(ParamPrecision::FP32), narrow_state: false, resident: None, host_moments: false, activations: None }
     }
 }
 
 impl TrainPrecision {
     pub fn uniform(p: ParamPrecision) -> TrainPrecision {
-        TrainPrecision { policy: PrecisionPolicy::uniform(p), narrow_state: false, resident: None, host_moments: false }
+        TrainPrecision { policy: PrecisionPolicy::uniform(p), narrow_state: false, resident: None, host_moments: false, activations: None }
     }
 
     /// Whether the parameter store's optimizer state lives in host memory: asked for (`moments=host`), or a state
@@ -72,7 +76,7 @@ impl TrainPrecision {
 
     /// Whether this is the default (all fp32): a resume file only records a precision that departs from it.
     pub fn is_default(&self) -> bool {
-        self.policy.rules.is_empty() && self.policy.default == ParamPrecision::FP32 && !self.narrow_state && self.resident.is_none() && !self.host_moments
+        self.policy.rules.is_empty() && self.policy.default == ParamPrecision::FP32 && !self.narrow_state && self.resident.is_none() && !self.host_moments && self.activations.is_none()
     }
 
     /// The resident full fine-tune this precision asks for, `None` for a plain one: the encoding and window of the
@@ -114,13 +118,15 @@ impl TrainPrecision {
 
     /// Parse `key=value,...` with keys `state` (`f32`, `bf16`, `int8[:block]`, `log8[:block]`), `master`
     /// (`none`, `bf16`, `f32`), `value` and `grad` (`f32`, `bf16`), `sr` and `narrow` (`on`, `off`), `moments` (`device`,
-    /// `host`: where the parameter store's optimizer state lives), and for a resident
+    /// `host`: where the parameter store's optimizer state lives), `activations` (`keep`, `recompute`, `bf16`, `fp8`:
+    /// what the backward keeps of the forward), and for a resident
     /// full fine-tune `weights` (`bf16`, `fp8[:block]`, `int8`, `nf4`), `window` (layers resident at once) and `clip`
     /// (`two-pass`, `running`). Unnamed keys keep the fp32 default. The result is uniform over every parameter.
     pub fn parse(spec: &str) -> Result<TrainPrecision, String> {
         let mut p = ParamPrecision::FP32;
         let mut narrow_state = false;
         let mut host_moments = false;
+        let mut activations = None;
         let (mut weights, mut window, mut clip_pass) = (None, None, ClipPass::TwoPass);
         for item in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
             let (key, value) = item.split_once('=').ok_or_else(|| format!("train precision '{item}': expected key=value"))?;
@@ -155,6 +161,16 @@ impl TrainPrecision {
                 }
                 "sr" => p.stochastic_rounding = flag(value)?,
                 "narrow" => narrow_state = flag(value)?,
+                "activations" => {
+                    use crate::saved::{SavedFormat, SavedPolicy};
+                    activations = Some(match value {
+                        "keep" => SavedPolicy::Keep,
+                        "recompute" => SavedPolicy::Recompute,
+                        "bf16" => SavedPolicy::Quantized(SavedFormat::Bf16),
+                        "fp8" => SavedPolicy::Quantized(SavedFormat::Fp8),
+                        other => return Err(format!("train precision 'activations': '{other}' is not keep, recompute, bf16 or fp8")),
+                    })
+                }
                 "moments" => {
                     host_moments = match value {
                         "host" => true,
@@ -173,14 +189,14 @@ impl TrainPrecision {
                         other => return Err(format!("train precision 'clip': '{other}' is not two-pass or running")),
                     }
                 }
-                other => return Err(format!("train precision: unknown key '{other}' (state, master, value, grad, sr, narrow, moments, weights, window, clip)")),
+                other => return Err(format!("train precision: unknown key '{other}' (state, master, value, grad, sr, narrow, moments, activations, weights, window, clip)")),
             }
         }
         if weights.is_none() && (window.is_some() || item_named(spec, "clip")) {
             return Err("train precision: 'window' and 'clip' describe a resident full fine-tune and need 'weights' (bf16, fp8, int8 or nf4)".into());
         }
         let resident = weights.map(|weights| ResidentRequest { weights, window, clip_pass });
-        Ok(TrainPrecision { policy: PrecisionPolicy::uniform(p), narrow_state, resident, host_moments })
+        Ok(TrainPrecision { policy: PrecisionPolicy::uniform(p), narrow_state, resident, host_moments, activations })
     }
 
     /// The precision of each of `params` under this policy, checked against what the trainer runs. The device
@@ -209,7 +225,7 @@ impl TrainPrecision {
 
     /// This precision with the optimizer state in `state` for every parameter (a uniform policy only).
     fn with_state(&self, state: StateFormat) -> TrainPrecision {
-        TrainPrecision { policy: PrecisionPolicy::uniform(ParamPrecision { state, ..self.policy.default }), narrow_state: self.narrow_state, resident: self.resident, host_moments: self.host_moments }
+        TrainPrecision { policy: PrecisionPolicy::uniform(ParamPrecision { state, ..self.policy.default }), narrow_state: self.narrow_state, resident: self.resident, host_moments: self.host_moments, activations: self.activations }
     }
 
     /// Plan the device footprint of a full fine-tune before anything loads. The optimizer state is held in the
@@ -283,6 +299,9 @@ pub fn release_device_moments<M: crate::Model>(model: &mut M) {
 pub fn apply_train_precision<M: crate::Model>(model: &mut M, precision: &TrainPrecision, name: &str) -> Result<(), String> {
     if precision.is_default() {
         return Ok(());
+    }
+    if let Some(policy) = precision.activations {
+        model.set_saved_policy(policy).map_err(|e| format!("{name}: {e}"))?;
     }
     if precision.resident.is_some() && model.off_device_state().is_none() {
         return Err(format!("{name}: resident low-precision weights were requested, but this build keeps no off-device training state"));

@@ -122,6 +122,12 @@ The per-cell matrix and its tests are `docs/reference/training-capabilities.md`.
   (`model/tests/moe_block_gradcheck.rs`), wired into every MoE trainer: qwen35moe, and deepseek2
   and glmdsa, whose recorded passes are now `model::moe::PassSeg`s (fixed dispatches and each MoE
   layer's experts, built per pass); glmdsa's own per-expert MoE training code is gone.
+- D Activation recompute through the run's precision (`activations=keep|recompute|bf16|fp8`,
+  `Model::set_saved_policy`): deepseek2 and glmdsa share one activation buffer set per layer kind
+  and replay each layer (routed experts included) before its backward, bit-equal to keeping every
+  layer (`model::saved::check_recompute`); qwen3 and qwen35 answer from their build; every other
+  model keeps every layer and refuses by name. Open: the recompute pattern in gpt2, lfm2, ouro,
+  huginn, spectrallm, horizon and the vision trainers.
 - D Memory: `model::saved` saved-activation policy (keep, recompute, bf16/fp8 boundaries)
   priced in memplan and wired into qwen3 and qwen35 LoRA training (a4a1242bc); flash attention
   backward without `[H,T,T]` probabilities for qwen35moe (fc6df1080) and flux2, including the

@@ -71,12 +71,14 @@
 //! first runs this decoder at real scale.
 
 use std::cell::{Cell, RefCell};
+
+use model::saved::SavedPolicy;
 use std::collections::HashMap;
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::block::{self, Gqa, KernelIds};
 use model::moe::{
-    self, ExpertBwdScratch, ExpertGrads, ExpertWeights, GroupedExpertFwdIds, GroupedExpertScratch, MoeActs, MoeIds, MoeIdsBwd, MoeShape, PassSeg,
+    self, ExpertBwdScratch, ExpertGrads, ExpertWeights, GroupedExpertFwdIds, GroupedExpertScratch, ExpertStage, MoeActs, MoeIds, MoeIdsBwd, MoeShape, PassSeg,
     RouterBwdIds, RouterKind, SharedExpertActs, SharedExpertBwdIds, SharedExpertBwdScratch, SharedExpertGrads, SharedExpertIds,
     SharedExpertScratch,
 };
@@ -424,6 +426,24 @@ enum Mlp {
     },
 }
 
+impl LayerBufs {
+    /// Another layer's view of these buffers (the handles are shared, the expert activations are its own).
+    fn share(&self) -> LayerBufs {
+        let mlp = match &self.mlp {
+            Mlp::Dense { gate_pre, up, h } => Mlp::Dense { gate_pre: gate_pre.clone(), up: up.clone(), h: h.clone() },
+            Mlp::Moe { router_logits, gate, sh_gate, sh_up, sh_h, .. } => Mlp::Moe {
+                router_logits: router_logits.clone(),
+                gate: gate.clone(),
+                acts: RefCell::new(None),
+                sh_gate: sh_gate.clone(),
+                sh_up: sh_up.clone(),
+                sh_h: sh_h.clone(),
+            },
+        };
+        LayerBufs { xn1: self.xn1.clone(), q: self.q.clone(), k: self.k.clone(), v: self.v.clone(), probs: self.probs.clone(), ctx: self.ctx.clone(), xmid: self.xmid.clone(), xn2: self.xn2.clone(), mlp }
+    }
+}
+
 struct LayerBufs {
     xn1: DeviceBuffer,
     q: DeviceBuffer,
@@ -626,6 +646,10 @@ pub struct DeepseekV2 {
 
     fwd_steps: Vec<PassSeg>,
     bwd_steps: Vec<PassSeg>,
+    /// What the backward keeps of the forward: every layer's activations, or (recompute) the residual between layers,
+    /// every layer sharing one set of activation buffers its replay before its backward refills
+    /// ([`model::Model::set_saved_policy`]).
+    saved: SavedPolicy,
 
     // ---- incremental KV-cache decode state (lazily built on first `step`) ----
     dec: RefCell<Option<Decode>>,
@@ -936,6 +960,7 @@ impl DeepseekV2 {
             adapter,
             fwd_steps: Vec::new(),
             bwd_steps: Vec::new(),
+            saved: SavedPolicy::Keep,
             dec: RefCell::new(None),
             dec_pos: Cell::new(0),
             gpu,
@@ -1064,14 +1089,6 @@ impl DeepseekV2 {
         let n = b_use * t_use;
         let d = c.d_model();
         let v = c.vocab();
-        let e = c.n_experts();
-        let hd = c.head_dim();
-        let nh = c.n_heads();
-        let dense_ff = c.ffn_hidden();
-        let shared_ff = c.shared_ff();
-        let ids = kernel_ids();
-        let ga = Gqa { b: b_use, t: t_use, n_heads: nh, n_kv_heads: c.n_kv_heads(), head_dim: hd };
-        let shape = self.moe_shape(n);
         let mut segs: Vec<PassSeg> = Vec::new();
         let mut s: Vec<Step> = Vec::new();
 
@@ -1086,73 +1103,8 @@ impl DeepseekV2 {
         }
 
         for l in self.shard.start..self.shard.end {
-            let lb = &self.layers[l];
-            let p = |name: &str| format!("blocks.{l}.{name}");
-
-            // ---- plain MHA (no bias anywhere; q/k/v/o are all square) ----
-            self.norm_fwd(&mut s, &self.res[l], &p("ln1.weight"), &lb.xn1, d, n);
-            self.mm(&mut s, &lb.xn1, &p("self_attn.q_proj.weight"), &lb.q, n, d, d);
-            self.lora_fwd(&mut s, "q_proj", &lb.xn1, &p("self_attn.q_proj.weight"), &lb.q, n, d, d);
-            self.mm(&mut s, &lb.xn1, &p("self_attn.k_proj.weight"), &lb.k, n, d, d);
-            self.lora_fwd(&mut s, "k_proj", &lb.xn1, &p("self_attn.k_proj.weight"), &lb.k, n, d, d);
-            self.mm(&mut s, &lb.xn1, &p("self_attn.v_proj.weight"), &lb.v, n, d, d);
-            self.lora_fwd(&mut s, "v_proj", &lb.xn1, &p("self_attn.v_proj.weight"), &lb.v, n, d, d);
-            s.push(block::rope_fwd(&self.gpu, &ids, &lb.q, n, nh, hd, d, t_use, c.rope_theta()));
-            s.push(block::rope_fwd(&self.gpu, &ids, &lb.k, n, nh, hd, d, t_use, c.rope_theta()));
-            s.extend(block::gqa_fwd(&self.gpu, &ids, &ga, &lb.q, &lb.k, &lb.v, &self.scores, &lb.probs, &lb.ctx));
-            self.mm(&mut s, &lb.ctx, &p("self_attn.o_proj.weight"), &self.proj, n, d, d);
-            self.lora_fwd(&mut s, "o_proj", &lb.ctx, &p("self_attn.o_proj.weight"), &self.proj, n, d, d);
-            s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
-
-            // ---- MLP: dense (leading blocks) or MoE ----
-            self.norm_fwd(&mut s, &lb.xmid, &p("ln2.weight"), &lb.xn2, d, n);
-            match &lb.mlp {
-                Mlp::Dense { gate_pre, up, h } => {
-                    self.mm(&mut s, &lb.xn2, &p("mlp.gate.weight"), gate_pre, n, d, dense_ff);
-                    self.mm(&mut s, &lb.xn2, &p("mlp.up.weight"), up, n, d, dense_ff);
-                    s.push(block::swiglu_fwd(&self.gpu, &ids, gate_pre, up, h, n * dense_ff));
-                    self.mm(&mut s, h, &p("mlp.down.weight"), &self.mlp_out, n, dense_ff, d);
-                }
-                Mlp::Moe { router_logits, gate, sh_gate, sh_up, sh_h, .. } => {
-                    // Router: logits -> a dense [n, E] gate, nonzero only at the
-                    // selected experts, under THIS config's norm/scale policy.
-                    self.mm(&mut s, &lb.xn2, &p("mlp.router.weight"), router_logits, n, d, e);
-                    s.push(moe::router_fwd_kind(&self.gpu, &moe_ids(), self.router_kind(), &shape, router_logits, None, gate, None));
-                    // Routed experts on the rows routed to each: built when the pass reaches them
-                    // (`Self::moe_fwd`), since the routing is this pass's.
-                    segs.push(PassSeg::Steps(std::mem::take(&mut s)));
-                    segs.push(PassSeg::Experts { layer: l, rows: n });
-                    // The fused shared experts, added UNWEIGHTED (`None`): there
-                    // is no shared-expert gate tensor in this checkpoint, and an
-                    // unweighted sum of SwiGLU experts IS one SwiGLU of the
-                    // summed width -- so this is one matmul triple, not two.
-                    s.extend(moe::shared_expert_fwd_tiered(
-                        &self.gpu,
-                        &shared_expert_ids(),
-                        Some(MATMUL_GEMV),
-                        n,
-                        d,
-                        shared_ff,
-                        &lb.xn2,
-                        self.w(&p("mlp.shared.gate.weight")),
-                        self.w(&p("mlp.shared.up.weight")),
-                        self.w(&p("mlp.shared.down.weight")),
-                        None,
-                        &SharedExpertScratch {
-                            gate_pre: sh_gate,
-                            up: sh_up,
-                            h: sh_h,
-                            mlp_out: &self.sh_out,
-                            gate_logits: &self.gate_stub,
-                            gate_scalar: &self.gate_stub,
-                            scaled: &self.gate_stub,
-                        },
-                        &self.moe_acc,
-                        &self.mlp_out,
-                    ));
-                }
-            }
-            s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[n * d], n * d));
+            // A pass that replays every layer before its backward keeps no expert activations here.
+            self.layer_forward(l, b_use, t_use, !self.saved.recomputes(), &mut segs, &mut s);
         }
 
         // final norm + untied lm_head + masked CE - head stage only. A
@@ -1166,6 +1118,93 @@ impl DeepseekV2 {
         }
         segs.push(PassSeg::Steps(s));
         segs
+    }
+
+    /// Layer `l`'s forward over `b_use` sequences of `t_use` tokens, from `res[l]` into `res[l + 1]`, appended to the
+    /// pass being built (`s` the dispatches not yet closed into a segment). `keep_experts` keeps a MoE layer's expert
+    /// activations for the backward.
+    fn layer_forward(&self, l: usize, b_use: u32, t_use: u32, keep_experts: bool, segs: &mut Vec<PassSeg>, steps: &mut Vec<Step>) {
+        let c = &self.cfg;
+        let n = b_use * t_use;
+        let d = c.d_model();
+        let e = c.n_experts();
+        let hd = c.head_dim();
+        let nh = c.n_heads();
+        let dense_ff = c.ffn_hidden();
+        let shared_ff = c.shared_ff();
+        let ids = kernel_ids();
+        let ga = Gqa { b: b_use, t: t_use, n_heads: nh, n_kv_heads: c.n_kv_heads(), head_dim: hd };
+        let shape = self.moe_shape(n);
+        let mut s = std::mem::take(steps);
+        let lb = &self.layers[l];
+        let p = |name: &str| format!("blocks.{l}.{name}");
+
+        // ---- plain MHA (no bias anywhere; q/k/v/o are all square) ----
+        self.norm_fwd(&mut s, &self.res[l], &p("ln1.weight"), &lb.xn1, d, n);
+        self.mm(&mut s, &lb.xn1, &p("self_attn.q_proj.weight"), &lb.q, n, d, d);
+        self.lora_fwd(&mut s, "q_proj", &lb.xn1, &p("self_attn.q_proj.weight"), &lb.q, n, d, d);
+        self.mm(&mut s, &lb.xn1, &p("self_attn.k_proj.weight"), &lb.k, n, d, d);
+        self.lora_fwd(&mut s, "k_proj", &lb.xn1, &p("self_attn.k_proj.weight"), &lb.k, n, d, d);
+        self.mm(&mut s, &lb.xn1, &p("self_attn.v_proj.weight"), &lb.v, n, d, d);
+        self.lora_fwd(&mut s, "v_proj", &lb.xn1, &p("self_attn.v_proj.weight"), &lb.v, n, d, d);
+        s.push(block::rope_fwd(&self.gpu, &ids, &lb.q, n, nh, hd, d, t_use, c.rope_theta()));
+        s.push(block::rope_fwd(&self.gpu, &ids, &lb.k, n, nh, hd, d, t_use, c.rope_theta()));
+        s.extend(block::gqa_fwd(&self.gpu, &ids, &ga, &lb.q, &lb.k, &lb.v, &self.scores, &lb.probs, &lb.ctx));
+        self.mm(&mut s, &lb.ctx, &p("self_attn.o_proj.weight"), &self.proj, n, d, d);
+        self.lora_fwd(&mut s, "o_proj", &lb.ctx, &p("self_attn.o_proj.weight"), &self.proj, n, d, d);
+        s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
+
+        // ---- MLP: dense (leading blocks) or MoE ----
+        self.norm_fwd(&mut s, &lb.xmid, &p("ln2.weight"), &lb.xn2, d, n);
+        match &lb.mlp {
+            Mlp::Dense { gate_pre, up, h } => {
+                self.mm(&mut s, &lb.xn2, &p("mlp.gate.weight"), gate_pre, n, d, dense_ff);
+                self.mm(&mut s, &lb.xn2, &p("mlp.up.weight"), up, n, d, dense_ff);
+                s.push(block::swiglu_fwd(&self.gpu, &ids, gate_pre, up, h, n * dense_ff));
+                self.mm(&mut s, h, &p("mlp.down.weight"), &self.mlp_out, n, dense_ff, d);
+            }
+            Mlp::Moe { router_logits, gate, sh_gate, sh_up, sh_h, .. } => {
+                // Router: logits -> a dense [n, E] gate, nonzero only at the
+                // selected experts, under THIS config's norm/scale policy.
+                self.mm(&mut s, &lb.xn2, &p("mlp.router.weight"), router_logits, n, d, e);
+                s.push(moe::router_fwd_kind(&self.gpu, &moe_ids(), self.router_kind(), &shape, router_logits, None, gate, None));
+                // Routed experts on the rows routed to each: built when the pass reaches them
+                // (`Self::moe_fwd`), since the routing is this pass's.
+                segs.push(PassSeg::Steps(std::mem::take(&mut s)));
+                segs.push(PassSeg::Experts { layer: l, rows: n, stage: ExpertStage::Forward { keep: keep_experts } });
+                // The fused shared experts, added UNWEIGHTED (`None`): there
+                // is no shared-expert gate tensor in this checkpoint, and an
+                // unweighted sum of SwiGLU experts IS one SwiGLU of the
+                // summed width -- so this is one matmul triple, not two.
+                s.extend(moe::shared_expert_fwd_tiered(
+                    &self.gpu,
+                    &shared_expert_ids(),
+                    Some(MATMUL_GEMV),
+                    n,
+                    d,
+                    shared_ff,
+                    &lb.xn2,
+                    self.w(&p("mlp.shared.gate.weight")),
+                    self.w(&p("mlp.shared.up.weight")),
+                    self.w(&p("mlp.shared.down.weight")),
+                    None,
+                    &SharedExpertScratch {
+                        gate_pre: sh_gate,
+                        up: sh_up,
+                        h: sh_h,
+                        mlp_out: &self.sh_out,
+                        gate_logits: &self.gate_stub,
+                        gate_scalar: &self.gate_stub,
+                        scaled: &self.gate_stub,
+                    },
+                    &self.moe_acc,
+                    &self.mlp_out,
+                ));
+            }
+        }
+        s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[n * d], n * d));
+
+        *steps = s;
     }
 
     // ---- backward tape ----
@@ -1198,6 +1237,10 @@ impl DeepseekV2 {
         }
 
         for l in (self.shard.start..self.shard.end).rev() {
+            if self.saved.recomputes() {
+                // Every layer shares one set of activation buffers: rebuild this layer's from `res[l]` first.
+                self.layer_forward(l, b_use, t_use, true, &mut segs, &mut s);
+            }
             let lb = &self.layers[l];
             let p = |name: &str| format!("blocks.{l}.{name}");
 
@@ -1251,7 +1294,7 @@ impl DeepseekV2 {
                     ));
                     // The routed half on the rows each expert was routed in the forward (`Self::moe_bwd`).
                     segs.push(PassSeg::Steps(std::mem::take(&mut s)));
-                    segs.push(PassSeg::Experts { layer: l, rows: n });
+                    segs.push(PassSeg::Experts { layer: l, rows: n, stage: ExpertStage::Backward });
                 }
             }
             // ln2 backward -> d_tmp ; dxmid = dres[l+1] + d_tmp
@@ -1303,14 +1346,14 @@ impl DeepseekV2 {
     }
 
     /// The routed experts of MoE layer `l` over `rows` rows: the layer's gate is read back, every expert runs on the
-    /// rows routed to it, and their activations are kept for the backward (`MoeActs::compact`).
-    fn moe_fwd(&self, l: usize, rows: u32) {
+    /// rows routed to it, and with `keep` their activations are kept for the backward (`MoeActs::compact`).
+    fn moe_fwd(&self, l: usize, rows: u32, keep: bool) {
         let Mlp::Moe { gate, acts, .. } = &self.layers[l].mlp else { unreachable!("a MoE segment of a dense layer") };
         let shape = self.moe_shape(rows);
         let compact = MoeActs::compact(&self.gpu, &shape, &self.gpu.read(gate, (rows * shape.n_experts) as usize));
         let steps = moe::experts_fwd_train(&self.gpu, &moe_ids(), &shape, &self.layers[l].xn2, gate, &self.expert_weights(l, &shape), &compact, &self.moe_acc);
         self.gpu.submit(&[&self.moe_acc], &steps);
-        *acts.borrow_mut() = Some(compact);
+        *acts.borrow_mut() = keep.then_some(compact);
     }
 
     /// The routed half of MoE layer `l`'s backward over `rows` rows: the router, then every expert on the rows it was
@@ -1355,13 +1398,47 @@ impl DeepseekV2 {
         self.gpu.submit(&[&self.d_gate], &steps);
     }
 
-    /// Run a pass: its fixed dispatches in order, each MoE layer's experts (`experts`: the forward's or the
-    /// backward's) as the pass reaches them.
-    fn run(&self, segs: &[PassSeg], experts: impl Fn(&Self, usize, u32)) {
+    /// Keep what `policy` names of the forward: every layer's activations ([`SavedPolicy::Keep`]), or only the residual
+    /// between layers ([`SavedPolicy::Recompute`]), where every layer of a kind shares one set of activation buffers
+    /// (the others are released) and the backward replays each layer from its residual before its own backward.
+    /// Residuals held below f32 are refused by name.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        if let SavedPolicy::Quantized(format) = policy {
+            return Err(format!("deepseek2 keeps its layer residuals in f32; {format:?} residuals are not supported"));
+        }
+        if policy == self.saved {
+            return Ok(());
+        }
+        if policy.recomputes() {
+            // One buffer set per kind of layer: the first dense and the first MoE layer's, shared by every layer.
+            let first_of = |moe: bool| self.layers.iter().position(|lb| matches!(lb.mlp, Mlp::Moe { .. }) == moe);
+            let (dense, moe) = (first_of(false), first_of(true));
+            self.layers = (0..self.layers.len())
+                .map(|l| {
+                    let src = &self.layers[if matches!(self.layers[l].mlp, Mlp::Moe { .. }) { moe } else { dense }.expect("a layer of this kind exists")];
+                    src.share()
+                })
+                .collect();
+        } else {
+            return Err("deepseek2: a build that recomputes cannot go back to keeping every layer's activations".into());
+        }
+        self.saved = policy;
+        if self.batched {
+            self.fwd_steps = self.build_forward(self.b, self.t);
+            if !self.bwd_steps.is_empty() {
+                self.bwd_steps = self.build_backward();
+            }
+        }
+        Ok(())
+    }
+
+    /// Run a pass: its fixed dispatches in order, each MoE layer's experts as the pass reaches them.
+    fn run(&self, segs: &[PassSeg]) {
         for seg in segs {
             match seg {
                 PassSeg::Steps(steps) => self.gpu.submit(&[], steps),
-                PassSeg::Experts { layer, rows } => experts(self, *layer, *rows),
+                PassSeg::Experts { layer, rows, stage: ExpertStage::Forward { keep } } => self.moe_fwd(*layer, *rows, *keep),
+                PassSeg::Experts { layer, rows, stage: ExpertStage::Backward } => self.moe_bwd(*layer, *rows),
             }
         }
     }
@@ -1375,7 +1452,7 @@ impl DeepseekV2 {
     /// stale or uninitialised data - see `crate::shard`).
     pub fn forward_submit(&self) {
         assert!(self.batched, "DeepseekV2::forward on a batched=false (chunked-decode-only) instance");
-        self.run(&self.fwd_steps, Self::moe_fwd);
+        self.run(&self.fwd_steps);
     }
 
     pub fn forward(&self) -> f32 {
@@ -1388,7 +1465,7 @@ impl DeepseekV2 {
         assert!(!self.bwd_steps.is_empty(), "DeepseekV2::backward on a forward-only (inference) instance");
         let n = self.b * self.t;
         self.gpu.write(&self.ce_grad_uni, &[n, self.cfg.vocab(), IGNORE, f(self.count.get())]);
-        self.run(&self.bwd_steps, Self::moe_bwd);
+        self.run(&self.bwd_steps);
     }
 
     // ---- pipeline-parallel cross-stage seam (see `crate::shard`) ----
@@ -1451,7 +1528,7 @@ impl DeepseekV2 {
         }
         let ignore = vec![IGNORE; t_use as usize];
         self.set_batch(tokens, &ignore);
-        self.run(&self.build_forward(1, t_use), Self::moe_fwd);
+        self.run(&self.build_forward(1, t_use));
         self.gpu.read(&self.logits, (t_use * self.cfg.vocab()) as usize)
     }
 
@@ -2194,6 +2271,9 @@ impl model::Model for DeepseekV2 {
 
     fn optimizer_parts(&self) -> Option<model::OptimizerParts<'_>> {
         Some(model::OptimizerParts { gpu: &self.gpu, store: &self.ps, optim: &self.opt })
+    }
+    fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        DeepseekV2::set_saved_policy(self, policy)
     }
 
     type Config = DeepseekV2Config;

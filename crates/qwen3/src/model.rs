@@ -4208,6 +4208,19 @@ impl model::Model for Qwen {
     fn optimizer_parts(&self) -> Option<model::OptimizerParts<'_>> {
         Some(model::OptimizerParts { gpu: &self.gpu, store: &self.ps, optim: &self.opt })
     }
+    /// This trainer always rebuilds every layer in the backward from its residual; the residual's format is fixed
+    /// when the model is built (`SavedPolicy::Quantized` at construction), so a request for it is answered from the
+    /// build, never ignored.
+    fn set_saved_policy(&mut self, policy: model::saved::SavedPolicy) -> Result<(), String> {
+        use model::saved::{SavedFormat, SavedPolicy};
+        let built = self.res_saved.as_ref().map_or(SavedFormat::F32, |b| b.format());
+        match policy {
+            SavedPolicy::Keep => Err("qwen3 always recomputes each layer in the backward; keeping every layer is not available".into()),
+            SavedPolicy::Recompute if built == SavedFormat::F32 => Ok(()),
+            SavedPolicy::Quantized(f) if f == built => Ok(()),
+            other => Err(format!("qwen3 was built keeping {built:?} residuals; {other:?} is chosen when the model is built")),
+        }
+    }
 
     type Config = QwenConfig;
 

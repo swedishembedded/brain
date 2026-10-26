@@ -457,7 +457,16 @@ impl MoeActs {
 /// forward, [`moe_layer_bwd`] in the backward).
 pub enum PassSeg {
     Steps(Vec<Step>),
-    Experts { layer: usize, rows: u32 },
+    Experts { layer: usize, rows: u32, stage: ExpertStage },
+}
+
+/// What a [`PassSeg::Experts`] does with its layer's routed experts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExpertStage {
+    /// The forward. `keep` holds the activations for the backward; a pass that recomputes each layer before its
+    /// backward drops them (the replay keeps its own).
+    Forward { keep: bool },
+    Backward,
 }
 
 /// The routed experts' training forward, accumulating every expert's gate-weighted output into `acc` (which the

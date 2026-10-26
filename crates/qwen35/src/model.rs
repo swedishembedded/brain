@@ -5809,6 +5809,20 @@ impl model::Model for Qwen35 {
     fn optimizer_parts(&self) -> Option<model::OptimizerParts<'_>> {
         Some(model::OptimizerParts { gpu: &self.gpu, store: &self.ps, optim: &self.opt })
     }
+    /// Keep every layer or recompute it ([`Qwen35::set_recompute`]); residuals below f32 are fixed when the model is
+    /// built, so a request for them is answered from the build, never ignored.
+    fn set_saved_policy(&mut self, policy: model::saved::SavedPolicy) -> Result<(), String> {
+        use model::saved::{SavedFormat, SavedPolicy};
+        let built = self.res_saved.as_ref().map_or(SavedFormat::F32, |b| b.format());
+        match policy {
+            SavedPolicy::Keep | SavedPolicy::Recompute if built == SavedFormat::F32 => {
+                self.set_recompute(policy.recomputes());
+                Ok(())
+            }
+            SavedPolicy::Quantized(f) if f == built => Ok(()),
+            other => Err(format!("qwen35 was built keeping {built:?} residuals; {other:?} is chosen when the model is built")),
+        }
+    }
 
     type Config = Qwen35Config;
 

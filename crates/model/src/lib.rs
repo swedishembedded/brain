@@ -360,6 +360,17 @@ pub trait Model {
         None
     }
 
+    /// Keep what `policy` names of the forward for the backward ([`saved::SavedPolicy`]): every layer's intermediates,
+    /// or the residual between layers with each layer replayed before its backward. Called before the first forward
+    /// (the fit loop applies the run's `activations=` precision). The default keeps everything and refuses any other
+    /// policy by name, never ignoring it.
+    fn set_saved_policy(&mut self, policy: saved::SavedPolicy) -> Result<(), String> {
+        match policy {
+            saved::SavedPolicy::Keep => Ok(()),
+            other => Err(format!("this model keeps every layer's activations; {other:?} is not supported")),
+        }
+    }
+
     /// [`Model::optimizer_state`] read-only: what the fit loop commits and restores the host-held optimizer state of
     /// an offloaded store through, for a model that keeps no [`OffDeviceState`] of its own.
     fn optimizer_parts(&self) -> Option<OptimizerParts<'_>> {

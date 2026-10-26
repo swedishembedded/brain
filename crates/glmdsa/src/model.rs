@@ -23,7 +23,8 @@
 
 use std::cell::{Cell, RefCell};
 
-use model::moe::{ExpertBwdScratch, ExpertGrads, ExpertWeights, MoeActs, MoeIds, MoeIdsBwd, MoeShape, PassSeg, RouterBwdIds, RouterKind};
+use model::moe::{ExpertBwdScratch, ExpertGrads, ExpertStage, ExpertWeights, MoeActs, MoeIds, MoeIdsBwd, MoeShape, PassSeg, RouterBwdIds, RouterKind};
+use model::saved::SavedPolicy;
 use std::collections::HashMap;
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
@@ -279,6 +280,41 @@ struct ExpertRowBufs {
     expert_out: DeviceBuffer,
 }
 
+impl LayerBufs {
+    /// Another layer's view of these buffers (the handles are shared, the expert activations are its own).
+    fn share(&self) -> LayerBufs {
+        let mlp = match &self.mlp {
+            Mlp::Dense { gate_pre, up, h } => Mlp::Dense { gate_pre: gate_pre.clone(), up: up.clone(), h: h.clone() },
+            Mlp::Moe { router_logits, gate, probs, sh_gate, sh_up, sh_h, .. } => Mlp::Moe {
+                router_logits: router_logits.clone(),
+                gate: gate.clone(),
+                probs: probs.clone(),
+                acts: RefCell::new(None),
+                sh_gate: sh_gate.clone(),
+                sh_up: sh_up.clone(),
+                sh_h: sh_h.clone(),
+            },
+        };
+        LayerBufs {
+            xn1: self.xn1.clone(),
+            q_c: self.q_c.clone(),
+            q_c_n: self.q_c_n.clone(),
+            q_pass: self.q_pass.clone(),
+            q_rot: self.q_rot.clone(),
+            kv_c: self.kv_c.clone(),
+            kv_c_n: self.kv_c_n.clone(),
+            k_rot: self.k_rot.clone(),
+            k_pass: self.k_pass.clone(),
+            v: self.v.clone(),
+            probs: self.probs.clone(),
+            ctx: self.ctx.clone(),
+            xmid: self.xmid.clone(),
+            xn2: self.xn2.clone(),
+            mlp,
+        }
+    }
+}
+
 struct LayerBufs {
     xn1: DeviceBuffer,
     q_c: DeviceBuffer,
@@ -404,6 +440,10 @@ pub struct Glm {
 
     fwd_steps: Vec<PassSeg>,
     bwd_steps: Vec<PassSeg>,
+    /// What the backward keeps of the forward: every layer's activations, or (recompute) the residual between layers,
+    /// every layer sharing one set of activation buffers its replay before its backward refills
+    /// ([`model::Model::set_saved_policy`]).
+    saved: SavedPolicy,
 
     // ---- incremental KV-cache decode (single new token vs the growing cache) ----
     // MLA "materialised per-head" cache: per layer store the up-projected per-head
@@ -690,6 +730,7 @@ impl Glm {
             inv: st(n),
             fwd_steps: Vec::new(),
             bwd_steps: Vec::new(),
+            saved: SavedPolicy::Keep,
             kpass_cache,
             krot_cache,
             v_cache,
@@ -825,93 +866,14 @@ impl Glm {
         let n = b_use * t_use;
         let d = c.d_model;
         let v = c.vocab;
-        let e = c.n_routed_experts;
-        let ql = c.q_lora_rank;
-        let kvl = c.kv_lora_rank;
-        let nope = c.nope_dim();
-        let qrope = c.q_rope_dim();
-        let rope1 = c.qk_rope_head_dim;
-        let vd = c.v_dim();
-        let nh = c.n_heads;
-        let vhd = c.v_head_dim;
-        let dense_ff = c.intermediate_size;
-        let shared_ff = c.shared_ff();
-        let half_rope = rope1 / 2;
         let mut segs: Vec<PassSeg> = Vec::new();
         let mut s: Vec<Step> = Vec::new();
 
         s.push(self.gpu.step(EMBED, &[&self.tokens, self.w("tok.weight"), &self.res[0]], &[d, n], n * d));
 
         for l in 0..c.n_layers as usize {
-            let lb = &self.layers[l];
-            let p = |name: &str| format!("blocks.{l}.{name}");
-
-            // ---- MLA attention ----
-            self.norm_fwd(&mut s, &self.res[l], &p("input_ln.weight"), &lb.xn1, d, n);
-            // Q: low-rank down -> norm -> split up (nope / rope), rope the rope slice
-            self.mm(&mut s, &lb.xn1, &p("attn.q_a.weight"), &lb.q_c, n, d, ql);
-            self.norm_fwd(&mut s, &lb.q_c, &p("attn.q_a_norm.weight"), &lb.q_c_n, ql, n);
-            self.mm(&mut s, &lb.q_c_n, &p("attn.q_b_nope.weight"), &lb.q_pass, n, ql, nope);
-            self.mm(&mut s, &lb.q_c_n, &p("attn.q_b_rope.weight"), &lb.q_rot, n, ql, qrope);
-            s.push(self.gpu.step(ROPE, &[&lb.q_rot], &[n, nh, rope1, qrope, 0, t_use, f(self.cfg.rope_theta)], n * nh * half_rope));
-            // KV: compressed latent (+ shared rope key), norm, up-project to k_pass / v
-            self.mm(&mut s, &lb.xn1, &p("attn.kv_a_c.weight"), &lb.kv_c, n, d, kvl);
-            self.mm(&mut s, &lb.xn1, &p("attn.kv_a_rope.weight"), &lb.k_rot, n, d, rope1);
-            s.push(self.gpu.step(ROPE, &[&lb.k_rot], &[n, 1, rope1, rope1, 0, t_use, f(self.cfg.rope_theta)], n * half_rope));
-            self.norm_fwd(&mut s, &lb.kv_c, &p("attn.kv_a_norm.weight"), &lb.kv_c_n, kvl, n);
-            self.mm(&mut s, &lb.kv_c_n, &p("attn.kv_b_nope.weight"), &lb.k_pass, n, kvl, nope);
-            self.mm(&mut s, &lb.kv_c_n, &p("attn.kv_b_v.weight"), &lb.v, n, kvl, vd);
-            // scores -> softmax -> ctx (v-side reuses the standard MHA apply)
-            s.push(self.gpu.step(MLA_SCORES, &[&lb.q_pass, &lb.q_rot, &lb.k_pass, &lb.k_rot, &self.scores], &[b_use, nh, t_use, c.qk_nope_head_dim, rope1], b_use * nh * t_use * t_use));
-            // DSA sparse indexer (IndexShare): `Full` layers compute a fresh top-k
-            // mask; `Full`+`Shared` layers add it into the scores before softmax.
-            // The indexer is detached (Frozen params) - no backward path.
-            match c.idx_mode(l as u32) {
-                IdxMode::Full => {
-                    self.indexer_fwd(&mut s, lb, l, b_use, t_use);
-                    self.add_index_mask(&mut s, b_use, nh, t_use);
-                }
-                IdxMode::Shared => self.add_index_mask(&mut s, b_use, nh, t_use),
-                IdxMode::None => {}
-            }
-            s.push(self.gpu.step(ATTN_SOFTMAX, &[&self.scores, &lb.probs], &[b_use, nh, t_use], b_use * nh * t_use));
-            s.push(self.gpu.step(ATTN_APPLY, &[&lb.probs, &lb.v, &lb.ctx], &[b_use, nh, t_use, vhd, vd, 0, vd], b_use * nh * t_use * vhd));
-            self.mm(&mut s, &lb.ctx, &p("attn.o.weight"), &self.proj, n, vd, d);
-            s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
-
-            // ---- MLP ----
-            self.norm_fwd(&mut s, &lb.xmid, &p("post_ln.weight"), &lb.xn2, d, n);
-            match &lb.mlp {
-                Mlp::Dense { gate_pre, up, h } => {
-                    self.mm(&mut s, &lb.xn2, &p("mlp.gate.weight"), gate_pre, n, d, dense_ff);
-                    self.mm(&mut s, &lb.xn2, &p("mlp.up.weight"), up, n, d, dense_ff);
-                    s.push(self.gpu.step(SILU_MUL, &[gate_pre, up, h], &[n * dense_ff], n * dense_ff));
-                    self.mm(&mut s, h, &p("mlp.down.weight"), &self.mlp_out, n, dense_ff, d);
-                    s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[n * d], n * d));
-                }
-                Mlp::Moe { router_logits, gate, probs, sh_gate, sh_up, sh_h, .. } => {
-                    // router (sigmoid noaux_tc): logits -> gate weights [n,E]
-                    self.mm(&mut s, &lb.xn2, &p("moe.router.weight"), router_logits, n, d, e);
-                    s.push(self.gpu.step(
-                        ROUTER_SIG,
-                        &[router_logits, self.w(&p("moe.router.bias")), gate, probs],
-                        &[n, e, c.num_experts_per_tok, c.n_group, c.topk_group, c.norm_topk_prob as u32, f(c.routed_scaling_factor)],
-                        n,
-                    ));
-                    // routed experts on the rows routed to each, gate-weighted into `moe_acc`: built when the pass
-                    // reaches them (`Self::moe_fwd`), since the routing is this pass's.
-                    segs.push(PassSeg::Steps(std::mem::take(&mut s)));
-                    segs.push(PassSeg::Experts { layer: l, rows: n });
-                    // shared expert on the same input
-                    self.mm(&mut s, &lb.xn2, &p("moe.shared.gate.weight"), sh_gate, n, d, shared_ff);
-                    self.mm(&mut s, &lb.xn2, &p("moe.shared.up.weight"), sh_up, n, d, shared_ff);
-                    s.push(self.gpu.step(SILU_MUL, &[sh_gate, sh_up, sh_h], &[n * shared_ff], n * shared_ff));
-                    self.mm(&mut s, sh_h, &p("moe.shared.down.weight"), &self.sh_out, n, shared_ff, d);
-                    // moe_out = routed + shared ; x += moe_out
-                    s.push(self.gpu.step(ADD2, &[&self.moe_acc, &self.sh_out, &self.mlp_out], &[n * d], n * d));
-                    s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[n * d], n * d));
-                }
-            }
+            // A pass that replays every layer before its backward keeps no expert activations here.
+            self.layer_forward(l, b_use, t_use, !self.saved.recomputes(), &mut segs, &mut s);
         }
 
         // final norm + untied lm_head + masked CE
@@ -944,6 +906,99 @@ impl Glm {
         }
         segs.push(PassSeg::Steps(s));
         segs
+    }
+
+    /// Layer `l`'s forward over `b_use` sequences of `t_use` tokens, from `res[l]` into `res[l + 1]`, appended to the
+    /// pass being built (`steps` the dispatches not yet closed into a segment). `keep_experts` keeps a MoE layer's
+    /// expert activations for the backward.
+    fn layer_forward(&self, l: usize, b_use: u32, t_use: u32, keep_experts: bool, segs: &mut Vec<PassSeg>, steps: &mut Vec<Step>) {
+        let c = &self.cfg;
+        let n = b_use * t_use;
+        let d = c.d_model;
+        let e = c.n_routed_experts;
+        let ql = c.q_lora_rank;
+        let kvl = c.kv_lora_rank;
+        let nope = c.nope_dim();
+        let qrope = c.q_rope_dim();
+        let rope1 = c.qk_rope_head_dim;
+        let vd = c.v_dim();
+        let nh = c.n_heads;
+        let vhd = c.v_head_dim;
+        let dense_ff = c.intermediate_size;
+        let shared_ff = c.shared_ff();
+        let half_rope = rope1 / 2;
+        let mut s = std::mem::take(steps);
+        let lb = &self.layers[l];
+        let p = |name: &str| format!("blocks.{l}.{name}");
+
+        // ---- MLA attention ----
+        self.norm_fwd(&mut s, &self.res[l], &p("input_ln.weight"), &lb.xn1, d, n);
+        // Q: low-rank down -> norm -> split up (nope / rope), rope the rope slice
+        self.mm(&mut s, &lb.xn1, &p("attn.q_a.weight"), &lb.q_c, n, d, ql);
+        self.norm_fwd(&mut s, &lb.q_c, &p("attn.q_a_norm.weight"), &lb.q_c_n, ql, n);
+        self.mm(&mut s, &lb.q_c_n, &p("attn.q_b_nope.weight"), &lb.q_pass, n, ql, nope);
+        self.mm(&mut s, &lb.q_c_n, &p("attn.q_b_rope.weight"), &lb.q_rot, n, ql, qrope);
+        s.push(self.gpu.step(ROPE, &[&lb.q_rot], &[n, nh, rope1, qrope, 0, t_use, f(self.cfg.rope_theta)], n * nh * half_rope));
+        // KV: compressed latent (+ shared rope key), norm, up-project to k_pass / v
+        self.mm(&mut s, &lb.xn1, &p("attn.kv_a_c.weight"), &lb.kv_c, n, d, kvl);
+        self.mm(&mut s, &lb.xn1, &p("attn.kv_a_rope.weight"), &lb.k_rot, n, d, rope1);
+        s.push(self.gpu.step(ROPE, &[&lb.k_rot], &[n, 1, rope1, rope1, 0, t_use, f(self.cfg.rope_theta)], n * half_rope));
+        self.norm_fwd(&mut s, &lb.kv_c, &p("attn.kv_a_norm.weight"), &lb.kv_c_n, kvl, n);
+        self.mm(&mut s, &lb.kv_c_n, &p("attn.kv_b_nope.weight"), &lb.k_pass, n, kvl, nope);
+        self.mm(&mut s, &lb.kv_c_n, &p("attn.kv_b_v.weight"), &lb.v, n, kvl, vd);
+        // scores -> softmax -> ctx (v-side reuses the standard MHA apply)
+        s.push(self.gpu.step(MLA_SCORES, &[&lb.q_pass, &lb.q_rot, &lb.k_pass, &lb.k_rot, &self.scores], &[b_use, nh, t_use, c.qk_nope_head_dim, rope1], b_use * nh * t_use * t_use));
+        // DSA sparse indexer (IndexShare): `Full` layers compute a fresh top-k
+        // mask; `Full`+`Shared` layers add it into the scores before softmax.
+        // The indexer is detached (Frozen params) - no backward path.
+        match c.idx_mode(l as u32) {
+            IdxMode::Full => {
+                self.indexer_fwd(&mut s, lb, l, b_use, t_use);
+                self.add_index_mask(&mut s, b_use, nh, t_use);
+            }
+            IdxMode::Shared => self.add_index_mask(&mut s, b_use, nh, t_use),
+            IdxMode::None => {}
+        }
+        s.push(self.gpu.step(ATTN_SOFTMAX, &[&self.scores, &lb.probs], &[b_use, nh, t_use], b_use * nh * t_use));
+        s.push(self.gpu.step(ATTN_APPLY, &[&lb.probs, &lb.v, &lb.ctx], &[b_use, nh, t_use, vhd, vd, 0, vd], b_use * nh * t_use * vhd));
+        self.mm(&mut s, &lb.ctx, &p("attn.o.weight"), &self.proj, n, vd, d);
+        s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
+
+        // ---- MLP ----
+        self.norm_fwd(&mut s, &lb.xmid, &p("post_ln.weight"), &lb.xn2, d, n);
+        match &lb.mlp {
+            Mlp::Dense { gate_pre, up, h } => {
+                self.mm(&mut s, &lb.xn2, &p("mlp.gate.weight"), gate_pre, n, d, dense_ff);
+                self.mm(&mut s, &lb.xn2, &p("mlp.up.weight"), up, n, d, dense_ff);
+                s.push(self.gpu.step(SILU_MUL, &[gate_pre, up, h], &[n * dense_ff], n * dense_ff));
+                self.mm(&mut s, h, &p("mlp.down.weight"), &self.mlp_out, n, dense_ff, d);
+                s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[n * d], n * d));
+            }
+            Mlp::Moe { router_logits, gate, probs, sh_gate, sh_up, sh_h, .. } => {
+                // router (sigmoid noaux_tc): logits -> gate weights [n,E]
+                self.mm(&mut s, &lb.xn2, &p("moe.router.weight"), router_logits, n, d, e);
+                s.push(self.gpu.step(
+                    ROUTER_SIG,
+                    &[router_logits, self.w(&p("moe.router.bias")), gate, probs],
+                    &[n, e, c.num_experts_per_tok, c.n_group, c.topk_group, c.norm_topk_prob as u32, f(c.routed_scaling_factor)],
+                    n,
+                ));
+                // routed experts on the rows routed to each, gate-weighted into `moe_acc`: built when the pass
+                // reaches them (`Self::moe_fwd`), since the routing is this pass's.
+                segs.push(PassSeg::Steps(std::mem::take(&mut s)));
+                segs.push(PassSeg::Experts { layer: l, rows: n, stage: ExpertStage::Forward { keep: keep_experts } });
+                // shared expert on the same input
+                self.mm(&mut s, &lb.xn2, &p("moe.shared.gate.weight"), sh_gate, n, d, shared_ff);
+                self.mm(&mut s, &lb.xn2, &p("moe.shared.up.weight"), sh_up, n, d, shared_ff);
+                s.push(self.gpu.step(SILU_MUL, &[sh_gate, sh_up, sh_h], &[n * shared_ff], n * shared_ff));
+                self.mm(&mut s, sh_h, &p("moe.shared.down.weight"), &self.sh_out, n, shared_ff, d);
+                // moe_out = routed + shared ; x += moe_out
+                s.push(self.gpu.step(ADD2, &[&self.moe_acc, &self.sh_out, &self.mlp_out], &[n * d], n * d));
+                s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[n * d], n * d));
+            }
+        }
+
+        *steps = s;
     }
 
     fn build_backward(&self) -> Vec<PassSeg> {
@@ -1008,6 +1063,10 @@ impl Glm {
         }
 
         for l in (0..c.n_layers as usize).rev() {
+            if self.saved.recomputes() {
+                // Every layer shares one set of activation buffers: rebuild this layer's from `res[l]` first.
+                self.layer_forward(l, b_use, t_use, true, &mut segs, &mut s);
+            }
             let lb = &self.layers[l];
             let p = |name: &str| format!("blocks.{l}.{name}");
 
@@ -1060,7 +1119,7 @@ impl Glm {
                     // The router and the routed experts on the rows each was routed in the forward
                     // (`Self::moe_bwd`), accumulating into d_xn after the shared expert's first touch.
                     segs.push(PassSeg::Steps(std::mem::take(&mut s)));
-                    segs.push(PassSeg::Experts { layer: l, rows: n });
+                    segs.push(PassSeg::Experts { layer: l, rows: n, stage: ExpertStage::Backward });
                 }
             }
             // post_ln backward -> d_tmp ; dxmid = dres[l+1] + d_tmp
@@ -1125,16 +1184,16 @@ impl Glm {
     }
 
     /// The routed experts of MoE layer `l` over `rows` rows: the layer's gate is read back, every expert runs on the
-    /// rows routed to it into the cleared `moe_acc`, and their activations are kept for the backward
+    /// rows routed to it into the cleared `moe_acc`, and with `keep` their activations are kept for the backward
     /// (`MoeActs::compact`).
-    fn moe_fwd(&self, l: usize, rows: u32) {
+    fn moe_fwd(&self, l: usize, rows: u32, keep: bool) {
         let Mlp::Moe { gate, acts, .. } = &self.layers[l].mlp else { unreachable!("a MoE segment of a dense layer") };
         let shape = self.moe_shape(rows);
         let compact = MoeActs::compact(&self.gpu, &shape, &self.gpu.read(gate, (rows * shape.n_experts) as usize));
         let ids = MoeIds { router_gate: ROUTER_SIG, linear_gated: self.kernel("moe_linear_gated"), silu_mul: SILU_MUL, scale_add: SCALE_ADD };
         let steps = model::moe::experts_fwd_train(&self.gpu, &ids, &shape, &self.layers[l].xn2, gate, &self.expert_weights(l), &compact, &self.moe_acc);
         self.gpu.submit(&[&self.moe_acc], &steps);
-        *acts.borrow_mut() = Some(compact);
+        *acts.borrow_mut() = keep.then_some(compact);
     }
 
     /// The routed half of MoE layer `l`'s backward over `rows` rows: the router (its weight's input gradient adds into
@@ -1192,19 +1251,46 @@ impl Glm {
         self.gpu.kernel_index(name).unwrap_or_else(|| panic!("glmdsa: kernel `{name}` is not registered"))
     }
 
-    /// Run a pass: its fixed dispatches in order, each MoE layer's experts (`experts`: the forward's or the
-    /// backward's) as the pass reaches them.
-    fn run(&self, segs: &[PassSeg], experts: impl Fn(&Self, usize, u32)) {
+    /// Run a pass: its fixed dispatches in order, each MoE layer's experts as the pass reaches them.
+    fn run(&self, segs: &[PassSeg]) {
         for seg in segs {
             match seg {
                 PassSeg::Steps(steps) => self.gpu.submit(&[], steps),
-                PassSeg::Experts { layer, rows } => experts(self, *layer, *rows),
+                PassSeg::Experts { layer, rows, stage: ExpertStage::Forward { keep } } => self.moe_fwd(*layer, *rows, *keep),
+                PassSeg::Experts { layer, rows, stage: ExpertStage::Backward } => self.moe_bwd(*layer, *rows),
             }
         }
     }
 
+    /// Keep what `policy` names of the forward: every layer's activations ([`SavedPolicy::Keep`]), or only the residual
+    /// between layers ([`SavedPolicy::Recompute`]), where every layer of a kind shares one set of activation buffers
+    /// (the others are released) and the backward replays each layer from its residual before its own backward.
+    /// Residuals held below f32 are refused by name.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        if let SavedPolicy::Quantized(format) = policy {
+            return Err(format!("glmdsa keeps its layer residuals in f32; {format:?} residuals are not supported"));
+        }
+        if policy == self.saved {
+            return Ok(());
+        }
+        if !policy.recomputes() {
+            return Err("glmdsa: a build that recomputes cannot go back to keeping every layer's activations".into());
+        }
+        let first_of = |moe: bool| self.layers.iter().position(|lb| matches!(lb.mlp, Mlp::Moe { .. }) == moe);
+        let (dense, moe) = (first_of(false), first_of(true));
+        self.layers = (0..self.layers.len())
+            .map(|l| self.layers[if matches!(self.layers[l].mlp, Mlp::Moe { .. }) { moe } else { dense }.expect("a layer of this kind exists")].share())
+            .collect();
+        self.saved = policy;
+        self.fwd_steps = self.build_forward(self.b, self.t);
+        if !self.bwd_steps.is_empty() {
+            self.bwd_steps = self.build_backward();
+        }
+        Ok(())
+    }
+
     pub fn forward(&self) -> f32 {
-        self.run(&self.fwd_steps, Self::moe_fwd);
+        self.run(&self.fwd_steps);
         let n = (self.b * self.t) as usize;
         let mut total: f32 = self.gpu.read(&self.ce_buf, n).iter().sum();
         // MTP auxiliary loss, added with the same count divisor (so `backward`,
@@ -1218,7 +1304,7 @@ impl Glm {
     pub fn backward(&self) {
         let n = self.b * self.t;
         self.gpu.write(&self.ce_grad_uni, &[n, self.cfg.vocab, IGNORE, f(self.count.get())]);
-        self.run(&self.bwd_steps, Self::moe_bwd);
+        self.run(&self.bwd_steps);
     }
 
     pub fn zero_grads(&self) {
@@ -1253,7 +1339,7 @@ impl Glm {
         assert!(t_use <= self.t && self.b == 1, "glm decoder sized too small");
         let ignore = vec![IGNORE; t_use as usize];
         self.set_batch(tokens, &ignore);
-        self.run(&self.build_forward(1, t_use), Self::moe_fwd);
+        self.run(&self.build_forward(1, t_use));
         self.gpu.read(&self.logits, (t_use * self.cfg.vocab) as usize)
     }
 
@@ -1430,7 +1516,7 @@ impl Glm {
         assert!(t_use <= self.t && self.b == 1, "glm decoder sized too small");
         let ignore = vec![IGNORE; t_use as usize];
         self.set_batch(tokens, &ignore);
-        self.run(&self.build_forward(1, t_use), Self::moe_fwd);
+        self.run(&self.build_forward(1, t_use));
         self.gpu.read(&self.xn_final, (t_use * self.cfg.d_model) as usize)
     }
 
@@ -1709,6 +1795,9 @@ impl model::Model for Glm {
 
     fn optimizer_parts(&self) -> Option<model::OptimizerParts<'_>> {
         Some(model::OptimizerParts { gpu: &self.gpu, store: &self.ps, optim: &self.opt })
+    }
+    fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        Glm::set_saved_policy(self, policy)
     }
 
     type Config = GlmConfig;

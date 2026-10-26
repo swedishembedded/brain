@@ -264,6 +264,49 @@ impl BoundaryStore {
     }
 }
 
+/// The activation-recompute contract every model that offers [`SavedPolicy::Recompute`] honours, for its own test to
+/// run: `build` makes a fresh trainable model (the same initial weights every call) and `step` runs one forward and
+/// backward on a fixed batch (`zero_grads`, the batch, `forward`, `backward`), returning the loss.
+///
+/// * the recomputing build's loss and every parameter's gradient equal the build that keeps every layer, bit for bit
+///   (each layer is replayed from its kept input exactly as the forward ran it);
+/// * where the backend accounts for its allocations, the recomputing build holds fewer live device bytes: the
+///   activation buffers of every layer but one per kind are released.
+pub fn check_recompute<M: crate::Model>(name: &str, build: impl Fn() -> M, step: impl Fn(&M) -> f32) -> Result<(), String> {
+    let live = |m: &M| m.optimizer_parts().and_then(|p| p.gpu.memory_usage()).map(|u| u.live);
+    let grads = |m: &M| -> Vec<(String, Vec<u32>)> {
+        let mut names = m.param_names();
+        names.sort();
+        names.into_iter().map(|n| (n.clone(), m.read_grad(&n).into_iter().map(f32::to_bits).collect())).collect()
+    };
+    let keep = build();
+    let keep_live = live(&keep);
+    let want = step(&keep);
+    let want_grads = grads(&keep);
+    drop(keep);
+    let mut rc = build();
+    let before = live(&rc);
+    rc.set_saved_policy(SavedPolicy::Recompute).map_err(|e| format!("{name}: {e}"))?;
+    if let (Some(before), Some(after)) = (before.or(keep_live), live(&rc)) {
+        if after >= before {
+            return Err(format!("{name}: recomputing holds {after} live device bytes, keeping every layer {before}"));
+        }
+    }
+    let got = step(&rc);
+    if got.to_bits() != want.to_bits() {
+        return Err(format!("{name}: recomputing gives loss {got}, keeping every layer {want}"));
+    }
+    if want_grads.is_empty() {
+        return Err(format!("{name}: no trained parameter to compare"));
+    }
+    for ((n, a), (_, b)) in want_grads.iter().zip(grads(&rc)) {
+        if let Some(i) = a.iter().zip(&b).position(|(x, y)| x != y) {
+            return Err(format!("{name}: {n}[{i}] gradient {} recomputing, {} keeping every layer", f32::from_bits(b[i]), f32::from_bits(a[i])));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

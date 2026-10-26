@@ -99,7 +99,7 @@ returns the newest generation that verifies.
 
 What a full fine-tune stores each trainable parameter as is ONE typed value,
 `FitOpts::precision` (`model::TrainPrecision`; `ChatFullFineTune::train_precision`
-in the SDK). It is parsed once from `state=int8:64,master=f32,sr=on,narrow=on,moments=host`
+in the SDK). It is parsed once from `state=int8:64,master=f32,sr=on,narrow=on,moments=host,activations=recompute`
 (`TrainPrecision::parse`), carried to the model's builder, and part of the
 identity a saved training state is resumed under. Nothing is read from the
 calling thread (the old thread-scoped policy is gone); `OptimizerState` still
@@ -112,6 +112,13 @@ with no master copy on this path, the device AdamW keeps f32, bf16 or int8
 blocks of 64, and any state format (also log8) is held by the host optimizer.
 `moments=host` asks for the host optimizer with any format; a format only it
 runs implies it.
+`activations=keep|recompute|bf16|fp8` says what the backward keeps of the
+forward: every layer's intermediates, or only the residual between layers (f32,
+or bf16/fp8 where the build holds them so) with each layer replayed before its
+backward. The fit loop hands it to the model (`Model::set_saved_policy`);
+deepseek2 and glmdsa then share one set of activation buffers across their
+layers, qwen3 and qwen35 answer from what they were built with, and a model
+that keeps every layer refuses any other choice by name.
 
 The memory planner decides the optimizer-state format before anything loads
 (`TrainPrecision::plan` over `memplan::training_demands`): the requested format
