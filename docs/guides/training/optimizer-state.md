@@ -262,8 +262,8 @@ tensors as `paramstore::Role::Streamed`, which the store never allocates, and
 `StreamedStore::attach` reads them from the checkpoint into the window's host
 state, so they never all reach the device. `check_streamed_construction` holds
 such a model to a construction peak below the plain build and to the bits of
-the build streamed after construction. gpt2, deepseek2 and glmdsa build this
-way; every other model
+the build streamed after construction. gpt2, deepseek2, glmdsa and qwen35moe
+build this way; every other model
 streams after construction by the trait's default.
 
 The run asks for it with one model-agnostic value (the SDK's

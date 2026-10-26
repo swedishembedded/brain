@@ -873,6 +873,14 @@ struct MoeGrouped {
     scratch: GroupedExpertScratch,
 }
 
+/// What [`Qwen35::new_impl_on`] builds: an inference model, or a trainable one, optionally streaming its layers through
+/// a device window from construction ([`model::streamed`]).
+#[derive(Clone, Copy)]
+enum Purpose<'a> {
+    Inference,
+    Training(Option<&'a model::resident_ft::ResidentFtConfig>),
+}
+
 /// Qwen3.5-35B-A3B hybrid decoder - forward/inference only (see module doc).
 pub struct Qwen35 {
     pub gpu: Gpu,
@@ -1336,14 +1344,14 @@ const UNTIED_HEAD: &str = "lm_head.weight";
 impl Qwen35 {
     pub fn new(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen35::new_impl_on(Gpu::new(pipelines()), cfg, b, t, init, &TierPolicy::uniform(Dtype::F32), false, shard)
+        Qwen35::new_impl_on(Gpu::new(pipelines()), cfg, b, t, init, &TierPolicy::uniform(Dtype::F32), Purpose::Inference, shard)
     }
 
     /// Build on an existing device handle (test fixtures share one `Gpu` per
     /// binary - see `gpu_core::testgpu`).
     pub fn new_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen35::new_impl_on(gpu, cfg, b, t, init, &TierPolicy::uniform(Dtype::F32), false, shard)
+        Qwen35::new_impl_on(gpu, cfg, b, t, init, &TierPolicy::uniform(Dtype::F32), Purpose::Inference, shard)
     }
 
     /// [`Self::new`] with the int8 (DP4A) inference tier: the attention/GDN
@@ -1358,13 +1366,13 @@ impl Qwen35 {
     /// (`Qwen35::backward` panics regardless).
     pub fn new_i8(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen35::new_impl_on(Gpu::new(pipelines()), cfg, b, t, init, &TierPolicy::uniform(Dtype::I8), false, shard)
+        Qwen35::new_impl_on(Gpu::new(pipelines()), cfg, b, t, init, &TierPolicy::uniform(Dtype::I8), Purpose::Inference, shard)
     }
 
     /// [`Self::new_i8`] on an existing device handle - see [`Self::new_on`].
     pub fn new_on_i8(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen35::new_impl_on(gpu, cfg, b, t, init, &TierPolicy::uniform(Dtype::I8), false, shard)
+        Qwen35::new_impl_on(gpu, cfg, b, t, init, &TierPolicy::uniform(Dtype::I8), Purpose::Inference, shard)
     }
 
     /// [`Self::new_on_i8`] streaming straight from a [`checkpoint::TensorSource`]
@@ -1372,7 +1380,7 @@ impl Qwen35 {
     /// the model ever exists, one tensor is decoded at a time.
     pub fn new_on_i8_src(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen35::new_impl_on(gpu, cfg, b, t, src, &TierPolicy::uniform(Dtype::I8), false, shard)
+        Qwen35::new_impl_on(gpu, cfg, b, t, src, &TierPolicy::uniform(Dtype::I8), Purpose::Inference, shard)
     }
 
     /// [`Self::new_on_i8_src`] at fp32: every weight a float buffer, streamed
@@ -1380,7 +1388,7 @@ impl Qwen35 {
     /// comparison is made against (only a truncated model fits a card in fp32).
     pub fn new_on_src(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen35::new_impl_on(gpu, cfg, b, t, src, &TierPolicy::uniform(Dtype::F32), false, shard)
+        Qwen35::new_impl_on(gpu, cfg, b, t, src, &TierPolicy::uniform(Dtype::F32), Purpose::Inference, shard)
     }
 
     /// [`Self::new_on_i8_src`] at a per-leaf [`TierPolicy`]: `F32` and `I8` are
@@ -1391,7 +1399,7 @@ impl Qwen35 {
     /// int8 experts under fp32 mixers.
     pub fn new_on_tier_src(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource, tier: &TierPolicy) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen35::new_impl_on(gpu, cfg, b, t, src, tier, false, shard)
+        Qwen35::new_impl_on(gpu, cfg, b, t, src, tier, Purpose::Inference, shard)
     }
 
     /// Build a TRAINABLE model: every weight `Role::Trainable` (full-parameter
@@ -1401,13 +1409,24 @@ impl Qwen35 {
     /// `assert!(!(i8 && train))`).
     pub fn new_train(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen35::new_impl_on(Gpu::new(pipelines()), cfg, b, t, init, &TierPolicy::uniform(Dtype::F32), true, shard)
+        Qwen35::new_impl_on(Gpu::new(pipelines()), cfg, b, t, init, &TierPolicy::uniform(Dtype::F32), Purpose::Training(None), shard)
     }
 
     /// [`Self::new_train`] on an existing device handle - see [`Self::new_on`].
     pub fn new_train_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen35::new_impl_on(gpu, cfg, b, t, init, &TierPolicy::uniform(Dtype::F32), true, shard)
+        Qwen35::new_impl_on(gpu, cfg, b, t, init, &TierPolicy::uniform(Dtype::F32), Purpose::Training(None), shard)
+    }
+
+    /// A full-training build whose per-layer tensors stream through a device window under `resident` from the start
+    /// (see [`model::streamed`]): they are read from `src` into the window's host state and never all reach the
+    /// device, so a model larger than it trains. Adapters are refused: only full-parameter training streams.
+    pub fn new_resident_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource, resident: &model::resident_ft::ResidentFtConfig) -> Result<Qwen35, String> {
+        if cfg.lora.is_some() {
+            return Err("qwen35moe: only a plain f32 full-training build streams its layers".into());
+        }
+        let shard = Shard::whole(cfg.n_layers as usize);
+        Ok(Qwen35::new_impl_on(gpu, cfg, b, t, src, &TierPolicy::uniform(Dtype::F32), Purpose::Training(Some(resident)), shard))
     }
 
     /// Build a single pipeline **stage**: only the layers (and endpoint
@@ -1424,7 +1443,7 @@ impl Qwen35 {
         } else {
             Gpu::new_on_index(shard.gpu_index as u32, pipelines()).unwrap_or_else(|e| panic!("qwen35 shard placement: {e}"))
         };
-        Qwen35::new_impl_on(gpu, cfg, b, t, init, &TierPolicy::uniform(Dtype::F32), true, shard)
+        Qwen35::new_impl_on(gpu, cfg, b, t, init, &TierPolicy::uniform(Dtype::F32), Purpose::Training(None), shard)
     }
 
     fn new_impl_on(
@@ -1434,9 +1453,14 @@ impl Qwen35 {
         t: u32,
         src: &dyn checkpoint::TensorSource,
         tier: &TierPolicy,
-        train: bool,
+        purpose: Purpose<'_>,
         shard: Shard,
     ) -> Qwen35 {
+        let train = !matches!(purpose, Purpose::Inference);
+        let resident = match purpose {
+            Purpose::Training(resident) => resident,
+            Purpose::Inference => None,
+        };
         let i8 = tier.quantizes_anything();
         assert!(!(i8 && train), "qwen35: int8 path is inference-only (Qwen35::new_train is fp32-only)");
         // Int8 weights are capability-driven, never assumed: the request only
@@ -1506,6 +1530,7 @@ impl Qwen35 {
         // `model.rs:504-507` in that crate). int8 and LoRA/training are
         // mutually exclusive (the `assert!` above), so `i8` and
         // `cfg.lora.is_some()` never both hold here.
+        let layer_of = |name: &str| model::streamed::blocks_layer(name).filter(|&l| shard.owns(l as usize));
         let roles: Vec<(String, usize, Role)> = shard_param_list(&cfg, &shard)
             .into_iter()
             .filter(|(n, _)| {
@@ -1518,8 +1543,10 @@ impl Qwen35 {
             .map(|(n, c)| {
                 let role = if !train {
                     Role::Frozen
-                } else if cfg.lora.is_some() {
-                    model::adapter::device::role_of(&n, &cfg.lora.as_ref().expect("checked by the branch").hp())
+                } else if resident.is_some() && layer_of(&n).is_some() {
+                    Role::Streamed
+                } else if let Some(lora) = &cfg.lora {
+                    model::adapter::device::role_of(&n, &lora.hp())
                 } else {
                     Role::Trainable
                 };
@@ -1527,6 +1554,9 @@ impl Qwen35 {
             })
             .collect();
         let mut ps = ParamStore::new_with_roles_src(&gpu, roles, src);
+        // A training build that streams its layers from the start reads them into the window before anything below
+        // takes a per-layer weight's handle (the mixer linears' `Ops` weights, the decode banks).
+        let streamed = resident.map(|r| StreamedStore::attach(&gpu, &mut ps, r.clone(), src, &layer_of).unwrap_or_else(|e| panic!("qwen35moe: {e}")));
         if let Some(lora) = cfg.lora.as_ref().filter(|_| train) {
             model::adapter::device::apply_groups(&mut ps, &lora.hp());
         }
@@ -1766,7 +1796,7 @@ impl Qwen35 {
             count: Cell::new(1.0),
             res,
             saved: SavedPolicy::Keep,
-            streamed: None,
+            streamed,
             backward_pending: Cell::new(false),
             ones_khd,
             cos,
@@ -4325,6 +4355,9 @@ impl model::Model for Qwen35 {
     /// adapters when `cfg.lora` is set).
     fn new(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {
         Qwen35::new_train_on(Gpu::new(pipelines()), cfg, b, t, init)
+    }
+    fn new_resident(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, resident: &model::resident_ft::ResidentFtConfig) -> Result<Self, String> {
+        Qwen35::new_resident_on(Gpu::new(pipelines()), cfg, b, t, init, resident)
     }
     fn new_inference(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {
         Qwen35::new(cfg, b, t, init)
