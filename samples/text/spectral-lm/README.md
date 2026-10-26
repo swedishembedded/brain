@@ -60,11 +60,18 @@ $S generate --checkpoint runs/spectral.safetensors \
 
 # Parameters and analytic arithmetic of a shape, without training it.
 $S cost --d-model 256 --layers 6 --heads 8 --signal-len 512 --channels 24
+# Per-kernel device profile of one training step, dense or FFT transforms.
+$S profile --d-model 256 --signal-len 512 --channels 24 --transform fft
 ```
+
+Every subcommand takes `--gpu N` to run on card N (brain's own device
+selection; `CUDA_VISIBLE_DEVICES` does not place a Vulkan-backed process).
 
 `qwen-corpus` encodes the same stories with Qwen3's tokenizer and
 `qwen-train` continues Qwen3-0.6B on them with the same schedule flags, for
-the fine-tuned reference.
+the fine-tuned reference. `qwen-spectrum` measures how much of Qwen3-0.6B's
+residual stream a truncated Fourier basis keeps, against principal
+components, random orthonormal directions and coordinates.
 
 Every training and scoring subcommand ends with one JSON line holding the
 numbers a comparison records (losses, tokens, time, parameter counts,
