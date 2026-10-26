@@ -823,11 +823,9 @@ impl DeepseekV2 {
         // `build_backward` (see `m.fwd_steps`/`m.bwd_steps` below) and reads
         // logits through `Decode`'s per-row scratch instead (see
         // `ensure_decode`), so nothing ever dispatches into these buffers.
-        // This is the dominant memory cost of a long-context build: the MoE
-        // perf-number: memory-share arithmetic of the activation buffers, not a timing
-        // `acts` below alone are ~86% of a batched row's ~13.25 MB (`MoeActs`
-        // saves EVERY expert's own activations for backward, vs `Decode`'s one
-        // shared set reused across every layer and every expert).
+        // The routed experts' saved activations are not among them: each pass
+        // allocates them for the rows routed to each expert
+        // (`MoeActs::compact`, see `Self::moe_fwd`).
         let n = if batched { (b * t) as u64 } else { 1 };
         let d = cfg.d_model() as u64;
         let v = cfg.vocab() as u64;
@@ -1935,8 +1933,8 @@ impl DeepseekV2 {
     /// never built - so it is what makes a context far wider than any single
     /// batched-tape build affordable stays cheap: every round costs
     /// [`Decode`]'s per-row scratch (shared across layers, nothing saved for
-    /// backward), not `crates/model/src/moe.rs`'s per-expert-per-row
-    /// `MoeActs` a batched tape's backward needs.
+    /// backward), not the per-expert activations (`MoeActs::compact`) a
+    /// batched pass's backward needs.
     ///
     /// A `batched = true` instance (every `new_on` caller today) should NOT
     /// use this for a real prompt at `chunk = 1`: every round pays a fixed
