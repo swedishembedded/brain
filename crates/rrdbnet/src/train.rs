@@ -40,7 +40,7 @@
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 use vae::blocks::grad::{BwdIds, Grads, Reverse, Trace};
-use vae::blocks::Tensors;
+use vae::blocks::{Activations, Tensors};
 
 use crate::config::RrdbConfig;
 use crate::model::Rrdb;
@@ -91,10 +91,10 @@ pub struct RrdbTrainer {
 }
 
 impl RrdbTrainer {
-    /// Record the forward + reverse for a `[in_channels, h, w]` input. `gpu`
-    /// must carry [`TRAIN_KERNELS`].
-    pub fn new(gpu: Gpu, cfg: RrdbConfig, tensors: &Tensors, h: u32, w: u32) -> RrdbTrainer {
-        let rrdb = Rrdb::new_train(gpu.share_or_new(TRAIN_PIPELINES), cfg.clone(), tensors, h, w);
+    /// Record the forward + reverse for a `[in_channels, h, w]` input, keeping or recomputing the dense blocks'
+    /// internals (`activations`). `gpu` must carry [`TRAIN_KERNELS`].
+    pub fn new(gpu: Gpu, cfg: RrdbConfig, tensors: &Tensors, h: u32, w: u32, activations: Activations) -> RrdbTrainer {
+        let rrdb = Rrdb::new_train(gpu.share_or_new(TRAIN_PIPELINES), cfg.clone(), tensors, h, w, activations);
         let (oh, ow) = rrdb.out_hw();
         let n_out = cfg.out_channels * oh * ow;
 
@@ -193,6 +193,11 @@ impl RrdbTrainer {
     /// survive across the whole reverse.
     pub fn backward(&self) {
         self.gpu.submit(&[], &self.rev);
+    }
+
+    /// The network's unclamped output, valid after [`Self::forward`].
+    pub fn out(&self) -> &DeviceBuffer {
+        self.rrdb.out()
     }
 
     /// `dL/d(out)` after a [`Self::backward`] - exposed for tests that check

@@ -22,7 +22,7 @@
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 use vae::blocks::grad::Trace;
-use vae::blocks::{BlockNames, Builder, LreluIds, ScaleAddIds, Tensors};
+use vae::blocks::{Activations, BlockNames, Builder, LreluIds, ScaleAddIds, Tensors};
 
 use crate::config::RrdbConfig;
 
@@ -83,14 +83,14 @@ pub struct Rrdb {
 impl Rrdb {
     /// Record the graph for a `[1, in_channels, h, w]` input.
     pub fn new(gpu: Gpu, cfg: RrdbConfig, w: &Tensors, h: u32, wd: u32, taps_on: bool) -> Rrdb {
-        Rrdb::build(gpu, cfg, w, h, wd, taps_on, false)
+        Rrdb::build(gpu, cfg, w, h, wd, taps_on, None)
     }
 
     /// [`Rrdb::new`] recording the reverse-mode tape - what
-    /// [`crate::train::RrdbTrainer`] builds on. No taps: nothing here needs the
-    /// parity ladder, and taps pin buffers exactly like train mode already does.
-    pub fn new_train(gpu: Gpu, cfg: RrdbConfig, w: &Tensors, h: u32, wd: u32) -> Rrdb {
-        Rrdb::build(gpu, cfg, w, h, wd, false, true)
+    /// [`crate::train::RrdbTrainer`] builds on - keeping or recomputing the dense blocks' internals. No taps:
+    /// nothing here needs the parity ladder, and taps pin buffers exactly like train mode already does.
+    pub fn new_train(gpu: Gpu, cfg: RrdbConfig, w: &Tensors, h: u32, wd: u32, activations: Activations) -> Rrdb {
+        Rrdb::build(gpu, cfg, w, h, wd, false, Some(activations))
     }
 
     /// The recorded tape, on an [`Rrdb::new_train`] build.
@@ -117,7 +117,8 @@ impl Rrdb {
         &self.cfg
     }
 
-    fn build(gpu: Gpu, cfg: RrdbConfig, w: &Tensors, h: u32, wd: u32, taps_on: bool, train: bool) -> Rrdb {
+    /// `train` is `None` for an inference graph, else what its reverse keeps.
+    fn build(gpu: Gpu, cfg: RrdbConfig, w: &Tensors, h: u32, wd: u32, taps_on: bool, train: Option<Activations>) -> Rrdb {
         // eps/groups are unused here (no GroupNorm in this net); the builder
         // takes them for the AutoencoderKL shape it also serves.
         // The residual weight, uploaded once and bound by every `scale_add`.
@@ -127,7 +128,10 @@ impl Rrdb {
         let mut b = Builder::new(&gpu, w, 1e-6, 32, BlockNames::diffusers(), taps_on);
         // Must precede the first recorded block (mirrors `Builder::set_train`'s
         // own ordering requirement).
-        b.set_train(train);
+        b.set_train(train.is_some());
+        if let Some(activations) = train {
+            b.set_activations(activations);
+        }
         // This crate's `leaky_relu`/`scale_add` are registered under OUR OWN
         // slots (`K_LEAKY_RELU`/`K_SCALE_ADD`), not `vae::blocks::KERNELS` -
         // see `LreluIds`/`ScaleAddIds`'s own doc for why. Needed whether or not
@@ -178,7 +182,7 @@ impl Rrdb {
 
         // Read BEFORE `finish` consumes the builder (mirrors
         // `sdxlunet::model::Unet::build`'s ordering).
-        let trace = train.then(|| b.trace());
+        let trace = train.map(|_| b.trace());
         let (steps, taps) = b.finish();
         Rrdb { gpu, cfg, steps, x_in, y_out, taps, hw: (ch, cw), _scale: scale_buf, trace }
     }
@@ -271,23 +275,38 @@ fn dense_block(
     x: &DeviceBuffer,
     scale: &DeviceBuffer,
 ) -> DeviceBuffer {
-    let hw = (h as u64) * (w as u64);
-    // `acc` is the running concat: x, then x‖x1, then x‖x1‖x2, ...
-    let mut acc = x.clone();
-    let mut acc_c = f_;
-    let mut last = x.clone();
-    for c in 1..=5u32 {
-        let cin = acc_c;
-        let cout = if c == 5 { f_ } else { g };
-        let y = b.conv(&format!("{prefix}.conv{c}"), cin, cout, 3, 1, h, w, &acc);
-        // conv5 has NO activation in the reference — it feeds the residual.
-        last = if c == 5 { y } else { lrelu(b, (cout as u64) * hw, &y) };
-        if c < 5 {
-            acc = cat(b, acc_c, cout, h, w, &acc, &last);
-            acc_c += cout;
+    // One segment: under recompute its internals are rebuilt before its adjoint (`Builder::segment`).
+    b.segment(|b| {
+        let hw = (h as u64) * (w as u64);
+        // `acc` is the running concat: x, then x‖x1, then x‖x1‖x2, ... Every intermediate is freed after its last
+        // read, so an eval graph reuses it and a recomputing train graph shares it with later blocks.
+        let mut acc = x.clone();
+        let mut acc_c = f_;
+        let mut last = x.clone();
+        for c in 1..=5u32 {
+            let cin = acc_c;
+            let cout = if c == 5 { f_ } else { g };
+            let y = b.conv(&format!("{prefix}.conv{c}"), cin, cout, 3, 1, h, w, &acc);
+            if c == 5 {
+                // conv5 has NO activation in the reference - it feeds the residual.
+                last = y;
+            } else {
+                last = lrelu(b, (cout as u64) * hw, &y);
+                b.free((cout as u64) * hw, y);
+                let next = cat(b, acc_c, cout, h, w, &acc, &last);
+                b.free((cout as u64) * hw, last.clone());
+                if c > 1 {
+                    b.free((acc_c as u64) * hw, acc);
+                }
+                acc = next;
+                acc_c += cout;
+            }
         }
-    }
-    residual(b, (f_ as u64) * hw, scale, x, &last)
+        b.free((acc_c as u64) * hw, acc);
+        let out = residual(b, (f_ as u64) * hw, scale, x, &last);
+        b.free((f_ as u64) * hw, last);
+        out
+    })
 }
 
 /// `RRDB`: three dense blocks, then `x + 0.2 * out`.

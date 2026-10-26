@@ -125,7 +125,7 @@ fn trainer(seed: u64) -> RrdbTrainer {
     let cfg = tiny_config();
     let tensors = init_weights(&cfg, seed);
     let gpu = gpu_core::testgpu::dev(TRAIN_PIPELINES);
-    let m = RrdbTrainer::new(gpu, cfg.clone(), &tensors, H, W);
+    let m = RrdbTrainer::new(gpu, cfg.clone(), &tensors, H, W, vae::blocks::Activations::Keep);
 
     let mut rng = Rng::new(seed ^ 0x5DEC_0DE5);
     let mut r = |n: usize| -> Vec<f32> { (0..n).map(|_| rng.next_f32()).collect() };
