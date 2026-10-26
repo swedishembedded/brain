@@ -59,6 +59,7 @@ use checkpoint::safetensors::{self, StTensor};
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::block::{self, GemmVariants, KernelIds};
 use model::hostmath::{linear_rows, linear_rows_bwd, matvec, silu, softmax};
+use model::saved::{BlockStack, SavedPolicy};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -384,9 +385,18 @@ fn block_bwd(w: &BlockW, cfg: &DepthDecoderConfig, cache: &BlockCache, s: usize,
 }
 
 pub struct ForwardCache {
-    blocks: Vec<BlockCache>,
+    blocks: BlockStack<Vec<f32>, BlockCache>,
+    /// The last block's output, the final norm's input.
+    last_h: Vec<f32>,
     final_inv: Vec<f32>,
     s: usize,
+}
+
+impl ForwardCache {
+    /// Block caches this cache holds: one per block when keeping, none when recomputing.
+    pub fn held_block_caches(&self) -> usize {
+        self.blocks.held_caches()
+    }
 }
 
 /// `forward(inputs_embeds)`: `[s, hidden]` -> normalized hidden states
@@ -395,6 +405,13 @@ pub struct ForwardCache {
 /// layer (the reference class does this itself, not something its caller
 /// pre-adds).
 pub fn forward(w: &DepthDecoderWeights, cfg: &DepthDecoderConfig, inputs_embeds: &[f32], s: usize) -> (Vec<f32>, ForwardCache) {
+    forward_saved(w, cfg, inputs_embeds, s, SavedPolicy::Keep).expect("keeping every block is always available")
+}
+
+/// [`forward`] keeping what `saved` names for [`backward`]: every block's cache ([`SavedPolicy::Keep`]) or only every
+/// block's input, each block rebuilt as the backward reaches it ([`SavedPolicy::Recompute`],
+/// `model::saved::BlockStack`). A narrow saved format is refused.
+pub fn forward_saved(w: &DepthDecoderWeights, cfg: &DepthDecoderConfig, inputs_embeds: &[f32], s: usize, saved: SavedPolicy) -> Result<(Vec<f32>, ForwardCache), String> {
     let d = cfg.hidden_size as usize;
     assert_eq!(inputs_embeds.len(), s * d, "depth_decoder::forward: inputs_embeds length mismatch");
     assert!(s <= cfg.max_position_embeddings as usize, "depth_decoder::forward: {s} positions exceeds max_position_embeddings");
@@ -402,11 +419,12 @@ pub fn forward(w: &DepthDecoderWeights, cfg: &DepthDecoderConfig, inputs_embeds:
     // its own position embedding internally, not something the caller
     // pre-adds.
     let mut h: Vec<f32> = inputs_embeds.iter().zip(&w.pos_embedding[..s * d]).map(|(a, b)| a + b).collect();
-    let mut blocks = Vec::with_capacity(w.layers.len());
+    let mut blocks = BlockStack::new("minimaxmusic3 depth decoder", saved)?;
     for layer in &w.layers {
+        let input = h.clone();
         let (out, cache) = block_fwd(layer, cfg, h, s);
+        blocks.push(&input, cache);
         h = out;
-        blocks.push(cache);
     }
     let mut out = vec![0.0f32; s * d];
     let mut final_inv = vec![0.0f32; s];
@@ -415,7 +433,7 @@ pub fn forward(w: &DepthDecoderWeights, cfg: &DepthDecoderConfig, inputs_embeds:
         out[r * d..(r + 1) * d].copy_from_slice(&row);
         final_inv[r] = inv;
     }
-    (out, ForwardCache { blocks, final_inv, s })
+    Ok((out, ForwardCache { blocks, last_h: h, final_inv, s }))
 }
 
 /// The depth decoder's per-frame inference KV cache: the causal
@@ -1003,19 +1021,8 @@ pub fn backward(w: &DepthDecoderWeights, cfg: &DepthDecoderConfig, cache: &Forwa
     let s = cache.s;
     let mut d_h = vec![0.0f32; s * d];
     let mut d_norm = vec![0.0f32; d];
-    // The last block's own forward output is the final norm's input, but
-    // isn't cached directly - re-derive it the same way block_fwd computed
-    // it (`mid + down_proj(silu(gate)*up)`), from the last block's own
-    // cached `gate`/`up` (its `norm2` is NOT the MLP's down-proj input,
-    // silu(gate)*up is).
-    let last_h = {
-        let inter = cfg.intermediate_size as usize;
-        let last = cache.blocks.last().unwrap();
-        let act: Vec<f32> = last.gate.iter().zip(&last.up).map(|(&g, &u)| silu(g) * u).collect();
-        let down = linear_rows(&act, &w.layers.last().unwrap().mlp.down, s, inter, d);
-        let h: Vec<f32> = last.mid.iter().zip(&down).map(|(a, b)| a + b).collect();
-        h
-    };
+    // The last block's output is the final norm's input.
+    let last_h = &cache.last_h;
     for r in 0..s {
         let (dx, dg) = rmsnorm_row_bwd(&last_h[r * d..(r + 1) * d], &w.norm, cache.final_inv[r], &dy[r * d..(r + 1) * d]);
         d_h[r * d..(r + 1) * d].copy_from_slice(&dx);
@@ -1025,11 +1032,14 @@ pub fn backward(w: &DepthDecoderWeights, cfg: &DepthDecoderConfig, cache: &Forwa
     }
 
     let mut d_layers = Vec::with_capacity(w.layers.len());
-    for (layer, cache) in w.layers.iter().zip(cache.blocks.iter()).rev() {
-        let (d_x, dw) = block_bwd(layer, cfg, cache, s, &d_h);
-        d_h = d_x;
-        d_layers.push(dw);
-    }
+    cache.blocks.rev_for_each(
+        |l, x| block_fwd(&w.layers[l], cfg, x.clone(), s).1,
+        |l, bc| {
+            let (d_x, dw) = block_bwd(&w.layers[l], cfg, bc, s, &d_h);
+            d_h = d_x;
+            d_layers.push(dw);
+        },
+    );
     d_layers.reverse();
     // `h = inputs_embeds + pos_embedding[0..s]`: both branches of this
     // elementwise sum receive the same upstream gradient unchanged.
@@ -1245,6 +1255,32 @@ mod tests {
             assert_eq!(first, run(&mut dec), "a reset decoder replayed a different frame");
             assert_eq!(dec.pos(), rows.len());
         }
+    }
+
+    /// Spec: recomputing the decoder's blocks gives the output and every gradient of keeping them, bit for bit,
+    /// holding none of their caches (`model::saved::check_block_recompute`).
+    #[test]
+    fn the_block_stack_recomputes_exactly() {
+        let cfg = DepthDecoderConfig::tiny();
+        let w = random_weights(&cfg, 13);
+        let s = cfg.num_codebooks as usize;
+        let mut r = Lcg::new(data::rng::random_seed());
+        let x = r.vec_scaled(s * cfg.hidden_size as usize, 0.4);
+        let dy = r.vec_scaled(s * cfg.hidden_size as usize, 1.0);
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits() as u64).collect::<Vec<u64>>();
+        model::saved::check_block_recompute("minimaxmusic3 depth decoder", |policy| {
+            let (out, cache) = forward_saved(&w, &cfg, &x, s, policy)?;
+            let (dx, d_layers, d_norm, d_pos) = backward(&w, &cfg, &cache, &dy);
+            let mut grads = vec![("dx".to_string(), bits(&dx)), ("norm".to_string(), bits(&d_norm)), ("pos".to_string(), bits(&d_pos))];
+            for (l, g) in d_layers.iter().enumerate() {
+                for (name, v) in [("ln1", &g.ln1), ("ln2", &g.ln2), ("gate", &g.mlp.gate), ("up", &g.mlp.up), ("down", &g.mlp.down)] {
+                    grads.push((format!("{l}.{name}"), bits(v)));
+                }
+            }
+            let loss: f64 = out.iter().zip(&dy).map(|(a, b)| (*a as f64) * (*b as f64)).sum();
+            Ok(model::saved::BlockStep { loss: loss.to_bits(), grads, held_caches: cache.held_block_caches() })
+        })
+        .unwrap();
     }
 
     #[test]

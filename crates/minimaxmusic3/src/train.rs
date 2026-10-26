@@ -27,6 +27,7 @@ use audio::conv::{conv1d_bwd, conv1d_fwd, convtr1d_bwd, convtr1d_fwd, Conv1d, Co
 use audio::snake::{snake1d_bwd_dalpha, snake1d_bwd_dx, snake1d_fwd, Snake1d, SnakeKernels};
 use data::rng::Lcg;
 use gpu_core::{DeviceBuffer, Gpu, Step};
+use model::saved::{BlockStack, SavedPolicy};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -291,12 +292,46 @@ struct ForwardCache {
     latents: DeviceBuffer, // dec_in_proj input
     rows: u32,
     x1: DeviceBuffer, // conv_in input (= dec_in_proj output)
-    blocks: Vec<BlockCache>,
+    blocks: BlockStack<BlockInput, BlockCache>,
     pre_snake_out: DeviceBuffer, // last block's output
     sn: DeviceBuffer,            // snake_out output = conv_out input
     pre_tanh: DeviceBuffer,      // conv_out output
     out_len: u32,
     output: DeviceBuffer,
+}
+
+/// A decoder block's input as the block stack records it: the activation and its `[rows, dim, len]` shape.
+#[derive(Clone)]
+struct BlockInput {
+    x: DeviceBuffer,
+    dim: u32,
+    len: u32,
+}
+
+/// One decoder block's forward (snake, transposed-conv upsample, three dilated residual units), recorded into
+/// `steps`: its cache and its output.
+fn block_fwd(gpu: &Gpu, steps: &mut Vec<Step>, block: &VocoderBlockD, stride: u32, rows: u32, input: &BlockInput) -> (BlockCache, DeviceBuffer) {
+    let (in_dim, in_len) = (input.dim, input.len);
+    let out_dim = in_dim / 2;
+    let s1 = snake_fwd(gpu, steps, &block.snake1_alpha, rows, in_dim, in_len, &input.x);
+    let out_len = in_len * stride;
+    let pad = stride.div_ceil(2);
+    let mut cur = convtr1d_bias_fwd(gpu, steps, &block.conv_t1, rows, in_dim, in_len, out_dim, 2 * stride, stride, pad, out_len, &s1);
+    let (cur_dim, cur_len) = (out_dim, out_len);
+    let mut res = Vec::new();
+    for (dilation, ru) in [1u32, 3, 9].into_iter().zip(&block.res_units) {
+        let ru_x = cur.clone();
+        let ru_pad = 3 * dilation;
+        let rs1 = snake_fwd(gpu, steps, &ru.snake1_alpha, rows, cur_dim, cur_len, &cur);
+        let rc1 = conv1d_bias_fwd(gpu, steps, &ru.conv1, rows, cur_dim, cur_len, cur_dim, 7, ru_pad, dilation, &rs1);
+        let rs2 = snake_fwd(gpu, steps, &ru.snake2_alpha, rows, cur_dim, cur_len, &rc1);
+        let rc2 = conv1d_bias_fwd(gpu, steps, &ru.conv2, rows, cur_dim, cur_len, cur_dim, 1, 0, 1, &rs2);
+        let out = gpu.storage(u64::from(rows) * u64::from(cur_dim) * u64::from(cur_len));
+        steps.push(gpu.step(ADD2, &[&ru_x, &rc2, &out], &[rows * cur_dim * cur_len], rows * cur_dim * cur_len));
+        res.push(ResidualUnitCache { x: ru_x, s1: rs1, c1: rc1, s2: rs2, dim: cur_dim, l: cur_len, dilation });
+        cur = out;
+    }
+    (BlockCache { x: input.x.clone(), s1, in_dim, in_len, out_dim, out_len, stride, res }, cur)
 }
 
 /// Vocoder trainer: persistent device weights/gradients, a fixed
@@ -315,6 +350,8 @@ pub struct Trainer {
     target: Vec<f32>,
     cache: RefCell<Option<ForwardCache>>,
     last_loss: RefCell<f32>,
+    /// What the block stack's backward keeps of its forward ([`Trainer::set_saved_policy`]).
+    saved: SavedPolicy,
 }
 
 impl Trainer {
@@ -324,7 +361,7 @@ impl Trainer {
         let sizes = flatten(w).into_iter().map(|(name, data)| (name, data.len())).collect();
         let out_len = length * cfg.upsampling_ratios.iter().product::<u32>() as usize;
         assert_eq!(target.len(), batch * 2 * out_len, "Trainer::new: target length mismatch");
-        Trainer { gpu, cfg, w: dw, sizes, latents, batch, length, target, cache: RefCell::new(None), last_loss: RefCell::new(0.0) }
+        Trainer { gpu, cfg, w: dw, sizes, latents, batch, length, target, cache: RefCell::new(None), last_loss: RefCell::new(0.0), saved: SavedPolicy::Keep }
     }
 
     fn run_forward(&self) -> f32 {
@@ -340,34 +377,13 @@ impl Trainer {
         let mut cur_dim = cfg.decoder_hidden_dim;
         let mut cur_len = self.length as u32;
 
-        let mut block_caches = Vec::new();
+        let mut block_caches = BlockStack::new("minimaxmusic3 vocoder", self.saved).expect("set_saved_policy accepted the policy");
         for (i, block) in self.w.blocks.iter().enumerate() {
-            let in_dim = cur_dim;
-            let in_len = cur_len;
-            let block_x = cur.clone();
-            let stride = cfg.upsampling_ratios[i];
-            let out_dim = cur_dim / 2;
-            let s1 = snake_fwd(gpu, &mut steps, &block.snake1_alpha, rows, cur_dim, cur_len, &cur);
-            let out_len = cur_len * stride;
-            let pad = stride.div_ceil(2);
-            cur = convtr1d_bias_fwd(gpu, &mut steps, &block.conv_t1, rows, cur_dim, cur_len, out_dim, 2 * stride, stride, pad, out_len, &s1);
-            cur_dim = out_dim;
-            cur_len = out_len;
-
-            let mut res_caches = Vec::new();
-            for (dilation, ru) in [1u32, 3, 9].into_iter().zip(&block.res_units) {
-                let ru_x = cur.clone();
-                let ru_pad = 3 * dilation;
-                let rs1 = snake_fwd(gpu, &mut steps, &ru.snake1_alpha, rows, cur_dim, cur_len, &cur);
-                let rc1 = conv1d_bias_fwd(gpu, &mut steps, &ru.conv1, rows, cur_dim, cur_len, cur_dim, 7, ru_pad, dilation, &rs1);
-                let rs2 = snake_fwd(gpu, &mut steps, &ru.snake2_alpha, rows, cur_dim, cur_len, &rc1);
-                let rc2 = conv1d_bias_fwd(gpu, &mut steps, &ru.conv2, rows, cur_dim, cur_len, cur_dim, 1, 0, 1, &rs2);
-                let out = gpu.storage(u64::from(rows) * u64::from(cur_dim) * u64::from(cur_len));
-                steps.push(gpu.step(ADD2, &[&ru_x, &rc2, &out], &[rows * cur_dim * cur_len], rows * cur_dim * cur_len));
-                res_caches.push(ResidualUnitCache { x: ru_x, s1: rs1, c1: rc1, s2: rs2, dim: cur_dim, l: cur_len, dilation });
-                cur = out;
-            }
-            block_caches.push(BlockCache { x: block_x, s1, in_dim, in_len, out_dim, out_len, stride, res: res_caches });
+            let input = BlockInput { x: cur.clone(), dim: cur_dim, len: cur_len };
+            let (bc, out) = block_fwd(gpu, &mut steps, block, cfg.upsampling_ratios[i], rows, &input);
+            (cur_dim, cur_len) = (bc.out_dim, bc.out_len);
+            block_caches.push(&input, bc);
+            cur = out;
         }
 
         let pre_snake_out = cur.clone();
@@ -410,26 +426,37 @@ impl Trainer {
         let mut d_cur = conv1d_bias_bwd(gpu, &mut steps, &self.w.conv_out, rows, cur_dim, cur_len, 1, 7, 3, 1, &cache.sn, &d_pre_tanh);
         d_cur = snake_bwd(gpu, &mut steps, &self.w.snake_out_alpha, rows, cur_dim, cur_len, &cache.pre_snake_out, &d_cur, &self.w.d_snake_out_alpha);
 
-        for block in self.w.blocks.iter().zip(cache.blocks.iter()).collect::<Vec<_>>().into_iter().rev() {
-            let (bw, bc) = block;
-            for (ru_w, ru_c) in bw.res_units.iter().zip(bc.res.iter()).rev() {
-                let dy_out = d_cur;
-                // add2 backward: both branches get dy_out unchanged.
-                let d_c2 = dy_out.clone();
-                let d_c1_branch = conv1d_bias_bwd(gpu, &mut steps, &ru_w.conv2, rows, ru_c.dim, ru_c.l, ru_c.dim, 1, 0, 1, &ru_c.s2, &d_c2);
-                let d_s1_out = snake_bwd(gpu, &mut steps, &ru_w.snake2_alpha, rows, ru_c.dim, ru_c.l, &ru_c.c1, &d_c1_branch, &ru_w.d_snake2_alpha);
-                let ru_pad = 3 * ru_c.dilation;
-                let d_x_branch = conv1d_bias_bwd(gpu, &mut steps, &ru_w.conv1, rows, ru_c.dim, ru_c.l, ru_c.dim, 7, ru_pad, ru_c.dilation, &ru_c.s1, &d_s1_out);
-                let d_x_from_branch = snake_bwd(gpu, &mut steps, &ru_w.snake1_alpha, rows, ru_c.dim, ru_c.l, &ru_c.x, &d_x_branch, &ru_w.d_snake1_alpha);
-                let dx = gpu.storage(u64::from(rows) * u64::from(ru_c.dim) * u64::from(ru_c.l));
-                steps.push(gpu.step(ADD2, &[&dy_out, &d_x_from_branch, &dx], &[rows * ru_c.dim * ru_c.l], rows * ru_c.dim * ru_c.l));
-                d_cur = dx;
-            }
-            let d_after_convt = d_cur;
-            let d_s1 = convtr1d_bias_bwd(gpu, &mut steps, &bw.conv_t1, rows, bc.in_dim, bc.in_len, bc.out_dim, 2 * bc.stride, bc.stride, bc.stride.div_ceil(2), bc.out_len, &bc.s1, &d_after_convt);
-            d_cur = snake_bwd(gpu, &mut steps, &bw.snake1_alpha, rows, bc.in_dim, bc.in_len, &bc.x, &d_s1, &bw.d_snake1_alpha);
-            cur_dim = bc.in_dim;
-        }
+        // Each block's backward is submitted on its own, so a recomputing stack holds one rebuilt block at a time.
+        cache.blocks.rev_for_each(
+            |i, input| {
+                // The rebuild reads only the block's input and weights, which no pending backward step writes.
+                let mut rebuild = Vec::new();
+                let (bc, _) = block_fwd(gpu, &mut rebuild, &self.w.blocks[i], cfg.upsampling_ratios[i], rows, input);
+                gpu.submit(&[], &rebuild);
+                bc
+            },
+            |i, bc| {
+                let bw = &self.w.blocks[i];
+                for (ru_w, ru_c) in bw.res_units.iter().zip(bc.res.iter()).rev() {
+                    let dy_out = d_cur.clone();
+                    // add2 backward: both branches get dy_out unchanged.
+                    let d_c2 = dy_out.clone();
+                    let d_c1_branch = conv1d_bias_bwd(gpu, &mut steps, &ru_w.conv2, rows, ru_c.dim, ru_c.l, ru_c.dim, 1, 0, 1, &ru_c.s2, &d_c2);
+                    let d_s1_out = snake_bwd(gpu, &mut steps, &ru_w.snake2_alpha, rows, ru_c.dim, ru_c.l, &ru_c.c1, &d_c1_branch, &ru_w.d_snake2_alpha);
+                    let ru_pad = 3 * ru_c.dilation;
+                    let d_x_branch = conv1d_bias_bwd(gpu, &mut steps, &ru_w.conv1, rows, ru_c.dim, ru_c.l, ru_c.dim, 7, ru_pad, ru_c.dilation, &ru_c.s1, &d_s1_out);
+                    let d_x_from_branch = snake_bwd(gpu, &mut steps, &ru_w.snake1_alpha, rows, ru_c.dim, ru_c.l, &ru_c.x, &d_x_branch, &ru_w.d_snake1_alpha);
+                    let dx = gpu.storage(u64::from(rows) * u64::from(ru_c.dim) * u64::from(ru_c.l));
+                    steps.push(gpu.step(ADD2, &[&dy_out, &d_x_from_branch, &dx], &[rows * ru_c.dim * ru_c.l], rows * ru_c.dim * ru_c.l));
+                    d_cur = dx;
+                }
+                let d_after_convt = d_cur.clone();
+                let d_s1 = convtr1d_bias_bwd(gpu, &mut steps, &bw.conv_t1, rows, bc.in_dim, bc.in_len, bc.out_dim, 2 * bc.stride, bc.stride, bc.stride.div_ceil(2), bc.out_len, &bc.s1, &d_after_convt);
+                d_cur = snake_bwd(gpu, &mut steps, &bw.snake1_alpha, rows, bc.in_dim, bc.in_len, &bc.x, &d_s1, &bw.d_snake1_alpha);
+                cur_dim = bc.in_dim;
+                gpu.submit(&[], &std::mem::take(&mut steps));
+            },
+        );
 
         let d_x1 = conv1d_bias_bwd(gpu, &mut steps, &self.w.conv_in, rows, self.cfg.decoder_input_dim, self.length as u32, cur_dim, 7, 3, 1, &cache.x1, &d_cur);
         let half = self.cfg.latent_channels / 2;
@@ -462,6 +489,21 @@ impl Trainer {
             self.gpu.write(buf, &vec![0u32; n]);
         }
     }
+    /// Keep every decoder block's activations for the backward ([`SavedPolicy::Keep`]) or only every block's input,
+    /// each block rebuilt on the device as the backward reaches it ([`SavedPolicy::Recompute`],
+    /// `model::saved::BlockStack`). A narrow saved format is refused by name.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        BlockStack::<(), ()>::new("minimaxmusic3 vocoder", policy)?;
+        self.saved = policy;
+        *self.cache.get_mut() = None;
+        Ok(())
+    }
+
+    /// Block caches the last forward held: one per block when keeping, none when recomputing.
+    pub fn held_block_caches(&self) -> usize {
+        self.cache.borrow().as_ref().map_or(0, |c| c.blocks.held_caches())
+    }
+
     pub fn loss(&self) -> f32 {
         let l = self.run_forward();
         *self.last_loss.borrow_mut() = l;
@@ -596,6 +638,31 @@ mod tests {
         assert_eq!(served.len(), trained_fwd.len());
         let max_abs = served.iter().zip(&trained_fwd).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
         assert!(max_abs < 1e-4, "train.rs's own forward drifted from vocoder::forward: max_abs={max_abs}");
+    }
+
+    /// Spec: recomputing the decoder blocks on the device gives the loss and gradients of keeping them, bit for bit,
+    /// holding no block's activations (`model::saved::check_block_recompute`).
+    #[test]
+    fn the_block_stack_recomputes_exactly() {
+        let cfg = VocoderConfig::tiny();
+        let w = random_weights(&cfg, 41);
+        let (batch, length) = (1, 4);
+        let mut r = Lcg::new(data::rng::random_seed());
+        let latents = r.vec_scaled(batch * cfg.latent_channels as usize * length, 0.5);
+        let out_len = length * cfg.upsampling_ratios.iter().product::<u32>() as usize;
+        let target = r.vec_scaled(batch * 2 * out_len, 0.5);
+        model::saved::check_block_recompute("minimaxmusic3 vocoder", |policy| {
+            let mut t = Trainer::new(cfg.clone(), &w, latents.clone(), batch, length, target.clone());
+            t.set_saved_policy(policy)?;
+            t.zero_grads();
+            let loss = t.loss();
+            t.backward();
+            let mut names = t.param_names();
+            names.sort();
+            let grads = names.into_iter().map(|n| (n.clone(), t.read_grad(&n).into_iter().map(|x| x.to_bits() as u64).collect())).collect();
+            Ok(model::saved::BlockStep { loss: loss.to_bits() as u64, grads, held_caches: t.held_block_caches() })
+        })
+        .unwrap();
     }
 
     #[test]

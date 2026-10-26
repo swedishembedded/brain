@@ -30,6 +30,7 @@ use data::rng::Lcg;
 use gpu_core::{DeviceBuffer, Gpu};
 use model::block::{self, bidir_bwd, bidir_fwd, layernorm_dx_bwd, layernorm_fwd, ln_stats_fwd, rope2d_partial_bwd, rope2d_partial_fwd, swiglu_bwd, swiglu_fwd, Bidir, BidirIds, KernelIds, LayerNormIds};
 use model::hostmath::{dsilu, linear_rows_bwd, matvec};
+use model::saved::{BlockStack, SavedPolicy};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -570,7 +571,7 @@ struct ForwardCache {
     h1_lin: Vec<f32>,    // pre-SiLU time_embed.linear_1 output, [inner]
     h1: Vec<f32>,        // post-SiLU, [inner]
     rows: usize,
-    blocks: Vec<BlockCache>,
+    blocks: BlockStack<DeviceBuffer, BlockCache>,
     x_final_host: Vec<f32>, // [rows, inner], the last block's output
     y_lc: Vec<f32>,         // [length, cin] (post proj_out, pre postprocess residual)
     output: Vec<f32>,       // [cin, length] NCL, the trainer's own forward output
@@ -594,6 +595,8 @@ pub struct Trainer {
     length: usize,
     target: Vec<f32>, // [cin, length] NCL
     cache: RefCell<Option<ForwardCache>>,
+    /// What the block stack's backward keeps of its forward ([`Trainer::set_saved_policy`]).
+    saved: SavedPolicy,
 }
 
 impl Trainer {
@@ -646,7 +649,7 @@ impl Trainer {
             sizes.insert(format!("{p}.ff_out.bias"), b.ff_out_b.len());
         }
 
-        Trainer { gpu, cfg, blocks, host: RefCell::new(host), host_grad: RefCell::new(host_grad), sizes, latents, condition, timestep, length, target, cache: RefCell::new(None) }
+        Trainer { gpu, cfg, blocks, host: RefCell::new(host), host_grad: RefCell::new(host_grad), sizes, latents, condition, timestep, length, target, cache: RefCell::new(None), saved: SavedPolicy::Keep }
     }
 
     fn run_forward(&self) -> f32 {
@@ -702,10 +705,10 @@ impl Trainer {
         let sin_b = gpu.storage_init("rope.sin", &sin_t);
 
         let mut x = gpu.storage_init("x0", &x_host);
-        let mut block_caches = Vec::with_capacity(self.blocks.len());
+        let mut block_caches = BlockStack::new("minimaxmusic3 dit", self.saved).expect("set_saved_policy accepted the policy");
         for bd in &self.blocks {
             let (bc, x_next) = block_fwd(gpu, cfg, bd, &cos_b, &sin_b, &x, rows);
-            block_caches.push(bc);
+            block_caches.push(&x, bc);
             x = x_next;
         }
         let x_final_host = gpu.read(&x, rows * inner);
@@ -782,9 +785,10 @@ impl Trainer {
         let cos_b = gpu.storage_init("rope.cos", &cos_t);
         let sin_b = gpu.storage_init("rope.sin", &sin_t);
 
-        for (bd, bc) in self.blocks.iter().zip(&cache.blocks).rev() {
-            d_x_next = block_bwd(gpu, cfg, bd, bc, &cos_b, &sin_b, &d_x_next, rows);
-        }
+        cache.blocks.rev_for_each(
+            |i, x| block_fwd(gpu, cfg, &self.blocks[i], &cos_b, &sin_b, x, rows).0,
+            |i, bc| d_x_next = block_bwd(gpu, cfg, &self.blocks[i], bc, &cos_b, &sin_b, &d_x_next, rows),
+        );
         let d_x0 = gpu.read(&d_x_next, rows * inner);
         let d_temb = &d_x0[..inner];
         let d_x0_rows = &d_x0[inner..]; // [length, inner]
@@ -871,6 +875,22 @@ impl Trainer {
         }
         *self.host_grad.borrow_mut() = self.host.borrow().zero_like();
     }
+    /// Keep every block's cached activations for the backward ([`SavedPolicy::Keep`]) or only every block's input,
+    /// each block's activations rebuilt on the device as the backward reaches it ([`SavedPolicy::Recompute`],
+    /// `model::saved::BlockStack`): one block's activations alive at a time instead of the whole stack's. A narrow
+    /// saved format is refused by name.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        BlockStack::<(), ()>::new("minimaxmusic3 dit", policy)?;
+        self.saved = policy;
+        *self.cache.get_mut() = None;
+        Ok(())
+    }
+
+    /// Block caches the last forward held: one per block when keeping, none when recomputing.
+    pub fn held_block_caches(&self) -> usize {
+        self.cache.borrow().as_ref().map_or(0, |c| c.blocks.held_caches())
+    }
+
     pub fn loss(&self) -> f32 {
         self.run_forward()
     }
@@ -1066,6 +1086,26 @@ mod tests {
                 assert!(worst <= 1e-3 * scale, "{label}: gradient for {na} diverged across backends: max|delta|={worst}, scale={scale}");
             }
         }
+    }
+
+    /// Spec: recomputing the block stack on the device gives the loss and gradients of keeping it, bit for bit,
+    /// holding no block's activations (`model::saved::check_block_recompute`).
+    #[test]
+    fn the_block_stack_recomputes_exactly() {
+        let cfg = DitConfig::tiny();
+        let (w, latents, condition, timestep, length, target) = fixture(&cfg, 61);
+        model::saved::check_block_recompute("minimaxmusic3 dit", |policy| {
+            let mut t = Trainer::new(cfg, &w, latents.clone(), condition.clone(), timestep, length, target.clone());
+            t.set_saved_policy(policy)?;
+            t.zero_grads();
+            let loss = t.loss();
+            t.backward();
+            let mut names = t.param_names();
+            names.sort();
+            let grads = names.into_iter().map(|n| (n.clone(), t.read_grad(&n).into_iter().map(|x| x.to_bits() as u64).collect())).collect();
+            Ok(model::saved::BlockStep { loss: loss.to_bits() as u64, grads, held_caches: t.held_block_caches() })
+        })
+        .unwrap();
     }
 
     #[test]
