@@ -501,7 +501,7 @@ impl Gpt {
     /// selection.
     pub fn new_shard(cfg: GptConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, shard: Shard) -> Gpt {
         let gpu = if shard.gpu_index == Shard::ANY_GPU {
-            Gpu::new(PIPELINES)
+            Gpu::new(&optim::with_moment_kernels(PIPELINES))
         } else {
             Gpu::new_on_index(shard.gpu_index as u32, PIPELINES)
                 .unwrap_or_else(|e| panic!("gpt shard placement: {e}"))
@@ -1230,6 +1230,10 @@ impl model::training::TokenObjectives for Gpt {
 }
 
 impl model::Model for Gpt {
+    fn optimizer_state(&mut self) -> Option<model::OptimizerState<'_>> {
+        Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: &self.opt })
+    }
+
     type Config = GptConfig;
 
     fn new(cfg: GptConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {

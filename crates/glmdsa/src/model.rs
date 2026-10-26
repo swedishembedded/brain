@@ -410,7 +410,7 @@ impl Glm {
         let reader = checkpoint::weightio::WeightReader::open(path)
             .unwrap_or_else(|e| panic!("cannot open {path}: {e}"));
         let cfg = GlmConfig::from_json(&reader.config());
-        Glm::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, &reader, true)
+        Glm::new_impl_on(Gpu::new(&optim::with_moment_kernels(PIPELINES)), cfg, b, t, &reader, true)
     }
 
     /// Inference load, streaming - see [`Glm::from_reader_inference`]. A
@@ -429,7 +429,7 @@ impl Glm {
     /// Inference build from any brain-named tensor source, one tensor at a
     /// time.
     pub fn from_source_inference(cfg: GlmConfig, src: &dyn checkpoint::TensorSource, b: u32, t: u32) -> Glm {
-        Glm::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, src, false)
+        Glm::new_impl_on(Gpu::new(&optim::with_moment_kernels(PIPELINES)), cfg, b, t, src, false)
     }
 
     /// Streaming inference load: build from a mmap-backed [`WeightReader`],
@@ -438,7 +438,7 @@ impl Glm {
     /// identical to [`Glm::load_inference`]; used by the resident serve path.
     pub fn from_reader_inference(reader: &checkpoint::weightio::WeightReader, b: u32, t: u32) -> Glm {
         let cfg = GlmConfig::from_json(&reader.config());
-        Glm::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, reader, false)
+        Glm::new_impl_on(Gpu::new(&optim::with_moment_kernels(PIPELINES)), cfg, b, t, reader, false)
     }
 
     pub fn new(cfg: GlmConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Glm {
@@ -451,7 +451,7 @@ impl Glm {
     }
 
     fn new_impl(cfg: GlmConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, train: bool) -> Glm {
-        Glm::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, init, train)
+        Glm::new_impl_on(Gpu::new(&optim::with_moment_kernels(PIPELINES)), cfg, b, t, init, train)
     }
 
     fn new_impl_on(gpu: Gpu, cfg: GlmConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, train: bool) -> Glm {
@@ -1612,6 +1612,10 @@ impl model::ModelConfig for GlmConfig {
 }
 
 impl model::Model for Glm {
+    fn optimizer_state(&mut self) -> Option<model::OptimizerState<'_>> {
+        Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: &self.opt })
+    }
+
     type Config = GlmConfig;
 
     fn new(cfg: GlmConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {

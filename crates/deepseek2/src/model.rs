@@ -684,13 +684,13 @@ fn shard_param_list(cfg: &DeepseekV2Config, shard: &Shard) -> Vec<(String, usize
 impl DeepseekV2 {
     /// Trainable model on a fresh device.
     pub fn new(cfg: DeepseekV2Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> DeepseekV2 {
-        DeepseekV2::new_on(Gpu::new(PIPELINES), cfg, b, t, init, true)
+        DeepseekV2::new_on(Gpu::new(&optim::with_moment_kernels(PIPELINES)), cfg, b, t, init, true)
     }
 
     /// Frozen (forward-only) model on a fresh device: no gradient/AdamW buffers
     /// are allocated and no backward tape is built.
     pub fn new_inference(cfg: DeepseekV2Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> DeepseekV2 {
-        DeepseekV2::new_on(Gpu::new(PIPELINES), cfg, b, t, init, false)
+        DeepseekV2::new_on(Gpu::new(&optim::with_moment_kernels(PIPELINES)), cfg, b, t, init, false)
     }
 
     /// Build on an existing device handle (the pooled test device, a placed
@@ -722,7 +722,7 @@ impl DeepseekV2 {
     /// - see `crate::shard`'s [`model::Shardable`] impl.
     pub fn new_shard(cfg: DeepseekV2Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, shard: Shard) -> DeepseekV2 {
         let gpu = if shard.gpu_index == Shard::ANY_GPU {
-            Gpu::new(PIPELINES)
+            Gpu::new(&optim::with_moment_kernels(PIPELINES))
         } else {
             Gpu::new_on_index(shard.gpu_index as u32, PIPELINES).unwrap_or_else(|e| panic!("deepseekv2 shard placement: {e}"))
         };
@@ -2188,6 +2188,10 @@ impl DeepseekV2 {
 // ---- architecture-agnostic Model seam ----
 
 impl model::Model for DeepseekV2 {
+    fn optimizer_state(&mut self) -> Option<model::OptimizerState<'_>> {
+        Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: &self.opt })
+    }
+
     type Config = DeepseekV2Config;
 
     fn new(cfg: DeepseekV2Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {

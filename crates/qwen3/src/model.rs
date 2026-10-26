@@ -299,11 +299,8 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
     LIST.get_or_init(|| {
         let mut v = STATIC_PIPELINES.to_vec();
         v.push(("matmul_gemv", kernels::MATMUL_GEMV));
-        // Device AdamW over blockwise-int8 moments (`optim::Optim` resolves them by
-        // name and `Op::AdamWQ8` picks the cooperative form where barriers run).
-        v.push(("adamw_q8", kernels::ADAMW_Q8));
-        v.push(("adamw_q8_wg", kernels::ADAMW_Q8_WG));
-        v.push(("adamw_bf16", kernels::ADAMW_BF16));
+        // Device AdamW over bf16 or blockwise-int8 moments (`optim::Optim` resolves them by name).
+        v.extend(optim::MOMENT_KERNELS);
         // The quantized-execution contract (`model::ops::tiled`): the resident FP8 full fine-tune multiplies,
         // back-propagates and takes weight gradients against block-scaled weights through the tile decode.
         for (name, src) in model::ops::frozen_base_kernels() {
@@ -4228,6 +4225,10 @@ impl model::training::TokenObjectives for Qwen {
 }
 
 impl model::Model for Qwen {
+    fn optimizer_state(&mut self) -> Option<model::OptimizerState<'_>> {
+        Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: &self.opt })
+    }
+
     type Config = QwenConfig;
 
     fn new(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {

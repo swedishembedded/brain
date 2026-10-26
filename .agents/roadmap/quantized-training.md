@@ -99,6 +99,11 @@ The per-cell matrix and its tests are `docs/reference/training-capabilities.md`.
   a bounded window (`Ops::read_range`), and a tensor wider than one storage binding is refused by
   name. Wired into qwen3 and qwen35: at the 27B shape this removes the fp32 table value, gradient
   and two moments (16 bytes a parameter, about 40 GB) from the device.
+- D Generic optimizer-state precision: every model with a `ParamStore` and the device `Optim`
+  exposes them (`Model::optimizer_state`) and the fit loop applies the run's state format before
+  the first step (`trainprec::apply_train_precision`, `ParamStore::apply_state_policy`); the bf16
+  and int8 moment kernels are one list (`optim::MOMENT_KERNELS`); one shared spec
+  (`trainprec::check_optimizer_state_formats`) runs per model.
 - D Memory: `model::saved` saved-activation policy (keep, recompute, bf16/fp8 boundaries)
   priced in memplan and wired into qwen3 and qwen35 LoRA training (a4a1242bc); flash attention
   backward without `[H,T,T]` probabilities for qwen35moe (fc6df1080) and flux2, including the
@@ -153,9 +158,7 @@ The per-cell matrix and its tests are `docs/reference/training-capabilities.md`.
   clip over both); only the layer pipeline splits a model across devices today.
 - O The value read of `DeviceTiles` (commit, export, a tensor without a master) still decodes a
   whole tensor on the host; gradients are read through a bounded window.
-- O Generic optimizer-state precision for every `ParamStore` trainer: only qwen3 and qwen35 build
-  their store under the run's policy; the other full trainers (qwen35moe, glmdsa, gpt2, ...) keep
-  fp32 device moments.
+
 
 ## Phases
 

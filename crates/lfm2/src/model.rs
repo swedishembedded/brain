@@ -558,7 +558,7 @@ impl Lfm {
     }
 
     fn new_impl_alloc_inner(cfg: LfmConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, chunked: Option<(u64, u32)>, train: bool, tiny_probs: bool) -> Lfm {
-        let gpu = Gpu::new(PIPELINES);
+        let gpu = Gpu::new(&optim::with_moment_kernels(PIPELINES));
         let role = if train { paramstore::Role::Trainable } else { paramstore::Role::Frozen };
         let roles = cfg
             .param_list()
@@ -1593,6 +1593,10 @@ impl model::ModelConfig for LfmConfig {
 }
 
 impl model::Model for Lfm {
+    fn optimizer_state(&mut self) -> Option<model::OptimizerState<'_>> {
+        Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: self.opt.as_ref()? })
+    }
+
     type Config = LfmConfig;
 
     /// Trait construction is the TRAINABLE model - what the generic trainer

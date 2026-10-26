@@ -271,7 +271,7 @@ impl Pid {
     /// blocking executor, so build the model with `new_async` instead.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn new(cfg: PidConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Pid {
-        let gpu = Gpu::new(PIPELINES);
+        let gpu = Gpu::new(&optim::with_moment_kernels(PIPELINES));
         Pid::from_gpu(gpu, cfg, b, t, init)
     }
 
@@ -694,6 +694,10 @@ impl model::ModelConfig for PidConfig {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl model::Model for Pid {
+    fn optimizer_state(&mut self) -> Option<model::OptimizerState<'_>> {
+        Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: &self.opt })
+    }
+
     type Config = PidConfig;
 
     fn new(cfg: PidConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {

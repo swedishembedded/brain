@@ -1625,6 +1625,8 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         obj.shard(rank, world)?;
     }
     obj.prepare(&mut model)?;
+    // The run's optimizer-state precision reaches every model here, before any step or resume.
+    crate::trainprec::apply_train_precision(&mut model, &opts.precision, std::any::type_name::<M>()).map_err(std::io::Error::other)?;
     model.pin_rounding_seed(opts.seed);
     let mut rng = Rng::new(opts.seed ^ 0xA5A5_5A5A);
     let mut first_step = 0u32;

@@ -119,7 +119,7 @@ pub use plan::{plan_tp, Hardware, ModelShape, TpPlan};
 pub use shard::{plan_balanced, Pipeline, PipelineModel, Shard, ShardCost, Shardable, StreamPlan};
 
 pub use objective::{Objective, StepVerdict};
-pub use trainprec::{ResidentRequest, StateSupport, TrainPrecision, TrainPrecisionSupport};
+pub use trainprec::{apply_train_precision, OptimizerState, ResidentRequest, StateSupport, TrainPrecision, TrainPrecisionSupport};
 #[cfg(not(target_arch = "wasm32"))]
 pub use score::{score_base, score_dataset, score_tuned, supervised_positions, ScoredSet};
 pub use train::{cosine_lr, generate, FitOpts, LrSchedule, IGNORE};
@@ -347,6 +347,14 @@ pub trait Model {
     /// master copies and optimizer state of the parameters trained against them (resident low-precision full
     /// fine-tuning). `None` (the default) when the model has none.
     fn off_device_state(&self) -> Option<&dyn OffDeviceState> {
+        None
+    }
+
+    /// The parameter store and the device optimizer [`Model::adamw_step`] updates it with, so the run's optimizer-state
+    /// precision ([`FitOpts::precision`](crate::train::FitOpts)) reaches any model through one generic path
+    /// ([`trainprec::apply_train_precision`], called by the fit loop before the first step). `None` (the default) for
+    /// a model that keeps no such pair; such a model refuses a non-default optimizer-state precision by name.
+    fn optimizer_state(&mut self) -> Option<OptimizerState<'_>> {
         None
     }
 

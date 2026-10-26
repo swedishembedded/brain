@@ -420,7 +420,7 @@ impl Seq2Seq {
     }
 
     pub fn new(cfg: Seq2SeqConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Seq2Seq {
-        Seq2Seq::new_on(Gpu::new(PIPELINES), cfg, b, t, init)
+        Seq2Seq::new_on(Gpu::new(&optim::with_moment_kernels(PIPELINES)), cfg, b, t, init)
     }
 
     /// Build on an existing device handle — see `Gpt::new_on`.
@@ -934,6 +934,10 @@ impl model::ModelConfig for Seq2SeqConfig {
 }
 
 impl model::Model for Seq2Seq {
+    fn optimizer_state(&mut self) -> Option<model::OptimizerState<'_>> {
+        Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: &self.opt })
+    }
+
     type Config = Seq2SeqConfig;
 
     fn new(cfg: Seq2SeqConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {

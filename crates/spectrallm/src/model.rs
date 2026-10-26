@@ -113,12 +113,12 @@ pub struct SpectralLm {
 impl SpectralLm {
     /// Frozen weights from any tensor source (a checkpoint or an init map).
     pub fn new_inference(cfg: SpectralConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource) -> SpectralLm {
-        Self::build(Gpu::new(PIPELINES), cfg, b, t, src, false)
+        Self::build(Gpu::new(&optim::with_moment_kernels(PIPELINES)), cfg, b, t, src, false)
     }
 
     /// Trainable: gradients, AdamW moments and the backward graph.
     pub fn new_train(cfg: SpectralConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource) -> SpectralLm {
-        Self::build(Gpu::new(PIPELINES), cfg, b, t, src, true)
+        Self::build(Gpu::new(&optim::with_moment_kernels(PIPELINES)), cfg, b, t, src, true)
     }
 
     /// [`Self::new_train`]/[`Self::new_inference`] on a caller's device
@@ -445,6 +445,10 @@ impl SpectralLm {
 }
 
 impl model::Model for SpectralLm {
+    fn optimizer_state(&mut self) -> Option<model::OptimizerState<'_>> {
+        Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: self.opt.as_ref()? })
+    }
+
     type Config = SpectralConfig;
 
     fn new(cfg: Self::Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {

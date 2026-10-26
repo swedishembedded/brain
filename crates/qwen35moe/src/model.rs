@@ -346,6 +346,8 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
     static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
     LIST.get_or_init(|| {
         let mut v = STATIC_PIPELINES.to_vec();
+        // Device AdamW over bf16 or blockwise-int8 moments (`optim::Optim` resolves them by name).
+        v.extend(optim::MOMENT_KERNELS);
         v.push(("matmul_gemv", kernels::MATMUL_GEMV));
         v.push(("matmul_reg2", kernels::MATMUL_REG3));
         v.push(("matmul_i8_gemv", kernels::MATMUL_I8_GEMV));
@@ -4087,6 +4089,10 @@ impl model::ModelConfig for Qwen35Config {
 }
 
 impl model::Model for Qwen35 {
+    fn optimizer_state(&mut self) -> Option<model::OptimizerState<'_>> {
+        Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: &self.opt })
+    }
+
     type Config = Qwen35Config;
 
     /// The training build (weights trainable, or a frozen base with trainable

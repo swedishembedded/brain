@@ -201,7 +201,7 @@ impl Autoencoder {
     }
 
     pub fn new(cfg: AutoencoderConfig, b: u32, init: &HashMap<String, Vec<f32>>) -> Autoencoder {
-        Autoencoder::new_on(Gpu::new(PIPELINES), cfg, b, init)
+        Autoencoder::new_on(Gpu::new(&optim::with_moment_kernels(PIPELINES)), cfg, b, init)
     }
 
     /// Build on an existing device handle — see `Gpt::new_on`.
@@ -424,6 +424,10 @@ impl model::ModelConfig for AutoencoderConfig {
 }
 
 impl model::Model for Autoencoder {
+    fn optimizer_state(&mut self) -> Option<model::OptimizerState<'_>> {
+        Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: &self.opt })
+    }
+
     type Config = AutoencoderConfig;
 
     fn new(cfg: AutoencoderConfig, b: u32, _t: u32, init: &HashMap<String, Vec<f32>>) -> Self {

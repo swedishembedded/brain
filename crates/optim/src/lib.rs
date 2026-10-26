@@ -230,6 +230,34 @@ struct Graph {
     _const_unis: Vec<gpu_core::DeviceBuffer>,
 }
 
+/// The kernels the fused update runs for moments narrower than f32: bf16 moments, and blockwise int8 moments (the
+/// portable kernel and its cooperative twin). A model whose full fine-tune offers those formats registers these beside
+/// its own `adamw`; [`missing_moment_kernels`] names what a device lacks for a set of formats.
+pub const MOMENT_KERNELS: &[(&str, &str)] = &[("adamw_bf16", kernels::ADAMW_BF16), ("adamw_q8", kernels::ADAMW_Q8), ("adamw_q8_wg", kernels::ADAMW_Q8_WG)];
+
+/// `pipelines` with every [`MOMENT_KERNELS`] entry it does not already name appended at the end, so the positions a
+/// model's kernel constants index stay where they are: the list a model whose optimizer state can be narrowed builds
+/// its `Gpu` from.
+pub fn with_moment_kernels(pipelines: &[(&'static str, &'static str)]) -> Vec<(&'static str, &'static str)> {
+    let mut all = pipelines.to_vec();
+    all.extend(MOMENT_KERNELS.iter().filter(|(name, _)| !pipelines.iter().any(|(n, _)| n == name)));
+    all
+}
+
+/// The moment kernels the state `formats` need that `gpu` has not registered (empty when every format is runnable).
+pub fn missing_moment_kernels(gpu: &Gpu, formats: impl IntoIterator<Item = paramstore::precision::StateFormat>) -> Vec<&'static str> {
+    use paramstore::precision::StateFormat;
+    let (bf16, int8) = formats.into_iter().fold((false, false), |(b, i), f| (b || f == StateFormat::Bf16, i || matches!(f, StateFormat::Int8Block { .. })));
+    let mut missing = Vec::new();
+    if bf16 && gpu.kernel_index("adamw_bf16").is_none() {
+        missing.push("adamw_bf16");
+    }
+    if int8 && gpu.kernel_index("adamw_q8").is_none() {
+        missing.push("adamw_q8");
+    }
+    missing
+}
+
 pub struct Optim {
     pub adamw: usize,
     pub gradnorm_sq: usize,
@@ -262,6 +290,12 @@ impl Optim {
         use std::hash::{BuildHasher, Hasher};
         let random = std::collections::hash_map::RandomState::new().build_hasher().finish();
         Optim { adamw, gradnorm_sq, grad_scale, clip_coef, grad_scale_buf, cache: RefCell::new(None), rounding_seed: Cell::new(random), last_scale: Cell::new(1.0) }
+    }
+
+    /// Drop the recorded update graph: the next [`Self::step`] records it again from the store. Call after the store's
+    /// moment buffers were replaced (`ParamStore::apply_state_policy`).
+    pub fn invalidate(&self) {
+        *self.cache.borrow_mut() = None;
     }
 
     /// Pin the stochastic-rounding seed of int8 moments (checkpoint resume).

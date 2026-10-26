@@ -365,7 +365,7 @@ pub struct Horizon {
 impl Horizon {
     /// Build on the device `BRAIN_DEVICE` selects.
     pub fn new(cfg: HorizonConfig, b: u32, init: &HashMap<String, Vec<f32>>) -> Horizon {
-        Horizon::new_on(Gpu::new(PIPELINES), cfg, b, init)
+        Horizon::new_on(Gpu::new(&optim::with_moment_kernels(PIPELINES)), cfg, b, init)
     }
 
     /// Build on an existing device handle (created with [`PIPELINES`]).
@@ -1438,6 +1438,10 @@ impl model::ModelConfig for HorizonConfig {
 }
 
 impl model::Model for Horizon {
+    fn optimizer_state(&mut self) -> Option<model::OptimizerState<'_>> {
+        Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: &self.opt })
+    }
+
     type Config = HorizonConfig;
 
     fn new(cfg: HorizonConfig, b: u32, _t: u32, init: &HashMap<String, Vec<f32>>) -> Self {

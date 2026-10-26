@@ -118,6 +118,48 @@ pub struct ParamStore {
     pub precision: HashMap<String, precision::ParamPrecision>,
 }
 
+/// The AdamW moment buffers of one trainable tensor in the format its precision names: f32 (one word an element),
+/// bf16 (two elements a word) or blockwise int8 of [`DEVICE_INT8_BLOCK`] (four codes a word, plus `ceil(numel/64)`
+/// first-moment scales followed by as many second-moment scales). Freshly allocated buffers read as zero, which is
+/// every format's empty state.
+///
+/// `gpu.storage(numel)` and no write: a buffer that is allocated and never written costs exactly its own bytes on a
+/// non-ReBAR card, while any upload into it costs double (the resident cost tracks bytes ever written), and wgpu
+/// already guarantees a fresh buffer reads as zero.
+struct DeviceMoments {
+    m: gpu_core::DeviceBuffer,
+    v: gpu_core::DeviceBuffer,
+    scales: Option<gpu_core::DeviceBuffer>,
+}
+
+impl DeviceMoments {
+    /// The device optimiser runs these with an f32 value and gradient and no master copy; any other precision is an
+    /// error naming the parameter (those formats belong to the streamed host optimiser in `optim`).
+    fn alloc(gpu: &Gpu, name: &str, numel: usize, pr: &precision::ParamPrecision) -> Result<DeviceMoments, String> {
+        if pr.value != precision::ValueDtype::F32 || pr.grad != precision::GradDtype::F32 || pr.master != precision::MasterPolicy::None {
+            return Err(format!("{name}: the device optimiser keeps an f32 value and gradient with no master copy; got {pr:?}"));
+        }
+        let pair = |words: u64| (gpu.storage(words), gpu.storage(words));
+        match pr.state {
+            precision::StateFormat::F32 => {
+                let (m, v) = pair(numel as u64);
+                Ok(DeviceMoments { m, v, scales: None })
+            }
+            precision::StateFormat::Bf16 => {
+                let (m, v) = pair(numel.div_ceil(2) as u64);
+                Ok(DeviceMoments { m, v, scales: None })
+            }
+            precision::StateFormat::Int8Block { block } if block == DEVICE_INT8_BLOCK => {
+                let (m, v) = pair(numel.div_ceil(4) as u64);
+                Ok(DeviceMoments { m, v, scales: Some(gpu.storage(2 * numel.div_ceil(DEVICE_INT8_BLOCK as usize) as u64)) })
+            }
+            other => Err(format!(
+                "{name}: the device optimiser keeps f32 or bf16 moments or int8 blocks of {DEVICE_INT8_BLOCK}; {other:?} moments need the host-offloaded optimizer state"
+            )),
+        }
+    }
+}
+
 impl ParamStore {
     /// All-trainable store (every parameter gets grad + AdamW moments).
     pub fn new(gpu: &Gpu, params: Vec<(String, usize)>, init: &HashMap<String, Vec<f32>>) -> ParamStore {
@@ -227,62 +269,13 @@ impl ParamStore {
                     if pr != precision::ParamPrecision::FP32 {
                         precisions.insert(name.clone(), pr);
                     }
-                    if let precision::StateFormat::Int8Block { block } = pr.state {
-                        assert!(
-                            block == DEVICE_INT8_BLOCK
-                                && pr.value == precision::ValueDtype::F32
-                                && pr.grad == precision::GradDtype::F32
-                                && pr.master == precision::MasterPolicy::None,
-                            "{name}: the device optimiser runs int8 moments only with block {DEVICE_INT8_BLOCK}, f32 value and grad and no master; got {pr:?}"
-                        );
-                        let words = numel.div_ceil(4) as u64;
-                        grad.insert(name.clone(), gpu.storage(*numel as u64));
-                        adam_m.insert(name.clone(), gpu.storage(words));
-                        adam_v.insert(name.clone(), gpu.storage(words));
-                        moment_scales.insert(name.clone(), gpu.storage(2 * numel.div_ceil(DEVICE_INT8_BLOCK as usize) as u64));
-                        trainable.push((name.clone(), *numel));
-                        params.push((name.clone(), *numel));
-                        continue;
-                    }
-                    if pr.state == precision::StateFormat::Bf16 {
-                        assert!(
-                            pr.value == precision::ValueDtype::F32 && pr.grad == precision::GradDtype::F32 && pr.master == precision::MasterPolicy::None,
-                            "{name}: the device optimiser runs bf16 moments with f32 value and grad and no master; got {pr:?}"
-                        );
-                        let words = numel.div_ceil(2) as u64;
-                        grad.insert(name.clone(), gpu.storage(*numel as u64));
-                        adam_m.insert(name.clone(), gpu.storage(words));
-                        adam_v.insert(name.clone(), gpu.storage(words));
-                        trainable.push((name.clone(), *numel));
-                        params.push((name.clone(), *numel));
-                        continue;
-                    }
-                    assert!(
-                        pr.state == precision::StateFormat::F32
-                            && pr.value == precision::ValueDtype::F32
-                            && pr.grad == precision::GradDtype::F32
-                            && pr.master == precision::MasterPolicy::None,
-                        "{name}: the device optimiser supports f32 moments bf16 or blockwise-int8 moments (f32 value/grad, no master); got {pr:?}"
-                    );
-                    // `gpu.storage(numel)` - NOT `storage_init`, and no write
-                    // at all - for the zero-initialized grad/Adam moment
-                    // buffers. Measured precisely on this backend: a buffer
-                    // that is allocated and never written costs exactly its
-                    // own bytes on this non-ReBAR card; ANY upload into it -
-                    // `storage_init` or a plain `storage()` + `write_f32`,
-                    // chunked or not - costs double that, because the resident
-                    // cost tracks cumulative bytes ever WRITTEN, not the
-                    // call shape. wgpu already guarantees a freshly-created
-                    // buffer reads as zero, so the old `let z = vec![0.0;
-                    // numel]; storage_init(name, &z)` was paying that penalty for
-                    // a write whose only content was the zero the buffer
-                    // already had - three such buffers per trainable tensor
-                    // (grad, adam_m, adam_v) made this the dominant real
-                    // VRAM cost of a full (non-LoRA) finetune, invisible
-                    // from the nominal parameter count.
+                    let moments = DeviceMoments::alloc(gpu, name, *numel, &pr).unwrap_or_else(|e| panic!("{e}"));
                     grad.insert(name.clone(), gpu.storage(*numel as u64));
-                    adam_m.insert(name.clone(), gpu.storage(*numel as u64));
-                    adam_v.insert(name.clone(), gpu.storage(*numel as u64));
+                    adam_m.insert(name.clone(), moments.m);
+                    adam_v.insert(name.clone(), moments.v);
+                    if let Some(scales) = moments.scales {
+                        moment_scales.insert(name.clone(), scales);
+                    }
                     trainable.push((name.clone(), *numel));
                 }
                 Role::Offload => {
@@ -307,6 +300,36 @@ impl ParamStore {
         let norms = gpu.storage(n_parts.max(trainable.len() as u64).max(1));
         let clip_coef = gpu.storage(1);
         ParamStore { params, trainable, weight, grad, adam_m, adam_v, norms, clip_coef, offload, frozen: Vec::new(), lr_mult: HashMap::new(), moment_scales, precision: precisions }
+    }
+
+    /// Hold the optimizer state of every trainable parameter in the format `policy` names, before the first optimizer
+    /// step: a tensor whose format changes gets fresh (zero) moment buffers in the new format, the others keep theirs.
+    /// Returns how many tensors changed format. Host-offloaded parameters ([`Role::Offload`]) are not touched: their
+    /// moments live in host memory. A format the device optimiser does not run is an error naming the parameter, and
+    /// nothing is changed. The caller rebuilds whatever recorded the old buffers (`optim::Optim::invalidate`).
+    pub fn apply_state_policy(&mut self, gpu: &Gpu, policy: &precision::PrecisionPolicy) -> Result<usize, String> {
+        let mut changes = Vec::new();
+        for (name, numel) in &self.trainable {
+            let pr = policy.resolve(name, *numel).precision;
+            if pr != self.precision_of(name) {
+                changes.push((name.clone(), pr, DeviceMoments::alloc(gpu, name, *numel, &pr)?));
+            }
+        }
+        let changed = changes.len();
+        for (name, pr, moments) in changes {
+            self.adam_m.insert(name.clone(), moments.m);
+            self.adam_v.insert(name.clone(), moments.v);
+            match moments.scales {
+                Some(scales) => self.moment_scales.insert(name.clone(), scales),
+                None => self.moment_scales.remove(&name),
+            };
+            if pr == precision::ParamPrecision::FP32 {
+                self.precision.remove(&name);
+            } else {
+                self.precision.insert(name, pr);
+            }
+        }
+        Ok(changed)
     }
 
     /// Withdraw every trainable parameter whose name satisfies `pred` from the

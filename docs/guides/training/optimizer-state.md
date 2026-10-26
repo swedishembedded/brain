@@ -193,6 +193,17 @@ The run asks for it with one model-agnostic value (the SDK's
 declares what it supports (`ChatTrainer::TRAIN_PRECISION`) and a request outside
 it is refused by name before anything loads.
 
+The optimizer-state part of that value reaches every model through one generic
+path. A model that keeps a `ParamStore` and the fused device `Optim` exposes them
+(`Model::optimizer_state`), and the fit loop applies the run's precision before
+the first step or resume (`trainprec::apply_train_precision`): each trainable
+tensor gets f32, bf16 or int8-block moments as asked, the update graph is
+recorded again, and a model whose build already holds that format is left as it
+is. A model that exposes no optimizer state, a format the device optimizer does
+not run (log8, another int8 block size), or a moment kernel the model did not
+register (`optim::MOMENT_KERNELS`, which `optim::with_moment_kernels` appends to
+a kernel list) is refused by name, never trained in fp32 instead.
+
 Resume is transactional: the model exposes `Model::off_device_state`, and the
 generic fit loop commits it (`<state>.offdevice/`, one generation per optimizer
 step, keyed by the applied-step count) before it writes the resume file, and

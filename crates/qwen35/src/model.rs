@@ -225,9 +225,7 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         // adapter parameters is seconds of a single thread's time per step.
         v.extend(model::dispatch::LORA_BANK_PIPELINES);
         // Device AdamW over bf16 or blockwise-int8 moments (`optim::Optim` resolves them by name).
-        v.push(("adamw_q8", kernels::ADAMW_Q8));
-        v.push(("adamw_q8_wg", kernels::ADAMW_Q8_WG));
-        v.push(("adamw_bf16", kernels::ADAMW_BF16));
+        v.extend(optim::MOMENT_KERNELS);
         v.push(("gradnorm_part", kernels::GRADNORM_PART));
         v.push(("clip_coef_wg", kernels::CLIP_COEF_WG));
         v.push(("matmul_gemv", kernels::MATMUL_GEMV));
@@ -5782,6 +5780,10 @@ impl model::ModelConfig for Qwen35Config {
 }
 
 impl model::Model for Qwen35 {
+    fn optimizer_state(&mut self) -> Option<model::OptimizerState<'_>> {
+        Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: &self.opt })
+    }
+
     type Config = Qwen35Config;
 
     /// The training build (weights trainable, or a frozen base with trainable

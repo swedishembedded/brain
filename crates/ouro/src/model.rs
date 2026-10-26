@@ -303,7 +303,7 @@ impl Ouro {
         assert!(t <= cfg.block_size, "sequence {t} exceeds positional capacity {}", cfg.block_size);
         assert!(b > 0 && t > 0);
 
-        let gpu = Gpu::new(PIPELINES);
+        let gpu = Gpu::new(&optim::with_moment_kernels(PIPELINES));
         let role = if train { paramstore::Role::Trainable } else { paramstore::Role::Frozen };
         let roles = cfg.param_list().into_iter().map(|(n, c)| (n, c, role)).collect();
         let ps = ParamStore::new_with_roles_src(&gpu, roles, src);
@@ -750,6 +750,10 @@ impl Ouro {
 }
 
 impl model::Model for Ouro {
+    fn optimizer_state(&mut self) -> Option<model::OptimizerState<'_>> {
+        Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: self.opt.as_ref()? })
+    }
+
     type Config = OuroConfig;
 
     fn new(cfg: Self::Config, b: u32, t: u32, init: &std::collections::HashMap<String, Vec<f32>>) -> Self {

@@ -229,7 +229,7 @@ impl Yolo {
         // while still defaulting to the native CPU-JIT when nothing was selected
         // (preserving the `cargo test` / tooling convention that yolo is CPU).
         let gpu = if gpu_core::backend_selected() {
-            Gpu::new(PIPELINES)
+            Gpu::new(&optim::with_moment_kernels(PIPELINES))
         } else {
             Gpu::new_cpu(PIPELINES)
         };
@@ -1118,6 +1118,10 @@ impl ModelConfigParamList for YoloConfig {
 // ---- model::Model seam ----
 
 impl model::Model for Yolo {
+    fn optimizer_state(&mut self) -> Option<model::OptimizerState<'_>> {
+        Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: &self.opt })
+    }
+
     type Config = YoloConfig;
 
     fn new(cfg: YoloConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {

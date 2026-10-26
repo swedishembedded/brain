@@ -246,7 +246,7 @@ impl Trainer {
         // One shared accelerator (wgpu or native CPU, chosen at runtime). All the
         // device-init + dispatch plumbing that used to live here now lives in
         // `gpu_core`, shared with the GPT and PID models.
-        Trainer::new_on(Gpu::new(PIPELINES), cfg, b, t, init)
+        Trainer::new_on(Gpu::new(&optim::with_moment_kernels(PIPELINES)), cfg, b, t, init)
     }
 
     /// Build on an existing device handle - see `Gpt::new_on`.
@@ -622,6 +622,10 @@ impl model::ModelConfig for Config {
 }
 
 impl model::Model for Trainer {
+    fn optimizer_state(&mut self) -> Option<model::OptimizerState<'_>> {
+        Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: &self.opt })
+    }
+
     type Config = Config;
 
     fn new(cfg: Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {

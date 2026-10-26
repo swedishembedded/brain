@@ -219,6 +219,91 @@ pub enum StateSupport {
     Any,
 }
 
+/// A model's parameter store and the device optimizer that updates it ([`crate::Model::optimizer_state`]).
+pub struct OptimizerState<'a> {
+    pub gpu: &'a gpu_core::Gpu,
+    pub store: &'a mut paramstore::ParamStore,
+    pub optim: &'a optim::Optim,
+}
+
+/// Bring `model`'s optimizer state to what `precision` asks, before the first optimizer step: every trainable
+/// parameter of its store gets its moments in the requested format (f32, bf16 or int8 blocks on the device), the
+/// update graph is recorded again, and a model whose build already holds that format is left as it is. A request
+/// the model cannot honour is an error naming the model or the parameter, never a silent fp32 run: a non-default
+/// state for a model with no [`OptimizerState`], a format the device optimizer does not run, a moment kernel the
+/// model did not register ([`optim::MOMENT_KERNELS`]), or resident low-precision weights for a build that keeps no
+/// off-device state.
+pub fn apply_train_precision<M: crate::Model>(model: &mut M, precision: &TrainPrecision, name: &str) -> Result<(), String> {
+    if precision.is_default() {
+        return Ok(());
+    }
+    if precision.resident.is_some() && model.off_device_state().is_none() {
+        return Err(format!("{name}: resident low-precision weights were requested, but this build keeps no off-device training state"));
+    }
+    let uniform_f32 = precision.policy.rules.is_empty() && precision.policy.default == ParamPrecision::FP32;
+    let Some(state) = model.optimizer_state() else {
+        return if uniform_f32 { Ok(()) } else { Err(format!("{name}: this model does not expose its optimizer state, so it trains only with f32 moments")) };
+    };
+    let formats = state.store.trainable.iter().map(|(n, numel)| precision.policy.resolve(n, *numel).precision.state);
+    let missing = optim::missing_moment_kernels(state.gpu, formats);
+    if !missing.is_empty() {
+        return Err(format!("{name}: the requested optimizer state needs the {} kernel(s), which this model does not register", missing.join(", ")));
+    }
+    let changed = state.store.apply_state_policy(state.gpu, &precision.policy).map_err(|e| format!("{name}: {e}"))?;
+    if changed > 0 {
+        state.optim.invalidate();
+    }
+    Ok(())
+}
+
+/// The optimizer-state contract every model with an [`OptimizerState`] honours, for its own test to run: `build`
+/// makes a fresh trainable model (the same initial weights every call) and `step` runs one optimizer step on a fixed
+/// batch (`zero_grads`, the batch, `forward`, `backward`, `adamw_step` at learning rate `lr`).
+///
+/// * bf16 moments and int8 blocks are each applied to every trainable tensor of the store;
+/// * the first update in each format equals the f32 run's within the format's quantization: a first AdamW step
+///   moves every weight by about `lr * sign(g)` whatever holds the moments, so the two may differ by 5% of `lr`;
+/// * a format only the host-offloaded optimizer runs (log8) is refused by parameter name and leaves the store as it
+///   was.
+pub fn check_optimizer_state_formats<M: crate::Model>(name: &str, build: impl Fn() -> M, step: impl Fn(&M), lr: f32) -> Result<(), String> {
+    let snapshot = |m: &M| -> Vec<(String, Vec<f32>)> {
+        let mut names = m.param_names();
+        names.sort();
+        names.into_iter().map(|n| (n.clone(), m.read_weight(&n))).collect()
+    };
+    let first_update = |precision: &TrainPrecision| -> Result<(Vec<(String, Vec<f32>)>, M), String> {
+        let mut m = build();
+        apply_train_precision(&mut m, precision, name)?;
+        let before = snapshot(&m);
+        step(&m);
+        let after = snapshot(&m);
+        Ok((before.into_iter().zip(after).map(|((n, b), (_, a))| (n, a.iter().zip(&b).map(|(x, y)| x - y).collect())).collect(), m))
+    };
+    let (want, _) = first_update(&TrainPrecision::default())?;
+    for (spec, state) in [("state=bf16", StateFormat::Bf16), ("state=int8", StateFormat::Int8Block { block: paramstore::DEVICE_INT8_BLOCK })] {
+        let (got, mut m) = first_update(&TrainPrecision::parse(spec)?)?;
+        let st = m.optimizer_state().ok_or_else(|| format!("{name}: no optimizer state"))?;
+        if let Some((n, _)) = st.store.trainable.iter().find(|(n, _)| st.store.precision_of(n).state != state) {
+            return Err(format!("{name} {spec}: {n} keeps {:?} moments", st.store.precision_of(n).state));
+        }
+        for ((n, w), (_, g)) in want.iter().zip(&got) {
+            if let Some((i, (a, b))) = w.iter().zip(g).enumerate().find(|(_, (a, b))| (*a - *b).abs() > 0.05 * lr) {
+                return Err(format!("{name} {spec}: {n}[{i}] moved by {b}, the f32 run by {a}"));
+            }
+        }
+    }
+    let mut m = build();
+    let refusal = apply_train_precision(&mut m, &TrainPrecision::parse("state=log8")?, name).err().ok_or_else(|| format!("{name}: log8 moments on the device were accepted"))?;
+    let st = m.optimizer_state().ok_or_else(|| format!("{name}: no optimizer state"))?;
+    if !st.store.trainable.iter().any(|(n, _)| refusal.contains(n.as_str())) {
+        return Err(format!("{name}: the refusal names no parameter: {refusal}"));
+    }
+    if let Some((n, _)) = st.store.trainable.iter().find(|(n, _)| st.store.precision_of(n) != ParamPrecision::FP32) {
+        return Err(format!("{name}: the refused request still changed {n}"));
+    }
+    Ok(())
+}
+
 /// What a model family's full fine-tune supports of [`TrainPrecision`], declared once by the trainer
 /// ([`crate::finetune::ChatTrainer::TRAIN_PRECISION`]) so every surface (the SDK, the command line) validates a
 /// request the same way and refuses what the model does not run by naming the model and the key.
