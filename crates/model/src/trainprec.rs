@@ -506,6 +506,9 @@ pub struct TrainPrecisionSupport {
     pub resident: bool,
     /// ... and be streamed through a window of layers (`window=`).
     pub layer_streamed: bool,
+    /// The per-layer tensors of its parameter store may stream in f32 through a device window (`weights=f32`, with
+    /// or without `window=`), through [`crate::Model::set_resident`] ([`crate::streamed`]).
+    pub f32_streamed: bool,
 }
 
 impl TrainPrecisionSupport {
@@ -527,6 +530,13 @@ impl TrainPrecisionSupport {
             return Err(format!("{}: train precision 'state={}' is not supported: its full fine-tune runs {runs}", self.model, state_name(state)));
         }
         let Some(r) = p.resident else { return Ok(()) };
+        if r.weights == ResidentValue::F32 {
+            return if self.f32_streamed {
+                Ok(())
+            } else {
+                Err(format!("{}: train precision 'weights=f32' is not supported: its layers do not stream through a parameter-store window", self.model))
+            };
+        }
         if !self.resident {
             return Err(format!("{}: train precision 'weights={}' is not supported: its full fine-tune keeps fp32 weights (no resident low-precision linears)", self.model, resident_name(r.weights)));
         }
@@ -661,18 +671,26 @@ mod tests {
     /// Spec: a model's declared support decides a request, and a refusal names the model and the key.
     #[test]
     fn declared_support_refuses_what_a_model_does_not_run_by_name() {
-        let fused = TrainPrecisionSupport { model: "tiny", state: StateSupport::DeviceFused, resident: true, layer_streamed: false };
+        let fused = TrainPrecisionSupport { model: "tiny", state: StateSupport::DeviceFused, resident: true, layer_streamed: false, f32_streamed: false };
         assert!(fused.check(&TrainPrecision::default()).is_ok());
         assert!(fused.check(&TrainPrecision::parse("state=int8,weights=bf16").unwrap()).is_ok());
         let e = fused.check(&TrainPrecision::parse("state=log8").unwrap()).unwrap_err();
         assert!(e.contains("tiny") && e.contains("state=log8:64"), "{e}");
         let e = fused.check(&TrainPrecision::parse("weights=nf4,window=2").unwrap()).unwrap_err();
         assert!(e.contains("tiny") && e.contains("window"), "{e}");
-        let fp32 = TrainPrecisionSupport { model: "plain", state: StateSupport::Fp32, resident: false, layer_streamed: false };
+        let fp32 = TrainPrecisionSupport { model: "plain", state: StateSupport::Fp32, resident: false, layer_streamed: false, f32_streamed: false };
         assert!(fp32.check(&TrainPrecision::parse("state=bf16").unwrap()).unwrap_err().contains("plain"));
         assert!(fp32.check(&TrainPrecision::parse("weights=fp8").unwrap()).unwrap_err().contains("weights=fp8:128"));
-        let any = TrainPrecisionSupport { model: "wide", state: StateSupport::Any, resident: false, layer_streamed: false };
+        let any = TrainPrecisionSupport { model: "wide", state: StateSupport::Any, resident: false, layer_streamed: false, f32_streamed: false };
         assert!(any.check(&TrainPrecision::parse("state=log8:32").unwrap()).is_ok());
+        // f32 layers streaming through a store window are their own offer: a model with a narrow resident state of
+        // its own does not take them by that, and a store model takes them with or without a window.
+        let e = fused.check(&TrainPrecision::parse("weights=f32,window=1").unwrap()).unwrap_err();
+        assert!(e.contains("tiny") && e.contains("weights=f32"), "{e}");
+        let streamed = TrainPrecisionSupport { model: "store", state: StateSupport::Any, resident: false, layer_streamed: false, f32_streamed: true };
+        assert!(streamed.check(&TrainPrecision::parse("weights=f32,window=1").unwrap()).is_ok());
+        assert!(streamed.check(&TrainPrecision::parse("weights=f32").unwrap()).is_ok());
+        assert!(streamed.check(&TrainPrecision::parse("weights=bf16").unwrap()).unwrap_err().contains("weights=bf16"));
     }
 
     fn footprint(numel: usize) -> TrainingFootprint {

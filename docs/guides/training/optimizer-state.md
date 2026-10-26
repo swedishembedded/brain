@@ -241,7 +241,10 @@ run each layer. Whatever a model holds of the store's buffers outside its passes
 (qwen35moe's `Ops` weights of the mixer linears) must be pointed at the window's
 slots when it converts. ouro and huginn run each layer in every step of their
 recurrence, so a layer's gradient is complete only after the last; they refuse a
-window by name. The conversion happens after the model is
+window by name. A chat full fine-tune (`finetune::fit_full`) takes `weights=f32`
+through the family's plain build, whose fit loop streams it, when the family
+declares `TrainPrecisionSupport::f32_streamed` (qwen35moe); qwen3 and qwen35
+keep their own narrow resident state and refuse `weights=f32` by name. The conversion happens after the model is
 built, so loading still needs the whole model on the device once; the window
 bounds what training adds and what stays resident.
 

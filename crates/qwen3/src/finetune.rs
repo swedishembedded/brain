@@ -785,7 +785,7 @@ impl model::finetune::ChatTrainer for Qwen3Trainer {
     type Trained = Trained;
     const SCORES_EXPORTED_PAIRS: bool = true;
     const LORA_BASES: model::policy::TrainBases = TRAIN_BASES;
-    const TRAIN_PRECISION: model::TrainPrecisionSupport = model::TrainPrecisionSupport { model: "qwen3", state: model::StateSupport::Any, resident: true, layer_streamed: true };
+    const TRAIN_PRECISION: model::TrainPrecisionSupport = model::TrainPrecisionSupport { model: "qwen3", state: model::StateSupport::Any, resident: true, layer_streamed: true, f32_streamed: false };
 
     fn checkpoint_path(weights: &Path, model_dir: &Path) -> std::path::PathBuf {
         crate::store_checkpoint_path(weights, model_dir)

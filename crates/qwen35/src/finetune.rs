@@ -419,7 +419,7 @@ pub struct Qwen35Trainer;
 impl model::finetune::ChatTrainer for Qwen35Trainer {
     type Trained = Qwen35;
     const LORA_BASES: model::policy::TrainBases = model::policy::TrainBases { model: "qwen35", bases: crate::base_source::LORA_BASES };
-    const TRAIN_PRECISION: model::TrainPrecisionSupport = model::TrainPrecisionSupport { model: "qwen35", state: model::StateSupport::Any, resident: true, layer_streamed: true };
+    const TRAIN_PRECISION: model::TrainPrecisionSupport = model::TrainPrecisionSupport { model: "qwen35", state: model::StateSupport::Any, resident: true, layer_streamed: true, f32_streamed: false };
 
     fn checkpoint_path(weights: &Path, model_dir: &Path) -> std::path::PathBuf {
         qwen3::store_checkpoint_path(weights, model_dir)

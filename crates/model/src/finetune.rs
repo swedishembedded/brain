@@ -90,6 +90,8 @@ pub fn fit_full<T: ChatTrainer>(base: &Path, dir: &Path, opts: &FitOpts, out: &P
     let mut fit = CausalLmFit { dir, opts, out: Some(out), control: Some(control) };
     let resident = opts.precision.resident_config(Some(opts.seed)).map_err(std::io::Error::other)?;
     let (report, _) = match &resident {
+        // f32 layers stream through the plain build: the fit loop hands the request to `Model::set_resident`.
+        Some(resident) if resident.value == crate::resident_ft::ResidentValue::F32 => T::train_full(base, opts, state, &mut fit)?,
         Some(resident) => T::train_full_resident(base, opts, resident, &mut fit)?,
         None => T::train_full(base, opts, state, &mut fit)?,
     };

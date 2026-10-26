@@ -89,7 +89,7 @@ impl model::finetune::ChatTrainer for Qwen35MoeTrainer {
     type Trained = Qwen35;
     /// The experts have no narrow training tier: the base is fp32.
     const LORA_BASES: model::policy::TrainBases = model::policy::TrainBases { model: "qwen35moe", bases: &[gpu_core::select::Dtype::F32] };
-    const TRAIN_PRECISION: model::TrainPrecisionSupport = model::TrainPrecisionSupport { model: "qwen35moe", state: model::StateSupport::Any, resident: false, layer_streamed: false };
+    const TRAIN_PRECISION: model::TrainPrecisionSupport = model::TrainPrecisionSupport { model: "qwen35moe", state: model::StateSupport::Any, resident: false, layer_streamed: false, f32_streamed: true };
 
     fn checkpoint_path(weights: &Path, model_dir: &Path) -> PathBuf {
         qwen3::store_checkpoint_path(weights, model_dir)
@@ -103,9 +103,6 @@ impl model::finetune::ChatTrainer for Qwen35MoeTrainer {
 
     fn train_full(base: &Path, opts: &FitOpts, state: OptimizerState, fit: &mut impl ModelFit) -> std::io::Result<(FitReport, Qwen35)> {
         Self::TRAIN_PRECISION.check(&opts.precision).map_err(|why| std::io::Error::new(std::io::ErrorKind::Unsupported, why))?;
-        if !opts.precision.is_default() {
-            return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "qwen35moe full fine-tuning keeps fp32 parameters and AdamW state with no master copy; a train precision other than the default is not wired for it"));
-        }
         check_before_load(base, None, state)?;
         let m = state.scope(|| Ok::<_, std::io::Error>(Qwen35::load_with_adapter(path_str(base)?, opts.batch_size, opts.block_size, None)))?;
         fit.fit(m)
