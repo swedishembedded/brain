@@ -67,8 +67,7 @@ pub fn finetune_from(
         // accumulated state must survive. Skipping the fresh-init overlay
         // below is exactly what lets `lora_b` keep the delta it learned in
         // earlier cycles instead of being reset back to its zero-delta init.
-        let c = checkpoint::load(out);
-        let cfg = QwenConfig::from_json_checked(&c.header["config"]).map_err(std::io::Error::other)?;
+        let (cfg, src) = crate::open_checkpoint(out).map_err(std::io::Error::other)?;
         if let Mode::Lora { rank, alpha, targets, tuning } = mode {
             let lora = cfg
                 .lora
@@ -79,7 +78,7 @@ pub fn finetune_from(
             assert_eq!(&lora.targets, targets, "resume checkpoint {out} adapts {:?}, not the requested {targets:?}", lora.targets);
             assert_eq!(lora.tuning(), *tuning, "resume checkpoint {out} was trained with {:?}, not the requested {tuning:?}", lora.tuning());
         }
-        (cfg, Box::new(c.by_role("")))
+        (cfg, src)
     } else if let Mode::Lora { rank, alpha, targets, tuning } = mode {
         let targets: Vec<&str> = targets.iter().map(String::as_str).collect();
         let (cfg, init) = lora_start_tuned(base, *rank, *alpha, *tuning, opts.seed, &LoraStart::FreshOn(&targets))?;

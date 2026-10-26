@@ -11,7 +11,6 @@
 //! switch: it loads architecture and weights from the checkpoint being
 //! continued, not the base, so a later cycle continues the SAME adapter.
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use gpu_core::select::Dtype;
@@ -22,7 +21,7 @@ use model::adapter::device::AdapterTuning;
 use model::FitOpts;
 
 use crate::base_source::{is_frozen_only, lora_base_tuned, open_base, BaseCheckpoint};
-use crate::config::{lora_targets, LoraCfg, Qwen35Config};
+use crate::config::Qwen35Config;
 use crate::model::{pipelines, Qwen35, TrainOpts};
 
 /// Which fine-tuning scheme.
@@ -51,14 +50,14 @@ pub fn finetune(base: &str, dir: &Path, opts: &FitOpts, mode: &Mode, out: &str) 
 /// `resume` with `out` missing (the very first cycle) falls back to the
 /// fresh-start path unchanged.
 pub fn finetune_from(base: &str, dir: &Path, opts: &FitOpts, mode: &Mode, out: &str, resume: bool) -> std::io::Result<(f32, f32)> {
-    let (cfg, init) = if resume && Path::new(out).exists() {
+    // Every start streams its tensors from the file through the bounded reader: the host never holds the model.
+    let (cfg, init): (Qwen35Config, Box<dyn checkpoint::TensorSource>) = if resume && Path::new(out).exists() {
         // Resume: architecture + weights come from the checkpoint being
         // continued, not `base` - the adapter's (or full model's)
         // accumulated state must survive. Skipping the fresh-init overlay
         // below is exactly what lets `lora_b` keep the delta it learned in
         // earlier cycles instead of being reset back to its zero-delta init.
-        let c = checkpoint::load(out);
-        let cfg = Qwen35Config::from_json(&c.header["config"]);
+        let BaseCheckpoint { cfg, src } = open_base(Path::new(out)).map_err(std::io::Error::other)?;
         if let Mode::Lora { rank, alpha, tuning } = mode {
             let lora = cfg
                 .lora
@@ -68,28 +67,22 @@ pub fn finetune_from(base: &str, dir: &Path, opts: &FitOpts, mode: &Mode, out: &
             assert_eq!(lora.alpha, *alpha, "resume checkpoint {out} LoRA alpha {} does not match requested alpha {alpha}", lora.alpha);
             assert_eq!(lora.tuning(), *tuning, "resume checkpoint {out} was trained with {:?}, not the requested {tuning:?}", lora.tuning());
         }
-        (cfg, c.by_role(""))
+        (cfg, src)
     } else {
-        // Fresh start: base architecture + weights from the checkpoint.
-        let c = checkpoint::load(base);
-        let mut cfg = Qwen35Config::from_json(&c.header["config"]);
-        let base_w = c.by_role("");
-        if let Mode::Lora { rank, alpha, tuning } = mode {
-            cfg.lora = Some(LoraCfg::new(*rank, *alpha, lora_targets()).with_tuning(*tuning));
+        // Fresh start: the base's architecture and weights; a LoRA start overlays zero-delta adapters on them.
+        let opened = open_base(Path::new(base)).map_err(std::io::Error::other)?;
+        match mode {
+            Mode::FullOffload => (opened.cfg, opened.src),
+            Mode::Lora { rank, alpha, tuning } => {
+                let (cfg, overlay) = crate::base_source::lora_overlay_tuned(opened, *rank, *alpha, *tuning, opts.seed, None).map_err(std::io::Error::other)?;
+                (cfg, Box::new(overlay))
+            }
         }
-        // Fresh init for the (possibly LoRA-extended) param set, then overwrite
-        // the base params with the checkpoint's -- adapters stay at their
-        // zero-delta init.
-        let mut init: HashMap<String, Vec<f32>> = crate::init::init_weights(&cfg, opts.seed);
-        for (k, v) in base_w {
-            init.insert(k, v);
-        }
-        (cfg, init)
     };
 
     let m = match mode {
-        Mode::FullOffload => build_full(cfg, opts, &init)?,
-        Mode::Lora { .. } => Qwen35::new_train_on(Gpu::new(pipelines()), cfg, opts.batch_size, opts.block_size, &init),
+        Mode::FullOffload => build_full(cfg, opts, &*init)?,
+        Mode::Lora { .. } => Qwen35::new_train_opts_on(Gpu::new(pipelines()), cfg, opts.batch_size, opts.block_size, &*init, &TrainOpts::default()),
     };
     let (train, val, bcfg, _vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
     let obj = model::causal_lm::<Qwen35>(train, val, bcfg, itos);

@@ -54,12 +54,11 @@ crates/nemotronasr/src/import.rs	1	offline importer: one whole tensor per call i
 crates/npu/src/bin/qwen_kv_bench.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/qwen3/src/caps.rs	4	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/qwen3/src/export.rs	3	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
-crates/qwen3/src/finetune.rs	3	delegating TensorSource wrapper: forwards the call to the wrapped source (knowledge 337 section 1)
+crates/qwen3/src/finetune.rs	1	delegating TensorSource wrapper: forwards the call to the wrapped source (knowledge 337 section 1)
 crates/qwen3/src/gguf_import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
 crates/qwen35/src/base_source.rs	1	AdapterOverlay forwards with_tensor to its owner and materializes nothing itself; delete when Phase 1 gives TensorSource a descriptor-aware packed read (keep forwarding with_tensor_chunks and raw_blocks)
 crates/qwen35/src/bin/import_profile.rs	2	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
 crates/qwen35/src/caps.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
-crates/qwen35/src/finetune.rs	4	delegating TensorSource wrapper: forwards the call to the wrapped source (knowledge 337 section 1)
 crates/qwen35/src/import.rs	3	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
 crates/qwen35moe/src/caps.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/qwen35moe/src/model.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
