@@ -152,11 +152,13 @@ impl StreamedStore {
         failed.map_or(Ok(()), Err)
     }
 
-    /// One optimizer step of the whole model: `host`'s backward is run layer by layer under the step's clip, every
-    /// streamed tensor updated as its layer completes and the rest by `host`'s own optimizer
-    /// ([`resident_ft::adamw_step`]). Returns the global gradient norm the clip measured.
-    pub fn adamw_step(&self, gpu: &Gpu, host: &dyn ResidentBackward, args: &StepArgs) -> io::Result<Option<f32>> {
-        resident_ft::adamw_step(host, &self.ft, &device(gpu)?, args)
+    /// One optimizer step of the whole model ([`resident_ft::adamw_step`]): with a window, the backward `tape` runs
+    /// here layer by layer under the step's clip (the model's `backward` only arms it), every streamed tensor updated
+    /// as its layer completes; without one, the backward already ran. The rest of `ps` is updated by the model's own
+    /// device optimizer `optim`, by the same multiplier. Returns the global gradient norm the clip measured.
+    pub fn adamw_step(&self, gpu: &Gpu, ps: &ParamStore, optim: &optim::Optim, tape: &LayerTape, args: &StepArgs) -> io::Result<Option<f32>> {
+        let host = StoreBackward { gpu, ps, optim, tape, stream: self };
+        resident_ft::adamw_step(&host, &self.ft, &device(gpu)?, args)
     }
 
     /// The current value of streamed tensor `name`.
@@ -193,6 +195,41 @@ impl StreamedStore {
 
     fn slot(&self, name: &str) -> io::Result<usize> {
         self.index.get(name).copied().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{name} is not a streamed tensor")))
+    }
+}
+
+/// What the shared resident update drives of a streamed store model: the store's own parameters under the model's
+/// device optimizer, and the model's backward tape one layer segment at a time.
+struct StoreBackward<'a> {
+    gpu: &'a Gpu,
+    ps: &'a ParamStore,
+    optim: &'a optim::Optim,
+    tape: &'a LayerTape,
+    stream: &'a StreamedStore,
+}
+
+impl ResidentBackward for StoreBackward<'_> {
+    fn flush_backward(&self) {
+        self.gpu.flush();
+    }
+
+    fn zero_remainder_grads(&self) {
+        self.ps.zero_grads(self.gpu);
+    }
+
+    fn remainder_grad_sum_sq(&self, norm: &crate::gradnorm::DeviceGradNorm) -> f64 {
+        let items: Vec<crate::gradnorm::NormItem<'_>> =
+            self.ps.opt_params().iter().map(|(name, numel)| crate::gradnorm::NormItem { buf: self.ps.g(name), numel: *numel, dtype: crate::ops::GradDtype::F32 }).collect();
+        norm.sum_sq(self.gpu, &items)
+    }
+
+    fn backward_pass(&self, on: &mut dyn FnMut(LayerEvent) -> io::Result<()>) -> io::Result<()> {
+        self.stream.backward_events(self.gpu, self.tape, on)
+    }
+
+    fn update_remainder(&self, args: &StepArgs, grad_multiplier: f32) {
+        // The clip is already in the multiplier: the device optimizer must not clip again.
+        self.optim.step(self.gpu, self.ps, args.step, args.lr, args.wd, args.adam, None, grad_multiplier);
     }
 }
 

@@ -1052,7 +1052,7 @@ impl Gpt {
                     assert!(self.backward_pending.replace(false), "gpt2 layer-streamed full fine-tune: adamw_step without a backward");
                 }
                 let args = model::resident_ft::StepArgs { step: t, lr, wd, adam, clip, extra_scale };
-                stream.adamw_step(&self.gpu, self, &args).unwrap_or_else(|e| panic!("gpt2 layer-streamed update: {e}"));
+                stream.adamw_step(&self.gpu, &self.ps, &self.opt, &self.bwd_steps, &args).unwrap_or_else(|e| panic!("gpt2 layer-streamed update: {e}"));
             }
             None => self.opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale),
         }
@@ -1472,34 +1472,6 @@ impl model::Model for Gpt {
     }
     fn config_json(&self) -> Value {
         self.cfg.to_json()
-    }
-}
-
-/// The part of a layer-streamed gpt2 the shared update drives (`model::resident_ft::adamw_step`): the store's own
-/// parameters (embeddings, head, final norm) under the device optimizer, and the backward one layer segment at a time.
-impl model::resident_ft::ResidentBackward for Gpt {
-    fn flush_backward(&self) {
-        self.gpu.flush();
-    }
-
-    fn zero_remainder_grads(&self) {
-        self.ps.zero_grads(&self.gpu);
-    }
-
-    fn remainder_grad_sum_sq(&self, norm: &model::gradnorm::DeviceGradNorm) -> f64 {
-        let items: Vec<model::gradnorm::NormItem<'_>> =
-            self.ps.opt_params().iter().map(|(name, numel)| model::gradnorm::NormItem { buf: self.ps.g(name), numel: *numel, dtype: model::ops::GradDtype::F32 }).collect();
-        norm.sum_sq(&self.gpu, &items)
-    }
-
-    fn backward_pass(&self, on: &mut dyn FnMut(model::resident_ft::LayerEvent) -> std::io::Result<()>) -> std::io::Result<()> {
-        let stream = self.streamed.as_ref().expect("a backward pass of a layer-streamed build");
-        stream.backward_events(&self.gpu, &self.bwd_steps, on)
-    }
-
-    fn update_remainder(&self, args: &model::resident_ft::StepArgs, grad_multiplier: f32) {
-        // The clip is already in the multiplier: the device optimizer must not clip again.
-        self.opt.step(&self.gpu, &self.ps, args.step, args.lr, args.wd, args.adam, None, grad_multiplier);
     }
 }
 
