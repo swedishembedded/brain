@@ -34,9 +34,11 @@ pub fn print_score(checkpoint: &str, score: &ByteScore, max_bytes: usize, second
 }
 
 /// The tokenizer of a Qwen checkpoint: `--tokenizer` (a `tokenizer.json` or
-/// its directory), else the checkpoint's own directory.
+/// its directory), else the checkpoint's own directory (the checkpoint
+/// itself when it is a Hugging Face directory).
 pub(crate) fn tokenizer(a: &mut Args, weights: &str) -> (QwenBpe, u32) {
-    let path = a.take_str("--tokenizer").unwrap_or_else(|| Path::new(weights).parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default());
+    let own = if Path::new(weights).is_dir() { Some(Path::new(weights)) } else { Path::new(weights).parent() };
+    let path = a.take_str("--tokenizer").unwrap_or_else(|| own.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default());
     let tok = if Path::new(&path).is_dir() { QwenBpe::from_dir(&path) } else { QwenBpe::from_file(&path) };
     let tok = tok.unwrap_or_else(|e| die(&format!("tokenizer {path}: {e}")));
     let eot = tok.special_id("<|endoftext|>").unwrap_or_else(|| die(&format!("tokenizer {path} has no <|endoftext|>")));
