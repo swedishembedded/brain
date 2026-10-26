@@ -233,7 +233,7 @@ fn check_config(cfg: VqganConfig, seed: u64, eps: f32) -> Report {
     let tensors = init_weights(&cfg, seed);
     let gpu = gpu_core::testgpu::dev(vqgan::TRAIN_PIPELINES);
     let (h, w) = (cfg.img_size, cfg.img_size);
-    let m = VqganTrainer::new(cfg.clone(), &tensors, h, w, gpu);
+    let m = VqganTrainer::new(cfg.clone(), &tensors, h, w, gpu, vae::blocks::Activations::Keep);
 
     // A fixed batch in the [-1,1] range VQGAN images live in, and a target that
     // is NOT the input (a perfect-reconstruction target would sit on the L1

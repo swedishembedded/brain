@@ -541,7 +541,7 @@ fn main() {
     let tensors = init_weights(&cfg, 7);
     eprintln!("vqgan_bench: {size}x{size}, latent {}x{}, {reps} reps", size / scale, size / scale);
     let t0 = Instant::now();
-    let tr = VqganTrainer::new(cfg, &tensors, size, size, gpu.share());
+    let tr = VqganTrainer::new(cfg, &tensors, size, size, gpu.share(), vae::blocks::Activations::Keep);
     eprintln!("built in {:.1}s\n", t0.elapsed().as_secs_f32());
 
     let img: Vec<f32> = (0..(3 * size * size) as usize).map(|i| (i % 251) as f32 / 251.0).collect();

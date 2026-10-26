@@ -121,7 +121,7 @@
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use vae::blocks::grad::{BwdIds, Grads, Reverse, Trace};
-use vae::blocks::{BlockNames, Builder, Tensors};
+use vae::blocks::{Activations, BlockNames, Builder, Tensors};
 
 use crate::config::{BetaTerm, VqganConfig};
 use crate::model::{l2norm_step, record_assign, record_lookup, run_blocks, L2_EPS};
@@ -230,8 +230,9 @@ const CODEBOOK: &str = "quantize.embedding.weight";
 
 impl VqganTrainer {
     /// Build the training graphs for a `[in_channels, h, w]` input on `gpu`
-    /// (which MUST have been created with [`TRAIN_KERNELS`]).
-    pub fn new(cfg: VqganConfig, tensors: &Tensors, h: u32, w: u32, gpu: Gpu) -> VqganTrainer {
+    /// (which MUST have been created with [`TRAIN_KERNELS`]), the encoder's and
+    /// generator's block internals kept or recomputed (`activations`).
+    pub fn new(cfg: VqganConfig, tensors: &Tensors, h: u32, w: u32, gpu: Gpu, activations: Activations) -> VqganTrainer {
         let scale = cfg.downscale();
         assert!(
             h.is_multiple_of(scale) && w.is_multiple_of(scale),
@@ -272,6 +273,7 @@ impl VqganTrainer {
         // ---- encoder (train mode: SSA, direct lowerings, taped) ------------
         let mut be = Builder::new(&gpu, tensors, cfg.norm_eps, cfg.norm_groups, BlockNames::vqgan(), false);
         be.set_train(true);
+        be.set_activations(activations);
         let z = run_blocks(&mut be, "encoder", &cfg.encoder_blocks(), 0, h, w, &img_in).0;
         let z_flat = be.nchw_to_rows(emb, t, &z);
         let enc = be.trace();
@@ -330,6 +332,7 @@ impl VqganTrainer {
         // ---- generator -----------------------------------------------------
         let mut bg = Builder::new(&gpu, tensors, cfg.norm_eps, cfg.norm_groups, BlockNames::vqgan(), false);
         bg.set_train(true);
+        bg.set_activations(activations);
         let z_q = bg.rows_to_nchw(emb, t, &zq_st);
         let (out, (oh, ow)) =
             run_blocks(&mut bg, "generator", &cfg.generator_blocks(), 0, lh, lw, &z_q);
@@ -762,7 +765,7 @@ mod tests {
         let cfg = tiny();
         let tensors = fixture(&cfg);
         let gpu = gpu_core::testgpu::dev(TRAIN_PIPELINES);
-        let m = VqganTrainer::new(cfg.clone(), &tensors, cfg.img_size, cfg.img_size, gpu);
+        let m = VqganTrainer::new(cfg.clone(), &tensors, cfg.img_size, cfg.img_size, gpu, Activations::Keep);
         let n_in = (cfg.in_channels * cfg.img_size * cfg.img_size) as usize;
         let n_out = (cfg.out_channels * cfg.img_size * cfg.img_size) as usize;
         m.set_batch(&fill(n_in, 1, 1.0), &fill(n_out, 2, 1.0));
@@ -813,7 +816,7 @@ mod tests {
         let inf = crate::Vqgan::new(cfg.clone(), &tensors, s, s, gpu_core::testgpu::dev(&crate::KERNELS), false);
         let want = inf.reconstruct(&image);
 
-        let m = VqganTrainer::new(cfg.clone(), &tensors, s, s, gpu_core::testgpu::dev(TRAIN_PIPELINES));
+        let m = VqganTrainer::new(cfg.clone(), &tensors, s, s, gpu_core::testgpu::dev(TRAIN_PIPELINES), Activations::Keep);
         m.set_batch(&image, &fill(n_out, 2, 1.0));
         assert_eq!(m.codes(), want.indices, "training and inference graphs assign different codes");
         m.loss();
@@ -834,7 +837,7 @@ mod tests {
         let codebook_grad = |beta_on| {
             let cfg = VqganConfig { beta_on, ..tiny_llamagen() };
             let tensors = fixture(&cfg);
-            let m = VqganTrainer::new(cfg.clone(), &tensors, s, s, gpu_core::testgpu::dev(TRAIN_PIPELINES));
+            let m = VqganTrainer::new(cfg.clone(), &tensors, s, s, gpu_core::testgpu::dev(TRAIN_PIPELINES), Activations::Keep);
             let n_in = (cfg.in_channels * s * s) as usize;
             let n_out = (cfg.out_channels * s * s) as usize;
             m.set_batch(&fill(n_in, 1, 1.0), &fill(n_out, 2, 1.0));
