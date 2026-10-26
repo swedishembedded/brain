@@ -1583,7 +1583,7 @@ pub fn chunked_bidir_fwd(
             r.check_span(len);
             // The hoist covers the WHOLE span; the chunk loop only folds the
             // rows it owns, addressed by `q0`.
-            r.qr_steps(g, heads, head_dim, qkv, stride, row0 * stride + q_off, steps);
+            r.qr_steps(g, heads, head_dim, qkv, stride, row0 * stride + q_off, (r.rel_h, r.rel_w), (0, 0), 1, steps);
         }
         let kv_row_off = row0 as u64 * stride as u64;
         if let Some(km) = km {
@@ -2425,6 +2425,37 @@ pub fn flash_cross_step(
     )
 }
 
+/// The fused relative-position cross-attention's dispatch: `bsz` spans of `nq = nk` rows of a window-partitioned
+/// qkv slab attend inside themselves with SAM's decomposed bias added to each scaled score
+/// (`flash_attn_cross_relpos.wgsl`). `rel_h`/`rel_w` are the hoisted `q . R` tables of every span at once
+/// (`[bsz, heads, nq, kh]` and `[bsz, heads, nq, kw]`, see `RelPos::qr_steps`'s `rel_off`), and the keys of a span
+/// are a `kh x kw` grid in row-major order. Gate on [`flash_cross_supported`], like [`flash_cross_step`].
+#[allow(clippy::too_many_arguments)]
+pub fn flash_cross_relpos_step(
+    g: &Gpu,
+    kind: usize,
+    bsz: u32,
+    heads: u32,
+    head_dim: u32,
+    n: u32,
+    grid: (u32, u32),
+    lay: FlashCrossLayout,
+    qkv: &DeviceBuffer,
+    rel_h: &DeviceBuffer,
+    rel_w: &DeviceBuffer,
+    ctx: &DeviceBuffer,
+) -> Step {
+    assert!(head_dim <= 128, "flash_attn_cross_relpos: head_dim {head_dim} > 128");
+    assert_eq!(n, grid.0 * grid.1, "a span of {n} rows is not a {}x{} key grid", grid.0, grid.1);
+    let nwg = bsz * heads * n.div_ceil(FLASH_CROSS_REG2_BR);
+    g.dispatch(
+        kind,
+        &[qkv, qkv, qkv, rel_h, rel_w, ctx],
+        &[bsz, heads, n, n, head_dim, lay.q_stride, lay.q_off, lay.k_stride, lay.k_off, lay.v_stride, lay.v_off, lay.d_out, grid.0, grid.1],
+        gpu_core::Dispatch::Workgroups(nwg),
+    )
+}
+
 /// Round up to a 64-word (256B) boundary - `step_sliced`'s storage-buffer
 /// `BufferBinding` offsets must satisfy `min_storage_buffer_offset_alignment`
 /// (256B on the near-universal case), so every per-head/per-segment stride
@@ -2722,7 +2753,7 @@ pub fn chunked_bidir_bwd(
     for (si, &(row0, len)) in spans.iter().enumerate() {
         if let Some(r) = rel {
             r.check_span(len);
-            r.qr_steps(g, heads, head_dim, qkv, stride, row0 * stride + q_off, steps);
+            r.qr_steps(g, heads, head_dim, qkv, stride, row0 * stride + q_off, (r.rel_h, r.rel_w), (0, 0), 1, steps);
         }
         let kv_row_off = row0 as u64 * stride as u64;
         if let Some(km) = km {

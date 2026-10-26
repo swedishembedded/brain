@@ -1026,6 +1026,15 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
                 4 * (2 * b * te * h * hd + 2 * b * td * h * hd),
             )
         }
+        // The same kernel with SAM's decomposed bias read per score: two more adds per pair, and the two hoisted
+        // tables (`[b, h, td, kh]` and `[b, h, td, kw]`, params slots 12 and 13) read once.
+        "flash_attn_cross_relpos" => {
+            let (b, h, td, te, hd, kh, kw) = (p(0)?, p(1)?, p(2)?, p(3)?, p(4)?, p(12)?, p(13)?);
+            f(
+                b * h * td * te * (2 * hd + 3) + b * h * td * (6 * te + 1) + 2 * b * h * hd * td * te,
+                4 * (2 * b * te * h * hd + 2 * b * td * h * hd + b * h * td * (kh + kw)),
+            )
+        }
 
         // ---- attention, cross (t_dec × t_enc); params [b, h, td, te, hd, ...].
         // `attn_scores_cross_kt` (params [bsz,n_heads,t_dec,t_enc,head_dim,

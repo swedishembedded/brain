@@ -2001,7 +2001,11 @@ impl RelPos<'_> {
     /// The two `attn_relpos_qr` dispatches for one span: `rel_h` (axis 0) and
     /// `rel_w` (axis 1). `q_off` is the ABSOLUTE float offset of this span's q
     /// region (`row0*stride + region offset`) - the buffer binds whole, so a
-    /// ragged row offset never has to meet the 256 B binding alignment.
+    /// ragged row offset never has to meet the 256 B binding alignment. The tables
+    /// are written into `out` from the ROW `rel_off` per axis (a row is `k_ext` floats): the
+    /// span-local scratch the chunk loop reads is `(self.rel_h, self.rel_w)` at `(0, 0)` with one
+    /// span; `spans` consecutive spans (their q regions `qh*qw` rows apart from `q_off`) are hoisted
+    /// by one dispatch into tables that keep every span at once, span `s` at row `s * heads * qh*qw`.
     pub fn qr_steps(
         &self,
         g: &Gpu,
@@ -2010,13 +2014,16 @@ impl RelPos<'_> {
         q: &DeviceBuffer,
         stride: u32,
         q_off: u32,
+        out: (&DeviceBuffer, &DeviceBuffer),
+        rel_off: (u32, u32),
+        spans: u32,
         steps: &mut Vec<Step>,
     ) {
-        for (axis, r_t, k_ext, rel) in
-            [(0u32, self.rh_t, self.kh, self.rel_h), (1, self.rw_t, self.kw, self.rel_w)]
+        for (axis, r_t, k_ext, rel, off) in
+            [(0u32, self.rh_t, self.kh, out.0, rel_off.0), (1, self.rw_t, self.kw, out.1, rel_off.1)]
         {
-            let p = [heads, self.qh, self.qw, k_ext, head_dim, stride, q_off, axis];
-            steps.push(g.step(self.ids.qr, &[q, r_t, rel], &p, self.qr_threads(heads, axis, k_ext)));
+            let p = [heads, self.qh, self.qw, k_ext, head_dim, stride, q_off, axis, off, spans];
+            steps.push(g.step(self.ids.qr, &[q, r_t, rel], &p, self.qr_threads(heads * spans, axis, k_ext)));
         }
     }
 

@@ -799,3 +799,29 @@ attention (scores, rel-pos bias, softmax, apply: unfused WGSL) is 1.1 s and the 
 CLIP at the tile's 101 tokens 0.66 s because its small-M GEMM picks the plain `matmul` kernel, which the native
 upgrade table does not cover, where the 257-token global CLIP gets `matmul_f32_reg`. Open: fused rel-pos flash
 attention for SAM, `matmul` -> native GEMM for small M, bf16 tensor cores for the linears.
+
+## 2026-10-26 encoder: fused relative-position attention, batched q.R hoist, native plain GEMM
+
+The profile above named three costs; each is now removed, measured per view with `encode_bench` (GH200, CUDA, fp32 kernels, median
+of 5 after a warm-up, a peer's jobs on the other card):
+
+| view | before | after |
+|---|---|---|
+| global 1024 px (SAM + CLIP + projector) | 863 ms | 137 ms |
+| tile 640 px | 601 ms | 79 ms |
+
+- `flash_attn_cross_relpos` (`kernels/wgsl`): `flash_attn_cross_reg2` with SAM's decomposed bias read per score from the hoisted
+  `q.R` tables, the windows of a block as its batch axis, so a block's attention is one dispatch in place of per-window, per-chunk
+  scores / rel-pos add / softmax / apply. An inference build uses it when the device runs 256-thread workgroups with 48 KiB of
+  shared memory (`block::flash_cross_supported`); the training build keeps the materialized chain it differentiates through.
+  `sam1/tests/flash_relpos.rs` holds the inference build to the training build on the same weights and image: 2.9e-6 absolute
+  against an output scale of 4.2, at the tiny config (grid 13x7, window 4x3) and at a resampled grid. SAM's device time at
+  1024 px: 1.57 s -> 0.28 s before the hoist batching below.
+- `attn_relpos_qr` hoists the tables of every span in one dispatch per axis (`spans`, `rel_off` params), where it took 408
+  dispatches per forward and 117 ms.
+- The plain one-thread-per-output `matmul` is a native-upgrade row to `matmul_f32_reg` (bit-identical, gated in
+  `gpu-core/tests/f32_reg_native.rs`, including a CLIP-L tile's 101-row shapes): `model::block::pick_gemm` gives it to every
+  small output, and it was ~100x slower than the register-tiled kernel. CLIP at the tile's 101 tokens: 660 ms -> under 40 ms.
+
+Open: bf16 tensor-core linears for SAM, CLIP and the DeepSeek-OCR-2 resampler through `model::ops` (the linears are now ~16% of
+SAM's device time; the rest is the elementwise glue: bias add, residual add, layer norm, window gather).

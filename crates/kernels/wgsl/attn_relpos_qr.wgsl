@@ -47,7 +47,9 @@
 //          [panel_ext*k_ext, head_dim] output of the interpolation gather; the
 //          backward (`attn_relpos_dr`) writes `r`'s layout directly, so the
 //          transpose is forward-only and needs no adjoint.
-//   rel  : [heads, qh_ext*qw_ext, k_ext], SPAN-local rows.
+//   rel  : [heads, qh_ext*qw_ext, k_ext], SPAN-local rows, starting at ROW `rel_off` (a caller that
+//          keeps every span's table at once - the fused rel-pos attention - writes span `s` at row
+//          `s * heads * qh_ext*qw_ext`).
 //
 // STRUCTURE. One workgroup owns (head, panel, an 8-row micro-tile of that
 // panel's rows, a 64-wide tile of k). Invocation `t` owns k = kt*64 + t and
@@ -58,7 +60,7 @@
 // the 8 `q` reads are workgroup-uniform broadcasts. So `r_t` is touched once
 // per 8 rows and `q` once per k-tile, instead of once per output.
 //
-// Dispatch: heads * panel_ext * ceil(group_len/8) * ceil(k_ext/64) workgroups
+// Dispatch: spans * heads * panel_ext * ceil(group_len/8) * ceil(k_ext/64) workgroups
 // (thread count = that * 64).
 
 struct Params {
@@ -70,6 +72,8 @@ struct Params {
     q_stride: u32,     // fused qkv row stride (3*C for a ViT block)
     q_off: u32,        // float offset of this span's q region in `q`
     axis: u32,         // 0 = height, 1 = width
+    rel_off: u32,      // row offset of the first span's table in `rel` (0 for a span-local table)
+    spans: u32,        // spans hoisted by this dispatch: span `s` follows span `s - 1` by `qh_ext*qw_ext` q rows
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -101,8 +105,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let rt = w1 % rtiles;
     let w2 = w1 / rtiles;
     let pnl = w2 % panel_ext;
-    let h = w2 / panel_ext;
-    if (h >= p.heads) { return; }
+    let hs = w2 / panel_ext;                   // (span, head), head fastest
+    if (hs >= p.heads * p.spans) { return; }
+    let h = hs % p.heads;
+    let sp = hs / p.heads;
 
     let k = kt * 64u + t;
     if (k >= p.k_ext) { return; }
@@ -115,14 +121,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let rs = select(p.qw_ext, 1u, p.axis == 0u);
     // Out-of-range members are CLAMPED (they compute a duplicate row) rather
     // than branched, and their stores are guarded below.
-    let b0 = p.q_off + (rb + min(g0 + 0u, gl1) * rs) * p.q_stride + h * hd;
-    let b1 = p.q_off + (rb + min(g0 + 1u, gl1) * rs) * p.q_stride + h * hd;
-    let b2 = p.q_off + (rb + min(g0 + 2u, gl1) * rs) * p.q_stride + h * hd;
-    let b3 = p.q_off + (rb + min(g0 + 3u, gl1) * rs) * p.q_stride + h * hd;
-    let b4 = p.q_off + (rb + min(g0 + 4u, gl1) * rs) * p.q_stride + h * hd;
-    let b5 = p.q_off + (rb + min(g0 + 5u, gl1) * rs) * p.q_stride + h * hd;
-    let b6 = p.q_off + (rb + min(g0 + 6u, gl1) * rs) * p.q_stride + h * hd;
-    let b7 = p.q_off + (rb + min(g0 + 7u, gl1) * rs) * p.q_stride + h * hd;
+    let qbase = p.q_off + sp * p.qh_ext * p.qw_ext * p.q_stride;
+    let b0 = qbase + (rb + min(g0 + 0u, gl1) * rs) * p.q_stride + h * hd;
+    let b1 = qbase + (rb + min(g0 + 1u, gl1) * rs) * p.q_stride + h * hd;
+    let b2 = qbase + (rb + min(g0 + 2u, gl1) * rs) * p.q_stride + h * hd;
+    let b3 = qbase + (rb + min(g0 + 3u, gl1) * rs) * p.q_stride + h * hd;
+    let b4 = qbase + (rb + min(g0 + 4u, gl1) * rs) * p.q_stride + h * hd;
+    let b5 = qbase + (rb + min(g0 + 5u, gl1) * rs) * p.q_stride + h * hd;
+    let b6 = qbase + (rb + min(g0 + 6u, gl1) * rs) * p.q_stride + h * hd;
+    let b7 = qbase + (rb + min(g0 + 7u, gl1) * rs) * p.q_stride + h * hd;
 
     var a0 = 0.0; var a1 = 0.0; var a2 = 0.0; var a3 = 0.0;
     var a4 = 0.0; var a5 = 0.0; var a6 = 0.0; var a7 = 0.0;
@@ -139,7 +146,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         a7 = a7 + q[b7 + c] * rv;
     }
 
-    let obase = h * p.qh_ext * p.qw_ext;
+    let obase = p.rel_off + (sp * p.heads + h) * p.qh_ext * p.qw_ext;
     if (g0 + 0u < group_len) { rel[(obase + rb + (g0 + 0u) * rs) * p.k_ext + k] = a0; }
     if (g0 + 1u < group_len) { rel[(obase + rb + (g0 + 1u) * rs) * p.k_ext + k] = a1; }
     if (g0 + 2u < group_len) { rel[(obase + rb + (g0 + 2u) * rs) * p.k_ext + k] = a2; }

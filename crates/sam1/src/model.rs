@@ -136,6 +136,8 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("attn_relpos_drw", kernels::ATTN_RELPOS_DRW),
     ("attn_relpos_dq", kernels::ATTN_RELPOS_DQ),
     ("attn_relpos_dr", kernels::ATTN_RELPOS_DR),
+    // ---- fused attention with that bias, for an inference build on a device that runs it ----
+    ("flash_attn_cross_relpos", kernels::FLASH_ATTN_CROSS_RELPOS),
     // ---- coalesced cross-attention scores ----
     // `attn_scores_cross` reads the fused KV slab with the KEY index as the
     // fastest thread index, so every lane of a warp lands on its own cache
@@ -178,6 +180,9 @@ struct Ids {
     nchw_nlc: usize,
     perm: VitPermuteIds,
     cross: CrossIds,
+    /// `flash_attn_cross_relpos`, when this device runs it (workgroup reductions, 256-thread workgroups, 48 KiB of
+    /// shared memory); an inference build then attends with it instead of the materialized chain.
+    flash_rel: Option<usize>,
     /// The coalesced score path both the forward and the backward recompute
     /// dispatch through.
     key_minor: (usize, usize),
@@ -213,6 +218,7 @@ impl Ids {
             nchw_nlc: k("nchw_nlc"),
             perm: VitPermuteIds { embed: k("embed"), row_scatter: k("row_scatter") },
             cross: CrossIds { scores: k("attn_scores_cross"), softmax: k("attn_softmax_cross"), apply: k("attn_apply_cross") },
+            flash_rel: g.kernel_index("flash_attn_cross_relpos").filter(|_| block::flash_cross_supported(&g.caps())),
             key_minor: (k("kv_k_headt"), k("attn_scores_cross_kt")),
             cross_bwd: CrossBwdIds::resolve(
                 g,
@@ -291,6 +297,9 @@ struct Block {
     ax_w: RelPosAxis,
     rel_h: DeviceBuffer,
     rel_w: DeviceBuffer,
+    /// The `q . R` tables of EVERY span at once (`[spans, heads, qn, kh]` and `[.., kw]`), for the fused attention
+    /// (inference builds on a device that runs it); `None` keeps the span-at-a-time materialized chain.
+    rel_all: Option<(DeviceBuffer, DeviceBuffer)>,
 
     // ---- forward cache (SSA) ----
     /// `[rows + 1, C]`. The extra row is `WindowPlan::padded`'s sentinel and is
@@ -318,7 +327,7 @@ struct Block {
 }
 
 impl Block {
-    fn new(g: &Gpu, cfg: &SamViTConfig, l: u32, train: bool) -> Block {
+    fn new(g: &Gpu, cfg: &SamViTConfig, l: u32, train: bool, fused: bool) -> Block {
         let (c, rows, hd) = (cfg.d_model, cfg.rows(), cfg.head_dim());
         let (qh, qw) = cfg.attn_extent(l);
         let (rh_rows, rw_rows) = cfg.rel_pos_rows(l);
@@ -339,6 +348,7 @@ impl Block {
         };
         let span_qn = qh * qw;
         assert_eq!(span_qn, spans[0].1, "block {l}: rel-pos extent {qh}x{qw} != span length {}", spans[0].1);
+        let spans_n = spans.len();
         let slab = cfg.n_heads as u64 * cfg.attn_chunk.min(span_qn) as u64 * span_qn as u64;
         let ar = attn_rows as u64;
         let rc = rows as u64 * c as u64;
@@ -353,6 +363,10 @@ impl Block {
             ax_w: RelPosAxis::new(g, qw, qw, hd, rw_rows),
             rel_h: g.storage((cfg.n_heads * span_qn * qh) as u64),
             rel_w: g.storage((cfg.n_heads * span_qn * qw) as u64),
+            rel_all: (fused && !train).then(|| {
+                let n = spans_n as u64 * cfg.n_heads as u64 * span_qn as u64;
+                (g.storage(n * qh as u64), g.storage(n * qw as u64))
+            }),
             bwd: train.then(|| BlockBwd {
                 d_rel_h: g.storage((cfg.n_heads * span_qn * qh) as u64),
                 d_rel_w: g.storage((cfg.n_heads * span_qn * qw) as u64),
@@ -772,7 +786,7 @@ impl SamEncoder {
             }
         });
 
-        let blocks: Vec<Block> = (0..cfg.n_layers).map(|l| Block::new(&gpu, &cfg, l, train)).collect();
+        let blocks: Vec<Block> = (0..cfg.n_layers).map(|l| Block::new(&gpu, &cfg, l, train, ids.flash_rel.is_some() && cfg.head_dim() <= 128)).collect();
 
         // Two-way coverage between the graph and the manifest: every tensor the
         // graph reads is declared, and every declared tensor is read. Without
@@ -966,11 +980,26 @@ impl SamEncoder {
         steps.push(g.step(self.ids.bias_add, &[&b.qkv, w("attn.qkv.bias")], &[ar, 3 * c], ar * 3 * c));
 
         let rel = b.relpos(&self.ids, false);
-        let km = b.key_minor(&self.ids);
-        block::chunked_bidir_fwd(
-            g, &self.ids.cross, Some(&km), cfg.n_heads, cfg.head_dim(), c, &b.qkv, 3 * c, 0, c, 2 * c, &b.ctx,
-            &b.scores, &b.probs, &b.spans, cfg.attn_chunk, Some(&rel), &mut steps,
-        );
+        match (self.ids.flash_rel, &b.rel_all) {
+            (Some(kind), Some((rel_h, rel_w))) => {
+                // Every span's q.R tables in one dispatch per axis, then ONE fused dispatch over all spans (the windows are its batch axis).
+                let (qn, heads) = (b.qh * b.qw, cfg.n_heads);
+                let nspans = b.spans.len() as u32;
+                for &(_, len) in &b.spans {
+                    rel.check_span(len);
+                }
+                rel.qr_steps(g, heads, cfg.head_dim(), &b.qkv, 3 * c, 0, (rel_h, rel_w), (0, 0), nspans, &mut steps);
+                let lay = block::FlashCrossLayout { q_stride: 3 * c, q_off: 0, k_stride: 3 * c, k_off: c, v_stride: 3 * c, v_off: 2 * c, d_out: c };
+                steps.push(block::flash_cross_relpos_step(g, kind, b.spans.len() as u32, heads, cfg.head_dim(), qn, (b.qh, b.qw), lay, &b.qkv, rel_h, rel_w, &b.ctx));
+            }
+            _ => {
+                let km = b.key_minor(&self.ids);
+                block::chunked_bidir_fwd(
+                    g, &self.ids.cross, Some(&km), cfg.n_heads, cfg.head_dim(), c, &b.qkv, 3 * c, 0, c, 2 * c, &b.ctx,
+                    &b.scores, &b.probs, &b.spans, cfg.attn_chunk, Some(&rel), &mut steps,
+                );
+            }
+        }
 
         let (mk, mt) = self.gemm(ar, c);
         steps.push(g.dispatch(mk, &[&b.ctx, w("attn.proj.weight"), &b.proj], &[ar, c, c], mt));
