@@ -141,6 +141,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("flash_attn_cross_relpos", kernels::FLASH_ATTN_CROSS_RELPOS),
     // ---- row softmax of the tensor-core global attention (workgroup per row) ----
     ("softmax_rows", kernels::SOFTMAX_ROWS),
+    ("attn_softmax_relpos", kernels::ATTN_SOFTMAX_RELPOS),
     // ---- coalesced cross-attention scores ----
     // `attn_scores_cross` reads the fused KV slab with the KEY index as the
     // fastest thread index, so every lane of a warp lands on its own cache
@@ -188,6 +189,8 @@ struct Ids {
     flash_rel: Option<usize>,
     /// `softmax_rows`, when this device runs workgroup reductions: the softmax of the tensor-core global attention.
     softmax_rows: Option<usize>,
+    /// `attn_softmax_relpos`: the bias and the softmax in one pass; with it the tensor-core attention needs no `softmax_rows`.
+    softmax_relpos: Option<usize>,
     /// The coalesced score path both the forward and the backward recompute
     /// dispatch through.
     key_minor: (usize, usize),
@@ -225,6 +228,7 @@ impl Ids {
             cross: CrossIds { scores: k("attn_scores_cross"), softmax: k("attn_softmax_cross"), apply: k("attn_apply_cross") },
             flash_rel: g.kernel_index("flash_attn_cross_relpos").filter(|_| block::flash_cross_supported(&g.caps())),
             softmax_rows: g.kernel_index("softmax_rows").filter(|_| g.caps().workgroup_reductions),
+            softmax_relpos: g.kernel_index("attn_softmax_relpos").filter(|_| g.caps().workgroup_reductions && g.caps().max_workgroup_size >= 256),
             key_minor: (k("kv_k_headt"), k("attn_scores_cross_kt")),
             cross_bwd: CrossBwdIds::resolve(
                 g,
@@ -746,6 +750,9 @@ struct TcAttention {
 /// floats (200 MB at SAM ViT-B's 4096 keys), twice.
 const TC_ATTN_CHUNK: u32 = 1024;
 
+/// Keys per row `attn_softmax_relpos` holds in registers (32 per thread of its 256).
+const MAX_FUSED_SOFTMAX_KEYS: u32 = 8192;
+
 impl SamEncoder {
     /// Trainable build from an eager map. Exactly
     /// [`Self::new_on`]`(gpu, cfg, init, seed, true)` - the signature and the
@@ -974,8 +981,17 @@ impl SamEncoder {
             if !ok {
                 return false;
             }
-            local.push(rel.add_step(g, heads, qn, keys, q0, &ws.scores));
-            local.push(g.dispatch(softmax, &[&ws.scores, &ws.probs], &[heads * qn, keys], gpu_core::Dispatch::Workgroups(heads * qn)));
+            match self.ids.softmax_relpos.filter(|_| keys <= MAX_FUSED_SOFTMAX_KEYS) {
+                // The bias and the softmax in one pass over the slab.
+                Some(fused) => {
+                    let p = [heads * qn, keys, qn, q0, rel.span_qn(), rel.kh, rel.kw];
+                    local.push(g.dispatch(fused, &[&ws.scores, &b.rel_h, &b.rel_w, &ws.probs], &p, gpu_core::Dispatch::Workgroups(heads * qn)));
+                }
+                None => {
+                    local.push(rel.add_step(g, heads, qn, keys, q0, &ws.scores));
+                    local.push(g.dispatch(softmax, &[&ws.scores, &ws.probs], &[heads * qn, keys], gpu_core::Dispatch::Workgroups(heads * qn)));
+                }
+            }
             if !tc.bmm_nn_tf32(g, &mut local, &whole(&ws.probs), &at(&b.qkv, 2 * c), &at(&b.ctx, q0 * c), &apply) {
                 return false;
             }

@@ -196,6 +196,8 @@ pub const ATTN_SOFTMAX_CROSS: &str = include_str!("../wgsl/attn_softmax_cross.wg
 pub const ATTN_SOFTMAX_FULL: &str = include_str!("../wgsl/attn_softmax_full.wgsl");
 /// `wgsl/attn_softmax_masked.wgsl`
 pub const ATTN_SOFTMAX_MASKED: &str = include_str!("../wgsl/attn_softmax_masked.wgsl");
+/// `wgsl/attn_softmax_relpos.wgsl`
+pub const ATTN_SOFTMAX_RELPOS: &str = include_str!("../wgsl/attn_softmax_relpos.wgsl");
 /// `wgsl/attn_softmax_spans.wgsl`
 pub const ATTN_SOFTMAX_SPANS: &str = include_str!("../wgsl/attn_softmax_spans.wgsl");
 /// `wgsl/avgpool2d.wgsl`
@@ -1412,6 +1414,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("attn_softmax_cross", ATTN_SOFTMAX_CROSS),
     ("attn_softmax_full", ATTN_SOFTMAX_FULL),
     ("attn_softmax_masked", ATTN_SOFTMAX_MASKED),
+    ("attn_softmax_relpos", ATTN_SOFTMAX_RELPOS),
     ("attn_softmax_spans", ATTN_SOFTMAX_SPANS),
     ("avgpool2d", AVGPOOL2D),
     ("avgpool2d_dx", AVGPOOL2D_DX),

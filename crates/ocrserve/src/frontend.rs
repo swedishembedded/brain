@@ -96,10 +96,20 @@ pub trait PageEncoder {
     /// Preprocess the page, run the vision encoder and lay its rows out as the decoder's image
     /// block: the prompt's ids for the instruction and the rows that stand at its image positions.
     fn encode(&self, page: &PageRequest) -> Encoded;
-    /// Encode every page waiting at once. A model whose views batch through its encoder overrides
-    /// this to pool them; the default encodes them one by one.
-    fn encode_many(&self, pages: &[PageRequest]) -> Vec<Encoded> {
-        pages.iter().map(|p| self.encode(p)).collect()
+    /// Run the encoder once over a small page and a large one, so the first real request does not pay for compiling its kernels.
+    fn warm_up(&self) {
+        for (w, h) in [(300u32, 200u32), (1300, 1000)] {
+            let page = PageRequest { instruction: DEFAULT_INSTRUCTION.to_string(), hwc: vec![0.5; (w * h * 3) as usize], w, h, read: ReadOptions::default() };
+            let _ = self.encode(&page);
+        }
+    }
+    /// Encode every page waiting, reporting each through `done(index, result)` the moment it is ready, so a page's
+    /// decode can start while the rest are still encoding. A model whose views batch through its encoder overrides
+    /// this to pool them (and reports a pooled group together); the default encodes them one by one.
+    fn encode_many(&self, pages: &[PageRequest], done: &mut dyn FnMut(usize, Encoded)) {
+        for (i, page) in pages.iter().enumerate() {
+            done(i, self.encode(page));
+        }
     }
 }
 
@@ -110,8 +120,7 @@ struct EncodeJob {
     reply: mpsc::Sender<Result<(ParsedRequest, Option<PromptEmbeds>), String>>,
 }
 
-/// The vision encoder on a thread of its own: pages queue to it and it encodes everything that waits in
-/// one go ([`PageEncoder::encode_many`]) while the scheduler decodes other requests. A request's rows
+/// The vision encoder on a thread of its own: pages queue to it and it encodes what waits ([`PageEncoder::encode_many`]) while the scheduler decodes other requests. A request's rows
 /// arrive on a channel the scheduler polls, so an encode overlaps decode instead of stalling it.
 struct EncodeStage {
     jobs: Option<mpsc::Sender<EncodeJob>>,
@@ -142,10 +151,10 @@ impl EncodeStage {
                             }
                         }
                     }
-                    let results = enc.encode_many(&pages);
-                    for (result, (max_new, reply)) in results.into_iter().zip(replies) {
-                        let _ = reply.send(result.map(|(ids, embeds)| (build_request(ids, max_new, ngram), Some(embeds))));
-                    }
+                    enc.encode_many(&pages, &mut |i, result| {
+                        let (max_new, reply) = &replies[i];
+                        let _ = reply.send(result.map(|(ids, embeds)| (build_request(ids, *max_new, ngram), Some(embeds))));
+                    });
                 }
             })
             .expect("the encoder thread starts");
@@ -206,6 +215,9 @@ impl OcrFrontend {
     /// interleave their kernels (best of four alternating server runs on a shared card: 30 -> 36 pages/min median).
     pub fn new<E: PageEncoder + Send + 'static>(enc: E, label: &'static str, eos: u32, allow: &[u32]) -> OcrFrontend {
         let ngram = NoRepeatNgram::new(NGRAM_SIZE, NGRAM_WINDOW, allow);
+        let t0 = std::time::Instant::now();
+        enc.warm_up();
+        crate::stage_time("load: encoder warm-up (kernels)", t0);
         OcrFrontend { tok: enc.tok().clone(), label, stop: vec![eos], stage: EncodeStage::spawn(enc, ngram) }
     }
 
@@ -277,7 +289,14 @@ pub fn build_engine(cfg: DeepseekV2Config, decoder: &dyn checkpoint::TensorSourc
         DecoderDevice::SameCard => Gpu::new(&kernels),
         DecoderDevice::Card(i) => gpu_core::devices::with_gpu(i, || Gpu::new(&kernels)).map_err(|e| format!("decoder on gpu{i}: {e}"))?,
     };
-    Engine::new(gpu, cfg, decoder, engine_config())
+    let mut engine = Engine::new(gpu, cfg, decoder, engine_config())?;
+    if !matches!(placement, DecoderDevice::Cpu) {
+        // The first request would otherwise pay for kernel compilation and for the recording of every row count the batch passes through.
+        let t0 = std::time::Instant::now();
+        engine.warm_up();
+        crate::stage_time("load: decoder warm-up (kernels, one decode step per row count)", t0);
+    }
+    Ok(engine)
 }
 
 /// Wrap `front` and `engine` in the continuously-batching instance.

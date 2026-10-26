@@ -739,6 +739,13 @@ impl Frozen {
         segments: Vec<(Vec<Arc<exec::DeviceMem>>, Vec<Resolved>)>,
         mut stamps: Option<(&exec::Event, &mut Vec<(String, exec::Event)>)>,
     ) -> Result<(Frozen, ()), String> {
+        // The library handle is created (it allocates) before a capture opens, not by the first product inside one: a program
+        // whose first library product is its own would otherwise fail to freeze.
+        if segments.iter().any(|(_, steps)| steps.iter().any(|s| s.library.is_some())) {
+            if let Some(why) = ctx.library_gemm_unavailable() {
+                return Err(format!("a program holds a library product but the library is unavailable: {why}"));
+            }
+        }
         // Private uniforms first, before any capture opens: an allocation and a
         // copy are not stream operations a capture may contain.
         let mut uniforms: Vec<exec::DeviceMem> = Vec::new();

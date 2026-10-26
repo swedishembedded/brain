@@ -217,3 +217,23 @@ fn the_fast_tier_runs_its_products_on_tensor_cores() {
     assert!(fallbacks.is_empty(), "products on CUDA cores in the fast tier: {fallbacks:?}\n{}", audit.summary());
     assert!(audit.tensor_core_ms > 0.0, "no tensor-core kernel ran at all: {rows:?}");
 }
+
+/// **A warmed engine records nothing while serving.** Recording a decode step costs more than running it, once per distinct row
+/// count; a burst that ramps the batch from 1 to its ceiling used to pay for every size it passed through while its pages waited.
+/// `warm_up` records them all, with throwaway sequences, before the first request.
+#[test]
+fn a_warmed_engine_records_no_decode_step_while_serving() {
+    let Some(mut engine) = engine_of(shaped(1, 128), Precision::Fast) else { return };
+    engine.warm_up();
+    let warmed = engine.tape_stats();
+    if warmed.recordings == 0 {
+        return brain_testutil::skip_unavailable("this device has no fused decode attention, so no step is recorded");
+    }
+    assert_eq!(warmed.recordings, 8, "one recording per row count up to the batch ceiling");
+    assert_eq!(engine.free_blocks(), 4 * 96 / 8, "the throwaway sequences gave their blocks back");
+    let mut sched = Scheduler::new(engine, 8);
+    let ids: Vec<u64> = (1..=8u32).map(|s| sched.submit(Request { prompt: prompt(s, 5 + s as usize), max_new: 4 + s as usize, stop: Vec::new() })).collect();
+    let out = sched.run();
+    assert!(ids.iter().all(|id| out.contains_key(id)));
+    assert_eq!(sched.into_decoder().tape_stats().recordings, warmed.recordings, "serving recorded a row count the warm-up missed");
+}

@@ -492,6 +492,30 @@ impl Engine {
         self.decode_tapes = on;
     }
 
+    /// Compile what a request runs and record the decode step of every row count up to the batch ceiling, with throwaway sequences that give their blocks back.
+    /// Recording a step (and the graph the device freezes it into) costs more than running it, once per distinct row count: a burst
+    /// of requests ramps the batch through every size, and without this its first pages wait for each recording in turn. A no-op
+    /// where no step is recorded.
+    pub fn warm_up(&mut self) {
+        // A full prefill chunk first: it compiles the kernels a prompt runs (the first request pays for them otherwise).
+        let mut scratch = BlockTable::new();
+        let _ = self.prefill_slice(&mut scratch, &vec![0; self.ec.chunk as usize], None, usize::MAX);
+        scratch.release(&mut self.alloc);
+        if !(self.decode_tapes && self.fused_decode()) {
+            return;
+        }
+        let rows = self.ec.max_batch as usize;
+        let mut tables: Vec<BlockTable> = (0..rows).map(|_| BlockTable::new()).collect();
+        for b in 1..=rows {
+            let mut refs: Vec<&mut BlockTable> = tables[..b].iter_mut().collect();
+            self.decode_batch(&mut refs, &vec![0; b]);
+        }
+        self.gpu.poll_wait();
+        for t in tables.iter_mut() {
+            t.release(&mut self.alloc);
+        }
+    }
+
     /// Replays and recordings of decode steps so far.
     pub fn tape_stats(&self) -> TapeStats {
         self.tape_stats

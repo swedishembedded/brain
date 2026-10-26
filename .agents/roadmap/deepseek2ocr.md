@@ -1020,3 +1020,24 @@ SM makes any one pair noisy, so treat the size as unproven and the direction as 
 5. The first request after a load takes 14 to 17 s against 4 to 6 s for the next (kernel compilation and the recording of each row count's decode step); nothing warms them at load.
 6. Speed of light: 300 pages a minute is ~200 ms of GPU per page; today's ~350 ms for a 6-tile page needs items 1 and 3 and, for the decoder,
    fp8 experts (the decode step is launch- and attention-bound at 4.5 ms for 32 rows, the weights are ~3 GB), none of which is started.
+
+## 2026-10-27 round 2: v2's 64-client collapse, warm-up, the fused bias softmax
+
+**The collapse is the encoder, not the scheduler.** v2 at 64 clients ran 24 to 28 pages/min (p95 130 to 160 s) against 50 at 16 clients, cold
+and warm alike once the card's neighbour is accounted for (the same binary gave 23 to 47 pages/min in three fresh 64-client bursts and
+56 to 60 when warm, with the neighbour at 137 to 340 W). No sequence was preempted (a counter in the preempt path read 0 over a 64-client
+burst) and the K/V pool never ran dry. What is serial is the encode thread: a v2 page is ~1 s of GPU (SAM at 1024 and six 768 px tiles, then
+the resampler over the tiles and the page), so the 64th page of a burst starts decoding after 64 encodes, and latency is proportional to the
+page's place in the queue. The throughput lever is the cost of an encode (below) and more than one in flight; the fix made here is that the
+encode thread answers each page when it is encoded (`PageEncoder::encode_many` takes a per-page callback) instead of answering a whole burst
+at once, so the first pages decode while the rest encode.
+
+**Warm-up.** `Engine::warm_up` runs a full prefill chunk (kernel compilation) and records the decode step of every row count up to the
+ceiling with throwaway sequences; `PageEncoder::warm_up` encodes a small and a large page. 0.9 s and 0.5 s at load on v1; fresh servers with and without it
+gave the same 64-client throughput within the neighbour's noise (cold bursts 47, 34, 23 against 30, 34, 50 pages/min), so recording is
+cheap and the cold cost was not the cause. A program whose first library product is its own now freezes (the cuBLAS handle is created before
+the capture opens; the warm-up hit it).
+
+**The bias and the row softmax of SAM's global blocks in one kernel** (`attn_softmax_relpos`, 256 threads per row, one read and one write
+of the score slab): SAM's device time at the global view 39.5 -> 35.5 ms, the view 50 -> 45.5 ms best of 25 (tile 21.5 ms, unchanged). The kernel
+runs 0.6 ms per 200 MB chunk against a 0.12 ms floor; the 32-register row buffer is the first suspect.
