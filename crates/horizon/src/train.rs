@@ -52,21 +52,35 @@ impl<'a> TimelineObjective<'a> {
     }
 }
 
-impl Objective<Horizon> for TimelineObjective<'_> {
-    fn regime(&self) -> &'static str {
-        "timeline"
-    }
-
-    fn micro_step(&mut self, model: &Horizon, rng: &mut Rng) -> f32 {
+impl TimelineObjective<'_> {
+    /// Draw a random training batch of the model's size into the model.
+    fn draw(&self, model: &Horizon, rng: &mut Rng) {
         let b = model.batch_size() as usize;
         let picks: Vec<&Encoded> = (0..b)
             .map(|_| &self.train[(rng.next_u64() % self.train.len() as u64) as usize])
             .collect();
         let hb = assemble(&model.cfg, &picks, b, self.mask_rate, rng);
         model.set_batch(&hb);
+    }
+}
+
+impl Objective<Horizon> for TimelineObjective<'_> {
+    fn regime(&self) -> &'static str {
+        "timeline"
+    }
+
+    fn micro_step(&mut self, model: &Horizon, rng: &mut Rng) -> f32 {
+        self.draw(model, rng);
         let loss = model.forward();
         model.backward();
         loss
+    }
+
+    /// The loss of a drawn batch without differentiating it: the initial estimate needs no gradient, and a
+    /// layer-streamed build runs its backward inside the update, once per step.
+    fn loss_probe(&mut self, model: &Horizon, rng: &mut Rng) -> f32 {
+        self.draw(model, rng);
+        model.forward()
     }
 
     /// The whole held-out set's weighted event NLL (batches are not sampled:

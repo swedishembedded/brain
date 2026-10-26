@@ -20,11 +20,14 @@
 //! hazards read; a hazard depends on the state, the subject's age and the
 //! calendar at each piece (two clocks) and the piece itself.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 
 use gpu_core::{BufUsage, DeviceBuffer, Gpu, Step};
 use model::block::{self, Bidir, BidirIds, LayerNormIds};
 use model::saved::{Residuals, SavedPolicy};
+use model::streamed::StreamedStore;
+use model::tape::LayerTape;
 use optim::Optim;
 use paramstore::ParamStore;
 use serde_json::Value;
@@ -242,6 +245,9 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("unpack_bf16", kernels::UNPACK_BF16),
     ("pack_fp8_rows", kernels::PACK_FP8_ROWS),
     ("unpack_fp8_rows", kernels::UNPACK_FP8_ROWS),
+    // A layer-streamed full fine-tune's device side (`model::ops::store_device_kernels`; `gradnorm_part` is above).
+    ("copy_cols", kernels::COPY_COLS),
+    ("gradnorm_part_bf16", kernels::GRADNORM_PART_BF16),
 ];
 
 #[derive(Clone)]
@@ -365,12 +371,17 @@ pub struct Horizon {
     fc: Option<forecast::ForecastBufs>,
     /// The state across visits, when the configuration asks for one.
     bb: Option<backbone::BackboneBufs>,
-    fwd: Vec<Step>,
-    bwd: Vec<Step>,
+    fwd: LayerTape,
+    bwd: LayerTape,
     /// What the backward keeps of the forward: every layer's activations, or (recompute) the residual between layers,
     /// every layer sharing one set of activation buffers its replay before its backward refills
     /// ([`model::Model::set_saved_policy`]).
     saved: SavedPolicy,
+    /// The set encoder's per-layer tensors held in a device window of layers, when the run streams them
+    /// ([`model::Model::set_resident`]); `None` keeps every layer in the store.
+    streamed: Option<StreamedStore>,
+    /// A streamed build runs its backward inside the update: set by `backward`, taken by `adamw_step`.
+    backward_pending: Cell<bool>,
 }
 
 impl Horizon {
@@ -509,9 +520,11 @@ impl Horizon {
             }),
             fc: forecast::ForecastBufs::new(&gpu, &cfg, b),
             bb: backbone::BackboneBufs::new(&gpu, &cfg, b),
-            fwd: Vec::new(),
-            bwd: Vec::new(),
+            fwd: LayerTape::default(),
+            bwd: LayerTape::default(),
             saved: SavedPolicy::Keep,
+            streamed: None,
+            backward_pending: Cell::new(false),
             cfg,
             ps,
             opt,
@@ -971,9 +984,13 @@ impl Horizon {
         ));
     }
 
-    fn forward_steps(&self) -> Vec<Step> {
+    /// The batched forward, one segment per set-encoder layer (a layer-streamed build loads each layer before its
+    /// segment).
+    fn forward_steps(&self) -> LayerTape {
+        let mut tape = LayerTape::default();
         if self.cfg.additive {
-            return self.additive_forward_steps();
+            tape.segment(&mut self.additive_forward_steps(), None);
+            return tape;
         }
         let c = &self.cfg;
         let g = &self.gpu;
@@ -983,9 +1000,11 @@ impl Horizon {
         let (bn, bp, b) = (self.sets * n, self.b * p, self.b);
         let mut s = self.embedding_steps();
         self.res.round_trip(g, &mut s, 0);
+        tape.segment(&mut s, None);
         for l in 0..self.layers.len() {
             self.layer_forward(l, &mut s);
             self.res.round_trip(g, &mut s, l + 1);
+            tape.segment(&mut s, Some(l));
         }
         let last = &self.res[c.n_layers as usize];
         s.extend([
@@ -1075,12 +1094,20 @@ impl Horizon {
             ),
         ]);
         s.extend(self.forecast_forward_steps());
-        s
+        tape.segment(&mut s, None);
+        tape
     }
 
-    fn backward_steps(&self) -> Vec<Step> {
+    /// The batched backward: the heads, one segment per set-encoder layer from the last down, then the embeddings.
+    fn backward_steps(&self) -> LayerTape {
+        let mut tape = LayerTape::default();
+        // The accumulators the heads add into start from zero on every run of the pass.
+        for buf in [&self.d_az, &self.d_lz, &self.d_z].into_iter().chain(self.bb.iter().flat_map(|bb| bb.cleared())) {
+            tape.clear_on_submit(buf);
+        }
         if self.cfg.additive {
-            return self.additive_backward_steps();
+            tape.segment(&mut self.additive_backward_steps(), None);
+            return tape;
         }
         let c = &self.cfg;
         let g = &self.gpu;
@@ -1091,8 +1118,9 @@ impl Horizon {
         let (bn, bp, b) = (self.sets * n, self.b * p, self.b);
         let last = c.n_layers as usize;
         // The forecast head first: its share of the state gradient goes into
-        // d_z (cleared before this list), the hazard head's is added to it.
-        let mut s = self.forecast_backward_steps();
+        // d_z (cleared by the pass), the hazard head's is added to it.
+        let mut s = Vec::new();
+        s.extend(self.forecast_backward_steps());
         s.extend(vec![
             // hazard head
             g.step(
@@ -1195,6 +1223,7 @@ impl Horizon {
             &self.dres[last],
             bn,
         ));
+        tape.segment(&mut s, None);
         let a = self.bidir();
         for l in (0..c.n_layers as usize).rev() {
             if self.saved.recomputes() {
@@ -1266,9 +1295,11 @@ impl Horizon {
                 &[bn * d],
                 bn * d,
             ));
+            tape.segment(&mut s, Some(l));
         }
         s.extend(self.embedding_backward_steps());
-        s
+        tape.segment(&mut s, None);
+        tape
     }
 
     /// Backward of [`Self::embedding_steps`] from the gradient in `dres[0]`.
@@ -1299,7 +1330,11 @@ impl Horizon {
     /// Submit the forward pass (no readback).
     pub fn forward_submit(&self) {
         let clears = self.bb.as_ref().map_or_else(Vec::new, |bb| bb.forward_cleared());
-        self.gpu.submit(&clears, &self.fwd);
+        self.gpu.submit(&clears, &[]);
+        match &self.streamed {
+            Some(stream) => stream.forward(&self.gpu, &self.fwd).unwrap_or_else(|e| panic!("horizon layer-streamed forward: {e}")),
+            None => self.fwd.submit(&self.gpu),
+        }
     }
 
     /// The batch loss of the last forward: the weighted mean event NLL plus
@@ -1405,11 +1440,13 @@ impl Horizon {
 
     /// Accumulate gradients of the last forward's loss.
     pub fn backward(&self) {
-        let mut clears = vec![&self.d_az, &self.d_lz, &self.d_z];
-        if let Some(bb) = &self.bb {
-            clears.extend(bb.cleared());
+        if self.streamed.as_ref().is_some_and(StreamedStore::is_layer_streamed) {
+            // The weights of a layer-streamed build are not all on the device: the backward runs layer by layer in
+            // `adamw_step`, where the layers it loads are the ones it updates.
+            assert!(!self.backward_pending.replace(true), "horizon layer-streamed full fine-tune: a second backward before the update (gradient accumulation) is not supported; every micro-batch is its own step");
+            return;
         }
-        self.gpu.submit(&clears, &self.bwd);
+        self.bwd.submit(&self.gpu);
     }
 
     /// Log-hazards of the last forward, `[b, pieces, codes]`.
@@ -1446,8 +1483,62 @@ impl Horizon {
         clip: Option<f32>,
         extra_scale: f32,
     ) {
-        self.opt
-            .step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale);
+        match &self.streamed {
+            Some(stream) => {
+                if stream.is_layer_streamed() {
+                    assert!(self.backward_pending.replace(false), "horizon layer-streamed full fine-tune: adamw_step without a backward");
+                }
+                let args = model::resident_ft::StepArgs { step: t, lr, wd, adam, clip, extra_scale };
+                stream.adamw_step(&self.gpu, &self.ps, &self.opt, &self.bwd, &args).unwrap_or_else(|e| panic!("horizon layer-streamed update: {e}"));
+            }
+            None => self.opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale),
+        }
+    }
+
+    /// The current value of `name`, wherever it lives.
+    pub fn read_weight(&self, name: &str) -> Vec<f32> {
+        match &self.streamed {
+            Some(stream) if stream.holds(name) => stream.read_weight(&self.gpu, name).unwrap_or_else(|e| panic!("horizon: reading {name}: {e}")),
+            _ => self.ps.read_weight(&self.gpu, name),
+        }
+    }
+
+    /// Replace the value of `name`, wherever it lives.
+    pub fn write_weight(&self, name: &str, data: &[f32]) {
+        match &self.streamed {
+            Some(stream) if stream.holds(name) => stream.write_weight(&self.gpu, name, data).unwrap_or_else(|e| panic!("horizon: writing {name}: {e}")),
+            _ => self.gpu.write_f32(self.w(name), data),
+        }
+    }
+
+    /// The gradient of `name` left by the last backward.
+    pub fn read_grad(&self, name: &str) -> Vec<f32> {
+        assert!(!self.streamed.as_ref().is_some_and(|s| s.holds(name)), "horizon: {name} streams through a layer window; no gradient outlives its layer");
+        self.ps.read_grad(&self.gpu, name)
+    }
+
+    /// Stream every set-encoder layer's tensors through a device window under `cfg` (see [`model::streamed`]): the
+    /// layers' f32 values and optimizer state move to the host, the device keeps the window's slots. The embeddings,
+    /// the heads and the final norm stay in the store under its own optimizer. The additive encoder has no layers,
+    /// and a visit backbone's blocks and accumulators are not recorded per layer, so neither streams.
+    pub fn set_resident(&mut self, cfg: &model::resident_ft::ResidentFtConfig) -> Result<(), String> {
+        if self.streamed.is_some() {
+            return Err("horizon: the layers already stream".into());
+        }
+        if self.cfg.additive {
+            return Err("horizon: the additive encoder has no layers to stream".into());
+        }
+        if self.bb.is_some() {
+            return Err("horizon: layers stream in the set encoder; a visit backbone's blocks stay on the device and are not supported beside a window".into());
+        }
+        let stream = StreamedStore::convert(&self.gpu, &mut self.ps, cfg.clone(), &model::streamed::blocks_layer).map_err(|e| format!("horizon: {e}"))?;
+        self.opt.invalidate();
+        self.streamed = Some(stream);
+        // The recorded passes bound the store's buffers as they were: record them again over the window's slots
+        // (which also releases the per-layer buffers they held).
+        self.fwd = self.forward_steps();
+        self.bwd = self.backward_steps();
+        Ok(())
     }
 
     /// Write the weights and the configuration to a safetensors checkpoint.
@@ -1460,7 +1551,7 @@ impl Horizon {
                 (
                     name.clone(),
                     vec![self.ps.numel(name) as u64],
-                    self.ps.read_weight(&self.gpu, name),
+                    self.read_weight(name),
                 )
             })
             .collect();
@@ -1512,6 +1603,13 @@ impl model::Model for Horizon {
         Horizon::set_saved_policy(self, policy)
     }
 
+    fn set_resident(&mut self, cfg: &model::resident_ft::ResidentFtConfig) -> Result<(), String> {
+        Horizon::set_resident(self, cfg)
+    }
+    fn off_device_state(&self) -> Option<&dyn model::OffDeviceState> {
+        self.streamed.as_ref().map(|_| self as &dyn model::OffDeviceState)
+    }
+
     type Config = HorizonConfig;
 
     fn new(cfg: HorizonConfig, b: u32, _t: u32, init: &HashMap<String, Vec<f32>>) -> Self {
@@ -1554,13 +1652,13 @@ impl model::Model for Horizon {
         self.ps.params.iter().map(|(n, _)| n.clone()).collect()
     }
     fn read_weight(&self, name: &str) -> Vec<f32> {
-        self.ps.read_weight(&self.gpu, name)
+        Horizon::read_weight(self, name)
     }
     fn write_weight(&self, name: &str, data: &[f32]) {
-        self.gpu.write_f32(self.w(name), data);
+        Horizon::write_weight(self, name, data)
     }
     fn read_grad(&self, name: &str) -> Vec<f32> {
-        self.ps.read_grad(&self.gpu, name)
+        Horizon::read_grad(self, name)
     }
     fn logits_all(&self, _tokens: &[u32]) -> Option<Vec<f32>> {
         None
@@ -1570,5 +1668,19 @@ impl model::Model for Horizon {
     }
     fn config_json(&self) -> Value {
         self.cfg.to_json()
+    }
+}
+
+impl model::OffDeviceState for Horizon {
+    fn commit(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
+        let stream = self.streamed.as_ref().ok_or_else(|| std::io::Error::other("horizon: no streamed state to commit"))?;
+        self.gpu.flush();
+        stream.commit(&self.gpu, dir, step)
+    }
+
+    fn restore(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
+        let stream = self.streamed.as_ref().ok_or_else(|| std::io::Error::other("horizon: no streamed state to restore"))?;
+        self.gpu.flush();
+        stream.restore(&self.gpu, dir, step)
     }
 }
