@@ -86,3 +86,15 @@ corpus.
 \label{sec:res-systems}
 
 \input{table-systems}
+
+Both transform paths compute the same model (\cref{tab:correctness}). Where
+the FFT path is faster, it shortens the whole training step by a factor of
+\FftGainRange{}; the dense basis product is faster at \DenseWins{}, so H4 is
+\HFourVerdict{} as registered. By the analytic count a radix-2 transform of
+length $D=512$ does about a tenth of the arithmetic of the dense product with
+$m=256$ retained modes ($5D\log_2 D$ against $2Dm$ per row), yet the step
+shortens by at most the factor above: the transforms are only part of a step,
+and the FFT kernels, one workgroup per row with a barrier per radix-2 stage,
+use the card far less efficiently than the tiled matrix product they replace.
+The fast transform's arithmetic advantage is real but, with these kernels on
+this hardware, mostly unrealized.

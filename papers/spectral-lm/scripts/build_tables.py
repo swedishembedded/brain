@@ -252,6 +252,25 @@ def samples(data):
     return "\n".join(out) + "\n"
 
 
+def systems_macros(data, m):
+    by = {}
+    for r in records(data, "systems"):
+        res = r["result"]
+        mix = res["config"]["mixer"]
+        by.setdefault((res["config"]["d_model"], mix["signal_len"], mix["channels"]), {})[res["transform"]] = res["step_ms"]
+    pairs = {k: v for k, v in by.items() if "Dense" in v and "Fft" in v}
+    if not pairs:
+        m("HFourVerdict", "not yet decided")
+        m("DenseWins", "--")
+        m("FftGainRange", "--")
+        return
+    losers = sorted(k for k, v in pairs.items() if v["Fft"] >= v["Dense"])
+    m("HFourVerdict", "supported" if not losers else "rejected")
+    m("DenseWins", ", ".join(f"$(m,D,C)=({a},{b},{c})$" for a, b, c in losers) if losers else "none")
+    gains = [v["Dense"] / v["Fft"] for k, v in pairs.items() if k not in losers]
+    m("FftGainRange", f"{min(gains):.2f}--{max(gains):.2f}" if gains else "--")
+
+
 def corpus(data):
     recs = records(data, "corpus")
     if not recs:
@@ -323,6 +342,7 @@ def macros(data, groups):
     w = groups.get("Q-512-2048")
     m("BpbQwide", f"{w[0]['eval']['bits_per_byte']:.3f}" if w else "--")
     m("ParamsQwide", num(w[0]["train"]["params_nonembed"]) if w else "--")
+    systems_macros(data, m)
     train_tokens, val_docs = corpus(data)
     m("TrainTokens", train_tokens or "--")
     m("ValDocs", val_docs or "--")
