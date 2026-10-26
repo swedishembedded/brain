@@ -302,6 +302,23 @@ impl MmapSafetensors {
         true
     }
 
+    /// Elements `[start, start + len)` of `name`, decoded without touching the rest of the tensor: the tile reader
+    /// of a consumer that walks a tensor in windows (the chunked reader would decode the tensor from its start for
+    /// every window). Returns whether the tensor was found and the range lies inside it.
+    pub fn with_tensor_range(&self, name: &str, start: usize, len: usize, f: &mut dyn FnMut(&[f32])) -> bool {
+        let Some(m) = self.index.get(name) else { return false };
+        let width = dtype_width(&m.dtype);
+        let numel = (m.end - m.start) / width;
+        if len == 0 || start.checked_add(len).is_none_or(|end| end > numel) {
+            return false;
+        }
+        let from = self.blob_start + m.start + start * width;
+        let mut scratch: Vec<f32> = Vec::new();
+        decode_into(name, &m.dtype, &self.mmap[from..from + len * width], &mut scratch);
+        f(&scratch);
+        true
+    }
+
     /// [`Self::with_tensor_chunks`] for a packed-`U32` tensor: ordered chunks
     /// of at most `max_elems` `u32` words, each decoded into ONE reused
     /// scratch this call owns, so peak *extra* host allocation is
@@ -430,6 +447,9 @@ impl crate::TensorSource for MmapSafetensors {
     }
     fn with_tensor_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[f32])) -> bool {
         MmapSafetensors::with_tensor_chunks(self, name, max_elems, f)
+    }
+    fn with_tensor_range(&self, name: &str, start: usize, len: usize, f: &mut dyn FnMut(&[f32])) -> bool {
+        MmapSafetensors::with_tensor_range(self, name, start, len, f)
     }
     fn with_tensor_u32_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[u32])) -> bool {
         MmapSafetensors::with_tensor_u32_chunks(self, name, max_elems, f)
@@ -629,6 +649,25 @@ mod tests {
         assert_eq!(reread, a);
         assert_eq!(m.tensor_f32("a").unwrap(), a);
 
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A range read decodes exactly the elements asked for, in every dtype, and refuses a range that leaves the tensor
+    /// instead of returning a truncated one.
+    #[test]
+    fn a_range_read_gives_the_elements_of_the_whole_tensor_decode() {
+        let (path, a, b_vals) = make_file();
+        let m = MmapSafetensors::open(&path).unwrap();
+        for (name, whole) in [("a", &a), ("b", &b_vals)] {
+            for (start, len) in [(0, whole.len()), (1, 2), (whole.len() - 1, 1)] {
+                let mut got = Vec::new();
+                assert!(m.with_tensor_range(name, start, len, &mut |v| got = v.to_vec()), "{name} {start}+{len}");
+                assert_eq!(got, whole[start..start + len], "{name} {start}+{len}");
+            }
+            assert!(!m.with_tensor_range(name, whole.len() - 1, 2, &mut |_| panic!("a range past the end is not served")));
+            assert!(!m.with_tensor_range(name, 0, 0, &mut |_| panic!("an empty range is not served")));
+        }
+        assert!(!m.with_tensor_range("absent", 0, 1, &mut |_| panic!("an unknown tensor is not served")));
         std::fs::remove_file(&path).ok();
     }
 

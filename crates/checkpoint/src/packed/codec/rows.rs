@@ -130,8 +130,41 @@ fn words_to_le(words: &[u32], out: &mut Vec<u8>) {
 }
 
 fn f32s_to_le(vals: &[f32], out: &mut Vec<u8>) {
+    fill_encoded::<4>(vals, out, f32::to_le_bytes);
+}
+
+/// `v` as bf16 bits, rounded to nearest even; NaN stays NaN (quiet, payload kept). The bits of `half::bf16::from_f32`
+/// in a form without a branch per element, so a tile of values narrows with vector instructions.
+#[inline]
+fn bf16_bits(v: f32) -> u16 {
+    let b = v.to_bits();
+    if v.is_nan() {
+        (b >> 16) as u16 | 0x0040
+    } else {
+        (b.wrapping_add(0x7FFF + ((b >> 16) & 1)) >> 16) as u16
+    }
+}
+
+/// Elements encoded per parallel work item.
+#[cfg(not(target_arch = "wasm32"))]
+const ENCODE_CHUNK: usize = 1 << 16;
+
+/// Encode every value of `vals` to a fixed-width little-endian code, replacing `out`. Elements are independent, so
+/// large tiles are cut into contiguous chunks run on the CPU scheduler's pool; the bytes are the serial loop's.
+fn fill_encoded<const W: usize>(vals: &[f32], out: &mut Vec<u8>, encode: impl Fn(f32) -> [u8; W] + Sync) {
     out.clear();
-    out.extend(vals.iter().flat_map(|v| v.to_le_bytes()));
+    out.resize(vals.len() * W, 0);
+    let codes = out.as_chunks_mut::<W>().0;
+    #[cfg(not(target_arch = "wasm32"))]
+    backend_cpu::par::chunks_mut(codes, ENCODE_CHUNK, |c, dst| {
+        for (d, &v) in dst.iter_mut().zip(&vals[c * ENCODE_CHUNK..]) {
+            *d = encode(v);
+        }
+    });
+    #[cfg(target_arch = "wasm32")]
+    for (d, &v) in codes.iter_mut().zip(vals) {
+        *d = encode(v);
+    }
 }
 
 /// Encode tile `elems` (`values`, row-major) of `desc` into `out`.
@@ -157,21 +190,14 @@ pub(super) fn encode(desc: &TensorDescriptor, elems: &Range<u64>, values: &[f32]
     match kind {
         EncodeKind::Fp8(fmt) => {
             let grid = grid(fmt);
-            out.payload.clear();
-            out.payload.extend(values.iter().map(|&v| nearest(grid, v)));
+            fill_encoded::<1>(values, &mut out.payload, |v| [nearest(grid, v)]);
         }
         EncodeKind::Fp8Tiled { fmt, rows, cols, scale } => encode_fp8_tiled(values, inner, fmt, rows, cols, scale, out),
         EncodeKind::Nvfp4 => encode_nvfp4(values, ctx.tensor_absmax, out),
         EncodeKind::Mxfp4 => encode_mxfp4(values, out),
         EncodeKind::Float(FloatFormat::F32) => f32s_to_le(values, &mut out.payload),
-        EncodeKind::Float(FloatFormat::F16) => {
-            out.payload.clear();
-            out.payload.extend(values.iter().flat_map(|&v| half::f16::from_f32(v).to_le_bytes()));
-        }
-        EncodeKind::Float(_) => {
-            out.payload.clear();
-            out.payload.extend(values.iter().flat_map(|&v| half::bf16::from_f32(v).to_le_bytes()));
-        }
+        EncodeKind::Float(FloatFormat::F16) => fill_encoded::<2>(values, &mut out.payload, |v| half::f16::from_f32(v).to_le_bytes()),
+        EncodeKind::Float(_) => fill_encoded::<2>(values, &mut out.payload, |v| bf16_bits(v).to_le_bytes()),
         EncodeKind::Int8Block(n) => {
             let mut scales = vec![0f32; values.len() / n];
             int8_block_scales(values, n, &mut scales);

@@ -118,7 +118,9 @@ impl PackedSource {
         let span = start / q * q..(end.div_ceil(q) * q).min(b.desc.numel());
         let (mut read, mut out) = (TileBuf::default(), Vec::new());
         self.decode_range(b, &span, &mut read, &mut out)?;
-        Ok(Some(out[(start - span.start) as usize..(end - span.start) as usize].to_vec()))
+        out.truncate((end - span.start) as usize);
+        out.drain(..(start - span.start) as usize);
+        Ok(Some(out))
     }
 
     /// The format and bytes of every tensor served, as stored, under the names the model asks for.

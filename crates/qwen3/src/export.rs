@@ -20,7 +20,7 @@
 //! to info@swedishembedded.com.
 
 use model::adapter::kind::{LORA_A, LORA_B};
-use std::io::Write;
+use std::os::unix::fs::FileExt;
 use std::path::Path;
 
 use checkpoint::gguf::GgufValue;
@@ -60,8 +60,13 @@ impl HfDtype {
             HfDtype::F16 => "float16",
         }
     }
+    /// `x` narrowed to this type's little-endian bytes in `out` (replacing its contents).
     fn encode(self, x: &[f32], out: &mut Vec<u8>) {
+        out.clear();
         match self {
+            #[cfg(target_endian = "little")]
+            HfDtype::F32 => out.extend_from_slice(bytemuck::cast_slice(x)),
+            #[cfg(not(target_endian = "little"))]
             HfDtype::F32 => x.iter().for_each(|v| out.extend_from_slice(&v.to_le_bytes())),
             HfDtype::Bf16 => x.iter().for_each(|v| out.extend_from_slice(&half::bf16::from_f32(*v).to_le_bytes())),
             HfDtype::F16 => x.iter().for_each(|v| out.extend_from_slice(&half::f16::from_f32(*v).to_le_bytes())),
@@ -263,29 +268,46 @@ fn write_shard(src: &dyn TensorSource, shard: &[&Planned], dtype: HfDtype, fold:
 
     let tmp = path.with_extension("safetensors.tmp");
     let io = |e: std::io::Error| format!("{}: {e}", tmp.display());
-    let mut w = std::io::BufWriter::new(std::fs::File::create(&tmp).map_err(io)?);
-    w.write_all(&(header.len() as u64).to_le_bytes()).map_err(io)?;
-    w.write_all(&header).map_err(io)?;
-    let mut buf = Vec::new();
+    let file = std::fs::File::create(&tmp).map_err(io)?;
+    file.write_all_at(&(header.len() as u64).to_le_bytes(), 0).map_err(io)?;
+    file.write_all_at(&header, 8).map_err(io)?;
+    let data_start = 8 + header.len() as u64;
+    let mut starts = Vec::with_capacity(shard.len());
+    let mut offset = data_start;
     for p in shard {
-        buf.clear();
-        let found = match fold.get(&p.brain) {
-            None => src.with_tensor(&p.brain, &mut |x| dtype.encode(x, &mut buf)),
-            Some(pair) => src.with_tensor(&p.brain, &mut |x| {
-                let mut w = x.to_vec();
-                pair.delta(1.0, &mut w);
-                dtype.encode(&w, &mut buf);
-            }),
-        };
-        if !found {
-            return Err(format!("export: the checkpoint has no tensor {:?}", p.brain));
-        }
-        if buf.len() as u64 != p.bytes {
-            return Err(format!("export: {} holds {} bytes, expected {}", p.brain, buf.len(), p.bytes));
-        }
-        w.write_all(&buf).map_err(io)?;
+        starts.push(offset);
+        offset += p.bytes;
     }
-    w.into_inner().map_err(|e| io(e.into_error()))?.sync_all().map_err(io)?;
+    // Each tensor is read and encoded on this thread, while the ones before it are written by several.
+    let mut failure: Option<String> = None;
+    let written = checkpoint::weightio::overlapped(
+        shard.len(),
+        |i| {
+            let p = shard[i];
+            let mut buf = Vec::new();
+            let found = match fold.get(&p.brain) {
+                None => src.with_tensor(&p.brain, &mut |x| dtype.encode(x, &mut buf)),
+                Some(pair) => src.with_tensor(&p.brain, &mut |x| {
+                    let mut w = x.to_vec();
+                    pair.delta(1.0, &mut w);
+                    dtype.encode(&w, &mut buf);
+                }),
+            };
+            if failure.is_none() && !found {
+                failure = Some(format!("export: the checkpoint has no tensor {:?}", p.brain));
+            } else if failure.is_none() && buf.len() as u64 != p.bytes {
+                failure = Some(format!("export: {} holds {} bytes, expected {}", p.brain, buf.len(), p.bytes));
+            }
+            buf
+        },
+        |i, buf| file.write_all_at(&buf, starts[i]),
+    );
+    if let Some(why) = failure {
+        return Err(why);
+    }
+    written.map_err(io)?;
+    file.sync_all().map_err(io)?;
+    drop(file);
     std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
 }
 

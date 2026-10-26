@@ -167,14 +167,13 @@ fn decode_elements(el: Element, payload: &[u8], n: usize, out: &mut Vec<f32>) ->
     out.clear();
     match el {
         Element::Float(f) => match f.bits() {
-            32 | 16 | 8 => {
-                let w = f.bits() as usize / 8;
-                out.extend(payload.chunks_exact(w).take(n).map(|b| {
-                    let mut c = [0u8; 4];
-                    c[..w].copy_from_slice(b);
-                    decode_float_code(f, u32::from_le_bytes(c))
-                }));
-            }
+            // The checkpoint formats of weights get a loop of their own so the format match is outside it and the
+            // conversion vectorizes.
+            32 if f == FloatFormat::F32 => fill_decoded::<4>(payload, n, out, f32::from_le_bytes),
+            16 if f == FloatFormat::Bf16 => fill_decoded::<2>(payload, n, out, |b| f32::from_bits(u32::from(u16::from_le_bytes(b)) << 16)),
+            32 => fill_decoded::<4>(payload, n, out, |b| decode_float_code(f, u32::from_le_bytes(b))),
+            16 => fill_decoded::<2>(payload, n, out, |b| decode_float_code(f, u32::from(u16::from_le_bytes(b)))),
+            8 => fill_decoded::<1>(payload, n, out, |b| decode_float_code(f, u32::from(b[0]))),
             4 => decode_nibbles(payload, n, &E2M1_CODEBOOK, out),
             b => return Err(format!("unsupported float width {b}")),
         },
@@ -195,6 +194,29 @@ fn decode_elements(el: Element, payload: &[u8], n: usize, out: &mut Vec<f32>) ->
         Element::Ggml(_) => unreachable!("GGUF blocks are decoded by GgmlCodec"),
     }
     Ok(())
+}
+
+/// Elements decoded per parallel work item: large enough that dispatch is noise, small enough to spread one tile.
+#[cfg(not(target_arch = "wasm32"))]
+const DECODE_CHUNK: usize = 1 << 16;
+
+/// Decode the first `n` fixed-width codes of `payload` into `out` (replacing its contents), `decode` mapping one
+/// little-endian code to its value. Elements are independent, so the tile is cut into contiguous chunks run on the
+/// CPU scheduler's pool; the values are the serial loop's.
+fn fill_decoded<const W: usize>(payload: &[u8], n: usize, out: &mut Vec<f32>, decode: impl Fn([u8; W]) -> f32 + Sync) {
+    let codes = &payload.as_chunks::<W>().0[..n.min(payload.len() / W)];
+    out.clear();
+    out.resize(codes.len(), 0.0);
+    #[cfg(not(target_arch = "wasm32"))]
+    backend_cpu::par::chunks_mut(out, DECODE_CHUNK, |c, dst| {
+        for (d, &code) in dst.iter_mut().zip(&codes[c * DECODE_CHUNK..]) {
+            *d = decode(code);
+        }
+    });
+    #[cfg(target_arch = "wasm32")]
+    for (d, &code) in out.iter_mut().zip(codes) {
+        *d = decode(code);
+    }
 }
 
 fn decode_nibbles(payload: &[u8], n: usize, table: &[f32; 16], out: &mut Vec<f32>) {
@@ -333,6 +355,22 @@ mod tests {
         }
     }
 
+    /// A tile of the checkpoint float formats decodes to each code's own value however the tile is cut across the CPU
+    /// pool: more elements than one work item, an odd length, and every code of the narrow formats.
+    #[test]
+    fn float_tiles_decode_to_each_codes_value_across_work_items() {
+        let n = 3 * DECODE_CHUNK + 17;
+        for (enc, width) in [(QuantEncoding::bf16(), 2usize), (QuantEncoding::f32(), 4), (QuantEncoding::f16(), 2)] {
+            let desc = TensorDescriptor::new("w", vec![1, n as u64], enc.clone());
+            let payload = bytes(9, n * width);
+            let got = decode_all(&desc, &payload, &[]);
+            let Element::Float(f) = enc.element else { unreachable!() };
+            let want: Vec<f32> = payload.chunks_exact(width).map(|c| decode_float_code(f, c.iter().rev().fold(0u32, |a, &b| a << 8 | u32::from(b)))).collect();
+            assert_eq!(got.len(), n);
+            assert!(got.iter().zip(&want).all(|(g, w)| g.to_bits() == w.to_bits()), "{enc}");
+        }
+    }
+
     #[test]
     fn nvfp4_decodes_e2m1_times_block16_e4m3_times_global_scale() {
         let desc = TensorDescriptor::new("w", vec![2, 32], QuantEncoding::nvfp4());
@@ -390,6 +428,22 @@ mod tests {
             // NF4's widest codebook gap is 0.30 of the block maximum (~1.9 here).
             let worst = got.iter().zip(&data).map(|(g, w)| (g - w).abs()).fold(0f32, f32::max);
             assert!(worst <= tol, "{enc}: worst abs error {worst}");
+        }
+    }
+
+    /// Narrowing a tile to bf16 or f16 gives the bits `half` gives for every value class: ties, subnormals, the
+    /// rounding carry into the exponent, infinities and NaN, across more elements than one work item.
+    #[test]
+    fn narrowing_tiles_gives_the_bits_of_the_reference_conversion() {
+        let mut vals: Vec<f32> = vec![0.0, -0.0, 1.0, f32::INFINITY, f32::NEG_INFINITY, f32::NAN, f32::MIN_POSITIVE, 1e-40, 3.4e38, f32::from_bits(0x3F80_8000), f32::from_bits(0x3F81_8000), f32::from_bits(0x7F7F_FFFF)];
+        vals.extend(bytes(5, 4 * (2 * 65536 + 5)).as_chunks::<4>().0.iter().map(|c| f32::from_bits(u32::from_le_bytes(*c))).filter(|v| !v.is_nan()));
+        let reg = CodecRegistry::reference();
+        for (enc, reference) in [(QuantEncoding::bf16(), (|v: f32| half::bf16::from_f32(v).to_le_bytes().to_vec()) as fn(f32) -> Vec<u8>), (QuantEncoding::f16(), |v| half::f16::from_f32(v).to_le_bytes().to_vec())] {
+            let desc = TensorDescriptor::new("w", vec![1, vals.len() as u64], enc.clone());
+            let mut buf = TileBuf::default();
+            reg.encoder(&enc).unwrap().encode_tile(&desc, &(0..desc.numel()), &vals, &EncodeCtx::default(), &mut buf).unwrap();
+            let want: Vec<u8> = vals.iter().flat_map(|&v| reference(v)).collect();
+            assert_eq!(buf.payload, want, "{enc}");
         }
     }
 

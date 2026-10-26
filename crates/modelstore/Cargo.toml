@@ -18,3 +18,9 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 ureq = { workspace = true, features = ["json"] }
+
+# sha2's portable SHA-256 runs at a few hundred MB/s on aarch64; its `asm` feature selects the hardware SHA-2
+# instructions there (it falls back to the portable code when the CPU lacks them). Hashing a multi-gigabyte base or
+# checkpoint is otherwise the longest step of a fine-tune that is not training.
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+sha2 = { workspace = true, features = ["asm"] }

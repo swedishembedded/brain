@@ -24,7 +24,8 @@
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{self, BufWriter, Write};
+use std::io;
+use std::os::unix::fs::FileExt;
 use std::path::Path;
 
 use serde_json::Value;
@@ -500,6 +501,25 @@ impl crate::TensorSource for WeightReader {
         }
     }
 
+    /// Only the elements of the range are decoded for safetensors (a window of a large tensor); the other
+    /// containers decode the tensor and slice, as the trait default does.
+    fn with_tensor_range(&self, name: &str, start: usize, len: usize, f: &mut dyn FnMut(&[f32])) -> bool {
+        match &self.inner {
+            Inner::St(m) => m.with_tensor_range(name, start, len, f),
+            Inner::StSharded(readers, owner) => owner.get(name).is_some_and(|&si| readers[si].with_tensor_range(name, start, len, f)),
+            _ => {
+                let mut in_range = false;
+                let found = self.with_tensor(name, &mut |d| {
+                    if start.checked_add(len).is_some_and(|end| end <= d.len()) {
+                        in_range = true;
+                        f(&d[start..start + len]);
+                    }
+                });
+                found && in_range
+            }
+        }
+    }
+
     /// Bounded packed-`u32` decode for safetensors - the int8-native
     /// counterpart to [`Self::with_tensor_chunks`]. GGUF has no packed-`U32`
     /// convention at all ([`Self::tensor_u32`]'s own doc), so it reports
@@ -688,6 +708,48 @@ struct Planned {
     dtype: Dtype,
 }
 
+/// Run `produce(0..count)` in order on the calling thread and hand each result to `consume(index, result)` on one of
+/// several writer threads, so production of item `i + 1` overlaps the writes of the items before it and the host holds a
+/// handful of items, not all of them. The first error of a consumer is returned once every item has been handled or the
+/// writers have all stopped.
+pub fn overlapped<T: Send>(count: usize, mut produce: impl FnMut(usize) -> T, consume: impl Fn(usize, T) -> io::Result<()> + Sync) -> io::Result<()> {
+    /// Items consumed at the same time; a consumer is one positioned write of one tensor.
+    const WRITERS: usize = 4;
+    // One queued item beside the ones being consumed bounds the host copy to a few items.
+    let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, T)>(1);
+    let rx = std::sync::Mutex::new(rx);
+    std::thread::scope(|scope| {
+        let writers: Vec<_> = (0..WRITERS)
+            .map(|_| {
+                scope.spawn(|| -> io::Result<()> {
+                    loop {
+                        let job = rx.lock().unwrap_or_else(|e| e.into_inner()).recv();
+                        let Ok((i, item)) = job else { return Ok(()) };
+                        consume(i, item)?;
+                    }
+                })
+            })
+            .collect();
+        for i in 0..count {
+            // A send fails only when every writer has stopped on an error, which the join below reports.
+            if tx.send((i, produce(i))).is_err() {
+                break;
+            }
+        }
+        drop(tx);
+        writers.into_iter().try_for_each(|w| w.join().unwrap_or_else(|_| Err(io::Error::other("a checkpoint writer thread panicked"))))
+    })
+}
+
+/// Write a checkpoint of planned `(name, shape)` tensors that `produce` yields one at a time, in plan order, through
+/// [`overlapped`]: the host holds a few tensors, not the model, and the file is written by several threads. The output
+/// is the file an [`StWriter`] makes (tmp, then rename, so an interrupted save leaves no truncated file).
+pub fn save_streamed(path: &str, config: &Value, card: Option<&ModelCard>, plan: &[(String, Vec<u64>)], mut produce: impl FnMut(&str) -> Vec<f32>) -> io::Result<()> {
+    let writer = StWriter::create(path, plan, config, card)?;
+    overlapped(plan.len(), |i| produce(&plan[i].0), |i, data| writer.write_shared(&plan[i].0, &data))?;
+    writer.finish()
+}
+
 /// An incremental F32 safetensors writer. Offsets are planned up front from
 /// (name, shape) - sizes only, no data - the header is written immediately, and
 /// each tensor's little-endian f32 bytes are [`write`](Self::write)able **in
@@ -698,13 +760,13 @@ struct Planned {
 /// tensor in RAM. The output format matches [`crate::st`] (`brain.config`,
 /// card via `to_metadata`).
 pub struct StWriter {
-    file: BufWriter<File>,
+    file: File,
     tmp: String,
     path: String,
     plan: Vec<Planned>,
     index_by_name: HashMap<String, usize>,
-    written: Vec<bool>,
-    written_count: usize,
+    written: Vec<std::sync::atomic::AtomicBool>,
+    written_count: std::sync::atomic::AtomicUsize,
     blob_start: u64,
 }
 
@@ -791,28 +853,31 @@ impl StWriter {
                 std::fs::create_dir_all(parent)?;
             }
         }
-        let tmp = format!("{path}.tmp");
-        let mut file = BufWriter::new(File::create(&tmp)?);
-        file.write_all(&(hbytes.len() as u64).to_le_bytes())?;
-        file.write_all(&hbytes)?;
+        // Per process: ranks of one job that write the same path (their replicas are identical) must not share a temporary.
+        let tmp = format!("{path}.{}.tmp", std::process::id());
+        let file = File::create(&tmp)?;
+        file.write_all_at(&(hbytes.len() as u64).to_le_bytes(), 0)?;
+        file.write_all_at(&hbytes, 8)?;
         let blob_start = 8 + hbytes.len() as u64;
 
         let index_by_name: HashMap<String, usize> = planned.iter().enumerate().map(|(i, p)| (p.name.clone(), i)).collect();
-        let written = vec![false; planned.len()];
-        Ok(StWriter { file, tmp, path: path.to_string(), plan: planned, index_by_name, written, written_count: 0, blob_start })
+        let written = planned.iter().map(|_| std::sync::atomic::AtomicBool::new(false)).collect();
+        Ok(StWriter { file, tmp, path: path.to_string(), plan: planned, index_by_name, written, written_count: std::sync::atomic::AtomicUsize::new(0), blob_start })
     }
 
     /// Write one planned tensor's data. May be called in any order (each
-    /// planned name exactly once) - seeks to that tensor's pre-planned offset,
-    /// so a caller streaming through its source in the source's own order
+    /// planned name exactly once): the bytes go to that tensor's pre-planned
+    /// offset, so a caller streaming through its source in the source's own order
     /// never needs to buffer or reorder its output.
     pub fn write(&mut self, name: &str, data: &[f32]) -> io::Result<()> {
+        self.write_shared(name, data)
+    }
+
+    /// [`Self::write`] from several threads at once: tensors occupy disjoint planned byte ranges and are written with
+    /// positioned writes, so threads writing different tensors never contend (each name still exactly once).
+    pub fn write_shared(&self, name: &str, data: &[f32]) -> io::Result<()> {
         let i = self.check_slot(name, data.len(), Dtype::F32)?;
-        self.seek_to(i)?;
-        // Stream the f32 little-endian bytes without materializing the whole blob.
-        for v in data {
-            self.file.write_all(&v.to_le_bytes())?;
-        }
+        self.put(i, f32s_le_bytes(data).as_ref())?;
         self.mark_written(i);
         Ok(())
     }
@@ -822,19 +887,14 @@ impl StWriter {
     /// output (4 int8 per u32), written as-is with no repacking.
     pub fn write_u32(&mut self, name: &str, data: &[u32]) -> io::Result<()> {
         let i = self.check_slot(name, data.len(), Dtype::U32)?;
-        self.seek_to(i)?;
-        for v in data {
-            self.file.write_all(&v.to_le_bytes())?;
-        }
+        self.put(i, u32s_le_bytes(data).as_ref())?;
         self.mark_written(i);
         Ok(())
     }
 
     fn check_slot(&self, name: &str, len: usize, want: Dtype) -> io::Result<usize> {
+        use std::sync::atomic::Ordering;
         let i = *self.index_by_name.get(name).ok_or_else(|| inval(format!("st: '{name}' is not in the plan")))?;
-        if self.written[i] {
-            return Err(inval(format!("st: '{name}' written twice")));
-        }
         let p = &self.plan[i];
         if p.dtype != want {
             return Err(inval(format!(
@@ -846,40 +906,55 @@ impl StWriter {
         if p.numel != len {
             return Err(inval(format!("st: '{name}' expects {} elems, got {len}", p.numel)));
         }
+        if self.written[i].swap(true, Ordering::AcqRel) {
+            return Err(inval(format!("st: '{name}' written twice")));
+        }
         Ok(i)
     }
 
-    fn seek_to(&mut self, i: usize) -> io::Result<()> {
-        use io::{Seek, SeekFrom};
-        self.file.seek(SeekFrom::Start(self.blob_start + self.plan[i].offset)).map(|_| ())
+    /// Write planned tensor `i`'s bytes at its offset.
+    fn put(&self, i: usize, bytes: &[u8]) -> io::Result<()> {
+        self.file.write_all_at(bytes, self.blob_start + self.plan[i].offset)
     }
 
-    fn mark_written(&mut self, i: usize) {
-        self.written[i] = true;
-        self.written_count += 1;
+    fn mark_written(&self, _: usize) {
+        self.written_count.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 
     /// Flush and atomically rename tmp → path. Errors if the plan was not fully
     /// written (the file would have holes).
-    pub fn finish(mut self) -> io::Result<()> {
-        if self.written_count != self.plan.len() {
+    pub fn finish(self) -> io::Result<()> {
+        use std::sync::atomic::Ordering;
+        let written = self.written_count.load(Ordering::Acquire);
+        if written != self.plan.len() {
             let missing: Vec<&str> = self
                 .plan
                 .iter()
                 .zip(&self.written)
-                .filter(|(_, &w)| !w)
+                .filter(|(_, w)| !w.load(Ordering::Acquire))
                 .map(|(p, _)| p.name.as_str())
                 .collect();
-            return Err(inval(format!(
-                "st: wrote {}/{} planned tensors (missing: {missing:?})",
-                self.written_count,
-                self.plan.len()
-            )));
+            return Err(inval(format!("st: wrote {}/{} planned tensors (missing: {missing:?})", written, self.plan.len())));
         }
-        self.file.flush()?;
         drop(self.file);
         std::fs::rename(&self.tmp, &self.path)
     }
+}
+
+/// The little-endian bytes of `data`: a view of it on a little-endian host, a converted copy elsewhere.
+fn f32s_le_bytes(data: &[f32]) -> std::borrow::Cow<'_, [u8]> {
+    #[cfg(target_endian = "little")]
+    return std::borrow::Cow::Borrowed(bytemuck::cast_slice(data));
+    #[cfg(not(target_endian = "little"))]
+    return std::borrow::Cow::Owned(data.iter().flat_map(|v| v.to_le_bytes()).collect());
+}
+
+/// [`f32s_le_bytes`] for words.
+fn u32s_le_bytes(data: &[u32]) -> std::borrow::Cow<'_, [u8]> {
+    #[cfg(target_endian = "little")]
+    return std::borrow::Cow::Borrowed(bytemuck::cast_slice(data));
+    #[cfg(not(target_endian = "little"))]
+    return std::borrow::Cow::Owned(data.iter().flat_map(|v| v.to_le_bytes()).collect());
 }
 
 #[cfg(test)]
@@ -913,6 +988,37 @@ mod tests {
     }
 
     // ---- StWriter round-trips ----
+
+    /// A streamed save holds a few tensors at a time yet writes the file an in-memory save writes: every tensor
+    /// reads back bit for bit and in a range read, whatever order the writer threads finish in, and a failing
+    /// producer leaves no file under the final name.
+    #[test]
+    fn a_streamed_save_reads_back_every_tensor_exactly() {
+        let p = scratch("streamed");
+        let cfg = serde_json::json!({"d_model": 8});
+        let tensors: Vec<(String, Vec<f32>)> = (0..23).map(|i| (format!("t{i}"), (0..1 + i * 37).map(|j| (i * 1000 + j) as f32 * 0.25 - 3.0).collect())).collect();
+        let plan: Vec<(String, Vec<u64>)> = tensors.iter().map(|(n, v)| (n.clone(), vec![v.len() as u64])).collect();
+        save_streamed(&p, &cfg, None, &plan, |name| tensors.iter().find(|(n, _)| n == name).unwrap().1.clone()).unwrap();
+
+        let r = WeightReader::open(&p).unwrap();
+        assert_eq!(r.config(), cfg);
+        for (name, want) in &tensors {
+            assert_eq!(&r.tensor(name).unwrap(), want, "{name}");
+            let (start, len) = (want.len() / 3, want.len() - want.len() / 3 - 1);
+            if len > 0 {
+                let mut got = Vec::new();
+                assert!(crate::TensorSource::with_tensor_range(&r, name, start, len, &mut |v| got = v.to_vec()));
+                assert_eq!(got, want[start..start + len], "{name} range");
+            }
+        }
+        std::fs::remove_file(&p).ok();
+
+        let q = scratch("streamed-short");
+        let short = save_streamed(&q, &cfg, None, &plan[..2], |_| vec![0.0]);
+        assert!(short.is_err(), "a tensor of the wrong length is an error");
+        assert!(!Path::new(&q).exists(), "no file under the final name after a failed save");
+        let _ = std::fs::remove_file(format!("{q}.{}.tmp", std::process::id()));
+    }
 
     #[test]
     fn stwriter_roundtrips_eager_and_streaming() {
