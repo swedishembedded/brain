@@ -42,6 +42,7 @@
 //! reference and a real caller's [`sam_tokens_from_nchw`] both feed (SAM has
 //! its own gate; nothing here re-derives it).
 
+use gpu_core::provider::library::{GemmPrecision, LibraryGemmProvider, Operand};
 use gpu_core::{DeviceBuffer, Gpu, Step};
 use model::block::{self, Bidir, BidirIds, KernelIds, UNREGISTERED};
 use paramstore::{ParamStore, Role};
@@ -254,6 +255,10 @@ pub struct Resampler {
     /// same runtime `deepseek2` and the qwen decoders use; `None` without an
     /// adapter or outside training.
     adapter: Option<model::adapter::exec::AdapterRuntime>,
+    /// The tensor-core GEMM the serving forward ([`Self::encode_views`]) runs its linears on, when the device has one. `None` for a
+    /// training build (its gradient checks are stated against the fp32 kernels) and under a pinned reference.
+    tensor_cores: Option<LibraryGemmProvider>,
+    train: bool,
 }
 
 impl Resampler {
@@ -298,11 +303,35 @@ impl Resampler {
             let max_out = crate::config::Qwen2EncoderConfig::lora_leaves().iter().filter_map(|leaf| cfg.encoder.linear_shape(leaf)).map(|(out, _)| out as u32).max().unwrap_or(cfg.encoder.d_model);
             model::adapter::exec::AdapterRuntime::new(&gpu, lora, rows, max_out)
         });
-        Resampler { gpu, ps, ids, cfg, opt, adapter }
+        let tensor_cores = (!train).then(|| LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Auto)).filter(LibraryGemmProvider::tf32_enabled);
+        Resampler { gpu, ps, ids, cfg, opt, adapter, tensor_cores, train }
     }
 
     pub fn gpu(&self) -> &Gpu {
         &self.gpu
+    }
+
+    /// Pin the arithmetic of the serving forward's linears: [`GemmPrecision::Fp32Reference`] runs the fp32 kernels (what parity
+    /// gates are stated against), anything else the tensor cores where the device has them. A training build is always the
+    /// fp32 reference.
+    pub fn set_gemm_precision(&mut self, precision: GemmPrecision) {
+        self.tensor_cores = (!self.train).then(|| LibraryGemmProvider::for_gpu(&self.gpu, precision)).filter(LibraryGemmProvider::tf32_enabled);
+    }
+
+    /// Whether the serving forward's linears run on tensor cores (TF32 products of the fp32 weights as stored).
+    pub fn uses_tensor_cores(&self) -> bool {
+        self.tensor_cores.is_some()
+    }
+
+    /// `out[rows, n] = x[rows, k] . w[n, k]^T`: a TF32 tensor-core product where the device runs one, else the fp32 kernel.
+    fn linear(&self, steps: &mut Vec<Step>, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, (rows, k, n): (u32, u32, u32)) {
+        let whole = |buf| Operand { buf, range: (0, 0) };
+        if let Some(tc) = &self.tensor_cores {
+            if tc.forward_tf32(&self.gpu, steps, &whole(x), &whole(w), &whole(out), rows, n, k) {
+                return;
+            }
+        }
+        steps.push(self.gpu.step(self.ids.matmul, &[x, w, out], &[rows, k, n], rows * n));
     }
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
         self.ps.read_weight(&self.gpu, name)
@@ -415,13 +444,13 @@ impl Resampler {
             let w = |leaf: &str| self.ps.w(&format!("vision.encoder.blocks.{l}.{leaf}"));
             let wn = |leaf: &str| format!("vision.encoder.blocks.{l}.{leaf}");
             steps.push(block::rmsnorm_fwd(g, &bids, &x, w("norm1.weight"), &xn, d, rows, e.rms_eps));
-            steps.push(g.step(ids.matmul, &[&xn, w("attn.q.weight"), &q], &[rows, d, d], rows * d));
+            self.linear(&mut steps, &xn, w("attn.q.weight"), &q, (rows, d, d));
             self.lora_fwd(&mut steps, "attn.q", &xn, &wn("attn.q.weight"), &q, rows, d, d);
             steps.push(g.step(ids.bias_add, &[&q, w("attn.q.bias")], &[rows, d], rows * d));
-            steps.push(g.step(ids.matmul, &[&xn, w("attn.k.weight"), &k], &[rows, d, kv], rows * kv));
+            self.linear(&mut steps, &xn, w("attn.k.weight"), &k, (rows, d, kv));
             self.lora_fwd(&mut steps, "attn.k", &xn, &wn("attn.k.weight"), &k, rows, d, kv);
             steps.push(g.step(ids.bias_add, &[&k, w("attn.k.bias")], &[rows, kv], rows * kv));
-            steps.push(g.step(ids.matmul, &[&xn, w("attn.v.weight"), &v], &[rows, d, kv], rows * kv));
+            self.linear(&mut steps, &xn, w("attn.v.weight"), &v, (rows, d, kv));
             self.lora_fwd(&mut steps, "attn.v", &xn, &wn("attn.v.weight"), &v, rows, d, kv);
             steps.push(g.step(ids.bias_add, &[&v, w("attn.v.bias")], &[rows, kv], rows * kv));
             steps.push(block::rope_fwd(g, &bids, &q, rows, nh, hd, d, t, e.rope_theta));
@@ -433,16 +462,16 @@ impl Resampler {
             steps.push(g.step(ids.mask, &[&scores], &[bsz, nh, t, n_query], bsz * nh * t * t));
             steps.push(g.step(ids.softmax, &[&scores, &probs], &[bsz, nh, t], bsz * nh * t));
             steps.push(g.step(ids.apply, &[&probs, &qkv, &ctx], &[bsz, nh, t, hd, 3 * d, 2 * d, d], bsz * nh * t * hd));
-            steps.push(g.step(ids.matmul, &[&ctx, w("attn.out.weight"), &delta], &[rows, d, d], rows * d));
+            self.linear(&mut steps, &ctx, w("attn.out.weight"), &delta, (rows, d, d));
             self.lora_fwd(&mut steps, "attn.out", &ctx, &wn("attn.out.weight"), &delta, rows, d, d);
             steps.push(g.step(ids.add_inplace, &[&x, &delta], &[rows * d], rows * d));
             steps.push(block::rmsnorm_fwd(g, &bids, &x, w("norm2.weight"), &xn, d, rows, e.rms_eps));
-            steps.push(g.step(ids.matmul, &[&xn, w("mlp.gate.weight"), &gate], &[rows, d, ff], rows * ff));
+            self.linear(&mut steps, &xn, w("mlp.gate.weight"), &gate, (rows, d, ff));
             self.lora_fwd(&mut steps, "mlp.gate", &xn, &wn("mlp.gate.weight"), &gate, rows, d, ff);
-            steps.push(g.step(ids.matmul, &[&xn, w("mlp.up.weight"), &up], &[rows, d, ff], rows * ff));
+            self.linear(&mut steps, &xn, w("mlp.up.weight"), &up, (rows, d, ff));
             self.lora_fwd(&mut steps, "mlp.up", &xn, &wn("mlp.up.weight"), &up, rows, d, ff);
             steps.push(g.step(ids.silu_mul, &[&gate, &up, &h], &[rows * ff], rows * ff));
-            steps.push(g.step(ids.matmul, &[&h, w("mlp.down.weight"), &delta], &[rows, ff, d], rows * d));
+            self.linear(&mut steps, &h, w("mlp.down.weight"), &delta, (rows, ff, d));
             self.lora_fwd(&mut steps, "mlp.down", &h, &wn("mlp.down.weight"), &delta, rows, ff, d);
             steps.push(g.step(ids.add_inplace, &[&x, &delta], &[rows * d], rows * d));
         }
@@ -453,13 +482,10 @@ impl Resampler {
         // tower's work, against slicing a device buffer per view).
         let (pin, pout) = (e.d_model, self.cfg.decoder_hidden);
         let proj = g.storage((rows * pout) as u64);
-        g.submit(
-            &[],
-            &[
-                g.step(ids.matmul, &[&xn, self.ps.w("vision.projector.fc.weight"), &proj], &[rows, pin, pout], rows * pout),
-                g.step(ids.bias_add, &[&proj, self.ps.w("vision.projector.fc.bias")], &[rows, pout], rows * pout),
-            ],
-        );
+        let mut head = Vec::new();
+        self.linear(&mut head, &xn, self.ps.w("vision.projector.fc.weight"), &proj, (rows, pin, pout));
+        head.push(g.step(ids.bias_add, &[&proj, self.ps.w("vision.projector.fc.bias")], &[rows, pout], rows * pout));
+        g.submit(&[], &head);
         let all = g.read(&proj, (rows * pout) as usize);
         all.chunks((t * pout) as usize).map(|view| view[(n_query * pout) as usize..].to_vec()).collect()
     }

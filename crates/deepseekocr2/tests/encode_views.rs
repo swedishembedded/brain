@@ -12,6 +12,7 @@
 //! produces for that view alone. Batching changes how the work is dispatched, never a value.
 
 use data::rng::Lcg;
+use gpu_core::provider::library::GemmPrecision;
 use deepseekocr2::config::{DeepseekOcr2VisionConfig, Qwen2EncoderConfig};
 use deepseekocr2::encoder::{Resampler, PIPELINES};
 use deepseekocr2::init::init_weights;
@@ -37,7 +38,9 @@ fn batched_views_equal_the_one_view_forward() {
             v.iter_mut().for_each(|x| *x *= 20.0);
         }
     }
-    let resampler = Resampler::new_on(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &init, false);
+    let mut resampler = Resampler::new_on(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &init, false);
+    // The batching is the subject here, not the arithmetic: both forwards multiply in fp32 (`tests/tensor_core.rs` holds the rest).
+    resampler.set_gemm_precision(GemmPrecision::Fp32Reference);
     let mut rng = Lcg::new(11);
     for local in [true, false] {
         let n_query = if local { cfg.encoder.n_query_local } else { cfg.encoder.n_query_global };

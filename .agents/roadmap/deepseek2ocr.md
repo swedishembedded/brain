@@ -931,3 +931,14 @@ memory-bound passes around them (`attn_relpos_add` + `softmax_rows` of the globa
   from what is free, so a neighbour that exits is noticed. What is NOT re-planned is the OCR replica set: it is decided at construction
   from the cards' free memory then, so a card that frees up later gets no replica until the server restarts (open).
 - `max_tiles` is forwarded by the chat API (top level or `chat_template_kwargs`, 0 to 64); the cheap reading is `max_tiles: 0`.
+
+## 2026-10-26 throughput lane: DeepSeek-OCR-2's resampler on tensor cores
+
+The v2 serving forward (`Resampler::encode_views`: 24 Qwen2 layers over `views x 2 x n_query` rows) multiplied every linear on the fp32
+register-tiled kernel (`matmul_f32_reg`: 152.9 ms, 38% of the 6-tile pass's 402.8 ms device time, `encode_bench --dir DeepSeek-OCR-2`).
+Its seven linears per layer and the projector are TF32 library products now (`Resampler::linear`, `set_gemm_precision` pins the reference;
+`deepseekocr2/tests/tensor_core.rs` holds the output to 7e-5 against a 0.22 scale and fails by kernel name on a fallback): the products are
+5.3 ms of the pass. What is left is the memory-bound glue the products used to hide behind: `bias_add`, `rmsnorm`, `kv_expand`, `rope`,
+`add_inplace` and `silu_mul` are 60% of the device time, and the unfused score/softmax/apply attention chain 19% (CUDA cores, reported
+apart). Both cards carried a peer's job at 230 to 370 W during these runs, which inflates every small kernel several-fold: read the
+ratios, not the absolute milliseconds.
