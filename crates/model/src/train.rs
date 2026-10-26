@@ -430,7 +430,19 @@ pub fn build_or_resume<M: Model>(cfg: M::Config, opts: &FitOpts, out: Option<&Pa
         let init = M::init_weights(&cfg, opts.seed);
         (cfg, init)
     };
-    M::new(cfg, opts.batch_size, opts.block_size, &init)
+    build_for::<M>(cfg, opts, &init).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// Build `M` sized for `opts`: with its layers streaming from the start when the run asks for f32 layers through a
+/// window (`weights=f32`, [`Model::new_resident`]), so a model larger than the device is built for training at all;
+/// a plain build otherwise, the run's other precision applied by the fit loop.
+pub fn build_for<M: Model>(cfg: M::Config, opts: &FitOpts, init: &std::collections::HashMap<String, Vec<f32>>) -> std::io::Result<M> {
+    match opts.precision.resident_config(Some(opts.seed)).map_err(std::io::Error::other)? {
+        Some(resident) if resident.value == crate::resident_ft::ResidentValue::F32 => {
+            M::new_resident(cfg, opts.batch_size, opts.block_size, init, &resident).map_err(std::io::Error::other)
+        }
+        _ => Ok(M::new(cfg, opts.batch_size, opts.block_size, init)),
+    }
 }
 
 /// Ordinary causal-LM SFT - [`fit`]'s [`Objective`]. One micro-step draws an
@@ -1995,7 +2007,7 @@ pub fn fit_from<M: Model>(
             None => {}
         }
     }
-    let model = M::new(cfg, opts.batch_size, opts.block_size, &weights);
+    let model = build_for::<M>(cfg, opts, &weights)?;
     let obj = CausalLm::new(loaded.train, loaded.val, loaded.batch_cfg, loaded.itos);
     fit_with(model, obj, opts, out)
 }

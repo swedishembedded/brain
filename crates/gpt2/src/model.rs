@@ -531,7 +531,28 @@ impl Gpt {
     }
 
     pub(crate) fn new_shard_on(gpu: Gpu, cfg: GptConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, shard: Shard) -> Gpt {
-        let ps = ParamStore::new_src(&gpu, shard_param_list(&cfg, &shard), src);
+        Gpt::build(gpu, cfg, b, t, src, shard, None).unwrap_or_else(|e| panic!("gpt2: {e}"))
+    }
+
+    /// A training build whose per-layer tensors stream through a device window under `resident` from the start
+    /// (see [`model::streamed`]): they are read from `src` into the window's host state and never all reach the
+    /// device, so a model larger than it trains. The embeddings, the head and the final norm load as usual.
+    pub fn new_resident_on(gpu: Gpu, cfg: GptConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, resident: &model::resident_ft::ResidentFtConfig) -> Result<Gpt, String> {
+        let shard = Shard::whole(cfg.n_layers as usize);
+        Gpt::build(gpu, cfg, b, t, src, shard, Some(resident))
+    }
+
+    fn build(gpu: Gpu, cfg: GptConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, shard: Shard, resident: Option<&model::resident_ft::ResidentFtConfig>) -> Result<Gpt, String> {
+        let layer_of = |name: &str| model::streamed::blocks_layer(name).filter(|&l| shard.owns(l as usize));
+        let roles = shard_param_list(&cfg, &shard)
+            .into_iter()
+            .map(|(name, numel)| {
+                let role = if resident.is_some() && layer_of(&name).is_some() { paramstore::Role::Streamed } else { paramstore::Role::Trainable };
+                (name, numel, role)
+            })
+            .collect();
+        let mut ps = ParamStore::new_with_roles_src(&gpu, roles, src);
+        let streamed = resident.map(|r| StreamedStore::attach(&gpu, &mut ps, r.clone(), src, &layer_of)).transpose()?;
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
 
         let n = (b * t) as u64;
@@ -626,7 +647,7 @@ impl Gpt {
             fwd_steps: LayerTape::default(),
             bwd_steps: LayerTape::default(),
             saved: SavedPolicy::Keep,
-            streamed: None,
+            streamed,
             backward_pending: Cell::new(false),
             ce_grad_uni,
             dec: RefCell::new(None),
@@ -635,7 +656,7 @@ impl Gpt {
         };
         m.fwd_steps = m.forward_steps(m.b, m.t);
         m.bwd_steps = m.build_backward_steps();
-        m
+        Ok(m)
     }
 
     /// Upload a batch. `y` uses [`IGNORE`] for masked positions.
@@ -1383,6 +1404,9 @@ impl model::Model for Gpt {
 
     fn new(cfg: GptConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {
         Gpt::new(cfg, b, t, init)
+    }
+    fn new_resident(cfg: GptConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, resident: &model::resident_ft::ResidentFtConfig) -> Result<Self, String> {
+        Gpt::new_resident_on(Gpu::new(&optim::with_moment_kernels(PIPELINES)), cfg, b, t, init, resident)
     }
 
     fn init_weights(cfg: &GptConfig, seed: u64) -> HashMap<String, Vec<f32>> {

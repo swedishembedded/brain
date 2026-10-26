@@ -30,6 +30,10 @@ pub enum Role {
     /// and writes the new weight back. Cuts GPU optimiser state from 4×params to
     /// 2×params (weight+grad) - enabling much larger models than fit in VRAM.
     Offload,
+    /// Trained through a window of layers held by a resident state (`model::streamed`): listed in the store (the save
+    /// set), but nothing is allocated on the device here, not even the value; the state attaches the handles of its
+    /// slots and gradient lanes after construction. What lets a model larger than the device be built for training.
+    Streamed,
 }
 
 /// Elements one workgroup of the cooperative grad-norm reduction
@@ -116,6 +120,8 @@ pub struct ParamStore {
     /// what the device buffers above physically are today; the streamed
     /// optimiser in `optim` is the consumer of non-default entries.
     pub precision: HashMap<String, precision::ParamPrecision>,
+    /// Parameters built as [`Role::Streamed`] and not yet attached: listed, with no buffer of their own.
+    pub streamed: Vec<(String, usize)>,
 }
 
 /// The AdamW moment buffers of one trainable tensor in the format its precision names: f32 (one word an element),
@@ -223,6 +229,7 @@ impl ParamStore {
         let mut params = Vec::with_capacity(params_roles.len());
         let mut trainable = Vec::new();
         let mut offload = Vec::new();
+        let mut streamed = Vec::new();
         // The bounded disk->VRAM mover, held across the WHOLE load: both the
         // host-side chunking and the device-side staging-reclaim discipline
         // (which is inherently cross-tensor - it drains roughly every GiB, not
@@ -244,6 +251,11 @@ impl ParamStore {
         let mut t_flush = std::time::Duration::ZERO;
         let mut up = upload::Uploader::new(gpu);
         for (name, numel, role) in &params_roles {
+            if *role == Role::Streamed {
+                streamed.push((name.clone(), *numel));
+                params.push((name.clone(), *numel));
+                continue;
+            }
             let t0 = std::time::Instant::now();
             let wbuf = up
                 .tensor(source, name, *numel)
@@ -284,7 +296,7 @@ impl ParamStore {
                     grad.insert(name.clone(), gpu.storage(*numel as u64));
                     offload.push((name.clone(), *numel));
                 }
-                Role::Frozen => {}
+                Role::Frozen | Role::Streamed => {}
             }
             params.push((name.clone(), *numel));
         }
@@ -299,7 +311,7 @@ impl ParamStore {
         let n_parts: u64 = trainable.iter().map(|(_, n)| gradnorm_parts(*n) as u64).sum();
         let norms = gpu.storage(n_parts.max(trainable.len() as u64).max(1));
         let clip_coef = gpu.storage(1);
-        ParamStore { params, trainable, weight, grad, adam_m, adam_v, norms, clip_coef, offload, frozen: Vec::new(), lr_mult: HashMap::new(), moment_scales, precision: precisions }
+        ParamStore { params, trainable, weight, grad, adam_m, adam_v, norms, clip_coef, offload, frozen: Vec::new(), lr_mult: HashMap::new(), moment_scales, precision: precisions, streamed }
     }
 
     /// Hold the optimizer state of every trainable parameter in the format `policy` names, before the first optimizer

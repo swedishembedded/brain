@@ -255,7 +255,15 @@ through the family's plain build, whose fit loop streams it, when the family
 declares `TrainPrecisionSupport::f32_streamed` (qwen35moe); qwen3 and qwen35
 keep their own narrow resident state and refuse `weights=f32` by name. The conversion happens after the model is
 built, so loading still needs the whole model on the device once; the window
-bounds what training adds and what stays resident.
+bounds what training adds and what stays resident, unless the model builds its
+layers straight into the window: `Model::new_resident` (called by the generic
+fit paths when the run asks for `weights=f32`) lets a model list its per-layer
+tensors as `paramstore::Role::Streamed`, which the store never allocates, and
+`StreamedStore::attach` reads them from the checkpoint into the window's host
+state, so they never all reach the device. `check_streamed_construction` holds
+such a model to a construction peak below the plain build and to the bits of
+the build streamed after construction. gpt2 builds this way; every other model
+streams after construction by the trait's default.
 
 The run asks for it with one model-agnostic value (the SDK's
 `train_precision`, the CLI's `--train-precision`):

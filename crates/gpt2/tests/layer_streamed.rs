@@ -41,3 +41,4 @@ fn gpt2_streams_its_layers_through_a_one_layer_window_and_resumes_exactly() {
     let _ = std::fs::remove_dir_all(&scratch);
     resumed.unwrap();
 }
+

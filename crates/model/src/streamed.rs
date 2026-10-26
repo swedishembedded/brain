@@ -74,23 +74,57 @@ impl StreamedStore {
     /// Move every trained tensor of `ps` that `layer_of` places in a layer into a resident state under `cfg` (f32
     /// values; a narrower value would need the model's kernels to read it), alias the store's entries to the state's
     /// slots and lanes, and withdraw those tensors from the store's optimizer: the caller must re-record its
-    /// optimizer (`optim::Optim::invalidate`). `gpu` must have registered [`crate::ops::store_device_kernels`]. The
-    /// planner refuses a window that does not fit the device's free memory before anything is allocated.
+    /// optimizer (`optim::Optim::invalidate`) and any pass that bound the store's buffers. `gpu` must have registered
+    /// [`crate::ops::store_device_kernels`]. The planner refuses a window that does not fit the device's free memory
+    /// before anything is allocated.
     pub fn convert(gpu: &Gpu, ps: &mut ParamStore, cfg: ResidentFtConfig, layer_of: &dyn Fn(&str) -> Option<u32>) -> Result<StreamedStore, String> {
+        let tensors: Vec<(String, usize, u32)> = ps.trained_params().filter_map(|(name, numel)| Some((name.clone(), *numel, layer_of(name)?))).collect();
+        if tensors.is_empty() {
+            return Err("no trained tensor of this model belongs to a layer: nothing to stream".into());
+        }
+        let values = StoreValues { gpu, ps };
+        let state = Self::state(gpu, cfg, &tensors, &values)?;
+        Ok(Self::alias(state, ps))
+    }
+
+    /// Attach a resident state under `cfg` to the tensors `ps` was built with as [`paramstore::Role::Streamed`], their
+    /// initial values read from `src` one tensor at a time: the per-layer tensors never all reach the device, so a
+    /// model larger than it is built for training. Every streamed tensor must belong to a layer (`layer_of`). The
+    /// caller records its passes after this, over the window's slots.
+    pub fn attach(gpu: &Gpu, ps: &mut ParamStore, cfg: ResidentFtConfig, src: &dyn TensorSource, layer_of: &dyn Fn(&str) -> Option<u32>) -> Result<StreamedStore, String> {
+        let tensors = ps
+            .streamed
+            .iter()
+            .map(|(name, numel)| layer_of(name).map(|l| (name.clone(), *numel, l)).ok_or_else(|| format!("{name} was built to stream but belongs to no layer")))
+            .collect::<Result<Vec<_>, String>>()?;
+        if tensors.is_empty() {
+            return Err("no tensor of this store was built to stream".into());
+        }
+        let state = Self::state(gpu, cfg, &tensors, src)?;
+        Ok(Self::alias(state, ps))
+    }
+
+    /// The resident state of `tensors` (`(name, elements, layer)`), initial values from `src`.
+    fn state(gpu: &Gpu, cfg: ResidentFtConfig, tensors: &[(String, usize, u32)], src: &dyn TensorSource) -> Result<ResidentFullFt, String> {
         if cfg.value != ResidentValue::F32 {
             return Err(format!("this model's kernels read f32 weights; its layers stream as weights=f32, not {:?}", cfg.value));
         }
-        let mut specs: Vec<ResidentSpec> = ps.trained_params().filter_map(|(name, numel)| Some((layer_of(name)?, name, *numel))).map(|(layer, name, numel)| {
-            let k = u32::try_from(numel).map_err(|_| format!("{name}: {numel} elements exceed one resident tensor"))?;
-            Ok(ResidentSpec::linear(name.clone(), 1, k, layer))
-        }).collect::<Result<_, String>>()?;
-        if specs.is_empty() {
-            return Err("no trained tensor of this model belongs to a layer: nothing to stream".into());
-        }
+        let mut specs: Vec<ResidentSpec> = tensors
+            .iter()
+            .map(|(name, numel, layer)| {
+                let k = u32::try_from(*numel).map_err(|_| format!("{name}: {numel} elements exceed one resident tensor"))?;
+                Ok(ResidentSpec::linear(name.clone(), 1, k, *layer))
+            })
+            .collect::<Result<_, String>>()?;
         specs.sort_by(|a, b| (a.layer(), &a.name).cmp(&(b.layer(), &b.name)));
         let dev = StoreDevice::new(gpu)?;
         let budget = ResidentBudget { capacity: Capacity::measured(), others: &[], authorized: Authorized::none() };
-        let ft = ResidentFullFt::new(&dev, cfg, specs, &StoreValues { gpu, ps }, &budget)?;
+        ResidentFullFt::new(&dev, cfg, specs, src, &budget)
+    }
+
+    /// Point `ps`'s entries for the state's tensors at its slots and lanes, and take them out of the store's own
+    /// optimizer and its list of tensors waiting to stream.
+    fn alias(ft: ResidentFullFt, ps: &mut ParamStore) -> StreamedStore {
         let mut index = HashMap::new();
         for (i, spec) in ft.specs().iter().enumerate() {
             let Weight::F32 { w, .. } = ft.weight(i) else { unreachable!("an f32 resident value is an f32 weight") };
@@ -103,7 +137,8 @@ impl StreamedStore {
         }
         ps.trainable.retain(|(n, _)| !index.contains_key(n));
         ps.offload.retain(|(n, _)| !index.contains_key(n));
-        Ok(StreamedStore { ft: RefCell::new(ft), index })
+        ps.streamed.retain(|(n, _)| !index.contains_key(n));
+        StreamedStore { ft: RefCell::new(ft), index }
     }
 
     /// Whether `name` is one of the streamed tensors.
@@ -311,6 +346,48 @@ pub fn check_layer_streaming<M: crate::Model>(name: &str, build: impl Fn() -> M,
             if let Some(i) = a.iter().zip(b).position(|(x, y)| x.to_bits() != y.to_bits()) {
                 return Err(format!("{name}: clip {clip:?}: {n}[{i}] is {} streamed, {} with every layer held", b[i], a[i]));
             }
+        }
+    }
+    Ok(())
+}
+
+/// The construction-time streaming contract of a model whose [`crate::Model::new_resident`] builds its layers straight
+/// into the window, for its own test to run: `build` makes the plain trainable model and `build_streamed` the same
+/// model streaming its layers through a one-layer window from construction (`weights=f32,window=1`), both from the same
+/// initial weights; `step` is as for [`check_layer_streaming`].
+///
+/// * where the backend accounts for its allocations, building the streamed model peaks at fewer live device bytes
+///   than the plain model holds once built: its layers never all reach the device;
+/// * it trains exactly what the plain model streamed after construction ([`crate::Model::set_resident`]) trains: the
+///   loss of every step and every final value, bit for bit, with the clip off and active.
+///
+/// Run it with no other model alive on the device, so the streamed build's peak is its own.
+pub fn check_streamed_construction<M: crate::Model>(name: &str, build: impl Fn() -> M, build_streamed: impl Fn() -> Result<M, String>, step: impl Fn(&M, u32, Option<f32>) -> f32) -> Result<(), String> {
+    let usage = |m: &M| m.optimizer_parts().and_then(|p| p.gpu.memory_usage());
+    let values = |m: &M| -> Vec<(String, Vec<u32>)> {
+        let mut names = m.param_names();
+        names.sort();
+        names.into_iter().map(|n| (n.clone(), m.read_weight(&n).into_iter().map(f32::to_bits).collect())).collect()
+    };
+    let streamed_peak = usage(&build_streamed().map_err(|e| format!("{name}: {e}"))?).map(|u| u.peak_live);
+    let plain_live = usage(&build()).map(|u| u.live);
+    if let (Some(peak), Some(plain)) = (streamed_peak, plain_live) {
+        if peak >= plain {
+            return Err(format!("{name}: building the streamed model peaks at {peak} live device bytes; the plain model holds {plain}"));
+        }
+    }
+    for clip in [None, Some(1e-3f32)] {
+        let built = build_streamed().map_err(|e| format!("{name}: {e}"))?;
+        let mut converted = build();
+        crate::trainprec::apply_train_precision(&mut converted, &crate::TrainPrecision::parse("weights=f32,window=1")?, name)?;
+        for t in 1..=3 {
+            let (want, got) = (step(&converted, t, clip), step(&built, t, clip));
+            if want.to_bits() != got.to_bits() {
+                return Err(format!("{name}: clip {clip:?} step {t}: built streaming, loss {got}; streamed after building, {want}"));
+            }
+        }
+        if values(&built) != values(&converted) {
+            return Err(format!("{name}: clip {clip:?}: the values trained from a streamed build differ from a build streamed after construction"));
         }
     }
     Ok(())

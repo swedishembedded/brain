@@ -371,6 +371,19 @@ pub trait Model {
         Err("this model has no layer-streamed full fine-tune".into())
     }
 
+    /// [`Model::new`] for a run that streams this model's layers under `resident` from the start: a model that
+    /// builds its layers straight into the window (`paramstore::Role::Streamed`, [`streamed::StreamedStore::attach`])
+    /// never holds them all on the device, so it trains a model larger than the device. The default builds every
+    /// layer and then streams them ([`Model::set_resident`]): the window bounds what training adds, not the load.
+    fn new_resident(cfg: Self::Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, resident: &resident_ft::ResidentFtConfig) -> Result<Self, String>
+    where
+        Self: Sized,
+    {
+        let mut model = Self::new(cfg, b, t, init);
+        model.set_resident(resident)?;
+        Ok(model)
+    }
+
     /// Keep what `policy` names of the forward for the backward ([`saved::SavedPolicy`]): every layer's intermediates,
     /// or the residual between layers with each layer replayed before its backward. Called before the first forward
     /// (the fit loop applies the run's `activations=` precision). The default keeps everything and refuses any other
