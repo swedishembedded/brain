@@ -22,6 +22,7 @@ Plans (the protocol section of the paper registers them):
   qwen-ft   Qwen3-0.6B continued on the training stories for QWEN_FT_STEPS
             steps of the shared schedule, then scored
   spectrum  Qwen3-0.6B residual-stream projection study
+  generate  text sampled from the first checkpoint of every primary model
   systems   training-step device time of the spectral mixer, dense basis
             product against FFT, over several (m, D, C)
 
@@ -73,6 +74,7 @@ QWEN_FT_STEPS = "0"
 QWEN_FT_BATCH = "4"
 QWEN_FT_LR = "3e-5"
 QWEN_FT_STORIES = "200000"
+PROMPTS = ["Once upon a time, there was a little dog named", "Lily wanted to build a tower, but", "The sun was hot, so Tom and his mom"]
 SYSTEMS = [(256, 512, 8), (256, 512, 24), (256, 512, 96), (128, 256, 24), (256, 1024, 24)]
 
 
@@ -126,6 +128,16 @@ def jobs_for(plan, work):
         jobs.append({"id": "qwen3-0.6b-zero-shot", "command": ["qwen-eval", "--weights", str(QWEN), "--text", str(CORPUS / "valid.txt"), "--max-doc-bytes", MAX_DOC_BYTES, "--batch", "8"]})
     elif plan == "qwen-ft":
         jobs.append({"id": "qwen3-0.6b-tinystories", "qwen_ft": True, "seed": str(secrets.randbits(63))})
+    elif plan == "generate":
+        seed = str(secrets.randbits(63))
+        for fam in PRIMARY:
+            done = sorted((DATA / "primary").glob(f"{fam}-*.json"))
+            if not done:
+                sys.exit(f"no primary record for {fam}; run the primary plan first")
+            ckpt = Path(str(work.parent / "primary" / (done[0].stem + ".safetensors")))
+            for i, prompt in enumerate(PROMPTS):
+                jobs.append({"id": f"{fam}-{i}", "command": ["generate", "--checkpoint", str(ckpt), "--tokenizer", str(CORPUS / "tokenizer.json"),
+                             "--prompt", prompt, "--max-new", "160", "--temp", "0.8", "--top-k", "40", "--seed", seed], "text": True})
     elif plan == "systems":
         seed = str(secrets.randbits(63))
         for m, d, c in SYSTEMS:
@@ -147,6 +159,16 @@ def card_memory(gpu):
     """Device memory in use on card `gpu`, MiB."""
     out = subprocess.run(["nvidia-smi", "-i", str(gpu), "--query-gpu=memory.used", "--format=csv,noheader,nounits"], capture_output=True, text=True)
     return int(out.stdout.strip())
+
+
+def run_text(cmd, gpu, log):
+    """Run `cmd` and return everything it printed to stdout."""
+    with open(log, "a") as lf:
+        lf.write("$ " + " ".join(cmd) + "\n")
+        out = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=lf, text=True)
+    if out.returncode != 0:
+        raise RuntimeError(f"{' '.join(cmd)} exited {out.returncode}; see {log}")
+    return out.stdout.strip()
 
 
 def run_measured(cmd, gpu, log):
@@ -200,6 +222,9 @@ def execute(job, gpu, plan, commit):
         score, _, _ = run_measured(ev, gpu, log)
         rec.update({"seed": int(job["seed"]), "corpus_command": " ".join(enc), "corpus": corp, "command": " ".join(train), "train": result,
                     "peak_mem_mib": peak, "eval_command": " ".join(ev), "result": score})
+    elif job.get("text"):
+        cmd = [str(SAMPLE)] + job["command"] + ["--gpu", str(gpu)]
+        rec.update({"command": " ".join(cmd), "text": run_text(cmd, gpu, log)})
     elif "command" in job:
         cmd = [str(SAMPLE)] + job["command"] + ["--gpu", str(gpu)]
         result, peak, _ = run_measured(cmd, gpu, log)

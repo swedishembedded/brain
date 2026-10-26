@@ -196,6 +196,18 @@ def systems(data):
                  "Tesla P40, best of three.", "tab:systems", ["$m$", "$D$", "$C$", "Dense ms", "FFT ms", "Dense/FFT"], rows, "rrrrrr")
 
 
+def samples(data):
+    recs = records(data, "generate")
+    if not recs:
+        return not_measured("Generated text")
+    out = ["\\begin{description}[style=nextline,leftmargin=0pt]"]
+    for r in sorted(recs, key=lambda r: r["id"]):
+        family = r["id"].rsplit("-", 1)[0]
+        out.append(f"\\item[{LABELS.get(family, tex(family))}] {{\\small {tex(r['text'])}}}")
+    out.append("\\end{description}")
+    return "\n".join(out) + "\n"
+
+
 def corpus(data):
     recs = records(data, "corpus")
     if not recs:
@@ -250,6 +262,7 @@ def main():
     (out / "table-qwen.tex").write_text(qwen(data, groups))
     (out / "table-compress.tex").write_text(spectrum(data))
     (out / "table-systems.tex").write_text(systems(data))
+    (out / "samples.tex").write_text(samples(data))
 
 
 if __name__ == "__main__":
