@@ -146,7 +146,7 @@ Reference client: [`samples/python/vision/deepseek-ocr/`](../../../samples/pytho
 | `prompt` | the instruction after the image. Default `<\|grounding\|>Convert the document to markdown.` - the reference model's own prompt |
 | `messages` | flattened chat messages (JSON array string); the last user turn becomes the instruction |
 | `max_new` | tokens to generate, default 2048 (`deepseek2ocr::caps::DEFAULT_MAX_NEW`). Decode is KV-cached and stops early on EOS - see below |
-| `max_tiles` | the most 640 px tiles a large page is cut into (default 9); `0` reads the page as one 1024 px global view |
+| `max_tiles` | the most 640 px tiles a large page is cut into (default 9); `0` reads the page as one 1024 px global view; over the chat API it is the `max_tiles` field, top-level or under `chat_template_kwargs`, an integer 0 to 64 |
 | `weights` | override the model-store resolver's own pick for one request |
 
 The decode runs vLLM's anti-repetition recipe for this model, set per request: no 30-gram may repeat within a 90-token window (the `<td>`/`</td>` table tags are exempt).

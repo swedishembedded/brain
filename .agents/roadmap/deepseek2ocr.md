@@ -921,3 +921,13 @@ Share of device time at the served sizes (`encode_bench`, `engine_bench --batch 
 The tensor-core products are a small share because they are fast: every GEMM of the encoders together is ~5 ms of the SAM view's 39.5.
 What is left on CUDA cores: the windowed blocks' fused attention (6 ms), CLIP's fused attention (3.7 ms), the convolutions (1.5 ms), and the
 memory-bound passes around them (`attn_relpos_add` + `softmax_rows` of the global blocks 14 ms, `bias_add` 4.4, `attn_relpos_qr` 3.6).
+
+## 2026-10-26 throughput lane: what an API client is told
+
+- A model that fits no card's budget used to reach a client as the generic `the model failed to process the request` (an unclassed error
+  string). The scheduler now classes that refusal `[failed-to-load]` with its own text, which names the model and the size and no path
+  (`residency` executor test `a_model_larger_than_every_budget_is_refused_with_a_classed_reason`).
+- Capacity is re-measured already: the dispatcher's capacity probe (`nvidia-smi`, on its idle tick) raises and lowers each card's budget
+  from what is free, so a neighbour that exits is noticed. What is NOT re-planned is the OCR replica set: it is decided at construction
+  from the cards' free memory then, so a card that frees up later gets no replica until the server restarts (open).
+- `max_tiles` is forwarded by the chat API (top level or `chat_template_kwargs`, 0 to 64); the cheap reading is `max_tiles: 0`.

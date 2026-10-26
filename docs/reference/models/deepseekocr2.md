@@ -83,7 +83,7 @@ Reference client: [`samples/python/vision/deepseek-ocr/`](../../../samples/pytho
 | `prompt` | the instruction after the image. Default `<\|grounding\|>Convert the document to markdown.` |
 | `messages` | flattened chat messages (JSON array string); the last user turn becomes the instruction |
 | `max_new` | tokens to generate, default 2048 (a page that finishes earlier stops at its end-of-sequence token) |
-| `max_tiles` | the most 768 px tiles a large page is cut into (default 6); `0` reads the page as one 1024 px global view |
+| `max_tiles` | the most 768 px tiles a large page is cut into (default 6); `0` reads the page as one 1024 px global view; over the chat API it is the `max_tiles` field, top-level or under `chat_template_kwargs`, an integer 0 to 64 |
 | `weights` | a checkpoint directory for one request, instead of the model store's own pick |
 
 The `<|grounding|>` marker and the `<|ref|>`/`<|det|>`/table-tag markers are

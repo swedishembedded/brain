@@ -1036,7 +1036,9 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
                 stalled.insert(key.clone());
                 continue;
             }
-            Err(ClaimError::TooLarge(e)) | Err(ClaimError::Activate(e)) => {
+            Err(refused @ (ClaimError::TooLarge(_) | ClaimError::Activate(_))) => {
+                let too_large = matches!(refused, ClaimError::TooLarge(_));
+                let e = refused.to_string();
                 // Both permanent for this group: FAIL its queued jobs now and
                 // keep scheduling the others. (The old code broke out of the
                 // whole round here - the jobs waited forever and every other
@@ -1045,6 +1047,12 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
                 // aggressive, could ever make room), so it must not be
                 // treated as `NoCapacity`'s "wait for a lane to free a device".
                 let msg = format!("{model}/{action}: {e}");
+                let msg = match too_large {
+                    // A size refusal names the model and sizes only: a client can act on it (a smaller model, a freer card), so
+                    // it carries a class a transport shows instead of its generic refusal.
+                    true => format!("{model}/{action}: {}", capability::failure::tag(capability::failure::FailureClass::FailedToLoad, &e)),
+                    false => msg,
+                };
                 let mut i = 0;
                 while i < queue.len() {
                     if queue[i].key == key && queue[i].action == action {
@@ -2472,6 +2480,21 @@ mod tests {
                 .expect("all three must complete (dispatcher alive)")
                 .unwrap();
         }
+    }
+
+    /// A model larger than every device's budget is refused at once, and the refusal carries a class and a reason a client can
+    /// act on (it names the model and sizes, no path), instead of the generic "failed to process" an unclassed error becomes.
+    #[test]
+    fn a_model_larger_than_every_budget_is_refused_with_a_classed_reason() {
+        let builds = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Cpu, 8 * GB, 0);
+        let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(Slow { name: "huge".into(), vram: 200 * GB, ms: 5, builds })];
+        let exec = Executor::start(models, budgets, Policy::default());
+        let err = exec.run_blocking("huge", "run", Invocation::new(), |_| {}).expect_err("a model that fits nowhere cannot run");
+        let (class, reason) = capability::classify(&err).unwrap_or_else(|| panic!("the refusal is not classed: {err}"));
+        assert_eq!(class, capability::FailureClass::FailedToLoad, "{err}");
+        assert!(reason.contains("huge") && reason.contains("budget"), "the reason names the model and the budget: {reason}");
     }
 
     /// REGRESSION: activation runs on the device's LANE, never the dispatcher.

@@ -362,6 +362,8 @@ async fn handle_generate(state: AppState, body: Bytes, surface: TextSurface) -> 
 /// body is otherwise unbounded attacker-controlled JSON, and `tools` feeds
 /// straight into prompt construction (the `<tools>` block's byte length is
 /// unbounded input to the tokenizer/model if left unchecked).
+/// Most local tiles a request may ask an image-tiling model for.
+const MAX_TILES: i64 = 64;
 const MAX_TOOLS: usize = 128;
 const MAX_TOOLS_BYTES: usize = 256 * 1024;
 const MAX_TOOL_NAME_LEN: usize = 64;
@@ -437,6 +439,13 @@ pub fn to_invocation(provider: Provider, body: &Value) -> Result<(String, Invoca
         .or_else(|| body.get("reasoning_effort").and_then(|v| v.as_str()));
     if let Some(re) = reasoning_effort {
         inv = inv.set("reasoning_effort", json!(re));
+    }
+    // `max_tiles`: the most local tiles a model that reads an image in tiles may cut it into (`0` reads the whole image as one
+    // view, the cheap reading); the same extension point as the kwargs above. A model that does not tile ignores it.
+    let max_tiles = body.get("chat_template_kwargs").and_then(|k| k.get("max_tiles")).or_else(|| body.get("max_tiles")).filter(|v| !v.is_null());
+    if let Some(v) = max_tiles {
+        let n = v.as_i64().filter(|n| (0..=MAX_TILES).contains(n)).ok_or_else(|| ApiError::invalid_request(provider, format!("'max_tiles' must be an integer in 0..={MAX_TILES}")))?;
+        inv = inv.set("max_tiles", json!(n));
     }
     // `preserve_thinking` (Qwen3.8 chat-template kwarg: keep <think> blocks
     // from prior assistant turns in the rendered history): same extension
@@ -1419,6 +1428,21 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn max_tiles_reaches_the_invocation_from_either_extension_point_and_is_bounded() {
+        let msg = json!([{"role": "user", "content": "read"}]);
+        let top = to_invocation(Provider::OpenAI, &json!({"model": "m", "messages": msg, "max_tiles": 0})).unwrap().1;
+        assert_eq!(top.get_i64("max_tiles"), Some(0));
+        let nested = to_invocation(Provider::OpenAI, &json!({"model": "m", "messages": msg, "chat_template_kwargs": {"max_tiles": 4}})).unwrap().1;
+        assert_eq!(nested.get_i64("max_tiles"), Some(4));
+        let unset = to_invocation(Provider::OpenAI, &json!({"model": "m", "messages": msg})).unwrap().1;
+        assert_eq!(unset.get_i64("max_tiles"), None, "unset stays the model's own default");
+        for bad in [json!(-1), json!(65), json!("many"), json!(2.5)] {
+            let e = to_invocation(Provider::OpenAI, &json!({"model": "m", "messages": msg, "max_tiles": bad})).unwrap_err();
+            assert!(format!("{e:?}").contains("max_tiles"), "{bad}: {e:?}");
+        }
+    }
     /// OpenAI's `completion_tokens_details.reasoning_tokens` appears only when the reply spent tokens thinking.
     #[test]
     fn usage_reports_reasoning_tokens_only_when_there_were_some() {
