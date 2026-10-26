@@ -136,20 +136,21 @@ fn ref_forward(
     y
 }
 
-// L(theta) using BATCH stats recomputed from x (so x perturbations move stats).
-fn ref_loss(
-    x: &[f32],
-    gamma: &[f32],
-    beta: &[f32],
-    dy: &[f32],
-    n: usize,
-    c: usize,
-    h: usize,
-    w: usize,
-) -> f32 {
-    let (mean, var) = ref_stats(x, n, c, h, w);
-    let y = ref_forward(x, &mean, &var, gamma, beta, n, c, h, w);
-    y.iter().zip(dy).map(|(a, b)| a * b).sum()
+// L(theta) using BATCH stats recomputed from x (so x perturbations move stats), in f64: the central difference
+// of an f32 sum loses the small gradients (BatchNorm's input gradients sum to zero per channel) to round-off.
+fn ref_loss(x: &[f32], gamma: &[f32], beta: &[f32], dy: &[f32], n: usize, c: usize, h: usize, w: usize) -> f64 {
+    let hw = h * w;
+    let m = (n * hw) as f64;
+    let at = |nn: usize, cc: usize, k: usize| ((nn * c + cc) * hw) + k;
+    let mut loss = 0.0f64;
+    for cc in 0..c {
+        let vals = || (0..n).flat_map(move |nn| (0..hw).map(move |k| at(nn, cc, k)));
+        let mean = vals().map(|i| x[i] as f64).sum::<f64>() / m;
+        let var = vals().map(|i| (x[i] as f64 - mean).powi(2)).sum::<f64>() / m;
+        let inv = 1.0 / (var + EPS as f64).sqrt();
+        loss += vals().map(|i| ((x[i] as f64 - mean) * inv * gamma[cc] as f64 + beta[cc] as f64) * dy[i] as f64).sum::<f64>();
+    }
+    loss
 }
 
 // Pack helpers matching the kernel ABIs.
@@ -349,8 +350,9 @@ fn bn_backward_finite_difference() {
 
     // --- Numerical gradients of L = sum_j dy_j * y_j ---
     let fd = 1e-3f32;
+    // Relative error, with an absolute floor for the gradients near zero the per-channel centering produces.
     let rel = |num: f32, ana: f32| -> f32 {
-        let denom = num.abs().max(ana.abs()).max(1e-6);
+        let denom = num.abs().max(ana.abs()).max(1e-2);
         (num - ana).abs() / denom
     };
 
@@ -362,7 +364,7 @@ fn bn_backward_finite_difference() {
         let mut xm = x.clone();
         xm[i] -= fd;
         let lm = ref_loss(&xm, &gamma, &beta, &dy, n, c, h, w);
-        let num = (lp - lm) / (2.0 * fd);
+        let num = ((lp - lm) / (xp[i] - xm[i]) as f64) as f32;
         assert!(
             rel(num, dx[i]) < 3e-2,
             "dx[{i}]: num={num} ana={} rel={}",
@@ -379,7 +381,7 @@ fn bn_backward_finite_difference() {
         let mut gm = gamma.clone();
         gm[cc] -= fd;
         let lm = ref_loss(&x, &gm, &beta, &dy, n, c, h, w);
-        let num = (lp - lm) / (2.0 * fd);
+        let num = ((lp - lm) / (gp[cc] - gm[cc]) as f64) as f32;
         assert!(
             rel(num, dgamma[cc]) < 3e-2,
             "dgamma[{cc}]: num={num} ana={}",
@@ -395,7 +397,7 @@ fn bn_backward_finite_difference() {
         let mut bm = beta.clone();
         bm[cc] -= fd;
         let lm = ref_loss(&x, &gamma, &bm, &dy, n, c, h, w);
-        let num = (lp - lm) / (2.0 * fd);
+        let num = ((lp - lm) / (bp[cc] - bm[cc]) as f64) as f32;
         assert!(
             rel(num, dbeta[cc]) < 3e-2,
             "dbeta[{cc}]: num={num} ana={}",
