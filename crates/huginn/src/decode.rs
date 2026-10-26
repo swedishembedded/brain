@@ -81,6 +81,7 @@ impl<'a> Decode<'a> {
     /// A decode engine over `base`'s weights, with room for `cap` positions and
     /// `steps` recurrent iterations per position.
     pub fn new(base: &'a Huginn, cap: u32, steps: u32) -> Decode<'a> {
+        assert!(!base.is_streamed(), "huginn: a layer-streamed build holds a window of its blocks; save it and load the checkpoint to decode");
         assert!(cap > 0 && steps > 0);
         let cfg = &base.cfg;
         let gpu = &base.gpu;

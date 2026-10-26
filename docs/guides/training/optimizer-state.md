@@ -239,7 +239,7 @@ trains (the host and device AdamW round differently, so losses agree to 1e-5
 and values to 1% of how far the plain build moved them); and the streamed build
 holds fewer device bytes. `trainprec::check_exact_resume` holds a streamed run
 to exact resume through the fit loop. gpt2, lfm2, horizon, spectrallm, ouro,
-deepseek2, glmdsa and qwen35moe run both
+huginn, deepseek2, glmdsa and qwen35moe run both
 (`<model>/tests/layer_streamed.rs`). A model whose passes interleave host work
 (the routed experts of deepseek2 and glmdsa, built per pass) reports its layer edges through
 `streamed::LayeredPass` (`moe::PassSeg::LayerBegin`/`LayerEnd`) instead of a
@@ -249,7 +249,8 @@ run each layer. Whatever a model holds of the store's buffers outside its passes
 slots when it converts, and the accumulators a backward adds into are cleared by
 the pass itself (`LayerTape::clear_on_submit`), since the update's measuring
 pass runs it twice. A model that runs each layer in every step of its recurrence
-(ouro) has a layer's gradient complete only after the last visit: its backward
+(ouro, huginn's recurrent core) has a layer's gradient complete only after the
+last visit: its backward
 pass declares that it revisits layers (`streamed::LayeredPass::revisits`,
 `RevisitingTape`), each visit's gradient is carried on the host
 (`ResidentFullFt::carry_layer`) and the layers are finished once the backward is
