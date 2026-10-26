@@ -59,19 +59,16 @@
 //!
 //! Config + forward + backward + deterministic init + GGUF import + a gradient
 //! check + `O(T²)`-recompute greedy decode
-//! ([`model::DeepseekV2::generate_greedy`]) + **LoRA** fine-tuning
+//! ([`model::DeepseekV2::generate_greedy`]) + the single-sequence KV-cache
+//! decode ([`model::DeepseekV2::generate_greedy_kv`]) + **LoRA** fine-tuning
 //! ([`config::DeepseekV2Config::lora`], frozen base + trainable low-rank
 //! adapters on the four attention projections - see `model`'s own doc) +
 //! **cross-GPU pipeline sharding** ([`model::Shardable`] for `DeepseekV2`,
-//! see [`shard`]). Deliberately **out of scope** for this phase, and listed
-//! here rather than half-built: INT8 quantization and paged-KV incremental
-//! serving - so of the two decode tiers the sibling decoders keep
-//! (`sample::generate` recompute, `sample::generate_kv` cached), only the
-//! recompute one exists here. `crates/qwen35moe` - the crate this one's
-//! decoder shape (and now its LoRA and sharding shape) is modelled on - has
-//! all four; this crate copies its *decoder*, not its production surface,
-//! and each of those is additive on top of the parameter layout below rather
-//! than a change to it.
+//! see [`shard`]) + the **paged batched serving engine** ([`serve::Engine`], a
+//! `model::serve::PagedDecoder`: continuous batching over a paged KV pool,
+//! prompts that carry embedding rows). Deliberately **out of scope**, and
+//! listed here rather than half-built: INT8 quantization, adapters and
+//! speculative decoding on the serving engine.
 
 pub mod config;
 pub mod hf;
@@ -79,6 +76,7 @@ pub mod import;
 pub mod init;
 pub mod lora;
 pub mod model;
+pub mod serve;
 pub mod shard;
 
 pub use config::DeepseekV2Config;

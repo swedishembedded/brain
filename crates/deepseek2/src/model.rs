@@ -95,7 +95,7 @@ use crate::config::DeepseekV2Config;
 pub const IGNORE: u32 = 0xFFFF_FFFF;
 
 // ---- kernel indices (order matches PIPELINES) ----
-const EMBED: usize = 0;
+pub(crate) const EMBED: usize = 0;
 const MATMUL: usize = 1;
 const MATMUL_REG3: usize = 2;
 const MATMUL_DX: usize = 3;
@@ -125,7 +125,7 @@ const MOE_LINEAR_GATED_DW: usize = 26;
 const SCALE_ADD: usize = 27;
 const SCALE_ADD_DEXP: usize = 28;
 const SCALE_ADD_DGATE: usize = 29;
-const ADD2: usize = 30;
+pub(crate) const ADD2: usize = 30;
 const CE_VALUE: usize = 31;
 const CE_GRAD: usize = 32;
 const EMB_BWD: usize = 33;
@@ -153,7 +153,7 @@ const SPLICE_BWD: usize = 40;
 // buffers (`fill_cache_from_prefill`); `CONCAT_SPLIT` pulls a round's LAST
 // row out of its `[n, d]` hidden state before the final norm + `lm_head`, so
 // a round that is not the final one never materializes `[n, vocab]` logits.
-const ROPE_AT: usize = 42;
+pub(crate) const ROPE_AT: usize = 42;
 const KV_APPEND: usize = 43;
 const RMSNORM_ROWS: usize = 44;
 // The coalesced RMSNorm BACKWARD-x twin of `rmsnorm_dx` above: `rmsnorm_dx`
@@ -164,9 +164,9 @@ const RMSNORM_ROWS: usize = 44;
 // construction. Appended, so every index above is unchanged.
 const RMSNORM_DX_ROWS: usize = 45;
 const PAGED_DECODE_SCORES_BATCHED: usize = 46;
-const DECODE_SOFTMAX_BATCHED: usize = 47;
+pub(crate) const DECODE_SOFTMAX_BATCHED: usize = 47;
 const PAGED_DECODE_APPLY_BATCHED: usize = 48;
-const CONCAT_SPLIT: usize = 49;
+pub(crate) const CONCAT_SPLIT: usize = 49;
 // The decode-regime GEMM: one WORKGROUP per output column, each of its 64
 // threads reading a K-slice of the weight row once. `matmul`/`matmul_reg3`
 // launch one thread per output ELEMENT, so a single decode row dispatches only
@@ -505,7 +505,22 @@ struct Decode {
     ctx: DeviceBuffer,
     proj: DeviceBuffer,
     xmid: DeviceBuffer,
-    xn2: DeviceBuffer,
+    mlp: MlpScratch,
+    xn_final: DeviceBuffer,
+    logits: DeviceBuffer,
+    kcache: Vec<DeviceBuffer>, // per layer [cap, d]
+    vcache: Vec<DeviceBuffer>,
+}
+
+/// The scratch of one MLP sublayer over up to `rows` rows, shared by every
+/// layer of a decode round (layers run strictly one after another): the second
+/// norm's output, the dense MLP's three buffers, the router/grouped-expert/
+/// shared-expert buffers and the sublayer's output. The decode round
+/// ([`DeepseekV2::decode_rows`]) and the paged serving engine
+/// (`crate::serve::Engine`) both run their MLP half through
+/// [`DeepseekV2::mlp_rows`] over one of these.
+pub(crate) struct MlpScratch {
+    pub(crate) xn2: DeviceBuffer,
     // dense MLP scratch (shared by every dense layer)
     dense_gate_pre: DeviceBuffer,
     dense_up: DeviceBuffer,
@@ -514,8 +529,8 @@ struct Decode {
     router_logits: DeviceBuffer,
     gate: DeviceBuffer,
     /// The grouped routed-expert forward's own scratch, sized once for the
-    /// widest round this instance can take (`chunk * top_k` compacted rows)
-    /// and shared by every MoE layer.
+    /// widest round (`rows * top_k` compacted rows) and shared by every MoE
+    /// layer.
     ///
     /// This REPLACED a `MoeActs` (every expert's own `gate_pre`/`up`/`h`/
     /// `expert_out` at the full round width, which only a backward needs and
@@ -536,10 +551,30 @@ struct Decode {
     sh_out: DeviceBuffer,
     moe_acc: DeviceBuffer,
     mlp_out: DeviceBuffer,
-    xn_final: DeviceBuffer,
-    logits: DeviceBuffer,
-    kcache: Vec<DeviceBuffer>, // per layer [cap, d]
-    vcache: Vec<DeviceBuffer>,
+}
+
+impl MlpScratch {
+    pub(crate) fn new(g: &Gpu, c: &DeepseekV2Config, rows: u32) -> MlpScratch {
+        let (r, d) = (rows as u64, c.d_model() as u64);
+        let st = |x: u64| g.storage(x);
+        let (dense_ff, shared_ff, e) = (c.ffn_hidden() as u64, c.shared_ff() as u64, c.n_experts() as u64);
+        let shape = MoeShape { rows, d_model: c.d_model(), moe_ff: c.moe_ff(), n_experts: c.n_experts(), top_k: c.top_k() };
+        MlpScratch {
+            xn2: st(r * d),
+            dense_gate_pre: st(r * dense_ff),
+            dense_up: st(r * dense_ff),
+            dense_h: st(r * dense_ff),
+            router_logits: st(r * e),
+            gate: st(r * e),
+            grouped: GroupedExpertScratch::new(g, &shape),
+            sh_gate: st(r * shared_ff),
+            sh_up: st(r * shared_ff),
+            sh_h: st(r * shared_ff),
+            sh_out: st(r * d),
+            moe_acc: st(r * d),
+            mlp_out: st(r * d),
+        }
+    }
 }
 
 /// DeepSeek-V2's AdamW recipe: β2 0.95, the large-language-model value,
@@ -1018,7 +1053,7 @@ impl DeepseekV2 {
 
     // ---- small dispatch helpers ----
 
-    fn w(&self, name: &str) -> &DeviceBuffer {
+    pub(crate) fn w(&self, name: &str) -> &DeviceBuffer {
         self.ps.w(name)
     }
     fn g(&self, name: &str) -> &DeviceBuffer {
@@ -1055,7 +1090,7 @@ impl DeepseekV2 {
     /// (q/k/v/o on 12 layers, the router and the shared expert's three
     /// projections on 11, and the `[1, 129280]` head), and at `m = 1` the
     /// element-per-thread kernels launch only `n` threads each.
-    fn mm(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, out: &DeviceBuffer, m: u32, k: u32, nout: u32) {
+    pub(crate) fn mm(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, out: &DeviceBuffer, m: u32, k: u32, nout: u32) {
         let (mk, mt) = match block::gemv_tier(&self.gpu, m, nout) {
             Some(threads) => (MATMUL_GEMV, threads),
             None => block::pick_gemm(m as usize, nout as usize, MATMUL, MATMUL_REG3, false),
@@ -1105,7 +1140,7 @@ impl DeepseekV2 {
         }
     }
 
-    fn norm_fwd(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, out: &DeviceBuffer, dim: u32, rows: u32) {
+    pub(crate) fn norm_fwd(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, out: &DeviceBuffer, dim: u32, rows: u32) {
         s.push(block::rmsnorm_fwd(&self.gpu, &kernel_ids(), x, self.w(wname), out, dim, rows, self.cfg.rms_eps()));
     }
 
@@ -1757,9 +1792,6 @@ impl DeepseekV2 {
         assert!(self.streamed.is_none(), "deepseek2: a layer-streamed build holds a window of its layers; save it and load the checkpoint to decode");
         let c = &self.cfg;
         let d = c.d_model() as u64;
-        let e = c.n_experts() as u64;
-        let dense_ff = c.ffn_hidden() as u64;
-        let shared_ff = c.shared_ff() as u64;
         let vocab = c.vocab() as u64;
         let nh = c.n_heads() as u64;
         // The KV-cache capacity, NOT the batched tape width `self.t` - the two
@@ -1785,8 +1817,6 @@ impl DeepseekV2 {
             kcache.push(st(cap as u64 * d));
             vcache.push(st(cap as u64 * d));
         }
-        let moe_shape_chunk = MoeShape { rows: self.chunk, d_model: c.d_model(), moe_ff: c.moe_ff(), n_experts: c.n_experts(), top_k: c.top_k() };
-
         let dec = Decode {
             cap,
             chunk: self.chunk,
@@ -1804,19 +1834,7 @@ impl DeepseekV2 {
             ctx: st(chunk * d),
             proj: st(chunk * d),
             xmid: st(chunk * d),
-            xn2: st(chunk * d),
-            dense_gate_pre: st(chunk * dense_ff),
-            dense_up: st(chunk * dense_ff),
-            dense_h: st(chunk * dense_ff),
-            router_logits: st(chunk * e),
-            gate: st(chunk * e),
-            grouped: GroupedExpertScratch::new(g, &moe_shape_chunk),
-            sh_gate: st(chunk * shared_ff),
-            sh_up: st(chunk * shared_ff),
-            sh_h: st(chunk * shared_ff),
-            sh_out: st(chunk * d),
-            moe_acc: st(chunk * d),
-            mlp_out: st(chunk * d),
+            mlp: MlpScratch::new(g, c, self.chunk),
             xn_final: st(d),
             logits: st(vocab),
             kcache,
@@ -1900,6 +1918,72 @@ impl DeepseekV2 {
         logits
     }
 
+    /// Block `l`'s MLP sublayer over `n` rows: `res_next = xmid + MLP(RMSNorm(xmid))`,
+    /// the dense SwiGLU for the leading blocks and the routed-plus-shared MoE for
+    /// the rest. The one definition of this half of a decode round, shared by
+    /// [`Self::decode_rows`] (one sequence's chunk) and the paged serving engine
+    /// (one row per running sequence): the MLP is row-wise, so it does not care
+    /// whose rows they are.
+    pub(crate) fn mlp_rows(&self, s: &mut Vec<Step>, l: usize, n: u32, xmid: &DeviceBuffer, sc: &MlpScratch, res_next: &DeviceBuffer) {
+        let c = &self.cfg;
+        let (d, e, dense_ff, shared_ff) = (c.d_model(), c.n_experts(), c.ffn_hidden(), c.shared_ff());
+        let g = &self.gpu;
+        let p = |name: &str| format!("blocks.{l}.{name}");
+        self.norm_fwd(s, xmid, &p("ln2.weight"), &sc.xn2, d, n);
+        if c.is_moe_layer(l as u32) {
+            let shape_n = MoeShape { rows: n, d_model: d, moe_ff: c.moe_ff(), n_experts: e, top_k: c.top_k() };
+            self.mm(s, &sc.xn2, &p("mlp.router.weight"), &sc.router_logits, n, d, e);
+            s.push(moe::router_fwd_kind(g, &moe_ids(), self.router_kind(), &shape_n, &sc.router_logits, None, &sc.gate, None));
+            // ONE grouped pass over every routed expert, at both round
+            // widths this function serves: a prefill round of hundreds of
+            // rows and a single decode row. The old shape dispatched
+            // `5 * n_experts` kernels per MoE layer whatever `n` was - 320
+            // per layer at this checkpoint's 64 experts, of which the
+            // router only ever selects 6 - and at `n = 1` each of those
+            // did almost no arithmetic, so the layer's cost was launch
+            // overhead rather than work.
+            //
+            // `expert_fwd_grouped` permutes the `n * top_k` routed
+            // (row, expert) pairs into per-expert contiguous ranges ON THE
+            // DEVICE and runs one grouped GEMM per projection over them,
+            // so the work is proportional to the rows actually routed at
+            // both widths. It writes `moe_acc` outright (it already sums
+            // each row's `top_k` contributions), so nothing pre-zeroes it.
+            let (gn, un, dn) = self.moe_bank_names[l].as_ref().expect("MoE layer has bank names");
+            s.extend(moe::expert_fwd_grouped(g, &grouped_expert_ids(), &shape_n, &sc.xn2, &sc.gate, self.w(gn), self.w(un), self.w(dn), &sc.grouped, &sc.moe_acc));
+            s.extend(moe::shared_expert_fwd_tiered(
+                g,
+                &shared_expert_ids(),
+                Some(MATMUL_GEMV),
+                n,
+                d,
+                shared_ff,
+                &sc.xn2,
+                self.w(&p("mlp.shared.gate.weight")),
+                self.w(&p("mlp.shared.up.weight")),
+                self.w(&p("mlp.shared.down.weight")),
+                None,
+                &SharedExpertScratch {
+                    gate_pre: &sc.sh_gate,
+                    up: &sc.sh_up,
+                    h: &sc.sh_h,
+                    mlp_out: &sc.sh_out,
+                    gate_logits: &self.gate_stub,
+                    gate_scalar: &self.gate_stub,
+                    scaled: &self.gate_stub,
+                },
+                &sc.moe_acc,
+                &sc.mlp_out,
+            ));
+        } else {
+            self.mm(s, &sc.xn2, &p("mlp.gate.weight"), &sc.dense_gate_pre, n, d, dense_ff);
+            self.mm(s, &sc.xn2, &p("mlp.up.weight"), &sc.dense_up, n, d, dense_ff);
+            s.push(block::swiglu_fwd(g, &kernel_ids(), &sc.dense_gate_pre, &sc.dense_up, &sc.dense_h, n * dense_ff));
+            self.mm(s, &sc.dense_h, &p("mlp.down.weight"), &sc.mlp_out, n, dense_ff, d);
+        }
+        s.push(g.step(ADD2, &[xmid, &sc.mlp_out, res_next], &[n * d], n * d));
+    }
+
     /// Record + run one chunked-decode ROUND: `tokens.len()` new rows
     /// starting at absolute position `pos_start`, returning only the round's
     /// LAST row's logits (`[vocab]`) - the next token to draw, or (mid-prefill)
@@ -1929,19 +2013,11 @@ impl DeepseekV2 {
         let d = c.d_model();
         let nh = c.n_heads();
         let hd = c.head_dim();
-        let e = c.n_experts();
-        let dense_ff = c.ffn_hidden();
-        let shared_ff = c.shared_ff();
         let vocab = c.vocab() as usize;
         let theta = c.rope_theta();
         let g = &self.gpu;
-        let ids = kernel_ids();
-        let moe_kernel_ids = moe_ids();
-        let grouped_ids = grouped_expert_ids();
-        let shared_ids = shared_expert_ids();
         let chunk_ids = gqa_chunk_ids();
         let n = tokens.len() as u32;
-        let shape_n = MoeShape { rows: n, d_model: d, moe_ff: c.moe_ff(), n_experts: e, top_k: c.top_k() };
 
         let dec_ref = self.dec.borrow();
         let dec = dec_ref.as_ref().unwrap();
@@ -1985,69 +2061,7 @@ impl DeepseekV2 {
             s.push(g.step(ADD2, &[&dec.res[l], &dec.proj, &dec.xmid], &[n * d], n * d));
 
             // ---- MLP: dense (leading blocks) or MoE, over the `n` new rows ----
-            self.norm_fwd(&mut s, &dec.xmid, &p("ln2.weight"), &dec.xn2, d, n);
-            if c.is_moe_layer(l as u32) {
-                self.mm(&mut s, &dec.xn2, &p("mlp.router.weight"), &dec.router_logits, n, d, e);
-                s.push(moe::router_fwd_kind(g, &moe_kernel_ids, self.router_kind(), &shape_n, &dec.router_logits, None, &dec.gate, None));
-                // ONE grouped pass over every routed expert, at both round
-                // widths this function serves: a prefill round of hundreds of
-                // rows and a single decode row. The old shape dispatched
-                // `5 * n_experts` kernels per MoE layer whatever `n` was - 320
-                // per layer at this checkpoint's 64 experts, of which the
-                // router only ever selects 6 - and at `n = 1` each of those
-                // did almost no arithmetic, so the layer's cost was launch
-                // overhead rather than work.
-                //
-                // `expert_fwd_grouped` permutes the `n * top_k` routed
-                // (row, expert) pairs into per-expert contiguous ranges ON THE
-                // DEVICE and runs one grouped GEMM per projection over them,
-                // so the work is proportional to the rows actually routed at
-                // both widths. It writes `moe_acc` outright (it already sums
-                // each row's `top_k` contributions), so nothing pre-zeroes it.
-                let (gn, un, dn) = self.moe_bank_names[l].as_ref().expect("MoE layer has bank names");
-                s.extend(moe::expert_fwd_grouped(
-                    g,
-                    &grouped_ids,
-                    &shape_n,
-                    &dec.xn2,
-                    &dec.gate,
-                    self.w(gn),
-                    self.w(un),
-                    self.w(dn),
-                    &dec.grouped,
-                    &dec.moe_acc,
-                ));
-                s.extend(moe::shared_expert_fwd_tiered(
-                    g,
-                    &shared_ids,
-                    Some(MATMUL_GEMV),
-                    n,
-                    d,
-                    shared_ff,
-                    &dec.xn2,
-                    self.w(&p("mlp.shared.gate.weight")),
-                    self.w(&p("mlp.shared.up.weight")),
-                    self.w(&p("mlp.shared.down.weight")),
-                    None,
-                    &SharedExpertScratch {
-                        gate_pre: &dec.sh_gate,
-                        up: &dec.sh_up,
-                        h: &dec.sh_h,
-                        mlp_out: &dec.sh_out,
-                        gate_logits: &self.gate_stub,
-                        gate_scalar: &self.gate_stub,
-                        scaled: &self.gate_stub,
-                    },
-                    &dec.moe_acc,
-                    &dec.mlp_out,
-                ));
-            } else {
-                self.mm(&mut s, &dec.xn2, &p("mlp.gate.weight"), &dec.dense_gate_pre, n, d, dense_ff);
-                self.mm(&mut s, &dec.xn2, &p("mlp.up.weight"), &dec.dense_up, n, d, dense_ff);
-                s.push(block::swiglu_fwd(g, &ids, &dec.dense_gate_pre, &dec.dense_up, &dec.dense_h, n * dense_ff));
-                self.mm(&mut s, &dec.dense_h, &p("mlp.down.weight"), &dec.mlp_out, n, dense_ff, d);
-            }
-            s.push(g.step(ADD2, &[&dec.xmid, &dec.mlp_out, &dec.res[l + 1]], &[n * d], n * d));
+            self.mlp_rows(&mut s, l, n, &dec.xmid, &dec.mlp, &dec.res[l + 1]);
         }
 
         // Only the LAST row is ever wanted (the next token to draw, or the
