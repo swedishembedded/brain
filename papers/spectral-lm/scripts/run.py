@@ -70,7 +70,7 @@ PILOT = ["Q-512-2048", "S-256-512-8", "S-256-512-96"]
 LR_GRID = ["1e-3", "3e-3", "6e-3"]
 # Qwen3-0.6B continued training: the budget is set from a measured
 # throughput probe and registered in the protocol before the run.
-QWEN_FT_STEPS = "0"
+QWEN_FT_STEPS = "2048"
 QWEN_FT_BATCH = "4"
 QWEN_FT_LR = "3e-5"
 QWEN_FT_STORIES = "200000"

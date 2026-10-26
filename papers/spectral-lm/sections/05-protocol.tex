@@ -33,7 +33,12 @@ feed-forward sublayer.
   compressing.
 \item \textbf{Pretrained reference}: Qwen3-0.6B \citep{qwen3report}, scored
   zero-shot on the validation split with its own tokenizer, and after
-  fine-tuning on the training split for the token budget of the trained models.
+  continued training of every weight on the first 200{,}000 training stories
+  encoded with its tokenizer: 2048 steps of 4 sequences of 512 tokens (4.2M
+  tokens, an eighth of the trained models' budget, set from its measured
+  training throughput on one card), AdamW at a fixed peak rate of
+  $3\times10^{-5}$ with 20 warm-up steps and the same cosine schedule, decay
+  and clipping; the rate is a conventional fine-tuning rate, not tuned.
 \end{itemize}
 
 \paragraph{Configurations.} Every trained model has 6 blocks, residual width
