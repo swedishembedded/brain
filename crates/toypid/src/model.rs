@@ -20,6 +20,9 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use gpu_core::{f, Gpu, Step};
+use model::saved::{Residuals, SavedPolicy};
+use model::streamed::StreamedStore;
+use model::tape::LayerTape;
 use optim::Optim;
 use paramstore::ParamStore;
 
@@ -127,6 +130,14 @@ const PIPELINES: &[(&str, &str)] = &[
     // them BY NAME, so appending them here (and only here) is the whole opt-in.
     ("gradnorm_part", kernels::GRADNORM_PART),
     ("clip_coef_wg", kernels::CLIP_COEF_WG),
+    // Narrow boundary residuals (`model::saved::Residuals`), resolved by name.
+    ("pack_bf16", kernels::PACK_BF16),
+    ("unpack_bf16", kernels::UNPACK_BF16),
+    ("pack_fp8_rows", kernels::PACK_FP8_ROWS),
+    ("unpack_fp8_rows", kernels::UNPACK_FP8_ROWS),
+    // A layer-streamed full fine-tune's device side (`model::ops::store_device_kernels`; `gradnorm_part` is above).
+    ("copy_cols", kernels::COPY_COLS),
+    ("gradnorm_part_bf16", kernels::GRADNORM_PART_BF16),
 ];
 
 #[derive(Clone)]
@@ -206,6 +217,7 @@ impl PidConfig {
     }
 }
 
+#[derive(Clone)]
 struct Layer {
     ln1_out: gpu_core::DeviceBuffer,
     qkv: gpu_core::DeviceBuffer,
@@ -230,8 +242,12 @@ pub struct Pid {
 
     tokens: gpu_core::DeviceBuffer,
     targets: gpu_core::DeviceBuffer,
-    res: Vec<gpu_core::DeviceBuffer>, // n_layers+1 residual stream
+    res: Residuals, // n_layers+1 residual stream
     layers: Vec<Layer>,
+    /// What the backward keeps of the forward: every layer's activations, or (recompute) the residual between layers,
+    /// every layer sharing one set of activation buffers its replay before its backward refills
+    /// ([`model::Model::set_saved_policy`]).
+    saved: SavedPolicy,
     proj: gpu_core::DeviceBuffer,
     ffn_out: gpu_core::DeviceBuffer,
     xn_final: gpu_core::DeviceBuffer,
@@ -261,8 +277,13 @@ pub struct Pid {
     // step (the old behaviour) allocates a fresh uniform + bind group per
     // dispatch, exhausting the GPU memory aperture after a few thousand steps
     // and triggering a device reset (surfaced as `Buffer 'params' is invalid`).
-    fwd_steps: Vec<Step>,
-    bwd_steps: Vec<Step>,
+    fwd_steps: LayerTape,
+    bwd_steps: LayerTape,
+    /// The per-layer tensors held in a device window of layers, when the run streams them
+    /// ([`model::Model::set_resident`]); `None` keeps every layer in the store.
+    streamed: Option<StreamedStore>,
+    /// A streamed build runs its backward inside the update: set by `backward`, taken by `adamw_step`.
+    backward_pending: Cell<bool>,
     ce_grad_uni: gpu_core::DeviceBuffer,
 }
 
@@ -306,6 +327,7 @@ impl Pid {
             res.push(st(n * d));
             dres.push(st(n * d));
         }
+        let res = Residuals::new(res, 0..cfg.n_layers as usize + 1);
         let mut layers = Vec::new();
         for _ in 0..cfg.n_layers {
             layers.push(Layer {
@@ -332,6 +354,7 @@ impl Pid {
             targets,
             res,
             layers,
+            saved: SavedPolicy::Keep,
             proj: st(n * d),
             ffn_out: st(n * d),
             xn_final: st(n * d),
@@ -351,8 +374,10 @@ impl Pid {
             d_val: st(n * ff),
             ln_mean: st(n),
             ln_inv: st(n),
-            fwd_steps: Vec::new(),
-            bwd_steps: Vec::new(),
+            fwd_steps: LayerTape::default(),
+            bwd_steps: LayerTape::default(),
+            streamed: None,
+            backward_pending: Cell::new(false),
             ce_grad_uni,
             gpu,
         };
@@ -380,43 +405,57 @@ impl Pid {
         self.ps.w(name)
     }
 
-    /// Forward over the first `b_use * t_use` rows. Returns mean CE.
-    fn forward_steps(&self, b_use: u32, t_use: u32) -> Vec<Step> {
+    /// Layer `l`'s forward over `b_use` sequences of `t_use` tokens, from `res[l]` into `res[l + 1]`.
+    fn layer_forward(&self, l: usize, b_use: u32, t_use: u32, s: &mut Vec<Step>) {
         let c = &self.cfg;
         let n = b_use * t_use;
         let d = c.d_model;
         let ff = c.d_ff;
-        let u = c.u_bins;
         let hd = c.head_dim();
+        let lb = &self.layers[l];
+        let p = |name: &str| format!("blocks.{l}.{name}");
+        // attention sub-layer
+        s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &self.res[l], self.w(&p("ln1.weight")), self.w(&p("ln1.bias")), &lb.ln1_out, d, n, 1e-5));
+        s.push(self.gpu.step(MATMUL, &[&lb.ln1_out, self.w(&p("attn.qkv.weight")), &lb.qkv], &[n, d, 3 * d], n * 3 * d));
+        s.push(self.gpu.step(BIAS_ADD, &[&lb.qkv, self.w(&p("attn.qkv.bias"))], &[n, 3 * d], n * 3 * d));
+        s.push(self.gpu.step(ATTN_SCORES, &[&lb.qkv, &self.tokens, &lb.scores], &[b_use, c.n_heads, t_use, hd, 3 * d, 0, d, PAD], b_use * c.n_heads * t_use * t_use));
+        s.push(self.gpu.step(ATTN_SOFTMAX, &[&lb.scores, &lb.probs], &[b_use, c.n_heads, t_use], b_use * c.n_heads * t_use));
+        s.push(self.gpu.step(ATTN_APPLY, &[&lb.probs, &lb.qkv, &lb.attn_ctx], &[b_use, c.n_heads, t_use, hd, 3 * d, 2 * d, d], b_use * c.n_heads * t_use * hd));
+        s.push(self.gpu.step(MATMUL, &[&lb.attn_ctx, self.w(&p("attn.out.weight")), &self.proj], &[n, d, d], n * d));
+        s.push(self.gpu.step(BIAS_ADD, &[&self.proj, self.w(&p("attn.out.bias"))], &[n, d], n * d));
+        s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
+        // SwiGLU FFN sub-layer
+        s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &lb.xmid, self.w(&p("ln2.weight")), self.w(&p("ln2.bias")), &lb.ln2_out, d, n, 1e-5));
+        s.push(self.gpu.step(MATMUL, &[&lb.ln2_out, self.w(&p("ffn.value.weight")), &lb.val], &[n, d, ff], n * ff));
+        s.push(self.gpu.step(BIAS_ADD, &[&lb.val, self.w(&p("ffn.value.bias"))], &[n, ff], n * ff));
+        s.push(self.gpu.step(MATMUL, &[&lb.ln2_out, self.w(&p("ffn.gate.weight")), &lb.gate], &[n, d, ff], n * ff));
+        s.push(self.gpu.step(BIAS_ADD, &[&lb.gate, self.w(&p("ffn.gate.bias"))], &[n, ff], n * ff));
+        s.push(self.gpu.step(SILU, &[&lb.gate, &lb.val, &lb.ffn_h], &[n * ff], n * ff));
+        s.push(self.gpu.step(MATMUL, &[&lb.ffn_h, self.w(&p("ffn.down.weight")), &self.ffn_out], &[n, ff, d], n * d));
+        s.push(self.gpu.step(BIAS_ADD, &[&self.ffn_out, self.w(&p("ffn.down.bias"))], &[n, d], n * d));
+        s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.ffn_out, &self.res[l + 1]], &[n * d], n * d));
+    }
+
+    /// Forward over the first `b_use * t_use` rows, one segment per layer (a layer-streamed build loads each layer
+    /// before its segment).
+    fn forward_steps(&self, b_use: u32, t_use: u32) -> LayerTape {
+        let c = &self.cfg;
+        let n = b_use * t_use;
+        let d = c.d_model;
+        let u = c.u_bins;
+        let mut tape = LayerTape::default();
         let mut s: Vec<Step> = Vec::new();
 
         // embeddings
         s.push(self.gpu.step(EMBED, &[&self.tokens, self.w("tok.weight"), &self.res[0]], &[d, n], n * d));
         s.push(self.gpu.step(POS_ADD, &[&self.res[0], self.w("pos.weight")], &[n * d, d, t_use], n * d));
 
+        self.res.round_trip(&self.gpu, &mut s, 0);
+        tape.segment(&mut s, None);
         for l in 0..c.n_layers as usize {
-            let lb = &self.layers[l];
-            let p = |name: &str| format!("blocks.{l}.{name}");
-            // attention sub-layer
-            s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &self.res[l], self.w(&p("ln1.weight")), self.w(&p("ln1.bias")), &lb.ln1_out, d, n, 1e-5));
-            s.push(self.gpu.step(MATMUL, &[&lb.ln1_out, self.w(&p("attn.qkv.weight")), &lb.qkv], &[n, d, 3 * d], n * 3 * d));
-            s.push(self.gpu.step(BIAS_ADD, &[&lb.qkv, self.w(&p("attn.qkv.bias"))], &[n, 3 * d], n * 3 * d));
-            s.push(self.gpu.step(ATTN_SCORES, &[&lb.qkv, &self.tokens, &lb.scores], &[b_use, c.n_heads, t_use, hd, 3 * d, 0, d, PAD], b_use * c.n_heads * t_use * t_use));
-            s.push(self.gpu.step(ATTN_SOFTMAX, &[&lb.scores, &lb.probs], &[b_use, c.n_heads, t_use], b_use * c.n_heads * t_use));
-            s.push(self.gpu.step(ATTN_APPLY, &[&lb.probs, &lb.qkv, &lb.attn_ctx], &[b_use, c.n_heads, t_use, hd, 3 * d, 2 * d, d], b_use * c.n_heads * t_use * hd));
-            s.push(self.gpu.step(MATMUL, &[&lb.attn_ctx, self.w(&p("attn.out.weight")), &self.proj], &[n, d, d], n * d));
-            s.push(self.gpu.step(BIAS_ADD, &[&self.proj, self.w(&p("attn.out.bias"))], &[n, d], n * d));
-            s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
-            // SwiGLU FFN sub-layer
-            s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &lb.xmid, self.w(&p("ln2.weight")), self.w(&p("ln2.bias")), &lb.ln2_out, d, n, 1e-5));
-            s.push(self.gpu.step(MATMUL, &[&lb.ln2_out, self.w(&p("ffn.value.weight")), &lb.val], &[n, d, ff], n * ff));
-            s.push(self.gpu.step(BIAS_ADD, &[&lb.val, self.w(&p("ffn.value.bias"))], &[n, ff], n * ff));
-            s.push(self.gpu.step(MATMUL, &[&lb.ln2_out, self.w(&p("ffn.gate.weight")), &lb.gate], &[n, d, ff], n * ff));
-            s.push(self.gpu.step(BIAS_ADD, &[&lb.gate, self.w(&p("ffn.gate.bias"))], &[n, ff], n * ff));
-            s.push(self.gpu.step(SILU, &[&lb.gate, &lb.val, &lb.ffn_h], &[n * ff], n * ff));
-            s.push(self.gpu.step(MATMUL, &[&lb.ffn_h, self.w(&p("ffn.down.weight")), &self.ffn_out], &[n, ff, d], n * d));
-            s.push(self.gpu.step(BIAS_ADD, &[&self.ffn_out, self.w(&p("ffn.down.bias"))], &[n, d], n * d));
-            s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.ffn_out, &self.res[l + 1]], &[n * d], n * d));
+            self.layer_forward(l, b_use, t_use, &mut s);
+            self.res.round_trip(&self.gpu, &mut s, l + 1);
+            tape.segment(&mut s, Some(l));
         }
 
         // final norm + head + loss
@@ -425,14 +464,23 @@ impl Pid {
         s.push(self.gpu.step(MATMUL, &[&self.xn_final, self.w("u_head.weight"), &self.logits], &[n, d, u], n * u));
         s.push(self.gpu.step(BIAS_ADD, &[&self.logits, self.w("u_head.bias")], &[n, u], n * u));
         s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, u, IGNORE], n));
-        s
+        tape.segment(&mut s, None);
+        tape
     }
 
     /// Submit the forward pass to the GPU. No host readback -- the loss scalar,
     /// gradients, and weights all stay device-resident. Use `loss()` to fetch
     /// the scalar only when needed (e.g. logging), avoiding per-step PCIe traffic.
     pub fn forward_submit(&self) {
-        self.gpu.submit(&[], &self.fwd_steps);
+        self.submit_forward(&self.fwd_steps);
+    }
+
+    /// Submit a recorded forward; a layer-streamed build loads each layer into its window slot as it is reached.
+    fn submit_forward(&self, tape: &LayerTape) {
+        match &self.streamed {
+            Some(stream) => stream.forward(&self.gpu, tape).unwrap_or_else(|e| panic!("toypid layer-streamed forward: {e}")),
+            None => tape.submit(&self.gpu),
+        }
     }
 
     /// Mean cross-entropy of the most recently submitted forward (reads the
@@ -461,12 +509,18 @@ impl Pid {
         let n = self.b * self.t;
         let u = self.cfg.u_bins;
         self.gpu.write(&self.ce_grad_uni, &[n, u, IGNORE, f(self.count.get())]);
-        self.gpu.submit(&[], &self.bwd_steps);
+        if self.streamed.as_ref().is_some_and(StreamedStore::is_layer_streamed) {
+            // The weights of a layer-streamed build are not all on the device: the backward runs layer by layer in
+            // `adamw_step`, where the layers it loads are the ones it updates.
+            assert!(!self.backward_pending.replace(true), "toypid layer-streamed full fine-tune: a second backward before the update (gradient accumulation) is not supported; every micro-batch is its own step");
+            return;
+        }
+        self.bwd_steps.submit(&self.gpu);
     }
 
     /// Build the backward dispatch graph (constant across steps apart from the
     /// CE-grad count, which lives in `ce_grad_uni`).
-    fn build_backward_steps(&self) -> Vec<Step> {
+    fn build_backward_steps(&self) -> LayerTape {
         let c = &self.cfg;
         let n = self.b * self.t;
         let d = c.d_model;
@@ -476,9 +530,12 @@ impl Pid {
         let g = |name: &str| self.ps.g(name);
         let p = |l: usize, name: &str| format!("blocks.{l}.{name}");
         let last = c.n_layers as usize;
+        let mut tape = LayerTape::default();
 
         // ---- head + final layernorm ----
-        let mut s: Vec<Step> = vec![
+        let mut s: Vec<Step> = Vec::new();
+        self.res.restore(&self.gpu, &mut s, last);
+        s.extend([
             self.gpu.step_buf(CE_GRAD, &self.ce_grad_uni, &[&self.logits, &self.targets, &self.d_logits], n * u),
             self.gpu.step(BIAS_GRAD, &[&self.d_logits, g("u_head.bias")], &[n, u], u),
             self.gpu.step(MATMUL_DW, &[&self.d_logits, &self.xn_final, g("u_head.weight")], &[n, d, u], u * d),
@@ -487,9 +544,15 @@ impl Pid {
             self.gpu.step(LN_DGAMMA, &[&self.d_xn, &self.res[last], &self.ln_mean, &self.ln_inv, g("ln.weight")], &[d, n], d),
             self.gpu.step(LN_DBETA, &[&self.d_xn, g("ln.bias")], &[d, n], d),
             model::block::layernorm_dx_bwd(&self.gpu, &LN_IDS, &self.res[last], self.w("ln.weight"), &self.d_xn, &self.dres[last], d, n, 1e-5),
-        ];
+        ]);
+        tape.segment(&mut s, None);
 
         for l in (0..c.n_layers as usize).rev() {
+            if self.saved.recomputes() {
+                // Every layer shares one set of activation buffers: rebuild this layer's from `res[l]` first.
+                self.res.restore(&self.gpu, &mut s, l);
+                self.layer_forward(l, self.b, self.t, &mut s);
+            }
             let lb = &self.layers[l];
             // ---- FFN backward (input grad = dres[l+1]) ----
             s.push(self.gpu.step(BIAS_GRAD, &[&self.dres[l + 1], g(&p(l, "ffn.down.bias"))], &[n, d], d));
@@ -525,13 +588,14 @@ impl Pid {
             s.push(self.gpu.step(LN_DBETA, &[&self.d_branch, g(&p(l, "ln1.bias"))], &[d, n], d));
             s.push(model::block::layernorm_dx_bwd(&self.gpu, &LN_IDS, &self.res[l], self.w(&p(l, "ln1.weight")), &self.d_branch, &self.d_tmp, d, n, 1e-5));
             s.push(self.gpu.step(ADD2, &[&self.dxmid, &self.d_tmp, &self.dres[l]], &[n * d], n * d));
+            tape.segment(&mut s, Some(l));
         }
 
         // ---- embeddings backward ----
         s.push(self.gpu.step(POS_BWD, &[&self.dres[0], g("pos.weight")], &[self.b, self.t, d], self.t * d));
         s.push(self.gpu.step(EMB_BWD, &[&self.tokens, &self.dres[0], g("tok.weight")], &[n, d, c.vocab], c.vocab * d));
-
-        s
+        tape.segment(&mut s, None);
+        tape
     }
 
     pub fn zero_grads(&self) {
@@ -548,22 +612,80 @@ impl Pid {
     }
 
     pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
-        self.opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale);
+        match &self.streamed {
+            Some(stream) => {
+                if stream.is_layer_streamed() {
+                    assert!(self.backward_pending.replace(false), "toypid layer-streamed full fine-tune: adamw_step without a backward");
+                }
+                let args = model::resident_ft::StepArgs { step: t, lr, wd, adam, clip, extra_scale };
+                stream.adamw_step(&self.gpu, &self.ps, &self.opt, &self.bwd_steps, &args).unwrap_or_else(|e| panic!("toypid layer-streamed update: {e}"));
+            }
+            None => self.opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale),
+        }
+    }
+
+    /// Keep what `policy` names of the forward: every layer's activations ([`SavedPolicy::Keep`]), or only the residual
+    /// between layers ([`SavedPolicy::Recompute`]), where every layer shares one set of activation buffers (the others
+    /// are released) and the backward replays each layer from its residual before its own backward, those residuals
+    /// optionally held in bf16 or FP8 ([`SavedPolicy::Quantized`], see [`Residuals`]). A build only narrows what it
+    /// keeps; widening again is refused by name.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        if !self.saved.narrows_to(policy) {
+            return Err(format!("toypid: a build keeping {:?} cannot go back to {policy:?}", self.saved));
+        }
+        if policy == self.saved {
+            return Ok(());
+        }
+        if !self.saved.recomputes() {
+            if let Some(shared) = self.layers.first().cloned() {
+                self.layers.fill(shared);
+            }
+        }
+        if let SavedPolicy::Quantized(format) = policy {
+            self.res.quantize(&self.gpu, format, self.b * self.t, self.cfg.d_model).map_err(|e| format!("toypid: {e}"))?;
+        }
+        self.saved = policy;
+        self.build_graphs();
+        Ok(())
+    }
+
+    /// Stream every per-layer tensor through a device window under `cfg` (see [`model::streamed`]): the layers' f32
+    /// values and optimizer state move to the host, the device keeps the window's slots. The embeddings, the head and
+    /// the final norm stay in the store under its own optimizer.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_resident(&mut self, cfg: &model::resident_ft::ResidentFtConfig) -> Result<(), String> {
+        if self.streamed.is_some() {
+            return Err("toypid: the layers already stream".into());
+        }
+        let stream = StreamedStore::convert(&self.gpu, &mut self.ps, cfg.clone(), &model::streamed::blocks_layer).map_err(|e| format!("toypid: {e}"))?;
+        self.opt.invalidate();
+        self.streamed = Some(stream);
+        // The recorded passes bound the store's buffers as they were: record them again over the window's slots
+        // (which also releases the per-layer buffers they held).
+        self.build_graphs();
+        Ok(())
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn read_grad(&self, name: &str) -> Vec<f32> {
+        assert!(!self.streamed.as_ref().is_some_and(|s| s.holds(name)), "toypid: {name} streams through a layer window; no gradient outlives its layer");
         self.ps.read_grad(&self.gpu, name)
     }
     #[cfg(not(target_arch = "wasm32"))]
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
-        self.ps.read_weight(&self.gpu, name)
+        match &self.streamed {
+            Some(stream) if stream.holds(name) => stream.read_weight(&self.gpu, name).unwrap_or_else(|e| panic!("toypid: reading {name}: {e}")),
+            _ => self.ps.read_weight(&self.gpu, name),
+        }
     }
     /// Overwrite a parameter's weights from host data (required by gradcheck via
     /// the `Model` trait, and by any host-driven weight surgery).
     #[cfg(not(target_arch = "wasm32"))]
     pub fn write_weight(&self, name: &str, data: &[f32]) {
-        self.gpu.write(self.w(name), bytemuck::cast_slice(data));
+        match &self.streamed {
+            Some(stream) if stream.holds(name) => stream.write_weight(&self.gpu, name, data).unwrap_or_else(|e| panic!("toypid: writing {name}: {e}")),
+            _ => self.gpu.write(self.w(name), bytemuck::cast_slice(data)),
+        }
     }
     /// Logits for the current batch (n_rows = b*t), shape [n_rows, u_bins].
     #[cfg(not(target_arch = "wasm32"))]
@@ -573,6 +695,7 @@ impl Pid {
     /// Debug: embedding+positional output res[0], shape [b*t, d_model].
     #[cfg(not(target_arch = "wasm32"))]
     pub fn read_res0(&self) -> Vec<f32> {
+        assert!(self.res.format() == model::saved::SavedFormat::F32, "toypid: read_res0: boundaries held in {:?} are not addressable", self.res.format());
         self.gpu.read(&self.res[0], (self.b * self.t * self.cfg.d_model) as usize)
     }
 
@@ -583,8 +706,7 @@ impl Pid {
         assert!(t_use <= self.t && self.b == 1, "decoder sized too small");
         let ignore = vec![IGNORE; t_use as usize];
         self.set_batch(tokens, &ignore);
-        let s = self.forward_steps(1, t_use);
-        self.gpu.submit(&[], &s);
+        self.submit_forward(&self.forward_steps(1, t_use));
         t_use
     }
 
@@ -693,6 +815,21 @@ impl model::ModelConfig for PidConfig {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+impl model::OffDeviceState for Pid {
+    fn commit(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
+        let stream = self.streamed.as_ref().ok_or_else(|| std::io::Error::other("toypid: no streamed state to commit"))?;
+        self.gpu.flush();
+        stream.commit(&self.gpu, dir, step)
+    }
+
+    fn restore(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
+        let stream = self.streamed.as_ref().ok_or_else(|| std::io::Error::other("toypid: no streamed state to restore"))?;
+        self.gpu.flush();
+        stream.restore(&self.gpu, dir, step)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 impl model::Model for Pid {
     fn optimizer_state(&mut self) -> Option<model::OptimizerState<'_>> {
         Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: &self.opt })
@@ -700,6 +837,16 @@ impl model::Model for Pid {
 
     fn optimizer_parts(&self) -> Option<model::OptimizerParts<'_>> {
         Some(model::OptimizerParts { gpu: &self.gpu, store: &self.ps, optim: &self.opt })
+    }
+
+    fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        Pid::set_saved_policy(self, policy)
+    }
+    fn set_resident(&mut self, cfg: &model::resident_ft::ResidentFtConfig) -> Result<(), String> {
+        Pid::set_resident(self, cfg)
+    }
+    fn off_device_state(&self) -> Option<&dyn model::OffDeviceState> {
+        self.streamed.as_ref().map(|_| self as &dyn model::OffDeviceState)
     }
 
     type Config = PidConfig;
