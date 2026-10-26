@@ -25,6 +25,7 @@ pub mod finetune;
 pub mod lora;
 mod lora_sites;
 pub mod shard;
+pub mod slice;
 pub mod spec;
 pub mod toolcall_eval;
 pub mod tp;

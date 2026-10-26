@@ -2856,6 +2856,23 @@ impl Qwen {
     pub fn read_out_res(&self) -> Vec<f32> {
         self.gpu.read(&self.res[self.shard.end], self.res_numel())
     }
+    /// The residual stream at `point` after the last forward, `[b * t, d]`:
+    /// `2l` is the stream entering layer `l` (`2 * n_layers` the one leaving
+    /// the last), `2l + 1` the stream inside layer `l` after its attention
+    /// sublayer. A shard holds the points of its own layers, in fp32 unless
+    /// its boundaries are saved in a narrow format.
+    pub fn read_residual(&self, point: usize) -> Vec<f32> {
+        let layer = point / 2;
+        assert!(
+            layer >= self.shard.start && (layer < self.shard.end || point == 2 * self.shard.end),
+            "Qwen::read_residual: point {point} is outside this shard's layers {}..{}",
+            self.shard.start,
+            self.shard.end
+        );
+        assert!(self.res_saved.is_none(), "Qwen::read_residual: this build keeps its boundaries in a narrow format");
+        let buf = if point.is_multiple_of(2) { &self.res[layer] } else { &self.layers[layer].xmid };
+        self.gpu.read(buf, self.res_numel())
+    }
     /// Write this stage's INPUT residual `res[start]` (from the previous stage).
     pub fn write_in_res(&self, data: &[f32]) {
         self.gpu.write(&self.res[self.shard.start], bytemuck::cast_slice(data));
