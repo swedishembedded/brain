@@ -1005,3 +1005,18 @@ binary without the overlap, one with):
 
 Three of the four pairs favour the overlap, the median is +20%, and median latency per page fell in three of them; a neighbour at 70 to 90%
 SM makes any one pair noisy, so treat the size as unproven and the direction as supported.
+
+## 2026-10-26 throughput lane: open, in the order the profile ranks it
+
+1. Encoder glue, ~half of a page's GPU time and all of it memory-bound: fuse SAM's relative-position bias and row softmax into one pass
+   (14 of the global view's 40 ms of SAM; one read and one write of the score slab instead of five), fold `bias_add`/`gelu` into the
+   products' epilogues, a tensor-core CLIP attention (3.7 of 8.5 ms), the windowed relative-position attention (6 ms) and v2's
+   score/softmax/apply chain on tensor cores. Batch the tiles of a page through one SAM pass.
+2. The scheduler waits for nothing now, but a burst still queues behind the encoder thread: more than one encode in flight (two streams).
+3. Prefill of a tiled page (930 tokens, ~70 ms) is built on the host chunk by chunk and not recorded; its shapes vary with the position.
+4. OCR replicas are planned once, at start, from the cards' free memory then; a card that frees up later gets none until a restart. Decode rows
+   and the K/V pool are fixed at 64 rows and 128k tokens (the 14 GiB budget), not derived from free memory, and `--max-batch`, `--ctx`
+   and `--gemm fp32` do not reach the OCR residents (no `PolicySupport` for them yet).
+5. The 1760 ms-class cold start of the first request (NVRTC and graph capture of each row count) is not warmed at load.
+6. Speed of light: 300 pages a minute is ~200 ms of GPU per page; today's ~350 ms for a 6-tile page needs items 1 and 3 and, for the decoder,
+   fp8 experts (the decode step is launch- and attention-bound at 4.5 ms for 32 rows, the weights are ~3 GB), none of which is started.
