@@ -68,6 +68,10 @@ fn train(
         eval_interval: 100,
         patience: 6,
         checkpoint_secs: 0,
+        // The batch order is pinned: across random orders each arm's error spreads by about a third (the state's
+        // long-gap error 0.022-0.030, the set encoder's 0.033-0.042), so a one-sided comparison of two single runs
+        // would pass or fail by draw. Pinned, every arm trains the same reproducible run.
+        seed: 42,
         ..Default::default()
     };
     let (_, model) = model::fit_controlled(
