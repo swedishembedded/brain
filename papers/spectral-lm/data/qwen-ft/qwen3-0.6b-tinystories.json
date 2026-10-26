@@ -1,0 +1,44 @@
+{
+ "commit": "76a336b5a42e872c88071b1f1ee2331da5aa6d34",
+ "device": "gpu0 Tesla P40",
+ "plan": "qwen-ft",
+ "id": "qwen3-0.6b-tinystories",
+ "seed": 4204743560820254815,
+ "corpus_command": "target/release/sample-text-spectral-lm qwen-corpus --weights <models>/Qwen/Qwen3-0.6B/model.brain.safetensors --text data/tinystories/train.txt --valid data/tinystories/valid.txt --out <work>/qwen-corpus --stories 200000 --gpu 0",
+ "corpus": {
+  "event": "corpus",
+  "train_tokens": 39025597,
+  "val_tokens": 5357208,
+  "vocab": 151669
+ },
+ "command": "target/release/sample-text-spectral-lm qwen-train --weights <models>/Qwen/Qwen3-0.6B/model.brain.safetensors <work>/qwen-corpus --out <work>/qwen3-0.6b-tinystories.safetensors --batch 4 --block 512 --warmup 20 --weight-decay 0.1 --clip 1.0 --steps 2048 --lr 3e-5 --seed 4204743560820254815 --gpu 0",
+ "train": {
+  "base": "<models>/Qwen/Qwen3-0.6B/model.brain.safetensors",
+  "batch": 4,
+  "block": 512,
+  "checkpoint": "<work>/qwen3-0.6b-tinystories.safetensors",
+  "event": "train",
+  "final_loss": 1.150826096534729,
+  "initial_loss": 2.1241939067840576,
+  "lr": 2.9999999242136255e-05,
+  "seconds": 9049.190126073,
+  "seed": 4204743560820254815,
+  "steps": 2048,
+  "tokens": 4194304,
+  "tokens_per_s": 463.50048364164127
+ },
+ "peak_mem_mib": null,
+ "eval_command": "target/release/sample-text-spectral-lm qwen-eval --weights <work>/qwen3-0.6b-tinystories.safetensors --tokenizer <models>/Qwen/Qwen3-0.6B --text data/tinystories/valid.txt --max-doc-bytes 1500 --batch 8 --gpu 0",
+ "result": {
+  "bits_per_byte": 0.42298197610499566,
+  "bytes": 19721848,
+  "checkpoint": "<work>/qwen3-0.6b-tinystories.safetensors",
+  "documents": 26439,
+  "event": "eval",
+  "max_doc_bytes": 1500,
+  "nats": 5782224.242167056,
+  "seconds": 2052.554518565,
+  "tokens": 4744557
+ },
+ "note": "scored by a second run after the first run's sample binary was removed from target/ before its scoring step"
+}
