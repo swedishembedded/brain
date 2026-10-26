@@ -2556,6 +2556,7 @@ dependencies = [
  "brain-gguf",
  "brain-gpu-core",
  "brain-gradcheck",
+ "brain-imaging",
  "brain-kernels",
  "brain-model",
  "brain-paramstore",

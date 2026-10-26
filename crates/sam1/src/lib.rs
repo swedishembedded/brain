@@ -54,6 +54,7 @@ pub mod hf;
 pub mod import;
 pub mod init;
 pub mod model;
+pub mod resample;
 
 pub use config::SamViTConfig;
 pub use init::{init_dense, init_weights};

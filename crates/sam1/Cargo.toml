@@ -16,6 +16,7 @@ brain-model.workspace = true
 brain-vision.workspace = true
 brain-paramstore.workspace = true
 brain-data.workspace = true
+brain-imaging.workspace = true
 # The mmproj loader that already names every SAM tensor. Depended on for the
 # config derivation and the import name map, never re-derived here.
 brain-gguf.workspace = true

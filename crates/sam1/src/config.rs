@@ -139,6 +139,20 @@ impl SamViTConfig {
         let (h, w) = self.compress_in_grid();
         (half(half(h)), half(half(w)))
     }
+    /// This tower at another patch grid, reading the same checkpoint: every
+    /// block keeps the relative-position table height it has now, so the graph
+    /// resamples the tables that no longer match their extent
+    /// (`get_rel_pos`), and the absolute position table is resampled at load by
+    /// [`crate::resample::GridSource`]. Built for a DeepSeek-OCR tile, a 640 or
+    /// 768 px crop through a tower whose table was trained at 1024.
+    pub fn at_grid(&self, grid_h: u32, grid_w: u32) -> SamViTConfig {
+        let mut c = self.clone();
+        c.rel_pos_table_rows = (0..self.n_layers).map(|l| self.rel_pos_rows(l)).collect();
+        c.grid_h = grid_h;
+        c.grid_w = grid_w;
+        c
+    }
+
     /// The block whose output feeds the HD branch -- the first global-attention
     /// block -- or `None` without [`Self::hd_branch`].
     pub fn hd_block(&self) -> Option<u32> {

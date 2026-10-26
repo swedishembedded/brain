@@ -136,6 +136,7 @@ pub mod photo;
 pub mod pixels;
 pub mod tiling;
 pub mod video;
+pub mod views;
 pub mod viz;
 
 pub use codec::{decode, load, save, save_jpeg, save_png, save_ppm, JPEG_QUALITY};
