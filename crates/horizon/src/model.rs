@@ -397,8 +397,48 @@ impl Horizon {
         b: u32,
         init: &HashMap<String, Vec<f32>>,
     ) -> Horizon {
+        Horizon::build(gpu, cfg, b, init, None).unwrap_or_else(|e| panic!("horizon: {e}"))
+    }
+
+    /// A build whose set-encoder layers stream through a device window under `resident` from the start (see
+    /// [`model::streamed`]): their tensors are read from `init` into the window's host state and never all reach the
+    /// device, so a model larger than it trains. The embeddings, the heads and the final norm load as usual. The
+    /// additive encoder has no layers, and a visit backbone's blocks stay on the device, so neither streams.
+    pub fn new_resident_on(
+        gpu: Gpu,
+        cfg: HorizonConfig,
+        b: u32,
+        init: &HashMap<String, Vec<f32>>,
+        resident: &model::resident_ft::ResidentFtConfig,
+    ) -> Result<Horizon, String> {
+        Horizon::build(gpu, cfg, b, init, Some(resident))
+    }
+
+    fn build(
+        gpu: Gpu,
+        cfg: HorizonConfig,
+        b: u32,
+        init: &HashMap<String, Vec<f32>>,
+        resident: Option<&model::resident_ft::ResidentFtConfig>,
+    ) -> Result<Horizon, String> {
         cfg.validate().expect("horizon config");
-        let ps = ParamStore::new(&gpu, cfg.param_list(), init);
+        if resident.is_some() && cfg.additive {
+            return Err("horizon: the additive encoder has no layers to stream".into());
+        }
+        if resident.is_some() && cfg.visits > 0 {
+            return Err("horizon: layers stream in the set encoder; a visit backbone's blocks stay on the device and are not supported beside a window".into());
+        }
+        let layer_of = |name: &str| model::streamed::blocks_layer(name);
+        let roles = cfg
+            .param_list()
+            .into_iter()
+            .map(|(name, numel)| {
+                let role = if resident.is_some() && layer_of(&name).is_some() { paramstore::Role::Streamed } else { paramstore::Role::Trainable };
+                (name, numel, role)
+            })
+            .collect();
+        let mut ps = ParamStore::new_with_roles_src(&gpu, roles, init);
+        let streamed = resident.map(|r| StreamedStore::attach(&gpu, &mut ps, r.clone(), init, &layer_of)).transpose()?;
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
         let (n, d, ff, r) = (
             cfg.max_tokens as u64,
@@ -523,7 +563,7 @@ impl Horizon {
             fwd: LayerTape::default(),
             bwd: LayerTape::default(),
             saved: SavedPolicy::Keep,
-            streamed: None,
+            streamed,
             backward_pending: Cell::new(false),
             cfg,
             ps,
@@ -532,7 +572,7 @@ impl Horizon {
         };
         m.fwd = m.forward_steps();
         m.bwd = m.backward_steps();
-        m
+        Ok(m)
     }
 
     /// Subjects per batch this model was sized for.
@@ -1614,6 +1654,9 @@ impl model::Model for Horizon {
 
     fn new(cfg: HorizonConfig, b: u32, _t: u32, init: &HashMap<String, Vec<f32>>) -> Self {
         Horizon::new(cfg, b, init)
+    }
+    fn new_resident(cfg: HorizonConfig, b: u32, _t: u32, init: &HashMap<String, Vec<f32>>, resident: &model::resident_ft::ResidentFtConfig) -> Result<Self, String> {
+        Horizon::new_resident_on(Gpu::new(&optim::with_moment_kernels(PIPELINES)), cfg, b, init, resident)
     }
     fn init_weights(cfg: &HorizonConfig, seed: u64) -> HashMap<String, Vec<f32>> {
         crate::init::init_weights(cfg, seed)
