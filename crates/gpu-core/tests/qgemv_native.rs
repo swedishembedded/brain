@@ -320,14 +320,23 @@ fn the_native_router_topk_selects_the_reference_experts() {
         return brain_testutil::skip_unavailable("the native router head needs a CUDA device");
     }
     let mut r = Lcg::new(data::rng::random_seed());
-    for &(rows, n, top_k, shared) in &[(1usize, 256usize, 8usize, 1usize), (5, 256, 8, 1), (3, 17, 2, 0), (40, 1000, 16, 1), (2, 256, 1, 1)] {
+    for &(rows, n, top_k, shared, norm, scale) in &[
+        (1usize, 256usize, 8usize, 1usize, 1u32, 1.0f32),
+        (5, 256, 8, 1, 1, 1.0),
+        (3, 17, 2, 0, 1, 1.0),
+        (40, 1000, 16, 1, 1, 1.0),
+        (2, 256, 1, 1, 1, 1.0),
+        // DeepSeek-V2's raw, scaled routing.
+        (3, 64, 6, 0, 0, 1.0),
+        (3, 64, 6, 0, 0, 2.5),
+    ] {
         let width = n + shared;
         let logits: Vec<f32> = (0..rows * width).map(|_| (r.next_u32() % 20001) as f32 / 2500.0 - 4.0).collect();
         let lb = gpu.storage_init("l", &logits);
         let out_w = top_k + shared;
         let (ia, wa) = (gpu.storage((rows * out_w) as u64), gpu.storage((rows * out_w) as u64));
         let (ib, wb) = (gpu.storage((rows * out_w) as u64), gpu.storage((rows * out_w) as u64));
-        let params = [rows as u32, n as u32, top_k as u32, shared as u32];
+        let params = [rows as u32, n as u32, top_k as u32, shared as u32, norm, scale.to_bits()];
         assert_eq!(gpu.native_kernel_for(0, &params), Some("moe_router_topk"));
         assert_eq!(gpu.native_kernel_for(1, &params), None);
         gpu.submit(&[], &[gpu.dispatch(0, &[&lb, &ia, &wa], &params, Dispatch::Workgroups(rows as u32)), gpu.dispatch(1, &[&lb, &ib, &wb], &params, Dispatch::Workgroups(rows as u32))]);

@@ -2569,7 +2569,7 @@ impl Qwen35 {
         // decode's one row that kernel walks the whole `k = d_model` serially per
         // output and was a third of a decode step's device time.
         self.ops.matmul(&mut steps, router_w, &self.ops.act_f32(xn2, 0, n, d), &logits, 0);
-        steps.push(g.dispatch(MOE_ROUTER_TOPK, &[&logits, &ids, &weight], &[n, e, top_k, shared], Dispatch::Workgroups(n)));
+        steps.push(g.dispatch(MOE_ROUTER_TOPK, &[&logits, &ids, &weight], &[n, e, top_k, shared, 1, 1.0f32.to_bits()], Dispatch::Workgroups(n)));
         if grouped {
             let counts = g.storage(ne as u64);
             steps.push(g.dispatch(MOE_ROUTE_COUNT, &[&ids, &counts], &[slots, ne], Dispatch::Workgroups(ne)));
@@ -2645,7 +2645,7 @@ impl Qwen35 {
             steps.push(rmsnorm_fwd(g, &kernel_ids(), xmid, self.w(&format!("blocks.{l}.ln2.weight")), xn2, d, n, c.rms_eps));
         }
         self.ops.matmul(&mut steps, &ml.router_ext, &self.ops.act_f32(xn2, 0, n, d), &logits, 0);
-        steps.push(g.dispatch(MOE_ROUTER_TOPK, &[&logits, &ids, &weight], &[n, e, top_k, 1], Dispatch::Workgroups(n)));
+        steps.push(g.dispatch(MOE_ROUTER_TOPK, &[&logits, &ids, &weight], &[n, e, top_k, 1, 1, 1.0f32.to_bits()], Dispatch::Workgroups(n)));
         if grouped {
             let counts = g.storage(ne as u64);
             steps.push(g.dispatch(MOE_ROUTE_COUNT, &[&ids, &counts], &[slots, ne], Dispatch::Workgroups(ne)));

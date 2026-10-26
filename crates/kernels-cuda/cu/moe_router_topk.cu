@@ -9,7 +9,8 @@
 // experts' logits, the `top_k` largest probabilities (ties to the lower expert), renormalised by their own sum, and the
 // shared expert's sigmoid weight as the last slot.
 //
-//   params : u32 [rows, n_experts, top_k, has_shared]   n_experts <= 1024, top_k <= 16
+//   params : u32 [rows, n_experts, top_k, has_shared, norm, scale_bits]   n_experts <= 1024, top_k <= 16
+//            norm = 1 renormalises the kept probabilities, 0 keeps them raw; scale is the routed scaling factor (f32 bits)
 //   logits : [rows, n_experts + has_shared] f32
 //   ids    : [rows, top_k + has_shared] u32     weight : [rows, top_k + has_shared] f32
 //
@@ -51,7 +52,8 @@ __device__ __forceinline__ float brain_rt_block_sum(float v, float* red) {
 
 extern "C" __global__ void __launch_bounds__(BRAIN_RT_THREADS)
 brain_moe_router_topk(const unsigned int* params, const float* logits, unsigned int* ids, float* weight) {
-    const unsigned int rows = params[0], e_n = params[1], top_k = params[2], has_shared = params[3];
+    const unsigned int rows = params[0], e_n = params[1], top_k = params[2], has_shared = params[3], norm = params[4];
+    const float scale = __uint_as_float(params[5]);
     const unsigned int row = blockIdx.y * gridDim.x + blockIdx.x;
     if (row >= rows) { return; }
     const unsigned int t = threadIdx.x;
@@ -118,7 +120,7 @@ brain_moe_router_topk(const unsigned int* params, const float* logits, unsigned 
     if (t == 0u) {
         float sel_sum = 0.0f;
         for (unsigned int kk = 0; kk < k; ++kk) { sel_sum += sel_p[kk]; }
-        const float inv = 1.0f / fmaxf(sel_sum, 1e-9f);
+        const float inv = (norm != 0u ? 1.0f / fmaxf(sel_sum, 1e-9f) : 1.0f) * scale;
         const unsigned long long out_w = k + has_shared;
         for (unsigned int kk = 0; kk < k; ++kk) {
             ids[row * out_w + kk] = sel_i[kk];

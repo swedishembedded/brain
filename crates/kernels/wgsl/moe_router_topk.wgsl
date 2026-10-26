@@ -40,9 +40,15 @@
 // The shared expert then rides through the routed experts' GEMVs as a ninth
 // slot instead of costing its own four dispatches.
 //
+//   params : u32 [rows, n_experts, top_k, has_shared, norm, scale_bits]
 //   logits : [rows, n_experts + shared]   router matmul output
 //   ids    : [rows, top_k + shared] u32
 //   weight : [rows, top_k + shared] f32
+//
+// NORMALISATION. `norm = 1` renormalises the kept probabilities by their sum (Switch/Mixtral/Qwen);
+// `norm = 0` keeps them raw (DeepSeek-V2 with `norm_topk_prob = false`, the DeepSeek-OCR decoder);
+// `scale` is DeepSeek's `routed_scaling_factor` applied last. Both are `router_gate.wgsl`'s knobs of the same
+// names, so the two routers agree for every setting.
 //
 // REQUIRES n_experts <= 1024 and top_k <= 16. Barriers are at the top level
 // of `main`, so every thread of the workgroup reaches each of them.
@@ -52,6 +58,8 @@ struct Params {
     n_experts: u32,
     top_k: u32,
     has_shared: u32,
+    norm: u32,     // 1: divide the kept probabilities by their own sum; 0: keep the raw softmax probabilities
+    scale: f32,    // routed scaling factor applied on top (1.0 = none)
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -159,7 +167,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
     if (t == 0u && live) {
         var sel_sum = 0.0;
         for (var kk: u32 = 0u; kk < k; kk = kk + 1u) { sel_sum = sel_sum + sel_p[kk]; }
-        let inv = 1.0 / max(sel_sum, 1e-9);
+        let inv = select(1.0, 1.0 / max(sel_sum, 1e-9), p.norm != 0u) * p.scale;
         let out_w = k + p.has_shared;
         for (var kk: u32 = 0u; kk < k; kk = kk + 1u) {
             ids[row * out_w + kk] = sel_i[kk];

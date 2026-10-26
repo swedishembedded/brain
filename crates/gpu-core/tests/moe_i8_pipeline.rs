@@ -192,7 +192,7 @@ fn the_router_selects_and_weights_like_router_gate_and_adds_the_shared_slot() {
         gpu.submit(
             &[],
             &[
-                gpu.dispatch(K_ROUTER, &[&lb, &ids, &weight], &[rows as u32, experts as u32, top_k as u32, 1], Dispatch::Workgroups(rows as u32)),
+                gpu.dispatch(K_ROUTER, &[&lb, &ids, &weight], &[rows as u32, experts as u32, top_k as u32, 1, 1, 1.0f32.to_bits()], Dispatch::Workgroups(rows as u32)),
                 gpu.step(K_ROUTER_GATE, &[&rb, &gate], &[rows as u32, experts as u32, top_k as u32, 1, 1.0f32.to_bits()], rows as u32),
                 gpu.step(K_TOPK_COMPACT, &[&gate, &dense_ids], &[rows as u32, experts as u32, top_k as u32], rows as u32),
             ],
@@ -218,6 +218,44 @@ fn the_router_selects_and_weights_like_router_gate_and_adds_the_shared_slot() {
     }
 }
 
+/// `norm = 0` keeps the softmax probabilities of the chosen experts raw and `scale` multiplies them,
+/// exactly `router_gate`'s `norm`/`scale` knobs: DeepSeek-V2 with `norm_topk_prob = false` (the
+/// DeepSeek-OCR decoder) routes with these.
+#[test]
+fn the_router_keeps_raw_probabilities_and_applies_the_scale_like_router_gate() {
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    if !gpu.caps().workgroup_reductions {
+        return brain_testutil::skip_unavailable("needs workgroup reductions");
+    }
+    for &(rows, experts, top_k, scale) in &[(1usize, 64usize, 6usize, 1.0f32), (5, 64, 6, 2.5), (3, 256, 8, 0.5)] {
+        let mut rng = Lcg::new(random_seed());
+        let logits: Vec<f32> = (0..rows * experts).map(|_| (rng.next_u32() % 12000) as f32 * 1e-3 - 6.0).collect();
+        let lb = upload_f32(&gpu, &logits);
+        let (ids, weight) = (gpu.storage((rows * top_k) as u64), gpu.storage((rows * top_k) as u64));
+        let (gate, dense_ids) = (gpu.storage((rows * experts) as u64), gpu.storage((rows * top_k) as u64));
+        gpu.submit(
+            &[],
+            &[
+                gpu.dispatch(K_ROUTER, &[&lb, &ids, &weight], &[rows as u32, experts as u32, top_k as u32, 0, 0, scale.to_bits()], Dispatch::Workgroups(rows as u32)),
+                gpu.step(K_ROUTER_GATE, &[&lb, &gate], &[rows as u32, experts as u32, top_k as u32, 0, scale.to_bits()], rows as u32),
+                gpu.step(K_TOPK_COMPACT, &[&gate, &dense_ids], &[rows as u32, experts as u32, top_k as u32], rows as u32),
+            ],
+        );
+        gpu.poll_wait();
+        let (got_ids, got_w) = (read_u32(&gpu, &ids, rows * top_k), gpu.read(&weight, rows * top_k));
+        let (want_ids, dense_gate) = (read_u32(&gpu, &dense_ids, rows * top_k), gpu.read(&gate, rows * experts));
+        for r in 0..rows {
+            assert_eq!(sorted(got_ids[r * top_k..(r + 1) * top_k].to_vec()), sorted(want_ids[r * top_k..(r + 1) * top_k].to_vec()), "row {r}: the selected experts");
+            for s in 0..top_k {
+                let e = got_ids[r * top_k + s] as usize;
+                let want = dense_gate[r * experts + e];
+                let got = got_w[r * top_k + s];
+                assert!((got - want).abs() <= 8.0 * f32::EPSILON * want.abs().max(1e-6), "row {r} expert {e}: weight {got} vs {want}");
+            }
+        }
+    }
+}
+
 /// Two experts at exactly equal probability: the LOWER index wins, as in
 /// `router_gate`'s strict `>` scan, and an expert is never selected twice.
 #[test]
@@ -233,7 +271,7 @@ fn the_router_breaks_ties_toward_the_lower_expert() {
     logits[130] = 3.0;
     let lb = upload_f32(&gpu, &logits);
     let (ids, weight) = (gpu.storage(3), gpu.storage(3));
-    gpu.submit(&[], &[gpu.dispatch(K_ROUTER, &[&lb, &ids, &weight], &[1, experts as u32, 2, 0], Dispatch::Workgroups(1))]);
+    gpu.submit(&[], &[gpu.dispatch(K_ROUTER, &[&lb, &ids, &weight], &[1, experts as u32, 2, 0, 1, 1.0f32.to_bits()], Dispatch::Workgroups(1))]);
     gpu.poll_wait();
     assert_eq!(&read_u32(&gpu, &ids, 2), &[5, 130], "equal probabilities pick the lowest indices first");
 }

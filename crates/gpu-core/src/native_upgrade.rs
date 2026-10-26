@@ -416,9 +416,9 @@ const MOE_NVFP4_GATEUP_BINDINGS: &[BindKind] = &[
 /// `moe_router_topk.wgsl`'s bindings: params, `logits`, `ids`, `weight`.
 const MOE_ROUTER_TOPK_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageReadWrite, BindKind::StorageReadWrite];
 
-/// The router head's `[rows, n_experts, top_k, has_shared]`: one 256-thread block holds at most 4 experts per thread and 16 picks.
+/// The router head's `[rows, n_experts, top_k, has_shared, norm, scale]`: one 256-thread block holds at most 4 experts per thread and 16 picks.
 fn serves_moe_router_topk(p: &[u32]) -> bool {
-    matches!(p, [rows, n, k, shared] if *rows >= 1 && (1..=1024).contains(n) && (1..=16).contains(k) && *shared <= 1)
+    matches!(p, [rows, n, k, shared, norm, _scale] if *rows >= 1 && (1..=1024).contains(n) && (1..=16).contains(k) && *shared <= 1 && *norm <= 1)
 }
 
 /// One block per row.

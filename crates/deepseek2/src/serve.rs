@@ -257,6 +257,7 @@ impl Engine {
             seq_lens.push(t.len());
             host_tables[i * bt..i * bt + t.blocks().len()].copy_from_slice(t.blocks());
         }
+        let t_dbg = std::time::Instant::now();
         let cap = *seq_lens.iter().max().expect("a non-empty batch");
         let (g, sc, c) = (&self.m.gpu, &self.sc, &self.m.cfg);
         g.write(&sc.tok_ids, inputs);
@@ -284,7 +285,9 @@ impl Engine {
         };
         let out = self.layers(&mut s, b, &rope, &attend);
         self.head(&mut s, &self.sc.res[out], b);
+        let t_built = t_dbg.elapsed();
         self.m.gpu.submit(&[], &s);
+        eprintln!("DBG decode: write+build {:.2} ms, submit {:.2} ms, steps {}", t_built.as_secs_f64() * 1e3, (t_dbg.elapsed() - t_built).as_secs_f64() * 1e3, s.len());
     }
 
     /// Read the next slice of `prompt` (at most `budget` rows) into `table`; when it is
@@ -364,6 +367,11 @@ impl Engine {
         let mut s: Vec<Step> = Vec::new();
         self.m.mm(&mut s, &self.sc.xn_final, c.head_weight(), &self.sc.logits, 1, c.d_model(), c.vocab());
         g.submit(&[], &s);
+    }
+
+    /// The device the engine runs on, for its profile and op counters.
+    pub fn gpu(&self) -> &Gpu {
+        &self.m.gpu
     }
 
     /// Tokens of K/V the pool holds.
