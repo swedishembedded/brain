@@ -349,8 +349,7 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         // Device AdamW over bf16 or blockwise-int8 moments (`optim::Optim` resolves them by name).
         v.extend(optim::MOMENT_KERNELS);
         // The row-compacted expert training path (`model::moe::MoeActs::compact`), resolved by name.
-        let missing: Vec<_> = model::moe::COMPACT_TRAIN_KERNELS.iter().filter(|(n, _)| !v.iter().any(|(have, _)| have == n)).copied().collect();
-        v.extend(missing);
+        let mut v = model::moe::with_compact_train_kernels(&v);
         v.push(("matmul_gemv", kernels::MATMUL_GEMV));
         v.push(("matmul_reg2", kernels::MATMUL_REG3));
         v.push(("matmul_i8_gemv", kernels::MATMUL_I8_GEMV));

@@ -395,6 +395,14 @@ struct RoutedRows {
 pub const COMPACT_TRAIN_KERNELS: &[(&str, &str)] =
     &[("embed", kernels::EMBED), ("moe_scatter_scaled_add", kernels::MOE_SCATTER_SCALED_ADD), ("rows_scatter_add", kernels::ROWS_SCATTER_ADD)];
 
+/// `pipelines` with every [`COMPACT_TRAIN_KERNELS`] entry it does not already name appended at the end, so the
+/// positions a model's kernel constants index stay where they are.
+pub fn with_compact_train_kernels(pipelines: &[(&'static str, &'static str)]) -> Vec<(&'static str, &'static str)> {
+    let mut all = pipelines.to_vec();
+    all.extend(COMPACT_TRAIN_KERNELS.iter().filter(|(name, _)| !pipelines.iter().any(|(n, _)| n == name)));
+    all
+}
+
 fn compact_kernel(g: &Gpu, name: &str) -> usize {
     g.kernel_index(name).unwrap_or_else(|| panic!("model::moe: row-compacted training needs the `{name}` kernel registered (model::moe::COMPACT_TRAIN_KERNELS)"))
 }

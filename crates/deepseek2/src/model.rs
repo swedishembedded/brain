@@ -7,9 +7,11 @@
 //!
 //! Both tapes are built ONCE in [`DeepseekV2::new_on`] and stored
 //! ([`DeepseekV2::fwd_steps`]/`bwd_steps` are plain dispatch descriptors, not
-//! lazily-evaluated closures); `forward()`/`backward()` only submit them and
-//! read back the loss. This is `crates/qwen35moe`'s and `crates/glm`'s shape,
-//! not a new one.
+//! lazily-evaluated closures) as [`Seg`]ments: the dispatches fixed at build,
+//! and each MoE layer's routed experts, whose shape follows the rows routed to
+//! each expert in this pass and which are built when the pass reaches them
+//! (`model::moe::MoeActs::compact`). `forward()`/`backward()` run them and
+//! read back the loss.
 //!
 //! ## What is composed, and from where - this crate adds NO kernel
 //!
@@ -174,14 +176,8 @@ const CONCAT_SPLIT: usize = 49;
 // dispatch ladder routes to the native AVX2 GEMM. Appended, so every index
 // above is unchanged.
 const MATMUL_GEMV: usize = 50;
-// The decode-regime twin of `moe_linear_gated`, same relationship
-// `matmul_gemv` has to `matmul`: one WORKGROUP per output column instead of
-// one thread per output element. Still used by the per-expert training
-// forward/backward (which needs each expert's own saved activations); the
-// inference-only routed-expert half of a layer now runs through the grouped
-// MoE kernels below instead. Selected by `moe::expert_fwd_tiered` against the
-// DEVICE's caps. Appended, so every index above is unchanged.
-const MOE_LINEAR_GATED_GEMV: usize = 51;
+// 51 is `moe_linear_gated_gemv`, kept registered so the positions after it hold: the routed experts now run on their
+// routed rows (`model::moe::experts_fwd_train`, training) or through the grouped kernels below (inference).
 // Grouped MoE (`model::moe::expert_fwd_grouped`) - the whole routed-expert
 // half of an inference MoE layer in ~9 dispatches instead of `5 * n_experts`.
 // Appended, so every index above is unchanged.
@@ -192,6 +188,11 @@ const SCAN_ADD: usize = 55;
 const MOE_GROUP_PERM_EMIT: usize = 56;
 const MATMUL_REG3_GROUPED: usize = 57;
 const MOE_GROUP_COMBINE: usize = 58;
+
+/// [`PIPELINES`] with the moment kernels of a narrowed optimizer state.
+fn pipelines() -> Vec<(&'static str, &'static str)> {
+    optim::with_moment_kernels(PIPELINES)
+}
 
 pub const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -283,6 +284,10 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("scale_chan", kernels::SCALE_CHAN),
     ("swap_axes12_vec", kernels::SWAP_AXES12_VEC),
     ("bias_grad", kernels::BIAS_GRAD),
+    // The routed experts on their routed rows (`model::moe::experts_fwd_train`, `moe_layer_bwd`), resolved by name
+    // (`embed` above is the row gather).
+    ("moe_scatter_scaled_add", kernels::MOE_SCATTER_SCALED_ADD),
+    ("rows_scatter_add", kernels::ROWS_SCATTER_ADD),
 ];
 
 fn kernel_ids() -> KernelIds {
@@ -402,6 +407,15 @@ fn argmax(v: &[f32]) -> usize {
     best
 }
 
+/// One piece of a recorded pass: the dispatches fixed when the pass was built, or one MoE layer's routed experts over
+/// `rows` rows, whose shapes follow the rows routed to each expert in this pass and are built when the pass reaches
+/// them.
+enum Seg {
+    Steps(Vec<Step>),
+    MoeFwd { layer: usize, rows: u32 },
+    MoeBwd { layer: usize, rows: u32 },
+}
+
 /// Per-layer MLP variant, holding the activations its backward reads back.
 enum Mlp {
     /// Blocks `[0, n_dense_layers)`: a plain SwiGLU MLP at `ffn_hidden` width.
@@ -410,7 +424,9 @@ enum Mlp {
     Moe {
         router_logits: DeviceBuffer,
         gate: DeviceBuffer, // combine weights [n, E], zero outside the top-k
-        acts: MoeActs,      // every expert's own gate_pre/up/h/expert_out
+        /// Every expert's `gate_pre`/`up`/`h`/`expert_out` for the rows routed to it in the latest forward
+        /// (`MoeActs::compact`), which the backward reads.
+        acts: RefCell<Option<MoeActs>>,
         sh_gate: DeviceBuffer,
         sh_up: DeviceBuffer,
         sh_h: DeviceBuffer,
@@ -617,8 +633,8 @@ pub struct DeepseekV2 {
     /// `cfg.lora` is set.
     adapter: Option<AdapterRuntime>,
 
-    fwd_steps: Vec<Step>,
-    bwd_steps: Vec<Step>,
+    fwd_steps: Vec<Seg>,
+    bwd_steps: Vec<Seg>,
 
     // ---- incremental KV-cache decode state (lazily built on first `step`) ----
     dec: RefCell<Option<Decode>>,
@@ -684,13 +700,13 @@ fn shard_param_list(cfg: &DeepseekV2Config, shard: &Shard) -> Vec<(String, usize
 impl DeepseekV2 {
     /// Trainable model on a fresh device.
     pub fn new(cfg: DeepseekV2Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> DeepseekV2 {
-        DeepseekV2::new_on(Gpu::new(&optim::with_moment_kernels(PIPELINES)), cfg, b, t, init, true)
+        DeepseekV2::new_on(Gpu::new(&pipelines()), cfg, b, t, init, true)
     }
 
     /// Frozen (forward-only) model on a fresh device: no gradient/AdamW buffers
     /// are allocated and no backward tape is built.
     pub fn new_inference(cfg: DeepseekV2Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> DeepseekV2 {
-        DeepseekV2::new_on(Gpu::new(&optim::with_moment_kernels(PIPELINES)), cfg, b, t, init, false)
+        DeepseekV2::new_on(Gpu::new(&pipelines()), cfg, b, t, init, false)
     }
 
     /// Build on an existing device handle (the pooled test device, a placed
@@ -722,7 +738,7 @@ impl DeepseekV2 {
     /// - see `crate::shard`'s [`model::Shardable`] impl.
     pub fn new_shard(cfg: DeepseekV2Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, shard: Shard) -> DeepseekV2 {
         let gpu = if shard.gpu_index == Shard::ANY_GPU {
-            Gpu::new(&optim::with_moment_kernels(PIPELINES))
+            Gpu::new(&pipelines())
         } else {
             Gpu::new_on_index(shard.gpu_index as u32, PIPELINES).unwrap_or_else(|e| panic!("deepseekv2 shard placement: {e}"))
         };
@@ -842,20 +858,13 @@ impl DeepseekV2 {
             res.push(st(n * d));
             dres.push(st(bn * d));
         }
-        let moe_shape = MoeShape {
-            rows: n as u32,
-            d_model: cfg.d_model(),
-            moe_ff: cfg.moe_ff(),
-            n_experts: cfg.n_experts(),
-            top_k: cfg.top_k(),
-        };
         let mut layers = Vec::new();
         for l in 0..cfg.n_layers() {
             let mlp = if cfg.is_moe_layer(l) {
                 Mlp::Moe {
                     router_logits: st(n * e),
                     gate: st(n * e),
-                    acts: MoeActs::new(&gpu, &moe_shape),
+                    acts: RefCell::new(None),
                     sh_gate: st(n * shared_ff),
                     sh_up: st(n * shared_ff),
                     sh_h: st(n * shared_ff),
@@ -1061,7 +1070,7 @@ impl DeepseekV2 {
 
     // ---- forward tape ----
 
-    fn build_forward(&self, b_use: u32, t_use: u32) -> Vec<Step> {
+    fn build_forward(&self, b_use: u32, t_use: u32) -> Vec<Seg> {
         let c = &self.cfg;
         let n = b_use * t_use;
         let d = c.d_model();
@@ -1074,6 +1083,7 @@ impl DeepseekV2 {
         let ids = kernel_ids();
         let ga = Gqa { b: b_use, t: t_use, n_heads: nh, n_kv_heads: c.n_kv_heads(), head_dim: hd };
         let shape = self.moe_shape(n);
+        let mut segs: Vec<Seg> = Vec::new();
         let mut s: Vec<Step> = Vec::new();
 
         // Embedding gather + vision-language splice - embed stage only. A
@@ -1114,42 +1124,15 @@ impl DeepseekV2 {
                     s.push(block::swiglu_fwd(&self.gpu, &ids, gate_pre, up, h, n * dense_ff));
                     self.mm(&mut s, h, &p("mlp.down.weight"), &self.mlp_out, n, dense_ff, d);
                 }
-                Mlp::Moe { router_logits, gate, acts, sh_gate, sh_up, sh_h } => {
+                Mlp::Moe { router_logits, gate, sh_gate, sh_up, sh_h, .. } => {
                     // Router: logits -> a dense [n, E] gate, nonzero only at the
                     // selected experts, under THIS config's norm/scale policy.
                     self.mm(&mut s, &lb.xn2, &p("mlp.router.weight"), router_logits, n, d, e);
                     s.push(moe::router_fwd_kind(&self.gpu, &moe_ids(), self.router_kind(), &shape, router_logits, None, gate, None));
-                    // Routed experts, one dispatch triple per expert against
-                    // its slice of the layer's three weight BANKS
-                    // (`moe::bank_offset`): `moe_linear_gated` skips a row
-                    // this expert did not win before the K-reduction, so the
-                    // cost is proportional to the rows actually routed here.
-                    //
-                    // This tape is the TRAINING one, so it stays per-expert
-                    // even though `decode_rows` runs the same layer through
-                    // the single grouped dispatch: the backward needs every
-                    // expert's own `gate_pre`/`up`/`h`/`expert_out` in
-                    // `MoeActs`, and the grouped forward writes compacted
-                    // activations that no expert owns.
-                    let (gn, un, dn) = self.moe_bank_names[l].as_ref().expect("MoE layer has bank names");
-                    for ei in 0..e as usize {
-                        s.extend(moe::expert_fwd_tiered(
-                            &self.gpu,
-                            &moe_ids(),
-                            Some(MOE_LINEAR_GATED_GEMV),
-                            &shape,
-                            &lb.xn2,
-                            gate,
-                            self.w(gn),
-                            self.w(un),
-                            self.w(dn),
-                            &acts.at(ei),
-                            &self.moe_acc,
-                            ei as u32,
-                            moe::bank_offset(&shape, ei as u32),
-                            ei != 0,
-                        ));
-                    }
+                    // Routed experts on the rows routed to each: built when the pass reaches them
+                    // (`Self::moe_fwd`), since the routing is this pass's.
+                    segs.push(Seg::Steps(std::mem::take(&mut s)));
+                    segs.push(Seg::MoeFwd { layer: l, rows: n });
                     // The fused shared experts, added UNWEIGHTED (`None`): there
                     // is no shared-expert gate tensor in this checkpoint, and an
                     // unweighted sum of SwiGLU experts IS one SwiGLU of the
@@ -1192,18 +1175,18 @@ impl DeepseekV2 {
             self.mm(&mut s, &self.xn_final, c.head_weight(), &self.logits, n, d, v);
             s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, v, IGNORE], n));
         }
-        s
+        segs.push(Seg::Steps(s));
+        segs
     }
 
     // ---- backward tape ----
 
-    fn build_backward(&self) -> Vec<Step> {
+    fn build_backward(&self) -> Vec<Seg> {
         let c = &self.cfg;
         let (b_use, t_use) = (self.b, self.t);
         let n = b_use * t_use;
         let d = c.d_model();
         let v = c.vocab();
-        let e = c.n_experts();
         let hd = c.head_dim();
         let nh = c.n_heads();
         let dense_ff = c.ffn_hidden();
@@ -1211,7 +1194,7 @@ impl DeepseekV2 {
         let head = c.head_weight();
         let ids = kernel_ids();
         let ga = Gqa { b: b_use, t: t_use, n_heads: nh, n_kv_heads: c.n_kv_heads(), head_dim: hd };
-        let shape = self.moe_shape(n);
+        let mut segs: Vec<Seg> = Vec::new();
         let mut s: Vec<Step> = Vec::new();
 
         // ---- head + final norm - head stage only. A non-head stage starts
@@ -1237,7 +1220,7 @@ impl DeepseekV2 {
                     self.mm_bwd(&mut s, &self.d_up, &lb.xn2, &p("mlp.up.weight"), &self.d_xn, n, d, dense_ff, 0);
                     self.mm_bwd(&mut s, &self.d_gate_pre, &lb.xn2, &p("mlp.gate.weight"), &self.d_xn, n, d, dense_ff, 1);
                 }
-                Mlp::Moe { router_logits, gate, acts, sh_gate, sh_up, sh_h } => {
+                Mlp::Moe { sh_gate, sh_up, sh_h, .. } => {
                     // The forward's last MoE step is `out = routed_acc + shared`,
                     // so `dres[l+1]` is the gradient w.r.t. BOTH summands
                     // unchanged -- no kernel is needed to split it, which is why
@@ -1277,53 +1260,9 @@ impl DeepseekV2 {
                         &self.d_xn,
                         false,
                     ));
-                    // The router weight's own dense-linear backward: `moe_layer_bwd`
-                    // does not own this GEMM's kernel choice, it only fixes WHERE
-                    // in the phase order it runs (after the router kernel's
-                    // backward, before the experts').
-                    let mut router_weight_bwd: Vec<Step> = Vec::new();
-                    self.mm_bwd(&mut router_weight_bwd, &self.d_router_logits, &lb.xn2, &p("mlp.router.weight"), &self.d_xn, n, d, e, 1);
-
-                    // Every expert reads the SAME three per-projection banks;
-                    // `w_off` is what separates them, and it addresses the
-                    // gradient banks identically (same layout), so one
-                    // `ExpertGrads` triple serves every expert too.
-                    let (gn, un, dn) = self.moe_bank_names[l].as_ref().expect("MoE layer has bank names");
-                    let expert_weights: Vec<ExpertWeights> = (0..e)
-                        .map(|ei| ExpertWeights {
-                            gate_w: self.w(gn).clone(),
-                            up_w: self.w(un).clone(),
-                            down_w: self.w(dn).clone(),
-                            w_off: moe::bank_offset(&shape, ei),
-                        })
-                        .collect();
-                    let expert_grads: Vec<ExpertGrads> = (0..e)
-                        .map(|_| ExpertGrads {
-                            gate_w: self.trainable(gn).then(|| self.g(gn)),
-                            up_w: self.trainable(un).then(|| self.g(un)),
-                            down_w: self.trainable(dn).then(|| self.g(dn)),
-                        })
-                        .collect();
-                    s.extend(moe::moe_layer_bwd(
-                        &self.gpu,
-                        &router_bwd_ids(),
-                        &moe_ids_bwd(),
-                        self.router_kind(),
-                        &shape,
-                        router_logits,
-                        gate,
-                        Some(&self.fe),
-                        &self.d_gate,
-                        &self.d_router_logits,
-                        &router_weight_bwd,
-                        &lb.xn2,
-                        &expert_weights,
-                        &expert_grads,
-                        acts,
-                        &ExpertBwdScratch { d_expert_out: &self.d_expert_out, d_h: &self.d_h, d_gate_pre: &self.d_gate_pre, d_up: &self.d_up },
-                        &self.dres[l + 1],
-                        &self.d_xn,
-                    ));
+                    // The routed half on the rows each expert was routed in the forward (`Self::moe_bwd`).
+                    segs.push(Seg::Steps(std::mem::take(&mut s)));
+                    segs.push(Seg::MoeBwd { layer: l, rows: n });
                 }
             }
             // ln2 backward -> d_tmp ; dxmid = dres[l+1] + d_tmp
@@ -1362,7 +1301,80 @@ impl DeepseekV2 {
                 s.push(self.gpu.step(EMB_BWD, &[&self.tokens, &self.dres[0], self.g("tok.weight")], &[n, d, v], v * d));
             }
         }
-        s
+        segs.push(Seg::Steps(s));
+        segs
+    }
+
+    /// Layer `l`'s routed experts' weights: slices of the layer's three per-projection banks (`moe::bank_offset`).
+    fn expert_weights(&self, l: usize, shape: &MoeShape) -> Vec<ExpertWeights> {
+        let (gn, un, dn) = self.moe_bank_names[l].as_ref().expect("MoE layer has bank names");
+        (0..shape.n_experts)
+            .map(|ei| ExpertWeights { gate_w: self.w(gn).clone(), up_w: self.w(un).clone(), down_w: self.w(dn).clone(), w_off: moe::bank_offset(shape, ei) })
+            .collect()
+    }
+
+    /// The routed experts of MoE layer `l` over `rows` rows: the layer's gate is read back, every expert runs on the
+    /// rows routed to it, and their activations are kept for the backward (`MoeActs::compact`).
+    fn moe_fwd(&self, l: usize, rows: u32) {
+        let Mlp::Moe { gate, acts, .. } = &self.layers[l].mlp else { unreachable!("a MoE segment of a dense layer") };
+        let shape = self.moe_shape(rows);
+        let compact = MoeActs::compact(&self.gpu, &shape, &self.gpu.read(gate, (rows * shape.n_experts) as usize));
+        let steps = moe::experts_fwd_train(&self.gpu, &moe_ids(), &shape, &self.layers[l].xn2, gate, &self.expert_weights(l, &shape), &compact, &self.moe_acc);
+        self.gpu.submit(&[&self.moe_acc], &steps);
+        *acts.borrow_mut() = Some(compact);
+    }
+
+    /// The routed half of MoE layer `l`'s backward over `rows` rows: the router, then every expert on the rows it was
+    /// routed in the forward. `d_xn` already holds the shared expert's input gradient.
+    fn moe_bwd(&self, l: usize, rows: u32) {
+        let lb = &self.layers[l];
+        let Mlp::Moe { router_logits, gate, acts, .. } = &lb.mlp else { unreachable!("a MoE segment of a dense layer") };
+        let acts = acts.borrow();
+        let acts = acts.as_ref().expect("deepseek2: a MoE backward without the forward that routed it");
+        let shape = self.moe_shape(rows);
+        let (d, e) = (shape.d_model, shape.n_experts);
+        let p = |name: &str| format!("blocks.{l}.{name}");
+        // The router weight's own dense-linear backward: `moe_layer_bwd` does not own this GEMM's kernel choice, it
+        // only fixes WHERE in the phase order it runs (after the router kernel's backward, before the experts').
+        let mut router_weight_bwd: Vec<Step> = Vec::new();
+        self.mm_bwd(&mut router_weight_bwd, &self.d_router_logits, &lb.xn2, &p("mlp.router.weight"), &self.d_xn, rows, d, e, 1);
+        // Every expert reads the SAME three per-projection banks; `w_off` separates them and addresses the gradient
+        // banks identically, so one `ExpertGrads` triple serves every expert.
+        let (gn, un, dn) = self.moe_bank_names[l].as_ref().expect("MoE layer has bank names");
+        let grads = ExpertGrads { gate_w: self.trainable(gn).then(|| self.g(gn)), up_w: self.trainable(un).then(|| self.g(un)), down_w: self.trainable(dn).then(|| self.g(dn)) };
+        let steps = moe::moe_layer_bwd(
+            &self.gpu,
+            &router_bwd_ids(),
+            &moe_ids_bwd(),
+            self.router_kind(),
+            &shape,
+            router_logits,
+            gate,
+            Some(&self.fe),
+            &self.d_gate,
+            &self.d_router_logits,
+            &router_weight_bwd,
+            &lb.xn2,
+            &self.expert_weights(l, &shape),
+            &vec![grads; e as usize],
+            acts,
+            &ExpertBwdScratch { d_expert_out: &self.d_expert_out, d_h: &self.d_h, d_gate_pre: &self.d_gate_pre, d_up: &self.d_up },
+            &self.dres[l + 1],
+            &self.d_xn,
+        );
+        // The compacted backward adds each expert's column into `d_gate`.
+        self.gpu.submit(&[&self.d_gate], &steps);
+    }
+
+    /// Run a pass: its fixed dispatches in order, each MoE layer's experts as the pass reaches them.
+    fn run(&self, segs: &[Seg]) {
+        for seg in segs {
+            match seg {
+                Seg::Steps(steps) => self.gpu.submit(&[], steps),
+                Seg::MoeFwd { layer, rows } => self.moe_fwd(*layer, *rows),
+                Seg::MoeBwd { layer, rows } => self.moe_bwd(*layer, *rows),
+            }
+        }
     }
 
     // ---- run ----
@@ -1374,7 +1386,7 @@ impl DeepseekV2 {
     /// stale or uninitialised data - see `crate::shard`).
     pub fn forward_submit(&self) {
         assert!(self.batched, "DeepseekV2::forward on a batched=false (chunked-decode-only) instance");
-        self.gpu.submit(&[], &self.fwd_steps);
+        self.run(&self.fwd_steps);
     }
 
     pub fn forward(&self) -> f32 {
@@ -1387,7 +1399,7 @@ impl DeepseekV2 {
         assert!(!self.bwd_steps.is_empty(), "DeepseekV2::backward on a forward-only (inference) instance");
         let n = self.b * self.t;
         self.gpu.write(&self.ce_grad_uni, &[n, self.cfg.vocab(), IGNORE, f(self.count.get())]);
-        self.gpu.submit(&[], &self.bwd_steps);
+        self.run(&self.bwd_steps);
     }
 
     // ---- pipeline-parallel cross-stage seam (see `crate::shard`) ----
@@ -1450,8 +1462,7 @@ impl DeepseekV2 {
         }
         let ignore = vec![IGNORE; t_use as usize];
         self.set_batch(tokens, &ignore);
-        let s = self.build_forward(1, t_use);
-        self.gpu.submit(&[], &s);
+        self.run(&self.build_forward(1, t_use));
         self.gpu.read(&self.logits, (t_use * self.cfg.vocab()) as usize)
     }
 

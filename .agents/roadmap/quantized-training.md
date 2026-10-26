@@ -119,7 +119,8 @@ The per-cell matrix and its tests are `docs/reference/training-capabilities.md`.
   its routed rows only (`rows * top_k` instead of `rows * n_experts` rows a layer, 32x fewer at
   top-8 of 256), `experts_fwd_train` and `moe_layer_bwd` gather the rows and scatter the outputs
   and gradients back (`rows_scatter_add.wgsl`); gradchecked and equal to the dense path
-  (`model/tests/moe_block_gradcheck.rs`), wired into qwen35moe.
+  (`model/tests/moe_block_gradcheck.rs`), wired into qwen35moe and deepseek2 (whose recorded
+  passes are now segments: fixed dispatches and each MoE layer's experts, built per pass).
 - D Memory: `model::saved` saved-activation policy (keep, recompute, bf16/fp8 boundaries)
   priced in memplan and wired into qwen3 and qwen35 LoRA training (a4a1242bc); flash attention
   backward without `[H,T,T]` probabilities for qwen35moe (fc6df1080) and flux2, including the
@@ -165,9 +166,8 @@ The per-cell matrix and its tests are `docs/reference/training-capabilities.md`.
 - O Full fine-tune on qwen35moe and glmdsa over resident packed weights (qwen35 has it). qwen35moe
   first needs bf16 storage variants of its expert training kernels (`model::moe` reads fp32 expert
   buffers).
-- O deepseek2 MoE training still saves every expert's activations for every row (dense `MoeActs`):
-  its training forward is a recorded tape, and the row-compacted form reads the routing back in the
-  middle of the forward. glmdsa trains its MoE through its own path, not `MoeActs`.
+- O glmdsa trains its MoE through its own per-expert path, not `model::moe`'s `MoeActs`: it keeps
+  every expert's activations for every row.
 - O Device memory by category (weights, gradients, moments, activations, scratch) against the
   planner's demands; `Gpu::memory_usage` reports live, reserved and peak bytes per step (wgpu and
   CUDA; Vulkan and the CPU JIT report none) but not what they hold. The freed-block cache trades
