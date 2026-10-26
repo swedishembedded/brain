@@ -1,5 +1,5 @@
 {
- "commit": "4c01a82f77d27069513e9a1840dcc760a63c5148",
+ "commit": "609bb62bc1ee63aee0bed80e9979e917c1d3ec48",
  "device": "gpu0 Tesla P40",
  "plan": "qwen",
  "id": "qwen3-0.6b-zero-shot",

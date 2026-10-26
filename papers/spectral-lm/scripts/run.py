@@ -112,7 +112,7 @@ def chosen_lr(family):
     return best[1]
 
 
-def jobs_for(plan, work):
+def jobs_for(plan, work, score_only=False):
     jobs = []
     if plan == "lr":
         for fam in PRIMARY + PILOT:
@@ -127,7 +127,7 @@ def jobs_for(plan, work):
     elif plan == "qwen":
         jobs.append({"id": "qwen3-0.6b-zero-shot", "command": ["qwen-eval", "--weights", str(QWEN), "--text", str(CORPUS / "valid.txt"), "--max-doc-bytes", MAX_DOC_BYTES, "--batch", "8"]})
     elif plan == "qwen-ft":
-        jobs.append({"id": "qwen3-0.6b-tinystories", "qwen_ft": True, "seed": str(secrets.randbits(63))})
+        jobs.append({"id": "qwen3-0.6b-tinystories", "qwen_ft": True, "seed": str(secrets.randbits(63)), "score_only": score_only})
     elif plan == "generate":
         seed = str(secrets.randbits(63))
         for fam in PRIMARY:
@@ -208,7 +208,22 @@ def execute(job, gpu, plan, commit):
     work = Path(job["work"])
     log = work / f"{job['id']}.log"
     rec = {"commit": commit, "device": f"gpu{gpu} {device_name(gpu)}", "plan": plan, "id": job["id"]}
-    if job.get("qwen_ft"):
+    if job.get("qwen_ft") and job.get("score_only"):
+        # Score a fine-tune whose training finished but whose scoring did not:
+        # its corpus and training records are the last JSON lines of the
+        # run's log, and the checkpoint is beside it.
+        ckpt = work / f"{job['id']}.safetensors"
+        logged = [json.loads(l) for l in log.read_text().splitlines() if l.startswith("{")]
+        corp = next(r for r in logged if r.get("event") == "corpus")
+        result = next(r for r in reversed(logged) if r.get("event") == "train")
+        cmds = [l[2:] for l in log.read_text().splitlines() if l.startswith("$ ")]
+        ev = [str(SAMPLE), "qwen-eval", "--weights", str(ckpt), "--tokenizer", str(QWEN.parent), "--text", str(CORPUS / "valid.txt"),
+              "--max-doc-bytes", MAX_DOC_BYTES, "--batch", "8", "--gpu", str(gpu)]
+        score, _, _ = run_measured(ev, gpu, log)
+        rec.update({"seed": result["seed"], "corpus_command": cmds[0], "corpus": corp, "command": cmds[1], "train": result,
+                    "peak_mem_mib": None, "eval_command": " ".join(ev), "result": score,
+                    "note": "scored by a second run after the first run's sample binary was removed from target/ before its scoring step"})
+    elif job.get("qwen_ft"):
         corpus = work / "qwen-corpus"
         enc = [str(SAMPLE), "qwen-corpus", "--weights", str(QWEN), "--text", str(CORPUS / "train.txt"), "--valid", str(CORPUS / "valid.txt"),
                "--out", str(corpus), "--stories", QWEN_FT_STORIES, "--gpu", str(gpu)]
@@ -271,6 +286,7 @@ def main():
     ap.add_argument("plan")
     ap.add_argument("--gpus", default="0,1")
     ap.add_argument("--work", required=True, help="checkpoint and log directory outside the repository")
+    ap.add_argument("--score-only", action="store_true", help="qwen-ft: score the checkpoint a finished training run left in --work")
     a = ap.parse_args()
     work = Path(a.work)
     work.mkdir(parents=True, exist_ok=True)
@@ -281,7 +297,7 @@ def main():
         record_corpus(commit)
         return
     jobs = queue.Queue()
-    for j in jobs_for(a.plan, work):
+    for j in jobs_for(a.plan, work, a.score_only):
         jobs.put(j)
     failures = []
 

@@ -1,5 +1,5 @@
 {
- "commit": "063ffe397c3a3f425ab692c5cb086cbdd5e4d4b4",
+ "commit": "9b6942ed8ee601e4bf132aeb965c34af7cd7aac0",
  "command": "cargo test --release --offline -p brain-gradcheck --test spectrallm_fd -- --nocapture --test-threads=1 && cargo test --release --offline -p brain-spectrallm --test model -- --nocapture --test-threads=1",
  "device": "gpu0 Tesla P40 (and the CPU backend)",
  "checks": [

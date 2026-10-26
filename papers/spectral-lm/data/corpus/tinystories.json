@@ -1,5 +1,5 @@
 {
- "commit": "123f5ddbf19fab3726ab66c4ea673491d6b423a1",
+ "commit": "742df9c9792b43e3e9cc0b3eb531a572f33acec2",
  "device": "host",
  "command": "brain data gen tinystories --out data/tinystories",
  "source": "huggingface.co/datasets/roneneldan/TinyStories@f54c09fd23315a6f9c86f9dc80f725de7d8f9c64 (TinyStoriesV2-GPT4-{train,valid}.txt), CDLA-Sharing-1.0",
