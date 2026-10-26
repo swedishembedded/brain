@@ -655,7 +655,10 @@ impl ResidencyManager {
             }
             let need = cost.on(d);
             if self.budgets.get(d).is_none() {
-                return false;
+                // A device this server does not schedule (`--device`) can never
+                // hold the share: permanent, like "too large" below, so the
+                // group goes on to `claim_multi` for a real error.
+                return true;
             }
             // Pool-clamped (`usable_on`/`fits_on`), never the raw per-device
             // `Budget` - see `multi::pick_devices` for why.
@@ -1991,6 +1994,24 @@ mod tests {
         };
         assert!(err.contains("too large"), "{err}");
         assert_eq!(live.load(Ordering::SeqCst), 0, "a failed claim must not have activated anything");
+    }
+
+    /// A device the cost names but the server does not schedule (`--device gpu0`
+    /// with a model that wants `gpu1`) can never be reserved. The group must reach
+    /// `claim_multi` and get that as a clean error; filtering it out as "not
+    /// placeable yet" parks its jobs in the queue forever with no reply.
+    #[test]
+    fn a_multi_device_cost_naming_an_unscheduled_device_is_refused_not_parked() {
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0);
+        let mut mgr = ResidencyManager::new(budgets);
+        mgr.register_multi(Arc::new(MultiFake { name: "pair".into(), per_gpu: 4 * GB, live: live.clone() }));
+        let key = InstanceKey::new("pair", "default");
+        assert!(mgr.placeable_multi(&key, "pair", &HashSet::new()), "the group must reach claim_multi so its jobs get an error");
+        let err = claim_multi_built(&mut mgr, "pair").err().expect("an unplaceable cost is an error");
+        assert!(err.contains("no budget"), "{err}");
+        assert_eq!(live.load(Ordering::SeqCst), 0);
     }
 
     struct MultiFakeUneven {
