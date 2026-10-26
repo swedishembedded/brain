@@ -314,6 +314,15 @@ enum Regime {
     },
 }
 
+/// What [`Lfm::new_impl_alloc_inner`] builds: the regime, whether it trains, whether the per-layer T×T caches shrink
+/// (chunked training), and the window the per-layer tensors stream through from construction, if any.
+struct Alloc<'a> {
+    chunked: Option<(u64, u32)>,
+    train: bool,
+    tiny_probs: bool,
+    resident: Option<&'a model::resident_ft::ResidentFtConfig>,
+}
+
 /// Gathered MLM head: CE evaluated only at the supervised rows (≤ cap).
 struct HeadGather {
     cap: u32,
@@ -562,8 +571,23 @@ impl Lfm {
     }
 
     fn new_impl(cfg: LfmConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, chunked: Option<(u64, u32)>, train: bool) -> Lfm {
+        Lfm::build(cfg, b, t, src, chunked, train, None).unwrap_or_else(|e| panic!("lfm2: {e}"))
+    }
+
+    /// A materialized training build whose per-layer tensors (convolution and attention layers alike) stream through
+    /// a device window under `resident` from the start (see [`model::streamed`]): they are read from `src` into the
+    /// window's host state and never all reach the device, so a model larger than it trains. The embedding table
+    /// (also the tied head) and the final norm load as usual.
+    pub fn new_resident_on(cfg: LfmConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, resident: &model::resident_ft::ResidentFtConfig) -> Result<Lfm, String> {
+        Lfm::build(cfg, b, t, src, None, true, Some(resident))
+    }
+
+    fn build(cfg: LfmConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, chunked: Option<(u64, u32)>, train: bool, resident: Option<&model::resident_ft::ResidentFtConfig>) -> Result<Lfm, String> {
         assert!(!(train && chunked.is_some()), "chunked-INFERENCE regime is frozen; long-context training uses new_train_chunked");
-        let mut m = Lfm::new_impl_alloc_inner(cfg, b, t, src, chunked, train, false);
+        if resident.is_some() && (!train || chunked.is_some()) {
+            return Err("layers stream in a materialized training build".into());
+        }
+        let mut m = Lfm::new_impl_alloc_inner(cfg, b, t, src, Alloc { chunked, train, tiny_probs: false, resident })?;
         m.fwd_steps = m.forward_steps();
         if matches!(m.regime, Regime::Chunked { .. }) && b > 1 {
             m.fwd_variants = (1..=b).map(|bu| m.forward_steps_for(bu)).collect();
@@ -572,25 +596,36 @@ impl Lfm {
             m.bwd_steps = m.backward_steps();
             m.seeded_bwd_steps = m.seeded_backward_steps();
         }
-        m
+        Ok(m)
     }
 
     /// Materialized-regime allocation only (no graphs); `tiny_probs` shrinks the
     /// per-layer T×T prob caches to size 1 (the chunked-training slabs replace
     /// them).
     fn new_impl_alloc(cfg: LfmConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, train: bool, tiny_probs: bool) -> Lfm {
-        Lfm::new_impl_alloc_inner(cfg, b, t, init, None, train, tiny_probs)
+        Lfm::new_impl_alloc_inner(cfg, b, t, init, Alloc { chunked: None, train, tiny_probs, resident: None }).unwrap_or_else(|e| panic!("lfm2: {e}"))
     }
 
-    fn new_impl_alloc_inner(cfg: LfmConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, chunked: Option<(u64, u32)>, train: bool, tiny_probs: bool) -> Lfm {
+    fn new_impl_alloc_inner(cfg: LfmConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, plan: Alloc) -> Result<Lfm, String> {
+        let Alloc { chunked, train, tiny_probs, resident } = plan;
         let gpu = Gpu::new(&optim::with_moment_kernels(PIPELINES));
-        let role = if train { paramstore::Role::Trainable } else { paramstore::Role::Frozen };
+        let layer_of = |name: &str| model::streamed::blocks_layer(name);
         let roles = cfg
             .param_list()
             .into_iter()
-            .map(|(n, c)| (n, c, role))
+            .map(|(n, c)| {
+                let role = if !train {
+                    paramstore::Role::Frozen
+                } else if resident.is_some() && layer_of(&n).is_some() {
+                    paramstore::Role::Streamed
+                } else {
+                    paramstore::Role::Trainable
+                };
+                (n, c, role)
+            })
             .collect();
-        let ps = ParamStore::new_with_roles_src(&gpu, roles, src);
+        let mut ps = ParamStore::new_with_roles_src(&gpu, roles, src);
+        let streamed = resident.map(|r| StreamedStore::attach(&gpu, &mut ps, r.clone(), src, &layer_of)).transpose()?;
         let opt = train.then(|| optim::Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF));
 
         let n = (b * t) as u64;
@@ -742,7 +777,7 @@ impl Lfm {
             (buf, attention_factor)
         });
 
-        Lfm {
+        Ok(Lfm {
             cfg,
             b,
             t,
@@ -759,7 +794,7 @@ impl Lfm {
             bwd_steps: LayerTape::default(),
             seeded_bwd_steps: LayerTape::default(),
             saved: SavedPolicy::Keep,
-            streamed: None,
+            streamed,
             backward_pending: Cell::new(false),
             slab_scores: st(1),
             slab_probs: st(1),
@@ -773,7 +808,7 @@ impl Lfm {
             fwd_variants: Vec::new(),
             yarn,
             gpu,
-        }
+        })
     }
 
     /// Set the input tokens and (unshifted) targets; `IGNORE` masks a position
@@ -1789,6 +1824,9 @@ impl model::Model for Lfm {
     /// for parity/inference work.)
     fn new(cfg: LfmConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {
         Lfm::new_train(cfg, b, t, init)
+    }
+    fn new_resident(cfg: LfmConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, resident: &model::resident_ft::ResidentFtConfig) -> Result<Self, String> {
+        Lfm::new_resident_on(cfg, b, t, init, resident)
     }
     fn init_weights(cfg: &LfmConfig, seed: u64) -> HashMap<String, Vec<f32>> {
         crate::init::init_weights(cfg, seed)
