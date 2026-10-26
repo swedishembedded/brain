@@ -951,3 +951,57 @@ stored in bf16 (the same 8 GiB; 2048 tokens a row at a full batch; the scheduler
 recorded fused-attention step (best step 3.6 ms against 4.5 at 32 rows) and the text: 10 omni-mixed pages at 400 tokens, 4 byte-identical to
 the fp32 pool, the rest diverge mid-page as any greedy decode does under a rounding change, and similarity to the ground truth is 0.5174
 against 0.5146. The process holds 22.7 GB on a card (vision 7 GiB + decoder 14 GiB budgets: 21 GiB).
+
+## 2026-10-26 throughput lane: before and after
+
+Server, DeepSeek-OCR v1 on one GH200 (gpu1), `--device gpu1`, eight omni-mixed pages (mixed sizes, 6 tiles for the large ones; max_tokens 1024),
+one HTTP client per row, wall time over `n` requests. Every number was measured with a neighbour's job on the same card (a peer's training
+run at 190 to 300 W, 70 to 90% SM, for the whole session): the card is time-sliced, so a number moves 2x between two runs of one binary,
+and the rows are only comparable to the extent the sweep is. The components below the table are the best of N runs and are the better guide.
+
+| clients | before: pages/min | tok/s | after: pages/min | tok/s |
+|---|---|---|---|---|
+| 1 | 3.7 | 44 | 19.6 | 222 |
+| 4 | 3.1 | 36 | 13.6 | 154 |
+| 16 | 14.5 | 166 | 27.5 | 313 |
+| 32 | 21.7 | 247 | 56.4 | 638 |
+| 64 | - | - | 62.0 | 701 |
+
+Small region crops (24 crops of 600x400 px cut from newspaper pages, max_tokens 256, 64 requests): 146.8 crops/min at 1 client, 345 at 16,
+412 at 64 (878 tok/s). DeepSeek-OCR-2, same pages: 21.5 pages/min at 1 client, 50.3 at 16, 52.3 at 32 (23.8 at 64: the burst of 64 encodes
+runs before the first decode, see below).
+
+Best of N, an uncontended moment, per component (GH200):
+
+| component | before | after |
+|---|---|---|
+| decode step, 1 row | 7.0 ms | 2.3 ms |
+| decode step, 32 rows | 10.2 ms | 4.5 ms (7,100 tok/s); 64 rows 6.9 ms (9,200 tok/s) |
+| SAM + CLIP, global 1024 px view | 137 ms | 50 ms |
+| SAM + CLIP, 640 px tile | 78 ms | 21 ms |
+| page preprocessing, 1767x2446 | 124 ms | 30 ms |
+| v2 resampler linears, 6 tiles | 153 ms (fp32 kernels) | 5 ms |
+
+On an uncontended card, a 6-tile page costs about 176 ms of encoder, 70 ms of prefill and 105 ms of decode: ~350 ms of GPU time, ~170
+pages a minute; a single-view crop ~50 ms. The server reached ~60 pages/min on the shared card, which is what that budget gives at the share
+of the card a neighbour at 70 to 90% SM leaves.
+
+What bounds it now: (1) the encoder, half the per-page GPU time, whose remaining cost is memory-bound glue (relative-position bias and row
+softmax of SAM's global blocks 14 ms of 40, `bias_add`, `gelu`, layer norms) and fused attention on the CUDA cores (SAM windows 6 ms, CLIP 3.7);
+(2) a burst of N pages: before the encoder ran beside the decoder, the scheduler paid N encodes before it decoded (below).
+
+## 2026-10-26 throughput lane: the encoder beside the decoder on one card
+
+With the encoder and decoder on one card the scheduler used to wait for each page's encode (`overlap` was off: an earlier measurement found
+interleaving them slower). The cost then was device-wide: a CUDA free waits for every stream of the process, so an encoder that frees its
+temporaries stalls the decoder. The vision towers' handles now hold their freed blocks (`ocrserve::serving_gpu`), and the encode thread runs
+beside the scheduler on any placement. Four alternating pairs of server runs on the shared card (16 clients, 32 pages; pages/min, one
+binary without the overlap, one with):
+
+| round | 1 | 2 | 3 | 4 | median |
+|---|---|---|---|---|---|
+| encode in the scheduler's path | 37.0 | 19.9 | 23.4 | 47.0 | 30.2 |
+| encode beside the decoder | 41.6 | 23.4 | 48.0 | 30.6 | 36.1 |
+
+Three of the four pairs favour the overlap, the median is +20%, and median latency per page fell in three of them; a neighbour at 70 to 90%
+SM makes any one pair noisy, so treat the size as unproven and the direction as supported.

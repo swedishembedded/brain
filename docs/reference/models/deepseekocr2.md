@@ -116,6 +116,12 @@ experts, which no LoRA target here reaches. Against a real, already-trained
 checkpoint - the actual use case - a fresh LoRA adapter has a competent base
 to correct, which is the regime LoRA is built for.
 
+**Tensor cores by default.** The decoder is the same engine as DeepSeek-OCR's fast tier (int8 routed experts on the grouped tensor-core
+GEMM, bf16 dense linears, a bf16 K/V pool, a decode step recorded once per row count and replayed, 64 rows over a 128k-token pool), SAM's
+linears and global-attention blocks are TF32 library products, and the resampler's seven linears per layer and its projector are TF32
+products too (tests fail by kernel name on a fallback to the CUDA cores; `BRAIN_PROFILE=1` prints the tensor-core share). Its unfused
+score/softmax/apply attention chain and its elementwise passes remain on the CUDA cores.
+
 **Greedy only** - no temperature, top-k, or top-p.
 
 **No NPU validation yet.** This host has no NPU firmware to test against;

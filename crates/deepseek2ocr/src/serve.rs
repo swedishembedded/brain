@@ -23,7 +23,6 @@
 use std::sync::Arc;
 
 use data::qwen_tokenizer::QwenBpe;
-use gpu_core::Gpu;
 use imaging::pixels::{hwc_to_rgb8, ChannelPolicy};
 use imaging::views::{mosaic_tiles, pad_square, tile_grid, to_chw_half};
 use model::serve::PromptEmbeds;
@@ -168,7 +167,7 @@ pub fn load(dir: &str, placement: DecoderDevice) -> Result<DeepseekOcrInstance, 
     eprintln!("deepseek-ocr: vision on the ambient card, decoder on {placement:?}");
     let t1 = std::time::Instant::now();
     let vision = import::encoder_weights_for(&files, &cfg)?;
-    let dev_vision = |k: &'static [(&'static str, &'static str)]| Gpu::new(k);
+    let dev_vision = |k: &'static [(&'static str, &'static str)]| ocrserve::serving_gpu(k);
     let global = DeepEncoder::new(&dev_vision, cfg.clone(), &vision, 0, false);
     let tile_grid = TILE_SIDE / cfg.sam.patch_size;
     let tile_cfg = cfg.at_sam_grid(tile_grid, tile_grid);
@@ -185,7 +184,7 @@ pub fn load(dir: &str, placement: DecoderDevice) -> Result<DeepseekOcrInstance, 
     let engine = ocrserve::build_engine(cfg.decoder.clone(), &decoder, placement).map_err(|e| format!("deepseek-ocr: {e}"))?;
     stage_time("load: decoder engine (weight upload, KV pool)", t2);
 
-    let front = OcrFrontend::new(PageEncoder { cfg, global, tile, newline, separator, tok }, "deepseek-ocr", eos, &allow, ocrserve::overlaps(placement));
+    let front = OcrFrontend::new(PageEncoder { cfg, global, tile, newline, separator, tok }, "deepseek-ocr", eos, &allow);
     stage_time("load: TOTAL", t0);
     Ok(ocrserve::instance(front, engine))
 }

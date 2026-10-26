@@ -296,8 +296,15 @@ decodes every page in flight as one batched step over a paged KV pool
 and leave between steps, a short page is not held behind a long one, and a
 cancelled request returns its KV blocks at once.
 
-**Greedy only** - no temperature, top-k or top-p - and fp32 weights only (no
-INT8 path).
+**Tensor cores by default.** On a CUDA device the decoder serves its fast tier: the routed experts are int8 banks run by the
+grouped tensor-core GEMM (a gather GEMV below seven rows), the dense linears and the head are bf16 library GEMMs, the router stays fp32
+(its top-k is a hard decision), and the K/V pool is bf16. A decode step over a batch is recorded once per row count and replayed as one
+graph launch. The vision towers run their linears as TF32 library products of the fp32 weights as stored, SAM's four global-attention
+blocks as batched TF32 products, and CLIP with the fused attention. Up to 64 pages decode together over a 128k-token pool. Tests fail by
+kernel name when a product falls back to the CUDA cores (`ArithmeticAudit`; the declared exceptions are the router and SAM's
+convolutions), and `BRAIN_PROFILE=1` prints each pass's tensor-core share. Without tensor cores the same code runs the fp32 kernels.
+
+**Greedy only** - no temperature, top-k or top-p.
 
 **No multimodal oracle for the decode loop.** The text decoder alone is matched
 token for token against llama.cpp on these weights; the image+decoder loop is

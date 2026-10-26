@@ -196,19 +196,17 @@ pub struct OcrFrontend {
     label: &'static str,
     stop: Vec<u32>,
     stage: EncodeStage,
-    /// Whether requests are built in the background (see [`overlaps`]).
-    overlap: bool,
 }
 
 impl OcrFrontend {
     /// `eos` ends a generation; `allow` are the ids exempt from the n-gram filter (table-cell tags).
     ///
-    /// `overlap` builds requests in the background, so the encoder runs while the decoder decodes; it pays
-    /// only when the two use different devices ([`overlaps`]): on one card they queue behind each other and
-    /// interleaving their dispatches measurably slows both.
-    pub fn new<E: PageEncoder + Send + 'static>(enc: E, label: &'static str, eos: u32, allow: &[u32], overlap: bool) -> OcrFrontend {
+    /// Requests are built in the background, so the encoder runs while the decoder decodes - on another device, or on the same
+    /// one: a tower's handle holds its freed blocks ([`serving_gpu`]), so it cannot stall the decoder's stream, and the two
+    /// interleave their kernels (best of four alternating server runs on a shared card: 30 -> 36 pages/min median).
+    pub fn new<E: PageEncoder + Send + 'static>(enc: E, label: &'static str, eos: u32, allow: &[u32]) -> OcrFrontend {
         let ngram = NoRepeatNgram::new(NGRAM_SIZE, NGRAM_WINDOW, allow);
-        OcrFrontend { tok: enc.tok().clone(), label, stop: vec![eos], stage: EncodeStage::spawn(enc, ngram), overlap }
+        OcrFrontend { tok: enc.tok().clone(), label, stop: vec![eos], stage: EncodeStage::spawn(enc, ngram) }
     }
 
     /// The page a request asks to read (pixels still packed), and its decode budget.
@@ -247,9 +245,6 @@ impl Frontend for OcrFrontend {
     }
     /// The encoder runs on its own thread: the request is built there while the scheduler decodes.
     fn parse_in_background(&self, inv: &Invocation) -> Option<Encoding> {
-        if !self.overlap {
-            return None;
-        }
         match self.page_of(inv) {
             Ok((page, max_new)) => Some(self.stage.submit(page, max_new)),
             // A bad request is answered at once by the inline path.
@@ -262,18 +257,17 @@ impl Frontend for OcrFrontend {
     }
 }
 
-/// Whether the encoder and a decoder placed at `placement` run on different devices, which is when an
-/// encode overlaps decode instead of queueing behind it. The encoder is on the card the load runs on.
-pub fn overlaps(placement: DecoderDevice) -> bool {
-    match placement {
-        DecoderDevice::Cpu => true,
-        DecoderDevice::SameCard => false,
-        DecoderDevice::Card(i) => gpu_core::devices::current_gpu() != Some(i),
-    }
-}
-
 /// A served OCR model: the front end and the scheduler that batches requests onto the decoder engine.
 pub type OcrInstance = ScheduledInstance<Engine, OcrFrontend>;
+
+/// A device handle for a serving tower on the ambient card. A step allocates activation temporaries and frees them again, and on CUDA a
+/// driver free waits for the whole device - every other stream of the process included, the decoder's among them. Held freed blocks
+/// make a free a bookkeeping entry, so a vision tower running beside the decoder cannot stall it.
+pub fn serving_gpu(kernels: &[(&'static str, &'static str)]) -> Gpu {
+    let gpu = Gpu::new(kernels);
+    gpu.hold_freed_blocks(true);
+    gpu
+}
 
 /// The decoder engine on `placement`'s device, from a decoder weight source under brain's names.
 pub fn build_engine(cfg: DeepseekV2Config, decoder: &dyn checkpoint::TensorSource, placement: DecoderDevice) -> Result<Engine, String> {

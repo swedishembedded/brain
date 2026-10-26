@@ -27,7 +27,7 @@ use std::path::Path;
 use capability::Assembly;
 use residency::Instance;
 
-pub use frontend::{build_engine, engine_config, instance, OcrFrontend, OcrInstance, overlaps, Encoded, PageEncoder, PageRequest, ReadOptions, MAX_BATCH, NGRAM_SIZE, NGRAM_WINDOW, POOL_TOKENS, PREFILL_CHUNK};
+pub use frontend::{build_engine, engine_config, instance, serving_gpu, OcrFrontend, OcrInstance, Encoded, PageEncoder, PageRequest, ReadOptions, MAX_BATCH, NGRAM_SIZE, NGRAM_WINDOW, POOL_TOKENS, PREFILL_CHUNK};
 pub use placement::{placement_for_process, plan_placement, plan_replicas, DecoderDevice, Footprint, Placement};
 
 /// The instruction the reference models ship with.
