@@ -749,3 +749,9 @@ Now: placement (`deepseek2ocr::caps::plan_placement`) only uses the offered
 cards, host staging is the cost's `ram`, `placeable_multi` lets a cost naming an
 unscheduled device through to `claim_multi` for a clean error, and
 `BRAIN_DEEPSEEK_OCR_DECODER_DEVICE` is deleted.
+
+## Replicas and measured throughput (omni-mixed/000.jpg, 512 max tokens, CUDA backend)
+
+- One replica on an idle card: 16 concurrent pages, 66.6 pages/min.
+- Two replicas (one per GH200, 19.4 GB each, one process): 21 to 45 pages/min while peer jobs held both cards at 80 to 100% SM. Contended, not a clean comparison; rerun on idle cards.
+- Open: vision encode runs serially inside request parsing (about 300 ms per page) and stalls decode; needs an encode prefetch worker. Serving policy flags (`--max-batch`, `--kv-tokens`, `--gemm fp32`) are not yet plumbed into the OCR resident. No fp32-fallback gate or tensor-core share profile yet (CUDA has no per-kernel timestamps).
