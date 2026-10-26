@@ -34,6 +34,7 @@ use std::collections::HashMap;
 use audio::conv::{Conv1d, ConvKernels};
 use gpu_core::{DeviceBuffer, Gpu, Step};
 use model::block::{self, Bidir, BidirIds, CrossIds};
+use model::saved::SavedPolicy;
 use paramstore::ParamStore;
 
 use crate::config::{LayerType, LfmConfig};
@@ -223,6 +224,7 @@ fn dw_kernel(nrows: u32, k: u32) -> (usize, gpu_core::Dispatch) {
 }
 
 /// Attention-mixer activation buffers.
+#[derive(Clone)]
 struct AttnBufs {
     q_pre: DeviceBuffer,
     q: DeviceBuffer,
@@ -236,6 +238,7 @@ struct AttnBufs {
 }
 
 /// Conv-mixer activation buffers.
+#[derive(Clone)]
 struct ConvBufs {
     bg: DeviceBuffer,
     cg: DeviceBuffer,
@@ -248,6 +251,7 @@ struct ConvBufs {
 }
 
 /// Per-layer common activations (norm outputs, residual mid, FFN).
+#[derive(Clone)]
 struct CommonBufs {
     xn1: DeviceBuffer,
     xmid: DeviceBuffer,
@@ -257,11 +261,13 @@ struct CommonBufs {
     h: DeviceBuffer,
 }
 
+#[derive(Clone)]
 enum MixerBufs {
     Attn(AttnBufs),
     Conv(ConvBufs),
 }
 
+#[derive(Clone)]
 struct LayerBufs {
     common: CommonBufs,
     mixer: MixerBufs,
@@ -369,6 +375,10 @@ pub struct Lfm {
     /// [`Lfm::backward_seeded`]. Built alongside `bwd_steps` whenever `train`
     /// is set; empty on an inference build.
     seeded_bwd_steps: Vec<Step>,
+    /// What the backward keeps of the forward: every layer's activations, or (recompute) the residual between layers,
+    /// each layer kind sharing one set of activation buffers its replay before its backward refills
+    /// ([`model::Model::set_saved_policy`]).
+    saved: SavedPolicy,
     /// Chunked-training attention slabs (`[heads, chunk, t]`; size-1 otherwise).
     slab_scores: DeviceBuffer,
     slab_probs: DeviceBuffer,
@@ -732,6 +742,7 @@ impl Lfm {
             ce_grad_uni: gpu.uniform_dynamic(4),
             bwd_steps: Vec::new(),
             seeded_bwd_steps: Vec::new(),
+            saved: SavedPolicy::Keep,
             slab_scores: st(1),
             slab_probs: st(1),
             slab_dscores: st(1),
@@ -994,6 +1005,14 @@ impl Lfm {
         s.push(self.gpu.step(ADD2, &[&cb.xmid, mlp_out, out], &[n * d], n * d));
     }
 
+    /// The residual-in / residual-out buffer for layer `l`, per regime.
+    fn res_of(&self, l: usize) -> &DeviceBuffer {
+        match &self.regime {
+            Regime::Materialized { res, .. } => &res[l],
+            Regime::Chunked { res, .. } => &res[l % 2],
+        }
+    }
+
     fn forward_steps(&self) -> Vec<Step> {
         self.forward_steps_for(self.b)
     }
@@ -1009,124 +1028,30 @@ impl Lfm {
         let n = b_use * self.t;
         let d = c.d_model;
         let v = c.vocab;
-        let hq = c.q_dim();
         let eps = c.norm_eps;
         let dw = d as u64;
         let tiles = block::vocab_tiles_on(&self.gpu, v as u64, dw);
         let mut s: Vec<Step> = Vec::new();
-
-        // The residual-in / residual-out buffer for layer `l`, per regime.
-        let res_of = |l: usize| -> &DeviceBuffer {
-            match &self.regime {
-                Regime::Materialized { res, .. } => &res[l],
-                Regime::Chunked { res, .. } => &res[l % 2],
-            }
-        };
 
         // Token embedding, vocab-tiled (65536×1024 fp32 = 256 MB per binding
         // otherwise).
         for &(v0, cnt) in &tiles {
             s.push(self.gpu.step_sliced(
                 EMBED_TILE,
-                &[&self.tokens, self.w("tok.weight"), res_of(0)],
+                &[&self.tokens, self.w("tok.weight"), self.res_of(0)],
                 &[(0, 0), (v0 as u64 * dw, cnt as u64 * dw), (0, 0)],
                 &[d, n, v0, cnt],
                 n * d,
             ));
         }
 
-        for (l, ty) in c.layer_types.iter().enumerate() {
-            let p = |name: &str| format!("blocks.{l}.{name}");
-            let (common, attn, conv): (&CommonBufs, Option<&AttnBufs>, Option<&ConvBufs>) = match &self.regime {
-                Regime::Materialized { layers, .. } => {
-                    let lb = &layers[l];
-                    match &lb.mixer {
-                        MixerBufs::Attn(a) => (&lb.common, Some(a), None),
-                        MixerBufs::Conv(cv) => (&lb.common, None, Some(cv)),
-                    }
-                }
-                Regime::Chunked { common, attn, conv, .. } => (common, Some(attn), Some(conv)),
-            };
-            s.push(block::rmsnorm_fwd_at(&self.gpu, RMSNORM, res_of(l), self.w(&p("ln1.weight")), &common.xn1, d, n, eps));
-
-            let mixer_out = &self.proj;
-            match ty {
-                LayerType::Attention => {
-                    let ab = attn.expect("attn bufs");
-                    let chunked = matches!(&self.regime, Regime::Chunked { .. });
-                    let flash_attn = chunked && Self::flash_selectable(&self.gpu);
-                    let gemm_attn = chunked && !flash_attn && self.gpu.caps().workgroup_reductions;
-                    self.emit_attn_qkv(&mut s, l, &common.xn1, ab, b_use, !gemm_attn);
-                    match &self.regime {
-                        Regime::Materialized { scores, .. } => match self.train_chunk {
-                            None => {
-                                s.extend(block::bidir_fwd(&self.gpu, &Self::bidir_ids(), &self.bidir(), &ab.qkv, scores, &ab.probs, &ab.ctx));
-                            }
-                            Some(chunk) => {
-                                let spans: Vec<(u32, u32)> = (0..self.b).map(|i| (i * self.t, self.t)).collect();
-                                let ids = CrossIds { scores: SCORES_CROSS, softmax: SOFTMAX_CROSS, apply: APPLY_CROSS };
-                                block::chunked_bidir_fwd(
-                                    &self.gpu, &ids, None, c.n_heads, c.head_dim, hq, &ab.qkv, 3 * d, 0, d, 2 * d,
-                                    &ab.ctx, &self.slab_scores, &self.slab_probs, &spans, chunk, None, &mut s,
-                                );
-                            }
-                        },
-                        Regime::Chunked { scores, probs, chunk, ctx_pack, .. } => {
-                            let spans: Vec<(u32, u32)> = (0..b_use).map(|i| (i * self.t, self.t)).collect();
-                            // Fused flash attention wherever the SPLIT kernel is
-                            // selectable - ~4x the GEMM path at 8k/hd=64 on a
-                            // P40 (3.97-4.35x over three runs), cosine
-                            // 1.0000000000 (numbers by `FLASH_BIDIR`
-                            // above). Otherwise GEMM attention on cooperative
-                            // devices (register-tiled matmuls over per-head
-                            // packs, GQA folded into the pack - ~8x the naive
-                            // trio); the chunked cross trio is the CPU-JIT path
-                            // (its native fast paths own that regime and read
-                            // the fused qkv).
-                            if flash_attn {
-                                block::flash_bidir_fwd(
-                                    &self.gpu, Self::flash_ids(), c.n_heads, c.head_dim, hq, &ab.qkv, 3 * d, 0, d,
-                                    2 * d, &ab.ctx, &spans, &mut s,
-                                );
-                            } else if self.gpu.caps().workgroup_reductions {
-                                let ids = block::GemmAttnIds {
-                                    head_pack: HEAD_PACK,
-                                    head_pack_t: HEAD_PACK_T,
-                                    head_unpack: HEAD_UNPACK,
-                                    softmax_rows: SOFTMAX_ROWS,
-                                    matmul: MATMUL,
-                                    matmul_reg: MATMUL_REG3,
-                                };
-                                block::gemm_bidir_fwd(
-                                    &self.gpu, &ids, c.n_heads, c.head_dim, c.group(), &ab.q, hq, (&ab.k, &ab.v),
-                                    c.kv_dim(), &ab.ctx, hq, &ab.qkv, ctx_pack, scores, probs, &spans, *chunk, false, &mut s,
-                                );
-                            } else {
-                                let ids = CrossIds { scores: SCORES_CROSS, softmax: SOFTMAX_CROSS, apply: APPLY_CROSS };
-                                block::chunked_bidir_fwd(
-                                    &self.gpu, &ids, None, c.n_heads, c.head_dim, hq, &ab.qkv, 3 * d, 0, d, 2 * d,
-                                    &ab.ctx, scores, probs, &spans, *chunk, None, &mut s,
-                                );
-                            }
-                        }
-                    }
-                    let (mk, mt) = linear_kernel(n as usize, d as usize);
-                    s.push(self.gpu.dispatch(mk, &[&ab.ctx, self.w(&p("attn.wo.weight")), mixer_out], &[n, hq, d], mt));
-                }
-                LayerType::Conv => {
-                    let cb = conv.expect("conv bufs");
-                    self.emit_conv_mixer(&mut s, l, &common.xn1, cb, b_use);
-                    let (mk, mt) = linear_kernel(n as usize, d as usize);
-                    s.push(self.gpu.dispatch(mk, &[&cb.gated, self.w(&p("conv.out_proj.weight")), mixer_out], &[n, d, d], mt));
-                }
-            }
-            s.push(self.gpu.step(ADD2, &[res_of(l), mixer_out, &common.xmid], &[n * d], n * d));
-            self.emit_ffn(&mut s, l, common, &self.mlp_out, res_of(l + 1), b_use);
+        for l in 0..c.layer_types.len() {
+            self.layer_forward(l, b_use, &mut s);
         }
 
         // Final norm.
         let last = c.n_layers() as usize;
-        s.push(block::rmsnorm_fwd_at(&self.gpu, RMSNORM, res_of(last), self.w("norm.weight"), &self.xn_final, d, n, eps));
+        s.push(block::rmsnorm_fwd_at(&self.gpu, RMSNORM, self.res_of(last), self.w("norm.weight"), &self.xn_final, d, n, eps));
 
         // Head.
         if let Some(hg) = &self.head {
@@ -1186,6 +1111,103 @@ impl Lfm {
             }
         }
         s
+    }
+
+    /// Layer `l`'s forward over `b_use` sequences, from its residual-in into the next residual, with the buffers the
+    /// backward reads kept in the layer's own set (materialized regime) or the one shared scratch set (chunked).
+    fn layer_forward(&self, l: usize, b_use: u32, s: &mut Vec<Step>) {
+        let c = &self.cfg;
+        let n = b_use * self.t;
+        let d = c.d_model;
+        let hq = c.q_dim();
+        let eps = c.norm_eps;
+        let ty = &c.layer_types[l];
+        let p = |name: &str| format!("blocks.{l}.{name}");
+        let (common, attn, conv): (&CommonBufs, Option<&AttnBufs>, Option<&ConvBufs>) = match &self.regime {
+            Regime::Materialized { layers, .. } => {
+                let lb = &layers[l];
+                match &lb.mixer {
+                    MixerBufs::Attn(a) => (&lb.common, Some(a), None),
+                    MixerBufs::Conv(cv) => (&lb.common, None, Some(cv)),
+                }
+            }
+            Regime::Chunked { common, attn, conv, .. } => (common, Some(attn), Some(conv)),
+        };
+        s.push(block::rmsnorm_fwd_at(&self.gpu, RMSNORM, self.res_of(l), self.w(&p("ln1.weight")), &common.xn1, d, n, eps));
+
+        let mixer_out = &self.proj;
+        match ty {
+            LayerType::Attention => {
+                let ab = attn.expect("attn bufs");
+                let chunked = matches!(&self.regime, Regime::Chunked { .. });
+                let flash_attn = chunked && Self::flash_selectable(&self.gpu);
+                let gemm_attn = chunked && !flash_attn && self.gpu.caps().workgroup_reductions;
+                self.emit_attn_qkv(s, l, &common.xn1, ab, b_use, !gemm_attn);
+                match &self.regime {
+                    Regime::Materialized { scores, .. } => match self.train_chunk {
+                        None => {
+                            s.extend(block::bidir_fwd(&self.gpu, &Self::bidir_ids(), &self.bidir(), &ab.qkv, scores, &ab.probs, &ab.ctx));
+                        }
+                        Some(chunk) => {
+                            let spans: Vec<(u32, u32)> = (0..self.b).map(|i| (i * self.t, self.t)).collect();
+                            let ids = CrossIds { scores: SCORES_CROSS, softmax: SOFTMAX_CROSS, apply: APPLY_CROSS };
+                            block::chunked_bidir_fwd(
+                                &self.gpu, &ids, None, c.n_heads, c.head_dim, hq, &ab.qkv, 3 * d, 0, d, 2 * d,
+                                &ab.ctx, &self.slab_scores, &self.slab_probs, &spans, chunk, None, s,
+                            );
+                        }
+                    },
+                    Regime::Chunked { scores, probs, chunk, ctx_pack, .. } => {
+                        let spans: Vec<(u32, u32)> = (0..b_use).map(|i| (i * self.t, self.t)).collect();
+                        // Fused flash attention wherever the SPLIT kernel is
+                        // selectable - ~4x the GEMM path at 8k/hd=64 on a
+                        // P40 (3.97-4.35x over three runs), cosine
+                        // 1.0000000000 (numbers by `FLASH_BIDIR`
+                        // above). Otherwise GEMM attention on cooperative
+                        // devices (register-tiled matmuls over per-head
+                        // packs, GQA folded into the pack - ~8x the naive
+                        // trio); the chunked cross trio is the CPU-JIT path
+                        // (its native fast paths own that regime and read
+                        // the fused qkv).
+                        if flash_attn {
+                            block::flash_bidir_fwd(
+                                &self.gpu, Self::flash_ids(), c.n_heads, c.head_dim, hq, &ab.qkv, 3 * d, 0, d,
+                                2 * d, &ab.ctx, &spans, s,
+                            );
+                        } else if self.gpu.caps().workgroup_reductions {
+                            let ids = block::GemmAttnIds {
+                                head_pack: HEAD_PACK,
+                                head_pack_t: HEAD_PACK_T,
+                                head_unpack: HEAD_UNPACK,
+                                softmax_rows: SOFTMAX_ROWS,
+                                matmul: MATMUL,
+                                matmul_reg: MATMUL_REG3,
+                            };
+                            block::gemm_bidir_fwd(
+                                &self.gpu, &ids, c.n_heads, c.head_dim, c.group(), &ab.q, hq, (&ab.k, &ab.v),
+                                c.kv_dim(), &ab.ctx, hq, &ab.qkv, ctx_pack, scores, probs, &spans, *chunk, false, s,
+                            );
+                        } else {
+                            let ids = CrossIds { scores: SCORES_CROSS, softmax: SOFTMAX_CROSS, apply: APPLY_CROSS };
+                            block::chunked_bidir_fwd(
+                                &self.gpu, &ids, None, c.n_heads, c.head_dim, hq, &ab.qkv, 3 * d, 0, d, 2 * d,
+                                &ab.ctx, scores, probs, &spans, *chunk, None, s,
+                            );
+                        }
+                    }
+                }
+                let (mk, mt) = linear_kernel(n as usize, d as usize);
+                s.push(self.gpu.dispatch(mk, &[&ab.ctx, self.w(&p("attn.wo.weight")), mixer_out], &[n, hq, d], mt));
+            }
+            LayerType::Conv => {
+                let cb = conv.expect("conv bufs");
+                self.emit_conv_mixer(s, l, &common.xn1, cb, b_use);
+                let (mk, mt) = linear_kernel(n as usize, d as usize);
+                s.push(self.gpu.dispatch(mk, &[&cb.gated, self.w(&p("conv.out_proj.weight")), mixer_out], &[n, d, d], mt));
+            }
+        }
+        s.push(self.gpu.step(ADD2, &[self.res_of(l), mixer_out, &common.xmid], &[n * d], n * d));
+        self.emit_ffn(s, l, common, &self.mlp_out, self.res_of(l + 1), b_use);
     }
 
     /// Backward for a plain linear `y = x·Wᵀ`: weight grad (accumulating into
@@ -1309,6 +1331,10 @@ impl Lfm {
         self.norm_bwd(s, &res[last], "norm.weight", &bw.d_xn, &bw.dres[last], &bw.inv, d, n);
 
         for (l, lb) in layers.iter().enumerate().rev() {
+            if self.saved.recomputes() {
+                // Layers of a kind share one set of activation buffers: rebuild this layer's from `res[l]` first.
+                self.layer_forward(l, self.b, s);
+            }
             let p = |name: &str| format!("blocks.{l}.{name}");
             let cb = &lb.common;
 
@@ -1433,6 +1459,43 @@ impl Lfm {
     pub fn backward_seeded(&self) {
         assert!(!self.seeded_bwd_steps.is_empty(), "backward_seeded: model built without training graphs");
         self.gpu.submit(&[], &self.seeded_bwd_steps);
+    }
+
+    /// Keep what `policy` names of the forward: every layer's activations ([`SavedPolicy::Keep`]), or only the residual
+    /// between layers ([`SavedPolicy::Recompute`]), where all conv layers share the first conv layer's activation
+    /// buffers and all attention layers the first attention layer's (the others are released) and the backward
+    /// replays each layer from its residual before its own backward. Residuals held below f32 are refused by name;
+    /// only a materialized training build has a backward to recompute for.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        if let SavedPolicy::Quantized(format) = policy {
+            return Err(format!("lfm2 keeps its layer residuals in f32; {format:?} residuals are not supported"));
+        }
+        if policy == self.saved {
+            return Ok(());
+        }
+        if !policy.recomputes() {
+            return Err("lfm2: a build that recomputes cannot go back to keeping every layer's activations".into());
+        }
+        if self.bwd.is_none() {
+            return Err("lfm2: an inference build has no backward to recompute for".into());
+        }
+        let Regime::Materialized { layers, .. } = &mut self.regime else {
+            return Err("lfm2: recompute needs the materialized training regime".into());
+        };
+        let first_attn = layers.iter().find(|lb| matches!(lb.mixer, MixerBufs::Attn(_))).cloned();
+        let first_conv = layers.iter().find(|lb| matches!(lb.mixer, MixerBufs::Conv(_))).cloned();
+        for lb in layers.iter_mut() {
+            let shared = match lb.mixer {
+                MixerBufs::Attn(_) => &first_attn,
+                MixerBufs::Conv(_) => &first_conv,
+            };
+            *lb = shared.clone().expect("a layer of this kind exists");
+        }
+        self.saved = policy;
+        self.fwd_steps = self.forward_steps();
+        self.bwd_steps = self.backward_steps();
+        self.seeded_bwd_steps = self.seeded_backward_steps();
+        Ok(())
     }
 
     pub fn zero_grads(&self) {
@@ -1599,6 +1662,10 @@ impl model::Model for Lfm {
 
     fn optimizer_parts(&self) -> Option<model::OptimizerParts<'_>> {
         Some(model::OptimizerParts { gpu: &self.gpu, store: &self.ps, optim: self.opt.as_ref()? })
+    }
+
+    fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        Lfm::set_saved_policy(self, policy)
     }
 
     type Config = LfmConfig;
