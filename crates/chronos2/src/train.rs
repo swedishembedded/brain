@@ -28,6 +28,7 @@
 use crate::config::Chronos2Config;
 // Single implementation of the elementwise/normalisation math.
 use model::hostmath;
+use model::saved::{BlockStack, SavedPolicy};
 use std::collections::HashMap;
 
 // ---- host math primitives (fwd + bwd), row-major, weights stored `[out, in]` ---
@@ -328,10 +329,19 @@ pub struct BlockCache {
     s: usize,
 }
 
-/// Intermediates for the full-core backward: every block's cache + the head's.
+/// Intermediates for the full-core backward: the block stack (every block's cache, or every block's input and the
+/// attention mask its rebuild reads) + the head's.
 pub struct FullCache {
-    blocks: Vec<BlockCache>,
+    blocks: BlockStack<Vec<f32>, BlockCache>,
+    mask: Option<Vec<f32>>,
     head: HeadCache,
+}
+
+impl FullCache {
+    /// Block caches this cache holds: one per block when keeping, none when recomputing.
+    pub fn held_block_caches(&self) -> usize {
+        self.blocks.held_caches()
+    }
 }
 
 // ---- the differentiable head path ----------------------------------------------
@@ -343,6 +353,8 @@ pub struct FullCache {
 pub struct Chronos2Train {
     pub cfg: Chronos2Config,
     pub w: HashMap<String, Vec<f32>>,
+    /// What the full core's backward keeps of its forward ([`Chronos2Train::set_saved_policy`]).
+    saved: SavedPolicy,
 }
 
 /// Everything the head backward needs from the forward.
@@ -356,6 +368,20 @@ pub struct HeadCache {
 }
 
 impl Chronos2Train {
+    /// A trainer over `w` that keeps every block's cache.
+    pub fn new(cfg: Chronos2Config, w: HashMap<String, Vec<f32>>) -> Chronos2Train {
+        Chronos2Train { cfg, w, saved: SavedPolicy::Keep }
+    }
+
+    /// Keep every block's cache for the backward ([`SavedPolicy::Keep`]) or only every block's input, each block
+    /// rebuilt as the backward reaches it ([`SavedPolicy::Recompute`], `model::saved::BlockStack`). A narrow saved
+    /// format is refused by name.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        BlockStack::<(), ()>::new("chronos2", policy)?;
+        self.saved = policy;
+        Ok(())
+    }
+
     /// Zeroed grad accumulator with an entry per weight.
     pub fn zero_grads(&self) -> HashMap<String, Vec<f32>> {
         self.w.iter().map(|(k, v)| (k.clone(), vec![0.0f32; v.len()])).collect()
@@ -515,23 +541,26 @@ impl Chronos2Train {
     pub fn full_forward(&self, emb_in: &[f32], mask: &[f32], n_out: usize, target: &[f32], levels: &[f32]) -> (f32, FullCache) {
         let s = mask.len();
         let mut emb = emb_in.to_vec();
-        let mut blocks = Vec::with_capacity(self.cfg.num_layers);
+        let mut blocks = BlockStack::new("chronos2", self.saved).expect("set_saved_policy accepted the policy");
         for b in 0..self.cfg.num_layers {
             let (out, c) = self.block_forward(b, &emb, mask, s);
+            blocks.push(&emb, c);
             emb = out;
-            blocks.push(c);
         }
         let (loss, head) = self.head_forward(&emb, n_out, target, levels);
-        (loss, FullCache { blocks, head })
+        let mask = self.saved.recomputes().then(|| mask.to_vec());
+        (loss, FullCache { blocks, mask, head })
     }
 
     /// Backward of [`full_forward`]: head then blocks in reverse, accumulating all
     /// grads into `g`; returns `d_emb_in`.
     pub fn full_backward(&self, cache: &FullCache, target: &[f32], levels: &[f32], g: &mut HashMap<String, Vec<f32>>) -> Vec<f32> {
         let mut d_emb = self.head_backward(&cache.head, target, levels, g);
-        for b in (0..self.cfg.num_layers).rev() {
-            d_emb = self.block_backward(b, &cache.blocks[b], &d_emb, g);
-        }
+        let rebuild = |b: usize, x: &Vec<f32>| {
+            let mask = cache.mask.as_ref().expect("a recomputing cache holds the mask its blocks rebuild with");
+            self.block_forward(b, x, mask, mask.len()).1
+        };
+        cache.blocks.rev_for_each(rebuild, |b, c| d_emb = self.block_backward(b, c, &d_emb, g));
         d_emb
     }
 
@@ -628,7 +657,7 @@ mod tests {
         let cfg = Chronos2Config::tiny(); // 2 layers
         // seed: full-backbone gradcheck: the finite-difference tolerance was measured against this parameter draw
         let mut seed = 0xFACE_u64;
-        let model = Chronos2Train { cfg: cfg.clone(), w: full_params(&cfg, &mut seed) };
+        let model = Chronos2Train::new(cfg.clone(), full_params(&cfg, &mut seed));
 
         let d = cfg.d_model;
         let patch = cfg.output_patch_size;
@@ -652,9 +681,9 @@ mod tests {
         for name in model.w.keys() {
             let len = model.w[name].len();
             for &idx in &[0usize, len / 2, len - 1] {
-                let mut mp = Chronos2Train { cfg: cfg.clone(), w: model.w.clone() };
+                let mut mp = Chronos2Train::new(cfg.clone(), model.w.clone());
                 mp.w.get_mut(name).unwrap()[idx] += eps;
-                let mut mm = Chronos2Train { cfg: cfg.clone(), w: model.w.clone() };
+                let mut mm = Chronos2Train::new(cfg.clone(), model.w.clone());
                 mm.w.get_mut(name).unwrap()[idx] -= eps;
                 let numeric = (loss(&mp, &emb) - loss(&mm, &emb)) / (2.0 * eps);
                 assert!(tol(g[name][idx], numeric), "grad {name}[{idx}]: {} vs {numeric}", g[name][idx]);
@@ -673,6 +702,33 @@ mod tests {
         assert!(checked > 60, "expected a broad end-to-end gradcheck, only {checked}");
     }
 
+    /// Spec: recomputing the core's blocks gives the loss and gradients of keeping them, bit for bit, holding none
+    /// of their caches (`model::saved::check_block_recompute`).
+    #[test]
+    fn the_core_recomputes_its_blocks_exactly() {
+        let cfg = Chronos2Config::tiny();
+        let mut seed = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8);
+        let w = full_params(&cfg, &mut seed);
+        let (s, n_out) = (5usize, 2usize);
+        let emb: Vec<f32> = (0..s * cfg.d_model).map(|_| rng(&mut seed)).collect();
+        let mask = vec![0.0f32; s];
+        let target: Vec<f32> = (0..n_out * cfg.output_patch_size).map(|_| rng(&mut seed) * 3.0).collect();
+        let levels: Vec<f32> = (0..cfg.num_quantiles).map(|i| (i as f32 + 0.5) / cfg.num_quantiles as f32).collect();
+        model::saved::check_block_recompute("chronos2", |policy| {
+            let mut m = Chronos2Train::new(cfg.clone(), w.clone());
+            m.set_saved_policy(policy)?;
+            let (loss, cache) = m.full_forward(&emb, &mask, n_out, &target, &levels);
+            let mut g = m.zero_grads();
+            m.full_backward(&cache, &target, &levels, &mut g);
+            let mut grads: Vec<(String, Vec<u64>)> = g.into_iter().map(|(n, v)| (n, v.into_iter().map(|x| x.to_bits() as u64).collect())).collect();
+            grads.sort();
+            Ok(model::saved::BlockStep { loss: loss.to_bits() as u64, grads, held_caches: cache.held_block_caches() })
+        })
+        .unwrap();
+        let mut m = Chronos2Train::new(cfg, w);
+        assert!(m.set_saved_policy(SavedPolicy::Quantized(model::saved::SavedFormat::Bf16)).unwrap_err().contains("chronos2"));
+    }
+
     #[test]
     fn full_backbone_learns_a_fixed_example() {
         // The whole differentiable core must actually reduce the pinball loss on a
@@ -681,7 +737,7 @@ mod tests {
         let cfg = Chronos2Config::tiny();
         // seed: the 0.5x loss-fall margin and the SGD step size were tuned on this parameter draw
         let mut seed = 0x5EED_u64;
-        let mut model = Chronos2Train { cfg: cfg.clone(), w: full_params(&cfg, &mut seed) };
+        let mut model = Chronos2Train::new(cfg.clone(), full_params(&cfg, &mut seed));
 
         let (s, n_out) = (5usize, 2usize);
         let d = cfg.d_model;
@@ -706,7 +762,7 @@ mod tests {
         // seed: block gradcheck: the finite-difference tolerance was measured against this parameter draw
         let mut seed = 0xB10C_u64;
         let w = block_params(&cfg, 0, &mut seed);
-        let model = Chronos2Train { cfg: cfg.clone(), w };
+        let model = Chronos2Train::new(cfg.clone(), w);
 
         let d = cfg.d_model;
         let s = 4usize;
@@ -730,10 +786,10 @@ mod tests {
         for name in model.w.keys() {
             let len = model.w[name].len();
             for &idx in &[0usize, len / 3, len / 2, len - 1] {
-                let mut mp = Chronos2Train { cfg: cfg.clone(), w: model.w.clone() };
+                let mut mp = Chronos2Train::new(cfg.clone(), model.w.clone());
                 mp.w.get_mut(name).unwrap()[idx] += eps;
                 let lp = loss(&mp, &emb);
-                let mut mm = Chronos2Train { cfg: cfg.clone(), w: model.w.clone() };
+                let mut mm = Chronos2Train::new(cfg.clone(), model.w.clone());
                 mm.w.get_mut(name).unwrap()[idx] -= eps;
                 let lm = loss(&mm, &emb);
                 let numeric = (lp - lm) / (2.0 * eps);
@@ -759,7 +815,7 @@ mod tests {
         // seed: head-path gradcheck: the finite-difference tolerance was measured against this parameter draw
         let mut seed = 0x51ED_u64;
         let w = head_params(&cfg, &mut seed);
-        let model = Chronos2Train { cfg: cfg.clone(), w };
+        let model = Chronos2Train::new(cfg.clone(), w);
 
         let d = cfg.d_model;
         let patch = cfg.output_patch_size;
@@ -783,10 +839,10 @@ mod tests {
         for name in model.w.keys() {
             let len = model.w[name].len();
             for &idx in &[0usize, len / 3, len / 2, len - 1] {
-                let mut mp = Chronos2Train { cfg: cfg.clone(), w: model.w.clone() };
+                let mut mp = Chronos2Train::new(cfg.clone(), model.w.clone());
                 mp.w.get_mut(name).unwrap()[idx] += eps;
                 let lp = loss(&mp, &emb);
-                let mut mm = Chronos2Train { cfg: cfg.clone(), w: model.w.clone() };
+                let mut mm = Chronos2Train::new(cfg.clone(), model.w.clone());
                 mm.w.get_mut(name).unwrap()[idx] -= eps;
                 let lm = loss(&mm, &emb);
                 let numeric = (lp - lm) / (2.0 * eps);

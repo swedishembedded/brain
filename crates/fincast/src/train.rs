@@ -20,6 +20,7 @@
 use crate::config::{FincastConfig, QUANTILES};
 // Single implementation of the elementwise/normalisation math.
 use model::hostmath;
+use model::saved::{BlockStack, SavedPolicy};
 use std::collections::HashMap;
 
 // ---- host math primitives (fwd + bwd), weights stored `[out, in]` -------------
@@ -277,8 +278,15 @@ struct BlockCache {
 }
 
 pub struct FullCache {
-    blocks: Vec<BlockCache>,
+    blocks: BlockStack<Vec<f32>, BlockCache>,
     head: HeadCache,
+}
+
+impl FullCache {
+    /// Block caches this cache holds: one per block when keeping, none when recomputing.
+    pub fn held_block_caches(&self) -> usize {
+        self.blocks.held_caches()
+    }
 }
 
 struct HeadCache {
@@ -293,9 +301,25 @@ struct HeadCache {
 pub struct FincastTrain {
     pub cfg: FincastConfig,
     pub w: HashMap<String, Vec<f32>>,
+    /// What the full core's backward keeps of its forward ([`FincastTrain::set_saved_policy`]).
+    saved: SavedPolicy,
 }
 
 impl FincastTrain {
+    /// A trainer over `w` that keeps every block's cache.
+    pub fn new(cfg: FincastConfig, w: HashMap<String, Vec<f32>>) -> FincastTrain {
+        FincastTrain { cfg, w, saved: SavedPolicy::Keep }
+    }
+
+    /// Keep every block's cache for the backward ([`SavedPolicy::Keep`]) or only every block's input, each block
+    /// rebuilt as the backward reaches it ([`SavedPolicy::Recompute`], `model::saved::BlockStack`). A narrow saved
+    /// format is refused by name.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        BlockStack::<(), ()>::new("fincast", policy)?;
+        self.saved = policy;
+        Ok(())
+    }
+
     pub fn zero_grads(&self) -> HashMap<String, Vec<f32>> {
         self.w.iter().map(|(k, v)| (k.clone(), vec![0.0f32; v.len()])).collect()
     }
@@ -569,11 +593,11 @@ impl FincastTrain {
     /// Full differentiable core: blocks → head, PQ loss on the last patch.
     pub fn full_forward(&self, emb_in: &[f32], target: &[f32]) -> (f32, FullCache) {
         let mut emb = emb_in.to_vec();
-        let mut blocks = Vec::with_capacity(self.cfg.num_layers);
+        let mut blocks = BlockStack::new("fincast", self.saved).expect("set_saved_policy accepted the policy");
         for b in 0..self.cfg.num_layers {
             let (out, c) = self.block_forward(b, &emb);
+            blocks.push(&emb, c);
             emb = out;
-            blocks.push(c);
         }
         let (loss, head) = self.head_forward(&emb, target);
         (loss, FullCache { blocks, head })
@@ -581,9 +605,7 @@ impl FincastTrain {
 
     pub fn full_backward(&self, cache: &FullCache, target: &[f32], g: &mut HashMap<String, Vec<f32>>) -> Vec<f32> {
         let mut d_emb = self.head_backward(&cache.head, target, g);
-        for b in (0..self.cfg.num_layers).rev() {
-            d_emb = self.block_backward(b, &cache.blocks[b], &d_emb, g);
-        }
+        cache.blocks.rev_for_each(|b, x| self.block_forward(b, x).1, |b, c| d_emb = self.block_backward(b, c, &d_emb, g));
         d_emb
     }
 
@@ -645,7 +667,7 @@ mod tests {
     fn full_core_gradcheck() {
         let cfg = FincastConfig::tiny();
         let mut seed = 0xF1C_u64;
-        let model = FincastTrain { cfg: cfg.clone(), w: params(&cfg, &mut seed) };
+        let model = FincastTrain::new(cfg.clone(), params(&cfg, &mut seed));
         let d = cfg.hidden_size;
         let s = 5usize;
         let hlen = cfg.horizon_len;
@@ -663,9 +685,9 @@ mod tests {
         for name in model.w.keys() {
             let len = model.w[name].len();
             for &idx in &[0usize, len / 2, len - 1] {
-                let mut mp = FincastTrain { cfg: cfg.clone(), w: model.w.clone() };
+                let mut mp = FincastTrain::new(cfg.clone(), model.w.clone());
                 mp.w.get_mut(name).unwrap()[idx] += eps;
-                let mut mm = FincastTrain { cfg: cfg.clone(), w: model.w.clone() };
+                let mut mm = FincastTrain::new(cfg.clone(), model.w.clone());
                 mm.w.get_mut(name).unwrap()[idx] -= eps;
                 let numeric = (loss(&mp, &emb) - loss(&mm, &emb)) / (2.0 * eps);
                 assert!(tol(g[name][idx], numeric), "grad {name}[{idx}]: {} vs {numeric}", g[name][idx]);
@@ -684,11 +706,36 @@ mod tests {
         assert!(checked > 60, "expected a broad gradcheck, only {checked}");
     }
 
+    /// Spec: recomputing the core's blocks gives the loss and gradients of keeping them, bit for bit, holding none
+    /// of their caches (`model::saved::check_block_recompute`).
+    #[test]
+    fn the_core_recomputes_its_blocks_exactly() {
+        let cfg = FincastConfig::tiny();
+        let mut seed = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8);
+        let w = params(&cfg, &mut seed);
+        let s = 5usize;
+        let emb: Vec<f32> = (0..s * cfg.hidden_size).map(|_| rng(&mut seed)).collect();
+        let target: Vec<f32> = (0..cfg.horizon_len).map(|_| rng(&mut seed) * 3.0).collect();
+        model::saved::check_block_recompute("fincast", |policy| {
+            let mut m = FincastTrain::new(cfg.clone(), w.clone());
+            m.set_saved_policy(policy)?;
+            let (loss, cache) = m.full_forward(&emb, &target);
+            let mut g = m.zero_grads();
+            m.full_backward(&cache, &target, &mut g);
+            let mut grads: Vec<(String, Vec<u64>)> = g.into_iter().map(|(n, v)| (n, v.into_iter().map(|x| x.to_bits() as u64).collect())).collect();
+            grads.sort();
+            Ok(model::saved::BlockStep { loss: loss.to_bits() as u64, grads, held_caches: cache.held_block_caches() })
+        })
+        .unwrap();
+        let mut m = FincastTrain::new(cfg, w);
+        assert!(m.set_saved_policy(SavedPolicy::Quantized(model::saved::SavedFormat::Bf16)).unwrap_err().contains("fincast"));
+    }
+
     #[test]
     fn core_learns_a_fixed_example() {
         let cfg = FincastConfig::tiny();
         let mut seed = 0x5EED_u64;
-        let mut model = FincastTrain { cfg: cfg.clone(), w: params(&cfg, &mut seed) };
+        let mut model = FincastTrain::new(cfg.clone(), params(&cfg, &mut seed));
         let d = cfg.hidden_size;
         let s = 5usize;
         let hlen = cfg.horizon_len;
