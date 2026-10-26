@@ -1268,6 +1268,7 @@ impl Glm {
                 PassSeg::Steps(steps) => self.gpu.submit(&[], steps),
                 PassSeg::Experts { layer, rows, stage: ExpertStage::Forward { keep } } => self.moe_fwd(*layer, *rows, *keep),
                 PassSeg::Experts { layer, rows, stage: ExpertStage::Backward } => self.moe_bwd(*layer, *rows),
+                PassSeg::LayerBegin(_) | PassSeg::LayerEnd(_) => {}
             }
         }
     }

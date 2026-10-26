@@ -454,10 +454,13 @@ impl MoeActs {
 /// One piece of a model's recorded training pass over MoE layers: the dispatches fixed when the pass was built, or one
 /// MoE layer's routed experts over `rows` rows, whose shapes follow the rows routed to each expert in this pass
 /// ([`MoeActs::compact`]) and which the model builds when the pass reaches them ([`experts_fwd_train`] in the
-/// forward, [`moe_layer_bwd`] in the backward).
+/// forward, [`moe_layer_bwd`] in the backward). `LayerBegin` and `LayerEnd` bracket each layer's part, where a
+/// layer-streamed build loads the layer and finishes its update ([`crate::streamed::LayeredPass`]).
 pub enum PassSeg {
     Steps(Vec<Step>),
     Experts { layer: usize, rows: u32, stage: ExpertStage },
+    LayerBegin(usize),
+    LayerEnd(usize),
 }
 
 /// What a [`PassSeg::Experts`] does with its layer's routed experts.

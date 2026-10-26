@@ -34,6 +34,20 @@ use crate::ops::{StoreDevice, Weight};
 use crate::resident_ft::{self, LayerEvent, ResidentBackward, ResidentBudget, ResidentFtConfig, ResidentFullFt, ResidentSpec, ResidentValue, StepArgs};
 use crate::tape::{LayerTape, TapeEdge};
 
+/// A recorded pass a layer-streamed build acts between the layers of: a [`LayerTape`], or a model's own segmented
+/// pass (one that interleaves host work, such as routed experts built per pass).
+pub trait LayeredPass {
+    /// Submit the pass in order, reporting [`TapeEdge::Before`] and [`TapeEdge::After`] around each layer's part
+    /// (edges with no layer may be reported too and are ignored).
+    fn submit_hooked(&self, gpu: &Gpu, edge: &mut dyn FnMut(TapeEdge));
+}
+
+impl LayeredPass for LayerTape {
+    fn submit_hooked(&self, gpu: &Gpu, edge: &mut dyn FnMut(TapeEdge)) {
+        LayerTape::submit_hooked(self, gpu, edge);
+    }
+}
+
 /// The streamed per-layer tensors of a [`ParamStore`] model.
 pub struct StreamedStore {
     ft: RefCell<ResidentFullFt>,
@@ -113,11 +127,11 @@ impl StreamedStore {
         self.ft.borrow().device_weight_bytes()
     }
 
-    /// Submit `tape`, loading each layer's weights into its slot before its segment.
-    pub fn forward(&self, gpu: &Gpu, tape: &LayerTape) -> io::Result<()> {
+    /// Submit the forward `pass`, loading each layer's weights into its slot before its part.
+    pub fn forward(&self, gpu: &Gpu, pass: &dyn LayeredPass) -> io::Result<()> {
         let dev = device(gpu)?;
         let mut failed = None;
-        tape.submit_hooked(gpu, &mut |edge| {
+        pass.submit_hooked(gpu, &mut |edge| {
             if let (TapeEdge::Before { layer: Some(layer), .. }, None) = (edge, &failed) {
                 failed = self.ft.borrow_mut().load_layer(&dev, layer).err();
             }
@@ -125,10 +139,10 @@ impl StreamedStore {
         failed.map_or(Ok(()), Err)
     }
 
-    /// Submit the backward `tape` for [`ResidentBackward::backward_pass`]: [`LayerEvent::AfterHead`] once the
-    /// segments before the first layer's are submitted, [`LayerEvent::BeforeBackward`] and
-    /// [`LayerEvent::AfterBackward`] around each layer's segment. The first error stops the reports.
-    pub fn backward_events(&self, gpu: &Gpu, tape: &LayerTape, on: &mut dyn FnMut(LayerEvent) -> io::Result<()>) -> io::Result<()> {
+    /// Submit the backward `pass` for [`ResidentBackward::backward_pass`]: [`LayerEvent::AfterHead`] once the parts
+    /// before the first layer's are submitted, [`LayerEvent::BeforeBackward`] and [`LayerEvent::AfterBackward`]
+    /// around each layer's part. The first error stops the reports.
+    pub fn backward_events(&self, gpu: &Gpu, pass: &dyn LayeredPass, on: &mut dyn FnMut(LayerEvent) -> io::Result<()>) -> io::Result<()> {
         let mut failed: Option<io::Error> = None;
         let mut head_done = false;
         let mut report = |event: LayerEvent, failed: &mut Option<io::Error>| {
@@ -136,7 +150,7 @@ impl StreamedStore {
                 *failed = on(event).err();
             }
         };
-        tape.submit_hooked(gpu, &mut |edge| match edge {
+        pass.submit_hooked(gpu, &mut |edge| match edge {
             TapeEdge::Before { layer: Some(layer), .. } => {
                 if !std::mem::replace(&mut head_done, true) {
                     report(LayerEvent::AfterHead, &mut failed);
@@ -152,12 +166,12 @@ impl StreamedStore {
         failed.map_or(Ok(()), Err)
     }
 
-    /// One optimizer step of the whole model ([`resident_ft::adamw_step`]): with a window, the backward `tape` runs
+    /// One optimizer step of the whole model ([`resident_ft::adamw_step`]): with a window, the backward `pass` runs
     /// here layer by layer under the step's clip (the model's `backward` only arms it), every streamed tensor updated
     /// as its layer completes; without one, the backward already ran. The rest of `ps` is updated by the model's own
     /// device optimizer `optim`, by the same multiplier. Returns the global gradient norm the clip measured.
-    pub fn adamw_step(&self, gpu: &Gpu, ps: &ParamStore, optim: &optim::Optim, tape: &LayerTape, args: &StepArgs) -> io::Result<Option<f32>> {
-        let host = StoreBackward { gpu, ps, optim, tape, stream: self };
+    pub fn adamw_step(&self, gpu: &Gpu, ps: &ParamStore, optim: &optim::Optim, pass: &dyn LayeredPass, args: &StepArgs) -> io::Result<Option<f32>> {
+        let host = StoreBackward { gpu, ps, optim, pass, stream: self };
         resident_ft::adamw_step(&host, &self.ft, &device(gpu)?, args)
     }
 
@@ -199,12 +213,12 @@ impl StreamedStore {
 }
 
 /// What the shared resident update drives of a streamed store model: the store's own parameters under the model's
-/// device optimizer, and the model's backward tape one layer segment at a time.
+/// device optimizer, and the model's backward pass one layer at a time.
 struct StoreBackward<'a> {
     gpu: &'a Gpu,
     ps: &'a ParamStore,
     optim: &'a optim::Optim,
-    tape: &'a LayerTape,
+    pass: &'a dyn LayeredPass,
     stream: &'a StreamedStore,
 }
 
@@ -224,7 +238,7 @@ impl ResidentBackward for StoreBackward<'_> {
     }
 
     fn backward_pass(&self, on: &mut dyn FnMut(LayerEvent) -> io::Result<()>) -> io::Result<()> {
-        self.stream.backward_events(self.gpu, self.tape, on)
+        self.stream.backward_events(self.gpu, self.pass, on)
     }
 
     fn update_remainder(&self, args: &StepArgs, grad_multiplier: f32) {
@@ -288,6 +302,10 @@ pub fn check_layer_streaming<M: crate::Model>(name: &str, build: impl Fn() -> M,
             }
         }
         let (held, streamed_values, plain_values) = (values(&resident), values(&streamed), values(&plain));
+        let names = |v: &[(String, Vec<f32>)]| v.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
+        if names(&streamed_values) != names(&plain_values) || names(&held) != names(&plain_values) {
+            return Err(format!("{name}: a streamed build must list the parameters the plain build does (streamed {}, plain {})", streamed_values.len(), plain_values.len()));
+        }
         for ((((n, a), (_, b)), (_, p)), (_, p0)) in held.iter().zip(&streamed_values).zip(&plain_values).zip(&initial) {
             if let Some(i) = a.iter().zip(b).position(|(x, y)| x.to_bits() != y.to_bits()) {
                 return Err(format!("{name}: clip {clip:?}: {n}[{i}] is {} streamed, {} with every layer held", b[i], a[i]));

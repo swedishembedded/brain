@@ -73,6 +73,8 @@
 use std::cell::{Cell, RefCell};
 
 use model::saved::{Residuals, SavedPolicy};
+use model::streamed::{LayeredPass, StreamedStore};
+use model::tape::TapeEdge;
 use std::collections::HashMap;
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
@@ -295,6 +297,10 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("unpack_bf16", kernels::UNPACK_BF16),
     ("pack_fp8_rows", kernels::PACK_FP8_ROWS),
     ("unpack_fp8_rows", kernels::UNPACK_FP8_ROWS),
+    // A layer-streamed full fine-tune's device side (`model::ops::store_device_kernels`), resolved by name.
+    ("copy_cols", kernels::COPY_COLS),
+    ("gradnorm_part", kernels::GRADNORM_PART),
+    ("gradnorm_part_bf16", kernels::GRADNORM_PART_BF16),
 ];
 
 fn kernel_ids() -> KernelIds {
@@ -655,6 +661,11 @@ pub struct DeepseekV2 {
     /// every layer sharing one set of activation buffers its replay before its backward refills
     /// ([`model::Model::set_saved_policy`]).
     saved: SavedPolicy,
+    /// The per-layer tensors held in a device window of layers, when the run streams them
+    /// ([`model::Model::set_resident`]); `None` keeps every layer in the store.
+    streamed: Option<StreamedStore>,
+    /// A streamed build runs its backward inside the update: set by `backward`, taken by `adamw_step`.
+    backward_pending: Cell<bool>,
 
     // ---- incremental KV-cache decode state (lazily built on first `step`) ----
     dec: RefCell<Option<Decode>>,
@@ -967,6 +978,8 @@ impl DeepseekV2 {
             fwd_steps: Vec::new(),
             bwd_steps: Vec::new(),
             saved: SavedPolicy::Keep,
+            streamed: None,
+            backward_pending: Cell::new(false),
             dec: RefCell::new(None),
             dec_pos: Cell::new(0),
             gpu,
@@ -1110,9 +1123,13 @@ impl DeepseekV2 {
 
         self.res.round_trip(&self.gpu, &mut s, self.shard.start);
         for l in self.shard.start..self.shard.end {
+            segs.push(PassSeg::Steps(std::mem::take(&mut s)));
+            segs.push(PassSeg::LayerBegin(l));
             // A pass that replays every layer before its backward keeps no expert activations here.
             self.layer_forward(l, b_use, t_use, !self.saved.recomputes(), &mut segs, &mut s);
             self.res.round_trip(&self.gpu, &mut s, l + 1);
+            segs.push(PassSeg::Steps(std::mem::take(&mut s)));
+            segs.push(PassSeg::LayerEnd(l));
         }
 
         // final norm + untied lm_head + masked CE - head stage only. A
@@ -1246,6 +1263,8 @@ impl DeepseekV2 {
         }
 
         for l in (self.shard.start..self.shard.end).rev() {
+            segs.push(PassSeg::Steps(std::mem::take(&mut s)));
+            segs.push(PassSeg::LayerBegin(l));
             if self.saved.recomputes() {
                 // Every layer shares one set of activation buffers: rebuild this layer's from `res[l]` first.
                 self.res.restore(&self.gpu, &mut s, l);
@@ -1328,6 +1347,8 @@ impl DeepseekV2 {
             // ln1 backward -> d_tmp ; dres[l] = dxmid + d_tmp
             self.norm_bwd(&mut s, &self.res[l], &p("ln1.weight"), &self.d_xn, &self.d_tmp, d, n);
             s.push(self.gpu.step(ADD2, &[&self.dxmid, &self.d_tmp, &self.dres[l]], &[n * d], n * d));
+            segs.push(PassSeg::Steps(std::mem::take(&mut s)));
+            segs.push(PassSeg::LayerEnd(l));
         }
 
         // Vision-language splice backward + embedding backward - embed stage
@@ -1444,14 +1465,12 @@ impl DeepseekV2 {
         Ok(())
     }
 
-    /// Run a pass: its fixed dispatches in order, each MoE layer's experts as the pass reaches them.
+    /// Run a forward pass; a layer-streamed build loads each layer into its window slot as the pass reaches it.
     fn run(&self, segs: &[PassSeg]) {
-        for seg in segs {
-            match seg {
-                PassSeg::Steps(steps) => self.gpu.submit(&[], steps),
-                PassSeg::Experts { layer, rows, stage: ExpertStage::Forward { keep } } => self.moe_fwd(*layer, *rows, *keep),
-                PassSeg::Experts { layer, rows, stage: ExpertStage::Backward } => self.moe_bwd(*layer, *rows),
-            }
+        let pass = Pass { model: self, segs };
+        match &self.streamed {
+            Some(stream) => stream.forward(&self.gpu, &pass).unwrap_or_else(|e| panic!("deepseek2 layer-streamed forward: {e}")),
+            None => pass.submit_hooked(&self.gpu, &mut |_| {}),
         }
     }
 
@@ -1477,7 +1496,13 @@ impl DeepseekV2 {
         assert!(!self.bwd_steps.is_empty(), "DeepseekV2::backward on a forward-only (inference) instance");
         let n = self.b * self.t;
         self.gpu.write(&self.ce_grad_uni, &[n, self.cfg.vocab(), IGNORE, f(self.count.get())]);
-        self.run(&self.bwd_steps);
+        if self.streamed.as_ref().is_some_and(StreamedStore::is_layer_streamed) {
+            // The weights of a layer-streamed build are not all on the device: the backward runs layer by layer in
+            // `adamw_step`, where the layers it loads are the ones it updates.
+            assert!(!self.backward_pending.replace(true), "deepseek2 layer-streamed full fine-tune: a second backward before the update (gradient accumulation) is not supported; every micro-batch is its own step");
+            return;
+        }
+        Pass { model: self, segs: &self.bwd_steps }.submit_hooked(&self.gpu, &mut |_| {});
     }
 
     // ---- pipeline-parallel cross-stage seam (see `crate::shard`) ----
@@ -1509,19 +1534,62 @@ impl DeepseekV2 {
         self.gpu.poll_wait();
     }
     pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
-        self.opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale);
+        match &self.streamed {
+            Some(stream) => {
+                if stream.is_layer_streamed() {
+                    assert!(self.backward_pending.replace(false), "deepseek2 layer-streamed full fine-tune: adamw_step without a backward");
+                }
+                let args = model::resident_ft::StepArgs { step: t, lr, wd, adam, clip, extra_scale };
+                let pass = Pass { model: self, segs: &self.bwd_steps };
+                stream.adamw_step(&self.gpu, &self.ps, &self.opt, &pass, &args).unwrap_or_else(|e| panic!("deepseek2 layer-streamed update: {e}"));
+            }
+            None => self.opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale),
+        }
     }
     pub fn read_grad(&self, name: &str) -> Vec<f32> {
+        assert!(!self.is_streamed(name), "deepseek2: {name} streams through a layer window; no gradient outlives its layer");
         self.ps.read_grad(&self.gpu, name)
     }
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
-        self.ps.read_weight(&self.gpu, name)
+        match &self.streamed {
+            Some(stream) if stream.holds(name) => stream.read_weight(&self.gpu, name).unwrap_or_else(|e| panic!("deepseek2: reading {name}: {e}")),
+            _ => self.ps.read_weight(&self.gpu, name),
+        }
     }
     pub fn write_weight(&self, name: &str, data: &[f32]) {
-        self.gpu.write(self.w(name), bytemuck::cast_slice(data));
+        match &self.streamed {
+            Some(stream) if stream.holds(name) => stream.write_weight(&self.gpu, name, data).unwrap_or_else(|e| panic!("deepseek2: writing {name}: {e}")),
+            _ => self.gpu.write(self.w(name), bytemuck::cast_slice(data)),
+        }
+    }
+
+    fn is_streamed(&self, name: &str) -> bool {
+        self.streamed.as_ref().is_some_and(|s| s.holds(name))
+    }
+
+    /// Stream every per-layer tensor (routed and shared experts included) through a device window under `cfg` (see
+    /// [`model::streamed`]): the layers' f32 values and optimizer state move to the host, the device keeps the
+    /// window's slots. The embedding, the head and the final norm stay in the store under its own optimizer.
+    pub fn set_resident(&mut self, cfg: &model::resident_ft::ResidentFtConfig) -> Result<(), String> {
+        if !self.batched || self.bwd_steps.is_empty() {
+            return Err("deepseek2: only a batched training build streams its layers".into());
+        }
+        if self.streamed.is_some() {
+            return Err("deepseek2: the layers already stream".into());
+        }
+        let shard = self.shard.clone();
+        let layer_of = |name: &str| model::streamed::blocks_layer(name).filter(|&l| shard.owns(l as usize));
+        let stream = StreamedStore::convert(&self.gpu, &mut self.ps, cfg.clone(), &layer_of).map_err(|e| format!("deepseek2: {e}"))?;
+        self.opt.invalidate();
+        self.streamed = Some(stream);
+        // The recorded passes bound the store's buffers as they were: record them again over the window's slots.
+        self.fwd_steps = self.build_forward(self.b, self.t);
+        self.bwd_steps = self.build_backward();
+        Ok(())
     }
     pub fn param_names(&self) -> Vec<String> {
-        self.ps.trained_params().map(|(n, _)| n.clone()).collect()
+        let streamed = self.streamed.iter().flat_map(|s| s.names().map(str::to_string));
+        self.ps.trained_params().map(|(n, _)| n.clone()).chain(streamed).collect()
     }
     pub fn ctx_len(&self) -> usize {
         self.ctx as usize
@@ -1666,6 +1734,7 @@ impl DeepseekV2 {
         if self.dec.borrow().is_some() {
             return;
         }
+        assert!(self.streamed.is_none(), "deepseek2: a layer-streamed build holds a window of its layers; save it and load the checkpoint to decode");
         let c = &self.cfg;
         let d = c.d_model() as u64;
         let e = c.n_experts() as u64;
@@ -2276,6 +2345,41 @@ impl DeepseekV2 {
     }
 }
 
+/// A recorded pass of [`DeepseekV2`]: its fixed dispatches in order and each MoE layer's experts as the pass reaches
+/// them, reporting where each layer's part begins and ends.
+struct Pass<'a> {
+    model: &'a DeepseekV2,
+    segs: &'a [PassSeg],
+}
+
+impl LayeredPass for Pass<'_> {
+    fn submit_hooked(&self, gpu: &gpu_core::Gpu, edge: &mut dyn FnMut(TapeEdge)) {
+        for (index, seg) in self.segs.iter().enumerate() {
+            match seg {
+                PassSeg::Steps(steps) => gpu.submit(&[], steps),
+                PassSeg::Experts { layer, rows, stage: ExpertStage::Forward { keep } } => self.model.moe_fwd(*layer, *rows, *keep),
+                PassSeg::Experts { layer, rows, stage: ExpertStage::Backward } => self.model.moe_bwd(*layer, *rows),
+                PassSeg::LayerBegin(layer) => edge(TapeEdge::Before { index, layer: Some(*layer) }),
+                PassSeg::LayerEnd(layer) => edge(TapeEdge::After { index, layer: Some(*layer) }),
+            }
+        }
+    }
+}
+
+impl model::OffDeviceState for DeepseekV2 {
+    fn commit(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
+        let stream = self.streamed.as_ref().ok_or_else(|| std::io::Error::other("deepseek2: no streamed state to commit"))?;
+        self.gpu.flush();
+        stream.commit(&self.gpu, dir, step)
+    }
+
+    fn restore(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
+        let stream = self.streamed.as_ref().ok_or_else(|| std::io::Error::other("deepseek2: no streamed state to restore"))?;
+        self.gpu.flush();
+        stream.restore(&self.gpu, dir, step)
+    }
+}
+
 // ---- architecture-agnostic Model seam ----
 
 impl model::Model for DeepseekV2 {
@@ -2288,6 +2392,12 @@ impl model::Model for DeepseekV2 {
     }
     fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
         DeepseekV2::set_saved_policy(self, policy)
+    }
+    fn set_resident(&mut self, cfg: &model::resident_ft::ResidentFtConfig) -> Result<(), String> {
+        DeepseekV2::set_resident(self, cfg)
+    }
+    fn off_device_state(&self) -> Option<&dyn model::OffDeviceState> {
+        self.streamed.as_ref().map(|_| self as &dyn model::OffDeviceState)
     }
 
     type Config = DeepseekV2Config;
