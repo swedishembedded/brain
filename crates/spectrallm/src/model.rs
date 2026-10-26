@@ -30,6 +30,8 @@ use std::collections::HashMap;
 use gpu_core::{BufUsage, DeviceBuffer, Gpu, Step};
 use model::block::{self, FlashGqaIds, Gqa, KernelIds};
 use model::saved::{Residuals, SavedFormat, SavedPolicy};
+use model::streamed::StreamedStore;
+use model::tape::LayerTape;
 use paramstore::ParamStore;
 
 use crate::config::SpectralConfig;
@@ -102,10 +104,17 @@ pub struct SpectralLm {
     ce_rows: DeviceBuffer,
     scratch: Scratch,
     grad: Option<Grad>,
-    trunk: Vec<Step>,
+    /// Embedding, the layers (one segment each) and the final norm.
+    trunk: LayerTape,
     head: Vec<Step>,
     loss_steps: Vec<Step>,
-    bwd_steps: Vec<Step>,
+    /// The head, the layers from the last down (one segment each), the embedding.
+    bwd_steps: LayerTape,
+    /// The per-layer tensors held in a device window of layers, when the run streams them
+    /// ([`model::Model::set_resident`]); `None` keeps every layer in the store.
+    streamed: Option<StreamedStore>,
+    /// A streamed build runs its backward inside the update: set by `backward`, taken by `adamw_step`.
+    backward_pending: Cell<bool>,
     ce_grad_uniform: DeviceBuffer,
     opt: Option<optim::Optim>,
     pub(crate) dec: RefCell<Option<Decode>>,
@@ -209,10 +218,12 @@ impl SpectralLm {
             t,
             train,
             count: Cell::new(1.0),
-            trunk: Vec::new(),
+            trunk: LayerTape::default(),
             head: Vec::new(),
             loss_steps: Vec::new(),
-            bwd_steps: Vec::new(),
+            bwd_steps: LayerTape::default(),
+            streamed: None,
+            backward_pending: Cell::new(false),
             dec: RefCell::new(None),
             gpu,
         };
@@ -333,17 +344,21 @@ impl SpectralLm {
         s.push(self.gpu.step(ADD2, &[&g.d_xmid, &g.d_tmp, d_in], &[n * d], n * d));
     }
 
-    fn trunk_steps(&self) -> Vec<Step> {
+    fn trunk_steps(&self) -> LayerTape {
         let (n, d) = (self.rows(), self.cfg.d_model);
+        let mut tape = LayerTape::default();
         let mut s = vec![self.gpu.step(EMBED, &[&self.tokens, self.ps.w("tok.weight"), &self.res[0]], &[d, n], n * d)];
         self.res.round_trip(&self.gpu, &mut s, 0);
+        tape.segment(&mut s, None);
         for l in 0..self.cfg.n_layers as usize {
             self.layer_fwd(&mut s, l, &self.res[l], &self.res[l + 1]);
             self.res.round_trip(&self.gpu, &mut s, l + 1);
+            tape.segment(&mut s, Some(l));
         }
         let last = &self.res[self.cfg.n_layers as usize];
         s.push(block::rmsnorm_fwd(&self.gpu, &self.ids, last, self.ps.w("norm.weight"), &self.xf, d, n, self.cfg.rms_eps));
-        s
+        tape.segment(&mut s, None);
+        tape
     }
 
     /// Per-position cross-entropy and the per-row softmax statistics the
@@ -370,23 +385,63 @@ impl SpectralLm {
 
     /// The whole backward: the head, then every layer rebuilt and
     /// differentiated in reverse, then the embedding.
-    fn backward_steps(&self) -> Vec<Step> {
+    fn backward_steps(&self) -> LayerTape {
         let (n, d, v) = (self.rows(), self.cfg.d_model, self.cfg.vocab);
         let g = self.grad.as_ref().expect("backward on an inference build");
         let layers = self.cfg.n_layers as usize;
+        let mut tape = LayerTape::default();
         // The loss steps wrote the per-row softmax statistics this reads.
         let mut s = vec![self.gpu.step_buf(CE_GRAD_STATS, &self.ce_grad_uniform, &[&self.logits, &self.targets, &self.ce_stats, &g.dlogits], n * v)];
         self.linear_dw(&mut s, &g.dlogits, &self.xf, self.head_grad(), n, d, v);
         self.linear_dx(&mut s, &g.dlogits, self.head_weight(), &g.d_xf, n, d, v, false);
         self.res.restore(&self.gpu, &mut s, layers);
         s.extend(block::rmsnorm_bwd(&self.gpu, &self.ids, &self.res[layers], self.ps.w("norm.weight"), &g.d_xf, &g.dres[layers], &g.rms_inv, Some(self.ps.g("norm.weight")), d, n, self.cfg.rms_eps));
+        tape.segment(&mut s, None);
         for l in (0..layers).rev() {
             self.res.restore(&self.gpu, &mut s, l);
             self.layer_fwd(&mut s, l, &self.res[l], &self.res[l + 1]);
             self.layer_bwd(&mut s, l, &self.res[l], &g.dres[l + 1], &g.dres[l]);
+            tape.segment(&mut s, Some(l));
         }
         s.push(self.gpu.step(EMB_BWD, &[&self.tokens, &g.dres[0], self.ps.g("tok.weight")], &[n, d, v], v * d));
-        s
+        tape.segment(&mut s, None);
+        tape
+    }
+
+    /// Submit the trunk; a layer-streamed build loads each layer into its window slot as it is reached.
+    fn submit_trunk(&self) {
+        match &self.streamed {
+            Some(stream) => stream.forward(&self.gpu, &self.trunk).unwrap_or_else(|e| panic!("spectrallm layer-streamed forward: {e}")),
+            None => self.trunk.submit(&self.gpu),
+        }
+    }
+
+    pub(crate) fn is_streamed(&self) -> bool {
+        self.streamed.is_some()
+    }
+
+    fn holds_streamed(&self, name: &str) -> bool {
+        self.streamed.as_ref().is_some_and(|s| s.holds(name))
+    }
+
+    /// Stream every per-layer tensor through a device window under `cfg` (see [`model::streamed`]): the layers' f32
+    /// values and optimizer state move to the host, the device keeps the window's slots. The embedding (the tied
+    /// head) and the final norm stay in the store under its own optimizer.
+    pub fn set_resident(&mut self, cfg: &model::resident_ft::ResidentFtConfig) -> Result<(), String> {
+        if !self.train {
+            return Err("spectrallm: an inference build has nothing to stream".into());
+        }
+        if self.streamed.is_some() {
+            return Err("spectrallm: the layers already stream".into());
+        }
+        let stream = StreamedStore::convert(&self.gpu, &mut self.ps, cfg.clone(), &model::streamed::blocks_layer).map_err(|e| format!("spectrallm: {e}"))?;
+        self.opt.as_ref().expect("a training build has an optimizer").invalidate();
+        self.streamed = Some(stream);
+        // The recorded passes bound the store's buffers as they were: record them again over the window's slots.
+        self.trunk = self.trunk_steps();
+        self.head = self.head_steps();
+        self.bwd_steps = self.backward_steps();
+        Ok(())
     }
 
     pub fn set_tokens(&self, tokens: &[u32]) {
@@ -405,7 +460,7 @@ impl SpectralLm {
 
     /// Full-sequence logits `[b*t, vocab]` for the uploaded tokens.
     pub fn forward_logits(&self) -> Vec<f32> {
-        self.gpu.submit(&[], &self.trunk);
+        self.submit_trunk();
         self.gpu.submit(&[], &self.head);
         self.gpu.read(&self.logits, self.rows() as usize * self.cfg.vocab as usize)
     }
@@ -413,7 +468,7 @@ impl SpectralLm {
     /// Per-position next-token negative log-likelihood (nats) of the
     /// uploaded batch, 0 at [`IGNORE`]d positions.
     pub fn token_nll(&self) -> Vec<f32> {
-        self.gpu.submit(&[], &self.trunk);
+        self.submit_trunk();
         self.gpu.submit(&[], &self.head);
         self.gpu.submit(&[], &self.loss_steps);
         self.gpu.read(&self.ce_rows, self.rows() as usize)
@@ -429,12 +484,12 @@ impl SpectralLm {
     /// Per-kernel-kind device profiles of the uploaded batch's forward (trunk,
     /// head and loss) and, on a training build, backward pass.
     pub fn profile(&self, reps: usize) -> (gpu_core::profile::PassProfile, Option<gpu_core::profile::PassProfile>) {
-        let fwd: Vec<Step> = self.trunk.iter().chain(&self.head).chain(&self.loss_steps).cloned().collect();
+        let fwd: Vec<Step> = self.trunk.steps().iter().chain(&self.head).chain(&self.loss_steps).cloned().collect();
         let f = gpu_core::profile::profile(&self.gpu, "spectrallm forward", &fwd, reps);
         let b = self.train.then(|| {
             let (n, v) = (self.rows(), self.cfg.vocab);
             self.gpu.write(&self.ce_grad_uniform, &[n, v, IGNORE, gpu_core::f(self.count.get())]);
-            gpu_core::profile::profile(&self.gpu, "spectrallm backward", &self.bwd_steps, reps)
+            gpu_core::profile::profile(&self.gpu, "spectrallm backward", self.bwd_steps.steps(), reps)
         });
         (f, b)
     }
@@ -443,7 +498,7 @@ impl SpectralLm {
     pub fn cost(&self) -> gpu_core::cost::CostReport {
         let mut report = gpu_core::cost::CostReport::default();
         let names: Vec<String> = PIPELINES.iter().map(|(n, _)| n.to_string()).collect();
-        for steps in [&self.trunk, &self.head, &self.loss_steps, &self.bwd_steps] {
+        for steps in [self.trunk.steps(), &self.head, &self.loss_steps, self.bwd_steps.steps()] {
             gpu_core::cost::tally(&mut report, &names, steps);
         }
         report
@@ -518,7 +573,13 @@ impl model::Model for SpectralLm {
         assert!(self.train, "backward on an inference build");
         let (n, v) = (self.rows(), self.cfg.vocab);
         self.gpu.write(&self.ce_grad_uniform, &[n, v, IGNORE, gpu_core::f(self.count.get())]);
-        self.gpu.submit(&[], &self.bwd_steps);
+        if self.streamed.as_ref().is_some_and(StreamedStore::is_layer_streamed) {
+            // The weights of a layer-streamed build are not all on the device: the backward runs layer by layer in
+            // `adamw_step`, where the layers it loads are the ones it updates.
+            assert!(!self.backward_pending.replace(true), "spectrallm layer-streamed full fine-tune: a second backward before the update (gradient accumulation) is not supported; every micro-batch is its own step");
+            return;
+        }
+        self.bwd_steps.submit(&self.gpu);
     }
 
     fn zero_grads(&self) {
@@ -526,7 +587,17 @@ impl model::Model for SpectralLm {
     }
 
     fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
-        self.opt.as_ref().expect("adamw_step on an inference build").step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale);
+        let opt = self.opt.as_ref().expect("adamw_step on an inference build");
+        match &self.streamed {
+            Some(stream) => {
+                if stream.is_layer_streamed() {
+                    assert!(self.backward_pending.replace(false), "spectrallm layer-streamed full fine-tune: adamw_step without a backward");
+                }
+                let args = model::resident_ft::StepArgs { step: t, lr, wd, adam, clip, extra_scale };
+                stream.adamw_step(&self.gpu, &self.ps, opt, &self.bwd_steps, &args).unwrap_or_else(|e| panic!("spectrallm layer-streamed update: {e}"));
+            }
+            None => opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale),
+        }
     }
 
     fn poll_wait(&self) {
@@ -538,15 +609,30 @@ impl model::Model for SpectralLm {
     }
 
     fn read_weight(&self, name: &str) -> Vec<f32> {
-        self.ps.read_weight(&self.gpu, name)
+        match &self.streamed {
+            Some(stream) if stream.holds(name) => stream.read_weight(&self.gpu, name).unwrap_or_else(|e| panic!("spectrallm: reading {name}: {e}")),
+            _ => self.ps.read_weight(&self.gpu, name),
+        }
     }
 
     fn write_weight(&self, name: &str, data: &[f32]) {
-        self.gpu.write_f32(self.ps.w(name), data);
+        match &self.streamed {
+            Some(stream) if stream.holds(name) => stream.write_weight(&self.gpu, name, data).unwrap_or_else(|e| panic!("spectrallm: writing {name}: {e}")),
+            _ => self.gpu.write_f32(self.ps.w(name), data),
+        }
     }
 
     fn read_grad(&self, name: &str) -> Vec<f32> {
+        assert!(!self.holds_streamed(name), "spectrallm: {name} streams through a layer window; no gradient outlives its layer");
         self.ps.read_grad(&self.gpu, name)
+    }
+
+    fn set_resident(&mut self, cfg: &model::resident_ft::ResidentFtConfig) -> Result<(), String> {
+        SpectralLm::set_resident(self, cfg)
+    }
+
+    fn off_device_state(&self) -> Option<&dyn model::OffDeviceState> {
+        self.streamed.as_ref().map(|_| self as &dyn model::OffDeviceState)
     }
 
     fn logits_all(&self, tokens: &[u32]) -> Option<Vec<f32>> {
@@ -559,6 +645,20 @@ impl model::Model for SpectralLm {
             self.cfg.param_list().into_iter().map(|(name, numel)| (name.clone(), vec![numel as u64], self.read_weight(&name))).collect();
         let card = checkpoint::st::ModelCard::new("brain/spectrallm", "spectrallm");
         checkpoint::save_carded(path, self.cfg.to_json(), &tensors, &card);
+    }
+}
+
+impl model::OffDeviceState for SpectralLm {
+    fn commit(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
+        let stream = self.streamed.as_ref().ok_or_else(|| std::io::Error::other("spectrallm: no streamed state to commit"))?;
+        self.gpu.flush();
+        stream.commit(&self.gpu, dir, step)
+    }
+
+    fn restore(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
+        let stream = self.streamed.as_ref().ok_or_else(|| std::io::Error::other("spectrallm: no streamed state to restore"))?;
+        self.gpu.flush();
+        stream.restore(&self.gpu, dir, step)
     }
 }
 

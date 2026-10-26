@@ -90,6 +90,7 @@ impl SpectralLm {
     /// Append `token` at the next position and return the logits predicting
     /// the position after it.
     pub fn step(&self, token: u32) -> Vec<f32> {
+        assert!(!self.is_streamed(), "spectrallm: a layer-streamed build holds a window of its layers; save it and load the checkpoint to decode");
         if self.dec.borrow().is_none() {
             *self.dec.borrow_mut() = Some(Decode::new(self));
         }

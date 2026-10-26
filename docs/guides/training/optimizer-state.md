@@ -231,8 +231,8 @@ for bit, with and without an active clip; both train what the plain f32 build
 trains (the host and device AdamW round differently, so losses agree to 1e-5
 and values to 1% of how far the plain build moved them); and the streamed build
 holds fewer device bytes. `trainprec::check_exact_resume` holds a streamed run
-to exact resume through the fit loop. gpt2 runs both
-(`gpt2/tests/layer_streamed.rs`). The conversion happens after the model is
+to exact resume through the fit loop. gpt2 and spectrallm run both
+(`<model>/tests/layer_streamed.rs`). The conversion happens after the model is
 built, so loading still needs the whole model on the device once; the window
 bounds what training adds and what stays resident.
 

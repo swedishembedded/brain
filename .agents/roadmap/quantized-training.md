@@ -136,8 +136,8 @@ The per-cell matrix and its tests are `docs/reference/training-capabilities.md`.
   master), `ops::DeviceIo`/`StoreDevice` (the state on the model's own handle), `model::tape::LayerTape` (per-layer
   segments), `model::streamed::StreamedStore` (converts a built store, aliases its entries to the window, drives
   the shared `resident_ft::adamw_step`), `Model::set_resident` from `apply_train_precision`. Specs:
-  `streamed::check_layer_streaming`, `trainprec::check_exact_resume`. gpt2 adopts it. Open: the other decoders
-  (lfm2, horizon, spectrallm, ouro, huginn; deepseek2/glmdsa/qwen35moe through their expert segments);
+  `streamed::check_layer_streaming`, `trainprec::check_exact_resume`. gpt2 and spectrallm adopt it. Open: the other
+  decoders (lfm2, horizon, ouro, huginn; deepseek2/glmdsa/qwen35moe through their expert segments);
   construction-time streaming so loading never holds the whole model on the device.
 - D Memory: `model::saved` saved-activation policy (keep, recompute, bf16/fp8 boundaries)
   priced in memplan and wired into qwen3 and qwen35 LoRA training (a4a1242bc); flash attention
