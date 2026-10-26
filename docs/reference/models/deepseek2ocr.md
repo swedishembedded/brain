@@ -24,7 +24,7 @@ block spliced over the decoder's `<image>` placeholders.
 | CLI (`brain <arch> <action>`)      | [x] |
 | HTTP API              | [x] |
 | D-Bus                 | [x] |
-| Batched serving       | [ ] |
+| Batched serving       | [x] |
 
 The backward pass exists end to end (the decoder's cross-entropy gradient
 reaches the input pixels through the splice, the projector, CLIP and the whole
@@ -161,8 +161,9 @@ atomically: `<|grounding|>` turns on grounding mode (the model then emits
 ## Hardware and limits
 
 **Both halves on the GPU, on a host that has one.** `caps::Session::load`
-builds the vision encoder (SAM+CLIP+glue) with `gpu_core::Gpu::new_wgpu` and
-the decoder on whichever device `caps::decoder_device` picks. That is a real
+builds the vision encoder (SAM+CLIP+glue) with `gpu_core::Gpu::new` (the
+server's default backend: CUDA on NVIDIA cards) and the decoder on whichever
+device `caps::plan_placement` picks. That is a real
 card by default: on two Tesla P40s the served build places the tower on one
 and the DeepSeek-V2 MoE decoder on the other.
 <!-- perf-number: the comparison this default rests on, measured on one host -->
@@ -281,14 +282,16 @@ returns `false` on the model's end-of-sentence id, which stops the loop from
 dispatching any further decode steps - wall time now tracks how early the
 model actually stopped, not always the full `max_new` budget.
 
-**One image, one view, batch 1.** The decoder's splice takes exactly one
-contiguous `(row0, n_rows)` run, so only DeepSeek-OCR's *global* (overview) view
-is served: the multi-tile "Base"/"Gundam" modes, which interleave a second token
-stream at 640², need one splice call per run. The row layout for them already
-exists and is unit-tested (`deepseekocr::rows`), and the row gather is already
-indifferent to tiles - `deepseekv2::enable_mm_splice` is the piece that is not.
-`run_batch` is therefore the serial default: two concurrent requests share no
-work (each image needs its own encoder pass, and the decoder has no batch axis).
+**One image, one view.** The image block is one contiguous run, so only
+DeepSeek-OCR's *global* (overview) view is served: the multi-tile "Base"/"Gundam"
+modes, which interleave a second token stream at 640², are not.
+
+**Concurrent requests are batched.** Each request's image is encoded once on the
+vision card, then the generic scheduler (`model::serve`, through `llmserve`)
+decodes every page in flight as one batched step over a paged KV pool
+(`deepseek2::serve::Engine`): one weight pass per step for all rows, pages join
+and leave between steps, a short page is not held behind a long one, and a
+cancelled request returns its KV blocks at once.
 
 **Greedy only** - no temperature, top-k or top-p - and fp32 weights only (no
 INT8 path).

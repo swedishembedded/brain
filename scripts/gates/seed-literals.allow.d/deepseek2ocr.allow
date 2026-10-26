@@ -1,1 +1,1 @@
-crates/deepseek2ocr/src/caps.rs	Session::load_with:new_with_prompt_devices_sized#5=0	positional	greedy: the inference load (train off) draws only placeholder buffers that every forward overwrites
+crates/deepseek2ocr/src/serve.rs	OcrFrontend::parse_embedded:seed=0	default	greedy: SampleParams::greedy never consults the RNG

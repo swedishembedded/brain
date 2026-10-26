@@ -294,10 +294,6 @@ crates/deepseek2/tests/common/real_lm.rs	MOE_SKIP_GPU_TESTS
 crates/deepseek2/tests/gradcheck.rs	MOE_SKIP_GPU_TESTS
 crates/deepseek2/tests/shard_parity.rs	MOE_SKIP_GPU_TESTS
 crates/deepseek2/tests/shard_parity.rs	SHARD_TEST_GPUS
-crates/deepseek2ocr/src/caps.rs	BRAIN_DEEPSEEK_OCR_CHUNK
-crates/deepseek2ocr/src/caps.rs	BRAIN_DEEPSEEK_OCR_CTX
-crates/deepseek2ocr/src/caps.rs	BRAIN_DEEPSEEK_OCR_NGRAM_SIZE
-crates/deepseek2ocr/src/caps.rs	BRAIN_DEEPSEEK_OCR_WINDOW_SIZE
 crates/deepseek2ocr/src/lib.rs	BRAIN_PROFILE
 crates/deepseek2ocr/tests/common/real_vision.rs	BRAIN_DEVICE
 crates/deepseekocr2/src/caps.rs	<DIR_VAR>

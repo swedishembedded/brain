@@ -3,18 +3,18 @@
 
 //! DeepSeek-OCR behind the residency scheduler.
 //!
-//! `activate_multi` builds the whole composite ONCE - the mmproj import, the
-//! decoder's streamed fp32 expansion, and the 273-row splice sized from the
-//! prompt - and the [`Instance`] owns the resulting
-//! [`deepseek2ocr::caps::Session`], so dropping it frees every buffer. One
-//! action, `generate`; its schema and all of its work come from
-//! `deepseek2ocr::caps`, so this file holds no second copy of the
-//! preprocessing, the prompt assembly or the token accounting.
+//! `activate_multi` builds the whole model ONCE - the mmproj import, the
+//! decoder engine's weight upload and its paged KV pool - and the [`Instance`]
+//! it returns is `deepseek2ocr::serve::OcrInstance`: a `llmserve::ScheduledInstance`,
+//! so dropping it frees every buffer. One action, `generate`; its schema comes
+//! from `deepseek2ocr::caps` and all of its work from `deepseek2ocr::serve`, so
+//! this file holds no second copy of the preprocessing, the prompt assembly or
+//! the token accounting.
 //!
 //! # This model spans TWO devices, and names both
 //!
-//! [`deepseek2ocr::caps::Session::load_with`] builds the vision encoder
-//! (SAM + CLIP + glue) with `gpu_core::Gpu::new_gpu`, and the decoder on
+//! [`deepseek2ocr::serve::load`] builds the vision encoder
+//! (SAM + CLIP + glue) with `gpu_core::Gpu::new`, and the decoder on
 //! whichever device the [`deepseek2ocr::caps::DecoderDevice`] it is handed
 //! names - a second card, the vision card, or the CPU Cranelift JIT.
 //!
@@ -48,7 +48,7 @@
 //! activation would change the backend every *other* resident builds on
 //! afterwards. Placement is a scoped registry selection
 //! (`gpu_core::devices::with_gpu`, via [`crate::resident_llm::on_device`]) -
-//! `Session::load_with`'s `Gpu::new_gpu` resolves the ambient selection, so
+//! `deepseek2ocr::serve::load`'s `Gpu::new` resolves the ambient selection, so
 //! running it inside that scope lands the vision tower on exactly the card
 //! `estimate_multi` reserved, and the decoder's own card is entered by a
 //! nested `with_gpu` inside that call. The placement is computed ONCE, here,
@@ -57,16 +57,16 @@
 //! `crates/deepseek2ocr/tests/common/real_vision.rs` does mutate `BRAIN_DEVICE`
 //! - correctly, for a single-threaded test binary that owns the process.)
 //!
-//! # Batching: the serial default, and why
+//! # Batching
 //!
-//! Each request's image needs its own DeepEncoder pass (the SAM tower is a
-//! single-image graph - `sam1`'s windowed spans are not batch-strided), and the
-//! decoder's batch axis is not wired for concurrent sequences, so there is no
-//! shared work between two concurrent requests to hoist. A real batched forward
-//! here is a performance phase of its own, not a wrapper this file could write.
+//! Requests handed to one `run_batch` (or admitted into a running group by
+//! `run_open`) share the decoder's weight passes: each request's image is
+//! encoded on the vision card, then the generic scheduler decodes every page in
+//! flight as one batched step. The scheduling is `model::serve` and `llmserve`;
+//! this file only places the model.
 
-use capability::{ActionResult, Invocation, Manifest, Progress};
-use deepseek2ocr::caps::{DecoderDevice, Session, MODEL};
+use capability::{Invocation, Manifest};
+use deepseek2ocr::caps::{DecoderDevice, MODEL};
 use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
@@ -90,7 +90,7 @@ pub struct DeepseekOcrResident {
     vision_gpu: Option<u32>,
     /// Where the decoder half goes - decided ONCE, at construction, and both
     /// budgeted by [`Self::estimate_multi`] and handed to
-    /// `Session::load_with` by [`Self::activate_multi`], so the reservation
+    /// `deepseek2ocr::serve::load` by [`Self::activate_multi`], so the reservation
     /// and the allocation cannot name different devices.
     decoder: DecoderDevice,
 }
@@ -133,17 +133,16 @@ impl ResidentModel for DeepseekOcrResident {
         // The stripped, weights-free spec: this resident's checkpoint
         // directory is already resolved at construction (`self.dir`), so a
         // served caller must never be told a `weights` param exists to set -
-        // see `deepseek2ocr::caps::manifest_resident`'s doc. `Session::generate`
-        // (what `DeepseekOcrInstance::run` actually calls) never reads
-        // `weights` from `inv` either.
+        // see `deepseek2ocr::caps::manifest_resident`'s doc. The instance
+        // never reads `weights` from `inv` either.
         deepseek2ocr::caps::manifest_resident()
     }
 
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
-        // One composite serves every request: the splice is sized at the
-        // instruction-independent (1, 273) image run, so nothing in an
-        // invocation can fork the graph. Keying on anything else would
-        // duplicate a ~21 GiB build.
+        // One model serves every request: the image block is the same
+        // instruction-independent (1, 273) run, so nothing in an invocation
+        // can fork the graph. Keying on anything else would duplicate a
+        // multi-GiB build.
         InstanceKey::new(MODEL, self.dir.clone())
     }
 
@@ -207,38 +206,19 @@ impl MultiDeviceResidentModel for DeepseekOcrResident {
         if devices.len() != planned.len() || !devices.iter().all(|d| planned.contains(d)) {
             return Err(format!("{MODEL}: activate_multi got devices {devices:?} but the plan placed {planned:?}"));
         }
-        // Scoped registry selection, never env mutation: `Session::load_with`
+        // Scoped registry selection, never env mutation: `deepseek2ocr::serve::load`
         // builds the vision half with `Gpu::new_gpu`, which resolves the
         // ambient selection, so this scope is what puts it on the reserved
         // card. A decoder on its OWN card enters a nested `with_gpu` inside
         // that call, and a decoder on the CPU names that backend explicitly;
         // neither is affected by this scope.
         let placement = self.decoder;
-        let session = match self.vision_gpu {
-            Some(i) => crate::resident_llm::on_device(Device::Gpu(i), || Session::load_with(&key.config, placement))?,
-            None => Session::load_with(&key.config, placement),
+        let instance = match self.vision_gpu {
+            Some(i) => crate::resident_llm::on_device(Device::Gpu(i), || deepseek2ocr::serve::load(&key.config, placement))?,
+            None => deepseek2ocr::serve::load(&key.config, placement),
         }?;
-        Ok(Box::new(DeepseekOcrInstance { session }))
+        Ok(Box::new(instance))
     }
-}
-
-/// A resident DeepSeek-OCR: the built composite, its tokenizer, and the
-/// preprocessor's device handle.
-struct DeepseekOcrInstance {
-    session: Session,
-}
-
-impl Instance for DeepseekOcrInstance {
-    fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        if action != "generate" {
-            return Err(format!("deepseek-ocr: unknown action '{action}'"));
-        }
-        self.session.generate(inv, progress)
-    }
-
-    // `run_batch` is the serial default: one encoder pass per image and a
-    // decoder with no wired batch axis share no work between requests -- see
-    // this module's header.
 }
 
 #[cfg(test)]

@@ -23,7 +23,7 @@
 
 use capability::{ActionResult, Invocation, Progress};
 use data::qwen_tokenizer::QwenBpe;
-use model::serve::{PagedDecoder, RejectReason, Request, Scheduler};
+use model::serve::{PagedDecoder, PromptEmbeds, RejectReason, Request, Scheduler};
 pub use qwen3::chat::ParsedRequest;
 use qwen3::chat::SeqState;
 use residency::{AdapterIdentity, Instance, JobFeed};
@@ -38,6 +38,20 @@ pub trait Frontend {
     fn label(&self) -> &str;
     /// Render and tokenize `inv`.
     fn parse(&self, inv: &Invocation) -> Result<ParsedRequest, String>;
+    /// [`Self::parse`] for a family whose prompts carry embedding rows from an
+    /// encoder (a vision tower): the request and the rows that stand at some of
+    /// its positions. The default has no rows, so a text family implements only
+    /// [`Self::parse`]; a family with rows implements this one (and `parse` as its
+    /// request half).
+    fn parse_embedded(&self, inv: &Invocation) -> Result<(ParsedRequest, Option<PromptEmbeds>), String> {
+        self.parse(inv).map(|req| (req, None))
+    }
+    /// Whether building a request runs an encoder over its inputs. Such a request is
+    /// not screened ahead of its slot (that would run the encoder twice); admission
+    /// still refuses one that can never run, with the same message.
+    fn encodes_inputs(&self) -> bool {
+        false
+    }
     /// The adapter `inv` runs under; `None` is the base model.
     fn route(&self, _inv: &Invocation) -> Result<Option<(model::serve::AdapterId, AdapterIdentity)>, String> {
         Ok(None)
@@ -76,6 +90,12 @@ impl<F: Frontend + ?Sized> Frontend for std::sync::Arc<F> {
     }
     fn parse(&self, inv: &Invocation) -> Result<ParsedRequest, String> {
         (**self).parse(inv)
+    }
+    fn parse_embedded(&self, inv: &Invocation) -> Result<(ParsedRequest, Option<PromptEmbeds>), String> {
+        (**self).parse_embedded(inv)
+    }
+    fn encodes_inputs(&self) -> bool {
+        (**self).encodes_inputs()
     }
     fn route(&self, inv: &Invocation) -> Result<Option<(model::serve::AdapterId, AdapterIdentity)>, String> {
         (**self).route(inv)
@@ -192,17 +212,22 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
                 return (bi, Some(Err(e)));
             }
         };
-        match self.front.parse(inv) {
-            Ok(req) => {
+        match self.front.parse_embedded(inv) {
+            Ok((req, embeds)) => {
                 let sample = req.sampler;
                 let seed = req.seed;
                 let max_new = req.max_new;
                 job.capture = Capture::of(inv, &req.ids);
                 let seq = SeqState::new(&req, inv.cancel.clone());
                 let request = Request { prompt: req.ids, max_new, stop: self.front.stop().to_vec() };
-                let id = match adapter {
-                    Some(adapter) => self.sched.submit_for_adapter(request, adapter, sample, seed),
-                    None => self.sched.submit_sampled(request, sample, seed),
+                let id = match (adapter, embeds) {
+                    (Some(adapter), None) => self.sched.submit_for_adapter(request, adapter, sample, seed),
+                    (None, None) => self.sched.submit_sampled(request, sample, seed),
+                    (None, Some(embeds)) => self.sched.submit_embedded(request, embeds, sample, seed),
+                    (Some(_), Some(_)) => {
+                        self.jobs.push(job);
+                        return (bi, Some(Err(format!("{}: an adapter cannot serve a prompt with embedding rows", self.front.label()))));
+                    }
                 };
                 progress(bi, Progress::step(0, max_new as u32, "generating"));
                 job.seq = Some(seq);
@@ -229,6 +254,9 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
             Ok(None) => None,
             Err(e) => return Some(e),
         };
+        if self.front.encodes_inputs() {
+            return None;
+        }
         let req = match self.front.parse(inv) {
             Ok(req) => req,
             Err(e) => return Some(e),

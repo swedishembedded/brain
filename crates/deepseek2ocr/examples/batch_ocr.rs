@@ -88,7 +88,7 @@ fn main() {
     eprintln!("   weights: {dir}");
 
     let t_load = Instant::now();
-    let session = Session::load(&dir).unwrap_or_else(|e| panic!("Session::load({dir}): {e}"));
+    let mut session = Session::load(&dir).unwrap_or_else(|e| panic!("Session::load({dir}): {e}"));
     eprintln!("== model resident in {:.1}s (one-time cost, amortized over every page below)\n", t_load.elapsed().as_secs_f64());
 
     let mut total_prompt_tokens = 0i64;

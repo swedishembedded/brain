@@ -42,6 +42,9 @@ brain-capability.workspace = true
 # `crates/qwen3` is used here.
 brain-qwen3.workspace = true
 brain-modelstore.workspace = true
+# The scheduler-driven instance (`src/serve.rs`): `llmserve::ScheduledInstance` over the paged engine.
+brain-llmserve.workspace = true
+brain-residency.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
