@@ -193,6 +193,32 @@ impl ResBlock {
         &self.out
     }
 
+    /// Write the two convs whose outputs only the residual join reads (`conv2`, `downsample`) into the context's shared
+    /// buffers: no backward reads them, so one pair serves every block driven through `ctx`.
+    pub(crate) fn share_join_inputs(&mut self, ctx: &Ctx) {
+        self.conv2.share_output(ctx, "arcface.block.conv2");
+        if let Some(d) = &mut self.downsample {
+            d.share_output(ctx, "arcface.block.downsample");
+        }
+    }
+
+    /// Write the `bn1 -> conv1 -> prelu` branch's outputs into the context's shared buffers too, for a trainer that
+    /// rebuilds them ([`ResBlock::replay_branch`]) before each block's backward: the block then holds only its output.
+    pub(crate) fn share_branch(&mut self, ctx: &Ctx) {
+        self.bn1.share_output(ctx, "arcface.block.bn1");
+        self.conv1.share_output(ctx, "arcface.block.conv1");
+        self.prelu.share_output(ctx, "arcface.block.prelu");
+    }
+
+    /// Rebuild the branch's outputs from the block input `x`, bit for bit what the train-mode forward wrote: `bn1` with
+    /// the batch statistics that forward packed, then `conv1` and `prelu`. `conv2` is not rebuilt; its backward reads
+    /// only its input.
+    pub(crate) fn replay_branch(&self, ctx: &Ctx, ps: &ParamStore, x: &DeviceBuffer) {
+        self.bn1.replay(ctx, x);
+        self.conv1.forward(ctx, ps, self.bn1.out());
+        self.prelu.forward(ctx, ps, self.conv1.out());
+    }
+
     pub(crate) fn param_list(&self) -> Vec<(String, usize)> {
         let mut v = self.bn1.param_list();
         v.extend(self.conv1.param_list());

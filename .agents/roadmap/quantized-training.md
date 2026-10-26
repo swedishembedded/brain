@@ -149,8 +149,12 @@ The per-cell matrix and its tests are `docs/reference/training-capabilities.md`.
   the five output-sized buffers each unit held). A normed unit's `conv_out`/`bn_out` are allocated on first use, and
   `Conv::set_recompute` takes them from the scratch and replays the conv and `bn_train` (with the forward's batch
   statistics, no second running-stat update) before the unit's backward: one of five buffers left per unit.
-  yolov8 (`set_saved_policy`) and zipdepth recompute this way. Open: arcface's raw-conv plus `vision::BatchNorm`
-  units, whose buffers are unit outputs, need recompute across a group of units.
+  yolov8 (`set_saved_policy`) and zipdepth recompute this way. A raw conv with no activation holds no activation
+  buffer. Units whose outputs are a group's intermediates share them per role (`Conv`/`BatchNorm`/`PReLU::share_output`,
+  `PReLU::share_d_in`): arcface's residual blocks share the join inputs and every backward temporary (the block input
+  gradients alternate between two), and `ArcFaceTrainer::set_saved_policy(Recompute)` shares the `bn1 -> conv1 ->
+  prelu` branch too, replaying it before each block's backward (`BatchNorm::replay`, the forward's batch statistics):
+  IResNet-100 at batch 8 peaks at 1796 MiB keeping, 1457 MiB recomputing, from 2739 MiB.
   Construction-time streaming (`Role::Streamed`, `StreamedStore::attach`, `Model::new_resident`,
   `check_streamed_construction`): gpt2, lfm2, spectrallm, deepseek2, glmdsa, qwen35moe. Open: horizon.
 - D Memory: `model::saved` saved-activation policy (keep, recompute, bf16/fp8 boundaries)

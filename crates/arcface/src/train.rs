@@ -37,12 +37,19 @@
 //! `run_mean`/`run_var` are therefore registered `Role::Frozen` (they carry no
 //! train-mode gradient) and a real training loop must turn the EMA back on.
 //!
-//! # SSA
+//! # What the backward keeps
 //!
-//! Nothing is recomputed and nothing is overwritten: every `vision` block owns
-//! its own output buffer for the object's lifetime (`Ctx::act` does not pool),
-//! so the forward's activations ARE the backward's cache. The per-block backward
-//! temporaries live in [`BlockBwd`], one set per block, for the same reason.
+//! Each residual block holds its own output (the next block's input, which its
+//! backward reads); everything else a block writes lives in buffers one per
+//! role for the whole backbone (`vision::Ctx::scratch`): the `conv2` and
+//! `downsample` outputs (only the residual join reads them) and every backward
+//! temporary, the block input gradients alternating between two buffers so a
+//! block reads its successor's while writing its own. The `bn1 -> conv1 ->
+//! prelu` branch outputs, which the backward reads, are the block's own under
+//! [`SavedPolicy::Keep`]; [`ArcFaceTrainer::set_saved_policy`] with
+//! [`SavedPolicy::Recompute`] shares them too and rebuilds a block's branch from
+//! its input before its backward, `bn1` replaying the batch statistics its
+//! forward packed, so the gradients are bit for bit the same.
 //!
 //! # The margin head
 //!
@@ -64,6 +71,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 
 use gpu_core::{f, DeviceBuffer, Gpu};
+use model::saved::SavedPolicy;
 use paramstore::{ParamStore, Role};
 use vision::{Act, BatchNorm, BnNames, Conv, ConvNames, Ctx, PReLU, Shape};
 
@@ -166,14 +174,17 @@ struct BlockBwd {
 }
 
 impl BlockBwd {
-    fn new(ctx: &Ctx, blk: &ResBlock, in_shape: Shape) -> BlockBwd {
+    /// Block `index`'s backward buffers. All of them live only through its backward, so they come from the context's
+    /// shared scratch; its input gradient is read by the block before it, so even and odd blocks write different ones.
+    fn new(ctx: &Ctx, index: usize, blk: &ResBlock, in_shape: Shape) -> BlockBwd {
+        let n_in = in_shape.numel();
         BlockBwd {
-            d_prelu_out: ctx.act(blk.conv1.out_shape.numel()),
-            d_bn1_out: ctx.act(in_shape.numel()),
-            d_main: ctx.act(in_shape.numel()),
-            d_skip: blk.downsample.as_ref().map(|_| ctx.act(in_shape.numel())),
-            d_x: ctx.act(in_shape.numel()),
-            n_in: in_shape.numel(),
+            d_prelu_out: ctx.scratch("arcface.block.d_prelu_out", blk.conv1.out_shape.numel()),
+            d_bn1_out: ctx.scratch("arcface.block.d_bn1_out", n_in),
+            d_main: ctx.scratch("arcface.block.d_main", n_in),
+            d_skip: blk.downsample.as_ref().map(|_| ctx.scratch("arcface.block.d_skip", n_in)),
+            d_x: ctx.scratch(if index.is_multiple_of(2) { "arcface.block.d_x.even" } else { "arcface.block.d_x.odd" }, n_in),
+            n_in,
         }
     }
 }
@@ -259,6 +270,8 @@ pub struct ArcFaceTrainer {
     d_input: DeviceBuffer,
 
     fwd_done: Cell<bool>,
+    /// What the backward keeps of the forward ([`ArcFaceTrainer::set_saved_policy`]).
+    saved: SavedPolicy,
 }
 
 impl ArcFaceTrainer {
@@ -302,13 +315,15 @@ impl ArcFaceTrainer {
         for s in 0..4usize {
             for b in 0..cfg.arc.layers[s] as usize {
                 let stride = if b == 0 { 2 } else { 1 };
-                let blk =
+                let mut blk =
                     ResBlock::new(&ctx, &format!("layer{}.{}", s + 1, b), shape, cfg.arc.channels[s], stride);
+                blk.share_join_inputs(&ctx);
+                blk.prelu.share_d_in(&ctx, "arcface.block.prelu.d_in");
                 // TRAIN-mode BN: batch statistics, and the `mvg` packing the
                 // backward reads. `ResBlock::new` builds it eval-mode for
                 // inference; flipping it here is the one difference.
                 blk.bn1.set_eval(false);
-                bwd.push(BlockBwd::new(&ctx, &blk, shape));
+                bwd.push(BlockBwd::new(&ctx, blocks.len(), &blk, shape));
                 shape = blk.out_shape;
                 blocks.push(blk);
             }
@@ -383,6 +398,7 @@ impl ArcFaceTrainer {
             ps,
             gpu,
             fwd_done: Cell::new(false),
+            saved: SavedPolicy::Keep,
         }
     }
 
@@ -401,6 +417,26 @@ impl ArcFaceTrainer {
     /// be built on top without changing anything here.
     pub fn d_input(&self) -> &DeviceBuffer {
         &self.d_input
+    }
+
+    /// Keep what `policy` names of the forward: every block's branch outputs ([`SavedPolicy::Keep`]), or only each
+    /// block's output, its `bn1 -> conv1 -> prelu` branch rebuilt from its input before its backward
+    /// ([`SavedPolicy::Recompute`]). A backbone of residual blocks keeps its block outputs in f32, so a narrow saved
+    /// format is refused by name, as is going back to keeping everything.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        if let SavedPolicy::Quantized(format) = policy {
+            return Err(format!("arcface recomputes its block branches from their f32 inputs; {format:?} saved boundaries do not apply"));
+        }
+        if !self.saved.narrows_to(policy) {
+            return Err(format!("arcface: a trainer keeping {:?} cannot go back to {policy:?}", self.saved));
+        }
+        if policy.recomputes() && !self.saved.recomputes() {
+            let ctx = Ctx::new(&self.gpu, ids());
+            self.blocks.iter_mut().for_each(|b| b.share_branch(&ctx));
+            self.fwd_done.set(false);
+        }
+        self.saved = policy;
+        Ok(())
     }
 
     fn ctx(&self) -> Ctx<'_> {
@@ -436,8 +472,8 @@ impl ArcFaceTrainer {
 
     /// Full forward, returning the mean ArcFace cross-entropy over the batch.
     ///
-    /// Every stage writes its own buffer, so this doubles as the backward's
-    /// activation cache - calling it twice in a row is safe and idempotent.
+    /// It leaves what the backward reads (see "What the backward keeps" above),
+    /// so calling it twice in a row is safe and idempotent.
     pub fn loss(&self) -> f32 {
         let ctx = self.ctx();
         let (b, e, k) = (self.cfg.batch, self.cfg.arc.embedding, self.cfg.classes);
@@ -590,6 +626,9 @@ impl ArcFaceTrainer {
         for i in (0..self.blocks.len()).rev() {
             let x: &DeviceBuffer =
                 if i == 0 { self.stem_prelu.out() } else { self.blocks[i - 1].out_ref() };
+            if self.saved.recomputes() {
+                self.blocks[i].replay_branch(&ctx, &self.ps, x);
+            }
             d_out = block_backward(&ctx, &self.ps, &self.blocks[i], &self.bwd[i], x, d_out);
         }
         self.stem_prelu.backward(&ctx, &self.ps, self.stem_conv.out(), d_out);
