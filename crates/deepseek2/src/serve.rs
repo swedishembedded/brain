@@ -311,7 +311,7 @@ pub struct Engine {
 
 /// Recorded decode steps kept: one per row count up to this many, least recently used dropped first.
 /// A recording pins the activation temporaries of a whole step, so the cache is bounded.
-const MAX_DECODE_TAPES: usize = 64;
+const MAX_DECODE_TAPES: usize = 128;
 
 /// How often a decode step was replayed from a recording or had to be recorded.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

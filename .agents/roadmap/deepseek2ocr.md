@@ -942,3 +942,12 @@ Its seven linears per layer and the projector are TF32 library products now (`Re
 `add_inplace` and `silu_mul` are 60% of the device time, and the unfused score/softmax/apply attention chain 19% (CUDA cores, reported
 apart). Both cards carried a peer's job at 230 to 370 W during these runs, which inflates every small kernel several-fold: read the
 ratios, not the absolute milliseconds.
+
+## 2026-10-26 throughput lane: 64 decode rows over a bf16 KV pool
+
+The served engine decoded at most 32 rows over a 64k-token fp32 KV pool. A step reads the weights once for however many rows share it
+(`engine_bench`, best step of 64, GH200: 4.8 ms at 32 rows, 6.9 ms at 64, 10.6 ms at 128), so it now carries 64 rows over a 128k-token pool
+stored in bf16 (the same 8 GiB; 2048 tokens a row at a full batch; the scheduler preempts and recomputes past that). bf16 K/V keeps the
+recorded fused-attention step (best step 3.6 ms against 4.5 at 32 rows) and the text: 10 omni-mixed pages at 400 tokens, 4 byte-identical to
+the fp32 pool, the rest diverge mid-page as any greedy decode does under a rounding change, and similarity to the ground truth is 0.5174
+against 0.5146. The process holds 22.7 GB on a card (vision 7 GiB + decoder 14 GiB budgets: 21 GiB).

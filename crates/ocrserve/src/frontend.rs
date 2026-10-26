@@ -35,10 +35,12 @@ use qwen3::chat::ToolChoice;
 
 use crate::{DecoderDevice, DEFAULT_INSTRUCTION, DEFAULT_MAX_NEW, MAX_CONTEXT};
 
-/// Pages decoded together: the batch the decoder's step buffers are sized for.
-pub const MAX_BATCH: u32 = 32;
-/// Tokens of K/V the pool holds across all pages in flight.
-pub const POOL_TOKENS: u32 = 64 * 1024;
+/// Pages decoded together: the batch the decoder's step buffers are sized for. A decode step reads the weights once for every row, so
+/// the more rows share it the cheaper each token (4.8 ms a step at 32 rows, 6.9 ms at 64, `engine_bench`), and a recorded step is kept
+/// per row count up to this many.
+pub const MAX_BATCH: u32 = 64;
+/// Tokens of K/V the pool holds across all pages in flight: 2048 per row at a full batch, in bf16 (the 14 GiB the decoder is budgeted).
+pub const POOL_TOKENS: u32 = 128 * 1024;
 /// Prefill rows per forward.
 pub const PREFILL_CHUNK: u32 = 512;
 /// vLLM's recipe for this model family: no 30-gram may repeat within a 90-token window.
@@ -47,7 +49,7 @@ pub const NGRAM_WINDOW: u32 = 90;
 
 /// The decoder engine's shape at the served defaults.
 pub fn engine_config() -> EngineConfig {
-    EngineConfig { max_seq: MAX_CONTEXT, pool_tokens: POOL_TOKENS, max_batch: MAX_BATCH, chunk: PREFILL_CHUNK, block_size: 64, kv: KvTier::F32, topk: 64, precision: Precision::Auto }
+    EngineConfig { max_seq: MAX_CONTEXT, pool_tokens: POOL_TOKENS, max_batch: MAX_BATCH, chunk: PREFILL_CHUNK, block_size: 64, kv: KvTier::BF16, topk: 64, precision: Precision::Auto }
 }
 
 /// How a request asks its page to be read.
