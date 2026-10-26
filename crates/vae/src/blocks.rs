@@ -649,6 +649,36 @@ impl Op {
     }
 }
 
+/// What the reverse of a train-mode graph keeps of its forward ([`Builder::set_activations`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Activations {
+    /// Every activation, the forward's buffers being the reverse's cache.
+    Keep,
+    /// Each block's output only; its internals are replayed before its adjoint.
+    Recompute,
+}
+
+impl Activations {
+    /// The run's saved-activation policy for the tape model `name`: keep or recompute; a narrow saved format is
+    /// refused by name (the blocks hold no residual stream to narrow).
+    pub fn from_policy(name: &str, policy: model::saved::SavedPolicy) -> Result<Activations, String> {
+        match policy {
+            model::saved::SavedPolicy::Keep => Ok(Activations::Keep),
+            model::saved::SavedPolicy::Recompute => Ok(Activations::Recompute),
+            other => Err(format!("{name} recomputes its blocks from their f32 inputs; {other:?} saved boundaries do not apply")),
+        }
+    }
+}
+
+/// A segment being recorded: where its ops and steps start, the activations it allocated, and those it freed (its
+/// internals, pooled for later segments once it closes).
+struct OpenSegment {
+    tape: usize,
+    steps: usize,
+    allocated: std::collections::HashSet<usize>,
+    freed: Vec<(u64, DeviceBuffer)>,
+}
+
 /// Graph-construction state (borrows the device + host tensors).
 pub struct Builder<'a> {
     gpu: &'a Gpu,
@@ -670,6 +700,15 @@ pub struct Builder<'a> {
     /// The caller's transformer-stage forward slots - see [`XformerIds`].
     xf: Option<XformerIds>,
     tape: Vec<Op>,
+    /// Activation recompute ([`Builder::set_activations`]): blocks record as segments whose internal activations share
+    /// buffers with later segments' internals and are replayed before their adjoint.
+    recompute: bool,
+    /// The segment being recorded ([`Builder::segment`]).
+    open_segment: Option<OpenSegment>,
+    /// The closed segments with internals to replay, for [`grad::Trace`].
+    segments: Vec<grad::Segment>,
+    /// Buffers internal to closed segments, by exact length: what a later segment's internals reuse.
+    segment_pool: HashMap<u64, Vec<DeviceBuffer>>,
     /// Every weight buffer this builder uploaded, by tensor name, in first-use
     /// order. Memoized so one tensor is one device buffer (and therefore one
     /// gradient buffer) however many times a block asks for it.
@@ -829,6 +868,10 @@ impl<'a> Builder<'a> {
             train: false,
             xf: None,
             tape: Vec::new(),
+            recompute: false,
+            open_segment: None,
+            segments: Vec::new(),
+            segment_pool: HashMap::new(),
             wmemo: HashMap::new(),
             worder: Vec::new(),
             pool: HashMap::new(),
@@ -977,6 +1020,54 @@ impl<'a> Builder<'a> {
         self.train = on;
     }
 
+    /// What the reverse keeps of a train-mode forward ([`Activations`]). Under [`Activations::Recompute`] each block
+    /// ([`Builder::segment`]: [`Builder::resnet`], [`Builder::attn`], and a caller's own) records as a segment: the
+    /// activations it allocates and frees are its internals, which share buffers with later segments' internals, and
+    /// the reverse replays the segment's forward steps just before its adjoint. A buffer that escapes its segment is
+    /// never shared, and every internal user of a shared buffer is restored by its own segment's replay before its
+    /// adjoint reads it, so the gradients are those of the graph that keeps everything, bit for bit. Train mode only;
+    /// set before the first block.
+    pub fn set_activations(&mut self, activations: Activations) {
+        assert!(self.steps.is_empty(), "vae::blocks: set_activations must precede the first block");
+        let recompute = activations == Activations::Recompute;
+        assert!(!recompute || self.train, "vae::blocks: recompute applies to a train-mode builder");
+        self.recompute = recompute;
+    }
+
+    /// Record `body` as one recomputable segment (see [`Builder::set_activations`]); a plain call otherwise, and
+    /// inside a segment already open (a block inside a caller's block belongs to the outer segment).
+    pub fn segment<R>(&mut self, body: impl FnOnce(&mut Self) -> R) -> R {
+        let opened = self.begin_segment();
+        let out = body(self);
+        self.end_segment(opened);
+        out
+    }
+
+    /// Open a recomputable segment for a caller whose block is not one closure over the builder; returns whether it
+    /// opened one (not when recompute is off or a segment is already open), which [`Builder::end_segment`] takes.
+    pub fn begin_segment(&mut self) -> bool {
+        if !self.recompute || self.open_segment.is_some() {
+            return false;
+        }
+        self.open_segment = Some(OpenSegment { tape: self.tape.len(), steps: self.steps.len(), allocated: Default::default(), freed: Vec::new() });
+        true
+    }
+
+    /// Close the segment [`Builder::begin_segment`] opened (a no-op when it opened none): its freed internals become
+    /// shareable by later segments, and it is replayed before its adjoint.
+    pub fn end_segment(&mut self, opened: bool) {
+        if !opened {
+            return;
+        }
+        let seg = self.open_segment.take().expect("end_segment closes the segment begin_segment opened");
+        if !seg.freed.is_empty() {
+            self.segments.push(grad::Segment { ops: seg.tape..self.tape.len(), replay: self.steps[seg.steps..].to_vec() });
+            for (len, buf) in seg.freed {
+                self.segment_pool.entry(len).or_default().push(buf);
+            }
+        }
+    }
+
     /// Configure the batch count every subsequently-recorded block dispatches
     /// over - see [`Builder::n`](Builder)'s doc. Set this BEFORE recording any
     /// block (the `assert` mirrors [`Builder::set_train`]'s, for the same
@@ -1015,6 +1106,7 @@ impl<'a> Builder<'a> {
     pub fn trace(&self) -> grad::Trace {
         grad::Trace::new(
             self.tape.clone(),
+            self.segments.clone(),
             self.worder.clone(),
             &self.wmemo,
             self.xf.map(|x| x.mul),
@@ -1154,6 +1246,17 @@ impl<'a> Builder<'a> {
     /// Allocate an activation buffer of `len` words, reusing a same-length freed
     /// buffer from the pool when one is available (see [`Builder::pool`]).
     pub fn act(&mut self, len: u64) -> DeviceBuffer {
+        if let Some(seg) = &mut self.open_segment {
+            let buf = match self.segment_pool.get_mut(&len).and_then(Vec::pop) {
+                Some(b) => b,
+                None => {
+                    self.allocated += len;
+                    self.gpu.storage(len)
+                }
+            };
+            seg.allocated.insert(buf.alloc_id() as usize);
+            return buf;
+        }
         if let Some(b) = self.pool.get_mut(&len).and_then(Vec::pop) {
             return b;
         }
@@ -1171,6 +1274,13 @@ impl<'a> Builder<'a> {
     /// the buffer's last read step has been pushed (else a later reuse would clobber
     /// data a pending step still needs). No-op when pooling is disabled.
     pub fn free(&mut self, len: u64, buf: DeviceBuffer) {
+        // A recomputing segment's internals are shared with later segments once it closes; nothing else is.
+        if let Some(seg) = &mut self.open_segment {
+            if seg.allocated.contains(&(buf.alloc_id() as usize)) {
+                seg.freed.push((len, buf));
+            }
+            return;
+        }
         // Train mode keeps every activation: the forward buffer IS the backprop
         // cache, so reuse would silently overwrite a cached stage.
         if !self.taps_on && !self.train {
@@ -1874,6 +1984,10 @@ impl<'a> Builder<'a> {
         w: u32,
         x: &DeviceBuffer,
     ) -> DeviceBuffer {
+        self.segment(|b| b.resnet_body(prefix, cin, cout, h, w, x))
+    }
+
+    fn resnet_body(&mut self, prefix: &str, cin: u32, cout: u32, h: u32, w: u32, x: &DeviceBuffer) -> DeviceBuffer {
         let bn = self.n as u64;
         let (nin, nout) = (bn * (cin * h * w) as u64, bn * (cout * h * w) as u64);
         // `r` aliases the input `x` when cin==cout (a residual we must NOT free — the
@@ -1923,6 +2037,10 @@ impl<'a> Builder<'a> {
     /// and [`BlockNames::attn_residual_normed`] moves the residual onto the
     /// norm output for DIAMOND.
     pub fn attn(&mut self, prefix: &str, c: u32, h: u32, w: u32, x: &DeviceBuffer) -> DeviceBuffer {
+        self.segment(|b| b.attn_body(prefix, c, h, w, x))
+    }
+
+    fn attn_body(&mut self, prefix: &str, c: u32, h: u32, w: u32, x: &DeviceBuffer) -> DeviceBuffer {
         let t = h * w;
         let nnorm = self.names.attn_norm;
         let nproj = self.names.attn_proj;

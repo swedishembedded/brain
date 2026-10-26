@@ -124,10 +124,20 @@ impl BwdIds {
     }
 }
 
+/// A recomputable block of the tape ([`super::Builder::set_activations`]): its ops, and the forward steps that rebuild
+/// its internal activations, replayed just before its adjoint.
+#[derive(Clone)]
+pub struct Segment {
+    pub(super) ops: std::ops::Range<usize>,
+    pub(super) replay: Vec<Step>,
+}
+
 /// A recorded forward tape plus the weight buffers it uploaded.
 #[derive(Clone)]
 pub struct Trace {
     ops: Vec<Op>,
+    /// The recomputable segments, in tape order.
+    segments: Vec<Segment>,
     /// The caller's forward `mul` slot, carried from `Builder`'s
     /// [`super::XformerIds`]. `Op::Mul`'s adjoint is two more products, and
     /// re-registering `mul` in the BACKWARD set would give the CPU JIT two
@@ -146,12 +156,13 @@ pub struct Trace {
 impl Trace {
     pub(super) fn new(
         ops: Vec<Op>,
+        segments: Vec<Segment>,
         order: Vec<(String, u64)>,
         w: &HashMap<String, DeviceBuffer>,
         xf_mul: Option<usize>,
         xf_scale_row: Option<usize>,
     ) -> Trace {
-        Trace { ops, order, w: w.clone(), xf_mul, xf_scale_row }
+        Trace { ops, segments, order, w: w.clone(), xf_mul, xf_scale_row }
     }
 
     /// Every trainable tensor this graph reads, `(name, length in floats)`, in
@@ -195,7 +206,12 @@ impl Trace {
             pool: HashMap::new(),
         };
         r.d.insert(key(out), d_out.clone());
-        for op in self.ops.iter().rev() {
+        // A segment's internals are rebuilt as the walk enters it, i.e. at its last op.
+        let replay_at: HashMap<usize, &Segment> = self.segments.iter().map(|s| (s.ops.end - 1, s)).collect();
+        for (i, op) in self.ops.iter().enumerate().rev() {
+            if let Some(seg) = replay_at.get(&i) {
+                r.steps.extend(seg.replay.iter().cloned());
+            }
             self.emit(&mut r, grads, op);
             r.release(op.output());
         }
