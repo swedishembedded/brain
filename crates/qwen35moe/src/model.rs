@@ -125,6 +125,8 @@ use gpu_core::{f, DeviceBuffer, Dispatch, Gpu, Step};
 use model::head_ce::{GradScale, HeadBackward, HeadCe, HeadCeConfig, HeadKernels};
 use model::ops::{Act, Ops, TierPolicy, Weight};
 use model::saved::{Residuals, SavedPolicy};
+use model::streamed::{LayeredPass, StreamedStore};
+use model::tape::TapeEdge;
 use model::Shard;
 use model::adapter::exec::AdapterRuntime;
 use paramstore::{ParamStore, Role};
@@ -353,6 +355,9 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         let mut v = model::moe::with_compact_train_kernels(&v);
         // Narrow boundary residuals (`model::saved::Residuals`), resolved by name.
         v.extend_from_slice(model::saved::kernels());
+        // A layer-streamed full fine-tune's device side, resolved by name (those the list lacks).
+        let missing: Vec<_> = model::ops::store_device_kernels().iter().filter(|(n, _)| !v.iter().any(|(m, _)| m == n)).copied().collect();
+        v.extend(missing);
         v.push(("matmul_gemv", kernels::MATMUL_GEMV));
         v.push(("matmul_reg2", kernels::MATMUL_REG3));
         v.push(("matmul_i8_gemv", kernels::MATMUL_I8_GEMV));
@@ -954,6 +959,11 @@ pub struct Qwen35 {
     /// What the backward keeps of the forward: every layer's activations, or (recompute) only the residual between
     /// layers, each layer's activations rebuilt right before its backward ([`model::Model::set_saved_policy`]).
     saved: SavedPolicy,
+    /// The per-layer tensors held in a device window of layers, when the run streams them
+    /// ([`model::Model::set_resident`]); `None` keeps every layer in the store.
+    streamed: Option<StreamedStore>,
+    /// A streamed build runs its backward inside the update: set by `backward`, taken by `adamw_step`.
+    backward_pending: Cell<bool>,
 
     /// All-ones buffer of width `linear_key_head_dim`, bound as `l2norm_scale
     /// .wgsl`'s per-dim scale so its learnably-scaled L2-norm computes the
@@ -1756,6 +1766,8 @@ impl Qwen35 {
             count: Cell::new(1.0),
             res,
             saved: SavedPolicy::Keep,
+            streamed: None,
+            backward_pending: Cell::new(false),
             ones_khd,
             cos,
             sin,
@@ -2809,7 +2821,16 @@ impl Qwen35 {
     /// `qwen3::Qwen::forward_steps`'s own shard gating exactly, adapted to
     /// this file's "build and submit inline" convention (no separate
     /// step-list rebuild is needed here).
+    /// The batched forward; a layer-streamed build loads each layer into its window slot as the forward reaches it.
     pub(crate) fn run_forward(&self) {
+        match &self.streamed {
+            Some(stream) => stream.forward(&self.gpu, &Eager { model: self, pass: EagerPass::Forward }).unwrap_or_else(|e| panic!("qwen35moe layer-streamed forward: {e}")),
+            None => self.run_forward_hooked(&mut |_| {}),
+        }
+    }
+
+    /// [`Self::run_forward`], reporting the edges of each layer's part.
+    fn run_forward_hooked(&self, edge: &mut dyn FnMut(TapeEdge)) {
         let g = &self.gpu;
         let n = self.b * self.t;
         let d = self.cfg.d_model;
@@ -2831,8 +2852,10 @@ impl Qwen35 {
         self.round_trip_boundary(self.shard.start);
         // `l` is the ABSOLUTE layer index (into the layer types, `self.res` and the `blocks.{l}.*` weight names).
         for l in self.shard.start..self.shard.end {
+            edge(TapeEdge::Before { index: l, layer: Some(l) });
             let acts = self.layer_forward(l, n, &self.res[l], &self.res[l + 1]);
             self.round_trip_boundary(l + 1);
+            edge(TapeEdge::After { index: l, layer: Some(l) });
             // A recomputing build drops each layer's activations here and rebuilds them in the backward.
             if self.is_train && !self.saved.recomputes() {
                 layer_acts.push(acts.expect("qwen35: is_train but layer_forward returned no acts"));
@@ -3093,11 +3116,28 @@ impl Qwen35 {
     /// (a single carried local, `d_res_next`, plays that role here).
     pub fn backward(&self) {
         assert!(self.is_train, "qwen35: backward() requires a Qwen35::new_train build");
-        let ta = self.train_acts.borrow_mut().take().expect(
+        if self.streamed.as_ref().is_some_and(StreamedStore::is_layer_streamed) {
+            // The weights of a layer-streamed build are not all on the device: the backward runs layer by layer in
+            // `adamw_step`, where the layers it loads are the ones it updates.
+            assert!(!self.backward_pending.replace(true), "qwen35moe layer-streamed full fine-tune: a second backward before the update (gradient accumulation) is not supported; every micro-batch is its own step");
+            return;
+        }
+        let ta = self.take_train_acts();
+        self.backward_hooked(&ta, &mut |_| {});
+    }
+
+    /// The forward's activations for its backward.
+    fn take_train_acts(&self) -> TrainActs {
+        self.train_acts.borrow_mut().take().expect(
             "qwen35: backward() called without an immediately preceding forward() -- \
              every forward() call reallocates its activation cache fresh (this file's \
              own convention throughout), so backward() must run against the SAME call",
-        );
+        )
+    }
+
+    /// The backward over the forward's activations `ta`, reporting the edges of each layer's part. It reads `ta` and
+    /// never consumes it, so a layer-streamed update that measures the clip first can run it twice.
+    fn backward_hooked(&self, ta: &TrainActs, edge: &mut dyn FnMut(TapeEdge)) {
         let g = &self.gpu;
         let n = self.b * self.t;
         let d = self.cfg.d_model;
@@ -3150,6 +3190,7 @@ impl Qwen35 {
         // Where a recomputed layer writes its (unused) output residual.
         let recompute_out = self.saved.recomputes().then(|| g.storage((n * d) as u64));
         for l in (self.shard.start..self.shard.end).rev() {
+            edge(TapeEdge::Before { index: l, layer: Some(l) });
             // This layer's input boundary (decoded into its working buffer when held narrow), then, when recomputing,
             // the layer's activations rebuilt from it.
             self.restore_boundary(l);
@@ -3207,6 +3248,7 @@ impl Qwen35 {
                 drop(rebuilt);
                 g.poll_wait();
             }
+            edge(TapeEdge::After { index: l, layer: Some(l) });
         }
 
         // This stage's INPUT-boundary gradient (`dres[shard.start]`), for the
@@ -3276,11 +3318,53 @@ impl Qwen35 {
     }
 
     pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
-        self.opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale);
+        match &self.streamed {
+            Some(stream) => {
+                if stream.is_layer_streamed() {
+                    assert!(self.backward_pending.replace(false), "qwen35moe layer-streamed full fine-tune: adamw_step without a backward");
+                }
+                let args = model::resident_ft::StepArgs { step: t, lr, wd, adam, clip, extra_scale };
+                stream.adamw_step(&self.gpu, &self.ps, &self.opt, &Eager { model: self, pass: EagerPass::Backward }, &args).unwrap_or_else(|e| panic!("qwen35moe layer-streamed update: {e}"));
+                // The backward ran inside the update; its activations go now, as a plain backward's would.
+                self.train_acts.borrow_mut().take();
+            }
+            None => self.opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale),
+        }
     }
 
     pub fn read_grad(&self, name: &str) -> Vec<f32> {
+        assert!(!self.is_streamed(name), "qwen35moe: {name} streams through a layer window; no gradient outlives its layer");
         self.ps.read_grad(&self.gpu, name)
+    }
+
+    fn is_streamed(&self, name: &str) -> bool {
+        self.streamed.as_ref().is_some_and(|s| s.holds(name))
+    }
+
+    /// Stream every per-layer tensor (routed and shared experts included) through a device window under `cfg` (see
+    /// [`model::streamed`]): the layers' f32 values and optimizer state move to the host, the device keeps the
+    /// window's slots. The embedding, the head and the final norm stay in the store under its own optimizer. A plain
+    /// f32 full-training build only: adapters, quantized expert banks and quantized resident weights are refused.
+    pub fn set_resident(&mut self, cfg: &model::resident_ft::ResidentFtConfig) -> Result<(), String> {
+        let quantized = self.weights.values().any(|w| !w.is_dense_f32());
+        if !self.is_train || self.cfg.lora.is_some() || self.q8.is_some() || self.nv.is_some() || quantized {
+            return Err("qwen35moe: only a plain f32 full-training build streams its layers".into());
+        }
+        if self.streamed.is_some() {
+            return Err("qwen35moe: the layers already stream".into());
+        }
+        let shard = self.shard.clone();
+        let layer_of = |name: &str| model::streamed::blocks_layer(name).filter(|&l| shard.owns(l as usize));
+        let stream = StreamedStore::convert(&self.gpu, &mut self.ps, cfg.clone(), &layer_of).map_err(|e| format!("qwen35moe: {e}"))?;
+        // The mixer linears' `Ops` weights hold the store's buffers as they were: point them at the window's slots.
+        for (name, w) in self.weights.iter_mut() {
+            if stream.holds(name) {
+                *w = w.rebound_f32(self.ps.w(name).clone()).expect("checked above: every mixer weight is dense f32");
+            }
+        }
+        self.opt.invalidate();
+        self.streamed = Some(stream);
+        Ok(())
     }
 
     /// Run the forward graph and return the scalar loss. Only meaningful on
@@ -3393,6 +3477,7 @@ impl Qwen35 {
     /// logits, exactly as `logits_all`'s own caller would from a row of its
     /// output.
     pub fn step(&self, token_id: u32) -> Vec<f32> {
+        assert!(self.streamed.is_none(), "qwen35moe: a layer-streamed build holds a window of its layers; save it and load the checkpoint to decode");
         assert_eq!(self.b, 1, "qwen35moe::step requires b==1 (single sequence)");
         assert!(
             (token_id as usize) < self.cfg.vocab as usize,
@@ -3732,6 +3817,7 @@ impl Qwen35 {
     /// mix freely on one sequence. The `qwen35` twin's contract, with this
     /// model's MoE sublayer in place of the dense MLP.
     pub(crate) fn run_prefill_chunk(&self, tokens: &[u32], pos_start: u32, caches: &DecodeCaches) -> DeviceBuffer {
+        assert!(self.streamed.is_none(), "qwen35moe: a layer-streamed build holds a window of its layers; save it and load the checkpoint to prefill");
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
@@ -4080,7 +4166,10 @@ impl Qwen35 {
     }
 
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
-        self.ps.read_weight(&self.gpu, name)
+        match &self.streamed {
+            Some(stream) if stream.holds(name) => stream.read_weight(&self.gpu, name).unwrap_or_else(|e| panic!("qwen35moe: reading {name}: {e}")),
+            _ => self.ps.read_weight(&self.gpu, name),
+        }
     }
 
     /// Whether the LM head is resident as a quantized weight (int8, FP8, NVFP4) instead of an f32 parameter: then
@@ -4104,7 +4193,10 @@ impl Qwen35 {
     }
 
     pub fn write_weight(&self, name: &str, data: &[f32]) {
-        self.gpu.write(self.w(name), bytemuck::cast_slice(data));
+        match &self.streamed {
+            Some(stream) if stream.holds(name) => stream.write_weight(&self.gpu, name, data).unwrap_or_else(|e| panic!("qwen35moe: writing {name}: {e}")),
+            _ => self.gpu.write(self.w(name), bytemuck::cast_slice(data)),
+        }
     }
 
     /// Rebuild a training model from a file [`Self::save`] wrote (adapters
@@ -4169,6 +4261,45 @@ impl model::ModelConfig for Qwen35Config {
     }
 }
 
+/// The eager forward or backward of [`Qwen35`] as a [`LayeredPass`]: it reports where each layer's part begins and
+/// ends, where a layer-streamed build loads the layer and finishes its update.
+struct Eager<'a> {
+    model: &'a Qwen35,
+    pass: EagerPass,
+}
+
+#[derive(Clone, Copy)]
+enum EagerPass {
+    Forward,
+    Backward,
+}
+
+impl LayeredPass for Eager<'_> {
+    fn submit_hooked(&self, _gpu: &Gpu, edge: &mut dyn FnMut(TapeEdge)) {
+        match self.pass {
+            EagerPass::Forward => self.model.run_forward_hooked(edge),
+            EagerPass::Backward => {
+                let ta = self.model.train_acts.borrow();
+                self.model.backward_hooked(ta.as_ref().expect("qwen35moe: a streamed update runs after a forward"), edge);
+            }
+        }
+    }
+}
+
+impl model::OffDeviceState for Qwen35 {
+    fn commit(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
+        let stream = self.streamed.as_ref().ok_or_else(|| std::io::Error::other("qwen35moe: no streamed state to commit"))?;
+        self.gpu.flush();
+        stream.commit(&self.gpu, dir, step)
+    }
+
+    fn restore(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
+        let stream = self.streamed.as_ref().ok_or_else(|| std::io::Error::other("qwen35moe: no streamed state to restore"))?;
+        self.gpu.flush();
+        stream.restore(&self.gpu, dir, step)
+    }
+}
+
 impl model::Model for Qwen35 {
     fn optimizer_state(&mut self) -> Option<model::OptimizerState<'_>> {
         Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: &self.opt })
@@ -4180,6 +4311,12 @@ impl model::Model for Qwen35 {
 
     fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
         Qwen35::set_saved_policy(self, policy)
+    }
+    fn set_resident(&mut self, cfg: &model::resident_ft::ResidentFtConfig) -> Result<(), String> {
+        Qwen35::set_resident(self, cfg)
+    }
+    fn off_device_state(&self) -> Option<&dyn model::OffDeviceState> {
+        self.streamed.as_ref().map(|_| self as &dyn model::OffDeviceState)
     }
 
     type Config = Qwen35Config;

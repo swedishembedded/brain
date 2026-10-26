@@ -668,6 +668,20 @@ impl Weight {
         Weight::F32 { w, n, k }
     }
 
+    /// Whether this is a dense f32 weight (one f32 buffer, no scales).
+    pub fn is_dense_f32(&self) -> bool {
+        matches!(self, Weight::F32 { .. })
+    }
+
+    /// This weight read from `buf` instead, for a dense f32 weight (whose values a caller moved, such as into a
+    /// layer window's slot); `None` for any other tier, whose storage is not one f32 buffer.
+    pub fn rebound_f32(&self, buf: DeviceBuffer) -> Option<Weight> {
+        match self {
+            Weight::F32 { n, k, .. } => Some(Weight::F32 { w: buf, n: *n, k: *k }),
+            _ => None,
+        }
+    }
+
     /// Whether a product against this tier reads the activations as f32 rows (every float-read tier). The
     /// activation-quantizing tiers (int8 DP4A, int4, K-quants) need [`Ops::act`] to quantize them first.
     pub fn reads_f32_activations(&self) -> bool {
