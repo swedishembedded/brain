@@ -40,6 +40,19 @@ impl WeightSource for checkpoint::weightio::WeightReader {
     }
 }
 
+/// A renamed view over a checkpoint (a plan of [`checkpoint::remap::Fetch`]es),
+/// read one tensor at a time like the reader it wraps.
+impl WeightSource for checkpoint::remap::RemapSource<'_> {
+    fn get(&self, name: &str) -> Vec<f32> {
+        use checkpoint::TensorSource;
+        let mut out = None;
+        if !self.with_tensor_chunks(name, usize::MAX, &mut |_, d| out = Some(d.to_vec())) {
+            panic!("checkpoint is missing tensor `{name}`");
+        }
+        out.unwrap_or_default()
+    }
+}
+
 /// A feature-map edge in the graph being built: its ONNX tensor name + NCHW dims.
 #[derive(Clone)]
 struct Feat {

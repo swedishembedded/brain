@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Real-checkpoint import: the shipped Q8_0 pair
-//! (`mmproj-deepseek-ocr-2-q8_0.gguf` + `deepseek-ocr-2-q8_0.gguf`) turned
-//! into the two [`checkpoint::TensorSource`]s [`crate::model::DeepseekOcr2::new_on`]
+//! Real-checkpoint import: the upstream `deepseek-ai/DeepSeek-OCR-2`
+//! safetensors release (read in place, see [`crate::hf`]) or a community
+//! Q8_0 pair (`mmproj-deepseek-ocr-2-q8_0.gguf` + `deepseek-ocr-2-q8_0.gguf`),
+//! turned into the two [`checkpoint::TensorSource`]s [`crate::model::DeepseekOcr2::new_on`]
 //! takes, plus the derived [`crate::config::DeepseekOcr2VisionConfig`].
 //!
 //! ## Two files in, two derived files out
@@ -31,7 +32,9 @@
 use std::path::{Path, PathBuf};
 
 use checkpoint::gguf::MmapGguf;
+use checkpoint::remap::{Fetch, RemapSource};
 use checkpoint::weightio::WeightReader;
+use deepseek2::DeepseekV2Config;
 use sam1::SamViTConfig;
 
 use crate::config::{DeepseekOcr2VisionConfig, Qwen2EncoderConfig};
@@ -53,36 +56,62 @@ pub const VISION_EXPANDED: &str = "mmproj-deepseek-ocr-2-brain-fp32.safetensors"
 /// streamed rather than held as a host map.
 pub const LM_EXPANDED: &str = "deepseek-ocr-2-brain-fp32.safetensors";
 
-/// The four paths, resolved and existence-checked for the two SHIPPED files.
+/// The upstream `transformers` release, the one served by default. No vendor
+/// publishes a GGUF; community conversions of it also load.
+pub const HF_STORE: &str = "deepseek-ai/DeepSeek-OCR-2";
+
+/// Which of the two checkpoint shapes a directory holds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Layout {
+    /// A community-converted Q8_0 pair, plus the fp32 expansions derived
+    /// beside it on first use.
+    GgufPair {
+        mmproj: PathBuf,
+        lm: PathBuf,
+        /// Where [`expand_vision`] caches its output. May not exist yet.
+        vision_expanded: PathBuf,
+        /// Where [`expand_lm`] caches its output. May not exist yet.
+        lm_expanded: PathBuf,
+    },
+    /// The upstream `transformers` release, read **in place**: `config.json`
+    /// for the numbers no tensor shape carries, `tokenizer.json` for the
+    /// vocabulary, and the safetensors streamed through [`crate::hf`]'s rename.
+    /// No conversion step and no expansion on disk.
+    Hf,
+}
+
+/// The checkpoint directory and the shape it turned out to have.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Files {
-    /// The directory holding both GGUFs (and, once built, both expansions).
+    /// The directory the checkpoint lives in.
     pub dir: PathBuf,
-    pub mmproj: PathBuf,
-    pub lm: PathBuf,
-    /// Where [`expand_vision`] caches its output. May not exist yet.
-    pub vision_expanded: PathBuf,
-    /// Where [`expand_lm`] caches its output. May not exist yet.
-    pub lm_expanded: PathBuf,
+    pub layout: Layout,
 }
 
 impl Files {
-    /// Resolve the checkpoint layout under `dir`.
+    /// Resolve the checkpoint layout under `dir`, recognizing either release.
     ///
-    /// Only the two SHIPPED files are required to exist; both expansions are
-    /// derived on demand, so their absence is not an error here.
+    /// The GGUF pair is the more specific shape (two exactly-named files); an
+    /// HF checkpoint is a `config.json` plus model safetensors. Only SHIPPED
+    /// files are required: both GGUF expansions are derived on demand.
     pub fn locate(dir: impl AsRef<Path>) -> Result<Files, String> {
         let dir = dir.as_ref().to_path_buf();
         if !dir.is_dir() {
-            return Err(format!("{}: not a directory (expected the one holding {MMPROJ} and {LM})", dir.display()));
+            return Err(format!("{}: not a directory (expected the one holding {MMPROJ} and {LM}, or an HF {HF_STORE} checkpoint)", dir.display()));
         }
         let (mmproj, lm) = (dir.join(MMPROJ), dir.join(LM));
-        for p in [&mmproj, &lm] {
-            if !p.exists() {
-                return Err(format!("{}: missing (the checkpoint is two files: {MMPROJ} and {LM})", p.display()));
+        if mmproj.exists() || lm.exists() {
+            for p in [&mmproj, &lm] {
+                if !p.exists() {
+                    return Err(format!("{}: missing (the checkpoint is two files: {MMPROJ} and {LM})", p.display()));
+                }
             }
+            return Ok(Files { layout: Layout::GgufPair { mmproj, lm, vision_expanded: dir.join(VISION_EXPANDED), lm_expanded: dir.join(LM_EXPANDED) }, dir });
         }
-        Ok(Files { vision_expanded: dir.join(VISION_EXPANDED), lm_expanded: dir.join(LM_EXPANDED), dir, mmproj, lm })
+        if dir.join("config.json").is_file() && checkpoint::safetensors::has_model_weights(&dir) {
+            return Ok(Files { dir, layout: Layout::Hf });
+        }
+        Err(format!("{}: holds neither the {MMPROJ} + {LM} pair nor an HF {HF_STORE} checkpoint (config.json + model safetensors)", dir.display()))
     }
 }
 
@@ -119,22 +148,98 @@ pub fn expand_lm(lm: &Path, out: &Path) -> Result<String, String> {
     Ok(out_s)
 }
 
-/// A streaming source for the vision tower's weights, expanding it if needed.
-pub fn vision_reader(files: &Files) -> Result<WeightReader, String> {
-    let path = expand_vision(&files.mmproj, &files.vision_expanded)?;
-    WeightReader::open(&path).map_err(|e| format!("{path}: {e}"))
+fn hf_reader(dir: &Path) -> Result<WeightReader, String> {
+    WeightReader::open_hf_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))
 }
 
-/// A streaming source for the decoder's weights, expanding it if needed.
-pub fn decoder_reader(files: &Files) -> Result<WeightReader, String> {
-    let path = expand_lm(&files.lm, &files.lm_expanded)?;
-    WeightReader::open(&path).map_err(|e| format!("{path}: {e}"))
+/// An identity plan over a reader that already carries brain's names, so both
+/// layouts hand out the same source type and the same every-parameter check.
+fn identity_source(reader: WeightReader, want: &[(String, usize)]) -> Result<RemapSource<'static>, String> {
+    let plan = want.iter().map(|(n, _)| (n.clone(), Fetch::Whole(n.clone()))).collect();
+    let src = RemapSource::owning(Box::new(reader), plan);
+    src.validate(want)?;
+    Ok(src)
 }
 
-/// The vision config, **derived** from the mmproj's own KV and tensor shapes,
-/// then checked against the documented preset (`rope_theta` excepted - see
-/// this module's header).
-pub fn vision_config(mmproj: &Path, decoder_hidden: u32) -> Result<DeepseekOcr2VisionConfig, String> {
+/// A streaming source for the vision tower's weights under brain's names.
+pub fn vision_reader(files: &Files) -> Result<RemapSource<'static>, String> {
+    let cfg = vision_config(files, DeepseekV2Config::deepseek_ocr(1).shape.d_model)?;
+    let want: Vec<(String, usize)> = cfg.sam.param_list().into_iter().chain(cfg.param_list()).collect();
+    match &files.layout {
+        Layout::GgufPair { mmproj, vision_expanded, .. } => {
+            let path = expand_vision(mmproj, vision_expanded)?;
+            identity_source(WeightReader::open(&path).map_err(|e| format!("{path}: {e}"))?, &want)
+        }
+        Layout::Hf => {
+            let reader = hf_reader(&files.dir)?;
+            let names: Vec<String> = reader.names().map(str::to_string).collect();
+            let plan = crate::hf::encoder_plan(&names, &cfg)?;
+            let src = RemapSource::owning(Box::new(reader), plan);
+            src.validate(&want).map_err(|e| format!("deepseek-ocr-2 hf import: {e}"))?;
+            Ok(src)
+        }
+    }
+}
+
+/// A streaming source for the decoder's weights under brain's names.
+pub fn decoder_reader(files: &Files) -> Result<RemapSource<'static>, String> {
+    let dec = DeepseekV2Config::deepseek_ocr(1);
+    match &files.layout {
+        Layout::GgufPair { lm, lm_expanded, .. } => {
+            let path = expand_lm(lm, lm_expanded)?;
+            identity_source(WeightReader::open(&path).map_err(|e| format!("{path}: {e}"))?, &dec.param_list())
+        }
+        Layout::Hf => {
+            let reader = hf_reader(&files.dir)?;
+            let names: Vec<String> = reader.names().map(str::to_string).collect();
+            let plan = deepseek2::hf::plan(&names, &dec).map_err(|e| format!("deepseek-ocr-2 hf import: {e}"))?;
+            let src = RemapSource::owning(Box::new(reader), plan);
+            src.validate(&dec.param_list()).map_err(|e| format!("deepseek-ocr-2 hf import: {e}"))?;
+            Ok(src)
+        }
+    }
+}
+
+/// The tokenizer: the HF release carries `tokenizer.json` (vocabulary, merges
+/// and specials, pre-tokenizer included); the GGUF layout only the LM's
+/// `tokenizer.ggml.*` KV.
+pub fn tokenizer(files: &Files) -> Result<data::qwen_tokenizer::QwenBpe, String> {
+    match &files.layout {
+        Layout::GgufPair { lm, .. } => crate::prompt::tokenizer_from_gguf(utf8(lm)?),
+        Layout::Hf => data::qwen_tokenizer::QwenBpe::from_dir(utf8(&files.dir)?),
+    }
+}
+
+/// The vision config: **derived** from the checkpoint's own shapes, then
+/// checked against the documented preset (`rope_theta` excepted for the GGUF
+/// pair - see this module's header).
+pub fn vision_config(files: &Files, decoder_hidden: u32) -> Result<DeepseekOcr2VisionConfig, String> {
+    match &files.layout {
+        Layout::GgufPair { mmproj, .. } => gguf_vision_config(mmproj, decoder_hidden),
+        Layout::Hf => configs(files, 1).map(|(v, _)| v),
+    }
+}
+
+/// Both configs of the HF layout, derived and compared with the preset; for the
+/// GGUF pair the vision config is derived from the mmproj and the decoder is the
+/// preset (its GGUF import has its own shape check).
+pub fn configs(files: &Files, block_size: u32) -> Result<(DeepseekOcr2VisionConfig, DeepseekV2Config), String> {
+    match &files.layout {
+        Layout::GgufPair { mmproj, .. } => {
+            let dec = DeepseekV2Config::deepseek_ocr(block_size);
+            Ok((gguf_vision_config(mmproj, dec.shape.d_model)?, dec))
+        }
+        Layout::Hf => {
+            let reader = hf_reader(&files.dir)?;
+            let path = files.dir.join("config.json");
+            let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let json = serde_json::from_slice(&bytes).map_err(|e| format!("{}: unparseable config.json: {e}", path.display()))?;
+            crate::hf::config_from_shapes(&deepseek2::hf::shapes(&reader), &json, block_size)
+        }
+    }
+}
+
+fn gguf_vision_config(mmproj: &Path, decoder_hidden: u32) -> Result<DeepseekOcr2VisionConfig, String> {
     let mg = MmapGguf::open(utf8(mmproj)?)?;
     let full = gguf::deepseekocr2_vision::config_from_gguf(&mg)?;
     drop(mg);
@@ -190,9 +295,10 @@ mod tests {
         assert!(e.contains(LM) && !e.contains("not a directory"), "{e}");
         std::fs::write(tmp.join(LM), b"").expect("touch lm");
         let f = Files::locate(&tmp).expect("both shipped files present");
-        assert_eq!(f.vision_expanded, tmp.join(VISION_EXPANDED));
-        assert_eq!(f.lm_expanded, tmp.join(LM_EXPANDED));
-        assert!(!f.vision_expanded.exists() && !f.lm_expanded.exists(), "both expansions are built on demand, not required");
+        let Layout::GgufPair { vision_expanded, lm_expanded, .. } = &f.layout else { panic!("two GGUFs are the pair layout") };
+        assert_eq!(vision_expanded, &tmp.join(VISION_EXPANDED));
+        assert_eq!(lm_expanded, &tmp.join(LM_EXPANDED));
+        assert!(!vision_expanded.exists() && !lm_expanded.exists(), "both expansions are built on demand, not required");
         std::fs::remove_dir_all(&tmp).ok();
     }
 }

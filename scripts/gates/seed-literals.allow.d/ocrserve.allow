@@ -1,0 +1,1 @@
+crates/ocrserve/src/frontend.rs	OcrFrontend::parse_embedded:seed=0	default	greedy: SampleParams::greedy never consults the RNG

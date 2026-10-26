@@ -25,22 +25,13 @@ edit two things in the script:
 
 1. `MODEL = "deepseek-ai/DeepSeek-OCR"` (near the top) -> 
    `MODEL = "deepseek-ai/DeepSeek-OCR-2"`
-2. Serve the model with `BRAIN_DEEPSEEKOCR2_DIR` instead of
-   `BRAIN_DEEPSEEK_OCR_DIR`.
+2. `brain pull deepseek-ai/DeepSeek-OCR-2`; the server resolves it from the
+   model store, no variable needed.
 
 ```bash
-BRAIN_DEEPSEEKOCR2_DIR=<dir with both DeepSeek-OCR-2 GGUFs> \
 tools/dbus-session.sh --serve "--dbus" -- \
   python3 samples/python/vision/deepseek-ocr/ocr_document.py --image page.ppm --max-new 8
 ```
-
-No vendor-published GGUF exists for DeepSeek-OCR-2 yet - obtain one
-yourself and point `BRAIN_DEEPSEEKOCR2_DIR` at the directory holding both
-files (see the model catalog's DeepSeek-OCR-2 entry for what a compatible
-checkpoint pair must carry). v2 also serves its **global view only** today
-(a document image fit into one 1024x1024 view) - the multi-tile layout v1
-doesn't serve over D-Bus either needs the same SAM position-embedding work
-either model would need.
 
 ## What to expect, and why the script prints seconds
 
@@ -75,8 +66,8 @@ BRAIN_DEEPSEEK_OCR_DIR=<dir> \
 
 ## What it needs
 
-`BRAIN_DEEPSEEK_OCR_DIR` (v1) or `BRAIN_DEEPSEEKOCR2_DIR` (v2), each
-pointing at a directory holding **both** shipped GGUFs for that version.
+The model pulled into the model store (`brain pull deepseek-ai/DeepSeek-OCR` or
+`deepseek-ai/DeepSeek-OCR-2`).
 Input is a binary PPM (P6); `brain caps deepseek-ai/DeepSeek-OCR[-2]`
 prints the full option list, and the model catalog's own page carries the
 honest limits - single global view, greedy only, batch 1, no early stop at

@@ -45,6 +45,7 @@ brain-modelstore.workspace = true
 # The scheduler-driven instance (`src/serve.rs`): `llmserve::ScheduledInstance` over the paged engine.
 brain-llmserve.workspace = true
 brain-residency.workspace = true
+brain-ocrserve.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

@@ -1,0 +1,22 @@
+[package]
+name = "brain-ocrserve"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "What the DeepSeek-OCR generations share to be served: the checkpoint-directory resolver helpers, device placement and replicas, the scheduler front end that turns a page request into prompt ids plus the vision encoder's rows, the capability provider and the residency adapter. A model supplies its encoder and its loader; everything else is here once."
+
+[lib]
+name = "ocrserve"
+path = "src/lib.rs"
+
+[dependencies]
+brain-capability.workspace = true
+brain-checkpoint.workspace = true
+brain-data.workspace = true
+brain-deepseek2.workspace = true
+brain-gpu-core.workspace = true
+brain-llmserve.workspace = true
+brain-model.workspace = true
+brain-qwen3.workspace = true
+brain-residency.workspace = true
+serde_json.workspace = true

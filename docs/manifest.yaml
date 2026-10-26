@@ -303,6 +303,8 @@ navigation:
         path: examples/text/retrieve-json.md
       - source: samples/text/retrieve/README.md
         path: examples/text/retrieve.md
+      - source: samples/text/spectral-lm/README.md
+        path: examples/text/spectral-lm.md
       - source: samples/tts/clone/README.md
         path: examples/tts/clone.md
       # END SAMPLES MANIFEST

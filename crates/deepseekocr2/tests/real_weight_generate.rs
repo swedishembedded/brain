@@ -65,10 +65,9 @@ fn real_weight_composite_greedy_decode_global_view() {
     mem("start");
 
     let decoder_cfg = DeepseekV2Config::deepseek_ocr(1);
-    let vision_cfg = import::vision_config(&files.mmproj, decoder_cfg.shape.d_model).expect("derive the real vision config");
+    let vision_cfg = import::vision_config(&files, decoder_cfg.shape.d_model).expect("derive the real vision config");
 
-    let lm = files.lm.to_string_lossy().into_owned();
-    let tok = deepseekocr2::prompt::tokenizer_from_gguf(&lm).expect("build the tokenizer");
+    let tok = import::tokenizer(&files).expect("build the tokenizer");
     let n_rows = vision_cfg.encoder.n_query_global + 1; // the global view's rows plus the separator
     let after = "\n<|grounding|>Convert the document to markdown.";
     let prompt = build_prompt(&tok, "", after, n_rows).expect("build the prompt");

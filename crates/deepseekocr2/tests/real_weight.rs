@@ -63,7 +63,7 @@ fn real_weight_composite_forward_global_view() {
     mem("start");
 
     let decoder_cfg = DeepseekV2Config::deepseek_ocr(1);
-    let vision_cfg = import::vision_config(&files.mmproj, decoder_cfg.shape.d_model).expect("derive the real vision config");
+    let vision_cfg = import::vision_config(&files, decoder_cfg.shape.d_model).expect("derive the real vision config");
     let plan = row_plan(TileGrid::none(), vision_cfg.encoder.n_query_local, vision_cfg.encoder.n_query_global);
     let (row0, n_rows) = (1u32, plan.len() as u32);
     let seq = n_rows + 2; // BOS, the image run, one trailing text row

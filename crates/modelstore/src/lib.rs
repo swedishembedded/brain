@@ -113,7 +113,7 @@ pub const NO_CHECKPOINT_DIR_READER: &[&str] = &["gpt2", "deepseekvl", "januspro"
 /// (`deepseek2ocr`, `decide`).
 pub fn checkpoint_dir_role(family: &str) -> &'static str {
     match family {
-        "deepseek2ocr" | "decide" => "dir",
+        "deepseek2ocr" | "deepseekocr2" | "decide" => "dir",
         _ => "weights",
     }
 }

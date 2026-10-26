@@ -30,7 +30,7 @@ pub fn export_all(checkpoint_dir: &str, seq_len: usize, out_dir: &str) -> Result
     let files = Files::locate(checkpoint_dir)?;
     std::fs::create_dir_all(out_dir).map_err(|e| format!("{out_dir}: {e}"))?;
 
-    let vcfg = deepseekocr2::import::vision_config(&files.mmproj, DeepseekV2Config::deepseek_ocr(seq_len as u32).d_model())?;
+    let vcfg = deepseekocr2::import::vision_config(&files, DeepseekV2Config::deepseek_ocr(seq_len as u32).d_model())?;
     let vreader = deepseekocr2::import::vision_reader(&files)?;
 
     for (local, n_query, tag) in [(true, vcfg.encoder.n_query_local as usize, "local"), (false, vcfg.encoder.n_query_global as usize, "global")] {

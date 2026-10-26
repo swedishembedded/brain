@@ -74,7 +74,10 @@ const HF_VECTORS: &[(&str, &[u32])] = &[
 #[test]
 fn real_tokenizer_reserved_tokens_and_prompt() {
     let Some(files) = real_files() else { return };
-    let lm = files.lm.to_string_lossy().into_owned();
+    // The reserved-token inventory is read from the GGUF's own KV block; the
+    // HF layout's tokenizer is `tokenizer.json`, covered by the served-path test.
+    let deepseekocr2::import::Layout::GgufPair { lm, .. } = &files.layout else { return brain_testutil::skip("the GGUF pair is not the stored layout") };
+    let lm = lm.to_string_lossy().into_owned();
 
     // ---- 1. the reserved-token inventory, straight from the file ----------
     let mg = checkpoint::gguf::MmapGguf::open(&lm).expect("open the LM gguf");

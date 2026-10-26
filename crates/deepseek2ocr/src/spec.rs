@@ -23,7 +23,7 @@
 //!   `config.json` is exactly what makes the scanner collapse it into ONE
 //!   `HfDir` record - so here the record's path already IS the directory.
 //!
-//! [`dir_from_assembly`] reconciles the two by asking whether the role it was
+//! [`ocrserve::dir_from_assembly`] reconciles the two by asking whether the role it was
 //! given is itself a directory, so neither side has to know which recipe
 //! fetched the checkpoint.
 //!
@@ -77,9 +77,9 @@ impl ArchSpec for Deepseek2ocrSpec {
             // The upstream `transformers` release. Unlike the GGUF pair this
             // IS collapsed into one directory record (it has a `config.json`),
             // so the record's own path is already the directory
-            // `crate::import::Files::locate` wants - see `dir_from_assembly`.
+            // `crate::import::Files::locate` wants - see `ocrserve::dir_from_assembly`.
             if rec.kind == ArtifactKind::HfDir {
-                if declares_deepseek_ocr(&rec.path) {
+                if ocrserve::declares_architecture(&rec.path, HF_ARCHITECTURE) {
                     out.push((idx, "dir".to_string(), Confidence::Derived));
                 }
                 continue;
@@ -111,49 +111,13 @@ impl ArchSpec for Deepseek2ocrSpec {
     }
 
     fn validate(&self, assembly: &Assembly) -> Result<(), String> {
-        dir_from_assembly(assembly).map(|_| ())
+        ocrserve::dir_from_assembly(assembly).map(|_| ())
     }
-}
-
-/// Whether an HF-shaped directory's `config.json` declares THIS model.
-///
-/// Content, not filename: a store can hold many `transformers` checkpoints,
-/// and the architecture string is the same one
-/// `brain_modelstore::plan` gated the download on
-/// (`brain_arch`'s `deepseek2ocr` row).
-fn declares_deepseek_ocr(dir: &Path) -> bool {
-    let Ok(bytes) = std::fs::read(dir.join("config.json")) else { return false };
-    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return false };
-    json["architectures"].as_array().is_some_and(|a| a.iter().any(|v| v.as_str() == Some(HF_ARCHITECTURE)))
 }
 
 /// The upstream release's own `architectures[0]`, as registered in
 /// `brain_arch`'s `deepseek2ocr` row.
 const HF_ARCHITECTURE: &str = "DeepseekOCRForCausalLM";
-
-/// The checkpoint DIRECTORY a resolved [`Assembly`]'s `dir` role names.
-///
-/// The two layouts name it differently and the difference is structural, not
-/// a heuristic: an HF checkpoint is ONE directory record, so the role already
-/// holds the directory, while the GGUF pair is recorded file-by-file (no
-/// `config.json` for the inventory scanner to collapse on), so the role holds
-/// the LM GGUF and the directory is its parent. Testing whether the role
-/// itself is a directory tells the two apart without either side having to
-/// know which recipe fetched it.
-///
-/// A missing role or a rootless path should be unreachable in practice
-/// (`resolve` only returns `Resolved` once every required role is filled, and
-/// `classify` only ever names a record with a real parent), but this must
-/// name it rather than panic if it somehow isn't.
-pub fn dir_from_assembly(assembly: &Assembly) -> Result<String, String> {
-    let role = assembly.roles.get("dir").ok_or_else(|| format!("deepseek2ocr: assembly '{}' has no dir role", assembly.id))?;
-    if role.is_dir() {
-        return Ok(role.to_string_lossy().into_owned());
-    }
-    role.parent()
-        .map(|p| p.to_string_lossy().into_owned())
-        .ok_or_else(|| format!("deepseek2ocr: {} has no parent directory", role.display()))
-}
 
 #[cfg(test)]
 mod tests {
@@ -272,7 +236,7 @@ mod tests {
         match resolve("deepseek2ocr", &records, &specs, &BTreeMap::new()) {
             Resolution::Resolved(assembly) => {
                 assert_eq!(assembly.arch, "deepseek2ocr");
-                assert_eq!(dir_from_assembly(&assembly).unwrap(), ckpt_dir.to_string_lossy());
+                assert_eq!(ocrserve::dir_from_assembly(&assembly).unwrap(), ckpt_dir.to_string_lossy());
             }
             other => panic!("expected Resolved, got {other:?}"),
         }
@@ -304,7 +268,7 @@ mod tests {
         let spec = Deepseek2ocrSpec;
         let specs: Vec<&dyn ArchSpec> = vec![&spec];
         match resolve("deepseek2ocr", &records, &specs, &BTreeMap::new()) {
-            Resolution::Resolved(assembly) => assert_eq!(dir_from_assembly(&assembly).unwrap(), ckpt_dir.to_string_lossy()),
+            Resolution::Resolved(assembly) => assert_eq!(ocrserve::dir_from_assembly(&assembly).unwrap(), ckpt_dir.to_string_lossy()),
             other => panic!("expected Resolved, got {other:?}"),
         }
     }

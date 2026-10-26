@@ -20,17 +20,11 @@
 //! no-repeat n-gram, 30 over a 90-token window, table-cell tags exempt) is the
 //! scheduler's own [`model::serve::NoRepeatNgram`], set per request.
 
-use capability::{last_user_text, Invocation};
-use data::qwen_chat::TemplateFlavor;
 use data::qwen_tokenizer::QwenBpe;
-use deepseek2::serve::{pipelines, Engine, EngineConfig, Precision};
-use gpu_core::Gpu;
-use llmserve::{Frontend, ParsedRequest, ScheduledInstance};
-use model::kv_tier::KvTier;
-use model::serve::{NoRepeatNgram, PromptEmbeds, SampleParams, Scheduler};
-use qwen3::chat::ToolChoice;
+use model::serve::PromptEmbeds;
+use ocrserve::{DecoderDevice, OcrFrontend, OcrInstance, PageEncoder as OcrPageEncoder};
 
-use crate::caps::{DecoderDevice, DEFAULT_INSTRUCTION, DEFAULT_MAX_NEW, MAX_CONTEXT};
+use crate::caps::DEFAULT_INSTRUCTION;
 use crate::config::DeepseekOcrConfig;
 use crate::encoder::DeepEncoder;
 use crate::import::{self, Files};
@@ -38,22 +32,7 @@ use crate::layout::RowGather;
 use crate::preprocess::{self, Fit};
 use crate::prompt::{self, Prompt};
 use crate::stage_time;
-
-/// Pages decoded together: the batch the decoder's step buffers are sized for.
-pub const MAX_BATCH: u32 = 32;
-/// Tokens of K/V the pool holds across all pages in flight.
-pub const POOL_TOKENS: u32 = 64 * 1024;
-/// Prefill rows per forward: the whole real prompt (BOS, 273 image rows and the
-/// instruction) in one pass.
-pub const PREFILL_CHUNK: u32 = 512;
-/// vLLM's recipe for this model: no 30-gram may repeat within a 90-token window.
-pub const NGRAM_SIZE: u32 = 30;
-pub const NGRAM_WINDOW: u32 = 90;
-
-/// The decoder engine's shape at the served defaults.
-pub fn engine_config() -> EngineConfig {
-    EngineConfig { max_seq: MAX_CONTEXT, pool_tokens: POOL_TOKENS, max_batch: MAX_BATCH, chunk: PREFILL_CHUNK, block_size: 64, kv: KvTier::F32, topk: 64, precision: Precision::Auto }
-}
+use gpu_core::Gpu;
 
 /// The vision half of a request: image to the DeepEncoder's rows, plus the
 /// tokenizer and the prompt layout around them.
@@ -76,16 +55,17 @@ impl PageEncoder {
     pub fn build_prompt(tok: &QwenBpe, cfg: &DeepseekOcrConfig, instruction: &str) -> Result<Prompt, String> {
         prompt::build_prompt(tok, "", &format!("\n{instruction}"), cfg.token_grid().0)
     }
+}
 
-    /// The tokenizer prompts are built with and generated ids decode through.
-    pub fn tok(&self) -> &QwenBpe {
+impl OcrPageEncoder for PageEncoder {
+    fn tok(&self) -> &QwenBpe {
         &self.tok
     }
 
     /// Preprocess `hwc` (`h x w` RGB in `[0, 1]`), run the DeepEncoder and lay
     /// its rows out as the decoder's image block: the prompt for `instruction`
     /// and the rows that stand at its image positions.
-    pub fn encode(&self, instruction: &str, hwc: &[f32], w: u32, h: u32) -> Result<(Prompt, PromptEmbeds), String> {
+    fn encode(&self, instruction: &str, hwc: &[f32], w: u32, h: u32) -> Result<(Vec<u32>, PromptEmbeds), String> {
         let prompt = Self::build_prompt(&self.tok, &self.cfg, instruction)?;
         let (row0, n_rows) = prompt.image_run();
         if n_rows != self.rows.rows() {
@@ -100,72 +80,17 @@ impl PageEncoder {
         let rows = self.enc.forward_rows(&image, &self.rows);
         stage_time("encode request: DeepEncoder", t_enc);
         let embeds = PromptEmbeds::run(self.cfg.decoder.d_model() as usize, row0, rows)?;
-        Ok((prompt, embeds))
-    }
-}
-
-/// The scheduler-facing half: how an OCR request becomes a prompt, and how its
-/// tokens are read back.
-pub struct OcrFrontend {
-    enc: PageEncoder,
-    stop: Vec<u32>,
-    ngram: NoRepeatNgram,
-}
-
-impl Frontend for OcrFrontend {
-    fn tok(&self) -> &QwenBpe {
-        self.enc.tok()
-    }
-    fn stop(&self) -> &[u32] {
-        &self.stop
-    }
-    fn label(&self) -> &str {
-        "deepseek-ocr"
-    }
-    fn parse(&self, inv: &Invocation) -> Result<ParsedRequest, String> {
-        self.parse_embedded(inv).map(|(req, _)| req)
-    }
-    fn parse_embedded(&self, inv: &Invocation) -> Result<(ParsedRequest, Option<PromptEmbeds>), String> {
-        let instruction = {
-            let t = last_user_text(inv);
-            if t.trim().is_empty() {
-                DEFAULT_INSTRUCTION.to_string()
-            } else {
-                t
-            }
-        };
-        let max_new = inv.get_i64("max_new").unwrap_or(DEFAULT_MAX_NEW).clamp(1, MAX_CONTEXT as i64) as usize;
-        let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
-        let (prompt, embeds) = self.enc.encode(&instruction, &hwc, w, h)?;
-        let req = ParsedRequest {
-            ids: prompt.ids,
-            max_new,
-            temp: 0.0,
-            top_k: 0,
-            top_p: 1.0,
-            sampler: SampleParams { no_repeat: self.ngram, ..SampleParams::greedy() },
-            seed: 0,
-            stops: Vec::new(),
-            tool_choice: ToolChoice::Auto,
-            flavor: TemplateFlavor::default(),
-            thinking_open: false,
-            raw: true,
-        };
-        Ok((req, Some(embeds)))
-    }
-    /// Building a request runs the DeepEncoder: it is not run ahead of the request's slot.
-    fn encodes_inputs(&self) -> bool {
-        true
+        Ok((prompt.ids, embeds))
     }
 }
 
 /// DeepSeek-OCR resident: the encoder, the decoder engine and the scheduler
 /// that batches requests onto it.
-pub type OcrInstance = ScheduledInstance<Engine, OcrFrontend>;
+pub type DeepseekOcrInstance = OcrInstance<PageEncoder>;
 
 /// Build the whole served model from `dir` (the GGUF pair or the Hugging Face
 /// checkpoint): the vision tower on the ambient card, the decoder on `placement`.
-pub fn load(dir: &str, placement: DecoderDevice) -> Result<OcrInstance, String> {
+pub fn load(dir: &str, placement: DecoderDevice) -> Result<DeepseekOcrInstance, String> {
     let t0 = std::time::Instant::now();
     let files = Files::locate(dir)?;
     let cfg = import::config(&files, 1)?;
@@ -187,19 +112,13 @@ pub fn load(dir: &str, placement: DecoderDevice) -> Result<OcrInstance, String> 
     let t2 = std::time::Instant::now();
     let reader = import::decoder_reader(&files, &cfg)?;
     let decoder = import::decoder_source(&files, &reader, &cfg)?;
-    let kernels = pipelines();
-    let gpu = match placement {
-        DecoderDevice::Cpu => Gpu::new_cpu(&kernels),
-        DecoderDevice::SameCard => Gpu::new(&kernels),
-        DecoderDevice::Card(i) => gpu_core::devices::with_gpu(i, || Gpu::new(&kernels)).map_err(|e| format!("deepseek-ocr: decoder on gpu{i}: {e}"))?,
-    };
-    let engine = Engine::new(gpu, cfg.decoder.clone(), &decoder, engine_config())?;
+    let engine = ocrserve::build_engine(cfg.decoder.clone(), &decoder, placement).map_err(|e| format!("deepseek-ocr: {e}"))?;
     stage_time("load: decoder engine (weight upload, KV pool)", t2);
 
     let pre = Gpu::new_cpu(preprocess::PIPELINES);
-    let front = OcrFrontend { enc: PageEncoder { cfg, enc, rows, pre, tok }, stop: vec![eos], ngram: NoRepeatNgram::new(NGRAM_SIZE, NGRAM_WINDOW, &allow) };
+    let front = OcrFrontend::new(PageEncoder { cfg, enc, rows, pre, tok }, "deepseek-ocr", eos, &allow);
     stage_time("load: TOTAL", t0);
-    Ok(ScheduledInstance::new(front, Scheduler::new(engine, MAX_BATCH as usize), MAX_BATCH as usize))
+    Ok(ocrserve::instance(front, engine))
 }
 
 #[cfg(test)]
@@ -239,6 +158,6 @@ mod tests {
         // invariance above is not vacuous. (Only the tail moves; `row0` cannot,
         // because `text_before` is empty by construction.)
         assert!(long.len() > short.len(), "a longer instruction must produce a longer prompt");
-        assert!(a.len() + DEFAULT_MAX_NEW as usize <= MAX_CONTEXT as usize, "the default request must fit the built context");
+        assert!(a.len() + ocrserve::DEFAULT_MAX_NEW as usize <= ocrserve::MAX_CONTEXT as usize, "the default request must fit the built context");
     }
 }

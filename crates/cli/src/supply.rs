@@ -1033,6 +1033,28 @@ pub(crate) mod tests {
         assert!(!repo.join("model.brain.safetensors").exists(), "nothing is rewritten on this path");
     }
 
+    /// `deepseek-ai/DeepSeek-OCR-2` is the same passthrough family shape as v1:
+    /// its upstream safetensors are served in place, so the finish step writes a
+    /// manifest under the resolver's `dir` role and leaves the weights alone.
+    #[test]
+    fn ensure_passes_the_upstream_deepseek_ocr_2_checkpoint_through_under_its_own_role() {
+        let mut hub = FakeHub::new();
+        hub.add_file("deepseek-ai", "DeepSeek-OCR-2", "main", "config.json", br#"{"architectures":["DeepseekOCR2ForCausalLM"]}"#.to_vec());
+        for f in ["tokenizer.json", "tokenizer_config.json", "model-00001-of-000001.safetensors"] {
+            hub.add_file("deepseek-ai", "DeepSeek-OCR-2", "main", f, b"stub".to_vec());
+        }
+        let dir = store(&format!("supply-test-deepseekocr2-hf-{}", std::process::id())).root().to_path_buf();
+        let supplier = StoreSupplier::new(Store::new(dir.clone()), Box::new(hub));
+        let e = exec();
+        let _ = supplier.ensure("deepseek-ai/DeepSeek-OCR-2", &e, &mut |_, _, _| {});
+
+        let repo = dir.join("deepseek-ai").join("DeepSeek-OCR-2");
+        let manifest: brain_modelstore::CompoundManifest = serde_json::from_slice(&std::fs::read(repo.join(brain_modelstore::MANIFEST_FILE)).unwrap()).unwrap();
+        assert_eq!(manifest.family, "deepseekocr2");
+        assert_eq!(manifest.roles.get("dir").map(String::as_str), Some("."), "the resolver's role name, not `weights`: {:?}", manifest.roles);
+        assert!(repo.join("model-00001-of-000001.safetensors").exists(), "the upstream weights ARE what gets served, so they must survive convert");
+    }
+
     /// The whole point of the `wan` recipe: `Wan-AI/Wan2.1-T2V-1.3B` has a
     /// root `config.json` declaring `"model_type": "t2v"` and no
     /// `architectures`, so before `WanRecipe` existed this plan reached

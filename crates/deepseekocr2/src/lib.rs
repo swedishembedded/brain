@@ -24,10 +24,13 @@
 pub mod caps;
 pub mod config;
 pub mod encoder;
+pub mod hf;
 pub mod import;
 pub mod init;
 pub mod model;
 pub mod preprocess;
 pub mod prompt;
 pub mod rows;
+pub mod serve;
+pub mod spec;
 pub mod train;

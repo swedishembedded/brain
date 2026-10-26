@@ -753,3 +753,22 @@ hidden:**
 - SAM's CPU forward is the single largest real-checkpoint cost measured in
   this campaign (M12) and does not hit a native fast-path kernel on this
   backend - a `crates/sam1`-wide lead, not fixed here.
+
+## 2026-10-26 served from the vendor release, through the shared OCR serving crate
+
+- `brain pull deepseek-ai/DeepSeek-OCR-2` works: the arch row declares `DeepseekOCR2ForCausalLM`,
+  the family's role is `dir`, `crate::spec::Deepseekocr2Spec` resolves a pulled HF directory (or a
+  community GGUF pair whose mmproj says `deepseekocr2`), and `BRAIN_DEEPSEEKOCR2_DIR` is gone.
+- `crate::hf` maps the upstream tensors in place (the decoder and SAM through `deepseek2::hf` /
+  `sam1::hf`, shared with v1): 2707 tensors, shape derived and refused unless it is the preset; the
+  `Layout::{GgufPair, Hf}` split in `crate::import` mirrors v1's.
+- Serving is `ocrserve`: v2 supplies `crate::serve::PageEncoder` (SAM, resampler, separator row) and
+  the decoder is the same `deepseek2::serve::Engine` + `model::serve::Scheduler` as v1 (continuous
+  batching, KV-cached, replicas). The old CPU-only full-recompute `Session` is deleted.
+- A real page (omni-mixed 000, a 8x6 table): the HF checkpoint on one GH200 returns the correct
+  table with grounding boxes, 238 tokens; the "EOS first" observation recorded at M7 was a property
+  of the synthetic test graphic, not a defect. Encoder 1.4 s/page (SAM + resampler on the card,
+  tap-shaped training forward with per-layer read-backs): the inference path is still to be written.
+- Open: multi-tile (Gundam) layout (needs the sam1 pos-embed / rel-pos resamples), lean inference
+  forward for the resampler, batched encode, a measured footprint (the 8 GiB vision figure in
+  `caps::FOOTPRINT` is an estimate).

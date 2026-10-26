@@ -137,6 +137,7 @@ default-members = [
     "crates/vqgan",
     "crates/clip",
     "crates/deepseek2ocr",
+    "crates/ocrserve",
     "crates/deepseekocr2",
     "crates/t5encoder",
     "crates/flux1",
@@ -322,6 +323,7 @@ brain-arcface = { path = "crates/arcface" }
 brain-vqgan = { path = "crates/vqgan" }
 brain-clip = { path = "crates/clip" }
 brain-deepseek2ocr = { path = "crates/deepseek2ocr" }
+brain-ocrserve = { path = "crates/ocrserve" }
 brain-deepseekocr2 = { path = "crates/deepseekocr2" }
 brain-deepseekvl = { path = "crates/deepseekvl" }
 brain-minicpmv = { path = "crates/minicpmv" }

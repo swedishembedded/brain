@@ -1,6 +1,5 @@
 crates/arcface/src/caps.rs	BRAIN_ARCFACE_DIR
 crates/arch/src/lib.rs	BRAIN_CAMPPLUS_DIR
-crates/arch/src/lib.rs	BRAIN_DEEPSEEKOCR2_DIR
 crates/arch/src/lib.rs	BRAIN_LLAVA_WEIGHTS
 crates/arch/src/lib.rs	BRAIN_S3TOKENIZER_V2
 crates/arch/src/lib.rs	BRAIN_S3TOKENIZER_V3
@@ -77,7 +76,6 @@ crates/catalog/src/resident_asr.rs	BRAIN_QWEN3ASR_MAXNEW
 crates/catalog/src/resident_asr.rs	BRAIN_QWEN3ASR_WINDOW
 crates/catalog/src/resident_controlnet.rs	BRAIN_CONTROLNET_DIR
 crates/catalog/src/resident_controlnet.rs	BRAIN_SDXL_DIR
-crates/catalog/src/resident_deepseekocr2.rs	<DIR_VAR>
 crates/catalog/src/resident_deepseekvl.rs	BRAIN_DEEPSEEKVL_TUNED
 crates/catalog/src/resident_depth.rs	BRAIN_ZIPDEPTH_WEIGHTS
 crates/catalog/src/resident_flux2.rs	BRAIN_FLUX2_FAMILY
@@ -296,7 +294,6 @@ crates/deepseek2/tests/shard_parity.rs	MOE_SKIP_GPU_TESTS
 crates/deepseek2/tests/shard_parity.rs	SHARD_TEST_GPUS
 crates/deepseek2ocr/src/lib.rs	BRAIN_PROFILE
 crates/deepseek2ocr/tests/common/real_vision.rs	BRAIN_DEVICE
-crates/deepseekocr2/src/caps.rs	<DIR_VAR>
 crates/deepseekocr2/tests/common/real_vision.rs	BRAIN_DEVICE
 crates/deepseekocr2/tests/train_overfit.rs	MOE_SKIP_GPU_TESTS
 crates/deepseekvl/src/caps.rs	MOE_SKIP_GPU_TESTS

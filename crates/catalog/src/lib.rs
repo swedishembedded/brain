@@ -55,8 +55,6 @@ pub mod resident_clip;
 pub mod resident_controlnet;
 pub mod resident_cosyvoice;
 pub mod resident_decision;
-pub mod resident_deepseekocr;
-pub mod resident_deepseekocr2;
 pub mod resident_deepseekvl;
 pub mod resident_minicpmv;
 pub mod resident_depth;
@@ -764,37 +762,30 @@ pub fn models() -> Vec<ModelEntry> {
             spec: Some(("pulid", &pulid::spec::PulidSpec)),
             resident: crate::resident_in_store!(crate::resident_pulid::PulidResident::from_env),
         },
-        // DeepSeek-OCR: a document image in, decoded text out. Multi-file
-        // checkpoint (mmproj + LM GGUF), so ONE directory variable, like
-        // the face stack's and clip's. The only MULTI-device entry: its
-        // vision tower runs on wgpu while its decoder runs on the CPU
-        // backend, so it holds real bytes on two devices at once - see
-        // `crate::resident_deepseekocr`'s header.
-        // `dir` is resolved through `deepseek2ocr::spec::Deepseek2ocrSpec`
-        // (see that module's doc) instead of `BRAIN_DEEPSEEK_OCR_DIR`.
+        // DeepSeek-OCR and DeepSeek-OCR-2: a document image in, decoded text out.
+        // The vision encoder runs on one card and the decoder engine on a second
+        // card, the same card or the host, so the residency adapter is the MULTI-
+        // device one (`ocrserve::resident`): every device it holds bytes on is
+        // named and budgeted, and each card that holds the whole model runs a
+        // replica. `dir` is resolved through the model-store resolver
+        // (`deepseek2ocr::spec` / `deepseekocr2::spec`).
         ModelEntry {
             manifest: deepseek2ocr::caps::manifest,
             provider: |assembly: &Assembly| {
-                let dir = deepseek2ocr::spec::dir_from_assembly(assembly)?;
-                deepseek2ocr::caps::DeepseekOcrProvider::new(dir).map(|p| Arc::new(p) as Arc<dyn Provider>).ok_or_else(|| "deepseek-ocr: resolved dir does not hold both shipped GGUFs".to_string())
+                let dir = ocrserve::dir_from_assembly(assembly)?;
+                deepseek2ocr::caps::DeepseekOcrProvider::new(dir).map(|p| Arc::new(p) as Arc<dyn Provider>).ok_or_else(|| "deepseek-ocr: the resolved directory holds no loadable checkpoint".to_string())
             },
             spec: Some(("deepseek2ocr", &deepseek2ocr::spec::Deepseek2ocrSpec)),
-            resident: crate::resident_multi!(crate::resident_deepseekocr::DeepseekOcrResident::from_assembly),
+            resident: crate::resident_multi!(ocrserve::resident::OcrResident::<deepseek2ocr::caps::DeepseekOcr>::from_assembly),
         },
-        // DeepSeek-OCR-2: v1's successor. Same decoder (`crates/deepseek2`,
-        // unmodified), a new vision tower - SAM feeding a Qwen2 GQA resampler
-        // under a prefix-LM mask, global view only for now (see
-        // `deepseekocr2::caps`'s own header for the scope this milestone
-        // shipped). Single-device (CPU) today, unlike v1's wgpu/CPU split -
-        // see `crate::resident_deepseekocr2`'s header for why.
         ModelEntry {
             manifest: deepseekocr2::caps::manifest,
-            provider: from_env!(
-                deepseekocr2::caps::DeepseekOcr2Provider::from_env,
-                "set BRAIN_DEEPSEEKOCR2_DIR to a directory holding mmproj-deepseek-ocr-2-q8_0.gguf + deepseek-ocr-2-q8_0.gguf"
-            ),
-            spec: None,
-            resident: crate::resident!(crate::resident_deepseekocr2::DeepseekOcr2Resident::from_env),
+            provider: |assembly: &Assembly| {
+                let dir = ocrserve::dir_from_assembly(assembly)?;
+                deepseekocr2::caps::DeepseekOcr2Provider::new(dir).map(|p| Arc::new(p) as Arc<dyn Provider>).ok_or_else(|| "deepseek-ocr-2: the resolved directory holds no loadable checkpoint".to_string())
+            },
+            spec: Some(("deepseekocr2", &deepseekocr2::spec::Deepseekocr2Spec)),
+            resident: crate::resident_multi!(ocrserve::resident::OcrResident::<deepseekocr2::caps::DeepseekOcr2>::from_assembly),
         },
         // Moondream 3: an image in, text out. SigLIP ViT with overlap multi-crop
         // -> connector -> a parallel-block sparse-MoE decoder. int8 experts by

@@ -51,7 +51,7 @@ variable instead of the store, each to move onto a resolver spec and the
       cannot find it).
 - [ ] Kronos serving (`BRAIN_KRONOS_TOKENIZER` + `_DECODER`; `brain forecast
       predict` already resolves both from the store).
-- [ ] DeepSeek-OCR-2 (`BRAIN_DEEPSEEKOCR2_DIR`).
+- [x] DeepSeek-OCR-2: pulled and served from the vendor repo through the resolver (no variable).
 - [ ] Qwen3-VL serving (`BRAIN_QWEN3VL_WEIGHTS`; `brain caps`/`brain do`
       already resolve it from the store).
 - [ ] The scheduler families the startup line counts with a variable as the

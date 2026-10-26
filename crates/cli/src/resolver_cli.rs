@@ -123,6 +123,7 @@ fn with_arch_spec<R>(arch: &str, f: impl FnOnce(&dyn ArchSpec) -> R) -> Option<R
         "minicpmv" => Some(f(&minicpmv::spec::MiniCpmVSpec)),
         "fastvlm" => Some(f(&fastvlm::spec::FastvlmSpec)),
         "deepseek2ocr" => Some(f(&deepseek2ocr::spec::Deepseek2ocrSpec)),
+        "deepseekocr2" => Some(f(&deepseekocr2::spec::Deepseekocr2Spec)),
         "scrfd" => Some(f(&scrfd::spec::ScrfdSpec)),
         "arcface" => Some(f(&arcface::spec::ArcFaceSpec)),
         "clip" => Some(f(&clip::spec::ClipSpec)),

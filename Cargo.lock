@@ -769,6 +769,7 @@ dependencies = [
  "brain-moondream3",
  "brain-nemotronasr",
  "brain-npu",
+ "brain-ocrserve",
  "brain-onnx",
  "brain-ouro",
  "brain-paramstore",
@@ -1164,6 +1165,7 @@ dependencies = [
  "brain-llmserve",
  "brain-model",
  "brain-modelstore",
+ "brain-ocrserve",
  "brain-paramstore",
  "brain-qwen3",
  "brain-residency",
@@ -1185,9 +1187,12 @@ dependencies = [
  "brain-imaging",
  "brain-kernels",
  "brain-model",
+ "brain-modelstore",
+ "brain-ocrserve",
  "brain-optim",
  "brain-paramstore",
  "brain-qwen3",
+ "brain-residency",
  "brain-sam1",
  "brain-testutil",
  "serde_json",
@@ -2103,6 +2108,22 @@ dependencies = [
  "brain-zipdepth",
  "bytemuck",
  "openvino",
+ "serde_json",
+]
+
+[[package]]
+name = "brain-ocrserve"
+version = "3.0.0"
+dependencies = [
+ "brain-capability",
+ "brain-checkpoint",
+ "brain-data",
+ "brain-deepseek2",
+ "brain-gpu-core",
+ "brain-llmserve",
+ "brain-model",
+ "brain-qwen3",
+ "brain-residency",
  "serde_json",
 ]
 
