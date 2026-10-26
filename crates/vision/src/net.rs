@@ -104,17 +104,36 @@ pub struct Ctx<'g> {
     /// Optional activation tap (calibration / fake-quant). `None` on every
     /// normal forward — see [`ActTap`].
     pub tap: Option<&'g dyn ActTap>,
+    /// Per-role temporaries shared by every block this context drives ([`Ctx::scratch`]): the largest request so far
+    /// and its buffer.
+    scratch: std::cell::RefCell<std::collections::HashMap<&'static str, (u32, gpu_core::DeviceBuffer)>>,
 }
 
 impl<'g> Ctx<'g> {
     pub fn new(gpu: &'g Gpu, ids: &'g ConvKernelIds) -> Ctx<'g> {
-        Ctx { gpu, ids, tap: None }
+        Ctx { gpu, ids, tap: None, scratch: Default::default() }
     }
     /// A context whose conv forwards route their input through the given
     /// [`ActTap`]. Used only by the NPU calibrator / fake-quant simulator.
     pub fn with_tap(gpu: &'g Gpu, ids: &'g ConvKernelIds, tap: &'g dyn ActTap) -> Ctx<'g> {
-        Ctx { gpu, ids, tap: Some(tap) }
+        Ctx { gpu, ids, tap: Some(tap), scratch: Default::default() }
     }
+    /// A temporary of at least `n` f32 elements for `role`, shared by every block driven through this context: a
+    /// temporary that lives only through one block's call (a backward's gradient wrt that block's own
+    /// intermediates) needs one buffer per role for the whole model, sized by the largest block, not one per block.
+    /// Its contents are whatever the last user left; the caller overwrites what it reads.
+    pub fn scratch(&self, role: &'static str, n: u32) -> gpu_core::DeviceBuffer {
+        let mut held = self.scratch.borrow_mut();
+        match held.get(role) {
+            Some((cap, buf)) if *cap >= n => buf.clone(),
+            _ => {
+                let buf = self.gpu.storage(n as u64);
+                held.insert(role, (n, buf.clone()));
+                buf
+            }
+        }
+    }
+
     /// A fresh activation / temporary buffer of `n` f32 elements.
     pub fn act(&self, n: u32) -> gpu_core::DeviceBuffer {
         self.gpu.storage(n as u64)

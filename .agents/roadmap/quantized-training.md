@@ -140,6 +140,11 @@ The per-cell matrix and its tests are `docs/reference/training-capabilities.md`.
   `PassSeg` passes through `streamed::LayeredPass`) and qwen35moe (eager: its passes report the edges) and lfm2 adopt it.
   ouro and huginn stream by carrying each layer's gradient between its visits (`LayeredPass::revisits`).
   horizon streams its set encoder's layers (not a visit backbone's).
+- D Vision blocks (`vision::blocks`, every model on them: yolov8, arcface, bisenet, scrfd, zipdepth, ...): a conv
+  unit's backward temporaries (the gradients wrt its BN input and its conv output) come from one per-role scratch
+  of the call's `vision::Ctx`, so a model holds one pair sized by its largest unit instead of a pair per unit (two of
+  the five output-sized buffers each unit held). Open: recomputing `conv_out`/`bn_out` (replaying train-mode BN
+  with its saved batch statistics, no second running-stat update).
   Construction-time streaming (`Role::Streamed`, `StreamedStore::attach`, `Model::new_resident`,
   `check_streamed_construction`): gpt2, lfm2, spectrallm, deepseek2, glmdsa, qwen35moe. Open: horizon.
 - D Memory: `model::saved` saved-activation policy (keep, recompute, bf16/fp8 boundaries)

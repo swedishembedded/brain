@@ -506,9 +506,8 @@ pub struct Conv {
     sb_ready: std::cell::Cell<bool>,
     bn_out: DeviceBuffer,   // post-BN pre-SiLU [out]
     act: DeviceBuffer,      // SiLU output (block output) [out]
-
-    d_bn: DeviceBuffer,   // grad wrt bn_out [out]
-    d_conv: DeviceBuffer, // grad wrt conv_out [out]
+    // The backward's gradients wrt bn_out and conv_out live only through `backward`: they come from the context's
+    // shared scratch (`Ctx::scratch`), one pair for the whole model rather than a pair per unit.
 
     /// `bias_grad`'s output before the host spatial reduce: `[C*HW]`, allocated
     /// on first use, and only where the model has no `bn_dbeta` to sum the bias
@@ -592,8 +591,6 @@ impl Conv {
             sb_ready: std::cell::Cell::new(false),
             bn_out: ctx.act(on),
             act: ctx.act(on),
-            d_bn: ctx.act(on),
-            d_conv: ctx.act(on),
             dbcast: std::cell::RefCell::new(None),
             q_in: std::cell::RefCell::new(None),
             col: std::cell::RefCell::new(None),
@@ -1154,10 +1151,11 @@ impl Conv {
             // Raw conv: act backward straight into d_conv, then the conv
             // adjoints. Act::None needs no act backward at all — `out()`
             // aliases `conv_out`, so `d_out` IS d(conv_out); bind it directly.
+            let scratch_conv = ctx.scratch("conv.d_conv", on);
             let d_conv: &DeviceBuffer = if let Some((_, bwd)) = act_pair(ctx, self.spec.act) {
-                let s_a = ctx.step(bwd, &[&self.conv_out, d_out, &self.d_conv], &act_params(self.spec.act, on), on);
+                let s_a = ctx.step(bwd, &[&self.conv_out, d_out, &scratch_conv], &act_params(self.spec.act, on), on);
                 ctx.gpu.submit(&[], &[s_a]);
-                &self.d_conv
+                &scratch_conv
             } else {
                 d_out
             };
@@ -1167,20 +1165,21 @@ impl Conv {
             self.bias_backward(ctx, ps, d_conv);
             return;
         }
+        let (d_bn, d_conv) = (ctx.scratch("conv.d_bn", on), ctx.scratch("conv.d_conv", on));
         let s_act = match act_pair(ctx, self.spec.act) {
-            Some((_, bwd)) => ctx.step(bwd, &[&self.bn_out, d_out, &self.d_bn], &act_params(self.spec.act, on), on),
-            None => ctx.step(ctx.ids.need(ctx.ids.leaky_relu_bwd, "leaky_relu_bwd"), &[&self.bn_out, d_out, &self.d_bn], &[on, f(1.0)], on),
+            Some((_, bwd)) => ctx.step(bwd, &[&self.bn_out, d_out, &d_bn], &act_params(self.spec.act, on), on),
+            None => ctx.step(ctx.ids.need(ctx.ids.leaky_relu_bwd, "leaky_relu_bwd"), &[&self.bn_out, d_out, &d_bn], &[on, f(1.0)], on),
         };
         // The act backward produces d_bn, which the BN backward reads; the BN
         // backward produces d_conv, which both conv adjoints read. Submit in
         // this order. The gamma/beta grads accumulate into buffers the model's
         // zero_grads pre-zeroes.
         let mut steps = vec![s_act];
-        steps.extend(self.bn.backward_steps(ctx, ps, &self.conv_out, &self.d_bn, &self.d_conv));
-        steps.extend(self.dw_steps(ctx, ps, &self.d_conv, x_in));
-        steps.extend(d_in.map(|d| dx_step(&self.d_conv, d)));
+        steps.extend(self.bn.backward_steps(ctx, ps, &self.conv_out, &d_bn, &d_conv));
+        steps.extend(self.dw_steps(ctx, ps, &d_conv, x_in));
+        steps.extend(d_in.map(|d| dx_step(&d_conv, d)));
         ctx.gpu.submit(&[], &steps);
-        self.bias_backward(ctx, ps, &self.d_conv);
+        self.bias_backward(ctx, ps, &d_conv);
     }
 }
 
