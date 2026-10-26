@@ -196,8 +196,10 @@ impl ConvUnit {
             bias_name: bias.then(|| format!("{prefix}.bias")),
             gelu,
             out_shape,
-            biased: ctx.gpu.storage(n),
-            activated: ctx.gpu.storage(n),
+            // Only a unit with a bias writes `biased`, and only one with a GELU writes `activated` (its backward
+            // also stages the GELU's input gradient there); the others hold a placeholder.
+            biased: ctx.gpu.storage(if bias { n } else { 1 }),
+            activated: ctx.gpu.storage(if gelu { n } else { 1 }),
             k_add_chan: kidx("add_chan_bcast"),
             k_gelu: kidx("gelu_erf"),
             conv,
@@ -313,9 +315,10 @@ impl ConvUnit {
     /// the epilogue (GELU → +bias) then the shared [`Conv::backward`] (BN + conv).
     pub fn backward(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer, d_out: &DeviceBuffer, d_in: &DeviceBuffer) {
         let tot = self.out_shape.numel();
-        // GELU backward on the pre-activation (self.biased): d_out → d_biased.
+        // GELU backward on its pre-activation (the biased conv output, or the raw one): d_out → d_biased.
         let d_biased: &DeviceBuffer = if self.gelu {
-            ctx.gpu.submit(&[], &[ctx.step(kidx("gelu_erf_bwd"), &[&self.biased, d_out, &self.activated], &[tot], tot)]);
+            let pre = if self.bias_name.is_some() { &self.biased } else { self.conv.out() };
+            ctx.gpu.submit(&[], &[ctx.step(kidx("gelu_erf_bwd"), &[pre, d_out, &self.activated], &[tot], tot)]);
             &self.activated // reuse the activation buffer as the grad staging
         } else {
             d_out
