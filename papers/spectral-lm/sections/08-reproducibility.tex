@@ -26,8 +26,15 @@ python3 papers/spectral-lm/scripts/run.py qwen-ft --work <dir>
 python3 papers/spectral-lm/scripts/run.py spectrum --work <dir>
 python3 papers/spectral-lm/scripts/run.py systems --work <dir>
 python3 papers/spectral-lm/scripts/run.py generate --work <dir>
+python3 papers/spectral-lm/scripts/run.py extension --work <dir>
 make papers/spectral-lm/pdf
 \end{verbatim}
+\code{run.py qwen-ft --score-only} scores a fine-tuned checkpoint whose
+training finished without its scoring step, taking the corpus and training
+records from that run's log; the fine-tune record was produced this way after
+the build directory was cleaned during the run, and says so. The branch was
+rebased while the records were being made; each record names the rebased
+commit with the subject and code of the one it was produced at.
 Each plan refuses to run on a tree with uncommitted tracked changes, so every
 record names a commit that reproduces it. Seeds are drawn at random and
 recorded; rerunning a plan draws new ones.

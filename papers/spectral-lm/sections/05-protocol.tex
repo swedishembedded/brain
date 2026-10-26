@@ -4,8 +4,14 @@
 \section{Evaluation protocol}
 \label{sec:protocol}
 
-The protocol below was fixed before any comparison run was trained. Anything
-not listed here is exploratory and is labelled so where it appears.
+The protocol below was fixed before any comparison run was trained, with
+three exceptions, each marked where it applies: the document-length limit for
+scoring was lowered before any run was scored; the continued-training budget
+of the pretrained reference was set from a throughput probe while the primary
+runs were in progress, before its own run; and the extension of
+\cref{sec:res-extension} (more seeds, and one run at another rate) was added
+after the registered analysis. Anything not listed here is exploratory and is
+labelled so where it appears.
 
 \paragraph{Corpus and metric.} All models are trained on the TinyStories
 training split \citep{eldan2023tinystories} and evaluated on its validation

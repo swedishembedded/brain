@@ -32,8 +32,9 @@ reaches \BpbS{} bits per byte, the parameter-matched SwiGLU control \BpbQpar{}
 and the arithmetic-matched SwiGLU control \BpbQstd{}. Against the
 parameter-matched control the difference is \DiffSQpar{} bits per byte (Welch
 95\% interval \DiffSQparCI{}, $p=\DiffSQparP$ on \DiffSQparDF{} degrees of
-freedom). The interval's upper end lies below the registered margin of 0.02,
-so H1 is \HOneVerdict{}: at equal width, equal attention and the same
+freedom). By the registered rule, a mean difference of at most 0.02, H1 is
+\HOneVerdict{}; it also holds under the stricter reading that the interval's
+upper end lies below the margin: at equal width, equal attention and the same
 parameter count, a feed-forward sublayer built from per-mode filters around a
 signal-domain gated product predicts held-out text at least as well as a dense
 SwiGLU, and its seed range \RangeRelation{}. Three seeds per model do not

@@ -57,6 +57,11 @@ our kernels on one card and do not bound what a better FFT implementation
 could reach. The mixer is one member of a larger family; channel-mixing
 spectral weights, sparse cross-frequency terms and dense escape channels were
 not evaluated, and neither was spectral structure along the sequence axis.
+No spectral model of Qwen3-0.6B's size was trained: at the throughput
+measured for continuing the 0.6B model on this hardware, a from-scratch run of
+that size at the trained models' token budget takes about a day per seed, so
+the comparison with Qwen3-0.6B places the small models rather than matching
+it.
 
 \section{Conclusion}
 \label{sec:conclusion}

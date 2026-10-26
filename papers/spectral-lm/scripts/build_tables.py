@@ -311,8 +311,8 @@ def macros(data, groups):
         m("DiffSQparP", f"{p:.3f}")
         m("DiffSQparDF", f"{df:.1f}")
         m("RangeRelation", "lies entirely below the control's" if max(a) < min(q) else "overlaps the control's")
-        # H1 is non-inferiority: the upper end of the interval below the margin.
-        m("HOneVerdict", "supported" if hi <= H1_MARGIN else "rejected")
+        # The registered rule: rejected if the mean difference exceeds the margin.
+        m("HOneVerdict", "supported" if diff <= H1_MARGIN else "rejected")
     else:
         m("DiffSQpar", "--")
         m("RangeRelation", "--")
