@@ -137,10 +137,12 @@ model (`Model::set_saved_policy`):
   fp8 residuals;
 - a model that keeps every layer refuses any other choice by name.
 
-Trainers outside `Model` take the same policy. arcface, yolov8, zipdepth and
-florence2 have `set_saved_policy`: arcface rebuilds each residual block's
-`bn1 -> conv1 -> prelu` branch, yolov8 and zipdepth each normed conv unit's
-intermediates, florence2 each BART layer from one set of intermediates per tower.
+Trainers outside `Model` take the same policy. arcface, yolov8, zipdepth,
+florence2, sam1 and sam2 have `set_saved_policy`: arcface rebuilds each residual
+block's `bn1 -> conv1 -> prelu` branch, yolov8 and zipdepth each normed conv
+unit's intermediates, florence2 each BART layer from one set of intermediates per
+tower, sam2 each two-way decoder layer and sam1 each ViT block (sharing one set
+per block geometry).
 The conv-block tape (`vae::blocks`: vqgan, rrdbnet, sdxlunet, controlnet, supir)
 takes `vae::blocks::Activations` when its graph is recorded: under `Recompute`
 every block is a segment whose freed intermediates are shared with later

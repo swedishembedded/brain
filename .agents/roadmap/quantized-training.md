@@ -162,7 +162,7 @@ The per-cell matrix and its tests are `docs/reference/training-capabilities.md`.
   segments replayed before their adjoint under `Activations::Recompute` (vqgan, rrdbnet, sdxlunet,
   controlnet, supir; bit-identical gradients) and its reverse holds activation gradients for the
   live frontier only (8 resnet blocks allocate what 2 do); florence2 shares one set of BART layer
-  intermediates per tower; nemotronasr and s3dit accept the recompute they always do
+  intermediates per tower, sam2 its two-way layers', sam1 its ViT blocks'; nemotronasr and s3dit accept the recompute they always do
   (`saved::recompute_only`); toyautoencoder shares its pre-activation. ltxv's and minimaxmusic3's
   `Model` impls have no backward (their training runs outside the trait).
 - D Memory: `model::saved` saved-activation policy (keep, recompute, bf16/fp8 boundaries)
