@@ -51,11 +51,7 @@ use checkpoint::remap::{Fetch, RemapSource};
 use checkpoint::weightio::WeightReader;
 
 use clip::config::ClipVisionConfig;
-use deepseek2::DeepseekV2Config;
-// The decoder's own checkpoint shape. Aliased because this crate's composite
-// config carries the same type NAME for a different thing.
-use gguf::deepseek_ocr::DeepseekOcrConfig as DecoderShape;
-use gguf::deepseek_ocr_vision::{ClipConfig, DeepseekOcrVisionConfig, SamConfig};
+use gguf::deepseek_ocr_vision::{ClipConfig, DeepseekOcrVisionConfig};
 use sam1::SamViTConfig;
 use serde_json::Value;
 
@@ -89,18 +85,6 @@ fn unknown(full: &str) -> String {
 
 const LABEL: &str = "deepseek-ocr hf import";
 
-/// Split `"{index}.{leaf}"`, bounds-checking the index, so a checkpoint that
-/// grew a block (or an expert) stops the import instead of landing silently
-/// outside the parameter list.
-fn split_indexed<'a>(rest: &'a str, full: &str, bound: u32, what: &str) -> Result<(u32, &'a str), String> {
-    let (idx, leaf) = rest.split_once('.').ok_or_else(|| format!("{LABEL}: malformed {what} name {full:?}"))?;
-    let i: u32 = idx.parse().map_err(|_| format!("{LABEL}: malformed {what} index in {full:?}"))?;
-    if i >= bound {
-        return Err(format!("{LABEL}: {full}: {what} index {i} beyond {bound}"));
-    }
-    Ok((i, leaf))
-}
-
 /// The brain-side home of one upstream HF tensor name.
 pub fn classify(name: &str, cfg: &DeepseekOcrConfig) -> Result<Half, String> {
     match name {
@@ -109,10 +93,13 @@ pub fn classify(name: &str, cfg: &DeepseekOcrConfig) -> Result<Half, String> {
         "model.image_newline" => return Ok(Half::Encoder(IMAGE_NEWLINE.to_string())),
         // `seperator` is the upstream spelling; brain's is spelled correctly.
         "model.view_seperator" => return Ok(Half::Encoder(VIEW_SEPARATOR.to_string())),
-        "model.embed_tokens.weight" => return Ok(Half::Decoder("tok.weight".to_string())),
-        "model.norm.weight" => return Ok(Half::Decoder("norm.weight".to_string())),
-        "lm_head.weight" => return Ok(Half::Decoder("lm_head.weight".to_string())),
         _ => {}
+    }
+    if let Some(d) = deepseek2::hf::classify(name, &cfg.decoder.shape).map_err(|e| format!("{LABEL}: {e}"))? {
+        return Ok(match d {
+            deepseek2::hf::Decoded::Whole(n) => Half::Decoder(n),
+            deepseek2::hf::Decoded::Expert { bank, expert } => Half::DecoderExpert { bank, expert },
+        });
     }
     if let Some(rest) = name.strip_prefix("model.sam_model.") {
         // The SAM tower's names are `sam1`'s to own; they keep its
@@ -123,9 +110,6 @@ pub fn classify(name: &str, cfg: &DeepseekOcrConfig) -> Result<Half, String> {
     }
     if let Some(rest) = name.strip_prefix("model.vision_model.") {
         return clip_leaf(rest, name, cfg).map(Half::Encoder);
-    }
-    if let Some(rest) = name.strip_prefix("model.layers.") {
-        return decoder_leaf(rest, name, cfg);
     }
     Err(unknown(name))
 }
@@ -145,7 +129,7 @@ fn clip_leaf(rest: &str, full: &str, cfg: &DeepseekOcrConfig) -> Result<String, 
         _ => {}
     }
     let rest = rest.strip_prefix("transformer.layers.").ok_or_else(|| unknown(full))?;
-    let (l, leaf) = split_indexed(rest, full, cfg.clip.layers(), "CLIP block")?;
+    let (l, leaf) = deepseek2::hf::split_indexed(rest, full, cfg.clip.layers(), "CLIP block").map_err(|e| format!("{LABEL}: {e}"))?;
     let b = |s: &str| Ok(format!("blocks.{l}.{s}"));
     match leaf {
         "layer_norm1.weight" => b("norm1.weight"),
@@ -160,47 +144,6 @@ fn clip_leaf(rest: &str, full: &str, cfg: &DeepseekOcrConfig) -> Result<String, 
         "mlp.fc1.weight" | "mlp.fc1.bias" | "mlp.fc2.weight" | "mlp.fc2.bias" => b(leaf),
         _ => Err(unknown(full)),
     }
-}
-
-/// The DeepSeek-V2 decoder stack.
-fn decoder_leaf(rest: &str, full: &str, cfg: &DeepseekOcrConfig) -> Result<Half, String> {
-    let (l, leaf) = split_indexed(rest, full, cfg.decoder.n_layers(), "decoder layer")?;
-    let p = |s: &str| Ok(Half::Decoder(format!("blocks.{l}.{s}")));
-    match leaf {
-        "input_layernorm.weight" => return p("ln1.weight"),
-        "post_attention_layernorm.weight" => return p("ln2.weight"),
-        "self_attn.q_proj.weight" | "self_attn.k_proj.weight" | "self_attn.v_proj.weight" | "self_attn.o_proj.weight" => return p(leaf),
-        _ => {}
-    }
-    let mlp = leaf.strip_prefix("mlp.").ok_or_else(|| unknown(full))?;
-    // Which MLP a layer carries is a fact of the config (`first_k_dense_replace`),
-    // so a router tensor on a dense layer is an error rather than a name brain
-    // happens not to have.
-    if !cfg.decoder.shape.is_moe_layer(l) {
-        return match mlp {
-            "gate_proj.weight" => p("mlp.gate.weight"),
-            "up_proj.weight" => p("mlp.up.weight"),
-            "down_proj.weight" => p("mlp.down.weight"),
-            _ => Err(unknown(full)),
-        };
-    }
-    match mlp {
-        // NOT `mlp.gate_proj.weight`: on a MoE layer `mlp.gate` is the router.
-        "gate.weight" => return p("mlp.router.weight"),
-        "shared_experts.gate_proj.weight" => return p("mlp.shared.gate.weight"),
-        "shared_experts.up_proj.weight" => return p("mlp.shared.up.weight"),
-        "shared_experts.down_proj.weight" => return p("mlp.shared.down.weight"),
-        _ => {}
-    }
-    let rest = mlp.strip_prefix("experts.").ok_or_else(|| unknown(full))?;
-    let (e, eleaf) = split_indexed(rest, full, cfg.decoder.shape.n_experts, "expert")?;
-    let which = match eleaf {
-        "gate_proj.weight" => "gate",
-        "up_proj.weight" => "up",
-        "down_proj.weight" => "down",
-        _ => return Err(unknown(full)),
-    };
-    Ok(Half::DecoderExpert { bank: format!("blocks.{l}.mlp.experts.{which}.weight"), expert: e })
 }
 
 /// The encoder half's manifest: every name [`classify`] may return as
@@ -235,52 +178,22 @@ pub type FetchPlan = HashMap<String, Fetch>;
 /// (the layout the GGUF release stores natively), so those are a
 /// `Fetch::Concat` of the experts in index order.
 pub fn plans(names: &[String], cfg: &DeepseekOcrConfig) -> Result<(FetchPlan, FetchPlan), String> {
-    let (mut enc, mut dec) = (HashMap::new(), HashMap::new());
-    // bank name -> expert index -> source tensor. `BTreeMap` on the inner key
-    // is what makes the concatenation expert-ordered by construction rather
-    // than by a sort someone could later drop.
-    let mut banks: BTreeMap<String, BTreeMap<u32, String>> = BTreeMap::new();
+    let mut enc = HashMap::new();
     for src in names {
-        let (side, brain) = match classify(src, cfg)? {
-            Half::Encoder(n) => (&mut enc, n),
-            Half::Decoder(n) => (&mut dec, n),
-            Half::DecoderExpert { bank, expert } => {
-                if let Some(prev) = banks.entry(bank.clone()).or_default().insert(expert, src.clone()) {
-                    return Err(format!("{LABEL}: two source tensors ({prev}, {src}) are expert {expert} of {bank}"));
-                }
-                continue;
+        // Every name is classified (an unrecognized one stops the import),
+        // but the decoder half is planned by `deepseek2::hf::plan`, the one
+        // owner of the decoder's tensor layout.
+        if let Half::Encoder(brain) = classify(src, cfg)? {
+            if enc.insert(brain.clone(), Fetch::Whole(src.clone())).is_some() {
+                return Err(format!("{LABEL}: two source tensors map to {brain}"));
             }
-        };
-        if side.insert(brain.clone(), Fetch::Whole(src.clone())).is_some() {
-            return Err(format!("{LABEL}: two source tensors map to {brain}"));
         }
     }
-    let n_experts = cfg.decoder.shape.n_experts;
-    for (bank, parts) in banks {
-        let missing: Vec<u32> = (0..n_experts).filter(|e| !parts.contains_key(e)).collect();
-        if !missing.is_empty() {
-            // Name each absent expert with its own per-expert leaf
-            // (`...experts.{e}.gate.weight`), so the message points at the one
-            // source tensor that is missing rather than only at the bank it
-            // would have joined.
-            let (head, tail) = bank.split_once("experts.").unwrap_or((bank.as_str(), ""));
-            let named: Vec<String> = missing.iter().map(|e| format!("{head}experts.{e}.{tail}")).collect();
-            return Err(format!(
-                "{LABEL}: {bank}: this checkpoint produces no tensor for {} of {n_experts} experts: {named:?}",
-                missing.len()
-            ));
-        }
-        let fetch = Fetch::Concat(parts.into_values().map(Fetch::Whole).collect());
-        if dec.insert(bank.clone(), fetch).is_some() {
-            return Err(format!("{LABEL}: two source tensors map to {bank}"));
-        }
+    let missing: Vec<String> = encoder_manifest(cfg).into_iter().map(|(n, _)| n).filter(|n| !enc.contains_key(n)).collect();
+    if !missing.is_empty() {
+        return Err(format!("{LABEL}: this checkpoint produces no encoder tensor for {} parameter(s): {missing:?}", missing.len()));
     }
-    for (label, plan, want) in [("encoder", &enc, encoder_manifest(cfg)), ("decoder", &dec, cfg.decoder.param_list())] {
-        let missing: Vec<&str> = want.iter().map(|(n, _)| n.as_str()).filter(|n| !plan.contains_key(*n)).collect();
-        if !missing.is_empty() {
-            return Err(format!("{LABEL}: this checkpoint produces no {label} tensor for {} parameter(s): {missing:?}", missing.len()));
-        }
-    }
+    let dec = deepseek2::hf::plan(names, &cfg.decoder).map_err(|e| format!("{LABEL}: {e}"))?;
     Ok((enc, dec))
 }
 
@@ -316,66 +229,8 @@ pub fn decoder_source<'a>(reader: &'a WeightReader, cfg: &DeepseekOcrConfig) -> 
     Ok(src)
 }
 
-/// Every tensor's shape, header-only - what [`config_from_shapes`] reads.
-pub fn shapes(reader: &WeightReader) -> BTreeMap<String, Vec<usize>> {
-    reader
-        .names()
-        .map(str::to_string)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .filter_map(|n| reader.shape(&n).map(|s| (n.clone(), s.iter().map(|d| *d as usize).collect())))
-        .collect()
-}
-
-/// One tensor's extent along `axis`, or a message naming the tensor.
-fn dim(shapes: &BTreeMap<String, Vec<usize>>, name: &str, axis: usize) -> Result<u32, String> {
-    let s = shapes.get(name).ok_or_else(|| format!("{LABEL}: missing {name}"))?;
-    let d = s.get(axis).ok_or_else(|| format!("{LABEL}: {name} has no axis {axis} (shape {s:?})"))?;
-    Ok(*d as u32)
-}
-
-/// How many `{prefix}{i}.` stacks the checkpoint declares - one past the
-/// highest index present, so a gap is caught by the coverage check rather
-/// than silently shortening the stack.
-fn stack_len(shapes: &BTreeMap<String, Vec<usize>>, prefix: &str) -> u32 {
-    shapes
-        .keys()
-        .filter_map(|k| k.strip_prefix(prefix))
-        .filter_map(|rest| rest.split('.').next())
-        .filter_map(|idx| idx.parse::<u32>().ok())
-        .max()
-        .map_or(0, |m| m + 1)
-}
-
-/// A `config.json` number reached by a path of object keys.
-fn cfg_u32(config: &Value, path: &[&str]) -> Result<u32, String> {
-    let mut v = config;
-    for k in path {
-        v = v.get(k).ok_or_else(|| format!("{LABEL}: config.json has no {}", path.join(".")))?;
-    }
-    v.as_u64().map(|n| n as u32).ok_or_else(|| format!("{LABEL}: config.json {} is not an integer", path.join(".")))
-}
-
-/// Same, for a float with a documented upstream default when the field is
-/// absent (this repo's `config.json` omits both of them).
-fn cfg_f32(config: &Value, path: &[&str], default: f32) -> f32 {
-    let mut v = config;
-    for k in path {
-        match v.get(k) {
-            Some(next) => v = next,
-            None => return default,
-        }
-    }
-    v.as_f64().map_or(default, |n| n as f32)
-}
-
-/// Refuse when a number the checkpoint states twice disagrees with itself.
-fn agree(what: &str, derived: u32, declared: u32) -> Result<(), String> {
-    if derived != declared {
-        return Err(format!("{LABEL}: {what}: the tensor shapes say {derived}, config.json says {declared}"));
-    }
-    Ok(())
-}
+pub use deepseek2::hf::shapes;
+use deepseek2::hf::{agree, cfg_u32, dim, stack_len};
 
 /// The vision tower's shape, read off the checkpoint's own tensors.
 ///
@@ -385,43 +240,13 @@ fn agree(what: &str, derived: u32, declared: u32) -> Result<(), String> {
 /// second axis, which is the head dimension - and is cross-checked against
 /// `config.json` rather than taken from it.
 fn vision_from_shapes(shapes: &BTreeMap<String, Vec<usize>>, config: &Value) -> Result<DeepseekOcrVisionConfig, String> {
-    let d_model = dim(shapes, "model.sam_model.patch_embed.proj.weight", 0)?;
-    let patch_size = dim(shapes, "model.sam_model.patch_embed.proj.weight", 2)?;
-    let (grid, grid_w) = (dim(shapes, "model.sam_model.pos_embed", 1)?, dim(shapes, "model.sam_model.pos_embed", 2)?);
-    if grid != grid_w {
-        return Err(format!("{LABEL}: SAM position grid is {grid}x{grid_w}; this tower is square"));
-    }
-    let n_layers = stack_len(shapes, "model.sam_model.blocks.");
-    let ffn_hidden = dim(shapes, "model.sam_model.blocks.0.mlp.lin1.weight", 0)?;
-    let head_dim = dim(shapes, "model.sam_model.blocks.0.attn.rel_pos_h", 1)?;
-    if head_dim == 0 || d_model % head_dim != 0 {
-        return Err(format!("{LABEL}: SAM width {d_model} is not a multiple of its head dim {head_dim}"));
-    }
-    let n_heads = d_model / head_dim;
-    agree("SAM head count", n_heads, cfg_u32(config, &["vision_config", "width", "sam_vit_b", "heads"])?)?;
-    agree("SAM depth", n_layers, cfg_u32(config, &["vision_config", "width", "sam_vit_b", "layers"])?)?;
-
-    // Which blocks attend globally is carried by the relative-position tables
-    // themselves: a global block spans the whole grid, a windowed one spans
-    // its window. Both are `2 * extent - 1` rows.
-    let (mut global_attn_layers, mut window) = (Vec::new(), None);
-    for l in 0..n_layers {
-        let rows = dim(shapes, &format!("model.sam_model.blocks.{l}.attn.rel_pos_h"), 0)?;
-        if rows == 2 * grid - 1 {
-            global_attn_layers.push(l);
-            continue;
-        }
-        if rows % 2 == 0 {
-            return Err(format!("{LABEL}: SAM block {l} has {rows} relative-position rows, which is not 2*extent-1"));
-        }
-        let w = rows.div_ceil(2);
-        match window {
-            None => window = Some(w),
-            Some(prev) if prev != w => return Err(format!("{LABEL}: SAM blocks disagree about the attention window ({prev} vs {w})")),
-            Some(_) => {}
-        }
-    }
-    let window_size = window.ok_or_else(|| format!("{LABEL}: every SAM block attends globally; this tower has a windowed majority"))?;
+    let sam = sam1::hf::config_from_shapes(
+        shapes,
+        "model.sam_model.",
+        cfg_u32(config, &["vision_config", "width", "sam_vit_b", "heads"])?,
+        cfg_u32(config, &["vision_config", "width", "sam_vit_b", "layers"])?,
+    )
+    .map_err(|e| format!("{LABEL}: {e}"))?;
 
     let clip_d = dim(shapes, "model.vision_model.embeddings.patch_embedding.weight", 0)?;
     let clip_patch = dim(shapes, "model.vision_model.embeddings.patch_embedding.weight", 2)?;
@@ -439,19 +264,7 @@ fn vision_from_shapes(shapes: &BTreeMap<String, Vec<usize>>, config: &Value) -> 
     agree("CLIP depth", clip_layers, cfg_u32(config, &["vision_config", "width", "clip-l-14-224", "layers"])?)?;
 
     Ok(DeepseekOcrVisionConfig {
-        sam: SamConfig {
-            d_model,
-            n_layers,
-            n_heads,
-            ffn_hidden,
-            patch_size,
-            grid,
-            window_size,
-            global_attn_layers,
-            neck_channels: dim(shapes, "model.sam_model.neck.0.weight", 0)?,
-            compress_mid: dim(shapes, "model.sam_model.net_2.weight", 0)?,
-            compress_out: dim(shapes, "model.sam_model.net_3.weight", 0)?,
-        },
+        sam,
         clip: ClipConfig {
             d_model: clip_d,
             n_layers: clip_layers,
@@ -485,80 +298,6 @@ fn vision_from_shapes(shapes: &BTreeMap<String, Vec<usize>>, config: &Value) -> 
     })
 }
 
-/// The decoder's shape. Everything the tensors can carry is read off them;
-/// the head counts, the router policy numbers and the two RoPE/norm constants
-/// come from `config.json` (or, where this repo omits them, from the
-/// documented `DeepseekV2Config` defaults its own
-/// `configuration_deepseek_v2.py` declares).
-fn decoder_from_shapes(shapes: &BTreeMap<String, Vec<usize>>, config: &Value, block_size: u32) -> Result<DeepseekV2Config, String> {
-    let lang = if config.get("language_config").is_some() { &["language_config"][..] } else { &[][..] };
-    let path = |k: &'static str| -> Vec<&str> { lang.iter().copied().chain(std::iter::once(k)).collect() };
-    let get = |k: &'static str| cfg_u32(config, &path(k));
-
-    let vocab = dim(shapes, "model.embed_tokens.weight", 0)?;
-    let d_model = dim(shapes, "model.embed_tokens.weight", 1)?;
-    let n_layers = stack_len(shapes, "model.layers.");
-    agree("decoder width", d_model, get("hidden_size")?)?;
-    agree("vocabulary", vocab, get("vocab_size")?)?;
-    agree("decoder depth", n_layers, get("num_hidden_layers")?)?;
-
-    let n_heads = get("num_attention_heads")?;
-    let n_kv_heads = get("num_key_value_heads")?;
-    let q_dim = dim(shapes, "model.layers.0.self_attn.q_proj.weight", 0)?;
-    if n_heads == 0 || q_dim % n_heads != 0 {
-        return Err(format!("{LABEL}: q projection is {q_dim} wide, which is not a multiple of {n_heads} heads"));
-    }
-    let head_dim = q_dim / n_heads;
-    let kv_dim = dim(shapes, "model.layers.0.self_attn.k_proj.weight", 0)?;
-    agree("key/value projection width", kv_dim, n_kv_heads * head_dim)?;
-
-    // The dense-then-MoE schedule is visible in the tensors: a MoE layer has a
-    // router, a dense one has a plain `gate_proj`.
-    let n_dense_layers = (0..n_layers).take_while(|l| !shapes.contains_key(&format!("model.layers.{l}.mlp.gate.weight"))).count() as u32;
-    agree("dense-layer prefix", n_dense_layers, get("first_k_dense_replace")?)?;
-    if n_dense_layers >= n_layers {
-        return Err(format!("{LABEL}: no layer carries a router; this is not a MoE decoder"));
-    }
-    let first_moe = n_dense_layers;
-    let moe_intermediate_size = dim(shapes, &format!("model.layers.{first_moe}.mlp.experts.0.gate_proj.weight"), 0)?;
-    let shared_width = dim(shapes, &format!("model.layers.{first_moe}.mlp.shared_experts.gate_proj.weight"), 0)?;
-    if moe_intermediate_size == 0 || shared_width % moe_intermediate_size != 0 {
-        return Err(format!("{LABEL}: the fused shared expert is {shared_width} wide, not a multiple of one expert's {moe_intermediate_size}"));
-    }
-
-    let shape = DecoderShape {
-        vocab,
-        n_layers,
-        d_model,
-        max_position_embeddings: get("max_position_embeddings")?,
-        // Absent from this repo's config.json; both are `DeepseekV2Config`'s
-        // own documented defaults.
-        rms_eps: cfg_f32(config, &path("rms_norm_eps"), 1e-6),
-        tie_embeddings: !shapes.contains_key("lm_head.weight"),
-        n_heads,
-        n_kv_heads,
-        head_dim,
-        rope_theta: cfg_f32(config, &path("rope_theta"), 10_000.0),
-        // This checkpoint names no partial-rotary width, so the whole head
-        // rotates - the same resolution `gguf::deepseek_ocr::config_from_gguf`
-        // applies to the GGUF's `rope.dimension_count = 0`.
-        rotary_dim: head_dim,
-        n_dense_layers,
-        ffn_hidden: dim(shapes, "model.layers.0.mlp.gate_proj.weight", 0)?,
-        n_experts: dim(shapes, &format!("model.layers.{first_moe}.mlp.gate.weight"), 0)?,
-        top_k: get("num_experts_per_tok")?,
-        moe_intermediate_size,
-        n_shared_experts: shared_width / moe_intermediate_size,
-        n_expert_groups: get("n_group")?,
-        n_expert_groups_used: get("topk_group")?,
-    };
-    agree("routed-expert count", shape.n_experts, get("n_routed_experts")?)?;
-    agree("shared-expert count", shape.n_shared_experts, get("n_shared_experts")?)?;
-    agree("expert width", shape.moe_intermediate_size, get("moe_intermediate_size")?)?;
-    agree("dense feed-forward width", shape.ffn_hidden, get("intermediate_size")?)?;
-    Ok(DeepseekV2Config::from_shape(shape, block_size))
-}
-
 /// The composite's config, derived from the checkpoint's own tensor shapes
 /// (plus the handful of numbers only `config.json` carries) and then refused
 /// unless it is [`DeepseekOcrConfig::deepseek_ocr`].
@@ -571,7 +310,7 @@ pub fn config_from_shapes(shapes: &BTreeMap<String, Vec<usize>>, config: &Value,
     let cfg = DeepseekOcrConfig {
         sam: SamViTConfig::from(&vision.sam),
         clip: ClipVisionConfig::from_gguf(&vision),
-        decoder: decoder_from_shapes(shapes, config, block_size)?,
+        decoder: deepseek2::hf::decoder_from_shapes(shapes, config, block_size).map_err(|e| format!("{LABEL}: {e}"))?,
         // No real-scale analogue; `check_real_scale_shaped` refuses it.
         patch_bypass: false,
     };

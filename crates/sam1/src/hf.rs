@@ -20,10 +20,12 @@
 //! inference stack with every tensor accounted for, you can procure our
 //! services by sending an email to info@swedishembedded.com.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use checkpoint::remap::{Fetch, RemapSource};
 use checkpoint::TensorSource;
+
+use gguf::deepseek_ocr_vision::SamConfig;
 
 use crate::config::{SamViTConfig, HD_ALPHA};
 
@@ -138,6 +140,76 @@ pub fn source<'a>(src: &'a dyn TensorSource, names: impl IntoIterator<Item = &'a
     let remap = RemapSource::new(src, plan(names, prefix, cfg, spelling)?);
     remap.validate(&cfg.param_list()).map_err(|e| format!("sam1 hf import ({prefix}): {e}"))?;
     Ok(remap)
+}
+
+/// The tower's shape, read off a checkpoint's own tensor shapes (header
+/// only) with every tensor under `prefix` (`model.sam_model.`).
+///
+/// Only the head and layer counts are taken from the release's `config.json`
+/// (`declared_*`), and as a cross-check: the head count is carried by the
+/// relative-position tables' second axis, the depth by the block indices. Which
+/// blocks attend globally is carried by the tables too: a global block spans the
+/// whole grid (`2 * grid - 1` rows), a windowed one its window.
+pub fn config_from_shapes(shapes: &BTreeMap<String, Vec<usize>>, prefix: &str, declared_heads: u32, declared_layers: u32) -> Result<SamConfig, String> {
+    let dim = |name: &str, axis: usize| -> Result<u32, String> {
+        let full = format!("{prefix}{name}");
+        let s = shapes.get(&full).ok_or_else(|| format!("missing {full}"))?;
+        s.get(axis).map(|d| *d as u32).ok_or_else(|| format!("{full} has no axis {axis} (shape {s:?})"))
+    };
+    let d_model = dim("patch_embed.proj.weight", 0)?;
+    let patch_size = dim("patch_embed.proj.weight", 2)?;
+    let (grid, grid_w) = (dim("pos_embed", 1)?, dim("pos_embed", 2)?);
+    if grid != grid_w {
+        return Err(format!("SAM position grid is {grid}x{grid_w}; this tower is square"));
+    }
+    let block_prefix = format!("{prefix}blocks.");
+    let n_layers = shapes
+        .keys()
+        .filter_map(|k| k.strip_prefix(block_prefix.as_str()))
+        .filter_map(|rest| rest.split('.').next()?.parse::<u32>().ok())
+        .max()
+        .map_or(0, |m| m + 1);
+    let head_dim = dim("blocks.0.attn.rel_pos_h", 1)?;
+    if head_dim == 0 || d_model % head_dim != 0 {
+        return Err(format!("SAM width {d_model} is not a multiple of its head dim {head_dim}"));
+    }
+    let n_heads = d_model / head_dim;
+    for (what, derived, declared) in [("SAM head count", n_heads, declared_heads), ("SAM depth", n_layers, declared_layers)] {
+        if derived != declared {
+            return Err(format!("{what}: the tensor shapes say {derived}, config.json says {declared}"));
+        }
+    }
+    let (mut global_attn_layers, mut window) = (Vec::new(), None);
+    for l in 0..n_layers {
+        let rows = dim(&format!("blocks.{l}.attn.rel_pos_h"), 0)?;
+        if rows == 2 * grid - 1 {
+            global_attn_layers.push(l);
+            continue;
+        }
+        if rows % 2 == 0 {
+            return Err(format!("SAM block {l} has {rows} relative-position rows, which is not 2*extent-1"));
+        }
+        let w = rows.div_ceil(2);
+        match window {
+            None => window = Some(w),
+            Some(prev) if prev != w => return Err(format!("SAM blocks disagree about the attention window ({prev} vs {w})")),
+            Some(_) => {}
+        }
+    }
+    let window_size = window.ok_or("every SAM block attends globally; this tower has a windowed majority")?;
+    Ok(SamConfig {
+        d_model,
+        n_layers,
+        n_heads,
+        ffn_hidden: dim("blocks.0.mlp.lin1.weight", 0)?,
+        patch_size,
+        grid,
+        window_size,
+        global_attn_layers,
+        neck_channels: dim("neck.0.weight", 0)?,
+        compress_mid: dim("net_2.weight", 0)?,
+        compress_out: dim("net_3.weight", 0)?,
+    })
 }
 
 #[cfg(test)]

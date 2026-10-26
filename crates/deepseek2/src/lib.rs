@@ -74,6 +74,7 @@
 //! than a change to it.
 
 pub mod config;
+pub mod hf;
 pub mod import;
 pub mod init;
 pub mod lora;
