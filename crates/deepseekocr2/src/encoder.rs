@@ -57,6 +57,8 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("bias_add", kernels::BIAS_ADD),
     ("bias_grad", kernels::BIAS_GRAD),
     ("add_inplace", kernels::ADD_INPLACE),
+    // The shared adapter runtime's LoRA correction (`model::adapter::exec`) accumulates with it.
+    ("axpy", kernels::AXPY),
     ("rmsnorm", kernels::RMSNORM),
     ("rms_inv", kernels::RMS_INV),
     ("rmsnorm_dx", kernels::RMSNORM_DX),
