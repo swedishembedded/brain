@@ -416,13 +416,14 @@ pub fn check_quantized_boundaries<M: crate::Model>(name: &str, build: impl Fn() 
 ///   recorded-pass model released the activation buffers of every layer but one per kind when the policy was set,
 ///   an eager one frees each layer's activations as the forward moves on.
 pub fn check_recompute<M: crate::Model>(name: &str, build: impl Fn() -> M, step: impl Fn(&M) -> f32) -> Result<(), String> {
+    /// A step's loss, every parameter's gradient bits and the live device bytes it peaked at.
+    type Measured = (f32, Vec<(String, Vec<u32>)>, Option<u64>);
     let grads = |m: &M| -> Vec<(String, Vec<u32>)> {
         let mut names = m.param_names();
         names.sort();
         names.into_iter().map(|n| (n.clone(), m.read_grad(&n).into_iter().map(f32::to_bits).collect())).collect()
     };
-    // One step under `policy`: its loss, its gradients and the live device bytes it peaked at.
-    let measured = |policy: SavedPolicy| -> Result<(f32, Vec<(String, Vec<u32>)>, Option<u64>), String> {
+    let measured = |policy: SavedPolicy| -> Result<Measured, String> {
         let mut m = build();
         m.set_saved_policy(policy).map_err(|e| format!("{name}: {policy:?} refused: {e}"))?;
         let gpu = m.optimizer_parts().map(|p| p.gpu);
