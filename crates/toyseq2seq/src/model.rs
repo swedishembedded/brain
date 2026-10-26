@@ -354,6 +354,15 @@ struct DecLayer {
     ffn_out: gpu_core::DeviceBuffer,
 }
 
+/// The layer a tensor belongs to in the window: the encoder's layers first (`enc.blocks.{l}.*`, index `l`), then the
+/// decoder's (`dec.blocks.{l}.*`, index `n_enc + l`); `None` for the embeddings, the head and the final norm.
+fn layer_of(n_enc: u32, name: &str) -> Option<u32> {
+    if let Some(rest) = name.strip_prefix("enc.blocks.") {
+        return rest.split('.').next()?.parse().ok();
+    }
+    Some(n_enc + name.strip_prefix("dec.blocks.")?.split('.').next()?.parse::<u32>().ok()?)
+}
+
 pub struct Seq2Seq {
     pub gpu: Gpu,
     pub cfg: Seq2SeqConfig,
@@ -447,7 +456,29 @@ impl Seq2Seq {
 
     /// Build on an existing device handle — see `Gpt::new_on`.
     pub fn new_on(gpu: Gpu, cfg: Seq2SeqConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Seq2Seq {
-        let ps = ParamStore::new(&gpu, cfg.param_list(), init);
+        Seq2Seq::build(gpu, cfg, b, t, init, None).unwrap_or_else(|e| panic!("toyseq2seq: {e}"))
+    }
+
+    /// A build whose encoder and decoder layers stream through a device window under `resident` from the start (see
+    /// [`model::streamed`]): their tensors are read from `init` into the window's host state and never all reach the
+    /// device, so a model larger than it trains. The embeddings, the head and the final norm load as usual.
+    pub fn new_resident_on(gpu: Gpu, cfg: Seq2SeqConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, resident: &model::resident_ft::ResidentFtConfig) -> Result<Seq2Seq, String> {
+        Seq2Seq::build(gpu, cfg, b, t, init, Some(resident))
+    }
+
+    fn build(gpu: Gpu, cfg: Seq2SeqConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, resident: Option<&model::resident_ft::ResidentFtConfig>) -> Result<Seq2Seq, String> {
+        let n_enc = cfg.n_enc;
+        let layer_of = |name: &str| layer_of(n_enc, name);
+        let roles = cfg
+            .param_list()
+            .into_iter()
+            .map(|(name, numel)| {
+                let role = if resident.is_some() && layer_of(&name).is_some() { paramstore::Role::Streamed } else { paramstore::Role::Trainable };
+                (name, numel, role)
+            })
+            .collect();
+        let mut ps = ParamStore::new_with_roles_src(&gpu, roles, init);
+        let streamed = resident.map(|r| StreamedStore::attach(&gpu, &mut ps, r.clone(), init, &layer_of)).transpose()?;
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
 
         let t_dec = t;
@@ -580,14 +611,14 @@ impl Seq2Seq {
             enc_ln_inv: st(ne),
             fwd_steps: LayerTape::default(),
             bwd_steps: LayerTape::default(),
-            streamed: None,
+            streamed,
             backward_pending: Cell::new(false),
             ce_grad_uni,
             gpu,
         };
         m.fwd_steps = m.forward_steps();
         m.bwd_steps = m.build_backward_steps();
-        m
+        Ok(m)
     }
 
     /// Upload one seq2seq batch. `src` feeds the encoder ([`Seq2SeqConfig::src_block_size`]
@@ -1006,12 +1037,7 @@ impl Seq2Seq {
             return Err("toyseq2seq: the layers already stream".into());
         }
         let n_enc = self.cfg.n_enc;
-        let layer_of = |name: &str| -> Option<u32> {
-            if let Some(rest) = name.strip_prefix("enc.blocks.") {
-                return rest.split('.').next()?.parse().ok();
-            }
-            Some(n_enc + name.strip_prefix("dec.blocks.")?.split('.').next()?.parse::<u32>().ok()?)
-        };
+        let layer_of = |name: &str| layer_of(n_enc, name);
         let stream = StreamedStore::convert(&self.gpu, &mut self.ps, cfg.clone(), &layer_of).map_err(|e| format!("toyseq2seq: {e}"))?;
         self.opt.invalidate();
         self.streamed = Some(stream);
@@ -1127,6 +1153,10 @@ impl model::Model for Seq2Seq {
 
     fn new(cfg: Seq2SeqConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {
         Seq2Seq::new(cfg, b, t, init)
+    }
+
+    fn new_resident(cfg: Seq2SeqConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, resident: &model::resident_ft::ResidentFtConfig) -> Result<Self, String> {
+        Seq2Seq::new_resident_on(Gpu::new(&optim::with_moment_kernels(PIPELINES)), cfg, b, t, init, resident)
     }
 
     fn init_weights(cfg: &Seq2SeqConfig, seed: u64) -> HashMap<String, Vec<f32>> {
