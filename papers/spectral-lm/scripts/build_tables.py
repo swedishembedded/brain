@@ -212,7 +212,8 @@ def spectrum(data):
     by = {(r["basis"], r["m"]): r for r in res["rows"]}
     rows = []
     for n in names:
-        rows.append([pretty[n]] + [f"{by[(n, m)]['energy']:.3f} / {by[(n, m)]['delta_nll']:.2f}" for m in widths])
+        # A change that rounds to zero is printed as 0.00, not -0.00.
+        rows.append([pretty[n]] + [f"{by[(n, m)]['energy']:.3f} / {by[(n, m)]['delta_nll'] + 0.0:.2f}".replace("-0.00", "0.00") for m in widths])
     return table(f"Qwen3-0.6B residual stream after layer {res['layer']} (width {res['residual_width']}), replaced by its projection "
                  f"onto $m$ directions of each basis (fitted on {num(res['fit_positions'])} positions of training stories): fraction "
                  f"of centred energy kept / increase in validation next-token loss in nats ({num(res['tokens'])} tokens of "
