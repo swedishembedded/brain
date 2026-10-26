@@ -150,6 +150,17 @@ segments and replayed before its adjoint (`Builder::set_activations`,
 `Builder::segment`), bit for bit. Its reverse also holds activation gradients
 only for the live frontier of the walk, whatever the policy.
 
+A trainer that keeps its own per-block caches (the host DiT trainers of wan,
+flux2, ltxv and minimaxh3, chronos2's and fincast's cores, the CosyVoice speech
+LM, and minimaxmusic3's device DiT, vocoder and depth decoder) records its stack
+as a `model::saved::BlockStack`: under `Recompute` it holds every block's input
+and what a block's rebuild reads, and rebuilds each block's cache with its own
+block forward as the backward reaches it, one cache alive at a time
+(`check_block_recompute` is the per-trainer contract). The fine-tunes carry it
+as `TrainOpts::saved`; `brain wan finetune` and `brain flux2 finetune` take
+`--activations keep|recompute`. qwen3vl's caption fine-tune trains the Qwen3
+decoder, which always recomputes.
+
 A built model only narrows what it keeps.
 
 The memory planner decides the optimizer-state format before anything loads

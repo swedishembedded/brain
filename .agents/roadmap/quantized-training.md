@@ -164,7 +164,9 @@ The per-cell matrix and its tests are `docs/reference/training-capabilities.md`.
   live frontier only (8 resnet blocks allocate what 2 do); florence2 shares one set of BART layer
   intermediates per tower, sam2 its two-way layers', sam1 its ViT blocks'; nemotronasr and s3dit accept the recompute they always do
   (`saved::recompute_only`); toyautoencoder shares its pre-activation. ltxv's and minimaxmusic3's
-  `Model` impls have no backward (their training runs outside the trait).
+  `Model` impls have no backward; their trainers, and every other trainer that keeps its own block
+  caches (wan, flux2, minimaxh3, chronos2, fincast, cosyvoice), record their stacks as
+  `model::saved::BlockStack` and recompute under the same policy (`check_block_recompute`).
 - D Memory: `model::saved` saved-activation policy (keep, recompute, bf16/fp8 boundaries)
   priced in memplan and wired into qwen3 and qwen35 LoRA training (a4a1242bc); flash attention
   backward without `[H,T,T]` probabilities for qwen35moe (fc6df1080) and flux2, including the
