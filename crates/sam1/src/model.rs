@@ -74,6 +74,7 @@ use std::collections::{HashMap, HashSet};
 use gpu_core::provider::library::{BatchedProduct, GemmPrecision, LibraryGemmProvider, Operand};
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::block::{self, CrossBwdIds, CrossIds, LayerNormIds};
+use model::saved::SavedPolicy;
 use model::vit::{
     scatter_rows, window_partition, window_reverse, RelPos, RelPosAxis, RelPosBwd, RelPosIds, RelPosTableIds,
     VitPermuteIds, WindowIndex, WindowPlan,
@@ -287,6 +288,31 @@ struct BlockBwd {
     d_x: DeviceBuffer,
 }
 
+impl BlockBwd {
+    /// Point every temporary but `d_x` at `donor`'s. `d_x` is the next block's upstream gradient, so it cannot be
+    /// shared with a block whose backward runs adjacent to this one.
+    fn share_temporaries(&mut self, donor: &BlockBwd) {
+        self.d_rel_h = donor.d_rel_h.clone();
+        self.d_rel_w = donor.d_rel_w.clone();
+        self.d_rh = donor.d_rh.clone();
+        self.d_rw = donor.d_rw.clone();
+        self.tbl_scratch = donor.tbl_scratch.clone();
+        self.d_scores = donor.d_scores.clone();
+        self.d_res = donor.d_res.clone();
+        self.d_ln = donor.d_ln.clone();
+        self.tmp = donor.tmp.clone();
+        self.d_h = donor.d_h.clone();
+        self.d_h2 = donor.d_h2.clone();
+        self.d_proj = donor.d_proj.clone();
+        self.d_ctx = donor.d_ctx.clone();
+        self.d_qkv = donor.d_qkv.clone();
+        self.d_wm = donor.d_wm.clone();
+        self.d_ln1 = donor.d_ln1.clone();
+        self.mean = donor.mean.clone();
+        self.inv = donor.inv.clone();
+    }
+}
+
 /// One block's geometry, relative-position machinery and SSA activation cache.
 ///
 /// Every buffer is allocated once and reused by every forward: a gradient check
@@ -450,6 +476,38 @@ impl Block {
     /// The backward scratch, or a panic naming the build that lacks it.
     fn bwd(&self) -> &BlockBwd {
         self.bwd.as_ref().expect("sam1: this is an inference build (train = false); it has no backward scratch")
+    }
+
+    /// Whether `other` has this block's buffer shapes (windowed blocks share one, global blocks another).
+    fn same_geometry(&self, other: &Block) -> bool {
+        (self.attn_rows, self.qh, self.qw, self.win.is_some()) == (other.attn_rows, other.qh, other.qw, other.win.is_some())
+    }
+
+    /// Point every intermediate the backward reads, and every backward temporary but the input gradient `d_x`,
+    /// at `donor`'s buffers, releasing this block's own. Only the output `out` stays the block's. The shared
+    /// buffers hold whichever block last ran, so the backward rebuilds this block's before reading them
+    /// ([`SamEncoder::block_fwd`]).
+    fn share_intermediates(&mut self, donor: &Block) {
+        assert!(self.same_geometry(donor), "sam1: block {} cannot share buffers with block {} of a different geometry", self.l, donor.l);
+        self.ln1 = donor.ln1.clone();
+        self.wm = donor.wm.clone();
+        self.qkv = donor.qkv.clone();
+        self.ctx = donor.ctx.clone();
+        self.scores = donor.scores.clone();
+        self.probs = donor.probs.clone();
+        self.kt = donor.kt.clone();
+        self.proj = donor.proj.clone();
+        self.attn_out = donor.attn_out.clone();
+        self.res = donor.res.clone();
+        self.ln2 = donor.ln2.clone();
+        self.h = donor.h.clone();
+        self.h2 = donor.h2.clone();
+        self.mlp_out = donor.mlp_out.clone();
+        self.rel_h = donor.rel_h.clone();
+        self.rel_w = donor.rel_w.clone();
+        if let (Some(mine), Some(theirs)) = (&mut self.bwd, &donor.bwd) {
+            mine.share_temporaries(theirs);
+        }
     }
 
     fn p(&self, leaf: &str) -> String {
@@ -756,6 +814,8 @@ pub struct SamEncoder {
     dir: Vec<f32>,
     d_out: DeviceBuffer,
     fwd_done: Cell<bool>,
+    /// What the backward keeps of the forward ([`SamEncoder::set_saved_policy`]).
+    saved: SavedPolicy,
     /// Tower-level backward scratch -- `None` for an inference build.
     bwd: Option<SamBwd>,
     /// The tensor-core GEMM the inference build's linears run on, when the device has one. `None` for the
@@ -896,6 +956,7 @@ impl SamEncoder {
             bwd,
             dir,
             fwd_done: Cell::new(false),
+            saved: SavedPolicy::Keep,
             gpu,
             cfg,
             ps,
@@ -946,6 +1007,39 @@ impl SamEncoder {
     pub fn with_dense_init(gpu: Gpu, cfg: SamViTConfig, seed: u64) -> SamEncoder {
         let init = crate::init::init_dense(&cfg, seed);
         SamEncoder::new(gpu, cfg, &init, seed)
+    }
+
+    /// Keep what `policy` names of the forward: every block's intermediates ([`SavedPolicy::Keep`]), or only each
+    /// block's output, the block rebuilt from its input before its backward ([`SavedPolicy::Recompute`]). The
+    /// rebuilt values are the forward's, bit for bit (same kernels, same inputs). Blocks of one geometry share one
+    /// set of intermediates and backward temporaries, and the blocks' input gradients alternate between two
+    /// buffers. Under `Recompute` the per-block taps ([`Self::block_norm1`], [`Self::block_attn_res`]) hold the
+    /// values of whichever block ran last. The tower has no residual stream to narrow, so a narrow saved format is
+    /// refused by name, as is going back to keeping everything.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        if let SavedPolicy::Quantized(format) = policy {
+            return Err(format!("sam1 recomputes its blocks from their f32 inputs; {format:?} saved boundaries do not apply"));
+        }
+        if !self.saved.narrows_to(policy) {
+            return Err(format!("sam1: a tower keeping {:?} cannot go back to {policy:?}", self.saved));
+        }
+        if policy.recomputes() && !self.saved.recomputes() {
+            for i in 1..self.blocks.len() {
+                let (earlier, rest) = self.blocks.split_at_mut(i);
+                if let Some(donor) = earlier.iter().find(|d| d.same_geometry(&rest[0])) {
+                    rest[0].share_intermediates(donor);
+                }
+            }
+            for i in 2..self.blocks.len() {
+                let pair_x = self.blocks[i % 2].bwd.as_ref().map(|b| b.d_x.clone());
+                if let (Some(x), Some(bwd)) = (pair_x, self.blocks[i].bwd.as_mut()) {
+                    bwd.d_x = x;
+                }
+            }
+            self.fwd_done.set(false);
+        }
+        self.saved = policy;
+        Ok(())
     }
 
     /// Whether this build can run [`Self::backward`] (i.e. was built with
@@ -1236,6 +1330,9 @@ impl SamEncoder {
                 }
                 _ => downstream,
             };
+            if self.saved.recomputes() {
+                self.block_fwd(&self.blocks[i], x);
+            }
             self.block_bwd(&self.blocks[i], x, d_out);
         }
 
