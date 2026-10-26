@@ -779,12 +779,19 @@ impl Frozen {
                     args[0] = uniforms[*u].device_ptr();
                 }
                 let (gx, gy) = backend_api::grid_ws(s.threads, s.per_block);
-                // SAFETY: `s.func` was resolved from `s.compiled`'s module, which
-                // this program keeps loaded, and `args` is the argument list that
-                // module's entry point takes. The compiled kernel's own shape
-                // (dynamic shared memory, cluster) is part of the launch: dropping it
-                // runs a kernel that needs more than the static allotment with none.
-                unsafe { ctx.launch_shaped(s.func, (gx, gy, 1), (s.compiled.block_dim, 1, 1), &s.compiled.shape, &args)? };
+                if let Some(gemm) = &s.library {
+                    // A vendor-library product is recorded under a placeholder kernel that must never run: the
+                    // library enqueues its own kernels on the capture stream, from the product's operands
+                    // (`A`, `B`, `C` are the placeholder's first three arguments, see `Resolved::library`).
+                    ctx.library_gemm(gemm, args[0], args[1], args[2])?;
+                } else {
+                    // SAFETY: `s.func` was resolved from `s.compiled`'s module, which
+                    // this program keeps loaded, and `args` is the argument list that
+                    // module's entry point takes. The compiled kernel's own shape
+                    // (dynamic shared memory, cluster) is part of the launch: dropping it
+                    // runs a kernel that needs more than the static allotment with none.
+                    unsafe { ctx.launch_shaped(s.func, (gx, gy, 1), (s.compiled.block_dim, 1, 1), &s.compiled.shape, &args)? };
+                }
                 touched.extend(s.uses().map(|(m, w)| (m.clone(), w)));
                 modules.push(s.compiled.clone());
                 dispatches += 1;

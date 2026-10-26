@@ -581,6 +581,60 @@ fn a_submission_holding_a_library_product_is_captured_and_replayed() {
     }
 }
 
+/// A recorded program that holds a vendor-library product freezes into a graph that runs the library's kernels, not
+/// the placeholder the product is recorded under: every launch adds the product again.
+#[test]
+fn a_frozen_program_holding_a_library_product_runs_the_product() {
+    use backend_api::Backend;
+    let Some(b) = backend() else { return };
+    if let Some(why) = b.library_gemm_unavailable() {
+        brain_testutil::skip_unavailable(&format!("no library GEMM: {why}"));
+        return;
+    }
+    const LAUNCHES: usize = 3;
+    const D: usize = 32;
+    let a_host: Vec<f32> = (0..D * D).map(|i| ((i * 7 % 13) as f32 - 6.0) * 0.25).collect();
+    let b_host: Vec<f32> = (0..D * D).map(|i| ((i * 5 % 11) as f32 - 5.0) * 0.5).collect();
+    let (a, bb) = (b.storage_init("a", &a_host), b.storage_init("b", &b_host));
+    let (c, out) = (b.storage((D * D) as u64), b.storage((D * D) as u64));
+    let gemm = backend_api::LibraryGemm {
+        trans_a: false,
+        trans_b: false,
+        m: D as u32,
+        n: D as u32,
+        k: D as u32,
+        lda: D as u32,
+        ldb: D as u32,
+        ldc: D as u32,
+        a: backend_api::LibraryDtype::F32,
+        b: backend_api::LibraryDtype::F32,
+        c: backend_api::LibraryDtype::F32,
+        alpha: 1.0,
+        beta: 0.0,
+        batch: 1,
+        stride_a: 0,
+        stride_b: 0,
+        stride_c: 0,
+        tf32: false,
+    };
+    let product = b.step_library_gemm(&gemm, &[&a, &bb, &c], &[(0, 0); 3]).expect("the library product is offered");
+    let accumulate = b.step(AXPY, &[&out, &c], &[(D * D) as u32, 1.0f32.to_bits()], (D * D) as u32);
+    let steps = [product, accumulate];
+    let program = b.freeze(&[(Vec::new(), &steps[..])]).expect("a CUDA backend with graphs freezes a program");
+    for _ in 0..LAUNCHES {
+        assert!(b.launch_program(&program), "the frozen program launches");
+    }
+    b.poll_wait();
+    let got = b.read(&out, D * D);
+    for j in 0..D {
+        for i in 0..D {
+            let truth: f32 = (0..D).map(|l| a_host[i + l * D] * b_host[l + j * D]).sum();
+            let want = LAUNCHES as f32 * truth;
+            assert!((got[i + j * D] - want).abs() <= 1e-4 * want.abs().max(1.0), "C[{i},{j}]: got {}, want {want}", got[i + j * D]);
+        }
+    }
+}
+
 /// A large submission that is alternated with a small one (a decode step: the layer stack, then after a readback the
 /// one-node head) is captured and replayed although it never follows itself.
 #[test]
