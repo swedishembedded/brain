@@ -32,14 +32,3 @@ fn ouro_trains_with_narrow_optimizer_state() {
     };
     model::trainprec::check_optimizer_state_formats("ouro", build, step, lr).unwrap();
 }
-
-/// A layer window updates each layer as its backward completes; a layer that runs in every step of the recurrence has
-/// no complete gradient until the last, so the request is refused with that reason rather than trained another way.
-#[test]
-fn ouro_refuses_to_stream_its_layers_by_name() {
-    let cfg = OuroConfig::tiny();
-    let init = ouro::init::init_weights(&cfg, 3);
-    let mut m = Ouro::new_train(cfg, 2, 4, &init);
-    let err = model::apply_train_precision(&mut m, &model::TrainPrecision::parse("weights=f32,window=1").unwrap(), "ouro").unwrap_err();
-    assert!(err.contains("recurrence") && err.contains("moments=host"), "{err}");
-}

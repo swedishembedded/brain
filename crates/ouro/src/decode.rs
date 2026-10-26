@@ -74,6 +74,7 @@ pub struct Decode<'a> {
 impl<'a> Decode<'a> {
     /// A decode engine over `base`'s weights, with room for `cap` positions.
     pub fn new(base: &'a Ouro, cap: u32) -> Decode<'a> {
+        assert!(!base.is_streamed(), "ouro: a layer-streamed build holds a window of its layers; save it and load the checkpoint to decode");
         let cfg = &base.cfg;
         assert!(cap > 0);
         let gpu = &base.gpu;

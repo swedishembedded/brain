@@ -668,6 +668,9 @@ pub struct ResidentFullFt {
     /// Device bytes of the weights this build holds (every layer, or the window's slots).
     weight_bytes: u64,
     window: Option<WindowState>,
+    /// Per tensor, the gradient of the visits of its layer finished so far in the open pass, when the backward visits
+    /// a layer more than once ([`Self::carry_layer`]); `None` for a tensor with nothing carried.
+    carry: Vec<Option<Vec<f32>>>,
 }
 
 /// What a layer-streamed build holds besides the shared fields: the host copy of the stored values, the device slots
@@ -813,7 +816,8 @@ impl ResidentFullFt {
             }
         };
         gpu_core::profile::stage_time("resident build: read the base once, seed the master, encode and upload the weights", upload_clock);
-        Ok(ResidentFullFt { cfg, specs, descs, weights, grads, state, registry, norm, tile, times: HostTimes::default(), weight_bytes, window })
+        let carry = vec![None; specs.len()];
+        Ok(ResidentFullFt { cfg, specs, descs, weights, grads, state, registry, norm, tile, times: HostTimes::default(), weight_bytes, window, carry })
     }
 
     pub fn specs(&self) -> &[ResidentSpec] {
@@ -1028,6 +1032,56 @@ impl ResidentFullFt {
         if let Some(w) = &mut self.window {
             w.pass = Some(PassState { pass, tensor_sum: vec![None; n], updated: vec![false; n], running: 0.0, min_multiplier: f32::INFINITY, step });
         }
+        self.carry.iter_mut().for_each(|c| *c = None);
+    }
+
+    /// One visit of `layer`'s backward is complete but the pass visits the layer again (a recurrent-depth model runs
+    /// one layer in every step of its recurrence): add the visit's gradients to the layer's host carry, so the next
+    /// visit can reuse the lane. The layer is finished by [`Self::finish_carried`] once the backward is complete.
+    /// Carried gradients are f32.
+    pub fn carry_layer(&mut self, ops: &dyn DeviceIo, layer: usize) -> io::Result<()> {
+        if self.cfg.grad != GradDtype::F32 {
+            return Err(invalid(format!("carry_layer: a layer visited more than once carries f32 gradients, not {:?}", self.cfg.grad)));
+        }
+        let w = self.window.as_ref().ok_or_else(|| invalid("carry_layer: this build keeps every layer resident".into()))?;
+        let tensors = w.by_layer.get(&(layer as u32)).cloned().unwrap_or_default();
+        for ti in tensors {
+            let numel = self.specs[ti].n as usize * self.specs[ti].k as usize;
+            let visit = ops.read_range(&self.grads[ti], 0, numel);
+            match &mut self.carry[ti] {
+                Some(c) => c.iter_mut().zip(&visit).for_each(|(a, b)| *a += b),
+                slot @ None => *slot = Some(visit),
+            }
+        }
+        Ok(())
+    }
+
+    /// The backward of a pass that visits layers more than once is complete: finish every layer with carried
+    /// gradients, the last first, as [`Self::finish_layer`] would have once its gradient was complete. Each layer's
+    /// carry goes back into its lane, so the norm and the update are the ones a single-visit pass computes.
+    pub fn finish_carried(&mut self, ops: &dyn DeviceIo) -> io::Result<()> {
+        let w = self.window.as_mut().ok_or_else(|| invalid("finish_carried: this build keeps every layer resident".into()))?;
+        let mut pass = w.pass.take().ok_or_else(|| invalid("finish_carried: no pass is open (call begin_pass)".into()))?;
+        let layers: Vec<(u32, Vec<usize>)> = w.by_layer.iter().rev().map(|(l, t)| (*l, t.clone())).collect();
+        let mut result = Ok(());
+        for (_, tensors) in layers {
+            if !tensors.iter().any(|&ti| self.carry[ti].is_some()) {
+                continue;
+            }
+            for &ti in &tensors {
+                let numel = self.specs[ti].n as usize * self.specs[ti].k as usize;
+                let carried = self.carry[ti].take().unwrap_or_else(|| vec![0.0; numel]);
+                ops.gpu().write_f32(&self.grads[ti], &carried);
+            }
+            result = self.finish_layer_in(ops, &mut pass, &tensors);
+            if result.is_err() {
+                break;
+            }
+        }
+        if let Some(w) = &mut self.window {
+            w.pass = Some(pass);
+        }
+        result
     }
 
     /// Add `sum_sq`, the squared norm of gradients this state does not hold that are already complete (a trainer's
@@ -1313,6 +1367,12 @@ pub enum LayerEvent {
     BeforeBackward(usize),
     /// The backward of `layer` has been submitted: its gradients are complete.
     AfterBackward(usize),
+    /// One visit of `layer`'s backward has been submitted and the pass visits it again: carry its gradients
+    /// ([`ResidentFullFt::carry_layer`]).
+    AfterVisit(usize),
+    /// The backward of a pass that visits layers more than once is complete: finish them
+    /// ([`ResidentFullFt::finish_carried`]).
+    AfterVisits,
 }
 
 /// The part of a model the generic resident update drives: the parameters outside the resident state (the norms, and
@@ -1401,6 +1461,8 @@ pub fn adamw_step(host: &dyn ResidentBackward, ft: &RefCell<ResidentFullFt>, ops
                 }
                 LayerEvent::BeforeBackward(layer) => ft.borrow_mut().begin_layer_backward(ops, layer),
                 LayerEvent::AfterBackward(layer) => ft.borrow_mut().finish_layer(ops, layer),
+                LayerEvent::AfterVisit(layer) => ft.borrow_mut().carry_layer(ops, layer),
+                LayerEvent::AfterVisits => ft.borrow_mut().finish_carried(ops),
             }
         })?;
         ft.borrow_mut().end_pass()

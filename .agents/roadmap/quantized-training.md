@@ -138,7 +138,8 @@ The per-cell matrix and its tests are `docs/reference/training-capabilities.md`.
   the shared `resident_ft::adamw_step`), `Model::set_resident` from `apply_train_precision`. Specs:
   `streamed::check_layer_streaming`, `trainprec::check_exact_resume`. gpt2, spectrallm, deepseek2 and glmdsa (their
   `PassSeg` passes through `streamed::LayeredPass`) and qwen35moe (eager: its passes report the edges) and lfm2 adopt it.
-  ouro and huginn refuse a window by name (each layer runs in every step of the recurrence). Open: horizon;
+  ouro streams by carrying each layer's gradient between its visits (`LayeredPass::revisits`); huginn refuses a
+  window by name. Open: horizon, huginn;
   Construction-time streaming (`Role::Streamed`, `StreamedStore::attach`, `Model::new_resident`,
   `check_streamed_construction`): gpt2, lfm2, spectrallm, deepseek2, glmdsa, qwen35moe. Open: horizon.
 - D Memory: `model::saved` saved-activation policy (keep, recompute, bf16/fp8 boundaries)

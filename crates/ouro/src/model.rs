@@ -30,6 +30,8 @@ use std::cell::{Cell, RefCell};
 use gpu_core::{BufUsage, DeviceBuffer, Gpu, Step};
 use model::block::{self, Gqa, KernelIds};
 use model::saved::{Residuals, SavedFormat, SavedPolicy};
+use model::streamed::{RevisitingTape, StreamedStore};
+use model::tape::LayerTape;
 use paramstore::ParamStore;
 
 use crate::config::OuroConfig;
@@ -145,6 +147,10 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("unpack_bf16", kernels::UNPACK_BF16),
     ("pack_fp8_rows", kernels::PACK_FP8_ROWS),
     ("unpack_fp8_rows", kernels::UNPACK_FP8_ROWS),
+    // A layer-streamed full fine-tune's device side (`model::ops::store_device_kernels`), resolved by name.
+    ("copy_cols", kernels::COPY_COLS),
+    ("gradnorm_part", kernels::GRADNORM_PART),
+    ("gradnorm_part_bf16", kernels::GRADNORM_PART_BF16),
 ];
 
 pub(crate) fn decode_batched_ids() -> block::GqaDecodeBatchedIds {
@@ -274,13 +280,19 @@ pub struct Ouro {
     scratch: Scratch,
     grad: Option<Grad>,
     /// Trunk: embed once, then every pass of the shared stack plus its gate.
-    trunk: Vec<Step>,
+    trunk: LayerTape,
     /// One LM-head matmul per pass.
     heads: Vec<Vec<Step>>,
     /// Training forward: trunk + every pass's head + its CE rows.
-    fwd_steps: Vec<Step>,
+    fwd_steps: LayerTape,
     /// Training backward: weighted head gradients, then the stack in reverse.
-    bwd_steps: Vec<Step>,
+    bwd_steps: LayerTape,
+    /// The per-layer tensors held in a device window of layers, when the run streams them
+    /// ([`model::Model::set_resident`]); `None` keeps every layer in the store. Each layer runs once in every pass, so
+    /// its gradient is carried between its visits and it is updated once the backward is complete.
+    streamed: Option<StreamedStore>,
+    /// A streamed build runs its backward inside the update: set by `backward`, taken by `adamw_step`.
+    backward_pending: Cell<bool>,
     /// Runtime CE-gradient uniform (`[rows, vocab, ignore, count]`).
     ce_grad_uniform: DeviceBuffer,
     opt: Option<optim::Optim>,
@@ -405,10 +417,12 @@ impl Ouro {
             ce_rows,
             scratch,
             grad,
-            trunk: Vec::new(),
+            trunk: LayerTape::default(),
             heads: Vec::new(),
-            fwd_steps: Vec::new(),
-            bwd_steps: Vec::new(),
+            fwd_steps: LayerTape::default(),
+            bwd_steps: LayerTape::default(),
+            streamed: None,
+            backward_pending: Cell::new(false),
             ce_grad_uniform,
             opt,
             exit: Cell::new(vec![0; b as usize]),
@@ -499,16 +513,18 @@ impl Ouro {
     /// The trunk: embed once, then `T` passes of the shared stack, each ending
     /// in the final norm and the exit gate. The embedding is applied exactly
     /// once - pass `p` consumes the previous pass's state, never `embed(x)`.
-    fn trunk_steps(&self) -> Vec<Step> {
+    fn trunk_steps(&self) -> LayerTape {
         let cfg = &self.cfg;
         let ids = self.k();
         let n = self.rows();
         let d = cfg.d_model;
         let t = cfg.total_ut_steps;
 
+        let mut tape = LayerTape::default();
         let mut steps = vec![self.gpu.step(EMBED, &[&self.tokens, self.ps.w("tok.weight"), &self.res[0]], &[d, n], n * d)];
         self.res.round_trip(&self.gpu, &mut steps, 0);
         for p in 0..t as usize {
+            tape.segment(&mut steps, None);
             for l in 0..cfg.n_layers as usize {
                 let i = p * cfg.n_layers as usize + l;
                 // The reference reassigns `hidden_states = norm(hidden_states)`
@@ -517,6 +533,7 @@ impl Ouro {
                 let h_in: &DeviceBuffer = if l == 0 && p > 0 { &self.hs[p - 1] } else { &self.res[i] };
                 self.layer_steps_into(&mut steps, l, h_in, &self.res[i + 1], None);
                 self.res.round_trip(&self.gpu, &mut steps, i + 1);
+                tape.segment(&mut steps, Some(l));
             }
             let last = &self.res[(p + 1) * cfg.n_layers as usize];
             steps.push(block::rmsnorm_fwd(&self.gpu, &ids, last, self.ps.w("norm.weight"), &self.hs[p], d, n, cfg.norm_eps));
@@ -524,7 +541,8 @@ impl Ouro {
             steps.push(self.gpu.step(MATMUL, &[&self.hs[p], self.ps.w("gate.weight"), &self.gates[p]], &[n, d, 1], n));
             steps.push(self.gpu.step(BIAS_ADD, &[&self.gates[p], self.ps.w("gate.bias")], &[n, 1], n));
         }
-        steps
+        tape.segment(&mut steps, None);
+        tape
     }
 
     fn head_steps(&self, pass: usize) -> Vec<Step> {
@@ -534,15 +552,17 @@ impl Ouro {
         vec![self.gpu.step(MATMUL, &[&self.hs[pass], self.ps.w("lm_head.weight"), out], &[n, d, v], n * v)]
     }
 
-    fn training_forward_steps(&self) -> Vec<Step> {
+    fn training_forward_steps(&self) -> LayerTape {
         let n = self.rows();
         let v = self.cfg.vocab;
-        let mut steps = self.trunk.clone();
+        let mut tape = self.trunk_steps();
+        let mut steps = Vec::new();
         for p in 0..self.cfg.total_ut_steps as usize {
             steps.extend(self.heads[p].iter().cloned());
             steps.push(self.gpu.step(CE_VALUE, &[&self.logits[p], &self.targets, &self.ce_rows[p]], &[n, v, IGNORE], n));
         }
-        steps
+        tape.segment(&mut steps, None);
+        tape
     }
 
     /// The backward graph. Pass 1 of every layer's gradient is the update of
@@ -550,7 +570,7 @@ impl Ouro {
     /// uses" accumulation, and the kernels that write a parameter gradient
     /// (`matmul_dw`, `rmsnorm_dw`, `emb_bwd`, `matmul_dx` with `acc=1`) add
     /// into the buffer the trainer zeroed once per step.
-    fn training_backward_steps(&self) -> Vec<Step> {
+    fn training_backward_steps(&self) -> LayerTape {
         let cfg = &self.cfg;
         let ids = self.k();
         let n = self.rows();
@@ -559,6 +579,7 @@ impl Ouro {
         let t = cfg.total_ut_steps as usize;
         let l_count = cfg.n_layers as usize;
         let g = self.grad.as_ref().expect("training graph on an inference build");
+        let mut tape = LayerTape::default();
         let mut steps = Vec::new();
 
         // Head phase, every pass. The CE gradient is divided by the supervised
@@ -596,13 +617,16 @@ impl Ouro {
                     self.res.restore(&self.gpu, &mut steps, i);
                 }
                 // Rebuild the layer's internals from its boundary residual.
+                tape.segment(&mut steps, None);
                 self.layer_steps_into(&mut steps, l, h_in, &self.res[i + 1], None);
                 self.layer_bwd_into(&mut steps, l, h_in, &g.dres[i + 1], if l == 0 && p > 0 { &g.dhs[p - 1] } else { &g.dres[i] }, l == 0 && p > 0);
+                tape.segment(&mut steps, Some(l));
             }
         }
 
         steps.push(self.gpu.step(EMB_BWD, &[&self.tokens, &g.dres[0], self.ps.g("tok.weight")], &[n, d, v], v * d));
-        steps
+        tape.segment(&mut steps, None);
+        tape
     }
 
     /// One layer's backward. `d_h_out` is the gradient of the layer's output;
@@ -656,7 +680,24 @@ impl Ouro {
 
     /// Run the trunk only (all passes and gates).
     pub fn trunk_forward(&self) {
-        self.gpu.submit(&[], &self.trunk);
+        self.submit_forward(&self.trunk);
+    }
+
+    /// Submit a forward tape; a layer-streamed build loads each layer into its window slot at every visit.
+    fn submit_forward(&self, tape: &LayerTape) {
+        match &self.streamed {
+            Some(stream) => stream.forward(&self.gpu, tape).unwrap_or_else(|e| panic!("ouro layer-streamed forward: {e}")),
+            None => tape.submit(&self.gpu),
+        }
+    }
+
+    /// Whether the layers stream through a device window (incremental decode then reads layers it does not hold).
+    pub(crate) fn is_streamed(&self) -> bool {
+        self.streamed.is_some()
+    }
+
+    fn holds_streamed(&self, name: &str) -> bool {
+        self.streamed.as_ref().is_some_and(|s| s.holds(name))
     }
 
     /// Run the trunk, then the LM head for pass `pass`.
@@ -762,6 +803,20 @@ impl Ouro {
     }
 }
 
+impl model::OffDeviceState for Ouro {
+    fn commit(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
+        let stream = self.streamed.as_ref().ok_or_else(|| std::io::Error::other("ouro: no streamed state to commit"))?;
+        self.gpu.flush();
+        stream.commit(&self.gpu, dir, step)
+    }
+
+    fn restore(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
+        let stream = self.streamed.as_ref().ok_or_else(|| std::io::Error::other("ouro: no streamed state to restore"))?;
+        self.gpu.flush();
+        stream.restore(&self.gpu, dir, step)
+    }
+}
+
 impl model::Model for Ouro {
     fn optimizer_state(&mut self) -> Option<model::OptimizerState<'_>> {
         Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: self.opt.as_ref()? })
@@ -774,9 +829,26 @@ impl model::Model for Ouro {
     /// Ouro keeps only the residual between the layers of every pass and rebuilds each layer before its backward (one
     /// scratch set serves every layer of every pass): it runs recompute, with the residuals in f32 or, once narrowed,
     /// in bf16 or FP8 ([`Residuals`]; each pass's normed output stays f32). Keeping every layer is refused by name.
-    /// The layers of a recurrent-depth model cannot stream through a window: refused by name with the reason.
-    fn set_resident(&mut self, _cfg: &model::resident_ft::ResidentFtConfig) -> Result<(), String> {
-        Err("ouro: every layer runs once in each of the passes of the recurrence, so a layer's gradient is complete only after the last; its layers cannot stream through a window that updates each layer as its backward completes; moments=host keeps its optimizer state off the device instead".into())
+    /// Stream every per-layer tensor through a device window under `cfg` (see [`model::streamed`]): each layer runs
+    /// once in every pass, so each visit loads it, its gradient is carried on the host between visits, and it is
+    /// updated once the backward is complete. The embedding, the head, the final norm and the exit gate stay in the
+    /// store under its own optimizer.
+    fn set_resident(&mut self, cfg: &model::resident_ft::ResidentFtConfig) -> Result<(), String> {
+        if !self.train {
+            return Err("ouro: an inference build has nothing to stream".into());
+        }
+        if self.streamed.is_some() {
+            return Err("ouro: the layers already stream".into());
+        }
+        let stream = StreamedStore::convert(&self.gpu, &mut self.ps, cfg.clone(), &model::streamed::blocks_layer).map_err(|e| format!("ouro: {e}"))?;
+        self.opt.as_ref().expect("a training build has an optimizer").invalidate();
+        self.streamed = Some(stream);
+        // The recorded passes bound the store's buffers as they were: record them again over the window's slots.
+        self.trunk = self.trunk_steps();
+        self.heads = (0..self.cfg.total_ut_steps).map(|p| self.head_steps(p as usize)).collect();
+        self.fwd_steps = self.training_forward_steps();
+        self.bwd_steps = self.training_backward_steps();
+        Ok(())
     }
 
     fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
@@ -826,7 +898,7 @@ impl model::Model for Ouro {
     /// exit probability, summed over passes, averaged over supervised rows.
     fn forward(&self) -> f32 {
         assert!(self.train, "forward on an inference-only build has no objective; read pass logits instead");
-        self.gpu.submit(&[], &self.fwd_steps);
+        self.submit_forward(&self.fwd_steps);
         let probs = self.exit_probabilities();
         for (p, row) in probs.iter().enumerate() {
             self.gpu.write_f32(&self.grad.as_ref().unwrap().exit_scale[p], row);
@@ -890,7 +962,13 @@ impl model::Model for Ouro {
         for (p, row) in dgate.iter().enumerate() {
             self.gpu.write_f32(&grad.gate_grad[p], row);
         }
-        self.gpu.submit(&[], &self.bwd_steps);
+        if self.streamed.as_ref().is_some_and(StreamedStore::is_layer_streamed) {
+            // The weights of a layer-streamed build are not all on the device: the backward runs layer by layer in
+            // `adamw_step`, where the layers it loads are the ones it updates.
+            assert!(!self.backward_pending.replace(true), "ouro layer-streamed full fine-tune: a second backward before the update (gradient accumulation) is not supported; every micro-batch is its own step");
+            return;
+        }
+        self.bwd_steps.submit(&self.gpu);
     }
 
     fn zero_grads(&self) {
@@ -898,7 +976,17 @@ impl model::Model for Ouro {
     }
 
     fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
-        self.opt.as_ref().expect("adamw_step on an inference-only build").step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale);
+        let opt = self.opt.as_ref().expect("adamw_step on an inference-only build");
+        match &self.streamed {
+            Some(stream) => {
+                if stream.is_layer_streamed() {
+                    assert!(self.backward_pending.replace(false), "ouro layer-streamed full fine-tune: adamw_step without a backward");
+                }
+                let args = model::resident_ft::StepArgs { step: t, lr, wd, adam, clip, extra_scale };
+                stream.adamw_step(&self.gpu, &self.ps, opt, &RevisitingTape(&self.bwd_steps), &args).unwrap_or_else(|e| panic!("ouro layer-streamed update: {e}"));
+            }
+            None => opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale),
+        }
     }
 
     fn poll_wait(&self) {
@@ -910,15 +998,26 @@ impl model::Model for Ouro {
     }
 
     fn read_weight(&self, name: &str) -> Vec<f32> {
-        self.ps.read_weight(&self.gpu, name)
+        match &self.streamed {
+            Some(stream) if stream.holds(name) => stream.read_weight(&self.gpu, name).unwrap_or_else(|e| panic!("ouro: reading {name}: {e}")),
+            _ => self.ps.read_weight(&self.gpu, name),
+        }
     }
 
     fn write_weight(&self, name: &str, data: &[f32]) {
-        self.gpu.write_f32(self.ps.w(name), data);
+        match &self.streamed {
+            Some(stream) if stream.holds(name) => stream.write_weight(&self.gpu, name, data).unwrap_or_else(|e| panic!("ouro: writing {name}: {e}")),
+            _ => self.gpu.write_f32(self.ps.w(name), data),
+        }
     }
 
     fn read_grad(&self, name: &str) -> Vec<f32> {
+        assert!(!self.holds_streamed(name), "ouro: {name} streams through a layer window; no gradient outlives its layer");
         self.ps.read_grad(&self.gpu, name)
+    }
+
+    fn off_device_state(&self) -> Option<&dyn model::OffDeviceState> {
+        self.streamed.as_ref().map(|_| self as &dyn model::OffDeviceState)
     }
 
     fn logits_all(&self, tokens: &[u32]) -> Option<Vec<f32>> {

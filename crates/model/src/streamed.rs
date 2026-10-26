@@ -40,11 +40,32 @@ pub trait LayeredPass {
     /// Submit the pass in order, reporting [`TapeEdge::Before`] and [`TapeEdge::After`] around each layer's part
     /// (edges with no layer may be reported too and are ignored).
     fn submit_hooked(&self, gpu: &Gpu, edge: &mut dyn FnMut(TapeEdge));
+
+    /// Whether the backward visits a layer more than once (a recurrent-depth model runs one layer in every step of
+    /// its recurrence): its gradients are then carried between visits and the layers finished once the backward is
+    /// complete, instead of each as its single visit ends.
+    fn revisits(&self) -> bool {
+        false
+    }
 }
 
 impl LayeredPass for LayerTape {
     fn submit_hooked(&self, gpu: &Gpu, edge: &mut dyn FnMut(TapeEdge)) {
         LayerTape::submit_hooked(self, gpu, edge);
+    }
+}
+
+/// A [`LayerTape`] whose backward visits a layer more than once ([`LayeredPass::revisits`]): a recurrent-depth model
+/// running one layer in every step of its recurrence.
+pub struct RevisitingTape<'a>(pub &'a LayerTape);
+
+impl LayeredPass for RevisitingTape<'_> {
+    fn submit_hooked(&self, gpu: &Gpu, edge: &mut dyn FnMut(TapeEdge)) {
+        self.0.submit_hooked(gpu, edge);
+    }
+
+    fn revisits(&self) -> bool {
+        true
     }
 }
 
@@ -180,6 +201,7 @@ impl StreamedStore {
     pub fn backward_events(&self, gpu: &Gpu, pass: &dyn LayeredPass, on: &mut dyn FnMut(LayerEvent) -> io::Result<()>) -> io::Result<()> {
         let mut failed: Option<io::Error> = None;
         let mut head_done = false;
+        let revisits = pass.revisits();
         let mut report = |event: LayerEvent, failed: &mut Option<io::Error>| {
             if failed.is_none() {
                 *failed = on(event).err();
@@ -192,11 +214,15 @@ impl StreamedStore {
                 }
                 report(LayerEvent::BeforeBackward(layer), &mut failed);
             }
+            TapeEdge::After { layer: Some(layer), .. } if revisits => report(LayerEvent::AfterVisit(layer), &mut failed),
             TapeEdge::After { layer: Some(layer), .. } => report(LayerEvent::AfterBackward(layer), &mut failed),
             _ => {}
         });
         if !head_done {
             report(LayerEvent::AfterHead, &mut failed);
+        }
+        if revisits {
+            report(LayerEvent::AfterVisits, &mut failed);
         }
         failed.map_or(Ok(()), Err)
     }
