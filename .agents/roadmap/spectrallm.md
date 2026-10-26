@@ -43,9 +43,20 @@ why the scope is what it is.
 | Gradient checks (both mixers, both transforms, tied embedding elementwise), CPU == GPU incl. the flash path, Qwen3 parity of the SwiGLU control, decode == forward, fixed-batch memorization | done |
 | TinyStories + 4096-token byte-level BPE (`brain data gen tinystories`), bits-per-byte scorer (`model::score`) | done |
 | `samples/text/spectral-lm` (train, eval, generate, cost, profile, Qwen3 eval/corpus/train/spectrum) and the paper's driver (`papers/spectral-lm/scripts/run.py`) | done |
-| Learning-rate selection, primary comparison (3 seeds), pilots | open |
-| Qwen3-0.6B: zero-shot BPB, fine-tuned BPB, residual-stream spectrum study | open |
-| Transform cost table (dense vs FFT mixer) for the paper | open |
+| Learning-rate selection, primary comparison (3 seeds), pilots | done |
+| Qwen3-0.6B: zero-shot BPB, fine-tuned BPB, residual-stream spectrum study | done |
+| Transform cost table (dense vs FFT mixer) for the paper | done |
+| Paper (`papers/spectral-lm`, `status.txt` final) | done |
+
+## Outcome
+
+Every registered measurement has its record under `papers/spectral-lm/data/`
+and the paper states the results; the numbers live there, not here. In one
+line: the spectral mixer is non-inferior to a SwiGLU with its parameter count
+and clearly worse than one with its arithmetic, trains at half the speed with
+several times the memory, the FFT path beats the dense basis product at four
+of five shapes by a small factor, and a pretrained model's lowest Fourier
+modes are about as uninformative as random directions.
 
 ## Measured while building
 
