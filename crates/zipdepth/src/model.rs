@@ -32,6 +32,7 @@
 
 use gpu_core::{DeviceBuffer, Gpu};
 use paramstore::ParamStore;
+use model::saved::SavedPolicy;
 use vision::blocks::{Act, Conv, ConvNames, ConvSpec, Norm};
 use vision::{Ctx, Shape, SppfSpec, NameStyle, SPPF};
 
@@ -91,6 +92,13 @@ impl Stage {
         self.mms.iter().for_each(|b| b.set_update_running(on));
         self.spa.iter().for_each(|b| b.set_update_running(on));
         self.gcb.iter().for_each(|b| b.set_update_running(on));
+    }
+    /// The stage's conv-carrying units recompute their intermediates in the backward. The attention tails whose
+    /// convs are raw with a BatchNorm of their own (`MinimalMultiScale`, `ChannelAttention`) have none to drop.
+    fn set_recompute(&self, on: bool) {
+        self.blocks.iter().for_each(|b| b.set_recompute(on));
+        self.spa.iter().for_each(|b| b.set_recompute(on));
+        self.gcb.iter().for_each(|b| b.set_recompute(on));
     }
     fn param_list(&self) -> Vec<(String, usize)> {
         let mut v = Vec::new();
@@ -215,6 +223,8 @@ pub struct ZipDepth {
     normed: DeviceBuffer,
     norm_tmp: DeviceBuffer,
     norm_ready: std::cell::Cell<bool>,
+    /// What the backward keeps of the forward ([`ZipDepth::set_saved_policy`]).
+    saved: std::cell::Cell<SavedPolicy>,
 
     // ---- encoder ----
     stem_half: Conv,
@@ -406,6 +416,7 @@ impl ZipDepth {
             normed: ctx.act(in_shape.numel()),
             norm_tmp: ctx.act(in_shape.numel()),
             norm_ready: std::cell::Cell::new(false),
+            saved: std::cell::Cell::new(SavedPolicy::Keep),
             d_fhalf_acc: ctx.act(fh.numel()),
             d_fhalf: ctx.act(fh.numel()),
             d_fhalf_head: ctx.act(fh.numel()),
@@ -474,6 +485,40 @@ impl ZipDepth {
         self.fuse1.set_eval(on);
         self.fuse_half.set_eval(on);
         self.convex_up.set_eval(on);
+    }
+
+    /// Keep what `policy` names of the forward: every normed unit's intermediates ([`SavedPolicy::Keep`]), or only
+    /// each unit's output, the post-conv and post-BatchNorm intermediates rebuilt from its input before its backward
+    /// ([`SavedPolicy::Recompute`], [`vision::blocks::Conv::set_recompute`]). A dense-prediction net has no
+    /// layer-boundary residual stream to hold narrow, so a narrow saved format is refused by name, as is going back to
+    /// keeping everything.
+    pub fn set_saved_policy(&self, policy: SavedPolicy) -> Result<(), String> {
+        if let SavedPolicy::Quantized(format) = policy {
+            return Err(format!("zipdepth recomputes its units' intermediates from their f32 inputs; {format:?} saved boundaries do not apply"));
+        }
+        if !self.saved.get().narrows_to(policy) {
+            return Err(format!("zipdepth: a net keeping {:?} cannot go back to {policy:?}", self.saved.get()));
+        }
+        if policy.recomputes() {
+            self.set_recompute(true);
+        }
+        self.saved.set(policy);
+        Ok(())
+    }
+
+    fn set_recompute(&self, on: bool) {
+        for c in [&self.stem_half, &self.stem_quarter, &self.proj4, &self.head_half] {
+            c.set_recompute(on);
+        }
+        self.stage1.set_recompute(on);
+        self.stage2.set_recompute(on);
+        self.stage3.set_recompute(on);
+        self.stage4.set_recompute(on);
+        self.down2.set_recompute(on);
+        self.down3.set_recompute(on);
+        self.down4.set_recompute(on);
+        self.spp.set_recompute(on);
+        self.convex_up.set_recompute(on);
     }
 
     pub fn set_update_running(&self, on: bool) {

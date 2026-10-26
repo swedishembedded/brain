@@ -143,8 +143,11 @@ The per-cell matrix and its tests are `docs/reference/training-capabilities.md`.
 - D Vision blocks (`vision::blocks`, every model on them: yolov8, arcface, bisenet, scrfd, zipdepth, ...): a conv
   unit's backward temporaries (the gradients wrt its BN input and its conv output) come from one per-role scratch
   of the call's `vision::Ctx`, so a model holds one pair sized by its largest unit instead of a pair per unit (two of
-  the five output-sized buffers each unit held). Open: recomputing `conv_out`/`bn_out` (replaying train-mode BN
-  with its saved batch statistics, no second running-stat update).
+  the five output-sized buffers each unit held). A normed unit's `conv_out`/`bn_out` are allocated on first use, and
+  `Conv::set_recompute` takes them from the scratch and replays the conv and `bn_train` (with the forward's batch
+  statistics, no second running-stat update) before the unit's backward: one of five buffers left per unit.
+  yolov8 (`set_saved_policy`) and zipdepth recompute this way. Open: arcface's raw-conv plus `vision::BatchNorm`
+  units, whose buffers are unit outputs, need recompute across a group of units.
   Construction-time streaming (`Role::Streamed`, `StreamedStore::attach`, `Model::new_resident`,
   `check_streamed_construction`): gpt2, lfm2, spectrallm, deepseek2, glmdsa, qwen35moe. Open: horizon.
 - D Memory: `model::saved` saved-activation policy (keep, recompute, bf16/fp8 boundaries)

@@ -156,6 +156,12 @@ impl QARepBlock {
         self.b3.set_update_running(on);
         self.b1.set_update_running(on);
     }
+    /// Recompute both branches' post-conv and post-BatchNorm intermediates in the backward
+    /// ([`Conv::set_recompute`]).
+    pub fn set_recompute(&self, on: bool) {
+        self.b3.set_recompute(on);
+        self.b1.set_recompute(on);
+    }
     pub fn param_list(&self) -> Vec<(String, usize)> {
         let mut v = self.b3.param_list();
         v.extend(self.b1.param_list());
@@ -631,6 +637,10 @@ impl StripPoolingAttention {
     pub fn set_update_running(&self, on: bool) {
         self.gate.set_update_running(on);
     }
+    /// Recompute the gate's post-conv and post-BatchNorm intermediates in the backward ([`Conv::set_recompute`]).
+    pub fn set_recompute(&self, on: bool) {
+        self.gate.set_recompute(on);
+    }
     pub fn param_list(&self) -> Vec<(String, usize)> {
         self.gate.param_list()
     }
@@ -831,6 +841,12 @@ impl GlobalContextBlock {
     }
     pub fn set_update_running(&self, on: bool) {
         self.t0.set_update_running(on);
+    }
+    /// Recompute the units' post-conv and post-BatchNorm intermediates in the backward ([`Conv::set_recompute`]).
+    pub fn set_recompute(&self, on: bool) {
+        self.score.set_recompute(on);
+        self.t0.set_recompute(on);
+        self.t1.set_recompute(on);
     }
     pub fn param_list(&self) -> Vec<(String, usize)> {
         let mut v = self.score.param_list();
@@ -1521,6 +1537,14 @@ impl FastConvexUpsample {
         self.c1.set_update_running(on);
         if let Some(c) = &self.c2 {
             c.set_update_running(on);
+        }
+    }
+    /// Recompute the units' post-conv and post-BatchNorm intermediates in the backward ([`Conv::set_recompute`]).
+    pub fn set_recompute(&self, on: bool) {
+        self.c0.set_recompute(on);
+        self.c1.set_recompute(on);
+        if let Some(c) = &self.c2 {
+            c.set_recompute(on);
         }
     }
     pub fn param_list(&self) -> Vec<(String, usize)> {
