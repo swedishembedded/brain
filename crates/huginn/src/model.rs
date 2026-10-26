@@ -323,6 +323,14 @@ fn block_layer(cfg: &HuginnConfig, stage: &str, i: usize) -> usize {
     }
 }
 
+/// The layer a tensor belongs to in the window (`prelude.{i}.*`, `core.{i}.*` and `coda.{i}.*` by [`block_layer`]), or
+/// `None` for the embedding, the adapter and the final norm, which stay in the store.
+fn tensor_layer(cfg: &HuginnConfig, name: &str) -> Option<u32> {
+    let (stage, rest) = name.split_once('.')?;
+    let i: usize = rest.split_once('.')?.0.parse().ok()?;
+    matches!(stage, "prelude" | "core" | "coda").then(|| block_layer(cfg, stage, i) as u32)
+}
+
 pub struct Huginn {
     pub gpu: Gpu,
     pub cfg: HuginnConfig,
@@ -386,13 +394,43 @@ impl Huginn {
     }
 
     fn new_impl(cfg: HuginnConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, train: bool) -> Huginn {
+        Huginn::build(cfg, b, t, src, train, None).unwrap_or_else(|e| panic!("huginn: {e}"))
+    }
+
+    /// A training build whose block tensors (prelude, core and coda; see [`block_layer`]) stream through a device
+    /// window under `resident` from the start (see [`model::streamed`]): they are read from `src` into the window's
+    /// host state and never all reach the device, so a model larger than it trains. The embedding (the tied head), the
+    /// adapter and the final norm load as usual.
+    pub fn new_resident_on(cfg: HuginnConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, resident: &model::resident_ft::ResidentFtConfig) -> Result<Huginn, String> {
+        Huginn::build(cfg, b, t, src, true, Some(resident))
+    }
+
+    fn build(cfg: HuginnConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, train: bool, resident: Option<&model::resident_ft::ResidentFtConfig>) -> Result<Huginn, String> {
         cfg.validate().expect("huginn config");
         assert!(t <= cfg.block_size, "sequence {t} exceeds positional capacity {}", cfg.block_size);
         assert!(b > 0 && t > 0);
+        if resident.is_some() && !train {
+            return Err("huginn: only a training build streams its blocks".into());
+        }
         let gpu = Gpu::new(&optim::with_moment_kernels(PIPELINES));
-        let role = if train { paramstore::Role::Trainable } else { paramstore::Role::Frozen };
-        let roles = cfg.param_list().into_iter().map(|(n, c)| (n, c, role)).collect();
-        let ps = ParamStore::new_with_roles_src(&gpu, roles, src);
+        let model_cfg = cfg.clone();
+        let layer_of = |name: &str| tensor_layer(&model_cfg, name);
+        let roles = cfg
+            .param_list()
+            .into_iter()
+            .map(|(n, c)| {
+                let role = if !train {
+                    paramstore::Role::Frozen
+                } else if resident.is_some() && layer_of(&n).is_some() {
+                    paramstore::Role::Streamed
+                } else {
+                    paramstore::Role::Trainable
+                };
+                (n, c, role)
+            })
+            .collect();
+        let mut ps = ParamStore::new_with_roles_src(&gpu, roles, src);
+        let streamed = resident.map(|r| StreamedStore::attach(&gpu, &mut ps, r.clone(), src, &layer_of)).transpose()?;
         let opt = train.then(|| optim::Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF));
         let n = (b * t) as u64;
         let d = cfg.d_model as u64;
@@ -499,7 +537,7 @@ impl Huginn {
             back,
             fwd_steps: LayerTape::default(),
             bwd_steps: LayerTape::default(),
-            streamed: None,
+            streamed,
             backward_pending: Cell::new(false),
             opt,
         };
@@ -507,7 +545,7 @@ impl Huginn {
             m.fwd_steps = m.training_forward_steps();
             m.bwd_steps = m.training_backward_steps();
         }
-        m
+        Ok(m)
     }
 
     pub fn batch(&self) -> u32 {
@@ -976,11 +1014,7 @@ impl model::Model for Huginn {
             return Err("huginn: the blocks already stream".into());
         }
         let model_cfg = self.cfg.clone();
-        let layer_of = |name: &str| -> Option<u32> {
-            let (stage, rest) = name.split_once('.')?;
-            let i: usize = rest.split_once('.')?.0.parse().ok()?;
-            matches!(stage, "prelude" | "core" | "coda").then(|| block_layer(&model_cfg, stage, i) as u32)
-        };
+        let layer_of = |name: &str| tensor_layer(&model_cfg, name);
         let stream = StreamedStore::convert(&self.gpu, &mut self.ps, cfg.clone(), &layer_of).map_err(|e| format!("huginn: {e}"))?;
         self.opt.as_ref().expect("a training build has an optimizer").invalidate();
         self.streamed = Some(stream);
@@ -1012,6 +1046,10 @@ impl model::Model for Huginn {
 
     fn new(cfg: Self::Config, b: u32, t: u32, init: &std::collections::HashMap<String, Vec<f32>>) -> Self {
         Huginn::new_train(cfg, b, t, init)
+    }
+
+    fn new_resident(cfg: Self::Config, b: u32, t: u32, init: &std::collections::HashMap<String, Vec<f32>>, resident: &model::resident_ft::ResidentFtConfig) -> Result<Self, String> {
+        Huginn::new_resident_on(cfg, b, t, init, resident)
     }
 
     fn new_inference(cfg: Self::Config, b: u32, t: u32, init: &std::collections::HashMap<String, Vec<f32>>) -> Self {
