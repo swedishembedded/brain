@@ -129,3 +129,16 @@ fn zimage_trains_with_narrow_host_optimizer_state() {
     };
     model::hostopt::check_host_state_formats("s3dit", || ZTrainModel::from_weights(c, weights.clone()), step, 1e-3).unwrap();
 }
+
+/// Spec: the trainer keeps only each block's input and rebuilds the block in its backward, so it accepts
+/// `activations=recompute` as what it already does and refuses keeping every layer by name.
+#[test]
+fn zimage_always_recomputes() {
+    if std::env::var("BRAIN_DEV_GPU").as_deref() != Ok("1") {
+        brain_testutil::skip_unavailable("set BRAIN_DEV_GPU=1 (needs a GPU) for the Z-Image recompute test");
+        return;
+    }
+    let c = cfg();
+    let mut m = ZTrainModel::from_weights(c, init(&c, &mut rng(0x5555)).to_f32());
+    model::saved::check_always_recomputes("s3dit", &mut m).unwrap();
+}

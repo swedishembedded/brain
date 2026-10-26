@@ -453,6 +453,16 @@ pub fn check_recompute<M: crate::Model>(name: &str, build: impl Fn() -> M, step:
     Ok(())
 }
 
+/// [`crate::Model::set_saved_policy`] of a model whose backward always rebuilds each layer from its f32 inputs and that
+/// holds no layer boundary it could narrow: [`SavedPolicy::Recompute`] is what it already does; keeping every layer
+/// and a narrow saved format are refused by `name`.
+pub fn recompute_only(name: &str, policy: SavedPolicy) -> Result<(), String> {
+    match policy {
+        SavedPolicy::Recompute => Ok(()),
+        other => Err(format!("{name} rebuilds every layer from its f32 inputs in the backward; {other:?} is not available")),
+    }
+}
+
 /// The contract of a model whose backward always rebuilds each layer from its input boundary (one scratch set serves
 /// every layer): it accepts [`SavedPolicy::Recompute`] as what it already does and refuses keeping every layer by its
 /// own name, never ignoring it. Narrow boundaries are a separate offer ([`check_quantized_boundaries`]).

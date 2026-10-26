@@ -763,6 +763,9 @@ impl Model for ZTrainModel {
             self.write_weight(name, &w);
         }
     }
+    fn set_saved_policy(&mut self, policy: model::saved::SavedPolicy) -> Result<(), String> {
+        model::saved::recompute_only("s3dit", policy)
+    }
     fn set_host_optimizer(&mut self, precision: ParamPrecision) -> Result<(), String> {
         HostAdam::new(&self.layout, precision)?;
         self.state_precision = precision;

@@ -232,6 +232,9 @@ impl model::Model for Transducer {
         *self.opt.get_mut() = model::hostopt::HostAdam::new(&self.tcfg.param_list(), precision)?;
         Ok(())
     }
+    fn set_saved_policy(&mut self, policy: model::saved::SavedPolicy) -> Result<(), String> {
+        model::saved::recompute_only("nemotronasr transducer", policy)
+    }
     fn poll_wait(&self) {}
     fn param_names(&self) -> Vec<String> {
         self.tcfg.param_list().into_iter().map(|(n, _)| n).collect()
@@ -594,6 +597,9 @@ impl model::Model for AcousticModel {
     fn set_host_optimizer(&mut self, precision: ParamPrecision) -> Result<(), String> {
         *self.opt.get_mut() = model::hostopt::HostAdam::new(&self.acfg.param_list(), precision)?;
         Ok(())
+    }
+    fn set_saved_policy(&mut self, policy: model::saved::SavedPolicy) -> Result<(), String> {
+        model::saved::recompute_only("nemotronasr acoustic model", policy)
     }
     fn poll_wait(&self) {}
     fn param_names(&self) -> Vec<String> {
