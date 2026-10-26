@@ -475,9 +475,138 @@ pub fn check_always_recomputes<M: crate::Model>(name: &str, model: &mut M) -> Re
     }
 }
 
+/// What a block stack keeps of its forward for its backward, for a trainer that holds each block's forward state
+/// itself (a host trainer's per-block cache, a device trainer's per-block buffers): under [`SavedPolicy::Keep`] every
+/// block's cache, under [`SavedPolicy::Recompute`] only every block's input, the cache rebuilt by the trainer's own
+/// block forward as the backward reaches that block ([`BlockStack::rev_for_each`]). A deterministic block forward
+/// rebuilds the very cache the forward made, so the gradients are those of keeping it, bit for bit, while the stack
+/// holds one cache at a time instead of one per block.
+pub struct BlockStack<X, C> {
+    recompute: bool,
+    caches: Vec<C>,
+    inputs: Vec<X>,
+}
+
+impl<X, C> BlockStack<X, C> {
+    /// An empty stack under `policy`; a narrow saved format is refused (the blocks' boundaries are the trainer's own
+    /// full-precision values, so `name` should name the model in the caller's error).
+    pub fn new(name: &str, policy: SavedPolicy) -> Result<BlockStack<X, C>, String> {
+        if let SavedPolicy::Quantized(format) = policy {
+            return Err(format!("{name} keeps its block boundaries in full precision; {format:?} saved boundaries do not apply"));
+        }
+        Ok(BlockStack { recompute: policy.recomputes(), caches: Vec::new(), inputs: Vec::new() })
+    }
+
+    /// Blocks recorded.
+    pub fn len(&self) -> usize {
+        if self.recompute {
+            self.inputs.len()
+        } else {
+            self.caches.len()
+        }
+    }
+
+    /// Whether no block was recorded.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Block caches the stack holds: one per block when keeping, none when recomputing.
+    pub fn held_caches(&self) -> usize {
+        self.caches.len()
+    }
+
+    /// Record the next block's forward: `input` is what its forward read, `cache` what its backward reads. Under
+    /// recompute the cache is dropped here and only the input kept.
+    pub fn push(&mut self, input: &X, cache: C)
+    where
+        X: Clone,
+    {
+        if self.recompute {
+            self.inputs.push(input.clone());
+        } else {
+            self.caches.push(cache);
+        }
+    }
+
+    /// Visit the blocks last to first with their caches: the kept one, or the one `rebuild(i, input)` makes from block
+    /// `i`'s recorded input. Only one rebuilt cache is alive at a time.
+    pub fn rev_for_each(&self, mut rebuild: impl FnMut(usize, &X) -> C, mut visit: impl FnMut(usize, &C)) {
+        if self.recompute {
+            for (i, x) in self.inputs.iter().enumerate().rev() {
+                let cache = rebuild(i, x);
+                visit(i, &cache);
+            }
+        } else {
+            for (i, cache) in self.caches.iter().enumerate().rev() {
+                visit(i, cache);
+            }
+        }
+    }
+}
+
+/// One training step of a [`BlockStack`] trainer, as [`check_block_recompute`] reads it: the loss and every gradient
+/// as bits (`f32::to_bits` or `f64::to_bits` widened), and how many block caches the stack held after the forward.
+pub struct BlockStep {
+    pub loss: u64,
+    pub grads: Vec<(String, Vec<u64>)>,
+    pub held_caches: usize,
+}
+
+/// The contract of a trainer whose block stack is a [`BlockStack`], for its own test to run: `step(policy)` runs one
+/// step on a fixed batch. Recomputing gives the loss and every gradient of keeping, bit for bit; some gradient is
+/// nonzero; keeping holds a cache per block and recomputing holds none.
+pub fn check_block_recompute(name: &str, step: impl Fn(SavedPolicy) -> Result<BlockStep, String>) -> Result<(), String> {
+    let keep = step(SavedPolicy::Keep)?;
+    let rec = step(SavedPolicy::Recompute)?;
+    if keep.held_caches == 0 || rec.held_caches != 0 {
+        return Err(format!("{name}: keeping holds {} block caches and recomputing {}; want every block's and none", keep.held_caches, rec.held_caches));
+    }
+    if rec.loss != keep.loss {
+        return Err(format!("{name}: the loss differs recomputing"));
+    }
+    if !keep.grads.iter().any(|(_, g)| g.iter().any(|b| *b != 0 && *b != 1 << 63)) {
+        return Err(format!("{name}: no parameter received a gradient to compare"));
+    }
+    if keep.grads.len() != rec.grads.len() {
+        return Err(format!("{name}: {} gradients keeping, {} recomputing", keep.grads.len(), rec.grads.len()));
+    }
+    for ((n, a), (_, b)) in keep.grads.iter().zip(&rec.grads) {
+        if a != b {
+            return Err(format!("{name}: {n}: gradient differs recomputing"));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Spec: a recomputing block stack visits the same caches as a keeping one, in reverse, holding none of them, and
+    /// a narrow format is refused by name.
+    #[test]
+    fn a_block_stack_rebuilds_the_caches_it_does_not_keep() {
+        let forward = |x: &f64| (x * 2.0 + 1.0, vec![*x, x * x]);
+        let run = |policy| {
+            let mut stack = BlockStack::<f64, Vec<f64>>::new("toy", policy).unwrap();
+            let mut x = 0.5;
+            for _ in 0..4 {
+                let (y, cache) = forward(&x);
+                stack.push(&x, cache);
+                x = y;
+            }
+            let mut seen = Vec::new();
+            stack.rev_for_each(|_, x| forward(x).1, |i, c| seen.push((i, c.clone())));
+            (seen, stack.held_caches(), stack.len())
+        };
+        let (kept, kept_held, n) = run(SavedPolicy::Keep);
+        let (rebuilt, rebuilt_held, m) = run(SavedPolicy::Recompute);
+        assert_eq!(kept, rebuilt);
+        assert_eq!((kept_held, rebuilt_held, n, m), (4, 0, 4, 4));
+        assert_eq!(kept.iter().map(|(i, _)| *i).collect::<Vec<_>>(), [3, 2, 1, 0]);
+        assert!(BlockStack::<f64, ()>::new("toy", SavedPolicy::Quantized(SavedFormat::Bf16)).err().unwrap().contains("toy"));
+    }
 
     #[test]
     fn a_policy_reads_back_from_its_label() {
