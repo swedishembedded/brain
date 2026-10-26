@@ -76,6 +76,50 @@ def sd(xs):
     return math.sqrt(sum((x - m) ** 2 for x in xs) / (len(xs) - 1))
 
 
+def _betacf(a, b, x):
+    """Continued fraction of the regularized incomplete beta (Lentz)."""
+    tiny, qab, qap, qam = 1e-300, a + b, a + 1.0, a - 1.0
+    c, d = 1.0, 1.0 - qab * x / qap
+    d = 1.0 / (d if abs(d) > tiny else tiny)
+    h = d
+    for m in range(1, 300):
+        m2 = 2 * m
+        for aa in (m * (b - m) * x / ((qam + m2) * (a + m2)), -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))):
+            d = 1.0 + aa * d
+            d = 1.0 / (d if abs(d) > tiny else tiny)
+            c = 1.0 + aa / c
+            c = c if abs(c) > tiny else tiny
+            h *= d * c
+    return h
+
+
+def t_cdf(t, df):
+    """Student-t CDF via the regularized incomplete beta function."""
+    x = df / (df + t * t)
+    a, b = df / 2.0, 0.5
+    front = math.exp(math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b) + a * math.log(x) + b * math.log(1 - x))
+    ib = front * _betacf(a, b, x) / a if x < (a + 1) / (a + b + 2) else 1 - front * _betacf(b, a, 1 - x) / b
+    return 1 - 0.5 * ib if t >= 0 else 0.5 * ib
+
+
+def t_quantile(p, df):
+    lo, hi = 0.0, 1000.0
+    for _ in range(200):
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if t_cdf(mid, df) < p else (lo, mid)
+    return (lo + hi) / 2
+
+
+def welch(a, b):
+    """Mean difference a - b, its Welch 95% interval and two-sided p-value."""
+    va, vb = sd(a) ** 2 / len(a), sd(b) ** 2 / len(b)
+    diff, se = mean(a) - mean(b), math.sqrt(va + vb)
+    df = (va + vb) ** 2 / (va ** 2 / (len(a) - 1) + vb ** 2 / (len(b) - 1))
+    half = t_quantile(0.975, df) * se
+    p = 2 * (1 - t_cdf(abs(diff) / se, df))
+    return diff, diff - half, diff + half, p, df
+
+
 def correctness(data):
     recs = records(data, "correctness")
     if not recs:
@@ -220,7 +264,13 @@ def macros(data, groups):
     lines = []
     def m(name, value):
         lines.append(f"\\newcommand{{\\{name}}}{{{value}}}")
-    measured = bool(records(data, "correctness")) and all(f in groups for f in ("S-256-512-24", "Q-256-24", "Q-256-1024"))
+    # The paper leaves draft status only when every registered plan has its
+    # records: the gates, all six model families, both Qwen3 measurements,
+    # the spectrum study and the transform cost.
+    qwen_ids = {r["id"] for r in records(data, "qwen")} | {r["id"] for r in records(data, "qwen-ft")}
+    measured = (bool(records(data, "correctness")) and all(f in groups for f in ORDER)
+                and {"qwen3-0.6b-zero-shot", "qwen3-0.6b-tinystories"} <= qwen_ids
+                and bool(records(data, "spectrum")) and bool(records(data, "systems")))
     status = "" if measured else ("This is a draft: the protocol of \\cref{sec:protocol} is registered and its results "
                                   "are not all measured yet.")
     m("StatusAbstract", status)
@@ -233,13 +283,35 @@ def macros(data, groups):
     m("BpbQpar", f"{qp:.3f}" if qp else "--")
     m("BpbQstd", f"{qs:.3f}" if qs else "--")
     if s and qp:
-        diff = s - qp
-        m("DiffSQpar", f"{diff:+.3f}")
-        m("HOneVerdict", "supported" if diff <= H1_MARGIN else "rejected")
+        a = [r["eval"]["bits_per_byte"] for r in groups["S-256-512-24"]]
+        q = [r["eval"]["bits_per_byte"] for r in groups["Q-256-24"]]
+        diff, lo, hi, p, df = welch(a, q)
+        m("DiffSQpar", f"${diff:+.4f}$")
+        m("DiffSQparCI", f"$[{lo:+.4f}, {hi:+.4f}]$")
+        m("DiffSQparP", f"{p:.3f}")
+        m("DiffSQparDF", f"{df:.1f}")
+        m("RangeRelation", "lies entirely below the control's" if max(a) < min(q) else "overlaps the control's")
+        # H1 is non-inferiority: the upper end of the interval below the margin.
+        m("HOneVerdict", "supported" if hi <= H1_MARGIN else "rejected")
     else:
         m("DiffSQpar", "--")
+        m("RangeRelation", "--")
         m("HOneVerdict", "not yet decided")
-    m("DiffSQstd", f"{s - qs:+.3f}" if s and qs else "--")
+    if s and qs:
+        diff, lo, hi, p, _ = welch([r["eval"]["bits_per_byte"] for r in groups["S-256-512-24"]], [r["eval"]["bits_per_byte"] for r in groups["Q-256-1024"]])
+        m("DiffSQstd", f"${diff:+.4f}$")
+        m("DiffSQstdCI", f"$[{lo:+.4f}, {hi:+.4f}]$")
+    else:
+        m("DiffSQstd", "--")
+        m("DiffSQstdCI", "--")
+    def avg(f, key):
+        return mean([r["train"][key] for r in groups[f]]) if f in groups else None
+    for f, name in (("S-256-512-24", "S"), ("Q-256-24", "Qpar"), ("Q-256-1024", "Qstd")):
+        tps = avg(f, "tokens_per_s")
+        m(f"Tps{name}", num(tps) if tps else "--")
+        m(f"Mem{name}", num(max(r["peak_mem_mib"] for r in groups[f])) if f in groups else "--")
+        m(f"Mflop{name}", f"{groups[f][0]['train']['flops_per_token'] / 1e6:.1f}" if f in groups else "--")
+        m(f"Params{name}", num(groups[f][0]["train"]["params_nonembed"]) if f in groups else "--")
     q = records(data, "qwen")
     m("BpbQwen", f"{q[0]['result']['bits_per_byte']:.3f}" if q else "--")
     train_tokens, val_docs = corpus(data)

@@ -16,10 +16,46 @@
 
 \input{table-lr}
 
+Selection picked $10^{-3}$ for SpectralLM and the C=96 pilot and
+$3\times10^{-3}$ for every other model (\cref{tab:lr}). SpectralLM's 300-step
+losses were not monotone in the rate ($3\times10^{-3}$ was worst of the
+three), which one seed per rate cannot separate from seed variation; the rule
+was applied as registered.
+
 \subsection{Language modeling at matched width}
 \label{sec:res-primary}
 
 \input{table-primary}
+
+\Cref{tab:primary} answers the primary question. Over three seeds SpectralLM
+reaches \BpbS{} bits per byte, the parameter-matched SwiGLU control \BpbQpar{}
+and the arithmetic-matched SwiGLU control \BpbQstd{}. Against the
+parameter-matched control the difference is \DiffSQpar{} bits per byte (Welch
+95\% interval \DiffSQparCI{}, $p=\DiffSQparP$ on \DiffSQparDF{} degrees of
+freedom). The interval's upper end lies below the registered margin of 0.02,
+so H1 is \HOneVerdict{}: at equal width, equal attention and the same
+parameter count, a feed-forward sublayer built from per-mode filters around a
+signal-domain gated product predicts held-out text at least as well as a dense
+SwiGLU, and its seed range \RangeRelation{}. Three seeds per model do not
+establish that it is better: the interval reaches zero.
+
+H2 holds by a wide margin. The SwiGLU of hidden width 1024, with \ParamsQstd{}
+non-embedding parameters against \ParamsS{} and nearly the same analytic
+arithmetic per token (\MflopQstd{} against \MflopS{} MFLOP with the transforms
+counted as FFTs), is better by \DiffSQstd{} bits per byte
+(\DiffSQstdCI{}). At this scale the spectral mixer buys parameter efficiency,
+not arithmetic efficiency: with the same budget of operations a dense
+feed-forward network spends them on four and a half times as many parameters
+and uses them better.
+
+The spectral model also costs more to run in this implementation. It trains
+at \TpsS{} tokens per second against \TpsQpar{} and \TpsQstd{} for the
+controls on the same card, and peaks at \MemS{} MiB of device memory against
+\MemQpar{} and \MemQstd{}. Both follow from the mixer's signal-domain
+activations: every token carries $C\cdot D=12{,}288$ signal samples per block in
+each of three forward buffers, and three more in the backward pass, where the
+dense control holds 1024 hidden units, and the FFT kernels that produce them
+run far below the card's arithmetic peak (\cref{sec:res-systems}).
 
 \subsection{Comparison with Qwen3-0.6B}
 \label{sec:res-qwen}
