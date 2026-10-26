@@ -884,3 +884,15 @@ blocks that took the path) and `gpu-core/tests/cuda_library_gemm.rs::batched_tf3
 
 Both cards carried a peer's job at 100 to 330 W for the whole measurement, so `encode_bench` now reports the fastest of N runs (the work is
 deterministic; interference only adds): best of 25, global view 69 -> 50 ms, 640 px tile 28 -> 21 ms (originally 137 and 78).
+
+## 2026-10-26 throughput lane: the host work around a page
+
+A stack sample of the encoder thread and of the scheduler thread showed host work the decode loop was paying for:
+
+- the scheduler thread copied a request's whole payload twice per admission (`Job.invocation` is cloned, and cloned again at submit) and
+  unpacked the f32 pixels (57 MB for a 3242x1475 page); the job now keeps the parameters and cancel token only
+  (`Invocation::without_blobs`) and the unpacking runs on the encoder thread (`PendingPage`);
+- the page's CPU preprocessing (u8 conversion, the two Pillow-exact bicubic resizes, the planar normalisation) was single-threaded with a
+  cache-hostile vertical pass: 124 ms for a 1767x2446 page, 6 tiles. The vertical pass now accumulates whole source rows and the passes
+  spread over the cores (`backend_cpu::par`), byte-identical (the Pillow and torch goldens in `imaging/tests/resize_reference.rs` pass):
+  30 ms.

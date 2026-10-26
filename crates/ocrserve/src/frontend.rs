@@ -67,6 +67,22 @@ pub struct PageRequest {
     pub read: ReadOptions,
 }
 
+/// A request's page before its pixels are decoded: the wire format is interleaved f32 (tens of megabytes for a
+/// page), and unpacking it is work for the encoder's thread, not for the one that is decoding other requests.
+pub struct PendingPage {
+    instruction: String,
+    image: Invocation,
+    read: ReadOptions,
+}
+
+impl PendingPage {
+    /// Unpack the pixels.
+    fn decode(self) -> Result<PageRequest, String> {
+        let (hwc, w, h) = capability::blob::decode_image(&self.image, "image")?;
+        Ok(PageRequest { instruction: self.instruction, hwc, w, h, read: self.read })
+    }
+}
+
 /// A page's prompt ids and the rows that stand at its image positions.
 pub type Encoded = Result<(Vec<u32>, PromptEmbeds), String>;
 
@@ -87,7 +103,7 @@ pub trait PageEncoder {
 
 /// What a request carries to the encoder stage: the page, and how its decode is sampled.
 struct EncodeJob {
-    page: PageRequest,
+    page: PendingPage,
     max_new: usize,
     reply: mpsc::Sender<Result<(ParsedRequest, Option<PromptEmbeds>), String>>,
 }
@@ -110,10 +126,22 @@ impl EncodeStage {
                 while let Ok(first) = queue.recv() {
                     let mut batch = vec![first];
                     batch.extend(queue.try_iter());
-                    let (pages, replies): (Vec<PageRequest>, Vec<(usize, mpsc::Sender<_>)>) = batch.into_iter().map(|j| (j.page, (j.max_new, j.reply))).unzip();
+                    let mut pages = Vec::with_capacity(batch.len());
+                    let mut replies = Vec::with_capacity(batch.len());
+                    for job in batch {
+                        match job.page.decode() {
+                            Ok(page) => {
+                                pages.push(page);
+                                replies.push((job.max_new, job.reply));
+                            }
+                            // A caller that gave up (cancelled, dropped its receiver) is not an error.
+                            Err(e) => {
+                                let _ = job.reply.send(Err(e));
+                            }
+                        }
+                    }
                     let results = enc.encode_many(&pages);
                     for (result, (max_new, reply)) in results.into_iter().zip(replies) {
-                        // A caller that gave up (cancelled, dropped its receiver) is not an error.
                         let _ = reply.send(result.map(|(ids, embeds)| (build_request(ids, max_new, ngram), Some(embeds))));
                     }
                 }
@@ -122,7 +150,7 @@ impl EncodeStage {
         EncodeStage { jobs: Some(jobs), worker: Some(worker) }
     }
 
-    fn submit(&self, page: PageRequest, max_new: usize) -> Encoding {
+    fn submit(&self, page: PendingPage, max_new: usize) -> Encoding {
         let (reply, rx) = mpsc::channel();
         let job = EncodeJob { page, max_new, reply };
         if let Some(jobs) = &self.jobs {
@@ -181,8 +209,8 @@ impl OcrFrontend {
         OcrFrontend { tok: enc.tok().clone(), label, stop: vec![eos], stage: EncodeStage::spawn(enc, ngram), overlap }
     }
 
-    /// The page a request asks to read, and its decode budget.
-    fn page_of(&self, inv: &Invocation) -> Result<(PageRequest, usize), String> {
+    /// The page a request asks to read (pixels still packed), and its decode budget.
+    fn page_of(&self, inv: &Invocation) -> Result<(PendingPage, usize), String> {
         let instruction = {
             let t = last_user_text(inv);
             if t.trim().is_empty() {
@@ -192,9 +220,9 @@ impl OcrFrontend {
             }
         };
         let max_new = inv.get_i64("max_new").unwrap_or(DEFAULT_MAX_NEW).clamp(1, MAX_CONTEXT as i64) as usize;
-        let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
+        let blob = inv.get_blob("image").ok_or("missing required input 'image'")?.clone();
         let read = ReadOptions { max_tiles: inv.get_i64("max_tiles").map(|n| n.clamp(0, 64) as u32) };
-        Ok((PageRequest { instruction, hwc, w, h, read }, max_new))
+        Ok((PendingPage { instruction, image: Invocation::new().blob("image", blob), read }, max_new))
     }
 }
 

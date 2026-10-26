@@ -221,7 +221,9 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
     /// `None` is returned.
     fn admit(&mut self, inv: &Invocation, progress: &mut dyn FnMut(usize, Progress)) -> (usize, Option<ActionResult>) {
         let bi = self.jobs.len();
-        let mut job = Job { invocation: inv.clone(), seq: None, id: None, identity: None, capture: Capture::default(), base_digest: self.front.base_digest() };
+        // The job remembers the request's parameters and cancellation, not its payload: a page's pixels are tens of
+        // megabytes, copied here on the thread that is decoding other requests.
+        let mut job = Job { invocation: inv.without_blobs(), seq: None, id: None, identity: None, capture: Capture::default(), base_digest: self.front.base_digest() };
         // A name the bank no longer holds is the caller's "no model", never
         // the base's answer under another name.
         let adapter = match self.front.route(inv) {

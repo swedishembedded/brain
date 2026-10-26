@@ -98,11 +98,13 @@ pub fn mosaic_tiles(img: &Rgb8, tile: u32, cols: u32, rows: u32) -> Vec<Rgb8> {
 pub fn to_chw_half(img: &Rgb8) -> Vec<f32> {
     let (w, h) = (img.w as usize, img.h as usize);
     let mut out = vec![0f32; 3 * w * h];
-    for (i, px) in img.px.as_chunks::<3>().0.iter().enumerate() {
-        for (c, &v) in px.iter().enumerate() {
-            out[c * w * h + i] = (v as f32 / 255.0 - 0.5) / 0.5;
+    // One row of one plane per task; rows are independent.
+    backend_cpu::par::chunks_mut(&mut out, w, |r, row| {
+        let (c, y) = (r / h, r % h);
+        for (x, v) in row.iter_mut().enumerate() {
+            *v = (img.px[(y * w + x) * 3 + c] as f32 / 255.0 - 0.5) / 0.5;
         }
-    }
+    });
     out
 }
 

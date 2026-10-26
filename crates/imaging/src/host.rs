@@ -190,32 +190,47 @@ fn fixed_coeffs(in_size: usize, out_size: usize, fixed: FixedPoint) -> (usize, V
     (ksize, bounds, kk, bits)
 }
 
-/// One 8bpc pass over interleaved RGB8: `n_lines` lines of `stride`
-/// pixels, resampled along the axis `at(line, i)` addresses, into `out_len`
-/// positions per line.
-fn fixed_pass(
-    fixed: FixedPoint,
-    src: &[u8],
-    in_size: usize,
-    out_size: usize,
-    n_lines: usize,
-    at: impl Fn(usize, usize) -> usize,
-    dst_at: impl Fn(usize, usize) -> usize,
-    dst_len: usize,
-) -> Vec<u8> {
-    let (ksize, bounds, kk, bits) = fixed_coeffs(in_size, out_size, fixed);
-    let mut out = vec![0u8; dst_len];
-    for line in 0..n_lines {
+/// The horizontal 8bpc pass over interleaved RGB8: every row of `src` (`w` x `h`) resampled to `nw` positions. Rows are
+/// independent, so they are spread over the cores.
+fn fixed_horizontal(fixed: FixedPoint, src: &[u8], w: usize, nw: usize, h: usize) -> Vec<u8> {
+    let (ksize, bounds, kk, bits) = fixed_coeffs(w, nw, fixed);
+    let mut out = vec![0u8; nw * h * 3];
+    backend_cpu::par::chunks_mut(&mut out, nw * 3, |y, row| {
+        let line = &src[y * w * 3..][..w * 3];
         for (o, &(min, n)) in bounds.iter().enumerate() {
-            for ch in 0..3 {
-                let mut ss = 1i32 << (bits - 1);
-                for i in 0..n {
-                    ss += src[at(line, min + i) * 3 + ch] as i32 * kk[o * ksize + i];
+            let mut ss = [1i32 << (bits - 1); 3];
+            for (i, &k) in kk[o * ksize..][..n].iter().enumerate() {
+                let px = &line[(min + i) * 3..][..3];
+                for ch in 0..3 {
+                    ss[ch] += px[ch] as i32 * k;
                 }
-                out[dst_at(line, o) * 3 + ch] = (ss >> bits).clamp(0, 255) as u8;
+            }
+            for ch in 0..3 {
+                row[o * 3 + ch] = (ss[ch] >> bits).clamp(0, 255) as u8;
             }
         }
-    }
+    });
+    out
+}
+
+/// The vertical 8bpc pass: `src` (`nw` x `h`) resampled to `nh` rows. One output row accumulates whole source rows, so the
+/// inner loop walks contiguous memory; output rows are independent and spread over the cores.
+fn fixed_vertical(fixed: FixedPoint, src: &[u8], h: usize, nh: usize, nw: usize) -> Vec<u8> {
+    let (ksize, bounds, kk, bits) = fixed_coeffs(h, nh, fixed);
+    let mut out = vec![0u8; nw * nh * 3];
+    backend_cpu::par::chunks_mut(&mut out, nw * 3, |oy, row| {
+        let (min, n) = bounds[oy];
+        let mut acc = vec![1i32 << (bits - 1); nw * 3];
+        for (i, &k) in kk[oy * ksize..][..n].iter().enumerate() {
+            let line = &src[(min + i) * nw * 3..][..nw * 3];
+            for (a, &v) in acc.iter_mut().zip(line) {
+                *a += v as i32 * k;
+            }
+        }
+        for (d, a) in row.iter_mut().zip(&acc) {
+            *d = (a >> bits).clamp(0, 255) as u8;
+        }
+    });
     out
 }
 
@@ -224,8 +239,8 @@ fn fixed_pass(
 fn resize_fixed(img: &Rgb8, nw: usize, nh: usize, fixed: FixedPoint) -> Rgb8 {
     let (w, h) = (img.w as usize, img.h as usize);
     assert!(w > 0 && h > 0 && nw > 0 && nh > 0, "resize: empty extent");
-    let horiz = if nw != w { fixed_pass(fixed, &img.px, w, nw, h, |y, x| y * w + x, |y, x| y * nw + x, nw * h * 3) } else { img.px.clone() };
-    let px = if nh != h { fixed_pass(fixed, &horiz, h, nh, nw, |x, y| y * nw + x, |x, y| y * nw + x, nw * nh * 3) } else { horiz };
+    let horiz = if nw != w { fixed_horizontal(fixed, &img.px, w, nw, h) } else { img.px.clone() };
+    let px = if nh != h { fixed_vertical(fixed, &horiz, h, nh, nw) } else { horiz };
     Rgb8 { w: nw as u32, h: nh as u32, px }
 }
 

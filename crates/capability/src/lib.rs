@@ -598,6 +598,11 @@ impl Invocation {
     pub fn new() -> Invocation {
         Invocation { params: json!({}), blobs: BTreeMap::new(), cancel: CancelToken::default() }
     }
+    /// This invocation's parameters and cancellation, without its blobs: what a caller that only needs to
+    /// remember the request (not read its payload again) keeps. A page of pixels is tens of megabytes.
+    pub fn without_blobs(&self) -> Invocation {
+        Invocation { params: self.params.clone(), blobs: BTreeMap::new(), cancel: self.cancel.clone() }
+    }
     pub fn set(mut self, key: &str, v: Value) -> Invocation {
         self.params.as_object_mut().expect("params must be an object").insert(key.into(), v);
         self
@@ -1015,6 +1020,18 @@ mod tests {
             roles: roles.iter().map(|&(k, v)| (k.to_string(), std::path::PathBuf::from(v))).collect(),
             provenance: Vec::new(),
         }
+    }
+
+    #[test]
+    fn an_invocation_without_blobs_keeps_what_identifies_the_request() {
+        let mut inv = Invocation::new().set("max_new", json!(7)).blob("image", Blob::new(Media::Image, vec![0; 1 << 20]));
+        inv.cancel = CancelToken::armed();
+        let light = inv.without_blobs();
+        inv.cancel.cancel();
+        assert_eq!(light.get_i64("max_new"), Some(7));
+        assert!(light.get_blob("image").is_none(), "the payload is not copied");
+        assert!(light.cancel.is_cancelled(), "cancelling the request still reaches whoever kept the light copy");
+        assert_eq!(inv.blobs.len(), 1, "the original keeps its payload");
     }
 
     #[test]

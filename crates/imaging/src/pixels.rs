@@ -183,12 +183,17 @@ pub fn hwc_to_rgb8(hwc: &[f32], w: u32, h: u32, c: usize, policy: ChannelPolicy)
         ));
     }
     let mut px = vec![0u8; n * 3];
-    for i in 0..n {
-        for ch in 0..3 {
-            let src = if c >= 3 { hwc[i * c + ch] } else { hwc[i * c] };
-            px[i * 3 + ch] = quantize_unit(src);
+    // Rows are independent: a page is millions of values, worth spreading over the cores.
+    let row = w as usize;
+    backend_cpu::par::chunks_mut(&mut px, row * 3, |y, out| {
+        for x in 0..row {
+            let i = y * row + x;
+            for ch in 0..3 {
+                let src = if c >= 3 { hwc[i * c + ch] } else { hwc[i * c] };
+                out[x * 3 + ch] = quantize_unit(src);
+            }
         }
-    }
+    });
     Rgb8::new(w, h, px)
 }
 
