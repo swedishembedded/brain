@@ -10,8 +10,11 @@ shared decoder building blocks (RMS normalization, rotary embedding,
 grouped-query attention and its backward pass, the key-value cache), its
 parameter store, its AdamW optimizer and its architecture-independent training
 loop, so the spectral model and its conventional controls differ only in the
-feed-forward sublayer. The controls are the engine's existing Qwen3-shaped
-decoder trained from scratch.
+feed-forward sublayer. The controls are the same crate with Qwen3's SwiGLU in
+place of the mixer; a test holds that configuration to the engine's Qwen3
+implementation on the same weights (\cref{tab:correctness}), so the
+conventional control is the Qwen3 architecture and shares every other line of
+code with the spectral model.
 
 \paragraph{Mixer operators.} \Cref{eq:mixer} decomposes into four operator
 families, each with a forward and a backward kernel:

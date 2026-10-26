@@ -93,7 +93,32 @@ per-mode filters $G,U,W\in\R^{C\times m}$,
 \label{eq:mixer}
 M(h)=\sum_{c=1}^{C} W_c\odot S^\top\!\Big[\silu\big(S(G_c\odot h)\big)\odot S(U_c\odot h)\Big].
 \end{equation}
-Read from the inside out: each channel filters the input spectrum twice
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[node distance=4mm and 7mm, every node/.style={font=\small},
+  box/.style={draw, rounded corners=2pt, minimum height=7mm, inner sep=3pt, align=center},
+  op/.style={draw, circle, inner sep=1pt}]
+\node[box] (h) {$h$\\[-1pt]\scriptsize $[m]$};
+\node[box, right=of h, yshift=6mm] (g) {$G_c\odot h$\\[-1pt]\scriptsize $[C,m]$};
+\node[box, right=of h, yshift=-6mm] (u) {$U_c\odot h$\\[-1pt]\scriptsize $[C,m]$};
+\node[box, right=of g] (sg) {$S(\cdot)$\\[-1pt]\scriptsize $[C,D]$};
+\node[box, right=of u] (su) {$S(\cdot)$\\[-1pt]\scriptsize $[C,D]$};
+\node[box, right=of sg, yshift=-6mm] (glu) {$\silu(a)\odot b$\\[-1pt]\scriptsize $[C,D]$};
+\node[box, right=of glu] (an) {$S^\top(\cdot)$\\[-1pt]\scriptsize $[C,m]$};
+\node[box, right=of an] (y) {$\sum_c W_c\odot t_c$\\[-1pt]\scriptsize $[m]$};
+\draw[-{Stealth}] (h) -- (g); \draw[-{Stealth}] (h) -- (u);
+\draw[-{Stealth}] (g) -- (sg); \draw[-{Stealth}] (u) -- (su);
+\draw[-{Stealth}] (sg) -- node[above, font=\scriptsize] {$a$} (glu); \draw[-{Stealth}] (su) -- node[below, font=\scriptsize] {$b$} (glu);
+\draw[-{Stealth}] (glu) -- (an); \draw[-{Stealth}] (an) -- node[above, font=\scriptsize] {$t$} (y);
+\end{tikzpicture}
+\caption{The spectral mixer for one row. Per-mode filters act on the $m$
+retained coefficients, synthesis $S$ moves to the $D$-sample signal domain
+where the gated product couples frequencies, analysis $S^\top$ returns to $m$
+coefficients, and per-mode output weights sum the $C$ channels.}
+\label{fig:mixer}
+\end{figure}
+
+Read from the inside out (\cref{fig:mixer}): each channel filters the input spectrum twice
 (diagonal maps, $2m$ parameters), synthesizes both filtered spectra into
 $D$-sample signals, applies the SwiGLU product \citep{shazeer2020glu} pointwise
 in the signal domain, analyses the result back to $m$ coefficients, and
