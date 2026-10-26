@@ -124,6 +124,7 @@ use gpu_core::select::Dtype;
 use gpu_core::{f, DeviceBuffer, Dispatch, Gpu, Step};
 use model::head_ce::{GradScale, HeadBackward, HeadCe, HeadCeConfig, HeadKernels};
 use model::ops::{Act, Ops, TierPolicy, Weight};
+use model::saved::{Residuals, SavedPolicy};
 use model::Shard;
 use model::adapter::exec::AdapterRuntime;
 use paramstore::{ParamStore, Role};
@@ -350,6 +351,8 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         v.extend(optim::MOMENT_KERNELS);
         // The row-compacted expert training path (`model::moe::MoeActs::compact`), resolved by name.
         let mut v = model::moe::with_compact_train_kernels(&v);
+        // Narrow boundary residuals (`model::saved::Residuals`), resolved by name.
+        v.extend_from_slice(model::saved::kernels());
         v.push(("matmul_gemv", kernels::MATMUL_GEMV));
         v.push(("matmul_reg2", kernels::MATMUL_REG3));
         v.push(("matmul_i8_gemv", kernels::MATMUL_I8_GEMV));
@@ -947,7 +950,10 @@ pub struct Qwen35 {
     /// convention `crates/glm/src/model.rs` uses, kept here even though
     /// nothing backprops through it (useful for parity debugging: any layer's
     /// residual output is independently readable).
-    res: Vec<DeviceBuffer>,
+    res: Residuals,
+    /// What the backward keeps of the forward: every layer's activations, or (recompute) only the residual between
+    /// layers, each layer's activations rebuilt right before its backward ([`model::Model::set_saved_policy`]).
+    saved: SavedPolicy,
 
     /// All-ones buffer of width `linear_key_head_dim`, bound as `l2norm_scale
     /// .wgsl`'s per-dim scale so its learnably-scaled L2-norm computes the
@@ -1653,6 +1659,7 @@ impl Qwen35 {
         for _ in 0..=cfg.n_layers {
             res.push(gpu.storage(n * d));
         }
+        let res = Residuals::new(res, shard.start..shard.end + 1);
         // Pipeline-parallel cross-stage boundary gradient buffers -- see the
         // struct fields' own doc.
         let dres_boundary_in = gpu.storage(n * d);
@@ -1748,6 +1755,7 @@ impl Qwen35 {
             targets,
             count: Cell::new(1.0),
             res,
+            saved: SavedPolicy::Keep,
             ones_khd,
             cos,
             sin,
@@ -2735,6 +2743,60 @@ impl Qwen35 {
 
     // ---- full stack ----------------------------------------------------------
 
+    /// Round boundary `l` through its narrow store as the forward writes it, so the next layer continues from the value
+    /// the backward will decode (no work while the boundaries are held in f32).
+    fn round_trip_boundary(&self, l: usize) {
+        let mut s = Vec::new();
+        self.res.round_trip(&self.gpu, &mut s, l);
+        if !s.is_empty() {
+            self.gpu.submit(&[], &s);
+        }
+    }
+
+    /// Decode boundary `l` into its working buffer before a step reads it (no work while held in f32).
+    fn restore_boundary(&self, l: usize) {
+        let mut s = Vec::new();
+        self.res.restore(&self.gpu, &mut s, l);
+        if !s.is_empty() {
+            self.gpu.submit(&[], &s);
+        }
+    }
+
+    /// Layer `l` over `n` rows, from the residual `xres` into `out`. A training build returns the activations the
+    /// layer's backward reads: the forward keeps them for that backward, or (recompute) the backward calls this again
+    /// from the kept input and gets the very same ones.
+    fn layer_forward(&self, l: usize, n: u32, xres: &DeviceBuffer, out: &DeviceBuffer) -> Option<LayerTrainActs> {
+        let g = &self.gpu;
+        let d = self.cfg.d_model;
+        let ty = self.cfg.layer_types()[l];
+        let xn1 = g.storage((n * d) as u64);
+        g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), xres, self.w(&format!("blocks.{l}.ln1.weight")), &xn1, d, n, self.cfg.rms_eps)]);
+
+        let (attn_out, mixer_acts) = match ty {
+            LayerType::Linear => {
+                let (o, a) = self.layer_gdn_fwd(l, &xn1, n, GdnCall::Whole);
+                (o, a.map(|a| MixerActs::Gdn(Box::new(a))))
+            }
+            LayerType::Full => {
+                let (o, a) = self.layer_gqa_fwd(l, &xn1, n, None);
+                (o, a.map(MixerActs::Gqa))
+            }
+        };
+
+        let xmid = g.storage((n * d) as u64);
+        g.submit(&[], &[g.step(ADD2, &[xres, &attn_out, &xmid], &[n * d], n * d)]);
+
+        let (moe_out, moe_acts) = self.moe_sublayer(l, &xmid, n);
+        g.submit(&[], &[g.step(ADD2, &[&xmid, &moe_out, out], &[n * d], n * d)]);
+
+        self.is_train.then(|| LayerTrainActs {
+            xn1,
+            mixer: mixer_acts.expect("qwen35: is_train but layer_gdn_fwd/layer_gqa_fwd returned no acts"),
+            xmid,
+            moe: moe_acts.expect("qwen35: is_train but moe_sublayer returned no acts"),
+        })
+    }
+
     /// Run this stage's forward graph over its own layer range
     /// (`self.shard.start..self.shard.end`, ABSOLUTE layer indices - `res`
     /// stays indexed by the real layer number, only the loop bounds are
@@ -2766,41 +2828,14 @@ impl Qwen35 {
             }
         }
 
-        let types = self.cfg.layer_types();
-        // `l` is the ABSOLUTE layer index (into `types`/`self.res`/the
-        // `blocks.{l}.*` weight names below), not just a `types` index --
-        // clippy's `needless_range_loop` heuristic only sees the first use.
-        #[allow(clippy::needless_range_loop)]
+        self.round_trip_boundary(self.shard.start);
+        // `l` is the ABSOLUTE layer index (into the layer types, `self.res` and the `blocks.{l}.*` weight names).
         for l in self.shard.start..self.shard.end {
-            let ty = types[l];
-            let xres = &self.res[l];
-            let xn1 = g.storage((n * d) as u64);
-            g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), xres, self.w(&format!("blocks.{l}.ln1.weight")), &xn1, d, n, self.cfg.rms_eps)]);
-
-            let (attn_out, mixer_acts) = match ty {
-                LayerType::Linear => {
-                    let (o, a) = self.layer_gdn_fwd(l, &xn1, n, GdnCall::Whole);
-                    (o, a.map(|a| MixerActs::Gdn(Box::new(a))))
-                }
-                LayerType::Full => {
-                    let (o, a) = self.layer_gqa_fwd(l, &xn1, n, None);
-                    (o, a.map(MixerActs::Gqa))
-                }
-            };
-
-            let xmid = g.storage((n * d) as u64);
-            g.submit(&[], &[g.step(ADD2, &[xres, &attn_out, &xmid], &[n * d], n * d)]);
-
-            let (moe_out, moe_acts) = self.moe_sublayer(l, &xmid, n);
-            g.submit(&[], &[g.step(ADD2, &[&xmid, &moe_out, &self.res[l + 1]], &[n * d], n * d)]);
-
-            if self.is_train {
-                layer_acts.push(LayerTrainActs {
-                    xn1,
-                    mixer: mixer_acts.expect("qwen35: is_train but layer_gdn_fwd/layer_gqa_fwd returned no acts"),
-                    xmid,
-                    moe: moe_acts.expect("qwen35: is_train but moe_sublayer returned no acts"),
-                });
+            let acts = self.layer_forward(l, n, &self.res[l], &self.res[l + 1]);
+            self.round_trip_boundary(l + 1);
+            // A recomputing build drops each layer's activations here and rebuilds them in the backward.
+            if self.is_train && !self.saved.recomputes() {
+                layer_acts.push(acts.expect("qwen35: is_train but layer_forward returned no acts"));
             }
         }
 
@@ -3102,6 +3137,7 @@ impl Qwen35 {
             // ---- final norm backward ----
             let d_res_next = g.storage((n * d) as u64);
             {
+                self.restore_boundary(self.cfg.n_layers as usize);
                 let mut s = Vec::new();
                 self.rmsnorm_bwd_step(&mut s, &self.res[self.cfg.n_layers as usize], "norm.weight", &d_xn_final, &d_res_next, d, n);
                 g.submit(&[], &s);
@@ -3111,8 +3147,19 @@ impl Qwen35 {
             self.dres_boundary_in.clone()
         };
 
+        // Where a recomputed layer writes its (unused) output residual.
+        let recompute_out = self.saved.recomputes().then(|| g.storage((n * d) as u64));
         for l in (self.shard.start..self.shard.end).rev() {
-            let la = &ta.layers[l - self.shard.start];
+            // This layer's input boundary (decoded into its working buffer when held narrow), then, when recomputing,
+            // the layer's activations rebuilt from it.
+            self.restore_boundary(l);
+            let rebuilt: Option<LayerTrainActs> = recompute_out
+                .as_ref()
+                .map(|out| self.layer_forward(l, n, &self.res[l], out).expect("qwen35: backward() requires a training build"));
+            let la = match &rebuilt {
+                Some(rebuilt) => rebuilt,
+                None => &ta.layers[l - self.shard.start],
+            };
 
             // ---- second residual add backward: res[l+1] = xmid + moe_out ----
             // Both branches receive the FULL upstream gradient (d_res_next):
@@ -3155,6 +3202,11 @@ impl Qwen35 {
                 g.submit(&[], &s);
             }
             d_res_next = d_res_l;
+            if rebuilt.is_some() {
+                // Return this layer's rebuilt activations before the next layer allocates its own.
+                drop(rebuilt);
+                g.poll_wait();
+            }
         }
 
         // This stage's INPUT-boundary gradient (`dres[shard.start]`), for the
@@ -3185,6 +3237,38 @@ impl Qwen35 {
                 g.submit(&[], &[g.step(EMB_BWD, &[&self.tokens, &d_res_next, self.g("tok.weight")], &[n, d, v], v * d)]);
             }
         }
+    }
+
+    /// How many layers' activations the last `forward()` left for `backward()`: every layer owned by this stage
+    /// while keeping them, none while recomputing - the quantity that decides whether training memory scales with depth.
+    pub fn retained_layer_activations(&self) -> usize {
+        self.train_acts.borrow().as_ref().map_or(0, |ta| ta.layers.len())
+    }
+
+    /// Keep what `policy` names of the forward: every layer's activations ([`SavedPolicy::Keep`]), or only the residual
+    /// between layers ([`SavedPolicy::Recompute`]), where the forward drops each layer's activations (Gated DeltaNet
+    /// state and routed-expert rows included) and the backward rebuilds them from the layer's input before its own
+    /// backward, those residuals optionally held in bf16 or FP8 ([`SavedPolicy::Quantized`], see [`Residuals`]; a
+    /// whole-model training build only, since a stage seam reads the f32 stream). A build only narrows what it keeps;
+    /// widening again is refused by name. Called before the first forward.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        if !self.saved.narrows_to(policy) {
+            return Err(format!("qwen35moe: a build keeping {:?} cannot go back to {policy:?}", self.saved));
+        }
+        if policy == self.saved {
+            return Ok(());
+        }
+        if !self.is_train {
+            return Err("qwen35moe: an inference build has no backward to recompute for".into());
+        }
+        if let SavedPolicy::Quantized(format) = policy {
+            if !self.shard.is_whole(self.cfg.n_layers as usize) {
+                return Err("qwen35moe: narrow boundary residuals need a whole-model build (a stage seam reads the f32 stream)".into());
+            }
+            self.res.quantize(&self.gpu, format, self.b * self.t, self.cfg.d_model).map_err(|e| format!("qwen35moe: {e}"))?;
+        }
+        self.saved = policy;
+        Ok(())
     }
 
     pub fn zero_grads(&self) {
@@ -3911,6 +3995,12 @@ impl Qwen35 {
 
     // ---- pipeline-parallel cross-stage seam (`model::Shardable`) ----------
 
+    /// The residual buffers are read and written directly only while they are held in f32: a narrow build keeps two
+    /// working buffers and the boundaries packed.
+    fn assert_boundaries_addressable(&self, tap: &str) {
+        assert!(self.res.format() == model::saved::SavedFormat::F32, "qwen35moe: {tap}: boundaries held in {:?} are not addressable", self.res.format());
+    }
+
     /// Residual-stream element count at a stage boundary (`b·t·d_model`).
     /// Mirrors `qwen3::Qwen::res_numel` exactly.
     fn res_numel(&self) -> usize {
@@ -3919,11 +4009,13 @@ impl Qwen35 {
     /// Read this stage's OUTPUT residual `res[shard.end]` (input to the next
     /// stage's [`Self::write_in_res`]).
     pub fn read_out_res(&self) -> Vec<f32> {
+        self.assert_boundaries_addressable("read_out_res");
         self.gpu.read(&self.res[self.shard.end], self.res_numel())
     }
     /// Write this stage's INPUT residual `res[shard.start]` (from the
     /// previous stage's [`Self::read_out_res`]).
     pub fn write_in_res(&self, data: &[f32]) {
+        self.assert_boundaries_addressable("write_in_res");
         self.gpu.write(&self.res[self.shard.start], bytemuck::cast_slice(data));
     }
     /// Read this stage's INPUT-boundary residual gradient `dres[shard.start]`
@@ -4084,6 +4176,10 @@ impl model::Model for Qwen35 {
 
     fn optimizer_parts(&self) -> Option<model::OptimizerParts<'_>> {
         Some(model::OptimizerParts { gpu: &self.gpu, store: &self.ps, optim: &self.opt })
+    }
+
+    fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        Qwen35::set_saved_policy(self, policy)
     }
 
     type Config = Qwen35Config;

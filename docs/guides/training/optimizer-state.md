@@ -120,7 +120,8 @@ forward used (`model::saved::Residuals`). The fit loop hands the choice to the
 model (`Model::set_saved_policy`):
 
 - deepseek2, glmdsa, gpt2, lfm2 and horizon share one set of activation buffers
-  across their layers;
+  across their layers, and qwen35moe (whose forward allocates its activations
+  afresh) keeps none of them past the layer;
 - spectrallm, ouro and huginn always rebuild each layer and refuse `keep`;
 - qwen3 and qwen35 answer from what they were built with;
 - every model above that recomputes (huginn: its recurrence) also holds bf16 or

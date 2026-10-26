@@ -129,7 +129,9 @@ The per-cell matrix and its tests are `docs/reference/training-capabilities.md`.
   and huginn always rebuild each layer and refuse keep (`check_always_recomputes`); every other
   model keeps every layer and refuses by name. Narrow boundaries through the shared
   `model::saved::Residuals` (`check_quantized_boundaries`): gpt2, deepseek2, glmdsa, lfm2, horizon, spectrallm, ouro, huginn.
-  Open: the recompute pattern in qwen35moe and the vision trainers.
+  qwen35moe (eager) keeps no layer's activations past the forward and replays each; its narrow-boundary spec runs
+  with every token routed to every expert (fp8 flips a fixed fraction of top-2 choices against f32). Open: the
+  vision trainers.
 - D Layer streaming for any `ParamStore` model (`weights=f32,window=N`): `ResidentValue::F32` (the value its own
   master), `ops::DeviceIo`/`StoreDevice` (the state on the model's own handle), `model::tape::LayerTape` (per-layer
   segments), `model::streamed::StreamedStore` (converts a built store, aliases its entries to the window, drives
