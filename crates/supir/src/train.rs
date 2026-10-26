@@ -44,10 +44,10 @@
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 use vae::blocks::grad::{BwdIds, Grads, Reverse, Trace};
-use vae::blocks::Tensors;
+use vae::blocks::{Activations, Tensors};
 
 use crate::config::SupirConfig;
-use crate::model::Supir;
+use crate::model::{GraphShape, Supir};
 
 /// Where [`vae::blocks::BWD_KERNELS`] sits in [`TRAIN_KERNELS`] - right after
 /// [`crate::model::KERNELS`] (which already carries the `edm_mix`/`scale_row`
@@ -89,10 +89,11 @@ pub struct SupirTrainer {
 }
 
 impl SupirTrainer {
-    /// Record the forward + reverse. `gpu` must carry [`TRAIN_KERNELS`].
-    pub fn new(gpu: Gpu, cfg: SupirConfig, tensors: &Tensors, h: u32, w: u32, t_enc: u32, control_scale: f32) -> SupirTrainer {
-        let supir = Supir::new_train(gpu.share_or_new(TRAIN_PIPELINES), cfg.clone(), tensors, h, w, t_enc, control_scale);
-        let n_out = cfg.backbone.out_channels * h * w;
+    /// Record the forward + reverse at `shape`, keeping or recomputing the blocks' internals (`activations`). `gpu`
+    /// must carry [`TRAIN_KERNELS`].
+    pub fn new(gpu: Gpu, cfg: SupirConfig, tensors: &Tensors, shape: GraphShape, activations: Activations) -> SupirTrainer {
+        let supir = Supir::new_train(gpu.share_or_new(TRAIN_PIPELINES), cfg.clone(), tensors, shape, activations);
+        let n_out = cfg.backbone.out_channels * shape.h * shape.w;
 
         let target = gpu.storage(n_out as u64);
         let loss = gpu.storage(n_out as u64);
@@ -184,6 +185,11 @@ impl SupirTrainer {
 
     pub fn gpu(&self) -> &Gpu {
         &self.gpu
+    }
+
+    /// The network's output, valid after [`Self::forward`].
+    pub fn out(&self) -> &DeviceBuffer {
+        self.supir.out()
     }
 
     /// `dL/d(out)` after a [`Self::backward`] - exposed for tests that check

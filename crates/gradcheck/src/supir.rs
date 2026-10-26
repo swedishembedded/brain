@@ -69,6 +69,7 @@ use std::cell::Cell;
 
 use data::rng::Rng;
 use supir::config::SupirConfig;
+use supir::model::GraphShape;
 use supir::train::{SupirTrainer, TRAIN_PIPELINES};
 
 use crate::{directional_check, elementwise_check, CheckModel, Report};
@@ -106,7 +107,7 @@ fn trainer_at(cfg: SupirConfig, seed: u64) -> SupirTrainer {
     let mut tensors = sdxlunet::init::init_weights(&cfg.backbone, seed);
     tensors.extend(supir::init::init_weights(&cfg, seed ^ 0x5350_4952));
     let gpu = gpu_core::testgpu::dev(TRAIN_PIPELINES);
-    let m = SupirTrainer::new(gpu, cfg.clone(), &tensors, H, W, T_ENC, CONTROL_SCALE);
+    let m = SupirTrainer::new(gpu, cfg.clone(), &tensors, GraphShape { h: H, w: W, t_enc: T_ENC, control_scale: CONTROL_SCALE }, vae::blocks::Activations::Keep);
 
     let c = cfg.backbone.clone();
     let mut rng = Rng::new(seed ^ 0x5DEC_0DE5);

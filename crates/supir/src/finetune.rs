@@ -111,7 +111,9 @@ impl Finetuner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::GraphShape;
     use data::rng::Rng;
+    use vae::blocks::Activations;
 
     /// One fixed, deterministic example: `(sample, hint, enc, pooled,
     /// time_ids, target)`, all finite and none identically zero.
@@ -169,7 +171,7 @@ mod tests {
     fn new_trainer(seed: u64) -> (crate::config::SupirConfig, SupirTrainer) {
         let (cfg, tensors) = crate::train::tiny_setup(seed);
         let gpu = gpu_core::testgpu::dev(crate::train::TRAIN_PIPELINES);
-        let trainer = SupirTrainer::new(gpu, cfg.clone(), &tensors, H, W, T_ENC, CONTROL_SCALE);
+        let trainer = SupirTrainer::new(gpu, cfg.clone(), &tensors, GraphShape { h: H, w: W, t_enc: T_ENC, control_scale: CONTROL_SCALE }, Activations::Keep);
         (cfg, trainer)
     }
 

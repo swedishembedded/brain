@@ -58,7 +58,7 @@
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 use vae::blocks::grad::{BwdIds, Grads, Reverse, Trace};
-use vae::blocks::Tensors;
+use vae::blocks::{Activations, Tensors};
 
 use crate::config::UNetConfig;
 use crate::model::Unet;
@@ -118,9 +118,10 @@ pub struct UnetTrainer {
 
 impl UnetTrainer {
     /// Record the forward + reverse for a `[out_channels, h, w]` output and
-    /// `t_enc` text tokens. `gpu` must carry [`TRAIN_KERNELS`].
-    pub fn new(gpu: Gpu, cfg: UNetConfig, tensors: &Tensors, h: u32, w: u32, t_enc: u32) -> UnetTrainer {
-        let unet = Unet::new_train(gpu.share_or_new(TRAIN_PIPELINES), cfg.clone(), tensors, h, w, t_enc);
+    /// `t_enc` text tokens, keeping or recomputing the resnets' and transformers' internals (`activations`).
+    /// `gpu` must carry [`TRAIN_KERNELS`].
+    pub fn new(gpu: Gpu, cfg: UNetConfig, tensors: &Tensors, h: u32, w: u32, t_enc: u32, activations: Activations) -> UnetTrainer {
+        let unet = Unet::new_train(gpu.share_or_new(TRAIN_PIPELINES), cfg.clone(), tensors, h, w, t_enc, activations);
         let n_out = cfg.out_channels * h * w;
 
         let target = gpu.storage(n_out as u64);

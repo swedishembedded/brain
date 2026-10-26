@@ -114,7 +114,7 @@ fn narrow_conditioning() -> ControlNetConfig {
 fn trainer_at(cfg: ControlNetConfig, seed: u64) -> ControlNetTrainer {
     let tensors = controlnet::train::tensors_for(&cfg, seed);
     let gpu = gpu_core::testgpu::dev(TRAIN_PIPELINES);
-    let m = ControlNetTrainer::new(gpu, cfg.clone(), &tensors, H, W, T_ENC);
+    let m = ControlNetTrainer::new(gpu, cfg.clone(), &tensors, H, W, T_ENC, vae::blocks::Activations::Keep);
 
     let bb = &cfg.backbone;
     let ds = cfg.cond_downscale();

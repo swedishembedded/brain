@@ -79,7 +79,7 @@ fn trainer(seed: u64) -> UnetTrainer {
 fn trainer_with(cfg: UNetConfig, seed: u64) -> UnetTrainer {
     let tensors = sdxlunet::init::init_weights(&cfg, seed);
     let gpu = gpu_core::testgpu::dev(TRAIN_PIPELINES);
-    let m = UnetTrainer::new(gpu, cfg.clone(), &tensors, H, W, T_ENC);
+    let m = UnetTrainer::new(gpu, cfg.clone(), &tensors, H, W, T_ENC, vae::blocks::Activations::Keep);
 
     let mut rng = Rng::new(seed ^ 0x5DEC_0DE5);
     let mut r = |n: usize| -> Vec<f32> { (0..n).map(|_| 2.0 * rng.next_f32() - 1.0).collect() };

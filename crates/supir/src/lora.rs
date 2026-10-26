@@ -291,7 +291,7 @@ mod tests {
         // see `crate::finetune`'s test module doc for why `H=W=8`.
         let (h, w, t_enc) = (8u32, 8u32, 5u32);
         let gpu = gpu_core::testgpu::dev(crate::train::TRAIN_PIPELINES);
-        let trainer = crate::train::SupirTrainer::new(gpu, cfg.clone(), &folded, h, w, t_enc, 0.7);
+        let trainer = crate::train::SupirTrainer::new(gpu, cfg.clone(), &folded, crate::model::GraphShape { h, w, t_enc, control_scale: 0.7 }, vae::blocks::Activations::Keep);
 
         let c = cfg.backbone.clone();
         let mut rng = Rng::new(data::rng::random_seed());

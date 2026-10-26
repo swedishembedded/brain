@@ -56,7 +56,7 @@
 use gpu_core::{DeviceBuffer, Gpu, Step};
 use model::block;
 use vae::blocks::skipfuse::{Map, SkipFuse};
-use vae::blocks::{BlockNames, Builder, PackedTensors, Tensors};
+use vae::blocks::{Activations, BlockNames, Builder, PackedTensors, Tensors};
 
 use crate::config::{BlockKind, UNetConfig, N_TIME_IDS, TRANSFORMER_NORM_EPS};
 use crate::hostemb;
@@ -207,22 +207,28 @@ impl<'a> Rec<'a> {
     /// each site's own softmax). [`attn_slab_words`] survives for callers that
     /// budget VRAM ahead of a build.
     pub fn new(gpu: &'a Gpu, cfg: &UNetConfig, tensors: &'a Tensors, t_enc: u32, taps: bool) -> Rec<'a> {
-        Rec::new_maybe_train(gpu, cfg, tensors, t_enc, taps, false)
+        Rec::new_maybe_train(gpu, cfg, tensors, t_enc, taps, None)
     }
 
     /// [`Rec::new`] recording the reverse-mode tape - what
     /// [`crate::train::UnetTrainer`] builds on. Train mode also pins the
     /// differentiable lowerings (direct conv, materialised attention) and
     /// disables the activation pool, so the forward is SSA and doubles as the
-    /// backprop cache.
-    pub fn new_train(gpu: &'a Gpu, cfg: &UNetConfig, tensors: &'a Tensors, t_enc: u32, taps: bool) -> Rec<'a> {
-        Rec::new_maybe_train(gpu, cfg, tensors, t_enc, taps, true)
+    /// backprop cache - except that under [`Activations::Recompute`] the
+    /// resnets, transformers and a caller's own blocks record as segments
+    /// whose internals are rebuilt before their adjoint.
+    pub fn new_train(gpu: &'a Gpu, cfg: &UNetConfig, tensors: &'a Tensors, t_enc: u32, taps: bool, activations: Activations) -> Rec<'a> {
+        Rec::new_maybe_train(gpu, cfg, tensors, t_enc, taps, Some(activations))
     }
 
-    fn new_maybe_train(gpu: &'a Gpu, cfg: &UNetConfig, tensors: &'a Tensors, t_enc: u32, taps: bool, train: bool) -> Rec<'a> {
+    /// `train` is `None` for an inference graph, else what its reverse keeps.
+    fn new_maybe_train(gpu: &'a Gpu, cfg: &UNetConfig, tensors: &'a Tensors, t_enc: u32, taps: bool, train: Option<Activations>) -> Rec<'a> {
         let mut b = Builder::new(gpu, tensors, cfg.norm_eps, cfg.norm_num_groups, BlockNames::diffusers(), taps);
         // Must precede the first recorded block.
-        b.set_train(train);
+        b.set_train(train.is_some());
+        if let Some(activations) = train {
+            b.set_activations(activations);
+        }
         let ln = block::LayerNormIds::resolve_fwd(gpu, K_LAYERNORM);
         // The transformer half's FORWARD slots, which this crate registers and
         // `vae::blocks` does not - see `vae::blocks::XformerIds`. Handing them
@@ -474,7 +480,8 @@ impl<'a> Rec<'a> {
         self.resnet("mid_block.resnets.1", "mid.resnet1", cmid, cmid, ch, cw, te, &hh)
     }
 
-    /// `ResnetBlock2D` with `time_embedding_norm = "default"`.
+    /// `ResnetBlock2D` with `time_embedding_norm = "default"`. One recomputable segment
+    /// ([`vae::blocks::Builder::segment`]).
     #[allow(clippy::too_many_arguments)]
     pub fn resnet(
         &mut self,
@@ -489,6 +496,7 @@ impl<'a> Rec<'a> {
     ) -> DeviceBuffer {
         let prefix = format!("{}{prefix}", self.prefix);
         let tap = format!("{}{tap}", self.prefix);
+        let opened = self.b.begin_segment();
         let (nin, nout) = ((cin * h * w) as u64, (cout * h * w) as u64);
         let (shortcut, owned) = if cin != cout {
             (self.b.conv(&format!("{prefix}.conv_shortcut"), cin, cout, 1, 0, h, w, x), true)
@@ -530,10 +538,11 @@ impl<'a> Rec<'a> {
             self.b.free(nout, shortcut);
         }
         self.b.tap(tap.to_string(), &out, cout * h * w);
+        self.b.end_segment(opened);
         out
     }
 
-    /// One `BasicTransformerBlock` over `[T, c]` rows.
+    /// One `BasicTransformerBlock` over `[T, c]` rows. One recomputable segment.
     #[allow(clippy::too_many_arguments)]
     pub fn transformer_block(
         &mut self,
@@ -547,6 +556,7 @@ impl<'a> Rec<'a> {
         enc: &DeviceBuffer,
         h: &DeviceBuffer,
     ) -> DeviceBuffer {
+        let opened = self.b.begin_segment();
         let n = (t as u64) * (c as u64);
         let t_enc = self.t_enc;
 
@@ -627,6 +637,7 @@ impl<'a> Rec<'a> {
         self.b.free(n, ff);
         self.b.free(n, h2);
         self.b.tap(tap.to_string(), &out, t * c);
+        self.b.end_segment(opened);
         out
     }
 
@@ -667,7 +678,8 @@ impl<'a> Rec<'a> {
         self.b.cross_attn(heads, hd, c, t, self.t_enc, q, kv, ctx);
     }
 
-    /// `Transformer2DModel` (`use_linear_projection = true`).
+    /// `Transformer2DModel` (`use_linear_projection = true`). One recomputable segment holding every
+    /// block of the stage.
     #[allow(clippy::too_many_arguments)]
     pub fn transformer(
         &mut self,
@@ -687,6 +699,7 @@ impl<'a> Rec<'a> {
         let t = h * w;
         let n = (t as u64) * (c as u64);
 
+        let opened = self.b.begin_segment();
         self.b.set_eps(TRANSFORMER_NORM_EPS);
         let norm = self.b.gn(&format!("{prefix}.norm"), c, h, w, x);
         self.b.set_eps(cfg.norm_eps);
@@ -726,6 +739,7 @@ impl<'a> Rec<'a> {
         let out = self.b.add(c * t, x, &chw);
         self.b.free(n, chw);
         self.b.tap(tap.to_string(), &out, c * t);
+        self.b.end_segment(opened);
         out
     }
 
@@ -857,9 +871,10 @@ impl Unet {
     /// other bit-for-bit).
     /// [`Unet::new`] recording the reverse-mode tape, for
     /// [`crate::train::UnetTrainer`]. No control residuals and no injection:
-    /// the backward is gated against the plain graph.
-    pub fn new_train(gpu: Gpu, cfg: UNetConfig, tensors: &Tensors, h: u32, w: u32, t_enc: u32) -> Unet {
-        Unet::build(gpu, cfg, tensors, None, h, w, t_enc, false, false, None, true, None)
+    /// the backward is gated against the plain graph. `activations` is what
+    /// the reverse keeps of the forward.
+    pub fn new_train(gpu: Gpu, cfg: UNetConfig, tensors: &Tensors, h: u32, w: u32, t_enc: u32, activations: Activations) -> Unet {
+        Unet::build(gpu, cfg, tensors, None, h, w, t_enc, false, false, None, Some(activations), None)
     }
 
     /// The recorded tape, on a [`Unet::new_train`] build.
@@ -932,7 +947,7 @@ impl Unet {
                  construct it from the union of sdxlunet::KERNELS and the adapter's (see model::attninject)"
             );
         }
-        Unet::build(gpu, cfg, tensors, None, h, w, t_enc, taps, control, Some(inject), false, None)
+        Unet::build(gpu, cfg, tensors, None, h, w, t_enc, taps, control, Some(inject), None, None)
     }
 
     pub fn new_controlled(
@@ -945,7 +960,7 @@ impl Unet {
         taps: bool,
         control: bool,
     ) -> Unet {
-        Unet::build(gpu, cfg, tensors, None, h, w, t_enc, taps, control, None, false, None)
+        Unet::build(gpu, cfg, tensors, None, h, w, t_enc, taps, control, None, None, None)
     }
 
     /// [`Unet::new`], but with the up path's skip joins, the post-mid-block
@@ -977,7 +992,7 @@ impl Unet {
                  construct it from the union of sdxlunet::KERNELS and the adapter's (see vae::blocks::skipfuse)"
             );
         }
-        Unet::build(gpu, cfg, tensors, None, h, w, t_enc, taps, false, None, false, Some(fuse))
+        Unet::build(gpu, cfg, tensors, None, h, w, t_enc, taps, false, None, None, Some(fuse))
     }
 
     /// [`Unet::new`], but every weight `tensors` doesn't carry falls back to
@@ -988,7 +1003,7 @@ impl Unet {
     /// the device buffers this produces are bit-identical to `Unet::new`'s
     /// (same dispatch, same fp32 GEMM), only the host-resident bytes differ.
     pub fn new_quantized(gpu: Gpu, cfg: UNetConfig, tensors: &Tensors, packed: &PackedTensors, h: u32, w: u32, t_enc: u32, taps: bool) -> Unet {
-        Unet::build(gpu, cfg, tensors, Some(packed), h, w, t_enc, taps, false, None, false, None)
+        Unet::build(gpu, cfg, tensors, Some(packed), h, w, t_enc, taps, false, None, None, None)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1003,7 +1018,7 @@ impl Unet {
         taps: bool,
         control: bool,
         inject: Option<&dyn model::attninject::CrossAttnInject>,
-        train: bool,
+        train: Option<Activations>,
         fuse: Option<&dyn SkipFuse>,
     ) -> Unet {
         let levels = cfg.levels();
@@ -1025,7 +1040,10 @@ impl Unet {
             aug_in: aug_in.clone(),
         };
 
-        let mut r = if train { Rec::new_train(&gpu, &cfg, tensors, t_enc, taps) } else { Rec::new(&gpu, &cfg, tensors, t_enc, taps) };
+        let mut r = match train {
+            Some(activations) => Rec::new_train(&gpu, &cfg, tensors, t_enc, taps, activations),
+            None => Rec::new(&gpu, &cfg, tensors, t_enc, taps),
+        };
         r.inject = inject;
         r.fuse = fuse;
         if let Some(p) = packed {
@@ -1036,7 +1054,7 @@ impl Unet {
 
         let sites = rec.sites;
         let blocks = r.into_blocks();
-        let trace = train.then(|| blocks.trace());
+        let trace = train.map(|_| blocks.trace());
         let (steps, taps) = blocks.finish();
         Unet {
             sites,
@@ -1114,6 +1132,8 @@ impl Unet {
                 let (skip, cskip, sh, sw) =
                     skips.pop().expect("the skip stack is sized by UNetConfig::skip_stack");
                 assert_eq!((sh, sw), (ch, cw), "up{i}.resnet{j}: skip is {sh}x{sw}, hidden is {ch}x{cw}");
+                // The joined tensor lives only inside the resnet that reads it: one recomputable segment.
+                let opened = r.b.begin_segment();
                 let (cat, cin) = r.join_skip(prev, cskip, ch, cw, &hh, &skip);
                 r.b.tap(format!("up{i}.cat{j}"), &cat, cin * ch * cw);
                 let next = r.resnet(
@@ -1127,6 +1147,7 @@ impl Unet {
                     &cat,
                 );
                 r.b.free((cin as u64) * (ch as u64) * (cw as u64), cat);
+                r.b.end_segment(opened);
                 hh = next;
                 if cfg.up_block_types[i] == BlockKind::CrossAttn {
                     hh = r.transformer(

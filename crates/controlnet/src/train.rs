@@ -90,7 +90,7 @@ use gpu_core::{DeviceBuffer, Gpu, Step};
 use sdxlunet::config::BlockKind;
 use sdxlunet::model::Rec;
 use vae::blocks::grad::{BwdIds, Grads, Reverse, Trace};
-use vae::blocks::{ScaleChanIds, Tensors};
+use vae::blocks::{Activations, ScaleChanIds, Tensors};
 
 use crate::config::ControlNetConfig;
 use crate::model::K_SCALE;
@@ -149,9 +149,10 @@ pub struct ControlNetTrainer {
 }
 
 impl ControlNetTrainer {
-    /// Record the forward + reverse. `gpu` must carry [`TRAIN_KERNELS`].
+    /// Record the forward + reverse, keeping or recomputing the blocks' internals (`activations`). `gpu` must carry
+    /// [`TRAIN_KERNELS`].
     #[allow(clippy::too_many_lines)]
-    pub fn new(gpu: Gpu, cfg: ControlNetConfig, tensors: &Tensors, h: u32, w: u32, t_enc: u32) -> ControlNetTrainer {
+    pub fn new(gpu: Gpu, cfg: ControlNetConfig, tensors: &Tensors, h: u32, w: u32, t_enc: u32, activations: Activations) -> ControlNetTrainer {
         cfg.validate().expect("controlnet train: invalid config");
         let gpu = gpu.share_or_new(TRAIN_PIPELINES);
         let bb = cfg.backbone.clone();
@@ -176,7 +177,7 @@ impl ControlNetTrainer {
         let loss = gpu.storage(n_out as u64);
         let d_out = gpu.storage(n_out as u64);
 
-        let mut r = Rec::new_train(&gpu, &bb, tensors, t_enc, false);
+        let mut r = Rec::new_train(&gpu, &bb, tensors, t_enc, false, activations);
         r.blocks().set_scale_chan_ids(ScaleChanIds { fwd: K_SCALE });
 
         // ==== 1. ControlNet's own trainable copy ============================
@@ -185,13 +186,19 @@ impl ControlNetTrainer {
 
         let p = |s: &str| format!("controlnet.{s}");
         let ce = &cfg.conditioning_embedding_out_channels;
+        // The embedder is one recomputable segment; every intermediate is freed after its last read.
+        let embedder = r.blocks().begin_segment();
         let (mut eh, mut ew) = (ph, pw);
         let mut e = r.blocks().conv(&p("controlnet_cond_embedding.conv_in"), cfg.conditioning_channels, ce[0], 3, 1, eh, ew, &cond_in);
         let mut ea = r.blocks().silu(ce[0] * eh * ew, &e);
+        r.blocks().free((ce[0] as u64) * (eh as u64) * (ew as u64), e);
         for i in 0..ce.len() - 1 {
             let (cin, cout) = (ce[i], ce[i + 1]);
+            let n_in = (cin as u64) * (eh as u64) * (ew as u64);
             e = r.blocks().conv(&p(&format!("controlnet_cond_embedding.blocks.{}", 2 * i)), cin, cin, 3, 1, eh, ew, &ea);
+            r.blocks().free(n_in, ea);
             ea = r.blocks().silu(cin * eh * ew, &e);
+            r.blocks().free(n_in, e);
             e = r.blocks().conv_s(
                 &p(&format!("controlnet_cond_embedding.blocks.{}", 2 * i + 1)),
                 cin,
@@ -205,13 +212,17 @@ impl ControlNetTrainer {
                 ew / 2,
                 &ea,
             );
+            r.blocks().free(n_in, ea);
             eh /= 2;
             ew /= 2;
             ea = r.blocks().silu(cout * eh * ew, &e);
+            r.blocks().free((cout as u64) * (eh as u64) * (ew as u64), e);
         }
         assert_eq!((eh, ew), (h, w), "controlnet train: the embedder lands at {eh}x{ew}, latent is {h}x{w}");
         let clast = *ce.last().expect("validated >= 2 stages");
         let cond = r.blocks().conv(&p("controlnet_cond_embedding.conv_out"), clast, c0, 3, 1, h, w, &ea);
+        r.blocks().free((clast as u64) * (h as u64) * (w as u64), ea);
+        r.blocks().end_segment(embedder);
 
         let cn_cin = r.blocks().conv(&p("conv_in"), bb.in_channels, c0, 3, 1, h, w, &sample_in);
         let x = r.blocks().add(c0 * h * w, &cn_cin, &cond);
@@ -224,12 +235,19 @@ impl ControlNetTrainer {
         // order then mid - see this module's doc for why that guarantees
         // alignment with the backbone's own skip list below.
         let mut cn_outs: Vec<DeviceBuffer> = Vec::with_capacity(cn_skips.len() + 1);
+        // Each zero-conv is a segment of its own: the unscaled conv output is internal to it.
+        let zero_conv = |r: &mut Rec<'_>, name: String, c: u32, sh: u32, sw: u32, x: &DeviceBuffer| {
+            let opened = r.blocks().begin_segment();
+            let z = r.blocks().conv(&name, c, c, 1, 0, sh, sw, x);
+            let out = r.blocks().scale_chan(c * sh * sw, 1, 1, &z, &scale_in);
+            r.blocks().free((c as u64) * (sh as u64) * (sw as u64), z);
+            r.blocks().end_segment(opened);
+            out
+        };
         for (k, (buf, c, sh, sw)) in cn_skips.into_iter().enumerate() {
-            let z = r.blocks().conv(&p(&format!("controlnet_down_blocks.{k}")), c, c, 1, 0, sh, sw, &buf);
-            cn_outs.push(r.blocks().scale_chan(c * sh * sw, 1, 1, &z, &scale_in));
+            cn_outs.push(zero_conv(&mut r, p(&format!("controlnet_down_blocks.{k}")), c, sh, sw, &buf));
         }
-        let zm = r.blocks().conv(&p("controlnet_mid_block"), cmid, cmid, 1, 0, cn_ch, cn_cw, &cn_mid);
-        cn_outs.push(r.blocks().scale_chan(cmid * cn_ch * cn_cw, 1, 1, &zm, &scale_in));
+        cn_outs.push(zero_conv(&mut r, p("controlnet_mid_block"), cmid, cn_ch, cn_cw, &cn_mid));
 
         // The trainable copy's own conditioning chain is fully consumed
         // (every resnet above already read it) - take it out before
@@ -266,8 +284,12 @@ impl ControlNetTrainer {
             for j in 0..=bb.layers_per_block {
                 let (skip, cskip, sh, sw) = bskips.pop().expect("the skip stack is sized by UNetConfig::skip_stack");
                 assert_eq!((sh, sw), (bch, bcw), "controlnet train up{i}.resnet{j}: skip is {sh}x{sw}, hidden is {bch}x{bcw}");
+                // The joined tensor lives only inside the resnet that reads it: one recomputable segment.
+                let opened = r.blocks().begin_segment();
                 let (cat, cin) = r.join_skip(prev, cskip, bch, bcw, &bhh, &skip);
                 let next = r.resnet(&format!("up_blocks.{i}.resnets.{j}"), &format!("up{i}.resnet{j}"), cin, cout, bch, bcw, bb.time_embed_dim, &cat);
+                r.blocks().free((cin as u64) * (bch as u64) * (bcw as u64), cat);
+                r.blocks().end_segment(opened);
                 bhh = next;
                 if bb.up_block_types[i] == BlockKind::CrossAttn {
                     bhh = r.transformer(&format!("up_blocks.{i}.attentions.{j}"), &format!("up{i}.attn{j}"), &bb, level, bch, bcw, &enc_in, &bhh);

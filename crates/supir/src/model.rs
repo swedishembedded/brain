@@ -43,7 +43,7 @@ use sdxlunet::import::Tensors;
 use sdxlunet::model::{Inputs, Rec, Unet};
 
 use vae::blocks::skipfuse::SkipFuse;
-use vae::blocks::PackedTensors;
+use vae::blocks::{Activations, PackedTensors};
 
 use crate::adaptors::Adaptors;
 use crate::config::SupirConfig;
@@ -72,6 +72,15 @@ const fn kernel_set() -> [(&'static str, &'static str); sdxlunet::model::KERNELS
     k[K_EDM_MIX] = ("edm_mix", kernels::EDM_MIX);
     k[K_SCALE_ROW] = ("scale_row", kernels::SCALE_ROW);
     k
+}
+
+/// What a training graph is recorded for: the latent size, the text-token count and the fixed `control_scale`.
+#[derive(Clone, Copy, Debug)]
+pub struct GraphShape {
+    pub h: u32,
+    pub w: u32,
+    pub t_enc: u32,
+    pub control_scale: f32,
 }
 
 /// A recorded SUPIR forward (trunk + adaptors + frozen UNet) at one latent
@@ -114,7 +123,7 @@ impl Supir {
         taps: bool,
         control_scale: f32,
     ) -> Supir {
-        Supir::build(gpu, cfg, tensors, None, h, w, t_enc, taps, control_scale, false)
+        Supir::build(gpu, cfg, tensors, None, h, w, t_enc, taps, control_scale, None)
     }
 
     /// [`Supir::new`], but every weight `tensors` doesn't carry falls back to
@@ -140,7 +149,7 @@ impl Supir {
         taps: bool,
         control_scale: f32,
     ) -> Supir {
-        Supir::build(gpu, cfg, tensors, Some(packed), h, w, t_enc, taps, control_scale, false)
+        Supir::build(gpu, cfg, tensors, Some(packed), h, w, t_enc, taps, control_scale, None)
     }
 
     /// [`Supir::new`], recording the reverse-mode tape - what
@@ -149,8 +158,10 @@ impl Supir {
     /// forward the tape needs doubles as its own cache), no int8 packing (a
     /// training build wants every gradient buffer, so the host-memory saving
     /// `set_packed` buys is not the relevant axis here).
-    pub fn new_train(gpu: Gpu, cfg: SupirConfig, tensors: &Tensors, h: u32, w: u32, t_enc: u32, control_scale: f32) -> Supir {
-        Supir::build(gpu, cfg, tensors, None, h, w, t_enc, false, control_scale, true)
+    /// `activations` is what the reverse keeps of the forward.
+    pub fn new_train(gpu: Gpu, cfg: SupirConfig, tensors: &Tensors, shape: GraphShape, activations: Activations) -> Supir {
+        let GraphShape { h, w, t_enc, control_scale } = shape;
+        Supir::build(gpu, cfg, tensors, None, h, w, t_enc, false, control_scale, Some(activations))
     }
 
     /// The recorded tape, on a [`Supir::new_train`] build.
@@ -169,7 +180,7 @@ impl Supir {
         t_enc: u32,
         taps: bool,
         control_scale: f32,
-        train: bool,
+        train: Option<Activations>,
     ) -> Supir {
         let levels = cfg.backbone.levels();
         let scale = 1u32 << (levels - 1);
@@ -186,10 +197,9 @@ impl Supir {
         let temb_in = gpu.storage(c0 as u64);
         let aug_in = gpu.storage(cfg.backbone.projection_class_embeddings_input_dim as u64);
 
-        let mut r = if train {
-            Rec::new_train(&gpu, &cfg.backbone, tensors, t_enc, taps)
-        } else {
-            Rec::new(&gpu, &cfg.backbone, tensors, t_enc, taps)
+        let mut r = match train {
+            Some(activations) => Rec::new_train(&gpu, &cfg.backbone, tensors, t_enc, taps, activations),
+            None => Rec::new(&gpu, &cfg.backbone, tensors, t_enc, taps),
         };
         if let Some(p) = packed {
             r.set_packed(p);
@@ -225,7 +235,7 @@ impl Supir {
         let recorded = Unet::record_into(&mut r, &cfg.backbone, h, w, &inputs, false);
 
         let blocks = r.into_blocks();
-        let trace = train.then(|| blocks.trace());
+        let trace = train.map(|_| blocks.trace());
         let (steps, taps) = blocks.finish();
         Supir { gpu, cfg, hw: (h, w), t_enc, sample_in, hint_in, enc_in, temb_in, aug_in, out: recorded.out, trace, steps, taps }
     }

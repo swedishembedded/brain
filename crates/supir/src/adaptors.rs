@@ -301,14 +301,23 @@ impl Adaptors {
         b.set_groups(self.cfg.backbone_norm_groups);
         b.set_eps(self.cfg.backbone_norm_eps);
 
+        let n_hidden = (NHIDDEN as u64) * (control.h as u64) * (control.w as u64);
         let actv_pre = b.conv(&format!("project_modules.{pm_idx}.mlp_shared.0"), control.c, NHIDDEN, 3, 1, control.h, control.w, &control.buf);
         let actv = b.silu(NHIDDEN * control.h * control.w, &actv_pre);
+        b.free(n_hidden, actv_pre);
         let gamma = b.conv(&format!("project_modules.{pm_idx}.zero_mul"), NHIDDEN, c_out, 3, 1, control.h, control.w, &actv);
         let beta = b.conv(&format!("project_modules.{pm_idx}.zero_add"), NHIDDEN, c_out, 3, 1, control.h, control.w, &actv);
+        b.free(n_hidden, actv);
 
         let ng = b.mul(n, &normed, &gamma);
+        b.free(n as u64, gamma);
         let n_plus = b.add(n, &normed, &ng);
-        b.add(n, &n_plus, &beta)
+        b.free(n as u64, ng);
+        b.free(n as u64, normed);
+        let out = b.add(n, &n_plus, &beta);
+        b.free(n as u64, n_plus);
+        b.free(n as u64, beta);
+        out
     }
 
     /// The zero-init 1x1 conv added onto `skip` before the concat that
@@ -347,17 +356,27 @@ impl SkipFuse for Adaptors {
         b.tap(format!("proj{}.in1", j.pm_idx), &skip.buf, skip.c * skip.h * skip.w);
         b.tap(format!("proj{}.in2", j.pm_idx), &h_ori.buf, h_ori.c * h_ori.h * h_ori.w);
 
+        // One recomputable segment: every intermediate is freed after its last read; the lerped output escapes.
+        let opened = b.begin_segment();
         let c_out = j.c_out();
         let h_raw = b.concat(h_ori.c, skip.c, h_ori.h, h_ori.w, &h_ori.buf, &skip.buf);
+        let n_skip = (skip.c as u64) * (skip.h as u64) * (skip.w as u64);
         let zc = self.zero_conv(b, j.pm_idx, control);
         let skip_plus = b.add(skip.c * skip.h * skip.w, &skip.buf, &zc);
+        b.free((control.c as u64) * (control.h as u64) * (control.w as u64), zc);
         let h1 = b.concat(h_ori.c, skip.c, h_ori.h, h_ori.w, &h_ori.buf, &skip_plus);
+        b.free(n_skip, skip_plus);
         let h1_map = Map { buf: h1, c: c_out, h: h_ori.h, w: h_ori.w };
         let out = self.zero_sft_tail(b, j.pm_idx, control, &h1_map, c_out);
+        let n_joined = (c_out as u64) * (h_ori.h as u64) * (h_ori.w as u64);
+        b.free(n_joined, h1_map.buf);
 
         let n = c_out * h_ori.h * h_ori.w;
         let lerped = b.mix(n, self.control_scale, 1.0 - self.control_scale, &out, &h_raw);
+        b.free(n_joined, out);
+        b.free(n_joined, h_raw);
         b.tap(format!("proj{}", j.pm_idx), &lerped, n);
+        b.end_segment(opened);
         Map { buf: lerped, c: c_out, h: h_ori.h, w: h_ori.w }
     }
 
@@ -376,12 +395,17 @@ impl SkipFuse for Adaptors {
         // No `h_ori`: the general `h1 = concat(h_ori, skip + zero_conv(c))`
         // degenerates to `h1 = x + zero_conv(c)` - see config.rs's module
         // doc for why a `zero_conv` tensor still exists at this site.
+        let opened = b.begin_segment();
+        let n_mid = (m.c as u64) * (x.h as u64) * (x.w as u64);
         let zc = self.zero_conv(b, m.pm_idx, control);
         let h1 = b.add(m.c * x.h * x.w, &x.buf, &zc);
+        b.free((control.c as u64) * (control.h as u64) * (control.w as u64), zc);
         let h1_map = Map { buf: h1, c: m.c, h: x.h, w: x.w };
         // No `control_scale` lerp at the post-mid site either.
         let out = self.zero_sft_tail(b, m.pm_idx, control, &h1_map, m.c);
+        b.free(n_mid, h1_map.buf);
         b.tap(format!("proj{}", m.pm_idx), &out, m.c * x.h * x.w);
+        b.end_segment(opened);
         Map { buf: out, c: m.c, h: x.h, w: x.w }
     }
 
@@ -399,6 +423,7 @@ impl SkipFuse for Adaptors {
         b.tap(format!("proj{}.in0", spec.pm_idx), &control.buf, control.c * control.h * control.w);
         b.tap(format!("proj{}.in1", spec.pm_idx), &x.buf, x.c * x.h * x.w);
 
+        let opened = b.begin_segment();
         let (tq, tkv) = (x.h * x.w, control.h * control.w);
         let heads = spec.heads();
         b.set_groups(32);
@@ -408,18 +433,30 @@ impl SkipFuse for Adaptors {
         b.set_groups(self.cfg.backbone_norm_groups);
         b.set_eps(self.cfg.backbone_norm_eps);
 
+        let n_x = (tq as u64) * (x.c as u64);
+        let n_control = (tkv as u64) * (control.c as u64);
         let x_rows = b.nchw_to_rows(x.c, tq, &x_normed);
+        b.free(n_x, x_normed);
         let c_rows = b.nchw_to_rows(control.c, tkv, &c_normed);
+        b.free(n_control, c_normed);
         let q = b.linear(&format!("project_modules.{}.attn.to_q", spec.pm_idx), tq, x.c, x.c, false, &x_rows);
+        b.free(n_x, x_rows);
         let kv = b.linear(&format!("project_modules.{}.attn.kv", spec.pm_idx), tkv, control.c, 2 * x.c, false, &c_rows);
-        let ctx = b.act((tq as u64) * (x.c as u64));
+        b.free(n_control, c_rows);
+        let ctx = b.act(n_x);
         b.cross_attn(heads, HEAD_DIM, x.c, tq, tkv, &q, &kv, &ctx);
+        b.free(n_x, q);
+        b.free((tkv as u64) * 2 * (x.c as u64), kv);
         let ao = b.linear(&format!("project_modules.{}.attn.to_out.0", spec.pm_idx), tq, x.c, x.c, true, &ctx);
+        b.free(n_x, ctx);
         let ao_chw = b.rows_to_nchw(x.c, tq, &ao);
+        b.free(n_x, ao);
 
         let n = x.c * x.h * x.w;
         let out = b.mix(n, 1.0, self.control_scale, &x.buf, &ao_chw);
+        b.free(n_x, ao_chw);
         b.tap(format!("proj{}", spec.pm_idx), &out, n);
+        b.end_segment(opened);
         Map { buf: out, c: x.c, h: x.h, w: x.w }
     }
 }
