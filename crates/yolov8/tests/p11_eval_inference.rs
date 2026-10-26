@@ -82,6 +82,7 @@ fn recall(
 /// Sample ONE well-conditioned scene (2-3 big, clearly separated shapes spanning
 /// >=2 classes), exactly like the P5 one-image overfit scaffolding.
 fn sample_scene(side: u32, nc: u32) -> (Vec<f32>, Vec<GtBox>) {
+    // seed: scans up from 0 for the first scene with large, separated shapes of 2+ classes; the overfit margin was tuned on that scene
     for seed in 0u64..200 {
         let mut rng = Rng::new(seed);
         let scene = gen_detect::gen_scene(Preset::MultiObject, side, side, nc, &mut rng);

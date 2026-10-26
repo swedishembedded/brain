@@ -52,8 +52,8 @@ fn fine_tune(model: &Path, records: &Path) -> ChatFineTune {
         .steps(4)
         .lr(1e-2)
         .eval_every(0)
-        // seed: the base score this test compares against is the zero-delta
-        // adapter's, and two runs of the comparison must see the same stream.
+        // The base score this test compares against is the zero-delta adapter's, and two runs of the comparison must see the same stream.
+        // seed: the two compared runs share one stream
         .seed(7)
         .device(cpu())
 }

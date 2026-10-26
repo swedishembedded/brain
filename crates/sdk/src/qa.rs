@@ -1022,7 +1022,8 @@ mod tests {
     fn the_control_arm_gives_every_question_someone_elses_answer() {
         let rows: Vec<Candidate> =
             (0..9).map(|i| candidate(&format!("question {i}?"), &format!("tool run --n {i}"))).collect();
-        for seed in 0..12u64 {
+        for _ in 0..12 {
+            let seed = data::rng::random_seed();
             let shuffled = shuffle_answers(&rows, seed);
             assert_eq!(shuffled.len(), rows.len());
             for (before, after) in rows.iter().zip(&shuffled) {

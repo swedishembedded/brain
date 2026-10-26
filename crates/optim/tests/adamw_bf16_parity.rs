@@ -39,7 +39,8 @@ fn run(gpu: &Gpu, sr: bool, clip: Option<f32>, tol: f32) {
     let n = 1001usize; // odd: the last word holds one element
     let w0: Vec<f32> = (0..n).map(|i| ((i * 7 % 101) as f32 / 101.0) - 0.5).collect();
     let init: HashMap<String, Vec<f32>> = [("w".to_string(), w0.clone())].into_iter().collect();
-    let seed = 0x1234_5678_9abc_def0u64;
+    // Device and host reference share one rounding seed so their streams agree.
+    let seed: u64 = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8);
     let adam = Adam { beta1: 0.9, beta2: 0.99, eps: 1e-6 };
     let (lr, wd, scale) = (1e-2f32, 0.01f32, 2.0f32);
 

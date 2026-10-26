@@ -276,7 +276,8 @@ fn a_crashed_or_corrupted_commit_never_loses_the_last_good_checkpoint() {
     let dir = scratch("crash");
     let (mut o, mut pp) = file_rig(&dir, n, p, &vec![0.2; n]);
     let ck = CheckpointDir::new(dir.join("ckpt")).unwrap();
-    let rs = |s: u32| RunState { step: s, seed: 99, rng_counter: 0, schedule: vec![] };
+    let seed: u64 = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8);
+    let rs = |s: u32| RunState { step: s, seed, rng_counter: 0, schedule: vec![] };
     for _ in 0..2 {
         fstep(&mut o, &mut pp, &task, n);
     }
@@ -312,7 +313,7 @@ fn a_checkpoint_for_other_tensors_is_refused() {
     let p = prec(StateFormat::F32, false);
     let (mut o, mut pp) = file_rig(&dir, 100, p, &vec![0.0; 100]);
     let ck = CheckpointDir::new(dir.join("ckpt")).unwrap();
-    ck.commit(&mut o, &mut pp, &RunState { step: 1, seed: 99, rng_counter: 0, schedule: vec![] }).unwrap();
+    ck.commit(&mut o, &mut pp, &RunState { step: 1, seed: std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8), rng_counter: 0, schedule: vec![] }).unwrap();
     let dir2 = scratch("mismatch2");
     let (mut o2, mut p2) = file_rig(&dir2, 200, p, &vec![0.0; 200]);
     let err: io::Error = ck.restore(&mut o2, &mut p2).unwrap_err();

@@ -99,8 +99,8 @@ fn an_improve_cycle_runs_gates_and_publishes_an_adapter_only_on_promote() {
         .adapter_dir(&adapters)
         .work_dir(dir.join("work"))
         .lora(4)
-        .seed(7)
-        .held_out_seed(8)
+        .seed(data::rng::random_seed())
+        .held_out_seed(data::rng::random_seed())
         // `max_new` must leave room for `prompt.len() + max_new <= block_size`
         // (32 here): the prompt is 3 tokens, so 8 is comfortably inside it.
         .run(env, FracMatchVerifier, &ImproveOptions { steps: 8, max_new: 8, ..ImproveOptions::default() })
@@ -163,8 +163,8 @@ fn a_cycle_trains_on_rows_capped_below_the_models_context() {
         .adapter_dir(dir.join("adapters"))
         .work_dir(dir.join("work"))
         .lora(4)
-        .seed(7)
-        .held_out_seed(8)
+        .seed(data::rng::random_seed())
+        .held_out_seed(data::rng::random_seed())
         // The model's context is 32; a prompt of 3 and 8 new tokens need 11.
         .run(FixedTargetEnv { prompt: vec![1, 2, 3], target: vec![4, 5, 6] }, FracMatchVerifier, &ImproveOptions { steps: 4, max_new: 8, max_seq_len: Some(16), ..ImproveOptions::default() })
         .expect("a capped cycle must run");

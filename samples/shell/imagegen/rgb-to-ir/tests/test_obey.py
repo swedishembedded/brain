@@ -11,6 +11,7 @@
 shortcut and fidelity, on fake generators that obey, ignore or cheat."""
 import json
 import os
+import secrets
 import sys
 import tempfile
 import unittest
@@ -96,6 +97,7 @@ def make_pairs(generator, n=60, per_sequence=3, source="oracle", instructions=("
 
 
 def evaluate(pairs, **kw):
+    # seed: the interval bounds asserted by these tests were tuned on this resample draw
     return O.evaluate(pairs, n_resamples=200, seed=1, **kw)
 
 
@@ -164,6 +166,7 @@ class Cheating(unittest.TestCase):
 
     def test_the_partial_correlation_controls_for_the_instruction(self):
         # c_gen follows the instruction and so does the RGB contrast; once the instruction is held fixed nothing is left.
+        # seed: the 0.2 bound is about three standard errors of a null partial correlation on 200 samples and was checked on this draw
         rng = np.random.default_rng(0)
         instruction = np.array(["warmer", "cooler"] * 100)
         sign = np.where(instruction == "warmer", 1.0, -1.0)
@@ -325,6 +328,7 @@ class Plumbing(unittest.TestCase):
 
     def test_the_report_is_plain_json_and_the_cli_reproduces_it(self):
         tmp = tempfile.mkdtemp()
+        seed = secrets.randbits(63)
         pairs = make_pairs(Generators.obeying, n=12)
         rows = []
         for i, p in enumerate(pairs):
@@ -340,12 +344,12 @@ class Plumbing(unittest.TestCase):
         with open(os.path.join(tmp, "pairs.jsonl"), "w") as fh:
             fh.write("\n".join(json.dumps(r) for r in rows) + "\n")
         out = os.path.join(tmp, "obedience.json")
-        self.assertEqual(O.main([os.path.join(tmp, "pairs.jsonl"), "--out", out, "--resamples", "200", "--seed", "3"]), 0)
+        self.assertEqual(O.main([os.path.join(tmp, "pairs.jsonl"), "--out", out, "--resamples", "200", "--seed", str(seed)]), 0)
         with open(out) as fh:
             cli = json.load(fh)
         for p in pairs:
             p.stratum = "day"
-        direct = json.loads(json.dumps(O.evaluate(pairs, n_resamples=200, seed=1)))
+        direct = json.loads(json.dumps(O.evaluate(pairs, n_resamples=200, seed=seed)))
         self.assertEqual(cli["sources"]["oracle"]["region_types"]["person"]["direction_accuracy"],
                          direct["sources"]["oracle"]["region_types"]["person"]["direction_accuracy"])
         self.assertEqual(cli["sources"]["oracle"]["region_types"]["person"]["strata"]["day"]["neutral_shift"],

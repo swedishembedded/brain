@@ -29,6 +29,7 @@ use rl::objective::dpo::{DpoConfig, PackedPair};
 use rl::objective::grpo::{Grpo, GrpoOptions};
 
 /// The weights every build draws from; the teacher's adapters draw from another.
+// seed: the adapter-step loss-gap thresholds below were tuned on this weight draw
 const SEED: u64 = 41;
 /// The teacher's logits are multiplied by this: a random tiny model is nearly
 /// uniform, and a sharper teacher is a gap a few adapter steps visibly close.

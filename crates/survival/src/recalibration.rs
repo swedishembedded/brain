@@ -192,6 +192,7 @@ mod tests {
         let z = Slope::Evidence(2.0);
         // Calibrated predictions: the slope is not kept (an intercept alone),
         // on every one of several seeds, where a free slope strays by chance.
+        // seed: a calibrated draw trips the z = 2 evidence rule by chance at a few percent, so the six draws are fixed
         for seed in 10..16 {
             let (s, o) = distorted(600, t, 0.0, 1.0, seed);
             let r = Recalibration::at_horizon(&s, &o, 0, t, &censoring(&o), z).unwrap();

@@ -43,6 +43,7 @@ def to_rgb(gray):
     return np.dstack([g, np.clip(g.astype(int) + 8, 0, 255).astype(np.uint8), g])
 
 
+# seed: the gate thresholds in these tests were tuned on this noise draw
 def to_ir(gray, invert=False, noise=2.0, seed=0, shift=(0, 0)):
     """A synthetic IR derived from the scene: contrast changed, blurred, noisy, optionally shifted."""
     img = 255 - gray if invert else gray

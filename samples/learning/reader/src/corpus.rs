@@ -837,9 +837,10 @@ mod tests {
         // clear the floor at the seed it was written at and fall under it at
         // the next one.
         let mut short = Vec::new();
-        for seed in 1..6u64 {
+        for _ in 0..5 {
+            let seed: u64 = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8);
             let a = Tool::generate(seed);
-            let b = Tool::generate_disjoint(seed + 1, &[&a]);
+            let b = Tool::generate_disjoint(seed.wrapping_add(1), &[&a]);
             let labels = write(&dir, &a, &b).expect("corpus");
             for rel in labels.keys() {
                 let text = std::fs::read_to_string(dir.join(rel)).expect("episode");
@@ -1117,9 +1118,10 @@ mod tests {
     /// wrong. Removed at the source rather than parsed around.
     #[test]
     fn no_flag_shares_a_word_with_its_own_command() {
-        for seed in 1..8u64 {
+        for _ in 0..7 {
+            let seed: u64 = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8);
             let a = Tool::generate(seed);
-            let b = Tool::generate_disjoint(seed + 1, &[&a]);
+            let b = Tool::generate_disjoint(seed.wrapping_add(1), &[&a]);
             for t in [&a, &b] {
                 for cmd in &t.commands {
                     let words: BTreeSet<&str> = cmd.name.split('-').collect();
@@ -1145,9 +1147,10 @@ mod tests {
     /// it will never see again.
     #[test]
     fn no_generated_name_is_disambiguated_with_a_number() {
-        for seed in 1..8u64 {
+        for _ in 0..7 {
+            let seed: u64 = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8);
             let a = Tool::generate(seed);
-            let b = Tool::generate_disjoint(seed + 1, &[&a]);
+            let b = Tool::generate_disjoint(seed.wrapping_add(1), &[&a]);
             for t in [&a, &b] {
                 for cmd in &t.commands {
                     assert!(
@@ -1182,7 +1185,8 @@ mod tests {
     /// be scoring against a grammar the manual never described.
     #[test]
     fn every_generated_command_has_distinct_flags_and_exactly_one_required() {
-        for seed in 0..12u64 {
+        for _ in 0..12 {
+            let seed: u64 = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8);
             let t = Tool::generate(seed);
             assert!(t.commands.len() >= 4, "seed {seed}: too few commands");
             let names: Vec<&str> = t.commands.iter().map(|c| c.name.as_str()).collect();
@@ -1206,7 +1210,8 @@ mod tests {
     /// itself wrong.
     #[test]
     fn every_battery_answer_is_an_invocation_the_tool_accepts() {
-        for seed in 0..12u64 {
+        for _ in 0..12 {
+            let seed: u64 = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8);
             let t = Tool::generate(seed);
             for (task, answer) in t.battery() {
                 assert!(t.parse(&answer).is_ok(), "seed {seed}: canonical answer {answer:?} is rejected by its own grammar (task {task:?})");

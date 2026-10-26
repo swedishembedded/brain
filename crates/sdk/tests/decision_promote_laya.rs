@@ -49,6 +49,7 @@ impl World {
         let mut run = TrainRun::new(self.root.join(data), self.store().join("convai/laya").to_str().unwrap(), self.dir(name));
         run.steps = 150;
         run.batch = 8;
+        // seed: the accuracy-lift gates of the promotion were tuned on this training draw
         run.seed = 3;
         train(&run, &mut |_, _| {}).unwrap();
     }

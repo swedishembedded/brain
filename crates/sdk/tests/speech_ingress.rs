@@ -37,6 +37,7 @@ fn a_projector_alone_teaches_a_model_to_answer_what_it_hears() {
         brain_testutil::skip("Qwen3-1.7B is not in the model store");
         return;
     };
+    // seed: the 0.25x loss-fall margin was tuned on this projector init
     let mut ingress = SpeechIngress::new(&SpeechIngressOptions { base, adapter: None, input_dim: DIM, rows: ROWS, block: 96, seed: 1, bf16: true }).unwrap();
     let (prefix, suffix) = (SpeechIngress::prefix("You are a patriot."), SpeechIngress::suffix(""));
     let examples: Vec<_> = PHRASES.iter().enumerate().map(|(i, (_, reply))| ingress.example(&rows_of(i), &prefix, &suffix, reply).unwrap()).collect();
@@ -66,7 +67,7 @@ fn a_saved_projector_loads_into_a_fresh_ingress_and_scores_the_same() {
         brain_testutil::skip("Qwen3-1.7B is not in the model store");
         return;
     };
-    let opts = SpeechIngressOptions { base, adapter: None, input_dim: DIM, rows: ROWS, block: 96, seed: 1, bf16: true };
+    let opts = SpeechIngressOptions { base, adapter: None, input_dim: DIM, rows: ROWS, block: 96, seed: data::rng::random_seed(), bf16: true };
     let mut first = SpeechIngress::new(&opts).unwrap();
     let (prefix, suffix) = (SpeechIngress::prefix("You are a patriot."), SpeechIngress::suffix(""));
     let ex = first.example(&rows_of(0), &prefix, &suffix, PHRASES[0].1).unwrap();
@@ -79,7 +80,7 @@ fn a_saved_projector_loads_into_a_fresh_ingress_and_scores_the_same() {
     let file = dir.join("projector.safetensors");
     first.save_projector(&file).unwrap();
 
-    let mut second = SpeechIngress::new(&SpeechIngressOptions { seed: 99, ..opts }).unwrap();
+    let mut second = SpeechIngress::new(&SpeechIngressOptions { seed: data::rng::random_seed(), ..opts }).unwrap();
     let ex2 = second.example(&rows_of(0), &prefix, &suffix, PHRASES[0].1).unwrap();
     second.load_projector(&file).unwrap();
     std::fs::remove_dir_all(&dir).ok();
@@ -95,7 +96,7 @@ fn features_of_the_wrong_size_are_refused_with_the_expected_shape() {
         brain_testutil::skip("Qwen3-1.7B is not in the model store");
         return;
     };
-    let mut ingress = SpeechIngress::new(&SpeechIngressOptions { base, adapter: None, input_dim: DIM, rows: ROWS, block: 96, seed: 1, bf16: true }).unwrap();
+    let mut ingress = SpeechIngress::new(&SpeechIngressOptions { base, adapter: None, input_dim: DIM, rows: ROWS, block: 96, seed: data::rng::random_seed(), bf16: true }).unwrap();
     let err = ingress.example(&[0.0; 5], "p", "s", "r").unwrap_err();
     assert!(err.to_string().contains("expected 4 rows of 32"), "{err}");
 }
@@ -112,6 +113,7 @@ fn a_trained_projector_saved_and_loaded_makes_the_untouched_model_answer_what_it
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("projector.safetensors");
     {
+        // seed: the generation is checked for the exact reply words, which was verified on this projector init
         let mut ingress = SpeechIngress::new(&SpeechIngressOptions { base: base.clone(), adapter: None, input_dim: DIM, rows: ROWS, block: 96, seed: 1, bf16: true }).unwrap();
         let (prefix, suffix) = (SpeechIngress::prefix(system), SpeechIngress::suffix(""));
         let examples: Vec<_> = PHRASES.iter().enumerate().map(|(i, (_, reply))| ingress.example(&rows_of(i), &prefix, &suffix, reply).unwrap()).collect();

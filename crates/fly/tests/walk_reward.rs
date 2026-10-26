@@ -49,7 +49,7 @@ fn rig() -> Option<Fly> {
 
 fn run(fly: &mut Fly, command: f32) -> fly::learn::Episode {
     let cfg = RewardConfig { objective: Objective::walk(), ticks: 1000, command, ..RewardConfig::default() };
-    episode(fly, cfg, Condition::Frozen, &mut Lcg::new(7)).expect("an episode runs")
+    episode(fly, cfg, Condition::Frozen, &mut Lcg::new(std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8))).expect("an episode runs")
 }
 
 /// The gate the imitation reward failed.
@@ -130,7 +130,7 @@ fn dropping_below_the_fall_threshold_ends_the_episode() {
             command: 1.0,
             ..RewardConfig::default()
         };
-        episode(fly, cfg, Condition::Frozen, &mut Lcg::new(1)).expect("an episode runs")
+        episode(fly, cfg, Condition::Frozen, &mut Lcg::new(std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8))).expect("an episode runs")
     };
     // A fly settles onto its legs by a fraction of a body length; a threshold
     // below that is tripped, one at half a body length is not.
@@ -145,7 +145,7 @@ fn dropping_below_the_fall_threshold_ends_the_episode() {
 fn a_walking_episode_too_short_to_score_is_an_error() {
     let Some(mut fly) = rig() else { return };
     let cfg = RewardConfig { objective: Objective::walk(), ticks: 100, ..RewardConfig::default() };
-    let e = episode(&mut fly, cfg, Condition::Frozen, &mut Lcg::new(1)).expect_err("too short to score");
+    let e = episode(&mut fly, cfg, Condition::Frozen, &mut Lcg::new(std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8))).expect_err("too short to score");
     assert!(e.contains("would score zero"), "{e}");
 }
 
@@ -275,7 +275,7 @@ fn a_walk_that_ends_on_its_back_scores_nothing() {
             command: 1.0,
             ..RewardConfig::default()
         };
-        episode(fly, cfg, Condition::Frozen, &mut Lcg::new(1)).expect("an episode runs")
+        episode(fly, cfg, Condition::Frozen, &mut Lcg::new(std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8))).expect("an episode runs")
     };
     let strict = run(&mut fly, 0.001);
     let normal = run(&mut fly, 1.0);

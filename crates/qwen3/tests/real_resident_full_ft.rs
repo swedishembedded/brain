@@ -74,7 +74,7 @@ fn run(name: &str, path: &str, case: Case) {
         rule,
         grad,
         stochastic_state: true,
-        seed: Some(1),
+        seed: None,
         tile_elems: 1 << 23,
         state_dir: None,
         defer_publication: false,

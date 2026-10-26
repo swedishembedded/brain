@@ -68,7 +68,7 @@ fn every_weight_tier_multiplies_any_row_count_through_matmul_rows() {
     if !ops.gpu().caps().workgroup_reductions {
         return brain_testutil::skip_unavailable("the tiled and GEMV kernels need workgroup barriers (not the CPU JIT)");
     }
-    let mut rng = Lcg::new(2026);
+    let mut rng = Lcg::new(data::rng::random_seed());
     let mut failures = Vec::new();
     for label in TIERS {
         let case = build_case(&ops, label, N, K, &mut rng);

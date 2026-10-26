@@ -23,9 +23,6 @@ use model::{FitControl, FitOpts, Model};
 use rl::fit::DistillFit;
 use rl::objective::distill::{DistillConfig, DistillExample, TopK};
 
-// seed: fixed so a failure reproduces
-const SEED: u64 = 41;
-
 /// A supervised example: the teacher says what follows the prompt.
 fn example() -> DistillExample {
     DistillExample {
@@ -39,7 +36,7 @@ fn every_declared_base_trains_and_an_undeclared_one_is_refused<Trainer: ChatTrai
     let dir = tempfile::tempdir().expect("a scratch directory");
     let base = dir.path().join("base.safetensors");
     write_base(&base);
-    let opts = FitOpts { steps: 2, batch_size: 1, block_size: T as u32, lr: 1e-2, seed: SEED, ..Default::default() };
+    let opts = FitOpts { steps: 2, batch_size: 1, block_size: T as u32, lr: 1e-2, seed: data::rng::random_seed(), ..Default::default() };
     let bases = Trainer::LORA_BASES;
     let lora = |dtype| LoraRequest { rank: 2, alpha: 2.0, continue_from: None, base: dtype };
 
@@ -60,7 +57,7 @@ fn every_declared_base_trains_and_an_undeclared_one_is_refused<Trainer: ChatTrai
 fn qwen3_trains_over_every_base_it_declares() {
     every_declared_base_trains_and_an_undeclared_one_is_refused::<qwen3::finetune::Qwen3Trainer>(|path| {
         let cfg = qwen3::QwenConfig { block_size: T as u32, ..qwen3::QwenConfig::tiny_i8() };
-        qwen3::Qwen::new(cfg.clone(), 1, T as u32, &qwen3::init_weights(&cfg, SEED)).save(path.to_str().unwrap());
+        qwen3::Qwen::new(cfg.clone(), 1, T as u32, &qwen3::init_weights(&cfg, data::rng::random_seed())).save(path.to_str().unwrap());
     });
 }
 
@@ -68,7 +65,7 @@ fn qwen3_trains_over_every_base_it_declares() {
 fn qwen35_trains_over_every_base_it_declares() {
     every_declared_base_trains_and_an_undeclared_one_is_refused::<qwen35::finetune::Qwen35Trainer>(|path| {
         let cfg = qwen35::config::Qwen35Config { block_size: T as u32, ..qwen35::config::Qwen35Config::tiny_i8() };
-        <qwen35::model::Qwen35 as Model>::new(cfg.clone(), 1, T as u32, &qwen35::init::init_weights(&cfg, SEED)).save(path.to_str().unwrap());
+        <qwen35::model::Qwen35 as Model>::new(cfg.clone(), 1, T as u32, &qwen35::init::init_weights(&cfg, data::rng::random_seed())).save(path.to_str().unwrap());
     });
 }
 
@@ -76,7 +73,7 @@ fn qwen35_trains_over_every_base_it_declares() {
 fn qwen35moe_trains_over_every_base_it_declares() {
     every_declared_base_trains_and_an_undeclared_one_is_refused::<qwen35moe::finetune::Qwen35MoeTrainer>(|path| {
         let cfg = qwen35moe::config::Qwen35Config { n_layers: 4, block_size: T as u32, ..qwen35moe::config::Qwen35Config::tiny() };
-        let init = <qwen35moe::model::Qwen35 as Model>::init_weights(&cfg, SEED);
+        let init = <qwen35moe::model::Qwen35 as Model>::init_weights(&cfg, data::rng::random_seed());
         <qwen35moe::model::Qwen35 as Model>::new(cfg, 1, T as u32, &init).save(path.to_str().unwrap());
     });
 }

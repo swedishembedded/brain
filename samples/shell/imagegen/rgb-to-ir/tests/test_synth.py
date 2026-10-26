@@ -15,6 +15,7 @@ import hashlib
 import io
 import json
 import os
+import secrets
 import stat
 import sys
 import tempfile
@@ -80,7 +81,7 @@ class World(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.dir = self.tmp.name
-        rng = np.random.default_rng(0)
+        rng = np.random.default_rng()
         self.rgb, self.ir, frames = {}, {}, []
         for k in range(3):
             self.rgb[k] = rng.integers(0, 256, (H, W, 3), dtype=np.uint8)
@@ -103,6 +104,7 @@ class World(unittest.TestCase):
             fh.write(ADAPTER_BYTES)
         self.write_json("synth.json", {"device": "gpu1", "backend": "cuda", "variant": "klein-4b", "dit": "m/dit.gguf",
                                       "vae": "m/vae.safetensors", "text_encoder": "m/te", "tokenizer": "m/tok.json",
+                                      # seed: the fake brain's command line and the records are asserted back against this generation seed
                                       "adapter": "adapter.brain", "strength": 1.0, "seed": 3})
         self.report = {"classes": {
             "person": {"warmer": 442, "cooler": 52, "same": 462, "n": 956},
@@ -205,7 +207,7 @@ class Instructions(World):
 
     def test_a_prior_instruction_states_the_priors_of_the_classes_in_the_frame_with_training_wording_only(self):
         priors = S.prior_polarities(self.report)
-        text = S.prior_instruction(["person", "car"], priors, np.random.default_rng(1))
+        text = S.prior_instruction(["person", "car"], priors, np.random.default_rng())
         self.assertTrue(text.startswith(C.NEUTRAL_CAPTION + " "))
         self.assertTrue(C.has_polarity(text, "person", "warmer") and C.has_polarity(text, "car", "warmer"))
         self.assertFalse(C.has_polarity(text, "person", "cooler"))
@@ -213,8 +215,8 @@ class Instructions(World):
             self.assertNotIn(held_out, text)
 
     def test_a_frame_without_a_class_that_has_a_prior_gets_the_neutral_caption(self):
-        self.assertEqual(S.prior_instruction([], S.prior_polarities(self.report), np.random.default_rng(1)), C.NEUTRAL_CAPTION)
-        self.assertEqual(S.prior_instruction(["truck"], S.prior_polarities(self.report), np.random.default_rng(1)),
+        self.assertEqual(S.prior_instruction([], S.prior_polarities(self.report), np.random.default_rng()), C.NEUTRAL_CAPTION)
+        self.assertEqual(S.prior_instruction(["truck"], S.prior_polarities(self.report), np.random.default_rng()),
                          C.NEUTRAL_CAPTION)
 
     def test_no_generated_prior_instruction_uses_a_held_out_template(self):
@@ -480,10 +482,11 @@ class Ingest(World):
         super().setUp()
         self.generate()
         self.arm_dir = self.path("arms/c2")
+        self.ingest_seed = secrets.randbits(63)
 
     def ingest(self, models=None, arm_dir=None, generated=None, only_existing=False, **selection):
         request = S.IngestRequest(self.doc, generated or os.path.join(self.out, "neutral"), arm_dir or self.arm_dir, "c2",
-                                  models, self.selection(**selection), ("person", "car", "bicycle"), seed=5,
+                                  models, self.selection(**selection), ("person", "car", "bicycle"), seed=self.ingest_seed,
                                   only_existing=only_existing)
         return S.ingest(request)
 
@@ -514,7 +517,7 @@ class Ingest(World):
     def test_the_sensor_model_is_the_one_rir_arms_applies_bit_for_bit(self):
         self.ingest(models={"d": MODEL})
         luma = D.to_gray(self.rgb[1][1:49, 3:67])
-        expected = A.apply_sensor(luma, MODEL, A.frame_rng(5, "d", "f1"))
+        expected = A.apply_sensor(luma, MODEL, A.frame_rng(self.ingest_seed, "d", "f1"))
         np.testing.assert_array_equal(self.png("d_f1.png"), expected)
         self.assertFalse(np.array_equal(expected, luma))
 

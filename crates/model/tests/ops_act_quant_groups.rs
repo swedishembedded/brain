@@ -72,7 +72,7 @@ fn bound(x: &[f32], w: &[f32], k: usize, r: usize, j: usize) -> f64 {
 fn check(dtype: Dtype, m: usize, n: usize, k: usize) {
     let ops = Ops::new(gpu_core::testgpu::dev(model::ops::kernel_list())).expect("Ops::new");
     let g = ops.gpu();
-    let mut rng = Lcg::new(0x5eed ^ (m * 7919 + n * 31 + k) as u64);
+    let mut rng = Lcg::new(data::rng::random_seed());
     let w = exact_weights(&mut rng, n, k);
     let x = outlier_rows(&mut rng, m, k);
     let weight = Weight::upload(&ops, &w, n, k, dtype);

@@ -395,8 +395,9 @@ mod tests {
     fn distinct_cubes_have_distinct_features() {
         let space = CubeSpace::new();
         let mut seen: HashMap<Vec<usize>, Cube> = HashMap::new();
-        for seed in 0..4000u64 {
-            let (cube, _) = crate::cube::scramble(1 + (seed % 24) as usize, seed + 1);
+        for _ in 0..4000 {
+            let seed: u64 = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8);
+            let (cube, _) = crate::cube::scramble(1 + (seed % 24) as usize, seed);
             if let Some(prev) = seen.insert(slot_states(&space, &cube), cube) {
                 assert_eq!(prev, cube, "two different cubes wrote the same features");
             }
@@ -449,8 +450,9 @@ mod tests {
     #[test]
     fn the_encoding_obeys_the_laws_of_the_cube() {
         let space = CubeSpace::new();
-        for seed in 0..300u64 {
-            let (cube, _) = crate::cube::scramble(20, seed + 1);
+        for _ in 0..300 {
+            let seed: u64 = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8);
+            let (cube, _) = crate::cube::scramble(20, seed);
             let states = slot_states(&space, &cube);
             let read = |range: std::ops::Range<usize>| -> (Vec<usize>, usize) {
                 let decoded: Vec<(usize, usize)> =

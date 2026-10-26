@@ -2537,10 +2537,12 @@ mod tests {
                 .map(|b| targets[b * BLOCK..(b + 1) * BLOCK].iter().copied().find(|&t| t != IGNORE).expect("a supervised target names the record"))
                 .collect()
         };
+        // Every run replays one generator seed so sharded and whole runs are comparable.
+        let rng_seed = data::rng::random_seed();
         let run = |obj: &mut CausalLm, steps: u32| {
             Objective::<Recorder>::begin(obj, 21, 0);
             let model = Recorder::new(RecorderCfg, BATCH as u32, BLOCK as u32, &HashMap::new());
-            let mut rng = Rng::new(1);
+            let mut rng = Rng::new(rng_seed);
             let mut seen = Vec::new();
             for _ in 0..steps {
                 Objective::<Recorder>::micro_step(obj, &model, &mut rng);
@@ -2928,9 +2930,9 @@ mod tests {
         let model = Recorder::new(RecorderCfg, 2, 6, &HashMap::new());
         // Supervised targets 2, 3, 12, 13, 22, 23: a mean of 12.5, which a
         // mean of the two batch means (7.5 and 22.5) would not give.
-        let first = obj.eval(&model, &mut Rng::new(1), 0).expect("scored");
+        let first = obj.eval(&model, &mut Rng::new(data::rng::random_seed()), 0).expect("scored");
         assert!((first - 12.5).abs() < 1e-5, "{first}");
-        assert_eq!(obj.eval(&model, &mut Rng::new(99), 0), Some(first), "the same split scores the same whatever the generator");
+        assert_eq!(obj.eval(&model, &mut Rng::new(data::rng::random_seed()), 0), Some(first), "the same split scores the same whatever the generator");
     }
 
     /// Held-out scoring over any model: the supervised-position mean of the
@@ -3025,11 +3027,12 @@ mod tests {
     /// a straight run follows.
     #[test]
     fn the_examples_are_drawn_in_epochs_without_replacement_and_a_resume_continues_the_order() {
+        let rng_seed = data::rng::random_seed();
         let draws = |first: u64, count: u32| {
             let mut obj = examples_objective(&[4; 5], 4);
             Objective::<Recorder>::begin(&mut obj, 7, first);
             let model = Recorder::new(RecorderCfg, 1, 4, &HashMap::new());
-            let mut rng = Rng::new(1);
+            let mut rng = Rng::new(rng_seed);
             Objective::<Recorder>::micro_steps(&mut obj, &model, &mut rng, count);
             let seen = model.drawn.borrow().clone();
             seen
@@ -3053,7 +3056,7 @@ mod tests {
         let mut obj = examples_objective(&[3, 7], 8);
         Objective::<Recorder>::begin(&mut obj, 1, 0);
         let model = Recorder::new(RecorderCfg, 1, 8, &HashMap::new());
-        let mut rng = Rng::new(1);
+        let mut rng = Rng::new(data::rng::random_seed());
         Objective::<Recorder>::micro_steps(&mut obj, &model, &mut rng, 2);
         assert_eq!(*model.denominators.borrow(), vec![4.0, 4.0]);
     }
@@ -3116,7 +3119,7 @@ mod tests {
         let (train, _val, cfg, _vocab) = load_dataset(&dir, &opts).expect("load");
         assert_eq!(train.example_count(), Some(4), "example boundaries must be recovered");
 
-        let mut rng = data::rng::Rng::new(3);
+        let mut rng = data::rng::Rng::new(data::rng::random_seed());
         for _ in 0..20 {
             let (x, y) = train.get_batch(&cfg, &mut rng);
             for b in 0..cfg.batch_size {

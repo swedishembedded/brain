@@ -10,6 +10,7 @@
 import dataclasses
 import json
 import os
+import secrets
 import sys
 import tempfile
 import unittest
@@ -56,7 +57,7 @@ def sensor_forward(scene, blur, noise, stripe, seed):
 
 class GrayArms(unittest.TestCase):
     def test_b2_is_the_exact_inverse_of_b1(self):
-        rgb = np.random.default_rng(0).integers(0, 256, (20, 30, 3), dtype=np.uint8)
+        rgb = np.random.default_rng().integers(0, 256, (20, 30, 3), dtype=np.uint8)
         b1, b2 = A.render_b1(rgb), A.render_b2(rgb)
         self.assertEqual(b1.ndim, 2)
         self.assertTrue(np.array_equal(b2, 255 - b1))
@@ -113,14 +114,14 @@ class SensorFit(unittest.TestCase):
             gray = np.round(rect_scene(len(seen))).astype(np.uint8)
             return np.dstack([gray] * 3), gray
 
-        A.fit_from_splits({"frames": rows}, "a", read_pair, max_frames=3, seed=0)
+        A.fit_from_splits({"frames": rows}, "a", read_pair, max_frames=3, seed=secrets.randbits(63))
         self.assertEqual(len(seen), 3)
         self.assertTrue(all(sp == "T" for _, sp in seen), seen)
 
     def test_fit_from_splits_refuses_when_there_is_no_t_frame(self):
         rows = [{"dataset": "a", "id": "a", "split": "Test", "usable": True}]
         with self.assertRaises(ValueError):
-            A.fit_from_splits({"frames": rows}, "a", lambda r: None, max_frames=3, seed=0)
+            A.fit_from_splits({"frames": rows}, "a", lambda r: None, max_frames=3, seed=secrets.randbits(63))
 
     def test_model_json_round_trip(self):
         m = A.SensorModel(blur_sigma=1.5, noise_sigma=2.0, stripe_amplitude=1.0, mean_mu=100, mean_sd=10, std_mu=40, std_sd=5)
@@ -135,11 +136,12 @@ class B3(unittest.TestCase):
         return np.dstack([np.round(rect_scene(7)).astype(np.uint8)] * 3)
 
     def test_deterministic_for_a_seeded_rng_and_single_channel_uint8(self):
-        a = A.render_b3(self.rgb(), MODEL, np.random.default_rng(4))
-        b = A.render_b3(self.rgb(), MODEL, np.random.default_rng(4))
+        seed = secrets.randbits(63)
+        a = A.render_b3(self.rgb(), MODEL, np.random.default_rng(seed))
+        b = A.render_b3(self.rgb(), MODEL, np.random.default_rng(seed))
         self.assertEqual((a.dtype, a.ndim), (np.uint8, 2))
         self.assertTrue(np.array_equal(a, b))
-        self.assertFalse(np.array_equal(a, A.render_b3(self.rgb(), MODEL, np.random.default_rng(5))))
+        self.assertFalse(np.array_equal(a, A.render_b3(self.rgb(), MODEL, np.random.default_rng(seed ^ 1))))
 
     def test_output_contrast_follows_the_fitted_statistics(self):
         outs = [A.render_b3(self.rgb(), MODEL, np.random.default_rng(s)) for s in range(30)]
@@ -152,18 +154,19 @@ class B4(unittest.TestCase):
 
     def test_box_regions_are_brighter_than_their_surroundings(self):
         for cls in (0, 1, 2):
-            img = A.render_b4(240, 320, [(cls, 140, 150, 180, 220)], self.CLEAN, np.random.default_rng(0))
+            img = A.render_b4(240, 320, [(cls, 140, 150, 180, 220)], self.CLEAN, np.random.default_rng())
             inside = img[165:205, 150:170].mean()
             ring = np.concatenate([img[150:220, 120:130].ravel(), img[150:220, 190:200].ravel()]).mean()
             self.assertGreater(inside, ring + 25, f"class {cls}")
 
     def test_person_is_hotter_than_a_car(self):
-        p = A.render_b4(240, 320, [(0, 100, 150, 160, 220)], self.CLEAN, np.random.default_rng(0))
-        c = A.render_b4(240, 320, [(1, 100, 150, 160, 220)], self.CLEAN, np.random.default_rng(0))
+        seed = secrets.randbits(63)  # both renders draw the same sensor noise, so only the class differs
+        p = A.render_b4(240, 320, [(0, 100, 150, 160, 220)], self.CLEAN, np.random.default_rng(seed))
+        c = A.render_b4(240, 320, [(1, 100, 150, 160, 220)], self.CLEAN, np.random.default_rng(seed))
         self.assertGreater(p[170:200, 120:140].mean(), c[170:200, 120:140].mean())
 
     def test_cold_sky_is_darker_than_ground(self):
-        img = A.render_b4(240, 320, [], self.CLEAN, np.random.default_rng(0))
+        img = A.render_b4(240, 320, [], self.CLEAN, np.random.default_rng())
         self.assertLess(img[:24].mean() + 20, img[-24:].mean())
         self.assertEqual((img.dtype, img.shape), (np.uint8, (240, 320)))
 
@@ -179,14 +182,14 @@ class RenderEndToEnd(unittest.TestCase):
             test_videos=[{"ids": range(200, 204), "scene": 30, "level": (60, 200)}],
         )
         records, _ = rir_readers.build_records({"dataset": "a", **args})
-        self.doc, _ = rir_splits.build_splits(records, seed=1, params=rir_splits.SplitParams(default_s_cap=12))
+        self.doc, _ = rir_splits.build_splits(records, seed=secrets.randbits(63), params=rir_splits.SplitParams(default_s_cap=12))
         self.out = tempfile.mkdtemp()
 
     def test_render_writes_images_manifest_and_a_packable_dataset(self):
-        model = A.fit_dataset_models(self.doc, ("a",), max_frames=6, seed=1)
+        model = A.fit_dataset_models(self.doc, ("a",), max_frames=6, seed=secrets.randbits(63))
         s_rows = [r for r in self.doc["frames"] if r["split"] == "S"]
         self.assertTrue(s_rows)
-        A.render_arms(self.doc, model, self.out, A.ARMS, "S", datasets=("a",), limit=0, seed=1)
+        A.render_arms(self.doc, model, self.out, A.ARMS, "S", datasets=("a",), limit=0, seed=secrets.randbits(63))
         for arm in A.ARMS:
             rows = manifest_rows(self.out, arm)
             self.assertEqual(len(rows), len(s_rows))
@@ -199,8 +202,8 @@ class RenderEndToEnd(unittest.TestCase):
             self.assertEqual(json.load(fh)["n"], len(s_rows))
 
     def test_arms_a2_is_the_real_ir_and_a1_the_rgb(self):
-        model = A.fit_dataset_models(self.doc, ("a",), max_frames=6, seed=1)
-        A.render_arms(self.doc, model, self.out, ("a1", "a2"), "S", datasets=("a",), limit=2, seed=1)
+        model = A.fit_dataset_models(self.doc, ("a",), max_frames=6, seed=secrets.randbits(63))
+        A.render_arms(self.doc, model, self.out, ("a1", "a2"), "S", datasets=("a",), limit=2, seed=secrets.randbits(63))
         for arm, reader in (("a1", rir_data.read_rgb), ("a2", rir_data.read_ir)):
             row = manifest_rows(self.out, arm)[0]
             source = next(r for r in self.doc["frames"] if r["id"] == row["id"])
@@ -208,8 +211,8 @@ class RenderEndToEnd(unittest.TestCase):
             self.assertTrue(np.array_equal(written, reader(source)), arm)
 
     def test_limit_selects_the_same_seeded_frames_for_every_arm(self):
-        model = A.fit_dataset_models(self.doc, ("a",), max_frames=6, seed=1)
-        A.render_arms(self.doc, model, self.out, A.ARMS, "S", datasets=("a",), limit=3, seed=9)
+        model = A.fit_dataset_models(self.doc, ("a",), max_frames=6, seed=secrets.randbits(63))
+        A.render_arms(self.doc, model, self.out, A.ARMS, "S", datasets=("a",), limit=3, seed=secrets.randbits(63))
         picks = [[r["id"] for r in manifest_rows(self.out, arm)] for arm in A.ARMS]
         self.assertEqual(len(picks[0]), 3)
         self.assertTrue(all(p == picks[0] for p in picks))

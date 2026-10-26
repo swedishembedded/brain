@@ -218,7 +218,8 @@ mod tests {
 
     #[test]
     fn the_fast_path_equals_the_definition_with_ties_weights_and_competing_events() {
-        for seed in 1..6 {
+        for _ in 0..5 {
+            let seed: u64 = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8);
             let (risk, obs) = sample(80, seed);
             let g = censoring(&obs);
             let h = harrell(&risk, &obs, 0).unwrap();

@@ -26,6 +26,8 @@ use decisions::manifest::{weights_identity, DecisionManifest, Validation};
 
 struct Setup {
     root: Scratch,
+    /// The training seed every run of this setup shares.
+    seed: u64,
 }
 
 impl Setup {
@@ -33,14 +35,14 @@ impl Setup {
         let root = Scratch::new(tag);
         write_laya(&root.join("base"), 48);
         std::fs::write(root.join("data.jsonl"), synthetic_jsonl(&SyntheticTask::new(12, 4, 4))).unwrap();
-        Setup { root }
+        Setup { root, seed: data::rng::random_seed() }
     }
 
     fn run(&self, out: &str) -> TrainRun {
         let mut run = TrainRun::new(self.root.join("data.jsonl"), self.root.join("base").to_str().unwrap(), self.root.join(out));
         run.steps = 4;
         run.batch = 2;
-        run.seed = 5;
+        run.seed = self.seed;
         run.brain_commit = "abc1234".into();
         run
     }
@@ -67,7 +69,7 @@ fn a_laya_run_writes_the_head_and_a_reference_to_the_backbone_with_its_lineage()
     assert_eq!(l.data_sha256, Some(brain_modelstore::fetch::file_digest(&s.root.join("data.jsonl")).unwrap()));
     let counts = l.split_counts.as_ref().unwrap();
     assert_eq!((counts["train"], counts["validation"], counts["test"]), (12, 4, 4));
-    assert_eq!((l.seed, l.brain_commit.as_deref()), (Some(5), Some("abc1234")));
+    assert_eq!((l.seed, l.brain_commit.as_deref()), (Some(s.seed), Some("abc1234")));
     let h = l.hyperparameters.as_ref().unwrap();
     assert_eq!((h["steps"].as_u64(), h["batch"].as_u64(), h["freeze_encoder"].as_bool()), (Some(4), Some(2), Some(true)));
 
@@ -89,7 +91,7 @@ fn the_same_seed_gives_the_same_weights_and_another_seed_does_not() {
     assert_eq!(a.manifest.weights_sha256, b.manifest.weights_sha256);
     assert_eq!(std::fs::read(s.root.join("a").join(HEAD_FILE)).unwrap(), std::fs::read(s.root.join("b").join(HEAD_FILE)).unwrap());
     let mut other = s.run("c");
-    other.seed = 6;
+    other.seed = s.seed ^ 1;
     let c = train(&other, &mut |_, _| {}).unwrap();
     assert_ne!(a.manifest.weights_sha256, c.manifest.weights_sha256);
 }

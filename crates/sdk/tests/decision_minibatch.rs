@@ -135,7 +135,7 @@ fn a_zero_batch_is_refused_by_name() {
 fn the_train_spec_carries_the_batch_size() {
     let Some(mut pipe) = pipeline() else { return };
     let before = pipe.steps_taken();
-    let spec = TrainSpec::new(INSTRUCTIONS).options(options()).examples(examples()).steps(3).batch(4).seed(7);
+    let spec = TrainSpec::new(INSTRUCTIONS).options(options()).examples(examples()).steps(3).batch(4).seed(data::rng::random_seed());
     let report = pipe.run_train(&spec, &mut |_, _| {}).expect("run_train");
     assert_eq!(report.steps, 3);
     assert_eq!(pipe.steps_taken() - before, 3, "TrainSpec::batch must reach the optimizer loop");

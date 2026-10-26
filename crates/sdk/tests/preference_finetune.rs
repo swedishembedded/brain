@@ -51,8 +51,8 @@ fn unseeded_fine_tune(model: &Path, out: &Path) -> PreferenceFineTune {
 }
 
 /// [`unseeded_fine_tune`] at a fixed seed.
-// seed: runs that must be compared with each other need the same stream.
 fn fine_tune(model: &Path, out: &Path) -> PreferenceFineTune {
+    // seed: runs that must be compared with each other need the same stream.
     unseeded_fine_tune(model, out).seed(7)
 }
 

@@ -77,13 +77,13 @@ mod tests {
 
     #[test]
     fn greedy_picks_argmax() {
-        let mut rng = Rng::new(0);
+        let mut rng = Rng::new(crate::rng::random_seed());
         assert_eq!(sample_logits(&[0.1, 5.0, 0.2, -1.0], 0.0, 0, &mut rng), 1);
     }
 
     #[test]
     fn top_k_one_is_greedy() {
-        let mut rng = Rng::new(1);
+        let mut rng = Rng::new(crate::rng::random_seed());
         for _ in 0..20 {
             assert_eq!(sample_logits(&[0.1, 5.0, 0.2, -1.0], 1.0, 1, &mut rng), 1);
         }

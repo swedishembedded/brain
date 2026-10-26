@@ -11,6 +11,7 @@
 within-frame contrast of an object against its ring, and the noise floor tau."""
 import json
 import os
+import secrets
 import sys
 import tempfile
 import unittest
@@ -40,7 +41,7 @@ class BoxSegmenter:
         return masks
 
 
-def noisy_frame(seed=0, level=100.0, sigma=SIGMA):
+def noisy_frame(seed, level=100.0, sigma=SIGMA):
     rng = np.random.default_rng(seed)
     return np.clip(np.round(level + rng.normal(0, sigma, (H, W))), 0, 255).astype(np.uint8)
 
@@ -103,7 +104,7 @@ class NoiseFloor(unittest.TestCase):
         side = 20
         box = (30, 30, 30 + side, 30 + side)
         ir = R.dequantize(noisy_frame(7), 0)
-        tau = R.noise_floor(ir, [mask_of(box)], side * side, np.random.default_rng(0), R.RegionParams(n_pairs=400))
+        tau = R.noise_floor(ir, [mask_of(box)], side * side, np.random.default_rng(), R.RegionParams(n_pairs=400))
         expected = 1.1503 * np.sqrt(2) * 1.2533 / side
         self.assertAlmostEqual(tau, expected, delta=0.3 * expected)
 
@@ -114,20 +115,22 @@ class NoiseFloor(unittest.TestCase):
         plain = R.dequantize(plain, 0)
         side = 12
         kw = dict(n_pairs=300)
-        a = R.noise_floor(plain, [mask_of(box)], side * side, np.random.default_rng(1), R.RegionParams(**kw))
-        b = R.noise_floor(planted, [mask_of(box)], side * side, np.random.default_rng(1), R.RegionParams(**kw))
+        seed = secrets.randbits(63)
+        a = R.noise_floor(plain, [mask_of(box)], side * side, np.random.default_rng(seed), R.RegionParams(**kw))
+        b = R.noise_floor(planted, [mask_of(box)], side * side, np.random.default_rng(seed), R.RegionParams(**kw))
         self.assertAlmostEqual(a, b, delta=0.25 * a)  # only the frame MAD differs; a patch on the object would be ~25x
 
     def test_pairs_are_local_by_default_and_frame_wide_on_request(self):
         ramp = np.tile(np.linspace(40, 200, W, dtype=np.float32), (H, 1))
         ir = R.dequantize(np.clip(ramp, 0, 255).astype(np.uint8), 0)
-        local = R.noise_floor(ir, [], 144, np.random.default_rng(3), R.RegionParams())
-        wide = R.noise_floor(ir, [], 144, np.random.default_rng(3), R.RegionParams(pair_reach=None))
+        seed = secrets.randbits(63)
+        local = R.noise_floor(ir, [], 144, np.random.default_rng(seed), R.RegionParams())
+        wide = R.noise_floor(ir, [], 144, np.random.default_rng(seed), R.RegionParams(pair_reach=None))
         self.assertGreater(wide, 2 * local)
 
     def test_no_room_for_background_patches_gives_no_tau(self):
         full = np.ones((H, W), bool)
-        self.assertIsNone(R.noise_floor(R.dequantize(noisy_frame(0), 0), [full], 144, np.random.default_rng(0), R.RegionParams()))
+        self.assertIsNone(R.noise_floor(R.dequantize(noisy_frame(0), 0), [full], 144, np.random.default_rng(), R.RegionParams()))
 
 
 class Polarity(unittest.TestCase):
@@ -162,7 +165,7 @@ class MeasureTile(unittest.TestCase):
 
     def test_objects_get_a_contrast_a_tau_and_a_polarity(self):
         rgb, ir, boxes = self.tile()
-        out = R.measure_tile(rgb, ir, boxes, BoxSegmenter(), seed=1)
+        out = R.measure_tile(rgb, ir, boxes, BoxSegmenter(), seed=secrets.randbits(63))
         pol = {o["class"]: o["polarity"] for o in out["objects"]}
         self.assertEqual(pol, {"car": "warmer", "person": "cooler"})
         for o in out["objects"]:
@@ -172,13 +175,14 @@ class MeasureTile(unittest.TestCase):
 
     def test_measurement_is_deterministic(self):
         rgb, ir, boxes = self.tile()
-        a = R.measure_tile(rgb, ir, boxes, BoxSegmenter(), seed=1)
-        b = R.measure_tile(rgb, ir, boxes, BoxSegmenter(), seed=1)
+        seed = secrets.randbits(63)
+        a = R.measure_tile(rgb, ir, boxes, BoxSegmenter(), seed=seed)
+        b = R.measure_tile(rgb, ir, boxes, BoxSegmenter(), seed=seed)
         self.assertEqual(json.dumps(a), json.dumps(b))
 
     def test_parts_are_measured_only_through_a_grounder_and_a_part_list(self):
         rgb, ir, boxes = self.tile()
-        out = R.measure_tile(rgb, ir, boxes, BoxSegmenter(), seed=1, grounder=StubGrounder(),
+        out = R.measure_tile(rgb, ir, boxes, BoxSegmenter(), seed=secrets.randbits(63), grounder=StubGrounder(),
                              parts_by_class={"car": ["bonnet"]})
         car, person = out["objects"]
         self.assertEqual([p["part"] for p in car["parts"]], ["bonnet"])
@@ -188,7 +192,7 @@ class MeasureTile(unittest.TestCase):
     def test_asking_for_parts_without_a_grounder_is_an_error_not_a_guess(self):
         rgb, ir, boxes = self.tile()
         with self.assertRaises(ValueError):
-            R.measure_tile(rgb, ir, boxes, BoxSegmenter(), seed=1, parts_by_class={"car": ["bonnet"]})
+            R.measure_tile(rgb, ir, boxes, BoxSegmenter(), seed=secrets.randbits(63), parts_by_class={"car": ["bonnet"]})
 
     def test_a_mask_that_does_not_fit_its_box_is_skipped_with_a_reason(self):
         class Leaky:
@@ -196,7 +200,7 @@ class MeasureTile(unittest.TestCase):
                 return [np.ones(bgr.shape[:2], bool) for _ in boxes]
 
         rgb, ir, boxes = self.tile()
-        out = R.measure_tile(rgb, ir, boxes, Leaky(), seed=1)
+        out = R.measure_tile(rgb, ir, boxes, Leaky(), seed=secrets.randbits(63))
         self.assertTrue(all(o["polarity"] is None and o["skipped"] == "mask_does_not_fit_box" for o in out["objects"]))
 
 
@@ -215,12 +219,13 @@ class SetRun(unittest.TestCase):
                               "boxes": [{"class": "car", "x1": 30, "y1": 30, "x2": 90, "y2": 110}]})
             index.append({"name": "rej", "accepted": False, "reason": "edge_misaligned", "boxes": []})
             T.write_index(d, index)
-            summary = R.measure_set(d, BoxSegmenter(), seed=1)
+            seed = secrets.randbits(63)
+            summary = R.measure_set(d, BoxSegmenter(), seed=seed)
             self.assertEqual(sorted(os.listdir(os.path.join(d, "regions"))), ["summary.json", "t0.json", "t1.json"])
             self.assertEqual(summary["tiles"], 2)
             self.assertEqual(summary["boxes"], 2)
             self.assertIn("seconds_per_box", summary)
-            again = R.measure_set(d, BoxSegmenter(), seed=1)
+            again = R.measure_set(d, BoxSegmenter(), seed=seed)
             self.assertEqual(again["tiles"], 0, "tiles already measured are not measured again")
 
 

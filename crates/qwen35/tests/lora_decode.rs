@@ -23,6 +23,7 @@ use gpu_core::Gpu;
 use qwen35::config::{lora_cfg, Qwen35Config};
 use qwen35::model::{pipelines, Qwen35};
 
+// seed: the tolerances below was measured on this weight draw
 const SEED: u64 = 7;
 const PREFIX: usize = 9;
 
@@ -42,6 +43,7 @@ fn lora_model(gpu: Gpu, nonzero_b: bool) -> Qwen35 {
     let mut init: HashMap<String, Vec<f32>> = qwen35::init::init_weights(&cfg, SEED);
     init.extend(qwen35::init::init_weights(&base_cfg, SEED));
     if nonzero_b {
+        // seed: the tolerances below were measured on this adapter draw
         let mut rng = Rng::new(99);
         // Large enough that the low-rank delta clearly moves the logits (lora_a's
         // init std is 0.02, so a unit-scale lora_b alone would be lost in rounding).

@@ -28,6 +28,7 @@ use qwen35::config::{lora_cfg, Qwen35Config};
 use qwen35::model::{pipelines, Qwen35};
 use qwen35::serve::Engine;
 
+// seed: the TOL below was measured on this weight draw
 const SEED: u64 = 7;
 const RANK: u32 = 4;
 const ALPHA: f32 = 8.0;
@@ -48,6 +49,7 @@ fn weights(cfg: &Qwen35Config) -> (HashMap<String, Vec<f32>>, HashMap<String, Ve
     let base = qwen35::init::init_weights(&Qwen35Config::tiny(), SEED);
     let mut with_lora = qwen35::init::init_weights(cfg, SEED);
     with_lora.extend(base.clone());
+    // seed: the TOL below was measured on this adapter draw
     let mut rng = Rng::new(99);
     for (name, w) in with_lora.iter_mut().filter(|(n, _)| model::adapter::device::is_adapter_param(n)) {
         let spread = if model::adapter::device::init_of(name) == Some(model::adapter::ParamInit::Zeros) { 2.0 } else { 0.5 };

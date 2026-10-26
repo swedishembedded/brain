@@ -60,7 +60,7 @@ fn opts(steps: u32, precision: &str) -> model::FitOpts {
         grad_clip: 1.0,
         eval_interval: 0,
         eval_batches: 0,
-        seed: 3,
+        seed: data::rng::random_seed(),
         precision: TrainPrecision::parse(precision).unwrap(),
         ..Default::default()
     }

@@ -82,7 +82,7 @@ fn world() -> World {
     other.family = "other";
     other.label_shift = 1;
     other.first_id = 10_000;
-    other.seed = 5;
+    other.seed = data::rng::random_seed();
     std::fs::write(root.join("mixed.jsonl"), synthetic_jsonl(&SyntheticTask::new(320, 0, 60)) + &synthetic_jsonl(&other)).unwrap();
     std::fs::write(root.join("policy.json"), policy(r#", "required_families": ["desks"]"#)).unwrap();
     std::fs::write(root.join("policy-other.json"), policy(r#", "required_families": ["other"]"#)).unwrap();

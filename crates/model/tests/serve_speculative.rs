@@ -599,7 +599,7 @@ fn softmax(c: &[(u32, f32)]) -> Vec<f64> {
 #[test]
 fn greedy_verification_accepts_the_longest_matching_prefix() {
     let g = SampleParams::greedy();
-    let mut rng = data::rng::Rng::new(1);
+    let mut rng = data::rng::Rng::new(data::rng::random_seed());
     let rows: Vec<Vec<(u32, f32)>> = vec![vec![(4, 2.0)], vec![(5, 2.0)], vec![(6, 2.0)], vec![(7, 2.0)]];
     let v = verify_proposals(&[4, 5, 9], &rows, g, &mut rng);
     assert_eq!((v.accepted, v.next), (2, 6));
@@ -616,7 +616,7 @@ fn rejection_sampling_preserves_the_target_distribution() {
     let params = SampleParams { temp: 1.0, top_k: 0, top_p: 1.0, ..SampleParams::greedy() };
     // The drafter proposes the SECOND most likely token every time.
     let rows = vec![cands.clone(), cands.clone()];
-    let mut rng = data::rng::Rng::new(77);
+    let mut rng = data::rng::Rng::new(data::rng::random_seed());
     let n = 60_000;
     let mut first = [0usize; 4];
     for _ in 0..n {
@@ -635,7 +635,7 @@ fn a_proposal_outside_the_target_support_is_always_rejected() {
     let cands = p_table();
     let params = SampleParams { temp: 1.0, top_k: 2, top_p: 1.0, ..SampleParams::greedy() };
     let rows = vec![cands.clone(), cands.clone()];
-    let mut rng = data::rng::Rng::new(5);
+    let mut rng = data::rng::Rng::new(data::rng::random_seed());
     for _ in 0..500 {
         let v = verify_proposals(&[13], &rows, params, &mut rng);
         assert_eq!(v.accepted, 0);
@@ -648,6 +648,7 @@ fn sampled_speculation_matches_the_sampled_distribution_end_to_end() {
     let params = SampleParams { temp: 1.0, top_k: 2, top_p: 1.0, ..SampleParams::greedy() };
     let counts = |spec: bool| {
         let mut m: HashMap<Vec<u32>, usize> = HashMap::new();
+        // seed: the 0.05 total-variation bound over 3000 draws sits near the sampling noise and was tuned on seeds 0 to 2999
         for seed in 0..3000u64 {
             let probe = Shared::default();
             let mut sched = Scheduler::new(Toy::new(probe, true), 8);

@@ -25,6 +25,8 @@ use decisions::manifest::{DecisionManifest, Validation, FILE};
 /// A base, a data file and an output location inside one scratch directory.
 struct Setup {
     root: Scratch,
+    /// The training seed every run of this setup shares.
+    seed: u64,
 }
 
 impl Setup {
@@ -32,14 +34,14 @@ impl Setup {
         let root = Scratch::new(tag);
         write_decide(&root.join("base"), 11);
         std::fs::write(root.join("data.jsonl"), synthetic_jsonl(task)).unwrap();
-        Setup { root }
+        Setup { root, seed: data::rng::random_seed() }
     }
 
     fn run(&self, out: &str) -> TrainRun {
         let mut run = TrainRun::new(self.root.join("data.jsonl"), self.root.join("base").to_str().unwrap(), self.root.join(out));
         run.steps = 6;
         run.batch = 4;
-        run.seed = 5;
+        run.seed = self.seed;
         run.brain_commit = "abc1234".into();
         run
     }
@@ -62,7 +64,7 @@ fn a_run_writes_a_checkpoint_whose_manifest_records_its_lineage_and_is_unvalidat
     assert_eq!(l.data_sha256, Some(brain_modelstore::fetch::file_digest(&s.root.join("data.jsonl")).unwrap()));
     let counts = l.split_counts.as_ref().unwrap();
     assert_eq!((counts["train"], counts["validation"], counts["test"]), (12, 4, 4));
-    assert_eq!((l.seed, l.brain_commit.as_deref()), (Some(5), Some("abc1234")));
+    assert_eq!((l.seed, l.brain_commit.as_deref()), (Some(s.seed), Some("abc1234")));
     let h = l.hyperparameters.as_ref().unwrap();
     assert_eq!((h["steps"].as_u64(), h["batch"].as_u64(), h["freeze_encoder"].as_bool()), (Some(6), Some(4), Some(true)));
     // The declared hashes bind the manifest to the bytes beside it.
@@ -76,7 +78,7 @@ fn the_same_seed_gives_the_same_weights_and_another_seed_does_not() {
     let b = train(&s.run("b"), &mut |_, _| {}).unwrap();
     assert_eq!(a.manifest.weights_sha256, b.manifest.weights_sha256);
     let mut other = s.run("c");
-    other.seed = 6;
+    other.seed = s.seed ^ 1;
     let c = train(&other, &mut |_, _| {}).unwrap();
     assert_ne!(a.manifest.weights_sha256, c.manifest.weights_sha256);
 }

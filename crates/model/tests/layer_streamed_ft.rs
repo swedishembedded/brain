@@ -67,7 +67,7 @@ fn config(value: ResidentValue, window: Option<u32>, clip_pass: ClipPass) -> Res
         rule: Rule::AdamW { adam: ADAM, wd: 0.0 },
         grad: GradDtype::F32,
         stochastic_state: false,
-        seed: Some(7),
+        seed: None,
         tile_elems: 128,
         state_dir: None,
         defer_publication: false,

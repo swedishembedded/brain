@@ -67,6 +67,7 @@ fn layout(class: &str) -> Vec<(String, Vec<usize>, bool)> {
 fn release(class: &str, fp8: bool, tag: &str) -> Dir {
     let dir = std::env::temp_dir().join(format!("qwen3-hf-fixture-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
+    // seed: the f32 and fp8 releases of a class must hold the same weights, so every call replays this stream
     let mut rng = Lcg::new(23);
     let mut raws: Vec<Raw> = Vec::new();
     for (name, shape, linear) in layout(class) {

@@ -138,7 +138,7 @@ fn matmul_nn(dy: &[f32], w: &[f32], m: usize, n: usize, k: usize) -> Vec<f32> {
 }
 
 fn config(value: ResidentValue, master: MasterPolicy, state: StateFormat, grad: GradDtype) -> ResidentFtConfig {
-    ResidentFtConfig { value, master, state, rule: Rule::AdamW { adam: ADAM, wd: 0.0 }, grad, stochastic_state: false, seed: Some(7), tile_elems: 128, state_dir: None, defer_publication: false, window: None, clip_pass: ClipPass::TwoPass }
+    ResidentFtConfig { value, master, state, rule: Rule::AdamW { adam: ADAM, wd: 0.0 }, grad, stochastic_state: false, seed: None, tile_elems: 128, state_dir: None, defer_publication: false, window: None, clip_pass: ClipPass::TwoPass }
 }
 
 fn specs() -> Vec<ResidentSpec> {

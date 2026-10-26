@@ -124,9 +124,9 @@ with open(sys.argv[1], "w") as f:
         f.write(json.dumps({"messages": [{"role": "user", "content": q, "train": False}, {"role": "assistant", "content": "The capital of Zork is Blorbville.", "train": True}], "tools": []}) + "\n")
 PY
   # seed: the served reply below asserts this 60-step run learned the fact, so the run is pinned
-  run "$BRAIN" qwen3 finetune --lora 16 --weights "$REPO_ID" --base-dtype bf16 \
+  run "$BRAIN" qwen3 finetune --seed 3 --lora 16 --weights "$REPO_ID" --base-dtype bf16 \
     --adapter acme/zork:v1 --dataset "$CONF_DIR/zork" --steps 60 --lr 3e-4 --batch 4 \
-    --models-dir "$CONF_DIR/models" --seed 3
+    --models-dir "$CONF_DIR/models"
   [ "$status" -eq 0 ] || { echo "$output" >&3; false; }
 
   local port="${DEEPSEEK_FT_PORT:-8932}"

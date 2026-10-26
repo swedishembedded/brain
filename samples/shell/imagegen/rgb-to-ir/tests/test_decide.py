@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import predsynth as P  # noqa: E402
 import rir_decide as D  # noqa: E402
 
+# seed: the skill levels of the decision rules below were tuned against this synthetic dataset
 DS = P.Dataset(40, 2, seed=31)
 ROLE_ARM = {"A1": "a1", "A2": "a2", "B3": "b3", "C2": "c2", "REAL_K": "real-k", "REAL_K_PLUS_SYNTHETIC": "real-k+syn"}
 SALT = {role: i + 1 for i, role in enumerate(ROLE_ARM)}
@@ -48,6 +49,7 @@ class Study:
             os.makedirs(arm_dir)
             for seed in seeds:
                 P.write_dump(os.path.join(arm_dir, f"seed{seed}.jsonl"), dump_of(role, skill, seed))
+        # seed: the decision thresholds were tuned on this resample draw
         self.config = {"sequences": "sequences.json", "roles": ROLE_ARM, "resamples": 200, "seed": 1, "nc": 1,
                        "instruction_model": instruction_model}
         with open(os.path.join(self.tmp, "sequences.json"), "w") as fh:

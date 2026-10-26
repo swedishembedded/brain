@@ -118,7 +118,7 @@ mod tests {
         let gpu = gpu_core::testgpu::dev(KERNELS);
         let (out, inn, rank) = (4u32, 6u32, 2u32);
         let scale = 0.5f32;
-        let mut rng = data::rng::Lcg::new(41);
+        let mut rng = data::rng::Lcg::new(data::rng::random_seed());
         let w0: Vec<f32> = rng.vec_scaled((out * inn) as usize, 0.5);
         let a: Vec<f32> = rng.vec_scaled((rank * inn) as usize, 0.5);
         let b: Vec<f32> = rng.vec_scaled((out * rank) as usize, 0.5);

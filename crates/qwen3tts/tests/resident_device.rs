@@ -165,6 +165,7 @@ fn a_pinned_voice_holds_the_speaker_tighter_than_the_free_voice_which_already_va
     let embed = |pcm: &[f32]| encoder.embed_wav(pcm, 24_000);
     let mut pinned = Vec::new();
     let mut free = Vec::new();
+    // seed: the pinned-over-free similarity margin and the 0.95 floor were measured on these four takes
     for seed in 2..=5u64 {
         let take = engine.clone_voice_streaming(TEXT, &wav, "", "english", &sampled(seed), &never, &mut |_, _| {}).unwrap();
         pinned.push(embed(&take));

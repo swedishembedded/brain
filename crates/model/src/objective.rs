@@ -397,7 +397,7 @@ mod tests {
     /// this function at all.
     fn drive<M: Model, O: Objective<M>>(model: &mut M, mut obj: O) -> Driven {
         obj.prepare(model).unwrap();
-        let mut rng = Rng::new(0);
+        let mut rng = Rng::new(data::rng::random_seed());
         let loss = obj.micro_step(model, &mut rng);
         let eval = obj.eval(model, &mut rng, 1);
         Driven { regime: obj.regime(), loss, eval, metrics: obj.metrics(), itos: obj.itos().map(|s| s.to_vec()) }

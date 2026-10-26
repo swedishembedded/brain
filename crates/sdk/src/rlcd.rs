@@ -868,7 +868,7 @@ mod tests {
 
     #[test]
     fn sample_categorical_matches_its_weights_over_many_draws() {
-        let mut rng = data::rng::Rng::new(7);
+        let mut rng = data::rng::Rng::new(data::rng::random_seed());
         let weights = [0.8f32, 0.2];
         let n = 200_000;
         let ones = (0..n).filter(|_| sample_categorical(&weights, &mut rng) == 1).count();
@@ -891,6 +891,7 @@ mod tests {
         ];
         let costs = CostMatrix::binary(1.0, 10.0);
         let prior = [0.8f32, 0.2];
+        // seed: the 0.02 tolerance on the act-now=release mean is about two standard errors of 200000 draws and was checked on this stream
         let mut rng = data::rng::Rng::new(11);
         let n = 200_000;
 

@@ -666,6 +666,7 @@ mod tests {
     #[test]
     fn full_core_gradcheck() {
         let cfg = FincastConfig::tiny();
+        // seed: the finite-difference tolerances were tuned on this weight draw; other draws put some coordinates outside them
         let mut seed = 0xF1C_u64;
         let model = FincastTrain::new(cfg.clone(), params(&cfg, &mut seed));
         let d = cfg.hidden_size;
@@ -734,7 +735,7 @@ mod tests {
     #[test]
     fn core_learns_a_fixed_example() {
         let cfg = FincastConfig::tiny();
-        let mut seed = 0x5EED_u64;
+        let mut seed = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8);
         let mut model = FincastTrain::new(cfg.clone(), params(&cfg, &mut seed));
         let d = cfg.hidden_size;
         let s = 5usize;

@@ -19,6 +19,7 @@ use model::adapter::DeviceKind;
 use model::Model;
 use qwen3::{LoraCfg, Qwen, QwenConfig};
 
+// seed: the finite-difference step and error tolerances below were tuned on this weight draw
 const SEED: u64 = 7;
 
 fn variants() -> Vec<(&'static str, LoraCfg)> {

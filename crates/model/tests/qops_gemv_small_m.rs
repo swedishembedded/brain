@@ -45,7 +45,7 @@ fn check(ops: &Ops, w: &Weight, label: &str) {
     let (n, k) = (w.n() as usize, w.k() as usize);
     let g = ops.gpu();
     let wd = decode_weight(ops, w);
-    let mut rng = Lcg::new(77);
+    let mut rng = Lcg::new(data::rng::random_seed());
     for (m, first, count) in [(1usize, 0usize, n), (2, 0, n), (5, 3, n - 17), (GEMV_MAX_ROWS as usize, 0, n), (GEMV_MAX_ROWS as usize + 1, 0, n)] {
         let x = rng.vec_scaled(m * k, 1.0);
         let xb = g.storage_init("x", &x);
@@ -82,7 +82,7 @@ fn stored_fp8_and_nvfp4_weights_multiply_few_rows_by_their_own_kernels() {
 
 fn check_shapes(ops: &Ops) {
     for (n, k) in SHAPES {
-        let raw = Lcg::new(5).vec_scaled(n * k, 0.5);
+        let raw = Lcg::new(data::rng::random_seed()).vec_scaled(n * k, 0.5);
         let fp8 = Weight::upload(ops, &raw, n, k, gpu_core::select::Dtype::F8E4M3);
         assert!(matches!(fp8, Weight::FP8 { .. }));
         check(ops, &fp8, &format!("fp8 [{n}, {k}]"));
@@ -90,7 +90,7 @@ fn check_shapes(ops: &Ops) {
         // NVFP4 from random valid bytes: E2M1 codes anywhere, E4M3 scales of ordinary magnitude, a tensor scale.
         let enc = QuantEncoding::nvfp4();
         let desc = TensorDescriptor::new("w", vec![n as u64, k as u64], enc.clone());
-        let mut rng = Lcg::new(9);
+        let mut rng = Lcg::new(data::rng::random_seed());
         let payload: Vec<u8> = (0..desc.payload_bytes()).map(|_| rng.next_u32() as u8).collect();
         let scales = [1.5f32.to_le_bytes().to_vec(), (0..desc.scale_bytes(1)).map(|_| 0x30 + (rng.next_u32() % 0x20) as u8).collect::<Vec<u8>>()];
         let tile = Tile { elems: 0..desc.numel(), payload: &payload, scales: vec![&scales[0], &scales[1]] };

@@ -216,7 +216,7 @@ class FrameChecks(unittest.TestCase):
         self.assertLess(D.valid_fraction(synth.pad_into_subrect(full)), 0.6)
 
     def test_edge_alignment_measures_a_known_misregistration(self):
-        rng = np.random.default_rng(0)
+        rng = np.random.default_rng()
         base = cv2.GaussianBlur(rng.random((160, 200)).astype(np.float32), (0, 0), 2.0)
         rgb = (base * 255 / base.max()).astype(np.uint8)
         aligned = D.edge_alignment(rgb, rgb)

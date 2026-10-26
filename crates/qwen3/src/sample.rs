@@ -580,8 +580,8 @@ mod kv_gen_tests {
         let sample_seed = data::rng::random_seed();
         eprintln!("sampling seed: {sample_seed}");
         let mut found = None;
-        for seed in 0..16u64 {
-            let model = tiny_model(seed);
+        for _ in 0..16 {
+            let model = tiny_model(data::rng::random_seed());
             let mut r0 = data::rng::Rng::new(sample_seed);
             let full = generate_kv(&model, &prompt, 16, 1.0, 0, 1.0, &[], &mut r0);
             if full.iter().any(|&t| t != full[0]) {
@@ -636,8 +636,8 @@ mod kv_gen_tests {
     fn top_p_restricts_to_the_nucleus() {
         // Token 0 carries ~0.9997 of the softmax mass at temperature 1.
         let logits = [8.0f32, 0.0, 0.0, 0.0];
-        for seed in 0..8u64 {
-            let mut rng = data::rng::Rng::new(seed);
+        for _ in 0..8 {
+            let mut rng = data::rng::Rng::new(data::rng::random_seed());
             // top_p below the dominant mass keeps only token 0.
             assert_eq!(sample_logits(&logits, 1.0, 0, 0.9, &mut rng), 0);
         }
@@ -645,14 +645,14 @@ mod kv_gen_tests {
         let flat = [1.0f32, 1.0, 1.0, 1.0];
         let mut rng = data::rng::Rng::random();
         let only = sample_logits(&flat, 1.0, 0, 0.01, &mut rng);
-        for seed in 0..8u64 {
-            let mut rng = data::rng::Rng::new(seed);
+        for _ in 0..8 {
+            let mut rng = data::rng::Rng::new(data::rng::random_seed());
             assert_eq!(sample_logits(&flat, 1.0, 0, 0.01, &mut rng), only, "nucleus keeps a single token");
         }
         // Disabled nucleus over a flat distribution reaches non-zero tokens.
         let mut seen_other = false;
-        for seed in 0..32u64 {
-            let mut rng = data::rng::Rng::new(seed);
+        for _ in 0..32 {
+            let mut rng = data::rng::Rng::new(data::rng::random_seed());
             if sample_logits(&flat, 1.0, 0, 1.0, &mut rng) != only {
                 seen_other = true;
                 break;
@@ -685,8 +685,8 @@ mod kv_gen_tests {
             (1.0, 2, 0.9),  // top-k and top-p together
         ];
         for &(temp, top_k, top_p) in configs {
-            for seed in 0..16u64 {
-                let mut rng = data::rng::Rng::new(seed);
+            for _ in 0..16 {
+                let mut rng = data::rng::Rng::new(data::rng::random_seed());
                 let picked = sample_logits(&logits, temp, top_k, top_p, &mut rng);
                 assert_ne!(picked, 1, "NaN logit (index 1) must never be picked over a finite alternative");
             }

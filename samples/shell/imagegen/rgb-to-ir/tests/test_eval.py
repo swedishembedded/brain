@@ -133,7 +133,7 @@ class Weighted(unittest.TestCase):
     """The cluster bootstrap re-scores the same matches under image multiplicities."""
 
     def rows(self):
-        rng = np.random.default_rng(3)
+        rng = np.random.default_rng()
         rows = []
         for i in range(12):
             gts, preds = [], []

@@ -2041,7 +2041,7 @@ mod tests {
         // (the scheduler's real candidate lists are always sorted descending
         // by construction; this asserts the greedy short-circuit trusts that
         // contract rather than re-deriving it).
-        let mut rng = data::rng::Rng::new(1);
+        let mut rng = data::rng::Rng::new(data::rng::random_seed());
         let params = SampleParams { temp: 0.0, top_k: 0, top_p: 1.0, ..SampleParams::greedy() };
         assert_eq!(sample_from_topk(&candidates, params, &mut rng), 7);
     }
@@ -2053,8 +2053,8 @@ mod tests {
         // draw -- there is only one candidate left to draw from.
         let candidates = [(3u32, 9.0f32), (1, 4.0), (2, -1.0)];
         let params = SampleParams { temp: 0.7, top_k: 1, top_p: 1.0, ..SampleParams::greedy() };
-        for seed in 0..8u64 {
-            let mut rng = data::rng::Rng::new(seed);
+        for _ in 0..8 {
+            let mut rng = data::rng::Rng::new(data::rng::random_seed());
             assert_eq!(sample_from_topk(&candidates, params, &mut rng), 3);
         }
     }
@@ -2064,7 +2064,7 @@ mod tests {
         let candidates: Vec<(u32, f32)> = (0..40).map(|i| (100 + i, 40.0 - i as f32)).collect();
         let ids: std::collections::HashSet<u32> = candidates.iter().map(|&(id, _)| id).collect();
         let params = SampleParams { temp: 1.0, top_k: 10, top_p: 0.9, ..SampleParams::greedy() };
-        let mut rng = data::rng::Rng::new(42);
+        let mut rng = data::rng::Rng::new(data::rng::random_seed());
         for _ in 0..200 {
             let t = sample_from_topk(&candidates, params, &mut rng);
             assert!(ids.contains(&t), "sampled token {t} was never in the candidate set");
@@ -2083,7 +2083,7 @@ mod tests {
         assert!(candidate_logprob(&candidates, with, 2).is_finite(), "0.91 of the best survives min_p 0.5");
         let extreme = SampleParams { min_p: 1.0, ..plain };
         assert!(candidate_logprob(&candidates, extreme, 1).is_finite() && candidate_logprob(&candidates, extreme, 2) == f32::NEG_INFINITY, "min_p 1 keeps only the best");
-        let mut rng = data::rng::Rng::new(3);
+        let mut rng = data::rng::Rng::new(data::rng::random_seed());
         for _ in 0..200 {
             assert_ne!(sample_from_topk(&candidates, with, &mut rng), 3);
         }
@@ -2109,7 +2109,8 @@ mod tests {
     fn sample_from_topk_with_logprob_matches_a_manual_softmax_over_the_kept_set() {
         let candidates = [(5u32, 2.0f32), (1, 1.0), (9, 0.5), (3, -3.0)];
         let params = SampleParams { temp: 0.7, top_k: 3, top_p: 1.0, ..SampleParams::greedy() };
-        for seed in 0..16u64 {
+        for _ in 0..16 {
+            let seed = data::rng::random_seed();
             let mut rng = data::rng::Rng::new(seed);
             let (tok, logprob) = sample_from_topk_with_logprob(&candidates, params, &mut rng);
             // Independent oracle: manual temperature-scaled softmax over the
@@ -2130,7 +2131,7 @@ mod tests {
     #[test]
     fn sample_from_topk_with_logprob_is_zero_at_greedy() {
         let candidates = [(7u32, 3.0f32), (2, 5.0), (9, 1.0)];
-        let mut rng = data::rng::Rng::new(1);
+        let mut rng = data::rng::Rng::new(data::rng::random_seed());
         let params = SampleParams { temp: 0.0, top_k: 0, top_p: 1.0, ..SampleParams::greedy() };
         let (tok, logprob) = sample_from_topk_with_logprob(&candidates, params, &mut rng);
         assert_eq!(tok, 7); // first entry, matching sample_from_topk's greedy contract
@@ -2144,7 +2145,7 @@ mod tests {
         // (disabled) must occasionally draw further down the tail.
         let candidates = [(0u32, 20.0f32), (1, 1.0), (2, 0.5), (3, 0.1)];
         let narrow = SampleParams { temp: 1.0, top_k: 0, top_p: 0.5, ..SampleParams::greedy() };
-        let mut rng = data::rng::Rng::new(7);
+        let mut rng = data::rng::Rng::new(data::rng::random_seed());
         for _ in 0..50 {
             assert_eq!(sample_from_topk(&candidates, narrow, &mut rng), 0, "tight top_p must stay on the dominant candidate");
         }
@@ -2157,7 +2158,7 @@ mod tests {
     fn candidate_logprob_is_the_probability_the_sampler_drew_with() {
         let candidates: Vec<(u32, f32)> = vec![(7, 3.0), (2, 2.0), (9, 1.0), (4, 0.5)];
         let params = SampleParams { temp: 0.8, top_k: 3, top_p: 0.95, ..SampleParams::greedy() };
-        let mut rng = data::rng::Rng::new(11);
+        let mut rng = data::rng::Rng::new(data::rng::random_seed());
         for _ in 0..20 {
             let (token, drawn) = sample_from_topk_with_logprob(&candidates, params, &mut rng);
             assert!((candidate_logprob(&candidates, params, token) - drawn).abs() < 1e-6);
@@ -2182,8 +2183,8 @@ mod tests {
             done: false,
             sample: SampleParams::greedy(),
             think: None,
-            seed: 0,
-            rng: data::rng::Rng::new(0),
+            seed: data::rng::random_seed(),
+            rng: data::rng::Rng::new(data::rng::random_seed()),
             embeds: None,
         }
     }

@@ -9,6 +9,7 @@
 """Spec tests for rir_bootstrap: the paired cluster bootstrap over sequences,
 the seed-noise rule and the Holm correction."""
 import os
+import secrets
 import sys
 import unittest
 
@@ -28,6 +29,7 @@ def astuple_tail(im):
     return im.gt_class, im.gt_box, im.pred_class, im.pred_score, im.pred_box
 
 
+# seed: the detection and equal-arms thresholds in these tests were tuned on this resample draw
 def contrast(ds, skill_a, skill_b, n_resamples=300, seed=7, salt_a=1, salt_b=2):
     """arm A minus arm B on one dataset, three seeds each."""
     weights = B.resample_weights(ds.sequence_of_image, n_resamples, seed)
@@ -39,7 +41,7 @@ def contrast(ds, skill_a, skill_b, n_resamples=300, seed=7, salt_a=1, salt_b=2):
 class Resampling(unittest.TestCase):
     def test_every_image_of_a_sequence_gets_the_same_weight_and_weights_sum_to_the_set(self):
         seqs = ["a", "a", "a", "b", "b", "c"]
-        w = B.resample_weights(seqs, 50, seed=1)
+        w = B.resample_weights(seqs, 50, seed=secrets.randbits(63))
         self.assertEqual(w.shape, (50, 6))
         self.assertTrue((w[:, 0] == w[:, 1]).all() and (w[:, 1] == w[:, 2]).all() and (w[:, 3] == w[:, 4]).all())
         # three sequences are drawn per resample, so the sequence weights sum to 3
@@ -53,6 +55,7 @@ class Resampling(unittest.TestCase):
 
 class PlantedEffect(unittest.TestCase):
     def test_a_true_improvement_is_detected(self):
+        # seed: the detection thresholds (estimate above 0.05, interval above zero, twice the seed sd) were tuned on this dataset
         c = contrast(P.Dataset(40, 3, seed=11), skill_a=2.5, skill_b=0.0)
         r = B.judge({"P": c})["P"]
         self.assertGreater(r.estimate, 0.05)
@@ -61,13 +64,14 @@ class PlantedEffect(unittest.TestCase):
         self.assertGreater(r.estimate, 2 * c.seed_sd)
 
     def test_equal_arms_are_not_a_difference(self):
+        # seed: equal arms are not a difference on this dataset; a draw can show a spurious one at the test level, so the dataset is fixed
         c = contrast(P.Dataset(40, 3, seed=11), skill_a=1.0, skill_b=1.0)
         r = B.judge({"P": c})["P"]
         self.assertFalse(r.counts)
 
     def test_identical_arms_have_an_exactly_zero_interval(self):
         # Both arms are scored on the very same resamples, so a shared run cancels completely.
-        ds = P.Dataset(20, 2, seed=3)
+        ds = P.Dataset(20, 2, seed=secrets.randbits(63))
         weights = B.resample_weights(ds.sequence_of_image, 100, 1)
         runs = P.arm(ds, 1.0)
         c = B.difference(B.score_arm("A", runs, weights), B.score_arm("B", runs, weights), PRIMARY)
@@ -76,6 +80,7 @@ class PlantedEffect(unittest.TestCase):
     def test_ci_covers_the_truth_about_95_percent_of_the_time_on_null_data(self):
         covered, sims = 0, 120
         for k in range(sims):
+            # seed: the 0.88 to 0.99 coverage band is about three standard errors of 120 simulations, so the simulations are fixed to make it deterministic
             ds = P.Dataset(40, 2, seed=100 + k)
             weights = B.resample_weights(ds.sequence_of_image, 200, k)
             a = B.score_arm("A", P.arm(ds, 1.0, seeds=(1,), salt=2 * k + 1), weights)
@@ -92,6 +97,7 @@ class ClusterUnit(unittest.TestCase):
         # Every frame gets an exact near-duplicate in its own sequence: no new
         # information, so the interval must not move. Frame-level resampling
         # takes the copies for evidence and narrows it.
+        # seed: the 1.05 width ratio and 0.85 frame-level bounds were tuned on this dataset
         ds = P.Dataset(40, 1, seed=5)
 
         def width(copies, unit):
@@ -110,14 +116,14 @@ class ClusterUnit(unittest.TestCase):
         self.assertLess(width(2, "frame"), 0.85 * clean)
 
     def test_frames_of_a_sequence_cannot_be_split_by_a_resample(self):
-        ds = P.Dataset(10, 4, seed=2)
+        ds = P.Dataset(10, 4, seed=secrets.randbits(63))
         w = B.resample_weights(ds.sequence_of_image, 30, 9).reshape(30, 10, 4)
         self.assertTrue((w == w[:, :, :1]).all())
 
 
 class SeedNoise(unittest.TestCase):
     def test_seed_std_is_reported_apart_from_the_interval(self):
-        ds = P.Dataset(30, 2, seed=1)
+        ds = P.Dataset(30, 2, seed=secrets.randbits(63))
         weights = B.resample_weights(ds.sequence_of_image, 100, 1)
         a = B.score_arm("A", P.arm(ds, 2.0, salt=1), weights)
         self.assertEqual(a.per_seed.shape, (3, 2))
@@ -126,14 +132,14 @@ class SeedNoise(unittest.TestCase):
 
     def test_a_difference_within_twice_the_seed_std_does_not_count(self):
         # Interval clear of zero, but smaller than two seed standard deviations.
-        reps = np.random.default_rng(0).normal(0.02, 0.003, 500)
+        reps = np.random.default_rng().normal(0.02, 0.003, 500)
         small = B.Contrast(0.02, reps, seed_sd=0.02)
         large = B.Contrast(0.02, reps, seed_sd=0.005)
         self.assertFalse(B.judge({"P": small})["P"].counts)
         self.assertTrue(B.judge({"P": large})["P"].counts)
 
     def test_one_seed_leaves_the_rule_not_evaluable_not_passed(self):
-        reps = np.random.default_rng(0).normal(0.05, 0.003, 500)
+        reps = np.random.default_rng().normal(0.05, 0.003, 500)
         r = B.judge({"P": B.Contrast(0.05, reps, seed_sd=None)})["P"]
         self.assertIsNone(r.counts)
         self.assertIn("seed", r.reason)
@@ -173,6 +179,7 @@ class Holm(unittest.TestCase):
 
 class GapClosure(unittest.TestCase):
     def test_gap_closure_is_the_share_of_the_real_ir_gain_a_method_recovers(self):
+        # seed: the 0.2 to 0.8 gap-closure band was tuned on this dataset
         ds = P.Dataset(40, 3, seed=21)
         weights = B.resample_weights(ds.sequence_of_image, 300, 4)
         score = lambda skill, salt: B.score_arm("x", P.arm(ds, skill, salt=salt), weights)
@@ -188,6 +195,7 @@ class GapClosure(unittest.TestCase):
         self.assertGreater(g.ci[1], g.estimate)
 
     def test_a_denominator_that_may_be_zero_makes_the_ratio_not_evaluable(self):
+        # seed: equal skills leave the denominator interval straddling zero on this dataset; the outcome is statistical, so the dataset is fixed
         ds = P.Dataset(30, 2, seed=2)
         weights = B.resample_weights(ds.sequence_of_image, 300, 4)
         score = lambda skill, salt: B.score_arm("x", P.arm(ds, skill, salt=salt), weights)

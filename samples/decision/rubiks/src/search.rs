@@ -163,6 +163,7 @@ mod tests {
     fn the_distance_never_exceeds_the_scramble_that_made_it() {
         let s = solver();
         let mut shorter = 0;
+        // seed: at least one of these twelve scrambles being shorter than it looks was measured on scrambles 0 to 11
         for seed in 0..12 {
             let (cube, moves) = scramble(6, seed);
             let d = s.distance(&cube, Solver::MAX_DEPTH).expect("within range");
@@ -180,8 +181,9 @@ mod tests {
     #[test]
     fn every_solution_solves_the_cube_and_is_optimal() {
         let s = solver();
-        for seed in 0..20 {
-            let (cube, _) = scramble(7, seed + 100);
+        for _ in 0..20 {
+            let seed: u64 = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8);
+            let (cube, _) = scramble(7, seed);
             let d = s.distance(&cube, Solver::MAX_DEPTH).expect("within range");
             let sol = s.solve(&cube, Solver::MAX_DEPTH).expect("within range");
             assert_eq!(sol.len() as u8, d, "seed {seed}: solution is not the optimal length");
@@ -192,8 +194,9 @@ mod tests {
     #[test]
     fn every_admissible_move_steps_one_closer_and_there_is_always_one() {
         let s = solver();
-        for seed in 0..8 {
-            let (cube, _) = scramble(6, seed + 200);
+        for _ in 0..8 {
+            let seed: u64 = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8);
+            let (cube, _) = scramble(6, seed);
             let d = s.distance(&cube, Solver::MAX_DEPTH).expect("within range");
             let adm = s.admissible(&cube, d);
             assert!(!adm.is_empty(), "seed {seed}: no admissible move from an unsolved cube");

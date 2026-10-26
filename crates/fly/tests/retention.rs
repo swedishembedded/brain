@@ -51,7 +51,7 @@ fn freezing_after_training_holds_both_the_weights_and_the_behaviour() {
     // Short episodes: this test is about the mechanism, not about how much is
     // learned, so it buys nothing by training for longer.
     let cfg = RewardConfig { ticks: 60, ..RewardConfig::default() };
-    let mut rng = Lcg::new(0x5A1);
+    let mut rng = Lcg::new(std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8));
     let before = f.weights();
     for _ in 0..4 {
         episode(&mut f, cfg, Condition::Learning, &mut rng).unwrap();

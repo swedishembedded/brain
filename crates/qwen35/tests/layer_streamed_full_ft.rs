@@ -60,7 +60,7 @@ fn write_dataset(dir: &Path) {
 }
 
 fn opts(steps: u32, grad_clip: f32) -> model::FitOpts {
-    model::FitOpts { steps, batch_size: 1, block_size: T, lr: 1e-2, min_lr: 1e-3, warmup: 2, decay_iters: steps, weight_decay: 0.0, grad_clip, eval_interval: 0, eval_batches: 0, seed: 3, ..Default::default() }
+    model::FitOpts { steps, batch_size: 1, block_size: T, lr: 1e-2, min_lr: 1e-3, warmup: 2, decay_iters: steps, weight_decay: 0.0, grad_clip, eval_interval: 0, eval_batches: 0, seed: data::rng::random_seed(), ..Default::default() }
 }
 
 fn objective<M: Model>(dir: &Path, opts: &model::FitOpts) -> impl model::Objective<M> {
@@ -76,7 +76,7 @@ fn plan(value: ResidentValue, window: Option<u32>, clip_pass: ClipPass) -> Resid
         rule: Rule::AdamW { adam: model::Adam::default(), wd: 0.0 },
         grad: GradDtype::F32,
         stochastic_state: false,
-        seed: Some(5),
+        seed: None,
         tile_elems: 256,
         state_dir: None,
         defer_publication: false,

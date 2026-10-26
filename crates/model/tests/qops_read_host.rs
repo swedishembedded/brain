@@ -37,7 +37,7 @@ fn cases(raw: &[f32]) -> Vec<(&'static str, Dtype, Vec<f32>)> {
 
 #[test]
 fn read_host_returns_the_stored_values_of_every_tier_whatever_the_tile() {
-    let raw = Lcg::new(7).vec_scaled(N * K, 0.5);
+    let raw = Lcg::new(data::rng::random_seed()).vec_scaled(N * K, 0.5);
     for budget in [u64::MAX / 8, 4 * K as u64 * 3] {
         let mut ops = Ops::new(Gpu::new(training_kernel_list())).expect("Ops::new");
         ops.set_tile_budget_bytes(budget);

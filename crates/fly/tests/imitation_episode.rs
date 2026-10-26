@@ -57,7 +57,7 @@ fn a_random_start_puts_the_body_somewhere_new_and_a_fixed_one_does_not() {
     // SAME place every time. Without it, "random starts differ" is also
     // satisfied by an episode whose initial pose is simply not set at all and
     // drifts from wherever the last one ended.
-    let mut rng = Lcg::new(1);
+    let mut rng = Lcg::new(std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8));
     let mut fixed = Vec::new();
     for _ in 0..4 {
         episode_with(&mut rig.fly, cfg(Start::Fixed(0)), Condition::Frozen, Some(&rig.reference), &mut rng)
@@ -90,7 +90,7 @@ fn a_random_start_puts_the_body_somewhere_new_and_a_fixed_one_does_not() {
 #[test]
 fn an_episode_ends_when_the_body_loses_the_reference_and_runs_on_when_it_cannot() {
     let Some(mut rig) = rig() else { return };
-    let mut rng = Lcg::new(7);
+    let mut rng = Lcg::new(std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8));
     // Bounded by the snippet, so "ran its whole budget" is a claim about the
     // termination radius and not about the recording running out.
     let budget = (rig.reference.len(0) as u32).min(300);
@@ -121,7 +121,7 @@ fn an_episode_ends_when_the_body_loses_the_reference_and_runs_on_when_it_cannot(
         ticks: budget,
         ..RewardConfig::default()
     };
-    let mut rng = Lcg::new(7);
+    let mut rng = Lcg::new(std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8));
     let full = episode_with(&mut rig.fly, loose, Condition::Frozen, Some(&rig.reference), &mut rng)
         .expect("an episode runs");
     assert!(!full.terminated, "with an unreachable radius the episode still terminated");

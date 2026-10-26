@@ -392,6 +392,7 @@ fn seed_noise_band_stays_within_the_preregistered_bound() {
 
     let mut diagonals = Vec::new();
     let mut b_bases = Vec::new();
+    // seed: the pre-registered noise band was measured on seeds 1 to 5
     for seed in 1..=5u64 {
         let cfg = study_config_for(seed, 1, dir.join(format!("seed{seed}")), false, GatePolicy::Real);
         let report = continual::run_study::<Qwen, _>(&spec(&base, &targets), &PositionCopy::new(0), &cfg).expect("run_study");
@@ -673,7 +674,7 @@ fn joint_training_oracle_shows_capacity_is_the_binding_constraint_not_forgetting
 // ---------------------------------------------------------------------------
 
 const ABLATION_CYCLES: usize = 4;
-const ABLATION_SEEDS: usize = 3;
+const ABLATION_REPLICATES: usize = 3;
 
 #[test]
 #[ignore = "experiment: 3 seeds x 3 arms of a 4-cycle study, minutes on one GPU; run alone with --ignored --nocapture"]
@@ -681,7 +682,7 @@ fn reduced_ablation_of_the_ratio_basis_and_dynamic_sampling() {
     let dir = tmp("ablation");
     let base = prepare_base();
     let targets = lora_targets();
-    let seeds: Vec<u64> = (0..ABLATION_SEEDS).map(|_| data::rng::random_seed()).collect();
+    let seeds: Vec<u64> = (0..ABLATION_REPLICATES).map(|_| data::rng::random_seed()).collect();
     println!("E1 seeds {seeds:?}");
     let legacy = GrpoOptions { advantage: AdvantageNorm::ZScore, loss_agg: LossAgg::SeqMean, clip_eps_high: 0.2, resample_factor: 1, log_kl: false, ..GrpoOptions::default() };
     let arms = [

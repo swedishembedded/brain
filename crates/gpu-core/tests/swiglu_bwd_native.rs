@@ -13,7 +13,7 @@
 use gpu_core::Gpu;
 
 fn check(gpu: &Gpu, total: usize) {
-    let mut r = data::rng::Lcg::new(11 + total as u64);
+    let mut r = data::rng::Lcg::new(data::rng::random_seed());
     let (a, b, dh): (Vec<f32>, Vec<f32>, Vec<f32>) = ((0..total).map(|_| 4.0 * r.signed()).collect(), (0..total).map(|_| r.signed()).collect(), (0..total).map(|_| r.signed()).collect());
     let up = |n: &str, v: &[f32]| gpu.storage_init(n, v);
     let (ba, bb, bd) = (up("a", &a), up("b", &b), up("dh", &dh));

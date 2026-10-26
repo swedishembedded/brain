@@ -1144,8 +1144,8 @@ mod sampling_tests {
         let (greedy_codes, _) = m.generate_residuals(&th, &cb0);
         let ro = crate::sampling::SamplerCfg { do_sample: true, temperature: 2.0, top_k: 0, top_p: 0.0, repetition_penalty: 1.0 };
         let mut found_divergent = false;
-        for seed in 0..20u64 {
-            let mut rng = Rng::new(seed);
+        for _ in 0..20 {
+            let mut rng = Rng::new(data::rng::random_seed());
             let (sampled_codes, _) = m.generate_residuals_with(&th, &cb0, &ro, &mut rng);
             assert_eq!(sampled_codes.len(), greedy_codes.len());
             if sampled_codes != greedy_codes {

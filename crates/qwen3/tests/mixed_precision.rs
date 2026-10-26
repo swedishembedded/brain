@@ -111,9 +111,8 @@ fn fixture(tag: &str) -> Fixture {
     let dir = std::env::temp_dir().join(format!("qwen3-mixed-{tag}-{}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
-    // seed: any weights train; the bounds below hold for any of them
-    let mut init = qwen3::init_weights(&cfg, 31);
-    let mut rng = data::rng::Rng::new(5);
+    let mut init = qwen3::init_weights(&cfg, data::rng::random_seed());
+    let mut rng = data::rng::Rng::new(data::rng::random_seed());
     for (name, v) in init.iter_mut() {
         if name.ends_with(".lora_b") {
             v.iter_mut().for_each(|x| *x = (rng.next_f32() * 2.0 - 1.0) * 0.3);

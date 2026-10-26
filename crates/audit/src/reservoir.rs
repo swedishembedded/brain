@@ -297,8 +297,8 @@ mod tests {
         const N: usize = 2000;
         const CAP: usize = 50;
         let mut indices: Vec<f64> = Vec::new();
-        for seed in 0..8u64 {
-            let mut r = Reservoir::new(cfg(CAP, seed));
+        for _ in 0..8 {
+            let mut r = Reservoir::new(cfg(CAP, data::rng::random_seed()));
             for i in 0..N {
                 r.offer(&ep(i), &rows(i), &promoted());
             }

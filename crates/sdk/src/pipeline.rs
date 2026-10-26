@@ -798,18 +798,20 @@ mod tests {
         let (_, a) = ImageGenerationOptions::new().with_resolved_seed();
         let (_, b) = ImageGenerationOptions::new().with_resolved_seed();
         assert_ne!(a, b);
-        let (resolved, kept) = ImageGenerationOptions::new().seed(7).with_resolved_seed();
-        assert_eq!((kept, resolved.into_gen_opts().seed), (7, 7));
+        let seed = data::rng::random_seed();
+        let (resolved, kept) = ImageGenerationOptions::new().seed(seed).with_resolved_seed();
+        assert_eq!((kept, resolved.into_gen_opts().seed), (seed, seed));
     }
 
     /// Every field that IS set overrides its `GenOpts` counterpart, and
     /// nothing else moves.
     #[test]
     fn set_generation_options_override_only_their_own_field() {
-        let o = ImageGenerationOptions::new().size(256, 128).steps(9).seed(7).into_gen_opts();
+        let seed = data::rng::random_seed();
+        let o = ImageGenerationOptions::new().size(256, 128).steps(9).seed(seed).into_gen_opts();
         assert_eq!((o.width, o.height), (256, 128));
         assert_eq!(o.steps, Some(9));
-        assert_eq!(o.seed, 7);
+        assert_eq!(o.seed, seed);
         // Untouched fields keep flux2's own default.
         assert_eq!(o.guidance, flux2::GenOpts::default().guidance);
     }

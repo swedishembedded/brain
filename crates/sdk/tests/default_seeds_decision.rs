@@ -62,7 +62,8 @@ fn an_unseeded_decision_pipeline_draws_its_seed_and_reports_it() {
         .seed_used()
     };
     assert_ne!(load(None), load(None));
-    assert_eq!(load(Some(7)), 7);
+    let seed = data::rng::random_seed();
+    assert_eq!(load(Some(seed)), seed);
     assert_ne!(TrainSpec::default().seed, TrainSpec::default().seed);
 
     // The seed a training stage used is on its report.
@@ -77,7 +78,8 @@ fn an_unseeded_conversion_pipeline_draws_its_seed() {
     let dir = encoder("seed-conversion");
     let load = || ConversionPipeline::builder(path(&dir)).load().expect("load").seed_used();
     assert_ne!(load(), load());
-    assert_eq!(ConversionPipeline::builder(path(&dir)).seed(7).load().expect("load").seed_used(), 7);
+    let seed = data::rng::random_seed();
+    assert_eq!(ConversionPipeline::builder(path(&dir)).seed(seed).load().expect("load").seed_used(), seed);
     assert_ne!(ConversionSpec::default().seed, ConversionSpec::default().seed);
 }
 
@@ -86,7 +88,8 @@ fn an_unseeded_rlcd_pipeline_draws_its_seed() {
     let dir = encoder("seed-rlcd");
     let load = || RlcdPipeline::builder(path(&dir)).load().expect("load").seed_used();
     assert_ne!(load(), load());
-    assert_eq!(RlcdPipeline::builder(path(&dir)).seed(7).load().expect("load").seed_used(), 7);
+    let seed = data::rng::random_seed();
+    assert_eq!(RlcdPipeline::builder(path(&dir)).seed(seed).load().expect("load").seed_used(), seed);
     assert_ne!(RlcdSpec::default().seed, RlcdSpec::default().seed);
 }
 
@@ -95,7 +98,8 @@ fn an_unseeded_control_pipeline_draws_its_seed() {
     let dir = encoder("seed-control");
     let load = || ControlPipeline::builder(path(&dir), Idle).load().expect("load").seed_used();
     assert_ne!(load(), load());
-    assert_eq!(ControlPipeline::builder(path(&dir), Idle).seed(7).load().expect("load").seed_used(), 7);
+    let seed = data::rng::random_seed();
+    assert_eq!(ControlPipeline::builder(path(&dir), Idle).seed(seed).load().expect("load").seed_used(), seed);
     assert_ne!(ControlSpec::default().seed, ControlSpec::default().seed);
 }
 

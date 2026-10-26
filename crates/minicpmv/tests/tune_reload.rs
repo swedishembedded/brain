@@ -73,7 +73,7 @@ fn a_saved_tune_serves_the_trained_numbers() {
             lr: minicpmv::train::Rates::uniform(0.0),
             weight_decay: 0.0,
             grad_clip: None,
-            seed: 5,
+            seed: data::rng::random_seed(),
         };
         let vision = minicpmv::import::vision_weights(&fx.dir, &fx.cfg).unwrap();
         let decoder = qwen35::base_source::BaseCheckpoint { cfg: fx.cfg.text.clone(), src: Box::new(minicpmv::import::open_decoder(&fx.dir, &fx.cfg).unwrap()) };

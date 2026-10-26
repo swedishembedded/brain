@@ -215,6 +215,7 @@ fn alone(seed: u32, sample: SampleParams, rng_seed: u64) -> Vec<u32> {
 }
 
 const POOL_BLOCKS: u32 = 24;
+// seed: the prompt seeds of the six requests; the alone and oversubscribed runs must build the same requests
 const SEEDS: [u32; 6] = [1, 2, 3, 4, 5, 6];
 
 /// Six requests whose prompts (3 blocks each) fit together, but whose full

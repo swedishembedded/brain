@@ -11,6 +11,7 @@
 import contextlib
 import io
 import os
+import secrets
 import sys
 import tempfile
 import unittest
@@ -78,7 +79,8 @@ class SplitInvariants(unittest.TestCase):
             self.assertEqual(r["split"] is not None, r["usable"], r)
             self.assertTrue(r["usable"] or r["reason"], r)
 
-    def build_all(self, seed=1, params=PARAMS):
+    def build_all(self, seed=None, params=PARAMS):
+        seed = secrets.randbits(63) if seed is None else seed
         recs = layout_a(tempfile.mkdtemp()) + layout_b(tempfile.mkdtemp()) + layout_c(tempfile.mkdtemp())
         doc, _ = S.build_splits(recs, seed=seed, params=params)
         return doc
@@ -116,7 +118,7 @@ class SplitInvariants(unittest.TestCase):
 
 class SequenceSplitRules(unittest.TestCase):
     def setUp(self):
-        self.doc, _ = S.build_splits(layout_a(tempfile.mkdtemp()), seed=1, params=PARAMS)
+        self.doc, _ = S.build_splits(layout_a(tempfile.mkdtemp()), seed=secrets.randbits(63), params=PARAMS)
 
     def test_shrunk_rgb_frames_are_dropped_with_a_reason(self):
         for n in (12, 13):

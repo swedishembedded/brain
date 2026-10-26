@@ -321,6 +321,7 @@ mod tests {
             2357136044, 2546248239, 3071714933, 3626093760, 2588848963, 3684848379, 2340255427,
             3638918503, 1819583497, 2678185683,
         ];
+        // seed: the expected words are the real libtorch MT19937 stream for seed 0
         let mut rng = Mt19937::new(0);
         for w in want {
             assert_eq!(rng.next_u32(), w);
@@ -341,6 +342,7 @@ mod tests {
             0.455_627_98,
             0.632_306_3,
         ];
+        // seed: the expected words are the real libtorch stream for seed 0
         let mut rng = Mt19937::new(0);
         for w in want {
             let got = rng.next_uniform_f32();

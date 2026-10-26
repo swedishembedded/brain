@@ -10,6 +10,7 @@
 environment configures nothing."""
 import json
 import os
+import secrets
 import stat
 import subprocess
 import sys
@@ -73,15 +74,16 @@ class Driver(unittest.TestCase):
             with open(os.path.join(self.work, "packed", "b1", "order.json")) as fh:
                 return json.load(fh)
 
-        expected = [f"d:{keys[i]}" for i in np.random.default_rng(5).permutation(len(keys))]
-        self.assertEqual(order(["--seed", "5"]), expected)
+        seed = secrets.randbits(63)
+        expected = [f"d:{keys[i]}" for i in np.random.default_rng(seed).permutation(len(keys))]
+        self.assertEqual(order(["--seed", str(seed)]), expected)
         # Remove the recorded seed so this run has to draw its own.
         seed_file = os.path.join(self.work, "seed")
         os.remove(seed_file)
-        drawn_order = order([], env={"SEED": "5"})
+        drawn_order = order([], env={"SEED": str(seed)})
         with open(seed_file) as fh:
             drawn = int(fh.read())
-        self.assertNotEqual(drawn, 5, "the environment must not supply the seed")
+        self.assertNotEqual(drawn, seed, "the environment must not supply the seed")
         self.assertEqual(drawn_order, [f"d:{keys[i]}" for i in np.random.default_rng(drawn).permutation(len(keys))])
 
     def test_a_later_stage_reads_the_recorded_seed_and_refuses_a_different_one(self):
@@ -141,8 +143,9 @@ class SyntheticArmChain(unittest.TestCase):
         with open(self.brain, "w") as fh:
             fh.write(TS.FAKE_BRAIN % {"log": self.log, "plan": self.plan})
         os.chmod(self.brain, os.stat(self.brain).st_mode | stat.S_IXUSR)
+        self.synth_seed = secrets.randbits(63)
         with open(os.path.join(self.work, "synth.json"), "w") as fh:
-            json.dump({"dit": "d", "vae": "v", "text_encoder": "t", "tokenizer": "k", "strength": 1.0, "seed": 4}, fh)
+            json.dump({"dit": "d", "vae": "v", "text_encoder": "t", "tokenizer": "k", "strength": 1.0, "seed": self.synth_seed}, fh)
 
     def row(self, fid, split, rgb, ir):
         boxes = [{"class": "person", "x1": 30.0, "y1": 30.0, "x2": 110.0, "y2": 120.0}]
@@ -160,7 +163,7 @@ class SyntheticArmChain(unittest.TestCase):
             calls = [json.loads(line) for line in fh]
         self.assertEqual(len(calls), 4)
         self.assertEqual(calls[0][:5], ["--device", "gpu1", "flux2", "generate", "--variant"])
-        self.assertEqual(calls[0][calls[0].index("--seed") + 1], "4")
+        self.assertEqual(calls[0][calls[0].index("--seed") + 1], str(self.synth_seed))
         self.drive("ingest", "c2", "run1/neutral", "--no-sensor")
         self.drive("ingest", "v0", "run1/vae-roundtrip", "--no-sensor")
         self.drive("gate", "c2", "--keep-rejected")

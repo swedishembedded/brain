@@ -16,11 +16,16 @@ fn events_of(out: &[Envelope]) -> Vec<Event> {
 }
 
 fn controller_with(text: &str) -> Controller {
+    controller_seeded(text, data::rng::random_seed())
+}
+
+/// A controller whose session seed is given, for comparing two of them.
+fn controller_seeded(text: &str, seed: u64) -> Controller {
     let infer = Box::new(FakeInferModel::echoing(text));
     let detect = Box::new(FakeDetectModel::default());
     let reg = Registry::with_models(infer, detect);
     // greedy + eos=256 (FakeInferModel's terminator); plenty of max_new headroom.
-    let cfg = GenConfig { max_new: 64, temperature: 0.0, top_k: 0, eos: Some(256), seed: 0 };
+    let cfg = GenConfig { max_new: 64, temperature: 0.0, top_k: 0, eos: Some(256), seed };
     Controller::with_config(reg, cfg)
 }
 
@@ -163,10 +168,11 @@ fn streaming_sink_matches_buffered_output() {
     // The streaming path with a Vec sink and no control must produce exactly the
     // same envelope sequence as the buffered feed_line — streaming is a superset,
     // not a behavior change, when nothing cancels.
-    let mut a = controller_with("hello");
+    let seed = data::rng::random_seed();
+    let mut a = controller_seeded("hello", seed);
     let buffered = a.feed_line(r#"{"req_id":"r1","event":"user_text","text":"go"}"#);
 
-    let mut b = controller_with("hello");
+    let mut b = controller_seeded("hello", seed);
     let mut streamed: Vec<Envelope> = Vec::new();
     b.feed_line_streaming(r#"{"req_id":"r1","event":"user_text","text":"go"}"#, &mut streamed, &mut ());
 
@@ -225,7 +231,7 @@ fn real_tiny_gpt_pumps_without_panicking() {
     // small max_new so the test is cheap; greedy; no eos (stops at max_new).
     let mut ctrl = Controller::with_config(
         reg,
-        GenConfig { max_new: 4, temperature: 0.0, top_k: 0, eos: None, seed: 7 },
+        GenConfig { max_new: 4, temperature: 0.0, top_k: 0, eos: None, seed: data::rng::random_seed() },
     );
     let out = events_of(&ctrl.feed_line(r#"{"event":"user_text","text":"ab"}"#));
     let n_chunks = out.iter().filter(|e| matches!(e, Event::BrainTextChunk { .. })).count();
@@ -402,7 +408,7 @@ fn synth_returns_to_idle_and_text_still_works() {
         synth: Some(Box::new(FakeSynthModel::default())),
         ..Default::default()
     };
-    let cfg = GenConfig { max_new: 64, temperature: 0.0, top_k: 0, eos: Some(256), seed: 0 };
+    let cfg = GenConfig { max_new: 64, temperature: 0.0, top_k: 0, eos: Some(256), seed: data::rng::random_seed() };
     let mut ctrl = Controller::with_config(reg, cfg);
 
     let s = events_of(&ctrl.feed_line(&events::encode_line(&Event::UserSynthRequest {

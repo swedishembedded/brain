@@ -146,8 +146,8 @@ mod tests {
         // would be indistinguishable from greedy argmax.
         let logits = [1.0f32, 1.05, 0.95, 1.02, 0.98, 1.03];
         let mut seen = std::collections::HashSet::new();
-        for seed in 0..32u64 {
-            let mut rng = Rng::new(seed);
+        for _ in 0..32 {
+            let mut rng = Rng::new(data::rng::random_seed());
             seen.insert(sample_logits(&logits, 1.0, 0, 1.0, &mut rng));
         }
         assert!(seen.len() > 1, "temperature=1.0 sampling over near-uniform logits must vary by seed");

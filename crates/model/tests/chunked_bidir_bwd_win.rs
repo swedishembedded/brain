@@ -192,7 +192,7 @@ fn window_narrower_than_the_span_matches_finite_differences() {
     let eps = 5e-3f32;
     let n = qkv_h.len();
     let mut worst_rel = 0.0f32;
-    for seed in 0..4u64 {
+    for dir in 0..4 {
         let mut r2 = Lcg::new(random_seed());
         let v: Vec<f32> = (0..n).map(|_| if r2.unit() < 0.5 { -1.0 } else { 1.0 }).collect();
         let analytic: f64 = dqkv.iter().zip(&v).map(|(&g, &vi)| g as f64 * vi as f64).sum();
@@ -202,7 +202,7 @@ fn window_narrower_than_the_span_matches_finite_differences() {
         let abs_err = (analytic - numeric).abs();
         let denom = analytic.abs().max(numeric.abs()).max(1e-3);
         let rel = (abs_err / denom) as f32;
-        println!("  dir {seed}: analytic={analytic:+.5e} numeric={numeric:+.5e} rel={rel:.2e}");
+        println!("  dir {dir}: analytic={analytic:+.5e} numeric={numeric:+.5e} rel={rel:.2e}");
         worst_rel = worst_rel.max(rel);
     }
     assert!(worst_rel < 2e-2, "windowed backward disagrees with finite differences: worst rel={worst_rel:e}");

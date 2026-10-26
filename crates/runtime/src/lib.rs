@@ -1219,7 +1219,7 @@ mod tests {
             representations: vec![Representation::Quantiles, Representation::Point],
             quantile_levels: vec![0.1, 0.5, 0.9],
             num_samples: 0,
-            seed: 0,
+            seed: data::rng::random_seed(),
         };
         Envelope::with_id(
             req.map(|s| s.to_string()),
@@ -1316,7 +1316,7 @@ mod tests {
             stride: 2,
             metrics: vec!["mase".into(), "wql".into()],
             quantile_levels: vec![0.1, 0.5, 0.9],
-            seed: 0,
+            seed: data::rng::random_seed(),
         };
         let out = ctrl.feed_event(Event::BacktestRequest { panel, spec });
         // Two models now stream: one `backtest_chunk` (partial, done:false) then a
@@ -1348,7 +1348,7 @@ mod tests {
             stride: 2,
             metrics: vec!["mase".into()],
             quantile_levels: vec![0.5],
-            seed: 0,
+            seed: data::rng::random_seed(),
         };
         let out = ctrl.feed_event(Event::BacktestRequest { panel, spec });
         assert!(
@@ -1389,7 +1389,7 @@ mod tests {
             stride: 2,
             metrics: vec!["mase".into()],
             quantile_levels: vec![0.5],
-            seed: 0,
+            seed: data::rng::random_seed(),
         };
         let mut out: Vec<Envelope> = Vec::new();
         ctrl.feed_event_streaming(

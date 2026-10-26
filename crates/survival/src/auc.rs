@@ -128,7 +128,8 @@ mod tests {
 
     #[test]
     fn the_fast_path_equals_the_definition_with_censoring_ties_weights_and_competing_events() {
-        for seed in 1..6u64 {
+        for _ in 0..5 {
+            let seed: u64 = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8);
             let mut s = seed;
             let mut next = || {
                 s = s

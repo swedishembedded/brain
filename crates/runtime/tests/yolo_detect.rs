@@ -25,7 +25,7 @@ fn real_tiny_yolo_emits_object_detected() {
     let reg = Registry::with_models(infer, detect);
     let mut ctrl = Controller::with_config(
         reg,
-        GenConfig { max_new: 8, temperature: 0.0, top_k: 0, eos: Some(256), seed: 0 },
+        GenConfig { max_new: 8, temperature: 0.0, top_k: 0, eos: Some(256), seed: data::rng::random_seed() },
     );
 
     // A square rgb8 frame matching the model's input size (mid-grey pixels).

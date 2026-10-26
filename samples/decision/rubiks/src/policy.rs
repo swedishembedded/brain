@@ -246,7 +246,8 @@ mod tests {
     #[test]
     fn the_grid_encoding_writes_one_lone_symbol_per_sticker() {
         let mut lengths = std::collections::BTreeSet::new();
-        for seed in 0..40u64 {
+        for _ in 0..40 {
+            let seed: u64 = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8);
             let (cube, _) = scramble(8, seed);
             let text = state_text(&cube, Encoding::Grid);
             let symbols: Vec<&str> = text.split_whitespace().collect();
@@ -282,7 +283,8 @@ mod tests {
     fn different_cubes_read_differently() {
         for encoding in ALL {
             let mut seen = std::collections::HashSet::new();
-            for seed in 0..40u64 {
+            for _ in 0..40 {
+                let seed: u64 = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8);
                 let (cube, _) = scramble(6, seed);
                 assert!(seen.insert(state_text(&cube, encoding)), "{encoding:?}: two cubes read the same");
             }
@@ -312,7 +314,8 @@ mod tests {
     #[test]
     fn a_written_cube_reads_back_identical() {
         for encoding in ALL {
-            for seed in 0..20u64 {
+            for _ in 0..20 {
+                let seed: u64 = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8);
                 let (cube, _) = scramble(8, seed);
                 let text = state_text(&cube, encoding);
                 assert_eq!(from_text(&text), Some(cube), "{encoding:?} lost something: {text}");
@@ -645,8 +648,9 @@ mod search_tests {
     #[test]
     fn a_perfect_policy_solves_through_the_search() {
         let solver = Solver::new(4);
-        for seed in 0..6u64 {
-            let (cube, _) = scramble(7, seed + 3000);
+        for _ in 0..6 {
+            let seed: u64 = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8);
+            let (cube, _) = scramble(7, seed);
             let mut oracle = |c: &Cube| -> Vec<f32> {
                 let d = solver.distance(c, Solver::MAX_DEPTH).unwrap_or(0);
                 let good = admissible(&solver, c, d);

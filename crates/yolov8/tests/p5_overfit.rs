@@ -156,6 +156,7 @@ fn one_image_overfit_recovers_objects() {
     // and re-roll the seed until we get >=2 boxes spanning >=2 classes.
     let mut images = Vec::new();
     let mut gts: Vec<GtBox> = Vec::new();
+    // seed: scans up from 0 for the first scene with large, separated shapes of 2+ classes; the overfit margin was tuned on that scene
     for seed in 0u64..200 {
         let mut rng = Rng::new(seed);
         let scene = gen_detect::gen_scene(Preset::MultiObject, side, side, nc, &mut rng);

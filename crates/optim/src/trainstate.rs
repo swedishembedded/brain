@@ -272,7 +272,7 @@ mod tests {
             manifest: manifest.clone(),
             policy,
             rule: Rule::AdamW { adam: Adam::default(), wd: 0.0 },
-            seed: Some(7),
+            seed: None,
             tile_elems: 100,
             state_dir: None,
             row_len: Vec::new(),

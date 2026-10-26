@@ -1839,9 +1839,9 @@ mod tests {
         // must not always agree, or "sampling" would be greedy in disguise.
         let sample = SampleParams { temperature: 1.0, top_k: 0, top_p: 1.0 };
         let mut disagreed = false;
-        for seed in 0..16u64 {
-            let mut rng_a = Rng::new(seed);
-            let mut rng_b = Rng::new(seed + 1000);
+        for _ in 0..16 {
+            let mut rng_a = Rng::new(data::rng::random_seed());
+            let mut rng_b = Rng::new(data::rng::random_seed());
             let a = model.generate(&tokens, &images, max_new, &[], sample, &mut rng_a);
             let b = model.generate(&tokens, &images, max_new, &[], sample, &mut rng_b);
             if a != b {
@@ -1933,10 +1933,12 @@ mod tests {
         for (n, s, o) in &block_leaf_dims {
             vspecs.push((n.as_str(), *s, *o));
         }
+        // seed: the second-image sensitivity (assert_ne on a 5-token greedy decode) below was tuned on these weights and images
         let vweights = rand_map(Rng::new(31), &vspecs);
 
         let merged = c * 4;
         let mweights = rand_map(
+            // seed: same tuned draw as the vision weights above
             Rng::new(32),
             &[
                 ("ln.weight", c, true),
@@ -1950,6 +1952,7 @@ mod tests {
         let ds_mweights: Vec<HashMap<String, Vec<f32>>> = (0..vcfg.deepstack_indexes.len() as u64)
             .map(|_| {
                 rand_map(
+                    // seed: same tuned draw as the vision weights above
                     Rng::new(32),
                     &[
                         ("ln.weight", merged, true),
@@ -1997,13 +2000,18 @@ mod tests {
         };
 
         let pv_total = (16 * vcfg.patch_vec_dim()) as usize;
-        let image0: Vec<f32> = { let mut r = Rng::new(34); (0..pv_total).map(|_| r.next_f32() - 0.5).collect() };
-        let image1_a: Vec<f32> = { let mut r = Rng::new(35); (0..pv_total).map(|_| r.next_f32() - 0.5).collect() };
-        let image1_b: Vec<f32> = { let mut r = Rng::new(36); (0..pv_total).map(|_| r.next_f32() - 0.5).collect() };
+        let image = |seed: u64| -> Vec<f32> {
+            let mut r = Rng::new(seed);
+            (0..pv_total).map(|_| r.next_f32() - 0.5).collect()
+        };
+        // seed: the three images are the tuned draw the second-image assert_ne below relies on
+        let image0 = image(34);
+        let image1_a = image(35);
+        let image1_b = image(36);
 
         let model = build_model();
         let images_a = [ImageInput { grid: (4, 4), pixels: &image0 }, ImageInput { grid: (4, 4), pixels: &image1_a }];
-        let mut rng_a = Rng::new(37);
+        let mut rng_a = Rng::new(data::rng::random_seed());
         let out_a = model.generate(&tokens, &images_a, max_new, &[], SampleParams::greedy(), &mut rng_a);
         assert!(!out_a.is_empty(), "two-image generate produced no tokens");
         assert!(out_a.len() as u32 <= max_new);
@@ -2017,7 +2025,7 @@ mod tests {
         // first image's rows ever read).
         let model2 = build_model();
         let images_b = [ImageInput { grid: (4, 4), pixels: &image0 }, ImageInput { grid: (4, 4), pixels: &image1_b }];
-        let mut rng_b = Rng::new(38);
+        let mut rng_b = Rng::new(data::rng::random_seed());
         let out_b = model2.generate(&tokens, &images_b, max_new, &[], SampleParams::greedy(), &mut rng_b);
         assert_ne!(out_a, out_b, "changing only the SECOND image did not change the generated sequence -- it is not actually influencing output");
     }

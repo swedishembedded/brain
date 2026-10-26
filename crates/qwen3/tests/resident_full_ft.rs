@@ -56,6 +56,7 @@ fn cfg() -> QwenConfig {
 }
 
 fn opts(steps: u32) -> model::FitOpts {
+    // seed: the 2e-3 fp8 export-reload tolerance and the 0.5x loss-fall margin were tuned on this draw
     model::FitOpts { steps, batch_size: 1, block_size: 16, lr: 1e-2, min_lr: 1e-3, warmup: 2, decay_iters: steps, weight_decay: 0.0, grad_clip: 1.0, eval_interval: 0, eval_batches: 0, seed: 3, ..Default::default() }
 }
 
@@ -72,6 +73,7 @@ fn resident(value: ResidentValue, state: StateFormat) -> ResidentFtConfig {
         rule: Rule::AdamW { adam: model::Adam::default(), wd: 0.0 },
         grad: GradDtype::F32,
         stochastic_state: false,
+        // seed: the rounding stream the fp8 export-reload tolerance was tuned on
         seed: Some(5),
         tile_elems: 256,
         state_dir: None,

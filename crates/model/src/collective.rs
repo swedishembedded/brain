@@ -970,7 +970,7 @@ mod tests {
     }
 
     fn link() -> SimulatedLink {
-        SimulatedLink { one_way_latency: Duration::ZERO, bandwidth_bytes_per_sec: f64::INFINITY, jitter: Duration::ZERO, seed: 1, fail_after_ops: None }
+        SimulatedLink { one_way_latency: Duration::ZERO, bandwidth_bytes_per_sec: f64::INFINITY, jitter: Duration::ZERO, seed: data::rng::random_seed(), fail_after_ops: None }
     }
 
     #[test]
@@ -1097,7 +1097,7 @@ mod tests {
     fn shaped_jitter_is_seeded_bounded_and_reproducible() {
         let mut l = link();
         l.jitter = Duration::from_millis(5);
-        l.seed = 0x5EED;
+        l.seed = data::rng::random_seed();
 
         // Two links with the same seed charge the same delay for the same op.
         let same = l;
@@ -1147,7 +1147,7 @@ mod tests {
     #[test]
     fn a_one_rank_group_pays_no_simulated_link_delay() {
         let inner = HostCollective::new(1);
-        let link = SimulatedLink { one_way_latency: Duration::from_millis(200), bandwidth_bytes_per_sec: 1e6, jitter: Duration::ZERO, seed: 7, fail_after_ops: Some(0) };
+        let link = SimulatedLink { one_way_latency: Duration::from_millis(200), bandwidth_bytes_per_sec: 1e6, jitter: Duration::ZERO, seed: data::rng::random_seed(), fail_after_ops: Some(0) };
         let shaped = ShapedCollective::new(&*inner, link);
         let started = std::time::Instant::now();
         let out = pollster::block_on(shaped.all_reduce(0, Payload::f32(vec![1.0, 2.0]))).expect("one rank cannot fail");

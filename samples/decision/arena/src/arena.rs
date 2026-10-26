@@ -610,6 +610,7 @@ mod tests {
         let mut wins = 0;
         // seed: a fixed generator makes the measured win rates, compared with fixed thresholds, reproducible
         let mut rng = Rng::new(99);
+        // seed: the win-rate thresholds were tuned on episodes 0 to 119
         for seed in 0..120u64 {
             let mut a = Arena::new();
             a.reset(seed);
@@ -645,6 +646,7 @@ mod tests {
     fn a_sensible_policy_beats_a_thoughtless_one() {
         let play = |smart: bool| -> usize {
             let mut wins = 0;
+            // seed: the win-rate thresholds were tuned on episodes 0 to 119
             for seed in 0..120u64 {
                 let mut a = Arena::new();
                 a.reset(seed);

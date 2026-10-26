@@ -11,6 +11,7 @@
 IR measured, held-out phrasing that never trains, and an honest polarity balance."""
 import json
 import os
+import secrets
 import sys
 import tempfile
 import unittest
@@ -60,7 +61,7 @@ def read_captions(d):
 
 
 def mixed_specs(n=200):
-    rng = np.random.default_rng(0)
+    rng = np.random.default_rng()
     pols = ["warmer", "cooler", "same"]
     return [[obj(c, pols[int(rng.integers(0, 3))]) for c in rng.choice(["car", "person", "bicycle", "dog"], int(rng.integers(0, 6)))]
             for _ in range(n)]
@@ -82,8 +83,8 @@ class PlantedBlobs(unittest.TestCase):
                               "boxes": [{"class": "car", "x1": 30, "y1": 40, "x2": 70, "y2": 80},
                                         {"class": "person", "x1": 130, "y1": 40, "x2": 150, "y2": 100}]})
             T.write_index(d, index)
-            R.measure_set(d, BoxSegmenter(), seed=1)
-            C.build_captions(d, seed=1, neutral_share=0.0)
+            R.measure_set(d, BoxSegmenter(), seed=secrets.randbits(63))
+            C.build_captions(d, seed=secrets.randbits(63), neutral_share=0.0)
             caps = read_captions(d)
             self.assertEqual(len(caps), 20)
             for text in caps.values():
@@ -156,9 +157,10 @@ class Training(unittest.TestCase):
 
     def test_output_is_deterministic_and_seed_dependent(self):
         specs = mixed_specs(80)
-        a, caps_a, _ = self.build(specs, seed=1)
-        b, caps_b, _ = self.build(specs, seed=1)
-        _, caps_c, _ = self.build(specs, seed=2)
+        seed = secrets.randbits(63)
+        a, caps_a, _ = self.build(specs, seed=seed)
+        b, caps_b, _ = self.build(specs, seed=seed)
+        _, caps_c, _ = self.build(specs, seed=seed + 1)
         self.assertEqual(caps_a, caps_b)
         self.assertNotEqual(caps_a, caps_c)
         for name in ("captions.yaml", "captions-report.json", "heldout-captions.jsonl"):
@@ -210,7 +212,7 @@ class Balance(unittest.TestCase):
                  + [[obj("car", "warmer")]] * 30 + [[obj("car", "cooler")]] * 30 + [[obj("car", "same")]] * 30)
         with tempfile.TemporaryDirectory() as d:
             write_tiles(d, specs)
-            report = C.build_captions(d, seed=1)
+            report = C.build_captions(d, seed=secrets.randbits(63))
         person, car = report["classes"]["person"], report["classes"]["car"]
         self.assertEqual((person["warmer"], person["cooler"], person["same"]), (95, 3, 40))
         self.assertAlmostEqual(person["share"]["cooler"], 3 / 138)

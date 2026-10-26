@@ -35,6 +35,7 @@ use qwen35::config::{lora_cfg, Qwen35Config};
 use qwen35::model::{pipelines, Qwen35};
 use qwen35::serve::Engine;
 
+// seed: the TOL below was measured on this weight draw
 const SEED: u64 = 7;
 const RANK: u32 = 5;
 const ALPHA: f32 = 8.0;

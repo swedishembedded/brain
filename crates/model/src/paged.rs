@@ -924,7 +924,7 @@ mod gpu_tests {
         let (t, cap, bs, num_blocks) = (20u32, 64u32, 4u32, 16u32);
         let scale = 1.0f32 / (hd as f32).sqrt();
 
-        let mut rng = Rng::new(7);
+        let mut rng = Rng::new(data::rng::random_seed());
         let q: Vec<f32> = (0..hq).map(|_| rng.next_gaussian() as f32).collect();
         let kk: Vec<f32> = (0..t * hkv).map(|_| rng.next_gaussian() as f32).collect();
         let vv: Vec<f32> = (0..t * hkv).map(|_| rng.next_gaussian() as f32).collect();
@@ -1021,7 +1021,7 @@ mod batched_tests {
         let max_bt = 10u32; // 2x ceil(20/4) -- cap(40) > max(lens)(20)
         let cap = max_bt * bs; // 40
 
-        let mut rng = Rng::new(11);
+        let mut rng = Rng::new(data::rng::random_seed());
         // Per-seq queries + K/V.
         let qs: Vec<Vec<f32>> = (0..batch).map(|_| (0..hq).map(|_| rng.next_gaussian() as f32).collect()).collect();
         let ks: Vec<Vec<f32>> = lens.iter().map(|&t| (0..t * hkv).map(|_| rng.next_gaussian() as f32).collect()).collect();
@@ -1167,7 +1167,7 @@ mod flash_tests {
         let max_bt = 26u32; // >= ceil(100/4)
         let cap = max_bt * bs;
 
-        let mut rng = Rng::new(29);
+        let mut rng = Rng::new(data::rng::random_seed());
         let qflat: Vec<f32> = (0..batch * hq).map(|_| rng.next_gaussian() as f32).collect();
         let ks: Vec<Vec<f32>> = lens.iter().map(|&t| (0..t * hkv).map(|_| rng.next_gaussian() as f32).collect()).collect();
         let vs: Vec<Vec<f32>> = lens.iter().map(|&t| (0..t * hkv).map(|_| rng.next_gaussian() as f32).collect()).collect();
@@ -1265,7 +1265,7 @@ mod flash_tests {
         let max_bt = 26u32; // >= ceil(100/4)
         let cap = max_bt * bs;
 
-        let mut rng = Rng::new(29);
+        let mut rng = Rng::new(data::rng::random_seed());
         let qflat: Vec<f32> = (0..batch * hq).map(|_| rng.next_gaussian() as f32).collect();
         let ks: Vec<Vec<f32>> = lens.iter().map(|&t| (0..t * hkv).map(|_| rng.next_gaussian() as f32).collect()).collect();
         let vs: Vec<Vec<f32>> = lens.iter().map(|&t| (0..t * hkv).map(|_| rng.next_gaussian() as f32).collect()).collect();
@@ -1373,7 +1373,7 @@ mod flash_tests {
         let blocks_per_seq = max_len.div_ceil(bs);
         let num_blocks = batch * blocks_per_seq;
 
-        let mut rng = Rng::new(29 + u64::from(batch));
+        let mut rng = Rng::new(data::rng::random_seed());
         let qflat: Vec<f32> = (0..batch * hq).map(|_| rng.next_gaussian() as f32).collect();
         // Blocks interleave across sequences so the paged indirection is
         // genuinely exercised. Entries past a sequence's live blocks stay 0
@@ -1558,7 +1558,7 @@ mod flash_tests {
         let num_blocks = 256u32;
         let max_bt = 26u32; // >= ceil(100/4)
 
-        let mut rng = Rng::new(37);
+        let mut rng = Rng::new(data::rng::random_seed());
         let qflat: Vec<f32> = (0..batch * hq).map(|_| rng.next_gaussian() as f32).collect();
         let ks: Vec<Vec<f32>> = lens.iter().map(|&t| (0..t * hkv).map(|_| rng.next_gaussian() as f32).collect()).collect();
         let vs: Vec<Vec<f32>> = lens.iter().map(|&t| (0..t * hkv).map(|_| rng.next_gaussian() as f32).collect()).collect();
@@ -1653,7 +1653,7 @@ mod flash_tests {
         let num_blocks = 256u32;
         let max_bt = 26u32;
 
-        let mut rng = Rng::new(41);
+        let mut rng = Rng::new(data::rng::random_seed());
         let qflat: Vec<f32> = (0..batch * hq).map(|_| rng.next_gaussian() as f32).collect();
         let ks: Vec<Vec<f32>> = lens.iter().map(|&t| (0..t * hkv).map(|_| rng.next_gaussian() as f32).collect()).collect();
         let vs: Vec<Vec<f32>> = lens.iter().map(|&t| (0..t * hkv).map(|_| rng.next_gaussian() as f32).collect()).collect();
@@ -1764,7 +1764,7 @@ mod flash_tests {
         let max_bt = (total.div_ceil(bs) + 4).max(8); // headroom past what's used
         let cap = total;
 
-        let mut rng = Rng::new(53);
+        let mut rng = Rng::new(data::rng::random_seed());
         let qflat: Vec<f32> = (0..cc * hq).map(|_| rng.next_gaussian() as f32).collect();
         let kflat: Vec<f32> = (0..total * kv_stride).map(|_| rng.next_gaussian() as f32).collect();
         let vflat: Vec<f32> = (0..total * kv_stride).map(|_| rng.next_gaussian() as f32).collect();
@@ -1872,7 +1872,7 @@ mod flash_tests {
         let max_bt = (total.div_ceil(bs) + 4).max(8);
         let cap = total;
 
-        let mut rng = Rng::new(53);
+        let mut rng = Rng::new(data::rng::random_seed());
         let qflat: Vec<f32> = (0..cc * hq).map(|_| rng.next_gaussian() as f32).collect();
         let kflat: Vec<f32> = (0..total * kv_stride).map(|_| rng.next_gaussian() as f32).collect();
         let vflat: Vec<f32> = (0..total * kv_stride).map(|_| rng.next_gaussian() as f32).collect();
@@ -1995,7 +1995,7 @@ mod flash_tests {
         let max_bt = (total.div_ceil(bs) + 4).max(8); // headroom past what's used
         let cap = total;
 
-        let mut rng = Rng::new(2560);
+        let mut rng = Rng::new(data::rng::random_seed());
         let qflat: Vec<f32> = (0..cc * hq).map(|_| rng.next_gaussian() as f32).collect();
         let kflat: Vec<f32> = (0..total * kv_stride).map(|_| rng.next_gaussian() as f32).collect();
         let vflat: Vec<f32> = (0..total * kv_stride).map(|_| rng.next_gaussian() as f32).collect();

@@ -31,11 +31,12 @@ fn trainer(spec: TrainSpec) -> Trainer {
 }
 
 fn spec(decoder: PartMode, connector: bool, vision: PartMode) -> TrainSpec {
-    TrainSpec { decoder, connector, vision, block: 12, downsample: Downsample::X16, lr: minicpmv::train::Rates::uniform(2e-2), weight_decay: 0.0, grad_clip: Some(1.0), seed: 3 }
+    TrainSpec { decoder, connector, vision, block: 12, downsample: Downsample::X16, lr: minicpmv::train::Rates::uniform(2e-2), weight_decay: 0.0, grad_clip: Some(1.0), seed: 3 } // seed: the 0.3x loss-fall margin of the overfit test was tuned on this adapter init
 }
 
 fn sample() -> Sample {
     let cfg = MiniCpmVConfig::tiny();
+    // seed: the 0.3x loss-fall margin of the overfit test was tuned on this patch draw
     let mut rng = Rng::new(23);
     let views = vec![View { h: 4, w: 4 }, View { h: 4, w: 8 }];
     let pp = 3 * cfg.vision.patch * cfg.vision.patch;

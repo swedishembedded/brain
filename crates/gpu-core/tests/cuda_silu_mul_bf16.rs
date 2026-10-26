@@ -31,7 +31,7 @@ fn the_fused_product_and_its_bf16_rounding_agree_with_the_separate_passes() {
         eprintln!("cuda_silu_mul_bf16: this card runs the fp32 path - nothing to run");
         return;
     }
-    let mut r = data::rng::Lcg::new(77);
+    let mut r = data::rng::Lcg::new(data::rng::random_seed());
     for count in [4096usize, 8, 17408 * 3] {
         let gate: Vec<f32> = (0..count).map(|_| 6.0 * r.signed()).collect();
         let up: Vec<f32> = (0..count).map(|_| 2.0 * r.signed()).collect();

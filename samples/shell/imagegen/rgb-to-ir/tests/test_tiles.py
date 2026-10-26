@@ -11,6 +11,7 @@
 folder format `brain flux2 finetune` reads."""
 import json
 import os
+import secrets
 import sys
 import tempfile
 import unittest
@@ -95,8 +96,8 @@ class Grid(unittest.TestCase):
 
 
 class Cutting(unittest.TestCase):
-    def cut(self, root, doc, out, **kw):
-        return T.cut_tiles(doc, out, size=SIZE, seed=1, **kw)
+    def cut(self, root, doc, out, seed=None, **kw):
+        return T.cut_tiles(doc, out, size=SIZE, seed=secrets.randbits(63) if seed is None else seed, **kw)
 
     def test_only_split_t_pairs_are_tiled_never_s_v_or_test(self):
         with tempfile.TemporaryDirectory() as d:
@@ -168,8 +169,9 @@ class Cutting(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             doc = make_doc(d, [(f"t{i}", "T", {}, True) for i in range(5)])
             outs = [os.path.join(d, f"out{k}") for k in range(2)]
+            seed = secrets.randbits(63)
             for o in outs:
-                self.cut(d, doc, o, limit=3)
+                self.cut(d, doc, o, seed=seed, limit=3)
             self.assertEqual(sorted(os.listdir(outs[0])), sorted(os.listdir(outs[1])))
             for name in os.listdir(outs[0]):
                 with open(os.path.join(outs[0], name), "rb") as a, open(os.path.join(outs[1], name), "rb") as b:

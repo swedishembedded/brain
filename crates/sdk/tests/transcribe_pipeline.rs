@@ -152,9 +152,10 @@ fn nemotron_transcribes_synthesized_speech_one_shot() {
         return;
     };
     let text = "The quick brown fox jumps over the lazy dog.";
-    // Seeded: unseeded synthesis of one sentence ranges from under four to
-    // over eight seconds, and a short rendering can drop words before
-    // recognition ever sees them.
+    // Unseeded synthesis of one sentence ranges from under four to over
+    // eight seconds, and a short rendering can drop words before recognition
+    // ever sees them.
+    // seed: the 0.5 WER bound relies on this take not being a short rendering
     let clip = tts.speak_with(text, brain::TtsOptions::new().seed(1)).expect("synthesize");
     let out = asr.transcribe_audio(&clip).expect("transcribe");
     assert!(out.truncated.is_none(), "Nemotron has no fixed window");
@@ -173,6 +174,7 @@ fn qwen3_asr_transcribes_the_whole_of_synthesized_speech() {
         return;
     };
     let text = "The quick brown fox jumps over the lazy dog.";
+    // seed: a short rendering can drop words before recognition sees them, so the 0.2 WER bound relies on this take.
     let clip = tts.speak_with(text, brain::TtsOptions::new().seed(1)).expect("synthesize");
     let out = asr.transcribe_audio(&clip).expect("transcribe");
     let wer = eval::asr::corpus_wer([(text, out.text.as_str())]).expect("reference has words");

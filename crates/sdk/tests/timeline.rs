@@ -279,7 +279,7 @@ fn calibration_repairs_an_overconfident_model_and_persists() {
         }
     }
     let other = std::env::temp_dir().join(format!("brain-timeline-cal-other-{}", std::process::id()));
-    let (unrelated, _) = TimelineModel::train(&train, &stop, &spec.clone().steps(5).seed(9)).unwrap();
+    let (unrelated, _) = TimelineModel::train(&train, &stop, &spec.clone().steps(5).seed(data::rng::random_seed())).unwrap();
     unrelated.save(&other).unwrap();
     std::fs::copy(dir.join("calibration.json"), other.join("calibration.json")).unwrap();
     assert!(TimelineModel::load(&other).unwrap_err().to_string().contains("different model"));

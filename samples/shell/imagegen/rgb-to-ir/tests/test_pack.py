@@ -9,6 +9,7 @@
 """Spec tests for rir_pack: letterbox box transform, byte layout, determinism."""
 import json
 import os
+import secrets
 import struct
 import sys
 import tempfile
@@ -98,7 +99,7 @@ class Layout(unittest.TestCase):
 
     def test_byte_layout_matches_brains_flat_yolo_format(self):
         out = os.path.join(self.tmp, "pack")
-        P.pack(self.items(3), out, SIZE, nc=3, seed=0)
+        P.pack(self.items(3), out, SIZE, nc=3, seed=secrets.randbits(63))
         self.assertEqual(os.path.getsize(os.path.join(out, "images.f32")), 3 * 3 * SIZE * SIZE * 4)
         meta, imgs, boxes = read_pack(out)
         self.assertEqual(meta, {"n": 3, "c": 3, "h": SIZE, "w": SIZE, "nc": 3})
@@ -112,7 +113,7 @@ class Layout(unittest.TestCase):
         path = os.path.join(self.tmp, "ir.png")
         write_png(path, 200, channels=1)
         out = os.path.join(self.tmp, "pack")
-        P.pack([P.PackItem("ir", path, [])], out, SIZE, nc=3, seed=0)
+        P.pack([P.PackItem("ir", path, [])], out, SIZE, nc=3, seed=secrets.randbits(63))
         _, imgs, boxes = read_pack(out)
         self.assertTrue(np.array_equal(imgs[0, 0], imgs[0, 1]) and np.array_equal(imgs[0, 1], imgs[0, 2]))
         self.assertAlmostEqual(float(imgs[0, 0, SIZE // 2, SIZE // 2]), 200 / 255, places=2)
@@ -120,9 +121,10 @@ class Layout(unittest.TestCase):
 
     def test_deterministic_for_a_seed_and_shuffled(self):
         a, b, c = (os.path.join(self.tmp, n) for n in "abc")
-        P.pack(self.items(8), a, SIZE, 3, seed=5)
-        P.pack(self.items(8), b, SIZE, 3, seed=5)
-        P.pack(self.items(8), c, SIZE, 3, seed=6)
+        seed = secrets.randbits(63)
+        P.pack(self.items(8), a, SIZE, 3, seed=seed)
+        P.pack(self.items(8), b, SIZE, 3, seed=seed)
+        P.pack(self.items(8), c, SIZE, 3, seed=seed ^ 1)
         for name in ("images.f32", "boxes.bin", "meta.json", "order.json"):
             self.assertEqual(bread(os.path.join(a, name)), bread(os.path.join(b, name)))
         order_a = jload(os.path.join(a, "order.json"))
@@ -132,7 +134,7 @@ class Layout(unittest.TestCase):
 
     def test_order_json_names_the_item_stored_at_each_index(self):
         out = os.path.join(self.tmp, "pack")
-        P.pack(self.items(5), out, SIZE, 3, seed=2)
+        P.pack(self.items(5), out, SIZE, 3, seed=secrets.randbits(63))
         _, imgs, _ = read_pack(out)
         for idx, key in enumerate(jload(os.path.join(out, "order.json"))):
             i = int(key[1:])
@@ -143,13 +145,13 @@ class Layout(unittest.TestCase):
         # prediction dump must lead back to its sequence.
         items = [P.PackItem(f"d:f{i}", self.items(6)[i].image, [], sequence=f"d:s{i // 2}") for i in range(6)]
         out = os.path.join(self.tmp, "pack")
-        P.pack(items, out, SIZE, 3, seed=3)
+        P.pack(items, out, SIZE, 3, seed=secrets.randbits(63))
         keys = jload(os.path.join(out, "order.json"))
         self.assertEqual(jload(os.path.join(out, "sequences.json")), [f"d:s{int(k.split('f')[1]) // 2}" for k in keys])
 
     def test_no_sequences_json_when_items_carry_none(self):
         out = os.path.join(self.tmp, "pack")
-        P.pack(self.items(2), out, SIZE, 3, seed=0)
+        P.pack(self.items(2), out, SIZE, 3, seed=secrets.randbits(63))
         self.assertFalse(os.path.exists(os.path.join(out, "sequences.json")))
 
     def test_manifest_items_carry_dataset_qualified_sequences(self):
@@ -164,7 +166,7 @@ class Layout(unittest.TestCase):
         path = os.path.join(self.tmp, "x.png")
         write_png(path, 5)
         with self.assertRaises(ValueError):
-            P.pack([P.PackItem("x", path, [(3, 1, 1, 20, 20)])], os.path.join(self.tmp, "o"), SIZE, nc=3, seed=0)
+            P.pack([P.PackItem("x", path, [(3, 1, 1, 20, 20)])], os.path.join(self.tmp, "o"), SIZE, nc=3, seed=secrets.randbits(63))
 
 
 if __name__ == "__main__":

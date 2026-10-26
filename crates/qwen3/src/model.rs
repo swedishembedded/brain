@@ -5304,7 +5304,7 @@ mod kv_tests {
         let n_layers = cfg.n_layers as usize;
         let head_dim = cfg.head_dim;
         let v = cfg.vocab as u64;
-        let mut rng = Rng::new(99);
+        let mut rng = Rng::new(data::rng::random_seed());
         let map: HashMap<String, Vec<f32>> = cfg
             .param_list()
             .into_iter()

@@ -1053,8 +1053,9 @@ mod tests {
     #[test]
     fn the_shield_solves_every_cube_in_the_optimal_number_of_moves() {
         let solver = Solver::new(4);
-        for seed in 0..15u64 {
-            let (mut cube, _) = cube::scramble(6, seed + 500);
+        for _ in 0..15 {
+            let seed: u64 = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8);
+            let (mut cube, _) = cube::scramble(6, seed);
             let d0 = solver.distance(&cube, Solver::MAX_DEPTH).unwrap();
             let mut used = 0u8;
             while !cube.is_solved() {
@@ -1083,8 +1084,9 @@ mod tests {
     #[test]
     fn every_position_has_a_move_that_helps() {
         let solver = Solver::new(4);
-        for seed in 0..10u64 {
-            let (cube, _) = cube::scramble(7, seed + 200);
+        for _ in 0..10 {
+            let seed: u64 = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8);
+            let (cube, _) = cube::scramble(7, seed);
             let d = solver.distance(&cube, Solver::MAX_DEPTH).unwrap();
             let good = policy::admissible(&solver, &cube, d);
             assert!(!good.is_empty(), "seed {seed}");

@@ -9,6 +9,7 @@
 """Spec test for rir_sheet: a sheet of the asked size, drawn from measured tiles only."""
 import json
 import os
+import secrets
 import sys
 import tempfile
 import unittest
@@ -39,13 +40,14 @@ class ContactSheet(unittest.TestCase):
                 boxes = [{"class": "car", "x1": 30, "y1": 40, "x2": 70, "y2": 80}] if k < 5 else []
                 index.append({"name": name, "accepted": True, "rgb": f"{name}_rgb.png", "ir": f"{name}_ir.png", "boxes": boxes})
             T.write_index(d, index)
-            R.measure_set(d, BoxSegmenter(), seed=1)
-            C.build_captions(d, seed=1)
+            seed = secrets.randbits(63)
+            R.measure_set(d, BoxSegmenter(), seed=seed)
+            C.build_captions(d, seed=seed)
             out = os.path.join(d, "sheet.png")
-            names = Sheet.contact_sheet(d, out, BoxSegmenter(), count=4, columns=2, panel=64, seed=1)
+            names = Sheet.contact_sheet(d, out, BoxSegmenter(), count=4, columns=2, panel=64, seed=seed)
             self.assertEqual(len(names), 4)
             self.assertTrue(set(names) <= {f"t{k}" for k in range(5)}, "tiles without a measurement are not sampled")
-            self.assertEqual(names, Sheet.contact_sheet(d, out, BoxSegmenter(), count=4, columns=2, panel=64, seed=1))
+            self.assertEqual(names, Sheet.contact_sheet(d, out, BoxSegmenter(), count=4, columns=2, panel=64, seed=seed))
             img = cv2.imread(out)
             self.assertEqual(img.shape[1], 2 * 2 * 64)
             self.assertEqual(img.shape[0], 2 * (64 + 70))

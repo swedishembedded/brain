@@ -31,8 +31,7 @@ fn round_trip(gpu: &Gpu, x: &[f32]) -> (Vec<u32>, Vec<f32>) {
 }
 
 fn values() -> Vec<f32> {
-    // seed: any stream exercises the rounding; the awkward values are explicit
-    let mut rng = Lcg::new(11);
+    let mut rng = Lcg::new(data::rng::random_seed());
     let mut v: Vec<f32> = (0..4097).map(|_| rng.scaled(30.0)).collect();
     v.extend([
         0.0,

@@ -205,7 +205,8 @@ fn within_vocab(text: &str) -> bool {
 #[test]
 fn a_chat_turn_streams_exactly_the_text_it_returns() {
     let (pipe, _ckpt, _tok) = tiny_chat("stream", None);
-    let request = ChatRequest::new(vec![ChatMessage::user(PROMPT_WITHIN_VOCAB)]).max_tokens(4).thinking(false).seed(7).temperature(0.8);
+    let seed = data::rng::random_seed();
+    let request = ChatRequest::new(vec![ChatMessage::user(PROMPT_WITHIN_VOCAB)]).max_tokens(4).thinking(false).seed(seed).temperature(0.8);
 
     let mut streamed = String::new();
     let reply = pipe
@@ -378,7 +379,7 @@ fn tiny_chat_with_adapter(tag: &str, adapter: &std::path::Path, precision: &str)
 fn an_adapter_attaches_and_detaches_on_the_resident_base() {
     let (mut pipe, ckpt, _tok) = tiny_chat("attach", None);
     let adapter = moving_adapter("attach-adapter");
-    let request = ChatRequest::new(vec![ChatMessage::user(PROMPT_WITHIN_VOCAB)]).max_tokens(6).thinking(false).seed(3).temperature(0.0);
+    let request = ChatRequest::new(vec![ChatMessage::user(PROMPT_WITHIN_VOCAB)]).max_tokens(6).thinking(false).seed(data::rng::random_seed()).temperature(0.0);
     let base = pipe.generate(&request).unwrap().text;
 
     pipe.attach_adapter(adapter.to_str().unwrap()).expect("the adapter attaches");
@@ -433,7 +434,7 @@ fn int8_able_checkpoint(tag: &str) -> Scratch {
 #[test]
 fn an_adapter_named_at_load_on_an_int8_base_runs_beside_it() {
     let adapter = moving_adapter_for("int8-adapter", &qwen3::QwenConfig::tiny_i8());
-    let request = ChatRequest::new(vec![ChatMessage::user(PROMPT_WITHIN_VOCAB)]).max_tokens(6).thinking(false).seed(3).temperature(0.0);
+    let request = ChatRequest::new(vec![ChatMessage::user(PROMPT_WITHIN_VOCAB)]).max_tokens(6).thinking(false).seed(data::rng::random_seed()).temperature(0.0);
     let (mut base, _c0, _t0) = tiny_chat_with_adapter("int8-base", &adapter, "int8");
     assert!(base.detach_adapter().unwrap());
     let base_text = base.generate(&request).unwrap().text;

@@ -92,6 +92,7 @@ fn every_part_trains_and_the_saved_tune_answers_unseen_images() {
     assert!(after < 0.01 * before, "held-out loss {before} -> {after}: {evals:?}");
 
     let mut m = MiniCpmV::load_tuned(&dir, Some(&out), &gpu, 1024, 1, model::kv_tier::KvTier::F32).expect("load the tune");
+    // seed: the exact-code assertions on unseen pictures were validated on this picture stream
     let mut rng = Rng::new(97);
     for (code, color) in CODES {
         let got = m.generate(&[Message::user(vec![Part::Image, Part::Text(QUESTION.into())])], &[picture(color, &mut rng)], &GenOptions { max_new: 8, ..GenOptions::default() }, &mut |_| true).unwrap();

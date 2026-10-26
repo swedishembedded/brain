@@ -239,7 +239,7 @@ mod tests {
         assert_eq!(r.strength, 0.0, "a flat signal cannot be periodic");
         assert!(!r.is_rhythmic(0.3));
 
-        let mut rng = crate::learn::Lcg::new(0x1234);
+        let mut rng = crate::learn::Lcg::new(std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8));
         let noise: Vec<f64> = (0..600).map(|_| rng.normal() as f64).collect();
         let r = analyse(&noise, DT, BAND);
         assert!(r.strength < 0.3, "white noise should not look periodic, got {r:?}");

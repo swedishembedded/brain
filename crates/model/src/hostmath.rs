@@ -656,7 +656,7 @@ mod tests {
     #[test]
     fn rmsnorm_matches_the_wgsl_kernel() {
         let (rows, d, eps) = (5usize, 64usize, 1e-6f32);
-        let mut r = Lcg::new(7);
+        let mut r = Lcg::new(data::rng::random_seed());
         let x: Vec<f32> = (0..rows * d).map(|_| r.signed()).collect();
         let g: Vec<f32> = (0..d).map(|_| r.signed() * 0.5 + 1.0).collect();
 
@@ -804,7 +804,7 @@ mod tests {
     /// lane so the scalar `k` tail is exercised too.
     #[test]
     fn linear_rows_is_bit_identical_to_a_per_row_matvec_loop() {
-        let mut r = Lcg::new(4242);
+        let mut r = Lcg::new(data::rng::random_seed());
         for (inn, out) in [(37usize, 11usize), (128, 96), (513, 64)] {
             let w: Vec<f32> = (0..out * inn).map(|_| r.signed()).collect();
             for rows in [1usize, 2, 3, 4, 5, 8] {
@@ -820,7 +820,7 @@ mod tests {
     /// consistent with the kernel they are standing in for.
     #[test]
     fn gelu_exact_matches_the_wgsl_kernel() {
-        let mut r = Lcg::new(13);
+        let mut r = Lcg::new(data::rng::random_seed());
         let x: Vec<f32> = (0..256).map(|_| r.scaled(6.0)).collect();
 
         let gpu = gpu_core::Gpu::new_cpu(&[("gelu_erf", kernels::GELU_ERF)]);
@@ -851,7 +851,7 @@ mod tests {
     #[test]
     fn single_row_helper_matches_the_rows_form() {
         let d = 16;
-        let mut r = Lcg::new(3);
+        let mut r = Lcg::new(data::rng::random_seed());
         let x: Vec<f32> = (0..d).map(|_| r.signed()).collect();
         let g: Vec<f32> = (0..d).map(|_| r.signed()).collect();
         assert_eq!(rmsnorm(&x, &g, 1e-6), rmsnorm_rows(&x, &g, 1, d, 1e-6));
@@ -860,7 +860,7 @@ mod tests {
     #[test]
     fn layernorm_centres_and_scales() {
         let (rows, c, eps) = (4usize, 32usize, 1e-5f32);
-        let mut r = Lcg::new(11);
+        let mut r = Lcg::new(data::rng::random_seed());
         let x: Vec<f32> = (0..rows * c).map(|_| r.signed() * 3.0 + 2.0).collect();
         let g = vec![1.0f32; c];
         let b = vec![0.0f32; c];
@@ -890,7 +890,7 @@ mod tests {
     #[test]
     fn rope_is_a_norm_preserving_rotation() {
         let (heads, hd, theta) = (2usize, 8usize, 10000.0f32);
-        let mut r = Lcg::new(5);
+        let mut r = Lcg::new(data::rng::random_seed());
         let orig: Vec<f32> = (0..heads * hd).map(|_| r.signed()).collect();
 
         let mut at0 = orig.clone();
@@ -918,7 +918,7 @@ mod tests {
     #[test]
     fn rope_dot_product_depends_only_on_relative_position() {
         let (heads, hd, theta) = (1usize, 16usize, 10000.0f32);
-        let mut r = Lcg::new(9);
+        let mut r = Lcg::new(data::rng::random_seed());
         let q0: Vec<f32> = (0..hd).map(|_| r.signed()).collect();
         let k0: Vec<f32> = (0..hd).map(|_| r.signed()).collect();
         let dot = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();

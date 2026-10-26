@@ -28,7 +28,8 @@ fn target_spec_whole_matches_pair_delta_offsets() {
 
 #[test]
 fn pair_and_lora_pair_are_bit_identical_over_many_shapes_and_steps() {
-    for seed in 0..50u64 {
+    for _ in 0..50 {
+        let seed = data::rng::random_seed();
         let mut dims_rng = Lcg::new(seed);
         let out = 1 + (dims_rng.next_u32() % 12) as usize;
         let inn = 1 + (dims_rng.next_u32() % 12) as usize;

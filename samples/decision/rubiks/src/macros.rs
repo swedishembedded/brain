@@ -1041,6 +1041,7 @@ mod tests {
         const BOUND: usize = 24;
         let (mut worst_macros, mut worst_moves, mut total_macros, mut total_moves) = (0, 0, 0, 0);
         let mut fired = Steps::default();
+        // seed: BOUND is the worst case measured over scrambles 1 to 2000
         for seed in 0..CUBES {
             let (cube, _) = scramble(40, seed + 1);
             let plan = book.play(&cube).unwrap_or_else(|| {
@@ -1130,6 +1131,7 @@ mod tests {
     fn a_strict_home_count_rule_stalls_and_the_tie_breaker_moves_it() {
         let library = library();
         let mut stalled = 0;
+        // seed: the at-least-10-of-20 stall count was measured on scrambles 1 to 20
         for seed in 0..20u64 {
             let (mut cube, _) = scramble(40, seed + 1);
             while let Some(m) = library.iter().find(|m| admissible(&cube, m)) {

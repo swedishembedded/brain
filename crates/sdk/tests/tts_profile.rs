@@ -28,7 +28,7 @@ fn profile_resident_synthesis() {
     println!("profile: load {:.2}s", began.elapsed().as_secs_f64());
     for (name, text) in [("cold-one", ONE), ("warm-one", ONE), ("warm-one-again", ONE), ("warm-three", THREE), ("warm-three-again", THREE)] {
         let began = Instant::now();
-        let clip = engine.speak_with(text, TtsOptions::new().seed(1)).unwrap();
+        let clip = engine.speak_with(text, TtsOptions::new().seed(data::rng::random_seed())).unwrap();
         let took = began.elapsed().as_secs_f64();
         let audio = clip.samples().len() as f64 / f64::from(clip.sample_rate());
         let t = engine.last_timings().unwrap();

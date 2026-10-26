@@ -170,7 +170,7 @@ fn a_falling_fly_scores_nothing_and_a_beating_one_scores() {
             command,
             ..RewardConfig::default()
         };
-        episode(&mut rig.fly, cfg, Condition::Frozen, &mut Lcg::new(3)).expect("an episode runs")
+        episode(&mut rig.fly, cfg, Condition::Frozen, &mut Lcg::new(std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8))).expect("an episode runs")
     };
 
     // THE CONTROL: wings out and still. It sinks, lands, and the episode ends.

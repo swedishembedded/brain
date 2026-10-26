@@ -204,7 +204,7 @@ mod tests {
             representations: vec![Representation::Quantiles, Representation::Point],
             quantile_levels: vec![0.1, 0.5, 0.9],
             num_samples: 0,
-            seed: 0,
+            seed: std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8),
         };
         let out = f.forecast(&panel, &spec).unwrap();
         assert_eq!(out.model, "fincast");
