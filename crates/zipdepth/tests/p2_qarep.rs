@@ -62,14 +62,16 @@ impl Fix {
     }
 
     /// Scalar loss `<r, block(x)>`.
-    fn loss(&self, train: bool, r: &[f32]) -> f32 {
+    /// `sum(out * r)`, accumulated in f64: an f32 sum over the block's outputs carries round-off of the order of the
+    /// finite difference the backward check divides by `2 * eps`.
+    fn loss(&self, train: bool, r: &[f32]) -> f64 {
         let ctx = Ctx::new(&self.gpu, zipdepth::net::ids());
         let b = QARepBlock::new(&ctx, "b", self.in_shape, self.cout, self.stride, train);
         b.set_eval(!train);
         let xb = self.gpu.storage_init("x", &self.x);
         b.forward(&ctx, &self.ps, &xb);
         let out = self.gpu.read(b.out(), b.out_shape.numel() as usize);
-        out.iter().zip(r).map(|(a, c)| a * c).sum()
+        out.iter().zip(r).map(|(a, c)| *a as f64 * *c as f64).sum()
     }
 }
 
@@ -143,10 +145,8 @@ fn qarep_backward_matches_finite_differences() {
         let wname = "b.branch_3x3.0.weight";
         let g = fix.gpu.read(fix.ps.g(wname), fix.ps.numel(wname));
         let n = g.len();
-        let dir: Vec<f32> = Lcg::new(random_seed()).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
-        let analytic: f32 = g.iter().zip(&dir).map(|(a, c)| a * c).sum();
-
         let w0 = fix.gpu.read(fix.ps.w(wname), n);
+        let tolerance = |analytic: f32, numeric: f32| 4e-3 + 1e-2 * analytic.abs().max(numeric.abs()).max(1e-3);
         // 1e-4, not 5e-4. This is a DIRECTIONAL difference along a ±1 vector of
         // 576–1152 components, so the L2 step is eps·√n — at 5e-4 that is ~0.017
         // and the central difference is dominated by its own O(eps²·L''')
@@ -159,27 +159,35 @@ fn qarep_backward_matches_finite_differences() {
         //   down2    0.1260   0.0013    0.0008   0.0014   0.0025
         //
         // i.e. the FD converges ONTO the analytic gradient as eps shrinks (and
-        // starts to lose to f32 round-off below ~7.5e-5). The old eps sat above
-        // the knee and only passed because the tolerance was 8e-2; `down2` broke
-        // it at 0.126 as soon as the test RNG stopped being one-sided and moved
-        // the operating point. The fix is the eps, and the tolerance below is
-        // then 8x TIGHTER than it was, not looser.
+        // starts to lose to f32 round-off below ~7.5e-5). The loss is summed in
+        // f64 so the host reduction adds no round-off of its own.
         let eps = 1e-4f32;
-        let wp: Vec<f32> = w0.iter().zip(&dir).map(|(w, d)| w + eps * d).collect();
-        fix.gpu.write(fix.ps.w(wname), bytemuck::cast_slice(&wp));
-        let lp = fix.loss(true, &r);
-        let wm: Vec<f32> = w0.iter().zip(&dir).map(|(w, d)| w - eps * d).collect();
-        fix.gpu.write(fix.ps.w(wname), bytemuck::cast_slice(&wm));
-        let lm = fix.loss(true, &r);
+        let loss_at = |step: f32, dir: &[f32]| -> f64 {
+            let w: Vec<f32> = w0.iter().zip(dir).map(|(w, d)| w + step * d).collect();
+            fix.gpu.write(fix.ps.w(wname), bytemuck::cast_slice(&w));
+            fix.loss(true, &r)
+        };
+        // The block's ReLUs make the loss piecewise smooth: a direction whose step crosses a kink has one-sided
+        // differences that disagree by more than the tolerance, and a central difference across it measures no
+        // gradient at all. Such a direction is drawn again; the gradient is checked where the loss is differentiable.
+        let mut checked = None;
+        for _ in 0..8 {
+            let dir: Vec<f32> = Lcg::new(random_seed()).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
+            let analytic: f32 = g.iter().zip(&dir).map(|(a, c)| a * c).sum();
+            let (l0, lp, lm) = (loss_at(0.0, &dir), loss_at(eps, &dir), loss_at(-eps, &dir));
+            let (ahead, behind) = (((lp - l0) / eps as f64) as f32, ((l0 - lm) / eps as f64) as f32);
+            if (ahead - behind).abs() <= tolerance(ahead, behind) {
+                checked = Some((analytic, ((lp - lm) / (2.0 * eps as f64)) as f32));
+                break;
+            }
+        }
         fix.gpu.write(fix.ps.w(wname), bytemuck::cast_slice(&w0));
-
-        let numeric = (lp - lm) / (2.0 * eps);
+        let (analytic, numeric) = checked.unwrap_or_else(|| panic!("{tag}: every direction drawn crosses a ReLU kink within {eps}"));
         let abs = (analytic - numeric).abs();
-        let denom = analytic.abs().max(numeric.abs()).max(1e-3);
         assert!(
-            abs <= 4e-3 + 1e-2 * denom,
+            abs <= tolerance(analytic, numeric),
             "{tag}: analytic {analytic}, fd {numeric} (abs {abs}, rel {})",
-            abs / denom
+            abs / analytic.abs().max(numeric.abs()).max(1e-3)
         );
     }
 }
