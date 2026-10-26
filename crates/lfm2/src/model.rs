@@ -34,7 +34,7 @@ use std::collections::HashMap;
 use audio::conv::{Conv1d, ConvKernels};
 use gpu_core::{DeviceBuffer, Gpu, Step};
 use model::block::{self, Bidir, BidirIds, CrossIds};
-use model::saved::SavedPolicy;
+use model::saved::{Residuals, SavedPolicy};
 use paramstore::ParamStore;
 
 use crate::config::{LayerType, LfmConfig};
@@ -208,6 +208,11 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("flash_attn_bidir_reg2", kernels::FLASH_ATTN_BIDIR_REG2),
     ("rope_base_yarn", kernels::ROPE_BASE_YARN),
     ("rope_base_yarn_bwd", kernels::ROPE_BASE_YARN_BWD),
+    // Narrow boundary residuals (`model::saved::Residuals`), resolved by name.
+    ("pack_bf16", kernels::PACK_BF16),
+    ("unpack_bf16", kernels::UNPACK_BF16),
+    ("pack_fp8_rows", kernels::PACK_FP8_ROWS),
+    ("unpack_fp8_rows", kernels::UNPACK_FP8_ROWS),
 ];
 
 fn linear_kernel(m: usize, n: usize) -> (usize, gpu_core::Dispatch) {
@@ -283,7 +288,7 @@ struct LayerBufs {
 #[allow(clippy::large_enum_variant)]
 enum Regime {
     /// Per-layer caches, full-score bidir trio (parity + training).
-    Materialized { layers: Vec<LayerBufs>, res: Vec<DeviceBuffer>, scores: DeviceBuffer },
+    Materialized { layers: Vec<LayerBufs>, res: Residuals, scores: DeviceBuffer },
     /// One shared scratch set, ping-pong residuals, query-chunked attention,
     /// head evaluated only at `probe_cap` gathered rows.
     Chunked {
@@ -643,6 +648,7 @@ impl Lfm {
                 }
                 // Full logits/CE only when the gathered head is NOT in play.
                 let (lg, ce) = if tiny_probs { (st(1), st(1)) } else { (st(n * v), st(n)) };
+                let res = Residuals::new(res, 0..cfg.n_layers() as usize + 1);
                 (Regime::Materialized { layers, res, scores: st(bht2) }, lg, ce)
             }
             Some((budget, probe_cap)) => {
@@ -1005,6 +1011,14 @@ impl Lfm {
         s.push(self.gpu.step(ADD2, &[&cb.xmid, mlp_out, out], &[n * d], n * d));
     }
 
+    /// Round boundary `l` through its narrow store as the forward writes it (only the materialized regime holds
+    /// boundaries; a build keeping them in f32 records nothing).
+    fn round_trip_boundary(&self, s: &mut Vec<Step>, l: usize) {
+        if let Regime::Materialized { res, .. } = &self.regime {
+            res.round_trip(&self.gpu, s, l);
+        }
+    }
+
     /// The residual-in / residual-out buffer for layer `l`, per regime.
     fn res_of(&self, l: usize) -> &DeviceBuffer {
         match &self.regime {
@@ -1045,8 +1059,10 @@ impl Lfm {
             ));
         }
 
+        self.round_trip_boundary(&mut s, 0);
         for l in 0..c.layer_types.len() {
             self.layer_forward(l, b_use, &mut s);
+            self.round_trip_boundary(&mut s, l + 1);
         }
 
         // Final norm.
@@ -1328,11 +1344,13 @@ impl Lfm {
         let theta = c.rope_theta;
 
         let last = c.n_layers() as usize;
+        res.restore(&self.gpu, s, last);
         self.norm_bwd(s, &res[last], "norm.weight", &bw.d_xn, &bw.dres[last], &bw.inv, d, n);
 
         for (l, lb) in layers.iter().enumerate().rev() {
             if self.saved.recomputes() {
                 // Layers of a kind share one set of activation buffers: rebuild this layer's from `res[l]` first.
+                res.restore(&self.gpu, s, l);
                 self.layer_forward(l, self.b, s);
             }
             let p = |name: &str| format!("blocks.{l}.{name}");
@@ -1464,32 +1482,36 @@ impl Lfm {
     /// Keep what `policy` names of the forward: every layer's activations ([`SavedPolicy::Keep`]), or only the residual
     /// between layers ([`SavedPolicy::Recompute`]), where all conv layers share the first conv layer's activation
     /// buffers and all attention layers the first attention layer's (the others are released) and the backward
-    /// replays each layer from its residual before its own backward. Residuals held below f32 are refused by name;
-    /// only a materialized training build has a backward to recompute for.
+    /// replays each layer from its residual before its own backward, those residuals optionally held in bf16 or FP8
+    /// ([`SavedPolicy::Quantized`], see [`Residuals`]). A build only narrows what it keeps; widening again is refused
+    /// by name. Only a materialized training build has a backward to recompute for.
     pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
-        if let SavedPolicy::Quantized(format) = policy {
-            return Err(format!("lfm2 keeps its layer residuals in f32; {format:?} residuals are not supported"));
+        if !self.saved.narrows_to(policy) {
+            return Err(format!("lfm2: a build keeping {:?} cannot go back to {policy:?}", self.saved));
         }
         if policy == self.saved {
             return Ok(());
         }
-        if !policy.recomputes() {
-            return Err("lfm2: a build that recomputes cannot go back to keeping every layer's activations".into());
-        }
         if self.bwd.is_none() {
             return Err("lfm2: an inference build has no backward to recompute for".into());
         }
-        let Regime::Materialized { layers, .. } = &mut self.regime else {
+        let (rows, width) = (self.b * self.t, self.cfg.d_model);
+        let Regime::Materialized { layers, res, .. } = &mut self.regime else {
             return Err("lfm2: recompute needs the materialized training regime".into());
         };
-        let first_attn = layers.iter().find(|lb| matches!(lb.mixer, MixerBufs::Attn(_))).cloned();
-        let first_conv = layers.iter().find(|lb| matches!(lb.mixer, MixerBufs::Conv(_))).cloned();
-        for lb in layers.iter_mut() {
-            let shared = match lb.mixer {
-                MixerBufs::Attn(_) => &first_attn,
-                MixerBufs::Conv(_) => &first_conv,
-            };
-            *lb = shared.clone().expect("a layer of this kind exists");
+        if !self.saved.recomputes() {
+            let first_attn = layers.iter().find(|lb| matches!(lb.mixer, MixerBufs::Attn(_))).cloned();
+            let first_conv = layers.iter().find(|lb| matches!(lb.mixer, MixerBufs::Conv(_))).cloned();
+            for lb in layers.iter_mut() {
+                let shared = match lb.mixer {
+                    MixerBufs::Attn(_) => &first_attn,
+                    MixerBufs::Conv(_) => &first_conv,
+                };
+                *lb = shared.clone().expect("a layer of this kind exists");
+            }
+        }
+        if let SavedPolicy::Quantized(format) = policy {
+            res.quantize(&self.gpu, format, rows, width).map_err(|e| format!("lfm2: {e}"))?;
         }
         self.saved = policy;
         self.fwd_steps = self.forward_steps();
@@ -1586,6 +1608,7 @@ impl Lfm {
         let Regime::Materialized { res, .. } = &self.regime else {
             panic!("read_res: chunked regime keeps no per-layer residuals");
         };
+        assert!(res.format() == model::saved::SavedFormat::F32, "read_res: boundaries held in {:?} are not addressable", res.format());
         let n = (self.b * self.t) as usize;
         self.gpu.read(&res[l], n * self.cfg.d_model as usize)
     }

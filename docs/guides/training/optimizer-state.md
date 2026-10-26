@@ -123,8 +123,8 @@ model (`Model::set_saved_policy`):
   across their layers;
 - spectrallm, ouro and huginn always rebuild each layer and refuse `keep`;
 - qwen3 and qwen35 answer from what they were built with;
-- deepseek2, glmdsa, gpt2, spectrallm, ouro and huginn (its recurrence) also
-  hold bf16 or fp8 residuals;
+- every model above that recomputes (huginn: its recurrence) also holds bf16 or
+  fp8 residuals;
 - a model that keeps every layer refuses any other choice by name.
 
 A built model only narrows what it keeps.

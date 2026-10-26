@@ -24,7 +24,7 @@ use std::collections::HashMap;
 
 use gpu_core::{BufUsage, DeviceBuffer, Gpu, Step};
 use model::block::{self, Bidir, BidirIds, LayerNormIds};
-use model::saved::SavedPolicy;
+use model::saved::{Residuals, SavedPolicy};
 use optim::Optim;
 use paramstore::ParamStore;
 use serde_json::Value;
@@ -237,6 +237,11 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // the optimiser finds them by name, not by index.
     ("gradnorm_part", kernels::GRADNORM_PART),
     ("clip_coef_wg", kernels::CLIP_COEF_WG),
+    // Narrow boundary residuals (`model::saved::Residuals`), resolved by name.
+    ("pack_bf16", kernels::PACK_BF16),
+    ("unpack_bf16", kernels::UNPACK_BF16),
+    ("pack_fp8_rows", kernels::PACK_FP8_ROWS),
+    ("unpack_fp8_rows", kernels::UNPACK_FP8_ROWS),
 ];
 
 #[derive(Clone)]
@@ -306,7 +311,7 @@ pub struct Horizon {
     gp: DeviceBuffer,
     e1: DeviceBuffer,
     te: DeviceBuffer,
-    res: Vec<DeviceBuffer>,
+    res: Residuals,
     layers: Vec<Layer>,
     proj: DeviceBuffer,
     ffn_out: DeviceBuffer,
@@ -449,7 +454,7 @@ impl Horizon {
             gp: st(bn * d),
             e1: st(bn * d),
             te: st(bn * d),
-            res: (0..=cfg.n_layers).map(|_| st(bn * d)).collect(),
+            res: Residuals::new((0..=cfg.n_layers).map(|_| st(bn * d)).collect(), 0..cfg.n_layers as usize + 1),
             layers,
             proj: st(bn * d),
             ffn_out: st(bn * d),
@@ -977,8 +982,10 @@ impl Horizon {
         let (p, k, nf) = (c.pieces(), c.n_codes, c.time_features());
         let (bn, bp, b) = (self.sets * n, self.b * p, self.b);
         let mut s = self.embedding_steps();
+        self.res.round_trip(g, &mut s, 0);
         for l in 0..self.layers.len() {
             self.layer_forward(l, &mut s);
+            self.res.round_trip(g, &mut s, l + 1);
         }
         let last = &self.res[c.n_layers as usize];
         s.extend([
@@ -1180,6 +1187,7 @@ impl Horizon {
             ),
         ]);
         s.extend(self.state_backward_steps());
+        self.res.restore(g, &mut s, last);
         s.extend(self.ln_backward_steps(
             &self.res[last],
             ("ln_f.weight", "ln_f.bias"),
@@ -1191,6 +1199,7 @@ impl Horizon {
         for l in (0..c.n_layers as usize).rev() {
             if self.saved.recomputes() {
                 // Every layer shares one set of activation buffers: rebuild this layer's from `res[l]` first.
+                self.res.restore(g, &mut s, l);
                 self.layer_forward(l, &mut s);
             }
             let lb = &self.layers[l];
@@ -1361,19 +1370,26 @@ impl Horizon {
     /// Keep what `policy` names of the forward: every layer's activations ([`SavedPolicy::Keep`]), or only the residual
     /// between layers ([`SavedPolicy::Recompute`]), where every encoder layer shares the first layer's activation
     /// buffers (the others are released) and the backward replays each layer from its residual before its own
-    /// backward. Residuals held below f32 are refused by name.
+    /// backward, those residuals optionally held in bf16 or FP8 ([`SavedPolicy::Quantized`], see [`Residuals`]; the
+    /// additive encoder has no layers and refuses it). A build only narrows what it keeps; widening again is refused
+    /// by name.
     pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
-        if let SavedPolicy::Quantized(format) = policy {
-            return Err(format!("horizon keeps its layer residuals in f32; {format:?} residuals are not supported"));
-        }
         if !self.saved.narrows_to(policy) {
             return Err(format!("horizon: a build keeping {:?} cannot go back to {policy:?}", self.saved));
         }
         if policy == self.saved {
             return Ok(());
         }
-        if let Some(shared) = self.layers.first().cloned() {
-            self.layers.fill(shared);
+        if self.cfg.additive && matches!(policy, SavedPolicy::Quantized(_)) {
+            return Err(format!("horizon: the additive encoder has no layer boundaries to hold in {policy:?}"));
+        }
+        if !self.saved.recomputes() {
+            if let Some(shared) = self.layers.first().cloned() {
+                self.layers.fill(shared);
+            }
+        }
+        if let SavedPolicy::Quantized(format) = policy {
+            self.res.quantize(&self.gpu, format, self.sets * self.cfg.max_tokens, self.cfg.d_model).map_err(|e| format!("horizon: {e}"))?;
         }
         self.saved = policy;
         self.fwd = self.forward_steps();
