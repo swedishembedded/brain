@@ -272,9 +272,9 @@ tensors as `paramstore::Role::Streamed`, which the store never allocates, and
 `StreamedStore::attach` reads them from the checkpoint into the window's host
 state, so they never all reach the device. `check_streamed_construction` holds
 such a model to a construction peak below the plain build and to the bits of
-the build streamed after construction. gpt2, lfm2, spectrallm, deepseek2,
-glmdsa and qwen35moe build this way; every other model
-streams after construction by the trait's default.
+the build streamed after construction. Every model with a layer-streamed full
+fine-tune builds this way (gpt2, lfm2, spectrallm, deepseek2, glmdsa, qwen35moe,
+horizon's set encoder, ouro, huginn, toymoe, toyseq2seq, toypid).
 
 The run asks for it with one model-agnostic value (the SDK's
 `train_precision`, the CLI's `--train-precision`):

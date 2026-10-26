@@ -156,7 +156,8 @@ The per-cell matrix and its tests are `docs/reference/training-capabilities.md`.
   prelu` branch too, replaying it before each block's backward (`BatchNorm::replay`, the forward's batch statistics):
   IResNet-100 at batch 8 peaks at 1796 MiB keeping, 1457 MiB recomputing, from 2739 MiB.
   Construction-time streaming (`Role::Streamed`, `StreamedStore::attach`, `Model::new_resident`,
-  `check_streamed_construction`): gpt2, lfm2, spectrallm, deepseek2, glmdsa, qwen35moe. Open: horizon.
+  `check_streamed_construction`): gpt2, lfm2, spectrallm, deepseek2, glmdsa, qwen35moe, horizon (set encoder), ouro,
+  huginn, toymoe, toyseq2seq, toypid.
 - D Memory: `model::saved` saved-activation policy (keep, recompute, bf16/fp8 boundaries)
   priced in memplan and wired into qwen3 and qwen35 LoRA training (a4a1242bc); flash attention
   backward without `[H,T,T]` probabilities for qwen35moe (fc6df1080) and flux2, including the

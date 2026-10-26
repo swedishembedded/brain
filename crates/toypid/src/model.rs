@@ -307,7 +307,30 @@ impl Pid {
     /// Build the model from an already-initialised `Gpu`. Target-agnostic: only
     /// device init differs between native and wasm.
     fn from_gpu(gpu: Gpu, cfg: PidConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Pid {
-        let ps = ParamStore::new(&gpu, cfg.param_list(), init);
+        Pid::build(gpu, cfg, b, t, init, None).unwrap_or_else(|e| panic!("toypid: {e}"))
+    }
+
+    /// A build whose per-layer tensors stream through a device window under `resident` from the start (see
+    /// [`model::streamed`]): they are read from `init` into the window's host state and never all reach the device,
+    /// so a model larger than it trains. The embeddings, the head and the final norm load as usual.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new_resident_on(cfg: PidConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, resident: &model::resident_ft::ResidentFtConfig) -> Result<Pid, String> {
+        let gpu = Gpu::new(&optim::with_moment_kernels(PIPELINES));
+        Pid::build(gpu, cfg, b, t, init, Some(resident))
+    }
+
+    fn build(gpu: Gpu, cfg: PidConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, resident: Option<&model::resident_ft::ResidentFtConfig>) -> Result<Pid, String> {
+        let layer_of = |name: &str| model::streamed::blocks_layer(name);
+        let roles = cfg
+            .param_list()
+            .into_iter()
+            .map(|(name, numel)| {
+                let role = if resident.is_some() && layer_of(&name).is_some() { paramstore::Role::Streamed } else { paramstore::Role::Trainable };
+                (name, numel, role)
+            })
+            .collect();
+        let mut ps = ParamStore::new_with_roles_src(&gpu, roles, init);
+        let streamed = resident.map(|r| StreamedStore::attach(&gpu, &mut ps, r.clone(), init, &layer_of)).transpose()?;
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
 
         let n = (b * t) as u64;
@@ -376,13 +399,13 @@ impl Pid {
             ln_inv: st(n),
             fwd_steps: LayerTape::default(),
             bwd_steps: LayerTape::default(),
-            streamed: None,
+            streamed,
             backward_pending: Cell::new(false),
             ce_grad_uni,
             gpu,
         };
         pid.build_graphs();
-        pid
+        Ok(pid)
     }
 
     /// Build the cached forward and backward dispatch graphs once, after all
@@ -853,6 +876,10 @@ impl model::Model for Pid {
 
     fn new(cfg: PidConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {
         Pid::new(cfg, b, t, init)
+    }
+
+    fn new_resident(cfg: PidConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, resident: &model::resident_ft::ResidentFtConfig) -> Result<Self, String> {
+        Pid::new_resident_on(cfg, b, t, init, resident)
     }
 
     fn init_weights(cfg: &PidConfig, seed: u64) -> HashMap<String, Vec<f32>> {
