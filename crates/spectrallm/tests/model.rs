@@ -248,3 +248,19 @@ fn flash_attention_path_matches_the_materialized_reference() {
     }
     gate("flash vs materialized attention, gradients", "max diff / max magnitude", worst as f64, 1e-3);
 }
+
+/// Scoring documents in length buckets, each on a model sized for its
+/// bucket, gives the same bits per byte as scoring them all at the longest
+/// length: every document is scored alone in its row.
+#[test]
+fn bucketed_scoring_matches_scoring_at_full_length() {
+    let Some(g) = gpu() else { return };
+    let cfg = SpectralConfig::tiny();
+    let init = spectrallm::init_weights(&cfg, 31);
+    let docs: Vec<model::score::ByteDoc> =
+        [3usize, 5, 12, 7, 2, 11, 9].iter().enumerate().map(|(i, &n)| model::score::ByteDoc { tokens: (0..n as u32).map(|t| (t * 5 + i as u32) % cfg.vocab).collect(), bytes: 3 * n }).collect();
+    let full = model::score::score_bytes(&SpectralLm::new_on(g.share(), cfg.clone(), 3, 12, &init, false), &docs, 3, 12).unwrap();
+    let bucketed = model::score::score_bytes_bucketed(&docs, 3, &[4, 8, 12], |len| SpectralLm::new_on(g.share(), cfg.clone(), 3, len, &init, false)).unwrap();
+    assert_eq!((full.tokens, full.bytes, full.documents), (bucketed.tokens, bucketed.bytes, bucketed.documents));
+    gate("length-bucketed scoring vs full-length scoring", "abs diff in bits per byte", (full.bits_per_byte() - bucketed.bits_per_byte()).abs(), 1e-5);
+}

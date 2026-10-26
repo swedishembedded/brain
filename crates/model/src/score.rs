@@ -93,6 +93,15 @@ pub struct ByteScore {
     pub documents: u64,
 }
 
+impl std::ops::AddAssign for ByteScore {
+    fn add_assign(&mut self, o: ByteScore) {
+        self.nats += o.nats;
+        self.bytes += o.bytes;
+        self.tokens += o.tokens;
+        self.documents += o.documents;
+    }
+}
+
 impl ByteScore {
     /// Bits per UTF-8 byte: independent of the tokenizer, so models with
     /// different vocabularies are compared on the same text.
@@ -141,6 +150,30 @@ pub fn score_bytes<M: Model>(m: &M, docs: &[ByteDoc], b: u32, t: u32) -> Result<
         let supervised = y.iter().filter(|&&v| v != ignore).count();
         m.set_batch(crate::Batch::Lm { tokens: &x, targets: &y });
         score.nats += m.forward() as f64 * supervised as f64;
+    }
+    Ok(score)
+}
+
+/// [`score_bytes`] over documents grouped by length: each group of
+/// documents whose token count fits `len` (one of `lengths`, ascending) is
+/// scored on a model `build(len)` makes for `b` rows of `len` positions, so a
+/// short document is not padded to the longest one. Every document is scored
+/// alone in its row, so the result equals one [`score_bytes`] over all of
+/// them up to the order of the floating-point sums. A document longer than
+/// the last length is refused.
+pub fn score_bytes_bucketed<M: Model>(docs: &[ByteDoc], b: u32, lengths: &[u32], mut build: impl FnMut(u32) -> M) -> Result<ByteScore, String> {
+    let mut groups: Vec<Vec<ByteDoc>> = vec![Vec::new(); lengths.len()];
+    for d in docs {
+        let Some(i) = lengths.iter().position(|&l| d.tokens.len() as u32 <= l) else {
+            return Err(format!("document of {} tokens exceeds the longest bucket {}", d.tokens.len(), lengths.last().copied().unwrap_or(0)));
+        };
+        groups[i].push(d.clone());
+    }
+    let mut score = ByteScore::default();
+    for (len, group) in lengths.iter().zip(&groups) {
+        if !group.is_empty() {
+            score += score_bytes(&build(*len), group, b, *len)?;
+        }
     }
     Ok(score)
 }

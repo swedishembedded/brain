@@ -56,9 +56,9 @@ pub fn eval(a: &mut Args) {
     a.finish();
     let docs = model::score::byte_docs(&read_text(&text), &tok, eot, max_bytes);
     let longest = docs.iter().map(|d| d.tokens.len()).max().unwrap_or(2) as u32;
-    let m = Qwen::load_inference(&weights, batch, longest);
     let start = Instant::now();
-    let score = model::score::score_bytes(&m, &docs, batch, longest).unwrap_or_else(|e| die(&e));
+    let score = model::score::score_bytes_bucketed(&docs, batch, &crate::buckets(longest), |len| Qwen::load_inference(&weights, batch, len))
+        .unwrap_or_else(|e| die(&e));
     print_score(&weights, &score, max_bytes, start.elapsed().as_secs_f64());
 }
 

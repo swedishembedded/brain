@@ -92,3 +92,11 @@ pub(crate) fn tokens_of(o: &model::FitOpts) -> u64 {
 pub(crate) fn read_text(path: &str) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|e| die(&format!("{path}: {e}")))
 }
+
+/// Scoring lengths: 128-token steps up to the longest document, so a
+/// document is padded by less than 128 positions.
+pub(crate) fn buckets(longest: u32) -> Vec<u32> {
+    let mut v: Vec<u32> = (1..).map(|i| i * 128).take_while(|l| *l < longest).collect();
+    v.push(longest);
+    v
+}

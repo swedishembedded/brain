@@ -118,9 +118,9 @@ pub fn eval(a: &mut Args) {
     if longest > cfg.block_size {
         die(&format!("the longest selected document has {longest} tokens, more than the model's {} positions; lower --max-doc-bytes", cfg.block_size));
     }
-    let m = SpectralLm::new_inference(cfg, batch, longest, &reader);
     let start = Instant::now();
-    let score = model::score::score_bytes(&m, &docs, batch, longest).unwrap_or_else(|e| die(&e));
+    let score = model::score::score_bytes_bucketed(&docs, batch, &crate::buckets(longest), |len| SpectralLm::new_inference(cfg.clone(), batch, len, &reader))
+        .unwrap_or_else(|e| die(&e));
     crate::qwen::print_score(&ckpt, &score, max_bytes, start.elapsed().as_secs_f64());
 }
 
