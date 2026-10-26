@@ -16,7 +16,8 @@ use sam1::{SamEncoder, SamViTConfig, PIPELINES};
 
 /// Tiny, but with every contraction and output width a multiple of 8 so each product is one a tensor core takes.
 fn config() -> SamViTConfig {
-    SamViTConfig { ffn_hidden: 32, ..SamViTConfig::tiny() }
+    // A 12x8 grid: the global block's 96 keys are a multiple of 4, the alignment a tensor-core product needs of its rows.
+    SamViTConfig { ffn_hidden: 32, ..SamViTConfig::tiny().at_grid(12, 8) }
 }
 
 fn encoder(precision: GemmPrecision, train: bool) -> SamEncoder {
@@ -42,6 +43,8 @@ fn tf32_linears_track_the_fp32_reference() {
         return brain_testutil::skip_unavailable("this device has no tensor-core GEMM");
     }
     let (got, want) = (output(&fast), output(&reference));
+    assert_eq!(fast.tensor_core_attention_blocks() as usize, config().global_attn_layers.len(), "every global block attends on tensor cores");
+    assert_eq!(reference.tensor_core_attention_blocks(), 0);
     let scale = want.iter().fold(0f32, |m, x| m.max(x.abs()));
     let err = got.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
     eprintln!("tf32 linears: max abs difference {err:.3e} against scale {scale:.3}");

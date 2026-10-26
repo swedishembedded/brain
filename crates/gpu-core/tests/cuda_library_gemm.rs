@@ -205,6 +205,58 @@ fn the_tf32_tier_multiplies_fp32_operands_within_tf32_rounding() {
     }
 }
 
+/// Attention's two products over the heads of a fused `[rows, 3 * d]` buffer: `S = alpha Q K^T` and `ctx = P V`, each one
+/// strided batch with a head per entry, on tensor cores. Operands are slices of the fused rows (row stride `3 d`, entry
+/// stride one head), the output a slice of a `[rows, d]` buffer.
+#[test]
+fn batched_tf32_products_slice_heads_out_of_a_fused_buffer() {
+    use gpu_core::provider::library::BatchedProduct;
+    let Some(gpu) = open() else { return };
+    let provider = LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Auto);
+    if !provider.tf32_enabled() {
+        brain_testutil::skip_unavailable(&format!("cuda_library_gemm: this card has no TF32 tier ({:?})", provider.path()));
+        return;
+    }
+    let (heads, hd, rows, q0, qn) = (3usize, 16usize, 40usize, 8usize, 24usize);
+    let d = heads * hd;
+    let qkv = values(rows * 3 * d, 1.0, 21);
+    let buf = gpu.storage_init("qkv", &qkv);
+    let at = |buf, word: usize| Operand { buf, range: (word as u64, 0) };
+    let whole = |buf| Operand { buf, range: (0, 0) };
+    let alpha = 0.25f32;
+
+    // S[h][i][j] = alpha * sum_t Q[q0 + i][h][t] K[j][h][t]
+    let scores = gpu.storage((heads * qn * rows) as u64);
+    let nt = BatchedProduct { batch: heads as u32, m: qn as u32, n: rows as u32, k: hd as u32, lda: (3 * d) as u32, ldb: (3 * d) as u32, ldc: rows as u32, stride_a: hd as i64, stride_b: hd as i64, stride_c: (qn * rows) as i64, alpha };
+    let mut steps = Vec::new();
+    assert!(provider.bmm_nt_tf32(&gpu, &mut steps, &at(&buf, q0 * 3 * d), &at(&buf, d), &whole(&scores), &nt), "batched Q K^T declined");
+    gpu.submit(&[], &steps);
+    let q = |i: usize, h: usize, t: usize| qkv[(q0 + i) * 3 * d + h * hd + t] as f64;
+    let k = |j: usize, h: usize, t: usize| qkv[j * 3 * d + d + h * hd + t] as f64;
+    let want = Sampled::of(heads * qn * rows, |x| {
+        let (h, i, j) = (x / (qn * rows), (x / rows) % qn, x % rows);
+        alpha as f64 * (0..hd).map(|t| q(i, h, t) * k(j, h, t)).sum::<f64>()
+    });
+    let rel = want.worst_relative_to_rms(&gpu.read(&scores, heads * qn * rows));
+    assert!(rel <= 4e-3, "batched Q K^T: worst error {rel} of the output RMS");
+
+    // ctx[q0 + i][h][t] = sum_j S[h][i][j] V[j][h][t], written into the head's columns of a [rows, d] buffer.
+    let ctx = gpu.storage((rows * d) as u64);
+    let nn = BatchedProduct { batch: heads as u32, m: qn as u32, n: hd as u32, k: rows as u32, lda: rows as u32, ldb: (3 * d) as u32, ldc: d as u32, stride_a: (qn * rows) as i64, stride_b: hd as i64, stride_c: hd as i64, alpha: 1.0 };
+    let mut steps = Vec::new();
+    assert!(provider.bmm_nn_tf32(&gpu, &mut steps, &whole(&scores), &at(&buf, 2 * d), &at(&ctx, q0 * d), &nn), "batched P V declined");
+    gpu.submit(&[], &steps);
+    let s = gpu.read(&scores, heads * qn * rows);
+    let v = |j: usize, h: usize, t: usize| qkv[j * 3 * d + 2 * d + h * hd + t] as f64;
+    let got = gpu.read(&ctx, rows * d);
+    let want = Sampled::of(qn * d, |x| {
+        let (i, h, t) = (x / d, (x % d) / hd, x % hd);
+        (0..rows).map(|j| s[(h * qn + i) * rows + j] as f64 * v(j, h, t)).sum()
+    });
+    let rel = want.worst_relative_to_rms(&got[q0 * d..(q0 + qn) * d]);
+    assert!(rel <= 4e-3, "batched P V: worst error {rel} of the output RMS");
+}
+
 /// A row window of the weight (the vocabulary-tile primitive) multiplies only
 /// its rows.
 #[test]

@@ -158,6 +158,25 @@ pub struct Operand<'a> {
     pub range: (u64, u64),
 }
 
+/// The geometry of a strided batch of row-major products (see [`LibraryGemmProvider::bmm_nt_tf32`]): `m x n` outputs
+/// over a contraction of `k`, each matrix's row stride (`ld*`, in elements) and the distance between consecutive
+/// matrices of the batch (`stride_*`, in elements).
+#[derive(Clone, Copy, Debug)]
+pub struct BatchedProduct {
+    pub batch: u32,
+    pub m: u32,
+    pub n: u32,
+    pub k: u32,
+    pub lda: u32,
+    pub ldb: u32,
+    pub ldc: u32,
+    pub stride_a: i64,
+    pub stride_b: i64,
+    pub stride_c: i64,
+    /// Scale of the product.
+    pub alpha: f32,
+}
+
 impl LibraryGemmProvider {
     /// The provider for `gpu` under `precision`, reading the backend's own
     /// availability answer. Logs the decision once per process.
@@ -337,6 +356,34 @@ impl LibraryGemmProvider {
         let mut gemm = Self::tf32_product(false, n, k, m, k, n, k, if accumulate { 1.0 } else { 0.0 });
         gemm.trans_b = true;
         self.tf32_step(gpu, steps, &gemm, &[x, dy, dw])
+    }
+
+    /// A strided batch of row-major fp32 products `C[i] = alpha . A[i] B[i]^T` on tensor cores as TF32 (binary32
+    /// accumulation): `A[i]` is `m x k`, `B[i]` is `n x k`, `C[i]` is `m x n`, and entry `i` of each operand starts
+    /// `stride` elements after the first. Attention's `Q K^T` over heads, whose operands are slices of one fused
+    /// `[rows, 3 * d]` buffer, is this with `lda == ldb == 3 * d` and a stride of one head. `false` (nothing pushed)
+    /// when the device runs no TF32 products or an operand is not 16-byte aligned.
+    pub fn bmm_nt_tf32(&self, gpu: &Gpu, steps: &mut Vec<Step>, a: &Operand, b: &Operand, c: &Operand, shape: &BatchedProduct) -> bool {
+        // Row-major `C = A B^T` is column-major `C^T[n, m] = B[k, n]^T A[k, m]`.
+        let mut gemm = Self::tf32_product(true, shape.m, shape.n, shape.k, shape.ldb, shape.lda, shape.ldc, 0.0);
+        Self::batch(&mut gemm, shape, shape.stride_b, shape.stride_a);
+        self.tf32_step(gpu, steps, &gemm, &[b, a, c])
+    }
+
+    /// [`Self::bmm_nt_tf32`] for `C[i] = alpha . A[i] B[i]` with `B[i]` of shape `k x n`: attention's `P V`.
+    pub fn bmm_nn_tf32(&self, gpu: &Gpu, steps: &mut Vec<Step>, a: &Operand, b: &Operand, c: &Operand, shape: &BatchedProduct) -> bool {
+        // Row-major `C = A B` is column-major `C^T[n, m] = B[n, k] A[k, m]`.
+        let mut gemm = Self::tf32_product(false, shape.m, shape.n, shape.k, shape.ldb, shape.lda, shape.ldc, 0.0);
+        Self::batch(&mut gemm, shape, shape.stride_b, shape.stride_a);
+        self.tf32_step(gpu, steps, &gemm, &[b, a, c])
+    }
+
+    fn batch(gemm: &mut LibraryGemm, shape: &BatchedProduct, stride_a: i64, stride_b: i64) {
+        gemm.batch = shape.batch;
+        gemm.alpha = shape.alpha;
+        gemm.stride_a = stride_a;
+        gemm.stride_b = stride_b;
+        gemm.stride_c = shape.stride_c;
     }
 
     /// The column-major product of `forward_tf32`/`dx_tf32`: `C[rows, cols] = op(A) B` over `depth`.

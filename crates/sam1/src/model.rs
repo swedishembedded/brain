@@ -71,7 +71,7 @@
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 
-use gpu_core::provider::library::{GemmPrecision, LibraryGemmProvider, Operand};
+use gpu_core::provider::library::{BatchedProduct, GemmPrecision, LibraryGemmProvider, Operand};
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::block::{self, CrossBwdIds, CrossIds, LayerNormIds};
 use model::vit::{
@@ -139,6 +139,8 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("attn_relpos_dr", kernels::ATTN_RELPOS_DR),
     // ---- fused attention with that bias, for an inference build on a device that runs it ----
     ("flash_attn_cross_relpos", kernels::FLASH_ATTN_CROSS_RELPOS),
+    // ---- row softmax of the tensor-core global attention (workgroup per row) ----
+    ("softmax_rows", kernels::SOFTMAX_ROWS),
     // ---- coalesced cross-attention scores ----
     // `attn_scores_cross` reads the fused KV slab with the KEY index as the
     // fastest thread index, so every lane of a warp lands on its own cache
@@ -184,6 +186,8 @@ struct Ids {
     /// `flash_attn_cross_relpos`, when this device runs it (workgroup reductions, 256-thread workgroups, 48 KiB of
     /// shared memory); an inference build then attends with it instead of the materialized chain.
     flash_rel: Option<usize>,
+    /// `softmax_rows`, when this device runs workgroup reductions: the softmax of the tensor-core global attention.
+    softmax_rows: Option<usize>,
     /// The coalesced score path both the forward and the backward recompute
     /// dispatch through.
     key_minor: (usize, usize),
@@ -220,6 +224,7 @@ impl Ids {
             perm: VitPermuteIds { embed: k("embed"), row_scatter: k("row_scatter") },
             cross: CrossIds { scores: k("attn_scores_cross"), softmax: k("attn_softmax_cross"), apply: k("attn_apply_cross") },
             flash_rel: g.kernel_index("flash_attn_cross_relpos").filter(|_| block::flash_cross_supported(&g.caps())),
+            softmax_rows: g.kernel_index("softmax_rows").filter(|_| g.caps().workgroup_reductions),
             key_minor: (k("kv_k_headt"), k("attn_scores_cross_kt")),
             cross_bwd: CrossBwdIds::resolve(
                 g,
@@ -722,7 +727,24 @@ pub struct SamEncoder {
     /// The tensor-core GEMM the inference build's linears run on, when the device has one. `None` for the
     /// training build (its gradient checks are stated against the fp32 kernels) and under a pinned reference.
     tensor_cores: Option<LibraryGemmProvider>,
+    /// Scratch of the global blocks' attention on tensor cores; `Some` only with [`Self::tensor_cores`].
+    tc_attn: Option<TcAttention>,
+    /// Global blocks the last [`Self::run`] attended through tensor cores.
+    tc_attn_blocks: Cell<u32>,
 }
+
+/// The score and probability slabs of attention on tensor cores, `[heads, chunk, keys]` each: a global block runs its
+/// queries `chunk` rows at a time through `Q K^T`, the relative-position bias, a row softmax and `P V`.
+struct TcAttention {
+    scores: DeviceBuffer,
+    probs: DeviceBuffer,
+    /// Query rows per pass.
+    chunk: u32,
+}
+
+/// Query rows a global block's tensor-core attention handles per pass: the score slab is `heads * chunk * keys`
+/// floats (200 MB at SAM ViT-B's 4096 keys), twice.
+const TC_ATTN_CHUNK: u32 = 1024;
 
 impl SamEncoder {
     /// Trainable build from an eager map. Exactly
@@ -825,6 +847,7 @@ impl SamEncoder {
             d_embed_nchw: gpu.storage(rows as u64 * c as u64),
         });
         let tensor_cores = (!train).then(|| LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Auto)).filter(LibraryGemmProvider::tf32_enabled);
+        let tc_attn = tensor_cores.as_ref().and_then(|_| Self::tc_attention(&gpu, &cfg, &ids));
         SamEncoder {
             image: gpu.storage_init("sam1_image", &image),
             patch_nlc: gpu.storage(rows as u64 * c as u64),
@@ -843,7 +866,19 @@ impl SamEncoder {
             hd,
             blocks,
             tensor_cores,
+            tc_attn,
+            tc_attn_blocks: Cell::new(0),
         }
+    }
+
+    /// The scratch for global blocks' attention on tensor cores, if the model has a global block and the device runs
+    /// the row softmax.
+    fn tc_attention(gpu: &Gpu, cfg: &SamViTConfig, ids: &Ids) -> Option<TcAttention> {
+        ids.softmax_rows?;
+        let keys = (0..cfg.n_layers).any(|l| cfg.is_global(l)).then(|| cfg.rows())?;
+        let chunk = keys.min(TC_ATTN_CHUNK);
+        let slab = cfg.n_heads as u64 * chunk as u64 * keys as u64;
+        Some(TcAttention { scores: gpu.storage(slab), probs: gpu.storage(slab), chunk })
     }
 
     /// Pin the arithmetic of the inference build's linears: [`GemmPrecision::Fp32Reference`] runs the fp32
@@ -851,6 +886,7 @@ impl SamEncoder {
     /// The training build is always the fp32 reference.
     pub fn set_gemm_precision(&mut self, precision: GemmPrecision) {
         self.tensor_cores = (self.bwd.is_none()).then(|| LibraryGemmProvider::for_gpu(&self.gpu, precision)).filter(LibraryGemmProvider::tf32_enabled);
+        self.tc_attn = self.tensor_cores.as_ref().and_then(|_| Self::tc_attention(&self.gpu, &self.cfg, &self.ids));
     }
 
     /// Whether the linears run on tensor cores (TF32 products of the fp32 weights as stored).
@@ -916,6 +952,46 @@ impl SamEncoder {
         steps.push(self.gpu.dispatch(kernel, &[x, w, out], &[rows, k, n], threads));
     }
 
+    /// A global block's attention as two batched TF32 products around the bias and a row softmax, `chunk` query rows at a
+    /// time: `S = Q K^T / sqrt(d)`, `S += rel_h + rel_w`, `P = softmax(S)`, `ctx = P V`. The fused kernel multiplies on
+    /// fp32 cores and pads every tile to 128 channels; these are tensor-core products over the heads at once. Pushes
+    /// nothing and answers `false` when the device offers no such products for these shapes.
+    fn attend_on_tensor_cores(&self, b: &Block, rel: &RelPos<'_>, steps: &mut Vec<Step>) -> bool {
+        let (Some(tc), Some(ws), Some(softmax)) = (&self.tensor_cores, &self.tc_attn, self.ids.softmax_rows) else { return false };
+        let (g, cfg) = (&self.gpu, &self.cfg);
+        let (c, heads, hd, keys) = (cfg.d_model, cfg.n_heads, cfg.head_dim(), b.attn_rows);
+        let whole = |buf| Operand { buf, range: (0, 0) };
+        let at = |buf, word: u32| Operand { buf, range: (word as u64, 0) };
+        rel.check_span(keys);
+        let mut local = Vec::new();
+        rel.qr_steps(g, heads, hd, &b.qkv, 3 * c, 0, (&b.rel_h, &b.rel_w), (0, 0), 1, &mut local);
+        let mut q0 = 0;
+        while q0 < keys {
+            let qn = ws.chunk.min(keys - q0);
+            let scores = BatchedProduct { batch: heads, m: qn, n: keys, k: hd, lda: 3 * c, ldb: 3 * c, ldc: keys, stride_a: hd as i64, stride_b: hd as i64, stride_c: qn as i64 * keys as i64, alpha: 1.0 / (hd as f32).sqrt() };
+            let apply = BatchedProduct { batch: heads, m: qn, n: hd, k: keys, lda: keys, ldb: 3 * c, ldc: c, stride_a: qn as i64 * keys as i64, stride_b: hd as i64, stride_c: hd as i64, alpha: 1.0 };
+            let ok = tc.bmm_nt_tf32(g, &mut local, &at(&b.qkv, q0 * 3 * c), &at(&b.qkv, c), &whole(&ws.scores), &scores);
+            if !ok {
+                return false;
+            }
+            local.push(rel.add_step(g, heads, qn, keys, q0, &ws.scores));
+            local.push(g.dispatch(softmax, &[&ws.scores, &ws.probs], &[heads * qn, keys], gpu_core::Dispatch::Workgroups(heads * qn)));
+            if !tc.bmm_nn_tf32(g, &mut local, &whole(&ws.probs), &at(&b.qkv, 2 * c), &at(&b.ctx, q0 * c), &apply) {
+                return false;
+            }
+            q0 += qn;
+        }
+        steps.append(&mut local);
+        self.tc_attn_blocks.set(self.tc_attn_blocks.get() + 1);
+        true
+    }
+
+    /// How many global blocks the last [`Self::run`] attended through tensor cores (the rest, and every windowed
+    /// block, attend with the fused kernel on fp32 cores).
+    pub fn tensor_core_attention_blocks(&self) -> u32 {
+        self.tc_attn_blocks.get()
+    }
+
     /// `[rows, C]` NLC -> `[1, C, grid_h, grid_w]` NCHW (and back).
     fn perm_params(&self) -> [u32; 3] {
         let (c, rows) = (self.cfg.d_model, self.cfg.rows());
@@ -952,6 +1028,7 @@ impl SamEncoder {
         let g = &self.gpu;
         let ctx = self.ctx();
         let (c, rows) = (self.cfg.d_model, self.cfg.rows());
+        self.tc_attn_blocks.set(0);
 
         // ---- patch embed + learned absolute position ----
         self.patch.forward(&ctx, &self.ps, &self.image);
@@ -1010,6 +1087,7 @@ impl SamEncoder {
         steps.push(g.step(self.ids.bias_add, &[&b.qkv, w("attn.qkv.bias")], &[ar, 3 * c], ar * 3 * c));
 
         let rel = b.relpos(&self.ids, false);
+        if !(b.win.is_none() && self.attend_on_tensor_cores(b, &rel, &mut steps)) {
         match (self.ids.flash_rel, &b.rel_all) {
             (Some(kind), Some((rel_h, rel_w))) => {
                 // Every span's q.R tables in one dispatch per axis, then ONE fused dispatch over all spans (the windows are its batch axis).
@@ -1029,6 +1107,7 @@ impl SamEncoder {
                     &b.scores, &b.probs, &b.spans, cfg.attn_chunk, Some(&rel), &mut steps,
                 );
             }
+        }
         }
 
         self.linear(&mut steps, &b.ctx, w("attn.proj.weight"), &b.proj, (ar, c, c));

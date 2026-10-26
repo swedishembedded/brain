@@ -7,7 +7,7 @@
 // sending an email to info@swedishembedded.com.
 
 //! The DeepEncoder's cost per view, without the server around it: build the global (1024 px) and
-//! the tile (640 px) encoders from a checkpoint and time forward passes of each (the median of
+//! the tile (640 px) encoders from a checkpoint and time forward passes of each (the fastest of
 //! `--runs`, after one warm-up), printing one JSON line.
 //!
 //! ```text
@@ -57,7 +57,8 @@ fn main() {
             })
             .collect();
         ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        ms[ms.len() / 2]
+        // The fastest run: the work is deterministic, and a card shared with other jobs only ever adds to it.
+        ms[0]
     };
     let (g, t) = (time(&global, 1024), time(&tile, TILE_SIDE));
     // Under BRAIN_PROFILE, one more pass of each with the device's per-kernel table (SAM's and CLIP's cards separately).

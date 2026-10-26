@@ -868,7 +868,19 @@ CUDA too). A peer's job was running on both cards (12 to 97% SM), so absolute nu
 
 Device time of the global view after the change (profile): SAM 58.6 ms, of which `flash_attn_cross_relpos` 41.8 ms (71%), bias_add 4.4,
 attn_relpos_qr 3.6, all library GEMMs together 3.3; CLIP 8.0 ms, of which `flash_attn_bidir_reg2` 3.7. Next cost: SAM's fused
-relative-position attention (fp32 CUDA cores, ~5 TFLOP/s on the four global blocks).
+relative-position attention (fp32 CUDA cores, ~5 TFLOP/s on the four global blocks), done in the next entry.
 
 `deepseekocr2` `train_overfit::full_finetune_overfits_a_small_batch` fails on `02334b411^`, before this campaign touched the repo:
 a seed-calibrated from-scratch overfit that plateaus (2.93 -> 2.36 at 600 epochs); not caused by this lane.
+
+## 2026-10-26 throughput lane: SAM's global attention on tensor cores
+
+`flash_attn_cross_relpos` was 71% of SAM's device time (41.8 of 58.6 ms at the global view): fp32 cores, tiles padded to 128 channels for
+SAM's 64. Its four global blocks (4096 keys each, 52 GFLOP per block) now run as two TF32 batched library products around the bias and a
+row softmax, 1024 query rows at a time (`S = Q K^T / 8`, `attn_relpos_add`, `softmax_rows`, `ctx = P V`; `LibraryGemmProvider::bmm_nt_tf32` /
+`bmm_nn_tf32` slice the heads out of the fused qkv buffer, no copy). The eight windowed blocks keep the fused kernel (small windows, 6 ms).
+Checked in `sam1/tests/tensor_core.rs` (tiny tower, output within 5e-4 of the fp32 reference, `tensor_core_attention_blocks()` counts the
+blocks that took the path) and `gpu-core/tests/cuda_library_gemm.rs::batched_tf32_products_slice_heads_out_of_a_fused_buffer`.
+
+Both cards carried a peer's job at 100 to 330 W for the whole measurement, so `encode_bench` now reports the fastest of N runs (the work is
+deterministic; interference only adds): best of 25, global view 69 -> 50 ms, 640 px tile 28 -> 21 ms (originally 137 and 78).
