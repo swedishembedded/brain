@@ -103,7 +103,7 @@ impl TrainPrecision {
             grad: p.grad,
             stochastic_state: p.stochastic_rounding,
             seed,
-            tile_elems: 1 << 22,
+            tile_elems: 1 << 26,
             state_dir: None,
             defer_publication: false,
             window: r.window.map(|layers| LayerWindow { layers }),

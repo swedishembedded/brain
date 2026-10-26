@@ -141,23 +141,19 @@ impl StateCodec {
         if pieces <= 1 {
             return self.decode_serial(data, scales, out);
         }
-        std::thread::scope(|scope| {
-            for (i, chunk) in out.chunks_mut(piece).enumerate() {
-                let e0 = i * piece;
-                let (d0, s0) = (self.data_bytes(e0), self.scale_bytes(e0));
-                let (d1, s1) = (d0 + self.data_bytes(chunk.len()), s0 + self.scale_bytes(chunk.len()));
-                scope.spawn(move || self.decode_serial(&data[d0..d1], &scales[s0..s1], chunk));
-            }
+        crate::par::chunks_mut(out, piece, |i, chunk| {
+            let e0 = i * piece;
+            let (d0, s0) = (self.data_bytes(e0), self.scale_bytes(e0));
+            let (d1, s1) = (d0 + self.data_bytes(chunk.len()), s0 + self.scale_bytes(chunk.len()));
+            self.decode_serial(&data[d0..d1], &scales[s0..s1], chunk);
         });
     }
 
     /// Pieces (and their length in elements, a whole number of blocks) a tile of `n` elements is worked in:
     /// one piece unless the tile is large and the format costs more than a copy.
     fn split(&self, n: usize) -> (usize, usize) {
-        const MIN_ELEMS: usize = 1 << 16;
-        const MAX_THREADS: usize = 16;
         let block = self.format.block().max(2);
-        let threads = std::thread::available_parallelism().map_or(1, |p| p.get()).min(MAX_THREADS).min(n / MIN_ELEMS);
+        let threads = crate::par::threads().min(n / crate::par::MIN_PIECE_ELEMS);
         if threads <= 1 {
             return (1, n.max(1));
         }
@@ -165,7 +161,7 @@ impl StateCodec {
         (n.div_ceil(piece), piece)
     }
 
-    fn decode_serial(&self, data: &[u8], scales: &[u8], out: &mut [f32]) {
+    pub(crate) fn decode_serial(&self, data: &[u8], scales: &[u8], out: &mut [f32]) {
         match self.format {
             StateFormat::F32 => {
                 for (o, c) in out.iter_mut().zip(data.as_chunks::<4>().0) {
@@ -198,19 +194,17 @@ impl StateCodec {
         if pieces <= 1 {
             return self.encode_serial(vals, data, scales, rnd, base);
         }
-        std::thread::scope(|scope| {
-            let (mut data, mut scales) = (data, scales);
-            for (i, chunk) in vals.chunks(piece).enumerate() {
-                let (d, rest_d) = std::mem::take(&mut data).split_at_mut(self.data_bytes(chunk.len()));
-                let (sc, rest_s) = std::mem::take(&mut scales).split_at_mut(self.scale_bytes(chunk.len()));
-                (data, scales) = (rest_d, rest_s);
-                let at = base + (i * piece) as u64;
-                scope.spawn(move || self.encode_serial(chunk, d, sc, rnd, at));
-            }
-        });
+        let encode_piece = |i: usize, d: &mut [u8], sc: &mut [u8]| {
+            let from = i * piece;
+            self.encode_serial(&vals[from..(from + piece).min(vals.len())], d, sc, rnd, base + from as u64);
+        };
+        match self.scale_bytes(piece) {
+            0 => crate::par::chunks_mut(data, self.data_bytes(piece), |i, d| encode_piece(i, d, &mut [])),
+            sb => crate::par::chunks2_mut(data, self.data_bytes(piece), scales, sb, encode_piece),
+        }
     }
 
-    fn encode_serial(&self, vals: &[f32], data: &mut [u8], scales: &mut [u8], rnd: Rounding, base: u64) {
+    pub(crate) fn encode_serial(&self, vals: &[f32], data: &mut [u8], scales: &mut [u8], rnd: Rounding, base: u64) {
         let u = |i: usize| rnd.stochastic.then(|| unit(rnd.key, base + i as u64));
         match self.format {
             StateFormat::F32 => {

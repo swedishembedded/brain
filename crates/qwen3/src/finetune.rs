@@ -798,8 +798,12 @@ impl model::finetune::ChatTrainer for Qwen3Trainer {
     /// Every weight trains in fp32; the moments follow `state`.
     fn train_full(base: &Path, opts: &FitOpts, state: model::finetune::OptimizerState, fit: &mut impl model::finetune::ModelFit) -> std::io::Result<(model::FitReport, Trained)> {
         let base = path_str(base).map_err(std::io::Error::other)?;
+        let open_clock = std::time::Instant::now();
         let (cfg, init) = crate::open_checkpoint(base).map_err(std::io::Error::other)?;
+        model::finetune::stage_time("qwen3 full fine-tune: open the base", open_clock);
+        let build_clock = std::time::Instant::now();
         let m = build_for_training_with(cfg, opts, &*init, Dtype::F32, state == model::finetune::OptimizerState::HostOffload)?;
+        model::finetune::stage_time("qwen3 full fine-tune: build the model (read, convert, upload, optimizer init)", build_clock);
         let (report, m) = fit.fit(m)?;
         Ok((report, Trained::Single(Box::new(m))))
     }
@@ -808,8 +812,12 @@ impl model::finetune::ChatTrainer for Qwen3Trainer {
     /// in fp32 on the device. Refused before loading when the planner finds it does not fit.
     fn train_full_resident(base: &Path, opts: &FitOpts, resident: &model::resident_ft::ResidentFtConfig, fit: &mut impl model::finetune::ModelFit) -> std::io::Result<(model::FitReport, Trained)> {
         let base = path_str(base).map_err(std::io::Error::other)?;
+        let open_clock = std::time::Instant::now();
         let (cfg, init) = crate::open_checkpoint(base).map_err(std::io::Error::other)?;
+        model::finetune::stage_time("qwen3 full fine-tune: open the base", open_clock);
+        let build_clock = std::time::Instant::now();
         let m = build_resident(cfg, opts, &*init, resident)?;
+        model::finetune::stage_time("qwen3 full fine-tune: build the model (read, convert, upload, optimizer init)", build_clock);
         let (report, m) = fit.fit(m)?;
         Ok((report, Trained::Single(Box::new(m))))
     }

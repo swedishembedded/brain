@@ -1845,10 +1845,12 @@ pub(crate) fn fit_opts(steps: u32, block: u32, lr: f32, seed: u64) -> model::Fit
     }
 }
 
-/// The content digest naming a base ([`brain_modelstore::fetch::base_digest`]:
-/// the file's own, or a `transformers` directory's config and weights).
+/// The content digest naming a base ([`brain_modelstore::fetch::base_digest_sidecar`]:
+/// the file's own, or a `transformers` directory's config and weights), each file hashed once and then
+/// answered from its validated sidecar: a fine-tune names the same base every round, and hashing a
+/// multi-gigabyte base is the cost of reading it all.
 pub(crate) fn base_digest(path: &Path) -> Result<String> {
-    brain_modelstore::fetch::base_digest(path).map_err(|e| Error::Backend(format!("{}: {e}", path.display())))
+    brain_modelstore::fetch::base_digest_sidecar(path).map_err(|e| Error::Backend(format!("{}: {e}", path.display())))
 }
 
 pub(crate) fn digest(path: &Path) -> Result<String> {

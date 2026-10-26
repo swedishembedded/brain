@@ -278,6 +278,12 @@ impl Ops {
         read_range_with(&self.gpu, self.tiled_kernel("copy_cols"), buf, start, words)
     }
 
+    /// [`Self::read_range`] into `out` (its length is the word count): the caller's buffer, reused from tile to tile,
+    /// so a walk over a large buffer allocates and faults in no host memory per tile.
+    pub fn read_range_into(&self, buf: &DeviceBuffer, start: u64, out: &mut [f32]) {
+        read_range_into_with(&self.gpu, self.tiled_kernel("copy_cols"), buf, start, out)
+    }
+
     /// The values `w` stores, as host f32: a dense weight is read as it is, every other tier is
     /// decoded on the device a bounded tile of rows at a time ([`Self::decode_tile`], the scratch is
     /// [`Self::tile_budget_bytes`], not the size of the tensor), so one read serves every tier a
@@ -454,19 +460,30 @@ impl Ops {
 
 /// [`Ops::read_range`] on any handle that registered `copy_cols` (its index `copy_cols`).
 pub(super) fn read_range_with(gpu: &gpu_core::Gpu, copy_cols: usize, buf: &DeviceBuffer, start: u64, words: usize) -> Vec<f32> {
+    let mut out = vec![0f32; words];
+    read_range_into_with(gpu, copy_cols, buf, start, &mut out);
+    out
+}
+
+/// [`read_range_with`] into `out`, whose length is the word count.
+pub(super) fn read_range_into_with(gpu: &gpu_core::Gpu, copy_cols: usize, buf: &DeviceBuffer, start: u64, out: &mut [f32]) {
     // A bound sub-range starts on a 256-byte boundary.
     const ALIGN_WORDS: u64 = 64;
-    if words == 0 {
-        return Vec::new();
+    if out.is_empty() {
+        return;
+    }
+    // A device that copies a sub-range back needs no bounded window: nothing is bound.
+    if gpu.reads_ranges() {
+        return gpu.read_into(buf, start, out);
     }
     let window0 = start / ALIGN_WORDS * ALIGN_WORDS;
     let lead = u32::try_from(start - window0).expect("an alignment remainder fits u32");
-    let count = u32::try_from(words).expect("read_range: a range exceeds u32 words");
-    let staging = gpu.storage_uninit(words as u64);
+    let count = u32::try_from(out.len()).expect("read_range: a range exceeds u32 words");
+    let staging = gpu.storage_uninit(out.len() as u64);
     let params = [1, count, lead + count, lead, count, 0];
     let copy = gpu.step_sliced(copy_cols, &[buf, &staging], &[(window0, (lead + count) as u64), WHOLE], &params, count);
     gpu.submit(&[], &[copy]);
-    gpu.read(&staging, words)
+    gpu.read_into(&staging, 0, out);
 }
 
 #[cfg(test)]

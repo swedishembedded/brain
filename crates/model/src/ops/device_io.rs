@@ -24,6 +24,8 @@ pub trait DeviceIo {
     }
     /// `words` f32 of `buf` from word `start`, staging only that range.
     fn read_range(&self, buf: &DeviceBuffer, start: u64, words: usize) -> Vec<f32>;
+    /// [`Self::read_range`] into `out` (its length is the word count): the caller's buffer, reused from tile to tile.
+    fn read_range_into(&self, buf: &DeviceBuffer, start: u64, out: &mut [f32]);
 }
 
 impl DeviceIo for super::Ops {
@@ -35,6 +37,9 @@ impl DeviceIo for super::Ops {
     }
     fn read_range(&self, buf: &DeviceBuffer, start: u64, words: usize) -> Vec<f32> {
         super::Ops::read_range(self, buf, start, words)
+    }
+    fn read_range_into(&self, buf: &DeviceBuffer, start: u64, out: &mut [f32]) {
+        super::Ops::read_range_into(self, buf, start, out)
     }
 }
 
@@ -67,5 +72,8 @@ impl DeviceIo for StoreDevice<'_> {
     }
     fn read_range(&self, buf: &DeviceBuffer, start: u64, words: usize) -> Vec<f32> {
         super::tiled::read_range_with(self.gpu, self.copy_cols, buf, start, words)
+    }
+    fn read_range_into(&self, buf: &DeviceBuffer, start: u64, out: &mut [f32]) {
+        super::tiled::read_range_into_with(self.gpu, self.copy_cols, buf, start, out)
     }
 }

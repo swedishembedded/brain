@@ -245,6 +245,14 @@ impl TensorSource for HashMap<String, Vec<f32>> {
     }
 }
 
+/// Elements `[start, start + out.len())` of `name` decoded into `out`: a tile reader's one call. Returns whether the
+/// tensor was found and the range lies inside it (`out` is untouched otherwise). Bounded to the tile for every source
+/// that can decode a range ([`TensorSource::with_tensor_range`]: safetensors, packed and GGUF sources); a source that
+/// holds plain f32 already has the tensor in memory.
+pub fn read_range_into(src: &dyn TensorSource, name: &str, start: usize, out: &mut [f32]) -> bool {
+    src.with_tensor_range(name, start, out.len(), &mut |values| out.copy_from_slice(values))
+}
+
 /// The shape-carrying eager map several model crates use for a small,
 /// wholly-materialized checkpoint (`s3dit::block::Tensors`, `vae`'s import
 /// map) - the same role as `HashMap<String, Vec<f32>>` above, plus a shape

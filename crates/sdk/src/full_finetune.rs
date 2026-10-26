@@ -236,6 +236,7 @@ impl ChatFullFineTune {
     /// the next step boundary once `cancel` fires; a stopped run writes no
     /// checkpoint.
     pub fn run_with(&self, cancel: &CancelToken, mut on_progress: impl FnMut(&FineTuneProgress)) -> Result<ChatFullFineTuneOutcome> {
+        let run_clock = std::time::Instant::now();
         let chat = chat_entry(&self.arch)?;
         let dataset = self.dataset.as_deref().ok_or_else(|| Error::MissingArgument("ChatFullFineTune: no dataset; call .dataset(path)".to_string()))?;
         let out_dir = self.out_dir.as_deref().ok_or_else(|| Error::MissingArgument("ChatFullFineTune: no out directory; call .out_dir(path)".to_string()))?;
@@ -267,20 +268,26 @@ impl ChatFullFineTune {
         // No evaluation runs during a full fine-tune; the validation split is
         // the rows themselves, unread.
         let prepared = data::chat::prepare_chat_samples(&rows, &rows, &tok, &tmpl, render, vocab, &prepared_dir).map_err(|e| Error::Backend(format!("preparing the dataset: {e}")))?;
+        model::finetune::stage_time("sdk: read dataset and prepare it", run_clock);
         let block = block_for(prepared.longest_example, self.max_block)?;
         let set = crate::device::resolve(&self.device)?;
         plan_before_load(&open, block, &set)?;
 
         let seed = resolve_seed(self.seed, None)?;
         let opts = model::FitOpts { grad_accum: self.grad_accum, weight_decay: self.weight_decay, precision: self.precision.clone(), ..fit_opts(self.steps, block, self.lr, seed) };
+        let digest_clock = std::time::Instant::now();
         let base_digest = base_digest(&open)?;
+        model::finetune::stage_time("sdk: digest the base weights", digest_clock);
         let mut on_step = |s: &model::StepReport| {
             on_progress(&FineTuneProgress { step: s.step, steps: s.steps, loss: s.loss, lr: s.lr });
             !cancel.is_cancelled()
         };
         let control = model::FitControl { on_step: Some(&mut on_step), ..Default::default() };
         let tuned = out_dir.join(TUNED_FILE);
-        let report = (chat.full)(&open, &prepared_dir, &opts, &tuned, control).map_err(|e| Error::Backend(format!("training: {e}")))?;
+        let train_clock = std::time::Instant::now();
+        let state = optimizer_state_for(&open, block, &set, &self.precision)?;
+        let report = (chat.full)(&open, &prepared_dir, &opts, &tuned, state, control).map_err(|e| Error::Backend(format!("training: {e}")))?;
+        model::finetune::stage_time("sdk: train (open, upload, steps, save)", train_clock);
 
         let mut outcome = ChatFullFineTuneOutcome {
             status: FineTuneStatus::Completed,
@@ -306,10 +313,14 @@ impl ChatFullFineTune {
         }
 
         let checkpoint = out_dir.join(CHECKPOINT_DIR);
+        let export_clock = std::time::Instant::now();
         export_trained(&chat, &tuned, &model_dir, &checkpoint, None)?;
         std::fs::remove_file(&tuned).ok();
+        model::finetune::stage_time("sdk: export the trained file to the checkpoint directory", export_clock);
         let weights = checkpoint.join(WEIGHTS_FILE);
+        let digest_clock = std::time::Instant::now();
         outcome.weights_digest = Some(digest(&weights)?);
+        model::finetune::stage_time("sdk: digest the exported weights", digest_clock);
         outcome.weights = Some(weights);
         outcome.checkpoint = Some(checkpoint);
 
@@ -381,7 +392,7 @@ impl ChatFullFineTuneOutcome {
 /// refusal naming it and the capability it lacks.
 /// Refuse a full fine-tune that cannot fit the selected cards BEFORE the base is loaded, with the planner's
 /// per-category arithmetic. Every tensor trains in fp32; the AdamW moments and the master weights live in host
-/// memory ([`model::training::OptimizerState::HostOffload`]), so the cards hold the values, the gradients and one
+/// memory ([`model::finetune::OptimizerState::HostOffload`]), so the cards hold the values, the gradients and one
 /// step's activations. The activation term is calibrated on the 27B (`crate::finetune::activation_bytes`) and
 /// included when the checkpoint's config names its depth and width. No selected card (a CPU run) is not checked.
 fn plan_before_load(open: &Path, block: u32, set: &gpu_core::devices::ComputeSet) -> Result<()> {
@@ -395,7 +406,18 @@ fn plan_before_load(open: &Path, block: u32, set: &gpu_core::devices::ComputeSet
 /// [`plan_before_load`]'s arithmetic for cards of `cards` bytes. `open` is a checkpoint file or a checkpoint
 /// directory (a `transformers` one, single-file or sharded, whose depth and width are in its `config.json`).
 fn plan_on_cards(open: &Path, block: u32, cards: &[u64]) -> Result<()> {
-    use model::memplan::{plan, training_demands, Authorized, Capacity, Category, Demand, TrainingFootprint};
+    use model::memplan::{plan, training_demands, Authorized, Capacity, Category, Demand};
+    let (footprint, numel) = full_footprint(open, block, true)?;
+    let mut demands = training_demands(&footprint).map_err(|e| Error::Backend(e.to_string()))?;
+    demands.push(Demand { category: Category::Weights, variants: vec![model::memplan::Variant::new(model::memplan::Lever::Base, "master weights on the host", 0, 4 * numel)] });
+    // The trainer runs on the selected cards together; host memory is not bounded by the planner here.
+    let capacity = Capacity { device_bytes: cards.iter().sum(), host_bytes: u64::MAX };
+    plan(&demands, capacity, &Authorized::none()).map(drop).map_err(|e| Error::Backend(format!("ChatFullFineTune: refusing to load {}: {e}", open.display())))
+}
+
+/// What a full fine-tune of the checkpoint `open` asks of the device at `block` tokens, with the optimizer state on
+/// the host (`state_on_host`) or beside the weights, and the element count of the model.
+fn full_footprint(open: &Path, block: u32, state_on_host: bool) -> Result<(model::memplan::TrainingFootprint, u64)> {
     let reader = checkpoint::weightio::WeightReader::open_any(open.to_str().ok_or_else(|| Error::Backend(format!("{}: not valid UTF-8", open.display())))?).map_err(|e| Error::Backend(format!("{}: {e}", open.display())))?;
     let trainable: Vec<(String, usize)> = reader.names().map(|n| (n.to_string(), reader.shape(n).map_or(0, |s| s.iter().product::<u64>() as usize))).collect();
     let config = if open.is_dir() {
@@ -411,22 +433,48 @@ fn plan_on_cards(open: &Path, block: u32, cards: &[u64]) -> Result<()> {
         _ => 0,
     };
     let numel: u64 = trainable.iter().map(|(_, n)| *n as u64).sum();
-    let footprint = TrainingFootprint {
+    let footprint = model::memplan::TrainingFootprint {
         frozen_weight_bytes: 0,
         trainable,
         precision: model::memplan::ParamPrecision::FP32,
         moment_slots: 2,
         int8_block: 256,
-        optimizer_state_on_host: true,
+        optimizer_state_on_host: state_on_host,
         activation_bytes,
         recompute_activation_bytes: None,
         saved_boundaries: None,
     };
-    let mut demands = training_demands(&footprint).map_err(|e| Error::Backend(e.to_string()))?;
-    demands.push(Demand { category: Category::Weights, variants: vec![model::memplan::Variant::new(model::memplan::Lever::Base, "master weights on the host", 0, 4 * numel)] });
-    // The trainer runs on the selected cards together; host memory is not bounded by the planner here.
-    let capacity = Capacity { device_bytes: cards.iter().sum(), host_bytes: u64::MAX };
-    plan(&demands, capacity, &Authorized::none()).map(drop).map_err(|e| Error::Backend(format!("ChatFullFineTune: refusing to load {}: {e}", open.display())))
+    Ok((footprint, numel))
+}
+
+/// Where the AdamW moments of a full fine-tune of `open` live: beside the weights and gradients when the first selected
+/// card has room for all of it (the update is then a device kernel, not a round trip of every gradient and moment
+/// through host memory), in host memory otherwise. A CPU run, or a card whose free memory the platform does not report,
+/// keeps the moments on the host as before.
+fn optimizer_state_for(open: &Path, block: u32, set: &gpu_core::devices::ComputeSet, precision: &model::TrainPrecision) -> Result<model::finetune::OptimizerState> {
+    use model::finetune::OptimizerState;
+    // A resident build keeps its master and moments on the host by construction; a precision that only the host
+    // optimizer runs (`moments=host`, log8) needs them there.
+    if precision.resident.is_some() || precision.wants_host_moments() {
+        return Ok(OptimizerState::HostOffload);
+    }
+    let Some(card) = gpu_core::devices::gpus().iter().filter(|d| set.gpus.contains(&d.index)).map(|d| d.index).min() else { return Ok(OptimizerState::HostOffload) };
+    let Some(free) = gpu_core::capacity::available_for(card) else { return Ok(OptimizerState::HostOffload) };
+    let fits = state_fits_on_device(open, block, precision.policy.default, free)?;
+    if gpu_core::profile::enabled() {
+        eprintln!("optimizer state placement: card {card} has {free} bytes free; the moments {}", if fits { "fit beside the weights and gradients" } else { "go to host memory" });
+    }
+    Ok(if fits { OptimizerState::Device } else { OptimizerState::HostOffload })
+}
+
+/// Whether a full fine-tune of `open` at `block` tokens fits a card with `free` bytes with the AdamW moments beside the
+/// weights and gradients: the planner's arithmetic with no lever pulled.
+fn state_fits_on_device(open: &Path, block: u32, precision: model::memplan::ParamPrecision, free: u64) -> Result<bool> {
+    use model::memplan::{plan, training_demands, Authorized, Capacity};
+    let (footprint, _) = full_footprint(open, block, false)?;
+    let footprint = model::memplan::TrainingFootprint { precision, ..footprint };
+    let demands = training_demands(&footprint).map_err(|e| Error::Backend(e.to_string()))?;
+    Ok(plan(&demands, Capacity { device_bytes: free, host_bytes: u64::MAX }, &Authorized::none()).is_ok())
 }
 
 fn chat_entry(arch: &str) -> Result<crate::chat_trainer::ChatEntry> {
@@ -472,7 +520,9 @@ pub struct MergedCheckpoint {
 
 #[cfg(test)]
 mod tests {
-    use super::plan_on_cards;
+    use model::memplan::ParamPrecision;
+
+    use super::{plan_on_cards, state_fits_on_device};
 
     /// A `transformers` checkpoint directory: weights with no embedded config, and the config beside them.
     fn hf_dir(tag: &str) -> std::path::PathBuf {
@@ -491,6 +541,19 @@ mod tests {
         plan_on_cards(&dir, 64, &[1 << 40]).expect("a checkpoint directory fits a large card");
         let refused = plan_on_cards(&dir, 64, &[1024]).expect_err("nothing fits a 1 KiB card");
         assert!(refused.to_string().contains("refusing to load"), "{refused}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The moments stay beside the weights exactly when the card has room for weights, gradients, moments and
+    /// activations together; otherwise they go to host memory.
+    #[test]
+    fn the_moments_stay_on_the_card_only_when_the_whole_state_fits_it() {
+        let dir = hf_dir("state");
+        let numel = 2 * 64 * 32u64;
+        // Values, gradients and two moments in fp32 are 16 bytes per element.
+        assert!(state_fits_on_device(&dir, 64, ParamPrecision::FP32, 1 << 40).unwrap(), "a large card holds everything");
+        assert!(state_fits_on_device(&dir, 64, ParamPrecision::FP32, 16 * numel + (1 << 20)).unwrap(), "room for the state and a small activation term");
+        assert!(!state_fits_on_device(&dir, 64, ParamPrecision::FP32, 12 * numel).unwrap(), "room for values, gradients and one moment is not enough");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

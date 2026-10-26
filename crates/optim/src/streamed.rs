@@ -34,7 +34,7 @@ use paramstore::precision::{ParamPrecision, StateFormat, ValueDtype};
 use crate::codec::{rounding_key, Rounding, SlotKind, StateCodec};
 use crate::factored::{self, Factored, SqAccumulator};
 use crate::rule::{Rule, StepScalars};
-use crate::storage::{BlockStateStorage, Backing, OptimizerStateStorage, StateLayout};
+use crate::storage::{BlockStateStorage, Backing, OptimizerStateStorage, SlotPiece, StateLayout};
 
 /// One optimised tensor: identity, size and its own precision.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -176,33 +176,111 @@ pub fn effective_tile(specs: &[TensorSpec], requested: usize) -> usize {
 
 const VALUE_ROUNDING_SLOT: usize = 255;
 
-/// Elements below which a tile's update runs on the calling thread: spawning costs more than the arithmetic.
-const PARALLEL_MIN_ELEMS: usize = 1 << 15;
-/// Most threads one tile's update uses.
-const PARALLEL_MAX_THREADS: usize = 16;
-
-/// Update every element of a tile with `rule`. The elements are independent, so the tile is cut into contiguous
-/// ranges run on scoped threads when it is large; the result is the same bits as the serial loop.
-fn apply_rule(rule: &Rule, scalars: StepScalars, w: &mut [f32], g: &[f32], s0: &mut [f32], s1: &mut [f32]) {
-    let serial = |w: &mut [f32], g: &[f32], s0: &mut [f32], s1: &mut [f32]| {
-        for i in 0..w.len() {
-            let mut st = [s0[i], s1[i]];
-            rule.update(scalars, &mut w[i], g[i], &mut st);
-            s0[i] = st[0];
-            s1[i] = st[1];
+/// Update every element of `w` with `rule` on the calling thread. The rule is matched once, outside the element loop,
+/// so the common AdamW loop is plain arithmetic the compiler vectorizes; the bits are those of [`Rule::update`].
+fn apply_rule_serial(rule: &Rule, scalars: StepScalars, w: &mut [f32], g: &[f32], s0: &mut [f32], s1: &mut [f32]) {
+    match *rule {
+        Rule::AdamW { adam, wd } => {
+            for i in 0..w.len() {
+                adam.update(scalars.bias_corrections, scalars.lr, wd, g[i] * scalars.grad_scale, &mut w[i], &mut s0[i], &mut s1[i]);
+            }
         }
-    };
-    let n = w.len();
-    let threads = std::thread::available_parallelism().map_or(1, |p| p.get()).min(PARALLEL_MAX_THREADS).min(n / PARALLEL_MIN_ELEMS);
-    if threads <= 1 {
-        return serial(w, g, s0, s1);
+        _ => {
+            for i in 0..w.len() {
+                let mut st = [s0[i], s1[i]];
+                rule.update(scalars, &mut w[i], g[i], &mut st);
+                [s0[i], s1[i]] = st;
+            }
+        }
     }
-    let chunk = n.div_ceil(threads);
-    std::thread::scope(|scope| {
-        for (((w, g), s0), s1) in w.chunks_mut(chunk).zip(g.chunks(chunk)).zip(s0.chunks_mut(chunk)).zip(s1.chunks_mut(chunk)) {
-            scope.spawn(move || serial(w, g, s0, s1));
+}
+
+/// Update every element of a tile with `rule`, spread over the CPU pool; the result is the same bits as the serial loop.
+fn apply_rule(rule: &Rule, scalars: StepScalars, w: &mut [f32], g: &[f32], s0: &mut [f32], s1: &mut [f32]) {
+    crate::par::zip3_mut(w, s0, s1, g, |w, s0, s1, g| {
+        let mut st = [*s0, *s1];
+        rule.update(scalars, w, *g, &mut st);
+        [*s0, *s1] = st;
+    });
+}
+
+/// Elements of one piece of a fused tile update: small enough that the decoded value, gradient and moments of a piece
+/// stay in a core's cache between decode, rule and encode.
+const FUSED_PIECE_ELEMS: usize = 8192;
+
+/// What one piece of a fused tile update works on: its slice of the state slots (moments first, then the master), the
+/// value tile it produces, and the gradient it consumes.
+struct FusedPiece<'a> {
+    slots: Vec<SlotPiece<'a>>,
+    w: &'a mut [f32],
+    g: &'a [f32],
+    /// Absolute index of the piece's first element in its tensor.
+    base: u64,
+}
+
+thread_local! {
+    /// The decoded moments of the piece a thread is working on.
+    static MOMENT_SCRATCH: std::cell::RefCell<[Vec<f32>; 2]> = const { std::cell::RefCell::new([Vec::new(), Vec::new()]) };
+}
+
+/// Decode the moments (and, with a master, the master) of a piece, apply `rule`, and encode the new moments (and
+/// master) back in place; the new value is left in `piece.w`, which holds the current value on entry when there is no
+/// master. `rounds` holds the rounding of each slot, in slot order.
+fn update_piece(piece: &mut FusedPiece<'_>, rule: &Rule, scalars: StepScalars, nslots: usize, rounds: &[Rounding]) {
+    let n = piece.w.len();
+    let (moments, master) = piece.slots.split_at_mut(nslots);
+    // The default precision stores f32 state: update it where it lies, with no decode and no encode.
+    if let ([m, v], master) = (&mut *moments, &mut *master) {
+        if let (Some(m), Some(v)) = (m.as_f32_mut(), v.as_f32_mut()) {
+            match master.first_mut() {
+                None => return apply_rule_serial(rule, scalars, piece.w, piece.g, m, v),
+                Some(master) => {
+                    if let Some(master) = master.as_f32_mut() {
+                        apply_rule_serial(rule, scalars, master, piece.g, m, v);
+                        return piece.w.copy_from_slice(master);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(master) = master.first() {
+        master.decode(piece.w);
+    }
+    MOMENT_SCRATCH.with_borrow_mut(|scratch| {
+        let [s0, s1] = scratch;
+        s0.resize(n, 0.0);
+        s1.resize(n, 0.0);
+        for (slot, st) in moments.iter().zip([&mut *s0, &mut *s1]) {
+            slot.decode(st);
+        }
+        apply_rule_serial(rule, scalars, piece.w, piece.g, s0, s1);
+        for ((slot, st), rnd) in moments.iter_mut().zip([&*s0, &*s1]).zip(rounds) {
+            slot.encode(st, *rnd, piece.base);
         }
     });
+    if let Some(master) = master.first_mut() {
+        master.encode(piece.w, rounds[nslots], piece.base);
+    }
+}
+
+/// Where the wall time of the tile loop of [`StreamedOptimizer::update_tensor`] went, summed over the tiles updated
+/// since the last [`StreamedOptimizer::take_phase_times`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PhaseTimes {
+    /// Reading the master (or value) tile.
+    pub read_master: std::time::Duration,
+    /// Reading the gradient tile through [`ParamTiles::read_grad`].
+    pub read_grad: std::time::Duration,
+    /// Reading the moment tiles.
+    pub read_state: std::time::Duration,
+    /// The rule's arithmetic.
+    pub arithmetic: std::time::Duration,
+    /// Writing the moment tiles.
+    pub write_state: std::time::Duration,
+    /// Writing the master tile.
+    pub write_master: std::time::Duration,
+    /// Writing the value tile through [`ParamTiles::write_value`].
+    pub write_value: std::time::Duration,
 }
 
 /// Streamed optimiser over a state storage.
@@ -220,6 +298,7 @@ pub struct StreamedOptimizer<S: OptimizerStateStorage> {
     master: Vec<f32>,
     /// Factored second-moment statistics, one per tensor, when the rule is [`Rule::Adafactor`]; empty otherwise.
     factored: Vec<Factored>,
+    phases: PhaseTimes,
 }
 
 impl<S: OptimizerStateStorage> StreamedOptimizer<S> {
@@ -249,7 +328,13 @@ impl<S: OptimizerStateStorage> StreamedOptimizer<S> {
             st: [vec![0.0; tile], vec![0.0; tile]],
             master: vec![0.0; tile],
             factored,
+            phases: PhaseTimes::default(),
         })
+    }
+
+    /// The phase times of the tile loops since the last call, and a reset.
+    pub fn take_phase_times(&mut self) -> PhaseTimes {
+        std::mem::take(&mut self.phases)
     }
 
     /// The effective tile size (>= the requested one, block-aligned).
@@ -319,17 +404,27 @@ impl<S: OptimizerStateStorage> StreamedOptimizer<S> {
     /// state; a resumed state already carries its masters.
     pub fn init_master(&mut self, params: &mut dyn ParamTiles) -> io::Result<()> {
         for ti in 0..self.specs.len() {
-            let Some(slot) = self.master_slot(ti) else { continue };
-            let sr = self.specs[ti].precision.stochastic_rounding;
-            let key = rounding_key(self.seed, 0, ti, slot);
             let numel = self.specs[ti].numel;
             for start in (0..numel).step_by(self.tile) {
                 let n = self.tile.min(numel - start);
                 params.read_value(ti, start, &mut self.w[..n])?;
-                self.state.write_tile(ti, slot, start, &self.w[..n], Rounding { stochastic: sr, key })?;
+                Self::seed_master_tile(&self.specs, &mut self.state, self.seed, &self.rule, ti, start, &self.w[..n])?;
             }
         }
         Ok(())
+    }
+
+    /// [`Self::init_master`] for one tile whose values the caller already holds: a loader that reads each tile of the
+    /// initial values once and feeds both the master and the stored value from it. Writes nothing for a tensor
+    /// without a master. The bits are those of [`Self::init_master`] (rounding is keyed on the element).
+    pub fn init_master_tile(&mut self, ti: usize, start: usize, vals: &[f32]) -> io::Result<()> {
+        Self::seed_master_tile(&self.specs, &mut self.state, self.seed, &self.rule, ti, start, vals)
+    }
+
+    fn seed_master_tile(specs: &[TensorSpec], state: &mut S, seed: u64, rule: &Rule, ti: usize, start: usize, vals: &[f32]) -> io::Result<()> {
+        let Some(slot) = specs[ti].precision.master.format().map(|_| rule.slots().len()) else { return Ok(()) };
+        let rnd = Rounding { stochastic: specs[ti].precision.stochastic_rounding, key: rounding_key(seed, 0, ti, slot) };
+        state.write_tile(ti, slot, start, vals, rnd)
     }
 
     /// Overwrite tensor `ti`'s master copy from `start` with `vals` (a trainer restoring a weight it holds
@@ -378,12 +473,17 @@ impl<S: OptimizerStateStorage> StreamedOptimizer<S> {
     /// partially updated - recover from the last committed checkpoint.
     pub fn step(&mut self, params: &mut dyn ParamTiles, lr: f32, clip: Option<f32>, extra_scale: f32) -> io::Result<StepReport> {
         let sumsq = if clip.is_some() { self.grad_sum_sq(params)? } else { 0.0 };
-        let mult = crate::grad_multiplier(sumsq, clip, extra_scale);
+        self.step_scaled(params, lr, crate::grad_multiplier(sumsq, clip, extra_scale))
+    }
+
+    /// [`Self::step`] with the gradient multiplier already decided: a trainer that measured the global norm itself
+    /// (on the device, where the gradients are) does not pay for a pass that moves every gradient to the host.
+    pub fn step_scaled(&mut self, params: &mut dyn ParamTiles, lr: f32, grad_multiplier: f32) -> io::Result<StepReport> {
         let step = self.begin_step();
         for ti in 0..self.specs.len() {
-            self.update_tensor(params, ti, lr, mult)?;
+            self.update_tensor(params, ti, lr, grad_multiplier)?;
         }
-        Ok(StepReport { step, grad_multiplier: mult })
+        Ok(StepReport { step, grad_multiplier })
     }
 
     /// Start the next optimisation step and return its 1-based index. The
@@ -408,35 +508,96 @@ impl<S: OptimizerStateStorage> StreamedOptimizer<S> {
         let numel = self.specs[ti].numel;
         let master_slot = self.master_slot(ti);
         let sr = prec.stochastic_rounding;
+        let fused = self.state.addressable();
         for start in (0..numel).step_by(self.tile) {
             let n = self.tile.min(numel - start);
+            if fused {
+                let clock = std::time::Instant::now();
+                if master_slot.is_none() {
+                    params.read_value(ti, start, &mut self.w[..n])?;
+                }
+                params.read_grad(ti, start, &mut self.g[..n])?;
+                let clock = lap(clock, &mut self.phases.read_grad);
+                let rounds: Vec<Rounding> = (0..nslots).chain(master_slot).map(|s| Rounding { stochastic: sr, key: rounding_key(self.seed, self.step, ti, s) }).collect();
+                self.update_fused(ti, start, n, scalars, &rounds, master_slot.is_some())?;
+                let clock = lap(clock, &mut self.phases.arithmetic);
+                let vr = Rounding { stochastic: sr && prec.value != ValueDtype::F32, key: rounding_key(self.seed, self.step, ti, VALUE_ROUNDING_SLOT) };
+                params.write_value(ti, start, &self.w[..n], vr)?;
+                lap(clock, &mut self.phases.write_value);
+                continue;
+            }
+            let clock = std::time::Instant::now();
             match master_slot {
                 Some(ms) => self.state.read_tile(ti, ms, start, &mut self.w[..n])?,
                 None => params.read_value(ti, start, &mut self.w[..n])?,
             }
+            let clock = lap(clock, &mut self.phases.read_master);
             params.read_grad(ti, start, &mut self.g[..n])?;
+            let clock = lap(clock, &mut self.phases.read_grad);
             for s in 0..nslots {
                 self.state.read_tile(ti, s, start, &mut self.st[s][..n])?;
             }
+            let clock = lap(clock, &mut self.phases.read_state);
             let [s0, s1] = &mut self.st;
             apply_rule(&self.rule, scalars, &mut self.w[..n], &self.g[..n], &mut s0[..n], &mut s1[..n]);
+            let clock = lap(clock, &mut self.phases.arithmetic);
             for s in 0..nslots {
                 let rnd = Rounding { stochastic: sr, key: rounding_key(self.seed, self.step, ti, s) };
                 self.state.write_tile(ti, s, start, &self.st[s][..n], rnd)?;
             }
+            let clock = lap(clock, &mut self.phases.write_state);
             if let Some(ms) = master_slot {
                 let rnd = Rounding { stochastic: sr, key: rounding_key(self.seed, self.step, ti, ms) };
                 self.master[..n].copy_from_slice(&self.w[..n]);
                 self.state.write_tile(ti, ms, start, &self.master[..n], rnd)?;
             }
+            let clock = lap(clock, &mut self.phases.write_master);
             let vr = Rounding {
                 stochastic: sr && prec.value != ValueDtype::F32,
                 key: rounding_key(self.seed, self.step, ti, VALUE_ROUNDING_SLOT),
             };
             params.write_value(ti, start, &self.w[..n], vr)?;
+            lap(clock, &mut self.phases.write_value);
         }
         Ok(())
     }
+}
+
+impl<S: OptimizerStateStorage> StreamedOptimizer<S> {
+    /// One elementwise tile update done in place on the state (`ti`, elements `[start, start + n)`), piece by piece
+    /// across the CPU pool: each piece decodes its moments (and master), applies the rule to the gradient already in
+    /// `self.g`, encodes the new state back, and leaves the new value in `self.w` (which holds the current value on
+    /// entry when `with_master` is false). The bits are those of the staged tile loop. Needs
+    /// [`OptimizerStateStorage::addressable`] state.
+    fn update_fused(&mut self, ti: usize, start: usize, n: usize, scalars: StepScalars, rounds: &[Rounding], with_master: bool) -> io::Result<()> {
+        let nslots = self.rule.slots().len();
+        let slots: Vec<usize> = (0..nslots + usize::from(with_master)).collect();
+        let piece = self.state_piece_elems(ti, &slots);
+        let views = self.state.slot_views(ti, &slots, start, n).ok_or_else(|| io::Error::other(format!("{}: tile [{start}, {}) has no in-place view of its state", self.specs[ti].name, start + n)))?;
+        let mut per_slot: Vec<std::vec::IntoIter<SlotPiece<'_>>> = views.into_iter().map(|v| v.pieces(piece).into_iter()).collect();
+        let mut tasks: Vec<FusedPiece<'_>> = Vec::with_capacity(n.div_ceil(piece));
+        for (i, (w, g)) in self.w[..n].chunks_mut(piece).zip(self.g[..n].chunks(piece)).enumerate() {
+            let slots = per_slot.iter_mut().map(|it| it.next().expect("every slot has a piece per chunk")).collect();
+            tasks.push(FusedPiece { slots, w, g, base: (start + i * piece) as u64 });
+        }
+        let rule = &self.rule;
+        crate::par::chunks_mut(&mut tasks, 1, |_, t| update_piece(&mut t[0], rule, scalars, nslots, rounds));
+        Ok(())
+    }
+
+    /// Elements of one fused piece of tensor `ti`: [`FUSED_PIECE_ELEMS`] rounded up to a multiple of every block of the slots.
+    fn state_piece_elems(&self, ti: usize, slots: &[usize]) -> usize {
+        let prec = self.specs[ti].precision;
+        let blocks = slots.iter().map(|&s| if s < self.rule.slots().len() { prec.state.block() } else { prec.master.format().map_or(1, |f| f.block()) });
+        blocks.fold(FUSED_PIECE_ELEMS, lcm)
+    }
+}
+
+/// Add the time since `since` to `phase` and return the new lap start.
+fn lap(since: std::time::Instant, phase: &mut std::time::Duration) -> std::time::Instant {
+    let now = std::time::Instant::now();
+    *phase += now - since;
+    now
 }
 
 impl<S: OptimizerStateStorage> StreamedOptimizer<S> {

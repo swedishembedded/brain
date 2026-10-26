@@ -45,7 +45,7 @@ pub(crate) struct PreferenceJob<'a> {
 /// [`PreferenceJob::score_sets`] entry.
 pub(crate) type ResidentMargins = Vec<Vec<f64>>;
 
-type FullFn = for<'c> fn(&Path, &Path, &FitOpts, &Path, FitControl<'c>) -> std::io::Result<FitReport>;
+type FullFn = for<'c> fn(&Path, &Path, &FitOpts, &Path, OptimizerState, FitControl<'c>) -> std::io::Result<FitReport>;
 type PreferenceFn = for<'j, 'c> fn(PreferenceJob<'j>, FitControl<'c>) -> std::io::Result<(FitReport, ResidentMargins)>;
 type MarginsFn = fn(&Path, Option<&Path>, &Path, &[(EncodedTurn, EncodedTurn)], u32) -> Option<PreferenceMargins>;
 
@@ -80,8 +80,8 @@ impl ChatEntry {
     }
 }
 
-fn full<T: ChatTrainer>(base: &Path, dir: &Path, opts: &FitOpts, out: &Path, control: FitControl<'_>) -> std::io::Result<FitReport> {
-    model::finetune::fit_full::<T>(base, dir, opts, out, OptimizerState::HostOffload, control)
+fn full<T: ChatTrainer>(base: &Path, dir: &Path, opts: &FitOpts, out: &Path, state: OptimizerState, control: FitControl<'_>) -> std::io::Result<FitReport> {
+    model::finetune::fit_full::<T>(base, dir, opts, out, state, control)
 }
 
 fn preference<T: ChatTrainer>(job: PreferenceJob<'_>, control: FitControl<'_>) -> std::io::Result<(FitReport, ResidentMargins)> {

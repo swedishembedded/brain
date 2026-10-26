@@ -23,6 +23,8 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 
+use paramstore::precision::StateFormat;
+
 use crate::codec::{Rounding, StateCodec};
 
 fn invalid(msg: String) -> io::Error {
@@ -34,6 +36,24 @@ pub trait Backing {
     fn read_at(&mut self, off: u64, buf: &mut [u8]) -> io::Result<()>;
     fn write_at(&mut self, off: u64, buf: &[u8]) -> io::Result<()>;
     fn len(&self) -> u64;
+    /// Bytes `off..off + len` in place, when the backing is addressable memory: a tile is then decoded straight from
+    /// the state instead of through a staging copy. `None` (the default) means read through [`Self::read_at`].
+    fn view(&self, _off: u64, _len: usize) -> Option<&[u8]> {
+        None
+    }
+    /// [`Self::view`] for writing.
+    fn view_mut(&mut self, _off: u64, _len: usize) -> Option<&mut [u8]> {
+        None
+    }
+    /// Whether [`Self::view`], [`Self::view_mut`] and [`Self::views_mut`] answer for every in-range request.
+    fn addressable(&self) -> bool {
+        false
+    }
+    /// Disjoint mutable views of `ranges` (`(offset, length)`, ascending and non-overlapping), when the backing is
+    /// addressable memory: the pieces of a tile can then be updated in place from several threads.
+    fn views_mut(&mut self, _ranges: &[(u64, usize)]) -> Option<Vec<&mut [u8]>> {
+        None
+    }
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -45,29 +65,30 @@ pub trait Backing {
 pub struct MemBacking(Vec<u8>);
 
 impl MemBacking {
+    /// `len` zero bytes, resident: every page is faulted in here, across the CPU pool, instead of one page at a time
+    /// by the first step that touches it (tens of gigabytes of optimizer state cost seconds of single-threaded page
+    /// faults inside that step).
     pub fn zeroed(len: u64) -> MemBacking {
-        MemBacking(vec![0u8; len as usize])
+        const PAGE: usize = 4096;
+        const PREFAULT_CHUNK: usize = 1 << 24;
+        let mut bytes = vec![0u8; len as usize];
+        crate::par::chunks_mut(&mut bytes, PREFAULT_CHUNK, |_, chunk| chunk.iter_mut().step_by(PAGE).for_each(|b| *b = 0));
+        MemBacking(bytes)
     }
 }
 
 /// Bytes below which a copy runs on the calling thread.
 const PARALLEL_COPY_MIN: usize = 1 << 20;
-/// Most threads one copy uses.
-const PARALLEL_COPY_THREADS: usize = 16;
 
-/// `dst.copy_from_slice(src)`, cut into contiguous pieces on scoped threads when it is large: one core does not saturate
+/// `dst.copy_from_slice(src)`, cut into contiguous pieces on the CPU pool when it is large: one core does not saturate
 /// the memory system, and a tile of optimizer state is megabytes.
 fn copy_parallel(dst: &mut [u8], src: &[u8]) {
-    let threads = std::thread::available_parallelism().map_or(1, |p| p.get()).min(PARALLEL_COPY_THREADS).min(dst.len() / PARALLEL_COPY_MIN);
-    if threads <= 1 {
+    let pieces = crate::par::threads().min(dst.len() / PARALLEL_COPY_MIN);
+    if pieces <= 1 {
         return dst.copy_from_slice(src);
     }
-    let piece = dst.len().div_ceil(threads);
-    std::thread::scope(|scope| {
-        for (d, s) in dst.chunks_mut(piece).zip(src.chunks(piece)) {
-            scope.spawn(move || d.copy_from_slice(s));
-        }
-    });
+    let piece = dst.len().div_ceil(pieces);
+    crate::par::chunks_mut(dst, piece, |i, d| d.copy_from_slice(&src[i * piece..i * piece + d.len()]));
 }
 
 impl Backing for MemBacking {
@@ -84,6 +105,31 @@ impl Backing for MemBacking {
     }
     fn len(&self) -> u64 {
         self.0.len() as u64
+    }
+    fn addressable(&self) -> bool {
+        true
+    }
+    fn view(&self, off: u64, len: usize) -> Option<&[u8]> {
+        self.0.get(off as usize..off as usize + len)
+    }
+    fn view_mut(&mut self, off: u64, len: usize) -> Option<&mut [u8]> {
+        self.0.get_mut(off as usize..off as usize + len)
+    }
+    fn views_mut(&mut self, ranges: &[(u64, usize)]) -> Option<Vec<&mut [u8]>> {
+        let mut rest = self.0.as_mut_slice();
+        let mut consumed = 0usize;
+        let mut views = Vec::with_capacity(ranges.len());
+        for &(off, len) in ranges {
+            let skip = (off as usize).checked_sub(consumed)?;
+            if skip + len > rest.len() {
+                return None;
+            }
+            let (head, tail) = std::mem::take(&mut rest).split_at_mut(skip + len);
+            views.push(&mut head[skip..]);
+            rest = tail;
+            consumed += skip + len;
+        }
+        Some(views)
     }
     fn sync(&mut self) -> io::Result<()> {
         Ok(())
@@ -175,8 +221,75 @@ impl StateLayout {
     }
 }
 
+/// The bytes of one slot over an element range, mutable and disjoint from every other [`SlotView`] of the same
+/// request: the form in which a tile of state is updated in place, piece by piece, from several threads.
+pub struct SlotView<'a> {
+    pub codec: StateCodec,
+    data: &'a mut [u8],
+    scales: &'a mut [u8],
+}
+
+/// One piece of a [`SlotView`], a whole number of the slot's blocks.
+pub struct SlotPiece<'a> {
+    codec: StateCodec,
+    data: &'a mut [u8],
+    scales: &'a mut [u8],
+}
+
+impl<'a> SlotView<'a> {
+    /// Cut the view into pieces of `piece_elems` elements (a multiple of the slot's block); the last may be shorter.
+    pub fn pieces(self, piece_elems: usize) -> Vec<SlotPiece<'a>> {
+        debug_assert!(piece_elems.is_multiple_of(self.codec.format.block()), "a piece is whole blocks");
+        let SlotView { codec, mut data, mut scales } = self;
+        let mut out = Vec::new();
+        while !data.is_empty() {
+            let elems = piece_elems.min(data.len() / codec.data_bytes(1));
+            let (d, rest_d) = std::mem::take(&mut data).split_at_mut(codec.data_bytes(elems));
+            let (sc, rest_s) = std::mem::take(&mut scales).split_at_mut(codec.scale_bytes(elems));
+            (data, scales) = (rest_d, rest_s);
+            out.push(SlotPiece { codec, data: d, scales: sc });
+        }
+        out
+    }
+}
+
+impl SlotPiece<'_> {
+    /// The piece as the f32 values it stores, in place, when it is an f32 slot on a little-endian host whose bytes are
+    /// 4-byte aligned: the update then needs no decode into scratch and no encode back.
+    #[cfg(target_endian = "little")]
+    pub fn as_f32_mut(&mut self) -> Option<&mut [f32]> {
+        matches!(self.codec.format, StateFormat::F32).then(|| bytemuck::try_cast_slice_mut(&mut *self.data).ok()).flatten()
+    }
+
+    #[cfg(not(target_endian = "little"))]
+    pub fn as_f32_mut(&mut self) -> Option<&mut [f32]> {
+        None
+    }
+
+    /// Decode the piece into `out` (its element count).
+    pub fn decode(&self, out: &mut [f32]) {
+        self.codec.decode_serial(self.data, self.scales, out);
+    }
+
+    /// Encode `vals` into the piece; `base` is the absolute index of its first element in the tensor (the rounding is
+    /// keyed on it).
+    pub fn encode(&mut self, vals: &[f32], rnd: Rounding, base: u64) {
+        self.codec.encode_serial(vals, self.data, self.scales, rnd, base);
+    }
+}
+
 /// Tile-addressed access to per-element training tensors.
 pub trait OptimizerStateStorage {
+    /// Whether [`Self::slot_views`] answers for every valid tile: the state is addressable memory.
+    fn addressable(&self) -> bool {
+        false
+    }
+    /// In-place views of `slots` (ascending) of `tensor` over elements `[start, start + n)`, when the state is
+    /// addressable memory and the range is a valid tile. `None` means use [`Self::read_tile`] and
+    /// [`Self::write_tile`].
+    fn slot_views(&mut self, _tensor: usize, _slots: &[usize], _start: usize, _n: usize) -> Option<Vec<SlotView<'_>>> {
+        None
+    }
     /// Decode `out.len()` elements of `slot` of `tensor`, starting at element
     /// `start`, into `out`. `start` must be a multiple of the slot's block.
     fn read_tile(&mut self, tensor: usize, slot: usize, start: usize, out: &mut [f32]) -> io::Result<()>;
@@ -240,15 +353,44 @@ impl<B: Backing> BlockStateStorage<B> {
 }
 
 impl<B: Backing> OptimizerStateStorage for BlockStateStorage<B> {
+    fn addressable(&self) -> bool {
+        self.backing.addressable()
+    }
+
+    fn slot_views(&mut self, tensor: usize, slots: &[usize], start: usize, n: usize) -> Option<Vec<SlotView<'_>>> {
+        if !slots.windows(2).all(|w| w[0] < w[1]) {
+            return None;
+        }
+        let mut layouts = Vec::with_capacity(slots.len());
+        let mut ranges = Vec::with_capacity(2 * slots.len());
+        for &slot in slots {
+            let (s, block) = self.slot(tensor, slot, start, n).ok()?;
+            let elem = s.codec.data_bytes(1);
+            ranges.push((s.data_off + (start * elem) as u64, s.codec.data_bytes(n)));
+            // An unscaled slot has an empty scale region: it sits at the region's start, which keeps the ranges ascending.
+            let scale_at = if s.codec.scale_bytes(n) == 0 { s.scale_off } else { s.scale_off + (4 * (start / block)) as u64 };
+            ranges.push((scale_at, s.codec.scale_bytes(n)));
+            layouts.push(s);
+        }
+        let mut views = self.backing.views_mut(&ranges)?.into_iter();
+        Some(layouts.into_iter().map(|s| SlotView { codec: s.codec, data: views.next().expect("two views per slot"), scales: views.next().expect("two views per slot") }).collect())
+    }
+
     fn read_tile(&mut self, tensor: usize, slot: usize, start: usize, out: &mut [f32]) -> io::Result<()> {
         let n = out.len();
         let (s, block) = self.slot(tensor, slot, start, n)?;
         let db = s.codec.data_bytes(n);
         let sb = s.codec.scale_bytes(n);
         let elem = if n == 0 { 0 } else { s.codec.data_bytes(1) };
-        self.backing.read_at(s.data_off + (start * elem) as u64, &mut self.data[..db])?;
+        let (data_at, scale_at) = (s.data_off + (start * elem) as u64, s.scale_off + (4 * (start / block)) as u64);
+        let scales = if sb == 0 { Some(&[][..]) } else { self.backing.view(scale_at, sb) };
+        if let (Some(data), Some(scales)) = (self.backing.view(data_at, db), scales) {
+            s.codec.decode(data, scales, out);
+            return Ok(());
+        }
+        self.backing.read_at(data_at, &mut self.data[..db])?;
         if sb > 0 {
-            self.backing.read_at(s.scale_off + (4 * (start / block)) as u64, &mut self.scales[..sb])?;
+            self.backing.read_at(scale_at, &mut self.scales[..sb])?;
         }
         s.codec.decode(&self.data[..db], &self.scales[..sb], out);
         Ok(())
@@ -260,6 +402,13 @@ impl<B: Backing> OptimizerStateStorage for BlockStateStorage<B> {
         let db = s.codec.data_bytes(n);
         let sb = s.codec.scale_bytes(n);
         let elem = if n == 0 { 0 } else { s.codec.data_bytes(1) };
+        // A format without scales is encoded in place when the backing is addressable.
+        if sb == 0 {
+            if let Some(data) = self.backing.view_mut(s.data_off + (start * elem) as u64, db) {
+                s.codec.encode(vals, data, &mut [], rnd, start as u64);
+                return Ok(());
+            }
+        }
         s.codec.encode(vals, &mut self.data[..db], &mut self.scales[..sb], rnd, start as u64);
         self.backing.write_at(s.data_off + (start * elem) as u64, &self.data[..db])?;
         if sb > 0 {

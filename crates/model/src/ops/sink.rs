@@ -315,8 +315,7 @@ pub fn rewrite_tile(ops: &dyn DeviceIo, weight: &Weight, dst: &TensorDescriptor,
     if !range.start.is_multiple_of(4) || !tile.payload.len().is_multiple_of(4) {
         return Err(format!("tensor '{}': tile {:?} is not word aligned ({} payload bytes at byte {})", dst.name, tile.elems, tile.payload.len(), range.start));
     }
-    let words: Vec<u32> = tile.payload.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect();
-    gpu.write_at(payload, range.start / 4, &words);
+    gpu.write_bytes_at(payload, range.start / 4, tile.payload);
     if let Some(buf) = scales {
         let level = dst.encoding.scales.last().ok_or_else(|| format!("tensor '{}': a scaled weight needs a scale level", dst.name))?;
         let bytes = tile.scales.first().ok_or("a scaled tile carries its scales")?;

@@ -231,9 +231,9 @@ impl ResidentBackward for StoreBackward<'_> {
         self.ps.zero_grads(self.gpu);
     }
 
-    fn remainder_grad_sum_sq(&self, norm: &crate::gradnorm::DeviceGradNorm) -> f64 {
-        let items: Vec<crate::gradnorm::NormItem<'_>> =
-            self.ps.opt_params().iter().map(|(name, numel)| crate::gradnorm::NormItem { buf: self.ps.g(name), numel: *numel, dtype: crate::ops::GradDtype::F32 }).collect();
+    fn remainder_grad_sum_sq(&self, norm: &optim::gradnorm::DeviceGradNorm) -> f64 {
+        let items: Vec<optim::gradnorm::NormItem<'_>> =
+            self.ps.opt_params().iter().map(|(name, numel)| optim::gradnorm::NormItem { buf: self.ps.g(name), numel: *numel, dtype: crate::ops::GradDtype::F32 }).collect();
         norm.sum_sq(self.gpu, &items)
     }
 

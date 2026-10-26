@@ -5733,9 +5733,9 @@ impl model::resident_ft::ResidentBackward for Qwen35 {
         self.ps.zero_grads(&self.gpu);
     }
 
-    fn remainder_grad_sum_sq(&self, norm: &model::gradnorm::DeviceGradNorm) -> f64 {
-        let items: Vec<model::gradnorm::NormItem<'_>> =
-            self.ps.opt_params().iter().map(|(name, numel)| model::gradnorm::NormItem { buf: self.ps.g(name), numel: *numel, dtype: model::ops::GradDtype::F32 }).collect();
+    fn remainder_grad_sum_sq(&self, norm: &optim::gradnorm::DeviceGradNorm) -> f64 {
+        let items: Vec<optim::gradnorm::NormItem<'_>> =
+            self.ps.opt_params().iter().map(|(name, numel)| optim::gradnorm::NormItem { buf: self.ps.g(name), numel: *numel, dtype: model::ops::GradDtype::F32 }).collect();
         norm.sum_sq(&self.gpu, &items)
     }
 

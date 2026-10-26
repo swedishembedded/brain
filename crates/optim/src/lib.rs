@@ -66,7 +66,9 @@ use paramstore::ParamStore;
 pub mod offload;
 pub use offload::OffloadAdam;
 
+mod par;
 pub mod codec;
+pub mod gradnorm;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod deferred;
 #[cfg(not(target_arch = "wasm32"))]

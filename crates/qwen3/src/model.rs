@@ -4048,23 +4048,18 @@ impl Qwen {
     }
 
     pub fn save_with_itos(&self, path: &str, itos: Option<&[char]>) {
-        let mut tensors: Vec<(String, Vec<u64>, Vec<f32>)> = self
-            .ps
-            .params
-            .iter()
-            .map(|(name, _)| (name.clone(), vec![self.ps.numel(name) as u64], self.read_weight(name)))
-            .collect();
+        let mut plan: Vec<(String, Vec<u64>)> = self.ps.params.iter().map(|(name, _)| (name.clone(), vec![self.ps.numel(name) as u64])).collect();
         // A resident build keeps its linears outside the parameter store: they are saved from their masters.
         if let Some(ft) = &self.resident {
-            let names: Vec<(String, u64)> = ft.borrow().specs().iter().map(|s| (s.name.clone(), s.n as u64 * s.k as u64)).collect();
-            tensors.extend(names.into_iter().map(|(name, numel)| (name.clone(), vec![numel], self.read_weight(&name))));
+            plan.extend(ft.borrow().specs().iter().map(|s| (s.name.clone(), vec![s.n as u64 * s.k as u64])));
         }
         let mut config = self.cfg.to_json();
         if let Some(itos) = itos {
             let arr: Vec<Value> = itos.iter().map(|c| Value::from(c.to_string())).collect();
             config["itos"] = Value::Array(arr);
         }
-        checkpoint::save(path, config, &tensors);
+        // One tensor at a time off the device or the master, written while the next is read.
+        checkpoint::weightio::save_streamed(path, &config, None, &plan, |name| self.read_weight(name)).expect("save safetensors");
     }
 }
 
@@ -4077,9 +4072,9 @@ impl model::resident_ft::ResidentBackward for Qwen {
         self.ps.zero_grads(&self.gpu);
     }
 
-    fn remainder_grad_sum_sq(&self, norm: &model::gradnorm::DeviceGradNorm) -> f64 {
-        let items: Vec<model::gradnorm::NormItem<'_>> =
-            self.ps.opt_params().iter().map(|(name, numel)| model::gradnorm::NormItem { buf: self.ps.g(name), numel: *numel, dtype: model::ops::GradDtype::F32 }).collect();
+    fn remainder_grad_sum_sq(&self, norm: &optim::gradnorm::DeviceGradNorm) -> f64 {
+        let items: Vec<optim::gradnorm::NormItem<'_>> =
+            self.ps.opt_params().iter().map(|(name, numel)| optim::gradnorm::NormItem { buf: self.ps.g(name), numel: *numel, dtype: model::ops::GradDtype::F32 }).collect();
         norm.sum_sq(&self.gpu, &items)
     }
 

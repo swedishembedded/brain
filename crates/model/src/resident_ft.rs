@@ -66,7 +66,7 @@ use optim::trainstate::{TrainState, TrainStateConfig};
 use paramstore::precision::{GradDtype, MasterPolicy, ParamPrecision, PrecisionPolicy, StateFormat, ValueDtype};
 use gpu_core::Step;
 
-use crate::gradnorm::{DeviceGradNorm, NormItem};
+use optim::gradnorm::{DeviceGradNorm, NormItem};
 use crate::memplan::{self, Authorized, Capacity, Category, Demand, Lever, PlanError, Variant};
 use crate::ops::{rewrite_tile, DeviceIo, DeviceWeightSink, Ops, Weight};
 
@@ -386,63 +386,31 @@ pub fn check_fits(cfg: &ResidentFtConfig, specs: &[ResidentSpec], budget: &Resid
     memplan::plan(&all, budget.capacity, &budget.authorized).map_err(|e| format!("resident full fine-tune does not fit: {e}"))
 }
 
-/// Elements of the window [`SourceTiles`] keeps of the tensor it is reading (16 MiB of f32).
-const SOURCE_WINDOW: usize = 1 << 22;
+/// Elements of a bf16 gradient unpacked per parallel work item.
+const GRAD_UNPACK_CHUNK: usize = 1 << 16;
 
-/// Elements of a gradient the host update reads off the device at once (64 MiB of f32).
-const GRAD_WINDOW: usize = 1 << 24;
-
-/// Initial values read from a [`TensorSource`] as the master's and the first stored value's source, through the
-/// bounded chunk reader: the host holds one window of the tensor being read, never the tensor.
+/// Initial values read from a [`TensorSource`] as the master's and the first stored value's source: each tile is
+/// decoded from exactly the elements it covers ([`TensorSource::with_tensor_range`]), so the host holds the tile
+/// being read and nothing else, and every element of the source is decoded once per pass over it.
 struct SourceTiles<'a> {
     src: &'a dyn TensorSource,
     names: Vec<&'a str>,
     /// Added to the tensor index the caller passes (an export of one tensor starts at 0).
     base: usize,
-    window: Vec<f32>,
-    /// `(tensor, first element)` the window holds.
-    at: Option<(usize, usize)>,
 }
 
 impl<'a> SourceTiles<'a> {
     fn new(src: &'a dyn TensorSource, names: Vec<&'a str>, base: usize) -> Self {
-        SourceTiles { src, names, base, window: Vec::new(), at: None }
-    }
-
-    fn fill(&mut self, ti: usize, start: usize, need: usize) -> io::Result<()> {
-        let name = self.names[ti];
-        let len = SOURCE_WINDOW.max(need);
-        let mut window = std::mem::take(&mut self.window);
-        window.clear();
-        window.resize(len, 0.0);
-        let mut filled = 0usize;
-        let found = self.src.with_tensor_chunks(name, SOURCE_WINDOW, &mut |off, chunk| {
-            let (lo, hi) = (off as usize, off as usize + chunk.len());
-            let (from, to) = (lo.max(start), hi.min(start + len));
-            if from < to {
-                window[from - start..to - start].copy_from_slice(&chunk[from - lo..to - lo]);
-                filled = filled.max(to - start);
-            }
-        });
-        if !found || filled < need {
-            return Err(invalid(format!("initial values: tensor '{name}' range {start}..{} is not in the source", start + need)));
-        }
-        window.truncate(filled);
-        self.window = window;
-        self.at = Some((ti, start));
-        Ok(())
+        SourceTiles { src, names, base }
     }
 }
 
 impl ParamTiles for SourceTiles<'_> {
     fn read_value(&mut self, tensor: usize, start: usize, out: &mut [f32]) -> io::Result<()> {
-        let ti = self.base + tensor;
-        let covered = self.at.is_some_and(|(t, first)| t == ti && start >= first && start + out.len() <= first + self.window.len());
-        if !covered {
-            self.fill(ti, start, out.len())?;
+        let name = self.names[self.base + tensor];
+        if !checkpoint::read_range_into(self.src, name, start, out) {
+            return Err(invalid(format!("initial values: tensor '{name}' range {start}..{} is not in the source", start + out.len())));
         }
-        let (_, first) = self.at.expect("filled above");
-        out.copy_from_slice(&self.window[start - first..start - first + out.len()]);
         Ok(())
     }
     fn write_value(&mut self, tensor: usize, _: usize, _: &[f32], _: Rounding) -> io::Result<()> {
@@ -450,6 +418,30 @@ impl ParamTiles for SourceTiles<'_> {
     }
     fn read_grad(&mut self, tensor: usize, _: usize, _: &mut [f32]) -> io::Result<()> {
         Err(io::Error::new(io::ErrorKind::Unsupported, format!("tensor {tensor}: the initial values carry no gradient")))
+    }
+}
+
+/// [`SourceTiles`] for a tensor upload that also seeds the tensor's master copy from every tile it reads.
+struct SeedingTiles<'a, 's> {
+    source: SourceTiles<'a>,
+    seed: Option<&'s mut TrainState>,
+    /// The tensor's index in the optimizer state.
+    tensor: usize,
+}
+
+impl ParamTiles for SeedingTiles<'_, '_> {
+    fn read_value(&mut self, _: usize, start: usize, out: &mut [f32]) -> io::Result<()> {
+        self.source.read_value(0, start, out)?;
+        match &mut self.seed {
+            Some(state) => state.init_master_tile(self.tensor, start, out),
+            None => Ok(()),
+        }
+    }
+    fn write_value(&mut self, tensor: usize, start: usize, vals: &[f32], rnd: Rounding) -> io::Result<()> {
+        self.source.write_value(tensor, start, vals, rnd)
+    }
+    fn read_grad(&mut self, tensor: usize, start: usize, out: &mut [f32]) -> io::Result<()> {
+        self.source.read_grad(tensor, start, out)
     }
 }
 
@@ -486,9 +478,9 @@ struct DeviceTiles<'a> {
     descs: &'a [TensorDescriptor],
     registry: &'a CodecRegistry,
     grad_dtype: GradDtype,
-    /// The window of the gradient last read: `(tensor, first element, values)`, at most [`GRAD_WINDOW`] elements, so
-    /// the host stages a bounded range of the largest tensor (a vocabulary table included), never the tensor.
-    grad_cache: Option<(usize, usize, Vec<f32>)>,
+    /// The words of a bf16 gradient tile as read off the device, before they are unpacked: warm scratch reused by
+    /// every tile.
+    grad_words: Vec<f32>,
     /// The stored value of the last tensor decoded on the host (read whole: only an export, a commit or a tensor
     /// without a master reads values off the device).
     value_cache: Option<(usize, Vec<u8>, Vec<Vec<u8>>)>,
@@ -595,27 +587,25 @@ impl ParamTiles for DeviceTiles<'_> {
     }
 
     fn read_grad(&mut self, ti: usize, start: usize, out: &mut [f32]) -> io::Result<()> {
-        let covered = self.grad_cache.as_ref().is_some_and(|(t, first, g)| *t == ti && start >= *first && start + out.len() <= first + g.len());
-        if !covered {
-            let t0 = std::time::Instant::now();
-            let numel = self.descs[ti].numel() as usize;
-            // An even first element keeps a bf16 window on whole words.
-            let first = start & !1;
-            let len = GRAD_WINDOW.max(start + out.len() - first).min(numel - first);
-            let g = match self.grad_dtype {
-                GradDtype::F32 => self.ops.read_range(&self.grads[ti], first as u64, len),
-                GradDtype::Bf16 => {
-                    let words = self.ops.read_range(&self.grads[ti], (first / 2) as u64, len.div_ceil(2));
-                    let mut g: Vec<f32> = words.iter().flat_map(|w| [f32::from_bits(w.to_bits() << 16), f32::from_bits(w.to_bits() & 0xffff_0000)]).collect();
-                    g.truncate(len);
-                    g
-                }
-            };
-            self.grad_cache = Some((ti, first, g));
-            self.times.grad_read += t0.elapsed();
+        let t0 = std::time::Instant::now();
+        match self.grad_dtype {
+            GradDtype::F32 => self.ops.read_range_into(&self.grads[ti], start as u64, out),
+            GradDtype::Bf16 => {
+                // Two bf16 values to a word: a tile starts on a word (the tiles are even) and ends on one (every
+                // tensor has an even element count).
+                debug_assert!(start.is_multiple_of(2) && out.len().is_multiple_of(2), "a bf16 gradient tile is whole words");
+                self.grad_words.resize(out.len() / 2, 0.0);
+                self.ops.read_range_into(&self.grads[ti], (start / 2) as u64, &mut self.grad_words);
+                let words = &self.grad_words;
+                backend_cpu::par::chunks_mut(out, GRAD_UNPACK_CHUNK, |c, dst| {
+                    for (pair, word) in dst.as_chunks_mut::<2>().0.iter_mut().zip(&words[c * GRAD_UNPACK_CHUNK / 2..]) {
+                        let bits = word.to_bits();
+                        *pair = [f32::from_bits(bits << 16), f32::from_bits(bits & 0xffff_0000)];
+                    }
+                });
+            }
         }
-        let (_, first, g) = self.grad_cache.as_ref().expect("filled above");
-        out.copy_from_slice(&g[start - first..start - first + out.len()]);
+        self.times.grad_read += t0.elapsed();
         Ok(())
     }
 
@@ -636,7 +626,7 @@ macro_rules! tiles {
             descs: &$self.descs,
             registry: &$self.registry,
             grad_dtype: $self.cfg.grad,
-            grad_cache: None,
+            grad_words: Vec::new(),
             value_cache: None,
             enc: TileBuf::default(),
             times: HostTimes::default(),
@@ -749,9 +739,11 @@ impl ResidentFullFt {
         let tile = lcm(tile, 4) as usize;
         let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
         let mut sink = DeviceWeightSink::new(ops);
-        let mut upload = |ti: usize| -> Result<Weight, String> {
+        // Each tile of the initial values is decoded from the source once per use: `seed` additionally feeds it to the
+        // master copy, so the pass that uploads a tensor is the pass that seeds its master.
+        let mut upload = |ti: usize, seed: Option<&mut TrainState>| -> Result<Weight, String> {
             let d = &descs[ti];
-            let mut init = SourceTiles::new(src, names.clone(), ti);
+            let mut init = SeedingTiles { source: SourceTiles::new(src, names.clone(), ti), seed, tensor: ti };
             export_values(&mut init, std::slice::from_ref(d), &registry, &mut sink, tile).map_err(|e| e.to_string())?;
             sink.take_weight().ok_or_else(|| format!("{}: the upload produced no weight", d.name))
         };
@@ -766,7 +758,6 @@ impl ResidentFullFt {
             row_len: specs.iter().map(|s| (s.name.clone(), s.k as usize)).collect(),
         })
         .map_err(|e| e.to_string())?;
-        state.init_master(&mut SourceTiles::new(src, names.clone(), 0)).map_err(|e| e.to_string())?;
         let gpu = ops.gpu();
         let grad_words = |s: &ResidentSpec| {
             let elems = s.n as u64 * s.k as u64;
@@ -779,7 +770,7 @@ impl ResidentFullFt {
         let norm = DeviceGradNorm::new(gpu)?;
         let (weights, grads, window, weight_bytes) = match cfg.window {
             None => {
-                let weights = (0..specs.len()).map(&mut upload).collect::<Result<Vec<_>, _>>()?;
+                let weights = (0..specs.len()).map(|ti| upload(ti, Some(&mut state))).collect::<Result<Vec<_>, _>>()?;
                 let grads = specs.iter().map(|s| gpu.storage(grad_words(s))).collect();
                 let bytes = specs.iter().map(|s| s.device_bytes(&cfg)).sum();
                 (weights, grads, None, bytes)
@@ -794,10 +785,11 @@ impl ResidentFullFt {
                     for start in (0..numel).step_by(tile) {
                         let n = tile.min(numel - start);
                         initial.read_value(ti, start, &mut values[..n]).map_err(|e| e.to_string())?;
+                        state.init_master_tile(ti, start, &values[..n]).map_err(|e| e.to_string())?;
                         host.write(ti, start, &values[..n]).map_err(|e| e.to_string())?;
                     }
                 }
-                let slot_weights = pools.slot_rep.iter().map(|&ti| upload(ti)).collect::<Result<Vec<_>, _>>()?;
+                let slot_weights = pools.slot_rep.iter().map(|&ti| upload(ti, None)).collect::<Result<Vec<_>, _>>()?;
                 let lane_buffers: Vec<DeviceBuffer> = pools.lane_rep.iter().map(|&ti| gpu.storage(grad_words(&specs[ti]))).collect();
                 let weights = pools.slot_of.iter().map(|&s| slot_weights[s].clone()).collect();
                 let grads = pools.lane_of.iter().map(|&l| lane_buffers[l].clone()).collect();
@@ -946,6 +938,20 @@ impl ResidentFullFt {
         }
         tiles.times.update += t0.elapsed();
         tiles.times.steps += 1;
+        if gpu_core::profile::enabled() {
+            let t = &tiles.times;
+            eprintln!(
+                "stage resident update: {:.0} ms total = grad read {:.0} + value encode {:.0} + value write {:.0} + master/state/arithmetic {:.0}",
+                t.update.as_secs_f64() * 1e3,
+                t.grad_read.as_secs_f64() * 1e3,
+                t.value_encode.as_secs_f64() * 1e3,
+                t.value_write.as_secs_f64() * 1e3,
+                (t.update.saturating_sub(t.grad_read + t.value_encode + t.value_write)).as_secs_f64() * 1e3,
+            );
+        }
+        if gpu_core::profile::enabled() {
+            eprintln!("stage resident update phases: {:?}", self.state.take_phase_times());
+        }
         self.times.add(&tiles.times);
         self.zero_grads(ops);
         Ok(StepReport { step, grad_multiplier })

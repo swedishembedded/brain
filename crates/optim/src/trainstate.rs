@@ -56,6 +56,12 @@ pub struct TrainState {
 }
 
 impl OptimizerStateStorage for Box<dyn OptimizerStateStorage + Send> {
+    fn addressable(&self) -> bool {
+        (**self).addressable()
+    }
+    fn slot_views(&mut self, tensor: usize, slots: &[usize], start: usize, n: usize) -> Option<Vec<crate::storage::SlotView<'_>>> {
+        (**self).slot_views(tensor, slots, start, n)
+    }
     fn read_tile(&mut self, tensor: usize, slot: usize, start: usize, out: &mut [f32]) -> io::Result<()> {
         (**self).read_tile(tensor, slot, start, out)
     }
@@ -136,6 +142,16 @@ impl TrainState {
     /// Seed master copies from the current values (fresh runs only).
     pub fn init_master(&mut self, params: &mut dyn ParamTiles) -> io::Result<()> {
         self.opt.init_master(params)
+    }
+
+    /// [`Self::init_master`] for one tile of tensor `ti` whose initial values the caller already holds.
+    pub fn init_master_tile(&mut self, ti: usize, start: usize, vals: &[f32]) -> io::Result<()> {
+        self.opt.init_master_tile(ti, start, vals)
+    }
+
+    /// Where the tile loops spent their time since the last call.
+    pub fn take_phase_times(&mut self) -> crate::streamed::PhaseTimes {
+        self.opt.take_phase_times()
     }
 
     pub fn step(&mut self, params: &mut dyn ParamTiles, lr: f32, clip: Option<f32>, extra_scale: f32) -> io::Result<StepReport> {

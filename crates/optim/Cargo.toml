@@ -18,6 +18,9 @@ bytemuck.workspace = true
 serde_json.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The workspace's one rayon seam: the host update of a tile (state decode and encode, the rule, copies) runs on the
+# CPU scheduler's pool instead of threads spawned per call.
+brain-backend-cpu.workspace = true
 wgpu.workspace = true
 pollster.workspace = true
 

@@ -1670,11 +1670,13 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
     obj.begin(opts.seed, u64::from(first_step) * u64::from(opts.grad_accum.max(1)) * opts.batch_size.max(1) as u64);
 
     let initial = {
+        let probe_clock = std::time::Instant::now();
         let mut sample_rng = rng.clone();
         let mut total = 0.0;
         for _ in 0..5 {
             total += obj.loss_probe(&model, &mut sample_rng);
         }
+        gpu_core::profile::stage_time("fit: initial loss probe (5 forwards)", probe_clock);
         total / 5.0
     };
     let mut last_train: Option<f32> = None;
@@ -1693,7 +1695,13 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
             parts.gpu.reset_memory_peak();
         }
         model.zero_grads();
-        let step_loss = obj.micro_steps(&model, &mut rng, opts.grad_accum.max(1));
+        // Under BRAIN_PROFILE the first step prints the device time of each kernel kind it ran.
+        let step_loss = match model.optimizer_parts().filter(|_| step == first_step) {
+            Some(parts) => gpu_core::profile::device_table(parts.gpu, "fit: first step, forward and backward", || obj.micro_steps(&model, &mut rng, opts.grad_accum.max(1))),
+            None => obj.micro_steps(&model, &mut rng, opts.grad_accum.max(1)),
+        };
+        gpu_core::profile::stage_time("fit: step micro-steps (forward+backward)", step_clock);
+        let update_clock = std::time::Instant::now();
         match obj.step_verdict() {
             StepVerdict::Apply => {
                 // average grads over accumulation steps
@@ -1709,6 +1717,8 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
             StepVerdict::Abort(e) => return Err(e),
         }
         model.poll_wait();
+        gpu_core::profile::stage_time("fit: step optimizer update", update_clock);
+        gpu_core::profile::stage_time("fit: step total", step_clock);
         let grad_norm = model.last_grad_norm();
         let loss = step_loss / opts.grad_accum.max(1) as f32;
         // The optimizer's share of the step: everything the objective did not
@@ -1717,6 +1727,9 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         let mut work = obj.step_work().unwrap_or_default();
         work.optimizer_secs = (step_clock.elapsed().as_secs_f64() - work.prepare_secs - work.forward_secs - work.backward_secs).max(0.0);
         work.device_memory = model.optimizer_parts().and_then(|parts| parts.gpu.memory_usage());
+        if let (Some(m), true) = (work.device_memory, gpu_core::profile::enabled()) {
+            eprintln!("fit: device memory after step {}: live {} B, reserved {} B, peak live {} B", step + 1, m.live, m.reserved, m.peak_live);
+        }
         if let Some(norm) = grad_norm {
             println!("step {:>6}  loss {loss:.4}  grad_norm {norm:.4}  lr {lr:.2e}", step + 1);
         }

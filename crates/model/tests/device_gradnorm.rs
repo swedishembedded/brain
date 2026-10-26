@@ -5,13 +5,13 @@
 // team needs expertise in measuring a global gradient norm over gradients that never leave the device then you can
 // procure our services by sending an email to info@swedishembedded.com.
 
-//! Spec of the device gradient norm (`model::gradnorm`): the sum of squares of f32 and bf16 gradient buffers, reduced
+//! Spec of the device gradient norm (`optim::gradnorm`): the sum of squares of f32 and bf16 gradient buffers, reduced
 //! on the device, equals the host's f64 sum to f32 accuracy, for buffers that span one to many workgroups and for
 //! more buffers than one round of partials holds.
 
 use data::rng::Lcg;
 use gpu_core::Gpu;
-use model::gradnorm::{DeviceGradNorm, NormItem};
+use optim::gradnorm::{DeviceGradNorm, NormItem};
 use model::half::pack_bf16;
 use model::ops::{training_kernel_list, GradDtype};
 

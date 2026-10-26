@@ -25,30 +25,38 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use gpu_core::Gpu;
-use paramstore::precision::{MasterPolicy, ParamPrecision, ValueDtype};
+use paramstore::precision::{GradDtype, MasterPolicy, ParamPrecision, ValueDtype};
 use paramstore::ParamStore;
 
 use crate::checkpoint::{CheckpointDir, RunState};
 use crate::codec::Rounding;
+use crate::gradnorm::{DeviceGradNorm, NormItem};
 use crate::rule::Rule;
 use crate::storage::{BlockStateStorage, FileBacking, MemBacking, OptimizerStateStorage};
 use crate::streamed::{state_layout, ParamTiles, StreamedOptimizer, TensorSpec};
 
 /// Tile size of the host update, in elements.
-const OFFLOAD_TILE: usize = 1 << 22;
+const OFFLOAD_TILE: usize = 1 << 26;
 
 /// The device-resident values and gradients of the offloaded tensors, as tiles.
-/// Each tensor is read once per pass and cached while its tiles are processed;
-/// written values are flushed to the device when the tensor's last tile lands.
+///
+/// A device that copies a sub-range back ([`Gpu::reads_ranges`]) is read and written one tile at a time, so the host
+/// holds the tile and nothing else. Any other device is read whole, once per tensor and pass, and cached while the
+/// tensor's tiles are processed; written values are flushed to the device when the tensor's last tile lands.
 struct DeviceTiles<'a> {
     gpu: &'a Gpu,
     ps: &'a ParamStore,
     names: Vec<(String, usize)>,
+    ranged: bool,
     value: Option<(usize, Vec<f32>)>,
     grad: Option<(usize, Vec<f32>)>,
 }
 
-impl DeviceTiles<'_> {
+impl<'a> DeviceTiles<'a> {
+    fn new(gpu: &'a Gpu, ps: &'a ParamStore, names: Vec<(String, usize)>) -> Self {
+        DeviceTiles { gpu, ps, names, ranged: gpu.reads_ranges(), value: None, grad: None }
+    }
+
     fn load_value(&mut self, ti: usize) -> &mut Vec<f32> {
         if self.value.as_ref().map(|v| v.0) != Some(ti) {
             let (name, numel) = &self.names[ti];
@@ -60,11 +68,19 @@ impl DeviceTiles<'_> {
 
 impl ParamTiles for DeviceTiles<'_> {
     fn read_value(&mut self, ti: usize, start: usize, out: &mut [f32]) -> io::Result<()> {
+        if self.ranged {
+            self.gpu.read_into(self.ps.w(&self.names[ti].0), start as u64, out);
+            return Ok(());
+        }
         out.copy_from_slice(&self.load_value(ti)[start..start + out.len()]);
         Ok(())
     }
 
     fn write_value(&mut self, ti: usize, start: usize, vals: &[f32], _rnd: Rounding) -> io::Result<()> {
+        if self.ranged {
+            self.gpu.write_f32_at(self.ps.w(&self.names[ti].0), start as u64, vals);
+            return Ok(());
+        }
         let n = vals.len();
         self.load_value(ti)[start..start + n].copy_from_slice(vals);
         let (name, numel) = &self.names[ti];
@@ -76,6 +92,10 @@ impl ParamTiles for DeviceTiles<'_> {
     }
 
     fn read_grad(&mut self, ti: usize, start: usize, out: &mut [f32]) -> io::Result<()> {
+        if self.ranged {
+            self.gpu.read_into(self.ps.g(&self.names[ti].0), start as u64, out);
+            return Ok(());
+        }
         if self.grad.as_ref().map(|g| g.0) != Some(ti) {
             let (name, numel) = &self.names[ti];
             self.grad = Some((ti, self.gpu.read(self.ps.g(name), *numel)));
@@ -90,6 +110,9 @@ impl ParamTiles for DeviceTiles<'_> {
 /// [`OffloadAdam::on_disk`]).
 pub struct OffloadAdam<S: OptimizerStateStorage = BlockStateStorage<MemBacking>> {
     opt: StreamedOptimizer<S>,
+    /// The device reduction of the global gradient norm, resolved on the first clipped step; `Some(None)` when the
+    /// device lacks its kernels (the norm is then measured on the host, which moves every gradient there).
+    norm: Option<Option<DeviceGradNorm>>,
 }
 
 fn specs_of(ps: &ParamStore) -> Vec<TensorSpec> {
@@ -128,7 +151,7 @@ impl OffloadAdam {
         let layout = state_layout(&default_rule(), &specs);
         let st = BlockStateStorage::new(layout.clone(), MemBacking::zeroed(layout.total_bytes()), OFFLOAD_TILE)
             .expect("state layout and backing agree");
-        OffloadAdam { opt: StreamedOptimizer::new(default_rule(), specs, st, random_seed(), OFFLOAD_TILE).expect("valid specs") }
+        OffloadAdam { opt: StreamedOptimizer::new(default_rule(), specs, st, random_seed(), OFFLOAD_TILE).expect("valid specs"), norm: None }
     }
 }
 
@@ -139,7 +162,7 @@ impl OffloadAdam<BlockStateStorage<FileBacking>> {
         let specs = specs_of(ps);
         let layout = state_layout(&default_rule(), &specs);
         let st = BlockStateStorage::new(layout.clone(), FileBacking::create(path, layout.total_bytes())?, OFFLOAD_TILE)?;
-        Ok(OffloadAdam { opt: StreamedOptimizer::new(default_rule(), specs, st, random_seed(), OFFLOAD_TILE)? })
+        Ok(OffloadAdam { opt: StreamedOptimizer::new(default_rule(), specs, st, random_seed(), OFFLOAD_TILE)?, norm: None })
     }
 }
 
@@ -154,15 +177,28 @@ impl<S: OptimizerStateStorage> OffloadAdam<S> {
         let seed = self.opt.seed();
         self.opt.set_position(t - 1, seed);
         let names = self.opt.specs().iter().map(|s| (s.name.clone(), s.numel)).collect();
-        let mut tiles = DeviceTiles { gpu, ps, names, value: None, grad: None };
-        self.opt.step(&mut tiles, lr, clip, extra_scale).unwrap_or_else(|e| panic!("OffloadAdam step: {e}"));
+        let mut tiles = DeviceTiles::new(gpu, ps, names);
+        let norm = self.norm.get_or_insert_with(|| DeviceGradNorm::new(gpu).ok());
+        let report = match (clip, norm) {
+            // The gradients are on the device: reduce their norm there rather than reading all of them to the host first.
+            (Some(_), Some(norm)) => {
+                let items: Vec<NormItem<'_>> = self.opt.specs().iter().map(|s| NormItem { buf: ps.g(&s.name), numel: s.numel, dtype: GradDtype::F32 }).collect();
+                let multiplier = crate::grad_multiplier(norm.sum_sq(gpu, &items), clip, extra_scale);
+                self.opt.step_scaled(&mut tiles, lr, multiplier)
+            }
+            _ => self.opt.step(&mut tiles, lr, clip, extra_scale),
+        };
+        report.unwrap_or_else(|e| panic!("OffloadAdam step: {e}"));
+        if gpu_core::profile::enabled() {
+            eprintln!("stage host optimizer update phases: {:?}", self.opt.take_phase_times());
+        }
     }
 
     /// Atomically commit the offloaded values (read off the device), the host state, the step and the rounding seed
     /// as one generation of `dir`, keyed by the optimizer step.
     pub fn commit(&mut self, gpu: &Gpu, ps: &ParamStore, dir: &CheckpointDir) -> io::Result<PathBuf> {
         let names = self.opt.specs().iter().map(|s| (s.name.clone(), s.numel)).collect();
-        let mut tiles = DeviceTiles { gpu, ps, names, value: None, grad: None };
+        let mut tiles = DeviceTiles::new(gpu, ps, names);
         let run = RunState { step: self.opt.step_count(), seed: self.opt.seed(), rng_counter: 0, schedule: Vec::new() };
         dir.commit(&mut self.opt, &mut tiles, &run)
     }
@@ -171,7 +207,7 @@ impl<S: OptimizerStateStorage> OffloadAdam<S> {
     /// and the position to this optimiser. `Ok(None)` when no such generation was committed.
     pub fn restore_at(&mut self, gpu: &Gpu, ps: &ParamStore, dir: &CheckpointDir, step: u32) -> io::Result<Option<RunState>> {
         let names = self.opt.specs().iter().map(|s| (s.name.clone(), s.numel)).collect();
-        let mut tiles = DeviceTiles { gpu, ps, names, value: None, grad: None };
+        let mut tiles = DeviceTiles::new(gpu, ps, names);
         dir.restore_at(&mut self.opt, &mut tiles, step)
     }
 
