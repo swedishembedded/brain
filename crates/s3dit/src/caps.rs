@@ -470,7 +470,7 @@ mod tests {
     fn a_matching_key_reuses_the_resident_instead_of_rebuilding() {
         let hot: Hot<u32, &'static str> = Hot::new();
         let mut builds = 0;
-        let mut use_key = |key: u32, builds: &mut u32| {
+        let use_key = |key: u32, builds: &mut u32| {
             hot.get(key, || { *builds += 1; Ok("weights") }, |_| ()).unwrap();
         };
         use_key(1, &mut builds);

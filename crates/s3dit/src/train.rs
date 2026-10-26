@@ -646,6 +646,9 @@ impl ModelConfig for Cfg {
     }
 }
 
+/// AdamW first and second moments, one host vector per parameter tensor.
+type Moments = (Vec<Vec<f32>>, Vec<Vec<f32>>);
+
 /// The trainable Z-Image DiT as a brain [`Model`]: `DeviceTrainer` (GPU block
 /// stack + host wrapper) behind named-tensor accessors + a gradient accumulator.
 /// Load a diffusion batch with [`ZTrainModel::load_batch`]; `forward` runs the
@@ -659,7 +662,7 @@ pub struct ZTrainModel {
     grad_acc: RefCell<Vec<Vec<f32>>>,
     /// AdamW first and second moments, allocated on the first [`ZTrainModel`]'s
     /// first [`Model::adamw_step`] so a forward-only user pays nothing.
-    moments: RefCell<Option<(Vec<Vec<f32>>, Vec<Vec<f32>>)>>,
+    moments: RefCell<Option<Moments>>,
     stash: RefCell<Option<ModelGradsF32>>,
     batch: RefCell<Option<Batch>>,
     loss: RefCell<f32>,

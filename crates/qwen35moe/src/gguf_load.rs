@@ -214,8 +214,8 @@ mod tests {
         let (layout, lent) = src.raw_blocks("blocks.0.linear_attn.in_proj_z.weight").expect("a row-permuted leaf is lent, regrouped");
         let mut want = Vec::new();
         assert!(src.with_tensor("blocks.0.linear_attn.in_proj_z.weight", &mut |d| want = d.to_vec()));
-        assert_eq!(layout.numel as usize, want.len());
-        let got: Vec<f32> = lent.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+        assert_eq!(layout.numel, want.len());
+        let got: Vec<f32> = lent.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect();
         assert_eq!(got.len(), want.len(), "the lent bytes hold one value per element");
         assert_eq!(got, want, "the lent blocks must be the regrouped tensor");
         std::fs::remove_file(&path).ok();

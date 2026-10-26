@@ -46,6 +46,7 @@ pub fn manifest() -> Manifest {
 
 pub const MODEL_ID: &str = "brain/ouro";
 
+#[derive(Default)]
 pub struct OuroProvider;
 
 impl OuroProvider {

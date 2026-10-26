@@ -460,7 +460,7 @@ fn run(
     let latent = hot.try_get_mut(
         key,
         || {
-            (&mut **report.borrow_mut())(1, total, "load transformer");
+            (**report.borrow_mut())(1, total, "load transformer");
 
             // **How the adapter reaches this build, decided once from the tier its
             // base weights will be stored at.** A dense tier folds the delta into

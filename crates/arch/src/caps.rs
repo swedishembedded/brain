@@ -111,9 +111,10 @@ mod tests {
 
     #[test]
     fn none_declares_nothing() {
-        assert!(!Caps::NONE.trains());
-        assert!(!Caps::NONE.other);
-        assert!(Caps::NONE.lora_bases.is_empty());
+        let none = Caps::NONE;
+        assert!(!none.trains());
+        assert!(!none.other);
+        assert!(none.lora_bases.is_empty());
     }
 
     #[test]

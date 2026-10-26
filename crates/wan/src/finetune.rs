@@ -387,7 +387,7 @@ pub fn run(
             let noise: Vec<f32> = (0..s.latent.len()).map(|_| rng.next_gaussian() as f32).collect();
             make_flow_batch(&tcfg, &s.latent, &s.ctx, cfg.text_len, sigma, &noise)
         },
-        |adapter, b, lr| trainer.lora_step(&base, adapter, b, lr) as f64,
+        |adapter, b, lr| trainer.lora_step(&base, adapter, b, lr),
         |adapter| save_adapter(&opts.save_path, adapter),
         |done, steps, loss| progress(encode_budget + done, total, format!("step {done}/{steps}  loss {loss:.5}")),
     )?;

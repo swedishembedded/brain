@@ -1128,7 +1128,7 @@ pub fn run(
             (batch, dropped, sigma, step)
         },
         |adapter, (batch, _dropped, _sigma, step), _lr| {
-            let lr_now = lr.at(*step as u32);
+            let lr_now = lr.at(*step);
             match (&dev, &host) {
                 (Some(t), _) => t.step(adapter, batch, lr_now),
                 (None, Some(b)) => {

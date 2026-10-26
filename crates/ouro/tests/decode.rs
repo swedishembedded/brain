@@ -53,9 +53,9 @@ fn cached_decode_matches_the_full_forward_at_every_position_and_pass() {
         let want = &want_logits[t - 1][pos * v..(pos + 1) * v];
         let rel = rel_l2(&got, want);
         assert!(rel < 2e-4, "position {pos}: logits rel_l2 {rel}");
-        for p in 0..t {
+        for (p, want_p) in want_hidden.iter().enumerate().take(t) {
             let hd = dec.read_hidden(p);
-            let want_h = &want_hidden[p][pos * d..(pos + 1) * d];
+            let want_h = &want_p[pos * d..(pos + 1) * d];
             let rel = rel_l2(&hd, want_h);
             assert!(rel < 2e-4, "position {pos} pass {p}: hidden rel_l2 {rel}");
         }

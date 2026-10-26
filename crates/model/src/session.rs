@@ -273,10 +273,8 @@ mod tests {
     #[derive(Default)]
     struct Fake {
         drawn: Vec<usize>,
-        pending: f32,
         applied: f32,
         steps: u32,
-        saved: Vec<u64>,
     }
 
     impl SampleTrainer for Fake {

@@ -66,6 +66,7 @@ pub fn manifest() -> Manifest {
     )
 }
 
+#[derive(Default)]
 pub struct HuginnProvider;
 
 impl HuginnProvider {

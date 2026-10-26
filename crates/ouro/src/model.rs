@@ -668,15 +668,15 @@ impl Ouro {
         let t = self.cfg.total_ut_steps as usize;
         let mut out = vec![vec![0.0f32; n]; t];
         let mut remaining = vec![1.0f64; n];
-        for pass in 0..t {
+        for (pass, out_pass) in out.iter_mut().enumerate() {
             let gate = self.gpu.read(&self.gates[pass], n);
             for r in 0..n {
                 let lambda = 1.0 / (1.0 + (-(gate[r] as f64)).exp());
                 if pass + 1 < t {
-                    out[pass][r] = (lambda * remaining[r]) as f32;
+                    out_pass[r] = (lambda * remaining[r]) as f32;
                     remaining[r] *= 1.0 - lambda;
                 } else {
-                    out[pass][r] = remaining[r] as f32;
+                    out_pass[r] = remaining[r] as f32;
                 }
             }
         }
@@ -800,10 +800,10 @@ impl model::Model for Ouro {
         // products are evaluated directly rather than by dividing out
         // (1-λ_t), which is the wrong answer when a gate saturates.
         let mut lambda = vec![vec![0.0f64; n]; t];
-        for p in 0..t {
+        for (p, lambda_p) in lambda.iter_mut().enumerate() {
             let gate = self.gpu.read(&self.gates[p], n);
-            for r in 0..n {
-                lambda[p][r] = 1.0 / (1.0 + (-(gate[r] as f64)).exp());
+            for (l, g) in lambda_p.iter_mut().zip(&gate) {
+                *l = 1.0 / (1.0 + (-(*g as f64)).exp());
             }
         }
         let mut dgate = vec![vec![0.0f32; n]; t];
@@ -812,9 +812,9 @@ impl model::Model for Ouro {
                 let mut d = 0.0f64;
                 for j in p..t {
                     let mut prod = 1.0f64;
-                    for k in 0..j {
+                    for (k, lambda_k) in lambda.iter().enumerate().take(j) {
                         if k != p {
-                            prod *= 1.0 - lambda[k][r];
+                            prod *= 1.0 - lambda_k[r];
                         }
                     }
                     // p_j carries its own λ_j only for j != p; the derivative

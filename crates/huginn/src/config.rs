@@ -103,8 +103,8 @@ impl HuginnConfig {
             tie_embeddings: true,
             qk_bias: true,
             mean_recurrence: 32,
-            init_std: 0.008703882797784892,
-            emb_scale: 72.6636084983398,
+            init_std: 0.008703883,
+            emb_scale: 72.663605,
         }
     }
 

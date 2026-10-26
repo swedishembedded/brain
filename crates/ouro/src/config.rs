@@ -152,7 +152,7 @@ impl OuroConfig {
                 return Err(format!("ouro config: {name} is zero"));
             }
         }
-        if self.n_heads % self.n_kv_heads != 0 {
+        if !self.n_heads.is_multiple_of(self.n_kv_heads) {
             return Err(format!(
                 "ouro config: num_attention_heads {} is not a multiple of num_key_value_heads {}",
                 self.n_heads, self.n_kv_heads

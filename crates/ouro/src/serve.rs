@@ -163,7 +163,7 @@ impl Engine {
     }
 
     fn build(gpu: Gpu, cfg: OuroConfig, ps: ParamStore, max_tokens: u32, block_size: u32) -> Engine {
-        assert!(block_size > 0 && max_tokens > 0 && max_tokens % block_size == 0);
+        assert!(block_size > 0 && max_tokens > 0 && max_tokens.is_multiple_of(block_size));
         let num_blocks = max_tokens / block_size;
         let max_bt = num_blocks;
         let cap = num_blocks * block_size;

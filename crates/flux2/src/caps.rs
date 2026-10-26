@@ -454,7 +454,7 @@ impl Action for Flux2Action {
                 self.hot.try_get(
                     key,
                     || {
-                        (&mut **sink.borrow_mut())(Progress::step(0, 1, "loading weights (first call for this variant/size)"));
+                        (**sink.borrow_mut())(Progress::step(0, 1, "loading weights (first call for this variant/size)"));
                         // One adapter at most over the wire: the `adapter` param
                         // is a single string, so a served call cannot express the
                         // stack `Pipeline` folds (`brain flux2 generate` can).
