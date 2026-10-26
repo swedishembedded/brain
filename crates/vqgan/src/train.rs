@@ -399,7 +399,7 @@ impl VqganTrainer {
         // The scatter lands on the codebook the quantiser read. Normalised,
         // that is `cb_q`, whose gradient is taken back through the
         // normalisation onto the parameter; raw, it IS the parameter.
-        let mut bwd_clears = gen_rev.clears;
+        let mut bwd_clears = Vec::new();
         match &l2_ones {
             Some(ones) => {
                 let d_cb_q = gpu.storage((ncode * emb) as u64);
@@ -441,7 +441,6 @@ impl VqganTrainer {
 
         bwd_clears.push(d_z);
         bwd_clears.push(dq_cb_b);
-        bwd_clears.extend(enc_rev.clears);
 
         let mut names: Vec<(String, u64)> = enc.params().to_vec();
         names.extend(gen.params().iter().cloned());

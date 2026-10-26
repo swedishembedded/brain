@@ -98,8 +98,7 @@ fn op_mix_backward_matches_finite_differences_of_the_real_forward() {
 
     let grads = trace.alloc_grads(&gpu);
     let reverse = trace.backward(&gpu, BwdIds::at(BWD_BASE), &grads, &y, &dw);
-    let clears: Vec<&gpu_core::DeviceBuffer> = reverse.clears.iter().collect();
-    gpu.submit(&clears, &reverse.steps);
+    gpu.submit(&[], &reverse.steps);
     gpu.poll_wait();
     let dx = reverse.d(&xb).expect("Op::Mix must reach x").clone();
     let df = reverse.d(&fb).expect("Op::Mix must reach f").clone();

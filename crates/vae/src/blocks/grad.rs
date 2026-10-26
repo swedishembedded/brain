@@ -190,14 +190,16 @@ impl Trace {
             ids,
             steps: Vec::new(),
             d: HashMap::new(),
-            clears: Vec::new(),
+            owned: HashMap::new(),
+            scalars: HashMap::new(),
             pool: HashMap::new(),
         };
         r.d.insert(key(out), d_out.clone());
         for op in self.ops.iter().rev() {
             self.emit(&mut r, grads, op);
+            r.release(op.output());
         }
-        Reverse { steps: r.steps, clears: r.clears, d: r.d }
+        Reverse { steps: r.steps, d: r.d }
     }
 
     fn emit(&self, r: &mut Rev, grads: &Grads, op: &Op) {
@@ -712,16 +714,15 @@ impl Grads {
 
 /// The recorded reverse pass.
 pub struct Reverse {
-    /// The reverse dispatches, in submit order.
+    /// The reverse dispatches, in submit order. Every activation gradient is assigned by its first contribution, so
+    /// nothing but the parameter gradients (the model's `zero_grads`) needs clearing before they run.
     pub steps: Vec<Step>,
-    /// Activation-gradient buffers that MUST be zeroed before `steps` run (they
-    /// are `axpy` accumulation targets). Parameter grads are NOT in here.
-    pub clears: Vec<DeviceBuffer>,
     d: HashMap<usize, DeviceBuffer>,
 }
 
 impl Reverse {
-    /// The gradient buffer of a forward activation, if the walk reached it.
+    /// The gradient buffer of a tape input (a buffer no recorded op produced), if the walk reached it. A produced
+    /// activation's gradient is dead once the walk has emitted its producer, and its buffer serves later gradients.
     pub fn d(&self, buf: &DeviceBuffer) -> Option<&DeviceBuffer> {
         self.d.get(&key(buf))
     }
@@ -736,7 +737,11 @@ struct Rev<'a> {
     ids: BwdIds,
     steps: Vec<Step>,
     d: HashMap<usize, DeviceBuffer>,
-    clears: Vec<DeviceBuffer>,
+    /// The activation gradients this walk allocated (not the caller's seed), by key, with their length: each goes
+    /// back to `pool` once the walk has emitted the op that produced its activation ([`Rev::release`]).
+    owned: HashMap<usize, u64>,
+    /// One-element buffers holding a scale `s` (by its bits), for the assigning first contribution in [`Rev::acc`].
+    scalars: HashMap<u32, DeviceBuffer>,
     /// Scratch temps by exact length. A temp is written by one dispatch and
     /// read by the very next one in the same submit (which runs its steps in
     /// order), so handing it back afterwards is bit-exact reuse.
@@ -756,18 +761,28 @@ impl Rev<'_> {
     fn give(&mut self, len: u64, b: DeviceBuffer) {
         self.pool.entry(len).or_default().push(b);
     }
-    /// `d[x] += s * src`, allocating (and registering for clearing) `d[x]`.
+    /// `d[x] += s * src`. The first contribution ASSIGNS `s * src` into a pooled buffer (`scale_chan` over one
+    /// channel: bit for bit the `0 + s * src` an accumulation into a zeroed buffer gives), so a gradient buffer needs
+    /// no clearing and can be one a dead gradient left.
     fn acc(&mut self, x: &DeviceBuffer, len: u64, src: &DeviceBuffer, s: f32) {
-        let dst = match self.d.get(&key(x)) {
-            Some(b) => b.clone(),
-            None => {
-                let b = self.gpu.storage(len);
-                self.clears.push(b.clone());
-                self.d.insert(key(x), b.clone());
-                b
-            }
-        };
-        self.steps.push(self.gpu.step(self.ids.k(B_AXPY), &[&dst, src], &[len as u32, f(s)], len as u32));
+        if let Some(dst) = self.d.get(&key(x)).cloned() {
+            self.steps.push(self.gpu.step(self.ids.k(B_AXPY), &[&dst, src], &[len as u32, f(s)], len as u32));
+            return;
+        }
+        let dst = self.tmp(len);
+        let gpu = self.gpu;
+        let scale = self.scalars.entry(s.to_bits()).or_insert_with(|| gpu.storage_init("vae.grad.scale", &[s])).clone();
+        self.steps.push(self.gpu.step(self.ids.k(B_SCALE_CHAN), &[src, &scale, &dst], &[len as u32, 1, len as u32], len as u32));
+        self.d.insert(key(x), dst);
+        self.owned.insert(key(x), len);
+    }
+    /// The walk has emitted the op producing `y`: no later step reads or accumulates `y`'s gradient, so a buffer
+    /// the walk allocated for it serves the gradients still to come.
+    fn release(&mut self, y: &DeviceBuffer) {
+        if let Some(len) = self.owned.remove(&key(y)) {
+            let buf = self.d.remove(&key(y)).expect("an owned gradient is in the map");
+            self.give(len, buf);
+        }
     }
     /// Bias gradient `dbias[n] += sum_m dy[m,n]`, via the two-stage
     /// `bias_grad_part`/`bias_grad_final` pair (kernel-performance.md M5.7)

@@ -622,6 +622,33 @@ pub(crate) enum Op {
     ScaleChan { total: u32, c: u32, inner: u32, x: DeviceBuffer, scale: DeviceBuffer, y: DeviceBuffer },
 }
 
+impl Op {
+    /// The activation this op writes.
+    pub(crate) fn output(&self) -> &DeviceBuffer {
+        match self {
+            Op::Conv { y, .. }
+            | Op::Gn { y, .. }
+            | Op::Silu { y, .. }
+            | Op::Add2 { y, .. }
+            | Op::Up2 { y, .. }
+            | Op::NchwNlc { y, .. }
+            | Op::NlcNchw { y, .. }
+            | Op::Attn { y, .. }
+            | Op::Linear { y, .. }
+            | Op::LayerNorm { y, .. }
+            | Op::GeluErf { y, .. }
+            | Op::Mul { y, .. }
+            | Op::AddChan { y, .. }
+            | Op::Cross { y, .. }
+            | Op::Concat { y, .. }
+            | Op::Mix { y, .. }
+            | Op::LeakyRelu { y, .. }
+            | Op::ScaleAdd { y, .. }
+            | Op::ScaleChan { y, .. } => y,
+        }
+    }
+}
+
 /// Graph-construction state (borrows the device + host tensors).
 pub struct Builder<'a> {
     gpu: &'a Gpu,

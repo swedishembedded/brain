@@ -87,7 +87,6 @@ pub struct RrdbTrainer {
     d_out: DeviceBuffer,
     fwd: Vec<Step>,
     rev: Vec<Step>,
-    rev_clears: Vec<DeviceBuffer>,
     n_out: u32,
 }
 
@@ -129,7 +128,6 @@ impl RrdbTrainer {
             d_out,
             fwd,
             rev,
-            rev_clears: reverse.clears.clone(),
             n_out,
         }
     }
@@ -194,7 +192,7 @@ impl RrdbTrainer {
     /// each must start at zero every step, while the parameter gradients must
     /// survive across the whole reverse.
     pub fn backward(&self) {
-        self.gpu.submit(&self.rev_clears.iter().collect::<Vec<_>>(), &self.rev);
+        self.gpu.submit(&[], &self.rev);
     }
 
     /// `dL/d(out)` after a [`Self::backward`] - exposed for tests that check

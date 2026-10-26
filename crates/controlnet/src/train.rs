@@ -145,7 +145,6 @@ pub struct ControlNetTrainer {
     out: DeviceBuffer,
     fwd: Vec<Step>,
     rev: Vec<Step>,
-    rev_clears: Vec<DeviceBuffer>,
     n_out: u32,
 }
 
@@ -317,7 +316,6 @@ impl ControlNetTrainer {
             out,
             fwd,
             rev,
-            rev_clears: reverse.clears.clone(),
             n_out,
         }
     }
@@ -404,7 +402,7 @@ impl ControlNetTrainer {
     }
 
     pub fn backward(&self) {
-        self.gpu.submit(&self.rev_clears.iter().collect::<Vec<_>>(), &self.rev);
+        self.gpu.submit(&[], &self.rev);
     }
 
     pub fn gpu(&self) -> &Gpu {
