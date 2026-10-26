@@ -92,6 +92,31 @@ corpus.
 
 \input{table-compress}
 
+\Cref{tab:compress} tests the premise behind compressing a pretrained
+model's hidden state into a few Fourier coefficients. Along its coordinate
+axis, Qwen3-0.6B's residual stream has no spectral structure: the lowest
+$m$ Fourier modes keep about the fraction $m/1024$ of the centred energy that
+any subspace blind to the coordinates' statistics keeps, and replacing the
+stream by that projection raises the next-token loss by several nats at every
+width, about as much as the random projection does. As registered, H3's
+energy clause fails narrowly: the Fourier basis keeps between 0.013 and 0.021
+more energy than the one random draw at every width, while both stay within
+0.025 of $m/1024$. Its information clause holds at $m\le128$, where the
+Fourier projection costs more loss than the random one, and fails at
+$m\ge256$, where it costs less. Its last clause holds by a wide margin: the
+top 128 principal components keep almost all of the energy and raise the
+loss by less than 0.15 nats.
+
+The table also shows why energy is the wrong criterion. The first 64
+coordinates keep 99.5\% of the centred energy, because a few coordinates
+carry most of it, yet that projection raises the loss by more than three
+nats; what predicts the next token is spread across directions that carry
+little energy. Both results agree with \cref{prop:absorption}: a model whose
+maps on the residual stream are dense has no reason to order its coordinates
+by frequency, so a fixed Fourier truncation of a pretrained model is no
+better than a random one, and any spectral representation has to be learned
+from the start rather than imposed afterwards.
+
 \subsection{Transform cost}
 \label{sec:res-systems}
 
