@@ -238,15 +238,17 @@ for bit, with and without an active clip; both train what the plain f32 build
 trains (the host and device AdamW round differently, so losses agree to 1e-5
 and values to 1% of how far the plain build moved them); and the streamed build
 holds fewer device bytes. `trainprec::check_exact_resume` holds a streamed run
-to exact resume through the fit loop. gpt2, spectrallm, deepseek2, glmdsa and
-qwen35moe run both
+to exact resume through the fit loop. gpt2, lfm2, spectrallm, deepseek2, glmdsa
+and qwen35moe run both
 (`<model>/tests/layer_streamed.rs`). A model whose passes interleave host work
 (the routed experts of deepseek2 and glmdsa, built per pass) reports its layer edges through
 `streamed::LayeredPass` (`moe::PassSeg::LayerBegin`/`LayerEnd`) instead of a
 tape, and an eager model (qwen35moe) reports them as its forward and backward
 run each layer. Whatever a model holds of the store's buffers outside its passes
 (qwen35moe's `Ops` weights of the mixer linears) must be pointed at the window's
-slots when it converts. ouro and huginn run each layer in every step of their
+slots when it converts, and the accumulators a backward adds into are cleared by
+the pass itself (`LayerTape::clear_on_submit`), since the update's measuring
+pass runs it twice. ouro and huginn run each layer in every step of their
 recurrence, so a layer's gradient is complete only after the last; they refuse a
 window by name. A chat full fine-tune (`finetune::fit_full`) takes `weights=f32`
 through the family's plain build, whose fit loop streams it, when the family

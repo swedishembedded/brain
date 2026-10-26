@@ -35,6 +35,8 @@ use audio::conv::{Conv1d, ConvKernels};
 use gpu_core::{DeviceBuffer, Gpu, Step};
 use model::block::{self, Bidir, BidirIds, CrossIds};
 use model::saved::{Residuals, SavedPolicy};
+use model::streamed::StreamedStore;
+use model::tape::LayerTape;
 use paramstore::ParamStore;
 
 use crate::config::{LayerType, LfmConfig};
@@ -213,6 +215,9 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("unpack_bf16", kernels::UNPACK_BF16),
     ("pack_fp8_rows", kernels::PACK_FP8_ROWS),
     ("unpack_fp8_rows", kernels::UNPACK_FP8_ROWS),
+    // A layer-streamed full fine-tune's device side (`model::ops::store_device_kernels`; `gradnorm_part` is above).
+    ("copy_cols", kernels::COPY_COLS),
+    ("gradnorm_part_bf16", kernels::GRADNORM_PART_BF16),
 ];
 
 fn linear_kernel(m: usize, n: usize) -> (usize, gpu_core::Dispatch) {
@@ -375,15 +380,20 @@ pub struct Lfm {
     /// binding budget). None = full [n, vocab] head.
     head: Option<HeadGather>,
     ce_grad_uni: DeviceBuffer,
-    bwd_steps: Vec<Step>,
+    bwd_steps: LayerTape,
     /// The seeded-backward twin of `bwd_steps` - see [`Lfm::seed_buf`]/
     /// [`Lfm::backward_seeded`]. Built alongside `bwd_steps` whenever `train`
     /// is set; empty on an inference build.
-    seeded_bwd_steps: Vec<Step>,
+    seeded_bwd_steps: LayerTape,
     /// What the backward keeps of the forward: every layer's activations, or (recompute) the residual between layers,
     /// each layer kind sharing one set of activation buffers its replay before its backward refills
     /// ([`model::Model::set_saved_policy`]).
     saved: SavedPolicy,
+    /// The per-layer tensors held in a device window of layers, when the run streams them
+    /// ([`model::Model::set_resident`]); `None` keeps every layer in the store.
+    streamed: Option<StreamedStore>,
+    /// A streamed build runs its backward inside the update: set by `backward`, taken by `adamw_step`.
+    backward_pending: Cell<bool>,
     /// Chunked-training attention slabs (`[heads, chunk, t]`; size-1 otherwise).
     slab_scores: DeviceBuffer,
     slab_probs: DeviceBuffer,
@@ -397,10 +407,10 @@ pub struct Lfm {
     logits: DeviceBuffer,
     ce_buf: DeviceBuffer,
 
-    fwd_steps: Vec<Step>,
+    fwd_steps: LayerTape,
     /// Chunked-inference regime: one forward per group size 1..=b (index
     /// `b_use-1`), so partial scheduler groups run at their true size.
-    fwd_variants: Vec<Vec<Step>>,
+    fwd_variants: Vec<LayerTape>,
     /// YaRN long-context RoPE table (`head_dim/2` per-channel inverse
     /// frequencies) plus the attention-magnitude correction - `None` when
     /// `cfg.rope_scaling` is unset, the plain analytic-theta RoPE path every
@@ -746,9 +756,11 @@ impl Lfm {
             train_chunk: None,
             head: None,
             ce_grad_uni: gpu.uniform_dynamic(4),
-            bwd_steps: Vec::new(),
-            seeded_bwd_steps: Vec::new(),
+            bwd_steps: LayerTape::default(),
+            seeded_bwd_steps: LayerTape::default(),
             saved: SavedPolicy::Keep,
+            streamed: None,
+            backward_pending: Cell::new(false),
             slab_scores: st(1),
             slab_probs: st(1),
             slab_dscores: st(1),
@@ -757,7 +769,7 @@ impl Lfm {
             xn_final: st(n * d),
             logits,
             ce_buf,
-            fwd_steps: Vec::new(),
+            fwd_steps: LayerTape::default(),
             fwd_variants: Vec::new(),
             yarn,
             gpu,
@@ -1027,7 +1039,7 @@ impl Lfm {
         }
     }
 
-    fn forward_steps(&self) -> Vec<Step> {
+    fn forward_steps(&self) -> LayerTape {
         self.forward_steps_for(self.b)
     }
 
@@ -1035,7 +1047,8 @@ impl Lfm {
     /// buffers are sized for the max, kernels touch the `b_use·t` prefix. The
     /// chunked-inference regime prebuilds one list per group size so the
     /// scheduler never pays repeat-padding for a partial group.
-    fn forward_steps_for(&self, b_use: u32) -> Vec<Step> {
+    /// One segment per layer (a layer-streamed build loads each layer before its segment).
+    fn forward_steps_for(&self, b_use: u32) -> LayerTape {
         let c = &self.cfg;
         assert!(b_use >= 1 && b_use <= self.b);
         assert!(b_use == self.b || matches!(self.regime, Regime::Chunked { .. }), "partial batches: chunked regime only");
@@ -1045,6 +1058,7 @@ impl Lfm {
         let eps = c.norm_eps;
         let dw = d as u64;
         let tiles = block::vocab_tiles_on(&self.gpu, v as u64, dw);
+        let mut tape = LayerTape::default();
         let mut s: Vec<Step> = Vec::new();
 
         // Token embedding, vocab-tiled (65536×1024 fp32 = 256 MB per binding
@@ -1060,9 +1074,11 @@ impl Lfm {
         }
 
         self.round_trip_boundary(&mut s, 0);
+        tape.segment(&mut s, None);
         for l in 0..c.layer_types.len() {
             self.layer_forward(l, b_use, &mut s);
             self.round_trip_boundary(&mut s, l + 1);
+            tape.segment(&mut s, Some(l));
         }
 
         // Final norm.
@@ -1086,7 +1102,8 @@ impl Lfm {
                 ));
             }
             s.push(self.gpu.step(CE_VALUE, &[&hg.logits_g, &hg.sup_targets, &hg.ce_g], &[cap, v, IGNORE], cap));
-            return s;
+            tape.segment(&mut s, None);
+            return tape;
         }
         match &self.regime {
             Regime::Materialized { .. } => {
@@ -1126,7 +1143,8 @@ impl Lfm {
                 }
             }
         }
-        s
+        tape.segment(&mut s, None);
+        tape
     }
 
     /// Layer `l`'s forward over `b_use` sequences, from its residual-in into the next residual, with the buffers the
@@ -1267,22 +1285,25 @@ impl Lfm {
         ));
     }
 
-    fn backward_steps(&self) -> Vec<Step> {
+    /// The batched backward: the head, one segment per layer from the last down, then the embedding.
+    fn backward_steps(&self) -> LayerTape {
         let c = &self.cfg;
         let bw = self.bwd.as_ref().expect("train mode");
         let n = self.b * self.t;
         let d = c.d_model;
         let v = c.vocab;
         let head = c.head_weight();
+        let mut tape = LayerTape::default();
         let mut s: Vec<Step> = Vec::new();
 
         // ---- head + final norm ----
         if let Some(hg) = &self.head {
             // Gathered head backward: CE stats/grad over ≤ cap rows, tied-head
             // dW from the gathered rows, then the input grad scattered back to
-            // the supervised rows of d_xn (zeroed via submit `clears` - rows
-            // with no supervision contribute nothing).
+            // the supervised rows of d_xn (zeroed by the pass's clears, each
+            // time it runs - rows with no supervision contribute nothing).
             let cap = hg.cap;
+            tape.clear_on_submit(&bw.d_xn);
             s.push(self.gpu.step(CE_STATS, &[&hg.logits_g, &hg.sup_targets, &hg.ce_stats_g], &[cap, v, IGNORE], cap));
             s.push(self.gpu.step_buf(CE_GRAD_STATS, &self.ce_grad_uni, &[&hg.logits_g, &hg.sup_targets, &hg.ce_stats_g, &hg.d_logits_g], cap * v));
             let (bk, bt) = dw_kernel(v, d);
@@ -1300,8 +1321,8 @@ impl Lfm {
             let (bk, bt) = dx_kernel(n, d);
             s.push(self.gpu.dispatch(bk, &[&bw.d_logits, self.w(head), &bw.d_xn], &[n, d, v, 0], bt));
         }
-        self.trunk_backward_steps(&mut s);
-        s
+        self.trunk_backward_steps(&mut tape, &mut s);
+        tape
     }
 
     /// The seeded-backward step list: whatever gradient the caller has
@@ -1312,10 +1333,10 @@ impl Lfm {
     /// CE - an external objective (contrastive, or anything else) owns the
     /// loss and its own gradient on the pooled/unpooled hidden states; this
     /// is where that gradient re-enters the encoder.
-    fn seeded_backward_steps(&self) -> Vec<Step> {
-        let mut s: Vec<Step> = Vec::new();
-        self.trunk_backward_steps(&mut s);
-        s
+    fn seeded_backward_steps(&self) -> LayerTape {
+        let mut tape = LayerTape::default();
+        self.trunk_backward_steps(&mut tape, &mut Vec::new());
+        tape
     }
 
     /// Final RMSNorm backward, every layer's FFN + mixer backward, and the
@@ -1327,7 +1348,10 @@ impl Lfm {
     /// TRAINING regime is also `Regime::Materialized`, see that variant's own
     /// doc; only the pure-inference chunked builder is not, and never builds
     /// `self.bwd` at all).
-    fn trunk_backward_steps(&self, s: &mut Vec<Step>) {
+    ///
+    /// Records into `tape`: the steps already in `s` (the head) close as the first segment, each layer is a segment of
+    /// its own, and the embedding backward is left in `s` for the caller to close.
+    fn trunk_backward_steps(&self, tape: &mut LayerTape, s: &mut Vec<Step>) {
         let c = &self.cfg;
         let bw = self.bwd.as_ref().expect("train mode");
         let Regime::Materialized { layers, res, .. } = &self.regime else {
@@ -1346,6 +1370,7 @@ impl Lfm {
         let last = c.n_layers() as usize;
         res.restore(&self.gpu, s, last);
         self.norm_bwd(s, &res[last], "norm.weight", &bw.d_xn, &bw.dres[last], &bw.inv, d, n);
+        tape.segment(s, None);
 
         for (l, lb) in layers.iter().enumerate().rev() {
             if self.saved.recomputes() {
@@ -1428,27 +1453,32 @@ impl Lfm {
             }
             self.norm_bwd(s, &res[l], &p("ln1.weight"), &bw.d_xn, &bw.d_tmp, &bw.inv, d, n);
             s.push(self.gpu.step(ADD2, &[&bw.dxmid, &bw.d_tmp, &bw.dres[l]], &[n * d], n * d));
+            tape.segment(s, Some(l));
         }
 
         // Embedding backward (tied: accumulates onto the head grad in tok.weight).
         s.push(self.gpu.step(EMB_BWD, &[&self.tokens, &bw.dres[0], self.ps.g("tok.weight")], &[n, d, v], v * d));
+        tape.segment(s, None);
     }
 
     pub fn backward(&self) {
-        assert!(!self.bwd_steps.is_empty(), "backward: model built without training graphs");
+        assert!(!self.bwd_steps.steps().is_empty(), "backward: model built without training graphs");
         match &self.head {
             Some(hg) => {
                 self.gpu.write(&self.ce_grad_uni, &[hg.cap, self.cfg.vocab, IGNORE, gpu_core::f(self.count.get())]);
-                // d_xn is the row_scatter target: unsupervised rows must be zero.
-                let bw = self.bwd.as_ref().expect("train mode");
-                self.gpu.submit(&[&bw.d_xn], &self.bwd_steps);
             }
             None => {
                 let n = self.b * self.t;
                 self.gpu.write(&self.ce_grad_uni, &[n, self.cfg.vocab, IGNORE, gpu_core::f(self.count.get())]);
-                self.gpu.submit(&[], &self.bwd_steps);
             }
         }
+        if self.streamed.as_ref().is_some_and(StreamedStore::is_layer_streamed) {
+            // The weights of a layer-streamed build are not all on the device: the backward runs layer by layer in
+            // `adamw_step`, where the layers it loads are the ones it updates.
+            assert!(!self.backward_pending.replace(true), "lfm2 layer-streamed full fine-tune: a second backward before the update (gradient accumulation) is not supported; every micro-batch is its own step");
+            return;
+        }
+        self.bwd_steps.submit(&self.gpu);
     }
 
     /// The buffer [`Lfm::backward_seeded`] reads from: the gradient of
@@ -1475,8 +1505,12 @@ impl Lfm {
     /// [`Lfm::backward`]'s own trunk, with no head and no CE computed first.
     /// See [`Lfm::seed_buf`]'s own doc for what the caller owes it.
     pub fn backward_seeded(&self) {
-        assert!(!self.seeded_bwd_steps.is_empty(), "backward_seeded: model built without training graphs");
-        self.gpu.submit(&[], &self.seeded_bwd_steps);
+        assert!(!self.seeded_bwd_steps.steps().is_empty(), "backward_seeded: model built without training graphs");
+        assert!(
+            !self.streamed.as_ref().is_some_and(StreamedStore::is_layer_streamed),
+            "lfm2 layer-streamed full fine-tune: the seeded backward (an external objective's gradient) is not supported; the update drives the model's own backward"
+        );
+        self.seeded_bwd_steps.submit(&self.gpu);
     }
 
     /// Keep what `policy` names of the forward: every layer's activations ([`SavedPolicy::Keep`]), or only the residual
@@ -1524,16 +1558,67 @@ impl Lfm {
         self.ps.zero_grads(&self.gpu);
     }
     pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
-        self.opt.as_ref().expect("train mode").step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale);
+        let opt = self.opt.as_ref().expect("train mode");
+        match &self.streamed {
+            Some(stream) => {
+                if stream.is_layer_streamed() {
+                    assert!(self.backward_pending.replace(false), "lfm2 layer-streamed full fine-tune: adamw_step without a backward");
+                }
+                let args = model::resident_ft::StepArgs { step: t, lr, wd, adam, clip, extra_scale };
+                stream.adamw_step(&self.gpu, &self.ps, opt, &self.bwd_steps, &args).unwrap_or_else(|e| panic!("lfm2 layer-streamed update: {e}"));
+            }
+            None => opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale),
+        }
     }
     pub fn read_grad(&self, name: &str) -> Vec<f32> {
+        assert!(!self.is_streamed(name), "lfm2: {name} streams through a layer window; no gradient outlives its layer");
         self.ps.read_grad(&self.gpu, name)
     }
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
-        self.ps.read_weight(&self.gpu, name)
+        match &self.streamed {
+            Some(stream) if stream.holds(name) => stream.read_weight(&self.gpu, name).unwrap_or_else(|e| panic!("lfm2: reading {name}: {e}")),
+            _ => self.ps.read_weight(&self.gpu, name),
+        }
     }
     pub fn write_weight(&self, name: &str, data: &[f32]) {
-        self.gpu.write(self.w(name), bytemuck::cast_slice(data));
+        match &self.streamed {
+            Some(stream) if stream.holds(name) => stream.write_weight(&self.gpu, name, data).unwrap_or_else(|e| panic!("lfm2: writing {name}: {e}")),
+            _ => self.gpu.write(self.w(name), bytemuck::cast_slice(data)),
+        }
+    }
+
+    fn is_streamed(&self, name: &str) -> bool {
+        self.streamed.as_ref().is_some_and(|s| s.holds(name))
+    }
+
+    /// Stream every per-layer tensor through a device window under `cfg` (see [`model::streamed`]): the layers'
+    /// f32 values and optimizer state move to the host, the device keeps the window's slots. The embedding table
+    /// (also the tied head) and the final norm stay in the store under its own optimizer. Only a materialized
+    /// training build streams.
+    pub fn set_resident(&mut self, cfg: &model::resident_ft::ResidentFtConfig) -> Result<(), String> {
+        if self.streamed.is_some() {
+            return Err("lfm2: the layers already stream".into());
+        }
+        if self.bwd.is_none() || !matches!(self.regime, Regime::Materialized { .. }) {
+            return Err("lfm2: layers stream in a materialized training build".into());
+        }
+        let stream = StreamedStore::convert(&self.gpu, &mut self.ps, cfg.clone(), &model::streamed::blocks_layer).map_err(|e| format!("lfm2: {e}"))?;
+        self.opt.as_ref().expect("train mode").invalidate();
+        self.streamed = Some(stream);
+        // The recorded passes bound the store's buffers as they were: record them again over the window's slots
+        // (which also releases the per-layer buffers they held).
+        self.fwd_steps = self.forward_steps();
+        self.bwd_steps = self.backward_steps();
+        self.seeded_bwd_steps = self.seeded_backward_steps();
+        Ok(())
+    }
+
+    /// Submit a recorded forward; a layer-streamed build loads each layer into its window slot as it is reached.
+    fn submit_forward(&self, tape: &LayerTape) {
+        match &self.streamed {
+            Some(stream) => stream.forward(&self.gpu, tape).unwrap_or_else(|e| panic!("lfm2 layer-streamed forward: {e}")),
+            None => tape.submit(&self.gpu),
+        }
     }
     /// Writes a `ModelCard` (`family: "lfm"`) alongside the weights -
     /// WITHOUT one, `brain::EmbeddingPipeline`'s card-family routing
@@ -1558,9 +1643,9 @@ impl Lfm {
     /// `b_use` sequences (tokens for exactly `b_use*t` rows must be set).
     pub fn forward_group(&self, b_use: u32) {
         if b_use == self.b || self.fwd_variants.is_empty() {
-            self.gpu.submit(&[], &self.fwd_steps);
+            self.submit_forward(&self.fwd_steps);
         } else {
-            self.gpu.submit(&[], &self.fwd_variants[(b_use - 1) as usize]);
+            self.submit_forward(&self.fwd_variants[(b_use - 1) as usize]);
         }
     }
 
@@ -1570,7 +1655,7 @@ impl Lfm {
     }
 
     pub fn forward(&self) -> f32 {
-        self.gpu.submit(&[], &self.fwd_steps);
+        self.submit_forward(&self.fwd_steps);
         if let Some(hg) = &self.head {
             let losses = self.gpu.read(&hg.ce_g, hg.cap as usize);
             return losses.iter().sum::<f32>() / self.count.get();
@@ -1593,12 +1678,12 @@ impl Lfm {
     /// executes nothing. Chunked-regime instances cost the recorded per-chunk
     /// graph (what one `forward` submits); see `gpu_core::cost`.
     pub fn cost_fwd(&self) -> gpu_core::cost::CostReport {
-        self.gpu.cost_of(&self.fwd_steps)
+        self.gpu.cost_of(self.fwd_steps.steps())
     }
 
     /// OFFLINE cost of the recorded backward (empty when built for inference).
     pub fn cost_bwd(&self) -> gpu_core::cost::CostReport {
-        self.gpu.cost_of(&self.bwd_steps)
+        self.gpu.cost_of(self.bwd_steps.steps())
     }
 
     // ---- parity / inference taps ----
@@ -1690,6 +1775,12 @@ impl model::Model for Lfm {
     fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
         Lfm::set_saved_policy(self, policy)
     }
+    fn set_resident(&mut self, cfg: &model::resident_ft::ResidentFtConfig) -> Result<(), String> {
+        Lfm::set_resident(self, cfg)
+    }
+    fn off_device_state(&self) -> Option<&dyn model::OffDeviceState> {
+        self.streamed.as_ref().map(|_| self as &dyn model::OffDeviceState)
+    }
 
     type Config = LfmConfig;
 
@@ -1729,7 +1820,9 @@ impl model::Model for Lfm {
         Lfm::poll_wait(self)
     }
     fn param_names(&self) -> Vec<String> {
-        self.ps.trained_params().map(|(n, _)| n.clone()).collect()
+        // A layer-streamed build's layers have left the store's optimizer lists but are still trained.
+        let streamed = self.streamed.iter().flat_map(StreamedStore::names).map(str::to_owned);
+        self.ps.trained_params().map(|(n, _)| n.clone()).chain(streamed).collect()
     }
     fn read_weight(&self, name: &str) -> Vec<f32> {
         Lfm::read_weight(self, name)
@@ -1748,6 +1841,20 @@ impl model::Model for Lfm {
     }
     fn config_json(&self) -> serde_json::Value {
         self.cfg.to_json()
+    }
+}
+
+impl model::OffDeviceState for Lfm {
+    fn commit(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
+        let stream = self.streamed.as_ref().ok_or_else(|| std::io::Error::other("lfm2: no streamed state to commit"))?;
+        self.gpu.flush();
+        stream.commit(&self.gpu, dir, step)
+    }
+
+    fn restore(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
+        let stream = self.streamed.as_ref().ok_or_else(|| std::io::Error::other("lfm2: no streamed state to restore"))?;
+        self.gpu.flush();
+        stream.restore(&self.gpu, dir, step)
     }
 }
 

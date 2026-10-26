@@ -137,8 +137,8 @@ The per-cell matrix and its tests are `docs/reference/training-capabilities.md`.
   segments), `model::streamed::StreamedStore` (converts a built store, aliases its entries to the window, drives
   the shared `resident_ft::adamw_step`), `Model::set_resident` from `apply_train_precision`. Specs:
   `streamed::check_layer_streaming`, `trainprec::check_exact_resume`. gpt2, spectrallm, deepseek2 and glmdsa (their
-  `PassSeg` passes through `streamed::LayeredPass`) and qwen35moe (eager: its passes report the edges) adopt it.
-  ouro and huginn refuse a window by name (each layer runs in every step of the recurrence). Open: lfm2, horizon;
+  `PassSeg` passes through `streamed::LayeredPass`) and qwen35moe (eager: its passes report the edges) and lfm2 adopt it.
+  ouro and huginn refuse a window by name (each layer runs in every step of the recurrence). Open: horizon;
   construction-time streaming so loading never holds the whole model on the device.
 - D Memory: `model::saved` saved-activation policy (keep, recompute, bf16/fp8 boundaries)
   priced in memplan and wired into qwen3 and qwen35 LoRA training (a4a1242bc); flash attention

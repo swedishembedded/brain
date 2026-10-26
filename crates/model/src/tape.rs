@@ -17,6 +17,9 @@ use gpu_core::{Gpu, Step};
 /// A recorded pass and the segments it is submitted in.
 #[derive(Default)]
 pub struct LayerTape {
+    /// Buffers zeroed each time the pass is submitted, before its first step: the accumulators it adds into, which
+    /// must start from zero on every run of the pass (a layer-streamed update runs its backward more than once).
+    clears: Vec<gpu_core::DeviceBuffer>,
     steps: Vec<Step>,
     /// Each closed segment: its exclusive end in `steps` and the layer it runs (`None` for anything else: the
     /// embedding, the head, the loss).
@@ -33,6 +36,11 @@ pub enum TapeEdge {
 }
 
 impl LayerTape {
+    /// Zero `buf` each time the pass is submitted, before its first step.
+    pub fn clear_on_submit(&mut self, buf: &gpu_core::DeviceBuffer) {
+        self.clears.push(buf.clone());
+    }
+
     /// The steps recorded so far, for appending to.
     pub fn steps_mut(&mut self) -> &mut Vec<Step> {
         &mut self.steps
@@ -73,8 +81,11 @@ impl LayerTape {
     }
 
     /// Submit every segment in order, reporting [`TapeEdge::Before`] ahead of each and [`TapeEdge::After`] once it
-    /// is submitted (an empty segment included).
+    /// is submitted (an empty segment included). The pass's clears go first.
     pub fn submit_hooked(&self, gpu: &Gpu, edge: &mut dyn FnMut(TapeEdge)) {
+        if !self.clears.is_empty() {
+            gpu.submit(&self.clears.iter().collect::<Vec<_>>(), &[]);
+        }
         for (index, layer, steps) in self.segments() {
             edge(TapeEdge::Before { index, layer });
             if !steps.is_empty() {
@@ -110,5 +121,19 @@ mod tests {
         assert_eq!(edges.len(), 8);
         assert_eq!(edges[2], TapeEdge::Before { index: 1, layer: Some(1) });
         assert_eq!(edges[5], TapeEdge::After { index: 2, layer: Some(0) });
+    }
+
+    /// Spec: a pass's clears zero their buffers on every submission, not only the first.
+    #[test]
+    fn clears_run_on_every_submission() {
+        let gpu = gpu_core::testgpu::dev(&[("add2", kernels::ADD2)]);
+        let acc = gpu.storage(4);
+        let mut t = LayerTape::default();
+        t.clear_on_submit(&acc);
+        for _ in 0..2 {
+            gpu.write_f32(&acc, &[5.0; 4]);
+            t.submit(&gpu);
+            assert_eq!(gpu.read(&acc, 4), vec![0.0; 4]);
+        }
     }
 }
