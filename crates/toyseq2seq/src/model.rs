@@ -41,6 +41,9 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use gpu_core::{f, Gpu, Step};
+use model::saved::{Residuals, SavedPolicy};
+use model::streamed::StreamedStore;
+use model::tape::LayerTape;
 use optim::Optim;
 use paramstore::ParamStore;
 
@@ -169,6 +172,14 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // them BY NAME, so appending them here (and only here) is the whole opt-in.
     ("gradnorm_part", kernels::GRADNORM_PART),
     ("clip_coef_wg", kernels::CLIP_COEF_WG),
+    // Narrow boundary residuals (`model::saved::Residuals`), resolved by name.
+    ("pack_bf16", kernels::PACK_BF16),
+    ("unpack_bf16", kernels::UNPACK_BF16),
+    ("pack_fp8_rows", kernels::PACK_FP8_ROWS),
+    ("unpack_fp8_rows", kernels::UNPACK_FP8_ROWS),
+    // A layer-streamed full fine-tune's device side (`model::ops::store_device_kernels`; `gradnorm_part` is above).
+    ("copy_cols", kernels::COPY_COLS),
+    ("gradnorm_part_bf16", kernels::GRADNORM_PART_BF16),
 ];
 
 /// Encoder-decoder configuration. `vocab`/`block_size` follow the `ModelConfig`
@@ -301,6 +312,7 @@ impl Seq2SeqConfig {
 }
 
 /// Per-encoder-block forward activation cache (SSA buffers).
+#[derive(Clone)]
 struct EncLayer {
     ln1_out: gpu_core::DeviceBuffer,
     qkv: gpu_core::DeviceBuffer,
@@ -316,6 +328,7 @@ struct EncLayer {
 }
 
 /// Per-decoder-block forward activation cache (SSA buffers).
+#[derive(Clone)]
 struct DecLayer {
     // causal self-attention
     ln1_out: gpu_core::DeviceBuffer,
@@ -356,12 +369,16 @@ pub struct Seq2Seq {
     labels: gpu_core::DeviceBuffer,
 
     // encoder forward
-    enc_res: Vec<gpu_core::DeviceBuffer>, // [n_enc+1] residual stream
+    enc_res: Residuals, // [n_enc+1] residual stream
     enc_layers: Vec<EncLayer>,
 
     // decoder forward
-    dec_res: Vec<gpu_core::DeviceBuffer>, // [n_dec+1] residual stream
+    dec_res: Residuals, // [n_dec+1] residual stream
     dec_layers: Vec<DecLayer>,
+    /// What the backward keeps of the forward: every layer's activations, or (recompute) the residual between layers
+    /// of each stack, the layers of a stack sharing one set of activation buffers their replay before their backward
+    /// refills ([`model::Model::set_saved_policy`]).
+    saved: SavedPolicy,
     xn_final: gpu_core::DeviceBuffer,
     logits: gpu_core::DeviceBuffer,
     ce_buf: gpu_core::DeviceBuffer,
@@ -406,8 +423,13 @@ pub struct Seq2Seq {
     enc_ln_mean: gpu_core::DeviceBuffer,
     enc_ln_inv: gpu_core::DeviceBuffer,
 
-    fwd_steps: Vec<Step>,
-    bwd_steps: Vec<Step>,
+    fwd_steps: LayerTape,
+    bwd_steps: LayerTape,
+    /// The encoder's and the decoder's per-layer tensors held in a device window of layers, when the run streams them
+    /// ([`model::Model::set_resident`]); `None` keeps every layer in the store.
+    streamed: Option<StreamedStore>,
+    /// A streamed build runs its backward inside the update: set by `backward`, taken by `adamw_step`.
+    backward_pending: Cell<bool>,
     ce_grad_uni: gpu_core::DeviceBuffer,
 }
 
@@ -455,6 +477,7 @@ impl Seq2Seq {
             enc_res.push(st(ne * d));
             enc_dres.push(st(ne * d));
         }
+        let enc_res = Residuals::new(enc_res, 0..cfg.n_enc as usize + 1);
         let mut enc_layers = Vec::new();
         for _ in 0..cfg.n_enc {
             enc_layers.push(EncLayer {
@@ -478,6 +501,7 @@ impl Seq2Seq {
             dec_res.push(st(nd * d));
             dec_dres.push(st(nd * d));
         }
+        let dec_res = Residuals::new(dec_res, 0..cfg.n_dec as usize + 1);
         let mut dec_layers = Vec::new();
         for _ in 0..cfg.n_dec {
             dec_layers.push(DecLayer {
@@ -518,6 +542,7 @@ impl Seq2Seq {
             enc_layers,
             dec_res,
             dec_layers,
+            saved: SavedPolicy::Keep,
             xn_final: st(nd * d),
             logits: st(nd * v),
             ce_buf: st(nd),
@@ -553,8 +578,10 @@ impl Seq2Seq {
             ln_inv: st(nd),
             enc_ln_mean: st(ne),
             enc_ln_inv: st(ne),
-            fwd_steps: Vec::new(),
-            bwd_steps: Vec::new(),
+            fwd_steps: LayerTape::default(),
+            bwd_steps: LayerTape::default(),
+            streamed: None,
+            backward_pending: Cell::new(false),
             ce_grad_uni,
             gpu,
         };
@@ -606,97 +633,128 @@ impl Seq2Seq {
         }
     }
 
-    fn forward_steps(&self) -> Vec<Step> {
+    /// Encoder layer `l`'s forward, from `enc_res[l]` into `enc_res[l + 1]`.
+    fn enc_layer_forward(&self, l: usize, s: &mut Vec<Step>) {
+        let c = &self.cfg;
+        let (d, ff) = (c.d_model, c.d_ff);
+        let ne = self.b * self.t_enc;
+        let lb = &self.enc_layers[l];
+        let p = |name: &str| format!("enc.blocks.{l}.{name}");
+        s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &self.enc_res[l], self.w(&p("ln1.weight")), self.w(&p("ln1.bias")), &lb.ln1_out, d, ne, 1e-5));
+        s.push(self.gpu.step(MATMUL, &[&lb.ln1_out, self.w(&p("attn.qkv.weight")), &lb.qkv], &[ne, d, 3 * d], ne * 3 * d));
+        s.push(self.gpu.step(BIAS_ADD, &[&lb.qkv, self.w(&p("attn.qkv.bias"))], &[ne, 3 * d], ne * 3 * d));
+        // bidir self-attn via the shared builder: q_off=0, k_off=d, v_off=2d
+        s.extend(model::block::bidir_fwd(&self.gpu, &Self::bidir_ids(), &self.enc_bidir(), &lb.qkv, &lb.scores, &lb.probs, &lb.attn_ctx));
+        s.push(self.gpu.step(MATMUL, &[&lb.attn_ctx, self.w(&p("attn.out.weight")), &lb.proj], &[ne, d, d], ne * d));
+        s.push(self.gpu.step(BIAS_ADD, &[&lb.proj, self.w(&p("attn.out.bias"))], &[ne, d], ne * d));
+        s.push(self.gpu.step(ADD2, &[&self.enc_res[l], &lb.proj, &lb.xmid], &[ne * d], ne * d));
+        // MLP
+        s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &lb.xmid, self.w(&p("ln2.weight")), self.w(&p("ln2.bias")), &lb.ln2_out, d, ne, 1e-5));
+        s.push(self.gpu.step(MATMUL, &[&lb.ln2_out, self.w(&p("mlp.fc.weight")), &lb.fc], &[ne, d, ff], ne * ff));
+        s.push(self.gpu.step(BIAS_ADD, &[&lb.fc, self.w(&p("mlp.fc.bias"))], &[ne, ff], ne * ff));
+        s.push(self.gpu.step(GELU, &[&lb.fc, &lb.gelu], &[ne * ff], ne * ff));
+        s.push(self.gpu.step(MATMUL, &[&lb.gelu, self.w(&p("mlp.proj.weight")), &lb.ffn_out], &[ne, ff, d], ne * d));
+        s.push(self.gpu.step(BIAS_ADD, &[&lb.ffn_out, self.w(&p("mlp.proj.bias"))], &[ne, d], ne * d));
+        s.push(self.gpu.step(ADD2, &[&lb.xmid, &lb.ffn_out, &self.enc_res[l + 1]], &[ne * d], ne * d));
+    }
+
+    /// Decoder layer `l`'s forward, from `dec_res[l]` into `dec_res[l + 1]`, cross-attending to the encoder memory
+    /// `enc_res[n_enc]`.
+    fn dec_layer_forward(&self, l: usize, s: &mut Vec<Step>) {
+        let c = &self.cfg;
+        let (d, ff) = (c.d_model, c.d_ff);
+        let (hd, h) = (c.head_dim(), c.n_heads);
+        let (b, te, td) = (self.b, self.t_enc, self.t_dec);
+        let (ne, nd) = (b * te, b * td);
+        let enc_mem = &self.enc_res[c.n_enc as usize];
+        let lb = &self.dec_layers[l];
+        let p = |name: &str| format!("dec.blocks.{l}.{name}");
+        // causal self-attention
+        s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &self.dec_res[l], self.w(&p("ln1.weight")), self.w(&p("ln1.bias")), &lb.ln1_out, d, nd, 1e-5));
+        s.push(self.gpu.step(MATMUL, &[&lb.ln1_out, self.w(&p("attn.qkv.weight")), &lb.qkv], &[nd, d, 3 * d], nd * 3 * d));
+        s.push(self.gpu.step(BIAS_ADD, &[&lb.qkv, self.w(&p("attn.qkv.bias"))], &[nd, 3 * d], nd * 3 * d));
+        s.push(self.gpu.step(ATTN_SCORES, &[&lb.qkv, &lb.scores], &[b, h, td, hd, 3 * d, 0, d], b * h * td * td));
+        s.push(self.gpu.step(ATTN_SOFTMAX, &[&lb.scores, &lb.probs], &[b, h, td], b * h * td));
+        s.push(self.gpu.step(ATTN_APPLY, &[&lb.probs, &lb.qkv, &lb.attn_ctx], &[b, h, td, hd, 3 * d, 2 * d, d], b * h * td * hd));
+        s.push(self.gpu.step(MATMUL, &[&lb.attn_ctx, self.w(&p("attn.out.weight")), &lb.sa_proj], &[nd, d, d], nd * d));
+        s.push(self.gpu.step(BIAS_ADD, &[&lb.sa_proj, self.w(&p("attn.out.bias"))], &[nd, d], nd * d));
+        s.push(self.gpu.step(ADD2, &[&self.dec_res[l], &lb.sa_proj, &lb.xa], &[nd * d], nd * d));
+
+        // cross-attention to encoder memory
+        s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &lb.xa, self.w(&p("ln2.weight")), self.w(&p("ln2.bias")), &lb.ln2_out, d, nd, 1e-5));
+        // q = ln2_out @ Wq + bq  -> contiguous [nd, d] (q_stride=d)
+        s.push(self.gpu.step(MATMUL, &[&lb.ln2_out, self.w(&p("cross.q.weight")), &lb.cq], &[nd, d, d], nd * d));
+        s.push(self.gpu.step(BIAS_ADD, &[&lb.cq, self.w(&p("cross.q.bias"))], &[nd, d], nd * d));
+        // kv = enc_mem @ Wkv + bkv -> fused [ne, 2d] (kv_stride=2d, K@0, V@d)
+        s.push(self.gpu.step(MATMUL, &[enc_mem, self.w(&p("cross.kv.weight")), &lb.ckv], &[ne, d, 2 * d], ne * 2 * d));
+        s.push(self.gpu.step(BIAS_ADD, &[&lb.ckv, self.w(&p("cross.kv.bias"))], &[ne, 2 * d], ne * 2 * d));
+        // cross scores/softmax/apply: q_stride=d, kv_stride=2d, q_off=0, k_off=0, v_off=d
+        s.push(self.gpu.step(ATTN_SCORES_CROSS, &[&lb.cq, &lb.ckv, &lb.cscores], &[b, h, td, te, hd, d, 2 * d, 0, 0], b * h * td * te));
+        s.push(self.gpu.step(ATTN_SOFTMAX_CROSS, &[&lb.cscores, &lb.cprobs], &[b, h, td, te], b * h * td));
+        s.push(self.gpu.step(ATTN_APPLY_CROSS, &[&lb.cprobs, &lb.ckv, &lb.cctx], &[b, h, td, te, hd, 2 * d, d, d], b * h * td * hd));
+        s.push(self.gpu.step(MATMUL, &[&lb.cctx, self.w(&p("cross.out.weight")), &lb.ca_proj], &[nd, d, d], nd * d));
+        s.push(self.gpu.step(BIAS_ADD, &[&lb.ca_proj, self.w(&p("cross.out.bias"))], &[nd, d], nd * d));
+        s.push(self.gpu.step(ADD2, &[&lb.xa, &lb.ca_proj, &lb.xc], &[nd * d], nd * d));
+
+        // MLP
+        s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &lb.xc, self.w(&p("ln3.weight")), self.w(&p("ln3.bias")), &lb.ln3_out, d, nd, 1e-5));
+        s.push(self.gpu.step(MATMUL, &[&lb.ln3_out, self.w(&p("mlp.fc.weight")), &lb.fc], &[nd, d, ff], nd * ff));
+        s.push(self.gpu.step(BIAS_ADD, &[&lb.fc, self.w(&p("mlp.fc.bias"))], &[nd, ff], nd * ff));
+        s.push(self.gpu.step(GELU, &[&lb.fc, &lb.gelu], &[nd * ff], nd * ff));
+        s.push(self.gpu.step(MATMUL, &[&lb.gelu, self.w(&p("mlp.proj.weight")), &lb.ffn_out], &[nd, ff, d], nd * d));
+        s.push(self.gpu.step(BIAS_ADD, &[&lb.ffn_out, self.w(&p("mlp.proj.bias"))], &[nd, d], nd * d));
+        s.push(self.gpu.step(ADD2, &[&lb.xc, &lb.ffn_out, &self.dec_res[l + 1]], &[nd * d], nd * d));
+    }
+
+    /// The forward, one segment per layer of the encoder and then of the decoder (the decoder's layer indices follow
+    /// the encoder's), so a layer-streamed build loads each layer before its segment.
+    fn forward_steps(&self) -> LayerTape {
         let c = &self.cfg;
         let d = c.d_model;
-        let ff = c.d_ff;
         let v = c.vocab;
-        let hd = c.head_dim();
-        let h = c.n_heads;
         let b = self.b;
         let te = self.t_enc;
         let td = self.t_dec;
         let ne = b * te;
         let nd = b * td;
+        let mut tape = LayerTape::default();
         let mut s: Vec<Step> = Vec::new();
 
         // ---- ENCODER ----
         s.push(self.gpu.step(EMBED, &[&self.src, self.w("tok.weight"), &self.enc_res[0]], &[d, ne], ne * d));
         s.push(self.gpu.step(POS_ADD, &[&self.enc_res[0], self.w("enc_pos.weight")], &[ne * d, d, te], ne * d));
+        self.enc_res.round_trip(&self.gpu, &mut s, 0);
+        tape.segment(&mut s, None);
         for l in 0..c.n_enc as usize {
-            let lb = &self.enc_layers[l];
-            let p = |name: &str| format!("enc.blocks.{l}.{name}");
-            s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &self.enc_res[l], self.w(&p("ln1.weight")), self.w(&p("ln1.bias")), &lb.ln1_out, d, ne, 1e-5));
-            s.push(self.gpu.step(MATMUL, &[&lb.ln1_out, self.w(&p("attn.qkv.weight")), &lb.qkv], &[ne, d, 3 * d], ne * 3 * d));
-            s.push(self.gpu.step(BIAS_ADD, &[&lb.qkv, self.w(&p("attn.qkv.bias"))], &[ne, 3 * d], ne * 3 * d));
-            // bidir self-attn via the shared builder: q_off=0, k_off=d, v_off=2d
-            s.extend(model::block::bidir_fwd(&self.gpu, &Self::bidir_ids(), &self.enc_bidir(), &lb.qkv, &lb.scores, &lb.probs, &lb.attn_ctx));
-            s.push(self.gpu.step(MATMUL, &[&lb.attn_ctx, self.w(&p("attn.out.weight")), &lb.proj], &[ne, d, d], ne * d));
-            s.push(self.gpu.step(BIAS_ADD, &[&lb.proj, self.w(&p("attn.out.bias"))], &[ne, d], ne * d));
-            s.push(self.gpu.step(ADD2, &[&self.enc_res[l], &lb.proj, &lb.xmid], &[ne * d], ne * d));
-            // MLP
-            s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &lb.xmid, self.w(&p("ln2.weight")), self.w(&p("ln2.bias")), &lb.ln2_out, d, ne, 1e-5));
-            s.push(self.gpu.step(MATMUL, &[&lb.ln2_out, self.w(&p("mlp.fc.weight")), &lb.fc], &[ne, d, ff], ne * ff));
-            s.push(self.gpu.step(BIAS_ADD, &[&lb.fc, self.w(&p("mlp.fc.bias"))], &[ne, ff], ne * ff));
-            s.push(self.gpu.step(GELU, &[&lb.fc, &lb.gelu], &[ne * ff], ne * ff));
-            s.push(self.gpu.step(MATMUL, &[&lb.gelu, self.w(&p("mlp.proj.weight")), &lb.ffn_out], &[ne, ff, d], ne * d));
-            s.push(self.gpu.step(BIAS_ADD, &[&lb.ffn_out, self.w(&p("mlp.proj.bias"))], &[ne, d], ne * d));
-            s.push(self.gpu.step(ADD2, &[&lb.xmid, &lb.ffn_out, &self.enc_res[l + 1]], &[ne * d], ne * d));
+            self.enc_layer_forward(l, &mut s);
+            self.enc_res.round_trip(&self.gpu, &mut s, l + 1);
+            tape.segment(&mut s, Some(l));
         }
-        let enc_mem = &self.enc_res[c.n_enc as usize];
 
         // ---- DECODER ----
         s.push(self.gpu.step(EMBED, &[&self.tgt, self.w("tok.weight"), &self.dec_res[0]], &[d, nd], nd * d));
         s.push(self.gpu.step(POS_ADD, &[&self.dec_res[0], self.w("dec_pos.weight")], &[nd * d, d, td], nd * d));
+        self.dec_res.round_trip(&self.gpu, &mut s, 0);
+        tape.segment(&mut s, None);
         for l in 0..c.n_dec as usize {
-            let lb = &self.dec_layers[l];
-            let p = |name: &str| format!("dec.blocks.{l}.{name}");
-            // causal self-attention
-            s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &self.dec_res[l], self.w(&p("ln1.weight")), self.w(&p("ln1.bias")), &lb.ln1_out, d, nd, 1e-5));
-            s.push(self.gpu.step(MATMUL, &[&lb.ln1_out, self.w(&p("attn.qkv.weight")), &lb.qkv], &[nd, d, 3 * d], nd * 3 * d));
-            s.push(self.gpu.step(BIAS_ADD, &[&lb.qkv, self.w(&p("attn.qkv.bias"))], &[nd, 3 * d], nd * 3 * d));
-            s.push(self.gpu.step(ATTN_SCORES, &[&lb.qkv, &lb.scores], &[b, h, td, hd, 3 * d, 0, d], b * h * td * td));
-            s.push(self.gpu.step(ATTN_SOFTMAX, &[&lb.scores, &lb.probs], &[b, h, td], b * h * td));
-            s.push(self.gpu.step(ATTN_APPLY, &[&lb.probs, &lb.qkv, &lb.attn_ctx], &[b, h, td, hd, 3 * d, 2 * d, d], b * h * td * hd));
-            s.push(self.gpu.step(MATMUL, &[&lb.attn_ctx, self.w(&p("attn.out.weight")), &lb.sa_proj], &[nd, d, d], nd * d));
-            s.push(self.gpu.step(BIAS_ADD, &[&lb.sa_proj, self.w(&p("attn.out.bias"))], &[nd, d], nd * d));
-            s.push(self.gpu.step(ADD2, &[&self.dec_res[l], &lb.sa_proj, &lb.xa], &[nd * d], nd * d));
-
-            // cross-attention to encoder memory
-            s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &lb.xa, self.w(&p("ln2.weight")), self.w(&p("ln2.bias")), &lb.ln2_out, d, nd, 1e-5));
-            // q = ln2_out @ Wq + bq  -> contiguous [nd, d] (q_stride=d)
-            s.push(self.gpu.step(MATMUL, &[&lb.ln2_out, self.w(&p("cross.q.weight")), &lb.cq], &[nd, d, d], nd * d));
-            s.push(self.gpu.step(BIAS_ADD, &[&lb.cq, self.w(&p("cross.q.bias"))], &[nd, d], nd * d));
-            // kv = enc_mem @ Wkv + bkv -> fused [ne, 2d] (kv_stride=2d, K@0, V@d)
-            s.push(self.gpu.step(MATMUL, &[enc_mem, self.w(&p("cross.kv.weight")), &lb.ckv], &[ne, d, 2 * d], ne * 2 * d));
-            s.push(self.gpu.step(BIAS_ADD, &[&lb.ckv, self.w(&p("cross.kv.bias"))], &[ne, 2 * d], ne * 2 * d));
-            // cross scores/softmax/apply: q_stride=d, kv_stride=2d, q_off=0, k_off=0, v_off=d
-            s.push(self.gpu.step(ATTN_SCORES_CROSS, &[&lb.cq, &lb.ckv, &lb.cscores], &[b, h, td, te, hd, d, 2 * d, 0, 0], b * h * td * te));
-            s.push(self.gpu.step(ATTN_SOFTMAX_CROSS, &[&lb.cscores, &lb.cprobs], &[b, h, td, te], b * h * td));
-            s.push(self.gpu.step(ATTN_APPLY_CROSS, &[&lb.cprobs, &lb.ckv, &lb.cctx], &[b, h, td, te, hd, 2 * d, d, d], b * h * td * hd));
-            s.push(self.gpu.step(MATMUL, &[&lb.cctx, self.w(&p("cross.out.weight")), &lb.ca_proj], &[nd, d, d], nd * d));
-            s.push(self.gpu.step(BIAS_ADD, &[&lb.ca_proj, self.w(&p("cross.out.bias"))], &[nd, d], nd * d));
-            s.push(self.gpu.step(ADD2, &[&lb.xa, &lb.ca_proj, &lb.xc], &[nd * d], nd * d));
-
-            // MLP
-            s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &lb.xc, self.w(&p("ln3.weight")), self.w(&p("ln3.bias")), &lb.ln3_out, d, nd, 1e-5));
-            s.push(self.gpu.step(MATMUL, &[&lb.ln3_out, self.w(&p("mlp.fc.weight")), &lb.fc], &[nd, d, ff], nd * ff));
-            s.push(self.gpu.step(BIAS_ADD, &[&lb.fc, self.w(&p("mlp.fc.bias"))], &[nd, ff], nd * ff));
-            s.push(self.gpu.step(GELU, &[&lb.fc, &lb.gelu], &[nd * ff], nd * ff));
-            s.push(self.gpu.step(MATMUL, &[&lb.gelu, self.w(&p("mlp.proj.weight")), &lb.ffn_out], &[nd, ff, d], nd * d));
-            s.push(self.gpu.step(BIAS_ADD, &[&lb.ffn_out, self.w(&p("mlp.proj.bias"))], &[nd, d], nd * d));
-            s.push(self.gpu.step(ADD2, &[&lb.xc, &lb.ffn_out, &self.dec_res[l + 1]], &[nd * d], nd * d));
+            self.dec_layer_forward(l, &mut s);
+            self.dec_res.round_trip(&self.gpu, &mut s, l + 1);
+            tape.segment(&mut s, Some(c.n_enc as usize + l));
         }
 
         let last = c.n_dec as usize;
         s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &self.dec_res[last], self.w("ln.weight"), self.w("ln.bias"), &self.xn_final, d, nd, 1e-5));
         s.push(self.gpu.step(MATMUL, &[&self.xn_final, self.w("lm_head.weight"), &self.logits], &[nd, d, v], nd * v));
         s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.labels, &self.ce_buf], &[nd, v, IGNORE], nd));
-        s
+        tape.segment(&mut s, None);
+        tape
     }
 
     pub fn forward_submit(&self) {
-        self.gpu.submit(&[], &self.fwd_steps);
+        match &self.streamed {
+            Some(stream) => stream.forward(&self.gpu, &self.fwd_steps).unwrap_or_else(|e| panic!("toyseq2seq layer-streamed forward: {e}")),
+            None => self.fwd_steps.submit(&self.gpu),
+        }
     }
 
     pub fn loss(&self) -> f32 {
@@ -714,12 +772,19 @@ impl Seq2Seq {
         let nd = self.b * self.t_dec;
         let v = self.cfg.vocab;
         self.gpu.write(&self.ce_grad_uni, &[nd, v, IGNORE, f(self.count.get())]);
-        // Clear the encoder-memory grad accumulator seed (index 0) so the first
-        // cross-attn contribution adds to zero.
-        self.gpu.submit(&[&self.d_enc_mem0], &self.bwd_steps);
+        if self.streamed.as_ref().is_some_and(StreamedStore::is_layer_streamed) {
+            // The weights of a layer-streamed build are not all on the device: the backward runs layer by layer in
+            // `adamw_step`, where the layers it loads are the ones it updates.
+            assert!(!self.backward_pending.replace(true), "toyseq2seq layer-streamed full fine-tune: a second backward before the update (gradient accumulation) is not supported; every micro-batch is its own step");
+            return;
+        }
+        // The pass clears the encoder-memory grad accumulator seed (index 0) itself, so the first cross-attn
+        // contribution adds to zero.
+        self.bwd_steps.submit(&self.gpu);
     }
 
-    fn build_backward_steps(&self) -> Vec<Step> {
+    /// The backward: the head, the decoder's layers from the last down, the encoder's likewise, then the embeddings.
+    fn build_backward_steps(&self) -> LayerTape {
         let c = &self.cfg;
         let d = c.d_model;
         let ff = c.d_ff;
@@ -732,6 +797,8 @@ impl Seq2Seq {
         let ne = b * te;
         let nd = b * td;
         let g = |name: &str| self.ps.g(name);
+        let mut tape = LayerTape::default();
+        tape.clear_on_submit(&self.d_enc_mem0);
         let mut s: Vec<Step> = Vec::new();
         let enc_mem = &self.enc_res[c.n_enc as usize];
         // Ping-pong accumulator parity for the encoder-memory grad: starts at the
@@ -740,6 +807,9 @@ impl Seq2Seq {
         let mut mem_idx: u32 = 0;
 
         // ---- head + final LN ----
+        self.dec_res.restore(&self.gpu, &mut s, c.n_dec as usize);
+        // The encoder memory every decoder layer reads (and its replay rebuilds from) is `enc_res[n_enc]`, which the
+        // forward left decoded in its working buffer: the encoder's backward, which refills it, runs after the decoder's.
         s.push(self.gpu.step_buf(CE_GRAD, &self.ce_grad_uni, &[&self.logits, &self.labels, &self.d_logits], nd * v));
         s.push(self.gpu.step(MATMUL_DW, &[&self.d_logits, &self.xn_final, g("lm_head.weight")], &[nd, d, v], v * d));
         s.push(self.gpu.step(MATMUL_DX, &[&self.d_logits, self.w("lm_head.weight"), &self.d_xn], &[nd, d, v, 0], nd * d));
@@ -752,7 +822,13 @@ impl Seq2Seq {
         // ---- DECODER blocks (reverse) ----
         // d_enc_mem accumulates cross-attn K/V grads from every decoder layer; it
         // is cleared once per backward submit (see `backward`).
+        tape.segment(&mut s, None);
         for l in (0..c.n_dec as usize).rev() {
+            if self.saved.recomputes() {
+                // The layers of the stack share one set of activation buffers: rebuild this layer's from `dec_res[l]`.
+                self.dec_res.restore(&self.gpu, &mut s, l);
+                self.dec_layer_forward(l, &mut s);
+            }
             let lb = &self.dec_layers[l];
             let p = |name: &str| format!("dec.blocks.{l}.{name}");
 
@@ -817,6 +893,7 @@ impl Seq2Seq {
             s.push(model::block::layernorm_dx_bwd(&self.gpu, &LN_IDS, &self.dec_res[l], self.w(&p("ln1.weight")), &self.d_branch, &self.d_tmp, d, nd, 1e-5));
             // grad into dec_res[l] = d_acc2 + d_tmp
             s.push(self.gpu.step(ADD2, &[&self.d_acc2, &self.d_tmp, &self.dec_dres[l]], &[nd * d], nd * d));
+            tape.segment(&mut s, Some(c.n_enc as usize + l));
         }
 
         // ---- ENCODER blocks (reverse) ----
@@ -828,6 +905,11 @@ impl Seq2Seq {
         let enc_top = mem_acc(mem_idx);
 
         for l in (0..c.n_enc as usize).rev() {
+            if self.saved.recomputes() {
+                // The layers of the stack share one set of activation buffers: rebuild this layer's from `enc_res[l]`.
+                self.enc_res.restore(&self.gpu, &mut s, l);
+                self.enc_layer_forward(l, &mut s);
+            }
             let lb = &self.enc_layers[l];
             let p = |name: &str| format!("enc.blocks.{l}.{name}");
             // MLP backward; input grad = grad into enc_res[l+1]. The top encoder
@@ -863,6 +945,7 @@ impl Seq2Seq {
             s.push(self.gpu.step(LN_DBETA, &[&self.enc_d_branch, g(&p("ln1.bias"))], &[d, ne], d));
             s.push(model::block::layernorm_dx_bwd(&self.gpu, &LN_IDS, &self.enc_res[l], self.w(&p("ln1.weight")), &self.enc_d_branch, &self.enc_d_tmp, d, ne, 1e-5));
             s.push(self.gpu.step(ADD2, &[&self.enc_d_acc, &self.enc_d_tmp, &self.enc_dres[l]], &[ne * d], ne * d));
+            tape.segment(&mut s, Some(l));
         }
 
         // ---- embeddings backward ----
@@ -872,7 +955,8 @@ impl Seq2Seq {
         // Encoder embeddings (tok.weight is SHARED: accumulate into the same grad).
         s.push(self.gpu.step(POS_BWD, &[&self.enc_dres[0], g("enc_pos.weight")], &[b, te, d], te * d));
         s.push(self.gpu.step(EMB_BWD, &[&self.src, &self.enc_dres[0], g("tok.weight")], &[ne, d, v], v * d));
-        s
+        tape.segment(&mut s, None);
+        tape
     }
 
     pub fn zero_grads(&self) {
@@ -884,17 +968,90 @@ impl Seq2Seq {
     }
 
     pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
-        self.opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale);
+        match &self.streamed {
+            Some(stream) => {
+                if stream.is_layer_streamed() {
+                    assert!(self.backward_pending.replace(false), "toyseq2seq layer-streamed full fine-tune: adamw_step without a backward");
+                }
+                let args = model::resident_ft::StepArgs { step: t, lr, wd, adam, clip, extra_scale };
+                stream.adamw_step(&self.gpu, &self.ps, &self.opt, &self.bwd_steps, &args).unwrap_or_else(|e| panic!("toyseq2seq layer-streamed update: {e}"));
+            }
+            None => self.opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale),
+        }
     }
 
     pub fn read_grad(&self, name: &str) -> Vec<f32> {
+        assert!(!self.streamed.as_ref().is_some_and(|s| s.holds(name)), "toyseq2seq: {name} streams through a layer window; no gradient outlives its layer");
         self.ps.read_grad(&self.gpu, name)
     }
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
-        self.ps.read_weight(&self.gpu, name)
+        match &self.streamed {
+            Some(stream) if stream.holds(name) => stream.read_weight(&self.gpu, name).unwrap_or_else(|e| panic!("toyseq2seq: reading {name}: {e}")),
+            _ => self.ps.read_weight(&self.gpu, name),
+        }
     }
     pub fn write_weight(&self, name: &str, data: &[f32]) {
-        self.gpu.write(self.w(name), bytemuck::cast_slice(data));
+        match &self.streamed {
+            Some(stream) if stream.holds(name) => stream.write_weight(&self.gpu, name, data).unwrap_or_else(|e| panic!("toyseq2seq: writing {name}: {e}")),
+            _ => self.gpu.write(self.w(name), bytemuck::cast_slice(data)),
+        }
+    }
+
+    /// Stream every encoder and decoder layer's tensors through a device window under `cfg` (see [`model::streamed`]),
+    /// the encoder's layers first and the decoder's after them, each its own layer: their f32 values and optimizer
+    /// state move to the host, the device keeps the window's slots. The embeddings, the head and the final norm stay in
+    /// the store under its own optimizer.
+    pub fn set_resident(&mut self, cfg: &model::resident_ft::ResidentFtConfig) -> Result<(), String> {
+        if self.streamed.is_some() {
+            return Err("toyseq2seq: the layers already stream".into());
+        }
+        let n_enc = self.cfg.n_enc;
+        let layer_of = |name: &str| -> Option<u32> {
+            if let Some(rest) = name.strip_prefix("enc.blocks.") {
+                return rest.split('.').next()?.parse().ok();
+            }
+            Some(n_enc + name.strip_prefix("dec.blocks.")?.split('.').next()?.parse::<u32>().ok()?)
+        };
+        let stream = StreamedStore::convert(&self.gpu, &mut self.ps, cfg.clone(), &layer_of).map_err(|e| format!("toyseq2seq: {e}"))?;
+        self.opt.invalidate();
+        self.streamed = Some(stream);
+        // The recorded passes bound the store's buffers as they were: record them again over the window's slots
+        // (which also releases the per-layer buffers they held).
+        self.fwd_steps = self.forward_steps();
+        self.bwd_steps = self.build_backward_steps();
+        Ok(())
+    }
+
+    /// Keep what `policy` names of the forward: every layer's activations ([`SavedPolicy::Keep`]), or only the residual
+    /// between layers ([`SavedPolicy::Recompute`]), where the layers of the encoder share one set of activation
+    /// buffers and the layers of the decoder another (the others are released) and the backward replays each layer from
+    /// its residual before its own backward, those residuals optionally held in bf16 or FP8
+    /// ([`SavedPolicy::Quantized`], see [`Residuals`]). A build only narrows what it keeps; widening again is refused
+    /// by name.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        if !self.saved.narrows_to(policy) {
+            return Err(format!("toyseq2seq: a build keeping {:?} cannot go back to {policy:?}", self.saved));
+        }
+        if policy == self.saved {
+            return Ok(());
+        }
+        if !self.saved.recomputes() {
+            if let Some(shared) = self.enc_layers.first().cloned() {
+                self.enc_layers.fill(shared);
+            }
+            if let Some(shared) = self.dec_layers.first().cloned() {
+                self.dec_layers.fill(shared);
+            }
+        }
+        if let SavedPolicy::Quantized(format) = policy {
+            let d = self.cfg.d_model;
+            self.enc_res.quantize(&self.gpu, format, self.b * self.t_enc, d).map_err(|e| format!("toyseq2seq: {e}"))?;
+            self.dec_res.quantize(&self.gpu, format, self.b * self.t_dec, d).map_err(|e| format!("toyseq2seq: {e}"))?;
+        }
+        self.saved = policy;
+        self.fwd_steps = self.forward_steps();
+        self.bwd_steps = self.build_backward_steps();
+        Ok(())
     }
 
     pub fn save(&self, path: &str) {
@@ -933,6 +1090,20 @@ impl model::ModelConfig for Seq2SeqConfig {
     }
 }
 
+impl model::OffDeviceState for Seq2Seq {
+    fn commit(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
+        let stream = self.streamed.as_ref().ok_or_else(|| std::io::Error::other("toyseq2seq: no streamed state to commit"))?;
+        self.gpu.flush();
+        stream.commit(&self.gpu, dir, step)
+    }
+
+    fn restore(&self, dir: &std::path::Path, step: u32) -> std::io::Result<()> {
+        let stream = self.streamed.as_ref().ok_or_else(|| std::io::Error::other("toyseq2seq: no streamed state to restore"))?;
+        self.gpu.flush();
+        stream.restore(&self.gpu, dir, step)
+    }
+}
+
 impl model::Model for Seq2Seq {
     fn optimizer_state(&mut self) -> Option<model::OptimizerState<'_>> {
         Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: &self.opt })
@@ -940,6 +1111,16 @@ impl model::Model for Seq2Seq {
 
     fn optimizer_parts(&self) -> Option<model::OptimizerParts<'_>> {
         Some(model::OptimizerParts { gpu: &self.gpu, store: &self.ps, optim: &self.opt })
+    }
+
+    fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        Seq2Seq::set_saved_policy(self, policy)
+    }
+    fn set_resident(&mut self, cfg: &model::resident_ft::ResidentFtConfig) -> Result<(), String> {
+        Seq2Seq::set_resident(self, cfg)
+    }
+    fn off_device_state(&self) -> Option<&dyn model::OffDeviceState> {
+        self.streamed.as_ref().map(|_| self as &dyn model::OffDeviceState)
     }
 
     type Config = Seq2SeqConfig;
