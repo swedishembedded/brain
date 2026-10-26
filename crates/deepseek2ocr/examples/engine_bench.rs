@@ -13,10 +13,10 @@
 //!
 //! ```text
 //! cargo run --release -p brain-deepseek2ocr --example engine_bench -- \
-//!     --dir <model dir> --batch 8 --steps 32 [--kv f32|bf16]
+//!     --dir <model dir> --batch 8 --steps 32 [--kv f32|bf16] [--precision auto|reference|fast]
 //! ```
 
-use deepseek2::serve::{pipelines, Engine, EngineConfig};
+use deepseek2::serve::{pipelines, Engine, EngineConfig, Precision};
 use gpu_core::Gpu;
 use model::kv_tier::KvTier;
 use model::paged::BlockTable;
@@ -31,13 +31,19 @@ fn main() {
     let steps: usize = arg("--steps", "32").parse().expect("--steps");
     let prompt_len: usize = arg("--prompt", "283").parse().expect("--prompt");
     let kv = KvTier::parse(&arg("--kv", "f32")).expect("--kv");
+    let precision = match arg("--precision", "auto").as_str() {
+        "auto" => Precision::Auto,
+        "reference" => Precision::Reference,
+        "fast" => Precision::Fast,
+        other => panic!("--precision auto|reference|fast, got {other}"),
+    };
     assert!(!dir.is_empty(), "--dir <model dir>");
 
     let files = deepseek2ocr::import::Files::locate(&dir).expect("locate");
     let cfg = deepseek2ocr::import::config(&files, 1).expect("config");
     let reader = deepseek2ocr::import::decoder_reader(&files, &cfg).expect("reader");
     let src = deepseek2ocr::import::decoder_source(&files, &reader, &cfg).expect("source");
-    let ec = EngineConfig { max_seq: 2048, pool_tokens: batch.max(1) * 1024, max_batch: batch.max(1), chunk: 512, block_size: 64, kv, topk: 64 };
+    let ec = EngineConfig { max_seq: 2048, pool_tokens: batch.max(1) * 1024, max_batch: batch.max(1), chunk: 512, block_size: 64, kv, topk: 64, precision };
     let t0 = Instant::now();
     let mut engine = Engine::new(Gpu::new(&pipelines()), cfg.decoder.clone(), &src, ec).expect("engine");
     eprintln!("engine built in {:.1}s", t0.elapsed().as_secs_f64());

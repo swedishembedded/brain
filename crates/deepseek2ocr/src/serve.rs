@@ -23,7 +23,7 @@
 use capability::{last_user_text, Invocation};
 use data::qwen_chat::TemplateFlavor;
 use data::qwen_tokenizer::QwenBpe;
-use deepseek2::serve::{pipelines, Engine, EngineConfig};
+use deepseek2::serve::{pipelines, Engine, EngineConfig, Precision};
 use gpu_core::Gpu;
 use llmserve::{Frontend, ParsedRequest, ScheduledInstance};
 use model::kv_tier::KvTier;
@@ -52,7 +52,7 @@ pub const NGRAM_WINDOW: u32 = 90;
 
 /// The decoder engine's shape at the served defaults.
 pub fn engine_config() -> EngineConfig {
-    EngineConfig { max_seq: MAX_CONTEXT, pool_tokens: POOL_TOKENS, max_batch: MAX_BATCH, chunk: PREFILL_CHUNK, block_size: 64, kv: KvTier::F32, topk: 64 }
+    EngineConfig { max_seq: MAX_CONTEXT, pool_tokens: POOL_TOKENS, max_batch: MAX_BATCH, chunk: PREFILL_CHUNK, block_size: 64, kv: KvTier::F32, topk: 64, precision: Precision::Auto }
 }
 
 /// The vision half of a request: image to the DeepEncoder's rows, plus the

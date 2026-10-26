@@ -1,0 +1,146 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+//
+// Swedish Embedded AB implements batched document-OCR serving for clients who
+// convert large archives to text. If your team needs expertise in
+// tensor-core mixture-of-experts decode with a stated accuracy contract then
+// you can procure our services by sending an email to info@swedishembedded.com.
+
+//! The engine's tensor-core tier (`Precision::Fast`: int8 routed experts, bf16 dense linears)
+//! against its fp32 reference tier on the same weights.
+//!
+//! The two are not bitwise equal by design: the experts' activations are quantised to int8 per
+//! 32-element group and the dense linears round their operands to bf16. The contract this file
+//! pins is how far apart they may be, as the user sees it: the next-token distribution after a
+//! prompt agrees to a cosine of at least [`LOGITS_COSINE`], the greedy token is the same, and a
+//! batch of sequences decodes exactly what the fast tier decodes for each alone.
+//!
+//! A 64-wide model, not the 12-wide tiny one: the int8 tier needs every contraction width to be
+//! a multiple of 32.
+
+use deepseek2::config::DeepseekV2Config;
+use deepseek2::serve::{pipelines, Engine, EngineConfig, Precision};
+use gguf::deepseek_ocr::DeepseekOcrConfig;
+use gpu_core::Gpu;
+use model::kv_tier::KvTier;
+use model::paged::BlockTable;
+use model::serve::{PagedDecoder, PrefillProgress, Request, Scheduler};
+
+/// Cosine between the reference and fast next-token logits. Measured on this model at its
+/// weight scale (0.9999 and up).
+const LOGITS_COSINE: f32 = 0.999;
+
+fn cfg() -> DeepseekV2Config {
+    DeepseekV2Config::from_shape(
+        DeepseekOcrConfig {
+            vocab: 96,
+            n_layers: 3,
+            d_model: 64,
+            max_position_embeddings: 128,
+            rms_eps: 1e-6,
+            tie_embeddings: false,
+            n_heads: 2,
+            n_kv_heads: 2,
+            head_dim: 32,
+            rope_theta: 10_000.0,
+            rotary_dim: 32,
+            n_dense_layers: 1,
+            ffn_hidden: 96,
+            n_experts: 8,
+            top_k: 2,
+            moe_intermediate_size: 32,
+            n_shared_experts: 2,
+            n_expert_groups: 1,
+            n_expert_groups_used: 1,
+        },
+        128,
+    )
+}
+
+/// Random weights with enough spread that the next token depends on the prompt.
+fn weights() -> std::collections::HashMap<String, Vec<f32>> {
+    let c = cfg();
+    let mut w = deepseek2::init_weights(&c, 11);
+    for (name, v) in w.iter_mut() {
+        if !name.ends_with("norm.weight") && !name.ends_with("ln1.weight") && !name.ends_with("ln2.weight") {
+            v.iter_mut().for_each(|x| *x *= 12.0);
+        }
+    }
+    w
+}
+
+fn engine(precision: Precision) -> Option<Engine> {
+    let gpu = Gpu::new(&pipelines());
+    if !gpu.caps().workgroup_reductions {
+        brain_testutil::skip_unavailable("the tensor-core tier needs workgroup reductions");
+        return None;
+    }
+    let ec = EngineConfig { max_seq: 96, pool_tokens: 4 * 96, max_batch: 8, chunk: 16, block_size: 8, kv: KvTier::F32, topk: 8, precision };
+    Some(Engine::new(gpu, cfg(), &weights(), ec).expect("engine"))
+}
+
+fn prompt(seed: u32, len: usize) -> Vec<u32> {
+    (0..len as u32).map(|i| 1 + (seed * 13 + i * 7 + i * i) % 90).collect()
+}
+
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    let (mut dot, mut na, mut nb) = (0f64, 0f64, 0f64);
+    for (x, y) in a.iter().zip(b) {
+        dot += (*x as f64) * (*y as f64);
+        na += (*x as f64).powi(2);
+        nb += (*y as f64).powi(2);
+    }
+    (dot / (na.sqrt() * nb.sqrt())) as f32
+}
+
+/// The next-token logits after `prompt`, from a prefill in `engine`.
+fn next_logits(engine: &mut Engine, prompt: &[u32]) -> Vec<f32> {
+    let mut table = BlockTable::new();
+    let hidden = loop {
+        if let PrefillProgress::Done(h) = engine.prefill_chunk(&mut table, prompt, usize::MAX) {
+            break h;
+        }
+    };
+    let logits = engine.logits(&hidden);
+    engine.release_table(&mut table);
+    logits
+}
+
+#[test]
+fn the_fast_tier_is_what_auto_picks_on_a_device_that_runs_it() {
+    let Some(auto) = engine(Precision::Auto) else { return };
+    assert!(auto.is_fast(), "Auto must pick the tensor-core tier on a device with workgroup reductions");
+    assert!(!engine(Precision::Reference).expect("reference").is_fast());
+}
+
+#[test]
+fn the_next_token_distribution_of_the_fast_tier_tracks_the_reference() {
+    let (Some(mut fast), Some(mut reference)) = (engine(Precision::Fast), engine(Precision::Reference)) else { return };
+    for (seed, len) in [(1u32, 5usize), (2, 17), (3, 40)] {
+        let p = prompt(seed, len);
+        let (a, b) = (next_logits(&mut fast, &p), next_logits(&mut reference, &p));
+        let cos = cosine(&a, &b);
+        println!("serve_fast prompt of {len}: logits cosine {cos:.5}");
+        assert!(cos >= LOGITS_COSINE, "prompt of {len} tokens: the fast tier's logits drifted from the reference (cosine {cos})");
+        let argmax = |v: &[f32]| v.iter().enumerate().fold(0, |best, (i, x)| if *x > v[best] { i } else { best });
+        assert_eq!(argmax(&a), argmax(&b), "prompt of {len} tokens: the greedy token differs");
+    }
+}
+
+/// Batched equals alone inside the fast tier: sequences share steps, not arithmetic.
+#[test]
+fn a_batch_in_the_fast_tier_decodes_what_each_decodes_alone() {
+    let Some(_) = engine(Precision::Fast) else { return };
+    let prompts: Vec<Vec<u32>> = [(1u32, 5usize), (2, 12), (3, 30)].iter().map(|&(s, n)| prompt(s, n)).collect();
+    let alone = |p: &Vec<u32>| {
+        let mut sched = Scheduler::new(engine(Precision::Fast).expect("fast"), 4);
+        let id = sched.submit(Request { prompt: p.clone(), max_new: 8, stop: Vec::new() });
+        sched.run().remove(&id).expect("finished")
+    };
+    let mut sched = Scheduler::new(engine(Precision::Fast).expect("fast"), 4);
+    let ids: Vec<u64> = prompts.iter().map(|p| sched.submit(Request { prompt: p.clone(), max_new: 8, stop: Vec::new() })).collect();
+    let together = sched.run();
+    for (p, id) in prompts.iter().zip(ids) {
+        assert_eq!(together[&id], alone(p), "a batched request must decode as it does alone (prompt of {})", p.len());
+    }
+}

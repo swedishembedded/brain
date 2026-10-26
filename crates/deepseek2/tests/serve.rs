@@ -20,7 +20,7 @@
 
 use deepseek2::config::DeepseekV2Config;
 use deepseek2::model::{DeepseekV2, Sizes};
-use deepseek2::serve::{pipelines, Engine, EngineConfig};
+use deepseek2::serve::{pipelines, Engine, EngineConfig, Precision};
 use gpu_core::Gpu;
 use model::kv_tier::KvTier;
 use model::serve::conformance::{self, Conformance};
@@ -29,7 +29,7 @@ use model::serve::{PromptEmbeds, Request, SampleParams, Scheduler};
 const SEED: u64 = 7;
 
 fn ec() -> EngineConfig {
-    EngineConfig { max_seq: 64, pool_tokens: 4 * 64 * 2, max_batch: 4, chunk: 8, block_size: 4, kv: KvTier::F32, topk: 8 }
+    EngineConfig { max_seq: 64, pool_tokens: 4 * 64 * 2, max_batch: 4, chunk: 8, block_size: 4, kv: KvTier::F32, topk: 8, precision: Precision::Reference }
 }
 
 /// Weights whose outputs depend on the input. The init's std of 0.02 collapses a
@@ -92,36 +92,38 @@ fn image_rows(n: usize) -> Vec<f32> {
     (0..n * d).map(|i| ((i * 37 % 29) as f32 / 29.0 - 0.5) * 2.0).collect()
 }
 
-fn parity(gpu: fn() -> Gpu) {
+/// `engine_gpu` builds the engine's device (its own pipeline list), `reference_gpu` the single-sequence
+/// decoder's (`DeepseekV2` addresses its kernels by its own `PIPELINES`).
+fn parity(engine_gpu: fn() -> Gpu, reference_gpu: fn() -> Gpu) {
     let n_new = 12;
     // Plain prompts of several lengths (a prompt past the 8-row chunk is read in pieces), decoded together.
     let prompts: Vec<Vec<u32>> = [5usize, 9, 20, 3].iter().enumerate().map(|(i, &n)| prompt(i as u32 + 1, n)).collect();
-    let mut sched = Scheduler::new(engine(gpu()), 4);
+    let mut sched = Scheduler::new(engine(engine_gpu()), 4);
     let ids: Vec<u64> = prompts.iter().map(|p| sched.submit(Request { prompt: p.clone(), max_new: n_new as usize, stop: Vec::new() })).collect();
     let got = sched.run();
     for (p, id) in prompts.iter().zip(&ids) {
-        assert_eq!(got[id], reference(gpu(), p, None, n_new), "a batched request must decode exactly what the single-sequence decoder does (prompt of {} tokens)", p.len());
+        assert_eq!(got[id], reference(reference_gpu(), p, None, n_new), "a batched request must decode exactly what the single-sequence decoder does (prompt of {} tokens)", p.len());
     }
 
     // A prompt with an image run in the middle, straddling a chunk boundary (rows 5..15 of a 20-token prompt).
     let (row0, n_img) = (5u32, 10usize);
     let rows = image_rows(n_img);
     let p = prompt(9, 20);
-    let mut sched = Scheduler::new(engine(gpu()), 2);
+    let mut sched = Scheduler::new(engine(engine_gpu()), 2);
     let embeds = PromptEmbeds::run(DeepseekV2Config::tiny().d_model() as usize, row0, rows.clone()).unwrap();
     let id = sched.submit_embedded(Request { prompt: p.clone(), max_new: n_new as usize, stop: Vec::new() }, embeds, SampleParams::greedy(), 0);
     let plain = sched.submit(Request { prompt: prompt(2, 6), max_new: n_new as usize, stop: Vec::new() });
     let got = sched.run();
-    assert_eq!(got[&id], reference(gpu(), &p, Some((row0, &rows)), n_new), "an image-run prompt must decode exactly what the splice path does");
-    assert_eq!(got[&plain], reference(gpu(), &prompt(2, 6), None, n_new), "a text request alongside it is unaffected");
+    assert_eq!(got[&id], reference(reference_gpu(), &p, Some((row0, &rows)), n_new), "an image-run prompt must decode exactly what the splice path does");
+    assert_eq!(got[&plain], reference(reference_gpu(), &prompt(2, 6), None, n_new), "a text request alongside it is unaffected");
 }
 
 #[test]
 fn greedy_decode_matches_the_single_sequence_decoder_cpu() {
-    parity(|| Gpu::new_cpu(&pipelines()));
+    parity(|| Gpu::new_cpu(&pipelines()), || Gpu::new_cpu(deepseek2::PIPELINES));
 }
 
 #[test]
 fn greedy_decode_matches_the_single_sequence_decoder_default_backend() {
-    parity(|| Gpu::new(&pipelines()));
+    parity(|| Gpu::new(&pipelines()), || Gpu::new(deepseek2::PIPELINES));
 }
