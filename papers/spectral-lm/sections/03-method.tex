@@ -34,6 +34,12 @@ writing it adds $W_{\mathrm{out}}u$ to $x$, that is $Q^\top W_{\mathrm{out}}u$
 to $z$. Addition commutes with $Q$. Induction over the layers gives the claim.
 \end{proof}
 
+This is the computational invariance that SliceGPT \citep{ashkboos2024slicegpt}
+uses to compress pretrained models: it folds each gain into the following
+linear map, so that the normalization commutes with $Q$, takes $Q$ from the
+principal components of the stream and deletes the rows and columns of the
+least-variance directions.
+
 Two consequences fix the design and the controls of this paper. First, a
 model that merely stores its hidden state as Fourier coefficients and keeps
 dense learned maps everywhere is a conventional transformer: the basis is

@@ -47,6 +47,16 @@ IMDB and AG~News text classification with an encoder. SpectralLM differs in
 keeping one residual stream, in coupling all modes through a signal-domain
 product, and in being an autoregressive language model.
 
+\paragraph{Rotating pretrained models.} SliceGPT \citep{ashkboos2024slicegpt}
+rotates each layer's residual stream of a pretrained model into its principal
+components, with an extra map on every residual connection to change basis
+between layers, deletes the least-variance directions and reports removing up
+to a quarter of the parameters, embeddings included, of LLAMA2-70B, OPT-66B and
+Phi-2 while keeping 99\%, 99\% and 90\% of their zero-shot task performance. Our
+residual-stream study (\cref{sec:res-compress}) asks the question that matters
+for spectral representations, whether a Fourier basis can stand in for the
+principal one, and finds that it cannot.
+
 \paragraph{Fourier features.} Random Fourier feature maps help coordinate
 networks fit high-frequency functions of low-dimensional inputs
 \citep{tancik2020fourierfeatures}. That is a statement about inputs that are
