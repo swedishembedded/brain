@@ -46,6 +46,7 @@ use std::cell::Cell;
 
 use gpu_core::{BufUsage, DeviceBuffer, Gpu, Step};
 use model::block::{self, Gqa, KernelIds};
+use model::saved::{Residuals, SavedPolicy};
 use paramstore::ParamStore;
 
 use crate::config::HuginnConfig;
@@ -165,6 +166,11 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("gqa_bwd_dk", kernels::GQA_BWD_DK),
     ("silu_bwd_da", kernels::SILU_BWD_DA),
     ("silu_bwd_db", kernels::SILU_BWD_DB),
+    // Narrow boundary residuals (`model::saved::Residuals`), resolved by name.
+    ("pack_bf16", kernels::PACK_BF16),
+    ("unpack_bf16", kernels::UNPACK_BF16),
+    ("pack_fp8_rows", kernels::PACK_FP8_ROWS),
+    ("unpack_fp8_rows", kernels::UNPACK_FP8_ROWS),
 ];
 
 pub(crate) fn decode_batched_ids() -> block::GqaDecodeBatchedIds {
@@ -237,8 +243,10 @@ struct Tape {
     /// last one is the injection every recurrent step re-reads.
     embeds: Vec<DeviceBuffer>,
     /// Per recurrent step `[adapter, core.0 … core.n-1]`, so
-    /// `steps * (n_recurrent + 1)` buffers.
-    core: Vec<DeviceBuffer>,
+    /// `steps * (n_recurrent + 1)` boundaries: the part of the tape that grows
+    /// with the recurrence, and the part a narrow saved format holds
+    /// ([`Residuals`]).
+    core: Residuals,
     /// The normed state the coda consumes (`ln_f` applied, coda not).
     latent: DeviceBuffer,
     /// `[coda.0 … coda.n-1, final norm]`.
@@ -409,7 +417,7 @@ impl Huginn {
         let per_step = cfg.n_recurrent as usize + 1;
         let tape = train.then(|| Tape {
             embeds: (0..cfg.n_prelude as usize + 2).map(|_| st(n * d)).collect(),
-            core: (0..steps as usize * per_step).map(|_| st(n * d)).collect(),
+            core: Residuals::new((0..steps as usize * per_step).map(|_| st(n * d)).collect(), 0..steps as usize * per_step),
             latent: st(n * d),
             coda: (0..cfg.n_coda as usize + 1).map(|_| st(n * d)).collect(),
             ce_rows: st(n),
@@ -662,10 +670,12 @@ impl Huginn {
             self.copy_cols(&mut g, state, d, 0, &self.scratch.concat, 2 * d, 0, d);
             self.copy_cols(&mut g, inject, d, 0, &self.scratch.concat, 2 * d, d, d);
             self.linear(&mut g, &self.scratch.concat, "adapter.weight", &tape.core[b], n, 2 * d, d);
+            tape.core.round_trip(&self.gpu, &mut g, b);
             let mut prev = &tape.core[b];
             for i in 0..cfg.n_recurrent as usize {
                 let out = &tape.core[b + 1 + i];
                 self.block_steps(&mut g, &format!("core.{i}"), prev, out);
+                tape.core.round_trip(&self.gpu, &mut g, b + 1 + i);
                 prev = out;
             }
             state = prev;
@@ -727,7 +737,8 @@ impl Huginn {
         }
         // The first use of `ln_f`: its input is the last recurrent block's
         // output, so its input gradient lands on that block's output gradient.
-        let last_core = tape.core.len() - 1;
+        let last_core = self.steps as usize * per_step - 1;
+        tape.core.restore(&self.gpu, &mut steps, last_core);
         steps.extend(block::rmsnorm_bwd(
             &self.gpu,
             &k,
@@ -748,9 +759,13 @@ impl Huginn {
         for s in (0..self.steps as usize).rev() {
             let b = s * per_step;
             for i in (0..cfg.n_recurrent as usize).rev() {
+                tape.core.restore(&self.gpu, &mut steps, b + i);
                 self.block_bwd(&mut steps, &format!("core.{i}"), &tape.core[b + i], &g.core[b + i + 1], &g.core[b + i]);
             }
             // Adapter: out = concat(state, inject) @ adapter.weightᵀ.
+            if s > 0 {
+                tape.core.restore(&self.gpu, &mut steps, b - 1);
+            }
             let h_prev = if s == 0 { &self.init_state } else { &tape.core[b - 1] };
             self.copy_cols(&mut steps, h_prev, d, 0, &self.scratch.concat, 2 * d, 0, d);
             self.copy_cols(&mut steps, inject, d, 0, &self.scratch.concat, 2 * d, d, d);
@@ -866,13 +881,26 @@ impl model::Model for Huginn {
         Some(model::OptimizerParts { gpu: &self.gpu, store: &self.ps, optim: self.opt.as_ref()? })
     }
 
-    /// Huginn keeps the f32 residual between block applications and rebuilds each block before its backward (one
-    /// scratch set serves every application), so recompute is the only policy it runs.
-    fn set_saved_policy(&mut self, policy: model::saved::SavedPolicy) -> Result<(), String> {
-        match policy {
-            model::saved::SavedPolicy::Recompute => Ok(()),
-            other => Err(format!("huginn recomputes each block application from its f32 residual in the backward; {other:?} is not available")),
+    /// Huginn keeps only the residual between block applications and rebuilds each block before its backward (one
+    /// scratch set serves every application): it runs recompute, with the recurrence's residuals in f32 or, once
+    /// narrowed, in bf16 or FP8 ([`Residuals`]; the prelude's and coda's few stay f32). Keeping every application is
+    /// refused by name.
+    fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        let held = self.tape.as_ref().map_or(model::saved::SavedFormat::F32, |t| t.core.format());
+        let current = SavedPolicy::recompute_with(held);
+        if !current.narrows_to(policy) {
+            return Err(format!("huginn recomputes each block application from its {held:?} residual in the backward; {policy:?} is not available"));
         }
+        if let SavedPolicy::Quantized(format) = policy {
+            if policy != current {
+                let (rows, width) = (self.rows(), self.cfg.d_model);
+                let tape = self.tape.as_mut().ok_or("huginn: an inference build keeps no residuals to narrow")?;
+                tape.core.quantize(&self.gpu, format, rows, width).map_err(|e| format!("huginn: {e}"))?;
+                self.fwd_steps = self.training_forward_steps();
+                self.bwd_steps = self.training_backward_steps();
+            }
+        }
+        Ok(())
     }
 
     type Config = HuginnConfig;
