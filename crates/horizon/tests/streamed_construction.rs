@@ -39,7 +39,7 @@ fn horizon_builds_its_layers_straight_into_the_window() {
     let encoded: Vec<Encoded> = subjects.iter().take(60).map(|s| encode(s, &vocab, &cfg)).collect();
     let init = horizon::init_weights(&cfg, 3);
     let refs: Vec<&Encoded> = encoded.iter().take(BATCH as usize).collect();
-    let batch = assemble(&cfg, &refs, BATCH as usize, 0.4, &mut Rng::new(7));
+    let batch = assemble(&cfg, &refs, BATCH as usize, 0.4, &mut Rng::new(data::rng::random_seed()));
     let resident = model::TrainPrecision::parse("weights=f32,window=1").unwrap().resident_config(Some(7)).unwrap().expect("resident");
     let build = || Horizon::new_on(gpu_core::testgpu::dev(pipelines()), cfg.clone(), BATCH, &init);
     let build_streamed = || Horizon::new_resident_on(gpu_core::testgpu::dev(pipelines()), cfg.clone(), BATCH, &init, &resident);

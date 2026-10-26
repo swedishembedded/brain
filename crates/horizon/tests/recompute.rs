@@ -34,7 +34,7 @@ fn horizon_recomputes_every_layer_and_narrows_its_boundaries() {
     cfg.n_layers = 6;
     let encoded: Vec<Encoded> = subjects.iter().take(30).map(|s| encode(s, &vocab, &cfg)).collect();
     let refs: Vec<&Encoded> = encoded.iter().collect();
-    let batch = assemble(&cfg, &refs, 32, 0.4, &mut Rng::new(7));
+    let batch = assemble(&cfg, &refs, 32, 0.4, &mut Rng::new(data::rng::random_seed()));
     let init = horizon::init_weights(&cfg, 3);
     let build = || Horizon::new_on(gpu_core::testgpu::dev(horizon::PIPELINES), cfg.clone(), 32, &init);
     let step = |m: &Horizon| {

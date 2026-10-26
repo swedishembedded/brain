@@ -37,8 +37,8 @@ teardown_file() {
 
 @test "the aligner and an adapter train on a bf16 decoder read from the checkpoint as downloaded" {
   # seed: the loss comparison below is taken over four steps, so the run is pinned
-  run "$BRAIN" deepseekvl finetune --weights "$STORE/$REPO_ID" --dataset "$WORK/data" \
-    --out "$WORK/out" --steps 4 --lr 1e-4 --seed 1
+  run "$BRAIN" deepseekvl finetune --weights "$STORE/$REPO_ID" --dataset "$WORK/data" --seed 1 \
+    --out "$WORK/out" --steps 4 --lr 1e-4
   [ "$status" -eq 0 ] || { echo "$output" >&3; false; }
   [[ "$output" == *"trained on 2 example(s)"* ]]
   [ -s "$WORK/out/adapter.safetensors" ]
@@ -72,8 +72,8 @@ teardown_file() {
   cp "$WORK/data/dog.png" "$WORK/learn/dog.png"
   printf '%s\n' '{"image":"dog.png","messages":[{"role":"user","content":"<image_placeholder>\nWhat animal is this?"},{"role":"assistant","content":"That is a Blorbville puppy."}]}' >"$WORK/learn/train.jsonl"
   # seed: the served reply below asserts this 14-step run learned the answer, so the run is pinned
-  run "$BRAIN" deepseekvl finetune --weights "$REPO_ID" --models-dir "$WORK/models" --dataset "$WORK/learn" \
-    --out "$WORK/tuned" --steps 14 --lr 3e-4 --seed 1
+  run "$BRAIN" deepseekvl finetune --weights "$REPO_ID" --models-dir "$WORK/models" --dataset "$WORK/learn" --seed 1 \
+    --out "$WORK/tuned" --steps 14 --lr 3e-4
   [ "$status" -eq 0 ] || { echo "$output" >&3; false; }
 
   local port="${DEEPSEEK_VL_FT_PORT:-8942}"

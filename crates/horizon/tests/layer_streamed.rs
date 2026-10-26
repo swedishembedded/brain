@@ -46,7 +46,7 @@ fn horizon_streams_its_layers_through_a_one_layer_window_and_resumes_exactly() {
     let build = || Horizon::new_on(gpu_core::testgpu::dev(pipelines()), cfg.clone(), BATCH, &init);
 
     let refs: Vec<&Encoded> = encoded.iter().take(BATCH as usize).collect();
-    let batch = assemble(&cfg, &refs, BATCH as usize, 0.4, &mut Rng::new(7));
+    let batch = assemble(&cfg, &refs, BATCH as usize, 0.4, &mut Rng::new(data::rng::random_seed()));
     let step = |m: &Horizon, t: u32, clip: Option<f32>| {
         m.zero_grads();
         m.set_batch(&batch);

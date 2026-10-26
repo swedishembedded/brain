@@ -34,7 +34,7 @@ fn horizon_trains_with_narrow_optimizer_state() {
     cfg.max_tokens = 8;
     let encoded: Vec<Encoded> = subjects.iter().take(30).map(|s| encode(s, &vocab, &cfg)).collect();
     let refs: Vec<&Encoded> = encoded.iter().collect();
-    let batch = assemble(&cfg, &refs, 32, 0.4, &mut Rng::new(7));
+    let batch = assemble(&cfg, &refs, 32, 0.4, &mut Rng::new(data::rng::random_seed()));
     let init = horizon::init_weights(&cfg, 3);
     let lr = 1e-2;
     let build = || Horizon::new_on(gpu_core::testgpu::dev(pipelines()), cfg.clone(), 32, &init);

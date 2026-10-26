@@ -45,8 +45,8 @@ loss_fell() {
 
 @test "understanding: the aligner and an adapter train on the checkpoint as downloaded" {
   # seed: loss_fell compares the loss over four steps, so the run is pinned
-  run "$BRAIN" januspro finetune --mode understanding --weights "$STORE/$REPO_ID" --dataset "$WORK/und" \
-    --out "$WORK/out_und" --steps 4 --lr 1e-4 --seed 1
+  run "$BRAIN" januspro finetune --mode understanding --weights "$STORE/$REPO_ID" --dataset "$WORK/und" --seed 1 \
+    --out "$WORK/out_und" --steps 4 --lr 1e-4
   [ "$status" -eq 0 ] || { echo "$output" >&3; false; }
   [ -s "$WORK/out_und/adapter.safetensors" ]
   [ -s "$WORK/out_und/aligner.safetensors" ]
@@ -55,8 +55,8 @@ loss_fell() {
 
 @test "generation: the adapter and the generation heads train on the image's VQ codes" {
   # seed: loss_fell compares the loss over four steps, so the run is pinned
-  run "$BRAIN" januspro finetune --mode generation --weights "$STORE/$REPO_ID" --dataset "$WORK/gen" \
-    --out "$WORK/out_gen" --steps 4 --lr 1e-4 --aligner-lr 1e-4 --seed 1
+  run "$BRAIN" januspro finetune --mode generation --weights "$STORE/$REPO_ID" --dataset "$WORK/gen" --seed 1 \
+    --out "$WORK/out_gen" --steps 4 --lr 1e-4 --aligner-lr 1e-4
   [ "$status" -eq 0 ] || { echo "$output" >&3; false; }
   [ -s "$WORK/out_gen/adapter.safetensors" ]
   [ -s "$WORK/out_gen/generation.safetensors" ]
