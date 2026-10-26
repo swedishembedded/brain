@@ -45,6 +45,13 @@ pub trait PagedDecoder {
     /// before yielding to decode — the default per-iteration prefill budget.
     fn max_prefill_tokens(&self) -> u32;
 
+    /// The most sequences one decode step carries, or `None` (the default) when
+    /// it is not bounded by the decoder's own buffers. [`Scheduler::new`] never
+    /// runs more sequences than this, whatever `max_running` it is given.
+    fn max_batch(&self) -> Option<usize> {
+        None
+    }
+
     /// KV blocks currently free in the pool.
     fn free_blocks(&self) -> u32;
 
@@ -1057,6 +1064,7 @@ pub struct Scheduler<D: PagedDecoder> {
 
 impl<D: PagedDecoder> Scheduler<D> {
     pub fn new(dec: D, max_running: usize) -> Scheduler<D> {
+        let max_running = dec.max_batch().map_or(max_running, |m| max_running.min(m));
         // Default budget: two full prefill chunks per iteration. Enough to keep
         // admission moving under load, small enough that running sequences see
         // a decode step between arrivals.
