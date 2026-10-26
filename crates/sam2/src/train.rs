@@ -57,6 +57,7 @@ use std::cell::Cell;
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::block;
+use model::saved::SavedPolicy;
 use model::vit::{gather_rows, row_index_buffer, scatter_rows};
 use vision::{Act, ConvTrSpec, ConvTranspose, Ctx, LayerNorm2d, Ln2dNames, Shape};
 
@@ -243,6 +244,30 @@ impl AttnCache {
             d_v_in: g.storage(tk as u64 * din as u64),
         }
     }
+    /// Point every buffer at `donor`'s, releasing this module's own. The two must have the same geometry.
+    fn adopt(&mut self, donor: &AttnCache) {
+        assert!(
+            (self.tq, self.tk, self.io, self.din, self.heads) == (donor.tq, donor.tk, donor.io, donor.din, donor.heads),
+            "{}: cannot share buffers with {} of a different geometry",
+            self.prefix,
+            donor.prefix
+        );
+        self.q = donor.q.clone();
+        self.k = donor.k.clone();
+        self.v = donor.v.clone();
+        self.scores = donor.scores.clone();
+        self.probs = donor.probs.clone();
+        self.kt = donor.kt.clone();
+        self.ctx = donor.ctx.clone();
+        self.d_q = donor.d_q.clone();
+        self.d_k = donor.d_k.clone();
+        self.d_v = donor.d_v.clone();
+        self.d_ctx = donor.d_ctx.clone();
+        self.d_scores = donor.d_scores.clone();
+        self.d_q_in = donor.d_q_in.clone();
+        self.d_k_in = donor.d_k_in.clone();
+        self.d_v_in = donor.d_v_in.clone();
+    }
     fn hd(&self) -> u32 {
         self.io / self.heads
     }
@@ -300,6 +325,14 @@ impl MlpCache {
         }
         MlpCache { prefix: prefix.to_string(), rows, dims: dims.to_vec(), act, sigmoid, pre, post, d_pre, d_post }
     }
+    /// Point every buffer at `donor`'s, releasing this MLP's own. The two must have the same geometry.
+    fn adopt(&mut self, donor: &MlpCache) {
+        assert!((self.rows, &self.dims) == (donor.rows, &donor.dims), "{}: cannot share buffers with {}", self.prefix, donor.prefix);
+        self.pre = donor.pre.clone();
+        self.post = donor.post.clone();
+        self.d_pre = donor.d_pre.clone();
+        self.d_post = donor.d_post.clone();
+    }
     fn last(&self) -> usize {
         self.dims.len() - 2
     }
@@ -338,6 +371,31 @@ struct LayerCache {
     o3: DeviceBuffer,
     k_a: DeviceBuffer,
     k_b: DeviceBuffer,
+}
+
+impl LayerCache {
+    /// Share everything the layer's backward reads except its two outputs (`q_f`, `k_b`, the next layer's inputs)
+    /// with `donor`. The shared buffers hold whichever layer last ran its forward, so the backward rebuilds this
+    /// layer's before reading them ([`MaskDecoderTrainer::layer_fwd`]).
+    fn share_intermediates(&mut self, donor: &LayerCache) {
+        self.self_attn.adopt(&donor.self_attn);
+        self.t2i.adopt(&donor.t2i);
+        self.i2t.adopt(&donor.i2t);
+        self.mlp.adopt(&donor.mlp);
+        self.qs = donor.qs.clone();
+        self.o1 = donor.o1.clone();
+        self.q_a = donor.q_a.clone();
+        self.q_b = donor.q_b.clone();
+        self.q2 = donor.q2.clone();
+        self.kpe = donor.kpe.clone();
+        self.o2 = donor.o2.clone();
+        self.q_c = donor.q_c.clone();
+        self.q_d = donor.q_d.clone();
+        self.q_e = donor.q_e.clone();
+        self.q3 = donor.q3.clone();
+        self.o3 = donor.o3.clone();
+        self.k_a = donor.k_a.clone();
+    }
 }
 
 /// Resolved decoder geometry.
@@ -420,6 +478,8 @@ pub struct MaskDecoderTrainer {
     ln_mean: DeviceBuffer,
     ln_inv: DeviceBuffer,
     fwd_done: Cell<bool>,
+    /// What the backward keeps of the forward ([`MaskDecoderTrainer::set_saved_policy`]).
+    saved: SavedPolicy,
 }
 
 impl MaskDecoderTrainer {
@@ -604,6 +664,7 @@ impl MaskDecoderTrainer {
             ln_mean: g.storage(ln_rows),
             ln_inv: g.storage(ln_rows),
             fwd_done: Cell::new(false),
+            saved: SavedPolicy::Keep,
             layers,
             dim,
             bwd,
@@ -621,6 +682,30 @@ impl MaskDecoderTrainer {
     // -----------------------------------------------------------------------
     // small dispatch helpers
     // -----------------------------------------------------------------------
+
+    /// Keep what `policy` names of the forward: every layer's intermediates ([`SavedPolicy::Keep`]), or only each
+    /// two-way layer's output tokens and keys, the layer rebuilt from its inputs before its backward
+    /// ([`SavedPolicy::Recompute`]). The rebuilt values are the forward's, bit for bit (same kernels, same inputs).
+    /// The decoder has no residual stream to narrow, so a narrow saved format is refused by name, as is going back
+    /// to keeping everything.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        if let SavedPolicy::Quantized(format) = policy {
+            return Err(format!("sam2 mask decoder recomputes its layers from their f32 inputs; {format:?} saved boundaries do not apply"));
+        }
+        if !self.saved.narrows_to(policy) {
+            return Err(format!("sam2 mask decoder: a trainer keeping {:?} cannot go back to {policy:?}", self.saved));
+        }
+        if policy.recomputes() && !self.saved.recomputes() {
+            // One set of intermediates per role serves every layer and the final attention (the final attention's
+            // backward runs before any layer is rebuilt, so it reads what its own forward wrote).
+            let (donor, rest) = self.layers.split_first_mut().expect("the two-way transformer has at least one layer");
+            rest.iter_mut().for_each(|l| l.share_intermediates(donor));
+            self.final_attn.adopt(&donor.t2i);
+            self.fwd_done.set(false);
+        }
+        self.saved = policy;
+        Ok(())
+    }
 
     fn g(&self) -> &Gpu {
         &self.sam.gpu
@@ -875,43 +960,7 @@ impl MaskDecoderTrainer {
 
         // ---- two-way transformer ----
         for l in 0..dm.depth as usize {
-            let lc = &self.layers[l];
-            let (q_in, k_in): (&DeviceBuffer, &DeviceBuffer) = if l == 0 {
-                (&self.tokens, &self.keys0)
-            } else {
-                (&self.layers[l - 1].q_f, &self.layers[l - 1].k_b)
-            };
-            let mut s = Vec::new();
-            // (1) token self-attention
-            if l == 0 {
-                // `skip_first_layer_pe`: no positional add AND no residual.
-                self.attn_fwd(&mut s, &lc.self_attn, q_in, q_in, q_in, &lc.o1);
-                s.push(self.acc(&lc.q_a, &lc.o1, qn));
-                g.submit(&[&lc.q_a], &s);
-            } else {
-                s.push(self.add2(q_in, &self.tokens, &lc.qs, qn));
-                self.attn_fwd(&mut s, &lc.self_attn, &lc.qs, &lc.qs, q_in, &lc.o1);
-                s.push(self.add2(q_in, &lc.o1, &lc.q_a, qn));
-                g.submit(&[], &s);
-            }
-            let mut s = Vec::new();
-            self.ln_fwd(&mut s, &lc.q_a, &lc.q_b, &format!("{}.norm1", lc.p), t, d);
-            // (2) tokens -> image
-            s.push(self.add2(&lc.q_b, &self.tokens, &lc.q2, qn));
-            s.push(self.add2(k_in, &self.key_pe, &lc.kpe, kn));
-            self.attn_fwd(&mut s, &lc.t2i, &lc.q2, &lc.kpe, k_in, &lc.o2);
-            s.push(self.add2(&lc.q_b, &lc.o2, &lc.q_c, qn));
-            self.ln_fwd(&mut s, &lc.q_c, &lc.q_d, &format!("{}.norm2", lc.p), t, d);
-            // (3) MLP on the tokens
-            self.mlp_fwd(&mut s, &lc.mlp, &lc.q_d);
-            s.push(self.add2(&lc.q_d, lc.mlp.out(), &lc.q_e, qn));
-            self.ln_fwd(&mut s, &lc.q_e, &lc.q_f, &format!("{}.norm3", lc.p), t, d);
-            // (4) image -> tokens
-            s.push(self.add2(&lc.q_f, &self.tokens, &lc.q3, qn));
-            self.attn_fwd(&mut s, &lc.i2t, &lc.kpe, &lc.q3, &lc.q_f, &lc.o3);
-            s.push(self.add2(k_in, &lc.o3, &lc.k_a, kn));
-            self.ln_fwd(&mut s, &lc.k_a, &lc.k_b, &format!("{}.norm4", lc.p), n_img, d);
-            g.submit(&[], &s);
+            self.layer_fwd(l);
         }
         let last = &self.layers[dm.depth as usize - 1];
 
@@ -963,6 +1012,53 @@ impl MaskDecoderTrainer {
         self.mlp_fwd(&mut s, &self.obj_head, &self.obj_tok);
         g.submit(&[], &s);
         self.fwd_done.set(true);
+    }
+
+    /// One `TwoWayAttentionBlock`'s forward, from the layer's input tokens and keys into its own buffers. The
+    /// backward of a recomputing trainer runs it again from the same inputs to rebuild what it reads.
+    fn layer_fwd(&self, l: usize) {
+        let g = self.g();
+        let dm = self.dim;
+        let (d, t, n_img) = (dm.d, dm.t, dm.n_img);
+        let qn = t * d;
+        let kn = n_img * d;
+        let lc = &self.layers[l];
+        let (q_in, k_in): (&DeviceBuffer, &DeviceBuffer) = if l == 0 {
+            (&self.tokens, &self.keys0)
+        } else {
+            (&self.layers[l - 1].q_f, &self.layers[l - 1].k_b)
+        };
+        let mut s = Vec::new();
+        // (1) token self-attention
+        if l == 0 {
+            // `skip_first_layer_pe`: no positional add AND no residual.
+            self.attn_fwd(&mut s, &lc.self_attn, q_in, q_in, q_in, &lc.o1);
+            s.push(self.acc(&lc.q_a, &lc.o1, qn));
+            g.submit(&[&lc.q_a], &s);
+        } else {
+            s.push(self.add2(q_in, &self.tokens, &lc.qs, qn));
+            self.attn_fwd(&mut s, &lc.self_attn, &lc.qs, &lc.qs, q_in, &lc.o1);
+            s.push(self.add2(q_in, &lc.o1, &lc.q_a, qn));
+            g.submit(&[], &s);
+        }
+        let mut s = Vec::new();
+        self.ln_fwd(&mut s, &lc.q_a, &lc.q_b, &format!("{}.norm1", lc.p), t, d);
+        // (2) tokens -> image
+        s.push(self.add2(&lc.q_b, &self.tokens, &lc.q2, qn));
+        s.push(self.add2(k_in, &self.key_pe, &lc.kpe, kn));
+        self.attn_fwd(&mut s, &lc.t2i, &lc.q2, &lc.kpe, k_in, &lc.o2);
+        s.push(self.add2(&lc.q_b, &lc.o2, &lc.q_c, qn));
+        self.ln_fwd(&mut s, &lc.q_c, &lc.q_d, &format!("{}.norm2", lc.p), t, d);
+        // (3) MLP on the tokens
+        self.mlp_fwd(&mut s, &lc.mlp, &lc.q_d);
+        s.push(self.add2(&lc.q_d, lc.mlp.out(), &lc.q_e, qn));
+        self.ln_fwd(&mut s, &lc.q_e, &lc.q_f, &format!("{}.norm3", lc.p), t, d);
+        // (4) image -> tokens
+        s.push(self.add2(&lc.q_f, &self.tokens, &lc.q3, qn));
+        self.attn_fwd(&mut s, &lc.i2t, &lc.kpe, &lc.q3, &lc.q_f, &lc.o3);
+        s.push(self.add2(k_in, &lc.o3, &lc.k_a, kn));
+        self.ln_fwd(&mut s, &lc.k_a, &lc.k_b, &format!("{}.norm4", lc.p), n_img, d);
+        g.submit(&[], &s);
     }
 
     /// Mask logits `[nmt, 16*n_img]` from the last forward.
@@ -1125,6 +1221,9 @@ impl MaskDecoderTrainer {
         let mut d_qout = d_q_last;
         let mut d_kout = d_k_last;
         for l in (0..dm.depth as usize).rev() {
+            if self.saved.recomputes() {
+                self.layer_fwd(l);
+            }
             let (d_qin, d_kin) = (g.storage(qn as u64), g.storage(kn as u64));
             self.layer_bwd(l, &d_qout, &d_kout, &d_qin, &d_kin);
             d_qout = d_qin;
