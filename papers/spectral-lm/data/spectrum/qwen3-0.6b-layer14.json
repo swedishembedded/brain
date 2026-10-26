@@ -1,0 +1,125 @@
+{
+ "commit": "ea30f33b63dda048965b4395ee12e1ee065c6fb5",
+ "device": "gpu0 Tesla P40",
+ "plan": "spectrum",
+ "id": "qwen3-0.6b-layer14",
+ "command": "target/release/sample-text-spectral-lm qwen-spectrum --weights <models>/Qwen/Qwen3-0.6B/model.brain.safetensors --fit-text data/tinystories/train.txt --text data/tinystories/valid.txt --layer 14 --widths 64,128,256,512 --fit-docs 256 --docs 256 --max-doc-bytes 1500 --batch 8 --seed 1163594489334123103 --gpu 0",
+ "result": {
+  "base_nll": 2.2410663475860857,
+  "checkpoint": "<models>/Qwen/Qwen3-0.6B/model.brain.safetensors",
+  "documents": 256,
+  "event": "spectrum",
+  "fit_documents": 256,
+  "fit_pca_energy": [
+   0.9981261040648318,
+   0.9987735081879868,
+   0.9993357432204711,
+   0.999754099023952
+  ],
+  "fit_positions": 47048,
+  "layer": 14,
+  "residual_width": 1024,
+  "rows": [
+   {
+    "basis": "fourier",
+    "delta_nll": 7.8516846591624025,
+    "energy": 0.05919085803716675,
+    "m": 64
+   },
+   {
+    "basis": "pca",
+    "delta_nll": 0.606907628371115,
+    "energy": 0.9982194361447655,
+    "m": 64
+   },
+   {
+    "basis": "random",
+    "delta_nll": 6.457124607271424,
+    "energy": 0.03984067036393857,
+    "m": 64
+   },
+   {
+    "basis": "coordinates",
+    "delta_nll": 3.416838905088398,
+    "energy": 0.9953357907129842,
+    "m": 64
+   },
+   {
+    "basis": "fourier",
+    "delta_nll": 6.975032474401392,
+    "energy": 0.1251998240770603,
+    "m": 128
+   },
+   {
+    "basis": "pca",
+    "delta_nll": 0.14390385599158376,
+    "energy": 0.9988237549569443,
+    "m": 128
+   },
+   {
+    "basis": "random",
+    "delta_nll": 6.373238174449197,
+    "energy": 0.10992980230582262,
+    "m": 128
+   },
+   {
+    "basis": "coordinates",
+    "delta_nll": 2.2096467245524187,
+    "energy": 0.9958186641306661,
+    "m": 128
+   },
+   {
+    "basis": "fourier",
+    "delta_nll": 6.707394563794931,
+    "energy": 0.24934301898027347,
+    "m": 256
+   },
+   {
+    "basis": "pca",
+    "delta_nll": 0.017181661392753095,
+    "energy": 0.9993515860109864,
+    "m": 256
+   },
+   {
+    "basis": "random",
+    "delta_nll": 7.482692136280853,
+    "energy": 0.23598481546276254,
+    "m": 256
+   },
+   {
+    "basis": "coordinates",
+    "delta_nll": 0.5679986090978181,
+    "energy": 0.9972360485464523,
+    "m": 256
+   },
+   {
+    "basis": "fourier",
+    "delta_nll": 4.890220163943778,
+    "energy": 0.5002265875316945,
+    "m": 512
+   },
+   {
+    "basis": "pca",
+    "delta_nll": -0.0012389858492755312,
+    "energy": 0.9997511549164768,
+    "m": 512
+   },
+   {
+    "basis": "random",
+    "delta_nll": 5.133149084735917,
+    "energy": 0.47946920865516357,
+    "m": 512
+   },
+   {
+    "basis": "coordinates",
+    "delta_nll": 0.20071123311277683,
+    "energy": 0.9989335922412467,
+    "m": 512
+   }
+  ],
+  "seconds": 565.168358939,
+  "seed": 1163594489334123103,
+  "tokens": 45902
+ },
+ "peak_mem_mib": 6742
+}
