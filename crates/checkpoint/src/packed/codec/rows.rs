@@ -152,8 +152,10 @@ const ENCODE_CHUNK: usize = 1 << 16;
 /// Encode every value of `vals` to a fixed-width little-endian code, replacing `out`. Elements are independent, so
 /// large tiles are cut into contiguous chunks run on the CPU scheduler's pool; the bytes are the serial loop's.
 fn fill_encoded<const W: usize>(vals: &[f32], out: &mut Vec<u8>, encode: impl Fn(f32) -> [u8; W] + Sync) {
-    out.clear();
-    out.resize(vals.len() * W, 0);
+    // Every byte is written below; see `fill_decoded` for why a fresh buffer is zeroed pages and not a `resize`.
+    if out.len() != vals.len() * W {
+        *out = vec![0u8; vals.len() * W];
+    }
     let codes = out.as_chunks_mut::<W>().0;
     #[cfg(not(target_arch = "wasm32"))]
     backend_cpu::par::chunks_mut(codes, ENCODE_CHUNK, |c, dst| {

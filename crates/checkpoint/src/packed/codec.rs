@@ -205,8 +205,11 @@ const DECODE_CHUNK: usize = 1 << 16;
 /// CPU scheduler's pool; the values are the serial loop's.
 fn fill_decoded<const W: usize>(payload: &[u8], n: usize, out: &mut Vec<f32>, decode: impl Fn([u8; W]) -> f32 + Sync) {
     let codes = &payload.as_chunks::<W>().0[..n.min(payload.len() / W)];
-    out.clear();
-    out.resize(codes.len(), 0.0);
+    // Every element is written below, so a buffer of the right length is reused as it is. A fresh one comes from the
+    // allocator's zeroed pages, which the parallel fill touches first: `resize` would write them all on this thread.
+    if out.len() != codes.len() {
+        *out = vec![0f32; codes.len()];
+    }
     #[cfg(not(target_arch = "wasm32"))]
     backend_cpu::par::chunks_mut(out, DECODE_CHUNK, |c, dst| {
         for (d, &code) in dst.iter_mut().zip(&codes[c * DECODE_CHUNK..]) {

@@ -748,6 +748,7 @@ impl ResidentFullFt {
             sink.take_weight().ok_or_else(|| format!("{}: the upload produced no weight", d.name))
         };
         let manifest: Vec<(String, usize)> = specs.iter().map(|s| (s.name.clone(), s.n as usize * s.k as usize)).collect();
+        let state_clock = std::time::Instant::now();
         let mut state = TrainState::create(TrainStateConfig {
             manifest,
             policy: PrecisionPolicy::uniform(cfg.precision()),
@@ -758,6 +759,8 @@ impl ResidentFullFt {
             row_len: specs.iter().map(|s| (s.name.clone(), s.k as usize)).collect(),
         })
         .map_err(|e| e.to_string())?;
+        gpu_core::profile::stage_time("resident build: allocate and fault in the master and optimizer state", state_clock);
+        let upload_clock = std::time::Instant::now();
         let gpu = ops.gpu();
         let grad_words = |s: &ResidentSpec| {
             let elems = s.n as u64 * s.k as u64;
@@ -809,6 +812,7 @@ impl ResidentFullFt {
                 (weights, grads, Some(window), bytes)
             }
         };
+        gpu_core::profile::stage_time("resident build: read the base once, seed the master, encode and upload the weights", upload_clock);
         Ok(ResidentFullFt { cfg, specs, descs, weights, grads, state, registry, norm, tile, times: HostTimes::default(), weight_bytes, window })
     }
 

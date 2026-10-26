@@ -250,7 +250,31 @@ impl TensorSource for HashMap<String, Vec<f32>> {
 /// that can decode a range ([`TensorSource::with_tensor_range`]: safetensors, packed and GGUF sources); a source that
 /// holds plain f32 already has the tensor in memory.
 pub fn read_range_into(src: &dyn TensorSource, name: &str, start: usize, out: &mut [f32]) -> bool {
-    src.with_tensor_range(name, start, out.len(), &mut |values| out.copy_from_slice(values))
+    src.with_tensor_range(name, start, out.len(), &mut |values| copy_slice_parallel(out, values))
+}
+
+/// Elements below which a copy stays on the calling thread.
+#[cfg(not(target_arch = "wasm32"))]
+const PARALLEL_COPY_MIN: usize = 1 << 20;
+
+/// `dst.copy_from_slice(src)`, cut into contiguous pieces on the CPU pool when it is large: one core does not saturate
+/// the memory system, and a tile is megabytes.
+fn copy_slice_parallel<T: Copy + Send + Sync>(dst: &mut [T], src: &[T]) {
+    assert_eq!(dst.len(), src.len(), "copy_slice_parallel: {} into {}", src.len(), dst.len());
+    #[cfg(not(target_arch = "wasm32"))]
+    if dst.len() >= PARALLEL_COPY_MIN {
+        return backend_cpu::par::chunks_mut(dst, PARALLEL_COPY_MIN, |i, d| d.copy_from_slice(&src[i * PARALLEL_COPY_MIN..i * PARALLEL_COPY_MIN + d.len()]));
+    }
+    dst.copy_from_slice(src);
+}
+
+/// Replace `dst` with `src`, copied across the CPU pool. A buffer that is already the right length is overwritten in
+/// place; any other is replaced by zeroed pages the parallel copy touches first (a `resize` would write them all here).
+pub(crate) fn copy_parallel(dst: &mut Vec<u8>, src: &[u8]) {
+    if dst.len() != src.len() {
+        *dst = vec![0u8; src.len()];
+    }
+    copy_slice_parallel(dst, src);
 }
 
 /// The shape-carrying eager map several model crates use for a small,

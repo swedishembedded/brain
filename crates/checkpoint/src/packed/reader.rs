@@ -349,9 +349,7 @@ impl PackedTensorReader for PackedReader {
         let (payload, _) = self.stored(name).ok_or_else(|| format!("{name}: not in checkpoint"))?;
         let pr = desc.payload_range(elems);
         let src = payload.get(pr.start as usize..pr.end as usize).ok_or_else(|| format!("{name}: payload range {pr:?} outside {} stored bytes", payload.len()))?;
-        dst.payload.clear();
-        dst.payload.reserve_exact(src.len());
-        dst.payload.extend_from_slice(src);
+        crate::copy_parallel(&mut dst.payload, src);
         dst.scales.resize_with(desc.encoding.scales.len(), Vec::new);
         for (l, level) in desc.encoding.scales.iter().enumerate() {
             let side = Self::sidecar_name(desc, l);
