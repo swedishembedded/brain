@@ -1017,6 +1017,6 @@ SM makes any one pair noisy, so treat the size as unproven and the direction as 
 4. OCR replicas are planned once, at start, from the cards' free memory then; a card that frees up later gets none until a restart. Decode rows
    and the K/V pool are fixed at 64 rows and 128k tokens (the 14 GiB budget), not derived from free memory, and `--max-batch`, `--ctx`
    and `--gemm fp32` do not reach the OCR residents (no `PolicySupport` for them yet).
-5. The 1760 ms-class cold start of the first request (NVRTC and graph capture of each row count) is not warmed at load.
+5. The first request after a load takes 14 to 17 s against 4 to 6 s for the next (kernel compilation and the recording of each row count's decode step); nothing warms them at load.
 6. Speed of light: 300 pages a minute is ~200 ms of GPU per page; today's ~350 ms for a 6-tile page needs items 1 and 3 and, for the decoder,
    fp8 experts (the decode step is launch- and attention-bound at 4.5 ms for 32 rows, the weights are ~3 GB), none of which is started.
