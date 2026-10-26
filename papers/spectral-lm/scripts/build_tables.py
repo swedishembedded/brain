@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 H1_MARGIN = 0.02  # bits per byte, registered in the protocol
+OUT_DIR = Path(".")  # set by main(): where generated tables go
 
 LABELS = {
     "S-256-512-24": r"$\mathcal{S}(256,512,24)$",
@@ -272,6 +273,44 @@ def systems_macros(data, m):
     m("FftGainRange", f"{min(gains):.2f}--{max(gains):.2f}" if gains else "--")
 
 
+def extension(data, groups, m):
+    """The post hoc extension: six seeds per model from the primary and
+    extension records, and SpectralLM at the rate its selection ranked last."""
+    ext = records(data, "extension")
+    alt = [r for r in ext if "-lr3e-3-" in r["id"]]
+    more = {}
+    for r in ext:
+        if r not in alt:
+            more.setdefault(r["family"], []).append(r)
+    s = [r["eval"]["bits_per_byte"] for r in groups.get("S-256-512-24", []) + more.get("S-256-512-24", [])]
+    q = [r["eval"]["bits_per_byte"] for r in groups.get("Q-256-24", []) + more.get("Q-256-24", [])]
+    done = len(s) >= 6 and len(q) >= 6 and alt
+    if not done:
+        for k in ("ExtN", "ExtBpbS", "ExtBpbQ", "ExtDiff", "ExtCI", "ExtP", "ExtVerdict", "AltBpb", "AltDiff"):
+            m(k, "--")
+        return not_measured("Post hoc extension"), False
+    diff, lo, hi, p, df = welch(s, q)
+    m("ExtN", str(min(len(s), len(q))))
+    m("ExtBpbS", f"{mean(s):.4f}")
+    m("ExtBpbQ", f"{mean(q):.4f}")
+    m("ExtDiff", f"${diff:+.4f}$")
+    m("ExtCI", f"$[{lo:+.4f}, {hi:+.4f}]$")
+    m("ExtP", f"{p:.4f}" if p >= 1e-4 else f"{p:.1e}")
+    m("ExtVerdict", "excludes zero, so SpectralLM is better than the control with its parameter count"
+      if hi < 0 else "reaches zero, so six seeds still do not establish that SpectralLM is better")
+    a = alt[0]["eval"]["bits_per_byte"]
+    sel = mean([r["eval"]["bits_per_byte"] for r in groups["S-256-512-24"]])
+    m("AltBpb", f"{a:.4f}")
+    m("AltDiff", f"${a - sel:+.4f}$")
+    rows = [[LABELS["S-256-512-24"] + r", $10^{-3}$", str(len(s)), f"{mean(s):.4f} $\\pm$ {sd(s):.4f}", f"[{min(s):.4f}, {max(s):.4f}]"],
+            [LABELS["Q-256-24"] + r", $3\\times10^{-3}$", str(len(q)), f"{mean(q):.4f} $\\pm$ {sd(q):.4f}", f"[{min(q):.4f}, {max(q):.4f}]"],
+            [LABELS["S-256-512-24"] + r", $3\\times10^{-3}$", "1", f"{a:.4f}", "--"]]
+    return table("Post hoc extension: SpectralLM and its parameter-matched control over the three registered seeds and "
+                 "three more, and SpectralLM at the rate its single-seed selection run ranked last. Bits per byte, mean "
+                 "$\\pm$ sample standard deviation, and the range over seeds.", "tab:extension",
+                 ["Model, peak rate", "Seeds", "BPB", "Range"], rows, "lrrr"), True
+
+
 def corpus(data):
     recs = records(data, "corpus")
     if not recs:
@@ -290,7 +329,8 @@ def macros(data, groups):
     qwen_ids = {r["id"] for r in records(data, "qwen")} | {r["id"] for r in records(data, "qwen-ft")}
     measured = (bool(records(data, "correctness")) and all(f in groups for f in ORDER)
                 and {"qwen3-0.6b-zero-shot", "qwen3-0.6b-tinystories"} <= qwen_ids
-                and bool(records(data, "spectrum")) and bool(records(data, "systems")))
+                and bool(records(data, "spectrum")) and bool(records(data, "systems"))
+                and len(records(data, "extension")) >= 7)
     status = "" if measured else ("This is a draft: the protocol of \\cref{sec:protocol} is registered and its results "
                                   "are not all measured yet.")
     m("StatusAbstract", status)
@@ -348,6 +388,8 @@ def macros(data, groups):
     m("BpbQwide", f"{w[0]['eval']['bits_per_byte']:.3f}" if w else "--")
     m("ParamsQwide", num(w[0]["train"]["params_nonembed"]) if w else "--")
     systems_macros(data, m)
+    ext_tex, ext_done = extension(data, groups, m)
+    (OUT_DIR / "table-extension.tex").write_text(ext_tex)
     train_tokens, val_docs = corpus(data)
     m("TrainTokens", train_tokens or "--")
     m("ValDocs", val_docs or "--")
@@ -357,8 +399,10 @@ def macros(data, groups):
 def main():
     if len(sys.argv) != 3:
         raise SystemExit(__doc__)
+    global OUT_DIR
     data, out = Path(sys.argv[1]), Path(sys.argv[2])
     out.mkdir(parents=True, exist_ok=True)
+    OUT_DIR = out
     groups = runs(data)
     lr_tex, _ = lr_table(data)
     (out / "macros.tex").write_text(macros(data, groups))

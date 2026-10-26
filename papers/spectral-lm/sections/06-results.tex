@@ -68,6 +68,23 @@ is worse than $C=24$ or merely no better. The wide control
 $\mathcal{Q}(512,2048)$, with \ParamsQwide{} non-embedding parameters, scores
 \BpbQwide{}, the best of the trained models.
 
+\subsection{Post hoc extension}
+\label{sec:res-extension}
+
+The registered comparison established non-inferiority but not superiority, and
+SpectralLM's rate came from a single-seed selection that was not monotone in
+the rate. After the registered analysis we therefore trained three more
+seeds of SpectralLM and of its parameter-matched control at their selected
+rates, and one SpectralLM run at $3\times10^{-3}$, the rate its selection run
+ranked last (the table below). This analysis was not registered.
+
+\input{table-extension}
+
+Over \ExtN{} seeds each, SpectralLM scores \ExtBpbS{} and the control
+\ExtBpbQ{}, a difference of \ExtDiff{} bits per byte (Welch 95\% interval
+\ExtCI{}, $p=\ExtP$); the interval \ExtVerdict{}. At $3\times10^{-3}$
+SpectralLM scores \AltBpb{}, \AltDiff{} against its mean at the selected rate.
+
 \subsection{Comparison with Qwen3-0.6B}
 \label{sec:res-qwen}
 
