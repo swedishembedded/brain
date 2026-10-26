@@ -1,0 +1,60 @@
+{
+ "commit": "609bb62bc1ee63aee0bed80e9979e917c1d3ec48",
+ "device": "gpu1 Tesla P40",
+ "plan": "pilot",
+ "id": "S-256-512-96-3595055735710070273",
+ "family": "S-256-512-96",
+ "seed": 3595055735710070273,
+ "command": "target/release/sample-text-spectral-lm train data/tinystories --out <work>/S-256-512-96-3595055735710070273.safetensors --d-model 256 --layers 6 --heads 8 --kv-heads 4 --head-dim 32 --mixer spectral --signal-len 512 --channels 96 --batch 16 --block 512 --warmup 100 --weight-decay 0.1 --clip 1.0 --steps 4096 --lr 0.0010000000474974513 --seed 3595055735710070273 --gpu 1",
+ "train": {
+  "batch": 16,
+  "block": 512,
+  "checkpoint": "<work>/S-256-512-96-3595055735710070273.safetensors",
+  "config": {
+   "block_size": 512,
+   "d_model": 256,
+   "head_dim": 32,
+   "mixer": {
+    "basis": "real-fourier-orthonormal-frequency-ordered",
+    "channels": 96,
+    "kind": "spectral",
+    "signal_len": 512
+   },
+   "model": "spectrallm",
+   "n_heads": 8,
+   "n_kv_heads": 4,
+   "n_layers": 6,
+   "rms_norm_eps": 9.999999974752427e-07,
+   "rope_theta": 10000.0,
+   "tie_embeddings": true,
+   "vocab_size": 4096
+  },
+  "event": "train",
+  "final_loss": 1.8708820343017578,
+  "flops_per_token": 47909888,
+  "initial_loss": 8.366573333740234,
+  "lr": 0.0010000000474974513,
+  "params_embed": 1048576,
+  "params_nonembed": 1625728,
+  "seconds": 11130.616764278,
+  "seed": 3595055735710070273,
+  "steps": 4096,
+  "tokens": 33554432,
+  "tokens_per_s": 3014.606711434696,
+  "transform": "Fft"
+ },
+ "peak_mem_mib": 14543,
+ "eval_command": "target/release/sample-text-spectral-lm eval --checkpoint <work>/S-256-512-96-3595055735710070273.safetensors --tokenizer data/tinystories/tokenizer.json --text data/tinystories/valid.txt --max-doc-bytes 1500 --batch 16 --gpu 1",
+ "eval": {
+  "bits_per_byte": 0.670871541192777,
+  "bytes": 19721848,
+  "checkpoint": "<work>/S-256-512-96-3595055735710070273.safetensors",
+  "documents": 26439,
+  "event": "eval",
+  "max_doc_bytes": 1500,
+  "nats": 9170910.128572345,
+  "seconds": 645.358141553,
+  "tokens": 4935406
+ },
+ "note": "trained by the binary of the commit named; scored by the same sample rebuilt after target/ was cleaned during training (no change to the scoring path)"
+}
