@@ -24,6 +24,7 @@ use std::collections::HashMap;
 
 use gpu_core::{BufUsage, DeviceBuffer, Gpu, Step};
 use model::block::{self, Bidir, BidirIds, LayerNormIds};
+use model::saved::SavedPolicy;
 use optim::Optim;
 use paramstore::ParamStore;
 use serde_json::Value;
@@ -238,6 +239,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("clip_coef_wg", kernels::CLIP_COEF_WG),
 ];
 
+#[derive(Clone)]
 struct Layer {
     ln1_out: DeviceBuffer,
     qkv: DeviceBuffer,
@@ -360,6 +362,10 @@ pub struct Horizon {
     bb: Option<backbone::BackboneBufs>,
     fwd: Vec<Step>,
     bwd: Vec<Step>,
+    /// What the backward keeps of the forward: every layer's activations, or (recompute) the residual between layers,
+    /// every layer sharing one set of activation buffers its replay before its backward refills
+    /// ([`model::Model::set_saved_policy`]).
+    saved: SavedPolicy,
 }
 
 impl Horizon {
@@ -500,6 +506,7 @@ impl Horizon {
             bb: backbone::BackboneBufs::new(&gpu, &cfg, b),
             fwd: Vec::new(),
             bwd: Vec::new(),
+            saved: SavedPolicy::Keep,
             cfg,
             ps,
             opt,
@@ -882,6 +889,83 @@ impl Horizon {
         ]
     }
 
+    /// Layer `l` of the set encoder, from `res[l]` into `res[l + 1]`; the buffers the backward reads are the layer's
+    /// own (shared by every layer once the build recomputes, see [`Self::set_saved_policy`]).
+    fn layer_forward(&self, l: usize, s: &mut Vec<Step>) {
+        let c = &self.cfg;
+        let g = &self.gpu;
+        let i = &self.inp;
+        let (n, d) = (c.max_tokens, c.d_model);
+        let bn = self.sets * n;
+        let a = self.bidir();
+        let lb = &self.layers[l];
+        let pn = |name: &str| format!("blocks.{l}.{name}");
+        s.push(block::layernorm_fwd(
+            g,
+            &LN_IDS,
+            &self.res[l],
+            self.w(&pn("ln1.weight")),
+            self.w(&pn("ln1.bias")),
+            &lb.ln1_out,
+            d,
+            bn,
+            LN_EPS,
+        ));
+        s.push(self.mm(
+            &lb.ln1_out,
+            self.w(&pn("attn.qkv.weight")),
+            &lb.qkv,
+            bn,
+            d,
+            3 * d,
+        ));
+        s.push(g.step(
+            BIAS_ADD,
+            &[&lb.qkv, self.w(&pn("attn.qkv.bias"))],
+            &[bn, 3 * d],
+            bn * 3 * d,
+        ));
+        let mut attn = block::bidir_fwd(g, &BIDIR, &a, &lb.qkv, &lb.scores, &lb.probs, &lb.ctx);
+        // Padding is never a key: the mask goes between scores and softmax.
+        attn.insert(
+            1,
+            g.step(
+                KEYPAD,
+                &[&i.keep, &lb.scores],
+                &[self.sets, c.n_heads, n],
+                self.sets * c.n_heads * n * n,
+            ),
+        );
+        s.extend(attn);
+        s.push(self.mm(
+            &lb.ctx,
+            self.w(&pn("attn.out.weight")),
+            &self.proj,
+            bn,
+            d,
+            d,
+        ));
+        s.push(g.step(
+            BIAS_ADD,
+            &[&self.proj, self.w(&pn("attn.out.bias"))],
+            &[bn, d],
+            bn * d,
+        ));
+        s.push(g.step(
+            ADD2,
+            &[&self.res[l], &self.proj, &lb.xmid],
+            &[bn * d],
+            bn * d,
+        ));
+        s.extend(self.mlp_forward_steps(
+            &format!("blocks.{l}."),
+            bn,
+            &lb.xmid,
+            (&lb.ln2_out, &lb.up_pre, &lb.up, &self.ffn_out),
+            &self.res[l + 1],
+        ));
+    }
+
     fn forward_steps(&self) -> Vec<Step> {
         if self.cfg.additive {
             return self.additive_forward_steps();
@@ -893,73 +977,8 @@ impl Horizon {
         let (p, k, nf) = (c.pieces(), c.n_codes, c.time_features());
         let (bn, bp, b) = (self.sets * n, self.b * p, self.b);
         let mut s = self.embedding_steps();
-        let a = self.bidir();
-        for (l, lb) in self.layers.iter().enumerate() {
-            let pn = |name: &str| format!("blocks.{l}.{name}");
-            s.push(block::layernorm_fwd(
-                g,
-                &LN_IDS,
-                &self.res[l],
-                self.w(&pn("ln1.weight")),
-                self.w(&pn("ln1.bias")),
-                &lb.ln1_out,
-                d,
-                bn,
-                LN_EPS,
-            ));
-            s.push(self.mm(
-                &lb.ln1_out,
-                self.w(&pn("attn.qkv.weight")),
-                &lb.qkv,
-                bn,
-                d,
-                3 * d,
-            ));
-            s.push(g.step(
-                BIAS_ADD,
-                &[&lb.qkv, self.w(&pn("attn.qkv.bias"))],
-                &[bn, 3 * d],
-                bn * 3 * d,
-            ));
-            let mut attn = block::bidir_fwd(g, &BIDIR, &a, &lb.qkv, &lb.scores, &lb.probs, &lb.ctx);
-            // Padding is never a key: the mask goes between scores and softmax.
-            attn.insert(
-                1,
-                g.step(
-                    KEYPAD,
-                    &[&i.keep, &lb.scores],
-                    &[self.sets, c.n_heads, n],
-                    self.sets * c.n_heads * n * n,
-                ),
-            );
-            s.extend(attn);
-            s.push(self.mm(
-                &lb.ctx,
-                self.w(&pn("attn.out.weight")),
-                &self.proj,
-                bn,
-                d,
-                d,
-            ));
-            s.push(g.step(
-                BIAS_ADD,
-                &[&self.proj, self.w(&pn("attn.out.bias"))],
-                &[bn, d],
-                bn * d,
-            ));
-            s.push(g.step(
-                ADD2,
-                &[&self.res[l], &self.proj, &lb.xmid],
-                &[bn * d],
-                bn * d,
-            ));
-            s.extend(self.mlp_forward_steps(
-                &format!("blocks.{l}."),
-                bn,
-                &lb.xmid,
-                (&lb.ln2_out, &lb.up_pre, &lb.up, &self.ffn_out),
-                &self.res[l + 1],
-            ));
+        for l in 0..self.layers.len() {
+            self.layer_forward(l, &mut s);
         }
         let last = &self.res[c.n_layers as usize];
         s.extend([
@@ -1170,6 +1189,10 @@ impl Horizon {
         ));
         let a = self.bidir();
         for l in (0..c.n_layers as usize).rev() {
+            if self.saved.recomputes() {
+                // Every layer shares one set of activation buffers: rebuild this layer's from `res[l]` first.
+                self.layer_forward(l, &mut s);
+            }
             let lb = &self.layers[l];
             let pn = |name: &str| format!("blocks.{l}.{name}");
             s.extend(self.mlp_backward_steps(
@@ -1335,6 +1358,29 @@ impl Horizon {
             .collect()
     }
 
+    /// Keep what `policy` names of the forward: every layer's activations ([`SavedPolicy::Keep`]), or only the residual
+    /// between layers ([`SavedPolicy::Recompute`]), where every encoder layer shares the first layer's activation
+    /// buffers (the others are released) and the backward replays each layer from its residual before its own
+    /// backward. Residuals held below f32 are refused by name.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        if let SavedPolicy::Quantized(format) = policy {
+            return Err(format!("horizon keeps its layer residuals in f32; {format:?} residuals are not supported"));
+        }
+        if !self.saved.narrows_to(policy) {
+            return Err(format!("horizon: a build keeping {:?} cannot go back to {policy:?}", self.saved));
+        }
+        if policy == self.saved {
+            return Ok(());
+        }
+        if let Some(shared) = self.layers.first().cloned() {
+            self.layers.fill(shared);
+        }
+        self.saved = policy;
+        self.fwd = self.forward_steps();
+        self.bwd = self.backward_steps();
+        Ok(())
+    }
+
     /// Forward and loss.
     pub fn forward(&self) -> f32 {
         self.forward_submit();
@@ -1444,6 +1490,10 @@ impl model::Model for Horizon {
 
     fn optimizer_parts(&self) -> Option<model::OptimizerParts<'_>> {
         Some(model::OptimizerParts { gpu: &self.gpu, store: &self.ps, optim: &self.opt })
+    }
+
+    fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        Horizon::set_saved_policy(self, policy)
     }
 
     type Config = HorizonConfig;

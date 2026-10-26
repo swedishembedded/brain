@@ -117,7 +117,7 @@ forward: every layer's intermediates, or only the residual between layers (f32,
 or bf16/fp8) with each layer replayed before its backward. A narrow residual is
 rounded as the forward writes it, so the backward replays exactly the input the
 forward used (`model::saved::Residuals`). The fit loop hands the choice to the
-model (`Model::set_saved_policy`); deepseek2, glmdsa, gpt2 and lfm2 then share
+model (`Model::set_saved_policy`); deepseek2, glmdsa, gpt2, lfm2 and horizon then share
 one set of activation buffers across their layers (deepseek2, glmdsa and gpt2
 also hold bf16 or fp8 residuals), qwen3 and qwen35 answer from what they were built with, spectrallm,
 ouro and huginn always rebuild each layer from its f32 residual and accept only
