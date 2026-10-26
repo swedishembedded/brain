@@ -261,6 +261,18 @@ impl BatchNorm {
     pub fn out(&self) -> &DeviceBuffer {
         &self.out
     }
+    /// Write the output into the context's shared buffer for `role` ([`Ctx::scratch`]), as
+    /// [`crate::blocks::Conv::share_output`].
+    pub fn share_output(&mut self, ctx: &Ctx, role: &'static str) {
+        self.out = ctx.scratch(role, self.shape.numel());
+    }
+    /// Rebuild the train-mode output from `x` with the batch statistics and affine parameters the last train forward
+    /// packed, bit for bit: what a backward that recomputes this unit replays. The statistics, and the running
+    /// statistics, are untouched.
+    pub fn replay(&self, ctx: &Ctx, x: &DeviceBuffer) {
+        assert!(self.train.get(), "BatchNorm::replay rebuilds a train-mode output; an eval-mode unit has none to rebuild");
+        ctx.gpu.submit(&[], &[self.core.train_step(ctx, x, &self.out)]);
+    }
     pub fn set_eval(&self, on: bool) {
         self.train.set(!on);
         if !on {

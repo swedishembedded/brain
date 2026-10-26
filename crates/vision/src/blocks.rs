@@ -598,7 +598,8 @@ impl Conv {
             recompute: std::cell::Cell::new(false),
             sb: ctx.act(2 * cout),
             sb_ready: std::cell::Cell::new(false),
-            act: ctx.act(on),
+            // A raw conv with no activation never writes `act`: `out()` aliases `conv_out`.
+            act: ctx.act(if spec.norm == Norm::None && spec.act == Act::None { 1 } else { on }),
             dbcast: std::cell::RefCell::new(None),
             q_in: std::cell::RefCell::new(None),
             col: std::cell::RefCell::new(None),
@@ -609,6 +610,18 @@ impl Conv {
     /// This unit's conv-weight tensor name.
     pub fn names_weight(&self) -> &str {
         &self.names.weight
+    }
+
+    /// Write the unit's output ([`Conv::out`]) into the context's shared buffer for `role` ([`Ctx::scratch`]) instead
+    /// of a buffer of its own: for a caller that consumes the output before another unit sharing `role` writes it, or
+    /// runs this unit's forward again before reading it.
+    pub fn share_output(&mut self, ctx: &Ctx, role: &'static str) {
+        let buf = ctx.scratch(role, self.out_shape.numel());
+        if self.spec.norm == Norm::None && self.spec.act == Act::None {
+            self.conv_out = buf;
+        } else {
+            self.act = buf;
+        }
     }
 
     pub fn out(&self) -> &DeviceBuffer {
@@ -2290,6 +2303,15 @@ impl PReLU {
     /// The grad wrt this stage's input, valid after [`PReLU::backward`].
     pub fn d_in(&self) -> &DeviceBuffer {
         &self.d_in
+    }
+    /// Write the output into the context's shared buffer for `role` ([`Ctx::scratch`]), as [`Conv::share_output`].
+    pub fn share_output(&mut self, ctx: &Ctx, role: &'static str) {
+        self.out = ctx.scratch(role, self.shape.numel());
+    }
+    /// Write [`PReLU::d_in`] into the context's shared buffer for `role`: for a caller that consumes it before the next
+    /// backward sharing `role`.
+    pub fn share_d_in(&mut self, ctx: &Ctx, role: &'static str) {
+        self.d_in = ctx.scratch(role, self.shape.numel());
     }
     pub fn param_list(&self) -> Vec<(String, usize)> {
         vec![(self.name.clone(), self.shape.c as usize)]
