@@ -195,32 +195,26 @@ fn fd_both(kind: UpsampleKind, weights: &[&str]) {
     let (dfe, dde) = (gpu.storage(feat.numel() as u64), gpu.storage(d.numel() as u64));
     m.backward(&ctx, &ps, &fb, &db, &d_out, &dfe, &dde);
 
-    let loss = |gpu: &Gpu, ps: &ParamStore| -> f32 {
+    let loss = |gpu: &Gpu, ps: &ParamStore| -> f64 {
         let ctx = Ctx::new(gpu, zipdepth::net::ids());
         let m = FastConvexUpsample::new(&ctx, "u", kind, feat, d, 2, 1.0, true);
         let fb = gpu.storage_init("f", &fv);
         let db = gpu.storage_init("d", &dv);
         m.forward(&ctx, ps, &fb, &db);
-        gpu.read(m.out(), no).iter().zip(&r).map(|(a, b)| a * b).sum()
+        gpu.read(m.out(), no).iter().zip(&r).map(|(a, b)| *a as f64 * *b as f64).sum()
     };
+    let check = brain_testutil::fd::Directional { eps: 5e-4, abs_tol: 4e-3, rel_tol: 8e-2 };
     for w in weights {
         let g = gpu.read(ps.g(w), ps.numel(w));
         let n = g.len();
-        let dir: Vec<f32> = Lcg::new(random_seed()).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
-        let analytic: f32 = g.iter().zip(&dir).map(|(a, b)| a * b).sum();
         let w0 = gpu.read(ps.w(w), n);
-        let eps = 5e-4f32;
-        let wp: Vec<f32> = w0.iter().zip(&dir).map(|(a, b)| a + eps * b).collect();
-        gpu.write(ps.w(w), bytemuck::cast_slice(&wp));
-        let lp = loss(&gpu, &ps);
-        let wm: Vec<f32> = w0.iter().zip(&dir).map(|(a, b)| a - eps * b).collect();
-        gpu.write(ps.w(w), bytemuck::cast_slice(&wm));
-        let lm = loss(&gpu, &ps);
+        let draw = || Lcg::new(random_seed()).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
+        let checked = check.check(&g, &w0, draw, |wv| {
+            gpu.write(ps.w(w), bytemuck::cast_slice(wv));
+            loss(&gpu, &ps)
+        });
         gpu.write(ps.w(w), bytemuck::cast_slice(&w0));
-        let numeric = (lp - lm) / (2.0 * eps);
-        let abs = (analytic - numeric).abs();
-        let denom = analytic.abs().max(numeric.abs()).max(1e-3);
-        assert!(abs <= 4e-3 + 8e-2 * denom, "{w}: analytic {analytic}, fd {numeric}");
+        checked.unwrap_or_else(|e| panic!("{w}: {e}"));
     }
 
     // `depth`'s own gradient — elementwise, since it reaches every output pixel.

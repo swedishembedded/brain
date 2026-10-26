@@ -62,8 +62,7 @@ impl Fix {
     }
 
     /// Scalar loss `<r, block(x)>`.
-    /// `sum(out * r)`, accumulated in f64: an f32 sum over the block's outputs carries round-off of the order of the
-    /// finite difference the backward check divides by `2 * eps`.
+    /// `sum(out * r)` in f64, as `brain_testutil::fd` takes it.
     fn loss(&self, train: bool, r: &[f32]) -> f64 {
         let ctx = Ctx::new(&self.gpu, zipdepth::net::ids());
         let b = QARepBlock::new(&ctx, "b", self.in_shape, self.cout, self.stride, train);
@@ -146,12 +145,10 @@ fn qarep_backward_matches_finite_differences() {
         let g = fix.gpu.read(fix.ps.g(wname), fix.ps.numel(wname));
         let n = g.len();
         let w0 = fix.gpu.read(fix.ps.w(wname), n);
-        let tolerance = |analytic: f32, numeric: f32| 4e-3 + 1e-2 * analytic.abs().max(numeric.abs()).max(1e-3);
-        // 1e-4, not 5e-4. This is a DIRECTIONAL difference along a ±1 vector of
-        // 576–1152 components, so the L2 step is eps·√n — at 5e-4 that is ~0.017
-        // and the central difference is dominated by its own O(eps²·L''')
-        // truncation error, not by the gradient. Measured rel error vs the
-        // analytic gradient over the three cases, on the corrected RNG:
+        // 1e-4, not 5e-4. The L2 step of a ±1 direction over 576–1152 components
+        // is eps·√n, and at 5e-4 the central difference is dominated by its own
+        // O(eps²·L''') truncation error, not by the gradient. Measured rel error
+        // vs the analytic gradient over the three cases:
         //
         //   eps      5e-4     2.5e-4    2e-4     1e-4     7.5e-5
         //   residual 0.0925   0.0416    0.0343   0.0030   0.0033
@@ -159,36 +156,15 @@ fn qarep_backward_matches_finite_differences() {
         //   down2    0.1260   0.0013    0.0008   0.0014   0.0025
         //
         // i.e. the FD converges ONTO the analytic gradient as eps shrinks (and
-        // starts to lose to f32 round-off below ~7.5e-5). The loss is summed in
-        // f64 so the host reduction adds no round-off of its own.
-        let eps = 1e-4f32;
-        let loss_at = |step: f32, dir: &[f32]| -> f64 {
-            let w: Vec<f32> = w0.iter().zip(dir).map(|(w, d)| w + step * d).collect();
-            fix.gpu.write(fix.ps.w(wname), bytemuck::cast_slice(&w));
+        // starts to lose to f32 round-off below ~7.5e-5).
+        let check = brain_testutil::fd::Directional { eps: 1e-4, abs_tol: 4e-3, rel_tol: 1e-2 };
+        let draw = || Lcg::new(random_seed()).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
+        let checked = check.check(&g, &w0, draw, |w| {
+            fix.gpu.write(fix.ps.w(wname), bytemuck::cast_slice(w));
             fix.loss(true, &r)
-        };
-        // The block's ReLUs make the loss piecewise smooth: a direction whose step crosses a kink has one-sided
-        // differences that disagree by more than the tolerance, and a central difference across it measures no
-        // gradient at all. Such a direction is drawn again; the gradient is checked where the loss is differentiable.
-        let mut checked = None;
-        for _ in 0..8 {
-            let dir: Vec<f32> = Lcg::new(random_seed()).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
-            let analytic: f32 = g.iter().zip(&dir).map(|(a, c)| a * c).sum();
-            let (l0, lp, lm) = (loss_at(0.0, &dir), loss_at(eps, &dir), loss_at(-eps, &dir));
-            let (ahead, behind) = (((lp - l0) / eps as f64) as f32, ((l0 - lm) / eps as f64) as f32);
-            if (ahead - behind).abs() <= tolerance(ahead, behind) {
-                checked = Some((analytic, ((lp - lm) / (2.0 * eps as f64)) as f32));
-                break;
-            }
-        }
+        });
         fix.gpu.write(fix.ps.w(wname), bytemuck::cast_slice(&w0));
-        let (analytic, numeric) = checked.unwrap_or_else(|| panic!("{tag}: every direction drawn crosses a ReLU kink within {eps}"));
-        let abs = (analytic - numeric).abs();
-        assert!(
-            abs <= tolerance(analytic, numeric),
-            "{tag}: analytic {analytic}, fd {numeric} (abs {abs}, rel {})",
-            abs / analytic.abs().max(numeric.abs()).max(1e-3)
-        );
+        checked.unwrap_or_else(|e| panic!("{tag}: {e}"));
     }
 }
 

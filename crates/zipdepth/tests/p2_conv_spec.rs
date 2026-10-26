@@ -59,13 +59,13 @@ impl Fix {
 
 /// Scalar loss `<r, conv(x)>` for a fixed random `r`, so FD has something to
 /// differentiate.
-fn loss(fix: &Fix, spec: ConvSpec, train: bool, r: &[f32]) -> f32 {
+fn loss(fix: &Fix, spec: ConvSpec, train: bool, r: &[f32]) -> f64 {
     let ctx = Ctx::new(&fix.gpu, zipdepth::net::ids());
     let c = Conv::with_spec(&ctx, "c", fix.in_shape, spec, train);
     let xb = fix.gpu.storage_init("x", &fix.x);
     c.forward(&ctx, &fix.ps, &xb);
     let out = fix.gpu.read(c.out(), c.out_shape.numel() as usize);
-    out.iter().zip(r).map(|(a, b)| a * b).sum()
+    out.iter().zip(r).map(|(a, b)| *a as f64 * *b as f64).sum()
 }
 
 /// Shapes must follow the dilated formula, not the dense one.
@@ -121,30 +121,17 @@ fn grouped_relu_conv_backward_matches_finite_differences() {
         c.backward(&ctx, &fix.ps, &xb, &d_out, &d_in);
         let g = fix.gpu.read(fix.ps.g("c.conv.weight"), fix.ps.numel("c.conv.weight"));
 
-        // FD over a random ±1 direction (the same directional trick gradcheck
-        // uses: it averages per-element round-off into one well-conditioned
-        // number instead of probing 1e3 elements individually).
+        // FD over random ±1 directions (`brain_testutil::fd`).
         let n = g.len();
-        let dir: Vec<f32> = Lcg::new(random_seed()).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
-        let analytic: f32 = g.iter().zip(&dir).map(|(a, b)| a * b).sum();
         let w0 = fix.gpu.read(fix.ps.w("c.conv.weight"), n);
-        let eps = 5e-4f32;
-        let wp: Vec<f32> = w0.iter().zip(&dir).map(|(w, d)| w + eps * d).collect();
-        fix.gpu.write(fix.ps.w("c.conv.weight"), bytemuck::cast_slice(&wp));
-        let lp = loss(&fix, spec, true, &r);
-        let wm: Vec<f32> = w0.iter().zip(&dir).map(|(w, d)| w - eps * d).collect();
-        fix.gpu.write(fix.ps.w("c.conv.weight"), bytemuck::cast_slice(&wm));
-        let lm = loss(&fix, spec, true, &r);
+        let check = brain_testutil::fd::Directional { eps: 5e-4, abs_tol: 4e-3, rel_tol: 8e-2 };
+        let draw = || Lcg::new(random_seed()).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
+        let checked = check.check(&g, &w0, draw, |w| {
+            fix.gpu.write(fix.ps.w("c.conv.weight"), bytemuck::cast_slice(w));
+            loss(&fix, spec, true, &r)
+        });
         fix.gpu.write(fix.ps.w("c.conv.weight"), bytemuck::cast_slice(&w0));
-
-        let numeric = (lp - lm) / (2.0 * eps);
-        let abs = (analytic - numeric).abs();
-        let denom = analytic.abs().max(numeric.abs()).max(1e-3);
-        assert!(
-            abs <= 4e-3 + 8e-2 * denom,
-            "{tag}: analytic {analytic}, fd {numeric} (abs {abs}, rel {})",
-            abs / denom
-        );
+        checked.unwrap_or_else(|e| panic!("{tag}: {e}"));
     }
 }
 
