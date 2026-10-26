@@ -25,7 +25,7 @@
 use checkpoint::packed::{Codebook, Element, FloatFormat, QuantEncoding, ScaleGranularity, TensorDescriptor, TensorSink, Tile};
 use gpu_core::{DeviceBuffer, Gpu};
 
-use super::{MicroScaled, Ops, Weight, FP8_BLOCK};
+use super::{DeviceIo, MicroScaled, Ops, Weight, FP8_BLOCK};
 use crate::fp8::Fp8Format;
 
 /// The tier a destination encoding maps to.
@@ -170,14 +170,14 @@ struct Pending {
 /// Uploads a tiled load into a resident [`Weight`]. One sink loads one tensor at a time; take the result
 /// with [`Self::take_weight`] after the load finished.
 pub struct DeviceWeightSink<'a> {
-    ops: &'a Ops,
+    ops: &'a dyn DeviceIo,
     pending: Option<Pending>,
     done: Option<Weight>,
 }
 
 impl<'a> DeviceWeightSink<'a> {
     /// A sink uploading through `ops`' device.
-    pub fn new(ops: &'a Ops) -> Self {
+    pub fn new(ops: &'a dyn DeviceIo) -> Self {
         DeviceWeightSink { ops, pending: None, done: None }
     }
 
@@ -302,7 +302,7 @@ impl TensorSink for DeviceWeightSink<'_> {
 /// weight was loaded from; the tile must start and end on a payload word boundary (a multiple of the descriptor's
 /// tile quantum satisfies this for every tier but the byte-scaled microscaling family, which this refuses: its
 /// per-tensor scale is not a buffer).
-pub fn rewrite_tile(ops: &Ops, weight: &Weight, dst: &TensorDescriptor, tile: &Tile<'_>) -> Result<(), String> {
+pub fn rewrite_tile(ops: &dyn DeviceIo, weight: &Weight, dst: &TensorDescriptor, tile: &Tile<'_>) -> Result<(), String> {
     let gpu = ops.gpu();
     let (payload, scales) = match weight {
         Weight::F32 { w, .. } | Weight::BF16 { w, .. } | Weight::F16 { w, .. } => (w, None),

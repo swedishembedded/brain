@@ -275,19 +275,7 @@ impl Ops {
     /// `words` 32-bit words of `buf` from word `start`, through a bounded device copy: only a window around the range
     /// is bound (so a buffer larger than one storage binding can be read) and only the range reaches the host.
     pub fn read_range(&self, buf: &DeviceBuffer, start: u64, words: usize) -> Vec<f32> {
-        // A bound sub-range starts on a 256-byte boundary.
-        const ALIGN_WORDS: u64 = 64;
-        if words == 0 {
-            return Vec::new();
-        }
-        let window0 = start / ALIGN_WORDS * ALIGN_WORDS;
-        let lead = u32::try_from(start - window0).expect("an alignment remainder fits u32");
-        let count = u32::try_from(words).expect("Ops::read_range: a range exceeds u32 words");
-        let staging = self.gpu.storage_uninit(words as u64);
-        let params = [1, count, lead + count, lead, count, 0];
-        let copy = self.gpu.step_sliced(self.tiled_kernel("copy_cols"), &[buf, &staging], &[(window0, (lead + count) as u64), WHOLE], &params, count);
-        self.gpu.submit(&[], &[copy]);
-        self.gpu.read(&staging, words)
+        read_range_with(&self.gpu, self.tiled_kernel("copy_cols"), buf, start, words)
     }
 
     /// The values `w` stores, as host f32: a dense weight is read as it is, every other tier is
@@ -462,6 +450,23 @@ impl Ops {
     fn dw_f32_overwrite_or_add(&self, s: &mut Vec<Step>, x: &DeviceBuffer, dy: &DeviceBuffer, m: u32, c: u32, k: u32, scratch: &DeviceBuffer) {
         self.dw_f32(s, x, dy, m, c, k, scratch, 0);
     }
+}
+
+/// [`Ops::read_range`] on any handle that registered `copy_cols` (its index `copy_cols`).
+pub(super) fn read_range_with(gpu: &gpu_core::Gpu, copy_cols: usize, buf: &DeviceBuffer, start: u64, words: usize) -> Vec<f32> {
+    // A bound sub-range starts on a 256-byte boundary.
+    const ALIGN_WORDS: u64 = 64;
+    if words == 0 {
+        return Vec::new();
+    }
+    let window0 = start / ALIGN_WORDS * ALIGN_WORDS;
+    let lead = u32::try_from(start - window0).expect("an alignment remainder fits u32");
+    let count = u32::try_from(words).expect("read_range: a range exceeds u32 words");
+    let staging = gpu.storage_uninit(words as u64);
+    let params = [1, count, lead + count, lead, count, 0];
+    let copy = gpu.step_sliced(copy_cols, &[buf, &staging], &[(window0, (lead + count) as u64), WHOLE], &params, count);
+    gpu.submit(&[], &[copy]);
+    gpu.read(&staging, words)
 }
 
 #[cfg(test)]
