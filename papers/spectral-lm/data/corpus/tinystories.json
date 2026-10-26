@@ -1,0 +1,24 @@
+{
+ "commit": "123f5ddbf19fab3726ab66c4ea673491d6b423a1",
+ "device": "host",
+ "command": "brain data gen tinystories --out data/tinystories",
+ "source": "huggingface.co/datasets/roneneldan/TinyStories@f54c09fd23315a6f9c86f9dc80f725de7d8f9c64 (TinyStoriesV2-GPT4-{train,valid}.txt), CDLA-Sharing-1.0",
+ "sha256": {
+  "train.txt": "6418d412de72888f52b5142c761ac21a582f7d1166f0bfbdb5f03ccfdec90443",
+  "valid.txt": "6874bae9a4c1a4e7edcf0e53b86c17817e9cf881fc75ff2368da457b80c0585d"
+ },
+ "stats": {
+  "tokenizer_stories": 30000,
+  "train": {
+   "bytes": 2185895233,
+   "documents": 2717495,
+   "tokens": 552738842
+  },
+  "val": {
+   "bytes": 22077118,
+   "documents": 27630,
+   "tokens": 5580589
+  },
+  "vocab_size": 4096
+ }
+}

@@ -1,0 +1,203 @@
+{
+ "commit": "063ffe397c3a3f425ab692c5cb086cbdd5e4d4b4",
+ "command": "cargo test --release --offline -p brain-gradcheck --test spectrallm_fd -- --nocapture --test-threads=1 && cargo test --release --offline -p brain-spectrallm --test model -- --nocapture --test-threads=1",
+ "device": "gpu0 Tesla P40 (and the CPU backend)",
+ "checks": [
+  {
+   "name": "finite-difference gradients, spectral dense, seed 3",
+   "metric": "max relative error over 24 tensors",
+   "value": 0.012446757,
+   "tolerance": 0.08,
+   "pass": true
+  },
+  {
+   "name": "finite-difference gradients, spectral dense, seed 11",
+   "metric": "max relative error over 24 tensors",
+   "value": 0.017379126,
+   "tolerance": 0.08,
+   "pass": true
+  },
+  {
+   "name": "finite-difference gradients, spectral fft, seed 3",
+   "metric": "max relative error over 24 tensors",
+   "value": 0.012447096,
+   "tolerance": 0.08,
+   "pass": true
+  },
+  {
+   "name": "finite-difference gradients, spectral fft, seed 11",
+   "metric": "max relative error over 24 tensors",
+   "value": 0.017379213,
+   "tolerance": 0.08,
+   "pass": true
+  },
+  {
+   "name": "finite-difference gradients, swiglu control, seed 5",
+   "metric": "max relative error over 24 tensors",
+   "value": 0.023972118,
+   "tolerance": 0.08,
+   "pass": true
+  },
+  {
+   "name": "finite-difference gradient, tied embedding element by element",
+   "metric": "entries outside tolerance of 299",
+   "value": 0,
+   "tolerance": 0,
+   "pass": true
+  },
+  {
+   "metric": "abs diff in bits per byte",
+   "name": "length-bucketed scoring vs full-length scoring",
+   "pass": true,
+   "tolerance": 1e-05,
+   "value": 7.019700154486941e-09
+  },
+  {
+   "metric": "abs diff",
+   "name": "CPU vs GPU backend, loss",
+   "pass": true,
+   "tolerance": 1e-05,
+   "value": 2.384185791015625e-07
+  },
+  {
+   "metric": "max abs diff",
+   "name": "CPU vs GPU backend, gradients",
+   "pass": true,
+   "tolerance": 1e-05,
+   "value": 5.960464477539063e-08
+  },
+  {
+   "metric": "max abs diff",
+   "name": "model logits, FFT vs dense transforms",
+   "pass": true,
+   "tolerance": 0.0001,
+   "value": 1.1920928955078125e-07
+  },
+  {
+   "metric": "max abs diff vs basis product",
+   "name": "FFT synthesis D=32 m=13",
+   "pass": true,
+   "tolerance": 2e-05,
+   "value": 1.7881393432617188e-07
+  },
+  {
+   "metric": "max abs diff vs basis product",
+   "name": "FFT analysis D=32 m=13",
+   "pass": true,
+   "tolerance": 5e-05,
+   "value": 2.384185791015625e-07
+  },
+  {
+   "metric": "max abs diff vs basis product",
+   "name": "FFT synthesis D=64 m=64",
+   "pass": true,
+   "tolerance": 2e-05,
+   "value": 2.384185791015625e-07
+  },
+  {
+   "metric": "max abs diff vs basis product",
+   "name": "FFT analysis D=64 m=64",
+   "pass": true,
+   "tolerance": 5e-05,
+   "value": 3.5762786865234375e-07
+  },
+  {
+   "metric": "max abs diff vs basis product",
+   "name": "FFT synthesis D=512 m=256",
+   "pass": true,
+   "tolerance": 2e-05,
+   "value": 7.152557373046875e-07
+  },
+  {
+   "metric": "max abs diff vs basis product",
+   "name": "FFT analysis D=512 m=256",
+   "pass": true,
+   "tolerance": 5e-05,
+   "value": 9.5367431640625e-07
+  },
+  {
+   "metric": "max abs diff vs basis product",
+   "name": "FFT synthesis D=2048 m=101",
+   "pass": true,
+   "tolerance": 2e-05,
+   "value": 1.4901161193847656e-07
+  },
+  {
+   "metric": "max abs diff vs basis product",
+   "name": "FFT analysis D=2048 m=101",
+   "pass": true,
+   "tolerance": 5e-05,
+   "value": 7.152557373046875e-07
+  },
+  {
+   "metric": "max abs diff vs basis product",
+   "name": "FFT synthesis D=2 m=2",
+   "pass": true,
+   "tolerance": 2e-05,
+   "value": 5.960464477539063e-08
+  },
+  {
+   "metric": "max abs diff vs basis product",
+   "name": "FFT analysis D=2 m=2",
+   "pass": true,
+   "tolerance": 5e-05,
+   "value": 5.960464477539063e-08
+  },
+  {
+   "metric": "max abs diff vs basis product",
+   "name": "FFT synthesis D=128 m=77",
+   "pass": true,
+   "tolerance": 2e-05,
+   "value": 3.5762786865234375e-07
+  },
+  {
+   "metric": "max abs diff vs basis product",
+   "name": "FFT analysis D=128 m=77",
+   "pass": true,
+   "tolerance": 5e-05,
+   "value": 5.140900611877441e-07
+  },
+  {
+   "metric": "abs diff",
+   "name": "flash vs materialized attention, loss",
+   "pass": true,
+   "tolerance": 0.0001,
+   "value": 0.0
+  },
+  {
+   "metric": "max diff / max magnitude",
+   "name": "flash vs materialized attention, gradients",
+   "pass": true,
+   "tolerance": 0.001,
+   "value": 1.1154418189107673e-06
+  },
+  {
+   "metric": "max abs logit diff",
+   "name": "incremental decode vs full forward (spectral)",
+   "pass": true,
+   "tolerance": 0.0001,
+   "value": 0.0
+  },
+  {
+   "metric": "max abs logit diff",
+   "name": "incremental decode vs full forward (SwiGLU)",
+   "pass": true,
+   "tolerance": 0.0001,
+   "value": 0.0
+  },
+  {
+   "metric": "max abs logit diff",
+   "name": "SwiGLU control vs brain's Qwen3",
+   "pass": true,
+   "tolerance": 0.0001,
+   "value": 2.9802322387695312e-08
+  },
+  {
+   "metric": "final loss (nats)",
+   "name": "fixed batch memorized in 400 steps",
+   "pass": true,
+   "tolerance": 0.05,
+   "value": 0.00330052780918777
+  }
+ ]
+}

@@ -1,0 +1,45 @@
+{
+ "commit": "c1424a8ad4c220ca58e5935054efebcbbc7c615e",
+ "device": "gpu1 Tesla P40",
+ "plan": "lr",
+ "id": "Q-512-2048-lr6e-3",
+ "family": "Q-512-2048",
+ "seed": 7611417510694719778,
+ "command": "target/release/sample-text-spectral-lm train data/tinystories --out <work>/Q-512-2048-lr6e-3.safetensors --d-model 512 --layers 6 --heads 8 --kv-heads 4 --head-dim 64 --mixer swiglu --d-ff 2048 --batch 16 --block 512 --warmup 100 --weight-decay 0.1 --clip 1.0 --steps 300 --lr 6e-3 --seed 7611417510694719778 --gpu 1",
+ "train": {
+  "batch": 16,
+  "block": 512,
+  "checkpoint": "<work>/Q-512-2048-lr6e-3.safetensors",
+  "config": {
+   "block_size": 512,
+   "d_model": 512,
+   "head_dim": 64,
+   "mixer": {
+    "d_ff": 2048,
+    "kind": "swiglu"
+   },
+   "model": "spectrallm",
+   "n_heads": 8,
+   "n_kv_heads": 4,
+   "n_layers": 6,
+   "rms_norm_eps": 9.999999974752427e-07,
+   "rope_theta": 10000.0,
+   "tie_embeddings": true,
+   "vocab_size": 4096
+  },
+  "event": "train",
+  "final_loss": 2.8903887271881104,
+  "flops_per_token": 54532096,
+  "initial_loss": 8.401688575744629,
+  "lr": 0.006000000052154064,
+  "params_embed": 2097152,
+  "params_nonembed": 23600384,
+  "seconds": 261.731974953,
+  "seed": 7611417510694719778,
+  "steps": 300,
+  "tokens": 2457600,
+  "tokens_per_s": 9389.758360404068,
+  "transform": null
+ },
+ "peak_mem_mib": null
+}

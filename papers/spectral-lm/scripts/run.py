@@ -76,6 +76,16 @@ QWEN_FT_STORIES = "200000"
 SYSTEMS = [(256, 512, 8), (256, 512, 24), (256, 512, 96), (128, 256, 24), (256, 1024, 24)]
 
 
+def portable(record, work):
+    """`record` with machine-specific locations replaced: the repository root
+    by a repository-relative path, the run directory by `<work>`, the model store by `<models>`.
+    Commands then read as they are run from the repository root."""
+    text = json.dumps(record, indent=1)
+    for path, name in ((str(work), "<work>"), (str(QWEN.parents[2]), "<models>"), (str(ROOT) + "/", ""), (str(ROOT), ".")):
+        text = text.replace(path, name)
+    return text + "\n"
+
+
 def git_commit():
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip()
     dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip()
@@ -207,7 +217,7 @@ def execute(job, gpu, plan, commit):
             rec.update({"eval_command": " ".join(ev), "eval": score})
     out = DATA / plan / f"{job['id']}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(rec, indent=1) + "\n")
+    out.write_text(portable(rec, work))
     print(f"[gpu{gpu}] wrote {out.relative_to(ROOT)}", flush=True)
 
 
