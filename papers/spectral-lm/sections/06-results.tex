@@ -54,8 +54,8 @@ controls on the same card, and peaks at \MemS{} MiB of device memory against
 \MemQpar{} and \MemQstd{}. Both follow from the mixer's signal-domain
 activations: every token carries $C\cdot D=12{,}288$ signal samples per block in
 each of three forward buffers, and three more in the backward pass, where the
-dense control holds 1024 hidden units, and the FFT kernels that produce them
-run far below the card's arithmetic peak (\cref{sec:res-systems}).
+dense control holds 1024 hidden units; \cref{sec:res-systems} prices the
+transforms that produce them.
 
 \subsection{Comparison with Qwen3-0.6B}
 \label{sec:res-qwen}
