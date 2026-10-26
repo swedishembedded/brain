@@ -63,15 +63,38 @@ why the scope is what it is.
   9.5 ms at 12 KiB), so the kernels keep one row per workgroup with the
   twiddles computed in the butterfly.
 
-## Next: the sequence axis
+## Next: ranked by what the measurements support
 
-The paper's comparison measures the feature axis only; it cannot show a
-prefill speedup, because attention still compares every token pair. The
-follow-on is a spectral sequence operator: a diagonal complex-mode
-recurrence (per-mode decay and oscillation, chunk-parallel prefill,
-fixed-state decode) and FFT long convolution, alone and with occasional
-attention layers. brain already has the selective-recurrence machinery this
-builds on (`model::gdn_mixer`, `gdn_segment`: Gated DeltaNet with chunked
-prefill, fixed-state decode and backward, used by the Qwen3.5 hybrids).
-Prefill tokens/s, time to first token and decode tokens/s are measured
-separately, against brain's Qwen3 prefill at matched quality and context.
+The registered study measures the feature axis only. What it found decides
+the order of what follows:
+
+- The spectral feed-forward mixer buys parameter efficiency, not arithmetic
+  efficiency: it beats a SwiGLU with its parameter count and loses clearly to
+  one with its arithmetic, and the FFT pair runs far below the tuned GEMM on
+  the same card. More structured-operator work (butterfly/Monarch factors in
+  place of dense projections) needs both multi-factor operators and kernel
+  work before it can pay; it is not the lead bet.
+- At a 512-token context attention is a minority-to-large share of a step
+  (about a quarter of SpectralLM's forward, about two thirds of the dense
+  control's), and projections plus feed-forward hold the rest, so replacing
+  attention alone cannot give large end-to-end factors at ordinary context.
+
+In order:
+
+1. **Sequence-axis state mixing with occasional attention.** Put the existing
+   Gated DeltaNet mixer (`model::gdn_mixer`, `gdn_segment`: selective
+   recurrent state, chunk-parallel prefill, fixed-state decode, backward) in
+   this crate's decoder as the token mixer, with an attention layer every few
+   blocks; a diagonal complex-mode recurrence (per-mode decay and rotation)
+   is an ablation of the same family. Measure held-out bits per byte, the
+   recall and copying tasks of `crates/bench` (MQAR, selective copy, recall),
+   and prefill tokens/s, time to first token and decode tokens/s from 2k to
+   16k context, against the attention-only decoder.
+2. **Adaptive depth.** brain already runs recurrent-depth decoders (`huginn`,
+   `ouro`); measure FLOPs to a fixed held-out quality with adaptive recurrence
+   on the same corpus.
+3. **FLOPs to a target quality as the standard metric.** Record evaluation
+   curves (periodic held-out loss) so every comparison can be read as compute
+   to a fixed quality, not only quality at a fixed token budget.
+4. Multiscale or innovation-gated states only after 1 or 2 move the
+   quality-per-FLOP frontier; brain has no mechanism for them yet.
