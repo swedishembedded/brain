@@ -111,6 +111,9 @@ The per-cell matrix and its tests are `docs/reference/training-capabilities.md`.
   `optimized_params`/`read_moments`/`write_moments` of every model read the store in any format,
   and data-parallel replicas and pipeline stages release their unused device moments; qwen3's own
   offload optimizer is gone.
+- D Narrow state for host-side trainers: a model whose parameters and update live on the host
+  runs AdamW through `model::hostopt::HostAdam` (the streamed optimizer, any state format) instead
+  of hand-rolled f32 moments; nemotronasr and s3dit adopt it (`hostopt::check_host_state_formats`).
 - D Device memory telemetry: `Gpu::memory_usage` (live, reserved, peak of live since
   `reset_memory_peak`) from the backend's own accounting on wgpu and CUDA; every fit step reports
   it (`StepWork::device_memory`, the SDK record's `device_peak_bytes`/`device_reserved_bytes`, the

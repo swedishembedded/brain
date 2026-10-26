@@ -36,8 +36,13 @@ It runs
 
 * on the host, tile by tile, through `StreamedOptimizer` over an
   `OptimizerStateStorage` (memory or a file, bounded staging independent of the
-  parameter count), used by `OffloadAdam` and by a generic trainer through
-  `TrainState`;
+  parameter count), used by `OffloadAdam`, by a generic trainer through
+  `TrainState`, and by a model whose parameters and update live on the host
+  (`model::hostopt::HostAdam`: nemotronasr's transducer and acoustic model,
+  s3dit's Z-Image trainer), which `trainprec::apply_train_precision` reaches through
+  `Model::set_host_optimizer` so `state=bf16`/`state=int8` hold its moments narrow; a
+  model with neither a device optimizer state nor a host optimizer refuses any
+  state but f32 by name (`hostopt::check_host_state_formats` is the per-model spec);
 * on the device, fused decode-update-encode for AdamW with bf16 moments
   (`adamw_bf16.wgsl`, two moments to a word, stochastic rounding optional; qwen3 and
   qwen35) or with int8 moments

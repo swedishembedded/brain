@@ -109,3 +109,23 @@ fn zimage_is_a_model_and_trains_via_ddp_optimizer() {
     assert!(l < l0 * 0.1, "Z-Image did not train through DdpOptimizer: {l0:.3e} -> {l:.3e}");
     eprintln!("Z-Image is a brain Model and trains through the generic distributed optimiser.");
 }
+
+/// Spec: Z-Image's host-side AdamW holds its moments in the run's state format through the generic precision path.
+#[test]
+fn zimage_trains_with_narrow_host_optimizer_state() {
+    if std::env::var("BRAIN_DEV_GPU").as_deref() != Ok("1") {
+        brain_testutil::skip_unavailable("set BRAIN_DEV_GPU=1 (needs a GPU) for the Z-Image host optimizer test");
+        return;
+    }
+    let c = cfg();
+    let weights = init(&c, &mut rng(0x3333)).to_f32();
+    let b = || batch(&c, &mut rng(0x4444));
+    let step = |m: &ZTrainModel| {
+        m.load_batch(b());
+        m.zero_grads();
+        m.forward();
+        m.backward();
+        m.adamw_step(1, 1e-3, 0.0, model::Adam::default(), Some(1.0), 1.0);
+    };
+    model::hostopt::check_host_state_formats("s3dit", || ZTrainModel::from_weights(c, weights.clone()), step, 1e-3).unwrap();
+}

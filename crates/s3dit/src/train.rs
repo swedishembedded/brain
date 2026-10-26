@@ -17,6 +17,9 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+use model::hostopt::HostAdam;
+use model::memplan::ParamPrecision;
+
 use crate::devgrad::BlockDev;
 use crate::grad::{Dims, GradsF32, WeightsF32};
 use crate::modelgrad::{dsilu, layernorm, layernorm_bwd, linb, linb_bwd, patchify, rmsnorm, rmsnorm_dw, silu, timestep_embedding, Cfg, ModelGradsF32, ModelWeightsF32, TDIM, TH};
@@ -646,9 +649,6 @@ impl ModelConfig for Cfg {
     }
 }
 
-/// AdamW first and second moments, one host vector per parameter tensor.
-type Moments = (Vec<Vec<f32>>, Vec<Vec<f32>>);
-
 /// The trainable Z-Image DiT as a brain [`Model`]: `DeviceTrainer` (GPU block
 /// stack + host wrapper) behind named-tensor accessors + a gradient accumulator.
 /// Load a diffusion batch with [`ZTrainModel::load_batch`]; `forward` runs the
@@ -660,9 +660,12 @@ pub struct ZTrainModel {
     names: Vec<String>,
     idx: HashMap<String, usize>,
     grad_acc: RefCell<Vec<Vec<f32>>>,
-    /// AdamW first and second moments, allocated on the first [`ZTrainModel`]'s
+    /// AdamW over the host weights in the run's state format, allocated on the
     /// first [`Model::adamw_step`] so a forward-only user pays nothing.
-    moments: RefCell<Option<Moments>>,
+    opt: RefCell<Option<HostAdam>>,
+    /// The moments' format the optimizer is built with.
+    state_precision: ParamPrecision,
+    layout: Vec<(String, usize)>,
     stash: RefCell<Option<ModelGradsF32>>,
     batch: RefCell<Option<Batch>>,
     loss: RefCell<f32>,
@@ -681,7 +684,9 @@ impl ZTrainModel {
             names,
             idx,
             grad_acc: RefCell::new(grad_acc),
-            moments: RefCell::new(None),
+            opt: RefCell::new(None),
+            state_precision: ParamPrecision::FP32,
+            layout,
             stash: RefCell::new(None),
             batch: RefCell::new(None),
             loss: RefCell::new(0.0),
@@ -742,28 +747,27 @@ impl Model for ZTrainModel {
         // that runs it through `fit_controlled`/`ModelFit` must actually train.
         // The distributed path reaches the weights through `DdpOptimizer`
         // instead, which owns its own flat state and never calls this.
-        let mut moments = self.moments.borrow_mut();
-        let (m_all, v_all) = moments.get_or_insert_with(|| {
-            let m = self.names.iter().map(|n| vec![0f32; self.read_weight(n).len()]).collect();
-            let v = self.names.iter().map(|n| vec![0f32; self.read_weight(n).len()]).collect();
-            (m, v)
-        });
+        let mut opt = self.opt.borrow_mut();
+        let opt = match &mut *opt {
+            Some(opt) => opt,
+            none => none.insert(HostAdam::new(&self.layout, self.state_precision).expect("the precision was accepted by set_host_optimizer")),
+        };
         let grads = self.grad_acc.borrow();
-        // The clip bounds the norm of the gradients the step sees, i.e. after
-        // the accumulation scale - the same order every other model's step
-        // applies them in.
-        let mut scale = extra;
-        if let Some(c) = clip {
-            let norm = grads.iter().flat_map(|g| g.iter()).map(|g| (g * extra) * (g * extra)).sum::<f32>().sqrt();
-            if norm > c {
-                scale *= c / norm;
-            }
+        let args = model::resident_ft::StepArgs { step: t, lr, wd, adam, clip, extra_scale: extra };
+        let sum_sq = if clip.is_some() { grads.iter().flatten().map(|&g| (g as f64).powi(2)).sum() } else { 0.0 };
+        let multiplier = opt.begin_step(&args, sum_sq);
+        // One weight copy at a time: the step never holds a second full model.
+        for (i, name) in self.names.iter().enumerate() {
+            let mut w = self.read_weight(name);
+            opt.update_tensor(i, &mut w, &grads[i], lr, multiplier).unwrap_or_else(|e| panic!("s3dit: {e}"));
+            self.write_weight(name, &w);
         }
-        for i in 0..self.names.len() {
-            let mut w = self.read_weight(&self.names[i]);
-            adam.update_slice(t, lr, wd, scale, &mut w, &mut m_all[i], &mut v_all[i], &grads[i]);
-            self.write_weight(&self.names[i], &w);
-        }
+    }
+    fn set_host_optimizer(&mut self, precision: ParamPrecision) -> Result<(), String> {
+        HostAdam::new(&self.layout, precision)?;
+        self.state_precision = precision;
+        *self.opt.get_mut() = None;
+        Ok(())
     }
     fn poll_wait(&self) {}
     fn param_names(&self) -> Vec<String> {
