@@ -21,7 +21,9 @@
 //!   MoE: x += Σ_topk gate_e·SwiGLU_e(h) + SwiGLU_shared(h)    (sigmoid noaux_tc router)
 //!   logits = lm_head·RMSNorm(x)·norm  (untied) ;  loss = masked cross-entropy
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+
+use model::moe::{ExpertBwdScratch, ExpertGrads, ExpertWeights, MoeActs, MoeIds, MoeIdsBwd, MoeShape, PassSeg, RouterBwdIds, RouterKind};
 use std::collections::HashMap;
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
@@ -241,6 +243,12 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // `model::block::rms_variant` in `Glm::norm_fwd` below; appended here, so
     // every index above is unchanged.
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),
+    // The routed experts of the training passes on their routed rows (`model::moe::experts_fwd_train`,
+    // `moe_layer_bwd`), resolved by name; appended, so every index above is unchanged.
+    ("moe_linear_gated", kernels::MOE_LINEAR_GATED),
+    ("moe_linear_gated_dx", kernels::MOE_LINEAR_GATED_DX),
+    ("moe_linear_gated_dw", kernels::MOE_LINEAR_GATED_DW),
+    ("rows_scatter_add", kernels::ROWS_SCATTER_ADD),
 ];
 
 /// MLP variant per layer (cached activations for backprop).
@@ -254,14 +262,21 @@ enum Mlp {
         router_logits: DeviceBuffer,
         gate: DeviceBuffer,   // combine weights [n, E] (0 for non-selected)
         probs: DeviceBuffer,  // sigmoid scores [n, E]
-        gate_pre: Vec<DeviceBuffer>,
-        up: Vec<DeviceBuffer>,
-        h: Vec<DeviceBuffer>,
-        expert_out: Vec<DeviceBuffer>,
+        /// Every routed expert's `gate_pre`/`up`/`h`/`expert_out` for the rows routed to it in the latest forward
+        /// (`model::moe::MoeActs::compact`), which the backward reads.
+        acts: RefCell<Option<MoeActs>>,
         sh_gate: DeviceBuffer,
         sh_up: DeviceBuffer,
         sh_h: DeviceBuffer,
     },
+}
+
+/// One routed expert's activations for a single row.
+struct ExpertRowBufs {
+    gate_pre: DeviceBuffer,
+    up: DeviceBuffer,
+    h: DeviceBuffer,
+    expert_out: DeviceBuffer,
 }
 
 struct LayerBufs {
@@ -310,6 +325,8 @@ pub struct Glm {
     scores: DeviceBuffer,
     proj: DeviceBuffer,
     moe_acc: DeviceBuffer,
+    /// One routed expert's single-row activations in the decode step, reused by every expert in turn.
+    dec_expert: ExpertRowBufs,
     sh_out: DeviceBuffer,
     mlp_out: DeviceBuffer,
 
@@ -385,8 +402,8 @@ pub struct Glm {
     d_expert_out: DeviceBuffer,
     inv: DeviceBuffer,
 
-    fwd_steps: Vec<Step>,
-    bwd_steps: Vec<Step>,
+    fwd_steps: Vec<PassSeg>,
+    bwd_steps: Vec<PassSeg>,
 
     // ---- incremental KV-cache decode (single new token vs the growing cache) ----
     // MLA "materialised per-head" cache: per layer store the up-projected per-head
@@ -537,10 +554,7 @@ impl Glm {
                     router_logits: st(n * e),
                     gate: st(n * e),
                     probs: st(n * e),
-                    gate_pre: (0..e).map(|_| st(n * moe_ff)).collect(),
-                    up: (0..e).map(|_| st(n * moe_ff)).collect(),
-                    h: (0..e).map(|_| st(n * moe_ff)).collect(),
-                    expert_out: (0..e).map(|_| st(n * d)).collect(),
+                    acts: RefCell::new(None),
                     sh_gate: st(n * shared_ff),
                     sh_up: st(n * shared_ff),
                     sh_h: st(n * shared_ff),
@@ -615,6 +629,7 @@ impl Glm {
             scores: st(bht2),
             proj: st(n * d),
             moe_acc: st(n * d),
+            dec_expert: ExpertRowBufs { gate_pre: st(moe_ff), up: st(moe_ff), h: st(moe_ff), expert_out: st(d) },
             sh_out: st(n * d),
             mlp_out: st(n * d),
             compact_scratch,
@@ -805,7 +820,7 @@ impl Glm {
         s.push(self.gpu.step(ADD_INDEX_MASK, &[&self.idx_mask, &self.scores], &[b_use, nh, t_use], b_use * nh * t_use * t_use));
     }
 
-    fn build_forward(&self, b_use: u32, t_use: u32) -> Vec<Step> {
+    fn build_forward(&self, b_use: u32, t_use: u32) -> Vec<PassSeg> {
         let c = &self.cfg;
         let n = b_use * t_use;
         let d = c.d_model;
@@ -819,10 +834,10 @@ impl Glm {
         let vd = c.v_dim();
         let nh = c.n_heads;
         let vhd = c.v_head_dim;
-        let moe_ff = c.moe_intermediate_size;
         let dense_ff = c.intermediate_size;
         let shared_ff = c.shared_ff();
         let half_rope = rope1 / 2;
+        let mut segs: Vec<PassSeg> = Vec::new();
         let mut s: Vec<Step> = Vec::new();
 
         s.push(self.gpu.step(EMBED, &[&self.tokens, self.w("tok.weight"), &self.res[0]], &[d, n], n * d));
@@ -874,7 +889,7 @@ impl Glm {
                     self.mm(&mut s, h, &p("mlp.down.weight"), &self.mlp_out, n, dense_ff, d);
                     s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[n * d], n * d));
                 }
-                Mlp::Moe { router_logits, gate, probs, gate_pre, up, h, expert_out, sh_gate, sh_up, sh_h } => {
+                Mlp::Moe { router_logits, gate, probs, sh_gate, sh_up, sh_h, .. } => {
                     // router (sigmoid noaux_tc): logits -> gate weights [n,E]
                     self.mm(&mut s, &lb.xn2, &p("moe.router.weight"), router_logits, n, d, e);
                     s.push(self.gpu.step(
@@ -883,16 +898,10 @@ impl Glm {
                         &[n, e, c.num_experts_per_tok, c.n_group, c.topk_group, c.norm_topk_prob as u32, f(c.routed_scaling_factor)],
                         n,
                     ));
-                    // routed experts (dense eval, gate-weighted accumulate)
-                    for ei in 0..e as usize {
-                        let ep = |nm: &str| format!("blocks.{l}.moe.experts.{ei}.{nm}");
-                        self.mm(&mut s, &lb.xn2, &ep("gate.weight"), &gate_pre[ei], n, d, moe_ff);
-                        self.mm(&mut s, &lb.xn2, &ep("up.weight"), &up[ei], n, d, moe_ff);
-                        s.push(self.gpu.step(SILU_MUL, &[&gate_pre[ei], &up[ei], &h[ei]], &[n * moe_ff], n * moe_ff));
-                        self.mm(&mut s, &h[ei], &ep("down.weight"), &expert_out[ei], n, moe_ff, d);
-                        let acc = if ei == 0 { 0 } else { 1 };
-                        s.push(self.gpu.step(SCALE_ADD, &[gate, &expert_out[ei], &self.moe_acc], &[n, d, e, ei as u32, acc], n * d));
-                    }
+                    // routed experts on the rows routed to each, gate-weighted into `moe_acc`: built when the pass
+                    // reaches them (`Self::moe_fwd`), since the routing is this pass's.
+                    segs.push(PassSeg::Steps(std::mem::take(&mut s)));
+                    segs.push(PassSeg::Experts { layer: l, rows: n });
                     // shared expert on the same input
                     self.mm(&mut s, &lb.xn2, &p("moe.shared.gate.weight"), sh_gate, n, d, shared_ff);
                     self.mm(&mut s, &lb.xn2, &p("moe.shared.up.weight"), sh_up, n, d, shared_ff);
@@ -933,17 +942,17 @@ impl Glm {
             self.mm(&mut s, &self.mtp_final, head, &self.mtp_logits, n, d, v); // shared lm_head
             s.push(self.gpu.step(CE_VALUE, &[&self.mtp_logits, &self.mtp_target, &self.mtp_ce_buf], &[n, v, IGNORE], n));
         }
-        s
+        segs.push(PassSeg::Steps(s));
+        segs
     }
 
-    fn build_backward(&self) -> Vec<Step> {
+    fn build_backward(&self) -> Vec<PassSeg> {
         let c = &self.cfg;
         let n = self.b * self.t;
         let b_use = self.b;
         let t_use = self.t;
         let d = c.d_model;
         let v = c.vocab;
-        let e = c.n_routed_experts;
         let ql = c.q_lora_rank;
         let kvl = c.kv_lora_rank;
         let nope = c.nope_dim();
@@ -953,11 +962,11 @@ impl Glm {
         let nh = c.n_heads;
         let vhd = c.v_head_dim;
         let nope_hd = c.qk_nope_head_dim;
-        let moe_ff = c.moe_intermediate_size;
         let dense_ff = c.intermediate_size;
         let shared_ff = c.shared_ff();
         let half_rope = rope1 / 2;
         let head = c.head_weight();
+        let mut segs: Vec<PassSeg> = Vec::new();
         let mut s: Vec<Step> = Vec::new();
 
         // ---- head + final norm ----
@@ -1011,7 +1020,7 @@ impl Glm {
                     self.mm_bwd(&mut s, &self.d_up, &lb.xn2, &p("mlp.up.weight"), &self.d_xn, n, d, dense_ff, 0);
                     self.mm_bwd(&mut s, &self.d_gate_pre, &lb.xn2, &p("mlp.gate.weight"), &self.d_xn, n, d, dense_ff, 1);
                 }
-                Mlp::Moe { router_logits, gate, probs: _, gate_pre, up, h, expert_out, sh_gate, sh_up, sh_h } => {
+                Mlp::Moe { sh_gate, sh_up, sh_h, .. } => {
                     // Shared expert backward (writes d_xn first, acc=0) --
                     // `model::moe::shared_expert_bwd`'s UNWEIGHTED arm, which
                     // IS the sequence this block used to spell out inline
@@ -1048,27 +1057,10 @@ impl Glm {
                         &self.d_xn,
                         false, // this is d_xn's FIRST touch in the MoE arm
                     ));
-                    // router backward: d_gate[n,E] from each expert, then through sigmoid
-                    for (ei, eo) in expert_out.iter().enumerate() {
-                        s.push(self.gpu.step(SCALE_ADD_DGATE, &[eo, &self.dres[l + 1], &self.d_gate], &[n, d, e, ei as u32], n));
-                    }
-                    s.push(self.gpu.step(
-                        ROUTER_SIG_BWD,
-                        &[router_logits, gate, &self.d_gate, &self.d_router_logits],
-                        &[n, e, c.num_experts_per_tok, c.norm_topk_prob as u32, f(c.routed_scaling_factor)],
-                        n,
-                    ));
-                    self.mm_bwd(&mut s, &self.d_router_logits, &lb.xn2, &p("moe.router.weight"), &self.d_xn, n, d, e, 1);
-                    // per-expert SwiGLU backward, accumulate into d_xn
-                    for ei in 0..e as usize {
-                        let ep = |nm: &str| format!("blocks.{l}.moe.experts.{ei}.{nm}");
-                        s.push(self.gpu.step(SCALE_ADD_DEXP, &[gate, &self.dres[l + 1], &self.d_expert_out], &[n, d, e, ei as u32], n * d));
-                        self.mm_bwd(&mut s, &self.d_expert_out, &h[ei], &ep("down.weight"), &self.d_h, n, moe_ff, d, 0);
-                        s.push(self.gpu.step(SILU_DA, &[&gate_pre[ei], &up[ei], &self.d_h, &self.d_gate_pre], &[n * moe_ff], n * moe_ff));
-                        s.push(self.gpu.step(SILU_DB, &[&gate_pre[ei], &self.d_h, &self.d_up], &[n * moe_ff], n * moe_ff));
-                        self.mm_bwd(&mut s, &self.d_up, &lb.xn2, &ep("up.weight"), &self.d_xn, n, d, moe_ff, 1);
-                        self.mm_bwd(&mut s, &self.d_gate_pre, &lb.xn2, &ep("gate.weight"), &self.d_xn, n, d, moe_ff, 1);
-                    }
+                    // The router and the routed experts on the rows each was routed in the forward
+                    // (`Self::moe_bwd`), accumulating into d_xn after the shared expert's first touch.
+                    segs.push(PassSeg::Steps(std::mem::take(&mut s)));
+                    segs.push(PassSeg::Experts { layer: l, rows: n });
                 }
             }
             // post_ln backward -> d_tmp ; dxmid = dres[l+1] + d_tmp
@@ -1108,11 +1100,111 @@ impl Glm {
         if self.trainable("tok.weight") {
             s.push(self.gpu.step(EMB_BWD, &[&self.tokens, &self.dres[0], self.g("tok.weight")], &[n, d, v], v * d));
         }
-        s
+        segs.push(PassSeg::Steps(s));
+        segs
+    }
+
+    /// Layer `l`'s routed experts' weights: one tensor per expert (`w_off = 0`).
+    fn expert_weights(&self, l: usize) -> Vec<ExpertWeights> {
+        (0..self.cfg.n_routed_experts)
+            .map(|ei| {
+                let ep = |nm: &str| format!("blocks.{l}.moe.experts.{ei}.{nm}");
+                ExpertWeights { gate_w: self.w(&ep("gate.weight")).clone(), up_w: self.w(&ep("up.weight")).clone(), down_w: self.w(&ep("down.weight")).clone(), w_off: 0 }
+            })
+            .collect()
+    }
+
+    fn moe_shape(&self, rows: u32) -> MoeShape {
+        let c = &self.cfg;
+        MoeShape { rows, d_model: c.d_model, moe_ff: c.moe_intermediate_size, n_experts: c.n_routed_experts, top_k: c.num_experts_per_tok }
+    }
+
+    fn router_kind(&self) -> RouterKind {
+        let c = &self.cfg;
+        RouterKind::SigmoidNoAuxTc { n_group: c.n_group, topk_group: c.topk_group, norm_topk_prob: c.norm_topk_prob, routed_scaling: c.routed_scaling_factor }
+    }
+
+    /// The routed experts of MoE layer `l` over `rows` rows: the layer's gate is read back, every expert runs on the
+    /// rows routed to it into the cleared `moe_acc`, and their activations are kept for the backward
+    /// (`MoeActs::compact`).
+    fn moe_fwd(&self, l: usize, rows: u32) {
+        let Mlp::Moe { gate, acts, .. } = &self.layers[l].mlp else { unreachable!("a MoE segment of a dense layer") };
+        let shape = self.moe_shape(rows);
+        let compact = MoeActs::compact(&self.gpu, &shape, &self.gpu.read(gate, (rows * shape.n_experts) as usize));
+        let ids = MoeIds { router_gate: ROUTER_SIG, linear_gated: self.kernel("moe_linear_gated"), silu_mul: SILU_MUL, scale_add: SCALE_ADD };
+        let steps = model::moe::experts_fwd_train(&self.gpu, &ids, &shape, &self.layers[l].xn2, gate, &self.expert_weights(l), &compact, &self.moe_acc);
+        self.gpu.submit(&[&self.moe_acc], &steps);
+        *acts.borrow_mut() = Some(compact);
+    }
+
+    /// The routed half of MoE layer `l`'s backward over `rows` rows: the router (its weight's input gradient adds into
+    /// `d_xn`, which the shared expert's backward already wrote), then every expert on the rows it was routed.
+    fn moe_bwd(&self, l: usize, rows: u32) {
+        let lb = &self.layers[l];
+        let Mlp::Moe { router_logits, gate, acts, .. } = &lb.mlp else { unreachable!("a MoE segment of a dense layer") };
+        let acts = acts.borrow();
+        let acts = acts.as_ref().expect("glmdsa: a MoE backward without the forward that routed it");
+        let shape = self.moe_shape(rows);
+        let (d, e) = (shape.d_model, shape.n_experts);
+        let mut router_weight_bwd: Vec<Step> = Vec::new();
+        self.mm_bwd(&mut router_weight_bwd, &self.d_router_logits, &lb.xn2, &format!("blocks.{l}.moe.router.weight"), &self.d_xn, rows, d, e, 1);
+        let grads: Vec<ExpertGrads> = (0..e)
+            .map(|ei| {
+                let ep = |nm: &str| format!("blocks.{l}.moe.experts.{ei}.{nm}");
+                let grad = |nm: &str| self.trainable(&ep(nm)).then(|| self.g(&ep(nm)));
+                ExpertGrads { gate_w: grad("gate.weight"), up_w: grad("up.weight"), down_w: grad("down.weight") }
+            })
+            .collect();
+        let bwd_ids = MoeIdsBwd {
+            scale_add_dexp: SCALE_ADD_DEXP,
+            scale_add_dgate: SCALE_ADD_DGATE,
+            silu_da: SILU_DA,
+            silu_db: SILU_DB,
+            linear_dx: self.kernel("moe_linear_gated_dx"),
+            linear_dw: self.kernel("moe_linear_gated_dw"),
+            linear_gated: true,
+        };
+        let steps = model::moe::moe_layer_bwd(
+            &self.gpu,
+            &RouterBwdIds { router_bwd: ROUTER_SIG_BWD, expert_counts: None },
+            &bwd_ids,
+            self.router_kind(),
+            &shape,
+            router_logits,
+            gate,
+            None,
+            &self.d_gate,
+            &self.d_router_logits,
+            &router_weight_bwd,
+            &lb.xn2,
+            &self.expert_weights(l),
+            &grads,
+            acts,
+            &ExpertBwdScratch { d_expert_out: &self.d_expert_out, d_h: &self.d_h, d_gate_pre: &self.d_gate_pre, d_up: &self.d_up },
+            &self.dres[l + 1],
+            &self.d_xn,
+        );
+        // The compacted backward adds each expert's column into `d_gate`.
+        self.gpu.submit(&[&self.d_gate], &steps);
+    }
+
+    fn kernel(&self, name: &str) -> usize {
+        self.gpu.kernel_index(name).unwrap_or_else(|| panic!("glmdsa: kernel `{name}` is not registered"))
+    }
+
+    /// Run a pass: its fixed dispatches in order, each MoE layer's experts (`experts`: the forward's or the
+    /// backward's) as the pass reaches them.
+    fn run(&self, segs: &[PassSeg], experts: impl Fn(&Self, usize, u32)) {
+        for seg in segs {
+            match seg {
+                PassSeg::Steps(steps) => self.gpu.submit(&[], steps),
+                PassSeg::Experts { layer, rows } => experts(self, *layer, *rows),
+            }
+        }
     }
 
     pub fn forward(&self) -> f32 {
-        self.gpu.submit(&[], &self.fwd_steps);
+        self.run(&self.fwd_steps, Self::moe_fwd);
         let n = (self.b * self.t) as usize;
         let mut total: f32 = self.gpu.read(&self.ce_buf, n).iter().sum();
         // MTP auxiliary loss, added with the same count divisor (so `backward`,
@@ -1126,7 +1218,7 @@ impl Glm {
     pub fn backward(&self) {
         let n = self.b * self.t;
         self.gpu.write(&self.ce_grad_uni, &[n, self.cfg.vocab, IGNORE, f(self.count.get())]);
-        self.gpu.submit(&[], &self.bwd_steps);
+        self.run(&self.bwd_steps, Self::moe_bwd);
     }
 
     pub fn zero_grads(&self) {
@@ -1161,8 +1253,7 @@ impl Glm {
         assert!(t_use <= self.t && self.b == 1, "glm decoder sized too small");
         let ignore = vec![IGNORE; t_use as usize];
         self.set_batch(tokens, &ignore);
-        let s = self.build_forward(1, t_use);
-        self.gpu.submit(&[], &s);
+        self.run(&self.build_forward(1, t_use), Self::moe_fwd);
         self.gpu.read(&self.logits, (t_use * self.cfg.vocab) as usize)
     }
 
@@ -1339,8 +1430,7 @@ impl Glm {
         assert!(t_use <= self.t && self.b == 1, "glm decoder sized too small");
         let ignore = vec![IGNORE; t_use as usize];
         self.set_batch(tokens, &ignore);
-        let s = self.build_forward(1, t_use);
-        self.gpu.submit(&[], &s);
+        self.run(&self.build_forward(1, t_use), Self::moe_fwd);
         self.gpu.read(&self.xn_final, (t_use * self.cfg.d_model) as usize)
     }
 
@@ -1446,7 +1536,8 @@ impl Glm {
                     self.mm(&mut s, h, &p("mlp.down.weight"), &self.mlp_out, 1, dense_ff, d);
                     s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[d], d));
                 }
-                Mlp::Moe { router_logits, gate, probs, gate_pre, up, h, expert_out, sh_gate, sh_up, sh_h } => {
+                Mlp::Moe { router_logits, gate, probs, sh_gate, sh_up, sh_h, .. } => {
+                    let ExpertRowBufs { gate_pre, up, h, expert_out } = &self.dec_expert;
                     self.mm(&mut s, &lb.xn2, &p("moe.router.weight"), router_logits, 1, d, e);
                     s.push(self.gpu.step(
                         ROUTER_SIG,
@@ -1456,12 +1547,12 @@ impl Glm {
                     ));
                     for ei in 0..e as usize {
                         let ep = |nm: &str| format!("blocks.{l}.moe.experts.{ei}.{nm}");
-                        self.mm(&mut s, &lb.xn2, &ep("gate.weight"), &gate_pre[ei], 1, d, moe_ff);
-                        self.mm(&mut s, &lb.xn2, &ep("up.weight"), &up[ei], 1, d, moe_ff);
-                        s.push(self.gpu.step(SILU_MUL, &[&gate_pre[ei], &up[ei], &h[ei]], &[moe_ff], moe_ff));
-                        self.mm(&mut s, &h[ei], &ep("down.weight"), &expert_out[ei], 1, moe_ff, d);
+                        self.mm(&mut s, &lb.xn2, &ep("gate.weight"), gate_pre, 1, d, moe_ff);
+                        self.mm(&mut s, &lb.xn2, &ep("up.weight"), up, 1, d, moe_ff);
+                        s.push(self.gpu.step(SILU_MUL, &[gate_pre, up, h], &[moe_ff], moe_ff));
+                        self.mm(&mut s, h, &ep("down.weight"), expert_out, 1, moe_ff, d);
                         let acc = if ei == 0 { 0 } else { 1 };
-                        s.push(self.gpu.step(SCALE_ADD, &[gate, &expert_out[ei], &self.moe_acc], &[1, d, e, ei as u32, acc], d));
+                        s.push(self.gpu.step(SCALE_ADD, &[gate, expert_out, &self.moe_acc], &[1, d, e, ei as u32, acc], d));
                     }
                     self.mm(&mut s, &lb.xn2, &p("moe.shared.gate.weight"), sh_gate, 1, d, shared_ff);
                     self.mm(&mut s, &lb.xn2, &p("moe.shared.up.weight"), sh_up, 1, d, shared_ff);

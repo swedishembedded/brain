@@ -451,6 +451,15 @@ impl MoeActs {
     }
 }
 
+/// One piece of a model's recorded training pass over MoE layers: the dispatches fixed when the pass was built, or one
+/// MoE layer's routed experts over `rows` rows, whose shapes follow the rows routed to each expert in this pass
+/// ([`MoeActs::compact`]) and which the model builds when the pass reaches them ([`experts_fwd_train`] in the
+/// forward, [`moe_layer_bwd`] in the backward).
+pub enum PassSeg {
+    Steps(Vec<Step>),
+    Experts { layer: usize, rows: u32 },
+}
+
 /// The routed experts' training forward, accumulating every expert's gate-weighted output into `acc` (which the
 /// caller zeroes) and saving what [`moe_layer_bwd`] reads into `acts`. Over row-compacted activations
 /// ([`MoeActs::compact`]) each expert runs on its routed rows only: they are gathered, the expert's projections run on

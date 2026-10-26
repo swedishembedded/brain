@@ -7,7 +7,7 @@
 //!
 //! Both tapes are built ONCE in [`DeepseekV2::new_on`] and stored
 //! ([`DeepseekV2::fwd_steps`]/`bwd_steps` are plain dispatch descriptors, not
-//! lazily-evaluated closures) as [`Seg`]ments: the dispatches fixed at build,
+//! lazily-evaluated closures) as `model::moe::PassSeg`s: the dispatches fixed at build,
 //! and each MoE layer's routed experts, whose shape follows the rows routed to
 //! each expert in this pass and which are built when the pass reaches them
 //! (`model::moe::MoeActs::compact`). `forward()`/`backward()` run them and
@@ -76,7 +76,7 @@ use std::collections::HashMap;
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::block::{self, Gqa, KernelIds};
 use model::moe::{
-    self, ExpertBwdScratch, ExpertGrads, ExpertWeights, GroupedExpertFwdIds, GroupedExpertScratch, MoeActs, MoeIds, MoeIdsBwd, MoeShape,
+    self, ExpertBwdScratch, ExpertGrads, ExpertWeights, GroupedExpertFwdIds, GroupedExpertScratch, MoeActs, MoeIds, MoeIdsBwd, MoeShape, PassSeg,
     RouterBwdIds, RouterKind, SharedExpertActs, SharedExpertBwdIds, SharedExpertBwdScratch, SharedExpertGrads, SharedExpertIds,
     SharedExpertScratch,
 };
@@ -407,15 +407,6 @@ fn argmax(v: &[f32]) -> usize {
     best
 }
 
-/// One piece of a recorded pass: the dispatches fixed when the pass was built, or one MoE layer's routed experts over
-/// `rows` rows, whose shapes follow the rows routed to each expert in this pass and are built when the pass reaches
-/// them.
-enum Seg {
-    Steps(Vec<Step>),
-    MoeFwd { layer: usize, rows: u32 },
-    MoeBwd { layer: usize, rows: u32 },
-}
-
 /// Per-layer MLP variant, holding the activations its backward reads back.
 enum Mlp {
     /// Blocks `[0, n_dense_layers)`: a plain SwiGLU MLP at `ffn_hidden` width.
@@ -633,8 +624,8 @@ pub struct DeepseekV2 {
     /// `cfg.lora` is set.
     adapter: Option<AdapterRuntime>,
 
-    fwd_steps: Vec<Seg>,
-    bwd_steps: Vec<Seg>,
+    fwd_steps: Vec<PassSeg>,
+    bwd_steps: Vec<PassSeg>,
 
     // ---- incremental KV-cache decode state (lazily built on first `step`) ----
     dec: RefCell<Option<Decode>>,
@@ -1068,7 +1059,7 @@ impl DeepseekV2 {
 
     // ---- forward tape ----
 
-    fn build_forward(&self, b_use: u32, t_use: u32) -> Vec<Seg> {
+    fn build_forward(&self, b_use: u32, t_use: u32) -> Vec<PassSeg> {
         let c = &self.cfg;
         let n = b_use * t_use;
         let d = c.d_model();
@@ -1081,7 +1072,7 @@ impl DeepseekV2 {
         let ids = kernel_ids();
         let ga = Gqa { b: b_use, t: t_use, n_heads: nh, n_kv_heads: c.n_kv_heads(), head_dim: hd };
         let shape = self.moe_shape(n);
-        let mut segs: Vec<Seg> = Vec::new();
+        let mut segs: Vec<PassSeg> = Vec::new();
         let mut s: Vec<Step> = Vec::new();
 
         // Embedding gather + vision-language splice - embed stage only. A
@@ -1129,8 +1120,8 @@ impl DeepseekV2 {
                     s.push(moe::router_fwd_kind(&self.gpu, &moe_ids(), self.router_kind(), &shape, router_logits, None, gate, None));
                     // Routed experts on the rows routed to each: built when the pass reaches them
                     // (`Self::moe_fwd`), since the routing is this pass's.
-                    segs.push(Seg::Steps(std::mem::take(&mut s)));
-                    segs.push(Seg::MoeFwd { layer: l, rows: n });
+                    segs.push(PassSeg::Steps(std::mem::take(&mut s)));
+                    segs.push(PassSeg::Experts { layer: l, rows: n });
                     // The fused shared experts, added UNWEIGHTED (`None`): there
                     // is no shared-expert gate tensor in this checkpoint, and an
                     // unweighted sum of SwiGLU experts IS one SwiGLU of the
@@ -1173,13 +1164,13 @@ impl DeepseekV2 {
             self.mm(&mut s, &self.xn_final, c.head_weight(), &self.logits, n, d, v);
             s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, v, IGNORE], n));
         }
-        segs.push(Seg::Steps(s));
+        segs.push(PassSeg::Steps(s));
         segs
     }
 
     // ---- backward tape ----
 
-    fn build_backward(&self) -> Vec<Seg> {
+    fn build_backward(&self) -> Vec<PassSeg> {
         let c = &self.cfg;
         let (b_use, t_use) = (self.b, self.t);
         let n = b_use * t_use;
@@ -1192,7 +1183,7 @@ impl DeepseekV2 {
         let head = c.head_weight();
         let ids = kernel_ids();
         let ga = Gqa { b: b_use, t: t_use, n_heads: nh, n_kv_heads: c.n_kv_heads(), head_dim: hd };
-        let mut segs: Vec<Seg> = Vec::new();
+        let mut segs: Vec<PassSeg> = Vec::new();
         let mut s: Vec<Step> = Vec::new();
 
         // ---- head + final norm - head stage only. A non-head stage starts
@@ -1259,8 +1250,8 @@ impl DeepseekV2 {
                         false,
                     ));
                     // The routed half on the rows each expert was routed in the forward (`Self::moe_bwd`).
-                    segs.push(Seg::Steps(std::mem::take(&mut s)));
-                    segs.push(Seg::MoeBwd { layer: l, rows: n });
+                    segs.push(PassSeg::Steps(std::mem::take(&mut s)));
+                    segs.push(PassSeg::Experts { layer: l, rows: n });
                 }
             }
             // ln2 backward -> d_tmp ; dxmid = dres[l+1] + d_tmp
@@ -1299,7 +1290,7 @@ impl DeepseekV2 {
                 s.push(self.gpu.step(EMB_BWD, &[&self.tokens, &self.dres[0], self.g("tok.weight")], &[n, d, v], v * d));
             }
         }
-        segs.push(Seg::Steps(s));
+        segs.push(PassSeg::Steps(s));
         segs
     }
 
@@ -1364,13 +1355,13 @@ impl DeepseekV2 {
         self.gpu.submit(&[&self.d_gate], &steps);
     }
 
-    /// Run a pass: its fixed dispatches in order, each MoE layer's experts as the pass reaches them.
-    fn run(&self, segs: &[Seg]) {
+    /// Run a pass: its fixed dispatches in order, each MoE layer's experts (`experts`: the forward's or the
+    /// backward's) as the pass reaches them.
+    fn run(&self, segs: &[PassSeg], experts: impl Fn(&Self, usize, u32)) {
         for seg in segs {
             match seg {
-                Seg::Steps(steps) => self.gpu.submit(&[], steps),
-                Seg::MoeFwd { layer, rows } => self.moe_fwd(*layer, *rows),
-                Seg::MoeBwd { layer, rows } => self.moe_bwd(*layer, *rows),
+                PassSeg::Steps(steps) => self.gpu.submit(&[], steps),
+                PassSeg::Experts { layer, rows } => experts(self, *layer, *rows),
             }
         }
     }
@@ -1384,7 +1375,7 @@ impl DeepseekV2 {
     /// stale or uninitialised data - see `crate::shard`).
     pub fn forward_submit(&self) {
         assert!(self.batched, "DeepseekV2::forward on a batched=false (chunked-decode-only) instance");
-        self.run(&self.fwd_steps);
+        self.run(&self.fwd_steps, Self::moe_fwd);
     }
 
     pub fn forward(&self) -> f32 {
@@ -1397,7 +1388,7 @@ impl DeepseekV2 {
         assert!(!self.bwd_steps.is_empty(), "DeepseekV2::backward on a forward-only (inference) instance");
         let n = self.b * self.t;
         self.gpu.write(&self.ce_grad_uni, &[n, self.cfg.vocab(), IGNORE, f(self.count.get())]);
-        self.run(&self.bwd_steps);
+        self.run(&self.bwd_steps, Self::moe_bwd);
     }
 
     // ---- pipeline-parallel cross-stage seam (see `crate::shard`) ----
@@ -1460,7 +1451,7 @@ impl DeepseekV2 {
         }
         let ignore = vec![IGNORE; t_use as usize];
         self.set_batch(tokens, &ignore);
-        self.run(&self.build_forward(1, t_use));
+        self.run(&self.build_forward(1, t_use), Self::moe_fwd);
         self.gpu.read(&self.logits, (t_use * self.cfg.vocab()) as usize)
     }
 
