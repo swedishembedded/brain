@@ -22,6 +22,8 @@
 use gpu_core::{Dispatch, Gpu};
 
 const KERNELS: &[(&str, &str)] = &[
+    ("matmul", kernels::MATMUL),
+    ("matmul_ref", kernels::MATMUL),
     ("matmul_reg3", kernels::MATMUL_REG3),
     ("matmul_reg3_ref", kernels::MATMUL_REG3),
     ("matmul_dx_reg", kernels::MATMUL_DX_REG),
@@ -30,12 +32,14 @@ const KERNELS: &[(&str, &str)] = &[
     ("matmul_dw_reg_ref", kernels::MATMUL_DW_REG),
 ];
 
-const K_REG3: usize = 0;
-const K_REF: usize = 1;
-const K_DX: usize = 2;
-const K_DX_REF: usize = 3;
-const K_DW: usize = 4;
-const K_DW_REF: usize = 5;
+const K_PLAIN: usize = 0;
+const K_PLAIN_REF: usize = 1;
+const K_REG3: usize = 2;
+const K_REF: usize = 3;
+const K_DX: usize = 4;
+const K_DX_REF: usize = 5;
+const K_DW: usize = 6;
+const K_DW_REF: usize = 7;
 /// The WGSL kernel's output tile, which sets its dispatch geometry.
 const WGSL_TILE: u32 = 128;
 /// Written around every window so an out-of-window write shows.
@@ -275,7 +279,44 @@ fn the_weight_gradient_is_redirected_and_bit_identical() {
     }
 }
 
+/// The plain one-thread-per-output GEMM is redirected to the same native kernel and agrees with its own WGSL
+/// source bit for bit - the shapes a small output takes (a ViT tile's rows, a single conditioning row) and ragged ones.
+fn the_plain_gemm_is_redirected_and_bit_identical() {
+    let Some(gpu) = device() else { return };
+    assert_eq!(gpu.native_kernel_for(K_PLAIN, &[101, 1024, 4096]), Some("matmul_f32_reg"));
+    assert_eq!(gpu.native_kernel_for(K_PLAIN_REF, &[101, 1024, 4096]), None);
+    let check_plain = |m: u32, k: u32, n: u32, lead: [u64; 3]| {
+        let seed = u64::from(m) * 131 + u64::from(k) * 7 + u64::from(n);
+        let x = Windowed::new(&gpu, &values((m * k) as usize, seed + 1), lead[0]);
+        let w = Windowed::new(&gpu, &values((n * k) as usize, seed + 2), lead[1]);
+        let a = Windowed::new(&gpu, &vec![SENTINEL; (m * n) as usize], lead[2]);
+        let b = Windowed::new(&gpu, &vec![SENTINEL; (m * n) as usize], lead[2]);
+        let dispatch = |kind: usize, o: &Windowed| {
+            gpu.dispatch_sliced(kind, &[&x.buf, &w.buf, &o.buf], &[x.range(), w.range(), o.range()], &[m, k, n], Dispatch::Threads(m * n))
+        };
+        gpu.submit(&[], &[dispatch(K_PLAIN, &a), dispatch(K_PLAIN_REF, &b)]);
+        gpu.poll_wait();
+        let (ga, gb) = (a.bits(&gpu), b.bits(&gpu));
+        let (lo, hi) = (a.lead as usize, a.lead as usize + a.len);
+        assert!(ga[..lo].iter().chain(&ga[hi..]).all(|&v| v == SENTINEL), "native path wrote outside its window at {m}x{k}x{n} {lead:?}");
+        let first = ga[lo..hi].iter().zip(&gb[lo..hi]).position(|(p, q)| p != q);
+        assert!(first.is_none(), "the native GEMM differs from plain matmul at m={m} k={k} n={n} lead={lead:?}: first at {first:?}");
+    };
+    for k in [1u32, 3, 8, 13, 31, 64, 257] {
+        for (m, n) in [(1u32, 1u32), (1, 130), (101, 96), (127, 129), (200, 257)] {
+            for lead in [[0, 0, 0], [1, 3, 5]] {
+                check_plain(m, k, n, lead);
+            }
+        }
+    }
+    // A CLIP-L tile's linears: 101 rows through the attention projection and the MLP.
+    for (m, k, n) in [(101u32, 1024u32, 3072u32), (101, 1024, 4096), (101, 4096, 1024)] {
+        check_plain(m, k, n, [0; 3]);
+    }
+}
+
 gpu_core::card_tests!(
+    the_plain_gemm_is_redirected_and_bit_identical,
     the_native_kernel_is_selected_for_every_reg3_dispatch,
     the_native_kernel_is_bit_identical_to_matmul_reg3,
     random_shapes_and_windows_are_bit_identical,

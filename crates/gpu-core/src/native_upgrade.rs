@@ -708,6 +708,18 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: gemm_blocks,
         requires_wgsl_upgrade: false,
     },
+    // The plain one-thread-per-output fp32 GEMM: what a small output (a ViT tile's 101 rows, a conditioning row)
+    // gets from `model::block::pick_gemm`, and ~100x slower than the register-tiled kernel on a CUDA device. The
+    // same arithmetic (one fp32 accumulator per output, product and sum each rounded, k ascending), so the same
+    // native kernel serves it bit for bit (`tests/f32_reg_native.rs`).
+    Row {
+        slow: "matmul",
+        target: Target::Named("matmul_f32_reg"),
+        bindings: F32_GEMM_BINDINGS,
+        serves: serves_f32_gemm,
+        blocks: gemm_blocks,
+        requires_wgsl_upgrade: false,
+    },
     // The register-tiled fp32 GEMM half the workspace dispatches. One fp32
     // accumulator per output, product and sum each rounded, k ascending: the
     // reference's own arithmetic, so bit-identical (`tests/f32_reg_native.rs`).
