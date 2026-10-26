@@ -158,6 +158,13 @@ The per-cell matrix and its tests are `docs/reference/training-capabilities.md`.
   Construction-time streaming (`Role::Streamed`, `StreamedStore::attach`, `Model::new_resident`,
   `check_streamed_construction`): gpt2, lfm2, spectrallm, deepseek2, glmdsa, qwen35moe, horizon (set encoder), ouro,
   huginn, toymoe, toyseq2seq, toypid.
+- D Saved-activation policy beyond `Model`: the conv-block tape (`vae::blocks`) records blocks as
+  segments replayed before their adjoint under `Activations::Recompute` (vqgan, rrdbnet, sdxlunet,
+  controlnet, supir; bit-identical gradients) and its reverse holds activation gradients for the
+  live frontier only (8 resnet blocks allocate what 2 do); florence2 shares one set of BART layer
+  intermediates per tower; nemotronasr and s3dit accept the recompute they always do
+  (`saved::recompute_only`); toyautoencoder shares its pre-activation. ltxv's and minimaxmusic3's
+  `Model` impls have no backward (their training runs outside the trait).
 - D Memory: `model::saved` saved-activation policy (keep, recompute, bf16/fp8 boundaries)
   priced in memplan and wired into qwen3 and qwen35 LoRA training (a4a1242bc); flash attention
   backward without `[H,T,T]` probabilities for qwen35moe (fc6df1080) and flux2, including the

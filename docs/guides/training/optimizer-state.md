@@ -127,11 +127,26 @@ model (`Model::set_saved_policy`):
 - deepseek2, glmdsa, gpt2, lfm2 and horizon share one set of activation buffers
   across their layers, and qwen35moe (whose forward allocates its activations
   afresh) keeps none of them past the layer;
-- spectrallm, ouro and huginn always rebuild each layer and refuse `keep`;
+- spectrallm, ouro and huginn always rebuild each layer and refuse `keep`, as do
+  nemotronasr and s3dit, whose backward reruns each layer from its f32 input
+  (`model::saved::recompute_only`);
 - qwen3 and qwen35 answer from what they were built with;
+- toyautoencoder shares one pre-activation buffer between its encoder and
+  decoder and rebuilds the encoder's;
 - every model above that recomputes (huginn: its recurrence) also holds bf16 or
   fp8 residuals;
 - a model that keeps every layer refuses any other choice by name.
+
+Trainers outside `Model` take the same policy. arcface, yolov8, zipdepth and
+florence2 have `set_saved_policy`: arcface rebuilds each residual block's
+`bn1 -> conv1 -> prelu` branch, yolov8 and zipdepth each normed conv unit's
+intermediates, florence2 each BART layer from one set of intermediates per tower.
+The conv-block tape (`vae::blocks`: vqgan, rrdbnet, sdxlunet, controlnet, supir)
+takes `vae::blocks::Activations` when its graph is recorded: under `Recompute`
+every block is a segment whose freed intermediates are shared with later
+segments and replayed before its adjoint (`Builder::set_activations`,
+`Builder::segment`), bit for bit. Its reverse also holds activation gradients
+only for the live frontier of the walk, whatever the policy.
 
 A built model only narrows what it keeps.
 
