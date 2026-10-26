@@ -91,6 +91,7 @@ pub mod plan;
 pub mod projector;
 /// Real per-device, per-dtype GEMM throughput measurement - see the module doc.
 pub mod probe;
+pub mod hostopt;
 pub mod resident_ft;
 pub mod rollout;
 pub mod saved;
@@ -371,6 +372,13 @@ pub trait Model {
     /// name, never training every layer on the device instead.
     fn set_resident(&mut self, _cfg: &resident_ft::ResidentFtConfig) -> Result<(), String> {
         Err("this model has no layer-streamed full fine-tune".into())
+    }
+
+    /// Hold this model's optimizer state as `precision` names when its parameters and its update live on the host
+    /// ([`hostopt::HostAdam`]): the fit loop calls it for a model with no device [`OptimizerState`] when the run asks
+    /// for a state other than f32. The default refuses by name, never training with f32 moments instead.
+    fn set_host_optimizer(&mut self, _precision: paramstore::precision::ParamPrecision) -> Result<(), String> {
+        Err("this model does not expose its optimizer state, so it trains only with f32 moments".into())
     }
 
     /// [`Model::new`] for a run that streams this model's layers under `resident` from the start: a model that

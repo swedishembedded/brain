@@ -325,8 +325,18 @@ pub fn apply_train_precision<M: crate::Model>(model: &mut M, precision: &TrainPr
         None => precision,
     };
     let uniform_f32 = precision.policy.rules.is_empty() && precision.policy.default == ParamPrecision::FP32;
+    if model.optimizer_parts().is_none() {
+        // No device optimizer state: a model whose parameters and update live on the host takes the format there.
+        if uniform_f32 {
+            return Ok(());
+        }
+        if !precision.policy.rules.is_empty() {
+            return Err(format!("{name}: a host optimizer takes one uniform precision (no per-group rules)"));
+        }
+        return model.set_host_optimizer(precision.policy.default).map_err(|e| format!("{name}: {e}"));
+    }
     let Some(state) = model.optimizer_state() else {
-        return if uniform_f32 { Ok(()) } else { Err(format!("{name}: this model does not expose its optimizer state, so it trains only with f32 moments")) };
+        return Err(format!("{name}: this model exposes its optimizer parts but not its optimizer state"));
     };
     let wanted: Vec<(String, ParamPrecision)> = state.store.trainable.iter().chain(&state.store.offload).map(|(n, numel)| (n.clone(), precision.policy.resolve(n, *numel).precision)).collect();
     if precision.wants_host_moments() || !state.store.offload.is_empty() {
