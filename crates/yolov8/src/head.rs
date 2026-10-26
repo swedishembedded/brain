@@ -128,6 +128,11 @@ impl Branch {
         self.c1.set_update_running(on);
     }
 
+    pub fn set_recompute(&self, on: bool) {
+        self.c0.set_recompute(on);
+        self.c1.set_recompute(on);
+    }
+
     pub fn param_list(&self) -> Vec<(String, usize)> {
         let mut v = self.c0.param_list();
         v.extend(self.c1.param_list());
@@ -192,6 +197,11 @@ impl ScaleHead {
     pub fn set_update_running(&self, on: bool) {
         self.cls.set_update_running(on);
         self.reg.set_update_running(on);
+    }
+
+    pub fn set_recompute(&self, on: bool) {
+        self.cls.set_recompute(on);
+        self.reg.set_recompute(on);
     }
 
     pub fn param_list(&self) -> Vec<(String, usize)> {
@@ -279,6 +289,13 @@ impl Head {
     pub fn set_update_running(&self, on: bool) {
         for s in &self.scales {
             s.set_update_running(on);
+        }
+    }
+
+    /// Recompute every unit's normed intermediates in the backward (`vision::blocks::Conv::set_recompute`).
+    pub fn set_recompute(&self, on: bool) {
+        for s in &self.scales {
+            s.set_recompute(on);
         }
     }
 

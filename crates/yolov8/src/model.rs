@@ -41,6 +41,7 @@ use serde_json::Value;
 
 use gpu_core::{DeviceBuffer, Gpu};
 use optim::Optim;
+use model::saved::SavedPolicy;
 use paramstore::ParamStore;
 
 use crate::blocks::{Conv, C2f, SPPF};
@@ -79,6 +80,8 @@ pub struct Yolo {
     pub gpu: Gpu,
     pub cfg: YoloConfig,
     pub ps: ParamStore,
+    /// What the backward keeps of the forward ([`Yolo::set_saved_policy`]).
+    saved: SavedPolicy,
     opt: Optim,
     b: u32,
     mode: Cell<LossMode>,
@@ -358,6 +361,7 @@ impl Yolo {
         let (cls_rows, box_rows) = (anchor_rows * cfg.nc, anchor_rows * 4 * cfg.reg_max);
 
         Yolo {
+            saved: SavedPolicy::Keep,
             cls_flat: ctx.act(cls_rows),
             box_flat: ctx.act(box_rows),
             d_cls_flat: ctx.act(cls_rows),
@@ -626,6 +630,27 @@ impl Yolo {
         }
         self.head.set_update_running(on);
         self.pin_frozen_norm();
+    }
+
+    /// Keep what `policy` names of the forward: every unit's normed intermediates ([`SavedPolicy::Keep`]), or only
+    /// each unit's output, the post-conv and post-BN intermediates rebuilt from its input before its backward
+    /// ([`SavedPolicy::Recompute`], `vision::blocks::Conv::set_recompute`). A detector has no layer-boundary residual
+    /// stream to hold narrow, so a narrow saved format is refused by name, as is going back to keeping everything.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        if let SavedPolicy::Quantized(format) = policy {
+            return Err(format!("yolov8 recomputes its units' intermediates from their f32 inputs; {format:?} saved boundaries do not apply"));
+        }
+        if !self.saved.narrows_to(policy) {
+            return Err(format!("yolov8: a build keeping {:?} cannot go back to {policy:?}", self.saved));
+        }
+        if policy.recomputes() {
+            for m in self.trunk_norm_targets() {
+                m.set_recompute(true);
+            }
+            self.head.set_recompute(true);
+        }
+        self.saved = policy;
+        Ok(())
     }
 
     /// Upload the image batch `[N*3*H*W]` (f32 CHW).
@@ -1074,6 +1099,7 @@ impl Yolo {
 trait NormToggle {
     fn set_eval(&self, eval: bool);
     fn set_update_running(&self, on: bool);
+    fn set_recompute(&self, on: bool);
 }
 
 macro_rules! impl_norm_toggle {
@@ -1084,6 +1110,9 @@ macro_rules! impl_norm_toggle {
             }
             fn set_update_running(&self, on: bool) {
                 <$t>::set_update_running(self, on)
+            }
+            fn set_recompute(&self, on: bool) {
+                <$t>::set_recompute(self, on)
             }
         }
     )*};
@@ -1118,6 +1147,9 @@ impl ModelConfigParamList for YoloConfig {
 // ---- model::Model seam ----
 
 impl model::Model for Yolo {
+    fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        Yolo::set_saved_policy(self, policy)
+    }
     fn optimizer_state(&mut self) -> Option<model::OptimizerState<'_>> {
         Some(model::OptimizerState { gpu: &self.gpu, store: &mut self.ps, optim: &self.opt })
     }

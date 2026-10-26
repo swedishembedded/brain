@@ -178,7 +178,7 @@ impl BnCore {
                 c,
             ));
         }
-        let s_train = ctx.step(ctx.ids.need(ctx.ids.bn_train, "bn_train"), &[x, &self.mv, &self.gb, out], &self.nchw(), self.shape.numel());
+        let s_train = self.train_step(ctx, x, out);
         if ctx.ids.bn_pack != crate::NONE {
             steps.push(ctx.step(
                 ctx.ids.bn_pack,
@@ -197,6 +197,13 @@ impl BnCore {
         let mut rest = vec![s_train];
         rest.extend(tail);
         ctx.gpu.submit(&[], &rest);
+    }
+
+    /// The train-mode normalisation `bn_train(x) -> out` with the batch statistics and affine parameters the last
+    /// [`Self::forward_train`] packed: what a backward that recomputes the unit replays, the statistics untouched (no
+    /// second pass over them, no second running-stat update).
+    pub(crate) fn train_step(&self, ctx: &Ctx, x: &DeviceBuffer, out: &DeviceBuffer) -> Step {
+        ctx.step(ctx.ids.need(ctx.ids.bn_train, "bn_train"), &[x, &self.mv, &self.gb, out], &self.nchw(), self.shape.numel())
     }
 
     /// The eval-mode normalisation step `bn_eval(x) -> out` with the fused

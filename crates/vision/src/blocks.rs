@@ -498,13 +498,20 @@ pub struct Conv {
     /// update flag is what [`Conv::set_update_running`] sets.
     bn: crate::bn::BnCore,
 
-    conv_out: DeviceBuffer, // post-conv pre-BN [out]
+    /// A raw conv's (no norm) output, which `out()` may alias. A normed unit holds its post-conv and post-BN
+    /// intermediates in [`Conv::bn_temps`] instead.
+    conv_out: DeviceBuffer,
+    /// A normed unit's post-conv pre-BN and post-BN pre-activation intermediates, allocated on first use. Absent while
+    /// the unit recomputes them ([`Conv::set_recompute`]): they then come from the context's shared scratch, and the
+    /// backward replays the conv and the normalisation from the unit's input before differentiating it.
+    bn_temps: std::cell::RefCell<Option<(DeviceBuffer, DeviceBuffer)>>,
+    /// Recompute the normed intermediates in the backward instead of holding them ([`Conv::set_recompute`]).
+    recompute: std::cell::Cell<bool>,
     sb: DeviceBuffer,       // packed scale|bias [2C] = BN-eval collapsed (fused conv_act)
     /// Whether `sb` holds the current BN-eval collapse. Computed lazily on the
     /// first eval-mode forward and reused across frames (constant in inference);
     /// invalidated when the block re-enters train mode.
     sb_ready: std::cell::Cell<bool>,
-    bn_out: DeviceBuffer,   // post-BN pre-SiLU [out]
     act: DeviceBuffer,      // SiLU output (block output) [out]
     // The backward's gradients wrt bn_out and conv_out live only through `backward`: they come from the context's
     // shared scratch (`Ctx::scratch`), one pair for the whole model rather than a pair per unit.
@@ -586,10 +593,11 @@ impl Conv {
             pad,
             train: std::cell::Cell::new(train),
             bn: crate::bn::BnCore::new(ctx, bn_names, out_shape),
-            conv_out: ctx.act(on),
+            conv_out: ctx.act(if spec.norm == Norm::None { on } else { 1 }),
+            bn_temps: std::cell::RefCell::new(None),
+            recompute: std::cell::Cell::new(false),
             sb: ctx.act(2 * cout),
             sb_ready: std::cell::Cell::new(false),
-            bn_out: ctx.act(on),
             act: ctx.act(on),
             dbcast: std::cell::RefCell::new(None),
             q_in: std::cell::RefCell::new(None),
@@ -639,6 +647,27 @@ impl Conv {
     /// data and eval-mode inference works; left OFF for the gradient check.
     pub fn set_update_running(&self, on: bool) {
         self.bn.update_running.set(on);
+    }
+
+    /// Recompute a normed unit's post-conv and post-BN intermediates in the backward instead of holding them: its
+    /// forward writes them to the context's shared scratch and the backward replays the conv and the train-mode
+    /// normalisation (with the batch statistics the forward kept) from the unit's input, bit for bit. Releases them
+    /// when turned on. A raw conv's output is its conv output and stays held.
+    pub fn set_recompute(&self, on: bool) {
+        self.recompute.set(on);
+        if on {
+            self.bn_temps.borrow_mut().take();
+        }
+    }
+
+    /// A normed unit's `(conv_out, bn_out)` intermediates: its own (allocated on first use), or the context's shared
+    /// scratch while it recomputes them.
+    fn bn_temps(&self, ctx: &Ctx) -> (DeviceBuffer, DeviceBuffer) {
+        let on = self.out_shape.numel();
+        if self.recompute.get() {
+            return (ctx.scratch("conv.conv_out", on), ctx.scratch("conv.bn_out", on));
+        }
+        self.bn_temps.borrow_mut().get_or_insert_with(|| (ctx.act(on), ctx.act(on))).clone()
     }
 
     /// The unit's tensor names — read-only. Lets a block-level fusion (e.g.
@@ -945,14 +974,15 @@ impl Conv {
         }
 
         // Train mode: conv -> batch-stat BN -> act.
-        let conv = self.conv_steps(ctx, ps, x_in, &self.conv_out);
+        let (conv_out, bn_out) = self.bn_temps(ctx);
+        let conv = self.conv_steps(ctx, ps, x_in, &conv_out);
         let s_act = match act_pair(ctx, self.spec.act) {
-            Some((fwd, _)) => ctx.step(fwd, &[&self.bn_out, &self.act], &act_params(self.spec.act, on), on),
+            Some((fwd, _)) => ctx.step(fwd, &[&bn_out, &self.act], &act_params(self.spec.act, on), on),
             // Act::None: the block's output is the BN output, copied into `act`
             // by a slope-1 leaky_relu (`out()` aliases only for a raw conv).
-            None => ctx.step(ctx.ids.need(ctx.ids.leaky_relu, "leaky_relu"), &[&self.bn_out, &self.act], &[on, f(1.0)], on),
+            None => ctx.step(ctx.ids.need(ctx.ids.leaky_relu, "leaky_relu"), &[&bn_out, &self.act], &[on, f(1.0)], on),
         };
-        self.bn.forward_train(ctx, ps, &self.conv_out, &self.bn_out, conv, vec![s_act]);
+        self.bn.forward_train(ctx, ps, &conv_out, &bn_out, conv, vec![s_act]);
     }
 
     /// This conv's calibration / fake-quant tap — see [`apply_tap`]. Every conv
@@ -1010,16 +1040,17 @@ impl Conv {
             &[cin, h, w, k, stride, pad, ho, wo, cinkk],
             hw * cinkk,
         );
-        // y[Cout, HW] = W[Cout, CinKK] . col[HW, CinKK]^T into conv_out (raw conv).
+        // y[Cout, HW] = W[Cout, CinKK] . col[HW, CinKK]^T into the pre-BN intermediate (raw conv).
+        let (conv_out, _) = self.bn_temps(ctx);
         let reg_tiles = cout.div_ceil(128) * hw.div_ceil(128);
         let s_gemm = ctx.dispatch(
             ctx.ids.matmul_reg,
-            &[ps.w(&self.names.weight), col, &self.conv_out],
+            &[ps.w(&self.names.weight), col, &conv_out],
             &[cout, cinkk, hw],
             gpu_core::Dispatch::Workgroups(reg_tiles),
         );
         // per-channel affine (BN-eval collapsed in `sb`) + SiLU (act=2): conv_out -> act.
-        let s_epi = ctx.step(ctx.ids.conv_epilogue, &[&self.sb, &self.conv_out, &self.act], &[cout, hw, 2], cout * hw);
+        let s_epi = ctx.step(ctx.ids.conv_epilogue, &[&self.sb, &conv_out, &self.act], &[cout, hw, 2], cout * hw);
         ctx.gpu.submit(&[], &[s_col, s_gemm, s_epi]);
     }
 
@@ -1065,13 +1096,14 @@ impl Conv {
         // GELU has NO selector code (see `Act::fused_code`), so it must run
         // `bn_eval` at act=0 into `bn_out` and then its own kernel. Pushing a
         // fabricated code would silently drop the activation.
-        let mut steps = self.conv_steps(ctx, ps, src, &self.conv_out);
+        let (conv_out, bn_out) = self.bn_temps(ctx);
+        let mut steps = self.conv_steps(ctx, ps, src, &conv_out);
         match self.spec.act.fused_code() {
-            Some(code) => steps.push(self.bn.eval_step(ctx, &self.conv_out, &self.act, code)),
+            Some(code) => steps.push(self.bn.eval_step(ctx, &conv_out, &self.act, code)),
             None => {
-                steps.push(self.bn.eval_step(ctx, &self.conv_out, &self.bn_out, 0));
+                steps.push(self.bn.eval_step(ctx, &conv_out, &bn_out, 0));
                 let (fwd, _) = act_pair(ctx, self.spec.act).expect("fused_code()==None implies a real activation");
-                steps.push(ctx.step(fwd, &[&self.bn_out, &self.act], &act_params(self.spec.act, on), on));
+                steps.push(ctx.step(fwd, &[&bn_out, &self.act], &act_params(self.spec.act, on), on));
             }
         }
         ctx.gpu.submit(&[], &steps);
@@ -1166,16 +1198,24 @@ impl Conv {
             return;
         }
         let (d_bn, d_conv) = (ctx.scratch("conv.d_bn", on), ctx.scratch("conv.d_conv", on));
+        let (conv_out, bn_out) = self.bn_temps(ctx);
+        // A recomputing unit first rebuilds its intermediates from its input: the conv, then the normalisation with
+        // the batch statistics its forward kept.
+        let mut steps = Vec::new();
+        if self.recompute.get() {
+            steps.extend(self.conv_steps(ctx, ps, x_in, &conv_out));
+            steps.push(self.bn.train_step(ctx, &conv_out, &bn_out));
+        }
         let s_act = match act_pair(ctx, self.spec.act) {
-            Some((_, bwd)) => ctx.step(bwd, &[&self.bn_out, d_out, &d_bn], &act_params(self.spec.act, on), on),
-            None => ctx.step(ctx.ids.need(ctx.ids.leaky_relu_bwd, "leaky_relu_bwd"), &[&self.bn_out, d_out, &d_bn], &[on, f(1.0)], on),
+            Some((_, bwd)) => ctx.step(bwd, &[&bn_out, d_out, &d_bn], &act_params(self.spec.act, on), on),
+            None => ctx.step(ctx.ids.need(ctx.ids.leaky_relu_bwd, "leaky_relu_bwd"), &[&bn_out, d_out, &d_bn], &[on, f(1.0)], on),
         };
         // The act backward produces d_bn, which the BN backward reads; the BN
         // backward produces d_conv, which both conv adjoints read. Submit in
         // this order. The gamma/beta grads accumulate into buffers the model's
         // zero_grads pre-zeroes.
-        let mut steps = vec![s_act];
-        steps.extend(self.bn.backward_steps(ctx, ps, &self.conv_out, &d_bn, &d_conv));
+        steps.push(s_act);
+        steps.extend(self.bn.backward_steps(ctx, ps, &conv_out, &d_bn, &d_conv));
         steps.extend(self.dw_steps(ctx, ps, &d_conv, x_in));
         steps.extend(d_in.map(|d| dx_step(&d_conv, d)));
         ctx.gpu.submit(&[], &steps);
@@ -1235,6 +1275,12 @@ impl Bottleneck {
     pub fn set_update_running(&self, on: bool) {
         self.cv1.set_update_running(on);
         self.cv2.set_update_running(on);
+    }
+
+    /// Recompute every unit's normed intermediates in the backward ([`Conv::set_recompute`]).
+    pub fn set_recompute(&self, on: bool) {
+        self.cv1.set_recompute(on);
+        self.cv2.set_recompute(on);
     }
 
     pub fn param_list(&self) -> Vec<(String, usize)> {
@@ -1372,6 +1418,15 @@ impl C2f {
             b.set_update_running(on);
         }
         self.cv2.set_update_running(on);
+    }
+
+    /// Recompute every unit's normed intermediates in the backward ([`Conv::set_recompute`]).
+    pub fn set_recompute(&self, on: bool) {
+        self.cv1.set_recompute(on);
+        for b in &self.m {
+            b.set_recompute(on);
+        }
+        self.cv2.set_recompute(on);
     }
 
     pub fn param_list(&self) -> Vec<(String, usize)> {
@@ -1614,6 +1669,12 @@ impl SPPF {
     pub fn set_update_running(&self, on: bool) {
         self.cv1.set_update_running(on);
         self.cv2.set_update_running(on);
+    }
+
+    /// Recompute every unit's normed intermediates in the backward ([`Conv::set_recompute`]).
+    pub fn set_recompute(&self, on: bool) {
+        self.cv1.set_recompute(on);
+        self.cv2.set_recompute(on);
     }
 
     pub fn param_list(&self) -> Vec<(String, usize)> {
