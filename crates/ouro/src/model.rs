@@ -774,6 +774,11 @@ impl model::Model for Ouro {
     /// Ouro keeps only the residual between the layers of every pass and rebuilds each layer before its backward (one
     /// scratch set serves every layer of every pass): it runs recompute, with the residuals in f32 or, once narrowed,
     /// in bf16 or FP8 ([`Residuals`]; each pass's normed output stays f32). Keeping every layer is refused by name.
+    /// The layers of a recurrent-depth model cannot stream through a window: refused by name with the reason.
+    fn set_resident(&mut self, _cfg: &model::resident_ft::ResidentFtConfig) -> Result<(), String> {
+        Err("ouro: every layer runs once in each of the passes of the recurrence, so a layer's gradient is complete only after the last; its layers cannot stream through a window that updates each layer as its backward completes; moments=host keeps its optimizer state off the device instead".into())
+    }
+
     fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
         let current = SavedPolicy::recompute_with(self.res.format());
         if !current.narrows_to(policy) {

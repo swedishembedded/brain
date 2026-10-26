@@ -885,6 +885,11 @@ impl model::Model for Huginn {
     /// scratch set serves every application): it runs recompute, with the recurrence's residuals in f32 or, once
     /// narrowed, in bf16 or FP8 ([`Residuals`]; the prelude's and coda's few stay f32). Keeping every application is
     /// refused by name.
+    /// The layers of a recurrent-depth model cannot stream through a window: refused by name with the reason.
+    fn set_resident(&mut self, _cfg: &model::resident_ft::ResidentFtConfig) -> Result<(), String> {
+        Err("huginn: the recurrent core runs once in each step of the recurrence, so a block's gradient is complete only after the last; its blocks cannot stream through a window that updates each block as its backward completes; moments=host keeps its optimizer state off the device instead".into())
+    }
+
     fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
         let held = self.tape.as_ref().map_or(model::saved::SavedFormat::F32, |t| t.core.format());
         let current = SavedPolicy::recompute_with(held);
