@@ -868,7 +868,7 @@ mod tests {
 
     #[test]
     fn sample_categorical_matches_its_weights_over_many_draws() {
-        let mut rng = data::rng::Rng::new(data::rng::random_seed());
+        let mut rng = data::rng::Rng::new(crate::random_seed());
         let weights = [0.8f32, 0.2];
         let n = 200_000;
         let ones = (0..n).filter(|_| sample_categorical(&weights, &mut rng) == 1).count();

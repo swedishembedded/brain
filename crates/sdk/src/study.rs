@@ -1002,8 +1002,8 @@ impl DocumentStudy {
             steps: DocumentStudyConfig::default().steps_per_cycle,
             eval_per_cycle: MIN_HELD_OUT_PROBES,
             sft: SftConfig::default(),
-            seed: data::rng::random_seed(),
-            null_gate_seed: data::rng::random_seed(),
+            seed: crate::random_seed(),
+            null_gate_seed: crate::random_seed(),
             verbose: true,
         })
     }
@@ -1282,7 +1282,7 @@ pub struct ImproveOptions {
 
 impl Default for ImproveOptions {
     fn default() -> Self {
-        ImproveOptions { group_size: 4, clip_eps: 0.2, temperature: 0.8, max_new: 32, steps: 100, lr: 5e-3, seed: data::rng::random_seed(), max_seq_len: None }
+        ImproveOptions { group_size: 4, clip_eps: 0.2, temperature: 0.8, max_new: 32, steps: 100, lr: 5e-3, seed: crate::random_seed(), max_seq_len: None }
     }
 }
 
@@ -1354,8 +1354,8 @@ impl Improve {
             work_dir: None,
             rank: 8,
             alpha: None,
-            seed: data::rng::random_seed(),
-            held_out_seed: data::rng::random_seed(),
+            seed: crate::random_seed(),
+            held_out_seed: crate::random_seed(),
         })
     }
     /// Which architecture's `Model` impl to monomorphise for. See [`Improve::architectures`].

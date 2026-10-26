@@ -309,7 +309,7 @@ mod tests {
         let a_ref: Vec<&[f32]> = anchors.iter().map(|v| v.as_slice()).collect();
         let p_ref: Vec<&[f32]> = positives.iter().map(|v| v.as_slice()).collect();
 
-        let mut rng = data::rng::Rng::new(data::rng::random_seed());
+        let mut rng = data::rng::Rng::new(crate::random_seed());
         let mut w: Vec<f32> = (0..dim * dim).map(|_| (rng.next_f32() - 0.5) * 0.5).collect();
         for o in 0..dim {
             w[o * dim + o] += 1.0;
@@ -389,7 +389,7 @@ mod tests {
             .iter()
             .map(|a| {
                 let mut v = a.as_slice().to_vec();
-                let mut rng = data::rng::Rng::new(data::rng::random_seed());
+                let mut rng = data::rng::Rng::new(crate::random_seed());
                 for x in &mut v {
                     *x += (rng.next_f32() - 0.5) * 0.3;
                 }

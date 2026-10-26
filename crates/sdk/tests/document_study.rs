@@ -88,8 +88,8 @@ fn study(arch: &str, dir: &Path, weights: &Path, dataset: &Path, adapters: &Path
         .alpha(8.0)
         .eval_per_cycle(EVAL_PER_CYCLE)
         .steps(STEPS)
-        .seed(data::rng::random_seed())
-        .null_gate_seed(data::rng::random_seed())
+        .seed(brain::random_seed())
+        .null_gate_seed(brain::random_seed())
         .quiet(true)
 }
 

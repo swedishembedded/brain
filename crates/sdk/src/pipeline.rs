@@ -798,7 +798,7 @@ mod tests {
         let (_, a) = ImageGenerationOptions::new().with_resolved_seed();
         let (_, b) = ImageGenerationOptions::new().with_resolved_seed();
         assert_ne!(a, b);
-        let seed = data::rng::random_seed();
+        let seed = crate::random_seed();
         let (resolved, kept) = ImageGenerationOptions::new().seed(seed).with_resolved_seed();
         assert_eq!((kept, resolved.into_gen_opts().seed), (seed, seed));
     }
@@ -807,7 +807,7 @@ mod tests {
     /// nothing else moves.
     #[test]
     fn set_generation_options_override_only_their_own_field() {
-        let seed = data::rng::random_seed();
+        let seed = crate::random_seed();
         let o = ImageGenerationOptions::new().size(256, 128).steps(9).seed(seed).into_gen_opts();
         assert_eq!((o.width, o.height), (256, 128));
         assert_eq!(o.steps, Some(9));

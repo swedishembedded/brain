@@ -31,7 +31,7 @@ fn distil_and_phrase_draw_their_seed_unless_one_is_given() {
     let tok = common::tiny_tokenizer("seed-qa");
     let pipeline = || pipeline(&dir, &tok);
     assert_ne!(Distil::with(pipeline()).seed_used(), Distil::with(pipeline()).seed_used());
-    let seed = data::rng::random_seed();
+    let seed = brain::random_seed();
     assert_eq!(Distil::with(pipeline()).seed(seed).seed_used(), seed);
     assert_ne!(Phrase::with(pipeline()).seed_used(), Phrase::with(pipeline()).seed_used());
     assert_eq!(Phrase::with(pipeline()).seed(seed).seed_used(), seed);

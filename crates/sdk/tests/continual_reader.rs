@@ -145,7 +145,7 @@ fn a_reader_without_a_seed_draws_one_and_a_given_seed_is_kept() {
     let a = ContinualReader::from_pretrained("fixture").run_dir(&dir).seed_used().expect("seed");
     let b = ContinualReader::from_pretrained("fixture").run_dir(&dir).seed_used().expect("seed");
     assert_ne!(a, b);
-    let seed = data::rng::random_seed();
+    let seed = brain::random_seed();
     assert_eq!(ContinualReader::from_pretrained("fixture").run_dir(&dir).seed(seed).seed_used().expect("seed"), seed);
 }
 
@@ -162,7 +162,7 @@ fn a_reader_reopening_a_run_without_a_seed_adopts_the_recorded_one() {
 
     let reader = ContinualReader::from_pretrained("fixture").run_dir(&dir);
     assert_eq!(reader.seed_used().expect("seed"), 1234);
-    let given = data::rng::random_seed();
+    let given = brain::random_seed();
     assert_eq!(reader.seed(given).seed_used().expect("seed"), given, "a seed given wins over the recorded one");
 
     let _ = std::fs::remove_dir_all(&dir);

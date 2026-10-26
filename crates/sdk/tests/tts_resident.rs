@@ -25,7 +25,7 @@ fn pipeline() -> Option<TtsPipeline> {
 fn a_resident_synthesizer_speaks_what_the_one_shot_pipeline_speaks() {
     let _serial = brain_testutil::env_lock();
     let Some(pipe) = pipeline() else { return };
-    let seed = data::rng::random_seed();
+    let seed = brain::random_seed();
     let opts = || TtsOptions::new().seed(seed);
 
     let one_shot = pipe.speak_with(TEXT, opts()).unwrap();
@@ -46,7 +46,7 @@ fn streamed_chunks_joined_are_the_whole_clip() {
     let mut joined = Vec::new();
     let mut chunks = 0;
     let clip = resident
-        .speak_stream(TEXT, TtsOptions::new().seed(data::rng::random_seed()), &CancelToken::default(), &mut |pcm: &[f32]| {
+        .speak_stream(TEXT, TtsOptions::new().seed(brain::random_seed()), &CancelToken::default(), &mut |pcm: &[f32]| {
             chunks += 1;
             joined.extend_from_slice(pcm);
         })
@@ -65,12 +65,12 @@ fn a_synthesizer_asked_to_stop_stops_with_cancelled_and_speaks_nothing() {
     cancel.cancel();
 
     let mut heard = 0;
-    let result = resident.speak_stream(TEXT, TtsOptions::new().seed(data::rng::random_seed()), &cancel, &mut |pcm: &[f32]| heard += pcm.len());
+    let result = resident.speak_stream(TEXT, TtsOptions::new().seed(brain::random_seed()), &cancel, &mut |pcm: &[f32]| heard += pcm.len());
 
     assert!(matches!(result, Err(brain::Error::Cancelled)), "{result:?}");
     assert_eq!(heard, 0);
     // A stopped request leaves the synthesizer usable.
-    assert!(resident.speak_with(TEXT, TtsOptions::new().seed(data::rng::random_seed())).is_ok());
+    assert!(resident.speak_with(TEXT, TtsOptions::new().seed(brain::random_seed())).is_ok());
 }
 
 #[test]
@@ -91,9 +91,9 @@ fn a_pinned_voice_speaks_every_seed_and_a_missing_reference_is_an_error() {
     let dir = std::env::temp_dir().join(format!("sdk-voice-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let reference = dir.join("reference.wav");
-    resident.speak_with(TEXT, TtsOptions::new().seed(data::rng::random_seed())).unwrap().save(&reference).unwrap();
+    resident.speak_with(TEXT, TtsOptions::new().seed(brain::random_seed())).unwrap().save(&reference).unwrap();
 
-    let (take_a, take_b) = (data::rng::random_seed(), data::rng::random_seed());
+    let (take_a, take_b) = (brain::random_seed(), brain::random_seed());
     let a = resident.speak_with(TEXT, TtsOptions::new().seed(take_a).voice(&reference, "")).unwrap();
     let b = resident.speak_with(TEXT, TtsOptions::new().seed(take_b).voice(&reference, "")).unwrap();
     assert!(!a.samples().is_empty() && !b.samples().is_empty());
@@ -102,6 +102,6 @@ fn a_pinned_voice_speaks_every_seed_and_a_missing_reference_is_an_error() {
     let missing = dir.join("nothing.wav");
     let err = resident.speak_with(TEXT, TtsOptions::new().voice(&missing, "")).unwrap_err();
     assert!(err.to_string().contains("nothing.wav"), "{err}");
-    resident.speak_with(TEXT, TtsOptions::new().seed(data::rng::random_seed())).unwrap();
+    resident.speak_with(TEXT, TtsOptions::new().seed(brain::random_seed())).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

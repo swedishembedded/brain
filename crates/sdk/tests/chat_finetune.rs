@@ -294,7 +294,7 @@ fn a_transformers_directory_base_fine_tunes_and_scores() {
     let train = write_dataset(&model, "train.jsonl", &[("cab", "bad"), ("fed", "deaf"), ("ace", "face"), ("bag", "gab")]);
     let held_out = write_dataset(&model, "held_out.jsonl", &[("cad", "bead")]);
     let out = model.join("run");
-    let outcome = ChatFineTune::from_pretrained(repo.to_str().unwrap()).dataset(train).held_out(held_out).out_dir(&out).rank(2).steps(4).lr(1e-2).seed(data::rng::random_seed()).device(cpu()).run().expect("a transformers directory base fine-tunes");
+    let outcome = ChatFineTune::from_pretrained(repo.to_str().unwrap()).dataset(train).held_out(held_out).out_dir(&out).rank(2).steps(4).lr(1e-2).seed(brain::random_seed()).device(cpu()).run().expect("a transformers directory base fine-tunes");
     assert_eq!(outcome.status, FineTuneStatus::Completed);
     assert!(outcome.base_score.is_some() && outcome.tuned_score.is_some(), "scored before and after");
     let digest = outcome.base_digest.expect("the base is named");

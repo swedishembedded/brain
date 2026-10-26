@@ -248,7 +248,7 @@ mod tests {
     /// nothing else moves.
     #[test]
     fn set_music_options_override_only_their_own_field() {
-        let seed = data::rng::random_seed();
+        let seed = crate::random_seed();
         let o = MusicOptions::new().duration_seconds(30.0).num_inference_steps(12).seed(seed).to_gen_opts();
         assert_eq!(o.duration_seconds, 30.0);
         assert_eq!(o.num_inference_steps, 12);

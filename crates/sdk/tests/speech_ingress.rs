@@ -67,7 +67,7 @@ fn a_saved_projector_loads_into_a_fresh_ingress_and_scores_the_same() {
         brain_testutil::skip("Qwen3-1.7B is not in the model store");
         return;
     };
-    let opts = SpeechIngressOptions { base, adapter: None, input_dim: DIM, rows: ROWS, block: 96, seed: data::rng::random_seed(), bf16: true };
+    let opts = SpeechIngressOptions { base, adapter: None, input_dim: DIM, rows: ROWS, block: 96, seed: brain::random_seed(), bf16: true };
     let mut first = SpeechIngress::new(&opts).unwrap();
     let (prefix, suffix) = (SpeechIngress::prefix("You are a patriot."), SpeechIngress::suffix(""));
     let ex = first.example(&rows_of(0), &prefix, &suffix, PHRASES[0].1).unwrap();
@@ -80,7 +80,7 @@ fn a_saved_projector_loads_into_a_fresh_ingress_and_scores_the_same() {
     let file = dir.join("projector.safetensors");
     first.save_projector(&file).unwrap();
 
-    let mut second = SpeechIngress::new(&SpeechIngressOptions { seed: data::rng::random_seed(), ..opts }).unwrap();
+    let mut second = SpeechIngress::new(&SpeechIngressOptions { seed: brain::random_seed(), ..opts }).unwrap();
     let ex2 = second.example(&rows_of(0), &prefix, &suffix, PHRASES[0].1).unwrap();
     second.load_projector(&file).unwrap();
     std::fs::remove_dir_all(&dir).ok();
@@ -96,7 +96,7 @@ fn features_of_the_wrong_size_are_refused_with_the_expected_shape() {
         brain_testutil::skip("Qwen3-1.7B is not in the model store");
         return;
     };
-    let mut ingress = SpeechIngress::new(&SpeechIngressOptions { base, adapter: None, input_dim: DIM, rows: ROWS, block: 96, seed: data::rng::random_seed(), bf16: true }).unwrap();
+    let mut ingress = SpeechIngress::new(&SpeechIngressOptions { base, adapter: None, input_dim: DIM, rows: ROWS, block: 96, seed: brain::random_seed(), bf16: true }).unwrap();
     let err = ingress.example(&[0.0; 5], "p", "s", "r").unwrap_err();
     assert!(err.to_string().contains("expected 4 rows of 32"), "{err}");
 }

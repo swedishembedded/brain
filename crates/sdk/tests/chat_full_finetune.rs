@@ -57,7 +57,7 @@ fn a_full_fine_tune_writes_a_checkpoint_directory_that_is_a_base_like_any_other(
         .out_dir(&out)
         .steps(40)
         .lr(5e-2)
-        .seed(data::rng::random_seed())
+        .seed(brain::random_seed())
         .device(cpu())
         .run()
         .expect("the full fine-tune runs");
@@ -83,7 +83,7 @@ fn a_full_fine_tune_writes_a_checkpoint_directory_that_is_a_base_like_any_other(
     assert!(after < before * 0.9, "the trained checkpoint fits its records: {before} -> {after}");
 
     // And it is a base: an adapter can be trained on it.
-    let on_it = ChatFineTune::from_pretrained(checkpoint.to_str().unwrap()).dataset(&train).out_dir(model.join("on-it")).rank(2).steps(2).lr(1e-2).seed(data::rng::random_seed()).device(cpu()).run().expect("a checkpoint directory is a base");
+    let on_it = ChatFineTune::from_pretrained(checkpoint.to_str().unwrap()).dataset(&train).out_dir(model.join("on-it")).rank(2).steps(2).lr(1e-2).seed(brain::random_seed()).device(cpu()).run().expect("a checkpoint directory is a base");
     assert_eq!(on_it.status, FineTuneStatus::Completed);
 }
 
@@ -94,7 +94,7 @@ fn a_full_fine_tune_takes_its_optimizer_state_precision_as_one_typed_value() {
     let model = chat_model_dir("full-precision");
     let train = write_dataset(&model, "train.jsonl", &TRAIN);
     // Both precisions train on one stream so their losses are comparable.
-    let seed = data::rng::random_seed();
+    let seed = brain::random_seed();
     let run = |name: &str, spec: &str| {
         ChatFullFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap())
             .dataset(&train)
@@ -142,7 +142,7 @@ fn merging_an_adapter_gives_the_weights_the_adapter_computes() {
     let model = chat_model_dir("merge");
     let train = write_dataset(&model, "train.jsonl", &TRAIN);
     let base = model.join("model.safetensors");
-    let tuned = ChatFineTune::from_pretrained(base.to_str().unwrap()).dataset(&train).out_dir(model.join("lora")).rank(2).steps(40).lr(3e-1).seed(data::rng::random_seed()).device(cpu()).run().expect("the adapter trains");
+    let tuned = ChatFineTune::from_pretrained(base.to_str().unwrap()).dataset(&train).out_dir(model.join("lora")).rank(2).steps(40).lr(3e-1).seed(brain::random_seed()).device(cpu()).run().expect("the adapter trains");
     let adapter = tuned.adapter.expect("an adapter");
 
     let merged = merge_adapter(base.to_str().unwrap(), &adapter, &model.join("merged")).expect("the adapter merges");

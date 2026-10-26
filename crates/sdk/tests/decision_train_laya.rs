@@ -35,7 +35,7 @@ impl Setup {
         let root = Scratch::new(tag);
         write_laya(&root.join("base"), 48);
         std::fs::write(root.join("data.jsonl"), synthetic_jsonl(&SyntheticTask::new(12, 4, 4))).unwrap();
-        Setup { root, seed: data::rng::random_seed() }
+        Setup { root, seed: brain::random_seed() }
     }
 
     fn run(&self, out: &str) -> TrainRun {

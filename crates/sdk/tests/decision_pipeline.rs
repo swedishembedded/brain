@@ -344,7 +344,7 @@ fn a_frozen_encoder_run_can_save_its_head_and_a_fine_tuned_one_still_cannot() {
     const INSTRUCTIONS: &str = "which banking intent does this message express";
     // The option-order seed `train_choices` takes; shared so the two arms
     // below shuffle identically and are comparable.
-    let seed: u64 = data::rng::random_seed();
+    let seed: u64 = brain::random_seed();
     let options: Vec<String> = ["card arrival", "exchange rate", "pin blocked"]
         .iter()
         .map(|s| s.to_string())
@@ -408,7 +408,7 @@ fn a_batched_run_consumes_a_batch_per_step_and_still_trains() {
     const INSTRUCTIONS: &str = "which banking intent does this message express";
     // The option-order seed `train_choices` takes; shared so the two arms
     // below shuffle identically and are comparable.
-    let seed: u64 = data::rng::random_seed();
+    let seed: u64 = brain::random_seed();
     let options: Vec<String> = ["card arrival", "exchange rate", "pin blocked"]
         .iter()
         .map(|s| s.to_string())

@@ -1023,7 +1023,7 @@ mod tests {
         let rows: Vec<Candidate> =
             (0..9).map(|i| candidate(&format!("question {i}?"), &format!("tool run --n {i}"))).collect();
         for _ in 0..12 {
-            let seed = data::rng::random_seed();
+            let seed = crate::random_seed();
             let shuffled = shuffle_answers(&rows, seed);
             assert_eq!(shuffled.len(), rows.len());
             for (before, after) in rows.iter().zip(&shuffled) {

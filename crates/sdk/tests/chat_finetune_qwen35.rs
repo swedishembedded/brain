@@ -93,7 +93,7 @@ fn a_base_whose_config_names_qwen35_trains_without_the_architecture_being_named(
         .rank(2)
         .steps(2)
         .lr(1e-2)
-        .seed(data::rng::random_seed())
+        .seed(brain::random_seed())
         .device(cpu());
     let outcome = run.run().expect("the fine-tune runs on the qwen35 trainer");
     assert_eq!(outcome.status, FineTuneStatus::Completed);
@@ -195,7 +195,7 @@ fn a_qwen35_full_fine_tune_trains_every_weight_and_writes_a_base() {
         .out_dir(&out)
         .steps(6)
         .lr(1e-2)
-        .seed(data::rng::random_seed())
+        .seed(brain::random_seed())
         .device(cpu())
         .run()
         .expect("the full fine-tune runs");
@@ -236,7 +236,7 @@ fn a_qwen35_preference_fine_tune_exports_a_dpo_adapter() {
         .rank(2)
         .steps(6)
         .lr(1e-1)
-        .seed(data::rng::random_seed())
+        .seed(brain::random_seed())
         .device(cpu())
         .run()
         .expect("the preference fine-tune runs");
