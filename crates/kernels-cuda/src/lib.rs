@@ -1478,7 +1478,7 @@ pub const ALL: &[CudaKernel] = &[
         source: ImplSource::Tuned,
         min_cc: BASELINE_MIN_CC,
         entry: "brain_moe_router_topk",
-        what: "MoE router head: softmax over the experts, the top_k largest (ties to the lower expert) renormalised, the shared expert's sigmoid weight last; warp-shuffle reductions, the reference's selection order",
+        what: "MoE router head: softmax over the experts, the top_k largest (ties to the lower expert) renormalised or kept raw and scaled, the shared expert's sigmoid weight last; warp-shuffle reductions, the reference's selection order",
         reported: "native:moe_router_topk",
         block_dim: 256,
         // One block per row.
