@@ -1,0 +1,8 @@
+{
+ "commit": "76a336b5a42e872c88071b1f1ee2331da5aa6d34",
+ "device": "gpu0 Tesla P40",
+ "plan": "generate",
+ "id": "Q-256-1024-2",
+ "command": "target/release/sample-text-spectral-lm generate --checkpoint <runs>/primary/Q-256-1024-2603556909225610885.safetensors --tokenizer data/tinystories/tokenizer.json --prompt The sun was hot, so Tom and his mom --max-new 160 --temp 0.8 --top-k 40 --seed 6797441302882263530 --gpu 0",
+ "text": "The sun was hot, so Tom and his mom were cooking. Tom was excited. He asked his mom, \"What do you want to cook?\" She smiled and said, \"Catch me by myself.\"\nTom and his mom put on a big, red plate and a little blue cup under a big bowl. They put everything in the food. Then they left the kitchen and went to the kitchen.\nWhen they got to the kitchen, Tom took his hand out the spoon and said, \"Yummy! I made a yummy cake!\" His mom smiled and said, \"Yes, Tom. Let's eat some yummy cake together.\"\nTom and his mom ate the yummy cake and it was the perfectest dessert they ever had. They laughed and ate the cake together. They were very happy and made a yummy cake."
+}

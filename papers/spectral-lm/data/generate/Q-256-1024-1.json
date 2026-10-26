@@ -1,0 +1,8 @@
+{
+ "commit": "76a336b5a42e872c88071b1f1ee2331da5aa6d34",
+ "device": "gpu0 Tesla P40",
+ "plan": "generate",
+ "id": "Q-256-1024-1",
+ "command": "target/release/sample-text-spectral-lm generate --checkpoint <runs>/primary/Q-256-1024-2603556909225610885.safetensors --tokenizer data/tinystories/tokenizer.json --prompt Lily wanted to build a tower, but --max-new 160 --temp 0.8 --top-k 40 --seed 6797441302882263530 --gpu 0",
+ "text": "Lily wanted to build a tower, but it was too heavy. She had a small box that was fragile and not fit. She asked her mom for help. \"Mom, can we build it together?\"\nMom said, \"Yes, we can, but we need to be careful. OK, we will find a new shape for you. But after we're done, we have a small box for you. Do you have something for me?\"\nLily nodded. She liked how the box was. It was in the box. She opened it and saw many colors. She saw a picture of a sun, a flower, and a star. She thought it was very pretty.\nShe took the frame and wrote a picture of it. She also made a face with it. She told her mom what she did. \"Mom,"
+}

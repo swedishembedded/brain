@@ -1,0 +1,8 @@
+{
+ "commit": "76a336b5a42e872c88071b1f1ee2331da5aa6d34",
+ "device": "gpu0 Tesla P40",
+ "plan": "generate",
+ "id": "Q-256-24-0",
+ "command": "target/release/sample-text-spectral-lm generate --checkpoint <runs>/primary/Q-256-24-1257447695936767018.safetensors --tokenizer data/tinystories/tokenizer.json --prompt Once upon a time, there was a little dog named --max-new 160 --temp 0.8 --top-k 40 --seed 6797441302882263530 --gpu 0",
+ "text": "Once upon a time, there was a little dog named Max. Max loved to play in the water. One day, Max saw a big, shiny rock. It was very shiny. It looked shiny with its mouth. Max wanted to show the rock to his friend, the blue frog.\nMax went closer to the rock and said, \"Hello, I am Sam. What is your name?\" The blue frog smiled and said, \"Hi, Max! Do you want to play with me?\" Max thought for a moment and said, \"Yes, I will help you find a friend to play with.\"\nMax and the blue frog played together on the rock. They had so much fun. Max was happy to meet them both. They played together all day long. And Max is very happy."
+}

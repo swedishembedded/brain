@@ -1,0 +1,8 @@
+{
+ "commit": "76a336b5a42e872c88071b1f1ee2331da5aa6d34",
+ "device": "gpu0 Tesla P40",
+ "plan": "generate",
+ "id": "S-256-512-24-0",
+ "command": "target/release/sample-text-spectral-lm generate --checkpoint <runs>/primary/S-256-512-24-287849435889518350.safetensors --tokenizer data/tinystories/tokenizer.json --prompt Once upon a time, there was a little dog named --max-new 160 --temp 0.8 --top-k 40 --seed 6797441302882263530 --gpu 0",
+ "text": "Once upon a time, there was a little dog named Max. Max loved to play and run all day. He felt better and made his friends smile.\nOne day, Max saw a small door full of toys. He wanted to play with it. He said, \"Why don't you play with these toys?\" His mom said, \"You can play with them if you want to play with them.\" Max learned to be careful and never played with the toys before.\nMax said, \"I don't want to play with that toys.\" His mom thought for a moment and said, \"No, Max. You are my best friend.\" Max was sad and didn't know what to do. He thought for a moment and said, \"I will take that all of my toys.\"\nMax thought about what his mom said. He tried to"
+}

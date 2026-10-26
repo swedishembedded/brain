@@ -1,0 +1,8 @@
+{
+ "commit": "76a336b5a42e872c88071b1f1ee2331da5aa6d34",
+ "device": "gpu0 Tesla P40",
+ "plan": "generate",
+ "id": "S-256-512-24-1",
+ "command": "target/release/sample-text-spectral-lm generate --checkpoint <runs>/primary/S-256-512-24-287849435889518350.safetensors --tokenizer data/tinystories/tokenizer.json --prompt Lily wanted to build a tower, but --max-new 160 --temp 0.8 --top-k 40 --seed 6797441302882263530 --gpu 0",
+ "text": "Lily wanted to build a tower, but her sister Tom said to Lily, \"No, we want to build a tower with their blocks. But we can't build it. Maybe there will make it another.\"\nLily said, \"No, I want to build something. I want to create big tower.\"\nTom was stubborn and did not want to buildings. He thought they were wrong. He said, \"I am sorry, Lily. Maybe we can build a tower together. Let's build our tower.\"\nLily started to build her tower. She was happy. She said, \"Thank you, Tom. You are very good friends.\"\nTom did not wait to build her tower. But then he saw that Lily was sad. He said, \"You are very smart and selfish. You are my best brother.\""
+}

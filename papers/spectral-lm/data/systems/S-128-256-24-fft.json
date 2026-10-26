@@ -1,0 +1,38 @@
+{
+ "commit": "76a336b5a42e872c88071b1f1ee2331da5aa6d34",
+ "device": "gpu0 Tesla P40",
+ "plan": "systems",
+ "id": "S-128-256-24-fft",
+ "command": "target/release/sample-text-spectral-lm profile --d-model 128 --layers 6 --heads 8 --kv-heads 4 --head-dim 16 --mixer spectral --signal-len 256 --channels 24 --transform fft --batch 16 --block 512 --reps 3 --seed 6861592017782708288 --gpu 0",
+ "result": {
+  "backward_ms": 608.1972890000001,
+  "batch": 16,
+  "block": 512,
+  "config": {
+   "block_size": 512,
+   "d_model": 128,
+   "head_dim": 16,
+   "mixer": {
+    "basis": "real-fourier-orthonormal-frequency-ordered",
+    "channels": 24,
+    "kind": "spectral",
+    "signal_len": 256
+   },
+   "model": "spectrallm",
+   "n_heads": 8,
+   "n_kv_heads": 4,
+   "n_layers": 6,
+   "rms_norm_eps": 9.999999974752427e-07,
+   "rope_theta": 10000.0,
+   "tie_embeddings": true,
+   "vocab_size": 4096
+  },
+  "event": "profile",
+  "forward_ms": 187.712305,
+  "reps": 3,
+  "step_ms": 795.9095940000001,
+  "tokens_per_s": 10292.626275340512,
+  "transform": "Fft"
+ },
+ "peak_mem_mib": 2235
+}
