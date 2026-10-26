@@ -89,7 +89,12 @@ impl TrainPrecision {
             return Err("a resident full fine-tune takes one uniform precision (no per-group rules)".into());
         }
         let p = self.policy.default;
-        let master = if p.master == MasterPolicy::None { MasterPolicy::F32 } else { p.master };
+        // An f32 weight is its own master; a narrower one keeps an f32 master unless the policy names one.
+        let master = match (r.weights, p.master) {
+            (ResidentValue::F32, master) => master,
+            (_, MasterPolicy::None) => MasterPolicy::F32,
+            (_, master) => master,
+        };
         Ok(Some(ResidentFtConfig {
             value: r.weights,
             master,
@@ -120,7 +125,7 @@ impl TrainPrecision {
     /// (`none`, `bf16`, `f32`), `value` and `grad` (`f32`, `bf16`), `sr` and `narrow` (`on`, `off`), `moments` (`device`,
     /// `host`: where the parameter store's optimizer state lives), `activations` (`keep`, `recompute`, `bf16`, `fp8`:
     /// what the backward keeps of the forward), and for a resident
-    /// full fine-tune `weights` (`bf16`, `fp8[:block]`, `int8`, `nf4`), `window` (layers resident at once) and `clip`
+    /// full fine-tune `weights` (`f32`, `bf16`, `fp8[:block]`, `int8`, `nf4`), `window` (layers resident at once) and `clip`
     /// (`two-pass`, `running`). Unnamed keys keep the fp32 default. The result is uniform over every parameter.
     pub fn parse(spec: &str) -> Result<TrainPrecision, String> {
         let mut p = ParamPrecision::FP32;
@@ -193,7 +198,7 @@ impl TrainPrecision {
             }
         }
         if weights.is_none() && (window.is_some() || item_named(spec, "clip")) {
-            return Err("train precision: 'window' and 'clip' describe a resident full fine-tune and need 'weights' (bf16, fp8, int8 or nf4)".into());
+            return Err("train precision: 'window' and 'clip' describe a resident full fine-tune and need 'weights' (f32, bf16, fp8, int8 or nf4)".into());
         }
         let resident = weights.map(|weights| ResidentRequest { weights, window, clip_pass });
         Ok(TrainPrecision { policy: PrecisionPolicy::uniform(p), narrow_state, resident, host_moments, activations })
@@ -524,6 +529,7 @@ fn state_name(s: StateFormat) -> String {
 
 fn resident_name(v: ResidentValue) -> String {
     match v {
+        ResidentValue::F32 => "f32".into(),
         ResidentValue::Bf16 => "bf16".into(),
         ResidentValue::Fp8E4M3 { block } => format!("fp8:{block}"),
         ResidentValue::Int8 => "int8".into(),
@@ -542,12 +548,13 @@ fn parse_resident_value(v: &str) -> Result<ResidentValue, String> {
         None => (v, None),
     };
     match (kind, block) {
+        ("f32", None) => Ok(ResidentValue::F32),
         ("bf16", None) => Ok(ResidentValue::Bf16),
         ("fp8", b) => Ok(ResidentValue::Fp8E4M3 { block: b.unwrap_or(128) }),
         ("int8", None) => Ok(ResidentValue::Int8),
         ("nf4", None) => Ok(ResidentValue::Nf4),
-        ("bf16" | "int8" | "nf4", Some(_)) => Err(format!("train precision 'weights': '{kind}' has a fixed layout (only fp8 takes a block size)")),
-        (other, _) => Err(format!("train precision 'weights': '{other}' is not bf16, fp8, int8 or nf4")),
+        ("f32" | "bf16" | "int8" | "nf4", Some(_)) => Err(format!("train precision 'weights': '{kind}' has a fixed layout (only fp8 takes a block size)")),
+        (other, _) => Err(format!("train precision 'weights': '{other}' is not f32, bf16, fp8, int8 or nf4")),
     }
 }
 
@@ -614,7 +621,7 @@ mod tests {
     }
 
     /// Spec: the resident keys parse into one typed request, a resident full fine-tune takes an f32 master unless one
-    /// is named, and `window`/`clip` without `weights` are refused by name.
+    /// is named (f32 weights are their own master), and `window`/`clip` without `weights` are refused by name.
     #[test]
     fn resident_keys_parse_into_one_request_with_a_master() {
         let t = TrainPrecision::parse("weights=fp8:64,window=2,clip=running,state=int8").unwrap();
@@ -623,6 +630,8 @@ mod tests {
         assert_eq!((cfg.master, cfg.window, cfg.seed), (MasterPolicy::F32, Some(LayerWindow { layers: 2 }), Some(7)));
         assert!(!t.is_default());
         assert_eq!(TrainPrecision::parse("weights=bf16").unwrap().resident.unwrap().clip_pass, ClipPass::TwoPass);
+        let f32_cfg = TrainPrecision::parse("weights=f32,window=1").unwrap().resident_config(None).unwrap().expect("resident");
+        assert_eq!((f32_cfg.value, f32_cfg.master), (ResidentValue::F32, MasterPolicy::None));
         assert!(TrainPrecision::default().resident_config(None).unwrap().is_none());
         assert!(TrainPrecision::parse("window=2").unwrap_err().contains("weights"));
         assert!(TrainPrecision::parse("weights=fp4").unwrap_err().contains("weights"));

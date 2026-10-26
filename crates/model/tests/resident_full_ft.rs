@@ -248,6 +248,8 @@ fn resident_low_precision_weights_learn_what_the_fp32_reference_learns() {
     };
     assert!(want < 0.1 * start, "the reference itself learns the task ({start} -> {want})");
     let cases = [
+        // The value is its own master: the update runs on the f32 weight read off the device, as the fp32 reference.
+        ("f32, no master, f32 moments, f32 grads", config(ResidentValue::F32, MasterPolicy::None, StateFormat::F32, GradDtype::F32), 0.01),
         ("bf16, f32 master, f32 moments, f32 grads", config(ResidentValue::Bf16, MasterPolicy::F32, StateFormat::F32, GradDtype::F32), 0.05),
         ("bf16, f32 master, int8 moments, bf16 grads", config(ResidentValue::Bf16, MasterPolicy::F32, StateFormat::Int8Block { block: 64 }, GradDtype::Bf16), 0.1),
         ("bf16, f32 master, log8 moments, bf16 grads", config(ResidentValue::Bf16, MasterPolicy::F32, StateFormat::Log8Block { block: 64 }, GradDtype::Bf16), 0.1),

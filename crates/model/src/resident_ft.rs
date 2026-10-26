@@ -77,6 +77,9 @@ use crate::ops::{rewrite_tile, DeviceWeightSink, Ops, Weight};
 /// stored weight is re-quantized from the master after every step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResidentValue {
+    /// f32, the value its own master: what a model whose kernels read f32 weights trains with when its layers stream
+    /// through a window or its state lives off the device.
+    F32,
     Bf16,
     /// OCP FP8 E4M3 with one scale per `block x block` tile.
     Fp8E4M3 { block: u32 },
@@ -89,6 +92,7 @@ pub enum ResidentValue {
 impl ResidentValue {
     pub fn encoding(self) -> QuantEncoding {
         match self {
+            ResidentValue::F32 => QuantEncoding::f32(),
             ResidentValue::Bf16 => QuantEncoding::bf16(),
             ResidentValue::Fp8E4M3 { block } => QuantEncoding::fp8_e4m3_tiled(block),
             ResidentValue::Int8 => QuantEncoding::int8_blocked(32),
@@ -100,6 +104,7 @@ impl ResidentValue {
     /// (the device widens bf16 scales to f32).
     pub fn device_bytes(self, n: u64, k: u64) -> u64 {
         match self {
+            ResidentValue::F32 => 4 * n * k,
             ResidentValue::Bf16 => 2 * n * k,
             ResidentValue::Fp8E4M3 { block } => (n * k).div_ceil(4) * 4 + 4 * n.div_ceil(block as u64) * k.div_ceil(block as u64),
             ResidentValue::Int8 => n * k + 4 * (n * k / 32),
@@ -110,6 +115,7 @@ impl ResidentValue {
     /// Row-length multiple a weight of this format needs.
     fn k_multiple(self) -> u32 {
         match self {
+            ResidentValue::F32 => 1,
             ResidentValue::Bf16 => 2,
             ResidentValue::Fp8E4M3 { .. } => 4,
             ResidentValue::Int8 | ResidentValue::Nf4 => 32,
@@ -122,7 +128,7 @@ impl ResidentValue {
 pub struct ResidentFtConfig {
     pub value: ResidentValue,
     /// Format of the master copy; a resident low-precision value needs one (`None` is refused: updates smaller
-    /// than the value's spacing would vanish).
+    /// than the value's spacing would vanish), and an f32 value is its own (anything but `None` is refused).
     pub master: MasterPolicy,
     pub state: StateFormat,
     pub rule: Rule,
@@ -190,7 +196,8 @@ pub struct PassReport {
 
 impl ResidentFtConfig {
     fn precision(&self) -> ParamPrecision {
-        ParamPrecision { value: ValueDtype::Bf16, grad: self.grad, state: self.state, master: self.master, stochastic_rounding: self.stochastic_state }
+        let value = if self.value == ResidentValue::F32 { ValueDtype::F32 } else { ValueDtype::Bf16 };
+        ParamPrecision { value, grad: self.grad, state: self.state, master: self.master, stochastic_rounding: self.stochastic_state }
     }
 }
 
@@ -209,9 +216,9 @@ pub enum ResidentRole {
     /// A linear `y = x W^T` of one layer, held in the configured [`ResidentFtConfig::value`]. A layer-streamed build
     /// loads and updates the tensors of a layer together.
     Linear { layer: u32 },
-    /// A `[rows, width]` table of the whole model: the embedding table, an untied LM head. Held in bf16 whatever the
-    /// linears' encoding (the embedding gather reads a float table, and a narrower head is the precision floor no
-    /// trainer here goes below), kept on the device for the whole step even when the layers stream, and updated once
+    /// A `[rows, width]` table of the whole model: the embedding table, an untied LM head. Held in bf16 under any
+    /// narrower linears' encoding (the embedding gather reads a float table, and a narrower head is the precision floor
+    /// no trainer here goes below) and in f32 beside f32 linears, kept on the device for the whole step even when the layers stream, and updated once
     /// the backward is complete: in a layer-streamed step together with the parameters outside this state, by the
     /// same multiplier.
     Table,
@@ -242,6 +249,7 @@ impl ResidentSpec {
     pub fn value(&self, cfg: &ResidentFtConfig) -> ResidentValue {
         match self.role {
             ResidentRole::Linear { .. } => cfg.value,
+            ResidentRole::Table if cfg.value == ResidentValue::F32 => ResidentValue::F32,
             ResidentRole::Table => ResidentValue::Bf16,
         }
     }
@@ -702,8 +710,13 @@ impl ResidentFullFt {
     /// per tensor at a time) and seed the master copies from the same f32 values. Nothing is allocated when the
     /// planner refuses.
     pub fn new(ops: &Ops, cfg: ResidentFtConfig, specs: Vec<ResidentSpec>, src: &dyn TensorSource, budget: &ResidentBudget<'_>) -> Result<ResidentFullFt, String> {
-        if cfg.master == MasterPolicy::None {
-            return Err("a resident bf16/fp8 weight needs a master copy (master: f32 or bf16); without one, updates below the value's spacing are lost".into());
+        match (cfg.value, cfg.master) {
+            (ResidentValue::F32, MasterPolicy::None) => {}
+            (ResidentValue::F32, master) => return Err(format!("a resident f32 weight is its own master; a {master:?} master copy would only duplicate it")),
+            (_, MasterPolicy::None) => {
+                return Err("a resident bf16/fp8 weight needs a master copy (master: f32 or bf16); without one, updates below the value's spacing are lost".into())
+            }
+            _ => {}
         }
         for s in &specs {
             let value = s.value(&cfg);

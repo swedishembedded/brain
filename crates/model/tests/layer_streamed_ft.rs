@@ -61,7 +61,8 @@ fn task() -> Task {
 fn config(value: ResidentValue, window: Option<u32>, clip_pass: ClipPass) -> ResidentFtConfig {
     ResidentFtConfig {
         value,
-        master: MasterPolicy::F32,
+        // An f32 value is its own master.
+        master: if value == ResidentValue::F32 { MasterPolicy::None } else { MasterPolicy::F32 },
         state: StateFormat::F32,
         rule: Rule::AdamW { adam: ADAM, wd: 0.0 },
         grad: GradDtype::F32,
@@ -186,7 +187,7 @@ fn masters(ops: &Ops, ft: &mut ResidentFullFt) -> Vec<Vec<u32>> {
     (0..2 * LAYERS).map(|i| ft.read_master(ops, i).unwrap().into_iter().map(f32::to_bits).collect()).collect()
 }
 
-const VALUES: [ResidentValue; 4] = [ResidentValue::Bf16, ResidentValue::Fp8E4M3 { block: 128 }, ResidentValue::Int8, ResidentValue::Nf4];
+const VALUES: [ResidentValue; 5] = [ResidentValue::F32, ResidentValue::Bf16, ResidentValue::Fp8E4M3 { block: 128 }, ResidentValue::Int8, ResidentValue::Nf4];
 
 /// Spec: layer streaming changes where the weights live, not the arithmetic: master weights after five steps are
 /// bit-identical to the resident step's, for every storage format, windows of one and two layers, with no clip and
@@ -394,20 +395,22 @@ fn all_masters(ops: &Ops, ft: &mut ResidentFullFt) -> Vec<Vec<u32>> {
     (0..=HEAD).map(|i| ft.read_master(ops, i).unwrap().into_iter().map(f32::to_bits).collect()).collect()
 }
 
-/// Spec: a table lives in the resident state in bf16 whatever the linears' encoding, stays on the device while the
+/// Spec: a table lives in the resident state in bf16 beside narrower linears and in f32 beside f32 ones, stays on the device while the
 /// layers stream (the window's bytes plus the table's), trains, and a layer-streamed step with it gives the resident
 /// step's bits, with no clip and with an active clip that spans the table.
 #[test]
-fn a_table_trains_in_bf16_beside_streamed_layers_with_the_resident_steps_bits() {
+fn a_table_trains_beside_streamed_layers_with_the_resident_steps_bits() {
     let ops = ops();
     let task = task_with_head();
-    let table_bytes = ResidentValue::Bf16.device_bytes(D as u64, D as u64);
     for value in VALUES {
+        let table = if value == ResidentValue::F32 { ResidentValue::F32 } else { ResidentValue::Bf16 };
+        let table_bytes = table.device_bytes(D as u64, D as u64);
         for clip in [None, Some(1e-3f32)] {
             let mut resident = build_with_head(&ops, config(value, None, ClipPass::TwoPass), &task);
             let mut streamed = build_with_head(&ops, config(value, Some(1), ClipPass::TwoPass), &task);
             for ft in [&resident, &streamed] {
-                assert!(matches!(ft.weight(HEAD), Weight::BF16 { .. }), "{value:?}: the table is held in bf16");
+                let held = matches!((table, ft.weight(HEAD)), (ResidentValue::F32, Weight::F32 { .. }) | (ResidentValue::Bf16, Weight::BF16 { .. }));
+                assert!(held, "{value:?}: the table is held in {table:?}");
             }
             assert_eq!(streamed.device_weight_bytes(), 2 * value.device_bytes(D as u64, D as u64) + table_bytes, "{value:?}: one layer and the table");
             for step in 0..4 {
