@@ -30,7 +30,7 @@
 use data::rng::Rng;
 
 use crate::av_lora::{save_adapter, LoraAdapter, LoraCfg};
-use crate::av_modelgrad::{grads, make_av_flow_batch, AvCfg, AvModelWeights};
+use crate::av_modelgrad::{grads_saved, make_av_flow_batch, AvCfg, AvModelWeights};
 
 /// One named tensor: `(name, shape, row-major f32 data)`.
 pub type NamedTensor = (String, Vec<usize>, Vec<f32>);
@@ -105,6 +105,8 @@ pub struct TrainOpts {
     pub save_path: String,
     /// Write a checkpoint every N steps (0 = final only).
     pub ckpt_every: u32,
+    /// What each step's backward keeps of its forward (`model::saved::BlockStack`).
+    pub saved: model::saved::SavedPolicy,
 }
 
 /// Fine-tune an AV LoRA adapter over `base` on `clips` (cycled in order).
@@ -115,6 +117,7 @@ pub fn run(cfg: &AvCfg, base: &AvModelWeights<f32>, clips: &[SyntheticAvClip], o
     if clips.is_empty() {
         return Err("ltxv av finetune: clips must be non-empty".into());
     }
+    model::saved::BlockStack::<(), ()>::new("ltxv av finetune", opts.saved)?;
     let total = opts.steps + 1;
     let mut rng = Rng::new(opts.seed);
     progress(0, total, format!("{} clip(s) at tv={} ta={}", clips.len(), cfg.tv, cfg.ta));
@@ -136,7 +139,7 @@ pub fn run(cfg: &AvCfg, base: &AvModelWeights<f32>, clips: &[SyntheticAvClip], o
             make_av_flow_batch(cfg, &clip.v_latent, &clip.a_latent, &clip.v_ctx, &clip.a_ctx, v_sigma, a_sigma, &v_noise, &a_noise)
         },
         |adapter, b, lr| {
-            let (loss, g) = grads(cfg, &adapter.apply(base), b);
+            let (loss, g) = grads_saved(cfg, &adapter.apply(base), b, opts.saved).expect("the policy was accepted before the first step");
             adapter.step(&g, lr);
             loss
         },
@@ -165,7 +168,7 @@ mod tests {
         let path = dir.join("adapter.brain");
         let mut rng = Rng::new(data::rng::random_seed());
         let clips: Vec<SyntheticAvClip> = (0..1).map(|_| random_synthetic_av_clip(&cfg, &mut rng)).collect();
-        let opts = TrainOpts { steps: 60, rank: 4, lr: 2e-3, seed: data::rng::random_seed(), save_path: path.to_str().expect("utf-8 path").into(), ckpt_every: 0 };
+        let opts = TrainOpts { steps: 60, rank: 4, lr: 2e-3, seed: data::rng::random_seed(), save_path: path.to_str().expect("utf-8 path").into(), ckpt_every: 0, saved: model::saved::SavedPolicy::Keep };
 
         let mut losses = Vec::new();
         let cancel = capability::CancelToken::default();
@@ -211,7 +214,7 @@ mod tests {
         let clips = vec![random_synthetic_av_clip(&cfg, &mut rng)];
         let initial = |seed: u64| {
             let save_path = dir.join(format!("adapter-{seed}.brain")).to_str().expect("utf-8 path").to_string();
-            let opts = TrainOpts { steps: 0, rank: 4, lr: 2e-3, seed, save_path, ckpt_every: 0 };
+            let opts = TrainOpts { steps: 0, rank: 4, lr: 2e-3, seed, save_path, ckpt_every: 0, saved: model::saved::SavedPolicy::Keep };
             run(&cfg, &base, &clips, &opts, &capability::CancelToken::default(), |_, _, _| {}).expect("av finetune run")
         };
         let (a, a_again, b) = (initial(1), initial(1), initial(2));

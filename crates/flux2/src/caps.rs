@@ -362,6 +362,7 @@ pub fn train_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Pr
             Some("fp32") | None => crate::Precision::F32,
             Some(other) => return Err(format!("lora_train: unknown precision {other} (fp32|int8)")),
         },
+        saved: model::saved::SavedPolicy::Keep,
     };
     let mut prog = |step: u32, total: u32, message: String| progress(Progress::step(step, total, message));
     let adapter = crate::finetune::run(&cfg, paths, std::path::Path::new(&dir), &opts, &inv.cancel, &mut prog)?;

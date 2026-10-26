@@ -96,7 +96,7 @@ fn run(device: Option<&str>) {
     let b = make_flow_batch(&cfg, &x0, &ctx, rows, 0.45, &noise);
 
     let w = ModelWeights::from_tensors(&cfg, &ts).expect("host weights from the manifest");
-    let (host, _) = forward(&cfg, &w, &b.latent, &b.ctx, b.t, &b.cos, &b.sin);
+    let (host, _) = forward(&cfg, &w, &b.inputs(), model::saved::SavedPolicy::Keep).unwrap();
 
     let (f, h, wd) = cfg.latent;
     let m = WanDit::new(wc, ts, device);

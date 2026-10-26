@@ -64,6 +64,16 @@ pub fn split_train_precision(args: &[String]) -> Result<(model::TrainPrecision, 
     Ok((precision, parsed.leftovers()))
 }
 
+/// The value of `--activations`: what a trainer's backward keeps of its forward, `keep` every block's activations or
+/// `recompute` them from each block's input. Any other value is refused, naming the flag.
+pub fn parse_activations(value: &str) -> Result<model::saved::SavedPolicy, String> {
+    use model::saved::SavedPolicy;
+    match SavedPolicy::parse(value) {
+        Some(policy @ (SavedPolicy::Keep | SavedPolicy::Recompute)) => Ok(policy),
+        _ => Err(format!("--activations: {value} is not one of keep, recompute")),
+    }
+}
+
 /// `--out`'s value, accepting either a dedicated command's own bare-path
 /// spelling (`--out out.png`) or the generic capability-manifest convention
 /// `brain caps <arch>` documents (`--out <blob_name>=<path>`, what `brain
@@ -145,5 +155,21 @@ mod out_name_prefix_tests {
         assert_eq!(parse_out_name_prefix("image=out.png", "image").unwrap(), "out.png");
         assert_eq!(parse_out_name_prefix("out.png", "image").unwrap(), "out.png");
         assert_eq!(parse_out_name_prefix("imageX=", "image").unwrap(), "imageX=");
+    }
+}
+
+#[cfg(test)]
+mod activations_tests {
+    use super::parse_activations;
+    use model::saved::SavedPolicy;
+
+    #[test]
+    fn activations_accept_keep_and_recompute_and_refuse_anything_else_naming_the_flag() {
+        assert_eq!(parse_activations("keep"), Ok(SavedPolicy::Keep));
+        assert_eq!(parse_activations("recompute"), Ok(SavedPolicy::Recompute));
+        for bad in ["recompute+bf16", "on", ""] {
+            let e = parse_activations(bad).unwrap_err();
+            assert!(e.contains("--activations"), "{e}");
+        }
     }
 }

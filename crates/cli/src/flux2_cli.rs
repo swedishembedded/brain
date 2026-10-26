@@ -143,7 +143,7 @@ const HELP: &str = "brain flux2 <cmd>
            [--size S] [--seed K] [--ckpt-every N] [--resume] [--trainer device|host] [--cards N]
            [--dit <path>] [--vae <path>] [--text-encoder <path>] [--tokenizer <path>] [--method lora|rslora] [--lr-ratio X] [--freeze-a]
            [--precision fp32|int8] [--train-base fp32|int8] [--cache-dir D] [--warmup N] [--min-lr X]
-           [--edit-weight A] [--detail-weight B] [--ref-dropout P]
+           [--edit-weight A] [--detail-weight B] [--ref-dropout P] [--activations keep|recompute]
            # Train a LoRA on a folder of captioned images (see data::imageset for
            # the caption formats; `brain label` writes one). The adapter it writes
            # is what `generate --adapter` loads. Do NOT name it '.safetensors':
@@ -258,6 +258,11 @@ const HELP: &str = "brain flux2 <cmd>
            #   --lr-ratio X    LoRA+: B's effective lr is lr-ratio*lr (default
            #                   1.0, plain LoRA)
            #   --freeze-a      LoRA-FA: freeze A at its random init, train only B
+           #   --activations A what the host trainer's backward keeps of its
+           #                   forward: keep (default) every block's activations,
+           #                   or recompute them from each block's input in the
+           #                   backward (same gradients, lower memory); the
+           #                   device trainer ignores it
            #   --precision P   the DiT tier this adapter will be GENERATED with
            #                   (default fp32; a .gguf DiT forces int8). It picks
            #                   the text-encoder tier the captions are embedded
@@ -836,6 +841,7 @@ fn finetune(args: &[String]) -> Result<(), String> {
         // What `generate` would run this adapter at. fp32 is generate's own
         // default request; `effective_dit_precision` overrides it for a .gguf.
         precision: flux2::Precision::F32,
+        saved: model::saved::SavedPolicy::Keep,
     };
     let mut i = 0;
     while i < args.len() {
@@ -888,6 +894,7 @@ fn finetune(args: &[String]) -> Result<(), String> {
                     other => return Err(format!("--precision: {other} is not one of fp32, int8")),
                 }
             }
+            "--activations" => opts.saved = crate::args::parse_activations(need(i)?)?,
             "--cache-dir" => opts.cache_dir = Some(std::path::PathBuf::from(need(i)?)),
             "--train-base" => {
                 opts.train_base = Some(match need(i)?.as_str() {

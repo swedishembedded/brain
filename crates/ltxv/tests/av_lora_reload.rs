@@ -32,7 +32,7 @@
 //! parent parses back out.
 
 use ltxv::av_lora::{load_adapter, save_adapter, LoraAdapter, LoraCfg};
-use ltxv::av_modelgrad::{forward, grads, init_model, make_av_flow_batch, AvCfg, AvModelWeights};
+use ltxv::av_modelgrad::{forward, grads, init_model, make_av_flow_batch, AvCfg, AvInputs, AvModelWeights};
 
 const CHILD_ENV: &str = "LTXV_AV_RELOAD_CHILD";
 const PATH_ENV: &str = "LTXV_AV_RELOAD_PATH";
@@ -52,10 +52,26 @@ fn eval_model(cfg: &AvCfg, w: &AvModelWeights<f32>) -> Vec<f32> {
     let v_positions = cfg.simple_positions_v();
     let a_positions = cfg.simple_positions_a();
     let (v_rope, a_rope, v_cross, a_cross) = cfg.rope_tables_f32(&v_positions, &a_positions);
-    let (v_pred, a_pred, _) = forward(
-        cfg, w, &v_latent, &v_timesteps, &v_keyframes_mask, &v_ctx, &a_latent, &a_timesteps, &a_ctx, 0.5, 0.5, &v_rope.cos, &v_rope.sin, &a_rope.cos, &a_rope.sin, &v_cross.cos, &v_cross.sin,
-        &a_cross.cos, &a_cross.sin,
-    );
+    let inputs = AvInputs {
+        v_latent: &v_latent,
+        v_timesteps: &v_timesteps,
+        v_keyframes_mask: &v_keyframes_mask,
+        v_context: &v_ctx,
+        a_latent: &a_latent,
+        a_timesteps: &a_timesteps,
+        a_context: &a_ctx,
+        v_sigma: 0.5,
+        a_sigma: 0.5,
+        v_cos: &v_rope.cos,
+        v_sin: &v_rope.sin,
+        a_cos: &a_rope.cos,
+        a_sin: &a_rope.sin,
+        v_cross_cos: &v_cross.cos,
+        v_cross_sin: &v_cross.sin,
+        a_cross_cos: &a_cross.cos,
+        a_cross_sin: &a_cross.sin,
+    };
+    let (v_pred, a_pred, _) = forward(cfg, w, &inputs, model::saved::SavedPolicy::Keep).unwrap();
     [v_pred, a_pred].concat()
 }
 

@@ -298,6 +298,9 @@ pub struct TrainOpts {
     /// `BRAIN_WAN_T5_DEVICE`, then `"cpu"` - the same precedence
     /// `GenOpts::te_device` uses at inference.
     pub te_device: Option<String>,
+    /// What each host-trainer step's backward keeps of its forward (`model::saved::BlockStack`); the device trainer
+    /// always rebuilds its blocks from their saved inputs.
+    pub saved: model::saved::SavedPolicy,
 }
 
 /// Fine-tune a LoRA adapter on `dir` (a [`ClipSet`] folder). Returns the
@@ -319,6 +322,7 @@ pub fn run(
     // each, then one final "saved" tick.
     let encode_budget = 2 * opts.samples as u32;
     let total = encode_budget + opts.steps + 1;
+    model::saved::BlockStack::<(), ()>::new("wan finetune", opts.saved)?;
     // 1. dataset
     let set = ClipSet::load_dir(dir)?;
     let (_, h, w) = set.frame_shape();
@@ -361,7 +365,7 @@ pub fn run(
     drop(tensors);
 
     // 4. adapter + flow-matching loop
-    let mut trainer = Trainer::open(&tcfg, opts.device.as_deref());
+    let mut trainer = Trainer::open(&tcfg, opts.device.as_deref()).with_saved(opts.saved)?;
     let mut adapter = LoraAdapter::new(&tcfg, LoraCfg::new(opts.rank, opts.seed));
     // With the base frozen and resident, a step's only weight traffic is the
     // rank-sized adapter itself: `W_eff` is folded and `dL/dW_eff` projected

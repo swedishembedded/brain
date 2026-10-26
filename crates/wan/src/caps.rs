@@ -238,6 +238,7 @@ pub fn train_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Pr
         ckpt_every: inv.get_i64("ckpt_every").unwrap_or(50).max(0) as u32,
         device: inv.get_str("device").filter(|s| !s.is_empty()),
         te_device: inv.get_str("te_device").filter(|s| !s.is_empty()),
+        saved: model::saved::SavedPolicy::Keep,
     };
     let mut prog = |step: u32, total: u32, message: String| progress(Progress::step(step, total, message));
     let tensors = crate::finetune::run(paths, std::path::Path::new(&dir), &cfg, &opts, &inv.cancel, &mut prog)?;

@@ -930,10 +930,10 @@ fn check_flux2_on_weighted(cfg: &flux2::modelgrad::Cfg, seed: u64, edit_weight: 
         .collect();
 
     let run_loss = |w: &flux2::modelgrad::ModelWeights<f64>| -> f64 {
-        let (pred, _) = forward(cfg, w, &b.img, &b.ctx, b.t, &b.cos, &b.sin);
+        let (pred, _) = forward(cfg, w, &b.inputs(), model::saved::SavedPolicy::Keep).unwrap();
         loss_weighted(&pred, &b.target, &b.w).0
     };
-    let (pred, cache) = forward(cfg, &w0, &b.img, &b.ctx, b.t, &b.cos, &b.sin);
+    let (pred, cache) = forward(cfg, &w0, &b.inputs(), model::saved::SavedPolicy::Keep).unwrap();
     let (_l, dpred) = loss_weighted(&pred, &b.target, &b.w);
     let g = backward(cfg, &w0, &cache, &dpred);
     let analytic: Vec<(String, Vec<f64>)> = grad_views(&g).into_iter().map(|(n, v)| (n, v.clone())).collect();
@@ -993,7 +993,7 @@ impl WanFixture {
     }
 
     fn loss_of(&self, w: &wan::modelgrad::ModelWeights<f64>) -> f64 {
-        let (pred, _) = wan::modelgrad::forward(&self.cfg, w, &self.b.latent, &self.b.ctx, self.b.t, &self.b.cos, &self.b.sin);
+        let (pred, _) = wan::modelgrad::forward(&self.cfg, w, &self.b.inputs(), model::saved::SavedPolicy::Keep).expect("keeping every block is always available");
         wan::modelgrad::loss(&pred, &self.b.target).0
     }
 
@@ -1284,10 +1284,7 @@ impl LtxvAvFixture {
     }
 
     fn loss_of(&self, w: &ltxv::av_modelgrad::AvModelWeights<f64>) -> f64 {
-        let (v_pred, a_pred, _) = ltxv::av_modelgrad::forward(
-            &self.cfg, w, &self.b.v_latent, &self.b.v_timesteps, &self.b.v_keyframes_mask, &self.b.v_ctx, &self.b.a_latent, &self.b.a_timesteps, &self.b.a_ctx, self.b.v_sigma, self.b.a_sigma,
-            &self.b.v_cos, &self.b.v_sin, &self.b.a_cos, &self.b.a_sin, &self.b.v_cross_cos, &self.b.v_cross_sin, &self.b.a_cross_cos, &self.b.a_cross_sin,
-        );
+        let (v_pred, a_pred, _) = ltxv::av_modelgrad::forward(&self.cfg, w, &self.b.inputs(), model::saved::SavedPolicy::Keep).expect("keeping every block is always available");
         ltxv::av_modelgrad::loss(&v_pred, &self.b.v_target, &a_pred, &self.b.a_target).0
     }
 
@@ -1415,7 +1412,7 @@ impl Minimaxh3Fixture {
     }
 
     fn loss_of(&self, w: &minimaxh3::grad::ModelW<f64>) -> f64 {
-        let (video_pred, audio_pred, _) = minimaxh3::grad::forward(&self.cfg, w, &self.b);
+        let (video_pred, audio_pred, _) = minimaxh3::grad::forward(&self.cfg, w, &self.b, model::saved::SavedPolicy::Keep).expect("keeping every block is always available");
         minimaxh3::grad::loss(&video_pred, &self.b.video_target, &audio_pred, &self.b.audio_target).0
     }
 

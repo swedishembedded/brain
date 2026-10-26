@@ -15,7 +15,7 @@
 //!      frozen base under the chosen [`Trainer`], and Adam-steps the low-rank
 //!      `A,B`. The host trainer gets there via a dense `dL/dW_eff` it then
 //!      projects, one block at a time as the backward completes it
-//!      ([`crate::modelgrad::grads_into`]) so the whole stack is never
+//!      ([`crate::modelgrad::grads_into_saved`]) so the whole stack is never
 //!      resident; the device trainer produces `(dA, dB)` directly.
 //!   3. Save the adapter ([`crate::lora::save_adapter`]); the inference path
 //!      picks it up via [`crate::lora::LoraAdapter::fold_into_tensors`].
@@ -782,6 +782,9 @@ pub struct TrainOpts {
     /// ([`base_precision`]): an adapter is fitted against the base it will be
     /// served on. The host trainer differentiates an fp32 base either way.
     pub precision: crate::Precision,
+    /// What each host-trainer step's backward keeps of its forward (`model::saved::BlockStack`); the device trainer
+    /// keeps its own per-block state.
+    pub saved: model::saved::SavedPolicy,
 }
 
 /// Default cooldown, as a fraction of the run's step budget: the rate is held
@@ -855,6 +858,7 @@ pub fn run(
     cancel: &capability::CancelToken,
     mut progress: impl FnMut(u32, u32, String),
 ) -> Result<LoraAdapter, String> {
+    model::saved::BlockStack::<(), ()>::new("flux2 finetune", opts.saved)?;
     // 1. dataset
     let samples = data::imageset::load_dir(dir, opts.size, |w| progress(0, opts.steps + 1, format!("dataset: {w}")))?;
     let (lh, lw) = ((opts.size / 16) as usize, (opts.size / 16) as usize);
@@ -1139,10 +1143,10 @@ pub fn run(
                     // copy of the model held for no reason - at klein-9B that is
                     // the difference between a training step that fits this box
                     // beside the frozen base and its effective copy, and one that
-                    // does not. `grads_into` runs the identical backward and hands
+                    // does not. `grads_into_saved` runs the identical backward and hands
                     // each block over as it completes.
                     let mut stepper = adapter.stepper(lr_now);
-                    let (loss, _globals) = modelgrad::grads_into(&cfg, &w_eff, batch, &mut stepper);
+                    let (loss, _globals) = modelgrad::grads_into_saved(&cfg, &w_eff, batch, &mut stepper, opts.saved).expect("the policy was accepted before the first step");
                     loss
                 }
                 (None, None) => unreachable!("one of the two trainers is always built"),

@@ -52,6 +52,7 @@ use crate::config::LtxAvDitConfig;
 use crate::grad::{dsilu, linear, linear_bwd, silu, AttnGrads, AttnW, Dims, Fp, Lin, LinNB};
 use crate::modelgrad::{layernorm, layernorm_bwd, timestep_embedding};
 use crate::rope::{ltx_rope_tables, LtxRopeTables};
+use model::saved::{BlockStack, SavedPolicy};
 
 // ---- the shared timestep MLP (see this module's doc) ----
 
@@ -352,42 +353,77 @@ pub struct AvModelCache<T> {
     av_audio_ss: TsMlpCache<T>,
     av_a2v_gate: TsMlpCache<T>,
     av_v2a_gate: TsMlpCache<T>,
-    blocks: Vec<AvBlockCache<T>>,
+    blocks: BlockStack<(Vec<T>, Vec<T>), AvBlockCache<T>>,
+    /// What a recomputing backward rebuilds a block's cache from besides its input; `None` when keeping.
+    rebuild: Option<Rebuild<T>>,
     v_out: OutputCache<T>,
     a_out: OutputCache<T>,
 }
 
-/// Full forward. `v_latent`/`a_latent`: `[t*in_channels]`, already tokens
-/// (see `crate::modelgrad`'s doc - no patchify/unpatchify inside the DiT's
-/// own math). `v_timesteps`/`a_timesteps`: `[t]` each, per-token RAW
-/// timestep (the model-level `timestep_scale_multiplier` scaling happens
-/// inside). `v_sigma`/`a_sigma`: each stream's SCALAR sigma - the CROSS
-/// modality's own scalar drives the OTHER stream's AV gate MLP (`crate::
-/// block::LtxAvBlock`'s doc). `{v,a}_cos`/`{v,a}_sin`: each stream's
-/// self-attention RoPE tables; `{v,a}_cross_cos`/`{v,a}_cross_sin`: the
-/// shared cross-modal tables, both at audio's head geometry.
-#[allow(clippy::too_many_arguments)]
-pub fn forward<T: Fp>(
-    cfg: &AvCfg,
-    w: &AvModelWeights<T>,
-    v_latent: &[T],
-    v_timesteps: &[f64],
-    v_keyframes_mask: &[f64],
-    v_context: &[T],
-    a_latent: &[T],
-    a_timesteps: &[f64],
-    a_context: &[T],
-    v_sigma: f64,
-    a_sigma: f64,
-    v_cos: &[T],
-    v_sin: &[T],
-    a_cos: &[T],
-    a_sin: &[T],
-    v_cross_cos: &[T],
-    v_cross_sin: &[T],
-    a_cross_cos: &[T],
-    a_cross_sin: &[T],
-) -> (Vec<T>, Vec<T>, AvModelCache<T>) {
+/// The block forward's inputs other than the block input (the video and audio streams), held by a recomputing cache.
+struct Rebuild<T> {
+    v_adaln_shared: Vec<T>,
+    a_adaln_shared: Vec<T>,
+    v_context: Vec<T>,
+    a_context: Vec<T>,
+    v_cos: Vec<T>,
+    v_sin: Vec<T>,
+    a_cos: Vec<T>,
+    a_sin: Vec<T>,
+    v_cross_cos: Vec<T>,
+    v_cross_sin: Vec<T>,
+    a_cross_cos: Vec<T>,
+    a_cross_sin: Vec<T>,
+    av_video_ss: Vec<T>,
+    av_audio_ss: Vec<T>,
+    av_a2v_gate: Vec<T>,
+    av_v2a_gate: Vec<T>,
+}
+
+impl<T> AvModelCache<T> {
+    /// Block caches this cache holds: one per block when keeping, none when recomputing.
+    pub fn held_block_caches(&self) -> usize {
+        self.blocks.held_caches()
+    }
+}
+
+/// The model inputs [`forward`] reads. `v_latent`/`a_latent`: `[t*in_channels]`, already tokens (see
+/// `crate::modelgrad`'s doc - no patchify/unpatchify inside the DiT's own math). `v_timesteps`/`a_timesteps`: `[t]`
+/// each, per-token RAW timestep (the model-level `timestep_scale_multiplier` scaling happens inside).
+/// `v_sigma`/`a_sigma`: each stream's SCALAR sigma - the CROSS modality's own scalar drives the OTHER stream's AV gate
+/// MLP (`crate::block::LtxAvBlock`'s doc). `{v,a}_cos`/`{v,a}_sin`: each stream's self-attention RoPE tables;
+/// `{v,a}_cross_cos`/`{v,a}_cross_sin`: the shared cross-modal tables, both at audio's head geometry.
+pub struct AvInputs<'a, T> {
+    pub v_latent: &'a [T],
+    pub v_timesteps: &'a [f64],
+    pub v_keyframes_mask: &'a [f64],
+    pub v_context: &'a [T],
+    pub a_latent: &'a [T],
+    pub a_timesteps: &'a [f64],
+    pub a_context: &'a [T],
+    pub v_sigma: f64,
+    pub a_sigma: f64,
+    pub v_cos: &'a [T],
+    pub v_sin: &'a [T],
+    pub a_cos: &'a [T],
+    pub a_sin: &'a [T],
+    pub v_cross_cos: &'a [T],
+    pub v_cross_sin: &'a [T],
+    pub a_cross_cos: &'a [T],
+    pub a_cross_sin: &'a [T],
+}
+
+/// What [`forward`] returns: the video and audio velocity predictions plus the cache.
+pub type AvForward<T> = Result<(Vec<T>, Vec<T>, AvModelCache<T>), String>;
+
+/// Full forward over `inputs`, keeping what `saved` names for [`backward`]: every block's cache
+/// ([`SavedPolicy::Keep`]) or only every block's input (both streams), each block's cache rebuilt as the backward
+/// reaches it ([`SavedPolicy::Recompute`], `model::saved::BlockStack`). Returns the video and audio velocity
+/// predictions plus the cache; a narrow saved format is refused.
+pub fn forward<T: Fp>(cfg: &AvCfg, w: &AvModelWeights<T>, inputs: &AvInputs<'_, T>, saved: SavedPolicy) -> AvForward<T> {
+    let AvInputs {
+        v_latent, v_timesteps, v_keyframes_mask, v_context, a_latent, a_timesteps, a_context, v_sigma, a_sigma, v_cos, v_sin, a_cos, a_sin, v_cross_cos, v_cross_sin, a_cross_cos, a_cross_sin,
+    } = *inputs;
     let (vdim, adim, tv, ta) = (cfg.vdim, cfg.adim, cfg.tv, cfg.ta);
     assert_eq!(v_latent.len(), tv * cfg.v_in_channels, "av forward: v_latent size");
     assert_eq!(a_latent.len(), ta * cfg.a_in_channels, "av forward: a_latent size");
@@ -423,16 +459,33 @@ pub fn forward<T: Fp>(
     let d = cfg.dims();
     let mut vxx = vx;
     let mut axx = ax;
-    let mut caches = Vec::with_capacity(w.blocks.len());
+    let mut blocks = BlockStack::new("ltxv audio-video", saved)?;
     for bw in &w.blocks {
         let (vo, ao, c) = av_block_forward(
             d, bw, &vxx, &axx, &v_adaln_shared, &a_adaln_shared, v_context, a_context, v_cos, v_sin, a_cos, a_sin, v_cross_cos, v_cross_sin, a_cross_cos, a_cross_sin, &av_video_ss, &av_audio_ss,
             &av_a2v_gate, &av_v2a_gate,
         );
-        vxx = vo;
-        axx = ao;
-        caches.push(c);
+        blocks.push(&(vxx, axx), c);
+        (vxx, axx) = (vo, ao);
     }
+    let rebuild = saved.recomputes().then(|| Rebuild {
+        v_adaln_shared,
+        a_adaln_shared,
+        v_context: v_context.to_vec(),
+        a_context: a_context.to_vec(),
+        v_cos: v_cos.to_vec(),
+        v_sin: v_sin.to_vec(),
+        a_cos: a_cos.to_vec(),
+        a_sin: a_sin.to_vec(),
+        v_cross_cos: v_cross_cos.to_vec(),
+        v_cross_sin: v_cross_sin.to_vec(),
+        a_cross_cos: a_cross_cos.to_vec(),
+        a_cross_sin: a_cross_sin.to_vec(),
+        av_video_ss,
+        av_audio_ss,
+        av_a2v_gate,
+        av_v2a_gate,
+    });
 
     // --- output stages, one per stream ------------------------------------
     let (v_pred, v_out) = output_stage_fwd(&w.v_output_scale_shift_table, &w.v_proj_out, &vxx, &v_embedded, tv, vdim, cfg.v_out_channels, cfg.norm_eps);
@@ -448,11 +501,12 @@ pub fn forward<T: Fp>(
         av_audio_ss: av_audio_ss_cache,
         av_a2v_gate: av_a2v_gate_cache,
         av_v2a_gate: av_v2a_gate_cache,
-        blocks: caches,
+        blocks,
+        rebuild,
         v_out,
         a_out,
     };
-    (v_pred, a_pred, cache)
+    Ok((v_pred, a_pred, cache))
 }
 
 /// Flow-matching velocity-MSE loss, combined across BOTH streams (mean over
@@ -499,8 +553,16 @@ pub fn backward<T: Fp>(cfg: &AvCfg, w: &AvModelWeights<T>, cache: &AvModelCache<
     let mut dvx = dx_v_from_out;
     let mut dax = dx_a_from_out;
     let mut blocks: Vec<AvBlockGrads<T>> = Vec::with_capacity(w.blocks.len());
-    for (bw, bc) in w.blocks.iter().zip(&cache.blocks).rev() {
-        let g = av_block_backward(d, bw, bc, &dvx, &dax);
+    let rebuild = |i: usize, x: &(Vec<T>, Vec<T>)| {
+        let r = cache.rebuild.as_ref().expect("a recomputing cache holds what its blocks rebuild from");
+        av_block_forward(
+            d, &w.blocks[i], &x.0, &x.1, &r.v_adaln_shared, &r.a_adaln_shared, &r.v_context, &r.a_context, &r.v_cos, &r.v_sin, &r.a_cos, &r.a_sin, &r.v_cross_cos, &r.v_cross_sin, &r.a_cross_cos,
+            &r.a_cross_sin, &r.av_video_ss, &r.av_audio_ss, &r.av_a2v_gate, &r.av_v2a_gate,
+        )
+        .2
+    };
+    cache.blocks.rev_for_each(rebuild, |i, bc| {
+        let g = av_block_backward(d, &w.blocks[i], bc, &dvx, &dax);
         dvx = g.dvx.clone();
         dax = g.dax.clone();
         for (acc, &gi) in dv_adaln_shared.iter_mut().zip(&g.dv_adaln_shared) {
@@ -522,7 +584,7 @@ pub fn backward<T: Fp>(cfg: &AvCfg, w: &AvModelWeights<T>, cache: &AvModelCache<
             *acc += gi;
         }
         blocks.push(g);
-    }
+    });
     blocks.reverse();
 
     // --- the six timestep MLPs (reverse) ---
@@ -641,15 +703,42 @@ pub fn make_av_flow_batch<T: Fp>(cfg: &AvCfg, v_x0: &[T], a_x0: &[T], v_ctx: &[T
     }
 }
 
+impl<T> AvBatch<T> {
+    /// This batch as [`forward`]'s inputs.
+    pub fn inputs(&self) -> AvInputs<'_, T> {
+        AvInputs {
+            v_latent: &self.v_latent,
+            v_timesteps: &self.v_timesteps,
+            v_keyframes_mask: &self.v_keyframes_mask,
+            v_context: &self.v_ctx,
+            a_latent: &self.a_latent,
+            a_timesteps: &self.a_timesteps,
+            a_context: &self.a_ctx,
+            v_sigma: self.v_sigma,
+            a_sigma: self.a_sigma,
+            v_cos: &self.v_cos,
+            v_sin: &self.v_sin,
+            a_cos: &self.a_cos,
+            a_sin: &self.a_sin,
+            v_cross_cos: &self.v_cross_cos,
+            v_cross_sin: &self.v_cross_sin,
+            a_cross_cos: &self.a_cross_cos,
+            a_cross_sin: &self.a_cross_sin,
+        }
+    }
+}
+
 /// One training evaluation: forward + loss + backward. The f32
 /// instantiation is the finetune trainer's step core.
 pub fn grads<T: Fp>(cfg: &AvCfg, w: &AvModelWeights<T>, b: &AvBatch<T>) -> (f64, AvModelGrads<T>) {
-    let (v_pred, a_pred, cache) = forward(
-        cfg, w, &b.v_latent, &b.v_timesteps, &b.v_keyframes_mask, &b.v_ctx, &b.a_latent, &b.a_timesteps, &b.a_ctx, b.v_sigma, b.a_sigma, &b.v_cos, &b.v_sin, &b.a_cos, &b.a_sin, &b.v_cross_cos,
-        &b.v_cross_sin, &b.a_cross_cos, &b.a_cross_sin,
-    );
+    grads_saved(cfg, w, b, SavedPolicy::Keep).expect("keeping every block is always available")
+}
+
+/// [`grads`] keeping what `saved` names of the forward for the backward (see [`forward`]).
+pub fn grads_saved<T: Fp>(cfg: &AvCfg, w: &AvModelWeights<T>, b: &AvBatch<T>, saved: SavedPolicy) -> Result<(f64, AvModelGrads<T>), String> {
+    let (v_pred, a_pred, cache) = forward(cfg, w, &b.inputs(), saved)?;
     let (l, dv_pred, da_pred) = loss(&v_pred, &b.v_target, &a_pred, &b.a_target);
-    (l, backward(cfg, w, &cache, &dv_pred, &da_pred))
+    Ok((l, backward(cfg, w, &cache, &dv_pred, &da_pred)))
 }
 
 // ---- weight construction ----

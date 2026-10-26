@@ -60,6 +60,7 @@ fn opts(steps: u32, lr: f32) -> TrainOpts {
         edit_weight: 0.0,
         detail_weight: 0.0,
         ref_dropout: 0.0,
+        saved: model::saved::SavedPolicy::Keep,
     }
 }
 
@@ -259,7 +260,7 @@ fn a_dropped_step_blanks_the_reference_rows_and_leaves_the_target_alone() {
     // And it must actually reach the model: a blanked reference has to change
     // the prediction, or the drop is a no-op dressed as a regulariser.
     let w = init_model::<f32>(&c, 0x51a7);
-    let pred = |b: &flux2::modelgrad::Batch<f32>| flux2::modelgrad::forward(&c, &w, &b.img, &b.ctx, b.t, &b.cos, &b.sin).0;
+    let pred = |b: &flux2::modelgrad::Batch<f32>| flux2::modelgrad::forward(&c, &w, &b.inputs(), model::saved::SavedPolicy::Keep).unwrap().0;
     let (pk, pd) = (pred(&kept), pred(&dropped));
     let moved = pk.iter().zip(&pd).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
     assert!(moved > 1e-5, "blanking the reference must change what the model predicts (max delta {moved:.2e})");

@@ -117,14 +117,14 @@ fn lora_only_descends_with_base_frozen_and_roundtrips() {
     // the fold, so the pre-fold extraction gets a copy (tiny config).
     let base_ts = ModelWeights::from_tensors(&c, &mut ts.clone()).unwrap();
     let b = &batches[0];
-    let (out_before, _) = forward(&c, &base_ts, &b.img, &b.ctx, b.t, &b.cos, &b.sin);
+    let (out_before, _) = forward(&c, &base_ts, &b.inputs(), model::saved::SavedPolicy::Keep).unwrap();
     ad.fold_into_tensors(&mut ts).expect("fold");
     let folded = ModelWeights::from_tensors(&c, &mut ts).unwrap();
-    let (out_after, _) = forward(&c, &folded, &b.img, &b.ctx, b.t, &b.cos, &b.sin);
+    let (out_after, _) = forward(&c, &folded, &b.inputs(), model::saved::SavedPolicy::Keep).unwrap();
     let max_change = out_before.iter().zip(&out_after).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
     assert!(max_change > 1e-4, "folding a trained adapter did not change the forward output");
     let applied = ad.apply(&base_ts);
-    let (out_applied, _) = forward(&c, &applied, &b.img, &b.ctx, b.t, &b.cos, &b.sin);
+    let (out_applied, _) = forward(&c, &applied, &b.inputs(), model::saved::SavedPolicy::Keep).unwrap();
     let max_dev = out_applied.iter().zip(&out_after).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
     assert!(max_dev < 1e-5, "fold_into_tensors diverges from apply (max dev {max_dev:.2e})");
     eprintln!("fold_into_tensors changes the forward (max Δ {max_change:.3e}) and matches apply (dev {max_dev:.1e}).");

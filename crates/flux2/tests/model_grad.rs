@@ -31,7 +31,7 @@ fn batch(c: &Cfg, r: &mut impl FnMut() -> f64) -> Batch<f64> {
 }
 
 fn run_loss(c: &Cfg, w: &flux2::modelgrad::ModelWeights<f64>, b: &Batch<f64>) -> f64 {
-    let (pred, _) = forward(c, w, &b.img, &b.ctx, b.t, &b.cos, &b.sin);
+    let (pred, _) = forward(c, w, &b.inputs(), model::saved::SavedPolicy::Keep).unwrap();
     loss(&pred, &b.target).0
 }
 
@@ -81,7 +81,7 @@ fn full_model_gradcheck() {
     let mut r = rng(0x00BE_EF02);
     let b = batch(&c, &mut r);
 
-    let (pred, cache) = forward(&c, &w0, &b.img, &b.ctx, b.t, &b.cos, &b.sin);
+    let (pred, cache) = forward(&c, &w0, &b.inputs(), model::saved::SavedPolicy::Keep).unwrap();
     let (_l, dpred) = loss(&pred, &b.target);
     let g = backward(&c, &w0, &cache, &dpred);
     let analytic: Vec<(String, Vec<f64>)> =
@@ -132,7 +132,7 @@ fn full_model_overfits() {
     let l0 = run_loss(&c, &w, &b);
     let mut l = l0;
     for step in 1..=250 {
-        let (pred, cache) = forward(&c, &w, &b.img, &b.ctx, b.t, &b.cos, &b.sin);
+        let (pred, cache) = forward(&c, &w, &b.inputs(), model::saved::SavedPolicy::Keep).unwrap();
         let (lv, dpred) = loss(&pred, &b.target);
         l = lv;
         let g = backward(&c, &w, &cache, &dpred);

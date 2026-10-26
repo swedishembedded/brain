@@ -65,6 +65,13 @@ store holds more checkpoints than you want served.
 does - by scanning the models directory, with one flag per role for what the
 scan cannot decide.
 
+`--activations keep|recompute` (default `keep`) sets what the host trainer
+(`--trainer host`) holds of each step's forward for its backward: `keep` holds
+every block's activations, `recompute` holds only each block's input and
+rebuilds the rest block by block in the backward. The loss and gradients are
+bit-identical; `recompute` trades extra forward compute for lower memory. The
+device trainer ignores it. Any other value is refused.
+
 ## Running it
 
 ```bash

@@ -37,15 +37,20 @@ model: a weights-free manifest `brain caps brain/wan` prints, a residency
 adapter the scheduler budgets and places, and a cancellable streaming job over
 D-Bus. Image-to-video does not exist yet.
 
-LoRA fine-tuning is a gradient-checked library path (`wan::finetune`) rather
-than a command. The transformer's forward and backward, the adapter and the
-captioned-clip dataset are all there and gated, but nothing exposes them as
-`brain wan ...` or as a capability action, so training today means calling
-`wan::finetune::run` from Rust. The transformer's forward and backward run on
+LoRA fine-tuning is `brain wan finetune --data <clips-dir> --save <adapter.brain>`
+(the same code as the `lora_train` capability action, `wan::finetune::run`),
+gradient-checked end to end. The transformer's forward and backward run on
 the GPU (`wan::train::DeviceTrainer` over `wan::devgrad::BlockDev`), with the
 patch embedding, conditioning MLPs, head and loss left on the host; `--device
 cpu` selects the host f32 trainer instead, which is also what a machine with no
 accelerator falls back to.
+
+`--activations keep|recompute` (default `keep`) sets what the host trainer holds
+of each step's forward for its backward: `keep` holds every block's
+activations, `recompute` holds only each block's input and rebuilds the rest
+block by block in the backward. The loss and gradients are bit-identical;
+`recompute` trades extra forward compute for lower memory. The GPU trainer
+always rebuilds from block inputs. Any other value is refused.
 
 Because a LoRA freezes the base, the GPU trainer keeps every block's base
 weights resident for the whole run and assembles `W_eff = base + (α/r)·B·A`

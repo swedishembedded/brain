@@ -40,6 +40,7 @@ use crate::grad::{
     affine, affine_bwd, block_backward, block_forward, dgelu, dsilu, gelu, layernorm, layernorm_bwd, linear, linear_bwd, silu,
     BlockCache, BlockGrads, BlockW, Dims, Fp, Lin,
 };
+use model::saved::{BlockStack, SavedPolicy};
 
 /// Shape of the training problem: the [`WanConfig`] fields the host path needs
 /// plus the latent extent being trained on.
@@ -300,19 +301,47 @@ pub struct ModelCache<T> {
     th: Vec<T>,
     thg: Vec<T>,
     flat: Vec<T>,
-    blocks: Vec<BlockCache<T>>,
+    blocks: BlockStack<Vec<T>, BlockCache<T>>,
+    /// What a recomputing backward rebuilds a block's cache from besides its input; `None` when keeping.
+    rebuild: Option<Rebuild<T>>,
     xhat_h: Vec<T>,
     inv_h: Vec<T>,
     gamma_h: Vec<T>,
     nh: Vec<T>,
 }
 
-/// Full forward. `latent`: `[C·F·H·W]`; `ctx`: `[text_len·text_dim]` (already
-/// zero-padded, as `WanModel.forward` pads with `new_zeros`); `t`: the timestep
-/// on the training grid (0..1000); `cos`/`sin`: `[tokens·head_dim/2]`. Returns
-/// the velocity prediction `[C_out·F·H·W]` plus the cache.
-#[allow(clippy::too_many_arguments)]
-pub fn forward<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, latent: &[T], ctx: &[T], t: f64, cos: &[T], sin: &[T]) -> (Vec<T>, ModelCache<T>) {
+/// The block forward's inputs other than the block input, held by a recomputing cache.
+struct Rebuild<T> {
+    e0: Vec<T>,
+    ctxe: Vec<T>,
+    cos: Vec<T>,
+    sin: Vec<T>,
+}
+
+impl<T> ModelCache<T> {
+    /// Block caches this cache holds: one per block when keeping, none when recomputing.
+    pub fn held_block_caches(&self) -> usize {
+        self.blocks.held_caches()
+    }
+}
+
+/// The model inputs [`forward`] reads. `latent`: `[C·F·H·W]`; `ctx`: `[text_len·text_dim]` (already zero-padded, as
+/// `WanModel.forward` pads with `new_zeros`); `t`: the timestep on the training grid (0..1000); `cos`/`sin`:
+/// `[tokens·head_dim/2]`.
+pub struct Inputs<'a, T> {
+    pub latent: &'a [T],
+    pub ctx: &'a [T],
+    pub t: f64,
+    pub cos: &'a [T],
+    pub sin: &'a [T],
+}
+
+/// Full forward over `inputs`, keeping what `saved` names for [`backward`]: every block's cache
+/// ([`SavedPolicy::Keep`]) or only every block's input, each block's cache rebuilt as the backward reaches it
+/// ([`SavedPolicy::Recompute`], `model::saved::BlockStack`). Returns the velocity prediction `[C_out·F·H·W]` plus the
+/// cache; a narrow saved format is refused.
+pub fn forward<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, inputs: &Inputs<'_, T>, saved: SavedPolicy) -> Result<(Vec<T>, ModelCache<T>), String> {
+    let Inputs { latent, ctx, t, cos, sin } = *inputs;
     let (dim, tl, td) = (cfg.dim, cfg.text_len, cfg.text_dim);
     let (gf, gh, gw) = cfg.grid();
     let n = cfg.n_tokens();
@@ -340,12 +369,13 @@ pub fn forward<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, latent: &[T], ctx: &[T], t
     let mut x = linear(&flat, n, cfg.patch_dim(), &w.patch_embed.w, &w.patch_embed.b, dim);
 
     let d = cfg.dims();
-    let mut caches = Vec::with_capacity(w.blocks.len());
+    let mut blocks = BlockStack::new("wan", saved)?;
     for bw in &w.blocks {
         let (o, c) = block_forward(d, bw, &x, &e0, &ctxe, cos, sin);
+        blocks.push(&x, c);
         x = o;
-        caches.push(c);
     }
+    let rebuild = saved.recomputes().then(|| Rebuild { e0, ctxe, cos: cos.to_vec(), sin: sin.to_vec() });
 
     // --- head: LayerNorm carrying `head.modulation + e`, then the projection ---
     let shift_h: Vec<T> = w.head_mod[..dim].iter().zip(&e).map(|(&a, &b)| a + b).collect();
@@ -357,9 +387,9 @@ pub fn forward<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, latent: &[T], ctx: &[T], t
 
     let cache = ModelCache {
         te, h0pre, h0, e, eact, ctx_in: ctx.to_vec(), th, thg, flat,
-        blocks: caches, xhat_h, inv_h, gamma_h, nh,
+        blocks, rebuild, xhat_h, inv_h, gamma_h, nh,
     };
-    (pred, cache)
+    Ok((pred, cache))
 }
 
 /// Flow-matching velocity-MSE loss + its `dpred`: `L = mean((pred − v)²)`.
@@ -402,8 +432,12 @@ pub fn backward<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, cache: &ModelCache<T>, dp
     let mut de0 = vec![T::ZERO; 6 * dim];
     let mut dctx = vec![T::ZERO; tl * dim];
     let mut blocks: Vec<BlockGrads<T>> = Vec::with_capacity(w.blocks.len());
-    for (bw, bc) in w.blocks.iter().zip(&cache.blocks).rev() {
-        let g = block_backward(d, bw, bc, &dx);
+    let rebuild = |i: usize, x: &Vec<T>| {
+        let r = cache.rebuild.as_ref().expect("a recomputing cache holds what its blocks rebuild from");
+        block_forward(d, &w.blocks[i], x, &r.e0, &r.ctxe, &r.cos, &r.sin).1
+    };
+    cache.blocks.rev_for_each(rebuild, |i, bc| {
+        let g = block_backward(d, &w.blocks[i], bc, &dx);
         dx = g.dx.clone();
         for (a, b) in de0.iter_mut().zip(&g.modulation) {
             *a += *b;
@@ -412,7 +446,7 @@ pub fn backward<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, cache: &ModelCache<T>, dp
             *a += *b;
         }
         blocks.push(g);
-    }
+    });
     blocks.reverse();
 
     // --- patch embedding (its input is data: weight grads only) ---
@@ -462,6 +496,13 @@ pub struct Batch<T> {
     pub target: Vec<T>,
 }
 
+impl<T> Batch<T> {
+    /// This batch as [`forward`]'s inputs.
+    pub fn inputs(&self) -> Inputs<'_, T> {
+        Inputs { latent: &self.latent, ctx: &self.ctx, t: self.t, cos: &self.cos, sin: &self.sin }
+    }
+}
+
 /// Timesteps the sigma grid is expressed on (`WanConfig::num_train_timesteps`).
 pub const TRAIN_TIMESTEPS: f64 = 1000.0;
 
@@ -494,9 +535,14 @@ pub fn make_flow_batch<T: Fp>(cfg: &Cfg, x0: &[T], ctx: &[T], rows: usize, sigma
 /// One training evaluation: forward + loss + backward. The f32 instantiation is
 /// the finetune trainer's step core.
 pub fn grads<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, b: &Batch<T>) -> (f64, ModelGrads<T>) {
-    let (pred, cache) = forward(cfg, w, &b.latent, &b.ctx, b.t, &b.cos, &b.sin);
+    grads_saved(cfg, w, b, SavedPolicy::Keep).expect("keeping every block is always available")
+}
+
+/// [`grads`] keeping what `saved` names of the forward for the backward (see [`forward`]).
+pub fn grads_saved<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, b: &Batch<T>, saved: SavedPolicy) -> Result<(f64, ModelGrads<T>), String> {
+    let (pred, cache) = forward(cfg, w, &b.inputs(), saved)?;
     let (l, dpred) = loss(&pred, &b.target);
-    (l, backward(cfg, w, &cache, &dpred))
+    Ok((l, backward(cfg, w, &cache, &dpred)))
 }
 
 // ---- weight construction ----

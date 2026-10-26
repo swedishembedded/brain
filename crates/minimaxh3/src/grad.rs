@@ -85,6 +85,7 @@ use std::ops::{Add, AddAssign, Div, Mul, Neg, Sub};
 use crate::config::{H3TransformerConfig, MODALITY_NUM, TAG_AUDIO, TAG_TEXT, TAG_VIDEO};
 use crate::model::adaln_indices;
 use crate::rope::build_tables;
+use model::saved::{BlockStack, SavedPolicy};
 
 const TIME_MAX_PERIOD: f64 = 10000.0;
 
@@ -765,7 +766,6 @@ struct BlockCache<T> {
 /// (`crate::rope::build_tables`, reused directly for the same reason).
 /// `temb_silu`: `[num_timesteps,time_embed_dim]`, this forward's shared
 /// timestep conditioning (every block reads the identical tensor).
-#[allow(clippy::too_many_arguments)]
 fn block_forward<T: Fp>(cfg: &Cfg, w: &BlockW<T>, x: &[T], adaln_idx: &[usize], cos: &[T], sin: &[T], temb_silu: &[T]) -> (Vec<T>, BlockCache<T>) {
     let (hidden, heads, head_dim, inner, ffn, half, num_ts) = (cfg.hidden(), cfg.heads(), cfg.head_dim(), cfg.inner(), cfg.ffn(), cfg.half(), cfg.num_timesteps);
     let seq_len = adaln_idx.len();
@@ -1050,6 +1050,13 @@ pub struct ModelGrads<T> {
     pub audio_proj_out: Lin<T>,
 }
 
+impl<T> ModelCache<T> {
+    /// Block caches this cache holds: one per block when keeping, none when recomputing.
+    pub fn held_block_caches(&self) -> usize {
+        self.block_caches.held_caches()
+    }
+}
+
 /// Saved forward state for the backward pass.
 pub struct ModelCache<T> {
     video_patches: Vec<T>,
@@ -1067,7 +1074,8 @@ pub struct ModelCache<T> {
     video_indices: Vec<usize>,
     audio_indices: Vec<usize>,
     text_indices: Vec<usize>,
-    block_caches: Vec<BlockCache<T>>,
+    /// The blocks' input `h` rows; the RoPE tables, adaLN indices and `temb_silu` they also read are held above.
+    block_caches: BlockStack<Vec<T>, BlockCache<T>>,
     h_final: Vec<T>,
     xhat_out: Vec<T>,
     inv_out: Vec<T>,
@@ -1098,9 +1106,15 @@ pub struct Batch<T> {
     pub audio_target: Vec<T>,
 }
 
+/// What [`forward`] returns: the video and audio predictions plus the cache.
+pub type Forward<T> = Result<(Vec<T>, Vec<T>, ModelCache<T>), String>;
+
 /// Full forward: input projections + token refiner, pack into one sequence,
-/// the `num_layers` block stack, `norm_out`, the two output heads.
-pub fn forward<T: Fp>(cfg: &Cfg, w: &ModelW<T>, b: &Batch<T>) -> (Vec<T>, Vec<T>, ModelCache<T>) {
+/// the `num_layers` block stack, `norm_out`, the two output heads. The block stack keeps what `saved` names for
+/// [`backward`]: every block's cache ([`SavedPolicy::Keep`]) or only every block's input, each block's cache rebuilt as
+/// the backward reaches it from the RoPE tables, adaLN indices and `temb_silu` the cache holds either way
+/// ([`SavedPolicy::Recompute`], `model::saved::BlockStack`). A narrow saved format is refused.
+pub fn forward<T: Fp>(cfg: &Cfg, w: &ModelW<T>, b: &Batch<T>, saved: SavedPolicy) -> Forward<T> {
     let seq_len = cfg.seq_len();
     let hidden = cfg.hidden();
 
@@ -1139,11 +1153,11 @@ pub fn forward<T: Fp>(cfg: &Cfg, w: &ModelW<T>, b: &Batch<T>) -> (Vec<T>, Vec<T>
     let timestep_indices: Vec<usize> = b.timestep_indices.iter().map(|&i| i as usize).collect();
 
     let mut h = h0;
-    let mut block_caches = Vec::with_capacity(w.blocks.len());
+    let mut block_caches = BlockStack::new("minimaxh3", saved)?;
     for bw in &w.blocks {
         let (out, bc) = block_forward(cfg, bw, &h, &adaln_idx, &cos, &sin, &temb_silu);
+        block_caches.push(&h, bc);
         h = out;
-        block_caches.push(bc);
     }
     let h_final = h;
 
@@ -1185,7 +1199,7 @@ pub fn forward<T: Fp>(cfg: &Cfg, w: &ModelW<T>, b: &Batch<T>) -> (Vec<T>, Vec<T>
         scale_g,
         modulated,
     };
-    (video_pred, audio_pred, cache)
+    Ok((video_pred, audio_pred, cache))
 }
 
 /// Full backward from `(dvideo_pred, daudio_pred)`.
@@ -1225,14 +1239,15 @@ pub fn backward<T: Fp>(cfg: &Cfg, w: &ModelW<T>, cache: &ModelCache<T>, dvideo_p
 
     let mut dh = dh_final;
     let mut block_grads = Vec::with_capacity(w.blocks.len());
-    for (bw, bc) in w.blocks.iter().zip(&cache.block_caches).rev() {
-        let (dx, g, d_ts) = block_backward(cfg, bw, bc, &cache.cos, &cache.sin, &cache.adaln_idx, &cache.temb_silu, &dh);
+    let rebuild = |i: usize, x: &Vec<T>| block_forward(cfg, &w.blocks[i], x, &cache.adaln_idx, &cache.cos, &cache.sin, &cache.temb_silu).1;
+    cache.block_caches.rev_for_each(rebuild, |i, bc| {
+        let (dx, g, d_ts) = block_backward(cfg, &w.blocks[i], bc, &cache.cos, &cache.sin, &cache.adaln_idx, &cache.temb_silu, &dh);
         dh = dx;
         for i in 0..d_temb_silu.len() {
             d_temb_silu[i] += d_ts[i];
         }
         block_grads.push(g);
-    }
+    });
     block_grads.reverse();
 
     let dvideo_embeds = gather_rows(&dh, &cache.video_indices, hidden);
@@ -1299,9 +1314,14 @@ pub fn loss<T: Fp>(video_pred: &[T], video_target: &[T], audio_pred: &[T], audio
 
 /// One training evaluation: forward + loss + backward.
 pub fn grads<T: Fp>(cfg: &Cfg, w: &ModelW<T>, b: &Batch<T>) -> (f64, ModelGrads<T>) {
-    let (video_pred, audio_pred, cache) = forward(cfg, w, b);
+    grads_saved(cfg, w, b, SavedPolicy::Keep).expect("keeping every block is always available")
+}
+
+/// [`grads`] keeping what `saved` names of the forward for the backward (see [`forward`]).
+pub fn grads_saved<T: Fp>(cfg: &Cfg, w: &ModelW<T>, b: &Batch<T>, saved: SavedPolicy) -> Result<(f64, ModelGrads<T>), String> {
+    let (video_pred, audio_pred, cache) = forward(cfg, w, b, saved)?;
     let (l, dv, da) = loss(&video_pred, &b.video_target, &audio_pred, &b.audio_target);
-    (l, backward(cfg, w, &cache, &dv, &da))
+    Ok((l, backward(cfg, w, &cache, &dv, &da)))
 }
 
 /// Build one training example under this module's own FIXED synthetic

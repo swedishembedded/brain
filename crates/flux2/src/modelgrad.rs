@@ -27,6 +27,7 @@ use crate::grad::{
     single_forward, dsilu, silu, Dims, DoubleCache, DoubleGrads, DoubleMods, DoubleW, Fp, Mod,
     ModGrad, SingleCache, SingleGrads, SingleW, StreamW,
 };
+use model::saved::{BlockStack, SavedPolicy};
 
 /// Minimal config for the training reference - the [`Flux2Config`] fields the
 /// host path needs plus the training latent grid (`lh×lw` tokens) and the
@@ -221,22 +222,48 @@ pub struct ModelCache<T> {
     fin: Mod<T>, // gate empty
     img_tokens: Vec<T>,
     ctx: Vec<T>,
-    dbl_c: Vec<DoubleCache<T>>,
-    sgl_c: Vec<SingleCache<T>>,
+    dbl_c: BlockStack<Vec<T>, DoubleCache<T>>,
+    sgl_c: BlockStack<Vec<T>, SingleCache<T>>,
+    /// The RoPE tables a recomputing backward rebuilds a block's cache from (with the block's input and the
+    /// modulation sites above); `None` when keeping.
+    rope: Option<Rope<T>>,
     xhat_f: Vec<T>, // final-LN xhat over the image rows
     inv_f: Vec<T>,
     n_f: Vec<T>, // modulated final-LN output (the head's input)
 }
 
-/// Full forward. `img_tokens:[n_img·in_channels]` (the target's packed latent
-/// tokens followed by every reference's - [`crate::refcond::JointLayout`]'s
-/// order), `ctx:[txt_len·context_in_dim]`, `cos/sin:[n·head_dim/2]` (joint
-/// tables, text rows first). Returns the velocity prediction for the
-/// GENERATED image tokens only `[n_gen·in_channels]` plus the cache: the
-/// reference rows condition the sequence through attention, and the head does
-/// not predict for them - exactly what `Flux2Model::forward_batch`'s `n_pred`
-/// does at inference.
-pub fn forward<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, img_tokens: &[T], ctx: &[T], t: f64, cos: &[T], sin: &[T]) -> (Vec<T>, ModelCache<T>) {
+/// The joint RoPE tables, held by a recomputing cache.
+struct Rope<T> {
+    cos: Vec<T>,
+    sin: Vec<T>,
+}
+
+impl<T> ModelCache<T> {
+    /// Block caches this cache holds: one per block when keeping, none when recomputing.
+    pub fn held_block_caches(&self) -> usize {
+        self.dbl_c.held_caches() + self.sgl_c.held_caches()
+    }
+}
+
+/// The model inputs [`forward`] reads. `img_tokens:[n_img·in_channels]` (the target's packed latent tokens followed
+/// by every reference's - [`crate::refcond::JointLayout`]'s order), `ctx:[txt_len·context_in_dim]`, `t`: the model
+/// time input, `cos/sin:[n·head_dim/2]` (joint tables, text rows first).
+pub struct Inputs<'a, T> {
+    pub img_tokens: &'a [T],
+    pub ctx: &'a [T],
+    pub t: f64,
+    pub cos: &'a [T],
+    pub sin: &'a [T],
+}
+
+/// Full forward over `inputs`, keeping what `saved` names for [`backward`]: every block's cache
+/// ([`SavedPolicy::Keep`]) or only every block's input, each block's cache rebuilt as the backward reaches it
+/// ([`SavedPolicy::Recompute`], `model::saved::BlockStack`). Returns the velocity prediction for the GENERATED image
+/// tokens only `[n_gen·in_channels]` plus the cache: the reference rows condition the sequence through attention, and
+/// the head does not predict for them - exactly what `Flux2Model::forward_batch`'s `n_pred` does at inference. A
+/// narrow saved format is refused.
+pub fn forward<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, inputs: &Inputs<'_, T>, saved: SavedPolicy) -> Result<(Vec<T>, ModelCache<T>), String> {
+    let Inputs { img_tokens, ctx, t, cos, sin } = *inputs;
     let (d, cin) = (cfg.hidden, cfg.in_channels);
     let (nt, ni, n) = (cfg.txt_len, cfg.n_img(), cfg.n());
     let ng = cfg.n_gen();
@@ -269,18 +296,19 @@ pub fn forward<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, img_tokens: &[T], ctx: &[T
     x.extend(linear(img_tokens, ni, cin, &w.img_in, d));
 
     let dims = cfg.dims();
-    let mut dbl_c = Vec::with_capacity(w.dbl.len());
+    let mut dbl_c = BlockStack::new("flux2", saved)?;
     for bw in &w.dbl {
         let (o, c) = double_forward(dims, bw, &x, &dmods, cos, sin);
+        dbl_c.push(&x, c);
         x = o;
-        dbl_c.push(c);
     }
-    let mut sgl_c = Vec::with_capacity(w.sgl.len());
+    let mut sgl_c = BlockStack::new("flux2", saved)?;
     for bw in &w.sgl {
         let (o, c) = single_forward(dims, bw, &x, &smod, cos, sin);
+        sgl_c.push(&x, c);
         x = o;
-        sgl_c.push(c);
     }
+    let rope = saved.recomputes().then(|| Rope { cos: cos.to_vec(), sin: sin.to_vec() });
 
     // final layer on the GENERATED image rows: modulated LN → linear to
     // in_channels. The reference rows sit past them in the same slab and are
@@ -297,9 +325,9 @@ pub fn forward<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, img_tokens: &[T], ctx: &[T
     let cache = ModelCache {
         te, hpre, h, vec_, sv, dmods, smod, fin,
         img_tokens: img_tokens.to_vec(), ctx: ctx.to_vec(),
-        dbl_c, sgl_c, xhat_f, inv_f, n_f,
+        dbl_c, sgl_c, rope, xhat_f, inv_f, n_f,
     };
-    (pred, cache)
+    Ok((pred, cache))
 }
 
 /// Velocity-MSE rectified-flow loss + its `dpred`: `L = mean((pred − v)²)`.
@@ -434,25 +462,33 @@ pub fn backward_into<T: Fp>(
 
     // ---- single blocks (reverse), site grads accumulated across the stack ----
     let mut sgl_site = ModGrad::<T>::zeros(d);
-    for (i, (bw, ca)) in w.sgl.iter().zip(&cache.sgl_c).enumerate().rev() {
-        let g = single_backward(dims, bw, &cache.smod, ca, &dx);
+    let rebuild_single = |i: usize, x: &Vec<T>| {
+        let r = cache.rope.as_ref().expect("a recomputing cache holds what its blocks rebuild from");
+        single_forward(dims, &w.sgl[i], x, &cache.smod, &r.cos, &r.sin).1
+    };
+    cache.sgl_c.rev_for_each(rebuild_single, |i, ca| {
+        let g = single_backward(dims, &w.sgl[i], &cache.smod, ca, &dx);
         dx = g.dx.clone();
         sgl_site.add(&g.m);
         sink.single(i, g);
-    }
+    });
 
     // ---- double blocks (reverse) ----
     let (mut s_img1, mut s_img2) = (ModGrad::<T>::zeros(d), ModGrad::<T>::zeros(d));
     let (mut s_txt1, mut s_txt2) = (ModGrad::<T>::zeros(d), ModGrad::<T>::zeros(d));
-    for (i, (bw, ca)) in w.dbl.iter().zip(&cache.dbl_c).enumerate().rev() {
-        let g = double_backward(dims, bw, &cache.dmods, ca, &dx);
+    let rebuild_double = |i: usize, x: &Vec<T>| {
+        let r = cache.rope.as_ref().expect("a recomputing cache holds what its blocks rebuild from");
+        double_forward(dims, &w.dbl[i], x, &cache.dmods, &r.cos, &r.sin).1
+    };
+    cache.dbl_c.rev_for_each(rebuild_double, |i, ca| {
+        let g = double_backward(dims, &w.dbl[i], &cache.dmods, ca, &dx);
         dx = g.dx.clone();
         s_img1.add(&g.img1);
         s_img2.add(&g.img2);
         s_txt1.add(&g.txt1);
         s_txt2.add(&g.txt2);
         sink.double(i, g);
-    }
+    });
 
     // ---- embedders (inputs are data → weight grads only) ----
     let (_dc, g_txt_in) = linear_bwd(&cache.ctx, nt, cfg.context_in_dim, &w.txt_in, d, &dx[..nt * d]);
@@ -577,12 +613,24 @@ pub fn make_flow_batch_paired<T: Fp>(cfg: &Cfg, x0: &[T], refs: &[T], ctx: &[T],
     Batch { img, ctx: ctx.to_vec(), t: sigma, cos: cast(&tables.cos), sin: cast(&tables.sin), target, w: Vec::new() }
 }
 
+impl<T> Batch<T> {
+    /// This batch as [`forward`]'s inputs.
+    pub fn inputs(&self) -> Inputs<'_, T> {
+        Inputs { img_tokens: &self.img, ctx: &self.ctx, t: self.t, cos: &self.cos, sin: &self.sin }
+    }
+}
+
 /// One training evaluation: forward + loss + backward. The f32 instantiation
 /// is the finetune trainer's step core.
 pub fn grads<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, b: &Batch<T>) -> (f64, ModelGrads<T>) {
-    let (pred, cache) = forward(cfg, w, &b.img, &b.ctx, b.t, &b.cos, &b.sin);
+    grads_saved(cfg, w, b, SavedPolicy::Keep).expect("keeping every block is always available")
+}
+
+/// [`grads`] keeping what `saved` names of the forward for the backward (see [`forward`]).
+pub fn grads_saved<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, b: &Batch<T>, saved: SavedPolicy) -> Result<(f64, ModelGrads<T>), String> {
+    let (pred, cache) = forward(cfg, w, &b.inputs(), saved)?;
     let (l, dpred) = loss_weighted(&pred, &b.target, &b.w);
-    (l, backward(cfg, w, &cache, &dpred))
+    Ok((l, backward(cfg, w, &cache, &dpred)))
 }
 
 /// [`grads`] with the per-block gradients streamed to `sink`
@@ -592,15 +640,21 @@ pub fn grads<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, b: &Batch<T>) -> (f64, Model
 /// This is what the host trainer runs: a LoRA step reduces each block's dense
 /// `dW` to its rank-`r` projection and has no use for the block after that, so
 /// holding the whole set costs a second fp32 copy of the model for nothing.
-pub fn grads_into<T: Fp>(
+pub fn grads_into<T: Fp>(cfg: &Cfg, w: &ModelWeights<T>, b: &Batch<T>, sink: &mut dyn GradSink<T>) -> (f64, ModelGrads<T>) {
+    grads_into_saved(cfg, w, b, sink, SavedPolicy::Keep).expect("keeping every block is always available")
+}
+
+/// [`grads_into`] keeping what `saved` names of the forward for the backward (see [`forward`]).
+pub fn grads_into_saved<T: Fp>(
     cfg: &Cfg,
     w: &ModelWeights<T>,
     b: &Batch<T>,
     sink: &mut dyn GradSink<T>,
-) -> (f64, ModelGrads<T>) {
-    let (pred, cache) = forward(cfg, w, &b.img, &b.ctx, b.t, &b.cos, &b.sin);
+    saved: SavedPolicy,
+) -> Result<(f64, ModelGrads<T>), String> {
+    let (pred, cache) = forward(cfg, w, &b.inputs(), saved)?;
     let (l, dpred) = loss_weighted(&pred, &b.target, &b.w);
-    (l, backward_into(cfg, w, &cache, &dpred, sink))
+    Ok((l, backward_into(cfg, w, &cache, &dpred, sink)))
 }
 
 // ---- weight construction ----

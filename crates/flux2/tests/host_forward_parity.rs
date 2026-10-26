@@ -63,7 +63,7 @@ fn host_f32_forward_matches_device_forward() {
     // `from_tensors` consumes the map; the device build below needs the fused
     // layout, so the host extraction gets a copy (tiny config).
     let w = ModelWeights::from_tensors(&cfg, &mut ts.clone()).unwrap();
-    let (host, _) = forward(&cfg, &w, &b.img, &b.ctx, b.t, &b.cos, &b.sin);
+    let (host, _) = forward(&cfg, &w, &b.inputs(), model::saved::SavedPolicy::Keep).unwrap();
 
     // device path on the same tensors/inputs
     let gpu = gpu_core::testgpu::dev(flux2::KERNELS);

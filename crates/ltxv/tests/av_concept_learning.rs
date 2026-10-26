@@ -34,7 +34,7 @@
 use data::gen_clips::{generate_concept_set, generate_distractor_set, CONCEPT_CAPTIONS, DISTRACTOR_CAPTIONS};
 use data::rng::Rng;
 use ltxv::av_finetune::{caption_context, encode_to_latent, random_projection, run, SyntheticAvClip, TrainOpts};
-use ltxv::av_modelgrad::{forward, init_model, AvCfg, AvModelWeights};
+use ltxv::av_modelgrad::{forward, init_model, AvCfg, AvInputs, AvModelWeights};
 
 /// Small, fast: no long runs before this phase's own optimisation work
 /// lands (Phase 8). 24x24 keeps `encode_to_latent`'s projection cheap while
@@ -96,10 +96,26 @@ fn denoise_from_noise(cfg: &AvCfg, w: &AvModelWeights<f32>, v_noise: &[f32], a_n
     let v_positions = cfg.simple_positions_v();
     let a_positions = cfg.simple_positions_a();
     let (v_rope, a_rope, v_cross, a_cross) = cfg.rope_tables_f32(&v_positions, &a_positions);
-    let (v_out, a_out, _) = forward(
-        cfg, w, v_noise, &v_timesteps, &v_keyframes_mask, v_ctx, a_noise, &a_timesteps, a_ctx, 1.0, 1.0, &v_rope.cos, &v_rope.sin, &a_rope.cos, &a_rope.sin, &v_cross.cos, &v_cross.sin,
-        &a_cross.cos, &a_cross.sin,
-    );
+    let inputs = AvInputs {
+        v_latent: v_noise,
+        v_timesteps: &v_timesteps,
+        v_keyframes_mask: &v_keyframes_mask,
+        v_context: v_ctx,
+        a_latent: a_noise,
+        a_timesteps: &a_timesteps,
+        a_context: a_ctx,
+        v_sigma: 1.0,
+        a_sigma: 1.0,
+        v_cos: &v_rope.cos,
+        v_sin: &v_rope.sin,
+        a_cos: &a_rope.cos,
+        a_sin: &a_rope.sin,
+        v_cross_cos: &v_cross.cos,
+        v_cross_sin: &v_cross.sin,
+        a_cross_cos: &a_cross.cos,
+        a_cross_sin: &a_cross.sin,
+    };
+    let (v_out, a_out, _) = forward(cfg, w, &inputs, model::saved::SavedPolicy::Keep).unwrap();
     let x0_v: Vec<f32> = v_noise.iter().zip(&v_out).map(|(&n, &o)| n - o).collect();
     let x0_a: Vec<f32> = a_noise.iter().zip(&a_out).map(|(&n, &o)| n - o).collect();
     (x0_v, x0_a)
@@ -160,7 +176,7 @@ fn an_av_lora_trained_only_on_concept_clips_moves_generated_output_toward_the_co
     let base = init_model::<f32>(&cfg, 0xBA5E_0000);
     let dir = std::env::temp_dir().join(format!("ltxv-av-concept-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("tmp dir");
-    let opts = TrainOpts { steps: 80, rank: 4, lr: 4e-3, seed: data::rng::random_seed(), save_path: dir.join("adapter.brain").to_str().expect("utf-8 path").into(), ckpt_every: 0 };
+    let opts = TrainOpts { steps: 80, rank: 4, lr: 4e-3, seed: data::rng::random_seed(), save_path: dir.join("adapter.brain").to_str().expect("utf-8 path").into(), ckpt_every: 0, saved: model::saved::SavedPolicy::Keep };
     let cancel = capability::CancelToken::default();
     let mut last_loss = 0.0;
     let tensors = run(&cfg, &base, &train_clips, &opts, &cancel, |step, total, msg| {

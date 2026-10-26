@@ -37,6 +37,7 @@ use crate::devgrad::BlockDev;
 use crate::grad::{affine, affine_bwd, dgelu, dsilu, gelu, layernorm, layernorm_bwd, linear, linear_bwd, silu, BlockGrads, Lin};
 use crate::lora::{LoraAdapter, LoraGrads};
 use crate::modelgrad::{loss, patchify, timestep_embedding, unpatchify, unpatchify_bwd, Batch, Cfg, ModelGrads, ModelWeights};
+use model::saved::SavedPolicy;
 
 /// Everything the host computes BEFORE the block stack: the timestep path, the
 /// text-embedding MLP and the patch embedding. Both device step paths share it
@@ -354,7 +355,8 @@ fn lora_budget(eng: &BlockDev) -> u64 {
 /// picks one and needs no other branch.
 pub enum Trainer {
     Device(Box<DeviceTrainer>),
-    Host(Cfg),
+    /// The host f32 reference, keeping what its [`SavedPolicy`] names of each step's forward.
+    Host(Cfg, SavedPolicy),
 }
 
 impl Trainer {
@@ -364,14 +366,25 @@ impl Trainer {
     /// accelerator - so a machine without one keeps the host path.
     pub fn open(cfg: &Cfg, device: Option<&str>) -> Trainer {
         if device == Some("cpu") {
-            return Trainer::Host(*cfg);
+            return Trainer::Host(*cfg, SavedPolicy::Keep);
         }
         let t = DeviceTrainer::on_device(cfg, device);
         if t.is_accelerated() {
             Trainer::Device(Box::new(t))
         } else {
-            Trainer::Host(*cfg)
+            Trainer::Host(*cfg, SavedPolicy::Keep)
         }
+    }
+
+    /// Have a host trainer keep what `saved` names of each step's forward (`model::saved::BlockStack`); a policy the
+    /// block stack cannot hold is refused. The device trainer already keeps only each block's input and rebuilds the
+    /// rest in its backward, so it takes any accepted policy unchanged.
+    pub fn with_saved(self, saved: SavedPolicy) -> Result<Trainer, String> {
+        model::saved::BlockStack::<(), ()>::new("wan", saved)?;
+        Ok(match self {
+            Trainer::Host(cfg, _) => Trainer::Host(cfg, saved),
+            device => device,
+        })
     }
 
     pub fn is_device(&self) -> bool {
@@ -382,14 +395,14 @@ impl Trainer {
     pub fn label(&self) -> String {
         match self {
             Trainer::Device(t) => format!("device ({:?})", t.engine().gpu().caps().class),
-            Trainer::Host(_) => "host f32 (CPU)".to_string(),
+            Trainer::Host(..) => "host f32 (CPU)".to_string(),
         }
     }
 
     pub fn grads(&self, w: &ModelWeights<f32>, b: &Batch<f32>) -> (f64, ModelGrads<f32>) {
         match self {
             Trainer::Device(t) => t.grads(w, b),
-            Trainer::Host(cfg) => crate::modelgrad::grads(cfg, w, b),
+            Trainer::Host(cfg, saved) => crate::modelgrad::grads_saved(cfg, w, b, *saved).expect("with_saved accepted the policy"),
         }
     }
 
@@ -399,7 +412,7 @@ impl Trainer {
     pub fn begin_lora(&mut self, base: &ModelWeights<f32>, rank: usize) -> bool {
         match self {
             Trainer::Device(t) => t.begin_lora(base, rank),
-            Trainer::Host(_) => false,
+            Trainer::Host(..) => false,
         }
     }
 

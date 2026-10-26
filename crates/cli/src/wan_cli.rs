@@ -135,6 +135,12 @@ Training:
                            resolves to a real accelerator, `cpu` forces the
                            host f32 trainer)
   --te-device <cpu|gpu>    umT5 text encoder device, else $BRAIN_WAN_T5_DEVICE
+  --activations <keep|recompute>
+                           what the host trainer's backward keeps of its forward:
+                           every block's activations (default), or only each
+                           block's input, recomputed in the backward for the
+                           same gradients at lower memory (the GPU trainer
+                           always recomputes)
   --report <dir>           write a human-readable run report (base vs. adapted
                            clips, contact sheets, loss curve, G2 scores) to
                            this directory after training"#;
@@ -325,6 +331,7 @@ fn finetune(args: &[String]) -> Result<(), String> {
         ckpt_every: 50,
         device: None,
         te_device: None,
+        saved: model::saved::SavedPolicy::Keep,
     };
     let mut i = 0;
     while i < args.len() {
@@ -342,6 +349,7 @@ fn finetune(args: &[String]) -> Result<(), String> {
             "--variant" => variant.clone_from(need(i)?),
             "--device" => opts.device = Some(need(i)?.clone()),
             "--te-device" => opts.te_device = Some(need(i)?.clone()),
+            "--activations" => opts.saved = crate::args::parse_activations(need(i)?)?,
             "--help" | "-h" => {
                 println!("{HELP}");
                 std::process::exit(0);
@@ -403,7 +411,7 @@ mod tests {
             "--prompt", "--output-path", "--negative-prompt", "--frames", "--width", "--height",
             "--steps", "--fps", "--shift", "--guidance", "--seed", "--solver", "--device",
             "--t5-device", "--dit", "--vae", "--t5", "--tokenizer", "--variant", "--adapter",
-            "--dit-dtype", "--data", "--save", "--rank", "--samples", "--lr", "--ckpt-every", "--te-device", "--report",
+            "--dit-dtype", "--data", "--save", "--rank", "--samples", "--lr", "--ckpt-every", "--te-device", "--activations", "--report",
         ] {
             assert!(super::HELP.contains(flag), "{flag} is parsed but not in --help");
             assert!(src.contains(&format!("\"{flag}\"")), "{flag} is in --help but not parsed");
