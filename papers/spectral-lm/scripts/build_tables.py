@@ -183,18 +183,18 @@ def comparison(groups):
 
 
 def qwen(data, groups):
-    recs = records(data, "qwen")
+    recs = records(data, "qwen") + records(data, "qwen-ft")
     if not recs:
         return not_measured("Qwen3-0.6B comparison")
     rows = []
     for r in recs:
         res = r["result"]
-        rows.append(["Qwen3-0.6B, zero-shot" if "zero-shot" in r["id"] else tex(r["id"]), f"{res['bits_per_byte']:.4f}",
-                     num(res["documents"]), num(res["tokens"])])
-    for f in ("S-256-512-24", "Q-256-1024"):
+        name = "Qwen3-0.6B, zero-shot" if "zero-shot" in r["id"] else f"Qwen3-0.6B, continued on {num(r['train']['tokens'])} story tokens"
+        rows.append([name, f"{res['bits_per_byte']:.4f}", num(res["documents"]), num(res["tokens"])])
+    for f in ("S-256-512-24", "Q-256-24", "Q-256-1024", "Q-512-2048"):
         if f in groups:
             rs = groups[f]
-            rows.append([LABELS[f] + ", mean of seeds", f"{mean([x['eval']['bits_per_byte'] for x in rs]):.4f}",
+            rows.append([LABELS[f] + (f", mean of {len(rs)} seeds" if len(rs) > 1 else ", one seed"), f"{mean([x['eval']['bits_per_byte'] for x in rs]):.4f}",
                          num(rs[0]["eval"]["documents"]), num(rs[0]["eval"]["tokens"])])
     return table("Qwen3-0.6B and the trained models on the same validation documents. Bits per byte do not depend on the "
                  "tokenizer; the token columns show how differently the two vocabularies cut the same text.", "tab:qwen",
@@ -314,6 +314,15 @@ def macros(data, groups):
         m(f"Params{name}", num(groups[f][0]["train"]["params_nonembed"]) if f in groups else "--")
     q = records(data, "qwen")
     m("BpbQwen", f"{q[0]['result']['bits_per_byte']:.3f}" if q else "--")
+    qf = records(data, "qwen-ft")
+    m("BpbQwenFt", f"{qf[0]['result']['bits_per_byte']:.3f}" if qf else "--")
+    m("QwenFtTokens", num(qf[0]["train"]["tokens"]) if qf else "--")
+    m("QwenFtLossFrom", f"{qf[0]['train']['initial_loss']:.2f}" if qf else "--")
+    m("QwenFtLossTo", f"{qf[0]['train']['final_loss']:.2f}" if qf else "--")
+    m("QwenZsBytesPerToken", f"{q[0]['result']['bytes'] / q[0]['result']['tokens']:.2f}" if q else "--")
+    w = groups.get("Q-512-2048")
+    m("BpbQwide", f"{w[0]['eval']['bits_per_byte']:.3f}" if w else "--")
+    m("ParamsQwide", num(w[0]["train"]["params_nonembed"]) if w else "--")
     train_tokens, val_docs = corpus(data)
     m("TrainTokens", train_tokens or "--")
     m("ValDocs", val_docs or "--")

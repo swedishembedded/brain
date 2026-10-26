@@ -62,6 +62,21 @@ transforms that produce them.
 
 \input{table-qwen}
 
+Zero-shot, Qwen3-0.6B scores \BpbQwen{} bits per byte on the validation
+documents, worse than every model trained on the corpus, the
+parameter-matched control included. After continued training on
+\QwenFtTokens{} tokens of training stories, an eighth of the trained models'
+budget, during which its training loss fell from \QwenFtLossFrom{} to
+\QwenFtLossTo{} nats per token, it scores \BpbQwenFt{}, better than every
+trained model by a wide margin. We read the zero-shot result as a domain gap:
+TinyStories is a narrow synthetic distribution that a small model fitted to it
+predicts better than a general-purpose model that has never been adapted to
+it, and a few million tokens of adaptation are enough for the larger model's
+capacity to dominate. The comparison places the trained models rather than
+competing with the pretrained one: SpectralLM has a few million parameters,
+two orders of magnitude fewer than Qwen3-0.6B, and has seen 33.6M tokens of one
+corpus.
+
 \subsection{Spectral structure of Qwen3-0.6B hidden states}
 \label{sec:res-compress}
 
