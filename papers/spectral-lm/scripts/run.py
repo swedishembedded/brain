@@ -18,6 +18,9 @@ Plans (the protocol section of the paper registers them):
   lr        300-step learning-rate selection runs, one seed per family and rate
   primary   the three primary configurations, three random seeds each
   pilot     the wide control and the channel pilots, one random seed each
+  extension post hoc, after the registered analysis: three more seeds of
+            SpectralLM and of its parameter-matched control, and SpectralLM
+            at the 3e-3 rate its selection run ranked last
   qwen      Qwen3-0.6B: zero-shot bits per byte
   qwen-ft   Qwen3-0.6B continued on the training stories for QWEN_FT_STEPS
             steps of the shared schedule, then scored
@@ -124,6 +127,13 @@ def jobs_for(plan, work, score_only=False):
             for _ in range(seeds):
                 seed = str(secrets.randbits(63))
                 jobs.append({"id": f"{fam}-{seed}", "family": fam, "lr": chosen_lr(fam), "steps": STEPS, "seed": seed, "eval": True})
+    elif plan == "extension":
+        for fam in ("S-256-512-24", "Q-256-24"):
+            for _ in range(3):
+                seed = str(secrets.randbits(63))
+                jobs.append({"id": f"{fam}-{seed}", "family": fam, "lr": chosen_lr(fam), "steps": STEPS, "seed": seed, "eval": True})
+        seed = str(secrets.randbits(63))
+        jobs.append({"id": f"S-256-512-24-lr3e-3-{seed}", "family": "S-256-512-24", "lr": "3e-3", "steps": STEPS, "seed": seed, "eval": True})
     elif plan == "qwen":
         jobs.append({"id": "qwen3-0.6b-zero-shot", "command": ["qwen-eval", "--weights", str(QWEN), "--text", str(CORPUS / "valid.txt"), "--max-doc-bytes", MAX_DOC_BYTES, "--batch", "8"]})
     elif plan == "qwen-ft":
