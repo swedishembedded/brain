@@ -784,3 +784,9 @@ attention kernels over `views` sequences), one read-back, against `resample_view
 equals `resample_view` per view at batch 1, 2, 4, 8 and 16 and for both query banks (`tests/encode_views.rs`).
 Same synthetic dense page as the v1 ledger: global view word error rate 1.000 (the 1024 view cannot resolve 15 px text,
 427 words of hallucination), dynamic crops 0.174.
+
+### Encoder timings (2026-10-26, GH200 idle, encode_bench, mean of 5 after warm-up)
+
+- SAM 1024 global 256 ms; SAM 768 tile 52 ms; resampler global x1 116 ms; tile x1 89 ms, x6 177 ms, x16 390 ms (batched, sub-linear).
+- v1 for comparison (deepseek2ocr encode_bench): global 1024 136 ms, tile 640 78 ms.
+- Open: bf16 tensor-core linears in the encoders; SAM/CLIP batching beyond the v2 resampler.
