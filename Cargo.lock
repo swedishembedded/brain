@@ -1772,6 +1772,7 @@ name = "brain-llmserve"
 version = "3.0.0"
 dependencies = [
  "brain-capability",
+ "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",
  "brain-model",

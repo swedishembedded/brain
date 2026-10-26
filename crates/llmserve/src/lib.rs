@@ -28,6 +28,9 @@ pub use qwen3::chat::ParsedRequest;
 use qwen3::chat::SeqState;
 use residency::{AdapterIdentity, Instance, JobFeed};
 
+/// Where a request being built in the background delivers its result.
+pub type Encoding = std::sync::mpsc::Receiver<Result<(ParsedRequest, Option<PromptEmbeds>), String>>;
+
 /// How one model family turns a request into a prompt and names its failures.
 pub trait Frontend {
     /// The tokenizer prompts are built with and generated ids decode through.
@@ -51,6 +54,14 @@ pub trait Frontend {
     /// still refuses one that can never run, with the same message.
     fn encodes_inputs(&self) -> bool {
         false
+    }
+    /// Start building `inv`'s request on a background worker and hand back where its result will
+    /// arrive, so the scheduler keeps decoding other requests meanwhile; `None` builds it inline
+    /// ([`Self::parse_embedded`]). A family whose encoder runs on its own device or stream
+    /// answers with the encoder's queue: the request is admitted to the scheduler the moment its
+    /// rows exist, and an encode overlaps decode instead of stalling it.
+    fn parse_in_background(&self, _inv: &Invocation) -> Option<Encoding> {
+        None
     }
     /// The adapter `inv` runs under; `None` is the base model.
     fn route(&self, _inv: &Invocation) -> Result<Option<(model::serve::AdapterId, AdapterIdentity)>, String> {
@@ -94,6 +105,9 @@ impl<F: Frontend + ?Sized> Frontend for std::sync::Arc<F> {
     fn parse_embedded(&self, inv: &Invocation) -> Result<(ParsedRequest, Option<PromptEmbeds>), String> {
         (**self).parse_embedded(inv)
     }
+    fn parse_in_background(&self, inv: &Invocation) -> Option<Encoding> {
+        (**self).parse_in_background(inv)
+    }
     fn encodes_inputs(&self) -> bool {
         (**self).encodes_inputs()
     }
@@ -125,6 +139,13 @@ struct Job {
     capture: Capture,
     /// The base checkpoint's digest when the request was admitted, if known.
     base_digest: Option<String>,
+}
+
+impl Job {
+    /// A job slot that holds nothing: numbering filler, and the stand-in while a job's request is being submitted.
+    fn placeholder() -> Job {
+        Job { invocation: Invocation::new(), seq: None, id: None, identity: None, capture: Capture::default(), base_digest: None }
+    }
 }
 
 /// The token-level facts a request asks to have returned (`logprobs`,
@@ -170,6 +191,8 @@ struct Group<'a, D: PagedDecoder> {
     jobs: Vec<Job>,
     /// Indices of jobs still running in the scheduler.
     open: std::collections::HashSet<usize>,
+    /// Jobs whose request is still being built in the background, in arrival order.
+    encoding: Vec<(usize, Encoding)>,
 }
 
 /// How [`run_open_scheduled`] ended.
@@ -186,11 +209,11 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
     /// Resume numbering after `n` jobs of an earlier call of the same open
     /// group, all of which are finished: placeholders keep indices aligned.
     fn skip_numbered(&mut self, n: usize) {
-        self.jobs.extend((0..n).map(|_| Job { invocation: Invocation::new(), seq: None, id: None, identity: None, capture: Capture::default(), base_digest: None }));
+        self.jobs.extend((0..n).map(|_| Job::placeholder()));
     }
 
     fn new(sched: &'a mut Scheduler<D>, front: &'a dyn Frontend) -> Self {
-        Group { sched, front, jobs: Vec::new(), open: std::collections::HashSet::new() }
+        Group { sched, front, jobs: Vec::new(), open: std::collections::HashSet::new(), encoding: Vec::new() }
     }
 
     /// Admit one request. A request that cannot even be parsed or routed has
@@ -212,12 +235,35 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
                 return (bi, Some(Err(e)));
             }
         };
-        match self.front.parse_embedded(inv) {
+        // A request whose encoder runs in the background is queued behind it and admitted when its rows
+        // exist (an adapter never carries embedding rows, so the inline path serves those).
+        if adapter.is_none() {
+            if let Some(rx) = self.front.parse_in_background(inv) {
+                self.jobs.push(job);
+                self.encoding.push((bi, rx));
+                return (bi, None);
+            }
+        }
+        let parsed = self.front.parse_embedded(inv);
+        self.submit(bi, job, adapter, parsed, progress)
+    }
+
+    /// Queue a parsed request in the scheduler (or return its parse error).
+    fn submit(
+        &mut self,
+        bi: usize,
+        mut job: Job,
+        adapter: Option<model::serve::AdapterId>,
+        parsed: Result<(ParsedRequest, Option<PromptEmbeds>), String>,
+        progress: &mut dyn FnMut(usize, Progress),
+    ) -> (usize, Option<ActionResult>) {
+        let inv = job.invocation.clone();
+        match parsed {
             Ok((req, embeds)) => {
                 let sample = req.sampler;
                 let seed = req.seed;
                 let max_new = req.max_new;
-                job.capture = Capture::of(inv, &req.ids);
+                job.capture = Capture::of(&inv, &req.ids);
                 let seq = SeqState::new(&req, inv.cancel.clone());
                 let request = Request { prompt: req.ids, max_new, stop: self.front.stop().to_vec() };
                 let id = match (adapter, embeds) {
@@ -225,22 +271,60 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
                     (None, None) => self.sched.submit_sampled(request, sample, seed),
                     (None, Some(embeds)) => self.sched.submit_embedded(request, embeds, sample, seed),
                     (Some(_), Some(_)) => {
-                        self.jobs.push(job);
+                        self.set_job(bi, job);
                         return (bi, Some(Err(format!("{}: an adapter cannot serve a prompt with embedding rows", self.front.label()))));
                     }
                 };
                 progress(bi, Progress::step(0, max_new as u32, "generating"));
                 job.seq = Some(seq);
                 job.id = Some(id);
-                self.jobs.push(job);
+                self.set_job(bi, job);
                 self.open.insert(bi);
                 (bi, None)
             }
             Err(e) => {
-                self.jobs.push(job);
+                self.set_job(bi, job);
                 (bi, Some(Err(e)))
             }
         }
+    }
+
+    /// Store `job` at its index: a new job is appended, one that waited on its encoder replaces its placeholder.
+    fn set_job(&mut self, bi: usize, job: Job) {
+        if bi == self.jobs.len() {
+            self.jobs.push(job);
+        } else {
+            self.jobs[bi] = job;
+        }
+    }
+
+    /// Admit every background-built request that is ready, in arrival order; with `wait` and none
+    /// ready, block on the oldest (nothing else is running, so there is nothing to overlap).
+    fn poll_encoding(&mut self, wait: bool, progress: &mut dyn FnMut(usize, Progress)) -> Vec<(usize, ActionResult)> {
+        let mut done: Vec<(usize, ActionResult)> = Vec::new();
+        let mut i = 0;
+        let mut blocked = false;
+        while i < self.encoding.len() {
+            let received = match self.encoding[i].1.try_recv() {
+                Ok(r) => Some(r),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Err(format!("{}: the encoder stopped", self.front.label()))),
+                Err(std::sync::mpsc::TryRecvError::Empty) if wait && !blocked && done.is_empty() && self.open.is_empty() => {
+                    blocked = true;
+                    Some(self.encoding[i].1.recv().unwrap_or_else(|_| Err(format!("{}: the encoder stopped", self.front.label()))))
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            };
+            let Some(parsed) = received else {
+                i += 1;
+                continue;
+            };
+            let (bi, _) = self.encoding.remove(i);
+            let job = std::mem::replace(&mut self.jobs[bi], Job::placeholder());
+            if let (_, Some(result)) = self.submit(bi, job, None, parsed, progress) {
+                done.push((bi, result));
+            }
+        }
+        done
     }
 
     /// Why a request can never be served by this group's scheduler, in the words its caller
@@ -267,7 +351,7 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
 
     /// Jobs still running.
     fn live(&self) -> usize {
-        self.open.len()
+        self.open.len() + self.encoding.len()
     }
 
     /// What served the reply: the adapter that answered and, when known, the
@@ -369,6 +453,9 @@ pub fn run_batch_scheduled<D: PagedDecoder>(
         results[bi] = immediate;
     }
     while group.live() > 0 {
+        for (bi, result) in group.poll_encoding(group.open.is_empty(), progress) {
+            results[bi] = Some(result);
+        }
         for (bi, result) in group.pump(progress) {
             results[bi] = Some(result);
         }
@@ -425,6 +512,9 @@ pub fn run_open_scheduled<D: PagedDecoder>(
                 return OpenGroup::Closed;
             }
             continue;
+        }
+        for (bi, result) in group.poll_encoding(group.open.is_empty(), progress) {
+            feed.finish(bi, result);
         }
         for (bi, result) in group.pump(progress) {
             feed.finish(bi, result);
