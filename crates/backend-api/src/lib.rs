@@ -50,7 +50,7 @@ pub mod hardware;
 /// A device's memory limits as separate answers: allocation, binding,
 /// workspace and working set.
 pub mod memory;
-pub use memory::{AllocPolicy, MemAdvice, MemoryLimits, PlacementFacts, PrefetchTarget};
+pub use memory::{AllocPolicy, MemAdvice, MemoryLimits, MemoryUsage, PlacementFacts, PrefetchTarget};
 
 // The neutral handles and the `Backend` trait are `Send + Sync` on native (the
 // CPU backend hands disjoint buffer sub-ranges to rayon workers, and models cross
@@ -1582,6 +1582,15 @@ pub trait Backend: Send + Sync {
     /// that is merely idle holds nothing back. The default is a no-op: a
     /// backend whose frees are already cheap has nothing to hold.
     fn hold_freed_blocks(&self, _on: bool) {}
+
+    /// The device memory this process holds, by the backend's own accounting ([`MemoryUsage`]); `None` for a backend
+    /// that does not account for its allocations.
+    fn memory_usage(&self) -> Option<MemoryUsage> {
+        None
+    }
+
+    /// Start a new [`MemoryUsage::peak_live`] from the current live bytes. A no-op where nothing is accounted.
+    fn reset_memory_peak(&self) {}
 
     /// What this device can actually do - see [`DeviceCaps`]. Filled at
     /// construction; querying is a cached read, never a device round-trip.

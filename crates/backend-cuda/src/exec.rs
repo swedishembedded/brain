@@ -425,6 +425,7 @@ impl Context {
                 (ptr, Fences::default())
             }
         };
+        crate::live::in_use_alloc(len);
         Ok(DeviceMem {
             d: self.d,
             fns: self.fns,
@@ -480,6 +481,7 @@ impl Context {
                 pool.alloc(len)?
             }
         };
+        crate::live::in_use_alloc(len);
         Ok(DeviceMem {
             d: self.d,
             fns: self.fns,
@@ -1761,6 +1763,7 @@ impl Drop for DeviceMem {
             // `cuMemFree` also waits for the device, which is what made it safe to
             // free a block another handle's stream was still reading.
             Origin::Driver { cache } => {
+                crate::live::in_use_free(len);
                 if !cache.keep(self.ptr, len, fence) {
                     // The context must be current for the free to reach the right device.
                     // SAFETY: `ctx` is kept alive by the `Context` that made this
@@ -1777,7 +1780,10 @@ impl Drop for DeviceMem {
                     }
                 }
             }
-            Origin::Pool(pool) => pool.free(self.ptr, len, fence),
+            Origin::Pool(pool) => {
+                crate::live::in_use_free(len);
+                pool.free(self.ptr, len, fence)
+            }
             Origin::Managed => {
                 // SAFETY: as for the driver arm; `cuMemFree` frees managed memory
                 // too and waits for the device.

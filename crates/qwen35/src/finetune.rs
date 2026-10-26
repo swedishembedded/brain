@@ -150,7 +150,7 @@ fn step_progress() -> impl FnMut(&model::StepReport) -> bool {
     move |r| {
         let w = r.work;
         eprintln!(
-            "qwen35 finetune: step {}/{} loss {:.4} lr {:.2e} {:.1}s (prepare {:.2} forward {:.1} backward {:.1} optimizer {:.1}; {} useful / {} computed tok)",
+            "qwen35 finetune: step {}/{} loss {:.4} lr {:.2e} {:.1}s (prepare {:.2} forward {:.1} backward {:.1} optimizer {:.1}; {} useful / {} computed tok){}",
             r.step,
             r.steps,
             r.loss,
@@ -161,7 +161,8 @@ fn step_progress() -> impl FnMut(&model::StepReport) -> bool {
             w.backward_secs,
             w.optimizer_secs,
             w.useful_tokens,
-            w.computed_tokens
+            w.computed_tokens,
+            w.device_memory.map_or(String::new(), |m| format!("; device peak {:.2} GiB, reserved {:.2} GiB", m.peak_live as f64 / (1u64 << 30) as f64, m.reserved as f64 / (1u64 << 30) as f64))
         );
         true
     }

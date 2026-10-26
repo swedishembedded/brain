@@ -1149,6 +1149,8 @@ impl ChatFineTuneOutcome {
                     "computed_tokens": w.computed_tokens,
                     "padded_tokens": w.padded_tokens(),
                     "supervised_positions": w.supervised_positions,
+                    "device_peak_bytes": w.device_memory.map(|m| m.peak_live),
+                    "device_reserved_bytes": w.device_memory.map(|m| m.reserved),
                 })
             })
             .collect()

@@ -1107,6 +1107,9 @@ pub struct StepWork {
     pub computed_tokens: u64,
     /// Positions carrying a supervised target (the loss denominator).
     pub supervised_positions: u64,
+    /// The device memory after the step, with the peak of live bytes over the step: read from the model's device
+    /// ([`Model::optimizer_parts`]) where its backend accounts for its allocations.
+    pub device_memory: Option<gpu_core::MemoryUsage>,
 }
 
 impl StepWork {
@@ -1156,7 +1159,7 @@ pub struct StepReport {
     /// The global gradient norm the step's clip measured, when the model reports it
     /// ([`Model::last_grad_norm`]).
     pub grad_norm: Option<f32>,
-    /// What the step measured: its phases' seconds and its token accounting.
+    /// What the step measured: its phases' seconds, its token accounting and its device memory.
     pub work: StepWork,
 }
 
@@ -1686,6 +1689,9 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
     for step in first_step..opts.steps {
         let lr = selection.cooldown.map_or_else(|| cosine_lr(step, opts), |c| c.lr(step, opts.min_lr));
         let step_clock = std::time::Instant::now();
+        if let Some(parts) = model.optimizer_parts() {
+            parts.gpu.reset_memory_peak();
+        }
         model.zero_grads();
         let step_loss = obj.micro_steps(&model, &mut rng, opts.grad_accum.max(1));
         match obj.step_verdict() {
@@ -1710,6 +1716,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         // device wait above. The evaluation a step is due is not part of it.
         let mut work = obj.step_work().unwrap_or_default();
         work.optimizer_secs = (step_clock.elapsed().as_secs_f64() - work.prepare_secs - work.forward_secs - work.backward_secs).max(0.0);
+        work.device_memory = model.optimizer_parts().and_then(|parts| parts.gpu.memory_usage());
         if let Some(norm) = grad_norm {
             println!("step {:>6}  loss {loss:.4}  grad_norm {norm:.4}  lr {lr:.2e}", step + 1);
         }

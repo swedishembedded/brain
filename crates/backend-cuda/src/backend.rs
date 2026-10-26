@@ -1964,6 +1964,14 @@ impl backend_api::Backend for CudaBackend {
         }
     }
 
+    /// The process's device blocks in use, plus the freed ones this context's block cache and pool keep.
+    fn memory_usage(&self) -> Option<backend_api::MemoryUsage> {
+        let (live, peak_live) = crate::live::in_use();
+        Some(backend_api::MemoryUsage { live, reserved: live + self.ctx.cached_bytes(), peak_live })
+    }
+    fn reset_memory_peak(&self) {
+        crate::live::reset_in_use_peak();
+    }
     fn read(&self, buf: &DeviceBuffer, n: usize) -> Vec<f32> {
         self.issue_held();
         self.refuse_during_capture("read");

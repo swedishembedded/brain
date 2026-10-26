@@ -111,6 +111,10 @@ The per-cell matrix and its tests are `docs/reference/training-capabilities.md`.
   `optimized_params`/`read_moments`/`write_moments` of every model read the store in any format,
   and data-parallel replicas and pipeline stages release their unused device moments; qwen3's own
   offload optimizer is gone.
+- D Device memory telemetry: `Gpu::memory_usage` (live, reserved, peak of live since
+  `reset_memory_peak`) from the backend's own accounting on wgpu and CUDA; every fit step reports
+  it (`StepWork::device_memory`, the SDK record's `device_peak_bytes`/`device_reserved_bytes`, the
+  qwen35 progress line).
 - D Memory: `model::saved` saved-activation policy (keep, recompute, bf16/fp8 boundaries)
   priced in memplan and wired into qwen3 and qwen35 LoRA training (a4a1242bc); flash attention
   backward without `[H,T,T]` probabilities for qwen35moe (fc6df1080) and flux2, including the
@@ -157,9 +161,9 @@ The per-cell matrix and its tests are `docs/reference/training-capabilities.md`.
   first needs bf16 storage variants of its expert training kernels (`model::moe` reads fp32 expert
   buffers), and its training forward keeps every expert's activations for every row
   (`MoeActs`: `n * n_experts * moe_ff` words per projection).
-- O Device memory telemetry: live, reserved (allocator cache), and peak bytes per step, from every
-  backend, in the step report; today only the CUDA backend counts live driver blocks
-  (`backend_cuda::live`) and nothing reports a high-water mark. The freed-block cache trades
+- O Device memory by category (weights, gradients, moments, activations, scratch) against the
+  planner's demands; `Gpu::memory_usage` reports live, reserved and peak bytes per step (wgpu and
+  CUDA; Vulkan and the CPU JIT report none) but not what they hold. The freed-block cache trades
   throughput for about 14 GiB of reserved memory at 8K tokens (knowledge 310, 311).
 - O Training state sharded over two devices (optimizer state and masters split by tensor, global
   clip over both); only the layer pipeline splits a model across devices today.

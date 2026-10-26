@@ -198,3 +198,17 @@ mod tests {
         assert!(!l.is_consistent());
     }
 }
+
+/// What a device currently holds for this process, read from the backend's own allocation accounting (never from the
+/// driver's free-memory figure, which moves with every other process on the card).
+///
+/// * `live` - bytes in buffers some handle still owns;
+/// * `reserved` - `live` plus bytes the backend keeps from allocations already released (a block cache, buffers
+///   awaiting reclaim): what the process has taken from the device;
+/// * `peak_live` - the most `live` has been since the peak was last reset.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MemoryUsage {
+    pub live: u64,
+    pub reserved: u64,
+    pub peak_live: u64,
+}

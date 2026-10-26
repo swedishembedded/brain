@@ -23,7 +23,7 @@
 //! `dyn`, and async device init / read-back via `new_async` / `read_async`).
 
 pub use backend_api::{
-    f, AllocPolicy, BufUsage, DeviceBuffer, DeviceCaps, DeviceClass, DeviceStats, MemAdvice, MemoryLimits,
+    f, AllocPolicy, BufUsage, DeviceBuffer, DeviceCaps, DeviceClass, DeviceStats, MemAdvice, MemoryLimits, MemoryUsage,
     NumericSupport, PlacementFacts, PrefetchTarget, Step, StepMeta,
 };
 pub use backend_api::select;
@@ -1578,6 +1578,16 @@ mod native_facade {
             for (_, _, a) in self.arena.lock().unwrap_or_else(|e| e.into_inner()).iter_mut().filter(|(l, _, _)| *l == lane) {
                 a.leave();
             }
+        }
+        /// The device memory this process holds, by the backend's own accounting: live, reserved and the peak of
+        /// live since [`Self::reset_memory_peak`] (`backend_api::MemoryUsage`). `None` on a backend that does not
+        /// account for its allocations.
+        pub fn memory_usage(&self) -> Option<backend_api::MemoryUsage> {
+            self.be().memory_usage()
+        }
+        /// Start a new peak of [`Self::memory_usage`]'s live bytes from the current figure.
+        pub fn reset_memory_peak(&self) {
+            self.be().reset_memory_peak()
         }
 
         /// [`Self::storage`], returning the ceiling's refusal instead of
