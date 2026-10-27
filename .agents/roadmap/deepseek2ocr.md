@@ -1109,3 +1109,22 @@ products over the heads (`attend_on_tensor_cores`; the prefix-LM mask, then `sof
 | resampler, 16 tiles | 222 ms | 63 ms |
 | SAM global / tile (unchanged) | 37.8 / 22.2 ms | 37.7 / 22.4 ms |
 | a 6-tile page, encoder | 320 ms | 215 ms |
+
+## 2026-10-27 round 2: the dispatcher ran the OCR models eight pages at a time
+
+At 32 clients the decode batch held 4 to 7 rows (a counter in the decode step), the encoder thread was 40% busy and every page took 24 s,
+of which about 4 were decode. A trace of the group admission showed the cause: pages entered the scheduler in waves of eight (`admit job=0..7`
+together, then nothing until all eight had finished, ~6.8 s a wave = 70 pages/min). The OCR residents declared no
+`ResidentModel::batch_limit`, so the dispatcher gave the instance the scheduler policy's default group of eight and closed its inbox to later arrivals:
+the continuous-batching scheduler underneath was never fed continuously. `OcrResident::batch_limit` now returns the engine's row count (64).
+
+| v1, 8 omni-mixed pages, gpu1 (neighbour at 190 to 250 W) | before: pages/min (tok/s) | after: pages/min (tok/s) |
+|---|---|---|
+| 1 client | 23.2 (261) | 23.1 (261) |
+| 4 | 34.7 (391) | 53.1 (599) |
+| 8 | 54.6 (616) | 76.6 (864) |
+| 16 | 71.2 (803) | 112.2 (1265) |
+| 32 | 71.2 (803) | 146.9 (1657) |
+| 64 | 74.2 (836) | 161.5 (1824) |
+| crops, 16 clients | 447 (875) | 613 (1197) |
+| crops, 64 clients | 450 (879) | 669 (1350) |

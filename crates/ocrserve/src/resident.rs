@@ -102,6 +102,13 @@ impl<M: OcrModel> ResidentModel for OcrResident<M> {
         self.plans.len()
     }
 
+    /// The pages the engine decodes together: the dispatcher hands the instance everything queued up to this, and admits later
+    /// arrivals into the running group, instead of the scheduler policy's small default (eight at a time, the next eight only
+    /// when the whole group had finished).
+    fn batch_limit(&self) -> Option<usize> {
+        Some(crate::policy::config().batch() as usize)
+    }
+
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
         // One model serves every request: nothing in an invocation can fork the
         // graph. Keying on anything else would duplicate a multi-GiB build.
@@ -256,6 +263,12 @@ mod tests {
 
     /// Two cards that each hold the whole model run one replica each, each
     /// charged to its own card alone.
+    #[test]
+    fn the_resident_asks_the_dispatcher_for_a_group_as_wide_as_the_engine_decodes() {
+        let r = at(0, DecoderDevice::SameCard);
+        assert_eq!(r.batch_limit(), Some(crate::MAX_BATCH as usize), "without it the dispatcher runs eight pages at a time and starts the next eight only when all have finished");
+    }
+
     #[test]
     fn two_whole_cards_are_two_replicas_each_charged_to_its_own_card() {
         let plans = plan_replicas(&[(0, 90 * GB), (1, 90 * GB)], &Toy::FOOTPRINT);
