@@ -162,6 +162,7 @@ default-members = [
     "crates/worldmirror2",
     "crates/capture",
     "crates/yolov8",
+    "crates/yolov5",
     "crates/onnx",
     "crates/npu",
     "crates/runtime",
@@ -352,6 +353,7 @@ brain-recon = { path = "crates/recon" }
 brain-worldmirror2 = { path = "crates/worldmirror2" }
 brain-capture = { path = "crates/capture" }
 brain-yolov8 = { path = "crates/yolov8" }
+brain-yolov5 = { path = "crates/yolov5" }
 brain-onnx = { path = "crates/onnx" }
 brain-npu = { path = "crates/npu" }
 brain-rknpu = { path = "crates/rknpu" }

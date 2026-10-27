@@ -67,7 +67,7 @@ layer 4 - models
     qwen3asr, qwen3omnimoe, qwen3tts, qwen3vl, qwen3vlmoe, recon, rrdbnet, s3dit, s3tokenizer,
     sam1, sam2, scrfd, sdxlunet, sfm, spectrallm, splat, supir, t5encoder, timesfm3,
     toyautoencoder, toymoe, toypid, toyseq2seq, viewport, vqgan, wan, wm-core, wm-display,
-    worldmirror2, yolov8, zipdepth
+    worldmirror2, yolov5, yolov8, zipdepth
 layer 5 - cross-cutting evaluation and tooling
     bench, capture, fcbench, federated, gradcheck, modelcost, rl
 layer 6 - serving, front ends, SDK, samples

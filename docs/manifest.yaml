@@ -103,6 +103,7 @@ navigation:
           - docs/reference/models/campplus.md
           - docs/reference/models/yolov8/readme.md
           - docs/reference/models/yolov8/npu.md
+          - docs/reference/models/yolov5.md
           - docs/reference/models/zipdepth.md
           - docs/reference/models/scrfd.md
           - docs/reference/models/arcface.md

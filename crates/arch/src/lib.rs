@@ -605,6 +605,10 @@ pub const ARCHS: &[Arch] = &[
           default_ref: Some("MiniMaxAI/MiniMax-Music3")),
     // -- Vision: detection / segmentation / face / depth -------------------
     arch!("yolov8", "YOLOv8-style anchor-free detector", Vision, Brain, "brain-yolov8", default_ref: Some("Ultralytics/YOLOv8")),
+    // No `default_ref`: the only checkpoints are AGPL-derived exports that brain
+    // never fetches on its own; a converted checkpoint is supplied by path or
+    // from the local model store.
+    arch!("yolov5", "YOLOv5 anchor-based detector (v6+ layout)", Vision, Brain, "brain-yolov5"),
     arch!("sam1", "SAM-1 / ViTDet ViT-B tower", Vision, Brain, "brain-sam1"),
     // No GGUF anywhere for this family - SAM2 is not part of the
     // llama.cpp/GGUF ecosystem. Rows below have empty `quants` deliberately,

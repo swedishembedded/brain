@@ -1,0 +1,32 @@
+[package]
+name = "brain-yolov5"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "YOLOv5 (Ultralytics v6+ layout) anchor-based detector: layer graph, brain checkpoint loading and anchor decode on the host, fp32 reference forward through gpu_core."
+
+[lib]
+name = "yolov5"
+path = "src/lib.rs"
+
+[dependencies]
+# The checkpoint reader (header + mmap); no device involved.
+brain-checkpoint.workspace = true
+# `imaging::letterbox` and `imaging::nms`: the workspace's one letterbox and
+# one NMS (shared with yolov8), so this crate owns neither.
+brain-imaging.workspace = true
+# The shared conv-net blocks the reference forward is assembled from
+# (`vision::Conv`, `MaxPool`, `Up`, `Cat`); only the `model` module touches them.
+brain-vision.workspace = true
+brain-gpu-core.workspace = true
+brain-paramstore.workspace = true
+brain-kernels.workspace = true
+# `spec.rs` - the model-store `ArchSpec` classifying a brain-format checkpoint.
+brain-modelstore.workspace = true
+brain-capability.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true
+brain-data.workspace = true

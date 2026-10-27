@@ -3085,6 +3085,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-yolov5"
+version = "3.0.0"
+dependencies = [
+ "brain-capability",
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-imaging",
+ "brain-kernels",
+ "brain-modelstore",
+ "brain-paramstore",
+ "brain-testutil",
+ "brain-vision",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-yolov8"
 version = "3.0.0"
 dependencies = [
