@@ -78,10 +78,12 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   not known until the model has rendered and encoded the prompt. The
   non-streaming reply and the OpenAI-shaped `usage` chunk carry the real
   numbers.
-- **Sampling parameters.** `temperature` and `top_p` default to 1.0, as in both
-  upstream APIs. `top_k` (an integer in 0..=1000) and `seed` are passed on only
-  when the request sets them; otherwise the model applies its own defaults, and an
-  unseeded request is sampled with a fresh random seed. OpenAI parameters brain
+- **Sampling parameters.** `temperature`, `top_p`, `top_k` (an integer in
+  0..=1000) and `seed` are passed on only when the request sets them; otherwise
+  the model applies its own defaults - for a checkpoint that declares them
+  (`generation_config.json`, or `general.sampling.*` in a GGUF) the declared
+  `temperature`, `top_k` and `top_p`, shown as the `generate` action's param
+  defaults - and an unseeded request is sampled with a fresh random seed. OpenAI parameters brain
   cannot honour are refused with 400 `invalid_request_error` naming the
   parameter rather than ignored: `n` > 1, a non-empty `logit_bias`, a non-zero
   `top_logprobs`, and a `response_format` other than `text`; on the legacy

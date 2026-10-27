@@ -3224,11 +3224,13 @@ pub struct Qwen35GgufResident {
     /// How the engine spends prefill - [`Self::with_prefill_policy`].
     prefill: PrefillPolicy,
     plan: OnceLock<Plan>,
+    /// The sampling defaults the GGUF declares, read once (see [`Self::sampling_defaults`]).
+    sampling: OnceLock<data::generation::SamplingDefaults>,
 }
 
 impl Qwen35GgufResident {
     pub fn new(gguf_path: String, devices: Vec<(Device, u64)>, cap: u32, tier: TierPolicy) -> Qwen35GgufResident {
-        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, prefix_slots: 0, kv_tier: KvTier::F32, kv_block_rows: 0, kv_pool_rows: 0, model_id: MODEL.to_string(), bank: None, spec: SpecServing::default(), exact_decode: false, prefill: PrefillPolicy::default(), plan: OnceLock::new() }
+        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, prefix_slots: 0, kv_tier: KvTier::F32, kv_block_rows: 0, kv_pool_rows: 0, model_id: MODEL.to_string(), bank: None, spec: SpecServing::default(), exact_decode: false, prefill: PrefillPolicy::default(), plan: OnceLock::new(), sampling: OnceLock::new() }
     }
 
     /// **Run every decode row independently of its co-batch** (`--exact-decode`):
@@ -3285,6 +3287,19 @@ impl Qwen35GgufResident {
     }
 
     /// The configured checkpoint path - the artifact this resident loads.
+    /// The sampling settings the GGUF declares as its defaults (`general.sampling.*`), read once. A file that
+    /// cannot be opened or declares a value out of range yields none, with the reason logged: the file is
+    /// reported against the real open at activation, and the action's own constants apply meanwhile.
+    pub fn sampling_defaults(&self) -> &data::generation::SamplingDefaults {
+        self.sampling.get_or_init(|| {
+            let declared = MmapGguf::open(&self.gguf_path).map_err(|e| format!("cannot open '{}': {e}", self.gguf_path)).and_then(|mg| data::generation::SamplingDefaults::from_gguf(|key| mg.kv().get(key).and_then(|v| v.as_f64())));
+            declared.unwrap_or_else(|e| {
+                residency::log::warn(&format!("{MODEL}: ignoring the checkpoint's sampling defaults: {e}"));
+                data::generation::SamplingDefaults::default()
+            })
+        })
+    }
+
     pub fn gguf_path(&self) -> &str {
         &self.gguf_path
     }
@@ -3581,6 +3596,7 @@ impl ResidentModel for Qwen35GgufResident {
         .param(ParamSpec::new("template_flavor", ParamType::Str, "chat template flavor: qwen3.8 (default; XML <function=> tool-call payloads, prefilled open <think>, preserve_thinking kwarg) or qwen3 (JSON <tool_call> payloads, positional think framing)").default(json!("qwen3.8")))
         .output(BlobSpec::new("text", Media::Text, "the generated text"));
         let generate = llmserve::with_token_capture(generate);
+        let generate = llmserve::with_sampling_defaults(generate, MODEL, self.sampling_defaults());
         Manifest::new(
             &self.model_id,
             "Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, served INT8 and GPU-resident directly from a released GGUF (no fp32 intermediate on disk), layer-sharded across as many cards as its real per-layer bytes need. Text only; no MTP self-speculative decode; continuous batching of up to max_batch sequences per dispatch.",
@@ -4386,6 +4402,37 @@ mod decode_phase_tests {
         ] {
             assert_eq!(DecodePhase::of_kernel(name), want, "kernel {name}");
         }
+    }
+
+    /// A GGUF that declares `general.sampling.*` defaults is served with them: the manifest a client reads carries
+    /// them as the defaults of `temp`, `top_k` and `top_p`, which is what a request that omits them gets. One that
+    /// declares nothing keeps the action's own constants.
+    #[test]
+    fn the_checkpoints_declared_sampling_defaults_are_the_manifests_param_defaults() {
+        use checkpoint::gguf::GgufValue;
+        let dir = std::env::temp_dir().join(format!("brain-gguf-sampling-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, sampling: &[(&str, GgufValue)]| {
+            let path = dir.join(name);
+            let mut kv = vec![("general.architecture".to_string(), GgufValue::String("qwen35".into()))];
+            kv.extend(sampling.iter().map(|(k, v)| (k.to_string(), v.clone())));
+            let tensor = checkpoint::gguf_write::TensorOut { name: "w".into(), shape: vec![1], ty: checkpoint::gguf::GgmlType::F32.id(), data: vec![0u8; 4] };
+            checkpoint::gguf_write::write(path.to_str().unwrap(), &kv, &[tensor], 32).unwrap();
+            path.to_string_lossy().into_owned()
+        };
+        let defaults = |path: String| -> Vec<(String, serde_json::Value)> {
+            let manifest = Qwen35GgufResident::new(path, Vec::new(), 64, TierPolicy::uniform(gpu_core::select::Dtype::I8)).manifest();
+            let generate = manifest.actions.iter().find(|a| a.name == "generate").expect("generate").clone();
+            ["temp", "top_k", "top_p"].iter().map(|n| (n.to_string(), generate.params.iter().find(|p| p.name == *n).and_then(|p| p.default.clone()).expect("a default"))).collect()
+        };
+        let declared = write("declared.gguf", &[("general.sampling.top_k", GgufValue::I32(20)), ("general.sampling.top_p", GgufValue::F32(0.95)), ("general.sampling.temp", GgufValue::F32(1.0))]);
+        let got = defaults(declared);
+        assert_eq!(got[0].1, serde_json::json!(1.0));
+        assert_eq!(got[1].1, serde_json::json!(20));
+        assert_eq!(got[2].1.as_f64().map(|p| (p * 100.0).round()), Some(95.0));
+        let silent = defaults(write("silent.gguf", &[]));
+        assert_eq!((silent[0].1.clone(), silent[1].1.clone(), silent[2].1.clone()), (serde_json::json!(0.0), serde_json::json!(40), serde_json::json!(1.0)), "nothing declared keeps the constants");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The rollup is a partition of the measured table: every millisecond and

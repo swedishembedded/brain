@@ -335,6 +335,18 @@ impl GgufValue {
         }
     }
     /// A string scalar as `&str`.
+    /// Any numeric scalar (integer or float) as `f64`.
+    pub fn as_f64(&self) -> Option<f64> {
+        match *self {
+            GgufValue::F32(v) => Some(v as f64),
+            GgufValue::F64(v) => Some(v),
+            GgufValue::I8(v) => Some(v as f64),
+            GgufValue::I16(v) => Some(v as f64),
+            GgufValue::I32(v) => Some(v as f64),
+            GgufValue::I64(v) => Some(v as f64),
+            _ => self.as_u64().map(|v| v as f64),
+        }
+    }
     pub fn as_str(&self) -> Option<&str> {
         match self {
             GgufValue::String(s) => Some(s),

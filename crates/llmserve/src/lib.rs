@@ -178,6 +178,31 @@ pub fn with_token_capture(spec: ActionSpec) -> ActionSpec {
         ))
 }
 
+/// `spec` with the sampling parameters it declares defaulting to what the checkpoint declares
+/// ([`data::generation::SamplingDefaults`]) instead of the action's own constants, so a request that omits
+/// `temp`, `top_k` or `top_p` samples the way the model's authors recommend and a client reading the manifest
+/// sees the value it will get. A setting the checkpoint declares and the action has no parameter for cannot be
+/// applied: it is logged, not dropped silently.
+pub fn with_sampling_defaults(mut spec: ActionSpec, label: &str, defaults: &data::generation::SamplingDefaults) -> ActionSpec {
+    // The shortest decimal of the f32, so 0.95 reads as 0.95 and not as the f64 nearest the f32.
+    let decimal = |v: f32| serde_json::json!(v.to_string().parse::<f64>().unwrap_or(f64::from(v)));
+    let declared: [(&str, Option<serde_json::Value>); 5] = [
+        ("temp", defaults.temp.map(decimal)),
+        ("top_k", defaults.top_k.map(|v| serde_json::json!(v))),
+        ("top_p", defaults.top_p.map(decimal)),
+        ("min_p", defaults.min_p.map(decimal)),
+        ("repetition_penalty", defaults.repetition_penalty.map(decimal)),
+    ];
+    for (name, value) in declared {
+        let Some(value) = value else { continue };
+        match spec.params.iter_mut().find(|p| p.name == name) {
+            Some(param) => param.default = Some(value),
+            None => residency::log::warn(&format!("{label}: the checkpoint declares {name} {value} as its default, but action '{}' has no '{name}' parameter to carry it", spec.name)),
+        }
+    }
+    spec
+}
+
 impl Capture {
     fn of(inv: &Invocation, prompt: &[u32]) -> Capture {
         let logprobs = inv.get_bool("logprobs").unwrap_or(false);

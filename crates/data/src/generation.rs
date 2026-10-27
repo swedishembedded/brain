@@ -49,6 +49,67 @@ impl GenerationConfig {
     }
 }
 
+/// The sampling settings a checkpoint declares as its own defaults: its `generation_config.json`
+/// (`temperature`, `top_k`, `top_p`, `min_p`, `repetition_penalty`) or, for a GGUF, the
+/// `general.sampling.*` KV keys. What a request that does not name a setting should sample with;
+/// a setting the checkpoint does not declare is `None` and the serving action's own constant stays.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SamplingDefaults {
+    pub temp: Option<f32>,
+    pub top_k: Option<u32>,
+    pub top_p: Option<f32>,
+    pub min_p: Option<f32>,
+    pub repetition_penalty: Option<f32>,
+}
+
+impl SamplingDefaults {
+    /// Whether the checkpoint declares nothing.
+    pub fn is_empty(&self) -> bool {
+        *self == SamplingDefaults::default()
+    }
+
+    /// Read the settings from `<dir>/generation_config.json`; empty when the file is absent. A file that declares
+    /// `do_sample: false` asks for greedy decoding, which is what a zero temperature is. A malformed value is an
+    /// error naming the file and the key, never a silent fallback.
+    pub fn from_generation_config(dir: &Path) -> Result<SamplingDefaults, String> {
+        let path = dir.join("generation_config.json");
+        let Ok(text) = std::fs::read_to_string(&path) else { return Ok(SamplingDefaults::default()) };
+        let v: Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        let number = |key: &str| -> Result<Option<f64>, String> {
+            match &v[key] {
+                Value::Null => Ok(None),
+                x => x.as_f64().map(Some).ok_or_else(|| format!("{}: {key} {x} is not a number", path.display())),
+            }
+        };
+        let mut d = SamplingDefaults::from_values(number("temperature")?, number("top_k")?, number("top_p")?, number("min_p")?, number("repetition_penalty")?)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        if v["do_sample"] == Value::Bool(false) {
+            d.temp = Some(0.0);
+        }
+        Ok(d)
+    }
+
+    /// Read the `general.sampling.*` keys of a GGUF through `get` (a key to its numeric value, `None` when absent).
+    pub fn from_gguf(get: impl Fn(&str) -> Option<f64>) -> Result<SamplingDefaults, String> {
+        SamplingDefaults::from_values(get("general.sampling.temp"), get("general.sampling.top_k"), get("general.sampling.top_p"), get("general.sampling.min_p"), get("general.sampling.penalty_repeat"))
+            .map_err(|e| format!("general.sampling: {e}"))
+    }
+
+    fn from_values(temp: Option<f64>, top_k: Option<f64>, top_p: Option<f64>, min_p: Option<f64>, repetition_penalty: Option<f64>) -> Result<SamplingDefaults, String> {
+        let within = |name: &str, x: Option<f64>, lo: f64, hi: f64| match x {
+            Some(x) if !(lo..=hi).contains(&x) => Err(format!("{name} {x} is outside {lo}..={hi}")),
+            x => Ok(x),
+        };
+        Ok(SamplingDefaults {
+            temp: within("temperature", temp, 0.0, 100.0)?.map(|x| x as f32),
+            top_k: within("top_k", top_k, 0.0, u32::MAX as f64)?.map(|x| x as u32),
+            top_p: within("top_p", top_p, 0.0, 1.0)?.map(|x| x as f32),
+            min_p: within("min_p", min_p, 0.0, 1.0)?.map(|x| x as f32),
+            repetition_penalty: within("repetition_penalty", repetition_penalty, 0.0, 100.0)?.map(|x| x as f32),
+        })
+    }
+}
+
 /// `tokenizer_config.json`'s `eos_token` (a string, or `{"content": ...}`).
 fn tokenizer_config_eos(dir: &Path) -> Option<String> {
     let v: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("tokenizer_config.json")).ok()?).ok()?;
@@ -92,6 +153,36 @@ mod tests {
             "added_tokens": [{"content": "<|endoftext|>", "id": 2}, {"content": "<|im_end|>", "id": 3}, {"content": "<|EOT|>", "id": 4}],
         });
         QwenBpe::from_json_bytes(json.to_string().as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn sampling_defaults_come_from_the_generation_config() {
+        let d = scratch("sampling");
+        std::fs::write(d.join("generation_config.json"), r#"{"do_sample": true, "temperature": 0.6, "top_k": 20, "top_p": 0.95, "repetition_penalty": 1.05}"#).unwrap();
+        let got = SamplingDefaults::from_generation_config(&d).unwrap();
+        assert_eq!(got, SamplingDefaults { temp: Some(0.6), top_k: Some(20), top_p: Some(0.95), min_p: None, repetition_penalty: Some(1.05) });
+        std::fs::write(d.join("generation_config.json"), r#"{"do_sample": false, "top_p": 0.9}"#).unwrap();
+        assert_eq!(SamplingDefaults::from_generation_config(&d).unwrap().temp, Some(0.0), "do_sample false is greedy");
+        std::fs::write(d.join("generation_config.json"), r#"{"eos_token_id": 2}"#).unwrap();
+        assert!(SamplingDefaults::from_generation_config(&d).unwrap().is_empty(), "a file that declares nothing leaves every constant alone");
+        std::fs::write(d.join("generation_config.json"), r#"{"top_p": 7}"#).unwrap();
+        assert!(SamplingDefaults::from_generation_config(&d).unwrap_err().contains("top_p"), "an out-of-range value is refused by name");
+        std::fs::write(d.join("generation_config.json"), r#"{"top_k": "twenty"}"#).unwrap();
+        assert!(SamplingDefaults::from_generation_config(&d).unwrap_err().contains("top_k"));
+        assert!(SamplingDefaults::from_generation_config(&d.join("missing")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn sampling_defaults_come_from_the_gguf_sampling_keys() {
+        let kv = |key: &str| match key {
+            "general.sampling.temp" => Some(1.0),
+            "general.sampling.top_k" => Some(20.0),
+            "general.sampling.top_p" => Some(0.95),
+            _ => None,
+        };
+        assert_eq!(SamplingDefaults::from_gguf(kv).unwrap(), SamplingDefaults { temp: Some(1.0), top_k: Some(20), top_p: Some(0.95), min_p: None, repetition_penalty: None });
+        assert!(SamplingDefaults::from_gguf(|_| None).unwrap().is_empty());
+        assert!(SamplingDefaults::from_gguf(|k| (k == "general.sampling.top_p").then_some(-1.0)).unwrap_err().contains("top_p"));
     }
 
     #[test]

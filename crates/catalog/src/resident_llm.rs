@@ -835,6 +835,8 @@ pub struct QwenResident {
     gemm_precision: gpu_core::provider::library::GemmPrecision,
     fuse_residual_norm: bool,
     refused: Option<String>,
+    /// The sampling defaults the checkpoint's `generation_config.json` declares, read once.
+    sampling: std::sync::OnceLock<data::generation::SamplingDefaults>,
 }
 
 /// What `--checkpoint` names, as the `(path to open, repo directory,
@@ -936,7 +938,21 @@ impl QwenResident {
             gemm_precision: cfg.gemm_precision,
             fuse_residual_norm: cfg.fuse_residual_norm,
             refused: cfg.refused.clone(),
+            sampling: std::sync::OnceLock::new(),
         }
+    }
+
+    /// What the checkpoint declares as its sampling defaults (`generation_config.json` beside the weights),
+    /// read once. Unreadable or out-of-range settings are logged and leave the action's constants in force.
+    fn sampling_defaults(&self) -> &data::generation::SamplingDefaults {
+        self.sampling.get_or_init(|| {
+            let path = std::path::Path::new(&self.path);
+            let dir = if path.is_dir() { Some(path) } else { path.parent() };
+            dir.map_or(Ok(Default::default()), data::generation::SamplingDefaults::from_generation_config).unwrap_or_else(|e| {
+                residency::log::warn(&format!("{}: ignoring the checkpoint's sampling defaults: {e}", self.id));
+                Default::default()
+            })
+        })
     }
 
     /// The KV pool size in tokens: `the KV pool size` verbatim when named;
@@ -1222,7 +1238,8 @@ impl ResidentModel for QwenResident {
         // serving capacity - see `Manifest::max_context_tokens`'s doc comment
         // on why this must be the actual engine capacity, not the
         // checkpoint's architectural `max_position_embeddings`.
-        Manifest::new(&self.id, "text generation (Qwen3 BPE decoder)", vec![generate_spec("generate text (Qwen3; chat template optional)", true)])
+        let generate = llmserve::with_sampling_defaults(generate_spec("generate text (Qwen3; chat template optional)", true), &self.id, self.sampling_defaults());
+        Manifest::new(&self.id, "text generation (Qwen3 BPE decoder)", vec![generate])
             .with_max_context_tokens(self.ctx as u64)
     }
     /// One key for the base and every adapter riding on it: a constant, because

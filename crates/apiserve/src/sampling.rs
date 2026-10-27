@@ -21,17 +21,22 @@ const MAX_TOP_K: i64 = 1000;
 /// (and OpenAI's).
 const MAX_TEMPERATURE: f64 = 2.0;
 
-/// Set `temp`, `top_p`, `top_k` and `seed` on `inv` from `body`. `temperature`
-/// and `top_p` default to 1.0, the default of both the OpenAI and the
-/// Anthropic API; `top_k` and `seed` are forwarded only when present.
+/// Set `temp`, `top_p`, `top_k` and `seed` on `inv` from `body`, each only when
+/// the client sent it: the action's default stands otherwise, which for a model
+/// that declares its own sampling defaults (its `generation_config.json` or GGUF
+/// metadata) is the setting its authors recommend, not the upstream APIs' 1.0.
 pub fn apply(provider: Provider, body: &Value, mut inv: Invocation) -> Result<Invocation, ApiError> {
-    let in_range = |name: &str, max: f64| -> Result<f64, ApiError> {
-        match present(body, name) {
-            None => Ok(1.0),
-            Some(v) => v.as_f64().filter(|x| (0.0..=max).contains(x)).ok_or_else(|| ApiError::invalid_request(provider, format!("'{name}' must be a number in 0..={max}"))),
-        }
+    let in_range = |name: &str, max: f64| -> Result<Option<f64>, ApiError> {
+        present(body, name)
+            .map(|v| v.as_f64().filter(|x| (0.0..=max).contains(x)).ok_or_else(|| ApiError::invalid_request(provider, format!("'{name}' must be a number in 0..={max}"))))
+            .transpose()
     };
-    inv = inv.set("temp", json!(in_range("temperature", MAX_TEMPERATURE)?)).set("top_p", json!(in_range("top_p", 1.0)?));
+    if let Some(t) = in_range("temperature", MAX_TEMPERATURE)? {
+        inv = inv.set("temp", json!(t));
+    }
+    if let Some(p) = in_range("top_p", 1.0)? {
+        inv = inv.set("top_p", json!(p));
+    }
     if let Some(v) = present(body, "top_k") {
         let k = v.as_i64().filter(|k| (0..=MAX_TOP_K).contains(k));
         let k = k.ok_or_else(|| ApiError::invalid_request(provider, format!("'top_k' must be an integer in 0..={MAX_TOP_K}")))?;
@@ -158,11 +163,11 @@ mod tests {
     const P: Provider = Provider::OpenAI;
 
     #[test]
-    fn an_omitted_seed_or_top_k_is_left_to_the_action() {
+    fn an_omitted_sampling_setting_is_left_to_the_action() {
         let inv = apply(P, &json!({}), Invocation::new()).unwrap();
         assert_eq!(inv.get_i64("seed"), None);
         assert_eq!(inv.get_i64("top_k"), None);
-        assert_eq!(inv.get_f64("temp"), Some(1.0));
+        assert_eq!((inv.get_f64("temp"), inv.get_f64("top_p")), (None, None), "the checkpoint's declared defaults apply, not a constant");
 
         let inv = apply(P, &json!({"seed": 7, "top_k": 3, "temperature": 0.2}), Invocation::new()).unwrap();
         assert_eq!((inv.get_i64("seed"), inv.get_i64("top_k"), inv.get_f64("temp")), (Some(7), Some(3), Some(0.2)));
