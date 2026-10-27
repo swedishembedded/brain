@@ -7,7 +7,7 @@
 // sending an email to info@swedishembedded.com.
 
 //! `model::anchor_memory`'s two device stages against independent host
-//! references: the admission selection (`anchor_select`) and the indexed read
+//! references: the admission selection (`anchor_commit`) and the indexed read
 //! with a sink (`anchor_read_*` and the row softmax). The host side restates
 //! the DEFINITION of the bank (sort all earlier tokens by score descending,
 //! position ascending) rather than the kernel's rank-by-counting scan, so a

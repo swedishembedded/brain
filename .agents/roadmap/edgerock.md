@@ -31,9 +31,8 @@ goldens under `testdata/golden/edgerock/{tiny_text,tiny_ties}/`.
   and take the import fold); the text-only `model.layers.*` layout through the one
   `import::classify` (also the lazy `fp8_source`); init; forward through
   `Qwen35::logits_all` (windowed `gqa_mixer_fwd_windowed`, memory added before the
-  residual add); decode, chunked prefill, streaming and training paths refuse the
-  config loudly (`Qwen35Config::require_plain_decoder`, a training build with an
-  anchor memory is refused at construction).
+  residual add); paths that implement neither the window nor the memory refuse the
+  config loudly (`Qwen35Config::require_plain_decoder`).
   Gates: `crates/qwen35/tests/edgerock_golden_parity.rs` (both variants, CPU and
   default backend), `edgerock_config.rs`, `edgerock_hf_fixture.rs` (the release
   layout through config, lazy source, eager import and a forward),
@@ -45,7 +44,7 @@ rel_l2, 24 stages per variant): cosine 1.0000000000 at every stage; worst max_ab
 4.1e-5 (CPU backend) and 2.9e-5 (default backend, wgpu), worst rel_l2 4.0e-6. The
 bank of both memory layers (`layer{3,7}.mem.refs`, 360 slots each) equals the
 reference exactly in both variants on both backends; flipping the tie rule in
-`anchor_select.wgsl` fails the ties variant and the model-crate selection test.
+`anchor_commit.wgsl` (formerly `anchor_select`) fails the ties variant and the model-crate selection test.
 
 - [x] M2: training at tiny scale. `model::anchor_memory::anchor_memory_bwd` (generic) differentiates the
   memory end to end: the output projection and per-head gate, the indexed read (dP, softmax backward,
@@ -79,6 +78,45 @@ reference exactly in both variants on both backends; flipping the tie rule in
   convention (cosine 0.999) and at least 95 percent of bank slots equal: near-tied scores swap rank
   there (1 to 2 percent of slots on `tiny_text`), which the released bf16 model does as well.
 
+- [x] M3: inference state. A sliding-window config decodes and prefills on **fixed-size** per-sequence
+  state; nothing in it grows with the sequence:
+  - the window's KV is a ring of exactly `window` rows per sequence and layer (position `p` in row
+    `p % window`, `model::gqa_mixer::{ring_row, ring_live}`); decode attends `min(pos + 1, window)` rows
+    through the unchanged paged decode kernels (`KvWindow::Ring`); a prefill chunk gathers the ring in
+    logical order, appends its own roped rows, attends under the window mask and writes its last
+    `window` rows back (`gqa_mixer_ring_chunk_fwd`, generic, any sliding-window model);
+  - the anchor bank per sequence slot and memory layer (`model::anchor_memory::AnchorBankPool`):
+    committed `pos`/`score` `[G,K]` and `key`/`value` `[K,G*D]`, pending `key`/`value`/`score` `[C,*]`;
+    the pending count is `position % C`, so no counter is stored. **One ordering implementation**:
+    `anchor_commit` merges a bank with explicit (score, position) candidates; the sequence form commits
+    block by block through it (ping-pong banks, refs now block-major `[blocks, seq, G, K]`) and a decode
+    step or a chunk commits through the same kernel, `anchor_bank_gather` moving keys and values.
+    A decode step dispatches a commit for every sequence (empty unless its block fills) so the step is
+    one list of dispatches; the read kernels address a pool by slot row. `reset_row` / `copy_row` are the
+    slot-reuse and snapshot operations;
+  - the first partial block of a chunk reads the state's bank, completed blocks commit, the tail
+    stays pending (`anchor_memory_chunk_fwd`, segment by block).
+  Wired into `step`, `prefill_chunked`, `prefill_embeds` and `run_decode_batch` (rings by position, banks
+  and `ReadPlan`/`WritePlan` by slot row); `SlotPool` (`new_slot_pool`, `slot_prefill`, `slot_decode`,
+  `slot_reset`, `slot_copy`) is the per-slot-row seam the M4 engine needs; `decode_snapshot` /
+  `decode_restore` copy the whole fixed state. Still refusing the config loudly (the same message):
+  the layer-streaming forward and trainer, paged multi-sequence prefill (`run_prefill_multi_stage`),
+  verify / speculative rounds (several rows of one sequence), and the f32 `serve::Engine` (M4); the
+  int8 GGUF resident cannot hold an EdgeRock config. A short chunk never takes the exact-round decode
+  tape for a windowed config.
+  Gates: `qwen35/tests/edgerock_decode.rs` on the CPU JIT, the default device and CUDA at the fp32 tier,
+  both golden variants: step-by-step decode equals `logits_all` at every one of the 48 positions;
+  chunked prefill at 1, 3, 5, 13 and 48 rows (then decode) equals it; a batch of three sequences at
+  positions 7, 19 and 30 (batched in a different order than pool order) equals each alone and the
+  whole sequence; a 133-token run (twelve windows) leaves every persistent buffer's identity and size
+  unchanged; snapshot, a detour, restore and continue reproduces the continuation bit for bit; a reset
+  slot behaves exactly as a fresh one while an unreset slot does not (the control), and a copied slot
+  continues identically. `model/tests/anchor_memory.rs` checks the state form against the sequence form
+  (every bank after every block with its keys, and every read), reset and copy.
+  Open: the decode step moves every sequence's bank through a scratch bank on every token (the commit is
+  unconditional to keep the step one list of dispatches), and the ring chunk attention is the
+  materialised chain over `m + n` rows; both are M6 work.
+
 - [x] M5 (forward part): the released weights against the independent reference
   forward (`tools/goldens/edgerock_dump_real_reference.py`, fp32 CPU torch, a
   1400-token prompt that slides the window and commits five blocks, then asks about
@@ -93,10 +131,6 @@ reference exactly in both variants on both backends; flipping the tie rule in
 
 ## Not yet done
 
-- [ ] M3: decode state. Per sequence and memory layer: the committed bank (`key`/`value`
-  `[groups, capacity, D]`, `score` and `position` `[groups, capacity]`), the pending
-  block, and the window's ring KV; step, chunked prefill and batched decode parity
-  against `logits_all`; state bytes independent of length.
 - [ ] M4: serving: engine on the generic scheduler, snapshot prefix cache over the
   fixed state, conformance suite, catalog, capabilities, CLI, `brain pull
   rockmatrix-ai/EdgeRock`, model page promoted from "recognized" to usable.
@@ -106,7 +140,7 @@ reference exactly in both variants on both backends; flipping the tie rule in
   are `[rows * heads, capacity + 1]` per memory layer, held until the backward or recomputed).
   Inference and training: The memory read materialises `[rows * heads, capacity + 1]`
   logits and probabilities and the windowed attention the `[B,H,T,T]` slabs (no
-  windowed flash kernel yet); `anchor_select` ranks by counting, `O((capacity + chunk)^2)`
+  windowed flash kernel yet); `anchor_commit` ranks by counting, `O((capacity + chunk)^2)`
   per group and block; both want the cooperative/flash treatment per `kernels.md` F.
 - [ ] The memory's projections are plain fp32 matmuls over the parameter store: no
   quantized tier, no adapter site. Quantizing them is only safe for the read side

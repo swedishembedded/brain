@@ -49,8 +49,14 @@ fn batch(seqs: u32, offset: usize) -> (Vec<u32>, Vec<u32>) {
     (x, y)
 }
 
+/// The fp32 kernels whatever the device would pick by default: these tests compare gradients and losses of runs
+/// that differ in shape, which TF32 products would blur.
+fn fp32() -> TrainOpts {
+    TrainOpts { gemm_precision: gpu_core::provider::library::GemmPrecision::Fp32Reference, ..TrainOpts::default() }
+}
+
 fn model(cfg: &Qwen35Config, init: &HashMap<String, Vec<f32>>, b: u32, x: &[u32], y: &[u32]) -> Qwen35 {
-    let m = Qwen35::new_train_on(Gpu::new(pipelines()), cfg.clone(), b, T, init);
+    let m = Qwen35::new_train_opts_on(Gpu::new(pipelines()), cfg.clone(), b, T, init, &fp32());
     m.set_batch(x, y);
     m
 }
@@ -140,7 +146,7 @@ fn recomputing_the_memory_in_the_backward_gives_the_same_gradients() {
     let init = weights(&cfg);
     let (x, y) = batch(2, 5);
     let kept = model(&cfg, &init, 2, &x, &y);
-    let recomputed = Qwen35::new_train_opts_on(Gpu::new(pipelines()), cfg.clone(), 2, T, &init, &TrainOpts { saved: SavedPolicy::Recompute, ..TrainOpts::default() });
+    let recomputed = Qwen35::new_train_opts_on(Gpu::new(pipelines()), cfg.clone(), 2, T, &init, &TrainOpts { saved: SavedPolicy::Recompute, ..fp32() });
     recomputed.set_batch(&x, &y);
     for m in [&kept, &recomputed] {
         m.zero_grads();

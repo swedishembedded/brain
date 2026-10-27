@@ -1787,7 +1787,10 @@ fn edgerock_gradcheck_harness(seed: u64, b: u32, lora: Option<qwen35::config::Lo
     use qwen35::model::Qwen35;
     let cfg = qwen35::config::Qwen35Config { lora, ..edgerock_gradcheck_cfg() };
     let init = edgerock_gradcheck_init(&cfg, seed);
-    let model = Qwen35::new_train_on(gpu_core::Gpu::new(qwen35::model::pipelines()), cfg, b, 12, &init);
+    // Finite differences are taken through the function the backward differentiates: the fp32 kernels, whatever
+    // GEMM tier the device would pick by default (TF32 tensor-core products add noise a probe would read as error).
+    let opts = qwen35::model::TrainOpts { gemm_precision: gpu_core::provider::library::GemmPrecision::Fp32Reference, ..Default::default() };
+    let model = Qwen35::new_train_opts_on(gpu_core::Gpu::new(qwen35::model::pipelines()), cfg, b, 12, &init, &opts);
     let n = (12 * b) as usize;
     let x: Vec<u32> = (0..n).map(|i| ((i * 5 + 1 + (i / 12) * 7) % 29) as u32).collect();
     let y: Vec<u32> = (0..n).map(|i| ((i * 5 + 2 + (i / 12) * 7) % 29) as u32).collect();
