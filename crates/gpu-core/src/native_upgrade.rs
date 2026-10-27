@@ -581,6 +581,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: bf16_gemv_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     Row {
         slow: "matmul_bf16_gemv#MAXM=2",
@@ -590,6 +591,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: bf16_gemv_staged_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     Row {
         slow: "matmul_bf16_gemv#MAXM=4",
@@ -599,6 +601,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: bf16_gemv_staged_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     Row {
         slow: "matmul_bf16_gemv#MAXM=8",
@@ -608,6 +611,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: bf16_gemv_staged_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     Row {
         slow: "matmul_fp8_gemv#MAXM=1",
