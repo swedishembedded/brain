@@ -404,9 +404,10 @@ pub const ARCHS: &[Arch] = &[
     // EdgeRock is the `qwen35` decoder with a causal sliding window and an anchor
     // memory on every full-attention layer: a config variant of `brain-qwen35`
     // (`Qwen35Config::{swa_window, anchor_memory}`), so a row, not a crate.
-    // llama.cpp has no entry for it. No training caps are declared until the
-    // capability matrix names the tests that back them.
-    arch!("edgerock", "EdgeRock windowed hybrid GDN/GQA decoder with anchor memory (config variant of qwen35)", Text, Brain, "brain-qwen35", hf: &["EdgeRockForCausalLM", "edgerock"]),
+    // llama.cpp has no entry for it. Training caps are declared only where the
+    // capability matrix names the tests that back them (fp32 full fine-tune and LoRA).
+    arch!("edgerock", "EdgeRock windowed hybrid GDN/GQA decoder with anchor memory (config variant of qwen35)", Text, Brain, "brain-qwen35", hf: &["EdgeRockForCausalLM", "edgerock"],
+        caps: Caps::NONE.full_ft().lora(&[BaseTier::F32])),
     arch!("glmdsa", "GLM-5.2 (glm_moe_dsa: MLA + sigmoid noaux_tc MoE + DSA)", Text, LlamaCpp, "brain-glmdsa", hf: &["GlmMoeDsaForCausalLM", "glm_moe_dsa"],
         caps: Caps::NONE.full_ft()),
     arch!("deepseek2", "DeepSeek-V2-family MoE decoder", Text, LlamaCpp, "brain-deepseek2"),

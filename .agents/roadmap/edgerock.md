@@ -47,13 +47,40 @@ bank of both memory layers (`layer{3,7}.mem.refs`, 360 slots each) equals the
 reference exactly in both variants on both backends; flipping the tie rule in
 `anchor_select.wgsl` fails the ties variant and the model-crate selection test.
 
+- [x] M2: training at tiny scale. `model::anchor_memory::anchor_memory_bwd` (generic) differentiates the
+  memory end to end: the output projection and per-head gate, the indexed read (dP, softmax backward,
+  query gradient, then key/value gradients **gathered** per record through an inverse bank map built
+  by `anchor_slot_inverse`, so no atomics and `O(rows * heads * capacity * head_dim)`), the rotary and
+  per-head norms, the writer MLP and the input norm, with both `u` paths (query/gate and writer/key/value)
+  joined. The admission scorer gets no gradient and is `Role::Frozen` (a discrete sort reads it; weight
+  decay must not touch it either). Six new kernels (`anchor_read_bwd_{dp,q,kv}`, `anchor_slot_inverse`,
+  `anchor_read_gate_{bwd,wgrad}`) around `softmax_k_dx`, `row_dot`, `rmsnorm_bwd`, `swiglu_bwd`. The
+  windowed attention backward needs nothing new: its saved probabilities are zero outside the window.
+  Wired into `backward_over` for Full layers (the memory's `d_h` joins the layer's residual gradient;
+  the recompute policy rebuilds the memory's activations through `layer_forward`). The training
+  refusal is gone. LoRA targets `memory.{q,k,v,o}_proj` and `memory.write_{gate,up,down}_proj`
+  (`memory_lora_targets()`, asked for through `lora_cfg_for(&cfg, rank, alpha)`; `LoraSites`,
+  `hf_linear_name`), never the scorer. The arch row declares
+  `full_ft` and `lora(F32)` with the matrix rows that back them.
+  Gates: `gradcheck::check_edgerock` (b = 2, every trainable tensor of the memory and the windowed
+  layer, banks pinned: a finite-difference step that moves a bank fails loudly instead of measuring a
+  jump; rel error 1e-4 to 3e-2 over the memory tensors, no hollow memory entry),
+  `check_edgerock_lora` (all seven memory adapter pairs), `model/tests/gqa_mixer_windowed.rs`
+  (the window's forward and backward against finite differences), `model/tests/anchor_memory.rs`
+  (the read backward against an explicit scatter), `qwen35/tests/edgerock_training.rs` (a batch of two
+  sequences equals two single batches in loss and gradients, a fixed-batch loop cuts the loss by 40
+  percent, zeroing `read_scale` moves the trained loss, the scorer is never optimised),
+  `lora_freezes_base.rs` (memory base, norms, gate and scorer unchanged under LoRA).
+- [x] CUDA parity. The memory's projections are `MATMUL` kernel steps, exact fp32 on every backend; only
+  `Ops::matmul` takes the TF32 tensor-core products, and those perturb the *residual stream* the
+  scorer reads, not the scorer's own arithmetic. So the banks are exact exactly where the whole model
+  is: `edgerock_golden_parity` runs CUDA pinned to `GemmPrecision::Fp32Reference` (stages to 1e-4, banks
+  exactly equal, both variants), and at the default tier (TF32) with the `lora_gemm_precision`
+  convention (cosine 0.999) and at least 95 percent of bank slots equal: near-tied scores swap rank
+  there (1 to 2 percent of slots on `tiny_text`), which the released bf16 model does as well.
+
 ## Not yet done
 
-- [ ] M2: backward + gradcheck of the memory (the admission selection is
-  non-differentiable: gradients flow through the read, the gate, the written keys and
-  values, not through the scores) and of the windowed attention; LoRA on the memory
-  projections; batched training `b > 1` (the memory kernels already take `n_seq`; the
-  rope tables are indexed `row % rows`, check them at `b > 1`).
 - [ ] M3: decode state. Per sequence and memory layer: the committed bank (`key`/`value`
   `[groups, capacity, D]`, `score` and `position` `[groups, capacity]`), the pending
   block, and the window's ring KV; step, chunked prefill and batched decode parity
@@ -63,17 +90,12 @@ reference exactly in both variants on both backends; flipping the tie rule in
   rockmatrix-ai/EdgeRock`, model page promoted from "recognized" to usable.
 - [ ] M5: real weights (BF16 load, reference parity with the CPU torch reference,
   generation sanity, long-context retrieval).
-- [ ] M6: performance. The memory read materialises `[rows * heads, capacity + 1]`
+- [ ] M6: performance, training included: real-weight training throughput and memory (the saved `probs`
+  are `[rows * heads, capacity + 1]` per memory layer, held until the backward or recomputed).
+  Inference and training: The memory read materialises `[rows * heads, capacity + 1]`
   logits and probabilities and the windowed attention the `[B,H,T,T]` slabs (no
   windowed flash kernel yet); `anchor_select` ranks by counting, `O((capacity + chunk)^2)`
   per group and block; both want the cooperative/flash treatment per `kernels.md` F.
-- [ ] CUDA parity. With the default GEMM precision the CUDA backend runs `matmul`
-  as TF32 tensor-core products: every stage of the tiny golden differs by about 3e-3
-  relative (the plain qwen35 path too), and the admission scores perturbed that much
-  reorder near-tied bank slots (4 of 360 at layer 3 of `tiny_text`). Admission scoring
-  must be exact fp32 on every device (route `AdmissionDown`/`AdmissionUp` to the
-  fp32 reference GEMM), and a real-weight check should judge the bank by its scores
-  and the logits, not by slot equality, since the released model itself runs bf16.
 - [ ] The memory's projections are plain fp32 matmuls over the parameter store: no
   quantized tier, no adapter site. Quantizing them is only safe for the read side
   (`q/k/v/o`, writer); the scorer stays fp32.

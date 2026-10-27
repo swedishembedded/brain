@@ -18,7 +18,7 @@ named on the model's own page (see
 | [`huginn`](huginn.md) | recurrent-depth decoder: prelude, shared core re-applied, coda | [x] | [ ] | [ ] |
 | [`qwen35moe`](qwen35moe.md) | hybrid GDN/GQA sparse-MoE decoder | [x] | [ ] | [x] |
 | [`qwen35`](qwen35.md) | dense hybrid GDN/GQA decoder + MTP + vision splice | [x] | [x] | [x] |
-| [`edgerock`](edgerock.md) | windowed hybrid GDN/GQA decoder with a bounded anchor memory | [ ] | [ ] | [ ] |
+| [`edgerock`](edgerock.md) | windowed hybrid GDN/GQA decoder with a bounded anchor memory | [ ] | [x] | [x] |
 | [`gpt2`](gpt2.md) | dense nanoGPT-parity baseline | [x] | [x] | [ ] |
 | [`glmdsa`](glmdsa.md) | MLA + sigmoid noaux_tc MoE decoder | [x] | [x] | [ ] |
 
