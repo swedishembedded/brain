@@ -86,8 +86,9 @@ A request that omits `temp`, `top_k`, `top_p`, `min_p` or `repetition_penalty` i
 sampled with what the checkpoint declares: `general.sampling.*` in a GGUF,
 `generation_config.json` beside Hugging Face weights. The values are the
 `generate` action's param defaults, so `Manifests` (and `GET /v1/capabilities`)
-show what an omitted setting will be. A checkpoint that declares nothing keeps
-the action's own defaults, and a value the request sets always wins.
+show what an omitted setting will be. A chat model whose checkpoint declares
+nothing (or only some of them) is sampled with temperature 0.7, top-p 0.95 and
+top-k 20 for the rest, not greedily; a value the request sets always wins.
 
 ## Serving LoRA adapters
 

@@ -63,6 +63,16 @@ pub struct SamplingDefaults {
 }
 
 impl SamplingDefaults {
+    /// What a chat model samples with when its checkpoint declares nothing: the established chat setting
+    /// (temperature 0.7, nucleus 0.95, top-k 20) instead of greedy decoding, which loops, or an untruncated
+    /// distribution, which admits the tail. The one place the fallback is defined.
+    pub const CHAT_FALLBACK: SamplingDefaults = SamplingDefaults { temp: Some(0.7), top_k: Some(20), top_p: Some(0.95), min_p: None, repetition_penalty: None };
+
+    /// These settings, with `other`'s for every one this leaves undeclared.
+    pub fn or(self, other: SamplingDefaults) -> SamplingDefaults {
+        SamplingDefaults { temp: self.temp.or(other.temp), top_k: self.top_k.or(other.top_k), top_p: self.top_p.or(other.top_p), min_p: self.min_p.or(other.min_p), repetition_penalty: self.repetition_penalty.or(other.repetition_penalty) }
+    }
+
     /// Whether the checkpoint declares nothing.
     pub fn is_empty(&self) -> bool {
         *self == SamplingDefaults::default()
@@ -170,6 +180,13 @@ mod tests {
         std::fs::write(d.join("generation_config.json"), r#"{"top_k": "twenty"}"#).unwrap();
         assert!(SamplingDefaults::from_generation_config(&d).unwrap_err().contains("top_k"));
         assert!(SamplingDefaults::from_generation_config(&d.join("missing")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn declared_settings_win_over_the_chat_fallback_one_by_one() {
+        let declared = SamplingDefaults { temp: Some(1.0), ..Default::default() };
+        let got = declared.or(SamplingDefaults::CHAT_FALLBACK);
+        assert_eq!((got.temp, got.top_k, got.top_p), (Some(1.0), Some(20), Some(0.95)));
     }
 
     #[test]

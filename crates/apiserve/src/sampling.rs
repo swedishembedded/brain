@@ -24,7 +24,7 @@ const MAX_TEMPERATURE: f64 = 2.0;
 /// Set `temp`, `top_p`, `top_k` and `seed` on `inv` from `body`, each only when
 /// the client sent it: the action's default stands otherwise, which for a model
 /// that declares its own sampling defaults (its `generation_config.json` or GGUF
-/// metadata) is the setting its authors recommend, not the upstream APIs' 1.0.
+/// metadata) is the setting its authors recommend, else the chat fallback.
 pub fn apply(provider: Provider, body: &Value, mut inv: Invocation) -> Result<Invocation, ApiError> {
     let in_range = |name: &str, max: f64| -> Result<Option<f64>, ApiError> {
         present(body, name)

@@ -13,7 +13,7 @@
 //! `top_k`, `top_p`, `min_p` and `repetition_penalty` default to what the
 //! checkpoint declares. Both a client reading the manifest and the validation
 //! of a request that omits a setting see the declared value; a checkpoint that
-//! declares nothing is served unwrapped, with the action's own constants.
+//! declares nothing gets the chat fallback for a chat model.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -22,17 +22,15 @@ use capability::{Invocation, Manifest};
 use data::generation::SamplingDefaults;
 use residency::{AdapterIdentity, Device, Instance, InstanceKey, MemCost, ResidentModel, Tier};
 
-/// `model` served with the sampling defaults `dir`'s `generation_config.json` declares; `model` itself when the
-/// file declares none or cannot be read (the reason is logged: the constants then apply).
+/// `model` served with the sampling defaults `dir`'s `generation_config.json` declares, and for a chat model the
+/// chat fallback ([`SamplingDefaults::CHAT_FALLBACK`]) where it declares none. An unreadable file is logged and
+/// treated as declaring nothing.
 pub fn with_checkpoint_sampling(model: Arc<dyn ResidentModel>, dir: &Path) -> Arc<dyn ResidentModel> {
-    match SamplingDefaults::from_generation_config(dir) {
-        Ok(defaults) if defaults.is_empty() => model,
-        Ok(defaults) => Arc::new(CheckpointSampling { inner: model, defaults }),
-        Err(e) => {
-            residency::log::warn(&format!("ignoring the checkpoint's sampling defaults: {e}"));
-            model
-        }
-    }
+    let defaults = SamplingDefaults::from_generation_config(dir).unwrap_or_else(|e| {
+        residency::log::warn(&format!("ignoring the checkpoint's sampling defaults: {e}"));
+        SamplingDefaults::default()
+    });
+    Arc::new(CheckpointSampling { inner: model, defaults })
 }
 
 struct CheckpointSampling {
@@ -98,12 +96,14 @@ mod tests {
     fn a_resident_is_served_with_the_defaults_its_checkpoint_declares() {
         let plain: Arc<dyn ResidentModel> = Arc::new(MockResident);
         assert_eq!(default_of(&plain, "top_p"), Some(serde_json::json!(1.0)), "the mock's own constant");
+        assert_eq!(default_of(&plain, "temp"), Some(serde_json::json!(1.0)));
         let dir = declared("declared", r#"{"temperature": 0.6, "top_k": 20, "top_p": 0.95}"#);
         let served = with_checkpoint_sampling(plain.clone(), &dir);
         assert_eq!(default_of(&served, "temp"), Some(serde_json::json!(0.6)));
         assert_eq!(default_of(&served, "top_k"), Some(serde_json::json!(20)));
         assert_eq!(default_of(&served, "top_p"), Some(serde_json::json!(0.95)));
         let silent = declared("silent", r#"{"eos_token_id": 2}"#);
-        assert_eq!(default_of(&with_checkpoint_sampling(plain, &silent), "top_p"), Some(serde_json::json!(1.0)), "nothing declared keeps the constants");
+        let fallback = with_checkpoint_sampling(plain, &silent);
+        assert_eq!((default_of(&fallback, "temp"), default_of(&fallback, "top_k"), default_of(&fallback, "top_p")), (Some(serde_json::json!(0.7)), Some(serde_json::json!(20)), Some(serde_json::json!(0.95))), "nothing declared: the chat fallback");
     }
 }

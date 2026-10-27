@@ -38,8 +38,23 @@ fn a_request_that_omits_the_settings_gets_what_the_checkpoint_declares() {
     assert_eq!(got["top_k"].as_u64(), Some(20));
 }
 
+fn chat() -> ActionSpec {
+    generate().param(ParamSpec::new("messages", ParamType::Str, "chat turns"))
+}
+
 #[test]
-fn a_checkpoint_that_declares_nothing_leaves_the_constants() {
+fn a_chat_action_whose_checkpoint_declares_nothing_gets_the_chat_fallback() {
+    let spec = with_sampling_defaults(chat(), "test", &SamplingDefaults::default());
+    let got = params_of(&spec, Invocation::new());
+    assert_eq!((got["temp"].as_f64(), got["top_k"].as_u64(), got["top_p"].as_f64()), (Some(0.7), Some(20), Some(0.95)));
+    // A partly declared checkpoint keeps what it declares and takes the fallback for the rest.
+    let spec = with_sampling_defaults(chat(), "test", &SamplingDefaults { temp: Some(1.0), ..Default::default() });
+    let got = params_of(&spec, Invocation::new());
+    assert_eq!((got["temp"].as_f64(), got["top_k"].as_u64(), got["top_p"].as_f64()), (Some(1.0), Some(20), Some(0.95)));
+}
+
+#[test]
+fn an_action_that_is_not_chat_keeps_its_constants_when_nothing_is_declared() {
     let spec = with_sampling_defaults(generate(), "test", &SamplingDefaults::default());
     let got = params_of(&spec, Invocation::new());
     assert_eq!((got["temp"].as_f64(), got["top_k"].as_u64(), got["top_p"].as_f64()), (Some(0.0), Some(40), Some(1.0)));

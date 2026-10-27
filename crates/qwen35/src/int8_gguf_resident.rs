@@ -4406,7 +4406,7 @@ mod decode_phase_tests {
 
     /// A GGUF that declares `general.sampling.*` defaults is served with them: the manifest a client reads carries
     /// them as the defaults of `temp`, `top_k` and `top_p`, which is what a request that omits them gets. One that
-    /// declares nothing keeps the action's own constants.
+    /// declares nothing gets the chat fallback.
     #[test]
     fn the_checkpoints_declared_sampling_defaults_are_the_manifests_param_defaults() {
         use checkpoint::gguf::GgufValue;
@@ -4431,7 +4431,7 @@ mod decode_phase_tests {
         assert_eq!(got[1].1, serde_json::json!(20));
         assert_eq!(got[2].1.as_f64().map(|p| (p * 100.0).round()), Some(95.0));
         let silent = defaults(write("silent.gguf", &[]));
-        assert_eq!((silent[0].1.clone(), silent[1].1.clone(), silent[2].1.clone()), (serde_json::json!(0.0), serde_json::json!(40), serde_json::json!(1.0)), "nothing declared keeps the constants");
+        assert_eq!((silent[0].1.clone(), silent[1].1.clone(), silent[2].1.as_f64().map(|p| (p * 100.0).round())), (serde_json::json!(0.7), serde_json::json!(20), Some(95.0)), "nothing declared: the chat fallback");
         std::fs::remove_dir_all(&dir).ok();
     }
 

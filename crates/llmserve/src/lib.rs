@@ -181,9 +181,14 @@ pub fn with_token_capture(spec: ActionSpec) -> ActionSpec {
 /// `spec` with the sampling parameters it declares defaulting to what the checkpoint declares
 /// ([`data::generation::SamplingDefaults`]) instead of the action's own constants, so a request that omits
 /// `temp`, `top_k` or `top_p` samples the way the model's authors recommend and a client reading the manifest
-/// sees the value it will get. A setting the checkpoint declares and the action has no parameter for cannot be
+/// sees the value it will get. A chat action (one taking `messages` with `temp`, `top_k` and `top_p`) whose
+/// checkpoint leaves a setting undeclared gets [`data::generation::SamplingDefaults::CHAT_FALLBACK`] for it, not the
+/// action's greedy constants. A setting the checkpoint declares and the action has no parameter for cannot be
 /// applied: it is logged, not dropped silently.
-pub fn with_sampling_defaults(mut spec: ActionSpec, label: &str, defaults: &data::generation::SamplingDefaults) -> ActionSpec {
+pub fn with_sampling_defaults(mut spec: ActionSpec, label: &str, declared: &data::generation::SamplingDefaults) -> ActionSpec {
+    let has = |name: &str| spec.params.iter().any(|p| p.name == name);
+    let chat = ["messages", "temp", "top_k", "top_p"].iter().all(|n| has(n));
+    let defaults = &if chat { declared.or(data::generation::SamplingDefaults::CHAT_FALLBACK) } else { *declared };
     // The shortest decimal of the f32, so 0.95 reads as 0.95 and not as the f64 nearest the f32.
     let decimal = |v: f32| serde_json::json!(v.to_string().parse::<f64>().unwrap_or(f64::from(v)));
     let declared: [(&str, Option<serde_json::Value>); 5] = [
