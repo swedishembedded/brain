@@ -192,6 +192,17 @@ mod tests {
         assert!(!ats.supports(AllocPolicy::Managed), "system memory access does not imply managed allocation");
     }
 
+    /// A full card unwinds with a payload a scheduler can catch, and says what happened first: the payload bypasses
+    /// the panic hook, so the line is the only thing a user whose process dies of it ever sees.
+    #[test]
+    fn a_device_oom_names_the_allocation_and_still_unwinds_with_its_payload() {
+        let oom = DeviceOutOfMemory { bytes: 3 << 30, what: "the ring pool".to_string(), detail: "out of memory".to_string() };
+        let line = oom.report_line();
+        assert!(line.contains(&(3u64 << 30).to_string()) && line.contains("the ring pool") && line.contains("out of memory"), "{line}");
+        let caught = std::panic::catch_unwind(|| oom.clone().raise()).expect_err("raise unwinds");
+        assert_eq!(caught.downcast::<DeviceOutOfMemory>().map(|p| *p).ok(), Some(oom));
+    }
+
     #[test]
     fn a_working_set_larger_than_the_binding_is_inconsistent() {
         let l = MemoryLimits { max_allocation_bytes: 8 << 30, max_binding_bytes: 1 << 30, workspace_bytes: 1 << 20, working_set_bytes: 2 << 30 };
@@ -219,7 +230,9 @@ pub struct MemoryUsage {
 /// allocation inside a step fails, so a scheduler that owns the step can tell a
 /// full card from a bug: it fails the requests that step carried with a
 /// classed error and keeps serving, instead of tearing the whole instance down.
-/// No panic message is printed for it.
+///
+/// An unwind with a payload bypasses the panic hook, so nothing would tell a user whose process died of it what
+/// happened: [`DeviceOutOfMemory::raise`] writes one line naming the bytes and the allocation before unwinding.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceOutOfMemory {
     /// Bytes the refused allocation asked for.
@@ -228,6 +241,21 @@ pub struct DeviceOutOfMemory {
     pub what: String,
     /// The driver's own words.
     pub detail: String,
+}
+
+impl DeviceOutOfMemory {
+    /// The one line a user sees: how much was asked for, what for, and the driver's reason.
+    pub fn report_line(&self) -> String {
+        format!("brain: {self}")
+    }
+
+    /// Say what happened on stderr, then unwind with `self` as the payload (see the type's doc). A caller that
+    /// catches the payload (a scheduler failing the requests that step carried) has still been told that the
+    /// card was full; one that does not is killed with the reason in front of the user instead of a bare abort.
+    pub fn raise(self) -> ! {
+        eprintln!("{}", self.report_line());
+        std::panic::resume_unwind(Box::new(self))
+    }
 }
 
 impl std::fmt::Display for DeviceOutOfMemory {
