@@ -109,7 +109,6 @@ crates/januspro/tests/gen_train.rs	1
 crates/januspro/tests/reference_parity.rs	1
 crates/januspro/tests/t2i_real.rs	1
 crates/kronos/src/decoder.rs	1
-crates/kronos/src/finetune.rs	2
 crates/kronos/src/forecaster.rs	1
 crates/kronos/src/generate.rs	1
 crates/kronos/src/tokenizer.rs	1

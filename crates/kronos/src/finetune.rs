@@ -148,7 +148,7 @@ mod tests {
 
     #[test]
     fn tokenize_window_has_shifted_shapes() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let (model, _) = tiny_model();
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn finetune_universe_runs_end_to_end_and_gates() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let (model, base) = tiny_model();
@@ -182,7 +182,7 @@ mod tests {
     /// cannot run fails the fine-tune by name before any step.
     #[test]
     fn finetune_takes_the_saved_activation_policy_and_refuses_what_it_cannot_run() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         use model::saved::{SavedFormat, SavedPolicy};

@@ -220,8 +220,6 @@ crates/cli/tests/qwen_lora_finetune.rs	QWEN3_DIR
 crates/cli/tests/serve_cli.rs	BRAIN_AUTO_FETCH
 crates/cli/tests/serve_cli.rs	BRAIN_BACKEND
 crates/cli/tests/serve_cli.rs	BRAIN_DEVICE
-crates/ouro/tests/forward.rs	BRAIN_BACKEND
-crates/ouro/tests/parity.rs	BRAIN_OURO_DIR
 crates/cli/tests/serve_cli.rs	BRAIN_MODELS_DIR
 crates/cli/tests/serve_cli.rs	BRAIN_QWEN_WEIGHTS
 crates/cli/tests/yolov8_eval.rs	BRAIN_DEVICE
@@ -595,6 +593,10 @@ crates/horizon/tests/saved.rs	MOE_SKIP_GPU_TESTS
 crates/horizon/tests/stack.rs	MOE_SKIP_GPU_TESTS
 crates/horizon/tests/support.rs	MOE_SKIP_GPU_TESTS
 crates/horizon/tests/units.rs	MOE_SKIP_GPU_TESTS
+crates/huginn/tests/decode.rs	BRAIN_BACKEND
+crates/huginn/tests/parity.rs	BRAIN_BACKEND
+crates/huginn/tests/parity_real.rs	BRAIN_HUGINN_DIR
+crates/huginn/tests/serve.rs	BRAIN_BACKEND
 crates/imgpipe/src/lib.rs	MOE_SKIP_GPU_TESTS
 crates/instantid/tests/parity.rs	BRAIN_INSTANTID
 crates/januspro/tests/gen_train.rs	MOE_SKIP_GPU_TESTS
@@ -604,7 +606,6 @@ crates/januspro/tests/t2i_tuned_real.rs	JANUS_TUNED_DIR
 crates/januspro/tests/t2i_tuned_real.rs	JANUS_TUNED_IMAGE
 crates/januspro/tests/t2i_tuned_real.rs	JANUS_TUNED_PROMPT
 crates/kronos/src/decoder.rs	MOE_SKIP_GPU_TESTS
-crates/kronos/src/finetune.rs	MOE_SKIP_GPU_TESTS
 crates/kronos/src/forecaster.rs	<key>
 crates/kronos/src/forecaster.rs	BRAIN_KRONOS_ARGMAX
 crates/kronos/src/forecaster.rs	BRAIN_KRONOS_TEMPERATURE
@@ -846,6 +847,8 @@ crates/npu/tests/qwen_onnx.rs	BRAIN_OV_PROBE
 crates/npu/tests/qwenvl_onnx.rs	MOE_SKIP_GPU_TESTS
 crates/npu/tests/wm_onnx.rs	BRAIN_OV_PROBE
 crates/npu/tests/wm_onnx.rs	MOE_SKIP_GPU_TESTS
+crates/ouro/tests/forward.rs	BRAIN_BACKEND
+crates/ouro/tests/parity.rs	BRAIN_OURO_DIR
 crates/paramstore/src/lib.rs	BRAIN_PROFILE
 crates/paramstore/src/lib.rs	MOE_SKIP_GPU_TESTS
 crates/paramstore/src/upload.rs	MOE_SKIP_GPU_TESTS
@@ -1343,7 +1346,3 @@ crates/zipdepth/tests/p5_stereo_render.rs	STEREO_OUT_DOTS
 crates/zipdepth/tests/p5_stereo_render.rs	STEREO_OUT_TEX
 crates/zipdepth/tests/p5_stereo_render.rs	STEREO_PPM
 crates/zipdepth/tests/p5_stereo_render.rs	ZIPDEPTH_NPU_PTH
-crates/huginn/tests/parity.rs	BRAIN_BACKEND
-crates/huginn/tests/decode.rs	BRAIN_BACKEND
-crates/huginn/tests/parity_real.rs	BRAIN_HUGINN_DIR
-crates/huginn/tests/serve.rs	BRAIN_BACKEND
