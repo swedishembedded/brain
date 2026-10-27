@@ -2313,6 +2313,9 @@ impl Ops {
         if !(2..=4).contains(&group.len()) || act.xr0 != 0 {
             return None;
         }
+        if matches!(group[0].0, Weight::BF16 { .. }) {
+            return self.fused_bf16_group(group, act);
+        }
         let quant = act.quant.as_ref()?;
         let (m, k) = (act.m, act.k);
         // Every weight of the group must be the same tier, run as that tier's
@@ -2344,6 +2347,34 @@ impl Ops {
             }
         }
         self.gpu.fused_step(fused, &bufs, &params)
+    }
+
+    /// [`Self::fused_group`] for dense bf16 weights: the decode GEMV's own conditions (rows, `k`), every member the same `k`.
+    fn fused_bf16_group(&self, group: &[(&Weight, &DeviceBuffer)], act: &Act) -> Option<Step> {
+        let (m, k) = (act.m, act.k);
+        if m == 0 || m > self.dense_gemv_max_rows() || !k.is_multiple_of(8) {
+            return None;
+        }
+        let mut params = vec![m, k];
+        for (w, _) in group {
+            let Weight::BF16 { n, k: wk, .. } = w else { return None };
+            if *wk != k {
+                return None;
+            }
+            params.push(*n);
+        }
+        // Unused sets are bound to buffers the kernel never touches (they own no blocks); each is its own one-word
+        // allocation because the facade refuses a dispatch whose last binding appears twice.
+        let unused: Vec<DeviceBuffer> = (group.len()..4).map(|_| self.gpu.storage(1)).collect();
+        params.resize(6, 0);
+        let mut bufs: Vec<&DeviceBuffer> = vec![&act.x];
+        for i in 0..4 {
+            match group.get(i) {
+                Some((Weight::BF16 { w, .. }, y)) => bufs.extend([w, *y]),
+                _ => bufs.extend([&act.x, &unused[i - group.len()]]),
+            }
+        }
+        self.gpu.fused_step(gpu_core::Fused::Bf16GemvMulti, &bufs, &params)
     }
 
     /// `dX[m, k] = sum_n dY[m, n] * W[n, k]` (`accumulate` selects overwrite

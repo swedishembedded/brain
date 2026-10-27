@@ -300,7 +300,11 @@ reference exactly in both variants on both backends; flipping the tie rule in
   [2560,4096] 10.8 us (1.9 TB/s), [4096,2560] 10.3 us, LM head [248320,2560] 335 us = 3.8 TB/s; the library product measured
   21 us on the first. Graph-profiled device time of the layers at b1: 8.63 -> 7.49 ms (event stamps included, minimum over
   replays). Eight rows: the same kernel is three times slower than the library's tensor-core product (13.8 vs 4.6 ms per step),
-  so it serves one row only (`DENSE_GEMV_MAX_ROWS`); b8 is unchanged. Small projections sit at a 6.5 us latency floor
+  so it served one row only. Native builds for 2, 4 and 8 rows (`matmul_bf16_gemv_m2/_m4/_m8`: activations staged in shared
+  memory, a warp walks four weight rows per chunk) and `Fused::Bf16GemvMulti` (up to four projections of one activation in
+  one launch, bit-identical to the singles, wired through `Ops::matmul_group`: b1 dispatches 675 -> 555) are in and gated
+  (`bf16_gemv_native.rs`, m = 1..8 ragged); the multi-row crossover against the library product is not yet measured on a quiet
+  card, so `DENSE_GEMV_MAX_ROWS` stays 1. Small projections sit at a 6.5 us latency floor
   (the 32-row in_proj_a/b, 1024-row k projections).
 - [x] M5 (forward part): the released weights against the independent reference
   forward (`tools/goldens/edgerock_dump_real_reference.py`, fp32 CPU torch, a

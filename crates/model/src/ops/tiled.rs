@@ -189,6 +189,11 @@ impl Ops {
         }
     }
 
+    /// Activation rows up to which a dense bf16 weight is read by its own GEMV on this device.
+    pub(super) fn dense_gemv_max_rows(&self) -> u32 {
+        DENSE_GEMV_MAX_ROWS
+    }
+
     /// The decode-regime product of a dense bf16 weight against `act`'s few rows by the kernel that reads the weight
     /// once and the f32 activations as they are: no activation cast launch, and a grid that fills the device at one
     /// row where the library's tensor-core product leaves the bandwidth idle. `false` when the weight, the row count or
@@ -197,7 +202,7 @@ impl Ops {
         let (first, count) = rows;
         let (m, k) = (act.m, w.k());
         let Weight::BF16 { w: wb, .. } = w else { return false };
-        if m == 0 || m > DENSE_GEMV_MAX_ROWS || !k.is_multiple_of(8) || !self.gpu.caps().workgroup_reductions {
+        if m == 0 || m > self.dense_gemv_max_rows() || !k.is_multiple_of(8) || !self.gpu.caps().workgroup_reductions {
             return false;
         }
         let Some(idx) = self.gpu.kernel_index(&kernels::template::gemv_kernel_name("matmul_bf16_gemv", m)) else { return false };

@@ -422,13 +422,33 @@ const QGEMV_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, 
 /// `matmul_bf16_gemv.wgsl`'s bindings: params, `x`, `w`, `y`.
 const BF16_GEMV_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
 
-/// The bf16 GEMV's `[m, k, count, first, xr0, rpw, pad, pad]`: one activation row, `k` whole 8-weight chunks.
-fn serves_bf16_gemv(p: &[u32]) -> bool {
-    matches!(p, [1, k, count, ..] if *count >= 1 && *k >= 8 && k % 8 == 0)
+/// The bf16 GEMVs' `[m, k, count, first, xr0, rpw, pad, pad]`: up to `rows` activation rows, `k` whole 8-weight chunks.
+fn serves_bf16_gemv(p: &[u32], rows: u32) -> bool {
+    matches!(p, [m, k, count, ..] if (1..=rows).contains(m) && *count >= 1 && *k >= 8 && k % 8 == 0)
+}
+fn serves_bf16_gemv_m1(p: &[u32]) -> bool {
+    serves_bf16_gemv(p, 1)
+}
+fn serves_bf16_gemv_m2(p: &[u32]) -> bool {
+    serves_bf16_gemv(p, 2)
+}
+fn serves_bf16_gemv_m4(p: &[u32]) -> bool {
+    serves_bf16_gemv(p, 4)
+}
+fn serves_bf16_gemv_m8(p: &[u32]) -> bool {
+    serves_bf16_gemv(p, 8)
 }
 
 /// Weight rows one block of the native bf16 GEMV covers (`BRAIN_BG_COLS`): a warp per row.
 const BF16_GEMV_COLS: u32 = 8;
+
+/// Weight rows one block of the staged native bf16 GEMV covers: eight warps of four rows.
+const BF16_GEMV_STAGED_COLS: u32 = 32;
+
+/// One block per 32 weight rows.
+fn bf16_gemv_staged_blocks(p: &[u32], _tile: (u32, u32)) -> u32 {
+    p[2].div_ceil(BF16_GEMV_STAGED_COLS)
+}
 
 /// One block per 8 weight rows.
 fn bf16_gemv_blocks(p: &[u32], _tile: (u32, u32)) -> u32 {
@@ -535,8 +555,35 @@ pub(crate) const ROWS: &[Row] = &[
         slow: "matmul_bf16_gemv#MAXM=1",
         target: Target::Named("matmul_bf16_gemv_m1"),
         bindings: BF16_GEMV_BINDINGS,
-        serves: serves_bf16_gemv,
+        serves: serves_bf16_gemv_m1,
         blocks: bf16_gemv_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 1,
+    },
+    Row {
+        slow: "matmul_bf16_gemv#MAXM=2",
+        target: Target::Named("matmul_bf16_gemv_m2"),
+        bindings: BF16_GEMV_BINDINGS,
+        serves: serves_bf16_gemv_m2,
+        blocks: bf16_gemv_staged_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 1,
+    },
+    Row {
+        slow: "matmul_bf16_gemv#MAXM=4",
+        target: Target::Named("matmul_bf16_gemv_m4"),
+        bindings: BF16_GEMV_BINDINGS,
+        serves: serves_bf16_gemv_m4,
+        blocks: bf16_gemv_staged_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 1,
+    },
+    Row {
+        slow: "matmul_bf16_gemv#MAXM=8",
+        target: Target::Named("matmul_bf16_gemv_m8"),
+        bindings: BF16_GEMV_BINDINGS,
+        serves: serves_bf16_gemv_m8,
+        blocks: bf16_gemv_staged_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
     },
@@ -1271,6 +1318,10 @@ pub enum Fused {
     /// n0, n1, n2, n3]` with the RAW `k` (the q4 GEMV's own contract); bindings
     /// as [`Fused::I8GemvMulti`].
     Q4GemvMulti,
+    /// `matmul_bf16_gemv_multi`: up to four dense bf16 matrices that read ONE f32 activation (up to eight rows), multiplied
+    /// in a single launch - each output bit-identical to the single `matmul_bf16_gemv` on that matrix. Params `[m, k, n0,
+    /// n1, n2, n3]` (`n_i == 0` leaves set `i` unused); bindings `x`, then for each set its `w` (read) and `y` (written).
+    Bf16GemvMulti,
     /// `conv2d_dw_partial`: the dense conv weight gradient over `S` slices of
     /// `chunk` output positions each. Params: the conv uniform `[N, Cin, H, W,
     /// Cout, K, stride, pad, Ho, Wo]` then `[S, chunk]`; bindings `dy`, `x`
@@ -1447,6 +1498,20 @@ const GQA_DECODE_PREP_BINDINGS: &[BindKind] = &[
 
 /// `matmul_i8_gemv_multi`'s bindings: params, `xq`, `sx`, then `wq`, `sw`, `out`
 /// for each of four sets.
+/// `matmul_bf16_gemv_multi`'s bindings: params, `x`, then `w` and `y` of each of four sets.
+const BF16_GEMV_MULTI_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+];
+
 const I8_GEMV_MULTI_BINDINGS: &[BindKind] = &[
     BindKind::Uniform,
     BindKind::StorageRead,
@@ -1526,6 +1591,7 @@ impl Fused {
             Fused::MoeNvfp4GateUp => "moe_nvfp4_gateup_silu",
             Fused::I8GemvMulti => "matmul_i8_gemv_multi",
             Fused::Q4GemvMulti => "matmul_q4_gemv_multi",
+            Fused::Bf16GemvMulti => "matmul_bf16_gemv_multi",
             Fused::Conv2dDwPartial => "conv2d_dw_partial_f32",
             Fused::Conv2dDwReduce => "conv2d_dw_reduce_f32",
             Fused::I8wDx => "matmul_i8w_dx",
@@ -1548,6 +1614,7 @@ impl Fused {
             Fused::GqaDecodePrep => GQA_DECODE_PREP_BINDINGS,
             Fused::MoeNvfp4GateUp => MOE_NVFP4_GATEUP_BINDINGS,
             Fused::I8GemvMulti | Fused::Q4GemvMulti => I8_GEMV_MULTI_BINDINGS,
+            Fused::Bf16GemvMulti => BF16_GEMV_MULTI_BINDINGS,
             Fused::Conv2dDwPartial => CONV2D_DW_PARTIAL_BINDINGS,
             Fused::Conv2dDwReduce => CONV2D_DW_REDUCE_BINDINGS,
             Fused::I8wDx => I8W_DX_BINDINGS,
@@ -1591,6 +1658,7 @@ impl Fused {
                 let rows = self.tile().0;
                 matches!(params, [m, k, n0, ..] if params.len() == 6 && *m >= 1 && *m <= rows && *k >= 32 && k % 32 == 0 && *n0 >= 1)
             }
+            Fused::Bf16GemvMulti => matches!(params, [m, k, n0, ..] if params.len() == 6 && (1..=8).contains(m) && *k >= 8 && k % 8 == 0 && *n0 >= 1),
             // The dense conv uniform plus a split whose slices are whole
             // stages and together cover every position, none of them empty.
             Fused::Conv2dDwPartial => {
@@ -1631,6 +1699,10 @@ impl Fused {
             }
             // Channel tiles x column tiles x slices; the kernel numbers them
             // channel-tile fastest.
+            Fused::Bf16GemvMulti => {
+                let cols = if params[0] == 1 { BF16_GEMV_COLS } else { BF16_GEMV_STAGED_COLS };
+                params[2..6].iter().map(|n| n.div_ceil(cols)).sum::<u32>()
+            }
             Fused::Conv2dDwPartial => {
                 let (cin, cout, k) = (params[1], params[4], params[5]);
                 cout.div_ceil(conv_rows_tile(cout)) * (cin * k * k).div_ceil(CONV_DW_COLS) * params[10]

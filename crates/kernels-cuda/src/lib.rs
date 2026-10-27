@@ -1440,6 +1440,81 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/bf16_gemv.cu"),
     },
     CudaKernel {
+        name: "matmul_bf16_gemv_m2",
+        // The native twin of `matmul_bf16_gemv.wgsl` at up to 2 activation rows, redirected to by name by
+        // `gpu_core::native_upgrade`.
+        op: Op::MatMul,
+        weight: Dtype::BF16,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_matmul_bf16_gemv_m2",
+        what: "float-read GEMV of a dense bf16 weight against up to 2 f32 activation rows: activations staged in shared memory, a warp walks four weight rows over each 16-byte chunk, fused multiply-adds, warp-shuffle sums; f32 rounding of the running sum against the WGSL tier",
+        reported: "native:matmul_bf16_gemv_m2",
+        block_dim: 256,
+        // 32 weight rows (a warp each four) per block, row-tile order.
+        tile: (1, 32),
+        shared_bytes: 2 * 1024 * 4,
+        programmatic: false,
+        src: include_str!("../cu/bf16_gemv.cu"),
+    },
+    CudaKernel {
+        name: "matmul_bf16_gemv_m4",
+        // The native twin of `matmul_bf16_gemv.wgsl` at up to 4 activation rows, redirected to by name by
+        // `gpu_core::native_upgrade`.
+        op: Op::MatMul,
+        weight: Dtype::BF16,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_matmul_bf16_gemv_m4",
+        what: "float-read GEMV of a dense bf16 weight against up to 4 f32 activation rows: activations staged in shared memory, a warp walks four weight rows over each 16-byte chunk, fused multiply-adds, warp-shuffle sums; f32 rounding of the running sum against the WGSL tier",
+        reported: "native:matmul_bf16_gemv_m4",
+        block_dim: 256,
+        // 32 weight rows (a warp each four) per block, row-tile order.
+        tile: (1, 32),
+        shared_bytes: 4 * 1024 * 4,
+        programmatic: false,
+        src: include_str!("../cu/bf16_gemv.cu"),
+    },
+    CudaKernel {
+        name: "matmul_bf16_gemv_m8",
+        // The native twin of `matmul_bf16_gemv.wgsl` at up to 8 activation rows, redirected to by name by
+        // `gpu_core::native_upgrade`.
+        op: Op::MatMul,
+        weight: Dtype::BF16,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_matmul_bf16_gemv_m8",
+        what: "float-read GEMV of a dense bf16 weight against up to 8 f32 activation rows: activations staged in shared memory, a warp walks four weight rows over each 16-byte chunk, fused multiply-adds, warp-shuffle sums; f32 rounding of the running sum against the WGSL tier",
+        reported: "native:matmul_bf16_gemv_m8",
+        block_dim: 256,
+        // 32 weight rows (a warp each four) per block, row-tile order.
+        tile: (1, 32),
+        shared_bytes: 8 * 1024 * 4,
+        programmatic: false,
+        src: include_str!("../cu/bf16_gemv.cu"),
+    },
+    CudaKernel {
+        name: "matmul_bf16_gemv_multi",
+        // Up to four dense bf16 matrices that read one activation, in one launch: another entry point of the single-matrix
+        // file, running its block bodies. A fused kernel asked for by name (`gpu_core::Fused`).
+        op: Op::MatMul,
+        weight: Dtype::BF16,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_matmul_bf16_gemv_multi",
+        what: "up to four bf16 projections of one activation (up to 8 rows) in one launch, so the blocks of every matrix fill the card together; runs the single GEMV's own block bodies, bit-identical to separate launches",
+        reported: "native:matmul_bf16_gemv_multi",
+        block_dim: 256,
+        tile: (1, 8),
+        shared_bytes: 8 * 1024 * 4,
+        programmatic: false,
+        src: include_str!("../cu/bf16_gemv.cu"),
+    },
+    CudaKernel {
         name: "matmul_fp8_gemv",
         // The native twin of `matmul_fp8_gemv.wgsl` (every row-capacity variant), redirected to by name by
         // `gpu_core::native_upgrade`: the decode-regime product of a stored FP8 weight.
