@@ -359,15 +359,15 @@ fn policy_flag(policy: &mut model::policy::ServePolicy, flag: &str, value: &str)
 /// Hand the model-agnostic policy to every serving family. A family that cannot
 /// honour a precision choice refuses at build time, naming itself; the server
 /// refuses to start only when NO family can honour it.
-fn apply_policy(policy: &model::policy::ServePolicy, qwen: &mut catalog::resident_llm::QwenServeConfig, qwen35: &mut catalog::resident_qwen35::Qwen35ServeConfig) {
+fn apply_policy(policy: &model::policy::ServePolicy, qwen: &mut catalog::resident_llm::QwenServeConfig, qwen35: &mut catalog::resident_qwen35::Qwen35ServeConfig, ocr: &mut ocrserve::OcrServeConfig) {
     if *policy == model::policy::ServePolicy::default() {
         return;
     }
     eprintln!("brain serve: serving policy: {}", policy.describe());
-    match (qwen.apply_policy(policy), qwen35.apply_policy(policy)) {
-        (Err(a), Err(b)) => policy_error(&format!("no served model family can honour this policy: {a}; {b}")),
-        (a, b) => {
-            for r in [a, b] {
+    match (qwen.apply_policy(policy), qwen35.apply_policy(policy), ocr.apply_policy(policy)) {
+        (Err(a), Err(b), Err(c)) => policy_error(&format!("no served model family can honour this policy: {a}; {b}; {c}")),
+        (a, b, c) => {
+            for r in [a, b, c] {
                 match r {
                     Ok(notes) => notes.iter().for_each(|n| eprintln!("brain serve: note: {n}")),
                     Err(why) => eprintln!("brain serve: note: {why} (that family will not serve)"),
@@ -576,6 +576,7 @@ pub fn run_serve(args: &[String]) {
     // resident - two different models, so the flags are name-spaced apart.
     let mut qwen35_cfg = catalog::resident_qwen35::Qwen35ServeConfig::default();
     let mut policy = model::policy::ServePolicy::default();
+    let mut ocr_cfg = ocrserve::OcrServeConfig::default();
     // `--decision-model` / `--decision-default`: the decision models served
     // beyond those the model store holds, and the one `auto` resolves to.
     let mut decision_cfg = catalog::resident_decision::DecisionServeConfig::default();
@@ -786,7 +787,7 @@ pub fn run_serve(args: &[String]) {
         }
         qwen_cfg.adapter_bank = Some(adapter_bank);
     }
-    apply_policy(&policy, &mut qwen_cfg, &mut qwen35_cfg);
+    apply_policy(&policy, &mut qwen_cfg, &mut qwen35_cfg, &mut ocr_cfg);
 
     // Each bound ADDRESS reports its own `Gate::bound` call (`apiserve::serve_all`
     // spawns one listener per address), not each dialect flag - so a dialect
@@ -827,7 +828,7 @@ pub fn run_serve(args: &[String]) {
             ready,
             deadlines,
             adapter_mode,
-            knobs: serving::ServeKnobs { qwen: qwen_cfg, qwen35: qwen35_cfg, decision: decision_cfg },
+            knobs: serving::ServeKnobs { qwen: qwen_cfg, qwen35: qwen35_cfg, decision: decision_cfg, ocr: ocr_cfg },
         });
     }
 

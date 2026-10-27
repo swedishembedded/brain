@@ -117,6 +117,7 @@ brain-capability.workspace = true
 # `catalog.rs` is a thin CLI-local extension over this (patches back the
 # residency adapters that must stay CLI-local, see that file's module doc).
 brain-catalog.workspace = true
+brain-ocrserve.workspace = true
 # `brain decide train|eval|promote|rollback`: the decision-model lifecycle over
 # outcome-labelled examples, driven through the SDK's `decision` surface.
 brain = { workspace = true, features = ["decision"] }

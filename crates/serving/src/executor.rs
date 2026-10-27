@@ -81,6 +81,8 @@ pub struct ServeKnobs {
     /// Which decision models to serve beyond the ones the model store holds,
     /// and which one `"auto"` resolves to.
     pub decision: catalog::resident_decision::DecisionServeConfig,
+    /// The DeepSeek-OCR generations: the model-agnostic policy flags they honour (`--max-batch`, `--ctx`, `--kv-cache`, `--gemm`).
+    pub ocr: ocrserve::OcrServeConfig,
 }
 
 /// Build the shared executor with every model registered, sized to the given per-GPU
@@ -117,7 +119,9 @@ pub struct ServeKnobs {
 /// resident, and `knobs.decision` naming the decision models served beyond
 /// those the store holds.
 pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std::path::Path>, policy: Policy, knobs: ServeKnobs) -> Serving {
-    let ServeKnobs { qwen: qwen_cfg, qwen35, decision } = knobs;
+    let ServeKnobs { qwen: qwen_cfg, qwen35, decision, ocr } = knobs;
+    // Process-wide, before any OCR model is built: the models read it when they load.
+    ocrserve::configure(ocr);
     let (gpus, npus, unified_gpus) = (&machine.gpus, &machine.npus, &machine.unified_gpus);
     let (cpu_ram, pool_ram) = (machine.cpu_compute_ram, machine.pool_ram);
     let mut budgets = residency::budget::Budgets::new();

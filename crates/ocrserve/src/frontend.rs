@@ -25,11 +25,10 @@ use std::sync::{mpsc, Arc};
 use capability::{last_user_text, Invocation};
 use data::qwen_chat::TemplateFlavor;
 use data::qwen_tokenizer::QwenBpe;
-use deepseek2::serve::{pipelines, Engine, EngineConfig, Precision};
+use deepseek2::serve::{pipelines, Engine, EngineConfig};
 use deepseek2::DeepseekV2Config;
 use gpu_core::Gpu;
 use llmserve::{Encoding, Frontend, ParsedRequest, ScheduledInstance};
-use model::kv_tier::KvTier;
 use model::serve::{NoRepeatNgram, PromptEmbeds, SampleParams, Scheduler};
 use qwen3::chat::ToolChoice;
 
@@ -43,13 +42,22 @@ pub const MAX_BATCH: u32 = 64;
 pub const POOL_TOKENS: u32 = 128 * 1024;
 /// Prefill rows per forward.
 pub const PREFILL_CHUNK: u32 = 512;
+/// Prompt rows prefilled between two decode steps: one chunk. The scheduler's default of two chunks makes every step that admits a
+/// page ~80 ms longer for every page already decoding; with one, 8 full pages and 8 clients of small crops (best of two alternating
+/// runs per setting, a neighbour on the card): the crops' median latency fell 3.5 -> 1.9 s (1.1 alone) and the pages' throughput
+/// rose 36 -> 51 per minute. 256 and 128 rows were no better than 512.
+pub const PREFILL_BUDGET: u32 = 512;
+/// Prompt rows prefilled between two decode steps: one chunk. The scheduler's default of two chunks makes every step that admits a
+/// page ~80 ms longer for every page already decoding; with one, 8 full pages and 8 clients of small crops (best of two alternating
+/// runs per setting, a neighbour on the card): the crops' median latency fell 3.5 -> 1.9 s (1.1 alone) and the pages' throughput
+/// rose 36 -> 51 per minute. 256 and 128 rows were no better than 512.
 /// vLLM's recipe for this model family: no 30-gram may repeat within a 90-token window.
 pub const NGRAM_SIZE: u32 = 30;
 pub const NGRAM_WINDOW: u32 = 90;
 
-/// The decoder engine's shape at the served defaults.
+/// The decoder engine's shape under the serving configuration ([`crate::policy`]).
 pub fn engine_config() -> EngineConfig {
-    EngineConfig { max_seq: MAX_CONTEXT, pool_tokens: POOL_TOKENS, max_batch: MAX_BATCH, chunk: PREFILL_CHUNK, block_size: 64, kv: KvTier::BF16, topk: 64, precision: Precision::Auto }
+    crate::policy::config().engine_config()
 }
 
 /// How a request asks its page to be read.
@@ -75,9 +83,21 @@ pub struct PendingPage {
     instruction: String,
     image: Invocation,
     read: ReadOptions,
+    cancel: capability::CancelToken,
 }
 
 impl PendingPage {
+    /// Pixels in the page, read from its metadata without unpacking it: what its encode costs, to the first order.
+    fn pixels(&self) -> u64 {
+        let dim = |k: &str| self.image.get_blob("image").and_then(|b| b.meta.get(k)).and_then(|v| v.as_u64()).unwrap_or(0);
+        dim("w") * dim("h")
+    }
+
+    /// Whether its request was cancelled while it waited.
+    fn cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
     /// Unpack the pixels.
     fn decode(self) -> Result<PageRequest, String> {
         let (hwc, w, h) = capability::blob::decode_image(&self.image, "image")?;
@@ -127,33 +147,44 @@ struct EncodeStage {
     worker: Option<std::thread::JoinHandle<()>>,
 }
 
+/// Which queued page the encoder takes next: the cheapest, discounted by how long it has waited, so a small crop is not held behind a
+/// full page's encode (a crop is a tenth of the work) and a full page cannot be passed over forever.
+fn next_job(waiting: &[(std::time::Instant, EncodeJob)]) -> usize {
+    let cost = |(since, job): &(std::time::Instant, EncodeJob)| job.page.pixels() as f64 / (1.0 + since.elapsed().as_secs_f64());
+    (0..waiting.len()).min_by(|&a, &b| cost(&waiting[a]).total_cmp(&cost(&waiting[b]))).expect("a non-empty queue")
+}
+
 impl EncodeStage {
     fn spawn<E: PageEncoder + Send + 'static>(enc: E, ngram: NoRepeatNgram) -> EncodeStage {
         let (jobs, queue) = mpsc::channel::<EncodeJob>();
         let worker = std::thread::Builder::new()
             .name("ocr-encode".into())
             .spawn(move || {
-                // Everything that queued while the last batch ran is encoded together.
-                while let Ok(first) = queue.recv() {
-                    let mut batch = vec![first];
-                    batch.extend(queue.try_iter());
-                    let mut pages = Vec::with_capacity(batch.len());
-                    let mut replies = Vec::with_capacity(batch.len());
-                    for job in batch {
-                        match job.page.decode() {
-                            Ok(page) => {
-                                pages.push(page);
-                                replies.push((job.max_new, job.reply));
-                            }
-                            // A caller that gave up (cancelled, dropped its receiver) is not an error.
-                            Err(e) => {
-                                let _ = job.reply.send(Err(e));
-                            }
+                let mut waiting: Vec<(std::time::Instant, EncodeJob)> = Vec::new();
+                loop {
+                    if waiting.is_empty() {
+                        match queue.recv() {
+                            Ok(job) => waiting.push((std::time::Instant::now(), job)),
+                            Err(_) => return,
                         }
                     }
-                    enc.encode_many(&pages, &mut |i, result| {
-                        let (max_new, reply) = &replies[i];
-                        let _ = reply.send(result.map(|(ids, embeds)| (build_request(ids, *max_new, ngram), Some(embeds))));
+                    waiting.extend(queue.try_iter().map(|job| (std::time::Instant::now(), job)));
+                    let (_, job) = waiting.swap_remove(next_job(&waiting));
+                    // A request cancelled while it waited costs nothing.
+                    if job.page.cancelled() {
+                        let _ = job.reply.send(Err("cancelled".to_string()));
+                        continue;
+                    }
+                    let page = match job.page.decode() {
+                        Ok(page) => page,
+                        Err(e) => {
+                            let _ = job.reply.send(Err(e));
+                            continue;
+                        }
+                    };
+                    // A page is answered the moment it is encoded; a caller that gave up is not an error.
+                    enc.encode_many(std::slice::from_ref(&page), &mut |_, result| {
+                        let _ = job.reply.send(result.map(|(ids, embeds)| (build_request(ids, job.max_new, ngram), Some(embeds))));
                     });
                 }
             })
@@ -234,7 +265,7 @@ impl OcrFrontend {
         let max_new = inv.get_i64("max_new").unwrap_or(DEFAULT_MAX_NEW).clamp(1, MAX_CONTEXT as i64) as usize;
         let blob = inv.get_blob("image").ok_or("missing required input 'image'")?.clone();
         let read = ReadOptions { max_tiles: inv.get_i64("max_tiles").map(|n| n.clamp(0, 64) as u32) };
-        Ok((PendingPage { instruction, image: Invocation::new().blob("image", blob), read }, max_new))
+        Ok((PendingPage { instruction, image: Invocation::new().blob("image", blob), read, cancel: inv.cancel.clone() }, max_new))
     }
 }
 
@@ -301,5 +332,32 @@ pub fn build_engine(cfg: DeepseekV2Config, decoder: &dyn checkpoint::TensorSourc
 
 /// Wrap `front` and `engine` in the continuously-batching instance.
 pub fn instance(front: OcrFrontend, engine: Engine) -> OcrInstance {
-    ScheduledInstance::new(front, Scheduler::new(engine, MAX_BATCH as usize), MAX_BATCH as usize)
+    let rows = crate::policy::config().batch() as usize;
+    let mut scheduler = Scheduler::new(engine, rows);
+    scheduler.set_prefill_budget(PREFILL_BUDGET);
+    ScheduledInstance::new(front, scheduler, rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use capability::{Blob, Media};
+    use std::time::{Duration, Instant};
+
+    fn job(w: u32, h: u32, waited: Duration) -> (Instant, EncodeJob) {
+        let blob = Blob::new(Media::Image, Vec::new()).with_meta(serde_json::json!({"w": w, "h": h, "c": 3}));
+        let page = PendingPage { instruction: String::new(), image: Invocation::new().blob("image", blob), read: ReadOptions::default(), cancel: capability::CancelToken::default() };
+        (Instant::now().checked_sub(waited).expect("a clock that runs long enough"), EncodeJob { page, max_new: 1, reply: mpsc::channel().0 })
+    }
+
+    /// The encoder serves the cheap page first - a crop is a tenth of a page's work - but a page that has waited long enough goes
+    /// ahead of fresh crops, so a stream of crops cannot starve it.
+    #[test]
+    fn the_encoder_takes_the_cheapest_page_and_does_not_starve_a_large_one() {
+        let fresh = Duration::ZERO;
+        let queue = vec![job(2000, 3000, fresh), job(600, 400, fresh), job(1200, 1700, fresh)];
+        assert_eq!(next_job(&queue), 1, "the crop first");
+        let queue = vec![job(2000, 3000, Duration::from_secs(120)), job(600, 400, fresh)];
+        assert_eq!(next_job(&queue), 0, "a page that waited two minutes goes before a fresh crop");
+    }
 }

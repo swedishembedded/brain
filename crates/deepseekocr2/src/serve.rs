@@ -154,6 +154,7 @@ pub type DeepseekOcr2Instance = OcrInstance;
 /// Build the whole served model from `dir` (the Hugging Face checkpoint or a
 /// community GGUF pair): the vision tower on the ambient card, the decoder on `placement`.
 pub fn load(dir: &str, placement: DecoderDevice) -> Result<DeepseekOcr2Instance, String> {
+    ocrserve::config().check_servable()?;
     let t0 = std::time::Instant::now();
     let files = Files::locate(dir)?;
     let (cfg, dec_cfg) = import::configs(&files, 1)?;
@@ -167,11 +168,16 @@ pub fn load(dir: &str, placement: DecoderDevice) -> Result<DeepseekOcr2Instance,
     eprintln!("deepseek-ocr-2: vision on the ambient card, decoder on {placement:?}");
     let t1 = std::time::Instant::now();
     let vision = import::vision_reader(&files)?;
-    let sam_global = SamEncoder::new_inference(ocrserve::serving_gpu(sam1::PIPELINES), cfg.sam.clone(), &vision, 0);
+    let mut sam_global = SamEncoder::new_inference(ocrserve::serving_gpu(sam1::PIPELINES), cfg.sam.clone(), &vision, 0);
     let tile_grid = TILE_SIDE / cfg.sam.patch_size;
     let tile_weights = GridSource::new(&vision, (cfg.sam.grid_h, cfg.sam.grid_w), (tile_grid, tile_grid), cfg.sam.d_model);
-    let sam_tile = SamEncoder::new_inference(ocrserve::serving_gpu(sam1::PIPELINES), cfg.sam.at_grid(tile_grid, tile_grid), &tile_weights, 0);
-    let resampler = Resampler::new_on(ocrserve::serving_gpu(crate::encoder::PIPELINES), cfg.clone(), &vision, false);
+    let mut sam_tile = SamEncoder::new_inference(ocrserve::serving_gpu(sam1::PIPELINES), cfg.sam.at_grid(tile_grid, tile_grid), &tile_weights, 0);
+    let mut resampler = Resampler::new_on(ocrserve::serving_gpu(crate::encoder::PIPELINES), cfg.clone(), &vision, false);
+    if let Some(precision) = ocrserve::config().gemm {
+        sam_global.set_gemm_precision(precision);
+        sam_tile.set_gemm_precision(precision);
+        resampler.set_gemm_precision(precision);
+    }
     let mut separator = Vec::new();
     use checkpoint::TensorSource;
     if !vision.with_tensor_chunks("vision.view_separator", usize::MAX, &mut |_, d| separator = d.to_vec()) {

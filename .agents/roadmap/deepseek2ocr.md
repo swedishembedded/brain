@@ -1041,3 +1041,27 @@ the capture opens; the warm-up hit it).
 **The bias and the row softmax of SAM's global blocks in one kernel** (`attn_softmax_relpos`, 256 threads per row, one read and one write
 of the score slab): SAM's device time at the global view 39.5 -> 35.5 ms, the view 50 -> 45.5 ms best of 25 (tile 21.5 ms, unchanged). The kernel
 runs 0.6 ms per 200 MB chunk against a 0.12 ms floor; the 32-register row buffer is the first suspect.
+
+## 2026-10-27 round 2: fairness of short pages against long, and the serving flags
+
+Eight clients reading full pages and eight reading 600x400 crops at the same time (DeepSeek-OCR v1, gpu1, a neighbour at 150 to 410 W on the
+card; two alternating runs per setting; crops alone: median 1.1 s, p95 1.8 s, 400 per minute):
+
+| setting | crops median / p95 (s) | pages per min mixed (alone 52) |
+|---|---|---|
+| before: FIFO encoder, 1024 prefill rows between decode steps | 3.5 / 12.9 and 3.5 / 12.6 | 34.9, 35.7 |
+| + cheapest-page-first encoder | 2.6 / 10.3 | 49.9 |
+| + 512 prefill rows (one chunk) | 1.9 / 9.0 and 1.8 / 9.1 | 51.1, 50.1 |
+| 256 rows | 2.8 / 13.5 and 1.8 / 9.3 | 37.1, 49.7 |
+| 128 rows | 2.0 / 9.4 and 1.9 / 12.2 | 48.8, 40.7 |
+
+Two causes. The encoder served its queue in arrival order, so a crop (29 ms alone, 130 ms beside a decode) waited behind full pages (0.3 to 1 s
+each): it now takes the cheapest page first, discounted by the time it has waited so a page cannot be passed over forever, and drops a request
+that was cancelled while it waited (`next_job`, tested). And a decode step that also admitted a page ran two prefill chunks (~80 ms) first, so
+every page already decoding paid that on every step a new page arrived: 120 steps of a crop's decode at 70 ms is the crop's 8 s. One chunk
+between decode steps (`PREFILL_BUDGET`) halves the crops' median and raises the pages' throughput. The tail (p95 9 s against 1.8 alone) remains.
+
+**Serving flags.** The OCR models honour `--max-batch` (1 to 128), `--ctx`, `--kv-cache f32|bf16` and `--gemm fp32` (`ocrserve::policy`,
+`OCR_POLICY`): `--gemm fp32` runs the decoder's reference tier and every vision tower on the exact fp32 kernels; the pool is sized by bytes
+(bf16 128k tokens, f32 64k), so a larger batch shares it. `--weight-format` is refused by name and stops the OCR models from being served
+(`brain serve --max-batch 16 --gemm fp32 --kv-cache f32` and the refusal were run).

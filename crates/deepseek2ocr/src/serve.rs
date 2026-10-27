@@ -153,6 +153,7 @@ pub type DeepseekOcrInstance = OcrInstance;
 /// Build the whole served model from `dir` (the GGUF pair or the Hugging Face
 /// checkpoint): the vision towers on the ambient card, the decoder on `placement`.
 pub fn load(dir: &str, placement: DecoderDevice) -> Result<DeepseekOcrInstance, String> {
+    ocrserve::config().check_servable()?;
     let t0 = std::time::Instant::now();
     let files = Files::locate(dir)?;
     let cfg = import::config(&files, 1)?;
@@ -168,11 +169,15 @@ pub fn load(dir: &str, placement: DecoderDevice) -> Result<DeepseekOcrInstance, 
     let t1 = std::time::Instant::now();
     let vision = import::encoder_weights_for(&files, &cfg)?;
     let dev_vision = |k: &'static [(&'static str, &'static str)]| ocrserve::serving_gpu(k);
-    let global = DeepEncoder::new(&dev_vision, cfg.clone(), &vision, 0, false);
+    let mut global = DeepEncoder::new(&dev_vision, cfg.clone(), &vision, 0, false);
     let tile_grid = TILE_SIDE / cfg.sam.patch_size;
     let tile_cfg = cfg.at_sam_grid(tile_grid, tile_grid);
     let tile_weights = GridSource::new(&vision, (cfg.sam.grid_h, cfg.sam.grid_w), (tile_grid, tile_grid), cfg.sam.d_model);
-    let tile = DeepEncoder::new(&dev_vision, tile_cfg, &tile_weights, 0, false);
+    let mut tile = DeepEncoder::new(&dev_vision, tile_cfg, &tile_weights, 0, false);
+    if let Some(precision) = ocrserve::config().gemm {
+        global.set_gemm_precision(precision);
+        tile.set_gemm_precision(precision);
+    }
     let newline = glue_vector(&global, IMAGE_NEWLINE);
     let separator = glue_vector(&global, VIEW_SEPARATOR);
     drop(vision);

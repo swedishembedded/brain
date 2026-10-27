@@ -12,6 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 brain-capability.workspace = true
 brain-catalog.workspace = true
+brain-ocrserve.workspace = true
 brain-loader.workspace = true
 brain-residency.workspace = true
 brain-arch.workspace = true
