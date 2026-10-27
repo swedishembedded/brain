@@ -143,6 +143,20 @@ enforces it.
   sibling; before dispatching one, read its `Params`; before optimizing,
   profile per kernel kind. A finding from an audit or sweep is a hypothesis
   until checked against the source.
+- **HARD RULE: brain runs at its roofline on every device, by selection, not by
+  hand-tuning.** Running efficiently on any hardware is brain's main promise, so
+  performance never depends on someone re-optimizing for a new card. Every hot
+  op registers its implementations as candidates that declare the capabilities
+  they need; brain measures the device's roofline (peak bandwidth and compute
+  per precision/tensor-core path, by microbenchmark, not from a spec table),
+  times the supported candidates per op, weight tier and shape class, checks
+  each against the WGSL reference before it may be chosen, and caches the
+  choice per device and build. Models only call the op: no device checks or
+  hard-wired kernel choices in model code. Each chosen kernel's achieved
+  fraction of its roofline bound is recorded and listed, and ops below
+  threshold are reported as that device's gap list; kernel work is driven by
+  that list and lands as a new candidate, never as a device-specific path. A
+  gate enforces candidate coverage for every hot op and weight tier.
 - **Backward plus a gradient check is the default for every model;** imported
   models are also parity-gated against goldens. See `testing.md`.
 - **A model is done when it is served and usable as a library:** capability,
