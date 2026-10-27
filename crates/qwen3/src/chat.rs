@@ -732,9 +732,10 @@ impl SeqState {
     }
 
     /// Final text + finish reason, and the outcome those become. A
-    /// stop-string truncates the visible RAW text (existing behavior, kept
-    /// as-is - a stop-string cutting mid-generation takes precedence over any
-    /// in-flight tool call, which is left unclosed and unreported). Otherwise
+    /// stop-string truncates the visible RAW text and takes precedence over
+    /// the finish reason; the reasoning and tool calls scanned before it are
+    /// still reported, and a call it cut open is closed as truncated
+    /// (`scan_anomalies` says so). Otherwise
     /// flush any held-back multi-byte tail through the scanner, then
     /// [`ChatScanner::finish`] closes out a still-open tool call (truncated
     /// by `max_new`) rather than silently dropping it.
@@ -767,6 +768,12 @@ impl SeqState {
         // model failing the constraint, and reports `"cancelled"`.
         let demanded = matches!(self.tool_choice, ToolChoice::Required | ToolChoice::Named(_));
         let (text, finish) = if let Some(idx) = self.stop_at {
+            // The text is cut at the stop string, but the scanner has seen exactly that text: closing it
+            // reports the reasoning and the tool calls written before the stop (a call the stop cut open is
+            // reported as truncated, with the anomaly saying so) instead of dropping them.
+            let mut evs = Vec::new();
+            self.scan.finish(&mut evs);
+            emit_chat_events(&evs, progress, step, self.max_new as u32);
             (self.printed[..idx].to_string(), "stop_sequence")
         } else {
             if full.len() > self.printed.len() {
@@ -819,6 +826,10 @@ impl SeqState {
             out = out.set("seed", json!(seed));
         }
         out = out.set("finish_reason", json!(finish)).set("reasoning_content", json!(self.scan.reasoning()));
+        if !self.scan.anomalies().is_empty() {
+            let names: Vec<&str> = self.scan.anomalies().iter().map(|a| a.name()).collect();
+            out = out.set("scan_anomalies", json!(names));
+        }
         if !self.scan.tool_calls().is_empty() {
             let calls: Vec<serde_json::Value> =
                 self.scan.tool_calls().iter().map(|c| json!({ "id": c.id, "name": c.name, "arguments": c.arguments })).collect();
@@ -1256,6 +1267,71 @@ mod tests {
         assert_eq!(out.outputs.get("finish_reason"), Some(&json!("tool_calls")));
         let calls = out.outputs.get("tool_calls").and_then(|v| v.as_str()).unwrap_or("");
         assert!(calls.contains("get_weather") && calls.contains("call_0"), "tool_calls: {calls}");
+    }
+
+    /// A request over a byte-level tokenizer with the ChatML and reasoning markers: the Qwen3.8 flavor, whose
+    /// prompt ends inside an open think block.
+    fn chatml_request(stops: &[&str]) -> (QwenBpe, ParsedRequest) {
+        let tok = byte_tok(&["<|im_start|>", "<|im_end|>", "<think>", "</think>"]);
+        let mut inv = Invocation::new().set("messages", json!(r#"[{"role": "user", "content": "go"}]"#)).set("template_flavor", json!("qwen3.8"));
+        if !stops.is_empty() {
+            inv = inv.set("stop", json!(serde_json::to_string(stops).unwrap()));
+        }
+        let req = parse_request_as(&tok, &ChatFormat::Qwen, &inv).unwrap();
+        assert!(req.thinking_open);
+        (tok, req)
+    }
+
+    fn finished(tok: &QwenBpe, req: &ParsedRequest, generated: &str) -> Outcome {
+        let ids = tok.encode(generated);
+        let mut seq = SeqState::new(req, CancelToken::default());
+        // Token by token, as the scheduler streams: a stop string ends the sequence the step it completes.
+        let end = (1..=ids.len()).find(|&n| seq.advance(tok, &ids[..n], &mut |_| {})).unwrap_or(ids.len());
+        seq.finish(tok, &ids[..end], &mut |_| {})
+    }
+
+    const WEATHER_CALL: &str = "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>";
+
+    /// A call written inside the reasoning is not run, so the reply looks like a turn that ended with prose;
+    /// the outcome names what happened.
+    #[test]
+    fn a_tool_call_inside_the_reasoning_is_named_in_the_outcome() {
+        let (tok, req) = chatml_request(&[]);
+        let out = finished(&tok, &req, &format!("I should check the weather.\n{WEATHER_CALL}"));
+        assert!(out.outputs.get("tool_calls").is_none());
+        assert_eq!(out.outputs.get("finish_reason"), Some(&json!("stop")));
+        assert_eq!(out.outputs.get("scan_anomalies"), Some(&json!(["ended_inside_think", "tool_call_inside_think"])));
+        assert!(out.outputs["reasoning_content"].as_str().unwrap().contains("get_weather"));
+    }
+
+    /// A generation that read cleanly has no anomaly field at all.
+    #[test]
+    fn a_clean_outcome_has_no_scan_anomalies_field() {
+        let (tok, req) = chatml_request(&[]);
+        let out = finished(&tok, &req, &format!("weather first</think>\n\n{WEATHER_CALL}"));
+        assert_eq!(out.outputs.get("finish_reason"), Some(&json!("tool_calls")));
+        assert!(out.outputs.get("scan_anomalies").is_none());
+    }
+
+    /// A stop string ends the reply, but the call written before it is a call: it used to be dropped.
+    #[test]
+    fn a_stop_string_after_a_tool_call_keeps_the_call() {
+        let (tok, req) = chatml_request(&["HALT"]);
+        let out = finished(&tok, &req, &format!("weather first</think>\n\n{WEATHER_CALL}\nHALT and more"));
+        assert_eq!(out.outputs.get("finish_reason"), Some(&json!("stop_sequence")));
+        let calls = out.outputs.get("tool_calls").and_then(|v| v.as_str()).expect("the call written before the stop is reported");
+        assert!(calls.contains("get_weather"), "{calls}");
+        assert_eq!(out.outputs.get("reasoning_content"), Some(&json!("weather first")));
+    }
+
+    /// A stop string that lands inside a call cuts it open: it is reported as the truncated call it is.
+    #[test]
+    fn a_stop_string_inside_a_tool_call_reports_it_truncated() {
+        let (tok, req) = chatml_request(&["Paris"]);
+        let out = finished(&tok, &req, &format!("hm</think>\n\n{WEATHER_CALL}"));
+        assert_eq!(out.outputs.get("finish_reason"), Some(&json!("stop_sequence")));
+        assert!(out.outputs["tool_calls"].as_str().unwrap().contains("get_weather"));
+        assert_eq!(out.outputs.get("scan_anomalies"), Some(&json!(["truncated_tool_call"])));
     }
 
     fn byte_tok(specials: &[&str]) -> QwenBpe {

@@ -786,6 +786,44 @@ pub enum ChatEvent {
     ToolCallEnd { index: u32 },
 }
 
+/// A way a generation did not read as clean chat output: the scanner kept every byte it was given, but some of it
+/// ended up somewhere other than where the model meant it (a tool call read as reasoning or as prose), was
+/// discarded as framing, or the output was cut off. Reported with the outcome so a caller can tell a model that
+/// chose not to call a tool from one whose call was lost.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScanAnomaly {
+    /// A `<tool_call>` or `<function=` opener inside the reasoning: the scanner only watches for `</think>` there,
+    /// so the call was kept as reasoning text and not run.
+    ToolCallInsideThink,
+    /// A `<tool_call>` whose payload is not the flavor's call syntax: kept as visible content, not a call.
+    InvalidToolCallHeader,
+    /// The generation ended inside a `<tool_call>` before its header resolved: kept as visible content, not a call.
+    TruncatedToolCallHeader,
+    /// The generation ended inside a call's arguments: the call is reported with arguments as far as they went.
+    TruncatedToolCall,
+    /// Prose between a call's parameter blocks: kept as visible content.
+    StrayTextInToolCall,
+    /// Text between a call's arguments and its closing `</tool_call>`: discarded.
+    DiscardedToolCallTail,
+    /// The generation ended inside the reasoning, so there is no answer after it.
+    EndedInsideThink,
+}
+
+impl ScanAnomaly {
+    /// The stable name an outcome reports.
+    pub fn name(self) -> &'static str {
+        match self {
+            ScanAnomaly::ToolCallInsideThink => "tool_call_inside_think",
+            ScanAnomaly::InvalidToolCallHeader => "invalid_tool_call_header",
+            ScanAnomaly::TruncatedToolCallHeader => "truncated_tool_call_header",
+            ScanAnomaly::TruncatedToolCall => "truncated_tool_call",
+            ScanAnomaly::StrayTextInToolCall => "stray_text_in_tool_call",
+            ScanAnomaly::DiscardedToolCallTail => "discarded_tool_call_tail",
+            ScanAnomaly::EndedInsideThink => "ended_inside_think",
+        }
+    }
+}
+
 /// Internal scan state. The call states buffer raw text in
 /// [`ChatScanner::pending`] rather than carrying their own buffer, since the
 /// withholding logic that guards against a marker splitting across two
@@ -849,6 +887,7 @@ pub struct ChatScanner {
     id_prefix: String,
     cur_name: String,
     cur_args: String,
+    anomalies: Vec<ScanAnomaly>,
 }
 
 const MARKERS_CONTENT: [&str; 2] = ["<think>", "<tool_call>"];
@@ -883,6 +922,7 @@ impl ChatScanner {
             id_prefix: format!("call_{:016x}", crate::rng::random_seed()),
             cur_name: String::new(),
             cur_args: String::new(),
+            anomalies: Vec::new(),
         }
     }
 
@@ -908,7 +948,10 @@ impl ChatScanner {
         match self.state {
             St::Raw => return,
             St::Content => self.flush_pending_as(out, false),
-            St::Think => self.flush_pending_as(out, true),
+            St::Think => {
+                self.flush_pending_as(out, true);
+                self.note(ScanAnomaly::EndedInsideThink);
+            }
             St::CallHeader => {
                 // The header never resolved (truncated before `"arguments":`) —
                 // there is no name to attach a tool call to, so surface the raw
@@ -917,8 +960,10 @@ impl ChatScanner {
                 let text = format!("<tool_call>{}", std::mem::take(&mut self.pending));
                 self.content.push_str(&text);
                 out.push(ChatEvent::Content(text));
+                self.note(ScanAnomaly::TruncatedToolCallHeader);
             }
             St::CallArgs { .. } => {
+                self.note(ScanAnomaly::TruncatedToolCall);
                 if !self.pending.is_empty() {
                     let frag = std::mem::take(&mut self.pending);
                     self.cur_args.push_str(&frag);
@@ -927,10 +972,12 @@ impl ChatScanner {
                 self.close_call(out);
             }
             St::CallTail => {
+                self.note_discarded_tail(self.pending.len());
                 self.pending.clear();
                 self.close_call(out);
             }
             St::XmlBetween | St::XmlKey => {
+                self.note(ScanAnomaly::TruncatedToolCall);
                 // The call header already streamed as a ToolCallStart, so the
                 // whole-call re-labeling the JSON header does here is
                 // unavailable: discard whatever partial marker text is left
@@ -941,6 +988,7 @@ impl ChatScanner {
                 self.close_call(out);
             }
             St::XmlValue { .. } => {
+                self.note(ScanAnomaly::TruncatedToolCall);
                 // Cut mid-value: the buffered text is the value.
                 let raw = std::mem::take(&mut self.pending);
                 let value = raw.strip_prefix('\n').unwrap_or(&raw);
@@ -953,7 +1001,24 @@ impl ChatScanner {
                 self.close_call(out);
             }
         }
+        // A call written inside the reasoning is never opened (only `</think>` ends that state), so it shows
+        // up here as text; checked on the whole reasoning, so where the chunks fell cannot hide it.
+        if self.reasoning.contains("<tool_call>") || self.reasoning.contains("<function=") {
+            self.note(ScanAnomaly::ToolCallInsideThink);
+        }
         self.state = St::Content;
+    }
+
+    /// Where the output stopped reading as clean chat output (see [`ScanAnomaly`]), each kind once, in the
+    /// order found. Complete after [`Self::finish`].
+    pub fn anomalies(&self) -> &[ScanAnomaly] {
+        &self.anomalies
+    }
+
+    fn note(&mut self, anomaly: ScanAnomaly) {
+        if !self.anomalies.contains(&anomaly) {
+            self.anomalies.push(anomaly);
+        }
     }
 
     pub fn content(&self) -> &str {
@@ -1072,6 +1137,7 @@ impl ChatScanner {
                             let text = format!("<tool_call>{}", std::mem::take(&mut self.pending));
                             self.content.push_str(&text);
                             out.push(ChatEvent::Content(text));
+                            self.note(ScanAnomaly::InvalidToolCallHeader);
                             self.state = St::Content;
                         }
                         HeaderOutcome::Done { name, consumed_chars } => {
@@ -1103,6 +1169,7 @@ impl ChatScanner {
                             } else {
                                 self.content.push_str(&rest);
                                 out.push(ChatEvent::Content(rest));
+                                self.note(ScanAnomaly::StrayTextInToolCall);
                             }
                             return;
                         }
@@ -1111,6 +1178,7 @@ impl ChatScanner {
                             if !pre.trim_start_matches([' ', '\t', '\n', '\r']).is_empty() {
                                 self.content.push_str(&pre);
                                 out.push(ChatEvent::Content(pre));
+                                self.note(ScanAnomaly::StrayTextInToolCall);
                             }
                             self.pending.drain(..marker.len());
                             if marker == "</function>" {
@@ -1286,6 +1354,14 @@ impl ChatScanner {
         (consumed, false)
     }
 
+    /// The first `len` bytes of `pending` are about to be dropped as the gap before `</tool_call>`: fine when it is
+    /// the whitespace the model writes there, an anomaly when it is anything else.
+    fn note_discarded_tail(&mut self, len: usize) {
+        if !self.pending[..len].trim().is_empty() {
+            self.note(ScanAnomaly::DiscardedToolCallTail);
+        }
+    }
+
     /// `CallTail` scan step: consume up to and including `</tool_call>`,
     /// discarding whatever precedes it (Qwen emits a bare `\n` there) and
     /// closing out the call. Returns `false` ("need more input") if the marker
@@ -1293,6 +1369,7 @@ impl ChatScanner {
     fn scan_tail(&mut self, out: &mut Vec<ChatEvent>) -> bool {
         match self.pending.find("</tool_call>") {
             Some(pos) => {
+                self.note_discarded_tail(pos);
                 self.pending.drain(..pos + "</tool_call>".len());
                 self.close_call(out);
                 self.state = St::Content;
@@ -1302,6 +1379,7 @@ impl ChatScanner {
                 let keep = withheld_suffix_len(&self.pending, &MARKERS_TAIL);
                 let drop_len = self.pending.len() - keep;
                 if drop_len > 0 {
+                    self.note_discarded_tail(drop_len);
                     self.pending.drain(..drop_len);
                 }
                 false
@@ -2005,6 +2083,78 @@ mod tests {
         scanner.finish(&mut events);
         assert!(scanner.tool_calls().is_empty());
         assert_eq!(scanner.content(), "<tool_call>\n{\"name\": \"f\", \"arguments\": {}}\n</tool_call>");
+    }
+
+    fn scan_all(text: &str, thinking_open: bool, flavor: TemplateFlavor, chunk: usize) -> ChatScanner {
+        let mut scanner = ChatScanner::with_flavor(thinking_open, flavor);
+        let mut events = Vec::new();
+        let chars: Vec<char> = text.chars().collect();
+        for piece in chars.chunks(chunk) {
+            scanner.push(&piece.iter().collect::<String>(), &mut events);
+        }
+        scanner.finish(&mut events);
+        scanner
+    }
+
+    const XML_CALL: &str = "<tool_call>\n<function=f>\n<parameter=a>\n1\n</parameter>\n</function>\n</tool_call>";
+
+    /// Output the scanner reads as the model meant it reports no anomaly, at any chunking.
+    #[test]
+    fn a_clean_generation_reports_no_anomaly() {
+        for chunk in [1, 7, usize::MAX] {
+            let s = scan_all(&format!("plan</think>\n\nrunning it\n{XML_CALL}"), true, TemplateFlavor::Qwen38, chunk);
+            assert_eq!(s.tool_calls().len(), 1);
+            assert!(s.anomalies().is_empty(), "chunk {chunk}: {:?}", s.anomalies());
+        }
+    }
+
+    /// A call written before the reasoning is closed stays reasoning text (only `</think>` ends that state), so
+    /// the agent sees no call: it is named, whichever way the chunks fall.
+    #[test]
+    fn a_tool_call_inside_the_think_block_is_reported() {
+        for chunk in [1, 5, usize::MAX] {
+            let s = scan_all(&format!("let me run it\n{XML_CALL}"), true, TemplateFlavor::Qwen38, chunk);
+            assert!(s.tool_calls().is_empty());
+            assert!(s.reasoning().contains("<function=f>"));
+            assert_eq!(s.anomalies(), [ScanAnomaly::EndedInsideThink, ScanAnomaly::ToolCallInsideThink], "chunk {chunk}");
+        }
+    }
+
+    /// A `<tool_call>` the flavor cannot read stays visible as text and is named, in the JSON form under the XML
+    /// flavor and the reverse.
+    #[test]
+    fn a_call_in_the_wrong_syntax_is_content_and_reported() {
+        let json_call = "<tool_call>\n{\"name\": \"f\", \"arguments\": {}}\n</tool_call>";
+        let s = scan_all(json_call, false, TemplateFlavor::Qwen38, 3);
+        assert!(s.tool_calls().is_empty() && s.content().contains("\"name\""));
+        assert_eq!(s.anomalies(), [ScanAnomaly::InvalidToolCallHeader]);
+        let s = scan_all(XML_CALL, false, TemplateFlavor::Qwen3, 3);
+        assert!(s.tool_calls().is_empty() && s.content().contains("<function=f>"));
+        assert_eq!(s.anomalies(), [ScanAnomaly::InvalidToolCallHeader]);
+    }
+
+    /// Output cut inside a call: the call is reported as far as it went, or - before its name is known - kept as
+    /// text; either way the cut is named.
+    #[test]
+    fn a_generation_cut_inside_a_call_is_reported() {
+        let s = scan_all("<tool_call>\n<function=f>\n<parameter=a>\n1", false, TemplateFlavor::Qwen38, 4);
+        assert_eq!(s.tool_calls().len(), 1);
+        assert_eq!(s.anomalies(), [ScanAnomaly::TruncatedToolCall]);
+        let s = scan_all("<tool_call>\n<func", false, TemplateFlavor::Qwen38, 4);
+        assert!(s.tool_calls().is_empty() && s.content().starts_with("<tool_call>"));
+        assert_eq!(s.anomalies(), [ScanAnomaly::TruncatedToolCallHeader]);
+    }
+
+    /// Prose between parameter blocks is kept as content, and text between the arguments and `</tool_call>`
+    /// (other than the whitespace the model writes there) is dropped: both are named, since the second is a loss.
+    #[test]
+    fn text_inside_a_call_is_reported() {
+        let s = scan_all("<tool_call>\n<function=f>\nnote to self\n<parameter=a>\n1\n</parameter>\n</function>\n</tool_call>", false, TemplateFlavor::Qwen38, 6);
+        assert!(s.content().contains("note to self"));
+        assert_eq!(s.anomalies(), [ScanAnomaly::StrayTextInToolCall]);
+        let s = scan_all("<tool_call>\n<function=f>\n</function>\nand then a second call\n</tool_call>", false, TemplateFlavor::Qwen38, 6);
+        assert_eq!(s.tool_calls().len(), 1);
+        assert_eq!(s.anomalies(), [ScanAnomaly::DiscardedToolCallTail]);
     }
 
     /// The scanner is the exact inverse of the render direction: an assistant
