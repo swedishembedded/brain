@@ -27,7 +27,7 @@ use gpu_core::provider::library::LibraryGemmProvider;
 use gpu_core::{DeviceBuffer, Gpu};
 
 use crate::kv_tier::{KvKernels, KvLayer};
-use crate::block::{flash_gqa_causal_bwd, flash_gqa_causal_fwd, gqa_bwd, gqa_fwd, rmsnorm_bwd, rmsnorm_fwd, rope2d_partial_bwd, rope2d_partial_fwd, FlashGqaIds, Gqa, KernelIds};
+use crate::block::{flash_gqa_causal_bwd, flash_gqa_causal_fwd, gqa_bwd, gqa_fwd, gqa_fwd_win, rmsnorm_bwd, rmsnorm_fwd, rope2d_partial_bwd, rope2d_partial_fwd, FlashGqaIds, Gqa, KernelIds};
 
 /// Kernel-pipeline indices [`gqa_mixer_fwd`]/[`gqa_mixer_bwd`] dispatch,
 /// beyond `kernels`. Resolved by the calling model against its own
@@ -163,6 +163,59 @@ pub fn gqa_mixer_fwd_tc(
     n: u32,
     is_train: bool,
 ) -> (DeviceBuffer, Option<GqaMixerActs>) {
+    gqa_mixer_fwd_core(g, ids, flash, tensor, None, shape, w, q_full, k, v, n, is_train)
+}
+
+/// A causal sliding window on the mixer's attention: query `i` reads keys `j`
+/// with `i - window < j <= i` (`gqa_scores_win`). `window >= shape.t` is plain
+/// causal attention.
+#[derive(Clone, Copy, Debug)]
+pub struct SlidingWindow {
+    /// Pipeline index of `gqa_scores_win` in the caller's kernel list.
+    pub scores_kernel: usize,
+    /// Keys each query may look back over, itself included. At least 1.
+    pub window: u32,
+}
+
+/// [`gqa_mixer_fwd`] with a sliding-window causal mask. The attention is the
+/// materialised scores/softmax/apply chain: the masked probabilities are exactly
+/// zero outside the window, so [`gqa_mixer_bwd`] on the returned
+/// [`AttnSaved::Probs`] needs no window of its own. The flash and tensor-core
+/// paths have no window, so a long windowed sequence pays the `[B,H,T,T]` slabs
+/// until a windowed flash kernel exists.
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_mixer_fwd_windowed(
+    g: &Gpu,
+    ids: &GqaMixerIds,
+    window: SlidingWindow,
+    shape: &GqaMixerShape,
+    w: &GqaMixerWeights,
+    q_full: &DeviceBuffer,
+    k: &DeviceBuffer,
+    v: &DeviceBuffer,
+    n: u32,
+    is_train: bool,
+) -> (DeviceBuffer, Option<GqaMixerActs>) {
+    assert!(window.window >= 1, "gqa_mixer_fwd_windowed: a window of 0 lets no key through");
+    gqa_mixer_fwd_core(g, ids, None, None, Some(window), shape, w, q_full, k, v, n, is_train)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gqa_mixer_fwd_core(
+    g: &Gpu,
+    ids: &GqaMixerIds,
+    flash: Option<FlashGqaIds>,
+    tensor: Option<&LibraryGemmProvider>,
+    window: Option<SlidingWindow>,
+    shape: &GqaMixerShape,
+    w: &GqaMixerWeights,
+    q_full: &DeviceBuffer,
+    k: &DeviceBuffer,
+    v: &DeviceBuffer,
+    n: u32,
+    is_train: bool,
+) -> (DeviceBuffer, Option<GqaMixerActs>) {
+    assert!(window.is_none() || (flash.is_none() && tensor.is_none()), "gqa_mixer: the flash and tensor-core attention paths have no sliding window");
     let (nh, nkv, hd) = (shape.n_heads, shape.n_kv_heads, shape.head_dim);
     let qd = shape.qd();
 
@@ -189,7 +242,11 @@ pub fn gqa_mixer_fwd_tc(
         None => {
             let scores = g.storage(shape.b as u64 * nh as u64 * shape.t as u64 * shape.t as u64);
             let probs = g.storage(shape.b as u64 * nh as u64 * shape.t as u64 * shape.t as u64);
-            g.submit(&[], &gqa_fwd(g, &ids.kernels, &ga, &prep.q_normed, &prep.k_normed, v, &scores, &probs, &ctx));
+            let steps = match window {
+                Some(win) => gqa_fwd_win(g, win.scores_kernel, &ids.kernels, &ga, win.window, &prep.q_normed, &prep.k_normed, v, &scores, &probs, &ctx),
+                None => gqa_fwd(g, &ids.kernels, &ga, &prep.q_normed, &prep.k_normed, v, &scores, &probs, &ctx),
+            };
+            g.submit(&[], &steps);
             AttnSaved::Probs(probs)
         }
     };

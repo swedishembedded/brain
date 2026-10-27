@@ -24,6 +24,7 @@ use std::collections::HashMap;
 
 pub mod actstats;
 pub mod adapter;
+pub mod anchor_memory;
 pub mod kv_offload;
 pub mod layer_stream;
 pub mod offload;

@@ -70,6 +70,14 @@ pub const ADD_CHAN_INPLACE: &str = include_str!("../wgsl/add_chan_inplace.wgsl")
 pub const ADD_INDEX_MASK: &str = include_str!("../wgsl/add_index_mask.wgsl");
 /// `wgsl/add_inplace.wgsl`
 pub const ADD_INPLACE: &str = include_str!("../wgsl/add_inplace.wgsl");
+/// `wgsl/anchor_read_apply.wgsl`
+pub const ANCHOR_READ_APPLY: &str = include_str!("../wgsl/anchor_read_apply.wgsl");
+/// `wgsl/anchor_read_gate.wgsl`
+pub const ANCHOR_READ_GATE: &str = include_str!("../wgsl/anchor_read_gate.wgsl");
+/// `wgsl/anchor_read_scores.wgsl`
+pub const ANCHOR_READ_SCORES: &str = include_str!("../wgsl/anchor_read_scores.wgsl");
+/// `wgsl/anchor_select.wgsl`
+pub const ANCHOR_SELECT: &str = include_str!("../wgsl/anchor_select.wgsl");
 /// `wgsl/arcface_margin.wgsl`
 pub const ARCFACE_MARGIN: &str = include_str!("../wgsl/arcface_margin.wgsl");
 /// `wgsl/arcface_margin_bwd.wgsl`
@@ -1351,6 +1359,10 @@ pub const ALL: &[(&str, &str)] = &[
     ("add_chan_inplace", ADD_CHAN_INPLACE),
     ("add_index_mask", ADD_INDEX_MASK),
     ("add_inplace", ADD_INPLACE),
+    ("anchor_read_apply", ANCHOR_READ_APPLY),
+    ("anchor_read_gate", ANCHOR_READ_GATE),
+    ("anchor_read_scores", ANCHOR_READ_SCORES),
+    ("anchor_select", ANCHOR_SELECT),
     ("arcface_margin", ARCFACE_MARGIN),
     ("arcface_margin_bwd", ARCFACE_MARGIN_BWD),
     ("argmax_final", ARGMAX_FINAL),
