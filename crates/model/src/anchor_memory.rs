@@ -45,6 +45,10 @@
 //! [`MemoryProj::AdmissionDown`]/[`MemoryProj::AdmissionUp`] through a narrow
 //! tier, because a one-ulp change in a score reorders the bank.
 //!
+//! [`anchor_memory_bwd`] is the reverse: the projections' parameter gradients go through a
+//! [`ProjectBwd`] closure the same way, the read's gradient is gathered per record (no atomics), and
+//! the admission scorer is outside it by construction (a sort has no gradient).
+//!
 //! ## Sequence form and the state a later chunked form carries
 //!
 //! [`anchor_memory_fwd`] processes `n_seq` sequences of `t` tokens each from
@@ -69,17 +73,24 @@
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 
-use crate::block::{rmsnorm_fwd, rope2d_partial_fwd, KernelIds};
+use crate::block::{rmsnorm_bwd, rmsnorm_fwd, rope2d_partial_bwd, rope2d_partial_fwd, swiglu_bwd, KernelIds};
 
 /// The kernels the anchor memory adds to a model's pipeline list (they are
 /// resolved by name, [`AnchorMemoryKernels::resolve`]). `attn_softmax_cross` is
 /// the row softmax over `capacity + 1` columns.
-pub const ANCHOR_MEMORY_PIPELINES: [(&str, &str); 5] = [
+pub const ANCHOR_MEMORY_PIPELINES: [(&str, &str); 12] = [
     ("anchor_select", kernels::ANCHOR_SELECT),
     ("anchor_read_scores", kernels::ANCHOR_READ_SCORES),
     ("anchor_read_apply", kernels::ANCHOR_READ_APPLY),
     ("anchor_read_gate", kernels::ANCHOR_READ_GATE),
     ("attn_softmax_cross", kernels::ATTN_SOFTMAX_CROSS),
+    ("anchor_read_bwd_dp", kernels::ANCHOR_READ_BWD_DP),
+    ("anchor_read_bwd_q", kernels::ANCHOR_READ_BWD_Q),
+    ("anchor_slot_inverse", kernels::ANCHOR_SLOT_INVERSE),
+    ("anchor_read_bwd_kv", kernels::ANCHOR_READ_BWD_KV),
+    ("anchor_read_gate_bwd", kernels::ANCHOR_READ_GATE_BWD),
+    ("anchor_read_gate_wgrad", kernels::ANCHOR_READ_GATE_WGRAD),
+    ("softmax_k_dx", kernels::SOFTMAX_K_DX),
 ];
 
 /// The anchor-memory pipeline indices, as the caller registered them.
@@ -91,6 +102,14 @@ pub struct AnchorMemoryKernels {
     pub read_gate: usize,
     /// `attn_softmax_cross`, used as a plain row softmax.
     pub row_softmax: usize,
+    pub read_bwd_dp: usize,
+    pub read_bwd_q: usize,
+    pub slot_inverse: usize,
+    pub read_bwd_kv: usize,
+    pub read_gate_bwd: usize,
+    pub read_gate_wgrad: usize,
+    /// `softmax_k_dx`, used as the row softmax backward.
+    pub row_softmax_dx: usize,
 }
 
 impl AnchorMemoryKernels {
@@ -101,7 +120,20 @@ impl AnchorMemoryKernels {
             let name = ANCHOR_MEMORY_PIPELINES[i].0;
             gpu.kernel_index(name).ok_or_else(|| format!("anchor memory: kernel '{name}' is not registered on this Gpu (add model::anchor_memory::ANCHOR_MEMORY_PIPELINES to its pipelines)"))
         };
-        Ok(AnchorMemoryKernels { select: find(0)?, read_scores: find(1)?, read_apply: find(2)?, read_gate: find(3)?, row_softmax: find(4)? })
+        Ok(AnchorMemoryKernels {
+            select: find(0)?,
+            read_scores: find(1)?,
+            read_apply: find(2)?,
+            read_gate: find(3)?,
+            row_softmax: find(4)?,
+            read_bwd_dp: find(5)?,
+            read_bwd_q: find(6)?,
+            slot_inverse: find(7)?,
+            read_bwd_kv: find(8)?,
+            read_gate_bwd: find(9)?,
+            read_gate_wgrad: find(10)?,
+            row_softmax_dx: find(11)?,
+        })
     }
 }
 
@@ -118,6 +150,8 @@ pub struct AnchorMemoryIds {
     /// `scale_row`: `y[i] = s[i / m] * x[i]`, here the per-head read gate.
     pub scale_row: usize,
     pub rope2d_partial: usize,
+    /// `row_dot`: `out[row] = alpha * sum_k a[row, k] * b[row, k]` (backward only).
+    pub row_dot: usize,
     pub memory: AnchorMemoryKernels,
 }
 
@@ -267,20 +301,41 @@ pub struct AnchorMemoryWeights<'a> {
     pub sin: &'a DeviceBuffer,
 }
 
-/// What the forward computed on the way to its output.
+/// What the forward computed on the way to its output: the tensors
+/// [`anchor_memory_bwd`] reads (a recomputing caller drops them and reruns the
+/// forward) and the parity taps.
 pub struct AnchorMemoryActs {
+    /// `[rows, d_model]` the input-normed residual, the input of the query,
+    /// admission and writer projections.
+    pub u: DeviceBuffer,
+    /// `[rows, n_heads * head_dim]` the query projection before its per-head norm.
+    pub q_raw: DeviceBuffer,
+    /// `[rows, n_heads * head_dim]` the normalised query BEFORE the rotary embedding (the gate's input).
+    pub q_normed: DeviceBuffer,
     /// `[rows, n_kv_heads]` admission scores, fp32.
     pub scores: DeviceBuffer,
     /// `[rows * n_heads]` read gate.
     pub gate: DeviceBuffer,
     /// `[rows, n_heads * head_dim]` normalised, rotated query.
     pub query: DeviceBuffer,
+    /// `[rows, writer_intermediate]` the writer's gate and up projections and their SwiGLU product.
+    pub w_gate: DeviceBuffer,
+    pub w_up: DeviceBuffer,
+    pub w_mix: DeviceBuffer,
+    /// `[rows, d_model]` the written record `u + write_down(..)`, the input of the key and value projections.
+    pub z: DeviceBuffer,
+    /// `[rows, n_kv_heads * head_dim]` the key projection before its per-group norm.
+    pub k_raw: DeviceBuffer,
     /// `[rows, n_kv_heads * head_dim]` rotated written keys.
     pub key: DeviceBuffer,
     /// `[rows, n_kv_heads * head_dim]` written values.
     pub value: DeviceBuffer,
+    /// `[rows * n_heads, capacity + 1]` read probabilities, the sink last.
+    pub probs: DeviceBuffer,
     /// `[rows, n_heads * head_dim]` the read, before the gate.
     pub read: DeviceBuffer,
+    /// `[rows, n_heads * head_dim]` the gated read, the input of the output projection.
+    pub gated: DeviceBuffer,
     /// `[n_seq, n_blocks, n_kv_heads, capacity]`, `position + 1` (0 = empty)
     /// per slot; see [`decode_refs`].
     pub refs: DeviceBuffer,
@@ -346,14 +401,15 @@ pub fn anchor_memory_fwd(g: &Gpu, ids: &AnchorMemoryIds, s: &AnchorMemoryShape, 
     let u = wide(n, d);
     g.submit(&[], &[rmsnorm_fwd(g, k, h, w.input_norm, &u, d, n, s.rms_eps)]);
 
-    // Query, its content-only read gate, then the rotation.
+    // Query, its content-only read gate, then the rotation. The unrotated normalised query is kept (`q_normed`)
+    // for the gate's backward; `query` is the same values, rotated in place.
     let q_raw = wide(n, qd);
     project(MemoryProj::Q, &u, &q_raw);
+    let q_normed = wide(n, qd);
     let query = wide(n, qd);
-    g.submit(&[], &[rmsnorm_fwd(g, k, &q_raw, w.q_norm, &query, hd, n * hh, s.rms_eps)]);
-    // `query` is not rotated yet: the gate reads content, not position.
+    g.submit(&[], &[rmsnorm_fwd(g, k, &q_raw, w.q_norm, &q_normed, hd, n * hh, s.rms_eps), rmsnorm_fwd(g, k, &q_raw, w.q_norm, &query, hd, n * hh, s.rms_eps)]);
     let gate = wide(n, hh);
-    g.submit(&[], &[g.step(ids.memory.read_gate, &[&query, w.read_scale, w.read_gate_weight, w.read_gate_bias, &gate], &[n, hh, hd], n * hh)]);
+    g.submit(&[], &[g.step(ids.memory.read_gate, &[&q_normed, w.read_scale, w.read_gate_weight, w.read_gate_bias, &gate], &[n, hh, hd], n * hh)]);
     g.submit(&[], &[rope2d_partial_fwd(g, ids.rope2d_partial, &query, w.cos, w.sin, n, hh, s.rotary_half, qd, 0, hd)]);
 
     // Admission score, fp32: the low-rank scorer over u.
@@ -396,7 +452,158 @@ pub fn anchor_memory_fwd(g: &Gpu, ids: &AnchorMemoryIds, s: &AnchorMemoryShape, 
     let out = wide(n, d);
     project(MemoryProj::O, &gated, &out);
 
-    (out, AnchorMemoryActs { scores, gate, query, key, value, read, refs })
+    (out, AnchorMemoryActs { u, q_raw, q_normed, scores, gate, query, w_gate, w_up, w_mix, z, k_raw, key, value, probs, read, gated, refs })
+}
+
+/// `x`'s gradient through [`MemoryProj`] `which`: `dx (+)= d_out . W` (`accumulate` adds to `dx`, else overwrites)
+/// and, where the weight trains, `dW += d_out^T . x`. The model supplies it as it does [`Project`], so an adapter
+/// or a frozen base is its business.
+pub type ProjectBwd<'a> = &'a dyn Fn(MemoryProj, &DeviceBuffer, &DeviceBuffer, &DeviceBuffer, bool);
+
+/// The read gate's three parameter gradients; trained together or frozen together.
+pub struct ReadGateGrads<'a> {
+    pub scale: &'a DeviceBuffer,
+    pub weight: &'a DeviceBuffer,
+    pub bias: &'a DeviceBuffer,
+}
+
+/// [`AnchorMemoryWeights`]'s gradient buffers, accumulated into by [`anchor_memory_bwd`]. `None` when frozen.
+pub struct AnchorMemoryGrads<'a> {
+    pub input_norm: Option<&'a DeviceBuffer>,
+    pub q_norm: Option<&'a DeviceBuffer>,
+    pub k_norm: Option<&'a DeviceBuffer>,
+    pub read_gate: Option<ReadGateGrads<'a>>,
+}
+
+/// Backward of [`anchor_read_steps`]: the gradient of the read (`d_read`, `[rows, n_heads * head_dim]`, before the
+/// gate) to `(d_query, d_key, d_value)` w.r.t. the rotated query and the rotated written keys and values.
+/// `probs` is the forward's `[rows * n_heads, capacity + 1]` softmax output.
+///
+/// dP per slot, the softmax backward over the `capacity + 1` columns (the sink's dP is zero), the query gradient
+/// summed over the slots, then each record's key and value gradient gathered from the rows that read it through the
+/// inverse bank map: no atomics, and `O(rows * heads * capacity * head_dim)`.
+#[allow(clippy::too_many_arguments)]
+pub fn anchor_read_bwd(
+    g: &Gpu,
+    m: &AnchorMemoryKernels,
+    s: &AnchorMemoryShape,
+    query: &DeviceBuffer,
+    key: &DeviceBuffer,
+    value: &DeviceBuffer,
+    refs: &DeviceBuffer,
+    probs: &DeviceBuffer,
+    d_read: &DeviceBuffer,
+) -> (DeviceBuffer, DeviceBuffer, DeviceBuffer) {
+    let n = s.rows();
+    let (hh, gg, hd) = (s.n_heads, s.n_kv_heads, s.head_dim);
+    let (qd, kvd) = (hh * hd, gg * hd);
+    let wide = |rows: u32, cols: u32| g.storage_uninit(u64::from(rows) * u64::from(cols));
+    let cols = s.capacity + 1;
+    let rows_heads = u64::from(n) * u64::from(hh);
+    // The read: dP, softmax backward, the query gradient, then key and value gathered per record.
+    let rp = [n, s.t, hh, gg, s.capacity, hd, s.commit_block];
+    let dp = wide(n * hh, cols);
+    let d_logit = wide(n * hh, cols);
+    let d_query = wide(n, qd);
+    g.submit(
+        &[],
+        &[
+            g.step(m.read_bwd_dp, &[d_read, value, refs, &dp], &rp, threads("anchor_read_bwd_dp", rows_heads * u64::from(cols))),
+            g.step(m.row_softmax_dx, &[probs, &dp, &d_logit], &[n * hh, cols, 1], threads("anchor softmax backward", rows_heads)),
+            g.step(m.read_bwd_q, &[&d_logit, key, refs, &d_query], &rp, threads("anchor_read_bwd_q", rows_heads * u64::from(hd))),
+        ],
+    );
+    let slot_of = g.storage_uninit(u64::from(s.n_seq) * u64::from(s.n_blocks()) * u64::from(gg) * u64::from(s.t));
+    let inverse_entries = u64::from(s.n_seq) * u64::from(s.n_blocks()) * u64::from(gg);
+    let ip = |phase: u32| [s.n_seq, s.t, gg, s.capacity, s.commit_block, phase];
+    let d_key = wide(n, kvd);
+    let d_value = wide(n, kvd);
+    g.submit(
+        &[],
+        &[
+            g.step(m.slot_inverse, &[refs, &slot_of], &ip(0), threads("anchor_slot_inverse", inverse_entries * u64::from(s.t))),
+            g.step(m.slot_inverse, &[refs, &slot_of], &ip(1), threads("anchor_slot_inverse", inverse_entries * u64::from(s.capacity))),
+            g.step(m.read_bwd_kv, &[&slot_of, &d_logit, probs, query, d_read, &d_key, &d_value], &rp, threads("anchor_read_bwd_kv", u64::from(n) * u64::from(kvd))),
+        ],
+    );
+
+    (d_query, d_key, d_value)
+}
+
+/// Reverse of [`anchor_memory_fwd`]: `d_out` (`[rows, d_model]`, the gradient of the memory's output) to `d_h`, the
+/// gradient of the layer's residual input, accumulating every norm, read-gate and (through `project_bwd`)
+/// projection gradient the caller trains.
+///
+/// **The admission scorer gets no gradient.** Which records a bank holds is a discrete decision (a sort by score),
+/// so the loss is piecewise constant in the scores: `admission_down`/`admission_up` are outside the backward by
+/// construction, and the gradient reaches the input only through the read, the gate and the written key and value.
+/// A scorer is trained by a different objective, never by a fabricated surrogate here.
+///
+/// The read's backward is a softmax backward over the bank slots and a gather: each record collects the gradient of
+/// every row that read it through the inverse bank map (`anchor_slot_inverse`), so no atomics are needed and the
+/// work is the forward read's, `O(rows * heads * capacity * head_dim)`, never quadratic in the sequence.
+#[allow(clippy::too_many_arguments)]
+pub fn anchor_memory_bwd(g: &Gpu, ids: &AnchorMemoryIds, s: &AnchorMemoryShape, w: &AnchorMemoryWeights, gw: &AnchorMemoryGrads, project_bwd: ProjectBwd, acts: &AnchorMemoryActs, h: &DeviceBuffer, d_out: &DeviceBuffer) -> DeviceBuffer {
+    let n = s.rows();
+    let (d, hh, gg, hd) = (s.d_model, s.n_heads, s.n_kv_heads, s.head_dim);
+    let (qd, kvd) = (hh * hd, gg * hd);
+    let (k, m) = (&ids.kernels, &ids.memory);
+    let wide = |rows: u32, cols: u32| g.storage_uninit(u64::from(rows) * u64::from(cols));
+
+    // Output projection, then the gate: gated = read * gate per head.
+    let d_gated = wide(n, qd);
+    project_bwd(MemoryProj::O, d_out, &acts.gated, &d_gated, false);
+    let d_read = wide(n, qd);
+    let d_gate = wide(n, hh);
+    g.submit(
+        &[],
+        &[
+            g.step(ids.scale_row, &[&d_gated, &acts.gate, &d_read], &[n * qd, hd], n * qd),
+            g.step(ids.row_dot, &[&d_gated, &acts.read, &d_gate], &[n * hh, hd, 0, 0, gpu_core::f(1.0)], n * hh),
+        ],
+    );
+
+    let (d_query, d_key, d_value) = anchor_read_bwd(g, m, s, &acts.query, &acts.key, &acts.value, &acts.refs, &acts.probs, &d_read);
+
+    // Query path: un-rotate, the gate's backward, the per-head norm, the projection.
+    g.submit(&[], &[rope2d_partial_bwd(g, ids.rope2d_partial, &d_query, w.cos, w.sin, n, hh, s.rotary_half, qd, 0, hd)]);
+    let gate_p = [n, hh, hd];
+    let (dz, dsc) = (wide(n, hh), wide(n, hh));
+    g.submit(&[], &[g.step(m.read_gate_bwd, &[&acts.q_normed, &d_gate, w.read_scale, w.read_gate_weight, w.read_gate_bias, &dz, &dsc, &d_query], &gate_p, n * hh)]);
+    if let Some(rg) = &gw.read_gate {
+        g.submit(&[], &[g.step(m.read_gate_wgrad, &[&acts.q_normed, &dz, &dsc, rg.weight, rg.bias, rg.scale], &gate_p, hh * (hd + 2))]);
+    }
+    let d_q_raw = wide(n, qd);
+    let inv_q = wide(n, hh);
+    g.submit(&[], &rmsnorm_bwd(g, k, &acts.q_raw, w.q_norm, &d_query, &d_q_raw, &inv_q, gw.q_norm, hd, n * hh, s.rms_eps));
+    let d_u = wide(n, d);
+    project_bwd(MemoryProj::Q, &d_q_raw, &acts.u, &d_u, false);
+
+    // Key and value path: both read the written record z.
+    g.submit(&[], &[rope2d_partial_bwd(g, ids.rope2d_partial, &d_key, w.cos, w.sin, n, gg, s.rotary_half, kvd, 0, hd)]);
+    let d_k_raw = wide(n, kvd);
+    let inv_k = wide(n, gg);
+    g.submit(&[], &rmsnorm_bwd(g, k, &acts.k_raw, w.k_norm, &d_key, &d_k_raw, &inv_k, gw.k_norm, hd, n * gg, s.rms_eps));
+    let d_z = wide(n, d);
+    project_bwd(MemoryProj::K, &d_k_raw, &acts.z, &d_z, false);
+    project_bwd(MemoryProj::V, &d_value, &acts.z, &d_z, true);
+
+    // The writer: z = u + write_down(silu(write_gate u) * write_up u), so d_z reaches u directly and through the MLP.
+    let wi = s.writer_intermediate;
+    let d_mix = wide(n, wi);
+    project_bwd(MemoryProj::WriteDown, &d_z, &acts.w_mix, &d_mix, false);
+    let (d_w_gate, d_w_up) = (wide(n, wi), wide(n, wi));
+    g.submit(&[], &swiglu_bwd(g, k, &acts.w_gate, &acts.w_up, &d_mix, &d_w_gate, &d_w_up, n * wi));
+    project_bwd(MemoryProj::WriteGate, &d_w_gate, &acts.u, &d_u, true);
+    project_bwd(MemoryProj::WriteUp, &d_w_up, &acts.u, &d_u, true);
+    let d_u_total = wide(n, d);
+    g.submit(&[], &[g.step(ids.add2, &[&d_u, &d_z, &d_u_total], &[n * d], n * d)]);
+
+    // The input norm: u = rmsnorm(h).
+    let d_h = wide(n, d);
+    let inv_h = wide(n, 1);
+    g.submit(&[], &rmsnorm_bwd(g, k, h, w.input_norm, &d_u_total, &d_h, &inv_h, gw.input_norm, d, n, s.rms_eps));
+    d_h
 }
 
 /// `refs` as host token indices: `position` of each slot, `-1` for an empty one.
