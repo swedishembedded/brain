@@ -82,6 +82,14 @@ impl EncoderFineTuner {
         Ok(EncoderFineTuner { model, tok, seq_len, batch_size, d_model, temperature: 0.05, step: 0 })
     }
 
+    /// What each step's backward keeps of the encoder's forward: every layer's activations or only each layer's input,
+    /// recomputed in the backward for the same gradients at lower memory ([`model::saved::SavedPolicy`]). A choice the
+    /// encoder cannot run is refused by name.
+    pub fn activations(mut self, policy: model::saved::SavedPolicy) -> Result<Self> {
+        model::Model::set_saved_policy(&mut self.model, policy).map_err(Error::Backend)?;
+        Ok(self)
+    }
+
     /// See [`crate::EmbeddingTrainer::temperature`] - the same knob, the same
     /// default.
     pub fn temperature(mut self, t: f32) -> Self {

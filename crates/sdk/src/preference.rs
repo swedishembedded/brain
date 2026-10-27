@@ -86,6 +86,8 @@ pub struct PreferenceFineTune {
     checkpoint_every: u32,
     cycle: u64,
     device: Device,
+    /// What each step's backward keeps of its forward ([`PreferenceFineTune::activations`]); `None` is the base's own.
+    activations: Option<model::saved::SavedPolicy>,
     base_format: Option<String>,
 }
 
@@ -116,6 +118,7 @@ impl PreferenceFineTune {
             checkpoint_every: 0,
             cycle: 0,
             device: Device::default(),
+            activations: None,
             base_format: None,
         }
     }
@@ -270,6 +273,14 @@ impl PreferenceFineTune {
         self
     }
 
+    /// What each step's backward keeps of its forward: every layer's activations or only each layer's input, recomputed
+    /// in the backward ([`model::saved::SavedPolicy`]). Unset, the base decides (Qwen3 always recomputes); a choice the
+    /// base cannot run fails the run by name before the first step.
+    pub fn activations(mut self, policy: model::saved::SavedPolicy) -> Self {
+        self.activations = Some(policy);
+        self
+    }
+
     pub fn device(mut self, device: Device) -> Self {
         self.device = device;
         self
@@ -327,7 +338,7 @@ impl PreferenceFineTune {
         let state_path = out_dir.join(STATE_FILE);
         let seed = resolve_seed(self.seed, Some(&state_path))?;
         // Both rows of a pair share one forward.
-        let opts = model::FitOpts { batch_size: 2, grad_accum: self.grad_accum, ..fit_opts(self.steps, block, self.lr, seed) };
+        let opts = model::FitOpts { batch_size: 2, grad_accum: self.grad_accum, precision: model::TrainPrecision { activations: self.activations, ..Default::default() }, ..fit_opts(self.steps, block, self.lr, seed) };
         let base_digest = digest(&weights)?;
         let dataset_id = digest(dataset)?;
         let identity = serde_json::json!({

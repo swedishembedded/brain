@@ -128,6 +128,8 @@ pub struct ChatFineTune {
     gemm_precision: crate::GemmPrecision,
     thinking: bool,
     pack_answers: bool,
+    /// What each step's backward keeps of its forward ([`ChatFineTune::activations`]); `None` is the base's own default.
+    activations: Option<model::saved::SavedPolicy>,
 }
 
 /// The architecture a [`ChatFineTune`] trains, with the tier its frozen base
@@ -271,7 +273,7 @@ impl ChatFamily {
                 Ok((report, TrainedLora::Qwen3(trained), Vec::new()))
             }
             ChatFamily::Qwen35(dtype) => {
-                let run = qwen35::finetune::StreamedRun { dtype: *dtype, recompute: qwen35::base_source::is_frozen_only(*dtype), long: qwen35::finetune::LongSeqOverrides::default() };
+                let run = qwen35::finetune::StreamedRun { dtype: *dtype, recompute: qwen35_recompute(*dtype, opts.precision.activations)?, long: qwen35::finetune::LongSeqOverrides::default() };
                 let (report, trained, scored) = qwen35::finetune::finetune_lora_scored_tuned(open, prepared_dir, opts, rank, alpha, tuning, continue_from, &run, control, held_out)?;
                 Ok((report, TrainedLora::Qwen35(Box::new(trained)), scored))
             }
@@ -377,6 +379,7 @@ impl ChatFineTune {
             gemm_precision: crate::GemmPrecision::Auto,
             thinking: true,
             pack_answers: false,
+            activations: None,
         }
     }
 
@@ -720,6 +723,16 @@ impl ChatFineTune {
         self
     }
 
+    /// What each step's backward keeps of its forward: every layer's activations ([`model::saved::SavedPolicy::Keep`])
+    /// or only each layer's input, the layer recomputed in the backward for the same gradients at lower memory
+    /// ([`model::saved::SavedPolicy::Recompute`]). Unset, the base decides: Qwen3 always recomputes, Qwen3.5 recomputes
+    /// over a narrow base and keeps over an fp32 one. A choice the base cannot run fails the run by name before the
+    /// first step.
+    pub fn activations(mut self, policy: model::saved::SavedPolicy) -> Self {
+        self.activations = Some(policy);
+        self
+    }
+
     /// Run to completion.
     pub fn run(&self) -> Result<ChatFineTuneOutcome> {
         self.run_with(&CancelToken::default(), |_| {})
@@ -836,6 +849,7 @@ impl ChatFineTune {
             weight_decay: self.weight_decay,
             gemm_precision: self.gemm_precision,
             cooldown_steps: self.cooldown_steps.unwrap_or(self.steps / COOLDOWN_DIVISOR),
+            precision: model::TrainPrecision { activations: self.activations, ..Default::default() },
             ..fit_opts(self.steps, block, self.lr, seed)
         };
         let base_digest = base_digest(&open)?;
@@ -1815,6 +1829,20 @@ pub(crate) fn resolve_seed(requested: Option<u64>, state: Option<&Path>) -> Resu
     Ok(saved.unwrap_or_else(crate::random_seed))
 }
 
+/// Whether a Qwen3.5 LoRA run over a `dtype` base recomputes its layers under `activations`: the base's default
+/// (recompute over a narrow base, keep over fp32) when unset; recompute over fp32 is refused, the f32 resident trainer
+/// keeping every layer.
+fn qwen35_recompute(dtype: qwen3::Dtype, activations: Option<model::saved::SavedPolicy>) -> std::io::Result<bool> {
+    use model::saved::SavedPolicy;
+    let narrow = qwen35::base_source::is_frozen_only(dtype);
+    match activations {
+        None => Ok(narrow),
+        Some(SavedPolicy::Keep) => Ok(false),
+        Some(SavedPolicy::Recompute) if narrow => Ok(true),
+        Some(other) => Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("qwen35 LoRA: activations {other:?} is not available over a {dtype:?} base; recompute needs a narrow base (bf16, nf4 or fp8)"))),
+    }
+}
+
 pub(crate) fn fit_opts(steps: u32, block: u32, lr: f32, seed: u64) -> model::FitOpts {
     model::FitOpts {
         steps,
@@ -1864,6 +1892,19 @@ pub(crate) fn utf8(path: &Path) -> Result<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Spec: a Qwen3.5 LoRA run takes the base's default without a choice, keeps on request, recomputes on request
+    /// over a narrow base, and refuses recompute over fp32 by name.
+    #[test]
+    fn qwen35_activations_follow_the_base_and_refuse_what_it_cannot_run() {
+        use model::saved::SavedPolicy;
+        let narrow = qwen3::Dtype::BF16;
+        assert_eq!(qwen35_recompute(narrow, None).unwrap(), qwen35::base_source::is_frozen_only(narrow));
+        assert!(!qwen35_recompute(narrow, Some(SavedPolicy::Keep)).unwrap());
+        assert!(qwen35_recompute(narrow, Some(SavedPolicy::Recompute)).unwrap());
+        assert!(!qwen35_recompute(qwen3::Dtype::F32, None).unwrap());
+        assert!(qwen35_recompute(qwen3::Dtype::F32, Some(SavedPolicy::Recompute)).unwrap_err().to_string().contains("qwen35"));
+    }
 
     /// A continued rsLoRA adapter trains on at the alpha that reproduces the
     /// scale its card records, and a LoRA+ ratio that cannot train is refused.
