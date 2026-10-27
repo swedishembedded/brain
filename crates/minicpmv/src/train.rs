@@ -28,6 +28,7 @@ use std::path::Path;
 
 use data::rng::Rng;
 use gpu_core::Gpu;
+use model::saved::SavedPolicy;
 use optim::Optim;
 use qwen35::base_source::BaseCheckpoint;
 use qwen35::model::{Qwen35, TrainOpts};
@@ -252,6 +253,17 @@ impl Trainer {
         targets.resize(block, model::IGNORE);
         self.decoder.set_batch(&ids, &targets);
         Ok(VisionPass { image, video })
+    }
+
+    /// What the backward keeps of the forward ([`SavedPolicy`]) in the parts that train. The decoder takes it as
+    /// `qwen35` does. A vision tower that trains below the connector always rebuilds each encoder block from its
+    /// input ([`Tower::set_saved_policy`]), so it accepts only recomputing and keeping is refused by name; with the
+    /// tower frozen the decoder alone decides.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        if self.spec.vision != PartMode::Frozen {
+            self.tower.set_saved_policy(policy)?;
+        }
+        model::Model::set_saved_policy(&mut self.decoder, policy)
     }
 
     /// Re-fold the vision LoRA before the next forward (after its factors

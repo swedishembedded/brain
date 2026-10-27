@@ -26,6 +26,7 @@
 use std::collections::HashMap;
 
 use gpu_core::{f, DeviceBuffer, Gpu};
+use model::saved::SavedPolicy;
 use model::vit::{self, VitBlockCache, VitBlockGrads, VitBwdIds, VitBwdScratch, VitKernelIds};
 use paramstore::{ParamStore, Role};
 
@@ -108,6 +109,12 @@ impl Tower {
 
     pub fn zero_grads(&self) {
         self.ps.zero_grads(&self.gpu);
+    }
+
+    /// The encoder's backward always rebuilds each block from the block's input (see the module doc): recomputing
+    /// is accepted as what it already does, keeping every block and a narrow saved format are refused by name.
+    pub fn set_saved_policy(&self, policy: SavedPolicy) -> Result<(), String> {
+        model::saved::recompute_only("minicpmv vision tower", policy)
     }
 
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
