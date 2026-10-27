@@ -169,17 +169,23 @@ pub fn load(dir: &str, placement: DecoderDevice) -> Result<DeepseekOcrInstance, 
     let t1 = std::time::Instant::now();
     let vision = import::encoder_weights_for(&files, &cfg)?;
     let dev_vision = |k: &'static [(&'static str, &'static str)]| ocrserve::serving_gpu(k);
-    let mut global = DeepEncoder::new(&dev_vision, cfg.clone(), &vision, 0, false);
     let tile_grid = TILE_SIDE / cfg.sam.patch_size;
     let tile_cfg = cfg.at_sam_grid(tile_grid, tile_grid);
-    let tile_weights = GridSource::new(&vision, (cfg.sam.grid_h, cfg.sam.grid_w), (tile_grid, tile_grid), cfg.sam.d_model);
-    let mut tile = DeepEncoder::new(&dev_vision, tile_cfg, &tile_weights, 0, false);
-    if let Some(precision) = ocrserve::config().gemm {
-        global.set_gemm_precision(precision);
-        tile.set_gemm_precision(precision);
-    }
-    let newline = glue_vector(&global, IMAGE_NEWLINE);
-    let separator = glue_vector(&global, VIEW_SEPARATOR);
+    // One set of towers per encoder thread: their scratch is per instance, so two pages encode at once only with two sets.
+    let towers: Vec<(DeepEncoder, DeepEncoder)> = (0..ocrserve::ENCODE_WORKERS)
+        .map(|_| {
+            let mut global = DeepEncoder::new(&dev_vision, cfg.clone(), &vision, 0, false);
+            let tile_weights = GridSource::new(&vision, (cfg.sam.grid_h, cfg.sam.grid_w), (tile_grid, tile_grid), cfg.sam.d_model);
+            let mut tile = DeepEncoder::new(&dev_vision, tile_cfg.clone(), &tile_weights, 0, false);
+            if let Some(precision) = ocrserve::config().gemm {
+                global.set_gemm_precision(precision);
+                tile.set_gemm_precision(precision);
+            }
+            (global, tile)
+        })
+        .collect();
+    let newline = glue_vector(&towers[0].0, IMAGE_NEWLINE);
+    let separator = glue_vector(&towers[0].0, VIEW_SEPARATOR);
     drop(vision);
     stage_time("load: DeepEncoders (mmproj import, weight upload)", t1);
 
@@ -189,7 +195,8 @@ pub fn load(dir: &str, placement: DecoderDevice) -> Result<DeepseekOcrInstance, 
     let engine = ocrserve::build_engine(cfg.decoder.clone(), &decoder, placement).map_err(|e| format!("deepseek-ocr: {e}"))?;
     stage_time("load: decoder engine (weight upload, KV pool)", t2);
 
-    let front = OcrFrontend::new(PageEncoder { cfg, global, tile, newline, separator, tok }, "deepseek-ocr", eos, &allow);
+    let encoders = towers.into_iter().map(|(global, tile)| PageEncoder { cfg: cfg.clone(), global, tile, newline: newline.clone(), separator: separator.clone(), tok: tok.clone() }).collect();
+    let front = OcrFrontend::new(encoders, "deepseek-ocr", eos, &allow);
     stage_time("load: TOTAL", t0);
     Ok(ocrserve::instance(front, engine))
 }

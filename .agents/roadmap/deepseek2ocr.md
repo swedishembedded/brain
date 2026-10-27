@@ -1182,3 +1182,10 @@ softmax, the windowed relative-position attention 6 ms, CLIP's attention 3.7 ms:
 101 keys are not multiples of 4); a second encoder pair for concurrent encodes would cost ~3 GB each against the 7 GiB vision budget; the 64-row decode step
 is 33% paged attention near its bandwidth floor (fp8 K/V would halve the bytes, not measured) and 85 activation casts. fp8 expert weights would not
 reduce the step: they are as many bytes as int8.
+
+## Round 2: concurrent encoders (ENCODE_WORKERS = 2)
+
+The encoder stage runs two worker threads, each owning a tower set, with SAM activation scratch shared between the sets. `encode_concurrency` (tile views/s,
+1/2/3 threads): 44.3 / 61.9 / 69.5. Server A/B, 64 clients: 256-token pages 238 -> 268 (v1) / 319 (v2) pages/min, 1024-token pages 107 -> 111 (v1) and
+187 -> 206 (v2). Cost: 32.6 GiB per replica (22.7 before; 34 before the shared scratch), so the footprints are now 15 + 18 GiB. Peer load on the card was
+present throughout; numbers are best of N alternating runs.

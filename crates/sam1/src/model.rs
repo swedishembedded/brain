@@ -417,6 +417,36 @@ impl Block {
         }
     }
 
+    /// An inference build runs its blocks one after another, so they need one set of activation buffers, not twelve: the blocks of one kind
+    /// (global, windowed) share the first one's scratch. Each keeps its own `out` (the next block's input, and a tap the HD branch reads).
+    /// A training build keeps every block's activations: its backward reads them. At the served size this is ~5 GiB per tower set.
+    fn share_scratch(blocks: &mut [Block]) {
+        for global in [true, false] {
+            let kind: Vec<usize> = (0..blocks.len()).filter(|&i| blocks[i].win.is_none() == global).collect();
+            let Some((&first, rest)) = kind.split_first() else { continue };
+            let donor = (
+                blocks[first].ln1.clone(),
+                blocks[first].wm.clone(),
+                blocks[first].qkv.clone(),
+                blocks[first].ctx.clone(),
+                blocks[first].scores.clone(),
+                blocks[first].probs.clone(),
+                blocks[first].kt.clone(),
+                blocks[first].proj.clone(),
+                blocks[first].attn_out.clone(),
+                blocks[first].res.clone(),
+                blocks[first].ln2.clone(),
+                blocks[first].h.clone(),
+                blocks[first].h2.clone(),
+                blocks[first].mlp_out.clone(),
+            );
+            for &i in rest {
+                let b = &mut blocks[i];
+                (b.ln1, b.wm, b.qkv, b.ctx, b.scores, b.probs, b.kt, b.proj, b.attn_out, b.res, b.ln2, b.h, b.h2, b.mlp_out) = donor.clone();
+            }
+        }
+    }
+
     /// The backward scratch, or a panic naming the build that lacks it.
     fn bwd(&self) -> &BlockBwd {
         self.bwd.as_ref().expect("sam1: this is an inference build (train = false); it has no backward scratch")
@@ -819,7 +849,10 @@ impl SamEncoder {
             }
         });
 
-        let blocks: Vec<Block> = (0..cfg.n_layers).map(|l| Block::new(&gpu, &cfg, l, train, ids.flash_rel.is_some() && cfg.head_dim() <= 128)).collect();
+        let mut blocks: Vec<Block> = (0..cfg.n_layers).map(|l| Block::new(&gpu, &cfg, l, train, ids.flash_rel.is_some() && cfg.head_dim() <= 128)).collect();
+        if !train {
+            Block::share_scratch(&mut blocks);
+        }
 
         // Two-way coverage between the graph and the manifest: every tensor the
         // graph reads is declared, and every declared tensor is read. Without

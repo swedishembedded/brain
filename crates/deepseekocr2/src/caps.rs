@@ -21,7 +21,7 @@ pub use ocrserve::{DEFAULT_INSTRUCTION, DEFAULT_MAX_NEW, MAX_CONTEXT};
 /// What the model holds while hot. The decoder is DeepSeek-OCR's, byte for byte,
 /// so its figures are DeepSeek-OCR's (`deepseek2ocr::caps`); the vision side is
 /// SAM plus a 24-layer Qwen2 resampler.
-pub const FOOTPRINT: Footprint = Footprint { vision_device: 8u64 << 30, decoder_device: 14u64 << 30, host_gpu_decoder: 3u64 << 30, host_cpu_decoder: 14u64 << 30 };
+pub const FOOTPRINT: Footprint = Footprint { vision_device: 15u64 << 30, decoder_device: 18u64 << 30, host_gpu_decoder: 3u64 << 30, host_cpu_decoder: 14u64 << 30 };
 
 /// DeepSeek-OCR-2, as the serving layer sees it.
 pub struct DeepseekOcr2;

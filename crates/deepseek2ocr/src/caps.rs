@@ -36,7 +36,14 @@ pub use ocrserve::{DEFAULT_INSTRUCTION, DEFAULT_MAX_NEW, MAX_CONTEXT};
 /// alone). 7 GiB rounds that up.
 ///
 /// The residency adapter budgets it ([`FOOTPRINT`]).
-pub const VISION_DEVICE_BYTES: u64 = 7u64 << 30;
+///
+/// The serving build holds `ENCODE_WORKERS` (2) tower sets with SAM
+/// activation scratch shared between them, and each set carries TF32/fp16
+/// serving copies; the served replica measured **32.6 GiB** in total on a
+/// GH200 (`nvidia-smi`, 64 rows, 128k-token KV pool, decode tapes), against
+/// 22.7 GiB with a single serial tower. The vision share is budgeted at
+/// 15 GiB and the decoder at 18 GiB (together 33 GiB).
+pub const VISION_DEVICE_BYTES: u64 = 15u64 << 30;
 
 /// Device bytes the decoder half holds while hot, at the default context.
 ///
@@ -46,7 +53,7 @@ pub const VISION_DEVICE_BYTES: u64 = 7u64 << 30;
 /// KV cache (12 layers x 2 x 8192 x 1280 fp32), ~0.5 GiB of per-expert MoE
 /// activation scratch at a 512-row round, and ~0.3 GiB of attention
 /// score/probability slabs. 14 GiB rounds that up.
-pub const DECODER_DEVICE_BYTES: u64 = 14u64 << 30;
+pub const DECODER_DEVICE_BYTES: u64 = 18u64 << 30;
 
 /// Host bytes the whole composite holds once the decoder is on a card:
 /// tokenizer, the transient mmproj import, the CPU-side preprocessor and the

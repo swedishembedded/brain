@@ -40,6 +40,8 @@ use crate::{DecoderDevice, DEFAULT_INSTRUCTION, DEFAULT_MAX_NEW, MAX_CONTEXT};
 pub const MAX_BATCH: u32 = 64;
 /// Tokens of K/V the pool holds across all pages in flight: 2048 per row at a full batch, in bf16 (the 14 GiB the decoder is budgeted).
 pub const POOL_TOKENS: u32 = 128 * 1024;
+/// Pages the vision encoders take at once: each is a full set of towers on the card (~4.5 GiB for DeepSeek-OCR).
+pub const ENCODE_WORKERS: usize = 2;
 /// Prefill rows per forward.
 pub const PREFILL_CHUNK: u32 = 512;
 /// Prompt rows prefilled between two decode steps: one chunk. The scheduler's default of two chunks makes every step that admits a
@@ -140,11 +142,21 @@ struct EncodeJob {
     reply: mpsc::Sender<Result<(ParsedRequest, Option<PromptEmbeds>), String>>,
 }
 
-/// The vision encoder on a thread of its own: pages queue to it and it encodes what waits ([`PageEncoder::encode_many`]) while the scheduler decodes other requests. A request's rows
-/// arrive on a channel the scheduler polls, so an encode overlaps decode instead of stalling it.
+/// The pages waiting for an encoder, and whether the stage is closing.
+#[derive(Default)]
+struct EncodeQueue {
+    waiting: Vec<(std::time::Instant, EncodeJob)>,
+    closed: bool,
+}
+
+/// The vision encoders, one thread each: pages queue to them and each takes the next ([`next_job`]) and encodes it
+/// ([`PageEncoder::encode_many`]) while the scheduler decodes other requests. A request's rows arrive on a channel the scheduler
+/// polls, so an encode overlaps decode instead of stalling it. Each encoder owns its towers (their scratch is not shared), so two
+/// pages encode at the same time on the same card from two streams: four tile encodes a second on one stream, six on two, seven
+/// on three (`encode_concurrency`, best of three runs, a quiet card).
 struct EncodeStage {
-    jobs: Option<mpsc::Sender<EncodeJob>>,
-    worker: Option<std::thread::JoinHandle<()>>,
+    queue: std::sync::Arc<(std::sync::Mutex<EncodeQueue>, std::sync::Condvar)>,
+    workers: Vec<std::thread::JoinHandle<()>>,
 }
 
 /// Which queued page the encoder takes next: the cheapest, discounted by how long it has waited, so a small crop is not held behind a
@@ -155,58 +167,70 @@ fn next_job(waiting: &[(std::time::Instant, EncodeJob)]) -> usize {
 }
 
 impl EncodeStage {
-    fn spawn<E: PageEncoder + Send + 'static>(enc: E, ngram: NoRepeatNgram) -> EncodeStage {
-        let (jobs, queue) = mpsc::channel::<EncodeJob>();
-        let worker = std::thread::Builder::new()
-            .name("ocr-encode".into())
-            .spawn(move || {
-                let mut waiting: Vec<(std::time::Instant, EncodeJob)> = Vec::new();
-                loop {
-                    if waiting.is_empty() {
-                        match queue.recv() {
-                            Ok(job) => waiting.push((std::time::Instant::now(), job)),
-                            Err(_) => return,
+    fn spawn<E: PageEncoder + Send + 'static>(encoders: Vec<E>, ngram: NoRepeatNgram) -> EncodeStage {
+        let queue = std::sync::Arc::new((std::sync::Mutex::new(EncodeQueue::default()), std::sync::Condvar::new()));
+        let workers = encoders
+            .into_iter()
+            .enumerate()
+            .map(|(i, enc)| {
+                let queue = queue.clone();
+                std::thread::Builder::new()
+                    .name(format!("ocr-encode-{i}"))
+                    .spawn(move || {
+                        let (lock, ready) = &*queue;
+                        loop {
+                            let job = {
+                                let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
+                                loop {
+                                    if !q.waiting.is_empty() {
+                                        let at = next_job(&q.waiting);
+                                        break q.waiting.swap_remove(at).1;
+                                    }
+                                    if q.closed {
+                                        return;
+                                    }
+                                    q = ready.wait(q).unwrap_or_else(|e| e.into_inner());
+                                }
+                            };
+                            // A request cancelled while it waited costs nothing.
+                            if job.page.cancelled() {
+                                let _ = job.reply.send(Err("cancelled".to_string()));
+                                continue;
+                            }
+                            let page = match job.page.decode() {
+                                Ok(page) => page,
+                                Err(e) => {
+                                    let _ = job.reply.send(Err(e));
+                                    continue;
+                                }
+                            };
+                            // A page is answered the moment it is encoded; a caller that gave up is not an error.
+                            enc.encode_many(std::slice::from_ref(&page), &mut |_, result| {
+                                let _ = job.reply.send(result.map(|(ids, embeds)| (build_request(ids, job.max_new, ngram), Some(embeds))));
+                            });
                         }
-                    }
-                    waiting.extend(queue.try_iter().map(|job| (std::time::Instant::now(), job)));
-                    let (_, job) = waiting.swap_remove(next_job(&waiting));
-                    // A request cancelled while it waited costs nothing.
-                    if job.page.cancelled() {
-                        let _ = job.reply.send(Err("cancelled".to_string()));
-                        continue;
-                    }
-                    let page = match job.page.decode() {
-                        Ok(page) => page,
-                        Err(e) => {
-                            let _ = job.reply.send(Err(e));
-                            continue;
-                        }
-                    };
-                    // A page is answered the moment it is encoded; a caller that gave up is not an error.
-                    enc.encode_many(std::slice::from_ref(&page), &mut |_, result| {
-                        let _ = job.reply.send(result.map(|(ids, embeds)| (build_request(ids, job.max_new, ngram), Some(embeds))));
-                    });
-                }
+                    })
+                    .expect("an encoder thread starts")
             })
-            .expect("the encoder thread starts");
-        EncodeStage { jobs: Some(jobs), worker: Some(worker) }
+            .collect();
+        EncodeStage { queue, workers }
     }
 
     fn submit(&self, page: PendingPage, max_new: usize) -> Encoding {
         let (reply, rx) = mpsc::channel();
-        let job = EncodeJob { page, max_new, reply };
-        if let Some(jobs) = &self.jobs {
-            // A stopped worker drops the reply sender, which the receiver reports as a stopped encoder.
-            let _ = jobs.send(job);
-        }
+        let (lock, ready) = &*self.queue;
+        lock.lock().unwrap_or_else(|e| e.into_inner()).waiting.push((std::time::Instant::now(), EncodeJob { page, max_new, reply }));
+        ready.notify_one();
         rx
     }
 }
 
 impl Drop for EncodeStage {
     fn drop(&mut self) {
-        self.jobs.take();
-        if let Some(worker) = self.worker.take() {
+        let (lock, ready) = &*self.queue;
+        lock.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
+        ready.notify_all();
+        for worker in self.workers.drain(..) {
             let _ = worker.join();
         }
     }
@@ -244,12 +268,14 @@ impl OcrFrontend {
     /// Requests are built in the background, so the encoder runs while the decoder decodes - on another device, or on the same
     /// one: a tower's handle holds its freed blocks ([`serving_gpu`]), so it cannot stall the decoder's stream, and the two
     /// interleave their kernels (best of four alternating server runs on a shared card: 30 -> 36 pages/min median).
-    pub fn new<E: PageEncoder + Send + 'static>(enc: E, label: &'static str, eos: u32, allow: &[u32]) -> OcrFrontend {
+    pub fn new<E: PageEncoder + Send + 'static>(encoders: Vec<E>, label: &'static str, eos: u32, allow: &[u32]) -> OcrFrontend {
         let ngram = NoRepeatNgram::new(NGRAM_SIZE, NGRAM_WINDOW, allow);
         let t0 = std::time::Instant::now();
-        enc.warm_up();
+        for enc in &encoders {
+            enc.warm_up();
+        }
         crate::stage_time("load: encoder warm-up (kernels)", t0);
-        OcrFrontend { tok: enc.tok().clone(), label, stop: vec![eos], stage: EncodeStage::spawn(enc, ngram) }
+        OcrFrontend { tok: encoders.first().expect("an OCR front end needs an encoder").tok().clone(), label, stop: vec![eos], stage: EncodeStage::spawn(encoders, ngram) }
     }
 
     /// The page a request asks to read (pixels still packed), and its decode budget.
@@ -359,5 +385,46 @@ mod tests {
         assert_eq!(next_job(&queue), 1, "the crop first");
         let queue = vec![job(2000, 3000, Duration::from_secs(120)), job(600, 400, fresh)];
         assert_eq!(next_job(&queue), 0, "a page that waited two minutes goes before a fresh crop");
+    }
+
+    struct Sleepy {
+        tok: Arc<QwenBpe>,
+        busy: Arc<std::sync::atomic::AtomicUsize>,
+        peak: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl PageEncoder for Sleepy {
+        fn tok(&self) -> &Arc<QwenBpe> {
+            &self.tok
+        }
+        fn encode(&self, _page: &PageRequest) -> Encoded {
+            use std::sync::atomic::Ordering::SeqCst;
+            let now = self.busy.fetch_add(1, SeqCst) + 1;
+            self.peak.fetch_max(now, SeqCst);
+            std::thread::sleep(Duration::from_millis(120));
+            self.busy.fetch_sub(1, SeqCst);
+            Ok((vec![1], PromptEmbeds::run(4, 0, vec![0.0; 4]).expect("rows")))
+        }
+    }
+
+    /// Two encoders take two pages at once, and every page is answered.
+    #[test]
+    fn pages_encode_on_as_many_threads_as_there_are_encoders() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let gt = checkpoint::gguf::GgufTokenizer { model: "gpt2".into(), pre: Some("deepseek-v3".into()), tokens: vec!["a".into()], merges: Vec::new(), token_types: vec![1], bos: Some(0), eos: Some(0), unk: None, pad: None, ..Default::default() };
+        let tok = Arc::new(QwenBpe::from_gguf(&gt).expect("tokenizer"));
+        let (busy, peak) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let encoders: Vec<Sleepy> = (0..2).map(|_| Sleepy { tok: tok.clone(), busy: busy.clone(), peak: peak.clone() }).collect();
+        let stage = EncodeStage::spawn(encoders, NoRepeatNgram::new(NGRAM_SIZE, NGRAM_WINDOW, &[]));
+        let page = || {
+            let blob = capability::blob::image_blob(&[0.5; 12], 2, 2, 3);
+            PendingPage { instruction: String::new(), image: Invocation::new().blob("image", blob), read: ReadOptions::default(), cancel: capability::CancelToken::default() }
+        };
+        let t0 = Instant::now();
+        let replies: Vec<Encoding> = (0..4).map(|_| stage.submit(page(), 1)).collect();
+        for r in replies {
+            r.recv_timeout(Duration::from_secs(5)).expect("a reply").expect("an encoded page");
+        }
+        assert_eq!(peak.load(SeqCst), 2, "two pages were in the encoders at once");
+        assert!(t0.elapsed() < Duration::from_millis(400), "four pages of 120 ms on two encoders take two rounds, not four: {:?}", t0.elapsed());
     }
 }

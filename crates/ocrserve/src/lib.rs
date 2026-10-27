@@ -28,7 +28,7 @@ use std::path::Path;
 use capability::Assembly;
 use residency::Instance;
 
-pub use frontend::{build_engine, engine_config, instance, serving_gpu, OcrFrontend, OcrInstance, Encoded, PageEncoder, PageRequest, ReadOptions, MAX_BATCH, NGRAM_SIZE, NGRAM_WINDOW, POOL_TOKENS, PREFILL_CHUNK};
+pub use frontend::{build_engine, engine_config, instance, serving_gpu, OcrFrontend, OcrInstance, Encoded, PageEncoder, PageRequest, ReadOptions, ENCODE_WORKERS, MAX_BATCH, NGRAM_SIZE, NGRAM_WINDOW, POOL_TOKENS, PREFILL_CHUNK};
 pub use policy::{config, configure, OcrServeConfig, MAX_BATCH_CEILING, OCR_POLICY};
 pub use placement::{placement_for_process, plan_placement, plan_replicas, DecoderDevice, Footprint, Placement};
 

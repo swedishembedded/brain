@@ -220,7 +220,11 @@ offered, and a placement that cannot be reserved is refused with a clear
 error instead of waiting in the queue.
 
 <!-- perf-number: hardware requirement, not a throughput claim -->
-**~7 GiB + ~14 GiB of VRAM and ~3 GiB of RAM**, measured on the served build
+**~15 GiB + ~18 GiB of VRAM and ~3 GiB of RAM** for the served GH200 build
+(two concurrent encoder towers, 64 rows, 128k-token KV pool: 32.6 GiB per
+replica by `nvidia-smi`; 22.7 GiB with a single serial tower). The figures
+below are the earlier single-tower measurement on a P40, kept as the
+tower's own cost, measured on the served build
 (`nvidia-smi memory.used` per card and `/proc/self/status` VmHWM, sampled for
 the life of a real page): **6.27 GiB** on the vision card, **13.25 GiB** on
 the decoder card, **2.68 GiB** of host RSS. With the decoder on the CPU
