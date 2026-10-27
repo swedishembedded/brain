@@ -10,17 +10,25 @@
 //! with the host reference (`conv::reference`). Run it on the board; it needs
 //! `/dev/rknpu`.
 //!
-//! Each case is a layer shape YOLOv5 has at a 320x320 input, so a pass here
-//! is a pass for the layers the detector runs. Prints per case: bytes that
-//! differ (must be 0), task count, NPU time (median of the timed runs).
+//! Each conv case is a layer shape YOLOv5 has at a 320x320 input, so a pass
+//! here is a pass for the layers the detector runs. The graph case compiles a
+//! YOLO-shaped network (residual add, concat, max pools, upsample, two heads)
+//! and compares the board's outputs with the plan's host simulation. Prints
+//! per case: bytes that differ (must be 0), task count, time.
+
+#[path = "../tests/common/mini_yolo.rs"]
+mod mini_yolo;
 
 use std::time::Instant;
 
 use data::rng::Rng;
 use rknpu::conv::{self, ConvAddrs, ConvGeometry, ENABLE, INT_MASK};
 use rknpu::driver::Device;
+use rknpu::graph::Calibration;
 use rknpu::job::{Job, Task};
 use rknpu::layout::Shape;
+use rknpu::model::Model;
+use rknpu::plan::Plan;
 use rknpu::quant::{ConvQuant, QParams};
 
 struct Case {
@@ -121,9 +129,57 @@ fn main() {
             job.resident_bytes() / 1024
         );
     }
+    if !graph_case(&mut rng) {
+        failures += 1;
+    }
     let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
     for line in status.lines().filter(|l| l.starts_with("VmHWM")) {
         println!("{line}");
     }
     std::process::exit(if failures == 0 { 0 } else { 1 });
+}
+
+/// Compile the YOLO-shaped graph, run it on the NPU and compare its outputs
+/// with the plan's host simulation.
+fn graph_case(rng: &mut Rng) -> bool {
+    let size = 96;
+    let g = mini_yolo::mini_yolo(rng, size);
+    let image: Vec<u8> = (0..size * size * 3).map(|_| rng.gen_range_inclusive(0, 255) as u8).collect();
+    let as_f32: Vec<f32> = image.iter().map(|&p| f32::from(p) / 255.0).collect();
+    let calibration = Calibration::measure(&g, [as_f32.as_slice()]).unwrap();
+    let input_q = QParams { scale: 1.0 / 255.0, zero_point: -128 };
+    let plan = Plan::new(&g, &calibration, input_q).unwrap();
+    let mut simulated = vec![0u8; plan.data_bytes()];
+    plan.write_constants(&mut simulated);
+
+    let device = Device::open().unwrap();
+    let mut model = Model::load(device, plan).unwrap();
+    model.write_input_rgb8(&image);
+    let input = model.input();
+    simulated[input.range()].copy_from_slice(&model.data()[input.range()]);
+    let mut timings = Vec::new();
+    for _ in 0..5 {
+        timings.push(model.run().unwrap());
+    }
+    model.plan().simulate(&mut simulated);
+    let (mut differ, mut total) = (0, 0);
+    for &o in model.plan().outputs() {
+        let p = model.plan().placement(o);
+        let got = p.shape.unpack(&model.data()[p.offset..]);
+        let want = p.shape.unpack(&simulated[p.offset..]);
+        differ += got.iter().zip(&want).filter(|(a, b)| a != b).count();
+        total += want.len();
+    }
+    let t = timings[timings.len() / 2];
+    println!(
+        "{:<34} {} differ={differ}/{total} tasks={} npu={:.2}ms cpu={:.2}ms total={:.2}ms arena={}KiB",
+        "graph mini-yolo 96x96",
+        if differ == 0 { "OK  " } else { "FAIL" },
+        model.plan().tasks().len(),
+        t.npu.as_secs_f64() * 1e3,
+        t.cpu.as_secs_f64() * 1e3,
+        t.total.as_secs_f64() * 1e3,
+        model.resident_bytes() / 1024
+    );
+    differ == 0
 }

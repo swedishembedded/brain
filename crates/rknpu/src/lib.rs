@@ -18,6 +18,11 @@
 //! - [`quant`]: the int8 arithmetic the hardware performs, exactly.
 //! - [`conv`]: dense convolution tasks, with height tiling.
 //! - [`job`]: a linked chain of tasks and the arena it addresses.
+//! - [`graph`]: the float network a model hands the compiler, with a float
+//!   reference and calibration.
+//! - [`plan`]: quantization, memory layout and the NPU/CPU schedule, with a
+//!   host simulation of the exact integers.
+//! - [`model`]: a plan resident on the device, ready to run.
 //!
 //! Every task kind also has a host reference that computes the identical
 //! integers, so a board run is checked byte for byte, not within a tolerance.
@@ -27,8 +32,11 @@
 
 pub mod conv;
 pub mod driver;
+pub mod graph;
 pub mod job;
 pub mod layout;
+pub mod model;
+pub mod plan;
 pub mod quant;
 pub mod regs;
 
