@@ -48,7 +48,7 @@ use qwen3::chat::{parse_request_as, sampling_params, text_outcome, ChatFormat};
 /// `pub(crate)`: reused as-is by [`crate::resident_qwen35moe::Qwen35Resident`]
 /// (same chat contract, same `qwen3::chat` shared parse underneath) rather
 /// than duplicated a third time.
-pub(crate) fn generate_spec(summary: &str, chat: bool) -> ActionSpec {
+pub fn generate_spec(summary: &str, chat: bool) -> ActionSpec {
     let mut s = ActionSpec::new("generate", summary)
         .param(ParamSpec::new("prompt", ParamType::Str, "the prompt to continue (or chat message)"))
         .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate").default(json!(128)))
@@ -85,7 +85,7 @@ pub(crate) fn generate_spec(summary: &str, chat: bool) -> ActionSpec {
             .param(ParamSpec::new("dry_allowed_length", ParamType::Int, "DRY: repeats up to this many tokens are not penalised (default 2)"))
             .param(ParamSpec::new("dry_sequence_breakers", ParamType::Str, "JSON array of strings that end a DRY sequence (default newline, colon, quote, asterisk)"));
     }
-    s.output(BlobSpec::new("text", Media::Text, "the generated text"))
+    llmserve::with_token_capture(s.output(BlobSpec::new("text", Media::Text, "the generated text")))
 }
 
 /// Estimate the Hot VRAM footprint of a checkpoint as ~1.3x its file size.

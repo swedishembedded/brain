@@ -21,7 +21,7 @@
 //! dispatcher groups queued jobs into such a call). Work that arrives while
 //! a call is already running waits for the next call.
 
-use capability::{ActionResult, Invocation, Progress};
+use capability::{ActionResult, ActionSpec, Invocation, ParamSpec, ParamType, Progress};
 use data::qwen_tokenizer::QwenBpe;
 use model::serve::{PagedDecoder, PromptEmbeds, RejectReason, Request, Scheduler};
 pub use qwen3::chat::ParsedRequest;
@@ -156,6 +156,14 @@ struct Capture {
     logprobs: bool,
     token_ids: bool,
     prompt: Vec<u32>,
+}
+
+/// `spec` with the token-capture parameters every action served through this
+/// crate honours ([`Capture`]): one declaration, so a client of any surface
+/// (HTTP, D-Bus) can ask for the same token facts.
+pub fn with_token_capture(spec: ActionSpec) -> ActionSpec {
+    spec.param(ParamSpec::new("logprobs", ParamType::Bool, "return the log-probability of each sampled token (completion_logprobs, with completion_token_ids)"))
+        .param(ParamSpec::new("return_token_ids", ParamType::Bool, "return the prompt's and the completion's token ids (prompt_token_ids, completion_token_ids)"))
 }
 
 impl Capture {

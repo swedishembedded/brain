@@ -224,7 +224,9 @@ fn an_idle_open_group_with_stale_routes_hands_back_before_taking_a_job() {
 #[test]
 fn token_ids_and_logprobs_come_back_only_when_asked_for() {
     let front = front();
-    let asked = inv("token capture", 6, 0.8, 17).set("logprobs", json!(true)).set("return_token_ids", json!(true));
+    // Through the generate spec every surface validates against (D-Bus included), not just the scheduler.
+    let spec = catalog::resident_llm::generate_spec("capture", true);
+    let asked = spec.validate(inv("token capture", 6, 0.8, 17).set("logprobs", json!(true)).set("return_token_ids", json!(true))).expect("the generate spec declares both capture flags");
     let plain = inv("token capture", 6, 0.8, 17);
     let results = run_batch_scheduled(&mut scheduler(2), &front, &[asked, plain], &mut |_, _| {});
     let asked = results[0].clone().expect("request succeeds").outputs;

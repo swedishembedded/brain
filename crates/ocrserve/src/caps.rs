@@ -29,7 +29,7 @@ use crate::{placement_for_process, DecoderDevice, OcrModel, DEFAULT_INSTRUCTION,
 
 /// The one `generate` action every OCR model serves.
 pub fn generate_spec<M: OcrModel>() -> ActionSpec {
-    ActionSpec::new("generate", &format!("{}: a document image + an instruction in, decoded text out (greedy, streamed per token)", M::ID))
+    llmserve::with_token_capture(ActionSpec::new("generate", &format!("{}: a document image + an instruction in, decoded text out (greedy, streamed per token)", M::ID))
         .streaming()
         .param(ParamSpec::new("messages", ParamType::Str, "flattened chat messages (JSON array string)"))
         .param(
@@ -46,7 +46,7 @@ pub fn generate_spec<M: OcrModel>() -> ActionSpec {
         .param(ParamSpec::new("max_tiles", ParamType::Int, "most local tiles a large page is cut into before it is read (0 reads the page as one global view; omitted, the model's own default)"))
         .param(ParamSpec::new("weights", ParamType::Str, "checkpoint DIRECTORY; overrides the model-store resolver's own pick when set").host_resolved())
         .input(BlobSpec::new("image", Media::Image, "raw HWC f32 pixels in [0,1], meta {w,h} (capability::blob's wire convention)").required())
-        .output(BlobSpec::new("text", Media::Text, "the decoded document text"))
+        .output(BlobSpec::new("text", Media::Text, "the decoded document text")))
 }
 
 /// The model's static manifest.

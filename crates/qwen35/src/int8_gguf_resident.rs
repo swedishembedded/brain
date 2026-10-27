@@ -3528,6 +3528,7 @@ impl ResidentModel for Qwen35GgufResident {
         .param(ParamSpec::new("preserve_thinking", ParamType::Bool, "Qwen3.8 chat-template kwarg: keep <think> blocks from prior assistant turns in the rendered history (takes effect on the Qwen3.8-flavor render, this model's default)").default(json!(true)))
         .param(ParamSpec::new("template_flavor", ParamType::Str, "chat template flavor: qwen3.8 (default; XML <function=> tool-call payloads, prefilled open <think>, preserve_thinking kwarg) or qwen3 (JSON <tool_call> payloads, positional think framing)").default(json!("qwen3.8")))
         .output(BlobSpec::new("text", Media::Text, "the generated text"));
+        let generate = llmserve::with_token_capture(generate);
         Manifest::new(
             &self.model_id,
             "Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, served INT8 and GPU-resident directly from a released GGUF (no fp32 intermediate on disk), layer-sharded across as many cards as its real per-layer bytes need. Text only; no MTP self-speculative decode; continuous batching of up to max_batch sequences per dispatch.",
@@ -4125,6 +4126,16 @@ mod tests {
     fn fits_at(cfg: &Qwen35Config, devices: &[(Device, u64)], cap: u32, kv: KvTier) -> bool {
         let caps: Vec<(usize, u64)> = devices.iter().enumerate().map(|(i, &(_, c))| (i, c.saturating_sub(ServingShape::new(cap, TierPolicy::uniform(Dtype::I8), kv, 1).stage_workspace(cfg)))).collect();
         kv_pool_addressable(cfg, cap, 1) && model::shard::plan_fewest_devices(&layer_cost(cfg, cap, &TierPolicy::uniform(Dtype::I8), kv, 1), &caps).is_some()
+    }
+
+    /// A D-Bus client validates against the manifest: the token-capture flags the
+    /// scheduler honours must be declared there too.
+    #[test]
+    fn the_generate_spec_declares_the_token_capture_flags() {
+        let r = Qwen35GgufResident::new("/nonexistent.gguf".to_string(), vec![], 512, TierPolicy::uniform(Dtype::I8));
+        let spec = r.manifest().actions.into_iter().find(|a| a.name == "generate").expect("generate");
+        let inv = spec.validate(Invocation::new().set("prompt", serde_json::json!("hi")).set("logprobs", serde_json::json!(true)).set("return_token_ids", serde_json::json!(true)));
+        assert!(inv.is_ok(), "{inv:?}");
     }
 
     /// The context is whatever the cards have room for after the weights, not a
