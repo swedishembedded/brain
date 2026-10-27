@@ -115,13 +115,13 @@ pub(crate) fn memory_geometry(cfg: &Qwen35Config) -> AnchorMemoryShape {
 /// Gated-DeltaNet layer, the ring of every full-attention layer and the anchor bank of every layer that has one.
 /// Independent of the sequence length; the pool holds exactly `slots` times this (`SlotPool::bytes`), which lets a
 /// serving engine size its pool to a memory budget before allocating anything.
-pub fn slot_state_bytes(cfg: &Qwen35Config) -> u64 {
+pub fn slot_state_bytes(cfg: &Qwen35Config, ring: KvTier) -> u64 {
     let window = u64::from(cfg.swa_window.expect("slot state is the ring state of a sliding-window config"));
     let mut words = 0u64;
     for (l, ty) in cfg.layer_types().into_iter().enumerate() {
         words += match ty {
             LayerType::Linear => cfg.gdn_state_len() + cfg.gdn_hist_len(),
-            LayerType::Full => 2 * window * u64::from(cfg.kv_dim()),
+            LayerType::Full => 2 * ring.plane_bytes(window, u64::from(cfg.kv_dim()), u64::from(cfg.head_dim)) / 4,
         };
         if cfg.layer_has_memory(l) {
             let g = memory_geometry(cfg);
@@ -157,7 +157,8 @@ pub struct SlotPool {
 }
 
 impl SlotPool {
-    pub(crate) fn new(gpu: &Gpu, cfg: &Qwen35Config, shard: &Shard, slots: u32) -> SlotPool {
+    pub(crate) fn new(gpu: &Gpu, cfg: &Qwen35Config, shard: &Shard, slots: u32, ring: KvTier) -> SlotPool {
+        assert!(ring == KvTier::F32 || ring == KvTier::BF16, "a slot pool's ring is stored f32 or bf16, not {ring}");
         let window = cfg.swa_window.expect("a slot pool holds the ring state of a sliding-window config");
         let kv_dim = cfg.kv_dim() as u64;
         let rows = u64::from(window) * u64::from(slots);
@@ -165,9 +166,10 @@ impl SlotPool {
         for (l, ty) in cfg.layer_types().into_iter().enumerate() {
             let owned = shard.owns(l);
             let kv = if owned && ty == LayerType::Full {
-                let kv = KvLayer::new(gpu, KvTier::F32, rows, kv_dim, cfg.head_dim as u64);
-                pool.ledger.push((kv.k.data().clone(), rows * kv_dim));
-                pool.ledger.push((kv.v.data().clone(), rows * kv_dim));
+                let kv = KvLayer::new(gpu, ring, rows, kv_dim, cfg.head_dim as u64);
+                let words = ring.plane_words(rows, kv_dim, cfg.head_dim as u64).data;
+                pool.ledger.push((kv.k.data().clone(), words));
+                pool.ledger.push((kv.v.data().clone(), words));
                 kv
             } else {
                 KvLayer::placeholder(gpu)

@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 
 use gpu_core::Gpu;
+use model::kv_tier::KvTier;
 use model::paged::BlockTable;
 use model::serve::conformance::{self, Conformance, MIN_SEQ_TOKENS};
 use model::serve::{PagedDecoder, Request, Scheduler};
@@ -38,8 +39,12 @@ fn f32_tier() -> model::ops::TierPolicy {
 }
 
 fn engine_on(gpu: &Gpu, prefix_slots: u32) -> RingEngine {
+    engine_with(gpu, prefix_slots, KvTier::F32)
+}
+
+fn engine_with(gpu: &Gpu, prefix_slots: u32, ring: KvTier) -> RingEngine {
     let cfg = Qwen35Config::edgerock_tiny();
-    RingEngine::from_source_tier_on(gpu, cfg.clone(), &weights(), cfg.max_position_embeddings, MAX_CONCURRENT, prefix_slots, &f32_tier())
+    RingEngine::from_source_tier_on(gpu, cfg.clone(), &weights(), cfg.max_position_embeddings, MAX_CONCURRENT, prefix_slots, &f32_tier(), ring)
 }
 
 fn cpu_engine() -> RingEngine {
@@ -190,7 +195,7 @@ fn a_released_slot_leaks_nothing_into_the_next_sequence() {
     };
     // One live slot, so the second request reuses the first's slot; the first is cancelled mid-decode.
     let mut sched = Scheduler::new(
-        RingEngine::from_source_tier_on(&gpu, Qwen35Config::edgerock_tiny(), &weights(), 48, 1, 0, &f32_tier()),
+        RingEngine::from_source_tier_on(&gpu, Qwen35Config::edgerock_tiny(), &weights(), 48, 1, 0, &f32_tier(), KvTier::F32),
         1,
     );
     let a = submit(&mut sched, &victim, 12);
@@ -207,7 +212,7 @@ fn state_bytes_are_fixed_and_match_the_analytic_size() {
     let cfg = Qwen35Config::edgerock_tiny();
     let mut engine = engine_on(&Gpu::new_cpu(pipelines()), PREFIX_SLOTS);
     let slots = u64::from(MAX_CONCURRENT + PREFIX_SLOTS);
-    assert_eq!(engine.state_bytes(), qwen35::model::slot_state_bytes(&cfg) * slots);
+    assert_eq!(engine.state_bytes(), qwen35::model::slot_state_bytes(&cfg, KvTier::F32) * slots);
     assert_eq!(engine.kv_pool_bytes(), engine.state_bytes());
     let before = engine.state_bytes();
     let mut table = BlockTable::new();
@@ -218,4 +223,37 @@ fn state_bytes_are_fixed_and_match_the_analytic_size() {
     assert!(qwen35::serve_ring::memory_param_bytes(&cfg) > 0);
     assert_eq!(engine.max_seq_len(), cfg.max_position_embeddings as usize);
     assert!(engine.max_seq_len() >= MIN_SEQ_TOKENS);
+}
+
+fn bf16_ring_engine() -> RingEngine {
+    engine_with(&Gpu::new(pipelines()), PREFIX_SLOTS, KvTier::BF16)
+}
+
+#[test]
+fn a_bf16_ring_conforms_and_halves_the_ring_bytes() {
+    conformance::run_all(&Conformance { make: bf16_ring_engine, prefix_reuse: true, prefix_prompt_tokens: 24, load_adapter: None });
+    let cfg = Qwen35Config::edgerock_tiny();
+    let (full, half) = (qwen35::model::slot_state_bytes(&cfg, KvTier::F32), qwen35::model::slot_state_bytes(&cfg, KvTier::BF16));
+    assert!(half < full, "a bf16 ring must cost fewer bytes ({half} against {full})");
+    assert_eq!(bf16_ring_engine().state_bytes(), half * u64::from(MAX_CONCURRENT + PREFIX_SLOTS));
+}
+
+#[test]
+fn a_bf16_ring_stays_close_to_an_f32_ring_through_the_window() {
+    // Sequences long enough to wrap the 11-row window several times: the bf16 rounding of the stored keys and
+    // values may move a logit, not the hidden state's direction.
+    let gpu = Gpu::new_cpu(pipelines());
+    let prompt = tokens(9, 40);
+    let hidden = |ring: KvTier| {
+        let mut engine = engine_with(&gpu, 0, ring);
+        let mut table = BlockTable::new();
+        let first = engine.prefill(&mut table, &prompt[..30]);
+        let after = engine.logits(&first);
+        engine.release_table(&mut table);
+        after
+    };
+    let (a, b) = (hidden(KvTier::F32), hidden(KvTier::BF16));
+    let dot: f64 = a.iter().zip(&b).map(|(x, y)| f64::from(*x) * f64::from(*y)).sum();
+    let (na, nb): (f64, f64) = (a.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>().sqrt(), b.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>().sqrt());
+    assert!(dot / (na * nb) > 0.999, "logits cosine {}", dot / (na * nb));
 }

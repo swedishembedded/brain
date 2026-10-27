@@ -54,6 +54,7 @@
 //! what they cost.
 
 use gpu_core::{DeviceBuffer, Gpu};
+use model::kv_tier::KvTier;
 use model::paged::{BlockAllocator, BlockTable, KvNamespace};
 use model::serve::{PagedDecoder, PrefillProgress};
 use model::snapshot_prefix::{Entry, SnapshotPrefixCache};
@@ -94,8 +95,8 @@ pub const MAX_PREFIX_SLOTS: u32 = 8;
 /// holds them (at least one), then up to [`MAX_PREFIX_SLOTS`] (and no more than the live count) cached prompts
 /// from what is left. A budget that cannot hold even one live slot still returns one: the caller's placement
 /// refuses the oversized model with its own arithmetic, not this sizing.
-pub fn ring_slots(cfg: &Qwen35Config, budget: u64, max_batch: u32) -> (u32, u32) {
-    let per_slot = slot_state_bytes(cfg).max(1);
+pub fn ring_slots(cfg: &Qwen35Config, ring: KvTier, budget: u64, max_batch: u32) -> (u32, u32) {
+    let per_slot = slot_state_bytes(cfg, ring).max(1);
     let fit = (budget / per_slot).min(u64::from(u32::MAX)) as u32;
     let live = fit.min(max_batch).max(1);
     (live, fit.saturating_sub(live).min(live).min(MAX_PREFIX_SLOTS))
@@ -115,16 +116,16 @@ pub struct RingEngine {
 impl RingEngine {
     /// Build over `weights` held at `tier`, on a device of its own. `max_seq_len` is capped by the model's position
     /// limit; `max_concurrent` live slots and `prefix_slots` cached prompts (0 turns prefix reuse off).
-    pub fn from_source_tier(cfg: Qwen35Config, weights: &dyn checkpoint::TensorSource, max_seq_len: u32, max_concurrent: u32, prefix_slots: u32, tier: &model::ops::TierPolicy) -> RingEngine {
-        Self::with_gpu(Gpu::new(pipelines()), cfg, weights, max_seq_len, max_concurrent, prefix_slots, tier)
+    pub fn from_source_tier(cfg: Qwen35Config, weights: &dyn checkpoint::TensorSource, max_seq_len: u32, max_concurrent: u32, prefix_slots: u32, tier: &model::ops::TierPolicy, ring: KvTier) -> RingEngine {
+        Self::with_gpu(Gpu::new(pipelines()), cfg, weights, max_seq_len, max_concurrent, prefix_slots, tier, ring)
     }
 
     /// [`Self::from_source_tier`] on an existing device handle (warm start).
-    pub fn from_source_tier_on(parent: &Gpu, cfg: Qwen35Config, weights: &dyn checkpoint::TensorSource, max_seq_len: u32, max_concurrent: u32, prefix_slots: u32, tier: &model::ops::TierPolicy) -> RingEngine {
-        Self::with_gpu(parent.new_like(pipelines()), cfg, weights, max_seq_len, max_concurrent, prefix_slots, tier)
+    pub fn from_source_tier_on(parent: &Gpu, cfg: Qwen35Config, weights: &dyn checkpoint::TensorSource, max_seq_len: u32, max_concurrent: u32, prefix_slots: u32, tier: &model::ops::TierPolicy, ring: KvTier) -> RingEngine {
+        Self::with_gpu(parent.new_like(pipelines()), cfg, weights, max_seq_len, max_concurrent, prefix_slots, tier, ring)
     }
 
-    fn with_gpu(gpu: Gpu, cfg: Qwen35Config, weights: &dyn checkpoint::TensorSource, max_seq_len: u32, max_concurrent: u32, prefix_slots: u32, tier: &model::ops::TierPolicy) -> RingEngine {
+    fn with_gpu(gpu: Gpu, cfg: Qwen35Config, weights: &dyn checkpoint::TensorSource, max_seq_len: u32, max_concurrent: u32, prefix_slots: u32, tier: &model::ops::TierPolicy, ring: KvTier) -> RingEngine {
         assert!(max_seq_len > 0 && max_concurrent > 0, "qwen35::serve_ring: max_seq_len and max_concurrent must be > 0");
         assert!(cfg.swa_window.is_some(), "qwen35::serve_ring: the ring engine serves sliding-window configs; a plain config pages a growing KV cache (qwen35::serve::Engine)");
         assert!(
@@ -133,7 +134,7 @@ impl RingEngine {
             cfg.max_position_embeddings
         );
         let model = Qwen35::new_on_dt(gpu, cfg, 1, 1, weights, tier);
-        let pool = model.new_slot_pool(max_concurrent + prefix_slots);
+        let pool = model.new_slot_pool(max_concurrent + prefix_slots, ring);
         RingEngine { model, pool, alloc: BlockAllocator::new(max_concurrent, max_seq_len), max_seq_len, live_slots: max_concurrent, cache: SnapshotPrefixCache::new(prefix_slots) }
     }
 

@@ -185,3 +185,46 @@ fn precision_matrix_against_the_reference_forward() {
         }
     }
 }
+
+/// The serving engine's state formats against the reference: the golden prompt (1400 tokens, past the window and
+/// five memory blocks) prefilled in 256-row chunks through the fixed-state slot (the fused windowed attention, the
+/// pooled recurrence, the bank) with the ring held in each format, the last position's logits against the
+/// reference's. The greedy answer must be the reference's and the logits cosine at least 0.9999.
+#[test]
+#[ignore = "slow: the released checkpoint, once per ring format"]
+fn the_serving_slot_matches_the_reference_with_a_bf16_ring() {
+    use model::paged::BlockTable;
+    use model::serve::PagedDecoder;
+    let Some(dir) = brain_testutil::model_dir("rockmatrix-ai/EdgeRock").filter(|d| Path::new(d).join("config.json").exists()) else {
+        brain_testutil::skip("rockmatrix-ai/EdgeRock is not in the model store - brain pull rockmatrix-ai/EdgeRock");
+        return;
+    };
+    let golden_path = brain_testutil::testdata("golden/edgerock/real/edgerock_real.safetensors");
+    if !Path::new(&golden_path).exists() {
+        brain_testutil::skip(&format!("fixture {golden_path} absent - run tools/goldens/edgerock_dump_real_reference.py"));
+        return;
+    }
+    let golden: HashMap<String, Vec<f32>> = checkpoint::safetensors::read(&golden_path).expect("read golden").into_iter().map(|t| (t.name, t.data)).collect();
+    let tokens: Vec<u32> = golden["tokens"].iter().map(|&v| v.round() as u32).collect();
+    let vocab = golden["logits_tail"].len() / 8;
+    let want = &golden["logits_tail"][7 * vocab..];
+    let want_token = want.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0 as u32;
+    let dir = Path::new(&dir);
+    let cfg = qwen35::fp8_source::hf_config(dir).expect("config.json");
+    for ring in [model::kv_tier::KvTier::F32, model::kv_tier::KvTier::BF16] {
+        let src = qwen35::fp8_source::open_dir(dir, &cfg, 128).expect("every tensor is covered");
+        let mut engine = qwen35::serve_ring::RingEngine::from_source_tier(cfg.clone(), &src, 4096, 1, 0, &TierPolicy::uniform(Dtype::BF16), ring);
+        let mut table = BlockTable::new();
+        let hidden = engine.prefill(&mut table, &tokens);
+        let got = engine.logits(&hidden);
+        let cos = {
+            let dot: f64 = got.iter().zip(want).map(|(a, b)| f64::from(*a) * f64::from(*b)).sum();
+            let (na, nb): (f64, f64) = (got.iter().map(|a| f64::from(*a).powi(2)).sum::<f64>().sqrt(), want.iter().map(|b| f64::from(*b).powi(2)).sum::<f64>().sqrt());
+            dot / (na * nb)
+        };
+        let token = engine.admit_greedy(&hidden);
+        println!("ring {ring}: logits cosine {cos:.7}, greedy {token} (reference {want_token})");
+        assert_eq!(token, want_token, "ring {ring}: the greedy answer differs from the reference's");
+        assert!(cos >= 0.9999, "ring {ring}: logits cosine {cos}");
+    }
+}

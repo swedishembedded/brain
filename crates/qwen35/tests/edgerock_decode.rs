@@ -171,12 +171,12 @@ fn a_batch_of_sequences_at_different_positions_equals_each_run_alone() {
         let alone: Vec<Vec<Vec<f32>>> = starts
             .iter()
             .map(|&start| {
-                let solo = m.new_slot_pool(1);
+                let solo = m.new_slot_pool(1, model::kv_tier::KvTier::F32);
                 m.slot_prefill(&solo, 0, &golden.tokens[..start], 13);
                 (0..12).map(|step| m.slot_decode(&solo, &[(0, golden.tokens[start + step])]).remove(0)).collect()
             })
             .collect();
-        let pool = m.new_slot_pool(4);
+        let pool = m.new_slot_pool(4, model::kv_tier::KvTier::F32);
         for (slot, &start) in starts.iter().enumerate() {
             m.slot_prefill(&pool, slot as u32, &golden.tokens[..start], 5);
         }
@@ -250,8 +250,8 @@ fn a_reused_slot_starts_from_an_empty_bank_and_ring() {
     let cfg = Qwen35Config::edgerock_tiny();
     let other: Vec<u32> = (0..40).map(|i| (i * 11 + 5) % cfg.vocab).collect();
     for (name, m, _) in models(&golden, cfg.block_size) {
-        let pool = m.new_slot_pool(2);
-        let fresh = m.new_slot_pool(1);
+        let pool = m.new_slot_pool(2, model::kv_tier::KvTier::F32);
+        let fresh = m.new_slot_pool(1, model::kv_tier::KvTier::F32);
         let reference = m.slot_prefill(&fresh, 0, &golden.tokens[..30], 7);
 
         // Slot 1 serves a different sequence far past its window, is released, and serves the golden prompt.

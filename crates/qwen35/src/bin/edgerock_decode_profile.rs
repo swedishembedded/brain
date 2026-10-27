@@ -48,9 +48,10 @@ fn main() {
     };
     let max_seq = (position + 64).min(cfg.max_position_embeddings);
     println!("EdgeRock decode profile: {} layers, batch {batch}, position {position}, backend {}", cfg.n_layers, gpu_core::backend_name());
-    println!("state per sequence: {:.1} MiB", qwen35::model::slot_state_bytes(&cfg) as f64 / (1u64 << 20) as f64);
+    let ring = model::kv_tier::KvTier::parse(flag("--ring").as_deref().unwrap_or("bf16")).unwrap_or_else(|e| panic!("{e}"));
+    println!("state per sequence: {:.1} MiB (ring {ring})", qwen35::model::slot_state_bytes(&cfg, ring) as f64 / (1u64 << 20) as f64);
     let t0 = std::time::Instant::now();
-    let mut eng = RingEngine::from_source_tier(cfg, &*source, max_seq, batch, 0, &tier);
+    let mut eng = RingEngine::from_source_tier(cfg, &*source, max_seq, batch, 0, &tier, ring);
     println!("load: {:.1} s", t0.elapsed().as_secs_f64());
     if let Some(u) = eng.gpu().memory_usage() {
         let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
@@ -58,7 +59,22 @@ fn main() {
     }
     let mut tables: Vec<BlockTable> = (0..batch).map(|_| BlockTable::new()).collect();
     let t0 = std::time::Instant::now();
+    let profile_prefill = a.iter().any(|x| x == "--prefill-profile");
+    if profile_prefill {
+        eng.seed_synthetic(&mut tables[..1], 256); // warm-up: pipelines compile on first use
+        eng.gpu().poll_wait();
+        eng.release_table(&mut tables[0]);
+        eng.gpu().set_kernel_timing(true);
+        eng.gpu().reset_kernel_times();
+    }
     eng.seed_synthetic(&mut tables, position);
+    if profile_prefill {
+        eng.gpu().poll_wait();
+        let rows = eng.gpu().kernel_times();
+        eng.gpu().set_kernel_timing(false);
+        gpu_core::profile::print_device_table("prefill", t0.elapsed().as_secs_f64() * 1e3, rows);
+        return;
+    }
     let _ = eng.admit_greedy(&vec![0.0; eng.model().cfg.d_model as usize]);
     println!("seed to position {position}: {:.1} s ({:.0} tok/s prefill incl. warm-up)", t0.elapsed().as_secs_f64(), position as f64 / t0.elapsed().as_secs_f64());
     let mut input = vec![1u32; batch as usize];
@@ -68,11 +84,16 @@ fn main() {
         eng.gpu().poll_wait();
     };
     step(&mut eng); // warm-up: pipelines, allocator growth
+    let before = eng.gpu().stats();
     let mut best = f64::INFINITY;
     for _ in 0..reps {
         let t = std::time::Instant::now();
         step(&mut eng);
         best = best.min(t.elapsed().as_secs_f64());
+    }
+    if let (Some(a), Some(b)) = (before, eng.gpu().stats()) {
+        let n = u64::from(reps).max(1);
+        println!("per step: {} submits, {} dispatches, {} readbacks, {} host writes, {} uniform allocs", (b.submits - a.submits) / n, (b.dispatches - a.dispatches) / n, (b.readbacks - a.readbacks) / n, (b.writes - a.writes) / n, (b.uniform_allocs - a.uniform_allocs) / n);
     }
     println!("wall per step (best of {reps}): {:.2} ms  = {:.1} tok/s/stream, {:.0} tok/s aggregate", best * 1e3, 1.0 / best, batch as f64 / best);
     let timed = eng.gpu().set_kernel_timing(true);

@@ -92,6 +92,8 @@ pub const ANCHOR_READ_GATE_BWD: &str = include_str!("../wgsl/anchor_read_gate_bw
 pub const ANCHOR_READ_GATE_WGRAD: &str = include_str!("../wgsl/anchor_read_gate_wgrad.wgsl");
 /// `wgsl/anchor_read_scores.wgsl`
 pub const ANCHOR_READ_SCORES: &str = include_str!("../wgsl/anchor_read_scores.wgsl");
+/// `wgsl/gqa_ring_chunk_attn.wgsl`
+pub const GQA_RING_CHUNK_ATTN: &str = include_str!("../wgsl/gqa_ring_chunk_attn.wgsl");
 /// `wgsl/anchor_read_scores_group.wgsl`
 pub const ANCHOR_READ_SCORES_GROUP: &str = include_str!("../wgsl/anchor_read_scores_group.wgsl");
 /// `wgsl/anchor_read_softmax_apply.wgsl`
@@ -1644,6 +1646,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("gqa_bwd_dv", GQA_BWD_DV),
     ("gqa_scores", GQA_SCORES),
     ("gqa_scores_kmask", GQA_SCORES_KMASK),
+    ("gqa_ring_chunk_attn", GQA_RING_CHUNK_ATTN),
     ("gqa_scores_win", GQA_SCORES_WIN),
     ("grad_scale", GRAD_SCALE),
     ("grad_scale_buf", GRAD_SCALE_BUF),

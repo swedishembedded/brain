@@ -49,6 +49,11 @@ fn weight_tier() -> TierPolicy {
     TierPolicy::uniform(Dtype::BF16)
 }
 
+/// How each sequence's ring of keys and values is stored: bf16, with the attention accumulating in fp32.
+fn ring_tier() -> model::kv_tier::KvTier {
+    model::kv_tier::KvTier::BF16
+}
+
 /// Device bytes kept free on the card beyond the weights, the slots and the prefill workspace: allocator slack
 /// and the kernels' own scratch.
 const HEADROOM_BYTES: u64 = 1 << 30;
@@ -89,7 +94,7 @@ impl EdgeRockResident {
         let max_seq_len = if sizing.ctx_explicit { sizing.ctx.min(cfg.max_position_embeddings) } else { cfg.max_position_embeddings };
         let fixed = Self::fixed_bytes(&cfg);
         let budget = gpu_core::capacity::available_gpus().iter().map(|&(_, free)| free).max().map_or(u64::MAX, |free| free.saturating_sub(fixed + HEADROOM_BYTES));
-        let (live_slots, prefix_slots) = ring_slots(&cfg, budget, sizing.max_batch);
+        let (live_slots, prefix_slots) = ring_slots(&cfg, ring_tier(), budget, sizing.max_batch);
         Ok(EdgeRockResident { id: id.to_string(), dir: path.to_path_buf(), cfg, max_seq_len, live_slots, prefix_slots })
     }
 
@@ -133,7 +138,7 @@ impl ResidentModel for EdgeRockResident {
     }
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
         let slots = u64::from(self.live_slots + self.prefix_slots);
-        MemCost::new(Self::fixed_bytes(&self.cfg) + slots * qwen35::model::slot_state_bytes(&self.cfg), 0)
+        MemCost::new(Self::fixed_bytes(&self.cfg) + slots * qwen35::model::slot_state_bytes(&self.cfg, ring_tier()), 0)
     }
     /// A demoted instance keeps the shards as a mapping of the files (evictable page cache): no f32 copy, no card.
     fn estimate_at(&self, key: &InstanceKey, tier: Tier) -> MemCost {
@@ -151,7 +156,7 @@ impl ResidentModel for EdgeRockResident {
         let host = HostWeights::from_source(Box::new(src), names);
         let (cfg, max_seq_len, live, prefix) = (self.cfg.clone(), self.max_seq_len, self.live_slots, self.prefix_slots);
         let build: Build = Box::new(move |host, device| {
-            let sched = on_device(device, || Scheduler::new(RingEngine::from_source_tier(cfg.clone(), host.source(), max_seq_len, live, prefix, &weight_tier()), live as usize))?;
+            let sched = on_device(device, || Scheduler::new(RingEngine::from_source_tier(cfg.clone(), host.source(), max_seq_len, live, prefix, &weight_tier(), ring_tier()), live as usize))?;
             Ok(Box::new(ScheduledInstance::new(front.clone(), sched, live as usize)))
         });
         Ok(Box::new(ParkableInstance::activate(Arc::new(host), device, build)?))

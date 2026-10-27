@@ -282,7 +282,7 @@ pub fn ring_live(pos: u32, window: u32) -> u32 {
 
 /// Where one chunk of a sliding-window prefill finds and leaves the ring (see [`gqa_mixer_ring_chunk_fwd`]).
 pub struct RingChunk<'a> {
-    /// The layer's cache; its planes must be `f32` (the ring is flat words here).
+    /// The layer's cache; its planes are `f32` or `bf16` (flat words, or pairs packed in words).
     pub layer: &'a KvLayer,
     /// First row of this sequence's ring in the planes (`block * window` for a pool of rings).
     pub row0: u32,
@@ -292,6 +292,12 @@ pub struct RingChunk<'a> {
     /// Pipeline indices of `gqa_scores_win` and `splice` in the caller's kernel list.
     pub scores_win: usize,
     pub splice: usize,
+    /// `gqa_ring_chunk_attn`, the fused windowed attention of a chunk (workgroup-cooperative): used where the device
+    /// runs such kernels and the window fits it; `None` keeps the three-kernel path, the reference.
+    pub ring_attn: Option<usize>,
+    /// Pipeline indices of `pack_bf16` and `unpack_bf16` (`model::saved::kernels`), used when the ring is bf16.
+    pub pack: usize,
+    pub unpack: usize,
 }
 
 /// Copy `rows` rows of `kvd` words from `src` (starting at row `src_row`) to `dst` (from row `dst_row`).
@@ -310,8 +316,31 @@ fn copy_rows(g: &Gpu, splice: usize, src: &DeviceBuffer, src_row: u64, dst: &Dev
 /// The attention is the materialised scores/softmax/apply chain over `m + n` rows with the first `m` query rows idle:
 /// the cost is `O((m + n)^2)` per head, which is fine for a bounded chunk and is what a windowed flash kernel replaces.
 #[allow(clippy::too_many_arguments)]
+/// Rows `row .. row + rows` of a ring plane into f32 `dst` (from row `dst_row`): a word copy for an f32 ring, an exact
+/// widening for a bf16 one.
+fn ring_read(g: &Gpu, ring: &RingChunk, plane: &crate::kv_tier::KvPlane, row: u64, dst: &DeviceBuffer, dst_row: u64, rows: u64, kvd: u64) -> Option<Step> {
+    if plane.tier() == crate::kv_tier::KvTier::F32 {
+        return copy_rows(g, ring.splice, plane.data(), row, dst, dst_row, rows, kvd);
+    }
+    let n = rows * kvd;
+    (n > 0).then(|| g.step_sliced(ring.unpack, &[plane.data(), dst], &[(row * kvd / 2, n.div_ceil(2)), (dst_row * kvd, n)], &[n as u32], n as u32))
+}
+
+/// f32 rows of `src` (from row `src_row`) into rows `row ..` of a ring plane: a word copy, or a rounding to bf16.
+fn ring_write(g: &Gpu, ring: &RingChunk, plane: &crate::kv_tier::KvPlane, row: u64, src: &DeviceBuffer, src_row: u64, rows: u64, kvd: u64) -> Option<Step> {
+    if plane.tier() == crate::kv_tier::KvTier::F32 {
+        return copy_rows(g, ring.splice, src, src_row, plane.data(), row, rows, kvd);
+    }
+    let n = rows * kvd;
+    (n > 0).then(|| g.step_sliced(ring.pack, &[src, plane.data()], &[(src_row * kvd, n), (row * kvd / 2, n.div_ceil(2))], &[n as u32], n.div_ceil(2) as u32))
+}
+
 pub fn gqa_mixer_ring_chunk_fwd(g: &Gpu, ids: &GqaMixerIds, ring: &RingChunk, shape: &GqaMixerShape, w: &GqaMixerWeights, q_full: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, n: u32) -> DeviceBuffer {
-    assert!(ring.layer.k.tier() == crate::kv_tier::KvTier::F32, "gqa_mixer_ring_chunk_fwd: the ring's planes must be f32");
+    assert!(
+        [crate::kv_tier::KvTier::F32, crate::kv_tier::KvTier::BF16].contains(&ring.layer.k.tier()) && ring.layer.k.tier() == ring.layer.v.tier(),
+        "gqa_mixer_ring_chunk_fwd: the ring's planes must be f32 or bf16"
+    );
+    assert!(u64::from(shape.kvd()).is_multiple_of(2), "gqa_mixer_ring_chunk_fwd: a bf16 ring packs pairs, so a row must be even");
     let (nh, nkv, hd) = (shape.n_heads, shape.n_kv_heads, shape.head_dim);
     let (qd, kvd) = (u64::from(shape.qd()), u64::from(shape.kvd()));
     let (win, start) = (ring.window, ring.start);
@@ -327,24 +356,33 @@ pub fn gqa_mixer_ring_chunk_fwd(g: &Gpu, ids: &GqaMixerIds, ring: &RingChunk, sh
         let row = ring_row(p, win);
         let run = (end - p).min(win - row);
         for (plane, dst) in [(&ring.layer.k, &ctx_k), (&ring.layer.v, &ctx_v)] {
-            steps.extend(copy_rows(g, ring.splice, plane.data(), u64::from(ring.row0 + row), dst, u64::from(p - (start - m)), u64::from(run), kvd));
+            steps.extend(ring_read(g, ring, plane, u64::from(ring.row0 + row), dst, u64::from(p - (start - m)), u64::from(run), kvd));
         }
         p += run;
     }
     steps.extend(copy_rows(g, ring.splice, &prep.k_normed, 0, &ctx_k, u64::from(m), u64::from(n), kvd));
     steps.extend(copy_rows(g, ring.splice, v, 0, &ctx_v, u64::from(m), u64::from(n), kvd));
-    // Queries sit at logical rows `m ..` of the run; the rows before them are idle.
-    let q_pad = g.storage_uninit(u64::from(len) * qd);
-    steps.extend(copy_rows(g, ring.splice, &prep.q_normed, 0, &q_pad, u64::from(m), u64::from(n), qd));
-    g.submit(&[], &steps);
+    let fused = ring.ring_attn.filter(|_| g.caps().workgroup_reductions && win <= 2048 && hd <= 256);
+    let ctx = if let Some(attn) = fused {
+        g.submit(&[], &steps);
+        let ctx = g.storage_uninit(u64::from(n) * qd);
+        g.submit(&[], &[g.dispatch(attn, &[&prep.q_normed, &ctx_k, &ctx_v, &ctx], &[n, nh, nkv, hd, m, win], gpu_core::Dispatch::Workgroups(n * nh))]);
+        ctx
+    } else {
+        // Queries sit at logical rows `m ..` of the run; the rows before them are idle.
+        let q_pad = g.storage_uninit(u64::from(len) * qd);
+        steps.extend(copy_rows(g, ring.splice, &prep.q_normed, 0, &q_pad, u64::from(m), u64::from(n), qd));
+        g.submit(&[], &steps);
 
-    let slabs = u64::from(nh) * u64::from(len) * u64::from(len);
-    let (scores, probs) = (g.storage_uninit(slabs), g.storage_uninit(slabs));
-    let ctx_pad = g.storage_uninit(u64::from(len) * qd);
-    let ga = Gqa { b: 1, t: len, n_heads: nh, n_kv_heads: nkv, head_dim: hd };
-    g.submit(&[], &gqa_fwd_win(g, ring.scores_win, &ids.kernels, &ga, win, &q_pad, &ctx_k, &ctx_v, &scores, &probs, &ctx_pad));
-    let ctx = g.storage_uninit(u64::from(n) * qd);
-    g.submit(&[], &copy_rows(g, ring.splice, &ctx_pad, u64::from(m), &ctx, 0, u64::from(n), qd).into_iter().collect::<Vec<_>>());
+        let slabs = u64::from(nh) * u64::from(len) * u64::from(len);
+        let (scores, probs) = (g.storage_uninit(slabs), g.storage_uninit(slabs));
+        let ctx_pad = g.storage_uninit(u64::from(len) * qd);
+        let ga = Gqa { b: 1, t: len, n_heads: nh, n_kv_heads: nkv, head_dim: hd };
+        g.submit(&[], &gqa_fwd_win(g, ring.scores_win, &ids.kernels, &ga, win, &q_pad, &ctx_k, &ctx_v, &scores, &probs, &ctx_pad));
+        let ctx = g.storage_uninit(u64::from(n) * qd);
+        g.submit(&[], &copy_rows(g, ring.splice, &ctx_pad, u64::from(m), &ctx, 0, u64::from(n), qd).into_iter().collect::<Vec<_>>());
+        ctx
+    };
 
     // The chunk's last `window` positions become the ring.
     let keep = n.min(win);
@@ -354,7 +392,7 @@ pub fn gqa_mixer_ring_chunk_fwd(g: &Gpu, ids: &GqaMixerIds, ring: &RingChunk, sh
         let row = ring_row(p, win);
         let run = (end - p).min(win - row);
         for (plane, src) in [(&ring.layer.k, &prep.k_normed), (&ring.layer.v, v)] {
-            steps.extend(copy_rows(g, ring.splice, src, u64::from(p - start), plane.data(), u64::from(ring.row0 + row), u64::from(run), kvd));
+            steps.extend(ring_write(g, ring, plane, u64::from(ring.row0 + row), src, u64::from(p - start), u64::from(run), kvd));
         }
         p += run;
     }

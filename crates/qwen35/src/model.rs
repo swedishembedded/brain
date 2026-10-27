@@ -228,6 +228,7 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         // EdgeRock: the anchor memory's kernels and the windowed attention scores, resolved by name.
         v.extend(model::anchor_memory::ANCHOR_MEMORY_PIPELINES);
         v.push(("gqa_scores_win", kernels::GQA_SCORES_WIN));
+        v.push(("gqa_ring_chunk_attn", kernels::GQA_RING_CHUNK_ATTN));
         // Device AdamW over bf16 or blockwise-int8 moments (`optim::Optim` resolves them by name).
         v.extend(optim::MOMENT_KERNELS);
         v.push(("gradnorm_part", kernels::GRADNORM_PART));
@@ -2933,6 +2934,9 @@ impl Qwen35 {
                         start: rc.start,
                         scores_win: g.kernel_index("gqa_scores_win").unwrap_or_else(|| panic!("qwen35: gqa_scores_win is not registered on this Gpu")),
                         splice: SPLICE,
+                        ring_attn: g.kernel_index("gqa_ring_chunk_attn"),
+                        pack: g.kernel_index("pack_bf16").unwrap_or_else(|| panic!("qwen35: pack_bf16 is not registered on this Gpu")),
+                        unpack: g.kernel_index("unpack_bf16").unwrap_or_else(|| panic!("qwen35: unpack_bf16 is not registered on this Gpu")),
                     },
                     &shape,
                     &weights,
@@ -5547,10 +5551,10 @@ impl Qwen35 {
     // ---- slot pools: the fixed state of many sequences, addressed by slot row ------------------------------------
 
     /// A pool of `slots` empty sequence slots for this (sliding-window) config; see [`SlotPool`].
-    pub fn new_slot_pool(&self, slots: u32) -> SlotPool {
+    pub fn new_slot_pool(&self, slots: u32, ring: model::kv_tier::KvTier) -> SlotPool {
         assert!(slots > 0, "qwen35::new_slot_pool: no slots");
         assert!(self.shard.is_whole(self.cfg.n_layers as usize), "qwen35::new_slot_pool: a slot pool holds a whole model's state");
-        SlotPool::new(&self.gpu, &self.cfg, &self.shard, slots)
+        SlotPool::new(&self.gpu, &self.cfg, &self.shard, slots, ring)
     }
 
     /// Feed `tokens` into slot `slot`, `max_chunk` rows per round, continuing whatever the slot holds. Returns the
@@ -5646,10 +5650,10 @@ impl Qwen35 {
                 self.gpu.write_at(&pool.gdn_hist[l], u64::from(slot) * hl, &vec![0u32; hl as usize]);
             }
         }
-        let ring_words = u64::from(pool.window) * u64::from(self.cfg.kv_dim());
         for (l, ty) in self.cfg.layer_types().iter().enumerate() {
             if *ty == LayerType::Full {
                 for plane in [&pool.gqa_kv[l].k, &pool.gqa_kv[l].v] {
+                    let ring_words = plane.tier().plane_words(u64::from(pool.window), u64::from(self.cfg.kv_dim()), u64::from(self.cfg.head_dim)).data;
                     self.gpu.write_at(plane.data(), u64::from(slot) * ring_words, &vec![0u32; ring_words as usize]);
                 }
             }

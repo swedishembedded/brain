@@ -77,7 +77,7 @@ fn the_placed_footprint_is_the_weights_plus_fixed_size_slots() {
     let four = EdgeRockResident::from_hf_dir(dir.to_str().unwrap(), "x/EdgeRock", Qwen35Sizing { max_batch: 4, ..Qwen35Sizing::default() }).unwrap();
     let key = InstanceKey::new("x/EdgeRock", "default");
     let (slots_one, slots_four) = (one.slots(), four.slots());
-    let per_slot = qwen35::model::slot_state_bytes(&cfg());
+    let per_slot = qwen35::model::slot_state_bytes(&cfg(), model::kv_tier::KvTier::BF16);
     let extra = u64::from(slots_four.0 + slots_four.1 - slots_one.0 - slots_one.1) * per_slot;
     assert_eq!(four.estimate(&key).vram - one.estimate(&key).vram, extra, "a slot costs the same fixed bytes whatever the context");
     std::fs::remove_dir_all(&dir).ok();
