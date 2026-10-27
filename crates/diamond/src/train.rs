@@ -22,6 +22,7 @@ use crate::cond::{conditioners, AdaGnSite, CondNet};
 use crate::config::DiamondConfig;
 use crate::model::Tensors;
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
+use model::saved::SavedPolicy;
 use paramstore::ParamStore;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -123,11 +124,92 @@ struct TB<'a> {
     /// Backward step groups in FORWARD order; flattened reversed at the end.
     bwd: Vec<Vec<Step>>,
     adagn: Vec<(AdaGnSite, DeviceBuffer)>,
+    /// What the backward keeps of the forward: every activation, or (recompute) only the activations between
+    /// segments (see [`TB::begin_segment`]).
+    saved: SavedPolicy,
+    /// The buffers recomputing segments share, by length and by how many of that length a segment has taken.
+    pool: HashMap<(u32, usize), DeviceBuffer>,
+    /// The open segment, if any.
+    segment: Option<Segment>,
+    /// Words of device memory the graph's activations and gradient temporaries hold.
+    activation_words: u64,
+}
+
+/// A run of blocks whose internal activations a recomputing backward rebuilds instead of keeping.
+struct Segment {
+    /// Index into `TB::fwd` where the segment's forward starts.
+    fwd_start: usize,
+    /// Buffers of each length the segment has taken from the pool so far.
+    taken: HashMap<u32, usize>,
+    /// The next allocation is the segment's output, which outlives it.
+    output_next: bool,
 }
 
 impl<'a> TB<'a> {
-    fn val(&self, len: u32) -> TVal {
-        TVal { buf: self.gpu.storage(len as u64), grad: self.gpu.storage(len as u64), len }
+    fn val(&mut self, len: u32) -> TVal {
+        let outlives = self.take_output_flag();
+        TVal { buf: self.alloc(len, outlives), grad: self.alloc(len, outlives), len }
+    }
+
+    /// A buffer of `len` words that lives as long as the segment it is taken in.
+    fn buf(&mut self, len: u32) -> DeviceBuffer {
+        self.alloc(len, false)
+    }
+
+    /// Whether the next value is the open segment's output (see [`TB::output_next`]); clears the mark.
+    fn take_output_flag(&mut self) -> bool {
+        self.segment.as_mut().is_some_and(|seg| std::mem::take(&mut seg.output_next))
+    }
+
+    /// A buffer of `len` words. Inside a recomputing segment, unless it `outlives` the segment, it is the pool's
+    /// `i`-th buffer of that length, shared with every other segment (their internals are never live together: a
+    /// segment's forward is replayed right before its backward); otherwise it is the graph's own.
+    fn alloc(&mut self, len: u32, outlives: bool) -> DeviceBuffer {
+        let gpu = self.gpu;
+        let words = &mut self.activation_words;
+        match self.segment.as_mut() {
+            Some(seg) if self.saved.recomputes() && !outlives => {
+                let i = seg.taken.entry(len).or_insert(0);
+                let key = (len, *i);
+                *i += 1;
+                self.pool
+                    .entry(key)
+                    .or_insert_with(|| {
+                        *words += u64::from(len);
+                        gpu.storage(u64::from(len))
+                    })
+                    .clone()
+            }
+            _ => {
+                *words += u64::from(len);
+                gpu.storage(u64::from(len))
+            }
+        }
+    }
+
+    /// Open a segment: the blocks recorded until [`TB::end_segment`] keep only what crosses their boundary under
+    /// [`SavedPolicy::Recompute`]. Their internal activations and gradients are shared with other segments, and
+    /// the backward replays the segment's forward from its inputs before differentiating it. Call
+    /// [`TB::output_next`] before the op that makes the segment's output, which must outlive the segment.
+    fn begin_segment(&mut self) {
+        assert!(self.segment.is_none(), "diamond train: segments do not nest");
+        self.segment = Some(Segment { fwd_start: self.fwd.len(), taken: HashMap::new(), output_next: false });
+    }
+
+    /// The next buffers taken are the open segment's output.
+    fn output_next(&mut self) {
+        if let Some(seg) = self.segment.as_mut() {
+            seg.output_next = true;
+        }
+    }
+
+    /// Close the segment. Under recompute its forward is replayed ahead of its backward.
+    fn end_segment(&mut self) {
+        let seg = self.segment.take().expect("diamond train: no open segment");
+        if self.saved.recomputes() {
+            // Groups are flattened in reverse, so the replay recorded last runs first in the backward.
+            self.bwd.push(self.fwd[seg.fwd_start..].to_vec());
+        }
     }
 
 
@@ -144,8 +226,8 @@ impl<'a> TB<'a> {
 
     /// Fork a value into two consumer slots; their grads are summed back.
     fn fork(&mut self, v: &TVal) -> (TVal, TVal) {
-        let a = TVal { buf: v.buf.clone(), grad: self.gpu.storage(v.len as u64), len: v.len };
-        let b = TVal { buf: v.buf.clone(), grad: self.gpu.storage(v.len as u64), len: v.len };
+        let a = TVal { buf: v.buf.clone(), grad: self.buf(v.len), len: v.len };
+        let b = TVal { buf: v.buf.clone(), grad: self.buf(v.len), len: v.len };
         self.bwd.push(vec![self.gpu.step(
             K_ADD2,
             &[&a.grad, &b.grad, &v.grad],
@@ -179,7 +261,7 @@ impl<'a> TB<'a> {
         let threads = cout.div_ceil(8) * (ho * wo).div_ceil(4);
         self.fwd.push(self.gpu.step(K_CONV, &[&x.buf, wgt, bias, &y.buf], &dims, threads));
         // Backward: dy is y.grad.
-        let dy_nlc = self.gpu.storage((cout * ho * wo) as u64);
+        let dy_nlc = self.buf(cout * ho * wo);
         self.bwd.push(vec![
             self.gpu.step(K_CONV_DX, &[&y.grad, wgt, &x.grad], &dims, cin * h * w),
             self.gpu.step(K_CONV_DW, &[&y.grad, &x.buf, dwgt], &dims, cout * cin * k * k),
@@ -194,16 +276,16 @@ impl<'a> TB<'a> {
     /// or a static affine one. Backward: gn_dx only (gb frozen).
     fn gn(&mut self, c: u32, h: u32, w: u32, x: &TVal, gb: &DeviceBuffer) -> TVal {
         let g = wm_core::gn::num_groups(c);
-        let stats = self.gpu.storage(2 * g as u64);
-        let part = self.gpu.storage(2 * g as u64 * GN_P as u64);
+        let stats = self.buf(2 * g);
+        let part = self.buf(2 * g * GN_P);
         let y = self.val(c * h * w);
         let n = c * h * w;
         self.fwd.push(self.gpu.step(K_GN_PART, &[&x.buf, &part], &[1, c, h, w, g, GN_P], g * GN_P));
         self.fwd.push(self.gpu.step(K_GN_STATS2, &[&part, &stats], &[1, c, h, w, g, GN_P, f(GN_EPS)], g));
         self.fwd.push(self.gpu.step(K_GN_APPLY, &[&x.buf, &stats, gb, &y.buf], &[1, c, h, w, g], n));
         // Backward (wm_core::gn recipe, dgamma/dbeta skipped — frozen):
-        let dyg = self.gpu.storage(n as u64);
-        let sums = self.gpu.storage(4 * g as u64);
+        let dyg = self.buf(n);
+        let sums = self.buf(4 * g);
         let dims5 = [1, c, h, w, g];
         self.bwd.push(vec![
             self.gpu.step(K_SCALE_CHAN, &[&y.grad, gb, &dyg], &[n, c, h * w], n),
@@ -320,8 +402,8 @@ impl<'a> TB<'a> {
             &[3 * c * t, 3 * c, t],
             3 * c * t,
         )]);
-        let scores = self.gpu.storage((heads * t * t) as u64);
-        let probs = self.gpu.storage((heads * t * t) as u64);
+        let scores = self.buf(heads * t * t);
+        let probs = self.buf(heads * t * t);
         let attn_out = self.val(t * c);
         let sp = [1, heads, t, ATTN_HEAD_DIM, 3 * c, 0, c]; // scores: q_off 0, k_off c
         let ap = [1, heads, t, ATTN_HEAD_DIM, 3 * c, 2 * c, c]; // apply/dv: v_off 2c
@@ -335,7 +417,7 @@ impl<'a> TB<'a> {
         ));
         // Backward: d_scores (softmax jacobian folded), then dv/dq/dk into
         // the disjoint regions of qkv.grad (every element written).
-        let d_scores = self.gpu.storage((heads * t * t) as u64);
+        let d_scores = self.buf(heads * t * t);
         self.bwd.push(vec![
             self.gpu.step(
                 K_ATTN_BWD_DSCORES,
@@ -377,7 +459,8 @@ impl<'a> TB<'a> {
         )]);
         let (proj, _, _) =
             self.conv(&format!("{prefix}.out_proj"), c, c, 1, 1, 0, h, w, &attn_chw);
-        // Residual on the NORMED input (reference quirk).
+        // Residual on the NORMED input (reference quirk). It is the block's output.
+        self.output_next();
         self.add(&normed_b, &proj, zero)
     }
 
@@ -406,6 +489,9 @@ impl<'a> TB<'a> {
         let n2 = self.adagn(&format!("{prefix}.norm2"), cout, h, w, &c1);
         let s2 = self.silu(&n2);
         let (c2, _, _) = self.conv(&format!("{prefix}.conv2"), cout, cout, 3, 1, 1, h, w, &s2);
+        if !attn {
+            self.output_next();
+        }
         let y = self.add(&c2, &r, zero);
         let out = if attn {
             self.attn(&format!("{prefix}.attn"), cout, h, w, &y, zero)
@@ -429,12 +515,174 @@ pub fn trainable_list(cfg: &DiamondConfig) -> Vec<(String, usize)> {
         .collect()
 }
 
+/// The recorded training graph and the buffers the trainer drives it through.
+struct Recorded {
+    adagn: Vec<(AdaGnSite, DeviceBuffer)>,
+    fwd: Vec<Step>,
+    bwd: Vec<Step>,
+    x_in: DeviceBuffer,
+    x_in_grad: DeviceBuffer,
+    obs_in: DeviceBuffer,
+    y_out: DeviceBuffer,
+    y_grad: DeviceBuffer,
+    tgt: DeviceBuffer,
+    loss_parts: DeviceBuffer,
+    n_px: u32,
+    activation_bytes: u64,
+}
+
+/// Record the UNet's forward and backward over `ps` on `gpu`, keeping what `saved` names for the backward.
+/// `tensors` must hold the frozen host-side tensors (norm gains, the conditioning linears).
+fn record_graph(gpu: &Gpu, ps: &ParamStore, cfg: &DiamondConfig, tensors: &Tensors, saved: SavedPolicy) -> Recorded {
+    let cc = cfg.cond_channels as usize;
+    let ic = cfg.img_channels;
+    let (h0, w0) = (cfg.h, cfg.w);
+    let nsc = cfg.num_steps_conditioning;
+    let n_lv = cfg.levels();
+    let n_px = ic * h0 * w0;
+
+    let mut b = TB { gpu, ps, t: tensors, cc, fwd: vec![], bwd: vec![], adagn: vec![], saved, pool: HashMap::new(), segment: None, activation_words: 0 };
+
+    let obs_in = gpu.storage((nsc * ic * h0 * w0) as u64);
+    let obs_grad = gpu.storage((nsc * ic * h0 * w0) as u64); // discarded
+    let x_in = gpu.storage(n_px as u64);
+    let x_in_grad = gpu.storage(n_px as u64); // discarded (input grad)
+    // Shared zeros for the residual-copy backward (`add2(y.grad, zero, .)`).
+    // MUST cover the LARGEST activation any add() operates on - the widest
+    // resblock/attention output is `max_channels * h0 * w0`, NOT the input
+    // `(nsc+1)*ic`. Undersizing here reads OOB zeros → garbage gradients
+    // for any channel width above the input's (the cpg>8 explosion bug).
+    let max_c = *cfg.channels.iter().max().unwrap();
+    let zero = gpu.storage((max_c * h0 * w0) as u64);
+
+    let obs_v = TVal { buf: obs_in.clone(), grad: obs_grad, len: nsc * ic * h0 * w0 };
+    let x_v = TVal { buf: x_in.clone(), grad: x_in_grad.clone(), len: n_px };
+
+    let cat = b.concat(nsc * ic, ic, h0, w0, &obs_v, &x_v);
+    let c0 = cfg.channels[0];
+    let (mut x, _, _) = b.conv("conv_in", (nsc + 1) * ic, c0, 3, 1, 1, h0, w0, &cat);
+
+    let mut hw = (h0, w0);
+    let mut d_skips: Vec<Vec<(TVal, u32)>> = vec![];
+    for i in 0..n_lv {
+        let c1 = cfg.channels[i.saturating_sub(1)];
+        let c2 = cfg.channels[i];
+        if i > 0 {
+            let (y, nh, nw) =
+                b.conv(&format!("unet.downsamples.{i}.conv"), c1, c1, 3, 2, 1, hw.0, hw.1, &x);
+            x = y;
+            hw = (nh, nw);
+        }
+        let mut level: Vec<(TVal, u32)> = vec![];
+        // Each level entry (x_down + per-resblock outputs) is consumed by
+        // both the forward chain and one up-path concat: fork each.
+        let (x_chain, x_skip) = b.fork(&x);
+        level.push((x_skip, c1));
+        x = x_chain;
+        let n = cfg.depths[i];
+        for r in 0..n {
+            let cin = if r == 0 { c1 } else { c2 };
+            b.begin_segment();
+            let y = b.resblock(
+                &format!("unet.d_blocks.{i}.resblocks.{r}"),
+                cin,
+                c2,
+                cfg.attn_depths[i],
+                hw.0,
+                hw.1,
+                &x,
+                &zero,
+            );
+            b.end_segment();
+            let (y_chain, y_skip) = b.fork(&y);
+            level.push((y_skip, c2));
+            x = y_chain;
+        }
+        d_skips.push(level);
+    }
+
+    let cl = *cfg.channels.last().unwrap();
+    for r in 0..2 {
+        b.begin_segment();
+        x = b.resblock(
+            &format!("unet.mid_blocks.resblocks.{r}"),
+            cl,
+            cl,
+            true,
+            hw.0,
+            hw.1,
+            &x,
+            &zero,
+        );
+        b.end_segment();
+    }
+
+    for j in 0..n_lv {
+        let i = n_lv - 1 - j;
+        let c1 = cfg.channels[i.saturating_sub(1)];
+        let c2 = cfg.channels[i];
+        if j > 0 {
+            let cx = c2;
+            let up = b.upsample(cx, hw.0, hw.1, &x);
+            hw = (hw.0 * 2, hw.1 * 2);
+            let (y, _, _) =
+                b.conv(&format!("unet.upsamples.{j}.conv"), cx, cx, 3, 1, 1, hw.0, hw.1, &up);
+            x = y;
+        }
+        let skips = &d_skips[i];
+        let n = cfg.depths[i] as usize;
+        for r in 0..=n {
+            let (skip, skip_c) = &skips[n - r];
+            let xc = if r == 0 { c2 } else { cfg.channels[i] };
+            // The joined tensor lives only inside the block that reads it.
+            b.begin_segment();
+            let cat = b.concat(xc, *skip_c, hw.0, hw.1, &x, skip);
+            let (cin, cout) = if r < n { (2 * c2, c2) } else { (c1 + c2, c1) };
+            debug_assert_eq!(cin, xc + skip_c);
+            x = b.resblock(
+                &format!("unet.u_blocks.{j}.resblocks.{r}"),
+                cin,
+                cout,
+                cfg.attn_depths[i],
+                hw.0,
+                hw.1,
+                &cat,
+                &zero,
+            );
+            b.end_segment();
+        }
+    }
+
+    let hn = b.affine_gn("norm_out.norm", c0, hw.0, hw.1, &x);
+    let hs = b.silu(&hn);
+    let (y_v, _, _) = b.conv("conv_out", c0, ic, 3, 1, 1, hw.0, hw.1, &hs);
+    assert_eq!(hw, (h0, w0));
+
+    // Loss plumbing: mse_value partials + mse_grad seed into y_v.grad.
+    let tgt = gpu.storage(n_px as u64);
+    let loss_parts = gpu.storage(n_px as u64);
+    let mut fwd = std::mem::take(&mut b.fwd);
+    fwd.push(gpu.step(K_MSE_VALUE, &[&y_v.buf, &tgt, &loss_parts], &[n_px], n_px));
+    let mut bwd: Vec<Step> =
+        vec![gpu.step(K_MSE_GRAD, &[&y_v.buf, &tgt, &y_v.grad], &[n_px], n_px)];
+    let TB { bwd: bwd_groups, adagn, activation_words, .. } = b;
+    for group in bwd_groups.into_iter().rev() {
+        bwd.extend(group);
+    }
+
+    Recorded { adagn, fwd, bwd, x_in, x_in_grad, obs_in, y_out: y_v.buf, y_grad: y_v.grad, tgt, loss_parts, n_px, activation_bytes: 4 * activation_words }
+}
+
 pub struct DiamondTrainer {
     pub gpu: Gpu,
     pub cfg: DiamondConfig,
     pub ps: ParamStore,
     opt: optim::Optim,
     cond: CondNet,
+    /// The frozen host-side tensors the graph is recorded from again by [`Self::set_saved_policy`].
+    frozen: Tensors,
+    /// What the backward keeps of the forward ([`Self::set_saved_policy`]).
+    saved: SavedPolicy,
     adagn: Vec<(AdaGnSite, DeviceBuffer)>,
     fwd: Vec<Step>,
     bwd: Vec<Step>,
@@ -450,16 +698,23 @@ pub struct DiamondTrainer {
     pub n_px: u32,
     /// Batch state (sigma + actions) for forward/backward determinism.
     batch: RefCell<Option<(f32, Vec<u32>)>>,
+    /// Bytes of device memory the graph's activations and gradient temporaries hold: what the saved-activation
+    /// policy trades against recompute.
+    activation_bytes: u64,
 }
 
 impl DiamondTrainer {
     /// Build from full host tensors (imported weights). Conv params become
     /// trainable in the ParamStore; everything else stays frozen host-side.
+    /// The graph keeps every activation for the backward ([`SavedPolicy::Keep`]);
+    /// [`Self::set_saved_policy`] changes that.
     pub fn from_tensors(cfg: DiamondConfig, tensors: &Tensors, device: Option<&str>) -> DiamondTrainer {
         let gpu = Gpu::open(device, &KERNELS);
         let list = trainable_list(&cfg);
         let init: HashMap<String, Vec<f32>> =
             list.iter().map(|(n, _)| (n.clone(), tensors[n].1.clone())).collect();
+        let trained: std::collections::HashSet<&str> = list.iter().map(|(n, _)| n.as_str()).collect();
+        let frozen: Tensors = tensors.iter().filter(|(n, _)| !trained.contains(n.as_str())).map(|(n, t)| (n.clone(), t.clone())).collect();
         let ps = ParamStore::new(&gpu, list, &init);
         let opt = optim::Optim::new(K_ADAMW, K_GRADNORM_SQ, K_GRAD_SCALE, K_CLIP_COEF, K_GRAD_SCALE_BUF);
 
@@ -477,154 +732,58 @@ impl DiamondTrainer {
             mlp2_b: get("cond_proj.2.bias"),
         };
 
-        let ic = cfg.img_channels;
-        let (h0, w0) = (cfg.h, cfg.w);
-        let nsc = cfg.num_steps_conditioning;
-        let n_lv = cfg.levels();
-        let n_px = ic * h0 * w0;
-
-        let mut b = TB { gpu: &gpu, ps: &ps, t: tensors, cc, fwd: vec![], bwd: vec![], adagn: vec![] };
-
-        let obs_in = gpu.storage((nsc * ic * h0 * w0) as u64);
-        let obs_grad = gpu.storage((nsc * ic * h0 * w0) as u64); // discarded
-        let x_in = gpu.storage(n_px as u64);
-        let x_in_grad = gpu.storage(n_px as u64); // discarded (input grad)
-        // Shared zeros for the residual-copy backward (`add2(y.grad, zero, .)`).
-        // MUST cover the LARGEST activation any add() operates on — the widest
-        // resblock/attention output is `max_channels * h0 * w0`, NOT the input
-        // `(nsc+1)*ic`. Undersizing here reads OOB zeros → garbage gradients
-        // for any channel width above the input's (the cpg>8 explosion bug).
-        let max_c = *cfg.channels.iter().max().unwrap();
-        let zero = gpu.storage((max_c * h0 * w0) as u64);
-
-        let obs_v = TVal { buf: obs_in.clone(), grad: obs_grad, len: nsc * ic * h0 * w0 };
-        let x_v = TVal { buf: x_in.clone(), grad: x_in_grad.clone(), len: n_px };
-
-        let cat = b.concat(nsc * ic, ic, h0, w0, &obs_v, &x_v);
-        let c0 = cfg.channels[0];
-        let (mut x, _, _) = b.conv("conv_in", (nsc + 1) * ic, c0, 3, 1, 1, h0, w0, &cat);
-
-        let mut hw = (h0, w0);
-        let mut d_skips: Vec<Vec<(TVal, u32)>> = vec![];
-        for i in 0..n_lv {
-            let c1 = cfg.channels[i.saturating_sub(1)];
-            let c2 = cfg.channels[i];
-            if i > 0 {
-                let (y, nh, nw) =
-                    b.conv(&format!("unet.downsamples.{i}.conv"), c1, c1, 3, 2, 1, hw.0, hw.1, &x);
-                x = y;
-                hw = (nh, nw);
-            }
-            let mut level: Vec<(TVal, u32)> = vec![];
-            // Each level entry (x_down + per-resblock outputs) is consumed by
-            // both the forward chain and one up-path concat: fork each.
-            let (x_chain, x_skip) = b.fork(&x);
-            level.push((x_skip, c1));
-            x = x_chain;
-            let n = cfg.depths[i];
-            for r in 0..n {
-                let cin = if r == 0 { c1 } else { c2 };
-                let y = b.resblock(
-                    &format!("unet.d_blocks.{i}.resblocks.{r}"),
-                    cin,
-                    c2,
-                    cfg.attn_depths[i],
-                    hw.0,
-                    hw.1,
-                    &x,
-                    &zero,
-                );
-                let (y_chain, y_skip) = b.fork(&y);
-                level.push((y_skip, c2));
-                x = y_chain;
-            }
-            d_skips.push(level);
-        }
-
-        let cl = *cfg.channels.last().unwrap();
-        for r in 0..2 {
-            x = b.resblock(
-                &format!("unet.mid_blocks.resblocks.{r}"),
-                cl,
-                cl,
-                true,
-                hw.0,
-                hw.1,
-                &x,
-                &zero,
-            );
-        }
-
-        for j in 0..n_lv {
-            let i = n_lv - 1 - j;
-            let c1 = cfg.channels[i.saturating_sub(1)];
-            let c2 = cfg.channels[i];
-            if j > 0 {
-                let cx = c2;
-                let up = b.upsample(cx, hw.0, hw.1, &x);
-                hw = (hw.0 * 2, hw.1 * 2);
-                let (y, _, _) =
-                    b.conv(&format!("unet.upsamples.{j}.conv"), cx, cx, 3, 1, 1, hw.0, hw.1, &up);
-                x = y;
-            }
-            let skips = &d_skips[i];
-            let n = cfg.depths[i] as usize;
-            for r in 0..=n {
-                let (skip, skip_c) = &skips[n - r];
-                let xc = if r == 0 { c2 } else { cfg.channels[i] };
-                let cat = b.concat(xc, *skip_c, hw.0, hw.1, &x, skip);
-                let (cin, cout) = if r < n { (2 * c2, c2) } else { (c1 + c2, c1) };
-                debug_assert_eq!(cin, xc + skip_c);
-                x = b.resblock(
-                    &format!("unet.u_blocks.{j}.resblocks.{r}"),
-                    cin,
-                    cout,
-                    cfg.attn_depths[i],
-                    hw.0,
-                    hw.1,
-                    &cat,
-                    &zero,
-                );
-            }
-        }
-
-        let hn = b.affine_gn("norm_out.norm", c0, hw.0, hw.1, &x);
-        let hs = b.silu(&hn);
-        let (y_v, _, _) = b.conv("conv_out", c0, ic, 3, 1, 1, hw.0, hw.1, &hs);
-        assert_eq!(hw, (h0, w0));
-
-        // Loss plumbing: mse_value partials + mse_grad seed into y_v.grad.
-        let tgt = gpu.storage(n_px as u64);
-        let loss_parts = gpu.storage(n_px as u64);
-        let mut fwd = std::mem::take(&mut b.fwd);
-        fwd.push(gpu.step(K_MSE_VALUE, &[&y_v.buf, &tgt, &loss_parts], &[n_px], n_px));
-        let mut bwd: Vec<Step> =
-            vec![gpu.step(K_MSE_GRAD, &[&y_v.buf, &tgt, &y_v.grad], &[n_px], n_px)];
-        // End the builder's borrows of `gpu`/`ps` before moving them.
-        let TB { bwd: bwd_groups, adagn, gpu: _, ps: _, t: _, cc: _, fwd: _ } = b;
-        for group in bwd_groups.into_iter().rev() {
-            bwd.extend(group);
-        }
-
+        let g = record_graph(&gpu, &ps, &cfg, tensors, SavedPolicy::Keep);
         DiamondTrainer {
             gpu,
             cfg,
             ps,
             opt,
             cond,
-            adagn,
-            fwd,
-            bwd,
-            x_in,
-            x_in_grad,
-            obs_in,
-            y_out: y_v.buf,
-            y_grad: y_v.grad,
-            tgt,
-            loss_parts,
-            n_px,
+            frozen,
+            saved: SavedPolicy::Keep,
+            adagn: g.adagn,
+            fwd: g.fwd,
+            bwd: g.bwd,
+            x_in: g.x_in,
+            x_in_grad: g.x_in_grad,
+            obs_in: g.obs_in,
+            y_out: g.y_out,
+            y_grad: g.y_grad,
+            tgt: g.tgt,
+            loss_parts: g.loss_parts,
+            n_px: g.n_px,
             batch: RefCell::new(None),
+            activation_bytes: g.activation_bytes,
         }
+    }
+
+    /// Keep every activation for the backward ([`SavedPolicy::Keep`]) or only the activations between residual
+    /// blocks, each block's internals shared with the other blocks' and rebuilt from its inputs as the backward
+    /// reaches it ([`SavedPolicy::Recompute`]). The UNet's activations stay in f32, so a narrow saved format is
+    /// refused by name. The graph is recorded again over new buffers, so call it before
+    /// [`Self::set_transition`]; the parameters and the optimiser state are untouched.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        if let SavedPolicy::Quantized(format) = policy {
+            return Err(format!("diamond keeps its activations in f32; {format:?} saved boundaries do not apply"));
+        }
+        if policy == self.saved {
+            return Ok(());
+        }
+        let g = record_graph(&self.gpu, &self.ps, &self.cfg, &self.frozen, policy);
+        self.saved = policy;
+        self.adagn = g.adagn;
+        self.fwd = g.fwd;
+        self.bwd = g.bwd;
+        self.x_in = g.x_in;
+        self.x_in_grad = g.x_in_grad;
+        self.obs_in = g.obs_in;
+        self.y_out = g.y_out;
+        self.y_grad = g.y_grad;
+        self.tgt = g.tgt;
+        self.loss_parts = g.loss_parts;
+        self.activation_bytes = g.activation_bytes;
+        *self.batch.borrow_mut() = None;
+        Ok(())
     }
 
     /// Prepare one transition: obs (nsc frames, [-1,1]), clean next frame
@@ -662,6 +821,13 @@ impl DiamondTrainer {
         *self.batch.borrow_mut() = Some((sigma, actions.to_vec()));
     }
 
+
+    /// Bytes of device memory the recorded graph's activations and gradient temporaries hold (the parameters,
+    /// their gradients and the optimiser state are not counted): all of them under [`SavedPolicy::Keep`], the
+    /// activations between blocks plus one block's worth shared by every block under [`SavedPolicy::Recompute`].
+    pub fn activation_bytes(&self) -> u64 {
+        self.activation_bytes
+    }
 
     pub fn forward_loss(&self) -> f32 {
         self.gpu.submit(&[], &self.fwd);
