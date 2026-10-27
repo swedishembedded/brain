@@ -1672,6 +1672,39 @@ $(SAMPLE_RUN_TARGETS): samples/%/run:
 	echo "$$bin (built $$(date -r "$$bin" '+%Y-%m-%d %H:%M:%S'))"; \
 	exec env $(ENV) "$$bin" $(ARGS)
 
+# The Rockchip NPU sample runs on a 32-bit uClibc board (RV1103/RV1106), so it
+# is cross-built for `armv7-unknown-linux-uclibceabihf`. That target is tier 3:
+# std is rebuilt from rust-src (`-Zbuild-std`, unlocked on the stable toolchain
+# by RUSTC_BOOTSTRAP for this one invocation) and linked by the board vendor's
+# uClibc cross gcc, whose bin/ directory UCLIBC_TOOLCHAIN names. BOARD is the
+# ssh host of the board; deploy copies the binary to `brain/` in that user's
+# home, on persistent storage (the board's /tmp is RAM it cannot spare).
+UCLIBC_TARGET := armv7-unknown-linux-uclibceabihf
+UCLIBC_TOOLCHAIN ?=
+UCLIBC_PREFIX = $(UCLIBC_TOOLCHAIN)/arm-rockchip830-linux-uclibcgnueabihf-
+BOARD ?=
+ROCKCHIP_SAMPLE_BIN = target/$(UCLIBC_TARGET)/release/sample-npu-rockchip
+
+## samples/npu/rockchip/board - lists the board actions of the Rockchip NPU sample; does nothing
+samples/npu/rockchip/board:
+	$(LIST_CHILDREN)
+
+## samples/npu/rockchip/board/build - cross-build the Rockchip NPU sample for the uClibc board (UCLIBC_TOOLCHAIN=<gcc bin dir>)
+samples/npu/rockchip/board/build:
+	@test -n "$(UCLIBC_TOOLCHAIN)" || { echo "set UCLIBC_TOOLCHAIN to the uClibc cross gcc's bin/ directory"; exit 2; }
+	RUSTC_BOOTSTRAP=1 \
+	CARGO_TARGET_ARMV7_UNKNOWN_LINUX_UCLIBCEABIHF_LINKER=$(UCLIBC_PREFIX)gcc \
+	CC_armv7_unknown_linux_uclibceabihf=$(UCLIBC_PREFIX)gcc \
+	AR_armv7_unknown_linux_uclibceabihf=$(UCLIBC_PREFIX)ar \
+	cargo build --release -p sample-npu-rockchip -Zbuild-std=std,panic_abort --target $(UCLIBC_TARGET)
+
+## samples/npu/rockchip/board/deploy - copy the built Rockchip NPU sample to brain/ on the board (BOARD=<ssh host>)
+samples/npu/rockchip/board/deploy:
+	@test -n "$(BOARD)" || { echo "set BOARD to the board's ssh host"; exit 2; }
+	@test -x "$(ROCKCHIP_SAMPLE_BIN)" || { echo "not built: $(ROCKCHIP_SAMPLE_BIN)"; echo "run: make samples/npu/rockchip/board/build"; exit 2; }
+	ssh $(BOARD) 'mkdir -p brain'
+	scp -q $(ROCKCHIP_SAMPLE_BIN) $(BOARD):brain/
+
 # A crate's cargo EXAMPLES, built by one target and run by another.
 #
 # The target path mirrors the source path, exactly as `samples/<a>/<b>` does:

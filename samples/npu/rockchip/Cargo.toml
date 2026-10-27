@@ -1,0 +1,15 @@
+[package]
+name = "sample-npu-rockchip"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: real-time object detection on a Rockchip RV1103/RV1106 board through brain's DetectionPipeline on the NPU, streamed over RTSP."
+publish = false
+
+[dependencies]
+# The only brain dependency: the SDK facade, naming the one surface it uses.
+brain = { workspace = true, features = ["vision"] }
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+max-brain-crates = 37

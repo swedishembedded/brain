@@ -6195,6 +6195,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sample-npu-rockchip"
+version = "3.0.0"
+dependencies = [
+ "brain",
+]
+
+[[package]]
 name = "sample-reconstruction-splat"
 version = "3.0.0"
 dependencies = [
