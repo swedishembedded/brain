@@ -307,6 +307,7 @@ pub fn lora_train_spec() -> ActionSpec {
         .param(ParamSpec::new("size", ParamType::Int, "training image square size, px (must be a multiple of patch_size*spatial_merge_size)").default(json!(224)))
         .param(ParamSpec::new("seq_len", ParamType::Int, "fixed per-sample token budget (prompt + caption, padded); a caption that overflows it is skipped, not truncated").default(json!(256)))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random)"))
+        .param(ParamSpec::new("activations", ParamType::Enum(model::saved::SavedPolicy::ACTIVATIONS_CHOICES.iter().map(|s| s.to_string()).collect()), "what the decoder's backward keeps of the forward: the decoder rebuilds every layer from its residual, so only 'recompute' runs and 'keep' is refused by name before the first step; default: recompute"))
         .output(BlobSpec::new("adapter", Media::Bytes, "the trained LoRA adapter checkpoint"))
 }
 
@@ -626,7 +627,12 @@ impl Action for LoraTrainAction {
             .ok_or("qwenvl lora_train: no base checkpoint directory (pass 'weights', or configure one through the models directory)")?;
         let data = inv.get_str("data").ok_or("qwenvl lora_train: 'data' folder is required")?;
         let save = inv.get_str("save").ok_or("qwenvl lora_train: 'save' path is required")?;
+        let saved = inv
+            .get_str("activations")
+            .map(|value| model::saved::SavedPolicy::parse_activations(&value).map_err(|e| format!("qwenvl lora_train: {e}")))
+            .transpose()?;
         let opts = crate::finetune::TrainOpts {
+            saved,
             rank: inv.get_i64("rank").unwrap_or(8).max(1) as u32,
             alpha: inv.get_f64("alpha").unwrap_or(16.0) as f32,
             steps: inv.get_i64("steps").unwrap_or(200).max(1) as u32,
@@ -1313,6 +1319,26 @@ mod tests {
             let b = a.inputs.iter().find(|b| b.name == key).unwrap_or_else(|| panic!("generate_spec missing '{key}'"));
             assert!(!b.required, "'{key}' must be optional (only 'image' is required)");
         }
+    }
+
+    #[test]
+    fn lora_train_declares_activations_without_a_default() {
+        let spec = lora_train_spec();
+        let p = spec.params.iter().find(|p| p.name == "activations").expect("lora_train declares activations");
+        assert_eq!(p.ty, ParamType::Enum(vec!["keep".into(), "recompute".into()]));
+        assert!(!p.required && p.default.is_none());
+    }
+
+    /// A value outside the enum is refused naming the parameter, before the checkpoint or the dataset is opened.
+    #[test]
+    fn lora_train_refuses_an_unknown_activations_choice_before_opening_anything() {
+        let inv = Invocation::new()
+            .set("weights", json!("no-such-checkpoint"))
+            .set("data", json!("no-such-data"))
+            .set("save", json!("unused.brain"))
+            .set("activations", json!("recompute+bf16"));
+        let e = LoraTrainAction { default_weights: None }.run(&inv, &mut |_| {}).unwrap_err();
+        assert!(e.contains("activations") && !e.contains("no-such"), "{e}");
     }
 
     /// [`resolved_ctx_len`] must never allocate a KV cache bigger than what

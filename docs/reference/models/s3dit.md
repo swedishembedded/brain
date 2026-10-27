@@ -76,6 +76,11 @@ D-Bus as well. `adapter`, and `lora_train`'s `data` and `save`, name files on
 the serving machine, so only `brain do` on that machine takes them; D-Bus
 and HTTP neither list nor accept them.
 
+`lora_train` takes an optional `activations` (`keep` or `recompute`): what the
+backward keeps of the forward. The trainers rebuild every block from its input,
+so `recompute` is what they do and `keep` is refused by name before the
+dataset is read.
+
 ## Options
 
 Shared generation parameters: `steps` (default 8), `guidance` (default 0.0),

@@ -229,6 +229,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("beta2", ParamType::Float, "AdamW second-moment decay").default(json!(0.999)).min(0.0).max(0.99999))
         .param(ParamSpec::new("eps", ParamType::Float, "AdamW denominator epsilon").default(json!(1e-8)).min(1e-12).max(1e-3))
         .param(ParamSpec::new("dataset_id", ParamType::Str, "provenance id recorded in the adapter's ModelCard"))
+        .param(ParamSpec::new("activations", ParamType::Enum(model::saved::SavedPolicy::ACTIVATIONS_CHOICES.iter().map(|s| s.to_string()).collect()), "what the backward keeps of the forward: the decoder rebuilds every layer from its residual, so only 'recompute' runs and 'keep' is refused by name before the first step; default: recompute"))
         .input(BlobSpec::new("dataset", Media::Bytes, "the training set: data::chat 'generic-messages-v2' JSONL, one packed sample per line").required())
         .input(BlobSpec::new("validation", Media::Bytes, "optional held-out set, same JSONL schema; enables periodic eval"))
         .output(BlobSpec::new("adapter", Media::Bytes, "the trained LoRA adapter checkpoint (safetensors: only the .lora_a/.lora_b tensors)"));
@@ -664,6 +665,10 @@ fn train_in(scratch: &Path, weights: &str, inv: &Invocation, progress: &mut dyn 
     let seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
     let dataset_id = inv.get_str("dataset_id").filter(|s| !s.is_empty());
     let (hyper, targets) = lora_schedule(inv)?;
+    let activations = inv
+        .get_str("activations")
+        .map(|value| model::saved::SavedPolicy::parse_activations(&value).map_err(|e| format!("qwen lora_train: {e}")))
+        .transpose()?;
 
     progress(Progress::step(1, 4, "preparing dataset"));
 
@@ -698,7 +703,11 @@ fn train_in(scratch: &Path, weights: &str, inv: &Invocation, progress: &mut dyn 
 
     // The token mask file `prepare_chat_samples` writes supersedes
     // character-offset masking; `model::load_dataset` prefers it.
-    let opts = model::FitOpts { eval_interval: if val.is_empty() { 0 } else { (steps / 10).max(1) }, ..hyper.fit_opts(steps, batch, block, lr, seed) };
+    let opts = model::FitOpts {
+        eval_interval: if val.is_empty() { 0 } else { (steps / 10).max(1) },
+        precision: model::TrainPrecision { activations, ..Default::default() },
+        ..hyper.fit_opts(steps, batch, block, lr, seed)
+    };
 
     progress(Progress::step(2, 4, format!("training {steps} steps (rank {rank}, alpha {alpha})")));
     let full = scratch.join("full.safetensors");
@@ -1556,7 +1565,7 @@ mod tests {
         let names: Vec<&str> = lt.params.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(
             names,
-            ["rank", "alpha", "steps", "lr", "batch", "block", "seed", "targets", "keep_reasoning", "weight_decay", "grad_clip", "warmup", "min_lr", "beta1", "beta2", "eps", "dataset_id"]
+            ["rank", "alpha", "steps", "lr", "batch", "block", "seed", "targets", "keep_reasoning", "weight_decay", "grad_clip", "warmup", "min_lr", "beta1", "beta2", "eps", "dataset_id", "activations"]
         );
         assert!(lt.inputs.iter().any(|b| b.name == "dataset"), "the dataset survives as a blob");
         assert!(lt.outputs.iter().any(|b| b.name == "adapter"), "the adapter survives as a blob");
@@ -1625,6 +1634,50 @@ mod tests {
         assert_eq!(again.outputs["seed"].as_u64(), Some(drawn));
         assert_eq!(again.blobs["adapter"].bytes, first.blobs["adapter"].bytes, "the echoed seed reproduces the adapter");
         assert!(train(Some(json!(-1))).unwrap_err().to_string().contains("seed"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `activations` is optional with no default on `lora_train`; `recompute` is what the decoder already does, so it
+    /// trains the adapter the unset run trains, `keep` is refused by name, and a value outside the enum is refused
+    /// naming the parameter. Both refusals come before any training.
+    #[test]
+    fn lora_train_routes_the_activations_choice_to_the_decoder() {
+        let spec = manifest().actions.into_iter().find(|a| a.name == "lora_train").unwrap();
+        let p = spec.params.iter().find(|p| p.name == "activations").expect("lora_train declares activations");
+        assert_eq!(p.ty, ParamType::Enum(vec!["keep".into(), "recompute".into()]));
+        assert!(!p.required && p.default.is_none());
+
+        let cfg = QwenConfig { vocab: 151936, ..QwenConfig::tiny() };
+        let dir = std::env::temp_dir().join(format!("qwen-caps-lora-activations-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("tiny.safetensors");
+        write_tiny_checkpoint(&base, &cfg, 3);
+        write_byte_tokenizer(&dir);
+        let mut reg = Registry::new();
+        reg.register(Arc::new(QwenProvider::new()));
+        let train = |activations: Option<&str>| {
+            let inv = Invocation::new()
+                .set("weights", json!(base.to_str().unwrap()))
+                .set("tokenizer", json!(dir.join("tokenizer.json").to_str().unwrap()))
+                .set("rank", json!(2))
+                .set("steps", json!(2))
+                .set("lr", json!(1e-2))
+                .set("batch", json!(1))
+                .set("block", json!(12))
+                .set("seed", json!(7))
+                .blob("dataset", Blob::new(Media::Bytes, dataset_jsonl()));
+            let inv = match activations {
+                Some(value) => inv.set("activations", json!(value)),
+                None => inv,
+            };
+            reg.run(MODEL, "lora_train", inv, &mut |_p| {})
+        };
+        let unset = train(None).unwrap();
+        let recompute = train(Some("recompute")).unwrap();
+        assert_eq!(recompute.blobs["adapter"].bytes, unset.blobs["adapter"].bytes, "recompute is the decoder's own behaviour");
+        let keep = train(Some("keep")).unwrap_err().to_string();
+        assert!(keep.contains("qwen3") && keep.contains("keeping every layer"), "{keep}");
+        assert!(train(Some("recompute+bf16")).unwrap_err().to_string().contains("activations"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

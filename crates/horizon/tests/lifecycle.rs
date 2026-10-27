@@ -219,6 +219,33 @@ fn a_bad_dataset_is_named_and_trains_nothing() {
 }
 
 #[test]
+fn an_activations_choice_the_action_does_not_offer_trains_nothing() {
+    let work = scratch("activations");
+    let (train, _) = population(20, 1);
+    let inv = train_request(&work.join("model"), &train, &train, 5).set("activations", json!("recompute+bf16"));
+    let err = run("train", &inv).unwrap_err();
+    assert!(err.contains("horizon") && err.contains("activations"), "{err}");
+    assert!(!work.join("model").exists());
+    std::fs::remove_dir_all(&work).ok();
+}
+
+#[test]
+fn training_with_recomputed_activations_completes_through_the_capability_layer() {
+    if skip_gpu() {
+        return;
+    }
+    let (train, _) = population(200, 1);
+    let (held, _) = population(60, 2);
+    let work = scratch("recompute");
+    let model = work.join("model");
+    let inv = train_request(&model, &train, &held, 10).set("activations", json!("recompute"));
+    let trained = run("train", &inv).unwrap();
+    assert!(model.join("model.safetensors").is_file());
+    assert!(trained.outputs["members"][0]["held_out_event_nll"].as_f64().unwrap().is_finite());
+    std::fs::remove_dir_all(&work).ok();
+}
+
+#[test]
 fn the_action_schemas_are_discoverable() {
     let m = manifest();
     let names: Vec<&str> = m.actions.iter().map(|a| a.name.as_str()).collect();
@@ -232,6 +259,9 @@ fn the_action_schemas_are_discoverable() {
         assert!(params("train").contains(&p), "train has no param {p}");
     }
     assert!(action("train").streaming, "train reports progress");
+    let activations = action("train").params.iter().find(|p| p.name == "activations").expect("train declares activations");
+    assert_eq!(activations.ty, capability::ParamType::Enum(vec!["keep".into(), "recompute".into()]));
+    assert!(activations.default.is_none() && !activations.required, "omitted leaves the encoder's own choice");
     let inputs = |name: &str| action(name).inputs.iter().map(|b| b.name.as_str()).collect::<Vec<_>>();
     assert_eq!(inputs("train"), ["dataset", "held_out"]);
     assert_eq!(inputs("eval"), ["dataset"]);

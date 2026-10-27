@@ -347,6 +347,12 @@ impl Qwen3Vl {
         Qwen3Vl::new(vcfg, dcfg, w.vision, w.main_merger, w.deepstack, &dweights, seq_len, image_token_id, image_row0, n_visual, mrope_section, DecoderBuild::Batched)
     }
 
+    /// What the decoder's backward keeps of the forward ([`model::Model::set_saved_policy`]): the vision tower is
+    /// frozen and keeps nothing for a backward, so the choice is the decoder's to accept or refuse by name.
+    pub fn set_saved_policy(&mut self, policy: model::saved::SavedPolicy) -> Result<(), String> {
+        model::Model::set_saved_policy(&mut self.decoder, policy)
+    }
+
     /// [`Self::from_tensors_train`] reading straight from an HF checkpoint
     /// directory (`config.json` + `model.safetensors[.index.json]`).
     #[allow(clippy::too_many_arguments)]

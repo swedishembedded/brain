@@ -100,6 +100,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "base model to adapt").default(json!("t2v-1.3B")))
         .param(ParamSpec::new("device", ParamType::Str, "device for the VAE encode and the DiT trainer; 'cpu' forces the host trainer (omit for brain's default, which uses the GPU where one is present)"))
         .param(ParamSpec::new("te_device", ParamType::Str, "device for the umT5 text encoder (omit for $BRAIN_WAN_T5_DEVICE, then cpu)"))
+        .param(ParamSpec::new("activations", ParamType::Enum(model::saved::SavedPolicy::ACTIVATIONS_CHOICES.iter().map(|s| s.to_string()).collect()), "what the host trainer's backward keeps of the forward: 'keep' every block's activations or 'recompute' them from each block's input (less memory, one extra forward); the device trainer always rebuilds from block inputs; default: keep"))
         .output(BlobSpec::new("adapter", Media::Bytes, "the trained LoRA adapter checkpoint"));
 
     Manifest::new(
@@ -215,6 +216,15 @@ pub fn video_outcome(video: &crate::pipeline::Video, timings: &crate::pipeline::
         .blob("video", blob)
 }
 
+/// What `lora_train`'s `activations` names for the host trainer's backward; absent keeps every block's activations,
+/// the trainer's own default.
+fn saved_policy(inv: &Invocation) -> Result<model::saved::SavedPolicy, String> {
+    match inv.get_str("activations") {
+        Some(value) => model::saved::SavedPolicy::parse_activations(&value).map_err(|e| format!("lora_train: {e}")),
+        None => Ok(model::saved::SavedPolicy::Keep),
+    }
+}
+
 /// Run `lora_train` from an invocation: train via [`crate::finetune::run`]
 /// (which polls `inv.cancel` every step), then return the trained artifact
 /// itself as an output blob - a remote client has no access to the server's
@@ -238,7 +248,7 @@ pub fn train_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Pr
         ckpt_every: inv.get_i64("ckpt_every").unwrap_or(50).max(0) as u32,
         device: inv.get_str("device").filter(|s| !s.is_empty()),
         te_device: inv.get_str("te_device").filter(|s| !s.is_empty()),
-        saved: model::saved::SavedPolicy::Keep,
+        saved: saved_policy(inv)?,
     };
     let mut prog = |step: u32, total: u32, message: String| progress(Progress::step(step, total, message));
     let tensors = crate::finetune::run(paths, std::path::Path::new(&dir), &cfg, &opts, &inv.cancel, &mut prog)?;
@@ -310,6 +320,20 @@ impl Action for WanAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lora_train_declares_activations_and_routes_the_choice_to_the_trainer() {
+        use model::saved::SavedPolicy;
+        let lt = manifest().actions.into_iter().find(|a| a.name == "lora_train").unwrap();
+        let p = lt.params.iter().find(|p| p.name == "activations").expect("lora_train declares activations");
+        assert_eq!(p.ty, ParamType::Enum(vec!["keep".into(), "recompute".into()]));
+        assert!(!p.required && p.default.is_none());
+        assert_eq!(saved_policy(&Invocation::new()), Ok(SavedPolicy::Keep));
+        assert_eq!(saved_policy(&Invocation::new().set("activations", json!("keep"))), Ok(SavedPolicy::Keep));
+        assert_eq!(saved_policy(&Invocation::new().set("activations", json!("recompute"))), Ok(SavedPolicy::Recompute));
+        let e = saved_policy(&Invocation::new().set("activations", json!("recompute+bf16"))).unwrap_err();
+        assert!(e.contains("activations"), "{e}");
+    }
 
     #[test]
     fn manifest_declares_the_full_surface() {

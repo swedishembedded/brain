@@ -181,6 +181,18 @@ impl SavedPolicy {
             other => other.strip_prefix("recompute+").and_then(SavedFormat::parse).filter(|f| *f != SavedFormat::F32).map(SavedPolicy::Quantized),
         }
     }
+
+    /// The values a capability's `activations` parameter accepts, in the order its enum lists them.
+    pub const ACTIVATIONS_CHOICES: [&'static str; 2] = ["keep", "recompute"];
+
+    /// The policy a capability's `activations` parameter names: `keep` or `recompute`. Any other label (including
+    /// the quantized rungs [`SavedPolicy::parse`] reads) is refused naming the parameter.
+    pub fn parse_activations(value: &str) -> Result<SavedPolicy, String> {
+        match SavedPolicy::parse(value) {
+            Some(policy @ (SavedPolicy::Keep | SavedPolicy::Recompute)) => Ok(policy),
+            _ => Err(format!("activations: {value} is not one of keep, recompute")),
+        }
+    }
 }
 
 /// The boundary residual stream of one training pass: `boundaries` row-matrices of `rows x width`.
@@ -582,6 +594,19 @@ pub fn check_block_recompute(name: &str, step: impl Fn(SavedPolicy) -> Result<Bl
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Spec: a capability's `activations` parameter names keep or recompute and nothing else.
+    #[test]
+    fn the_activations_parameter_accepts_only_keep_and_recompute() {
+        assert_eq!(SavedPolicy::parse_activations("keep"), Ok(SavedPolicy::Keep));
+        assert_eq!(SavedPolicy::parse_activations("recompute"), Ok(SavedPolicy::Recompute));
+        for bad in ["recompute+bf16", "", "on"] {
+            assert!(SavedPolicy::parse_activations(bad).unwrap_err().contains("activations"), "{bad}");
+        }
+        for label in SavedPolicy::ACTIVATIONS_CHOICES {
+            assert!(SavedPolicy::parse_activations(label).is_ok(), "{label}");
+        }
+    }
 
     /// Spec: a recomputing block stack visits the same caches as a keeping one, in reverse, holding none of them, and
     /// a narrow format is refused by name.

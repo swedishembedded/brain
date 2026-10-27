@@ -62,6 +62,7 @@ pub struct TrainSpec {
     visits: Option<u32>,
     backbone: Option<Backbone>,
     next_events: Option<(Vec<String>, f32)>,
+    activations: Option<model::saved::SavedPolicy>,
 }
 
 impl TrainSpec {
@@ -89,7 +90,14 @@ impl TrainSpec {
             visits: None,
             backbone: None,
             next_events: None,
+            activations: None,
         }
+    }
+    /// What the backward keeps of the forward; absent leaves the build's own choice. A policy the encoder cannot
+    /// run fails the training before its first step.
+    pub fn activations(mut self, policy: model::saved::SavedPolicy) -> Self {
+        self.activations = Some(policy);
+        self
     }
     /// Use exactly this model shape (its `vocab` and `n_codes` are replaced
     /// by the fitted vocabulary's and the spec's codes).
@@ -359,6 +367,7 @@ pub fn train_with_vocab(
         patience: spec.patience,
         checkpoint_secs: 0,
         seed: spec.seed,
+        precision: model::TrainPrecision { activations: spec.activations, ..Default::default() },
         ..Default::default()
     };
     let last_held_out = Rc::new(Cell::new(None));

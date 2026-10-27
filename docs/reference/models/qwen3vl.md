@@ -276,6 +276,10 @@ brain do qwen3vl lora_train \
   that machine (`brain do`) may set them: D-Bus and HTTP neither list nor
   accept them, and `lora_train` is therefore not reachable from a remote
   caller until it takes its dataset as an input blob.
+- `activations` - `keep` or `recompute`, what the decoder's backward keeps of
+  the forward. The decoder rebuilds every layer from its residual, so `keep`
+  is refused by name before the first step; omitted takes the decoder's own
+  behaviour.
 - `weights` - the base checkpoint to adapt (defaults to the model-store
   resolver's own pick, `qwen3vl::spec::Qwen3VlSpec`).
 - `rank`/`alpha` - LoRA capacity/scale (defaults 8 / 16.0).

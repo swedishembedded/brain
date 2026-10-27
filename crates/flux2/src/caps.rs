@@ -95,6 +95,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("method", ParamType::Enum(vec!["lora".into(), "rslora".into()]), "adapter scale: 'lora' is alpha/rank, 'rslora' is alpha/sqrt(rank) (rank-stabilized, does not suppress the update as rank grows)").default(json!("lora")))
         .param(ParamSpec::new("lr_ratio", ParamType::Float, "LoRA+ : B's effective learning rate is lr_ratio*lr; 1.0 (the default) is plain LoRA").default(json!(1.0)).min(1.0).max(64.0))
         .param(ParamSpec::new("freeze_a", ParamType::Bool, "LoRA-FA: freeze A at its random init, train only B").default(json!(false)))
+        .param(ParamSpec::new("activations", ParamType::Enum(model::saved::SavedPolicy::ACTIVATIONS_CHOICES.iter().map(|s| s.to_string()).collect()), "what the host trainer's backward keeps of the forward: 'keep' every block's activations or 'recompute' them from each block's input (less memory, one extra forward); the device trainer always rebuilds from block inputs; default: keep"))
         .output(BlobSpec::new("adapter", Media::Bytes, "the trained LoRA adapter checkpoint"));
 
     Manifest::new(
@@ -303,6 +304,15 @@ pub fn image_outcome(rgb: &[u8], w: u32, h: u32) -> Outcome {
         .blob("image", capability::blob::image_blob(&hwc, w, h, 3))
 }
 
+/// What `lora_train`'s `activations` names for the host trainer's backward; absent keeps every block's activations,
+/// the trainer's own default.
+fn saved_policy(inv: &Invocation) -> Result<model::saved::SavedPolicy, String> {
+    match inv.get_str("activations") {
+        Some(value) => model::saved::SavedPolicy::parse_activations(&value).map_err(|e| format!("lora_train: {e}")),
+        None => Ok(model::saved::SavedPolicy::Keep),
+    }
+}
+
 /// Run `lora_train` from an invocation: train via [`crate::finetune::run`]
 /// (which polls `inv.cancel` every step), then return the trained artifact
 /// itself as an output blob — a remote client has no access to the server's
@@ -362,7 +372,7 @@ pub fn train_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Pr
             Some("fp32") | None => crate::Precision::F32,
             Some(other) => return Err(format!("lora_train: unknown precision {other} (fp32|int8)")),
         },
-        saved: model::saved::SavedPolicy::Keep,
+        saved: saved_policy(inv)?,
     };
     let mut prog = |step: u32, total: u32, message: String| progress(Progress::step(step, total, message));
     let adapter = crate::finetune::run(&cfg, paths, std::path::Path::new(&dir), &opts, &inv.cancel, &mut prog)?;
@@ -474,6 +484,20 @@ impl Action for Flux2Action {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lora_train_declares_activations_and_routes_the_choice_to_the_trainer() {
+        use model::saved::SavedPolicy;
+        let lt = manifest().actions.into_iter().find(|a| a.name == "lora_train").unwrap();
+        let p = lt.params.iter().find(|p| p.name == "activations").expect("lora_train declares activations");
+        assert_eq!(p.ty, ParamType::Enum(vec!["keep".into(), "recompute".into()]));
+        assert!(!p.required && p.default.is_none());
+        assert_eq!(saved_policy(&Invocation::new()), Ok(SavedPolicy::Keep));
+        assert_eq!(saved_policy(&Invocation::new().set("activations", json!("keep"))), Ok(SavedPolicy::Keep));
+        assert_eq!(saved_policy(&Invocation::new().set("activations", json!("recompute"))), Ok(SavedPolicy::Recompute));
+        let e = saved_policy(&Invocation::new().set("activations", json!("recompute+bf16"))).unwrap_err();
+        assert!(e.contains("activations"), "{e}");
+    }
 
     #[test]
     fn manifest_declares_the_full_surface() {

@@ -93,6 +93,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("lr", ParamType::Float, "learning rate").default(json!(1e-4)))
         .param(cap_len_param())
         .param(ParamSpec::new("one_gpu", ParamType::Bool, "train on a single GPU (default: shard the 6B across both)").default(json!(false)))
+        .param(ParamSpec::new("activations", ParamType::Enum(model::saved::SavedPolicy::ACTIVATIONS_CHOICES.iter().map(|s| s.to_string()).collect()), "what the backward keeps of the forward: the trainer rebuilds every block from its input, so only 'recompute' runs and 'keep' is refused by name before training starts; default: recompute"))
         .output(BlobSpec::new("adapter", Media::Bytes, "the trained LoRA adapter checkpoint"));
 
     Manifest::new(
@@ -246,6 +247,7 @@ impl Action for ZAction {
                     two_gpu: !inv.get_bool("one_gpu").unwrap_or(false),
                     save_path: save.clone(),
                     ckpt_every: 100,
+                    saved: inv.get_str("activations").map(|value| model::saved::SavedPolicy::parse_activations(&value).map_err(|e| format!("lora_train: {e}"))).transpose()?,
                 };
                 let mut prog = |step: u32, total: u32, message: String| progress(Progress::step(step, total, message));
                 let tensors = crate::finetune::run(paths, std::path::Path::new(&dir), &opts, &inv.cancel, &mut prog)?;
@@ -382,6 +384,29 @@ mod tests {
         // the whole manifest round-trips to JSON for discovery.
         let j = m.to_json();
         assert_eq!(j["actions"].as_array().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn lora_train_declares_activations_without_a_default() {
+        let m = manifest();
+        let lt = m.actions.iter().find(|a| a.name == "lora_train").unwrap();
+        let p = lt.params.iter().find(|p| p.name == "activations").expect("lora_train declares activations");
+        assert_eq!(p.ty, ParamType::Enum(vec!["keep".into(), "recompute".into()]));
+        assert!(!p.required && p.default.is_none());
+    }
+
+    /// The invocation reaches the trainer's refusal: `keep` fails by name before any path is opened, and a value
+    /// outside the enum is refused naming the parameter.
+    #[test]
+    fn lora_train_refuses_an_activations_choice_it_cannot_run() {
+        let unreadable = || crate::pipeline::Paths { dit: "no-such-dit".into(), vae: "no-such-vae".into(), qwen: "no-such-qwen".into(), tokenizer: "no-such-tok".into() };
+        let run = |value: &str| {
+            let inv = Invocation::new().set("data", json!("no-such-data")).set("save", json!("unused.brain")).set("activations", json!(value));
+            ZImageProvider::from_paths(unreadable()).action("lora_train").unwrap().run(&inv, &mut |_| {}).unwrap_err()
+        };
+        let keep = run("keep");
+        assert!(keep.contains("s3dit") && keep.contains("Keep") && !keep.contains("no-such"), "{keep}");
+        assert!(run("recompute+bf16").contains("activations"));
     }
 
     /// The caption capacity is a declared, caller-settable resident capacity -

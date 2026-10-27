@@ -70,7 +70,8 @@ scan cannot decide.
 every block's activations, `recompute` holds only each block's input and
 rebuilds the rest block by block in the backward. The loss and gradients are
 bit-identical; `recompute` trades extra forward compute for lower memory. The
-device trainer ignores it. Any other value is refused.
+device trainer ignores it. Any other value is refused. The `lora_train` action
+takes the same choice as its optional `activations` parameter.
 
 ## Running it
 

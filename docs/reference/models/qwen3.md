@@ -225,6 +225,9 @@ above. Everything about HOW to serve it is a `brain serve` flag:
   steps, `lr/10`, and torch's AdamW (0.9, 0.999, 1e-8). The `lora_train`
   action takes the same settings as `targets`, `weight_decay`, `grad_clip`,
   `warmup`, `min_lr`, `beta1`, `beta2` and `eps`.
+- `--activations keep|recompute` - what the backward keeps of the forward; the
+  `lora_train` action takes it as `activations`. The decoder always recomputes
+  each layer, so `keep` is refused by name before the first step.
 - `--device cpu|gpu|vulkan` - backend selection.
 - `--ctx N` - built context length. Unset by default: the resident
   auto-sizes it to the target device's real usable VRAM instead of a fixed

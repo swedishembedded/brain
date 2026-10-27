@@ -82,6 +82,9 @@ pub struct TrainOpts {
     pub checkpoint_secs: u64,
     /// AdamW's β1, β2 and ε.
     pub adam: model::Adam,
+    /// What the decoder's backward keeps of the forward; `None` takes the build's own behaviour. The decoder rebuilds
+    /// every layer from its residual, so `Keep` is refused by name before the first step.
+    pub saved: Option<model::saved::SavedPolicy>,
 }
 
 impl Default for TrainOpts {
@@ -100,6 +103,7 @@ impl Default for TrainOpts {
             seed: data::rng::random_seed(),
             checkpoint_secs: 300,
             adam: model::Adam::default(),
+            saved: None,
         }
     }
 }
@@ -198,7 +202,11 @@ pub fn run(
     }
 
     // 6. Build the trainable model.
-    let model = Qwen3Vl::from_hf_train(base_dir, cfg.vision.clone(), cfg.text.clone(), opts.seq_len, cfg.image_token_id, image_row0, n_visual, cfg.mrope_section, opts.seed)?;
+    let mut model = Qwen3Vl::from_hf_train(base_dir, cfg.vision.clone(), cfg.text.clone(), opts.seq_len, cfg.image_token_id, image_row0, n_visual, cfg.mrope_section, opts.seed)?;
+
+    if let Some(policy) = opts.saved {
+        model.set_saved_policy(policy).map_err(|e| format!("qwen3vl finetune: activations {policy:?}: {e}"))?;
+    }
 
     // 7. Train.
     let fit = model::FitOpts { steps: opts.steps, lr: opts.lr, min_lr: opts.min_lr, warmup: opts.warmup, decay_iters: opts.steps.max(1), weight_decay: opts.weight_decay, grad_clip: opts.grad_clip, ..Default::default() };

@@ -233,6 +233,10 @@ pub struct TrainOpts {
     /// Where to write the adapter (final + every `ckpt_every` steps, 0 = only final).
     pub save_path: String,
     pub ckpt_every: u32,
+    /// What the backward keeps of the forward; `None` takes the trainer's own behaviour. Both trainers rebuild each
+    /// block from its input boundary, so only `Recompute` is available and any other choice is refused by name
+    /// before the dataset is read.
+    pub saved: Option<model::saved::SavedPolicy>,
 }
 
 /// Fine-tune a LoRA adapter on `dir` (a captioned-image folder). Returns the adapter
@@ -258,6 +262,9 @@ pub fn run(
     // layer's `ParamSpec::min`/`max` are advisory, and `ActionSpec::validate`
     // enforces neither. So the same guards the generation paths run at their
     // own entry belong here, at this one.
+    if let Some(policy) = opts.saved {
+        model::saved::recompute_only("s3dit", policy)?;
+    }
     let zcfg = ZImageConfig::turbo();
     crate::pipeline::check_image_size(&zcfg, opts.size, opts.size)?;
     crate::pipeline::check_cap_len(&zcfg, opts.cap_len, 1)?;
@@ -396,7 +403,7 @@ mod tests {
     }
 
     fn opts_with(size: u32, cap_len: u32) -> TrainOpts {
-        TrainOpts { steps: 1, rank: 4, lr: 1e-4, size, cap_len, seed: data::rng::random_seed(), two_gpu: false, save_path: "unused.brain".into(), ckpt_every: 0 }
+        TrainOpts { steps: 1, rank: 4, lr: 1e-4, size, cap_len, seed: data::rng::random_seed(), two_gpu: false, save_path: "unused.brain".into(), ckpt_every: 0, saved: None }
     }
 
     /// `lora_train` had no ceiling on `cap_len` anywhere: the capability
@@ -414,6 +421,19 @@ mod tests {
         let e = run(&unreadable_paths(), Path::new("no-such-dataset-dir"), &opts_with(512, over), &Default::default(), |_, _, _| {}).unwrap_err();
         assert!(e.contains("cap_len"), "must be refused by name, got: {e}");
         assert!(!e.contains("no-such"), "nothing may be opened before the guard runs: {e}");
+    }
+
+    /// `keep` is a choice the block-rebuilding trainers cannot run: it is refused by name before the dataset is
+    /// read, while `recompute` (what they do) passes the guard and fails later only on the missing files.
+    #[test]
+    fn an_activations_choice_the_trainer_cannot_run_is_refused_before_any_dataset_is_read() {
+        let keep = TrainOpts { saved: Some(model::saved::SavedPolicy::Keep), ..opts_with(512, crate::pipeline::DEFAULT_CAP_LEN) };
+        let e = run(&unreadable_paths(), Path::new("no-such-dataset-dir"), &keep, &Default::default(), |_, _, _| {}).unwrap_err();
+        assert!(e.contains("s3dit") && e.contains("Keep"), "{e}");
+        assert!(!e.contains("no-such"), "nothing may be opened before the guard runs: {e}");
+        let recompute = TrainOpts { saved: Some(model::saved::SavedPolicy::Recompute), ..opts_with(512, crate::pipeline::DEFAULT_CAP_LEN) };
+        let e = run(&unreadable_paths(), Path::new("no-such-dataset-dir"), &recompute, &Default::default(), |_, _, _| {}).unwrap_err();
+        assert!(e.contains("no-such"), "recompute is accepted and training proceeds to the dataset: {e}");
     }
 
     /// Same for the training square: `size` was checked only for being a

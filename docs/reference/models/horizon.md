@@ -508,7 +508,10 @@ brain horizon predict --weights model/ --history patient.json --json
   a subject's entry), `--absorbing`, `--knots`, `--steps`, `--batch`, `--seed`,
   `--eval-interval`, `--patience`, `--next-events a,b --next-weight W`,
   `--mixer attention|gated-delta-net|hybrid --blocks N [--visits N]`,
-  `--forecasts N`, and `--members N --ensemble seeded|bootstrap`. It is the
+  `--forecasts N`, `--members N --ensemble seeded|bootstrap`, and
+  `--activations keep|recompute` (what the backward keeps of the forward; absent
+  takes the encoder's own choice, and a choice the encoder cannot run fails the
+  run before its first step). It is the
   SDK's `TimelineModel::train` (one function, `horizon::fit::train`): early
   stopping on the held-out event NLL, keeping the best model. It is long
   running, so it reports progress at every evaluation interval and polls the

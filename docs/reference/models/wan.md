@@ -50,7 +50,9 @@ of each step's forward for its backward: `keep` holds every block's
 activations, `recompute` holds only each block's input and rebuilds the rest
 block by block in the backward. The loss and gradients are bit-identical;
 `recompute` trades extra forward compute for lower memory. The GPU trainer
-always rebuilds from block inputs. Any other value is refused.
+always rebuilds from block inputs. Any other value is refused. The
+`lora_train` action takes the same choice as its optional `activations`
+parameter.
 
 Because a LoRA freezes the base, the GPU trainer keeps every block's base
 weights resident for the whole run and assembles `W_eff = base + (α/r)·B·A`

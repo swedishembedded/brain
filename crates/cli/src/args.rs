@@ -67,11 +67,7 @@ pub fn split_train_precision(args: &[String]) -> Result<(model::TrainPrecision, 
 /// The value of `--activations`: what a trainer's backward keeps of its forward, `keep` every block's activations or
 /// `recompute` them from each block's input. Any other value is refused, naming the flag.
 pub fn parse_activations(value: &str) -> Result<model::saved::SavedPolicy, String> {
-    use model::saved::SavedPolicy;
-    match SavedPolicy::parse(value) {
-        Some(policy @ (SavedPolicy::Keep | SavedPolicy::Recompute)) => Ok(policy),
-        _ => Err(format!("--activations: {value} is not one of keep, recompute")),
-    }
+    model::saved::SavedPolicy::parse_activations(value).map_err(|e| format!("--{e}"))
 }
 
 /// The flag every training verb takes for what the backward keeps of the forward.

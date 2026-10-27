@@ -88,6 +88,11 @@ pub fn train_spec() -> ActionSpec {
     .param(ParamSpec::new("blocks", ParamType::Int, "residual blocks of the mixer stack").default(json!(2)).min(1.0).max(64.0))
     .param(ParamSpec::new("visits", ParamType::Int, "most recent visits read one by one with a mixer (0: no mixer stack, one set; with a mixer and none given: 4)").default(json!(0)).min(0.0).max(64.0))
     .param(ParamSpec::new("forecasts", ParamType::Int, "future measurements per subject to train a value-forecast head on (0: no head)").default(json!(0)).min(0.0).max(64.0))
+    .param(ParamSpec::new(
+        "activations",
+        ParamType::Enum(model::saved::SavedPolicy::ACTIVATIONS_CHOICES.iter().map(|s| s.to_string()).collect()),
+        "what the backward keeps of the forward: 'keep' every layer's activations, or 'recompute' them from each layer's input (less memory, one extra forward); default: the encoder's own choice",
+    ))
     .param(ParamSpec::new("members", ParamType::Int, "1 trains one model; 2 or more train an ensemble whose spread is the uncertainty").default(json!(1)).min(1.0).max(64.0))
     .param(ParamSpec::new("ensemble", ParamType::Enum(vec!["seeded".into(), "bootstrap".into()]), "how ensemble members differ: another seed each, or subjects resampled with replacement by group").default(json!("seeded")))
     .input(BlobSpec::new("dataset", Media::Text, "training subjects: timeline-v1, one per line").required())
@@ -257,6 +262,9 @@ fn train_settings(inv: &Invocation, train: &[Subject]) -> Result<TrainSpec, Stri
         }
         None if visits > 0 => spec = spec.visits(visits),
         None => {}
+    }
+    if let Some(value) = inv.get_str("activations") {
+        spec = spec.activations(model::saved::SavedPolicy::parse_activations(&value).map_err(|e| format!("horizon: {e}"))?);
     }
     Ok(spec)
 }
