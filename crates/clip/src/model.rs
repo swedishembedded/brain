@@ -59,6 +59,7 @@ use std::collections::HashMap;
 use gpu_core::provider::library::{GemmPrecision, LibraryGemmProvider};
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::block;
+use model::saved::SavedPolicy;
 use paramstore::{ParamStore, Role};
 
 use crate::config::{ClipTextConfig, EvaVisionConfig, VisionStem};
@@ -1283,6 +1284,9 @@ pub const CLIP_VISION_PIPELINES: &[(&str, &str)] = &[
     // `model::vit::vit_block_fwd`'s reference GEMM - the shared-scratch block
     // builder [`ClipVision::encode`] records.
     ("matmul_rows", kernels::MATMUL_ROWS),
+    // Zeroes the shared `qkv` copy a recomputing tower rebuilds per block
+    // ([`ClipVision::set_saved_policy`]).
+    ("region_copy", kernels::REGION_COPY),
 ];
 
 /// The fused bidirectional attention kernels `model::vit::flash_ids` resolves by name.
@@ -1303,8 +1307,9 @@ pub fn serving_pipelines() -> &'static [(&'static str, &'static str)] {
 
 /// Entries of [`CLIP_VISION_PIPELINES`] a handle may leave out: the tiled GEMM
 /// is an opt-in the block builders resolve by name themselves, falling back to
-/// the reference kernel for the same values.
-const OPTIONAL_KERNELS: &[&str] = &["matmul_reg3"];
+/// the reference kernel for the same values, and the zeroing copy only a
+/// recomputing tower dispatches.
+const OPTIONAL_KERNELS: &[&str] = &["matmul_reg3", "region_copy"];
 
 /// **Where [`ClipVision`]'s patch tokens come from.** The tower is IDENTICAL
 /// downstream of this point in both cases - same class-token prepend (CLIP
@@ -1372,6 +1377,9 @@ enum Blocks {
         x_last: DeviceBuffer,
         scr_tmp: DeviceBuffer,
         scores: DeviceBuffer,
+        /// `[B*seq, 3D]` zeros a recomputing tower copies over the `qkv` its blocks share before each block's
+        /// forward (`vit_block_fwd_cached` accumulates into it); `None` while every block keeps its own.
+        qkv_zero: Option<DeviceBuffer>,
     },
     /// One activation buffer the blocks update in place and ONE scratch shared
     /// by every block (`model::vit::vit_block_fwd`) - inference only, and what
@@ -1469,6 +1477,7 @@ impl Graph {
                 x_last: gpu.storage(nl * dl),
                 scr_tmp: gpu.storage(nl * dl),
                 scores: gpu.storage(cfg.heads() as u64 * seql * seql),
+                qkv_zero: None,
             }
         } else {
             // chunk == span: one score slab per sample, the same per-span
@@ -1612,6 +1621,10 @@ pub struct ClipVision {
     /// The tensor-core GEMM an inference build's block linears run on, when the device has one. `None` for a
     /// training build (its gradient checks are stated against the fp32 kernels) and under a pinned reference.
     tensor_cores: Option<LibraryGemmProvider>,
+    /// What the backward keeps of the forward ([`ClipVision::set_saved_policy`]): every block's intermediates, or
+    /// (recompute) each block's input only, every block sharing one set of intermediates that its replay before the
+    /// block's backward refills.
+    saved: SavedPolicy,
 }
 
 impl ClipVision {
@@ -1726,7 +1739,7 @@ impl ClipVision {
             .collect();
         let ps = ParamStore::new_with_roles_src(&gpu, roles, init);
         let tensor_cores = (!train && !taps).then(|| LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Auto)).filter(LibraryGemmProvider::tf32_enabled);
-        let mut m = ClipVision { gpu, cfg, ps, src, graph: None, bwd: None, tensor_cores };
+        let mut m = ClipVision { gpu, cfg, ps, src, graph: None, bwd: None, tensor_cores, saved: SavedPolicy::Keep };
         // Refuse a handle that lacks a kernel now, by name, rather than at the
         // first `encode` or as an out-of-range pipeline index at submit.
         for (name, _) in CLIP_VISION_PIPELINES.iter().filter(|(n, _)| !OPTIONAL_KERNELS.contains(n)) {
@@ -1831,6 +1844,22 @@ impl ClipVision {
         }
     }
 
+    /// Block `l` of the resident graph `gr`, from its input `caches[l].x_in` to the next block's input (the last
+    /// block's to `x_last`), recorded into `s`. A recomputing tower zeroes the `qkv` its blocks share first, and
+    /// replays this before each block's backward.
+    fn block_forward(&self, gr: &Graph, l: usize, s: &mut Vec<Step>) {
+        let Blocks::Cached { caches, x_last, scr_tmp, scores, qkv_zero } = &gr.blocks else {
+            unreachable!("the resident graph is always the cached form");
+        };
+        if let Some(zeros) = qkv_zero {
+            // `region_copy` Params: [rows, width, row_stride, off] - the whole buffer.
+            let words = 3 * gr.rows() * self.cfg.d_model();
+            s.push(self.gpu.step(self.k("region_copy"), &[zeros, &caches[l].qkv], &[gr.rows(), 3 * self.cfg.d_model(), 3 * self.cfg.d_model(), 0], words));
+        }
+        let x_out = if l + 1 < caches.len() { &caches[l + 1].x_in } else { x_last };
+        model::vit::vit_block_fwd_cached(&self.gpu, &self.vit_ids(), &self.vit_bwd_ids(), &self.shape(), &self.block_weights(l as u32), &caches[l], x_out, gr.rows(), &gr.spans, scr_tmp, scores, s);
+    }
+
     /// The forward of graph `gr`: stem -> blocks -> (post-norm).
     ///
     /// **The `PatchSource` seam is the first dispatches and nothing else.**
@@ -1910,12 +1939,9 @@ impl ClipVision {
         let sh = self.shape();
         let ids = self.vit_ids();
         match &gr.blocks {
-            Blocks::Cached { caches, x_last, scr_tmp, scores } => {
-                let kb = self.vit_bwd_ids();
+            Blocks::Cached { .. } => {
                 for l in 0..c.layers() as usize {
-                    let bw = self.block_weights(l as u32);
-                    let x_out = if l + 1 < caches.len() { &caches[l + 1].x_in } else { x_last };
-                    model::vit::vit_block_fwd_cached(g, &ids, &kb, &sh, &bw, &caches[l], x_out, n, &gr.spans, scr_tmp, scores, &mut s);
+                    self.block_forward(gr, l, &mut s);
                 }
             }
             Blocks::Shared { x, scr } => {
@@ -1975,6 +2001,10 @@ impl ClipVision {
 
         // ---- blocks, in reverse ----
         for l in (0..c.layers() as usize).rev() {
+            if self.saved.recomputes() {
+                // Every block shares one set of intermediates: rebuild this block's from its input first.
+                self.block_forward(gr, l, &mut s);
+            }
             let w = self.block_weights(l as u32);
             let p = format!("blocks.{l}");
             let vg = model::vit::VitBlockGrads {
@@ -2143,6 +2173,59 @@ impl ClipVision {
         self.gpu.write_f32(&bw.seed_out, d_out);
         let clears = [&bw.d_pos_full, &bw.scratch.d_qkv, &bw.scratch.d_qkv_pre];
         self.gpu.submit(&clears, &bw.steps);
+    }
+
+    /// Keep every block's intermediates for the backward ([`SavedPolicy::Keep`]) or only each block's input, every
+    /// block sharing one set of intermediates that its replay refills before the block's backward
+    /// ([`SavedPolicy::Recompute`]). The residual stream stays in f32, so a narrow saved format is refused by name,
+    /// as is going back to keeping everything once the buffers are shared. Needs a trainable build on a handle
+    /// that carries `region_copy` ([`CLIP_VISION_PIPELINES`]).
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        if let SavedPolicy::Quantized(format) = policy {
+            return Err(format!("clip keeps its block boundaries in f32; {format:?} saved boundaries do not apply"));
+        }
+        if !self.saved.narrows_to(policy) {
+            return Err(format!("clip: a tower keeping {:?} cannot go back to {policy:?}", self.saved));
+        }
+        if !policy.recomputes() || self.saved.recomputes() {
+            return Ok(());
+        }
+        if self.bwd.is_none() {
+            return Err(format!("clip: an inference build has no backward to save for; {policy:?} is not available"));
+        }
+        if self.gpu.kernel_index("region_copy").is_none() {
+            return Err("clip: recomputing needs the region_copy kernel (chain clip::model::CLIP_VISION_PIPELINES into the device's kernel list)".into());
+        }
+        let (mut graph, mut bwd) = (self.graph.take().expect("a trainable tower has a resident graph"), self.bwd.take().expect("checked above"));
+        let zeros = self.gpu.storage(3 * graph.rows() as u64 * self.cfg.d_model() as u64);
+        let Blocks::Cached { caches, qkv_zero, .. } = &mut graph.blocks else {
+            unreachable!("the resident graph is always the cached form");
+        };
+        let (donor, rest) = caches.split_first_mut().expect("a tower has at least one block");
+        for cache in rest {
+            *cache = model::vit::VitBlockCache {
+                x_in: cache.x_in.clone(),
+                ln1: donor.ln1.clone(),
+                qkv_pre: donor.qkv_pre.clone(),
+                qkv: donor.qkv.clone(),
+                probs: donor.probs.clone(),
+                ctx: donor.ctx.clone(),
+                attn_proj: donor.attn_proj.clone(),
+                res_mid: donor.res_mid.clone(),
+                ln2: donor.ln2.clone(),
+                h: donor.h.clone(),
+                h2: donor.h2.clone(),
+                mlp_out: donor.mlp_out.clone(),
+                kt: donor.kt.clone(),
+            };
+        }
+        *qkv_zero = Some(zeros);
+        self.saved = policy;
+        graph.steps = self.record(&graph);
+        bwd.steps = self.record_bwd(&graph, &bwd);
+        self.graph = Some(graph);
+        self.bwd = Some(bwd);
+        Ok(())
     }
 
     pub fn zero_grads(&self) {
