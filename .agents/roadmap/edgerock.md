@@ -321,6 +321,11 @@ reference exactly in both variants on both backends; flipping the tie rule in
   bank bf16 alone moves the hidden state by 7e-4 relative L2, recurrent bf16 by 1e-2 to 5e-2 per step (the random tiny state is
   ill-conditioned; the real model does not show it). `model/tests/anchor_memory` runs the state-form scenario for both bank
   tiers at hd 6 (triad) and 8 (split) against the sequence form.
+  Measured effect (full card, position 4096, tape on): slots 194 -> 97 MiB, b256 53.3 -> 51.2 ms; `gdn_decode_pool` 17.4 -> 14.8 ms
+  and `anchor_read_split` 14.4 -> 14.5 ms, i.e. both are latency-bound (a 128-register serial FP chain; scalar bf16 loads and
+  repeated q loads), not bandwidth-bound; the capacity unlock (256 slots = 25 GiB) is the gain, the speed needs those kernels.
+  The memory's fp32 scorer at more than 32 rows takes `matmul_tile16` (exact fp32, k ascending, 16 x 16 tiles, 64-wide k stages,
+  padded shared columns; gate `gpu-core/tests/matmul_tile16.rs` against f64): b256 `matmul_gemv_reg` 4.46 ms -> 1.35 ms.
 - [x] M5 (forward part): the released weights against the independent reference
   forward (`tools/goldens/edgerock_dump_real_reference.py`, fp32 CPU torch, a
   1400-token prompt that slides the window and commits five blocks, then asks about

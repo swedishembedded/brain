@@ -232,6 +232,8 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         let gather_a = kernels::template::dtype_variant("pool_rows_gather2", kernels::POOL_ROWS_GATHER2, "pool_a", Dtype::BF16).unwrap();
         v.push(kernels::template::dtype_variant(gather_a.0, gather_a.1, "pool_b", Dtype::BF16).unwrap());
         v.push(("pool_rows_scatter2_bf16", kernels::POOL_ROWS_SCATTER2_BF16));
+        // The exact fp32 product of the memory's scorer at a large decode batch (`memory_project`).
+        v.push(("matmul_tile16", kernels::MATMUL_TILE16));
         v.push(("gqa_scores_win", kernels::GQA_SCORES_WIN));
         v.push(("gqa_ring_chunk_attn", kernels::GQA_RING_CHUNK_ATTN));
         // Device AdamW over bf16 or blockwise-int8 moments (`optim::Optim` resolves them by name).
@@ -426,6 +428,8 @@ const TOPK_EXTRACT_STEP: usize = 87;
 const DECODE_SOFTMAX_BATCHED: usize = 88;
 const GDN_UT_FWD: usize = 93;
 const BMM_TILED: usize = 94;
+/// Rows from which the memory's fp32 scorer takes the tiled product instead of the skinny-M kernel's 32-row groups.
+const MEMORY_TILED_MIN_ROWS: u32 = 32;
 const POOL_ROWS_GATHER2: usize = 96;
 const POOL_ROWS_SCATTER2: usize = 97;
 /// The bf16-pool builds of the two staging kernels, resolved by name (`Qwen35::kernel_by_name`).
@@ -3418,6 +3422,12 @@ impl Qwen35 {
                 // workgroup per output column, the weight read once), which a single decode row needs; it has no
                 // tensor-core variant, so the product stays exact.
                 None => match g.kernel_index("matmul_gemv") {
+                    // Many rows: the exact tiled product, one output per thread, whose grid is as wide as the batch
+                    // (the skinny-M kernel below would launch one narrow dispatch per 32 rows).
+                    Some(_) if n > MEMORY_TILED_MIN_ROWS && g.caps().workgroup_reductions && g.kernel_index("matmul_tile16").is_some() => {
+                        let tile = g.kernel_index("matmul_tile16").expect("checked");
+                        s.push(g.dispatch(tile, &[x, self.w(&wname), out], &[n, n_in, n_out], gpu_core::Dispatch::Workgroups(n.div_ceil(16) * n_out.div_ceil(16))));
+                    }
                     // Groups of up to 32 rows, each a view of the activations and the output.
                     Some(gemv) => {
                         let wbuf = self.w(&wname);
