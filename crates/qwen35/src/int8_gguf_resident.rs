@@ -4360,7 +4360,9 @@ mod decode_phase_tests {
             ("native:matmul_i8_gemv", DecodePhase::Linear),
             ("matmul_i8_gemv_reg", DecodePhase::Linear),
             ("native:matmul_i8_gemv_multi", DecodePhase::Linear),
+            ("native:matmul_i8_gemv_wide", DecodePhase::Linear),
             ("native:matmul_i8_mma_m16", DecodePhase::Linear),
+            ("native:matmul_i8_mma_m32", DecodePhase::Linear),
             ("matmul_i8_dyn", DecodePhase::Linear),
             ("library_gemm 8x5120x5120 F32.F32.F32 b1", DecodePhase::Linear),
             // Paged GQA attention, its KV append and its fused prep.

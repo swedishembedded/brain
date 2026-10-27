@@ -858,6 +858,30 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/matmul_i8_gemv.cu"),
     },
     CudaKernel {
+        name: "matmul_i8_gemv_wide",
+        // The same source built with `BRAIN_I8G_WIDE_TILE`, for devices with int8 tensor cores: a block serves up to
+        // 32 rows of x against one read of its 16 weight rows, so a batched decode step streams every weight
+        // matrix from memory once instead of once per eight rows. One candidate of the int8 decode linear's set
+        // beside `matmul_i8_gemv` (`gpu_core::native_tune` chooses among them), asked for by name.
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_matmul_i8_gemv_wide",
+        what: "packed-int8 skinny-M GEMV for up to 32 rows of x per weight pass on int8 tensor cores (mma.sync m16n8k32, one MMA per scale group and tile of eight rows); bit-identical to matmul_i8_gemv below 5 rows",
+        reported: "native:matmul_i8_gemv_wide",
+        block_dim: 128,
+        // 32 rows of x by 16 weight rows per block.
+        tile: (32, 16),
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!(
+            "#define BRAIN_I8G_WIDE_TILE 1\n#define brain_matmul_i8_gemv brain_matmul_i8_gemv_wide\n",
+            include_str!("../cu/matmul_i8_gemv.cu")
+        ),
+    },
+    CudaKernel {
         name: "matmul_i8_gemv_multi",
         // Up to four matrices that read one activation, in one launch: a second
         // entry point of the single-matrix kernel's own file, which shares its

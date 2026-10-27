@@ -92,8 +92,16 @@
 #define BRAIN_I8G_LANES 8
 #define BRAIN_I8G_VLANES 8
 #define BRAIN_I8G_THREADS (BRAIN_I8G_COLS * BRAIN_I8G_LANES)
-// Rows of x one block covers; larger m is split over blocks by the grid.
+// Rows of x the dp4a block covers; larger m is split over blocks by the grid.
 #define BRAIN_I8G_ROWS 8
+// Rows of x one block of the grid covers. The wide-tile build (`BRAIN_I8G_WIDE_TILE`, compute capability 8.0+ only,
+// where every batch of five rows or more takes the tensor-core block) lets that block take up to four tiles of eight
+// rows of x against ONE read of its weight rows; the plain build keeps eight, and a larger batch takes more blocks.
+#if defined(BRAIN_I8G_WIDE_TILE)
+#define BRAIN_I8G_TILE_ROWS 32
+#else
+#define BRAIN_I8G_TILE_ROWS BRAIN_I8G_ROWS
+#endif
 // Blocks per SM the register budget is sized for.
 #ifndef BRAIN_I8G_MIN_BLOCKS
 #define BRAIN_I8G_MIN_BLOCKS 3
@@ -431,6 +439,10 @@ __device__ __forceinline__ void brain_gemv_select(BrainXTile xs, BrainSxTile sxs
 #ifndef BRAIN_I8G_MMA_UNROLL
 #define BRAIN_I8G_MMA_UNROLL 4
 #endif
+// Stages in flight with three or four tiles of x (more registers staged per stage).
+#ifndef BRAIN_I8G_MMA_UNROLL_WIDE
+#define BRAIN_I8G_MMA_UNROLL_WIDE 2
+#endif
 
 __device__ __forceinline__ void brain_mma_s8_m16n8k32(unsigned int (&d)[4], unsigned int a0, unsigned int a1, unsigned int a2, unsigned int a3, unsigned int b0, unsigned int b1) {
     asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %10, %10, %10};\n"
@@ -456,13 +468,20 @@ __device__ __forceinline__ uint2 brain_mma_ld_x(const unsigned int* p) {
     return make_uint2(p[0], p[1]);
 }
 
-template <bool VEC>
+// The warps' partial sums: [warp][lane][tile * 4 + accumulator]. One buffer for every instance of the block below
+// (declared once by the caller, because each `__shared__` in a template instance would take its own space).
+typedef float BrainMmaRed[BRAIN_I8G_MMA_WARPS][32][4 * (BRAIN_I8G_TILE_ROWS / 8)];
+
+// `T` is the number of tiles of eight rows of x the block serves (1 to 4): the weight fragments of a stage are loaded
+// once and every tile's MMA reuses them, so the weights are read from memory once however many rows ride along.
+template <bool VEC, int T>
 __device__ __forceinline__ void brain_gemv_block_mma(const unsigned int* xq, const unsigned int* wq,
                                                      const float* sx, const float* sw, float* out,
                                                      unsigned int m0, unsigned int mrows,
-                                                     unsigned int kg, unsigned int n, unsigned int n0) {
-    constexpr int U = BRAIN_I8G_MMA_UNROLL;
-    __shared__ float red[BRAIN_I8G_MMA_WARPS][32][4];
+                                                     unsigned int kg, unsigned int n, unsigned int n0,
+                                                     BrainMmaRed& red) {
+    // Stages of loads in flight per thread; the staged fragments of x and their scales grow with `T`.
+    constexpr int U = T <= 2 ? BRAIN_I8G_MMA_UNROLL : BRAIN_I8G_MMA_UNROLL_WIDE;
     const unsigned int lane = threadIdx.x & 31u;
     const unsigned int warp = threadIdx.x >> 5;
     const unsigned int g = lane >> 2;    // MMA groupID: weight rows g and g + 8 of A, the row of x of B
@@ -471,64 +490,105 @@ __device__ __forceinline__ void brain_gemv_block_mma(const unsigned int* xq, con
     // Rows past n read the last row; their outputs are dropped.
     const unsigned int rlo = min(n0 + g, n - 1u);
     const unsigned int rhi = min(n0 + g + 8u, n - 1u);
-    const unsigned int xrow = m0 + (g < mrows ? g : 0u);
-    // The two rows of x whose outputs this thread's accumulators hold (B's columns 2*t4 and 2*t4 + 1).
-    const float* sxa = sx + (unsigned long long)(m0 + (2u * t4 < mrows ? 2u * t4 : 0u)) * groups;
-    const float* sxb = sx + (unsigned long long)(m0 + (2u * t4 + 1u < mrows ? 2u * t4 + 1u : 0u)) * groups;
 
     const unsigned int* wlo = wq + (unsigned long long)rlo * kg + 2u * t4;
     const unsigned int* whi = wq + (unsigned long long)rhi * kg + 2u * t4;
     const float* slo = sw + (unsigned long long)rlo * groups;
     const float* shi = sw + (unsigned long long)rhi * groups;
-    const unsigned int* xp = xq + (unsigned long long)xrow * kg + 2u * t4;
+    // Per tile of eight rows of x: the row of x of B (column g) and the two rows whose outputs this thread's
+    // accumulators hold (B's columns 2*t4 and 2*t4 + 1). Rows past `mrows` read the tile's first row and are dropped.
+    const unsigned int* xp[T];
+    const float* sxa[T];
+    const float* sxb[T];
+#pragma unroll
+    for (int t = 0; t < T; ++t) {
+        const unsigned int rel = 8u * t;
+        xp[t] = xq + (unsigned long long)(m0 + rel + (rel + g < mrows ? g : 0u)) * kg + 2u * t4;
+        sxa[t] = sx + (unsigned long long)(m0 + rel + (rel + 2u * t4 < mrows ? 2u * t4 : 0u)) * groups;
+        sxb[t] = sx + (unsigned long long)(m0 + rel + (rel + 2u * t4 + 1u < mrows ? 2u * t4 + 1u : 0u)) * groups;
+    }
 
-    float f0 = 0.0f, f1 = 0.0f, f2 = 0.0f, f3 = 0.0f;
+    float f[T][4];
+#pragma unroll
+    for (int t = 0; t < T; ++t) { f[t][0] = f[t][1] = f[t][2] = f[t][3] = 0.0f; }
     // Each warp takes one contiguous stretch of K, so its loads of a weight row are adjacent.
     const unsigned int chunk = (groups + BRAIN_I8G_MMA_WARPS - 1u) / BRAIN_I8G_MMA_WARPS;
     const unsigned int first = min(warp * chunk, groups);
     const unsigned int per_warp = min(chunk, groups - first);
     for (unsigned int i0 = 0; i0 < per_warp; i0 += U) {
-        uint2 wl[U], wh[U], x[U];
-        float sl[U], sh[U], xa[U], xb[U];
+        uint2 wl[U], wh[U], x[U][T];
+        float sl[U], sh[U], xa[U][T], xb[U][T];
 #pragma unroll
         for (int u = 0; u < U; ++u) {
             const unsigned int gi = first + i0 + u;
             if (i0 + u < per_warp) {
                 wl[u] = brain_mma_ld_w<VEC>(wlo + 8ull * gi);
                 wh[u] = brain_mma_ld_w<VEC>(whi + 8ull * gi);
-                x[u] = brain_mma_ld_x<VEC>(xp + 8ull * gi);
                 sl[u] = slo[gi];
                 sh[u] = shi[gi];
-                xa[u] = sxa[gi];
-                xb[u] = sxb[gi];
+#pragma unroll
+                for (int t = 0; t < T; ++t) {
+                    x[u][t] = brain_mma_ld_x<VEC>(xp[t] + 8ull * gi);
+                    xa[u][t] = sxa[t][gi];
+                    xb[u][t] = sxb[t][gi];
+                }
             }
         }
 #pragma unroll
         for (int u = 0; u < U; ++u) {
             if (i0 + u < per_warp) {
-                unsigned int d[4];
-                brain_mma_s8_m16n8k32(d, wl[u].x, wh[u].x, wl[u].y, wh[u].y, x[u].x, x[u].y);
-                f0 = fmaf(__uint_as_float(d[0]) - 12582912.0f, sl[u] * xa[u], f0);  // weight row g, row of x 2*t4
-                f1 = fmaf(__uint_as_float(d[1]) - 12582912.0f, sl[u] * xb[u], f1);  // weight row g, row of x 2*t4 + 1
-                f2 = fmaf(__uint_as_float(d[2]) - 12582912.0f, sh[u] * xa[u], f2);  // weight row g + 8
-                f3 = fmaf(__uint_as_float(d[3]) - 12582912.0f, sh[u] * xb[u], f3);
+#pragma unroll
+                for (int t = 0; t < T; ++t) {
+                    unsigned int d[4];
+                    brain_mma_s8_m16n8k32(d, wl[u].x, wh[u].x, wl[u].y, wh[u].y, x[u][t].x, x[u][t].y);
+                    f[t][0] = fmaf(__uint_as_float(d[0]) - 12582912.0f, sl[u] * xa[u][t], f[t][0]);  // weight row g, row of x 2*t4
+                    f[t][1] = fmaf(__uint_as_float(d[1]) - 12582912.0f, sl[u] * xb[u][t], f[t][1]);  // weight row g, row of x 2*t4 + 1
+                    f[t][2] = fmaf(__uint_as_float(d[2]) - 12582912.0f, sh[u] * xa[u][t], f[t][2]);  // weight row g + 8
+                    f[t][3] = fmaf(__uint_as_float(d[3]) - 12582912.0f, sh[u] * xb[u][t], f[t][3]);
+                }
             }
         }
     }
-    red[warp][lane][0] = f0;
-    red[warp][lane][1] = f1;
-    red[warp][lane][2] = f2;
-    red[warp][lane][3] = f3;
-    __syncthreads();
-    if (threadIdx.x < 128u) {
-        const unsigned int l = threadIdx.x >> 2, j = threadIdx.x & 3u;
-        float total = 0.0f;
 #pragma unroll
-        for (int w = 0; w < BRAIN_I8G_MMA_WARPS; ++w) { total += red[w][l][j]; }
-        const unsigned int orow = n0 + (l >> 2) + 8u * (j >> 1);
-        const unsigned int ocol = 2u * (l & 3u) + (j & 1u);
-        if (orow < n && ocol < mrows) { out[(unsigned long long)(m0 + ocol) * n + orow] = total; }
+    for (int t = 0; t < T; ++t) {
+#pragma unroll
+        for (int j = 0; j < 4; ++j) { red[warp][lane][4 * t + j] = f[t][j]; }
     }
+    __syncthreads();
+    // Threads 0..127 each fold one (lane, accumulator) column over the warps in warp order, per tile.
+#pragma unroll
+    for (int t = 0; t < T; ++t) {
+        if (threadIdx.x < 128u) {
+            const unsigned int l = threadIdx.x >> 2, j = threadIdx.x & 3u;
+            float total = 0.0f;
+#pragma unroll
+            for (int w = 0; w < BRAIN_I8G_MMA_WARPS; ++w) { total += red[w][l][4 * t + j]; }
+            const unsigned int orow = n0 + (l >> 2) + 8u * (j >> 1);
+            const unsigned int ocol = 8u * t + 2u * (l & 3u) + (j & 1u);
+            if (orow < n && ocol < mrows) { out[(unsigned long long)(m0 + ocol) * n + orow] = total; }
+        }
+    }
+}
+
+// The tile count that covers `mrows` rows of x, as a template argument.
+template <bool VEC>
+__device__ __forceinline__ void brain_gemv_block_mma_rows(const unsigned int* xq, const unsigned int* wq,
+                                                          const float* sx, const float* sw, float* out,
+                                                          unsigned int m0, unsigned int mrows,
+                                                          unsigned int kg, unsigned int n, unsigned int n0,
+                                                          BrainMmaRed& red) {
+    if (mrows <= 8u) {
+        brain_gemv_block_mma<VEC, 1>(xq, wq, sx, sw, out, m0, mrows, kg, n, n0, red);
+    }
+#if BRAIN_I8G_TILE_ROWS > 8
+    else if (mrows <= 16u) {
+        brain_gemv_block_mma<VEC, 2>(xq, wq, sx, sw, out, m0, mrows, kg, n, n0, red);
+    } else if (mrows <= 24u) {
+        brain_gemv_block_mma<VEC, 3>(xq, wq, sx, sw, out, m0, mrows, kg, n, n0, red);
+    } else {
+        brain_gemv_block_mma<VEC, 4>(xq, wq, sx, sw, out, m0, mrows, kg, n, n0, red);
+    }
+#endif
 }
 #endif
 
@@ -541,22 +601,25 @@ __device__ __forceinline__ void brain_gemv_block(const unsigned int* xq, const u
                                                  const float* sx, const float* sw, float* out,
                                                  unsigned int m, unsigned int kg, unsigned int n,
                                                  unsigned int tile_m, unsigned int tile_n) {
-    const unsigned int m0 = tile_m * BRAIN_I8G_ROWS;
+    const unsigned int m0 = tile_m * BRAIN_I8G_TILE_ROWS;
     if (m0 >= m) { return; }  // block-uniform
-    const unsigned int mrows = min(m - m0, (unsigned int)BRAIN_I8G_ROWS);
 #ifdef BRAIN_I8G_USE_MMA
     if (m >= BRAIN_I8G_MMA_MIN_ROWS) {
+        const unsigned int mrows = min(m - m0, (unsigned int)BRAIN_I8G_TILE_ROWS);
+        __shared__ BrainMmaRed red;
         // Eight-byte loads when x_q and w_q are 8-byte aligned, word by word otherwise.
         const bool aligned8 = ((reinterpret_cast<unsigned long long>(xq) |
                                 reinterpret_cast<unsigned long long>(wq)) & 7ull) == 0ull;
+        const unsigned int n0 = tile_n * BRAIN_I8G_COLS;
         if (aligned8) {
-            brain_gemv_block_mma<true>(xq, wq, sx, sw, out, m0, mrows, kg, n, tile_n * BRAIN_I8G_COLS);
+            brain_gemv_block_mma_rows<true>(xq, wq, sx, sw, out, m0, mrows, kg, n, n0, red);
         } else {
-            brain_gemv_block_mma<false>(xq, wq, sx, sw, out, m0, mrows, kg, n, tile_n * BRAIN_I8G_COLS);
+            brain_gemv_block_mma_rows<false>(xq, wq, sx, sw, out, m0, mrows, kg, n, n0, red);
         }
         return;
     }
 #endif
+    const unsigned int mrows = min(m - m0, (unsigned int)BRAIN_I8G_ROWS);
     const unsigned int col = tile_n * BRAIN_I8G_COLS + threadIdx.x / BRAIN_I8G_LANES;
 
     // One staging tile for whichever row-count instance the block runs.
@@ -595,7 +658,7 @@ brain_matmul_i8_gemv(const unsigned int* params, const unsigned int* xq, const u
     const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
     // Row tiles of one weight tile are adjacent in launch order, so they
     // run together and the weights they share are read from memory once.
-    const unsigned int tiles_m = (m + BRAIN_I8G_ROWS - 1u) / BRAIN_I8G_ROWS;
+    const unsigned int tiles_m = (m + BRAIN_I8G_TILE_ROWS - 1u) / BRAIN_I8G_TILE_ROWS;
     if (tiles_m == 0u || n == 0u) { return; }
     const unsigned int tile_n = blk / tiles_m;
     const unsigned int tile_m = blk - tile_n * tiles_m;
@@ -633,7 +696,7 @@ brain_matmul_i8_gemv_multi(const unsigned int* params, const unsigned int* xq, c
     BRAIN_PDL_ENTRY();
     const unsigned int m = params[0];
     const unsigned int kg = params[1];
-    const unsigned int tiles_m = (m + BRAIN_I8G_ROWS - 1u) / BRAIN_I8G_ROWS;
+    const unsigned int tiles_m = (m + BRAIN_I8G_TILE_ROWS - 1u) / BRAIN_I8G_TILE_ROWS;
 
     // Which matrix this block belongs to: set i owns tiles_m * ceil(n_i / COLS)
     // consecutive blocks.
