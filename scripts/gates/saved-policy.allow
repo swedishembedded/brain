@@ -1,0 +1,6 @@
+codeformer	the stage-II transformer backward (src/train.rs) serves its gradient check (gradcheck/src/restore.rs); no trainer or optimizer runs it
+fastvlm	the FastViTHD encoder backward serves its own gradient check; the VLM fine-tune trains the spliced Qwen2 decoder (train_smoke.rs), which takes the policy
+moondream3	the decoder backward (src/decoder.rs) serves its in-file finite-difference tests; no trainer or optimizer runs it
+splat	one differentiable rasterizer pass (src/renderer.rs render_bwd) with no layer stack to recompute
+t5encoder	the T5 backward serves gradcheck/src/t5.rs; every production T5 is a frozen inference build
+wm-core	single-op step builders (src/gn.rs and the film/attn/vq steps) with no layer stack to recompute

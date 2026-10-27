@@ -111,6 +111,19 @@ repos:
         files: '(^|/)Makefile$'
         pass_filenames: false
         stages: [pre-commit]
+      - id: saved-policy
+        name: "Every backward takes the saved-activation policy (or states why it needs none)"
+        description: >-
+          A crate that defines a backward lets its training run choose what the
+          backward keeps (model::saved), or is listed in
+          scripts/gates/saved-policy.allow with the reason it needs none. See
+          scripts/gates/check-saved-policy.sh. Also run by
+          `make check/saved-policy`.
+        entry: bash scripts/gates/check-saved-policy.sh
+        language: system
+        files: '(^crates/.*\.rs$|^scripts/gates/saved-policy\.allow$)'
+        pass_filenames: false
+        stages: [pre-commit]
       - id: env-reads
         name: "No new environment reads under crates/ (add a flag, not a variable)"
         description: >-

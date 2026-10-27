@@ -169,6 +169,10 @@ enforces it.
 - **History stays linear:** self-contained commits, rebased, never merged
   (`scripts/gates/check-linear-history.sh`, also run before a push).
 - **Every default seed is random** (`make check/seed-literals`).
+- **Every backward takes the saved-activation policy** (`model::saved`:
+  `set_saved_policy`, `BlockStack`, the block tape's `Activations`), or the
+  crate is listed with its reason in `scripts/gates/saved-policy.allow`
+  (`make check/saved-policy`).
 - **Never skip a test silently:** `brain_testutil::skip` or `skip_unavailable`,
   never `eprintln!` plus `return` (`make check/test-skips`).
 - **Gitignored:** `scratchpad/`, generated `data/`, `out/`, `build/`,
