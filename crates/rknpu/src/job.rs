@@ -6,18 +6,18 @@
 // expertise in embedded NPU bring-up then you can procure our services by
 // sending an email to info@swedishembedded.com.
 
-//! A job: a chain of tasks and the one contiguous arena every address in them
-//! points into.
+//! A job: a chain of task programs in NPU memory, linked so the whole chain
+//! (or any contiguous run of it) executes as one submission without the CPU.
 //!
-//! The arena holds the data region first (tensors, weights, biases; its layout
-//! is the caller's) and the task programs after it, so the caller can assign
-//! data addresses before it knows how many tasks the layers produce. Every
-//! program's tail links to the next, so the whole chain runs as one
-//! submission and the CPU is not involved between tasks.
+//! Every address a program holds, its successor's included, is relative to
+//! the job's base address. The data the tasks address lives in buffers the
+//! caller owns; the base is the lowest of their DMA addresses (and the
+//! program buffer's), so memory can be split across several modest
+//! allocations instead of one large contiguous block the board may not have.
 
 use crate::driver::{Buffer, Device, TaskEntry};
 use crate::regs::{Program, PROFILE, PROGRAM_BYTES, PROGRAM_WORDS};
-use crate::Result;
+use crate::{Error, Result};
 
 /// One task: a register program and the engines it starts.
 #[derive(Clone)]
@@ -32,29 +32,34 @@ const INT_CLEAR_ALL: u32 = 0x1ffff;
 
 /// A built job, resident in NPU memory.
 pub struct Job {
-    arena: Buffer,
+    programs: Buffer,
     table: Buffer,
-    data_bytes: usize,
+    base: u32,
     count: u32,
 }
 
 impl Job {
-    /// Allocate the arena (`data_bytes` of data plus the programs), encode and
-    /// link the programs and fill the task table. The data region is zeroed;
-    /// the caller writes its constants through [`Job::data_mut`].
-    pub fn new(device: &Device, data_bytes: usize, tasks: &[Task]) -> Result<Job> {
-        let data_bytes = data_bytes.next_multiple_of(PROGRAM_BYTES.max(64));
-        let mut arena = device.alloc(data_bytes + tasks.len() * PROGRAM_BYTES, false)?;
+    /// Bytes of program memory `tasks` tasks need.
+    pub fn program_bytes(tasks: usize) -> usize {
+        tasks.max(1) * PROGRAM_BYTES
+    }
+
+    /// Encode and link `tasks` into `programs` (allocated with at least
+    /// [`Job::program_bytes`]) and fill the task table. `base` must not exceed
+    /// the DMA address of `programs` or of anything the tasks address.
+    pub fn new(device: &Device, mut programs: Buffer, tasks: &[Task], base: u32) -> Result<Job> {
+        if programs.len() < Job::program_bytes(tasks.len()) || programs.dma_addr() < base {
+            return Err(Error::Unsupported(format!("program buffer of {} bytes at {:#x} cannot hold {} tasks above base {base:#x}", programs.len(), programs.dma_addr(), tasks.len())));
+        }
         let mut table = device.alloc(tasks.len().max(1) * std::mem::size_of::<TaskEntry>(), true)?;
-        arena.as_mut_slice().fill(0);
-        let base = arena.dma_addr();
+        let relative = programs.dma_addr() - base;
         let mut words = [0u64; PROGRAM_WORDS];
         for (i, task) in tasks.iter().enumerate() {
-            let offset = data_bytes + i * PROGRAM_BYTES;
-            let next = (i + 1 < tasks.len()).then(|| ((offset + PROGRAM_BYTES) as u32, PROFILE.len()));
+            let offset = i * PROGRAM_BYTES;
+            let next = (i + 1 < tasks.len()).then(|| (relative + (offset + PROGRAM_BYTES) as u32, PROFILE.len()));
             task.program.encode(&mut words, next, task.enable);
             for (j, w) in words.iter().enumerate() {
-                arena.as_mut_slice()[offset + j * 8..offset + j * 8 + 8].copy_from_slice(&w.to_le_bytes());
+                programs.as_mut_slice()[offset + j * 8..offset + j * 8 + 8].copy_from_slice(&w.to_le_bytes());
             }
             let entry = TaskEntry {
                 op_idx: i as u32 + 1,
@@ -62,7 +67,7 @@ impl Job {
                 int_mask: task.int_mask,
                 int_clear: INT_CLEAR_ALL,
                 regcfg_amount: PROFILE.len() as u32,
-                regcmd_addr: u64::from(base) + offset as u64,
+                regcmd_addr: u64::from(programs.dma_addr()) + offset as u64,
                 ..Default::default()
             };
             let at = i * std::mem::size_of::<TaskEntry>();
@@ -70,57 +75,32 @@ impl Job {
             let bytes = unsafe { std::slice::from_raw_parts((&entry as *const TaskEntry).cast::<u8>(), std::mem::size_of::<TaskEntry>()) };
             table.as_mut_slice()[at..at + bytes.len()].copy_from_slice(bytes);
         }
-        let job = Job { arena, table, data_bytes, count: tasks.len() as u32 };
-        job.table.sync_to_device(0..job.table.len())?;
-        Ok(job)
-    }
-
-    /// The data region (tensors and constants), as the CPU sees it.
-    pub fn data(&self) -> &[u8] {
-        &self.arena.as_slice()[..self.data_bytes]
-    }
-
-    pub fn data_mut(&mut self) -> &mut [u8] {
-        &mut self.arena.as_mut_slice()[..self.data_bytes]
-    }
-
-    /// The arena as a dma-buf, for zero-copy producers writing an input.
-    pub fn arena_dmabuf_fd(&self) -> std::os::fd::RawFd {
-        self.arena.dmabuf_fd()
+        programs.sync_to_device(0..programs.len())?;
+        table.sync_to_device(0..table.len())?;
+        Ok(Job { programs, table, base, count: tasks.len() as u32 })
     }
 
     pub fn task_count(&self) -> u32 {
         self.count
     }
 
-    /// Bytes of NPU memory this job holds.
+    /// Bytes of NPU memory the programs and the task table hold.
     pub fn resident_bytes(&self) -> usize {
-        self.arena.len() + self.table.len()
+        self.programs.len() + self.table.len()
     }
 
-    /// Make CPU writes to `range` of the data region visible to the NPU.
-    pub fn flush(&self, range: std::ops::Range<usize>) -> Result<()> {
-        self.arena.sync_to_device(range)
-    }
-
-    /// Make NPU writes to `range` of the data region visible to the CPU.
-    pub fn invalidate(&self, range: std::ops::Range<usize>) -> Result<()> {
-        self.arena.sync_from_device(range)
-    }
-
-    /// Flush the whole arena (constants and programs). Call once after
-    /// writing the constants.
-    pub fn flush_all(&self) -> Result<()> {
-        self.arena.sync_to_device(0..self.arena.len())
-    }
-
-    /// Run tasks `range` (all of them by default) as one submission and block
-    /// until the last one finishes.
+    /// Run tasks `range` (all of them when `None`) as one submission and
+    /// block until the last one finishes.
     pub fn run(&self, device: &Device, range: Option<std::ops::Range<u32>>) -> Result<()> {
         let range = range.unwrap_or(0..self.count);
         if range.is_empty() {
             return Ok(());
         }
-        device.submit(&self.table, range.start, range.end - range.start, self.arena.dma_addr(), PROFILE.len() as u32)
+        device.submit(&self.table, range.start, range.end - range.start, self.base, PROFILE.len() as u32)
     }
+}
+
+/// The base address for a job over `buffers`: the lowest DMA address.
+pub fn base_of<'a>(buffers: impl IntoIterator<Item = &'a Buffer>) -> u32 {
+    buffers.into_iter().map(Buffer::dma_addr).min().unwrap_or(0)
 }

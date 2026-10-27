@@ -8,7 +8,9 @@
 
 //! A compiled [`Plan`] resident on the NPU, ready to run.
 //!
-//! The arena is cacheable, so the CPU and the NPU hand tensors over through
+//! NPU memory is several modest buffers rather than one large block: the
+//! activation region, the constant chunks and the programs. NPU memory is
+//! cacheable, so the CPU and the NPU hand tensors over through
 //! explicit cache maintenance: the input is written back before the first
 //! segment, a CPU step invalidates what it reads and writes back what it
 //! produces, and the outputs are invalidated after the last step. Every tensor
@@ -16,11 +18,11 @@
 
 use std::time::{Duration, Instant};
 
-use crate::driver::Device;
+use crate::driver::{Buffer, Device};
 use crate::graph::TensorId;
-use crate::job::Job;
+use crate::job::{self, Job};
 use crate::layout::LANES;
-use crate::plan::{Placement, Plan, Step};
+use crate::plan::{AddressMap, Placement, Plan, Step};
 use crate::{Error, Result};
 
 /// Where one run's time went.
@@ -34,16 +36,38 @@ pub struct Timing {
 pub struct Model {
     device: Device,
     job: Job,
+    activations: Buffer,
+    /// Held for the NPU's sake; the CPU never touches them after load.
+    constants: Vec<Buffer>,
     plan: Plan,
 }
 
 impl Model {
-    /// Allocate NPU memory for `plan`, write its constants and programs.
+    /// Allocate NPU memory for `plan`, quantize and write its constants (one
+    /// layer's float weights in memory at a time) and its programs.
     pub fn load(device: Device, plan: Plan) -> Result<Model> {
-        let mut job = Job::new(&device, plan.data_bytes(), plan.tasks())?;
-        plan.write_constants(job.data_mut());
-        job.flush_all()?;
-        Ok(Model { device, job, plan })
+        // Largest first: the allocations most likely to fail go while the
+        // most contiguous memory is still free.
+        let mut order: Vec<usize> = (0..plan.constant_chunks().len()).collect();
+        order.sort_by_key(|&i| std::cmp::Reverse(plan.constant_chunks()[i]));
+        let activations = device.alloc(plan.activation_bytes(), false)?;
+        let mut constants: Vec<Option<Buffer>> = (0..order.len()).map(|_| None).collect();
+        for i in order {
+            constants[i] = Some(device.alloc(plan.constant_chunks()[i], false)?);
+        }
+        let mut constants: Vec<Buffer> = constants.into_iter().map(|b| b.expect("every chunk allocated")).collect();
+        let programs = device.alloc(Job::program_bytes(plan.task_count()), false)?;
+        let base = job::base_of(std::iter::once(&activations).chain(&constants).chain(std::iter::once(&programs)));
+        let at = AddressMap { activations: activations.dma_addr() - base, constants: constants.iter().map(|b| b.dma_addr() - base).collect() };
+        let tasks = {
+            let mut chunks: Vec<&mut [u8]> = constants.iter_mut().map(Buffer::as_mut_slice).collect();
+            plan.emit(&at, &mut chunks)?
+        };
+        for c in &constants {
+            c.sync_to_device(0..c.len())?;
+        }
+        let job = Job::new(&device, programs, &tasks, base)?;
+        Ok(Model { device, job, activations, constants, plan })
     }
 
     pub fn plan(&self) -> &Plan {
@@ -52,7 +76,7 @@ impl Model {
 
     /// Bytes of NPU memory the model holds.
     pub fn resident_bytes(&self) -> usize {
-        self.job.resident_bytes()
+        self.job.resident_bytes() + self.activations.len() + self.constants.iter().map(Buffer::len).sum::<usize>()
     }
 
     pub fn input(&self) -> Placement {
@@ -83,9 +107,9 @@ impl Model {
     pub fn run_with(&mut self, fill: impl FnOnce(&mut [u8], Placement)) -> Result<Timing> {
         let start = Instant::now();
         let p = self.input();
-        fill(self.job.data_mut(), p);
+        fill(self.activations.as_mut_slice(), p);
         let mut timing = Timing::default();
-        self.job.flush(p.range())?;
+        self.activations.sync_to_device(p.range())?;
         for step in self.plan.steps() {
             let t = Instant::now();
             match step {
@@ -95,16 +119,16 @@ impl Model {
                 }
                 cpu => {
                     for r in cpu_reads(cpu) {
-                        self.job.invalidate(self.plan.placement(r).range())?;
+                        self.activations.sync_from_device(self.plan.placement(r).range())?;
                     }
-                    self.plan.run_cpu_step(cpu, self.job.data_mut());
-                    self.job.flush(self.plan.placement(cpu_writes(cpu)).range())?;
+                    self.plan.run_cpu_step(cpu, self.activations.as_mut_slice());
+                    self.activations.sync_to_device(self.plan.placement(cpu_writes(cpu)).range())?;
                     timing.cpu += t.elapsed();
                 }
             }
         }
         for &o in self.plan.outputs() {
-            self.job.invalidate(self.plan.placement(o).range())?;
+            self.activations.sync_from_device(self.plan.placement(o).range())?;
         }
         timing.total = start.elapsed();
         Ok(timing)
@@ -113,13 +137,13 @@ impl Model {
     /// Output `index` in place, as the last run left it.
     pub fn output(&self, index: usize) -> TensorView<'_> {
         let p = self.plan.placement(self.plan.outputs()[index]);
-        TensorView { data: &self.job.data()[p.offset..p.offset + p.shape.bytes()], placement: p }
+        TensorView { data: &self.activations.as_slice()[p.offset..p.offset + p.shape.bytes()], placement: p }
     }
 
-    /// The whole data region (for byte-exact comparison with
+    /// The activation region (for byte-exact comparison with
     /// [`Plan::simulate`]).
-    pub fn data(&self) -> &[u8] {
-        self.job.data()
+    pub fn activations(&self) -> &[u8] {
+        &self.activations.as_slice()[..self.plan.activation_bytes()]
     }
 }
 

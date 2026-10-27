@@ -31,12 +31,11 @@ fn quantized_plan_tracks_the_float_graph() {
     let quantized: Vec<f32> = pixels.iter().map(|&p| f32::from(p) / 255.0).collect();
     let want = g.run(&quantized, |_, _| {}).unwrap();
 
-    let mut data = vec![0u8; plan.data_bytes()];
-    plan.write_constants(&mut data);
+    let mut data = vec![0u8; plan.activation_bytes()];
     let input = plan.placement(plan.input());
     let codes: Vec<i8> = quantized.iter().map(|&v| input_q.quantize(v)).collect();
     input.shape.pack(&codes, &mut data[input.offset..]);
-    plan.simulate(&mut data);
+    plan.simulate(&mut data).unwrap();
 
     for (i, &out) in plan.outputs().iter().enumerate() {
         let p = plan.placement(out);

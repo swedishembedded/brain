@@ -18,6 +18,8 @@
 
 #[path = "../tests/common/mini_yolo.rs"]
 mod mini_yolo;
+#[path = "../tests/common/yolov5s.rs"]
+mod yolov5s;
 
 use std::time::Instant;
 
@@ -25,7 +27,7 @@ use data::rng::Rng;
 use rknpu::conv::{self, ConvAddrs, ConvGeometry, ENABLE, INT_MASK};
 use rknpu::driver::Device;
 use rknpu::graph::Calibration;
-use rknpu::job::{Job, Task};
+use rknpu::job::{self, Job, Task};
 use rknpu::layout::Shape;
 use rknpu::model::Model;
 use rknpu::plan::Plan;
@@ -74,19 +76,24 @@ fn main() {
         let q = ConvQuant::quantize(&weights, &bias, g.out_channels, g.input.c, g.kernel, input_q, output_q, c.relu).unwrap();
         let input: Vec<i8> = (0..g.input.h * g.input.w * g.input.c).map(|_| rng.gen_range_inclusive(-128, 127) as i8).collect();
 
-        // Data region: input, output, weights, bias, each 64-byte aligned.
+        // One data buffer: input, output, weights, bias, each 64-byte aligned.
         let input_at = 0usize;
         let output_at = input_at + g.input.bytes();
         let weights_at = output_at + out.bytes();
         let bias_at = weights_at + g.weight_bytes().next_multiple_of(64);
         let data_bytes = bias_at + g.bias_bytes().next_multiple_of(64);
+        let mut data = device.alloc(data_bytes, false).unwrap_or_else(|e| panic!("{}: {e}", c.name));
+        let bands = conv::bands(g).map(|b| b.len()).unwrap_or(1);
+        let programs_buf = device.alloc(Job::program_bytes(bands), false).unwrap();
+        let base = job::base_of([&data, &programs_buf]);
+        let at = data.dma_addr() - base;
         let addrs = ConvAddrs {
-            input: input_at as u32,
+            input: at + input_at as u32,
             input_plane_bytes: g.input.plane_bytes(),
-            output: output_at as u32,
+            output: at + output_at as u32,
             output_plane_bytes: out.plane_bytes(),
-            weights: weights_at as u32,
-            bias: bias_at as u32,
+            weights: at + weights_at as u32,
+            bias: at + bias_at as u32,
         };
         let programs = match conv::programs(g, &q, input_q.zero_point, &addrs) {
             Ok(p) => p,
@@ -97,12 +104,12 @@ fn main() {
             }
         };
         let tasks: Vec<Task> = programs.into_iter().map(|program| Task { program, enable: ENABLE, int_mask: INT_MASK }).collect();
-        let mut job = Job::new(&device, data_bytes, &tasks).unwrap_or_else(|e| panic!("{}: {e}", c.name));
-        let data = job.data_mut();
-        g.input.pack(&input, &mut data[input_at..]);
-        conv::pack_weights(g, &q, &mut data[weights_at..weights_at + g.weight_bytes()]);
-        conv::pack_bias(&q, &mut data[bias_at..bias_at + g.bias_bytes()]);
-        job.flush_all().unwrap();
+        let bytes = data.as_mut_slice();
+        g.input.pack(&input, &mut bytes[input_at..]);
+        conv::pack_weights(g, &q, &mut bytes[weights_at..weights_at + g.weight_bytes()]);
+        conv::pack_bias(&q, &mut bytes[bias_at..bias_at + g.bias_bytes()]);
+        data.sync_to_device(0..data.len()).unwrap();
+        let job = Job::new(&device, programs_buf, &tasks, base).unwrap_or_else(|e| panic!("{}: {e}", c.name));
 
         let mut times = Vec::new();
         for _ in 0..5 {
@@ -111,8 +118,8 @@ fn main() {
             times.push(t.elapsed().as_secs_f64() * 1e3);
         }
         times.sort_by(f64::total_cmp);
-        job.invalidate(output_at..output_at + out.bytes()).unwrap();
-        let got = out.unpack(&job.data()[output_at..]);
+        data.sync_from_device(output_at..output_at + out.bytes()).unwrap();
+        let got = out.unpack(&data.as_slice()[output_at..]);
         let want = conv::reference(g, &q, input_q.zero_point, &input);
         let differ = got.iter().zip(&want).filter(|(a, b)| a != b).count();
         let max_diff = got.iter().zip(&want).map(|(&a, &b)| (i16::from(a) - i16::from(b)).abs()).max().unwrap_or(0);
@@ -126,10 +133,15 @@ fn main() {
             want.len(),
             job.task_count(),
             times[times.len() / 2],
-            job.resident_bytes() / 1024
+            (job.resident_bytes() + data.len()) / 1024
         );
     }
-    if !graph_case(&mut rng) {
+    let small = mini_yolo::mini_yolo(&mut rng, 96);
+    if !graph_case(&mut rng, "graph mini-yolo 96x96", small, true) {
+        failures += 1;
+    }
+    let full = yolov5s::yolov5s(&mut rng, 320);
+    if !graph_case(&mut rng, "graph yolov5s-topology 320x320", full, false) {
         failures += 1;
     }
     let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
@@ -139,21 +151,33 @@ fn main() {
     std::process::exit(if failures == 0 { 0 } else { 1 });
 }
 
-/// Compile the YOLO-shaped graph, run it on the NPU and compare its outputs
-/// with the plan's host simulation.
-fn graph_case(rng: &mut Rng) -> bool {
-    let size = 96;
-    let g = mini_yolo::mini_yolo(rng, size);
+/// Compile a graph, run it on the NPU and compare its outputs with the plan's
+/// host simulation. `calibrate` runs the float reference for real ranges; a
+/// full-size network takes fixed ranges instead, since any quantization gives
+/// a valid byte-exact comparison and the board's CPU is slow at float convs.
+fn graph_case(rng: &mut Rng, name: &str, g: rknpu::graph::Graph, calibrate: bool) -> bool {
+    let size = g.shape(g.input()).h;
     let image: Vec<u8> = (0..size * size * 3).map(|_| rng.gen_range_inclusive(0, 255) as u8).collect();
     let as_f32: Vec<f32> = image.iter().map(|&p| f32::from(p) / 255.0).collect();
-    let calibration = Calibration::measure(&g, [as_f32.as_slice()]).unwrap();
+    let calibration = if calibrate { Calibration::measure(&g, [as_f32.as_slice()]).unwrap() } else { Calibration { ranges: vec![(-4.0, 4.0); g.tensor_count()] } };
     let input_q = QParams { scale: 1.0 / 255.0, zero_point: -128 };
     let plan = Plan::new(&g, &calibration, input_q).unwrap();
-    let mut simulated = vec![0u8; plan.data_bytes()];
-    plan.write_constants(&mut simulated);
+    let mut simulated = vec![0u8; plan.activation_bytes()];
 
+    println!(
+        "  {name}: plan needs activations {} KiB + constants {:?} KiB + {} tasks",
+        plan.activation_bytes() / 1024,
+        plan.constant_chunks().iter().map(|c| c / 1024).collect::<Vec<_>>(),
+        plan.task_count()
+    );
     let device = Device::open().unwrap();
-    let mut model = Model::load(device, plan).unwrap();
+    let mut model = match Model::load(device, plan) {
+        Ok(m) => m,
+        Err(e) => {
+            println!("{name:<34} FAIL load: {e}");
+            return false;
+        }
+    };
     let mut timings = Vec::new();
     for _ in 0..5 {
         timings.push(model.run_rgb8(&image).unwrap());
@@ -161,11 +185,11 @@ fn graph_case(rng: &mut Rng) -> bool {
     let input = model.input();
     let codes: Vec<i8> = image.iter().map(|&p| input.q.quantize(f32::from(p) / 255.0)).collect();
     input.shape.pack(&codes, &mut simulated[input.offset..]);
-    model.plan().simulate(&mut simulated);
+    model.plan().simulate(&mut simulated).unwrap();
     let (mut differ, mut total) = (0, 0);
     for &o in model.plan().outputs() {
         let p = model.plan().placement(o);
-        let got = p.shape.unpack(&model.data()[p.offset..]);
+        let got = p.shape.unpack(&model.activations()[p.offset..]);
         let want = p.shape.unpack(&simulated[p.offset..]);
         differ += got.iter().zip(&want).filter(|(a, b)| a != b).count();
         total += want.len();
@@ -173,9 +197,9 @@ fn graph_case(rng: &mut Rng) -> bool {
     let t = timings[timings.len() / 2];
     println!(
         "{:<34} {} differ={differ}/{total} tasks={} npu={:.2}ms cpu={:.2}ms total={:.2}ms arena={}KiB",
-        "graph mini-yolo 96x96",
+        name,
         if differ == 0 { "OK  " } else { "FAIL" },
-        model.plan().tasks().len(),
+        model.plan().task_count(),
         t.npu.as_secs_f64() * 1e3,
         t.cpu.as_secs_f64() * 1e3,
         t.total.as_secs_f64() * 1e3,

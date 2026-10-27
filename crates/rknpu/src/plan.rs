@@ -26,11 +26,14 @@
 //! [`Plan::simulate`] executes the whole plan on a host byte arena with the
 //! exact integer arithmetic, so a board run is checked byte for byte.
 
+use std::borrow::Cow;
 use std::ops::Range;
+use std::sync::Arc;
 
 use crate::conv::{self, ConvAddrs, ConvGeometry};
-use crate::graph::{Calibration, Graph, Op, TensorId};
+use crate::graph::{Calibration, ConvParams, Graph, Op, TensorId};
 use crate::job::Task;
+
 use crate::layout::{Shape, LANES};
 use crate::quant::{ConvQuant, QParams};
 use crate::{Error, Result};
@@ -65,23 +68,55 @@ pub enum Step {
 /// Fixed-point fraction bits of the CPU Add's operand scales.
 const ADD_FRAC_BITS: u32 = 16;
 
+/// Upper bound of one constant buffer. Weights are split across buffers of
+/// about this size (a layer never straddles two), because a board's
+/// contiguous NPU memory is fragmented: several 1 MiB blocks are available
+/// when one 7 MiB block is not.
+const CONSTANT_CHUNK_BYTES: usize = 1 << 20;
+
+/// One compiled convolution. Its int8 weights are not kept: they are
+/// re-derived from the float source when they are written, so a plan for a
+/// whole network costs kilobytes, not the model's size.
 struct ConvLayer {
+    /// After [`odd_kernel`]; `source_kernel` is the graph's own.
     geometry: ConvGeometry,
-    quant: ConvQuant,
+    source_kernel: usize,
+    params: Arc<dyn ConvParams>,
+    relu: bool,
     input: TensorId,
     output: TensorId,
+    /// Which constant buffer holds its weights and bias, and where.
+    chunk: usize,
     weights_at: usize,
     bias_at: usize,
+}
+
+impl ConvLayer {
+    fn quantize(&self, placements: &[Placement]) -> Result<ConvQuant> {
+        let (si, so) = (placements[self.input], placements[self.output]);
+        let source = self.params.weights();
+        let weights = odd_kernel_weights(&source, self.geometry.out_channels * self.geometry.input.c, self.source_kernel, self.geometry.kernel);
+        ConvQuant::quantize(&weights, &self.params.bias(), so.shape.c, si.shape.c, self.geometry.kernel, si.q, so.q, self.relu)
+    }
+}
+
+/// Where the plan's regions start, relative to the job base.
+#[derive(Clone, Debug)]
+pub struct AddressMap {
+    pub activations: u32,
+    /// One per [`Plan::constant_chunks`] entry.
+    pub constants: Vec<u32>,
 }
 
 pub struct Plan {
     placements: Vec<Placement>,
     steps: Vec<Step>,
-    tasks: Vec<Task>,
     convs: Vec<ConvLayer>,
     /// The conv layers each NPU step runs, by index into `convs`.
     segments: Vec<Range<usize>>,
-    data_bytes: usize,
+    task_count: usize,
+    activation_bytes: usize,
+    constant_chunks: Vec<usize>,
     input: TensorId,
     outputs: Vec<TensorId>,
 }
@@ -89,72 +124,66 @@ pub struct Plan {
 impl Plan {
     /// Compile `graph`, quantizing activations from `calibration` and the
     /// input with `input_q` (the caller decides how pixels map to int8).
+    /// Weights are not read here; [`Plan::emit`] quantizes them.
     pub fn new(graph: &Graph, calibration: &Calibration, input_q: QParams) -> Result<Plan> {
         let n = graph.tensor_count();
         if calibration.ranges.len() != n {
             return Err(Error::Quantization(format!("calibration covers {} tensors, the graph has {n}", calibration.ranges.len())));
         }
         let q = quant_classes(graph, calibration, input_q)?;
-        let (mut placements, mut data_bytes) = layout(graph, &q)?;
+        let (placements, activation_bytes) = layout(graph, &q)?;
 
-        let mut convs = Vec::new();
-        let mut tasks = Vec::new();
+        let mut convs: Vec<ConvLayer> = Vec::new();
+        let mut constant_chunks: Vec<usize> = Vec::new();
+        let mut task_count = 0usize;
         let mut steps = Vec::new();
         let mut segments = Vec::new();
-        let mut segment_start = (0u32, 0usize);
-        let close = |steps: &mut Vec<Step>, segments: &mut Vec<Range<usize>>, start: &mut (u32, usize), tasks: usize, convs: usize| {
-            if tasks as u32 > start.0 {
-                steps.push(Step::Npu { tasks: start.0..tasks as u32 });
+        let mut segment_start = (0usize, 0usize);
+        let close = |steps: &mut Vec<Step>, segments: &mut Vec<Range<usize>>, start: &mut (usize, usize), tasks: usize, convs: usize| {
+            if tasks > start.0 {
+                steps.push(Step::Npu { tasks: start.0 as u32..tasks as u32 });
                 segments.push(start.1..convs);
             }
-            *start = (tasks as u32, convs);
+            *start = (tasks, convs);
         };
         for op in graph.ops() {
             match op {
-                Op::Conv { input, output, weights, bias, kernel, stride, pad, relu } => {
+                Op::Conv { input, output, params, kernel, stride, pad, relu } => {
                     let (si, so) = (placements[*input], placements[*output]);
-                    let (geometry, weights) = odd_kernel(ConvGeometry { input: si.shape, out_channels: so.shape.c, kernel: *kernel, stride: *stride, pad: *pad }, weights);
+                    let geometry = odd_kernel(ConvGeometry { input: si.shape, out_channels: so.shape.c, kernel: *kernel, stride: *stride, pad: *pad });
                     if geometry.output() != so.shape {
                         return Err(Error::Unsupported(format!("conv {geometry:?} produces {:?}, the graph says {:?}", geometry.output(), so.shape)));
                     }
-                    let quant = ConvQuant::quantize(&weights, bias, so.shape.c, si.shape.c, geometry.kernel, si.q, so.q, *relu)?;
-                    let weights_at = data_bytes;
-                    let bias_at = weights_at + geometry.weight_bytes().next_multiple_of(64);
-                    data_bytes = bias_at + geometry.bias_bytes().next_multiple_of(64);
-                    let addrs = ConvAddrs {
-                        input: si.offset as u32,
-                        input_plane_bytes: si.shape.plane_bytes(),
-                        output: so.offset as u32,
-                        output_plane_bytes: so.shape.plane_bytes(),
-                        weights: weights_at as u32,
-                        bias: bias_at as u32,
-                    };
-                    for program in conv::programs(&geometry, &quant, si.q.zero_point, &addrs)? {
-                        tasks.push(Task { program, enable: conv::ENABLE, int_mask: conv::INT_MASK });
+                    task_count += conv::bands(&geometry)?.len();
+                    let size = geometry.weight_bytes().next_multiple_of(64) + geometry.bias_bytes().next_multiple_of(64);
+                    if constant_chunks.last().is_none_or(|&used| used + size > CONSTANT_CHUNK_BYTES) {
+                        constant_chunks.push(0);
                     }
-                    convs.push(ConvLayer { geometry, quant, input: *input, output: *output, weights_at, bias_at });
+                    let chunk = constant_chunks.len() - 1;
+                    let weights_at = constant_chunks[chunk];
+                    let bias_at = weights_at + geometry.weight_bytes().next_multiple_of(64);
+                    constant_chunks[chunk] += size;
+                    convs.push(ConvLayer { geometry, source_kernel: *kernel, params: Arc::clone(params), relu: *relu, input: *input, output: *output, chunk, weights_at, bias_at });
                 }
                 Op::Concat { .. } => {}
                 Op::Add { a, b, output } => {
-                    close(&mut steps, &mut segments, &mut segment_start, tasks.len(), convs.len());
+                    close(&mut steps, &mut segments, &mut segment_start, task_count, convs.len());
                     let so = placements[*output].q.scale;
                     let fixed = |s: f32| ((f64::from(s) / f64::from(so)) * f64::from(1u32 << ADD_FRAC_BITS)).round() as i32;
                     steps.push(Step::Add { a: *a, b: *b, output: *output, scale_a: fixed(placements[*a].q.scale), scale_b: fixed(placements[*b].q.scale) });
                 }
                 Op::MaxPool { input, output, kernel, stride, pad } => {
-                    close(&mut steps, &mut segments, &mut segment_start, tasks.len(), convs.len());
+                    close(&mut steps, &mut segments, &mut segment_start, task_count, convs.len());
                     steps.push(Step::MaxPool { input: *input, output: *output, kernel: *kernel, stride: *stride, pad: *pad });
                 }
                 Op::Upsample2x { input, output } => {
-                    close(&mut steps, &mut segments, &mut segment_start, tasks.len(), convs.len());
+                    close(&mut steps, &mut segments, &mut segment_start, task_count, convs.len());
                     steps.push(Step::Upsample2x { input: *input, output: *output });
                 }
             }
         }
-        close(&mut steps, &mut segments, &mut segment_start, tasks.len(), convs.len());
-        // Every tensor keeps its graph shape; the input is quantized as asked.
-        placements[graph.input()].q = input_q;
-        Ok(Plan { placements, steps, tasks, convs, segments, data_bytes, input: graph.input(), outputs: graph.outputs().to_vec() })
+        close(&mut steps, &mut segments, &mut segment_start, task_count, convs.len());
+        Ok(Plan { placements, steps, convs, segments, task_count, activation_bytes, constant_chunks, input: graph.input(), outputs: graph.outputs().to_vec() })
     }
 
     pub fn placement(&self, t: TensorId) -> Placement {
@@ -173,24 +202,51 @@ impl Plan {
         &self.steps
     }
 
-    pub fn tasks(&self) -> &[Task] {
-        &self.tasks
+    pub fn task_count(&self) -> usize {
+        self.task_count
     }
 
-    /// Bytes of the data region (tensors, then weights and biases).
-    pub fn data_bytes(&self) -> usize {
-        self.data_bytes
+    /// Bytes of the activation region (every tensor, native16).
+    pub fn activation_bytes(&self) -> usize {
+        self.activation_bytes
     }
 
-    /// Write every constant (weight tables, bias blocks) into `data`.
-    pub fn write_constants(&self, data: &mut [u8]) {
-        for c in &self.convs {
-            conv::pack_weights(&c.geometry, &c.quant, &mut data[c.weights_at..c.weights_at + c.geometry.weight_bytes()]);
-            conv::pack_bias(&c.quant, &mut data[c.bias_at..c.bias_at + c.geometry.bias_bytes()]);
+    /// Bytes of each constant buffer (weight tables and bias blocks).
+    pub fn constant_chunks(&self) -> &[usize] {
+        &self.constant_chunks
+    }
+
+    /// Quantize every layer (one layer's parameters in memory at a time),
+    /// write its constants into `chunks` (one buffer per
+    /// [`Plan::constant_chunks`] entry) and return the task programs for the
+    /// regions at `at`.
+    pub fn emit(&self, at: &AddressMap, chunks: &mut [&mut [u8]]) -> Result<Vec<Task>> {
+        if at.constants.len() != self.constant_chunks.len() || chunks.len() != self.constant_chunks.len() {
+            return Err(Error::Unsupported(format!("the plan has {} constant buffers; got {} addresses and {} buffers", self.constant_chunks.len(), at.constants.len(), chunks.len())));
         }
+        let mut tasks = Vec::with_capacity(self.task_count);
+        for c in &self.convs {
+            let quant = c.quantize(&self.placements)?;
+            let chunk = &mut chunks[c.chunk];
+            conv::pack_weights(&c.geometry, &quant, &mut chunk[c.weights_at..c.weights_at + c.geometry.weight_bytes()]);
+            conv::pack_bias(&quant, &mut chunk[c.bias_at..c.bias_at + c.geometry.bias_bytes()]);
+            let (si, so) = (self.placements[c.input], self.placements[c.output]);
+            let addrs = ConvAddrs {
+                input: at.activations + si.offset as u32,
+                input_plane_bytes: si.shape.plane_bytes(),
+                output: at.activations + so.offset as u32,
+                output_plane_bytes: so.shape.plane_bytes(),
+                weights: at.constants[c.chunk] + c.weights_at as u32,
+                bias: at.constants[c.chunk] + c.bias_at as u32,
+            };
+            for program in conv::programs(&c.geometry, &quant, si.q.zero_point, &addrs)? {
+                tasks.push(Task { program, enable: conv::ENABLE, int_mask: conv::INT_MASK });
+            }
+        }
+        Ok(tasks)
     }
 
-    /// Run one CPU step on `data`, the data region.
+    /// Run one CPU step on `data`, the activation region.
     pub fn run_cpu_step(&self, step: &Step, data: &mut [u8]) {
         match *step {
             Step::Npu { .. } => unreachable!("NPU steps run on the device"),
@@ -253,10 +309,10 @@ impl Plan {
         &self.convs[self.segments[index].clone()]
     }
 
-    /// Execute the whole plan on a host arena with the NPU's exact integer
-    /// arithmetic. `data` must be [`Plan::data_bytes`] long with the input
-    /// already written; afterwards it holds what the board would hold.
-    pub fn simulate(&self, data: &mut [u8]) {
+    /// Execute the whole plan on a host activation region with the NPU's exact
+    /// integer arithmetic. `data` must be [`Plan::activation_bytes`] long with
+    /// the input already written; afterwards it holds what the board would.
+    pub fn simulate(&self, data: &mut [u8]) -> Result<()> {
         let mut npu_steps = 0;
         for step in &self.steps {
             match step {
@@ -264,7 +320,7 @@ impl Plan {
                     for c in self.segment_convs(npu_steps) {
                         let (pi, po) = (self.placements[c.input], self.placements[c.output]);
                         let input = pi.shape.unpack(&data[pi.offset..]);
-                        let result = conv::reference(&c.geometry, &c.quant, pi.q.zero_point, &input);
+                        let result = conv::reference(&c.geometry, &c.quantize(&self.placements)?, pi.q.zero_point, &input);
                         pack_into(po.shape, &result, &mut data[po.offset..]);
                     }
                     npu_steps += 1;
@@ -272,6 +328,7 @@ impl Plan {
                 cpu => self.run_cpu_step(cpu, data),
             }
         }
+        Ok(())
     }
 }
 
@@ -288,22 +345,29 @@ fn pack_into(shape: Shape, values: &[i8], dst: &mut [u8]) {
 
 /// An even kernel becomes the next odd one: zero taps on its last row and
 /// column, one more row and column of bottom/right padding. Same outputs.
-fn odd_kernel(g: ConvGeometry, weights: &[f32]) -> (ConvGeometry, Vec<f32>) {
+fn odd_kernel(g: ConvGeometry) -> ConvGeometry {
     if g.kernel % 2 == 1 {
-        return (g, weights.to_vec());
+        return g;
     }
-    let (k, k2) = (g.kernel, g.kernel + 1);
-    let n = g.out_channels * g.input.c;
-    let mut w = vec![0f32; n * k2 * k2];
-    for oc_ic in 0..n {
+    let [t, l, b, r] = g.pad;
+    ConvGeometry { kernel: g.kernel + 1, pad: [t, l, b + 1, r + 1], ..g }
+}
+
+/// `weights` (`filters` filters of `k x k`) re-laid for an `k2 x k2` kernel
+/// with the extra taps zero; borrowed unchanged when `k2 == k`.
+fn odd_kernel_weights(weights: &[f32], filters: usize, k: usize, k2: usize) -> Cow<'_, [f32]> {
+    if k == k2 {
+        return Cow::Borrowed(weights);
+    }
+    let mut w = vec![0f32; filters * k2 * k2];
+    for f in 0..filters {
         for ky in 0..k {
             for kx in 0..k {
-                w[(oc_ic * k2 + ky) * k2 + kx] = weights[(oc_ic * k + ky) * k + kx];
+                w[(f * k2 + ky) * k2 + kx] = weights[(f * k + ky) * k + kx];
             }
         }
     }
-    let [t, l, b, r] = g.pad;
-    (ConvGeometry { kernel: k2, pad: [t, l, b + 1, r + 1], ..g }, w)
+    Cow::Owned(w)
 }
 
 /// Quantization parameters per tensor. Concat, max pool and upsample share

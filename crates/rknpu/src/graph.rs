@@ -9,20 +9,51 @@
 //! The float network a model hands the NPU compiler, and its host reference.
 //!
 //! A [`Graph`] is a single-input feed-forward network over HWC feature maps,
-//! with ops in execution order. A model crate builds it from its checkpoint
-//! (weights stay float, `[out][in][k][k]`); the compiler quantizes it from a
-//! [`Calibration`]. [`Graph::run`] is the float reference used to calibrate and
-//! to measure what quantization costs.
+//! with ops in execution order. A model crate builds it from its checkpoint;
+//! the compiler quantizes it from a [`Calibration`]. [`Graph::run`] is the
+//! float reference used to calibrate and to measure what quantization costs.
+//!
+//! Convolution parameters are not copied into the graph: a [`ConvParams`]
+//! hands them out on demand (from a memory-mapped checkpoint, typically), so
+//! compiling a network on a board with a few MB of RAM holds one layer's
+//! float weights at a time, never the whole model.
+
+use std::borrow::Cow;
+use std::sync::Arc;
 
 use crate::layout::Shape;
 use crate::{Error, Result};
 
+/// The float parameters of one convolution, produced when asked.
+pub trait ConvParams: Send + Sync {
+    /// `[out][in][k][k]`.
+    fn weights(&self) -> Cow<'_, [f32]>;
+    /// `[out]`.
+    fn bias(&self) -> Cow<'_, [f32]>;
+}
+
+/// Parameters held in memory (tests, small models).
+pub struct OwnedConvParams {
+    pub weights: Vec<f32>,
+    pub bias: Vec<f32>,
+}
+
+impl ConvParams for OwnedConvParams {
+    fn weights(&self) -> Cow<'_, [f32]> {
+        Cow::Borrowed(&self.weights)
+    }
+
+    fn bias(&self) -> Cow<'_, [f32]> {
+        Cow::Borrowed(&self.bias)
+    }
+}
+
 pub type TensorId = usize;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum Op {
     /// Square-kernel convolution with bias, optionally followed by ReLU.
-    Conv { input: TensorId, output: TensorId, weights: Vec<f32>, bias: Vec<f32>, kernel: usize, stride: usize, pad: [usize; 4], relu: bool },
+    Conv { input: TensorId, output: TensorId, params: Arc<dyn ConvParams>, kernel: usize, stride: usize, pad: [usize; 4], relu: bool },
     /// Element-wise sum of two same-shape tensors.
     Add { a: TensorId, b: TensorId, output: TensorId },
     /// Channel concatenation.
@@ -49,7 +80,7 @@ impl Op {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Graph {
     shapes: Vec<Shape>,
     ops: Vec<Op>,
@@ -96,9 +127,9 @@ impl Graph {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn conv(&mut self, input: TensorId, weights: Vec<f32>, bias: Vec<f32>, out_channels: usize, kernel: usize, stride: usize, pad: [usize; 4], relu: bool) -> Result<TensorId> {
+    pub fn conv(&mut self, input: TensorId, params: Arc<dyn ConvParams>, out_channels: usize, kernel: usize, stride: usize, pad: [usize; 4], relu: bool) -> Result<TensorId> {
         let s = self.shapes[input];
-        if weights.len() != out_channels * s.c * kernel * kernel || bias.len() != out_channels {
+        if params.weights().len() != out_channels * s.c * kernel * kernel || params.bias().len() != out_channels {
             return Err(Error::Unsupported(format!("conv on {s:?}: weights must be [{out_channels}, {}, {kernel}, {kernel}] with {out_channels} biases", s.c)));
         }
         let [t, l, b, r] = pad;
@@ -106,7 +137,7 @@ impl Graph {
             return Err(Error::Unsupported(format!("conv on {s:?}: kernel {kernel}, stride {stride}, pad {pad:?} has no output")));
         }
         let out = Shape::new((s.h + t + b - kernel) / stride + 1, (s.w + l + r - kernel) / stride + 1, out_channels);
-        Ok(self.push(out, |output| Op::Conv { input, output, weights, bias, kernel, stride, pad, relu }))
+        Ok(self.push(out, |output| Op::Conv { input, output, params, kernel, stride, pad, relu }))
     }
 
     pub fn add(&mut self, a: TensorId, b: TensorId) -> Result<TensorId> {
@@ -160,7 +191,7 @@ impl Graph {
         for (step, op) in self.ops.iter().enumerate() {
             let get = |t: TensorId| values[t].as_deref().expect("graph ops are in execution order");
             let out = match op {
-                Op::Conv { input, weights, bias, kernel, stride, pad, relu, output } => conv_f32(get(*input), self.shapes[*input], self.shapes[*output], weights, bias, *kernel, *stride, *pad, *relu),
+                Op::Conv { input, params, kernel, stride, pad, relu, output } => conv_f32(get(*input), self.shapes[*input], self.shapes[*output], &params.weights(), &params.bias(), *kernel, *stride, *pad, *relu),
                 Op::Add { a, b, .. } => get(*a).iter().zip(get(*b)).map(|(x, y)| x + y).collect(),
                 Op::Concat { inputs, output } => {
                     let so = self.shapes[*output];

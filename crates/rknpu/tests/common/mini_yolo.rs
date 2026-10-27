@@ -6,7 +6,9 @@
 //! branches, concatenation, chained max pools, upsampling and two heads.
 
 use data::rng::Rng;
-use rknpu::graph::{Graph, TensorId};
+use std::sync::Arc;
+
+use rknpu::graph::{Graph, OwnedConvParams, TensorId};
 use rknpu::layout::Shape;
 
 fn conv(g: &mut Graph, rng: &mut Rng, x: TensorId, oc: usize, k: usize, s: usize, relu: bool) -> TensorId {
@@ -15,7 +17,7 @@ fn conv(g: &mut Graph, rng: &mut Rng, x: TensorId, oc: usize, k: usize, s: usize
     let w = (0..oc * ic * k * k).map(|_| rng.uniform(-bound, bound) as f32).collect();
     let b = (0..oc).map(|_| rng.uniform(-0.1, 0.1) as f32).collect();
     let p = if k % 2 == 1 { k / 2 } else { 0 };
-    g.conv(x, w, b, oc, k, s, [p; 4], relu).unwrap()
+    g.conv(x, Arc::new(OwnedConvParams { weights: w, bias: b }), oc, k, s, [p; 4], relu).unwrap()
 }
 
 pub fn mini_yolo(rng: &mut Rng, size: usize) -> Graph {
