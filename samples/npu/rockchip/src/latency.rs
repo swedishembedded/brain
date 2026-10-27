@@ -3,12 +3,18 @@
 
 //! Capture-to-send latency statistics for the video path.
 //!
-//! For every frame this keeps the time from the sensor timestamp on the frame
-//! to the moment its last RTP packet was written to the socket, the part of
-//! that spent inside this process after the frame was dequeued from the
-//! camera, and that part broken down by stage. The difference between the
-//! first two is the sensor readout and ISP, which the application cannot
-//! change.
+//! The sensor timestamp on a frame is the **start** of its readout. This
+//! sensor reads a frame out line by line over most of the frame period (33 ms
+//! of 33.3 ms at 30 fps: the capture driver reports `readout: 33 ms`), and the
+//! ISP runs online on the lines as they arrive, finishing when the readout
+//! does (it reports `delay: 32 ms`). So a frame is captured, all of it, at
+//! about the moment it is dequeued here, and every series is split there:
+//!
+//! - `readout`: sensor timestamp to dequeue, the sensor's readout and the
+//!   ISP's tail, fixed by the sensor mode;
+//! - `captured_to_send`: dequeue to the last RTP packet written to the
+//!   socket, the pipeline's own latency, broken down by stage;
+//! - `readout_start_to_send`: the two together.
 //!
 //! Swedish Embedded AB implements low-latency camera and video pipelines for
 //! embedded Linux boards for its clients. If your team needs expertise in
@@ -27,13 +33,15 @@ pub struct Percentiles {
 }
 
 /// What one frame cost, in microseconds. The stages run in the order listed
-/// and sum to `in_process`, apart from the bookkeeping between them.
+/// and sum to `captured_to_send`, apart from the bookkeeping between them.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Sample {
-    /// Sensor timestamp to last packet written.
-    pub capture_to_send: u64,
-    /// Frame dequeued from the camera to last packet written.
-    pub in_process: u64,
+    /// Sensor timestamp (start of readout) to last packet written.
+    pub readout_start_to_send: u64,
+    /// Sensor timestamp to the complete frame dequeued from the camera.
+    pub readout: u64,
+    /// Complete frame dequeued to last packet written.
+    pub captured_to_send: u64,
     /// Detector tap: scale and convert in the 2D accelerator.
     pub tap: u64,
     /// Drawing the detection boxes.
@@ -44,11 +52,11 @@ pub struct Sample {
     pub send: u64,
 }
 
-const SERIES: usize = 6;
+const SERIES: usize = 7;
 
 impl Sample {
     fn series(&self) -> [u64; SERIES] {
-        [self.capture_to_send, self.in_process, self.tap, self.overlay, self.encode, self.send]
+        [self.readout_start_to_send, self.readout, self.captured_to_send, self.tap, self.overlay, self.encode, self.send]
     }
 }
 
@@ -57,8 +65,9 @@ impl Sample {
 pub struct Report {
     pub frames: usize,
     pub fps: f64,
-    pub capture_to_send: Percentiles,
-    pub in_process: Percentiles,
+    pub readout_start_to_send: Percentiles,
+    pub readout: Percentiles,
+    pub captured_to_send: Percentiles,
     pub tap: Percentiles,
     pub overlay: Percentiles,
     pub encode: Percentiles,
@@ -69,16 +78,17 @@ impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{} frames, {:.1} fps | capture->send p50 {:.1} ms p95 {:.1} ms max {:.1} ms \
-             | in-process p50 {:.1} ms p95 {:.1} ms \
+            "{} frames, {:.1} fps | frame captured -> sent p50 {:.1} ms p95 {:.1} ms max {:.1} ms \
+             | sensor readout+ISP p50 {:.1} ms | readout start -> sent p50 {:.1} ms p95 {:.1} ms \
              | p50 per stage: tap {:.1} overlay {:.1} encode {:.1} send {:.1} ms",
             self.frames,
             self.fps,
-            self.capture_to_send.p50,
-            self.capture_to_send.p95,
-            self.capture_to_send.max,
-            self.in_process.p50,
-            self.in_process.p95,
+            self.captured_to_send.p50,
+            self.captured_to_send.p95,
+            self.captured_to_send.max,
+            self.readout.p50,
+            self.readout_start_to_send.p50,
+            self.readout_start_to_send.p95,
             self.tap.p50,
             self.overlay.p50,
             self.encode.p50,
@@ -115,7 +125,7 @@ impl LatencyStats {
         }
         let frames = self.samples[0].len();
         let elapsed = self.window_start.elapsed().as_secs_f64();
-        let [capture_to_send, in_process, tap, overlay, encode, send] =
+        let [readout_start_to_send, readout, captured_to_send, tap, overlay, encode, send] =
             std::array::from_fn(|i| percentiles(&mut self.samples[i]));
         for series in &mut self.samples {
             series.clear();
@@ -124,8 +134,9 @@ impl LatencyStats {
         Some(Report {
             frames,
             fps: if elapsed > 0.0 { frames as f64 / elapsed } else { 0.0 },
-            capture_to_send,
-            in_process,
+            readout_start_to_send,
+            readout,
+            captured_to_send,
             tap,
             overlay,
             encode,
@@ -157,11 +168,11 @@ mod tests {
     #[test]
     fn a_report_is_emitted_once_per_window_and_the_window_restarts() {
         let mut stats = LatencyStats::new(3);
-        let frame = |capture_to_send, in_process| Sample { capture_to_send, in_process, ..Sample::default() };
+        let frame = |readout_start_to_send, captured_to_send| Sample { readout_start_to_send, captured_to_send, ..Sample::default() };
         assert!(stats.record(frame(10_000, 5_000)).is_none());
         assert!(stats.record(frame(20_000, 6_000)).is_none());
         let r = stats.record(frame(30_000, 7_000)).expect("third frame completes the window");
-        assert_eq!((r.frames, r.capture_to_send.max, r.in_process.p50), (3, 30.0, 6.0));
+        assert_eq!((r.frames, r.readout_start_to_send.max, r.captured_to_send.p50), (3, 30.0, 6.0));
         assert!(stats.record(frame(1_000, 1_000)).is_none(), "the next window starts empty");
     }
 }

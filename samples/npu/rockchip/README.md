@@ -117,21 +117,29 @@ around the draw (`overlay::dirty_ranges`).
 
 | | |
 |---|---|
-| video | 30.0 fps; capture -> last RTP packet p50 37 ms, p95 39 ms |
-| of which in this program | p50 4 ms (tap, overlay, encode 3 ms, send) |
+| video | 30.0 fps |
+| frame captured -> last RTP packet sent | p50 3.9 ms, p95 4.6 ms, max 6.3 ms (tap 0.1, overlay up to 1, encode 2.9, send under 0.5) |
+| sensor readout + ISP | 33.5 ms, before the frame is complete |
+| start of readout -> last RTP packet sent | p50 37 ms, p95 38 ms |
 | detection | 15 inferences/s, 46 ms per inference (frame copy + NPU + decode) |
-| boxes on screen | about 84 ms after the frame's capture |
+| boxes on screen | about 84 ms after the frame's readout began, so about 50 ms after it is complete |
 | still image (640x426) | 71 ms including the letterbox; model loads in 4.8 s |
 | memory | VmRSS 10 MB, peak 11.4 MB; CMA 20.2 of 24.5 MB (model 9.6 MB, camera and encoder 7.9 MB) |
 
-About 33 ms of the capture-to-send latency is sensor readout and ISP before the
-frame reaches the program. The timestamp is the start of readout, so that part
-is not in the program's hands. Measured at other stream sizes, the camera path
-alone:
+The sensor timestamp on a frame is the start of its readout. The SC3336 has one
+mode (2304x1296 at 30 fps), which reads a frame out over 33 ms of its 33.3 ms
+frame period; the capture driver reports `readout: 33 ms` in
+`/proc/rkcif-mipi-lvds`. The ISP runs online on the lines as they arrive and
+finishes with the readout (`/proc/rkisp-vir0`: `delay: 32ms`). So a frame is
+complete about 33.5 ms after its timestamp, whatever runs downstream, and the
+sample reports that span separately from its own latency. That latency, from
+the complete frame to its last RTP packet written to the socket, is about 4 ms.
+The program logs all three every 100 frames. The camera path alone at other
+stream sizes:
 
-| stream | CMA used by the camera path | in-process p50 |
+| stream | CMA used by the camera path | frame captured -> sent, p50 |
 |---|---|---|
-| 800x448 (default) | 7.9 MB | 4-6 ms |
+| 800x448 (default) | 7.9 MB | 4 ms |
 | 960x544 | 9.0 MB | 7.6 ms |
 | 1280x720 | 11.7 MB | 10.6 ms |
 

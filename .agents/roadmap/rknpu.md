@@ -88,10 +88,12 @@ engine: brain loads a brain checkpoint, compiles it for the NPU itself and serve
 - [ ] M0: oracle baseline against the vendor toolkit and runtime. Superseded as a
   gate by the host simulation (exact) and the float reference (accuracy); still useful
   as a speed comparison.
-- [ ] Capture-to-stream latency. Target ~20 ms; measured p50 37 ms, of which ~33 ms is
-  sensor readout and ISP before the frame reaches the program (the program's share is
-  4 ms). Candidates: the VI/encoder wrap (slice) mode the vendor daemon uses, a
-  shorter ISP path, a timestamp at end of readout to tell readout from ISP.
+- [x] Capture-to-stream latency (target ~20 ms): a complete frame reaches the RTSP
+  socket in p50 3.9 ms / p95 4.6 ms. The sensor timestamp is the start of readout;
+  the SC3336's only mode reads out over 33 ms (`/proc/rkcif-mipi-lvds`: `readout: 33
+  ms`) and the online ISP finishes with it (`/proc/rkisp-vir0`: `delay: 32ms`), so
+  start of readout -> sent is 37 ms, of which 33.5 ms no downstream pipeline can
+  remove. The sample's latency report splits the two.
 - [ ] Detection throughput: 15 inferences/s, 46 ms each, of which the NPU is ~23 ms.
   Writing the 3-channel input costs ~6 ms because each pixel fills a 16-lane atom;
   lowering the 2x2/s2 stem to a CPU space-to-depth on input would quarter that and
@@ -113,7 +115,8 @@ engine: brain loads a brain checkpoint, compiles it for the NPU itself and serve
   23 ms, CPU ops 3 ms (max pool 1.3 with NEON, upsample 0.7, cache 0.3), input write
   6.6 ms, whole run 33 ms; 9.6 MB of NPU memory.
 - 2026-10-27, live stream on the Luckfox Pico Plus (800x448 at 30 fps, SC3336): video
-  30.0 fps, capture -> last RTP packet p50 37 ms / p95 39 ms (in-process 4 ms);
+  30.0 fps; frame captured -> last RTP packet p50 3.9 ms / p95 4.6 ms; sensor readout
+  + ISP 33.5 ms; start of readout -> sent p50 37 ms / p95 38 ms;
   detection 15 inferences/s, 46 ms per inference, boxes drawn ~84 ms after capture;
   VmRSS 10 MB (peak 11.4); CMA 20.2 of 24.5 MB. Still image 640x426: 71 ms; model
   load 4.8 s.

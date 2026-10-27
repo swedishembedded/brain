@@ -68,8 +68,9 @@ pub fn run(pipeline: brain::DetectionPipeline, options: brain::DetectOptions, fr
         board.publish(Detections { boxes });
         window.frames += 1;
         window.busy += started.elapsed();
-        // How old the camera frame is when its boxes reach the overlay, and
-        // how many camera frames went by between two inferences.
+        // How long after the frame's readout began its boxes reach the overlay
+        // (the readout itself is ~33 ms, see `latency`), and how many camera
+        // frames went by between two inferences.
         window.age_us += crate::stream::now_us().saturating_sub(meta.pts_us);
         window.skipped += last_seq.map_or(0, |s: u64| meta.seq.saturating_sub(s + 1));
         last_seq = Some(meta.seq);
@@ -100,7 +101,7 @@ impl Window {
     fn report(&self) {
         let n = f64::from(self.frames.max(1));
         eprintln!(
-            "detector: {:.1} inferences/s, {:.1} ms per inference, boxes {:.1} ms after capture, {:.1} camera frames between inferences",
+            "detector: {:.1} inferences/s, {:.1} ms per inference, boxes {:.1} ms after the frame's readout began, {:.1} camera frames between inferences",
             f64::from(self.frames) / self.start.elapsed().as_secs_f64(),
             self.busy.as_secs_f64() * 1e3 / n,
             self.age_us as f64 / 1e3 / n,

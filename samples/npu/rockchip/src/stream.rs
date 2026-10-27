@@ -184,8 +184,9 @@ fn video_thread(
         let sent_us = now_us();
 
         let sample = Sample {
-            capture_to_send: sent_us.saturating_sub(frame.info().pts_us),
-            in_process: sent_us - dequeued_us,
+            readout_start_to_send: sent_us.saturating_sub(frame.info().pts_us),
+            readout: dequeued_us.saturating_sub(frame.info().pts_us),
+            captured_to_send: sent_us - dequeued_us,
             tap: tapped_us - dequeued_us,
             overlay: drawn_us - tapped_us,
             encode: encoded_us - drawn_us,
