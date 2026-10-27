@@ -109,6 +109,7 @@
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::block;
+use model::saved::SavedPolicy;
 use paramstore::{ParamStore, Role};
 use std::collections::HashMap;
 
@@ -134,6 +135,7 @@ fn gcd(a: u64, b: u64) -> u64 {
     }
 }
 
+#[derive(Clone)]
 struct LayerBufs {
     /// Fused `[rows, 3H]` - q at 0, k at H, v at 2H. RoPE rotates q/k IN
     /// PLACE in this same buffer, per span.
@@ -241,6 +243,10 @@ pub struct ModernBert {
     /// The AdamW time index, needed for bias correction and carried across a
     /// resumed run.
     step: u32,
+    /// What the backward keeps of the forward ([`ModernBert::set_saved_policy`]): every layer's intermediates, or
+    /// (recompute) the residual stream `x` only, every layer sharing one set of intermediates that its replay
+    /// before the layer's backward refills.
+    saved: SavedPolicy,
 }
 
 impl ModernBert {
@@ -321,6 +327,7 @@ impl ModernBert {
         let mut e = ModernBert {
             opt: train.then(|| k.optimizer()),
             step: 0,
+            saved: SavedPolicy::Keep,
             k,
             cap_rows,
             rows: 0,
@@ -370,6 +377,31 @@ impl ModernBert {
 
     fn w(&self, name: &str) -> &DeviceBuffer {
         self.ps.w(name)
+    }
+
+    /// Keep every layer's intermediates for the backward ([`SavedPolicy::Keep`]) or only the residual stream
+    /// between layers, every layer sharing one set of intermediates that its replay refills before the layer's
+    /// backward ([`SavedPolicy::Recompute`]). The residual stream stays in f32, so a narrow saved format is
+    /// refused by name, as is going back to keeping everything once the buffers are shared.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        if let SavedPolicy::Quantized(format) = policy {
+            return Err(format!("modernbert keeps its residual stream in f32; {format:?} saved boundaries do not apply"));
+        }
+        if !self.saved.narrows_to(policy) {
+            return Err(format!("modernbert: a trunk keeping {:?} cannot go back to {policy:?}", self.saved));
+        }
+        if policy.recomputes() && !self.saved.recomputes() {
+            if self.bwd.is_none() {
+                return Err(format!("modernbert: an inference build has no backward to save for; {policy:?} is not available"));
+            }
+            if let Some(shared) = self.layers.first().cloned() {
+                self.layers.fill(shared);
+            }
+            self.saved = policy;
+            self.steps = self.build_steps();
+            self.rebuild_bwd();
+        }
+        Ok(())
     }
 
     /// Load one packed call: `ids` is the flat token stream, `spans` the
@@ -618,7 +650,9 @@ impl ModernBert {
         ));
     }
 
-    fn build_steps(&self) -> Vec<Step> {
+    /// Layer `l`'s forward, from the residual `x[l]` to `x[l + 1]`, recorded into `s`. A recomputing backward
+    /// replays it to refill the intermediates its layer's backward reads.
+    fn layer_forward(&self, l: usize, s: &mut Vec<Step>) {
         let g = &self.gpu;
         let c = &self.cfg;
         let n = self.rows;
@@ -627,57 +661,65 @@ impl ModernBert {
         let hd = c.head_dim();
         let cross = block::CrossIds { scores: self.k.scores_cross, softmax: self.k.softmax_cross, apply: self.k.apply_cross };
         let cross_win = block::CrossWinIds { scores: self.k.scores_cross_win };
+        let lb = &self.layers[l];
+        let p = format!("blocks.{l}");
+
+        // ---- pre-LN attention ----
+        // Layer 0 has no attn_norm tensor at all (`nn.Identity()` on the
+        // real model - see `ModernBertConfig::has_attn_norm`), so its
+        // qkv GEMM reads `x[l]` straight, no norm dispatch recorded.
+        let attn_in: &DeviceBuffer = if c.has_attn_norm(l) {
+            s.push(block::layernorm_nobias_fwd(g, self.k.layernorm_nobias, &self.x[l], self.w(&format!("{p}.attn_norm.weight")), &lb.xn, h, n, c.eps));
+            &lb.xn
+        } else {
+            &self.x[l]
+        };
+        s.push(g.step(self.k.matmul, &[attn_in, self.w(&format!("{p}.qkv.weight")), &lb.qkv], &[n, h, 3 * h], n * 3 * h));
+
+        let attn = c.layer_types[l];
+        let theta = if attn == LayerAttn::Full { c.rope_theta_full } else { c.rope_theta_local };
+        for &(row0, len) in &self.spans {
+            self.rope_span(row0, len, 3 * h, 0, theta, &lb.qkv, s); // q
+            self.rope_span(row0, len, 3 * h, h, theta, &lb.qkv, s); // k
+        }
+
+        match attn {
+            LayerAttn::Full => block::chunked_bidir_fwd(
+                g, &cross, None, c.n_heads, hd, h, &lb.qkv, 3 * h, 0, h, 2 * h, &lb.ctx, &self.scores, &self.probs, &self.spans, self.chunk, None, s,
+            ),
+            // Local layers MUST take the materialized windowed rung - see
+            // the module doc's "attention rung choice" note.
+            LayerAttn::Local => block::chunked_bidir_fwd_win(
+                g, &cross_win, self.k.softmax_cross, self.k.apply_cross, None, c.window, c.n_heads, hd, h, &lb.qkv, 3 * h, 0, h, 2 * h, &lb.ctx, &self.scores, &self.probs, &self.spans, self.chunk, s,
+            ),
+        }
+
+        s.push(g.step(self.k.matmul, &[&lb.ctx, self.w(&format!("{p}.proj.weight")), &lb.attn_out], &[n, h, h], n * h));
+        s.push(g.step(self.k.add2, &[&self.x[l], &lb.attn_out, &lb.res1], &[n * h], n * h));
+
+        // ---- pre-LN GeGLU MLP ----
+        s.push(block::layernorm_nobias_fwd(g, self.k.layernorm_nobias, &lb.res1, self.w(&format!("{p}.mlp_norm.weight")), &lb.xn2, h, n, c.eps));
+        let wi = self.w(&format!("{p}.mlp.wi.weight"));
+        self.half_matmul(&lb.xn2, wi, 0, n, h, ff, &lb.wi_u, s); // "input" half - gets the activation
+        self.half_matmul(&lb.xn2, wi, 1, n, h, ff, &lb.wi_v, s); // "gate" half - raw multiplier
+        s.push(g.step(self.k.gelu_erf, &[&lb.wi_u, &lb.h_act], &[n * ff], n * ff));
+        s.push(g.step(self.k.mul, &[&lb.h_act, &lb.wi_v, &lb.h], &[n * ff], n * ff));
+        s.push(g.step(self.k.matmul, &[&lb.h, self.w(&format!("{p}.mlp.wo.weight")), &lb.mlp_out], &[n, ff, h], n * h));
+        s.push(g.step(self.k.add2, &[&lb.res1, &lb.mlp_out, &self.x[l + 1]], &[n * h], n * h));
+    }
+
+    fn build_steps(&self) -> Vec<Step> {
+        let g = &self.gpu;
+        let c = &self.cfg;
+        let n = self.rows;
+        let h = c.d_model;
 
         // ---- embeddings ----
         let mut s = vec![g.step(self.k.embed, &[&self.ids, self.w("tok.weight"), &self.e_tok], &[h, n], n * h)];
         s.push(block::layernorm_nobias_fwd(g, self.k.layernorm_nobias, &self.e_tok, self.w("emb_norm.weight"), &self.x[0], h, n, c.eps));
 
         for l in 0..c.n_layers as usize {
-            let lb = &self.layers[l];
-            let p = format!("blocks.{l}");
-
-            // ---- pre-LN attention ----
-            // Layer 0 has no attn_norm tensor at all (`nn.Identity()` on the
-            // real model - see `ModernBertConfig::has_attn_norm`), so its
-            // qkv GEMM reads `x[l]` straight, no norm dispatch recorded.
-            let attn_in: &DeviceBuffer = if c.has_attn_norm(l) {
-                s.push(block::layernorm_nobias_fwd(g, self.k.layernorm_nobias, &self.x[l], self.w(&format!("{p}.attn_norm.weight")), &lb.xn, h, n, c.eps));
-                &lb.xn
-            } else {
-                &self.x[l]
-            };
-            s.push(g.step(self.k.matmul, &[attn_in, self.w(&format!("{p}.qkv.weight")), &lb.qkv], &[n, h, 3 * h], n * 3 * h));
-
-            let attn = c.layer_types[l];
-            let theta = if attn == LayerAttn::Full { c.rope_theta_full } else { c.rope_theta_local };
-            for &(row0, len) in &self.spans {
-                self.rope_span(row0, len, 3 * h, 0, theta, &lb.qkv, &mut s); // q
-                self.rope_span(row0, len, 3 * h, h, theta, &lb.qkv, &mut s); // k
-            }
-
-            match attn {
-                LayerAttn::Full => block::chunked_bidir_fwd(
-                    g, &cross, None, c.n_heads, hd, h, &lb.qkv, 3 * h, 0, h, 2 * h, &lb.ctx, &self.scores, &self.probs, &self.spans, self.chunk, None, &mut s,
-                ),
-                // Local layers MUST take the materialized windowed rung - see
-                // the module doc's "attention rung choice" note.
-                LayerAttn::Local => block::chunked_bidir_fwd_win(
-                    g, &cross_win, self.k.softmax_cross, self.k.apply_cross, None, c.window, c.n_heads, hd, h, &lb.qkv, 3 * h, 0, h, 2 * h, &lb.ctx, &self.scores, &self.probs, &self.spans, self.chunk, &mut s,
-                ),
-            }
-
-            s.push(g.step(self.k.matmul, &[&lb.ctx, self.w(&format!("{p}.proj.weight")), &lb.attn_out], &[n, h, h], n * h));
-            s.push(g.step(self.k.add2, &[&self.x[l], &lb.attn_out, &lb.res1], &[n * h], n * h));
-
-            // ---- pre-LN GeGLU MLP ----
-            s.push(block::layernorm_nobias_fwd(g, self.k.layernorm_nobias, &lb.res1, self.w(&format!("{p}.mlp_norm.weight")), &lb.xn2, h, n, c.eps));
-            let wi = self.w(&format!("{p}.mlp.wi.weight"));
-            self.half_matmul(&lb.xn2, wi, 0, n, h, ff, &lb.wi_u, &mut s); // "input" half - gets the activation
-            self.half_matmul(&lb.xn2, wi, 1, n, h, ff, &lb.wi_v, &mut s); // "gate" half - raw multiplier
-            s.push(g.step(self.k.gelu_erf, &[&lb.wi_u, &lb.h_act], &[n * ff], n * ff));
-            s.push(g.step(self.k.mul, &[&lb.h_act, &lb.wi_v, &lb.h], &[n * ff], n * ff));
-            s.push(g.step(self.k.matmul, &[&lb.h, self.w(&format!("{p}.mlp.wo.weight")), &lb.mlp_out], &[n, ff, h], n * h));
-            s.push(g.step(self.k.add2, &[&lb.res1, &lb.mlp_out, &self.x[l + 1]], &[n * h], n * h));
+            self.layer_forward(l, &mut s);
         }
 
         s.push(block::layernorm_nobias_fwd(g, self.k.layernorm_nobias, &self.x[c.n_layers as usize], self.w("final_norm.weight"), &self.hidden, h, n, c.eps));
@@ -723,6 +765,10 @@ impl ModernBert {
         s.push(block::layernorm_dx_bwd(g, &ln, x_last, self.w("final_norm.weight"), &bw.d_hidden, &bw.dx[c.n_layers as usize], h, n, c.eps));
 
         for l in (0..c.n_layers as usize).rev() {
+            if self.saved.recomputes() {
+                // Every layer shares one set of intermediates: rebuild this layer's from `x[l]` first.
+                self.layer_forward(l, &mut s);
+            }
             let lb = &self.layers[l];
             let p = format!("blocks.{l}");
             let d_out = &bw.dx[l + 1];

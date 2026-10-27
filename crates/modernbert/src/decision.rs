@@ -77,6 +77,7 @@ use std::collections::HashMap;
 
 use data::qwen_tokenizer::QwenBpe;
 use gpu_core::{DeviceBuffer, Gpu};
+use model::saved::SavedPolicy;
 
 use crate::config::ModernBertConfig;
 use crate::laya::{tensor_manifest, LayaConfig, LayaHead};
@@ -205,6 +206,23 @@ impl LayaDecision {
             grad_sink,
             provenance: Provenance::default(),
         }
+    }
+
+    /// What the backward keeps of the forward ([`model::saved::SavedPolicy`]), for every half this model trains: the
+    /// head, and the trunk in [`Training::HeadAndTrunk`]. Set it before the first [`LayaDecision::score`]. An
+    /// inference-only build has no backward, so it accepts only keeping.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        if self.mode == Training::Off {
+            return match policy {
+                SavedPolicy::Keep => Ok(()),
+                other => Err(format!("laya decision: an inference-only build has no backward to save for; {other:?} is not available")),
+            };
+        }
+        self.head.set_saved_policy(policy)?;
+        if self.mode == Training::HeadAndTrunk {
+            self.enc.set_saved_policy(policy)?;
+        }
+        Ok(())
     }
 
     /// Record what this head attaches to and what it was trained for - see

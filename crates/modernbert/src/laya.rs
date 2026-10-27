@@ -127,6 +127,7 @@ use std::collections::HashMap;
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::block;
+use model::saved::SavedPolicy;
 use paramstore::{ParamStore, Role};
 
 /// Attention-slab budget for the head's own chunked self-attention - same
@@ -237,6 +238,7 @@ pub fn tensor_manifest(cfg: &LayaConfig) -> Vec<(String, Vec<usize>)> {
     v
 }
 
+#[derive(Clone)]
 struct HeadLayerBufs {
     xn: DeviceBuffer,
     qkv: DeviceBuffer,
@@ -354,6 +356,10 @@ pub struct LayaHead {
     /// submit on another.
     opt: Option<optim::Optim>,
     step: u32,
+    /// What the backward keeps of the forward ([`LayaHead::set_saved_policy`]): every head layer's intermediates,
+    /// or (recompute) the residual stream `x` only, every layer sharing one set of intermediates that its replay
+    /// before the layer's backward refills.
+    saved: SavedPolicy,
 }
 
 impl LayaHead {
@@ -473,6 +479,7 @@ impl LayaHead {
             bwd: None,
             opt: None,
             step: 0,
+            saved: SavedPolicy::Keep,
             gpu,
             cfg,
             ps,
@@ -513,6 +520,33 @@ impl LayaHead {
 
     fn w(&self, name: &str) -> &DeviceBuffer {
         self.ps.w(name)
+    }
+
+    /// Keep every head layer's intermediates for the backward ([`SavedPolicy::Keep`]) or only the residual stream
+    /// between layers, every layer sharing one set of intermediates that its replay refills before the layer's
+    /// backward ([`SavedPolicy::Recompute`]). Set it before the first [`LayaHead::set_call`]: a call's recorded
+    /// steps bind the layers' buffers. A narrow saved format is refused by name, as is going back to keeping
+    /// everything.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        if let SavedPolicy::Quantized(format) = policy {
+            return Err(format!("laya keeps its residual stream in f32; {format:?} saved boundaries do not apply"));
+        }
+        if !self.saved.narrows_to(policy) {
+            return Err(format!("laya: a head keeping {:?} cannot go back to {policy:?}", self.saved));
+        }
+        if policy.recomputes() && !self.saved.recomputes() {
+            if self.bwd.is_none() {
+                return Err(format!("laya: an inference build has no backward to save for; {policy:?} is not available"));
+            }
+            if !self.steps.is_empty() {
+                return Err("laya: the saved-activation policy must be set before the first call".into());
+            }
+            if let Some(shared) = self.layers.first().cloned() {
+                self.layers.fill(shared);
+            }
+            self.saved = policy;
+        }
+        Ok(())
     }
 
     /// Point the head at one call: `spans` are the encoder's own packed
@@ -616,7 +650,9 @@ impl LayaHead {
         self.gpu.poll_wait();
     }
 
-    fn build_steps(&self, hidden: &DeviceBuffer) -> Vec<Step> {
+    /// Head layer `l`'s forward, from the residual `x[l]` to `x[l + 1]`, recorded into `s`. A recomputing backward
+    /// replays it to refill the intermediates its layer's backward reads.
+    fn layer_forward(&self, l: usize, s: &mut Vec<Step>) {
         let g = &self.gpu;
         let d = self.cfg.d_model;
         let ff = self.cfg.ff_mult * self.cfg.d_model;
@@ -625,6 +661,44 @@ impl LayaHead {
         let hd = self.cfg.head_dim();
         let ln = block::LayerNormIds::resolve_fwd(g, self.k.layernorm);
         let cross = block::CrossIds { scores: self.k.scores_cross, softmax: self.k.softmax_cross, apply: self.k.apply_cross };
+        let lb = &self.layers[l];
+        let p = format!("head.{l}");
+
+        s.push(block::layernorm_fwd(g, &ln, &self.x[l], self.w(&format!("{p}.norm1.weight")), self.w(&format!("{p}.norm1.bias")), &lb.xn, d, n, self.cfg.eps));
+        s.push(g.step(self.k.matmul, &[&lb.xn, self.w(&format!("{p}.attn.in_proj.weight")), &lb.qkv], &[n, d, 3 * d], n * 3 * d));
+        s.push(g.step(self.k.bias_add, &[&lb.qkv, self.w(&format!("{p}.attn.in_proj.bias"))], &[n, 3 * d], n * 3 * d));
+
+        // Plain full bidirectional self-attention, per span - no RoPE, no
+        // window, the same primitive `ModernBert`'s own FULL-attention
+        // layers use, called directly rather than through the trunk.
+        block::chunked_bidir_fwd(
+            g, &cross, None, heads, hd, d, &lb.qkv, 3 * d, 0, d, 2 * d, &lb.ctx, &self.scores, &self.probs, &self.spans, self.chunk, None, s,
+        );
+
+        s.push(g.step(self.k.matmul, &[&lb.ctx, self.w(&format!("{p}.attn.out_proj.weight")), &lb.attn_out], &[n, d, d], n * d));
+        s.push(g.step(self.k.bias_add, &[&lb.attn_out, self.w(&format!("{p}.attn.out_proj.bias"))], &[n, d], n * d));
+        s.push(g.step(self.k.add2, &[&self.x[l], &lb.attn_out, &lb.res1], &[n * d], n * d));
+
+        s.push(block::layernorm_fwd(g, &ln, &lb.res1, self.w(&format!("{p}.norm2.weight")), self.w(&format!("{p}.norm2.bias")), &lb.xn2, d, n, self.cfg.eps));
+        s.push(g.step(self.k.matmul, &[&lb.xn2, self.w(&format!("{p}.ff1.weight")), &lb.ff1], &[n, d, ff], n * ff));
+        s.push(g.step(self.k.bias_add, &[&lb.ff1, self.w(&format!("{p}.ff1.bias"))], &[n, ff], n * ff));
+        // PLAIN RELU, not GELU - see the module doc's trap note.
+        // Non-in-place (`leaky_relu` at `slope=0.0`, not `relu_inplace`):
+        // the backward (Laya M5) needs the PRE-activation `ff1` back, so
+        // the activation is written into the separate `ff1_act` buffer -
+        // see the module doc's "Backward" section. Same numbers either
+        // way; only the buffer layout changed.
+        s.push(g.step(self.k.leaky_relu, &[&lb.ff1, &lb.ff1_act], &[n * ff, f(0.0)], n * ff));
+        s.push(g.step(self.k.matmul, &[&lb.ff1_act, self.w(&format!("{p}.ff2.weight")), &lb.ff2], &[n, ff, d], n * d));
+        s.push(g.step(self.k.bias_add, &[&lb.ff2, self.w(&format!("{p}.ff2.bias"))], &[n, d], n * d));
+        s.push(g.step(self.k.add2, &[&lb.res1, &lb.ff2, &self.x[l + 1]], &[n * d], n * d));
+    }
+
+    fn build_steps(&self, hidden: &DeviceBuffer) -> Vec<Step> {
+        let g = &self.gpu;
+        let d = self.cfg.d_model;
+        let n = self.rows;
+        let ln = block::LayerNormIds::resolve_fwd(g, self.k.layernorm);
 
         // h0 = hidden + type_emb[qtype], broadcast per span via a per-row
         // gather - the same `embed`-as-broadcast idiom `ModernBert::model`
@@ -633,37 +707,7 @@ impl LayaHead {
         s.push(g.step(self.k.add2, &[hidden, &self.e_type, &self.x[0]], &[n * d], n * d));
 
         for l in 0..self.cfg.head_layers as usize {
-            let lb = &self.layers[l];
-            let p = format!("head.{l}");
-
-            s.push(block::layernorm_fwd(g, &ln, &self.x[l], self.w(&format!("{p}.norm1.weight")), self.w(&format!("{p}.norm1.bias")), &lb.xn, d, n, self.cfg.eps));
-            s.push(g.step(self.k.matmul, &[&lb.xn, self.w(&format!("{p}.attn.in_proj.weight")), &lb.qkv], &[n, d, 3 * d], n * 3 * d));
-            s.push(g.step(self.k.bias_add, &[&lb.qkv, self.w(&format!("{p}.attn.in_proj.bias"))], &[n, 3 * d], n * 3 * d));
-
-            // Plain full bidirectional self-attention, per span - no RoPE, no
-            // window, the same primitive `ModernBert`'s own FULL-attention
-            // layers use, called directly rather than through the trunk.
-            block::chunked_bidir_fwd(
-                g, &cross, None, heads, hd, d, &lb.qkv, 3 * d, 0, d, 2 * d, &lb.ctx, &self.scores, &self.probs, &self.spans, self.chunk, None, &mut s,
-            );
-
-            s.push(g.step(self.k.matmul, &[&lb.ctx, self.w(&format!("{p}.attn.out_proj.weight")), &lb.attn_out], &[n, d, d], n * d));
-            s.push(g.step(self.k.bias_add, &[&lb.attn_out, self.w(&format!("{p}.attn.out_proj.bias"))], &[n, d], n * d));
-            s.push(g.step(self.k.add2, &[&self.x[l], &lb.attn_out, &lb.res1], &[n * d], n * d));
-
-            s.push(block::layernorm_fwd(g, &ln, &lb.res1, self.w(&format!("{p}.norm2.weight")), self.w(&format!("{p}.norm2.bias")), &lb.xn2, d, n, self.cfg.eps));
-            s.push(g.step(self.k.matmul, &[&lb.xn2, self.w(&format!("{p}.ff1.weight")), &lb.ff1], &[n, d, ff], n * ff));
-            s.push(g.step(self.k.bias_add, &[&lb.ff1, self.w(&format!("{p}.ff1.bias"))], &[n, ff], n * ff));
-            // PLAIN RELU, not GELU - see the module doc's trap note.
-            // Non-in-place (`leaky_relu` at `slope=0.0`, not `relu_inplace`):
-            // the backward (Laya M5) needs the PRE-activation `ff1` back, so
-            // the activation is written into the separate `ff1_act` buffer -
-            // see the module doc's "Backward" section. Same numbers either
-            // way; only the buffer layout changed.
-            s.push(g.step(self.k.leaky_relu, &[&lb.ff1, &lb.ff1_act], &[n * ff, f(0.0)], n * ff));
-            s.push(g.step(self.k.matmul, &[&lb.ff1_act, self.w(&format!("{p}.ff2.weight")), &lb.ff2], &[n, ff, d], n * d));
-            s.push(g.step(self.k.bias_add, &[&lb.ff2, self.w(&format!("{p}.ff2.bias"))], &[n, d], n * d));
-            s.push(g.step(self.k.add2, &[&lb.res1, &lb.ff2, &self.x[l + 1]], &[n * d], n * d));
+            self.layer_forward(l, &mut s);
         }
 
         let x_final = &self.x[self.cfg.head_layers as usize];
@@ -870,6 +914,10 @@ impl LayaHead {
 
         // ---- the head_layers stack, walked bottom up ----
         for l in (0..head_layers).rev() {
+            if self.saved.recomputes() {
+                // Every layer shares one set of intermediates: rebuild this layer's from `x[l]` first.
+                self.layer_forward(l, &mut s);
+            }
             let lb = &self.layers[l];
             let p = format!("head.{l}");
             // `dx[i]` holds the grad of `x[i+1]`, so `dx[l]` is this layer's
