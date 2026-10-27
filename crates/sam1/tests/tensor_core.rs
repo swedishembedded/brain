@@ -82,3 +82,21 @@ fn the_tower_runs_its_products_on_tensor_cores() {
     assert!(fallbacks.is_empty(), "products on CUDA cores in the inference tower: {fallbacks:?}\n{}", audit.summary());
     assert!(audit.tensor_core_ms > 0.0, "no tensor-core kernel ran at all: {rows:?}");
 }
+
+/// An inference tower builds its relative-position tables once (they depend on weights alone), so a weight written after a
+/// pass must still reach the next one: the tower agrees with a fresh build holding the same weights.
+#[test]
+fn a_weight_written_between_passes_reaches_the_cached_tables() {
+    let name = "vision.sam.blocks.0.attn.rel_pos_h";
+    let reused = encoder(GemmPrecision::Fp32Reference, false);
+    let before = output(&reused);
+    let moved: Vec<f32> = reused.read_weight(name).iter().map(|w| w * 3.0 + 0.5).collect();
+    reused.write_weight(name, &moved);
+    let got = output(&reused);
+
+    let fresh = encoder(GemmPrecision::Fp32Reference, false);
+    fresh.write_weight(name, &moved);
+    let want = output(&fresh);
+    assert!(got.iter().zip(&before).any(|(a, b)| a != b), "the written table must change the output");
+    assert_eq!(got, want, "a stale cached table survived a weight write");
+}

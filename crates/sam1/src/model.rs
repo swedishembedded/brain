@@ -825,6 +825,9 @@ pub struct SamEncoder {
     tc_attn: Option<TcAttention>,
     /// Global blocks the last [`Self::run`] attended through tensor cores.
     tc_attn_blocks: Cell<u32>,
+    /// The blocks' relative-position tables are current. They depend on weights alone, so an inference build derives them
+    /// once, on its first pass, and again only after a weight write; a training build re-derives them every pass.
+    tables_ready: Cell<bool>,
 }
 
 /// The score and probability slabs of attention on tensor cores, `[heads, chunk, keys]` each: a global block runs its
@@ -969,6 +972,7 @@ impl SamEncoder {
             tensor_cores,
             tc_attn,
             tc_attn_blocks: Cell::new(0),
+            tables_ready: Cell::new(false),
         }
     }
 
@@ -1129,6 +1133,16 @@ impl SamEncoder {
         true
     }
 
+    /// Whether the fused relative-position attention runs on tensor cores for this block: the device redirects the
+    /// kernel to its native fp16 form for the block's span shape. That one pass over q, k, v beats the batched
+    /// products with a materialized score slab, so a global block prefers it.
+    fn flash_on_tensor_cores(&self, b: &Block) -> bool {
+        let (Some(kind), Some(_)) = (self.ids.flash_rel, &b.rel_all) else { return false };
+        let (c, heads, hd, qn) = (self.cfg.d_model, self.cfg.n_heads, self.cfg.head_dim(), b.qh * b.qw);
+        let params = [b.spans.len() as u32, heads, qn, qn, hd, 3 * c, 0, 3 * c, c, 3 * c, 2 * c, c, b.qh, b.qw];
+        self.gpu.native_kernel_for(kind, &params).is_some()
+    }
+
     /// How many global blocks the last [`Self::run`] attended through tensor cores (the rest, and every windowed
     /// block, attend with the fused kernel on fp32 cores).
     pub fn tensor_core_attention_blocks(&self) -> u32 {
@@ -1186,6 +1200,7 @@ impl SamEncoder {
             let x = if i == 0 { &self.embed } else { &self.blocks[i - 1].out };
             self.block_fwd(&self.blocks[i], x);
         }
+        self.tables_ready.set(!self.is_trainable());
 
         // ---- NLC -> NCHW, neck, (resize), compressor; then the HD branch ----
         let perm = self.perm_params();
@@ -1213,7 +1228,9 @@ impl SamEncoder {
         let w = |leaf: &str| self.ps.w(&b.p(leaf));
         let mut steps: Vec<Step> = Vec::new();
 
-        b.build_tables(g, &self.ids, &self.ps, &mut steps);
+        if !self.tables_ready.get() {
+            b.build_tables(g, &self.ids, &self.ps, &mut steps);
+        }
         steps.push(block::layernorm_fwd(g, &self.ids.ln, x, w("norm1.weight"), w("norm1.bias"), &b.ln1, c, rows, cfg.eps));
 
         // Zero-padded window partition. The sentinel row of `ln1` is zero
@@ -1230,7 +1247,7 @@ impl SamEncoder {
         steps.push(g.step(self.ids.bias_add, &[&b.qkv, w("attn.qkv.bias")], &[ar, 3 * c], ar * 3 * c));
 
         let rel = b.relpos(&self.ids, false);
-        if !(b.win.is_none() && self.attend_on_tensor_cores(b, &rel, &mut steps)) {
+        if !(b.win.is_none() && !self.flash_on_tensor_cores(b) && self.attend_on_tensor_cores(b, &rel, &mut steps)) {
         match (self.ids.flash_rel, &b.rel_all) {
             (Some(kind), Some((rel_h, rel_w))) => {
                 // Every span's q.R tables in one dispatch per axis, then ONE fused dispatch over all spans (the windows are its batch axis).
@@ -1530,8 +1547,9 @@ impl SamEncoder {
     pub fn write_weight(&self, name: &str, data: &[f32]) {
         assert_eq!(data.len(), self.ps.numel(name), "{name}: size mismatch");
         self.gpu.write_f32(self.ps.w(name), data);
-        // A weight moved between passes invalidates the cached activations.
+        // A weight moved between passes invalidates the cached activations and the derived tables.
         self.fwd_done.set(false);
+        self.tables_ready.set(false);
     }
     pub fn read_grad(&self, name: &str) -> Vec<f32> {
         self.ps.read_grad(&self.gpu, name)
