@@ -128,3 +128,15 @@ fn gpu_and_cpu_scopes_each_print_only_their_own_section() {
     assert!(ok, "brain roofline gpu failed: {stderr}");
     assert!(!stdout.lines().any(|l| l.starts_with("npu") || l.starts_with("cpu")), "brain roofline gpu must print ONLY its own section:\n{stdout}");
 }
+
+/// `--device` bounds what the command opens: a selection with no GPU (`cpu`)
+/// must not probe any card, and the report says so instead of listing one.
+/// (Safe on a shared node: it touches no GPU.)
+#[test]
+fn device_selection_without_a_gpu_opens_no_card() {
+    let (ok, stdout, stderr, _) = run(&["gpu", "--device", "cpu"]);
+    assert!(ok, "brain roofline gpu --device cpu failed: {stderr}");
+    let gpu_lines: Vec<&str> = stdout.lines().filter(|l| l.starts_with("gpu")).collect();
+    assert_eq!(gpu_lines.len(), 1, "one placeholder row, no per-card rows:\n{stdout}");
+    assert!(gpu_lines[0].contains("no hardware") && gpu_lines[0].contains("no GPU selected"), "{}", gpu_lines[0]);
+}

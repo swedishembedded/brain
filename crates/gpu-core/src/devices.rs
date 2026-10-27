@@ -192,6 +192,22 @@ pub fn gpus() -> &'static [DeviceId] {
     registry().devices()
 }
 
+/// The cards of `all` that `set` schedules work on, in canonical order.
+///
+/// A command that opens every card to measure it (a roofline, a probe) must
+/// open only these: on a shared node the other cards belong to someone else
+/// and `--device` is the user's statement of which ones are theirs.
+pub fn select_gpus<'a>(all: &'a [DeviceId], set: &ComputeSet) -> Vec<&'a DeviceId> {
+    all.iter().filter(|d| set.gpus.contains(&d.index)).collect()
+}
+
+/// [`select_gpus`] over the machine's cards and the process's compute set
+/// (`--device` / `BRAIN_DEVICE`).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn schedulable_gpus() -> Vec<&'static DeviceId> {
+    select_gpus(gpus(), ambient_compute_set())
+}
+
 /// The card behind canonical index `index`. Out-of-range is an error, never a
 /// silent clamp.
 pub fn device(index: u32) -> Result<&'static DeviceId, String> {
@@ -1744,6 +1760,21 @@ mod tests {
     }
 
     // ---- registry (pure parts) ----------------------------------------------
+
+    /// `--device gpu0` on a two-card node must leave the second card alone:
+    /// a command that measures cards opens exactly the selected ones.
+    #[test]
+    fn a_card_measuring_command_sees_only_the_selected_cards() {
+        let two: Vec<DeviceId> = (0..2)
+            .map(|i| DeviceId { index: i, identity: ident("GH200", Some(&format!("0009:0{i}:00.0")), 0, backend_api::DeviceClass::DiscreteGpu) })
+            .collect();
+        let pick = |spec: &str| -> Vec<u32> { select_gpus(&two, &resolve(spec, inv(2, 8, 0)).unwrap()).iter().map(|d| d.index).collect() };
+        assert_eq!(pick("gpu0"), vec![0]);
+        assert_eq!(pick("gpu1"), vec![1]);
+        assert_eq!(pick("gpu"), vec![0, 1]);
+        assert_eq!(pick(""), vec![0, 1]);
+        assert!(pick("cpu").is_empty(), "a CPU-only selection opens no card");
+    }
 
     fn ident(name: &str, pci: Option<&str>, ordinal: usize, class: backend_api::DeviceClass) -> GpuIdentity {
         GpuIdentity {

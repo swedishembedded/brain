@@ -70,7 +70,7 @@ way.
 |---|---|
 | `brain devices` | canonical GPU table (index, PCI bus, UUID, VRAM) + ambient device selection - see [Hardware](../guides/hardware/choosing-hardware.md) |
 | `brain doctor [--model <vendor>/<repo>]` | can a model be served here? checks the model store, the free disk, each GPU's free memory and, with `--model`, that model's weights, tokenizer and whether some card has room for it; loads nothing, exits 1 when a check fails, `--json` for scripts - see [Quickstart](../getting-started/quickstart.md) |
-| `brain roofline` | measured, cross-accelerator hardware compute-capacity report: every GPU, the NPU, and the CPU, each dtype it supports, streamed as each finishes; `--kernels` adds the measured kernel selection and each choice's fraction of the roofline |
+| `brain roofline` | measured, cross-accelerator hardware compute-capacity report: every GPU `--device` selects (a card outside the selection is never opened), the NPU, and the CPU, each dtype it supports, streamed as each finishes; `--kernels` adds the measured kernel selection and each choice's fraction of the roofline |
 | `brain data` | dataset generation and tokenizers |
 | `brain label` | caption a dataset with any vision-language model - see [Labeling a dataset](../guides/training/labeling.md) |
 | `brain caps` | every architecture's action manifest - see above |

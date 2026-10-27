@@ -221,10 +221,11 @@ impl Row {
 
 // -------------------------------------------------------------------- gpu --
 
-/// Every physical GPU on the machine, each dtype it supports - not just the
-/// ambient/first device, so a multi-GPU box gets a row set per card.
+/// Every GPU `--device` selects, each dtype it supports - a multi-GPU box gets
+/// a row set per selected card, and a card outside the selection is never
+/// opened (on a shared node it belongs to someone else).
 fn gpu_rows(reprofile: bool) -> Vec<Row> {
-    let devs = gpu_core::devices::registry().devices();
+    let devs = gpu_core::devices::schedulable_gpus();
     if devs.is_empty() {
         return vec![Row {
             accelerator: "gpu".into(),
@@ -234,7 +235,7 @@ fn gpu_rows(reprofile: bool) -> Vec<Row> {
             rate: None,
             rate_unit: None,
             bandwidth_gbs: None,
-            note: Some("no physical GPUs (a software rasteriser may still serve --device gpu)".into()),
+            note: Some("no GPU selected (no physical GPUs, or --device names none; a software rasteriser may still serve --device gpu)".into()),
         }];
     }
 

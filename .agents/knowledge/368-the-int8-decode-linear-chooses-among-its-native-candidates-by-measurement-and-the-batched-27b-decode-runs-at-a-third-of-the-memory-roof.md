@@ -36,5 +36,5 @@ fast path costs more than it saves). Next candidate: stage weight tiles through 
 feed `ldmatrix`, as the prefill GEMM does, with the activation tile resident; it lands as another row of the slot
 and the table says at once whether it wins.
 
-Trap: `brain roofline` opens every GPU of the box, whatever `--device` says (it probed the second card of a shared
-node once); run it only where every card is yours, and use the `roofline_gpu0` style tests otherwise.
+Trap (fixed): `brain roofline` used to open every GPU of the box whatever `--device` said (it probed the second card
+of a shared node once); it now opens only the cards `--device` selects (`devices::schedulable_gpus`).

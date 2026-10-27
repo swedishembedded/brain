@@ -887,7 +887,14 @@ pub fn profile(device: &DeviceInfo, plan: &Plan) -> DeviceProfile {
 #[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub fn machine(plan: &Plan) -> Vec<DeviceProfile> {
-    devices().iter().map(|d| profile(d, plan)).collect()
+    // A card outside `--device` is not ours to open (shared nodes), so only
+    // the schedulable GPUs are profiled; the CPU and NPUs are never GPU-opened.
+    let ours: Vec<u32> = gpu_core::devices::schedulable_gpus().iter().map(|d| d.index).collect();
+    devices()
+        .iter()
+        .filter(|d| !matches!(d.kind, DeviceKind::DiscreteGpu | DeviceKind::IntegratedGpu) || ours.contains(&d.index))
+        .map(|d| profile(d, plan))
+        .collect()
 }
 
 #[cfg(test)]
