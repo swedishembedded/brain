@@ -653,6 +653,21 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
             // native kernels are measured with. Set before any device is built.
             gpu_core::set_native_kernels(false);
             i += 1;
+        } else if argv[i] == "--no-autotune" {
+            // Every kernel slot keeps its default candidate: reproducible benchmarking and A/B runs.
+            gpu_core::set_native_autotune(false);
+            i += 1;
+        } else if argv[i] == "--kernel" {
+            // `--kernel <slot>=<candidate>` pins one kernel slot to one of its candidates (repeatable), wherever the
+            // candidate can serve the dispatch - the debugging and A/B override of the measured selection.
+            match argv.get(i + 1).and_then(|v| v.split_once('=')).filter(|(s, c)| !s.is_empty() && !c.is_empty()) {
+                Some((slot, candidate)) => gpu_core::force_candidate(slot, candidate),
+                None => {
+                    eprintln!("brain: --kernel takes <slot>=<candidate>, e.g. --kernel matmul_i8_gemv=matmul_i8_mma_m16");
+                    std::process::exit(2);
+                }
+            }
+            i += 2;
         } else if argv[i] == "--profile-replays" {
             // Passes that support it print a min-of-N-replays kernel table.
             match argv.get(i + 1).and_then(|v| v.parse::<u32>().ok()) {

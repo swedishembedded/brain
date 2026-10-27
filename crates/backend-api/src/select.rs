@@ -554,19 +554,17 @@ pub const I8_GEMV_MMA_MIN_ROWS: u32 = 5;
 pub const I8_MMA_MIN_CC: (u32, u32) = (8, 0);
 
 /// The int8 GEMV/tile crossover on `caps`. A device that runs the native
-/// kernels but not the int8 tensor-core GEMM (compute capability below
-/// [`I8_MMA_MIN_CC`]) keeps the GEMV through the whole decode regime: the
-/// native GEMV streams the weights at full width and takes more blocks for more
-/// rows, where the register-tiled kernel's 128x128 tile leaves a small batch on
-/// a few blocks (the dominant share of a 16-row 35B-A3B decode step before
-/// the GEMV took over). A device with the tensor-core GEMM hands over to it at
-/// [`I8_GEMV_MAX_ROWS`] rows: swept on a GH200 on a real 35B-A3B decode step,
-/// device-timed, the GEMV leads up to 8 rows and the GEMM from 9, with the gap
-/// widening at 16 and 32 rows.
+/// kernels keeps the GEMV through the whole decode regime: the native GEMV
+/// streams the weights at full width, and from compute capability
+/// [`I8_MMA_MIN_CC`] its tensor-core block serves up to
+/// [`DECODE_REGIME_MAX_ROWS`] rows of x against ONE read of each weight row,
+/// where the register-tiled GEMM's tile leaves a small batch on a few blocks.
+/// A portable device keeps the [`I8_GEMV_MAX_ROWS`] crossover of the
+/// generated kernels.
 pub fn i8_gemv_max_rows(caps: &DeviceCaps) -> u32 {
     match caps.arch.compute_capability {
-        Some(cc) if cc < I8_MMA_MIN_CC => DECODE_REGIME_MAX_ROWS,
-        _ => I8_GEMV_MAX_ROWS,
+        Some(_) => DECODE_REGIME_MAX_ROWS,
+        None => I8_GEMV_MAX_ROWS,
     }
 }
 
@@ -1616,7 +1614,7 @@ mod tests {
         for m in [1u32, 8, 9, 16, 32] {
             let sh = shape(m, 4096, 2048, Dtype::I8);
             let on_hopper = DefaultSelector.select(Op::MatMul, sh, &hopper);
-            assert_eq!(on_hopper == KernelVariant::WorkgroupPerOutput, m <= I8_GEMV_MAX_ROWS, "m={m} on a device with int8 tensor cores");
+            assert_eq!(on_hopper, KernelVariant::WorkgroupPerOutput, "m={m} on a device with int8 tensor cores");
             assert_eq!(DefaultSelector.select(Op::MatMul, sh, &turing), KernelVariant::WorkgroupPerOutput, "m={m} on a native-GEMV device without them");
             let on_portable = DefaultSelector.select(Op::MatMul, sh, &portable);
             assert_eq!(on_portable == KernelVariant::WorkgroupPerOutput, m <= I8_GEMV_MAX_ROWS, "m={m} on a portable device");

@@ -1294,3 +1294,24 @@ again at the point it is used.
   fails on the base commit too, and `crates/gpu-core/tests/native_f16_provider.rs`'s
   three tests fail with "the `f16` extension is not supported in the current
   environment" on hardware without it.
+
+
+### Measured kernel selection and the roofline gap list (int8 decode linear)
+
+The int8 decode linear (`matmul_i8_gemv`) is a candidate set chosen per device by measurement
+(`gpu_core::native_tune`, knowledge 368): the dp4a GEMV, the wide tensor-core GEMV (up to 32 rows of x per
+weight pass) and the 16- and 32-row tiled tensor-core GEMMs. Done: the mechanism, the per-device read roof and
+launch floor probe, the oracle check, the store, `brain roofline gpu --kernels`, `--kernel`, `--no-autotune`, the
+candidate-coverage unit test and the forced-candidate-versus-WGSL gate (`i8_gemv_native.rs`). Measured on a GH200,
+12/20/32 streams of the 27B: no end-to-end change (the tuner confirms the previous hand choice), 53 of 56 classes
+under 60 % of the memory roof.
+
+Open, in the order the gap list ranks them: (1) a candidate that streams weights through shared memory with
+cp.async/TMA and `ldmatrix` (the 8-byte register loads cap every current candidate near 1.5 TB/s at 12 rows and 1 TB/s
+at 32); (2) problem generators and oracles so the other tiers' multi-row slots (K-quant narrow/wide, q4, fp8, nvfp4)
+join the tuner, and a prefill-sized (`matmul_i8_dyn`) class grid; (3) the attention and the GDN decode kernels as
+candidate sets; (4) a compute roof per tensor-core precision for the compute-bound classes (the decode classes are
+memory-bound at 32 rows and below, so only the memory roof is graded today); (5) the driver version in the store key.
+The f16-weight warpgroup int8 GEMM of the dropped `perf-wgmma-f16` branch (commit 7dea031a6, parity speed with the tiled
+GEMM) belongs here as a prefill candidate once (2) exists; `b27-decode-attn-wip` (4305fa87a) was superseded by the
+native int8 decode attention and its shared-prefix test already on main.

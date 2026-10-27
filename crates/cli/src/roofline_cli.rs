@@ -36,7 +36,7 @@ use serde_json::Value;
 use crate::args::Args;
 
 const USAGE: &str = "\
-usage: brain roofline [gpu|npu|cpu] [--reprofile] [--json]
+usage: brain roofline [gpu|npu|cpu] [--reprofile] [--kernels] [--json]
 
   Prints every accelerator's MEASURED raw hardware compute capacity - what
   this machine can do, model-independent. Streamed as each accelerator's
@@ -54,6 +54,12 @@ usage: brain roofline [gpu|npu|cpu] [--reprofile] [--json]
                      npu::roofline::measure has no cache of its own to
                      bypass, it always re-measures. CPU always measures
                      fresh regardless (it is fast enough not to need one).
+  --kernels         after the GPU rows, list which native kernel candidate brain
+                     chose per op and shape class on this device, its achieved
+                     bandwidth and fraction of the measured roofline, and the
+                     classes under 60% of it (the device's gap list). The choice is
+                     measured on first use and cached per device and build;
+                     `--kernel <slot>=<candidate>` pins one for A/B runs.
   --json            emit an array of row objects (same fields as the plain
                      rows) instead of plain text
 ";
@@ -66,6 +72,7 @@ pub fn run_roofline(args: &[String]) -> i32 {
     let mut a = Args::new(args);
     let reprofile = a.take_flag("--reprofile");
     let json = a.take_flag("--json");
+    let kernels = a.take_flag("--kernels");
     let scope = a.positional();
     if let Some(s) = &scope {
         if !matches!(s.as_str(), "gpu" | "npu" | "cpu") {
@@ -107,6 +114,10 @@ pub fn run_roofline(args: &[String]) -> i32 {
             }
             rows.push(r);
         }
+    }
+
+    if kernels && want_gpu && !json {
+        println!("\n{}", gpu_core::native_selection_report_for_default_device());
     }
 
     if json {

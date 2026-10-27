@@ -152,6 +152,17 @@ the generated tier's own error on the same inputs
 `--no-native-kernels` (a global flag, like `--device`) keeps every dispatch on
 the generated tier - the A/B switch the native kernels are measured with.
 
+Where several native kernels can serve the same operation (the int8 decode
+linear has a dp4a GEMV, a tensor-core GEMV and two tiled tensor-core GEMMs), brain
+chooses by measurement, not by device name. On the first start on a device it
+times every candidate the device can run on a grid of shape classes (row count,
+`K`, weight bytes), checks each against an f64 reference and rejects a
+disagreeing one, and caches the table per device and build, so later starts read
+it. `brain roofline gpu --kernels` lists the choice per class with its achieved
+bandwidth and its fraction of the memory roofline measured on the same device,
+and the classes under 60 % of it. `--kernel <slot>=<candidate>` pins a slot to one
+candidate for an A/B run, and `--no-autotune` keeps every slot on its default.
+
 A repeated submission is also recorded into a CUDA graph and replayed, and a
 decode step is replayed whole, from recycled scratch buffers, in a few chunks so
 the card starts before the host has built the rest of the step.

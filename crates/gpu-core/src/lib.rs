@@ -251,10 +251,12 @@ mod upgrade;
 /// `register_native` seam it dispatches through.
 #[cfg(not(target_arch = "wasm32"))]
 mod native_upgrade;
+mod native_tune;
 
 /// Native kernels a model asks for by name - see [`native_upgrade::Fused`].
 #[cfg(not(target_arch = "wasm32"))]
 pub use native_upgrade::{native_kernels_enabled, set_native_kernels, Fused};
+pub use native_tune::{clear_forced as clear_forced_candidates, force_candidate, offered as native_candidates_offered, report as native_selection_report, report_for_default_device as native_selection_report_for_default_device, set_autotune as set_native_autotune, unknown_forced as unknown_forced_candidates};
 
 /// The `OperatorProvider` ABI, registry, WGSL reference provider and
 /// cross-provider parity harness (`kernel-performance.md` Phase 8, M8.3).
@@ -734,6 +736,8 @@ mod native_facade {
         /// [`crate::native_upgrade`]. Empty on every backend that cannot
         /// compile the registry's source.
         native_upgrades: Vec<crate::native_upgrade::Active>,
+        /// The device's measured choice among the candidates of each native slot - see [`crate::native_tune`].
+        tuned: std::sync::OnceLock<Option<Arc<crate::native_tune::Tuned>>>,
         /// The native fused kernels this handle has been asked about, and what
         /// the backend answered - resolved lazily, because resolving compiles
         /// the kernel and most handles never ask. See [`Gpu::fused_step`].
@@ -809,13 +813,14 @@ mod native_facade {
             // so `step` costs one compare against a usually-empty list.
             let upgrades = crate::upgrade::resolve(&names, &inner.caps());
             let native_upgrades = crate::native_upgrade::resolve(&names, inner.as_ref(), &upgrades);
-            Gpu {
+            let gpu = Gpu {
                 inner,
                 names,
                 counters: Mutex::new(Default::default()),
                 cost_enabled: std::sync::atomic::AtomicBool::new(false),
                 upgrades,
                 native_upgrades,
+                tuned: std::sync::OnceLock::new(),
                 fused: Mutex::new(Vec::new()),
                 mem_device,
                 grants: Mutex::new(Vec::new()),
@@ -827,7 +832,27 @@ mod native_facade {
                 tape: Mutex::new(None),
                 taping: std::sync::atomic::AtomicBool::new(false),
                 declines_library_flag: std::sync::atomic::AtomicBool::new(false),
-            }
+            };
+            // A slot with several native candidates has its choice measured once per device (or read from the
+            // store) before the handle is used; every other handle skips this at the cost of one scan.
+            let mut slots: Vec<(usize, &'static str)> = gpu.native_upgrades.iter().map(|a| (a.slow, a.slot)).collect();
+            slots.dedup();
+            let _ = gpu.tuned.set(crate::native_tune::ensure(&gpu, &slots));
+            gpu
+        }
+
+        /// The native candidates resolved for this handle, for [`crate::native_tune`].
+        pub(crate) fn native_rows(&self) -> &[crate::native_upgrade::Active] {
+            &self.native_upgrades
+        }
+
+        /// One launch of native kernel `id` over `bufs`, bypassing the candidate choice: how the tuner times and checks each candidate.
+        pub(crate) fn native_step_raw(&self, id: backend_api::NativeId, bufs: &[&DeviceBuffer], params: &[u32], blocks: u32) -> Option<Step> {
+            self.be().step_native(id, bufs, params, blocks)
+        }
+
+        fn tuned_table(&self) -> Option<&crate::native_tune::Tuned> {
+            self.tuned.get().and_then(|t| t.as_deref())
         }
 
         /// The memory device a handle on this backend, on this thread, is
@@ -2431,7 +2456,7 @@ mod native_facade {
         /// (an id it does not recognise, or no native slicing path), which is
         /// a fallback and never a failure.
         fn native_step(&self, kind: usize, bufs: &[&DeviceBuffer], offsets: Option<&[(u64, u64)]>, params: &[u32]) -> Option<Step> {
-            let (id, blocks) = crate::native_upgrade::apply(&self.native_upgrades, kind, params)?;
+            let (id, blocks) = crate::native_upgrade::apply(&self.native_upgrades, kind, params, self.tuned_table(), offsets)?;
             match offsets {
                 None => self.be().step_native(id, bufs, params, blocks),
                 Some(o) => self.be().step_native_sliced(id, bufs, o, params, blocks),
@@ -2444,7 +2469,7 @@ mod native_facade {
         /// of [`Gpu::physical_kernel_names`], for tests and diagnostics to
         /// assert the redirect really fired.
         pub fn native_kernel_for(&self, kind: usize, params: &[u32]) -> Option<&'static str> {
-            crate::native_upgrade::serving(&self.native_upgrades, kind, params).map(|a| a.kernel)
+            crate::native_upgrade::serving(&self.native_upgrades, kind, params, self.tuned_table(), None).map(|a| a.kernel)
         }
 
         /// The pipeline slot a kernel name occupies on this handle, or `None`

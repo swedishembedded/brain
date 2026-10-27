@@ -204,8 +204,15 @@ fn the_native_kernel_is_selected_exactly_for_the_shapes_it_serves() {
         brain_testutil::skip_unavailable("not a CUDA device");
         return;
     }
+    // The slot is a candidate set: below the tensor-core block's first row count only the dp4a GEMV serves (the
+    // exact-decode contract), from there the device's tuned choice among the candidates it can run.
     for m in 1..=NATIVE_ROWS {
-        assert_eq!(gpu.native_kernel_for(K_GEMV, &[m, 1280, 1024]), Some("matmul_i8_gemv"), "m={m}");
+        let got = gpu.native_kernel_for(K_GEMV, &[m, 1280, 1024]).unwrap_or_else(|| panic!("m={m} has no native kernel"));
+        if m < kernels_cuda::I8_GEMV_MMA_MIN_ROWS {
+            assert_eq!(got, "matmul_i8_gemv", "m={m}");
+        } else {
+            assert!(got.starts_with("matmul_i8_"), "m={m}: {got}");
+        }
     }
     assert_eq!(gpu.native_kernel_for(K_GEMV, &[NATIVE_ROWS + 1, 1280, 1024]), None, "past the decode regime keeps the prefill kernels");
     assert_eq!(gpu.native_kernel_for(K_GEMV, &[1, 1284, 1024]), None, "K not a whole number of scale groups");
@@ -282,7 +289,7 @@ fn the_real_27b_projection_shapes_are_byte_identical() {
         return;
     }
     for (k, n) in [(5120u32, 48u32), (5120, 1024), (5120, 6144), (6144, 5120), (5120, 10240), (17408, 5120), (5120, 17408)] {
-        for m in [1u32, 3, 8] {
+        for m in [1u32, 3, 8, 9, 20, 32] {
             let (got, want) = run(&gpu, &Case { m, kg: k / 4, n, lead: [0; 5] });
             assert_native_agrees(&gpu, m, &got, &want, &format!("native int8 GEMV differs at the real shape k={k} n={n} m={m}"));
         }
@@ -448,5 +455,38 @@ fn exact_decode_groups_make_every_batch_row_bit_identical_to_the_same_row_alone(
         // of the buffer still holds the batched step's rows.
         let got = &grouped[..(m * n) as usize];
         assert_eq!(got, want, "exact-decode grouping differs from the rows decoded alone at m={m} step={step}");
+    }
+}
+
+/// Every candidate the slot offers, forced in turn, agrees with the WGSL reference over ragged shapes, every row
+/// count it serves and binding windows off every alignment: the check that lets the autotuner choose among them.
+/// A forced candidate that cannot serve a dispatch (rows outside its range, a window off its alignment) leaves the
+/// default, so each run is a valid launch whichever candidate is named.
+#[test]
+fn every_candidate_of_the_slot_agrees_with_the_wgsl_reference() {
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda(&gpu) || !gpu.caps().numeric.int8_dot {
+        brain_testutil::skip_unavailable("native int8 GEMV needs a CUDA device");
+        return;
+    }
+    let candidates = ["matmul_i8_gemv", "matmul_i8_gemv_wide", "matmul_i8_mma_m16", "matmul_i8_mma_m32"];
+    let mut served = std::collections::BTreeSet::new();
+    for forced in candidates {
+        gpu_core::force_candidate("matmul_i8_gemv", forced);
+        for (kg, n) in [(16u32, 17u32), (72, 9), (328, 33), (1280, 64)] {
+            for m in (1..=NATIVE_ROWS).step_by(3).chain([NATIVE_ROWS]) {
+                for lead in [[0u64; 5], [1, 2, 3, 1, 3], [4, 4, 4, 4, 4]] {
+                    if let Some(name) = gpu.native_kernel_for(K_GEMV, &[m, kg, n]) {
+                        served.insert(name);
+                    }
+                    let (got, want) = run(&gpu, &Case { m, kg, n, lead });
+                    assert_native_agrees(&gpu, m, &got, &want, &format!("forced {forced}: differs at m={m} kg={kg} n={n} lead={lead:?}"));
+                }
+            }
+        }
+    }
+    gpu_core::clear_forced_candidates();
+    for c in candidates {
+        assert!(served.contains(c), "{c} was never the kernel that served a dispatch: {served:?}");
     }
 }
