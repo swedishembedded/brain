@@ -355,12 +355,32 @@ pub struct ServingShape {
     pub kv_pool_rows: u32,
     /// What speculative decoding keeps on the cards.
     pub spec: SpecCost,
+    /// Rows of the largest prefill forward a stage runs: the transient
+    /// activations of one ([`prefill_workspace_bytes`]) are memory the cards
+    /// must keep free beside everything this shape places.
+    pub prefill_rows: u32,
 }
 
 impl ServingShape {
     /// `max_batch` sequences of `cap` tokens, no prompt cache, no speculation.
     pub fn new(cap: u32, tier: TierPolicy, kv: KvTier, max_batch: u32) -> ServingShape {
-        ServingShape { cap, tier, kv, max_batch, prefix_slots: 0, kv_pool_rows: 0, spec: SpecCost::NONE }
+        ServingShape { cap, tier, kv, max_batch, prefix_slots: 0, kv_pool_rows: 0, spec: SpecCost::NONE, prefill_rows: TENSOR_CORE_PREFILL_TOKENS }
+    }
+
+    /// The same shape for a stack whose prefill forward may carry `rows` rows (the
+    /// batched-prefill setting): never fewer than the widest single-sequence round,
+    /// which a stack with tensor cores runs whatever the setting.
+    pub fn with_prefill_rows(&self, rows: u32) -> ServingShape {
+        ServingShape { prefill_rows: rows.max(TENSOR_CORE_PREFILL_TOKENS), ..self.clone() }
+    }
+
+    /// Device bytes every stage must keep free beside what this shape places: the
+    /// activations of a prefill round and of a decode (or verify) step, which run
+    /// at the same time on separate streams. Decode rows are the larger of the
+    /// sequences and the verify rows speculation batches.
+    pub fn stage_workspace(&self, cfg: &Qwen35Config) -> u64 {
+        let rows = self.max_batch.max(self.spec.scratch_rows).max(1);
+        prefill_workspace_bytes(cfg, self.prefill_rows) + decode_scratch_bytes(cfg, rows, self.cap)
     }
 
     /// The same shape at another context.
@@ -457,14 +477,16 @@ pub fn sizing_refusal(cfg: &Qwen35Config, shape: &ServingShape, usable: &[u64]) 
             cfg.kv_dim()
         ));
     }
-    let caps: Vec<(usize, u64)> = usable.iter().copied().enumerate().collect();
+    // Every card also keeps its prefill round's activations free.
+    let workspace = shape.stage_workspace(cfg);
+    let caps: Vec<(usize, u64)> = usable.iter().map(|&u| u.saturating_sub(workspace)).enumerate().collect();
     if model::shard::plan_fewest_devices(&serving_cost(cfg, shape), &caps).is_some() {
         return None;
     }
     // Placement said no: the global planner states the arithmetic per category and finds the
     // smallest KV tier change (the only lever a serving configuration may pull for itself).
     let demands = serving_demands(cfg, shape);
-    let total_usable: u64 = usable.iter().sum();
+    let total_usable: u64 = caps.iter().map(|&(_, c)| c).sum();
     let capacity = model::memplan::Capacity { device_bytes: total_usable, host_bytes: 0 };
     let (report, fits_with) = match model::memplan::plan(&demands, capacity, &model::memplan::Authorized::only(&[model::memplan::Lever::CompactKv])) {
         Ok(r) => (r, true),
@@ -485,14 +507,15 @@ pub fn sizing_refusal(cfg: &Qwen35Config, shape: &ServingShape, usable: &[u64]) 
         None => "lower --max-batch or --ctx, or choose a more compact --kv-cache".to_string(),
     };
     Some(format!(
-        "--max-batch {max_batch} x --ctx {cap} with a {} KV cache needs {:.1} GiB ({:.1} GiB weights + {:.1} GiB KV cache + {:.1} GiB recurrent state for {max_batch} sequences) but the {} budgeted GPU(s) offer {:.1} GiB; {advice}",
+        "--max-batch {max_batch} x --ctx {cap} with a {} KV cache needs {:.1} GiB ({:.1} GiB weights + {:.1} GiB KV cache + {:.1} GiB recurrent state for {max_batch} sequences) but the {} budgeted GPU(s) offer {:.1} GiB after keeping {:.1} GiB free on each for prefill and decode activations; {advice}",
         kv.as_str(),
         gib(weights + kv_bytes + state),
         gib(weights),
         gib(kv_bytes),
         gib(state),
         usable.len(),
-        gib(total_usable)
+        gib(total_usable),
+        gib(workspace)
     ))
 }
 
@@ -517,12 +540,54 @@ fn gpu_capacities(devices: &[(Device, u64)], headroom: u64) -> Vec<(usize, u64)>
     devices.iter().enumerate().filter(|(_, (d, _))| matches!(d, Device::Gpu(_))).map(|(i, &(_, cap))| (i, cap.saturating_sub(headroom))).collect()
 }
 
-/// Device memory per card [`auto_cap`] leaves untouched: the chunked-prefill
-/// scratch a stage allocates on top of its [`layer_cost`] (about a gigabyte at
-/// [`TENSOR_CORE_PREFILL_TOKENS`] rows), which the placement does not charge.
-/// Without it a context sized to the last byte would load and then fail its
-/// first long prompt.
-const AUTO_CAP_HEADROOM_PER_DEVICE: u64 = 1 << 30;
+/// Rows of one prefill round, on a stack whose stages all run it on tensor cores or not.
+pub fn prefill_round_rows_for(tensor_cores: bool) -> u32 {
+    if tensor_cores {
+        TENSOR_CORE_PREFILL_TOKENS
+    } else {
+        MAX_PREFILL_TOKENS
+    }
+}
+
+/// How many layers' worth of intermediate activations a prefill round holds at
+/// once, as a ratio. A round's buffers are returned to the allocator only when
+/// the device has finished with them, so the host, which queues layers ahead,
+/// sees the buffers of several layers live together. Measured on a GH200 at the
+/// real 27B shape (`tests/gguf_resident_real.rs`, 1024 rows): 2.09 layers;
+/// charged as 5/2 so the bound holds with a margin.
+const PREFILL_LIVE_LAYERS: (u64, u64) = (5, 2);
+
+/// Device bytes one stage allocates, on top of its weights and decode state,
+/// while it prefills a round of `rows` rows: the f32 activations of a layer
+/// ([`PREFILL_LIVE_LAYERS`] of them at once). The placement must leave this
+/// free on every card, or the first long prompt dies on an allocation after the
+/// model loaded; it is linear in `rows` and independent of the context.
+///
+/// A layer's intermediates are the residual pair, its mixer's projections
+/// (the larger of the recurrent and the attention mixer) and the three
+/// feed-forward buffers.
+pub fn prefill_workspace_bytes(cfg: &Qwen35Config, rows: u32) -> u64 {
+    let d = cfg.d_model as u64;
+    let recurrent = d + 3 * cfg.linear_conv_dim() as u64 + 3 * cfg.linear_value_dim() as u64 + d;
+    let attention = d + cfg.q_proj_dim() as u64 + 2 * cfg.kv_dim() as u64 + 2 * cfg.q_dim() as u64 + d;
+    let feed_forward = d + 3 * cfg.intermediate_size as u64 + d;
+    let layer_words = 2 * d + recurrent.max(attention) + feed_forward;
+    let (num, den) = PREFILL_LIVE_LAYERS;
+    rows as u64 * layer_words * 4 * num / den
+}
+
+/// Device bytes one decode (or verify) step of `rows` rows allocates at a
+/// context of `cap`: per row the attention's score and probability strips of
+/// two layers in flight (`n_heads * cap` f32 each), which is what grows with the
+/// context, and a fixed share for the step's other activations and the replay
+/// arena it fills on first use. Measured on a GH200 at the real 27B shape
+/// (`tests/gguf_resident_real.rs`, 8 rows, first step): 268 MiB at a context
+/// of 8192 and 540 MiB at 100000; charged with a margin.
+pub fn decode_scratch_bytes(cfg: &Qwen35Config, rows: u32, cap: u32) -> u64 {
+    const FIXED_PER_ROW: u64 = 40 << 20;
+    const STRIPS_IN_FLIGHT: u64 = 4;
+    rows as u64 * (FIXED_PER_ROW + STRIPS_IN_FLIGHT * cfg.n_heads as u64 * cap as u64 * 4)
+}
 
 /// Granularity of [`auto_cap`]'s answer, so the advertised context is a round
 /// number an operator can read in a log line rather than a byte-exact sweep
@@ -531,7 +596,7 @@ const AUTO_CAP_GRANULE: u32 = 1024;
 
 /// The longest per-sequence context `shape` can have on `devices` (its own
 /// `cap` is ignored): the largest cap whose [`serving_cost`] the planner still
-/// places, with [`AUTO_CAP_HEADROOM_PER_DEVICE`] kept free on every card,
+/// places, with the step workspace ([`ServingShape::stage_workspace`]) kept free on every card,
 /// rounded down to [`AUTO_CAP_GRANULE`]. Nothing but memory (and the kernels'
 /// `u32` KV index, [`kv_pool_addressable`]) bounds it - not the checkpoint's
 /// trained context, which a longer cap extends with YaRN.
@@ -539,12 +604,12 @@ const AUTO_CAP_GRANULE: u32 = 1024;
 /// `None` when even a one-token context does not fit, i.e. the weights alone
 /// exceed the cards.
 pub fn auto_cap(cfg: &Qwen35Config, devices: &[(Device, u64)], shape: &ServingShape) -> Option<u32> {
-    let caps = gpu_capacities(devices, AUTO_CAP_HEADROOM_PER_DEVICE);
     let fits = |cap: u32| {
         let at = shape.at(cap);
+        let caps = gpu_capacities(devices, at.stage_workspace(cfg));
         kv_pool_addressable(cfg, cap, at.max_batch + at.prefix_slots) && model::shard::plan_fewest_devices(&serving_cost(cfg, &at), &caps).is_some()
     };
-    if caps.is_empty() || !fits(1) {
+    if gpu_capacities(devices, 0).is_empty() || !fits(1) {
         return None;
     }
     // Feasibility is monotone in cap (cost only grows), so bracket the
@@ -3353,6 +3418,9 @@ impl Qwen35GgufResident {
             }
             cost.head += bank.row_scratch_bytes(self.max_batch.max(MAX_PREFILL_TOKENS.max(TENSOR_CORE_PREFILL_TOKENS)));
         }
+        // The same cards less the prefill round's activations, as `sizing_refusal` held them to.
+        let workspace = shape.stage_workspace(&cfg);
+        let caps: Vec<(usize, u64)> = caps.iter().map(|&(i, c)| (i, c.saturating_sub(workspace))).collect();
         let Some(placements) = model::shard::plan_fewest_devices(&cost, &caps) else {
             return refused("the weights fit the cards but the adapter bank does not: lower --adapter-slots, --adapter-rank-cap or --adapter-targets".to_string());
         };
@@ -3404,7 +3472,7 @@ impl Qwen35GgufResident {
             // Exact decode runs plain steps, so the verify scratch is not
             // charged: the placement must describe what will be allocated.
             spec: if self.exact_decode { SpecCost::NONE } else { self.spec.cost(mtp::checkpoint_has_mtp(mg, cfg), verify) },
-            ..ServingShape::new(self.cap, self.tier.clone(), self.kv_tier, self.max_batch)
+            ..ServingShape::new(self.cap, self.tier.clone(), self.kv_tier, self.max_batch).with_prefill_rows(self.prefill.batch_tokens.try_into().unwrap_or(u32::MAX))
         }
     }
 
@@ -4055,7 +4123,7 @@ mod tests {
     /// The same feasibility test `auto_cap` applies, spelled out from the
     /// planner so the assertions below do not copy its search.
     fn fits_at(cfg: &Qwen35Config, devices: &[(Device, u64)], cap: u32, kv: KvTier) -> bool {
-        let caps: Vec<(usize, u64)> = devices.iter().enumerate().map(|(i, &(_, c))| (i, c.saturating_sub(AUTO_CAP_HEADROOM_PER_DEVICE))).collect();
+        let caps: Vec<(usize, u64)> = devices.iter().enumerate().map(|(i, &(_, c))| (i, c.saturating_sub(ServingShape::new(cap, TierPolicy::uniform(Dtype::I8), kv, 1).stage_workspace(cfg)))).collect();
         kv_pool_addressable(cfg, cap, 1) && model::shard::plan_fewest_devices(&layer_cost(cfg, cap, &TierPolicy::uniform(Dtype::I8), kv, 1), &caps).is_some()
     }
 
@@ -4084,6 +4152,47 @@ mod tests {
         assert!(auto_cap(&cfg, &roomier, &ServingShape::new(1, i8.clone(), KvTier::F32, 1)).unwrap() > f32_cap);
         assert!(auto_cap(&cfg, &pair, &ServingShape::new(1, i8.clone(), KvTier::INT8, 1)).unwrap() > f32_cap);
         assert!(auto_cap(&cfg, &pair, &ServingShape::new(1, i8.clone(), KvTier::F32, 4)).unwrap() < f32_cap, "more concurrent slots share the same leftover");
+    }
+
+    /// The context the cards hold leaves room for the prefill round: a served model
+    /// that fills its card to the last KV row loads, then dies on its first long prompt.
+    #[test]
+    fn auto_cap_leaves_the_prefill_workspace_free() {
+        let cfg = Qwen35Config::qwen38_27b();
+        let i8 = TierPolicy::uniform(Dtype::I8);
+        let card = [(Device::Gpu(0), 96 * GB)];
+        let shape = ServingShape::new(1, i8, KvTier::INT8, 8);
+        let cap = auto_cap(&cfg, &card, &shape).expect("27B INT8 fits a 96 GiB card");
+        let (at, more_at) = (shape.at(cap), shape.at(cap + AUTO_CAP_GRANULE));
+        assert!(prefill_workspace_bytes(&cfg, at.prefill_rows) > 0, "a prefill round allocates activations");
+        let (placed, workspace) = (serving_cost(&cfg, &at).total(), at.stage_workspace(&cfg));
+        assert!(placed + workspace <= 96 * GB, "{placed} bytes placed + {workspace} of step workspace overrun the card");
+        let (more, more_workspace) = (serving_cost(&cfg, &more_at).total(), more_at.stage_workspace(&cfg));
+        assert!(more + more_workspace > 96 * GB, "one granule more still fits beside the workspace: the context stops short of the memory bound");
+    }
+
+    /// An operator-fixed context is held to the same budget as the automatic one.
+    #[test]
+    fn an_explicit_context_that_leaves_no_room_for_the_prefill_round_is_refused() {
+        let cfg = Qwen35Config::qwen38_27b();
+        let shape = ServingShape::new(1, TierPolicy::uniform(Dtype::I8), KvTier::INT8, 8);
+        let shape = shape.at(65_536);
+        let workspace = shape.stage_workspace(&cfg);
+        // Exactly the bytes the weights and state need: it places, with nothing left for a round.
+        let tight = serving_cost(&cfg, &shape).total();
+        assert_eq!(sizing_refusal(&cfg, &shape, &[tight + workspace]), None, "with the workspace beside it the configuration fits");
+        let why = sizing_refusal(&cfg, &shape, &[tight]).expect("no room for the prefill round");
+        assert!(why.contains("prefill"), "the refusal names the prefill workspace: {why}");
+    }
+
+    /// The workspace follows the rows a round carries, and the batched-prefill setting widens them.
+    #[test]
+    fn the_prefill_workspace_grows_with_the_rows_of_a_round() {
+        let cfg = Qwen35Config::qwen38_27b();
+        assert_eq!(prefill_workspace_bytes(&cfg, 2048), 2 * prefill_workspace_bytes(&cfg, 1024));
+        let i8 = TierPolicy::uniform(Dtype::I8);
+        let base = ServingShape::new(8192, i8, KvTier::INT8, 8);
+        assert!(base.with_prefill_rows(4096).stage_workspace(&cfg) > base.stage_workspace(&cfg));
     }
 
     /// Weights that do not fit the cards at all leave no context to offer.

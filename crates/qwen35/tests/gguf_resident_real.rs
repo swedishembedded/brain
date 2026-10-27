@@ -34,7 +34,7 @@ use model::kv_tier::KvTier;
 use model::ops::TierPolicy;
 use model::shard::Shard;
 use qwen35::config::{LayerType, Qwen35Config};
-use qwen35::int8_gguf_resident::{endpoint_names, layer_cost, resident_config, shard_fetch_plan, shard_source, Qwen35GgufResident};
+use qwen35::int8_gguf_resident::{decode_scratch_bytes, endpoint_names, layer_cost, prefill_round_rows_for, prefill_workspace_bytes, resident_config, shard_fetch_plan, shard_source, Qwen35GgufResident};
 use residency::multi::MultiDeviceResidentModel;
 use residency::model::Instance;
 use residency::{Device, ResidentModel};
@@ -1157,5 +1157,65 @@ fn the_checkpoint_is_held_as_it_is_stored() {
         assert!(held_bytes * 3 < i8_bytes * 2, "a 4-bit release is held near 4 bits: {:.2} of {:.2} GiB", gib(held_bytes), gib(i8_bytes));
     } else {
         assert_eq!(held_bytes, i8_bytes, "every other release is held at int8");
+    }
+}
+
+/// Contexts the gate loads the checkpoint at: the decode step's scratch grows with the context.
+const CAPS: [u32; 2] = [8192, 100_000];
+
+/// The planner's prefill and decode workspace against what a real prefill round and decode step allocate on a
+/// card: the placement keeps this free, so a figure under the measurement lets a served model run out of device
+/// memory on a long prompt after it has loaded. Needs one CUDA card (`--device gpuN --backend cuda` through
+/// `BRAIN_DEVICE`/`BRAIN_BACKEND`) beside the checkpoint.
+#[test]
+fn the_planned_workspace_covers_what_a_real_step_allocates() {
+    let Some(path) = gguf_path() else { return };
+    let devices = real_devices();
+    if devices.is_empty() {
+        brain_testutil::skip_unavailable("no GPU with queryable VRAM");
+        return;
+    }
+    let probe = gpu_core::Gpu::new(&[]);
+    if probe.memory_usage().is_none() {
+        brain_testutil::skip_unavailable("this backend does not account for its allocations");
+        return;
+    }
+    let mg = checkpoint::gguf::MmapGguf::open(&path).expect("open the checkpoint");
+    let cfg = resident_config(&mg, 1).expect("a servable checkpoint");
+    for cap in CAPS {
+        covers_a_round_and_a_step_at(&path, &devices, &cfg, &probe, cap);
+    }
+}
+
+/// Load the checkpoint at `cap` and compare the planner's figures with the peak of a long prefill and of decode steps.
+fn covers_a_round_and_a_step_at(path: &str, devices: &[(Device, u64)], cfg: &Qwen35Config, probe: &gpu_core::Gpu, cap: u32) {
+    let r = Qwen35GgufResident::new(path.to_string(), devices.to_vec(), cap, TierPolicy::uniform(Dtype::I8)).with_kv_tier(KvTier::INT8).with_max_batch(8);
+    let key = r.instance_key("generate", &capability::Invocation::new());
+    let placed: Vec<Device> = r.estimate_multi(&key).devices().collect();
+    let inst = r.activate_owned(&placed).expect("activate the real checkpoint");
+
+    // Several full rounds, so the largest round runs after earlier ones have filled the pool.
+    let prompt: Vec<u32> = (0..5000u32).map(|i| 1000 + i % 5000).collect();
+    inst.prefill_timed(&prompt[..64]).expect("warm");
+    let live = probe.memory_usage().unwrap().live;
+    probe.reset_memory_peak();
+    inst.prefill_timed(&prompt).expect("prefill");
+    let transient = probe.memory_usage().unwrap().peak_live - live;
+    let rows = prefill_round_rows_for(true);
+    let planned = prefill_workspace_bytes(cfg, rows);
+    println!("cap {cap}: prefill rows {rows}: measured {} MiB, planned {} MiB", transient >> 20, planned >> 20);
+    assert!(planned >= transient, "the planner charges {planned} bytes of prefill workspace but a real round allocated {transient}");
+
+    // Widest first: the first step also fills the replay arena for its row count.
+    for rows in [8u32, 4, 2, 1] {
+        probe.reset_memory_peak();
+        let toks = vec![5u32; rows as usize];
+        let pos: Vec<u32> = (0..rows).map(|i| cap - 100 - i * 10).collect();
+        let live = probe.memory_usage().unwrap().live;
+        inst.decode_batch_at(&toks, &pos).expect("decode");
+        let measured = probe.memory_usage().unwrap().peak_live - live;
+        let planned = decode_scratch_bytes(cfg, rows, cap);
+        println!("cap {cap}: decode {rows} rows: measured {} MiB, planned {} MiB", measured >> 20, planned >> 20);
+        assert!(planned >= measured, "the planner charges {planned} bytes of decode scratch at {rows} rows but a step allocated {measured}");
     }
 }
