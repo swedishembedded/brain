@@ -129,12 +129,13 @@ T = 48
 
 
 class AnchorMemory(nn.Module):
-    """The memory module's parameters under the checkpoint's leaf names."""
+    """The memory module's parameters under the checkpoint's leaf names.
+    `memory` is the checkpoint's `independent_memory` block."""
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, memory):
         super().__init__()
         d, h, g, hd = cfg.hidden_size, cfg.num_attention_heads, cfg.num_key_value_heads, cfg.head_dim
-        r, i = MEMORY["admission_rank"], MEMORY["writer_intermediate_size"]
+        r, i = memory["admission_rank"], memory["writer_intermediate_size"]
         self.heads, self.groups, self.dim = h, g, hd
         self.input_norm = Qwen3_5RMSNorm(d, eps=cfg.rms_norm_eps)
         self.q_norm = Qwen3_5RMSNorm(hd, eps=cfg.rms_norm_eps)
@@ -192,7 +193,7 @@ def bank_by_replay(scores, chunk, capacity):
     return seen
 
 
-def memory_forward(mem, h, cos, sin, chunk, taps, prefix):
+def memory_forward(mem, h, cos, sin, chunk, capacity, taps, prefix):
     t = h.shape[0]
     hh, g, d = mem.heads, mem.groups, mem.dim
     u = mem.input_norm(h)
@@ -204,21 +205,25 @@ def memory_forward(mem, h, cos, sin, chunk, taps, prefix):
     key = partial_rope(mem.k_norm(mem.k_proj(z).view(t, g, d)), cos, sin)
     value = mem.v_proj(z).view(t, g, d)
 
-    refs = bank_by_definition(scores, chunk, MEMORY["capacity"])
-    replay = bank_by_replay(scores, chunk, MEMORY["capacity"])
-    by_token = refs[torch.arange(t) // chunk]
-    assert torch.equal(by_token, replay), f"{prefix}: closed-form bank and decode replay disagree"
+    refs = bank_by_definition(scores, chunk, capacity)
+    replay = bank_by_replay(scores, chunk, capacity)
+    assert torch.equal(refs[torch.arange(t) // chunk], replay), f"{prefix}: closed-form bank and decode replay disagree"
 
+    # Every token of block b reads the same bank, so read a block at a time.
     per_group = hh // g
     read = torch.zeros(t, hh, d)
-    for i in range(t):
-        for head in range(hh):
-            grp = head // per_group
-            r = by_token[i, grp]
+    for b in range(refs.shape[0]):
+        rows = slice(b * chunk, min(t, (b + 1) * chunk))
+        for grp in range(g):
+            r = refs[b, grp]
             r = r[r >= 0]
-            logits = torch.cat((key[r, grp] @ query[i, head] / math.sqrt(d), torch.zeros(1)))
-            p = torch.softmax(logits, 0)[:-1]
-            read[i, head] = p @ value[r, grp] if len(r) else torch.zeros(d)
+            if len(r) == 0:
+                continue
+            heads = slice(grp * per_group, (grp + 1) * per_group)
+            logits = torch.einsum("chd,kd->chk", query[rows, heads], key[r, grp]) / math.sqrt(d)
+            logits = torch.cat((logits, torch.zeros(*logits.shape[:2], 1)), -1)
+            p = torch.softmax(logits, -1)[..., :-1]
+            read[rows, heads] = torch.einsum("chk,kd->chd", p, value[r, grp])
     out = mem.o_proj((read * gate[..., None]).reshape(t, hh * d))
     for name, v in (("scores", scores), ("gate", gate), ("query", query), ("key", key), ("value", value), ("read", read), ("out", out), ("refs", refs)):
         taps[f"{prefix}.{name}"] = v
@@ -247,7 +252,7 @@ def build(seed, ties):
     torch.manual_seed(seed)
     gen = torch.Generator().manual_seed(seed + 1)
     model = Qwen3_5TextModel(cfg).eval()
-    memories = {i: AnchorMemory(cfg) for i, ty in enumerate(cfg.layer_types) if ty == "full_attention"}
+    memories = {i: AnchorMemory(cfg, MEMORY) for i, ty in enumerate(cfg.layer_types) if ty == "full_attention"}
     with torch.no_grad():
         # Every parameter random: the checkpoint's zero inits (RMSNorm
         # weights, read gate, write_down, admission_up) would make whole
@@ -265,12 +270,13 @@ def build(seed, ties):
     return cfg, model, memories, tokens
 
 
-def forward(cfg, model, memories, tokens):
+def forward(cfg, model, memories, tokens, window=WINDOW, memory=MEMORY):
+    """The whole decoder over `tokens`; returns every tap."""
     taps = {"tokens": tokens.to(torch.int32)}
-    chunk = min(MEMORY["max_commit_chunk"], WINDOW)
+    chunk = min(memory["max_commit_chunk"], window)
     h = model.embed_tokens(tokens)
     taps["embed"] = h
-    position_ids = torch.arange(T).view(1, 1, -1).expand(3, 1, -1)
+    position_ids = torch.arange(tokens.shape[0]).view(1, 1, -1).expand(3, 1, -1)
     cos, sin = model.rotary_emb(h[None], position_ids)
     cos, sin = cos[0], sin[0]
     taps["cos"], taps["sin"] = cos, sin
@@ -281,9 +287,9 @@ def forward(cfg, model, memories, tokens):
                 h = h[0]
         else:
             residual = h
-            mixed = swa_forward(layer.self_attn, layer.input_layernorm(h), cos, sin, WINDOW)
+            mixed = swa_forward(layer.self_attn, layer.input_layernorm(h), cos, sin, window)
             taps[f"layer{i}.swa.out"] = mixed
-            mixed = mixed + memory_forward(memories[i], residual, cos, sin, chunk, taps, f"layer{i}.mem")
+            mixed = mixed + memory_forward(memories[i], residual, cos, sin, chunk, memory["capacity"], taps, f"layer{i}.mem")
             h = residual + mixed
             h = h + layer.mlp(layer.post_attention_layernorm(h))
         taps[f"layer{i}.out"] = h
