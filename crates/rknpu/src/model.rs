@@ -21,7 +21,7 @@ use crate::graph::TensorId;
 use crate::job::Job;
 use crate::layout::LANES;
 use crate::plan::{Placement, Plan, Step};
-use crate::Result;
+use crate::{Error, Result};
 
 /// Where one run's time went.
 #[derive(Clone, Copy, Debug, Default)]
@@ -59,34 +59,33 @@ impl Model {
         self.plan.placement(self.plan.input())
     }
 
-    /// Write the input with `fill`, which gets the data region and the
-    /// input's placement (native16; see [`crate::layout`]).
-    pub fn write_input(&mut self, fill: impl FnOnce(&mut [u8], Placement)) {
+    /// Run once on an RGB8 image (HWC, the input's height and width),
+    /// quantized with the input's parameters.
+    pub fn run_rgb8(&mut self, rgb: &[u8]) -> Result<Timing> {
+        let p = self.input();
+        if p.shape.c != 3 || rgb.len() != p.shape.h * p.shape.w * 3 {
+            return Err(Error::Unsupported(format!("the model input is {:?}; got {} RGB bytes", p.shape, rgb.len())));
+        }
+        let lut: Vec<u8> = (0..=255u8).map(|v| p.q.quantize(f32::from(v) / 255.0) as u8).collect();
+        self.run_with(|data, p| {
+            for (pixel, px) in rgb.as_chunks::<3>().0.iter().enumerate() {
+                let atom = &mut data[p.offset + pixel * LANES..][..3];
+                for (d, &v) in atom.iter_mut().zip(px) {
+                    *d = lut[usize::from(v)];
+                }
+            }
+        })
+    }
+
+    /// Run once, with `fill` writing the input into the data region at its
+    /// placement (native16; see [`crate::layout`]). The input is taken per run
+    /// because its bytes are reused by later tensors once nothing reads it.
+    pub fn run_with(&mut self, fill: impl FnOnce(&mut [u8], Placement)) -> Result<Timing> {
+        let start = Instant::now();
         let p = self.input();
         fill(self.job.data_mut(), p);
-    }
-
-    /// Write an RGB8 image (HWC, the input's shape) as the input, quantized
-    /// with the input's parameters.
-    pub fn write_input_rgb8(&mut self, rgb: &[u8]) {
-        let p = self.input();
-        assert_eq!(rgb.len(), p.shape.h * p.shape.w * 3, "rgb8 input must be {}x{}x3", p.shape.h, p.shape.w);
-        assert_eq!(p.shape.c, 3, "the model input has {} channels, not 3", p.shape.c);
-        let lut: Vec<u8> = (0..=255u8).map(|v| p.q.quantize(f32::from(v) / 255.0) as u8).collect();
-        let data = &mut self.job.data_mut()[p.offset..];
-        for (pixel, px) in rgb.as_chunks::<3>().0.iter().enumerate() {
-            let atom = &mut data[pixel * LANES..pixel * LANES + 3];
-            for (d, &v) in atom.iter_mut().zip(px) {
-                *d = lut[usize::from(v)];
-            }
-        }
-    }
-
-    /// Run the whole plan once.
-    pub fn run(&mut self) -> Result<Timing> {
-        let start = Instant::now();
         let mut timing = Timing::default();
-        self.job.flush(self.input().range())?;
+        self.job.flush(p.range())?;
         for step in self.plan.steps() {
             let t = Instant::now();
             match step {

@@ -154,13 +154,13 @@ fn graph_case(rng: &mut Rng) -> bool {
 
     let device = Device::open().unwrap();
     let mut model = Model::load(device, plan).unwrap();
-    model.write_input_rgb8(&image);
-    let input = model.input();
-    simulated[input.range()].copy_from_slice(&model.data()[input.range()]);
     let mut timings = Vec::new();
     for _ in 0..5 {
-        timings.push(model.run().unwrap());
+        timings.push(model.run_rgb8(&image).unwrap());
     }
+    let input = model.input();
+    let codes: Vec<i8> = image.iter().map(|&p| input.q.quantize(f32::from(p) / 255.0)).collect();
+    input.shape.pack(&codes, &mut simulated[input.offset..]);
     model.plan().simulate(&mut simulated);
     let (mut differ, mut total) = (0, 0);
     for &o in model.plan().outputs() {

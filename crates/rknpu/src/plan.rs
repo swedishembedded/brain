@@ -15,9 +15,10 @@
 //!   pooling, upsampling) force their inputs and output onto one shared set,
 //!   so they need no requantization.
 //! - **Memory.** One data region holds every tensor (native16), then the
-//!   weights. A concatenation is free: its inputs are written straight into
-//!   adjacent planes of its output, which needs every input but the last to
-//!   have a multiple of 16 channels.
+//!   weights. Tensors whose lifetimes do not overlap share bytes (first fit,
+//!   largest first). A concatenation is free: its inputs are written straight
+//!   into adjacent planes of its output, which needs every input but the last
+//!   to have a multiple of 16 channels.
 //! - **Schedule.** Consecutive convolutions form one NPU segment (one linked
 //!   submission). Add, max pool and upsample run on the CPU between segments,
 //!   in place on the native16 buffers, with explicit cache maintenance.
@@ -367,13 +368,55 @@ fn layout(graph: &Graph, q: &[QParams]) -> Result<(Vec<Placement>, usize)> {
             }
         }
     }
-    let mut offset = vec![usize::MAX; n];
-    let mut cursor = 0usize;
-    for t in 0..n {
-        if parent[t].is_none() {
-            offset[t] = cursor;
-            cursor += graph.shape(t).bytes().next_multiple_of(64);
+    // Storage roots (tensors not stored inside a concat) and the op interval
+    // each must stay intact for: from the first write of any tensor stored in
+    // it to the last read of any of them. The graph input is written before
+    // op 0; outputs are read after the last op.
+    let root = |mut t: TensorId| {
+        while let Some((p, _)) = parent[t] {
+            t = p;
         }
+        t
+    };
+    let after_last = graph.ops().len();
+    let mut live: Vec<Option<(usize, usize)>> = vec![None; n];
+    let mut touch = |t: TensorId, at: usize| {
+        let r = root(t);
+        live[r] = Some(live[r].map_or((at, at), |(a, b)| (a.min(at), b.max(at))));
+    };
+    touch(graph.input(), 0);
+    for (i, op) in graph.ops().iter().enumerate() {
+        touch(op.output(), i);
+        for t in op.inputs() {
+            touch(t, i);
+        }
+    }
+    for &t in graph.outputs() {
+        touch(t, after_last);
+    }
+    // First fit, largest first: a root may share bytes with any root whose
+    // interval does not intersect its own (intervals are inclusive, so an op's
+    // inputs never share with its output).
+    let mut roots: Vec<TensorId> = (0..n).filter(|&t| parent[t].is_none() && live[t].is_some()).collect();
+    roots.sort_by_key(|&t| std::cmp::Reverse(graph.shape(t).bytes()));
+    let mut offset = vec![usize::MAX; n];
+    let mut placed: Vec<(usize, usize, (usize, usize))> = Vec::new();
+    let mut cursor = 0usize;
+    for t in roots {
+        let size = graph.shape(t).bytes().next_multiple_of(64);
+        let (a, b) = live[t].expect("filtered");
+        let mut busy: Vec<(usize, usize)> = placed.iter().filter(|(_, _, (c, d))| a <= *d && *c <= b).map(|&(o, s, _)| (o, o + s)).collect();
+        busy.sort_unstable();
+        let mut at = 0;
+        for (lo, hi) in busy {
+            if at + size <= lo {
+                break;
+            }
+            at = at.max(hi);
+        }
+        offset[t] = at;
+        placed.push((at, size, (a, b)));
+        cursor = cursor.max(at + size);
     }
     // Resolve nested concats outermost first (a parent always has a higher id
     // than its inputs, since ops are in execution order).
