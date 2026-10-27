@@ -98,18 +98,27 @@ impl Default for TrainOpts {
 /// bits, so a narrower request for the base gives them bf16. MTP shares the
 /// tables with its own fp32 path and keeps them fp32.
 pub(crate) fn table_tier(tier: &TierPolicy, cfg: &Qwen35Config, train: bool, name: &str) -> Option<Dtype> {
+    if cfg.mtp || !is_table(cfg, name) {
+        return None;
+    }
     let narrow_lora_base = train && cfg.lora.is_some() && tier.quantizes_anything();
-    // An inference build at the bf16 tier holds the tables in bf16 too: a decode step reads the head once, and
-    // at fp32 that is the largest single read of the step.
-    let bf16_inference = !train && tier.want(name) == Dtype::BF16;
-    ((narrow_lora_base || bf16_inference) && !cfg.mtp && is_table(cfg, name)).then_some(Dtype::BF16)
+    // An inference build below fp32 holds the tables in 16 bits too (never narrower: the head's logits decide the
+    // sampled token): a decode step reads the head once, and at fp32 that is the largest single read of the step.
+    let inference_16bit = !train && tier.want(name) != Dtype::F32;
+    match (narrow_lora_base, inference_16bit) {
+        (true, _) => Some(Dtype::BF16),
+        (_, true) => Some(if tier.want(name) == Dtype::F16 { Dtype::F16 } else { Dtype::BF16 }),
+        _ => None,
+    }
 }
 
-/// Whether the anchor memory's read-side linear `name` (`blocks.{l}.memory.<leaf>.weight`, not the admission scorer)
-/// is held in bf16 on an inference build at the bf16 tier. The scorer, the norms and the read gate stay exact fp32.
-pub(crate) fn memory_linear_bf16(tier: &TierPolicy, cfg: &Qwen35Config, train: bool, name: &str) -> bool {
-    let Some((_, leaf)) = name.split_once(".memory.") else { return false };
-    !train && !cfg.mtp && tier.want(name) == Dtype::BF16 && cfg.memory_linears().iter().any(|(l, _, _)| *l == leaf)
+/// The tier the anchor memory's read-side linear `name` (`blocks.{l}.memory.<leaf>.weight`, not the admission
+/// scorer) is held at on an inference build: the weight tier the policy names for it, `None` at fp32 (the parameter
+/// store holds it). The scorer, the norms and the read gate stay exact fp32.
+pub(crate) fn memory_linear_tier(tier: &TierPolicy, cfg: &Qwen35Config, train: bool, name: &str) -> Option<Dtype> {
+    let (_, leaf) = name.split_once(".memory.")?;
+    let want = tier.want(name);
+    (!train && !cfg.mtp && want != Dtype::F32 && cfg.memory_linears().iter().any(|(l, _, _)| *l == leaf)).then_some(want)
 }
 
 /// Whether `name` is one of the `[vocab, d_model]` tables: the embedding, or an untied LM head.

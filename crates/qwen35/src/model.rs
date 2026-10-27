@@ -78,7 +78,7 @@ use crate::decode_state::DecodeState;
 mod objectives;
 #[path = "spec_verify.rs"]
 pub(crate) mod verify;
-use crate::train_base::{is_table, memory_linear_bf16, reads_float_acts, table_tier, write_weight_host};
+use crate::train_base::{is_table, memory_linear_tier, reads_float_acts, table_tier, write_weight_host};
 
 // ---- kernel pipeline (order fixes the indices below) -----------------------
 // Forward + backward subset of qwen35moe::model::STATIC_PIPELINES (no MoE -
@@ -1770,7 +1770,7 @@ impl Qwen35 {
         // adapters are never quantizable leaves, so they stay in the store.
         let roles: Vec<(String, usize, Role)> = shard_param_list(&cfg, &shard)
             .into_iter()
-            .filter(|(n, _)| !(is_quantizable_linear(n) && (tier.want(n) != Dtype::F32 || resident_plan.is_some())) && table_tier(tier, &cfg, train, n).is_none() && !memory_linear_bf16(tier, &cfg, train, n) && !(resident_plan.is_some() && is_table(&cfg, n)))
+            .filter(|(n, _)| !(is_quantizable_linear(n) && (tier.want(n) != Dtype::F32 || resident_plan.is_some())) && table_tier(tier, &cfg, train, n).is_none() && memory_linear_tier(tier, &cfg, train, n).is_none() && !(resident_plan.is_some() && is_table(&cfg, n)))
             .map(|(n, c)| {
                 // The admission scorer is outside the loss's gradient (a discrete sort reads it): never optimised.
                 let role = if !train || n.contains(".memory.admission_") {
@@ -1869,8 +1869,8 @@ impl Qwen35 {
         for (l, _) in cfg.layer_types().iter().enumerate().filter(|(l, _)| shard.owns(*l) && cfg.layer_has_memory(*l)) {
             for (leaf, n, k) in cfg.memory_linears() {
                 let name = format!("blocks.{l}.memory.{leaf}");
-                if memory_linear_bf16(tier, &cfg, train, &name) {
-                    upload(name, n as u32, k as u32, Dtype::BF16);
+                if let Some(want) = memory_linear_tier(tier, &cfg, train, &name) {
+                    upload(name, n as u32, k as u32, want);
                 }
             }
         }

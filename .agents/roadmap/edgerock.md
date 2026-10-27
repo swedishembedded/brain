@@ -180,6 +180,31 @@ reference exactly in both variants on both backends; flipping the tie rule in
   kernel f32 state); windowed prefill attention on CUDA (prefill still runs the materialised path); the
   decode tape/graph for windowed configs; the batched anchor read and the GDN pooled kernel are at about 1 TB/s
   and are the next targets by share.
+- [x] M6b: precision matrix, one NVIDIA GH200 (GPU1), real weights, the bf16 checkpoint quantized on load group-wise through
+  `TierPolicy` (`edgerock_decode_profile --weights <tier>`; the tables follow the tier at 16 bits, the memory's
+  read-side projections follow the tier, the scorer, norms and read gate stay exact fp32). Step times are decode
+  steps at position 4096 with full ring and bank, fp32 state (194.5 MiB per slot), greedy.
+  <!-- perf-number: measured with edgerock_decode_profile on the GH200, 2026-10-27; reproduce with that tool and `precision_matrix_against_the_reference_forward` -->
+  | tier | weights+tables GiB | b1 tok/s | b64 agg tok/s | b256 agg tok/s | layer cos (worst) | logits cos | logits rel_l2 | greedy | bank set overlap |
+  |---|---|---|---|---|---|---|---|---|---|
+  | f32 | 17.29 | 59 | 1360 | 1732 | 0.999994 | 0.9999999 | 4.8e-4 | same | 99.99% |
+  | bf16 | 8.78 | 126 | 2716 | 3646 | 0.99917 | 0.999993 | 3.6e-3 | same | 99.94% |
+  | f16 | 8.78 | 41 | 163 | 533 | 1.000000 | 1.000000 | 3.3e-6 | same | 100% |
+  | f8e4m3 | 5.11 | 112 | 2144 | 3328 | 0.99501 | 0.99889 | 4.9e-2 | same | 99.67% |
+  | i8 (q8) | 5.57 | 145 | 2336 | 3165 | 0.99157 | 0.99963 | 2.7e-2 | same | 99.76% |
+  | q4 | 3.74 | 159 | 463 | 1270 | 0.95162 | 0.98533 | 1.7e-1 | same | 98.95% |
+  | nf4 | 3.74 | 69 | 2166 | 3332 | 0.95794 | 0.98632 | 1.7e-1 | same | 99.04% |
+  | f4e2m1 (fp4) | - | - | - | - | cannot run: `Weight::upload: F4E2M1 weights are not implemented yet` | | | | |
+  Gaps, not fixed here: (1) fp4 E2M1 has no weight upload (a generic gap in `model::ops`; `matmul_nvfp4_gemv`
+  exists for pre-packed NVFP4 checkpoints only). (2) f16 has no fast batched GEMM at this shape: b1 is 3x slower
+  than bf16 and b64 17x slower. (3) q4 has a fast GEMV but no batched tensor-core GEMM: b64 is 6x slower than
+  bf16. (4) nf4 has no fast GEMV: b1 is 2x slower than q4 of the same size, while its batched path is on par with
+  bf16. (5) Every tier is bounded at large batch by the fp32 per-sequence state (about 1 TB/s of HBM through the
+  attention and recurrence kernels), so b256 does not separate the tiers below bf16. A serve-level option for the
+  weight tier of this model is not wired (`Qwen35Sizing` has no tier): the per-tier numbers are from the profile
+  tool at the engine, not through the API. KV and state tiers: ring KV bf16/fp8/int8 exists in `KvTier` for the
+  fused decode, but the ring prefill path is f32-only (`gqa_mixer_ring_chunk_fwd` asserts it); the bank and the
+  recurrent state have no storage tiers (kernels are f32). Not done.
 - [x] M5 (forward part): the released weights against the independent reference
   forward (`tools/goldens/edgerock_dump_real_reference.py`, fp32 CPU torch, a
   1400-token prompt that slides the window and commits five blocks, then asks about

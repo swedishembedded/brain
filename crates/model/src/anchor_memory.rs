@@ -481,7 +481,7 @@ pub fn anchor_read_steps_at(
     // kernels the softmax and the apply are one kernel and `probs` is not written.
     if at.slots.is_some() && g.caps().workgroup_reductions && s.n_heads / s.n_kv_heads <= 8 {
         let tiles = u64::from(s.head_dim.div_ceil(32));
-        let grouped = s.head_dim % 4 == 0 && s.n_heads / s.n_kv_heads <= 8;
+        let grouped = s.head_dim.is_multiple_of(4) && s.n_heads / s.n_kv_heads <= 8;
         let scores = if grouped {
             g.step(ids.read_scores_group, &[query, key, refs, logits, slots], &p, threads("anchor_read_scores_group", u64::from(s.rows()) * u64::from(s.n_kv_heads) * u64::from(s.capacity + 1)))
         } else {

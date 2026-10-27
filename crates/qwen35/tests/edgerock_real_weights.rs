@@ -110,3 +110,78 @@ fn released_weights_match_the_reference_forward() {
         }
     }
 }
+
+/// The precision matrix: the released weights quantized on load to each weight tier the generic machinery offers
+/// (the checkpoint is bf16; the admission scorer, the norms and the read gate stay exact fp32, the memory's
+/// read-side projections and the embedding follow the tier at 16 bits or the tier itself), against the same
+/// reference forward. Prints, per tier, the worst layer cosine, the tail-logit cosine and relative L2, whether the
+/// greedy answer after the question is the reference's, and the worst per-(block, group) bank set overlap. A
+/// measurement, not a gate: what a tier costs in fidelity is the finding. A tier the kernels cannot run is
+/// reported with the panic message, not skipped.
+#[test]
+#[ignore = "slow: loads the released checkpoint once per tier"]
+fn precision_matrix_against_the_reference_forward() {
+    let Some(dir) = brain_testutil::model_dir("rockmatrix-ai/EdgeRock").filter(|d| Path::new(d).join("config.json").exists()) else {
+        brain_testutil::skip("rockmatrix-ai/EdgeRock is not in the model store - brain pull rockmatrix-ai/EdgeRock");
+        return;
+    };
+    let golden_path = brain_testutil::testdata("golden/edgerock/real/edgerock_real.safetensors");
+    if !Path::new(&golden_path).exists() {
+        brain_testutil::skip(&format!("fixture {golden_path} absent - run tools/goldens/edgerock_dump_real_reference.py"));
+        return;
+    }
+    let golden: HashMap<String, Vec<f32>> = checkpoint::safetensors::read(&golden_path).expect("read golden").into_iter().map(|t| (t.name, t.data)).collect();
+    let tokens: Vec<u32> = golden["tokens"].iter().map(|&v| v.round() as u32).collect();
+    let rows: Vec<usize> = golden["rows"].iter().map(|&v| v.round() as usize).collect();
+    let t = tokens.len() as u32;
+    let dir = Path::new(&dir);
+    let mut cfg = qwen35::fp8_source::hf_config(dir).expect("config.json");
+    cfg.block_size = t;
+    let (d, vocab) = (cfg.d_model as usize, cfg.vocab as usize);
+    let (capacity, _groups) = (cfg.anchor_memory.expect("EdgeRock has an anchor memory").capacity as usize, cfg.n_kv_heads as usize);
+    println!("{:<8} {:>14} {:>14} {:>10} {:>8} {:>14}", "tier", "worst layer cos", "logits cos", "logits rel_l2", "greedy", "bank overlap");
+    for name in ["f32", "bf16", "f16", "i8", "q4", "nf4", "f8e4m3", "f4e2m1"] {
+        let tier = TierPolicy::parse(name).expect("a tier name");
+        let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let src = qwen35::fp8_source::open_dir(dir, &cfg, 128).expect("every tensor is covered");
+            let m = Qwen35::new_on_dt(Gpu::new(pipelines()), cfg.clone(), 1, t, &src, &tier);
+            m.enable_memory_taps();
+            let logits = m.logits_all(&tokens);
+            let taps: HashMap<String, Vec<f32>> = m.take_memory_taps().into_iter().collect();
+            let pick = |all: &[f32]| rows.iter().flat_map(|&r| all[r * d..(r + 1) * d].iter().copied()).collect::<Vec<f32>>();
+            let mut table = Table::new(0.0, f64::MAX);
+            for l in 0..cfg.n_layers as usize {
+                table.check(&format!("layer{l}.out"), &pick(&m.debug_res(l + 1)), &golden[&format!("layer{l}.out")]);
+            }
+            let tail = &logits[(t as usize - 8) * vocab..];
+            table.check("logits_tail", tail, &golden["logits_tail"]);
+            let worst_layer = table.rows.iter().filter(|r| r.0.starts_with("layer")).map(|r| r.1).fold(1.0, f64::min);
+            let (cos, rel) = table.rows.iter().find(|r| r.0 == "logits_tail").map(|r| (r.1, r.3)).expect("compared");
+            let last = &tail[7 * vocab..];
+            let greedy = (0..vocab).max_by(|&a, &b| last[a].total_cmp(&last[b])).unwrap();
+            let want = golden["logits_tail"][7 * vocab..].iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+            let mut overlap = 1.0f64;
+            for l in (0..cfg.n_layers as usize).filter(|&l| cfg.layer_has_memory(l)) {
+                let key = format!("layer{l}.mem.refs");
+                let (mut sum, mut cells) = (0.0, 0usize);
+                for (a, b) in taps[&key].chunks(capacity).zip(golden[&key].chunks(capacity)) {
+                    let set = |row: &[f32]| row.iter().filter(|&&r| r != 0.0).map(|&r| r as u32).collect::<std::collections::HashSet<u32>>();
+                    let (sa, sb) = (set(a), set(b));
+                    if sa.len().max(sb.len()) > 0 {
+                        sum += sa.intersection(&sb).count() as f64 / sa.len().max(sb.len()) as f64;
+                        cells += 1;
+                    }
+                }
+                overlap = overlap.min(if cells == 0 { 1.0 } else { sum / cells as f64 });
+            }
+            (worst_layer, cos, rel, greedy == want, overlap)
+        }));
+        match ran {
+            Ok((layer, cos, rel, greedy, overlap)) => println!("{name:<8} {layer:>14.8} {cos:>14.8} {rel:>10.3e} {:>8} {:>13.2}%", if greedy { "same" } else { "DIFFERS" }, overlap * 100.0),
+            Err(p) => {
+                let why = p.downcast_ref::<String>().cloned().or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default();
+                println!("{name:<8} cannot run: {}", why.lines().next().unwrap_or(""));
+            }
+        }
+    }
+}

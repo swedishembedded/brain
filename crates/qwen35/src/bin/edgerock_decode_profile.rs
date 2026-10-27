@@ -31,7 +31,10 @@ fn main() {
         eprintln!("usage: edgerock_decode_profile (<model dir> | synth[:layers]) [--batch N] [--position P] [--reps R] [--device gpu1]");
         std::process::exit(2);
     };
-    let tier = model::ops::TierPolicy::uniform(gpu_core::select::Dtype::BF16);
+    // `--weights` takes the generic tier grammar (`bf16`, `f16`, `f32`, `i8`, `q4`, `nf4`, `f8e4m3`, `f4e2m1`, with
+    // `pattern=tier` rules); the checkpoint's bf16 tensors are quantized group-wise on load.
+    let tier = model::ops::TierPolicy::parse(flag("--weights").as_deref().unwrap_or("bf16")).unwrap_or_else(|e| panic!("{e}"));
+    println!("weight tier: {}", tier.summary());
     let (cfg, source): (Qwen35Config, Box<dyn checkpoint::TensorSource>) = if let Some(layers) = target.strip_prefix("synth") {
         let layers: u32 = layers.strip_prefix(':').map_or(8, |l| l.parse().expect("synth:<layers>"));
         let cfg = Qwen35Config { n_layers: layers, ..Qwen35Config::edgerock_4b() };
@@ -49,6 +52,10 @@ fn main() {
     let t0 = std::time::Instant::now();
     let mut eng = RingEngine::from_source_tier(cfg, &*source, max_seq, batch, 0, &tier);
     println!("load: {:.1} s", t0.elapsed().as_secs_f64());
+    if let Some(u) = eng.gpu().memory_usage() {
+        let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
+        println!("device live after load: {:.2} GiB ({:.2} GiB of it weights and tables, {:.2} GiB the slot pool)", gib(u.live), gib(u.live.saturating_sub(eng.state_bytes())), gib(eng.state_bytes()));
+    }
     let mut tables: Vec<BlockTable> = (0..batch).map(|_| BlockTable::new()).collect();
     let t0 = std::time::Instant::now();
     eng.seed_synthetic(&mut tables, position);
