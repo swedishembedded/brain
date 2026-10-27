@@ -19,9 +19,12 @@
 //!   largest first). A concatenation is free: its inputs are written straight
 //!   into adjacent planes of its output, which needs every input but the last
 //!   to have a multiple of 16 channels.
-//! - **Schedule.** Consecutive convolutions form one NPU segment (one linked
-//!   submission). Add, max pool and upsample run on the CPU between segments,
-//!   in place on the native16 buffers, with explicit cache maintenance.
+//! - **Schedule.** An Add becomes a concatenation plus a 1x1 identity-pair
+//!   convolution ([`Graph::lower_adds`]), so it runs on the NPU. Consecutive
+//!   convolutions form one NPU segment (one linked submission). Max pool,
+//!   upsample and any Add that could not be lowered run on the CPU between
+//!   segments, in place on the native16 buffers, with explicit cache
+//!   maintenance.
 //!
 //! [`Plan::simulate`] executes the whole plan on a host byte arena with the
 //! exact integer arithmetic, so a board run is checked byte for byte.
@@ -31,6 +34,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use crate::conv::{self, ConvAddrs, ConvGeometry};
+use crate::cpu;
 use crate::graph::{Calibration, ConvParams, Graph, Op, TensorId};
 use crate::job::Task;
 
@@ -64,9 +68,6 @@ pub enum Step {
     MaxPool { input: TensorId, output: TensorId, kernel: usize, stride: usize, pad: usize },
     Upsample2x { input: TensorId, output: TensorId },
 }
-
-/// Fixed-point fraction bits of the CPU Add's operand scales.
-const ADD_FRAC_BITS: u32 = 16;
 
 /// Upper bound of one constant buffer. Weights are split across buffers of
 /// about this size (a layer never straddles two), because a board's
@@ -126,10 +127,11 @@ impl Plan {
     /// input with `input_q` (the caller decides how pixels map to int8).
     /// Weights are not read here; [`Plan::emit`] quantizes them.
     pub fn new(graph: &Graph, calibration: &Calibration, input_q: QParams) -> Result<Plan> {
-        let n = graph.tensor_count();
-        if calibration.ranges.len() != n {
-            return Err(Error::Quantization(format!("calibration covers {} tensors, the graph has {n}", calibration.ranges.len())));
+        if calibration.ranges.len() != graph.tensor_count() {
+            return Err(Error::Quantization(format!("calibration covers {} tensors, the graph has {}", calibration.ranges.len(), graph.tensor_count())));
         }
+        let (lowered, calibration) = graph.lower_adds(calibration);
+        let (graph, calibration) = (&lowered, &calibration);
         let q = quant_classes(graph, calibration, input_q)?;
         let (placements, activation_bytes) = layout(graph, &q)?;
 
@@ -169,7 +171,7 @@ impl Plan {
                 Op::Add { a, b, output } => {
                     close(&mut steps, &mut segments, &mut segment_start, task_count, convs.len());
                     let so = placements[*output].q.scale;
-                    let fixed = |s: f32| ((f64::from(s) / f64::from(so)) * f64::from(1u32 << ADD_FRAC_BITS)).round() as i32;
+                    let fixed = |s: f32| ((f64::from(s) / f64::from(so)) * f64::from(1u32 << cpu::ADD_FRAC_BITS)).round() as i32;
                     steps.push(Step::Add { a: *a, b: *b, output: *output, scale_a: fixed(placements[*a].q.scale), scale_b: fixed(placements[*b].q.scale) });
                 }
                 Op::MaxPool { input, output, kernel, stride, pad } => {
@@ -252,54 +254,20 @@ impl Plan {
             Step::Npu { .. } => unreachable!("NPU steps run on the device"),
             Step::Add { a, b, output, scale_a, scale_b } => {
                 let (pa, pb, po) = (self.placements[a], self.placements[b], self.placements[output]);
-                let (za, zb, zo) = (i32::from(pa.q.zero_point), i32::from(pb.q.zero_point), i32::from(po.q.zero_point));
-                let half = 1i32 << (ADD_FRAC_BITS - 1);
-                for i in 0..po.shape.planes() * po.shape.plane_bytes() {
-                    let x = i32::from(data[pa.offset + i] as i8) - za;
-                    let y = i32::from(data[pb.offset + i] as i8) - zb;
-                    let v = ((x * scale_a + y * scale_b + half) >> ADD_FRAC_BITS) + zo;
-                    data[po.offset + i] = v.clamp(-128, 127) as i8 as u8;
-                }
+                let (out, [x, y]) = split(data, po.range(), [pa.range(), pb.range()]);
+                cpu::add(x, y, out, pa.q.zero_point, pb.q.zero_point, po.q.zero_point, scale_a, scale_b);
             }
             Step::MaxPool { input, output, kernel, stride, pad } => {
                 let (pi, po) = (self.placements[input], self.placements[output]);
-                let (si, so) = (pi.shape, po.shape);
-                for plane in 0..si.planes() {
-                    let src = pi.offset + plane * si.plane_bytes();
-                    let dst = po.offset + plane * so.plane_bytes();
-                    for oy in 0..so.h {
-                        let ys = (oy * stride).saturating_sub(pad)..(oy * stride + kernel - pad).min(si.h);
-                        for ox in 0..so.w {
-                            let xs = (ox * stride).saturating_sub(pad)..(ox * stride + kernel - pad).min(si.w);
-                            let mut m = [i8::MIN; LANES];
-                            for y in ys.clone() {
-                                for x in xs.clone() {
-                                    let atom = &data[src + (y * si.w + x) * LANES..][..LANES];
-                                    for (m, &v) in m.iter_mut().zip(atom) {
-                                        *m = (*m).max(v as i8);
-                                    }
-                                }
-                            }
-                            for (l, v) in m.iter().enumerate() {
-                                data[dst + (oy * so.w + ox) * LANES + l] = *v as u8;
-                            }
-                        }
-                    }
-                }
+                let (out, [x]) = split(data, po.range(), [pi.range()]);
+                let (staged_in, mut staged_out) = (x.to_vec(), vec![0u8; out.len()]);
+                cpu::max_pool(&staged_in, pi.shape, &mut staged_out, po.shape, kernel, stride, pad, &mut Vec::new());
+                out.copy_from_slice(&staged_out);
             }
             Step::Upsample2x { input, output } => {
                 let (pi, po) = (self.placements[input], self.placements[output]);
-                let (si, so) = (pi.shape, po.shape);
-                for plane in 0..si.planes() {
-                    let src = pi.offset + plane * si.plane_bytes();
-                    let dst = po.offset + plane * so.plane_bytes();
-                    for y in 0..so.h {
-                        for x in 0..so.w {
-                            let from = src + ((y / 2) * si.w + x / 2) * LANES;
-                            data.copy_within(from..from + LANES, dst + (y * so.w + x) * LANES);
-                        }
-                    }
-                }
+                let (out, [x]) = split(data, po.range(), [pi.range()]);
+                cpu::upsample2x(x, pi.shape, out, po.shape);
             }
         }
     }
@@ -491,4 +459,19 @@ fn layout(graph: &Graph, q: &[QParams]) -> Result<(Vec<Placement>, usize)> {
     }
     let placements = (0..n).map(|t| Placement { offset: offset[t], shape: graph.shape(t), q: q[t] }).collect();
     Ok((placements, cursor))
+}
+
+/// `data[out]` mutably and each `data[ins[i]]` shared. Panics if an input
+/// overlaps the output: the planner never lets an op's output share bytes
+/// with its inputs (their lifetimes intersect at the op).
+fn split<const N: usize>(data: &mut [u8], out: Range<usize>, ins: [Range<usize>; N]) -> (&mut [u8], [&[u8]; N]) {
+    assert!(out.end <= data.len() && ins.iter().all(|r| r.end <= data.len()), "tensor outside the activation region");
+    for r in &ins {
+        assert!(r.end <= out.start || out.end <= r.start, "op input {r:?} overlaps its output {out:?}");
+    }
+    let base = data.as_mut_ptr();
+    // SAFETY: every range is inside `data` and none of the inputs overlaps
+    // the output, so the one mutable slice aliases nothing; the shared slices
+    // may overlap each other, which shared borrows allow.
+    unsafe { (std::slice::from_raw_parts_mut(base.add(out.start), out.len()), ins.map(|r| &*std::ptr::slice_from_raw_parts(base.add(r.start), r.len()))) }
 }

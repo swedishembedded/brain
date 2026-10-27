@@ -196,12 +196,18 @@ fn graph_case(rng: &mut Rng, name: &str, g: rknpu::graph::Graph, calibrate: bool
     }
     let t = timings[timings.len() / 2];
     println!(
-        "{:<34} {} differ={differ}/{total} tasks={} npu={:.2}ms cpu={:.2}ms total={:.2}ms arena={}KiB",
+        "{:<34} {} differ={differ}/{total} tasks={} npu={:.2}ms cpu={:.2}ms (add {:.2} pool {:.2} up {:.2} cache {:.2}) in={:.2}ms out={:.2}ms total={:.2}ms arena={}KiB",
         name,
         if differ == 0 { "OK  " } else { "FAIL" },
         model.plan().task_count(),
         t.npu.as_secs_f64() * 1e3,
-        t.cpu.as_secs_f64() * 1e3,
+        t.cpu().as_secs_f64() * 1e3,
+        t.add.as_secs_f64() * 1e3,
+        t.max_pool.as_secs_f64() * 1e3,
+        t.upsample.as_secs_f64() * 1e3,
+        t.cache.as_secs_f64() * 1e3,
+        t.input.as_secs_f64() * 1e3,
+        t.output.as_secs_f64() * 1e3,
         t.total.as_secs_f64() * 1e3,
         model.resident_bytes() / 1024
     );

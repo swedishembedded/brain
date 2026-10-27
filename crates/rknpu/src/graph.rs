@@ -220,6 +220,53 @@ impl Graph {
         Ok(self.outputs.iter().map(|&t| values[t].clone().expect("outputs are kept")).collect())
     }
 
+    /// Rewrite each Add the NPU can take as a channel concatenation of its
+    /// operands followed by a 1x1 convolution with weights `[I | I]`, and
+    /// extend `calibration` to the new concatenations. An identity weight is
+    /// exact in the NPU's int8 (1.0 is 255 codes of scale 1/255), so the
+    /// rewrite computes the same sum through the already exact conv path,
+    /// with its own requantization, and keeps the network in one NPU segment
+    /// where the Add would have split it.
+    ///
+    /// An Add stays as it is when its operands cannot sit side by side: an
+    /// operand that is the graph input or already concatenated elsewhere, the
+    /// same tensor twice, or a first operand whose channels are not a
+    /// multiple of 16.
+    pub(crate) fn lower_adds(&self, calibration: &Calibration) -> (Graph, Calibration) {
+        let mut concatenated = vec![false; self.shapes.len()];
+        for op in &self.ops {
+            if let Op::Concat { inputs, .. } = op {
+                for &t in inputs {
+                    concatenated[t] = true;
+                }
+            }
+        }
+        let mut g = Graph { shapes: self.shapes.clone(), ops: Vec::with_capacity(self.ops.len()), input: self.input, outputs: self.outputs.clone() };
+        let mut ranges = calibration.ranges.clone();
+        for op in &self.ops {
+            match *op {
+                Op::Add { a, b, output } if a != b && a != self.input && b != self.input && !concatenated[a] && !concatenated[b] && self.shapes[a].c.is_multiple_of(crate::layout::LANES) => {
+                    concatenated[a] = true;
+                    concatenated[b] = true;
+                    let (sa, c) = (self.shapes[a], self.shapes[a].c);
+                    let joined = g.shapes.len();
+                    g.shapes.push(Shape::new(sa.h, sa.w, 2 * c));
+                    ranges.push((ranges[a].0.min(ranges[b].0), ranges[a].1.max(ranges[b].1)));
+                    g.ops.push(Op::Concat { inputs: vec![a, b], output: joined });
+                    let mut weights = vec![0f32; c * 2 * c];
+                    for o in 0..c {
+                        weights[o * 2 * c + o] = 1.0;
+                        weights[o * 2 * c + c + o] = 1.0;
+                    }
+                    let params = Arc::new(OwnedConvParams { weights, bias: vec![0.0; c] });
+                    g.ops.push(Op::Conv { input: joined, output, params, kernel: 1, stride: 1, pad: [0; 4], relu: false });
+                }
+                _ => g.ops.push(op.clone()),
+            }
+        }
+        (g, Calibration { ranges })
+    }
+
     /// For every tensor, the index of the last op that reads it.
     pub(crate) fn last_uses(&self) -> Vec<usize> {
         let mut last = vec![0; self.shapes.len()];

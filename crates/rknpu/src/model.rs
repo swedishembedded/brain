@@ -29,8 +29,23 @@ use crate::{Error, Result};
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Timing {
     pub npu: Duration,
-    pub cpu: Duration,
+    /// CPU steps, by kind, and the cache maintenance around them.
+    pub add: Duration,
+    pub max_pool: Duration,
+    pub upsample: Duration,
+    pub cache: Duration,
+    /// Writing the input (and making it visible to the NPU), and making the
+    /// outputs visible to the CPU.
+    pub input: Duration,
+    pub output: Duration,
     pub total: Duration,
+}
+
+impl Timing {
+    /// Everything the CPU did.
+    pub fn cpu(&self) -> Duration {
+        self.add + self.max_pool + self.upsample + self.cache
+    }
 }
 
 pub struct Model {
@@ -110,6 +125,7 @@ impl Model {
         fill(self.activations.as_mut_slice(), p);
         let mut timing = Timing::default();
         self.activations.sync_to_device(p.range())?;
+        timing.input = start.elapsed();
         for step in self.plan.steps() {
             let t = Instant::now();
             match step {
@@ -121,15 +137,24 @@ impl Model {
                     for r in cpu_reads(cpu) {
                         self.activations.sync_from_device(self.plan.placement(r).range())?;
                     }
+                    let work = Instant::now();
                     self.plan.run_cpu_step(cpu, self.activations.as_mut_slice());
+                    let spent = work.elapsed();
+                    *match cpu {
+                        Step::Add { .. } => &mut timing.add,
+                        Step::MaxPool { .. } => &mut timing.max_pool,
+                        _ => &mut timing.upsample,
+                    } += spent;
                     self.activations.sync_to_device(self.plan.placement(cpu_writes(cpu)).range())?;
-                    timing.cpu += t.elapsed();
+                    timing.cache += t.elapsed() - spent;
                 }
             }
         }
+        let t = Instant::now();
         for &o in self.plan.outputs() {
             self.activations.sync_from_device(self.plan.placement(o).range())?;
         }
+        timing.output = t.elapsed();
         timing.total = start.elapsed();
         Ok(timing)
     }

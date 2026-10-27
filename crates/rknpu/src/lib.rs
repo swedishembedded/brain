@@ -17,6 +17,7 @@
 //! - [`layout`]: the NPU's 16-lane feature-map layout.
 //! - [`quant`]: the int8 arithmetic the hardware performs, exactly.
 //! - [`conv`]: dense convolution tasks, with height tiling.
+//! - [`cpu`]: the ops that run on the CPU between NPU segments.
 //! - [`job`]: a linked chain of tasks and the arena it addresses.
 //! - [`graph`]: the float network a model hands the compiler, with a float
 //!   reference and calibration.
@@ -31,6 +32,7 @@
 //! Mesa's Rocket driver (MIT); see `/NOTICE.md`.
 
 pub mod conv;
+pub mod cpu;
 pub mod driver;
 pub mod graph;
 pub mod job;

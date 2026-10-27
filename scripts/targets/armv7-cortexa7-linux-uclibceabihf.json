@@ -1,0 +1,37 @@
+{
+  "abi": "eabihf",
+  "arch": "arm",
+  "cpu": "cortex-a7",
+  "crt-objects-fallback": "false",
+  "crt-static-respected": true,
+  "data-layout": "e-m:e-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64",
+  "default-uwtable": true,
+  "dynamic-linking": true,
+  "env": "uclibc",
+  "features": "+v7,+vfp4,+d32,+thumb2,+neon",
+  "has-rpath": true,
+  "has-thread-local": true,
+  "linker-flavor": "gnu-cc",
+  "llvm-floatabi": "hard",
+  "llvm-target": "armv7-unknown-linux-gnueabihf",
+  "max-atomic-width": 64,
+  "metadata": {
+    "description": "Armv7-A Linux with uClibc, hardfloat",
+    "host_tools": null,
+    "std": true,
+    "tier": 3
+  },
+  "os": "linux",
+  "position-independent-executables": true,
+  "relro-level": "full",
+  "supported-split-debuginfo": [
+    "packed",
+    "unpacked",
+    "off"
+  ],
+  "target-family": [
+    "unix"
+  ],
+  "target-mcount": "_mcount",
+  "target-pointer-width": 32
+}

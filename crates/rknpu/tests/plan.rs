@@ -22,9 +22,10 @@ fn quantized_plan_tracks_the_float_graph() {
     let input_q = QParams { scale: 1.0 / 255.0, zero_point: -128 };
     let plan = Plan::new(&g, &calibration, input_q).unwrap();
 
-    // The schedule: NPU segments separated by the CPU ops, nothing else.
+    // The schedule: the Add is lowered onto the NPU, so only the two max
+    // pools and the upsample run on the CPU.
     let cpu = plan.steps().iter().filter(|s| !matches!(s, Step::Npu { .. })).count();
-    assert_eq!(cpu, 4, "one add, two max pools, one upsample");
+    assert_eq!(cpu, 3, "two max pools, one upsample");
 
     let image = &images[0];
     let pixels: Vec<u8> = image.iter().map(|&v| (v * 255.0).round() as u8).collect();

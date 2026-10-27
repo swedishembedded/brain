@@ -1673,13 +1673,19 @@ $(SAMPLE_RUN_TARGETS): samples/%/run:
 	exec env $(ENV) "$$bin" $(ARGS)
 
 # The Rockchip NPU sample runs on a 32-bit uClibc board (RV1103/RV1106), so it
-# is cross-built for `armv7-unknown-linux-uclibceabihf`. That target is tier 3:
-# std is rebuilt from rust-src (`-Zbuild-std`, unlocked on the stable toolchain
-# by RUSTC_BOOTSTRAP for this one invocation) and linked by the board vendor's
-# uClibc cross gcc, whose bin/ directory UCLIBC_TOOLCHAIN names. BOARD is the
-# ssh host of the board; deploy copies the binary to `brain/` in that user's
-# home, on persistent storage (the board's /tmp is RAM it cannot spare).
-UCLIBC_TARGET := armv7-unknown-linux-uclibceabihf
+# is cross-built for a uClibc ARMv7 target. Rust's own
+# `armv7-unknown-linux-uclibceabihf` spec disables NEON outright (target-cpu
+# cannot re-enable it, and `+neon` is an unstable flag that warns on every
+# crate), so the board's Cortex-A7 gets its own spec,
+# scripts/targets/armv7-cortexa7-linux-uclibceabihf.json: that spec with
+# NEON and VFPv4. Either way the target is tier 3: std is rebuilt from rust-src
+# (`-Zbuild-std`, unlocked on the stable toolchain by RUSTC_BOOTSTRAP for this
+# one invocation) and linked by the board vendor's uClibc cross gcc, whose
+# bin/ directory UCLIBC_TOOLCHAIN names. BOARD is the ssh host of the board;
+# deploy copies binaries to `brain/` in that user's home, on persistent
+# storage (the board's /tmp is RAM it cannot spare).
+UCLIBC_TARGET := armv7-cortexa7-linux-uclibceabihf
+UCLIBC_TARGET_SPEC := scripts/targets/$(UCLIBC_TARGET).json
 UCLIBC_TOOLCHAIN ?=
 UCLIBC_PREFIX = $(UCLIBC_TOOLCHAIN)/arm-rockchip830-linux-uclibcgnueabihf-
 BOARD ?=
@@ -1693,10 +1699,10 @@ samples/npu/rockchip/board:
 # `--example <name>`) to it.
 UCLIBC_CARGO_BUILD = @test -n "$(UCLIBC_TOOLCHAIN)" || { echo "set UCLIBC_TOOLCHAIN to the uClibc cross gcc's bin/ directory"; exit 2; }; \
 	RUSTC_BOOTSTRAP=1 \
-	CARGO_TARGET_ARMV7_UNKNOWN_LINUX_UCLIBCEABIHF_LINKER=$(UCLIBC_PREFIX)gcc \
-	CC_armv7_unknown_linux_uclibceabihf=$(UCLIBC_PREFIX)gcc \
-	AR_armv7_unknown_linux_uclibceabihf=$(UCLIBC_PREFIX)ar \
-	cargo build --release -Zbuild-std=std,panic_abort --target $(UCLIBC_TARGET)
+	CARGO_TARGET_ARMV7_CORTEXA7_LINUX_UCLIBCEABIHF_LINKER=$(UCLIBC_PREFIX)gcc \
+	CC_armv7_cortexa7_linux_uclibceabihf=$(UCLIBC_PREFIX)gcc \
+	AR_armv7_cortexa7_linux_uclibceabihf=$(UCLIBC_PREFIX)ar \
+	cargo build --release -Zbuild-std=std,panic_abort -Zjson-target-spec --target $(UCLIBC_TARGET_SPEC)
 BOARD_REQUIRED = @test -n "$(BOARD)" || { echo "set BOARD to the board's ssh host"; exit 2; }
 
 ## samples/npu/rockchip/board/build - cross-build the Rockchip NPU sample for the uClibc board (UCLIBC_TOOLCHAIN=<gcc bin dir>)
