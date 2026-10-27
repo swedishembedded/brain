@@ -80,6 +80,7 @@ heading and a `Scope: <one sentence>` line under it, then run `make generate/roa
 | [`qwen3omnimoe`](qwen3omnimoe.md) | qwen3omnimoe | Qwen3-Omni-30B (`crates/qwen3omnimoe`). |
 | [`qwen3tts`](qwen3tts.md) | qwen3tts | Qwen3-TTS synthesis stack (`crates/qwen3tts`, `mimi`, `ecapatdnn`). |
 | [`research-upgrades`](research-upgrades.md) | research-to-stack - brain share | brain's share of the cross-project research upgrades. |
+| [`rknpu`](rknpu.md) | rknpu | native Rockchip RV1103/RV1106 NPU support (own compiler and `/dev/rknpu` runtime, no vendor SDK), a lean low-RAM build of brain for 32-bit ARM boards, and YOLOv5 detection served on such a board. |
 | [`rlcd`](rlcd.md) | rlcd | Reinforcement learning for calibrated decisions (`crates/rlcd`). |
 | [`s3dit`](s3dit.md) | s3dit | Z-Image text-to-image (`crates/s3dit`, `dit`, `diffusion`, `vae`). |
 | [`scrfd`](scrfd.md) | scrfd | Face detection and recognition (`crates/scrfd`, `crates/arcface`). |
