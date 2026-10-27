@@ -8,9 +8,9 @@
 
 // @what  Anchor-memory read steps 2 and 3 in one kernel: row softmax over the logits (with the sink) and the weighted sum of values
 // @how   one workgroup per (row, KV group, 32-channel tile), all the group's heads at once; online softmax statistics merged across threads, the bank slots split over 8 lanes
-// @opt   2
+// @opt   4
 // @cpu   no
-// @gpu   yes
+// @gpu   yes-wg256
 // @npu   no
 // @quant none
 // @dtype f32

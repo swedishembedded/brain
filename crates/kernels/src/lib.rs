@@ -78,10 +78,6 @@ pub const ANCHOR_COMMIT: &str = include_str!("../wgsl/anchor_commit.wgsl");
 pub const ANCHOR_PUSH: &str = include_str!("../wgsl/anchor_push.wgsl");
 /// `wgsl/anchor_read_apply.wgsl`
 pub const ANCHOR_READ_APPLY: &str = include_str!("../wgsl/anchor_read_apply.wgsl");
-/// `wgsl/anchor_read_scores_group.wgsl`
-pub const ANCHOR_READ_SCORES_GROUP: &str = include_str!("../wgsl/anchor_read_scores_group.wgsl");
-/// `wgsl/anchor_read_softmax_apply.wgsl`
-pub const ANCHOR_READ_SOFTMAX_APPLY: &str = include_str!("../wgsl/anchor_read_softmax_apply.wgsl");
 /// `wgsl/anchor_read_bwd_dp.wgsl`
 pub const ANCHOR_READ_BWD_DP: &str = include_str!("../wgsl/anchor_read_bwd_dp.wgsl");
 /// `wgsl/anchor_read_bwd_kv.wgsl`
@@ -96,6 +92,10 @@ pub const ANCHOR_READ_GATE_BWD: &str = include_str!("../wgsl/anchor_read_gate_bw
 pub const ANCHOR_READ_GATE_WGRAD: &str = include_str!("../wgsl/anchor_read_gate_wgrad.wgsl");
 /// `wgsl/anchor_read_scores.wgsl`
 pub const ANCHOR_READ_SCORES: &str = include_str!("../wgsl/anchor_read_scores.wgsl");
+/// `wgsl/anchor_read_scores_group.wgsl`
+pub const ANCHOR_READ_SCORES_GROUP: &str = include_str!("../wgsl/anchor_read_scores_group.wgsl");
+/// `wgsl/anchor_read_softmax_apply.wgsl`
+pub const ANCHOR_READ_SOFTMAX_APPLY: &str = include_str!("../wgsl/anchor_read_softmax_apply.wgsl");
 /// `wgsl/anchor_rows_copy.wgsl`
 pub const ANCHOR_ROWS_COPY: &str = include_str!("../wgsl/anchor_rows_copy.wgsl");
 /// `wgsl/anchor_slot_inverse.wgsl`
