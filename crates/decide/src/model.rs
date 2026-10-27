@@ -36,6 +36,7 @@ use crate::Tensors;
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 use model::block;
+use model::saved::SavedPolicy;
 use paramstore::{ParamStore, Role};
 
 use crate::config::EncoderConfig;
@@ -67,6 +68,7 @@ fn gcd(a: u64, b: u64) -> u64 {
     }
 }
 
+#[derive(Clone)]
 struct LayerBufs {
     /// Fused `[rows, 3H]` - q at 0, k at H, v at 2H.
     qkv: DeviceBuffer,
@@ -189,6 +191,10 @@ pub struct Encoder {
     /// on the host, per decision, and the two conditions that trigger it are
     /// different - see `crates/decide/tests/graph_records.rs`.
     records: (u64, u64),
+    /// What the backward keeps of the forward ([`Encoder::set_saved_policy`]): every layer's intermediates, or
+    /// (recompute) the residual stream `x` only, every layer sharing one set of intermediates that its replay
+    /// before the layer's backward refills.
+    saved: SavedPolicy,
 }
 
 impl Encoder {
@@ -320,6 +326,7 @@ impl Encoder {
             bwd: None,
             reverse_stale: false,
             records: (0, 0),
+            saved: SavedPolicy::Keep,
             gpu,
             cfg,
             ps,
@@ -417,6 +424,33 @@ impl Encoder {
                 gpu_core::Dispatch::Workgroups(m.div_ceil(64) * n.div_ceil(64)),
             ),
         }
+    }
+
+    /// Keep every layer's intermediates for the backward ([`SavedPolicy::Keep`]) or only the residual stream
+    /// between layers, every layer sharing one set of intermediates that its replay refills before the layer's
+    /// backward ([`SavedPolicy::Recompute`]). The residual stream stays in f32, so a narrow saved format is
+    /// refused by name, as is going back to keeping everything once the buffers are shared. After a switch to
+    /// recompute the per-layer taps ([`Encoder::attn_ctx`], [`Encoder::attn_out`], [`Encoder::ffn_act`]) refuse,
+    /// since the shared buffers hold the layer that ran last.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        if let SavedPolicy::Quantized(format) = policy {
+            return Err(format!("decide keeps its residual stream in f32; {format:?} saved boundaries do not apply"));
+        }
+        if !self.saved.narrows_to(policy) {
+            return Err(format!("decide: an encoder keeping {:?} cannot go back to {policy:?}", self.saved));
+        }
+        if policy.recomputes() && !self.saved.recomputes() {
+            if self.bwd.is_none() {
+                return Err(format!("decide: an inference build has no backward to save for; {policy:?} is not available"));
+            }
+            if let Some(shared) = self.layers.first().cloned() {
+                self.layers.fill(shared);
+            }
+            self.saved = policy;
+            self.steps = self.build_steps();
+            self.rebuild_bwd();
+        }
+        Ok(())
     }
 
     /// Load one packed call: `ids`/`type_ids` are the flat token and segment
@@ -540,7 +574,9 @@ impl Encoder {
         self.gpu.submit(&[], &self.steps);
     }
 
-    fn build_steps(&self) -> Vec<Step> {
+    /// Layer `l`'s forward, from the residual `x[l]` to `x[l + 1]`, recorded into `s`. A recomputing backward
+    /// replays it to refill the intermediates its layer's backward reads.
+    fn layer_forward(&self, l: usize, s: &mut Vec<Step>) {
         let g = &self.gpu;
         let c = &self.cfg;
         let n = self.rows;
@@ -585,6 +621,114 @@ impl Encoder {
         } else {
             Err(None)
         };
+        let lb = &self.layers[l];
+        let p = format!("blocks.{l}");
+
+        let (mk, mt) = self.gemm(n, 3 * h);
+        s.push(g.dispatch(mk, &[&self.x[l], self.w(&format!("{p}.qkv.weight")), &lb.qkv], &[n, h, 3 * h], mt));
+        s.push(g.step(self.k.bias_add, &[&lb.qkv, self.w(&format!("{p}.qkv.bias"))], &[n, 3 * h], n * 3 * h));
+
+        // Self-attention within each span, independently. q/k/v live at
+        // 0/H/2H of the fused row.
+        match flash {
+            // One dispatch over every span. `self.flash_work` was filled
+            // by `set_batch` for exactly these spans.
+            Ok(kind) => s.push(block::flash_bidir_spans_step(
+                g,
+                kind,
+                c.n_heads,
+                hd,
+                h,
+                &lb.qkv,
+                3 * h,
+                0,
+                h,
+                2 * h,
+                &lb.ctx,
+                &self.flash_work,
+                &self.spans,
+            )),
+            Err(Some(ids)) => block::flash_bidir_fwd(
+                g,
+                ids,
+                c.n_heads,
+                hd,
+                h,
+                &lb.qkv,
+                3 * h,
+                0,
+                h,
+                2 * h,
+                &lb.ctx,
+                &self.spans,
+                s,
+            ),
+            Err(None) => block::chunked_bidir_fwd(
+                g,
+                &cross,
+                Some(&km),
+                c.n_heads,
+                hd,
+                h,
+                &lb.qkv,
+                3 * h,
+                0,
+                h,
+                2 * h,
+                &lb.ctx,
+                &self.scores,
+                &self.probs,
+                &self.spans,
+                self.chunk,
+                None,
+                s,
+            ),
+        }
+
+        let (mk, mt) = self.gemm(n, h);
+        s.push(g.dispatch(mk, &[&lb.ctx, self.w(&format!("{p}.proj.weight")), &lb.attn_out], &[n, h, h], mt));
+        s.push(g.step(self.k.bias_add, &[&lb.attn_out, self.w(&format!("{p}.proj.bias"))], &[n, h], n * h));
+        // POST-LayerNorm: the residual is added first and normalized after.
+        s.push(g.step(self.k.add2, &[&self.x[l], &lb.attn_out, &lb.res_pre], &[n * h], n * h));
+        s.push(block::layernorm_fwd(
+            g,
+            &ln,
+            &lb.res_pre,
+            self.w(&format!("{p}.ln1.weight")),
+            self.w(&format!("{p}.ln1.bias")),
+            &lb.res,
+            h,
+            n,
+            c.eps,
+        ));
+
+        let (mk, mt) = self.gemm(n, ff);
+        s.push(g.dispatch(mk, &[&lb.res, self.w(&format!("{p}.fc1.weight")), &lb.h], &[n, h, ff], mt));
+        s.push(g.step(self.k.bias_add, &[&lb.h, self.w(&format!("{p}.fc1.bias"))], &[n, ff], n * ff));
+        s.push(g.step(self.k.gelu_erf, &[&lb.h, &lb.h_act], &[n * ff], n * ff));
+        let (mk, mt) = self.gemm(n, h);
+        s.push(g.dispatch(mk, &[&lb.h_act, self.w(&format!("{p}.fc2.weight")), &lb.mlp_out], &[n, ff, h], mt));
+        s.push(g.step(self.k.bias_add, &[&lb.mlp_out, self.w(&format!("{p}.fc2.bias"))], &[n, h], n * h));
+        s.push(g.step(self.k.add2, &[&lb.res, &lb.mlp_out, &lb.ffn_pre], &[n * h], n * h));
+        s.push(block::layernorm_fwd(
+            g,
+            &ln,
+            &lb.ffn_pre,
+            self.w(&format!("{p}.ln2.weight")),
+            self.w(&format!("{p}.ln2.bias")),
+            &self.x[l + 1],
+            h,
+            n,
+            c.eps,
+        ));
+    }
+
+    fn build_steps(&self) -> Vec<Step> {
+        let g = &self.gpu;
+        let c = &self.cfg;
+        let n = self.rows;
+        let h = c.d_model;
+        let ln = block::LayerNormIds::resolve(g, self.k.layernorm, self.k.ln_stats, self.k.layernorm_dx);
         // ---- embeddings ----
         // `embed` Params: [width, rows]; bufs [index(u32), table, out]. The
         // position and segment tables are gathered the same way as the token
@@ -610,106 +754,7 @@ impl Encoder {
         ));
 
         for l in 0..c.n_layers as usize {
-            let lb = &self.layers[l];
-            let p = format!("blocks.{l}");
-
-            let (mk, mt) = self.gemm(n, 3 * h);
-            s.push(g.dispatch(mk, &[&self.x[l], self.w(&format!("{p}.qkv.weight")), &lb.qkv], &[n, h, 3 * h], mt));
-            s.push(g.step(self.k.bias_add, &[&lb.qkv, self.w(&format!("{p}.qkv.bias"))], &[n, 3 * h], n * 3 * h));
-
-            // Self-attention within each span, independently. q/k/v live at
-            // 0/H/2H of the fused row.
-            match flash {
-                // One dispatch over every span. `self.flash_work` was filled
-                // by `set_batch` for exactly these spans.
-                Ok(kind) => s.push(block::flash_bidir_spans_step(
-                    g,
-                    kind,
-                    c.n_heads,
-                    hd,
-                    h,
-                    &lb.qkv,
-                    3 * h,
-                    0,
-                    h,
-                    2 * h,
-                    &lb.ctx,
-                    &self.flash_work,
-                    &self.spans,
-                )),
-                Err(Some(ids)) => block::flash_bidir_fwd(
-                    g,
-                    ids,
-                    c.n_heads,
-                    hd,
-                    h,
-                    &lb.qkv,
-                    3 * h,
-                    0,
-                    h,
-                    2 * h,
-                    &lb.ctx,
-                    &self.spans,
-                    &mut s,
-                ),
-                Err(None) => block::chunked_bidir_fwd(
-                    g,
-                    &cross,
-                    Some(&km),
-                    c.n_heads,
-                    hd,
-                    h,
-                    &lb.qkv,
-                    3 * h,
-                    0,
-                    h,
-                    2 * h,
-                    &lb.ctx,
-                    &self.scores,
-                    &self.probs,
-                    &self.spans,
-                    self.chunk,
-                    None,
-                    &mut s,
-                ),
-            }
-
-            let (mk, mt) = self.gemm(n, h);
-            s.push(g.dispatch(mk, &[&lb.ctx, self.w(&format!("{p}.proj.weight")), &lb.attn_out], &[n, h, h], mt));
-            s.push(g.step(self.k.bias_add, &[&lb.attn_out, self.w(&format!("{p}.proj.bias"))], &[n, h], n * h));
-            // POST-LayerNorm: the residual is added first and normalized after.
-            s.push(g.step(self.k.add2, &[&self.x[l], &lb.attn_out, &lb.res_pre], &[n * h], n * h));
-            s.push(block::layernorm_fwd(
-                g,
-                &ln,
-                &lb.res_pre,
-                self.w(&format!("{p}.ln1.weight")),
-                self.w(&format!("{p}.ln1.bias")),
-                &lb.res,
-                h,
-                n,
-                c.eps,
-            ));
-
-            let (mk, mt) = self.gemm(n, ff);
-            s.push(g.dispatch(mk, &[&lb.res, self.w(&format!("{p}.fc1.weight")), &lb.h], &[n, h, ff], mt));
-            s.push(g.step(self.k.bias_add, &[&lb.h, self.w(&format!("{p}.fc1.bias"))], &[n, ff], n * ff));
-            s.push(g.step(self.k.gelu_erf, &[&lb.h, &lb.h_act], &[n * ff], n * ff));
-            let (mk, mt) = self.gemm(n, h);
-            s.push(g.dispatch(mk, &[&lb.h_act, self.w(&format!("{p}.fc2.weight")), &lb.mlp_out], &[n, ff, h], mt));
-            s.push(g.step(self.k.bias_add, &[&lb.mlp_out, self.w(&format!("{p}.fc2.bias"))], &[n, h], n * h));
-            s.push(g.step(self.k.add2, &[&lb.res, &lb.mlp_out, &lb.ffn_pre], &[n * h], n * h));
-            s.push(block::layernorm_fwd(
-                g,
-                &ln,
-                &lb.ffn_pre,
-                self.w(&format!("{p}.ln2.weight")),
-                self.w(&format!("{p}.ln2.bias")),
-                &self.x[l + 1],
-                h,
-                n,
-                c.eps,
-            ));
+            self.layer_forward(l, &mut s);
         }
         s
     }
@@ -891,6 +936,10 @@ impl Encoder {
         let mut s: Vec<Step> = Vec::new();
 
         for l in (0..c.n_layers as usize).rev() {
+            if self.saved.recomputes() {
+                // Every layer shares one set of intermediates: rebuild this layer's from `x[l]` first.
+                self.layer_forward(l, &mut s);
+            }
             let lb = &self.layers[l];
             let p = format!("blocks.{l}");
             let d_out = &bw.dx[l + 1];
@@ -1050,18 +1099,26 @@ impl Encoder {
         self.read(&self.x[0])
     }
 
+    /// The per-layer intermediates are only layer `l`'s while every layer keeps its own.
+    fn assert_layer_taps(&self) {
+        assert!(!self.saved.recomputes(), "decide: layers share their intermediates under recompute; only hidden, layer_out and embeddings are per layer");
+    }
+
     /// Layer `l`'s attention context, before the output projection.
     pub fn attn_ctx(&self, l: usize) -> Vec<f32> {
+        self.assert_layer_taps();
         self.read(&self.layers[l].ctx)
     }
 
     /// Layer `l`'s post-attention residual, after LN1.
     pub fn attn_out(&self, l: usize) -> Vec<f32> {
+        self.assert_layer_taps();
         self.read(&self.layers[l].res)
     }
 
     /// Layer `l`'s FFN hidden after its GELU, `[rows, d_ff]`.
     pub fn ffn_act(&self, l: usize) -> Vec<f32> {
+        self.assert_layer_taps();
         self.gpu.read(&self.layers[l].h_act, (self.rows * self.cfg.d_ff) as usize)
     }
 
