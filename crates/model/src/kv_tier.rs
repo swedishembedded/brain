@@ -399,7 +399,7 @@ const FLASH_COMBINE: &str = "paged_flash_decode_gqa_combine";
 /// registers, so each pair is its own pipeline. Group 6 at head_dim 256 is Qwen3.8-27B
 /// (24 heads / 4 kv), group 8 the 35B-A3B sibling (16 / 2); head_dim 128 with group 1 is plain
 /// multi-head attention (DeepSeek-OCR's decoder: 10 heads of 128). Any other shape keeps the triad.
-const FLASH_SHAPES: [(u32, u32); 3] = [(256, 6), (256, 8), (128, 1)];
+const FLASH_SHAPES: [(u32, u32); 4] = [(256, 6), (256, 8), (256, 4), (128, 1)];
 
 /// The compile-time constants of the fused decode kernel for one shape: `GRP`, and for the
 /// non-native head width `HD` and its 4-channel piece count `HD4`.

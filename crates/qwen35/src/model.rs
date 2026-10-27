@@ -78,7 +78,7 @@ use crate::decode_state::DecodeState;
 mod objectives;
 #[path = "spec_verify.rs"]
 pub(crate) mod verify;
-use crate::train_base::{is_table, reads_float_acts, table_tier, write_weight_host};
+use crate::train_base::{is_table, memory_linear_bf16, reads_float_acts, table_tier, write_weight_host};
 
 // ---- kernel pipeline (order fixes the indices below) -----------------------
 // Forward + backward subset of qwen35moe::model::STATIC_PIPELINES (no MoE -
@@ -1770,7 +1770,7 @@ impl Qwen35 {
         // adapters are never quantizable leaves, so they stay in the store.
         let roles: Vec<(String, usize, Role)> = shard_param_list(&cfg, &shard)
             .into_iter()
-            .filter(|(n, _)| !(is_quantizable_linear(n) && (tier.want(n) != Dtype::F32 || resident_plan.is_some())) && table_tier(tier, &cfg, train, n).is_none() && !(resident_plan.is_some() && is_table(&cfg, n)))
+            .filter(|(n, _)| !(is_quantizable_linear(n) && (tier.want(n) != Dtype::F32 || resident_plan.is_some())) && table_tier(tier, &cfg, train, n).is_none() && !memory_linear_bf16(tier, &cfg, train, n) && !(resident_plan.is_some() && is_table(&cfg, n)))
             .map(|(n, c)| {
                 // The admission scorer is outside the loss's gradient (a discrete sort reads it): never optimised.
                 let role = if !train || n.contains(".memory.admission_") {
@@ -1862,6 +1862,16 @@ impl Qwen35 {
                 let name = format!("blocks.{l}.{suffix}");
                 let want = tier.want(&name);
                 upload(name, n, k, want);
+            }
+        }
+        // The anchor memory's read-side projections follow the weight tier of an inference build; the admission
+        // scorer, the norms and the read gate stay in the parameter store at fp32.
+        for (l, _) in cfg.layer_types().iter().enumerate().filter(|(l, _)| shard.owns(*l) && cfg.layer_has_memory(*l)) {
+            for (leaf, n, k) in cfg.memory_linears() {
+                let name = format!("blocks.{l}.memory.{leaf}");
+                if memory_linear_bf16(tier, &cfg, train, &name) {
+                    upload(name, n as u32, k as u32, Dtype::BF16);
+                }
             }
         }
         if cfg.mtp && shard.head {
@@ -3380,7 +3390,21 @@ impl Qwen35 {
             let g = &self.gpu;
             let (n_out, n_in) = which.dims(shape);
             let wname = format!("blocks.{l}.memory.{}.weight", which.leaf());
-            let mut s = vec![g.step(MATMUL, &[x, self.w(&wname), out], &[n, n_in, n_out], n * n_out)];
+            let mut s = Vec::new();
+            match self.weights.get(&wname) {
+                // Held in a narrower tier: the same product through the library path the layer's linears take.
+                Some(w) => {
+                    let act = self.ops_act(&mut s, x, n, n_in);
+                    self.ops.matmul(&mut s, w, &act, out, 0);
+                }
+                // The scorer and anything not held in a tier: exact fp32. A few rows take the skinny-M kernel (one
+                // workgroup per output column, the weight read once), which a single decode row needs; it has no
+                // tensor-core variant, so the product stays exact.
+                None => match (n <= 32).then(|| g.kernel_index("matmul_gemv")).flatten() {
+                    Some(gemv) => s.push(g.dispatch(gemv, &[x, self.w(&wname), out], &[n, n_in, n_out], gpu_core::Dispatch::Workgroups(n_out))),
+                    None => s.push(g.step(MATMUL, &[x, self.w(&wname), out], &[n, n_in, n_out], n * n_out)),
+                },
+            }
             self.lora_fwd(&mut s, &format!("memory.{}", which.leaf()), x, &wname, out, n, n_in, n_out);
             g.submit(&[], &s);
         }
@@ -3590,9 +3614,8 @@ impl Qwen35 {
         let xn_final = if self.shard.head {
             let xn_final = g.storage((n * d) as u64);
             g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), last, self.w("norm.weight"), &xn_final, d, n, self.cfg.rms_eps)]);
-            let v = self.cfg.vocab;
             if self.head_ce.is_none() {
-                g.submit(&[], &[g.step(MATMUL, &[&xn_final, self.w(self.cfg.head_weight()), &self.logits], &[n, d, v], n * v)]);
+                self.head_matmul(&xn_final, &self.logits, n);
             }
 
             if self.cfg.mtp {
@@ -4445,12 +4468,14 @@ impl Qwen35 {
             let cb = shape.commit_block;
             let read = model::anchor_memory::ReadPlan::upload(g, &shape, &caches.seqs.iter().map(|s| (s.slot, s.pos)).collect::<Vec<_>>());
             let pushes: Vec<_> = caches.seqs.iter().enumerate().map(|(i, s)| model::anchor_memory::Push { slot: s.slot, pos: s.pos, src_row: i as u32 }).collect();
-            // Every sequence carries a commit, empty unless its token completes a block, so the step is the same
-            // list of dispatches whichever sequences' blocks fill.
+            // Only the sequences whose token completes a block commit (the host knows every position), so a step
+            // where none does moves no bank at all. Windowed configs run no decode tape, which is what lets the
+            // dispatch list depend on the positions.
             let commits: Vec<_> = caches
                 .seqs
                 .iter()
-                .map(|s| if s.pos % cb == cb - 1 { model::anchor_memory::Commit { slot: s.slot, first_pos: s.pos + 1 - cb, count: cb } } else { model::anchor_memory::Commit { slot: s.slot, first_pos: 0, count: 0 } })
+                .filter(|s| s.pos % cb == cb - 1)
+                .map(|s| model::anchor_memory::Commit { slot: s.slot, first_pos: s.pos + 1 - cb, count: cb })
                 .collect();
             (shape, read, model::anchor_memory::WritePlan::upload(g, &shape, &pushes, &commits))
         });
@@ -5874,14 +5899,29 @@ impl Qwen35 {
         self.head_logits_rows_ungrouped(hidden, rows)
     }
 
+    /// `out = x @ head^T` over `rows` rows: through `Ops` where the head is held in a narrow tier, the fp32 kernel
+    /// otherwise.
+    fn head_matmul(&self, x: &DeviceBuffer, out: &DeviceBuffer, rows: u32) {
+        let g = &self.gpu;
+        let (d, v) = (self.cfg.d_model, self.cfg.vocab);
+        match self.weights.get(self.cfg.head_weight()) {
+            Some(w) => {
+                let mut s = Vec::new();
+                let act = self.ops_act(&mut s, x, rows, d);
+                self.ops.matmul(&mut s, w, &act, out, 0);
+                g.submit(&[], &s);
+            }
+            None => g.submit(&[], &[g.step(MATMUL, &[x, self.w(self.cfg.head_weight()), out], &[rows, d, v], rows * v)]),
+        }
+    }
+
     /// [`Self::head_logits_rows_dev`] for one group: one `MATMUL` over `rows`
     /// rows of `hidden`.
     fn head_logits_rows_ungrouped(&self, hidden: &DeviceBuffer, rows: u32) -> DeviceBuffer {
         let g = &self.gpu;
-        let d = self.cfg.d_model;
         let v = self.cfg.vocab;
         let logits = g.storage(rows as u64 * v as u64);
-        g.submit(&[], &[g.step(MATMUL, &[hidden, self.w(self.cfg.head_weight()), &logits], &[rows, d, v], rows * v)]);
+        self.head_matmul(hidden, &logits, rows);
         logits
     }
 

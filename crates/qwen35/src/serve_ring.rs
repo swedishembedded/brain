@@ -138,6 +138,34 @@ impl RingEngine {
         &self.model
     }
 
+    /// The device handle, for profiling.
+    pub fn gpu(&self) -> &Gpu {
+        &self.model.gpu
+    }
+
+    /// Bring every table to `position` tokens of synthetic context without computing each one: the first is
+    /// prefilled with a fixed in-vocabulary prompt and the rest are copies of its state, so a measurement can sit
+    /// at a decode position (ring and bank full) at the cost of one prefill. Tables must be fresh.
+    pub fn seed_synthetic(&mut self, tables: &mut [BlockTable], position: u32) {
+        assert!(position > 0 && position <= self.max_seq_len, "qwen35::serve_ring: synthetic position {position} outside 1..={}", self.max_seq_len);
+        let vocab = u64::from(self.model.cfg.vocab);
+        let prompt: Vec<u32> = (0..u64::from(position)).map(|i| ((i * 7919 + 13) % vocab) as u32).collect();
+        let mut first = None;
+        for t in tables.iter_mut() {
+            assert!(t.is_empty(), "qwen35::serve_ring: seed_synthetic needs fresh tables");
+            t.reserve(position, &mut self.alloc).unwrap_or_else(|e| panic!("qwen35::serve_ring: no free slot: {e}"));
+            let slot = Self::slot(t);
+            match first {
+                None => {
+                    self.model.slot_reset(&self.pool, slot);
+                    self.model.slot_prefill(&self.pool, slot, &prompt, PREFILL_ROUND_TOKENS);
+                    first = Some(slot);
+                }
+                Some(src) => self.model.slot_copy(&self.pool, src, slot),
+            }
+        }
+    }
+
     /// Device bytes of the slot pool (live and snapshot slots): fixed for the engine's life.
     pub fn state_bytes(&self) -> u64 {
         self.pool.bytes()

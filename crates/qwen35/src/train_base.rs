@@ -98,7 +98,18 @@ impl Default for TrainOpts {
 /// bits, so a narrower request for the base gives them bf16. MTP shares the
 /// tables with its own fp32 path and keeps them fp32.
 pub(crate) fn table_tier(tier: &TierPolicy, cfg: &Qwen35Config, train: bool, name: &str) -> Option<Dtype> {
-    (train && cfg.lora.is_some() && !cfg.mtp && tier.quantizes_anything() && is_table(cfg, name)).then_some(Dtype::BF16)
+    let narrow_lora_base = train && cfg.lora.is_some() && tier.quantizes_anything();
+    // An inference build at the bf16 tier holds the tables in bf16 too: a decode step reads the head once, and
+    // at fp32 that is the largest single read of the step.
+    let bf16_inference = !train && tier.want(name) == Dtype::BF16;
+    ((narrow_lora_base || bf16_inference) && !cfg.mtp && is_table(cfg, name)).then_some(Dtype::BF16)
+}
+
+/// Whether the anchor memory's read-side linear `name` (`blocks.{l}.memory.<leaf>.weight`, not the admission scorer)
+/// is held in bf16 on an inference build at the bf16 tier. The scorer, the norms and the read gate stay exact fp32.
+pub(crate) fn memory_linear_bf16(tier: &TierPolicy, cfg: &Qwen35Config, train: bool, name: &str) -> bool {
+    let Some((_, leaf)) = name.split_once(".memory.") else { return false };
+    !train && !cfg.mtp && tier.want(name) == Dtype::BF16 && cfg.memory_linears().iter().any(|(l, _, _)| *l == leaf)
 }
 
 /// Whether `name` is one of the `[vocab, d_model]` tables: the embedding, or an untied LM head.

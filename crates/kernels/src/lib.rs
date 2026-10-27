@@ -78,6 +78,8 @@ pub const ANCHOR_COMMIT: &str = include_str!("../wgsl/anchor_commit.wgsl");
 pub const ANCHOR_PUSH: &str = include_str!("../wgsl/anchor_push.wgsl");
 /// `wgsl/anchor_read_apply.wgsl`
 pub const ANCHOR_READ_APPLY: &str = include_str!("../wgsl/anchor_read_apply.wgsl");
+/// `wgsl/anchor_read_softmax_apply.wgsl`
+pub const ANCHOR_READ_SOFTMAX_APPLY: &str = include_str!("../wgsl/anchor_read_softmax_apply.wgsl");
 /// `wgsl/anchor_read_bwd_dp.wgsl`
 pub const ANCHOR_READ_BWD_DP: &str = include_str!("../wgsl/anchor_read_bwd_dp.wgsl");
 /// `wgsl/anchor_read_bwd_kv.wgsl`
@@ -1388,6 +1390,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("anchor_read_gate_bwd", ANCHOR_READ_GATE_BWD),
     ("anchor_read_gate_wgrad", ANCHOR_READ_GATE_WGRAD),
     ("anchor_read_scores", ANCHOR_READ_SCORES),
+    ("anchor_read_softmax_apply", ANCHOR_READ_SOFTMAX_APPLY),
     ("anchor_rows_copy", ANCHOR_ROWS_COPY),
     ("anchor_slot_inverse", ANCHOR_SLOT_INVERSE),
     ("arcface_margin", ARCFACE_MARGIN),

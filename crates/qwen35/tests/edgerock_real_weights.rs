@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use brain_testutil::parity::Table;
+use gpu_core::provider::library::GemmPath;
 use gpu_core::select::Dtype;
 use gpu_core::Gpu;
 use model::ops::TierPolicy;
@@ -59,6 +60,8 @@ fn released_weights_match_the_reference_forward() {
     let d = cfg.d_model as usize;
     let vocab = cfg.vocab as usize;
     let pick = |all: &[f32]| rows.iter().flat_map(|&r| all[r * d..(r + 1) * d].iter().copied()).collect::<Vec<f32>>();
+    // The tier the model's matrix products run at decides the tolerance, as in the golden tests.
+    let exact = matches!(m.gemm_path(), GemmPath::Fp32Kernels { .. });
     let mut table = Table::new(0.999, 5e-2);
     for l in 0..cfg.n_layers as usize {
         table.check(&format!("layer{l}.out"), &pick(&m.debug_res(l + 1)), &golden[&format!("layer{l}.out")]);
@@ -67,14 +70,31 @@ fn released_weights_match_the_reference_forward() {
     table.check("logits_tail", tail, &golden["logits_tail"]);
     table.print();
 
+    // The bank a block commits is a top-`capacity` selection by score. A near tie swaps one record, and every slot
+    // after it in rank order then differs, so slot-wise equality understates agreement; what the memory reads is the
+    // SET of records, so the bank is compared per (block, group) as a set. Exact slot equality is held only on the
+    // fp32 reference tier; the tensor-core tier is held to the overlap its arithmetic supports.
+    let (capacity, groups) = (cfg.anchor_memory.expect("EdgeRock has an anchor memory").capacity as usize, cfg.n_kv_heads as usize);
     let mut banks = Vec::new();
     for l in (0..cfg.n_layers as usize).filter(|&l| cfg.layer_has_memory(l)) {
         let name = format!("layer{l}.mem.refs");
         let (ours, theirs) = (&taps[&name], &golden[&name]);
         assert_eq!(ours.len(), theirs.len(), "{name}: bank shape");
         let equal = ours.iter().zip(theirs).filter(|(a, b)| a == b).count() as f64 / theirs.len() as f64;
-        println!("{name}: {:.2}% of slots equal the reference", equal * 100.0);
-        banks.push((name, equal));
+        let (mut overlap, mut cells) = (0.0, 0usize);
+        for (a, b) in ours.chunks(capacity).zip(theirs.chunks(capacity)) {
+            let set = |row: &[f32]| row.iter().filter(|&&r| r != 0.0).map(|&r| r as u32).collect::<std::collections::HashSet<u32>>();
+            let (sa, sb) = (set(a), set(b));
+            let denom = sa.len().max(sb.len());
+            if denom > 0 {
+                overlap += sa.intersection(&sb).count() as f64 / denom as f64;
+                cells += 1;
+            }
+        }
+        assert_eq!(ours.len() % (groups * capacity), 0, "{name}: bank layout");
+        let overlap = if cells == 0 { 1.0 } else { overlap / cells as f64 };
+        println!("{name}: {:.2}% of slots equal the reference, {:.2}% set overlap per (block, group)", equal * 100.0, overlap * 100.0);
+        banks.push((name, equal, overlap));
     }
 
     let last = &tail[7 * vocab..];
@@ -82,7 +102,11 @@ fn released_weights_match_the_reference_forward() {
     let want = golden["logits_tail"][7 * vocab..].iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
     assert_eq!(greedy, want, "the greedy answer after the question differs from the reference's");
     assert!(table.failures.is_empty(), "parity failures: {:#?}", table.failures);
-    for (name, equal) in banks {
-        assert!(equal >= 0.95, "{name}: only {:.1}% of the bank equals the reference", equal * 100.0);
+    for (name, equal, overlap) in banks {
+        if exact {
+            assert!(equal >= 0.95, "{name}: only {:.1}% of the bank equals the reference", equal * 100.0);
+        } else {
+            assert!(overlap >= 0.99, "{name}: only {:.1}% set overlap with the reference bank", overlap * 100.0);
+        }
     }
 }
