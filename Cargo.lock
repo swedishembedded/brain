@@ -448,6 +448,7 @@ dependencies = [
  "brain-viewport",
  "brain-wan",
  "brain-wm-display",
+ "brain-yolov5",
  "brain-yolov8",
  "brain-zipdepth",
  "serde",

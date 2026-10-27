@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! [`DetectionPipeline`]: brain's object-detection surface, over YOLOv8.
-//! Resolved through `crates/loader`'s resolver against
-//! `yolov8::spec::YoloSpec`'s one `"weights"` role - the same resolver
-//! `brain do yolov8 detect` uses, never a parallel path.
+//! [`DetectionPipeline`]: brain's object-detection surface, over YOLOv8 and
+//! YOLOv5. Resolved through `crates/loader`'s resolver against each
+//! architecture's one `"weights"` role (`yolov8::spec::YoloSpec`,
+//! `yolov5::spec::Yolov5Spec`) - the same resolver `brain do yolov8 detect`
+//! uses, never a parallel path. The architecture is read from the checkpoint,
+//! not chosen by the caller: both are the one [`DetectionPipeline`].
 //!
 //! A NEW public domain type, [`Detection`], rather than joining
 //! [`crate::Image`]-shaped pipelines: detection returns boxes over an image,
@@ -28,6 +30,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::resolve_policy::Resolved2;
 use crate::{Device, Error, Image, Result};
 
 /// One detected object, in ORIGINAL image pixel coordinates (already mapped
@@ -48,7 +51,7 @@ pub struct Detection {
 }
 
 impl Detection {
-    fn from_raw(d: yolov8::Detection) -> Detection {
+    fn from_raw(d: imaging::nms::Detection) -> Detection {
         Detection { x1: d[0], y1: d[1], x2: d[2], y2: d[3], confidence: d[4], class: d[5] as u32 }
     }
 }
@@ -85,12 +88,19 @@ impl DetectOptions {
     }
 }
 
-/// `brain`'s object-detection pipeline. One architecture today (YOLOv8).
-pub struct DetectionPipeline {
-    model: yolov8::Yolo,
+/// The resolved architecture's resident model.
+enum Detector {
+    // Both boxed: each is kilobytes of resident device state, and the enum should stay one pointer wide.
+    V8(Box<yolov8::Yolo>),
+    V5(Box<yolov5::Yolov5>),
 }
 
-/// Explicit, not derived: `yolov8::Yolo` holds a live GPU device handle
+/// `brain`'s object-detection pipeline over YOLOv8 and YOLOv5 checkpoints.
+pub struct DetectionPipeline {
+    model: Detector,
+}
+
+/// Explicit, not derived: both models hold a live GPU device handle
 /// (no `Debug` impl), the same reason [`crate::UpscalePipeline`]'s own
 /// `Debug` is explicit.
 impl std::fmt::Debug for DetectionPipeline {
@@ -110,10 +120,14 @@ impl DetectionPipeline {
     }
 
     /// The real, static `capability::Manifest` this session's action
-    /// declares (`yolov8::caps::manifest`) - reflected, not re-described,
-    /// same reason [`crate::UpscalePipeline::capabilities`] is.
+    /// declares (`yolov8::caps::manifest` / `yolov5::caps::manifest`, by the
+    /// resolved architecture) - reflected, not re-described, same reason
+    /// [`crate::UpscalePipeline::capabilities`] is.
     pub fn capabilities(&self) -> capability::Manifest {
-        yolov8::caps::manifest()
+        match self.model {
+            Detector::V8(_) => yolov8::caps::manifest(),
+            Detector::V5(_) => yolov5::caps::manifest(),
+        }
     }
 
     /// Detect objects in `image` at [`DetectOptions`]'s defaults.
@@ -125,7 +139,10 @@ impl DetectionPipeline {
     pub fn detect_with(&self, image: &Image, opts: DetectOptions) -> Result<Vec<Detection>> {
         let (w, h) = (image.width(), image.height());
         let hwc = image.to_hwc_unit();
-        let raw = self.model.detect(&hwc, w, h, opts.confidence, opts.iou);
+        let raw = match &self.model {
+            Detector::V8(m) => m.detect(&hwc, w, h, opts.confidence, opts.iou),
+            Detector::V5(m) => m.detect(&hwc, w, h, opts.confidence, opts.iou).map_err(|e| Error::Backend(e.to_string()))?,
+        };
         Ok(raw.into_iter().map(Detection::from_raw).collect())
     }
 }
@@ -155,30 +172,36 @@ impl DetectionPipelineBuilder {
     /// Resolve `model_id` and build a real [`DetectionPipeline`].
     ///
     /// 1. [`Device`] is applied to this process (see [`crate::device::apply`]).
-    /// 2. `crates/loader`'s resolver is tried FIRST against
-    ///    `yolov8::spec::YoloSpec`'s one `"weights"` role: a `.safetensors`
-    ///    archive whose `brain.config` header derives a real YOLOv8 shape
-    ///    that the file's own tensors actually match. Only on `Missing` does
-    ///    `model_id` get parsed and, under
+    /// 2. `crates/loader`'s resolver is tried FIRST over what `model_id`'s own
+    ///    repo directory holds, against `yolov8::spec::YoloSpec` and then
+    ///    `yolov5::spec::Yolov5Spec`, each requiring one `"weights"`
+    ///    `.safetensors` archive whose `brain.config` header derives a real
+    ///    network that the file's own tensors actually match - so the
+    ///    checkpoint, not the caller, decides the architecture. Only when
+    ///    neither resolves does `model_id` get fetched, under
     ///    [`DetectionPipelineBuilder::download_policy`] (default
-    ///    [`loader::DownloadPolicy::IfMissing`]), fetched - then resolution
-    ///    is retried once. See [`crate::resolve_policy::resolve_with_policy`],
-    ///    shared by every pipeline builder that resolves this way -
-    ///    YOLOv8 has a working `brain_modelstore::recipe::YoloRecipe`, so
-    ///    unlike some siblings this reorder closes no live bug, only unifies
-    ///    every pipeline builder onto one resolve strategy.
-    /// 3. `yolov8::Yolo::load` re-reads the SAME checkpoint and builds a
-    ///    single-image (`batch = 1`) detector.
+    ///    [`loader::DownloadPolicy::IfMissing`]), and resolution is retried
+    ///    once. Only YOLOv8 has a model-store recipe: a YOLOv5 checkpoint
+    ///    (AGPL-derived weights) is never fetched, it is supplied locally.
+    /// 3. The matching crate re-reads the SAME checkpoint and builds a
+    ///    single-image detector.
     pub fn load(self) -> Result<DetectionPipeline> {
         let DetectionPipelineBuilder { model_id, device, download_policy } = self;
 
         crate::device::apply(&device)?;
 
         let overrides: BTreeMap<String, String> = BTreeMap::new();
-        let assembly = crate::resolve_policy::resolve_with_policy("yolov8", &yolov8::spec::YoloSpec, &model_id, &overrides, download_policy)?;
-        let weights = assembly.roles.get("weights").ok_or_else(|| Error::Backend(format!("yolov8: resolved assembly {:?} has no weights role", assembly.id)))?;
+        let resolved = crate::resolve_policy::resolve_either_for_reference("yolov8", &yolov8::spec::YoloSpec, "yolov5", &yolov5::spec::Yolov5Spec, &model_id, &overrides, download_policy)?;
+        let (arch, assembly) = match resolved {
+            Resolved2::A(a) => ("yolov8", a),
+            Resolved2::B(b) => ("yolov5", b),
+        };
+        let weights = assembly.roles.get("weights").ok_or_else(|| Error::Backend(format!("{arch}: resolved assembly {:?} has no weights role", assembly.id)))?;
 
-        let model = yolov8::Yolo::load(&weights.to_string_lossy(), 1);
+        let model = match arch {
+            "yolov5" => Detector::V5(Box::new(yolov5::Yolov5::load(weights, 0).map_err(|e| Error::Backend(e.to_string()))?)),
+            _ => Detector::V8(Box::new(yolov8::Yolo::load(&weights.to_string_lossy(), 1))),
+        };
         Ok(DetectionPipeline { model })
     }
 }

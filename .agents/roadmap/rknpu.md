@@ -55,8 +55,17 @@ engine: brain loads a brain checkpoint, compiles it for the NPU itself and serve
   that deploys it to `brain/` in the board user's home directory (SD card, never
   the RAM-backed `/tmp`). Gate: the sample's idle RSS measured on the board, with
   the budget set from the measurement.
-- [ ] M2: YOLOv5 in brain, sharing `crates/yolov8`'s blocks, NMS and letterbox: arch
-  row, import, CPU fp32 forward parity against an ONNX golden, int8 PTQ.
+- [x] M2: YOLOv5 in brain (`crates/yolov5`, arch row `yolov5`, no default ref so
+  nothing is fetched). `tools/yolov5_export/export_yolov5.py` converts Rockchip's
+  `yolov5s_relu.onnx` (121 tensors, 7,226,029 parameters; batch norm folded; the stem is
+  a 2x2/s2 space-to-depth conv, SPPF is six chained 3x3 pools; the sigmoid is inside the
+  graph) into a brain `.safetensors` with a `brain.config` header. fp32 forward through
+  `gpu_core` for any multiple-of-32 input; anchor decode and NMS on the host (NMS hoisted
+  into `imaging::nms`, shared with YOLOv8); `DetectionPipeline` resolves YOLOv5 from the
+  checkpoint. Parity against onnxruntime (`crates/yolov5/tests/parity.rs`, goldens from
+  `tools/goldens/yolov5_dump_reference.py`), max abs diff of the post-sigmoid heads: noise
+  320 3.7e-6, noise 640 4.4e-6, photo 320 9.4e-6, photo 640 1.8e-5 (gate 1e-4).
+  Int8 quantization lives in `crates/rknpu` (M3), not here.
 - [ ] M3: the rknpu crate. Done: driver (buffers, sync, linked one-ioctl
   jobs), dense conv with fused ReLU and height tiling, byte-exact on the board.
   Open: ioctl runtime (buffers, submit, sync), compiler for

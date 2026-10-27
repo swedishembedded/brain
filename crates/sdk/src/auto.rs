@@ -201,6 +201,7 @@ fn detect(overrides: &BTreeMap<String, String>) -> Result<Target> {
     probe!("timesfm3", &timesfm3::spec::Timesfm3Spec, Target::Forecast);
     probe!("clip", &clip::spec::ClipSpec, Target::Embedding);
     probe!("yolov8", &yolov8::spec::YoloSpec, Target::Detection);
+    probe!("yolov5", &yolov5::spec::Yolov5Spec, Target::Detection);
     probe!("sam2", &sam2::spec::Sam2Spec, Target::Segment);
     probe!("zipdepth", &zipdepth::spec::ZipdepthSpec, Target::Depth);
     probe!("florence2", &florence2::spec::Florence2Spec, Target::Grounding);

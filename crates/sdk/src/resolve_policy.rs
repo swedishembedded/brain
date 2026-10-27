@@ -100,7 +100,7 @@ pub(crate) fn resolve_with_policy(arch: &str, spec: &dyn ArchSpec, model_id: &st
 /// which side won is the caller's own dispatch, not this function's; this
 /// only carries the resolved [`capability::Assembly`] back with that
 /// decision attached.
-#[cfg(any(feature = "audio", feature = "forecast", feature = "image"))]
+#[cfg(any(feature = "audio", feature = "forecast", feature = "image", feature = "vision"))]
 pub(crate) enum Resolved2 {
     A(capability::Assembly),
     B(capability::Assembly),
@@ -198,7 +198,7 @@ pub(crate) fn resolve_two_with_policy(
 /// tried again. A side that finds the directory but fails (ambiguous roles,
 /// a read error) ends the search with that error rather than falling through
 /// to the other side.
-#[cfg(feature = "audio")]
+#[cfg(any(feature = "audio", feature = "vision"))]
 pub(crate) fn resolve_either_for_reference(
     a_arch: &str,
     a_spec: &dyn ArchSpec,

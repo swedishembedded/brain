@@ -93,7 +93,7 @@ text = ["resolve", "dep:brain-qwen3", "dep:brain-lfm2", "dep:brain-data", "dep:b
 # inventing a second word for the same modality is exactly what that rule
 # exists to prevent. `brain::DepthPipeline` (ZipDepth monocular depth) joins
 # this SAME feature for the same reason, rather than getting its own.
-vision = ["resolve", "imagetype", "dep:brain-clip", "dep:brain-yolov8", "dep:brain-sam2", "dep:brain-zipdepth", "dep:brain-florence2", "dep:serde_json"]
+vision = ["resolve", "imagetype", "dep:brain-clip", "dep:brain-yolov8", "dep:brain-yolov5", "dep:brain-sam2", "dep:brain-zipdepth", "dep:brain-florence2", "dep:serde_json"]
 # `brain::DecisionPipeline`. Selects `device` only, not `resolve`: like `text`,
 # this architecture has no model-store `ArchSpec`, so there is nothing for a
 # resolver to resolve a hub id against - and a decision model is two artifacts
@@ -259,6 +259,7 @@ brain-viewport = { workspace = true, optional = true }
 # crate has, whichever surfaces it names.
 brain-appopts.workspace = true
 brain-yolov8 = { workspace = true, optional = true }
+brain-yolov5 = { workspace = true, optional = true }
 brain-zipdepth = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
@@ -267,6 +268,8 @@ tempfile = { workspace = true, optional = true }
 [dev-dependencies]
 brain-checkpoint.workspace = true
 brain-testutil.workspace = true
+# `data::rng::Lcg`, the one deterministic test filler (the YOLOv5 fixture weights).
+brain-data.workspace = true
 serde_json.workspace = true
 # An independent SHA-256, so the chat surface's identity test checks the
 # digest it reports against the file's bytes rather than against itself.
