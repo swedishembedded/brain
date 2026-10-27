@@ -334,7 +334,7 @@ fn npu_rows() -> Vec<Row> {
             rate: None,
             rate_unit: None,
             bandwidth_gbs: None,
-            note: Some("no NPU device node found (expected /dev/accel/accel*)".into()),
+            note: Some("no NPU device node found (expected /dev/accel/accel* or /dev/rknpu)".into()),
         }];
     }
 

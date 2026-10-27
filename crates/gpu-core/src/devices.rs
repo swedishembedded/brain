@@ -880,7 +880,7 @@ impl DeviceSpec {
         }
         if any_npu_request && set.npus.is_empty() {
             return Err(
-                "NPU compute requested but no NPU was found (expected /dev/accel/accel*)".to_string(),
+                "NPU compute requested but no NPU was found (expected /dev/accel/accel* or /dev/rknpu)".to_string(),
             );
         }
         if set.gpus.is_empty() && set.cpu_cores.is_empty() && set.npus.is_empty() {
@@ -984,10 +984,33 @@ impl Inventory {
     }
 }
 
-/// Intel NPUs expose `/dev/accel/accel*`; OpenVINO is loaded at run time, so
-/// presence is a device-node question, not a linkage one.
+/// Which NPU family the machine has. The two are driven by different runtimes
+/// (OpenVINO for Intel, brain's own `rknpu` compiler for Rockchip), so a caller
+/// that honours `npu` in a device spec picks its path from this.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NpuKind {
+    /// Intel NPU: `/dev/accel/accel*`.
+    Intel,
+    /// Rockchip RV1103/RV1106-class NPU: `/dev/rknpu` (vendor driver).
+    Rockchip,
+}
+
+/// The NPU family present, by device node; `None` without one. Runtimes are
+/// loaded at run time, so presence is a device-node question, not a linkage
+/// one.
 #[cfg(not(target_arch = "wasm32"))]
-fn npu_count() -> u32 {
+pub fn npu_kind() -> Option<NpuKind> {
+    if intel_npu_nodes() > 0 {
+        Some(NpuKind::Intel)
+    } else if std::path::Path::new("/dev/rknpu").exists() {
+        Some(NpuKind::Rockchip)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn intel_npu_nodes() -> u32 {
     let mut n = 0;
     if let Ok(rd) = std::fs::read_dir("/dev/accel") {
         for e in rd.flatten() {
@@ -997,6 +1020,16 @@ fn npu_count() -> u32 {
         }
     }
     n
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn npu_count() -> u32 {
+    match npu_kind() {
+        Some(NpuKind::Intel) => intel_npu_nodes(),
+        // The vendor driver exposes one node for the whole NPU.
+        Some(NpuKind::Rockchip) => 1,
+        None => 0,
+    }
 }
 
 /// **How** the selected hardware is driven - the `--backend` axis.

@@ -105,7 +105,7 @@ fn print_npus() {
     let npu_nodes = gpu_core::Inventory::probe().npus;
     println!();
     if npu_nodes == 0 {
-        println!("no NPU device node found (expected /dev/accel/accel*)");
+        println!("no NPU device node found (expected /dev/accel/accel* or /dev/rknpu)");
         return;
     }
     println!("NPU: {npu_nodes} device node(s) present (/dev/accel/accel*)");
