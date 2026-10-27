@@ -306,6 +306,21 @@ reference exactly in both variants on both backends; flipping the tie rule in
   (`bf16_gemv_native.rs`, m = 1..8 ragged); the multi-row crossover against the library product is not yet measured on a quiet
   card, so `DENSE_GEMV_MAX_ROWS` stays 1. Small projections sit at a 6.5 us latency floor
   (the 32-row in_proj_a/b, 1024-row k projections).
+- [x] M6g (partial): bf16 storage tiers for the slot pool's bank and recurrent state (`SlotTiers { ring, bank, recurrent }`,
+  default bf16 for all three, `SlotTiers::EXACT` is the f32 reference). The anchor bank's key/value and pending block store
+  bf16 (`AnchorBankPool::tier`; push rounds to nearest even, the commit gather and row copies move words, the reads decode:
+  the split read and the triad's score/apply are the f32 kernels with their key/value bindings rewritten by
+  `dtype_variant`, so the CPU runs them too; `anchor_read_softmax_apply` is gone). The Gated-DeltaNet state and conv history
+  store bf16 (`gdn_decode_pool_bf16`: the shared body templated on the state element, widened on load, rounded on store;
+  `pool_rows_gather2` decodes and `pool_rows_scatter2_bf16` rounds for the WGSL chain and the prefill staging; a speculative
+  verify round still needs the f32 pool and refuses a compact one). Slot bytes from the allocated buffers (real config, bf16
+  ring): 194 MiB all f32, 162 ring bf16, 122 + bank, 137 + recurrent, **97 MiB** all three (`RingEngine::state_bytes()`).
+  Parity on the real weights (`edgerock_real_weights the_serving_slot`, 1400-token prompt, then 48 greedy decode steps):
+  prefill logits cosine 0.9999938 for every tier (reference 220 = greedy), worst bank overlap against the f32 state 99.51%,
+  and the 48 decode tokens identical to the f32 state's. Tiny random model (`edgerock_decode`, CPU, default device, CUDA fp32):
+  bank bf16 alone moves the hidden state by 7e-4 relative L2, recurrent bf16 by 1e-2 to 5e-2 per step (the random tiny state is
+  ill-conditioned; the real model does not show it). `model/tests/anchor_memory` runs the state-form scenario for both bank
+  tiers at hd 6 (triad) and 8 (split) against the sequence form.
 - [x] M5 (forward part): the released weights against the independent reference
   forward (`tools/goldens/edgerock_dump_real_reference.py`, fp32 CPU torch, a
   1400-token prompt that slides the window and commits five blocks, then asks about

@@ -169,12 +169,23 @@ __device__ __forceinline__ float brain_conv_silu(float (&h)[3], const float (&w)
     return brain_silu(acc);
 }
 
+// The recurrent state and the conv window are stored as f32 or as bf16 (an `unsigned short` holding the top half of the
+// f32): every arithmetic step is f32, a bf16 element is widened on load and rounded to nearest even on store.
+__device__ __forceinline__ float brain_ld_state(const float* p) { return *p; }
+__device__ __forceinline__ float brain_ld_state(const unsigned short* p) { return __uint_as_float(static_cast<unsigned int>(*p) << 16); }
+__device__ __forceinline__ void brain_st_state(float* p, float v) { *p = v; }
+__device__ __forceinline__ void brain_st_state(unsigned short* p, float v) {
+    const unsigned int b = __float_as_uint(v);
+    *p = static_cast<unsigned short>((b + 0x7FFFu + ((b >> 16) & 1u)) >> 16);
+}
+
 // `rows` consecutive steps of one sequence for key head `kh`: every pointer is
 // already the sequence's own (its tokens' inputs, its window and its state).
+template <typename S>
 __device__ __forceinline__ void brain_gdn_decode_body(const unsigned int* params, unsigned int kh, unsigned int rows,
-                                                      const float* mixed, const float* conv_w, float* hist,
+                                                      const float* mixed, const float* conv_w, S* hist,
                                                       const float* bproj, const float* aproj, const float* a_log,
-                                                      const float* dt_bias, float* state, const float* z,
+                                                      const float* dt_bias, S* state, const float* z,
                                                       const float* norm_w, float* gated, float* snap_state,
                                                       float* snap_hist) {
     const unsigned int nkh = params[0];
@@ -205,9 +216,9 @@ __device__ __forceinline__ void brain_gdn_decode_body(const unsigned int* params
 
     // The state column: loaded once, kept in registers across the rows.
     float s[BRAIN_GDN_HD];
-    float* state_col = state + ((unsigned long long)vh * BRAIN_GDN_HD) * BRAIN_GDN_HD + j;
+    S* state_col = state + ((unsigned long long)vh * BRAIN_GDN_HD) * BRAIN_GDN_HD + j;
 #pragma unroll
-    for (int i = 0; i < BRAIN_GDN_HD; ++i) { s[i] = live ? state_col[(unsigned long long)i * BRAIN_GDN_HD] : 0.0f; }
+    for (int i = 0; i < BRAIN_GDN_HD; ++i) { s[i] = live ? brain_ld_state(state_col + (unsigned long long)i * BRAIN_GDN_HD) : 0.0f; }
 
     // Phase A. The channels this block owns: q and k of key head `kh` and v of
     // each of its value heads. A channel's window is read and rewritten by its
@@ -223,19 +234,19 @@ __device__ __forceinline__ void brain_gdn_decode_body(const unsigned int* params
     float h0[3], h1[3], h2[3], w0[4], w1[4], w2[4];
     if (do_q) {
 #pragma unroll
-        for (int i = 0; i < 3; ++i) { h0[i] = hist[(unsigned long long)q_ch * 3 + i]; }
+        for (int i = 0; i < 3; ++i) { h0[i] = brain_ld_state(hist + (unsigned long long)q_ch * 3 + i); }
 #pragma unroll
         for (int i = 0; i < 4; ++i) { w0[i] = conv_w[(unsigned long long)q_ch * 4 + i]; }
     }
     if (do_k) {
 #pragma unroll
-        for (int i = 0; i < 3; ++i) { h1[i] = hist[(unsigned long long)k_ch * 3 + i]; }
+        for (int i = 0; i < 3; ++i) { h1[i] = brain_ld_state(hist + (unsigned long long)k_ch * 3 + i); }
 #pragma unroll
         for (int i = 0; i < 4; ++i) { w1[i] = conv_w[(unsigned long long)k_ch * 4 + i]; }
     }
     if (live) {
 #pragma unroll
-        for (int i = 0; i < 3; ++i) { h2[i] = hist[(unsigned long long)v_ch * 3 + i]; }
+        for (int i = 0; i < 3; ++i) { h2[i] = brain_ld_state(hist + (unsigned long long)v_ch * 3 + i); }
 #pragma unroll
         for (int i = 0; i < 4; ++i) { w2[i] = conv_w[(unsigned long long)v_ch * 4 + i]; }
     }
@@ -266,15 +277,15 @@ __device__ __forceinline__ void brain_gdn_decode_body(const unsigned int* params
     // The windows are final: write them back now so the registers are free.
     if (do_q) {
 #pragma unroll
-        for (int i = 0; i < 3; ++i) { hist[(unsigned long long)q_ch * 3 + i] = h0[i]; }
+        for (int i = 0; i < 3; ++i) { brain_st_state(hist + (unsigned long long)q_ch * 3 + i, h0[i]); }
     }
     if (do_k) {
 #pragma unroll
-        for (int i = 0; i < 3; ++i) { hist[(unsigned long long)k_ch * 3 + i] = h1[i]; }
+        for (int i = 0; i < 3; ++i) { brain_st_state(hist + (unsigned long long)k_ch * 3 + i, h1[i]); }
     }
     if (live) {
 #pragma unroll
-        for (int i = 0; i < 3; ++i) { hist[(unsigned long long)v_ch * 3 + i] = h2[i]; }
+        for (int i = 0; i < 3; ++i) { brain_st_state(hist + (unsigned long long)v_ch * 3 + i, h2[i]); }
     }
     // The gates of every (row, value head): beta = sigmoid(b), decay = exp(g).
     if (t < rows * group) {
@@ -359,7 +370,7 @@ __device__ __forceinline__ void brain_gdn_decode_body(const unsigned int* params
             }
         }
 #pragma unroll
-        for (int i = 0; i < BRAIN_GDN_HD; ++i) { state_col[(unsigned long long)i * BRAIN_GDN_HD] = s[i]; }
+        for (int i = 0; i < BRAIN_GDN_HD; ++i) { brain_st_state(state_col + (unsigned long long)i * BRAIN_GDN_HD, s[i]); }
     }
     __syncthreads();
 
@@ -404,7 +415,7 @@ brain_gdn_decode(const unsigned int* params, const float* mixed, const float* co
     BRAIN_PDL_ENTRY();
     const unsigned int kh = blockIdx.y * gridDim.x + blockIdx.x;  // key head
     if (kh >= params[0]) { return; }                               // block-uniform
-    brain_gdn_decode_body(params, kh, params[6], mixed, conv_w, hist, bproj, aproj, a_log, dt_bias, state, z, norm_w,
+    brain_gdn_decode_body<float>(params, kh, params[6], mixed, conv_w, hist, bproj, aproj, a_log, dt_bias, state, z, norm_w,
                           gated, nullptr, nullptr);
 }
 
@@ -424,7 +435,7 @@ brain_gdn_decode_pool(const unsigned int* params, const float* mixed, const floa
     if (bi >= b) { return; }                          // block-uniform
     const unsigned long long conv_dim = 2ull * nkh * BRAIN_GDN_HD + static_cast<unsigned long long>(nvh) * BRAIN_GDN_HD;
     const unsigned long long row = rows[bi];
-    brain_gdn_decode_body(params, kh, 1u, mixed + bi * conv_dim, conv_w, hist + row * conv_dim * (BRAIN_GDN_KW - 1),
+    brain_gdn_decode_body<float>(params, kh, 1u, mixed + bi * conv_dim, conv_w, hist + row * conv_dim * (BRAIN_GDN_KW - 1),
                           bproj + static_cast<unsigned long long>(bi) * nvh, aproj + static_cast<unsigned long long>(bi) * nvh,
                           a_log, dt_bias, state + row * nvh * BRAIN_GDN_HD * BRAIN_GDN_HD,
                           z + static_cast<unsigned long long>(bi) * nvh * BRAIN_GDN_HD, norm_w,
@@ -453,7 +464,7 @@ brain_gdn_verify_pool(const unsigned int* params, const float* mixed, const floa
     const unsigned long long row = rows[bi];
     const unsigned long long off = offs[bi];
     const unsigned int n = counts[bi];
-    brain_gdn_decode_body(params, kh, n, mixed + off * conv_dim, conv_w, hist + row * hist_len,
+    brain_gdn_decode_body<float>(params, kh, n, mixed + off * conv_dim, conv_w, hist + row * hist_len,
                           bproj + off * nvh, aproj + off * nvh, a_log, dt_bias, state + row * state_len,
                           z + off * nvh * BRAIN_GDN_HD, norm_w, gated + off * nvh * BRAIN_GDN_HD,
                           snap_state + off * state_len, snap_hist + off * hist_len);
@@ -501,4 +512,28 @@ brain_gdn_commit_pool(const unsigned int* params, float* pool_state, float* pool
             if (i < n4) { dst[i] = src[i]; }
         }
     }
+}
+
+// The pooled decode over a pool that stores the state and the conv window as bf16 (two bytes an element): the same body
+// with the state widened on load and rounded to nearest even on store. `hist` and `state` are `[pool, ...]` arrays of
+// bf16 elements, indexed exactly as the f32 pool is.
+extern "C" __global__ void __launch_bounds__(BRAIN_GDN_MAX_GROUP * BRAIN_GDN_HD, 1)
+brain_gdn_decode_pool_bf16(const unsigned int* params, const float* mixed, const float* conv_w, unsigned short* hist,
+                           const float* bproj, const float* aproj, const float* a_log, const float* dt_bias,
+                           unsigned short* state, const float* z, const float* norm_w, float* gated, const unsigned int* rows) {
+    BRAIN_PDL_ENTRY();
+    const unsigned int nkh = params[0];
+    const unsigned int nvh = params[1];
+    const unsigned int b = params[6];
+    const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
+    const unsigned int bi = blk / nkh;                // batch row
+    const unsigned int kh = blk - bi * nkh;           // key head
+    if (bi >= b) { return; }                          // block-uniform
+    const unsigned long long conv_dim = 2ull * nkh * BRAIN_GDN_HD + static_cast<unsigned long long>(nvh) * BRAIN_GDN_HD;
+    const unsigned long long row = rows[bi];
+    brain_gdn_decode_body<unsigned short>(params, kh, 1u, mixed + bi * conv_dim, conv_w, hist + row * conv_dim * (BRAIN_GDN_KW - 1),
+                                          bproj + static_cast<unsigned long long>(bi) * nvh, aproj + static_cast<unsigned long long>(bi) * nvh,
+                                          a_log, dt_bias, state + row * nvh * BRAIN_GDN_HD * BRAIN_GDN_HD,
+                                          z + static_cast<unsigned long long>(bi) * nvh * BRAIN_GDN_HD, norm_w,
+                                          gated + static_cast<unsigned long long>(bi) * nvh * BRAIN_GDN_HD, nullptr, nullptr);
 }

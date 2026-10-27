@@ -73,31 +73,47 @@
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 
+use crate::kv_tier::KvTier;
+
 use crate::block::{rmsnorm_bwd, rmsnorm_fwd, rope2d_partial_bwd, rope2d_partial_fwd, swiglu_bwd, KernelIds};
 
 /// The kernels the anchor memory adds to a model's pipeline list (they are
 /// resolved by name, [`AnchorMemoryKernels::resolve`]). `attn_softmax_cross` is
-/// the row softmax over `capacity + 1` columns.
-pub const ANCHOR_MEMORY_PIPELINES: [(&str, &str); 18] = [
-    ("anchor_commit", kernels::ANCHOR_COMMIT),
-    ("anchor_read_scores", kernels::ANCHOR_READ_SCORES),
-    ("anchor_read_apply", kernels::ANCHOR_READ_APPLY),
-    ("anchor_read_gate", kernels::ANCHOR_READ_GATE),
-    ("attn_softmax_cross", kernels::ATTN_SOFTMAX_CROSS),
-    ("anchor_read_bwd_dp", kernels::ANCHOR_READ_BWD_DP),
-    ("anchor_read_bwd_q", kernels::ANCHOR_READ_BWD_Q),
-    ("anchor_slot_inverse", kernels::ANCHOR_SLOT_INVERSE),
-    ("anchor_read_bwd_kv", kernels::ANCHOR_READ_BWD_KV),
-    ("anchor_read_gate_bwd", kernels::ANCHOR_READ_GATE_BWD),
-    ("anchor_read_gate_wgrad", kernels::ANCHOR_READ_GATE_WGRAD),
-    ("softmax_k_dx", kernels::SOFTMAX_K_DX),
-    ("anchor_bank_gather", kernels::ANCHOR_BANK_GATHER),
-    ("anchor_push", kernels::ANCHOR_PUSH),
-    ("anchor_rows_copy", kernels::ANCHOR_ROWS_COPY),
-    ("anchor_read_softmax_apply", kernels::ANCHOR_READ_SOFTMAX_APPLY),
-    ("anchor_read_split", kernels::ANCHOR_READ_SPLIT),
-    ("anchor_read_merge", kernels::ANCHOR_READ_MERGE),
-];
+/// the row softmax over `capacity + 1` columns. The bf16-bank read builds are the f32 kernels with their key and value
+/// bindings rewritten to packed bf16 loads (`kernels::template::dtype_variant`).
+pub fn anchor_memory_pipelines() -> &'static [(&'static str, &'static str)] {
+    static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| {
+        use gpu_core::select::Dtype;
+        use kernels::template::dtype_variant;
+        let mut v = vec![
+            ("anchor_commit", kernels::ANCHOR_COMMIT),
+            ("anchor_read_scores", kernels::ANCHOR_READ_SCORES),
+            ("anchor_read_apply", kernels::ANCHOR_READ_APPLY),
+            ("anchor_read_gate", kernels::ANCHOR_READ_GATE),
+            ("attn_softmax_cross", kernels::ATTN_SOFTMAX_CROSS),
+            ("anchor_read_bwd_dp", kernels::ANCHOR_READ_BWD_DP),
+            ("anchor_read_bwd_q", kernels::ANCHOR_READ_BWD_Q),
+            ("anchor_slot_inverse", kernels::ANCHOR_SLOT_INVERSE),
+            ("anchor_read_bwd_kv", kernels::ANCHOR_READ_BWD_KV),
+            ("anchor_read_gate_bwd", kernels::ANCHOR_READ_GATE_BWD),
+            ("anchor_read_gate_wgrad", kernels::ANCHOR_READ_GATE_WGRAD),
+            ("softmax_k_dx", kernels::SOFTMAX_K_DX),
+            ("anchor_bank_gather", kernels::ANCHOR_BANK_GATHER),
+            ("anchor_push", kernels::ANCHOR_PUSH),
+            ("anchor_rows_copy", kernels::ANCHOR_ROWS_COPY),
+            ("anchor_read_split", kernels::ANCHOR_READ_SPLIT),
+            ("anchor_read_merge", kernels::ANCHOR_READ_MERGE),
+            ("anchor_push_bf16", kernels::ANCHOR_PUSH_BF16),
+        ];
+        let scores = dtype_variant("anchor_read_scores", kernels::ANCHOR_READ_SCORES, "key", Dtype::BF16).expect("key is templatable");
+        let apply = dtype_variant("anchor_read_apply", kernels::ANCHOR_READ_APPLY, "value", Dtype::BF16).expect("value is templatable");
+        let split_k = dtype_variant("anchor_read_split", kernels::ANCHOR_READ_SPLIT, "key", Dtype::BF16).expect("key is templatable");
+        let split = dtype_variant(split_k.0, split_k.1, "value", Dtype::BF16).expect("value is templatable");
+        v.extend([scores, apply, split]);
+        v
+    })
+}
 
 /// The anchor-memory pipeline indices, as the caller registered them.
 #[derive(Clone, Copy, Debug)]
@@ -120,42 +136,45 @@ pub struct AnchorMemoryKernels {
     pub bank_gather: usize,
     pub push: usize,
     pub rows_copy: usize,
-    /// `anchor_read_softmax_apply`: the inference read's softmax and apply in one kernel (workgroup-cooperative,
-    /// so a device without workgroup reductions keeps the two kernels).
-    pub read_softmax_apply: usize,
     /// `anchor_read_split` and `anchor_read_merge`: the inference read split over the bank's slots, so one sequence's
     /// read fills the device.
     pub read_split: usize,
     pub read_merge: usize,
+    /// The bf16-bank builds: `anchor_push_bf16` (rounds the record on its way into the pending block) and the read
+    /// kernels with packed bf16 key/value loads.
+    pub push_bf16: usize,
+    pub read_scores_bf16: usize,
+    pub read_apply_bf16: usize,
+    pub read_split_bf16: usize,
 }
 
 impl AnchorMemoryKernels {
     /// Look the kernels up on `gpu` by name. An error names the first missing
-    /// one: the model did not register [`ANCHOR_MEMORY_PIPELINES`].
+    /// one: the model did not register [`anchor_memory_pipelines`].
     pub fn resolve(gpu: &Gpu) -> Result<AnchorMemoryKernels, String> {
-        let find = |i: usize| {
-            let name = ANCHOR_MEMORY_PIPELINES[i].0;
-            gpu.kernel_index(name).ok_or_else(|| format!("anchor memory: kernel '{name}' is not registered on this Gpu (add model::anchor_memory::ANCHOR_MEMORY_PIPELINES to its pipelines)"))
-        };
+        let find = |name: &str| gpu.kernel_index(name).ok_or_else(|| format!("anchor memory: kernel '{name}' is not registered on this Gpu (add model::anchor_memory::anchor_memory_pipelines() to its pipelines)"));
         Ok(AnchorMemoryKernels {
-            commit: find(0)?,
-            read_scores: find(1)?,
-            read_apply: find(2)?,
-            read_gate: find(3)?,
-            row_softmax: find(4)?,
-            read_bwd_dp: find(5)?,
-            read_bwd_q: find(6)?,
-            slot_inverse: find(7)?,
-            read_bwd_kv: find(8)?,
-            read_gate_bwd: find(9)?,
-            read_gate_wgrad: find(10)?,
-            row_softmax_dx: find(11)?,
-            bank_gather: find(12)?,
-            push: find(13)?,
-            rows_copy: find(14)?,
-            read_softmax_apply: find(15)?,
-            read_split: find(16)?,
-            read_merge: find(17)?,
+            commit: find("anchor_commit")?,
+            read_scores: find("anchor_read_scores")?,
+            read_apply: find("anchor_read_apply")?,
+            read_gate: find("anchor_read_gate")?,
+            row_softmax: find("attn_softmax_cross")?,
+            read_bwd_dp: find("anchor_read_bwd_dp")?,
+            read_bwd_q: find("anchor_read_bwd_q")?,
+            slot_inverse: find("anchor_slot_inverse")?,
+            read_bwd_kv: find("anchor_read_bwd_kv")?,
+            read_gate_bwd: find("anchor_read_gate_bwd")?,
+            read_gate_wgrad: find("anchor_read_gate_wgrad")?,
+            row_softmax_dx: find("softmax_k_dx")?,
+            bank_gather: find("anchor_bank_gather")?,
+            push: find("anchor_push")?,
+            rows_copy: find("anchor_rows_copy")?,
+            read_split: find("anchor_read_split")?,
+            read_merge: find("anchor_read_merge")?,
+            push_bf16: find("anchor_push_bf16")?,
+            read_scores_bf16: find("anchor_read_scores#key=bf16")?,
+            read_apply_bf16: find("anchor_read_apply#value=bf16")?,
+            read_split_bf16: find("anchor_read_split#key=bf16#value=bf16")?,
         })
     }
 }
@@ -434,6 +453,8 @@ pub fn anchor_select_steps(g: &Gpu, ids: &AnchorMemoryKernels, s: &AnchorMemoryS
 pub struct BankAddressing<'a> {
     pub kv_rows: u32,
     pub slots: Option<&'a DeviceBuffer>,
+    /// How the bank stores its keys and values ([`AnchorBankPool::tier`]).
+    pub tier: KvTier,
 }
 
 /// Bank slots per workgroup of the split read ([`anchor_read_steps_at`]): the width the kernel's 256 threads cover as
@@ -465,7 +486,7 @@ pub fn anchor_read_steps(
     probs: &DeviceBuffer,
     read: &DeviceBuffer,
 ) -> Vec<Step> {
-    anchor_read_steps_at(g, ids, s, BankAddressing { kv_rows: s.t, slots: None }, query, key, value, refs, logits, probs, read)
+    anchor_read_steps_at(g, ids, s, BankAddressing { kv_rows: s.t, slots: None, tier: KvTier::F32 }, query, key, value, refs, logits, probs, read)
 }
 
 /// [`anchor_read_steps`] over records addressed as `at` says.
@@ -494,33 +515,32 @@ pub fn anchor_read_steps_at(
         }
     };
     let rows_heads = u64::from(s.rows()) * u64::from(s.n_heads);
-    // A read from a pool of fixed-state banks keeps no backward, so on a device that runs workgroup-cooperative
-    // kernels the softmax and the apply are one kernel and `probs` is not written. The bank's slots are cut into
-    // pieces of `READ_SPLIT_SLOTS`, each a workgroup of its own (flash-decoding), so a single sequence's read fills
-    // the device; the pieces' softmax records are merged by a second dispatch.
-    if at.slots.is_some() && g.caps().workgroup_reductions && s.n_heads / s.n_kv_heads <= 8 {
-        if split_read_applies(g, s) {
-            let splits = s.capacity.div_ceil(READ_SPLIT_SLOTS);
-            let sp = [s.rows(), s.t, s.n_heads, s.n_kv_heads, s.capacity, s.head_dim, s.commit_block, at.kv_rows, 1, splits];
-            let hpg = s.n_heads / s.n_kv_heads;
-            let part = g.storage_uninit(u64::from(s.rows()) * u64::from(s.n_kv_heads) * u64::from(splits) * u64::from(hpg) * u64::from(s.head_dim + 4));
-            let groups = u64::from(s.rows()) * u64::from(s.n_kv_heads);
-            return vec![
-                g.dispatch(ids.read_split, &[query, key, value, refs, slots, &part], &sp, gpu_core::Dispatch::Workgroups(threads("anchor_read_split", groups * u64::from(splits)))),
-                g.dispatch(ids.read_merge, &[&part, read], &sp, gpu_core::Dispatch::Workgroups(threads("anchor_read_merge", u64::from(s.rows()) * u64::from(s.n_heads)))),
-            ];
-        }
-        let tiles = u64::from(s.head_dim.div_ceil(32));
-        let scores = g.step(ids.read_scores, &[query, key, refs, logits, slots], &p, threads("anchor_read_scores", rows_heads * u64::from(s.capacity + 1)));
+    // A read from a pool of fixed-state banks keeps no backward. Where the device runs workgroup-cooperative kernels
+    // the bank's slots are cut into pieces of `READ_SPLIT_SLOTS`, each a workgroup of its own (flash-decoding), so a
+    // single sequence's read fills the device; the pieces' softmax records are merged by a second dispatch, and no
+    // logits or probabilities are written.
+    let bf16 = match at.tier {
+        KvTier::F32 => false,
+        KvTier::BF16 => true,
+        other => panic!("anchor memory: a bank stores f32 or bf16, not {other}"),
+    };
+    if at.slots.is_some() && split_read_applies(g, s) {
+        let splits = s.capacity.div_ceil(READ_SPLIT_SLOTS);
+        let sp = [s.rows(), s.t, s.n_heads, s.n_kv_heads, s.capacity, s.head_dim, s.commit_block, at.kv_rows, 1, splits];
+        let hpg = s.n_heads / s.n_kv_heads;
+        let part = g.storage_uninit(u64::from(s.rows()) * u64::from(s.n_kv_heads) * u64::from(splits) * u64::from(hpg) * u64::from(s.head_dim + 4));
+        let groups = u64::from(s.rows()) * u64::from(s.n_kv_heads);
+        let split = if bf16 { ids.read_split_bf16 } else { ids.read_split };
         return vec![
-            scores,
-            g.dispatch(ids.read_softmax_apply, &[logits, value, refs, read, slots], &p, gpu_core::Dispatch::Workgroups((u64::from(s.rows()) * u64::from(s.n_kv_heads) * tiles) as u32)),
+            g.dispatch(split, &[query, key, value, refs, slots, &part], &sp, gpu_core::Dispatch::Workgroups(threads("anchor_read_split", groups * u64::from(splits)))),
+            g.dispatch(ids.read_merge, &[&part, read], &sp, gpu_core::Dispatch::Workgroups(threads("anchor_read_merge", u64::from(s.rows()) * u64::from(s.n_heads)))),
         ];
     }
+    let (scores, apply) = if bf16 { (ids.read_scores_bf16, ids.read_apply_bf16) } else { (ids.read_scores, ids.read_apply) };
     vec![
-        g.step(ids.read_scores, &[query, key, refs, logits, slots], &p, threads("anchor_read_scores", rows_heads * u64::from(s.capacity + 1))),
+        g.step(scores, &[query, key, refs, logits, slots], &p, threads("anchor_read_scores", rows_heads * u64::from(s.capacity + 1))),
         g.step(ids.row_softmax, &[logits, probs], &[s.rows() * s.n_heads, 1, 1, s.capacity + 1], threads("anchor softmax", rows_heads)),
-        g.step(ids.read_apply, &[probs, value, refs, read, slots], &p, threads("anchor_read_apply", rows_heads * u64::from(s.head_dim))),
+        g.step(apply, &[probs, value, refs, read, slots], &p, threads("anchor_read_apply", rows_heads * u64::from(s.head_dim))),
     ]
 }
 
@@ -803,6 +823,9 @@ pub struct AnchorBankPool {
     pub capacity: u32,
     pub commit_block: u32,
     pub head_dim: u32,
+    /// How `key`, `value`, `pend_key` and `pend_value` store their elements: f32, or bf16 (two to a word, the even
+    /// channel in the low half) with f32 arithmetic everywhere they are read. `pos`, `score` and `pend_score` are f32.
+    pub tier: KvTier,
     pub pos: DeviceBuffer,
     pub score: DeviceBuffer,
     pub key: DeviceBuffer,
@@ -813,9 +836,21 @@ pub struct AnchorBankPool {
 }
 
 impl AnchorBankPool {
-    /// An empty pool; `s` supplies the geometry (its sequence count and length are not used).
-    pub fn new(g: &Gpu, s: &AnchorMemoryShape, slots: u32) -> AnchorBankPool {
+    /// Device words of `elems` key or value elements in `tier`.
+    fn elem_words(tier: KvTier, elems: u64) -> u64 {
+        match tier {
+            KvTier::F32 => elems,
+            KvTier::BF16 => elems.div_ceil(2),
+            other => panic!("anchor bank: a bank stores f32 or bf16, not {other}"),
+        }
+    }
+
+    /// An empty pool; `s` supplies the geometry (its sequence count and length are not used). Keys and values are
+    /// stored in `tier` (f32 or bf16); a bf16 bank needs an even `head_dim`.
+    pub fn new(g: &Gpu, s: &AnchorMemoryShape, slots: u32, tier: KvTier) -> AnchorBankPool {
+        assert!(tier == KvTier::F32 || (tier == KvTier::BF16 && s.head_dim.is_multiple_of(2)), "anchor bank: tier {tier} with head_dim {}", s.head_dim);
         let zeros = |words: u64| g.storage_init("anchor_bank", &vec![0f32; words as usize]);
+        let kv = |elems: u64| zeros(Self::elem_words(tier, elems));
         let (gg, k, c, gd) = (u64::from(s.n_kv_heads), u64::from(s.capacity), u64::from(s.commit_block), u64::from(s.n_kv_heads * s.head_dim));
         let n = u64::from(slots);
         AnchorBankPool {
@@ -824,12 +859,13 @@ impl AnchorBankPool {
             capacity: s.capacity,
             commit_block: s.commit_block,
             head_dim: s.head_dim,
+            tier,
             pos: zeros(n * gg * k),
             score: zeros(n * gg * k),
-            key: zeros(n * k * gd),
-            value: zeros(n * k * gd),
-            pend_key: zeros(n * c * gd),
-            pend_value: zeros(n * c * gd),
+            key: kv(n * k * gd),
+            value: kv(n * k * gd),
+            pend_key: kv(n * c * gd),
+            pend_value: kv(n * c * gd),
             pend_score: zeros(n * c * gg),
         }
     }
@@ -837,13 +873,14 @@ impl AnchorBankPool {
     /// An empty pool of the same geometry and slot count.
     pub fn like(g: &Gpu, other: &AnchorBankPool) -> AnchorBankPool {
         let s = AnchorMemoryShape { n_seq: 1, t: 1, d_model: 1, n_heads: other.groups, n_kv_heads: other.groups, head_dim: other.head_dim, rotary_half: 0, rms_eps: 0.0, capacity: other.capacity, commit_block: other.commit_block, admission_rank: 1, writer_intermediate: 1 };
-        AnchorBankPool::new(g, &s, other.slots)
+        AnchorBankPool::new(g, &s, other.slots, other.tier)
     }
 
     /// Every buffer of the pool with its per-slot width in words.
     pub fn arrays(&self) -> [(&DeviceBuffer, u64); 7] {
         let (gg, k, c, gd) = (u64::from(self.groups), u64::from(self.capacity), u64::from(self.commit_block), u64::from(self.groups * self.head_dim));
-        [(&self.pos, gg * k), (&self.score, gg * k), (&self.key, k * gd), (&self.value, k * gd), (&self.pend_key, c * gd), (&self.pend_value, c * gd), (&self.pend_score, c * gg)]
+        let w = |elems| Self::elem_words(self.tier, elems);
+        [(&self.pos, gg * k), (&self.score, gg * k), (&self.key, w(k * gd)), (&self.value, w(k * gd)), (&self.pend_key, w(c * gd)), (&self.pend_value, w(c * gd)), (&self.pend_score, c * gg)]
     }
 
     /// Words one slot holds: the whole per-sequence state of this layer.
@@ -1001,14 +1038,23 @@ pub fn state_push_steps(g: &Gpu, ids: &AnchorMemoryKernels, s: &AnchorMemoryShap
     if plan.n_push == 0 {
         return Vec::new();
     }
-    vec![g.step(ids.push, &[&plan.push, key, value, scores, &pool.pend_key, &pool.pend_value, &pool.pend_score], &[plan.n_push, gg, hd], threads("anchor_push", u64::from(plan.n_push) * u64::from(gg * hd)))]
+    let (kernel, per_record) = match pool.tier {
+        KvTier::BF16 => (ids.push_bf16, gg * hd / 2),
+        _ => (ids.push, gg * hd),
+    };
+    vec![g.step(kernel, &[&plan.push, key, value, scores, &pool.pend_key, &pool.pend_value, &pool.pend_score], &[plan.n_push, gg, hd], threads("anchor_push", u64::from(plan.n_push) * u64::from(per_record)))]
 }
 
 /// Run the planned commits: merge pending into the bank (`anchor_commit` orders, `anchor_bank_gather` moves the keys
 /// and values) into a scratch bank and store it back to the pool rows. The scratch hop exists because a commit reads
 /// the whole old bank of its row.
 pub fn state_commit_steps(g: &Gpu, ids: &AnchorMemoryKernels, s: &AnchorMemoryShape, pool: &AnchorBankPool, plan: &CommitPlan) -> Vec<Step> {
-    let (gg, k, hd) = (s.n_kv_heads, s.capacity, s.head_dim);
+    let (gg, k) = (s.n_kv_heads, s.capacity);
+    // The records move as words: a record's channels are `head_dim` words of an f32 bank, half as many of a bf16 one.
+    let hd = match pool.tier {
+        KvTier::BF16 => s.head_dim / 2,
+        _ => s.head_dim,
+    };
     let gd = gg * hd;
     if plan.n_commit == 0 {
         return Vec::new();
@@ -1065,7 +1111,7 @@ pub fn anchor_memory_decode_fwd(g: &Gpu, ids: &AnchorMemoryIds, s: &AnchorMemory
     let words = if split_read_applies(g, &rs) { 1 } else { u64::from(n) * u64::from(s.n_heads) * u64::from(s.capacity + 1) };
     let (logits, probs) = (g.storage_uninit(words), g.storage_uninit(words));
     let read_out = g.storage_uninit(u64::from(n) * u64::from(s.n_heads * s.head_dim));
-    g.submit(&[], &anchor_read_steps_at(g, &ids.memory, &rs, BankAddressing { kv_rows: pool.capacity, slots: Some(&read.slots) }, &p.query, &pool.key, &pool.value, &read.refs, &logits, &probs, &read_out));
+    g.submit(&[], &anchor_read_steps_at(g, &ids.memory, &rs, BankAddressing { kv_rows: pool.capacity, slots: Some(&read.slots), tier: pool.tier }, &p.query, &pool.key, &pool.value, &read.refs, &logits, &probs, &read_out));
     let out = finish_read(g, ids, s, project, &p.gate, &read_out);
     g.submit(&[], &state_push_steps(g, &ids.memory, s, pool, push, &p.key, &p.value, &p.scores));
     out
@@ -1094,7 +1140,7 @@ pub fn anchor_memory_chunk_fwd(g: &Gpu, ids: &AnchorMemoryIds, s: &AnchorMemoryS
         let words = u64::from(rows) * u64::from(s.n_heads) * u64::from(s.capacity + 1);
         let (logits, probs) = (g.storage_uninit(words), g.storage_uninit(words));
         g.submit(&[], &[g.step(ids.memory.rows_copy, &[&rows_of(a), &p.query, &seg_q], &[rows, qd], rows * qd)]);
-        g.submit(&[], &anchor_read_steps_at(g, &ids.memory, &rs, BankAddressing { kv_rows: pool.capacity, slots: Some(&plan.slots) }, &seg_q, &pool.key, &pool.value, &plan.refs, &logits, &probs, &seg_out));
+        g.submit(&[], &anchor_read_steps_at(g, &ids.memory, &rs, BankAddressing { kv_rows: pool.capacity, slots: Some(&plan.slots), tier: pool.tier }, &seg_q, &pool.key, &pool.value, &plan.refs, &logits, &probs, &seg_out));
         g.submit(&[], &[g.step(ids.memory.rows_copy, &[&to_rows(a), &seg_out, &read_out], &[rows, qd], rows * qd)]);
         // Absorb the segment's records; a block this completes commits.
         let pushes: Vec<Push> = (0..rows).map(|i| Push { slot, pos: pos + i, src_row: a + i }).collect();

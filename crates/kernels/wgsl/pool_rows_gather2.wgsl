@@ -49,10 +49,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let row = idx / width;
     let c = idx % width;
     let src = ids[row];
+    // Bare indices, so the bf16 storage variant (`dtype_variant` on `pool_a` and `pool_b`) can decode each load.
     if (c < p.len_a) {
-        out_a[row * p.len_a + c] = pool_a[src * p.len_a + c];
+        let ia = src * p.len_a + c;
+        out_a[row * p.len_a + c] = pool_a[ia];
     } else {
         let cb = c - p.len_a;
-        out_b[row * p.len_b + cb] = pool_b[src * p.len_b + cb];
+        let ib = src * p.len_b + cb;
+        out_b[row * p.len_b + cb] = pool_b[ib];
     }
 }

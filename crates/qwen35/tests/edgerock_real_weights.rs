@@ -211,9 +211,20 @@ fn the_serving_slot_matches_the_reference_with_a_bf16_ring() {
     let want_token = want.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0 as u32;
     let dir = Path::new(&dir);
     let cfg = qwen35::fp8_source::hf_config(dir).expect("config.json");
-    for ring in [model::kv_tier::KvTier::F32, model::kv_tier::KvTier::BF16] {
+    use model::kv_tier::KvTier;
+    use qwen35::model::SlotTiers;
+    let tiers = [
+        ("f32 ring, f32 bank and state", SlotTiers { ring: KvTier::F32, bank: KvTier::F32, recurrent: KvTier::F32 }),
+        ("bf16 ring", SlotTiers { ring: KvTier::BF16, bank: KvTier::F32, recurrent: KvTier::F32 }),
+        ("bf16 ring and bank", SlotTiers { ring: KvTier::BF16, bank: KvTier::BF16, recurrent: KvTier::F32 }),
+        ("bf16 ring and recurrent state", SlotTiers { ring: KvTier::BF16, bank: KvTier::F32, recurrent: KvTier::BF16 }),
+        ("bf16 ring, bank and recurrent state", SlotTiers { ring: KvTier::BF16, bank: KvTier::BF16, recurrent: KvTier::BF16 }),
+    ];
+    let mut reference_run: Option<Vec<u32>> = None;
+    let mut reference_banks: Option<Vec<Vec<u32>>> = None;
+    for (label, tiers) in tiers {
         let src = qwen35::fp8_source::open_dir(dir, &cfg, 128).expect("every tensor is covered");
-        let mut engine = qwen35::serve_ring::RingEngine::from_source_tier(cfg.clone(), &src, 4096, 1, 0, &TierPolicy::uniform(Dtype::BF16), ring);
+        let mut engine = qwen35::serve_ring::RingEngine::from_source_tier(cfg.clone(), &src, 4096, 1, 0, &TierPolicy::uniform(Dtype::BF16), tiers);
         let mut table = BlockTable::new();
         let hidden = engine.prefill(&mut table, &tokens);
         let got = engine.logits(&hidden);
@@ -223,8 +234,29 @@ fn the_serving_slot_matches_the_reference_with_a_bf16_ring() {
             dot / (na * nb)
         };
         let token = engine.admit_greedy(&hidden);
-        println!("ring {ring}: logits cosine {cos:.7}, greedy {token} (reference {want_token})");
-        assert_eq!(token, want_token, "ring {ring}: the greedy answer differs from the reference's");
-        assert!(cos >= 0.9999, "ring {ring}: logits cosine {cos}");
+        // What the bank kept, against the f32 state's: the worst set overlap over every (layer, KV group).
+        let banks = engine.bank_positions(&table);
+        let overlap = reference_banks.as_ref().map_or(1.0, |r| {
+            r.iter()
+                .zip(&banks)
+                .map(|(a, b)| {
+                    let (a, b): (std::collections::HashSet<_>, std::collections::HashSet<_>) = (a.iter().collect(), b.iter().collect());
+                    if a.len().max(b.len()) == 0 { 1.0 } else { a.intersection(&b).count() as f64 / a.len().max(b.len()) as f64 }
+                })
+                .fold(1.0, f64::min)
+        });
+        // Then 48 greedy decode steps through the pooled decode (the native recurrence, the split bank read, the ring).
+        let mut run = vec![token];
+        for _ in 0..48 {
+            let next = engine.forward_batched_greedy(&mut [&mut table], &[*run.last().unwrap()])[0];
+            run.push(next);
+        }
+        let agree = reference_run.as_ref().map_or(run.len(), |r| r.iter().zip(&run).take_while(|(a, b)| a == b).count());
+        println!("{label} ({} MiB a slot): prefill logits cosine {cos:.7}, greedy {token} (reference {want_token}), worst bank overlap {:.2}%; decode agrees with the f32 state for {agree} of {} tokens", engine.state_bytes() >> 20, overlap * 100.0, run.len());
+        assert_eq!(token, want_token, "{label}: the greedy answer differs from the reference's");
+        assert!(cos >= 0.9999, "{label}: logits cosine {cos}");
+        assert!(overlap >= 0.99, "{label}: the bank keeps {overlap} of the f32 state's positions");
+        reference_run.get_or_insert(run);
+        reference_banks.get_or_insert(banks);
     }
 }

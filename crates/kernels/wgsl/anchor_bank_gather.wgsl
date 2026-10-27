@@ -16,7 +16,8 @@
 // @dtype f32
 //
 // `anchor_commit` decides which candidate lands in each slot (`out_src`); this
-// kernel moves the records. Slot `c` of group `g` takes its key and value from
+// kernel moves the records, as WORDS: a record's `head_dim` elements are `head_dim` f32 words, or `head_dim / 2` words
+// of a bf16 bank (the caller passes the word count as `head_dim`), copied bit for bit. Slot `c` of group `g` takes its key and value from
 // the in bank (`src < K`) or from the pending block (`src >= K`, pending row
 // `new_row0 + src - K`), or becomes zero for an empty slot.
 //
@@ -36,12 +37,12 @@ const EMPTY: u32 = 0xFFFFFFFFu;
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read>       plan:       array<u32>;
 @group(0) @binding(2) var<storage, read>       out_src:    array<u32>;
-@group(0) @binding(3) var<storage, read>       in_key:     array<f32>;
-@group(0) @binding(4) var<storage, read>       in_value:   array<f32>;
-@group(0) @binding(5) var<storage, read>       pend_key:   array<f32>;
-@group(0) @binding(6) var<storage, read>       pend_value: array<f32>;
-@group(0) @binding(7) var<storage, read_write> out_key:    array<f32>;
-@group(0) @binding(8) var<storage, read_write> out_value:  array<f32>;
+@group(0) @binding(3) var<storage, read>       in_key:     array<u32>;
+@group(0) @binding(4) var<storage, read>       in_value:   array<u32>;
+@group(0) @binding(5) var<storage, read>       pend_key:   array<u32>;
+@group(0) @binding(6) var<storage, read>       pend_value: array<u32>;
+@group(0) @binding(7) var<storage, read_write> out_key:    array<u32>;
+@group(0) @binding(8) var<storage, read_write> out_value:  array<u32>;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>,
@@ -60,8 +61,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let src = out_src[(plan[s * 5u + 1u] * p.groups + g) * p.capacity + c];
     let dst = (plan[s * 5u + 1u] * p.capacity + c) * gd + g * hd + d;
     if (src == EMPTY) {
-        out_key[dst] = 0.0;
-        out_value[dst] = 0.0;
+        out_key[dst] = 0u;
+        out_value[dst] = 0u;
     } else if (src < p.capacity) {
         let from_i = (plan[s * 5u] * p.capacity + src) * gd + g * hd + d;
         out_key[dst] = in_key[from_i];

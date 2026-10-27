@@ -54,13 +54,12 @@
 //! what they cost.
 
 use gpu_core::{DeviceBuffer, Gpu};
-use model::kv_tier::KvTier;
 use model::paged::{BlockAllocator, BlockTable, KvNamespace};
 use model::serve::{PagedDecoder, PrefillProgress};
 use model::snapshot_prefix::{Entry, SnapshotPrefixCache};
 
 use crate::config::Qwen35Config;
-use crate::model::{pipelines, slot_state_bytes, Qwen35, SlotPool};
+use crate::model::{pipelines, slot_state_bytes, Qwen35, SlotPool, SlotTiers};
 
 /// Candidate list width of [`RingEngine::forward_batched_topk`], as in [`crate::serve::Engine`].
 const TOPK_CAPACITY: usize = 32;
@@ -95,8 +94,8 @@ pub const MAX_PREFIX_SLOTS: u32 = 8;
 /// holds them (at least one), then up to [`MAX_PREFIX_SLOTS`] (and no more than the live count) cached prompts
 /// from what is left. A budget that cannot hold even one live slot still returns one: the caller's placement
 /// refuses the oversized model with its own arithmetic, not this sizing.
-pub fn ring_slots(cfg: &Qwen35Config, ring: KvTier, budget: u64, max_batch: u32) -> (u32, u32) {
-    let per_slot = slot_state_bytes(cfg, ring).max(1);
+pub fn ring_slots(cfg: &Qwen35Config, tiers: impl Into<SlotTiers>, budget: u64, max_batch: u32) -> (u32, u32) {
+    let per_slot = slot_state_bytes(cfg, tiers).max(1);
     let fit = (budget / per_slot).min(u64::from(u32::MAX)) as u32;
     let live = fit.min(max_batch).max(1);
     (live, fit.saturating_sub(live).min(live).min(MAX_PREFIX_SLOTS))
@@ -116,16 +115,16 @@ pub struct RingEngine {
 impl RingEngine {
     /// Build over `weights` held at `tier`, on a device of its own. `max_seq_len` is capped by the model's position
     /// limit; `max_concurrent` live slots and `prefix_slots` cached prompts (0 turns prefix reuse off).
-    pub fn from_source_tier(cfg: Qwen35Config, weights: &dyn checkpoint::TensorSource, max_seq_len: u32, max_concurrent: u32, prefix_slots: u32, tier: &model::ops::TierPolicy, ring: KvTier) -> RingEngine {
-        Self::with_gpu(Gpu::new(pipelines()), cfg, weights, max_seq_len, max_concurrent, prefix_slots, tier, ring)
+    pub fn from_source_tier(cfg: Qwen35Config, weights: &dyn checkpoint::TensorSource, max_seq_len: u32, max_concurrent: u32, prefix_slots: u32, tier: &model::ops::TierPolicy, tiers: impl Into<SlotTiers>) -> RingEngine {
+        Self::with_gpu(Gpu::new(pipelines()), cfg, weights, max_seq_len, max_concurrent, prefix_slots, tier, tiers)
     }
 
     /// [`Self::from_source_tier`] on an existing device handle (warm start).
-    pub fn from_source_tier_on(parent: &Gpu, cfg: Qwen35Config, weights: &dyn checkpoint::TensorSource, max_seq_len: u32, max_concurrent: u32, prefix_slots: u32, tier: &model::ops::TierPolicy, ring: KvTier) -> RingEngine {
-        Self::with_gpu(parent.new_like(pipelines()), cfg, weights, max_seq_len, max_concurrent, prefix_slots, tier, ring)
+    pub fn from_source_tier_on(parent: &Gpu, cfg: Qwen35Config, weights: &dyn checkpoint::TensorSource, max_seq_len: u32, max_concurrent: u32, prefix_slots: u32, tier: &model::ops::TierPolicy, tiers: impl Into<SlotTiers>) -> RingEngine {
+        Self::with_gpu(parent.new_like(pipelines()), cfg, weights, max_seq_len, max_concurrent, prefix_slots, tier, tiers)
     }
 
-    fn with_gpu(gpu: Gpu, cfg: Qwen35Config, weights: &dyn checkpoint::TensorSource, max_seq_len: u32, max_concurrent: u32, prefix_slots: u32, tier: &model::ops::TierPolicy, ring: KvTier) -> RingEngine {
+    fn with_gpu(gpu: Gpu, cfg: Qwen35Config, weights: &dyn checkpoint::TensorSource, max_seq_len: u32, max_concurrent: u32, prefix_slots: u32, tier: &model::ops::TierPolicy, tiers: impl Into<SlotTiers>) -> RingEngine {
         assert!(max_seq_len > 0 && max_concurrent > 0, "qwen35::serve_ring: max_seq_len and max_concurrent must be > 0");
         assert!(cfg.swa_window.is_some(), "qwen35::serve_ring: the ring engine serves sliding-window configs; a plain config pages a growing KV cache (qwen35::serve::Engine)");
         assert!(
@@ -134,7 +133,7 @@ impl RingEngine {
             cfg.max_position_embeddings
         );
         let model = Qwen35::new_on_dt(gpu, cfg, 1, 1, weights, tier);
-        let pool = model.new_slot_pool(max_concurrent + prefix_slots, ring);
+        let pool = model.new_slot_pool(max_concurrent + prefix_slots, tiers);
         RingEngine { model, pool, alloc: BlockAllocator::new(max_concurrent, max_seq_len), max_seq_len, live_slots: max_concurrent, cache: SnapshotPrefixCache::new(prefix_slots) }
     }
 
@@ -252,6 +251,22 @@ impl RingEngine {
     /// [`SlotPool::time_recorded_step`]).
     pub fn time_recorded_step(&self, reps: u32) -> Option<f64> {
         self.pool.time_recorded_step(&self.model.gpu, reps)
+    }
+
+    /// The positions each memory layer's bank holds for the sequence on `table`, one set per (layer, KV group): what the
+    /// admission scorer chose to keep, for comparing two storage tiers of the same state.
+    pub fn bank_positions(&self, table: &BlockTable) -> Vec<Vec<u32>> {
+        let slot = u64::from(Self::slot(table));
+        let (groups, capacity) = (self.model.cfg.n_kv_heads as usize, self.model.cfg.anchor_memory.as_ref().expect("EdgeRock has an anchor memory").capacity as usize);
+        let mut out = Vec::new();
+        for bank in self.pool.memory.iter().flatten() {
+            let mut words = vec![0f32; groups * capacity];
+            self.model.gpu.read_into(&bank.pos, slot * (groups * capacity) as u64, &mut words);
+            for g in 0..groups {
+                out.push(words[g * capacity..(g + 1) * capacity].iter().map(|w| w.to_bits()).filter(|&p| p != 0).collect());
+            }
+        }
+        out
     }
 
     /// Per-slot position, for tests: tokens the slot has absorbed.

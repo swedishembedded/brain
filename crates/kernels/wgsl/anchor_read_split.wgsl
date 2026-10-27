@@ -39,8 +39,8 @@ struct Params {
 
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read>       q:     array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read>       key:   array<vec4<f32>>;
-@group(0) @binding(3) var<storage, read>       value: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read>       key:   array<f32>;
+@group(0) @binding(3) var<storage, read>       value: array<f32>;
 @group(0) @binding(4) var<storage, read>       refs:  array<u32>;
 @group(0) @binding(5) var<storage, read>       slots: array<u32>;
 @group(0) @binding(6) var<storage, read_write> part:  array<vec4<f32>>;
@@ -83,9 +83,14 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
     var dot: array<f32, 8>;
     for (var j = 0u; j < 8u; j = j + 1u) { dot[j] = 0.0; }
     if (slot != 0u) {
-        let k_base = ((base + slot - 1u) * p.groups + g) * hd4;
+        let k_base = (base + slot - 1u) * p.groups * hd4 + g * hd4;
         for (var d = k; d < hd4; d = d + 8u) {
-            let kv = key[k_base + d];
+            // Four scalar loads at bare indices: the bf16 storage variant decodes each one.
+            let i0 = (k_base + d) * 4u;
+            let i1 = i0 + 1u;
+            let i2 = i0 + 2u;
+            let i3 = i0 + 3u;
+            let kv = vec4<f32>(key[i0], key[i1], key[i2], key[i3]);
             for (var j = 0u; j < 8u; j = j + 1u) {
                 if (j < hpg) {
                     let qv = q[(first + j) * hd4 + d];
@@ -144,7 +149,11 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
         for (var u = lane; u < 32u; u = u + 4u) {
             let sv = sl[u];
             if (sv == 0u || !live) { continue; }
-            let v = value[((base + sv - 1u) * p.groups + g) * hd4 + d4];
+            let vi0 = (((base + sv - 1u) * p.groups + g) * hd4 + d4) * 4u;
+            let vi1 = vi0 + 1u;
+            let vi2 = vi0 + 2u;
+            let vi3 = vi0 + 3u;
+            let v = vec4<f32>(value[vi0], value[vi1], value[vi2], value[vi3]);
             for (var j = 0u; j < 8u; j = j + 1u) {
                 if (j < hpg) { acc[j] = acc[j] + pe[j * 32u + u] * v; }
             }

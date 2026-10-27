@@ -98,8 +98,8 @@ pub const GQA_RING_CHUNK_ATTN: &str = include_str!("../wgsl/gqa_ring_chunk_attn.
 pub const ANCHOR_READ_SPLIT: &str = include_str!("../wgsl/anchor_read_split.wgsl");
 /// `wgsl/anchor_read_merge.wgsl`
 pub const ANCHOR_READ_MERGE: &str = include_str!("../wgsl/anchor_read_merge.wgsl");
-/// `wgsl/anchor_read_softmax_apply.wgsl`
-pub const ANCHOR_READ_SOFTMAX_APPLY: &str = include_str!("../wgsl/anchor_read_softmax_apply.wgsl");
+/// `wgsl/anchor_push_bf16.wgsl`
+pub const ANCHOR_PUSH_BF16: &str = include_str!("../wgsl/anchor_push_bf16.wgsl");
 /// `wgsl/anchor_rows_copy.wgsl`
 pub const ANCHOR_ROWS_COPY: &str = include_str!("../wgsl/anchor_rows_copy.wgsl");
 /// `wgsl/anchor_slot_inverse.wgsl`
@@ -1009,6 +1009,8 @@ pub const PIXEL_SHUFFLE3D_CL: &str = include_str!("../wgsl/pixel_shuffle3d_cl.wg
 pub const PIXEL_SHUFFLE_DX: &str = include_str!("../wgsl/pixel_shuffle_dx.wgsl");
 /// `wgsl/pool_rows_gather2.wgsl`
 pub const POOL_ROWS_GATHER2: &str = include_str!("../wgsl/pool_rows_gather2.wgsl");
+/// `wgsl/pool_rows_scatter2_bf16.wgsl`
+pub const POOL_ROWS_SCATTER2_BF16: &str = include_str!("../wgsl/pool_rows_scatter2_bf16.wgsl");
 /// `wgsl/pool_rows_scatter2.wgsl`
 pub const POOL_ROWS_SCATTER2: &str = include_str!("../wgsl/pool_rows_scatter2.wgsl");
 /// `wgsl/pos_add.wgsl`
@@ -1398,7 +1400,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("anchor_read_gate_bwd", ANCHOR_READ_GATE_BWD),
     ("anchor_read_gate_wgrad", ANCHOR_READ_GATE_WGRAD),
     ("anchor_read_scores", ANCHOR_READ_SCORES),
-    ("anchor_read_softmax_apply", ANCHOR_READ_SOFTMAX_APPLY),
+    ("anchor_push_bf16", ANCHOR_PUSH_BF16),
     ("anchor_read_split", ANCHOR_READ_SPLIT),
     ("anchor_read_merge", ANCHOR_READ_MERGE),
     ("anchor_rows_copy", ANCHOR_ROWS_COPY),
@@ -1840,6 +1842,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("pixel_shuffle_dx", PIXEL_SHUFFLE_DX),
     ("pool_rows_gather2", POOL_ROWS_GATHER2),
     ("pool_rows_scatter2", POOL_ROWS_SCATTER2),
+    ("pool_rows_scatter2_bf16", POOL_ROWS_SCATTER2_BF16),
     ("pos_add", POS_ADD),
     ("pos_bwd", POS_BWD),
     ("prelu", PRELU),

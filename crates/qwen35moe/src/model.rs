@@ -3691,6 +3691,7 @@ impl Qwen35 {
                             gather: POOL_ROWS_GATHER2,
                             scatter: POOL_ROWS_SCATTER2,
                             fuse: self.decode_fusion.get(),
+                            bf16: false,
                         }),
                     };
                     self.layer_gdn_fwd_pre(l, &xn1, pre1, epilogue, bsz, GdnCall::Decode(state)).0

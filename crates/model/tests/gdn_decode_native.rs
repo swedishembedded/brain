@@ -316,7 +316,7 @@ fn a_pooled_batch_is_byte_identical_to_the_staged_chain() {
 
         let run = |fuse: bool| {
             let (st, hi) = (g.storage_init("state", &state0), g.storage_init("hist", &hist0));
-            let pool = GdnPoolRows { state: &st, hist: &hi, rows: &rows, gather: idx(&g, "pool_rows_gather2"), scatter: idx(&g, "pool_rows_scatter2"), fuse };
+            let pool = GdnPoolRows { state: &st, hist: &hi, rows: &rows, gather: idx(&g, "pool_rows_gather2"), scatter: idx(&g, "pool_rows_scatter2"), fuse, bf16: false };
             let gated = gdn_mixer_decode_state_fwd(&g, &ids(&g), &dec_ids(&g), &shape, &w, &mixed, &bp, &ap, &z, &GdnDecodeState::Pool(pool));
             g.poll_wait();
             (bits(g.read(&gated, (b * value_dim) as usize)), bits(g.read(&st, pool_rows as usize * state_len)), bits(g.read(&hi, pool_rows as usize * hist_len)))

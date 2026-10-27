@@ -89,7 +89,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let k_base = (base + slot - 1u) * p.groups * hd + g * hd;
     var dot = 0.0;
     for (var d = 0u; d < hd; d = d + 1u) {
-        dot = dot + q[q_base + d] * key[k_base + d];
+        let ki = k_base + d;   // a bare index, so the bf16 storage variant can decode the load
+        dot = dot + q[q_base + d] * key[ki];
     }
     logits[gidx] = dot * inverseSqrt(f32(hd));
 }

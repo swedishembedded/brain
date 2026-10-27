@@ -68,7 +68,7 @@ impl DecodeState {
                 }
             }
             let pool = (owned && cfg.layer_has_memory(l)).then(|| {
-                let pool = AnchorBankPool::new(gpu, &memory_geometry(cfg), 1);
+                let pool = AnchorBankPool::new(gpu, &memory_geometry(cfg), 1, KvTier::F32);
                 st.ledger.extend(pool.arrays().iter().map(|(buf, per_slot)| ((*buf).clone(), *per_slot)));
                 pool
             });
@@ -111,22 +111,67 @@ pub(crate) fn memory_geometry(cfg: &Qwen35Config) -> AnchorMemoryShape {
     }
 }
 
-/// Bytes of one sequence slot of a [`SlotPool`] for `cfg`: the recurrent state and conv history of every
+/// How a [`SlotPool`] stores the three kinds of per-sequence state, each a storage tier with f32 arithmetic wherever it
+/// is read: the ring KV of the full-attention layers, the anchor banks' keys and values (and their pending block), and
+/// the Gated-DeltaNet recurrent state with its conv history. `F32` and `BF16` are the tiers the banks and the recurrent
+/// state support; the ring takes any [`KvTier`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SlotTiers {
+    pub ring: KvTier,
+    pub bank: KvTier,
+    pub recurrent: KvTier,
+}
+
+impl SlotTiers {
+    /// The tier the bank and the recurrent state take unless a caller names them.
+    pub const DEFAULT_STATE: KvTier = KvTier::BF16;
+
+    /// Everything f32: the reference the compact tiers are measured against, and what a test of exact arithmetic pins.
+    pub const EXACT: SlotTiers = SlotTiers { ring: KvTier::F32, bank: KvTier::F32, recurrent: KvTier::F32 };
+
+    /// `ring` for the ring KV and the default tier for the rest.
+    pub fn with_ring(ring: KvTier) -> SlotTiers {
+        SlotTiers { ring, bank: Self::DEFAULT_STATE, recurrent: Self::DEFAULT_STATE }
+    }
+
+    fn check(self) {
+        for (what, tier) in [("bank", self.bank), ("recurrent state", self.recurrent)] {
+            assert!(tier == KvTier::F32 || tier == KvTier::BF16, "a slot pool's {what} is stored f32 or bf16, not {tier}");
+        }
+        assert!(self.ring == KvTier::F32 || self.ring == KvTier::BF16, "a slot pool's ring is stored f32 or bf16, not {}", self.ring);
+    }
+}
+
+impl From<KvTier> for SlotTiers {
+    fn from(ring: KvTier) -> SlotTiers {
+        SlotTiers::with_ring(ring)
+    }
+}
+
+/// Device words of `elems` elements stored in `tier` (f32 or bf16).
+pub(crate) fn state_words(tier: KvTier, elems: u64) -> u64 {
+    if tier == KvTier::BF16 { elems.div_ceil(2) } else { elems }
+}
+
+/// Bytes of one sequence slot of a [`SlotPool`] for `cfg` at `tiers` (a bare ring [`KvTier`] takes the default tiers for
+/// the rest): the recurrent state and conv history of every
 /// Gated-DeltaNet layer, the ring of every full-attention layer and the anchor bank of every layer that has one.
 /// Independent of the sequence length; the pool holds exactly `slots` times this (`SlotPool::bytes`), which lets a
 /// serving engine size its pool to a memory budget before allocating anything.
-pub fn slot_state_bytes(cfg: &Qwen35Config, ring: KvTier) -> u64 {
+pub fn slot_state_bytes(cfg: &Qwen35Config, tiers: impl Into<SlotTiers>) -> u64 {
+    let tiers = tiers.into();
+    tiers.check();
     let window = u64::from(cfg.swa_window.expect("slot state is the ring state of a sliding-window config"));
     let mut words = 0u64;
     for (l, ty) in cfg.layer_types().into_iter().enumerate() {
         words += match ty {
-            LayerType::Linear => cfg.gdn_state_len() + cfg.gdn_hist_len(),
-            LayerType::Full => 2 * ring.plane_bytes(window, u64::from(cfg.kv_dim()), u64::from(cfg.head_dim)) / 4,
+            LayerType::Linear => state_words(tiers.recurrent, cfg.gdn_state_len()) + state_words(tiers.recurrent, cfg.gdn_hist_len()),
+            LayerType::Full => 2 * tiers.ring.plane_bytes(window, u64::from(cfg.kv_dim()), u64::from(cfg.head_dim)) / 4,
         };
         if cfg.layer_has_memory(l) {
             let g = memory_geometry(cfg);
             let (gg, k, c, gd) = (u64::from(g.n_kv_heads), u64::from(g.capacity), u64::from(g.commit_block), u64::from(g.n_kv_heads * g.head_dim));
-            words += 2 * gg * k + 2 * k * gd + 2 * c * gd + c * gg;
+            words += 2 * gg * k + 2 * state_words(tiers.bank, k * gd) + 2 * state_words(tiers.bank, c * gd) + c * gg;
         }
     }
     words * 4
@@ -141,6 +186,7 @@ pub fn slot_state_bytes(cfg: &Qwen35Config, ring: KvTier) -> u64 {
 pub struct SlotPool {
     pub(crate) slots: u32,
     pub(crate) window: u32,
+    pub(crate) tiers: SlotTiers,
     pub(crate) gqa_kv: Vec<KvLayer>,
     /// Per layer ONE buffer of `slots` rows (a size-1 placeholder at full-attention layers), so a decode step finds
     /// every sequence's row by its slot and runs the recurrence on the rows in place.
@@ -159,12 +205,13 @@ pub struct SlotPool {
 }
 
 impl SlotPool {
-    pub(crate) fn new(gpu: &Gpu, cfg: &Qwen35Config, shard: &Shard, slots: u32, ring: KvTier) -> SlotPool {
-        assert!(ring == KvTier::F32 || ring == KvTier::BF16, "a slot pool's ring is stored f32 or bf16, not {ring}");
+    pub(crate) fn new(gpu: &Gpu, cfg: &Qwen35Config, shard: &Shard, slots: u32, tiers: SlotTiers) -> SlotPool {
+        tiers.check();
+        let ring = tiers.ring;
         let window = cfg.swa_window.expect("a slot pool holds the ring state of a sliding-window config");
         let kv_dim = cfg.kv_dim() as u64;
         let rows = u64::from(window) * u64::from(slots);
-        let mut pool = SlotPool { slots, window, gqa_kv: Vec::new(), gdn_state: Vec::new(), gdn_hist: Vec::new(), work_state: Vec::new(), work_hist: Vec::new(), memory: Vec::new(), pos: std::cell::RefCell::new(vec![0; slots as usize]), tapes: Default::default(), ledger: Vec::new() };
+        let mut pool = SlotPool { slots, window, tiers, gqa_kv: Vec::new(), gdn_state: Vec::new(), gdn_hist: Vec::new(), work_state: Vec::new(), work_hist: Vec::new(), memory: Vec::new(), pos: std::cell::RefCell::new(vec![0; slots as usize]), tapes: Default::default(), ledger: Vec::new() };
         for (l, ty) in cfg.layer_types().into_iter().enumerate() {
             let owned = shard.owns(l);
             let kv = if owned && ty == LayerType::Full {
@@ -179,9 +226,10 @@ impl SlotPool {
             pool.gqa_kv.push(kv);
             let (state, hist, work_state, work_hist) = if owned && ty == LayerType::Linear {
                 let (sl, hl) = (cfg.gdn_state_len(), cfg.gdn_hist_len());
-                let (state, hist) = (gpu.storage(sl * u64::from(slots)), gpu.storage(hl * u64::from(slots)));
-                pool.ledger.push((state.clone(), sl * u64::from(slots)));
-                pool.ledger.push((hist.clone(), hl * u64::from(slots)));
+                let (sw, hw) = (state_words(tiers.recurrent, sl), state_words(tiers.recurrent, hl));
+                let (state, hist) = (gpu.storage(sw * u64::from(slots)), gpu.storage(hw * u64::from(slots)));
+                pool.ledger.push((state.clone(), sw * u64::from(slots)));
+                pool.ledger.push((hist.clone(), hw * u64::from(slots)));
                 (state, hist, gpu.storage(sl), gpu.storage(hl))
             } else {
                 (gpu.storage(1), gpu.storage(1), gpu.storage(1), gpu.storage(1))
@@ -191,7 +239,7 @@ impl SlotPool {
             pool.work_state.push(work_state);
             pool.work_hist.push(work_hist);
             let bank = (owned && cfg.layer_has_memory(l)).then(|| {
-                let bank = AnchorBankPool::new(gpu, &memory_geometry(cfg), slots);
+                let bank = AnchorBankPool::new(gpu, &memory_geometry(cfg), slots, tiers.bank);
                 pool.ledger.extend(bank.arrays().iter().map(|(buf, per_slot)| ((*buf).clone(), *per_slot * u64::from(slots))));
                 bank
             });

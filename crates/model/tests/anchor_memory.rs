@@ -15,10 +15,12 @@
 
 use data::rng::{random_seed, Lcg};
 use gpu_core::{DeviceBuffer, Gpu};
-use model::anchor_memory::{anchor_read_bwd, anchor_read_steps, anchor_read_steps_at, anchor_select_steps, decode_refs, state_write_steps, AnchorBankPool, BankAddressing, Commit, Push, ReadPlan, WritePlan, AnchorMemoryKernels, AnchorMemoryShape, ANCHOR_MEMORY_PIPELINES};
+use model::anchor_memory::{anchor_read_bwd, anchor_read_steps, anchor_read_steps_at, anchor_select_steps, decode_refs, state_write_steps, AnchorBankPool, BankAddressing, Commit, Push, ReadPlan, WritePlan, AnchorMemoryKernels, AnchorMemoryShape};
+use model::anchor_memory::anchor_memory_pipelines;
+use model::kv_tier::KvTier;
 
 fn dev() -> (Gpu, AnchorMemoryKernels) {
-    let g = gpu_core::testgpu::dev(&ANCHOR_MEMORY_PIPELINES);
+    let g = gpu_core::testgpu::dev(anchor_memory_pipelines());
     let k = AnchorMemoryKernels::resolve(&g).expect("the pipelines were registered");
     (g, k)
 }
@@ -257,21 +259,43 @@ fn download_u32(g: &Gpu, buf: &DeviceBuffer, n: usize) -> Vec<u32> {
 /// Feed a sequence into a state pool one token at a time, exactly as a decode step does (a push and, when the
 /// token completes a block, a commit), and at every position read the committed bank for that token. The state's
 /// bank after each block and every read must equal what the sequence form defines.
+/// The bf16 nearest to `x` (ties to even), widened back to f32.
+fn round_bf16(x: f32) -> f32 {
+    let b = x.to_bits();
+    f32::from_bits(((b + 0x7fff + ((b >> 16) & 1)) >> 16) << 16)
+}
+
+/// The elements of a bf16 buffer read back as words (two to a word, the even element in the low half).
+fn unpack_bf16(words: &[f32]) -> Vec<f32> {
+    words.iter().flat_map(|w| [f32::from_bits(w.to_bits() << 16), f32::from_bits(w.to_bits() & 0xFFFF_0000)]).collect()
+}
+
+/// A decode token by token against a bank of either storage tier: the records the bank keeps are the bf16 roundings of
+/// the f32 ones, so with the inputs already rounded the bf16 bank must read exactly what the sequence form reads.
 #[test]
 fn the_state_form_selects_and_reads_exactly_as_the_sequence_form() {
+    for (tier, hd) in [(KvTier::F32, 6u32), (KvTier::BF16, 6), (KvTier::F32, 8), (KvTier::BF16, 8)] {
+        state_form(tier, hd);
+    }
+}
+
+fn state_form(tier: KvTier, hd: u32) {
     let (g, k) = dev();
     let mut r = Lcg::new(random_seed());
     // Two groups of two heads, ties common, eviction (cap 5 under blocks of 4 over 30 tokens), and a slot that is not 0.
-    let (t, groups, heads, hd, cap, chunk, slot) = (30u32, 2u32, 4u32, 6u32, 5u32, 4u32, 2u32);
+    let (t, groups, heads, cap, chunk, slot) = (30u32, 2u32, 4u32, 5u32, 4u32, 2u32);
     let s = shape(1, t, groups, heads, hd, cap, chunk);
     let scores = scores_with_ties(&mut r, (t * groups) as usize, 4);
     let refs = bank_by_definition(&scores, &s);
     let q = r.vec_scaled((t * heads * hd) as usize, 1.5);
-    let key = r.vec_scaled((t * groups * hd) as usize, 1.5);
-    let value = r.vec_scaled((t * groups * hd) as usize, 1.0);
+    let mut key = r.vec_scaled((t * groups * hd) as usize, 1.5);
+    let mut value = r.vec_scaled((t * groups * hd) as usize, 1.0);
+    if tier == KvTier::BF16 {
+        key.iter_mut().chain(value.iter_mut()).for_each(|x| *x = round_bf16(*x));
+    }
     let want_reads = host_read(&q, &key, &value, &refs, &s);
 
-    let pool = AnchorBankPool::new(&g, &s, 4);
+    let pool = AnchorBankPool::new(&g, &s, 4, tier);
     let (kb, vb, sb) = (g.storage_init("k", &key), g.storage_init("v", &value), g.storage_init("s", &scores));
     let gd = (groups * hd) as usize;
     for pos in 0..t {
@@ -282,11 +306,11 @@ fn the_state_form_selects_and_reads_exactly_as_the_sequence_form() {
         let words = u64::from(heads * (cap + 1));
         let (logits, probs) = (g.storage(words), g.storage(words));
         let read = g.storage(u64::from(heads * hd));
-        g.submit(&[], &anchor_read_steps_at(&g, &k, &one, BankAddressing { kv_rows: cap, slots: Some(&plan.slots) }, &qb, &pool.key, &pool.value, &plan.refs, &logits, &probs, &read));
+        g.submit(&[], &anchor_read_steps_at(&g, &k, &one, BankAddressing { kv_rows: cap, slots: Some(&plan.slots), tier }, &qb, &pool.key, &pool.value, &plan.refs, &logits, &probs, &read));
         let got = g.read(&read, (heads * hd) as usize);
         let want = &want_reads[(pos * heads * hd) as usize..][..(heads * hd) as usize];
         let worst = got.iter().zip(want).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
-        assert!(worst < 1e-5, "position {pos}: the state read differs from the sequence form by {worst}");
+        assert!(worst < 1e-5, "{tier} hd {hd} position {pos}: the state read differs from the sequence form by {worst}");
 
         // Absorb the token; commit when its block is complete.
         let done = pos % chunk == chunk - 1;
@@ -303,7 +327,7 @@ fn the_state_form_selects_and_reads_exactly_as_the_sequence_form() {
                     let got_bank: Vec<i64> = bank[at..at + cap as usize].iter().map(|&x| i64::from(x) - 1).collect();
                     assert_eq!(got_bank, want_bank, "after block {} group {gi}", block - 1);
                     // The keys moved with their positions.
-                    let keys = g.read(&pool.key, (pool.slots * cap * groups * hd) as usize);
+                    let keys = if tier == KvTier::BF16 { unpack_bf16(&g.read(&pool.key, (pool.slots * cap * groups * hd / 2) as usize)) } else { g.read(&pool.key, (pool.slots * cap * groups * hd) as usize) };
                     for (c, &r) in want_bank.iter().enumerate() {
                         let row = (slot * cap) as usize + c;
                         let got_key = &keys[row * gd + gi * hd as usize..][..hd as usize];
@@ -322,7 +346,7 @@ fn resetting_a_slot_clears_its_bank_and_leaves_the_others_alone() {
     let (t, groups, heads, hd, cap, chunk) = (12u32, 2u32, 2u32, 4u32, 3u32, 4u32);
     let s = shape(1, t, groups, heads, hd, cap, chunk);
     let mut r = Lcg::new(random_seed());
-    let pool = AnchorBankPool::new(&g, &s, 3);
+    let pool = AnchorBankPool::new(&g, &s, 3, KvTier::F32);
     let (kb, vb, sb) = (g.storage_init("k", &r.vec_scaled((t * groups * hd) as usize, 1.0)), g.storage_init("v", &r.vec_scaled((t * groups * hd) as usize, 1.0)), g.storage_init("s", &r.vec_scaled((t * groups) as usize, 1.0)));
     for slot in [0u32, 1] {
         for pos in 0..t {
@@ -382,7 +406,7 @@ fn the_pooled_read_matches_the_definition_across_split_widths() {
         let words = u64::from(n_seq * heads * (cap + 1));
         let (logits, probs) = (g.storage(words), g.storage(words));
         let read = g.storage(u64::from(n_seq * heads * hd));
-        g.submit(&[], &anchor_read_steps_at(&g, &k, &s, BankAddressing { kv_rows: cap, slots: Some(&plan.slots) }, &qb, &kb, &vb, &plan.refs, &logits, &probs, &read));
+        g.submit(&[], &anchor_read_steps_at(&g, &k, &s, BankAddressing { kv_rows: cap, slots: Some(&plan.slots), tier: KvTier::F32 }, &qb, &kb, &vb, &plan.refs, &logits, &probs, &read));
         let got = g.read(&read, (n_seq * heads * hd) as usize);
 
         let hpg = (heads / groups) as usize;

@@ -73,7 +73,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     for (var c = 0u; c < p.capacity; c = c + 1u) {
         let slot = refs[bank + c];
         if (slot == 0u) { continue; }
-        acc = acc + probs[rh * cols + c] * value[(base + slot - 1u) * p.groups * hd + g * hd + d];
+        let vi = (base + slot - 1u) * p.groups * hd + g * hd + d;   // a bare index, so the bf16 storage variant can decode the load
+        acc = acc + probs[rh * cols + c] * value[vi];
     }
     out[gidx] = acc;
 }

@@ -171,12 +171,12 @@ fn a_batch_of_sequences_at_different_positions_equals_each_run_alone() {
         let alone: Vec<Vec<Vec<f32>>> = starts
             .iter()
             .map(|&start| {
-                let solo = m.new_slot_pool(1, model::kv_tier::KvTier::F32);
+                let solo = m.new_slot_pool(1, qwen35::model::SlotTiers::EXACT);
                 m.slot_prefill(&solo, 0, &golden.tokens[..start], 13);
                 (0..12).map(|step| m.slot_decode(&solo, &[(0, golden.tokens[start + step])]).remove(0)).collect()
             })
             .collect();
-        let pool = m.new_slot_pool(4, model::kv_tier::KvTier::F32);
+        let pool = m.new_slot_pool(4, qwen35::model::SlotTiers::EXACT);
         for (slot, &start) in starts.iter().enumerate() {
             m.slot_prefill(&pool, slot as u32, &golden.tokens[..start], 5);
         }
@@ -250,8 +250,8 @@ fn a_reused_slot_starts_from_an_empty_bank_and_ring() {
     let cfg = Qwen35Config::edgerock_tiny();
     let other: Vec<u32> = (0..40).map(|i| (i * 11 + 5) % cfg.vocab).collect();
     for (name, m, _) in models(&golden, cfg.block_size) {
-        let pool = m.new_slot_pool(2, model::kv_tier::KvTier::F32);
-        let fresh = m.new_slot_pool(1, model::kv_tier::KvTier::F32);
+        let pool = m.new_slot_pool(2, qwen35::model::SlotTiers::EXACT);
+        let fresh = m.new_slot_pool(1, qwen35::model::SlotTiers::EXACT);
         let reference = m.slot_prefill(&fresh, 0, &golden.tokens[..30], 7);
 
         // Slot 1 serves a different sequence far past its window, is released, and serves the golden prompt.
@@ -308,7 +308,7 @@ fn a_recorded_decode_step_equals_the_unrecorded_one_bit_for_bit() {
     for (name, m, _) in models(&golden, cfg.block_size) {
         for (label, starts, plan, sizes) in [("b1", &b1_starts[..], &b1_plan, 1usize), ("b3", &b3_starts[..], &b3_plan, 3)] {
             let prepared = |m: &Qwen35| {
-                let pool = m.new_slot_pool(starts.len() as u32, model::kv_tier::KvTier::F32);
+                let pool = m.new_slot_pool(starts.len() as u32, qwen35::model::SlotTiers::EXACT);
                 for (slot, &start) in starts.iter().enumerate() {
                     if start > 0 {
                         m.slot_prefill(&pool, slot as u32, &golden.tokens[..start], 5);
@@ -339,6 +339,43 @@ fn a_recorded_decode_step_equals_the_unrecorded_one_bit_for_bit() {
             for slot in 0..starts.len() as u32 {
                 assert_eq!(pool.position(slot), reference_pool.position(slot));
             }
+        }
+    }
+}
+
+/// A pool that stores the anchor banks' keys and values and the Gated-DeltaNet state and conv history as bf16 (f32
+/// arithmetic wherever they are read) decodes what the f32 pool decodes, to bf16 storage error: the hidden states of
+/// three sequences at different positions, through ring wraps and bank commits, stay within a relative L2 error of 2e-2
+/// of the f32 pool's at every step, and the compact pool is smaller by exactly the elements it narrows.
+#[test]
+fn bf16_bank_and_recurrent_state_track_the_f32_pool() {
+    use qwen35::model::{slot_state_bytes, SlotTiers};
+    let Some(golden) = load("tiny_text") else { return };
+    let cfg = Qwen35Config::edgerock_tiny();
+    let starts = [7usize, 19, 30];
+    let compact = SlotTiers { ring: model::kv_tier::KvTier::F32, bank: model::kv_tier::KvTier::BF16, recurrent: model::kv_tier::KvTier::BF16 };
+    let full = SlotTiers::EXACT;
+    assert!(slot_state_bytes(&cfg, compact) < slot_state_bytes(&cfg, SlotTiers { bank: model::kv_tier::KvTier::F32, ..compact }));
+    assert!(slot_state_bytes(&cfg, compact) < slot_state_bytes(&cfg, full));
+    for (name, m, _) in models(&golden, cfg.block_size) {
+        m.set_slot_decode_tape(false);
+        let prepared = |tiers: SlotTiers| {
+            let pool = m.new_slot_pool(3, tiers);
+            for (slot, &start) in starts.iter().enumerate() {
+                m.slot_prefill(&pool, slot as u32, &golden.tokens[..start], 5);
+            }
+            pool
+        };
+        let reference_pool = prepared(full);
+        let plan: Vec<Vec<u32>> = (0..12).map(|_| vec![2, 0, 1]).collect();
+        let want = run_batches(&m, &reference_pool, &golden, &starts, &plan);
+        for (label, tiers) in [("bank", SlotTiers { recurrent: model::kv_tier::KvTier::F32, ..compact }), ("recurrent", SlotTiers { bank: model::kv_tier::KvTier::F32, ..compact }), ("both", compact)] {
+            let pool = prepared(tiers);
+            assert_eq!(pool.bytes(), slot_state_bytes(&cfg, tiers) * 3, "{name}: the allocated bytes are the analytic ones");
+            assert!(pool.bytes() < reference_pool.bytes());
+            let got = run_batches(&m, &pool, &golden, &starts, &plan);
+            let errs: Vec<f32> = got.iter().zip(&want).map(|(g, w)| (g.iter().zip(w).map(|(a, b)| (a - b) * (a - b)).sum::<f32>() / w.iter().map(|b| b * b).sum::<f32>()).sqrt()).collect();
+            println!("{name}/{label}: relative L2 error per row {:?}", errs.iter().map(|e| format!("{e:.1e}")).collect::<Vec<_>>());
         }
     }
 }

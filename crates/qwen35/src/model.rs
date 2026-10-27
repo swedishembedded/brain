@@ -71,7 +71,7 @@ use model::Shard;
 use optim::Optim;
 
 use crate::config::{LayerType, Qwen35Config};
-pub use crate::decode_state::{slot_state_bytes, SlotPool};
+pub use crate::decode_state::{slot_state_bytes, SlotPool, SlotTiers};
 use crate::decode_tape::{DecodeInputs, SlotDecodeTape};
 pub use crate::train_base::TrainOpts;
 use crate::decode_state::DecodeState;
@@ -227,7 +227,11 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         // adapter parameters is seconds of a single thread's time per step.
         v.extend(model::dispatch::LORA_BANK_PIPELINES);
         // EdgeRock: the anchor memory's kernels and the windowed attention scores, resolved by name.
-        v.extend(model::anchor_memory::ANCHOR_MEMORY_PIPELINES);
+        v.extend(model::anchor_memory::anchor_memory_pipelines());
+        // The Gated-DeltaNet pool staging for a pool stored as bf16: the gather decodes, the scatter rounds.
+        let gather_a = kernels::template::dtype_variant("pool_rows_gather2", kernels::POOL_ROWS_GATHER2, "pool_a", Dtype::BF16).unwrap();
+        v.push(kernels::template::dtype_variant(gather_a.0, gather_a.1, "pool_b", Dtype::BF16).unwrap());
+        v.push(("pool_rows_scatter2_bf16", kernels::POOL_ROWS_SCATTER2_BF16));
         v.push(("gqa_scores_win", kernels::GQA_SCORES_WIN));
         v.push(("gqa_ring_chunk_attn", kernels::GQA_RING_CHUNK_ATTN));
         // Device AdamW over bf16 or blockwise-int8 moments (`optim::Optim` resolves them by name).
@@ -424,6 +428,9 @@ const GDN_UT_FWD: usize = 93;
 const BMM_TILED: usize = 94;
 const POOL_ROWS_GATHER2: usize = 96;
 const POOL_ROWS_SCATTER2: usize = 97;
+/// The bf16-pool builds of the two staging kernels, resolved by name (`Qwen35::kernel_by_name`).
+const POOL_ROWS_GATHER2_BF16: &str = "pool_rows_gather2#pool_a=bf16#pool_b=bf16";
+const POOL_ROWS_SCATTER2_BF16: &str = "pool_rows_scatter2_bf16";
 
 /// The readout kernels of this crate's pipeline list (`model::readout`).
 const READOUT: model::readout::ReadoutKernels = model::readout::ReadoutKernels { part: ARGMAX_PART, fin: ARGMAX_FINAL, extract: TOPK_EXTRACT_STEP };
@@ -1317,6 +1324,8 @@ pub(crate) struct BatchSeq<'a> {
 pub(crate) struct GdnPoolStore<'a> {
     pub state: &'a [DeviceBuffer],
     pub hist: &'a [DeviceBuffer],
+    /// The pools store bf16 ([`crate::decode_state::SlotTiers::recurrent`]); only a decode step reads them so.
+    pub bf16: bool,
 }
 
 /// What one [`Qwen35::run_decode_batch`] call reads and updates: the shared
@@ -3434,6 +3443,11 @@ impl Qwen35 {
     }
 
     /// The memory's shape for `n_seq` sequences of `t` rows each.
+    /// The pipeline index registered under `name`: a kernel of this crate's list that no hand-numbered const names.
+    fn kernel_by_name(&self, name: &str) -> usize {
+        self.gpu.kernel_index(name).unwrap_or_else(|| panic!("qwen35: kernel '{name}' is not registered on this Gpu"))
+    }
+
     fn memory_shape_of(&self, n_seq: u32, t: u32) -> model::anchor_memory::AnchorMemoryShape {
         model::anchor_memory::AnchorMemoryShape { n_seq, t, ..self.memory_shape() }
     }
@@ -4422,7 +4436,7 @@ impl Qwen35 {
                 .iter()
                 .map(|s| BatchSeq { window: s.window, slot: s.slot, pos: s.pos, gdn_state: s.gdn_state, gdn_hist: s.gdn_hist })
                 .collect();
-            let pool = caches.gdn_pool.as_ref().map(|p| GdnPoolStore { state: p.state, hist: p.hist });
+            let pool = caches.gdn_pool.as_ref().map(|p| GdnPoolStore { state: p.state, hist: p.hist, bf16: p.bf16 });
             let group = BatchDecodeCaches { gqa_kv: caches.gqa_kv, gqa_cap: caches.gqa_cap, seqs: &seqs, one_sequence: false, gdn_pool: pool, memory: caches.memory };
             let x = input_override.map(|x| &x[start * d..end * d]);
             let hidden = self.run_decode_batch_with(&tokens[start..end], &group, x, None);
@@ -4600,6 +4614,11 @@ impl Qwen35 {
             self.embed_rows(tok_buf, bsz, &res);
         }
 
+        // The staging kernels of a pooled recurrent state: the f32 pair, or the bf16 builds of a compact pool.
+        let (pool_gather, pool_scatter) = match &caches.gdn_pool {
+            Some(pool) if pool.bf16 => (self.kernel_by_name(POOL_ROWS_GATHER2_BF16), self.kernel_by_name(POOL_ROWS_SCATTER2_BF16)),
+            _ => (POOL_ROWS_GATHER2, POOL_ROWS_SCATTER2),
+        };
         let types = c.layer_types();
 
         // Where the residual add, the norm and the activation quantisation that
@@ -4640,6 +4659,7 @@ impl Qwen35 {
                         caches.seqs.iter().map(|s| model::gdn_mixer::GdnStream { state: &s.gdn_state[l], hist: &s.gdn_hist[l] }).collect()
                     };
                     let call = if let (Some(pool), Some(v), Some(layout)) = (&caches.gdn_pool, verify, &verify_layout) {
+                        assert!(!pool.bf16, "qwen35: a speculative verify round needs an f32 recurrent-state pool");
                         GdnCall::VerifyPool {
                             pool: model::gdn_mixer::GdnPoolRows {
                                 state: &pool.state[l],
@@ -4648,6 +4668,7 @@ impl Qwen35 {
                                 gather: POOL_ROWS_GATHER2,
                                 scatter: POOL_ROWS_SCATTER2,
                                 fuse: true,
+                                bf16: false,
                             },
                             layout: model::gdn_verify::VerifyLayout { rows: &layout.rows, counts: &layout.counts, offs: &layout.offs, b: v.sequences() },
                             snaps: v.snapshots(l),
@@ -4658,9 +4679,10 @@ impl Qwen35 {
                             state: &pool.state[l],
                             hist: &pool.hist[l],
                             rows: slot_rows,
-                            gather: POOL_ROWS_GATHER2,
-                            scatter: POOL_ROWS_SCATTER2,
+                            gather: pool_gather,
+                            scatter: pool_scatter,
                             fuse: self.decode_fusion.get(),
+                            bf16: pool.bf16,
                         })
                     } else if caches.one_sequence {
                         GdnCall::Rows(model::gdn_mixer::GdnStream { state: &caches.seqs[0].gdn_state[l], hist: &caches.seqs[0].gdn_hist[l] })
@@ -5624,11 +5646,13 @@ impl Qwen35 {
 
     // ---- slot pools: the fixed state of many sequences, addressed by slot row ------------------------------------
 
-    /// A pool of `slots` empty sequence slots for this (sliding-window) config; see [`SlotPool`].
-    pub fn new_slot_pool(&self, slots: u32, ring: model::kv_tier::KvTier) -> SlotPool {
+    /// A pool of `slots` empty sequence slots for this (sliding-window) config; see [`SlotPool`]. `tiers` names how the ring,
+    /// the anchor banks and the recurrent state are stored (a bare ring [`KvTier`](model::kv_tier::KvTier) takes the default
+    /// tiers for the other two).
+    pub fn new_slot_pool(&self, slots: u32, tiers: impl Into<SlotTiers>) -> SlotPool {
         assert!(slots > 0, "qwen35::new_slot_pool: no slots");
         assert!(self.shard.is_whole(self.cfg.n_layers as usize), "qwen35::new_slot_pool: a slot pool holds a whole model's state");
-        SlotPool::new(&self.gpu, &self.cfg, &self.shard, slots, ring)
+        SlotPool::new(&self.gpu, &self.cfg, &self.shard, slots, tiers.into())
     }
 
     /// Feed `tokens` into slot `slot`, `max_chunk` rows per round, continuing whatever the slot holds. Returns the
@@ -5684,7 +5708,7 @@ impl Qwen35 {
             gqa_cap: pool.window,
             seqs: &seqs,
             one_sequence: false,
-            gdn_pool: Some(GdnPoolStore { state: &pool.gdn_state, hist: &pool.gdn_hist }),
+            gdn_pool: Some(GdnPoolStore { state: &pool.gdn_state, hist: &pool.gdn_hist, bf16: pool.tiers.recurrent == model::kv_tier::KvTier::BF16 }),
             memory: &pool.memory,
         };
         let tokens: Vec<u32> = items.iter().map(|&(_, t)| t).collect();
@@ -5751,8 +5775,27 @@ impl Qwen35 {
     fn stage_slot_state(&self, pool: &SlotPool, slot: u32, into_work: bool) {
         let (state_len, hist_len) = (self.cfg.gdn_state_len() as u32, self.cfg.gdn_hist_len() as u32);
         let mut steps = Vec::new();
+        // A bf16 pool is staged through the row-indexed gather (decode) and scatter (round) of the batched step, for the
+        // one row `slot`; an f32 pool is copied word for word.
+        let compact = pool.tiers.recurrent == model::kv_tier::KvTier::BF16;
+        let row_id = compact.then(|| {
+            let ids = self.gpu.storage(1);
+            self.gpu.write(&ids, &[slot]);
+            ids
+        });
+        let (gather, scatter) = if compact { (self.kernel_by_name(POOL_ROWS_GATHER2_BF16), self.kernel_by_name(POOL_ROWS_SCATTER2_BF16)) } else { (0, 0) };
         for (l, ty) in self.cfg.layer_types().iter().enumerate() {
             if *ty != LayerType::Linear {
+                continue;
+            }
+            if let Some(ids) = &row_id {
+                let params = [1, state_len, hist_len];
+                let (kernel, bufs) = if into_work {
+                    (gather, [&pool.gdn_state[l], &pool.gdn_hist[l], ids, &pool.work_state[l], &pool.work_hist[l]])
+                } else {
+                    (scatter, [&pool.work_state[l], &pool.work_hist[l], ids, &pool.gdn_state[l], &pool.gdn_hist[l]])
+                };
+                steps.push(self.gpu.step(kernel, &bufs, &params, state_len + hist_len));
                 continue;
             }
             for (pooled, work, len) in [(&pool.gdn_state[l], &pool.work_state[l], state_len), (&pool.gdn_hist[l], &pool.work_hist[l], hist_len)] {
@@ -5770,7 +5813,7 @@ impl Qwen35 {
         assert!(slot < pool.slots, "qwen35::slot_reset: slot {slot} of {}", pool.slots);
         for (l, ty) in self.cfg.layer_types().iter().enumerate() {
             if *ty == LayerType::Linear {
-                let (sl, hl) = (self.cfg.gdn_state_len(), self.cfg.gdn_hist_len());
+                let (sl, hl) = (crate::decode_state::state_words(pool.tiers.recurrent, self.cfg.gdn_state_len()), crate::decode_state::state_words(pool.tiers.recurrent, self.cfg.gdn_hist_len()));
                 self.gpu.write_at(&pool.gdn_state[l], u64::from(slot) * sl, &vec![0u32; sl as usize]);
                 self.gpu.write_at(&pool.gdn_hist[l], u64::from(slot) * hl, &vec![0u32; hl as usize]);
             }
@@ -5794,7 +5837,7 @@ impl Qwen35 {
         assert!(from < pool.slots && to < pool.slots && from != to, "qwen35::slot_copy: {from} -> {to} of {} slots", pool.slots);
         let mut steps = Vec::new();
         let ids = model::anchor_memory::AnchorMemoryKernels::resolve(&self.gpu).unwrap_or_else(|e| panic!("qwen35: {e}"));
-        let (state_len, hist_len) = (self.cfg.gdn_state_len() as u32, self.cfg.gdn_hist_len() as u32);
+        let (state_len, hist_len) = (crate::decode_state::state_words(pool.tiers.recurrent, self.cfg.gdn_state_len()) as u32, crate::decode_state::state_words(pool.tiers.recurrent, self.cfg.gdn_hist_len()) as u32);
         for (l, ty) in self.cfg.layer_types().iter().enumerate() {
             match ty {
                 LayerType::Linear => {

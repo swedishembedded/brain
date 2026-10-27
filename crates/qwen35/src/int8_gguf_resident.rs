@@ -1134,7 +1134,7 @@ impl ShardCaches {
     }
 
     fn gdn_pool(&self) -> GdnPoolStore<'_> {
-        GdnPoolStore { state: &self.pool_state, hist: &self.pool_hist }
+        GdnPoolStore { state: &self.pool_state, hist: &self.pool_hist, bf16: false }
     }
 }
 
