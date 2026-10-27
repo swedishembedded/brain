@@ -349,3 +349,63 @@ fn resetting_a_slot_clears_its_bank_and_leaves_the_others_alone() {
     let per = (cap * groups * hd) as usize;
     assert_eq!(keys[2 * per..], keys[per..2 * per]);
 }
+
+/// The inference read of pooled banks (the split-over-slots path where the device runs it) against a direct host
+/// evaluation of the definition: softmax over the live slots' scaled dot products plus a zero sink, then the weighted
+/// values. Shapes cross the split width (32 slots) ragged, with empty slots, several sequences in shuffled pool rows
+/// and a group of four heads.
+#[test]
+fn the_pooled_read_matches_the_definition_across_split_widths() {
+    let (g, k) = dev();
+    let mut r = Lcg::new(random_seed());
+    for (cap, groups, heads, hd, n_seq, live) in [(70u32, 2u32, 8u32, 8u32, 3u32, 70u32), (33, 2, 8, 12, 2, 20), (5, 1, 4, 4, 1, 0), (64, 4, 16, 16, 5, 64), (1024, 4, 16, 256, 1, 1000)] {
+        let s = shape(n_seq, 1, groups, heads, hd, cap, 1);
+        let pool_rows = n_seq + 2;
+        let gd = (groups * hd) as usize;
+        let key = r.vec_scaled((pool_rows * cap) as usize * gd, 1.0);
+        let value = r.vec_scaled((pool_rows * cap) as usize * gd, 1.0);
+        let q = r.vec_scaled((n_seq * heads * hd) as usize, 1.0);
+        // Sequence i lives in pool row rows[i]; its bank slots are a random subset (1-based indices, 0 = empty).
+        let rows: Vec<u32> = (0..n_seq).map(|i| (i * 2 + 1) % pool_rows).collect();
+        let mut refs = vec![0u32; (n_seq * groups * cap) as usize];
+        for sg in 0..(n_seq * groups) as usize {
+            for c in 0..cap as usize {
+                if (c as u32) < live.min(cap) && !r.next_u32().is_multiple_of(5) {
+                    refs[sg * cap as usize + c] = c as u32 + 1;
+                }
+            }
+        }
+        let plan = ReadPlan::alloc(&g, &s, n_seq);
+        g.write(&plan.slots, &rows);
+        g.write(&plan.refs, &refs);
+        let (kb, vb, qb) = (g.storage_init("k", &key), g.storage_init("v", &value), g.storage_init("q", &q));
+        let words = u64::from(n_seq * heads * (cap + 1));
+        let (logits, probs) = (g.storage(words), g.storage(words));
+        let read = g.storage(u64::from(n_seq * heads * hd));
+        g.submit(&[], &anchor_read_steps_at(&g, &k, &s, BankAddressing { kv_rows: cap, slots: Some(&plan.slots) }, &qb, &kb, &vb, &plan.refs, &logits, &probs, &read));
+        let got = g.read(&read, (n_seq * heads * hd) as usize);
+
+        let hpg = (heads / groups) as usize;
+        let hd_u = hd as usize;
+        let mut worst = 0f64;
+        let mut vacuous = true;
+        for sq in 0..n_seq as usize {
+            for h in 0..heads as usize {
+                let gi = h / hpg;
+                let qh = &q[(sq * heads as usize + h) * hd_u..][..hd_u];
+                let live_slots: Vec<usize> = (0..cap as usize).filter(|&c| refs[(sq * groups as usize + gi) * cap as usize + c] != 0).collect();
+                let kv_index = |c: usize| ((rows[sq] as usize * cap as usize + c) * groups as usize + gi) * hd_u;
+                let logit: Vec<f64> = live_slots.iter().map(|&c| qh.iter().zip(&key[kv_index(c)..][..hd_u]).map(|(a, b)| f64::from(*a) * f64::from(*b)).sum::<f64>() / (hd_u as f64).sqrt()).collect();
+                let m = logit.iter().fold(0f64, |m, &l| m.max(l));
+                let denom = (0.0 - m).exp() + logit.iter().map(|l| (l - m).exp()).sum::<f64>();
+                for d in 0..hd_u {
+                    let want: f64 = live_slots.iter().zip(&logit).map(|(&c, l)| (l - m).exp() * f64::from(value[kv_index(c) + d])).sum::<f64>() / denom;
+                    vacuous &= want.abs() < 1e-6;
+                    worst = worst.max((f64::from(got[(sq * heads as usize + h) * hd_u + d]) - want).abs());
+                }
+            }
+        }
+        assert!(worst < 1e-5, "cap {cap} groups {groups} heads {heads} hd {hd}: the pooled read differs from the definition by {worst}");
+        assert!(live == 0 || !vacuous, "the reference is vacuous");
+    }
+}

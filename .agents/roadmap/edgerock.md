@@ -282,6 +282,14 @@ reference exactly in both variants on both backends; flipping the tie rule in
   launches about 1.1 ms; 49 `rmsnorm_rows` 0.3 ms; GDN decode 24 x 14 us. Next: split the memory read across more
   workgroups (roofline candidate), fuse the activation casts into the producing norm/epilogue, run independent projections
   of a layer as parallel graph branches, and put the head in the recording.
+- [x] M6f (partial, in progress): roofline round after the recording. (1) Anchor read split over the bank's slots
+  (`anchor_read_split` + `anchor_read_merge`, flash-decoding: 32 slots per workgroup, partial softmax records, a merge that
+  adds the sink): replaces `anchor_read_scores_group` (deleted) + `anchor_read_softmax_apply` for pooled reads on devices with
+  workgroup reductions. Per-kernel device time at b1, 8 layers (graph-profiled, minimum over replays, a peer process shares
+  the card so wall times are not comparable): 1.37 ms -> 0.31 ms (split 0.23, merge 0.08, event stamps included). Still
+  about 26 us per split call against ~3 us of bank bytes: the phases inside a workgroup are serial.
+  Parity: `model/tests/anchor_memory` (new `the_pooled_read_matches_the_definition_across_split_widths` against a host
+  evaluation, caps 5 to 1024), `edgerock_decode`, `edgerock_serve`, `edgerock_golden_parity`.
 - [x] M5 (forward part): the released weights against the independent reference
   forward (`tools/goldens/edgerock_dump_real_reference.py`, fp32 CPU torch, a
   1400-token prompt that slides the window and commits five blocks, then asks about

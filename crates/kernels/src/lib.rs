@@ -94,8 +94,10 @@ pub const ANCHOR_READ_GATE_WGRAD: &str = include_str!("../wgsl/anchor_read_gate_
 pub const ANCHOR_READ_SCORES: &str = include_str!("../wgsl/anchor_read_scores.wgsl");
 /// `wgsl/gqa_ring_chunk_attn.wgsl`
 pub const GQA_RING_CHUNK_ATTN: &str = include_str!("../wgsl/gqa_ring_chunk_attn.wgsl");
-/// `wgsl/anchor_read_scores_group.wgsl`
-pub const ANCHOR_READ_SCORES_GROUP: &str = include_str!("../wgsl/anchor_read_scores_group.wgsl");
+/// `wgsl/anchor_read_split.wgsl`
+pub const ANCHOR_READ_SPLIT: &str = include_str!("../wgsl/anchor_read_split.wgsl");
+/// `wgsl/anchor_read_merge.wgsl`
+pub const ANCHOR_READ_MERGE: &str = include_str!("../wgsl/anchor_read_merge.wgsl");
 /// `wgsl/anchor_read_softmax_apply.wgsl`
 pub const ANCHOR_READ_SOFTMAX_APPLY: &str = include_str!("../wgsl/anchor_read_softmax_apply.wgsl");
 /// `wgsl/anchor_rows_copy.wgsl`
@@ -1394,8 +1396,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("anchor_read_gate_bwd", ANCHOR_READ_GATE_BWD),
     ("anchor_read_gate_wgrad", ANCHOR_READ_GATE_WGRAD),
     ("anchor_read_scores", ANCHOR_READ_SCORES),
-    ("anchor_read_scores_group", ANCHOR_READ_SCORES_GROUP),
     ("anchor_read_softmax_apply", ANCHOR_READ_SOFTMAX_APPLY),
+    ("anchor_read_split", ANCHOR_READ_SPLIT),
+    ("anchor_read_merge", ANCHOR_READ_MERGE),
     ("anchor_rows_copy", ANCHOR_ROWS_COPY),
     ("anchor_slot_inverse", ANCHOR_SLOT_INVERSE),
     ("arcface_margin", ARCFACE_MARGIN),

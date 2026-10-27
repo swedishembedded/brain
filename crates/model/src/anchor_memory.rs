@@ -78,7 +78,7 @@ use crate::block::{rmsnorm_bwd, rmsnorm_fwd, rope2d_partial_bwd, rope2d_partial_
 /// The kernels the anchor memory adds to a model's pipeline list (they are
 /// resolved by name, [`AnchorMemoryKernels::resolve`]). `attn_softmax_cross` is
 /// the row softmax over `capacity + 1` columns.
-pub const ANCHOR_MEMORY_PIPELINES: [(&str, &str); 17] = [
+pub const ANCHOR_MEMORY_PIPELINES: [(&str, &str); 18] = [
     ("anchor_commit", kernels::ANCHOR_COMMIT),
     ("anchor_read_scores", kernels::ANCHOR_READ_SCORES),
     ("anchor_read_apply", kernels::ANCHOR_READ_APPLY),
@@ -95,7 +95,8 @@ pub const ANCHOR_MEMORY_PIPELINES: [(&str, &str); 17] = [
     ("anchor_push", kernels::ANCHOR_PUSH),
     ("anchor_rows_copy", kernels::ANCHOR_ROWS_COPY),
     ("anchor_read_softmax_apply", kernels::ANCHOR_READ_SOFTMAX_APPLY),
-    ("anchor_read_scores_group", kernels::ANCHOR_READ_SCORES_GROUP),
+    ("anchor_read_split", kernels::ANCHOR_READ_SPLIT),
+    ("anchor_read_merge", kernels::ANCHOR_READ_MERGE),
 ];
 
 /// The anchor-memory pipeline indices, as the caller registered them.
@@ -122,8 +123,10 @@ pub struct AnchorMemoryKernels {
     /// `anchor_read_softmax_apply`: the inference read's softmax and apply in one kernel (workgroup-cooperative,
     /// so a device without workgroup reductions keeps the two kernels).
     pub read_softmax_apply: usize,
-    /// `anchor_read_scores_group`: the scores of all of a group's heads per key row read.
-    pub read_scores_group: usize,
+    /// `anchor_read_split` and `anchor_read_merge`: the inference read split over the bank's slots, so one sequence's
+    /// read fills the device.
+    pub read_split: usize,
+    pub read_merge: usize,
 }
 
 impl AnchorMemoryKernels {
@@ -151,7 +154,8 @@ impl AnchorMemoryKernels {
             push: find(13)?,
             rows_copy: find(14)?,
             read_softmax_apply: find(15)?,
-            read_scores_group: find(16)?,
+            read_split: find(16)?,
+            read_merge: find(17)?,
         })
     }
 }
@@ -432,6 +436,13 @@ pub struct BankAddressing<'a> {
     pub slots: Option<&'a DeviceBuffer>,
 }
 
+/// Bank slots per workgroup of the split read ([`anchor_read_steps_at`]): the width the kernel's 256 threads cover as
+/// 32 slots of 8 threads each.
+const READ_SPLIT_SLOTS: u32 = 32;
+
+/// Most splits the merge kernel folds (one thread per split's weight).
+const MAX_READ_SPLITS: u32 = 256;
+
 /// The three read steps: logits against the bank (sink column last), row
 /// softmax, probability-weighted sum of the bank's values into `read`.
 /// `logits` and `probs` are `[rows * n_heads, capacity + 1]` scratch.
@@ -478,15 +489,23 @@ pub fn anchor_read_steps_at(
     };
     let rows_heads = u64::from(s.rows()) * u64::from(s.n_heads);
     // A read from a pool of fixed-state banks keeps no backward, so on a device that runs workgroup-cooperative
-    // kernels the softmax and the apply are one kernel and `probs` is not written.
+    // kernels the softmax and the apply are one kernel and `probs` is not written. The bank's slots are cut into
+    // pieces of `READ_SPLIT_SLOTS`, each a workgroup of its own (flash-decoding), so a single sequence's read fills
+    // the device; the pieces' softmax records are merged by a second dispatch.
     if at.slots.is_some() && g.caps().workgroup_reductions && s.n_heads / s.n_kv_heads <= 8 {
+        if s.head_dim.is_multiple_of(4) && s.capacity.div_ceil(READ_SPLIT_SLOTS) <= MAX_READ_SPLITS {
+            let splits = s.capacity.div_ceil(READ_SPLIT_SLOTS);
+            let sp = [s.rows(), s.t, s.n_heads, s.n_kv_heads, s.capacity, s.head_dim, s.commit_block, at.kv_rows, 1, splits];
+            let hpg = s.n_heads / s.n_kv_heads;
+            let part = g.storage_uninit(u64::from(s.rows()) * u64::from(s.n_kv_heads) * u64::from(splits) * u64::from(hpg) * u64::from(s.head_dim + 4));
+            let groups = u64::from(s.rows()) * u64::from(s.n_kv_heads);
+            return vec![
+                g.dispatch(ids.read_split, &[query, key, value, refs, slots, &part], &sp, gpu_core::Dispatch::Workgroups(threads("anchor_read_split", groups * u64::from(splits)))),
+                g.dispatch(ids.read_merge, &[&part, read], &sp, gpu_core::Dispatch::Workgroups(threads("anchor_read_merge", u64::from(s.rows()) * u64::from(s.n_heads)))),
+            ];
+        }
         let tiles = u64::from(s.head_dim.div_ceil(32));
-        let grouped = s.head_dim.is_multiple_of(4) && s.n_heads / s.n_kv_heads <= 8;
-        let scores = if grouped {
-            g.step(ids.read_scores_group, &[query, key, refs, logits, slots], &p, threads("anchor_read_scores_group", u64::from(s.rows()) * u64::from(s.n_kv_heads) * u64::from(s.capacity + 1)))
-        } else {
-            g.step(ids.read_scores, &[query, key, refs, logits, slots], &p, threads("anchor_read_scores", rows_heads * u64::from(s.capacity + 1)))
-        };
+        let scores = g.step(ids.read_scores, &[query, key, refs, logits, slots], &p, threads("anchor_read_scores", rows_heads * u64::from(s.capacity + 1)));
         return vec![
             scores,
             g.dispatch(ids.read_softmax_apply, &[logits, value, refs, read, slots], &p, gpu_core::Dispatch::Workgroups((u64::from(s.rows()) * u64::from(s.n_kv_heads) * tiles) as u32)),
