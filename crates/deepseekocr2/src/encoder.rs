@@ -45,6 +45,7 @@
 use gpu_core::provider::library::{BatchedProduct, GemmPrecision, LibraryGemmProvider, Operand};
 use gpu_core::{DeviceBuffer, Gpu, Step};
 use model::block::{self, Bidir, BidirIds, KernelIds, UNREGISTERED};
+use model::saved::{BlockStack, SavedPolicy};
 use paramstore::{ParamStore, Role};
 
 use crate::config::DeepseekOcr2VisionConfig;
@@ -83,6 +84,8 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("silu_mul", kernels::SILU_MUL),
     ("silu_bwd_da", kernels::SILU_BWD_DA),
     ("silu_bwd_db", kernels::SILU_BWD_DB),
+    // The shared adapter runtime (`model::adapter::exec`) dispatches it for the vision tower's LoRA.
+    ("axpy", kernels::AXPY),
     ("adamw", kernels::ADAMW),
     ("gradnorm_sq", kernels::GRADNORM_SQ),
     ("grad_scale", kernels::GRAD_SCALE),
@@ -238,10 +241,18 @@ pub struct TrainState {
     /// The residual stream after the last layer, before the final norm -
     /// still valid: nothing after the layer loop mutates it further.
     x_final: DeviceBuffer,
-    layers: Vec<LayerFwdState>,
+    /// Each layer's input, and under [`SavedPolicy::Keep`] the state its backward reads.
+    layers: BlockStack<DeviceBuffer, LayerFwdState>,
     /// The final norm's post-norm query-half rows, uploaded back to device -
     /// the projector's own `x` operand, needed by its `matmul_dw`.
     q_dev: DeviceBuffer,
+}
+
+impl TrainState {
+    /// Layer states this view holds: one per layer when keeping, none when recomputing.
+    pub fn held_block_caches(&self) -> usize {
+        self.layers.held_caches()
+    }
 }
 
 /// Everything one call to [`Resampler::resample_view`] produced, named after
@@ -274,6 +285,8 @@ pub struct Resampler {
     /// training build (its gradient checks are stated against the fp32 kernels) and under a pinned reference.
     tensor_cores: Option<LibraryGemmProvider>,
     train: bool,
+    /// What [`Resampler::forward_train`] keeps of each layer for the backward ([`Resampler::set_saved_policy`]).
+    saved: SavedPolicy,
 }
 
 impl Resampler {
@@ -319,7 +332,7 @@ impl Resampler {
             model::adapter::exec::AdapterRuntime::new(&gpu, lora, rows, max_out)
         });
         let tensor_cores = (!train).then(|| LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Auto)).filter(LibraryGemmProvider::tf32_enabled);
-        Resampler { gpu, ps, ids, cfg, opt, adapter, tensor_cores, train }
+        Resampler { gpu, ps, ids, cfg, opt, adapter, tensor_cores, train, saved: SavedPolicy::Keep }
     }
 
     pub fn gpu(&self) -> &Gpu {
@@ -380,6 +393,15 @@ impl Resampler {
             }
         }
         steps.push(self.gpu.step(self.ids.matmul, &[x, w, out], &[rows, k, n], rows * n));
+    }
+
+    /// Keep every layer's forward state for the backward ([`SavedPolicy::Keep`]) or only each layer's input, the
+    /// state rebuilt by the layer's own forward as the backward reaches it ([`SavedPolicy::Recompute`],
+    /// `model::saved::BlockStack`). A narrow saved format is refused by name.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        BlockStack::<(), ()>::new("deepseekocr2 resampler", policy)?;
+        self.saved = policy;
+        Ok(())
     }
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
         self.ps.read_weight(&self.gpu, name)
@@ -876,9 +898,11 @@ impl Resampler {
         let x = self.gpu.storage((t * d) as u64);
         self.gpu.write_f32(&x, &concat_in);
 
-        let mut layers = Vec::with_capacity(e.n_layers as usize);
+        let mut layers = BlockStack::new("deepseekocr2 resampler", self.saved).expect("set_saved_policy accepted the policy");
         for l in 0..e.n_layers {
-            layers.push(self.layer_fwd(l, &x, t, n_query).1);
+            let state = self.layer_fwd(l, &x, t, n_query).1;
+            let input = state.x_in.clone();
+            layers.push(&input, state);
         }
 
         let final_norm = self.gpu.storage((t * d) as u64);
@@ -941,9 +965,14 @@ impl Resampler {
         );
 
         let mut d_x = d_x_final;
-        for l in (0..e.n_layers).rev() {
-            d_x = self.layer_bwd(l, &st.layers[l as usize], t, &d_x);
-        }
+        st.layers.rev_for_each(
+            |l, x_in| {
+                // `layer_fwd` updates its residual in place: replay it on a copy of the layer's input.
+                let x = self.snapshot(x_in, (t * d) as usize);
+                self.layer_fwd(l as u32, &x, t, n_query).1
+            },
+            |l, state| d_x = self.layer_bwd(l as u32, state, t, &d_x),
+        );
         let d_concat_in = self.gpu.read(&d_x, (t * d) as usize);
 
         let (d_sam, d_query_bank) = d_concat_in.split_at((n_query * d) as usize);

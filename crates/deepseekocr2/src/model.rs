@@ -30,6 +30,7 @@
 //! later milestones' work (real-weight parity, M6).
 
 use deepseek2::model::DeepseekV2;
+use model::saved::SavedPolicy;
 use deepseek2::{DeepseekV2Config, IGNORE};
 
 use crate::config::DeepseekOcr2VisionConfig;
@@ -184,6 +185,22 @@ impl DeepseekOcr2 {
     pub fn zero_grads(&self) {
         self.enc.zero_grads();
         self.dec.zero_grads();
+    }
+
+    /// What the backward keeps of the forward ([`model::saved::SavedPolicy`]) in both towers: the resampler keeps
+    /// each view's layer inputs only and rebuilds a layer as the backward reaches it, the decoder's layers share one
+    /// set of intermediates ([`SavedPolicy::Recompute`]). [`SavedPolicy::Quantized`] holds the decoder's residual
+    /// stream in the narrow format while the resampler recomputes from its f32 layer inputs. Going back to keeping
+    /// is refused by name. Call it before the first forward.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        let vision = match policy {
+            SavedPolicy::Quantized(_) => SavedPolicy::Recompute,
+            other => other,
+        };
+        // The decoder is the one that can refuse (it cannot widen what it has narrowed), so it goes first and a
+        // refusal leaves both towers as they were.
+        self.dec.set_saved_policy(policy).map_err(|e| format!("deepseekocr2 decoder: {e}"))?;
+        self.enc.set_saved_policy(vision)
     }
 
     /// `[seq, d_model]` - the decoder's residual stream after the splice.
