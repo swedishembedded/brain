@@ -43,6 +43,7 @@
 
 use deepseek2::model::{DeepseekV2, Sizes};
 use deepseek2::IGNORE;
+use model::saved::SavedPolicy;
 
 use crate::config::DeepseekOcrConfig;
 use crate::encoder::DeepEncoder;
@@ -563,6 +564,20 @@ impl DeepseekOcr {
     pub fn zero_grads(&self) {
         self.enc.zero_grads();
         self.dec.zero_grads();
+    }
+
+    /// What the backward keeps of the forward ([`model::saved::SavedPolicy`]) in every tower: each tower's layers
+    /// share one set of intermediates and rebuild a layer's from its input before its backward
+    /// ([`SavedPolicy::Recompute`]). [`SavedPolicy::Quantized`] holds the decoder's residual stream in the narrow
+    /// format and has the vision towers recompute from their f32 block inputs. Going back to keeping is refused by
+    /// name. Call it before the first forward.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        let vision = match policy {
+            SavedPolicy::Quantized(_) => SavedPolicy::Recompute,
+            other => other,
+        };
+        self.enc.set_saved_policy(vision).map_err(|e| format!("deepseek2ocr encoder: {e}"))?;
+        self.dec.set_saved_policy(policy).map_err(|e| format!("deepseek2ocr decoder: {e}"))
     }
 
     /// `[seq, d_model]` -- the decoder's residual stream after the splice, i.e.

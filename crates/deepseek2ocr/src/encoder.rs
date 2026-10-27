@@ -51,6 +51,7 @@
 
 use clip::model::{serving_pipelines, ClipVision, PatchSource, CLIP_VISION_PIPELINES};
 use gpu_core::{DeviceBuffer, Gpu};
+use model::saved::SavedPolicy;
 use paramstore::{ParamStore, Role};
 use sam1::model::SamEncoder;
 
@@ -421,6 +422,22 @@ impl DeepEncoder {
         self.sam.zero_grads();
         self.clip.zero_grads();
         self.glue.ps.zero_grads(&self.glue.gpu);
+    }
+
+    /// What the backward keeps of the forward ([`model::saved::SavedPolicy`]): every block of the SAM and CLIP towers
+    /// ([`SavedPolicy::Keep`]), or only each block's input, a block's intermediates rebuilt as the backward reaches
+    /// it ([`SavedPolicy::Recompute`]). The towers hold their block inputs in f32, so a narrow saved format is
+    /// refused by name, as is going back to keeping everything. The projector is one layer and holds nothing to
+    /// rebuild. An inference build has no backward and accepts only keeping.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        if let SavedPolicy::Quantized(format) = policy {
+            return Err(format!("deepseek2ocr's vision towers keep their block inputs in f32; {format:?} saved boundaries do not apply"));
+        }
+        if policy.recomputes() && !self.sam.is_trainable() {
+            return Err(format!("deepseek2ocr: an inference build has no backward to save for; {policy:?} is not available"));
+        }
+        self.sam.set_saved_policy(policy)?;
+        self.clip.set_saved_policy(policy)
     }
 
     // -----------------------------------------------------------------------
