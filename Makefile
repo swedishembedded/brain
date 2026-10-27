@@ -1709,12 +1709,17 @@ BOARD_REQUIRED = @test -n "$(BOARD)" || { echo "set BOARD to the board's ssh hos
 samples/npu/rockchip/board/build:
 	$(UCLIBC_CARGO_BUILD) -p sample-npu-rockchip
 
-## samples/npu/rockchip/board/deploy - copy the built Rockchip NPU sample to brain/ on the board (BOARD=<ssh host>)
+## samples/npu/rockchip/board/deploy - copy the built Rockchip NPU sample (and MODEL_DIR, if given, as model local/<its name>) to brain/ on the board (BOARD=<ssh host>)
 samples/npu/rockchip/board/deploy:
 	$(BOARD_REQUIRED)
 	@test -x "$(ROCKCHIP_SAMPLE_BIN)" || { echo "not built: $(ROCKCHIP_SAMPLE_BIN)"; echo "run: make samples/npu/rockchip/board/build"; exit 2; }
-	ssh $(BOARD) 'mkdir -p brain'
+	ssh $(BOARD) 'mkdir -p brain/models/local'
 	scp -q $(ROCKCHIP_SAMPLE_BIN) $(BOARD):brain/
+	@if [ -n "$(MODEL_DIR)" ]; then \
+		test -f "$(MODEL_DIR)/model.safetensors" -a -f "$(MODEL_DIR)/model.npu-calibration.json" || { echo "$(MODEL_DIR) needs model.safetensors and model.npu-calibration.json"; exit 2; }; \
+		echo "model $(MODEL_DIR) -> $(BOARD):brain/models/local/$$(basename $(MODEL_DIR))"; \
+		scp -qr "$(MODEL_DIR)" $(BOARD):brain/models/local/; \
+	fi
 
 # brain's Rockchip NPU compiler checked on the board itself: every layer shape
 # the detector runs, compared byte for byte with the host reference.

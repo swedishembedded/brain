@@ -209,7 +209,7 @@ mod tests {
         let big = nal(5, 5000);
         let mut pk = Packetizer::new(96, 1);
         let mut out = Packets::default();
-        pk.packetize(&annex_b(&[big.clone()]), 0, &mut out);
+        pk.packetize(&annex_b(std::slice::from_ref(&big)), 0, &mut out);
         let got = parse(&out);
         assert!(got.len() > 3);
         let mut rebuilt = Vec::new();

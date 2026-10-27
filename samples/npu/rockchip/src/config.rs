@@ -46,7 +46,7 @@ impl StreamConfig {
     /// Rejects settings the camera or encoder cannot honour.
     pub fn validate(&self) -> Result<(), String> {
         let (max_w, max_h) = SENSOR_MAX;
-        if self.width % 2 != 0 || self.height % 2 != 0 || self.width < 64 || self.height < 64 {
+        if !self.width.is_multiple_of(2) || !self.height.is_multiple_of(2) || self.width < 64 || self.height < 64 {
             return Err(format!("{}x{} is not a usable stream size (even, at least 64x64)", self.width, self.height));
         }
         if self.width > max_w || self.height > max_h {

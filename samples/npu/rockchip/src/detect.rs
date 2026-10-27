@@ -94,13 +94,13 @@ impl Letterbox {
     }
 
     /// Maps a point in the tap image to a point in the stream frame.
-    pub fn to_stream(&self, x: f32, y: f32) -> (i32, i32) {
+    pub fn to_stream(self, x: f32, y: f32) -> (i32, i32) {
         (((x - self.pad_x as f32) / self.scale).round() as i32, ((y - self.pad_y as f32) / self.scale).round() as i32)
     }
 
     /// Maps a box (`left, top, right, bottom`) in the tap image to the stream
     /// frame, clamped to `width` x `height`.
-    pub fn box_to_stream(&self, b: [f32; 4], width: u32, height: u32) -> [i32; 4] {
+    pub fn box_to_stream(self, b: [f32; 4], width: u32, height: u32) -> [i32; 4] {
         let (l, t) = self.to_stream(b[0], b[1]);
         let (r, bt) = self.to_stream(b[2], b[3]);
         let (w, h) = (width as i32 - 1, height as i32 - 1);
