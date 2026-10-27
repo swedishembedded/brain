@@ -19,6 +19,8 @@ const TOO_LONG: usize = 100;
 struct Toy {
     alloc: BlockAllocator,
     abandoned: usize,
+    /// Decode steps left before one runs the card out of memory (`usize::MAX`: never).
+    steps_until_oom: usize,
 }
 
 impl PagedDecoder for Toy {
@@ -62,6 +64,10 @@ impl PagedDecoder for Toy {
         l
     }
     fn forward_batched_greedy(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<u32> {
+        if self.steps_until_oom == 0 {
+            std::panic::resume_unwind(Box::new(gpu_core::DeviceOutOfMemory { bytes: 252 << 20, what: "storage".into(), detail: "out of memory".into() }));
+        }
+        self.steps_until_oom = self.steps_until_oom.saturating_sub(1);
         for t in tables.iter_mut() {
             t.append(&mut self.alloc).unwrap();
         }
@@ -99,7 +105,7 @@ fn prompt(len: usize) -> Vec<u32> {
 
 #[test]
 fn a_full_card_refuses_the_prompt_it_was_reading_and_keeps_serving() {
-    let mut sched = Scheduler::new(Toy { alloc: BlockAllocator::new(512, 8), abandoned: 0 }, 4);
+    let mut sched = Scheduler::new(Toy { alloc: BlockAllocator::new(512, 8), abandoned: 0, steps_until_oom: usize::MAX }, 4);
     let free = sched.free_blocks();
     let running = sched.submit(Request { prompt: prompt(10), max_new: 6, stop: Vec::new() });
     sched.step();
@@ -123,4 +129,30 @@ fn a_full_card_refuses_the_prompt_it_was_reading_and_keeps_serving() {
     assert!(ids.contains(&running) && ids.contains(&later), "{ids:?}");
     assert_eq!(done.iter().find(|(id, _)| *id == running).unwrap().1.len(), 6);
     assert_eq!(sched.free_blocks(), free, "every block, the refused prompt's included, is back in the pool");
+}
+
+#[test]
+fn a_full_card_in_a_decode_step_refuses_that_steps_sequences_with_a_classed_reason() {
+    let mut sched = Scheduler::new(Toy { alloc: BlockAllocator::new(512, 8), abandoned: 0, steps_until_oom: 2 }, 4);
+    let free = sched.free_blocks();
+    let a = sched.submit(Request { prompt: prompt(10), max_new: 20, stop: Vec::new() });
+    let b = sched.submit(Request { prompt: prompt(12), max_new: 20, stop: Vec::new() });
+    let mut rejected = Vec::new();
+    for _ in 0..8 {
+        rejected.extend(sched.step_report().rejected);
+    }
+    let ids: Vec<u64> = rejected.iter().map(|(id, _)| *id).collect();
+    assert!(ids.contains(&a) && ids.contains(&b), "both sequences of the failed step are refused: {rejected:?}");
+    assert!(rejected.iter().all(|(_, r)| matches!(r, RejectReason::DeviceOutOfMemory { bytes } if *bytes == 252 << 20)));
+    assert!(!sched.pending(), "nothing is left running");
+    assert_eq!(sched.free_blocks(), free, "their blocks are back in the pool");
+
+    // The scheduler serves on: once the card has room again the next request is answered.
+    sched.decoder_mut().steps_until_oom = usize::MAX;
+    let later = sched.submit(Request { prompt: prompt(9), max_new: 3, stop: Vec::new() });
+    let mut done = Vec::new();
+    while sched.pending() {
+        done.extend(sched.step());
+    }
+    assert!(done.iter().any(|(id, toks)| *id == later && toks.len() == 3));
 }

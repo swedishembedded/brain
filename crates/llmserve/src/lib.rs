@@ -330,7 +330,9 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
                 let max_new = req.max_new;
                 job.capture = Capture::of(&inv, &req.ids);
                 let seq = SeqState::new(&req, inv.cancel.clone());
-                let request = Request { prompt: req.ids, max_new, stop: self.front.stop().to_vec() };
+                // `ignore_eos` generates to the token budget: the end-of-sequence ids are not stop tokens for this request.
+                let stop = if inv.get_bool("ignore_eos").unwrap_or(false) { Vec::new() } else { self.front.stop().to_vec() };
+                let request = Request { prompt: req.ids, max_new, stop };
                 let id = match (adapter, embeds) {
                     (Some(adapter), None) => self.sched.submit_for_adapter(request, adapter, sample, seed),
                     (None, None) => self.sched.submit_sampled(request, sample, seed),

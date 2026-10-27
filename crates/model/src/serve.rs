@@ -1984,7 +1984,11 @@ impl<D: PagedDecoder> Scheduler<D> {
         //    back below). With work waiting, the window stays 1 so admission
         //    latency is never traded away silently.
         let active: Vec<usize> = (0..self.running.len()).filter(|&i| !self.running[i].done).collect();
-        if !active.is_empty() && !self.speculative_step(&active) {
+        'decode: {
+        if active.is_empty() || self.speculative_step(&active) {
+            break 'decode;
+        }
+        {
             let plain_started = (self.clock)();
             let generated_before: usize = active.iter().map(|&i| self.running[i].generated.len()).sum();
             let inputs: Vec<u32> = active.iter().map(|&i| self.running[i].next_input).collect();
@@ -2016,7 +2020,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             if k > 1 && (self.dec.free_blocks() as usize) < active.len() * k {
                 k = 1;
             }
-            let window: Vec<Vec<(u32, f32)>> = if all_greedy {
+            let decoded = catch_device_oom(|| -> Vec<Vec<(u32, f32)>> { if all_greedy {
                 let mut refs: Vec<&mut BlockTable> = Vec::new();
                 for (idx, r) in self.running.iter_mut().enumerate() {
                     if active.contains(&idx) {
@@ -2053,6 +2057,21 @@ impl<D: PagedDecoder> Scheduler<D> {
                         vec![sample_in_context(&candidates[bi], r.sample, &ctx, &mut r.rng)]
                     })
                     .collect()
+            }});
+            let window = match decoded {
+                Ok(window) => window,
+                Err(oom) => {
+                    // The step ran the card out of memory: the sequences it carried are refused with a classed
+                    // error (their blocks returned) and the rest of the server goes on. All of them, since the
+                    // step's answers for the others are lost with its unwind.
+                    for &i in active.iter().rev() {
+                        let mut r = self.running.remove(i);
+                        self.dec.release_table(&mut r.table);
+                        self.unpin(r.adapter);
+                        report.rejected.push((r.id, RejectReason::DeviceOutOfMemory { bytes: oom.bytes }));
+                    }
+                    break 'decode;
+                }
             };
             for (bi, &si) in active.iter().enumerate() {
                 let r = &mut self.running[si];
@@ -2086,6 +2105,7 @@ impl<D: PagedDecoder> Scheduler<D> {
                 let produced: usize = active.iter().map(|&i| self.running[i].generated.len()).sum::<usize>() - generated_before;
                 self.gate.observe_plain(speculate::CostGate::bucket(active.len()), produced, (self.clock)() - plain_started);
             }
+        }
         }
 
         // 4. Reap completed sequences, returning their blocks to the pool.

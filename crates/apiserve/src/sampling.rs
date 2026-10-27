@@ -43,6 +43,14 @@ pub fn apply(provider: Provider, body: &Value, mut inv: Invocation) -> Result<In
         inv = inv.set("top_k", json!(k));
     }
     inv = apply_extended(provider, body, inv)?;
+    // vLLM's `ignore_eos`: generate to the token budget past the model's end-of-sequence tokens (a throughput
+    // benchmark's protocol). Forwarded only when on, so a model that does not honour it refuses it by name.
+    if let Some(v) = present(body, "ignore_eos") {
+        let on = v.as_bool().ok_or_else(|| ApiError::invalid_request(provider, "'ignore_eos' must be a boolean"))?;
+        if on {
+            inv = inv.set("ignore_eos", json!(true));
+        }
+    }
     if let Some(v) = present(body, "seed") {
         // A seed the model drew itself spans all of u64 and is echoed back as
         // such; sending it back must reproduce the decode.
@@ -161,6 +169,14 @@ mod tests {
     use super::*;
 
     const P: Provider = Provider::OpenAI;
+
+    #[test]
+    fn ignore_eos_is_forwarded_only_when_on_and_must_be_a_boolean() {
+        assert_eq!(apply(P, &json!({}), Invocation::new()).unwrap().get_bool("ignore_eos"), None);
+        assert_eq!(apply(P, &json!({"ignore_eos": false}), Invocation::new()).unwrap().get_bool("ignore_eos"), None);
+        assert_eq!(apply(P, &json!({"ignore_eos": true}), Invocation::new()).unwrap().get_bool("ignore_eos"), Some(true));
+        assert!(apply(P, &json!({"ignore_eos": "yes"}), Invocation::new()).is_err());
+    }
 
     #[test]
     fn an_omitted_sampling_setting_is_left_to_the_action() {

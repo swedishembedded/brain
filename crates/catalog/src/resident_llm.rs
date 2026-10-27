@@ -72,6 +72,7 @@ pub fn generate_spec(summary: &str, chat: bool) -> ActionSpec {
             ))
             .param(ParamSpec::new("top_p", ParamType::Float, "nucleus sampling threshold (>= 1 = disabled)").default(json!(1.0)))
             .param(ParamSpec::new("stop", ParamType::Str, "JSON array of stop strings"))
+            .param(ParamSpec::new("ignore_eos", ParamType::Bool, "generate to max_new past the model's end-of-sequence tokens (stop strings still apply)").default(json!(false)))
             .param(ParamSpec::new("tools", ParamType::Str, "JSON array of tool definitions (OpenAI function-calling schema)"))
             .param(ParamSpec::new("tool_choice", ParamType::Str, "tool_choice directive, raw JSON text (\"auto\"|\"none\"|\"required\"|{...})"))
             .param(ParamSpec::new("enable_thinking", ParamType::Bool, "allow the model to emit a <think> reasoning block").default(json!(true)))
