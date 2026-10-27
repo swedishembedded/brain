@@ -14,9 +14,9 @@
 //! float reference used to calibrate and to measure what quantization costs.
 //!
 //! Convolution parameters are not copied into the graph: a [`ConvParams`]
-//! hands them out on demand (from a memory-mapped checkpoint, typically), so
-//! compiling a network on a board with a few MB of RAM holds one layer's
-//! float weights at a time, never the whole model.
+//! streams them on demand (from a memory-mapped checkpoint, typically), so
+//! compiling a network on a board with a few MB of RAM never holds a layer's
+//! float weights, let alone the model's.
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -26,10 +26,18 @@ use crate::{Error, Result};
 
 /// The float parameters of one convolution, produced when asked.
 pub trait ConvParams: Send + Sync {
-    /// `[out][in][k][k]`.
-    fn weights(&self) -> Cow<'_, [f32]>;
+    /// Stream the weights, `[out][in][k][k]` in order, as consecutive chunks
+    /// of any size. Called once per pass; a quantizer makes two.
+    fn weights(&self, sink: &mut dyn FnMut(&[f32]));
     /// `[out]`.
     fn bias(&self) -> Cow<'_, [f32]>;
+
+    /// Every weight in one vector: the float reference's (host) form.
+    fn collect_weights(&self) -> Vec<f32> {
+        let mut all = Vec::new();
+        self.weights(&mut |chunk| all.extend_from_slice(chunk));
+        all
+    }
 }
 
 /// Parameters held in memory (tests, small models).
@@ -39,8 +47,8 @@ pub struct OwnedConvParams {
 }
 
 impl ConvParams for OwnedConvParams {
-    fn weights(&self) -> Cow<'_, [f32]> {
-        Cow::Borrowed(&self.weights)
+    fn weights(&self, sink: &mut dyn FnMut(&[f32])) {
+        sink(&self.weights);
     }
 
     fn bias(&self) -> Cow<'_, [f32]> {
@@ -129,7 +137,9 @@ impl Graph {
     #[allow(clippy::too_many_arguments)]
     pub fn conv(&mut self, input: TensorId, params: Arc<dyn ConvParams>, out_channels: usize, kernel: usize, stride: usize, pad: [usize; 4], relu: bool) -> Result<TensorId> {
         let s = self.shapes[input];
-        if params.weights().len() != out_channels * s.c * kernel * kernel || params.bias().len() != out_channels {
+        let mut weights = 0;
+        params.weights(&mut |chunk| weights += chunk.len());
+        if weights != out_channels * s.c * kernel * kernel || params.bias().len() != out_channels {
             return Err(Error::Unsupported(format!("conv on {s:?}: weights must be [{out_channels}, {}, {kernel}, {kernel}] with {out_channels} biases", s.c)));
         }
         let [t, l, b, r] = pad;
@@ -191,7 +201,7 @@ impl Graph {
         for (step, op) in self.ops.iter().enumerate() {
             let get = |t: TensorId| values[t].as_deref().expect("graph ops are in execution order");
             let out = match op {
-                Op::Conv { input, params, kernel, stride, pad, relu, output } => conv_f32(get(*input), self.shapes[*input], self.shapes[*output], &params.weights(), &params.bias(), *kernel, *stride, *pad, *relu),
+                Op::Conv { input, params, kernel, stride, pad, relu, output } => conv_f32(get(*input), self.shapes[*input], self.shapes[*output], &params.collect_weights(), &params.bias(), *kernel, *stride, *pad, *relu),
                 Op::Add { a, b, .. } => get(*a).iter().zip(get(*b)).map(|(x, y)| x + y).collect(),
                 Op::Concat { inputs, output } => {
                     let so = self.shapes[*output];
@@ -281,10 +291,22 @@ impl Graph {
 
 #[allow(clippy::too_many_arguments)]
 fn conv_f32(x: &[f32], si: Shape, so: Shape, w: &[f32], b: &[f32], k: usize, stride: usize, pad: [usize; 4], relu: bool) -> Vec<f32> {
-    let mut out = vec![0f32; so.h * so.w * so.c];
+    // Weights as [tap][in][out], so the innermost loop runs over contiguous
+    // output channels and vectorizes; a zero input (common after ReLU) is
+    // skipped outright.
+    let (ic, oc) = (si.c, so.c);
+    let mut wt = vec![0f32; k * k * ic * oc];
+    for o in 0..oc {
+        for c in 0..ic {
+            for t in 0..k * k {
+                wt[(t * ic + c) * oc + o] = w[(o * ic + c) * k * k + t];
+            }
+        }
+    }
+    let mut out = vec![0f32; so.h * so.w * oc];
     for oy in 0..so.h {
         for ox in 0..so.w {
-            let acc = &mut out[(oy * so.w + ox) * so.c..(oy * so.w + ox + 1) * so.c];
+            let acc = &mut out[(oy * so.w + ox) * oc..(oy * so.w + ox + 1) * oc];
             acc.copy_from_slice(b);
             for ky in 0..k {
                 let y = (oy * stride + ky) as isize - pad[0] as isize;
@@ -296,10 +318,14 @@ fn conv_f32(x: &[f32], si: Shape, so: Shape, w: &[f32], b: &[f32], k: usize, str
                     if xx < 0 || xx >= si.w as isize {
                         continue;
                     }
-                    let px = &x[((y as usize) * si.w + xx as usize) * si.c..][..si.c];
-                    for (o, a) in acc.iter_mut().enumerate() {
-                        let wo = &w[o * si.c * k * k..];
-                        *a += px.iter().enumerate().map(|(c, v)| v * wo[(c * k + ky) * k + kx]).sum::<f32>();
+                    let px = &x[((y as usize) * si.w + xx as usize) * ic..][..ic];
+                    let taps = &wt[(ky * k + kx) * ic * oc..][..ic * oc];
+                    for (&v, row) in px.iter().zip(taps.chunks_exact(oc)) {
+                        if v != 0.0 {
+                            for (a, &wv) in acc.iter_mut().zip(row) {
+                                *a += v * wv;
+                            }
+                        }
                     }
                 }
             }

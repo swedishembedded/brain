@@ -18,6 +18,9 @@ pub enum Error {
     Checkpoint(Vec<String>),
     /// A caller-supplied size, buffer or threshold is unusable.
     Input(String),
+    /// The NPU path: compiling, loading or running on the Rockchip NPU, or
+    /// its calibration file.
+    Npu(String),
 }
 
 impl fmt::Display for Error {
@@ -29,6 +32,7 @@ impl fmt::Display for Error {
                 write!(f, "yolov5 checkpoint does not match its config ({} problem(s)): {}", problems.len(), problems.join("; "))
             }
             Error::Input(m) => write!(f, "yolov5 input: {m}"),
+            Error::Npu(m) => write!(f, "yolov5 npu: {m}"),
         }
     }
 }

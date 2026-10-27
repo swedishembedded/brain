@@ -55,47 +55,61 @@ pub struct HeadMap<'a> {
 /// class]` in network-input pixels, before NMS, keeping those above
 /// `conf_thresh`.
 pub fn decode_candidates(cfg: &Yolov5Config, heads: [HeadMap<'_>; 3], conf_thresh: f32) -> Result<Vec<Detection>, Error> {
-    let nc = cfg.nc as usize;
-    let fields = BOX_FIELDS as usize + nc;
-    let (h0, w0) = (heads[0].h * STRIDES[0] as usize, heads[0].w * STRIDES[0] as usize);
-
-    let mut out = Vec::new();
+    let fields = BOX_FIELDS as usize + cfg.nc as usize;
     for (scale, head) in heads.iter().enumerate() {
-        let stride = STRIDES[scale] as usize;
-        if (head.h * stride, head.w * stride) != (h0, w0) {
-            return Err(Error::Input(format!("head {scale} is {}x{} at stride {stride}, which is not the {h0}x{w0} input head 0 implies", head.h, head.w)));
-        }
         let want = ANCHORS_PER_SCALE * fields * head.h * head.w;
         if head.data.len() != want {
             return Err(Error::Input(format!("head {scale} has {} values, expected {want} ({} x {} x {}x{})", head.data.len(), ANCHORS_PER_SCALE, fields, head.h, head.w)));
         }
-        let plane = head.h * head.w;
+    }
+    let sizes = heads.map(|h| (h.h, h.w));
+    decode_candidates_with(cfg, sizes, conf_thresh, |scale, channel, y, x| {
+        let h = &heads[scale];
+        h.data[channel * h.h * h.w + y * h.w + x]
+    })
+}
+
+/// [`decode_candidates`] over any source of post-sigmoid head values:
+/// `field(scale, channel, y, x)` with `channel = anchor * (5 + nc) + k`. An
+/// NPU runtime decodes its int8 head tensors in place through this, reading
+/// only the objectness of every anchor and the rest only for survivors.
+pub fn decode_candidates_with(cfg: &Yolov5Config, sizes: [(usize, usize); 3], conf_thresh: f32, field: impl Fn(usize, usize, usize, usize) -> f32) -> Result<Vec<Detection>, Error> {
+    let nc = cfg.nc as usize;
+    let fields = BOX_FIELDS as usize + nc;
+    let (h0, w0) = (sizes[0].0 * STRIDES[0] as usize, sizes[0].1 * STRIDES[0] as usize);
+    let mut out = Vec::new();
+    for (scale, &(hh, hw)) in sizes.iter().enumerate() {
+        let stride = STRIDES[scale] as usize;
+        if (hh * stride, hw * stride) != (h0, w0) {
+            return Err(Error::Input(format!("head {scale} is {hh}x{hw} at stride {stride}, which is not the {h0}x{w0} input head 0 implies")));
+        }
         let s = stride as f32;
         for a in 0..ANCHORS_PER_SCALE {
             let (anchor_w, anchor_h) = (cfg.anchors[scale][2 * a], cfg.anchors[scale][2 * a + 1]);
-            let field = |k: usize, cell: usize| head.data[(a * fields + k) * plane + cell];
-            for cell in 0..plane {
-                let obj = field(4, cell);
-                if obj <= conf_thresh {
-                    continue;
-                }
-                let (mut best, mut best_class) = (f32::NEG_INFINITY, 0);
-                for c in 0..nc {
-                    let score = obj * field(BOX_FIELDS as usize + c, cell);
-                    if score > best {
-                        best = score;
-                        best_class = c;
+            let f = |k: usize, y: usize, x: usize| field(scale, a * fields + k, y, x);
+            for gy in 0..hh {
+                for gx in 0..hw {
+                    let obj = f(4, gy, gx);
+                    if obj <= conf_thresh {
+                        continue;
                     }
+                    let (mut best, mut best_class) = (f32::NEG_INFINITY, 0);
+                    for c in 0..nc {
+                        let score = obj * f(BOX_FIELDS as usize + c, gy, gx);
+                        if score > best {
+                            best = score;
+                            best_class = c;
+                        }
+                    }
+                    if best <= conf_thresh {
+                        continue;
+                    }
+                    let cx = (f(0, gy, gx) * 2.0 - 0.5 + gx as f32) * s;
+                    let cy = (f(1, gy, gx) * 2.0 - 0.5 + gy as f32) * s;
+                    let w = (f(2, gy, gx) * 2.0).powi(2) * anchor_w;
+                    let h = (f(3, gy, gx) * 2.0).powi(2) * anchor_h;
+                    out.push([cx - w * 0.5, cy - h * 0.5, cx + w * 0.5, cy + h * 0.5, best, best_class as f32]);
                 }
-                if best <= conf_thresh {
-                    continue;
-                }
-                let (gx, gy) = ((cell % head.w) as f32, (cell / head.w) as f32);
-                let cx = (field(0, cell) * 2.0 - 0.5 + gx) * s;
-                let cy = (field(1, cell) * 2.0 - 0.5 + gy) * s;
-                let w = (field(2, cell) * 2.0).powi(2) * anchor_w;
-                let h = (field(3, cell) * 2.0).powi(2) * anchor_h;
-                out.push([cx - w * 0.5, cy - h * 0.5, cx + w * 0.5, cy + h * 0.5, best, best_class as f32]);
             }
         }
     }
@@ -115,14 +129,19 @@ pub fn detections(
     iou_thresh: f32,
     max_det: usize,
 ) -> Result<Vec<Detection>, Error> {
-    let kept = nms(&decode_candidates(cfg, heads, conf_thresh)?, iou_thresh, max_det);
-    Ok(kept
+    Ok(finish(&decode_candidates(cfg, heads, conf_thresh)?, letterbox, orig, iou_thresh, max_det))
+}
+
+/// Class-aware NMS of `candidates` at `iou_thresh`, at most `max_det` kept,
+/// mapped back through `letterbox` into the `orig` `(width, height)` image.
+pub fn finish(candidates: &[Detection], letterbox: &Letterbox, orig: (u32, u32), iou_thresh: f32, max_det: usize) -> Vec<Detection> {
+    nms(candidates, iou_thresh, max_det)
         .into_iter()
         .map(|d| {
             let b = letterbox.invert_box([d[0], d[1], d[2], d[3]], orig.0, orig.1);
             [b[0], b[1], b[2], b[3], d[4], d[5]]
         })
-        .collect())
+        .collect()
 }
 
 #[cfg(test)]

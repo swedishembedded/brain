@@ -108,6 +108,10 @@ fn round_shift(x: i64, shift: u32) -> i64 {
     (x + (1 << (shift - 1)) - 1 + ((x >> shift) & 1)) >> shift
 }
 
+/// A source of weights in order: each call feeds every weight, in chunks, to
+/// the sink it is given.
+pub type WeightStream<'a> = &'a mut dyn FnMut(&mut dyn FnMut(&[f32]));
+
 /// A convolution's weights, bias and output conversion in the NPU's integers.
 #[derive(Clone, Debug)]
 pub struct ConvQuant {
@@ -128,57 +132,97 @@ pub struct ConvQuant {
 impl ConvQuant {
     /// Quantize a float convolution (`weights` `[out][in][k][k]`, `bias`
     /// `[out]`) that reads `input` and writes `output`.
+    #[allow(clippy::too_many_arguments)]
     pub fn quantize(weights: &[f32], bias: &[f32], out_channels: usize, in_channels: usize, kernel: usize, input: QParams, output: QParams, relu: bool) -> Result<ConvQuant> {
+        ConvQuant::quantize_streamed(&mut |sink| sink(weights), bias, out_channels, in_channels, kernel, input, output, relu)
+    }
+
+    /// [`ConvQuant::quantize`] over weights that `stream` produces in order,
+    /// in chunks, each time it is called (twice: ranges, then codes), so no
+    /// float copy of the weights is ever held.
+    #[allow(clippy::too_many_arguments)]
+    pub fn quantize_streamed(stream: WeightStream<'_>, bias: &[f32], out_channels: usize, in_channels: usize, kernel: usize, input: QParams, output: QParams, relu: bool) -> Result<ConvQuant> {
         let per_out = in_channels * kernel * kernel;
-        if weights.len() != out_channels * per_out || bias.len() != out_channels {
-            return Err(Error::Quantization(format!(
-                "conv expects {} weights and {out_channels} biases for [{out_channels}, {in_channels}, {kernel}, {kernel}], got {} and {}",
-                out_channels * per_out,
-                weights.len(),
-                bias.len()
-            )));
+        let total = out_channels * per_out;
+        if bias.len() != out_channels || bias.iter().any(|v| !v.is_finite()) {
+            return Err(Error::Quantization(format!("conv [{out_channels}, {in_channels}, {kernel}, {kernel}] needs {out_channels} finite biases, got {}", bias.len())));
         }
-        if weights.iter().chain(bias).any(|v| !v.is_finite()) {
-            return Err(Error::Quantization("conv weights or bias are not finite".into()));
+        // Pass 1: each output channel's range, widened to include 0.
+        let mut ranges = vec![(0f32, 0f32); out_channels];
+        let (mut seen, mut finite) = (0usize, true);
+        stream(&mut |chunk| {
+            for &v in chunk {
+                if seen < total {
+                    let r = &mut ranges[seen / per_out];
+                    *r = (r.0.min(v), r.1.max(v));
+                }
+                finite &= v.is_finite();
+                seen += 1;
+            }
+        });
+        if seen != total || !finite {
+            return Err(Error::Quantization(format!("conv [{out_channels}, {in_channels}, {kernel}, {kernel}] expects {total} finite weights, got {seen}")));
         }
-        let ranges: Vec<(f32, f32)> = weights
-            .chunks(per_out)
-            .map(|w| (w.iter().fold(0f32, |a, &b| a.min(b)), w.iter().fold(0f32, |a, &b| a.max(b))))
-            .collect();
         let raw_scales: Vec<f32> = ranges.iter().map(|(lo, hi)| (hi - lo) / 255.0).collect();
         let max_scale = raw_scales.iter().fold(0f32, |a, &b| a.max(b));
         let max_scale = if max_scale > 0.0 { max_scale } else { 1.0 / 32768.0 };
         // An all-zero channel still carries its bias; give it the common scale.
         let scales: Vec<f32> = raw_scales.iter().map(|&s| if s > 0.0 { s } else { max_scale }).collect();
+        let zero_points: Vec<i8> = ranges.iter().zip(&scales).map(|((lo, _), s)| (-128.0 - lo / s).round_ties_even().clamp(-128.0, 127.0) as i8).collect();
 
+        // Pass 2: the codes, and each channel's sum of centered codes (the
+        // input zero point's share of the bias).
+        let mut weights = Vec::with_capacity(total);
+        let mut centered = vec![0i64; out_channels];
+        stream(&mut |chunk| {
+            for &v in chunk {
+                let o = weights.len() / per_out;
+                let q = ((v / scales[o]).round_ties_even() + f32::from(zero_points[o])).clamp(-128.0, 127.0) as i8;
+                centered[o] += i64::from(q) - i64::from(zero_points[o]);
+                weights.push(q);
+            }
+        });
         let mut q = ConvQuant {
             out_channels,
             in_channels,
             kernel,
-            weights: Vec::with_capacity(weights.len()),
-            weight_zero_points: Vec::with_capacity(out_channels),
+            weights,
+            weight_zero_points: zero_points,
             bias: Vec::with_capacity(out_channels),
-            channel_multipliers: Vec::with_capacity(out_channels),
+            channel_multipliers: scales.iter().map(|&s| (f64::from(s) / f64::from(max_scale) * 16384.0).round_ties_even() as u16).collect(),
             requant: Requant::for_factor(f64::from(max_scale) * f64::from(input.scale) / f64::from(output.scale), output.zero_point)?,
             relu,
         };
-        for (o, w) in weights.chunks(per_out).enumerate() {
-            let scale = scales[o];
-            let zp = (-128.0 - ranges[o].0 / scale).round_ties_even().clamp(-128.0, 127.0) as i8;
-            let mut centered_sum = 0i64;
-            for &v in w {
-                let qv = ((v / scale).round_ties_even() + f32::from(zp)).clamp(-128.0, 127.0) as i8;
-                centered_sum += i64::from(qv) - i64::from(zp);
-                q.weights.push(qv);
-            }
-            let units = (f64::from(bias[o]) / (f64::from(scale) * f64::from(input.scale))).round_ties_even();
-            let folded = units as i64 - i64::from(input.zero_point) * centered_sum;
-            let bias_i32 = i32::try_from(folded).map_err(|_| Error::Quantization(format!("conv bias of channel {o} overflows int32")))?;
-            q.weight_zero_points.push(zp);
-            q.bias.push(bias_i32);
-            q.channel_multipliers.push((f64::from(scale) / f64::from(max_scale) * 16384.0).round_ties_even() as u16);
+        for o in 0..out_channels {
+            let units = (f64::from(bias[o]) / (f64::from(scales[o]) * f64::from(input.scale))).round_ties_even();
+            let folded = units as i64 - i64::from(input.zero_point) * centered[o];
+            q.bias.push(i32::try_from(folded).map_err(|_| Error::Quantization(format!("conv bias of channel {o} overflows int32")))?);
         }
         Ok(q)
+    }
+
+    /// The same convolution with a `k2 x k2` kernel (`k2 > kernel`): the new
+    /// taps (last rows and columns) get each channel's weight zero point, a
+    /// zero weight, so the results are unchanged given the padding grows to
+    /// match.
+    pub fn grow_kernel(mut self, k2: usize) -> ConvQuant {
+        let k = self.kernel;
+        if k2 == k {
+            return self;
+        }
+        let filters = self.out_channels * self.in_channels;
+        let mut w = Vec::with_capacity(filters * k2 * k2);
+        for f in 0..filters {
+            let zp = self.weight_zero_points[f / self.in_channels];
+            for ky in 0..k2 {
+                for kx in 0..k2 {
+                    w.push(if ky < k && kx < k { self.weights[(f * k + ky) * k + kx] } else { zp });
+                }
+            }
+        }
+        self.weights = w;
+        self.kernel = k2;
+        self
     }
 
     /// The accumulator of output channel `o` for one receptive field

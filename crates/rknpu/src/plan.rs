@@ -29,7 +29,6 @@
 //! [`Plan::simulate`] executes the whole plan on a host byte arena with the
 //! exact integer arithmetic, so a board run is checked byte for byte.
 
-use std::borrow::Cow;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -55,6 +54,11 @@ impl Placement {
     /// The byte range its planes cover.
     pub fn range(&self) -> Range<usize> {
         self.offset..self.offset + self.shape.bytes()
+    }
+
+    /// The real value at `(y, x, c)` in the activation region `data`.
+    pub fn value(&self, data: &[u8], y: usize, x: usize, c: usize) -> f32 {
+        self.q.dequantize(data[self.offset + self.shape.offset(y, x, c)] as i8)
     }
 }
 
@@ -95,9 +99,8 @@ struct ConvLayer {
 impl ConvLayer {
     fn quantize(&self, placements: &[Placement]) -> Result<ConvQuant> {
         let (si, so) = (placements[self.input], placements[self.output]);
-        let source = self.params.weights();
-        let weights = odd_kernel_weights(&source, self.geometry.out_channels * self.geometry.input.c, self.source_kernel, self.geometry.kernel);
-        ConvQuant::quantize(&weights, &self.params.bias(), so.shape.c, si.shape.c, self.geometry.kernel, si.q, so.q, self.relu)
+        let quant = ConvQuant::quantize_streamed(&mut |sink| self.params.weights(sink), &self.params.bias(), so.shape.c, si.shape.c, self.source_kernel, si.q, so.q, self.relu)?;
+        Ok(quant.grow_kernel(self.geometry.kernel))
     }
 }
 
@@ -319,23 +322,6 @@ fn odd_kernel(g: ConvGeometry) -> ConvGeometry {
     }
     let [t, l, b, r] = g.pad;
     ConvGeometry { kernel: g.kernel + 1, pad: [t, l, b + 1, r + 1], ..g }
-}
-
-/// `weights` (`filters` filters of `k x k`) re-laid for an `k2 x k2` kernel
-/// with the extra taps zero; borrowed unchanged when `k2 == k`.
-fn odd_kernel_weights(weights: &[f32], filters: usize, k: usize, k2: usize) -> Cow<'_, [f32]> {
-    if k == k2 {
-        return Cow::Borrowed(weights);
-    }
-    let mut w = vec![0f32; filters * k2 * k2];
-    for f in 0..filters {
-        for ky in 0..k {
-            for kx in 0..k {
-                w[(f * k2 + ky) * k2 + kx] = weights[(f * k + ky) * k + kx];
-            }
-        }
-    }
-    Cow::Owned(w)
 }
 
 /// Quantization parameters per tensor. Concat, max pool and upsample share

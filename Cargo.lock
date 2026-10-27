@@ -3097,6 +3097,7 @@ dependencies = [
  "brain-kernels",
  "brain-modelstore",
  "brain-paramstore",
+ "brain-rknpu",
  "brain-testutil",
  "brain-vision",
  "serde",

@@ -25,6 +25,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
+use std::sync::Arc;
 
 use checkpoint::mmap::MmapSafetensors;
 
@@ -137,6 +138,23 @@ pub fn open(path: &Path) -> Result<Checkpoint, Error> {
     }
     let weights = Weights::new(&graph, tensors)?;
     Ok(Checkpoint { config, graph, weights })
+}
+
+/// A validated checkpoint whose tensors stay in the mapped file until asked
+/// for: the form a board with a few MB of RAM can load (the NPU path reads
+/// one layer at a time).
+pub struct MappedCheckpoint {
+    pub config: Yolov5Config,
+    pub graph: Graph,
+    pub file: Arc<MmapSafetensors>,
+}
+
+/// Open and validate a checkpoint (same checks as [`open`]) without reading
+/// its tensors.
+pub fn open_mapped_checkpoint(path: &Path) -> Result<MappedCheckpoint, Error> {
+    let mm = open_mapped(path)?;
+    let (config, graph) = config_and_graph(&mm)?;
+    Ok(MappedCheckpoint { config, graph, file: Arc::new(mm) })
 }
 
 /// Write `weights` and `config` as a brain-format checkpoint (tests, and tools

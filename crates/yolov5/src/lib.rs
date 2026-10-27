@@ -40,6 +40,7 @@ pub mod decode;
 pub mod error;
 pub mod graph;
 pub mod model;
+pub mod npu;
 pub mod spec;
 pub mod weights;
 

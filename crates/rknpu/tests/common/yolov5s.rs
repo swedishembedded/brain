@@ -24,9 +24,16 @@ struct SeededParams {
 }
 
 impl ConvParams for SeededParams {
-    fn weights(&self) -> Cow<'_, [f32]> {
+    fn weights(&self, sink: &mut dyn FnMut(&[f32])) {
         let mut rng = Rng::new(self.seed);
-        Cow::Owned((0..self.weights).map(|_| rng.uniform(-self.bound, self.bound) as f32).collect())
+        let mut chunk = Vec::with_capacity(4096);
+        for i in 0..self.weights {
+            chunk.push(rng.uniform(-self.bound, self.bound) as f32);
+            if chunk.len() == 4096 || i + 1 == self.weights {
+                sink(&chunk);
+                chunk.clear();
+            }
+        }
     }
 
     fn bias(&self) -> Cow<'_, [f32]> {

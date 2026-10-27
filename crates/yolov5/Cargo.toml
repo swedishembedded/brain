@@ -26,6 +26,9 @@ brain-modelstore.workspace = true
 brain-capability.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# `npu.rs` - the checkpoint lowered onto the Rockchip NPU by brain's own
+# compiler and runtime (std + libc only).
+brain-rknpu.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true
