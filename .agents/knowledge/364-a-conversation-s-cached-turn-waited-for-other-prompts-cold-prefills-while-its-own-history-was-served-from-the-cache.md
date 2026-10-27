@@ -21,9 +21,13 @@ to 37 s and of turn 2 from 13 s to 4 s but moved the large cold prompts behind t
 other conversations then waited 60-70 s behind them: the mean time-to-first-token over the 30 requests was about
 the same (28 s against 29 s). Ordering cannot beat a prefill that runs 25 s without a break.
 
-Open: a cold prefill read in slices that other prompts' slices interleave with. The background path keeps one
-working copy of the recurrent state, restored per slice only by the multi-sequence forward (`state_in_pool`), so
-interleaving needs the slice state kept in the sequence's pool row between slices.
+Fix: the background path reads a prompt in slices of at most 4096 tokens (a multiple of the prefill round and of the
+recurrent chunk, so the rounds are the unsliced prefill's: greedy tokens of a 4.8k cold prompt identical sliced and
+unsliced) and, between slices, starts the oldest prompt that fits one slice before the oldest long one (a long one
+gets a slice after 8 short ones in a row). The slice's recurrent state is already stored in the sequence's pool row
+when the slice ends; a later slice reloads it into the working copy. Same ten-conversation run: turn 2 median
+13.2 s to 1.4 s (maximum 49.8 s to 4.4 s), turn 3 maximum 1.2 s to 2.5 s; the cold turn 1 finished at 94 s against
+85 s (the large cold prompts now share the card with the turns that arrive meanwhile).
 
 Reproducibility, same finding: a seeded request is sampled from its own RNG (`Running::rng`), but its logits
 depend on the co-batch (knowledge #358), so a seed reproduces a decode only with `--exact-decode`.

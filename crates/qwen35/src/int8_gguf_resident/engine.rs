@@ -81,6 +81,36 @@ use super::{KvLayout, KvWindow, MultiPrefillJob, Qwen35GgufInstance, MODEL};
 /// sampling can reach (the same bound `crate::serve::Engine` uses).
 const TOPK_CAPACITY: usize = 32;
 
+/// The most prompt tokens one background task reads in before the engine chooses again which prompt goes next.
+/// A prompt longer than this is read in slices, with every shorter one (a conversation's next turn, whose history
+/// is cached) started between them instead of after the whole of it. A multiple of the prefill round and of the
+/// recurrent chunk, so the rounds are the ones an unsliced prefill runs.
+// perf-number: about 2 s of prefill at the measured 2.2k prompt tokens per second on one GH200
+const BACKGROUND_SLICE_TOKENS: usize = 4096;
+
+/// How many prompts that fit one slice start in a row while a longer prompt waits, before that prompt gets a slice:
+/// a long prompt is delayed by a bounded number of short ones and never starved.
+const MAX_SHORT_STREAK: u32 = 8;
+
+/// The index of the prompt to read in next among those with `remaining` tokens left, oldest first: the oldest that
+/// fits one slice, else the oldest; `streak` counts the short ones chosen in a row while a long one waited, and at
+/// [`MAX_SHORT_STREAK`] the oldest long one is chosen instead.
+fn choose_next(remaining: &[usize], streak: &mut u32) -> Option<usize> {
+    let short = remaining.iter().position(|&r| r <= BACKGROUND_SLICE_TOKENS);
+    let long = remaining.iter().position(|&r| r > BACKGROUND_SLICE_TOKENS);
+    match (short, long) {
+        (Some(i), Some(_)) if *streak < MAX_SHORT_STREAK => {
+            *streak += 1;
+            Some(i)
+        }
+        (_, Some(i)) => {
+            *streak = 0;
+            Some(i)
+        }
+        (short, None) => short,
+    }
+}
+
 /// Weight of the newest sequence in the running mean of MTP prefill-feed time.
 const FEED_EWMA: f64 = 0.3;
 
@@ -123,6 +153,8 @@ pub struct Qwen35GgufEngine {
     background_on: bool,
     /// The prompt slice being read in that way, if any.
     background: Option<Background>,
+    /// Prompts that fit one slice started in a row while a longer one waited ([`MAX_SHORT_STREAK`]).
+    short_streak: u32,
 }
 
 /// A prompt slice read in while sequences decode, and what finishing it needs.
@@ -259,6 +291,7 @@ impl Qwen35GgufEngine {
             prefill: PrefillPolicy::default(),
             background_on,
             background: None,
+            short_streak: 0,
         }
     }
 
@@ -721,14 +754,40 @@ impl Qwen35GgufEngine {
         }
         let slot = self.slot(job.table);
         let p = self.partial.remove(&slot).expect("a prefill in progress has its state");
-        let end = self.slice_end(&p, job.prompt.len(), usize::MAX);
-        // The working copy holds the state after `p.done` tokens: cleared for a
-        // cold prompt, seeded from a cached prefix, or left by the previous slice.
+        let end = self.slice_end(&p, job.prompt.len(), BACKGROUND_SLICE_TOKENS);
+        // The working copy holds the state after `p.done` tokens: cleared for a cold prompt, seeded from a cached
+        // prefix, or - for a later slice - restored from the slot's pool row, where the previous slice left it
+        // (another prompt's slice may have used the working copy since).
+        if !p.fresh {
+            self.inst.load_work_state(slot);
+        }
         let from = if p.done == 0 { TaskStart::Fresh } else { TaskStart::Continue };
         let collect = self.inst.has_mtp() && p.mtp_feed;
         let task = self.inst.prefill_task(job.prompt, p.done, end, slot, from, collect);
         self.background = Some(Background { task, p, end, namespace: job.table.kv_namespace(), done: None });
         None
+    }
+
+    /// Prompt tokens `job` still has to read in: what is left of one begun, the prompt less its cached prefix
+    /// for one not yet begun.
+    fn remaining_tokens(&self, job: &PrefillJob<'_>) -> usize {
+        match job.table.state_row().and_then(|slot| self.partial.get(&slot)) {
+            Some(p) => job.prompt.len() - p.done,
+            None => {
+                let namespace = job.table.kv_namespace();
+                let cached = if job.prompt.len() >= MIN_CACHED_TOKENS { self.cache.peek(namespace, job.prompt).map_or(0, |i| self.cache.entry(i).tokens.len()) } else { 0 };
+                job.prompt.len() - cached
+            }
+        }
+    }
+
+    /// Which prompt to read in next: the oldest that fits one slice, so a conversation's next turn does not wait
+    /// for another prompt's whole prefill, and otherwise the oldest; after [`MAX_SHORT_STREAK`] short ones in a
+    /// row, the oldest long one gets a slice. `None` when every job has its answer.
+    fn next_prompt(&mut self, jobs: &[PrefillJob<'_>], answers: &[Option<PrefillProgress>]) -> Option<usize> {
+        let open: Vec<usize> = (0..jobs.len()).filter(|&i| answers[i].is_none()).collect();
+        let remaining: Vec<usize> = open.iter().map(|&i| self.remaining_tokens(&jobs[i])).collect();
+        choose_next(&remaining, &mut self.short_streak).map(|k| open[k])
     }
 
     /// Hand each card whose prefill round has finished its next one, without
@@ -750,7 +809,7 @@ impl Qwen35GgufEngine {
         let mut consumed = vec![0usize; jobs.len()];
         loop {
             if self.background.is_none() {
-                let Some(i) = answers.iter().position(Option::is_none) else { break };
+                let Some(i) = self.next_prompt(jobs, &answers) else { break };
                 if let Some(done) = self.start_background(&mut jobs[i]) {
                     answers[i] = Some(done);
                     continue;
@@ -767,7 +826,13 @@ impl Qwen35GgufEngine {
             let Background { mut p, end, namespace, .. } = self.background.take().expect("checked above");
             p.rows_hidden.extend_from_slice(&done.all);
             match self.finish_slice(slot, namespace, jobs[i].prompt, p, end, done.last, false) {
-                PrefillProgress::Partial { consumed: c } => consumed[i] += c,
+                PrefillProgress::Partial { consumed: c } => {
+                    consumed[i] += c;
+                    // Back to the scheduler between slices: a prompt that arrived meanwhile is considered now.
+                    if wait {
+                        break;
+                    }
+                }
                 finished => {
                     answers[i] = Some(finished);
                     // Nothing decodes yet: hand the scheduler the sequence that can.
@@ -1098,5 +1163,26 @@ impl Qwen35GgufEngine {
         let out = self.inst.mtp_draft(&slots, &consumed, &next, &ks);
         self.times.draft += t0.elapsed();
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A conversation's next turn (a few tokens to read in) starts before a long prompt that arrived first, and the
+    /// long prompt still gets a slice after a bounded number of them.
+    #[test]
+    fn a_short_prompt_goes_before_a_long_one_and_the_long_one_is_not_starved() {
+        let mut streak = 0;
+        let long = BACKGROUND_SLICE_TOKENS * 4;
+        assert_eq!(choose_next(&[long, 100], &mut streak), Some(1));
+        assert_eq!(choose_next(&[long, long + 1], &mut 0), Some(0), "the oldest long prompt when none is short");
+        assert_eq!(choose_next(&[300, 100], &mut 0), Some(0), "the oldest short prompt");
+        assert_eq!(choose_next(&[], &mut 0), None);
+        let mut streak = 0;
+        let picks: Vec<usize> = (0..=MAX_SHORT_STREAK).map(|_| choose_next(&[long, 100], &mut streak).unwrap()).collect();
+        assert_eq!(picks.iter().filter(|&&i| i == 0).count(), 1, "one slice for the long prompt after {MAX_SHORT_STREAK} short ones: {picks:?}");
+        assert_eq!(picks[MAX_SHORT_STREAK as usize], 0);
     }
 }
