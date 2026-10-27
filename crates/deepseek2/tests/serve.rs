@@ -26,6 +26,7 @@ use model::kv_tier::KvTier;
 use model::serve::conformance::{self, Conformance};
 use model::serve::{PromptEmbeds, Request, SampleParams, Scheduler};
 
+// seed: every engine below is built from these same weights and compared, and WEIGHT_SCALE was chosen to spread this draw's logits
 const SEED: u64 = 7;
 
 fn ec() -> EngineConfig {

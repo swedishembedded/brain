@@ -41,7 +41,7 @@ fn batched_views_equal_the_one_view_forward() {
     let mut resampler = Resampler::new_on(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &init, false);
     // The batching is the subject here, not the arithmetic: both forwards multiply in fp32 (`tests/tensor_core.rs` holds the rest).
     resampler.set_gemm_precision(GemmPrecision::Fp32Reference);
-    let mut rng = Lcg::new(11);
+    let mut rng = Lcg::new(data::rng::random_seed());
     for local in [true, false] {
         let n_query = if local { cfg.encoder.n_query_local } else { cfg.encoder.n_query_global };
         for batch in [1usize, 2, 4, 8, 16] {

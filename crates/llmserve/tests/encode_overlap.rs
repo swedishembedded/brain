@@ -38,6 +38,7 @@ fn request(seed: u32, max_new: usize) -> ParsedRequest {
         top_k: 0,
         top_p: 1.0,
         sampler: SampleParams::greedy(),
+        // seed: the request samples greedily, so its seed is never consulted
         seed: 0,
         stops: Vec::new(),
         tool_choice: ToolChoice::Auto,
@@ -64,6 +65,7 @@ impl Frontend for Gated {
         "gated"
     }
     fn parse(&self, inv: &Invocation) -> Result<ParsedRequest, String> {
+        // seed: the test double samples greedily, so the seed it passes on is never consulted
         Ok(request(inv.get_i64("seed").unwrap_or(0) as u32, inv.get_i64("max_new").unwrap_or(8) as usize))
     }
     fn parse_in_background(&self, inv: &Invocation) -> Option<Encoding> {

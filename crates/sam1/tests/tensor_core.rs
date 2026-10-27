@@ -29,6 +29,7 @@ fn encoder(precision: GemmPrecision, train: bool) -> SamEncoder {
 
 fn output(enc: &SamEncoder) -> Vec<f32> {
     let cfg = config();
+    // seed: the tensor-core and reference encoders are compared on this one image
     let mut rng = data::rng::Lcg::new(9);
     enc.write_image(&rng.vec_scaled((3 * cfg.image_h() * cfg.image_w()) as usize, 1.0));
     enc.run();

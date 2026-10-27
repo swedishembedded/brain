@@ -29,7 +29,7 @@ fn run(cfg: &SamViTConfig, weights: &std::collections::HashMap<String, Vec<f32>>
 
 fn compare(label: &str, cfg: &SamViTConfig) {
     let weights = init_dense(cfg, 5);
-    let mut rng = data::rng::Lcg::new(9);
+    let mut rng = data::rng::Lcg::new(data::rng::random_seed());
     let image = rng.vec_scaled((3 * cfg.image_h() * cfg.image_w()) as usize, 1.0);
     let (fused, chain) = (run(cfg, &weights, false, &image), run(cfg, &weights, true, &image));
     let scale = chain.iter().fold(0f32, |m, x| m.max(x.abs()));

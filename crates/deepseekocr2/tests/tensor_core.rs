@@ -38,7 +38,7 @@ fn tf32_linears_track_the_fp32_reference() {
         return brain_testutil::skip_unavailable("this device has no tensor-core GEMM");
     }
     let cfg = config();
-    let mut rng = Lcg::new(11);
+    let mut rng = Lcg::new(data::rng::random_seed());
     let views: Vec<Vec<f32>> = (0..3).map(|_| rng.vec_scaled((cfg.encoder.n_query_local * cfg.encoder.d_model) as usize, 1.0)).collect();
     let refs: Vec<&[f32]> = views.iter().map(Vec::as_slice).collect();
     let (got, want) = (fast.encode_views(&refs, true), reference.encode_views(&refs, true));
@@ -64,7 +64,7 @@ fn the_serving_forward_runs_its_products_on_tensor_cores() {
         return brain_testutil::skip_unavailable("this backend cannot time kernels");
     }
     let cfg = config();
-    let view = Lcg::new(3).vec_scaled((cfg.encoder.n_query_local * cfg.encoder.d_model) as usize, 1.0);
+    let view = Lcg::new(data::rng::random_seed()).vec_scaled((cfg.encoder.n_query_local * cfg.encoder.d_model) as usize, 1.0);
     let _ = r.encode_views(&[&view, &view], true);
     let rows = r.gpu().kernel_times().expect("timing was switched on");
     let audit = gpu_core::profile::ArithmeticAudit::of(&rows);
