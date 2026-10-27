@@ -1106,7 +1106,7 @@ impl ShardCaches {
     /// The single-sequence view (prefill, and any single-token step): GQA
     /// window of `slot`, GDN state on the working copy.
     fn view(&self, slot: u32) -> DecodeCaches<'_> {
-        DecodeCaches { gqa_kv: &self.gqa_kv, gqa_cap: self.kv_block(), gqa_window: self.window(slot), gdn_state: &self.work_state, gdn_hist: &self.work_hist }
+        DecodeCaches { gqa_kv: &self.gqa_kv, gqa_cap: self.kv_block(), gqa_window: self.window(slot), gdn_state: &self.work_state, gdn_hist: &self.work_hist, slot: 0, memory: &[] }
     }
 
     /// The pools as a multi-sequence prefill round works on them
@@ -1675,7 +1675,7 @@ impl Qwen35GgufInstance {
         let mut carry = self.embed_rows(tokens)?;
         for s in &self.shards {
             let seqs = s.caches.batch(slots, positions);
-            let caches = BatchDecodeCaches { gqa_kv: &s.caches.gqa_kv, gqa_cap: s.caches.kv_block(), seqs: &seqs, one_sequence: false, gdn_pool: Some(s.caches.gdn_pool()) };
+            let caches = BatchDecodeCaches { gqa_kv: &s.caches.gqa_kv, gqa_cap: s.caches.kv_block(), seqs: &seqs, one_sequence: false, gdn_pool: Some(s.caches.gdn_pool()), memory: &[] };
             carry = s.qwen35.decode_batch_stage(tokens, &caches, Some(&carry));
         }
         Ok(carry)

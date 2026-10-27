@@ -303,6 +303,9 @@ impl Engine {
     fn from_map_with_gpu(gpu: Gpu, cfg: Qwen35Config, weights: &dyn checkpoint::TensorSource, max_seq_len: u32, max_concurrent: u32, kv: KvTier, tier: &model::ops::TierPolicy) -> Engine {
         assert!(max_seq_len > 0, "max_seq_len must be > 0");
         assert!(max_concurrent > 0, "max_concurrent must be > 0");
+        // The engine pages a KV cache that grows with the sequence; a sliding-window / anchor-memory config keeps fixed
+        // ring and bank state (`Qwen35::new_slot_pool`) that the scheduler seam does not carry yet.
+        cfg.require_plain_decoder("the f32 serving engine");
         // b=1, t=1: this instance's own decode-state fields are dead weight
         // for `Engine` (see `Engine::model`'s own doc) - t=1 is the smallest
         // legal prefill length (`gdn_chunk_size(1) == 1`, so `t % chunk ==
@@ -390,6 +393,8 @@ impl Engine {
             gqa_window: crate::model::KvWindow::Block(phys),
             gdn_state: &slot.state,
             gdn_hist: &slot.hist,
+            slot: 0,
+            memory: &[],
         }
     }
 
@@ -427,7 +432,7 @@ impl Engine {
             .zip(&slots)
             .map(|(&(phys, offset), slot)| BatchSeq { window: crate::model::KvWindow::Block(phys), slot: phys, pos: offset, gdn_state: &slot.state, gdn_hist: &slot.hist })
             .collect();
-        let caches = BatchDecodeCaches { gqa_kv: &self.gqa_kv, gqa_cap: self.block_size, seqs: &seqs, one_sequence: false, gdn_pool: None };
+        let caches = BatchDecodeCaches { gqa_kv: &self.gqa_kv, gqa_cap: self.block_size, seqs: &seqs, one_sequence: false, gdn_pool: None, memory: &[] };
         adapters::set_rows(std::iter::once(&self.model), &row_slots);
         let hidden = self.model.run_decode_batch(inputs, &caches, None);
         adapters::set_rows(std::iter::once(&self.model), &[]);

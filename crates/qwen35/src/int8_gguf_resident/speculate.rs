@@ -234,7 +234,7 @@ impl Qwen35GgufInstance {
         let mut carry = self.embed_rows(&tokens)?;
         for s in &self.shards {
             let seqs = s.caches.batch(&row_slots, &row_positions);
-            let caches = BatchDecodeCaches { gqa_kv: &s.caches.gqa_kv, gqa_cap: s.caches.kv_block(), seqs: &seqs, one_sequence: false, gdn_pool: Some(s.caches.gdn_pool()) };
+            let caches = BatchDecodeCaches { gqa_kv: &s.caches.gqa_kv, gqa_cap: s.caches.kv_block(), seqs: &seqs, one_sequence: false, gdn_pool: Some(s.caches.gdn_pool()), memory: &[] };
             let verify = VerifyBatch::new(slots, &counts, &s.caches.verify_snaps);
             carry = s.qwen35.verify_batch_stage(&tokens, &caches, &verify, Some(&carry));
         }

@@ -71,6 +71,7 @@ use model::Shard;
 use optim::Optim;
 
 use crate::config::{LayerType, Qwen35Config};
+pub use crate::decode_state::SlotPool;
 pub use crate::train_base::TrainOpts;
 use crate::decode_state::DecodeState;
 #[path = "objectives.rs"]
@@ -741,26 +742,38 @@ struct GdnLayerActs {
 pub(crate) enum KvWindow<'a> {
     Block(u32),
     Table(&'a [u32]),
+    /// A sliding-window layer's ring ([`model::gqa_mixer::ring_row`]): ONE block of exactly the window's rows,
+    /// position `p` in row `p % window`, reused for as long as the sequence runs. It holds the last `window`
+    /// positions and no more, so it has no capacity to exceed.
+    Ring(u32),
 }
 
 impl KvWindow<'_> {
-    /// Rows the window holds: `block_size` per block.
+    /// Rows the window holds: `block_size` per block; a ring holds the same rows forever, so any position fits.
     fn capacity(&self, block_size: u32) -> u32 {
-        block_size * self.blocks().len() as u32
+        match self {
+            KvWindow::Ring(_) => u32::MAX,
+            _ => block_size * self.blocks().len() as u32,
+        }
     }
 
     /// The blocks, in logical order.
     fn blocks(&self) -> Vec<u32> {
         match self {
-            KvWindow::Block(b) => vec![*b],
+            KvWindow::Block(b) | KvWindow::Ring(b) => vec![*b],
             KvWindow::Table(t) => t.to_vec(),
         }
+    }
+
+    fn is_ring(&self) -> bool {
+        matches!(self, KvWindow::Ring(_))
     }
 
     /// The per-row addressing of `n` rows at positions `pos_start..`: the block
     /// each row's K/V is appended to, its offset inside the block, and the
     /// sequence's block table repeated for every row, with the table's length.
     fn chunk_rows(&self, block_size: u32, pos_start: u32, n: u32) -> (Vec<u32>, Vec<u32>, Vec<u32>, u32) {
+        assert!(!self.is_ring(), "qwen35: a ring window is prefilled through the ring chunk path, not paged rows");
         let table = self.blocks();
         let max_bt = table.len() as u32;
         assert!(max_bt > 0, "qwen35: a sequence's KV window names no block");
@@ -798,6 +811,18 @@ struct GqaChunkCtx<'a> {
     seq_lens: DeviceBuffer,
     /// This round's own `[n, rotary_dim/2]` M-RoPE tables, for absolute
     /// positions `start..start+n`.
+    cos: &'a DeviceBuffer,
+    sin: &'a DeviceBuffer,
+}
+
+/// What a chunk of a sliding-window layer hands [`Qwen35::layer_gqa_fwd`]: where the sequence's ring is and which
+/// positions the chunk covers.
+struct RingChunkCtx<'a> {
+    start: u32,
+    window: u32,
+    /// First row of the sequence's ring in the layer's pool.
+    row0: u32,
+    layer: &'a KvLayer,
     cos: &'a DeviceBuffer,
     sin: &'a DeviceBuffer,
 }
@@ -844,6 +869,8 @@ enum GdnCall<'a> {
 /// sequences' one token each ([`GqaDecodeCtx`]).
 enum GqaCached<'a> {
     Chunk(&'a GqaChunkCtx<'a>),
+    /// One sequence's chunk of a sliding-window layer, against its ring ([`RingChunkCtx`]).
+    Ring(&'a RingChunkCtx<'a>),
     Decode(&'a GqaDecodeCtx<'a>),
     /// Several sequences' rounds laid out one after another in the activation
     /// rows ([`Qwen35::run_prefill_multi_stage`]), attending this layer's cache.
@@ -1245,6 +1272,12 @@ pub(crate) struct DecodeCaches<'a> {
     /// `gdn_causal_conv1d_step`'s `hist`.
     pub gdn_state: &'a [DeviceBuffer],
     pub gdn_hist: &'a [DeviceBuffer],
+    /// The sequence's row of the anchor-memory pools below (and of a ring-KV pool: its block is named by
+    /// [`Self::gqa_window`]).
+    pub slot: u32,
+    /// Per-layer anchor-memory banks (EdgeRock; `None` entries at layers without a memory, an empty slice for a
+    /// model without one).
+    pub memory: &'a [Option<model::anchor_memory::AnchorBankPool>],
 }
 
 /// One sequence's coordinates in a [`Qwen35::run_decode_batch`] call: where
@@ -1306,6 +1339,9 @@ pub(crate) struct BatchDecodeCaches<'a> {
     /// Where the sequences' Gated-DeltaNet state lives when it is pooled by
     /// physical block. `None`: each [`BatchSeq`] carries its own buffers.
     pub gdn_pool: Option<GdnPoolStore<'a>>,
+    /// Per-layer anchor-memory banks, one pool row per sequence slot ([`BatchSeq::slot`]); see
+    /// [`DecodeCaches::memory`].
+    pub memory: &'a [Option<model::anchor_memory::AnchorBankPool>],
 }
 
 /// Cold copies of every Gated-DeltaNet layer's recurrent state and conv
@@ -1317,6 +1353,17 @@ pub(crate) struct BatchDecodeCaches<'a> {
 pub struct GdnSnapshot {
     pub(crate) state: Vec<DeviceBuffer>,
     pub(crate) hist: Vec<DeviceBuffer>,
+}
+
+/// A copy of one sequence's whole fixed-size decode state - recurrent state, sliding-window ring, anchor bank - and
+/// its position, taken by [`Qwen35::decode_snapshot`] and put back by [`Qwen35::decode_restore`]. Its size does not
+/// depend on how long the sequence is.
+pub struct DecodeSnapshot {
+    gdn: GdnSnapshot,
+    /// `(k, v)` ring copies per layer (1-word dummies where the layer has none).
+    rings: Vec<(DeviceBuffer, DeviceBuffer)>,
+    banks: Vec<Option<model::anchor_memory::AnchorBankPool>>,
+    pos: u32,
 }
 
 /// What a speculative run actually cost, which is the only way to know
@@ -2844,6 +2891,7 @@ impl Qwen35 {
         let (cos, sin) = match &cached {
             None => (&self.cos, &self.sin),
             Some(GqaCached::Chunk(ch)) => (ch.cos, ch.sin),
+            Some(GqaCached::Ring(rc)) => (rc.cos, rc.sin),
             Some(GqaCached::Decode(dc)) => (dc.cos, dc.sin),
             // Each sequence of a multi-sequence round brings its own tables below.
             Some(GqaCached::Segments(round, _)) => (&round.segs[0].cos, &round.segs[0].sin),
@@ -2851,8 +2899,10 @@ impl Qwen35 {
         let weights = model::gqa_mixer::GqaMixerWeights { q_norm: self.w(&p("q_norm.weight")), k_norm: self.w(&p("k_norm.weight")), cos, sin };
         // Set by the decode arm that fuses the sigmoid gate into the quantiser.
         let mut o_proj_act: Option<Act> = None;
-        if cached.is_some() {
-            c.require_plain_decoder("the cached-KV (chunked prefill / decode / serving) attention");
+        // A sliding-window layer attends its ring (`GqaCached::Ring`, or a decode step over a ring window); the
+        // paged-prefill shapes below address a cache that grows with the sequence and would attend all of it.
+        if c.swa_window.is_some() && matches!(cached, Some(GqaCached::Chunk(_)) | Some(GqaCached::Segments(..))) {
+            c.require_plain_decoder("multi-round and multi-sequence prefill over a paged cache");
         }
         let (ctx_gated, internals) = match cached {
             None => match c.swa_window {
@@ -2862,6 +2912,27 @@ impl Qwen35 {
                 }
                 None => model::gqa_mixer::gqa_mixer_fwd_tc(g, &gqa_mixer_ids(), self.training_flash(), Some(self.ops.tensor_gemm()), &shape, &weights, &q_full, &k, &v, n, self.is_train),
             },
+            Some(GqaCached::Ring(rc)) => (
+                model::gqa_mixer::gqa_mixer_ring_chunk_fwd(
+                    g,
+                    &gqa_mixer_ids(),
+                    &model::gqa_mixer::RingChunk {
+                        layer: rc.layer,
+                        row0: rc.row0,
+                        window: rc.window,
+                        start: rc.start,
+                        scores_win: g.kernel_index("gqa_scores_win").unwrap_or_else(|| panic!("qwen35: gqa_scores_win is not registered on this Gpu")),
+                        splice: SPLICE,
+                    },
+                    &shape,
+                    &weights,
+                    &q_full,
+                    &k,
+                    &v,
+                    n,
+                ),
+                None,
+            ),
             Some(GqaCached::Chunk(ch)) => (
                 model::gqa_mixer::gqa_mixer_chunk_kv_fwd_paged(
                     g,
@@ -3284,6 +3355,11 @@ impl Qwen35 {
     }
 
     fn memory_weights(&self, l: usize) -> model::anchor_memory::AnchorMemoryWeights<'_> {
+        self.memory_weights_at(l, &self.cos, &self.sin)
+    }
+
+    /// [`Self::memory_weights`] with the rope tables of the step's own rows (decode positions, a chunk's range).
+    fn memory_weights_at<'a>(&'a self, l: usize, cos: &'a DeviceBuffer, sin: &'a DeviceBuffer) -> model::anchor_memory::AnchorMemoryWeights<'a> {
         let p = |leaf: &str| self.w(&format!("blocks.{l}.memory.{leaf}"));
         model::anchor_memory::AnchorMemoryWeights {
             input_norm: p("input_norm.weight"),
@@ -3292,9 +3368,27 @@ impl Qwen35 {
             read_scale: p("read_scale"),
             read_gate_weight: p("read_gate_weight"),
             read_gate_bias: p("read_gate_bias"),
-            cos: &self.cos,
-            sin: &self.sin,
+            cos,
+            sin,
         }
+    }
+
+    /// The memory's projections of layer `l` over `n` rows: plain fp32 matmuls over the parameter store's
+    /// tensors, corrected by the layer's adapters where it has them.
+    fn memory_project<'a>(&'a self, l: usize, shape: &'a model::anchor_memory::AnchorMemoryShape, n: u32) -> impl Fn(model::anchor_memory::MemoryProj, &DeviceBuffer, &DeviceBuffer) + 'a {
+        move |which, x, out| {
+            let g = &self.gpu;
+            let (n_out, n_in) = which.dims(shape);
+            let wname = format!("blocks.{l}.memory.{}.weight", which.leaf());
+            let mut s = vec![g.step(MATMUL, &[x, self.w(&wname), out], &[n, n_in, n_out], n * n_out)];
+            self.lora_fwd(&mut s, &format!("memory.{}", which.leaf()), x, &wname, out, n, n_in, n_out);
+            g.submit(&[], &s);
+        }
+    }
+
+    /// The memory's shape for `n_seq` sequences of `t` rows each.
+    fn memory_shape_of(&self, n_seq: u32, t: u32) -> model::anchor_memory::AnchorMemoryShape {
+        model::anchor_memory::AnchorMemoryShape { n_seq, t, ..self.memory_shape() }
     }
 
     /// The anchor memory of full-attention layer `l` (`model::anchor_memory`):
@@ -3306,19 +3400,13 @@ impl Qwen35 {
     /// tier the rest of the layer runs at; an adapter corrects the read-side
     /// ones exactly as it does the attention's.
     fn add_anchor_memory(&self, l: usize, xres: &DeviceBuffer, attn_out: DeviceBuffer, n: u32) -> (DeviceBuffer, Option<model::anchor_memory::AnchorMemoryActs>) {
-        use model::anchor_memory::{anchor_memory_fwd, MemoryProj};
+        use model::anchor_memory::anchor_memory_fwd;
         let g = &self.gpu;
         let c = &self.cfg;
         let shape = self.memory_shape();
         let ids = self.memory_ids();
         let weights = self.memory_weights(l);
-        let project = |which: MemoryProj, x: &DeviceBuffer, out: &DeviceBuffer| {
-            let (n_out, n_in) = which.dims(&shape);
-            let wname = format!("blocks.{l}.memory.{}.weight", which.leaf());
-            let mut s = vec![g.step(MATMUL, &[x, self.w(&wname), out], &[n, n_in, n_out], n * n_out)];
-            self.lora_fwd(&mut s, &format!("memory.{}", which.leaf()), x, &wname, out, n, n_in, n_out);
-            g.submit(&[], &s);
-        };
+        let project = self.memory_project(l, &shape, n);
         let (memory_out, acts) = anchor_memory_fwd(g, &ids, &shape, &weights, &project, xres);
 
         if let Some(taps) = self.memory_taps.borrow_mut().as_mut() {
@@ -3958,6 +4046,19 @@ impl Qwen35 {
                 clears.push(&dec.gdn_hist[l]);
             }
         }
+        // A sliding-window config also forgets its ring and its anchor bank: nothing of the previous sequence may be
+        // read by the next, whatever the position arithmetic says about which rows are live.
+        if self.cfg.swa_window.is_some() {
+            for (l, ty) in self.cfg.layer_types().iter().enumerate() {
+                if *ty == LayerType::Full && self.shard.owns(l) {
+                    clears.push(dec.gqa_kv[l].k.data());
+                    clears.push(dec.gqa_kv[l].v.data());
+                }
+            }
+            for pool in dec.memory.iter().flatten() {
+                pool.reset_row(&self.gpu, 0);
+            }
+        }
         self.gpu.submit(&clears, &[]);
     }
 
@@ -4011,7 +4112,6 @@ impl Qwen35 {
     ///
     /// `None` is exactly [`Self::step`] and requires `shard.embed`.
     pub fn step_with_input(&self, token_id: u32, input: Option<&[f32]>) -> Vec<f32> {
-        self.cfg.require_plain_decoder("step");
         assert_eq!(self.b, 1, "qwen35::step requires b==1 (single sequence)");
         assert!(
             (token_id as usize) < self.cfg.vocab as usize,
@@ -4132,12 +4232,12 @@ impl Qwen35 {
         assert!(caches.gqa_cap > 0, "qwen35::run_decode_step: a KV block of 0 rows");
         let seqs = [BatchSeq {
             window: caches.gqa_window,
-            slot: 0,
+            slot: caches.slot,
             pos,
             gdn_state: caches.gdn_state,
             gdn_hist: caches.gdn_hist,
         }];
-        let batch = BatchDecodeCaches { gqa_kv: caches.gqa_kv, gqa_cap: caches.gqa_cap, seqs: &seqs, one_sequence: false, gdn_pool: None };
+        let batch = BatchDecodeCaches { gqa_kv: caches.gqa_kv, gqa_cap: caches.gqa_cap, seqs: &seqs, one_sequence: false, gdn_pool: None, memory: caches.memory };
         self.run_decode_batch(&[token_id], &batch, input_override)
     }
 
@@ -4183,7 +4283,7 @@ impl Qwen35 {
                 .map(|s| BatchSeq { window: s.window, slot: s.slot, pos: s.pos, gdn_state: s.gdn_state, gdn_hist: s.gdn_hist })
                 .collect();
             let pool = caches.gdn_pool.as_ref().map(|p| GdnPoolStore { state: p.state, hist: p.hist });
-            let group = BatchDecodeCaches { gqa_kv: caches.gqa_kv, gqa_cap: caches.gqa_cap, seqs: &seqs, one_sequence: false, gdn_pool: pool };
+            let group = BatchDecodeCaches { gqa_kv: caches.gqa_kv, gqa_cap: caches.gqa_cap, seqs: &seqs, one_sequence: false, gdn_pool: pool, memory: caches.memory };
             let x = input_override.map(|x| &x[start * d..end * d]);
             let hidden = self.run_decode_batch_with(&tokens[start..end], &group, x, None);
             out.extend(self.gpu.read(&hidden, (end - start) * d));
@@ -4219,6 +4319,25 @@ impl Qwen35 {
         for s in caches.seqs {
             let capacity = s.window.capacity(caches.gqa_cap);
             assert!(s.pos < capacity, "qwen35::run_decode_batch: decode position {} exceeds the per-sequence capacity {capacity}", s.pos);
+        }
+        // A sliding-window model attends rings of exactly `window` rows; a cache that grows with the sequence would
+        // silently attend all of it, so any other window is refused. A model without one never takes a ring.
+        let ring = c.swa_window;
+        for s in caches.seqs {
+            match ring {
+                Some(win) => assert!(s.window.is_ring() && caches.gqa_cap == win, "qwen35::run_decode_batch: this config's attention is a {win}-row sliding window and needs ring KV windows of that size (got {:?}, block of {} rows)", s.window, caches.gqa_cap),
+                None => assert!(!s.window.is_ring(), "qwen35::run_decode_batch: a ring KV window for a model without a sliding window"),
+            }
+        }
+        // A verify round puts several rows of ONE sequence in a batch. Its rows write the ring before any attends, so
+        // a row could overwrite a position an earlier row still needs, and its memory rows would commit blocks
+        // between each other: neither is implemented.
+        assert!(ring.is_none() || (!caches.one_sequence && verify.is_none()), "qwen35::run_decode_batch: a verify round (several rows of one sequence) does not implement this config's sliding window");
+        if c.anchor_memory.is_some() {
+            assert!(!caches.memory.is_empty(), "qwen35::run_decode_batch: this config has an anchor memory and the caches carry no bank pool");
+            for s in caches.seqs {
+                assert!(caches.memory.iter().flatten().all(|pool| s.slot < pool.slots), "qwen35::run_decode_batch: slot {} is outside the anchor-bank pool", s.slot);
+            }
         }
 
         // The whole token is one replayable submission. Two things make that so,
@@ -4309,19 +4428,36 @@ impl Qwen35 {
         };
         let bs = caches.gqa_cap;
         let blocks = g.storage(bsz as u64);
-        g.write(&blocks, &caches.seqs.iter().zip(&windows).map(|(s, w)| w[(s.pos / bs) as usize]).collect::<Vec<u32>>());
+        g.write(&blocks, &caches.seqs.iter().zip(&windows).map(|(s, w)| if s.window.is_ring() { w[0] } else { w[(s.pos / bs) as usize] }).collect::<Vec<u32>>());
         let offsets = g.storage(bsz as u64);
-        g.write(&offsets, &caches.seqs.iter().map(|s| s.pos % bs).collect::<Vec<u32>>());
+        g.write(&offsets, &caches.seqs.iter().map(|s| if s.window.is_ring() { model::gqa_mixer::ring_row(s.pos, bs) } else { s.pos % bs }).collect::<Vec<u32>>());
         let slot_rows = g.storage(bsz as u64);
         g.write(&slot_rows, &caches.seqs.iter().map(|s| s.slot).collect::<Vec<u32>>());
         let block_tables = g.storage(bsz as u64 * max_bt as u64);
         g.write(&block_tables, &windows.iter().flat_map(|w| (0..max_bt as usize).map(|i| w.get(i).copied().unwrap_or(0))).collect::<Vec<u32>>());
         let seq_lens = g.storage(bsz as u64);
-        g.write(&seq_lens, &caches.seqs.iter().map(|s| s.pos + 1).collect::<Vec<u32>>());
+        let live = |s: &BatchSeq| if s.window.is_ring() { model::gqa_mixer::ring_live(s.pos, bs) } else { s.pos + 1 };
+        g.write(&seq_lens, &caches.seqs.iter().map(live).collect::<Vec<u32>>());
+        // The anchor memory's per-step plans, shared by every memory layer: which bank slots each sequence reads,
+        // and the records it pushes and the block it may complete.
+        let memory_step = c.anchor_memory.as_ref().map(|_| {
+            let shape = self.memory_shape_of(bsz, 1);
+            let cb = shape.commit_block;
+            let read = model::anchor_memory::ReadPlan::upload(g, &shape, &caches.seqs.iter().map(|s| (s.slot, s.pos)).collect::<Vec<_>>());
+            let pushes: Vec<_> = caches.seqs.iter().enumerate().map(|(i, s)| model::anchor_memory::Push { slot: s.slot, pos: s.pos, src_row: i as u32 }).collect();
+            // Every sequence carries a commit, empty unless its token completes a block, so the step is the same
+            // list of dispatches whichever sequences' blocks fill.
+            let commits: Vec<_> = caches
+                .seqs
+                .iter()
+                .map(|s| if s.pos % cb == cb - 1 { model::anchor_memory::Commit { slot: s.slot, first_pos: s.pos + 1 - cb, count: cb } } else { model::anchor_memory::Commit { slot: s.slot, first_pos: 0, count: 0 } })
+                .collect();
+            (shape, read, model::anchor_memory::WritePlan::upload(g, &shape, &pushes, &commits))
+        });
         // A verify step's per-sequence layout, uploaded with the rest of the
         // step's inputs (a write after the first dispatch would split the pass).
         let verify_layout = verify.map(|v| v.upload(g));
-        let longest = caches.seqs.iter().map(|s| s.pos + 1).max().unwrap_or(1);
+        let longest = caches.seqs.iter().map(live).max().unwrap_or(1);
         let cap_bound = caches.gqa_cap * max_bt;
         let paged = model::gqa_mixer::PagedDecodeBatch {
             blocks: &blocks,
@@ -4417,7 +4553,19 @@ impl Qwen35 {
                 }
                 LayerType::Full => {
                     let dctx = GqaDecodeCtx { paged: &paged, layer: &caches.gqa_kv[l], cos: &cos, sin: &sin };
-                    self.layer_gqa_fwd_pre(&format!("blocks.{l}.self_attn"), &xn1, pre1, epilogue, bsz, Some(GqaCached::Decode(&dctx))).0
+                    let attn = self.layer_gqa_fwd_pre(&format!("blocks.{l}.self_attn"), &xn1, pre1, epilogue, bsz, Some(GqaCached::Decode(&dctx))).0;
+                    match (&memory_step, c.layer_has_memory(l)) {
+                        (Some((shape, read, write)), true) => {
+                            let project = self.memory_project(l, shape, bsz);
+                            let pool = caches.memory[l].as_ref().expect("a memory layer has a bank pool");
+                            // The memory reads the layer's residual input, like the attention it sits beside.
+                            let memory = model::anchor_memory::anchor_memory_decode_fwd(g, &self.memory_ids(), shape, &self.memory_weights_at(l, &cos, &sin), &project, &res, pool, read, write);
+                            let sum = g.storage((bsz * d) as u64);
+                            g.submit(&[], &[g.step(ADD2, &[&attn, &memory, &sum], &[bsz * d], bsz * d)]);
+                            sum
+                        }
+                        _ => attn,
+                    }
                 }
             };
 
@@ -4596,6 +4744,19 @@ impl Qwen35 {
             }
         };
 
+        // A sliding-window config prefills into a ring window of exactly its rows (the sequence's block is the ring's
+        // pool block, and `slot` its bank row); anything else would attend, or fill, a cache that grows.
+        let (ring_block, slot) = match (c.swa_window, caches.gqa_window) {
+            (Some(win), KvWindow::Ring(block)) => {
+                assert_eq!(caches.gqa_cap, win, "qwen35::run_prefill_chunk_stage: the ring is {} rows, the config's window {win}", caches.gqa_cap);
+                (block, caches.slot)
+            }
+            (Some(win), other) => panic!("qwen35::run_prefill_chunk_stage: this config's attention is a {win}-row sliding window and needs a ring KV window (got {other:?})"),
+            (None, _) => (0, 0),
+        };
+        if c.anchor_memory.is_some() {
+            assert!(caches.memory.len() == c.n_layers as usize, "qwen35::run_prefill_chunk_stage: this config has an anchor memory and the caches carry no bank pool");
+        }
         // Built ONCE per round, shared by every GQA layer in it: the round's
         // own M-RoPE table (absolute positions), its causal `seq_lens`, and
         // the single-block table a flat per-sequence KV cache degenerates to.
@@ -4616,18 +4777,35 @@ impl Qwen35 {
         let seq_lens = g.storage(n as u64);
         // Each row's append address and the sequence's block table (one block
         // for every row when the window is a single block).
-        let (row_blocks, row_offsets, row_tables, max_bt) = caches.gqa_window.chunk_rows(caches.gqa_cap, pos_start, n);
+        // A ring window has no paged rows to address: its chunk attention gathers and writes the ring itself.
+        let (row_blocks, row_offsets, row_tables, max_bt) = if caches.gqa_window.is_ring() { (vec![0], vec![0], vec![0], 1) } else { caches.gqa_window.chunk_rows(caches.gqa_cap, pos_start, n) };
         let tables = g.storage(row_tables.len() as u64);
-        g.write(&blocks, &row_blocks);
-        g.write(&offsets, &row_offsets);
+        g.write(&blocks, &row_blocks[..(n as usize).min(row_blocks.len())]);
+        g.write(&offsets, &row_offsets[..(n as usize).min(row_offsets.len())]);
         g.write(&tables, &row_tables);
         g.write(&seq_lens, &(0..n).map(|i| pos_start + i + 1).collect::<Vec<u32>>());
 
-        let mut mixer = |l: usize, ty: LayerType, xn1: &DeviceBuffer, pre: Option<Act>, epilogue: bool| -> DeviceBuffer {
+        let mut mixer = |l: usize, ty: LayerType, res_in: &DeviceBuffer, xn1: &DeviceBuffer, pre: Option<Act>, epilogue: bool| -> DeviceBuffer {
             match ty {
                 LayerType::Linear => {
                     let cont = model::gdn_mixer::GdnStream { state: &caches.gdn_state[l], hist: &caches.gdn_hist[l] };
                     self.layer_gdn_fwd_pre(l, xn1, pre, epilogue, n, GdnCall::Chunk(cont)).0
+                }
+                LayerType::Full if c.swa_window.is_some() => {
+                    let window = c.swa_window.expect("checked by the guard");
+                    let row0 = ring_block * window;
+                    let rc = RingChunkCtx { start: pos_start, window, row0, layer: &caches.gqa_kv[l], cos: &cos, sin: &sin };
+                    let attn = self.layer_gqa_fwd_pre(&format!("blocks.{l}.self_attn"), xn1, pre, epilogue, n, Some(GqaCached::Ring(&rc))).0;
+                    if !c.layer_has_memory(l) {
+                        return attn;
+                    }
+                    let shape = self.memory_shape_of(1, n);
+                    let project = self.memory_project(l, &shape, n);
+                    let pool = caches.memory[l].as_ref().expect("a memory layer has a bank pool");
+                    let memory = model::anchor_memory::anchor_memory_chunk_fwd(g, &self.memory_ids(), &shape, &self.memory_weights_at(l, &cos, &sin), &project, res_in, pool, slot, pos_start);
+                    let sum = g.storage((n * d) as u64);
+                    g.submit(&[], &[g.step(ADD2, &[&attn, &memory, &sum], &[n * d], n * d)]);
+                    sum
                 }
                 LayerType::Full => {
                     let ctx = GqaChunkCtx {
@@ -4747,7 +4925,7 @@ impl Qwen35 {
             row0 += rows;
         }
         let round = MultiRound { caches, segs: round };
-        let mut mixer = |l: usize, ty: LayerType, xn1: &DeviceBuffer, pre: Option<Act>, epilogue: bool| -> DeviceBuffer {
+        let mut mixer = |l: usize, ty: LayerType, _res: &DeviceBuffer, xn1: &DeviceBuffer, pre: Option<Act>, epilogue: bool| -> DeviceBuffer {
             match ty {
                 LayerType::Linear => self.layer_gdn_fwd_pre(l, xn1, pre, epilogue, n, GdnCall::Segments(&round)).0,
                 LayerType::Full => self.layer_gqa_fwd_pre(&format!("blocks.{l}.self_attn"), xn1, pre, epilogue, n, Some(GqaCached::Segments(&round, &caches.gqa_kv[l]))).0,
@@ -4835,7 +5013,7 @@ impl Qwen35 {
                 }
             };
 
-            let mixer_out = mixer(l, ty, &xn1, pre1, epilogue);
+            let mixer_out = mixer(l, ty, &res, &xn1, pre1, epilogue);
 
             let ln2 = format!("blocks.{l}.ln2.weight");
             let (xmid, xn2, pre2) = if fused {
@@ -4970,7 +5148,10 @@ impl Qwen35 {
             conv_kernel: c.linear_conv_kernel_dim,
             rms_eps: c.rms_eps,
         };
-        n <= DECODE_REGIME_MAX_ROWS
+        // A short round steps rows one at a time through the decode tape; a windowed, memory-carrying round has its
+        // own chunk path (ring and bank), so it never takes this one.
+        self.cfg.swa_window.is_none()
+            && n <= DECODE_REGIME_MAX_ROWS
             && self.exact_rounds.get()
             && self.decode_fusion.get()
             && c.lora.is_none()
@@ -5016,7 +5197,7 @@ impl Qwen35 {
             let seqs: Vec<BatchSeq> = (0..len)
                 .map(|i| BatchSeq { window: caches.gqa_window, slot: 0, pos: pos_start + (start + i) as u32, gdn_state: caches.gdn_state, gdn_hist: caches.gdn_hist })
                 .collect();
-            let batch = BatchDecodeCaches { gqa_kv: caches.gqa_kv, gqa_cap: caches.gqa_cap, seqs: &seqs, one_sequence: true, gdn_pool: None };
+            let batch = BatchDecodeCaches { gqa_kv: caches.gqa_kv, gqa_cap: caches.gqa_cap, seqs: &seqs, one_sequence: true, gdn_pool: None, memory: caches.memory };
             let x = input_override.map(|x| &x[start * d..(start + len) * d]);
             self.run_decode_batch(&tokens[start..start + len], &batch, x)
         };
@@ -5096,7 +5277,6 @@ impl Qwen35 {
     /// with the dispatch count, and the reason this is CHUNKED rather than one
     /// whole-prompt forward.
     pub fn prefill_chunked(&self, tokens: &[u32], max_chunk: u32) -> Vec<f32> {
-        self.cfg.require_plain_decoder("prefill_chunked");
         assert_eq!(self.b, 1, "qwen35::prefill_chunked requires b==1 (single sequence)");
         assert!(!tokens.is_empty(), "qwen35::prefill_chunked: empty prompt");
         assert!(max_chunk > 0, "qwen35::prefill_chunked: max_chunk must be > 0");
@@ -5146,7 +5326,6 @@ impl Qwen35 {
     /// token prefill would, so [`Self::step`] continues from it. Returns the
     /// last row's final-norm hidden state.
     pub fn prefill_embeds(&self, embeds: &[f32], max_chunk: u32) -> Vec<f32> {
-        self.cfg.require_plain_decoder("prefill_embeds");
         assert_eq!(self.b, 1, "qwen35::prefill_embeds requires b==1 (single sequence)");
         assert!(max_chunk > 0, "qwen35::prefill_embeds: max_chunk must be > 0");
         let d = self.cfg.d_model as usize;
@@ -5277,6 +5456,181 @@ impl Qwen35 {
         self.gdn_snapshot_xfer(&self.own_caches(), snap, false);
     }
 
+    /// Copy the whole decode state of this instance's sequence - recurrent state, ring, bank, position - so a later
+    /// [`Self::decode_restore`] resumes exactly here. Device-side. A plain config has no ring or bank to copy, and
+    /// its KV cache grows with the sequence: use [`Self::gdn_snapshot`] and a position rewind there.
+    pub fn decode_snapshot(&self) -> DecodeSnapshot {
+        assert!(self.cfg.swa_window.is_some(), "qwen35::decode_snapshot: a config without a sliding window keeps a KV cache that grows with the sequence; there is no fixed state to copy");
+        let dec = self.decode_state();
+        let copy = DecodeSnapshot {
+            gdn: self.new_gdn_snapshot(),
+            rings: (0..dec.gqa_kv.len()).map(|_| (self.gpu.storage(self.ring_words()), self.gpu.storage(self.ring_words()))).collect(),
+            banks: dec.memory.iter().map(|pool| pool.as_ref().map(|pool| model::anchor_memory::AnchorBankPool::like(&self.gpu, pool))).collect(),
+            pos: self.dec_pos.get(),
+        };
+        self.decode_state_xfer(&copy, true);
+        copy
+    }
+
+    /// Put a [`Self::decode_snapshot`] back, discarding everything the sequence absorbed since.
+    pub fn decode_restore(&self, snap: &DecodeSnapshot) {
+        self.decode_state_xfer(snap, false);
+        self.dec_pos.set(snap.pos);
+    }
+
+    /// Copy the decode state into (`save`) or out of (`!save`) `snap`.
+    fn decode_state_xfer(&self, snap: &DecodeSnapshot, save: bool) {
+        self.gdn_snapshot_xfer(&self.own_caches(), &snap.gdn, save);
+        let dec = self.decode_state();
+        let mut steps = Vec::new();
+        let mut copy = |live: &DeviceBuffer, cold: &DeviceBuffer, words: u64| {
+            let (src, dst) = if save { (live, cold) } else { (cold, live) };
+            let n = words as u32;
+            steps.push(self.gpu.step(REGION_COPY, &[src, dst], &[1, n, n, 0], n));
+        };
+        for (l, kv) in dec.gqa_kv.iter().enumerate() {
+            if self.cfg.layer_types()[l] == LayerType::Full && self.shard.owns(l) {
+                copy(kv.k.data(), &snap.rings[l].0, self.ring_words());
+                copy(kv.v.data(), &snap.rings[l].1, self.ring_words());
+            }
+        }
+        for (live, cold) in dec.memory.iter().zip(&snap.banks) {
+            if let (Some(live), Some(cold)) = (live, cold) {
+                for ((live, words), (cold, _)) in live.arrays().into_iter().zip(cold.arrays()) {
+                    copy(live, cold, words);
+                }
+            }
+        }
+        self.gpu.submit(&[], &steps);
+    }
+
+    // ---- slot pools: the fixed state of many sequences, addressed by slot row ------------------------------------
+
+    /// A pool of `slots` empty sequence slots for this (sliding-window) config; see [`SlotPool`].
+    pub fn new_slot_pool(&self, slots: u32) -> SlotPool {
+        assert!(slots > 0, "qwen35::new_slot_pool: no slots");
+        assert!(self.shard.is_whole(self.cfg.n_layers as usize), "qwen35::new_slot_pool: a slot pool holds a whole model's state");
+        SlotPool::new(&self.gpu, &self.cfg, &self.shard, slots)
+    }
+
+    /// Feed `tokens` into slot `slot`, `max_chunk` rows per round, continuing whatever the slot holds. Returns the
+    /// last row's final-norm hidden state (`[d_model]`).
+    pub fn slot_prefill(&self, pool: &SlotPool, slot: u32, tokens: &[u32], max_chunk: u32) -> Vec<f32> {
+        assert!(slot < pool.slots, "qwen35::slot_prefill: slot {slot} of {}", pool.slots);
+        assert!(!tokens.is_empty() && max_chunk > 0, "qwen35::slot_prefill: empty prompt or chunk");
+        if let Some(&bad) = tokens.iter().find(|&&t| t >= self.cfg.vocab) {
+            panic!("qwen35::slot_prefill: token {bad} exceeds vocab {}", self.cfg.vocab);
+        }
+        let caches = DecodeCaches {
+            gqa_kv: &pool.gqa_kv,
+            gqa_cap: pool.window,
+            gqa_window: KvWindow::Ring(slot),
+            gdn_state: &pool.gdn_state[slot as usize],
+            gdn_hist: &pool.gdn_hist[slot as usize],
+            slot,
+            memory: &pool.memory,
+        };
+        let mut hidden = None;
+        let mut pos = pool.position(slot);
+        for round in tokens.chunks(max_chunk as usize) {
+            hidden = Some(self.run_prefill_chunk(round, pos, &caches, None));
+            pos += round.len() as u32;
+        }
+        pool.pos.borrow_mut()[slot as usize] = pos;
+        self.gpu.read(&hidden.expect("non-empty prompt"), self.cfg.d_model as usize)
+    }
+
+    /// One decode token for each `(slot, token)` of `items`, all slots in one batch (any positions, in any order):
+    /// the final-norm hidden state (`[d_model]`) of each, in order.
+    pub fn slot_decode(&self, pool: &SlotPool, items: &[(u32, u32)]) -> Vec<Vec<f32>> {
+        assert!(!items.is_empty(), "qwen35::slot_decode: empty batch");
+        let mut seen = std::collections::HashSet::new();
+        for &(slot, token) in items {
+            assert!(slot < pool.slots, "qwen35::slot_decode: slot {slot} of {}", pool.slots);
+            assert!(seen.insert(slot), "qwen35::slot_decode: slot {slot} twice in one batch");
+            assert!(token < self.cfg.vocab, "qwen35::slot_decode: token {token} exceeds vocab {}", self.cfg.vocab);
+        }
+        let seqs: Vec<BatchSeq> =
+            items.iter().map(|&(slot, _)| BatchSeq { window: KvWindow::Ring(slot), slot, pos: pool.position(slot), gdn_state: &pool.gdn_state[slot as usize], gdn_hist: &pool.gdn_hist[slot as usize] }).collect();
+        let caches = BatchDecodeCaches { gqa_kv: &pool.gqa_kv, gqa_cap: pool.window, seqs: &seqs, one_sequence: false, gdn_pool: None, memory: &pool.memory };
+        let tokens: Vec<u32> = items.iter().map(|&(_, t)| t).collect();
+        let hidden = self.run_decode_batch(&tokens, &caches, None);
+        let d = self.cfg.d_model as usize;
+        let rows = self.gpu.read(&hidden, items.len() * d);
+        for &(slot, _) in items {
+            pool.pos.borrow_mut()[slot as usize] += 1;
+        }
+        rows.chunks(d).map(<[f32]>::to_vec).collect()
+    }
+
+    /// Make slot `slot` a new sequence: no recurrent state, no ring rows, an empty bank, position 0. Nothing of the
+    /// sequence that held it can reach the next.
+    pub fn slot_reset(&self, pool: &SlotPool, slot: u32) {
+        assert!(slot < pool.slots, "qwen35::slot_reset: slot {slot} of {}", pool.slots);
+        let mut clears: Vec<&DeviceBuffer> = Vec::new();
+        for (l, ty) in self.cfg.layer_types().iter().enumerate() {
+            if *ty == LayerType::Linear {
+                clears.push(&pool.gdn_state[slot as usize][l]);
+                clears.push(&pool.gdn_hist[slot as usize][l]);
+            }
+        }
+        self.gpu.submit(&clears, &[]);
+        let ring_words = u64::from(pool.window) * u64::from(self.cfg.kv_dim());
+        for (l, ty) in self.cfg.layer_types().iter().enumerate() {
+            if *ty == LayerType::Full {
+                for plane in [&pool.gqa_kv[l].k, &pool.gqa_kv[l].v] {
+                    self.gpu.write_at(plane.data(), u64::from(slot) * ring_words, &vec![0u32; ring_words as usize]);
+                }
+            }
+        }
+        for bank in pool.memory.iter().flatten() {
+            bank.reset_row(&self.gpu, slot);
+        }
+        pool.pos.borrow_mut()[slot as usize] = 0;
+    }
+
+    /// Copy slot `from`'s whole state over slot `to`, bit for bit: what a snapshot prefix cache stores and restores.
+    pub fn slot_copy(&self, pool: &SlotPool, from: u32, to: u32) {
+        assert!(from < pool.slots && to < pool.slots && from != to, "qwen35::slot_copy: {from} -> {to} of {} slots", pool.slots);
+        let mut steps = Vec::new();
+        let ids = model::anchor_memory::AnchorMemoryKernels::resolve(&self.gpu).unwrap_or_else(|e| panic!("qwen35: {e}"));
+        let (state_len, hist_len) = (self.cfg.gdn_state_len() as u32, self.cfg.gdn_hist_len() as u32);
+        for (l, ty) in self.cfg.layer_types().iter().enumerate() {
+            match ty {
+                LayerType::Linear => {
+                    steps.push(self.gpu.step(REGION_COPY, &[&pool.gdn_state[from as usize][l], &pool.gdn_state[to as usize][l]], &[1, state_len, state_len, 0], state_len));
+                    steps.push(self.gpu.step(REGION_COPY, &[&pool.gdn_hist[from as usize][l], &pool.gdn_hist[to as usize][l]], &[1, hist_len, hist_len, 0], hist_len));
+                }
+                LayerType::Full => {
+                    for plane in [&pool.gqa_kv[l].k, &pool.gqa_kv[l].v] {
+                        steps.extend(plane.copy_rows(&self.gpu, SPLICE, u64::from(from) * u64::from(pool.window), u64::from(to) * u64::from(pool.window), u64::from(pool.window), u64::from(self.cfg.kv_dim()), u64::from(self.cfg.head_dim)));
+                    }
+                }
+            }
+        }
+        for bank in pool.memory.iter().flatten() {
+            steps.extend(bank.copy_row(&self.gpu, &ids, from, to));
+        }
+        self.gpu.submit(&[], &steps);
+        let pos = pool.position(from);
+        pool.pos.borrow_mut()[to as usize] = pos;
+    }
+
+    /// Words of one ring plane: `window` rows of `kv_dim`.
+    fn ring_words(&self) -> u64 {
+        u64::from(self.kv_block()) * u64::from(self.cfg.kv_dim())
+    }
+
+    /// Bytes of persistent per-sequence state this instance holds (recurrent state, ring, bank), summed over the
+    /// buffers it allocated, and the identity and size of each: a sequence that grows nothing leaves both unchanged.
+    pub fn decode_state_bytes(&self) -> u64 {
+        self.decode_state().bytes()
+    }
+
+    pub fn decode_state_allocations(&self) -> Vec<(usize, u64)> {
+        self.decode_state().allocations()
+    }
+
     /// This instance's own single-sequence caches, as `run_*` wants them -
     /// the same literal `step`/`prefill_chunked` build, factored out because
     /// the speculative loop needs it in three places.
@@ -5286,10 +5640,27 @@ impl Qwen35 {
         let dec = self.decode_state();
         DecodeCaches {
             gqa_kv: &dec.gqa_kv,
-            gqa_cap: self.dec_cap,
-            gqa_window: KvWindow::Block(0),
+            gqa_cap: self.kv_block(),
+            gqa_window: self.own_window(),
             gdn_state: &dec.gdn_state,
             gdn_hist: &dec.gdn_hist,
+            slot: 0,
+            memory: &dec.memory,
+        }
+    }
+
+    /// Rows of one sequence's attention cache: the window of a sliding-window config (a ring), else the decode
+    /// capacity.
+    fn kv_block(&self) -> u32 {
+        self.cfg.swa_window.unwrap_or(self.dec_cap)
+    }
+
+    /// The window the instance's own cache is addressed as: a ring for a sliding-window config.
+    fn own_window(&self) -> KvWindow<'static> {
+        if self.cfg.swa_window.is_some() {
+            KvWindow::Ring(0)
+        } else {
+            KvWindow::Block(0)
         }
     }
 
@@ -6069,7 +6440,9 @@ impl model::Model for Qwen35 {
 /// A prefill round's token mixer for one layer: given the layer index, its type,
 /// the normed input, the fused epilogue the next GEMM may apply and whether the
 /// input is quantised, it returns the mixer output (see `prefill_layer_stack`).
-type PrefillMixer<'a> = dyn FnMut(usize, LayerType, &DeviceBuffer, Option<Act>, bool) -> DeviceBuffer + 'a;
+/// A prefill round's token mixer: layer index, its type, the layer's residual input, the normed input, the fused
+/// epilogue the next GEMM may apply and whether the input is quantised.
+type PrefillMixer<'a> = dyn FnMut(usize, LayerType, &DeviceBuffer, &DeviceBuffer, Option<Act>, bool) -> DeviceBuffer + 'a;
 
 #[cfg(test)]
 mod tests {
@@ -6095,13 +6468,7 @@ mod tests {
     /// `input_override` seam exposed (`step` itself is the whole-shard
     /// convenience wrapper and always passes `None`).
     fn decode_stage(m: &Qwen35, token_id: u32, pos: u32, input: Option<&[f32]>) -> Vec<f32> {
-        let caches = DecodeCaches {
-            gqa_kv: &m.decode_state().gqa_kv,
-            gqa_cap: m.dec_cap,
-            gqa_window: KvWindow::Block(0),
-            gdn_state: &m.decode_state().gdn_state,
-            gdn_hist: &m.decode_state().gdn_hist,
-        };
+        let caches = m.own_caches();
         let out = m.run_decode_step(token_id, pos, &caches, input);
         m.gpu.read(&out, m.cfg.d_model as usize)
     }
@@ -6209,13 +6576,7 @@ mod tests {
     /// sibling of [`decode_stage`], with the widened `[n, d_model]` seam
     /// exposed. Returns the whole `[n, d_model]` boundary block.
     fn prefill_stage(m: &Qwen35, tokens: &[u32], pos: u32, input: Option<&[f32]>) -> Vec<f32> {
-        let caches = DecodeCaches {
-            gqa_kv: &m.decode_state().gqa_kv,
-            gqa_cap: m.dec_cap,
-            gqa_window: KvWindow::Block(0),
-            gdn_state: &m.decode_state().gdn_state,
-            gdn_hist: &m.decode_state().gdn_hist,
-        };
+        let caches = m.own_caches();
         m.prefill_chunk_stage(tokens, pos, &caches, input)
     }
 

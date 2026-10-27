@@ -151,16 +151,6 @@ fn tiny_ties_matches_the_reference_default_backend() {
     run(Gpu::new(pipelines()), "tiny_ties");
 }
 
-/// A decode or chunked-prefill step of a windowed config must refuse, not run
-/// plain full attention.
-#[test]
-#[should_panic(expected = "does not implement this config's sliding window")]
-fn the_decode_step_refuses_a_windowed_config() {
-    let cfg = Qwen35Config::edgerock_tiny();
-    let w = qwen35::init::init_weights(&cfg, 3);
-    Qwen35::new_on(Gpu::new_cpu(pipelines()), cfg.clone(), 1, cfg.block_size, &w).step(1);
-}
-
 /// A CUDA device, or a named skip: this machine cannot run the test, which is not a missing fixture.
 fn cuda() -> Option<Gpu> {
     match Gpu::try_new_cuda(pipelines()) {

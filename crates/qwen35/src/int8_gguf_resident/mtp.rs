@@ -233,7 +233,7 @@ impl MtpDrafter {
         let ehp = self.project(head_gpu, &x);
         let t1 = std::time::Instant::now();
         let seqs = self.caches.batch(slots, positions);
-        let caches = BatchDecodeCaches { gqa_kv: &self.caches.gqa_kv, gqa_cap: self.caches.kv_block(), seqs: &seqs, one_sequence: false, gdn_pool: None };
+        let caches = BatchDecodeCaches { gqa_kv: &self.caches.gqa_kv, gqa_cap: self.caches.kv_block(), seqs: &seqs, one_sequence: false, gdn_pool: None, memory: &[] };
         let out = self.stage.decode_batch_stage(tokens, &caches, Some(&ehp));
         self.times[0] += t1 - t0;
         self.times[1] += t1.elapsed();

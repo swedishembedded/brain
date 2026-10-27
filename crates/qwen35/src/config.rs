@@ -352,14 +352,16 @@ impl Qwen35Config {
 
     /// Refuse, loudly, a path that implements neither the sliding window nor
     /// the anchor memory: `path` names it. Plain Qwen3.5 configs pass. The
-    /// decode, serving, streaming and training paths call this until each has
-    /// its own windowed/memory state, so a configuration they would run with
-    /// plain full attention never produces silently wrong text.
+    /// one-shot forward, training, and the ring-and-bank decode state (`step`,
+    /// `prefill_chunked`, slot pools) implement both; the layer-streaming
+    /// forward and trainer, the paged multi-sequence prefill and the f32
+    /// serving engine do not yet, and call this so a configuration they would
+    /// run with plain full attention never produces silently wrong text.
     pub fn require_plain_decoder(&self, path: &str) {
         assert!(
             self.swa_window.is_none() && self.anchor_memory.is_none(),
             "qwen35: {path} does not implement this config's sliding window / anchor memory (swa_window {:?}, anchor_memory {:?}); \
-             only the one-shot forward (`logits_all`) does so far",
+             the one-shot forward, training and the ring/bank decode state (`step`, `prefill_chunked`, slot pools) do",
             self.swa_window,
             self.anchor_memory
         );
