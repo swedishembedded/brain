@@ -278,6 +278,24 @@ pub fn scan(root: &Path) -> Vec<ArtifactRecord> {
     scan_with_probe_hook(root, &mut |_| {})
 }
 
+/// The records for one path a caller named explicitly (a `--dit`/`--vae`
+/// role flag), wherever it lives: a weight file or `tokenizer.json`, or a
+/// checkpoint directory walked as a repo directory is. Nothing is cached, and
+/// a path that is neither yields nothing.
+pub fn scan_explicit(path: &Path) -> Vec<ArtifactRecord> {
+    let Some(parent) = path.parent() else { return Vec::new() };
+    let (cache, mut out) = (BTreeMap::new(), Vec::new());
+    if path.is_dir() {
+        walk_repo_dir(path, parent, &cache, &mut |_| {}, &mut out, 0);
+    } else if let Some(fname) = path.file_name().and_then(|s| s.to_str()) {
+        let kind = if fname == "tokenizer.json" { Some(ArtifactKind::TokenizerJson) } else { kind_of_extension(fname) };
+        if let Some(kind) = kind {
+            push_file_record(path, parent, kind, &cache, &mut |_| {}, &mut out);
+        }
+    }
+    out
+}
+
 fn scan_with_probe_hook(root: &Path, probed: &mut dyn FnMut(&Path)) -> Vec<ArtifactRecord> {
     let cache = load_cache(root);
     let mut out = Vec::new();

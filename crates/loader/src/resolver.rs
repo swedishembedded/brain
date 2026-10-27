@@ -92,9 +92,10 @@ pub fn try_resolve(models_dir: Option<&Path>, arch: &str, spec: &dyn ArchSpec, o
 /// reached.
 pub fn resolve_structured(models_dir: Option<&Path>, arch: &str, spec: &dyn ArchSpec, overrides: &BTreeMap<String, String>) -> Result<Resolution, String> {
     let root = models_dir.ok_or_else(|| format!("{arch}: no models directory (set --models-dir, BRAIN_MODELS_DIR, or $HOME)"))?;
-    let records = brain_modelstore::inventory::scan(root);
+    let mut records = brain_modelstore::inventory::scan(root);
+    add_explicit_paths(&mut records, overrides);
     let specs: [&dyn ArchSpec; 1] = [spec];
-    Ok(brain_modelstore::resolve::resolve(arch, &records, &specs, overrides))
+    Ok(brain_modelstore::resolve::resolve_under(root, arch, &records, &specs, overrides))
 }
 
 /// [`resolve_structured`] for one named model: only what `reference`'s own
@@ -110,8 +111,23 @@ pub fn resolve_reference(models_dir: Option<&Path>, arch: &str, spec: &dyn ArchS
         let repo = brain_modelstore::Store::new(root).repo_dir(reference);
         records.retain(|r| r.path.starts_with(&repo));
     }
+    add_explicit_paths(&mut records, overrides);
     let specs: [&dyn ArchSpec; 1] = [spec];
     Ok(brain_modelstore::resolve::resolve_under(root, arch, &records, &specs, overrides))
+}
+
+/// An override naming an existing file or directory is considered whether or
+/// not the store holds it: its records join the scanned ones, so the
+/// resolver's override match finds it and the architecture's own `classify`
+/// and `validate` still judge it. A value that is not an existing path (a
+/// `<vendor>/<repo>` reference, a variant name) adds nothing.
+fn add_explicit_paths(records: &mut Vec<brain_modelstore::inventory::ArtifactRecord>, overrides: &BTreeMap<String, String>) {
+    for value in overrides.values() {
+        let path = Path::new(value);
+        if path.is_absolute() && path.exists() && !records.iter().any(|r| r.path == path) {
+            records.extend(brain_modelstore::inventory::scan_explicit(path));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -163,5 +179,25 @@ mod tests {
         assert_eq!(err.exit_code(), MISSING_EXIT);
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A role flag naming an existing file outside the store is that role's
+    /// artifact: `--dit /elsewhere/model.gguf` must resolve to that file, not
+    /// report that nothing in the store classifies as `dit`.
+    #[test]
+    fn an_override_outside_the_store_resolves_to_that_file() {
+        let base = std::env::temp_dir().join(format!("brain-loader-resolver-outside-{}", std::process::id()));
+        let (root, elsewhere) = (base.join("store"), base.join("elsewhere"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let file = elsewhere.join("weights.safetensors");
+        std::fs::write(&file, b"not read: the resolver only records the file").unwrap();
+
+        let overrides = BTreeMap::from([("weights".to_string(), file.to_string_lossy().into_owned())]);
+        let assembly = try_resolve(Some(&root), "loadertest", &OneRoleSpec, &overrides).unwrap_or_else(|e| panic!("{}", e.message()));
+        assert_eq!(assembly.roles.get("weights"), Some(&file));
+        assert!(root.read_dir().unwrap().all(|e| e.unwrap().file_name() != "weights.safetensors"), "the store is not modified");
+
+        std::fs::remove_dir_all(&base).ok();
     }
 }

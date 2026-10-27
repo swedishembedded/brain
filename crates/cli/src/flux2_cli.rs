@@ -413,8 +413,8 @@ fn attach_lora_scale(specs: &mut [AdapterSpec], scaled: &mut usize, value: f32) 
 /// Resolve FLUX.2's four weight roles through the model-store resolver
 /// (`brain_modelstore::resolve::resolve` + [`flux2::spec::Flux2Spec`])
 /// instead of `BRAIN_FLUX2_*` variables: `--dit`/`--text-encoder` name a
-/// role's file outright (the resolver's own override contract - an exact
-/// path already found by scanning the models directory), `--variant` states
+/// role's file outright (an exact path, inside the models directory or not,
+/// or a `<vendor>/<repo>` reference into it), `--variant` states
 /// the klein-vs-base family a weight's shape alone can never answer.
 ///
 /// One flag per role, spelled as the role is: `dit` -> `--dit`, `vae` ->
