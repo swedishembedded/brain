@@ -74,9 +74,11 @@ fi
 # side: CONFIG VARIANTS of the dense decoder brain-qwen3 implements (the
 # same HF tensor names, told apart by bias / QK-norm / RoPE-scaling flags),
 # each with its own id because a checkpoint should be named for what it is.
+# `edgerock` is likewise a config variant of brain-qwen35's hybrid decoder
+# (a window and an anchor memory on the full-attention layers).
 # A crate per variant would re-wire the same decoder; see brain_arch's
 # `Arch::implementation` and .agents/rules/porting.md section 0.
-permanent_exceptions="autoencoderkl:vae llama:qwen3 qwen2:qwen3"
+permanent_exceptions="autoencoderkl:vae edgerock:qwen35 llama:qwen3 qwen2:qwen3"
 
 # TEMPORARY, TRACKED exceptions -- unlike the permanent one above, each of
 # these would be real drift, not a deliberate design choice: an architecture

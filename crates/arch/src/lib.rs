@@ -401,6 +401,12 @@ pub const ARCHS: &[Arch] = &[
     // model store.
     arch!("qwen35", "Qwen3.5/3.8-27B dense hybrid GDN/GQA decoder + MTP + ViT", Multimodal, LlamaCpp, "brain-qwen35", gguf: Some("qwen35"), hf: &["Qwen3_5ForConditionalGeneration", "qwen3_5"], default_ref: Some("Qwen/Qwen3.8-27B-FP8"),
         caps: Caps::NONE.full_ft().lora(&[BaseTier::F32, BaseTier::Bf16, BaseTier::Nf4, BaseTier::Fp8]).other()),
+    // EdgeRock is the `qwen35` decoder with a causal sliding window and an anchor
+    // memory on every full-attention layer: a config variant of `brain-qwen35`
+    // (`Qwen35Config::{swa_window, anchor_memory}`), so a row, not a crate.
+    // llama.cpp has no entry for it. No training caps are declared until the
+    // capability matrix names the tests that back them.
+    arch!("edgerock", "EdgeRock windowed hybrid GDN/GQA decoder with anchor memory (config variant of qwen35)", Text, Brain, "brain-qwen35", hf: &["EdgeRockForCausalLM", "edgerock"]),
     arch!("glmdsa", "GLM-5.2 (glm_moe_dsa: MLA + sigmoid noaux_tc MoE + DSA)", Text, LlamaCpp, "brain-glmdsa", hf: &["GlmMoeDsaForCausalLM", "glm_moe_dsa"],
         caps: Caps::NONE.full_ft()),
     arch!("deepseek2", "DeepSeek-V2-family MoE decoder", Text, LlamaCpp, "brain-deepseek2"),
@@ -916,6 +922,11 @@ mod tests {
             assert_eq!(by_gguf(id).map(|a| a.id), Some(id), "gguf {id}");
             assert_eq!(a.implementation().id, "qwen3", "{id} is implemented by the qwen3 decoder");
         }
+        // EdgeRock is a variant row of the qwen35 decoder.
+        let edgerock = by_id("edgerock").expect("edgerock row");
+        assert_eq!(by_hf("EdgeRockForCausalLM").map(|a| a.id), Some("edgerock"));
+        assert_eq!(by_hf("edgerock").map(|a| a.id), Some("edgerock"));
+        assert_eq!(edgerock.implementation().id, "qwen35");
         // A row whose crate carries its own id implements itself, and so does
         // one whose crate is shared infrastructure rather than an architecture.
         assert_eq!(by_id("qwen3").map(|a| a.implementation().id), Some("qwen3"));

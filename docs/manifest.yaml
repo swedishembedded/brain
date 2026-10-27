@@ -69,6 +69,7 @@ navigation:
           - docs/reference/models/llama.md
           - docs/reference/models/qwen35moe.md
           - docs/reference/models/qwen35.md
+          - docs/reference/models/edgerock.md
           - docs/reference/models/gpt2.md
           - docs/reference/models/glmdsa.md
           - docs/reference/models/glmdsa/npu.md

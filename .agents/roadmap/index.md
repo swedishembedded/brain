@@ -36,6 +36,7 @@ heading and a `Scope: <one sentence>` line under it, then run `make generate/roa
 | [`distributed-execution`](distributed-execution.md) | distributed-execution | Running one training job as ranks across machines - the job plan every rank agrees on, the process group it joins, the transport's failure semantics, and the tests that start a cluster as real processes (`crates/model`: `job`, `collective`, `netcollective`, `distributed`, `grid`). |
 | [`doom`](doom.md) | doom - roadmap: search, then compression, to UV-Max | The DOOM decision sample (`samples/decision/doom`) and the search runtime it drives. |
 | [`dtype`](dtype.md) | dtype | Keeping measured numbers out of `docs/` and attached to the tests that assert them. |
+| [`edgerock`](edgerock.md) | edgerock | EdgeRock-4B windowed hybrid decoder with a bounded anchor memory (`crates/qwen35` config variant, `model::anchor_memory`). |
 | [`embeddings`](embeddings.md) | embeddings | Text embedding, retrieval, RAG and contrastive fine-tuning through the SDK. |
 | [`fincast`](fincast.md) | fincast | FinCast forecaster (`crates/fincast`). |
 | [`florence2`](florence2.md) | florence2 | Florence-2 vision-language model (`crates/florence2`). |
