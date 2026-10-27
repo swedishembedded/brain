@@ -1065,3 +1065,13 @@ between decode steps (`PREFILL_BUDGET`) halves the crops' median and raises the 
 `OCR_POLICY`): `--gemm fp32` runs the decoder's reference tier and every vision tower on the exact fp32 kernels; the pool is sized by bytes
 (bf16 128k tokens, f32 64k), so a larger batch shares it. `--weight-format` is refused by name and stops the OCR models from being served
 (`brain serve --max-batch 16 --gemm fp32 --kv-cache f32` and the refusal were run).
+
+## 2026-10-27 round 2: a client that hangs up cancels its generation
+
+Measured with 32 non-streaming page requests (max_tokens 4096) whose clients closed the connection 6 s after sending: the generations
+**kept running**. The next 32-request burst took 131.8 s against 29.1 s on a clean server (the card still at 47% SM from this process
+five seconds after the hang-ups), because a one-shot request's cancel token was cancelled only by a streamed request's guard. A
+one-shot handler is one future, dropped on disconnect; `bridge::submit` now holds the same `CancelGuard`
+(`dropping_a_one_shot_request_cancels_its_generation`). Same experiment after the fix: 28.9 s against 29.4 s, the card idle at 11%.
+The scheduler returns a cancelled sequence's K/V blocks at once (conformance), and a request cancelled while it waits for the encoder is
+not encoded.

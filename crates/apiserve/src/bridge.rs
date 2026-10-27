@@ -325,6 +325,9 @@ pub async fn submit(state: &AppState, model: &str, action: &str, mut inv: Invoca
     residency::log::info(&format!("{provider:?} request: {action} {model}"));
     let (id, token) = state.register();
     inv.cancel = token.clone();
+    // A one-shot request is one handler future, dropped when the client hangs up: the guard then cancels the generation instead of
+    // leaving it to run to its token limit for nobody (a streamed request has the same guard in its `EventStream`).
+    let _guard = CancelGuard { token: token.clone(), jobs: state.jobs.clone(), id };
     let (tx, rx) = oneshot::channel();
     let (admit_tx, mut admit_rx) = oneshot::channel::<()>();
     let job = Job::new(model.to_string(), action.to_string(), inv)

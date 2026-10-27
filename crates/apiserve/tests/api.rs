@@ -1640,6 +1640,65 @@ async fn admit_deadline_sheds_saturated_lane_with_429_and_cancels() {
     assert_eq!(gate.started(), 1, "a timed-out (cancelled) job must not run after the lane frees");
 }
 
+/// A chat model that works until its request is cancelled (bounded, so a bug cannot hang the suite) and reports whether it was.
+struct UntilCancelled {
+    started: Arc<AtomicUsize>,
+    cancelled: Arc<AtomicUsize>,
+}
+struct UntilCancelledInst(Arc<AtomicUsize>, Arc<AtomicUsize>);
+impl ResidentModel for UntilCancelled {
+    fn manifest(&self) -> Manifest {
+        chat_manifest()
+    }
+    fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+        InstanceKey::new("brain-chat", "default")
+    }
+    fn estimate(&self, _k: &InstanceKey) -> MemCost {
+        MemCost::default()
+    }
+    fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(UntilCancelledInst(self.started.clone(), self.cancelled.clone())))
+    }
+}
+impl Instance for UntilCancelledInst {
+    fn run(&mut self, _a: &str, inv: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        let until = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < until {
+            if inv.cancel.is_cancelled() {
+                self.1.fetch_add(1, Ordering::SeqCst);
+                return Err("cancelled".into());
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(Outcome::new().set("prompt_tokens", json!(1)).set("completion_tokens", json!(1)).set("finish_reason", json!("stop")).blob("text", Blob::new(Media::Text, b"done".to_vec())))
+    }
+}
+
+/// **A client that hangs up on a one-shot request cancels its generation.** A non-streaming request is one handler future; when the
+/// client disconnects the server drops it, and the generation it started must stop (and give its KV back) instead of running to
+/// its token limit for nobody - a timed-out client otherwise leaves the work behind on the card.
+#[tokio::test]
+async fn dropping_a_one_shot_request_cancels_its_generation() {
+    let (started, cancelled) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(UntilCancelled { started: started.clone(), cancelled: cancelled.clone() })];
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Cpu, 8 << 30, 0);
+    let key = "sk-brain-test-key".to_string();
+    let app = router(AppState::new(Executor::start(models, budgets, Policy::default()), key.clone(), Provider::OpenAI));
+    let body = json!({"model": "brain-chat", "messages": [{"role": "user", "content": "hi"}]});
+
+    // The client gives up after 300 ms: the future is dropped, as the server does when the connection closes.
+    let request = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body);
+    assert!(tokio::time::timeout(Duration::from_millis(300), request).await.is_err(), "the model works until cancelled, so the call does not finish");
+    assert_eq!(started.load(Ordering::SeqCst), 1, "the generation had started");
+    let until = Instant::now() + Duration::from_secs(2);
+    while cancelled.load(Ordering::SeqCst) == 0 {
+        assert!(Instant::now() < until, "the generation kept running after its client hung up");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 /// A chat model whose `run_batch` pays its (mocked) generation cost ONCE per
 /// batch, not once per invocation — a stand-in for "one shared forward pass
 /// serves every sequence in it", exactly what `qwen3::serve::Scheduler` does for
