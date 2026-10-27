@@ -117,6 +117,30 @@ reference exactly in both variants on both backends; flipping the tie rule in
   unconditional to keep the step one list of dispatches), and the ring chunk attention is the
   materialised chain over `m + n` rows; both are M6 work.
 
+- [x] M4: serving. `qwen35::serve_ring::RingEngine` implements `model::serve::PagedDecoder` over the
+  slot pool, a second engine rather than a mode of `serve::Engine` (whose pool, block table and
+  prefix story all assume KV that grows with the sequence; the module doc justifies it): one block
+  per live sequence whose id is its slot, `max_seq_len` = the position limit (262144), batched
+  decode of all live slots in one dispatch set (`Qwen35::slot_decode_dev`), chunked prefill under
+  the scheduler budget, device heads shared with `Engine`. Prefix reuse is the generic
+  `SnapshotPrefixCache`: an entry is a snapshot slot (`slot_copy` of the whole GDN + ring + bank
+  state) plus the last hidden row, with a table that carries only the namespace; `reclaim_prefix`
+  frees and evicts nothing because the cache holds no pool block. `tests/edgerock_serve.rs`:
+  generic conformance on the CPU and the default device (CUDA under the build environment),
+  scheduler-batched generation equal to per-sequence `step` decoding, a prefix hit equal to the
+  cold run and reading only the suffix (asserted from `prefix_stats`), namespaces, LRU,
+  reclaim, slot reuse after a cancel, fixed state bytes equal to `slot_state_bytes`.
+  Catalog: `catalog::resident_edgerock` (`EdgeRockResident` over the pulled directory read in place
+  through `fp8_source::open_dir`, bf16 weight tier, slots sized from the emptiest card's free
+  memory by `ring_slots`; `EdgeRockProvider` for `brain do edgerock generate`),
+  `qwen35::spec::EdgeRockSpec` (roles `weights` = the directory, `tokenizer` = its
+  `tokenizer.json`), the `model_dir` arm for the `edgerock` family, sampling defaults from
+  `generation_config.json`, chat through the existing Qwen3.5 flavour, `--ctx` honoured as a cap
+  (`Qwen35Sizing::ctx_explicit`). `tests/edgerock_served.rs` serves a tiny pulled directory through
+  the residency adapter (batch equals single, prefix hits, footprint = weights + fixed slots);
+  `tests/edgerock_real_served.rs` (ignored) asks the released model the vault-code question.
+  Sample `samples/python/llm/edgerock`; model page promoted to served. A device out-of-memory now
+  says which allocation was refused before it unwinds (`DeviceOutOfMemory::raise`).
 - [x] M5 (forward part): the released weights against the independent reference
   forward (`tools/goldens/edgerock_dump_real_reference.py`, fp32 CPU torch, a
   1400-token prompt that slides the window and commits five blocks, then asks about
@@ -131,9 +155,15 @@ reference exactly in both variants on both backends; flipping the tie rule in
 
 ## Not yet done
 
-- [ ] M4: serving: engine on the generic scheduler, snapshot prefix cache over the
-  fixed state, conformance suite, catalog, capabilities, CLI, `brain pull
-  rockmatrix-ai/EdgeRock`, model page promoted from "recognized" to usable.
+- [ ] Serving: the tied embedding table is held in fp32 on the device (2.5 GB at the published shape,
+  and the head matmul reads it every decode step); a bf16 table needs the head and the embedding
+  gather routed through `Ops` like the linears (`table_tier` does it for narrow LoRA training only).
+  The memory's projections stay fp32 by design; `infer_footprint_bytes` charges both.
+- [ ] Serving: no adapters (the engine reports none, `adapter_availability` refuses), no speculation,
+  no embedding-row prompts, no KV offload (nothing to offload: the state is fixed). A prefix entry
+  serves one prompt length (the prompt that was filed); there is no mid-prompt checkpoint.
+- [ ] Serving: a GPU run of the real model (`edgerock_real_served`, then the sample over HTTP) and the
+  throughput of the batched decode at the published shape are unmeasured.
 - [ ] M5: real weights (BF16 load, reference parity with the CPU torch reference,
   generation sanity, long-context retrieval).
 - [ ] M6: performance, training included: real-weight training throughput and memory (the saved `probs`

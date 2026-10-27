@@ -218,6 +218,8 @@ navigation:
         path: examples/python/imagegen/sdxl.md
       - source: samples/python/imaging/edit-pipeline/README.md
         path: examples/python/imaging/edit-pipeline.md
+      - source: samples/python/llm/edgerock/README.md
+        path: examples/python/llm/edgerock.md
       - source: samples/python/llm/glmdsa/README.md
         path: examples/python/llm/glmdsa.md
       - source: samples/python/llm/qwen35moe/README.md
