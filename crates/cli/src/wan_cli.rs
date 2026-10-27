@@ -121,6 +121,12 @@ Required:
   --data <dir>             a data::episode dataset plus captions.json
   --save <path>            where to write the trained adapter
 
+Weights (from the models directory, like `t2v`; each flag names its role outright):
+  --dit <path>             transformer dir/file/.gguf
+  --vae <path>             Wan2.1_VAE.pth or vae/
+  --t5 <path>              umT5-XXL encoder
+  --tokenizer <path>       tokenizer.json or its dir
+
 Training:
   --rank <N>               LoRA rank (default 16)
   --steps <N>              training steps (default 200)
@@ -333,6 +339,8 @@ fn finetune(args: &[String]) -> Result<(), String> {
         te_device: None,
         saved: model::saved::SavedPolicy::Keep,
     };
+    // `--dit`/`--vae`/`--t5`/`--tokenizer`, each naming its role outright; the rest come from the model store.
+    let mut weights: [Option<String>; 4] = Default::default();
     let mut i = 0;
     while i < args.len() {
         let need = |i: usize| -> Result<&String, String> { args.get(i + 1).ok_or_else(|| format!("{} needs a value", args[i])) };
@@ -350,6 +358,10 @@ fn finetune(args: &[String]) -> Result<(), String> {
             "--device" => opts.device = Some(need(i)?.clone()),
             "--te-device" => opts.te_device = Some(need(i)?.clone()),
             "--activations" => opts.saved = crate::args::parse_activations(need(i)?)?,
+            "--dit" => weights[0] = Some(need(i)?.clone()),
+            "--vae" => weights[1] = Some(need(i)?.clone()),
+            "--t5" => weights[2] = Some(need(i)?.clone()),
+            "--tokenizer" => weights[3] = Some(need(i)?.clone()),
             "--help" | "-h" => {
                 println!("{HELP}");
                 std::process::exit(0);
@@ -366,7 +378,8 @@ fn finetune(args: &[String]) -> Result<(), String> {
         "t2v-14B" | "14b" | "14B" => WanConfig::t2v_14b(),
         other => return Err(format!("unknown --variant {other:?} (t2v-1.3B, t2v-14B)")),
     };
-    let paths = Paths::from_env()?;
+    let [dit, vae, t5, tokenizer] = &weights;
+    let paths = resolve_wan(dit.as_deref(), vae.as_deref(), t5.as_deref(), tokenizer.as_deref())?;
 
     eprintln!(
         "wan finetune: {} rank {} steps {} frames {} samples {} lr {} seed {} -> {}",
