@@ -80,14 +80,17 @@ pub fn plan_placement(cards: &[(u32, u64)], fp: &Footprint) -> Placement {
     Placement { vision: Some(v), decoder }
 }
 
-/// The placements of every replica the offered `cards` can run at once: one
-/// self-contained replica (encoder and decoder on the same card) on each card
-/// that holds both, when there are two or more such cards - the spare capacity
-/// is then used, and two replicas never wait on each other's card. With fewer,
-/// the one placement of [`plan_placement`]. Never empty.
-pub fn plan_replicas(cards: &[(u32, u64)], fp: &Footprint) -> Vec<Placement> {
-    let whole: Vec<Placement> =
-        cards.iter().filter(|&&(_, usable)| usable >= fp.vision_device + fp.decoder_device).map(|&(i, _)| Placement { vision: Some(i), decoder: DecoderDevice::SameCard }).collect();
+/// The placements of every replica the offered cards can run: one self-contained replica (encoder and decoder on the same card) on
+/// each card that holds both, when there are two or more such cards - the spare capacity is then used, and two replicas never wait on
+/// each other's card. With fewer, the one placement of [`plan_placement`] over the free memory. Never empty.
+///
+/// `cards` are `(index, free bytes)` now; `capacities` are `(index, total bytes)`. A replica is planned on every card whose CAPACITY
+/// holds the model, free now or not: the scheduler runs a job on a replica whose card has the budget at that moment, so a card a
+/// neighbouring process holds when the server starts gets its replica as soon as the capacity probe sees the card free.
+pub fn plan_replicas(cards: &[(u32, u64)], capacities: &[(u32, u64)], fp: &Footprint) -> Vec<Placement> {
+    let need = fp.vision_device + fp.decoder_device;
+    let capacity_of = |i: u32, free: u64| capacities.iter().find(|&&(c, _)| c == i).map_or(free, |&(_, total)| total.max(free));
+    let whole: Vec<Placement> = cards.iter().filter(|&&(i, free)| capacity_of(i, free) >= need).map(|&(i, _)| Placement { vision: Some(i), decoder: DecoderDevice::SameCard }).collect();
     if whole.len() >= 2 {
         whole
     } else {
@@ -130,10 +133,16 @@ mod tests {
     #[test]
     fn a_replica_runs_on_every_card_that_holds_the_whole_model() {
         let whole = Placement { vision: Some(0), decoder: DecoderDevice::SameCard };
-        assert_eq!(plan_replicas(&[(0, 90 * GIB), (1, 90 * GIB)], &FP), vec![whole, Placement { vision: Some(1), decoder: DecoderDevice::SameCard }]);
-        assert_eq!(plan_replicas(&[(0, 90 * GIB), (1, 12 * GIB)], &FP), vec![plan_placement(&[(0, 90 * GIB), (1, 12 * GIB)], &FP)], "one whole card is one replica");
-        assert_eq!(plan_replicas(&[(0, 90 * GIB), (1, 60 * GIB), (3, 8 * GIB)], &FP).len(), 2, "a card that cannot hold the model is left out");
-        assert_eq!(plan_replicas(&[], &FP), vec![Placement { vision: None, decoder: DecoderDevice::Cpu }]);
+        let whole_cards = [(0, 90 * GIB), (1, 90 * GIB)];
+        assert_eq!(plan_replicas(&whole_cards, &whole_cards, &FP), vec![whole, Placement { vision: Some(1), decoder: DecoderDevice::SameCard }]);
+        assert_eq!(plan_replicas(&[(0, 90 * GIB), (1, 12 * GIB)], &[(0, 90 * GIB), (1, 12 * GIB)], &FP), vec![plan_placement(&[(0, 90 * GIB), (1, 12 * GIB)], &FP)], "one whole card is one replica");
+        let three = [(0, 90 * GIB), (1, 60 * GIB), (3, 8 * GIB)];
+        assert_eq!(plan_replicas(&three, &three, &FP).len(), 2, "a card that cannot hold the model is left out");
+        assert_eq!(plan_replicas(&[], &[], &FP), vec![Placement { vision: None, decoder: DecoderDevice::Cpu }]);
+        // A neighbour holds most of card 1 when the server starts, but the card is big enough: its replica is planned, to be used once it frees.
+        let held = [(0, 90 * GIB), (1, 12 * GIB)];
+        let big = [(0, 96 * GIB), (1, 96 * GIB)];
+        assert_eq!(plan_replicas(&held, &big, &FP).len(), 2, "capacity, not the free memory of the moment, decides the replicas");
     }
 
     #[test]

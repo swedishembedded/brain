@@ -379,6 +379,23 @@ impl ResidencyManager {
         self.models.get(model).map(|m| m.replicas()).or_else(|| self.multi_models.get(model).map(|m| m.replicas())).unwrap_or(1).max(1)
     }
 
+    /// Whether the replica `key` names can run on this machine as its devices are budgeted now: it is hot, or every device it needs has
+    /// a budget that holds its share with nothing else resident. A replica whose card another process holds is not one: its jobs would
+    /// be refused for the budget, so the executor routes around it until the capacity probe sees the card free again.
+    pub fn replica_can_run(&self, key: &InstanceKey, model: &str) -> bool {
+        if self.residents.contains(key) || self.multi_residents.contains_key(key) {
+            return true;
+        }
+        if let Some(m) = self.multi_models.get(model) {
+            let cost = m.estimate_multi(key);
+            return cost.devices().all(|d| self.budgets.get(d).is_some() && self.budgets.usable_on(d) >= cost.on(d));
+        }
+        match self.models.get(model) {
+            Some(m) => could_ever_fit(&m.estimate(key), &self.budgets),
+            None => true,
+        }
+    }
+
     /// Whether `model` is registered as a [`MultiDeviceResidentModel`] - the
     /// executor's `assign` uses this to pick between the `claim`/`placeable`
     /// and `claim_multi`/`placeable_multi` branches for a queued group.
@@ -2282,6 +2299,58 @@ mod tests {
             self.live.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(FakeInst { live: self.live.clone() }))
         }
+    }
+
+    /// A model that runs one replica per card, each charged to its own card.
+    struct PerCard {
+        replicas: usize,
+    }
+    impl ResidentModel for PerCard {
+        fn manifest(&self) -> Manifest {
+            Manifest::new("percard", "fake", vec![ActionSpec::new("run", "run")])
+        }
+        fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+            InstanceKey::new("percard", "default")
+        }
+        fn replicas(&self) -> usize {
+            self.replicas
+        }
+        fn estimate(&self, _k: &InstanceKey) -> MemCost {
+            MemCost::new(0, 0)
+        }
+        fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn crate::Instance>, String> {
+            Err("not this model's contract".to_string())
+        }
+    }
+    impl crate::multi::MultiDeviceResidentModel for PerCard {
+        fn estimate_multi(&self, k: &InstanceKey) -> crate::multi::MultiDeviceCost {
+            crate::multi::MultiDeviceCost::new(vec![(Device::Gpu(k.replica_index() as u32), 14 * GB)], 0)
+        }
+        fn activate_multi(&self, _k: &InstanceKey, _devices: &[Device]) -> Result<Box<dyn crate::Instance>, String> {
+            Err("not built in this test".to_string())
+        }
+    }
+
+    /// **A replica on a card another process holds is not a replica that can run - until the card is free.** The executor routes a job
+    /// to a replica that can run, so a model planned for two cards uses one while the other is held, and both once the capacity probe
+    /// sees the second card free again.
+    #[test]
+    fn a_replica_can_run_only_while_its_card_has_the_budget() {
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Gpu(1), 24 * GB, 0);
+        let mut mgr = ResidencyManager::new(budgets);
+        mgr.register_multi(Arc::new(PerCard { replicas: 2 }));
+        let key = InstanceKey::new("percard", "default");
+        assert!(mgr.replica_can_run(&key.replica(0), "percard") && mgr.replica_can_run(&key.replica(1), "percard"));
+
+        // A neighbour takes all but 6 GB of card 1: the 14 GB replica cannot be built there.
+        mgr.refresh_accelerator_capacity(&[(Device::Gpu(1), 6 * GB)]);
+        assert!(mgr.replica_can_run(&key.replica(0), "percard"));
+        assert!(!mgr.replica_can_run(&key.replica(1), "percard"), "card 1 cannot hold it now");
+
+        // The neighbour exits: the replica comes back without a restart.
+        mgr.refresh_accelerator_capacity(&[(Device::Gpu(1), 24 * GB)]);
+        assert!(mgr.replica_can_run(&key.replica(1), "percard"));
     }
 
     /// **The daemon adapts to VRAM it does not own.** Budgets used to be frozen

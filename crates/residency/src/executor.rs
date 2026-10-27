@@ -787,7 +787,7 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
     match msg {
         Msg::Submit(mut job) => match mgr.instance_key_for(&job.model, &job.action, &job.inv) {
             Some(key) => {
-                let key = least_loaded_replica(mgr.replicas(&job.model), key, queue, running_jobs);
+                let key = least_loaded_replica(mgr.replicas(&job.model), key, queue, running_jobs, &|k| mgr.replica_can_run(k, &job.model));
                 mgr.stamp(&job.model, &mut job.inv);
                 let id = *next_id;
                 *next_id += 1;
@@ -957,13 +957,19 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
 /// The replica of `key`'s build with the fewest jobs queued or running (the lowest index on a tie): a model
 /// that can run `replicas` instances at once gets its jobs spread over them, so spare capacity is used
 /// without the model, or the caller, choosing.
-fn least_loaded_replica(replicas: usize, key: InstanceKey, queue: &[Pending], running_jobs: &[RunningJob]) -> InstanceKey {
+///
+/// Only replicas that can run now are candidates (`can_run`): one whose card is held by another process is routed around until the capacity
+/// probe sees the card free, and a model with no replica that can run takes them all (its jobs then fail with the budget's reason).
+fn least_loaded_replica(replicas: usize, key: InstanceKey, queue: &[Pending], running_jobs: &[RunningJob], can_run: &dyn Fn(&InstanceKey) -> bool) -> InstanceKey {
     if replicas <= 1 {
         return key;
     }
     let base = key.base();
     let load = |k: &InstanceKey| queue.iter().filter(|p| &p.key == k).count() + running_jobs.iter().filter(|r| &r.key == k).count();
-    (0..replicas).map(|i| base.replica(i)).min_by_key(load).unwrap_or(base)
+    let all: Vec<InstanceKey> = (0..replicas).map(|i| base.replica(i)).collect();
+    let live: Vec<InstanceKey> = all.iter().filter(|k| can_run(k)).cloned().collect();
+    let candidates = if live.is_empty() { all } else { live };
+    candidates.into_iter().min_by_key(load).unwrap_or(base)
 }
 
 fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy, lanes: &HashMap<Device, Sender<RunReq>>, running: &mut HashSet<InstanceKey>, busy: &mut HashSet<Device>, stats: &Arc<Mutex<Stats>>, running_jobs: &mut Vec<RunningJob>, open_groups: &mut HashMap<InstanceKey, OpenGroup>) {
@@ -1734,6 +1740,20 @@ mod tests {
         let elapsed = submit_wait(&exec, &["a", "b"]);
         assert!(elapsed < Duration::from_millis(210), "expected the two to overlap, took {elapsed:?}");
         assert!(exec.stats().max_parallel >= 2, "expected 2 lanes at once, stats={:?}", exec.stats());
+    }
+
+    /// Jobs are routed to a replica that can run: with the second replica's card held, everything goes to the first; with no replica
+    /// able to run, the lowest-numbered takes the job (and fails with the budget's own reason).
+    #[test]
+    fn jobs_avoid_a_replica_that_cannot_run() {
+        let key = InstanceKey::new("rep", "default");
+        let only_first = |k: &InstanceKey| k.replica_index() == 0;
+        assert_eq!(least_loaded_replica(2, key.clone(), &[], &[], &only_first).replica_index(), 0);
+        let queue: Vec<Pending> = Vec::new();
+        assert_eq!(least_loaded_replica(2, key.clone(), &queue, &[], &|_| true).replica_index(), 0, "a tie goes to the lowest index");
+        assert_eq!(least_loaded_replica(2, key.clone(), &queue, &[], &|_| false).replica_index(), 0, "none can run: the first, so the refusal is the budget's");
+        let second_only = |k: &InstanceKey| k.replica_index() == 1;
+        assert_eq!(least_loaded_replica(2, key, &queue, &[], &second_only).replica_index(), 1, "the first is held: the second takes it");
     }
 
     /// A model that can run two replicas at once gets its concurrent jobs spread over both: each

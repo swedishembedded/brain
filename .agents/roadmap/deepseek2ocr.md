@@ -1144,3 +1144,12 @@ reduction over the card; the reference tier keeps the in-house kernel it is stat
 The rest of the 64-row step is the paged attention at 33% (3.2 ms against a 2.1 ms floor for reading 7.5 GB of bf16 K/V; fp8 K/V would halve the bytes,
 unmeasured), the experts' grouped MMA 11%, the dense bf16 products ~20% and 85 activation casts. fp8 expert weights would read the same number of
 bytes as the int8 ones (one per weight), so they cannot make the step bandwidth-cheaper; they stay int8.
+
+## 2026-10-27 round 2: replicas follow the cards that are free
+
+Replicas were planned once, at start, on the cards that had room then, so a card a neighbour held at start never got its replica, and a replica planned on a card
+that is held later would have been refused for the budget. Now: the OCR models plan a replica on every card whose capacity holds the model
+(`plan_replicas(free, capacities, ..)`), and the executor routes a job only to a replica that can run on the budgets as they are now
+(`ResidencyManager::replica_can_run`, `least_loaded_replica`): one whose card is held is routed around until the capacity probe (it already raises
+and lowers every card's budget from what is free) sees the card free, and a model with no replica able to run takes the first, failing with the
+budget's classed reason. Tested at the manager (`a_replica_can_run_only_while_its_card_has_the_budget`), the router and the planner.

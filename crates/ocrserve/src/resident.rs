@@ -70,8 +70,10 @@ impl<M: OcrModel> OcrResident<M> {
         let dir = dir.into();
         match M::locate(&dir) {
             Ok(()) => {
-                let cards: Vec<(u32, u64)> = gpus.iter().map(|&(i, total)| (i, total.saturating_sub(reserved))).collect();
-                Some(OcrResident { dir, plans: plan_replicas(&cards, &M::FOOTPRINT), _model: PhantomData })
+                let cards: Vec<(u32, u64)> = gpus.iter().map(|&(i, free)| (i, free.saturating_sub(reserved))).collect();
+                let capacities: Vec<(u32, u64)> =
+                    gpu_core::devices::gpus().iter().map(|d| (d.index, d.identity.vram_bytes.saturating_sub(reserved))).collect();
+                Some(OcrResident { dir, plans: plan_replicas(&cards, &capacities, &M::FOOTPRINT), _model: PhantomData })
             }
             Err(e) => {
                 residency::log::not_served(&format!("brain: {} not served ({e})", M::ID));
@@ -271,7 +273,8 @@ mod tests {
 
     #[test]
     fn two_whole_cards_are_two_replicas_each_charged_to_its_own_card() {
-        let plans = plan_replicas(&[(0, 90 * GB), (1, 90 * GB)], &Toy::FOOTPRINT);
+        let cards = [(0, 90 * GB), (1, 90 * GB)];
+        let plans = plan_replicas(&cards, &cards, &Toy::FOOTPRINT);
         let r = OcrResident::<Toy>::with_plans("/tmp", plans);
         assert_eq!(r.replicas(), 2);
         let base = key(&r);
