@@ -562,7 +562,12 @@ pub const I8_MMA_MIN_CC: (u32, u32) = (8, 0);
 /// A portable device keeps the [`I8_GEMV_MAX_ROWS`] crossover of the
 /// generated kernels.
 pub fn i8_gemv_max_rows(caps: &DeviceCaps) -> u32 {
-    match caps.arch.compute_capability {
+    i8_gemv_max_rows_at(caps.arch.compute_capability)
+}
+
+/// [`i8_gemv_max_rows`] from the compute capability alone, for a provider that holds nothing else.
+pub fn i8_gemv_max_rows_at(compute_capability: Option<(u32, u32)>) -> u32 {
+    match compute_capability {
         Some(_) => DECODE_REGIME_MAX_ROWS,
         None => I8_GEMV_MAX_ROWS,
     }

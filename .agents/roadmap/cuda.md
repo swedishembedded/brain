@@ -1306,9 +1306,18 @@ candidate-coverage unit test and the forced-candidate-versus-WGSL gate (`i8_gemv
 12/20/32 streams of the 27B: no end-to-end change (the tuner confirms the previous hand choice), 53 of 56 classes
 under 60 % of the memory roof.
 
-Open, in the order the gap list ranks them: (1) a candidate that streams weights through shared memory with
-cp.async/TMA and `ldmatrix` (the 8-byte register loads cap every current candidate near 1.5 TB/s at 12 rows and 1 TB/s
-at 32); (2) problem generators and oracles so the other tiers' multi-row slots (K-quant narrow/wide, q4, fp8, nvfp4)
+Weight-streaming candidates landed (knowledge 369, `cu/matmul_i8_stream.cu`): a cp.async ring into shared memory,
+`ldmatrix` and `mma.m16n8k32`, 64 or 128 weight rows a block, K split over a cluster of 1/2/4/8 blocks (Hopper), eight
+registry entries the tuner chooses among per class (5 to 32 rows; rows 1-4 keep the bit-identical dp4a block). The
+decode GEMM the provider took for 9-32 rows bypassed the slot and now leaves the decode regime to it. GH200, 27B,
+16 steps: 12/20/32 streams 496/615/850 -> 556/702/883 tok/s (noisy; up to 573/732/956 on the best run). Classes
+reach 60-80 % of the roof where the matrix is large (K 5120 x N 16384: 2.7 TB/s) and stay at 30-60 % for small
+matrices (launch floor) and for 25-32 rows at K=17408 (scale-fixup issue bound: 12 FP ops per MMA per thread).
+
+Open, in the order the gap list ranks them: (1) lift the streaming candidate further: fold the group-scale fixup
+(issue bound at 17-32 rows), issue the weight copies ahead of the `griddepcontrol.wait`, TMA/`cp.async.bulk` and
+wgmma, fewer launches for the small matrices (fused multi-matrix streaming); then the fp8 and bf16 tiers with the same
+structure; (2) problem generators and oracles so the other tiers' multi-row slots (K-quant narrow/wide, q4, fp8, nvfp4)
 join the tuner, and a prefill-sized (`matmul_i8_dyn`) class grid; (3) the attention and the GDN decode kernels as
 candidate sets; (4) a compute roof per tensor-core precision for the compute-bound classes (the decode classes are
 memory-bound at 32 rows and below, so only the memory roof is graded today); (5) the driver version in the store key.

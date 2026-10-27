@@ -44,8 +44,9 @@
 //! * the int8 dynamic-activation GEMM, `[Act, Weight, ActScale, WeightScale,
 //!   Out]` with group-32 weight scales - the prefill GEMM of every int8
 //!   resident model, run on int8 tensor cores (`matmul_i8_mma`). It is taken
-//!   only above the GEMV's crossover ([`select::I8_GEMV_MAX_ROWS`] rows -
-//!   below that the GEMV family is the right shape), only when K is a
+//!   only above the GEMV's crossover ([`select::i8_gemv_max_rows_at`]: the whole
+//!   decode regime on a device with a compute capability, whose GEMV slot picks
+//!   its candidate by measurement - below that the GEMV family is the right shape), only when K is a
 //!   whole number of 64-element tiles, and only on a device whose capability
 //!   reaches the kernel's own floor.
 //!
@@ -218,7 +219,7 @@ impl CudaProvider {
     /// weights - a wrong answer, not a crash. The same holds for the uniform:
     /// the int8 kernel reads `[m, k/4, n]`, and a request whose uniform
     /// disagrees with its own shape is refused rather than launched.
-    fn shape_of(req: &OpRequest) -> Option<Dtype> {
+    fn shape_of(&self, req: &OpRequest) -> Option<Dtype> {
         let roles = |want: &[(Role, DType)]| {
             req.operands.len() == want.len() && req.operands.iter().zip(want).all(|(o, (r, d))| o.role == *r && o.dtype == *d)
         };
@@ -232,7 +233,7 @@ impl CudaProvider {
                     (Role::WeightScale, DType::F32),
                     (Role::Out, DType::F32),
                 ]) && req.group == I8_MMA_GROUP
-                    && req.shape.m > select::I8_GEMV_MAX_ROWS
+                    && req.shape.m > select::i8_gemv_max_rows_at(Some(self.cc))
                     && req.shape.k.is_multiple_of(I8_MMA_K_TILE)
                     && req.attrs == [req.shape.m, req.shape.k / 4, req.shape.n] =>
             {
@@ -1236,7 +1237,7 @@ impl OperatorProvider for CudaProvider {
         // `Step` onto the caller's tape, replayable exactly like a WGSL one.
         req.op == select::Op::MatMul
             && req.pass == Pass::Forward
-            && match Self::shape_of(req) {
+            && match self.shape_of(req) {
                 // The tiled fp32 kernel fills a 64x64 output tile per block: at
                 // decode row counts that is a few blocks of a 132-SM device and
                 // measured 200 us for a 257x2048 router. The decode regime is
@@ -1249,7 +1250,7 @@ impl OperatorProvider for CudaProvider {
     }
 
     fn lower(&self, ctx: &mut LowerCtx, req: &OpRequest) -> Result<Lowered, String> {
-        let dt = match (req.op, Self::shape_of(req)) {
+        let dt = match (req.op, self.shape_of(req)) {
             (select::Op::MatMul, Some(dt)) => dt,
             _ => {
                 return Err(format!(

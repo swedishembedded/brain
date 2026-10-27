@@ -270,11 +270,17 @@ fn the_int8_tensor_core_gemm_is_routed_to_and_agrees_with_the_portable_kernel_on
         let (want, ref_kernels) = d.run(&reference, &p);
         assert_eq!(ref_kernels, vec!["matmul_i8_dyn"], "the reference registry must run the portable kernel");
         let (got, kernels_used) = d.run(&production, &p);
+        if m <= backend_api::select::DECODE_REGIME_MAX_ROWS {
+            // The decode regime belongs to the int8 GEMV slot (`gpu_core::native_tune` chooses its candidate per
+            // shape class), so the provider leaves it alone.
+            assert_eq!(kernels_used, vec!["matmul_i8_dyn"], "{m} rows is the GEMV slot's: the provider must decline it");
+            continue;
+        }
         assert!(
             kernels_used.len() == 1 && kernels_used[0].starts_with("native:matmul_i8_mma"),
             "{m}x{n}x{k}: the production chain must route to a tensor-core kernel, got {kernels_used:?}"
         );
-        if (9..=128).contains(&m) {
+        if (33..=128).contains(&m) {
             assert_ne!(kernels_used[0], "native:matmul_i8_mma", "{m} rows is a decode batch: it takes a smaller tile than the prefill kernel");
         }
 

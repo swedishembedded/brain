@@ -86,6 +86,8 @@ pub(crate) struct Row {
     /// Words a binding window must start on for this kernel to run (`1` = any). A candidate that copies 16 bytes
     /// at a time cannot take a sliced binding that starts mid-vector; the dispatch then keeps a candidate that can.
     pub align_words: u64,
+    /// Launch shape beyond the source (cluster, dynamic shared memory); `programmatic` comes from the registry entry.
+    pub launch: CudaLaunch,
 }
 
 /// `Params { m, .., n }`: one block covers `tile.0` rows of x by `tile.1`
@@ -147,6 +149,26 @@ fn serves_i8_batched(p: &[u32], max_rows: u32, kg_multiple: u32) -> bool {
 /// The wide tensor-core GEMV: any whole number of scale groups.
 fn serves_i8_gemv_wide(p: &[u32]) -> bool {
     serves_i8_batched(p, backend_api::select::DECODE_REGIME_MAX_ROWS, 8)
+}
+
+/// The weight-streaming candidate serves the batched rows the tensor-core block serves, whole scale groups of K.
+fn serves_i8_stream(p: &[u32]) -> bool {
+    serves_i8_batched(p, backend_api::select::DECODE_REGIME_MAX_ROWS, 8)
+}
+
+/// Blocks of the weight-streaming candidate split over `SPLIT` blocks of a cluster: 64 weight rows a cluster.
+fn i8_stream_blocks<const SPLIT: u32>(p: &[u32], tile: (u32, u32)) -> u32 {
+    p[2].div_ceil(tile.1) * SPLIT
+}
+
+/// Cluster shape and dynamic shared memory of the weight-streaming candidate at a split of `split` blocks.
+const fn i8_stream_launch(split: u32, bn: u32, stages: u32) -> CudaLaunch {
+    CudaLaunch {
+        dynamic_shared_bytes: kernels_cuda::i8_stream_dynamic_shared_bytes(bn, stages),
+        shared_opt_in: true,
+        cluster: if split > 1 { Some([split, 1, 1]) } else { None },
+        ..CudaLaunch::NONE
+    }
 }
 
 /// The tiled tensor-core GEMM at a 16-row tile: `K` a multiple of 64 (two scale groups per staged k-tile).
@@ -595,6 +617,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: qgemv_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     Row {
         slow: "matmul_fp8_gemv#MAXM=2",
@@ -604,6 +627,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: qgemv_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     Row {
         slow: "matmul_fp8_gemv#MAXM=4",
@@ -613,6 +637,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: qgemv_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     Row {
         slow: "matmul_fp8_gemv#MAXM=8",
@@ -622,6 +647,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: qgemv_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     Row {
         slow: "matmul_nvfp4_gemv#MAXM=1",
@@ -631,6 +657,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: qgemv_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     Row {
         slow: "matmul_nvfp4_gemv#MAXM=2",
@@ -640,6 +667,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: qgemv_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     Row {
         slow: "matmul_nvfp4_gemv#MAXM=4",
@@ -649,6 +677,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: qgemv_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     Row {
         slow: "matmul_nvfp4_gemv#MAXM=8",
@@ -658,6 +687,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: qgemv_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     Row {
         slow: "moe_router_topk",
@@ -667,6 +697,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: moe_router_topk_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     Row {
         slow: "moe_nvfp4_grouped",
@@ -676,6 +707,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: moe_nvfp4_grouped_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     Row {
         slow: "moe_nvfp4_gemv_gather",
@@ -685,6 +717,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: moe_nvfp4_gather_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     Row {
         slow: "paged_kv_append_i8_clipped_batched",
@@ -694,6 +727,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: kv_append_i8_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     Row {
         slow: "paged_flash_decode_gqa_hd256#GRP=6#kv=int8",
@@ -703,6 +737,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: flash_decode_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     Row {
         slow: "paged_flash_decode_gqa_hd256#GRP=6",
@@ -712,6 +747,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: flash_decode_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     Row {
         slow: "paged_flash_decode_gqa_hd256#GRP=6#kv=bf16",
@@ -721,6 +757,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: flash_decode_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     Row {
         slow: "paged_flash_decode_gqa_hd256#GRP=6#kv=fp8",
@@ -730,6 +767,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: flash_decode_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     Row {
         slow: "paged_flash_decode_gqa_combine",
@@ -739,6 +777,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: flash_combine_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     // The int8 decode linear is a CANDIDATE SET, not one redirect: every row below that serves a dispatch is a
     // candidate, `crate::native_tune` times them per device and shape class and `serving` takes its choice. The
@@ -753,6 +792,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: gemm_blocks,
         requires_wgsl_upgrade: true,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     Row {
         slow: "matmul_i8_gemv",
@@ -762,6 +802,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: gemm_blocks,
         requires_wgsl_upgrade: true,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     Row {
         slow: "matmul_i8_gemv",
@@ -771,6 +812,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: gemm_blocks,
         requires_wgsl_upgrade: true,
         align_words: 4,
+        launch: CudaLaunch::NONE,
     },
     Row {
         slow: "matmul_i8_gemv",
@@ -780,6 +822,88 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: gemm_blocks,
         requires_wgsl_upgrade: true,
         align_words: 4,
+        launch: CudaLaunch::NONE,
+    },
+    // The weight-streaming candidates (cp.async ring, ldmatrix, K split over a cluster of 1, 2, 4 or 8 blocks).
+    Row {
+        slow: "matmul_i8_gemv",
+        target: Target::Named("matmul_i8_stream_s1"),
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_i8_stream,
+        blocks: i8_stream_blocks::<1>,
+        requires_wgsl_upgrade: true,
+        align_words: 4,
+        launch: i8_stream_launch(1, 64, 5),
+    },
+    Row {
+        slow: "matmul_i8_gemv",
+        target: Target::Named("matmul_i8_stream_s2"),
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_i8_stream,
+        blocks: i8_stream_blocks::<2>,
+        requires_wgsl_upgrade: true,
+        align_words: 4,
+        launch: i8_stream_launch(2, 64, 5),
+    },
+    Row {
+        slow: "matmul_i8_gemv",
+        target: Target::Named("matmul_i8_stream_s4"),
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_i8_stream,
+        blocks: i8_stream_blocks::<4>,
+        requires_wgsl_upgrade: true,
+        align_words: 4,
+        launch: i8_stream_launch(4, 64, 5),
+    },
+    Row {
+        slow: "matmul_i8_gemv",
+        target: Target::Named("matmul_i8_stream_s8"),
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_i8_stream,
+        blocks: i8_stream_blocks::<8>,
+        requires_wgsl_upgrade: true,
+        align_words: 4,
+        launch: i8_stream_launch(8, 64, 5),
+    },
+    Row {
+        slow: "matmul_i8_gemv",
+        target: Target::Named("matmul_i8_stream_w1"),
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_i8_stream,
+        blocks: i8_stream_blocks::<1>,
+        requires_wgsl_upgrade: true,
+        align_words: 4,
+        launch: i8_stream_launch(1, 128, 4),
+    },
+    Row {
+        slow: "matmul_i8_gemv",
+        target: Target::Named("matmul_i8_stream_w2"),
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_i8_stream,
+        blocks: i8_stream_blocks::<2>,
+        requires_wgsl_upgrade: true,
+        align_words: 4,
+        launch: i8_stream_launch(2, 128, 4),
+    },
+    Row {
+        slow: "matmul_i8_gemv",
+        target: Target::Named("matmul_i8_stream_w4"),
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_i8_stream,
+        blocks: i8_stream_blocks::<4>,
+        requires_wgsl_upgrade: true,
+        align_words: 4,
+        launch: i8_stream_launch(4, 128, 4),
+    },
+    Row {
+        slow: "matmul_i8_gemv",
+        target: Target::Named("matmul_i8_stream_w8"),
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_i8_stream,
+        blocks: i8_stream_blocks::<8>,
+        requires_wgsl_upgrade: true,
+        align_words: 4,
+        launch: i8_stream_launch(8, 128, 4),
     },
     // The q4 (W4A8) decode GEMV: the int8 row's structure over 4-bit weights,
     // bit-identical to `matmul_q4_gemv_reg` (`tests/q4_gemv_native.rs`).
@@ -791,6 +915,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: gemm_blocks,
         requires_wgsl_upgrade: true,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     // The affine K-quant (Q4_K / Q5_K) decode GEMVs. They round once per
     // 32-element group where the WGSL tier rounds per quad, so they are held
@@ -807,6 +932,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: gemm_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     Row {
         slow: "matmul_kq_gemv#CODE_BITS=4",
@@ -816,6 +942,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: gemm_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     Row {
         slow: "matmul_kq_gemv#CODE_BITS=8",
@@ -825,6 +952,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: gemm_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     Row {
         slow: "matmul_kq_gemv#CODE_BITS=8",
@@ -834,6 +962,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: gemm_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     // The prefill/DiT GEMM, at every shape the WGSL kernel serves. Its
     // grouped int32 sums are exact and folded in the reference's order with
@@ -847,6 +976,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: gemm_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     // The affine K-quant prefill GEMMs: the int8 GEMM's block over K-quant
     // codes, held to the fp32 summation bound against an f64 oracle rather
@@ -859,6 +989,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: gemm_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     Row {
         slow: "matmul_kq_dyn#CODE_BITS=8",
@@ -868,6 +999,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: gemm_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     // The plain one-thread-per-output fp32 GEMM: what a small output (a ViT tile's 101 rows, a conditioning row)
     // gets from `model::block::pick_gemm`, and ~100x slower than the register-tiled kernel on a CUDA device. The
@@ -881,6 +1013,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: gemm_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     // The register-tiled fp32 GEMM half the workspace dispatches. One fp32
     // accumulator per output, product and sum each rounded, k ascending: the
@@ -893,6 +1026,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: gemm_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     // Its input gradient: `Params { m, k, n, accumulate }`, the output `m x k`.
     Row {
@@ -903,6 +1037,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: dx_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     // The accumulating weight gradient: `Params { m, k, n }`, the output `n x k`.
     Row {
@@ -913,6 +1048,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: dw_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     Row {
         slow: "moe_i8_grouped",
@@ -922,41 +1058,42 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: gemm_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     // The 3x3 / stride-1 / pad-1 forward of a layer at least one 64-channel
     // tile wide, as a direct convolution: the same bits as the implicit GEMM
     // rows below (same reduction order, same fused multiply-adds), which
     // serve every other shape. These come FIRST: `apply` takes the first row
     // of a slot that serves the dispatch.
-    Row { slow: "conv2d", target: Target::Named("conv2d_fwd3x3_f32"), bindings: CONV2D_BINDINGS, serves: serves_conv3x3, blocks: conv3x3_blocks, requires_wgsl_upgrade: false, align_words: 1 },
-    Row { slow: "conv_bias", target: Target::Named("conv2d_bias_fwd3x3_f32"), bindings: CONV_BIAS_BINDINGS, serves: serves_conv3x3, blocks: conv3x3_blocks, requires_wgsl_upgrade: false, align_words: 1 },
-    Row { slow: "conv_bias_reg", target: Target::Named("conv2d_bias_fwd3x3_f32"), bindings: CONV_BIAS_BINDINGS, serves: serves_conv3x3, blocks: conv3x3_blocks, requires_wgsl_upgrade: false, align_words: 1 },
+    Row { slow: "conv2d", target: Target::Named("conv2d_fwd3x3_f32"), bindings: CONV2D_BINDINGS, serves: serves_conv3x3, blocks: conv3x3_blocks, requires_wgsl_upgrade: false, align_words: 1, launch: CudaLaunch::NONE },
+    Row { slow: "conv_bias", target: Target::Named("conv2d_bias_fwd3x3_f32"), bindings: CONV_BIAS_BINDINGS, serves: serves_conv3x3, blocks: conv3x3_blocks, requires_wgsl_upgrade: false, align_words: 1, launch: CudaLaunch::NONE },
+    Row { slow: "conv_bias_reg", target: Target::Named("conv2d_bias_fwd3x3_f32"), bindings: CONV_BIAS_BINDINGS, serves: serves_conv3x3, blocks: conv3x3_blocks, requires_wgsl_upgrade: false, align_words: 1, launch: CudaLaunch::NONE },
     // The dense convolution and its input gradient. Unlike the two rows above
     // these do NOT reproduce the WGSL kernel's bits: they sum the same
     // reduction in the same order with a fused multiply-add, one rounding
     // where the reference has two. Their gate (`tests/conv2d_native.rs`)
     // holds them to the fp32 summation-order bound instead of to raw bits.
-    Row { slow: "conv2d", target: Target::Named("conv2d_fwd_f32"), bindings: CONV2D_BINDINGS, serves: serves_conv, blocks: conv2d_fwd_blocks, requires_wgsl_upgrade: false, align_words: 1 },
-    Row { slow: "conv2d_dx", target: Target::Named("conv2d_dx_f32"), bindings: CONV2D_BINDINGS, serves: serves_conv, blocks: conv2d_dx_blocks, requires_wgsl_upgrade: false, align_words: 1 },
+    Row { slow: "conv2d", target: Target::Named("conv2d_fwd_f32"), bindings: CONV2D_BINDINGS, serves: serves_conv, blocks: conv2d_fwd_blocks, requires_wgsl_upgrade: false, align_words: 1, launch: CudaLaunch::NONE },
+    Row { slow: "conv2d_dx", target: Target::Named("conv2d_dx_f32"), bindings: CONV2D_BINDINGS, serves: serves_conv, blocks: conv2d_dx_blocks, requires_wgsl_upgrade: false, align_words: 1, launch: CudaLaunch::NONE },
     // The biased forward, and its register-tiled WGSL sibling (same uniform,
     // same bindings - only the WGSL dispatch geometry differs, and the native
     // kernel derives its own block count from the uniform).
-    Row { slow: "conv_bias", target: Target::Named("conv2d_bias_fwd_f32"), bindings: CONV_BIAS_BINDINGS, serves: serves_conv, blocks: conv2d_fwd_blocks, requires_wgsl_upgrade: false, align_words: 1 },
-    Row { slow: "conv_bias_reg", target: Target::Named("conv2d_bias_fwd_f32"), bindings: CONV_BIAS_BINDINGS, serves: serves_conv, blocks: conv2d_fwd_blocks, requires_wgsl_upgrade: false, align_words: 1 },
+    Row { slow: "conv_bias", target: Target::Named("conv2d_bias_fwd_f32"), bindings: CONV_BIAS_BINDINGS, serves: serves_conv, blocks: conv2d_fwd_blocks, requires_wgsl_upgrade: false, align_words: 1, launch: CudaLaunch::NONE },
+    Row { slow: "conv_bias_reg", target: Target::Named("conv2d_bias_fwd_f32"), bindings: CONV_BIAS_BINDINGS, serves: serves_conv, blocks: conv2d_fwd_blocks, requires_wgsl_upgrade: false, align_words: 1, launch: CudaLaunch::NONE },
     // BatchNorm's per-channel reductions: one block per channel instead of
     // one thread. Re-associated sums, gated like the conv rows
     // (`tests/bn_native.rs`).
-    Row { slow: "bn_stats", target: Target::Named("bn_stats_f32"), bindings: BN_STATS_BINDINGS, serves: serves_bn, blocks: bn_blocks, requires_wgsl_upgrade: false, align_words: 1 },
-    Row { slow: "bn_dstats", target: Target::Named("bn_dstats_f32"), bindings: BN_FOUR_BINDINGS, serves: serves_bn, blocks: bn_blocks, requires_wgsl_upgrade: false, align_words: 1 },
-    Row { slow: "bn_dgamma", target: Target::Named("bn_dgamma_f32"), bindings: BN_FOUR_BINDINGS, serves: serves_bn, blocks: bn_blocks, requires_wgsl_upgrade: false, align_words: 1 },
-    Row { slow: "bn_dbeta", target: Target::Named("bn_dbeta_f32"), bindings: BN_DBETA_BINDINGS, serves: serves_bn, blocks: bn_blocks, requires_wgsl_upgrade: false, align_words: 1 },
+    Row { slow: "bn_stats", target: Target::Named("bn_stats_f32"), bindings: BN_STATS_BINDINGS, serves: serves_bn, blocks: bn_blocks, requires_wgsl_upgrade: false, align_words: 1, launch: CudaLaunch::NONE },
+    Row { slow: "bn_dstats", target: Target::Named("bn_dstats_f32"), bindings: BN_FOUR_BINDINGS, serves: serves_bn, blocks: bn_blocks, requires_wgsl_upgrade: false, align_words: 1, launch: CudaLaunch::NONE },
+    Row { slow: "bn_dgamma", target: Target::Named("bn_dgamma_f32"), bindings: BN_FOUR_BINDINGS, serves: serves_bn, blocks: bn_blocks, requires_wgsl_upgrade: false, align_words: 1, launch: CudaLaunch::NONE },
+    Row { slow: "bn_dbeta", target: Target::Named("bn_dbeta_f32"), bindings: BN_DBETA_BINDINGS, serves: serves_bn, blocks: bn_blocks, requires_wgsl_upgrade: false, align_words: 1, launch: CudaLaunch::NONE },
     // BatchNorm's elementwise passes: the same arithmetic per element as the
     // WGSL kernels, so these ARE bit-identical, and gated so.
-    Row { slow: "bn_train", target: Target::Named("bn_train_f32"), bindings: BN_FOUR_BINDINGS, serves: serves_bn, blocks: bn_elem_blocks, requires_wgsl_upgrade: false, align_words: 1 },
-    Row { slow: "bn_dx", target: Target::Named("bn_dx_f32"), bindings: BN_FOUR_BINDINGS, serves: serves_bn, blocks: bn_elem_blocks, requires_wgsl_upgrade: false, align_words: 1 },
+    Row { slow: "bn_train", target: Target::Named("bn_train_f32"), bindings: BN_FOUR_BINDINGS, serves: serves_bn, blocks: bn_elem_blocks, requires_wgsl_upgrade: false, align_words: 1, launch: CudaLaunch::NONE },
+    Row { slow: "bn_dx", target: Target::Named("bn_dx_f32"), bindings: BN_FOUR_BINDINGS, serves: serves_bn, blocks: bn_elem_blocks, requires_wgsl_upgrade: false, align_words: 1, launch: CudaLaunch::NONE },
     // GroupNorm's apply pass, plane-blocked like BatchNorm's: the same
     // arithmetic per element, bit-identical (`tests/gn_apply_native.rs`).
-    Row { slow: "gn_apply", target: Target::Named("gn_apply_f32"), bindings: BN_FOUR_BINDINGS, serves: serves_gn, blocks: bn_elem_blocks, requires_wgsl_upgrade: false, align_words: 1 },
+    Row { slow: "gn_apply", target: Target::Named("gn_apply_f32"), bindings: BN_FOUR_BINDINGS, serves: serves_gn, blocks: bn_elem_blocks, requires_wgsl_upgrade: false, align_words: 1, launch: CudaLaunch::NONE },
     // The row softmax with each lane's columns in registers: the WGSL
     // kernel's partition and fold order, bit-identical
     // (`tests/softmax_rows_native.rs`). One row per register bucket, the
@@ -964,24 +1101,24 @@ pub(crate) const ROWS: &[Row] = &[
     // The cross-entropy backward's per-row statistics: a block per row. The sum is
     // reassociated, so it is held to the fp32 summation bound (`tests/ce_stats_native.rs`).
     // Gated DeltaNet's decay-scale gradient: a block per head (`tests/gdn_dscale_native.rs`).
-    Row { slow: "gdn_state_decay_bwd_dscale", target: Target::Named("gdn_state_decay_bwd_dscale_f32"), bindings: DSCALE_BINDINGS, serves: serves_dscale, blocks: dscale_blocks, requires_wgsl_upgrade: false, align_words: 1 },
-    Row { slow: "ce_stats", target: Target::Named("ce_stats_f32"), bindings: CE_STATS_BINDINGS, serves: serves_ce_stats, blocks: ce_stats_blocks, requires_wgsl_upgrade: false, align_words: 1 },
-    Row { slow: "softmax_rows", target: Target::Named("softmax_rows_f32_k8"), bindings: COPY_BINDINGS, serves: serves_softmax_rows_k8, blocks: softmax_rows_blocks, requires_wgsl_upgrade: false, align_words: 1 },
-    Row { slow: "softmax_rows", target: Target::Named("softmax_rows_f32_k16"), bindings: COPY_BINDINGS, serves: serves_softmax_rows_k16, blocks: softmax_rows_blocks, requires_wgsl_upgrade: false, align_words: 1 },
-    Row { slow: "softmax_rows", target: Target::Named("softmax_rows_f32_k32"), bindings: COPY_BINDINGS, serves: serves_softmax_rows_k32, blocks: softmax_rows_blocks, requires_wgsl_upgrade: false, align_words: 1 },
-    Row { slow: "softmax_rows", target: Target::Named("softmax_rows_f32_k64"), bindings: COPY_BINDINGS, serves: serves_softmax_rows_k64, blocks: softmax_rows_blocks, requires_wgsl_upgrade: false, align_words: 1 },
+    Row { slow: "gdn_state_decay_bwd_dscale", target: Target::Named("gdn_state_decay_bwd_dscale_f32"), bindings: DSCALE_BINDINGS, serves: serves_dscale, blocks: dscale_blocks, requires_wgsl_upgrade: false, align_words: 1, launch: CudaLaunch::NONE },
+    Row { slow: "ce_stats", target: Target::Named("ce_stats_f32"), bindings: CE_STATS_BINDINGS, serves: serves_ce_stats, blocks: ce_stats_blocks, requires_wgsl_upgrade: false, align_words: 1, launch: CudaLaunch::NONE },
+    Row { slow: "softmax_rows", target: Target::Named("softmax_rows_f32_k8"), bindings: COPY_BINDINGS, serves: serves_softmax_rows_k8, blocks: softmax_rows_blocks, requires_wgsl_upgrade: false, align_words: 1, launch: CudaLaunch::NONE },
+    Row { slow: "softmax_rows", target: Target::Named("softmax_rows_f32_k16"), bindings: COPY_BINDINGS, serves: serves_softmax_rows_k16, blocks: softmax_rows_blocks, requires_wgsl_upgrade: false, align_words: 1, launch: CudaLaunch::NONE },
+    Row { slow: "softmax_rows", target: Target::Named("softmax_rows_f32_k32"), bindings: COPY_BINDINGS, serves: serves_softmax_rows_k32, blocks: softmax_rows_blocks, requires_wgsl_upgrade: false, align_words: 1, launch: CudaLaunch::NONE },
+    Row { slow: "softmax_rows", target: Target::Named("softmax_rows_f32_k64"), bindings: COPY_BINDINGS, serves: serves_softmax_rows_k64, blocks: softmax_rows_blocks, requires_wgsl_upgrade: false, align_words: 1, launch: CudaLaunch::NONE },
     // The CSP plumbing and the SiLU pair: copies and elementwise expressions,
     // bit-identical, gated so (`tests/plumb_native.rs`).
-    Row { slow: "concat_split", target: Target::Named("concat_split_f32"), bindings: COPY_BINDINGS, serves: serves_chan_window, blocks: chan_window_blocks, requires_wgsl_upgrade: false, align_words: 1 },
-    Row { slow: "chan_place", target: Target::Named("chan_place_f32"), bindings: COPY_BINDINGS, serves: serves_chan_window, blocks: chan_window_blocks, requires_wgsl_upgrade: false, align_words: 1 },
-    Row { slow: "concat2", target: Target::Named("concat2_f32"), bindings: CONCAT2_BINDINGS, serves: serves_concat2, blocks: concat2_blocks, requires_wgsl_upgrade: false, align_words: 1 },
+    Row { slow: "concat_split", target: Target::Named("concat_split_f32"), bindings: COPY_BINDINGS, serves: serves_chan_window, blocks: chan_window_blocks, requires_wgsl_upgrade: false, align_words: 1, launch: CudaLaunch::NONE },
+    Row { slow: "chan_place", target: Target::Named("chan_place_f32"), bindings: COPY_BINDINGS, serves: serves_chan_window, blocks: chan_window_blocks, requires_wgsl_upgrade: false, align_words: 1, launch: CudaLaunch::NONE },
+    Row { slow: "concat2", target: Target::Named("concat2_f32"), bindings: CONCAT2_BINDINGS, serves: serves_concat2, blocks: concat2_blocks, requires_wgsl_upgrade: false, align_words: 1, launch: CudaLaunch::NONE },
     // The transformer glue: bias add, residual add and the erf GELU, four elements a thread, bit-identical
     // (`tests/elementwise_native.rs`).
-    Row { slow: "bias_add", target: Target::Named("bias_add_f32"), bindings: BIAS_ADD_BINDINGS, serves: serves_bias_add, blocks: bias_add_blocks, requires_wgsl_upgrade: false, align_words: 1 },
-    Row { slow: "add2", target: Target::Named("add2_f32"), bindings: CONCAT2_BINDINGS, serves: serves_flat, blocks: flat_blocks, requires_wgsl_upgrade: false, align_words: 1 },
-    Row { slow: "gelu_erf", target: Target::Named("gelu_erf_f32"), bindings: COPY_BINDINGS, serves: serves_flat, blocks: flat_blocks, requires_wgsl_upgrade: false, align_words: 1 },
-    Row { slow: "silu", target: Target::Named("silu_f32"), bindings: COPY_BINDINGS, serves: serves_flat, blocks: flat_blocks, requires_wgsl_upgrade: false, align_words: 1 },
-    Row { slow: "silu_bwd", target: Target::Named("silu_bwd_f32"), bindings: CONCAT2_BINDINGS, serves: serves_flat, blocks: flat_blocks, requires_wgsl_upgrade: false, align_words: 1 },
+    Row { slow: "bias_add", target: Target::Named("bias_add_f32"), bindings: BIAS_ADD_BINDINGS, serves: serves_bias_add, blocks: bias_add_blocks, requires_wgsl_upgrade: false, align_words: 1, launch: CudaLaunch::NONE },
+    Row { slow: "add2", target: Target::Named("add2_f32"), bindings: CONCAT2_BINDINGS, serves: serves_flat, blocks: flat_blocks, requires_wgsl_upgrade: false, align_words: 1, launch: CudaLaunch::NONE },
+    Row { slow: "gelu_erf", target: Target::Named("gelu_erf_f32"), bindings: COPY_BINDINGS, serves: serves_flat, blocks: flat_blocks, requires_wgsl_upgrade: false, align_words: 1, launch: CudaLaunch::NONE },
+    Row { slow: "silu", target: Target::Named("silu_f32"), bindings: COPY_BINDINGS, serves: serves_flat, blocks: flat_blocks, requires_wgsl_upgrade: false, align_words: 1, launch: CudaLaunch::NONE },
+    Row { slow: "silu_bwd", target: Target::Named("silu_bwd_f32"), bindings: CONCAT2_BINDINGS, serves: serves_flat, blocks: flat_blocks, requires_wgsl_upgrade: false, align_words: 1, launch: CudaLaunch::NONE },
     // Bidirectional flash attention at head_dim 128. A reordered sum, so not
     // bit-identical: the gate holds both tiers to one stated tolerance
     // against an f64 oracle (`tests/flash_bidir_native.rs`).
@@ -993,6 +1130,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: flash_bidir_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     // The same at head_dim 64 (CLIP) on fp16 tensor cores: fp16 operands, fp32 accumulation, held to its own stated
     // tolerance (`tests/flash_attn_f16_native.rs`).
@@ -1004,6 +1142,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: flash_bidir_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
     // SAM's relative-position-bias attention (windowed and global spans) at head_dim 64 on fp16 tensor cores.
     Row {
@@ -1014,6 +1153,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: flash_cross_relpos_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        launch: CudaLaunch::NONE,
     },
 ];
 
@@ -1847,7 +1987,7 @@ pub(crate) fn resolve(
                 block_dim: k.block_dim,
                 bindings: row.bindings,
                 shared_bytes: k.shared_bytes,
-                launch: CudaLaunch { programmatic: k.programmatic, ..CudaLaunch::NONE },
+                launch: CudaLaunch { programmatic: k.programmatic, ..row.launch },
             })?;
             Some(Active { slow, slot: row.slow, id, kernel: k.name, reported: k.reported, tile: k.tile, serves: row.serves, blocks: row.blocks, align_words: row.align_words })
         })
@@ -1905,10 +2045,15 @@ mod tests {
                 Target::Operator { .. } => panic!("the int8 slot's candidates are named"),
             })
             .collect();
-        assert_eq!(names, ["matmul_i8_gemv", "matmul_i8_gemv_wide", "matmul_i8_mma_m16", "matmul_i8_mma_m32"], "first is the untuned default");
+        assert_eq!(names, ["matmul_i8_gemv", "matmul_i8_gemv_wide", "matmul_i8_mma_m16", "matmul_i8_mma_m32", "matmul_i8_stream_s1", "matmul_i8_stream_s2", "matmul_i8_stream_s4", "matmul_i8_stream_s8", "matmul_i8_stream_w1", "matmul_i8_stream_w2", "matmul_i8_stream_w4", "matmul_i8_stream_w8"], "first is the untuned default");
         for r in &rows {
-            let k = r.target.resolve(kernels_cuda::MMA_S8_MIN_CC).expect("every candidate exists at the tensor-core floor");
-            assert!(k.min_cc <= kernels_cuda::MMA_S8_MIN_CC);
+            // The cluster-split streaming candidates need Hopper; every other candidate runs at the tensor-core floor.
+            let at = if r.launch.cluster.is_some() { kernels_cuda::CLUSTER_MIN_CC } else { kernels_cuda::MMA_S8_MIN_CC };
+            let k = r.target.resolve(at).expect("every candidate exists at its declared floor");
+            assert!(k.min_cc <= at);
+            if r.launch.cluster.is_none() {
+                assert!(r.target.resolve(kernels_cuda::MMA_S8_MIN_CC).is_some());
+            }
         }
         // A device below the tensor-core floor is offered the dp4a GEMV alone.
         let offered = rows.iter().filter(|r| r.target.resolve(kernels_cuda::DP4A_MIN_CC).is_some()).count();

@@ -69,6 +69,17 @@ pub const FP8_CVT_MIN_CC: Cc = (8, 9);
 /// The compute capability that introduced thread-block clusters and their distributed shared memory: Hopper.
 pub const CLUSTER_MIN_CC: Cc = (9, 0);
 
+/// Dynamic shared memory per block of `matmul_i8_stream_*` with `bn` weight rows a block and `stages` stages (the
+/// source's `BRAIN_I8S_STAGE_BYTES` x `BRAIN_I8S_STAGES`): per stage `bn` rows x 128 bytes of weights, 32 rows of x x
+/// 128 bytes and their four scale groups each. A test holds it to the source.
+pub const fn i8_stream_dynamic_shared_bytes(bn: u32, stages: u32) -> u32 {
+    stages * (bn * 128 + 32 * 128 + bn * 16 + 32 * 16)
+}
+/// Weight rows a block of the narrow and the wide streaming candidates covers.
+pub const I8_STREAM_BN: [u32; 2] = [64, 128];
+/// The splits of K over a cluster the streaming candidate is registered at.
+pub const I8_STREAM_SPLITS: [u32; 4] = [1, 2, 4, 8];
+
 /// Rows of x from which `matmul_i8_gemv` runs its int8 tensor-core block (see
 /// [`backend_api::select::I8_GEMV_MMA_MIN_ROWS`]); the source's `BRAIN_I8G_MMA_MIN_ROWS` is the
 /// same number and a test holds the two together.
@@ -880,6 +891,182 @@ pub const ALL: &[CudaKernel] = &[
             "#define BRAIN_I8G_WIDE_TILE 1\n#define brain_matmul_i8_gemv brain_matmul_i8_gemv_wide\n",
             include_str!("../cu/matmul_i8_gemv.cu")
         ),
+    },
+    CudaKernel {
+        name: "matmul_i8_stream_s1",
+        // Weight-streaming candidate of the int8 decode linear: cp.async ring through shared memory, ldmatrix and
+        // int8 MMAs, 64 weight rows a block and K split over a cluster of 1 block(s) (the cluster size is the
+        // launch's, see `gpu_core::native_upgrade`). One source, one entry per shape so the autotuner can choose it
+        // per shape class.
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // `cp.async` and the int8 MMA from 8.0; the cluster and its distributed shared memory from 9.0.
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_matmul_i8_stream_s1",
+        what: "packed-int8 skinny-M matmul for 5 to 32 rows of x that streams weights through a cp.async ring into shared memory (64 weight rows a block, ldmatrix, mma.sync m16n8k32), K split over 1 block(s) of a cluster; agrees with matmul_i8_gemv_reg to f32 rounding",
+        reported: "native:matmul_i8_stream_s1",
+        block_dim: 128,
+        tile: (32, 64),
+        // The stage ring is dynamic shared memory (`i8_stream_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define brain_matmul_i8_stream brain_matmul_i8_stream_s1\n", include_str!("../cu/matmul_i8_stream.cu")),
+    },
+    CudaKernel {
+        name: "matmul_i8_stream_s2",
+        // Weight-streaming candidate of the int8 decode linear: cp.async ring through shared memory, ldmatrix and
+        // int8 MMAs, 64 weight rows a block and K split over a cluster of 2 block(s) (the cluster size is the
+        // launch's, see `gpu_core::native_upgrade`). One source, one entry per shape so the autotuner can choose it
+        // per shape class.
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // `cp.async` and the int8 MMA from 8.0; the cluster and its distributed shared memory from 9.0.
+        min_cc: CLUSTER_MIN_CC,
+        entry: "brain_matmul_i8_stream_s2",
+        what: "packed-int8 skinny-M matmul for 5 to 32 rows of x that streams weights through a cp.async ring into shared memory (64 weight rows a block, ldmatrix, mma.sync m16n8k32), K split over 2 block(s) of a cluster; agrees with matmul_i8_gemv_reg to f32 rounding",
+        reported: "native:matmul_i8_stream_s2",
+        block_dim: 128,
+        tile: (32, 64),
+        // The stage ring is dynamic shared memory (`i8_stream_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define brain_matmul_i8_stream brain_matmul_i8_stream_s2\n", include_str!("../cu/matmul_i8_stream.cu")),
+    },
+    CudaKernel {
+        name: "matmul_i8_stream_s4",
+        // Weight-streaming candidate of the int8 decode linear: cp.async ring through shared memory, ldmatrix and
+        // int8 MMAs, 64 weight rows a block and K split over a cluster of 4 block(s) (the cluster size is the
+        // launch's, see `gpu_core::native_upgrade`). One source, one entry per shape so the autotuner can choose it
+        // per shape class.
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // `cp.async` and the int8 MMA from 8.0; the cluster and its distributed shared memory from 9.0.
+        min_cc: CLUSTER_MIN_CC,
+        entry: "brain_matmul_i8_stream_s4",
+        what: "packed-int8 skinny-M matmul for 5 to 32 rows of x that streams weights through a cp.async ring into shared memory (64 weight rows a block, ldmatrix, mma.sync m16n8k32), K split over 4 block(s) of a cluster; agrees with matmul_i8_gemv_reg to f32 rounding",
+        reported: "native:matmul_i8_stream_s4",
+        block_dim: 128,
+        tile: (32, 64),
+        // The stage ring is dynamic shared memory (`i8_stream_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define brain_matmul_i8_stream brain_matmul_i8_stream_s4\n", include_str!("../cu/matmul_i8_stream.cu")),
+    },
+    CudaKernel {
+        name: "matmul_i8_stream_s8",
+        // Weight-streaming candidate of the int8 decode linear: cp.async ring through shared memory, ldmatrix and
+        // int8 MMAs, 64 weight rows a block and K split over a cluster of 8 block(s) (the cluster size is the
+        // launch's, see `gpu_core::native_upgrade`). One source, one entry per shape so the autotuner can choose it
+        // per shape class.
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // `cp.async` and the int8 MMA from 8.0; the cluster and its distributed shared memory from 9.0.
+        min_cc: CLUSTER_MIN_CC,
+        entry: "brain_matmul_i8_stream_s8",
+        what: "packed-int8 skinny-M matmul for 5 to 32 rows of x that streams weights through a cp.async ring into shared memory (64 weight rows a block, ldmatrix, mma.sync m16n8k32), K split over 8 block(s) of a cluster; agrees with matmul_i8_gemv_reg to f32 rounding",
+        reported: "native:matmul_i8_stream_s8",
+        block_dim: 128,
+        tile: (32, 64),
+        // The stage ring is dynamic shared memory (`i8_stream_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define brain_matmul_i8_stream brain_matmul_i8_stream_s8\n", include_str!("../cu/matmul_i8_stream.cu")),
+    },
+    CudaKernel {
+        name: "matmul_i8_stream_w1",
+        // Weight-streaming candidate of the int8 decode linear: cp.async ring through shared memory, ldmatrix and
+        // int8 MMAs, 128 weight rows a block and K split over a cluster of 1 block(s) (the cluster size is the
+        // launch's, see `gpu_core::native_upgrade`). One source, one entry per shape so the autotuner can choose it
+        // per shape class.
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // `cp.async` and the int8 MMA from 8.0; the cluster and its distributed shared memory from 9.0.
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_matmul_i8_stream_w1",
+        what: "packed-int8 skinny-M matmul for 5 to 32 rows of x that streams weights through a cp.async ring into shared memory (128 weight rows a block, ldmatrix, mma.sync m16n8k32), K split over 1 block(s) of a cluster; agrees with matmul_i8_gemv_reg to f32 rounding",
+        reported: "native:matmul_i8_stream_w1",
+        block_dim: 128,
+        tile: (32, 128),
+        // The stage ring is dynamic shared memory (`i8_stream_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_I8S_ATILES 2\n#define BRAIN_I8S_STAGES 4\n#define brain_matmul_i8_stream brain_matmul_i8_stream_w1\n", include_str!("../cu/matmul_i8_stream.cu")),
+    },
+    CudaKernel {
+        name: "matmul_i8_stream_w2",
+        // Weight-streaming candidate of the int8 decode linear: cp.async ring through shared memory, ldmatrix and
+        // int8 MMAs, 128 weight rows a block and K split over a cluster of 2 block(s) (the cluster size is the
+        // launch's, see `gpu_core::native_upgrade`). One source, one entry per shape so the autotuner can choose it
+        // per shape class.
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // `cp.async` and the int8 MMA from 8.0; the cluster and its distributed shared memory from 9.0.
+        min_cc: CLUSTER_MIN_CC,
+        entry: "brain_matmul_i8_stream_w2",
+        what: "packed-int8 skinny-M matmul for 5 to 32 rows of x that streams weights through a cp.async ring into shared memory (128 weight rows a block, ldmatrix, mma.sync m16n8k32), K split over 2 block(s) of a cluster; agrees with matmul_i8_gemv_reg to f32 rounding",
+        reported: "native:matmul_i8_stream_w2",
+        block_dim: 128,
+        tile: (32, 128),
+        // The stage ring is dynamic shared memory (`i8_stream_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_I8S_ATILES 2\n#define BRAIN_I8S_STAGES 4\n#define brain_matmul_i8_stream brain_matmul_i8_stream_w2\n", include_str!("../cu/matmul_i8_stream.cu")),
+    },
+    CudaKernel {
+        name: "matmul_i8_stream_w4",
+        // Weight-streaming candidate of the int8 decode linear: cp.async ring through shared memory, ldmatrix and
+        // int8 MMAs, 128 weight rows a block and K split over a cluster of 4 block(s) (the cluster size is the
+        // launch's, see `gpu_core::native_upgrade`). One source, one entry per shape so the autotuner can choose it
+        // per shape class.
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // `cp.async` and the int8 MMA from 8.0; the cluster and its distributed shared memory from 9.0.
+        min_cc: CLUSTER_MIN_CC,
+        entry: "brain_matmul_i8_stream_w4",
+        what: "packed-int8 skinny-M matmul for 5 to 32 rows of x that streams weights through a cp.async ring into shared memory (128 weight rows a block, ldmatrix, mma.sync m16n8k32), K split over 4 block(s) of a cluster; agrees with matmul_i8_gemv_reg to f32 rounding",
+        reported: "native:matmul_i8_stream_w4",
+        block_dim: 128,
+        tile: (32, 128),
+        // The stage ring is dynamic shared memory (`i8_stream_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_I8S_ATILES 2\n#define BRAIN_I8S_STAGES 4\n#define brain_matmul_i8_stream brain_matmul_i8_stream_w4\n", include_str!("../cu/matmul_i8_stream.cu")),
+    },
+    CudaKernel {
+        name: "matmul_i8_stream_w8",
+        // Weight-streaming candidate of the int8 decode linear: cp.async ring through shared memory, ldmatrix and
+        // int8 MMAs, 128 weight rows a block and K split over a cluster of 8 block(s) (the cluster size is the
+        // launch's, see `gpu_core::native_upgrade`). One source, one entry per shape so the autotuner can choose it
+        // per shape class.
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // `cp.async` and the int8 MMA from 8.0; the cluster and its distributed shared memory from 9.0.
+        min_cc: CLUSTER_MIN_CC,
+        entry: "brain_matmul_i8_stream_w8",
+        what: "packed-int8 skinny-M matmul for 5 to 32 rows of x that streams weights through a cp.async ring into shared memory (128 weight rows a block, ldmatrix, mma.sync m16n8k32), K split over 8 block(s) of a cluster; agrees with matmul_i8_gemv_reg to f32 rounding",
+        reported: "native:matmul_i8_stream_w8",
+        block_dim: 128,
+        tile: (32, 128),
+        // The stage ring is dynamic shared memory (`i8_stream_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_I8S_ATILES 2\n#define BRAIN_I8S_STAGES 4\n#define brain_matmul_i8_stream brain_matmul_i8_stream_w8\n", include_str!("../cu/matmul_i8_stream.cu")),
     },
     CudaKernel {
         name: "matmul_i8_gemv_multi",

@@ -469,9 +469,12 @@ fn every_candidate_of_the_slot_agrees_with_the_wgsl_reference() {
         brain_testutil::skip_unavailable("native int8 GEMV needs a CUDA device");
         return;
     }
-    let candidates = ["matmul_i8_gemv", "matmul_i8_gemv_wide", "matmul_i8_mma_m16", "matmul_i8_mma_m32"];
+    let cc = gpu.caps().arch.compute_capability.unwrap_or((0, 0));
+    let mut candidates: Vec<String> = ["matmul_i8_gemv", "matmul_i8_gemv_wide", "matmul_i8_mma_m16", "matmul_i8_mma_m32"].map(String::from).to_vec();
+    // The weight-streaming candidates: a split of K over a cluster needs Hopper, the unsplit one needs cp.async.
+    candidates.extend(kernels_cuda::I8_STREAM_SPLITS.iter().flat_map(|s| ["s", "w"].map(|w| format!("matmul_i8_stream_{w}{s}"))).filter(|n| kernels_cuda::get(n).is_some_and(|k| k.min_cc <= cc)));
     let mut served = std::collections::BTreeSet::new();
-    for forced in candidates {
+    for forced in &candidates {
         gpu_core::force_candidate("matmul_i8_gemv", forced);
         for (kg, n) in [(16u32, 17u32), (72, 9), (328, 33), (1280, 64)] {
             for m in (1..=NATIVE_ROWS).step_by(3).chain([NATIVE_ROWS]) {
@@ -486,7 +489,7 @@ fn every_candidate_of_the_slot_agrees_with_the_wgsl_reference() {
         }
     }
     gpu_core::clear_forced_candidates();
-    for c in candidates {
-        assert!(served.contains(c), "{c} was never the kernel that served a dispatch: {served:?}");
+    for c in &candidates {
+        assert!(served.contains(c.as_str()), "{c} was never the kernel that served a dispatch: {served:?}");
     }
 }
