@@ -274,6 +274,12 @@ impl TalkerTrainer {
         stats
     }
 
+    /// The update's backward always rebuilds each layer from its input boundary: recomputing is accepted as what
+    /// it already does, keeping every layer and a narrow saved format are refused by name.
+    pub fn set_saved_policy(&self, policy: model::saved::SavedPolicy) -> Result<(), String> {
+        model::saved::recompute_only("qwen3tts talker", policy)
+    }
+
     /// The most rows one example can have.
     #[must_use]
     pub fn block(&self) -> usize {

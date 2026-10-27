@@ -192,6 +192,11 @@ impl TalkerModel {
     pub fn backward(&self) {
         self.inner.backward();
     }
+    /// The decoder's backward always rebuilds each layer from its input boundary: recomputing is accepted as what
+    /// it already does, keeping every layer and a narrow saved format are refused by name.
+    pub fn set_saved_policy(&self, policy: model::saved::SavedPolicy) -> Result<(), String> {
+        model::saved::recompute_only("qwen3tts talker", policy)
+    }
     pub fn zero_grads(&self) {
         self.inner.zero_grads();
     }
