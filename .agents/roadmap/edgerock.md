@@ -230,6 +230,27 @@ reference exactly in both variants on both backends; flipping the tie rule in
   with 13 host writes, built from fresh plan buffers each step), the tensor-core windowed prefill kernel, the
   weight-tier serve option, the generic tier gaps, the longctx perf target. Ceiling now: per-slot state is 162.5 MiB
   and every attention/recurrence kernel runs at about 1 TB/s, so b256 decode is about 70 ms per step.
+- [x] M6d (partial): protocol support and the honest ladder. `ignore_eos` is parsed in the shared API sampling layer
+  (OpenAI and Anthropic), declared on the generate action of the scheduled text models and honoured by the
+  scheduler front end (the end-of-sequence ids are not stop ids for that request). A decode step that runs the card
+  out of memory now refuses the sequences it carried with `RejectReason::DeviceOutOfMemory` and returns their blocks,
+  as the prefill phase already did (`serve_device_oom` has both). Through the API with a distinct prompt per request
+  (request index prefixed to the 4131-token prompt, so the prefix cache cannot answer it), max_tokens 2048 with
+  ignore_eos, `--max-batch 320`, one GH200:
+  <!-- perf-number: measured with tps.py on the GH200, 2026-10-27; reproduce with that client -->
+  | concurrency | end-to-end aggregate tok/s | per-stream decode tok/s | mean TTFT |
+  |---|---|---|---|
+  | 1 | 113 | 122 | 1.3 s |
+  | 8 | 509 | 78 | 5.1 s |
+  | 32 | 832 | 35 | 14 s |
+  | 64 | 697 | 18 | 53 s |
+  | 128 | 536 | 7.8 | 154 s |
+  The ladder is bound by serving-time prefill, not decode: eight 4K prompts take 10 s to read in (about 3.3k tok/s
+  alone, less when interleaved with decode and with many queued), and every decode step is slowed by the prefill
+  slices interleaved with it. The 256 and 512 rungs were not run. Not done from the M6d scope: the decode tape
+  (b1 stays at 7.4 ms, 493 submits and 863 dispatches per step), bf16 bank and recurrent state, and the conversion
+  of the M6a-c kernels into roofline-selected candidates (they are still wired by device capability checks in
+  `anchor_memory.rs`, `gqa_mixer.rs` and the qwen35 model, the pattern the new rule forbids).
 - [x] M5 (forward part): the released weights against the independent reference
   forward (`tools/goldens/edgerock_dump_real_reference.py`, fp32 CPU torch, a
   1400-token prompt that slides the window and commits five blocks, then asks about
