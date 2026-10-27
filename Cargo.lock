@@ -6226,6 +6226,7 @@ name = "sample-npu-rockchip"
 version = "3.0.0"
 dependencies = [
  "brain",
+ "libc",
 ]
 
 [[package]]

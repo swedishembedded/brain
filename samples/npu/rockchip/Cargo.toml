@@ -9,6 +9,8 @@ publish = false
 [dependencies]
 # The only brain dependency: the SDK facade, naming the one surface it uses.
 brain = { workspace = true, features = ["vision"] }
+# Signals, clock_gettime and poll for the camera/RTSP pipeline.
+libc = { workspace = true }
 
 [package.metadata.brain]
 # `make check/samples` fails if the real `cargo tree` closure exceeds this.
