@@ -302,9 +302,11 @@ pub fn gemv_kernel_name(base: &str, rows: u32) -> String {
     variant_name(base, &[("MAXM", cap)])
 }
 
-/// Every row-capacity variant of the two stored-format GEMV kernels.
+/// Every row-capacity variant of the bf16 and the two stored-format GEMV kernels.
 pub fn gemv_variants() -> Vec<Variant> {
     let mut out = Vec::new();
+    // The dense bf16 GEMV serves the single decode token only; the library's tensor-core product serves more rows.
+    out.push(interned("matmul_bf16_gemv", crate::MATMUL_BF16_GEMV, &[("MAXM", 1)]).expect("the GEMV kernels declare MAXM"));
     for (base, src) in [("matmul_fp8_gemv", crate::MATMUL_FP8_GEMV), ("matmul_nvfp4_gemv", crate::MATMUL_NVFP4_GEMV)] {
         for cap in GEMV_ROW_CAPACITIES {
             out.push(interned(base, src, &[("MAXM", cap)]).expect("the GEMV kernels declare MAXM"));

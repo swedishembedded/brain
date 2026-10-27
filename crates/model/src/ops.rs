@@ -490,7 +490,7 @@ pub fn frozen_base_kernels() -> &'static [(&'static str, &'static str)] {
             ("gradnorm_part_bf16", kernels::GRADNORM_PART_BF16),
         ];
         list.extend(kernels::template::weight_decode_variants());
-        // The decode-regime GEMVs of the stored FP8 / NVFP4 tiers (`Ops::small_m_gemv`); optional: a list without them
+        // The decode-regime GEMVs of the dense bf16 and the stored FP8 / NVFP4 tiers (`Ops::small_m_gemv`, `Ops::dense_small_m_gemv`); optional: a list without them
         // keeps the tile decode.
         list.extend(kernels::template::gemv_variants());
         list
@@ -1735,7 +1735,7 @@ impl Ops {
         let (n, k) = (w.n(), w.k());
         assert_eq!(act.k, k, "Ops::matmul: activation width {} does not match weight K {k}", act.k);
         let m = act.m;
-        if self.library_forward(s, w, (0, n), act, y, yoff) {
+        if self.dense_small_m_gemv(s, w, (0, n), act, y, yoff) || self.library_forward(s, w, (0, n), act, y, yoff) {
             return;
         }
         let shape = OpShape { m, n, k, dtype: w.dtype() };
@@ -2441,7 +2441,7 @@ impl Ops {
             }
             return self.forward_tiled(s, w, rows, act, y, yoff);
         }
-        if self.library_forward(s, w, rows, act, y, yoff) {
+        if self.dense_small_m_gemv(s, w, rows, act, y, yoff) || self.library_forward(s, w, rows, act, y, yoff) {
             return;
         }
         let tiled = self.tiled_gemm(m, count);

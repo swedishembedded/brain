@@ -145,6 +145,9 @@ pub const GEMV_MAX_ROWS: u32 = 8;
 /// tensor-core product reads the weight once for all of the rows. A recording that holds no library product has no such
 /// tile product, so there the GEMVs serve up to [`GEMV_MAX_ROWS`].
 const LIBRARY_GEMV_MAX_ROWS: u32 = 2;
+/// Activation rows up to which a dense bf16 weight is read by its own GEMV instead of the library's tensor-core product: the
+/// single decode token. The multi-row build is not yet competitive (measured at eight rows: the library is three times faster).
+const DENSE_GEMV_MAX_ROWS: u32 = 1;
 /// Workgroups the GEMV grid aims at (about four per multiprocessor of a large GPU) and the most 4-row rounds one
 /// workgroup walks.
 const GEMV_TARGET_WORKGROUPS: u32 = 528;
@@ -184,6 +187,26 @@ impl Ops {
             }
             _ => false,
         }
+    }
+
+    /// The decode-regime product of a dense bf16 weight against `act`'s few rows by the kernel that reads the weight
+    /// once and the f32 activations as they are: no activation cast launch, and a grid that fills the device at one
+    /// row where the library's tensor-core product leaves the bandwidth idle. `false` when the weight, the row count or
+    /// the registered kernels do not allow it; the caller then takes the library or the tiled kernels.
+    pub(super) fn dense_small_m_gemv(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), act: &Act, y: &DeviceBuffer, yoff: u64) -> bool {
+        let (first, count) = rows;
+        let (m, k) = (act.m, w.k());
+        let Weight::BF16 { w: wb, .. } = w else { return false };
+        if m == 0 || m > DENSE_GEMV_MAX_ROWS || !k.is_multiple_of(8) || !self.gpu.caps().workgroup_reductions {
+            return false;
+        }
+        let Some(idx) = self.gpu.kernel_index(&kernels::template::gemv_kernel_name("matmul_bf16_gemv", m)) else { return false };
+        // One round per workgroup: a thread's loads are all the memory parallelism the kernel has, so the grid is as wide
+        // as the weight is tall (the stored-format kernels amortise a decode table over rounds; this one has none).
+        let grid = gpu_core::Dispatch::Workgroups(count.div_ceil(4));
+        let params = [m, k, count, first, act.xr0, 1, 0, 0];
+        s.push(self.gpu.dispatch_sliced(idx, &[&act.x, wb, y], &[WHOLE, WHOLE, (yoff, m as u64 * count as u64)], &params, grid));
+        true
     }
 
     /// Bytes of decoded f32 scratch a quantized product may use per tile (see the module doc).

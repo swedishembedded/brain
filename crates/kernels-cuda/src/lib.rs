@@ -1422,6 +1422,24 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/moe_i8_grouped_mma.cu"),
     },
     CudaKernel {
+        name: "matmul_bf16_gemv_m1",
+        // The native twin of `matmul_bf16_gemv.wgsl` at one activation row, redirected to by name by
+        // `gpu_core::native_upgrade`: the decode token's product of a dense bf16 weight.
+        op: Op::MatMul,
+        weight: Dtype::BF16,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_matmul_bf16_gemv_m1",
+        what: "float-read GEMV of a dense bf16 weight against one f32 activation row: 16-byte streaming weight loads, a warp per row with eight in flight per lane, bf16 widened by a shift or a mask, fused multiply-adds, warp-shuffle row sum; f32 rounding of the running sum against the WGSL tier",
+        reported: "native:matmul_bf16_gemv_m1",
+        block_dim: 256,
+        tile: (1, 8),
+        shared_bytes: 0,
+        programmatic: false,
+        src: include_str!("../cu/bf16_gemv.cu"),
+    },
+    CudaKernel {
         name: "matmul_fp8_gemv",
         // The native twin of `matmul_fp8_gemv.wgsl` (every row-capacity variant), redirected to by name by
         // `gpu_core::native_upgrade`: the decode-regime product of a stored FP8 weight.

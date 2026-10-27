@@ -490,6 +490,11 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (m, k, count) = (p(0)?, p(1)?, p(2)?);
             f(2 * m * k * count, count * k + 4 * (m * k + m * count))
         }
+        // The dense bf16 GEMV: two bytes per weight.
+        "matmul_bf16_gemv" => {
+            let (m, k, count) = (p(0)?, p(1)?, p(2)?);
+            f(2 * m * k * count, 2 * count * k + 4 * (m * k + m * count))
+        }
         "matmul_nvfp4_gemv" => {
             let (m, k, count) = (p(0)?, p(1)?, p(2)?);
             f(2 * m * k * count, count * k / 2 + count * k / 16 + 4 * (m * k + m * count))

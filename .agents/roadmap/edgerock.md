@@ -289,7 +289,19 @@ reference exactly in both variants on both backends; flipping the tie rule in
   the card so wall times are not comparable): 1.37 ms -> 0.31 ms (split 0.23, merge 0.08, event stamps included). Still
   about 26 us per split call against ~3 us of bank bytes: the phases inside a workgroup are serial.
   Parity: `model/tests/anchor_memory` (new `the_pooled_read_matches_the_definition_across_split_widths` against a host
-  evaluation, caps 5 to 1024), `edgerock_decode`, `edgerock_serve`, `edgerock_golden_parity`.
+  evaluation, caps 5 to 1024), `edgerock_decode`, `edgerock_serve`, `edgerock_golden_parity`. The pooled read no longer
+  allocates the `logits`/`probs` scratch it does not use.
+  (2) Dense bf16 decode GEMV (`matmul_bf16_gemv`: WGSL reference + native `cu/bf16_gemv.cu`, a warp per weight row, ten
+  16-byte streaming loads in flight per lane, f32 activations read as they are). `Ops::dense_small_m_gemv` takes the single
+  decode token of a `Weight::BF16` before the library product, which removes the 184 `cast_f32_bf16` launches (the library
+  casts the activation to bf16 first) and the 304 library calls: dispatches per step 859 -> 675. Gate
+  `gpu-core/tests/bf16_gemv_native.rs` (native and WGSL against an f64 oracle at ragged shapes, native selected). Cold-weight
+  device time per call (same file, `--ignored`): [9216,2560] 17.6 us = 2.7 TB/s, [8192,2560] 15.8 us, [2560,9216] 17.4 us,
+  [2560,4096] 10.8 us (1.9 TB/s), [4096,2560] 10.3 us, LM head [248320,2560] 335 us = 3.8 TB/s; the library product measured
+  21 us on the first. Graph-profiled device time of the layers at b1: 8.63 -> 7.49 ms (event stamps included, minimum over
+  replays). Eight rows: the same kernel is three times slower than the library's tensor-core product (13.8 vs 4.6 ms per step),
+  so it serves one row only (`DENSE_GEMV_MAX_ROWS`); b8 is unchanged. Small projections sit at a 6.5 us latency floor
+  (the 32-row in_proj_a/b, 1024-row k projections).
 - [x] M5 (forward part): the released weights against the independent reference
   forward (`tools/goldens/edgerock_dump_real_reference.py`, fp32 CPU torch, a
   1400-token prompt that slides the window and commits five blocks, then asks about

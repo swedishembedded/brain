@@ -443,6 +443,12 @@ const READ_SPLIT_SLOTS: u32 = 32;
 /// Most splits the merge kernel folds (one thread per split's weight).
 const MAX_READ_SPLITS: u32 = 256;
 
+/// Whether a read of pooled banks takes the split kernels ([`anchor_read_steps_at`]), which need no `logits` or `probs`
+/// scratch: the caller may pass one-word buffers for them.
+pub fn split_read_applies(g: &Gpu, s: &AnchorMemoryShape) -> bool {
+    g.caps().workgroup_reductions && s.n_heads / s.n_kv_heads <= 8 && s.head_dim.is_multiple_of(4) && s.capacity.div_ceil(READ_SPLIT_SLOTS) <= MAX_READ_SPLITS
+}
+
 /// The three read steps: logits against the bank (sink column last), row
 /// softmax, probability-weighted sum of the bank's values into `read`.
 /// `logits` and `probs` are `[rows * n_heads, capacity + 1]` scratch.
@@ -493,7 +499,7 @@ pub fn anchor_read_steps_at(
     // pieces of `READ_SPLIT_SLOTS`, each a workgroup of its own (flash-decoding), so a single sequence's read fills
     // the device; the pieces' softmax records are merged by a second dispatch.
     if at.slots.is_some() && g.caps().workgroup_reductions && s.n_heads / s.n_kv_heads <= 8 {
-        if s.head_dim.is_multiple_of(4) && s.capacity.div_ceil(READ_SPLIT_SLOTS) <= MAX_READ_SPLITS {
+        if split_read_applies(g, s) {
             let splits = s.capacity.div_ceil(READ_SPLIT_SLOTS);
             let sp = [s.rows(), s.t, s.n_heads, s.n_kv_heads, s.capacity, s.head_dim, s.commit_block, at.kv_rows, 1, splits];
             let hpg = s.n_heads / s.n_kv_heads;
@@ -1056,7 +1062,7 @@ pub fn anchor_memory_decode_fwd(g: &Gpu, ids: &AnchorMemoryIds, s: &AnchorMemory
     let p = memory_projections(g, ids, s, w, project, h);
     let n = s.rows();
     let rs = read_shape(s, 1);
-    let words = u64::from(n) * u64::from(s.n_heads) * u64::from(s.capacity + 1);
+    let words = if split_read_applies(g, &rs) { 1 } else { u64::from(n) * u64::from(s.n_heads) * u64::from(s.capacity + 1) };
     let (logits, probs) = (g.storage_uninit(words), g.storage_uninit(words));
     let read_out = g.storage_uninit(u64::from(n) * u64::from(s.n_heads * s.head_dim));
     g.submit(&[], &anchor_read_steps_at(g, &ids.memory, &rs, BankAddressing { kv_rows: pool.capacity, slots: Some(&read.slots) }, &p.query, &pool.key, &pool.value, &read.refs, &logits, &probs, &read_out));

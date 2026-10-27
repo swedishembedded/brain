@@ -419,6 +419,22 @@ fn flash_combine_blocks(p: &[u32], _tile: (u32, u32)) -> u32 {
 /// `matmul_fp8_gemv.wgsl`'s and `matmul_nvfp4_gemv.wgsl`'s bindings: params, `x`, `w`, `s`, `y`.
 const QGEMV_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
 
+/// `matmul_bf16_gemv.wgsl`'s bindings: params, `x`, `w`, `y`.
+const BF16_GEMV_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
+
+/// The bf16 GEMV's `[m, k, count, first, xr0, rpw, pad, pad]`: one activation row, `k` whole 8-weight chunks.
+fn serves_bf16_gemv(p: &[u32]) -> bool {
+    matches!(p, [1, k, count, ..] if *count >= 1 && *k >= 8 && k % 8 == 0)
+}
+
+/// Weight rows one block of the native bf16 GEMV covers (`BRAIN_BG_COLS`): a warp per row.
+const BF16_GEMV_COLS: u32 = 8;
+
+/// One block per 8 weight rows.
+fn bf16_gemv_blocks(p: &[u32], _tile: (u32, u32)) -> u32 {
+    p[2].div_ceil(BF16_GEMV_COLS)
+}
+
 /// `moe_nvfp4_gemv_gather.wgsl`'s bindings: params, `x`, `ids`, `wq`, `sc`, `gl`, `out`.
 const MOE_NVFP4_GATHER_BINDINGS: &[BindKind] = &[
     BindKind::Uniform,
@@ -515,6 +531,15 @@ fn moe_nvfp4_gather_blocks(p: &[u32], _tile: (u32, u32)) -> u32 {
 }
 
 pub(crate) const ROWS: &[Row] = &[
+    Row {
+        slow: "matmul_bf16_gemv#MAXM=1",
+        target: Target::Named("matmul_bf16_gemv_m1"),
+        bindings: BF16_GEMV_BINDINGS,
+        serves: serves_bf16_gemv,
+        blocks: bf16_gemv_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 1,
+    },
     Row {
         slow: "matmul_fp8_gemv#MAXM=1",
         target: Target::Named("matmul_fp8_gemv_m1"),
