@@ -23,15 +23,16 @@ use sam1::resample::GridSource;
 use sam1::SamEncoder;
 use std::time::Instant;
 
-/// The median of `runs` timings of `f`, after one warm-up.
+/// The fastest of `runs` timings of `f`, after one warm-up.
 fn median(runs: usize, mut f: impl FnMut() -> f64) -> f64 {
     let _ = f();
     let mut ms: Vec<f64> = (0..runs).map(|_| f()).collect();
     ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    ms[ms.len() / 2]
+    // The fastest run: the work is deterministic, and a card shared with other jobs only ever adds to it.
+    ms[0]
 }
 
-/// One SAM forward of a `side` px view (median ms) and the token grid it produced.
+/// One SAM forward of a `side` px view (best ms) and the token grid it produced.
 fn time_sam(cfg: &deepseekocr2::config::DeepseekOcr2VisionConfig, sam: &SamEncoder, side: u32, n_query: u32, runs: usize) -> (f64, Vec<f32>) {
     let image: Vec<f32> = (0..3 * (side * side) as usize).map(|i| (((i * 2654435761usize) >> 9) % 2001) as f32 / 1000.0 - 1.0).collect();
     let mut tokens = Vec::new();

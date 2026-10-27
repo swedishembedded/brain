@@ -1093,3 +1093,19 @@ width 128).
 | attention share of it | 59% | 5.8% |
 
 What is left in prefill: the experts' grouped int8 MMA (49 ms of the 135), the dense bf16 products (30 ms) and the fp32 router (10.5 ms).
+
+## 2026-10-27 round 2: v2's resampler attention and norms
+
+Best of 15 on a quiet moment (`encode_bench --dir DeepSeek-OCR-2`, both cards at ~150 W). After the products moved to tensor cores the resampler's profile was
+60 of 85 ms in its unfused attention chain (`attn_scores_bidir` 44 ms: one thread per score on the CUDA cores) and 11 ms in the per-row-thread
+`rmsnorm` (0.22 ms for a 6 MB activation: 1728 threads, uncoalesced). The serving forward now runs each view's scores and `P V` as strided batched TF32
+products over the heads (`attend_on_tensor_cores`; the prefix-LM mask, then `softmax_rows`), and the workgroup-per-row norm
+(`as_serving_block_ids`; the golden-parity and training forwards keep the per-thread kernel and its bits).
+
+| v2, GH200, best of 15 | before | after |
+|---|---|---|
+| resampler, 6 tiles | 92.6 ms | 28.0 ms |
+| resampler, global view | 56.6 ms | 15.3 ms |
+| resampler, 16 tiles | 222 ms | 63 ms |
+| SAM global / tile (unchanged) | 37.8 / 22.2 ms | 37.7 / 22.4 ms |
+| a 6-tile page, encoder | 320 ms | 215 ms |

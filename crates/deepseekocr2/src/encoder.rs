@@ -42,7 +42,7 @@
 //! reference and a real caller's [`sam_tokens_from_nchw`] both feed (SAM has
 //! its own gate; nothing here re-derives it).
 
-use gpu_core::provider::library::{GemmPrecision, LibraryGemmProvider, Operand};
+use gpu_core::provider::library::{BatchedProduct, GemmPrecision, LibraryGemmProvider, Operand};
 use gpu_core::{DeviceBuffer, Gpu, Step};
 use model::block::{self, Bidir, BidirIds, KernelIds, UNREGISTERED};
 use paramstore::{ParamStore, Role};
@@ -62,6 +62,8 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("axpy", kernels::AXPY),
     ("rmsnorm", kernels::RMSNORM),
     ("rms_inv", kernels::RMS_INV),
+    // The serving forward's workgroup-per-row norm (the per-row thread kernel is uncoalesced: 0.22 ms for a 6 MB activation).
+    ("rmsnorm_rows", kernels::RMSNORM_ROWS),
     ("rmsnorm_dx", kernels::RMSNORM_DX),
     ("rmsnorm_dw", kernels::RMSNORM_DW),
     ("rope_base", kernels::ROPE_BASE),
@@ -70,6 +72,8 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("kv_expand_bwd", kernels::KV_EXPAND_BWD),
     ("attn_scores_bidir", kernels::ATTN_SCORES_BIDIR),
     ("attn_prefix_mask", kernels::ATTN_PREFIX_MASK),
+    // The serving forward's row softmax (a workgroup per row), after its tensor-core scores.
+    ("softmax_rows", kernels::SOFTMAX_ROWS),
     ("attn_softmax_bidir", kernels::ATTN_SOFTMAX_BIDIR),
     ("attn_apply_bidir", kernels::ATTN_APPLY_BIDIR),
     ("attn_bwd_dscores_bidir", kernels::ATTN_BWD_DSCORES_BIDIR),
@@ -96,6 +100,7 @@ struct Ids {
     bias_grad: usize,
     add_inplace: usize,
     rmsnorm: usize,
+    rmsnorm_rows: Option<usize>,
     rms_inv: usize,
     rmsnorm_dx: usize,
     rmsnorm_dw: usize,
@@ -106,6 +111,8 @@ struct Ids {
     scores: usize,
     mask: usize,
     softmax: usize,
+    /// `softmax_rows`, when the device runs workgroup reductions: the serving forward's softmax over tensor-core scores.
+    softmax_rows: Option<usize>,
     apply: usize,
     dscores: usize,
     dv: usize,
@@ -127,6 +134,7 @@ impl Ids {
             bias_grad: idx("bias_grad"),
             add_inplace: idx("add_inplace"),
             rmsnorm: idx("rmsnorm"),
+            rmsnorm_rows: g.kernel_index("rmsnorm_rows"),
             rms_inv: idx("rms_inv"),
             rmsnorm_dx: idx("rmsnorm_dx"),
             rmsnorm_dw: idx("rmsnorm_dw"),
@@ -137,6 +145,7 @@ impl Ids {
             scores: idx("attn_scores_bidir"),
             mask: idx("attn_prefix_mask"),
             softmax: idx("attn_softmax_bidir"),
+            softmax_rows: g.kernel_index("softmax_rows").filter(|_| g.caps().workgroup_reductions),
             apply: idx("attn_apply_bidir"),
             dscores: idx("attn_bwd_dscores_bidir"),
             dv: idx("attn_bwd_dv_bidir"),
@@ -173,6 +182,12 @@ impl Ids {
             rmsnorm_rows: UNREGISTERED,
             rmsnorm_dx_rows: UNREGISTERED,
         }
+    }
+
+    /// [`Self::as_block_ids`] with the workgroup-per-row norm for the serving forward, which is held to a stated tolerance rather than to
+    /// the golden's bits (the two norms agree to ~3e-6).
+    fn as_serving_block_ids(&self) -> KernelIds {
+        KernelIds { rmsnorm_rows: self.rmsnorm_rows.unwrap_or(UNREGISTERED), ..self.as_block_ids() }
     }
 
     /// The bidirectional-attention family's ids, forward and backward.
@@ -323,6 +338,39 @@ impl Resampler {
         self.tensor_cores.is_some()
     }
 
+    /// One layer's attention over `bsz` views of `t` tokens as TF32 products on tensor cores: per view `S = Q K^T / sqrt(d)` over all heads
+    /// at once, the prefix-LM mask, a row softmax over the whole slab, then `ctx = P V` per view. The unfused chain it replaces ran one
+    /// thread per score on the CUDA cores (60 of the resampler's 85 ms). Pushes nothing and answers `false` when the device offers no such
+    /// products for these shapes.
+    #[allow(clippy::too_many_arguments)]
+    fn attend_on_tensor_cores(&self, steps: &mut Vec<Step>, (qkv, scores, probs, ctx): (&DeviceBuffer, &DeviceBuffer, &DeviceBuffer, &DeviceBuffer), bsz: u32, t: u32, n_query: u32) -> bool {
+        let (Some(tc), Some(softmax)) = (&self.tensor_cores, self.ids.softmax_rows) else { return false };
+        let e = &self.cfg.encoder;
+        let (nh, hd, d) = (e.n_heads, e.head_dim(), e.d_model);
+        let g = &self.gpu;
+        let at = |buf, word: u32| Operand { buf, range: (word as u64, 0) };
+        let slab = nh as i64 * t as i64 * t as i64;
+        let mut local = Vec::new();
+        for b in 0..bsz {
+            let rows = b * t;
+            let s = BatchedProduct { batch: nh, m: t, n: t, k: hd, lda: 3 * d, ldb: 3 * d, ldc: t, stride_a: hd as i64, stride_b: hd as i64, stride_c: t as i64 * t as i64, alpha: 1.0 / (hd as f32).sqrt() };
+            if !tc.bmm_nt_tf32(g, &mut local, &at(qkv, rows * 3 * d), &at(qkv, rows * 3 * d + d), &at(scores, (b as i64 * slab) as u32), &s) {
+                return false;
+            }
+        }
+        local.push(g.step(self.ids.mask, &[scores], &[bsz, nh, t, n_query], bsz * nh * t * t));
+        local.push(g.dispatch(softmax, &[scores, probs], &[bsz * nh * t, t], gpu_core::Dispatch::Workgroups(bsz * nh * t)));
+        for b in 0..bsz {
+            let rows = b * t;
+            let a = BatchedProduct { batch: nh, m: t, n: hd, k: t, lda: t, ldb: 3 * d, ldc: d, stride_a: t as i64 * t as i64, stride_b: hd as i64, stride_c: hd as i64, alpha: 1.0 };
+            if !tc.bmm_nn_tf32(g, &mut local, &at(probs, (b as i64 * slab) as u32), &at(qkv, rows * 3 * d + 2 * d), &at(ctx, rows * d), &a) {
+                return false;
+            }
+        }
+        steps.append(&mut local);
+        true
+    }
+
     /// `out[rows, n] = x[rows, k] . w[n, k]^T`: a TF32 tensor-core product where the device runs one, else the fp32 kernel.
     fn linear(&self, steps: &mut Vec<Step>, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, (rows, k, n): (u32, u32, u32)) {
         let whole = |buf| Operand { buf, range: (0, 0) };
@@ -420,7 +468,7 @@ impl Resampler {
         let rows = bsz * t;
         let g = &self.gpu;
         let ids = &self.ids;
-        let bids = ids.as_block_ids();
+        let bids = ids.as_serving_block_ids();
 
         let bank = self.ps.read_weight(g, if local { "vision.query_local.weight" } else { "vision.query_global.weight" });
         let mut concat = Vec::with_capacity((rows * d) as usize);
@@ -458,10 +506,12 @@ impl Resampler {
             steps.push(block::kv_expand_fwd(g, ids.kv_expand, &q, &qkv, rows, nh, 1, hd, 3 * d, 0));
             steps.push(block::kv_expand_fwd(g, ids.kv_expand, &k, &qkv, rows, nh, group, hd, 3 * d, d));
             steps.push(block::kv_expand_fwd(g, ids.kv_expand, &v, &qkv, rows, nh, group, hd, 3 * d, 2 * d));
-            steps.push(g.step(ids.scores, &[&qkv, &scores], &[bsz, nh, t, hd, 3 * d, 0, d], bsz * nh * t * t));
-            steps.push(g.step(ids.mask, &[&scores], &[bsz, nh, t, n_query], bsz * nh * t * t));
-            steps.push(g.step(ids.softmax, &[&scores, &probs], &[bsz, nh, t], bsz * nh * t));
-            steps.push(g.step(ids.apply, &[&probs, &qkv, &ctx], &[bsz, nh, t, hd, 3 * d, 2 * d, d], bsz * nh * t * hd));
+            if !self.attend_on_tensor_cores(&mut steps, (&qkv, &scores, &probs, &ctx), bsz, t, n_query) {
+                steps.push(g.step(ids.scores, &[&qkv, &scores], &[bsz, nh, t, hd, 3 * d, 0, d], bsz * nh * t * t));
+                steps.push(g.step(ids.mask, &[&scores], &[bsz, nh, t, n_query], bsz * nh * t * t));
+                steps.push(g.step(ids.softmax, &[&scores, &probs], &[bsz, nh, t], bsz * nh * t));
+                steps.push(g.step(ids.apply, &[&probs, &qkv, &ctx], &[bsz, nh, t, hd, 3 * d, 2 * d, d], bsz * nh * t * hd));
+            }
             self.linear(&mut steps, &ctx, w("attn.out.weight"), &delta, (rows, d, d));
             self.lora_fwd(&mut steps, "attn.out", &ctx, &wn("attn.out.weight"), &delta, rows, d, d);
             steps.push(g.step(ids.add_inplace, &[&x, &delta], &[rows * d], rows * d));
