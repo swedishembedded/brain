@@ -257,8 +257,8 @@ fn milestone_e_promotion_gate() {
     let init = init_weights(&cfg, 3);
 
     // (1) trained → should beat base and be PROMOTED (weights returned).
-    let opts = FinetuneOpts { epochs: 80, lr: 5e-3, wd: 0.0, clip: 3.0, lora: None, batch: 2, progress: false };
-    let (rep, w) = finetune(cfg.clone(), t, &init, &train, &val, &opts);
+    let opts = FinetuneOpts { epochs: 80, lr: 5e-3, wd: 0.0, clip: 3.0, lora: None, batch: 2, progress: false, saved: None };
+    let (rep, w) = finetune(cfg.clone(), t, &init, &train, &val, &opts).unwrap();
     eprintln!("gate(train): base_val {:.3} ft_val {:.3} promoted {}", rep.base_val, rep.ft_val, rep.promoted);
     assert!(rep.ft_val < rep.base_val, "fine-tune did not beat base on held-out");
     assert!(rep.promoted && w.is_some(), "gate should promote a genuine improvement");
@@ -267,8 +267,8 @@ fn milestone_e_promotion_gate() {
     // Weights still come back — the contract returns them unconditionally so a
     // caller can evaluate generalization on a rejected candidate; the GATE
     // decision is `promoted`, and the caller saves iff it is true.
-    let opts0 = FinetuneOpts { epochs: 0, lr: 5e-3, wd: 0.0, clip: 3.0, lora: Some(LoraCfg::attn(4, 8.0).with_seed(0)), batch: 1, progress: false }; // seed: the finite-difference check needs a reproducible adapter init
-    let (rep0, w0) = finetune(cfg, t, &init, &train, &val, &opts0);
+    let opts0 = FinetuneOpts { epochs: 0, lr: 5e-3, wd: 0.0, clip: 3.0, lora: Some(LoraCfg::attn(4, 8.0).with_seed(0)), batch: 1, progress: false, saved: None }; // seed: the finite-difference check needs a reproducible adapter init
+    let (rep0, w0) = finetune(cfg, t, &init, &train, &val, &opts0).unwrap();
     eprintln!("gate(noop): base_val {:.3} ft_val {:.3} promoted {}", rep0.base_val, rep0.ft_val, rep0.promoted);
     assert!(!rep0.promoted, "gate must reject a non-improvement");
     assert!(w0.is_some(), "weights are returned for generalization eval even when rejected");

@@ -238,7 +238,7 @@ LABEL (caption a dataset with a vision-language model)
 
 DECIDE (decision-model training on outcome-labelled examples)
   brain decide train --data FILE --base REF --out DIR [--freeze-encoder | --finetune-encoder]
-      [--steps N --batch N --seed N]
+      [--steps N --batch N --seed N --activations keep|recompute]
       Trains a decision head on the `train` split of a JSONL file and writes a
       checkpoint whose manifest records its lineage and says `unvalidated`.
   brain decide eval --model DIR|REF --data FILE --split validation|test
@@ -259,7 +259,8 @@ DECIDE (decision-model training on outcome-labelled examples)
 GPT2 (dense baseline)
   brain gpt2 train <data_dir> [--out F --steps N --batch B --block T
                               --layers L --d-model D --heads H --lr X --mask = --align
-                              --job-plan FILE --job-rank N --profile-collectives FILE]
+                              --job-plan FILE --job-rank N --profile-collectives FILE
+                              --activations keep|recompute]
   brain gpt2 eval  --weights F --data <dir> [--batches N --samples M]
   brain gpt2 infer --weights F [--data <dir>] [--prompt \"...\" --max-new N --temp X --top-k K]
                               (vocab is read from the checkpoint; --data only for old ones)
@@ -316,11 +317,11 @@ WorldMirror-2 (multi-view images → 3D Gaussian Splatting scene; docs/reference
 
 YOLOv8 (from-scratch anchor-free object detector)
   brain yolov8 train <data_dir> --out F [--steps N --batch B --lr X --nc C
-                                       --input S --seed S]
+                                       --input S --seed S --activations keep|recompute]
   brain yolov8 eval  --weights F --data <dir> [--split all|val --conf X --iou X --dump-preds F.jsonl]   # mAP@0.5, mAP@0.5:0.95, per-class AP, P/R
   brain yolov8 detect --weights F --image <P6.ppm | dataset_dir> [--conf X --iou X]
                                                                 # prints [x1,y1,x2,y2,conf,class] JSON lines
-  brain yolov8 fine-tune <data_dir> --weights <pretrained> --out F [--freeze-backbone ...]
+  brain yolov8 fine-tune <data_dir> --weights <pretrained> --out F [--freeze-backbone ... --activations keep|recompute]
       Trains the tiny YOLOv8 graph on a `data gen detect` dataset (CPU backend).
   brain yolov8 detect --weights F --image <...> --device npu     # run on the Intel NPU
 
@@ -337,7 +338,7 @@ INTEL NPU (OpenVINO: quantize + compile YOLO to a real NPU graph)
       (--device is still accepted here as a deprecated alias for --ov-device).
 
 TOY ARCHITECTURES (brain's own, no upstream reference - toy tasks, not served)
-  brain toymoe train [--steps N --batch-size B --block-size T --lr X --out F]
+  brain toymoe train [--steps N --batch-size B --block-size T --lr X --out F --activations keep|recompute]
   brain toymoe infer --weights F [--prompt 1,2,3,4 --max-new N --temperature X --top-k K]
   brain toymoe eval  --weights F [--samples N]
   brain toypid <train|rollout|profile> ...   # the WebGPU browser demo's model
@@ -449,7 +450,7 @@ LFM2.5-ENCODER (bidirectional conv/attention encoder, MLM head, 8k context)
   brain lfm2 fill-mask --weights F --tokenizer T --text \"… <|mask|> …\" [--topk K]
   brain lfm2 embed     --weights F --tokenizer T (--text \"…\" | --input FILE) [--seq T]
   brain lfm2 data      --input corpus.txt --tokenizer T --out data/lfm
-  brain lfm2 finetune  --weights F --tokenizer T [--data D --steps N --batch B --seq T]
+  brain lfm2 finetune  --weights F --tokenizer T [--data D --steps N --batch B --seq T --activations keep|recompute]
   brain lfm2 eval      --weights F --tokenizer T [--data D]     # pseudo-ppl + masked-acc
   brain npu lfm        --weights F --seq S --out model.onnx [--int8]   # OpenVINO export
   make perf/model/lfm                      # standalone concurrency benchmark (scheduler+residency)

@@ -62,7 +62,9 @@ baseline's `generate` returns its text in one piece.
 
 - `--steps`, `--batch`, `--block` (context length), `--lr`, `--layers`,
   `--d-model`, `--heads`, `--warmup`, `--grad-accum`, `--seed`, `--mask`,
-  `--align` - training.
+  `--align`, `--activations keep|recompute` (what the backward keeps of the
+  forward: every layer's activations, or only each layer's input, rebuilt in
+  the backward for the same gradients at lower memory) - training.
 - `--batches`, `--samples`, `--seed` - eval.
 - `--prompt`, `--max-new`, `--temp`, `--top-k`, `--seed` - generation
   (greedy argmax when `--temp <= 0`).

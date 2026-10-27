@@ -620,13 +620,21 @@ fn infer(args: &[String]) {
 /// Shared core for `train` (fresh) and `finetune` (seeded from `--weights`).
 fn train(args: &[String], base: Option<&str>) {
     let (seed, rest) = crate::args::split_seed(args, "qwen3 train");
-    let (precision, rest) = match crate::args::split_train_precision(&rest) {
+    let verb = if base.is_some() { "finetune" } else { "train" };
+    let (mut precision, activations, rest) = match crate::args::split_train_precision(&rest).and_then(|(p, rest)| crate::args::split_activations(&rest).map(|(a, rest)| (p, a, rest))) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("brain qwen3 {}: {e}", if base.is_some() { "finetune" } else { "train" });
+            eprintln!("brain qwen3 {verb}: {e}");
             std::process::exit(2);
         }
     };
+    // A from-scratch run keeps fp32 state, so it refuses a state request below; what the backward keeps of the
+    // forward is not a state request and applies to both.
+    let state_request = model::TrainPrecision { activations: None, ..precision.clone() };
+    if let Err(e) = crate::args::merge_activations(activations, &mut precision) {
+        eprintln!("brain qwen3 {verb}: {e}");
+        std::process::exit(2);
+    }
     let args = &rest[..];
     let mut data_dir = String::new();
     let mut out = "out/qwen.safetensors".to_string();
@@ -654,7 +662,7 @@ fn train(args: &[String], base: Option<&str>) {
         i += 1;
     }
     if data_dir.is_empty() {
-        eprintln!("usage: brain qwen3 {{train|finetune}} <data_dir> --out F [--steps N --batch B --block T --lr X --mask = --align] {}", crate::args::TRAIN_PRECISION_USAGE);
+        eprintln!("usage: brain qwen3 {{train|finetune}} <data_dir> --out F [--steps N --batch B --block T --lr X --mask = --align] {} {}", crate::args::TRAIN_PRECISION_USAGE, crate::args::ACTIVATIONS_USAGE);
         return;
     }
     let opts = model::FitOpts {
@@ -688,11 +696,14 @@ fn train(args: &[String], base: Option<&str>) {
         let resume = Path::new(&out).exists();
         match qwen3::finetune::finetune_from(p, Path::new(&data_dir), &opts, &qwen3::finetune::Mode::FullOffload, &out, resume) {
             Ok((l0, l1)) => println!("trained: loss {l0:.4} -> {l1:.4}; saved {out}"),
-            Err(e) => eprintln!("train error: {e}"),
+            Err(e) => {
+            eprintln!("train error: {e}");
+            std::process::exit(1);
+        }
         }
         return;
     }
-    if !opts.precision.is_default() {
+    if !state_request.is_default() {
         eprintln!("brain qwen3 train: {} describes how a full fine-tune of a base stores what it trains; a from-scratch run keeps fp32 (use `brain qwen3 finetune`)", crate::args::TRAIN_PRECISION_FLAG);
         std::process::exit(2);
     }
@@ -717,7 +728,10 @@ fn train(args: &[String], base: Option<&str>) {
     };
     match model::fit::<Qwen>(Path::new(&data_dir), cfg, &opts, Some(Path::new(&out))) {
         Ok((l0, l1)) => println!("trained: loss {l0:.4} -> {l1:.4}; saved {out}"),
-        Err(e) => eprintln!("train error: {e}"),
+        Err(e) => {
+            eprintln!("train error: {e}");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -814,7 +828,7 @@ fn job_pair(plan: Option<String>, rank: Option<String>) -> Result<Option<(String
 
 /// `brain qwen3 finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG]
 ///     --dataset DIR [--alpha A --lora-variant V --lora-plus-ratio X --adapter-kind K --steps N --lr X --batch B --block T --seed S
-///     --models-dir DIR --dataset-id ID --job-plan FILE --job-rank N]`
+///     --models-dir DIR --dataset-id ID --job-plan FILE --job-rank N --activations keep|recompute]`
 ///
 /// Trains a NAMED LoRA adapter and saves ONLY the adapter tensors into the
 /// model store at `<models-dir>/<vendor>/<repo>/adapters/<owner>/<name>/<tag>/`
@@ -870,7 +884,7 @@ fn finetune_lora(args: &[String]) {
             None => parsed.seed("qwen3 finetune (lora)"),
         },
     };
-    let rest = parsed.leftovers();
+    let (activations, rest) = crate::args::split_activations_or_exit(&parsed.leftovers(), "brain qwen3 finetune --lora");
     let args = &rest[..];
     let mut base = String::new();
     let mut adapter_spec = String::new();
@@ -968,7 +982,8 @@ fn finetune_lora(args: &[String]) {
              [--patience N] [--lora-targets wq,wk,...] [--keep-reasoning] [--base-format f32|bf16|int8|nf4|fp8] [--grad-accum N] \
              [--weight-decay W --grad-clip C --warmup N --min-lr X --beta1 B --beta2 B --adam-eps E] \
              [--alpha A --steps N --lr X --batch B --block T --seed S --models-dir DIR --dataset-id ID] [--fresh] \
-             [--job-plan FILE --job-rank N --profile-collectives FILE]"
+             [--job-plan FILE --job-rank N --profile-collectives FILE] {}",
+            crate::args::ACTIVATIONS_USAGE
         );
         return;
     }
@@ -1110,6 +1125,7 @@ fn finetune_lora(args: &[String]) {
         eval_interval: if val_samples.is_empty() { 0 } else { (steps / 20).max(1) },
         patience,
         grad_accum,
+        precision: model::TrainPrecision { activations, ..Default::default() },
         ..hyper.fit_opts(steps, batch, block, lr, seed)
     };
     if patience > 0 && val_samples.is_empty() {

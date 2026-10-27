@@ -21,7 +21,7 @@ use decisions::examples::{Dataset, Split};
 
 const USAGE: &str = "\
 usage: brain decide train   --data FILE --base REF --out DIR [--freeze-encoder | --finetune-encoder]
-                            [--steps N] [--batch N] [--seed N]
+                            [--steps N] [--batch N] [--seed N] [--activations keep|recompute]
        brain decide eval    --model DIR|REF --data FILE --split validation|test
                             [--costs FILE] [--order-seed N] [--json] [--out FILE]
        brain decide promote --model DIR --data FILE --policy POLICY.json [--json]
@@ -37,7 +37,10 @@ train     Train a decision head on the `train` split of a JSONL file of
           model) always trains its head with the trunk frozen; the output is
           the head plus a reference to the base by id and digest, not a copy of
           the weights, and the base must stay installed to serve it.
-          --finetune-encoder is refused for Laya.
+          --finetune-encoder is refused for Laya. --activations picks what the
+          backward keeps of the forward: keep every layer's activations, or
+          recompute them from each layer's input for the same gradients at
+          lower memory; absent leaves the backend's default.
 eval      Measure a checkpoint on one split: accuracy against the majority and
           chance baselines, NLL, Brier, ECE/AdaECE with reliability bins,
           coverage versus accuracy, option-order instability under a seeded
@@ -226,6 +229,13 @@ fn train_verb(args: &mut crate::args::Args) -> i32 {
     run.steps = args.usize_or("--steps", DEFAULT_STEPS);
     run.batch = args.usize_or("--batch", brain::decision::DEFAULT_BATCH);
     run.seed = args.seed("brain decide train");
+    match args.take_str(crate::args::ACTIVATIONS_FLAG).map(|value| crate::args::parse_activations(&value)).transpose() {
+        Ok(policy) => run.saved = policy,
+        Err(e) => {
+            eprintln!("brain decide: {e}");
+            return 2;
+        }
+    }
     args.finish();
     run.brain_commit = code_revision();
 

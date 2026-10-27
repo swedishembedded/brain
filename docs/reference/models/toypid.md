@@ -25,7 +25,7 @@ your own from simulated plant data; there's nothing to fetch.
 ## Running it
 
 ```bash
-brain toypid train    --out pid.safetensors
+brain toypid train    --out pid.safetensors [--activations keep|recompute]
 brain toypid rollout  --weights pid.safetensors
 brain toypid profile  --weights pid.safetensors
 ```

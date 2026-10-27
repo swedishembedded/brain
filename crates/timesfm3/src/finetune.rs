@@ -63,7 +63,7 @@ const CLOSE: usize = 3;
 
 /// Fine-tuning hyper-parameters: the shared forecaster contract
 /// ([`forecast::finetune`]), with this model's adapter configuration.
-pub type FinetuneOpts = forecast::finetune::FinetuneOpts<LoraCfg>;
+pub type FinetuneOpts = forecast::finetune::FinetuneOpts<LoraCfg, Option<model::saved::SavedPolicy>>;
 
 /// The gate decision of one fine-tune ([`forecast::finetune`]).
 pub type FinetuneReport = forecast::finetune::FinetuneReport;
@@ -285,7 +285,7 @@ fn mean_loss(gpu: &Gpu, cfg: &Timesfm3Config, weights: &HashMap<String, Vec<f32>
 /// The weights are returned whether or not the gate promoted, so the caller
 /// decides what to do with a losing run; `report.promoted` is the only thing
 /// that should decide whether they are WRITTEN.
-pub fn finetune_universe(cfg: &Timesfm3Config, base: &HashMap<String, Vec<f32>>, series: &[Series], context: usize, horizon: usize, split: train_data::SplitConfig, opts: &FinetuneOpts) -> (FinetuneReport, Option<HashMap<String, Vec<f32>>>) {
+pub fn finetune_universe(cfg: &Timesfm3Config, base: &HashMap<String, Vec<f32>>, series: &[Series], context: usize, horizon: usize, split: train_data::SplitConfig, opts: &FinetuneOpts) -> Result<forecast::FinetuneOutcome, String> {
     let windows = train_data::enumerate_windows(series, context, horizon);
     let sp = train_data::temporal_split(series, &windows, horizon, split);
     let train = build_examples(cfg, series, &sp.train, context, horizon);
@@ -303,10 +303,13 @@ pub fn finetune_universe(cfg: &Timesfm3Config, base: &HashMap<String, Vec<f32>>,
     let base_val = mean_loss(&gpu, cfg, base, None, &val, context, horizon, b);
 
     let dev = gpu.share_or_new(TRAIN_PIPELINES);
-    let m = match &opts.lora {
+    let mut m = match &opts.lora {
         None => Timesfm3Train::new_on(dev, cfg.clone(), &zeros, &mask0, b, 1, n, base),
         Some(lc) => Timesfm3Train::new_lora_on(dev, cfg.clone(), lc.clone(), &zeros, &mask0, b, 1, n, base),
     };
+    if let Some(policy) = opts.saved {
+        m.set_saved_policy(policy)?;
+    }
 
     let mut steps = 0u32;
     for epoch in 0..opts.epochs {
@@ -334,7 +337,7 @@ pub fn finetune_universe(cfg: &Timesfm3Config, base: &HashMap<String, Vec<f32>>,
     // `kronos::train::finetune`'s rule, so one CLI gate line means the same
     // thing whichever model produced it.
     let promoted = forecast::finetune::promoted(base_val, ft_val);
-    (FinetuneReport { promoted, base_val, ft_val, steps, lora_seed: opts.lora.as_ref().map(|lc| lc.seed) }, Some(weights))
+    Ok((FinetuneReport { promoted, base_val, ft_val, steps, lora_seed: opts.lora.as_ref().map(|lc| lc.seed) }, Some(weights)))
 }
 
 /// The licence the TimesFM-3 3.0 pretrained weights carry. Non-commercial
@@ -520,9 +523,9 @@ mod tests {
         let (context, horizon) = (8usize, 4usize);
         let s: Vec<Series> = (0..3).map(|i| series(200, i as f32)).collect();
         let base = crate::train::init_weights(&cfg, 7);
-        let opts = FinetuneOpts { epochs: 1, lr: 1e-3, wd: 0.0, clip: 1.0, lora: None, batch: 2, progress: false };
+        let opts = FinetuneOpts { epochs: 1, lr: 1e-3, wd: 0.0, clip: 1.0, lora: None, batch: 2, progress: false, saved: None };
         let split = train_data::SplitConfig { train_frac: 0.7, val_frac: 0.15, embargo: horizon };
-        let (rep, w) = finetune_universe(&cfg, &base, &s, context, horizon, split, &opts);
+        let (rep, w) = finetune_universe(&cfg, &base, &s, context, horizon, split, &opts).unwrap();
 
         assert!(rep.steps > 0, "the fixture produced no training windows");
         assert!(rep.base_val.is_finite(), "base_val must be a real number, got {}", rep.base_val);
@@ -577,9 +580,9 @@ mod tests {
         let (context, horizon) = (8usize, 4usize);
         let s: Vec<Series> = (0..3).map(|i| series(200, i as f32)).collect();
         let base = crate::train::init_weights(&cfg, 7);
-        let opts = FinetuneOpts { epochs: 1, lr: 1e-2, wd: 0.0, clip: 1.0, lora: Some(LoraCfg::attn(2, 4.0)), batch: 2, progress: false };
+        let opts = FinetuneOpts { epochs: 1, lr: 1e-2, wd: 0.0, clip: 1.0, lora: Some(LoraCfg::attn(2, 4.0)), batch: 2, progress: false, saved: None };
         let split = train_data::SplitConfig { train_frac: 0.7, val_frac: 0.15, embargo: horizon };
-        let (rep, w) = finetune_universe(&cfg, &base, &s, context, horizon, split, &opts);
+        let (rep, w) = finetune_universe(&cfg, &base, &s, context, horizon, split, &opts).unwrap();
         assert!(rep.steps > 0);
         let w = w.expect("weights are always returned");
         assert_eq!(w.len(), cfg.param_list().len(), "the fold leaves no adapter tensors behind");

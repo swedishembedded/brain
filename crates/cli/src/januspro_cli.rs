@@ -125,4 +125,12 @@ mod tests {
         assert_eq!((mode, dropout), (Mode::Understanding, 0.1), "guidance dropout defaults to a tenth");
         assert!(with(&["--mode", "generation", "--cfg-dropout", "2"]).err().unwrap().contains("between 0 and 1"));
     }
+
+    #[test]
+    fn activations_reach_the_options_of_both_modes() {
+        let base = ["--weights", "w", "--dataset", "d", "--out", "o", "--seed", "1"];
+        let with = |extra: &[&str]| parse(&args(&[&base[..], extra].concat()));
+        assert_eq!(with(&["--mode", "generation", "--activations", "recompute"]).unwrap().2.options.saved, Some(model::saved::SavedPolicy::Recompute));
+        assert!(with(&["--mode", "understanding", "--activations", "bogus"]).err().unwrap().contains("--activations"));
+    }
 }

@@ -917,6 +917,18 @@ impl DecisionPipeline {
         }
     }
 
+    /// What the backward keeps of the forward ([`model::saved::SavedPolicy`]): every layer's intermediates, or only
+    /// the residual stream between layers, rebuilt one layer at a time in the backward. Set it before the first
+    /// training step. The Decide arm applies it to its encoder, the Laya arm to its head (and its trunk when the
+    /// trunk trains). A choice the backend cannot run is refused by name.
+    pub fn set_saved_policy(&mut self, policy: model::saved::SavedPolicy) -> Result<()> {
+        match &mut self.backend {
+            Backend::Decide(model) => model.enc.set_saved_policy(policy),
+            Backend::Laya(l) => l.model.set_saved_policy(policy),
+        }
+        .map_err(Error::Backend)
+    }
+
     /// Whether the trunk/encoder is being held fixed.
     pub fn encoder_frozen(&self) -> bool {
         match &self.backend {

@@ -902,10 +902,17 @@ fn finetune_model(args: &[String]) -> Result<FinetuneModel, String> {
     }
 }
 
+/// Exit 1 with the trainer's refusal of the requested `--activations` choice; the fine-tune loops fail only on it.
+fn refused_activations(error: &str) -> ! {
+    eprintln!("brain forecast finetune: {} refused: {error}", crate::args::ACTIVATIONS_FLAG);
+    std::process::exit(1);
+}
+
 /// The Kronos fine-tune: same flags, same output, same exit codes as before
 /// the verb learned a second model.
 fn finetune_kronos(args: &[String]) {
-    let mut a = Args::new(args);
+    let (saved, args) = crate::args::split_activations_or_exit(args, "brain forecast finetune");
+    let mut a = Args::new(&args);
     let tok = a.str_or("--tokenizer-dir", "");
     let dec = a.str_or("--decoder-dir", "");
     let data = a.str_or("--data", "");
@@ -923,7 +930,7 @@ fn finetune_kronos(args: &[String]) {
     if tok.is_empty() || dec.is_empty() || data.is_empty() {
         eprintln!("usage: brain forecast finetune --tokenizer-dir <dir> --decoder-dir <dir> --data <csv-dir> \\");
         eprintln!("         [--out <ckpt>] [--context 180] [--horizon 5] [--epochs 8] [--lr 4e-5] [--lora RANK] [--embargo N] [--batch B]");
-        eprintln!("         [--holdout-data <csv-dir>] [--skip-invalid]");
+        eprintln!("         [--holdout-data <csv-dir>] [--skip-invalid] {}", crate::args::ACTIVATIONS_USAGE);
         eprintln!();
         eprintln!("Each <TICKER>.csv is Date,open,high,low,close,volume. Every file is validated before");
         eprintln!("anything is loaded; a file with a bad row fails the run naming the file and the line,");
@@ -967,8 +974,8 @@ fn finetune_kronos(args: &[String]) {
         series.len(), if lora_rank > 0 { format!(" · LoRA r{lora_rank}") } else { " · full".into() });
     let split = forecast::train_data::SplitConfig { train_frac: 0.7, val_frac: 0.15, embargo };
     let lora = (lora_rank > 0).then(|| kronos::train::LoraCfg::attn(lora_rank, (lora_rank * 2) as f32));
-    let opts = kronos::train::FinetuneOpts { epochs, lr, wd: 0.1, clip: 3.0, lora, batch, progress: true };
-    let (rep, weights) = kronos::finetune::finetune_universe(&model, &base, &series, context, horizon, split, &opts);
+    let opts = kronos::train::FinetuneOpts { epochs, lr, wd: 0.1, clip: 3.0, lora, batch, progress: true, saved };
+    let (rep, weights) = kronos::finetune::finetune_universe(&model, &base, &series, context, horizon, split, &opts).unwrap_or_else(|e| refused_activations(&e));
     // Zero steps is not a verdict. It means the embargoed split left no training
     // window at all, and printing "KEEP BASE" for it would read as "the
     // fine-tune was tried and lost" when nothing was ever trained.
@@ -1008,7 +1015,8 @@ fn finetune_kronos(args: &[String]) {
 /// [`finetune_kronos`]; the differences are the checkpoint it loads, the
 /// horizon limit it enforces, and the licence it stamps on what it writes.
 fn finetune_timesfm3(args: &[String]) {
-    let mut a = Args::new(args);
+    let (saved, args) = crate::args::split_activations_or_exit(args, "brain forecast finetune");
+    let mut a = Args::new(&args);
     let weights = a.str_or("--timesfm3", "");
     let data = a.str_or("--data", "");
     let out = a.take_str("--out");
@@ -1034,7 +1042,7 @@ fn finetune_timesfm3(args: &[String]) {
     if weights.is_empty() || data.is_empty() {
         eprintln!("usage: brain forecast finetune --timesfm3 <weights> --data <csv-dir> \\");
         eprintln!("         [--out <ckpt>] [--context 180] [--horizon 5] [--epochs 8] [--lr 4e-5] [--lora RANK] [--embargo N] [--batch B]");
-        eprintln!("         [--holdout-data <csv-dir>] [--skip-invalid] [--seed N]");
+        eprintln!("         [--holdout-data <csv-dir>] [--skip-invalid] [--seed N] {}", crate::args::ACTIVATIONS_USAGE);
         eprintln!();
         eprintln!("Each <TICKER>.csv is Date,open,high,low,close,volume, and the close is what is");
         eprintln!("forecast and scored. Every file is validated before anything is loaded.");
@@ -1074,8 +1082,8 @@ fn finetune_timesfm3(args: &[String]) {
     );
     let split = forecast::train_data::SplitConfig { train_frac: 0.7, val_frac: 0.15, embargo };
     let lora = lora_seed.map(|seed| timesfm3::train::LoraCfg::attn(lora_rank, (lora_rank * 2) as f32).with_seed(seed));
-    let opts = timesfm3::finetune::FinetuneOpts { epochs, lr, wd: 0.1, clip: 3.0, lora, batch, progress: true };
-    let (rep, weights_out) = timesfm3::finetune::finetune_universe(&cfg, &base, &series, context, horizon, split, &opts);
+    let opts = timesfm3::finetune::FinetuneOpts { epochs, lr, wd: 0.1, clip: 3.0, lora, batch, progress: true, saved };
+    let (rep, weights_out) = timesfm3::finetune::finetune_universe(&cfg, &base, &series, context, horizon, split, &opts).unwrap_or_else(|e| refused_activations(&e));
 
     // Zero steps is not a verdict - the same distinction `finetune_kronos`
     // draws, for the same reason.

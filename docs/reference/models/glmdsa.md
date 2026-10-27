@@ -45,7 +45,10 @@ brain glm export    --weights F --out model.onnx --seq T
 ```
 
 `--size tiny|small|base` selects a runnable preset shape; the CLI grammar is
-shared with `gpt`/`qwen`. `export` produces an ONNX graph for the Intel NPU
+shared with `gpt`/`qwen`. `train` and `finetune` take
+`--activations keep|recompute` (what the backward keeps of the forward:
+every layer's activations, or only each layer's input, rebuilt in the backward
+for the same gradients at lower memory). `export` produces an ONNX graph for the Intel NPU
 path (below) rather than a servable checkpoint.
 
 ## Options

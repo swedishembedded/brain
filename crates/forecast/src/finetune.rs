@@ -25,9 +25,12 @@
 ///
 /// `L` is the model's own adapter configuration: the target leaves of a Kronos
 /// decoder are not a TimesFM-3 encoder's, so the *shape* of the setting is
-/// shared and its content is not.
+/// shared and its content is not. `S` is likewise the choice of what the
+/// backward keeps of the forward, in the type the models' training substrate
+/// defines (this crate depends on no model crate); its [`Default`] is the
+/// trainer's own default.
 #[derive(Clone, Debug)]
-pub struct FinetuneOpts<L> {
+pub struct FinetuneOpts<L, S = ()> {
     pub epochs: u32,
     pub lr: f32,
     pub wd: f32,
@@ -40,11 +43,14 @@ pub struct FinetuneOpts<L> {
     pub batch: u32,
     /// Print per-batch progress.
     pub progress: bool,
+    /// What the backward keeps of the forward; a choice the trainer cannot run
+    /// fails the fine-tune by name before the first step.
+    pub saved: S,
 }
 
-impl<L> Default for FinetuneOpts<L> {
-    fn default() -> FinetuneOpts<L> {
-        FinetuneOpts { epochs: 8, lr: 4e-5, wd: 0.1, clip: 3.0, lora: None, batch: 1, progress: false }
+impl<L, S: Default> Default for FinetuneOpts<L, S> {
+    fn default() -> FinetuneOpts<L, S> {
+        FinetuneOpts { epochs: 8, lr: 4e-5, wd: 0.1, clip: 3.0, lora: None, batch: 1, progress: false, saved: S::default() }
     }
 }
 
@@ -59,6 +65,10 @@ pub struct FinetuneReport {
     /// fine-tune, which draws nothing. Passing it back reproduces the run.
     pub lora_seed: Option<u64>,
 }
+
+/// What a fine-tune returns: the gate decision, and the fine-tuned weights in the checkpoint's own tensor names
+/// whether or not the gate promoted them (the caller writes them only when `promoted`).
+pub type FinetuneOutcome = (FinetuneReport, Option<std::collections::HashMap<String, Vec<f32>>>);
 
 /// Whether a fine-tune is promoted: a lower held-out loss than the base's,
 /// and a finite one. A non-finite number - a diverged run, an empty train

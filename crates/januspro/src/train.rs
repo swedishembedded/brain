@@ -162,6 +162,11 @@ impl GenTrainer {
         })
     }
 
+    /// What the decoder's backward keeps of its forward ([`Trained::set_saved_policy`]).
+    pub fn set_saved_policy(&mut self, policy: model::saved::SavedPolicy) -> Result<(), String> {
+        self.decoder.set_saved_policy(policy)
+    }
+
     /// The decoder, for saving its adapter.
     pub fn decoder(&self) -> &Trained {
         &self.decoder
@@ -452,6 +457,9 @@ pub fn finetune_generation(dir: &Path, dataset: &Path, opts: &GenOptions, progre
     }
     let base = qwen3::import::nested_source(&rd, deepseekvl::import::DECODER, &base_cfg)?;
     let mut trainer = GenTrainer::new(decoder_cfg, Box::new(base), o.dtype, block, parts, o.seed)?;
+    if let Some(policy) = o.saved {
+        trainer.set_saved_policy(policy)?;
+    }
 
     let fit = o.hyper.fit_opts(o.steps, 1, block, o.lr, o.seed);
     let schedule = model::train::LrSchedule::from(&fit);

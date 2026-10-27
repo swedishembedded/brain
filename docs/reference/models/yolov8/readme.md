@@ -57,7 +57,10 @@ brain yolov8 detect --weights out/yolo.safetensors --image photo.ppm --conf 0.25
 ```
 
 `brain yolov8 train`'s defaults are 200 steps, batch size 4, learning rate
-1e-3, weight decay 1e-2 - override as needed.
+1e-3, weight decay 1e-2 - override as needed. `train` and `fine-tune` take
+`--activations keep|recompute`: `recompute` keeps only each normed conv unit's
+input and rebuilds its intermediates in the backward, for the same gradients at
+lower memory.
 
 ### The training data
 

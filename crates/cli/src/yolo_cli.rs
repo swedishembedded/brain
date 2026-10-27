@@ -7,7 +7,8 @@
 //! instantiates the CPU backend today, see `Yolo::new`).
 //!
 //!   brain yolov8 train <data_dir> --out F [--steps N --batch B --lr X --nc C
-//!                                          --input S --seed S --arch tiny|yolov8n]
+//!                                          --input S --seed S --arch tiny|yolov8n
+//!                                          --activations keep|recompute]
 //!   brain yolov8 eval  --weights F --data <dir> [--split all|val --conf X --iou X
 //!                                                --dump-preds <path.jsonl>]
 //!   brain yolov8 detect --weights F --image <path> [--conf X --iou X --input S]
@@ -16,7 +17,7 @@
 //!          --identity-margin X --arcface-dir DIR]
 //!   brain yolov8 fine-tune <data_dir> --weights F --out F [--nc C
 //!         --freeze-backbone --freeze-reg-head --freeze-cls-hidden
-//!         --train-classes a,b,...]
+//!         --train-classes a,b,... --activations keep|recompute]
 //!
 //! `detect` takes the image at its OWN resolution and never wants a
 //! pre-letterboxed one: `Yolo::detect` letterboxes internally and inverts the
@@ -117,6 +118,8 @@ struct TrainCfg {
     freeze_cls_hidden: bool,
     /// Class ids allowed to learn; empty = all of them.
     train_classes: Vec<u32>,
+    /// `--activations`; `None` keeps the detector's own default.
+    activations: Option<model::saved::SavedPolicy>,
 }
 
 impl Default for TrainCfg {
@@ -136,14 +139,16 @@ impl Default for TrainCfg {
             freeze_reg_head: false,
             freeze_cls_hidden: false,
             train_classes: Vec::new(),
+            activations: None,
         }
     }
 }
 
 fn parse_train_flags(args: &[String], start: usize) -> TrainCfg {
     let (seed, rest) = crate::args::split_seed(args, "yolov8 train");
+    let (activations, rest) = crate::args::split_activations_or_exit(&rest, "brain yolov8 train");
     let args = &rest[..];
-    let mut cfg = TrainCfg { seed, ..TrainCfg::default() };
+    let mut cfg = TrainCfg { seed, activations, ..TrainCfg::default() };
     let mut i = start;
     while i < args.len() {
         match args[i].as_str() {
@@ -372,7 +377,7 @@ fn run_train_loop(model: &Yolo, data: &DetectData, cfg: &TrainCfg) -> (f32, f32)
 
 fn train(args: &[String], pretrained: Option<&str>) {
     let Some(dir) = args.first().cloned() else {
-        eprintln!("usage: brain yolov8 train <data_dir> --out F [--steps N --batch B --lr X --nc C --input S --seed S --arch tiny|yolov8n]");
+        eprintln!("usage: brain yolov8 train <data_dir> --out F [--steps N --batch B --lr X --nc C --input S --seed S --arch tiny|yolov8n] {}", crate::args::ACTIVATIONS_USAGE);
         return;
     };
     let cfg = parse_train_flags(args, 1);
@@ -394,6 +399,7 @@ fn train(args: &[String], pretrained: Option<&str>) {
     );
 
     let mut model = build_model(base_config(&cfg, pretrained, &data), &cfg, &data);
+    crate::args::apply_activations_or_exit(&mut model, cfg.activations, "brain yolov8 train");
     // Optional pretrained init for fine-tune: copy each matching tensor in,
     // widening the class head when this run adds classes.
     if let Some(path) = pretrained {
@@ -434,7 +440,7 @@ fn train(args: &[String], pretrained: Option<&str>) {
 fn fine_tune(args: &[String]) {
     // `fine-tune <data_dir> --weights <pretrained> --out F ...`
     if args.is_empty() {
-        eprintln!("usage: brain yolov8 fine-tune <data_dir> --weights <pretrained> --out F [--nc C --freeze-backbone --freeze-reg-head ...]");
+        eprintln!("usage: brain yolov8 fine-tune <data_dir> --weights <pretrained> --out F [--nc C --freeze-backbone --freeze-reg-head ...] {}", crate::args::ACTIVATIONS_USAGE);
         return;
     }
     let cfg = parse_train_flags(args, 1);
@@ -842,5 +848,23 @@ fn detect_via_npu(weights: &str, image: &str, conf: f32, iou: f32) {
 fn print_dets(dets: &[[f32; 6]]) {
     for d in dets {
         println!("[{:.2},{:.2},{:.2},{:.2},{:.4},{}]", d[0], d[1], d[2], d[3], d[4], d[5] as u32);
+    }
+}
+
+#[cfg(test)]
+mod activations_tests {
+    use super::parse_train_flags;
+
+    fn argv(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The data directory stays the first token and `--activations` is consumed, never "ignored".
+    #[test]
+    fn activations_are_taken_off_the_train_flags_and_default_to_the_detectors_own() {
+        let cfg = parse_train_flags(&argv(&["data", "--seed", "1", "--out", "w"]), 1);
+        assert_eq!(cfg.activations, None);
+        let cfg = parse_train_flags(&argv(&["data", "--seed", "1", "--activations", "recompute", "--out", "w"]), 1);
+        assert_eq!((cfg.activations, cfg.out.as_str()), (Some(model::saved::SavedPolicy::Recompute), "w"));
     }
 }

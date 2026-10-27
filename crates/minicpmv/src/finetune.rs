@@ -67,6 +67,9 @@ pub struct Options {
     pub checkpoint_every: u32,
     /// Continue from the output directory's saved state when one is there.
     pub resume: bool,
+    /// What the backward keeps of the forward in the parts that train ([`Trainer::set_saved_policy`]); `None` is
+    /// each part's own default. A choice a part cannot run fails the run before the first step.
+    pub saved: Option<model::saved::SavedPolicy>,
 }
 
 impl Options {
@@ -94,6 +97,7 @@ impl Options {
             max_frames: crate::video::MAX_NUM_FRAMES,
             checkpoint_every: 0,
             resume: false,
+            saved: None,
         }
     }
 }
@@ -275,7 +279,10 @@ fn run(gpu: &Gpu, job: Job, opts: &Options, progress: &mut dyn FnMut(&Event)) ->
     };
     let vision = crate::import::vision_weights(dir, &cfg)?;
     let decoder = qwen35::base_source::BaseCheckpoint { cfg: cfg.text.clone(), src: Box::new(crate::import::open_decoder(dir, &cfg)?) };
-    let t = Trainer::new(gpu, cfg, &vision, decoder, spec)?;
+    let mut t = Trainer::new(gpu, cfg, &vision, decoder, spec)?;
+    if let Some(policy) = opts.saved {
+        t.set_saved_policy(policy)?;
+    }
     drop(vision);
 
     let n = train_split.turns.len();

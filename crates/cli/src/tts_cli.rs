@@ -77,15 +77,16 @@ pub fn run_tts(args: &[String]) {
 /// LoRA fine-tune the Talker on a `text->codes` dataset (single-speaker SFT).
 ///
 ///   brain qwen3tts finetune --base out/tts/talker.safetensors --data data/tts --out out/tts/talker_lora.safetensors
-///                      [--steps N --lr X --rank R --alpha A --batch B --block T --seed S]
+///                      [--steps N --lr X --rank R --alpha A --batch B --block T --seed S --activations keep|recompute]
 fn finetune(args: &[String]) {
     let (seed, rest) = crate::args::split_seed(args, "qwen3tts finetune");
+    let (saved, rest) = crate::args::split_activations_or_exit(&rest, "brain qwen3tts finetune");
     let args = &rest[..];
     let mut base = "out/tts/talker.safetensors".to_string();
     let mut data_dir = "data/tts".to_string();
     let mut out = String::new();
     let mut full = false;
-    let mut o = qwen3tts::FinetuneOpts { seed, ..qwen3tts::FinetuneOpts::default() };
+    let mut o = qwen3tts::FinetuneOpts { seed, saved, ..qwen3tts::FinetuneOpts::default() };
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {

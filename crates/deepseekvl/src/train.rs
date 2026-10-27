@@ -151,6 +151,12 @@ impl Trainer {
         format!("{:?}", self.aligner.cfg())
     }
 
+    /// What the decoder's backward keeps of its forward ([`qwen3::finetune::Trained::set_saved_policy`]); the
+    /// aligner's activations are the same size whatever is chosen.
+    pub fn set_saved_policy(&mut self, policy: model::saved::SavedPolicy) -> Result<(), String> {
+        self.decoder.set_saved_policy(policy)
+    }
+
     /// The decoder, for saving its adapter.
     pub fn decoder(&self) -> &Trained {
         &self.decoder
@@ -259,6 +265,9 @@ pub struct Options {
     pub dtype: Dtype,
     /// Decay, clip, warmup and the floor of the cosine schedule.
     pub hyper: qwen3::finetune::LoraHyper,
+    /// What the decoder's backward keeps of its forward; `None` is the decoder's own default (it recomputes). A
+    /// choice the decoder cannot run is refused by name before the first step.
+    pub saved: Option<model::saved::SavedPolicy>,
 }
 
 /// A step's progress.
@@ -390,6 +399,9 @@ pub fn run(frontend: Frontend, rd: &WeightReader, aligner_prefix: &str, examples
     let base = qwen3::import::nested_source(rd, crate::import::DECODER, &base_cfg)?;
     let aligner_weights = crate::import::aligner_weights(rd, aligner_prefix, &aligner_cfg)?;
     let mut trainer = Trainer::new(decoder_cfg, Box::new(base), opts.dtype, block, aligner_cfg, aligner_weights, rows, opts.seed)?;
+    if let Some(policy) = opts.saved {
+        trainer.set_saved_policy(policy)?;
+    }
 
     let fit = opts.hyper.fit_opts(opts.steps, 1, block, opts.lr, opts.seed);
     let schedule = model::train::LrSchedule::from(&fit);

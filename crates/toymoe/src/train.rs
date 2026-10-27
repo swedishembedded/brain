@@ -987,9 +987,13 @@ pub struct TrainArgs {
     pub wd: f32,
     pub seed: u64,
     pub out: String,
+    /// What the backward keeps of the forward; `None` keeps every layer's activations. A choice the model cannot
+    /// run fails the run by name before the first step.
+    pub saved: Option<SavedPolicy>,
 }
 
-pub fn train(args: TrainArgs) {
+/// Train the toy MoE on its synthetic corpus and write the checkpoint to `args.out`.
+pub fn train(args: TrainArgs) -> Result<(), String> {
     let cfg = Config {
         vocab: 64, block_size: args.t, n_layers: 2, d_model: 64, n_heads: 4,
         n_experts: 4, top_k: 2, d_ff: 128, aux_coef: 0.01, z_coef: 1e-4,
@@ -1025,12 +1029,15 @@ pub fn train(args: TrainArgs) {
         eval_batches: 10,
         seed: args.seed,
         adam: MOE_ADAM,
+        precision: model::TrainPrecision { activations: args.saved, ..Default::default() },
         ..Default::default()
     };
     let out = std::path::Path::new(&args.out);
-    let _ = model::train::fit::<Trainer>(&dir, cfg, &opts, Some(out));
+    let fitted = model::train::fit::<Trainer>(&dir, cfg, &opts, Some(out));
     let _ = std::fs::remove_dir_all(&dir);
+    fitted.map_err(|e| e.to_string())?;
     println!("saved {}", args.out);
+    Ok(())
 }
 
 /// Arguments for training a single expert with a frozen backbone.
@@ -1043,19 +1050,24 @@ pub struct ExpertTrainArgs {
     pub t: u32,
     pub lr: f32,
     pub seed: u64,
+    /// What the backward keeps of the forward; `None` keeps every layer's activations.
+    pub saved: Option<SavedPolicy>,
 }
 
 /// Train one expert against an immutable shared backbone, starting from `base`.
 /// Writes a full updated `.safetensors` to `out`; the backbone and every other
 /// expert are left bit-for-bit unchanged. This is the federated worker step:
 /// load the common base, train your expert, return its shard.
-pub fn train_expert(args: ExpertTrainArgs) {
+pub fn train_expert(args: ExpertTrainArgs) -> Result<(), String> {
     let c = checkpoint::load(&args.base_weights);
     let cfg = cfg_from_json(&c.header["config"]);
     assert!(args.t <= cfg.block_size, "T must be <= block_size");
     assert!(args.expert < cfg.n_experts, "expert {} >= n_experts {}", args.expert, cfg.n_experts);
     let init = c.by_role("");
-    let trainer = Trainer::new(cfg.clone(), args.b, args.t, &init);
+    let mut trainer = Trainer::new(cfg.clone(), args.b, args.t, &init);
+    if let Some(policy) = args.saved {
+        trainer.set_saved_policy(policy)?;
+    }
 
     let (corpus, _table) = corpus_and_table(20_000, cfg.vocab, CORPUS_SEED);
     let mut rng = args.seed.max(1) ^ 0x9E3779B97F4A7C15;
@@ -1079,6 +1091,7 @@ pub fn train_expert(args: ExpertTrainArgs) {
     }
     trainer.save(&args.out);
     println!("saved expert-{} checkpoint {}", args.expert, args.out);
+    Ok(())
 }
 
 fn save_weights(trainer: &Trainer, cfg: &Config, path: &str) {

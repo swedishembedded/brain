@@ -25,7 +25,7 @@ pub fn run_wm(args: &[String]) {
         Some("finetune") => run_finetune(&args[1..]),
         Some("export") => run_export(&args[1..]),
         _ => {
-            eprintln!("usage: brain diamond <import|export|play|replay|bench> [options]");
+            eprintln!("usage: brain diamond <import|export|play|replay|bench|finetune> [options]");
             eprintln!("  import --arch diamond --src <agent.pt> --out <F.safetensors> [--actions-count N]");
             eprintln!("  export --arch diamond --weights <F.safetensors> --onnx <F.onnx>");
             eprintln!("  play  --model fake|diamond [--weights F.safetensors] [--device cpu|gpu|npu]");
@@ -37,6 +37,9 @@ pub fn run_wm(args: &[String]) {
             eprintln!("         [--device cpu|gpu|npu] [--onnx F.onnx] [--seed N] [--denoise-steps N]");
             eprintln!("         [--context N] [--tolerance T]]");
             eprintln!("  bench --model fake|diamond [--weights F] [--onnx F.onnx (npu)] [--frames N] [--seed N]");
+            eprintln!("  finetune --weights <base.safetensors> --data <episode-dir> --out <tuned.safetensors>");
+            eprintln!("        [--steps N] [--lr X] [--wd X] [--clip X] [--seed N] [--device cpu|gpu]");
+            eprintln!("        {}", crate::args::ACTIVATIONS_USAGE);
             std::process::exit(2);
         }
     }
@@ -69,7 +72,8 @@ fn finalize_recording(rec: RecorderSink, dir: &str) {
 }
 
 fn run_finetune(rest: &[String]) {
-    let mut a = Args::new(rest);
+    let (saved, rest) = crate::args::split_activations_or_exit(rest, "brain diamond finetune");
+    let mut a = Args::new(&rest);
     let weights = a.take_str("--weights").unwrap_or_else(|| {
         eprintln!("wm finetune needs --weights <base.safetensors>");
         std::process::exit(2);
@@ -100,7 +104,13 @@ fn run_finetune(rest: &[String]) {
     let nsc = cfg.num_steps_conditioning as usize;
     let frame_len = (cfg.img_channels * cfg.h * cfg.w) as usize;
 
-    let tr = diamond::train::DiamondTrainer::from_tensors(cfg.clone(), &tensors, device.as_deref());
+    let mut tr = diamond::train::DiamondTrainer::from_tensors(cfg.clone(), &tensors, device.as_deref());
+    if let Some(policy) = saved {
+        if let Err(e) = tr.set_saved_policy(policy) {
+            eprintln!("brain diamond finetune: {} {policy:?}: {e}", crate::args::ACTIVATIONS_FLAG);
+            std::process::exit(1);
+        }
+    }
     println!(
         "fine-tuning {} trainable conv tensors on {data_dir} ({steps} steps, lr {lr})",
         diamond::train::trainable_list(&cfg).len()

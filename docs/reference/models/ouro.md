@@ -22,6 +22,10 @@ brain ouro train --checkpoint <checkpoint> --steps 32 --seq 128 --batch 2 --lr 2
     --out trained.safetensors
 ```
 
+`--activations recompute` is what `train` already does: ouro rebuilds every
+layer of every pass from its residual in the backward, so `--activations keep`
+is refused by name before the first step.
+
 ## Training
 
 The objective is the released one: every pass's cross-entropy weighted by

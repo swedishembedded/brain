@@ -1092,6 +1092,11 @@ impl<M: Shardable> Model for PipelineModel<M> {
     fn init_weights(cfg: &Self::Config, seed: u64) -> HashMap<String, Vec<f32>> {
         M::init_weights(cfg, seed)
     }
+    /// Every stage takes the policy, so a pipelined build refuses exactly what one card's build refuses.
+    fn set_saved_policy(&mut self, policy: crate::saved::SavedPolicy) -> Result<(), String> {
+        let pipeline = self.pipeline_mut();
+        (0..pipeline.n_stages()).try_for_each(|i| pipeline.stage_mut(i).set_saved_policy(policy))
+    }
     fn config(&self) -> &Self::Config {
         &self.cfg
     }

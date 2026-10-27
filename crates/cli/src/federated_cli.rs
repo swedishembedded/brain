@@ -26,8 +26,10 @@ pub fn run_federated(args: &[String]) {
 /// Train one expert against a frozen backbone and emit an overlay shard dir.
 ///   brain federated train-expert --base B --expert E --out DIR
 ///                                [--steps N --batch B --block T --lr X --seed S]
+///                                [--activations keep|recompute]
 fn train_expert(args: &[String]) {
     let (seed, rest) = crate::args::split_seed(args, "federated train-expert");
+    let (saved, rest) = crate::args::split_activations_or_exit(&rest, "brain federated train-expert");
     let args = &rest[..];
     let mut base = String::new();
     let mut out = String::new();
@@ -51,7 +53,7 @@ fn train_expert(args: &[String]) {
         i += 1;
     }
     if base.is_empty() || out.is_empty() {
-        eprintln!("usage: brain federated train-expert --base <base.safetensors> --expert E --out <dir> [--steps N --batch B --block T --lr X --seed S]");
+        eprintln!("usage: brain federated train-expert --base <base.safetensors> --expert E --out <dir> [--steps N --batch B --block T --lr X --seed S] {}", crate::args::ACTIVATIONS_USAGE);
         return;
     }
 
@@ -62,7 +64,7 @@ fn train_expert(args: &[String]) {
     // Train expert E (frozen backbone) -> a full updated checkpoint, then keep
     // only that expert's shard (+ shared) as an overlay dir for `assemble`.
     let tmp_full = out_dir.join(".worker_full.safetensors");
-    toymoe::train::train_expert(toymoe::train::ExpertTrainArgs {
+    let trained = toymoe::train::train_expert(toymoe::train::ExpertTrainArgs {
         base_weights: base,
         expert,
         out: tmp_full.to_string_lossy().into_owned(),
@@ -71,7 +73,12 @@ fn train_expert(args: &[String]) {
         t,
         lr,
         seed,
+        saved,
     });
+    if let Err(e) = trained {
+        eprintln!("brain federated train-expert: {e}");
+        std::process::exit(1);
+    }
     match federated::split_filtered(tmp_full.to_str().unwrap(), out_dir, Some(&[expert])) {
         Ok(_) => {
             let _ = std::fs::remove_file(&tmp_full);

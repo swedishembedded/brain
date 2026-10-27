@@ -347,7 +347,7 @@ fn tuning_desc(t: &model::adapter::device::AdapterTuning) -> String {
 const FINETUNE_USAGE: &str = "usage: brain qwen35 finetune <data_dir> --base F|DIR --out F [--mode lora|full] [--lora-rank R --lora-alpha A --lora-variant V --lora-plus-ratio X --adapter-kind K] \
      [--base-format f32|bf16|nf4|fp8] [--seq-len T] [--recompute on|off] [--gdn-segment N] [--bf16-residuals on|off] [--mlp-rows N] \
      [--eval-interval N --eval-batches N] [--steps N --lr X --batch B --grad-accum G --warmup W --weight-decay X --grad-clip X --save-secs S --seed S --mask = --align] \
-     [--train-precision SPEC]
+     [--train-precision SPEC] [--activations keep|recompute]
   --train-precision  how a --mode full run stores what it trains, one model-agnostic value: state=f32|bf16|int8[:B] (device AdamW
                 moments), master=none|bf16|f32, grad=f32|bf16, sr=on|off, narrow=on|off (let the planner narrow the state), and for
                 the linears resident in a low-precision encoding weights=bf16|fp8[:B]|int8|nf4 with window=N (layers kept on the
@@ -360,6 +360,10 @@ const FINETUNE_USAGE: &str = "usage: brain qwen35 finetune <data_dir> --base F|D
   --lora-variant, --lora-plus-ratio  rsLoRA and LoRA-FA (--lora-variant rs,fa: scale alpha/sqrt(rank); A stays at its
                 init) and LoRA+ (B trains at X times the learning rate); a continued adapter must be continued with the same
   --recompute   recompute layer activations in the backward pass instead of keeping them (default on for bf16/nf4)
+  --activations what the backward keeps of the forward: keep every layer's activations or recompute them from each layer's input
+                (same gradients, lower memory). With --mode lora it is --recompute off|on by another name (naming both with
+                different values is refused); with --mode full it is the activations= key of --train-precision (naming both
+                with different values is refused). Absent leaves each trainer's own default
   --gdn-segment, --bf16-residuals, --mlp-rows  the long-sequence settings (segmented Gated-DeltaNet layers, bf16 residual
                 stream, MLP in token chunks) of a bf16/nf4 base. Rows of 2048 tokens or more at batch 1 get 2048 / on / 2048
                 by themselves; naming one replaces that choice (0 turns --gdn-segment and --mlp-rows off)
@@ -432,6 +436,7 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
     let naming = qwen35::finetune::AdapterNaming { id: a.take_str("--adapter-id"), name: a.take_str("--name") };
     let block_size = parse_num("--seq-len", aliased(&mut a, "--seq-len", "--block")?, model::FitOpts::default().block_size)?;
 
+    let activations = a.take_str(crate::args::ACTIVATIONS_FLAG).map(|value| crate::args::parse_activations(&value)).transpose()?;
     let precision = match a.take_str(crate::args::TRAIN_PRECISION_FLAG) {
         Some(spec) => model::TrainPrecision::parse(&spec).map_err(|e| format!("{} {spec:?}: {e}", crate::args::TRAIN_PRECISION_FLAG))?,
         None => model::TrainPrecision::default(),
@@ -440,7 +445,7 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
     let steps = a.u32_or("--steps", d.steps);
     let lr = a.f32_or("--lr", d.lr);
     let mask = a.char_opt("--mask");
-    let opts = model::FitOpts {
+    let mut opts = model::FitOpts {
         precision,
         steps,
         batch_size: a.u32_or("--batch", d.batch_size),
@@ -495,11 +500,27 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
             model::policy::format_name(base_dtype)
         ));
     }
+    // `--activations` is the full run's `activations=` precision key, and the LoRA run's `--recompute`.
+    let mut recompute_flag = recompute_flag;
+    if let Some(policy) = activations {
+        match mode {
+            qwen35::finetune::Mode::FullOffload => crate::args::merge_activations(Some(policy), &mut opts.precision)?,
+            qwen35::finetune::Mode::Lora { .. } => {
+                let wanted = policy == model::saved::SavedPolicy::Recompute;
+                if let Some(named) = recompute_flag.filter(|named| *named != wanted) {
+                    let word = |on: bool| if on { "on" } else { "off" };
+                    return Err(format!("{} {policy:?} conflicts with --recompute {}; name the choice once", crate::args::ACTIVATIONS_FLAG, word(named)));
+                }
+                recompute_flag = Some(wanted);
+            }
+        }
+    }
     if !opts.precision.is_default() && !matches!(mode, qwen35::finetune::Mode::FullOffload) {
         return Err(format!("{} describes how a full fine-tune stores what it trains: use it with --mode full", crate::args::TRAIN_PRECISION_FLAG));
     }
     if recompute_flag == Some(true) && !is_frozen_only(base_dtype) {
-        return Err("--recompute on: the f32 resident trainer keeps every layer's activations; recompute is available with a narrow --base-format (bf16, nf4 or fp8)".into());
+        let flag = if activations.is_some() { "--activations recompute" } else { "--recompute on" };
+        return Err(format!("{flag}: the f32 resident trainer keeps every layer's activations; recompute is available with a narrow --base-format (bf16, nf4 or fp8)"));
     }
     let recompute = recompute_flag.unwrap_or(is_frozen_only(base_dtype));
     if long != qwen35::finetune::LongSeqOverrides::default() && !is_frozen_only(base_dtype) {
@@ -767,6 +788,28 @@ mod finetune_cli_tests {
 
         let plain = parse_finetune(&argv(&["corpus", "--base", "b", "--out", "o"])).unwrap();
         assert_eq!((plain.base_dtype, plain.recompute), (Dtype::F32, false), "the default keeps the classic f32 trainer");
+    }
+
+    /// Spec: `--activations` is the full run's `activations=` precision key and the LoRA run's `--recompute`; naming
+    /// both spellings with different values is refused by name, and a bogus value is refused naming the flag.
+    #[test]
+    fn activations_route_to_the_precision_key_or_the_recompute_switch() {
+        let full = ["corpus", "--base", "b", "--out", "o"];
+        let with = |base: &[&str], extra: &[&str]| parse_finetune(&argv(&[base, extra].concat()));
+        assert_eq!(with(&full, &["--activations", "recompute"]).unwrap().opts.precision.activations, Some(model::saved::SavedPolicy::Recompute));
+        assert_eq!(with(&full, &[]).unwrap().opts.precision.activations, None, "absent leaves the trainer's own default");
+        let e = with(&full, &["--activations", "keep", "--train-precision", "activations=recompute"]).unwrap_err();
+        assert!(e.contains("--activations") && e.contains("--train-precision"), "{e}");
+        assert!(with(&full, &["--activations", "bogus"]).unwrap_err().contains("--activations"));
+
+        let lora = ["corpus", "--base", "b", "--out", "o", "--mode", "lora", "--base-dtype", "bf16"];
+        assert!(with(&lora, &["--activations", "recompute"]).unwrap().recompute);
+        assert!(!with(&lora, &["--activations", "keep"]).unwrap().recompute);
+        let e = with(&lora, &["--activations", "keep", "--recompute", "on"]).unwrap_err();
+        assert!(e.contains("--activations") && e.contains("--recompute"), "{e}");
+        let f32_lora = ["corpus", "--base", "b", "--out", "o", "--mode", "lora"];
+        let e = with(&f32_lora, &["--activations", "recompute"]).unwrap_err();
+        assert!(e.contains("--activations recompute") && e.contains("f32"), "{e}");
     }
 
     #[test]

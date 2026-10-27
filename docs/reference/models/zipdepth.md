@@ -93,6 +93,10 @@ brain zipdepth train --out out/zipdepth.safetensors --steps 50 --batch 2 --size 
 brain zipdepth train --out out/ft.safetensors --weights zipdepth_base.pth   # fine-tune
 ```
 
+`--activations keep|recompute` (default `keep`) sets what the backward keeps of
+the forward: every normed unit's intermediates, or only each unit's input,
+rebuilt in the backward for the same gradients at lower memory.
+
 ## Options
 
 | Flag / env | Effect |

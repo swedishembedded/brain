@@ -59,14 +59,16 @@ fn eval(args: &[String]) {
 }
 
 fn train(args: &[String]) {
-    let mut a = Args::new(args);
+    let (activations, args) = crate::args::split_activations_or_exit(args, "brain gpt2 train");
+    let mut a = Args::new(&args);
     let Some(dir) = a.positional() else {
-        eprintln!("usage: brain gpt2 train <data_dir> [flags]");
+        eprintln!("usage: brain gpt2 train <data_dir> [flags] {}", crate::args::ACTIVATIONS_USAGE);
         return;
     };
     let mut o = TrainOpts::default();
     let mut cfg = GptConfig { vocab: 0, block_size: o.block_size, n_layers: 4, d_model: 128, n_heads: 4, d_ff: 0 };
     let out = a.take_str("--out").map(PathBuf::from);
+    o.precision.activations = activations;
     o.steps = a.u32_or("--steps", o.steps);
     o.batch_size = a.u32_or("--batch", o.batch_size);
     o.block_size = a.u32_or("--block", o.block_size);

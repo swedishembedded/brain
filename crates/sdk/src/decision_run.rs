@@ -81,6 +81,9 @@ pub struct TrainRun {
     pub seed: u64,
     /// The commit of the code doing the training, recorded in the lineage.
     pub brain_commit: String,
+    /// What the backward keeps of the forward. `None` leaves the backend's own default (keep every layer's
+    /// intermediates); a choice the backend cannot run fails the run before the first step.
+    pub saved: Option<model::saved::SavedPolicy>,
 }
 
 impl TrainRun {
@@ -94,6 +97,7 @@ impl TrainRun {
             batch: DEFAULT_BATCH,
             seed: crate::random_seed(),
             brain_commit: "unknown".to_string(),
+            saved: None,
         }
     }
 }
@@ -156,6 +160,9 @@ pub fn train(run: &TrainRun, log: &mut dyn FnMut(usize, f32)) -> Result<TrainOut
 
     let mut pipeline = DecisionPipeline::builder(base_str).seed(run.seed).load()?;
     pipeline.set_encoder_frozen(run.freeze_encoder)?;
+    if let Some(policy) = run.saved {
+        pipeline.set_saved_policy(policy)?;
+    }
     let final_loss = pipeline.train_cases(&cases, run.steps, run.batch, run.seed, log)?;
 
     // Write beside the target and rename, so the output directory either

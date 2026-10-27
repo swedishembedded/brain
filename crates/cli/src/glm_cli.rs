@@ -79,7 +79,8 @@ fn preset(size: &str, block: u32) -> GlmConfig {
 }
 
 fn train(args: &[String], base: Option<&str>) {
-    let mut a = Args::new(args);
+    let (activations, args) = crate::args::split_activations_or_exit(args, if base.is_some() { "brain glm finetune" } else { "brain glm train" });
+    let mut a = Args::new(&args);
     let data_dir = a.positional().unwrap_or_default();
     let out = a.str_or("--out", "out/glm.safetensors");
     let steps = a.u32_or("--steps", 2000);
@@ -96,7 +97,7 @@ fn train(args: &[String], base: Option<&str>) {
     let align = a.take_flag("--align");
     a.finish();
     if data_dir.is_empty() {
-        eprintln!("usage: brain glm {{train|finetune}} <data_dir> --out F [--size tiny|small|base --steps N --batch B --block T --lr X --layers L --d-model D --heads H --experts E --mask = --align]");
+        eprintln!("usage: brain glm {{train|finetune}} <data_dir> --out F [--size tiny|small|base --steps N --batch B --block T --lr X --layers L --d-model D --heads H --experts E --mask = --align] {}", crate::args::ACTIVATIONS_USAGE);
         return;
     }
     let mut cfg = match base {
@@ -141,6 +142,7 @@ fn train(args: &[String], base: Option<&str>) {
         seed,
         adam: glmdsa::ADAM,
         gemm_precision: Default::default(),
+        precision: model::TrainPrecision { activations, ..Default::default() },
         ..Default::default()
     };
     if let Some(p) = base {
@@ -154,7 +156,10 @@ fn train(args: &[String], base: Option<&str>) {
     );
     match model::fit::<Glm>(Path::new(&data_dir), cfg, &opts, Some(Path::new(&out))) {
         Ok((l0, l1)) => println!("trained: loss {l0:.4} -> {l1:.4}; saved {out}"),
-        Err(e) => eprintln!("train error: {e}"),
+        Err(e) => {
+            eprintln!("train error: {e}");
+            std::process::exit(1);
+        }
     }
 }
 

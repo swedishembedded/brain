@@ -307,6 +307,7 @@ brain decide train --data decisions.jsonl --base sentence-transformers/all-MiniL
 | `--out DIR` | the checkpoint to create; it must not exist, and a failed run leaves nothing behind |
 | `--freeze-encoder` / `--finetune-encoder` | head only (the default) or encoder and head. A Laya base is always head only and `--finetune-encoder` is refused for it |
 | `--steps N`, `--batch N`, `--seed N` | optimizer updates (600), examples per update (16), seed (drawn at random and printed) |
+| `--activations keep\|recompute` | what the backward keeps of the forward: every layer's activations, or only each layer's input, rebuilt in the backward for the same gradients at lower memory. Absent keeps them; a backend that cannot run the choice refuses it by name |
 
 Each case brings its own question and options. A step draws cases at random
 and shows each one's options in a fresh seeded order, so a position never

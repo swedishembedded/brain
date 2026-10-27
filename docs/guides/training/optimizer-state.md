@@ -157,8 +157,7 @@ as a `model::saved::BlockStack`: under `Recompute` it holds every block's input
 and what a block's rebuild reads, and rebuilds each block's cache with its own
 block forward as the backward reaches it, one cache alive at a time
 (`check_block_recompute` is the per-trainer contract). The fine-tunes carry it
-as `TrainOpts::saved`; `brain wan finetune` and `brain flux2 finetune` take
-`--activations keep|recompute`. qwen3vl's caption fine-tune trains the Qwen3
+as `TrainOpts::saved`. qwen3vl's caption fine-tune trains the Qwen3
 decoder, which always recomputes.
 
 The remaining trainers share one set of layer intermediates and replay each
@@ -169,6 +168,18 @@ qwen3tts's talker always recompute. `make check/saved-policy` fails any crate
 that defines a backward without one of these mechanisms, unless
 `scripts/gates/saved-policy.allow` gives the reason it needs none (a backward
 that only gradient-checks a frozen component, or no layer stack).
+
+Every training verb of the `brain` CLI takes `--activations keep|recompute`
+(`crate::args::split_activations`): `gpt2`, `glmdsa`, `lfm2`, `ouro`, `toymoe`,
+`toypid`, `yolov8`, `zipdepth`, `qwen3` (train, finetune, `--lora`), `qwen35`,
+`qwen3tts`, `deepseekvl`, `januspro`, `minicpmv`, `diamond`, `decide`,
+`forecast finetune` (kronos, timesfm3), `federated train-expert`, `wan` and
+`flux2`. Absent leaves the trainer's own default, so a trainer that only
+recomputes is never forced onto `keep`; a choice the trainer cannot run is
+refused by name before the first step and the command exits non-zero. Where a
+verb also takes `--train-precision`, the flag and `activations=` spell the same
+choice and naming different values is refused. `qwen35` maps the flag to
+`--recompute` for `--mode lora`.
 
 A built model only narrows what it keeps.
 

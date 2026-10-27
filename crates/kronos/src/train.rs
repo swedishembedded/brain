@@ -1036,7 +1036,7 @@ impl KronosTrain {
 
 /// Fine-tuning hyper-parameters: the shared forecaster contract
 /// ([`forecast::finetune`]), with this model's adapter configuration.
-pub type FinetuneOpts = forecast::finetune::FinetuneOpts<LoraCfg>;
+pub type FinetuneOpts = forecast::finetune::FinetuneOpts<LoraCfg, Option<SavedPolicy>>;
 
 /// The gate decision of one fine-tune ([`forecast::finetune`]).
 pub type FinetuneReport = forecast::finetune::FinetuneReport;
@@ -1056,7 +1056,7 @@ pub fn finetune(
     train: &[TokenBatch],
     val: &[TokenBatch],
     opts: &FinetuneOpts,
-) -> (FinetuneReport, Option<HashMap<String, Vec<f32>>>) {
+) -> Result<forecast::FinetuneOutcome, String> {
     // One device for the whole finetune: base evaluation and the fine-tuned
     // trainer share it instead of each building their own.
     let dev = Gpu::new(PIPELINES);
@@ -1069,7 +1069,10 @@ pub fn finetune(
     // small universe still trains (never zero steps); a trailing partial group is
     // dropped each epoch (a fixed-`b` trainer can't take a short group).
     let bsz = opts.batch.max(1).min(train.len().max(1) as u32);
-    let ft = KronosTrain::with_lora_batch_on(dev, cfg.clone(), t, bsz, base_init, opts.lora.clone());
+    let mut ft = KronosTrain::with_lora_batch_on(dev, cfg.clone(), t, bsz, base_init, opts.lora.clone());
+    if let Some(policy) = opts.saved {
+        ft.set_saved_policy(policy)?;
+    }
     let groups = train.chunks_exact(bsz as usize);
     let dropped = train.len() % bsz as usize;
     let per_epoch = train.len() / bsz as usize;
@@ -1117,5 +1120,5 @@ pub fn finetune(
     let promoted = forecast::finetune::promoted(base_val, ft_val);
     // Return the fine-tuned weights unconditionally so the caller can also evaluate
     // generalization (held-out names); the caller saves iff `promoted`.
-    (FinetuneReport { promoted, base_val, ft_val, steps: step, lora_seed: opts.lora.as_ref().map(|lc| lc.seed) }, Some(ft_weights))
+    Ok((FinetuneReport { promoted, base_val, ft_val, steps: step, lora_seed: opts.lora.as_ref().map(|lc| lc.seed) }, Some(ft_weights)))
 }

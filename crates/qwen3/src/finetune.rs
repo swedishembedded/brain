@@ -331,6 +331,15 @@ impl Trained {
         }
     }
 
+    /// What the backward keeps of the forward, on every stage ([`model::Model::set_saved_policy`]): a Qwen3 decoder
+    /// always recomputes each layer from its residual, so recomputing is accepted and keeping is refused by name.
+    pub fn set_saved_policy(&mut self, policy: model::saved::SavedPolicy) -> Result<(), String> {
+        match self {
+            Trained::Single(m) => model::Model::set_saved_policy(&mut **m, policy),
+            Trained::Pipeline(m) => model::Model::set_saved_policy(&mut **m, policy),
+        }
+    }
+
     /// Splice each image's rows over its run of residual rows
     /// ([`Qwen::enable_mm_splices`]), on the stage that embeds.
     pub fn enable_mm_splices(&mut self, regions: &[(u32, u32)]) {

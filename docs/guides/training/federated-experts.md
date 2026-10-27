@@ -45,6 +45,9 @@ brain federated train-expert --base base.safetensors --expert 1 --out out/exp1 -
 brain federated assemble out/base out/exp0 out/exp1 --out out/final.safetensors
 ```
 
+`train-expert` takes `--activations keep|recompute` (what the backward keeps of
+the forward; absent keeps every layer's activations).
+
 Each `train-expert` runs independently and only needs `base.safetensors`, so you
 can train one shard at a time on a small machine (control per-step memory with
 `--batch`/`--block`).

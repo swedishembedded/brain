@@ -46,7 +46,7 @@ pub fn run_deepseekvl(args: &[String]) {
 
 pub(crate) const USAGE: &str = "usage: brain deepseekvl finetune --weights DIR|vendor/repo --dataset DIR --out DIR \
     [--rank N] [--alpha A] [--lora-targets wq,wk,...] [--steps N] [--lr X] [--aligner-lr X] [--block T] [--batch N] [--seed S] \
-    [--base-format f32|bf16|int8] [--weight-decay W] [--grad-clip C] [--warmup N] [--min-lr X] [--models-dir DIR]";
+    [--base-format f32|bf16|int8] [--weight-decay W] [--grad-clip C] [--warmup N] [--min-lr X] [--activations keep|recompute] [--models-dir DIR]";
 
 /// The flags `finetune` takes, parsed once.
 pub struct Args {
@@ -74,6 +74,7 @@ impl Args {
             batch: 1,
             dtype: qwen3::Dtype::BF16,
             hyper: qwen3::finetune::LoraHyper::default(),
+            saved: None,
         };
         let mut alpha = None;
         let mut i = 0;
@@ -103,6 +104,7 @@ impl Args {
                 "--grad-clip" => o.hyper.grad_clip = number(value()?)?,
                 "--warmup" => o.hyper.warmup = Some(number(value()?)? as u32),
                 "--min-lr" => o.hyper.min_lr = Some(number(value()?)?),
+                "--activations" => o.saved = Some(crate::args::parse_activations(&value()?)?),
                 other => return Err(format!("unknown flag {other:?}\n{USAGE}")),
             }
             i += 1;
@@ -174,6 +176,16 @@ mod tests {
         let a = Args::parse(&args(&["--weights", "w", "--dataset", "d", "--out", "o", "--seed", "1", "--base-format", "int8"])).unwrap();
         assert_eq!(a.options.dtype, qwen3::Dtype::I8);
         assert!(err(&["--weights", "w", "--dataset", "d", "--out", "o", "--steps"]).contains("needs a value"));
+    }
+
+    #[test]
+    fn activations_default_to_the_decoders_own_and_refuse_a_bogus_value_naming_the_flag() {
+        let base = ["--weights", "w", "--dataset", "d", "--out", "o", "--seed", "1"];
+        let with = |extra: &[&str]| Args::parse(&args(&[&base[..], extra].concat()));
+        assert_eq!(with(&[]).unwrap().options.saved, None);
+        assert_eq!(with(&["--activations", "recompute"]).unwrap().options.saved, Some(model::saved::SavedPolicy::Recompute));
+        assert_eq!(with(&["--activations", "keep"]).unwrap().options.saved, Some(model::saved::SavedPolicy::Keep));
+        assert!(with(&["--activations", "bogus"]).err().unwrap().contains("--activations"));
     }
 
     #[test]

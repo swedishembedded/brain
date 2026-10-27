@@ -76,6 +76,10 @@ brain forecast finetune \
   length).
 - `--epochs` / `--lr` — training length and learning rate.
 - `--lora RANK` — LoRA rank; omit for a full-parameter fine-tune.
+- `--activations keep|recompute` - what the backward keeps of the forward:
+  every layer's activations (the default), or only each layer's input, rebuilt
+  in the backward for the same gradients at lower memory. Kronos and
+  TimesFM-3 both take it.
 - `--out` — where to write the resulting checkpoint, if the fine-tune is
   promoted (see below).
 - `--skip-invalid` - train on the files that passed validation instead of

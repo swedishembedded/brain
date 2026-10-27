@@ -36,7 +36,7 @@ To serve a checkpoint, point `BRAIN_LFM2` (and `BRAIN_LFM2_TOKENIZER`) at it.
 brain lfm2 embed     --weights F --tokenizer tokenizer.json --text "..."
 brain lfm2 fill-mask --weights F --tokenizer tokenizer.json \
     --text "The capital of France is <|mask|>." --topk 5
-brain lfm2 finetune  --weights F --tokenizer tokenizer.json --data <dir> [...]
+brain lfm2 finetune  --weights F --tokenizer tokenizer.json --data <dir> [--activations keep|recompute] [...]
 brain lfm2 eval      --weights F --tokenizer tokenizer.json --data <dir>
 brain lfm2 data      --input corpus.txt --tokenizer tokenizer.json --out data/lfm
 ```

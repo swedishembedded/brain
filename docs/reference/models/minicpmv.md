@@ -93,6 +93,7 @@ Each part trains on its own:
 | `--downsample`, `--max-slices`, `--max-frames` | the processor options, as for `generate` |
 | `--checkpoint-every N`, `--resume` | save the whole training state every N steps (always at each epoch's end); `--resume` continues from it, drawing the same batches |
 | `--label owner:name:tag` / `--out DIR` | where the tune goes: beside the checkpoint in the model store under the label (served as `brain/minicpmv:<label>`), or a directory |
+| `--activations keep|recompute` | what the backward keeps of the forward in the parts that train: the decoder as `qwen35` does, and a vision tower that trains always rebuilds its blocks, so `keep` is refused by name there; absent leaves each part's default |
 | `--device gpuN`, `--seed S` | the card; the seed of the data order and adapter initialisation (random and printed when not given) |
 
 A tune directory holds `tune.json`, the decoder's LoRA adapter (or its full

@@ -159,6 +159,9 @@ pub struct FinetuneOpts {
     /// Seed of the adapter/weight init and the batch order; [`FinetuneOpts::default`]
     /// draws a fresh one. A resumed run must pass the seed its state was saved with.
     pub seed: u64,
+    /// What the backward keeps of the forward (`model::FitOpts::precision`'s `activations`); `None` is the Talker's
+    /// own default. The Talker recomputes each layer, so keeping is refused by name when the run starts.
+    pub saved: Option<model::saved::SavedPolicy>,
 }
 
 impl Default for FinetuneOpts {
@@ -179,6 +182,7 @@ impl Default for FinetuneOpts {
             rank: 8,
             alpha: 16.0,
             seed: data::rng::random_seed(),
+            saved: None,
         }
     }
 }
@@ -213,6 +217,7 @@ impl FinetuneOpts {
             cooldown_steps: 0,
             adam: Default::default(),
             gemm_precision: Default::default(),
+            precision: model::TrainPrecision { activations: self.saved, ..Default::default() },
             ..Default::default()
         }
     }

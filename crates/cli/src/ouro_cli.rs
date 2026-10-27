@@ -57,7 +57,8 @@ fn import(argv: &[String]) {
 /// AdamW step per batch. Prints the loss every step, so a falling loss is
 /// measurable evidence that the shared stack trains.
 fn train(argv: &[String]) {
-    let mut a = Args::new(argv);
+    let (activations, argv) = crate::args::split_activations_or_exit(argv, "brain ouro train");
+    let mut a = Args::new(&argv);
     let checkpoint = a.take_str("--checkpoint").or_else(|| a.take_str("--weights"));
     let tokenizer = a.take_str("--tokenizer");
     let text = a.str_or("--text", DEFAULT_TRAIN_TEXT);
@@ -74,7 +75,7 @@ fn train(argv: &[String]) {
     let out = a.take_str("--out");
     a.finish();
     let Some(checkpoint) = checkpoint else {
-        eprintln!("usage: brain ouro train --checkpoint <hf dir|checkpoint> [--steps N --seq N --batch N --lr F --clip F --out PATH]");
+        eprintln!("usage: brain ouro train --checkpoint <hf dir|checkpoint> [--steps N --seq N --batch N --lr F --clip F --out PATH] {}", crate::args::ACTIVATIONS_USAGE);
         std::process::exit(2);
     };
     let tokenizer = match ids {
@@ -162,7 +163,8 @@ fn train(argv: &[String]) {
         }),
     };
     let t0 = Instant::now();
-    let model = ouro::model::Ouro::new_train(cfg, b, t, src.as_ref());
+    let mut model = ouro::model::Ouro::new_train(cfg, b, t, src.as_ref());
+    crate::args::apply_activations_or_exit(&mut model, activations, "brain ouro train");
     model::Model::set_batch(&model, model::Batch::Lm { tokens: &tokens, targets: &targets });
     let mut first = None;
     for step in 0..steps {

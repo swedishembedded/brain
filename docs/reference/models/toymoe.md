@@ -56,7 +56,9 @@ workflow.
 ## Options
 
 - `--steps`, `--batch-size`, `--block-size`, `--lr`, `--weight-decay`,
-  `--seed`, `--out` — training.
+  `--seed`, `--out`, `--activations keep|recompute` (what the backward keeps
+  of the forward) - training; `federated train-expert` takes
+  `--activations` too.
 - `--seed`, `--samples` — eval.
 - `--prompt` (comma-separated token ids), `--max-new`, `--temperature`,
   `--top-k`, `--seed` — generation.

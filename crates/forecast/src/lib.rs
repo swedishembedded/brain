@@ -37,7 +37,7 @@ pub mod train_data;
 
 pub use backtest::{BacktestReport, BacktestRow, BacktestSpec};
 pub use csv::{parse_ohlcv, Bar, OhlcvSeries, Split, Stamp};
-pub use finetune::{promoted, FinetuneOpts, FinetuneReport};
+pub use finetune::{promoted, FinetuneOpts, FinetuneOutcome, FinetuneReport};
 pub use forecast::{Block, Forecast, TargetForecast};
 pub use panel::{Item, Kind, Panel, Role, Variate};
 

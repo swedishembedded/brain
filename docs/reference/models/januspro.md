@@ -56,7 +56,8 @@ brain januspro finetune --mode understanding|generation --weights deepseek-ai/Ja
 
 Both modes train a LoRA over the frozen bf16 decoder (`--base-format f32` to
 hold it at fp32) and read the checkpoint as downloaded; nothing is written
-beside it. The flags are `brain deepseekvl finetune`'s.
+beside it. The flags are `brain deepseekvl finetune`'s, `--activations
+keep|recompute` included.
 
 - **understanding** is that command's trainer with Janus-Pro's tower and
   roles: `DIR/train.jsonl` holds an `image` and the `messages` to learn,

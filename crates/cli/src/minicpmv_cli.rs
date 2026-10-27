@@ -86,7 +86,7 @@ fn export_peft(args: &[String]) -> Result<(), String> {
 pub(crate) const USAGE: &str = "usage: brain minicpmv finetune --dataset FILE.jsonl [--held-out FILE.jsonl] [--weights DIR|vendor/repo] \
     [--decoder frozen|full|lora:R[:A]] [--vision frozen|full|lora:R[:A]] [--freeze-connector] [--epochs N] [--batch N] [--lr X] \
     [--connector-lr X] [--vision-lr X] [--min-lr-ratio R] [--warmup N] [--weight-decay W] [--grad-clip C] [--block T] [--downsample 16x|4x] [--max-slices N] [--max-frames N] \
-    [--checkpoint-every N] [--resume] [--label owner:name:tag] [--out DIR] [--device gpuN] [--models-dir DIR] [--seed S]";
+    [--checkpoint-every N] [--resume] [--activations keep|recompute] [--label owner:name:tag] [--out DIR] [--device gpuN] [--models-dir DIR] [--seed S]";
 
 const DEFAULT_WEIGHTS: &str = "openbmb/MiniCPM-V-4.6";
 const DEFAULT_LABEL: &str = "local:minicpmv-tune:latest";
@@ -146,6 +146,7 @@ impl Args {
                 "--max-frames" => o.max_frames = whole(value()?)?,
                 "--checkpoint-every" => o.checkpoint_every = whole(value()?)?,
                 "--resume" => o.resume = true,
+                "--activations" => o.saved = Some(crate::args::parse_activations(&value()?)?),
                 other => return Err(format!("unknown flag {other:?}\n{USAGE}")),
             }
             i += 1;
@@ -230,6 +231,14 @@ mod tests {
         assert!(err(&["--dataset", "d", "--seed", "1", "--batch", "0"]).contains("--batch"));
         let r = Args::parse(&args(&["--dataset", "d", "--seed", "1", "--vision", "full", "--connector-lr", "3e-5"])).unwrap().options.rates();
         assert_eq!((r.decoder, r.connector, r.vision), (1e-4, 3e-5, 1e-4 / 50.0), "a full tower defaults to a fiftieth of the LoRA rate");
+    }
+
+    #[test]
+    fn activations_default_to_each_parts_own_and_refuse_a_bogus_value_naming_the_flag() {
+        let with = |extra: &[&str]| Args::parse(&args(&[&["--dataset", "d", "--seed", "1"][..], extra].concat()));
+        assert_eq!(with(&[]).unwrap().options.saved, None);
+        assert_eq!(with(&["--activations", "recompute"]).unwrap().options.saved, Some(model::saved::SavedPolicy::Recompute));
+        assert!(with(&["--activations", "bogus"]).err().unwrap().contains("--activations"));
     }
 
     #[test]

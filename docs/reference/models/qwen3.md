@@ -162,7 +162,9 @@ RAM, so the card holds the weights and their gradients (fp32): a 1.3B-1.5B
 decoder trains on one 24 GB card. `F` is a brain checkpoint (rerun with the
 same `--out` to continue it; `brain qwen3 export` writes it back as a
 `transformers` directory). `<data_dir>` is a token dataset
-(`train.u32.bin`, `val.u32.bin`, `meta.json`).
+(`train.u32.bin`, `val.u32.bin`, `meta.json`). `--activations keep|recompute`
+sets what the backward keeps of the forward; the decoder always recomputes each
+layer, so `keep` is refused by name.
 
 ### LoRA adapters
 

@@ -42,6 +42,9 @@ pub struct TrainCfg {
     pub wd: f32,
     pub seed: u64,
     pub fixed_batch: bool,
+    /// What the backward keeps of the forward; `None` keeps every unit's intermediates. A choice the net cannot
+    /// run is refused by name before the first step ([`crate::ZipDepth::set_saved_policy`]).
+    pub saved: Option<model::saved::SavedPolicy>,
 }
 
 /// What a run reports: the loss at the first and last step.
@@ -116,16 +119,19 @@ fn synth_batch(t: &TrainCfg, step: u32) -> (Vec<f32>, Vec<f32>) {
 /// Run the loop: build the model at `(t.h, t.w)`, seed the params from `init`
 /// (fresh `init_weights` or a loaded checkpoint for fine-tune), and step.
 /// `on_step(step, loss)` fires every step (progress printing, test capture).
-/// Returns the trained `ParamStore` (the caller saves it) and the loss report.
+/// Returns the trained `ParamStore` (the caller saves it) and the loss report, or the refusal of `t.saved`.
 pub fn train_loop(
     gpu: &Gpu,
     cfg: ZipConfig,
     t: &TrainCfg,
     init: &HashMap<String, Vec<f32>>,
     mut on_step: impl FnMut(u32, f32),
-) -> (ParamStore, Trained) {
+) -> Result<(ParamStore, Trained), String> {
     let ctx = Ctx::new(gpu, crate::net::ids());
     let m = ZipDepth::build_hw(&ctx, cfg, t.batch, t.h, t.w, true);
+    if let Some(policy) = t.saved {
+        m.set_saved_policy(policy)?;
+    }
     // Track BN running stats so eval-mode inference on the saved weights works.
     m.set_update_running(true);
     let ps = ParamStore::new(gpu, m.param_list(), init);
@@ -167,5 +173,5 @@ pub fn train_loop(
         last = loss;
         on_step(step, loss);
     }
-    (ps, Trained { first_loss: first, last_loss: last })
+    Ok((ps, Trained { first_loss: first, last_loss: last }))
 }

@@ -3,6 +3,10 @@
 
 //! CLI for the PID event/effect transformer: train / rollout / profile.
 //! Dispatched from `main` via `brain toypid <action> ...`.
+//!
+//! `train` flags: `--steps --effective-batch --seq-steps --seq-len --d-model --layers --heads --lr --weight-decay
+//! --n-traj --traj-len --mem-budget --out --checkpoint-every --seed` and `--activations keep|recompute` (what the
+//! backward keeps of the forward; absent leaves the model's own default).
 
 use std::collections::HashMap;
 
@@ -45,6 +49,8 @@ struct TrainCfg {
     mem_budget: u64,
     out: String,
     ckpt_every: u32,
+    /// `--activations`; `None` keeps the model's own default.
+    activations: Option<model::saved::SavedPolicy>,
 }
 
 /// Memory-budgeted microbatch + accumulation planner.
@@ -74,6 +80,7 @@ fn plan_batch(cfg: &PidConfig, t: u32, eff_batch: u32, budget: u64) -> (u32, u32
 
 fn parse_train(args: &[String]) -> TrainCfg {
     let (seed, rest) = crate::args::split_seed(args, "pid train");
+    let (activations, rest) = crate::args::split_activations_or_exit(&rest, "brain toypid train");
     let args = &rest[..];
     let mut c = TrainCfg {
         steps: 2000,
@@ -91,6 +98,7 @@ fn parse_train(args: &[String]) -> TrainCfg {
         mem_budget: 4u64 << 30,
         out: "moe_pid.safetensors".to_string(),
         ckpt_every: 100,
+        activations,
     };
     let mut i = 0;
     while i < args.len() {
@@ -143,7 +151,8 @@ fn train(args: &[String]) {
     let plants = pid_data::training_plants();
     let ds = pid_data::PidDataset::new(&plants, tc.n_traj, tc.traj_len, tc.seq_steps as usize, t_pad as usize, tc.seed);
     let init = pid_data::init_weights(&cfg, tc.seed);
-    let model = Pid::new(cfg.clone(), b_micro, t_pad, &init);
+    let mut model = Pid::new(cfg.clone(), b_micro, t_pad, &init);
+    crate::args::apply_activations_or_exit(&mut model, tc.activations, "brain toypid train");
 
     let mut rng = Rng::new(tc.seed ^ 0xABCD_1234);
     for step in 1..=tc.steps {
@@ -268,6 +277,14 @@ fn profile(args: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activations_are_taken_off_the_train_flags_and_default_to_the_models_own() {
+        let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(parse_train(&argv(&["--seed", "1", "--steps", "3"])).activations, None);
+        let tc = parse_train(&argv(&["--seed", "1", "--activations", "recompute", "--steps", "3"]));
+        assert_eq!((tc.activations, tc.steps), (Some(model::saved::SavedPolicy::Recompute), 3));
+    }
 
     #[test]
     fn batch_planner_budget_and_divisibility() {

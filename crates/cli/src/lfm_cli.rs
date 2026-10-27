@@ -80,7 +80,8 @@ fn data_prep(argv: &[String]) {
 }
 
 fn finetune(argv: &[String]) {
-    let mut a = Args::new(argv);
+    let (activations, argv) = crate::args::split_activations_or_exit(argv, "brain lfm2 finetune");
+    let mut a = Args::new(&argv);
     let weights = a.take_str("--weights");
     let tokenizer = a.take_str("--tokenizer");
     let data_dir = a.str_or("--data", "data/lfm");
@@ -92,7 +93,7 @@ fn finetune(argv: &[String]) {
     let seed = a.seed("lfm2 finetune");
     a.finish();
     let (Some(weights), Some(tokenizer)) = (weights, tokenizer) else {
-        eprintln!("usage: brain lfm2 finetune --weights F --tokenizer T [--data D --out F --steps N --batch B --seq T --lr X --seed K]");
+        eprintln!("usage: brain lfm2 finetune --weights F --tokenizer T [--data D --out F --steps N --batch B --seq T --lr X --seed K] {}", crate::args::ACTIVATIONS_USAGE);
         std::process::exit(2);
     };
     let tok = load_tokenizer(&tokenizer);
@@ -105,13 +106,14 @@ fn finetune(argv: &[String]) {
     // Long sequences train on the chunked regime: bounded [H,chunk,T] attention
     // slabs + the gathered supervised-row MLM head (full T×T scores and
     // [n,vocab] logits both exceed the ~2 GiB binding budget at 8k).
-    let m = if seq > 2048 {
+    let mut m = if seq > 2048 {
         let head_cap = ((batch * seq) as f32 * 0.35) as u32 + 64;
         Lfm::load_train_chunked(&weights, batch, seq, 512 << 20, head_cap)
     } else {
         Lfm::load_train(&weights, batch, seq)
     };
     eprintln!("loaded trainable model in {:.1}s (b={batch}, t={seq})", t0.elapsed().as_secs_f64());
+    crate::args::apply_activations_or_exit(&mut m, activations, "brain lfm2 finetune");
     let opts = lfm2::train::MlmTrainOpts { steps, lr, seed, ..Default::default() };
     let val_loss = lfm2::train::finetune(&m, &train, &val, &mlm, batch, seq, &opts, &mut |line| eprintln!("{line}"));
     if let Some(parent) = std::path::Path::new(&out).parent() {

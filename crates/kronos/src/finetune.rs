@@ -11,7 +11,7 @@
 //! on a held-out (embargoed) split.
 
 use crate::generate::KronosModel;
-use crate::train::{finetune, FinetuneOpts, FinetuneReport, KronosTrain, TokenBatch};
+use crate::train::{finetune, FinetuneOpts, KronosTrain, TokenBatch};
 use forecast::train_data::{self, Series, SplitConfig, Window, WindowRef};
 use std::collections::HashMap;
 
@@ -64,7 +64,7 @@ pub fn finetune_universe(
     horizon: usize,
     split: SplitConfig,
     opts: &FinetuneOpts,
-) -> (FinetuneReport, Option<HashMap<String, Vec<f32>>>) {
+) -> Result<forecast::FinetuneOutcome, String> {
     let windows = train_data::enumerate_windows(series, context, horizon);
     let sp = train_data::temporal_split(series, &windows, horizon, split);
     let tok = |ws: &[WindowRef]| -> Vec<TokenBatch> {
@@ -169,12 +169,30 @@ mod tests {
         let (model, base) = tiny_model();
         let series: Vec<Series> = (0..3).map(|i| synth_series(&format!("S{i}"), 120)).collect();
         let split = SplitConfig { train_frac: 0.6, val_frac: 0.25, embargo: 5 };
-        let opts = FinetuneOpts { epochs: 2, lr: 1e-3, wd: 0.0, clip: 3.0, lora: None, batch: 2, progress: false };
-        let (rep, w) = finetune_universe(&model, &base, &series, 10, 3, split, &opts);
+        let opts = FinetuneOpts { epochs: 2, lr: 1e-3, wd: 0.0, clip: 3.0, lora: None, batch: 2, progress: false, saved: None };
+        let (rep, w) = finetune_universe(&model, &base, &series, 10, 3, split, &opts).unwrap();
         // plumbing must run and produce a well-formed decision.
         assert!(rep.base_val.is_finite() && rep.ft_val.is_finite());
         assert!(rep.steps > 0, "no training steps ran (no train windows tokenized)");
         assert!(w.is_some(), "fine-tuned weights are always returned");
         eprintln!("universe finetune: base {:.3} ft {:.3} promoted {} steps {}", rep.base_val, rep.ft_val, rep.promoted, rep.steps);
+    }
+
+    /// Spec: the fine-tune takes the saved-activation policy; a run that recomputes trains, and a choice the trainer
+    /// cannot run fails the fine-tune by name before any step.
+    #[test]
+    fn finetune_takes_the_saved_activation_policy_and_refuses_what_it_cannot_run() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        use model::saved::{SavedFormat, SavedPolicy};
+        let (model, base) = tiny_model();
+        let series: Vec<Series> = (0..3).map(|i| synth_series(&format!("S{i}"), 120)).collect();
+        let split = SplitConfig { train_frac: 0.6, val_frac: 0.25, embargo: 5 };
+        let with = |saved| FinetuneOpts { epochs: 1, lr: 1e-3, wd: 0.0, clip: 3.0, lora: None, batch: 2, progress: false, saved: Some(saved) };
+        let (rep, _) = finetune_universe(&model, &base, &series, 10, 3, split, &with(SavedPolicy::Recompute)).unwrap();
+        assert!(rep.steps > 0 && rep.ft_val.is_finite());
+        let refused = finetune_universe(&model, &base, &series, 10, 3, split, &with(SavedPolicy::Quantized(SavedFormat::Bf16))).unwrap_err();
+        assert!(refused.contains("kronos"), "{refused}");
     }
 }

@@ -119,10 +119,13 @@ LoRA fine-tuning (single-speaker) of the Talker on a `text -> codes` dataset:
 ```bash
 brain qwen3tts finetune --base out/tts/talker.safetensors --data data/tts \
   --out out/tts/talker_lora.safetensors \
-  [--steps N --lr X --rank R --alpha A --batch B --block T --seed S]
+  [--steps N --lr X --rank R --alpha A --batch B --block T --seed S --activations keep|recompute]
 ```
 
-This freezes the base Talker and trains attention adapters only.
+This freezes the base Talker and trains attention adapters only. The Talker
+rebuilds each layer in the backward whatever is asked, so `--activations
+recompute` is accepted and `--activations keep` is refused by name before the
+first step.
 
 ## Options
 

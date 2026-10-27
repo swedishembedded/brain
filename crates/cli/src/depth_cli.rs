@@ -157,7 +157,8 @@ USAGE:
   brain zipdepth --image <img>  --weights <ckpt.pth> [options]   # single image
   brain zipdepth --camera       --weights <ckpt.pth> [options]   # realtime webcam
   brain zipdepth train --out <w.safetensors> [--steps N --batch B --lr X --size WxH
-                     --seed S --wd X --weights <init.pth>]    # train / fine-tune
+                     --seed S --wd X --weights <init.pth>
+                     --activations keep|recompute]            # train / fine-tune
                     (synthetic RGB->depth pairs; loss printed per step)
 
 OPTIONS:
@@ -178,6 +179,9 @@ OPTIONS:
   --out <path>         PPM output path (default out/depth.ppm)
   --bench <n>          after the first (cold) inference, run n more and report
                        per-frame ms (min/median/mean) - steady-state timing
+  --activations keep|recompute   (train) what the backward keeps of the forward: every
+                       unit's intermediates (default), or only each unit's input,
+                       rebuilt in the backward for the same gradients at lower memory
   --input <n>          model input (shorter side; default = the checkpoint's
                        native 384). The net is fully convolutional, so smaller
                        inputs are valid and faster - work scales with n²
@@ -672,6 +676,7 @@ fn run_camera(_args: &[String]) {
 /// released checkpoint (fine-tune), otherwise fresh `init_weights`.
 fn run_train(args: &[String]) {
     let (seed, rest) = crate::args::split_seed(args, "zipdepth train");
+    let (saved, rest) = crate::args::split_activations_or_exit(&rest, "brain zipdepth train");
     let args = &rest[..];
     let mut steps = 50u32;
     let mut batch = 2u32;
@@ -734,7 +739,7 @@ fn run_train(args: &[String]) {
 
     let upsample_unfold = cfg.upsample_unfold; // captured before cfg moves into train_loop below
     let gpu = Gpu::new(zipdepth::net::PIPELINES);
-    let t = zipdepth::train::TrainCfg { steps, batch, h, w, lr, wd, seed, fixed_batch: false };
+    let t = zipdepth::train::TrainCfg { steps, batch, h, w, lr, wd, seed, fixed_batch: false, saved };
     println!(
         "training zipdepth on synthetic pairs: {w}x{h} batch={batch} steps={steps} lr={lr} ({})",
         if weights.is_empty() { "fresh init" } else { &weights }
@@ -743,6 +748,10 @@ fn run_train(args: &[String]) {
         if step == 0 || (step + 1) % 10 == 0 || step + 1 == steps {
             println!("step {:>5}/{steps}  loss {loss:.4}", step + 1);
         }
+    })
+    .unwrap_or_else(|e| {
+        eprintln!("brain zipdepth train: {} {saved:?}: {e}", crate::args::ACTIVATIONS_FLAG);
+        std::process::exit(1);
     });
 
     let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = ps

@@ -501,7 +501,9 @@ pub fn run_eval(flags: &[String]) {
     println!("new-orbit acc by context length: {}", s.join("  "));
 }
 
-pub fn run_train(flags: &[String]) {
+/// `brain toymoe train`: `flags` are the training flags, `saved` the `--activations` choice the caller parsed
+/// (`None` keeps the model's default). A refused choice or a failed run exits 1.
+pub fn run_train(flags: &[String], saved: Option<model::saved::SavedPolicy>) {
     let mut a = train::TrainArgs {
         steps: 2000,
         b: 16,
@@ -510,6 +512,7 @@ pub fn run_train(flags: &[String]) {
         wd: 0.1,
         seed: data::rng::random_seed(),
         out: "moe_rs.safetensors".to_string(),
+        saved,
     };
     let mut seed_given = false;
     let mut i = 0;
@@ -533,7 +536,10 @@ pub fn run_train(flags: &[String]) {
     if !seed_given {
         announce_drawn_seed("toymoe train", a.seed);
     }
-    train::train(a);
+    if let Err(e) = train::train(a) {
+        eprintln!("toymoe train: {e}");
+        std::process::exit(1);
+    }
 }
 
 pub fn run_generate() {

@@ -63,7 +63,8 @@ brain diamond bench --model fake|diamond [--weights F] [--onnx F.onnx] [--frames
 
 # fine-tune on a recorded episode dataset
 brain diamond finetune --weights <base.safetensors> --data <episode-dir> --out <tuned.safetensors> \
-    [--steps N] [--lr F] [--wd F] [--clip F] [--seed N] [--device cpu|gpu]
+    [--steps N] [--lr F] [--wd F] [--clip F] [--seed N] [--device cpu|gpu] \
+    [--activations keep|recompute]
 ```
 
 ## Options

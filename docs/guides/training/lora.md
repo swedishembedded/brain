@@ -30,6 +30,11 @@ brain qwen3 finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG] --dat
   chat template. Only the messages marked as trainable in a given example
   contribute to the loss, so a dataset can mix turns you want the model to
   learn from with context turns it shouldn't be scored against.
+- `--activations keep|recompute` - what the backward keeps of the forward. A
+  Qwen3 decoder always recomputes each layer, so `recompute` is accepted and
+  `keep` is refused by name before the first step. `brain qwen3 train` and
+  `brain qwen3 finetune` (full) take it too, also as `activations=` in
+  `--train-precision`; naming both with different values is refused.
 
 This target is also wrapped by `make qwen/finetune DATASET=<dir>
 ADAPTER=<owner/name[:tag]>`, which builds the release binary first.
@@ -66,6 +71,9 @@ brain qwen35 finetune DATA_DIR --base BASE --out OUT --mode lora [--base-format 
 - `--recompute` - recompute layer activations in the backward pass instead of
   keeping them; the default for `bf16` and `nf4`. The `f32` resident trainer
   keeps all activations, so `--recompute on` is refused there.
+- `--activations keep|recompute` - the same choice as `--recompute off|on` for a
+  `--mode lora` run (naming both with different values is refused), and the
+  `activations=` key of `--train-precision` for a `--mode full` run.
 - `--backend cuda|cpu|vulkan` is the global backend flag, as for every command.
 
 - `--gdn-segment`, `--bf16-residuals`, `--mlp-rows` - the long-sequence

@@ -91,10 +91,14 @@ pub(crate) fn catalog_id_for_arch_handler(id: &str) -> String {
 /// The bare sparse-MoE toy model used to be three unrelated top-level
 /// commands (`brain train`, `brain eval`, `brain generate`, no shared verb
 /// dispatch). Folded into one handler so it fits [`ARCH_HANDLERS`]'s shape;
-/// `toymoe::run_train`/`run_eval`/`run_generate` themselves are untouched.
+/// `toymoe::run_train`/`run_eval`/`run_generate` themselves are untouched, but for `train` taking the
+/// `--activations` choice parsed here.
 fn run_toymoe(args: &[String]) {
     match args.first().map(String::as_str) {
-        Some("train") => toymoe::run_train(&args[1..]),
+        Some("train") => {
+            let (saved, rest) = crate::args::split_activations_or_exit(&args[1..], "brain toymoe train");
+            toymoe::run_train(&rest, saved);
+        }
         Some("eval") => toymoe::run_eval(&args[1..]),
         Some("infer" | "generate" | "gen" | "sample") => toymoe::run_generate(),
         other => eprintln!("usage: brain toymoe <train|eval|infer> ...  (got {other:?})"),
