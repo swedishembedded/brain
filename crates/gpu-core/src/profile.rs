@@ -862,9 +862,14 @@ impl ArithmeticAudit {
     /// The CUDA-core products no declared exception covers: the hot kernels that fell back to fp32. `exceptions` are kernel
     /// names (specialisation suffixes and the `native:` prefix ignored) a pass is allowed to run on CUDA cores, each with a
     /// reason at the call site.
+    /// An exception ending in `*` covers every kernel whose name starts with the rest (a library product's name carries its shape).
     pub fn fallbacks<'a>(&'a self, exceptions: &[&str]) -> Vec<&'a (String, f64)> {
         let base = |n: &str| n.strip_prefix("native:").unwrap_or(n).split('#').next().unwrap_or(n).to_string();
-        self.cuda_core_products.iter().filter(|(n, _)| !exceptions.iter().any(|e| base(n) == *e)).collect()
+        let allowed = |n: &str, e: &str| match e.strip_suffix('*') {
+            Some(prefix) => n.starts_with(prefix),
+            None => base(n) == e,
+        };
+        self.cuda_core_products.iter().filter(|(n, _)| !exceptions.iter().any(|e| allowed(n, e))).collect()
     }
 
     /// One line for a report.
@@ -913,5 +918,7 @@ mod arithmetic_tests {
         let fallbacks = audit.fallbacks(&["matmul_gemv_reg"]);
         assert_eq!(fallbacks.iter().map(|f| f.0.as_str()).collect::<Vec<_>>(), ["matmul_reg3"]);
         assert!(audit.fallbacks(&["matmul_gemv_reg", "matmul_reg3"]).is_empty());
+        let rows = vec![("library_gemm 8x16x128 F32.F32.F32 tA b1".to_string(), 1.0, 1)];
+        assert!(ArithmeticAudit::of(&rows).fallbacks(&["library_gemm *"]).is_empty(), "a trailing * covers a name prefix");
     }
 }

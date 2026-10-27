@@ -58,6 +58,7 @@
 
 use checkpoint::TensorSource;
 use gpu_core::select::Dtype;
+use gpu_core::provider::library::{F32Product, GemmPrecision, LibraryGemmProvider, Operand};
 use gpu_core::tape::Tape;
 use gpu_core::{BufUsage, DeviceBuffer, Gpu, Step};
 use model::block::{self, ChunkPaging};
@@ -176,6 +177,8 @@ struct Lin {
 struct MoeLayer {
     /// `[E, d]` fp32: the router's hard top-k decision is never quantised (see `Engine::exact`).
     router: Lin,
+    /// The same weights as a plain buffer, for the fast tier's exact fp32 library product.
+    router_f32: DeviceBuffer,
     experts: Experts,
     sh_gate: Lin,
     sh_up: Lin,
@@ -290,6 +293,8 @@ pub struct Engine {
     ops: Ops,
     /// Always fp32 arithmetic (never TF32): the router, whose top-k is a hard decision a rounded logit can flip.
     exact: Ops,
+    /// The vendor library's fp32 product the fast tier routes with (`None` where the device has no library).
+    router_gemm: Option<LibraryGemmProvider>,
     cfg: DeepseekV2Config,
     ec: EngineConfig,
     fast: bool,
@@ -395,6 +400,7 @@ impl Engine {
                 let sf = c.shared_ff();
                 Mlp::Moe(Box::new(MoeLayer {
                     router: Lin { w: Weight::upload_from(&exact, src, &p("mlp.router.weight"), e as usize, d as usize, Dtype::F32)?, k: d },
+                    router_f32: upload(&p("mlp.router.weight"), (e * d) as usize)?,
                     experts,
                     sh_gate: linear(&p("mlp.shared.gate.weight"), sf, d)?,
                     sh_up: linear(&p("mlp.shared.up.weight"), sf, d)?,
@@ -479,7 +485,8 @@ impl Engine {
         let ro = ReadoutKernels::resolve(g)?;
         let slot_kernels = fast.then(|| SlotKernels::resolve(g)).transpose()?;
         let alloc = BlockAllocator::new(num_blocks, ec.block_size);
-        Ok(Engine { tapes: Vec::new(), decode_tapes: true, tape_stats: TapeStats::default(), gpu, ops, exact, cfg, ec, fast, ids, tok, norm, head, layers, kvk, kv, alloc, max_bt, sc, ro, slot_kernels, grouped_ids, moe_ids })
+        let router_gemm = fast.then(|| LibraryGemmProvider::for_gpu(g, GemmPrecision::Auto)).filter(LibraryGemmProvider::is_active);
+        Ok(Engine { router_gemm, tapes: Vec::new(), decode_tapes: true, tape_stats: TapeStats::default(), gpu, ops, exact, cfg, ec, fast, ids, tok, norm, head, layers, kvk, kv, alloc, max_bt, sc, ro, slot_kernels, grouped_ids, moe_ids })
     }
 
     /// Whether this engine runs the tensor-core tier.
@@ -567,7 +574,15 @@ impl Engine {
             }
             Mlp::Moe(m) => {
                 // The router is fp32 in both tiers: a quantisation-noised logit can flip which experts are chosen.
-                self.exact.matmul(s, &m.router.w, &self.exact.act_f32(&sc.xn2, 0, n, d), &sc.router_logits, 0);
+                // The fast tier takes the library's exact fp32 product (the 64-column output is one 128x128 tile of the in-house kernel,
+                // i.e. one multiprocessor: 0.12 ms a layer); the reference tier keeps the in-house kernel it is stated against.
+                let library = self.router_gemm.as_ref().filter(|_| self.fast).is_some_and(|p| {
+                    let (x, w, y) = (Operand { buf: &sc.xn2, range: (0, 0) }, Operand { buf: &m.router_f32, range: (0, 0) }, Operand { buf: &sc.router_logits, range: (0, 0) });
+                    p.gemm_f32(g, s, &x, &w, &y, F32Product { m: n, n: e, k: d, trans_a: false, trans_b: true, alpha: 1.0, beta: 0.0, tf32: false })
+                });
+                if !library {
+                    self.exact.matmul(s, &m.router.w, &self.exact.act_f32(&sc.xn2, 0, n, d), &sc.router_logits, 0);
+                }
                 let shape = MoeShape { rows: n, d_model: d, moe_ff: c.moe_ff(), n_experts: e, top_k: c.top_k() };
                 match &m.experts {
                     Experts::F32 { gate, up, down } => {

@@ -1128,3 +1128,19 @@ the continuous-batching scheduler underneath was never fed continuously. `OcrRes
 | 64 | 74.2 (836) | 161.5 (1824) |
 | crops, 16 clients | 447 (875) | 613 (1197) |
 | crops, 64 clients | 450 (879) | 669 (1350) |
+
+## 2026-10-27 round 2: the router's product
+
+A decode step's profile at 64 rows and ~950 tokens of context put 13% of its device time (20.9 ms of 156 over 16 steps) in `native:matmul_f32_tiled`,
+the fp32 router: a `[64, 1280] x [1280, 64]` product is ONE 128x128 tile of that kernel, one multiprocessor of 132, 0.12 ms a layer. The fast tier now
+routes with the library's exact binary32 product (`LibraryGemmProvider::gemm_f32`, no TF32: the top-k stays a decision on unrounded logits), which splits the
+reduction over the card; the reference tier keeps the in-house kernel it is stated against. Best step of 64 (best-of-N, engine_bench, prompt 900):
+
+| decode step | before | after |
+|---|---|---|
+| 32 rows | 4.66 ms | 4.46 ms |
+| 64 rows | 7.18 ms (8,900 tok/s) | 6.11 ms (10,470 tok/s) |
+
+The rest of the 64-row step is the paged attention at 33% (3.2 ms against a 2.1 ms floor for reading 7.5 GB of bf16 K/V; fp8 K/V would halve the bytes,
+unmeasured), the experts' grouped MMA 11%, the dense bf16 products ~20% and 85 activation casts. fp8 expert weights would read the same number of
+bytes as the int8 ones (one per weight), so they cannot make the step bandwidth-cheaper; they stay int8.

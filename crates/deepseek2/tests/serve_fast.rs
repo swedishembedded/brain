@@ -184,8 +184,9 @@ fn a_replayed_decode_step_decodes_what_a_rebuilt_one_does() {
 }
 
 /// Kernels a fast-tier step may run on CUDA cores, with the reason: the router's logits are fp32 on purpose (the experts it
-/// picks are a hard decision that a rounded logit can flip), and its product is `[rows, d_model] x [d_model, n_experts]`.
-const FP32_BY_DESIGN: &[&str] = &["matmul_gemv_reg", "matmul_reg3"];
+/// picks are a hard decision that a rounded logit can flip), and its product is `[rows, d_model] x [d_model, n_experts]`: the library's
+/// exact binary32 product (the only one of that kind in the tier) or the in-house fp32 kernel.
+const FP32_BY_DESIGN: &[&str] = &["matmul_gemv_reg", "matmul_reg3", "library_gemm *"];
 
 /// **No hot kernel of the fast tier falls back to fp32 CUDA cores.** A decode step and a prefill chunk are profiled on the
 /// device's own kernel timer; every product in them is a tensor-core kernel (the library's bf16 GEMM for the dense linears
