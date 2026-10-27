@@ -33,6 +33,7 @@ pub mod model;
 pub mod sample;
 pub mod score;
 pub mod serve;
+pub mod serve_ring;
 pub mod shard;
 /// [`brain_modelstore::resolve::ArchSpec`] - which on-disk artifacts satisfy
 /// Qwen3.8-27B's `weights`/`tokenizer` roles.

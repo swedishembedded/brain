@@ -71,7 +71,7 @@ use model::Shard;
 use optim::Optim;
 
 use crate::config::{LayerType, Qwen35Config};
-pub use crate::decode_state::SlotPool;
+pub use crate::decode_state::{slot_state_bytes, SlotPool};
 pub use crate::train_base::TrainOpts;
 use crate::decode_state::DecodeState;
 #[path = "objectives.rs"]
@@ -5543,6 +5543,14 @@ impl Qwen35 {
     /// One decode token for each `(slot, token)` of `items`, all slots in one batch (any positions, in any order):
     /// the final-norm hidden state (`[d_model]`) of each, in order.
     pub fn slot_decode(&self, pool: &SlotPool, items: &[(u32, u32)]) -> Vec<Vec<f32>> {
+        let hidden = self.slot_decode_dev(pool, items);
+        let d = self.cfg.d_model as usize;
+        self.gpu.read(&hidden, items.len() * d).chunks(d).map(<[f32]>::to_vec).collect()
+    }
+
+    /// [`Self::slot_decode`] leaving the `[items.len(), d_model]` hidden block on the device, for a head that
+    /// consumes it there (argmax, top-k) without the block crossing to the host.
+    pub fn slot_decode_dev(&self, pool: &SlotPool, items: &[(u32, u32)]) -> DeviceBuffer {
         assert!(!items.is_empty(), "qwen35::slot_decode: empty batch");
         let mut seen = std::collections::HashSet::new();
         for &(slot, token) in items {
@@ -5555,12 +5563,10 @@ impl Qwen35 {
         let caches = BatchDecodeCaches { gqa_kv: &pool.gqa_kv, gqa_cap: pool.window, seqs: &seqs, one_sequence: false, gdn_pool: None, memory: &pool.memory };
         let tokens: Vec<u32> = items.iter().map(|&(_, t)| t).collect();
         let hidden = self.run_decode_batch(&tokens, &caches, None);
-        let d = self.cfg.d_model as usize;
-        let rows = self.gpu.read(&hidden, items.len() * d);
         for &(slot, _) in items {
             pool.pos.borrow_mut()[slot as usize] += 1;
         }
-        rows.chunks(d).map(<[f32]>::to_vec).collect()
+        hidden
     }
 
     /// Make slot `slot` a new sequence: no recurrent state, no ring rows, an empty bank, position 0. Nothing of the

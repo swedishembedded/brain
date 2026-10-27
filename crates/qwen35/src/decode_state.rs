@@ -111,6 +111,27 @@ pub(crate) fn memory_geometry(cfg: &Qwen35Config) -> AnchorMemoryShape {
     }
 }
 
+/// Bytes of one sequence slot of a [`SlotPool`] for `cfg`: the recurrent state and conv history of every
+/// Gated-DeltaNet layer, the ring of every full-attention layer and the anchor bank of every layer that has one.
+/// Independent of the sequence length; the pool holds exactly `slots` times this (`SlotPool::bytes`), which lets a
+/// serving engine size its pool to a memory budget before allocating anything.
+pub fn slot_state_bytes(cfg: &Qwen35Config) -> u64 {
+    let window = u64::from(cfg.swa_window.expect("slot state is the ring state of a sliding-window config"));
+    let mut words = 0u64;
+    for (l, ty) in cfg.layer_types().into_iter().enumerate() {
+        words += match ty {
+            LayerType::Linear => cfg.gdn_state_len() + cfg.gdn_hist_len(),
+            LayerType::Full => 2 * window * u64::from(cfg.kv_dim()),
+        };
+        if cfg.layer_has_memory(l) {
+            let g = memory_geometry(cfg);
+            let (gg, k, c, gd) = (u64::from(g.n_kv_heads), u64::from(g.capacity), u64::from(g.commit_block), u64::from(g.n_kv_heads * g.head_dim));
+            words += 2 * gg * k + 2 * k * gd + 2 * c * gd + c * gg;
+        }
+    }
+    words * 4
+}
+
 /// The fixed-size state of `slots` sequences of a sliding-window config, one pool row per sequence slot: the ring KV
 /// of every full-attention layer (`slots * window` rows, sequence `i`'s ring is rows `i * window ..`), each
 /// sequence's Gated-DeltaNet state and conv history, and the anchor-memory bank pools. Nothing here grows with a
