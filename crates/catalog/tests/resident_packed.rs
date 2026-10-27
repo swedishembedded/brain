@@ -279,7 +279,7 @@ fn a_demoted_resident_holds_no_engine_and_is_promoted_to_the_same_model() {
     let file_bytes = std::fs::metadata(&path).unwrap().len();
     let tokenizer = write_byte_tokenizer(&dir);
     let card = checkpoint::st::ModelCard::new("brain/qwen35", "qwen35");
-    let resident = Qwen35Resident::from_card_sized(path.to_str().unwrap(), &card, Some(tokenizer.to_str().unwrap()), Qwen35Sizing { ctx: 48, max_batch: 2, exact_decode: false, refused: false }).expect("a resident for the checkpoint");
+    let resident = Qwen35Resident::from_card_sized(path.to_str().unwrap(), &card, Some(tokenizer.to_str().unwrap()), Qwen35Sizing { ctx: 48, ctx_explicit: true, max_batch: 2, exact_decode: false, refused: false }).expect("a resident for the checkpoint");
     let key = InstanceKey::new("brain/qwen35", "default");
 
     for tier in [Tier::Warm, Tier::Cold] {

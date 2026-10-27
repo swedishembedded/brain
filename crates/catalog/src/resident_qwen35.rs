@@ -95,6 +95,9 @@ pub struct Qwen35Sizing {
     /// (`Engine::from_map`'s `max_seq_len`, which this engine also uses as
     /// its per-sequence block size).
     pub ctx: u32,
+    /// `ctx` was asked for (`--ctx`) rather than left at its default: an engine whose context is a property of the
+    /// model, not of memory (EdgeRock), takes the default as "the model's own limit" and an explicit value as a cap.
+    pub ctx_explicit: bool,
     /// How many sequences may be RESIDENT at once (`Engine::from_map`'s
     /// `max_concurrent`, i.e. `num_blocks`) and so decode together in one
     /// batched step.
@@ -109,7 +112,7 @@ pub struct Qwen35Sizing {
 
 impl Default for Qwen35Sizing {
     fn default() -> Self {
-        Qwen35Sizing { ctx: 4096, max_batch: 4, exact_decode: false, refused: false }
+        Qwen35Sizing { ctx: 4096, ctx_explicit: false, max_batch: 4, exact_decode: false, refused: false }
     }
 }
 
@@ -117,7 +120,7 @@ impl Qwen35Sizing {
     /// Clamp both knobs to their 1 floor - what the old env readers did to
     /// any parsed value, now applied to the parsed struct once, here.
     pub fn sanitized(self) -> Qwen35Sizing {
-        Qwen35Sizing { ctx: self.ctx.max(1), max_batch: self.max_batch.max(1), exact_decode: self.exact_decode, refused: self.refused }
+        Qwen35Sizing { ctx: self.ctx.max(1), ctx_explicit: self.ctx_explicit, max_batch: self.max_batch.max(1), exact_decode: self.exact_decode, refused: self.refused }
     }
 }
 
@@ -387,6 +390,7 @@ impl Qwen35ServeConfig {
         } else {
             if let Some(c) = p.limits.ctx {
                 self.fp32.ctx = c;
+                self.fp32.ctx_explicit = true;
             }
             if let Some(b) = p.limits.max_batch {
                 self.fp32.max_batch = b;
@@ -779,7 +783,7 @@ mod tests {
     fn sizing_defaults_and_sanitization() {
         let d = Qwen35Sizing::default();
         assert_eq!((d.ctx, d.max_batch), (4096, 4));
-        let s = Qwen35Sizing { ctx: 0, max_batch: u32::MAX, exact_decode: false, refused: false }.sanitized();
+        let s = Qwen35Sizing { ctx: 0, ctx_explicit: false, max_batch: u32::MAX, exact_decode: false, refused: false }.sanitized();
         assert_eq!((s.ctx, s.max_batch), (1, u32::MAX));
     }
 

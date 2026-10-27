@@ -130,6 +130,7 @@ const ARCH_TO_MODEL: &[(&str, &str)] = &[
     ("fastvlm", "brain/fastvlm"),
     ("llava", "brain/llava"),
     ("qwen3vl", "brain/qwen3vl"),
+    ("edgerock", "brain/edgerock"),
     ("sam2", "brain/sam2"),
     ("lpips", "brain/lpips"),
     ("scrfd", "brain/scrfd"),

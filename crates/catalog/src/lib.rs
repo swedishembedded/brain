@@ -75,6 +75,7 @@ pub mod resident_mock;
 pub mod resident_moondream3;
 pub mod resident_omni;
 pub mod resident_pulid;
+pub mod resident_edgerock;
 pub mod resident_qwen35;
 pub mod resident_qwen_embed;
 pub mod resident_qwen35moe;
@@ -489,6 +490,17 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(qwen35::caps::Qwen35Provider::new().with_defaults(weights, tokenizer)) as Arc<dyn Provider>)
             },
             spec: Some(("qwen35", &qwen35::spec::Qwen35Spec)),
+            resident: None,
+        },
+        // EdgeRock: the pulled Hugging Face directory, resolved through `qwen35::spec::EdgeRockSpec`; served by
+        // `crate::resident_edgerock::EdgeRockResident`, which the model-dir scan registers under the pulled id.
+        ModelEntry {
+            manifest: resident_edgerock::manifest,
+            provider: |assembly: &Assembly| {
+                let weights = assembly.roles.get("weights").cloned();
+                Ok(Arc::new(resident_edgerock::EdgeRockProvider::new(weights)) as Arc<dyn Provider>)
+            },
+            spec: Some(("edgerock", &qwen35::spec::EdgeRockSpec)),
             resident: None,
         },
         // The timeline model: a directory a caller trained and saved (no

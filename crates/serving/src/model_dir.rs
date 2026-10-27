@@ -765,6 +765,11 @@ fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<St
             _ => Err(format!("{} is served across GPUs: set BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT={weights}", card.id)),
         };
     }
+    // EdgeRock: the windowed Qwen3.5 decoder, served from its published directory by the fixed-state ring engine.
+    if card.family == "edgerock" {
+        let dir = roles.get("weights").and_then(|p| p.to_str()).ok_or("compound manifest missing role \"weights\"")?;
+        return catalog::resident_edgerock::EdgeRockResident::from_hf_dir(dir, &card.id, qwen35_sizing).map(|r| Built::Other(Arc::new(r)));
+    }
     // A Qwen3.5/3.6 MoE release is served from its published directory, every tensor in the format it is stored in.
     if implementation == Some("qwen35moe") {
         let dir = roles.get("weights").and_then(|p| p.to_str()).ok_or("compound manifest missing role \"weights\"")?;
@@ -1428,6 +1433,33 @@ mod tests {
         let Discovered { residents, errors, .. } = discover(&root, &ScanSettings::default());
         assert!(errors.is_empty(), "unexpected discovery errors: {errors:?}");
         assert_eq!(ids(&residents), ["zai-org/tiny-glm"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A pulled EdgeRock directory (family `edgerock`, the repo directory as its `weights` role) is served by the
+    /// fixed-state resident under its pulled id, with the context of its position limit.
+    #[test]
+    fn discover_serves_a_downloaded_edgerock_directory() {
+        let root = tmp_dir("discover-edgerock-dir");
+        let repo_dir = root.join("rockmatrix-ai").join("EdgeRock");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        let config = serde_json::json!({
+            "architectures": ["EdgeRockForCausalLM"], "vocab_size": 29, "num_hidden_layers": 8, "hidden_size": 96, "num_attention_heads": 10,
+            "num_key_value_heads": 5, "head_dim": 16, "rms_norm_eps": 1e-6, "rope_theta": 10000.0, "max_position_embeddings": 4096,
+            "full_attention_interval": 4, "intermediate_size": 112, "linear_num_key_heads": 2, "linear_num_value_heads": 4,
+            "linear_key_head_dim": 8, "linear_value_head_dim": 8, "linear_conv_kernel_dim": 4, "tie_word_embeddings": true,
+            "fixed_memory_revision": qwen35::config::EDGEROCK_MEMORY_REVISION, "fixed_memory_swa_window": 11, "fixed_memory_swa_layers": [3, 7],
+            "independent_memory": {"capacity": 6, "max_commit_chunk": 4, "admission_rank": 7, "writer_intermediate_size": 52},
+        });
+        std::fs::write(repo_dir.join("config.json"), config.to_string()).unwrap();
+        std::fs::write(repo_dir.join("tokenizer.json"), "{}").unwrap();
+        let manifest = brain_modelstore::CompoundManifest { id: "rockmatrix-ai/EdgeRock".into(), family: "edgerock".into(), roles: [("weights".to_string(), ".".to_string())].into() };
+        std::fs::write(repo_dir.join(brain_modelstore::MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let Discovered { residents, errors, .. } = discover(&root, &ScanSettings::default());
+        assert!(errors.is_empty(), "unexpected discovery errors: {errors:?}");
+        let resident = residents.iter().find(|r| r.manifest().model == "rockmatrix-ai/EdgeRock").expect("discovered");
+        assert_eq!(resident.manifest().max_context_tokens, Some(4096));
+        assert!(resident.manifest().actions.iter().any(|a| a.name == "generate"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -189,6 +189,51 @@ impl ArchSpec for Qwen35Fp32Spec {
     }
 }
 
+/// EdgeRock's [`ArchSpec`]: the Hugging Face directory `brain pull rockmatrix-ai/EdgeRock` leaves in the store (a
+/// `config.json` declaring `EdgeRockForCausalLM`, safetensors shards and the root `tokenizer.json`), read in place.
+/// The vision tower in `vision/` is a separate component the text decoder does not use.
+pub struct EdgeRockSpec;
+
+impl ArchSpec for EdgeRockSpec {
+    fn arch(&self) -> &'static str {
+        "edgerock"
+    }
+
+    fn roles(&self) -> &'static [&'static str] {
+        ROLES
+    }
+
+    fn classify(&self, records: &[ArtifactRecord], inventory_root: &Path) -> Vec<(usize, String, Confidence)> {
+        let mut out = Vec::new();
+        for (idx, rec) in records.iter().enumerate().filter(|(_, r)| r.usable() && r.kind == ArtifactKind::HfDir) {
+            let Ok(bytes) = std::fs::read(rec.path.join("config.json")) else { continue };
+            let Ok(config) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
+            if brain_modelstore::family_of_config(&config) == Some("edgerock") {
+                out.push((idx, "weights".to_string(), Confidence::Declared));
+            }
+        }
+        let weights_candidates: Vec<&Path> = out.iter().map(|(idx, ..)| records[*idx].path.as_path()).collect();
+        classify_tokenizer_role(records, inventory_root, "tokenizer", &weights_candidates, &mut out);
+        out
+    }
+
+    /// A pulled directory is named for the repo it came from (`<vendor>/<repo>`), so a served model answers to what
+    /// the client asked for.
+    fn assemble(&self, chosen: &BTreeMap<String, usize>, records: &[ArtifactRecord], _overrides: &BTreeMap<String, String>) -> Result<AssembleOutcome, String> {
+        let weights = *chosen.get("weights").ok_or("edgerock assemble: no weights chosen")?;
+        chosen.get("tokenizer").ok_or("edgerock assemble: no tokenizer chosen")?;
+        let path = &records[weights].path;
+        let id = path.file_name().zip(path.parent().and_then(Path::file_name)).map(|(repo, vendor)| format!("{}/{}", vendor.to_string_lossy(), repo.to_string_lossy()));
+        Ok(AssembleOutcome::Assembled(AssembledVariant { id: id.unwrap_or_else(|| "local/edgerock".to_string()), variant: None }))
+    }
+
+    fn validate(&self, assembly: &Assembly) -> Result<(), String> {
+        assembly.roles.get("weights").ok_or("edgerock validate: assembly has no weights role")?;
+        assembly.roles.get("tokenizer").ok_or("edgerock validate: assembly has no tokenizer role")?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,5 +476,36 @@ mod tests {
         let weights: Vec<_> = out.iter().filter(|(_, role, _)| role == "weights").map(|(idx, ..)| records[*idx].path.clone()).collect();
         assert_eq!(weights, vec![own]);
         assert!(out.iter().all(|(idx, ..)| records[*idx].kind != ArtifactKind::Gguf), "{out:?}");
+    }
+
+    /// A pulled EdgeRock repo: the directory is the `weights` role (named for the repo it came from) and the
+    /// `tokenizer.json` inside it the `tokenizer`; a Qwen3.5 directory beside it is not EdgeRock's.
+    #[test]
+    fn resolves_a_pulled_edgerock_directory_and_its_tokenizer() {
+        let root = tmp("edgerock-dir");
+        let repo = root.join("rockmatrix-ai").join("EdgeRock");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("config.json"), serde_json::json!({"architectures": ["EdgeRockForCausalLM"], "vocab_size": TOY_VOCAB}).to_string()).unwrap();
+        write_tokenizer_json(&repo.join("tokenizer.json"), TOY_VOCAB);
+        let plain = root.join("Qwen").join("Qwen3.8-27B-FP8");
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::write(plain.join("config.json"), serde_json::json!({"architectures": ["Qwen3_5ForConditionalGeneration"]}).to_string()).unwrap();
+        let records = vec![
+            complete(repo.clone(), ArtifactKind::HfDir),
+            complete(repo.join("tokenizer.json"), ArtifactKind::TokenizerJson),
+            complete(plain, ArtifactKind::HfDir),
+        ];
+
+        let spec = EdgeRockSpec;
+        let specs: Vec<&dyn ArchSpec> = vec![&spec];
+        match resolve("edgerock", &records, &specs, &BTreeMap::new()) {
+            Resolution::Resolved(assembly) => {
+                assert_eq!(assembly.roles["weights"], repo);
+                assert_eq!(assembly.roles["tokenizer"], repo.join("tokenizer.json"));
+                assert_eq!(assembly.id, "rockmatrix-ai/EdgeRock");
+            }
+            other => panic!("expected Resolved, got {other:?}"),
+        }
+        std::fs::remove_dir_all(&root).ok();
     }
 }
