@@ -21,6 +21,7 @@
 use crate::config::KronosConfig;
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::block::{self, Gqa, KernelIds};
+use model::saved::SavedPolicy;
 use model::IGNORE;
 use optim::Optim;
 use model::adapter::exec::AdapterRuntime;
@@ -71,7 +72,8 @@ const DV_BIDIR: usize = 37;
 const CONCAT2: usize = 38;
 const CONCAT_SPLIT: usize = 39;
 
-pub(crate) const PIPELINES: &[(&str, &str)] = &[
+/// The kernels a device handed to [`KronosTrain`] carries.
+pub const PIPELINES: &[(&str, &str)] = &[
     ("matmul", kernels::MATMUL),
     ("rmsnorm", kernels::RMSNORM),
     ("rms_inv", kernels::RMS_INV),
@@ -163,6 +165,7 @@ pub const CAL: [(&str, usize); 5] =
     [("minute", 60), ("hour", 24), ("weekday", 7), ("day", 32), ("month", 13)];
 
 /// Per-layer forward-activation buffers (cached for the backward pass).
+#[derive(Clone)]
 struct Layer {
     xn1: DeviceBuffer,
     q: DeviceBuffer,
@@ -268,6 +271,10 @@ pub struct KronosTrain {
     ce_grad_uni: DeviceBuffer,
     fwd_steps: Vec<Step>,
     bwd_steps: Vec<Step>,
+    /// What the backward keeps of the forward ([`KronosTrain::set_saved_policy`]): every layer's intermediates, or
+    /// (recompute) the residual stream `res` only, every layer sharing one set of intermediates that its replay
+    /// before the layer's backward refills.
+    saved: SavedPolicy,
 }
 
 /// Trainable transformer-block + norm + s1-head param names (milestone A subset).
@@ -499,6 +506,7 @@ impl KronosTrain {
             ce_grad_uni: gpu.uniform_dynamic(4),
             fwd_steps: Vec::new(),
             bwd_steps: Vec::new(),
+            saved: SavedPolicy::Keep,
             gpu,
         };
         m.fwd_steps = m.forward_steps();
@@ -582,18 +590,53 @@ impl KronosTrain {
         }
     }
 
-    fn forward_steps(&self) -> Vec<Step> {
+    /// Layer `l`'s forward, from the residual `res[l]` to `res[l + 1]`, recorded into `s`. A recomputing backward
+    /// replays it to refill the intermediates its layer's backward reads.
+    fn layer_forward(&self, l: usize, s: &mut Vec<Step>) {
         let c = &self.cfg;
         let d = c.d_model as u32;
         let ff = c.ff_dim as u32;
-        let t = self.t; // per-sequence length (rope period + attention time dim)
-        let b = self.b;
-        let n = b * t; // total rows (batch-major)
-        let s1v = c.s1_vocab() as u32;
+        let t = self.t;
+        let n = self.b * t;
         let heads = c.n_heads as u32;
         let hd = d / heads;
         let ids = Self::ids();
         let ga = self.gqa();
+        let lb = &self.layers[l];
+        let p = |nm: &str| format!("transformer.{l}.{nm}");
+        s.push(block::rmsnorm_fwd(&self.gpu, &ids, &self.res[l], self.w(&p("norm1.weight")), &lb.xn1, d, n, crate::config::RMS_EPS));
+        self.matmul(s, &lb.xn1, &p("self_attn.q_proj.weight"), &lb.q, n, d, d);
+        self.bias(s, &lb.q, &p("self_attn.q_proj.bias"), n, d);
+        self.lora_fwd(s, &p("self_attn.q_proj.weight"), &lb.xn1, &lb.q, n, d, d);
+        self.matmul(s, &lb.xn1, &p("self_attn.k_proj.weight"), &lb.k, n, d, d);
+        self.bias(s, &lb.k, &p("self_attn.k_proj.bias"), n, d);
+        self.lora_fwd(s, &p("self_attn.k_proj.weight"), &lb.xn1, &lb.k, n, d, d);
+        self.matmul(s, &lb.xn1, &p("self_attn.v_proj.weight"), &lb.v, n, d, d);
+        self.bias(s, &lb.v, &p("self_attn.v_proj.bias"), n, d);
+        self.lora_fwd(s, &p("self_attn.v_proj.weight"), &lb.xn1, &lb.v, n, d, d);
+        s.push(block::rope_fwd(&self.gpu, &ids, &lb.q, n, heads, hd, d, t, ROPE_THETA));
+        s.push(block::rope_fwd(&self.gpu, &ids, &lb.k, n, heads, hd, d, t, ROPE_THETA));
+        s.extend(block::gqa_fwd(&self.gpu, &ids, &ga, &lb.q, &lb.k, &lb.v, &self.scores, &lb.probs, &lb.ctx));
+        self.matmul(s, &lb.ctx, &p("self_attn.out_proj.weight"), &self.proj, n, d, d);
+        self.bias(s, &self.proj, &p("self_attn.out_proj.bias"), n, d);
+        self.lora_fwd(s, &p("self_attn.out_proj.weight"), &lb.ctx, &self.proj, n, d, d);
+        s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
+        s.push(block::rmsnorm_fwd(&self.gpu, &ids, &lb.xmid, self.w(&p("norm2.weight")), &lb.xn2, d, n, crate::config::RMS_EPS));
+        self.matmul(s, &lb.xn2, &p("ffn.w1.weight"), &lb.gate, n, d, ff);
+        self.matmul(s, &lb.xn2, &p("ffn.w3.weight"), &lb.up, n, d, ff);
+        s.push(block::swiglu_fwd(&self.gpu, &ids, &lb.gate, &lb.up, &lb.h, n * ff));
+        self.matmul(s, &lb.h, &p("ffn.w2.weight"), &self.mlp_out, n, ff, d);
+        s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[n * d], n * d));
+    }
+
+    fn forward_steps(&self) -> Vec<Step> {
+        let c = &self.cfg;
+        let d = c.d_model as u32;
+        let t = self.t; // per-sequence length (rope period + attention time dim)
+        let b = self.b;
+        let n = b * t; // total rows (batch-major)
+        let s1v = c.s1_vocab() as u32;
+        let ids = Self::ids();
         // ---- hierarchical + temporal embedding → res[0] ----
         let mut s: Vec<Step> = vec![
             self.gpu.step(EMBED, &[&self.s1_ids, self.w("embedding.emb_s1.weight"), &self.e1], &[d, n], n * d),
@@ -616,31 +659,7 @@ impl KronosTrain {
 
         // ---- transformer stack ----
         for l in 0..c.n_layers {
-            let lb = &self.layers[l];
-            let p = |nm: &str| format!("transformer.{l}.{nm}");
-            s.push(block::rmsnorm_fwd(&self.gpu, &ids, &self.res[l], self.w(&p("norm1.weight")), &lb.xn1, d, n, crate::config::RMS_EPS));
-            self.matmul(&mut s, &lb.xn1, &p("self_attn.q_proj.weight"), &lb.q, n, d, d);
-            self.bias(&mut s, &lb.q, &p("self_attn.q_proj.bias"), n, d);
-            self.lora_fwd(&mut s, &p("self_attn.q_proj.weight"), &lb.xn1, &lb.q, n, d, d);
-            self.matmul(&mut s, &lb.xn1, &p("self_attn.k_proj.weight"), &lb.k, n, d, d);
-            self.bias(&mut s, &lb.k, &p("self_attn.k_proj.bias"), n, d);
-            self.lora_fwd(&mut s, &p("self_attn.k_proj.weight"), &lb.xn1, &lb.k, n, d, d);
-            self.matmul(&mut s, &lb.xn1, &p("self_attn.v_proj.weight"), &lb.v, n, d, d);
-            self.bias(&mut s, &lb.v, &p("self_attn.v_proj.bias"), n, d);
-            self.lora_fwd(&mut s, &p("self_attn.v_proj.weight"), &lb.xn1, &lb.v, n, d, d);
-            s.push(block::rope_fwd(&self.gpu, &ids, &lb.q, n, heads, hd, d, t, ROPE_THETA));
-            s.push(block::rope_fwd(&self.gpu, &ids, &lb.k, n, heads, hd, d, t, ROPE_THETA));
-            s.extend(block::gqa_fwd(&self.gpu, &ids, &ga, &lb.q, &lb.k, &lb.v, &self.scores, &lb.probs, &lb.ctx));
-            self.matmul(&mut s, &lb.ctx, &p("self_attn.out_proj.weight"), &self.proj, n, d, d);
-            self.bias(&mut s, &self.proj, &p("self_attn.out_proj.bias"), n, d);
-            self.lora_fwd(&mut s, &p("self_attn.out_proj.weight"), &lb.ctx, &self.proj, n, d, d);
-            s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
-            s.push(block::rmsnorm_fwd(&self.gpu, &ids, &lb.xmid, self.w(&p("norm2.weight")), &lb.xn2, d, n, crate::config::RMS_EPS));
-            self.matmul(&mut s, &lb.xn2, &p("ffn.w1.weight"), &lb.gate, n, d, ff);
-            self.matmul(&mut s, &lb.xn2, &p("ffn.w3.weight"), &lb.up, n, d, ff);
-            s.push(block::swiglu_fwd(&self.gpu, &ids, &lb.gate, &lb.up, &lb.h, n * ff));
-            self.matmul(&mut s, &lb.h, &p("ffn.w2.weight"), &self.mlp_out, n, ff, d);
-            s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[n * d], n * d));
+            self.layer_forward(l, &mut s);
         }
         let last = c.n_layers;
         s.push(block::rmsnorm_fwd(&self.gpu, &ids, &self.res[last], self.w("norm.weight"), &self.xn_final, d, n, crate::config::RMS_EPS));
@@ -752,6 +771,10 @@ impl KronosTrain {
         self.rms_bwd(&mut s, &self.res[last], "norm.weight", &self.d_xn2, &self.dres[last], d, n);
 
         for l in (0..c.n_layers).rev() {
+            if self.saved.recomputes() {
+                // Every layer shares one set of intermediates: rebuild this layer's from `res[l]` first.
+                self.layer_forward(l, &mut s);
+            }
             let lb = &self.layers[l];
             let p = |nm: &str| format!("transformer.{l}.{nm}");
             // FFN backward (input grad = dres[l+1]); dW guarded for frozen (LoRA) params
@@ -801,6 +824,28 @@ impl KronosTrain {
     }
 
     // ---- driver surface (used by the bespoke gradcheck + train loop) ----
+
+    /// Keep every layer's intermediates for the backward ([`SavedPolicy::Keep`]) or only the residual stream
+    /// between layers, every layer sharing one set of intermediates that its replay refills before the layer's
+    /// backward ([`SavedPolicy::Recompute`]). The residual stream stays in f32, so a narrow saved format is
+    /// refused by name, as is going back to keeping everything once the buffers are shared.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        if let SavedPolicy::Quantized(format) = policy {
+            return Err(format!("kronos keeps its residual stream in f32; {format:?} saved boundaries do not apply"));
+        }
+        if !self.saved.narrows_to(policy) {
+            return Err(format!("kronos: a trainer keeping {:?} cannot go back to {policy:?}", self.saved));
+        }
+        if policy.recomputes() && !self.saved.recomputes() {
+            if let Some(shared) = self.layers.first().cloned() {
+                self.layers.fill(shared);
+            }
+            self.saved = policy;
+            self.fwd_steps = self.forward_steps();
+            self.bwd_steps = self.backward_steps();
+        }
+        Ok(())
+    }
 
     /// Upload one batch: s1/s2 context token ids `[t]`, the five calendar-stamp
     /// columns `[t]` (minute,hour,weekday,day,month), the `sampled_s1` ids `[t]`
