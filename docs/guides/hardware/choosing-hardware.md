@@ -70,8 +70,9 @@ Pass `--device` to any command that runs a model:
 - `--device gpu` - all GPUs.
 - `--device cpu` - all CPU cores. brain JIT-compiles the same WGSL kernels
   to native code for the CPU backend, so no GPU is required at all.
-- `--device npu` - the Intel NPU, via a separate compile path from the
-  GPU/CPU kernels.
+- `--device npu` - the NPU, via a separate compile path from the GPU/CPU
+  kernels: an Intel NPU (OpenVINO), or a Rockchip RV1103/RV1106 NPU (brain's
+  own compiler; YOLOv5 detection, see `docs/reference/models/yolov5.md`).
 - `--device vulkan` - the native Vulkan backend instead of the default wgpu
   backend.
 

@@ -14,4 +14,5 @@ libc = { workspace = true }
 
 [package.metadata.brain]
 # `make check/samples` fails if the real `cargo tree` closure exceeds this.
-max-brain-crates = 37
+# 37 -> 39: the vision surface now carries YOLOv5 and brain's NPU compiler.
+max-brain-crates = 39

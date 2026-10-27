@@ -3,42 +3,91 @@
 
 # npu/rockchip - real-time detection on a Rockchip RV1103/RV1106 board
 
-Runs brain's `DetectionPipeline` on the board's NPU and streams the camera, with
-the detected boxes drawn on it, over RTSP. Work in progress: the status and the
-measured numbers are in the `rknpu` roadmap ledger.
+Streams the board's camera over RTSP with objects detected by brain's
+`DetectionPipeline` drawn on it. YOLOv5 runs on the board's NPU, compiled by
+brain's own NPU compiler (`crates/rknpu`): no vendor NPU SDK and no offline
+conversion. The board loads a brain checkpoint and compiles it itself. The
+same program also detects in a single image and prints the boxes.
 
-## Build and deploy
+Tested on a Luckfox Pico Plus (RV1103, one Cortex-A7, 64 MB DDR of which Linux
+sees 33 MB, SC3336 camera).
 
-The board runs 32-bit uClibc, so the sample is cross-built with the board
-vendor's uClibc gcc and copied to `brain/` in the board user's home:
+## 1. Prepare the model (on a host)
+
+The weights are Rockchip's ReLU export of Ultralytics YOLOv5s,
+`yolov5s_relu.onnx` from Rockchip's model zoo. Like the published YOLOv5
+weights they are AGPL-3.0-derived. Convert it to a brain
+checkpoint, then measure its NPU calibration over a few dozen images like the
+ones the camera will see:
+
+```sh
+python tools/yolov5_export/export_yolov5.py --onnx path/to/yolov5s_relu.onnx
+make crates/yolov5/examples/npu-calibrate/build
+make crates/yolov5/examples/npu-calibrate/run \
+  ARGS="<models-dir>/local/yolov5s-relu/model.safetensors path/to/images 320"
+```
+
+The calibration is written beside the checkpoint as
+`model.npu-calibration.json`. It records every tensor's range at the 320x320
+input the board runs. It takes about 12 s for 32 images.
+
+## 2. Build and deploy
+
+The board runs 32-bit uClibc. The sample is cross-built with the board
+vendor's uClibc gcc and copied, with the model, to `brain/` in the board
+user's home (persistent storage; the board's `/tmp` is RAM it cannot spare):
 
 ```sh
 make samples/npu/rockchip/board/build UCLIBC_TOOLCHAIN=<path/to/uclibc-gcc/bin>
-make samples/npu/rockchip/board/deploy BOARD=<ssh host>
+make samples/npu/rockchip/board/deploy BOARD=<ssh host> \
+  MODEL_DIR=<models-dir>/local/yolov5s-relu
 ```
 
-## Live video: `--stream`
+The result is `brain/sample-npu-rockchip` and
+`brain/models/local/yolov5s-relu/`. Model ids resolve in the `models/`
+directory beside the program (`--models-dir` overrides that), so the `brain/`
+directory runs from wherever it is copied.
+
+## 3. Run
+
+One image, boxes as JSON in the image's pixels:
 
 ```sh
-ssh <board> 'cd brain && ./sample-npu-rockchip --stream'
+ssh <board> 'cd brain && ./sample-npu-rockchip --model local/yolov5s-relu --image photo.jpg'
+```
+
+Live video with detection:
+
+```sh
+ssh <board> 'cd brain && ./sample-npu-rockchip --model local/yolov5s-relu --stream'
 ffplay -rtsp_transport tcp rtsp://<board-ip>:8554/live/0
 ```
 
-`--stream` takes the camera (stop the board's own camera daemon first), encodes
-H.264 in hardware and serves it over RTSP. Ctrl-C or SIGTERM releases the
-camera, the ISP and the encoder so the next run starts cleanly. `--help` lists
-every option (size, bit rate, GOP, port, mount point, duration, ...).
+`--stream` takes the camera, so stop the board's own camera daemon first. It
+loads the model before the camera, because the model's NPU memory is the
+largest allocation. Ctrl-C or SIGTERM releases the camera, the ISP and the
+encoder, so the next run starts cleanly. `--help` lists every option: stream
+size, bit rate, GOP, port, mount point, duration and the detection thresholds.
 
-It uses the board's own media libraries (`librockit`, `librkaiq`, `librga` in
-`/oem/usr/lib`), opened at run time with `dlopen`; nothing is linked or
-redistributed. The program restarts itself once with `LD_LIBRARY_PATH` set,
-because the board's loader does not search `/oem`.
+The camera, ISP 3A, 2D scaler and encoder are the board's own media libraries
+(`librockit`, `librkaiq`, `librga` in `/oem/usr/lib`). They are opened at run
+time with `dlopen`; nothing is linked or redistributed. The program restarts
+itself once with `LD_LIBRARY_PATH` set, because the board's loader does not
+search `/oem`.
 
-### How the video path is arranged
+## How it is arranged
 
-One thread does camera frame -> detector tap -> box overlay -> encoder -> RTSP
-socket, because each thread hand-off costs a wake-up and the stages in between
-are hardware. Detection never sits on that thread.
+Two threads, joined only by the seam in `detect`:
+
+- **The video thread**: camera frame -> detector tap -> box overlay -> encoder
+  -> RTSP socket. Each thread hand-off would cost a wake-up, and the stages in
+  between are hardware. It never waits for detection.
+- **The detector thread** (`detector`): it takes the freshest tap frame (a
+  320x320 letterboxed RGB copy, made by the 2D accelerator) and runs
+  `brain::DetectionPipeline` on the NPU. It maps the boxes to stream pixels
+  through the frame's letterbox and publishes them. The video thread draws
+  the newest result on every frame and drops one older than 600 ms. A frame
+  that arrives during an inference is simply not taken, so nothing queues.
 
 | module | job |
 |---|---|
@@ -48,65 +97,47 @@ are hardware. Detection never sits on that thread.
 | `rtsp` | RTSP server (`proto`: requests, SDP; `rtp`: RFC 6184 packetizer with FU-A) |
 | `overlay` | boxes and labels drawn into the NV12 frame |
 | `tap` | scaled RGB copy of the frame for the detector |
-| `detect` | the seam types |
+| `detect` | the seam: detections, the board they are published to, the letterbox |
+| `detector` | the detection thread |
 | `latency`, `memory` | capture-to-send statistics, RSS and CMA reporting |
 | `stream` | the pipeline loop and its start/stop |
 
-RTSP: `OPTIONS`, `DESCRIBE`, `SETUP`, `PLAY`, `GET_PARAMETER`, `TEARDOWN`, with
-RTP carried over the TCP control connection (interleaved). A UDP request gets
-`461`, and clients such as ffmpeg then retry over TCP. A client that cannot take
-a frame within 250 ms is dropped so it cannot stall the camera.
+**RTSP**: `OPTIONS`, `DESCRIBE`, `SETUP`, `PLAY`, `GET_PARAMETER`, `TEARDOWN`,
+with RTP carried over the TCP control connection (interleaved). A UDP request
+gets `461`, and clients such as ffmpeg then retry over TCP. A client that
+cannot take a frame within 250 ms is dropped, so it cannot stall the camera.
 
-Overlay: drawn by the CPU straight into the camera frame, not with the
+**Overlay**: the CPU draws straight into the camera frame instead of using the
 encoder's hardware overlay. A box outline is a few thousand pixels, while the
-hardware path needs bitmap memory in CMA, which this board does not have to
-spare. The frame buffer is CPU-cached, so the touched rows are invalidated and
-cleaned around the draw (`overlay::dirty_ranges`).
+hardware path needs bitmap memory in CMA that this board cannot spare. The
+frame buffer is CPU-cached, so the touched rows are invalidated and cleaned
+around the draw (`overlay::dirty_ranges`).
 
-### Plugging in the detector
+## Measured (Luckfox Pico Plus, SC3336, 800x448 at 30 fps)
 
-`stream::Stream::start(config)` returns a handle with both ends of the seam:
+| | |
+|---|---|
+| video | 30.0 fps; capture -> last RTP packet p50 37 ms, p95 39 ms |
+| of which in this program | p50 4 ms (tap, overlay, encode 3 ms, send) |
+| detection | 15 inferences/s, 46 ms per inference (frame copy + NPU + decode) |
+| boxes on screen | about 84 ms after the frame's capture |
+| still image (640x426) | 71 ms including the letterbox; model loads in 4.8 s |
+| memory | VmRSS 10 MB, peak 11.4 MB; CMA 20.2 of 24.5 MB (model 9.6 MB, camera and encoder 7.9 MB) |
 
-```rust
-let stream = Stream::start(StreamConfig::default())?;
+About 33 ms of the capture-to-send latency is sensor readout and ISP before the
+frame reaches the program. The timestamp is the start of readout, so that part
+is not in the program's hands. Measured at other stream sizes, the camera path
+alone:
 
-// detector thread
-while let Some(frame) = stream.frames.recv(Duration::from_millis(200)) {
-    let rgb: &[u8] = frame.rgb();          // TAP_SIZE * TAP_SIZE * 3, RGB
-    let lb = frame.meta().letterbox;       // model space -> stream space
-    let [l, t, r, b] = lb.box_to_stream([x1, y1, x2, y2], w, h);
-    stream.board.publish(Detections { boxes: vec![Detection {
-        left: l, top: t, right: r, bottom: b, class_id, score, label }] });
-}
-```
-
-* **Tap frame**: 320 x 320 RGB888, letterboxed (aspect ratio kept, grey 114
-  padding), made by the 2D accelerator. `TapMeta::letterbox` maps tap
-  coordinates back to stream pixels (`Letterbox::to_stream`, `box_to_stream`).
-* **Delivery**: a frame is converted only while the detector is blocked in
-  `recv`, so it is always the freshest one, and a busy detector costs the
-  video path nothing. One buffer: while a `TapFrame` is held no new one is
-  made, so the pixels can be fed to the NPU without a copy.
-* **Results**: `DetectionBoard::publish` replaces the result; the video thread
-  draws the newest one on every frame. A result older than 600 ms is dropped
-  from the picture, so boxes vanish if the detector stalls.
-* `--stream` currently runs a sweeping demo box and a tap consumer in place of
-  the detector (`--no-demo-box` turns the box off, `--dump-tap FILE` saves a
-  tap image as a PPM).
-
-### Memory and latency (Luckfox Pico Plus, SC3336, 30 fps)
-
-CMA is the scarce resource (24 MB shared with the NPU). The ISP's own buffers
-are about 5 MB at any stream size; the rest scales with the stream:
-
-| stream | CMA used by the sample | in-process p50 |
+| stream | CMA used by the camera path | in-process p50 |
 |---|---|---|
-| 800x448 (default) | 7.9 MB | 5.6 ms |
+| 800x448 (default) | 7.9 MB | 4-6 ms |
 | 960x544 | 9.0 MB | 7.6 ms |
 | 1280x720 | 11.7 MB | 10.6 ms |
 
-At 800x448, process memory is VmRSS 8.7 MB. Latency is the sensor timestamp on
-a frame to its last RTP packet written; the program logs p50/p95 every 100
-frames. Typical: p50 41 ms, p95 43 ms, of which about 35 ms is sensor readout
-and ISP before the frame reaches the program; the program's own share is
-5.6 ms (tap 1.4, overlay 1.2, encode 2.9, send under 0.5).
+1280x720 does not fit beside the model in the 24 MB CMA pool.
+
+The detector's int8 results match the float network: on the YOLOv5 golden
+photograph, the same people are found with confidence within 0.012
+(`crates/yolov5/tests/npu_int8.rs`). The board's detections equal the host
+simulation of the same integers exactly.

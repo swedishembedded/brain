@@ -45,16 +45,15 @@ engine: brain loads a brain checkpoint, compiles it for the NPU itself and serve
   the board). A static `armv7-unknown-linux-musleabihf` build also runs, and is
   usable once nothing needs the board's shared libraries.
 
-## Open
+## Done
 
-- [ ] M0: oracle baseline. `yolov5s_relu.onnx` converted by the vendor toolkit and run
-  on the board with the vendor runtime by our own harness, recording output tensors
-  for fixed inputs and the per-inference latency. Lives outside this repository.
-- [ ] M1: lean build. Detection box math and NMS in a host-only crate; the board
-  sample builds for the uClibc target; a `make` target that builds it and one
-  that deploys it to `brain/` in the board user's home directory (SD card, never
-  the RAM-backed `/tmp`). Gate: the sample's idle RSS measured on the board, with
-  the budget set from the measurement.
+- [x] M1: lean build. The board sample builds for a Cortex-A7 uClibc target spec
+  with NEON (`scripts/targets/armv7-cortexa7-linux-uclibceabihf.json`; Rust's own
+  uClibc ARMv7 spec disables NEON), `make samples/npu/rockchip/board/{build,deploy}`
+  copies it and the model to `brain/` on the board (never `/tmp`). Box math, NMS and
+  the COCO names are host-only in `imaging` (`nms`, `coco`), shared by both detectors.
+  The sample links the SDK's `vision` surface (39 brain crates, budget in its
+  `Cargo.toml`); its RSS on the board is 3 MB idle and 10 MB streaming.
 - [x] M2: YOLOv5 in brain (`crates/yolov5`, arch row `yolov5`, no default ref so
   nothing is fetched). `tools/yolov5_export/export_yolov5.py` converts Rockchip's
   `yolov5s_relu.onnx` (121 tensors, 7,226,029 parameters; batch norm folded; the stem is
@@ -66,17 +65,41 @@ engine: brain loads a brain checkpoint, compiles it for the NPU itself and serve
   `tools/goldens/yolov5_dump_reference.py`), max abs diff of the post-sigmoid heads: noise
   320 3.7e-6, noise 640 4.4e-6, photo 320 9.4e-6, photo 640 1.8e-5 (gate 1e-4).
   Int8 quantization lives in `crates/rknpu` (M3), not here.
-- [ ] M3: the rknpu crate. Done: driver (buffers, sync, linked one-ioctl
-  jobs), dense conv with fused ReLU and height tiling, byte-exact on the board.
-  Open: ioctl runtime (buffers, submit, sync), compiler for
-  Conv+ReLU, Add, channel Concat, nearest 2x Upsample; SPPF's 5x5 MaxPool on the CPU.
-  Gate: each layer byte-exact against brain's int8 reference on the board, then the
-  whole graph against the M0 oracle.
-- [ ] M4: still-image mode. The sample detects on an image file and prints the boxes
-  as JSON, the end-to-end check against the M0 oracle and brain's CPU reference.
-- [ ] M5: real-time stream. The sample takes the camera (the board's `rkipc` daemon
-  stopped), runs detection on every frame it can, draws the boxes and serves H.264
-  over RTSP. Measured: end-to-end FPS, NPU latency and total RAM on the board.
+- [x] M3: the rknpu crate. `/dev/rknpu` driver (NPU memory, cache sync, linked
+  one-submission jobs); dense int8 conv with fused ReLU, any stride, even kernels grown
+  to odd, height tiling against the CNA buffer; Add lowered to concat + a 1x1 `[I | I]`
+  conv so it runs on the NPU; concat by plane aliasing; max pool and 2x upsample on
+  NEON between NPU segments; liveness-based tensor memory reuse; weights streamed
+  from the mapped checkpoint layer by layer (never a layer's float copy); NPU memory
+  split into ~1 MiB buffers because the board's CMA is fragmented. Gates: every
+  YOLOv5-at-320 layer shape and the whole YOLOv5s topology byte-exact against the
+  plan's host simulation on the board (`make crates/rknpu/board/check/run`); the int8
+  network tracks float onnxruntime on the golden photograph
+  (`crates/yolov5/tests/npu_int8.rs`).
+- [x] M4: still-image mode. `sample-npu-rockchip --model local/yolov5s-relu --image
+  FILE` prints JSON boxes. COCO val2017 #139 on the board: ten detections (tv 0.89,
+  person 0.62, chair 0.56, ...) identical to `yolov5::npu::simulate_detect` on the host.
+- [x] M5: real-time stream. `--stream`: camera (ISP 3A) -> 320x320 RGA tap ->
+  `DetectionPipeline` on the NPU on its own thread -> boxes drawn into NV12 -> H.264
+  -> RTSP, verified with ffmpeg from a host (boxes and labels on the decoded frames).
+
+## Open
+
+- [ ] M0: oracle baseline against the vendor toolkit and runtime. Superseded as a
+  gate by the host simulation (exact) and the float reference (accuracy); still useful
+  as a speed comparison.
+- [ ] Capture-to-stream latency. Target ~20 ms; measured p50 37 ms, of which ~33 ms is
+  sensor readout and ISP before the frame reaches the program (the program's share is
+  4 ms). Candidates: the VI/encoder wrap (slice) mode the vendor daemon uses, a
+  shorter ISP path, a timestamp at end of readout to tell readout from ISP.
+- [ ] Detection throughput: 15 inferences/s, 46 ms each, of which the NPU is ~23 ms.
+  Writing the 3-channel input costs ~6 ms because each pixel fills a 16-lane atom;
+  lowering the 2x2/s2 stem to a CPU space-to-depth on input would quarter that and
+  1.2 MB of NPU memory. Max pool on the NPU's PPU would take the last CPU op off the
+  path.
+- [ ] SiLU (stock YOLOv5/YOLOv8 checkpoints) needs a LUT lowering on the NPU.
+- [ ] The model must load before the camera starts: with the camera running, the
+  board's CMA is too fragmented for the model's buffers.
 
 ## Measured
 
@@ -86,3 +109,11 @@ engine: brain loads a brain checkpoint, compiles it for the NPU itself and serve
   320x320x3->12 k2s2 (as k3) 1.50 ms in 18 tasks; 160x160x12->32 k3 1.36 ms;
   160x160x32->64 k3s2 1.13 ms; 20x20x256->256 k3 1.48 ms; 10x10x1024->512 k1
   0.70 ms; head 40x40x128->255 k1 0.43 ms. Check process VmHWM 4.2 MB.
+- 2026-10-27, YOLOv5s topology at 320x320 on the board, byte-exact, 172 tasks: NPU
+  23 ms, CPU ops 3 ms (max pool 1.3 with NEON, upsample 0.7, cache 0.3), input write
+  6.6 ms, whole run 33 ms; 9.6 MB of NPU memory.
+- 2026-10-27, live stream on the Luckfox Pico Plus (800x448 at 30 fps, SC3336): video
+  30.0 fps, capture -> last RTP packet p50 37 ms / p95 39 ms (in-process 4 ms);
+  detection 15 inferences/s, 46 ms per inference, boxes drawn ~84 ms after capture;
+  VmRSS 10 MB (peak 11.4); CMA 20.2 of 24.5 MB. Still image 640x426: 71 ms; model
+  load 4.8 s.

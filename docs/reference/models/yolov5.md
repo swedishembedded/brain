@@ -2,15 +2,18 @@
 
 An anchor-based, single-stage real-time object detector (Ultralytics YOLOv5,
 v6 layout: CSP backbone, SPP-fast block, PAN neck, three-scale anchor head).
-brain loads a converted checkpoint, runs it in fp32, and decodes the boxes on
-the host. Reach for it when you need bounding-box detection from a YOLOv5
-model, or a trusted fp32 reference to validate an NPU deployment of one.
+brain loads a converted checkpoint and runs it in fp32 on the GPU/CPU
+backends, or in int8 on a Rockchip RV1103/RV1106 NPU through brain's own NPU
+compiler, and decodes the boxes on the host. Reach for it when you need
+bounding-box detection from a YOLOv5 model, on a workstation or on a small
+camera board.
 
 ## Support
 
 | Capability | Supported |
 |---|---|
 | Inference (SDK `DetectionPipeline`, library) | [x] |
+| Rockchip RV1103/RV1106 NPU (int8, ReLU checkpoints) | [x] |
 | Training / fine-tuning | [ ] |
 | CLI (`brain <arch> <action>`) | [ ] |
 | D-Bus / HTTP | [ ] |
@@ -63,6 +66,24 @@ for d in pipe.detect(&photo)? {
 `DetectOptions` sets the confidence threshold (default 0.25) and the NMS IoU
 threshold (default 0.45). `class` indexes the checkpoint's label set; the
 released weights use the 80 COCO classes.
+
+## Running it on a Rockchip NPU
+
+On a board with a Rockchip RV1103/RV1106 NPU (`/dev/rknpu`), the same
+`DetectionPipeline` compiles the checkpoint onto the NPU when the device
+selection includes it (the default does). Nothing else changes for the caller.
+The checkpoint needs its NPU calibration beside it: `model.npu-calibration.json`,
+the range of every tensor over representative images at the input size the
+board will run. Measure it once on a host:
+
+```sh
+make crates/yolov5/examples/npu-calibrate/run ARGS="<model.safetensors> <images-dir> 320"
+```
+
+A model without its calibration is refused with a message naming that
+command. The NPU path needs a ReLU checkpoint (SiLU has no NPU lowering yet).
+`samples/npu/rockchip` is a complete board application: still-image detection
+and a live camera stream with the boxes drawn on it.
 
 ## Running it without a device
 
