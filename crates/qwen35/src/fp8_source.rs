@@ -208,8 +208,8 @@ fn check_coverage(src: &PackedSource, cfg: &Qwen35Config) -> Result<(), String> 
 
 /// The [`Qwen35Config`] of the HF checkpoint in `dir`, read from its
 /// `config.json` (the `text_config` object of a multimodal release, or the
-/// top level of a text-only one). `block_size` is the model's full
-/// `max_position_embeddings`; a trainer narrows it to its own sequence window.
+/// top level of a text-only one; EdgeRock's `fixed_memory_*` and `independent_memory` fields included).
+/// `block_size` is the model's full `max_position_embeddings`; a trainer narrows it to its own sequence window.
 pub fn hf_config(dir: &Path) -> Result<Qwen35Config, String> {
     let path = dir.join("config.json");
     let top: Value = serde_json::from_slice(&std::fs::read(&path).map_err(|e| format!("qwen35 config: read {}: {e}", path.display()))?)
@@ -247,7 +247,8 @@ pub fn hf_config(dir: &Path) -> Result<Qwen35Config, String> {
     }
     let tie = top["tie_word_embeddings"].as_bool().or_else(|| c["tie_word_embeddings"].as_bool()).unwrap_or(false);
     j.insert("tie_word_embeddings".to_string(), Value::Bool(tie));
-    Qwen35Config::from_json_checked(&Value::Object(j))
+    // EdgeRock's window and anchor memory; a plain Qwen3.5 config names none and passes through.
+    Qwen35Config::from_json_checked(&Value::Object(j))?.with_edgerock_hf(c)
 }
 
 

@@ -224,6 +224,9 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         // `gradnorm_sq` gives each tensor ONE thread to sum its elements, which for 118 M
         // adapter parameters is seconds of a single thread's time per step.
         v.extend(model::dispatch::LORA_BANK_PIPELINES);
+        // EdgeRock: the anchor memory's kernels and the windowed attention scores, resolved by name.
+        v.extend(model::anchor_memory::ANCHOR_MEMORY_PIPELINES);
+        v.push(("gqa_scores_win", kernels::GQA_SCORES_WIN));
         // Device AdamW over bf16 or blockwise-int8 moments (`optim::Optim` resolves them by name).
         v.extend(optim::MOMENT_KERNELS);
         v.push(("gradnorm_part", kernels::GRADNORM_PART));
@@ -769,6 +772,9 @@ impl KvWindow<'_> {
     }
 }
 
+/// One named intermediate of a window/memory layer, `(name, values)`: see [`Qwen35::enable_memory_taps`].
+pub type MemoryTap = (String, Vec<f32>);
+
 /// What one CHUNKED-prefill round hands [`Qwen35::layer_gqa_fwd`] so its GQA
 /// layers attend the sequence's persistent KV cache instead of an isolated
 /// `[T,T]` causal block over the round alone. Every field is built ONCE per
@@ -1177,6 +1183,11 @@ pub struct Qwen35 {
     /// What the last chunk pass tapped, `(layer, [n, d_model])` in layer
     /// order. Drained by [`Self::take_hidden_taps`].
     tapped: RefCell<Vec<(usize, Vec<f32>)>>,
+    /// Intermediates of every window/memory layer of the last one-shot forward,
+    /// named `layer{l}.swa.out` / `layer{l}.mem.{scores,gate,query,key,value,read,refs,out}`
+    /// as the reference dumper names them. `None` (the default) keeps nothing;
+    /// see [`Self::enable_memory_taps`].
+    memory_taps: RefCell<Option<Vec<MemoryTap>>>,
 
     /// This instance's [`CHUNK_ARENA_MIN_ROWS`] - see
     /// [`Self::set_chunk_arena_min_rows`].
@@ -1412,7 +1423,8 @@ pub(crate) fn is_quantizable_linear(name: &str) -> bool {
         "up.weight",
         "down.weight",
     ];
-    LEAVES.iter().any(|leaf| name.ends_with(leaf))
+    // The anchor memory's projections share leaf names (`memory.q_proj.weight`) but are plain fp32 parameters.
+    !name.contains(".memory.") && LEAVES.iter().any(|leaf| name.ends_with(leaf))
 }
 
 /// The precision of each tensor a resident full fine-tune of `shard` leaves in the parameter store (the norms and
@@ -1636,6 +1648,18 @@ impl Qwen35 {
         shard: Shard,
     ) -> Qwen35 {
         let train = train_opts.is_some();
+        if let Err(e) = cfg.check_window_and_memory() {
+            panic!("{e}");
+        }
+        assert!(
+            !(train && cfg.anchor_memory.is_some()),
+            "qwen35: training through the anchor memory is not implemented (its backward lands with the training milestone); \
+             a training build of this config would silently skip the memory's gradient"
+        );
+        assert!(
+            !(cfg.mtp && (cfg.swa_window.is_some() || cfg.anchor_memory.is_some())),
+            "qwen35: the multi-token head reuses the full-attention layer and has no sliding window / anchor memory"
+        );
         let head_budget = train_opts.and_then(|o| o.head_budget_words);
         let resident_plan = train_opts.and_then(|o| o.resident.as_ref());
         assert!(
@@ -1956,6 +1980,7 @@ impl Qwen35 {
             shard,
             taps: RefCell::new(Vec::new()),
             tapped: RefCell::new(Vec::new()),
+            memory_taps: RefCell::new(None),
             chunk_arena_min_rows: Cell::new(CHUNK_ARENA_MIN_ROWS),
             chunk_arena_drain: Cell::new(None),
             exact_rounds: Cell::new(true),
@@ -2086,6 +2111,22 @@ impl Qwen35 {
     pub fn set_hidden_taps(&self, layers: &[usize]) {
         *self.taps.borrow_mut() = layers.to_vec();
         self.tapped.borrow_mut().clear();
+    }
+
+    /// **Keep the intermediates of the sliding-window and anchor-memory layers**
+    /// of every following one-shot forward ([`Self::logits_all`]), for parity
+    /// debugging: see [`Self::take_memory_taps`]. Costs a readback per
+    /// intermediate per layer, so it is off unless asked for.
+    pub fn enable_memory_taps(&self) {
+        *self.memory_taps.borrow_mut() = Some(Vec::new());
+    }
+
+    /// Take what the last forward tapped, `(name, values)` in the order the
+    /// layers ran; the bank `layer{l}.mem.refs` holds the token index of each
+    /// slot (`[blocks, groups, capacity]`, `-1` for an empty one). Draining, so
+    /// a caller cannot read a previous forward's values.
+    pub fn take_memory_taps(&self) -> Vec<MemoryTap> {
+        self.memory_taps.borrow_mut().as_mut().map(std::mem::take).unwrap_or_default()
     }
 
     /// Take what the last chunk pass tapped, `(absolute layer, `[n, d_model]`)`
@@ -2812,8 +2853,17 @@ impl Qwen35 {
         let weights = model::gqa_mixer::GqaMixerWeights { q_norm: self.w(&p("q_norm.weight")), k_norm: self.w(&p("k_norm.weight")), cos, sin };
         // Set by the decode arm that fuses the sigmoid gate into the quantiser.
         let mut o_proj_act: Option<Act> = None;
+        if cached.is_some() {
+            c.require_plain_decoder("the cached-KV (chunked prefill / decode / serving) attention");
+        }
         let (ctx_gated, internals) = match cached {
-            None => model::gqa_mixer::gqa_mixer_fwd_tc(g, &gqa_mixer_ids(), self.training_flash(), Some(self.ops.tensor_gemm()), &shape, &weights, &q_full, &k, &v, n, self.is_train),
+            None => match c.swa_window {
+                Some(window) => {
+                    let scores_kernel = g.kernel_index("gqa_scores_win").unwrap_or_else(|| panic!("qwen35: gqa_scores_win is not registered on this Gpu"));
+                    model::gqa_mixer::gqa_mixer_fwd_windowed(g, &gqa_mixer_ids(), model::gqa_mixer::SlidingWindow { scores_kernel, window }, &shape, &weights, &q_full, &k, &v, n, self.is_train)
+                }
+                None => model::gqa_mixer::gqa_mixer_fwd_tc(g, &gqa_mixer_ids(), self.training_flash(), Some(self.ops.tensor_gemm()), &shape, &weights, &q_full, &k, &v, n, self.is_train),
+            },
             Some(GqaCached::Chunk(ch)) => (
                 model::gqa_mixer::gqa_mixer_chunk_kv_fwd_paged(
                     g,
@@ -3202,6 +3252,78 @@ impl Qwen35 {
         d_res_next2
     }
 
+    /// The anchor memory of full-attention layer `l` (`model::anchor_memory`):
+    /// reads the layer's residual input `xres` and returns `attn_out +
+    /// memory(xres)`, the mixer output the residual add takes. The memory's
+    /// projections are plain fp32 matmuls over the parameter store's tensors
+    /// (never a quantized tier or an adapter site), which also keeps the
+    /// admission scores fp32 whatever tier the rest of the layer runs at.
+    fn add_anchor_memory(&self, l: usize, xres: &DeviceBuffer, attn_out: DeviceBuffer, n: u32) -> DeviceBuffer {
+        use model::anchor_memory::{anchor_memory_fwd, AnchorMemoryIds, AnchorMemoryKernels, AnchorMemoryShape, AnchorMemoryWeights, MemoryProj};
+        let g = &self.gpu;
+        let c = &self.cfg;
+        let mem = c.anchor_memory.as_ref().expect("add_anchor_memory is called only for a layer with a memory");
+        let shape = AnchorMemoryShape {
+            n_seq: self.b,
+            t: self.run_len(),
+            d_model: c.d_model,
+            n_heads: c.n_heads,
+            n_kv_heads: c.n_kv_heads,
+            head_dim: c.head_dim,
+            rotary_half: c.rotary_dim() / 2,
+            rms_eps: c.rms_eps,
+            capacity: mem.capacity,
+            commit_block: c.memory_commit_block().expect("a memory has a commit block"),
+            admission_rank: mem.admission_rank,
+            writer_intermediate: mem.writer_intermediate,
+        };
+        let ids = AnchorMemoryIds {
+            kernels: kernel_ids(),
+            silu: SILU,
+            silu_mul: SILU_MUL,
+            add2: ADD2,
+            scale_row: SCALE_ROW,
+            rope2d_partial: ROPE2D_PARTIAL,
+            memory: AnchorMemoryKernels::resolve(g).unwrap_or_else(|e| panic!("qwen35: {e}")),
+        };
+        let p = |leaf: &str| self.w(&format!("blocks.{l}.memory.{leaf}"));
+        let weights = AnchorMemoryWeights {
+            input_norm: p("input_norm.weight"),
+            q_norm: p("q_norm.weight"),
+            k_norm: p("k_norm.weight"),
+            read_scale: p("read_scale"),
+            read_gate_weight: p("read_gate_weight"),
+            read_gate_bias: p("read_gate_bias"),
+            cos: &self.cos,
+            sin: &self.sin,
+        };
+        let project = |which: MemoryProj, x: &DeviceBuffer, out: &DeviceBuffer| {
+            let (n_out, n_in) = which.dims(&shape);
+            g.submit(&[], &[g.step(MATMUL, &[x, p(&format!("{}.weight", which.leaf())), out], &[n, n_in, n_out], n * n_out)]);
+        };
+        let (memory_out, acts) = anchor_memory_fwd(g, &ids, &shape, &weights, &project, xres);
+
+        if let Some(taps) = self.memory_taps.borrow_mut().as_mut() {
+            let d = c.d_model as usize;
+            let rows = n as usize;
+            let mut push = |name: &str, buf: &DeviceBuffer, len: usize| taps.push((format!("layer{l}.{name}"), g.read(buf, len)));
+            push("swa.out", &attn_out, rows * d);
+            push("mem.scores", &acts.scores, rows * c.n_kv_heads as usize);
+            push("mem.gate", &acts.gate, rows * c.n_heads as usize);
+            push("mem.query", &acts.query, rows * c.q_dim() as usize);
+            push("mem.key", &acts.key, rows * c.kv_dim() as usize);
+            push("mem.value", &acts.value, rows * c.kv_dim() as usize);
+            push("mem.read", &acts.read, rows * c.q_dim() as usize);
+            push("mem.out", &memory_out, rows * d);
+            let refs = model::anchor_memory::decode_refs(&g.read(&acts.refs, shape.refs_len() as usize));
+            taps.push((format!("layer{l}.mem.refs"), refs.into_iter().map(|r| r as f32).collect()));
+        }
+
+        let sum = g.storage_uninit((n * c.d_model) as u64);
+        g.submit(&[], &[g.step(ADD2, &[&attn_out, &memory_out, &sum], &[n * c.d_model], n * c.d_model)]);
+        sum
+    }
+
     /// One decoder layer's forward: `out = layer_l(xres)`. On a training
     /// build it returns the activations the backward needs; the caller keeps
     /// them (no recompute) or drops them at once (recompute, which calls this
@@ -3225,6 +3347,8 @@ impl Qwen35 {
             }
             LayerType::Full => {
                 let (o, a) = self.layer_gqa_fwd(&format!("blocks.{l}.self_attn"), &xn1, n, None);
+                // The anchor memory reads the layer's residual input, not its normalised copy.
+                let o = if self.cfg.layer_has_memory(l) { self.add_anchor_memory(l, xres, o, n) } else { o };
                 (o, a.map(MixerActs::Gqa))
             }
         };
@@ -3834,6 +3958,7 @@ impl Qwen35 {
     ///
     /// `None` is exactly [`Self::step`] and requires `shard.embed`.
     pub fn step_with_input(&self, token_id: u32, input: Option<&[f32]>) -> Vec<f32> {
+        self.cfg.require_plain_decoder("step");
         assert_eq!(self.b, 1, "qwen35::step requires b==1 (single sequence)");
         assert!(
             (token_id as usize) < self.cfg.vocab as usize,
@@ -4918,6 +5043,7 @@ impl Qwen35 {
     /// with the dispatch count, and the reason this is CHUNKED rather than one
     /// whole-prompt forward.
     pub fn prefill_chunked(&self, tokens: &[u32], max_chunk: u32) -> Vec<f32> {
+        self.cfg.require_plain_decoder("prefill_chunked");
         assert_eq!(self.b, 1, "qwen35::prefill_chunked requires b==1 (single sequence)");
         assert!(!tokens.is_empty(), "qwen35::prefill_chunked: empty prompt");
         assert!(max_chunk > 0, "qwen35::prefill_chunked: max_chunk must be > 0");
@@ -4967,6 +5093,7 @@ impl Qwen35 {
     /// token prefill would, so [`Self::step`] continues from it. Returns the
     /// last row's final-norm hidden state.
     pub fn prefill_embeds(&self, embeds: &[f32], max_chunk: u32) -> Vec<f32> {
+        self.cfg.require_plain_decoder("prefill_embeds");
         assert_eq!(self.b, 1, "qwen35::prefill_embeds requires b==1 (single sequence)");
         assert!(max_chunk > 0, "qwen35::prefill_embeds: max_chunk must be > 0");
         let d = self.cfg.d_model as usize;

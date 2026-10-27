@@ -65,25 +65,49 @@ pub fn hf_leaf(suffix: &str) -> String {
     }
 }
 
+/// How a checkpoint names the decoder's tensors: the multimodal release nests
+/// it under `model.language_model.` (with a vision tower and an MTP head
+/// beside it); a text-only release (EdgeRock) has `model.layers.*` and a
+/// top-level `config.json`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    Multimodal,
+    TextOnly,
+}
+
 /// A fresh scratch dir holding the checkpoint; `skip` drops one canonical
 /// tensor (to test the refusal path).
 pub fn write_checkpoint(cfg: &Qwen35Config, tag: &str, skip: Option<&str>) -> PathBuf {
-    write_checkpoint_from(cfg, tag, skip, None)
+    write_checkpoint_from(cfg, tag, skip, None, Layout::Multimodal)
 }
 
 /// [`write_checkpoint`] holding `values` (brain-canonical, as `qwen35::init::init_weights` makes them) in the
 /// same layout, every tensor bf16 (the recurrence's `A_log` f32) instead of random FP8 bytes: a model whose
 /// weights are sane enough to train, in a file the packed loader reads like the real release.
 pub fn write_dense_checkpoint(cfg: &Qwen35Config, tag: &str, values: &HashMap<String, Vec<f32>>) -> PathBuf {
-    write_checkpoint_from(cfg, tag, None, Some(values))
+    write_checkpoint_from(cfg, tag, None, Some(values), Layout::Multimodal)
+}
+
+/// [`write_dense_checkpoint`] in a text-only release's layout (EdgeRock): no
+/// vision tower or MTP shard, `model.layers.*` names, the anchor-memory
+/// tensors of `cfg`, and a tied head when `cfg` ties it.
+pub fn write_text_only_checkpoint(cfg: &Qwen35Config, tag: &str, values: &HashMap<String, Vec<f32>>) -> PathBuf {
+    write_checkpoint_from(cfg, tag, None, Some(values), Layout::TextOnly)
 }
 
 /// A plain RMSNorm gain is stored as `w` and applied as `1 + w` (`qwen35::import`).
 fn stored_as_offset_from_one(canon: &str) -> bool {
-    canon == "norm.weight" || canon.ends_with(".ln1.weight") || canon.ends_with(".ln2.weight") || canon.ends_with(".self_attn.q_norm.weight") || canon.ends_with(".self_attn.k_norm.weight")
+    canon == "norm.weight"
+        || canon.ends_with(".ln1.weight")
+        || canon.ends_with(".ln2.weight")
+        || canon.ends_with(".self_attn.q_norm.weight")
+        || canon.ends_with(".self_attn.k_norm.weight")
+        || canon.ends_with(".memory.input_norm.weight")
+        || canon.ends_with(".memory.q_norm.weight")
+        || canon.ends_with(".memory.k_norm.weight")
 }
 
-fn write_checkpoint_from(cfg: &Qwen35Config, tag: &str, skip: Option<&str>, dense: Option<&HashMap<String, Vec<f32>>>) -> PathBuf {
+fn write_checkpoint_from(cfg: &Qwen35Config, tag: &str, skip: Option<&str>, dense: Option<&HashMap<String, Vec<f32>>>, layout: Layout) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("qwen35_fp8_source_{tag}_{}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
@@ -105,7 +129,7 @@ fn write_checkpoint_from(cfg: &Qwen35Config, tag: &str, skip: Option<&str>, dens
         }
         let (file, hf, shape) = if let Some(rest) = canon.strip_prefix("blocks.") {
             let (l, suffix) = rest.split_once('.').unwrap();
-            let hf = format!("model.language_model.layers.{l}.{}", hf_leaf(suffix));
+            let hf = format!("{}layers.{l}.{}", decoder_prefix(layout), hf_leaf(suffix));
             let shape = match linear_shapes.get(&canon) {
                 Some(&(n, k)) => vec![n, k],
                 None if suffix == "linear_attn.conv1d.weight" => vec![cfg.linear_conv_dim() as usize, 1, cfg.linear_conv_kernel_dim as usize],
@@ -114,12 +138,12 @@ fn write_checkpoint_from(cfg: &Qwen35Config, tag: &str, skip: Option<&str>, dens
             (format!("layers-{l}.safetensors"), hf, shape)
         } else {
             let (hf, shape) = match canon.as_str() {
-                "tok.weight" => ("model.language_model.embed_tokens.weight", vec![cfg.vocab as usize, d]),
-                "lm_head.weight" => ("lm_head.weight", vec![cfg.vocab as usize, d]),
-                "norm.weight" => ("model.language_model.norm.weight", vec![d]),
+                "tok.weight" => (format!("{}embed_tokens.weight", decoder_prefix(layout)), vec![cfg.vocab as usize, d]),
+                "lm_head.weight" => ("lm_head.weight".to_string(), vec![cfg.vocab as usize, d]),
+                "norm.weight" => (format!("{}norm.weight", decoder_prefix(layout)), vec![d]),
                 other => panic!("fixture does not know {other}"),
             };
-            ("outside.safetensors".to_string(), hf.to_string(), shape)
+            ("outside.safetensors".to_string(), hf, shape)
         };
         // FP8-quantized in the real release: the big linears, except the GDN
         // in_proj_a/b gates (kept bf16, which also covers a mixed layer).
@@ -155,18 +179,51 @@ fn write_checkpoint_from(cfg: &Qwen35Config, tag: &str, skip: Option<&str>, dens
             list.push(Raw { name: hf, dtype: "BF16", shape, bytes });
         }
     }
-    // Real, present, out-of-scope tensors in their own shard.
-    by_file.entry("mtp.safetensors".into()).or_default().push(Raw { name: "mtp.fc.weight".into(), dtype: "BF16", shape: vec![d, 2 * d], bytes: vec![0; d * 2 * d * 2] });
-    weight_map.insert("mtp.fc.weight".into(), "mtp.safetensors".into());
-    by_file.get_mut("outside.safetensors").unwrap().push(Raw { name: "model.visual.patch_embed.weight".into(), dtype: "BF16", shape: vec![4], bytes: vec![0; 8] });
-    weight_map.insert("model.visual.patch_embed.weight".into(), "outside.safetensors".into());
+    if layout == Layout::Multimodal {
+        // Real, present, out-of-scope tensors in their own shard.
+        by_file.entry("mtp.safetensors".into()).or_default().push(Raw { name: "mtp.fc.weight".into(), dtype: "BF16", shape: vec![d, 2 * d], bytes: vec![0; d * 2 * d * 2] });
+        weight_map.insert("mtp.fc.weight".into(), "mtp.safetensors".into());
+        by_file.get_mut("outside.safetensors").unwrap().push(Raw { name: "model.visual.patch_embed.weight".into(), dtype: "BF16", shape: vec![4], bytes: vec![0; 8] });
+        weight_map.insert("model.visual.patch_embed.weight".into(), "outside.safetensors".into());
+    }
 
     for (file, tensors) in &by_file {
         write_st(&dir.join(file), tensors);
     }
-    std::fs::write(dir.join("config.json"), serde_json::to_vec(&hf_config_json(cfg, BLOCK)).unwrap()).unwrap();
+    let config = match layout {
+        Layout::Multimodal => hf_config_json(cfg, BLOCK),
+        Layout::TextOnly => hf_text_config_json(cfg),
+    };
+    std::fs::write(dir.join("config.json"), serde_json::to_vec(&config).unwrap()).unwrap();
     std::fs::write(dir.join("model.safetensors.index.json"), serde_json::to_vec(&serde_json::json!({"weight_map": weight_map})).unwrap()).unwrap();
     dir
+}
+
+/// The tensor-name prefix of the decoder in `layout`.
+fn decoder_prefix(layout: Layout) -> &'static str {
+    match layout {
+        Layout::Multimodal => "model.language_model.",
+        Layout::TextOnly => "model.",
+    }
+}
+
+/// The `config.json` of a text-only release for `cfg`: the text config at the
+/// top level, with EdgeRock's `fixed_memory_*` and `independent_memory` fields
+/// when `cfg` has a window and an anchor memory.
+pub fn hf_text_config_json(cfg: &Qwen35Config) -> serde_json::Value {
+    let mut c = hf_config_json(cfg, BLOCK)["text_config"].clone();
+    c["architectures"] = serde_json::json!(["EdgeRockForCausalLM"]);
+    if let (Some(window), Some(mem)) = (cfg.swa_window, cfg.anchor_memory) {
+        c["fixed_memory_revision"] = qwen35::config::EDGEROCK_MEMORY_REVISION.into();
+        c["fixed_memory_swa_window"] = window.into();
+        let full: Vec<usize> = cfg.layer_types().iter().enumerate().filter(|(_, ty)| **ty == qwen35::config::LayerType::Full).map(|(l, _)| l).collect();
+        c["fixed_memory_swa_layers"] = serde_json::json!(full);
+        c["independent_memory"] = serde_json::json!({
+            "capacity": mem.capacity, "max_commit_chunk": mem.commit_chunk,
+            "admission_rank": mem.admission_rank, "writer_intermediate_size": mem.writer_intermediate,
+        });
+    }
+    c
 }
 
 /// The `config.json` of the multimodal release for `cfg`: the text model

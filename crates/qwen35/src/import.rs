@@ -19,6 +19,14 @@
 //! scope - MTP's own import lands alongside the MTP model code
 //! (`crate::model`), vision's alongside the vision splice code (`crate::vl`).
 //!
+//! A text-only checkpoint (`Qwen3_5ForCausalLM`, EdgeRock) has no
+//! `language_model` level: `model.layers.{i}.*`, `model.embed_tokens.weight`,
+//! `model.norm.weight`, and no `lm_head.weight` when the head is tied. The same
+//! [`classify`] reads both layouts. EdgeRock's full-attention layers add
+//! `model.layers.{i}.memory.<leaf>` (the anchor memory,
+//! [`Qwen35Config::memory_leaves`]); three of its leaves are plain RMSNorms and
+//! take the fold below.
+//!
 //! One name this module got wrong before real-checkpoint access caught it:
 //! the embedding is `model.language_model.embed_tokens.weight`, nested
 //! under `language_model` unlike `lm_head.weight`. The original guess
@@ -118,6 +126,9 @@ pub(crate) fn is_plain_rmsnorm_weight(name: &str) -> bool {
         || name.ends_with(".ln2.weight")
         || name.ends_with(".self_attn.q_norm.weight")
         || name.ends_with(".self_attn.k_norm.weight")
+        || name.ends_with(".memory.input_norm.weight")
+        || name.ends_with(".memory.q_norm.weight")
+        || name.ends_with(".memory.k_norm.weight")
 }
 
 /// Add `1.0` to every plain-RMSNorm weight (`ln1`/`ln2`/`self_attn.{q,k}_norm`/
@@ -238,16 +249,18 @@ pub(crate) fn classify(name: &str, cfg: &Qwen35Config, foreign: &[&str]) -> Resu
     if foreign.iter().any(|p| name.starts_with(p)) {
         return Ok(None);
     }
-    if name == "model.language_model.embed_tokens.weight" {
-        return Ok(Some("tok.weight".to_string()));
-    }
     if name == "lm_head.weight" {
         return Ok(Some("lm_head.weight".to_string()));
     }
-    if name == "model.language_model.norm.weight" {
-        return Ok(Some("norm.weight".to_string()));
+    let Some(inner) = text_model_tensor(name) else {
+        return Err(format!("import: unrecognized tensor name {name}"));
+    };
+    match inner {
+        "embed_tokens.weight" => return Ok(Some("tok.weight".to_string())),
+        "norm.weight" => return Ok(Some("norm.weight".to_string())),
+        _ => {}
     }
-    let Some(rest) = name.strip_prefix("model.language_model.layers.") else {
+    let Some(rest) = inner.strip_prefix("layers.") else {
         return Err(format!("import: unrecognized tensor name {name}"));
     };
     let (idx_str, leaf) = rest
@@ -258,10 +271,26 @@ pub(crate) fn classify(name: &str, cfg: &Qwen35Config, foreign: &[&str]) -> Resu
     let ty = types
         .get(l as usize)
         .ok_or_else(|| format!("import: {name} references layer {l}, but cfg.n_layers is {}", types.len()))?;
+    if let Some(memory_leaf) = leaf.strip_prefix("memory.") {
+        let known = cfg.memory_leaves().iter().any(|(n, _)| *n == memory_leaf);
+        return match (*ty, known) {
+            (LayerType::Full, true) => Ok(Some(format!("blocks.{l}.memory.{memory_leaf}"))),
+            (_, false) if cfg.anchor_memory.is_none() => Err(format!("import: {name} is an anchor-memory tensor but the config has no anchor_memory")),
+            _ => Err(format!("import: unrecognized anchor-memory leaf {memory_leaf:?} (or on a non-full-attention layer) under {name}")),
+        };
+    }
     match classify_layer_leaf(leaf, *ty) {
         Some(suffix) => Ok(Some(format!("blocks.{l}.{suffix}"))),
         None => Err(format!("import: unrecognized leaf {leaf:?} under a known-scope tensor {name}")),
     }
+}
+
+/// The part of a text-decoder tensor name after its model prefix: the
+/// multimodal layout nests the decoder under `model.language_model.`, the
+/// text-only layout (`Qwen3_5ForCausalLM`, EdgeRock) under `model.`. One
+/// classifier serves both; `None` for a name under neither.
+fn text_model_tensor(name: &str) -> Option<&str> {
+    name.strip_prefix("model.language_model.").or_else(|| name.strip_prefix("model."))
 }
 
 /// `conv1d.weight` ships as HF's raw `nn.Conv1d` shape `[conv_dim, 1,
@@ -344,10 +373,10 @@ pub fn import_dir(dir: &Path, cfg: &Qwen35Config, block: usize) -> Result<HashMa
 /// belongs to `blocks.{l}.*` - the same "loud, by name" discipline this
 /// module's doc describes for the whole-checkpoint path.
 pub fn import_layer(reader: &checkpoint::mmap::MmapSafetensors, cfg: &Qwen35Config, l: usize, block: usize) -> Result<HashMap<String, Vec<f32>>, String> {
-    let prefix = format!("model.language_model.layers.{l}.");
-    let names: Vec<String> = reader.names().iter().filter(|n| n.starts_with(&prefix)).cloned().collect();
+    let prefixes = [format!("model.language_model.layers.{l}."), format!("model.layers.{l}.")];
+    let names: Vec<String> = reader.names().iter().filter(|n| prefixes.iter().any(|p| n.starts_with(p.as_str()))).cloned().collect();
     if names.is_empty() {
-        return Err(format!("import_layer: no tensors found with prefix {prefix}"));
+        return Err(format!("import_layer: no tensors found with prefix {prefixes:?}"));
     }
     let mut raw: Tensors = HashMap::with_capacity(names.len());
     for name in &names {
@@ -680,12 +709,18 @@ mod tests {
     /// (unnested); the real checkpoint's `model.safetensors.index.json` has
     /// `model.language_model.embed_tokens.weight` instead - nested, like
     /// every per-layer tensor, unlike `lm_head.weight`. Pins the fix so a
-    /// future edit cannot silently revert to the unverified guess.
+    /// future edit cannot silently revert to the unverified guess. The
+    /// unnested `model.embed_tokens.weight` is a different, REAL layout: a
+    /// text-only checkpoint (EdgeRock) has no `language_model` level at all,
+    /// and every one of its tensors is unnested, so the embedding classifies
+    /// there together with `model.layers.*` and `model.norm.weight`.
     #[test]
-    fn embed_tokens_classifies_at_its_real_nested_name_not_the_unverified_guess() {
+    fn embed_tokens_classifies_at_its_real_nested_name_and_in_the_text_only_layout() {
         let cfg = Qwen35Config::tiny();
         assert_eq!(classify("model.language_model.embed_tokens.weight", &cfg, &[]).unwrap(), Some("tok.weight".to_string()));
-        assert!(classify("model.embed_tokens.weight", &cfg, &[]).is_err(), "the old unverified name must no longer classify as anything");
+        assert_eq!(classify("model.embed_tokens.weight", &cfg, &[]).unwrap(), Some("tok.weight".to_string()));
+        assert!(classify("embed_tokens.weight", &cfg, &[]).is_err(), "a name under no model prefix classifies as nothing");
+        assert!(classify("model.language_model.language_model.embed_tokens.weight", &cfg, &[]).is_err());
     }
 
     #[test]
@@ -853,5 +888,70 @@ mod tests {
         let err = import_mtp(&reader, &cfg, 128).unwrap_err();
         std::fs::remove_file(&path).ok();
         assert!(err.contains("mtp.fc.weight"), "error must name the missing tensor: {err}");
+    }
+
+    /// EdgeRock's text-only layout at `Qwen35Config::edgerock_tiny()`'s
+    /// shapes: `model.layers.{i}.*` with no `language_model` level, the
+    /// anchor-memory tensors under `memory.`, and no `lm_head.weight` (tied
+    /// head). Plain RMSNorm seeds are 0.0 (applied as `1 + w`).
+    fn synthetic_edgerock(cfg: &Qwen35Config) -> Tensors {
+        let mut t: Tensors = synthetic(cfg)
+            .into_iter()
+            .filter(|(n, _)| n != "lm_head.weight" && !n.starts_with("mtp.") && !n.starts_with("model.visual."))
+            .map(|(n, v)| (n.replacen("model.language_model.", "model.", 1), v))
+            .collect();
+        for (l, _) in cfg.layer_types().iter().enumerate().filter(|(l, _)| cfg.layer_has_memory(*l)) {
+            for (leaf, numel) in cfg.memory_leaves() {
+                let seed = if leaf.ends_with("_norm.weight") { 0.0 } else { 0.01 };
+                t.insert(format!("model.layers.{l}.memory.{leaf}"), (vec![numel], vec![seed; numel]));
+            }
+        }
+        t
+    }
+
+    #[test]
+    fn edgerock_text_only_layout_imports_with_two_way_coverage_fold_and_tied_head() {
+        let cfg = Qwen35Config::edgerock_tiny();
+        let out = import_from_tensors(synthetic_edgerock(&cfg), &cfg).expect("import must succeed");
+        assert_eq!(out.len(), cfg.param_list().len());
+        assert!(!out.contains_key("lm_head.weight"), "a tied head has no lm_head tensor");
+        assert_eq!(cfg.head_weight(), "tok.weight");
+        for l in [3, 7] {
+            for leaf in ["input_norm", "q_norm", "k_norm"] {
+                assert!(out[&format!("blocks.{l}.memory.{leaf}.weight")].iter().all(|&v| v == 1.0), "memory {leaf} is a plain (1+w) RMSNorm");
+            }
+            assert!(out[&format!("blocks.{l}.memory.q_proj.weight")].iter().all(|&v| v == 0.01), "projections are not folded");
+            assert!(out[&format!("blocks.{l}.memory.read_scale")].iter().all(|&v| v == 0.01), "read_scale is not a norm");
+        }
+        assert!(out["norm.weight"].iter().all(|&v| v == 1.0));
+    }
+
+    #[test]
+    fn edgerock_missing_or_unexpected_memory_tensor_errors_by_name() {
+        let cfg = Qwen35Config::edgerock_tiny();
+        let mut raw = synthetic_edgerock(&cfg);
+        raw.remove("model.layers.7.memory.admission_up.weight");
+        let err = import_from_tensors(raw, &cfg).unwrap_err();
+        assert!(err.contains("blocks.7.memory.admission_up.weight"), "{err}");
+
+        // The same checkpoint against a config without an anchor memory.
+        let plain = Qwen35Config { anchor_memory: None, swa_window: None, ..cfg.clone() };
+        let err = import_from_tensors(synthetic_edgerock(&cfg), &plain).unwrap_err();
+        assert!(err.contains(".memory.") && err.contains("no anchor_memory"), "{err}");
+
+        // A memory tensor on a linear-attention layer is refused, not ignored.
+        let mut raw = synthetic_edgerock(&cfg);
+        raw.insert("model.layers.0.memory.q_proj.weight".into(), one_f32(vec![1], 0.0));
+        let err = import_from_tensors(raw, &cfg).unwrap_err();
+        assert!(err.contains("model.layers.0.memory.q_proj.weight"), "{err}");
+    }
+
+    #[test]
+    fn the_multimodal_layout_still_classifies_to_the_same_names() {
+        let cfg = Qwen35Config::tiny();
+        assert_eq!(classify("model.language_model.layers.3.self_attn.q_proj.weight", &cfg, &[]).unwrap().as_deref(), Some("blocks.3.self_attn.q_proj.weight"));
+        assert_eq!(classify("model.layers.3.self_attn.q_proj.weight", &cfg, &[]).unwrap().as_deref(), Some("blocks.3.self_attn.q_proj.weight"));
+        assert_eq!(classify("model.embed_tokens.weight", &cfg, &[]).unwrap().as_deref(), Some("tok.weight"));
+        assert!(classify("model.rotary_emb.inv_freq", &cfg, &[]).is_err());
     }
 }

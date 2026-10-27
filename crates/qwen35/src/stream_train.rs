@@ -661,6 +661,7 @@ fn gqa_layer_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Conf
         gpu.submit(&[], &s);
     }
 
+    cfg.require_plain_decoder("the layer-streamed trainer");
     let shape = GqaMixerShape { b: 1, t: n, n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: cfg.rotary_dim() / 2, rms_eps: cfg.rms_eps };
     let mix_w = GqaMixerWeights { q_norm: &layer.q_norm, k_norm: &layer.k_norm, cos, sin };
     let flash = ids.flash.and_then(|f| f.for_training(gpu, hd, n));
@@ -711,6 +712,7 @@ fn gqa_mixer_backward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Con
         gpu.submit(&[], &s);
     }
 
+    cfg.require_plain_decoder("the layer-streamed trainer");
     let shape = GqaMixerShape { b: 1, t: n, n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: cfg.rotary_dim() / 2, rms_eps: cfg.rms_eps };
     let weights = GqaMixerWeights { q_norm: &layer.q_norm, k_norm: &layer.k_norm, cos, sin };
     let grads = GqaMixerGrads { q_norm: None, k_norm: None };

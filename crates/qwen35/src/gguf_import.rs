@@ -171,6 +171,9 @@ pub fn config_from_gguf(mg: &MmapGguf) -> Result<Qwen35Config, String> {
         rope_scaling: None,
 
         lora: None,
+        // A llama.cpp qwen35 GGUF is a plain decoder: no window, no anchor memory.
+        swa_window: None,
+        anchor_memory: None,
         mtp: true,
     })
 }

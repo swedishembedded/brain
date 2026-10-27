@@ -610,6 +610,7 @@ impl StreamState {
         ops.matmul(&mut s1, &l.v_proj, &act1, &v, 0);
         g.submit(&[], &s1);
 
+        cfg.require_plain_decoder("the layer-streamed forward");
         let shape = GqaMixerShape { b: 1, t: n, n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: cfg.rotary_dim() / 2, rms_eps: cfg.rms_eps };
         let weights = GqaMixerWeights { q_norm: &l.q_norm, k_norm: &l.k_norm, cos: &self.cos, sin: &self.sin };
         let (ctx_gated, _acts) = gqa_mixer_fwd(g, &self.ids.gqa_mixer, &shape, &weights, &q_full, &k, &v, n, false);
@@ -693,6 +694,7 @@ fn mtp_mixer_forward(state: &StreamState, cfg: &Qwen35Config, l: &OwnedGqaLayer,
     ops.matmul(&mut s1, &l.v_proj, &act1, &v, 0);
     g.submit(&[], &s1);
 
+    cfg.require_plain_decoder("the layer-streamed forward");
     let shape = GqaMixerShape { b: 1, t: n, n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: cfg.rotary_dim() / 2, rms_eps: cfg.rms_eps };
     let weights = GqaMixerWeights { q_norm: &l.q_norm, k_norm: &l.k_norm, cos, sin };
     let (ctx_gated, _acts) = gqa_mixer_fwd(g, &state.ids.gqa_mixer, &shape, &weights, &q_full, &k, &v, n, false);

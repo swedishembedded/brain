@@ -20,6 +20,12 @@
 //! (`Qwen3_5PreTrainedModel._init_weights`): `dt_bias` ones, `A_log =
 //! log(Uniform(0,16))`.
 //!
+//! An EdgeRock anchor memory (`cfg.anchor_memory`): its three RMSNorm gains are
+//! `1.0` like every other norm and every other tensor, including the read
+//! gate (`read_scale`, `read_gate_*`), is drawn like a base weight. A released
+//! checkpoint zero-initialises the gate so its memory starts silent; a
+//! cold-start test wants the memory path to carry signal.
+//!
 //! LoRA adapters (`cfg.lora` set - see `config::Qwen35Config::param_list`):
 //! `.lora_a` gets the standard `std=0.02` normal init, `.lora_b` is
 //! zero-initialised so a freshly-built adapter starts as an exact no-op
@@ -91,6 +97,21 @@ mod tests {
             assert_eq!(v.len(), numel, "{name}: wrong length");
             assert!(v.iter().all(|x| x.is_finite()), "{name}: non-finite value");
         }
+    }
+
+    #[test]
+    fn init_weights_covers_the_anchor_memory_of_every_full_layer() {
+        let cfg = Qwen35Config::edgerock_tiny();
+        let w = init_weights(&cfg, 7);
+        for l in [3, 7] {
+            for (leaf, numel) in cfg.memory_leaves() {
+                let v = w.get(&format!("blocks.{l}.memory.{leaf}")).unwrap_or_else(|| panic!("init_weights missing blocks.{l}.memory.{leaf}"));
+                assert_eq!(v.len(), numel);
+                assert!(v.iter().all(|x| x.is_finite()));
+            }
+            assert!(w[&format!("blocks.{l}.memory.q_norm.weight")].iter().all(|&x| x == 1.0));
+        }
+        assert!(!w.contains_key("lm_head.weight"), "tied head");
     }
 
     #[test]

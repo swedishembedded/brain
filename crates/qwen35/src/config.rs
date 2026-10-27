@@ -71,6 +71,27 @@ pub fn layer_types(n_layers: u32, interval: u32) -> Vec<LayerType> {
         .collect()
 }
 
+/// The `fixed_memory_revision` value this importer understands: the Qwen3.5
+/// text decoder with a sliding window and an independent GQA anchor memory on
+/// its full-attention layers.
+pub const EDGEROCK_MEMORY_REVISION: &str = "qwen35-text-original-gdn-swa-independent-gqa-memory-v1";
+
+/// The anchor memory of a full-attention layer (EdgeRock's `independent_memory`).
+/// Per KV group the layer keeps the `capacity` best-scoring records written by
+/// completed commit blocks; the math is `model::anchor_memory`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AnchorMemoryCfg {
+    /// Records kept per KV group.
+    pub capacity: u32,
+    /// `max_commit_chunk`: the longest commit block. The block actually used is
+    /// `min(commit_chunk, swa_window)` ([`Qwen35Config::memory_commit_block`]).
+    pub commit_chunk: u32,
+    /// Width of the low-rank admission scorer (`admission_down` output).
+    pub admission_rank: u32,
+    /// Hidden width of the record writer's gated MLP.
+    pub writer_intermediate: u32,
+}
+
 #[derive(Clone, Debug)]
 pub struct Qwen35Config {
     pub vocab: u32,
@@ -115,6 +136,16 @@ pub struct Qwen35Config {
     /// `Some` selects LoRA fine-tuning (frozen base + adapters); `None` is a
     /// full (all-parameter) model.
     pub lora: Option<LoraCfg>,
+
+    /// Causal sliding-window length on every [`LayerType::Full`] layer: query
+    /// `i` attends keys `j` with `i - window < j <= i`. `None` is plain causal
+    /// attention. EdgeRock's `fixed_memory_swa_window`.
+    pub swa_window: Option<u32>,
+    /// A bounded anchor memory beside the attention of every
+    /// [`LayerType::Full`] layer (see [`AnchorMemoryCfg`]). Requires
+    /// [`Self::swa_window`]: the window covers the tokens of the commit block
+    /// the memory cannot read yet.
+    pub anchor_memory: Option<AnchorMemoryCfg>,
 
     /// Multi-token prediction head (`mtp_num_hidden_layers: 1` in the real
     /// config - always exactly one extra layer, so this is a plain bool, not
@@ -171,6 +202,8 @@ impl Qwen35Config {
             intermediate_size: 112,
 
             lora: None,
+            swa_window: None,
+            anchor_memory: None,
             mtp: false,
         }
     }
@@ -237,8 +270,151 @@ impl Qwen35Config {
             intermediate_size: 17408,
 
             lora: None,
+            swa_window: None,
+            anchor_memory: None,
             mtp: false,
         }
+    }
+
+    /// The tiny EdgeRock fixture: **must match `tools/goldens/
+    /// edgerock_dump_reference.py`'s `TINY`, `WINDOW` and `MEMORY` exactly**,
+    /// dimension for dimension. Eight layers (full attention at 3 and 7), two
+    /// KV groups' worth of distinct dims, a window and a commit block small
+    /// enough that its 48-token prompt slides the window and evicts from a
+    /// 6-slot bank many times over, and a tied head.
+    pub fn edgerock_tiny() -> Qwen35Config {
+        Qwen35Config {
+            vocab: 29,
+            block_size: 48,
+            n_layers: 8,
+            d_model: 96,
+            max_position_embeddings: 48,
+            tie_embeddings: true,
+            n_heads: 10,
+            n_kv_heads: 5,
+            intermediate_size: 112,
+            swa_window: Some(11),
+            anchor_memory: Some(AnchorMemoryCfg { capacity: 6, commit_chunk: 4, admission_rank: 7, writer_intermediate: 52 }),
+            ..Qwen35Config::tiny()
+        }
+    }
+
+    /// The published EdgeRock-4B shape (`rockmatrix-ai/EdgeRock`'s `config.json`):
+    /// the Qwen3.5-4B text decoder with a 1024-token window and a 1024-record
+    /// anchor memory on each of its eight full-attention layers. Tied head.
+    pub fn edgerock_4b() -> Qwen35Config {
+        Qwen35Config {
+            vocab: 248320,
+            block_size: 4096,
+            n_layers: 32,
+            d_model: 2560,
+            max_position_embeddings: 262144,
+            tie_embeddings: true,
+            n_heads: 16,
+            n_kv_heads: 4,
+            head_dim: 256,
+            mrope_section: [11, 11, 10],
+            linear_num_key_heads: 16,
+            linear_num_value_heads: 32,
+            linear_key_head_dim: 128,
+            linear_value_head_dim: 128,
+            intermediate_size: 9216,
+            swa_window: Some(1024),
+            anchor_memory: Some(AnchorMemoryCfg { capacity: 1024, commit_chunk: 256, admission_rank: 256, writer_intermediate: 2560 }),
+            ..Qwen35Config::qwen38_27b()
+        }
+    }
+
+    /// Positions per anchor-memory commit block: `min(commit_chunk, swa_window)`,
+    /// so a token's own block, which the bank cannot hold yet, is always inside
+    /// its window. `None` without an anchor memory.
+    pub fn memory_commit_block(&self) -> Option<u32> {
+        let mem = self.anchor_memory.as_ref()?;
+        Some(self.swa_window.map_or(mem.commit_chunk, |w| mem.commit_chunk.min(w)))
+    }
+
+    /// Refuse, loudly, a path that implements neither the sliding window nor
+    /// the anchor memory: `path` names it. Plain Qwen3.5 configs pass. The
+    /// decode, serving, streaming and training paths call this until each has
+    /// its own windowed/memory state, so a configuration they would run with
+    /// plain full attention never produces silently wrong text.
+    pub fn require_plain_decoder(&self, path: &str) {
+        assert!(
+            self.swa_window.is_none() && self.anchor_memory.is_none(),
+            "qwen35: {path} does not implement this config's sliding window / anchor memory (swa_window {:?}, anchor_memory {:?}); \
+             only the one-shot forward (`logits_all`) does so far",
+            self.swa_window,
+            self.anchor_memory
+        );
+    }
+
+    /// Whether `blocks.{l}` carries the window and the anchor memory.
+    pub fn layer_has_memory(&self, l: usize) -> bool {
+        self.anchor_memory.is_some() && self.layer_types().get(l) == Some(&LayerType::Full)
+    }
+
+    /// Refuse a configuration the windowed/anchor-memory forward cannot run,
+    /// naming the field. Called where a model is built.
+    pub fn check_window_and_memory(&self) -> Result<(), String> {
+        if self.swa_window == Some(0) {
+            return Err("qwen35 config: swa_window must be > 0".to_string());
+        }
+        let Some(mem) = &self.anchor_memory else { return Ok(()) };
+        for (field, v) in [("capacity", mem.capacity), ("commit_chunk", mem.commit_chunk), ("admission_rank", mem.admission_rank), ("writer_intermediate", mem.writer_intermediate)] {
+            if v == 0 {
+                return Err(format!("qwen35 config: anchor_memory.{field} must be > 0"));
+            }
+        }
+        if self.swa_window.is_none() {
+            return Err("qwen35 config: anchor_memory requires swa_window (the window covers the commit block the memory cannot read yet)".to_string());
+        }
+        if self.n_kv_heads == 0 || !self.n_heads.is_multiple_of(self.n_kv_heads) {
+            return Err(format!("qwen35 config: n_heads {} is not a multiple of n_kv_heads {}", self.n_heads, self.n_kv_heads));
+        }
+        Ok(())
+    }
+
+    /// Read EdgeRock's extra fields from an HF `config.json` object `c` (the
+    /// text config) onto `self`. A config naming none of them is a plain
+    /// Qwen3.5 decoder and comes back unchanged. Otherwise all of
+    /// `fixed_memory_revision` (equal to [`EDGEROCK_MEMORY_REVISION`]),
+    /// `fixed_memory_swa_window`, `fixed_memory_swa_layers` (exactly this
+    /// config's full-attention layers) and `independent_memory` must be present
+    /// and well formed: an error names the field.
+    pub fn with_edgerock_hf(mut self, c: &Value) -> Result<Qwen35Config, String> {
+        const KEYS: [&str; 4] = ["fixed_memory_revision", "fixed_memory_swa_window", "fixed_memory_swa_layers", "independent_memory"];
+        if KEYS.iter().all(|k| c.get(*k).is_none_or(Value::is_null)) {
+            return Ok(self);
+        }
+        let need = |k: &str| c.get(k).filter(|v| !v.is_null()).ok_or_else(|| format!("config: {k} is required by the other fixed-memory fields"));
+        let revision = need("fixed_memory_revision")?.as_str().unwrap_or("");
+        if revision != EDGEROCK_MEMORY_REVISION {
+            return Err(format!("config: fixed_memory_revision {revision:?} is not supported (this importer reads {EDGEROCK_MEMORY_REVISION:?})"));
+        }
+        let uint = |v: &Value, what: &str| -> Result<u32, String> {
+            v.as_u64().filter(|n| *n > 0 && *n <= u64::from(u32::MAX)).map(|n| n as u32).ok_or_else(|| format!("config: {what} must be a positive integer, got {v}"))
+        };
+        self.swa_window = Some(uint(need("fixed_memory_swa_window")?, "fixed_memory_swa_window")?);
+        let layers: Vec<u64> = need("fixed_memory_swa_layers")?
+            .as_array()
+            .ok_or("config: fixed_memory_swa_layers must be an array")?
+            .iter()
+            .map(|v| v.as_u64().ok_or_else(|| format!("config: fixed_memory_swa_layers entry {v} is not a layer index")))
+            .collect::<Result<_, _>>()?;
+        let full: Vec<u64> = self.layer_types().iter().enumerate().filter(|(_, ty)| **ty == LayerType::Full).map(|(l, _)| l as u64).collect();
+        if layers != full {
+            return Err(format!("config: fixed_memory_swa_layers {layers:?} must equal the full-attention layers {full:?} (the window and the memory sit on exactly those)"));
+        }
+        let mem = need("independent_memory")?;
+        let field = |k: &str| uint(mem.get(k).unwrap_or(&Value::Null), &format!("independent_memory.{k}"));
+        self.anchor_memory = Some(AnchorMemoryCfg {
+            capacity: field("capacity")?,
+            commit_chunk: field("max_commit_chunk")?,
+            admission_rank: field("admission_rank")?,
+            writer_intermediate: field("writer_intermediate_size")?,
+        });
+        self.check_window_and_memory()?;
+        Ok(self)
     }
 
     pub fn layer_types(&self) -> Vec<LayerType> {
@@ -496,7 +672,10 @@ impl Qwen35Config {
         let head = if self.tie_embeddings { 0 } else { self.vocab as u64 * self.d_model as u64 * 4 };
         let norm = self.d_model as u64 * 4;
         let layers: u64 = self.layer_types().into_iter().map(|ty| self.layer_weight_bytes(ty, tier) + self.layer_decode_state_bytes(ty, cap, KvTier::F32)).sum();
-        embed + head + norm + layers
+        // The anchor memories' fp32 parameters. Their decode state (window ring + bank) is not costed yet.
+        let memory_layers = (0..self.n_layers as usize).filter(|l| self.layer_has_memory(*l)).count() as u64;
+        let memory: u64 = memory_layers * self.memory_leaves().iter().map(|(_, n)| *n as u64 * 4).sum::<u64>();
+        embed + head + norm + layers + memory
     }
 
     pub fn head_weight(&self) -> &'static str {
@@ -535,6 +714,15 @@ impl Qwen35Config {
         }
         if let Some(scaling) = &self.rope_scaling {
             v["rope_scaling"] = scaling.to_config();
+        }
+        if let Some(w) = self.swa_window {
+            v["swa_window"] = w.into();
+        }
+        if let Some(m) = &self.anchor_memory {
+            v["anchor_memory"] = serde_json::json!({
+                "capacity": m.capacity, "commit_chunk": m.commit_chunk,
+                "admission_rank": m.admission_rank, "writer_intermediate": m.writer_intermediate,
+            });
         }
         v
     }
@@ -629,8 +817,41 @@ impl Qwen35Config {
             intermediate_size: g("intermediate_size", 112),
 
             lora: c.get("lora").and_then(|l| l.as_object()).map(LoraCfg::from_json),
+            swa_window: c["swa_window"].as_u64().map(|v| v as u32),
+            anchor_memory: c["anchor_memory"].as_object().map(|m| {
+                let f = |k: &str| m.get(k).and_then(Value::as_u64).unwrap_or_else(|| panic!("qwen35 config: anchor_memory.{k} is missing")) as u32;
+                AnchorMemoryCfg { capacity: f("capacity"), commit_chunk: f("commit_chunk"), admission_rank: f("admission_rank"), writer_intermediate: f("writer_intermediate") }
+            }),
             mtp: c["mtp"].as_bool().unwrap_or(false),
         }
+    }
+
+    /// The `(leaf, numel)` of every parameter the anchor memory of one
+    /// full-attention layer owns, named as the checkpoint's `memory.<leaf>`
+    /// tensors; empty without an anchor memory. `*_norm`s are plain `(1+w)`
+    /// RMSNorms; `admission_*` produce the fp32 admission scores.
+    pub fn memory_leaves(&self) -> Vec<(&'static str, usize)> {
+        let Some(m) = &self.anchor_memory else { return Vec::new() };
+        let (d, hd) = (self.d_model as usize, self.head_dim as usize);
+        let (h, g) = (self.n_heads as usize, self.n_kv_heads as usize);
+        let (r, i) = (m.admission_rank as usize, m.writer_intermediate as usize);
+        vec![
+            ("input_norm.weight", d),
+            ("q_norm.weight", hd),
+            ("k_norm.weight", hd),
+            ("q_proj.weight", h * hd * d),
+            ("k_proj.weight", g * hd * d),
+            ("v_proj.weight", g * hd * d),
+            ("o_proj.weight", d * h * hd),
+            ("write_gate_proj.weight", i * d),
+            ("write_up_proj.weight", i * d),
+            ("write_down_proj.weight", d * i),
+            ("admission_down.weight", r * d),
+            ("admission_up.weight", g * r),
+            ("read_scale", h),
+            ("read_gate_weight", h * hd),
+            ("read_gate_bias", h),
+        ]
     }
 
     /// Parameter list: `(name, numel)`. Mirrors `qwen35moe::config::
@@ -695,6 +916,11 @@ impl Qwen35Config {
                     out.push((p("self_attn.q_norm.weight"), hd));
                     out.push((p("self_attn.k_norm.weight"), hd));
                     lin(&mut out, p("self_attn.o_proj.weight"), "o_proj", d, hq);
+                    // Never a LoRA site or a quantized tier: plain fp32 parameters
+                    // (`lin` would match the `q_proj`/`o_proj` leaf names).
+                    for (leaf, numel) in self.memory_leaves() {
+                        out.push((p(&format!("memory.{leaf}")), numel));
+                    }
                 }
             }
 
