@@ -1153,3 +1153,32 @@ that is held later would have been refused for the budget. Now: the OCR models p
 (`ResidencyManager::replica_can_run`, `least_loaded_replica`): one whose card is held is routed around until the capacity probe (it already raises
 and lowers every card's budget from what is free) sees the card free, and a model with no replica able to run takes the first, failing with the
 budget's classed reason. Tested at the manager (`a_replica_can_run_only_while_its_card_has_the_budget`), the router and the planner.
+
+## 2026-10-27 round 2: before and after
+
+Server, `--device gpu1`, eight omni-mixed pages (mixed sizes), one client per row; the card carried a neighbour's job at 150 to 410 W throughout. "Start"
+is round 1's final binary (this round's first measurement), "end" the head of this round.
+
+| | start | end |
+|---|---|---|
+| v1, 16 clients, max_tokens 1024: pages/min (tok/s) | 71.2 (803) | 114.8 (1252) |
+| v1, 64 clients | 74.2 (836) | 167.1 (1828) |
+| v2, 16 clients | 31.1 (337) | 120.1 (1308) |
+| v2, 64 clients (p95 latency) | 28.1 (p95 134 s) | 181.9 (p95 21 s) |
+| small crops, 64 clients: crops/min (tok/s) | 450 (879) | 705 (1436) |
+| v1 / v2 pages of 256 tokens, 64 clients: pages/min | - | 235 / 255 |
+| crops' median latency beside 8 full-page clients | 3.5 s | 1.9 s (1.1 s alone) |
+| 32 abandoned requests, then the next burst | 131.8 s (29.1 clean) | 28.9 s |
+
+Two replicas (both cards, the other card also carrying the neighbour): 230.7 pages/min, 2,596 tok/s at 128 clients (v1, 1024 tokens).
+
+Components, best of N: decode step at 64 rows 7.18 -> 6.11 ms; prefill of a 930-token page 83 -> 36 ms; v2 resampler for six tiles 92.6 -> 28.0 ms; the first
+request after start 5.4 s (model load) either way.
+
+What decided the throughput was not a kernel: the dispatcher ran the OCR models eight pages at a time (a missing `batch_limit`), a client that hung up
+did not cancel its generation, and prefill attention ran the decode-shaped triad on the CUDA cores. Open, in the order the profile ranks them: the
+encoder is ~60% of a page's GPU time (v1 six tiles 174 ms, v2 215 ms) and its remaining cost is memory-bound glue in fp32 (`bias_add`, `gelu`, the bias
+softmax, the windowed relative-position attention 6 ms, CLIP's attention 3.7 ms: tensor-core CLIP attention needs a padded score stride because its 257 and
+101 keys are not multiples of 4); a second encoder pair for concurrent encodes would cost ~3 GB each against the 7 GiB vision budget; the 64-row decode step
+is 33% paged attention near its bandwidth floor (fp8 K/V would halve the bytes, not measured) and 85 activation casts. fp8 expert weights would not
+reduce the step: they are as many bytes as int8.

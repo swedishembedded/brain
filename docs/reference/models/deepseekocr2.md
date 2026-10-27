@@ -122,6 +122,13 @@ linears and global-attention blocks are TF32 library products, and the resampler
 products too (tests fail by kernel name on a fallback to the CUDA cores; `BRAIN_PROFILE=1` prints the tensor-core share). Its unfused
 score/softmax/apply attention chain and its elementwise passes remain on the CUDA cores.
 
+**Serving flags.** `brain serve` honours `--max-batch N` (pages decoded together, 1 to 128, default 64), `--ctx N` (tokens one page may hold),
+`--kv-cache f32|bf16` (default bf16; the pool is sized in bytes, so f32 holds half the tokens) and `--gemm fp32` (the decoder's reference tier and every
+vision tower on the exact fp32 kernels instead of tensor cores). `--weight-format` is refused by name and the model is then not served. With two
+or more cards that each hold the model, one replica runs on each, jobs go to a replica whose card has the budget at that moment, and a card another
+process held at start is used as soon as it is free. Queued pages are admitted into the running batch continuously; the encoder serves the cheapest
+queued page first and drops a request cancelled while it waits; a client that hangs up cancels its generation.
+
 **Greedy only** - no temperature, top-k, or top-p.
 
 **No NPU validation yet.** This host has no NPU firmware to test against;
