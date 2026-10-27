@@ -54,9 +54,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let row = rh / p.n_heads;
     let s = row / p.t;
     let pos = row % p.t;
-    let n_blocks = (p.t + p.chunk - 1u) / p.chunk;
+    let n_seq = p.rows / p.t;
     let g = h / (p.n_heads / p.groups);
-    let bank = ((s * n_blocks + pos / p.chunk) * p.groups + g) * p.capacity;
+    let bank = (((pos / p.chunk) * n_seq + s) * p.groups + g) * p.capacity;
     let cols = p.capacity + 1u;
 
     var acc = 0.0;

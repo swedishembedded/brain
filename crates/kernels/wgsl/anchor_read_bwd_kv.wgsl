@@ -26,7 +26,7 @@
 // gradient is scattered: each output word has one writer. `dkey` is w.r.t. the
 // ROTATED key. Records read by nobody get exactly zero.
 //
-//   slot_of : [n_seq, n_blocks, groups, t]
+//   slot_of : [n_blocks, n_seq, groups, t]
 //   dlogit, probs : [n_seq * t * n_heads, capacity + 1]
 //   q, d_read     : [n_seq * t, n_heads * head_dim]
 //   dkey, dvalue  : [n_seq * t, groups * head_dim]
@@ -64,6 +64,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let s = row_j / p.t;
     let pos = row_j % p.t;
     let n_blocks = (p.t + p.chunk - 1u) / p.chunk;
+    let n_seq = p.rows / p.t;
     let per_group = p.n_heads / p.groups;
     let cols = p.capacity + 1u;
     let scale = inverseSqrt(f32(hd));
@@ -71,7 +72,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     var acc_k = 0.0;
     var acc_v = 0.0;
     for (var b = pos / p.chunk + 1u; b < n_blocks; b = b + 1u) {
-        let sl = slot_of[((s * n_blocks + b) * p.groups + g) * p.t + pos];
+        let sl = slot_of[((b * n_seq + s) * p.groups + g) * p.t + pos];
         if (sl != 0u) {
             let c = sl - 1u;
             let r_end = min(p.t, (b + 1u) * p.chunk);

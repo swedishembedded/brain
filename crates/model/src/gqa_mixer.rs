@@ -24,7 +24,7 @@
 
 use gpu_core::provider::attention::AttnShape;
 use gpu_core::provider::library::LibraryGemmProvider;
-use gpu_core::{DeviceBuffer, Gpu};
+use gpu_core::{DeviceBuffer, Gpu, Step};
 
 use crate::kv_tier::{KvKernels, KvLayer};
 use crate::block::{flash_gqa_causal_bwd, flash_gqa_causal_fwd, gqa_bwd, gqa_fwd, gqa_fwd_win, rmsnorm_bwd, rmsnorm_fwd, rope2d_partial_bwd, rope2d_partial_fwd, FlashGqaIds, Gqa, KernelIds};
@@ -265,6 +265,102 @@ fn gqa_mixer_fwd_core(
         gate,
     });
     (ctx_gated, acts)
+}
+
+/// The ring of a sliding-window layer's KV cache: exactly `window` rows per sequence however long it runs, position
+/// `p` in row `p % window`. Softmax is order-invariant and positions are already rotated into the keys, so a decode
+/// step attends the ring as an ordinary cache whose length is [`ring_live`] and whose write offset is
+/// [`ring_row`]; nothing about the paged decode kernels changes. The two functions are the whole of that contract.
+pub fn ring_row(pos: u32, window: u32) -> u32 {
+    pos % window
+}
+
+/// Rows of the ring a token at `pos` attends (itself included): `min(pos + 1, window)`.
+pub fn ring_live(pos: u32, window: u32) -> u32 {
+    (pos + 1).min(window)
+}
+
+/// Where one chunk of a sliding-window prefill finds and leaves the ring (see [`gqa_mixer_ring_chunk_fwd`]).
+pub struct RingChunk<'a> {
+    /// The layer's cache; its planes must be `f32` (the ring is flat words here).
+    pub layer: &'a KvLayer,
+    /// First row of this sequence's ring in the planes (`block * window` for a pool of rings).
+    pub row0: u32,
+    pub window: u32,
+    /// Absolute position of the chunk's first token.
+    pub start: u32,
+    /// Pipeline indices of `gqa_scores_win` and `splice` in the caller's kernel list.
+    pub scores_win: usize,
+    pub splice: usize,
+}
+
+/// Copy `rows` rows of `kvd` words from `src` (starting at row `src_row`) to `dst` (from row `dst_row`).
+fn copy_rows(g: &Gpu, splice: usize, src: &DeviceBuffer, src_row: u64, dst: &DeviceBuffer, dst_row: u64, rows: u64, kvd: u64) -> Option<Step> {
+    let n = rows * kvd;
+    (n > 0).then(|| g.step_sliced(splice, &[src, dst], &[(src_row * kvd, n), (dst_row * kvd, n)], &[n as u32, 0], n as u32))
+}
+
+/// [`gqa_mixer_fwd`] for ONE CHUNK of `n` rows at positions `start ..` of a sliding-window layer, against the
+/// sequence's ring ([`RingChunk`]) instead of a cache that grows with the sequence. The keys of the last
+/// `min(start, window)` positions are gathered out of the ring in logical order and the chunk's own roped keys appended
+/// (a chunk's later rows cannot be written into the ring first: they would overwrite rows its earlier queries still
+/// need); the chunk's queries attend that run under the window mask; then the chunk's last `min(n, window)` rows are
+/// written back to their ring rows. Equal to the same rows of a whole-sequence windowed forward.
+///
+/// The attention is the materialised scores/softmax/apply chain over `m + n` rows with the first `m` query rows idle:
+/// the cost is `O((m + n)^2)` per head, which is fine for a bounded chunk and is what a windowed flash kernel replaces.
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_mixer_ring_chunk_fwd(g: &Gpu, ids: &GqaMixerIds, ring: &RingChunk, shape: &GqaMixerShape, w: &GqaMixerWeights, q_full: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, n: u32) -> DeviceBuffer {
+    assert!(ring.layer.k.tier() == crate::kv_tier::KvTier::F32, "gqa_mixer_ring_chunk_fwd: the ring's planes must be f32");
+    let (nh, nkv, hd) = (shape.n_heads, shape.n_kv_heads, shape.head_dim);
+    let (qd, kvd) = (u64::from(shape.qd()), u64::from(shape.kvd()));
+    let (win, start) = (ring.window, ring.start);
+    let prep = qkv_prepare(g, ids, shape, w, q_full, k, n);
+
+    let m = start.min(win);
+    let len = m + n;
+    let (ctx_k, ctx_v) = (g.storage_uninit(u64::from(len) * kvd), g.storage_uninit(u64::from(len) * kvd));
+    let mut steps = Vec::new();
+    // The previous `m` positions, in order, out of the ring (at most two runs: it wraps once).
+    let (mut p, end) = (start - m, start);
+    while p < end {
+        let row = ring_row(p, win);
+        let run = (end - p).min(win - row);
+        for (plane, dst) in [(&ring.layer.k, &ctx_k), (&ring.layer.v, &ctx_v)] {
+            steps.extend(copy_rows(g, ring.splice, plane.data(), u64::from(ring.row0 + row), dst, u64::from(p - (start - m)), u64::from(run), kvd));
+        }
+        p += run;
+    }
+    steps.extend(copy_rows(g, ring.splice, &prep.k_normed, 0, &ctx_k, u64::from(m), u64::from(n), kvd));
+    steps.extend(copy_rows(g, ring.splice, v, 0, &ctx_v, u64::from(m), u64::from(n), kvd));
+    // Queries sit at logical rows `m ..` of the run; the rows before them are idle.
+    let q_pad = g.storage_uninit(u64::from(len) * qd);
+    steps.extend(copy_rows(g, ring.splice, &prep.q_normed, 0, &q_pad, u64::from(m), u64::from(n), qd));
+    g.submit(&[], &steps);
+
+    let slabs = u64::from(nh) * u64::from(len) * u64::from(len);
+    let (scores, probs) = (g.storage_uninit(slabs), g.storage_uninit(slabs));
+    let ctx_pad = g.storage_uninit(u64::from(len) * qd);
+    let ga = Gqa { b: 1, t: len, n_heads: nh, n_kv_heads: nkv, head_dim: hd };
+    g.submit(&[], &gqa_fwd_win(g, ring.scores_win, &ids.kernels, &ga, win, &q_pad, &ctx_k, &ctx_v, &scores, &probs, &ctx_pad));
+    let ctx = g.storage_uninit(u64::from(n) * qd);
+    g.submit(&[], &copy_rows(g, ring.splice, &ctx_pad, u64::from(m), &ctx, 0, u64::from(n), qd).into_iter().collect::<Vec<_>>());
+
+    // The chunk's last `window` positions become the ring.
+    let keep = n.min(win);
+    let (mut p, end) = (start + n - keep, start + n);
+    let mut steps = Vec::new();
+    while p < end {
+        let row = ring_row(p, win);
+        let run = (end - p).min(win - row);
+        for (plane, src) in [(&ring.layer.k, &prep.k_normed), (&ring.layer.v, v)] {
+            steps.extend(copy_rows(g, ring.splice, src, u64::from(p - start), plane.data(), u64::from(ring.row0 + row), u64::from(run), kvd));
+        }
+        p += run;
+    }
+    g.submit(&[], &steps);
+
+    gate_ctx(g, ids, &ctx, &prep.q_gate, n, shape.qd()).1
 }
 
 /// [`gqa_mixer_fwd`] for ONE CHUNK of a multi-round prefill: identical

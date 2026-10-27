@@ -70,6 +70,12 @@ pub const ADD_CHAN_INPLACE: &str = include_str!("../wgsl/add_chan_inplace.wgsl")
 pub const ADD_INDEX_MASK: &str = include_str!("../wgsl/add_index_mask.wgsl");
 /// `wgsl/add_inplace.wgsl`
 pub const ADD_INPLACE: &str = include_str!("../wgsl/add_inplace.wgsl");
+/// `wgsl/anchor_bank_gather.wgsl`
+pub const ANCHOR_BANK_GATHER: &str = include_str!("../wgsl/anchor_bank_gather.wgsl");
+/// `wgsl/anchor_commit.wgsl`
+pub const ANCHOR_COMMIT: &str = include_str!("../wgsl/anchor_commit.wgsl");
+/// `wgsl/anchor_push.wgsl`
+pub const ANCHOR_PUSH: &str = include_str!("../wgsl/anchor_push.wgsl");
 /// `wgsl/anchor_read_apply.wgsl`
 pub const ANCHOR_READ_APPLY: &str = include_str!("../wgsl/anchor_read_apply.wgsl");
 /// `wgsl/anchor_read_bwd_dp.wgsl`
@@ -86,8 +92,8 @@ pub const ANCHOR_READ_GATE_BWD: &str = include_str!("../wgsl/anchor_read_gate_bw
 pub const ANCHOR_READ_GATE_WGRAD: &str = include_str!("../wgsl/anchor_read_gate_wgrad.wgsl");
 /// `wgsl/anchor_read_scores.wgsl`
 pub const ANCHOR_READ_SCORES: &str = include_str!("../wgsl/anchor_read_scores.wgsl");
-/// `wgsl/anchor_select.wgsl`
-pub const ANCHOR_SELECT: &str = include_str!("../wgsl/anchor_select.wgsl");
+/// `wgsl/anchor_rows_copy.wgsl`
+pub const ANCHOR_ROWS_COPY: &str = include_str!("../wgsl/anchor_rows_copy.wgsl");
 /// `wgsl/anchor_slot_inverse.wgsl`
 pub const ANCHOR_SLOT_INVERSE: &str = include_str!("../wgsl/anchor_slot_inverse.wgsl");
 /// `wgsl/arcface_margin.wgsl`
@@ -1371,6 +1377,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("add_chan_inplace", ADD_CHAN_INPLACE),
     ("add_index_mask", ADD_INDEX_MASK),
     ("add_inplace", ADD_INPLACE),
+    ("anchor_bank_gather", ANCHOR_BANK_GATHER),
+    ("anchor_commit", ANCHOR_COMMIT),
+    ("anchor_push", ANCHOR_PUSH),
     ("anchor_read_apply", ANCHOR_READ_APPLY),
     ("anchor_read_bwd_dp", ANCHOR_READ_BWD_DP),
     ("anchor_read_bwd_kv", ANCHOR_READ_BWD_KV),
@@ -1379,7 +1388,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("anchor_read_gate_bwd", ANCHOR_READ_GATE_BWD),
     ("anchor_read_gate_wgrad", ANCHOR_READ_GATE_WGRAD),
     ("anchor_read_scores", ANCHOR_READ_SCORES),
-    ("anchor_select", ANCHOR_SELECT),
+    ("anchor_rows_copy", ANCHOR_ROWS_COPY),
     ("anchor_slot_inverse", ANCHOR_SLOT_INVERSE),
     ("arcface_margin", ARCFACE_MARGIN),
     ("arcface_margin_bwd", ARCFACE_MARGIN_BWD),

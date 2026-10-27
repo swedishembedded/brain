@@ -26,7 +26,7 @@
 //
 //   d_read : [n_seq * t, n_heads * head_dim]
 //   value  : [n_seq * t, groups * head_dim]
-//   refs   : [n_seq, n_blocks, groups, capacity]    (`anchor_select`'s layout)
+//   refs   : [n_blocks, n_seq, groups, capacity]    (`anchor_commit`'s bank, block-major)
 //   dp     : [n_seq * t * n_heads, capacity + 1]
 
 struct Params {
@@ -62,9 +62,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     }
     let s = row / p.t;
     let pos = row % p.t;
-    let n_blocks = (p.t + p.chunk - 1u) / p.chunk;
+    let n_seq = p.rows / p.t;
     let g = h / (p.n_heads / p.groups);
-    let slot = refs[((s * n_blocks + pos / p.chunk) * p.groups + g) * p.capacity + c];
+    let slot = refs[(((pos / p.chunk) * n_seq + s) * p.groups + g) * p.capacity + c];
     if (slot == 0u) {
         dp[gidx] = 0.0;
         return;

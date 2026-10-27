@@ -18,7 +18,7 @@
 // The read side of an anchor memory, step 1 of 3 (this kernel, a row softmax
 // over `capacity + 1` columns, `anchor_read_apply`). A token at position `pos`
 // of sequence `s` reads the bank committed before its commit block
-// `pos / chunk` (see `anchor_select`), through the head's KV group:
+// `pos / chunk` (see `anchor_commit`), through the head's KV group:
 //
 //   logits[row, h, c] = q[row, h, :] . key[s * t + ref, g, :] / sqrt(head_dim)
 //                       for slot c < capacity holding a record `ref`,
@@ -29,8 +29,13 @@
 //
 //   q      : [n_seq * t, n_heads * head_dim]   rotated query
 //   key    : [n_seq * t, groups * head_dim]    rotated written keys
-//   refs   : [n_seq, n_blocks, groups, capacity] (`anchor_select`'s layout)
+//   refs   : [n_blocks, n_seq, groups, capacity] (`anchor_commit`'s bank, block-major)
 //   logits : [n_seq * t * n_heads, capacity + 1]
+//
+// A record's key row is `base + ref - 1` where `base = s * kv_rows` for a sequence's own
+// tensors (`slotted` 0: the sequence form, `kv_rows` = t) or `slots[s] * kv_rows` for a pool
+// of fixed-state banks (`slotted` 1: a decode step or a chunk from a state, `kv_rows` = K).
+// There `refs` holds the slot index + 1 of each filled bank slot.
 
 struct Params {
     rows: u32,       // n_seq * t
@@ -40,6 +45,8 @@ struct Params {
     capacity: u32,
     head_dim: u32,
     chunk: u32,
+    kv_rows: u32,
+    slotted: u32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -47,6 +54,7 @@ struct Params {
 @group(0) @binding(2) var<storage, read>       key:    array<f32>;
 @group(0) @binding(3) var<storage, read>       refs:   array<u32>;
 @group(0) @binding(4) var<storage, read_write> logits: array<f32>;
+@group(0) @binding(5) var<storage, read>       slots:  array<u32>;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>,
@@ -66,9 +74,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
 
     let s = row / p.t;
     let pos = row % p.t;
-    let n_blocks = (p.t + p.chunk - 1u) / p.chunk;
+    let n_seq = p.rows / p.t;
     let g = h / (p.n_heads / p.groups);
-    let slot = refs[((s * n_blocks + pos / p.chunk) * p.groups + g) * p.capacity + c];
+    let slot = refs[(((pos / p.chunk) * n_seq + s) * p.groups + g) * p.capacity + c];
     if (slot == 0u) {
         logits[gidx] = -3.4e38;
         return;
@@ -76,7 +84,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
 
     let hd = p.head_dim;
     let q_base = row * p.n_heads * hd + h * hd;
-    let k_base = (s * p.t + slot - 1u) * p.groups * hd + g * hd;
+    var base = s * p.kv_rows;
+    if (p.slotted != 0u) { base = slots[s] * p.kv_rows; }
+    let k_base = (base + slot - 1u) * p.groups * hd + g * hd;
     var dot = 0.0;
     for (var d = 0u; d < hd; d = d + 1u) {
         dot = dot + q[q_base + d] * key[k_base + d];

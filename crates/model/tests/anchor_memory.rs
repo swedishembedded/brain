@@ -15,7 +15,7 @@
 
 use data::rng::{random_seed, Lcg};
 use gpu_core::{DeviceBuffer, Gpu};
-use model::anchor_memory::{anchor_read_bwd, anchor_read_steps, anchor_select_steps, decode_refs, AnchorMemoryKernels, AnchorMemoryShape, ANCHOR_MEMORY_PIPELINES};
+use model::anchor_memory::{anchor_read_bwd, anchor_read_steps, anchor_read_steps_at, anchor_select_steps, decode_refs, state_write_steps, AnchorBankPool, BankAddressing, Commit, Push, ReadPlan, WritePlan, AnchorMemoryKernels, AnchorMemoryShape, ANCHOR_MEMORY_PIPELINES};
 
 fn dev() -> (Gpu, AnchorMemoryKernels) {
     let g = gpu_core::testgpu::dev(&ANCHOR_MEMORY_PIPELINES);
@@ -40,12 +40,12 @@ fn shape(n_seq: u32, t: u32, groups: u32, heads: u32, head_dim: u32, capacity: u
     }
 }
 
-/// `refs[s][b][g][c]` by definition: the `capacity` best of the tokens of blocks `< b`, `-1` padded.
+/// `refs[b][s][g][c]` by definition: the `capacity` best of the tokens of blocks `< b`, `-1` padded.
 fn bank_by_definition(scores: &[f32], s: &AnchorMemoryShape) -> Vec<i64> {
     let (t, groups, cap) = (s.t as usize, s.n_kv_heads as usize, s.capacity as usize);
     let mut refs = Vec::new();
-    for seq in 0..s.n_seq as usize {
-        for b in 0..s.n_blocks() as usize {
+    for b in 0..s.n_blocks() as usize {
+        for seq in 0..s.n_seq as usize {
             for g in 0..groups {
                 let committed = (b * s.commit_block as usize).min(t);
                 let score = |j: usize| scores[(seq * t + j) * groups + g];
@@ -96,9 +96,9 @@ fn equal_scores_keep_the_earliest_positions() {
     let s = shape(1, 24, 2, 2, 2, 5, 4);
     let got = run_select(&g, &k, &s, &vec![0.0; (s.t * s.n_kv_heads) as usize]);
     let cap = s.capacity as usize;
-    let last_block_group0 = &got[((s.n_blocks() as usize - 1) * 2) * cap..][..cap];
+    let last_block_group0 = &got[((s.n_blocks() as usize - 1) * 2 * s.n_seq as usize) * cap..][..cap];
     assert_eq!(last_block_group0, &[0, 1, 2, 3, 4], "a tie goes to the earlier position");
-    let first_block = &got[..2 * cap];
+    let first_block = &got[..2 * s.n_seq as usize * cap];
     assert!(first_block.iter().all(|&r| r == -1), "block 0 reads an empty bank");
 }
 
@@ -113,7 +113,7 @@ fn host_read(q: &[f32], key: &[f32], value: &[f32], refs: &[i64], s: &AnchorMemo
         let block = pos / s.commit_block as usize;
         for head in 0..h {
             let g = head / per_group;
-            let bank = &refs[((seq * s.n_blocks() as usize + block) * groups + g) * cap..][..cap];
+            let bank = &refs[((block * s.n_seq as usize + seq) * groups + g) * cap..][..cap];
             let live: Vec<usize> = bank.iter().filter(|&&r| r >= 0).map(|&r| r as usize).collect();
             let logit = |j: usize| -> f64 {
                 let dot: f64 = (0..hd).map(|d| f64::from(q[(row * h + head) * hd + d]) * f64::from(key[((seq * t + j) * groups + g) * hd + d])).sum();
@@ -186,7 +186,7 @@ fn host_read_bwd(q: &[f32], key: &[f32], value: &[f32], refs: &[i64], d_read: &[
         let block = pos / s.commit_block as usize;
         for head in 0..h {
             let g = head / per_group;
-            let bank = &refs[((seq * s.n_blocks() as usize + block) * groups + g) * cap..][..cap];
+            let bank = &refs[((block * s.n_seq as usize + seq) * groups + g) * cap..][..cap];
             let live: Vec<usize> = bank.iter().filter(|&&r| r >= 0).map(|&r| r as usize).collect();
             let qv = |d: usize| f64::from(q[(row * h + head) * hd + d]);
             let kv = |j: usize, d: usize| f64::from(key[((seq * t + j) * groups + g) * hd + d]);
@@ -248,4 +248,104 @@ fn read_backward_gathers_the_same_gradients_a_scatter_would() {
             assert!(dkey[(row * (groups * hd) as usize)..][..(groups * hd) as usize].iter().all(|&x| x == 0.0), "a record of the last block is read by nobody");
         }
     }
+}
+
+fn download_u32(g: &Gpu, buf: &DeviceBuffer, n: usize) -> Vec<u32> {
+    g.read(buf, n).iter().map(|w| w.to_bits()).collect()
+}
+
+/// Feed a sequence into a state pool one token at a time, exactly as a decode step does (a push and, when the
+/// token completes a block, a commit), and at every position read the committed bank for that token. The state's
+/// bank after each block and every read must equal what the sequence form defines.
+#[test]
+fn the_state_form_selects_and_reads_exactly_as_the_sequence_form() {
+    let (g, k) = dev();
+    let mut r = Lcg::new(random_seed());
+    // Two groups of two heads, ties common, eviction (cap 5 under blocks of 4 over 30 tokens), and a slot that is not 0.
+    let (t, groups, heads, hd, cap, chunk, slot) = (30u32, 2u32, 4u32, 6u32, 5u32, 4u32, 2u32);
+    let s = shape(1, t, groups, heads, hd, cap, chunk);
+    let scores = scores_with_ties(&mut r, (t * groups) as usize, 4);
+    let refs = bank_by_definition(&scores, &s);
+    let q = r.vec_scaled((t * heads * hd) as usize, 1.5);
+    let key = r.vec_scaled((t * groups * hd) as usize, 1.5);
+    let value = r.vec_scaled((t * groups * hd) as usize, 1.0);
+    let want_reads = host_read(&q, &key, &value, &refs, &s);
+
+    let pool = AnchorBankPool::new(&g, &s, 4);
+    let (kb, vb, sb) = (g.storage_init("k", &key), g.storage_init("v", &value), g.storage_init("s", &scores));
+    let gd = (groups * hd) as usize;
+    for pos in 0..t {
+        // Read the bank the token sees.
+        let one = shape(1, 1, groups, heads, hd, cap, 1);
+        let plan = ReadPlan::upload(&g, &s, &[(slot, pos)]);
+        let qb = g.storage_init("q", &q[(pos * heads * hd) as usize..][..(heads * hd) as usize]);
+        let words = u64::from(heads * (cap + 1));
+        let (logits, probs) = (g.storage(words), g.storage(words));
+        let read = g.storage(u64::from(heads * hd));
+        g.submit(&[], &anchor_read_steps_at(&g, &k, &one, BankAddressing { kv_rows: cap, slots: Some(&plan.slots) }, &qb, &pool.key, &pool.value, &plan.refs, &logits, &probs, &read));
+        let got = g.read(&read, (heads * hd) as usize);
+        let want = &want_reads[(pos * heads * hd) as usize..][..(heads * hd) as usize];
+        let worst = got.iter().zip(want).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+        assert!(worst < 1e-5, "position {pos}: the state read differs from the sequence form by {worst}");
+
+        // Absorb the token; commit when its block is complete.
+        let done = pos % chunk == chunk - 1;
+        let write = WritePlan::upload(&g, &s, &[Push { slot, pos, src_row: pos }], &[Commit { slot, first_pos: if done { pos + 1 - chunk } else { 0 }, count: if done { chunk } else { 0 } }]);
+        // The step's record tensors are those of the whole sequence; a decode step's are one row, so row `pos` is the source.
+        g.submit(&[], &state_write_steps(&g, &k, &s, &pool, &write, &kb, &vb, &sb));
+        if done {
+            let block = (pos / chunk + 1) as usize;
+            if block < s.n_blocks() as usize {
+                let bank = download_u32(&g, &pool.pos, (pool.slots * groups * cap) as usize);
+                for gi in 0..groups as usize {
+                    let at = ((slot as usize * groups as usize) + gi) * cap as usize;
+                    let want_bank = &refs[(block * groups as usize + gi) * cap as usize..][..cap as usize];
+                    let got_bank: Vec<i64> = bank[at..at + cap as usize].iter().map(|&x| i64::from(x) - 1).collect();
+                    assert_eq!(got_bank, want_bank, "after block {} group {gi}", block - 1);
+                    // The keys moved with their positions.
+                    let keys = g.read(&pool.key, (pool.slots * cap * groups * hd) as usize);
+                    for (c, &r) in want_bank.iter().enumerate() {
+                        let row = (slot * cap) as usize + c;
+                        let got_key = &keys[row * gd + gi * hd as usize..][..hd as usize];
+                        let want_key: Vec<f32> = if r < 0 { vec![0.0; hd as usize] } else { key[r as usize * gd + gi * hd as usize..][..hd as usize].to_vec() };
+                        assert_eq!(got_key, &want_key[..], "key of rank {c}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn resetting_a_slot_clears_its_bank_and_leaves_the_others_alone() {
+    let (g, k) = dev();
+    let (t, groups, heads, hd, cap, chunk) = (12u32, 2u32, 2u32, 4u32, 3u32, 4u32);
+    let s = shape(1, t, groups, heads, hd, cap, chunk);
+    let mut r = Lcg::new(random_seed());
+    let pool = AnchorBankPool::new(&g, &s, 3);
+    let (kb, vb, sb) = (g.storage_init("k", &r.vec_scaled((t * groups * hd) as usize, 1.0)), g.storage_init("v", &r.vec_scaled((t * groups * hd) as usize, 1.0)), g.storage_init("s", &r.vec_scaled((t * groups) as usize, 1.0)));
+    for slot in [0u32, 1] {
+        for pos in 0..t {
+            let done = pos % chunk == chunk - 1;
+            let write = WritePlan::upload(&g, &s, &[Push { slot, pos, src_row: pos }], &[Commit { slot, first_pos: if done { pos + 1 - chunk } else { 0 }, count: if done { chunk } else { 0 } }]);
+            g.submit(&[], &state_write_steps(&g, &k, &s, &pool, &write, &kb, &vb, &sb));
+        }
+    }
+    let words = (groups * cap) as usize;
+    let before = download_u32(&g, &pool.pos, 3 * words);
+    assert!(before[..words].iter().any(|&x| x != 0) && before[words..2 * words].iter().any(|&x| x != 0), "both slots hold a bank");
+    pool.reset_row(&g, 0);
+    let after = download_u32(&g, &pool.pos, 3 * words);
+    assert!(after[..words].iter().all(|&x| x == 0), "the reset slot is empty");
+    assert_eq!(after[words..], before[words..], "the other slots are untouched");
+    for (buf, per) in pool.arrays() {
+        assert!(g.read(buf, 3 * per as usize)[..per as usize].iter().all(|&x| x == 0.0), "every array of the slot is cleared, pending block included");
+    }
+    // A copy is bit for bit.
+    g.submit(&[], &pool.copy_row(&g, &k, 1, 2));
+    let copied = download_u32(&g, &pool.pos, 3 * words);
+    assert_eq!(copied[2 * words..], before[words..2 * words]);
+    let keys = g.read(&pool.key, (3 * cap * groups * hd) as usize);
+    let per = (cap * groups * hd) as usize;
+    assert_eq!(keys[2 * per..], keys[per..2 * per]);
 }

@@ -22,10 +22,10 @@
 // write conflicts.
 //
 //   phase 0: slot_of[i] = 0 for every entry         (threads: n_seq * n_blocks * groups * t)
-//   phase 1: slot_of[(s, b, g, ref - 1)] = c + 1    (threads: n_seq * n_blocks * groups * capacity)
+//   phase 1: slot_of[(b, s, g, ref - 1)] = c + 1    (threads: n_seq * n_blocks * groups * capacity)
 //
-//   refs    : [n_seq, n_blocks, groups, capacity]   (`anchor_select`'s layout)
-//   slot_of : [n_seq, n_blocks, groups, t]
+//   refs    : [n_blocks, n_seq, groups, capacity]   (`anchor_commit`'s bank, block-major)
+//   slot_of : [n_blocks, n_seq, groups, t]
 
 struct Params {
     n_seq: u32,
@@ -52,7 +52,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     }
     if (gidx >= p.n_seq * n_blocks * p.groups * p.capacity) { return; }
     let c = gidx % p.capacity;
-    let bg = gidx / p.capacity;           // (s * n_blocks + b) * groups + g
+    let bg = gidx / p.capacity;           // (b * n_seq + s) * groups + g
     let slot = refs[gidx];
     if (slot != 0u) {
         slot_of[bg * p.t + slot - 1u] = c + 1u;
