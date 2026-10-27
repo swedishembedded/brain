@@ -3400,8 +3400,23 @@ impl Qwen35 {
                 // The scorer and anything not held in a tier: exact fp32. A few rows take the skinny-M kernel (one
                 // workgroup per output column, the weight read once), which a single decode row needs; it has no
                 // tensor-core variant, so the product stays exact.
-                None => match (n <= 32).then(|| g.kernel_index("matmul_gemv")).flatten() {
-                    Some(gemv) => s.push(g.dispatch(gemv, &[x, self.w(&wname), out], &[n, n_in, n_out], gpu_core::Dispatch::Workgroups(n_out))),
+                None => match g.kernel_index("matmul_gemv") {
+                    // Groups of up to 32 rows, each a view of the activations and the output.
+                    Some(gemv) => {
+                        let wbuf = self.w(&wname);
+                        let wlen = u64::from(n_in) * u64::from(n_out);
+                        for first in (0..n).step_by(32) {
+                            let rows = (n - first).min(32);
+                            let (xo, yo) = (u64::from(first) * u64::from(n_in), u64::from(first) * u64::from(n_out));
+                            s.push(g.dispatch_sliced(
+                                gemv,
+                                &[x, wbuf, out],
+                                &[(xo, u64::from(rows) * u64::from(n_in)), (0, wlen), (yo, u64::from(rows) * u64::from(n_out))],
+                                &[rows, n_in, n_out],
+                                gpu_core::Dispatch::Workgroups(n_out),
+                            ));
+                        }
+                    }
                     None => s.push(g.step(MATMUL, &[x, self.w(&wname), out], &[n, n_in, n_out], n * n_out)),
                 },
             }
@@ -5550,17 +5565,19 @@ impl Qwen35 {
             gqa_kv: &pool.gqa_kv,
             gqa_cap: pool.window,
             gqa_window: KvWindow::Ring(slot),
-            gdn_state: &pool.gdn_state[slot as usize],
-            gdn_hist: &pool.gdn_hist[slot as usize],
+            gdn_state: &pool.work_state,
+            gdn_hist: &pool.work_hist,
             slot,
             memory: &pool.memory,
         };
+        self.stage_slot_state(pool, slot, true);
         let mut hidden = None;
         let mut pos = pool.position(slot);
         for round in tokens.chunks(max_chunk as usize) {
             hidden = Some(self.run_prefill_chunk(round, pos, &caches, None));
             pos += round.len() as u32;
         }
+        self.stage_slot_state(pool, slot, false);
         pool.pos.borrow_mut()[slot as usize] = pos;
         self.gpu.read(&hidden.expect("non-empty prompt"), self.cfg.d_model as usize)
     }
@@ -5583,9 +5600,15 @@ impl Qwen35 {
             assert!(seen.insert(slot), "qwen35::slot_decode: slot {slot} twice in one batch");
             assert!(token < self.cfg.vocab, "qwen35::slot_decode: token {token} exceeds vocab {}", self.cfg.vocab);
         }
-        let seqs: Vec<BatchSeq> =
-            items.iter().map(|&(slot, _)| BatchSeq { window: KvWindow::Ring(slot), slot, pos: pool.position(slot), gdn_state: &pool.gdn_state[slot as usize], gdn_hist: &pool.gdn_hist[slot as usize] }).collect();
-        let caches = BatchDecodeCaches { gqa_kv: &pool.gqa_kv, gqa_cap: pool.window, seqs: &seqs, one_sequence: false, gdn_pool: None, memory: &pool.memory };
+        let seqs: Vec<BatchSeq> = items.iter().map(|&(slot, _)| BatchSeq { window: KvWindow::Ring(slot), slot, pos: pool.position(slot), gdn_state: &[], gdn_hist: &[] }).collect();
+        let caches = BatchDecodeCaches {
+            gqa_kv: &pool.gqa_kv,
+            gqa_cap: pool.window,
+            seqs: &seqs,
+            one_sequence: false,
+            gdn_pool: Some(GdnPoolStore { state: &pool.gdn_state, hist: &pool.gdn_hist }),
+            memory: &pool.memory,
+        };
         let tokens: Vec<u32> = items.iter().map(|&(_, t)| t).collect();
         let hidden = self.run_decode_batch(&tokens, &caches, None);
         for &(slot, _) in items {
@@ -5594,18 +5617,35 @@ impl Qwen35 {
         hidden
     }
 
+    /// Copy slot `slot`'s recurrent state and conv history between its row of the pool (`into_work`: pool to the
+    /// work buffers a prefill chunk runs against; otherwise back).
+    fn stage_slot_state(&self, pool: &SlotPool, slot: u32, into_work: bool) {
+        let (state_len, hist_len) = (self.cfg.gdn_state_len() as u32, self.cfg.gdn_hist_len() as u32);
+        let mut steps = Vec::new();
+        for (l, ty) in self.cfg.layer_types().iter().enumerate() {
+            if *ty != LayerType::Linear {
+                continue;
+            }
+            for (pooled, work, len) in [(&pool.gdn_state[l], &pool.work_state[l], state_len), (&pool.gdn_hist[l], &pool.work_hist[l], hist_len)] {
+                let row = (u64::from(slot) * u64::from(len), u64::from(len));
+                let (bufs, offs) = if into_work { ([pooled, work], [row, (0, u64::from(len))]) } else { ([work, pooled], [(0, u64::from(len)), row]) };
+                steps.push(self.gpu.step_sliced(REGION_COPY, &bufs, &offs, &[1, len, len, 0], len));
+            }
+        }
+        self.gpu.submit(&[], &steps);
+    }
+
     /// Make slot `slot` a new sequence: no recurrent state, no ring rows, an empty bank, position 0. Nothing of the
     /// sequence that held it can reach the next.
     pub fn slot_reset(&self, pool: &SlotPool, slot: u32) {
         assert!(slot < pool.slots, "qwen35::slot_reset: slot {slot} of {}", pool.slots);
-        let mut clears: Vec<&DeviceBuffer> = Vec::new();
         for (l, ty) in self.cfg.layer_types().iter().enumerate() {
             if *ty == LayerType::Linear {
-                clears.push(&pool.gdn_state[slot as usize][l]);
-                clears.push(&pool.gdn_hist[slot as usize][l]);
+                let (sl, hl) = (self.cfg.gdn_state_len(), self.cfg.gdn_hist_len());
+                self.gpu.write_at(&pool.gdn_state[l], u64::from(slot) * sl, &vec![0u32; sl as usize]);
+                self.gpu.write_at(&pool.gdn_hist[l], u64::from(slot) * hl, &vec![0u32; hl as usize]);
             }
         }
-        self.gpu.submit(&clears, &[]);
         let ring_words = u64::from(pool.window) * u64::from(self.cfg.kv_dim());
         for (l, ty) in self.cfg.layer_types().iter().enumerate() {
             if *ty == LayerType::Full {
@@ -5629,8 +5669,9 @@ impl Qwen35 {
         for (l, ty) in self.cfg.layer_types().iter().enumerate() {
             match ty {
                 LayerType::Linear => {
-                    steps.push(self.gpu.step(REGION_COPY, &[&pool.gdn_state[from as usize][l], &pool.gdn_state[to as usize][l]], &[1, state_len, state_len, 0], state_len));
-                    steps.push(self.gpu.step(REGION_COPY, &[&pool.gdn_hist[from as usize][l], &pool.gdn_hist[to as usize][l]], &[1, hist_len, hist_len, 0], hist_len));
+                    let (sl, hl) = (u64::from(state_len), u64::from(hist_len));
+                    steps.push(self.gpu.step_sliced(REGION_COPY, &[&pool.gdn_state[l], &pool.gdn_state[l]], &[(u64::from(from) * sl, sl), (u64::from(to) * sl, sl)], &[1, state_len, state_len, 0], state_len));
+                    steps.push(self.gpu.step_sliced(REGION_COPY, &[&pool.gdn_hist[l], &pool.gdn_hist[l]], &[(u64::from(from) * hl, hl), (u64::from(to) * hl, hl)], &[1, hist_len, hist_len, 0], hist_len));
                 }
                 LayerType::Full => {
                     for plane in [&pool.gqa_kv[l].k, &pool.gqa_kv[l].v] {

@@ -142,9 +142,14 @@ pub struct SlotPool {
     pub(crate) slots: u32,
     pub(crate) window: u32,
     pub(crate) gqa_kv: Vec<KvLayer>,
-    /// `[slot][layer]`
-    pub(crate) gdn_state: Vec<Vec<DeviceBuffer>>,
-    pub(crate) gdn_hist: Vec<Vec<DeviceBuffer>>,
+    /// Per layer ONE buffer of `slots` rows (a size-1 placeholder at full-attention layers), so a decode step finds
+    /// every sequence's row by its slot and runs the recurrence on the rows in place.
+    pub(crate) gdn_state: Vec<DeviceBuffer>,
+    pub(crate) gdn_hist: Vec<DeviceBuffer>,
+    /// One sequence's state and history per layer: a prefill chunk runs against these, staged from the slot's row
+    /// before and stored back after (the chunked recurrence takes a whole buffer, not a row of a pool).
+    pub(crate) work_state: Vec<DeviceBuffer>,
+    pub(crate) work_hist: Vec<DeviceBuffer>,
     pub(crate) memory: Vec<Option<AnchorBankPool>>,
     /// Tokens each slot has absorbed.
     pub(crate) pos: std::cell::RefCell<Vec<u32>>,
@@ -156,7 +161,7 @@ impl SlotPool {
         let window = cfg.swa_window.expect("a slot pool holds the ring state of a sliding-window config");
         let kv_dim = cfg.kv_dim() as u64;
         let rows = u64::from(window) * u64::from(slots);
-        let mut pool = SlotPool { slots, window, gqa_kv: Vec::new(), gdn_state: vec![Vec::new(); slots as usize], gdn_hist: vec![Vec::new(); slots as usize], memory: Vec::new(), pos: std::cell::RefCell::new(vec![0; slots as usize]), ledger: Vec::new() };
+        let mut pool = SlotPool { slots, window, gqa_kv: Vec::new(), gdn_state: Vec::new(), gdn_hist: Vec::new(), work_state: Vec::new(), work_hist: Vec::new(), memory: Vec::new(), pos: std::cell::RefCell::new(vec![0; slots as usize]), ledger: Vec::new() };
         for (l, ty) in cfg.layer_types().into_iter().enumerate() {
             let owned = shard.owns(l);
             let kv = if owned && ty == LayerType::Full {
@@ -168,18 +173,19 @@ impl SlotPool {
                 KvLayer::placeholder(gpu)
             };
             pool.gqa_kv.push(kv);
-            for slot in 0..slots as usize {
-                let (state, hist) = if owned && ty == LayerType::Linear {
-                    let (state, hist) = (gpu.storage(cfg.gdn_state_len()), gpu.storage(cfg.gdn_hist_len()));
-                    pool.ledger.push((state.clone(), cfg.gdn_state_len()));
-                    pool.ledger.push((hist.clone(), cfg.gdn_hist_len()));
-                    (state, hist)
-                } else {
-                    (gpu.storage(1), gpu.storage(1))
-                };
-                pool.gdn_state[slot].push(state);
-                pool.gdn_hist[slot].push(hist);
-            }
+            let (state, hist, work_state, work_hist) = if owned && ty == LayerType::Linear {
+                let (sl, hl) = (cfg.gdn_state_len(), cfg.gdn_hist_len());
+                let (state, hist) = (gpu.storage(sl * u64::from(slots)), gpu.storage(hl * u64::from(slots)));
+                pool.ledger.push((state.clone(), sl * u64::from(slots)));
+                pool.ledger.push((hist.clone(), hl * u64::from(slots)));
+                (state, hist, gpu.storage(sl), gpu.storage(hl))
+            } else {
+                (gpu.storage(1), gpu.storage(1), gpu.storage(1), gpu.storage(1))
+            };
+            pool.gdn_state.push(state);
+            pool.gdn_hist.push(hist);
+            pool.work_state.push(work_state);
+            pool.work_hist.push(work_hist);
             let bank = (owned && cfg.layer_has_memory(l)).then(|| {
                 let bank = AnchorBankPool::new(gpu, &memory_geometry(cfg), slots);
                 pool.ledger.extend(bank.arrays().iter().map(|(buf, per_slot)| ((*buf).clone(), *per_slot * u64::from(slots))));

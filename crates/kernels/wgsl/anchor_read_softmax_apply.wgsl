@@ -7,7 +7,7 @@
 // sending an email to info@swedishembedded.com.
 
 // @what  Anchor-memory read steps 2 and 3 in one kernel: row softmax over the logits (with the sink) and the weighted sum of values
-// @how   one workgroup per (row, head, 32-channel tile); online softmax statistics merged across threads, the bank slots split over 8 lanes
+// @how   one workgroup per (row, KV group, 32-channel tile), all the group's heads at once; online softmax statistics merged across threads, the bank slots split over 8 lanes
 // @opt   2
 // @cpu   no
 // @gpu   yes
@@ -24,7 +24,8 @@
 //
 //   logits : [n_seq * t * n_heads, capacity + 1]   the sink is column `capacity` and carries no value
 //   value, refs, slots, out : as `anchor_read_apply`
-// Dispatch: n_seq * t * n_heads * ceil(head_dim / 32) workgroups.
+// Each value row is read once for the `n_heads / groups` (at most 8) heads that read it.
+// Dispatch: n_seq * t * groups * ceil(head_dim / 32) workgroups.
 
 struct Params {
     rows: u32,       // n_seq * t
@@ -47,7 +48,7 @@ struct Params {
 
 var<workgroup> stat_m: array<f32, 256>;
 var<workgroup> stat_s: array<f32, 256>;
-var<workgroup> part: array<f32, 256>;
+var<workgroup> part: array<f32, 2048>;
 
 @compute @workgroup_size(256)
 fn main(@builtin(local_invocation_id) lid: vec3<u32>,
@@ -56,57 +57,78 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
     let hd = p.head_dim;
     let tiles = (hd + 31u) / 32u;
     let wg = wid.y * nwg.x + wid.x;
-    if (wg >= p.rows * p.n_heads * tiles) { return; }
+    if (wg >= p.rows * p.groups * tiles) { return; }
     let t = lid.x;
-    let rh = wg / tiles;
+    let rg = wg / tiles;
     let tile = wg % tiles;
+    let g = rg % p.groups;
+    let row = rg / p.groups;
+    let hpg = p.n_heads / p.groups;
     let cols = p.capacity + 1u;
-    let lrow = rh * cols;
+    let first = row * p.n_heads + g * hpg;   // the group's first (row, head)
 
-    // Online softmax statistics over this thread's columns.
-    var m = -3.0e38;
-    var s = 0.0;
-    for (var c = t; c < cols; c = c + 256u) {
-        let l = logits[lrow + c];
-        if (l > m) {
-            s = s * exp(m - l);
-            m = l;
+    // Online softmax statistics: thread (head j, partial k) covers the columns k, k + 32, ... of head j.
+    {
+        let j = t / 32u;
+        let k = t % 32u;
+        var m = -3.0e38;
+        var s = 0.0;
+        if (j < hpg) {
+            let lrow = (first + j) * cols;
+            for (var c = k; c < cols; c = c + 32u) {
+                let l = logits[lrow + c];
+                if (l > m) {
+                    s = s * exp(m - l);
+                    m = l;
+                }
+                s = s + exp(l - m);
+            }
         }
-        s = s + exp(l - m);
+        stat_m[t] = m;
+        stat_s[t] = s;
     }
-    stat_m[t] = m;
-    stat_s[t] = s;
     workgroupBarrier();
-    var big = -3.0e38;
-    for (var i = 0u; i < 256u; i = i + 1u) { big = max(big, stat_m[i]); }
-    var total = 0.0;
-    for (var i = 0u; i < 256u; i = i + 1u) { total = total + stat_s[i] * exp(stat_m[i] - big); }
+    var big: array<f32, 8>;
+    var total: array<f32, 8>;
+    for (var j = 0u; j < 8u; j = j + 1u) {
+        if (j < hpg) {
+            var b = -3.0e38;
+            for (var i = 0u; i < 32u; i = i + 1u) { b = max(b, stat_m[j * 32u + i]); }
+            var sum = 0.0;
+            for (var i = 0u; i < 32u; i = i + 1u) { sum = sum + stat_s[j * 32u + i] * exp(stat_m[j * 32u + i] - b); }
+            big[j] = b;
+            total[j] = sum;
+        }
+    }
 
-    // The weighted sum of this tile's channels over the slots, 8 lanes apart.
+    // The weighted sums of this tile's channels over the slots, 8 lanes apart.
     let d = tile * 32u + (t % 32u);
     let lane = t / 32u;
-    let h = rh % p.n_heads;
-    let row = rh / p.n_heads;
     let sq = row / p.t;
     let pos = row % p.t;
     let n_seq = p.rows / p.t;
-    let g = h / (p.n_heads / p.groups);
     let bank = (((pos / p.chunk) * n_seq + sq) * p.groups + g) * p.capacity;
     var base = sq * p.kv_rows;
     if (p.slotted != 0u) { base = slots[sq] * p.kv_rows; }
-    var acc = 0.0;
+    var acc: array<f32, 8>;
+    for (var j = 0u; j < 8u; j = j + 1u) { acc[j] = 0.0; }
     if (d < hd) {
         for (var c = lane; c < p.capacity; c = c + 8u) {
             let slot = refs[bank + c];
             if (slot == 0u) { continue; }
-            acc = acc + exp(logits[lrow + c] - big) * value[(base + slot - 1u) * p.groups * hd + g * hd + d];
+            let v = value[(base + slot - 1u) * p.groups * hd + g * hd + d];
+            for (var j = 0u; j < 8u; j = j + 1u) {
+                if (j < hpg) { acc[j] = acc[j] + exp(logits[(first + j) * cols + c] - big[j]) * v; }
+            }
         }
     }
-    part[t] = acc;
+    for (var j = 0u; j < 8u; j = j + 1u) { part[j * 256u + t] = acc[j]; }
     workgroupBarrier();
     if (lane == 0u && d < hd) {
-        var sum = 0.0;
-        for (var k = 0u; k < 8u; k = k + 1u) { sum = sum + part[k * 32u + t]; }
-        out[rh * hd + d] = sum / total;
+        for (var j = 0u; j < hpg; j = j + 1u) {
+            var sum = 0.0;
+            for (var k = 0u; k < 8u; k = k + 1u) { sum = sum + part[j * 256u + k * 32u + t]; }
+            out[(first + j) * hd + d] = sum / total[j];
+        }
     }
 }

@@ -78,7 +78,7 @@ use crate::block::{rmsnorm_bwd, rmsnorm_fwd, rope2d_partial_bwd, rope2d_partial_
 /// The kernels the anchor memory adds to a model's pipeline list (they are
 /// resolved by name, [`AnchorMemoryKernels::resolve`]). `attn_softmax_cross` is
 /// the row softmax over `capacity + 1` columns.
-pub const ANCHOR_MEMORY_PIPELINES: [(&str, &str); 16] = [
+pub const ANCHOR_MEMORY_PIPELINES: [(&str, &str); 17] = [
     ("anchor_commit", kernels::ANCHOR_COMMIT),
     ("anchor_read_scores", kernels::ANCHOR_READ_SCORES),
     ("anchor_read_apply", kernels::ANCHOR_READ_APPLY),
@@ -95,6 +95,7 @@ pub const ANCHOR_MEMORY_PIPELINES: [(&str, &str); 16] = [
     ("anchor_push", kernels::ANCHOR_PUSH),
     ("anchor_rows_copy", kernels::ANCHOR_ROWS_COPY),
     ("anchor_read_softmax_apply", kernels::ANCHOR_READ_SOFTMAX_APPLY),
+    ("anchor_read_scores_group", kernels::ANCHOR_READ_SCORES_GROUP),
 ];
 
 /// The anchor-memory pipeline indices, as the caller registered them.
@@ -121,6 +122,8 @@ pub struct AnchorMemoryKernels {
     /// `anchor_read_softmax_apply`: the inference read's softmax and apply in one kernel (workgroup-cooperative,
     /// so a device without workgroup reductions keeps the two kernels).
     pub read_softmax_apply: usize,
+    /// `anchor_read_scores_group`: the scores of all of a group's heads per key row read.
+    pub read_scores_group: usize,
 }
 
 impl AnchorMemoryKernels {
@@ -148,6 +151,7 @@ impl AnchorMemoryKernels {
             push: find(13)?,
             rows_copy: find(14)?,
             read_softmax_apply: find(15)?,
+            read_scores_group: find(16)?,
         })
     }
 }
@@ -475,11 +479,17 @@ pub fn anchor_read_steps_at(
     let rows_heads = u64::from(s.rows()) * u64::from(s.n_heads);
     // A read from a pool of fixed-state banks keeps no backward, so on a device that runs workgroup-cooperative
     // kernels the softmax and the apply are one kernel and `probs` is not written.
-    if at.slots.is_some() && g.caps().workgroup_reductions {
+    if at.slots.is_some() && g.caps().workgroup_reductions && s.n_heads / s.n_kv_heads <= 8 {
         let tiles = u64::from(s.head_dim.div_ceil(32));
+        let grouped = s.head_dim % 4 == 0 && s.n_heads / s.n_kv_heads <= 8;
+        let scores = if grouped {
+            g.step(ids.read_scores_group, &[query, key, refs, logits, slots], &p, threads("anchor_read_scores_group", u64::from(s.rows()) * u64::from(s.n_kv_heads) * u64::from(s.capacity + 1)))
+        } else {
+            g.step(ids.read_scores, &[query, key, refs, logits, slots], &p, threads("anchor_read_scores", rows_heads * u64::from(s.capacity + 1)))
+        };
         return vec![
-            g.step(ids.read_scores, &[query, key, refs, logits, slots], &p, threads("anchor_read_scores", rows_heads * u64::from(s.capacity + 1))),
-            g.dispatch(ids.read_softmax_apply, &[logits, value, refs, read, slots], &p, gpu_core::Dispatch::Workgroups((rows_heads * tiles) as u32)),
+            scores,
+            g.dispatch(ids.read_softmax_apply, &[logits, value, refs, read, slots], &p, gpu_core::Dispatch::Workgroups((u64::from(s.rows()) * u64::from(s.n_kv_heads) * tiles) as u32)),
         ];
     }
     vec![
