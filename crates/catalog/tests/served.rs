@@ -63,7 +63,7 @@ fn every_assembly_reading_provider_is_registered_for_the_served_path() {
     );
 }
 
-/// Every catalog model is in exactly ONE of three declared states for
+/// Every catalog model is in exactly ONE of four declared states for
 /// how it finds its weights, and a model in none of them fails here
 /// rather than at a user's first run.
 ///
@@ -75,6 +75,10 @@ fn every_assembly_reading_provider_is_registered_for_the_served_path() {
 ///    explicitly or let `ActionSpec::validate` fill from that variable.
 /// 3. **Env-only provider** - listed by name below, with the reason it
 ///    cannot classify from disk.
+/// 4. **Library resident** - listed by name below: the serving layer's model
+///    library recognises the checkpoint's family from its card and builds
+///    the resident from the files it found (`serving::model_dir`); the
+///    one-shot provider takes no weights at all.
 ///
 /// The point is that state 3 is a CHOICE someone made and wrote down,
 /// not a default a new model falls into by being added. Together with
@@ -102,6 +106,13 @@ fn every_model_declares_how_it_finds_its_weights() {
         ),
     ];
 
+    /// Models whose weights the model library finds: their resident is built
+    /// from a scanned checkpoint's card, each with the family it is keyed on.
+    const LIBRARY_RESIDENT: &[(&str, &str)] = &[
+        ("brain/huginn", "serving::model_dir builds HuginnResident from a card of family `huginn`"),
+        ("brain/ouro", "serving::model_dir builds OuroResident from a card of family `ouro`"),
+    ];
+
     /// Models that need no weights at all: pure composition over OTHER
     /// models' weights, or a deterministic mock.
     const NO_WEIGHTS: &[&str] = &[
@@ -118,7 +129,10 @@ fn every_model_declares_how_it_finds_its_weights() {
     let mut undeclared = Vec::new();
     for m in manifests() {
         let id = m.model.clone();
-        if NO_WEIGHTS.contains(&id.as_str()) || ENV_ONLY.iter().any(|(n, _)| *n == id) {
+        if NO_WEIGHTS.contains(&id.as_str())
+            || ENV_ONLY.iter().any(|(n, _)| *n == id)
+            || LIBRARY_RESIDENT.iter().any(|(n, _)| *n == id)
+        {
             continue;
         }
         // State 1: the provider needs a resolved role, and gets one.
@@ -138,8 +152,8 @@ fn every_model_declares_how_it_finds_its_weights() {
     }
     assert!(
         undeclared.is_empty(),
-        "these models are in none of the three declared weight-acquisition states - make one true, \
-         or add the model to ENV_ONLY with the reason: {undeclared:?}"
+        "these models are in none of the four declared weight-acquisition states - make one true, \
+         or add the model to ENV_ONLY or LIBRARY_RESIDENT with the reason: {undeclared:?}"
     );
 }
 
