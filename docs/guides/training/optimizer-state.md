@@ -161,6 +161,15 @@ as `TrainOpts::saved`; `brain wan finetune` and `brain flux2 finetune` take
 `--activations keep|recompute`. qwen3vl's caption fine-tune trains the Qwen3
 decoder, which always recomputes.
 
+The remaining trainers share one set of layer intermediates and replay each
+layer before its backward: modernbert (and its Laya head), decide's encoder,
+kronos, timesfm3, clip's vision tower, deepseek2ocr's towers, diamond's UNet;
+deepseekocr2's resampler is a `BlockStack`; minicpmv's vision tower and
+qwen3tts's talker always recompute. `make check/saved-policy` fails any crate
+that defines a backward without one of these mechanisms, unless
+`scripts/gates/saved-policy.allow` gives the reason it needs none (a backward
+that only gradient-checks a frozen component, or no layer stack).
+
 A built model only narrows what it keeps.
 
 The memory planner decides the optimizer-state format before anything loads
