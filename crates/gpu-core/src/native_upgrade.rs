@@ -809,6 +809,11 @@ pub(crate) const ROWS: &[Row] = &[
     Row { slow: "concat_split", target: Target::Named("concat_split_f32"), bindings: COPY_BINDINGS, serves: serves_chan_window, blocks: chan_window_blocks, requires_wgsl_upgrade: false },
     Row { slow: "chan_place", target: Target::Named("chan_place_f32"), bindings: COPY_BINDINGS, serves: serves_chan_window, blocks: chan_window_blocks, requires_wgsl_upgrade: false },
     Row { slow: "concat2", target: Target::Named("concat2_f32"), bindings: CONCAT2_BINDINGS, serves: serves_concat2, blocks: concat2_blocks, requires_wgsl_upgrade: false },
+    // The transformer glue: bias add, residual add and the erf GELU, four elements a thread, bit-identical
+    // (`tests/elementwise_native.rs`).
+    Row { slow: "bias_add", target: Target::Named("bias_add_f32"), bindings: BIAS_ADD_BINDINGS, serves: serves_bias_add, blocks: bias_add_blocks, requires_wgsl_upgrade: false },
+    Row { slow: "add2", target: Target::Named("add2_f32"), bindings: CONCAT2_BINDINGS, serves: serves_flat, blocks: flat_blocks, requires_wgsl_upgrade: false },
+    Row { slow: "gelu_erf", target: Target::Named("gelu_erf_f32"), bindings: COPY_BINDINGS, serves: serves_flat, blocks: flat_blocks, requires_wgsl_upgrade: false },
     Row { slow: "silu", target: Target::Named("silu_f32"), bindings: COPY_BINDINGS, serves: serves_flat, blocks: flat_blocks, requires_wgsl_upgrade: false },
     Row { slow: "silu_bwd", target: Target::Named("silu_bwd_f32"), bindings: CONCAT2_BINDINGS, serves: serves_flat, blocks: flat_blocks, requires_wgsl_upgrade: false },
     // Bidirectional flash attention at head_dim 128. A reordered sum, so not
@@ -822,7 +827,67 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: flash_bidir_blocks,
         requires_wgsl_upgrade: false,
     },
+    // The same at head_dim 64 (CLIP) on fp16 tensor cores: fp16 operands, fp32 accumulation, held to its own stated
+    // tolerance (`tests/flash_attn_f16_native.rs`).
+    Row {
+        slow: "flash_attn_bidir_reg2",
+        target: Target::Named("flash_bidir_f16_hd64"),
+        bindings: FLASH_BIDIR_BINDINGS,
+        serves: serves_flash_bidir_hd64,
+        blocks: flash_bidir_blocks,
+        requires_wgsl_upgrade: false,
+    },
+    // SAM's relative-position-bias attention (windowed and global spans) at head_dim 64 on fp16 tensor cores.
+    Row {
+        slow: "flash_attn_cross_relpos",
+        target: Target::Named("flash_cross_relpos_f16_hd64"),
+        bindings: FLASH_CROSS_RELPOS_BINDINGS,
+        serves: serves_flash_cross_relpos_hd64,
+        blocks: flash_cross_relpos_blocks,
+        requires_wgsl_upgrade: false,
+    },
 ];
+
+/// `flash_attn_cross_relpos.wgsl`'s bindings: params, `q`, `k`, `v`, `rel_h`, `rel_w`, the written `out`.
+const FLASH_CROSS_RELPOS_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+];
+
+/// The head width the fp16 tensor-core flash kernels are compiled for.
+const FLASH_F16_HEAD_DIM: u32 = 64;
+
+/// Query rows one block of the fp16 flash kernels covers - their registry tile.
+const FLASH_F16_ROWS: u32 = 64;
+
+/// The packed-slab params of `serves_flash_bidir`, at head_dim 64, with every row start and head offset a whole
+/// number of 16-byte vectors (the kernel loads rows as float4).
+fn serves_flash_bidir_hd64(p: &[u32]) -> bool {
+    matches!(p, [bsz, heads, t, hd, stride, q_off, k_off, v_off, d_model]
+        if *bsz >= 1 && *heads >= 1 && *t >= 1 && *hd == FLASH_F16_HEAD_DIM
+        && [*stride, *q_off, *k_off, *v_off, *d_model].iter().all(|w| w % 4 == 0)
+        && u64::from(*bsz) * u64::from(*heads) * u64::from(t.div_ceil(FLASH_F16_ROWS)) <= u64::from(u32::MAX))
+}
+
+/// `[bsz, n_heads, t_dec, t_enc, head_dim, q_stride, q_off, k_stride, k_off, v_stride, v_off, d_model, kh_ext, kw_ext]`
+/// at head_dim 64 with 16-byte aligned rows and a key grid that covers the keys.
+fn serves_flash_cross_relpos_hd64(p: &[u32]) -> bool {
+    matches!(p, [bsz, heads, t_dec, t_enc, hd, qs, qo, ks, ko, vs, vo, d_model, kh, kw]
+        if *bsz >= 1 && *heads >= 1 && *t_dec >= 1 && *t_enc >= 1 && *hd == FLASH_F16_HEAD_DIM && *kh >= 1 && *kw >= 1
+        && u64::from(*kh) * u64::from(*kw) >= u64::from(*t_enc)
+        && [*qs, *qo, *ks, *ko, *vs, *vo, *d_model].iter().all(|w| w % 4 == 0)
+        && u64::from(*bsz) * u64::from(*heads) * u64::from(t_dec.div_ceil(FLASH_F16_ROWS)) <= u64::from(u32::MAX))
+}
+
+/// One block per `tile.0` query rows of one (span, head).
+fn flash_cross_relpos_blocks(p: &[u32], tile: (u32, u32)) -> u32 {
+    p[0] * p[1] * p[2].div_ceil(tile.0)
+}
 
 /// The flash attention family's bindings: params, the packed `qkv` slab, the
 /// written `out`.
@@ -920,6 +985,19 @@ fn concat2_blocks(p: &[u32], tile: (u32, u32)) -> u32 {
 /// `[total]`, non-empty.
 fn serves_flat(p: &[u32]) -> bool {
     matches!(p, [total] if *total >= 1)
+}
+
+/// `bias_add.wgsl`'s bindings: params, the biased `out` (read and written), the `bias` row.
+const BIAS_ADD_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageReadWrite, BindKind::StorageRead];
+
+/// `[m, n]` with something to add; the whole product must index with 32 bits.
+fn serves_bias_add(p: &[u32]) -> bool {
+    matches!(p, [m, n] if *m >= 1 && *n >= 1 && u64::from(*m) * u64::from(*n) <= u64::from(u32::MAX))
+}
+
+/// A block per run of `tile.1` elements of the `m * n` array.
+fn bias_add_blocks(p: &[u32], tile: (u32, u32)) -> u32 {
+    (p[0] * p[1]).div_ceil(tile.1)
 }
 
 /// A block per run of `tile.1` elements.

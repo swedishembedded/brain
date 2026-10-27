@@ -81,6 +81,10 @@ name = "flash_bidir_native_bench"
 harness = false
 
 [[test]]
+name = "flash_attn_f16_native"
+harness = false
+
+[[test]]
 name = "flash_gqa_kmask_native"
 harness = false
 
@@ -102,6 +106,10 @@ harness = false
 
 [[test]]
 name = "plumb_native"
+harness = false
+
+[[test]]
+name = "elementwise_native"
 harness = false
 
 [[test]]

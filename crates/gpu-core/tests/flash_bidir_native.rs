@@ -181,7 +181,7 @@ fn the_native_kernel_serves_head_dim_128() {
     for (bsz, heads, t) in [(1u32, 24u32, 1792u32), (1, 24, 3072), (2, 3, 1), (1, 1, 65)] {
         assert_eq!(gpu.native_kernel_for(K_REG2, &params(bsz, heads, t, HD)), Some("flash_bidir_f32"), "{bsz} {heads} {t}");
     }
-    assert_eq!(gpu.native_kernel_for(K_REG2, &params(1, 4, 64, 64)), None, "another head width keeps the WGSL tier");
+    assert_eq!(gpu.native_kernel_for(K_REG2, &params(1, 4, 64, 96)), None, "another head width keeps the WGSL tier");
     assert_eq!(gpu.native_kernel_for(K_REG2, &params(1, 4, 0, HD)), None, "no rows");
     assert_eq!(gpu.native_kernel_for(K_REG2, &params(0, 4, 64, HD)), None, "no samples");
     assert_eq!(gpu.native_kernel_for(K_REG2, &params(1, 4, 64, HD)[..8]), None, "short params");
