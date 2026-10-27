@@ -35,13 +35,15 @@ pub(crate) fn resolve(device: &Device) -> Result<gpu_core::devices::ComputeSet> 
 /// multi-GB, potentially multi-GPU checkpoints) needs this; `creature`
 /// (a single connectome's worth of GPU memory, no shard placement) does not
 /// and calls [`resolve`] alone.
+/// Returns the resolved set, so a pipeline that can run on an NPU sees
+/// whether one was selected.
 #[cfg(feature = "resolve")]
-pub(crate) fn apply(device: &Device) -> Result<()> {
+pub(crate) fn apply(device: &Device) -> Result<gpu_core::devices::ComputeSet> {
     let set = resolve(device)?;
     let gpus: Option<std::collections::HashSet<u32>> = Some(set.gpus.iter().copied().collect());
     let cpu_allowed = set.cpu_enabled();
     loader::install_default_placer(gpus, cpu_allowed);
-    Ok(())
+    Ok(set)
 }
 
 /// Drive the hardware with `backend` (`wgpu | vulkan | cuda | cpu`) in every

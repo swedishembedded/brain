@@ -217,6 +217,10 @@ impl NpuDetector {
         Ok(NpuDetector { model, config: ckpt.config, size: calibration.input })
     }
 
+    pub fn config(&self) -> &Yolov5Config {
+        &self.config
+    }
+
     /// The square input size the model was compiled for.
     pub fn input_size(&self) -> u32 {
         self.size

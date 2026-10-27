@@ -29,6 +29,7 @@
 //! ```
 
 use std::collections::BTreeMap;
+use std::sync::Mutex;
 
 use crate::resolve_policy::Resolved2;
 use crate::{Device, Error, Image, Result};
@@ -90,9 +91,12 @@ impl DetectOptions {
 
 /// The resolved architecture's resident model.
 enum Detector {
-    // Both boxed: each is kilobytes of resident device state, and the enum should stay one pointer wide.
+    // Boxed: each is kilobytes of resident device state, and the enum should stay one pointer wide.
     V8(Box<yolov8::Yolo>),
     V5(Box<yolov5::Yolov5>),
+    /// YOLOv5 compiled onto a Rockchip NPU. A run writes the model's NPU
+    /// buffers, so concurrent detections take turns.
+    V5Npu(Box<Mutex<yolov5::npu::NpuDetector>>),
 }
 
 /// `brain`'s object-detection pipeline over YOLOv8 and YOLOv5 checkpoints.
@@ -116,7 +120,7 @@ impl DetectionPipeline {
     }
 
     pub fn builder(model_id: impl AsRef<str>) -> DetectionPipelineBuilder {
-        DetectionPipelineBuilder { model_id: model_id.as_ref().to_string(), device: Device::default(), download_policy: loader::DownloadPolicy::default() }
+        DetectionPipelineBuilder { model_id: model_id.as_ref().to_string(), device: Device::default(), download_policy: loader::DownloadPolicy::default(), models_dir: None }
     }
 
     /// The real, static `capability::Manifest` this session's action
@@ -126,8 +130,20 @@ impl DetectionPipeline {
     pub fn capabilities(&self) -> capability::Manifest {
         match self.model {
             Detector::V8(_) => yolov8::caps::manifest(),
-            Detector::V5(_) => yolov5::caps::manifest(),
+            Detector::V5(_) | Detector::V5Npu(_) => yolov5::caps::manifest(),
         }
+    }
+
+    /// The name of class `class`, for a model trained on COCO-80 (the
+    /// published YOLOv8 and YOLOv5 weights are); `None` for any other class
+    /// count, whose names the checkpoint does not carry.
+    pub fn class_name(&self, class: u32) -> Option<&'static str> {
+        let classes = match &self.model {
+            Detector::V8(m) => m.cfg.nc,
+            Detector::V5(m) => m.config().nc,
+            Detector::V5Npu(m) => m.lock().map(|d| d.config().nc).unwrap_or(0),
+        };
+        (classes as usize == imaging::coco::NAMES.len()).then(|| imaging::coco::name(class as usize)).flatten()
     }
 
     /// Detect objects in `image` at [`DetectOptions`]'s defaults.
@@ -138,10 +154,13 @@ impl DetectionPipeline {
     /// [`DetectionPipeline::detect`] plus [`DetectOptions`].
     pub fn detect_with(&self, image: &Image, opts: DetectOptions) -> Result<Vec<Detection>> {
         let (w, h) = (image.width(), image.height());
-        let hwc = image.to_hwc_unit();
         let raw = match &self.model {
-            Detector::V8(m) => m.detect(&hwc, w, h, opts.confidence, opts.iou),
-            Detector::V5(m) => m.detect(&hwc, w, h, opts.confidence, opts.iou).map_err(|e| Error::Backend(e.to_string()))?,
+            Detector::V8(m) => m.detect(&image.to_hwc_unit(), w, h, opts.confidence, opts.iou),
+            Detector::V5(m) => m.detect(&image.to_hwc_unit(), w, h, opts.confidence, opts.iou).map_err(|e| Error::Backend(e.to_string()))?,
+            Detector::V5Npu(m) => {
+                let mut npu = m.lock().map_err(|_| Error::Backend("a previous NPU detection panicked".into()))?;
+                npu.detect(image.pixels(), w, h, opts.confidence, opts.iou, yolov5::decode::MAX_DETECTIONS).map_err(|e| Error::Backend(e.to_string()))?.0
+            }
         };
         Ok(raw.into_iter().map(Detection::from_raw).collect())
     }
@@ -153,6 +172,7 @@ pub struct DetectionPipelineBuilder {
     model_id: String,
     device: Device,
     download_policy: loader::DownloadPolicy,
+    models_dir: Option<String>,
 }
 
 impl DetectionPipelineBuilder {
@@ -166,6 +186,13 @@ impl DetectionPipelineBuilder {
     /// that type's own doc for what each variant means.
     pub fn download_policy(mut self, policy: loader::DownloadPolicy) -> Self {
         self.download_policy = policy;
+        self
+    }
+
+    /// The models directory `model_id` (`<vendor>/<repo>`) resolves in,
+    /// instead of the default (`BRAIN_MODELS_DIR`, else the user's data dir).
+    pub fn models_dir(mut self, dir: impl Into<String>) -> Self {
+        self.models_dir = Some(dir.into());
         self
     }
 
@@ -184,14 +211,18 @@ impl DetectionPipelineBuilder {
     ///    once. Only YOLOv8 has a model-store recipe: a YOLOv5 checkpoint
     ///    (AGPL-derived weights) is never fetched, it is supplied locally.
     /// 3. The matching crate re-reads the SAME checkpoint and builds a
-    ///    single-image detector.
+    ///    single-image detector: a YOLOv5 checkpoint on a Rockchip NPU when
+    ///    the device selection includes one (brain's own NPU compiler; the
+    ///    checkpoint needs its `<model>.npu-calibration.json`, see
+    ///    `yolov5::npu`), otherwise on the GPU/CPU backends.
     pub fn load(self) -> Result<DetectionPipeline> {
-        let DetectionPipelineBuilder { model_id, device, download_policy } = self;
+        let DetectionPipelineBuilder { model_id, device, download_policy, models_dir } = self;
 
-        crate::device::apply(&device)?;
+        let set = crate::device::apply(&device)?;
+        let rockchip_npu = !set.npus.is_empty() && gpu_core::devices::npu_kind() == Some(gpu_core::devices::NpuKind::Rockchip);
 
         let overrides: BTreeMap<String, String> = BTreeMap::new();
-        let resolved = crate::resolve_policy::resolve_either_for_reference("yolov8", &yolov8::spec::YoloSpec, "yolov5", &yolov5::spec::Yolov5Spec, &model_id, &overrides, download_policy)?;
+        let resolved = crate::resolve_policy::resolve_either_for_reference("yolov8", &yolov8::spec::YoloSpec, "yolov5", &yolov5::spec::Yolov5Spec, &model_id, &overrides, download_policy, models_dir.as_deref())?;
         let (arch, assembly) = match resolved {
             Resolved2::A(a) => ("yolov8", a),
             Resolved2::B(b) => ("yolov5", b),
@@ -199,6 +230,7 @@ impl DetectionPipelineBuilder {
         let weights = assembly.roles.get("weights").ok_or_else(|| Error::Backend(format!("{arch}: resolved assembly {:?} has no weights role", assembly.id)))?;
 
         let model = match arch {
+            "yolov5" if rockchip_npu => Detector::V5Npu(Box::new(Mutex::new(yolov5::npu::NpuDetector::load(weights).map_err(|e| Error::Backend(e.to_string()))?))),
             "yolov5" => Detector::V5(Box::new(yolov5::Yolov5::load(weights, 0).map_err(|e| Error::Backend(e.to_string()))?)),
             _ => Detector::V8(Box::new(yolov8::Yolo::load(&weights.to_string_lossy(), 1))),
         };

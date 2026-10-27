@@ -43,6 +43,9 @@ use imaging::Letterbox;
 use crate::config::{Yolov5Config, ANCHORS_PER_SCALE, BOX_FIELDS, STRIDES};
 use crate::error::Error;
 
+/// Detections kept after NMS, as the reference post-processing keeps.
+pub const MAX_DETECTIONS: usize = 300;
+
 /// One scale's output, borrowed: `[anchors * (5 + nc), h, w]` row-major.
 #[derive(Clone, Copy, Debug)]
 pub struct HeadMap<'a> {

@@ -207,9 +207,10 @@ pub(crate) fn resolve_either_for_reference(
     model_id: &str,
     overrides: &BTreeMap<String, String>,
     download_policy: loader::DownloadPolicy,
+    models_dir: Option<&str>,
 ) -> Result<Resolved2> {
     let reference = brain_modelref::ModelRef::parse(model_id).map_err(|e| Error::ModelNotFound(format!("{model_id}: {e}")))?;
-    let models_dir = loader::model_dir::resolve(None);
+    let models_dir = loader::model_dir::resolve(models_dir);
 
     // Resolved, or the first side's `Missing` report when neither side holds it.
     let try_both = || -> Result<std::result::Result<Resolved2, Box<brain_modelstore::resolve::Missing>>> {

@@ -7,18 +7,6 @@ use capability::{ActionResult, Invocation, Manifest, Media, Outcome, Progress};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use serde_json::{json, Value};
 
-/// COCO-80 class names (index → label), so detections carry human labels (dog = 16).
-const COCO: [&str; 80] = [
-    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
-    "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
-    "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
-    "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket", "bottle",
-    "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange",
-    "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch", "potted plant", "bed",
-    "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone", "microwave", "oven",
-    "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush",
-];
-
 /// YOLO detection behind the scheduler. Loads a brain-format YOLOv8 checkpoint
 /// (`BRAIN_YOLOV8`); the resident instance holds the model on the CPU (brain's yolo
 /// default) - dropping it frees the RAM. One action, `detect`.
@@ -82,7 +70,7 @@ fn detections_outcome(dets: &[[f32; 6]]) -> Outcome {
         .iter()
         .map(|d| {
             let cls = d[5] as usize;
-            json!({"bbox": [d[0], d[1], d[2], d[3]], "conf": d[4], "class": cls, "label": COCO.get(cls).copied().unwrap_or("?")})
+            json!({"bbox": [d[0], d[1], d[2], d[3]], "conf": d[4], "class": cls, "label": imaging::coco::name(cls).unwrap_or("?")})
         })
         .collect();
     Outcome::new().set("count", json!(objects.len())).set("detections", json!(objects))

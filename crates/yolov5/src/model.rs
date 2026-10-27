@@ -59,8 +59,6 @@ fn ids() -> &'static ConvKernelIds {
 /// Grey letterbox fill (114/255), the convention the weights were trained with.
 const LETTERBOX_PAD: f32 = 114.0 / 255.0;
 
-/// Detections kept per image after NMS.
-const MAX_DETECTIONS: usize = 300;
 
 enum Stage {
     Conv(Box<Conv>),
@@ -246,6 +244,6 @@ impl Yolov5 {
         }
         let (chw, lb) = imaging::letterbox_rgb(hwc, w0, h0, self.height, LETTERBOX_PAD);
         let out = self.forward(&chw)?;
-        decode::detections(&self.cfg, out.heads(), &lb, (w0, h0), conf_thresh, iou_thresh, MAX_DETECTIONS)
+        decode::detections(&self.cfg, out.heads(), &lb, (w0, h0), conf_thresh, iou_thresh, decode::MAX_DETECTIONS)
     }
 }

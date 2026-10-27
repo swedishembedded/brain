@@ -236,6 +236,7 @@ impl TranscribePipelineBuilder {
             &model_id,
             &overrides,
             download_policy,
+            None,
         )?;
         let weights_dir = |assembly: &capability::Assembly, arch: &str| -> Result<String> {
             let dir = assembly.roles.get("weights").ok_or_else(|| Error::Backend(format!("{arch}: resolved assembly {:?} has no weights role", assembly.id)))?;

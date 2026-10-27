@@ -126,6 +126,7 @@
 //! * **A hard threshold on the host.** [`mask::threshold`] is a device
 //!   composition; there is no host twin to drift from it.
 
+pub mod coco;
 pub mod codec;
 pub mod color;
 pub mod colorfix;
