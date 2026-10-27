@@ -609,12 +609,20 @@ pub fn auto_cap(cfg: &Qwen35Config, devices: &[(Device, u64)], shape: &ServingSh
         let caps = gpu_capacities(devices, at.stage_workspace(cfg));
         kv_pool_addressable(cfg, cap, at.max_batch + at.prefix_slots) && model::shard::plan_fewest_devices(&serving_cost(cfg, &at), &caps).is_some()
     };
-    if gpu_capacities(devices, 0).is_empty() || !fits(1) {
+    if gpu_capacities(devices, 0).is_empty() {
         return None;
     }
-    // Feasibility is monotone in cap (cost only grows), so bracket the
-    // boundary by doubling and bisect it. The KV index bound makes `fits`
-    // fail before `u32` overflows, so the doubling ends.
+    largest_fitting(fits).map(|fit| if fit >= AUTO_CAP_GRANULE { fit / AUTO_CAP_GRANULE * AUTO_CAP_GRANULE } else { fit })
+}
+
+/// The largest `n` for which `fits(n)` holds, or `None` when not even 1 does.
+/// Feasibility is monotone in `n` (cost only grows), so the boundary is bracketed
+/// by doubling and bisected. An addressing bound inside `fits` makes it fail
+/// before `u32` overflows, so the doubling ends.
+fn largest_fitting(fits: impl Fn(u32) -> bool) -> Option<u32> {
+    if !fits(1) {
+        return None;
+    }
     let (mut fit, mut over) = (1u32, 2u32);
     while fits(over) {
         fit = over;
@@ -628,7 +636,38 @@ pub fn auto_cap(cfg: &Qwen35Config, devices: &[(Device, u64)], shape: &ServingSh
             over = mid;
         }
     }
-    Some(if fit >= AUTO_CAP_GRANULE { fit / AUTO_CAP_GRANULE * AUTO_CAP_GRANULE } else { fit })
+    Some(fit)
+}
+
+/// Rows of one KV block in the paged layout `brain serve` uses for this model:
+/// large enough that a million-token sequence's block table stays a few thousand
+/// entries (it is uploaded every decode step), and a multiple of the decode
+/// kernel's key tile.
+pub const KV_BLOCK_ROWS: u32 = 256;
+
+/// Granularity of [`auto_pool_rows`]'s answer.
+const AUTO_POOL_GRANULE: u32 = 16 * KV_BLOCK_ROWS;
+
+/// The largest shared KV pool, in rows, that `shape` leaves room for on `devices`
+/// once the weights, the recurrent state and the step workspace are placed
+/// ([`auto_cap`]'s counterpart for the paged layout: sequences hold the blocks
+/// their tokens need, so what memory bounds is the pool, not a window per slot).
+/// With `cap` the per-sequence context is fixed and the workspace is sized for
+/// it; without, one sequence may take the whole pool. Rounded down to
+/// [`AUTO_POOL_GRANULE`]; `None` when not even one block fits, or when a fixed
+/// `cap` does not fit the pool.
+pub fn auto_pool_rows(cfg: &Qwen35Config, devices: &[(Device, u64)], shape: &ServingShape, cap: Option<u32>) -> Option<u32> {
+    if gpu_capacities(devices, 0).is_empty() {
+        return None;
+    }
+    let fits = |rows: u32| {
+        let at = ServingShape { kv_pool_rows: rows, cap: cap.unwrap_or(rows), ..shape.clone() };
+        let caps = gpu_capacities(devices, at.stage_workspace(cfg));
+        kv_rows_addressable(cfg, rows) && model::shard::plan_fewest_devices(&serving_cost(cfg, &at), &caps).is_some()
+    };
+    let fit = largest_fitting(fits)?;
+    let rows = if fit >= AUTO_POOL_GRANULE { fit / AUTO_POOL_GRANULE * AUTO_POOL_GRANULE } else { fit / KV_BLOCK_ROWS * KV_BLOCK_ROWS };
+    (rows > 0 && rows >= cap.unwrap_or(0)).then_some(rows)
 }
 
 // ------------------------------------------------------------ the fetch plan
@@ -3452,10 +3491,23 @@ impl Qwen35GgufResident {
 
     /// The longest per-sequence context this configuration places on its
     /// cards ([`auto_cap`]), or why not even one token fits.
+    ///
+    /// In the paged layout ([`Self::with_kv_block_rows`]) the longest context is
+    /// the largest pool one sequence may take whole ([`auto_pool_rows`]).
     pub fn longest_cap(&self) -> Result<u32, String> {
         let mg = MmapGguf::open(&self.gguf_path).map_err(|e| format!("cannot open '{}': {e}", self.gguf_path))?;
         let cfg = resident_config(&mg, 1).map_err(|e| format!("'{}' is not a servable Qwen3.8 GGUF: {e}", self.gguf_path))?;
-        auto_cap(&cfg, &self.devices, &self.serving_shape(&mg, &cfg)).ok_or_else(|| format!("{} does not fit across the {} budgeted device(s) even with a one-token context", self.gguf_path, self.devices.len()))
+        let shape = self.serving_shape(&mg, &cfg);
+        let longest = if self.kv_block_rows > 0 { auto_pool_rows(&cfg, &self.devices, &shape, None) } else { auto_cap(&cfg, &self.devices, &shape) };
+        longest.ok_or_else(|| format!("{} does not fit across the {} budgeted device(s) even with a one-token context", self.gguf_path, self.devices.len()))
+    }
+
+    /// The largest shared KV pool, in rows, this configuration leaves room for
+    /// when every sequence is held to `cap` tokens ([`auto_pool_rows`]).
+    pub fn longest_pool(&self, cap: u32) -> Result<u32, String> {
+        let mg = MmapGguf::open(&self.gguf_path).map_err(|e| format!("cannot open '{}': {e}", self.gguf_path))?;
+        let cfg = resident_config(&mg, 1).map_err(|e| format!("'{}' is not a servable Qwen3.8 GGUF: {e}", self.gguf_path))?;
+        auto_pool_rows(&cfg, &self.devices, &self.serving_shape(&mg, &cfg), Some(cap)).ok_or_else(|| format!("a {cap}-token context does not fit the {} budgeted device(s) beside the weights", self.devices.len()))
     }
 
     /// What this resident will hold on the cards besides the weights, as
@@ -4180,6 +4232,27 @@ mod tests {
         assert!(placed + workspace <= 96 * GB, "{placed} bytes placed + {workspace} of step workspace overrun the card");
         let (more, more_workspace) = (serving_cost(&cfg, &more_at).total(), more_at.stage_workspace(&cfg));
         assert!(more + more_workspace > 96 * GB, "one granule more still fits beside the workspace: the context stops short of the memory bound");
+    }
+
+    /// The paged layout bounds memory by the shared pool, not by a window per slot: the
+    /// same card that holds a ~100k context for 8 slots + 4 cached prompts one-block holds
+    /// a pool of a million rows, and a batch of 32 costs the recurrent state only.
+    #[test]
+    fn the_paged_pool_is_bounded_by_memory_not_multiplied_by_the_batch() {
+        let cfg = Qwen35Config::qwen38_27b();
+        let card = [(Device::Gpu(0), 96 * GB)];
+        let shape = ServingShape { prefix_slots: 32, ..ServingShape::new(1, TierPolicy::uniform(Dtype::I8), KvTier::INT8, 32) };
+        let windowed = auto_cap(&cfg, &card, &shape).expect("fits");
+        let pool = auto_pool_rows(&cfg, &card, &shape, None).expect("fits");
+        assert!(pool > 8 * windowed, "pool {pool} rows against {windowed} rows per slot");
+        assert_eq!(pool % KV_BLOCK_ROWS, 0, "whole blocks");
+        // The pool, the placement and the workspace fit together; one granule more does not.
+        let at = |rows: u32| ServingShape { kv_pool_rows: rows, cap: rows, ..shape.clone() };
+        let total = |rows: u32| serving_cost(&cfg, &at(rows)).total() + at(rows).stage_workspace(&cfg);
+        assert!(total(pool) <= 96 * GB && total(pool + AUTO_POOL_GRANULE) > 96 * GB);
+        // A fixed context that fits the pool is honoured; one longer than any pool is refused.
+        assert!(auto_pool_rows(&cfg, &card, &shape, Some(65_536)).expect("fits") >= 65_536);
+        assert_eq!(auto_pool_rows(&cfg, &card, &shape, Some(u32::MAX / 2)), None);
     }
 
     /// An operator-fixed context is held to the same budget as the automatic one.

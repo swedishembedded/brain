@@ -572,7 +572,9 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
     }
     let build = |kv, mode, prefix_slots, cap| {
         let spec = SpecServing { mode, ..SpecServing::default() };
-        let r = Qwen35GgufResident::new(gguf_path.to_string(), devices.clone(), cap, tier.clone()).with_kv_tier(kv).with_max_batch(max_batch).with_prefix_slots(prefix_slots).with_speculation(spec).with_exact_decode(cfg.exact_decode);
+        // Paged KV: sequences hold the blocks their tokens need from one shared pool, so a long context
+        // costs only the sequences that use it, and the batch is not multiplied by the context.
+        let r = Qwen35GgufResident::new(gguf_path.to_string(), devices.clone(), cap, tier.clone()).with_kv_tier(kv).with_max_batch(max_batch).with_prefix_slots(prefix_slots).with_speculation(spec).with_exact_decode(cfg.exact_decode).with_kv_block_rows(qwen35::int8_gguf_resident::KV_BLOCK_ROWS);
         match &bank {
             Some(bank) => r.with_adapter_bank(bank.request()),
             None => r,
@@ -583,7 +585,8 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
     let floor = DEFAULT_CONTEXT_FLOOR.min(model_cfg.max_position_embeddings.max(1));
     let fits = |r: Qwen35GgufResident| -> Result<(), String> {
         match cfg.ctx {
-            Some(_) => r.unservable_reason().map_or(Ok(()), Err),
+            // One sequence of the operator's context must fit the pool the cards leave.
+            Some(ctx) => r.longest_pool(ctx).map(|_| ()),
             None => match r.longest_cap()? {
                 c if c >= floor => Ok(()),
                 c => Err(format!("it leaves a {c}-token context, under {floor}")),
@@ -601,11 +604,17 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
     }
     let prefix_slots = given_or_chosen(cfg.prefix_slots.map(PrefixCache::Slots), "prefix slots", PREFIX_SLOT_DEFAULTS, hw, &mut chosen, |cache| fits(build(kv, mode, cache.slots(max_batch), probe_cap))).slots(max_batch);
     let resident = match cfg.ctx {
-        Some(_) => build(kv, mode, prefix_slots, probe_cap),
+        Some(ctx) => {
+            let resident = build(kv, mode, prefix_slots, ctx);
+            // The refusal that states the arithmetic is the sizing check's.
+            let pool = resident.longest_pool(ctx).map_err(|e| resident.unservable_reason().unwrap_or(e))?;
+            chosen.push(format!("KV pool {pool} tokens shared by all sequences: what the cards hold beside everything above"));
+            build(kv, mode, prefix_slots, ctx).with_kv_pool_rows(pool)
+        }
         None => {
             let cap = build(kv, mode, prefix_slots, 1).longest_cap()?;
-            chosen.push(format!("--ctx {cap}: the longest context the cards hold beside everything above"));
-            build(kv, mode, prefix_slots, cap)
+            chosen.push(format!("--ctx {cap}: the longest context the cards hold beside everything above, with one KV pool of {cap} tokens shared by all sequences"));
+            build(kv, mode, prefix_slots, cap).with_kv_pool_rows(cap)
         }
     };
     let resident = resident.with_prefill_policy(cfg.prefill_policy_or_default()).with_model_id(id);
@@ -1012,7 +1021,9 @@ mod tests {
         let r = gguf_resident(&path, "t/x", &gpus, RESERVED, &Qwen35GgufServeConfig { ctx: Some(longest), ..Default::default() }).expect("the leaner default fits");
         assert_eq!(r.cap(), longest);
         assert_eq!(r.kv_tier(), model::kv_tier::KvTier::INT8);
-        assert_eq!(r.prefix_slots(), 0, "no cached prompt fits beside {longest}-token sequences");
+        // Cached prompts live in the shared KV pool and cost only their recurrent-state snapshots, so a few can
+        // still fit beside the longest context; the full default cannot.
+        assert!(r.prefix_slots() < DEFAULT_MAX_BATCH, "the full prompt cache does not fit beside {longest}-token sequences: {}", r.prefix_slots());
         let said = r.chosen_defaults().join("\n");
         assert!(said.contains("passed over"), "{said}");
         let wide = gguf_resident(&path, "t/x", &gpus, RESERVED, &Qwen35GgufServeConfig { max_batch: Some(16), ..Default::default() }).expect("builds");

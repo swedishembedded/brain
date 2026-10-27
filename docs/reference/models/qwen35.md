@@ -142,7 +142,15 @@ where every card runs the CUDA verify kernels, else `off`), then the prompt
 cache (one per concurrent sequence, at least 4; then 4, 2, 1, 0). "Fits" means
 the plan places at a fixed `--ctx`, or, with the context left to the cards,
 that at least 32768 tokens (or the trained window, when shorter) remain. The
-context is then the longest the cards hold beside all of it. `brain serve`
+context is then the longest the cards hold beside all of it. The KV cache is
+one pool shared by every sequence and cached prompt (paged, 256-row blocks), so
+the context is bounded by the pool, not multiplied by `--max-batch`: one
+sequence may take the whole pool, and 32 sequences cost their recurrent state
+and their own tokens. A 96 GB card serves a context past a million tokens at
+`--max-batch 32` with the int8 KV tier (beyond the checkpoint's trained
+window, where quality is the operator's to judge). The card also keeps its
+prefill and decode step workspace free, so a long prompt is refused with a
+classed error rather than taking the lane down. `brain serve`
 logs each choice and why (`brain: <id>: default ...`). Adding a default is
 adding a rule or a candidate where its throughput ranks it.
 

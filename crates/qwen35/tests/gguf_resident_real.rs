@@ -1212,7 +1212,7 @@ fn covers_a_round_and_a_step_at(path: &str, devices: &[(Device, u64)], cfg: &Qwe
         let toks = vec![5u32; rows as usize];
         let pos: Vec<u32> = (0..rows).map(|i| cap - 100 - i * 10).collect();
         let live = probe.memory_usage().unwrap().live;
-        inst.decode_batch_at(&toks, &pos).expect("decode");
+        inst.decode_batch_greedy_at(&toks, &pos).expect("decode");
         let measured = probe.memory_usage().unwrap().peak_live - live;
         let planned = decode_scratch_bytes(cfg, rows, cap);
         println!("cap {cap}: decode {rows} rows: measured {} MiB, planned {} MiB", measured >> 20, planned >> 20);
