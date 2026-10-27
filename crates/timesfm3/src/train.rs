@@ -66,6 +66,7 @@ use std::collections::HashMap;
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::block;
+use model::saved::SavedPolicy;
 use optim::Optim;
 use model::adapter::exec::AdapterRuntime;
 use paramstore::{ParamStore, Role};
@@ -352,7 +353,7 @@ fn lora_fwd(_g: &Gpu, ps: &ParamStore, lw: &LoraWiring, weight: &str, x: &Device
 /// struct stays a complete, literal record of the forward, matching
 /// `core_forward`'s own local variable it mirrors one for one). Named after
 /// that local variable, so the two stay easy to diff against each other by eye.
-#[allow(dead_code)]
+#[derive(Clone)]
 struct TrainLayer {
     /// This layer's own input hidden state (`pre_seq_attn_ln`'s `x`).
     h_in: DeviceBuffer,
@@ -392,23 +393,69 @@ struct TrainLayer {
     h_out: DeviceBuffer,
 }
 
+impl TrainLayer {
+    /// Every buffer of one layer's forward over `b * v * n` rows, reading `h_in`.
+    fn new(g: &Gpu, cfg: &Timesfm3Config, (b, v, n): (usize, usize, usize), h_in: DeviceBuffer) -> TrainLayer {
+        let rows = b * v * n;
+        let d = cfg.model_dims;
+        let st = |words: usize| g.storage(words as u64);
+        TrainLayer {
+            h_in,
+            seq_in: st(rows * d),
+            q: st(rows * d),
+            k: st(rows * d),
+            vv: st(rows * d),
+            qn: st(rows * d),
+            kn: st(rows * d),
+            probs_seq: st(b * v * cfg.num_heads * n * n),
+            ctx: st(rows * d),
+            seq_out: st(rows * d),
+            h1: st(rows * d),
+            var_in: st(rows * d),
+            q2: st(rows * d),
+            k2: st(rows * d),
+            v2: st(rows * d),
+            q2n: st(rows * d),
+            k2n: st(rows * d),
+            q2t: st(rows * d),
+            k2t: st(rows * d),
+            v2t: st(rows * d),
+            probs_var: st(b * n * cfg.num_heads * v * v),
+            ctx2t: st(rows * d),
+            ctx2: st(rows * d),
+            var_out: st(rows * d),
+            h2: st(rows * d),
+            ff_in: st(rows * d),
+            ff_h_pre: st(rows * cfg.hidden_dims),
+            ff_h_act: st(rows * cfg.hidden_dims),
+            ff_out: st(rows * d),
+            h_out: st(rows * d),
+        }
+    }
+
+    /// A layer that reads `h_in` and writes `h_out` and holds every other buffer in common with `donor`: the
+    /// intermediates the backward rebuilds before it reads them.
+    fn sharing(donor: &TrainLayer, h_in: DeviceBuffer, h_out: DeviceBuffer) -> TrainLayer {
+        TrainLayer { h_in, h_out, ..donor.clone() }
+    }
+}
+
 /// A trainable TimesFM-3 core: the SSA forward and its reverse. See the
 /// module doc for exactly what "trainable" covers.
 ///
 /// The activation fields (`resblock_hidden_*`/`resblock_resid`/
-/// `resblock_out`/`layers`) are never read via `self.` - `build_backward` is
-/// called with the LOCAL variables from the constructor directly, before this
-/// struct exists, rather than as a `&self` method the way
-/// `t5encoder::train::T5Trainer::build_bwd_steps` is. They stay struct fields
-/// anyway because something must own these buffers for as long as
-/// `self.steps`/`self.bwd_steps` can still be resubmitted (repeated
-/// `forward()`/`backward()` calls across training steps).
+/// `resblock_out`/`layers`) are read only when a pass is recorded
+/// ([`Timesfm3Train::forward_steps`], [`Timesfm3Train::backward_steps`]);
+/// they stay struct fields because something must own these buffers for as
+/// long as `self.steps`/`self.bwd_steps` can still be resubmitted (repeated
+/// `forward()`/`backward()` calls across training steps), and because
+/// [`Timesfm3Train::set_saved_policy`] records both passes again over
+/// buffers the layers share.
 ///
 /// `resblock_input`/`seq_kmask`/`var_kmask` are different: they are the
 /// model's INPUT rather than an activation, and [`Timesfm3Train::set_input`]
 /// rewrites all three in place so a training loop can move to the next batch
 /// without rebuilding the graph.
-#[allow(dead_code)]
 pub struct Timesfm3Train {
     pub gpu: Gpu,
     pub cfg: Timesfm3Config,
@@ -446,10 +493,14 @@ pub struct Timesfm3Train {
     /// forward's `rmsnorm_w` and the reverse's `rmsnorm_bwd`, so a refresh
     /// cannot leave the two disagreeing about which weights they differentiate.
     q_gains: Vec<(String, String, DeviceBuffer)>,
-    /// The adapter config, when this is a LoRA trainer. `None` is a full
-    /// fine-tune and every dispatch below is bit-unchanged from before LoRA
-    /// existed.
-    lora: Option<LoraCfg>,
+    /// The adapter wiring, when this is a LoRA trainer. Without an adapter
+    /// config this is a full fine-tune and every dispatch below is
+    /// bit-unchanged from before LoRA existed.
+    lw: LoraWiring,
+    /// What the backward keeps of the forward ([`Timesfm3Train::set_saved_policy`]): every layer's intermediates,
+    /// or (recompute) each layer's input and output only, every layer sharing one set of intermediates that its
+    /// replay before the layer's backward refills.
+    saved: SavedPolicy,
     /// The on-device AdamW step. Held rather than constructed per call: it
     /// caches the optimiser graph and rebuilds it only when the clip mode or
     /// the trainable-parameter count changes.
@@ -504,7 +555,6 @@ impl Timesfm3Train {
 
         let d = cfg.model_dims;
         let g = &gpu;
-        let mut steps = Vec::new();
 
         // One set of adapter scratch buffers for the whole graph. `out` is
         // sized for the WIDEST adapted projection, which is the quantile head
@@ -513,18 +563,10 @@ impl Timesfm3Train {
         let lw = LoraWiring { cfg: lora.clone(), rt: lora.as_ref().map(|lc| AdapterRuntime::new(g, &lc.adapter, rows as u32, widest as u32)) };
 
         let resblock_input_buf = g.storage_init("resblock_input", resblock_input);
-
-        // ---- pre_transformer_resblock: out = output(relu(hidden(x))) + residual(x) ----
         let hidden_pre = g.storage((rows * d) as u64);
-        steps.push(linear(g, &ps, &resblock_input_buf, "pre_transformer_resblock.hidden_layer.weight", &hidden_pre, rows, cfg.resblock_in_dim(), d));
         let hidden_act = g.storage((rows * d) as u64);
-        steps.push(g.step(K_REGION_COPY, &[&hidden_pre, &hidden_act], &[rows as u32, d as u32, d as u32, 0], (rows * d) as u32));
-        steps.push(g.step(K_RELU, &[&hidden_act], &[(rows * d) as u32], (rows * d) as u32));
         let resblock_out = g.storage((rows * d) as u64);
-        steps.push(linear(g, &ps, &hidden_act, "pre_transformer_resblock.output_layer.weight", &resblock_out, rows, d, d));
         let resid = g.storage((rows * d) as u64);
-        steps.push(linear(g, &ps, &resblock_input_buf, "pre_transformer_resblock.residual_layer.weight", &resid, rows, cfg.resblock_in_dim(), d));
-        steps.push(g.step(K_ADD, &[&resblock_out, &resid], &[(rows * d) as u32], (rows * d) as u32));
 
         // Additive key masks, both layouts - reused by every layer, exactly
         // like `core_forward`. Rebuilt (not reallocated) by `set_input`.
@@ -550,130 +592,17 @@ impl Timesfm3Train {
 
         let mut layers = Vec::with_capacity(cfg.num_layers);
         let mut h_in = resblock_out.clone();
-        for l in 0..cfg.num_layers {
-            let p = format!("transformer_stack.layers.{l}");
-
-            // ---- sequence attention: causal, per-(b,v) sequence over n, RoPE ----
-            let seq_in = g.storage((rows * d) as u64);
-            steps.push(rmsnorm(g, &ps, &h_in, &format!("{p}.pre_seq_attn_ln.weight"), &seq_in, d, rows, cfg.rms_norm_eps));
-            let (q, k, vv) = (g.storage((rows * d) as u64), g.storage((rows * d) as u64), g.storage((rows * d) as u64));
-            steps.push(linear(g, &ps, &seq_in, &format!("{p}.seq_attn.query_proj.weight"), &q, rows, d, d));
-            steps.extend(lora_fwd(g, &ps, &lw, &format!("{p}.seq_attn.query_proj.weight"), &seq_in, &q, rows, d, d));
-            steps.push(linear(g, &ps, &seq_in, &format!("{p}.seq_attn.key_proj.weight"), &k, rows, d, d));
-            steps.extend(lora_fwd(g, &ps, &lw, &format!("{p}.seq_attn.key_proj.weight"), &seq_in, &k, rows, d, d));
-            steps.push(linear(g, &ps, &seq_in, &format!("{p}.seq_attn.value_proj.weight"), &vv, rows, d, d));
-            steps.extend(lora_fwd(g, &ps, &lw, &format!("{p}.seq_attn.value_proj.weight"), &seq_in, &vv, rows, d, d));
-            steps.push(rope_seq(g, &cfg, &q, rows, n));
-            steps.push(rope_seq(g, &cfg, &k, rows, n));
-            let (qn, kn) = (g.storage((rows * d) as u64), g.storage((rows * d) as u64));
-            let q_gain = query_gain_of(&q_gains, &format!("{p}.seq_attn.query_ln.weight"));
-            steps.push(rmsnorm_w(g, &q, q_gain, &qn, cfg.head_dim, rows * cfg.num_heads, cfg.rms_norm_eps));
-            steps.push(rmsnorm(g, &ps, &k, &format!("{p}.seq_attn.key_ln.weight"), &kn, cfg.head_dim, rows * cfg.num_heads, cfg.rms_norm_eps));
-            let ctx = g.storage((rows * d) as u64);
-            let probs_seq = g.storage((b * v * cfg.num_heads * n * n) as u64);
-            steps.extend(attention(g, &cfg, &qn, &kn, &vv, &seq_kmask, &probs_seq, &ctx, b * v, n, true));
-            let seq_out = g.storage((rows * d) as u64);
-            steps.push(linear(g, &ps, &ctx, &format!("{p}.seq_attn.out_proj.weight"), &seq_out, rows, d, d));
-            steps.extend(lora_fwd(g, &ps, &lw, &format!("{p}.seq_attn.out_proj.weight"), &ctx, &seq_out, rows, d, d));
-            let seq_normed = g.storage((rows * d) as u64);
-            steps.push(rmsnorm(g, &ps, &seq_out, &format!("{p}.post_seq_attn_ln.weight"), &seq_normed, d, rows, cfg.rms_norm_eps));
-            steps.push(g.step(K_ADD, &[&seq_normed, &h_in], &[(rows * d) as u32], (rows * d) as u32));
-            let h1 = seq_normed;
-
-            // ---- variate attention: non-causal, per-(b,position) over v, no RoPE ----
-            let var_in = g.storage((rows * d) as u64);
-            steps.push(rmsnorm(g, &ps, &h1, &format!("{p}.pre_var_attn_ln.weight"), &var_in, d, rows, cfg.rms_norm_eps));
-            let (q2, k2, v2) = (g.storage((rows * d) as u64), g.storage((rows * d) as u64), g.storage((rows * d) as u64));
-            steps.push(linear(g, &ps, &var_in, &format!("{p}.var_attn.query_proj.weight"), &q2, rows, d, d));
-            steps.extend(lora_fwd(g, &ps, &lw, &format!("{p}.var_attn.query_proj.weight"), &var_in, &q2, rows, d, d));
-            steps.push(linear(g, &ps, &var_in, &format!("{p}.var_attn.key_proj.weight"), &k2, rows, d, d));
-            steps.extend(lora_fwd(g, &ps, &lw, &format!("{p}.var_attn.key_proj.weight"), &var_in, &k2, rows, d, d));
-            steps.push(linear(g, &ps, &var_in, &format!("{p}.var_attn.value_proj.weight"), &v2, rows, d, d));
-            steps.extend(lora_fwd(g, &ps, &lw, &format!("{p}.var_attn.value_proj.weight"), &var_in, &v2, rows, d, d));
-            let (q2n, k2n) = (g.storage((rows * d) as u64), g.storage((rows * d) as u64));
-            let q2_gain = query_gain_of(&q_gains, &format!("{p}.var_attn.query_ln.weight"));
-            steps.push(rmsnorm_w(g, &q2, q2_gain, &q2n, cfg.head_dim, rows * cfg.num_heads, cfg.rms_norm_eps));
-            steps.push(rmsnorm(g, &ps, &k2, &format!("{p}.var_attn.key_ln.weight"), &k2n, cfg.head_dim, rows * cfg.num_heads, cfg.rms_norm_eps));
-            let (q2t, k2t, v2t) = (g.storage((rows * d) as u64), g.storage((rows * d) as u64), g.storage((rows * d) as u64));
-            steps.push(swap12(g, &q2n, &q2t, b, v, n, d));
-            steps.push(swap12(g, &k2n, &k2t, b, v, n, d));
-            steps.push(swap12(g, &v2, &v2t, b, v, n, d));
-            let ctx2t = g.storage((rows * d) as u64);
-            let probs_var = g.storage((b * n * cfg.num_heads * v * v) as u64);
-            steps.extend(attention(g, &cfg, &q2t, &k2t, &v2t, &var_kmask, &probs_var, &ctx2t, b * n, v, false));
-            let ctx2 = g.storage((rows * d) as u64);
-            steps.push(swap12(g, &ctx2t, &ctx2, b, n, v, d));
-            let var_out = g.storage((rows * d) as u64);
-            steps.push(linear(g, &ps, &ctx2, &format!("{p}.var_attn.out_proj.weight"), &var_out, rows, d, d));
-            steps.extend(lora_fwd(g, &ps, &lw, &format!("{p}.var_attn.out_proj.weight"), &ctx2, &var_out, rows, d, d));
-            let var_normed = g.storage((rows * d) as u64);
-            steps.push(rmsnorm(g, &ps, &var_out, &format!("{p}.post_var_attn_ln.weight"), &var_normed, d, rows, cfg.rms_norm_eps));
-            steps.push(g.step(K_ADD, &[&var_normed, &h1], &[(rows * d) as u32], (rows * d) as u32));
-            let h2 = var_normed;
-
-            // ---- feedforward: ReLU, hidden width == model_dims (no 4x) ----
-            let ff_in = g.storage((rows * d) as u64);
-            steps.push(rmsnorm(g, &ps, &h2, &format!("{p}.pre_ff_ln.weight"), &ff_in, d, rows, cfg.rms_norm_eps));
-            let ff_h_pre = g.storage((rows * cfg.hidden_dims) as u64);
-            steps.push(linear(g, &ps, &ff_in, &format!("{p}.ff0.weight"), &ff_h_pre, rows, d, cfg.hidden_dims));
-            steps.extend(lora_fwd(g, &ps, &lw, &format!("{p}.ff0.weight"), &ff_in, &ff_h_pre, rows, d, cfg.hidden_dims));
-            let ff_h_act = g.storage((rows * cfg.hidden_dims) as u64);
-            steps.push(g.step(K_REGION_COPY, &[&ff_h_pre, &ff_h_act], &[rows as u32, cfg.hidden_dims as u32, cfg.hidden_dims as u32, 0], (rows * cfg.hidden_dims) as u32));
-            steps.push(g.step(K_RELU, &[&ff_h_act], &[(rows * cfg.hidden_dims) as u32], (rows * cfg.hidden_dims) as u32));
-            let ff_out = g.storage((rows * d) as u64);
-            steps.push(linear(g, &ps, &ff_h_act, &format!("{p}.ff1.weight"), &ff_out, rows, cfg.hidden_dims, d));
-            steps.extend(lora_fwd(g, &ps, &lw, &format!("{p}.ff1.weight"), &ff_h_act, &ff_out, rows, cfg.hidden_dims, d));
-            let ff_normed = g.storage((rows * d) as u64);
-            steps.push(rmsnorm(g, &ps, &ff_out, &format!("{p}.post_ff_ln.weight"), &ff_normed, d, rows, cfg.rms_norm_eps));
-            steps.push(g.step(K_ADD, &[&ff_normed, &h2], &[(rows * d) as u32], (rows * d) as u32));
-            let h_out = ff_normed;
-
-            layers.push(TrainLayer {
-                h_in: h_in.clone(),
-                seq_in,
-                q,
-                k,
-                vv,
-                qn,
-                kn,
-                probs_seq,
-                ctx,
-                seq_out,
-                h1,
-                var_in,
-                q2,
-                k2,
-                v2,
-                q2n,
-                k2n,
-                q2t,
-                k2t,
-                v2t,
-                probs_var,
-                ctx2t,
-                ctx2,
-                var_out,
-                h2,
-                ff_in,
-                ff_h_pre,
-                ff_h_act,
-                ff_out,
-                h_out: h_out.clone(),
-            });
-            h_in = h_out;
+        for _ in 0..cfg.num_layers {
+            let layer = TrainLayer::new(g, &cfg, (b, v, n), h_in);
+            h_in = layer.h_out.clone();
+            layers.push(layer);
         }
 
-        // ---- output head: biased linear, no norm ----
         let head_out = cfg.head_out_dim();
         let logits = g.storage((rows * head_out) as u64);
-        steps.push(linear(g, &ps, &h_in, "output_head.weight", &logits, rows, d, head_out));
-        steps.extend(lora_fwd(g, &ps, &lw, "output_head.weight", &h_in, &logits, rows, d, head_out));
-        steps.push(g.step(K_BIAS_ADD, &[&logits, ps.w("output_head.bias")], &[rows as u32, head_out as u32], (rows * head_out) as u32));
-
         let d_logits = g.storage((rows * head_out) as u64);
-        let (bwd_steps, qgain_fold_temps) = build_backward(g, &cfg, &ps, &lw, &q_gains, &layers, &resblock_input_buf, &hidden_pre, &hidden_act, &h_in, &d_logits, b, v, n);
 
-        Timesfm3Train {
+        let mut trainer = Timesfm3Train {
             gpu,
             cfg,
             ps,
@@ -689,14 +618,219 @@ impl Timesfm3Train {
             resblock_out,
             layers,
             logits,
-            steps,
+            steps: Vec::new(),
             d_logits,
-            bwd_steps,
-            qgain_fold_temps,
+            bwd_steps: Vec::new(),
+            qgain_fold_temps: Vec::new(),
             q_gains,
-            lora,
+            lw,
+            saved: SavedPolicy::Keep,
             opt: Optim::new(K_ADAMW, K_GRADNORM_SQ, K_GRAD_SCALE, K_CLIP_COEF, K_GRAD_SCALE_BUF),
+        };
+        trainer.record();
+        trainer
+    }
+
+    /// Record both passes over the buffers the layers currently hold.
+    fn record(&mut self) {
+        self.steps = self.forward_steps();
+        (self.bwd_steps, self.qgain_fold_temps) = self.backward_steps();
+    }
+
+    /// Keep every layer's intermediates for the backward ([`SavedPolicy::Keep`]) or only each layer's input and
+    /// output, every layer sharing one set of intermediates that its replay refills before the layer's backward
+    /// ([`SavedPolicy::Recompute`]). The residual stream stays in f32, so a narrow saved format is refused by
+    /// name, as is going back to keeping everything once the buffers are shared.
+    pub fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
+        if let SavedPolicy::Quantized(format) = policy {
+            return Err(format!("timesfm3 keeps its residual stream in f32; {format:?} saved boundaries do not apply"));
         }
+        if !self.saved.narrows_to(policy) {
+            return Err(format!("timesfm3: a trainer keeping {:?} cannot go back to {policy:?}", self.saved));
+        }
+        if policy.recomputes() && !self.saved.recomputes() {
+            if let Some(donor) = self.layers.first().cloned() {
+                let mut h_in = donor.h_out.clone();
+                for layer in self.layers.iter_mut().skip(1) {
+                    *layer = TrainLayer::sharing(&donor, h_in, layer.h_out.clone());
+                    h_in = layer.h_out.clone();
+                }
+            }
+            self.saved = policy;
+            self.record();
+        }
+        Ok(())
+    }
+
+    /// The forward: `pre_transformer_resblock`, every layer, the output head.
+    fn forward_steps(&self) -> Vec<Step> {
+        let (g, ps, lw, cfg) = (&self.gpu, &self.ps, &self.lw, &self.cfg);
+        let (rows, d) = (self.b * self.v * self.n, cfg.model_dims);
+        let mut steps = Vec::new();
+
+        // ---- pre_transformer_resblock: out = output(relu(hidden(x))) + residual(x) ----
+        let (hidden_pre, hidden_act, resblock_out, resid) = (&self.resblock_hidden_pre, &self.resblock_hidden_act, &self.resblock_out, &self.resblock_resid);
+        steps.push(linear(g, ps, &self.resblock_input, "pre_transformer_resblock.hidden_layer.weight", hidden_pre, rows, cfg.resblock_in_dim(), d));
+        steps.push(g.step(K_REGION_COPY, &[hidden_pre, hidden_act], &[rows as u32, d as u32, d as u32, 0], (rows * d) as u32));
+        steps.push(g.step(K_RELU, &[hidden_act], &[(rows * d) as u32], (rows * d) as u32));
+        steps.push(linear(g, ps, hidden_act, "pre_transformer_resblock.output_layer.weight", resblock_out, rows, d, d));
+        steps.push(linear(g, ps, &self.resblock_input, "pre_transformer_resblock.residual_layer.weight", resid, rows, cfg.resblock_in_dim(), d));
+        steps.push(g.step(K_ADD, &[resblock_out, resid], &[(rows * d) as u32], (rows * d) as u32));
+
+        for l in 0..cfg.num_layers {
+            self.layer_forward(l, &mut steps);
+        }
+
+        // ---- output head: biased linear, no norm ----
+        let h_final = &self.layers.last().expect("a core has at least one layer").h_out;
+        let head_out = cfg.head_out_dim();
+        steps.push(linear(g, ps, h_final, "output_head.weight", &self.logits, rows, d, head_out));
+        steps.extend(lora_fwd(g, ps, lw, "output_head.weight", h_final, &self.logits, rows, d, head_out));
+        steps.push(g.step(K_BIAS_ADD, &[&self.logits, ps.w("output_head.bias")], &[rows as u32, head_out as u32], (rows * head_out) as u32));
+        steps
+    }
+
+    /// Layer `l`'s forward, from its `h_in` to its `h_out`, recorded into `steps`. A recomputing backward replays
+    /// it to refill the intermediates its layer's backward reads.
+    fn layer_forward(&self, l: usize, steps: &mut Vec<Step>) {
+        let (g, ps, lw, cfg) = (&self.gpu, &self.ps, &self.lw, &self.cfg);
+        let (b, v, n) = (self.b, self.v, self.n);
+        let (rows, d) = (b * v * n, cfg.model_dims);
+        let (seq_kmask, var_kmask, q_gains) = (&self.seq_kmask, &self.var_kmask, &self.q_gains);
+        let TrainLayer { h_in, seq_in, q, k, vv, qn, kn, probs_seq, ctx, seq_out, h1, var_in, q2, k2, v2, q2n, k2n, q2t, k2t, v2t, probs_var, ctx2t, ctx2, var_out, h2, ff_in, ff_h_pre, ff_h_act, ff_out, h_out } = self.layers[l].clone();
+        let p = format!("transformer_stack.layers.{l}");
+
+        // ---- sequence attention: causal, per-(b,v) sequence over n, RoPE ----
+        steps.push(rmsnorm(g, ps, &h_in, &format!("{p}.pre_seq_attn_ln.weight"), &seq_in, d, rows, cfg.rms_norm_eps));
+        steps.push(linear(g, ps, &seq_in, &format!("{p}.seq_attn.query_proj.weight"), &q, rows, d, d));
+        steps.extend(lora_fwd(g, ps, lw, &format!("{p}.seq_attn.query_proj.weight"), &seq_in, &q, rows, d, d));
+        steps.push(linear(g, ps, &seq_in, &format!("{p}.seq_attn.key_proj.weight"), &k, rows, d, d));
+        steps.extend(lora_fwd(g, ps, lw, &format!("{p}.seq_attn.key_proj.weight"), &seq_in, &k, rows, d, d));
+        steps.push(linear(g, ps, &seq_in, &format!("{p}.seq_attn.value_proj.weight"), &vv, rows, d, d));
+        steps.extend(lora_fwd(g, ps, lw, &format!("{p}.seq_attn.value_proj.weight"), &seq_in, &vv, rows, d, d));
+        steps.push(rope_seq(g, cfg, &q, rows, n));
+        steps.push(rope_seq(g, cfg, &k, rows, n));
+        let q_gain = query_gain_of(q_gains, &format!("{p}.seq_attn.query_ln.weight"));
+        steps.push(rmsnorm_w(g, &q, q_gain, &qn, cfg.head_dim, rows * cfg.num_heads, cfg.rms_norm_eps));
+        steps.push(rmsnorm(g, ps, &k, &format!("{p}.seq_attn.key_ln.weight"), &kn, cfg.head_dim, rows * cfg.num_heads, cfg.rms_norm_eps));
+        steps.extend(attention(g, cfg, &qn, &kn, &vv, seq_kmask, &probs_seq, &ctx, b * v, n, true));
+        steps.push(linear(g, ps, &ctx, &format!("{p}.seq_attn.out_proj.weight"), &seq_out, rows, d, d));
+        steps.extend(lora_fwd(g, ps, lw, &format!("{p}.seq_attn.out_proj.weight"), &ctx, &seq_out, rows, d, d));
+        steps.push(rmsnorm(g, ps, &seq_out, &format!("{p}.post_seq_attn_ln.weight"), &h1, d, rows, cfg.rms_norm_eps));
+        steps.push(g.step(K_ADD, &[&h1, &h_in], &[(rows * d) as u32], (rows * d) as u32));
+        
+        // ---- variate attention: non-causal, per-(b,position) over v, no RoPE ----
+        steps.push(rmsnorm(g, ps, &h1, &format!("{p}.pre_var_attn_ln.weight"), &var_in, d, rows, cfg.rms_norm_eps));
+        steps.push(linear(g, ps, &var_in, &format!("{p}.var_attn.query_proj.weight"), &q2, rows, d, d));
+        steps.extend(lora_fwd(g, ps, lw, &format!("{p}.var_attn.query_proj.weight"), &var_in, &q2, rows, d, d));
+        steps.push(linear(g, ps, &var_in, &format!("{p}.var_attn.key_proj.weight"), &k2, rows, d, d));
+        steps.extend(lora_fwd(g, ps, lw, &format!("{p}.var_attn.key_proj.weight"), &var_in, &k2, rows, d, d));
+        steps.push(linear(g, ps, &var_in, &format!("{p}.var_attn.value_proj.weight"), &v2, rows, d, d));
+        steps.extend(lora_fwd(g, ps, lw, &format!("{p}.var_attn.value_proj.weight"), &var_in, &v2, rows, d, d));
+        let q2_gain = query_gain_of(q_gains, &format!("{p}.var_attn.query_ln.weight"));
+        steps.push(rmsnorm_w(g, &q2, q2_gain, &q2n, cfg.head_dim, rows * cfg.num_heads, cfg.rms_norm_eps));
+        steps.push(rmsnorm(g, ps, &k2, &format!("{p}.var_attn.key_ln.weight"), &k2n, cfg.head_dim, rows * cfg.num_heads, cfg.rms_norm_eps));
+        steps.push(swap12(g, &q2n, &q2t, b, v, n, d));
+        steps.push(swap12(g, &k2n, &k2t, b, v, n, d));
+        steps.push(swap12(g, &v2, &v2t, b, v, n, d));
+        steps.extend(attention(g, cfg, &q2t, &k2t, &v2t, var_kmask, &probs_var, &ctx2t, b * n, v, false));
+        steps.push(swap12(g, &ctx2t, &ctx2, b, n, v, d));
+        steps.push(linear(g, ps, &ctx2, &format!("{p}.var_attn.out_proj.weight"), &var_out, rows, d, d));
+        steps.extend(lora_fwd(g, ps, lw, &format!("{p}.var_attn.out_proj.weight"), &ctx2, &var_out, rows, d, d));
+        steps.push(rmsnorm(g, ps, &var_out, &format!("{p}.post_var_attn_ln.weight"), &h2, d, rows, cfg.rms_norm_eps));
+        steps.push(g.step(K_ADD, &[&h2, &h1], &[(rows * d) as u32], (rows * d) as u32));
+        
+        // ---- feedforward: ReLU, hidden width == model_dims (no 4x) ----
+        steps.push(rmsnorm(g, ps, &h2, &format!("{p}.pre_ff_ln.weight"), &ff_in, d, rows, cfg.rms_norm_eps));
+        steps.push(linear(g, ps, &ff_in, &format!("{p}.ff0.weight"), &ff_h_pre, rows, d, cfg.hidden_dims));
+        steps.extend(lora_fwd(g, ps, lw, &format!("{p}.ff0.weight"), &ff_in, &ff_h_pre, rows, d, cfg.hidden_dims));
+        steps.push(g.step(K_REGION_COPY, &[&ff_h_pre, &ff_h_act], &[rows as u32, cfg.hidden_dims as u32, cfg.hidden_dims as u32, 0], (rows * cfg.hidden_dims) as u32));
+        steps.push(g.step(K_RELU, &[&ff_h_act], &[(rows * cfg.hidden_dims) as u32], (rows * cfg.hidden_dims) as u32));
+        steps.push(linear(g, ps, &ff_h_act, &format!("{p}.ff1.weight"), &ff_out, rows, cfg.hidden_dims, d));
+        steps.extend(lora_fwd(g, ps, lw, &format!("{p}.ff1.weight"), &ff_h_act, &ff_out, rows, cfg.hidden_dims, d));
+        steps.push(rmsnorm(g, ps, &ff_out, &format!("{p}.post_ff_ln.weight"), &h_out, d, rows, cfg.rms_norm_eps));
+        steps.push(g.step(K_ADD, &[&h_out, &h2], &[(rows * d) as u32], (rows * d) as u32));
+        
+    }
+
+    /// The full reverse pass: output head, every layer in reverse, then
+    /// `pre_transformer_resblock`. The last layer's own output is `core_forward`'s
+    /// local `h` just before the head's linear; `d_logits` is the buffer
+    /// [`Timesfm3Train::backward`] writes the objective's gradient into on every call.
+    /// Under [`SavedPolicy::Recompute`] each layer's forward is replayed from its input
+    /// first, refilling the intermediates its backward reads.
+    fn backward_steps(&self) -> (Vec<Step>, Vec<(String, String, DeviceBuffer)>) {
+        let (g, cfg, ps, lw) = (&self.gpu, &self.cfg, &self.ps, &self.lw);
+        let (q_gains, layers) = (&self.q_gains[..], &self.layers[..]);
+        let (resblock_input, resblock_hidden_pre, resblock_hidden_act) = (&self.resblock_input, &self.resblock_hidden_pre, &self.resblock_hidden_act);
+        let h_final = &layers.last().expect("a core has at least one layer").h_out;
+        let d_logits = &self.d_logits;
+        let (b, v, n) = (self.b, self.v, self.n);
+        let rows = b * v * n;
+        let d = cfg.model_dims;
+        let head_out = cfg.head_out_dim();
+        let mut steps = Vec::new();
+        let mut folds = Vec::new();
+
+        // ---- output head: logits = linear(h_final, output_head.weight) + bias ----
+        if let Some(db) = grad_of(ps, "output_head.bias") {
+            steps.push(g.step(K_BIAS_GRAD, &[d_logits, db], &[rows as u32, head_out as u32], head_out as u32));
+        }
+        let mut d_h = g.storage((rows * d) as u64);
+        steps.extend(proj_bwd(g, ps, lw, "output_head.weight", d_logits, h_final, &d_h, rows, d, head_out, false));
+
+        for l in (0..cfg.num_layers).rev() {
+            if self.saved.recomputes() {
+                // Every layer shares one set of intermediates: rebuild this layer's from its input first.
+                self.layer_forward(l, &mut steps);
+            }
+            let ly = &layers[l];
+            let prefix = format!("transformer_stack.layers.{l}");
+
+            // ---- feedforward, in reverse ----
+            let d_ff_out = g.storage((rows * d) as u64);
+            steps.extend(rmsnorm_bwd(g, &ly.ff_out, ps.w(&format!("{prefix}.post_ff_ln.weight")), &d_h, &d_ff_out, grad_of(ps, &format!("{prefix}.post_ff_ln.weight")), d, rows, cfg.rms_norm_eps));
+            let d_ff_h_act = g.storage((rows * cfg.hidden_dims) as u64);
+            steps.extend(proj_bwd(g, ps, lw, &format!("{prefix}.ff1.weight"), &d_ff_out, &ly.ff_h_act, &d_ff_h_act, rows, cfg.hidden_dims, d, false));
+            let d_ff_h_pre = g.storage((rows * cfg.hidden_dims) as u64);
+            steps.push(g.step(K_LEAKY_RELU_BWD, &[&ly.ff_h_pre, &d_ff_h_act, &d_ff_h_pre], &[(rows * cfg.hidden_dims) as u32, f(0.0)], (rows * cfg.hidden_dims) as u32));
+            let d_ff_in = g.storage((rows * d) as u64);
+            steps.extend(proj_bwd(g, ps, lw, &format!("{prefix}.ff0.weight"), &d_ff_h_pre, &ly.ff_in, &d_ff_in, rows, d, cfg.hidden_dims, false));
+            let d_ff_in_dx = g.storage((rows * d) as u64);
+            steps.extend(rmsnorm_bwd(g, &ly.h2, ps.w(&format!("{prefix}.pre_ff_ln.weight")), &d_ff_in, &d_ff_in_dx, grad_of(ps, &format!("{prefix}.pre_ff_ln.weight")), d, rows, cfg.rms_norm_eps));
+            let d_h2 = g.storage((rows * d) as u64);
+            steps.push(add2(g, &d_h, &d_ff_in_dx, &d_h2, rows * d));
+
+            // ---- variate attention, in reverse ----
+            let (var_steps, d_h1, var_folds) = attn_sublayer_bwd(g, cfg, ps, lw, q_gains, &prefix, false, &ly.h1, &ly.var_in, &ly.q2, &ly.k2, &ly.v2, &ly.q2n, &ly.k2n, &ly.probs_var, &ly.ctx2, &ly.var_out, &d_h2, b, v, n, rows);
+            steps.extend(var_steps);
+            folds.extend(var_folds);
+
+            // ---- sequence attention, in reverse ----
+            let (seq_steps, d_h_in, seq_folds) = attn_sublayer_bwd(g, cfg, ps, lw, q_gains, &prefix, true, &ly.h_in, &ly.seq_in, &ly.q, &ly.k, &ly.vv, &ly.qn, &ly.kn, &ly.probs_seq, &ly.ctx, &ly.seq_out, &d_h1, b, v, n, rows);
+            steps.extend(seq_steps);
+            folds.extend(seq_folds);
+
+            d_h = d_h_in;
+        }
+
+        // ---- pre_transformer_resblock, in reverse: resblock_out = output(relu(hidden(x))) + residual(x) ----
+        // d_h is now the gradient into resblock_out; both branches read it
+        // directly (neither is mutated by what follows), no copy needed.
+        let resblock_in_dim = cfg.resblock_in_dim();
+        if let Some(dw) = grad_of(ps, "pre_transformer_resblock.residual_layer.weight") {
+            steps.push(linear_dw(g, &d_h, resblock_input, dw, rows, resblock_in_dim, d));
+        }
+        let d_hidden_act = g.storage((rows * d) as u64);
+        steps.extend(proj_bwd(g, ps, lw, "pre_transformer_resblock.output_layer.weight", &d_h, resblock_hidden_act, &d_hidden_act, rows, d, d, false));
+        let d_hidden_pre = g.storage((rows * d) as u64);
+        steps.push(g.step(K_LEAKY_RELU_BWD, &[resblock_hidden_pre, &d_hidden_act, &d_hidden_pre], &[(rows * d) as u32, f(0.0)], (rows * d) as u32));
+        if let Some(dw) = grad_of(ps, "pre_transformer_resblock.hidden_layer.weight") {
+            steps.push(linear_dw(g, &d_hidden_pre, resblock_input, dw, rows, resblock_in_dim, d));
+        }
+        // No d_resblock_input needed: it is the model's own input, not a trainable weight.
+
+        (steps, folds)
     }
 
     /// Refold every effective query gain from the weights `ps` holds RIGHT
@@ -831,7 +965,7 @@ impl Timesfm3Train {
 
     /// The adapter config, if this is a LoRA trainer.
     pub fn lora(&self) -> Option<&LoraCfg> {
-        self.lora.as_ref()
+        self.lw.cfg.as_ref()
     }
 
     /// Every tensor of [`Timesfm3Config::param_list`] under its own
@@ -847,7 +981,7 @@ impl Timesfm3Train {
         let mut out = HashMap::new();
         for (name, _) in self.cfg.param_list() {
             let mut w = self.read_weight(&name);
-            if let Some(lc) = self.lora.as_ref().filter(|lc| lc.hits(&name)) {
+            if let Some(lc) = self.lw.cfg.as_ref().filter(|lc| lc.hits(&name)) {
                 let (a_name, b_name) = adapter_names(&name);
                 let (a, b) = (self.read_weight(&a_name), self.read_weight(&b_name));
                 model::lora::device_adapter::fold_delta(&mut w, &a, &b, lc.adapter.rank as usize, lc.scale());
@@ -1288,91 +1422,6 @@ fn attn_sublayer_bwd(
     steps.push(add2(g, d_h_next, &d_h_prev_from_norm, &d_h_prev, rows * d));
 
     (steps, d_h_prev, folds)
-}
-
-/// The full reverse pass: output head, every layer in reverse, then
-/// `pre_transformer_resblock`. `h_final` is the LAST layer's own output
-/// (`core_forward`'s local `h` just before the head's linear); `d_logits`
-/// is the (not-yet-uploaded) seed buffer [`Timesfm3Train::backward`] writes
-/// into on every call.
-#[allow(clippy::too_many_arguments)]
-fn build_backward(
-    g: &Gpu,
-    cfg: &Timesfm3Config,
-    ps: &ParamStore,
-    lw: &LoraWiring,
-    q_gains: &[(String, String, DeviceBuffer)],
-    layers: &[TrainLayer],
-    resblock_input: &DeviceBuffer,
-    resblock_hidden_pre: &DeviceBuffer,
-    resblock_hidden_act: &DeviceBuffer,
-    h_final: &DeviceBuffer,
-    d_logits: &DeviceBuffer,
-    b: usize,
-    v: usize,
-    n: usize,
-) -> (Vec<Step>, Vec<(String, String, DeviceBuffer)>) {
-    let rows = b * v * n;
-    let d = cfg.model_dims;
-    let head_out = cfg.head_out_dim();
-    let mut steps = Vec::new();
-    let mut folds = Vec::new();
-
-    // ---- output head: logits = linear(h_final, output_head.weight) + bias ----
-    if let Some(db) = grad_of(ps, "output_head.bias") {
-        steps.push(g.step(K_BIAS_GRAD, &[d_logits, db], &[rows as u32, head_out as u32], head_out as u32));
-    }
-    let mut d_h = g.storage((rows * d) as u64);
-    steps.extend(proj_bwd(g, ps, lw, "output_head.weight", d_logits, h_final, &d_h, rows, d, head_out, false));
-
-    for l in (0..cfg.num_layers).rev() {
-        let ly = &layers[l];
-        let prefix = format!("transformer_stack.layers.{l}");
-
-        // ---- feedforward, in reverse ----
-        let d_ff_out = g.storage((rows * d) as u64);
-        steps.extend(rmsnorm_bwd(g, &ly.ff_out, ps.w(&format!("{prefix}.post_ff_ln.weight")), &d_h, &d_ff_out, grad_of(ps, &format!("{prefix}.post_ff_ln.weight")), d, rows, cfg.rms_norm_eps));
-        let d_ff_h_act = g.storage((rows * cfg.hidden_dims) as u64);
-        steps.extend(proj_bwd(g, ps, lw, &format!("{prefix}.ff1.weight"), &d_ff_out, &ly.ff_h_act, &d_ff_h_act, rows, cfg.hidden_dims, d, false));
-        let d_ff_h_pre = g.storage((rows * cfg.hidden_dims) as u64);
-        steps.push(g.step(K_LEAKY_RELU_BWD, &[&ly.ff_h_pre, &d_ff_h_act, &d_ff_h_pre], &[(rows * cfg.hidden_dims) as u32, f(0.0)], (rows * cfg.hidden_dims) as u32));
-        let d_ff_in = g.storage((rows * d) as u64);
-        steps.extend(proj_bwd(g, ps, lw, &format!("{prefix}.ff0.weight"), &d_ff_h_pre, &ly.ff_in, &d_ff_in, rows, d, cfg.hidden_dims, false));
-        let d_ff_in_dx = g.storage((rows * d) as u64);
-        steps.extend(rmsnorm_bwd(g, &ly.h2, ps.w(&format!("{prefix}.pre_ff_ln.weight")), &d_ff_in, &d_ff_in_dx, grad_of(ps, &format!("{prefix}.pre_ff_ln.weight")), d, rows, cfg.rms_norm_eps));
-        let d_h2 = g.storage((rows * d) as u64);
-        steps.push(add2(g, &d_h, &d_ff_in_dx, &d_h2, rows * d));
-
-        // ---- variate attention, in reverse ----
-        let (var_steps, d_h1, var_folds) = attn_sublayer_bwd(g, cfg, ps, lw, q_gains, &prefix, false, &ly.h1, &ly.var_in, &ly.q2, &ly.k2, &ly.v2, &ly.q2n, &ly.k2n, &ly.probs_var, &ly.ctx2, &ly.var_out, &d_h2, b, v, n, rows);
-        steps.extend(var_steps);
-        folds.extend(var_folds);
-
-        // ---- sequence attention, in reverse ----
-        let (seq_steps, d_h_in, seq_folds) = attn_sublayer_bwd(g, cfg, ps, lw, q_gains, &prefix, true, &ly.h_in, &ly.seq_in, &ly.q, &ly.k, &ly.vv, &ly.qn, &ly.kn, &ly.probs_seq, &ly.ctx, &ly.seq_out, &d_h1, b, v, n, rows);
-        steps.extend(seq_steps);
-        folds.extend(seq_folds);
-
-        d_h = d_h_in;
-    }
-
-    // ---- pre_transformer_resblock, in reverse: resblock_out = output(relu(hidden(x))) + residual(x) ----
-    // d_h is now the gradient into resblock_out; both branches read it
-    // directly (neither is mutated by what follows), no copy needed.
-    let resblock_in_dim = cfg.resblock_in_dim();
-    if let Some(dw) = grad_of(ps, "pre_transformer_resblock.residual_layer.weight") {
-        steps.push(linear_dw(g, &d_h, resblock_input, dw, rows, resblock_in_dim, d));
-    }
-    let d_hidden_act = g.storage((rows * d) as u64);
-    steps.extend(proj_bwd(g, ps, lw, "pre_transformer_resblock.output_layer.weight", &d_h, resblock_hidden_act, &d_hidden_act, rows, d, d, false));
-    let d_hidden_pre = g.storage((rows * d) as u64);
-    steps.push(g.step(K_LEAKY_RELU_BWD, &[resblock_hidden_pre, &d_hidden_act, &d_hidden_pre], &[(rows * d) as u32, f(0.0)], (rows * d) as u32));
-    if let Some(dw) = grad_of(ps, "pre_transformer_resblock.hidden_layer.weight") {
-        steps.push(linear_dw(g, &d_hidden_pre, resblock_input, dw, rows, resblock_in_dim, d));
-    }
-    // No d_resblock_input needed: it is the model's own input, not a trainable weight.
-
-    (steps, folds)
 }
 
 #[cfg(test)]
