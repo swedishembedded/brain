@@ -379,8 +379,11 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
             v.push(kernels::template::dtype_variant("matmul_gemv", kernels::MATMUL_GEMV, "w", dt).unwrap());
             v.push(kernels::template::dtype_variant("matmul_reg3", kernels::MATMUL_REG3, "w", dt).unwrap());
             v.push(kernels::template::dtype_variant("embed", kernels::EMBED, "emb", dt).unwrap());
+            v.push(kernels::template::dtype_variant("embed_tile", kernels::EMBED_TILE, "emb", dt).unwrap());
             v.push(kernels::template::dtype_variant("moe_linear_gated", kernels::MOE_LINEAR_GATED, "w", dt).unwrap());
         }
+        // A 248k-row vocabulary's table exceeds one storage binding; `Ops::embed` gathers it in vocab tiles.
+        v.push(("embed_tile", kernels::EMBED_TILE));
         v.push(
             kernels::template::dtype_variant_store(
                 "paged_kv_append_batched_word",

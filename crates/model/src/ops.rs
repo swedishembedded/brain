@@ -227,6 +227,10 @@ mod kname {
     pub const EMBED: &str = "embed";
     pub const EMBED_BF16: &str = "embed#emb=bf16";
     pub const EMBED_F16: &str = "embed#emb=f16";
+    /// The embedding gather over one vocab tile (`embed_tile.wgsl`), for a table larger than one binding.
+    pub const EMBED_TILE: &str = "embed_tile";
+    pub const EMBED_TILE_BF16: &str = "embed_tile#emb=bf16";
+    pub const EMBED_TILE_F16: &str = "embed_tile#emb=f16";
     pub const MOE_LINEAR_GATED: &str = "moe_linear_gated";
     pub const MOE_LINEAR_GATED_BF16: &str = "moe_linear_gated#w=bf16";
     pub const MOE_LINEAR_GATED_F16: &str = "moe_linear_gated#w=f16";
@@ -308,6 +312,9 @@ mod kname {
         EMBED,
         EMBED_BF16,
         EMBED_F16,
+        EMBED_TILE,
+        EMBED_TILE_BF16,
+        EMBED_TILE_F16,
         MOE_LINEAR_GATED,
         MOE_LINEAR_GATED_BF16,
         MOE_LINEAR_GATED_F16,
@@ -377,6 +384,8 @@ pub fn kernel_list() -> &'static [(&'static str, &'static str)] {
         let f16_reg3 = var("matmul_reg3", kernels::MATMUL_REG3, "w", Dtype::F16);
         let bf16_embed = var("embed", kernels::EMBED, "emb", Dtype::BF16);
         let f16_embed = var("embed", kernels::EMBED, "emb", Dtype::F16);
+        let bf16_embed_tile = var("embed_tile", kernels::EMBED_TILE, "emb", Dtype::BF16);
+        let f16_embed_tile = var("embed_tile", kernels::EMBED_TILE, "emb", Dtype::F16);
         let bf16_moe = var("moe_linear_gated", kernels::MOE_LINEAR_GATED, "w", Dtype::BF16);
         let f16_moe = var("moe_linear_gated", kernels::MOE_LINEAR_GATED, "w", Dtype::F16);
         // B9: paged-KV append is the WRITE direction, so it needs
@@ -447,6 +456,9 @@ pub fn kernel_list() -> &'static [(&'static str, &'static str)] {
             ("embed", kernels::EMBED),
             bf16_embed,
             f16_embed,
+            ("embed_tile", kernels::EMBED_TILE),
+            bf16_embed_tile,
+            f16_embed_tile,
             ("moe_linear_gated", kernels::MOE_LINEAR_GATED),
             bf16_moe,
             f16_moe,
@@ -1944,6 +1956,15 @@ impl Ops {
     /// embedding table exists in this tree) - a panic here means a caller
     /// asked [`Weight::upload`] for a tier this method cannot serve, which
     /// should never happen given `Weight::upload`'s own tier assertion.
+    /// The vocab-tile twin of [`Self::bind_embed`] (`embed_tile.wgsl`), for a table larger than one binding.
+    fn bind_embed_tile(dt: Dtype) -> &'static str {
+        match dt {
+            Dtype::BF16 => kname::EMBED_TILE_BF16,
+            Dtype::F16 => kname::EMBED_TILE_F16,
+            _ => kname::EMBED_TILE,
+        }
+    }
+
     fn bind_embed(dt: Dtype) -> &'static str {
         match dt {
             Dtype::F32 => kname::EMBED,
@@ -1988,6 +2009,21 @@ impl Ops {
         let bind = |_: KernelVariant| -> (usize, &'static str) { (self.idx[kname], kname) };
         match table {
             Weight::F32 { w, .. } | Weight::BF16 { w, .. } | Weight::F16 { w, .. } => {
+                // A table larger than one binding (a 248k-row vocabulary is 2.5 GB at bf16, past a Vulkan device's
+                // 2 GB storage-binding ceiling) is gathered tile by tile: `embed_tile` binds rows `[v0, v0 + count)`
+                // and writes only the tokens that fall there, so every output element is written by exactly one
+                // tile. Tiles are sized in 32-bit words, two bf16/f16 elements to a word.
+                let row_words = if dt == Dtype::F32 { d_model } else { d_model / 2 };
+                assert!(dt == Dtype::F32 || d_model.is_multiple_of(2), "Ops::embed: a {dt:?} table row of {d_model} elements is not whole words");
+                let tiles = crate::block::vocab_tiles_on(&self.gpu, table.n() as u64, row_words as u64);
+                if tiles.len() > 1 {
+                    let kind = self.idx[Self::bind_embed_tile(dt)];
+                    let rw = row_words as u64;
+                    for (v0, count) in tiles {
+                        s.push(self.gpu.step_sliced(kind, &[tokens, w, out], &[WHOLE, (v0 as u64 * rw, count as u64 * rw), WHOLE], &[d_model, seq_len, v0, count], seq_len * d_model));
+                    }
+                    return;
+                }
                 let operands = [
                     // The token buffer holds u32 row INDICES, not numbers the
                     // kernel does arithmetic on. `Role::Aux` says so (it is

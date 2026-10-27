@@ -257,6 +257,8 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         // REQUIRED_KERNELS` still demands it (see the bf16/f16 loop below,
         // which only adds the DTYPE VARIANTS, not this base name).
         v.push(("moe_linear_gated", kernels::MOE_LINEAR_GATED));
+        // A 248k-row vocabulary's table exceeds one storage binding; `Ops::embed` gathers it in vocab tiles.
+        v.push(("embed_tile", kernels::EMBED_TILE));
         // `Ops::REQUIRED_KERNELS` also demands the bf16/f16 storage-tier
         // variants even though this crate never builds a `Weight::BF16`/
         // `Weight::F16` and never dispatches the generic `paged_*_batched`
@@ -268,6 +270,7 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
             v.push(kernels::template::dtype_variant("matmul_gemv", kernels::MATMUL_GEMV, "w", dt).unwrap());
             v.push(kernels::template::dtype_variant("matmul_reg3", kernels::MATMUL_REG3, "w", dt).unwrap());
             v.push(kernels::template::dtype_variant("embed", kernels::EMBED, "emb", dt).unwrap());
+            v.push(kernels::template::dtype_variant("embed_tile", kernels::EMBED_TILE, "emb", dt).unwrap());
             v.push(kernels::template::dtype_variant("moe_linear_gated", kernels::MOE_LINEAR_GATED, "w", dt).unwrap());
         }
         v.push(
