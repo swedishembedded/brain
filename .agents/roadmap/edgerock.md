@@ -79,6 +79,18 @@ reference exactly in both variants on both backends; flipping the tie rule in
   convention (cosine 0.999) and at least 95 percent of bank slots equal: near-tied scores swap rank
   there (1 to 2 percent of slots on `tiny_text`), which the released bf16 model does as well.
 
+- [x] M5 (forward part): the released weights against the independent reference
+  forward (`tools/goldens/edgerock_dump_real_reference.py`, fp32 CPU torch, a
+  1400-token prompt that slides the window and commits five blocks, then asks about
+  a fact stated at its start). `crates/qwen35/tests/edgerock_real_weights.rs`
+  (ignored: needs the store checkpoint and the dumped golden), bf16 weight tier on
+  the CPU backend: every `layer{i}.out` cosine >= 0.9999999997 (worst max_abs
+  1.9e-3 at layer 26, rel_l2 <= 2.3e-5), tail logits rel_l2 4.1e-6, the same greedy
+  answer, and 99.54-99.85% of the slots of every memory bank equal (near-tied
+  scores swap rank). The reference itself answers the probe correctly with the
+  memory on (" 4817.", the fact sits ~1380 tokens back, outside the window) and
+  wrongly with `read_scale` zeroed (" 48617").
+
 ## Not yet done
 
 - [ ] M3: decode state. Per sequence and memory layer: the committed bank (`key`/`value`
