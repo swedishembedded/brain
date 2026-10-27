@@ -86,15 +86,19 @@ pub fn memory_param_bytes(cfg: &Qwen35Config) -> u64 {
     layers * per_layer * 4
 }
 
-/// Live and snapshot slots for a slot budget of `budget` bytes, never more than `max_batch` live slots and
-/// `max_batch` snapshot slots (one cached conversation per live sequence), and always at least one live slot.
-/// A budget that cannot hold even one live slot still returns one: the caller's placement refuses the oversized
-/// model with its own arithmetic, not this sizing.
+/// Most prompts kept for reuse beside the live sequences: each costs a whole slot, which a live sequence would
+/// rather have, and an agent's few conversations are what the cache is for.
+pub const MAX_PREFIX_SLOTS: u32 = 8;
+
+/// Live and snapshot slots for a slot budget of `budget` bytes: `max_batch` live slots as far as the budget
+/// holds them (at least one), then up to [`MAX_PREFIX_SLOTS`] (and no more than the live count) cached prompts
+/// from what is left. A budget that cannot hold even one live slot still returns one: the caller's placement
+/// refuses the oversized model with its own arithmetic, not this sizing.
 pub fn ring_slots(cfg: &Qwen35Config, budget: u64, max_batch: u32) -> (u32, u32) {
     let per_slot = slot_state_bytes(cfg).max(1);
-    let fit = (budget / per_slot).min(u64::from(max_batch) * 2) as u32;
+    let fit = (budget / per_slot).min(u64::from(u32::MAX)) as u32;
     let live = fit.min(max_batch).max(1);
-    (live, fit.saturating_sub(live).min(live))
+    (live, fit.saturating_sub(live).min(live).min(MAX_PREFIX_SLOTS))
 }
 
 /// See the module doc.

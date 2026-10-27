@@ -141,6 +141,45 @@ reference exactly in both variants on both backends; flipping the tie rule in
   `tests/edgerock_real_served.rs` (ignored) asks the released model the vault-code question.
   Sample `samples/python/llm/edgerock`; model page promoted to served. A device out-of-memory now
   says which allocation was refused before it unwinds (`DeviceOutOfMemory::raise`).
+- [x] M6a (partial): inference speed, profile-driven. Tool: `cargo run --release -p brain-qwen35 --bin
+  edgerock_decode_profile -- <model dir | synth[:layers]> --batch N --position P --device gpu1 --backend cuda`
+  (per-kernel device table, state bytes per sequence, wall per step; `RingEngine::seed_synthetic` puts the
+  slots at a decode position with full ring and bank for one prefill). Measured on one NVIDIA GH200 (GPU1),
+  real weights, position 2048 at batch 1.
+  <!-- perf-number: measured with edgerock_decode_profile and tps.py on the GH200, 2026-10-27; reproduce with those tools -->
+  Before: 56.3 ms per step (17.8 tok/s), 72% of device time in `matmul_f32_reg` (the fp32 tied head, read every
+  step at 2.5 GB, and the memory's fp32 projections and scorer: 73 calls). Fixes, each re-profiled:
+  (1) the head, the embedding and the memory's seven read-side linears follow the bf16 weight tier of an
+  inference build (`table_tier`, `memory_linear_bf16`, `Qwen35::head_matmul`), the admission scorer stays exact
+  fp32 on the skinny-M kernel `matmul_gemv` (groups of 32 rows; the library fp32 path is TF32 and was rejected):
+  19.2 ms. (2) Only slots whose pending block fills commit their bank (boundary-only `Commit`s): no bank copies
+  on other steps. (3) `FLASH_SHAPES` gains group 4: the fused split-key decode attention replaces the
+  scores/softmax/apply triad over the ring: 12.0 ms. (4) `anchor_read_softmax_apply`: the read's softmax and
+  apply as one workgroup-cooperative kernel (devices with workgroup reductions; the CPU keeps the two
+  kernels, the reference provider): 7.7 ms. (5) The slot pool keeps one buffer of slot rows per recurrent layer
+  and decode runs the pooled in-place recurrence (`gdn_decode_pool`) instead of splicing every sequence's state
+  in and out: at batch 64 this removed 44 ms of `splice` and `concat_split` per step; prefill stages a slot's
+  row through a work buffer. (6) `anchor_read_scores_group` reads each key row once for the heads of its group,
+  bit-identical to the old scores; the softmax-apply kernel takes the group's heads together.
+  Through the API (`brain --device gpu1 --backend cuda serve --openai`, `tps.py`, greedy, 62-token prompt,
+  aggregate tok/s), before on 664033238 and after: b1 19.4 -> 138, b8 121.5 -> 846, b32 230.7 -> 2093,
+  b64 261.9 -> 2544, b256 2393 (14.5 per stream); prefill of a 4126-token prompt 3.06 s (about 1350 tok/s,
+  about 1054 before); 67.5 GB at 256 live slots. `ring_slots` now keeps at most 8 prompts beside the live
+  sequences (a cached prompt costs a whole slot).
+  Parity after every step: `edgerock_golden_parity`, `edgerock_decode` (CPU and CUDA, batched sequences at different
+  positions, chunk sizes, snapshots), `edgerock_serve` (conformance), `edgerock_training`, `model/anchor_memory`, and
+  the real-weight test on CUDA at the bf16 tier: logits cosine 0.999993, same greedy answer; banks compared as
+  per-(block, group) sets (99.94-99.99% overlap; slot-wise equality is 54-67% on the tensor-core tier because a
+  rank shift moves every later slot), exact slot equality only on the fp32 tier.
+  Ceilings reached: at batch 64 (23 ms per step) every attention/state kernel runs at roughly 1 TB/s of the
+  card's HBM because the per-sequence state is fp32 (194.5 MiB per slot: ring 64, bank 64+, recurrent state
+  about 50) and read once per step; b256 is bandwidth-bound at about 90 ms per step. b1 is at 7.4 ms against
+  a 2.5 ms weight-streaming floor: about 800 dispatches per step, no decode tape for windowed configs.
+  Not done: bf16 storage of the ring, the bank and the recurrent state (halves the bytes read and the slot
+  size, needed for 512 slots in 60 GB; the ring prefill path is f32-only, the bank kernels f32, the GDN decode
+  kernel f32 state); windowed prefill attention on CUDA (prefill still runs the materialised path); the
+  decode tape/graph for windowed configs; the batched anchor read and the GDN pooled kernel are at about 1 TB/s
+  and are the next targets by share.
 - [x] M5 (forward part): the released weights against the independent reference
   forward (`tools/goldens/edgerock_dump_real_reference.py`, fp32 CPU torch, a
   1400-token prompt that slides the window and commits five blocks, then asks about
