@@ -131,6 +131,34 @@ https://github.com/shiyu-coder/Kronos
   (MIT permission text as reproduced above under llama.cpp/ggml applies.)
 
 ================================================================================
+open-rknpu -- MIT License
+Copyright (c) 2026 open-rknpu contributors
+https://github.com/dnhkng/open-rknpu
+
+  - crates/rknpu: the RV1103/RV1106 NPU task register profile
+    (src/regs.rs, from src/open_rknpu/register_profile.py), the dense
+    convolution register fields, height tiling rule and weight-table layout
+    (src/conv.rs, from src/open_rknpu/native.py), the int8 quantization and
+    output-conversion arithmetic (src/quant.rs, from
+    src/open_rknpu/quantization.py and chain.py), task linking
+    (src/job.rs, from src/open_rknpu/sequence.py) and the /dev/rknpu ioctl
+    ABI (src/driver.rs, from runtime/open_rknpu.c) are ported from it
+    (pinned at commit 0e0afcd1b00058255590bf19d644e12bea13af38).
+
+  (MIT permission text as reproduced above under llama.cpp/ggml applies.)
+
+================================================================================
+Mesa Rocket driver -- MIT License
+Copyright (c) 2024-2025 Tomeu Vizoso <tomeu@tomeuvizoso.net>
+https://gitlab.freedesktop.org/mesa/mesa (src/gallium/drivers/rocket)
+
+  - crates/rknpu/src/regs.rs: NPU register names are taken from
+    registers.xml (pinned at Mesa commit
+    e9177010db177e63966b6d1373efc2a6c582a428).
+
+  (MIT permission text as reproduced above under llama.cpp/ggml applies.)
+
+================================================================================
 nanoGPT -- MIT License
 Copyright (c) 2022 Andrej Karpathy
 https://github.com/karpathy/nanoGPT

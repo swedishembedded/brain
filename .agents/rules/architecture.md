@@ -50,8 +50,8 @@ diagram is stale.
 layer 1 - kernels, architecture registry, device-neutral contracts
     arch, backend-api, kernels, kernels-cuda, memauth, seed
 layer 2 - accelerator seam: backends and the gpu-core facade
-    backend-cpu, backend-cuda, backend-vulkan, backend-wgpu, cuda-aot, gpu-core, vulkan, wgsl-
-    cpu, wgsl-cuda
+    backend-cpu, backend-cuda, backend-vulkan, backend-wgpu, cuda-aot, gpu-core, rknpu, vulkan,
+    wgsl-cpu, wgsl-cuda
 layer 3 - training substrate and shared contracts
     atif, audio, audit, camera, capability, checkpoint, data, diffusion, dit, events, forecast,
     gguf, model, modelref, modelstore, neuro, onnx, optim, paramstore, promote, residency, rlcd,
@@ -76,10 +76,10 @@ layer 6 - serving, front ends, SDK, samples
     decision-json, sample-decision-patterns, sample-decision-rubiks, sample-decision-salesagent,
     sample-decision-triage, sample-fly-interactive, sample-imagegen-batch, sample-imagegen-
     generate, sample-learning-reader, sample-learning-rlcd, sample-learning-visualclick, sample-
-    reconstruction-splat, sample-study-chat, sample-study-document, sample-study-timeline,
-    sample-text-chat-full-finetune, sample-text-embed, sample-text-embed-train, sample-text-
-    encoder-finetune, sample-text-retrieve, sample-text-retrieve-json, sample-text-spectral-lm,
-    sample-tts-clone, server, serving, web
+    npu-rockchip, sample-reconstruction-splat, sample-study-chat, sample-study-document, sample-
+    study-timeline, sample-text-chat-full-finetune, sample-text-embed, sample-text-embed-train,
+    sample-text-encoder-finetune, sample-text-retrieve, sample-text-retrieve-json, sample-text-
+    spectral-lm, sample-tts-clone, server, serving, web
 ```
 <!-- crate-layers:end -->
 

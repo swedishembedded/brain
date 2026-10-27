@@ -38,6 +38,7 @@ brain-backend-cpu	2
 brain-backend-cuda	2
 brain-backend-vulkan	2
 brain-backend-wgpu	2
+brain-rknpu	2
 brain-cuda-aot	2
 brain-gpu-core	2
 brain-vulkan	2
@@ -206,6 +207,7 @@ sample-decision-triage	6
 sample-fly-interactive	6
 sample-imagegen-batch	6
 sample-imagegen-generate	6
+sample-npu-rockchip	6
 sample-learning-reader	6
 sample-learning-rlcd	6
 sample-learning-visualclick	6

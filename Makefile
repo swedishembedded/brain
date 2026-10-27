@@ -1689,21 +1689,50 @@ ROCKCHIP_SAMPLE_BIN = target/$(UCLIBC_TARGET)/release/sample-npu-rockchip
 samples/npu/rockchip/board:
 	$(LIST_CHILDREN)
 
-## samples/npu/rockchip/board/build - cross-build the Rockchip NPU sample for the uClibc board (UCLIBC_TOOLCHAIN=<gcc bin dir>)
-samples/npu/rockchip/board/build:
-	@test -n "$(UCLIBC_TOOLCHAIN)" || { echo "set UCLIBC_TOOLCHAIN to the uClibc cross gcc's bin/ directory"; exit 2; }
+# The cargo invocation every uClibc board build shares; append `-p <pkg>` (and
+# `--example <name>`) to it.
+UCLIBC_CARGO_BUILD = @test -n "$(UCLIBC_TOOLCHAIN)" || { echo "set UCLIBC_TOOLCHAIN to the uClibc cross gcc's bin/ directory"; exit 2; }; \
 	RUSTC_BOOTSTRAP=1 \
 	CARGO_TARGET_ARMV7_UNKNOWN_LINUX_UCLIBCEABIHF_LINKER=$(UCLIBC_PREFIX)gcc \
 	CC_armv7_unknown_linux_uclibceabihf=$(UCLIBC_PREFIX)gcc \
 	AR_armv7_unknown_linux_uclibceabihf=$(UCLIBC_PREFIX)ar \
-	cargo build --release -p sample-npu-rockchip -Zbuild-std=std,panic_abort --target $(UCLIBC_TARGET)
+	cargo build --release -Zbuild-std=std,panic_abort --target $(UCLIBC_TARGET)
+BOARD_REQUIRED = @test -n "$(BOARD)" || { echo "set BOARD to the board's ssh host"; exit 2; }
+
+## samples/npu/rockchip/board/build - cross-build the Rockchip NPU sample for the uClibc board (UCLIBC_TOOLCHAIN=<gcc bin dir>)
+samples/npu/rockchip/board/build:
+	$(UCLIBC_CARGO_BUILD) -p sample-npu-rockchip
 
 ## samples/npu/rockchip/board/deploy - copy the built Rockchip NPU sample to brain/ on the board (BOARD=<ssh host>)
 samples/npu/rockchip/board/deploy:
-	@test -n "$(BOARD)" || { echo "set BOARD to the board's ssh host"; exit 2; }
+	$(BOARD_REQUIRED)
 	@test -x "$(ROCKCHIP_SAMPLE_BIN)" || { echo "not built: $(ROCKCHIP_SAMPLE_BIN)"; echo "run: make samples/npu/rockchip/board/build"; exit 2; }
 	ssh $(BOARD) 'mkdir -p brain'
 	scp -q $(ROCKCHIP_SAMPLE_BIN) $(BOARD):brain/
+
+# brain's Rockchip NPU compiler checked on the board itself: every layer shape
+# the detector runs, compared byte for byte with the host reference.
+RKNPU_CHECK_BIN = target/$(UCLIBC_TARGET)/release/examples/board_check
+
+## crates/rknpu/board - lists the on-board checks of the Rockchip NPU compiler; does nothing
+crates/rknpu/board:
+	$(LIST_CHILDREN)
+
+## crates/rknpu/board/check - lists the board check's actions (build, run); does nothing
+crates/rknpu/board/check:
+	$(LIST_CHILDREN)
+
+## crates/rknpu/board/check/build - cross-build the NPU board check for the uClibc board (UCLIBC_TOOLCHAIN=<gcc bin dir>)
+crates/rknpu/board/check/build:
+	$(UCLIBC_CARGO_BUILD) -p brain-rknpu --example board_check
+
+## crates/rknpu/board/check/run - copy the built NPU board check to brain/ on the board and run it (BOARD=<ssh host>)
+crates/rknpu/board/check/run:
+	$(BOARD_REQUIRED)
+	@test -x "$(RKNPU_CHECK_BIN)" || { echo "not built: $(RKNPU_CHECK_BIN)"; echo "run: make crates/rknpu/board/check/build"; exit 2; }
+	ssh $(BOARD) 'mkdir -p brain'
+	scp -q $(RKNPU_CHECK_BIN) $(BOARD):brain/rknpu-board-check
+	ssh $(BOARD) 'cd brain && ./rknpu-board-check'
 
 # A crate's cargo EXAMPLES, built by one target and run by another.
 #

@@ -1,0 +1,19 @@
+[package]
+name = "brain-rknpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Rockchip RV1103/RV1106 NPU: brain's own int8 compiler (register command programs) and its /dev/rknpu runtime. No vendor SDK."
+
+[lib]
+name = "rknpu"
+path = "src/lib.rs"
+
+# std + libc only: the crate runs on a 32-bit uClibc board with a few MB of
+# free RAM, and talks to the kernel driver through ioctl/mmap directly.
+[dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+# `data::rng::Rng`, the workspace's test filler, for the board check's operands.
+brain-data.workspace = true

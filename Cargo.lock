@@ -2449,6 +2449,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-rknpu"
+version = "3.0.0"
+dependencies = [
+ "brain-data",
+ "libc",
+]
+
+[[package]]
 name = "brain-rl"
 version = "3.0.0"
 dependencies = [

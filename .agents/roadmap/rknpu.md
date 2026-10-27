@@ -57,7 +57,9 @@ engine: brain loads a brain checkpoint, compiles it for the NPU itself and serve
   the budget set from the measurement.
 - [ ] M2: YOLOv5 in brain, sharing `crates/yolov8`'s blocks, NMS and letterbox: arch
   row, import, CPU fp32 forward parity against an ONNX golden, int8 PTQ.
-- [ ] M3: the rknpu crate. ioctl runtime (buffers, submit, sync), compiler for
+- [ ] M3: the rknpu crate. Done: driver (buffers, sync, linked one-ioctl
+  jobs), dense conv with fused ReLU and height tiling, byte-exact on the board.
+  Open: ioctl runtime (buffers, submit, sync), compiler for
   Conv+ReLU, Add, channel Concat, nearest 2x Upsample; SPPF's 5x5 MaxPool on the CPU.
   Gate: each layer byte-exact against brain's int8 reference on the board, then the
   whole graph against the M0 oracle.
@@ -69,4 +71,9 @@ engine: brain loads a brain checkpoint, compiles it for the NPU itself and serve
 
 ## Measured
 
-Nothing yet.
+- 2026-10-27, `make crates/rknpu/board/check/run` on the Luckfox Pico Plus: dense int8
+  convolution, every YOLOv5-at-320 layer shape, byte-exact against
+  `conv::reference` (0 differing bytes of 2.2M). NPU time, median of 5: stem
+  320x320x3->12 k2s2 (as k3) 1.50 ms in 18 tasks; 160x160x12->32 k3 1.36 ms;
+  160x160x32->64 k3s2 1.13 ms; 20x20x256->256 k3 1.48 ms; 10x10x1024->512 k1
+  0.70 ms; head 40x40x128->255 k1 0.43 ms. Check process VmHWM 4.2 MB.
