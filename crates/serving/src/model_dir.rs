@@ -349,7 +349,7 @@ impl Scan {
         };
 
         match resident_for(&wp, card, tokenizer.as_deref(), self.qwen_cfg_for(&card.id), self.settings.qwen35.fp32) {
-            Some(built) => self.keep(&card.id, built),
+            Some(built) => self.keep(&card.id, built, dir),
             None => {
                 self.seen.remove(&card.id); // free the id if the family declined
             }
@@ -377,11 +377,17 @@ impl Scan {
         }
     }
 
-    fn keep(&mut self, id: &str, built: Built) {
+    /// Register `built`, a model whose checkpoint sits in `dir`. A model other than the Qwen decoder (which reads
+    /// its own `generation_config.json`) is served with the sampling defaults that file declares.
+    fn keep(&mut self, id: &str, built: Built, dir: &Path) {
         if let Built::Qwen(qwen) = &built {
             self.qwen_bases.insert(id.to_string(), qwen.clone());
         }
-        self.out.push(built.erased());
+        let model = match &built {
+            Built::Qwen(_) => built.erased(),
+            Built::Other(other) => catalog::sampling_defaults::with_checkpoint_sampling(other.clone(), dir),
+        };
+        self.out.push(model);
     }
 }
 
@@ -459,7 +465,7 @@ fn register_compound(local: &brain_modelstore::LocalModel, scan: &mut Scan, erro
         return;
     }
     match build_for_local(local, scan.qwen_cfg_for(&id), scan.settings.qwen35.fp32) {
-        Ok(built) => scan.keep(&id, built),
+        Ok(built) => scan.keep(&id, built, &local.dir),
         Err(reason) => {
             scan.seen.remove(&id); // free the id if the family declined, same as `register`
             errors.push(DiscoveryError { dir: local.dir.clone(), family, reason });

@@ -92,6 +92,7 @@ pub mod resident_wan;
 pub mod resident_worldmirror2;
 pub mod resident_yolo;
 pub mod resident_zimage;
+pub mod sampling_defaults;
 mod served_family;
 mod serving;
 

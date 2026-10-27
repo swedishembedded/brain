@@ -80,6 +80,15 @@ architecture-prefixed spellings (`--qwen-ctx`, `--qwen35-kv`,
 warning until their callers have moved; the ones for derived settings still
 set them so existing launch lines behave as before.
 
+## Sampling defaults
+
+A request that omits `temp`, `top_k`, `top_p`, `min_p` or `repetition_penalty` is
+sampled with what the checkpoint declares: `general.sampling.*` in a GGUF,
+`generation_config.json` beside Hugging Face weights. The values are the
+`generate` action's param defaults, so `Manifests` (and `GET /v1/capabilities`)
+show what an omitted setting will be. A checkpoint that declares nothing keeps
+the action's own defaults, and a value the request sets always wins.
+
 ## Serving LoRA adapters
 
 One resident copy of a Qwen3's weights serves the base and any number of LoRA
