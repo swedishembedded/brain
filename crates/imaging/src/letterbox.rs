@@ -53,14 +53,10 @@
 
 use crate::pixels::Rect;
 
-/// An `xyxy` box in pixels.
-///
-/// The same `[f32; 4]` that `yolov8::boxmath::Xyxy` names. Box *math* (IoU, CIoU,
-/// NMS) stays in `yolov8::boxmath` - `crates/eval` already re-exports yolo's IoU
-/// rather than owning a second one — and only the letterbox geometry is
-/// image-substrate work. A `type` alias carries no behaviour, so the two names
-/// for one primitive cannot drift; a second `struct` would have.
-pub type Xyxy = [f32; 4];
+/// An `xyxy` box in pixels: [`crate::nms::Xyxy`], the one box type of the
+/// detection tail (IoU, NMS, un-letterboxing), re-exported here for the
+/// letterbox's own signatures.
+pub use crate::nms::Xyxy;
 
 /// The scale + padding that maps an original `(w0, h0)` image onto a square
 /// `size x size` model input while preserving aspect ratio.

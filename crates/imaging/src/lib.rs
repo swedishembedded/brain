@@ -31,6 +31,7 @@
 //! | item | previous site | state |
 //! |---|---|---|
 //! | [`letterbox::Letterbox`] / [`letterbox_rgb`] | `yolov8::boxmath` | **moved**; `boxmath` re-exports, one definition |
+//! | [`nms::iou`] / [`nms::nms`] / [`nms::Detection`] | `yolov8::{boxmath, nms}` | **moved**; both re-export, one definition |
 //! | [`codec::decode_p6`] / [`codec::encode_p6`] | `events::ppm` | **re-exported**; `events` keeps the definition (it is wasm-reachable and must not gain `image`) |
 //! | [`Shape`] | `vision::net` | **re-exported**; no second NCHW type |
 //! | [`device::NONE`] | `vision::ids` | **re-exported**; one sentinel |
@@ -132,6 +133,7 @@ pub mod device;
 pub mod host;
 pub mod letterbox;
 pub mod mask;
+pub mod nms;
 pub mod photo;
 pub mod pixels;
 pub mod tiling;

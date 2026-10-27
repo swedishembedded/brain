@@ -13,8 +13,9 @@
 //! faithful than the kernel polyfill. The loss itself still differentiates the
 //! kernel CIoU, so the two never need to agree to fp32.
 
-/// A box as `(x1, y1, x2, y2)` (top-left / bottom-right), pixel coordinates.
-pub type Xyxy = [f32; 4];
+/// Box type and plain IoU, **re-exported** from `imaging::nms` (the one home of
+/// the detection post-processing tail, shared with other detectors).
+pub use imaging::nms::{iou, Xyxy};
 
 /// Decode a DFL `(l, t, r, b)` distance tuple (feature units) at the anchor
 /// point `(ax, ay)` (feature units) with the given `stride` into a pixel-space
@@ -53,17 +54,6 @@ pub fn xywhn_to_xyxy(cx: f32, cy: f32, w: f32, h: f32, img_size: f32) -> Xyxy {
 #[inline]
 pub fn xyxy_to_xywh(b: Xyxy) -> [f32; 4] {
     [(b[0] + b[2]) * 0.5, (b[1] + b[3]) * 0.5, b[2] - b[0], b[3] - b[1]]
-}
-
-/// Plain IoU of two pixel `xyxy` boxes.
-pub fn iou(a: Xyxy, b: Xyxy) -> f32 {
-    let iw = (a[2].min(b[2]) - a[0].max(b[0])).max(0.0);
-    let ih = (a[3].min(b[3]) - a[1].max(b[1])).max(0.0);
-    let inter = iw * ih;
-    let area_a = (a[2] - a[0]).max(0.0) * (a[3] - a[1]).max(0.0);
-    let area_b = (b[2] - b[0]).max(0.0) * (b[3] - b[1]).max(0.0);
-    let uni = (area_a + area_b - inter).max(1e-9);
-    inter / uni
 }
 
 /// Complete-IoU of two pixel `xyxy` boxes (same definition as `ciou.wgsl`, but
@@ -130,21 +120,6 @@ pub fn point_in_box(px: f32, py: f32, b: Xyxy) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn iou_identical_is_one() {
-        let b = [10.0, 20.0, 50.0, 80.0];
-        assert!((iou(b, b) - 1.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn iou_one_seventh_case() {
-        // [0,0,10,10] vs [5,5,15,15]: inter = 25, union = 100+100-25 = 175,
-        // IoU = 25/175 = 1/7.
-        let a = [0.0, 0.0, 10.0, 10.0];
-        let b = [5.0, 5.0, 15.0, 15.0];
-        assert!((iou(a, b) - 1.0 / 7.0).abs() < 1e-6, "iou = {}", iou(a, b));
-    }
 
     #[test]
     fn ciou_identical_is_one() {
