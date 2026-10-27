@@ -15,16 +15,20 @@
 //! `qwen35moe/tests/lora_freezes_base.rs` exactly.
 
 use gpu_core::Gpu;
-use qwen35::config::{lora_cfg, Qwen35Config};
+use qwen35::config::{lora_cfg_for, Qwen35Config};
 use qwen35::model::{pipelines, Qwen35};
 
 fn run(gpu: Gpu) {
-    let mut cfg = Qwen35Config::tiny();
+    run_on(gpu, Qwen35Config::tiny());
+}
+
+/// [`run`] over `cfg`, whose `lora` is set here (every target it has a site for).
+fn run_on(gpu: Gpu, mut cfg: Qwen35Config) {
     // Both layer types (n_layers=4, full_attention_interval=4 -> layer 3 is
     // GQA, the rest GDN) and every one of the 12 targetable leaves.
-    cfg.lora = Some(lora_cfg(2, 4.0));
+    cfg.lora = Some(lora_cfg_for(&cfg, 2, 4.0));
     let b = 1;
-    let t = cfg.block_size;
+    let t = cfg.block_size.min(24);
     let init = qwen35::init::init_weights(&cfg, 7);
     let all_names: Vec<String> = cfg.param_list().into_iter().map(|(n, _)| n).collect();
     let lora_leaf_count = all_names.iter().filter(|n| n.ends_with(".lora_a")).count();
@@ -81,4 +85,29 @@ fn lora_training_only_updates_adapters_cpu() {
 #[test]
 fn lora_training_only_updates_adapters_default_backend() {
     run(Gpu::new(pipelines()));
+}
+
+/// The same promise for EdgeRock: the memory's base linears, norms, read gate and admission scorer are frozen too;
+/// only the adapters on its seven read-side linears (beside every other target) move.
+#[test]
+fn lora_training_only_updates_adapters_on_an_edgerock_memory() {
+    let cfg = Qwen35Config::edgerock_tiny();
+    let adapters_on_memory = cfg.param_list().iter().filter(|(n, _)| n.contains(".memory.") && n.ends_with(".lora_a")).count();
+    assert_eq!(adapters_on_memory, 0, "no adapters until a LoRA config is set");
+    run_on(Gpu::new_cpu(pipelines()), cfg);
+}
+
+#[test]
+fn a_lora_config_puts_adapters_on_the_memory_linears_only() {
+    let cfg = Qwen35Config::edgerock_tiny();
+    let cfg = Qwen35Config { lora: Some(lora_cfg_for(&cfg, 2, 4.0)), ..cfg };
+    let names: Vec<String> = cfg.param_list().into_iter().map(|(n, _)| n).collect();
+    for l in [3, 7] {
+        for leaf in ["q_proj", "k_proj", "v_proj", "o_proj", "write_gate_proj", "write_up_proj", "write_down_proj"] {
+            assert!(names.contains(&format!("blocks.{l}.memory.{leaf}.weight.lora_a")), "memory.{leaf} of layer {l} has no adapter");
+        }
+        for plain in ["admission_down", "admission_up"] {
+            assert!(!names.iter().any(|n| n.starts_with(&format!("blocks.{l}.memory.{plain}.weight.lora"))), "the admission scorer must not get an adapter");
+        }
+    }
 }

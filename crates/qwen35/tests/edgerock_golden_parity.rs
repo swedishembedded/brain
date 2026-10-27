@@ -31,7 +31,8 @@ use brain_testutil::parity::Table;
 use checkpoint::safetensors::StTensor;
 use gpu_core::Gpu;
 use qwen35::config::Qwen35Config;
-use qwen35::model::{pipelines, Qwen35};
+use gpu_core::provider::library::{GemmPath, GemmPrecision};
+use qwen35::model::{pipelines, Qwen35, TrainOpts};
 
 fn to_map(tensors: Vec<StTensor>) -> HashMap<String, Vec<f32>> {
     tensors.into_iter().map(|t| (t.name, t.data)).collect()
@@ -59,19 +60,51 @@ fn load(variant: &str) -> Option<Golden> {
 fn run(gpu: Gpu, variant: &str) {
     let Some(golden) = load(variant) else { return };
     let cfg = Qwen35Config::edgerock_tiny();
+    let model = Qwen35::new_on(gpu, cfg.clone(), 1, cfg.block_size, &golden.weights);
+    // The tier the device assigned decides the arithmetic: tensor-core products where the library takes them
+    // (CUDA by default), the fp32 kernels everywhere else.
+    let tol = match model.gemm_path() {
+        GemmPath::Bf16TensorCore => Tolerance::tf32(),
+        GemmPath::Fp32Kernels { .. } => Tolerance::exact_fp32(),
+    };
+    check(&model, &golden, variant, tol);
+}
+
+/// How closely a tier must reproduce the reference, and how much of the selection it must keep.
+struct Tolerance {
+    cosine: f64,
+    rel_l2: f64,
+    /// Fraction of bank slots that must equal the reference: 1.0 demands the exact bank.
+    bank: f64,
+}
+
+impl Tolerance {
+    /// fp32 arithmetic throughout: float-op-order noise only, the bank exactly the reference's.
+    fn exact_fp32() -> Tolerance {
+        Tolerance { cosine: 0.999999, rel_l2: 1e-4, bank: 1.0 }
+    }
+    /// TF32 tensor-core products in the attention and MLP (the CUDA default tier): the convention of
+    /// `lora_gemm_precision` (cosine 0.999). Near-tied admission scores can then swap rank, so a bank is held to
+    /// agreeing in nearly every slot, not all.
+    fn tf32() -> Tolerance {
+        Tolerance { cosine: 0.999, rel_l2: 2e-2, bank: 0.95 }
+    }
+}
+
+fn check(m: &Qwen35, golden: &Golden, variant: &str, tol: Tolerance) {
+    let cfg = Qwen35Config::edgerock_tiny();
     let t = cfg.block_size;
 
     let tokens: Vec<u32> = golden.taps["tokens"].iter().map(|&v| v.round() as u32).collect();
     assert_eq!(tokens.len(), t as usize);
 
-    let m = Qwen35::new_on(gpu, cfg.clone(), 1, t, &golden.weights);
     m.enable_memory_taps();
     let logits = m.logits_all(&tokens);
     let taps: HashMap<String, Vec<f32>> = m.take_memory_taps().into_iter().collect();
 
     // fp32 float-op-order noise between this replay and torch is ~1e-6 at
     // every stage; the floor sits well above it, so a real error trips it.
-    let mut table = Table::new(0.999999, 1e-4);
+    let mut table = Table::new(tol.cosine, tol.rel_l2);
     table.check("embed", &m.debug_res(0), &golden.taps["embed"]);
     for l in 0..cfg.n_layers as usize {
         if cfg.layer_has_memory(l) {
@@ -85,7 +118,8 @@ fn run(gpu: Gpu, variant: &str) {
                 table.check(&name, &taps[&name], &golden.taps[&name]);
             }
             let name = format!("layer{l}.mem.refs");
-            assert_eq!(taps[&name], golden.taps[&name], "{variant}: the bank of {name} differs from the reference");
+            let equal = taps[&name].iter().zip(&golden.taps[&name]).filter(|(a, b)| a == b).count() as f64 / golden.taps[&name].len() as f64;
+            assert!(equal >= tol.bank, "{variant}: only {:.1}% of the slots of the bank {name} equal the reference (need {:.1}%)", equal * 100.0, tol.bank * 100.0);
         }
         table.check(&format!("layer{l}.out"), &m.debug_res(l + 1), &golden.taps[&format!("layer{l}.out")]);
     }
@@ -125,4 +159,59 @@ fn the_decode_step_refuses_a_windowed_config() {
     let cfg = Qwen35Config::edgerock_tiny();
     let w = qwen35::init::init_weights(&cfg, 3);
     Qwen35::new_on(Gpu::new_cpu(pipelines()), cfg.clone(), 1, cfg.block_size, &w).step(1);
+}
+
+/// A CUDA device, or a named skip: this machine cannot run the test, which is not a missing fixture.
+fn cuda() -> Option<Gpu> {
+    match Gpu::try_new_cuda(pipelines()) {
+        Ok(gpu) => Some(gpu),
+        Err(e) => {
+            brain_testutil::skip_unavailable(&format!("no usable CUDA device: {e}"));
+            None
+        }
+    }
+}
+
+/// CUDA with every GEMM pinned to the fp32 kernels (`GemmPrecision::Fp32Reference`, the tier the cross-backend
+/// parity gates are stated against): the stages agree to float-op-order noise and the banks are EXACTLY the
+/// reference's. Built as a training model, the one build that takes a precision.
+fn cuda_reference(variant: &str) {
+    let Some(gpu) = cuda() else { return };
+    let Some(golden) = load(variant) else { return };
+    let cfg = Qwen35Config::edgerock_tiny();
+    let opts = TrainOpts { gemm_precision: GemmPrecision::Fp32Reference, ..TrainOpts::default() };
+    let m = Qwen35::new_train_opts_on(gpu, cfg.clone(), 1, cfg.block_size, &golden.weights, &opts);
+    check(&m, &golden, variant, Tolerance::exact_fp32());
+}
+
+/// CUDA at its default GEMM precision (TF32 tensor-core products where the library takes them): the tolerance
+/// the plain qwen35 tiers state, and the banks agreeing wherever no two admission scores are within TF32 noise.
+fn cuda_default(variant: &str) {
+    let Some(gpu) = cuda() else { return };
+    let Some(golden) = load(variant) else { return };
+    let cfg = Qwen35Config::edgerock_tiny();
+    let opts = TrainOpts { gemm_precision: GemmPrecision::Auto, ..TrainOpts::default() };
+    let m = Qwen35::new_train_opts_on(gpu, cfg.clone(), 1, cfg.block_size, &golden.weights, &opts);
+    println!("CUDA default tier GEMM path: {:?}", m.gemm_path());
+    check(&m, &golden, variant, Tolerance::tf32());
+}
+
+#[test]
+fn tiny_text_matches_the_reference_cuda_fp32() {
+    cuda_reference("tiny_text");
+}
+
+#[test]
+fn tiny_ties_matches_the_reference_cuda_fp32() {
+    cuda_reference("tiny_ties");
+}
+
+#[test]
+fn tiny_text_matches_the_reference_cuda_default_precision() {
+    cuda_default("tiny_text");
+}
+
+#[test]
+fn tiny_ties_matches_the_reference_cuda_default_precision() {
+    cuda_default("tiny_ties");
 }

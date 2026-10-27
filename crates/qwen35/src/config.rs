@@ -45,6 +45,23 @@ pub fn lora_targets() -> Vec<String> {
         .collect()
 }
 
+/// The LoRA target names of an EdgeRock anchor memory's seven read-side linears (`memory.<leaf>`): the query,
+/// key, value and output projections and the writer's three. The admission scorer is not a target: no loss
+/// gradient reaches it. A config without a memory has no such sites, so these are asked for explicitly
+/// ([`lora_cfg_for`]), never part of [`lora_targets`].
+pub fn memory_lora_targets() -> Vec<String> {
+    ["memory.q_proj", "memory.k_proj", "memory.v_proj", "memory.o_proj", "memory.write_gate_proj", "memory.write_up_proj", "memory.write_down_proj"].iter().map(|s| s.to_string()).collect()
+}
+
+/// [`lora_cfg`] for `cfg`: every target `cfg` has a site for, the memory's included when it has an anchor memory.
+pub fn lora_cfg_for(cfg: &Qwen35Config, rank: u32, alpha: f32) -> LoraCfg {
+    let mut targets = lora_targets();
+    if cfg.anchor_memory.is_some() {
+        targets.extend(memory_lora_targets());
+    }
+    LoraCfg::new(rank, alpha, targets)
+}
+
 /// [`LoraCfg`] targeting every one of [`lora_targets`] at the given rank/alpha
 /// - the qwen35-dense analogue of `qwen35moe::config::lora_cfg`.
 pub fn lora_cfg(rank: u32, alpha: f32) -> LoraCfg {
@@ -424,7 +441,7 @@ impl Qwen35Config {
     /// The widest output among the linears an adapter may correct: sizes the
     /// adapter runtime's correction scratch.
     pub fn adapter_max_out(&self) -> u32 {
-        self.linear_conv_dim().max(self.linear_value_dim()).max(self.linear_num_value_heads).max(self.d_model).max(self.q_proj_dim()).max(self.kv_dim()).max(self.intermediate_size)
+        self.linear_conv_dim().max(self.linear_value_dim()).max(self.linear_num_value_heads).max(self.d_model).max(self.q_proj_dim()).max(self.kv_dim()).max(self.intermediate_size).max(self.anchor_memory.map_or(0, |m| m.writer_intermediate))
     }
 
     // -- full-attention (GQA) derived shapes --
@@ -834,23 +851,29 @@ impl Qwen35Config {
         let Some(m) = &self.anchor_memory else { return Vec::new() };
         let (d, hd) = (self.d_model as usize, self.head_dim as usize);
         let (h, g) = (self.n_heads as usize, self.n_kv_heads as usize);
-        let (r, i) = (m.admission_rank as usize, m.writer_intermediate as usize);
+        let r = m.admission_rank as usize;
+        let mut leaves = vec![("input_norm.weight", d), ("q_norm.weight", hd), ("k_norm.weight", hd)];
+        leaves.extend(self.memory_linears().into_iter().map(|(leaf, o, n)| (leaf, o * n)));
+        leaves.extend([("admission_down.weight", r * d), ("admission_up.weight", g * r), ("read_scale", h), ("read_gate_weight", h * hd), ("read_gate_bias", h)]);
+        leaves
+    }
+
+    /// The `(leaf, out, in)` of the seven read-side linears of the anchor memory
+    /// (`memory.<leaf>` tensors), the ones a LoRA may correct under the target
+    /// names `memory.<leaf without .weight>`. The admission scorer is not among
+    /// them: no loss gradient reaches it. Empty without an anchor memory.
+    pub fn memory_linears(&self) -> Vec<(&'static str, usize, usize)> {
+        let Some(m) = &self.anchor_memory else { return Vec::new() };
+        let (d, hd) = (self.d_model as usize, self.head_dim as usize);
+        let (h, g, i) = (self.n_heads as usize, self.n_kv_heads as usize, m.writer_intermediate as usize);
         vec![
-            ("input_norm.weight", d),
-            ("q_norm.weight", hd),
-            ("k_norm.weight", hd),
-            ("q_proj.weight", h * hd * d),
-            ("k_proj.weight", g * hd * d),
-            ("v_proj.weight", g * hd * d),
-            ("o_proj.weight", d * h * hd),
-            ("write_gate_proj.weight", i * d),
-            ("write_up_proj.weight", i * d),
-            ("write_down_proj.weight", d * i),
-            ("admission_down.weight", r * d),
-            ("admission_up.weight", g * r),
-            ("read_scale", h),
-            ("read_gate_weight", h * hd),
-            ("read_gate_bias", h),
+            ("q_proj.weight", h * hd, d),
+            ("k_proj.weight", g * hd, d),
+            ("v_proj.weight", g * hd, d),
+            ("o_proj.weight", d, h * hd),
+            ("write_gate_proj.weight", i, d),
+            ("write_up_proj.weight", i, d),
+            ("write_down_proj.weight", d, i),
         ]
     }
 
@@ -916,10 +939,15 @@ impl Qwen35Config {
                     out.push((p("self_attn.q_norm.weight"), hd));
                     out.push((p("self_attn.k_norm.weight"), hd));
                     lin(&mut out, p("self_attn.o_proj.weight"), "o_proj", d, hq);
-                    // Never a LoRA site or a quantized tier: plain fp32 parameters
-                    // (`lin` would match the `q_proj`/`o_proj` leaf names).
+                    // Never a quantized tier. The read-side linears are LoRA sites under their own
+                    // `memory.` target names; the norms, the read gate and the admission scorer are plain.
+                    let linears = self.memory_linears();
                     for (leaf, numel) in self.memory_leaves() {
-                        out.push((p(&format!("memory.{leaf}")), numel));
+                        let name = p(&format!("memory.{leaf}"));
+                        match linears.iter().find(|(l, _, _)| *l == leaf) {
+                            Some(&(_, o, i)) => lin(&mut out, name, &format!("memory.{}", leaf.trim_end_matches(".weight")), o, i),
+                            None => out.push((name, numel)),
+                        }
                     }
                 }
             }

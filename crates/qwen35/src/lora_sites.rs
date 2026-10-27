@@ -51,8 +51,27 @@ impl LoraSites for Qwen35Config {
             for &(leaf, tail, out, inn) in mixer.iter().chain(mlp.iter()) {
                 sites.push(LinearSite { name: format!("blocks.{layer}.{tail}"), leaf, layer: Some(layer), spec: TargetSpec::whole(out, inn), save_name: None });
             }
+            if self.layer_has_memory(layer) {
+                for (leaf, out, inn) in self.memory_linears() {
+                    sites.push(LinearSite { name: format!("blocks.{layer}.memory.{leaf}"), leaf: memory_site_leaf(leaf), layer: Some(layer), spec: TargetSpec::whole(out, inn), save_name: None });
+                }
+            }
         }
         sites
+    }
+}
+
+/// The LoRA target name of a memory linear (`memory.q_proj` for the `q_proj.weight` leaf).
+fn memory_site_leaf(leaf: &str) -> &'static str {
+    match leaf {
+        "q_proj.weight" => "memory.q_proj",
+        "k_proj.weight" => "memory.k_proj",
+        "v_proj.weight" => "memory.v_proj",
+        "o_proj.weight" => "memory.o_proj",
+        "write_gate_proj.weight" => "memory.write_gate_proj",
+        "write_up_proj.weight" => "memory.write_up_proj",
+        "write_down_proj.weight" => "memory.write_down_proj",
+        other => panic!("qwen35: {other} is not an anchor-memory linear"),
     }
 }
 

@@ -1687,6 +1687,140 @@ pub fn check_qwen35_a_log_elementwise(seed: u64) -> Report {
     elementwise_check(&model, "blocks.2.linear_attn.A_log", 3e-1)
 }
 
+/// EdgeRock's tiny training config: [`qwen35::config::Qwen35Config::tiny`]'s hybrid schedule (layers 0-2 GDN, layer 3
+/// full attention) with a 5-token sliding window and an anchor memory whose 3-slot bank evicts under 2-token commit
+/// blocks over a 12-token sequence, and two KV groups so admission is per group.
+pub fn edgerock_gradcheck_cfg() -> qwen35::config::Qwen35Config {
+    use qwen35::config::{AnchorMemoryCfg, Qwen35Config};
+    Qwen35Config {
+        n_heads: 4,
+        n_kv_heads: 2,
+        swa_window: Some(5),
+        anchor_memory: Some(AnchorMemoryCfg { capacity: 3, commit_chunk: 2, admission_rank: 4, writer_intermediate: 8 }),
+        ..Qwen35Config::tiny()
+    }
+}
+
+/// [`edgerock_gradcheck_cfg`]'s weights: the GDN wide init [`qwen35_gradcheck_harness`] explains, and every memory
+/// tensor drawn wide (std 0.4, the norms left at their unit gain) so the memory carries signal and, with
+/// `admission_up` wider still, the scores of different tokens are far enough apart that a finite-difference step
+/// cannot reorder the bank.
+pub fn edgerock_gradcheck_init(cfg: &qwen35::config::Qwen35Config, seed: u64) -> std::collections::HashMap<String, Vec<f32>> {
+    use qwen35::model::Qwen35;
+    let mut init = <Qwen35 as model::Model>::init_weights(cfg, seed);
+    let mut rng = data::rng::Lcg::new(seed ^ 0x9e3779b9);
+    // A wide embedding: a step of every table entry at once is then a small relative move of each token's
+    // embedding, which keeps the admission scores (and so the banks) where they are.
+    init.get_mut("tok.weight").expect("init covers the embedding").iter_mut().for_each(|x| *x = rng.scaled(1.0));
+    for l in 0..cfg.n_layers as usize {
+        for leaf in ["in_proj_qkv.weight", "conv1d.weight"] {
+            if let Some(v) = init.get_mut(&format!("blocks.{l}.linear_attn.{leaf}")) {
+                v.iter_mut().for_each(|x| *x = rng.scaled(1.0));
+            }
+        }
+        if cfg.layer_has_memory(l) {
+            // The windowed attention beside the memory, wide for the same reason.
+            for leaf in ["q_proj.weight", "k_proj.weight", "v_proj.weight", "o_proj.weight"] {
+                init.get_mut(&format!("blocks.{l}.self_attn.{leaf}")).expect("init covers the attention").iter_mut().for_each(|x| *x = rng.scaled(0.4));
+            }
+            for (leaf, _) in cfg.memory_leaves() {
+                if leaf.ends_with("_norm.weight") {
+                    continue;
+                }
+                let std = if leaf == "admission_up.weight" { 2.0 } else { 0.4 };
+                init.get_mut(&format!("blocks.{l}.memory.{leaf}")).expect("init covers the memory").iter_mut().for_each(|x| *x = rng.scaled(std));
+            }
+        }
+    }
+    init
+}
+
+/// A [`qwen35::model::Qwen35`] whose every forward also reads the anchor-memory banks (`layer*.mem.refs`) and
+/// refuses to continue if they differ from the first forward's. A finite-difference probe through a discrete
+/// selection is only valid while the selection does not move: a changed bank would make the numeric derivative
+/// measure a jump, so the check fails loudly instead of reporting a bogus mismatch (or a bogus pass).
+struct BankPinned {
+    model: qwen35::model::Qwen35,
+    baseline: std::cell::RefCell<Option<Vec<qwen35::model::MemoryTap>>>,
+    /// The tensor most recently written, named in the failure message.
+    probing: std::cell::RefCell<String>,
+}
+
+impl CheckModel for BankPinned {
+    fn param_names(&self) -> Vec<String> {
+        CheckModel::param_names(&self.model)
+    }
+    fn read_weight(&self, name: &str) -> Vec<f32> {
+        CheckModel::read_weight(&self.model, name)
+    }
+    fn write_weight(&self, name: &str, data: &[f32]) {
+        *self.probing.borrow_mut() = name.to_string();
+        CheckModel::write_weight(&self.model, name, data);
+    }
+    fn read_grad(&self, name: &str) -> Vec<f32> {
+        CheckModel::read_grad(&self.model, name)
+    }
+    fn loss(&self) -> f32 {
+        let loss = CheckModel::loss(&self.model);
+        let banks: Vec<qwen35::model::MemoryTap> = self.model.take_memory_taps().into_iter().filter(|(n, _)| n.ends_with(".mem.refs")).collect();
+        assert!(!banks.is_empty(), "the memory taps returned no bank: the probe would not notice a reordered selection");
+        if let Some(base) = &*self.baseline.borrow() {
+            assert!(*base == banks, "the anchor-memory selection changed after writing {}: the probe is invalid (pick a seed or eps whose perturbation keeps the banks)", self.probing.borrow());
+        }
+        self.baseline.borrow_mut().get_or_insert(banks);
+        loss
+    }
+    fn zero_grads(&self) {
+        CheckModel::zero_grads(&self.model);
+    }
+    fn backward(&self) {
+        CheckModel::backward(&self.model);
+    }
+}
+
+/// The finite-difference step of the EdgeRock checks: smaller than the workspace's 5e-3 because a perturbation of
+/// every weight of a tensor at once must not move a discrete selection (see [`BankPinned`]).
+const EDGEROCK_EPS: f32 = 5e-4;
+
+/// An EdgeRock training model at [`edgerock_gradcheck_cfg`] over `b` sequences of 12 tokens, banks pinned.
+fn edgerock_gradcheck_harness(seed: u64, b: u32, lora: Option<qwen35::config::LoraCfg>) -> BankPinned {
+    use qwen35::model::Qwen35;
+    let cfg = qwen35::config::Qwen35Config { lora, ..edgerock_gradcheck_cfg() };
+    let init = edgerock_gradcheck_init(&cfg, seed);
+    let model = Qwen35::new_train_on(gpu_core::Gpu::new(qwen35::model::pipelines()), cfg, b, 12, &init);
+    let n = (12 * b) as usize;
+    let x: Vec<u32> = (0..n).map(|i| ((i * 5 + 1 + (i / 12) * 7) % 29) as u32).collect();
+    let y: Vec<u32> = (0..n).map(|i| ((i * 5 + 2 + (i / 12) * 7) % 29) as u32).collect();
+    model.set_batch(&x, &y);
+    model.enable_memory_taps();
+    BankPinned { model, baseline: std::cell::RefCell::new(None), probing: std::cell::RefCell::new(String::new()) }
+}
+
+/// Gradient-checks EdgeRock end to end: every trainable tensor of the sliding-window attention and of the anchor
+/// memory (the three norms, the seven projections, `read_scale`, `read_gate_weight`, `read_gate_bias`), through the
+/// hybrid schedule, over `b = 2` sequences so the batched kernels are exercised. The admission scorer is frozen by
+/// design (no loss gradient reaches a discrete sort) and not probed. See [`BankPinned`] for why the banks are pinned.
+pub fn check_edgerock(seed: u64) -> Report {
+    let model = edgerock_gradcheck_harness(seed, 2, None);
+    directional_check(&model, EDGEROCK_EPS, 4, seed ^ 0x1234)
+}
+
+/// [`check_edgerock`] under LoRA: rank-2 adapters on every target, the memory's seven read-side linears included,
+/// with the frozen base (and the frozen norms, read gate and scorer) never given a gradient write.
+pub fn check_edgerock_lora(seed: u64) -> Report {
+    let model = edgerock_gradcheck_harness(seed, 1, Some(qwen35::config::lora_cfg_for(&edgerock_gradcheck_cfg(), 2, 4.0)));
+    // Move the adapters off the B = 0 init so both A and B carry real gradients.
+    for step in 1..=5 {
+        model.model.zero_grads();
+        model.model.forward();
+        model.model.backward();
+        model.model.adamw_step(step, 5e-2, 0.0, Default::default(), Some(1.0), 1.0);
+        model.model.poll_wait();
+    }
+    model.model.take_memory_taps();
+    directional_check(&model, EDGEROCK_EPS, 4, seed ^ 0x1234)
+}
+
 /// [`qwen35_gradcheck_harness`]'s MTP-enabled analogue - `cfg.mtp =
 /// true` adds the auxiliary t+2 head (`mtp.*`) on top of the same tiny
 /// hybrid GDN/GQA decoder, exercising every `mtp.*` tensor (both pre-norms,
@@ -2564,6 +2698,54 @@ mod tests {
             "qwen35 gradient check failed for {:?}",
             fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
         );
+    }
+
+    /// EdgeRock end to end: the sliding-window attention and the anchor memory, batched (`b = 2`), against finite
+    /// differences, with the selection pinned. The no-zero assertion is the hollow-gradcheck guard (knowledge #40):
+    /// every memory tensor and the windowed layer's attention tensors must show a numeric derivative that is
+    /// really nonzero, or the probe proved nothing about them.
+    #[test]
+    fn edgerock_analytic_grads_match_finite_differences() {
+        if brain_testutil::gpu_tests_skipped() {
+            return;
+        }
+        let report = check_edgerock(8);
+        report.print();
+        let (atol, rtol) = (4e-3, 8e-2);
+        let fails = report.failures(atol, rtol);
+        assert!(fails.is_empty(), "edgerock gradient check failed for {:?}", fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>());
+        assert!(report.dead_gradients().is_empty(), "a memory gradient came back exactly zero where the finite difference is not: {:?}", report.dead_gradients().iter().map(|c| &c.param).collect::<Vec<_>>());
+        for leaf in ["input_norm.weight", "q_norm.weight", "k_norm.weight", "q_proj.weight", "k_proj.weight", "v_proj.weight", "o_proj.weight", "write_gate_proj.weight", "write_up_proj.weight", "write_down_proj.weight", "read_scale", "read_gate_weight", "read_gate_bias"] {
+            let name = format!("blocks.3.memory.{leaf}");
+            let c = report.checks.iter().find(|c| c.param == name).unwrap_or_else(|| panic!("{name} was not probed"));
+            assert!(c.numeric != 0.0 && c.analytic != 0.0, "{name} is hollow: analytic {} numeric {}", c.analytic, c.numeric);
+        }
+        for leaf in ["q_proj.weight", "k_proj.weight", "v_proj.weight", "o_proj.weight", "q_norm.weight", "k_norm.weight"] {
+            let name = format!("blocks.3.self_attn.{leaf}");
+            let c = report.checks.iter().find(|c| c.param == name).unwrap_or_else(|| panic!("{name} was not probed"));
+            assert!(c.numeric != 0.0 && c.analytic != 0.0, "windowed attention tensor {name} is hollow");
+        }
+        assert!(!report.checks.iter().any(|c| c.param.contains(".memory.admission_")), "the admission scorer is frozen and has no gradient to check");
+    }
+
+    #[test]
+    fn edgerock_lora_grads_match_finite_differences() {
+        if brain_testutil::gpu_tests_skipped() {
+            return;
+        }
+        let report = check_edgerock_lora(8);
+        report.print();
+        let (atol, rtol) = (4e-3, 8e-2);
+        let fails = report.failures(atol, rtol);
+        assert!(fails.is_empty(), "edgerock LoRA gradient check failed for {:?}", fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>());
+        for leaf in ["q_proj", "k_proj", "v_proj", "o_proj", "write_gate_proj", "write_up_proj", "write_down_proj"] {
+            for side in ["lora_a", "lora_b"] {
+                let name = format!("blocks.3.memory.{leaf}.weight.{side}");
+                let c = report.checks.iter().find(|c| c.param == name).unwrap_or_else(|| panic!("{name} was not probed"));
+                assert!(c.numeric != 0.0, "{name} is hollow");
+            }
+        }
+        assert!(report.checks.iter().all(|c| model::adapter::device::is_adapter_param(&c.param)), "under LoRA only adapter tensors train");
     }
 
     #[test]

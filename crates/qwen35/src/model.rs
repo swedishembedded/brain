@@ -908,6 +908,8 @@ pub(crate) struct MultiRound<'a> {
 struct GqaLayerActs {
     internals: model::gqa_mixer::GqaMixerActs,
     ctx_gated: DeviceBuffer,
+    /// The layer's anchor memory (EdgeRock), whose output is added to the attention's.
+    memory: Option<Box<model::anchor_memory::AnchorMemoryActs>>,
 }
 
 /// Everything [`Qwen35::mlp_fwd`]'s training branch saves - universal, every
@@ -1652,11 +1654,6 @@ impl Qwen35 {
             panic!("{e}");
         }
         assert!(
-            !(train && cfg.anchor_memory.is_some()),
-            "qwen35: training through the anchor memory is not implemented (its backward lands with the training milestone); \
-             a training build of this config would silently skip the memory's gradient"
-        );
-        assert!(
             !(cfg.mtp && (cfg.swa_window.is_some() || cfg.anchor_memory.is_some())),
             "qwen35: the multi-token head reuses the full-attention layer and has no sliding window / anchor memory"
         );
@@ -1728,7 +1725,8 @@ impl Qwen35 {
             .into_iter()
             .filter(|(n, _)| !(is_quantizable_linear(n) && (tier.want(n) != Dtype::F32 || resident_plan.is_some())) && table_tier(tier, &cfg, train, n).is_none() && !(resident_plan.is_some() && is_table(&cfg, n)))
             .map(|(n, c)| {
-                let role = if !train {
+                // The admission scorer is outside the loss's gradient (a discrete sort reads it): never optimised.
+                let role = if !train || n.contains(".memory.admission_") {
                     Role::Frozen
                 } else if cfg.lora.is_some() {
                     model::adapter::device::role_of(&n, &cfg.lora.as_ref().expect("checked by the branch").hp())
@@ -2988,7 +2986,7 @@ impl Qwen35 {
             g.submit(&[], &s);
         }
 
-        let acts = internals.map(|internals| GqaLayerActs { internals, ctx_gated });
+        let acts = internals.map(|internals| GqaLayerActs { internals, ctx_gated, memory: None });
         (out, acts)
     }
 
@@ -3252,18 +3250,11 @@ impl Qwen35 {
         d_res_next2
     }
 
-    /// The anchor memory of full-attention layer `l` (`model::anchor_memory`):
-    /// reads the layer's residual input `xres` and returns `attn_out +
-    /// memory(xres)`, the mixer output the residual add takes. The memory's
-    /// projections are plain fp32 matmuls over the parameter store's tensors
-    /// (never a quantized tier or an adapter site), which also keeps the
-    /// admission scores fp32 whatever tier the rest of the layer runs at.
-    fn add_anchor_memory(&self, l: usize, xres: &DeviceBuffer, attn_out: DeviceBuffer, n: u32) -> DeviceBuffer {
-        use model::anchor_memory::{anchor_memory_fwd, AnchorMemoryIds, AnchorMemoryKernels, AnchorMemoryShape, AnchorMemoryWeights, MemoryProj};
-        let g = &self.gpu;
+    /// The anchor-memory shape of this build's current batch.
+    fn memory_shape(&self) -> model::anchor_memory::AnchorMemoryShape {
         let c = &self.cfg;
-        let mem = c.anchor_memory.as_ref().expect("add_anchor_memory is called only for a layer with a memory");
-        let shape = AnchorMemoryShape {
+        let mem = c.anchor_memory.as_ref().expect("a layer with a memory implies an anchor_memory config");
+        model::anchor_memory::AnchorMemoryShape {
             n_seq: self.b,
             t: self.run_len(),
             d_model: c.d_model,
@@ -3276,18 +3267,25 @@ impl Qwen35 {
             commit_block: c.memory_commit_block().expect("a memory has a commit block"),
             admission_rank: mem.admission_rank,
             writer_intermediate: mem.writer_intermediate,
-        };
-        let ids = AnchorMemoryIds {
+        }
+    }
+
+    fn memory_ids(&self) -> model::anchor_memory::AnchorMemoryIds {
+        model::anchor_memory::AnchorMemoryIds {
             kernels: kernel_ids(),
             silu: SILU,
             silu_mul: SILU_MUL,
             add2: ADD2,
             scale_row: SCALE_ROW,
             rope2d_partial: ROPE2D_PARTIAL,
-            memory: AnchorMemoryKernels::resolve(g).unwrap_or_else(|e| panic!("qwen35: {e}")),
-        };
+            row_dot: ROW_DOT,
+            memory: model::anchor_memory::AnchorMemoryKernels::resolve(&self.gpu).unwrap_or_else(|e| panic!("qwen35: {e}")),
+        }
+    }
+
+    fn memory_weights(&self, l: usize) -> model::anchor_memory::AnchorMemoryWeights<'_> {
         let p = |leaf: &str| self.w(&format!("blocks.{l}.memory.{leaf}"));
-        let weights = AnchorMemoryWeights {
+        model::anchor_memory::AnchorMemoryWeights {
             input_norm: p("input_norm.weight"),
             q_norm: p("q_norm.weight"),
             k_norm: p("k_norm.weight"),
@@ -3296,10 +3294,30 @@ impl Qwen35 {
             read_gate_bias: p("read_gate_bias"),
             cos: &self.cos,
             sin: &self.sin,
-        };
+        }
+    }
+
+    /// The anchor memory of full-attention layer `l` (`model::anchor_memory`):
+    /// reads the layer's residual input `xres` and returns `attn_out +
+    /// memory(xres)`, the mixer output the residual add takes, and (on a
+    /// training build) what its backward needs. The memory's projections are
+    /// plain fp32 matmuls over the parameter store's tensors, never a
+    /// quantized tier, which also keeps the admission scores fp32 whatever
+    /// tier the rest of the layer runs at; an adapter corrects the read-side
+    /// ones exactly as it does the attention's.
+    fn add_anchor_memory(&self, l: usize, xres: &DeviceBuffer, attn_out: DeviceBuffer, n: u32) -> (DeviceBuffer, Option<model::anchor_memory::AnchorMemoryActs>) {
+        use model::anchor_memory::{anchor_memory_fwd, MemoryProj};
+        let g = &self.gpu;
+        let c = &self.cfg;
+        let shape = self.memory_shape();
+        let ids = self.memory_ids();
+        let weights = self.memory_weights(l);
         let project = |which: MemoryProj, x: &DeviceBuffer, out: &DeviceBuffer| {
             let (n_out, n_in) = which.dims(&shape);
-            g.submit(&[], &[g.step(MATMUL, &[x, p(&format!("{}.weight", which.leaf())), out], &[n, n_in, n_out], n * n_out)]);
+            let wname = format!("blocks.{l}.memory.{}.weight", which.leaf());
+            let mut s = vec![g.step(MATMUL, &[x, self.w(&wname), out], &[n, n_in, n_out], n * n_out)];
+            self.lora_fwd(&mut s, &format!("memory.{}", which.leaf()), x, &wname, out, n, n_in, n_out);
+            g.submit(&[], &s);
         };
         let (memory_out, acts) = anchor_memory_fwd(g, &ids, &shape, &weights, &project, xres);
 
@@ -3321,7 +3339,35 @@ impl Qwen35 {
 
         let sum = g.storage_uninit((n * c.d_model) as u64);
         g.submit(&[], &[g.step(ADD2, &[&attn_out, &memory_out, &sum], &[n * c.d_model], n * c.d_model)]);
-        sum
+        (sum, self.is_train.then_some(acts))
+    }
+
+    /// Reverse of [`Self::add_anchor_memory`]'s memory term: the gradient of
+    /// the layer's residual input `xres` through the memory, given `d_mixer`
+    /// (the gradient of the mixer output the memory is added to). Parameter
+    /// gradients accumulate where the parameter trains; the admission scorer
+    /// is frozen by construction (see `model::anchor_memory::anchor_memory_bwd`).
+    fn anchor_memory_bwd(&self, l: usize, xres: &DeviceBuffer, acts: &model::anchor_memory::AnchorMemoryActs, d_mixer: &DeviceBuffer, n: u32) -> DeviceBuffer {
+        use model::anchor_memory::{anchor_memory_bwd, AnchorMemoryGrads, MemoryProj, ReadGateGrads};
+        let g = &self.gpu;
+        let shape = self.memory_shape();
+        let ids = self.memory_ids();
+        let weights = self.memory_weights(l);
+        let name = |leaf: &str| format!("blocks.{l}.memory.{leaf}");
+        let grad = |leaf: &str| self.trainable(&name(leaf)).then(|| self.g(&name(leaf)));
+        let read_gate = match (grad("read_scale"), grad("read_gate_weight"), grad("read_gate_bias")) {
+            (Some(scale), Some(weight), Some(bias)) => Some(ReadGateGrads { scale, weight, bias }),
+            (None, None, None) => None,
+            _ => panic!("qwen35: blocks.{l}.memory.read_scale/read_gate_weight/read_gate_bias must train together or all stay frozen"),
+        };
+        let grads = AnchorMemoryGrads { input_norm: grad("input_norm.weight"), q_norm: grad("q_norm.weight"), k_norm: grad("k_norm.weight"), read_gate };
+        let project_bwd = |which: MemoryProj, d_out: &DeviceBuffer, x: &DeviceBuffer, dx: &DeviceBuffer, acc: bool| {
+            let (n_out, n_in) = which.dims(&shape);
+            let mut s = Vec::new();
+            self.proj_bwd(&mut s, &format!("memory.{}", which.leaf()), d_out, x, &name(&format!("{}.weight", which.leaf())), dx, n, n_in, n_out, acc as u32);
+            g.submit(&[], &s);
+        };
+        anchor_memory_bwd(g, &ids, &shape, &weights, &grads, &project_bwd, acts, xres, d_mixer)
     }
 
     /// One decoder layer's forward: `out = layer_l(xres)`. On a training
@@ -3348,8 +3394,8 @@ impl Qwen35 {
             LayerType::Full => {
                 let (o, a) = self.layer_gqa_fwd(&format!("blocks.{l}.self_attn"), &xn1, n, None);
                 // The anchor memory reads the layer's residual input, not its normalised copy.
-                let o = if self.cfg.layer_has_memory(l) { self.add_anchor_memory(l, xres, o, n) } else { o };
-                (o, a.map(MixerActs::Gqa))
+                let (o, memory) = if self.cfg.layer_has_memory(l) { self.add_anchor_memory(l, xres, o, n) } else { (o, None) };
+                (o, a.map(|a| MixerActs::Gqa(GqaLayerActs { memory: memory.map(Box::new), ..a })))
             }
         };
 
@@ -3828,11 +3874,18 @@ impl Qwen35 {
             }
 
             // ---- ln1 backward: xn1 = rmsnorm(res[l]) -> d_res[l] = d_xmid + d_tmp ----
-            let d_res_l = g.storage((n * d) as u64);
+            let mut d_res_l = g.storage((n * d) as u64);
             {
                 let mut s = Vec::new();
                 self.rmsnorm_bwd_add_step(&mut s, x, &format!("blocks.{l}.ln1.weight"), &d_xn1, &d_xmid, &d_res_l, d, n);
                 g.submit(&[], &s);
+            }
+            // The anchor memory read the same residual input: its gradient joins d_res[l].
+            if let MixerActs::Gqa(GqaLayerActs { memory: Some(memory), .. }) = &la.mixer {
+                let d_h = self.anchor_memory_bwd(l, x, memory, &d_xmid, n);
+                let joined = g.storage((n * d) as u64);
+                g.submit(&[], &[g.step(ADD2, &[&d_res_l, &d_h, &joined], &[n * d], n * d)]);
+                d_res_l = joined;
             }
             d_res_next = d_res_l;
             if rebuilt.is_some() {
@@ -5591,7 +5644,8 @@ impl Qwen35 {
             self.ps.trained_params().map(|(n, _)| n.clone()).collect()
         } else {
             let resident = self.resident.iter().flat_map(|ft| ft.borrow().specs().iter().map(|s| s.name.clone()).collect::<Vec<_>>());
-            self.ps.params.iter().map(|(n, _)| n.clone()).chain(resident).collect()
+            // A training build lists what it trains: a tensor that is frozen by design (the admission scorer) has no gradient.
+            self.ps.params.iter().map(|(n, _)| n.clone()).filter(|n| !self.is_train || self.ps.grad.contains_key(n)).chain(resident).collect()
         }
     }
 

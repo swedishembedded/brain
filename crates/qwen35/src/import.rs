@@ -227,6 +227,11 @@ pub fn hf_linear_name(name: &str) -> Option<String> {
     let rest = name.strip_prefix("blocks.")?;
     let (l, leaf) = rest.split_once('.')?;
     l.parse::<u32>().ok()?;
+    // The anchor memory exists only in text-only releases, whose decoder is not nested.
+    if let Some(memory_leaf) = leaf.strip_prefix("memory.") {
+        const LINEARS: [&str; 7] = ["q_proj.weight", "k_proj.weight", "v_proj.weight", "o_proj.weight", "write_gate_proj.weight", "write_up_proj.weight", "write_down_proj.weight"];
+        return LINEARS.contains(&memory_leaf).then(|| format!("model.layers.{l}.memory.{memory_leaf}"));
+    }
     let hf_leaf = match leaf {
         "mlp.gate.weight" => "mlp.gate_proj.weight",
         "mlp.up.weight" => "mlp.up_proj.weight",
@@ -953,5 +958,22 @@ mod tests {
         assert_eq!(classify("model.layers.3.self_attn.q_proj.weight", &cfg, &[]).unwrap().as_deref(), Some("blocks.3.self_attn.q_proj.weight"));
         assert_eq!(classify("model.embed_tokens.weight", &cfg, &[]).unwrap().as_deref(), Some("tok.weight"));
         assert!(classify("model.rotary_emb.inv_freq", &cfg, &[]).is_err());
+    }
+
+    #[test]
+    fn every_memory_lora_target_names_the_hf_tensor_it_was_imported_from() {
+        let cfg = Qwen35Config::edgerock_tiny();
+        let mut seen = 0;
+        for (leaf, _, _) in cfg.memory_linears() {
+            let name = format!("blocks.3.memory.{leaf}");
+            let hf = hf_linear_name(&name).unwrap_or_else(|| panic!("{name} has no HF name"));
+            assert_eq!(hf, format!("model.layers.3.memory.{leaf}"));
+            assert_eq!(classify(&hf, &cfg, &[]).unwrap().as_deref(), Some(name.as_str()));
+            seen += 1;
+        }
+        assert_eq!(seen, crate::config::memory_lora_targets().len());
+        for scorer in ["admission_down.weight", "admission_up.weight", "input_norm.weight", "read_scale"] {
+            assert_eq!(hf_linear_name(&format!("blocks.3.memory.{scorer}")), None, "{scorer} is not a LoRA site");
+        }
     }
 }
