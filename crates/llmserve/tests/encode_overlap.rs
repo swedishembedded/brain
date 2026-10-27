@@ -23,98 +23,12 @@ use capability::{Invocation, Progress};
 use data::qwen_chat::TemplateFlavor;
 use data::qwen_tokenizer::QwenBpe;
 use llmserve::{run_batch_scheduled, Encoding, Frontend, ParsedRequest};
-use model::paged::{BlockAllocator, BlockTable};
-use model::serve::{PagedDecoder, SampleParams, Scheduler};
+use model::paged::BlockAllocator;
+use model::serve::{SampleParams, Scheduler};
 use qwen3::chat::ToolChoice;
 
-const VOCAB: usize = 64;
-
-/// A decoder whose next token is the previous one plus one.
-struct Toy {
-    alloc: BlockAllocator,
-}
-
-impl PagedDecoder for Toy {
-    fn alloc_mut(&mut self) -> &mut BlockAllocator {
-        &mut self.alloc
-    }
-    fn max_prefill_tokens(&self) -> u32 {
-        64
-    }
-    fn free_blocks(&self) -> u32 {
-        self.alloc.free_blocks()
-    }
-    fn max_seq_len(&self) -> usize {
-        1024
-    }
-    fn vocab(&self) -> usize {
-        VOCAB
-    }
-    fn blocks_for(&self, tokens: u32) -> u32 {
-        tokens.div_ceil(8)
-    }
-    fn reclaim_prefix(&mut self, _want: u32) -> u32 {
-        0
-    }
-    fn release_table(&mut self, t: &mut BlockTable) {
-        t.release(&mut self.alloc);
-    }
-    fn prefill(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Vec<f32> {
-        table.reserve(prompt.len() as u32, &mut self.alloc).unwrap();
-        vec![*prompt.last().unwrap() as f32]
-    }
-    fn logits(&self, hidden: &[f32]) -> Vec<f32> {
-        let mut l = vec![0.0; VOCAB];
-        l[(hidden[0] as usize + 1) % VOCAB] = 1.0;
-        l
-    }
-    fn forward_batched_greedy(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<u32> {
-        for t in tables.iter_mut() {
-            t.append(&mut self.alloc).unwrap();
-        }
-        inputs.iter().map(|&i| (i + 1) % VOCAB as u32).collect()
-    }
-    fn forward_batched_greedy_window(&mut self, _: &mut [&mut BlockTable], _: &[u32], _: usize) -> Vec<Vec<u32>> {
-        unreachable!("window capacity is 1")
-    }
-    fn prefix_stats(&self) -> (u64, u64, usize) {
-        (0, 0, 0)
-    }
-    fn device_stats(&self) -> Option<gpu_core::DeviceStats> {
-        None
-    }
-    fn kv_pool_bytes(&self) -> u64 {
-        0
-    }
-    fn kv_pool_capacity_tokens(&self) -> u64 {
-        4096
-    }
-    fn decode_window_capacity(&self) -> usize {
-        1
-    }
-    fn forward_batched_topk(&mut self, _: &mut [&mut BlockTable], _: &[u32], _: usize) -> Vec<Vec<(u32, f32)>> {
-        unreachable!("greedy only")
-    }
-    fn topk_capacity(&self) -> usize {
-        1
-    }
-}
-
-fn tokenizer() -> QwenBpe {
-    let gt = checkpoint::gguf::GgufTokenizer {
-        model: "gpt2".into(),
-        pre: Some("deepseek-v3".into()),
-        tokens: (0..VOCAB).map(|i| format!("t{i}")).collect(),
-        merges: Vec::new(),
-        token_types: vec![1; VOCAB],
-        bos: Some(0),
-        eos: Some(1),
-        unk: None,
-        pad: None,
-        ..Default::default()
-    };
-    QwenBpe::from_gguf(&gt).expect("toy tokenizer")
-}
+mod common;
+use common::{tokenizer, Toy, VOCAB};
 
 fn request(seed: u32, max_new: usize) -> ParsedRequest {
     ParsedRequest {
@@ -174,7 +88,7 @@ impl Frontend for Gated {
 fn a_request_built_in_the_background_joins_while_the_others_keep_decoding() {
     let gate = Arc::new(AtomicBool::new(false));
     let front = Gated { tok: tokenizer(), gate: gate.clone() };
-    let mut sched = Scheduler::new(Toy { alloc: BlockAllocator::new(512, 8) }, 8);
+    let mut sched = Scheduler::new(Toy::new(BlockAllocator::new(512, 8), 0), 8);
     let invs = [
         Invocation::new().set("slow", serde_json::json!(true)).set("seed", serde_json::json!(10)).set("max_new", serde_json::json!(5)),
         Invocation::new().set("seed", serde_json::json!(20)).set("max_new", serde_json::json!(30)),

@@ -56,7 +56,7 @@
 //! that lives in the process layer (`brain_shutdown::bound_drain`), not the
 //! decoder, and has its own test there.
 
-use super::{AdapterId, DraftQuery, Drafter, PagedDecoder, PromptEmbeds, RejectReason, Request, SampleParams, Scheduler, SpecPolicy};
+use super::{AdapterId, Completion, DraftQuery, Drafter, PagedDecoder, PromptEmbeds, RejectReason, Request, SampleParams, Scheduler, SpecPolicy};
 
 /// How a decoder is brought to the suite.
 pub struct Conformance<D: PagedDecoder> {
@@ -97,6 +97,21 @@ fn complete<D: PagedDecoder>(sched: &mut Scheduler<D>, id: u64) -> Vec<u32> {
         }
     }
     out.expect("the request completed")
+}
+
+/// [`complete`], also returning what the scheduler reported for the request.
+fn complete_with_meta<D: PagedDecoder>(sched: &mut Scheduler<D>, id: u64) -> (Vec<u32>, Completion) {
+    let (mut out, mut meta) = (None, None);
+    while sched.pending() {
+        let report = sched.step_report();
+        meta = meta.or_else(|| report.completed_meta.iter().find(|(done, _)| *done == id).map(|(_, m)| *m));
+        for (done, toks) in report.completed {
+            if done == id {
+                out = Some(toks);
+            }
+        }
+    }
+    (out.expect("the request completed"), meta.expect("a completed request reports its metadata"))
 }
 
 /// Greedy output of one request alone on a fresh decoder.
@@ -176,11 +191,14 @@ pub fn a_prefix_hit_prefills_only_the_suffix<D: PagedDecoder>(c: &Conformance<D>
     let mut second = first.clone();
     second.extend(tokens(vocab, 4, 8));
     let id = sched.submit(request(first.clone(), 4));
-    complete(&mut sched, id);
+    let cold = complete_with_meta(&mut sched, id);
+    assert_eq!(cold.1.cached_tokens, 0, "a prompt nothing was cached for reported cached tokens");
     let (hit_before, _, _) = sched.prefix_stats();
     let id = sched.submit(request(second.clone(), 4));
-    let warm = complete(&mut sched, id);
+    let (warm, meta) = complete_with_meta(&mut sched, id);
     let gained = sched.prefix_stats().0 - hit_before;
+    // What the request reports is what the cache counted: one number, whatever shape the cache has.
+    assert_eq!(meta.cached_tokens as u64, gained, "the outcome's cached tokens disagree with the cache's hit count");
     if c.prefix_reuse {
         assert!(gained as usize >= first.len() / 2, "a prompt extending a served one reused only {gained} of {} cached tokens", first.len());
         assert!(gained as usize <= first.len(), "reuse cannot exceed the cached prompt ({gained} tokens)");

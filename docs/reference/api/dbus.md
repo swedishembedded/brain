@@ -70,6 +70,16 @@ else.
 
 ### `Cancel` — cooperative cancellation
 
+A text `generate` result also carries `cached_tokens` (the prompt tokens the
+prefix cache served), the `seed` the decode sampled with (drawn or given: pass
+it back to reproduce the decode), and `scan_anomalies` when the chat scanner
+could not read the output cleanly (a tool call written inside the reasoning,
+a call in the wrong syntax or cut off, text dropped from a call). Passing
+`return_raw: true` adds `raw_output` - the completion exactly as the model wrote
+it, every reasoning and tool-call marker included, ending with the stop token
+(`stop_token`) when one ended it - so a client can tell a turn that ended in
+prose from one whose tool call was lost.
+
 `Cancel(job)` takes the job id `Subscribe` returned and asks that job to stop.
 Cancellation is cooperative: a long-running action checks for it between steps
 (denoising steps, training steps) and aborts, which arrives as the stream's terminal

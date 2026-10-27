@@ -506,6 +506,7 @@ impl Qwen35GgufEngine {
             let e = self.cache.entry(i);
             let (rows, snap) = (e.tokens.len(), e.snap_row);
             seed_valid = e.payload.mtp_valid;
+            table.mark_cached(rows as u32);
             match self.inst.kv_layout {
                 KvLayout::OneBlock => {
                     let (from, to) = (self.window(&e.table), self.window(table));

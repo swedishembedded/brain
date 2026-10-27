@@ -776,7 +776,7 @@ fn non_stream_body(model: &str, co: &bridge::ChatOutcome, native: bool) -> Value
         "created": CREATED_UNIX,
         "model": model,
         "choices": [choice],
-        "usage": usage(co.prompt_tokens, co.completion_tokens, co.reasoning_tokens),
+        "usage": usage(co.prompt_tokens, co.completion_tokens, co.reasoning_tokens, co.cached_tokens),
     });
     if native {
         // OpenRouter's ChatResult requires system_fingerprint (nullable).
@@ -833,8 +833,12 @@ fn completion_object(id: &str, model: &str, text: &str, finish: Option<&str>) ->
     })
 }
 
-fn usage(prompt: i64, completion: i64, reasoning: i64) -> Value {
+fn usage(prompt: i64, completion: i64, reasoning: i64, cached: Option<i64>) -> Value {
     let mut u = json!({ "prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion });
+    // OpenAI's name for the prompt tokens a prefix cache served; present whenever the model reports it, 0 included.
+    if let Some(cached) = cached {
+        u["prompt_tokens_details"] = json!({ "cached_tokens": cached });
+    }
     // OpenAI's name for the share of the completion spent thinking.
     if reasoning > 0 {
         u["completion_tokens_details"] = json!({ "reasoning_tokens": reasoning });
@@ -845,7 +849,7 @@ fn usage(prompt: i64, completion: i64, reasoning: i64) -> Value {
 /// The non-streaming `text_completion` body.
 fn completion_body(model: &str, co: &bridge::ChatOutcome) -> Value {
     let mut body = completion_object(&format!("cmpl-{}", Uuid::new_v4().simple()), model, &co.text, Some(&co.finish));
-    body["usage"] = usage(co.prompt_tokens, co.completion_tokens, 0);
+    body["usage"] = usage(co.prompt_tokens, co.completion_tokens, 0, co.cached_tokens);
     attach_served(&mut body, co);
     body
 }
@@ -858,7 +862,7 @@ fn render_completion_stream(mut src: bridge::EventStream, model: String, want_us
     use futures::StreamExt;
     let id = format!("cmpl-{}", Uuid::new_v4().simple());
     let events = async_stream::stream! {
-        let (mut prompt, mut completion) = (0i64, 0i64);
+        let (mut prompt, mut completion, mut cached) = (0i64, 0i64, None);
         let mut finish = String::from("stop");
         let mut saw_delta = false;
         let mut served = None;
@@ -872,7 +876,7 @@ fn render_completion_stream(mut src: bridge::EventStream, model: String, want_us
                 StreamMsg::Fetching(p) => yield Ok(Event::default().comment(p.comment_text())),
                 StreamMsg::Done(outcome) => {
                     let co = bridge::read_chat_outcome(&outcome);
-                    (prompt, completion, finish) = (co.prompt_tokens, co.completion_tokens, co.finish.clone());
+                    (prompt, completion, cached, finish) = (co.prompt_tokens, co.completion_tokens, co.cached_tokens, co.finish.clone());
                     // A resident that reports no token deltas still answers.
                     if !saw_delta && !co.text.is_empty() {
                         yield Ok(Event::default().data(completion_object(&id, &model, &co.text, None).to_string()));
@@ -894,7 +898,7 @@ fn render_completion_stream(mut src: bridge::EventStream, model: String, want_us
         if want_usage {
             let mut frame = completion_object(&id, &model, "", None);
             frame["choices"] = json!([]);
-            frame["usage"] = usage(prompt, completion, 0);
+            frame["usage"] = usage(prompt, completion, 0, cached);
             yield Ok(Event::default().data(frame.to_string()));
         }
         yield Ok(Event::default().data("[DONE]"));
@@ -1316,7 +1320,7 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
         }
 
         let mut finish = String::from("stop");
-        let (mut prompt, mut completion, mut reasoning) = (0i64, 0i64, 0i64);
+        let (mut prompt, mut completion, mut reasoning, mut cached) = (0i64, 0i64, 0i64, None);
         // Whether any real token delta was streamed. A model that only reports
         // coarse `Progress::step` ticks (no `delta`) - `brain/qwen3omnimoe` is one -
         // produces its whole answer in the terminal `Outcome` and would
@@ -1357,6 +1361,7 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
                     prompt = co.prompt_tokens;
                     completion = co.completion_tokens;
                     reasoning = co.reasoning_tokens;
+                    cached = co.cached_tokens;
                     finish = co.finish;
                     final_text = co.text;
                 }
@@ -1417,7 +1422,7 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
                 "created": CREATED_UNIX,
                 "model": model,
                 "choices": [],
-                "usage": usage(prompt, completion, reasoning),
+                "usage": usage(prompt, completion, reasoning, cached),
             });
             yield Ok(Event::default().data(usage_chunk.to_string()));
         }
@@ -1446,8 +1451,8 @@ mod tests {
     /// OpenAI's `completion_tokens_details.reasoning_tokens` appears only when the reply spent tokens thinking.
     #[test]
     fn usage_reports_reasoning_tokens_only_when_there_were_some() {
-        assert!(usage(10, 5, 0).get("completion_tokens_details").is_none());
-        let u = usage(10, 5, 3);
+        assert!(usage(10, 5, 0, None).get("completion_tokens_details").is_none());
+        let u = usage(10, 5, 3, None);
         assert_eq!(u["completion_tokens_details"]["reasoning_tokens"], 3);
         assert_eq!((u["prompt_tokens"].as_i64(), u["completion_tokens"].as_i64(), u["total_tokens"].as_i64()), (Some(10), Some(5), Some(15)));
     }

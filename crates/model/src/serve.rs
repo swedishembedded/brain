@@ -907,6 +907,8 @@ pub struct StepReport {
     /// top-p truncated softmax a sampled token was drawn from, and `0.0` for
     /// greedy decoding (deterministic). Same order and lengths as `completed`.
     pub completed_logprobs: Vec<(u64, Vec<f32>)>,
+    /// For each of `completed`, how its prompt was served and why it stopped (see [`Completion`]).
+    pub completed_meta: Vec<(u64, Completion)>,
     /// Requests preempted this iteration: their KV went to host RAM and their
     /// device blocks back to the pool (see [`crate::kv_offload`]).
     pub demoted: Vec<u64>,
@@ -950,6 +952,18 @@ struct Resume {
     rng: data::rng::Rng,
     /// Where the sequence was in its think block.
     think: Option<sampler::ThinkState>,
+    /// Prompt tokens the first admission served from the prefix cache.
+    cached_tokens: usize,
+}
+
+/// What a finished request reports beside its tokens, the same for every decoder whatever shape its cache has.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Completion {
+    /// Prompt tokens the decoder's prefix cache served instead of computing them (0 for a cold prompt).
+    pub cached_tokens: usize,
+    /// The stop token the sequence ended on. It is not among the generated tokens (a stop id is a control
+    /// signal, not output); `None` when the sequence ended on its token budget or was cancelled.
+    pub stop_token: Option<u32>,
 }
 
 /// A request being prefilled over several iterations: it holds its blocks and a
@@ -998,6 +1012,11 @@ struct Running {
     /// requeued as the request it was.
     seed: u64,
     rng: data::rng::Rng,
+    /// Prompt tokens served from the decoder's prefix cache when the sequence was first admitted
+    /// (see [`BlockTable::cached_rows`]); a recompute after preemption does not change it.
+    cached_tokens: usize,
+    /// The stop token that ended the sequence, once it has.
+    stop_token: Option<u32>,
     /// The prompt's embedding rows, kept for a recompute (see [`Waiting::embeds`]).
     embeds: Option<std::sync::Arc<PromptEmbeds>>,
 }
@@ -1015,6 +1034,7 @@ struct Running {
 fn accept_token(r: &mut Running, next: u32, logprob: f32) {
     if r.stop.contains(&next) {
         r.done = true;
+        r.stop_token = Some(next);
         return;
     }
     if let Some(t) = r.think.as_mut() {
@@ -1210,6 +1230,19 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// server under normal churn from losing its cache to dead sequences.
     pub fn cancel(&mut self, id: u64) -> Option<Vec<u32>> {
         self.cancel_detailed(id).map(|(tokens, _)| tokens)
+    }
+
+    /// What request `id` reports so far (see [`Completion`]); the default for an unknown id or a request not
+    /// admitted yet. Ask before [`Self::cancel_detailed`], which forgets the request.
+    pub fn completion_of(&self, id: u64) -> Completion {
+        let cached = |cached_tokens| Completion { cached_tokens, stop_token: None };
+        if let Some(r) = self.running.iter().chain(self.swapped.iter()).find(|r| r.id == id) {
+            return Completion { cached_tokens: r.cached_tokens, stop_token: r.stop_token };
+        }
+        if let Some(p) = self.prefilling.iter().find(|p| p.id == id) {
+            return cached(p.resume.as_ref().map_or(p.table.cached_rows() as usize, |r| r.cached_tokens));
+        }
+        cached(self.waiting.iter().find(|w| w.id == id).and_then(|w| w.resume.as_ref()).map_or(0, |r| r.cached_tokens))
     }
 
     /// [`Self::cancel`], also returning the log-probability of each token it
@@ -1585,11 +1618,11 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// as part of the context to prefill.
     fn requeue_for_recompute(&mut self, mut r: Running) {
         self.dec.release_table(&mut r.table);
-        let Running { id, adapter, generated, logprobs, max_new, stop, next_input, mut context, spec, sample, seed, rng, think, embeds, .. } = r;
+        let Running { id, adapter, generated, logprobs, max_new, stop, next_input, mut context, spec, sample, seed, rng, think, embeds, cached_tokens, .. } = r;
         let uncached = context.pop();
         debug_assert_eq!(uncached, Some(next_input), "the newest token is the one with no cache entry yet");
         let req = Request { prompt: context, max_new, stop };
-        self.waiting.push_front(Waiting { id, req, adapter, sample, seed, resume: Some(Resume { generated, logprobs, next_input, spec, rng, think }), embeds });
+        self.waiting.push_front(Waiting { id, req, adapter, sample, seed, resume: Some(Resume { generated, logprobs, next_input, spec, rng, think, cached_tokens }), embeds });
     }
 
     /// Index of the first waiting request that can be admitted this
@@ -1678,14 +1711,15 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// picked from the prefill's final hidden state.
     fn start_running(&mut self, p: Prefilling, hidden: Vec<f32>, report: &mut StepReport) {
         let Prefilling { id, prompt, max_new, stop, adapter, sample, seed, table, resume, embeds, .. } = p;
-        if let Some(Resume { generated, logprobs, next_input, spec, rng, think }) = resume {
+        if let Some(Resume { generated, logprobs, next_input, spec, rng, think, cached_tokens }) = resume {
             // The cache is whole again; the token to decode next was chosen
             // before the preemption, so the prefill's own output is not used.
             let mut context = prompt;
             context.push(next_input);
-            self.running.push(Running { id, table, adapter, generated, logprobs, max_new, stop, next_input, context, spec, done: false, sample, think, seed, rng, embeds });
+            self.running.push(Running { id, table, adapter, generated, logprobs, max_new, stop, next_input, context, spec, done: false, sample, think, seed, rng, embeds, cached_tokens, stop_token: None });
             return;
         }
+        let cached_tokens = table.cached_rows() as usize;
         let mut rng = data::rng::Rng::new(seed);
         // `admit_greedy`/`admit_topk` are on-device for a decoder that has
         // one (`qwen3::serve::Engine`): neither ships a `[vocab]` block to
@@ -1702,7 +1736,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             let candidates = self.dec.admit_topk(&hidden, k);
             sample_in_context(&candidates, sample, &SampleContext { context: &prompt, prompt_len: prompt.len() }, &mut rng)
         };
-        let mut r = Running { id, table, adapter, generated: Vec::new(), logprobs: Vec::new(), max_new, stop, next_input: first, context: prompt, spec: speculate::SeqSpec::new(), done: false, sample, think, seed, rng, embeds };
+        let mut r = Running { id, table, adapter, generated: Vec::new(), logprobs: Vec::new(), max_new, stop, next_input: first, context: prompt, spec: speculate::SeqSpec::new(), done: false, sample, think, seed, rng, embeds, cached_tokens, stop_token: None };
         accept_token(&mut r, first, first_logprob);
         report.admitted.push(id);
         self.running.push(r);
@@ -1740,7 +1774,7 @@ impl<D: PagedDecoder> Scheduler<D> {
         if self.dec.free_blocks() < want {
             return false;
         }
-        let Waiting { id, req, adapter, sample, seed, resume, embeds } = self.waiting.remove(pos).expect("admissible position");
+        let Waiting { id, req, adapter, sample, seed, resume, embeds, .. } = self.waiting.remove(pos).expect("admissible position");
         let table = match adapter {
             Some(adapter) => {
                 // A resumed sequence never gave its pin back.
@@ -2063,6 +2097,7 @@ impl<D: PagedDecoder> Scheduler<D> {
                 self.dec.release_table(&mut r.table);
                 self.unpin(r.adapter);
                 report.completed_logprobs.push((r.id, r.logprobs));
+                report.completed_meta.push((r.id, Completion { cached_tokens: r.cached_tokens, stop_token: r.stop_token }));
                 self.prefill_gate.observe_reply(r.generated.len());
                 completed.push((r.id, r.generated));
             } else {
@@ -2240,6 +2275,8 @@ mod tests {
             seed: data::rng::random_seed(),
             rng: data::rng::Rng::new(data::rng::random_seed()),
             embeds: None,
+            cached_tokens: 0,
+            stop_token: None,
         }
     }
 

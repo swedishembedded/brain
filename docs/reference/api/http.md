@@ -105,6 +105,9 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   when it is spent the closing tag and the blank line after it are forced and
   the model answers. A reply reports the tokens spent thinking in
   `usage.completion_tokens_details.reasoning_tokens`.
+- **Prompt cache.** `usage.prompt_tokens_details.cached_tokens` is how many of
+  `prompt_tokens` the model's prefix cache served instead of computing (0 for a
+  cold prompt); a model that does not report it omits the field.
 - **Sampled tokens (chat).** `logprobs: true` makes the reply carry
   `choices[0].logprobs.content[]` (`{token, logprob, bytes, top_logprobs}`; the
   server relays ids, so `token` is `token_id:<id>`, `top_logprobs` is empty) and

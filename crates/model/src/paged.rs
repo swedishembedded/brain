@@ -115,6 +115,8 @@ pub struct BlockTable {
     len: u32,         // tokens stored
     kv_namespace: KvNamespace,
     state_row: Option<u32>, // the sequence's row in a hybrid decoder's recurrent-state pool
+    /// Prompt tokens a decoder served from its prefix cache when the sequence began (see [`Self::cached_rows`]).
+    cached_rows: u32,
 }
 
 impl BlockTable {
@@ -159,6 +161,18 @@ impl BlockTable {
     /// Hand the recurrent-state row back (to the pool it came from).
     pub fn take_state_row(&mut self) -> Option<u32> {
         self.state_row.take()
+    }
+
+    /// How many leading prompt tokens this sequence did not have to compute because a prefix cache served them
+    /// (0 for a cold prompt). Set by the decoder when it starts the sequence from a cached prefix
+    /// ([`Self::adopt_prefix`], [`Self::adopt_rows`], or [`Self::mark_cached`] for a decoder that copies the
+    /// rows) and kept for the sequence's life, so the scheduler can report it with the outcome.
+    pub fn cached_rows(&self) -> u32 {
+        self.cached_rows
+    }
+    /// Record that the first `rows` tokens of this sequence came from a prefix cache.
+    pub fn mark_cached(&mut self, rows: u32) {
+        self.cached_rows = rows;
     }
 
     /// The `(physical_block, offset)` holding logical token `tok` (must be < len).
@@ -217,6 +231,7 @@ impl BlockTable {
         }
         self.blocks.clear();
         self.len = 0;
+        self.cached_rows = 0;
     }
 
     /// Fork a sequence that **shares** all of this table's blocks (incref each) —
@@ -227,7 +242,7 @@ impl BlockTable {
         for &b in &self.blocks {
             alloc.incref(b);
         }
-        BlockTable { blocks: self.blocks.clone(), len: self.len, kv_namespace: self.kv_namespace, state_row: None }
+        BlockTable { blocks: self.blocks.clone(), len: self.len, kv_namespace: self.kv_namespace, state_row: None, cached_rows: 0 }
     }
 
     /// Copy-on-write the last (writable) block if it is shared: allocate a private
@@ -259,7 +274,7 @@ impl BlockTable {
     /// demoted from: the restored bytes are only valid under it.
     pub fn restore(kv_namespace: KvNamespace, blocks: Vec<u32>, len: u32) -> BlockTable {
         assert!(!blocks.is_empty() || len == 0, "restore: {len} tokens cannot live in zero blocks");
-        BlockTable { blocks, len, kv_namespace, state_row: None }
+        BlockTable { blocks, len, kv_namespace, state_row: None, cached_rows: 0 }
     }
 
     /// Start a FRESH table from shared full prefix blocks (incref each): the
@@ -273,6 +288,7 @@ impl BlockTable {
             self.blocks.push(b);
         }
         self.len = blocks.len() as u32 * alloc.block_size();
+        self.cached_rows = self.len;
     }
 }
 
@@ -288,6 +304,7 @@ impl BlockTable {
             self.blocks.push(b);
         }
         self.len = len;
+        self.cached_rows = len;
     }
 }
 

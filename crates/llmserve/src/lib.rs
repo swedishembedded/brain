@@ -23,6 +23,7 @@
 
 use capability::{ActionResult, ActionSpec, Invocation, ParamSpec, ParamType, Progress};
 use data::qwen_tokenizer::QwenBpe;
+use data::tokenizer::Tokenizer;
 use model::serve::{PagedDecoder, PromptEmbeds, RejectReason, Request, Scheduler};
 pub use qwen3::chat::ParsedRequest;
 use qwen3::chat::SeqState;
@@ -159,6 +160,8 @@ impl Job {
 struct Capture {
     logprobs: bool,
     token_ids: bool,
+    /// `return_raw`: also return the generated text exactly as decoded (see [`Capture::attach`]).
+    raw: bool,
     prompt: Vec<u32>,
 }
 
@@ -168,18 +171,36 @@ struct Capture {
 pub fn with_token_capture(spec: ActionSpec) -> ActionSpec {
     spec.param(ParamSpec::new("logprobs", ParamType::Bool, "return the log-probability of each sampled token (completion_logprobs, with completion_token_ids)"))
         .param(ParamSpec::new("return_token_ids", ParamType::Bool, "return the prompt's and the completion's token ids (prompt_token_ids, completion_token_ids)"))
+        .param(ParamSpec::new(
+            "return_raw",
+            ParamType::Bool,
+            "return the completion exactly as the model wrote it (raw_output): every reasoning, tool-call and control marker, ending with the stop token if one ended it; the chat fields are parsed from this text",
+        ))
 }
 
 impl Capture {
     fn of(inv: &Invocation, prompt: &[u32]) -> Capture {
         let logprobs = inv.get_bool("logprobs").unwrap_or(false);
         let token_ids = inv.get_bool("return_token_ids").unwrap_or(false);
-        Capture { logprobs, token_ids, prompt: if token_ids { prompt.to_vec() } else { Vec::new() } }
+        let raw = inv.get_bool("return_raw").unwrap_or(false);
+        Capture { logprobs, token_ids, raw, prompt: if token_ids { prompt.to_vec() } else { Vec::new() } }
     }
 
-    /// `outcome` with the requested ids and log-probabilities added.
-    fn attach(&self, outcome: capability::Outcome, tokens: &[u32], logprobs: &[f32]) -> capability::Outcome {
-        let mut outcome = outcome;
+    /// `outcome` with what the scheduler knows of the request added: how many prompt tokens its prefix cache
+    /// served (`cached_tokens`, always) and, on request, the ids, log-probabilities and the raw text.
+    /// `raw_output` is the decode of every generated token followed by the stop token that ended the
+    /// sequence (which the scheduler withholds from `tokens`), so it shows what the model wrote even where the
+    /// chat scanner reads it differently.
+    fn attach(&self, outcome: capability::Outcome, tok: &QwenBpe, tokens: &[u32], logprobs: &[f32], completion: model::serve::Completion) -> capability::Outcome {
+        let mut outcome = outcome.set("cached_tokens", serde_json::json!(completion.cached_tokens));
+        if self.raw {
+            let mut ended = tokens.to_vec();
+            ended.extend(completion.stop_token);
+            outcome = outcome.set("raw_output", serde_json::json!(tok.decode(&ended)));
+            if let Some(stop) = completion.stop_token {
+                outcome = outcome.set("stop_token", serde_json::json!(stop));
+            }
+        }
         if self.token_ids {
             outcome = outcome.set("prompt_token_ids", serde_json::json!(self.prompt)).set("completion_token_ids", serde_json::json!(tokens));
         }
@@ -381,6 +402,18 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
         }
     }
 
+    /// The outcome of a finished job: the sequence's own (text, reasoning, tool calls, finish reason), who served
+    /// it, and what the request asked to get back. A generation the chat scanner could not read cleanly is
+    /// logged, so a reply that lost a tool call is visible on the server and not only in the outcome.
+    #[allow(clippy::too_many_arguments)]
+    fn conclude(job: &Job, label: &str, seq: SeqState, tok: &QwenBpe, tokens: &[u32], logprobs: &[f32], completion: model::serve::Completion, progress: &mut dyn FnMut(Progress)) -> capability::Outcome {
+        let outcome = Self::named(seq.finish(tok, tokens, progress), job);
+        if let Some(anomalies) = outcome.outputs.get("scan_anomalies") {
+            residency::log::warn(&format!("{label}: a generation of {} tokens did not read as clean chat output: {anomalies}", tokens.len()));
+        }
+        job.capture.attach(outcome, tok, tokens, logprobs, completion)
+    }
+
     /// One iteration: stream each open job's new suffix and check its stop
     /// strings and cancellation (a triggered job is cancelled and finished at
     /// once - `Scheduler::cancel` returns its tokens so far and reclaims its
@@ -398,10 +431,10 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
             let Some(all_tokens) = self.sched.tokens_of(id) else { continue };
             let seq = self.jobs[bi].seq.as_mut().expect("an open job has its stream");
             if seq.advance(tok, all_tokens, &mut |p| progress(bi, p)) {
+                let completion = self.sched.completion_of(id);
                 let (toks, logprobs) = self.sched.cancel_detailed(id).unwrap_or_default();
                 let seq = self.jobs[bi].seq.take().expect("checked above");
-                let outcome = Self::named(seq.finish(tok, &toks, &mut |p| progress(bi, p)), &self.jobs[bi]);
-                let outcome = self.jobs[bi].capture.attach(outcome, &toks, &logprobs);
+                let outcome = Self::conclude(&self.jobs[bi], self.front.label(), seq, tok, &toks, &logprobs, completion, &mut |p| progress(bi, p));
                 self.open.remove(&bi);
                 finished.push((bi, Ok(outcome)));
             }
@@ -435,12 +468,13 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
             finished.push((bi, Err(self.front.rejection(&self.jobs[bi].invocation, &reason))));
         }
         let mut logprobs_of: std::collections::HashMap<u64, Vec<f32>> = report.completed_logprobs.into_iter().collect();
+        let mut meta_of: std::collections::HashMap<u64, model::serve::Completion> = report.completed_meta.into_iter().collect();
         for (id, toks) in report.completed {
             let bi = job_of(&self.jobs, id);
             let logprobs = logprobs_of.remove(&id).unwrap_or_default();
             if let Some(seq) = self.jobs[bi].seq.take() {
-                let outcome = Self::named(seq.finish(tok, &toks, &mut |p| progress(bi, p)), &self.jobs[bi]);
-                let outcome = self.jobs[bi].capture.attach(outcome, &toks, &logprobs);
+                let completion = meta_of.remove(&id).unwrap_or_default();
+                let outcome = Self::conclude(&self.jobs[bi], self.front.label(), seq, tok, &toks, &logprobs, completion, &mut |p| progress(bi, p));
                 finished.push((bi, Ok(outcome)));
             }
             self.open.remove(&bi);
