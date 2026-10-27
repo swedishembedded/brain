@@ -50,7 +50,7 @@ pub mod hardware;
 /// A device's memory limits as separate answers: allocation, binding,
 /// workspace and working set.
 pub mod memory;
-pub use memory::{AllocPolicy, MemAdvice, MemoryLimits, MemoryUsage, PlacementFacts, PrefetchTarget};
+pub use memory::{AllocPolicy, DeviceOutOfMemory, MemAdvice, MemoryLimits, MemoryUsage, PlacementFacts, PrefetchTarget};
 
 // The neutral handles and the `Backend` trait are `Send + Sync` on native (the
 // CPU backend hands disjoint buffer sub-ranges to rayon workers, and models cross

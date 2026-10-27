@@ -752,7 +752,14 @@ impl CudaBackend {
     fn alloc(&self, bytes: u64, what: &str) -> exec::DeviceMem {
         self.ctx
             .alloc(bytes as usize)
-            .unwrap_or_else(|e| panic!("backend-cuda: allocating {bytes} bytes for {what} failed: {e}"))
+            .unwrap_or_else(|e| {
+                let detail = e.to_string();
+                // A full card is not a bug: unwind with a payload the scheduler can tell apart (see `DeviceOutOfMemory`).
+                if detail.contains("out of memory") {
+                    std::panic::resume_unwind(Box::new(backend_api::DeviceOutOfMemory { bytes, what: what.to_string(), detail }));
+                }
+                panic!("backend-cuda: allocating {bytes} bytes for {what} failed: {detail}")
+            })
     }
 
     /// The uniform allocation every step of this shape shares.

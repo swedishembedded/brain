@@ -284,6 +284,12 @@ pub trait PagedDecoder {
         self.prefill_chunks(jobs)
     }
 
+    /// A prefill call unwound with a device allocation failure
+    /// ([`gpu_core::DeviceOutOfMemory`]): drop whatever prompt the decoder was
+    /// reading in and leave the device idle, so the scheduler can release the
+    /// prefilling sequences and go on. The default holds no such work.
+    fn abandon_prefill(&mut self) {}
+
     // ---- speculative decoding (optional; see [`speculate`]) ----
     //
     // Every method below defaults to "this decoder does not speculate", so an
@@ -466,6 +472,19 @@ pub struct PrefillJob<'a> {
     pub budget: usize,
     /// The embedding rows of the prompt, when it carries any.
     pub embeds: Option<&'a PromptEmbeds>,
+}
+
+/// `f`, with a device allocation failure it unwinds with
+/// ([`gpu_core::DeviceOutOfMemory`]) returned as an error. Any other panic keeps
+/// unwinding: only a full card is a condition the scheduler can serve through.
+fn catch_device_oom<R>(f: impl FnOnce() -> R) -> Result<R, gpu_core::DeviceOutOfMemory> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(r) => Ok(r),
+        Err(payload) => match payload.downcast::<gpu_core::DeviceOutOfMemory>() {
+            Ok(oom) => Err(*oom),
+            Err(other) => std::panic::resume_unwind(other),
+        },
+    }
 }
 
 /// What one [`PagedDecoder::prefill_chunk`] call achieved.
@@ -766,6 +785,9 @@ pub enum RejectReason {
     /// The embedding rows do not fit the request or the decoder (see
     /// [`PromptEmbeds::refusal`]).
     InvalidEmbeds { why: String },
+    /// The card had no memory left for the step that was reading this prompt in.
+    /// Retrying later, or with a shorter prompt, can succeed.
+    DeviceOutOfMemory { bytes: u64 },
 }
 
 impl std::fmt::Display for RejectReason {
@@ -782,6 +804,7 @@ impl std::fmt::Display for RejectReason {
                 write!(f, "adapter {} is not available", adapter.kv_namespace())
             }
             RejectReason::InvalidEmbeds { why } => write!(f, "invalid embedding rows: {why}"),
+            RejectReason::DeviceOutOfMemory { bytes } => write!(f, "the device ran out of memory ({bytes} bytes refused) while the prompt was read in"),
         }
     }
 }
@@ -1756,8 +1779,12 @@ impl<D: PagedDecoder> Scheduler<D> {
         }
         let mut jobs: Vec<PrefillJob<'_>> =
             self.prefilling.iter_mut().zip(&takes).filter(|(_, &take)| take > 0).map(|(p, &take)| PrefillJob { table: &mut p.table, prompt: &p.prompt, budget: take, embeds: p.embeds.as_deref() }).collect();
-        let progress = self.dec.prefill_chunks(&mut jobs);
+        let progress = catch_device_oom(|| self.dec.prefill_chunks(&mut jobs));
         drop(jobs);
+        let progress = match progress {
+            Ok(progress) => progress,
+            Err(oom) => return self.refuse_prefilling(report, oom),
+        };
         assert_eq!(progress.len(), takes.iter().filter(|&&t| t > 0).count(), "prefill_chunks answers every job");
         let mut finished = Vec::new();
         let mut answers = progress.into_iter();
@@ -1793,8 +1820,12 @@ impl<D: PagedDecoder> Scheduler<D> {
         let wait = self.running.iter().all(|r| r.done);
         let mut jobs: Vec<PrefillJob<'_>> =
             self.prefilling.iter_mut().map(|p| PrefillJob { table: &mut p.table, prompt: &p.prompt, budget: p.prompt.len() - p.done, embeds: p.embeds.as_deref() }).collect();
-        let progress = self.dec.prefill_background(&mut jobs, wait);
+        let progress = catch_device_oom(|| self.dec.prefill_background(&mut jobs, wait));
         drop(jobs);
+        let progress = match progress {
+            Ok(progress) => progress,
+            Err(oom) => return self.refuse_prefilling(report, oom),
+        };
         assert_eq!(progress.len(), self.prefilling.len(), "prefill_background answers every job");
         let mut finished = Vec::new();
         for (idx, (p, answer)) in self.prefilling.iter_mut().zip(progress).enumerate() {
@@ -1810,6 +1841,22 @@ impl<D: PagedDecoder> Scheduler<D> {
         }
         for (p, hidden) in starting.into_iter().rev() {
             self.start_running(p, hidden, report);
+        }
+    }
+
+    /// A prefill call ran the card out of memory: the prompts being read in are
+    /// refused (their blocks and adapter pins returned) and the decoder drops its
+    /// prefill work, while everything already decoding goes on. All of them, not
+    /// only the one that hit the wall: the call's answers for the others are lost
+    /// with its unwind, and a prompt half read in cannot be resumed from a state
+    /// nobody reported.
+    fn refuse_prefilling(&mut self, report: &mut StepReport, oom: gpu_core::DeviceOutOfMemory) {
+        let bytes = oom.bytes;
+        self.dec.abandon_prefill();
+        for mut p in std::mem::take(&mut self.prefilling) {
+            self.dec.release_table(&mut p.table);
+            self.unpin(p.adapter);
+            report.rejected.push((p.id, RejectReason::DeviceOutOfMemory { bytes }));
         }
     }
 
@@ -1846,9 +1893,16 @@ impl<D: PagedDecoder> Scheduler<D> {
                         break;
                     }
                     let slice = budget_left.max(1);
-                    let progress = match p.embeds.as_deref() {
+                    let progress = catch_device_oom(|| match p.embeds.as_deref() {
                         Some(e) => self.dec.prefill_chunk_embeds(&mut p.table, &p.prompt, e, slice),
                         None => self.dec.prefill_chunk(&mut p.table, &p.prompt, slice),
+                    });
+                    let progress = match progress {
+                        Ok(progress) => progress,
+                        Err(oom) => {
+                            self.refuse_prefilling(report, oom);
+                            break;
+                        }
                     };
                     let consumed = match progress {
                         PrefillProgress::Partial { consumed } => {

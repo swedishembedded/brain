@@ -23,7 +23,7 @@
 //! `dyn`, and async device init / read-back via `new_async` / `read_async`).
 
 pub use backend_api::{
-    f, AllocPolicy, BufUsage, DeviceBuffer, DeviceCaps, DeviceClass, DeviceStats, MemAdvice, MemoryLimits, MemoryUsage,
+    f, AllocPolicy, BufUsage, DeviceBuffer, DeviceCaps, DeviceClass, DeviceOutOfMemory, DeviceStats, MemAdvice, MemoryLimits, MemoryUsage,
     NumericSupport, PlacementFacts, PrefetchTarget, Step, StepMeta,
 };
 pub use backend_api::select;

@@ -212,3 +212,26 @@ pub struct MemoryUsage {
     pub reserved: u64,
     pub peak_live: u64,
 }
+
+/// A device allocation the driver refused for lack of memory.
+///
+/// The payload a backend unwinds with (`std::panic::resume_unwind`) when an
+/// allocation inside a step fails, so a scheduler that owns the step can tell a
+/// full card from a bug: it fails the requests that step carried with a
+/// classed error and keeps serving, instead of tearing the whole instance down.
+/// No panic message is printed for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceOutOfMemory {
+    /// Bytes the refused allocation asked for.
+    pub bytes: u64,
+    /// What the allocation was for.
+    pub what: String,
+    /// The driver's own words.
+    pub detail: String,
+}
+
+impl std::fmt::Display for DeviceOutOfMemory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "device out of memory allocating {} bytes for {}: {}", self.bytes, self.what, self.detail)
+    }
+}

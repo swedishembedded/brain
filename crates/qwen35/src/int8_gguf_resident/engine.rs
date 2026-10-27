@@ -896,6 +896,14 @@ impl PagedDecoder for Qwen35GgufEngine {
     fn background_prefill(&self) -> bool {
         self.background_on && self.inst.background_prefill_available()
     }
+    /// The prompt being read in is dropped and the cards drained: its slot's rows
+    /// are released with the sequence, and the next prompt starts from a clean
+    /// working copy of the recurrent state.
+    fn abandon_prefill(&mut self) {
+        if let Some(bg) = self.background.take() {
+            self.inst.abandon_prefill(bg.task);
+        }
+    }
     fn prefill_background(&mut self, jobs: &mut [PrefillJob<'_>], wait: bool) -> Vec<PrefillProgress> {
         let started = std::time::Instant::now();
         let progress = self.read_prompts_in(jobs, wait);

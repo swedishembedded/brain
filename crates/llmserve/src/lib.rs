@@ -83,7 +83,11 @@ pub trait Frontend {
     }
     /// The caller-facing message for a request the scheduler refused.
     fn rejection(&self, _inv: &Invocation, reason: &RejectReason) -> String {
-        format!("{}: {reason}", self.label())
+        match reason {
+            // A full card is a condition the caller can act on (retry later, shorten the prompt), so it carries a class.
+            RejectReason::DeviceOutOfMemory { .. } => capability::failure::tag(capability::failure::FailureClass::BackendFailure, format!("{}: {reason}", self.label())),
+            _ => format!("{}: {reason}", self.label()),
+        }
     }
 }
 
