@@ -20,6 +20,7 @@ pub mod caps;
 pub mod base_source;
 pub mod config;
 mod decode_state;
+pub mod decode_tape;
 pub mod dflash2;
 pub mod finetune;
 pub mod fp8_source;

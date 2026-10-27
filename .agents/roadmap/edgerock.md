@@ -251,6 +251,37 @@ reference exactly in both variants on both backends; flipping the tie rule in
   (b1 stays at 7.4 ms, 493 submits and 863 dispatches per step), bf16 bank and recurrent state, and the conversion
   of the M6a-c kernels into roofline-selected candidates (they are still wired by device capability checks in
   `anchor_memory.rs`, `gqa_mixer.rs` and the qwen35 model, the pattern the new rule forbids).
+- [x] M6e (partial): the decode step as a recording. `Qwen35::slot_decode` replays a `gpu_core::tape` recording of the
+  windowed step (`qwen35::decode_tape`): every per-step input (token ids, rope rows, ring row and live count, slot rows,
+  block tables, the anchor memory's read and push plans) lives in persistent buffers (`DecodeInputs`) rewritten by 11 small
+  host writes, the ring attention has one scratch size and split count at every position, and the bank commits (the only
+  position-dependent dispatches) moved out of the step: they are issued after it from the pool's pending blocks
+  (`CommitPlan`, `state_commit_steps`; one implementation for the recorded and the ordinary step). A recording is per batch
+  size (any mix of slots replays it), taken once a size has held 3 steps, at most 4 kept per pool (0.74 GiB each at b64);
+  `Qwen35::set_slot_decode_tape(on)` (default off) selects it; off is the reference path. Parity: recorded hidden states equal the ordinary step bit for
+  bit at b1 (48 positions, four ring wraps, twelve commits) and b3 with changing composition, on CPU, default device and CUDA
+  fp32 (`edgerock_decode`); `edgerock_serve`, `edgerock_golden_parity`, catalog `edgerock_served` and `edgerock_real_weights
+  -- --ignored` pass.
+  <!-- perf-number: measured with edgerock_decode_profile (real weights, position 2048, bf16) and tps.py on one NVIDIA GH200 (GPU1), 2026-10-27; reproduce with those tools -->
+  | batch | ms/step ordinary | ms/step recorded | submits/step | graph alone, no host (layers) |
+  |---|---|---|---|---|
+  | 1 | 7.97 | 7.83 | 493 -> 3 | 7.18 |
+  | 8 | 9.21 | 9.09 | 493 -> 3 | 8.41 |
+  | 64 | 21.95 | 21.96 | 493 -> 3 | 21.14 |
+  **Finding: the host was not the bottleneck.** The pass already issued each step asynchronously, so wall time equals the
+  card's time (the layers replayed back to back take 7.18 ms; head and readback are the other 0.65 ms). The recording takes
+  the host out (3 submits instead of 493) but buys 1 to 2 percent; through the API (`tps.py`, 62-token prompts, 512 tokens)
+  it is neutral at b1/b8 (138 / 881-896 tok/s against 135-138 / 892-923 ordinary) and 8 percent BEHIND at b64 (2970-2993
+  against 3232-3272 aggregate; waiting for a size to hold did not close it, cause not isolated: the b64 profile is equal, so
+  suspect the interleaved prefill rounds or the ramp). Hence `set_slot_decode_tape` defaults to OFF; the recording is
+  there for the device-side work below, which is what can make it pay. The 4.3 ms target needs fewer and faster device dispatches, not less host. Graph
+  breakdown at b1 (859 dispatches, 8.4 us each on average; event stamps add about 2.9 us per node to the profile table):
+  library GEMMs 304 calls, about 3.4 ms against a 2.3 ms weight-streaming floor (about 8.7 GB); the anchor memory read
+  (`anchor_read_softmax_apply` 8 x 110 us, `anchor_read_scores_group` 8 x 59 us, gate) about 1.5 ms, whose banks are only
+  64 MiB, so it is a grid too small for the card; 184 `cast_f32_bf16` and 64 `add_rms_quant` / `quant_epilogue_cluster`
+  launches about 1.1 ms; 49 `rmsnorm_rows` 0.3 ms; GDN decode 24 x 14 us. Next: split the memory read across more
+  workgroups (roofline candidate), fuse the activation casts into the producing norm/epilogue, run independent projections
+  of a layer as parallel graph branches, and put the head in the recording.
 - [x] M5 (forward part): the released weights against the independent reference
   forward (`tools/goldens/edgerock_dump_real_reference.py`, fp32 CPU torch, a
   1400-token prompt that slides the window and commits five blocks, then asks about

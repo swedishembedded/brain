@@ -11,7 +11,7 @@
 //! position where the ring and the anchor bank are full: the steady state of a long conversation.
 //!
 //! Usage: `edgerock_decode_profile (<model dir> | synth[:<layers>]) [--batch N] [--position P] [--reps R]
-//! [--device gpu1] [--backend cuda]`. `synth` is the published shape with `<layers>` layers (default 8) on random
+//! [--tape] [--device gpu1] [--backend cuda]`. `--tape` replays a recorded step instead of building every step. `synth` is the published shape with `<layers>` layers (default 8) on random
 //! weights, for measuring the hardware without the checkpoint. Prints the state bytes per sequence, the
 //! wall time of a step, and the per-kernel device table.
 
@@ -28,7 +28,7 @@ fn main() {
     let set = gpu_core::select_compute(flag("--device").as_deref().unwrap_or("gpu"), flag("--backend").as_deref()).unwrap_or_else(|e| panic!("{e}"));
     let _ = set;
     let Some(target) = a.get(1).filter(|s| !s.starts_with("--")).cloned() else {
-        eprintln!("usage: edgerock_decode_profile (<model dir> | synth[:layers]) [--batch N] [--position P] [--reps R] [--device gpu1]");
+        eprintln!("usage: edgerock_decode_profile (<model dir> | synth[:layers]) [--batch N] [--position P] [--reps R] [--tape] [--device gpu1]");
         std::process::exit(2);
     };
     // `--weights` takes the generic tier grammar (`bf16`, `f16`, `f32`, `i8`, `q4`, `nf4`, `f8e4m3`, `f4e2m1`, with
@@ -57,6 +57,7 @@ fn main() {
         let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
         println!("device live after load: {:.2} GiB ({:.2} GiB of it weights and tables, {:.2} GiB the slot pool)", gib(u.live), gib(u.live.saturating_sub(eng.state_bytes())), gib(eng.state_bytes()));
     }
+    eng.set_decode_tape(a.iter().any(|x| x == "--tape"));
     let mut tables: Vec<BlockTable> = (0..batch).map(|_| BlockTable::new()).collect();
     let t0 = std::time::Instant::now();
     let profile_prefill = a.iter().any(|x| x == "--prefill-profile");
@@ -95,7 +96,22 @@ fn main() {
         let n = u64::from(reps).max(1);
         println!("per step: {} submits, {} dispatches, {} readbacks, {} host writes, {} uniform allocs", (b.submits - a.submits) / n, (b.dispatches - a.dispatches) / n, (b.readbacks - a.readbacks) / n, (b.writes - a.writes) / n, (b.uniform_allocs - a.uniform_allocs) / n);
     }
+    if let Some(u) = eng.gpu().memory_usage() {
+        println!("device live after decoding: {:.2} GiB", u.live as f64 / (1u64 << 30) as f64);
+    }
     println!("wall per step (best of {reps}): {:.2} ms  = {:.1} tok/s/stream, {:.0} tok/s aggregate", best * 1e3, 1.0 / best, batch as f64 / best);
+    let recorded = eng.time_recorded_step(20);
+    if let Some(ms) = recorded {
+        println!("recorded layers replayed back to back, no host in the loop: {ms:.3} ms per step (head and readback excluded)");
+    }
+    // The recorded step as one program: each kernel timed from the previous one's completion, so the table carries no
+    // launch latency and its total is what the card spends on a step.
+    if let Some(rows) = eng.profile_recorded_step(5) {
+        let device_ms: f64 = rows.iter().map(|r| r.1).sum();
+        println!("recorded step: {device_ms:.3} ms device time over {} dispatches", rows.iter().map(|r| r.2).sum::<u64>());
+        gpu_core::profile::print_device_table("recorded decode step", best * 1e3, Some(rows));
+        return;
+    }
     let timed = eng.gpu().set_kernel_timing(true);
     if timed {
         eng.gpu().reset_kernel_times();

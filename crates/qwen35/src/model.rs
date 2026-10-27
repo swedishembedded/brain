@@ -72,6 +72,7 @@ use optim::Optim;
 
 use crate::config::{LayerType, Qwen35Config};
 pub use crate::decode_state::{slot_state_bytes, SlotPool};
+use crate::decode_tape::{DecodeInputs, SlotDecodeTape};
 pub use crate::train_base::TrainOpts;
 use crate::decode_state::DecodeState;
 #[path = "objectives.rs"]
@@ -1236,6 +1237,8 @@ pub struct Qwen35 {
     /// Whether a decode step may use the native fused kernels where the device
     /// offers them - see [`Self::set_decode_fusion`].
     decode_fusion: Cell<bool>,
+    /// Whether `slot_decode` replays a recorded step ([`Self::set_slot_decode_tape`]).
+    slot_decode_tapes: Cell<bool>,
 }
 
 /// Which per-sequence GQA cache / GDN recurrent state one [`Qwen35::
@@ -2042,6 +2045,7 @@ impl Qwen35 {
             exact_rounds: Cell::new(true),
             exact_decode: Cell::new(None),
             decode_fusion: Cell::new(true),
+            slot_decode_tapes: Cell::new(false),
         }
     }
 
@@ -4306,6 +4310,100 @@ impl Qwen35 {
         self.run_decode_batch_with(tokens, caches, input_override, None)
     }
 
+    /// Buffers for one decode step's per-step inputs over `bsz` rows ([`DecodeInputs`]), drawn from the scratch arena
+    /// when one is open. Their contents are set by [`Self::write_decode_inputs`].
+    fn alloc_decode_inputs(&self, bsz: u32, caches: &BatchDecodeCaches, verify: bool) -> DecodeInputs {
+        // The exact-decode regime sizes every row's attention from the configured context, not from the longest
+        // sequence that happens to share this step: `cap` and the block-table width are then the same for a row
+        // whatever its neighbours are, so its split count and key partition cannot move. Unused block-table entries
+        // are never read (`seq_lens` bounds every access), and a split past a sequence's live length is one
+        // degenerate record.
+        let max_bt = match self.exact_decode.get().filter(|_| !verify) {
+            Some(ctx) => ctx.div_ceil(caches.gqa_cap).max(1),
+            None => caches.seqs.iter().map(|s| s.window.blocks().len()).max().unwrap_or(1).max(1) as u32,
+        };
+        self.alloc_decode_inputs_at(bsz, max_bt)
+    }
+
+    /// [`Self::alloc_decode_inputs`] for a block-table width of `max_bt`.
+    pub(crate) fn alloc_decode_inputs_at(&self, bsz: u32, max_bt: u32) -> DecodeInputs {
+        let g = &self.gpu;
+        let rows = u64::from(bsz);
+        let memory = self.cfg.anchor_memory.as_ref().map(|_| {
+            let shape = self.memory_shape_of(bsz, 1);
+            (shape, model::anchor_memory::ReadPlan::alloc(g, &shape, bsz), model::anchor_memory::PushPlan::alloc(g, bsz))
+        });
+        DecodeInputs {
+            bsz,
+            max_bt,
+            tok: g.storage(rows),
+            cos: g.storage(rows * u64::from(self.cfg.rotary_dim() / 2)),
+            sin: g.storage(rows * u64::from(self.cfg.rotary_dim() / 2)),
+            blocks: g.storage(rows),
+            offsets: g.storage(rows),
+            slot_rows: g.storage(rows),
+            block_tables: g.storage(rows * u64::from(max_bt)),
+            seq_lens: g.storage(rows),
+            memory,
+        }
+    }
+
+    /// Set a decode step's per-step inputs for `caches`' rows: the one place the host's view of the batch (positions,
+    /// rings, slots) becomes the data the step's kernels read. `tokens` is `None` on a step that starts from a residual.
+    /// Every write comes before the step's first dispatch.
+    pub(crate) fn write_decode_inputs(&self, inputs: &DecodeInputs, tokens: Option<&[u32]>, caches: &BatchDecodeCaches) {
+        let (g, c) = (&self.gpu, &self.cfg);
+        let seqs = caches.seqs;
+        assert_eq!(seqs.len(), inputs.bsz as usize, "qwen35: decode inputs for {} rows written for {}", inputs.bsz, seqs.len());
+        if let Some(tokens) = tokens {
+            g.write(&inputs.tok, tokens);
+        }
+        // The batch's M-RoPE table at each sequence's OWN position, and the four paged-KV index buffers. The rows of
+        // one batch are unrelated positions and unrelated physical blocks, which is the whole difference from a chunk.
+        let yarn = c.rope_table();
+        let positions: Vec<[u32; 3]> = seqs.iter().map(|s| [s.pos, s.pos, s.pos]).collect();
+        let (cos_rows, sin_rows) = qwen3vl::mrope::mrope_tables_scaled(&positions, c.mrope_section, c.rotary_dim(), c.rope_theta, yarn.as_ref().map(|(f, a)| (f.as_slice(), *a)));
+        g.write_f32(&inputs.cos, &cos_rows);
+        g.write_f32(&inputs.sin, &sin_rows);
+        // Each row's block table is its sequence's blocks in logical order, padded to the widest (a single entry for a
+        // one-block sequence).
+        let windows: Vec<Vec<u32>> = seqs.iter().map(|s| s.window.blocks()).collect();
+        let bs = caches.gqa_cap;
+        g.write(&inputs.blocks, &seqs.iter().zip(&windows).map(|(s, w)| if s.window.is_ring() { w[0] } else { w[(s.pos / bs) as usize] }).collect::<Vec<u32>>());
+        g.write(&inputs.offsets, &seqs.iter().map(|s| if s.window.is_ring() { model::gqa_mixer::ring_row(s.pos, bs) } else { s.pos % bs }).collect::<Vec<u32>>());
+        g.write(&inputs.slot_rows, &seqs.iter().map(|s| s.slot).collect::<Vec<u32>>());
+        g.write(&inputs.block_tables, &windows.iter().flat_map(|w| (0..inputs.max_bt as usize).map(|i| w.get(i).copied().unwrap_or(0))).collect::<Vec<u32>>());
+        g.write(&inputs.seq_lens, &seqs.iter().map(|s| if s.window.is_ring() { model::gqa_mixer::ring_live(s.pos, bs) } else { s.pos + 1 }).collect::<Vec<u32>>());
+        // The anchor memory's per-step plans, shared by every memory layer: which bank slots each sequence reads, and
+        // the record it pushes.
+        if let Some((shape, read, push)) = &inputs.memory {
+            read.write(g, shape, &seqs.iter().map(|s| (s.slot, s.pos)).collect::<Vec<_>>());
+            push.write(g, shape, &seqs.iter().enumerate().map(|(i, s)| model::anchor_memory::Push { slot: s.slot, pos: s.pos, src_row: i as u32 }).collect::<Vec<_>>());
+        }
+    }
+
+    /// The bank commits a decode step over `seqs` owes: one per sequence whose token completes a commit block (the
+    /// host knows every position). Empty on most steps, and then nothing moves.
+    fn decode_memory_commits(&self, seqs: &[BatchSeq]) -> Vec<model::anchor_memory::Commit> {
+        let Some(cb) = self.cfg.memory_commit_block() else { return Vec::new() };
+        seqs.iter().filter(|s| s.pos % cb == cb - 1).map(|s| model::anchor_memory::Commit { slot: s.slot, first_pos: s.pos + 1 - cb, count: cb }).collect()
+    }
+
+    /// Commit `commits` into every layer's bank (a decode step's pushes are already in the pending blocks). Issued after
+    /// the step so the step's own dispatches do not depend on which sequences complete a block.
+    fn commit_memory_blocks(&self, pools: &[Option<model::anchor_memory::AnchorBankPool>], commits: &[model::anchor_memory::Commit]) {
+        if commits.is_empty() {
+            return;
+        }
+        let g = &self.gpu;
+        let shape = self.memory_shape_of(commits.len() as u32, 1);
+        let plan = model::anchor_memory::CommitPlan::upload(g, &shape, commits);
+        let ids = self.memory_ids();
+        for pool in pools.iter().flatten() {
+            g.submit(&[], &model::anchor_memory::state_commit_steps(g, &ids.memory, &shape, pool, &plan));
+        }
+    }
+
     /// [`Self::run_decode_batch`] in exact-decode groups of at most `step` rows.
     ///
     /// One `run_decode_batch` per group, each a complete pass over every layer
@@ -4352,6 +4450,17 @@ impl Qwen35 {
         if let Some(step) = group.filter(|&step| tokens.len() as u32 > step) {
             return self.run_decode_batch_exact_groups(tokens, caches, input_override, step);
         }
+        let hidden = self.decode_batch_dispatches(tokens, caches, input_override, verify, None);
+        // The step's banks that filled a block commit once its dispatches are issued (see `decode_memory_commits`).
+        self.commit_memory_blocks(caches.memory, &self.decode_memory_commits(caches.seqs));
+        hidden
+    }
+
+    /// The dispatches of one decode step over `caches`' rows, without the anchor-memory bank commits (which the caller
+    /// issues after, see [`Self::commit_memory_blocks`]). With `persist` the step's per-step inputs live in those
+    /// buffers (the caller rewrites them before every replay of a recording of this call), the scratch arena and the
+    /// pass are left to the recording, and nothing in the dispatch list depends on the positions.
+    fn decode_batch_dispatches(&self, tokens: &[u32], caches: &BatchDecodeCaches, input_override: Option<&[f32]>, verify: Option<&verify::VerifyBatch>, persist: Option<&DecodeInputs>) -> DeviceBuffer {
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
@@ -4407,6 +4516,9 @@ impl Qwen35 {
         // replays a fixed request sequence, and a different count is a
         // different one. One row is the decode step itself and shares its arena
         // (and, with it, its graph).
+        //
+        // A recording (`persist`) needs neither: it keeps every buffer it names alive itself, and a replay is one
+        // submission by construction.
         let arena = if verify.is_some() {
             verify::VERIFY_ARENA
         } else if caches.one_sequence {
@@ -4414,9 +4526,9 @@ impl Qwen35 {
         } else {
             DECODE_ARENA
         };
-        let _ops_scratch = self.ops.gpu().scratch_scope_in(arena);
-        let _scratch = g.scratch_scope_in(arena);
-        let _pass = g.pass_scope();
+        let _ops_scratch = persist.is_none().then(|| self.ops.gpu().scratch_scope_in(arena));
+        let _scratch = persist.is_none().then(|| g.scratch_scope_in(arena));
+        let _pass = persist.is_none().then(|| g.pass_scope());
 
         // Every host->device write of the token comes BEFORE the first
         // dispatch is submitted. A write is ordered after all earlier
@@ -4425,89 +4537,51 @@ impl Qwen35 {
         // `input_override` is the batch's input rows: on a non-embed stage the
         // previous stage's residual, on the embed stage the caller's own input
         // embeddings in place of the token gather (`Qwen35::prefill_embeds`).
-        let (tok_buf, mut res) = match input_override {
+        assert!(persist.is_none() || (input_override.is_none() && verify.is_none() && c.swa_window.is_some()), "qwen35::decode_batch_dispatches: a recorded step is a token step of a sliding-window config");
+        let owned_inputs;
+        let inputs = match persist {
+            Some(inputs) => {
+                assert_eq!(inputs.bsz, bsz, "qwen35::decode_batch_dispatches: inputs for {} rows used for {bsz}", inputs.bsz);
+                inputs
+            }
+            None => {
+                owned_inputs = self.alloc_decode_inputs(bsz, caches, verify.is_some());
+                &owned_inputs
+            }
+        };
+        let mut res = match input_override {
             Some(x) => {
                 assert_eq!(x.len(), (bsz * d) as usize, "qwen35: run_decode_batch input_override must be the batch's whole [bsz, d_model] block");
                 let res = g.storage((bsz * d) as u64);
                 g.write_f32(&res, x);
-                (None, res)
+                res
             }
             None => {
                 assert!(self.shard.embed, "qwen35: run_decode_batch on a NON-EMBED stage needs the previous stage's residual as `input_override` (this stage holds no `tok.weight`)");
-                let tok_buf = g.storage(bsz as u64);
-                g.write(&tok_buf, tokens);
-                (Some(tok_buf), g.storage((bsz * d) as u64))
+                g.storage((bsz * d) as u64)
             }
         };
-
-        // Built ONCE per step, shared by every layer in it (the same discipline
-        // `run_prefill_chunk_stage` uses for a round): the batch's M-RoPE
-        // table at each sequence's OWN position, and the four paged-KV index
-        // buffers. The rows of one batch are unrelated positions and unrelated
-        // physical blocks, which is the whole difference from a chunk.
-        let yarn = c.rope_table();
-        let positions: Vec<[u32; 3]> = caches.seqs.iter().map(|s| [s.pos, s.pos, s.pos]).collect();
-        let (cos_rows, sin_rows) =
-            qwen3vl::mrope::mrope_tables_scaled(&positions, c.mrope_section, c.rotary_dim(), c.rope_theta, yarn.as_ref().map(|(f, a)| (f.as_slice(), *a)));
-        let cos = g.storage(cos_rows.len() as u64);
-        g.write_f32(&cos, &cos_rows);
-        let sin = g.storage(sin_rows.len() as u64);
-        g.write_f32(&sin, &sin_rows);
-        // Each row's block table is its sequence's blocks in logical order,
-        // padded to the longest (a single entry for a one-block sequence).
-        let windows: Vec<Vec<u32>> = caches.seqs.iter().map(|s| s.window.blocks()).collect();
-        // The exact-decode regime sizes every row's attention from the
-        // configured context, not from the longest sequence that happens to
-        // share this step: `cap` and the block-table width are then the same
-        // for a row whatever its neighbours are, so its split count and key
-        // partition cannot move. Unused block-table entries are never read
-        // (`seq_lens` bounds every access), and a split past a sequence's live
-        // length is one degenerate record.
-        let exact_ctx = self.exact_decode.get().filter(|_| verify.is_none());
-        let max_bt = match exact_ctx {
-            Some(ctx) => ctx.div_ceil(caches.gqa_cap).max(1),
-            None => windows.iter().map(Vec::len).max().unwrap_or(1).max(1) as u32,
-        };
-        let bs = caches.gqa_cap;
-        let blocks = g.storage(bsz as u64);
-        g.write(&blocks, &caches.seqs.iter().zip(&windows).map(|(s, w)| if s.window.is_ring() { w[0] } else { w[(s.pos / bs) as usize] }).collect::<Vec<u32>>());
-        let offsets = g.storage(bsz as u64);
-        g.write(&offsets, &caches.seqs.iter().map(|s| if s.window.is_ring() { model::gqa_mixer::ring_row(s.pos, bs) } else { s.pos % bs }).collect::<Vec<u32>>());
-        let slot_rows = g.storage(bsz as u64);
-        g.write(&slot_rows, &caches.seqs.iter().map(|s| s.slot).collect::<Vec<u32>>());
-        let block_tables = g.storage(bsz as u64 * max_bt as u64);
-        g.write(&block_tables, &windows.iter().flat_map(|w| (0..max_bt as usize).map(|i| w.get(i).copied().unwrap_or(0))).collect::<Vec<u32>>());
-        let seq_lens = g.storage(bsz as u64);
-        let live = |s: &BatchSeq| if s.window.is_ring() { model::gqa_mixer::ring_live(s.pos, bs) } else { s.pos + 1 };
-        g.write(&seq_lens, &caches.seqs.iter().map(live).collect::<Vec<u32>>());
-        // The anchor memory's per-step plans, shared by every memory layer: which bank slots each sequence reads,
-        // and the records it pushes and the block it may complete.
-        let memory_step = c.anchor_memory.as_ref().map(|_| {
-            let shape = self.memory_shape_of(bsz, 1);
-            let cb = shape.commit_block;
-            let read = model::anchor_memory::ReadPlan::upload(g, &shape, &caches.seqs.iter().map(|s| (s.slot, s.pos)).collect::<Vec<_>>());
-            let pushes: Vec<_> = caches.seqs.iter().enumerate().map(|(i, s)| model::anchor_memory::Push { slot: s.slot, pos: s.pos, src_row: i as u32 }).collect();
-            // Only the sequences whose token completes a block commit (the host knows every position), so a step
-            // where none does moves no bank at all. Windowed configs run no decode tape, which is what lets the
-            // dispatch list depend on the positions.
-            let commits: Vec<_> = caches
-                .seqs
-                .iter()
-                .filter(|s| s.pos % cb == cb - 1)
-                .map(|s| model::anchor_memory::Commit { slot: s.slot, first_pos: s.pos + 1 - cb, count: cb })
-                .collect();
-            (shape, read, model::anchor_memory::WritePlan::upload(g, &shape, &pushes, &commits))
-        });
+        let tok_buf = input_override.is_none().then_some(&inputs.tok);
+        self.write_decode_inputs(inputs, if tok_buf.is_some() { Some(tokens) } else { None }, caches);
+        let DecodeInputs { cos, sin, blocks, offsets, slot_rows, block_tables, seq_lens, max_bt, memory, .. } = inputs;
+        let max_bt = *max_bt;
+        let memory_step = memory.as_ref().map(|(shape, read, push)| (shape, read, push));
         // A verify step's per-sequence layout, uploaded with the rest of the
         // step's inputs (a write after the first dispatch would split the pass).
         let verify_layout = verify.map(|v| v.upload(g));
+        let live = |s: &BatchSeq| if s.window.is_ring() { model::gqa_mixer::ring_live(s.pos, caches.gqa_cap) } else { s.pos + 1 };
         let longest = caches.seqs.iter().map(live).max().unwrap_or(1);
         let cap_bound = caches.gqa_cap * max_bt;
+        let exact_ctx = self.exact_decode.get().filter(|_| verify.is_none());
+        // A ring is a fixed-size window, so its attention scratch has one size and one split count at every position:
+        // the step is the same dispatch list from the first token to the last, which is what a recording needs. Any other
+        // window sizes it to the longest live sequence, in buckets.
+        let all_ring = caches.seqs.iter().all(|s| s.window.is_ring());
         let paged = model::gqa_mixer::PagedDecodeBatch {
-            blocks: &blocks,
-            offsets: &offsets,
-            block_tables: &block_tables,
-            seq_lens: &seq_lens,
+            blocks,
+            offsets,
+            block_tables,
+            seq_lens,
             block_size: caches.gqa_cap,
             max_bt,
             // The scores/probs stride, and with it those buffers' size and the
@@ -4518,11 +4592,11 @@ impl Qwen35 {
             // the next. Sized exactly it changed every token: a fresh buffer
             // and a new grid per attention layer, which defeats both the arena
             // and the replayed graph. Now both change once per bucket.
-            cap: exact_ctx.unwrap_or(longest).next_multiple_of(DECODE_CAP_BUCKET).min(cap_bound),
+            cap: if all_ring { cap_bound } else { exact_ctx.unwrap_or(longest).next_multiple_of(DECODE_CAP_BUCKET).min(cap_bound) },
             pin_splits: exact_ctx.is_some(),
         };
 
-        if let Some(tok_buf) = &tok_buf {
+        if let Some(tok_buf) = tok_buf {
             self.embed_rows(tok_buf, bsz, &res);
         }
 
@@ -4583,7 +4657,7 @@ impl Qwen35 {
                         GdnCall::DecodePool(model::gdn_mixer::GdnPoolRows {
                             state: &pool.state[l],
                             hist: &pool.hist[l],
-                            rows: &slot_rows,
+                            rows: slot_rows,
                             gather: POOL_ROWS_GATHER2,
                             scatter: POOL_ROWS_SCATTER2,
                             fuse: self.decode_fusion.get(),
@@ -4596,14 +4670,14 @@ impl Qwen35 {
                     self.layer_gdn_fwd_pre(l, &xn1, pre1, epilogue, bsz, call).0
                 }
                 LayerType::Full => {
-                    let dctx = GqaDecodeCtx { paged: &paged, layer: &caches.gqa_kv[l], cos: &cos, sin: &sin };
+                    let dctx = GqaDecodeCtx { paged: &paged, layer: &caches.gqa_kv[l], cos, sin };
                     let attn = self.layer_gqa_fwd_pre(&format!("blocks.{l}.self_attn"), &xn1, pre1, epilogue, bsz, Some(GqaCached::Decode(&dctx))).0;
                     match (&memory_step, c.layer_has_memory(l)) {
-                        (Some((shape, read, write)), true) => {
+                        (Some((shape, read, push)), true) => {
                             let project = self.memory_project(l, shape, bsz);
                             let pool = caches.memory[l].as_ref().expect("a memory layer has a bank pool");
                             // The memory reads the layer's residual input, like the attention it sits beside.
-                            let memory = model::anchor_memory::anchor_memory_decode_fwd(g, &self.memory_ids(), shape, &self.memory_weights_at(l, &cos, &sin), &project, &res, pool, read, write);
+                            let memory = model::anchor_memory::anchor_memory_decode_fwd(g, &self.memory_ids(), shape, &self.memory_weights_at(l, cos, sin), &project, &res, pool, read, push);
                             let sum = g.storage((bsz * d) as u64);
                             g.submit(&[], &[g.step(ADD2, &[&attn, &memory, &sum], &[bsz * d], bsz * d)]);
                             sum
@@ -5614,10 +5688,61 @@ impl Qwen35 {
             memory: &pool.memory,
         };
         let tokens: Vec<u32> = items.iter().map(|&(_, t)| t).collect();
-        let hidden = self.run_decode_batch(&tokens, &caches, None);
+        let hidden = if self.slot_tapes_usable() { self.replay_slot_decode(pool, &tokens, &caches) } else { self.run_decode_batch(&tokens, &caches, None) };
         for &(slot, _) in items {
             pool.pos.borrow_mut()[slot as usize] += 1;
         }
+        hidden
+    }
+
+    /// Whether a slot decode step may run as a recording: the dispatches must not depend on anything the host rewrites
+    /// per step but the inputs ([`DecodeInputs`]). An adapter bank correcting the step (rows indexed by position within
+    /// the dispatch) and the exact-decode regime (its own grouping) are the exceptions.
+    fn slot_tapes_usable(&self) -> bool {
+        self.slot_decode_tapes.get() && self.adapter_rows.get() == 0 && self.exact_decode.get().is_none()
+    }
+
+    /// Turn the recorded slot decode step on or off (off by default: measured neutral at small batches and behind at 64
+    /// through the API, see the roadmap). Off is the reference every recording is gated against:
+    /// the same dispatches built and launched the ordinary way.
+    pub fn set_slot_decode_tape(&self, on: bool) {
+        self.slot_decode_tapes.set(on);
+    }
+
+    /// One decode step of `caches`' rows as a replay of the recording for this batch size, made on first use. Returns the
+    /// final-norm hidden block, which lives in the recording's own buffer: valid until the next decode step on this pool.
+    fn replay_slot_decode(&self, pool: &SlotPool, tokens: &[u32], caches: &BatchDecodeCaches) -> DeviceBuffer {
+        let g = &self.gpu;
+        let bsz = tokens.len() as u32;
+        let fusion = self.decode_fusion.get();
+        let (cached, worth_recording) = {
+            let mut tapes = pool.tapes.borrow_mut();
+            let held = tapes.note(bsz);
+            (tapes.take(bsz, fusion), held)
+        };
+        let step = match cached {
+            Some(step) => {
+                self.write_decode_inputs(&step.inputs, Some(tokens), caches);
+                step
+            }
+            // A batch size that has not held yet is built the ordinary way (see `RECORD_AFTER_STEPS`).
+            None if !worth_recording => {
+                return self.run_decode_batch(tokens, caches, None);
+            }
+            None => {
+                let inputs = self.alloc_decode_inputs_at(bsz, 1);
+                // Building the step writes the inputs for these rows too (host writes land immediately).
+                g.begin_tape();
+                let hidden = self.decode_batch_dispatches(tokens, caches, None, None, Some(&inputs));
+                let tape = g.end_tape();
+                SlotDecodeTape { bsz, fusion, tape, inputs, hidden }
+            }
+        };
+        g.replay_tape(&step.tape);
+        let hidden = step.hidden.clone();
+        pool.tapes.borrow_mut().put(step);
+        // The commits are issued after the replay, in stream order, and read only the pending blocks the replay pushed.
+        self.commit_memory_blocks(caches.memory, &self.decode_memory_commits(caches.seqs));
         hidden
     }
 

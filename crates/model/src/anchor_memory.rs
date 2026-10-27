@@ -858,6 +858,20 @@ impl ReadPlan {
     /// `seqs[i] = (pool row, position of the sequence's first row in this read)`; all rows of one sequence in one
     /// read lie in one commit block.
     pub fn upload(g: &Gpu, s: &AnchorMemoryShape, seqs: &[(u32, u32)]) -> ReadPlan {
+        let plan = ReadPlan::alloc(g, s, seqs.len() as u32);
+        plan.write(g, s, seqs);
+        plan
+    }
+
+    /// A plan for `n_seq` sequences whose contents are set by [`Self::write`]: the buffers a recorded decode step
+    /// binds once and the engine rewrites before every replay.
+    pub fn alloc(g: &Gpu, s: &AnchorMemoryShape, n_seq: u32) -> ReadPlan {
+        let refs = u64::from(n_seq) * u64::from(s.n_kv_heads) * u64::from(s.capacity);
+        ReadPlan { slots: g.storage(u64::from(n_seq).max(1)), refs: g.storage(refs.max(1)) }
+    }
+
+    /// Set the plan's contents for `seqs` (as [`Self::upload`]); the plan keeps its buffers.
+    pub fn write(&self, g: &Gpu, s: &AnchorMemoryShape, seqs: &[(u32, u32)]) {
         let (gg, k, c) = (s.n_kv_heads as usize, s.capacity as usize, s.commit_block);
         let mut refs = Vec::with_capacity(seqs.len() * gg * k);
         for &(_, pos) in seqs {
@@ -867,7 +881,8 @@ impl ReadPlan {
                 refs.extend((0..k).map(|slot| if slot < filled { slot as u32 + 1 } else { 0 }));
             }
         }
-        ReadPlan { slots: upload_u32(g, &seqs.iter().map(|&(slot, _)| slot).collect::<Vec<_>>()), refs: upload_u32(g, &refs) }
+        g.write(&self.slots, &seqs.iter().map(|&(slot, _)| slot).collect::<Vec<_>>());
+        g.write(&self.refs, &refs);
     }
 }
 
@@ -889,47 +904,109 @@ pub struct Commit {
     pub count: u32,
 }
 
-/// The writes of a step, uploaded once and shared by every memory layer.
-pub struct WritePlan {
+/// The records a step pushes into the pending blocks: one per sequence, whatever its position. The plan's contents
+/// are data ([`Self::write`]), so a recorded step binds its buffer once and the engine rewrites it before each replay.
+pub struct PushPlan {
     n_push: u32,
     push: DeviceBuffer,
+}
+
+impl PushPlan {
+    pub fn upload(g: &Gpu, s: &AnchorMemoryShape, pushes: &[Push]) -> PushPlan {
+        let plan = PushPlan::alloc(g, pushes.len() as u32);
+        plan.write(g, s, pushes);
+        plan
+    }
+
+    /// A plan for `n_push` records, set by [`Self::write`].
+    pub fn alloc(g: &Gpu, n_push: u32) -> PushPlan {
+        PushPlan { n_push, push: g.storage(u64::from(n_push).max(1) * 2) }
+    }
+
+    /// Set the plan's contents; `pushes` must be as many as the plan was allocated for.
+    pub fn write(&self, g: &Gpu, s: &AnchorMemoryShape, pushes: &[Push]) {
+        assert_eq!(pushes.len(), self.n_push as usize, "anchor memory: a push plan for {} records written with {}", self.n_push, pushes.len());
+        let c = s.commit_block;
+        g.write(&self.push, &pushes.iter().flat_map(|p| [p.slot * c + p.pos % c, p.src_row]).collect::<Vec<u32>>());
+    }
+}
+
+/// The bank commits of a step: the sequences whose pending block it completes. Issued AFTER the step's pushes
+/// ([`state_commit_steps`]). A commit reads only the pool's pending block, so it does not have to sit among the
+/// step's other dispatches, and the step's own dispatch list is then the same whichever sequences complete a block.
+pub struct CommitPlan {
     n_commit: u32,
     commit: DeviceBuffer,
     store: DeviceBuffer,
 }
 
-impl WritePlan {
-    pub fn upload(g: &Gpu, s: &AnchorMemoryShape, pushes: &[Push], commits: &[Commit]) -> WritePlan {
+impl CommitPlan {
+    pub fn upload(g: &Gpu, s: &AnchorMemoryShape, commits: &[Commit]) -> CommitPlan {
         let c = s.commit_block;
-        let push: Vec<u32> = pushes.iter().flat_map(|p| [p.slot * c + p.pos % c, p.src_row]).collect();
-        let commit: Vec<u32> = commits.iter().enumerate().flat_map(|(i, m)| [m.slot, i as u32, m.slot * c, m.first_pos, m.count]).collect();
+        let meta: Vec<u32> = commits.iter().enumerate().flat_map(|(i, m)| [m.slot, i as u32, m.slot * c, m.first_pos, m.count]).collect();
         let store: Vec<u32> = commits.iter().enumerate().flat_map(|(i, m)| [i as u32, m.slot]).collect();
-        WritePlan { n_push: pushes.len() as u32, push: upload_u32(g, &push), n_commit: commits.len() as u32, commit: upload_u32(g, &commit), store: upload_u32(g, &store) }
+        CommitPlan { n_commit: commits.len() as u32, commit: upload_u32(g, &meta), store: upload_u32(g, &store) }
+    }
+
+    /// Commits planned.
+    pub fn len(&self) -> u32 {
+        self.n_commit
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.n_commit == 0
     }
 }
 
-/// Push the step's records into the pending blocks, then run the planned commits: merge pending into the bank
-/// (`anchor_commit` orders, `anchor_bank_gather` moves the keys and values) into a scratch bank and store it back to
-/// the pool rows. The scratch hop exists because a commit reads the whole old bank of its row.
-#[allow(clippy::too_many_arguments)]
-pub fn state_write_steps(g: &Gpu, ids: &AnchorMemoryKernels, s: &AnchorMemoryShape, pool: &AnchorBankPool, plan: &WritePlan, key: &DeviceBuffer, value: &DeviceBuffer, scores: &DeviceBuffer) -> Vec<Step> {
+/// The writes of a step, uploaded once and shared by every memory layer.
+pub struct WritePlan {
+    pub push: PushPlan,
+    pub commit: CommitPlan,
+}
+
+impl WritePlan {
+    pub fn upload(g: &Gpu, s: &AnchorMemoryShape, pushes: &[Push], commits: &[Commit]) -> WritePlan {
+        WritePlan { push: PushPlan::upload(g, s, pushes), commit: CommitPlan::upload(g, s, commits) }
+    }
+}
+
+/// Push the step's records into the pending blocks.
+pub fn state_push_steps(g: &Gpu, ids: &AnchorMemoryKernels, s: &AnchorMemoryShape, pool: &AnchorBankPool, plan: &PushPlan, key: &DeviceBuffer, value: &DeviceBuffer, scores: &DeviceBuffer) -> Vec<Step> {
+    let (gg, hd) = (s.n_kv_heads, s.head_dim);
+    if plan.n_push == 0 {
+        return Vec::new();
+    }
+    vec![g.step(ids.push, &[&plan.push, key, value, scores, &pool.pend_key, &pool.pend_value, &pool.pend_score], &[plan.n_push, gg, hd], threads("anchor_push", u64::from(plan.n_push) * u64::from(gg * hd)))]
+}
+
+/// Run the planned commits: merge pending into the bank (`anchor_commit` orders, `anchor_bank_gather` moves the keys
+/// and values) into a scratch bank and store it back to the pool rows. The scratch hop exists because a commit reads
+/// the whole old bank of its row.
+pub fn state_commit_steps(g: &Gpu, ids: &AnchorMemoryKernels, s: &AnchorMemoryShape, pool: &AnchorBankPool, plan: &CommitPlan) -> Vec<Step> {
     let (gg, k, hd) = (s.n_kv_heads, s.capacity, s.head_dim);
     let gd = gg * hd;
-    let mut steps = Vec::new();
-    if plan.n_push > 0 {
-        steps.push(g.step(ids.push, &[&plan.push, key, value, scores, &pool.pend_key, &pool.pend_value, &pool.pend_score], &[plan.n_push, gg, hd], threads("anchor_push", u64::from(plan.n_push) * u64::from(gd))));
+    if plan.n_commit == 0 {
+        return Vec::new();
     }
-    if plan.n_commit > 0 {
-        let nc = plan.n_commit;
-        let bank = u64::from(nc) * u64::from(gg) * u64::from(k);
-        let (spos, sscore, ssrc) = (g.storage_uninit(bank), g.storage_uninit(bank), g.storage_uninit(bank));
-        let (skey, svalue) = (g.storage_uninit(bank * u64::from(hd)), g.storage_uninit(bank * u64::from(hd)));
-        steps.push(commit_step(g, ids, s, nc, &plan.commit, (&pool.pos, &pool.score), &pool.pend_score, (&spos, &sscore), &ssrc));
-        steps.push(g.step(ids.bank_gather, &[&plan.commit, &ssrc, &pool.key, &pool.value, &pool.pend_key, &pool.pend_value, &skey, &svalue], &[nc, gg, k, hd], threads("anchor_bank_gather", bank * u64::from(hd))));
-        for (src, dst, stride) in [(&spos, &pool.pos, gg * k), (&sscore, &pool.score, gg * k), (&skey, &pool.key, k * gd), (&svalue, &pool.value, k * gd)] {
-            steps.push(g.step(ids.rows_copy, &[&plan.store, src, dst], &[nc, stride], threads("anchor_rows_copy", u64::from(nc) * u64::from(stride))));
-        }
+    let nc = plan.n_commit;
+    let bank = u64::from(nc) * u64::from(gg) * u64::from(k);
+    let (spos, sscore, ssrc) = (g.storage_uninit(bank), g.storage_uninit(bank), g.storage_uninit(bank));
+    let (skey, svalue) = (g.storage_uninit(bank * u64::from(hd)), g.storage_uninit(bank * u64::from(hd)));
+    let mut steps = vec![
+        commit_step(g, ids, s, nc, &plan.commit, (&pool.pos, &pool.score), &pool.pend_score, (&spos, &sscore), &ssrc),
+        g.step(ids.bank_gather, &[&plan.commit, &ssrc, &pool.key, &pool.value, &pool.pend_key, &pool.pend_value, &skey, &svalue], &[nc, gg, k, hd], threads("anchor_bank_gather", bank * u64::from(hd))),
+    ];
+    for (src, dst, stride) in [(&spos, &pool.pos, gg * k), (&sscore, &pool.score, gg * k), (&skey, &pool.key, k * gd), (&svalue, &pool.value, k * gd)] {
+        steps.push(g.step(ids.rows_copy, &[&plan.store, src, dst], &[nc, stride], threads("anchor_rows_copy", u64::from(nc) * u64::from(stride))));
     }
+    steps
+}
+
+/// Push the step's records, then run its commits ([`state_push_steps`], [`state_commit_steps`]).
+#[allow(clippy::too_many_arguments)]
+pub fn state_write_steps(g: &Gpu, ids: &AnchorMemoryKernels, s: &AnchorMemoryShape, pool: &AnchorBankPool, plan: &WritePlan, key: &DeviceBuffer, value: &DeviceBuffer, scores: &DeviceBuffer) -> Vec<Step> {
+    let mut steps = state_push_steps(g, ids, s, pool, &plan.push, key, value, scores);
+    steps.extend(state_commit_steps(g, ids, s, pool, &plan.commit));
     steps
 }
 
@@ -951,10 +1028,11 @@ fn finish_read(g: &Gpu, ids: &AnchorMemoryIds, s: &AnchorMemoryShape, project: P
 }
 
 /// One decode token of each of `s.n_seq` sequences (`s.t == 1`): the memory's output for `h` (`[n_seq, d_model]`),
-/// reading each sequence's committed bank from `pool`, then pushing its record and committing the block it completes.
-/// `read` and `write` are the step's plans, shared by every memory layer.
+/// reading each sequence's committed bank from `pool`, then pushing its record. The block a sequence completes is
+/// committed by the caller afterwards ([`state_commit_steps`]), once per layer, so this dispatch list does not depend
+/// on the positions. `read` and `push` are the step's plans, shared by every memory layer.
 #[allow(clippy::too_many_arguments)]
-pub fn anchor_memory_decode_fwd(g: &Gpu, ids: &AnchorMemoryIds, s: &AnchorMemoryShape, w: &AnchorMemoryWeights, project: Project, h: &DeviceBuffer, pool: &AnchorBankPool, read: &ReadPlan, write: &WritePlan) -> DeviceBuffer {
+pub fn anchor_memory_decode_fwd(g: &Gpu, ids: &AnchorMemoryIds, s: &AnchorMemoryShape, w: &AnchorMemoryWeights, project: Project, h: &DeviceBuffer, pool: &AnchorBankPool, read: &ReadPlan, push: &PushPlan) -> DeviceBuffer {
     assert_eq!(s.t, 1, "anchor memory decode: one token per sequence");
     let p = memory_projections(g, ids, s, w, project, h);
     let n = s.rows();
@@ -964,7 +1042,7 @@ pub fn anchor_memory_decode_fwd(g: &Gpu, ids: &AnchorMemoryIds, s: &AnchorMemory
     let read_out = g.storage_uninit(u64::from(n) * u64::from(s.n_heads * s.head_dim));
     g.submit(&[], &anchor_read_steps_at(g, &ids.memory, &rs, BankAddressing { kv_rows: pool.capacity, slots: Some(&read.slots) }, &p.query, &pool.key, &pool.value, &read.refs, &logits, &probs, &read_out));
     let out = finish_read(g, ids, s, project, &p.gate, &read_out);
-    g.submit(&[], &state_write_steps(g, &ids.memory, s, pool, write, &p.key, &p.value, &p.scores));
+    g.submit(&[], &state_push_steps(g, &ids.memory, s, pool, push, &p.key, &p.value, &p.scores));
     out
 }
 

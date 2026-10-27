@@ -279,3 +279,66 @@ fn a_reused_slot_starts_from_an_empty_bank_and_ring() {
         assert_eq!(a, b, "{name}: a copied slot continues identically");
     }
 }
+
+/// Decode `plan` (a list of batches of `(slot, token index into the slot's own stream)`) on `pool`, returning every
+/// row's hidden state.
+fn run_batches(m: &Qwen35, pool: &qwen35::model::SlotPool, golden: &Golden, starts: &[usize], plan: &[Vec<u32>]) -> Vec<Vec<f32>> {
+    let mut out = Vec::new();
+    for slots in plan {
+        let items: Vec<(u32, u32)> = slots.iter().map(|&slot| (slot, golden.tokens[pool.position(slot) as usize % golden.tokens.len()])).collect();
+        assert!(items.iter().all(|&(slot, _)| pool.position(slot) as usize >= starts[slot as usize]));
+        out.extend(m.slot_decode(pool, &items));
+    }
+    out
+}
+
+#[test]
+fn a_recorded_decode_step_equals_the_unrecorded_one_bit_for_bit() {
+    let Some(golden) = load("tiny_text") else { return };
+    let cfg = Qwen35Config::edgerock_tiny();
+    // One sequence alone for the whole golden stream (the ring wraps four times, twelve blocks commit), and three at
+    // 7, 19 and 30 tokens whose batch loses a member and regains it: a batch size that holds for a few steps is
+    // recorded once and replayed for every composition of that size (a size seen for two steps is built the ordinary way),
+    // and a commit lands in some steps and not in others.
+    let b1_starts = [0usize];
+    let b1_plan: Vec<Vec<u32>> = (0..golden.tokens.len()).map(|_| vec![0]).collect();
+    let b3_starts = [7usize, 19, 30];
+    let rep = |slots: &[u32], n: usize| std::iter::repeat_n(slots.to_vec(), n);
+    let b3_plan: Vec<Vec<u32>> = rep(&[2, 0, 1], 5).chain(rep(&[0, 2], 2)).chain(rep(&[1, 0, 2], 4)).chain(rep(&[2, 1], 4)).collect();
+    for (name, m, _) in models(&golden, cfg.block_size) {
+        for (label, starts, plan, sizes) in [("b1", &b1_starts[..], &b1_plan, 1usize), ("b3", &b3_starts[..], &b3_plan, 3)] {
+            let prepared = |m: &Qwen35| {
+                let pool = m.new_slot_pool(starts.len() as u32, model::kv_tier::KvTier::F32);
+                for (slot, &start) in starts.iter().enumerate() {
+                    if start > 0 {
+                        m.slot_prefill(&pool, slot as u32, &golden.tokens[..start], 5);
+                    }
+                }
+                pool
+            };
+            m.set_slot_decode_tape(false);
+            let reference_pool = prepared(&m);
+            let reference = run_batches(&m, &reference_pool, &golden, starts, plan);
+            assert_eq!(reference_pool.recorded_steps(), 0, "{name}/{label}: with the tape off nothing is recorded");
+            m.set_slot_decode_tape(true);
+            let pool = prepared(&m);
+            let recorded = run_batches(&m, &pool, &golden, starts, plan);
+            assert_eq!(recorded, reference, "{name}/{label}: a replayed step must give the unrecorded step's hidden states bit for bit");
+            // The sizes that held for `RECORD_AFTER_STEPS` steps in a row.
+            let mut held = std::collections::BTreeSet::new();
+            let mut run = 0;
+            for (i, batch) in plan.iter().enumerate() {
+                run = if i > 0 && plan[i - 1].len() == batch.len() { run + 1 } else { 1 };
+                if run >= qwen35::decode_tape::RECORD_AFTER_STEPS {
+                    held.insert(batch.len());
+                }
+            }
+            assert_eq!(pool.recorded_steps(), held.len(), "{name}/{label}: one recording per batch size that held ({held:?}), replayed for every composition");
+            assert!(held.contains(&sizes) && (label == "b1" || held.len() == 2));
+            // The recorded state goes on exactly as the reference's: the pools hold the same sequences afterwards.
+            for slot in 0..starts.len() as u32 {
+                assert_eq!(pool.position(slot), reference_pool.position(slot));
+            }
+        }
+    }
+}

@@ -143,6 +143,12 @@ impl RingEngine {
         &self.model
     }
 
+    /// Replay a recorded decode step or build every step the ordinary way
+    /// ([`Qwen35::set_slot_decode_tape`]).
+    pub fn set_decode_tape(&self, on: bool) {
+        self.model.set_slot_decode_tape(on);
+    }
+
     /// The device handle, for profiling.
     pub fn gpu(&self) -> &Gpu {
         &self.model.gpu
@@ -234,6 +240,18 @@ impl RingEngine {
             items.push((Self::slot(t), input));
         }
         self.model.slot_decode_dev(&self.pool, &items)
+    }
+
+    /// Device time per kernel of the recorded decode step, as the graph runs it (see
+    /// [`SlotPool::profile_recorded_step`]).
+    pub fn profile_recorded_step(&self, reps: u32) -> Option<Vec<(String, f64, u64)>> {
+        self.pool.profile_recorded_step(&self.model.gpu, reps)
+    }
+
+    /// Milliseconds per replay of the recorded decode step with the host out of the loop (see
+    /// [`SlotPool::time_recorded_step`]).
+    pub fn time_recorded_step(&self, reps: u32) -> Option<f64> {
+        self.pool.time_recorded_step(&self.model.gpu, reps)
     }
 
     /// Per-slot position, for tests: tokens the slot has absorbed.

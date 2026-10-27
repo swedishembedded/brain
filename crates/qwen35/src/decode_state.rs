@@ -153,6 +153,8 @@ pub struct SlotPool {
     pub(crate) memory: Vec<Option<AnchorBankPool>>,
     /// Tokens each slot has absorbed.
     pub(crate) pos: std::cell::RefCell<Vec<u32>>,
+    /// Recorded decode steps over this pool's state ([`crate::decode_tape`]).
+    pub(crate) tapes: std::cell::RefCell<crate::decode_tape::SlotTapes>,
     ledger: Vec<(DeviceBuffer, u64)>,
 }
 
@@ -162,7 +164,7 @@ impl SlotPool {
         let window = cfg.swa_window.expect("a slot pool holds the ring state of a sliding-window config");
         let kv_dim = cfg.kv_dim() as u64;
         let rows = u64::from(window) * u64::from(slots);
-        let mut pool = SlotPool { slots, window, gqa_kv: Vec::new(), gdn_state: Vec::new(), gdn_hist: Vec::new(), work_state: Vec::new(), work_hist: Vec::new(), memory: Vec::new(), pos: std::cell::RefCell::new(vec![0; slots as usize]), ledger: Vec::new() };
+        let mut pool = SlotPool { slots, window, gqa_kv: Vec::new(), gdn_state: Vec::new(), gdn_hist: Vec::new(), work_state: Vec::new(), work_hist: Vec::new(), memory: Vec::new(), pos: std::cell::RefCell::new(vec![0; slots as usize]), tapes: Default::default(), ledger: Vec::new() };
         for (l, ty) in cfg.layer_types().into_iter().enumerate() {
             let owned = shard.owns(l);
             let kv = if owned && ty == LayerType::Full {
@@ -206,6 +208,34 @@ impl SlotPool {
     /// Tokens slot `slot` has absorbed.
     pub fn position(&self, slot: u32) -> u32 {
         self.pos.borrow()[slot as usize]
+    }
+
+    /// Decode steps this pool has recorded and still holds (batch sizes replayed rather than built).
+    pub fn recorded_steps(&self) -> usize {
+        self.tapes.borrow().len()
+    }
+
+    /// Per-kernel device time of the most recently replayed decode step, run `reps` times as one program (see
+    /// [`gpu_core::Gpu::profile_tape`]); `None` when nothing is recorded or the backend cannot time a program.
+    /// Executes the step: the slots' state advances by `reps` tokens.
+    pub fn profile_recorded_step(&self, gpu: &Gpu, reps: u32) -> Option<Vec<(String, f64, u64)>> {
+        gpu.profile_tape(&self.tapes.borrow().latest()?.tape, reps)
+    }
+
+    /// Wall time per replay of the most recently replayed decode step when `reps` replays are issued back to back and
+    /// drained once: the device's time per step with no host in the loop (no input writes, no readback, no events in
+    /// the graph). `None` when nothing is recorded. Executes the step: the slots' state advances by `reps` tokens.
+    pub fn time_recorded_step(&self, gpu: &Gpu, reps: u32) -> Option<f64> {
+        let tapes = self.tapes.borrow();
+        let tape = &tapes.latest()?.tape;
+        gpu.replay_tape(tape);
+        gpu.poll_wait();
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            gpu.replay_tape(tape);
+        }
+        gpu.poll_wait();
+        Some(t0.elapsed().as_secs_f64() * 1e3 / f64::from(reps.max(1)))
     }
 
     /// Bytes the pool holds, summed over the buffers it allocated: independent of every sequence's length.
