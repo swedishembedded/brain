@@ -205,6 +205,31 @@ reference exactly in both variants on both backends; flipping the tie rule in
   tool at the engine, not through the API. KV and state tiers: ring KV bf16/fp8/int8 exists in `KvTier` for the
   fused decode, but the ring prefill path is f32-only (`gqa_mixer_ring_chunk_fwd` asserts it); the bank and the
   recurrent state have no storage tiers (kernels are f32). Not done.
+- [x] M6c (partial): state formats and prefill. One NVIDIA GH200 (GPU1, 96 GiB), real weights.
+  <!-- perf-number: measured with edgerock_decode_profile and tps.py on the GH200, 2026-10-27; reproduce with those tools -->
+  (1) The slot pool stores each ring as f32 or bf16 (`SlotPool` takes a `KvTier`; the decode flash kernel already
+  reads bf16 planes, the ring prefill gathers and writes back through `pack_bf16`/`unpack_bf16`, a generic change in
+  `gqa_mixer_ring_chunk_fwd`). EdgeRock serves with a bf16 ring: 162.5 MiB per slot (was 194.5). Real weights, the
+  1400-token golden prompt through the slot: logits cosine 0.9999925 (f32 ring) and 0.9999937 (bf16 ring), the
+  reference's greedy token with both (`the_serving_slot_matches_the_reference_with_a_bf16_ring`). Decode at batch 64
+  is 22.1 ms (was 23.2). (2) The windowed attention of a prefill round is one workgroup-cooperative kernel
+  (`gqa_ring_chunk_attn`: the n query rows against their window, no full-sequence slabs; WGSL three-kernel path
+  stays the CPU reference): the attention of a 4096-token prefill went from about 1.8 s to 0.25 s, the prefill from
+  3.05 s to 1.6 s (about 2500 tok/s; was 1350). The kernel is still not tensor-core: the next prefill costs are the
+  anchor read (320 ms), the scorer products (75 ms) and host submits (wall 1.6 s against 1.0 s of device time).
+  Through the API (4126-token prompt, `l370`, max_tokens 2048; the API does not honour `ignore_eos`, so streams end
+  at the model's EOS, about 430-470 tokens, and the identical prompts hit the prefix cache): per-stream decode tok/s
+  b1 124.5, b8 103.4, b32 64.0, b64 39.2, b128 22.5, b256 12.9, i.e. decode-only aggregate b8 827, b32 2048,
+  b64 2509, b128 2880, b256 3300. `--max-batch 480` loads (89 GB) but then runs out of memory in a decode step at
+  256 concurrent (`brain: device out of memory allocating 252293120 bytes for storage` is now printed, the request
+  fails with "non-string panic payload": the decode path does not classify the typed OOM); `--max-batch 320` serves
+  256 streams (72 GB), 320 concurrent loses 64 requests. 512 slots do not fit (95.4 GiB estimated).
+  Not done: bf16 bank keys/values (the read kernels are f32; the templated bf16 loads need scalar indices and the
+  grouped kernels read 4-wide), bf16 recurrent state (native CUDA `gdn_decode_pool`, verify/commit entries and the
+  WGSL fallbacks all f32), a decode tape/graph for windowed configs (the step is 493 submits and 863 dispatches
+  with 13 host writes, built from fresh plan buffers each step), the tensor-core windowed prefill kernel, the
+  weight-tier serve option, the generic tier gaps, the longctx perf target. Ceiling now: per-slot state is 162.5 MiB
+  and every attention/recurrence kernel runs at about 1 TB/s, so b256 decode is about 70 ms per step.
 - [x] M5 (forward part): the released weights against the independent reference
   forward (`tools/goldens/edgerock_dump_real_reference.py`, fp32 CPU torch, a
   1400-token prompt that slides the window and commits five blocks, then asks about
