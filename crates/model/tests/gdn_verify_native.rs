@@ -123,7 +123,7 @@ fn verify_rows_and_snapshots_equal_repeated_single_steps_and_commit_restores_the
         let rows_buf = u32s(&g, slots);
         let offs: Vec<u32> = counts.iter().scan(0u32, |acc, &c| { let o = *acc; *acc += c; Some(o) }).collect();
         let (counts_buf, offs_buf) = (u32s(&g, counts), u32s(&g, &offs));
-        let pool = GdnPoolRows { state: &pst, hist: &phi, rows: &rows_buf, gather: 0, scatter: 0, fuse: true, bf16: false };
+        let pool = GdnPoolRows { state: &pst, hist: &phi, rows: &rows_buf, gather: 0, scatter: 0, fuse: true, bf16: false, wide: false };
         let snaps = GdnRowSnapshots::new(&g, &shape, n);
         let layout = VerifyLayout { rows: &rows_buf, counts: &counts_buf, offs: &offs_buf, b };
         let gated = gdn_mixer_verify_pooled_fused(

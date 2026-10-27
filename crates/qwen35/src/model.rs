@@ -1250,6 +1250,8 @@ pub struct Qwen35 {
     decode_fusion: Cell<bool>,
     /// Whether `slot_decode` replays a recorded step ([`Self::set_slot_decode_tape`]).
     slot_decode_tapes: Cell<bool>,
+    /// Whether the pooled Gated-DeltaNet decode runs the occupancy-built candidate ([`Self::set_gdn_pool_wide`]).
+    gdn_pool_wide: Cell<bool>,
 }
 
 /// Which per-sequence GQA cache / GDN recurrent state one [`Qwen35::
@@ -2059,6 +2061,7 @@ impl Qwen35 {
             exact_decode: Cell::new(None),
             decode_fusion: Cell::new(true),
             slot_decode_tapes: Cell::new(false),
+            gdn_pool_wide: Cell::new(true),
         }
     }
 
@@ -4679,6 +4682,7 @@ impl Qwen35 {
                                 scatter: POOL_ROWS_SCATTER2,
                                 fuse: true,
                                 bf16: false,
+                                wide: false,
                             },
                             layout: model::gdn_verify::VerifyLayout { rows: &layout.rows, counts: &layout.counts, offs: &layout.offs, b: v.sequences() },
                             snaps: v.snapshots(l),
@@ -4693,6 +4697,7 @@ impl Qwen35 {
                             scatter: pool_scatter,
                             fuse: self.decode_fusion.get(),
                             bf16: pool.bf16,
+                            wide: self.gdn_pool_wide.get(),
                         })
                     } else if caches.one_sequence {
                         GdnCall::Rows(model::gdn_mixer::GdnStream { state: &caches.seqs[0].gdn_state[l], hist: &caches.seqs[0].gdn_hist[l] })
@@ -5734,6 +5739,12 @@ impl Qwen35 {
     /// the dispatch) and the exact-decode regime (its own grouping) are the exceptions.
     fn slot_tapes_usable(&self) -> bool {
         self.slot_decode_tapes.get() && self.adapter_rows.get() == 0 && self.exact_decode.get().is_none()
+    }
+
+    /// Choose the pooled Gated-DeltaNet decode kernel: the occupancy-built candidate (default; it agrees with the exact body to
+    /// f32 reassociation) or the exact body the WGSL chain is gated against.
+    pub fn set_gdn_pool_wide(&self, on: bool) {
+        self.gdn_pool_wide.set(on);
     }
 
     /// Turn the recorded slot decode step on or off (off by default: measured neutral at small batches and behind at 64

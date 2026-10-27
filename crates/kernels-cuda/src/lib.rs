@@ -1978,6 +1978,46 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/gdn_decode.cu"),
     },
     CudaKernel {
+        name: "gdn_decode_pool_wide",
+        // The wide pooled decode over bf16 pools, asked for by name (`gpu_core::Fused`); see `cu/gdn_decode.cu`.
+        op: Op::RmsNorm,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_gdn_decode_pool_wide",
+        what: "the pooled decode step built for occupancy: a pair of lanes shares each state column (64 registers a thread), the contractions fold with one shuffle, the norm sums by warp tree, fused multiply-adds; agrees with the exact body to f32 reassociation",
+        reported: "native:gdn_decode_pool_wide",
+        block_dim: 512,
+        // One block per (key head, batch row).
+        tile: (1, 1),
+        // The shared body's staging, sized for `gdn_decode`'s at most 8 rows
+        // (see that entry) though a pooled block walks a single one.
+        shared_bytes: 2 * 128 * 4 + 2 * 128 * 4 + 2 * 4 + 2 * 4 + 2 * 8 * 4,
+        programmatic: true,
+        src: include_str!("../cu/gdn_decode.cu"),
+    },
+    CudaKernel {
+        name: "gdn_decode_pool_wide_bf16",
+        // The wide pooled decode over bf16 pools, asked for by name (`gpu_core::Fused`); see `cu/gdn_decode.cu`.
+        op: Op::RmsNorm,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_gdn_decode_pool_wide_bf16",
+        what: "the pooled decode step built for occupancy: a pair of lanes shares each state column (64 registers a thread), the contractions fold with one shuffle, the norm sums by warp tree, fused multiply-adds; agrees with the exact body to f32 reassociation (bf16 pools)",
+        reported: "native:gdn_decode_pool_wide_bf16",
+        block_dim: 512,
+        // One block per (key head, batch row).
+        tile: (1, 1),
+        // The shared body's staging, sized for `gdn_decode`'s at most 8 rows
+        // (see that entry) though a pooled block walks a single one.
+        shared_bytes: 2 * 128 * 4 + 2 * 128 * 4 + 2 * 4 + 2 * 4 + 2 * 8 * 4,
+        programmatic: true,
+        src: include_str!("../cu/gdn_decode.cu"),
+    },
+    CudaKernel {
         name: "gdn_verify_pool",
         // The speculative verify form of `gdn_decode_pool`: a third entry point
         // of that kernel's file. A fused kernel asked for by name (see

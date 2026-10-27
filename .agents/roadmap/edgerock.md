@@ -326,6 +326,15 @@ reference exactly in both variants on both backends; flipping the tie rule in
   repeated q loads), not bandwidth-bound; the capacity unlock (256 slots = 25 GiB) is the gain, the speed needs those kernels.
   The memory's fp32 scorer at more than 32 rows takes `matmul_tile16` (exact fp32, k ascending, 16 x 16 tiles, 64-wide k stages,
   padded shared columns; gate `gpu-core/tests/matmul_tile16.rs` against f64): b256 `matmul_gemv_reg` 4.46 ms -> 1.35 ms.
+- [x] M6h (partial): the pooled Gated-DeltaNet decode as an occupancy-built candidate (`gdn_decode_pool_wide[_bf16]`,
+  `Fused::GdnDecodePoolWide[Bf16]`, `Qwen35::set_gdn_pool_wide`, default on; the bit-identical body stays as the reference
+  candidate). A pair of lanes shares each state column (64 registers a thread), the key and query contractions fold with one
+  shuffle, the gated norm sums by warp tree, products are fused multiply-adds; the conv windows and gates are the exact
+  body's code. Verified against the exact body (`model/tests/gdn_decode_native`): layer output and state within 2e-5
+  relative L2 on an f32 pool, within 2e-3 (output) and 6e-3 (state) on a bf16 pool, windows bit for bit. b256 (position 4096,
+  bf16 pools): 14.75 -> 11.55 ms for the 24 layers (1.1 TB/s of state traffic, not the 2.5 TB/s target: block latency is
+  still about 15 us; unprofiled, no counter tool on the box); at b1 0.38 ms. Forcing 64 registers (two blocks per SM) spills
+  and doubles the time.
 - [x] M5 (forward part): the released weights against the independent reference
   forward (`tools/goldens/edgerock_dump_real_reference.py`, fp32 CPU torch, a
   1400-token prompt that slides the window and commits five blocks, then asks about

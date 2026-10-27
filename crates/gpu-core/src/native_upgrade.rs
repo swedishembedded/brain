@@ -1426,6 +1426,11 @@ pub enum Fused {
     /// `gdn_decode_pool_bf16`: [`Fused::GdnDecodePool`] over pools that store the state and the conv window as bf16
     /// (`unsigned short` elements: widened on load, rounded to nearest even on store); the same params and bindings.
     GdnDecodePoolBf16,
+    /// `gdn_decode_pool_wide` and `gdn_decode_pool_wide_bf16`: [`Fused::GdnDecodePool`] built for occupancy (a lane pair per state
+    /// column, 64 registers a thread), agreeing with the exact body to f32 reassociation rather than bit for bit; at most two
+    /// value heads per key head. The same params and bindings.
+    GdnDecodePoolWide,
+    GdnDecodePoolWideBf16,
     /// `gdn_verify_pool`: [`Fused::GdnDecodePool`] for a speculative verify - each
     /// sequence of the batch takes `counts[bi]` (1..=8) consecutive steps, its
     /// inputs and outputs the rows `offs[bi] ..` of packed token arrays, and the
@@ -1733,6 +1738,8 @@ impl Fused {
             Fused::GdnDecode => "gdn_decode",
             Fused::GdnDecodePool => "gdn_decode_pool",
             Fused::GdnDecodePoolBf16 => "gdn_decode_pool_bf16",
+            Fused::GdnDecodePoolWide => "gdn_decode_pool_wide",
+            Fused::GdnDecodePoolWideBf16 => "gdn_decode_pool_wide_bf16",
             Fused::GdnVerifyPool => "gdn_verify_pool",
             Fused::GdnCommitPool => "gdn_commit_pool",
             Fused::GqaDecodePrep => "gqa_decode_prep",
@@ -1756,7 +1763,7 @@ impl Fused {
             Fused::AddRmsQuant => ADD_RMS_QUANT_BINDINGS,
             Fused::QuantEpilogue => QUANT_EPILOGUE_BINDINGS,
             Fused::GdnDecode => GDN_DECODE_BINDINGS,
-            Fused::GdnDecodePool | Fused::GdnDecodePoolBf16 => GDN_DECODE_POOL_BINDINGS,
+            Fused::GdnDecodePool | Fused::GdnDecodePoolBf16 | Fused::GdnDecodePoolWide | Fused::GdnDecodePoolWideBf16 => GDN_DECODE_POOL_BINDINGS,
             Fused::GdnVerifyPool => GDN_VERIFY_POOL_BINDINGS,
             Fused::GdnCommitPool => GDN_COMMIT_POOL_BINDINGS,
             Fused::GqaDecodePrep => GQA_DECODE_PREP_BINDINGS,
@@ -1786,6 +1793,9 @@ impl Fused {
             // (3 is what one SM's registers hold at 128 live state words).
             Fused::GdnDecode => {
                 matches!(params, [nkh, nvh, group, _, _, _, rows, _] if *nkh >= 1 && (1..=3).contains(group) && *nvh == nkh * group && (1..=8).contains(rows))
+            }
+            Fused::GdnDecodePoolWide | Fused::GdnDecodePoolWideBf16 => {
+                matches!(params, [nkh, nvh, group, _, _, _, b, _] if *nkh >= 1 && (1..=2).contains(group) && *nvh == nkh * group && *b >= 1)
             }
             Fused::GdnDecodePool | Fused::GdnDecodePoolBf16 | Fused::GdnVerifyPool => {
                 matches!(params, [nkh, nvh, group, _, _, _, b, _] if *nkh >= 1 && (1..=3).contains(group) && *nvh == nkh * group && *b >= 1)
@@ -1837,7 +1847,7 @@ impl Fused {
         match self {
             Fused::AddRmsQuant | Fused::QuantEpilogue => params[1],
             Fused::GdnDecode => params[0],
-            Fused::GdnDecodePool | Fused::GdnDecodePoolBf16 | Fused::GdnVerifyPool => params[0] * params[6],
+            Fused::GdnDecodePool | Fused::GdnDecodePoolBf16 | Fused::GdnDecodePoolWide | Fused::GdnDecodePoolWideBf16 | Fused::GdnVerifyPool => params[0] * params[6],
             Fused::GdnCommitPool => params[0] * params[1].div_ceil(GDN_COMMIT_TILE),
             Fused::GqaDecodePrep => (params[0] + params[1]) * params[6],
             Fused::MoeNvfp4GateUp => params[0] * params[2].div_ceil(QGEMV_COLS),

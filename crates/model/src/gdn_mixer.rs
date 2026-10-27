@@ -577,6 +577,9 @@ pub struct GdnPoolRows<'a> {
     /// The pools store bf16 (two elements to a word, widened to f32 wherever they are read): `gather` and `scatter`
     /// are then the bf16 builds, and the fused launch is the bf16 pool kernel.
     pub bf16: bool,
+    /// Run the fused launch as the occupancy-built candidate (`Fused::GdnDecodePoolWide`: agrees with the exact body to f32
+    /// reassociation) where it serves the shape; off, always the exact body the WGSL chain is gated against.
+    pub wide: bool,
 }
 
 /// Where [`gdn_mixer_decode_state_fwd`] finds each batch row's state.
@@ -906,11 +909,10 @@ pub fn gdn_mixer_decode_pooled_fused(
     }
     let gated = g.storage(gdn.b as u64 * shape.value_dim() as u64);
     let params = [shape.nkh, gdn.h, shape.group(), f(1e-6), f(shape.rms_eps), f(1.0f32 / (gdn.dk as f32).sqrt()), gdn.b, 0];
-    let step = g.fused_step(
-        if pool.bf16 { gpu_core::Fused::GdnDecodePoolBf16 } else { gpu_core::Fused::GdnDecodePool },
-        &[mixed_qkv, w.conv1d_weight, pool.hist, bproj, aproj, w.a_log, w.dt_bias, pool.state, z, w.norm_weight, &gated, pool.rows],
-        &params,
-    )?;
+    let bufs = [mixed_qkv, w.conv1d_weight, pool.hist, bproj, aproj, w.a_log, w.dt_bias, pool.state, z, w.norm_weight, &gated, pool.rows];
+    let exact = if pool.bf16 { gpu_core::Fused::GdnDecodePoolBf16 } else { gpu_core::Fused::GdnDecodePool };
+    let wide = if pool.bf16 { gpu_core::Fused::GdnDecodePoolWideBf16 } else { gpu_core::Fused::GdnDecodePoolWide };
+    let step = pool.wide.then(|| g.fused_step(wide, &bufs, &params)).flatten().or_else(|| g.fused_step(exact, &bufs, &params))?;
     g.submit(&[], &[step]);
     Some(gated)
 }

@@ -316,7 +316,7 @@ fn a_pooled_batch_is_byte_identical_to_the_staged_chain() {
 
         let run = |fuse: bool| {
             let (st, hi) = (g.storage_init("state", &state0), g.storage_init("hist", &hist0));
-            let pool = GdnPoolRows { state: &st, hist: &hi, rows: &rows, gather: idx(&g, "pool_rows_gather2"), scatter: idx(&g, "pool_rows_scatter2"), fuse, bf16: false };
+            let pool = GdnPoolRows { state: &st, hist: &hi, rows: &rows, gather: idx(&g, "pool_rows_gather2"), scatter: idx(&g, "pool_rows_scatter2"), fuse, bf16: false, wide: false };
             let gated = gdn_mixer_decode_state_fwd(&g, &ids(&g), &dec_ids(&g), &shape, &w, &mixed, &bp, &ap, &z, &GdnDecodeState::Pool(pool));
             g.poll_wait();
             (bits(g.read(&gated, (b * value_dim) as usize)), bits(g.read(&st, pool_rows as usize * state_len)), bits(g.read(&hi, pool_rows as usize * hist_len)))
@@ -406,5 +406,66 @@ fn a_multi_row_launch_is_byte_identical_to_the_same_rows_one_step_at_a_time() {
         assert_eq!(bits(g.read(&gated, rn * vd)), bits(ref_out), "layer output differs: {ctx}");
         assert_eq!(bits(g.read(&s_nat, state_len)), bits(g.read(&s_ref, state_len)), "recurrent state differs: {ctx}");
         assert_eq!(bits(g.read(&h_nat, hist_len)), bits(g.read(&h_ref, hist_len)), "conv window differs: {ctx}");
+    }
+}
+
+/// The occupancy-built candidate (`Fused::GdnDecodePoolWide`) against the exact body, for an f32 pool and for a bf16 pool: it
+/// reassociates two sums per step, so the layer output and the state agree to f32 rounding (an f32 pool) or, for a bf16 pool
+/// whose stores round, to bf16 storage error; the conv windows are untouched by the reassociation and come out bit for bit.
+#[test]
+fn the_wide_candidate_agrees_with_the_exact_body_within_a_stated_tolerance() {
+    let g = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda(&g) {
+        brain_testutil::skip_unavailable("native fused kernels need a CUDA device");
+        return;
+    }
+    let (dk, dv, kw) = (128u32, 128u32, 4u32);
+    let rel_l2 = |a: &[f32], b: &[f32]| (a.iter().zip(b).map(|(x, y)| f64::from(x - y).powi(2)).sum::<f64>() / b.iter().map(|y| f64::from(*y).powi(2)).sum::<f64>().max(1e-30)).sqrt();
+    // bf16 rows as words (two to a word, the even element low) and back.
+    let round = |x: f32| {
+        let b = x.to_bits();
+        ((b + 0x7fff + ((b >> 16) & 1)) >> 16) as u16
+    };
+    let pack = |v: &[f32]| v.chunks(2).map(|p| f32::from_bits(u32::from(round(p[0])) | u32::from(round(p[1])) << 16)).collect::<Vec<f32>>();
+    let unpack = |w: &[f32]| w.iter().flat_map(|x| [f32::from_bits(x.to_bits() << 16), f32::from_bits(x.to_bits() & 0xFFFF_0000)]).collect::<Vec<f32>>();
+    for (case, &(nkh, group, picked, pool_rows)) in [(2u32, 2u32, &[1u32][..], 3u32), (16, 2, &[5, 1, 7, 0, 3, 6], 8), (4, 1, &[2, 4, 0], 5)].iter().enumerate() {
+        let (nvh, b) = (nkh * group, picked.len() as u32);
+        let shape = GdnMixerShape { gdn: GdnShape { b, h: nvh, t: 1, dk, dv, chunk: 1 }, nkh, conv_kernel: kw, rms_eps: 1e-6 };
+        let (value_dim, conv_dim) = (shape.value_dim(), shape.conv_dim());
+        let state_len = (nvh * dk * dv) as usize;
+        let hist_len = (conv_dim * (kw - 1)) as usize;
+        let mut r = Lcg::new(random_seed());
+        let conv_w = g.storage_init("conv_w", &rnd(&mut r, (conv_dim * kw) as usize, 0.5));
+        let a_log = g.storage_init("a_log", &rnd(&mut r, nvh as usize, 0.5));
+        let dt_bias = g.storage_init("dt_bias", &rnd(&mut r, nvh as usize, 0.5));
+        let norm_w = g.storage_init("norm_w", &rnd(&mut r, dv as usize, 0.5));
+        let ones = g.storage_init("ones", &vec![1.0f32; dk as usize]);
+        let w = GdnMixerWeights { conv1d_weight: &conv_w, a_log: &a_log, dt_bias: &dt_bias, norm_weight: &norm_w, ones_khd: &ones };
+        let mixed = g.storage_init("mixed", &rnd(&mut r, (b * conv_dim) as usize, 1.0));
+        let bp = g.storage_init("bp", &rnd(&mut r, (b * nvh) as usize, 1.0));
+        let ap = g.storage_init("ap", &rnd(&mut r, (b * nvh) as usize, 1.0));
+        let z = g.storage_init("z", &rnd(&mut r, (b * value_dim) as usize, 1.0));
+        let state0 = rnd(&mut r, pool_rows as usize * state_len, 0.3);
+        let hist0 = rnd(&mut r, pool_rows as usize * hist_len, 0.3);
+        let rows = g.storage_init("rows", &picked.iter().map(|&i| f32::from_bits(i)).collect::<Vec<_>>());
+        for bf16 in [false, true] {
+            let run = |wide: bool| {
+                let (s0, h0) = if bf16 { (pack(&state0), pack(&hist0)) } else { (state0.clone(), hist0.clone()) };
+                let (st, hi) = (g.storage_init("state", &s0), g.storage_init("hist", &h0));
+                let pool = GdnPoolRows { state: &st, hist: &hi, rows: &rows, gather: idx(&g, "pool_rows_gather2"), scatter: idx(&g, "pool_rows_scatter2"), fuse: true, bf16, wide };
+                let gated = gdn_mixer_decode_state_fwd(&g, &ids(&g), &dec_ids(&g), &shape, &w, &mixed, &bp, &ap, &z, &GdnDecodeState::Pool(pool));
+                g.poll_wait();
+                let words = |n: usize| if bf16 { n / 2 } else { n };
+                let (state, hist) = (g.read(&st, pool_rows as usize * words(state_len)), g.read(&hi, pool_rows as usize * words(hist_len)));
+                let (state, hist) = if bf16 { (unpack(&state), unpack(&hist)) } else { (state, hist) };
+                (g.read(&gated, (b * value_dim) as usize), state, hist)
+            };
+            let (exact, wide) = (run(false), run(true));
+            let ctx = format!("case {case}: nkh={nkh} group={group} batch={b} bf16={bf16}");
+            let (tol_out, tol_state) = if bf16 { (2e-3, 6e-3) } else { (2e-5, 2e-5) };
+            assert!(rel_l2(&wide.0, &exact.0) < tol_out, "layer output: {ctx}: {}", rel_l2(&wide.0, &exact.0));
+            assert!(rel_l2(&wide.1, &exact.1) < tol_state, "state pool: {ctx}: {}", rel_l2(&wide.1, &exact.1));
+            assert_eq!(bits(wide.2), bits(exact.2), "window pool: {ctx}");
+        }
     }
 }
