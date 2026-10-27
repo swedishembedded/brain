@@ -1075,3 +1075,21 @@ one-shot handler is one future, dropped on disconnect; `bridge::submit` now hold
 (`dropping_a_one_shot_request_cancels_its_generation`). Same experiment after the fix: 28.9 s against 29.4 s, the card idle at 11%.
 The scheduler returns a cancelled sequence's K/V blocks at once (conformance), and a request cancelled while it waits for the encoder is
 not encoded.
+
+## 2026-10-27 round 2: prefill attention on tensor cores
+
+A profile of the prefill of a 930-token page (`engine_bench --prompt 930 --batch 4`, `BRAIN_PROFILE=1` now prints the prefill table too) showed
+59% of its device time (182 of 307 ms) in the decode-shaped score/softmax/apply triad (`paged_decode_scores_batched`, `paged_decode_apply_batched`,
+`decode_softmax_batched`): each query row attended as a separate sequence, on the CUDA cores, over a materialised score slab. The native fp16
+tensor-core flash prefill kernel (`flash_prefill_f16_hd128_bf16`) already existed for every KV tier and the paged block tables, but
+`gqa_chunk_step_kv_paged` only fused at head width 256. It now takes the native kernel at 128 too (`KvKernels::native_flash_prefill`; the reference
+tier withholds it, `portable_prefill`), accuracy held by `serve_fast` (logits cosine against the fp32 reference 0.9998 to 0.99996 at head
+width 128).
+
+| prefill of a 930-token page, GH200 | before | after |
+|---|---|---|
+| per sequence, 8 in a row (best of two) | 83 ms | 36 ms |
+| device time, 4 sequences | 307 ms | 135 ms |
+| attention share of it | 59% | 5.8% |
+
+What is left in prefill: the experts' grouped int8 MMA (49 ms of the 135), the dense bf16 products (30 ms) and the fp32 router (10.5 ms).

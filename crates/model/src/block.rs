@@ -959,6 +959,14 @@ pub fn gqa_chunk_step_kv_paged(
         steps.push(kv.flash_prefill_hd256(g, q, &layer.k, &layer.v, tables, seq_lens, ctx, PrefillShape { n, n_heads, n_kv_heads, head_dim, block_size, max_bt }));
         return steps;
     }
+    // Head width 128 has no portable fused kernel, but the native tensor-core one covers it on every tier that has one.
+    if head_dim == 128 {
+        let shape = PrefillShape { n, n_heads, n_kv_heads, head_dim, block_size, max_bt };
+        if let Some(step) = kv.native_flash_prefill(g, q, &layer.k, &layer.v, tables, seq_lens, ctx, shape) {
+            steps.push(step);
+            return steps;
+        }
+    }
     let shape = PagedDecodeShape { batch: n, n_heads, group: n_heads / n_kv_heads, head_dim, block_size, kv_stride, cap: t_max, max_bt, scale: 1.0 / (head_dim as f32).sqrt() };
     let scores = g.storage(n as u64 * n_heads as u64 * t_max as u64);
     let probs = g.storage(n as u64 * n_heads as u64 * t_max as u64);

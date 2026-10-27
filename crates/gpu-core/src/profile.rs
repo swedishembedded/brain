@@ -813,7 +813,7 @@ pub fn arithmetic_of(name: &str) -> Arithmetic {
         return if exact_fp32 { Arithmetic::CudaCoreProduct } else { Arithmetic::TensorCore };
     }
     let base = name.strip_prefix("native:").unwrap_or(name).split('#').next().unwrap_or(name);
-    if base.contains("mma") {
+    if base.contains("mma") || base.starts_with("flash_prefill_f16") {
         Arithmetic::TensorCore
     } else if base.starts_with("matmul") || base.starts_with("conv2d") || base.contains("gemv") {
         Arithmetic::CudaCoreProduct
@@ -886,7 +886,7 @@ mod arithmetic_tests {
 
     #[test]
     fn rows_are_judged_by_what_multiplies() {
-        for tc in ["library_gemm 1280x32x1280 Bf16.Bf16.F32 tA b1", "library_gemm 768x4096x3072 F32.F32.F32 tA tf32 b1", "native:moe_i8_grouped_mma", "native:matmul_i8_mma_m16"] {
+        for tc in ["native:flash_prefill_f16_hd128_bf16", "library_gemm 1280x32x1280 Bf16.Bf16.F32 tA b1", "library_gemm 768x4096x3072 F32.F32.F32 tA tf32 b1", "native:moe_i8_grouped_mma", "native:matmul_i8_mma_m16"] {
             assert_eq!(arithmetic_of(tc), Arithmetic::TensorCore, "{tc}");
         }
         for cc in ["library_gemm 8x8x8 F32.F32.F32 tA b1", "matmul_reg3", "matmul_gemv_reg#MREG=32", "native:matmul_f32_tiled", "native:conv2d_fwd_f32", "matmul_i8_gemv"] {

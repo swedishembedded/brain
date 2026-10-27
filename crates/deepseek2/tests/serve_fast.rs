@@ -123,15 +123,19 @@ fn the_fast_tier_is_what_auto_picks_on_a_device_that_runs_it() {
 
 #[test]
 fn the_next_token_distribution_of_the_fast_tier_tracks_the_reference() {
-    let (Some(mut fast), Some(mut reference)) = (engine(Precision::Fast), engine(Precision::Reference)) else { return };
-    for (seed, len) in [(1u32, 5usize), (2, 17), (3, 40)] {
-        let p = prompt(seed, len);
-        let (a, b) = (next_logits(&mut fast, &p), next_logits(&mut reference, &p));
-        let cos = cosine(&a, &b);
-        println!("serve_fast prompt of {len}: logits cosine {cos:.5}");
-        assert!(cos >= LOGITS_COSINE, "prompt of {len} tokens: the fast tier's logits drifted from the reference (cosine {cos})");
-        let argmax = |v: &[f32]| v.iter().enumerate().fold(0, |best, (i, x)| if *x > v[best] { i } else { best });
-        assert_eq!(argmax(&a), argmax(&b), "prompt of {len} tokens: the greedy token differs");
+    // Head width 32 attends through the portable kernels; 128 is the width the served model has, whose prefill attention takes the
+    // native fp16 tensor-core kernel from a handful of rows up (the reference tier withholds it).
+    for (heads, head_dim) in [(2u32, 32u32), (1, 128)] {
+        let (Some(mut fast), Some(mut reference)) = (engine_of(shaped(heads, head_dim), Precision::Fast), engine_of(shaped(heads, head_dim), Precision::Reference)) else { return };
+        for (seed, len) in [(1u32, 5usize), (2, 17), (3, 40)] {
+            let p = prompt(seed, len);
+            let (a, b) = (next_logits(&mut fast, &p), next_logits(&mut reference, &p));
+            let cos = cosine(&a, &b);
+            println!("serve_fast head width {head_dim}, prompt of {len}: logits cosine {cos:.5}");
+            assert!(cos >= LOGITS_COSINE, "head width {head_dim}, prompt of {len} tokens: the fast tier's logits drifted from the reference (cosine {cos})");
+            let argmax = |v: &[f32]| v.iter().enumerate().fold(0, |best, (i, x)| if *x > v[best] { i } else { best });
+            assert_eq!(argmax(&a), argmax(&b), "head width {head_dim}, prompt of {len} tokens: the greedy token differs");
+        }
     }
 }
 

@@ -60,6 +60,10 @@ fn main() {
     let rows: Vec<f32> = (0..image_rows * d).map(|i| (((i * 2654435761usize) >> 9) % 2001) as f32 / 4000.0 - 0.25).collect();
     let embeds = PromptEmbeds::run(d, 1, rows).expect("rows");
 
+    // Under BRAIN_PROFILE the prefill runs with the device's per-kernel table too.
+    let profiled = gpu_core::profile::enabled();
+    let timed_prefill = profiled && engine.gpu().set_kernel_timing(true);
+    engine.gpu().reset_kernel_times();
     let mut tables: Vec<BlockTable> = (0..batch).map(|_| BlockTable::new()).collect();
     let mut last: Vec<u32> = Vec::new();
     let t_pre = Instant::now();
@@ -75,13 +79,16 @@ fn main() {
     let pre = t_pre.elapsed().as_secs_f64();
     eprintln!("prefill: {batch} x {prompt_len} tokens in {:.0} ms ({:.0} ms per sequence)", pre * 1e3, pre * 1e3 / batch as f64);
 
+    if timed_prefill {
+        gpu_core::profile::print_device_table("prefill", pre * 1e3, engine.gpu().kernel_times());
+        engine.gpu().set_kernel_timing(false);
+    }
     if let Some(s) = engine.gpu().stats() {
         eprintln!("device counters after prefill: {s:?}");
     }
     let mut per_step = Vec::new();
     let mut digest = 0xcbf29ce484222325u64;
     // Under BRAIN_PROFILE the decode steps run with the device's per-kernel table.
-    let profiled = gpu_core::profile::enabled();
     let timed = profiled && engine.gpu().set_kernel_timing(true);
     engine.gpu().reset_kernel_times();
     let t_all = Instant::now();

@@ -416,7 +416,9 @@ impl Engine {
         }
 
         let max_bt = ec.max_seq.div_ceil(ec.block_size);
+        // The reference tier is fp32 throughout: its prefill attention is the portable triad, not the fp16 tensor-core kernel.
         let kvk = KvKernels::resolve(g, ec.kv)?;
+        let kvk = if fast { kvk } else { kvk.portable_prefill() };
         let rows = ec.max_batch.max(ec.chunk);
         let st = |n: u64| g.storage(n);
         let (r, du) = (rows as u64, d as u64);
