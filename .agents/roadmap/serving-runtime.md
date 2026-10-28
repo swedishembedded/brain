@@ -67,7 +67,7 @@ claimed before its baseline exists.
 | 9 | One logical prefix index (radix over content, namespace, revision) over block-sharing and snapshot physical forms; retention by saved work per byte | `model::paged`, `model::snapshot_prefix` | longest-prefix match without scanning entries | open |
 | 10 | Grace memory as a managed warm KV tier: page-granular async promotion/demotion through the existing upload ring; direct coherent reads measured separately (G9) | `model::kv_offload`, `backend-cuda` | warm-prefix hits served from host without whole-sequence swaps | open |
 | 11 | Batched adapters in prefill and speculation (G8) | `qwen35`, `llmserve` | adapter traffic keeps multi-sequence prefill | open |
-| 12 | Device-resident inter-GPU transfers and collectives (G10) | `model::collective`, residency | no host-staged per-token transfer on supported devices | open |
+| 12 | Device-resident inter-GPU transfers and collectives (G10) | `model::collective`, residency | no host-staged per-token transfer on supported devices | in progress: peer copy and link measurement done (A), stage boundary and NCCL open |
 
 Page size (256 rows today) is part of item 3 and is chosen per cache group by
 measurement (16-256), not fixed globally.
@@ -82,3 +82,15 @@ measurement (16-256), not fixed globally.
   full. Regression test: the next turn of a conversation whose history fills
   10 of 16 blocks livelocked the scheduler before; it now resumes from all 40
   cached tokens and yields the cold run's tokens.
+
+- 2026-10-29 (12, A): `Gpu::copy_to` copies a byte range of a buffer on one
+  card into a buffer of another over the card link when the driver offers one
+  (`cuMemcpyPeerAsync` on the source's stream, peer access enabled per copy,
+  ordered against both cards with the existing event fences, no device-wide
+  sync) and through the host otherwise, stating the reason once per pair.
+  `Gpu::peer_link` is the driver's topology answer
+  (`cuDeviceCanAccessPeer` / `cuDeviceGetP2PAttribute`), `gpu_core::link`
+  measures both paths with a short copy probe (8 MiB x 32, best of 3) and
+  caches the result on disk like the roofs, and `brain devices` prints each
+  pair's path and GB/s. Gates: `gpu-core/tests/peer_copy.rs` (exact on the CPU
+  backend through the host; two-card test is skip-if-absent).

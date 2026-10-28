@@ -289,6 +289,10 @@ pub use tune::cache_dir;
 /// claim in this engine divides by, so that claim is about the device that ran.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod roof;
+/// How two cards reach each other: topology, measured bandwidth, and the
+/// once-stated reason when a transfer has to go through the host.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod link;
 
 /// Per-kernel-kind profiling of a recorded pass - the one implementation the
 /// model benches share.
@@ -1795,6 +1799,64 @@ mod native_facade {
             assert!(!self.taping.load(std::sync::atomic::Ordering::Relaxed), "Gpu::read_into while a tape is being recorded: the recorded dispatches have not run, so the data would be stale");
             self.be().read_into(buf, offset_words, out)
         }
+        /// How this device reaches `other`'s memory directly - the driver's topology answer, no measurement
+        /// (that is [`crate::link::bandwidth`]). No direct path for two different backends, a backend without
+        /// device identity, or a backend with no device-to-device copy, and the link says why.
+        pub fn peer_link(&self, other: &Gpu) -> backend_api::PeerLink {
+            if self.kind() != other.kind() {
+                return backend_api::PeerLink::none(format!("the cards run on different backends ({} and {})", self.kind(), other.kind()));
+            }
+            match other.identity() {
+                Some(id) => self.be().peer_link(&id),
+                None => backend_api::PeerLink::none(format!("the {} backend does not identify its cards", other.kind())),
+            }
+        }
+
+        /// Copy `bytes` of `src` starting at `src_offset_bytes` into `dst` (a buffer of `dst_gpu`, usually
+        /// another card) at `dst_offset_bytes`, by the fastest path the pair has: straight over the
+        /// device-to-device link when the driver offers one, through the host otherwise (the reason is printed
+        /// once per pair). Returns the path used.
+        ///
+        /// Ordered, not blocking: the copy runs after every use of the two ranges submitted so far on any handle
+        /// and anything that uses `dst` afterwards waits for it, so a stage boundary needs no device-wide sync.
+        /// Only the host-staged path waits for `self`'s device, because it has to read the bytes.
+        ///
+        /// # Panics
+        /// If an offset or the length is not a whole number of 32-bit words, a range lies outside its buffer,
+        /// or either handle is recording a tape.
+        pub fn copy_to(&self, src: &DeviceBuffer, src_offset_bytes: u64, dst_gpu: &Gpu, dst: &DeviceBuffer, dst_offset_bytes: u64, bytes: u64) -> crate::link::Path {
+            assert!(
+                (src_offset_bytes | dst_offset_bytes | bytes).is_multiple_of(4),
+                "Gpu::copy_to: offsets ({src_offset_bytes}, {dst_offset_bytes}) and length ({bytes}) must be whole 32-bit words"
+            );
+            for g in [self, dst_gpu] {
+                assert!(!g.taping.load(Ordering::Relaxed), "Gpu::copy_to while a tape is being recorded: the recorded dispatches have not run");
+            }
+            self.be().release_held();
+            dst_gpu.be().release_held();
+            match self.be().copy_to_peer(src, src_offset_bytes, dst, dst_offset_bytes, bytes) {
+                Ok(()) => crate::link::Path::Peer,
+                Err(reason) => {
+                    crate::link::state_host_staging(self, dst_gpu, &reason);
+                    self.copy_via_host(src, src_offset_bytes, dst_gpu, dst, dst_offset_bytes, bytes);
+                    crate::link::Path::HostStaged
+                }
+            }
+        }
+
+        /// [`Self::copy_to`] through a host buffer, in bounded pieces. The path every backend has.
+        pub(crate) fn copy_via_host(&self, src: &DeviceBuffer, src_offset_bytes: u64, dst_gpu: &Gpu, dst: &DeviceBuffer, dst_offset_bytes: u64, bytes: u64) {
+            const PIECE_WORDS: u64 = 1 << 20;
+            let mut host = vec![0f32; PIECE_WORDS.min(bytes / 4) as usize];
+            let (mut at, words) = (0u64, bytes / 4);
+            while at < words {
+                let n = PIECE_WORDS.min(words - at) as usize;
+                self.read_into(src, src_offset_bytes / 4 + at, &mut host[..n]);
+                dst_gpu.write_f32_at(dst, dst_offset_bytes / 4 + at, &host[..n]);
+                at += n as u64;
+            }
+        }
+
         /// Whether [`Self::read_into`] copies only the range asked for on this device; see
         /// `backend_api::Backend::reads_ranges`.
         pub fn reads_ranges(&self) -> bool {

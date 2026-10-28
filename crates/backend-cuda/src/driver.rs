@@ -119,6 +119,9 @@ pub struct Driver {
     /// Managed allocation, prefetch and advice, resolved separately: a driver
     /// without them has no placement policies and everything else works.
     place: Result<PlaceFns, String>,
+    /// Device-to-device access and copies, resolved separately: a driver
+    /// without them has no peer path and everything else works.
+    peer: Result<PeerFns, String>,
 }
 
 /// The context / memory / module / launch half of the Driver API.
@@ -400,6 +403,29 @@ pub struct PlaceFns {
     pub(crate) advise: unsafe extern "C" fn(CuDevicePtr, usize, c_int, CuMemLocation) -> CuResult,
 }
 
+/// Device-to-device access, copies and the link questions.
+///
+/// A missing symbol disables the peer path only; a pair of cards then moves data
+/// through the host, and says so.
+pub struct PeerFns {
+    pub(crate) can_access_peer: unsafe extern "C" fn(*mut c_int, CuDevice, CuDevice) -> CuResult,
+    pub(crate) get_p2p_attribute: unsafe extern "C" fn(*mut c_int, c_int, CuDevice, CuDevice) -> CuResult,
+    /// `cuCtxEnablePeerAccess(peer, 0)`: the CURRENT context may address `peer`'s memory.
+    pub(crate) ctx_enable_peer_access: unsafe extern "C" fn(CuContext, u32) -> CuResult,
+    /// `cuMemcpyPeerAsync(dst, dstCtx, src, srcCtx, bytes, stream)`.
+    pub(crate) memcpy_peer_async: unsafe extern "C" fn(CuDevicePtr, CuContext, CuDevicePtr, CuContext, usize, CuStream) -> CuResult,
+    /// `cuMemcpyDtoDAsync`: the copy between two ranges of one context.
+    pub(crate) memcpy_dtod_async: unsafe extern "C" fn(CuDevicePtr, CuDevicePtr, usize, CuStream) -> CuResult,
+}
+
+/// `CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED`: the access this call asked for is already on.
+pub(crate) const ERROR_PEER_ACCESS_ALREADY_ENABLED: CuResult = 704;
+
+// `CUdevice_P2PAttribute` discriminants.
+const P2P_ATTR_PERFORMANCE_RANK: c_int = 1;
+const P2P_ATTR_ACCESS_SUPPORTED: c_int = 2;
+const P2P_ATTR_NATIVE_ATOMIC_SUPPORTED: c_int = 3;
+
 /// `CU_MEM_ATTACH_GLOBAL`.
 pub const MEM_ATTACH_GLOBAL: u32 = 1;
 
@@ -469,7 +495,9 @@ fn load() -> Result<Driver, String> {
         let graph = load_graph(&lib);
         let pool = load_pool(&lib);
         let place = load_place(&lib);
+        let peer = load_peer(&lib);
         let d = Driver {
+            peer,
             exec,
             graph,
             pool,
@@ -587,6 +615,21 @@ unsafe fn load_place(lib: &libloading::Library) -> Result<PlaceFns, String> {
     })
 }
 
+/// Resolve the device-to-device half. A missing symbol disables the peer path
+/// only.
+///
+/// # Safety
+/// Same contract as [`load_exec`].
+unsafe fn load_peer(lib: &libloading::Library) -> Result<PeerFns, String> {
+    Ok(PeerFns {
+        can_access_peer: sym(lib, b"cuDeviceCanAccessPeer\0")?,
+        get_p2p_attribute: sym(lib, b"cuDeviceGetP2PAttribute\0")?,
+        ctx_enable_peer_access: sym(lib, b"cuCtxEnablePeerAccess\0")?,
+        memcpy_peer_async: sym(lib, b"cuMemcpyPeerAsync\0")?,
+        memcpy_dtod_async: sym(lib, b"cuMemcpyDtoDAsync_v2\0")?,
+    })
+}
+
 /// Resolve one NUL-terminated symbol name AT the type the caller expects,
 /// yielding the bare function pointer.
 ///
@@ -623,6 +666,32 @@ impl Driver {
     /// The placement entry points, or why this driver has none.
     pub fn place(&self) -> Result<&PlaceFns, &str> {
         self.place.as_ref().map_err(|e| e.as_str())
+    }
+
+    /// The device-to-device entry points, or why this driver has none.
+    pub fn peer(&self) -> Result<&PeerFns, &str> {
+        self.peer.as_ref().map_err(|e| e.as_str())
+    }
+
+    /// What the driver says about memory access from device `from` to device
+    /// `to` (CUDA ordinals). `Err` when this driver has no peer entry points or
+    /// an ordinal does not exist.
+    pub fn peer_query(&self, from: u32, to: u32) -> Result<PeerQuery, String> {
+        let f = self.peer().map_err(str::to_string)?;
+        let (a, b) = (self.device(from)?, self.device(to)?);
+        let mut can: c_int = 0;
+        // SAFETY: `can` is a valid out-parameter and both are `cuDeviceGet` handles.
+        self.check(unsafe { (f.can_access_peer)(&mut can, a, b) }, "cuDeviceCanAccessPeer")?;
+        let attr = |which| {
+            let mut v: c_int = 0;
+            // SAFETY: as above; `which` is a `CUdevice_P2PAttribute` discriminant.
+            self.check(unsafe { (f.get_p2p_attribute)(&mut v, which, a, b) }, "cuDeviceGetP2PAttribute").map(|()| v)
+        };
+        Ok(PeerQuery {
+            access: can != 0 && attr(P2P_ATTR_ACCESS_SUPPORTED)? != 0,
+            performance_rank: attr(P2P_ATTR_PERFORMANCE_RANK)?,
+            native_atomics: attr(P2P_ATTR_NATIVE_ATOMIC_SUPPORTED)? != 0,
+        })
     }
 
     /// Whether the device at `ordinal` supports stream-ordered memory pools.
@@ -759,6 +828,17 @@ impl Driver {
     pub fn devices(&self) -> Result<Vec<CudaDevice>, String> {
         (0..self.device_count()?).map(|i| self.describe(i)).collect()
     }
+}
+
+/// The driver's answer about reaching one device's memory from another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PeerQuery {
+    /// One device may address the other's memory directly.
+    pub access: bool,
+    /// `CU_DEVICE_P2P_ATTRIBUTE_PERFORMANCE_RANK`: lower is faster; only comparable between pairs.
+    pub performance_rank: i32,
+    /// Atomics on the other device's memory are native.
+    pub native_atomics: bool,
 }
 
 /// One CUDA device, as the driver describes it. Every field is a runtime

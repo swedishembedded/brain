@@ -68,7 +68,7 @@ way.
 
 | Command | Purpose |
 |---|---|
-| `brain devices` | canonical GPU table (index, PCI bus, UUID, VRAM) + ambient device selection - see [Hardware](../guides/hardware/choosing-hardware.md) |
+| `brain devices` | canonical GPU table (index, PCI bus, UUID, VRAM) + ambient device selection + how each pair of cards reaches the other (direct peer link or host memory, measured GB/s) - see [Hardware](../guides/hardware/choosing-hardware.md) |
 | `brain doctor [--model <vendor>/<repo>]` | can a model be served here? checks the model store, the free disk, each GPU's free memory and, with `--model`, that model's weights, tokenizer and whether some card has room for it; loads nothing, exits 1 when a check fails, `--json` for scripts - see [Quickstart](../getting-started/quickstart.md) |
 | `brain roofline` | measured, cross-accelerator hardware compute-capacity report: every GPU `--device` selects (a card outside the selection is never opened), the NPU, and the CPU, each dtype it supports, streamed as each finishes; `--kernels` adds the measured kernel selection and each choice's fraction of the roofline |
 | `brain data` | dataset generation and tokenizers |
@@ -97,7 +97,7 @@ naming a real checkpoint via `--weights` - feeds the very cache `models
 list`/`models profile` read, so the two can never disagree); `perf` MEASURES
 real latency/throughput against a regression baseline, correctness-gated;
 `bench` asks whether an architecture learns at all, no hardware axis;
-`devices` is just the GPU table, no timing; `roofline` answers "what can this
+`devices` is the GPU table plus how the cards reach each other (one short copy probe per pair, cached); `roofline` answers "what can this
 hardware do" - raw, model-INDEPENDENT compute capacity (GFLOP/s, GOP/s,
 GB/s) for every accelerator on the box - which is the number `flops`' own
 "roofs" line and `perf`'s utilisation figures are both graded against.

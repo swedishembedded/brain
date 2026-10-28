@@ -853,6 +853,45 @@ impl Context {
         self.sync()
     }
 
+    /// Copy `bytes` from `src` (an allocation of THIS context) into `dst`, which may live on another device,
+    /// enqueued on [`Self::stream`]. The copy runs on the source's stream, over the device-to-device link when
+    /// the allocations are on different devices: `Err` (with the driver's reason) when this pair cannot be
+    /// reached directly, so the caller states it and stages through the host instead - never a silent staging
+    /// inside the driver.
+    ///
+    /// Ordering against other streams is the caller's job (`CudaBackend::copy_to_peer` fences both
+    /// allocations); this only enqueues.
+    pub fn copy_between(&self, src: &DeviceMem, src_offset: usize, dst: &DeviceMem, dst_offset: usize, bytes: usize) -> Result<(), String> {
+        let src_end = src_offset.checked_add(bytes).ok_or("peer copy source range overflows")?;
+        let dst_end = dst_offset.checked_add(bytes).ok_or("peer copy destination range overflows")?;
+        if src_end > src.len || dst_end > dst.len {
+            return Err(format!(
+                "peer copy of {bytes} bytes from offset {src_offset} of {} into offset {dst_offset} of {} is out of range",
+                src.len, dst.len
+            ));
+        }
+        if src.ctx != self.ctx {
+            return Err("peer copy source belongs to another device than the handle issuing it".into());
+        }
+        if bytes == 0 {
+            return Ok(());
+        }
+        let f = self.d.peer().map_err(str::to_string)?;
+        self.make_current()?;
+        let (from, to) = (src.ptr + src_offset as CuDevicePtr, dst.ptr + dst_offset as CuDevicePtr);
+        if dst.ctx == self.ctx {
+            // SAFETY: both ranges were bounds-checked against their allocations, which the borrows keep alive.
+            return self.d.check(unsafe { (f.memcpy_dtod_async)(to, from, bytes, self.stream) }, "cuMemcpyDtoDAsync");
+        }
+        // SAFETY: `dst.ctx` is a live context (the allocation holds a share of it) and this one is current.
+        let rc = unsafe { (f.ctx_enable_peer_access)(dst.ctx, 0) };
+        if rc != 0 && rc != crate::driver::ERROR_PEER_ACCESS_ALREADY_ENABLED {
+            return Err(format!("cuCtxEnablePeerAccess failed: {}", self.d.error_text(rc)));
+        }
+        // SAFETY: as above for the ranges; both contexts are alive and access is enabled.
+        self.d.check(unsafe { (f.memcpy_peer_async)(to, dst.ctx, from, src.ctx, bytes, self.stream) }, "cuMemcpyPeerAsync")
+    }
+
     /// A new event with timing enabled.
     pub fn event(&self) -> Result<Event, String> {
         self.event_with(0)

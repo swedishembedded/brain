@@ -2204,6 +2204,45 @@ impl backend_api::Backend for CudaBackend {
         Some(self.identity.clone())
     }
 
+    fn peer_link(&self, peer: &GpuIdentity) -> backend_api::PeerLink {
+        let d = match crate::driver::driver() {
+            Ok(d) => d,
+            Err(e) => return backend_api::PeerLink::none(e),
+        };
+        let found = d.devices().map(|all| all.into_iter().find(|c| c.identity().same_device(peer)));
+        let ordinal = match found {
+            Ok(Some(c)) => c.ordinal,
+            Ok(None) => return backend_api::PeerLink::none("the other card is not visible to the CUDA driver"),
+            Err(e) => return backend_api::PeerLink::none(e),
+        };
+        if ordinal == self.ordinal {
+            return backend_api::PeerLink { direct: true, performance_rank: Some(0), native_atomics: true, reason: None };
+        }
+        match d.peer_query(self.ordinal, ordinal) {
+            Ok(q) if q.access => backend_api::PeerLink { direct: true, performance_rank: Some(q.performance_rank), native_atomics: q.native_atomics, reason: None },
+            Ok(_) => backend_api::PeerLink::none("the CUDA driver reports no peer access between the two cards"),
+            Err(e) => backend_api::PeerLink::none(e),
+        }
+    }
+
+    fn copy_to_peer(&self, src: &DeviceBuffer, src_offset: u64, dst: &DeviceBuffer, dst_offset: u64, bytes: u64) -> Result<(), String> {
+        let dst = dst.try_downcast_ref::<CudaBuf>().ok_or("the destination buffer is not a CUDA buffer")?;
+        self.issue_held();
+        self.refuse_during_capture("copy_to_peer");
+        let (src, dst) = (&CudaBuf::of(src).mem, &dst.mem);
+        // The source is read and the destination written: wait for the other handles' writers of the one and
+        // for every user of the other, on this (the source's) stream.
+        self.fence_in([(src, false), (dst, true)]);
+        self.ctx.copy_between(src, src_offset as usize, dst, dst_offset as usize, bytes as usize)?;
+        // Anything on the destination's handle that touches `dst` from now on waits for the copy.
+        self.fence_out([(src, false), (dst, true)]);
+        Ok(())
+    }
+
+    fn release_held(&self) {
+        self.issue_held();
+    }
+
     fn stats(&self) -> Option<DeviceStats> {
         Some(DeviceStats {
             submits: self.counters.submits.load(Ordering::Relaxed),

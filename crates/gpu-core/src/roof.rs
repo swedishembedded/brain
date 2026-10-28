@@ -372,6 +372,8 @@ impl DeviceKey {
     }
 }
 
+pub(crate) use persist::{cache_dir, identity_slug};
+
 static CACHE: Mutex<Vec<(DeviceKey, Roofs)>> = Mutex::new(Vec::new());
 
 /// Serialises the actual measurement (`ensure`'s cache-miss path): two racing
@@ -898,7 +900,7 @@ mod persist {
     /// the same priority `GpuIdentity::same_device` itself uses, so two
     /// identities this crate considers "the same card" always produce the
     /// same slug and two it considers different always produce different ones.
-    fn identity_slug(id: &backend_api::GpuIdentity) -> String {
+    pub(crate) fn identity_slug(id: &backend_api::GpuIdentity) -> String {
         let raw = if let Some(uuid) = id.uuid {
             uuid.iter().map(|b| format!("{b:02x}")).collect::<String>()
         } else if let Some(pci) = &id.pci_bus {
@@ -909,7 +911,7 @@ mod persist {
         raw.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect()
     }
 
-    fn cache_dir() -> Option<PathBuf> {
+    pub(crate) fn cache_dir() -> Option<PathBuf> {
         if let Some(d) = DIR_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()).clone() {
             return Some(d);
         }

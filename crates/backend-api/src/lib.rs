@@ -1178,6 +1178,10 @@ impl DeviceBuffer {
             .downcast_ref::<T>()
             .expect("DeviceBuffer/backend mismatch")
     }
+    /// [`Self::downcast_ref`] for a caller that handles a buffer from another backend: `None` instead of a panic.
+    pub fn try_downcast_ref<T: Any>(&self) -> Option<&T> {
+        self.0.downcast_ref::<T>()
+    }
 }
 
 /// Backend-neutral record of WHAT a dispatch computes: the kernel slot it runs
@@ -1628,6 +1632,24 @@ pub trait Backend: Send + Sync {
         None
     }
 
+    /// How this device reaches `peer`'s memory directly. The default has no such path, for the stated reason.
+    fn peer_link(&self, _peer: &GpuIdentity) -> PeerLink {
+        PeerLink::none(format!("the {} backend has no device-to-device path", self.kind()))
+    }
+
+    /// Copy `bytes` of `src` starting at `src_offset` into `dst` at `dst_offset` (a buffer of ANOTHER handle,
+    /// possibly on another device), over the direct link and without waiting for either device: the copy is
+    /// ordered after every use of the two ranges submitted so far on any handle, and later uses wait for it.
+    /// `Err` with the reason when there is no direct path for this pair (nothing was copied); the caller then
+    /// stages through the host.
+    fn copy_to_peer(&self, _src: &DeviceBuffer, _src_offset: u64, _dst: &DeviceBuffer, _dst_offset: u64, _bytes: u64) -> Result<(), String> {
+        Err(format!("the {} backend has no device-to-device copy", self.kind()))
+    }
+
+    /// Issue whatever this handle still holds back in an open pass, so work on other handles that is ordered
+    /// against this handle's buffers sees all of it. A no-op where nothing is held.
+    fn release_held(&self) {}
+
     /// Turn per-kernel DEVICE timing on or off for this device, returning
     /// whether it is now on. `false` means the backend cannot time kernels.
     ///
@@ -1855,6 +1877,27 @@ pub fn cache_dir() -> Option<std::path::PathBuf> {
         return Some(std::path::Path::new(&d).join("brain"));
     }
     std::env::var("HOME").ok().map(|h| std::path::Path::new(&h).join(".cache/brain"))
+}
+
+/// How one device reaches another device's memory directly, as the driver reports it. A topology fact only:
+/// what the link sustains is measured (`gpu_core::link`), never read from here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeerLink {
+    /// The device can read and write the other's memory without the host in between.
+    pub direct: bool,
+    /// The driver's performance rank for the pair, lower is faster; comparable only between pairs of one machine.
+    pub performance_rank: Option<i32>,
+    /// Atomics on the other device's memory are native.
+    pub native_atomics: bool,
+    /// Why there is no direct path (`direct == false`); `None` when there is one.
+    pub reason: Option<String>,
+}
+
+impl PeerLink {
+    /// No direct path, for `reason`.
+    pub fn none(reason: impl Into<String>) -> PeerLink {
+        PeerLink { direct: false, performance_rank: None, native_atomics: false, reason: Some(reason.into()) }
+    }
 }
 
 /// Per-handle device-op counters - the queryable form of what

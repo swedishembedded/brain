@@ -7,7 +7,9 @@
 //! means everywhere in brain (`--device gpu1`, `Shard.gpu_index`,
 //! `residency::Device::Gpu(i)`), and the PCI bus id is how nvidia-smi's own
 //! ordering maps onto it. Also reports what the ambient selection
-//! (`--device` / `BRAIN_DEVICE` / `BRAIN_GPU_INDEX`) resolves to.
+//! (`--device` / `BRAIN_DEVICE` / `BRAIN_GPU_INDEX`) resolves to, and how each
+//! pair of cards reaches the other: the path a split model's boundary
+//! transfers take and the bandwidth measured on it (`gpu_core::link`).
 
 /// Short UUID: first 8 hex digits — the disambiguating prefix of the NVML GPU
 /// UUID nvidia-smi shows.
@@ -88,7 +90,47 @@ pub fn run_devices(_args: &[String]) {
     if let Some(why) = &gpu_core::defaults::Hardware::detected().cuda_unusable {
         println!("cuda: not usable here - {why}");
     }
+    print_links(devs);
     print_npus();
+}
+
+/// How each pair of cards moves data between them. Opening a handle per card
+/// is what makes the answer the backend's own (a CUDA driver's peer query, not
+/// a guess from the PCI table), and the bandwidth is measured once and cached.
+fn print_links(devs: &[gpu_core::devices::DeviceId]) {
+    if devs.len() < 2 {
+        return;
+    }
+    println!();
+    println!("device links (the path a transfer between two cards takes; bandwidth is measured, then cached)");
+    let open = |d: &gpu_core::devices::DeviceId| {
+        std::panic::catch_unwind(|| gpu_core::Gpu::new_on(d, &[])).map_err(|_| format!("gpu{} could not be opened", d.index))
+    };
+    for (i, a) in devs.iter().enumerate() {
+        for b in &devs[i + 1..] {
+            let (ga, gb) = match (open(a), open(b)) {
+                (Ok(ga), Ok(gb)) => (ga, gb),
+                (Err(e), _) | (_, Err(e)) => {
+                    println!("  gpu{}-gpu{}  unknown: {e}", a.index, b.index);
+                    continue;
+                }
+            };
+            let link = ga.peer_link(&gb);
+            let how = match (&link.reason, link.performance_rank) {
+                (None, Some(rank)) => format!("direct peer access (driver performance rank {rank})"),
+                (None, None) => "direct peer access".to_string(),
+                (Some(why), _) => format!("through host memory: {why}"),
+            };
+            let rate = |from: &gpu_core::Gpu, to: &gpu_core::Gpu| match gpu_core::link::bandwidth(from, to) {
+                Some(bw) => format!("{:.1} GB/s{}", bw.used_gbs(), if bw.peer_gbs.is_some() { "" } else { " (host-staged)" }),
+                None => "unmeasured".to_string(),
+            };
+            println!(
+                "  gpu{}-gpu{}  {how}; gpu{}->gpu{} {}, gpu{}->gpu{} {}",
+                a.index, b.index, a.index, b.index, rate(&ga, &gb), b.index, a.index, rate(&gb, &ga)
+            );
+        }
+    }
 }
 
 /// NPU section: separate from the GPU table above because "present" and
