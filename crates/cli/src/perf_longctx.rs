@@ -581,11 +581,8 @@ pub fn run(spec: &str, args: &Args, device: &str, smoke: bool) -> Result<perf::s
 pub fn build_engine(spec: &str) -> Result<Box<dyn LongContextEngine>, String> {
     if let Some(rest) = spec.strip_prefix("qwen35:") {
         // `:kv<tier>` names the GQA cache storage; f32 when absent.
-        let (path, kv) = match rest.rsplit_once(":kv") {
-            Some((p, tier)) if tier == "f32" || tier == "bf16" || tier == "int8" => (p, model::kv_tier::KvTier::parse(tier).expect("matched")),
-            Some((_p, tier)) => return Err(format!("longctx target {spec:?}: :kv{tier} is not a KV tier - use :kvf32, :kvbf16 or :kvint8")),
-            None => (rest, model::kv_tier::KvTier::F32),
-        };
+        let (path, kv) = crate::perf_qwen35::parse_spec(rest)?;
+        let kv = kv.unwrap_or(model::kv_tier::KvTier::F32);
         return Ok(Box::new(Qwen35Engine::open(path, kv)?));
     }
     if let Some(path) = spec.strip_prefix("qwen35moe:") {

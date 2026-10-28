@@ -53,6 +53,9 @@ OPTIONS
                                                    comparison, useless for quality.
                           qwen:<weights.brain>     the paged serving engine on a
                                                    real checkpoint
+                          qwen35:<gguf>[:kvf32|:kvbf16|:kvint8]
+                                                   the released Qwen3.8-27B GGUF,
+                                                   built as `brain serve` builds it
                           lfm:<weights>:<tok.json> the LFM2.5 encoder behind the
                                                    residency executor (unit: sequence)
                           flux2[:<W>x<H>x<steps>[:<precision>]]
@@ -139,9 +142,12 @@ const TARGET_LIST: &str = "
 targets (--target):
   qwen-synth:<L>x<D>x<H>[xV[xHeadDim[xNKvHeads]]][:i8w][:kvf32]   the real paged serving engine on random weights
   qwen35:<gguf>[:kvf32|:kvbf16|:kvint8]
-                                     `longctx` only: the Qwen3.8 GGUF resident; weights held as the
-                                     checkpoint stores them (as `brain serve` holds them), the `:kv`
-                                     suffix picks the GQA cache storage (f32 when absent)
+                                     the released Qwen3.8-27B GGUF through the shared scheduler,
+                                     built by `brain serve`'s own engine construction (tier,
+                                     context, KV pool, prefix slots, speculation chosen for the
+                                     `--device` cards); the `:kv` suffix pins the GQA cache
+                                     storage (the server's default when absent - `longctx`
+                                     defaults to f32 instead). Also `longctx`.
   qwen:<weights.brain>[:i8w][:kvf32]         the paged serving engine on a real checkpoint (also `longctx`)
                                      (:i8w opts IN to int8 weights, off by default; :kvf32 opts
                                      OUT of int8 KV, which is ON by default -- either order, both optional.
@@ -666,6 +672,9 @@ fn build_target(spec: &str, workload: &str, input_override: Option<usize>, outpu
     if let Some(weights) = spec.strip_prefix("qwen:") {
         return build_qwen(weights, workload, input_override, output_override);
     }
+    if let Some(rest) = spec.strip_prefix("qwen35:") {
+        return crate::perf_qwen35::build(rest);
+    }
     if let Some(rest) = spec.strip_prefix("http:") {
         return build_http(rest, workload, input_override, output_override);
     }
@@ -756,7 +765,7 @@ fn build_target(spec: &str, workload: &str, input_override: Option<usize>, outpu
     Err(format!(
         "unknown --target {spec:?} \
          (expected 'qwen-synth:<L>x<D>x<H>[xV][:i8w][:kvf32]', 'qwen:<weights>[:i8w][:kvf32]', \
-         'http:qwen-synth:<L>x<D>x<H>[xV]:<tokenizer.json>', 'http:qwen:<weights>:<tokenizer.json>', \
+         'qwen35:<gguf>[:kvf32|:kvbf16|:kvint8]', 'http:qwen-synth:<L>x<D>x<H>[xV]:<tokenizer.json>', 'http:qwen:<weights>:<tokenizer.json>', \
          'lfm:<weights>:<tokenizer.json>', 'kronos:<tokenizer-dir>:<decoder-dir>', \
          'chronos2:<weights>', 'fincast:<weights>', 'timesfm3:<weights>', 'flux2[:<W>x<H>x<steps>[:<precision>]]', \
          'wan[:<frames>x<W>x<H>x<steps>]', 'ltxv[:<frames>x<W>x<H>x<steps>]', \

@@ -3678,14 +3678,24 @@ impl MultiDeviceResidentModel for Qwen35GgufResident {
     /// `max_batch` requests decode in ONE batched step per iteration and join
     /// and leave between steps - the same loop every brain LLM is served by.
     fn activate_multi(&self, _key: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
-        let (engine, tok, stop) = self.activate_engine(devices)?;
-        let mut sched = model::serve::Scheduler::new(engine, self.max_batch as usize);
-        self.configure_scheduler(&mut sched);
+        let (sched, tok, stop) = self.activate_scheduler(devices)?;
         Ok(Box::new(llmserve::ScheduledInstance::new(llmserve::TextFrontend { tok, stop, label: "qwen35", parse: std::sync::Arc::new(parse_request) }, sched, self.max_batch as usize)))
     }
 }
 
 impl Qwen35GgufResident {
+    /// The scheduler every consumer of this resident serves through: the
+    /// activated engine ([`Self::activate_engine`]) under the generic
+    /// continuous-batching `model::serve::Scheduler` with `max_batch` running
+    /// sequences and the configured speculation installed. `brain serve` and
+    /// the serving benchmark both build it here, so they cannot drift.
+    pub fn activate_scheduler(&self, devices: &[Device]) -> Result<(model::serve::Scheduler<Qwen35GgufEngine>, QwenBpe, Vec<u32>), String> {
+        let (engine, tok, stop) = self.activate_engine(devices)?;
+        let mut sched = model::serve::Scheduler::new(engine, self.max_batch as usize);
+        self.configure_scheduler(&mut sched);
+        Ok((sched, tok, stop))
+    }
+
     /// The serving surface: the activated checkpoint as a
     /// `model::serve::PagedDecoder` for the generic continuous-batching
     /// scheduler, with the tokenizer and stop ids its requests need.

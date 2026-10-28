@@ -48,6 +48,14 @@ weights of that shape — no checkpoint needed, good for hardware comparison)
 or `qwen:out/qwen.safetensors` (a real checkpoint). Run `brain perf --help`
 for the full list of target specs (one per served model family).
 
+`qwen35:<gguf>[:kvf32|:kvbf16|:kvint8]` measures the released Qwen3.8-27B GGUF
+end to end through the shared scheduler. The engine is built by the same code
+`brain serve` runs, so weight tier, context, KV pool, prefix slots and
+speculation are what the server would pick for the cards `--device` allows;
+the optional suffix pins the KV cache storage. Goodput, TTFT, prefix-hit rate,
+free KV blocks and swap counters in the artifact are therefore the served
+behaviour. It needs GPUs and refuses (naming the file) a missing checkpoint.
+
 `--smoke` shrinks a run to a few seconds, useful for a quick sanity check
 rather than a real measurement.
 

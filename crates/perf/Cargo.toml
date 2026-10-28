@@ -17,7 +17,6 @@ brain-stats.workspace = true
 brain-data.workspace = true
 brain-gpu-core.workspace = true
 brain-model.workspace = true
-brain-qwen3.workspace = true
 brain-qwen35.workspace = true
 brain-weightset.workspace = true
 # The HTTP surface target (`HttpTarget`) drives the REAL `apiserve::router()`

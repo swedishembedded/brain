@@ -43,6 +43,7 @@ mod omni_cli;
 mod perf_cli;
 mod perf_engine;
 mod perf_longctx;
+mod perf_qwen35;
 mod pid_cli;
 mod placement;
 mod plan_cli;

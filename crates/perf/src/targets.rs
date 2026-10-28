@@ -7,7 +7,7 @@
 //!   path: a model that implements the seam becomes benchmarkable with **zero**
 //!   new benchmark code, because `Action::run` already takes a `Progress`
 //!   callback that gives the harness its artifact timeline.
-//! * [`PagedLlmTarget`] — wraps `qwen3::serve::{Engine, Scheduler}` directly. The
+//! * [`PagedLlmTarget`] - wraps `model::serve::Scheduler` over any `PagedDecoder` directly. The
 //!   paged continuous-batching engine is the thing most worth measuring today
 //!   and does not yet sit behind a `Provider`.
 //! * [`ExecutorTarget`] — wraps a [`residency::Executor`] holding a real
@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use capability::{Invocation, Progress, Provider};
+use model::serve::{PagedDecoder, Request, Scheduler};
 
 use crate::target::{Emission, EmissionKind, PerfRequest, PerfTarget, ReqId, TargetInfo};
 
@@ -211,11 +212,13 @@ fn two_path_verdict(
 
 // ===================== paged LLM engine =====================
 
-/// Drives `qwen3::serve::Scheduler`. One [`PerfTarget::step`] is one scheduler
+/// Drives `model::serve::Scheduler` over any [`PagedDecoder`] (the Qwen3 paged
+/// engine, the Qwen3.8 GGUF engine, ...): the same scheduler `brain serve` runs,
+/// so the numbers are the served behaviour. One [`PerfTarget::step`] is one scheduler
 /// iteration — admit what fits, one batched decode over the running set, reap
 /// completions — which is exactly the granularity TTFA and IAL are defined at.
-pub struct PagedLlmTarget {
-    sched: qwen3::serve::Scheduler,
+pub struct PagedLlmTarget<D: PagedDecoder> {
+    sched: Scheduler<D>,
     info: TargetInfo,
     stop: Vec<u32>,
     /// Deterministic synthetic prompt vocabulary bound (avoids tokenizer I/O in
@@ -224,8 +227,8 @@ pub struct PagedLlmTarget {
     submitted: usize,
 }
 
-impl PagedLlmTarget {
-    pub fn new(sched: qwen3::serve::Scheduler, info: TargetInfo, stop: Vec<u32>, vocab: u32) -> PagedLlmTarget {
+impl<D: PagedDecoder> PagedLlmTarget<D> {
+    pub fn new(sched: Scheduler<D>, info: TargetInfo, stop: Vec<u32>, vocab: u32) -> PagedLlmTarget<D> {
         PagedLlmTarget { sched, info, stop, vocab, submitted: 0 }
     }
 
@@ -237,7 +240,7 @@ impl PagedLlmTarget {
     }
 }
 
-impl PerfTarget for PagedLlmTarget {
+impl<D: PagedDecoder> PerfTarget for PagedLlmTarget<D> {
     fn describe(&self) -> TargetInfo {
         self.info.clone()
     }
@@ -248,7 +251,7 @@ impl PerfTarget for PagedLlmTarget {
         // `ignore_stop` is expressed by passing no stop ids: a synthetic run must
         // produce the full requested length, or the workload silently shortens
         // and the reported rate is inflated.
-        self.sched.submit(qwen3::serve::Request { prompt, max_new: req.output_artifacts, stop: self.stop.clone() })
+        self.sched.submit(Request { prompt, max_new: req.output_artifacts, stop: self.stop.clone() })
     }
 
     fn step(&mut self, out: &mut Vec<Emission>) -> bool {
@@ -286,6 +289,20 @@ impl PerfTarget for PagedLlmTarget {
                 rate.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null),
             ),
             ("kv_prefix_cached_blocks".into(), serde_json::json!(cached)),
+            // The raw token counts behind the rate, so runs can be pooled.
+            ("kv_prefix_hit_tokens".into(), serde_json::json!(hit)),
+            ("kv_prefix_lookup_tokens".into(), serde_json::json!(looked)),
+            ("kv_offload".into(), {
+                let o = self.sched.offload_stats();
+                serde_json::json!({
+                    "demotions": o.demotions,
+                    "promotions": o.promotions,
+                    "blocks_out": o.blocks_out,
+                    "blocks_in": o.blocks_in,
+                    "refused": o.refused,
+                    "peak_bytes": o.peak_bytes,
+                })
+            }),
             // Device-op accounting (K): submits/dispatches/readbacks since the
             // engine was built. Null where the backend does not count.
             (
@@ -303,7 +320,7 @@ impl PerfTarget for PagedLlmTarget {
             ),
             // The int8-KV memory claim, measured rather than asserted: an
             // analytic byte count derived from the SAME arithmetic the engine
-            // allocated from (qwen3::serve::kv_pool_bytes), not a device
+            // allocated from (`PagedDecoder::kv_pool_bytes`), not a device
             // counter -- see that function's doc comment for why. `kv_dtype`
             // itself is already reported in the artifact's `target.config`
             // (`build_qwen_synth`/`build_qwen`'s `.with("kv_dtype", ...)`).
@@ -323,7 +340,7 @@ impl PerfTarget for PagedLlmTarget {
 
     /// Map the harness policy names onto the engine's admission seam.
     fn set_admission(&mut self, policy: &str) -> bool {
-        use qwen3::serve::{DeadlineAware, MaxQueueDepth, UnboundedQueue};
+        use model::serve::{DeadlineAware, MaxQueueDepth, UnboundedQueue};
         match policy.split_once(':') {
             None if policy == "unbounded" => {
                 self.sched.set_admission(Box::new(UnboundedQueue));
@@ -358,7 +375,7 @@ impl PerfTarget for PagedLlmTarget {
         // Sequential reference: one request at a time, drained to completion.
         let mut seq_out = Vec::new();
         for p in &prompts {
-            let id = self.sched.submit(qwen3::serve::Request {
+            let id = self.sched.submit(Request {
                 prompt: p.clone(),
                 max_new,
                 stop: Vec::new(),
@@ -371,7 +388,7 @@ impl PerfTarget for PagedLlmTarget {
         let ids: Vec<u64> = prompts
             .iter()
             .map(|p| {
-                self.sched.submit(qwen3::serve::Request { prompt: p.clone(), max_new, stop: Vec::new() })
+                self.sched.submit(Request { prompt: p.clone(), max_new, stop: Vec::new() })
             })
             .collect();
         let done = self.sched.run();
