@@ -27,7 +27,7 @@ column: **open** unless stated.
 
 | # | gap | evidence | note |
 |---|---|---|---|
-| G1 | Admission charges a request for its whole prompt, blocks it adopts from the prefix cache included | `model::serve::Scheduler::admit_one`, `prefill_debt` | worse than over-reservation: the next turn of a conversation whose cached history exceeds `pool - prompt` is never admitted, even on an idle server |
+| G1 | Admission charged a request for its whole prompt, blocks it adopts from the prefix cache included | `model::serve::Scheduler::admit_one`, `prefill_debt` | **fixed** (below). Worse than over-reservation: the next turn of a conversation whose cached history exceeded `pool - prompt` was never admitted, even on an idle server |
 | G2 | The 35B MoE serves only through a one-block-per-sequence engine: `max_concurrent x max_seq_len` fp32 KV, no paging, no prefix sharing | `crates/qwen35moe/src/serve.rs` (`pool_rows`), `crates/catalog/src/resident_qwen35moe.rs` | the paged GGUF 27B engine is the pattern to generalise |
 | G3 | The native 27B engine (`crates/qwen35/src/serve.rs`, `block_size == max_seq_len`) is still served for brain-format checkpoints | `crates/serving/src/executor.rs`, `model_dir.rs` | released GGUFs use the paged `int8_gguf_resident` engine (256-row blocks) |
 | G4 | Sequence identity and KV pages are not separate resources in the one-block engines: the first block is the sequence | same files as G2/G3 | the paged GGUF engine already separates them (state row on `BlockTable`) |
@@ -55,7 +55,7 @@ claimed before its baseline exists.
 | order | item | owner | done when | status |
 |---|---|---|---|---|
 | 1 | Serving qualification suite: contexts 4K-128K (256K/1M where supported) x concurrency 1-64 x traffic (steady, burst, recorded agent trajectories, shared prefixes); TTFT, TPOT, p50/p95/p99, goodput under SLO, cache-hit tokens, KV occupancy, bytes per phase | `perf`, `cli`, `llmserve` | repeatable GH200 numbers with per-phase attribution | open |
-| 2a | Admission and prefill debt charge only blocks not adopted from the prefix cache (`PagedDecoder::cached_prefix_blocks`) | `model::serve` | a mostly cached prompt is admitted on its uncached blocks | open |
+| 2a | Admission and prefill debt charge only blocks not adopted from the prefix cache (`PagedDecoder::cached_prefix_blocks`) | `model::serve` | `model/tests/serve_prefix_admission.rs` | done |
 | 2b | Incremental reservation: charge the next scheduled slice plus bounded decode headroom, not the whole prompt, with a guaranteed route to completion | `model::serve` | mixed long/short prompts admit without full-prompt reservation; no deadlock or leak under the KV-pressure tests | open |
 | 2c | Admission/eviction as one transaction; victim choice by restore cost, not recency | `model::serve` | a failed admission rolls back without losing cache entries | open |
 | 3 | One paged layout for every served decoder: stable sequence id, KV pages and recurrent slots as independent pools (G2-G4) | `model`, `qwen35`, `qwen35moe` | no served path allocates `max_seq_len` per sequence outside bounded-state modes | open |
@@ -74,4 +74,11 @@ measurement (16-256), not fixed globally.
 
 ## Done
 
-Nothing yet.
+- 2026-10-28 (2a): `PagedDecoder::cached_prefix_blocks` peeks how many blocks a
+  fresh prefill adopts from the prefix cache; `admit_one` and `prefill_debt`
+  subtract them. Implemented for `qwen3` (block chains) and the paged GGUF 27B
+  engine (snapshot entries, less the tail block it copies); engines without
+  block sharing keep the default 0. A prompt with embedding rows is charged in
+  full. Regression test: the next turn of a conversation whose history fills
+  10 of 16 blocks livelocked the scheduler before; it now resumes from all 40
+  cached tokens and yields the cold run's tokens.

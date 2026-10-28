@@ -874,6 +874,20 @@ impl PagedDecoder for Qwen35GgufEngine {
     fn blocks_for(&self, tokens: u32) -> u32 {
         tokens.div_ceil(self.alloc.block_size())
     }
+    /// The blocks [`Self::adopt_cached_blocks`] shares from the entry `prompt` would resume from, less the one it
+    /// copies before the sequence writes into it. The one-block layout copies rows into the sequence's own block,
+    /// so it adopts none.
+    fn cached_prefix_blocks(&self, prompt: &[u32], adapter: Option<AdapterId>) -> u32 {
+        let KvLayout::Paged { block_rows, .. } = self.inst.kv_layout else { return 0 };
+        if prompt.len() < MIN_CACHED_TOKENS || !self.cache.enabled() {
+            return 0;
+        }
+        let namespace = adapter.map_or(BASE_KV_NAMESPACE, |a| a.kv_namespace());
+        let Some(i) = self.cache.peek(namespace, prompt) else { return 0 };
+        let rows = self.cache.entry(i).tokens.len() as u32;
+        let copied = !rows.is_multiple_of(block_rows) || self.inst.has_mtp();
+        rows.div_ceil(block_rows) - u32::from(copied)
+    }
     /// Evict least recently used cached prompts until `want` blocks are freed.
     fn reclaim_prefix(&mut self, want: u32) -> u32 {
         let before = self.alloc.free_blocks();

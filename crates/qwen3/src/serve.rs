@@ -3792,6 +3792,11 @@ impl model::serve::PagedDecoder for Engine {
         let ns = adapter.map_or(BASE_KV_NAMESPACE, |a| a.kv_namespace());
         Engine::reclaim_prefix_keeping(self, want, ns, prompt)
     }
+    /// The chain [`Engine::prefill`] adopts: whole cached blocks, always leaving the last token to compute.
+    fn cached_prefix_blocks(&self, prompt: &[u32], adapter: Option<model::serve::AdapterId>) -> u32 {
+        let ns = adapter.map_or(BASE_KV_NAMESPACE, |a| a.kv_namespace());
+        self.prefix.peek_in(ns, prompt, self.block_size, prompt.len().saturating_sub(1)).len() as u32
+    }
     fn release_table(&mut self, t: &mut BlockTable) {
         self.release_table(t)
     }

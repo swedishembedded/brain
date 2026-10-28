@@ -77,6 +77,18 @@ pub trait PagedDecoder {
     // A hybrid decoder uses both kinds' bookkeeping from the shared crate and
     // implements only the device operations (copy rows, capture and restore state).
 
+    /// Device blocks a fresh prefill of `prompt` under `adapter` would adopt
+    /// from the prefix cache instead of allocating, as the cache stands now
+    /// (a peek: it neither refreshes recency nor counts as a lookup). Admission
+    /// charges a request only for the rest, so the next turn of a long
+    /// conversation is not refused for want of room its own cached history
+    /// already occupies. A block the prefill copies before writing into it is
+    /// not adopted. The default, for a decoder without a prefix cache, is 0.
+    fn cached_prefix_blocks(&self, prompt: &[u32], adapter: Option<AdapterId>) -> u32 {
+        let _ = (prompt, adapter);
+        0
+    }
+
     /// Reclaim up to `want` cache-only prefix blocks back to the pool (live
     /// sequences always outrank the prefix cache). Returns blocks actually freed.
     fn reclaim_prefix(&mut self, want: u32) -> u32;
@@ -1523,9 +1535,30 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// Device blocks the sequences still being prefilled have been promised
     /// (their whole prompt plus the first token) but do not hold yet. Prefill
     /// takes them chunk by chunk, so until it has, the pool looks emptier than
-    /// it is.
+    /// it is. A prefill that has not started yet holds no blocks; the ones it
+    /// will adopt from the prefix cache are resident already and owed nothing.
     fn prefill_debt(&self) -> u32 {
-        self.prefilling.iter().map(|p| self.dec.blocks_for(p.prompt.len() as u32 + 1).saturating_sub(p.table.blocks().len() as u32)).sum()
+        self.prefilling
+            .iter()
+            .map(|p| {
+                let held = match p.table.blocks().len() as u32 {
+                    0 => self.adopted_blocks(&p.prompt, p.adapter, p.embeds.is_some()),
+                    n => n,
+                };
+                self.dec.blocks_for(p.prompt.len() as u32 + 1).saturating_sub(held)
+            })
+            .sum()
+    }
+
+    /// Blocks a fresh prefill of `prompt` will adopt from the prefix cache
+    /// ([`PagedDecoder::cached_prefix_blocks`]). A prompt carrying embedding
+    /// rows is charged in full: its placeholder ids are not the content the
+    /// cache is keyed on, so the decoder's peek would overstate the hit.
+    fn adopted_blocks(&self, prompt: &[u32], adapter: Option<AdapterId>, embeds: bool) -> u32 {
+        if embeds {
+            return 0;
+        }
+        self.dec.cached_prefix_blocks(prompt, adapter)
     }
 
     /// Blocks this iteration has already spoken for: one more token for every
@@ -1769,8 +1802,15 @@ impl<D: PagedDecoder> Scheduler<D> {
         }
         // The prompt, its first token, and what the sequences already in flight
         // are owed this iteration: admitting into those blocks would only get the
-        // newcomer preempted before it produced anything.
-        let want = self.dec.blocks_for(need as u32 + 1) + self.committed_blocks();
+        // newcomer preempted before it produced anything. The blocks the prompt
+        // adopts from the prefix cache are resident already: charging for them
+        // again would refuse a long conversation's next turn for want of the room
+        // its own history occupies, forever when nothing else is running.
+        let cached = {
+            let w = &self.waiting[pos];
+            self.adopted_blocks(&w.req.prompt, w.adapter, w.embeds.is_some())
+        };
+        let want = self.dec.blocks_for(need as u32 + 1).saturating_sub(cached) + self.committed_blocks();
         let free = self.dec.free_blocks();
         if free < want {
             // Cached prefix blocks are reclaimable capacity: live sequences always
