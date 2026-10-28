@@ -325,12 +325,26 @@ pub(crate) fn ensure(gpu: &Gpu, slots: &[(usize, &'static str)]) -> Option<Arc<T
         return Some(t.clone());
     }
     TUNING.with(|t| t.set(true));
-    let tuned = Arc::new(load(&key, gpu).unwrap_or_else(|| {
-        let t = measure(gpu, &multi);
-        save(&key, &t);
-        eprintln!("{}", summary(&t));
-        t
-    }));
+    let names: Vec<&str> = multi.iter().map(|&(_, slot)| slot).collect();
+    let stored = load(&key);
+    let tuned = Arc::new(match stored {
+        Some(t) if missing_classes(&t, &names).is_empty() => t,
+        prior => {
+            // A table the budget cut short is resumed: its measured classes are kept and only the rest are timed.
+            let t = measure(gpu, &multi, prior.as_ref());
+            save(&key, &t);
+            eprintln!("{}", summary(&t));
+            let unmeasured = missing_classes(&t, &names).len();
+            if unmeasured > 0 {
+                eprintln!(
+                    "brain: warning: the {}s tuning budget left {unmeasured} kernel shape classes unmeasured on {}; they take their nearest measured neighbour's choice until the next start measures them",
+                    BUDGET.as_secs(),
+                    t.device
+                );
+            }
+            t
+        }
+    });
     TUNING.with(|t| t.set(false));
     tables.push((key, tuned.clone()));
     Some(tuned)
@@ -352,8 +366,13 @@ fn store_path(key: &str) -> Option<std::path::PathBuf> {
     Some(crate::tune::cache_dir()?.join(format!("native-tune-{key}.txt")))
 }
 
-fn load(key: &str, gpu: &Gpu) -> Option<Tuned> {
-    let text = std::fs::read_to_string(store_path(key)?).ok()?;
+fn load(key: &str) -> Option<Tuned> {
+    parse_store(&std::fs::read_to_string(store_path(key)?).ok()?)
+}
+
+/// A stored table, as written by [`save`]; `None` when the text is not one. A class saved with no results was not
+/// reached by its tuning run's budget ([`missing_classes`]).
+fn parse_store(text: &str) -> Option<Tuned> {
     let mut lines = text.lines();
     let header: Vec<&str> = lines.next()?.split('|').collect();
     let [tag, device, roof, floor] = header[..] else { return None };
@@ -377,25 +396,58 @@ fn load(key: &str, gpu: &Gpu) -> Option<Tuned> {
         }
         entries.push(Entry { slot: slot.to_owned(), class, best: best.to_owned(), results: rs });
     }
-    // A store that does not cover every class of every multi-candidate slot of this handle is stale: measure again.
-    let covered = |slot: &str| Class::all().all(|c| entries.iter().any(|e| e.slot == slot && e.class == c));
-    let slots_ok = TUNABLE_SLOTS.iter().filter(|s| gpu.native_rows().iter().filter(|a| a.slot == **s).count() > 1).all(|s| covered(s));
-    slots_ok.then(|| Tuned { device: device.to_owned(), roof_gbs: roof.parse().ok(), floor_us: floor.parse().ok(), entries, from_store: true })
+    Some(Tuned { device: device.to_owned(), roof_gbs: roof.parse().ok(), floor_us: floor.parse().ok(), entries, from_store: true })
+}
+
+/// The `(slot, class)` pairs of `slots` that `t` holds no measurement for: absent, or saved unmeasured because the
+/// tuning budget ran out before them.
+fn missing_classes(t: &Tuned, slots: &[&str]) -> Vec<(String, Class)> {
+    slots
+        .iter()
+        .flat_map(|&slot| Class::all().map(move |c| (slot, c)))
+        .filter(|&(slot, c)| !t.entries.iter().any(|e| e.slot == slot && e.class == c && !e.results.is_empty()))
+        .map(|(slot, c)| (slot.to_owned(), c))
+        .collect()
+}
+
+/// Give every unmeasured class the choice of the nearest measured row bucket of the same slot, `K` and bytes
+/// class (the lower one on a tie) whose winner `serves` it; a class with no such neighbour keeps its default.
+/// The slot's default is its first candidate, the single-row GEMV - the slowest choice at a batch - so leaving
+/// a batched class on it is the costliest guess. Filled classes keep no results, so they stay unmeasured.
+/// Returns how many classes were filled.
+fn fill_untimed(entries: &mut [Entry], serves: impl Fn(&str, Class, &str) -> bool) -> usize {
+    let measured: Vec<(String, Class, String)> = entries.iter().filter(|e| !e.results.is_empty()).map(|e| (e.slot.clone(), e.class, e.best.clone())).collect();
+    let mut filled = 0;
+    for e in entries.iter_mut().filter(|e| e.results.is_empty()) {
+        let nearest = measured
+            .iter()
+            .filter(|(slot, c, best)| *slot == e.slot && c.k == e.class.k && c.bytes == e.class.bytes && serves(&e.slot, e.class, best))
+            .min_by_key(|(_, c, _)| (c.rows.abs_diff(e.class.rows), c.rows));
+        if let Some((_, _, best)) = nearest {
+            e.best = best.clone();
+            filled += 1;
+        }
+    }
+    filled
+}
+
+/// One class's results as [`save`] writes them.
+fn store_results(results: &[(String, Verdict)]) -> String {
+    results
+        .iter()
+        .map(|(k, v)| match v {
+            Verdict::Timed { us, gbs, frac } => format!("{k}:{us:.2}:{gbs:.0}:{}", frac.map(|f| format!("{f:.3}")).unwrap_or_default()),
+            Verdict::Rejected(why) => format!("{k}:rej:{}", why.replace([':', '|', ';', '\n'], " ")),
+        })
+        .collect::<Vec<_>>()
+        .join(";")
 }
 
 fn save(key: &str, t: &Tuned) {
     let Some(path) = store_path(key) else { return };
     let mut text = format!("native-tune-v2|{}|{}|{}\n", t.device, t.roof_gbs.map(|r| r.to_string()).unwrap_or_default(), t.floor_us.map(|r| r.to_string()).unwrap_or_default());
     for e in &t.entries {
-        let results: Vec<String> = e
-            .results
-            .iter()
-            .map(|(k, v)| match v {
-                Verdict::Timed { us, gbs, frac } => format!("{k}:{us:.2}:{gbs:.0}:{}", frac.map(|f| format!("{f:.3}")).unwrap_or_default()),
-                Verdict::Rejected(why) => format!("{k}:rej:{}", why.replace([':', '|', ';', '\n'], " ")),
-            })
-            .collect();
-        text += &format!("{}|{}|{}|{}|{}|{}\n", e.slot, e.class.rows, e.class.k, e.class.bytes, e.best, results.join(";"));
+        text += &format!("{}|{}|{}|{}|{}|{}\n", e.slot, e.class.rows, e.class.k, e.class.bytes, e.best, store_results(&e.results));
     }
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -406,8 +458,9 @@ fn save(key: &str, t: &Tuned) {
     }
 }
 
-/// Measure every class of every multi-candidate slot.
-fn measure(gpu: &Gpu, slots: &[(usize, &'static str)]) -> Tuned {
+/// Measure every class of every multi-candidate slot that `prior` (a stored table the budget cut short) holds no
+/// measurement for; the measured classes of `prior` are kept as they are.
+fn measure(gpu: &Gpu, slots: &[(usize, &'static str)], prior: Option<&Tuned>) -> Tuned {
     let timing = gpu.set_kernel_timing(true);
     let (roof_gbs, floor_us) = match timing.then(|| measure_read_roof(gpu)).flatten() {
         Some((r, f)) => (Some(r), Some(f)),
@@ -415,6 +468,7 @@ fn measure(gpu: &Gpu, slots: &[(usize, &'static str)]) -> Tuned {
     };
     let started = std::time::Instant::now();
     let mut entries = Vec::new();
+    let mut served: HashMap<(&str, Class), Vec<&str>> = HashMap::new();
     for &(kind, slot) in slots {
         for class in Class::all() {
             let (m, kg, n) = class.problem();
@@ -423,7 +477,13 @@ fn measure(gpu: &Gpu, slots: &[(usize, &'static str)]) -> Tuned {
             if cands.is_empty() {
                 continue;
             }
-            // Past the budget a class keeps its default candidate, unmeasured, rather than delaying the start further.
+            served.insert((slot, class), cands.iter().map(|a| a.kernel).collect());
+            if let Some(e) = prior.and_then(|p| p.entries.iter().find(|e| e.slot == slot && e.class == class && !e.results.is_empty())) {
+                entries.push(e.clone());
+                continue;
+            }
+            // Past the budget a class is left unmeasured (filled from its neighbours below) rather than delaying the
+            // start further; the next start measures it.
             let results = if started.elapsed() > BUDGET { Vec::new() } else { time_class(gpu, &cands, m, kg, n, roof_gbs, floor_us, timing) };
             let mut best: Option<(&str, f64)> = None;
             for (name, v) in &results {
@@ -438,6 +498,7 @@ fn measure(gpu: &Gpu, slots: &[(usize, &'static str)]) -> Tuned {
             entries.push(Entry { slot: slot.to_owned(), class, best, results });
         }
     }
+    fill_untimed(&mut entries, |slot, class, name| served.get(&(slot, class)).is_some_and(|names| names.contains(&name)));
     gpu.set_kernel_timing(false);
     let device = crate::adapter_info().map(|(d, _)| d).unwrap_or_else(|| gpu.kind().to_owned());
     Tuned { device, roof_gbs, floor_us, entries, from_store: false }
@@ -626,6 +687,49 @@ mod tests {
         assert_eq!(t.choice("slot", &[12, 1280, 17]).as_deref(), None, "an untuned class names nothing: the default stands");
         assert_eq!(t.choice("other", &[12, 1280, 5120]), None);
         assert_eq!(t.entries[0].roof_fraction(), Some(0.5));
+    }
+
+    fn timed(slot: &str, rows: usize, best: &str) -> Entry {
+        Entry { slot: slot.into(), class: Class { rows, k: 0, bytes: 2 }, best: best.into(), results: vec![(best.into(), Verdict::Timed { us: 10.0, gbs: 1500.0, frac: Some(0.4) })] }
+    }
+
+    fn untimed(slot: &str, rows: usize) -> Entry {
+        Entry { slot: slot.into(), class: Class { rows, k: 0, bytes: 2 }, best: "default".into(), results: Vec::new() }
+    }
+
+    /// A class the tuning budget did not reach takes the choice of the nearest measured row bucket of the same
+    /// slot, `K` and bytes class whose winner also serves it - not the slot's default, which is the slowest
+    /// candidate at a batch (a 32-row decode step on the default ran at a third of its bandwidth).
+    #[test]
+    fn a_class_the_budget_did_not_reach_takes_its_nearest_measured_neighbours_choice() {
+        let mut entries = vec![timed("s", 3, "gemv"), timed("s", 4, "stream"), untimed("s", 5), untimed("s", 6), timed("other", 6, "x")];
+        let filled = fill_untimed(&mut entries, |_, _, name| name != "x");
+        assert_eq!(filled, 2);
+        assert_eq!(entries[2].best, "stream", "rows 17-24 take rows 9-16's choice");
+        assert_eq!(entries[3].best, "stream", "rows 25-32 take the nearest measured bucket's choice");
+        assert!(entries[2].results.is_empty(), "a filled class stays marked unmeasured, so the next start measures it");
+        assert_eq!(entries[1].best, "stream", "measured classes are untouched");
+
+        let mut entries = vec![timed("s", 4, "stream"), untimed("s", 5)];
+        fill_untimed(&mut entries, |_, class, name| !(class.rows == 5 && name == "stream"));
+        assert_eq!(entries[1].best, "default", "a neighbour whose winner cannot serve the class is not copied");
+    }
+
+    /// A stored table holding an unmeasured class is incomplete: it is used, and the next start measures the
+    /// missing classes instead of serving them from the default for as long as this build lives.
+    #[test]
+    fn a_stored_table_with_unmeasured_classes_is_incomplete() {
+        let line = |e: &Entry| format!("{}|{}|{}|{}|{}|{}\n", e.slot, e.class.rows, e.class.k, e.class.bytes, e.best, store_results(&e.results));
+        let all: Vec<Entry> = Class::all().map(|class| Entry { class, ..timed("s", 0, "gemv") }).collect();
+        let text = |entries: &[Entry]| "native-tune-v2|dev|3700|6.5\n".to_owned() + &entries.iter().map(line).collect::<String>();
+        let complete = parse_store(&text(&all)).expect("a whole table parses");
+        assert!(missing_classes(&complete, &["s"]).is_empty());
+        let mut cut = all.clone();
+        let last = cut.len() - 1;
+        cut[last].results.clear();
+        let partial = parse_store(&text(&cut)).expect("a table cut by the budget still parses");
+        assert_eq!(missing_classes(&partial, &["s"]), vec![("s".to_owned(), cut[last].class)]);
+        assert_eq!(missing_classes(&parse_store(&text(&all[1..])).unwrap(), &["s"]).len(), 1, "an absent class is missing too");
     }
 
     #[test]
