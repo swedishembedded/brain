@@ -329,15 +329,17 @@ impl KvPlane {
     /// Steps that copy token rows `from_row .. from_row + rows` of this plane
     /// over rows `to_row ..` of the SAME plane - element storage and, in the
     /// int8 tier, the per-row scales - so a sequence's cached prefix can seed
-    /// another sequence's window. `splice` is the pipeline index of the
-    /// `splice` kernel (a flat word copy) on `gpu`. The ranges must not
-    /// overlap. Copies words, never values, so every tier is bit-exact.
-    pub fn copy_rows(&self, gpu: &Gpu, splice: usize, from_row: u64, to_row: u64, rows: u64, kv_stride: u64, head_dim: u64) -> Vec<Step> {
+    /// another sequence's window. `copy_within` is the pipeline index of the
+    /// `copy_within` kernel on `gpu`: the plane is bound once, because a buffer
+    /// bound as both source and destination of one dispatch is a wgpu usage
+    /// conflict. The ranges must not overlap. Copies words, never values, so
+    /// every tier is bit-exact.
+    pub fn copy_rows(&self, gpu: &Gpu, copy_within: usize, from_row: u64, to_row: u64, rows: u64, kv_stride: u64, head_dim: u64) -> Vec<Step> {
         let mut steps = Vec::new();
         let mut copy = |buf: &DeviceBuffer, per_row: u64| {
             let n = rows * per_row;
             if n > 0 {
-                steps.push(gpu.step_sliced(splice, &[buf, buf], &[(from_row * per_row, n), (to_row * per_row, n)], &[n as u32, 0], n as u32));
+                steps.push(copy_words_within(gpu, copy_within, buf, from_row * per_row, to_row * per_row, n));
             }
         };
         let word_elems = self.tier.per_word();
@@ -350,6 +352,14 @@ impl KvPlane {
         }
         steps
     }
+}
+
+/// One `copy_within` dispatch: `n` words of `buf` from word `from` to word `to`, which
+/// must not overlap (an overlapping copy would race on a GPU).
+pub fn copy_words_within(gpu: &Gpu, copy_within: usize, buf: &DeviceBuffer, from: u64, to: u64, n: u64) -> Step {
+    assert!(from + n <= to || to + n <= from, "copy_words_within: words {from}..{} and {to}..{} overlap", from + n, to + n);
+    let word = |v: u64| u32::try_from(v).unwrap_or_else(|_| panic!("copy_words_within: word offset {v} does not fit the kernel's 32-bit index"));
+    gpu.dispatch(copy_within, &[buf], &[word(n), word(from), word(to)], Dispatch::Threads(word(n)))
 }
 
 /// One layer's K and V planes.
@@ -846,6 +856,47 @@ impl KvKernels {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Seeding one window of a plane from another copies the rows (and, in the int8
+    /// tier, their scales) bit for bit, binds the plane ONCE (a buffer that is
+    /// `read_write` and also another binding of one dispatch is a wgpu validation
+    /// error on a GPU, and `Gpu::dispatch` refuses it on every backend), and leaves
+    /// every other row alone.
+    #[test]
+    fn copying_rows_within_a_plane_is_exact_for_data_and_scales() {
+        let gpu = Gpu::new_cpu(&[("copy_within", kernels::COPY_WITHIN)]);
+        let copy_within = gpu.kernel_index("copy_within").unwrap();
+        let (rows, kv_stride, head_dim) = (8u64, 8u64, 4u64);
+        let plane = KvPlane::new(&gpu, KvTier::INT8, rows, kv_stride, head_dim);
+        let scales = plane.scales.as_ref().expect("the int8 tier keeps per-row scales");
+        let words = |base: u32, n: usize| (0..n as u32).map(|i| f32::from_bits(base + i * 0x101)).collect::<Vec<_>>();
+        let (data_words, scale_words) = (rows * kv_stride / 4, rows * kv_stride / head_dim);
+        gpu.write(plane.data(), &words(0x4000_0000, data_words as usize).iter().map(|f| f.to_bits()).collect::<Vec<_>>());
+        gpu.write(scales, &words(0x3f80_0000, scale_words as usize).iter().map(|f| f.to_bits()).collect::<Vec<_>>());
+        let before = |buf: &DeviceBuffer, n: u64| gpu.read(buf, n as usize).iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+        let (data0, scales0) = (before(plane.data(), data_words), before(scales, scale_words));
+
+        let steps = plane.copy_rows(&gpu, copy_within, 0, 4, 2, kv_stride, head_dim);
+        gpu.submit(&[], &steps);
+        let (data1, scales1) = (before(plane.data(), data_words), before(scales, scale_words));
+
+        let (dw, sw) = ((kv_stride / 4) as usize, (kv_stride / head_dim) as usize);
+        let mut want_data = data0.clone();
+        want_data.copy_within(0..2 * dw, 4 * dw);
+        let mut want_scales = scales0.clone();
+        want_scales.copy_within(0..2 * sw, 4 * sw);
+        assert_eq!(data1, want_data);
+        assert_eq!(scales1, want_scales);
+        assert_ne!(data1, data0, "the copy must have changed something");
+    }
+
+    #[test]
+    #[should_panic(expected = "overlap")]
+    fn an_overlapping_copy_is_refused() {
+        let gpu = Gpu::new_cpu(&[("copy_within", kernels::COPY_WITHIN)]);
+        let buf = gpu.storage(16);
+        let _ = copy_words_within(&gpu, 0, &buf, 0, 4, 8);
+    }
 
     /// A long context keeps its 1024-key splits (the device is full anyway); a
     /// short one is cut finer so even one sequence reaches the workgroup target,

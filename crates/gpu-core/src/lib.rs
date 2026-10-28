@@ -49,6 +49,10 @@ pub struct KernelGrid {
     /// The params block's size in 32-bit words ([`parse_params_words`]), when
     /// the source declares a flat one. A dispatch passing fewer is refused.
     pub params_words: Option<u32>,
+    /// Bit `n` is set when the source binds `@binding(n)` as `var<storage, read_write>`
+    /// ([`parse_written_bindings`]). Binding 0 is the params block, so buffer `i`
+    /// of a dispatch is binding `i + 1`.
+    pub written_bindings: u32,
 }
 
 /// What a caller is counting when it dispatches.
@@ -124,7 +128,61 @@ pub fn parse_kernel_grid(src: &str) -> KernelGrid {
     // `var<workgroup>` alone would over-report: a kernel can use scratch
     // without its threads sharing an item. A barrier means they do.
     let cooperative = code.contains("workgroupBarrier");
-    KernelGrid { wg_size: wg_size.max(1), cooperative, params_words: parse_params_words(src) }
+    KernelGrid { wg_size: wg_size.max(1), cooperative, params_words: parse_params_words(src), written_bindings: parse_written_bindings(src) }
+}
+
+/// Which `@binding(n)` slots (bit `n`) the shader declares `var<storage, read_write>`.
+/// Bindings above 31 are not representable and are ignored: kernels are held to
+/// at most 8 storage buffers.
+pub fn parse_written_bindings(src: &str) -> u32 {
+    let code = wgsl_code_only(src);
+    let mut mask = 0u32;
+    for (at, _) in code.match_indices("var<storage") {
+        let Some(close) = code[at..].find('>') else { continue };
+        if !code[at..at + close].contains("read_write") {
+            continue;
+        }
+        // The attributes of this declaration sit between the previous statement and it.
+        let head = &code[..at];
+        let stmt = &head[head.rfind([';', '}']).map_or(0, |i| i + 1)..];
+        let Some(b) = stmt.rfind("@binding(") else { continue };
+        let digits: String = stmt[b + "@binding(".len()..].chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(n) = digits.parse::<u32>() {
+            if n < 32 {
+                mask |= 1 << n;
+            }
+        }
+    }
+    mask
+}
+
+/// Panic when a dispatch of kernel `name` binds one buffer to two slots and at least
+/// one of them is `read_write`.
+///
+/// wgpu tracks a buffer's usage per dispatch as a whole, not per bound range, and
+/// `STORAGE_READ_WRITE` is exclusive: the dispatch is a validation error on a GPU
+/// even when the CPU backend runs it, and the error names no kernel. This is the
+/// check that names it, from the kernel's own declared access, so the CPU test path
+/// catches the class. Two read-only bindings of one buffer stay legal.
+#[track_caller]
+fn refuse_aliased_writes(name: &str, grid: Option<KernelGrid>, bufs: &[&DeviceBuffer]) {
+    // A source declaring no read_write binding is one this reading did not
+    // understand: fall back to the output-is-last heuristic rather than let it through.
+    let Some(written) = grid.map(|g| g.written_bindings).filter(|w| *w != 0) else { return assert_no_output_alias(bufs) };
+    let writes = |slot: usize| slot + 1 < 32 && (written >> (slot + 1)) & 1 != 0;
+    for (i, a) in bufs.iter().enumerate() {
+        for (j, b) in bufs.iter().enumerate().skip(i + 1) {
+            if a.alloc_id() == b.alloc_id() && (writes(i) || writes(j)) {
+                panic!(
+                    "kernel '{name}' binds one buffer as both binding {} and binding {} and one of them is read_write; \
+                     wgpu rejects that (STORAGE_READ_WRITE is exclusive within a dispatch, whatever the bound ranges). \
+                     Copy through a scratch buffer, or use a form of the kernel with a single read_write binding.",
+                    i + 1,
+                    j + 1
+                );
+            }
+        }
+    }
 }
 
 /// The size, in 32-bit words, of the struct a shader binds as its
@@ -1904,7 +1962,7 @@ mod native_facade {
         }
 
         fn step_unchecked(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
-            crate::assert_no_output_alias(bufs);
+            crate::refuse_aliased_writes(self.names.get(kind).map(String::as_str).unwrap_or("?"), self.kernel_grid_at(kind), bufs);
             // See `enable_step_cache`: OFF is one relaxed load, and a hit
             // returns the dispatch the miss below would have built. The lock
             // is taken for the lookup and again for the insert, never across
@@ -2008,8 +2066,10 @@ mod native_facade {
         }
 
         fn step_sliced_unchecked(&self, kind: usize, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> Step {
-            // NB: sliced views of ONE buffer at disjoint offsets are legal and common
-            // here, so no alias check - wgpu validates the concrete ranges.
+            // Sliced views of ONE buffer at disjoint offsets are legal and common
+            // here while every one of them is read-only; one read_write binding
+            // of a buffer another binding shares is not, whatever the ranges.
+            crate::refuse_aliased_writes(self.names.get(kind).map(String::as_str).unwrap_or("?"), self.kernel_grid_at(kind), bufs);
             //
             // Memoized on the same terms as `step` (see `enable_step_cache`),
             // with the bind OFFSETS in the key: a sliced dispatch is a pure
@@ -2876,12 +2936,12 @@ mod tests {
                      /* nor a /* nested */ one */\n\
                      @compute @workgroup_size(64)\n\
                      fn main() {}";
-        assert_eq!(crate::parse_kernel_grid(prose), crate::KernelGrid { wg_size: 64, cooperative: false, params_words: None });
+        assert_eq!(crate::parse_kernel_grid(prose), crate::KernelGrid { wg_size: 64, cooperative: false, params_words: None, written_bindings: 0 });
 
         let real = "// a tiled GEMM\n\
                     @compute @workgroup_size(16, 16)\n\
                     fn main() { workgroupBarrier(); }";
-        assert_eq!(crate::parse_kernel_grid(real), crate::KernelGrid { wg_size: 256, cooperative: true, params_words: None });
+        assert_eq!(crate::parse_kernel_grid(real), crate::KernelGrid { wg_size: 256, cooperative: true, params_words: None, written_bindings: 0 });
     }
 
     /// The uniform block's size is read from the struct the kernel actually
@@ -2942,6 +3002,46 @@ mod tests {
         for (i, v) in y.iter().enumerate() {
             assert!((v - (i as f32 + 1.0) / rms).abs() < 1e-6, "{y:?}");
         }
+    }
+
+    /// Kernel with its read_write binding FIRST, so the aliasing it guards against is
+    /// not the "output is the last binding" case `assert_no_output_alias` already knows.
+    const ACCUMULATE: &str = "struct P { n: u32 }\n\
+        @group(0) @binding(0) var<uniform> p: P;\n\
+        @group(0) @binding(1) var<storage, read_write> acc: array<f32>;\n\
+        @group(0) @binding(2)\nvar<storage, read> x: array<f32>;\n\
+        @group(0) @binding(3) var<storage, read> y: array<f32>;\n\
+        @compute @workgroup_size(64)\n\
+        fn main(@builtin(global_invocation_id) gid: vec3<u32>) { if (gid.x < p.n) { acc[gid.x] = x[gid.x] + y[gid.x]; } }";
+
+    #[test]
+    fn the_written_bindings_are_read_from_the_source() {
+        assert_eq!(crate::parse_written_bindings(ACCUMULATE), 0b0010);
+        assert_eq!(crate::parse_written_bindings(kernels::ADD2), 0b1000, "the output is the last of three storage bindings");
+        let commented = "// @group(0) @binding(1) var<storage, read_write> a: array<f32>;\n@group(0) @binding(2) var<storage, read> b: array<f32>;";
+        assert_eq!(crate::parse_written_bindings(commented), 0);
+    }
+
+    /// A buffer bound to a `read_write` slot and to any other slot of one dispatch is a
+    /// wgpu validation error on a GPU, so it is refused here, on any backend, naming the
+    /// kernel; read-only repeats stay legal.
+    #[test]
+    #[should_panic(expected = "kernel 'accumulate' binds one buffer as both binding 1 and binding 2")]
+    fn a_written_buffer_bound_twice_is_refused_naming_the_kernel() {
+        let gpu = Gpu::new_cpu(&[("accumulate", ACCUMULATE)]);
+        let a = gpu.storage_init("a", &[1.0, 2.0]);
+        let y = gpu.storage_init("y", &[1.0, 2.0]);
+        let _ = gpu.step(0, &[&a, &a, &y], &[2], 2);
+    }
+
+    #[test]
+    fn a_read_only_buffer_may_be_bound_twice() {
+        let gpu = Gpu::new_cpu(&[("accumulate", ACCUMULATE)]);
+        let acc = gpu.storage(2);
+        let x = gpu.storage_init("x", &[1.0, 2.0]);
+        let step = gpu.step(0, &[&acc, &x, &x], &[2], 2);
+        gpu.submit(&[], &[step]);
+        assert_eq!(gpu.read(&acc, 2), vec![2.0, 4.0]);
     }
 
     #[test]

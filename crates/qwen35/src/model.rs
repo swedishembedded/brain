@@ -259,6 +259,8 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         v.push(("moe_linear_gated", kernels::MOE_LINEAR_GATED));
         // A 248k-row vocabulary's table exceeds one storage binding; `Ops::embed` gathers it in vocab tiles.
         v.push(("embed_tile", kernels::EMBED_TILE));
+        // Copies between two ranges of one buffer (a KV prefix or a pooled state row into another slot).
+        v.push(("copy_within", kernels::COPY_WITHIN));
         // `Ops::REQUIRED_KERNELS` also demands the bf16/f16 storage-tier
         // variants even though this crate never builds a `Weight::BF16`/
         // `Weight::F16` and never dispatches the generic `paged_*_batched`
@@ -5861,17 +5863,18 @@ impl Qwen35 {
         assert!(from < pool.slots && to < pool.slots && from != to, "qwen35::slot_copy: {from} -> {to} of {} slots", pool.slots);
         let mut steps = Vec::new();
         let ids = model::anchor_memory::AnchorMemoryKernels::resolve(&self.gpu).unwrap_or_else(|e| panic!("qwen35: {e}"));
+        let copy_within = self.gpu.kernel_index("copy_within").expect("copy_within is in the qwen35 kernel set");
         let (state_len, hist_len) = (crate::decode_state::state_words(pool.tiers.recurrent, self.cfg.gdn_state_len()) as u32, crate::decode_state::state_words(pool.tiers.recurrent, self.cfg.gdn_hist_len()) as u32);
         for (l, ty) in self.cfg.layer_types().iter().enumerate() {
             match ty {
                 LayerType::Linear => {
                     let (sl, hl) = (u64::from(state_len), u64::from(hist_len));
-                    steps.push(self.gpu.step_sliced(REGION_COPY, &[&pool.gdn_state[l], &pool.gdn_state[l]], &[(u64::from(from) * sl, sl), (u64::from(to) * sl, sl)], &[1, state_len, state_len, 0], state_len));
-                    steps.push(self.gpu.step_sliced(REGION_COPY, &[&pool.gdn_hist[l], &pool.gdn_hist[l]], &[(u64::from(from) * hl, hl), (u64::from(to) * hl, hl)], &[1, hist_len, hist_len, 0], hist_len));
+                    steps.push(model::kv_tier::copy_words_within(&self.gpu, copy_within, &pool.gdn_state[l], u64::from(from) * sl, u64::from(to) * sl, sl));
+                    steps.push(model::kv_tier::copy_words_within(&self.gpu, copy_within, &pool.gdn_hist[l], u64::from(from) * hl, u64::from(to) * hl, hl));
                 }
                 LayerType::Full => {
                     for plane in [&pool.gqa_kv[l].k, &pool.gqa_kv[l].v] {
-                        steps.extend(plane.copy_rows(&self.gpu, SPLICE, u64::from(from) * u64::from(pool.window), u64::from(to) * u64::from(pool.window), u64::from(pool.window), u64::from(self.cfg.kv_dim()), u64::from(self.cfg.head_dim)));
+                        steps.extend(plane.copy_rows(&self.gpu, copy_within, u64::from(from) * u64::from(pool.window), u64::from(to) * u64::from(pool.window), u64::from(pool.window), u64::from(self.cfg.kv_dim()), u64::from(self.cfg.head_dim)));
                     }
                 }
             }

@@ -269,6 +269,14 @@ existing caller. Assume nothing about units.
 
 ## D. Constraints that will bite you
 
+- **A buffer a dispatch writes is bound ONCE.** wgpu tracks usage per buffer for the
+  whole dispatch, not per bound range, and `STORAGE_READ_WRITE` is exclusive: binding
+  one buffer as a `read_write` slot and as any other slot is a validation error on
+  a GPU (it names no kernel) that the CPU backend runs without complaint. Moving rows
+  within one pool is `copy_within` (one `read_write` binding), or a copy through a
+  scratch buffer, never `splice`/`region_copy` over `[buf, buf]`. `Gpu::step` and
+  `Gpu::dispatch` read each kernel's declared access from its source and refuse such a
+  dispatch on every backend, naming the kernel and the two bindings.
 - **No atomics, no subgroups, no f16** — a tree reduction is
   shared-memory + a second pass, never an atomic accumulate.
 - **The CPU JIT runs idiomatic WGSL, but not everything.** It scalarizes

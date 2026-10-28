@@ -919,11 +919,11 @@ struct ShardCaches {
     /// between a sequence's rows (see [`speculate`]); empty until speculation
     /// is enabled.
     verify_snaps: Vec<model::gdn_verify::GdnRowSnapshots>,
-    /// Kernel indices of `pool_rows_scatter2`, `pool_rows_gather2` and `splice`
+    /// Kernel indices of `pool_rows_scatter2`, `pool_rows_gather2` and `copy_within`
     /// on this stage's device.
     scatter: usize,
     gather: usize,
-    splice: usize,
+    copy_within: usize,
 }
 
 impl ShardCaches {
@@ -958,7 +958,7 @@ impl ShardCaches {
         }
         let scatter = gpu.kernel_index("pool_rows_scatter2").expect("pool_rows_scatter2 is in the qwen35 kernel set");
         let gather = gpu.kernel_index("pool_rows_gather2").expect("pool_rows_gather2 is in the qwen35 kernel set");
-        let splice = gpu.kernel_index("splice").expect("splice is in the qwen35 kernel set");
+        let copy_within = gpu.kernel_index("copy_within").expect("copy_within is in the qwen35 kernel set");
         let (block_rows, paged, slot_tables) = match layout {
             KvLayout::OneBlock => (cap, false, Vec::new()),
             KvLayout::Paged { block_rows, pool_rows } => {
@@ -968,7 +968,7 @@ impl ShardCaches {
                 (block_rows, true, (0..slots).map(|s| (s * per_slot..(s + 1) * per_slot).take_while(|&b| b < pool_blocks).collect()).collect())
             }
         };
-        let caches = ShardCaches { gqa_kv, pool_state, pool_hist, work_state, work_hist, snap_state, snap_hist, recurrent, full: full_layers, slots, cap, block_rows, paged, slot_tables, verify_snaps: Vec::new(), scatter, gather, splice };
+        let caches = ShardCaches { gqa_kv, pool_state, pool_hist, work_state, work_hist, snap_state, snap_hist, recurrent, full: full_layers, slots, cap, block_rows, paged, slot_tables, verify_snaps: Vec::new(), scatter, gather, copy_within };
         caches.reset(gpu);
         caches
     }
@@ -1071,7 +1071,7 @@ impl ShardCaches {
         for (layer, _) in self.gqa_kv.iter().zip(&self.full).filter(|(_, owned)| **owned) {
             for plane in [&layer.k, &layer.v] {
                 for &(src, dst, n) in &runs {
-                    steps.extend(plane.copy_rows(gpu, self.splice, src, dst, n, kv, hd));
+                    steps.extend(plane.copy_rows(gpu, self.copy_within, src, dst, n, kv, hd));
                 }
             }
         }

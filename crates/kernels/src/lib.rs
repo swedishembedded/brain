@@ -76,6 +76,8 @@ pub const ANCHOR_BANK_GATHER: &str = include_str!("../wgsl/anchor_bank_gather.wg
 pub const ANCHOR_COMMIT: &str = include_str!("../wgsl/anchor_commit.wgsl");
 /// `wgsl/anchor_push.wgsl`
 pub const ANCHOR_PUSH: &str = include_str!("../wgsl/anchor_push.wgsl");
+/// `wgsl/anchor_push_bf16.wgsl`
+pub const ANCHOR_PUSH_BF16: &str = include_str!("../wgsl/anchor_push_bf16.wgsl");
 /// `wgsl/anchor_read_apply.wgsl`
 pub const ANCHOR_READ_APPLY: &str = include_str!("../wgsl/anchor_read_apply.wgsl");
 /// `wgsl/anchor_read_bwd_dp.wgsl`
@@ -90,16 +92,12 @@ pub const ANCHOR_READ_GATE: &str = include_str!("../wgsl/anchor_read_gate.wgsl")
 pub const ANCHOR_READ_GATE_BWD: &str = include_str!("../wgsl/anchor_read_gate_bwd.wgsl");
 /// `wgsl/anchor_read_gate_wgrad.wgsl`
 pub const ANCHOR_READ_GATE_WGRAD: &str = include_str!("../wgsl/anchor_read_gate_wgrad.wgsl");
-/// `wgsl/anchor_read_scores.wgsl`
-pub const ANCHOR_READ_SCORES: &str = include_str!("../wgsl/anchor_read_scores.wgsl");
-/// `wgsl/gqa_ring_chunk_attn.wgsl`
-pub const GQA_RING_CHUNK_ATTN: &str = include_str!("../wgsl/gqa_ring_chunk_attn.wgsl");
-/// `wgsl/anchor_read_split.wgsl`
-pub const ANCHOR_READ_SPLIT: &str = include_str!("../wgsl/anchor_read_split.wgsl");
 /// `wgsl/anchor_read_merge.wgsl`
 pub const ANCHOR_READ_MERGE: &str = include_str!("../wgsl/anchor_read_merge.wgsl");
-/// `wgsl/anchor_push_bf16.wgsl`
-pub const ANCHOR_PUSH_BF16: &str = include_str!("../wgsl/anchor_push_bf16.wgsl");
+/// `wgsl/anchor_read_scores.wgsl`
+pub const ANCHOR_READ_SCORES: &str = include_str!("../wgsl/anchor_read_scores.wgsl");
+/// `wgsl/anchor_read_split.wgsl`
+pub const ANCHOR_READ_SPLIT: &str = include_str!("../wgsl/anchor_read_split.wgsl");
 /// `wgsl/anchor_rows_copy.wgsl`
 pub const ANCHOR_ROWS_COPY: &str = include_str!("../wgsl/anchor_rows_copy.wgsl");
 /// `wgsl/anchor_slot_inverse.wgsl`
@@ -388,6 +386,8 @@ pub const CONVTR2D_DW: &str = include_str!("../wgsl/convtr2d_dw.wgsl");
 pub const CONVTR2D_DX: &str = include_str!("../wgsl/convtr2d_dx.wgsl");
 /// `wgsl/copy_cols.wgsl`
 pub const COPY_COLS: &str = include_str!("../wgsl/copy_cols.wgsl");
+/// `wgsl/copy_within.wgsl`
+pub const COPY_WITHIN: &str = include_str!("../wgsl/copy_within.wgsl");
 /// `wgsl/crop2d.wgsl`
 pub const CROP2D: &str = include_str!("../wgsl/crop2d.wgsl");
 /// `wgsl/ct_state_scan.wgsl`
@@ -602,6 +602,8 @@ pub const GQA_BWD_DSCORES: &str = include_str!("../wgsl/gqa_bwd_dscores.wgsl");
 pub const GQA_BWD_DSCORES_ROWS: &str = include_str!("../wgsl/gqa_bwd_dscores_rows.wgsl");
 /// `wgsl/gqa_bwd_dv.wgsl`
 pub const GQA_BWD_DV: &str = include_str!("../wgsl/gqa_bwd_dv.wgsl");
+/// `wgsl/gqa_ring_chunk_attn.wgsl`
+pub const GQA_RING_CHUNK_ATTN: &str = include_str!("../wgsl/gqa_ring_chunk_attn.wgsl");
 /// `wgsl/gqa_scores.wgsl`
 pub const GQA_SCORES: &str = include_str!("../wgsl/gqa_scores.wgsl");
 /// `wgsl/gqa_scores_kmask.wgsl`
@@ -730,6 +732,8 @@ pub const MASKED_L1: &str = include_str!("../wgsl/masked_l1.wgsl");
 pub const MASKED_L1_GRAD: &str = include_str!("../wgsl/masked_l1_grad.wgsl");
 /// `wgsl/matmul.wgsl`
 pub const MATMUL: &str = include_str!("../wgsl/matmul.wgsl");
+/// `wgsl/matmul_bf16_gemv.wgsl`
+pub const MATMUL_BF16_GEMV: &str = include_str!("../wgsl/matmul_bf16_gemv.wgsl");
 /// `wgsl/matmul_dw.wgsl`
 pub const MATMUL_DW: &str = include_str!("../wgsl/matmul_dw.wgsl");
 /// `wgsl/matmul_dw_reg.wgsl`
@@ -742,10 +746,6 @@ pub const MATMUL_DW_REG_TN: &str = include_str!("../wgsl/matmul_dw_reg_tn.wgsl")
 pub const MATMUL_DX: &str = include_str!("../wgsl/matmul_dx.wgsl");
 /// `wgsl/matmul_dx_reg.wgsl`
 pub const MATMUL_DX_REG: &str = include_str!("../wgsl/matmul_dx_reg.wgsl");
-/// `wgsl/matmul_bf16_gemv.wgsl`
-pub const MATMUL_BF16_GEMV: &str = include_str!("../wgsl/matmul_bf16_gemv.wgsl");
-/// `wgsl/matmul_tile16.wgsl`
-pub const MATMUL_TILE16: &str = include_str!("../wgsl/matmul_tile16.wgsl");
 /// `wgsl/matmul_fp8_gemv.wgsl`
 pub const MATMUL_FP8_GEMV: &str = include_str!("../wgsl/matmul_fp8_gemv.wgsl");
 /// `wgsl/matmul_gemv.wgsl`
@@ -802,6 +802,8 @@ pub const MATMUL_REG4: &str = include_str!("../wgsl/matmul_reg4.wgsl");
 pub const MATMUL_ROWS: &str = include_str!("../wgsl/matmul_rows.wgsl");
 /// `wgsl/matmul_tile.wgsl`
 pub const MATMUL_TILE: &str = include_str!("../wgsl/matmul_tile.wgsl");
+/// `wgsl/matmul_tile16.wgsl`
+pub const MATMUL_TILE16: &str = include_str!("../wgsl/matmul_tile16.wgsl");
 /// `wgsl/matmul_tiled.wgsl`
 pub const MATMUL_TILED: &str = include_str!("../wgsl/matmul_tiled.wgsl");
 /// `wgsl/max_abs_row.wgsl`
@@ -1011,10 +1013,10 @@ pub const PIXEL_SHUFFLE3D_CL: &str = include_str!("../wgsl/pixel_shuffle3d_cl.wg
 pub const PIXEL_SHUFFLE_DX: &str = include_str!("../wgsl/pixel_shuffle_dx.wgsl");
 /// `wgsl/pool_rows_gather2.wgsl`
 pub const POOL_ROWS_GATHER2: &str = include_str!("../wgsl/pool_rows_gather2.wgsl");
-/// `wgsl/pool_rows_scatter2_bf16.wgsl`
-pub const POOL_ROWS_SCATTER2_BF16: &str = include_str!("../wgsl/pool_rows_scatter2_bf16.wgsl");
 /// `wgsl/pool_rows_scatter2.wgsl`
 pub const POOL_ROWS_SCATTER2: &str = include_str!("../wgsl/pool_rows_scatter2.wgsl");
+/// `wgsl/pool_rows_scatter2_bf16.wgsl`
+pub const POOL_ROWS_SCATTER2_BF16: &str = include_str!("../wgsl/pool_rows_scatter2_bf16.wgsl");
 /// `wgsl/pos_add.wgsl`
 pub const POS_ADD: &str = include_str!("../wgsl/pos_add.wgsl");
 /// `wgsl/pos_bwd.wgsl`
@@ -1394,6 +1396,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("anchor_bank_gather", ANCHOR_BANK_GATHER),
     ("anchor_commit", ANCHOR_COMMIT),
     ("anchor_push", ANCHOR_PUSH),
+    ("anchor_push_bf16", ANCHOR_PUSH_BF16),
     ("anchor_read_apply", ANCHOR_READ_APPLY),
     ("anchor_read_bwd_dp", ANCHOR_READ_BWD_DP),
     ("anchor_read_bwd_kv", ANCHOR_READ_BWD_KV),
@@ -1401,10 +1404,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("anchor_read_gate", ANCHOR_READ_GATE),
     ("anchor_read_gate_bwd", ANCHOR_READ_GATE_BWD),
     ("anchor_read_gate_wgrad", ANCHOR_READ_GATE_WGRAD),
-    ("anchor_read_scores", ANCHOR_READ_SCORES),
-    ("anchor_push_bf16", ANCHOR_PUSH_BF16),
-    ("anchor_read_split", ANCHOR_READ_SPLIT),
     ("anchor_read_merge", ANCHOR_READ_MERGE),
+    ("anchor_read_scores", ANCHOR_READ_SCORES),
+    ("anchor_read_split", ANCHOR_READ_SPLIT),
     ("anchor_rows_copy", ANCHOR_ROWS_COPY),
     ("anchor_slot_inverse", ANCHOR_SLOT_INVERSE),
     ("arcface_margin", ARCFACE_MARGIN),
@@ -1549,6 +1551,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("convtr2d_dw", CONVTR2D_DW),
     ("convtr2d_dx", CONVTR2D_DX),
     ("copy_cols", COPY_COLS),
+    ("copy_within", COPY_WITHIN),
     ("crop2d", CROP2D),
     ("ct_state_scan", CT_STATE_SCAN),
     ("ct_state_scan_bwd", CT_STATE_SCAN_BWD),
@@ -1653,9 +1656,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("gqa_bwd_dscores", GQA_BWD_DSCORES),
     ("gqa_bwd_dscores_rows", GQA_BWD_DSCORES_ROWS),
     ("gqa_bwd_dv", GQA_BWD_DV),
+    ("gqa_ring_chunk_attn", GQA_RING_CHUNK_ATTN),
     ("gqa_scores", GQA_SCORES),
     ("gqa_scores_kmask", GQA_SCORES_KMASK),
-    ("gqa_ring_chunk_attn", GQA_RING_CHUNK_ATTN),
     ("gqa_scores_win", GQA_SCORES_WIN),
     ("grad_scale", GRAD_SCALE),
     ("grad_scale_buf", GRAD_SCALE_BUF),
@@ -1715,14 +1718,13 @@ pub const ALL: &[(&str, &str)] = &[
     ("masked_l1", MASKED_L1),
     ("masked_l1_grad", MASKED_L1_GRAD),
     ("matmul", MATMUL),
+    ("matmul_bf16_gemv", MATMUL_BF16_GEMV),
     ("matmul_dw", MATMUL_DW),
     ("matmul_dw_reg", MATMUL_DW_REG),
     ("matmul_dw_reg_splitk", MATMUL_DW_REG_SPLITK),
     ("matmul_dw_reg_tn", MATMUL_DW_REG_TN),
     ("matmul_dx", MATMUL_DX),
     ("matmul_dx_reg", MATMUL_DX_REG),
-    ("matmul_bf16_gemv", MATMUL_BF16_GEMV),
-    ("matmul_tile16", MATMUL_TILE16),
     ("matmul_fp8_gemv", MATMUL_FP8_GEMV),
     ("matmul_gemv", MATMUL_GEMV),
     ("matmul_gemv_f8e4m3", MATMUL_GEMV_F8E4M3),
@@ -1751,6 +1753,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("matmul_reg4", MATMUL_REG4),
     ("matmul_rows", MATMUL_ROWS),
     ("matmul_tile", MATMUL_TILE),
+    ("matmul_tile16", MATMUL_TILE16),
     ("matmul_tiled", MATMUL_TILED),
     ("max_abs_row", MAX_ABS_ROW),
     ("max_abs_rows", MAX_ABS_ROWS),
