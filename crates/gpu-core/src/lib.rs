@@ -289,6 +289,10 @@ pub use tune::cache_dir;
 /// claim in this engine divides by, so that claim is about the device that ran.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod roof;
+/// Collectives over several cards: device all-reduce and all-gather when the
+/// backend has them, the host otherwise, with the reason stated once.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod devgroup;
 /// How two cards reach each other: topology, measured bandwidth, and the
 /// once-stated reason when a transfer has to go through the host.
 #[cfg(not(target_arch = "wasm32"))]
@@ -1842,6 +1846,23 @@ mod native_facade {
                     crate::link::Path::HostStaged
                 }
             }
+        }
+
+        /// A device collective over `members` (this backend's cards, rank = position), or why there is none.
+        pub(crate) fn open_device_collective(&self, members: &[&Gpu]) -> Result<Box<dyn backend_api::DeviceCollective>, String> {
+            let mut ids = Vec::with_capacity(members.len());
+            for m in members {
+                if m.kind() != self.kind() {
+                    return Err(format!("the cards run on different backends ({} and {})", self.kind(), m.kind()));
+                }
+                ids.push(m.identity().ok_or_else(|| format!("the {} backend does not identify its cards", m.kind()))?);
+            }
+            self.be().open_collective(&ids)
+        }
+
+        /// Issue what this handle still holds back in an open pass; see `backend_api::Backend::release_held`.
+        pub(crate) fn release_held_work(&self) {
+            self.be().release_held()
         }
 
         /// [`Self::copy_to`] through a host buffer, in bounded pieces. The path every backend has.

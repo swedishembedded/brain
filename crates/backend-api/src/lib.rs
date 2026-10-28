@@ -1646,6 +1646,13 @@ pub trait Backend: Send + Sync {
         Err(format!("the {} backend has no device-to-device copy", self.kind()))
     }
 
+    /// A communicator over `members` (distinct devices of this backend, rank = position): device collectives with
+    /// no host copy of the payload. `Err` with the reason when the backend has none or the library that provides
+    /// them is absent; the caller then reduces through the host.
+    fn open_collective(&self, _members: &[GpuIdentity]) -> Result<Box<dyn DeviceCollective>, String> {
+        Err(format!("the {} backend has no device collectives", self.kind()))
+    }
+
     /// Issue whatever this handle still holds back in an open pass, so work on other handles that is ordered
     /// against this handle's buffers sees all of it. A no-op where nothing is held.
     fn release_held(&self) {}
@@ -1898,6 +1905,19 @@ impl PeerLink {
     pub fn none(reason: impl Into<String>) -> PeerLink {
         PeerLink { direct: false, performance_rank: None, native_atomics: false, reason: Some(reason.into()) }
     }
+}
+
+/// A communicator over several devices of one backend: collectives that run on the devices, stream-ordered, with
+/// no host copy of the payload. Buffers are given in RANK order (the order of the members the communicator was
+/// opened with), one per rank, each on its rank's device. f32 payloads only, sum as the reduction.
+pub trait DeviceCollective: Send + Sync {
+    /// The library that moves the bytes, for reporting.
+    fn provider(&self) -> &'static str;
+    /// Every rank's `bufs[i]` (its first `words` f32 words) becomes the element-wise sum over ranks.
+    fn all_reduce_sum(&self, bufs: &[&DeviceBuffer], words: u64) -> Result<(), String>;
+    /// Every rank's `recv[j]` (`ranks * words` f32 words) becomes the concatenation, in rank order, of every rank's
+    /// first `words` words of `send`.
+    fn all_gather(&self, send: &[&DeviceBuffer], recv: &[&DeviceBuffer], words: u64) -> Result<(), String>;
 }
 
 /// Per-handle device-op counters - the queryable form of what

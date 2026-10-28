@@ -67,7 +67,7 @@ claimed before its baseline exists.
 | 9 | One logical prefix index (radix over content, namespace, revision) over block-sharing and snapshot physical forms; retention by saved work per byte | `model::paged`, `model::snapshot_prefix` | longest-prefix match without scanning entries | open |
 | 10 | Grace memory as a managed warm KV tier: page-granular async promotion/demotion through the existing upload ring; direct coherent reads measured separately (G9) | `model::kv_offload`, `backend-cuda` | warm-prefix hits served from host without whole-sequence swaps | open |
 | 11 | Batched adapters in prefill and speculation (G8) | `qwen35`, `llmserve` | adapter traffic keeps multi-sequence prefill | open |
-| 12 | Device-resident inter-GPU transfers and collectives (G10) | `model::collective`, residency | no host-staged per-token transfer on supported devices | in progress: peer copy and link measurement (A) and the 27B stage boundary (B) done, NCCL open |
+| 12 | Device-resident inter-GPU transfers and collectives (G10) | `model::collective`, residency | no host-staged per-token transfer on supported devices | in progress: peer copy and link measurement (A) and the 27B stage boundary (B) and the NCCL communicator (C) done, tensor-parallel use and the head hand-off open |
 
 Page size (256 rows today) is part of item 3 and is chosen per cache group by
 measurement (16-256), not fixed globally.
@@ -106,3 +106,14 @@ measurement (16-256), not fixed globally.
   and `two_shard_int8_prefill_round_with_a_device_boundary_matches_the_host_boundary`
   (bit-equal; run on the CPU backend, where the hand-off falls back to the
   host). Open: the head still receives the last block through the host.
+- 2026-10-29 (12, C): `gpu_core::devgroup::DeviceGroup` runs all-reduce (sum)
+  and all-gather over `DeviceBuffer`s of several cards. On CUDA it is an NCCL
+  communicator (`backend_cuda::nccl`, `libnccl.so.2` by `dlopen` like cuBLAS,
+  one `ncclCommInitAll` for the process, one kernel-less handle per rank whose
+  stream carries the collective, ordered against the producers and consumers by
+  the same event fences as `copy_to`); an absent library, another backend or a
+  refused card set reduces through the host and says why once. A failure of an
+  opened device collective is an error, not a retry through the host. Not done
+  and recorded here: tensor-parallel use (the collective is not yet called from
+  any model), and `model::collective`'s host `Collective` seam still stages
+  through host fp32.

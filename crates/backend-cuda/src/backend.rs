@@ -590,6 +590,31 @@ impl CudaBackend {
         }
     }
 
+    /// The stream this handle issues on, for a library enqueuing its own work behind this handle's.
+    pub(crate) fn stream(&self) -> crate::driver::CuStream {
+        self.ctx.stream()
+    }
+
+    /// The device address and length in bytes of `buf`, which must be one of this backend's.
+    pub(crate) fn address_of(buf: &DeviceBuffer) -> Result<(CuDevicePtr, u64), String> {
+        let b = buf.try_downcast_ref::<CudaBuf>().ok_or("the buffer is not a CUDA buffer")?;
+        Ok((b.mem.device_ptr(), b.mem.len() as u64))
+    }
+
+    /// Order this handle's stream after every other handle's work on `bufs` (a use that reads and writes them),
+    /// then, with [`Self::fence_collective_out`] after the library has enqueued, order later users after it.
+    pub(crate) fn fence_collective_in(&self, bufs: &[&DeviceBuffer]) -> Result<(), String> {
+        self.issue_held();
+        self.refuse_during_capture("a collective");
+        let mems = bufs.iter().map(|b| b.try_downcast_ref::<CudaBuf>().map(|c| &c.mem).ok_or("the buffer is not a CUDA buffer")).collect::<Result<Vec<_>, _>>()?;
+        self.fence_in(mems.iter().map(|m| (*m, true)));
+        Ok(())
+    }
+
+    pub(crate) fn fence_collective_out(&self, bufs: &[&DeviceBuffer]) {
+        self.fence_out(bufs.iter().filter_map(|b| b.try_downcast_ref::<CudaBuf>()).map(|c| (&c.mem, true)));
+    }
+
     /// Turn submission capture off (or back on) for this handle.
     ///
     /// On by default where the driver supports it. The knob exists because the
@@ -2237,6 +2262,16 @@ impl backend_api::Backend for CudaBackend {
         // Anything on the destination's handle that touches `dst` from now on waits for the copy.
         self.fence_out([(src, false), (dst, true)]);
         Ok(())
+    }
+
+    fn open_collective(&self, members: &[GpuIdentity]) -> Result<Box<dyn backend_api::DeviceCollective>, String> {
+        let d = crate::driver::driver().map_err(str::to_string)?;
+        let all = d.devices()?;
+        let ordinals = members
+            .iter()
+            .map(|m| all.iter().find(|c| c.identity().same_device(m)).map(|c| c.ordinal).ok_or_else(|| format!("{} is not visible to the CUDA driver", m.name)))
+            .collect::<Result<Vec<u32>, String>>()?;
+        Ok(Box::new(crate::nccl::NcclGroup::open(&ordinals)?))
     }
 
     fn release_held(&self) {

@@ -285,9 +285,11 @@ Scope: Running one training job as ranks across machines - the job plan every ra
 - [ ] `DdpOptimizer`, `DataParallel` and `federated_average` have no
       production caller; the shipped driver reduces through `reduce_grads` so
       each model keeps its own optimizer and schedule.
-- [ ] Device-resident collectives and an NCCL provider (the `Collective` seam
-      and the CUDA provider table are where they belong); today every payload
-      is staged through host fp32.
+- [ ] Device-resident collectives: `gpu_core::devgroup::DeviceGroup` (NCCL by
+      `dlopen`, host fallback with a stated reason) exists, ledger in
+      `serving-runtime.md` item 12; the `Collective` seam in `model::collective`
+      does not call it yet, so every distributed-training payload is still
+      staged through host fp32.
 - [ ] Wire the commit into a trainer: rank 0 writes the weights and the
       exact-resume state, calls `CheckpointCommit::build`/`write`, and the
       driver resumes from `CheckpointCommit::latest` after verifying it.

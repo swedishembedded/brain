@@ -47,6 +47,7 @@ pub mod driver;
 pub mod exec;
 mod graph;
 pub mod live;
+pub mod nccl;
 pub mod nvrtc;
 pub mod policy;
 mod upload_ring;
