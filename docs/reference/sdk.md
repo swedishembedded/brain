@@ -405,7 +405,7 @@ The dataset is **`generic-preference-v1`** JSONL, one pair per line:
 
 - `prompt` (required, non-empty) is a conversation in the
   `generic-messages-v2` message shape - `role`, `content`, optional
-  `tool_calls` and `tool_call_id` - **without `train`**: supervision follows
+  `tool_calls`, `tool_call_id` and, on an assistant turn, `reasoning_content` (rendered as the turn's think block) - **without `train`**: supervision follows
   from position, so the prompt is never supervised and the candidates always
   are. It must not end in an assistant turn.
 - `chosen` and `rejected` (required) are single assistant messages of the

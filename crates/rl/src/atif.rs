@@ -151,7 +151,7 @@ fn push_step(step: &TraceStep, out: &mut Vec<ChatMessage>) -> Result<(), String>
                         .and_then(MessageBody::as_text)
                         .ok_or_else(|| format!("step {}: tool observation has no plain-text content", step.step_id))?
                         .to_string();
-                    out.push(ChatMessage { role: "tool".to_string(), content, tool_calls: Vec::new(), tool_call_id: entry.source_call_id.clone(), train: false });
+                    out.push(ChatMessage { role: "tool".to_string(), content, tool_calls: Vec::new(), tool_call_id: entry.source_call_id.clone(), reasoning_content: None, train: false });
                 }
             }
         }

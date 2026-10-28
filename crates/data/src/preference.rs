@@ -131,11 +131,13 @@ struct WireTurn {
     tool_calls: Vec<WireToolCall>,
     #[serde(default)]
     tool_call_id: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
 }
 
 impl WireTurn {
     fn into_message(self, train: bool) -> WireMessage {
-        WireMessage { role: self.role, content: self.content, tool_calls: self.tool_calls, tool_call_id: self.tool_call_id, train }
+        WireMessage { role: self.role, content: self.content, tool_calls: self.tool_calls, tool_call_id: self.tool_call_id, reasoning_content: self.reasoning_content, train }
     }
 }
 

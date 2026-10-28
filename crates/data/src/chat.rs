@@ -100,6 +100,13 @@ pub struct ChatMessage {
     /// Only meaningful when `role == "tool"`: which tool call this result
     /// answers.
     pub tool_call_id: Option<String>,
+    /// Only meaningful when `role == "assistant"`: the reasoning the model
+    /// produced before this turn. It reaches the template as
+    /// `reasoning_content`, the field a reasoning model's template renders as
+    /// its think block (the same field inference sends back), so a trained
+    /// turn shows the reasoning where the model is asked to produce it. A
+    /// turn with none keeps the shape it always had.
+    pub reasoning_content: Option<String>,
     /// Whether this message's tokens are supervised (assistant decision
     /// turns the model should learn) or masked context (system/user/tool-
     /// result turns, and any assistant turn a producer excluded from
@@ -109,21 +116,21 @@ pub struct ChatMessage {
 
 impl ChatMessage {
     pub fn system(content: impl Into<String>) -> ChatMessage {
-        ChatMessage { role: "system".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: None, train: false }
+        ChatMessage { role: "system".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: None, reasoning_content: None, train: false }
     }
     pub fn user(content: impl Into<String>) -> ChatMessage {
-        ChatMessage { role: "user".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: None, train: false }
+        ChatMessage { role: "user".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: None, reasoning_content: None, train: false }
     }
     pub fn assistant(content: impl Into<String>, train: bool) -> ChatMessage {
-        ChatMessage { role: "assistant".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: None, train }
+        ChatMessage { role: "assistant".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: None, reasoning_content: None, train }
     }
     pub fn assistant_tool_calls(content: impl Into<String>, tool_calls: Vec<ToolCall>, train: bool) -> ChatMessage {
-        ChatMessage { role: "assistant".into(), content: content.into(), tool_calls, tool_call_id: None, train }
+        ChatMessage { role: "assistant".into(), content: content.into(), tool_calls, tool_call_id: None, reasoning_content: None, train }
     }
     /// A tool result. Never trainable; the template merges consecutive
     /// `"tool"`-role messages into one wrapping turn on its own.
     pub fn tool_result(content: impl Into<String>) -> ChatMessage {
-        ChatMessage { role: "tool".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: None, train: false }
+        ChatMessage { role: "tool".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: None, reasoning_content: None, train: false }
     }
 
     /// This message as the JSON-shaped value a chat template reads
@@ -152,6 +159,8 @@ impl ChatMessage {
             tool_calls: Vec<TplToolCall<'a>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             tool_call_id: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            reasoning_content: Option<&'a str>,
         }
         minijinja::Value::from_serialize(TplMessage {
             role: &self.role,
@@ -162,6 +171,7 @@ impl ChatMessage {
                 .map(|tc| TplToolCall { id: tc.id.as_deref(), r#type: "function", function: TplFunction { name: &tc.name, arguments: template_arguments(&tc.arguments, argument_objects) } })
                 .collect(),
             tool_call_id: self.tool_call_id.as_deref(),
+            reasoning_content: self.reasoning_content.as_deref(),
         })
     }
 }
@@ -527,6 +537,9 @@ pub(crate) struct WireMessage {
     /// Only meaningful on `WireRole::Tool`.
     #[serde(default)]
     pub(crate) tool_call_id: Option<String>,
+    /// Only meaningful on `WireRole::Assistant`: the reasoning before the turn.
+    #[serde(default)]
+    pub(crate) reasoning_content: Option<String>,
     /// No default: a message with no explicit supervision boundary is
     /// rejected rather than silently treated as all-context or all-trained.
     pub(crate) train: bool,
@@ -599,11 +612,14 @@ pub(crate) fn messages_from_wire(wire: Vec<WireMessage>) -> Result<Vec<ChatMessa
             tool_calls.push(ToolCall { id: tc.id, name: tc.function.name, arguments: tc.function.arguments });
         }
 
+        if m.reasoning_content.is_some() && !matches!(m.role, WireRole::Assistant) {
+            return Err(format!("messages[{i}]: only an \"assistant\" message carries \"reasoning_content\""));
+        }
         if matches!(m.role, WireRole::Tool) && m.tool_call_id.is_none() {
             return Err(format!("messages[{i}]: a \"tool\"-role message must carry \"tool_call_id\""));
         }
 
-        messages.push(ChatMessage { role: role.to_string(), content: m.content, tool_calls, tool_call_id: m.tool_call_id, train: m.train });
+        messages.push(ChatMessage { role: role.to_string(), content: m.content, tool_calls, tool_call_id: m.tool_call_id, reasoning_content: m.reasoning_content, train: m.train });
     }
     check_tool_pairing(&messages)?;
     Ok(messages)
@@ -786,7 +802,7 @@ mod tests {
 
 
     fn answering(content: &str, train: bool) -> ChatMessage {
-        ChatMessage { role: "assistant".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: None, train }
+        ChatMessage { role: "assistant".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: None, reasoning_content: None, train }
     }
 
     /// A model asked not to reason is trained on what it is asked from: each
@@ -815,7 +831,7 @@ mod tests {
     #[test]
     fn each_answer_of_a_dialogue_is_trained_as_the_model_is_asked_for_it() {
         let tmpl = ChatTemplate::compile(&std::fs::read_to_string(brain_testutil::testdata("qwen3/chat_template.jinja")).unwrap()).unwrap();
-        let turn = |role: &str, text: &str, train: bool| ChatMessage { role: role.into(), content: text.into(), tool_calls: Vec::new(), tool_call_id: None, train };
+        let turn = |role: &str, text: &str, train: bool| ChatMessage { role: role.into(), content: text.into(), tool_calls: Vec::new(), tool_call_id: None, reasoning_content: None, train };
         let dialogue = ChatSample {
             messages: vec![turn("system", "s", false), turn("user", "q1", false), turn("assistant", "a1", true), turn("user", "q2", false), turn("assistant", "a2", true)],
             ..ChatSample::default()
@@ -885,6 +901,62 @@ mod tests {
             }
             assert!(samples[0].rendered.as_ref().unwrap().segments[1].text.contains("<tool_call>"));
         }
+    }
+
+    /// A turn's reasoning travels as `reasoning_content`, the field serving
+    /// sends back and the template renders as the turn's think block, so a
+    /// trained turn is the turn as serving renders it, reasoning included, in
+    /// either thinking mode; the same turn without it keeps its empty block.
+    #[test]
+    fn a_turns_reasoning_is_trained_as_serving_renders_it() {
+        use crate::qwen_chat::{self, ChatMessage as Served, TemplateOpts, ToolCallMsg};
+        let tmpl = ChatTemplate::compile(&std::fs::read_to_string(brain_testutil::testdata("qwen3/chat_template.jinja")).unwrap()).unwrap();
+        let schema = r#"{"type":"function","function":{"name":"get_weather","description":"Get the weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}}"#;
+        let call = ToolCall { id: Some("c1".into()), name: "get_weather".into(), arguments: r#"{"city": "Paris"}"#.into() };
+        let reasoned = |m: ChatMessage, reasoning: &str| ChatMessage { reasoning_content: Some(reasoning.into()), ..m };
+        let conversation = ChatSample {
+            messages: vec![
+                ChatMessage::user("Weather in Paris?"),
+                reasoned(ChatMessage::assistant_tool_calls("", vec![call], true), "I should ask the tool."),
+                ChatMessage::tool_result("18C"),
+                reasoned(ChatMessage::assistant("Paris is 18C.", true), "The tool said 18C."),
+            ],
+            tools: vec![crate::chat_template::parse_json_ordered(schema).unwrap()],
+            rendered: None,
+        };
+        let served = [
+            Served::user("Weather in Paris?"),
+            Served { reasoning_content: Some("I should ask the tool.".into()), ..Served::assistant("") }.with_tool_calls(vec![ToolCallMsg { id: "c1".into(), name: "get_weather".into(), arguments: r#"{"city": "Paris"}"#.into() }]),
+            Served::tool("18C"),
+            Served { reasoning_content: Some("The tool said 18C.".into()), ..Served::assistant("Paris is 18C.") },
+        ];
+        let opts = TemplateOpts { enable_thinking: true, ..TemplateOpts::default() };
+        let samples = conversation.answers_as_asked(&tmpl, true).unwrap().expect("every turn is an assistant turn");
+        assert_eq!(samples.len(), 2);
+        for (sample, at) in samples.iter().zip([1, 3]) {
+            let prompt = qwen_chat::render_for_generation(&served[..at], &[schema.to_string()], opts.clone()).unwrap();
+            let full = qwen_chat::render(&served[..=at], &[schema.to_string()], TemplateOpts { add_generation_prompt: false, ..opts.clone() }).unwrap();
+            let rendered = sample.rendered.as_ref().expect("a rendered example");
+            assert_eq!(rendered.segments[0].text, prompt, "turn {at}");
+            assert_eq!(rendered.segments[1].text, full.strip_prefix(prompt.as_str()).unwrap(), "turn {at}");
+        }
+        assert!(samples[0].rendered.as_ref().unwrap().segments[1].text.contains("I should ask the tool.\n</think>"));
+        assert!(samples[1].rendered.as_ref().unwrap().segments[1].text.contains("The tool said 18C.\n</think>\n\nParis is 18C."));
+    }
+
+    #[test]
+    fn reasoning_content_is_read_from_the_wire_on_an_assistant_turn_only() {
+        let line = |role: &str| format!(r#"{{"messages":[{{"role":"{role}","content":"x","reasoning_content":"r","train":false}}]}}"#);
+        let dir = std::env::temp_dir().join(format!("brain-reasoning-wire-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("d.jsonl");
+        std::fs::write(&path, line("assistant")).unwrap();
+        let samples = ChatSample::from_jsonl(&path).unwrap();
+        assert_eq!(samples[0].messages[0].reasoning_content.as_deref(), Some("r"));
+        std::fs::write(&path, line("user")).unwrap();
+        let err = ChatSample::from_jsonl(&path).err().expect("refused").to_string();
+        assert!(err.contains("reasoning_content"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
