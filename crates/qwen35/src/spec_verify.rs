@@ -23,6 +23,7 @@ use gpu_core::{DeviceBuffer, Gpu};
 use model::gdn_verify::{GdnRowSnapshots, MAX_VERIFY_ROWS};
 
 use super::{BatchDecodeCaches, Qwen35};
+use crate::stage_rows::StageRows;
 
 /// The scratch arena a verify step's layer stack draws from. Its own: a verify
 /// step asks for a different sequence of buffers than a decode step does. One
@@ -102,12 +103,11 @@ impl<'a> VerifyBatch<'a> {
 }
 
 impl Qwen35 {
-    /// [`Self::decode_batch_stage`] as a speculative verify pass; the result is
-    /// the packed `[rows, d_model]` hidden block, staged to the host.
-    pub(crate) fn verify_batch_stage(&self, tokens: &[u32], caches: &BatchDecodeCaches, verify: &VerifyBatch, input_override: Option<&[f32]>) -> Vec<f32> {
+    /// [`Self::run_decode_batch`] as a speculative verify pass: the packed `[rows, d_model]` hidden block,
+    /// left on the device for the next stage.
+    pub(crate) fn verify_batch(&self, tokens: &[u32], caches: &BatchDecodeCaches, verify: &VerifyBatch, input_override: Option<StageRows<'_>>) -> gpu_core::DeviceBuffer {
         assert_eq!(tokens.len() as u32, verify.counts.iter().sum::<u32>(), "qwen35 verify: {} tokens for {:?} rows", tokens.len(), verify.counts);
-        let hidden = self.run_decode_batch_with(tokens, caches, input_override, Some(verify));
-        self.gpu.read(&hidden, tokens.len() * self.cfg.d_model as usize)
+        self.run_decode_batch_with(tokens, caches, input_override, Some(verify))
     }
 
     /// Copy, for every sequence that rejected some of its rows, the snapshot of

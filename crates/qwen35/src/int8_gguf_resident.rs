@@ -34,13 +34,14 @@
 //!   inner `MmapGguf`.
 //! * **Stage construction** - [`Qwen35::new_i8_shard`], one instance per card,
 //!   each holding only its own `shard.start..shard.end` layers.
-//! * **Decode** - `Qwen35::decode_step_stage` per stage per token, with the
-//!   boundary residual host-staged from card to card (`d_model` floats, 20 KiB
-//!   at this shape). Gated at tiny scale by
+//! * **Decode** - `Qwen35::run_decode_step` per stage per token, with the
+//!   boundary residual handed from card to card device to device
+//!   (`Gpu::copy_to`: over the card link when the pair has one, `d_model`
+//!   floats, 20 KiB at this shape). Gated at tiny scale by
 //!   `crate::model`'s own `two_shard_int8_decode_matches_the_whole_shard_model`,
 //!   which proves the two-stage composition is bit-equal to the whole-shard
 //!   model.
-//! * **Prefill** - `Qwen35::prefill_chunk_stage` per stage per ROUND, the same
+//! * **Prefill** - `Qwen35::run_prefill_chunk_stage` per stage per ROUND, the same
 //!   seam widened to a whole round's `[n, d_model]` boundary block (5.2 MB at
 //!   this resident's `n = 256`). Gated at tiny scale by `crate::model`'s own
 //!   `two_shard_chunked_prefill_matches_token_by_token_replay`, which proves a
@@ -170,7 +171,7 @@ use serde_json::json;
 
 use crate::adapter_serving as adapters;
 use crate::config::{LayerType, Qwen35Config};
-use crate::model::{BatchDecodeCaches, BatchSeq, DecodeCaches, GdnPoolStore, KvWindow, PooledCaches, PrefillSeg, Qwen35, SpecDecodeStats};
+use crate::model::{BatchDecodeCaches, BatchSeq, DecodeCaches, GdnPoolStore, KvWindow, PooledCaches, PrefillSeg, Qwen35, SpecDecodeStats, StageRows};
 
 /// Catalog id. Names the real upstream release this resident loads, exactly
 /// (`https://huggingface.co/unsloth/Qwen3.8-27B-GGUF`, the `Q8_0` file) -
@@ -185,9 +186,8 @@ pub const MODEL: &str = "unsloth/Qwen3.8-27B-Q8_0";
 ///
 /// The upside is `crate::serve`'s and applies here twice over: a round
 /// amortises each stage's per-layer dispatch overhead over `n` rows AND
-/// replaces `n` host round trips per stage (`Qwen35::decode_step_stage` reads
-/// its result back every call, and there are `n_stages` of those per token)
-/// with one.
+/// replaces `n` per-token stage hand-offs (there are `n_stages` of those per
+/// token) with one.
 ///
 /// The same 256 `crate::serve::Engine` uses - but RE-MEASURED on this model
 /// rather than inherited, because the first honest attempt at it did not run
@@ -1360,26 +1360,58 @@ impl Qwen35GgufInstance {
         })?
     }
 
+    /// `input` through EVERY stage in order, returning the last stage's output on the host. `run` is one
+    /// stage's forward over its input rows; `observe` sees each stage's output (and the handle that owns it)
+    /// before the next stage starts.
+    ///
+    /// The residual crosses each card boundary device to device ([`StageRows::Device`]): the next stage's
+    /// forward copies it straight from the previous stage's output over the card link when the pair has
+    /// one, ordered on the two streams, so the host neither waits for a stage nor carries its output. Only
+    /// the first stage's input (the embedding rows, which live in the mapped file) and the last stage's output
+    /// (which the head projects) cross the host. A stage whose layer range is empty passes its input through.
+    fn chain_stages<'s>(
+        &'s self,
+        input: &[f32],
+        mut run: impl FnMut(&'s DeviceShard, StageRows<'_>) -> DeviceBuffer,
+        mut observe: impl FnMut(&Gpu, &DeviceBuffer),
+    ) -> Vec<f32> {
+        let words = input.len();
+        let mut prev: Option<(&Gpu, DeviceBuffer)> = None;
+        for s in &self.shards {
+            let rows = match &prev {
+                None => StageRows::Host(input),
+                Some((from, out)) => StageRows::device(from, out, words),
+            };
+            let out = run(s, rows);
+            observe(&s.qwen35.gpu, &out);
+            prev = Some((&s.qwen35.gpu, out));
+        }
+        let (g, out) = prev.expect("a plan always has at least one stage");
+        g.read(&out, words)
+    }
+
     /// One token through EVERY stage in order, then the head - returning
     /// `[vocab]` logits. The residual stream crosses each card boundary
-    /// host-staged (`d_model` fp32, 20 KiB at this shape), which is also how
-    /// the embedding enters stage 0 and how the final hidden state reaches the
-    /// head.
+    /// device to device ([`Self::chain_stages`]); the embedding enters stage 0
+    /// from the host and the final hidden state reaches the head on the host.
     ///
     /// A stage whose layer range is empty (which a capacity-driven plan may
     /// legitimately produce) needs no special case: `run_decode_step` passes
     /// its input straight through.
     fn stack_step(&self, token_id: u32, pos: u32, slot: u32) -> Result<Vec<f32>, String> {
-        let mut carry = self.embed_row(token_id)?;
+        let embedded = self.embed_row(token_id)?;
         let debug = std::env::var_os("BRAIN_QWEN35_GGUF_DEBUG").is_some();
         let mut per_stage_rms = Vec::new();
-        for s in &self.shards {
-            let caches = s.caches.view(slot);
-            carry = s.qwen35.decode_step_stage(token_id, pos, &caches, Some(&carry));
-            if debug {
-                per_stage_rms.push((carry.iter().map(|v| v * v).sum::<f32>() / carry.len() as f32).sqrt());
-            }
-        }
+        let carry = self.chain_stages(
+            &embedded,
+            |s, rows| s.qwen35.run_decode_step(token_id, pos, &s.caches.view(slot), Some(rows)),
+            |g, out| {
+                if debug {
+                    let carry = g.read(out, embedded.len());
+                    per_stage_rms.push((carry.iter().map(|v| v * v).sum::<f32>() / carry.len() as f32).sqrt());
+                }
+            },
+        );
         let last = self.shards.last().expect("a plan always has at least one stage");
         let logits = crate::stream::head_logits_on(&last.qwen35.gpu, &self.head.ops, &self.cfg, &self.head.norm, &self.head.w, &carry);
         self.debug_step(pos, &per_stage_rms, &logits);
@@ -1392,9 +1424,9 @@ impl Qwen35GgufInstance {
     ///
     /// `tokens` are `n` consecutive prompt tokens starting at absolute
     /// position `pos_start`. The boundary residual crosses each card boundary
-    /// host-staged exactly as in `stack_step`, but as the round's whole
-    /// `[n, d_model]` block rather than one `[d_model]` row - so the host
-    /// round trips per round are `n_stages`, not `n_stages * n`, and each
+    /// device to device exactly as in `stack_step`, but as the round's whole
+    /// `[n, d_model]` block rather than one `[d_model]` row - so the
+    /// hand-offs per round are `n_stages`, not `n_stages * n`, and each
     /// stage issues one dispatch shape per layer instead of `n` of them.
     ///
     /// Only the LAST row is projected to logits: the rest of the block exists
@@ -1429,22 +1461,27 @@ impl Qwen35GgufInstance {
         let d = self.cfg.d_model as usize;
         let n = tokens.len();
         assert!(n > 0, "{MODEL}: stack_chunk_carry on an empty round");
-        let mut carry = self.embed_rows(tokens)?;
+        let embedded = self.embed_rows(tokens)?;
         let debug = std::env::var_os("BRAIN_QWEN35_GGUF_DEBUG").is_some();
         let mut per_stage_rms = Vec::new();
         let mut taps: Vec<(usize, Vec<f32>)> = Vec::new();
         let adapter_slot = self.prefill_adapter_slot.get();
         self.set_adapter_rows(&vec![adapter_slot; if adapter_slot == LORA_SLOT_NONE { 0 } else { n }]);
+        let carry = self.chain_stages(
+            &embedded,
+            |s, rows| s.qwen35.run_prefill_chunk_stage(tokens, pos_start, &s.caches.view(slot), Some(rows)),
+            |g, out| {
+                if debug {
+                    // The round's LAST row, so the dump is directly comparable to
+                    // the per-token one `stack_step` prints.
+                    let block = g.read(out, n * d);
+                    let last = &block[(n - 1) * d..];
+                    per_stage_rms.push((last.iter().map(|v| v * v).sum::<f32>() / last.len() as f32).sqrt());
+                }
+            },
+        );
         for s in &self.shards {
-            let caches = s.caches.view(slot);
-            carry = s.qwen35.prefill_chunk_stage(tokens, pos_start, &caches, Some(&carry));
             taps.extend(s.qwen35.take_hidden_taps());
-            if debug {
-                // The round's LAST row, so the dump is directly comparable to
-                // the per-token one `stack_step` prints.
-                let last = &carry[(n - 1) * d..];
-                per_stage_rms.push((last.iter().map(|v| v * v).sum::<f32>() / last.len() as f32).sqrt());
-            }
         }
         self.set_adapter_rows(&[]);
         self.record_taps(pos_start, n, &taps)?;
@@ -1661,8 +1698,8 @@ impl Qwen35GgufInstance {
     /// `tokens[i]`/`positions[i]` belong to slot `i` of every stage's
     /// [`ShardCaches`] (slot order IS batch-row order and IS the physical
     /// block id - see that struct's own doc). The residual crosses each card
-    /// boundary host-staged as the whole `[bsz, d_model]` block, so the host
-    /// round trips per step are `n_stages`, not `n_stages * bsz`, and the head
+    /// boundary device to device as the whole `[bsz, d_model]` block, so the
+    /// hand-offs per step are `n_stages`, not `n_stages * bsz`, and the head
     /// is projected ONCE for the whole batch rather than once per sequence -
     /// which matters most of all, the head being this model's single largest
     /// weight.
@@ -1690,13 +1727,16 @@ impl Qwen35GgufInstance {
             }
         }
         debug_assert!(slots.iter().collect::<std::collections::HashSet<_>>().len() == bsz, "{MODEL}: a decode step names a slot twice");
-        let mut carry = self.embed_rows(tokens)?;
-        for s in &self.shards {
-            let seqs = s.caches.batch(slots, positions);
-            let caches = BatchDecodeCaches { gqa_kv: &s.caches.gqa_kv, gqa_cap: s.caches.kv_block(), seqs: &seqs, one_sequence: false, gdn_pool: Some(s.caches.gdn_pool()), memory: &[] };
-            carry = s.qwen35.decode_batch_stage(tokens, &caches, Some(&carry));
-        }
-        Ok(carry)
+        let embedded = self.embed_rows(tokens)?;
+        Ok(self.chain_stages(
+            &embedded,
+            |s, rows| {
+                let seqs = s.caches.batch(slots, positions);
+                let caches = BatchDecodeCaches { gqa_kv: &s.caches.gqa_kv, gqa_cap: s.caches.kv_block(), seqs: &seqs, one_sequence: false, gdn_pool: Some(s.caches.gdn_pool()), memory: &[] };
+                s.qwen35.run_decode_batch(tokens, &caches, Some(rows))
+            },
+            |_, _| {},
+        ))
     }
 
     /// The last stage's card and the head epilogue it runs - the one place a
@@ -1910,11 +1950,9 @@ impl Qwen35GgufInstance {
         } else {
             let adapter_slot = self.prefill_adapter_slot.get();
             for (i, &t) in rest.iter().enumerate() {
-                let mut carry = self.embed_row(t)?;
+                let embedded = self.embed_row(t)?;
                 self.set_adapter_rows(&[adapter_slot]);
-                for s in &self.shards {
-                    carry = s.qwen35.decode_step_stage(t, (start + i) as u32, &s.caches.view(slot), Some(&carry));
-                }
+                let carry = self.chain_stages(&embedded, |s, rows| s.qwen35.run_decode_step(t, (start + i) as u32, &s.caches.view(slot), Some(rows)), |_, _| {});
                 self.set_adapter_rows(&[]);
                 if let Some(all) = collect.as_deref_mut() {
                     all.extend_from_slice(&carry);
@@ -1951,12 +1989,16 @@ impl Qwen35GgufInstance {
         let d = self.cfg.d_model as usize;
         assert!(!jobs.is_empty() && jobs.iter().all(|j| j.start < j.end && j.end <= j.prompt.len()), "{MODEL}: a multi-sequence prefill needs at least one new token per job");
         let tokens: Vec<u32> = jobs.iter().flat_map(|j| j.prompt[j.start..j.end].iter().copied()).collect();
-        let mut carry = self.embed_rows(&tokens)?;
-        for s in &self.shards {
-            let segs: Vec<PrefillSeg<'_>> =
-                jobs.iter().map(|j| PrefillSeg { tokens: &j.prompt[j.start..j.end], pos_start: j.start as u32, gqa_window: s.caches.window(j.slot), slot: j.slot }).collect();
-            carry = s.qwen35.prefill_multi_stage(&segs, &s.caches.pooled(), &carry);
-        }
+        let embedded = self.embed_rows(&tokens)?;
+        let carry = self.chain_stages(
+            &embedded,
+            |s, rows| {
+                let segs: Vec<PrefillSeg<'_>> =
+                    jobs.iter().map(|j| PrefillSeg { tokens: &j.prompt[j.start..j.end], pos_start: j.start as u32, gqa_window: s.caches.window(j.slot), slot: j.slot }).collect();
+                s.qwen35.run_prefill_multi_stage(&segs, &s.caches.pooled(), Some(rows))
+            },
+            |_, _| {},
+        );
         let mut row0 = 0usize;
         let mut out = Vec::with_capacity(jobs.len());
         for j in jobs {

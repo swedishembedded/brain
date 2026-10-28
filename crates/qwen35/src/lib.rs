@@ -39,6 +39,7 @@ pub mod shard;
 /// [`brain_modelstore::resolve::ArchSpec`] - which on-disk artifacts satisfy
 /// Qwen3.8-27B's `weights`/`tokenizer` roles.
 pub mod spec;
+mod stage_rows;
 pub mod stream;
 pub mod stream_train;
 pub mod train_base;

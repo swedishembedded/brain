@@ -67,7 +67,7 @@ claimed before its baseline exists.
 | 9 | One logical prefix index (radix over content, namespace, revision) over block-sharing and snapshot physical forms; retention by saved work per byte | `model::paged`, `model::snapshot_prefix` | longest-prefix match without scanning entries | open |
 | 10 | Grace memory as a managed warm KV tier: page-granular async promotion/demotion through the existing upload ring; direct coherent reads measured separately (G9) | `model::kv_offload`, `backend-cuda` | warm-prefix hits served from host without whole-sequence swaps | open |
 | 11 | Batched adapters in prefill and speculation (G8) | `qwen35`, `llmserve` | adapter traffic keeps multi-sequence prefill | open |
-| 12 | Device-resident inter-GPU transfers and collectives (G10) | `model::collective`, residency | no host-staged per-token transfer on supported devices | in progress: peer copy and link measurement done (A), stage boundary and NCCL open |
+| 12 | Device-resident inter-GPU transfers and collectives (G10) | `model::collective`, residency | no host-staged per-token transfer on supported devices | in progress: peer copy and link measurement (A) and the 27B stage boundary (B) done, NCCL open |
 
 Page size (256 rows today) is part of item 3 and is chosen per cache group by
 measurement (16-256), not fixed globally.
@@ -94,3 +94,15 @@ measurement (16-256), not fixed globally.
   caches the result on disk like the roofs, and `brain devices` prints each
   pair's path and GB/s. Gates: `gpu-core/tests/peer_copy.rs` (exact on the CPU
   backend through the host; two-card test is skip-if-absent).
+- 2026-10-29 (12, B): the layer-sharded GGUF resident hands the boundary
+  residual from stage to stage as the previous stage's own device buffer
+  (`StageRows::Device`, one implementation: the host-row entry points are thin
+  wrappers) through decode, batched decode, verify, per-token and multi-sequence
+  prefill and the background prefill pipeline, all via
+  `Qwen35GgufInstance::chain_stages`. The host now carries only the embedding
+  rows into stage 0 and the last stage's block to the head, and no longer waits
+  for a stage to finish before the next is issued. Gates:
+  `two_shard_int8_decode_with_a_device_boundary_matches_the_whole_shard_model`
+  and `two_shard_int8_prefill_round_with_a_device_boundary_matches_the_host_boundary`
+  (bit-equal; run on the CPU backend, where the hand-off falls back to the
+  host). Open: the head still receives the last block through the host.

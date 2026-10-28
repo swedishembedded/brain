@@ -73,6 +73,7 @@ use optim::Optim;
 use crate::config::{LayerType, Qwen35Config};
 pub use crate::decode_state::{slot_state_bytes, SlotPool, SlotTiers};
 use crate::decode_tape::{DecodeInputs, SlotDecodeTape};
+pub(crate) use crate::stage_rows::StageRows;
 pub use crate::train_base::TrainOpts;
 use crate::decode_state::DecodeState;
 #[path = "objectives.rs"]
@@ -4199,7 +4200,7 @@ impl Qwen35 {
         let pos = self.dec_pos.get();
         assert!(pos < self.dec_cap, "qwen35::step: decode position {pos} exceeds capacity {}", self.dec_cap);
         let caches = self.own_caches();
-        let hidden = self.run_decode_step(token_id, pos, &caches, input);
+        let hidden = self.run_decode_step(token_id, pos, &caches, input.map(StageRows::Host));
         self.dec_pos.set(pos + 1);
         self.gpu.read(&hidden, self.cfg.d_model as usize)
     }
@@ -4306,7 +4307,15 @@ impl Qwen35 {
     /// on a non-head stage it returns that stage's LAST-LAYER RESIDUAL,
     /// **unnormed** - the next stage's `input_override`, not a finished
     /// hidden state.
-    pub(crate) fn run_decode_step(&self, token_id: u32, pos: u32, caches: &DecodeCaches, input_override: Option<&[f32]>) -> DeviceBuffer {
+    ///
+    /// Deliberately does NOT apply an `lm_head` projection, even on a head
+    /// stage. At the real Qwen3.8-27B shape a `[248320, 5120]` fp32 head is
+    /// 5.09 GB - past `max_buffer_size` on a 24 GB P40, so it cannot be a
+    /// device buffer at all and a shard that owned it would fail to load.
+    /// Both real-weight callers therefore keep the head OUTSIDE the shard, as
+    /// an int8 `model::ops::Weight` (1.27 GB packed, inside the binding
+    /// limit), and project with `crate::stream::head_logits_on`.
+    pub(crate) fn run_decode_step(&self, token_id: u32, pos: u32, caches: &DecodeCaches, input_override: Option<StageRows<'_>>) -> DeviceBuffer {
         assert!(caches.gqa_cap > 0, "qwen35::run_decode_step: a KV block of 0 rows");
         let seqs = [BatchSeq {
             window: caches.gqa_window,
@@ -4338,7 +4347,7 @@ impl Qwen35 {
     /// `input_override`, when present, is the whole `[bsz, d_model]` boundary
     /// block, the same cross-stage seam [`Self::run_decode_step`] documents at
     /// one row.
-    pub(crate) fn run_decode_batch(&self, tokens: &[u32], caches: &BatchDecodeCaches, input_override: Option<&[f32]>) -> DeviceBuffer {
+    pub(crate) fn run_decode_batch(&self, tokens: &[u32], caches: &BatchDecodeCaches, input_override: Option<StageRows<'_>>) -> DeviceBuffer {
         self.run_decode_batch_with(tokens, caches, input_override, None)
     }
 
@@ -4444,7 +4453,7 @@ impl Qwen35 {
     /// and concatenated in the caller's row order. The extra device round trip
     /// per group is exact mode's own cost on top of the second weight pass: it
     /// is opt-in, and a caller that needs a row to be a row pays for it.
-    fn run_decode_batch_exact_groups(&self, tokens: &[u32], caches: &BatchDecodeCaches, input_override: Option<&[f32]>, step: u32) -> DeviceBuffer {
+    fn run_decode_batch_exact_groups(&self, tokens: &[u32], caches: &BatchDecodeCaches, input_override: Option<StageRows<'_>>, step: u32) -> DeviceBuffer {
         let d = self.cfg.d_model as usize;
         let step = step as usize;
         let mut out = Vec::with_capacity(tokens.len() * d);
@@ -4456,7 +4465,7 @@ impl Qwen35 {
                 .collect();
             let pool = caches.gdn_pool.as_ref().map(|p| GdnPoolStore { state: p.state, hist: p.hist, bf16: p.bf16 });
             let group = BatchDecodeCaches { gqa_kv: caches.gqa_kv, gqa_cap: caches.gqa_cap, seqs: &seqs, one_sequence: false, gdn_pool: pool, memory: caches.memory };
-            let x = input_override.map(|x| &x[start * d..end * d]);
+            let x = input_override.map(|x| x.slice(start * d, end * d));
             let hidden = self.run_decode_batch_with(&tokens[start..end], &group, x, None);
             out.extend(self.gpu.read(&hidden, (end - start) * d));
         }
@@ -4468,7 +4477,7 @@ impl Qwen35 {
     /// of each sequence rather than one token of each, and the Gated-DeltaNet
     /// layers take a sequence's rows in order and snapshot the state between
     /// them. Everything else in the pass is row-agnostic.
-    fn run_decode_batch_with(&self, tokens: &[u32], caches: &BatchDecodeCaches, input_override: Option<&[f32]>, verify: Option<&verify::VerifyBatch>) -> DeviceBuffer {
+    pub(crate) fn run_decode_batch_with(&self, tokens: &[u32], caches: &BatchDecodeCaches, input_override: Option<StageRows<'_>>, verify: Option<&verify::VerifyBatch>) -> DeviceBuffer {
         // The exact-decode regime (see `set_exact_decode`): a batch wider than
         // one bit-identical group runs as several whole steps, in order. Each
         // group's hidden block is read before the next is issued - the same
@@ -4492,7 +4501,7 @@ impl Qwen35 {
     /// issues after, see [`Self::commit_memory_blocks`]). With `persist` the step's per-step inputs live in those
     /// buffers (the caller rewrites them before every replay of a recording of this call), the scratch arena and the
     /// pass are left to the recording, and nothing in the dispatch list depends on the positions.
-    fn decode_batch_dispatches(&self, tokens: &[u32], caches: &BatchDecodeCaches, input_override: Option<&[f32]>, verify: Option<&verify::VerifyBatch>, persist: Option<&DecodeInputs>) -> DeviceBuffer {
+    fn decode_batch_dispatches(&self, tokens: &[u32], caches: &BatchDecodeCaches, input_override: Option<StageRows<'_>>, verify: Option<&verify::VerifyBatch>, persist: Option<&DecodeInputs>) -> DeviceBuffer {
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
@@ -4583,9 +4592,9 @@ impl Qwen35 {
         };
         let mut res = match input_override {
             Some(x) => {
-                assert_eq!(x.len(), (bsz * d) as usize, "qwen35: run_decode_batch input_override must be the batch's whole [bsz, d_model] block");
+                assert_eq!(x.words(), (bsz * d) as usize, "qwen35: run_decode_batch input_override must be the batch's whole [bsz, d_model] block");
                 let res = g.storage((bsz * d) as u64);
-                g.write_f32(&res, x);
+                x.load_into(g, &res);
                 res
             }
             None => {
@@ -4822,7 +4831,7 @@ impl Qwen35 {
             self.shard.embed,
             self.shard.head
         );
-        let xn_final = self.run_prefill_chunk_stage(tokens, pos_start, caches, input);
+        let xn_final = self.run_prefill_chunk_stage(tokens, pos_start, caches, input.map(StageRows::Host));
         // Only the LAST row is ever wanted (this round's next-token
         // prediction, or the seam into the next round).
         let last = g.storage(d as u64);
@@ -4858,7 +4867,7 @@ impl Qwen35 {
         tokens: &[u32],
         pos_start: u32,
         caches: &DecodeCaches,
-        input_override: Option<&[f32]>,
+        input_override: Option<StageRows<'_>>,
     ) -> DeviceBuffer {
         let g = &self.gpu;
         let c = &self.cfg;
@@ -4888,8 +4897,10 @@ impl Qwen35 {
         // input embeddings in place of the token gather.
         let res = match input_override {
             Some(x) => {
-                assert_eq!(x.len(), (n * d) as usize, "qwen35: run_prefill_chunk_stage input_override must be the round's whole [n, d_model] block");
-                g.storage_init("qwen35.prefill.res_in", x)
+                assert_eq!(x.words(), (n * d) as usize, "qwen35: run_prefill_chunk_stage input_override must be the round's whole [n, d_model] block");
+                let res = g.storage((n * d) as u64);
+                x.load_into(g, &res);
+                res
             }
             None => {
                 assert!(
@@ -4987,14 +4998,6 @@ impl Qwen35 {
         self.prefill_layer_stack(res, n, &format!("pos_start={pos_start}"), &mut mixer)
     }
 
-    /// [`Self::run_prefill_multi_stage`] staged to the HOST, as
-    /// [`Self::prefill_chunk_stage`] is for one sequence: `input_override` is the
-    /// previous stage's (or the embedding's) `[n, d_model]` block.
-    pub(crate) fn prefill_multi_stage(&self, segs: &[PrefillSeg<'_>], caches: &PooledCaches<'_>, input_override: &[f32]) -> Vec<f32> {
-        let out = self.run_prefill_multi_stage(segs, caches, Some(input_override));
-        self.gpu.read(&out, input_override.len())
-    }
-
     /// Whether this build can run [`Self::run_prefill_multi_stage`]: not a LoRA build,
     /// whose adapter scratch is sized for one sequence's round.
     pub(crate) fn multi_prefill_supported(&self) -> bool {
@@ -5025,7 +5028,7 @@ impl Qwen35 {
     /// rows (a round of at most [`DECODE_REGIME_MAX_ROWS`] rows is a decode replay,
     /// which this function is not for: the caller sends such a round through the
     /// single-sequence path).
-    pub(crate) fn run_prefill_multi_stage(&self, segs: &[PrefillSeg<'_>], caches: &PooledCaches<'_>, input_override: Option<&[f32]>) -> DeviceBuffer {
+    pub(crate) fn run_prefill_multi_stage(&self, segs: &[PrefillSeg<'_>], caches: &PooledCaches<'_>, input_override: Option<StageRows<'_>>) -> DeviceBuffer {
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
@@ -5043,8 +5046,10 @@ impl Qwen35 {
             res
         } else {
             let x = input_override.expect("qwen35: run_prefill_multi_stage on a NON-EMBED stage needs the previous stage's residual block");
-            assert_eq!(x.len(), (n * d) as usize, "qwen35: run_prefill_multi_stage input_override must be the round's whole [n, d_model] block");
-            g.storage_init("qwen35.prefill.res_in", x)
+            assert_eq!(x.words(), (n * d) as usize, "qwen35: run_prefill_multi_stage input_override must be the round's whole [n, d_model] block");
+            let res = g.storage((n * d) as u64);
+            x.load_into(g, &res);
+            res
         };
 
         // The per-sequence tables a chunk round builds once, for each sequence: its
@@ -5350,7 +5355,7 @@ impl Qwen35 {
     ///
     /// Same contract as [`Self::run_prefill_chunk_stage`]: `[n, d_model]`,
     /// final-normed on a head stage, the raw residual block otherwise.
-    fn run_exact_round(&self, tokens: &[u32], pos_start: u32, caches: &DecodeCaches, input_override: Option<&[f32]>) -> DeviceBuffer {
+    fn run_exact_round(&self, tokens: &[u32], pos_start: u32, caches: &DecodeCaches, input_override: Option<StageRows<'_>>) -> DeviceBuffer {
         let d = self.cfg.d_model as usize;
         assert!(caches.gqa_cap > 0, "qwen35::run_exact_round: a KV block of 0 rows");
         let group = |start: usize, len: usize| -> DeviceBuffer {
@@ -5358,7 +5363,7 @@ impl Qwen35 {
                 .map(|i| BatchSeq { window: caches.gqa_window, slot: 0, pos: pos_start + (start + i) as u32, gdn_state: caches.gdn_state, gdn_hist: caches.gdn_hist })
                 .collect();
             let batch = BatchDecodeCaches { gqa_kv: caches.gqa_kv, gqa_cap: caches.gqa_cap, seqs: &seqs, one_sequence: true, gdn_pool: None, memory: caches.memory };
-            let x = input_override.map(|x| &x[start * d..(start + len) * d]);
+            let x = input_override.map(|x| x.slice(start * d, (start + len) * d));
             self.run_decode_batch(&tokens[start..start + len], &batch, x)
         };
         let step = self.exact_group_rows();
@@ -5403,12 +5408,12 @@ impl Qwen35 {
     /// [`Self::run_prefill_chunk_stage`] staged to the HOST - the one call a
     /// multi-stage CHUNKED prefill driver (`crate::int8_gguf_resident`) needs
     /// per stage per round, and the exact counterpart of what
-    /// [`Self::decode_step_stage`] is for a single-token pass.
+    /// [`Self::run_decode_step`] is for a single-token pass.
     ///
     /// Returns `[n * d_model]` in token order: this stage's boundary residual
     /// block, ready to be handed to the next stage as its `input_override` (or,
     /// on a head stage, already through the final `norm.weight`). The same
-    /// "no `lm_head` here, ever" rule [`Self::decode_step_stage`]'s doc
+    /// "no `lm_head` here, ever" rule [`Self::run_decode_step`]'s doc
     /// explains applies - at the real shape an fp32 head cannot be a device
     /// buffer, so every sharded caller projects with
     /// `crate::stream::head_logits_on` instead.
@@ -5416,7 +5421,7 @@ impl Qwen35 {
     /// One host round trip per stage per ROUND, where the per-token path pays
     /// one per stage per TOKEN: that ratio is the point of the function.
     pub(crate) fn prefill_chunk_stage(&self, tokens: &[u32], pos_start: u32, caches: &DecodeCaches, input_override: Option<&[f32]>) -> Vec<f32> {
-        let out = self.run_prefill_chunk_stage(tokens, pos_start, caches, input_override);
+        let out = self.run_prefill_chunk_stage(tokens, pos_start, caches, input_override.map(StageRows::Host));
         self.gpu.read(&out, tokens.len() * self.cfg.d_model as usize)
     }
 
@@ -5940,7 +5945,7 @@ impl Qwen35 {
     /// to `want` continuations of `ctx`; `argmax_of` projects one `[d_model]`
     /// final-norm hidden state to its greedy token id (this crate keeps the
     /// vocab head off-device, so the caller owns that matvec - see
-    /// [`Self::decode_step_stage`]'s doc for why).
+    /// [`Self::run_decode_step`]'s doc for why).
     ///
     /// The output is IDENTICAL to plain greedy decoding through
     /// [`Self::step`], whatever the drafter proposes - a rejected proposal
@@ -6069,25 +6074,7 @@ impl Qwen35 {
         (out, out_hidden, stats)
     }
 
-    /// [`Self::run_decode_step`] staged to the HOST - the one call a
-    /// multi-stage decode driver (`crate::int8_gguf_resident`) needs per stage
-    /// per token. Returns `[d_model]`: this stage's last-layer residual, ready
-    /// to be handed to the next stage as its `input_override` (or, on a head
-    /// stage, already through the final `norm.weight`).
-    ///
-    /// Deliberately does NOT apply an `lm_head` projection, even on a head
-    /// stage. At the real Qwen3.8-27B shape a `[248320, 5120]` fp32 head is
-    /// 5.09 GB - past `max_buffer_size` on a 24 GB P40, so it cannot be a
-    /// device buffer at all and a shard that owned it would fail to load.
-    /// Both real-weight callers therefore keep the head OUTSIDE the shard, as
-    /// an int8 `model::ops::Weight` (1.27 GB packed, inside the binding
-    /// limit), and project with `crate::stream::head_logits_on`.
-    pub(crate) fn decode_step_stage(&self, token_id: u32, pos: u32, caches: &DecodeCaches, input_override: Option<&[f32]>) -> Vec<f32> {
-        let hidden = self.run_decode_step(token_id, pos, caches, input_override);
-        self.gpu.read(&hidden, self.cfg.d_model as usize)
-    }
-
-    /// [`Self::decode_step_stage`] for a BATCH: one decode token for each of
+    /// [`Self::run_decode_step`] for a BATCH: one decode token for each of
     /// `tokens.len()` independent sequences through THIS stage, staged to the
     /// host as the whole `[bsz, d_model]` boundary block.
     ///
@@ -6095,7 +6082,7 @@ impl Qwen35 {
     /// pays one per stage per sequence per step - which is the same ratio, on
     /// the pipeline seam, that [`Self::run_decode_batch`] buys inside a stage.
     pub(crate) fn decode_batch_stage(&self, tokens: &[u32], caches: &BatchDecodeCaches, input_override: Option<&[f32]>) -> Vec<f32> {
-        let hidden = self.run_decode_batch(tokens, caches, input_override);
+        let hidden = self.run_decode_batch(tokens, caches, input_override.map(StageRows::Host));
         self.gpu.read(&hidden, tokens.len() * self.cfg.d_model as usize)
     }
 
@@ -6104,7 +6091,7 @@ impl Qwen35 {
     /// run_forward`]'s head epilogue and [`Self::logits_all`] already issue,
     /// at `n = 1`. `hidden` must already be through the final `norm.weight`
     /// RMSNorm - exactly what [`Self::run_decode_step`]'s head-stage branch
-    /// returns. Unlike [`Self::decode_step_stage`]'s doc (which explains why
+    /// returns. Unlike [`Self::run_decode_step`]'s doc (which explains why
     /// a STREAMED/SHARDED head must stay int8 and off-shard), a whole
     /// unsharded `Qwen35` - this method's only caller
     /// (`crate::serve::Engine`) - already holds the fp32 head resident via
@@ -6755,7 +6742,7 @@ mod tests {
     /// convenience wrapper and always passes `None`).
     fn decode_stage(m: &Qwen35, token_id: u32, pos: u32, input: Option<&[f32]>) -> Vec<f32> {
         let caches = m.own_caches();
-        let out = m.run_decode_step(token_id, pos, &caches, input);
+        let out = m.run_decode_step(token_id, pos, &caches, input.map(StageRows::Host));
         m.gpu.read(&out, m.cfg.d_model as usize)
     }
 
@@ -7051,6 +7038,68 @@ mod tests {
             // rather than using `input_override`, this step would diverge.
             let got = decode_stage(&stage1, (tok + 1) % cfg.vocab, pos, Some(&boundary));
             assert_eq!(got, want, "pos {pos}: two-shard decode diverged from the whole-shard model");
+        }
+    }
+
+    /// The same two stages as [`two_shard_int8_decode_matches_the_whole_shard_model`], with the
+    /// boundary residual handed over DEVICE to DEVICE ([`StageRows::Device`]) instead of read to
+    /// the host: stage 1 copies it from stage 0's own output buffer. It must still be the
+    /// whole-shard model's bits - the hand-off moves bytes and nothing else.
+    #[test]
+    fn two_shard_int8_decode_with_a_device_boundary_matches_the_whole_shard_model() {
+        let cfg = Qwen35Config::tiny_i8();
+        let n_layers = cfg.n_layers as usize;
+        let cut = 2usize;
+        let t = cfg.block_size;
+        let d = cfg.d_model as usize;
+        let init = crate::init::init_weights(&cfg, 7);
+
+        let whole = Qwen35::new_i8(cfg.clone(), 1, t, &init);
+        let stage0 = Qwen35::new_i8_shard(cfg.clone(), 1, t, &init, Shard { start: 0, end: cut, embed: true, head: false, gpu_index: Shard::ANY_GPU });
+        let stage1 = Qwen35::new_i8_shard(cfg.clone(), 1, t, &init, Shard { start: cut, end: n_layers, embed: false, head: true, gpu_index: Shard::ANY_GPU });
+        for m in [&whole, &stage0, &stage1] {
+            m.reset_decode_cache();
+        }
+
+        let tokens: Vec<u32> = (0..6).map(|i| (i * 5 + 3) % cfg.vocab).collect();
+        for (i, &tok) in tokens.iter().enumerate() {
+            let pos = i as u32;
+            let want = whole.step(tok);
+            let boundary = stage0.run_decode_step(tok, pos, &stage0.own_caches(), None);
+            let rows = StageRows::device(&stage0.gpu, &boundary, d);
+            let out = stage1.run_decode_step((tok + 1) % cfg.vocab, pos, &stage1.own_caches(), Some(rows));
+            assert_eq!(stage1.gpu.read(&out, d), want, "pos {pos}: a device boundary changed the two-shard decode");
+        }
+    }
+
+    /// A prefill round across the seam, device to device, against the same round with the
+    /// boundary read to the host: a short one (the exact-round path, which slices the boundary into
+    /// groups) and one past a GEMM tile (the chunk path). Two instance pairs, one per boundary
+    /// kind, so neither inherits the other's recurrent state.
+    #[test]
+    fn two_shard_int8_prefill_round_with_a_device_boundary_matches_the_host_boundary() {
+        let cfg = Qwen35Config { block_size: 160, max_position_embeddings: 160, ..Qwen35Config::tiny_i8() };
+        let n_layers = cfg.n_layers as usize;
+        let cut = 2usize;
+        let t = cfg.block_size;
+        let d = cfg.d_model as usize;
+        let init = crate::init::init_weights(&cfg, 7);
+        let pair = || {
+            let first = Qwen35::new_i8_shard(cfg.clone(), 1, t, &init, Shard { start: 0, end: cut, embed: true, head: false, gpu_index: Shard::ANY_GPU });
+            let second = Qwen35::new_i8_shard(cfg.clone(), 1, t, &init, Shard { start: cut, end: n_layers, embed: false, head: true, gpu_index: Shard::ANY_GPU });
+            (first, second)
+        };
+        for rows in [3usize, 140] {
+            let prompt: Vec<u32> = (0..rows as u32).map(|i| (i * 5 + 3) % cfg.vocab).collect();
+            let (host0, host1) = pair();
+            let boundary = prefill_stage(&host0, &prompt, 0, None);
+            let want = prefill_stage(&host1, &prompt, 0, Some(&boundary));
+
+            let (dev0, dev1) = pair();
+            let out0 = dev0.run_prefill_chunk_stage(&prompt, 0, &dev0.own_caches(), None);
+            let rows_in = StageRows::device(&dev0.gpu, &out0, rows * d);
+            let out1 = dev1.run_prefill_chunk_stage(&prompt, 0, &dev1.own_caches(), Some(rows_in));
+            assert_eq!(dev1.gpu.read(&out1, rows * d), want, "{rows}-row round: a device boundary changed the two-shard prefill");
         }
     }
 

@@ -34,6 +34,7 @@ use gpu_core::DeviceBuffer;
 
 use super::{Qwen35GgufInstance, MODEL};
 use crate::adapter_serving as adapters;
+use crate::model::StageRows;
 /// What the working copy of the recurrent state holds when a task starts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TaskStart {
@@ -58,7 +59,8 @@ pub(crate) struct PrefillTask {
     /// Per stage: the round it is running and the buffer it will leave its output in.
     running: Vec<Option<DeviceBuffer>>,
     /// Per stage: the outputs of the stage before it, in round order, waiting to be taken.
-    handed: Vec<VecDeque<Vec<f32>>>,
+    /// Device buffers: the boundary rows stay on the card that made them until the next stage copies them.
+    handed: Vec<VecDeque<DeviceBuffer>>,
     /// The last row's `[d_model]` hidden state, once the last stage has run the last round.
     last: Vec<f32>,
     /// Every row's, in order, when collected (the MTP head's input).
@@ -155,11 +157,12 @@ impl Qwen35GgufInstance {
                 if task.running[s].is_some() && (wait || stage.qwen35.lane_idle()) {
                     let k = task.next[s] - 1;
                     let n = task.round(k).len();
-                    let out = stage.qwen35.gpu.read(task.running[s].as_ref().expect("checked"), n * d);
-                    task.running[s] = None;
+                    let out = task.running[s].take().expect("checked");
                     if s + 1 < self.shards.len() {
+                        // The next stage copies the rows device to device; the host neither reads nor waits for them.
                         task.handed[s + 1].push_back(out);
                     } else {
+                        let out = stage.qwen35.gpu.read(&out, n * d);
                         task.last = out[(n - 1) * d..].to_vec();
                         if task.collect {
                             task.all.extend_from_slice(&out);
@@ -172,10 +175,14 @@ impl Qwen35GgufInstance {
                 }
                 if task.running[s].is_none() && task.next[s] < task.rounds {
                     let k = task.next[s];
+                    let embedded;
+                    let handed;
                     let input = if s == 0 {
-                        self.embed_rows(task.round(k))?
-                    } else if let Some(input) = task.handed[s].pop_front() {
-                        input
+                        embedded = self.embed_rows(task.round(k))?;
+                        StageRows::Host(&embedded)
+                    } else if let Some(rows) = task.handed[s].pop_front() {
+                        handed = rows;
+                        StageRows::device(&self.shards[s - 1].qwen35.gpu, &handed, task.round(k).len() * d)
                     } else {
                         continue;
                     };
@@ -184,7 +191,7 @@ impl Qwen35GgufInstance {
                     }
                     let pos = task.pos0 + (k * task.rows) as u32;
                     let caches = stage.caches.view(task.slot);
-                    let out = stage.qwen35.run_prefill_chunk_stage(task.round(k), pos, &caches, Some(&input));
+                    let out = stage.qwen35.run_prefill_chunk_stage(task.round(k), pos, &caches, Some(input));
                     task.running[s] = Some(out);
                     task.next[s] = k + 1;
                 }
