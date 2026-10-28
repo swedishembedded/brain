@@ -742,6 +742,13 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
         eprintln!("brain: --device: {e}");
         std::process::exit(2);
     }
+    // An NVIDIA card driven through the portable backend because CUDA cannot
+    // load is a large, silent slowdown: say so once, with the loader's reason.
+    if set.gpu_enabled() {
+        if let Some(notice) = gpu_core::defaults::Hardware::detected().cuda_fallback_notice(set.backend) {
+            eprintln!("brain: warning: {notice}");
+        }
+    }
     gpu_core::publish_compute_set(set);
     out
 }

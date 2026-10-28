@@ -83,6 +83,22 @@ impl Hardware {
         })
     }
 
+    /// The warning for a machine that has an NVIDIA card and is driving it through
+    /// `backend` only because CUDA cannot load: `None` when CUDA drives it, when no
+    /// NVIDIA card is present, or when CUDA works and the portable backend was asked
+    /// for. The reason is the loader's own, so it names the missing library.
+    pub fn cuda_fallback_notice(&self, backend: Backend) -> Option<String> {
+        if !matches!(backend, Backend::Wgpu | Backend::Vulkan) {
+            return None;
+        }
+        let why = self.cuda_unusable.as_ref()?;
+        let card = self.cards.iter().find(|c| c.vendor_id == NVIDIA)?;
+        Some(format!(
+            "NVIDIA {} is present but the CUDA backend cannot load ({why}); falling back to the {backend} backend, which runs slower and lacks the CUDA-only kernels (speculation among them). Make the CUDA driver library (libcuda.so.1) and NVRTC (libnvrtc.so) findable, for example on LD_LIBRARY_PATH, to run on CUDA",
+            card.name
+        ))
+    }
+
     /// Every card is NVIDIA's and the CUDA backend can run on each.
     pub fn cuda_everywhere(&self) -> bool {
         self.cuda_unusable.is_none() && !self.cards.is_empty() && self.cards.iter().all(|c| c.vendor_id == NVIDIA && c.compute_capability.is_some())
@@ -182,6 +198,21 @@ mod tests {
         let mixed = Hardware { cards: vec![card(0, NVIDIA, 24, Some((6, 1))), card(1, 0x1002, 16, None)], cuda_unusable: None };
         assert_eq!(backend(&mixed), Backend::Wgpu, "one card CUDA cannot drive keeps every card on the portable backend");
         assert_eq!(backend(&Hardware::default()), Backend::Cpu);
+    }
+
+    #[test]
+    fn an_nvidia_card_driven_without_cuda_is_reported_with_the_reason() {
+        let nvidia = vec![card(0, NVIDIA, 96, None)];
+        let broken = Hardware { cards: nvidia.clone(), cuda_unusable: Some("libcuda.so.1 could not be loaded: not found".into()) };
+        let notice = broken.cuda_fallback_notice(Backend::Wgpu).expect("silent degradation");
+        assert!(notice.contains("libcuda.so.1") && notice.contains("wgpu") && notice.contains("card0"), "{notice}");
+        // Nothing to report: CUDA drives it, the operator chose the CPU, no NVIDIA card, or CUDA works and wgpu was asked for.
+        assert_eq!(broken.cuda_fallback_notice(Backend::Cuda), None);
+        assert_eq!(broken.cuda_fallback_notice(Backend::Cpu), None);
+        let amd = Hardware { cards: vec![card(0, 0x1002, 16, None)], cuda_unusable: Some("no driver".into()) };
+        assert_eq!(amd.cuda_fallback_notice(Backend::Wgpu), None);
+        let healthy = Hardware { cards: nvidia, cuda_unusable: None };
+        assert_eq!(healthy.cuda_fallback_notice(Backend::Wgpu), None);
     }
 
     #[test]
