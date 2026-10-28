@@ -1,0 +1,77 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- Copyright (c) 2026 Martin Schröder <info@swedishembedded.com> -->
+
+# serving-runtime - one shared inference runtime for long context and high concurrency
+
+Scope: The shared LLM serving runtime (`model::serve`, `model::paged`, `model::kv_offload`, `llmserve`) and the engines that plug into it, for 128K-1M contexts at high concurrency.
+
+The goal: every served decoder approaches the bandwidth, compute and capacity
+limits of its device while maximising completed requests per second under
+time-to-first-token and inter-token latency objectives. The unit of
+optimisation is the whole request workload (cache reuse, scheduling, memory
+movement, execution), not one forward. Evidence for the principle: fixing
+cross-turn prefix reuse took a recorded 240-turn agent workload from 549 s to
+312 s on the same card (#347); native decode attention cut attention time per
+token from 2.06 to 0.58 ms (#350).
+
+Model crates describe the computation and the state they need; the shared
+runtime decides scheduling, allocation, placement and execution. A one-off
+optimisation inside one engine is debt unless it lands as a shared mechanism.
+Kernel selection and rooflines belong to `kernel-performance.md` and `probe.md`;
+machine facts to `gh200.md`; this ledger references them rather than restating.
+
+## Verified gaps (source audit, rev 6b9eae851, 2026-10-28)
+
+An external review listed gaps; each was checked against the source. Status
+column: **open** unless stated.
+
+| # | gap | evidence | note |
+|---|---|---|---|
+| G1 | Admission charges a request for its whole prompt, blocks it adopts from the prefix cache included | `model::serve::Scheduler::admit_one`, `prefill_debt` | worse than over-reservation: the next turn of a conversation whose cached history exceeds `pool - prompt` is never admitted, even on an idle server |
+| G2 | The 35B MoE serves only through a one-block-per-sequence engine: `max_concurrent x max_seq_len` fp32 KV, no paging, no prefix sharing | `crates/qwen35moe/src/serve.rs` (`pool_rows`), `crates/catalog/src/resident_qwen35moe.rs` | the paged GGUF 27B engine is the pattern to generalise |
+| G3 | The native 27B engine (`crates/qwen35/src/serve.rs`, `block_size == max_seq_len`) is still served for brain-format checkpoints | `crates/serving/src/executor.rs`, `model_dir.rs` | released GGUFs use the paged `int8_gguf_resident` engine (256-row blocks) |
+| G4 | Sequence identity and KV pages are not separate resources in the one-block engines: the first block is the sequence | same files as G2/G3 | the paged GGUF engine already separates them (state row on `BlockTable`) |
+| G5 | Sampling sees at most 32 device candidates on the 27B path; top-p tails past rank 32 are truncated | `int8_gguf_resident/engine.rs` `TOPK_CAPACITY`, `model::serve` sampler docs | exact full-vocabulary device sampling is open |
+| G6 | Recorded decode replayed as a CUDA graph returned zeros from library GEMMs on the NVFP4 tier; recording declines the library | knowledge #356 | root cause not found; replay loses the library path |
+| G7 | Block tables, positions and lengths are rebuilt on the host and uploaded every decode step | `crates/qwen35/src/model.rs` decode-tape upload | no persistent device batch state, no CPU/GPU step overlap |
+| G8 | Any adapter row turns multi-sequence prefill sequential and disables speculation | `int8_gguf_resident/engine.rs` `prefill_slices`, `serve/speculate.rs` | per-row adapter routing exists in decode |
+| G9 | Host KV offload swaps whole sequences through host vectors, synchronously; only `qwen3` adopts it; the 27B resident refuses `--kv-offload-gb` | `model::kv_offload`, `catalog/resident_qwen35.rs` | no page-granular async tier, no use of coherent Grace memory |
+| G10 | Layer-sharded serving stages the boundary residual through host memory per step; collectives stage through host and block on TCP | `int8_gguf_resident.rs` shard path, `model::collective`, `netcollective` | device peer copies are the first step |
+| G11 | Multi-request prefill is off by default (`batch_tokens = 0`, slice 512) because batching hurt early requests' latency in the measured workload | `PrefillPolicy::default` | wants a cost model, not a new constant |
+| G12 | The GGUF engine's decode window is 1 | `decode_window_capacity` | |
+
+Not gaps (claims checked and found already in place): arrival-time continuous
+batching through `llmserve::run_open_scheduled`; prefix caches keyed by adapter
+namespace; an adaptive, measured speculation cost gate (`serve/speculate.rs`
+`CostGate`); a pinned upload ring (`backend-cuda/src/upload_ring.rs`, used for
+weight writes, not KV).
+
+## Plan
+
+Ordered by dependency. Each item ends with a measured improvement on the
+serving qualification suite (item 1) or a correctness gate; no speed-up is
+claimed before its baseline exists.
+
+| order | item | owner | done when | status |
+|---|---|---|---|---|
+| 1 | Serving qualification suite: contexts 4K-128K (256K/1M where supported) x concurrency 1-64 x traffic (steady, burst, recorded agent trajectories, shared prefixes); TTFT, TPOT, p50/p95/p99, goodput under SLO, cache-hit tokens, KV occupancy, bytes per phase | `perf`, `cli`, `llmserve` | repeatable GH200 numbers with per-phase attribution | open |
+| 2a | Admission and prefill debt charge only blocks not adopted from the prefix cache (`PagedDecoder::cached_prefix_blocks`) | `model::serve` | a mostly cached prompt is admitted on its uncached blocks | open |
+| 2b | Incremental reservation: charge the next scheduled slice plus bounded decode headroom, not the whole prompt, with a guaranteed route to completion | `model::serve` | mixed long/short prompts admit without full-prompt reservation; no deadlock or leak under the KV-pressure tests | open |
+| 2c | Admission/eviction as one transaction; victim choice by restore cost, not recency | `model::serve` | a failed admission rolls back without losing cache entries | open |
+| 3 | One paged layout for every served decoder: stable sequence id, KV pages and recurrent slots as independent pools (G2-G4) | `model`, `qwen35`, `qwen35moe` | no served path allocates `max_seq_len` per sequence outside bounded-state modes | open |
+| 4 | Persistent device batch state: row diffs scattered into device buffers, double-buffered metadata, schedule N+1 prepared while N runs (G7) | `gpu-core`, `backend-cuda`, `model::serve` | no host sync inside the token loop; per-step upload bytes proportional to changes | open |
+| 5 | Graph-safe library execution: find #356's root cause, verify eager vs replay per tier and shape | `backend-cuda`, `gpu-core` | replay keeps library GEMMs with bit-level parity | open |
+| 6 | Shape-driven attention and GEMM selection over phase, batch, KV length, KV tier, page size | `kernel-performance.md` owns it | selection table covers the context x batch matrix | open |
+| 7 | Exact device sampling over the full vocabulary (G5) | `model::serve`, `kernels-cuda` | distribution tests match the host reference; no logits readback | open |
+| 8 | Cost- and cache-aware scheduling: order by uncached work, shared in-flight prefixes, bounded-fairness aging, calibrated step-cost model (G11) | `model::serve` | goodput and tail latency improve on mixed traffic with bounded starvation | open |
+| 9 | One logical prefix index (radix over content, namespace, revision) over block-sharing and snapshot physical forms; retention by saved work per byte | `model::paged`, `model::snapshot_prefix` | longest-prefix match without scanning entries | open |
+| 10 | Grace memory as a managed warm KV tier: page-granular async promotion/demotion through the existing upload ring; direct coherent reads measured separately (G9) | `model::kv_offload`, `backend-cuda` | warm-prefix hits served from host without whole-sequence swaps | open |
+| 11 | Batched adapters in prefill and speculation (G8) | `qwen35`, `llmserve` | adapter traffic keeps multi-sequence prefill | open |
+| 12 | Device-resident inter-GPU transfers and collectives (G10) | `model::collective`, residency | no host-staged per-token transfer on supported devices | open |
+
+Page size (256 rows today) is part of item 3 and is chosen per cache group by
+measurement (16-256), not fixed globally.
+
+## Done
+
+Nothing yet.
