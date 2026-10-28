@@ -499,7 +499,19 @@ impl ChatTemplate {
         let mut prev_len = 0usize;
         for i in 0..messages.len() {
             let prefix_msgs: Vec<Value> = messages[..=i].to_vec();
-            let prefix = self.render(Value::from(prefix_msgs), tools.clone(), false, &BTreeMap::new())?;
+            let prefix = match self.render(Value::from(prefix_msgs), tools.clone(), false, &BTreeMap::new()) {
+                Ok(prefix) => prefix,
+                // A template that needs a user turn (Qwen3.8's: "No user query
+                // found") cannot render the system turn that precedes it
+                // alone. Its text is attributed to the first message that
+                // renders with it; no message that can be supervised is ever
+                // folded into another.
+                Err(_) if is_leading_system(messages, i) => {
+                    boundaries.push(prev_len..prev_len);
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             if !full.as_bytes().starts_with(prefix.as_bytes()) {
                 return Err(TemplateError(format!(
                     "message {i} is not prefix-stable under this template: rendering it in isolation \
@@ -519,6 +531,12 @@ impl ChatTemplate {
         }
         Ok((full, boundaries))
     }
+}
+
+/// Whether message `i` is a system or developer turn with only such turns
+/// before it: the instructions that open a conversation, never supervised.
+fn is_leading_system(messages: &[Value], i: usize) -> bool {
+    messages[..=i].iter().all(|m| matches!(m.get_attr("role").ok().as_ref().and_then(Value::as_str), Some("system" | "developer")))
 }
 
 /// The context variables that turn reasoning off in the templates that have a
@@ -683,6 +701,33 @@ mod tests {
         assert_eq!(full, "<|user|>hi<|assistant|>hey");
         assert_eq!(&full[ranges[0].clone()], "<|user|>hi");
         assert_eq!(&full[ranges[1].clone()], "<|assistant|>hey");
+    }
+
+    /// Qwen3.8's template refuses a conversation without a user turn, so the
+    /// system turn that opens a record cannot be rendered alone to find its
+    /// boundary; its text rides with the first message that renders.
+    #[test]
+    fn a_leading_system_turn_a_template_cannot_render_alone_joins_the_next_message() {
+        let t = ChatTemplate::compile(
+            "{% set ns = namespace(user=false) %}{% for m in messages %}{% if m.role == 'user' %}{% set ns.user = true %}{% endif %}{% endfor %}\
+             {% if not ns.user %}{{ raise_exception('No user query found in messages.') }}{% endif %}\
+             {% for m in messages %}<|{{ m.role }}|>{{ m.content }}{% endfor %}",
+        )
+        .unwrap();
+        let messages: Vec<Value> = vec![
+            parse_json_ordered(r#"{"role":"system","content":"rules"}"#).unwrap(),
+            parse_json_ordered(r#"{"role":"user","content":"hi"}"#).unwrap(),
+            parse_json_ordered(r#"{"role":"assistant","content":"hey"}"#).unwrap(),
+        ];
+        let (full, ranges) = t.render_with_message_boundaries(&messages, None).unwrap();
+        assert_eq!(full, "<|system|>rules<|user|>hi<|assistant|>hey");
+        assert_eq!(&full[ranges[0].clone()], "");
+        assert_eq!(&full[ranges[1].clone()], "<|system|>rules<|user|>hi");
+        assert_eq!(&full[ranges[2].clone()], "<|assistant|>hey");
+
+        // A conversation that never has a user turn is still refused.
+        let err = t.render_with_message_boundaries(&messages[..1], None).unwrap_err();
+        assert!(err.to_string().contains("No user query"), "got: {err}");
     }
 
     #[test]
