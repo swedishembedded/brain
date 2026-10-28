@@ -42,11 +42,19 @@ use residency::{Device, ResidentModel};
 /// models do not count: `brain serve`'s own default reserve.
 const RESERVE: u64 = 2 << 30;
 
-/// Every GPU the process can see, with the bytes usable after the reserve.
+/// The GPUs `--device` selected, with the bytes usable after the reserve.
 fn gpu_budget() -> Vec<(u32, String, u64)> {
-    gpu_core::devices::gpus()
-        .iter()
-        .map(|d| (d.index, d.identity.name.clone(), d.identity.vram_bytes.saturating_sub(RESERVE)))
+    let all: Vec<(u32, String, u64)> = gpu_core::devices::gpus().iter().map(|d| (d.index, d.identity.name.clone(), d.identity.vram_bytes)).collect();
+    selected_budget(&all, crate::compute_set().map(|s| s.gpus.as_slice()))
+}
+
+/// `gpus` narrowed to `selected` (every GPU when `--device` has not resolved), less [`RESERVE`] each. A card
+/// outside the selection is never planned on: another process may own it, and its bytes counted as usable made
+/// the sweep load a model across both cards of a machine whose `--device` named one.
+fn selected_budget(gpus: &[(u32, String, u64)], selected: Option<&[u32]>) -> Vec<(u32, String, u64)> {
+    gpus.iter()
+        .filter(|(i, _, _)| selected.is_none_or(|sel| sel.contains(i)))
+        .map(|(i, name, vram)| (*i, name.clone(), vram.saturating_sub(RESERVE)))
         .filter(|&(_, _, usable)| usable > 0)
         .collect()
 }
@@ -601,6 +609,15 @@ pub fn build_engine(spec: &str) -> Result<Box<dyn LongContextEngine>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sweep_plans_only_on_the_cards_device_selected() {
+        let gpus = vec![(0, "a".to_owned(), 96 << 30), (1, "b".to_owned(), 96 << 30)];
+        let one = selected_budget(&gpus, Some(&[1]));
+        assert_eq!(one.iter().map(|g| g.0).collect::<Vec<_>>(), vec![1], "--device gpu1 never counts gpu0's memory");
+        assert_eq!(one[0].2, (96 << 30) - RESERVE);
+        assert_eq!(selected_budget(&gpus, None).len(), 2, "no selection yet is every card");
+    }
 
     #[test]
     fn smoke_shrinks_the_run_and_flags_are_validated() {
