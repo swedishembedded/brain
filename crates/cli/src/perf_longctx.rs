@@ -203,10 +203,12 @@ impl LongContextEngine for Qwen35Engine {
         let inst = self.inst.as_ref().ok_or("decode before load")?;
         let tokens = vec![1u32; positions.len()];
         let t = Instant::now();
-        // Reading the logits back is part of a real step, and is also what makes
-        // the wall time cover the device's work; the explicit drain makes that
-        // true regardless.
-        inst.decode_batch_at(&tokens, positions)?;
+        // The step a served greedy request runs: the layers, then the device head,
+        // with only the chosen ids read back. Timing `decode_batch_at` instead
+        // priced a `[batch, vocab]` logits readback no served step makes, which
+        // doubled the 32-row step. The read and the drain make the wall time
+        // cover the device's work.
+        inst.decode_batch_greedy_at(&tokens, positions)?;
         inst.poll_wait();
         Ok(elapsed_ms(t))
     }
