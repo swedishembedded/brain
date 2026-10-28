@@ -900,10 +900,16 @@ impl AnchorBankPool {
     /// Steps copying slot `from` over slot `to`, bit for bit.
     pub fn copy_row(&self, g: &Gpu, ids: &AnchorMemoryKernels, from: u32, to: u32) -> Vec<Step> {
         assert!(from < self.slots && to < self.slots, "anchor bank: copy {from} -> {to} of {} slots", self.slots);
-        let meta = upload_u32(g, &[0, 0]);
+        // Through a one-row scratch: a dispatch cannot read and write the same buffer, and binding the two rows as
+        // sub-ranges of it needs offsets the device's storage alignment (256 bytes on most GPUs) rarely allows.
+        let (out, back) = (upload_u32(g, &[from, 0]), upload_u32(g, &[0, to]));
         self.arrays()
             .iter()
-            .map(|(buf, words)| g.step_sliced(ids.rows_copy, &[&meta, buf, buf], &[(0, 2), (u64::from(from) * words, *words), (u64::from(to) * words, *words)], &[1, *words as u32], *words as u32))
+            .flat_map(|(buf, words)| {
+                let row = g.storage_uninit(*words);
+                let n = threads("anchor_rows_copy", *words);
+                [g.step(ids.rows_copy, &[&out, buf, &row], &[1, *words as u32], n), g.step(ids.rows_copy, &[&back, &row, buf], &[1, *words as u32], n)]
+            })
             .collect()
     }
 }
