@@ -188,6 +188,18 @@ pub fn pick_device(cost: &MemCost, budgets: &Budgets, exclude: &HashSet<Device>)
 /// fallback structure exactly, substituting `usable_on` for `fits_on` so it
 /// answers "ever", not "right now".
 pub fn could_ever_fit(cost: &MemCost, budgets: &Budgets) -> bool {
+    fits_within(cost, budgets, Budgets::ceiling_on)
+}
+
+/// [`could_ever_fit`] against what each device can give NOW (its live-measured usable
+/// bytes) rather than the most it has ever had: whether an EMPTY device would take
+/// `cost` today. False while `could_ever_fit` is true means a shortage that
+/// eviction cannot fix.
+pub fn fits_when_empty(cost: &MemCost, budgets: &Budgets) -> bool {
+    fits_within(cost, budgets, Budgets::usable_on)
+}
+
+fn fits_within(cost: &MemCost, budgets: &Budgets, capacity: fn(&Budgets, Device) -> u64) -> bool {
     if cost.vram == 0 && cost.ram == 0 && cost.npu == 0 {
         return true; // stateless: placeable anywhere a budget exists at all.
     }
@@ -195,7 +207,7 @@ pub fn could_ever_fit(cost: &MemCost, budgets: &Budgets) -> bool {
         if need == 0 {
             continue;
         }
-        if devices.iter().any(|&d| budgets.usable_on(d) >= need) {
+        if devices.iter().any(|&d| capacity(budgets, d) >= need) {
             return true;
         }
     }
@@ -210,7 +222,7 @@ pub fn could_ever_fit(cost: &MemCost, budgets: &Budgets) -> bool {
     // `pick_device` still refuses (eviction stays preferred); what changes is
     // that "no card will ever hold it" is no longer reported as "it can never
     // run".
-    host_need(cost) > 0 && budgets.usable_on(Device::Cpu) >= host_need(cost)
+    host_need(cost) > 0 && capacity(budgets, Device::Cpu) >= host_need(cost)
 }
 
 /// The victims to evict from a device to fit `needed` bytes, and where to place the

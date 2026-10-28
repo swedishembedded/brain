@@ -21,11 +21,17 @@ pub struct Budget {
     pub total: u64,
     pub reserved: u64,
     pub used: u64,
+    /// The largest `total` this device has ever had. A live measurement
+    /// ([`Self::measure`]) moves `total` both ways, so the current figure says
+    /// what is free NOW; this says what the device has been known to hold, which
+    /// is what separates "too large for this card" (permanent) from "the card is
+    /// short right now" (a neighbour, or memory this process leaked).
+    pub peak_total: u64,
 }
 
 impl Budget {
     pub fn new(total: u64, reserved: u64) -> Budget {
-        Budget { total, reserved: reserved.min(total), used: 0 }
+        Budget { total, reserved: reserved.min(total), used: 0, peak_total: total }
     }
     /// Bytes available to new instances (capacity minus reserved headroom minus used).
     pub fn free(&self) -> u64 {
@@ -35,6 +41,17 @@ impl Budget {
     /// single instance could ever occupy here.
     pub fn usable(&self) -> u64 {
         self.total.saturating_sub(self.reserved)
+    }
+    /// What a single instance could occupy at the best capacity this device has
+    /// shown (peak total minus reserve), ignoring current use and current shortage.
+    pub fn ceiling(&self) -> u64 {
+        self.peak_total.saturating_sub(self.reserved)
+    }
+    /// Re-size the device from a live measurement of its capacity.
+    pub fn measure(&mut self, total: u64) {
+        self.total = total;
+        self.peak_total = self.peak_total.max(total);
+        self.reserved = self.reserved.min(self.total);
     }
     pub fn fits(&self, bytes: u64) -> bool {
         bytes <= self.free()
@@ -215,6 +232,16 @@ impl Budgets {
         match self.pool_of.get(&device).and_then(|p| self.pools.get(p)) {
             Some(pool) => dev_usable.min(pool.usable()),
             None => dev_usable,
+        }
+    }
+    /// [`Budget::ceiling`] for `device`, clamped by its pool's usable bytes: the most
+    /// the device has ever been able to give one instance. A model above this can
+    /// never run here; one above [`Self::usable_on`] only cannot run right now.
+    pub fn ceiling_on(&self, device: Device) -> u64 {
+        let dev = self.devices.get(&device).map(|b| b.ceiling()).unwrap_or(0);
+        match self.pool_of.get(&device).and_then(|p| self.pools.get(p)) {
+            Some(pool) => dev.min(pool.usable()),
+            None => dev,
         }
     }
     pub fn fits_on(&self, device: Device, bytes: u64) -> bool {

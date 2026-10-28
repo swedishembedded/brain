@@ -39,7 +39,7 @@ use crate::budget::Budgets;
 use crate::lru::Residents;
 use crate::multi::{pick_devices, MultiDeviceCost, MultiDeviceResidentModel};
 use crate::runplan::{Eviction, PlanError, Placement, RunPlan};
-use crate::place::{could_ever_fit, no_exclude, pick_device, plan_eviction_with, CostAware, EvictionPolicy};
+use crate::place::{could_ever_fit, fits_when_empty, no_exclude, pick_device, plan_eviction_with, CostAware, EvictionPolicy};
 use crate::{Device, Instance, InstanceKey, MemCost, ResidentModel, Tier};
 
 /// A hot instance handle: the (mutex-guarded) instance plus the device it lives on.
@@ -56,13 +56,20 @@ pub enum ClaimError {
     /// budget could hold it, but not without evicting more than is
     /// currently evictable - try again once something frees).
     NoCapacity(String),
-    /// The instance exceeds EVERY device's budget even with nothing resident -
-    /// no eviction, however aggressive, could ever make room. A budget is the
-    /// memory free on the device when serving started, so another process
-    /// holding a card then shrinks it for the life of this one. Checked
-    /// BEFORE planning any eviction, so a claim that can never succeed never
-    /// costs anything else its residency (see `place::could_ever_fit`).
+    /// The instance exceeds EVERY device's budget even at the most capacity any
+    /// device has ever shown - no eviction, however aggressive, could ever make
+    /// room. Checked BEFORE planning any eviction, so a claim that can never
+    /// succeed never costs anything else its residency (see
+    /// `place::could_ever_fit`).
     TooLarge(String),
+    /// The instance has fitted a device before, but the live capacity
+    /// measurement says it does not fit one now even with nothing resident: a
+    /// neighbouring process holds the memory, or this process leaked it (a device
+    /// that faulted is never destroyed). Evicting cannot help, so the executor
+    /// fails the queued jobs with that reason, reports the model unservable, and
+    /// the next request tries again - it recovers by itself when the memory
+    /// returns.
+    Starved(String),
     /// The model/instance itself is unusable (unknown model, activation error).
     Activate(String),
 }
@@ -70,7 +77,7 @@ pub enum ClaimError {
 impl std::fmt::Display for ClaimError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ClaimError::NoCapacity(e) | ClaimError::TooLarge(e) | ClaimError::Activate(e) => write!(f, "{e}"),
+            ClaimError::NoCapacity(e) | ClaimError::TooLarge(e) | ClaimError::Starved(e) | ClaimError::Activate(e) => write!(f, "{e}"),
         }
     }
 }
@@ -391,7 +398,7 @@ impl ResidencyManager {
             return cost.devices().all(|d| self.budgets.get(d).is_some() && self.budgets.usable_on(d) >= cost.on(d));
         }
         match self.models.get(model) {
-            Some(m) => could_ever_fit(&m.estimate(key), &self.budgets),
+            Some(m) => fits_when_empty(&m.estimate(key), &self.budgets),
             None => true,
         }
     }
@@ -604,6 +611,32 @@ impl ResidencyManager {
         })
     }
 
+    /// The refusal for a cost no device can take with nothing resident, if it is
+    /// one: [`ClaimError::TooLarge`] when no device has ever been able to hold it,
+    /// [`ClaimError::Starved`] when one could but the live measurement says it
+    /// cannot now. `Ok` when an empty device would hold it (eviction may help).
+    fn refuse_unfittable(&self, key: &InstanceKey, cost: &MemCost) -> Result<(), ClaimError> {
+        let mib = cost.vram.max(cost.ram).max(cost.npu) >> 20;
+        if !could_ever_fit(cost, &self.budgets) {
+            return Err(ClaimError::TooLarge(format!("{key} ({mib} MiB) exceeds every device's budget even with nothing resident")));
+        }
+        if !fits_when_empty(cost, &self.budgets) {
+            return Err(ClaimError::Starved(format!(
+                "{key} ({mib} MiB) does not fit the memory this server can use right now ({}) even with nothing resident, though it has fitted before: another process holds the memory, or this process leaked it after a device fault; it is retried on every request and recovers when the memory returns",
+                self.usable_summary()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Each accelerator's current usable bytes against the most it has had, for
+    /// messages ("gpu0 90112 MiB of 94208 MiB").
+    fn usable_summary(&self) -> String {
+        let mut devices: Vec<Device> = self.budgets.gpus();
+        devices.extend(self.budgets.npus());
+        devices.iter().map(|&d| format!("{d:?} {} MiB of {} MiB", self.budgets.usable_on(d) >> 20, self.budgets.ceiling_on(d) >> 20)).collect::<Vec<_>>().join(", ")
+    }
+
     /// Could `key` run **now** on a device not in `exclude`? A resident instance is
     /// runnable iff its device is free; a cold one iff it can be placed (or evicted
     /// into) on some free device. Used by the parallel scheduler to skip groups whose
@@ -631,7 +664,7 @@ impl ResidencyManager {
         // reaches `claim()`, which turns the same unplaceable cost into a real,
         // per-job `ClaimError::TooLarge` -- a clean failure instead of a silent
         // hang. Mirrors `placeable_multi`'s identical fix (see its own doc).
-        !could_ever_fit(&cost, &self.budgets)
+        !fits_when_empty(&cost, &self.budgets)
     }
 
     /// [`Self::placeable`]'s multi-device sibling - the executor's scheduling
@@ -850,12 +883,7 @@ impl ResidencyManager {
             let device = match pick_device(&hot_cost, &self.budgets, exclude) {
                 Some(d) => d,
                 None => {
-                    if !could_ever_fit(&hot_cost, &self.budgets) {
-                        return Err(ClaimError::TooLarge(format!(
-                            "{key} ({} MiB) exceeds every device's budget even with nothing resident (a budget is the memory that was free on the device when serving started)",
-                            hot_cost.vram.max(hot_cost.ram).max(hot_cost.npu) >> 20
-                        )));
-                    }
+                    self.refuse_unfittable(&key, &hot_cost)?;
                     let plan = plan_eviction_with(&*self.eviction, &hot_cost, &self.budgets, &self.residents, std::slice::from_ref(&key), exclude);
                     match self.accelerator_before_host(plan, &hot_cost, exclude) {
                         Some(d) => d,
@@ -898,12 +926,7 @@ impl ResidencyManager {
                 // Checked BEFORE planning any eviction: a claim that could never
                 // fit on any device even fully empty must fail cleanly right now,
                 // not after evicting everything else and still not fitting.
-                if !could_ever_fit(&cost, &self.budgets) {
-                    return Err(ClaimError::TooLarge(format!(
-                        "{key} ({} MiB) exceeds every device's budget even with nothing resident (a budget is the memory that was free on the device when serving started)",
-                        cost.vram.max(cost.ram).max(cost.npu) >> 20
-                    )));
-                }
+                self.refuse_unfittable(&key, &cost)?;
                 let plan = plan_eviction_with(&*self.eviction, &cost, &self.budgets, &self.residents, std::slice::from_ref(&key), exclude);
                 match self.accelerator_before_host(plan, &cost, exclude) {
                     Some(d) => d,
@@ -1044,7 +1067,7 @@ impl ResidencyManager {
                         }
                         // Pool-clamped, so a unified-memory box cannot book the
                         // same physical bytes twice (see `multi::pick_devices`).
-                        if self.budgets.usable_on(d) < need {
+                        if self.budgets.ceiling_on(d) < need {
                             // PERMANENT: no eviction, however aggressive, can make
                             // this device hold this share. `TooLarge`, not
                             // `NoCapacity` - the executor retries the latter
@@ -1052,8 +1075,15 @@ impl ResidencyManager {
                             // group through to here precisely so it gets a real,
                             // final error instead of sitting in the queue.
                             return Err(ClaimError::TooLarge(format!(
-                                "{key} ({} MiB on {d:?}) is too large for that device's budget even with nothing resident (a budget is the memory that was free on the device when serving started)",
+                                "{key} ({} MiB on {d:?}) is too large for that device's budget even with nothing resident",
                                 need >> 20
+                            )));
+                        }
+                        if self.budgets.usable_on(d) < need {
+                            return Err(ClaimError::Starved(format!(
+                                "{key} ({} MiB on {d:?}) does not fit the memory this server can use right now ({}) even with nothing resident, though it has fitted before: another process holds the memory, or this process leaked it after a device fault; it is retried on every request and recovers when the memory returns",
+                                need >> 20,
+                                self.usable_summary()
                             )));
                         }
                         if self.budgets.fits_on(d, need) {
@@ -1268,11 +1298,7 @@ impl ResidencyManager {
                 continue;
             }
             let Some(b) = self.budgets.get_mut(d) else { continue };
-            let want = b.used.saturating_add(free_now);
-            if want != b.total {
-                b.total = want;
-                b.reserved = b.reserved.min(b.total);
-            }
+            b.measure(b.used.saturating_add(free_now));
         }
     }
 
@@ -2351,6 +2377,53 @@ mod tests {
         // The neighbour exits: the replica comes back without a restart.
         mgr.refresh_accelerator_capacity(&[(Device::Gpu(1), 24 * GB)]);
         assert!(mgr.replica_can_run(&key.replica(1), "percard"));
+    }
+
+    /// **A card that shrank under a model is not "too large".** A model sized to
+    /// fill the card at startup stops fitting the moment a neighbour (or memory
+    /// this process leaked from a faulted device) takes a few GiB. That used to
+    /// be reported as the permanent `TooLarge` - and stayed one after the memory
+    /// came back, because nothing distinguished it from a model that never fitted.
+    /// It is `Starved` instead: refused without evicting anything, and placed
+    /// again as soon as the live measurement shows the room.
+    #[test]
+    fn a_model_that_fitted_before_is_starved_not_too_large_and_recovers() {
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 2 * GB); // 22 GB usable at start
+        let mut mgr = ResidencyManager::new(budgets);
+        mgr.register(Arc::new(Fake { name: "fills".into(), vram: 22 * GB, live: live.clone() }));
+        mgr.register(Arc::new(Fake { name: "toobig".into(), vram: 23 * GB, live: live.clone() }));
+        mgr.run("fills", "run", &Invocation::new(), &mut |_| {}).expect("fits the empty card");
+        assert!(mgr.evict(&InstanceKey::new("fills", "default")));
+
+        // 3 GB are gone (a neighbour, or a leaked faulted device): 19 GB usable.
+        mgr.refresh_accelerator_capacity(&[(Device::Gpu(0), 21 * GB)]);
+        let err = mgr.claim("fills", "run", &Invocation::new(), 0, &no_exclude()).err().expect("no room now");
+        assert!(matches!(err, ClaimError::Starved(_)), "expected Starved, got {err:?}");
+        assert!(err.to_string().contains("recovers when the memory returns"), "{err}");
+        // A model that never fitted stays a permanent refusal.
+        let err = mgr.claim("toobig", "run", &Invocation::new(), 0, &no_exclude()).err().expect("never fits");
+        assert!(matches!(err, ClaimError::TooLarge(_)), "expected TooLarge, got {err:?}");
+
+        // The memory returns and the same model is placed again, no restart.
+        mgr.refresh_accelerator_capacity(&[(Device::Gpu(0), 24 * GB)]);
+        mgr.run("fills", "run", &Invocation::new(), &mut |_| {}).expect("recovered");
+    }
+
+    /// The multi-device claim path makes the same distinction.
+    #[test]
+    fn a_multi_device_share_that_fitted_before_is_starved_not_too_large() {
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Gpu(1), 24 * GB, 0);
+        let mut mgr = ResidencyManager::new(budgets);
+        mgr.register_multi(Arc::new(MultiFake { name: "pair".into(), per_gpu: 20 * GB, live }));
+        mgr.refresh_accelerator_capacity(&[(Device::Gpu(0), 18 * GB)]);
+        let err = mgr.claim_multi("pair", "run", &Invocation::new(), 0, &HashSet::new()).err().expect("gpu0 is short");
+        assert!(matches!(err, ClaimError::Starved(_)), "expected Starved, got {err:?}");
+        mgr.refresh_accelerator_capacity(&[(Device::Gpu(0), 24 * GB)]);
+        claim_multi_built(&mut mgr, "pair").expect("recovered");
     }
 
     /// **The daemon adapts to VRAM it does not own.** Budgets used to be frozen

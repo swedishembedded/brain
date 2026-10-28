@@ -151,6 +151,12 @@ pub struct Stats {
     /// the dispatcher after every `assign()` pass. Empty for any instance that
     /// doesn't override `metrics()` - most models.
     pub metrics: HashMap<InstanceKey, Vec<(String, serde_json::Value)>>,
+    /// Models this server cannot serve right now, with the reason: their last claim was
+    /// refused for memory the device no longer has (see [`ClaimError::Starved`]) or
+    /// for exceeding every device. Empty means every model that was asked for is
+    /// servable. An entry is logged when it appears and again when it clears, and
+    /// goes when a later claim for the key succeeds.
+    pub unservable: HashMap<InstanceKey, String>,
 }
 
 /// A message to the dispatcher: a new job, a lane adopting a freshly built
@@ -972,6 +978,25 @@ fn least_loaded_replica(replicas: usize, key: InstanceKey, queue: &[Pending], ru
     candidates.into_iter().min_by_key(load).unwrap_or(base)
 }
 
+/// Record (`Some(reason)`) or clear (`None`) that `key` cannot be served, logging only
+/// the transitions so a model that stays unservable is announced once, not on every
+/// request that it fails.
+fn note_unservable(stats: &Arc<Mutex<Stats>>, key: &InstanceKey, reason: Option<&str>) {
+    let Ok(mut s) = stats.lock() else { return };
+    match reason {
+        Some(why) => {
+            if s.unservable.insert(key.clone(), why.to_string()).as_deref() != Some(why) {
+                eprintln!("[residency] UNSERVABLE {key}: {why}");
+            }
+        }
+        None => {
+            if s.unservable.remove(key).is_some() {
+                eprintln!("[residency] {key} is servable again");
+            }
+        }
+    }
+}
+
 fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy, lanes: &HashMap<Device, Sender<RunReq>>, running: &mut HashSet<InstanceKey>, busy: &mut HashSet<Device>, stats: &Arc<Mutex<Stats>>, running_jobs: &mut Vec<RunningJob>, open_groups: &mut HashMap<InstanceKey, OpenGroup>) {
     // Groups whose claim came back `NoCapacity` THIS round. They are skipped
     // for the rest of it, and reconsidered on the next one (a lane finishing,
@@ -1035,16 +1060,22 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
             mgr.claim(&model, &action, &inv, key.replica_index(), busy).map(|(w, d, k)| (ClaimOutcome::Single(w, d), k))
         };
         let (outcome, ckey) = match claim_result {
-            Ok(x) => x,
+            Ok(x) => {
+                note_unservable(stats, &key, None);
+                x
+            }
             Err(ClaimError::NoCapacity(_)) => {
                 // Transient: wait for a lane to free a device. Skip THIS group
                 // for the rest of the round and keep assigning the others.
                 stalled.insert(key.clone());
                 continue;
             }
-            Err(refused @ (ClaimError::TooLarge(_) | ClaimError::Activate(_))) => {
-                let too_large = matches!(refused, ClaimError::TooLarge(_));
+            Err(refused @ (ClaimError::TooLarge(_) | ClaimError::Starved(_) | ClaimError::Activate(_))) => {
+                let too_large = matches!(refused, ClaimError::TooLarge(_) | ClaimError::Starved(_));
                 let e = refused.to_string();
+                if too_large {
+                    note_unservable(stats, &key, Some(&e));
+                }
                 // Both permanent for this group: FAIL its queued jobs now and
                 // keep scheduling the others. (The old code broke out of the
                 // whole round here - the jobs waited forever and every other
@@ -3075,5 +3106,40 @@ mod tests {
 
         // Evicting an unknown key (never resident) is a clean `false`, not a panic.
         assert!(!exec.evict(InstanceKey::new("never-registered", "default")));
+    }
+
+    /// A server that cannot place a model says so: the queued request fails with the
+    /// reason, the model is listed in `Stats::unservable`, and the entry clears once a
+    /// request is served again.
+    #[test]
+    fn a_starved_model_is_reported_unservable_and_cleared_when_it_runs() {
+        let free_gb = Arc::new(AtomicU32::new(19)); // 3 GB short of the 22 GB the model needs
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 2 * GB);
+        let probe_free = free_gb.clone();
+        let probe: CapacityProbe = Arc::new(move || vec![(Device::Gpu(0), u64::from(probe_free.load(Ordering::SeqCst)) * GB)]);
+        let exec = Executor::start_with_probe(Vec::new(), budgets, Policy::default(), Some(probe));
+        // A registration is a message: the dispatcher measures the card right after it.
+        exec.register(Arc::new(Slow { name: "fills".into(), vram: 22 * GB, ms: 1, builds: Arc::new(AtomicU32::new(0)) }));
+        let key = InstanceKey::new("fills", "default");
+        // Submit only once the dispatcher has measured the short card, or the job races the first probe.
+        let measured = Instant::now() + Duration::from_secs(10);
+        while exec.residency().budgets.iter().find(|b| b.device == Device::Gpu(0)).is_some_and(|b| b.total != 19 * GB) {
+            assert!(Instant::now() < measured, "the capacity probe never ran");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let err = exec.run_blocking("fills", "run", Invocation::new(), |_| {}).expect_err("the card is short");
+        assert!(err.contains("right now"), "the reason must say the shortage is current: {err}");
+        assert!(exec.stats().unservable.contains_key(&key), "the model must be listed unservable");
+
+        // The memory is back: the next measurement lets it run and clears the entry.
+        free_gb.store(24, Ordering::SeqCst);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while exec.run_blocking("fills", "run", Invocation::new(), |_| {}).is_err() {
+            assert!(Instant::now() < deadline, "never recovered after the memory returned");
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        assert!(exec.stats().unservable.is_empty(), "{:?}", exec.stats().unservable);
     }
 }
