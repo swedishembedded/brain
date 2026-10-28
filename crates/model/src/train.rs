@@ -369,7 +369,7 @@ fn load(dir: &Path, opts: &FitOpts) -> std::io::Result<Loaded> {
                     // example per row is the defect this branch exists to
                     // make visible.
                     Err(e) => {
-                        println!("{label}: {e}; sampling windows across examples instead");
+                        eprintln!("{label}: {e}; sampling windows across examples instead");
                         let (tok, m) = e.returned();
                         (tok, Some(m))
                     }
@@ -412,7 +412,7 @@ pub fn build_or_resume<M: Model>(cfg: M::Config, opts: &FitOpts, out: Option<&Pa
     let resume = out.map(|p| p.exists()).unwrap_or(false);
     let (cfg, init) = if resume {
         let p = out.unwrap();
-        println!("resuming from existing checkpoint {}", p.display());
+        eprintln!("resuming from existing checkpoint {}", p.display());
         let c = checkpoint::load(p.to_str().expect("utf-8 path"));
         let rcfg = M::Config::from_json(&c.header["config"]);
         assert_eq!(
@@ -1666,7 +1666,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
             }
         }
         let (step, saved_applied, saved_rng, saved) = load_train_state(&model, state, opts, &control.identity)?;
-        println!("resuming at step {step} from {}", state.display());
+        eprintln!("resuming at step {step} from {}", state.display());
         first_step = step;
         applied = saved_applied;
         rng = saved_rng;
@@ -1725,7 +1725,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
                 }
                 model.adamw_step(applied, lr, opts.weight_decay, opts.adam, clip, scale);
             }
-            StepVerdict::Skip(why) => println!("step {:>6}: no optimiser step taken: {why}", step + 1),
+            StepVerdict::Skip(why) => eprintln!("step {:>6}: no optimiser step taken: {why}", step + 1),
             StepVerdict::Abort(e) => return Err(e),
         }
         model.poll_wait();
@@ -1743,7 +1743,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
             eprintln!("fit: device memory after step {}: live {} B, reserved {} B, peak live {} B", step + 1, m.live, m.reserved, m.peak_live);
         }
         if let Some(norm) = grad_norm {
-            println!("step {:>6}  loss {loss:.4}  grad_norm {norm:.4}  lr {lr:.2e}", step + 1);
+            eprintln!("step {:>6}  loss {loss:.4}  grad_norm {norm:.4}  lr {lr:.2e}", step + 1);
         }
         last_train = Some(loss);
         completed = step + 1;
@@ -1756,7 +1756,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
             if let Some(eval_loss) = agreed_eval(&mut obj, &model, &rng, opts.eval_batches, grad_sync.as_ref())? {
                 let train_loss = selection.take_interval();
                 selection.evaluations.push(Evaluation { step: step + 1, train_loss, eval_loss });
-                println!("step {:>6}  lr {:.2e}  train {:.4}  eval {:.4}", step + 1, lr, loss, eval_loss);
+                eprintln!("step {:>6}  lr {:.2e}  train {:.4}  eval {:.4}", step + 1, lr, loss, eval_loss);
                 if let Some(snapshots) = control.snapshots.as_ref().filter(|_| writer) {
                     let path = snapshots.path(step + 1);
                     crate::lora::device_adapter::save_lora_with_lineage(
@@ -1808,7 +1808,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
                     Watch::Wait => {}
                     Watch::Stop if selection.cooldown.is_none() && opts.cooldown_steps > 0 && step + 1 < opts.steps => {
                         let steps = opts.cooldown_steps.min(opts.steps - (step + 1));
-                        println!(
+                        eprintln!(
                             "step {:>6}: held-out loss has not improved for {} evaluations (best {:.4}); cooling the rate to its floor over {} steps",
                             step + 1,
                             opts.patience,
@@ -1821,7 +1821,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
                         // Patience that ran out again during the cooldown is
                         // not a second stop; the cooldown's end is.
                         if selection.cooldown.is_none() {
-                            println!(
+                            eprintln!(
                                 "stopping at step {}: held-out loss has not improved for {} evaluations (best {:.4}), \
                                  while the training loss went on falling - past this point the model is learning the \
                                  training rows rather than the task",
@@ -1836,11 +1836,11 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
                 }
             }
             for (name, value) in obj.metrics() {
-                println!("  {name}: {value:.4}");
+                eprintln!("  {name}: {value:.4}");
             }
         }
         if cooled {
-            println!("stopping at step {}: the cooldown is done; the best evaluation's parameters are kept", step + 1);
+            eprintln!("stopping at step {}: the cooldown is done; the best evaluation's parameters are kept", step + 1);
             stopped_early = true;
             break;
         }
@@ -1852,7 +1852,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
             if opts.checkpoint_secs > 0 && last_save.elapsed().as_secs() >= opts.checkpoint_secs {
                 let ts = std::time::Instant::now();
                 model.save_with_itos(p.to_str().expect("utf-8 path"), obj.itos());
-                println!(
+                eprintln!(
                     "step {:>6}  saved checkpoint -> {} ({:.1} s)",
                     step + 1,
                     p.display(),
@@ -1899,7 +1899,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         if let Some(p) = out {
             let ts = std::time::Instant::now();
             model.save_with_itos(p.to_str().expect("utf-8 path"), obj.itos());
-            println!("restored the best parameters -> {} ({:.1} s)", p.display(), ts.elapsed().as_secs_f64());
+            eprintln!("restored the best parameters -> {} ({:.1} s)", p.display(), ts.elapsed().as_secs_f64());
             commit(p, completed)?;
         }
         kept_best = true;
@@ -1913,10 +1913,10 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
     if let Some(p) = out.filter(|_| !kept_best) {
         let ts = std::time::Instant::now();
         model.save_with_itos(p.to_str().expect("utf-8 path"), obj.itos());
-        println!("saved checkpoint -> {} ({:.1} s)", p.display(), ts.elapsed().as_secs_f64());
+        eprintln!("saved checkpoint -> {} ({:.1} s)", p.display(), ts.elapsed().as_secs_f64());
         commit(p, completed)?;
     } else if kept_best {
-        println!(
+        eprintln!(
             "kept the checkpoint with the best held-out loss ({:.4}){}",
             selection.watch.best(),
             if stopped_early { ", stopped early" } else { "" }
@@ -2071,6 +2071,17 @@ mod tests {
 
     use super::*;
     use crate::training::TokenObjectives;
+
+    /// A caller of the training loop (the CLI, the SDK, a program that prints
+    /// a JSON report) owns stdout; progress is a diagnostic and goes to
+    /// stderr. A `println!` in the loop made a report unparseable.
+    #[test]
+    fn the_training_loop_writes_progress_to_stderr_never_stdout() {
+        let source = include_str!("train.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        let offenders: Vec<usize> = production.lines().enumerate().filter(|(_, l)| l.contains(" println!(") || l.trim_start().starts_with("println!(")).map(|(n, _)| n + 1).collect();
+        assert!(offenders.is_empty(), "println! on lines {offenders:?}: use eprintln!");
+    }
 
     /// The shape this exists to catch: training loss falling all the way
     /// while held-out loss bottoms out and turns back up.
