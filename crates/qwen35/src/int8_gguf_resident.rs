@@ -359,12 +359,24 @@ pub struct ServingShape {
     /// activations of one ([`prefill_workspace_bytes`]) are memory the cards
     /// must keep free beside everything this shape places.
     pub prefill_rows: u32,
+    /// What an adapter bank holds on the cards, when one is served: part of the
+    /// shape so the automatic context and pool size leave room for it, rather
+    /// than filling the cards and refusing the bank afterwards.
+    pub adapter_bank: Option<BankBytes>,
+}
+
+/// An adapter bank's device bytes: beside each layer it corrects, and the row
+/// scratch, charged once to the head.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BankBytes {
+    pub per_layer: Vec<u64>,
+    pub head: u64,
 }
 
 impl ServingShape {
     /// `max_batch` sequences of `cap` tokens, no prompt cache, no speculation.
     pub fn new(cap: u32, tier: TierPolicy, kv: KvTier, max_batch: u32) -> ServingShape {
-        ServingShape { cap, tier, kv, max_batch, prefix_slots: 0, kv_pool_rows: 0, spec: SpecCost::NONE, prefill_rows: TENSOR_CORE_PREFILL_TOKENS }
+        ServingShape { cap, tier, kv, max_batch, prefix_slots: 0, kv_pool_rows: 0, spec: SpecCost::NONE, prefill_rows: TENSOR_CORE_PREFILL_TOKENS, adapter_bank: None }
     }
 
     /// The same shape for a stack whose prefill forward may carry `rows` rows (the
@@ -429,14 +441,20 @@ pub(crate) fn layer_state_bytes(cfg: &Qwen35Config, ty: LayerType, shape: &Servi
 pub fn serving_cost(cfg: &Qwen35Config, shape: &ServingShape) -> LayerBytes {
     // Decode state is per SEQUENCE; weights are shared by the whole batch and
     // counted once, which is the entire point of batching.
-    let per_layer = cfg.layer_types().into_iter().enumerate().map(|(l, ty)| cfg.layer_weight_bytes_at(&format!("blocks.{l}."), ty, &shape.tier) + layer_state_bytes(cfg, ty, shape)).collect();
+    let bank = shape.adapter_bank.as_ref();
+    let per_layer = cfg
+        .layer_types()
+        .into_iter()
+        .enumerate()
+        .map(|(l, ty)| cfg.layer_weight_bytes_at(&format!("blocks.{l}."), ty, &shape.tier) + layer_state_bytes(cfg, ty, shape) + bank.and_then(|b| b.per_layer.get(l)).copied().unwrap_or(0))
+        .collect();
     let mtp = if shape.spec.mtp_head {
         let d = cfg.d_model as u64;
         cfg.layer_weight_bytes_at(mtp::MTP_PREFIX, LayerType::Full, &shape.tier) + d * 2 * d + shape.window_slots() as u64 * cfg.layer_decode_state_bytes(LayerType::Full, shape.cap, shape.kv)
     } else {
         0
     };
-    LayerBytes { per_layer, embed: 0, head: head_i8_bytes(cfg) + cfg.d_model as u64 * 4 + mtp }
+    LayerBytes { per_layer, embed: 0, head: head_i8_bytes(cfg) + cfg.d_model as u64 * 4 + mtp + bank.map_or(0, |b| b.head) }
 }
 
 /// Whether `max_batch` sequences of `cap` tokens make KV planes the kernels
@@ -3458,20 +3476,12 @@ impl Qwen35GgufResident {
         if let Some(why) = sizing_refusal(&cfg, &shape, &caps.iter().map(|&(_, c)| c).collect::<Vec<_>>()) {
             return refused(why);
         }
-        let mut cost = serving_cost(&cfg, &shape);
-        if let Some(request) = &self.bank {
-            // The bank lives beside the weights of the layers it corrects, on
-            // the card that holds them; each stage also carries the row
-            // scratch, charged once to the head (a stage is at least a layer).
-            let bank = match request.config(&cfg) {
-                Ok(bank) => bank,
-                Err(why) => return refused(format!("adapter bank: {why}")),
-            };
-            for (layer, bytes) in bank.device_bytes_by_layer(&cfg, cost.per_layer.len()).into_iter().enumerate() {
-                cost.per_layer[layer] += bytes;
-            }
-            cost.head += bank.row_scratch_bytes(self.max_batch.max(MAX_PREFILL_TOKENS.max(TENSOR_CORE_PREFILL_TOKENS)));
+        if let Some(Err(why)) = self.bank.as_ref().map(|request| request.config(&cfg)) {
+            return refused(format!("adapter bank: {why}"));
         }
+        // The shape carries the bank (serving_shape), so the sizing that chose
+        // the context and this placement charge the same bytes.
+        let cost = serving_cost(&cfg, &shape);
         // The same cards less the prefill round's activations, as `sizing_refusal` held them to.
         let workspace = shape.stage_workspace(&cfg);
         let caps: Vec<(usize, u64)> = caps.iter().map(|&(i, c)| (i, c.saturating_sub(workspace))).collect();
@@ -3539,8 +3549,22 @@ impl Qwen35GgufResident {
             // Exact decode runs plain steps, so the verify scratch is not
             // charged: the placement must describe what will be allocated.
             spec: if self.exact_decode { SpecCost::NONE } else { self.spec.cost(mtp::checkpoint_has_mtp(mg, cfg), verify) },
+            adapter_bank: self.bank_bytes(cfg),
             ..ServingShape::new(self.cap, self.tier.clone(), self.kv_tier, self.max_batch).with_prefill_rows(self.prefill.batch_tokens.try_into().unwrap_or(u32::MAX))
         }
+    }
+
+    /// The device bytes of the adapter bank this resident serves, if any: the
+    /// bank lives beside the weights of the layers it corrects, on the card
+    /// that holds them, and each stage also carries the row scratch, charged
+    /// once to the head (a stage is at least a layer). `None` without a bank,
+    /// or for a request the model cannot hold (`plan` refuses that by name).
+    fn bank_bytes(&self, cfg: &Qwen35Config) -> Option<BankBytes> {
+        let bank = self.bank.as_ref()?.config(cfg).ok()?;
+        Some(BankBytes {
+            per_layer: bank.device_bytes_by_layer(cfg, cfg.layer_types().len()),
+            head: bank.row_scratch_bytes(self.max_batch.max(MAX_PREFILL_TOKENS.max(TENSOR_CORE_PREFILL_TOKENS))),
+        })
     }
 
     /// Which layer range and how many bytes each device holds, as planned -
@@ -4269,6 +4293,27 @@ mod tests {
         // A fixed context that fits the pool is honoured; one longer than any pool is refused.
         assert!(auto_pool_rows(&cfg, &card, &shape, Some(65_536)).expect("fits") >= 65_536);
         assert_eq!(auto_pool_rows(&cfg, &card, &shape, Some(u32::MAX / 2)), None);
+    }
+
+    /// An adapter bank is part of what the automatic pool leaves room for: with one
+    /// the pool is smaller by at least its bytes and still places, instead of filling
+    /// the card and refusing the bank afterwards.
+    #[test]
+    fn the_automatic_pool_leaves_room_for_an_adapter_bank() {
+        let cfg = Qwen35Config::qwen38_27b();
+        let card = [(Device::Gpu(0), 96 * GB)];
+        let shape = ServingShape { prefix_slots: 32, ..ServingShape::new(1, TierPolicy::uniform(Dtype::I8), KvTier::INT8, 32) };
+        let layers = cfg.layer_types().len();
+        let bank = BankBytes { per_layer: vec![64 << 20; layers], head: 2 * GB };
+        let banked = ServingShape { adapter_bank: Some(bank.clone()), ..shape.clone() };
+        let plain_pool = auto_pool_rows(&cfg, &card, &shape, None).expect("fits");
+        let banked_pool = auto_pool_rows(&cfg, &card, &banked, None).expect("fits beside the bank");
+        assert!(banked_pool < plain_pool, "pool {banked_pool} with the bank against {plain_pool} without");
+        let at = ServingShape { kv_pool_rows: banked_pool, cap: banked_pool, ..banked.clone() };
+        let placed = serving_cost(&cfg, &at).total();
+        let without = serving_cost(&cfg, &ServingShape { adapter_bank: None, ..at.clone() }).total();
+        assert_eq!(placed - without, bank.per_layer.iter().sum::<u64>() + bank.head, "the bank is charged once, all of it");
+        assert!(placed + at.stage_workspace(&cfg) <= 96 * GB, "the banked pool places");
     }
 
     /// An operator-fixed context is held to the same budget as the automatic one.
