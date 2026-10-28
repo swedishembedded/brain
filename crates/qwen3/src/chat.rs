@@ -270,13 +270,19 @@ pub fn visible_delta(printed: &str, full: &str, stops: &[String]) -> (String, St
 
 /// Read the four shared sampling params (with the spec defaults).
 ///
+/// `max_new` is `None` when the request names no budget: the reply then runs
+/// to its end of turn or to what the engine's context leaves, the meaning
+/// the OpenAI surface gives an omitted `max_tokens`. A fixed default here
+/// silently cut every such reply short. The engine resolves it
+/// ([`ParsedRequest::max_new_within`]).
+///
 /// `seed` is the one param that is NOT a fixed spec default: a request that
 /// omits it gets a real random seed ([`data::rng::random_seed`]), not a
 /// hardcoded `0` - two back-to-back unseeded requests must not decode the
 /// same sequence. A caller that wants a reproducible decode passes `seed`
 /// explicitly; a `seed` that is not a non-negative integer is refused.
-pub fn sampling_params(inv: &Invocation) -> Result<(usize, f32, usize, u64), String> {
-    let max_new = inv.get_i64("max_new").unwrap_or(128).max(0) as usize;
+pub fn sampling_params(inv: &Invocation) -> Result<(Option<usize>, f32, usize, u64), String> {
+    let max_new = inv.get_i64("max_new").map(|n| n.max(0) as usize);
     let temp = inv.get_f64("temp").unwrap_or(0.8) as f32;
     let top_k = inv.get_i64("top_k").unwrap_or(40).max(0) as usize;
     let seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
@@ -294,7 +300,9 @@ pub fn text_outcome(text: String) -> Outcome {
 #[derive(Debug)]
 pub struct ParsedRequest {
     pub ids: Vec<u32>,
-    pub max_new: usize,
+    /// The requested budget; `None` runs to the end of the context (see
+    /// [`sampling_params`]).
+    pub max_new: Option<usize>,
     pub temp: f32,
     pub top_k: usize,
     pub top_p: f32,
@@ -318,6 +326,24 @@ pub struct ParsedRequest {
     /// A raw completion (no chat template): the output is plain text, with
     /// no reasoning or tool-call markup read out of it.
     pub raw: bool,
+}
+
+impl ParsedRequest {
+    /// The tokens this request may generate in a context of `capacity`
+    /// tokens: its own budget, or everything the prompt leaves when it named
+    /// none. A budget past the context stays as asked, for the engine to
+    /// refuse rather than shorten.
+    pub fn max_new_within(&self, capacity: usize) -> usize {
+        self.max_new.unwrap_or_else(|| capacity.saturating_sub(self.ids.len()))
+    }
+
+    /// Fix the budget to [`Self::max_new_within`] `capacity`, before the
+    /// request is decoded or its [`SeqState`] made, and return it.
+    pub fn bound_to(&mut self, capacity: usize) -> usize {
+        let max_new = self.max_new_within(capacity);
+        self.max_new = Some(max_new);
+        max_new
+    }
 }
 
 /// How many of `generated`'s tokens were spent inside think blocks, the tags
@@ -695,7 +721,9 @@ impl SeqState {
             scan: if req.raw { ChatScanner::raw() } else { ChatScanner::with_flavor(req.thinking_open, req.flavor) },
             stop_at: None,
             cancelled: false,
-            max_new: req.max_new,
+            // Unbounded only if the caller skipped `bound_to`; the engine's
+            // context still ends the reply.
+            max_new: req.max_new.unwrap_or(usize::MAX),
             prompt_tokens: Some(req.ids.len()),
             tool_choice: req.tool_choice.clone(),
             seed: Some(req.seed),

@@ -1441,6 +1441,14 @@ impl<D: PagedDecoder> Scheduler<D> {
         self.dec.kv_pool_capacity_tokens()
     }
 
+    /// The most context one sequence may hold, prompt and reply together:
+    /// the decoder's sequence limit within the KV pool. A request that names
+    /// no budget generates until it ends its turn or reaches this.
+    pub fn sequence_capacity(&self) -> usize {
+        let pool_tokens = usize::try_from(self.dec.kv_pool_capacity_tokens()).unwrap_or(usize::MAX);
+        self.dec.max_seq_len().min(pool_tokens)
+    }
+
     /// One scheduler iteration: admit waiting requests that fit (prefill + sample
     /// first token), run one batched decode step over all running sequences, then
     /// reap completed ones. Returns the `(id, tokens)` of requests finished here.
@@ -1689,8 +1697,7 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// A sequence can only ever run alone in the pool, so it must fit it: the KV
     /// of every token but the last one it produces.
     fn static_refusal(&self, prompt: &[u32], max_new: usize) -> Option<RejectReason> {
-        let pool_tokens = usize::try_from(self.dec.kv_pool_capacity_tokens()).unwrap_or(usize::MAX);
-        let cap = self.dec.max_seq_len().min(pool_tokens);
+        let cap = self.sequence_capacity();
         let vocab = self.dec.vocab() as u32;
         if let Some(&token) = prompt.iter().find(|&&t| t >= vocab) {
             return Some(RejectReason::InvalidToken { token, vocab });

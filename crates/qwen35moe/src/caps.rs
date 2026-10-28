@@ -183,7 +183,10 @@ impl Action for GenerateAction {
         };
         let plan = match &tok {
             Some(t) => {
-                let req = parse_request(t, inv)?;
+                let mut req = parse_request(t, inv)?;
+                // This path builds its context for the request, so a request
+                // without a budget gets the declared default, not a window.
+                req.max_new.get_or_insert(DEFAULT_MAX_NEW as usize);
                 // Stop tokens: explicit param wins (-1 disables); else both Qwen3
                 // EOS ids (`<|im_end|>` and `<|endoftext|>`) from the tokenizer —
                 // Qwen3.5 shares the same special-token vocabulary.
@@ -220,7 +223,7 @@ impl Action for GenerateAction {
         // Hot path: keep the loaded model resident across calls; rebuild only when
         // the weights change or the built context is too small for this request.
         let need = match &plan {
-            Plan::Chat { req, .. } => (req.ids.len() + req.max_new) as u32,
+            Plan::Chat { req, .. } => (req.ids.len() + req.max_new.unwrap_or(DEFAULT_MAX_NEW as usize)) as u32,
             Plan::Raw { ids, max_new, .. } => (ids.len() + max_new) as u32,
         };
         let key: HotKey = (weights.clone(), need.max(64), precision.clone());
@@ -247,11 +250,11 @@ impl Action for GenerateAction {
                 let seed = req.seed;
                 let mut rng = Rng::new(seed);
                 let mut seq = SeqState::new(&req, inv.cancel.clone());
-                let mut ids_out: Vec<u32> = Vec::with_capacity(req.max_new);
+                let mut ids_out: Vec<u32> = Vec::with_capacity(req.max_new.unwrap_or(DEFAULT_MAX_NEW as usize));
                 let gen = crate::sample::generate_kv_stream_with_head(
                     model,
                     &req.ids,
-                    req.max_new,
+                    req.max_new.unwrap_or(DEFAULT_MAX_NEW as usize),
                     req.temp,
                     req.top_k,
                     req.top_p,

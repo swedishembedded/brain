@@ -435,7 +435,7 @@ impl Resident {
         // image branches below, not a second copy per media kind.
         let build_request = |ids: Vec<u32>| ParsedRequest {
             ids,
-            max_new: max_new as usize,
+            max_new: Some(max_new as usize),
             temp: temperature,
             top_k,
             top_p,

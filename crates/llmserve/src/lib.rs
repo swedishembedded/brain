@@ -324,10 +324,10 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
     ) -> (usize, Option<ActionResult>) {
         let inv = job.invocation.clone();
         match parsed {
-            Ok((req, embeds)) => {
+            Ok((mut req, embeds)) => {
+                let max_new = req.bound_to(self.sched.sequence_capacity());
                 let sample = req.sampler;
                 let seed = req.seed;
-                let max_new = req.max_new;
                 job.capture = Capture::of(&inv, &req.ids);
                 let seq = SeqState::new(&req, inv.cancel.clone());
                 // `ignore_eos` generates to the token budget: the end-of-sequence ids are not stop tokens for this request.
@@ -412,7 +412,8 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
             Ok(req) => req,
             Err(e) => return Some(e),
         };
-        let request = Request { prompt: req.ids, max_new: req.max_new, stop: Vec::new() };
+        let max_new = req.max_new_within(self.sched.sequence_capacity());
+        let request = Request { prompt: req.ids, max_new, stop: Vec::new() };
         self.sched.refusal(&request, adapter).map(|reason| self.front.rejection(inv, &reason))
     }
 

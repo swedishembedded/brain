@@ -400,9 +400,10 @@ pub fn to_invocation(provider: Provider, body: &Value) -> Result<(String, Invoca
     // tool_call_id/reasoning_content so a multi-turn tool-calling conversation
     // round-trips (see [`flatten_message`]).
     let msgs: Vec<Value> = messages.iter().map(flatten_message).collect();
-    let inv = Invocation::new()
-        .set("messages", json!(serde_json::to_string(&msgs).unwrap_or_else(|_| "[]".into())))
-        .set("max_new", json!(max_new(provider, body)?));
+    let mut inv = Invocation::new().set("messages", json!(serde_json::to_string(&msgs).unwrap_or_else(|_| "[]".into())));
+    if let Some(n) = max_new(provider, body)? {
+        inv = inv.set("max_new", json!(n));
+    }
     let inv = crate::sampling::apply_token_capture(provider, body, crate::sampling::apply(provider, body, inv)?)?;
     let mut inv = inv;
     if let Some(stop) = normalize_stop(body.get("stop")) {
@@ -523,7 +524,7 @@ fn to_completion_invocation(provider: Provider, body: &Value) -> Result<(String,
     crate::sampling::refuse_unsupported_openai(provider, body, false)?;
     let stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    let inv = Invocation::new().set("prompt", json!(prompt)).set("chat", json!(false)).set("max_new", json!(max_new(provider, body)?));
+    let inv = Invocation::new().set("prompt", json!(prompt)).set("chat", json!(false)).set("max_new", json!(max_new(provider, body)?.unwrap_or(COMPLETIONS_DEFAULT_MAX_TOKENS)));
     let mut inv = crate::sampling::apply(provider, body, inv)?;
     if let Some(stop) = normalize_stop(body.get("stop")) {
         inv = inv.set("stop", json!(stop));
@@ -585,15 +586,22 @@ fn validate_tool_choice(provider: Provider, tc: &Value) -> Result<(), ApiError> 
     }
 }
 
-/// `max_tokens` (or the newer `max_completion_tokens`), defaulting to 1024.
-fn max_new(provider: Provider, body: &Value) -> Result<i64, ApiError> {
+/// `max_tokens` (or the newer `max_completion_tokens`), `None` when the
+/// request sets neither. For chat completions the API defines no default:
+/// the reply runs until it ends its turn or the context is full, and the
+/// engine bounds it there. A fixed default cut such replies short with
+/// `finish_reason: "length"` while the client had asked for no limit.
+fn max_new(provider: Provider, body: &Value) -> Result<Option<i64>, ApiError> {
     for name in ["max_completion_tokens", "max_tokens"] {
         if let Some(v) = body.get(name).filter(|v| !v.is_null()) {
-            return crate::sampling::max_tokens(provider, name, Some(v));
+            return crate::sampling::max_tokens(provider, name, Some(v)).map(Some);
         }
     }
-    Ok(1024)
+    Ok(None)
 }
+
+/// The legacy completions API's own default for an omitted `max_tokens`.
+const COMPLETIONS_DEFAULT_MAX_TOKENS: i64 = 16;
 
 /// Normalize OpenAI `stop` (string | array | null) to a JSON-array string, or `None`.
 fn normalize_stop(v: Option<&Value>) -> Option<String> {
@@ -1446,6 +1454,19 @@ mod tests {
         for bad in [json!(-1), json!(65), json!("many"), json!(2.5)] {
             let e = to_invocation(Provider::OpenAI, &json!({"model": "m", "messages": msg, "max_tiles": bad})).unwrap_err();
             assert!(format!("{e:?}").contains("max_tiles"), "{bad}: {e:?}");
+        }
+    }
+    /// A chat request without `max_tokens` puts no budget on the reply: the
+    /// engine runs it to its end of turn or the end of the context. Either
+    /// name, when sent, is the budget.
+    #[test]
+    fn an_omitted_max_tokens_leaves_the_chat_reply_unbounded() {
+        let msg = json!([{"role": "user", "content": "hi"}]);
+        let unset = to_invocation(Provider::OpenAI, &json!({"model": "m", "messages": msg})).unwrap().1;
+        assert_eq!(unset.get_i64("max_new"), None);
+        for name in ["max_tokens", "max_completion_tokens"] {
+            let set = to_invocation(Provider::OpenAI, &json!({"model": "m", "messages": msg, name: 77})).unwrap().1;
+            assert_eq!(set.get_i64("max_new"), Some(77), "{name}");
         }
     }
     /// OpenAI's `completion_tokens_details.reasoning_tokens` appears only when the reply spent tokens thinking.

@@ -577,7 +577,8 @@ impl ChatPipeline {
                 parsed.ids.len()
             )));
         }
-        parsed.max_new = parsed.max_new.min(capacity - parsed.ids.len());
+        let room = capacity - parsed.ids.len();
+        parsed.max_new = Some(parsed.max_new.map_or(room, |n| n.min(room)));
         let outcome = self.engine.run(&parsed, cancel, self.prefill_chunk, &mut |progress| {
             if let Some(text) = progress.delta {
                 on_delta(ChatDelta::Text(text));

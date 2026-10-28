@@ -33,7 +33,7 @@ use common::{tokenizer, Toy, VOCAB};
 fn request(seed: u32, max_new: usize) -> ParsedRequest {
     ParsedRequest {
         ids: (0..4).map(|i| (seed + i) % VOCAB as u32).collect(),
-        max_new,
+        max_new: Some(max_new),
         temp: 0.0,
         top_k: 0,
         top_p: 1.0,

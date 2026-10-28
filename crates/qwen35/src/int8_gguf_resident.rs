@@ -3582,7 +3582,7 @@ impl ResidentModel for Qwen35GgufResident {
         .param(ParamSpec::new("messages", ParamType::Str, "JSON array of {role,content,...} chat turns (overrides prompt)"))
         .param(ParamSpec::new("system", ParamType::Str, "optional system prompt prepended to the chat"))
         .param(ParamSpec::new("chat", ParamType::Bool, "apply the chat template to the prompt").default(json!(true)))
-        .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate").default(json!(128)))
+        .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate; omitted, the reply runs to its end of turn or to the end of the context"))
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0 = greedy)").default(json!(0.0)))
         .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (0 or negative = disabled)").default(json!(40)))
         .param(ParamSpec::new("top_p", ParamType::Float, "nucleus sampling threshold (>= 1 = disabled)").default(json!(1.0)))

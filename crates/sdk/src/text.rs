@@ -265,9 +265,9 @@ impl TextGenerationPipeline {
     /// doc.
     pub fn generate_with(&self, prompt: &str, opts: TextGenerationOptions) -> Result<GeneratedText> {
         let inv = opts.into_invocation(prompt)?;
-        let req = qwen3::chat::parse_request_as(&self.engine.tok, &self.engine.format, &inv).map_err(Error::Backend)?;
+        let mut req = qwen3::chat::parse_request_as(&self.engine.tok, &self.engine.format, &inv).map_err(Error::Backend)?;
 
-        let need = req.ids.len() as u64 + req.max_new as u64;
+        let need = req.ids.len() as u64 + req.bound_to(self.engine.capacity as usize) as u64;
         if need > self.engine.capacity as u64 {
             return Err(Error::Backend(format!(
                 "qwen3: prompt + max_new_tokens ({need} tokens) exceeds this pipeline's built capacity ({} tokens) -- rebuild with .capacity({need}) or larger",
@@ -417,12 +417,13 @@ impl Engine {
     /// and the outcome's text are the same.
     pub(crate) fn run(&self, req: &qwen3::chat::ParsedRequest, cancel: &capability::CancelToken, prefill_chunk: usize, progress: &mut dyn FnMut(capability::Progress)) -> capability::Outcome {
         let mut rng = data::rng::Rng::new(req.seed);
+        let max_new = req.max_new_within(self.capacity as usize);
         let mut seq = qwen3::chat::SeqState::new(req, cancel.clone());
-        let mut ids_out: Vec<u32> = Vec::with_capacity(req.max_new);
+        let mut ids_out: Vec<u32> = Vec::with_capacity(max_new);
         let generated = qwen3::sample::generate_kv_stream_on_device(
             &self.model,
             &req.ids,
-            req.max_new,
+            max_new,
             req.temp,
             req.top_k,
             req.top_p,

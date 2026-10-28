@@ -64,7 +64,7 @@ pub fn generate_spec() -> ActionSpec {
         .param(ParamSpec::new("tool_choice", ParamType::Str, "auto | none | required | {\"type\":\"function\",\"function\":{\"name\":...}}"))
         .param(ParamSpec::new("stop", ParamType::Str, "JSON array of stop strings"))
         .param(ParamSpec::new("enable_thinking", ParamType::Bool, "let the model reason in a <think> block first").default(json!(false)))
-        .param(ParamSpec::new("max_new", ParamType::Int, "max tokens to generate").default(json!(DEFAULT_MAX_NEW)).min(1.0).max(SERVE_CONTEXT as f64))
+        .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate; omitted, the reply runs to its end of turn or to the end of the context").min(1.0).max(SERVE_CONTEXT as f64))
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0: greedy)").default(json!(0.8)))
         .param(ParamSpec::new("top_k", ParamType::Int, "top-k cut (0: off)").default(json!(40)))
         .param(ParamSpec::new("top_p", ParamType::Float, "nucleus cut (1: off)").default(json!(1.0)))
@@ -261,7 +261,8 @@ impl Session {
         let (max_new, temp, top_k, seed) = qwen3::chat::sampling_params(&inv)?;
         let top_p = inv.get_f64("top_p").unwrap_or(1.0) as f32;
         let opts = GenOptions {
-            max_new: max_new.max(1),
+            // No budget named: what the prompt leaves of the context (below).
+            max_new: max_new.unwrap_or(usize::MAX).max(1),
             temperature: temp,
             top_k,
             top_p,
@@ -280,7 +281,7 @@ impl Session {
         let opts = GenOptions { max_new: opts.max_new.min(room), ..opts };
         let parsed = ParsedRequest {
             ids: prepared.prompt.ids.clone(),
-            max_new: opts.max_new,
+            max_new: Some(opts.max_new),
             temp,
             top_p,
             top_k,

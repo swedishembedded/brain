@@ -41,7 +41,7 @@ impl Frontend for Front {
     fn parse(&self, inv: &Invocation) -> Result<ParsedRequest, String> {
         Ok(ParsedRequest {
             ids: vec![1, 2, 3, 4],
-            max_new: inv.get_i64("max_new").unwrap_or(16) as usize,
+            max_new: inv.get_i64("max_new").map(|n| n as usize),
             temp: 0.0,
             top_k: 0,
             top_p: 1.0,
@@ -58,7 +58,8 @@ impl Frontend for Front {
 
 fn serve(cached: u32, inv: Invocation) -> capability::Outcome {
     let front = Front { tok: tokenizer() };
-    let mut sched = Scheduler::new(Toy::new(BlockAllocator::new(64, 8), cached), 4);
+    // 128 blocks of 8: the KV for the toy's whole 1024-token context.
+    let mut sched = Scheduler::new(Toy::new(BlockAllocator::new(128, 8), cached), 4);
     let mut results = run_batch_scheduled(&mut sched, &front, &[inv], &mut |_, _| {});
     results.remove(0).expect("served")
 }
@@ -90,6 +91,15 @@ fn a_sequence_that_runs_out_of_tokens_has_no_stop_token() {
     let out = serve(0, Invocation::new().set("return_raw", json!(true)).set("max_new", json!(1)));
     assert!(out.outputs.get("stop_token").is_none());
     assert_eq!(out.outputs["raw_output"], json!("t5"));
+}
+
+#[test]
+fn a_request_without_a_budget_runs_to_the_end_of_the_context() {
+    // Without its stop token the toy never ends its turn, so only the
+    // context (1024 tokens, 4 of them the prompt) ends the reply.
+    let out = serve(0, Invocation::new().set("ignore_eos", json!(true)));
+    assert_eq!(out.outputs["completion_tokens"], json!(1020));
+    assert_eq!(out.outputs["finish_reason"], json!("length"));
 }
 
 const _: () = assert!(VOCAB > 8);

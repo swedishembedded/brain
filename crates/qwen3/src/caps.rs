@@ -431,7 +431,10 @@ impl Action for GenerateAction {
                 // The checkpoint's own chat format renders the prompt.
                 let tok_dir = tok_path.as_deref().and_then(|p| std::path::Path::new(p).parent());
                 let format = ChatFormat::for_checkpoint(tok_dir, t);
-                let req = parse_request_as(t, &format, inv)?;
+                let mut req = parse_request_as(t, &format, inv)?;
+                // This path builds its context for the request, so a request
+                // without a budget gets the declared default, not a window.
+                req.max_new.get_or_insert(DEFAULT_MAX_NEW as usize);
                 // Stop tokens: explicit param wins (-1 disables); else the
                 // checkpoint's own eos ids plus the format's turn end.
                 let eos: Vec<u32> = match inv.get_i64("eos") {
@@ -470,7 +473,7 @@ impl Action for GenerateAction {
         // Hot path: keep the loaded model resident across calls; rebuild only when
         // the weights change or the built context is too small for this request.
         let (prompt_len, max_new) = match &plan {
-            Plan::Chat { req, .. } => (req.ids.len(), req.max_new),
+            Plan::Chat { req, .. } => (req.ids.len(), req.max_new.unwrap_or(DEFAULT_MAX_NEW as usize)),
             Plan::Raw { ids, max_new, .. } => (ids.len(), *max_new),
         };
         // The context this request needs; whether it fits is the footprint
@@ -529,11 +532,11 @@ impl Action for GenerateAction {
                 let tok = tok.expect("Plan::Chat is only built when a tokenizer was loaded");
                 let mut rng = Rng::new(req.seed);
                 let mut seq = SeqState::new(&req, inv.cancel.clone());
-                let mut ids_out: Vec<u32> = Vec::with_capacity(req.max_new.min(hot.cap as usize));
+                let mut ids_out: Vec<u32> = Vec::with_capacity(req.max_new.unwrap_or(DEFAULT_MAX_NEW as usize).min(hot.cap as usize));
                 let gen = crate::sample::generate_kv_stream_with_head(
                     model,
                     &req.ids,
-                    req.max_new,
+                    req.max_new.unwrap_or(DEFAULT_MAX_NEW as usize),
                     req.temp,
                     req.top_k,
                     req.top_p,

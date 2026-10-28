@@ -51,7 +51,7 @@ use qwen3::chat::{parse_request_as, sampling_params, text_outcome, ChatFormat};
 pub fn generate_spec(summary: &str, chat: bool) -> ActionSpec {
     let mut s = ActionSpec::new("generate", summary)
         .param(ParamSpec::new("prompt", ParamType::Str, "the prompt to continue (or chat message)"))
-        .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate").default(json!(128)))
+        .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate; omitted, the reply runs to its end of turn or to the end of the context"))
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0 = greedy)").default(json!(0.8)))
         .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (40 = standard; 1 = greedy; 0 or negative = disabled)").default(json!(40)))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random)"));
@@ -315,6 +315,10 @@ impl ResidentModel for GptResident {
     }
 }
 
+/// What the char-level demo models generate when a request names no budget:
+/// they hold no serving context to run to the end of.
+const TOY_MAX_NEW: usize = 128;
+
 struct GptInstance {
     model: gpt2::model::Gpt,
     tok: CharTokenizer,
@@ -323,6 +327,7 @@ struct GptInstance {
 impl Instance for GptInstance {
     fn run(&mut self, _action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let (max_new, temp, top_k, seed) = sampling_params(inv)?;
+        let max_new = max_new.unwrap_or(TOY_MAX_NEW);
         let prompt = inv.get_str("prompt").unwrap_or_default();
         let prompt_text = if prompt.is_empty() { "\n".to_string() } else { prompt };
         let ids = self.tok.encode(&prompt_text);
@@ -455,6 +460,7 @@ struct GlmInstance {
 impl Instance for GlmInstance {
     fn run(&mut self, _action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let (max_new, temp, top_k, seed) = sampling_params(inv)?;
+        let max_new = max_new.unwrap_or(TOY_MAX_NEW);
         let prompt = inv.get_str("prompt").unwrap_or_default();
         let prompt_text = if prompt.is_empty() { "\n".to_string() } else { prompt };
         let ids = self.tok.encode(&prompt_text);

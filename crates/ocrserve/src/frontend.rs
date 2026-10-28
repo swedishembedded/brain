@@ -240,7 +240,7 @@ impl Drop for EncodeStage {
 fn build_request(ids: Vec<u32>, max_new: usize, ngram: NoRepeatNgram) -> ParsedRequest {
     ParsedRequest {
         ids,
-        max_new,
+        max_new: Some(max_new),
         temp: 0.0,
         top_k: 0,
         top_p: 1.0,
