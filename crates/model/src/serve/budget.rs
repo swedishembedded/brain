@@ -34,6 +34,12 @@ const DECAY: f64 = 0.95;
 /// say how long a step takes, not how it grows with its rows.
 const MIN_SPREAD_ROWS: f64 = 8.0;
 
+/// How much longer than the minimum slice's own iteration an iteration may be made when the latency target is
+/// out of reach even for that slice. A forward whose cost is mostly fixed (the weights read once, the host
+/// recording its launches) grows slowly with its rows, so the target alone would pin the prompt part to its
+/// minimum and pay that fixed cost for the least possible work; this much extra time buys many more rows.
+const UNREACHABLE_TARGET_STRETCH: f64 = 1.25;
+
 /// Seconds an iteration of `rows` rows takes: `fixed + per_row * rows`, fitted by exponentially decayed least
 /// squares over the iterations observed.
 #[derive(Clone, Copy, Debug, Default)]
@@ -98,6 +104,8 @@ impl StepCost {
         if per_row <= 0.0 {
             return room;
         }
+        // A target the minimum slice already overruns is replaced by a little more than that slice takes.
+        let target = target.max(UNREACHABLE_TARGET_STRETCH * (fixed + per_row * (decode_rows + floor) as f64));
         let rows_under_target = ((target - fixed) / per_row).max(0.0) as usize;
         rows_under_target.saturating_sub(decode_rows).clamp(floor, room)
     }
@@ -135,8 +143,20 @@ mod tests {
 
     #[test]
     fn a_prompt_always_advances_however_busy_decode_is() {
+        // Every row costs a millisecond: the minimum slice alone overruns the target, and 25 % more than it takes
+        // buys the 16 rows beyond the minimum.
         let c = trained(0.040, 0.001);
-        assert_eq!(c.prompt_rows(LIMITS, 64, Some(0.045)), LIMITS.min_prompt_rows);
+        let rows = c.prompt_rows(LIMITS, 64, Some(0.045));
+        assert!((LIMITS.min_prompt_rows..=LIMITS.min_prompt_rows + 70).contains(&rows), "{rows}");
+    }
+
+    #[test]
+    fn a_target_out_of_reach_is_stretched_by_a_quarter_of_the_minimum_slice() {
+        // 90 ms fixed, 0.1 ms a row: the 45 ms target is out of reach; 64 decode and 64 prompt rows take 102.8 ms,
+        // a quarter more is 128.5 ms, which holds (128.5 - 90) / 0.1 - 64 = 321 prompt rows.
+        let c = trained(0.090, 0.0001);
+        let rows = c.prompt_rows(MixedLimits { max_rows: 2048, min_prompt_rows: 64 }, 64, Some(0.045));
+        assert!((319..=322).contains(&rows), "{rows}");
     }
 
     #[test]

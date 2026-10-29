@@ -44,7 +44,7 @@ const MIN_CACHED_TOKENS: usize = 64;
 /// Prompt rows a mixed iteration always carries when a prompt waits (`MixedLimits::min_prompt_rows`): a round wide
 /// enough to run as a tensor-core GEMM, so a prompt behind a busy decode batch still advances at a useful rate.
 // perf-number: a 128-row round is the smallest the prefill GEMM kernels serve at tile width
-const MIN_MIXED_PROMPT_ROWS: usize = 128;
+const MIN_MIXED_PROMPT_ROWS: usize = 512;
 
 /// Branch-point hints held for prompts not yet started; the oldest goes first (a hint whose prompt was cancelled
 /// before it started is never taken).
