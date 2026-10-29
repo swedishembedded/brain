@@ -1263,6 +1263,7 @@ mod tests {
         }
         let slots = ["slot", "other_slot", crate::native_upgrade::PREFILL_SLOT];
         let names = ["a", "b", "c", "d"];
+        // seed: a fixed stream so a failing table reproduces
         let mut rng = data::rng::Lcg::new(21);
         let pick = |rng: &mut data::rng::Lcg, n: usize| ((rng.unit() * n as f32) as usize).min(n - 1);
         for _ in 0..60 {

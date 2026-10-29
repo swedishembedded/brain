@@ -646,6 +646,7 @@ mod tests {
     #[test]
     fn utf8_decoder_matches_decode_for_any_chunking() {
         let t = byte_tok();
+        // seed: a fixed stream so a failing id sequence reproduces
         let mut rng = crate::rng::Lcg::new(11);
         for _ in 0..500 {
             let n = (rng.unit() * 40.0) as usize;

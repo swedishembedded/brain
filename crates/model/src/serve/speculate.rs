@@ -700,6 +700,7 @@ mod tests {
             }
         }
         let table = BlockTable::new();
+        // seed: a fixed stream so a failing context reproduces
         let mut rng = data::rng::Lcg::new(9);
         for n in 1..=4 {
             let mut drafter = NgramDrafter::new(n);

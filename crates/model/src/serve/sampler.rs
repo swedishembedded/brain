@@ -778,6 +778,7 @@ mod tests {
     /// incremental result is the reference's, token for token and logit for logit.
     #[test]
     fn incremental_processors_equal_the_whole_context_reference() {
+        // seed: a fixed stream so a failing context reproduces
         let mut rng = data::rng::Lcg::new(3);
         let variants = [
             SampleParams { repetition_penalty: 1.3, ..params() },

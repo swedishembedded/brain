@@ -1013,6 +1013,7 @@ mod tests {
         }
         let stops = vec!["END".to_string(), "xyz".to_string(), "é!".to_string()];
         let alphabet = ["a", "b", "E", "N", "D", "x", "y", "z", "é", "!", " ", "€"];
+        // seed: a fixed stream so a failing text reproduces
         let mut rng = data::rng::Lcg::new(5);
         for _ in 0..300 {
             let (mut printed, mut full) = (String::new(), String::new());

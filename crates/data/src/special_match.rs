@@ -130,6 +130,7 @@ mod tests {
         specials.sort_by_key(|s| std::cmp::Reverse(s.0.len()));
         let m = SpecialMatcher::new(specials.iter().map(|(c, i)| (c.as_str(), *i)));
         let alphabet = ["<", "|", "im", "_", "start", "end", ">", "é", "[", "M", "ASK", "]", "a", "b", "c", " ", "ü"];
+        // seed: a fixed stream so a failing text reproduces
         let mut rng = crate::rng::Lcg::new(7);
         for _ in 0..2000 {
             let n = (rng.unit() * 20.0) as usize;

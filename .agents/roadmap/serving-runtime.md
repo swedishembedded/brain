@@ -110,6 +110,16 @@ measurement (16-256), not fixed globally.
 
 ## Done
 
+- 2026-10-29 (host-path complexity audit; every serving-path scan checked against the source, host CPU timings): streaming
+  detokenisation feeds each token once (`Utf8Decoder`; G=16000 4.61 s -> 1.0 ms per generation, shared by `SeqState`,
+  deepseekvl and nemotronasr); sampler penalties and DRY fold in each accepted token (`ProcessorState`; 32k context 582 -> 2 us
+  per token); special tokens cut in one pass (`SpecialMatcher`; 2000 specials on 162 KB 21 ms -> 33 us); the XML tool-call scanner
+  resumes its marker search (100 KB value 163 -> 3 ms); `Scheduler::streams` replaces a find per open request (B=1024 116 -> 18
+  us), admission validates a prompt once, `ensure_decode_room` keeps a running total, the decode batch uses a mask; the n-gram
+  drafter keeps an incremental index; the step cache looks up by borrowed key; native candidate choice is indexed. Left for the
+  radix prefix index: `snapshot_prefix` peek/branch_point/take_row, `PrefixCache` per-block hashing and `evict_keeping`, shared-prefill LCP checks.
+  Still linear by design: `completion_of`/`cancel` (once per request), `ChatScanner` header parse (bounded by a name), `ngram_followers` (bounded by its window).
+
 - 2026-10-29 (13 precision admission, 14 dequantize-in-register linears; knowledge 376, 377): candidates declare the activation and
   weight forms they consume (`native_upgrade::Input`), `native_tune` admits a candidate within 8x the error of rounding those
   forms against the f64 reference of the stored representation (all int8 candidates and all bf16 ones pass), a dispatch hands each
