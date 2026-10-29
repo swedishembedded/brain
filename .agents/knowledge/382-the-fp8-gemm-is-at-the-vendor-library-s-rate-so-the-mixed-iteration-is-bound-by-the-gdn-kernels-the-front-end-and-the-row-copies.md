@@ -25,3 +25,11 @@ cuBLASLt with the 1x128 activation / 128x128 weight scale modes, timed inside a 
 
 Consequence: the next wins are a multi-segment GDN prefill (one launch for all pieces of a round: grid over segments x heads with the
 sequence boundaries as data), the fused e4m3 front end, and row views for the 1227 `concat_split` copies; the GEMM is not the bound.
+
+Single-stream decode (same note, tried and not kept): the decode graph is 18.8 ms a token, 12.3 ms of it `matmul_fp8_dq_stream_r4` (390 launches, ~2.1 TB/s;
+ncu at the 17408-wide shapes: 768 blocks of 128 threads, 74 KB dynamic smem so 3 blocks (12 warps) an SM, 1.94 waves, DRAM 1.62 TB/s under ncu).
+Four candidates sized for a decode step of at most 8 rows (x tile of 8 rows instead of 64, so a stage costs 10 KB not 24 KB: `m8r1s6`, `m8r2s6`,
+`m8r4s6` with six stages, `m8r2s4`) were registered and tuned on the real card: none beat `r4` on any class (rows 1-8, K 5120 and 17408: `r4`
+0.59-0.66 of the read roof on the large classes, `m8r4s6` 0.54-0.68, the others 0.3-0.5), and the client c = 1 rate went 50.1 -> 48.3 tok/s (noise
+to slightly worse). The stream is not limited by shared memory or ring depth. Per-kernel durations inside the decode graph are inflated by
+programmatic dependent launch (a kernel counts from its early start, 24.1 ms of kernel time against 17.6 ms of union busy time).
