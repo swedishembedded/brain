@@ -326,7 +326,7 @@ mod native_tune;
 /// Native kernels a model asks for by name - see [`native_upgrade::Fused`].
 #[cfg(not(target_arch = "wasm32"))]
 pub use native_upgrade::{native_kernels_enabled, set_native_kernels, Fused};
-pub use native_tune::{clear_forced as clear_forced_candidates, force_candidate, offered as native_candidates_offered, report as native_selection_report, report_for_default_device as native_selection_report_for_default_device, set_autotune as set_native_autotune, unknown_forced as unknown_forced_candidates};
+pub use native_tune::{check_shape as native_check_shape, clear_forced as clear_forced_candidates, force_candidate, offered as native_candidates_offered, report as native_selection_report, report_for_default_device as native_selection_report_for_default_device, set_autotune as set_native_autotune, unknown_forced as unknown_forced_candidates, Verdict as NativeVerdict};
 
 /// The `OperatorProvider` ABI, registry, WGSL reference provider and
 /// cross-provider parity harness (`kernel-performance.md` Phase 8, M8.3).
@@ -2616,7 +2616,7 @@ mod native_facade {
         /// of [`Gpu::physical_kernel_names`], for tests and diagnostics to
         /// assert the redirect really fired.
         pub fn native_kernel_for(&self, kind: usize, params: &[u32]) -> Option<&'static str> {
-            crate::native_upgrade::serving(&self.native_upgrades, kind, params, self.tuned_table(), None).map(|a| a.kernel)
+            crate::native_upgrade::serving(&self.native_upgrades, kind, params, self.tuned_table(), None, Some(crate::native_upgrade::ActFormat::Int8Group32)).map(|a| a.kernel)
         }
 
         /// The step for a prefill-sized int8 GEMM (`params` is `matmul_i8_dyn`'s `[m, k/4, n]`, `bufs` its five
@@ -2625,7 +2625,50 @@ mod native_facade {
         /// handle's model does not register `matmul_i8_dyn`, the shape is outside every candidate, or a binding is
         /// off every candidate's alignment): the caller keeps the WGSL tier.
         pub fn prefill_gemm_step(&self, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32]) -> Option<(Step, &'static str)> {
-            let a = crate::native_upgrade::serving(&self.native_upgrades, crate::native_upgrade::PREFILL_KIND, params, self.tuned_table(), Some(offsets))?;
+            let a = crate::native_upgrade::serving(&self.native_upgrades, crate::native_upgrade::PREFILL_KIND, params, self.tuned_table(), Some(offsets), Some(crate::native_upgrade::ActFormat::Int8Group32))?;
+            let step = self.be().step_native_sliced(a.id, bufs, offsets, params, (a.blocks)(params, a.tile))?;
+            Some((step, a.reported))
+        }
+
+        /// The slot of the int8 linear candidate set that serves `m` rows on this handle: the decode GEMV's pipeline
+        /// slot up to the decode regime, the prefill slot past it.
+        pub(crate) fn int8_linear_kind(&self, m: u32) -> Option<usize> {
+            if m <= backend_api::select::DECODE_REGIME_MAX_ROWS {
+                self.kernel_index("matmul_i8_gemv")
+            } else {
+                Some(crate::native_upgrade::PREFILL_KIND)
+            }
+        }
+
+        /// Whether the candidate this device's tuned table names for an int8-weight linear (`params` = `[m, k/4, n]`)
+        /// dequantises the weights in registers against bf16 rows: the caller then hands
+        /// [`Self::int8_dequant_step`] the bf16 rows and need not quantise the activations for this product. `false`
+        /// when the packed int8 form serves (the default, every device without a bf16 candidate, an untuned device).
+        pub fn int8_linear_bf16_input(&self, params: &[u32]) -> bool {
+            let Some(kind) = self.int8_linear_kind(params[0]) else { return false };
+            crate::native_upgrade::serving(&self.native_upgrades, kind, params, self.tuned_table(), None, None).is_some_and(|a| a.input.act == crate::native_upgrade::ActFormat::Bf16)
+        }
+
+        /// Whether no int8-weight linear of `m` rows and a `kg * 4`-wide input reads the packed int8 activations on
+        /// this device: every shape class of that row bucket and width names a candidate that reads bf16 rows
+        /// (and the tuned table exists, so an untuned device keeps quantising). The caller then skips the
+        /// activation quantisation, and makes it on demand if a product still needs it.
+        pub fn int8_packed_unneeded(&self, m: u32, kg: u32) -> bool {
+            let Some(kind) = self.int8_linear_kind(m) else { return false };
+            let Some(tuned) = self.tuned_table() else { return false };
+            let slot = if kind == crate::native_upgrade::PREFILL_KIND { crate::native_upgrade::PREFILL_SLOT } else { "matmul_i8_gemv" };
+            let bf16 = |name: &str| self.native_upgrades.iter().any(|a| a.slow == kind && a.kernel == name && a.input.act == crate::native_upgrade::ActFormat::Bf16);
+            tuned.all_classes_accept(slot, m, kg, &bf16)
+        }
+
+        /// The step for an int8-weight linear on the dequantize-in-register candidate the tuned table names for the
+        /// shape class: `bufs` are the bf16 activation rows, the int8 weight codes, the weight scales and the output
+        /// (`offsets` their windows), `params` is `[m, k/4, n]`. With the name the backend times it under. `None`
+        /// when no such candidate serves the dispatch (a binding off every candidate's alignment, a shape outside
+        /// them): the caller keeps the packed form.
+        pub fn int8_dequant_step(&self, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32]) -> Option<(Step, &'static str)> {
+            let kind = self.int8_linear_kind(params[0])?;
+            let a = crate::native_upgrade::serving(&self.native_upgrades, kind, params, self.tuned_table(), Some(offsets), Some(crate::native_upgrade::ActFormat::Bf16))?;
             let step = self.be().step_native_sliced(a.id, bufs, offsets, params, (a.blocks)(params, a.tile))?;
             Some((step, a.reported))
         }

@@ -177,6 +177,23 @@ pub struct BatchedProduct {
     pub alpha: f32,
 }
 
+/// Round `count` fp32 values of `x` to a new bf16 buffer (round to nearest even, two to a word) and push the cast step.
+/// This is the activation operand of every bf16 tensor-core product - the vendor library's and the int8 weights'
+/// dequantize-in-register candidates - and does not depend on the library being active. `None` when the device
+/// declines the cast kernel or the count / window is not one it takes.
+pub fn cast_bf16(gpu: &Gpu, steps: &mut Vec<Step>, x: &Operand, count: u64) -> Option<DeviceBuffer> {
+    if count == 0 || !count.is_multiple_of(ALIGN_ELEMS as u64) || count * 2 > MAX_SCRATCH_BYTES || !x.range.0.is_multiple_of(4) {
+        return None;
+    }
+    let kernel = kernels_cuda::get("cast_f32_bf16")?;
+    let id = gpu.native_kernel(kernel, CAST_BINDINGS)?;
+    // The cast writes all `count` values (an even multiple of ALIGN_ELEMS), so the scratch is not cleared.
+    let scratch = gpu.storage_uninit(count.div_ceil(2));
+    let step = gpu.step_native_sliced(id, &[x.buf, &scratch], &[(x.range.0, count), (0, 0)], &[count as u32], kernel.blocks_for(1, count as u32))?;
+    steps.push(step);
+    Some(scratch)
+}
+
 impl LibraryGemmProvider {
     /// The provider for `gpu` under `precision`, reading the backend's own
     /// availability answer. Logs the decision once per process.
@@ -428,16 +445,10 @@ impl LibraryGemmProvider {
     /// Round `count` fp32 values of `x` to a new bf16 buffer (the cast step is
     /// pushed), for [`Self::forward_bf16`]. `None` when the device declines.
     pub fn cast_bf16(&self, gpu: &Gpu, steps: &mut Vec<Step>, x: &Operand, count: u64) -> Option<DeviceBuffer> {
-        if !self.is_active() || count == 0 || !count.is_multiple_of(ALIGN_ELEMS as u64) || count * 2 > MAX_SCRATCH_BYTES || !x.range.0.is_multiple_of(4) {
+        if !self.is_active() {
             return None;
         }
-        let kernel = kernels_cuda::get("cast_f32_bf16")?;
-        let id = gpu.native_kernel(kernel, CAST_BINDINGS)?;
-        // The cast writes all `count` values (an even multiple of ALIGN_ELEMS), so the scratch is not cleared.
-        let scratch = gpu.storage_uninit(count.div_ceil(2));
-        let step = gpu.step_native_sliced(id, &[x.buf, &scratch], &[(x.range.0, count), (0, 0)], &[count as u32], kernel.blocks_for(1, count as u32))?;
-        steps.push(step);
-        Some(scratch)
+        cast_bf16(gpu, steps, x, count)
     }
 
     /// `h = silu(gate) * up` and its bf16 rounding (the operand [`Self::forward_bf16`] reads) in one pass over

@@ -1213,7 +1213,12 @@ pub struct Act {
     /// via [`Ops::act_f32`], that no weight reading this activation is
     /// quantized - which is what makes the two packing dispatches skippable
     /// rather than merely unused.
-    quant: Option<I8Scratch>,
+    quant: std::cell::RefCell<Option<Arc<I8Scratch>>>,
+    /// Whether [`Ops::act`] left `quant` unmade because this device's tuned table has every linear of this width and
+    /// row count read bf16 rows ([`Gpu::int8_packed_unneeded`]): a product that does need the packed form (a weight
+    /// window or alignment no bf16 candidate serves) makes it then, at its own position in the step order
+    /// ([`Ops::packed`]).
+    quant_deferred: bool,
     /// `crate::kquant`'s `S[m,g] = Σ_{k in g} xq[m,k]` affine correction
     /// prepass (M9's `quant_group_sum.wgsl`), `[xr0+rows, k/GROUP]` f32. Made
     /// by the first [`Weight::KQuant`] product that reads these rows and
@@ -1434,6 +1439,39 @@ impl Ops {
         ok
     }
 
+    /// An int8-weight product on the dequantize-in-register candidate this device's tuned table names for its shape
+    /// class, if it names one and the dispatch can run it: the weight codes are multiplied by their group scale in
+    /// registers and the activations are the bf16 rows of `act` (rounded once, shared by every product that reads
+    /// them), so no activation quantisation is read at all. `false` leaves the packed int8 form to the caller.
+    /// Only whole matrices of group-32 weights.
+    fn dequant_forward(&self, s: &mut Vec<Step>, w: &Weight, act: &Act, y: &DeviceBuffer, yoff: u64) -> bool {
+        let Weight::I8 { w: wb, s: sw, n, k } = w else { return false };
+        let (m, n, k) = (act.m, *n, *k);
+        let params = [m, k / 4, n];
+        if w.group() != 32 || !self.gpu.int8_linear_bf16_input(&params) {
+            return false;
+        }
+        let mut prep = Vec::new();
+        let shared = act.bf16.borrow().clone();
+        let (xb, fresh) = match shared {
+            Some(xb) => (xb, false),
+            None => {
+                let x_op = library::Operand { buf: &act.x, range: (act.xr0 as u64 * k as u64, m as u64 * k as u64) };
+                match library::cast_bf16(&self.gpu, &mut prep, &x_op, m as u64 * k as u64) {
+                    Some(xb) => (xb, true),
+                    None => return false,
+                }
+            }
+        };
+        let Some((step, _)) = self.gpu.int8_dequant_step(&[&xb, wb, sw, y], &[(0, 0), (0, 0), (0, 0), (yoff, m as u64 * n as u64)], &params) else { return false };
+        s.append(&mut prep);
+        s.push(step);
+        if fresh {
+            *act.bf16.borrow_mut() = Some(xb);
+        }
+        true
+    }
+
     /// The bf16 weight rows `rows` of `w` as the library path reads them: the buffer and the range to bind.
     /// `None` for a tier or a device the library path does not serve (only bf16 storage is read in place).
     fn library_weight(&self, w: &Weight, rows: (u32, u32)) -> Option<(DeviceBuffer, (u64, u64))> {
@@ -1527,10 +1565,35 @@ impl Ops {
         if !k.is_multiple_of(crate::int8::GROUP as u32) {
             return self.act_f32(x, xr0, rows, k);
         }
+        // The packed form is made only where some linear of this width reads it: when this device's tuned table has
+        // every int8 linear of these rows and this width on a candidate that reads bf16 rows, the two quantisation
+        // dispatches (and the scratch) are skipped and a stray product that does need them makes them then.
+        let deferred = self.gpu.int8_packed_unneeded(rows, k / 4);
+        let quant = (!deferred).then(|| self.quantize_rows(s, x, xr0, rows, k));
+        Act { x: x.clone(), xr0, m: rows, k, quant: std::cell::RefCell::new(quant), quant_deferred: deferred, xgs: Default::default(), bf16: Default::default() }
+    }
+
+    /// The packed int8 form of rows `[xr0, xr0 + rows)` of `x`: scratch sized for exactly `[0, xr0 + rows)` and the
+    /// `max_abs_row` / `quant_pack` dispatches that fill it.
+    fn quantize_rows(&self, s: &mut Vec<Step>, x: &DeviceBuffer, xr0: u32, rows: u32, k: u32) -> Arc<I8Scratch> {
         let total = (xr0 + rows) as u64;
         let quant = I8Scratch::new(&self.gpu, total, total, &[k]);
         quant.quant_rows(&self.gpu, [self.idx[kname::MAX_ABS_ROW], self.idx[kname::QUANT_PACK]], s, x, xr0, xr0 + rows, k);
-        Act { x: x.clone(), xr0, m: rows, k, quant: Some(quant), xgs: Default::default(), bf16: Default::default() }
+        Arc::new(quant)
+    }
+
+    /// The packed int8 form of `act` for a product that reads it, made now when [`Ops::act`] deferred it. `None`
+    /// for an activation built by [`Ops::act_f32`], which promises no quantised weight reads it.
+    fn packed(&self, s: &mut Vec<Step>, act: &Act) -> Option<Arc<I8Scratch>> {
+        if let Some(q) = act.quant.borrow().as_ref() {
+            return Some(q.clone());
+        }
+        if !act.quant_deferred {
+            return None;
+        }
+        let q = self.quantize_rows(s, &act.x, act.xr0, act.m, act.k);
+        *act.quant.borrow_mut() = Some(q.clone());
+        Some(q)
     }
 
     /// The [`Act`] for rows `[0, rows)` of `x` (`[rows, k]`) that something
@@ -1542,7 +1605,7 @@ impl Ops {
     pub fn act_prequantized(&self, x: &DeviceBuffer, sx: &DeviceBuffer, xq: &DeviceBuffer, rows: u32, k: u32) -> Act {
         assert!(rows > 0, "Ops::act_prequantized: rows must be > 0 (got 0)");
         assert_eq!(k % 4, 0, "int8 K must be a multiple of 4 (got {k})");
-        Act { x: x.clone(), xr0: 0, m: rows, k, quant: Some(I8Scratch::from_parts(sx.clone(), k, xq.clone())), xgs: Default::default(), bf16: Default::default() }
+        Act { x: x.clone(), xr0: 0, m: rows, k, quant: std::cell::RefCell::new(Some(Arc::new(I8Scratch::from_parts(sx.clone(), k, xq.clone())))), quant_deferred: false, xgs: Default::default(), bf16: Default::default() }
     }
 
     /// [`Ops::act`], plus the affine K-quant group-sum prepass
@@ -1578,7 +1641,7 @@ impl Ops {
             xr0 + rows,
             k,
         ));
-        Act { x: x.clone(), xr0, m: rows, k, quant: Some(quant), xgs: std::cell::RefCell::new(Some(xgs)), bf16: Default::default() }
+        Act { x: x.clone(), xr0, m: rows, k, quant: std::cell::RefCell::new(Some(Arc::new(quant))), quant_deferred: false, xgs: std::cell::RefCell::new(Some(xgs)), bf16: Default::default() }
     }
 
     /// [`Ops::act`] for a caller whose weights are ALL fp32-family, so the
@@ -1597,7 +1660,7 @@ impl Ops {
     /// whatever a missing buffer would have held.
     pub fn act_f32(&self, x: &DeviceBuffer, xr0: u32, rows: u32, k: u32) -> Act {
         assert!(rows > 0, "Ops::act_f32: rows must be > 0 (got 0)");
-        Act { x: x.clone(), xr0, m: rows, k, quant: None, xgs: Default::default(), bf16: Default::default() }
+        Act { x: x.clone(), xr0, m: rows, k, quant: Default::default(), quant_deferred: false, xgs: Default::default(), bf16: Default::default() }
     }
 
     /// [`Self::act_f32`] for all `rows` rows of `x` whose bf16 rounding a fused kernel has already produced
@@ -1605,7 +1668,7 @@ impl Ops {
     /// read this activation take it instead of casting it again.
     pub fn act_f32_with_bf16(&self, x: &DeviceBuffer, rows: u32, k: u32, bf16: DeviceBuffer) -> Act {
         assert!(rows > 0, "Ops::act_f32_with_bf16: rows must be > 0 (got 0)");
-        Act { x: x.clone(), xr0: 0, m: rows, k, quant: None, xgs: Default::default(), bf16: std::cell::RefCell::new(Some(bf16)) }
+        Act { x: x.clone(), xr0: 0, m: rows, k, quant: Default::default(), quant_deferred: false, xgs: Default::default(), bf16: std::cell::RefCell::new(Some(bf16)) }
     }
 
     /// The f32 rows of an activation built by [`Self::act_f32`]: the buffer, its
@@ -1824,7 +1887,10 @@ impl Ops {
                     Dtype::I8 => kg as u32,
                     _ => k,
                 };
-                let quant = act.quant.as_ref().expect(
+                if self.dequant_forward(s, w, act, y, yoff) {
+                    return;
+                }
+                let quant = self.packed(s, act).expect(
                     "Ops::matmul: this activation was built with Ops::act_f32, which promises no \
                      quantized weight reads it - build it with Ops::act instead",
                 );
@@ -1880,7 +1946,7 @@ impl Ops {
                 // follow (see `crate::int8::quant_rows_steps`'s own doc
                 // comment on `xgs`'s offset units).
                 let go = crate::int8::act_scale_range(act.xr0, m, k);
-                let quant = act.quant.as_ref().expect(
+                let quant = self.packed(s, act).expect(
                     "Ops::matmul: this activation was built with Ops::act_f32, which promises no \
                      quantized weight reads it - build it with Ops::act or Ops::act_kq instead",
                 );
@@ -2352,7 +2418,7 @@ impl Ops {
         if matches!(group[0].0, Weight::BF16 { .. }) {
             return self.fused_bf16_group(group, act);
         }
-        let quant = act.quant.as_ref()?;
+        let quant = act.quant.borrow().clone()?;
         let (m, k) = (act.m, act.k);
         // Every weight of the group must be the same tier, run as that tier's
         // decode GEMV; the multi kernel takes the single GEMV's own `k` word.
@@ -2365,6 +2431,10 @@ impl Ops {
         for (w, _) in group {
             let (Weight::I8 { n, k: wk, .. } | Weight::Q4 { n, k: wk, .. }) = w else { return None };
             if *wk != k || w.group() != 32 || self.matmul_kernel(w, m) != gemv {
+                return None;
+            }
+            // A member the tuned table puts on a dequantize-in-register candidate runs as its own product.
+            if matches!(w, Weight::I8 { .. }) && self.gpu.int8_linear_bf16_input(&[m, k / 4, *n]) {
                 return None;
             }
             params.push(*n);

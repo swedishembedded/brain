@@ -16,7 +16,7 @@
 //!
 //! Usage: `qwen35_gguf_logit_check <Q8_0.gguf> <text file> [--prompts 4] [--prompt-tokens 4000] [--steps 24]
 //!        [--device gpu1] [--backend cuda] [--kv int8] [--dump DIR] [--dry-run] [--raw] [--assert-within-floor M]
-//!        [--batched N] [--batched-only]`
+//!        [--batched N] [--batched-only] [--kernel SLOT=CANDIDATE]...`
 //!
 //! The prompt is the served chat rendering (user turn, then the assistant turn with an empty think block, as the
 //! server renders `enable_thinking: false`), and the continuation is the greedy decode-tape trace of
@@ -138,6 +138,17 @@ fn main() {
     };
     let (prompts, ptoks, steps) = (num("--prompts", 4), num("--prompt-tokens", 4000), num("--steps", 24));
     let raw = a.iter().any(|x| x == "--raw");
+    // `--kernel <slot>=<candidate>` (repeatable) pins a kernel slot to one candidate, as `brain --kernel` does: the
+    // model-level quality check of a candidate the autotuner would not choose on this device.
+    for (i, _) in a.iter().enumerate().filter(|(_, x)| *x == "--kernel") {
+        match a.get(i + 1).and_then(|v| v.split_once('=')).filter(|(s, c)| !s.is_empty() && !c.is_empty()) {
+            Some((slot, candidate)) => gpu_core::force_candidate(slot, candidate),
+            None => {
+                eprintln!("--kernel takes <slot>=<candidate>, e.g. --kernel matmul_i8_prefill=matmul_i8_dq_stream_q2");
+                std::process::exit(2);
+            }
+        }
+    }
     if a.iter().any(|x| x == "--dry-run") {
         dry_run(&path, &std::fs::read_to_string(&text_path).expect("read the text file"), prompts, ptoks, raw);
         return;

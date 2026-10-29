@@ -21,9 +21,12 @@
 //!    candidates, a bounded grid of synthetic problems (row bucket x `K` class x
 //!    weight-bytes class, the shape classes a decode step falls in) is built
 //!    on the device;
-//! 2. every candidate that serves a problem is run on it once and its output is
-//!    compared with an f64 oracle over a sample of outputs; a candidate that
-//!    disagrees is rejected for that class, never chosen;
+//! 2. every candidate that serves a problem is run on it once, handed the
+//!    activation form it declares (packed int8 or bf16 rows), and its output is
+//!    compared with the f64 reference of the stored representation over a sample
+//!    of outputs; a candidate whose error exceeds [`ALPHA`] times the error of
+//!    rounding its own inputs to their storage resolution is rejected for that
+//!    class, never chosen (see [`admit`]);
 //! 3. the surviving candidates are timed with the backend's per-launch device
 //!    events, the weights cycled past the L2 so the stream is DRAM-bound as in a
 //!    real decode step, and the fastest wins (an earlier candidate keeps a tie
@@ -40,6 +43,7 @@
 //! default (first) candidate; [`report`] lists what was chosen and the ops
 //! under [`GAP_THRESHOLD`] of their roofline.
 
+use crate::native_upgrade::{ActFormat, Input, WeightRead};
 use crate::Gpu;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -255,7 +259,7 @@ fn measure_int8_roof(gpu: &Gpu) -> Option<f32> {
     Some((ops / (ms * 1e-3) / 1e12) as f32)
 }
 
-/// The slots whose candidates this module knows how to build a synthetic problem and an oracle for: the int8
+/// The slots whose candidates this module knows how to build a synthetic problem and a reference for: the int8
 /// decode linear and the prefill-sized int8 GEMM. A slot with several rows that is not listed (the K-quant narrow
 /// and wide blocks) keeps its row-count rule until it has a problem generator here.
 const TUNABLE_SLOTS: [&str; 2] = ["matmul_i8_gemv", crate::native_upgrade::PREFILL_SLOT];
@@ -334,7 +338,7 @@ impl Class {
 pub enum Verdict {
     /// Timed: microseconds per launch, weight bandwidth in GB/s, fraction of the measured roofline bound.
     Timed { us: f64, gbs: f64, frac: Option<f64> },
-    /// Disagreed with the oracle; never chosen.
+    /// Refused by the admission rule; never chosen.
     Rejected(String),
 }
 
@@ -379,8 +383,10 @@ pub struct Tuned {
 }
 
 impl Tuned {
-    /// The candidate the table (or a forced override) names for a dispatch of `slot` with caller `params`.
-    pub(crate) fn choice(&self, slot: &str, params: &[u32]) -> Option<String> {
+    /// The candidate the table (or a forced override) names for a dispatch of `slot` with caller `params`, among the
+    /// candidates `accepts` (a caller that can supply only one activation form asks for the best candidate reading
+    /// it; a class that was never timed names its fill-in choice when that one is accepted).
+    pub(crate) fn choice(&self, slot: &str, params: &[u32], accepts: &dyn Fn(&str) -> bool) -> Option<String> {
         if let Some((_, k)) = FORCED.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(s, _)| s == slot) {
             return Some(k.clone());
         }
@@ -388,7 +394,39 @@ impl Tuned {
             [m, kg, n, ..] => Class::of(grid(slot), *m, *kg, *n)?,
             _ => return None,
         };
-        self.entries.iter().find(|e| e.slot == slot && e.class == class).map(|e| e.best.clone())
+        let e = self.entries.iter().find(|e| e.slot == slot && e.class == class)?;
+        if accepts(&e.best) {
+            return Some(e.best.clone());
+        }
+        // The overall winner reads a form the caller cannot supply: the fastest accepted candidate of the class
+        // (an earlier one keeps a near tie, as when the winner was chosen).
+        let mut best: Option<(&str, f64)> = None;
+        for (name, v) in &e.results {
+            if let Verdict::Timed { us, .. } = v {
+                if accepts(name) && best.is_none_or(|(_, b)| *us < b * TIE) {
+                    best = Some((name, *us));
+                }
+            }
+        }
+        best.map(|(n, _)| n.to_owned())
+    }
+}
+
+impl Tuned {
+    /// Whether every shape class of `slot` with the row bucket of `m` rows and the `K` class of `kg` names a
+    /// candidate `accepts`. A class never measured counts as not accepted, so an untuned slot answers `false`.
+    pub(crate) fn all_classes_accept(&self, slot: &str, m: u32, kg: u32, accepts: &dyn Fn(&str) -> bool) -> bool {
+        let g = grid(slot);
+        // Any `n` of the bytes classes: the row bucket and the `K` class are what the caller knows.
+        let Some(probe) = Class::of(g, m, kg, 1) else { return false };
+        let mut any = false;
+        for e in self.entries.iter().filter(|e| e.slot == slot && e.class.rows == probe.rows && e.class.k == probe.k) {
+            if !accepts(&e.best) {
+                return false;
+            }
+            any = true;
+        }
+        any
     }
 }
 
@@ -405,7 +443,7 @@ fn mix(i: u64) -> u64 {
 }
 
 /// Pseudo-random int8 words: a block of random words repeated, so filling a hundred-megabyte weight tensor costs
-/// a copy, not a hash per word. The oracle reads the same array, so the check is exact regardless of the pattern.
+/// a copy, not a hash per word. The reference reads the same array, so the check is exact regardless of the pattern.
 fn packed_i8(words: usize, salt: u64) -> Vec<u32> {
     const BLOCK: usize = 65_521;
     let block: Vec<u32> = (0..BLOCK.min(words)).map(|i| mix(salt << 40 | i as u64) as u32).collect();
@@ -420,7 +458,7 @@ fn byte(words: &[u32], idx: usize) -> i32 {
     i32::from((words[idx / 4] >> (8 * (idx % 4))) as u8 as i8)
 }
 
-/// Spread of the output positions checked against the oracle: first, last and interior rows, columns at tile edges.
+/// Spread of the output positions checked against the reference: first, last and interior rows, columns at tile edges.
 fn sample_positions(m: u32, n: u32) -> Vec<(u32, u32)> {
     let rows = [0, m / 2, m.saturating_sub(1)];
     let cols = [0, 1, 15, 16, 17, n / 3, n / 2, n.saturating_sub(17), n.saturating_sub(1)];
@@ -435,20 +473,169 @@ fn sample_positions(m: u32, n: u32) -> Vec<(u32, u32)> {
     out
 }
 
-/// The f64 oracle for `out[r, c]`: `sum_g (sw[c, g] * sx[r, g]) * sum_{k in g} xq[r, k] * wq[c, k]`.
-fn oracle(x: &[u32], w: &[u32], sx: &[f32], sw: &[f32], kg: u32, r: u32, c: u32) -> f64 {
-    let k = (kg * 4) as usize;
-    let groups = k / 32;
-    let mut total = 0.0f64;
-    for g in 0..groups {
-        let mut acc = 0i64;
-        for e in 0..32 {
-            let idx = g * 32 + e;
-            acc += i64::from(byte(x, r as usize * k + idx)) * i64::from(byte(w, c as usize * k + idx));
-        }
-        total += acc as f64 * (f64::from(sw[c as usize * groups + g]) * f64::from(sx[r as usize * groups + g]));
+/// `x` rounded to bf16 (round to nearest, ties to even), as `cast_f32_bf16` and the bf16 tensor-core operands do.
+fn round_bf16(x: f64) -> f64 {
+    let x = x as f32;
+    if !x.is_finite() {
+        return f64::from(x);
     }
-    total
+    let bits = x.to_bits();
+    let rounded = bits.wrapping_add(0x7FFF + ((bits >> 16) & 1)) & 0xFFFF_0000;
+    f64::from(f32::from_bits(rounded))
+}
+
+/// A synthetic activation matrix of one class and every form a candidate may consume it in. The fp32 rows are the
+/// activations "as produced"; the int8 group form is made from them exactly as `max_abs_row` and `quant_pack` do
+/// (`sx = max(amax, 1e-8) / 127`, `q = clamp(round(x / sx), -127, 127)`), the bf16 form as `cast_f32_bf16` does.
+struct Acts {
+    m: u32,
+    kg: u32,
+    x: Vec<f32>,
+    xq: Vec<u32>,
+    sx: Vec<f32>,
+    bf16: Vec<u32>,
+}
+
+impl Acts {
+    fn new(m: u32, kg: u32) -> Acts {
+        const BLOCK: usize = 65_521;
+        let k = (kg * 4) as usize;
+        let groups = k / 32;
+        // Triangular noise with a group-varying magnitude and an occasional outlier: the shape of a normalised
+        // activation row, and what makes the group quantisation step differ between groups.
+        let block: Vec<f32> = (0..BLOCK)
+            .map(|i| {
+                let u = |salt: u64| (mix(salt << 40 | i as u64) >> 40) as f32 / (1u64 << 24) as f32;
+                let v = u(5) + u(6) - 1.0;
+                if mix(7 << 40 | i as u64).is_multiple_of(97) { 8.0 * v } else { v }
+            })
+            .collect();
+        const MAGNITUDE: [f32; 8] = [0.25, 0.5, 1.0, 2.0, 0.75, 1.5, 0.35, 1.2];
+        let total = m as usize * k;
+        let x: Vec<f32> = (0..total).map(|i| block[(i + i / BLOCK) % BLOCK] * MAGNITUDE[(i / 32 + i / (32 * BLOCK)) % 8]).collect();
+        let mut sx = Vec::with_capacity(m as usize * groups);
+        let mut xq = vec![0u32; total / 4];
+        for (g, chunk) in x.as_chunks::<32>().0.iter().enumerate() {
+            let scale = chunk.iter().fold(0.0f32, |a, v| a.max(v.abs())).max(1e-8) / 127.0;
+            sx.push(scale);
+            for (e, v) in chunk.iter().enumerate() {
+                let q = (*v * (1.0 / scale)).round().clamp(-127.0, 127.0) as i32;
+                let idx = g * 32 + e;
+                xq[idx / 4] |= ((q & 0xff) as u32) << (8 * (idx % 4));
+            }
+        }
+        let bf16 = x.chunks(2).map(|p| (round_bf16(f64::from(p[0])) as f32).to_bits() >> 16 | (round_bf16(f64::from(p[1])) as f32).to_bits() & 0xFFFF_0000).collect();
+        Acts { m, kg, x, xq, sx, bf16 }
+    }
+
+    /// `x[r, idx]` as a consumer of `format` sees it (`None`: as produced).
+    fn value(&self, format: Option<ActFormat>, r: u32, idx: usize) -> f64 {
+        let k = (self.kg * 4) as usize;
+        let at = r as usize * k + idx;
+        match format {
+            None => f64::from(self.x[at]),
+            Some(ActFormat::Int8Group32) => f64::from(byte(&self.xq, at)) * f64::from(self.sx[r as usize * (k / 32) + idx / 32]),
+            Some(ActFormat::Bf16) => round_bf16(f64::from(self.x[at])),
+        }
+    }
+}
+
+/// The int8 weights of a class as stored: `n` rows of `kg` words of codes, one f32 scale per 32 codes.
+struct Stored<'a> {
+    w: &'a [u32],
+    sw: &'a [f32],
+    kg: u32,
+}
+
+impl Stored<'_> {
+    /// `w[c, idx]` as a consumer of `read` sees it (`None`: as stored, `code * scale`, exact in f64).
+    fn value(&self, read: Option<WeightRead>, c: u32, idx: usize) -> f64 {
+        let k = (self.kg * 4) as usize;
+        let stored = f64::from(byte(self.w, c as usize * k + idx)) * f64::from(self.sw[c as usize * (k / 32) + idx / 32]);
+        match read {
+            None | Some(WeightRead::Stored) => stored,
+            Some(WeightRead::Bf16) => round_bf16(stored),
+        }
+    }
+}
+
+/// `sum_k a[r, k] * w[c, k]` over the activations and weights as a consumer of the given forms sees them (`None`:
+/// as produced and as stored), in f64, and the sum of the absolute terms.
+fn dot(a: &Acts, w: &Stored, input: Option<Input>, r: u32, c: u32) -> (f64, f64) {
+    let (mut total, mut abs) = (0.0f64, 0.0f64);
+    for idx in 0..(a.kg * 4) as usize {
+        let term = a.value(input.map(|i| i.act), r, idx) * w.value(input.map(|i| i.weight), c, idx);
+        total += term;
+        abs += term.abs();
+    }
+    (total, abs)
+}
+
+/// The admission factor: a candidate is admitted while its error against the f64 reference of the stored
+/// representation is at most this many times the error of rounding its own inputs to their storage resolution.
+pub const ALPHA: f64 = 8.0;
+
+/// Unit roundoff of the fp32 accumulation every candidate sums in (2^-24). The accumulation floor of the bound.
+const F32_EPS: f64 = 1.0 / 16_777_216.0;
+
+/// The root-mean-square and the largest absolute error of a candidate (or of rounding its inputs) over the sampled
+/// outputs of one class.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Errors {
+    rms: f64,
+    max: f64,
+}
+
+impl Errors {
+    fn of(errors: &[f64]) -> Errors {
+        let rms = (errors.iter().map(|e| e * e).sum::<f64>() / errors.len().max(1) as f64).sqrt();
+        Errors { rms, max: errors.iter().fold(0.0f64, |a, e| a.max(*e)) }
+    }
+}
+
+/// The admission rule, on the errors of one class's sampled outputs.
+///
+/// Reference: the f64 dot product of the fp32 activations as produced and the weights as stored (`code * scale`, exact
+/// in f64) - what the linear means, independent of any candidate's arithmetic. A candidate cannot beat the resolution
+/// of the forms it consumes: an int8-activation kernel sees the activations rounded to int8 with a scale per 32, a
+/// bf16 kernel sees them and the dequantised weights rounded to bf16. So the error that form alone costs is measured
+/// directly: `input` is the f64 dot product of the inputs rounded to the candidate's formats ([`Input`]), and its
+/// difference to the reference is the candidate's resolution error, derived from the formats it declares and from
+/// nothing else. Beyond rounding its inputs a candidate only adds accumulation order and fp32 rounding, which are
+/// orders of magnitude smaller; a wrong kernel is orders of magnitude larger. The rule puts the line between at
+/// [`ALPHA`] times the input error (8: it admits both the int8 candidates, whose error is dominated by the activation
+/// step, and the bf16 ones, whose tensor-core arithmetic rounds the weight product once more than the f64 emulation
+/// does), floored at the fp32 accumulation error so that a candidate consuming its inputs without rounding (an fp32
+/// one) is held to an achievable bound rather than zero.
+///
+/// Both the root mean square and the largest error over the sampled outputs must pass: a bad tile edge or a single
+/// wrong row passes an rms bound and fails the maximum.
+///
+/// Returns `Ok` when `candidate` is within [`ALPHA`] times `input` (never under `floor`), otherwise the reason it is refused.
+fn admit(candidate: Errors, input: Errors, floor: Errors) -> Result<(), String> {
+    if candidate.rms.is_nan() || candidate.max.is_nan() {
+        return Err("non-finite output".into());
+    }
+    let bound = Errors { rms: ALPHA * input.rms.max(floor.rms), max: ALPHA * input.max.max(floor.max) };
+    if candidate.rms > bound.rms || candidate.max > bound.max {
+        return Err(format!(
+            "error rms {:.3e} max {:.3e} against {ALPHA}x the input rounding error (rms {:.3e} max {:.3e}) over the stored reference",
+            candidate.rms, candidate.max, bound.rms, bound.max
+        ));
+    }
+    Ok(())
+}
+
+/// The admission verdict of every candidate of `gpu`'s int8 linear sets that serves `params` (`[m, k/4, n]`), on a
+/// synthetic problem of exactly that shape: the check [`measure`] applies per class, for a shape of the caller's
+/// choosing (ragged edges, odd widths). A candidate is listed as `Timed` with NaN time when it passes. For tests.
+#[doc(hidden)]
+pub fn check_shape(gpu: &Gpu, params: [u32; 3]) -> Vec<(String, Verdict)> {
+    let [m, kg, n] = params;
+    let Some(kind) = gpu.int8_linear_kind(m) else { return Vec::new() };
+    let slot = if kind == crate::native_upgrade::PREFILL_KIND { crate::native_upgrade::PREFILL_SLOT } else { "matmul_i8_gemv" };
+    let cands: Vec<&crate::native_upgrade::Active> = crate::native_upgrade::candidates(gpu.native_rows(), kind, &params).collect();
+    time_class(gpu, grid(slot), &cands, (m, kg, n), &Acts::new(m, kg), &Roofs { gbs: None, floor_us: None, int8_tops: None }, false)
 }
 
 /// Tune every multi-candidate slot of `gpu` (once per device and build) and return the table, or `None` when this
@@ -497,7 +684,7 @@ fn device_key(gpu: &Gpu, slots: &[(usize, &'static str)]) -> String {
     sources.sort_unstable();
     sources.dedup();
     let srcs: Vec<&str> = sources.iter().filter_map(|n| kernels_cuda::get(n).map(|k| k.src)).collect();
-    let fp = fnv(&srcs) ^ fnv(&[env!("CARGO_PKG_VERSION"), &format!("{:?}", [&DECODE, &PREFILL].map(|g| (g.rows, g.k, g.bytes_bounds, g.n_reps, g.footprint_bytes, g.stream_max_rows)))]);
+    let fp = fnv(&srcs) ^ fnv(&[env!("CARGO_PKG_VERSION"), &format!("admission-{ALPHA}"), &format!("{:?}", [&DECODE, &PREFILL].map(|g| (g.rows, g.k, g.bytes_bounds, g.n_reps, g.footprint_bytes, g.stream_max_rows)))]);
     let slug: String = format!("{desc}-{}-{cc}", gpu.kind()).chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
     format!("{slug}-{fp:016x}")
 }
@@ -611,6 +798,9 @@ fn measure(gpu: &Gpu, slots: &[(usize, &'static str)], prior: Option<&Tuned>) ->
     let started = std::time::Instant::now();
     let mut entries = Vec::new();
     let mut served: HashMap<(&str, Class), Vec<&str>> = HashMap::new();
+    // The activations of the last class built: neighbouring classes (the bytes classes of one row bucket and `K`)
+    // time the same rows.
+    let mut acts: Option<Acts> = None;
     for &(kind, slot) in slots {
         let g = grid(slot);
         for class in Class::all(g) {
@@ -627,7 +817,12 @@ fn measure(gpu: &Gpu, slots: &[(usize, &'static str)], prior: Option<&Tuned>) ->
             }
             // Past the budget a class is left unmeasured (filled from its neighbours below) rather than delaying the
             // start further; the next start measures it.
-            let results = if started.elapsed() > BUDGET { Vec::new() } else { time_class(gpu, g, &cands, (m, kg, n), &Roofs { gbs: roof_gbs, floor_us, int8_tops }, timing) };
+            let results = if started.elapsed() > BUDGET { Vec::new() } else {
+                if !acts.as_ref().is_some_and(|a| a.m == m && a.kg == kg) {
+                    acts = Some(Acts::new(m, kg));
+                }
+                time_class(gpu, g, &cands, (m, kg, n), acts.as_ref().expect("built above"), &Roofs { gbs: roof_gbs, floor_us, int8_tops }, timing)
+            };
             let mut best: Option<(&str, f64)> = None;
             for (name, v) in &results {
                 if let Verdict::Timed { us, .. } = v {
@@ -668,20 +863,23 @@ impl Roofs {
     }
 }
 
-/// Run and time each candidate on one synthetic problem `(m, kg, n)` of grid `g`.
-fn time_class(gpu: &Gpu, g: &Grid, cands: &[&crate::native_upgrade::Active], (m, kg, n): (u32, u32, u32), roofs: &Roofs, timing: bool) -> Vec<(String, Verdict)> {
+/// Run and time each candidate on one synthetic problem `(m, kg, n)` of grid `g`, over the activations `acts`
+/// (`m` rows, `kg * 4` wide). A candidate is handed the activation form it declares ([`Input`]) and judged by the
+/// admission rule ([`admit`]) before it is timed.
+fn time_class(gpu: &Gpu, g: &Grid, cands: &[&crate::native_upgrade::Active], (m, kg, n): (u32, u32, u32), acts: &Acts, roofs: &Roofs, timing: bool) -> Vec<(String, Verdict)> {
+    debug_assert!(acts.m == m && acts.kg == kg);
     let k = kg * 4;
     let groups = (k / 32) as usize;
-    let x = packed_i8((m * kg) as usize, 1);
-    let sx = scales(m as usize * groups, 2);
     let w = packed_i8(n as usize * kg as usize, 3);
     let sw = scales(n as usize * groups, 4);
     let xq = gpu.storage(u64::from(m * kg));
     let sxb = gpu.storage((m as usize * groups) as u64);
-    gpu.write(&xq, &x);
-    gpu.write_f32(&sxb, &sx);
+    let xb = gpu.storage(u64::from(m) * u64::from(kg) * 2);
+    gpu.write(&xq, &acts.xq);
+    gpu.write_f32(&sxb, &acts.sx);
+    gpu.write(&xb, &acts.bf16);
     let wbytes = u64::from(n) * u64::from(kg) * 4 + u64::from(n) * groups as u64 * 4;
-    let copies = if !g.streams(m) { 1 } else { g.footprint_bytes.div_ceil(wbytes).clamp(1, 128) as usize };
+    let copies = if !timing || !g.streams(m) { 1 } else { g.footprint_bytes.div_ceil(wbytes).clamp(1, 128) as usize };
     let weights: Vec<_> = (0..copies)
         .map(|i| {
             let wb = gpu.storage(u64::from(n) * u64::from(kg));
@@ -695,13 +893,28 @@ fn time_class(gpu: &Gpu, g: &Grid, cands: &[&crate::native_upgrade::Active], (m,
         .collect();
     let out = gpu.storage(u64::from(m) * u64::from(n));
     let positions = sample_positions(m, n);
-    let truth: Vec<f64> = positions.iter().map(|&(r, c)| oracle(&x, &w, &sx, &sw, kg, r, c)).collect();
-    let rms = (truth.iter().map(|t| t * t).sum::<f64>() / truth.len() as f64).sqrt();
+    let stored = Stored { w: &w, sw: &sw, kg };
+    // The reference and, per input form, the error of rounding the inputs to it: computed once per form.
+    let reference: Vec<(f64, f64)> = positions.iter().map(|&(r, c)| dot(acts, &stored, None, r, c)).collect();
+    let mut resolution: Vec<(Input, Errors)> = Vec::new();
+    for a in cands {
+        if !resolution.iter().any(|(i, _)| *i == a.input) {
+            let errors: Vec<f64> = positions.iter().zip(&reference).map(|(&(r, c), (truth, _))| (dot(acts, &stored, Some(a.input), r, c).0 - truth).abs()).collect();
+            resolution.push((a.input, Errors::of(&errors)));
+        }
+    }
+    let floor = Errors {
+        rms: F32_EPS * (reference.iter().map(|(_, abs)| abs * abs).sum::<f64>() / reference.len() as f64).sqrt(),
+        max: F32_EPS * reference.iter().fold(0.0f64, |a, (_, abs)| a.max(*abs)),
+    };
     let params = [m, kg, n];
     let mut results = Vec::new();
     for a in cands {
         let blocks = (a.blocks)(&params, a.tile);
-        let step = |wi: &(crate::DeviceBuffer, crate::DeviceBuffer)| gpu.native_step_raw(a.id, &[&xq, &wi.0, &sxb, &wi.1, &out], &params, blocks);
+        let step = |wi: &(crate::DeviceBuffer, crate::DeviceBuffer)| match a.input.act {
+            ActFormat::Int8Group32 => gpu.native_step_raw(a.id, &[&xq, &wi.0, &sxb, &wi.1, &out], &params, blocks),
+            ActFormat::Bf16 => gpu.native_step_raw(a.id, &[&xb, &wi.0, &wi.1, &out], &params, blocks),
+        };
         let Some(check) = step(&weights[0]) else {
             results.push((a.kernel.to_owned(), Verdict::Rejected("backend declined the launch".into())));
             continue;
@@ -709,9 +922,10 @@ fn time_class(gpu: &Gpu, g: &Grid, cands: &[&crate::native_upgrade::Active], (m,
         gpu.submit(&[], &[check]);
         gpu.poll_wait();
         let got = gpu.read(&out, (m * n) as usize);
-        let worst = positions.iter().zip(&truth).map(|(&(r, c), t)| (f64::from(got[r as usize * n as usize + c as usize]) - t).abs()).fold(0.0, f64::max);
-        if worst.is_nan() || worst > 2e-5 * rms + 1e-30 {
-            results.push((a.kernel.to_owned(), Verdict::Rejected(format!("worst error {worst:.3e} against output rms {rms:.3e}"))));
+        let errors: Vec<f64> = positions.iter().zip(&reference).map(|(&(r, c), (truth, _))| (f64::from(got[r as usize * n as usize + c as usize]) - truth).abs()).collect();
+        let input = resolution.iter().find(|(i, _)| *i == a.input).map_or(Errors { rms: 0.0, max: 0.0 }, |(_, e)| *e);
+        if let Err(why) = admit(Errors::of(&errors), input, floor) {
+            results.push((a.kernel.to_owned(), Verdict::Rejected(why)));
             continue;
         }
         if !timing {
@@ -877,9 +1091,9 @@ mod tests {
             entries: vec![Entry { slot: "slot".into(), class, best: "fast".into(), results: vec![("fast".into(), Verdict::Timed { us: 1.0, gbs: 500.0, frac: Some(0.5) })] }],
             from_store: false,
         };
-        assert_eq!(t.choice("slot", &[12, 1280, 5120]).as_deref(), Some("fast"));
-        assert_eq!(t.choice("slot", &[12, 1280, 17]).as_deref(), None, "an untuned class names nothing: the default stands");
-        assert_eq!(t.choice("other", &[12, 1280, 5120]), None);
+        assert_eq!(t.choice("slot", &[12, 1280, 5120], &|_| true).as_deref(), Some("fast"));
+        assert_eq!(t.choice("slot", &[12, 1280, 17], &|_| true).as_deref(), None, "an untuned class names nothing: the default stands");
+        assert_eq!(t.choice("other", &[12, 1280, 5120], &|_| true), None);
         assert_eq!(t.entries[0].roof_fraction(), Some(0.5));
     }
 
@@ -924,6 +1138,58 @@ mod tests {
         let partial = parse_store(&text(&cut)).expect("a table cut by the budget still parses");
         assert_eq!(missing_classes(&partial, &["s"]), vec![("s".to_owned(), cut[last].class)]);
         assert_eq!(missing_classes(&parse_store(&text(&all[1..])).unwrap(), &["s"]).len(), 1, "an absent class is missing too");
+    }
+
+    /// The errors of a candidate over the positions of a small synthetic class, against the f64 reference of the
+    /// stored representation, and of rounding the inputs to `input`'s forms.
+    fn class_errors(input: Input, candidate: impl Fn(&Acts, &Stored, u32, u32) -> f64) -> (Errors, Errors, Errors) {
+        let (m, kg, n) = (4u32, 64u32, 40u32);
+        let acts = Acts::new(m, kg);
+        let (w, sw) = (packed_i8(n as usize * kg as usize, 3), scales(n as usize * kg as usize / 8, 4));
+        let stored = Stored { w: &w, sw: &sw, kg };
+        let positions = sample_positions(m, n);
+        let reference: Vec<(f64, f64)> = positions.iter().map(|&(r, c)| dot(&acts, &stored, None, r, c)).collect();
+        let diff = |f: &dyn Fn(u32, u32) -> f64| Errors::of(&positions.iter().zip(&reference).map(|(&(r, c), (t, _))| (f(r, c) - t).abs()).collect::<Vec<_>>());
+        let floor = Errors { rms: F32_EPS * reference.iter().map(|(_, a)| a * a).sum::<f64>().sqrt() / (reference.len() as f64).sqrt(), max: F32_EPS * reference.iter().fold(0.0f64, |a, (_, b)| a.max(*b)) };
+        (diff(&|r, c| candidate(&acts, &stored, r, c)), diff(&|r, c| dot(&acts, &stored, Some(input), r, c).0), floor)
+    }
+
+    /// The rule admits the arithmetic each input form allows and refuses what is wrong, whatever the candidate's
+    /// format: an int8-activation kernel (error dominated by the activation step), a bf16 dequantising kernel (weights
+    /// rounded once more than the f64 emulation of the formats does) and a kernel that gets a tile edge wrong.
+    #[test]
+    fn the_admission_rule_follows_the_candidates_input_resolution() {
+        // The existing integer-MMA candidates compute exactly the dot product of their inputs.
+        let (cand, input, floor) = class_errors(Input::PACKED, |a, w, r, c| dot(a, w, Some(Input::PACKED), r, c).0);
+        assert!(input.rms > 100.0 * floor.rms, "int8 activations cost far more than the fp32 accumulation: {input:?} vs {floor:?}");
+        assert_eq!(admit(cand, input, floor), Ok(()), "an int8-activation candidate is admitted");
+
+        // A bf16 kernel that rounds the group scale to bf16 before the product (the cheap packed dequantisation).
+        let scale_bf16 = |a: &Acts, w: &Stored, r: u32, c: u32| {
+            (0..(w.kg * 4) as usize).map(|i| a.value(Some(ActFormat::Bf16), r, i) * round_bf16(round_bf16(f64::from(w.sw[c as usize * (w.kg as usize / 8) + i / 32])) * f64::from(byte(w.w, c as usize * (w.kg as usize * 4) + i)))).sum::<f64>()
+        };
+        let (cand, input, floor) = class_errors(Input::DEQUANT_BF16, scale_bf16);
+        assert_eq!(admit(cand, input, floor), Ok(()), "a bf16 dequantising candidate is admitted: {cand:?} vs {input:?}");
+
+        // The same bf16 kernel with one output wrong by a tenth of its rms is refused (max bound), and so is a kernel
+        // 100x off; NaN is refused.
+        let wrong = |a: &Acts, w: &Stored, r: u32, c: u32| scale_bf16(a, w, r, c) * if (r, c) == (0, 17) { 1.1 } else { 1.0 };
+        let (cand, input, floor) = class_errors(Input::DEQUANT_BF16, wrong);
+        assert!(admit(cand, input, floor).is_err(), "a single wrong output fails the maximum: {cand:?} vs {input:?}");
+        let (cand, input, floor) = class_errors(Input::PACKED, |a, w, r, c| dot(a, w, Some(Input::PACKED), r, c).0);
+        assert_eq!(admit(Errors { rms: f64::NAN, max: 0.0 }, input, floor), Err("non-finite output".into()));
+        assert!(admit(Errors { rms: input.rms * 100.0, max: input.max * 100.0 }, input, floor).is_err(), "a kernel 100x off the input resolution is refused");
+        assert_eq!(admit(cand, input, floor), Ok(()));
+    }
+
+    /// A candidate that consumes its inputs unrounded has no resolution error to scale: the bound falls to the
+    /// accumulation floor, which an fp32-accurate kernel meets and a bf16-accurate one does not.
+    #[test]
+    fn a_zero_input_error_leaves_the_fp32_accumulation_floor() {
+        let none = Errors { rms: 0.0, max: 0.0 };
+        let floor = Errors { rms: 1e-6, max: 3e-6 };
+        assert_eq!(admit(Errors { rms: 5e-6, max: 2e-5 }, none, floor), Ok(()));
+        assert!(admit(Errors { rms: 5e-5, max: 2e-4 }, none, floor).is_err());
     }
 
     #[test]

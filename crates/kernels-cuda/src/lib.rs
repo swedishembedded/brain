@@ -85,6 +85,12 @@ pub const I8_WGMMA_DYNAMIC_SHARED_BYTES: u32 = 4 * (2 * 128 * 128 + 2 * 4 * 128 
 pub const fn i8_stream_dynamic_shared_bytes(bn: u32, rows: u32, stages: u32) -> u32 {
     stages * (bn * 128 + rows * 128 + bn * 16 + rows * 16)
 }
+/// Dynamic shared memory per block of `matmul_i8_dq_stream_*` with `bn` weight rows a block, room for `rows` rows of x
+/// and `stages` stages (the source's `BRAIN_DQS_STAGE_BYTES` x `BRAIN_DQS_STAGES`): per stage `bn` rows x 128 bytes of
+/// int8 weights, `rows` rows of x x 256 bytes of bf16 and four f32 scales per weight row. A test holds it to the source.
+pub const fn i8_dq_stream_dynamic_shared_bytes(bn: u32, rows: u32, stages: u32) -> u32 {
+    stages * (bn * 128 + rows * 256 + bn * 16)
+}
 /// Dynamic shared memory per block of `matmul_i8_wgstream_*` for `xn` rows of x (the source's
 /// `BRAIN_WGS_STAGES` x `BRAIN_WGS_STAGE_BYTES` + `BRAIN_WGS_XP_BYTES` + 1 KiB to align the ring to the 128-byte swizzle
 /// pattern): per stage a 128-row weight tile and the x tile at 128 bytes of K a row, and their raw group scales.
@@ -95,6 +101,8 @@ pub const fn i8_wgstream_dynamic_shared_bytes(xn: u32) -> u32 {
 pub const I8_WGSTREAM_MAX_ROWS: u32 = 128;
 /// Rows of x the many-row streaming candidates (`matmul_i8_stream_r*`) serve per launch.
 pub const I8_STREAM_MANY_ROWS: u32 = 64;
+/// Rows of x the widest dequantize-in-register streaming candidates (`matmul_i8_dq_stream_q*`) serve per launch.
+pub const I8_DQ_STREAM_WIDE_ROWS: u32 = 128;
 /// The splits of K over a cluster the streaming candidate is registered at.
 pub const I8_STREAM_SPLITS: [u32; 4] = [1, 2, 4, 8];
 
@@ -1171,6 +1179,117 @@ pub const ALL: &[CudaKernel] = &[
         shared_bytes: 0,
         programmatic: true,
         src: concat!("#define BRAIN_I8S_MAX_ROWS 64\n#define BRAIN_I8S_STAGES 3\n#define BRAIN_I8S_MIN_BLOCKS 4\n#define brain_matmul_i8_stream brain_matmul_i8_stream_r4\n", include_str!("../cu/matmul_i8_stream.cu")),
+    },
+    CudaKernel {
+        name: "matmul_i8_dq_stream_r1",
+        // Dequantize-in-register weight-streaming candidate of the int8 linear for 33 to 64 rows of x: int8 weight codes
+        // times their group scale become bf16 in registers (no per-group fold), the activations are bf16 and the
+        // accumulation is f32 across all of K. cp.async ring through shared memory, ldmatrix, mma.sync m16n8k16, 64
+        // weight rows a block, K split over a cluster of 1 block(s) (the cluster size is the launch's, see
+        // `gpu_core::native_upgrade`). The activation form is the bf16 rows, not the packed int8 ones.
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // `cp.async` and the bf16 MMA from 8.0; the cluster and its distributed shared memory from 9.0.
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_matmul_i8_dq_stream_r1",
+        what: "int8-weight matmul for 33 to 64 rows of bf16 x that dequantises the weight codes times their group scale to bf16 in registers and accumulates in f32 across K (cp.async ring, ldmatrix, mma.sync m16n8k16, 64 weight rows a block), K split over 1 block(s) of a cluster; agrees with the f64 reference of the stored weights to the bf16 resolution of its inputs",
+        reported: "native:matmul_i8_dq_stream_r1",
+        block_dim: 128,
+        tile: (64, 64),
+        // The stage ring is dynamic shared memory (`i8_dq_stream_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_DQS_STAGES 3\n#define BRAIN_DQS_MAX_ROWS 64\n#define BRAIN_DQS_MIN_BLOCKS 4\n#define brain_matmul_i8_dq_stream brain_matmul_i8_dq_stream_r1\n", include_str!("../cu/matmul_i8_dq_stream.cu")),
+    },
+    CudaKernel {
+        name: "matmul_i8_dq_stream_r2",
+        // Dequantize-in-register weight-streaming candidate of the int8 linear for 33 to 64 rows of x: int8 weight codes
+        // times their group scale become bf16 in registers (no per-group fold), the activations are bf16 and the
+        // accumulation is f32 across all of K. cp.async ring through shared memory, ldmatrix, mma.sync m16n8k16, 64
+        // weight rows a block, K split over a cluster of 2 block(s) (the cluster size is the launch's, see
+        // `gpu_core::native_upgrade`). The activation form is the bf16 rows, not the packed int8 ones.
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // `cp.async` and the bf16 MMA from 8.0; the cluster and its distributed shared memory from 9.0.
+        min_cc: CLUSTER_MIN_CC,
+        entry: "brain_matmul_i8_dq_stream_r2",
+        what: "int8-weight matmul for 33 to 64 rows of bf16 x that dequantises the weight codes times their group scale to bf16 in registers and accumulates in f32 across K (cp.async ring, ldmatrix, mma.sync m16n8k16, 64 weight rows a block), K split over 2 block(s) of a cluster; agrees with the f64 reference of the stored weights to the bf16 resolution of its inputs",
+        reported: "native:matmul_i8_dq_stream_r2",
+        block_dim: 128,
+        tile: (64, 64),
+        // The stage ring is dynamic shared memory (`i8_dq_stream_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_DQS_STAGES 3\n#define BRAIN_DQS_MAX_ROWS 64\n#define BRAIN_DQS_MIN_BLOCKS 4\n#define brain_matmul_i8_dq_stream brain_matmul_i8_dq_stream_r2\n", include_str!("../cu/matmul_i8_dq_stream.cu")),
+    },
+    CudaKernel {
+        name: "matmul_i8_dq_stream_r4",
+        // Dequantize-in-register weight-streaming candidate of the int8 linear for 33 to 64 rows of x: int8 weight codes
+        // times their group scale become bf16 in registers (no per-group fold), the activations are bf16 and the
+        // accumulation is f32 across all of K. cp.async ring through shared memory, ldmatrix, mma.sync m16n8k16, 64
+        // weight rows a block, K split over a cluster of 4 block(s) (the cluster size is the launch's, see
+        // `gpu_core::native_upgrade`). The activation form is the bf16 rows, not the packed int8 ones.
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // `cp.async` and the bf16 MMA from 8.0; the cluster and its distributed shared memory from 9.0.
+        min_cc: CLUSTER_MIN_CC,
+        entry: "brain_matmul_i8_dq_stream_r4",
+        what: "int8-weight matmul for 33 to 64 rows of bf16 x that dequantises the weight codes times their group scale to bf16 in registers and accumulates in f32 across K (cp.async ring, ldmatrix, mma.sync m16n8k16, 64 weight rows a block), K split over 4 block(s) of a cluster; agrees with the f64 reference of the stored weights to the bf16 resolution of its inputs",
+        reported: "native:matmul_i8_dq_stream_r4",
+        block_dim: 128,
+        tile: (64, 64),
+        // The stage ring is dynamic shared memory (`i8_dq_stream_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_DQS_STAGES 3\n#define BRAIN_DQS_MAX_ROWS 64\n#define BRAIN_DQS_MIN_BLOCKS 4\n#define brain_matmul_i8_dq_stream brain_matmul_i8_dq_stream_r4\n", include_str!("../cu/matmul_i8_dq_stream.cu")),
+    },
+    CudaKernel {
+        name: "matmul_i8_dq_stream_q2",
+        // Dequantize-in-register weight-streaming candidate of the int8 linear for 65 to 128 rows of x (a decode step of
+        // a large batch): the `matmul_i8_dq_stream_*` structure with 8 warps and 128 weight rows a block, room for 128 rows of
+        // x in the stage ring and K split over a cluster of 2 block(s). One candidate of the prefill slot's set.
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // `cp.async` and the bf16 MMA from 8.0; the cluster and its distributed shared memory from 9.0.
+        min_cc: CLUSTER_MIN_CC,
+        entry: "brain_matmul_i8_dq_stream_q2",
+        what: "int8-weight matmul for 33 to 128 rows of bf16 x that dequantises the weight codes times their group scale to bf16 in registers and accumulates in f32 across K (cp.async ring, ldmatrix, mma.sync m16n8k16, 128 weight rows a block of 8 warps), K split over 2 block(s) of a cluster; agrees with the f64 reference of the stored weights to the bf16 resolution of its inputs",
+        reported: "native:matmul_i8_dq_stream_q2",
+        block_dim: 256,
+        tile: (128, 128),
+        // The stage ring is dynamic shared memory (`i8_dq_stream_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_DQS_WARPS 8\n#define BRAIN_DQS_STAGES 3\n#define BRAIN_DQS_MAX_ROWS 128\n#define BRAIN_DQS_MIN_BLOCKS 1\n#define brain_matmul_i8_dq_stream brain_matmul_i8_dq_stream_q2\n", include_str!("../cu/matmul_i8_dq_stream.cu")),
+    },
+    CudaKernel {
+        name: "matmul_i8_dq_stream_q4",
+        // Dequantize-in-register weight-streaming candidate of the int8 linear for 65 to 128 rows of x (a decode step of
+        // a large batch): the `matmul_i8_dq_stream_*` structure with 8 warps and 128 weight rows a block, room for 128 rows of
+        // x in the stage ring and K split over a cluster of 4 block(s). One candidate of the prefill slot's set.
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // `cp.async` and the bf16 MMA from 8.0; the cluster and its distributed shared memory from 9.0.
+        min_cc: CLUSTER_MIN_CC,
+        entry: "brain_matmul_i8_dq_stream_q4",
+        what: "int8-weight matmul for 33 to 128 rows of bf16 x that dequantises the weight codes times their group scale to bf16 in registers and accumulates in f32 across K (cp.async ring, ldmatrix, mma.sync m16n8k16, 128 weight rows a block of 8 warps), K split over 4 block(s) of a cluster; agrees with the f64 reference of the stored weights to the bf16 resolution of its inputs",
+        reported: "native:matmul_i8_dq_stream_q4",
+        block_dim: 256,
+        tile: (128, 128),
+        // The stage ring is dynamic shared memory (`i8_dq_stream_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_DQS_WARPS 8\n#define BRAIN_DQS_STAGES 3\n#define BRAIN_DQS_MAX_ROWS 128\n#define BRAIN_DQS_MIN_BLOCKS 1\n#define brain_matmul_i8_dq_stream brain_matmul_i8_dq_stream_q4\n", include_str!("../cu/matmul_i8_dq_stream.cu")),
     },
     CudaKernel {
         name: "matmul_i8_wgstream_n64_s2",
