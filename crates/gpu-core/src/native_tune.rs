@@ -46,8 +46,9 @@
 use crate::native_upgrade::{ActFormat, Input, WeightRead};
 use crate::Gpu;
 use std::collections::HashMap;
+use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// A later candidate must beat an earlier one by this factor to displace it.
 const TIE: f64 = 0.97;
@@ -287,6 +288,8 @@ const TUNABLE_SLOTS: [&str; 3] = ["matmul_i8_gemv", crate::native_upgrade::PREFI
 
 static AUTOTUNE: AtomicBool = AtomicBool::new(true);
 static FORCED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+/// Whether [`FORCED`] holds anything: a dispatch consults the list (and its lock) only then, which is almost never.
+static FORCED_ANY: AtomicBool = AtomicBool::new(false);
 static TABLES: Mutex<Vec<(String, Arc<Tuned>)>> = Mutex::new(Vec::new());
 
 thread_local! {
@@ -306,11 +309,13 @@ pub fn force_candidate(slot: &str, kernel: &str) {
     let mut f = FORCED.lock().unwrap_or_else(|e| e.into_inner());
     f.retain(|(s, _)| s != slot);
     f.push((slot.to_owned(), kernel.to_owned()));
+    FORCED_ANY.store(true, Ordering::Release);
 }
 
 /// Drop every forced candidate: the tuned choice applies again.
 pub fn clear_forced() {
     FORCED.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    FORCED_ANY.store(false, Ordering::Release);
 }
 
 /// Every forced `(slot, candidate)` pair whose candidate no handle offers - a misspelt name must fail loudly.
@@ -401,23 +406,51 @@ pub struct Tuned {
     pub entries: Vec<Entry>,
     /// Whether this table was read from the persistent store rather than measured by this process.
     pub from_store: bool,
+    /// `entries` by slot and class, built on the first dispatch that asks (a table is immutable once shared).
+    index: OnceLock<Vec<(String, HashMap<Class, usize>)>>,
 }
 
 impl Tuned {
+    /// The entry for `slot` and `class`: the first one the table holds, found through the index in O(1)
+    /// (hash of the class, plus a compare against the few slot names) instead of a scan over every entry.
+    fn entry(&self, slot: &str, class: Class) -> Option<&Entry> {
+        let index = self.index.get_or_init(|| {
+            let mut by_slot: Vec<(String, HashMap<Class, usize>)> = Vec::new();
+            for (i, e) in self.entries.iter().enumerate() {
+                let at = match by_slot.iter().position(|(s, _)| *s == e.slot) {
+                    Some(at) => at,
+                    None => {
+                        by_slot.push((e.slot.clone(), HashMap::new()));
+                        by_slot.len() - 1
+                    }
+                };
+                by_slot[at].1.entry(e.class).or_insert(i);
+            }
+            by_slot
+        });
+        let (_, classes) = index.iter().find(|(s, _)| s == slot)?;
+        classes.get(&class).map(|&i| &self.entries[i])
+    }
+
     /// The candidate the table (or a forced override) names for a dispatch of `slot` with caller `params`, among the
     /// candidates `accepts` (a caller that can supply only one activation form asks for the best candidate reading
     /// it; a class that was never timed names its fill-in choice when that one is accepted).
-    pub(crate) fn choice(&self, slot: &str, params: &[u32], accepts: &dyn Fn(&str) -> bool) -> Option<String> {
-        if let Some((_, k)) = FORCED.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(s, _)| s == slot) {
-            return Some(k.clone());
+    ///
+    /// Per dispatch this is O(1) in the table's size when `accepts` is (one hash lookup, no allocation, no lock
+    /// unless a candidate is forced) plus O(candidates the class timed) when the winner is not accepted.
+    pub(crate) fn choice(&self, slot: &str, params: &[u32], accepts: &dyn Fn(&str) -> bool) -> Option<Cow<'_, str>> {
+        if FORCED_ANY.load(Ordering::Acquire) {
+            if let Some((_, k)) = FORCED.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(s, _)| s == slot) {
+                return Some(Cow::Owned(k.clone()));
+            }
         }
         let class = match params {
             [m, kg, n, ..] => Class::of(grid(slot), *m, *kg, *n)?,
             _ => return None,
         };
-        let e = self.entries.iter().find(|e| e.slot == slot && e.class == class)?;
+        let e = self.entry(slot, class)?;
         if accepts(&e.best) {
-            return Some(e.best.clone());
+            return Some(Cow::Borrowed(&e.best));
         }
         // The overall winner reads a form the caller cannot supply: the fastest accepted candidate of the class
         // (an earlier one keeps a near tie, as when the winner was chosen).
@@ -429,7 +462,7 @@ impl Tuned {
                 }
             }
         }
-        best.map(|(n, _)| n.to_owned())
+        best.map(|(n, _)| Cow::Borrowed(n))
     }
 }
 
@@ -821,7 +854,7 @@ fn parse_store(text: &str) -> Option<Tuned> {
         }
         entries.push(Entry { slot: slot.to_owned(), class, best: best.to_owned(), results: rs });
     }
-    Some(Tuned { device: device.to_owned(), roof_gbs: roof.parse().ok(), floor_us: floor.parse().ok(), int8_tops: tops.parse().ok(), entries, from_store: true })
+    Some(Tuned { device: device.to_owned(), roof_gbs: roof.parse().ok(), floor_us: floor.parse().ok(), int8_tops: tops.parse().ok(), entries, from_store: true, index: OnceLock::new() })
 }
 
 /// The `(slot, class)` pairs of `slots` that `t` holds no measurement for: absent, or saved unmeasured because the
@@ -937,7 +970,7 @@ fn measure(gpu: &Gpu, slots: &[(usize, &'static str)], prior: Option<&Tuned>) ->
     fill_untimed(&mut entries, |slot, class, name| served.get(&(slot, class)).is_some_and(|names| names.contains(&name)));
     gpu.set_kernel_timing(false);
     let device = crate::adapter_info().map(|(d, _)| d).unwrap_or_else(|| gpu.kind().to_owned());
-    Tuned { device, roof_gbs, floor_us, int8_tops, entries, from_store: false }
+    Tuned { device, roof_gbs, floor_us, int8_tops, entries, from_store: false, index: OnceLock::new() }
 }
 
 /// The device's measured roofs, the bounds a class's fraction is taken against.
@@ -1197,11 +1230,81 @@ mod tests {
             int8_tops: Some(600.0),
             entries: vec![Entry { slot: "slot".into(), class, best: "fast".into(), results: vec![("fast".into(), Verdict::Timed { us: 1.0, gbs: 500.0, frac: Some(0.5) })] }],
             from_store: false,
+            index: OnceLock::new(),
         };
         assert_eq!(t.choice("slot", &[12, 1280, 5120], &|_| true).as_deref(), Some("fast"));
         assert_eq!(t.choice("slot", &[12, 1280, 17], &|_| true).as_deref(), None, "an untuned class names nothing: the default stands");
         assert_eq!(t.choice("other", &[12, 1280, 5120], &|_| true), None);
         assert_eq!(t.entries[0].roof_fraction(), Some(0.5));
+    }
+
+    /// The per-dispatch choice through the index equals the linear scan it replaced, on random tables (several
+    /// slots, two grids, duplicate classes, tables with unaccepted winners) and random acceptance.
+    #[test]
+    fn the_indexed_choice_equals_the_linear_scan() {
+        fn reference(t: &Tuned, slot: &str, params: &[u32], accepts: &dyn Fn(&str) -> bool) -> Option<String> {
+            let class = match params {
+                [m, kg, n, ..] => Class::of(grid(slot), *m, *kg, *n)?,
+                _ => return None,
+            };
+            let e = t.entries.iter().find(|e| e.slot == slot && e.class == class)?;
+            if accepts(&e.best) {
+                return Some(e.best.clone());
+            }
+            let mut best: Option<(&str, f64)> = None;
+            for (name, v) in &e.results {
+                if let Verdict::Timed { us, .. } = v {
+                    if accepts(name) && best.is_none_or(|(_, b)| *us < b * TIE) {
+                        best = Some((name, *us));
+                    }
+                }
+            }
+            best.map(|(n, _)| n.to_owned())
+        }
+        let slots = ["slot", "other_slot", crate::native_upgrade::PREFILL_SLOT];
+        let names = ["a", "b", "c", "d"];
+        let mut rng = data::rng::Lcg::new(21);
+        let pick = |rng: &mut data::rng::Lcg, n: usize| ((rng.unit() * n as f32) as usize).min(n - 1);
+        for _ in 0..60 {
+            let entries: Vec<Entry> = (0..pick(&mut rng, 40) + 1)
+                .map(|_| {
+                    let slot = slots[pick(&mut rng, slots.len())];
+                    let g = grid(slot);
+                    let class = Class { rows: pick(&mut rng, g.rows.len()), k: pick(&mut rng, 2), bytes: pick(&mut rng, g.bytes_bounds.len() + 1) };
+                    let mut results = Vec::new();
+                    for n in names {
+                        if rng.unit() < 0.7 {
+                            results.push((n.to_string(), Verdict::Timed { us: 1.0 + rng.unit() as f64 * 5.0, gbs: 1.0, frac: None }));
+                        }
+                    }
+                    Entry { slot: slot.into(), class, best: names[pick(&mut rng, names.len())].into(), results }
+                })
+                .collect();
+            let t = Tuned { device: "t".into(), roof_gbs: None, floor_us: None, int8_tops: None, entries, from_store: false, index: OnceLock::new() };
+            let accepted: Vec<&str> = names.iter().copied().filter(|_| rng.unit() < 0.6).collect();
+            let accepts = |n: &str| accepted.contains(&n);
+            for _ in 0..80 {
+                let slot = slots[pick(&mut rng, slots.len())];
+                let g = grid(slot);
+                let m = g.rows[pick(&mut rng, g.rows.len())].0;
+                let params = [m, [1280, 17408][pick(&mut rng, 2)] / 4, [512, 5120, 50_000][pick(&mut rng, 3)]];
+                assert_eq!(t.choice(slot, &params, &accepts).as_deref(), reference(&t, slot, &params, &accepts).as_deref(), "{slot} {params:?}");
+            }
+        }
+    }
+
+    /// A forced candidate wins for its slot only, while it is forced, and the table answers again once it is cleared.
+    #[test]
+    fn a_forced_candidate_overrides_its_slot_until_cleared() {
+        let class = Class::of(&DECODE, 12, 1280, 5120).unwrap();
+        let entry = |slot: &str| Entry { slot: slot.into(), class, best: "fast".into(), results: vec![("fast".into(), Verdict::Timed { us: 1.0, gbs: 1.0, frac: None })] };
+        let t = Tuned { device: "t".into(), roof_gbs: None, floor_us: None, int8_tops: None, entries: vec![entry("forced_slot"), entry("free_slot")], from_store: false, index: OnceLock::new() };
+        let p = [12, 1280, 5120];
+        force_candidate("forced_slot", "pinned");
+        assert_eq!(t.choice("forced_slot", &p, &|_| true).as_deref(), Some("pinned"));
+        assert_eq!(t.choice("free_slot", &p, &|_| true).as_deref(), Some("fast"), "another slot keeps the tuned choice");
+        clear_forced();
+        assert_eq!(t.choice("forced_slot", &p, &|_| true).as_deref(), Some("fast"));
     }
 
     fn timed(slot: &str, rows: usize, best: &str) -> Entry {

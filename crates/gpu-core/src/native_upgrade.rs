@@ -2609,6 +2609,10 @@ pub(crate) fn apply(active: &[Active], kind: usize, params: &[u32], tuned: Optio
 /// `supplies` is the activation form the caller can hand over (`None`: any). Only rows reading it are considered, so
 /// a caller holding packed int8 activations never gets a candidate that needs the bf16 rows, and the table's choice
 /// among the rest is the fastest candidate that reads that form.
+///
+/// Cost per dispatch: O(rows of slot `kind`) for the `serves` tests, plus the tuned table's O(1) class lookup
+/// ([`crate::native_tune::Tuned::choice`]). Pass `active` as the slot's own rows ([`crate::Gpu`] does) so a
+/// dispatch of a kernel with no native row pays one lookup of the slot, not a scan of every row on the handle.
 #[inline]
 pub(crate) fn serving<'a>(
     active: &'a [Active],
@@ -2625,10 +2629,10 @@ pub(crate) fn serving<'a>(
     let first = serving.next()?;
     let accepts = |name: &str| active.iter().any(|a| a.slow == kind && a.kernel == name && reads(a));
     let Some(choice) = tuned.and_then(|t| t.choice(first.slot, params, &accepts)) else { return Some(first) };
-    if first.kernel == choice.as_str() {
+    if first.kernel == &*choice {
         return Some(first);
     }
-    Some(serving.find(|a| a.kernel == choice.as_str()).unwrap_or(first))
+    Some(serving.find(|a| a.kernel == &*choice).unwrap_or(first))
 }
 
 /// Every candidate row of slot `kind` that serves `params` on this handle, in preference order.

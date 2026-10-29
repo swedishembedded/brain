@@ -815,6 +815,10 @@ mod native_facade {
         /// [`crate::native_upgrade`]. Empty on every backend that cannot
         /// compile the registry's source.
         native_upgrades: Vec<crate::native_upgrade::Active>,
+        /// `native_upgrades` grouped by pipeline slot, each group in the original (preference) order: a dispatch
+        /// of slot `kind` reads only that slot's few rows ([`Gpu::native_rows_of`]) instead of scanning every row
+        /// on the handle - which every dispatch of every other kernel would otherwise do for nothing.
+        native_by_kind: Vec<(usize, Vec<crate::native_upgrade::Active>)>,
         /// The device's measured choice among the candidates of each native slot - see [`crate::native_tune`].
         tuned: std::sync::OnceLock<Option<Arc<crate::native_tune::Tuned>>>,
         /// The FP8 linear's table, measured on first use ([`Gpu::prepare_fp8_linear`]) so a model with no FP8 weight never
@@ -895,6 +899,13 @@ mod native_facade {
             // so `step` costs one compare against a usually-empty list.
             let upgrades = crate::upgrade::resolve(&names, &inner.caps());
             let native_upgrades = crate::native_upgrade::resolve(&names, inner.as_ref(), &upgrades);
+            let mut native_by_kind: Vec<(usize, Vec<crate::native_upgrade::Active>)> = Vec::new();
+            for a in &native_upgrades {
+                match native_by_kind.iter_mut().find(|(k, _)| *k == a.slow) {
+                    Some((_, rows)) => rows.push(a.clone()),
+                    None => native_by_kind.push((a.slow, vec![a.clone()])),
+                }
+            }
             let gpu = Gpu {
                 inner,
                 names,
@@ -902,6 +913,7 @@ mod native_facade {
                 cost_enabled: std::sync::atomic::AtomicBool::new(false),
                 upgrades,
                 native_upgrades,
+                native_by_kind,
                 tuned: std::sync::OnceLock::new(),
                 tuned_fp8: std::sync::OnceLock::new(),
                 fused: Mutex::new(Vec::new()),
@@ -934,6 +946,12 @@ mod native_facade {
             self.be().step_native(id, bufs, params, blocks)
         }
 
+        /// The native rows of pipeline slot `kind`, in preference order (empty for a slot with none). O(slots with
+        /// native rows), a handful, whatever the number of rows on the handle.
+        fn native_rows_of(&self, kind: usize) -> &[crate::native_upgrade::Active] {
+            self.native_by_kind.iter().find(|(k, _)| *k == kind).map_or(&[], |(_, rows)| rows.as_slice())
+        }
+
         fn tuned_table(&self) -> Option<&crate::native_tune::Tuned> {
             self.tuned.get().and_then(|t| t.as_deref())
         }
@@ -962,7 +980,7 @@ mod native_facade {
                 crate::Fp8Act::Bf16 => crate::native_upgrade::ActFormat::Bf16,
                 crate::Fp8Act::E4m3 => crate::native_upgrade::ActFormat::Fp8Group128,
             };
-            let a = crate::native_upgrade::serving(&self.native_upgrades, crate::native_upgrade::FP8_KIND, params, tuned, Some(offsets), Some(form))?;
+            let a = crate::native_upgrade::serving(self.native_rows_of(crate::native_upgrade::FP8_KIND), crate::native_upgrade::FP8_KIND, params, tuned, Some(offsets), Some(form))?;
             let step = self.be().step_native_sliced(a.id, bufs, offsets, params, (a.blocks)(params, a.tile))?;
             Some((step, a.reported))
         }
@@ -972,7 +990,7 @@ mod native_facade {
         /// rows, or the E4M3 rows with their scales) and hands it to [`Self::fp8_linear_step`].
         pub fn fp8_linear_act(&self, params: &[u32]) -> Option<crate::Fp8Act> {
             let tuned = self.tuned_fp8.get().and_then(|t| t.as_deref());
-            let a = crate::native_upgrade::serving(&self.native_upgrades, crate::native_upgrade::FP8_KIND, params, tuned, None, None)?;
+            let a = crate::native_upgrade::serving(self.native_rows_of(crate::native_upgrade::FP8_KIND), crate::native_upgrade::FP8_KIND, params, tuned, None, None)?;
             Some(match a.input.act {
                 crate::native_upgrade::ActFormat::Fp8Group128 => crate::Fp8Act::E4m3,
                 _ => crate::Fp8Act::Bf16,
@@ -2657,7 +2675,7 @@ mod native_facade {
         /// (an id it does not recognise, or no native slicing path), which is
         /// a fallback and never a failure.
         fn native_step(&self, kind: usize, bufs: &[&DeviceBuffer], offsets: Option<&[(u64, u64)]>, params: &[u32]) -> Option<Step> {
-            let (id, blocks) = crate::native_upgrade::apply(&self.native_upgrades, kind, params, self.tuned_table(), offsets)?;
+            let (id, blocks) = crate::native_upgrade::apply(self.native_rows_of(kind), kind, params, self.tuned_table(), offsets)?;
             match offsets {
                 None => self.be().step_native(id, bufs, params, blocks),
                 Some(o) => self.be().step_native_sliced(id, bufs, o, params, blocks),
@@ -2670,7 +2688,7 @@ mod native_facade {
         /// of [`Gpu::physical_kernel_names`], for tests and diagnostics to
         /// assert the redirect really fired.
         pub fn native_kernel_for(&self, kind: usize, params: &[u32]) -> Option<&'static str> {
-            crate::native_upgrade::serving(&self.native_upgrades, kind, params, self.tuned_table(), None, Some(crate::native_upgrade::ActFormat::Int8Group32)).map(|a| a.kernel)
+            crate::native_upgrade::serving(self.native_rows_of(kind), kind, params, self.tuned_table(), None, Some(crate::native_upgrade::ActFormat::Int8Group32)).map(|a| a.kernel)
         }
 
         /// The step for a prefill-sized int8 GEMM (`params` is `matmul_i8_dyn`'s `[m, k/4, n]`, `bufs` its five
@@ -2679,7 +2697,7 @@ mod native_facade {
         /// handle's model does not register `matmul_i8_dyn`, the shape is outside every candidate, or a binding is
         /// off every candidate's alignment): the caller keeps the WGSL tier.
         pub fn prefill_gemm_step(&self, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32]) -> Option<(Step, &'static str)> {
-            let a = crate::native_upgrade::serving(&self.native_upgrades, crate::native_upgrade::PREFILL_KIND, params, self.tuned_table(), Some(offsets), Some(crate::native_upgrade::ActFormat::Int8Group32))?;
+            let a = crate::native_upgrade::serving(self.native_rows_of(crate::native_upgrade::PREFILL_KIND), crate::native_upgrade::PREFILL_KIND, params, self.tuned_table(), Some(offsets), Some(crate::native_upgrade::ActFormat::Int8Group32))?;
             let step = self.be().step_native_sliced(a.id, bufs, offsets, params, (a.blocks)(params, a.tile))?;
             Some((step, a.reported))
         }
@@ -2700,7 +2718,7 @@ mod native_facade {
         /// when the packed int8 form serves (the default, every device without a bf16 candidate, an untuned device).
         pub fn int8_linear_bf16_input(&self, params: &[u32]) -> bool {
             let Some(kind) = self.int8_linear_kind(params[0]) else { return false };
-            crate::native_upgrade::serving(&self.native_upgrades, kind, params, self.tuned_table(), None, None).is_some_and(|a| a.input.act == crate::native_upgrade::ActFormat::Bf16)
+            crate::native_upgrade::serving(self.native_rows_of(kind), kind, params, self.tuned_table(), None, None).is_some_and(|a| a.input.act == crate::native_upgrade::ActFormat::Bf16)
         }
 
         /// Whether no int8-weight linear of `m` rows and a `kg * 4`-wide input reads the packed int8 activations on
@@ -2711,7 +2729,7 @@ mod native_facade {
             let Some(kind) = self.int8_linear_kind(m) else { return false };
             let Some(tuned) = self.tuned_table() else { return false };
             let slot = if kind == crate::native_upgrade::PREFILL_KIND { crate::native_upgrade::PREFILL_SLOT } else { "matmul_i8_gemv" };
-            let bf16 = |name: &str| self.native_upgrades.iter().any(|a| a.slow == kind && a.kernel == name && a.input.act == crate::native_upgrade::ActFormat::Bf16);
+            let bf16 = |name: &str| self.native_rows_of(kind).iter().any(|a| a.slow == kind && a.kernel == name && a.input.act == crate::native_upgrade::ActFormat::Bf16);
             tuned.all_classes_accept(slot, m, kg, &bf16)
         }
 
@@ -2722,7 +2740,7 @@ mod native_facade {
         /// them): the caller keeps the packed form.
         pub fn int8_dequant_step(&self, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32]) -> Option<(Step, &'static str)> {
             let kind = self.int8_linear_kind(params[0])?;
-            let a = crate::native_upgrade::serving(&self.native_upgrades, kind, params, self.tuned_table(), Some(offsets), Some(crate::native_upgrade::ActFormat::Bf16))?;
+            let a = crate::native_upgrade::serving(self.native_rows_of(kind), kind, params, self.tuned_table(), Some(offsets), Some(crate::native_upgrade::ActFormat::Bf16))?;
             let step = self.be().step_native_sliced(a.id, bufs, offsets, params, (a.blocks)(params, a.tile))?;
             Some((step, a.reported))
         }
