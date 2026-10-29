@@ -117,3 +117,16 @@ measurement (16-256), not fixed globally.
   and recorded here: tensor-parallel use (the collective is not yet called from
   any model), and `model::collective`'s host `Collective` seam still stages
   through host fp32.
+- 2026-10-29 (12, measured on the two-GH200 node, 8 MiB copies, GPU tests of
+  `peer_copy` and `device_group`): the pair reports direct peer access (driver
+  performance rank 1); `Gpu::copy_to` sustains 127.1 GB/s gpu0->gpu1 and
+  129.1 GB/s gpu1->gpu0 against 31.2 and 30.0 GB/s host-staged (about 4.1x);
+  copies are bit-exact in both directions and wait for the kernel that wrote
+  their source; NCCL 2.32.3 all-reduce and all-gather over the two cards are
+  bit-exact. The device-boundary two-shard gates pass on CUDA too (both stages
+  on one card there, so the hand-off is the same-card copy). Not measured: the
+  27B resident's end-to-end step with a real model (no model may load on this
+  node for this work), so the per-token saving is arithmetic only: a 20 KiB
+  decode boundary is about 0.2 us on the link, and the host wait it replaces is
+  what is saved. `brain devices` link rows were not run: the CLI does not build
+  at present (`crates/perf` is mid-edit by another change).
