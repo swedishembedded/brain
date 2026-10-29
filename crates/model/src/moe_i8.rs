@@ -32,6 +32,13 @@
 //! The router weights are DeepSeek-V2's: the raw softmax probabilities of the
 //! chosen experts when `norm` is off, the renormalised ones when on, times
 //! `scale` ([`SlotRouter`]).
+//!
+//! A shared expert that has the routed experts' shape rides along as one more
+//! slot of every row ([`SlotShape::shared`]): it is block `n_experts` of each
+//! bank, the router matmul grows by one row (the shared expert's gate) and the
+//! router kernel emits `sigmoid(gate . x)` as that slot's combine weight. That
+//! is the Qwen3.5/3.6 MoE; a shared expert of another width is the caller's to
+//! add on top of the routed output.
 
 use gpu_core::{DeviceBuffer, Dispatch, Gpu, Step};
 
@@ -155,11 +162,24 @@ pub struct SlotShape {
     pub moe_ff: u32,
     pub n_experts: u32,
     pub top_k: u32,
+    /// 1 when the shared expert is block `n_experts` of every bank and one more slot per row, else 0. The router
+    /// `logits` then have `n_experts + 1` columns, the last being the shared expert's gate.
+    pub shared: u32,
 }
 
 impl SlotShape {
+    /// Experts a row can address: the routed ones plus the shared one in the bank.
+    fn banked(&self) -> u32 {
+        self.n_experts + self.shared
+    }
+
+    /// Slots one row occupies: its `top_k` routed experts plus the shared one.
+    fn slots_per_row(&self) -> u32 {
+        self.top_k + self.shared
+    }
+
     fn slots(&self) -> u32 {
-        self.rows * self.top_k
+        self.rows * self.slots_per_row()
     }
 }
 
@@ -181,8 +201,9 @@ pub struct SlotScratch {
 }
 
 impl SlotScratch {
-    pub fn new(g: &Gpu, max_rows: u32, d_model: u32, moe_ff: u32, n_experts: u32, top_k: u32) -> SlotScratch {
-        let slots = (max_rows * top_k) as usize;
+    pub fn new(g: &Gpu, max_rows: u32, d_model: u32, moe_ff: u32, n_experts: u32, top_k: u32, shared: u32) -> SlotScratch {
+        let slots = (max_rows * (top_k + shared)) as usize;
+        let banked = (n_experts + shared) as usize;
         let st = |n: usize| g.storage(n.max(1) as u64);
         SlotScratch {
             max_rows,
@@ -195,32 +216,33 @@ impl SlotScratch {
             hq: st(slots * moe_ff as usize / 4),
             sh: st(act_scale_len(slots, moe_ff as usize)),
             y: st(slots * d_model as usize),
-            counts: st(n_experts as usize),
-            route_tab: st(2 * (n_experts as usize + 1)),
+            counts: st(banked),
+            route_tab: st(2 * (banked + 1)),
             route_perm: st(slots),
         }
     }
 }
 
-/// One MoE layer's routed experts over `shape.rows` rows of `xn` (`[rows, d_model]`, already normalised), with
-/// the router's `logits` (`[rows, n_experts]`) computed by the caller; the combined routed output lands in `out`
-/// (`[rows, d_model]`, overwritten). `grouped_min_rows` is the row count from which slots are ordered by expert and
+/// One MoE layer's experts over `shape.rows` rows of `xn` (`[rows, d_model]`, already normalised), with
+/// the router's `logits` (`[rows, n_experts + shape.shared]`) computed by the caller; the combined output lands in
+/// `out` (`[rows, d_model]`, overwritten). `grouped_min_rows` is the row count from which slots are ordered by expert and
 /// the grouped GEMM runs ([`GROUPED_MIN_ROWS`] unless a model measured another).
 pub fn expert_fwd_i8_slots(g: &Gpu, k: &SlotKernels, shape: &SlotShape, router: SlotRouter, xn: &DeviceBuffer, logits: &DeviceBuffer, experts: &I8Experts, sc: &SlotScratch, grouped_min_rows: u32, out: &DeviceBuffer) -> Vec<Step> {
-    let SlotShape { rows, d_model: d, moe_ff: ff, n_experts: e, top_k } = *shape;
+    let SlotShape { rows, d_model: d, moe_ff: ff, n_experts: e, top_k, shared } = *shape;
     assert!(rows >= 1 && rows <= sc.max_rows, "int8 slot MoE: {rows} rows exceeds the scratch's {}", sc.max_rows);
     assert!(d.is_multiple_of(GROUP as u32) && ff.is_multiple_of(GROUP as u32), "int8 slot MoE: d_model {d} and moe_ff {ff} must be multiples of {GROUP}");
-    let slots = shape.slots();
+    assert!(shared <= 1, "int8 slot MoE: at most one shared expert rides in the bank, got {shared}");
+    let (slots, per_row, banked) = (shape.slots(), shape.slots_per_row(), shape.banked());
     let grouped = rows >= grouped_min_rows;
     let gather = |bank: &I8Bank, xq: &DeviceBuffer, sx: &DeviceBuffer, out: &DeviceBuffer, xdiv: u32| {
         if grouped {
             // Worst-case tile count (an expert's last tile may be partial); a workgroup past the real count finds
             // the table's end and exits.
-            let tiles = e + slots.div_ceil(GROUPED_MR);
+            let tiles = banked + slots.div_ceil(GROUPED_MR);
             g.dispatch(
                 k.i8_grouped,
                 &[xq, sx, &sc.route_tab, &sc.route_perm, &bank.packed, &bank.scale, out],
-                &[tiles, bank.k / 4, bank.n, xdiv, e],
+                &[tiles, bank.k / 4, bank.n, xdiv, banked],
                 Dispatch::Workgroups(tiles * bank.n.div_ceil(GROUPED_COLS)),
             )
         } else {
@@ -230,16 +252,16 @@ pub fn expert_fwd_i8_slots(g: &Gpu, k: &SlotKernels, shape: &SlotShape, router: 
     let mut steps = Vec::with_capacity(16);
     steps.push(g.step(k.max_abs_row, &[xn, &sc.sx], &[rows, d], rows));
     steps.push(g.step(k.quant_pack, &[xn, &sc.sx, &sc.xq], &[rows, d], rows * d / 4));
-    steps.push(g.dispatch(k.router_topk, &[logits, &sc.ids, &sc.weight], &[rows, e, top_k, 0, u32::from(router.norm), router.scale.to_bits()], Dispatch::Workgroups(rows)));
+    steps.push(g.dispatch(k.router_topk, &[logits, &sc.ids, &sc.weight], &[rows, e, top_k, shared, u32::from(router.norm), router.scale.to_bits()], Dispatch::Workgroups(rows)));
     if grouped {
-        steps.push(g.dispatch(k.route_count, &[&sc.ids, &sc.counts], &[slots, e], Dispatch::Workgroups(e)));
-        steps.push(g.dispatch(k.route_scan, &[&sc.counts, &sc.route_tab], &[e, GROUPED_MR], Dispatch::Workgroups(1)));
-        steps.push(g.dispatch(k.route_emit, &[&sc.ids, &sc.route_tab, &sc.route_perm], &[slots, e], Dispatch::Workgroups(e)));
+        steps.push(g.dispatch(k.route_count, &[&sc.ids, &sc.counts], &[slots, banked], Dispatch::Workgroups(banked)));
+        steps.push(g.dispatch(k.route_scan, &[&sc.counts, &sc.route_tab], &[banked, GROUPED_MR], Dispatch::Workgroups(1)));
+        steps.push(g.dispatch(k.route_emit, &[&sc.ids, &sc.route_tab, &sc.route_perm], &[slots, banked], Dispatch::Workgroups(banked)));
     }
-    steps.push(gather(&experts.gate, &sc.xq, &sc.sx, &sc.gate_out, top_k));
-    steps.push(gather(&experts.up, &sc.xq, &sc.sx, &sc.up_out, top_k));
+    steps.push(gather(&experts.gate, &sc.xq, &sc.sx, &sc.gate_out, per_row));
+    steps.push(gather(&experts.up, &sc.xq, &sc.sx, &sc.up_out, per_row));
     steps.push(g.dispatch(k.swiglu_quant, &[&sc.gate_out, &sc.up_out, &sc.hq, &sc.sh], &[slots, ff], Dispatch::Workgroups(slots)));
     steps.push(gather(&experts.down, &sc.hq, &sc.sh, &sc.y, 1));
-    steps.push(g.step(k.slot_combine, &[&sc.y, &sc.weight, out], &[rows, d, top_k], rows * d));
+    steps.push(g.step(k.slot_combine, &[&sc.y, &sc.weight, out], &[rows, d, per_row], rows * d));
     steps
 }

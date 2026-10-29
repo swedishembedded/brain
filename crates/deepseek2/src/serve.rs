@@ -455,7 +455,7 @@ impl Engine {
             router_logits: st(r * e as u64),
             gate: st(if fast { 1 } else { r * e as u64 }),
             grouped: (!fast).then(|| GroupedExpertScratch::new(g, &mshape)),
-            slots: fast.then(|| SlotScratch::new(g, rows, d, ff, e, top_k)),
+            slots: fast.then(|| SlotScratch::new(g, rows, d, ff, e, top_k, 0)),
             sh_gate: st(r * sf),
             sh_up: st(r * sf),
             sh_h: st(r * sf),
@@ -595,7 +595,7 @@ impl Engine {
                         let k = self.slot_kernels.as_ref().expect("the fast tier has slot kernels");
                         let slots = sc.slots.as_ref().expect("the fast tier has slot scratch");
                         let router = SlotRouter { norm: c.norm_topk_prob, scale: c.routed_scaling };
-                        let ss = moe_i8::SlotShape { rows: n, d_model: d, moe_ff: c.moe_ff(), n_experts: e, top_k: c.top_k() };
+                        let ss = moe_i8::SlotShape { rows: n, d_model: d, moe_ff: c.moe_ff(), n_experts: e, top_k: c.top_k(), shared: 0 };
                         s.extend(moe_i8::expert_fwd_i8_slots(g, k, &ss, router, &sc.xn2, &sc.router_logits, banks, slots, moe_i8::GROUPED_MIN_ROWS, &sc.moe_acc));
                     }
                 }

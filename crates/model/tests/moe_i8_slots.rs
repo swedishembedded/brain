@@ -95,9 +95,9 @@ fn run(rows: u32, norm: bool, scale: f32) {
     let bank = |name: &str, n: u32, k: u32| I8Bank::from_source(&g, &src, name, e as usize, n as usize, k as usize).expect("bank");
     let experts = I8Experts { gate: bank("gate", ff, d), up: bank("up", ff, d), down: bank("down", d, ff) };
     let kernels = SlotKernels::resolve(&g).expect("kernels");
-    let scratch = SlotScratch::new(&g, rows, d, ff, e, top_k);
+    let scratch = SlotScratch::new(&g, rows, d, ff, e, top_k, 0);
     let out_i8 = g.storage((rows * d) as u64);
-    let shape = SlotShape { rows, d_model: d, moe_ff: ff, n_experts: e, top_k };
+    let shape = SlotShape { rows, d_model: d, moe_ff: ff, n_experts: e, top_k, shared: 0 };
     let steps = expert_fwd_i8_slots(&g, &kernels, &shape, SlotRouter { norm, scale }, &x, &logits, &experts, &scratch, GROUPED_MIN_ROWS, &out_i8);
     g.submit(&[], &steps);
 
@@ -152,4 +152,61 @@ fn every_router_setting_matches() {
     run(5, true, 1.0);
     run(5, false, 2.5);
     run(30, true, 2.5);
+}
+
+/// The shared expert as one more slot of every row: the output is the routed experts' output plus
+/// `sigmoid(gate . x)` times the shared expert alone. Both parts are computed by the same kernels on separate banks,
+/// so the combined slot form must equal their host sum to float rounding, in the gather and the grouped regime.
+fn run_shared(rows: u32) {
+    let g = gpu_core::testgpu::dev(pipelines());
+    if !g.caps().workgroup_reductions {
+        return brain_testutil::skip_unavailable("the slot kernels need workgroup reductions");
+    }
+    let (d, ff, e, top_k) = (64u32, 64u32, 16u32, 3u32);
+    let mut rng = Lcg::new(data::rng::random_seed());
+    let (mut routed_src, mut shared_src, mut all_src) = (std::collections::HashMap::new(), std::collections::HashMap::new(), std::collections::HashMap::new());
+    for (name, n, k) in [("gate", ff, d), ("up", ff, d), ("down", d, ff)] {
+        let routed = rng.vec_scaled((e * n * k) as usize, 0.3);
+        let shared = rng.vec_scaled((n * k) as usize, 0.3);
+        all_src.insert(name.to_string(), [routed.clone(), shared.clone()].concat());
+        routed_src.insert(name.to_string(), routed);
+        shared_src.insert(name.to_string(), shared);
+    }
+    let logits_host = rng.vec_scaled((rows * (e + 1)) as usize, 2.0);
+    let routed_logits: Vec<f32> = logits_host.chunks(e as usize + 1).flat_map(|r| r[..e as usize].to_vec()).collect();
+    let shared_gate: Vec<f32> = logits_host.chunks(e as usize + 1).map(|r| r[e as usize]).collect();
+    let x_host = rng.vec_scaled((rows * d) as usize, 1.0);
+    let x = g.storage_init("x", &x_host);
+    let kernels = SlotKernels::resolve(&g).expect("kernels");
+    let experts = |src: &std::collections::HashMap<String, Vec<f32>>, blocks: u32| {
+        let bank = |name: &str, n: u32, k: u32| I8Bank::from_source(&g, src, name, blocks as usize, n as usize, k as usize).expect("bank");
+        I8Experts { gate: bank("gate", ff, d), up: bank("up", ff, d), down: bank("down", d, ff) }
+    };
+    let call = |experts: &I8Experts, logits: &[f32], experts_n: u32, k: u32, shared: u32, router: SlotRouter| {
+        let scratch = SlotScratch::new(&g, rows, d, ff, experts_n, k, shared);
+        let (logits, out) = (g.storage_init("logits", logits), g.storage((rows * d) as u64));
+        let shape = SlotShape { rows, d_model: d, moe_ff: ff, n_experts: experts_n, top_k: k, shared };
+        g.submit(&[], &expert_fwd_i8_slots(&g, &kernels, &shape, router, &x, &logits, experts, &scratch, GROUPED_MIN_ROWS, &out));
+        g.read(&out, (rows * d) as usize)
+    };
+    let router = SlotRouter { norm: true, scale: 1.0 };
+    let combined = call(&experts(&all_src, e + 1), &logits_host, e, top_k, 1, router);
+    let routed = call(&experts(&routed_src, e), &routed_logits, e, top_k, 0, router);
+    // One expert, one slot, router weight exactly 1: the shared expert's own output.
+    let shared_out = call(&experts(&shared_src, 1), &vec![0.0; rows as usize], 1, 1, 0, router);
+    let want: Vec<f32> = (0..(rows * d) as usize)
+        .map(|i| {
+            let gate = 1.0 / (1.0 + (-shared_gate[i / d as usize]).exp());
+            routed[i] + gate * shared_out[i]
+        })
+        .collect();
+    let (rel, _) = relative_l2(&combined, &want);
+    println!("moe_i8_slots shared rows={rows}: relative L2 {rel:.2e}");
+    assert!(combined.iter().all(|v| v.is_finite()) && rel < 1e-4, "rows={rows}: the shared slot differs from routed + gate * shared by {rel}");
+}
+
+#[test]
+fn a_shared_expert_slot_adds_its_gated_output_to_the_routed_experts() {
+    run_shared(1);
+    run_shared(12);
 }
