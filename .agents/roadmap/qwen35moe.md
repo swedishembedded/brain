@@ -178,8 +178,8 @@ times group-32 activation scales, identical result to the WGSL kernel),
 
 | # | step | gate |
 |---|---|---|
-| 1 | `model::moe_i8` carries the shared-expert slot (`SlotShape.shared`), `qwen35moe` calls it and drops its copy | `model/tests/moe_i8_slots.rs` extended with a shared slot against the host reference; qwen35moe's moe sublayer and decode tests unchanged; the 35B greedy tokens before and after identical |
-| 2 | `ffn_fwd_pre` is the one FFN call of the `qwen35` layer loops, dense bit-unchanged | `qwen35/tests/gguf_conformance.rs` on gpu1 and the CPU lib suite, unchanged |
+| 1 | `model::moe_i8` carries the shared-expert slot (`SlotShape.shared`), `qwen35moe` calls it and drops its copy (first half done, second half blocked: see below) | `model/tests/moe_i8_slots.rs` extended with a shared slot against the host reference; qwen35moe's moe sublayer and decode tests unchanged; the 35B greedy tokens before and after identical |
+| 2 | `ffn_fwd_pre` is the one FFN call of the `qwen35` layer loops, dense bit-unchanged (done) | `qwen35/tests/gguf_conformance.rs` on gpu1 and the CPU lib suite, unchanged |
 | 3 | `Qwen35Config::moe`, MoE weights in the stage loader, GGUF mapping, byte cost; a tiny random-weight MoE GGUF fixture served by `Qwen35GgufEngine` | `model::serve::conformance` suite on the fixture (the same suite `qwen35moe/tests/serve_conformance.rs` runs against the old engine), parity with `qwen35moe::serve::Engine` on the same weights |
 | 4 | the real 35B GGUF through the shared engine: paged KV (256-row blocks), state row independent of KV pages, snapshot prefix cache, background prefill | greedy tokens equal the old engine's on 8 prompts; `longctx` and chat `sweep` rerun against the baseline above |
 | 5 | catalog serves the GGUF via the shared resident, `qwen35moe` serving engine and `resident_qwen35moe` deleted | `brain serve` end to end on the GGUF; serving-runtime G2/G4 closed |
@@ -189,3 +189,40 @@ Step 4 changes what is measured, so its acceptance is a number: the chat sweep
 at concurrency 16 must beat 263 output tok/s and the 4-client inter-token p99
 must fall under the 359 ms above, with longctx single-stream decode within 5 %
 of 183 tok/s.
+
+### Status of the first steps (2026-10-29)
+
+Step 2 is done: `Qwen35::ffn_fwd_pre` is the single FFN call of the decode and
+prefill loops; `gguf_conformance` on gpu1 (13 tests) and the CPU lib suite (148)
+pass unchanged.
+
+Step 1, first half is done: `SlotShape::shared` makes the shared expert one more
+slot of every row in `model::moe_i8`, gated by
+`a_shared_expert_slot_adds_its_gated_output_to_the_routed_experts` (relative L2
+0 and 2.3e-8 on gpu1, gather and grouped regimes).
+
+Step 1, second half is NOT done and not landed. Replacing
+`qwen35moe::model::moe_sublayer_i8` with the shared op was built and is
+bit-identical on the real checkpoint (`fast_path_parity_real` reports the same
+rel-L2 on every prompt as HEAD, to four digits), but it made chunked prefill
+6-9 % slower on the 35B Q8_0 (A/B of two binaries, alternating, same card:
+1024-token prefill 3090 -> 2870 tok/s, 4096-token 2880 -> 2620 tok/s) while
+decode was unchanged (183.2 against 183.4 tok/s at one stream, 987 against 986
+at 16). The per-kernel device table attributes it to `moe_i8_grouped` alone (208.6
+-> 227.3 ms over 480 calls of one 1024-token prefill) with the same call count
+and the same arguments. Ruled out by experiment, each built and timed: the
+number of per-call allocations (the unfused path packs into persistent buffers
+as before), allocation order inside the sublayer, the size of the persistent
+packing (64, 512, 1024, 2048 rows), and the shared op's code itself (the old
+sublayer body pasted into the new tree is equally slow). What remains is
+something the port changes in `qwen35moe::q8` or at engine build: the old
+`Qwen35Q8` held its packing at `b * t` = 64 rows while a prefill round packs 256
+(the old code writes past it), and the bank type, field layout and kernel
+lookup by name differ. Until that is understood the duplicate stays; the
+direction is unchanged. Note for whoever resumes: the unfused prefill path is
+taken at 256 rows (`front` is `None`), so any change to that path is on the
+hot path of the 35B's prefill.
+
+`fast_path_parity_real` itself fails at HEAD (prompt 3 prefill hidden rel-L2
+5.06e-2 against its floor), before and after these changes with identical
+numbers; it is an existing defect of the real-checkpoint gate, not of this work.
