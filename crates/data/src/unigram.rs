@@ -68,6 +68,7 @@ use std::collections::HashMap;
 use serde::Deserialize;
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::special_match::SpecialMatcher;
 use crate::tokenizer::Tokenizer;
 
 /// The `U+2581` "lower one eighth block" sentencepiece uses for a space.
@@ -344,10 +345,8 @@ pub struct UnigramTokenizer {
     unk_score: f64,
     /// Longest piece in BYTES - the lattice never looks further ahead.
     max_piece_bytes: usize,
-    /// (content, id) for added/special tokens, longest content first.
-    added: Vec<(String, u32)>,
-    /// First byte of every added token, so the scan skips most positions.
-    added_first: [bool; 256],
+    /// The added/special tokens, matched longest-first at a position.
+    added: SpecialMatcher,
     normalizer: Vec<NormStep>,
     /// Single-sequence template specials, e.g. umT5's trailing `</s>`.
     prefix: Vec<u32>,
@@ -400,15 +399,12 @@ impl UnigramTokenizer {
         }
 
         let mut added: Vec<(String, u32)> = Vec::new();
-        let mut added_first = [false; 256];
         for a in &j.added_tokens {
             if a.content.is_empty() {
                 return Err("tokenizer.json: an added token has empty content".into());
             }
             added.push((a.content.clone(), a.id));
-            added_first[a.content.as_bytes()[0] as usize] = true;
         }
-        added.sort_by(|x, y| y.0.len().cmp(&x.0.len()).then_with(|| x.0.cmp(&y.0)));
 
         let normalizer = parse_normalizer(j.normalizer.as_ref())?;
         parse_metaspace(&j.pre_tokenizer)?;
@@ -418,6 +414,7 @@ impl UnigramTokenizer {
         // every T5) uses id 0; taking it from the added tokens rather than
         // hardcoding keeps a checkpoint that renumbers them honest.
         let pad_id = added.iter().find(|(c, _)| c == "<pad>").map(|(_, i)| *i).unwrap_or(0);
+        let added = SpecialMatcher::new(added.iter().map(|(c, id)| (c.as_str(), *id)));
 
         Ok(UnigramTokenizer {
             vocab_size: id_to_piece.len(),
@@ -427,7 +424,6 @@ impl UnigramTokenizer {
             unk_score: min_score - UNK_PENALTY,
             max_piece_bytes,
             added,
-            added_first,
             normalizer,
             prefix,
             suffix,
@@ -447,7 +443,7 @@ impl UnigramTokenizer {
 
     /// Id of an added/special token by literal content (e.g. `"</s>"`).
     pub fn special_id(&self, content: &str) -> Option<u32> {
-        self.added.iter().find(|(c, _)| c == content).map(|(_, id)| *id)
+        self.added.id_of(content)
     }
 
     /// `wan/modules/tokenizers.py`'s `whitespace_clean`: collapse every run of
@@ -541,16 +537,10 @@ impl UnigramTokenizer {
         s
     }
 
-    /// The longest added token matching at byte offset `at`, if any.
+    /// The longest added token matching at byte offset `at`, if any:
+    /// O(length of the match), one table lookup when no token starts here.
     fn added_at(&self, s: &str, at: usize) -> Option<(usize, u32)> {
-        if !self.added_first[s.as_bytes()[at] as usize] {
-            return None;
-        }
-        let rest = &s[at..];
-        self.added
-            .iter()
-            .find(|(c, _)| rest.starts_with(c.as_str()))
-            .map(|(c, id)| (c.len(), *id))
+        self.added.longest_at(&s[at..])
     }
 
     /// Metaspace + max-product dynamic programming over one added-token-free segment.

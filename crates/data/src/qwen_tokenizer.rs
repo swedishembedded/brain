@@ -25,6 +25,7 @@ use std::collections::HashMap;
 
 use crate::bpe::{bpe_merge, bytes_to_unicode};
 use crate::hf_pretok::{Normalizer, PreTokenizer};
+use crate::special_match::SpecialMatcher;
 use crate::tokenizer::Tokenizer;
 
 pub struct QwenBpe {
@@ -33,8 +34,8 @@ pub struct QwenBpe {
     bpe_ranks: HashMap<(String, String), u32>,
     byte_encoder: [char; 256],
     byte_decoder: HashMap<char, u8>,
-    /// (content, id) for special/added tokens, longest content first.
-    specials: Vec<(String, u32)>,
+    /// The special/added tokens, matched leftmost-longest in one pass.
+    specials: SpecialMatcher,
     vocab_size: usize,
     /// The file's normalizer, applied to the text between special tokens.
     normalizer: Option<Normalizer>,
@@ -199,8 +200,7 @@ impl QwenBpe {
                 }
             }
         }
-        // Longest content first so e.g. "<|im_start|>" matches before any prefix.
-        specials.sort_by_key(|special| std::cmp::Reverse(special.0.len()));
+        let specials = SpecialMatcher::new(specials.iter().map(|(c, id)| (c.as_str(), *id)));
 
         let byte_encoder = bytes_to_unicode();
         let mut byte_decoder = HashMap::with_capacity(256);
@@ -275,8 +275,7 @@ impl QwenBpe {
                 }
             }
         }
-        // Longest content first so e.g. "<|im_start|>" matches before any prefix.
-        specials.sort_by_key(|special| std::cmp::Reverse(special.0.len()));
+        let specials = SpecialMatcher::new(specials.iter().map(|(c, id)| (c.as_str(), *id)));
 
         let byte_encoder = bytes_to_unicode();
         let mut byte_decoder = HashMap::with_capacity(256);
@@ -309,7 +308,7 @@ impl QwenBpe {
 
     /// Id of a special/added token by literal content (e.g. `"<|mask|>"`).
     pub fn special_id(&self, content: &str) -> Option<u32> {
-        self.specials.iter().find(|(c, _)| c == content).map(|(_, id)| *id)
+        self.specials.id_of(content)
     }
 
     /// Append new special/added tokens past the current vocabulary, in the
@@ -329,13 +328,9 @@ impl QwenBpe {
             let id = self.vocab_size as u32;
             self.encoder.insert(content.to_string(), id);
             self.decoder.insert(id, content.to_string());
-            self.specials.push((content.to_string(), id));
+            self.specials.insert(content, id);
             self.vocab_size += 1;
         }
-        // Longest content first, same invariant `from_json_bytes`/`from_gguf`
-        // establish - a longer added token must match before a shorter one
-        // that happens to be one of its prefixes.
-        self.specials.sort_by_key(|special| std::cmp::Reverse(special.0.len()));
     }
 
     /// Number of distinct ids this tokenizer can produce (max id + 1,
@@ -450,34 +445,21 @@ impl QwenBpe {
         }
     }
 
+    /// Cut the text at its special-token literals (leftmost, longest first) and
+    /// BPE the gaps. One pass over `text` through the [`SpecialMatcher`]: the
+    /// cost is the BPE of the gaps plus O(text length x longest special), not
+    /// a search per special.
     fn encode_with_specials(&self, text: &str, out: &mut Vec<u32>) {
-        // Split on special-token literals first (longest-first), BPE the gaps.
         let mut rest = text;
-        'outer: while !rest.is_empty() {
-            // Find the earliest special-token occurrence.
-            let mut best: Option<(usize, &str, u32)> = None;
-            for (content, id) in &self.specials {
-                if let Some(pos) = rest.find(content.as_str()) {
-                    if best.map(|(bp, _, _)| pos < bp).unwrap_or(true) {
-                        best = Some((pos, content, *id));
-                    }
-                }
-            }
-            if let Some((pos, content, id)) = best {
-                if pos > 0 {
-                    for piece in self.pretokenize(&rest[..pos]) {
-                        self.encode_piece(&piece, out);
-                    }
-                }
-                out.push(id);
-                rest = &rest[pos + content.len()..];
-                continue 'outer;
-            }
-            // No specials left: BPE the remainder.
-            for piece in self.pretokenize(rest) {
+        while let Some((pos, len, id)) = self.specials.find(rest) {
+            for piece in self.pretokenize(&rest[..pos]) {
                 self.encode_piece(&piece, out);
             }
-            break;
+            out.push(id);
+            rest = &rest[pos + len..];
+        }
+        for piece in self.pretokenize(rest) {
+            self.encode_piece(&piece, out);
         }
     }
 }
@@ -575,6 +557,28 @@ mod tests {
         t.add_special_tokens(&["<loc_5>"]);
         let id = t.special_id("<loc_5>").unwrap();
         assert_eq!(t.encode("<loc_5>"), vec![id]);
+    }
+
+    /// A tokenizer with one token per byte (ids 0..256 in `bytes_to_unicode`
+    /// order, so id == byte value) plus two specials.
+    fn byte_tok() -> QwenBpe {
+        let map = bytes_to_unicode();
+        let vocab: serde_json::Map<String, serde_json::Value> = (0..256usize).map(|b| (map[b].to_string(), serde_json::json!(b))).collect();
+        let json = serde_json::json!({
+            "model": { "vocab": vocab, "merges": [] },
+            "added_tokens": [{"content": "<|a|>", "id": 256u32}, {"content": "<|a|b|>", "id": 257u32}],
+        });
+        QwenBpe::from_json_bytes(json.to_string().as_bytes()).unwrap()
+    }
+
+    /// Specials are cut leftmost, longest first, wherever they sit in the text.
+    #[test]
+    fn encode_cuts_specials_leftmost_longest() {
+        let t = byte_tok();
+        let ids = |s: &str| s.bytes().map(u32::from).collect::<Vec<_>>();
+        assert_eq!(t.encode("x<|a|b|>y<|a|>"), [ids("x"), vec![257], ids("y"), vec![256]].concat());
+        assert_eq!(t.encode("<|a|<|a|>"), [ids("<|a|"), vec![256]].concat());
+        assert_eq!(t.encode("no specials é"), ids("no specials é"));
     }
 
     fn lfm_tok() -> Option<QwenBpe> {

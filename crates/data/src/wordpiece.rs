@@ -55,6 +55,7 @@ use serde_json::Value;
 use unicode_general_category::{get_general_category, GeneralCategory};
 use unicode_normalization::UnicodeNormalization;
 
+use crate::special_match::SpecialMatcher;
 use crate::tokenizer::Tokenizer;
 
 pub struct WordPiece {
@@ -65,10 +66,9 @@ pub struct WordPiece {
     /// `continuing_subword_prefix` - `##` for every checkpoint in this family.
     cont: String,
     max_word_chars: usize,
-    /// Added/special tokens as `(content, id)`, **longest content first** so the
-    /// scan is leftmost-longest and `[MASK]` can never be shadowed by a shorter
-    /// entry that happens to be its prefix.
-    added: Vec<(String, u32)>,
+    /// Added/special tokens, matched leftmost-longest in one pass so `[MASK]`
+    /// can never be shadowed by a shorter entry that happens to be its prefix.
+    added: SpecialMatcher,
     /// `TemplateProcessing`'s single-sequence prefix/suffix ids (`[CLS]`/`[SEP]`).
     prefix: Vec<u32>,
     suffix: Vec<u32>,
@@ -214,7 +214,7 @@ impl WordPiece {
             other => return Err(format!("tokenizer.json: pre_tokenizer.type is {other:?}, expected \"BertPreTokenizer\"")),
         }
 
-        let mut added: Vec<(String, u32)> = v
+        let added: Vec<(String, u32)> = v
             .get("added_tokens")
             .and_then(Value::as_array)
             .map(|a| {
@@ -227,9 +227,7 @@ impl WordPiece {
                     .collect()
             })
             .unwrap_or_default();
-        // Longest first: leftmost-LONGEST, so a short entry cannot shadow a
-        // longer one that starts at the same position.
-        added.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
+        let added = SpecialMatcher::new(added.iter().map(|(c, id)| (c.as_str(), *id)));
 
         let (prefix, suffix) = template_affixes(&v)?;
 
@@ -356,7 +354,8 @@ impl WordPiece {
         out.extend(sub);
     }
 
-    /// Split the RAW input around added tokens, longest match first.
+    /// Split the RAW input around added tokens, leftmost then longest. One
+    /// pass through the [`SpecialMatcher`]: O(text length x longest added token).
     fn split_added<'a>(&self, text: &'a str) -> Vec<Segment<'a>> {
         let mut segs = Vec::new();
         if self.added.is_empty() {
@@ -366,21 +365,12 @@ impl WordPiece {
             return segs;
         }
         let mut plain_from = 0usize;
-        let mut i = 0usize;
-        while i < text.len() {
-            let rest = &text[i..];
-            let hit = self.added.iter().find(|(c, _)| !c.is_empty() && rest.starts_with(c.as_str()));
-            match hit {
-                Some((content, id)) => {
-                    if i > plain_from {
-                        segs.push(Segment::Plain(&text[plain_from..i]));
-                    }
-                    segs.push(Segment::Added(*id));
-                    i += content.len();
-                    plain_from = i;
-                }
-                None => i += rest.chars().next().map(char::len_utf8).unwrap_or(1),
+        while let Some((pos, len, id)) = self.added.find(&text[plain_from..]) {
+            if pos > 0 {
+                segs.push(Segment::Plain(&text[plain_from..plain_from + pos]));
             }
+            segs.push(Segment::Added(id));
+            plain_from += pos + len;
         }
         if plain_from < text.len() {
             segs.push(Segment::Plain(&text[plain_from..]));
