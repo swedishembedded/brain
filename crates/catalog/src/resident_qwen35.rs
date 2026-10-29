@@ -549,7 +549,8 @@ pub fn gguf_resident(gguf_path: &str, id: &str, gpus: &[(u32, u64)], reserved: u
 /// (its device bytes are part of the placement), so adapters can be offered
 /// on it ([`AdapterHost`]).
 pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], reserved: u64, cfg: &Qwen35GgufServeConfig, bank: Option<AdapterBankSettings>) -> Result<Qwen35GgufServed, String> {
-    use qwen35::int8_gguf_resident::{held_tiers, resident_config, Qwen35GgufResident, SpecServing, SpeculativeMode};
+    use qwen35::int8_gguf_resident::{Qwen35GgufResident, SpecServing, SpeculativeMode};
+    use qwen35::resident_checkpoint::ResidentCheckpoint;
     if let Some(why) = &cfg.refused {
         return Err(why.clone());
     }
@@ -560,13 +561,13 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
         return Err(format!("{MODEL}: --exact-decode is not supported with an adapter bank: a grouped decode step cannot carry per-row adapter slots"));
     }
     let max_batch = cfg.max_batch_or_default();
-    let mg = checkpoint::gguf::MmapGguf::open(gguf_path).map_err(|e| format!("cannot open '{gguf_path}': {e}"))?;
-    let model_cfg = resident_config(&mg, 1).map_err(|e| format!("'{gguf_path}' is not a servable Qwen3.8 GGUF: {e}"))?;
+    let ckpt = ResidentCheckpoint::open(gguf_path).map_err(|e| format!("cannot open '{gguf_path}': {e}"))?;
+    let model_cfg = ckpt.config(1).map_err(|e| format!("'{gguf_path}' is not a servable Qwen3.8 checkpoint: {e}"))?;
     let mut chosen = Vec::new();
     let tier = match &cfg.tier {
         Some(tier) => tier.clone(),
         None => {
-            let held = held_tiers(&mg, &model_cfg).map_err(|e| format!("'{gguf_path}': {e}"))?;
+            let held = ckpt.held_tiers(&model_cfg).map_err(|e| format!("'{gguf_path}': {e}"))?;
             chosen.push(format!("--weight-format {} with {} tensors at other tiers: each tensor as the checkpoint stores it", held.default_dtype().name(), held.rule_count()));
             held
         }

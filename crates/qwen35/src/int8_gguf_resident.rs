@@ -160,6 +160,7 @@ use data::tokenizer::Tokenizer;
 use data::rng::Rng;
 use gguf::import::Mapped;
 use gguf::GdnFixSource;
+use gpu_core::select::Dtype;
 use gpu_core::{DeviceBuffer, Gpu};
 use model::adapter::bank::AdapterBankRequest;
 use model::dispatch::LORA_SLOT_NONE;
@@ -172,6 +173,8 @@ use serde_json::json;
 
 use crate::adapter_serving as adapters;
 use crate::config::{LayerType, Qwen35Config};
+use crate::resident_checkpoint::ResidentCheckpoint;
+pub(crate) use mtp::checkpoint_has_mtp;
 use crate::model::{BatchDecodeCaches, BatchSeq, DecodeCaches, GdnPoolStore, KvWindow, PooledCaches, PrefillSeg, Qwen35, SpecDecodeStats, StageRows};
 
 /// Catalog id. Names the real upstream release this resident loads, exactly
@@ -312,9 +315,8 @@ const SCORE_HEAD_ROWS: usize = 8;
 /// an element. 1.42 GB at the real shape - against 5.09 GB for the fp32 table
 /// this replaces, which is not merely large but IMPOSSIBLE on a 24 GB P40
 /// (past `max_buffer_size`, and 2.4x the 2047 MiB storage-binding limit).
-fn head_i8_bytes(cfg: &Qwen35Config) -> u64 {
-    let (v, d) = (cfg.vocab as u64, cfg.d_model as u64);
-    v * d + v * (d / model::int8::GROUP as u64) * 4
+fn head_bytes(cfg: &Qwen35Config, tier: Dtype) -> u64 {
+    model::ops::Weight::bytes_for(tier, cfg.vocab as usize, cfg.d_model as usize)
 }
 
 /// The byte-exact per-stage cost model this resident hands to
@@ -329,7 +331,7 @@ fn head_i8_bytes(cfg: &Qwen35Config) -> u64 {
 ///   it straight out of the mapping ([`MmapGguf::tensor_range`], which decodes
 ///   only the quant blocks that row touches). 5.09 GB that exists neither in
 ///   VRAM nor in host RAM.
-/// * `head` - `norm.weight` plus the INT8 `lm_head` ([`head_i8_bytes`]), both
+/// * `head` - `norm.weight` plus the INT8 `lm_head` ([`head_bytes`]), both
 ///   held by this resident on the last stage's card rather than by the shard
 ///   (the shard is built `head: false`; see [`Qwen35GgufInstance::head`]).
 ///
@@ -368,6 +370,8 @@ pub struct ServingShape {
     /// shape so the automatic context and pool size leave room for it, rather
     /// than filling the cards and refusing the bank afterwards.
     pub adapter_bank: Option<BankBytes>,
+    /// The tier the lm_head is held at ([`ResidentCheckpoint::head_tier`]): int8 for a GGUF, as stored for an HF release.
+    pub head: Dtype,
 }
 
 /// An adapter bank's device bytes: beside each layer it corrects, and the row
@@ -381,7 +385,7 @@ pub struct BankBytes {
 impl ServingShape {
     /// `max_batch` sequences of `cap` tokens, no prompt cache, no speculation.
     pub fn new(cap: u32, tier: TierPolicy, kv: KvTier, max_batch: u32) -> ServingShape {
-        ServingShape { cap, tier, kv, max_batch, prefix_slots: 0, kv_pool_rows: 0, spec: SpecCost::NONE, prefill_rows: TENSOR_CORE_PREFILL_TOKENS, adapter_bank: None }
+        ServingShape { cap, tier, kv, max_batch, prefix_slots: 0, kv_pool_rows: 0, spec: SpecCost::NONE, prefill_rows: TENSOR_CORE_PREFILL_TOKENS, adapter_bank: None, head: Dtype::I8 }
     }
 
     /// The same shape for a stack whose prefill forward may carry `rows` rows (the
@@ -459,7 +463,7 @@ pub fn serving_cost(cfg: &Qwen35Config, shape: &ServingShape) -> LayerBytes {
     } else {
         0
     };
-    LayerBytes { per_layer, embed: 0, head: head_i8_bytes(cfg) + cfg.d_model as u64 * 4 + mtp + bank.map_or(0, |b| b.head) }
+    LayerBytes { per_layer, embed: 0, head: head_bytes(cfg, shape.head) + cfg.d_model as u64 * 4 + mtp + bank.map_or(0, |b| b.head) }
 }
 
 /// Whether `max_batch` sequences of `cap` tokens make KV planes the kernels
@@ -790,6 +794,22 @@ pub fn shard_source<'a>(mg: &'a MmapGguf, cfg: &Qwen35Config, shard: &Shard) -> 
     Ok(GdnFixSource::new(src, cfg.gdn_head_order()))
 }
 
+/// The lm_head on `gpu` in the tier `ckpt` holds it at ([`ResidentCheckpoint::head_tier`]): int8 quantized on the way in for a
+/// GGUF (never the whole 5 GB fp32 table on the host), bf16 as stored for an HF release.
+fn upload_head(ckpt: &ResidentCheckpoint, ops: &model::ops::Ops, gpu: &Gpu, name: &str, v: usize, d: usize) -> Result<model::ops::Weight, String> {
+    let src = ckpt.endpoint_source();
+    match ckpt.head_tier() {
+        Dtype::I8 => {
+            let (w, s) = model::int8::upload_quantized(&mut paramstore::upload::Uploader::new(gpu), src, name, v, d).map_err(|e| format!("{MODEL}: {e}"))?;
+            Ok(model::ops::Weight::I8 { w, s, n: v as u32, k: d as u32 })
+        }
+        tier => {
+            let staging = checkpoint::packed::BoundedWorkspace::new(checkpoint::packed::MemoryBudget::new(crate::fp8_source::WEIGHT_STAGING_BYTES, 0));
+            model::ops::upload_from_source(ops, src, name, v, d, tier, &staging).ok_or_else(|| format!("{MODEL}: '{name}' is not in the checkpoint"))
+        }
+    }
+}
+
 /// The weight-tier policy that holds every linear of the checkpoint as it is
 /// stored ([`gguf::held_tier_of`]): a Q4_K tensor as a K-quant, anything else
 /// at int8 - the main layers under `blocks.{l}.`, the MTP layer's under
@@ -814,11 +834,11 @@ pub fn held_tiers(mg: &MmapGguf, cfg: &Qwen35Config) -> Result<TierPolicy, Strin
     Ok(TierPolicy::per_leaf(leaves))
 }
 
-/// [`held_tiers`] of the checkpoint at `path`.
+/// [`held_tiers`] of the checkpoint at `path`: a GGUF file, or an HF directory ([`ResidentCheckpoint::held_tiers`]).
 pub fn held_tiers_at(path: &str) -> Result<TierPolicy, String> {
-    let mg = MmapGguf::open(path)?;
-    let cfg = resident_config(&mg, 1)?;
-    held_tiers(&mg, &cfg)
+    let ckpt = ResidentCheckpoint::open(path)?;
+    let cfg = ckpt.config(1)?;
+    ckpt.held_tiers(&cfg)
 }
 
 /// [`crate::gguf_import::config_from_gguf`] with the two adjustments a
@@ -1275,7 +1295,7 @@ pub struct Qwen35GgufInstance {
     shards: Vec<DeviceShard>,
     /// Kept open for the instance's lifetime so embedding rows can be read on
     /// demand. This is the header + mapping handle, not data.
-    mg: MmapGguf,
+    ckpt: ResidentCheckpoint,
     embed: EmbedTable,
     head: Head,
     tok: QwenBpe,
@@ -1344,8 +1364,8 @@ impl Qwen35GgufInstance {
 
     /// Token `t`'s embedding row, `[d_model]`, read from the mapping.
     fn embed_row(&self, t: u32) -> Result<Vec<f32>, String> {
-        self.mg
-            .tensor_range(&self.embed.name, t as usize * self.embed.d, self.embed.d)
+        self.ckpt
+            .embed_rows(&self.embed.name, &[t as usize], self.embed.d)
             .ok_or_else(|| format!("{MODEL}: token id {t} is outside '{}'", self.embed.name))?
     }
 
@@ -1359,8 +1379,8 @@ impl Qwen35GgufInstance {
     /// row, as this was, kept the device idle at the start of every 512-row prompt round.
     fn embed_rows(&self, tokens: &[u32]) -> Result<Vec<f32>, String> {
         let rows: Vec<usize> = tokens.iter().map(|&t| t as usize).collect();
-        self.mg.tensor_rows(&self.embed.name, &rows, self.embed.d).ok_or_else(|| {
-            let bad = tokens.iter().find(|&&t| self.mg.tensor_range(&self.embed.name, t as usize * self.embed.d, self.embed.d).is_none()).copied().unwrap_or(0);
+        self.ckpt.embed_rows(&self.embed.name, &rows, self.embed.d).ok_or_else(|| {
+            let bad = tokens.iter().find(|&&t| self.ckpt.embed_rows(&self.embed.name, &[t as usize], self.embed.d).is_none()).copied().unwrap_or(0);
             format!("{MODEL}: token id {bad} is outside '{}'", self.embed.name)
         })?
     }
@@ -3134,7 +3154,7 @@ pub struct Qwen35GgufResident {
     cap: u32,
     /// The per-leaf storage tier the decoder body uploads at (M24) - the
     /// `lm_head`/embedding endpoints are unaffected (INT8 and row-mmap-read
-    /// respectively, always, regardless of `tier` - see [`head_i8_bytes`]).
+    /// respectively, always, regardless of `tier` - see [`head_bytes`]).
     /// Feeds both [`layer_cost`] (so a placement is honest about what a
     /// narrower tier actually saves) and [`Self::activate_owned`]'s
     /// [`Qwen35::new_shard_dt`] call (so the plan and the load agree on what
@@ -3244,7 +3264,7 @@ impl Qwen35GgufResident {
     /// reported against the real open at activation, and the action's own constants apply meanwhile.
     pub fn sampling_defaults(&self) -> &data::generation::SamplingDefaults {
         self.sampling.get_or_init(|| {
-            let declared = MmapGguf::open(&self.gguf_path).map_err(|e| format!("cannot open '{}': {e}", self.gguf_path)).and_then(|mg| data::generation::SamplingDefaults::from_gguf(|key| mg.kv().get(key).and_then(|v| v.as_f64())));
+            let declared = ResidentCheckpoint::open(&self.gguf_path).map_err(|e| format!("cannot open '{}': {e}", self.gguf_path)).and_then(|c| c.sampling_defaults());
             declared.unwrap_or_else(|e| {
                 residency::log::warn(&format!("{MODEL}: ignoring the checkpoint's sampling defaults: {e}"));
                 data::generation::SamplingDefaults::default()
@@ -3379,8 +3399,8 @@ impl Qwen35GgufResident {
         if let Some(reason) = &self.plan().refusal {
             return Some(reason.clone());
         }
-        match MmapGguf::open(&self.gguf_path) {
-            Ok(mg) if mg.tokenizer().is_none() => Some(format!("'{}' carries no embedded tokenizer (tokenizer.ggml.* KV)", self.gguf_path)),
+        match ResidentCheckpoint::open(&self.gguf_path) {
+            Ok(c) if !c.has_tokenizer() => Some(format!("'{}' carries no tokenizer (tokenizer.ggml.* KV, or a sibling tokenizer.json)", self.gguf_path)),
             Ok(_) => None,
             Err(e) => Some(format!("cannot open '{}': {e}", self.gguf_path)),
         }
@@ -3391,13 +3411,13 @@ impl Qwen35GgufResident {
         if self.devices.is_empty() {
             return refused("no GPU is budgeted for it (its weights are device buffers; there is no CPU path)".to_string());
         }
-        let mg = match MmapGguf::open(&self.gguf_path) {
+        let mg = match ResidentCheckpoint::open(&self.gguf_path) {
             Ok(mg) => mg,
             Err(e) => return refused(format!("cannot open '{}': {e}", self.gguf_path)),
         };
-        let cfg = match resident_config(&mg, self.cap) {
+        let cfg = match mg.config(self.cap) {
             Ok(c) => c,
-            Err(e) => return refused(format!("'{}' is not a servable Qwen3.8 GGUF: {e}", self.gguf_path)),
+            Err(e) => return refused(format!("'{}' is not a servable Qwen3.8 checkpoint: {e}", self.gguf_path)),
         };
         // `plan_fewest_devices` wants `(index into self.devices, capacity)`;
         // mapping back afterwards is what makes a non-GPU device in the list
@@ -3443,8 +3463,8 @@ impl Qwen35GgufResident {
     /// the per-layer profile behind it - for a caller sizing budgets or
     /// reporting "will this fit at all?".
     pub fn total_device_bytes(&self) -> Result<u64, String> {
-        let mg = MmapGguf::open(&self.gguf_path).map_err(|e| format!("{MODEL}: cannot open '{}': {e}", self.gguf_path))?;
-        let cfg = resident_config(&mg, self.cap)?;
+        let mg = ResidentCheckpoint::open(&self.gguf_path).map_err(|e| format!("{MODEL}: cannot open '{}': {e}", self.gguf_path))?;
+        let cfg = mg.config(self.cap)?;
         Ok(serving_cost(&cfg, &self.serving_shape(&mg, &cfg)).total())
     }
 
@@ -3454,8 +3474,8 @@ impl Qwen35GgufResident {
     /// In the paged layout ([`Self::with_kv_block_rows`]) the longest context is
     /// the largest pool one sequence may take whole ([`auto_pool_rows`]).
     pub fn longest_cap(&self) -> Result<u32, String> {
-        let mg = MmapGguf::open(&self.gguf_path).map_err(|e| format!("cannot open '{}': {e}", self.gguf_path))?;
-        let cfg = resident_config(&mg, 1).map_err(|e| format!("'{}' is not a servable Qwen3.8 GGUF: {e}", self.gguf_path))?;
+        let mg = ResidentCheckpoint::open(&self.gguf_path).map_err(|e| format!("cannot open '{}': {e}", self.gguf_path))?;
+        let cfg = mg.config(1).map_err(|e| format!("'{}' is not a servable Qwen3.8 checkpoint: {e}", self.gguf_path))?;
         let shape = self.serving_shape(&mg, &cfg);
         let longest = if self.kv_block_rows > 0 { auto_pool_rows(&cfg, &self.devices, &shape, None) } else { auto_cap(&cfg, &self.devices, &shape) };
         longest.ok_or_else(|| format!("{} does not fit across the {} budgeted device(s) even with a one-token context", self.gguf_path, self.devices.len()))
@@ -3464,8 +3484,8 @@ impl Qwen35GgufResident {
     /// The largest shared KV pool, in rows, this configuration leaves room for
     /// when every sequence is held to `cap` tokens ([`auto_pool_rows`]).
     pub fn longest_pool(&self, cap: u32) -> Result<u32, String> {
-        let mg = MmapGguf::open(&self.gguf_path).map_err(|e| format!("cannot open '{}': {e}", self.gguf_path))?;
-        let cfg = resident_config(&mg, 1).map_err(|e| format!("'{}' is not a servable Qwen3.8 GGUF: {e}", self.gguf_path))?;
+        let mg = ResidentCheckpoint::open(&self.gguf_path).map_err(|e| format!("cannot open '{}': {e}", self.gguf_path))?;
+        let cfg = mg.config(1).map_err(|e| format!("'{}' is not a servable Qwen3.8 checkpoint: {e}", self.gguf_path))?;
         auto_pool_rows(&cfg, &self.devices, &self.serving_shape(&mg, &cfg), Some(cap)).ok_or_else(|| format!("a {cap}-token context does not fit the {} budgeted device(s) beside the weights", self.devices.len()))
     }
 
@@ -3473,7 +3493,7 @@ impl Qwen35GgufResident {
     /// configured: speculation is charged only where loading will allocate it
     /// ([`SpecServing::cost`]) - the verify kernels on every budgeted card and,
     /// for the MTP modes, an MTP block in the checkpoint.
-    fn serving_shape(&self, mg: &MmapGguf, cfg: &Qwen35Config) -> ServingShape {
+    fn serving_shape(&self, mg: &ResidentCheckpoint, cfg: &Qwen35Config) -> ServingShape {
         let cards: Vec<u32> = self.devices.iter().filter_map(|(d, _)| if let Device::Gpu(i) = d { Some(*i) } else { None }).collect();
         let hw = gpu_core::defaults::Hardware::detected();
         let verify = crate::model::verify::verify_shape_supported(cfg) && [gpu_core::Fused::GdnVerifyPool, gpu_core::Fused::GdnCommitPool].iter().all(|&k| hw.offers_fused(k, &cards));
@@ -3482,8 +3502,9 @@ impl Qwen35GgufResident {
             kv_pool_rows: self.paged_pool_rows(),
             // Exact decode runs plain steps, so the verify scratch is not
             // charged: the placement must describe what will be allocated.
-            spec: if self.exact_decode { SpecCost::NONE } else { self.spec.cost(mtp::checkpoint_has_mtp(mg, cfg), verify) },
+            spec: if self.exact_decode { SpecCost::NONE } else { self.spec.cost(mg.has_mtp(cfg), verify) },
             adapter_bank: self.bank_bytes(cfg),
+            head: mg.head_tier(),
             ..ServingShape::new(self.cap, self.tier.clone(), self.kv_tier, self.max_batch).with_prefill_rows(self.prefill.batch_tokens.try_into().unwrap_or(u32::MAX))
         }
     }
@@ -3506,21 +3527,6 @@ impl Qwen35GgufResident {
     pub fn placement(&self) -> Vec<(Device, usize, usize, u64)> {
         self.plan().stages.iter().map(|(d, s, b)| (*d, s.start, s.end, *b)).collect()
     }
-}
-
-/// Stop ids for this checkpoint: the GGUF's own declared EOS plus the chat
-/// markup terminators, resolved through the embedded vocabulary rather than
-/// hardcoded. Duplicates are dropped so `eos.contains` stays a plain scan.
-fn stop_ids(tok: &QwenBpe, declared: Option<u32>) -> Vec<u32> {
-    let mut ids: Vec<u32> = declared.into_iter().collect();
-    for s in ["<|im_end|>", "<|endoftext|>"] {
-        if let Some(id) = tok.special_id(s) {
-            if !ids.contains(&id) {
-                ids.push(id);
-            }
-        }
-    }
-    ids
 }
 
 /// This model renders the 3.8 chat template by default; `parse_request`
@@ -3636,9 +3642,7 @@ impl Qwen35GgufResident {
     /// `max_batch` is the number of sequences the scheduler may run at once.
     pub fn activate_engine(&self, devices: &[Device]) -> Result<(Qwen35GgufEngine, QwenBpe, Vec<u32>), String> {
         let inst = self.activate_owned(devices)?;
-        let gtok = inst.mg.tokenizer().ok_or_else(|| format!("{MODEL}: '{}' carries no embedded tokenizer", self.gguf_path))?;
-        let tok = QwenBpe::from_gguf(&gtok).map_err(|e| format!("{MODEL}: embedded tokenizer: {e}"))?;
-        let stop = inst.eos.clone();
+        let (tok, stop) = inst.ckpt.tokenizer().map_err(|e| format!("{MODEL}: '{}': {e}", self.gguf_path))?;
         let mut engine = Qwen35GgufEngine::new(inst);
         engine.set_prefill_policy(self.prefill);
         if let Some(request) = &self.bank {
@@ -3680,12 +3684,9 @@ impl Qwen35GgufResident {
             ));
         }
 
-        let mg = MmapGguf::open(&self.gguf_path).map_err(|e| format!("{MODEL}: cannot open '{}': {e}", self.gguf_path))?;
-        let gtok = mg.tokenizer().ok_or_else(|| format!("{MODEL}: '{}' carries no embedded tokenizer (tokenizer.ggml.* KV)", self.gguf_path))?;
-        let declared_eos = gtok.eos;
-        let tok = QwenBpe::from_gguf(&gtok).map_err(|e| format!("{MODEL}: embedded tokenizer: {e}"))?;
-        let eos = stop_ids(&tok, declared_eos);
-        let (embed_name, norm_name, head_name) = endpoint_names(&mg, &cfg)?;
+        let mg = ResidentCheckpoint::open(&self.gguf_path).map_err(|e| format!("{MODEL}: cannot open '{}': {e}", self.gguf_path))?;
+        let (tok, eos) = mg.tokenizer().map_err(|e| format!("{MODEL}: '{}': {e}", self.gguf_path))?;
+        let (embed_name, norm_name, head_name) = mg.endpoint_names(&cfg)?;
 
         let layout = self.kv_layout();
         let state_rows = layout.state_rows(self.max_batch, self.prefix_slots);
@@ -3697,14 +3698,15 @@ impl Qwen35GgufResident {
             // endpoints, because an fp32 `[vocab, d_model]` cannot be a
             // device buffer here at all).
             let shard = &Shard { embed: false, head: false, ..placed.clone() };
-            let src = shard_source(&mg, &cfg, shard)?;
+            let shard_src = mg.shard_source(&cfg, shard)?;
+            let src = shard_src.as_source();
             // `b = t = 1`: this instance's own `res`/`logits`/`tokens` and
             // its per-instance decode state are sized to the smallest legal
             // value (`gdn_chunk_size(1) == 1`, so `t % chunk == 0` holds for
             // every config). The real per-sequence cache is `ShardCaches`
             // below, at `self.cap` - the same split `crate::serve::Engine`
             // makes for the same reason.
-            let qwen35 = Qwen35::new_shard_dt(cfg.clone(), 1, 1, &src, shard.clone(), &self.tier);
+            let qwen35 = Qwen35::new_shard_dt(cfg.clone(), 1, 1, src, shard.clone(), &self.tier);
             // Exact decode is a property of the STEP, not of one card: every
             // stage groups its rows and sizes its attention from this
             // instance's per-sequence context.
@@ -3722,17 +3724,16 @@ impl Qwen35GgufResident {
         // serve (a Q8_0 GGUF byte repack straight from blocks, no fp32
         // anywhere, when it applies) and otherwise bounds host scratch to
         // its own row-chunked fp32 fallback - never the whole 5.09 GB table.
-        let (w, s) = model::int8::upload_quantized(&mut paramstore::upload::Uploader::new(gpu), &mg, &head_name, v, d)
-            .map_err(|e| format!("{MODEL}: {e}"))?;
-        let head_w = model::ops::Weight::I8 { w, s, n: v as u32, k: d as u32 };
-        let norm = match mg.tensor(&norm_name) {
+        let head_ops = model::ops::Ops::new(gpu.share()).map_err(|e| format!("{MODEL}: Ops::new on the head card: {e}"))?;
+        let head_w = upload_head(&mg, &head_ops, gpu, &head_name, v, d)?;
+        let norm = match mg.final_norm(&norm_name) {
             Some(Ok(w)) if w.len() == d => gpu.storage_init("qwen35.gguf.final_norm", &w),
             Some(Ok(w)) => return Err(format!("{MODEL}: '{norm_name}' has {} elements, expected {d}", w.len())),
             Some(Err(e)) => return Err(format!("{MODEL}: '{norm_name}': {e}")),
             None => return Err(format!("{MODEL}: '{norm_name}' vanished between planning and load")),
         };
         let head = Head {
-            ops: model::ops::Ops::new(gpu.share()).map_err(|e| format!("{MODEL}: Ops::new on the head card: {e}"))?,
+            ops: head_ops,
             norm,
             w: head_w,
         };
@@ -3741,7 +3742,7 @@ impl Qwen35GgufResident {
         let mut inst = Qwen35GgufInstance {
             cfg,
             shards,
-            mg,
+            ckpt: mg,
             embed,
             head,
             tok,
@@ -3782,7 +3783,6 @@ mod tests {
     }
 
     use super::*;
-    use gpu_core::select::Dtype;
 
     const GB: u64 = 1 << 30;
 
@@ -3858,11 +3858,11 @@ mod tests {
         let fp32_table = cfg.vocab as u64 * cfg.d_model as u64 * 4;
         assert_eq!(fp32_table, 5_085_593_600, "the fp32 table this resident refuses to place");
         assert_eq!(cost.embed, 0, "the embedding is read from the mapping a row at a time, never uploaded");
-        assert_eq!(cost.head, head_i8_bytes(&cfg) + cfg.d_model as u64 * 4, "int8 lm_head + fp32 norm.weight");
+        assert_eq!(cost.head, head_bytes(&cfg, Dtype::I8) + cfg.d_model as u64 * 4, "int8 lm_head + fp32 norm.weight");
         assert!(cost.head < fp32_table / 3, "the int8 head must be far smaller than the fp32 table: {}", cost.head);
         // Inside the 2047 MiB storage-buffer BINDING limit, which is the
         // constraint that actually decides whether this can run at all.
-        assert!(head_i8_bytes(&cfg) < 2047 << 20, "the packed head must be bindable: {}", head_i8_bytes(&cfg));
+        assert!(head_bytes(&cfg, Dtype::I8) < 2047 << 20, "the packed head must be bindable: {}", head_bytes(&cfg, Dtype::I8));
     }
 
     /// A layer's decode state is charged to the stage that owns the layer -

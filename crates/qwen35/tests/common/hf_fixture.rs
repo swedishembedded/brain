@@ -78,21 +78,27 @@ pub enum Layout {
 /// A fresh scratch dir holding the checkpoint; `skip` drops one canonical
 /// tensor (to test the refusal path).
 pub fn write_checkpoint(cfg: &Qwen35Config, tag: &str, skip: Option<&str>) -> PathBuf {
-    write_checkpoint_from(cfg, tag, skip, None, Layout::Multimodal)
+    write_checkpoint_from(cfg, tag, skip, None, Layout::Multimodal, BLOCK)
+}
+
+/// [`write_checkpoint`] with the FP8 scale grid of `block` x `block` (128 in the real release, which the
+/// resident tier holds as stored; [`BLOCK`] elsewhere).
+pub fn write_checkpoint_blocked(cfg: &Qwen35Config, tag: &str, block: usize) -> PathBuf {
+    write_checkpoint_from(cfg, tag, None, None, Layout::Multimodal, block)
 }
 
 /// [`write_checkpoint`] holding `values` (brain-canonical, as `qwen35::init::init_weights` makes them) in the
 /// same layout, every tensor bf16 (the recurrence's `A_log` f32) instead of random FP8 bytes: a model whose
 /// weights are sane enough to train, in a file the packed loader reads like the real release.
 pub fn write_dense_checkpoint(cfg: &Qwen35Config, tag: &str, values: &HashMap<String, Vec<f32>>) -> PathBuf {
-    write_checkpoint_from(cfg, tag, None, Some(values), Layout::Multimodal)
+    write_checkpoint_from(cfg, tag, None, Some(values), Layout::Multimodal, BLOCK)
 }
 
 /// [`write_dense_checkpoint`] in a text-only release's layout (EdgeRock): no
 /// vision tower or MTP shard, `model.layers.*` names, the anchor-memory
 /// tensors of `cfg`, and a tied head when `cfg` ties it.
 pub fn write_text_only_checkpoint(cfg: &Qwen35Config, tag: &str, values: &HashMap<String, Vec<f32>>) -> PathBuf {
-    write_checkpoint_from(cfg, tag, None, Some(values), Layout::TextOnly)
+    write_checkpoint_from(cfg, tag, None, Some(values), Layout::TextOnly, BLOCK)
 }
 
 /// A plain RMSNorm gain is stored as `w` and applied as `1 + w` (`qwen35::import`).
@@ -107,7 +113,7 @@ fn stored_as_offset_from_one(canon: &str) -> bool {
         || canon.ends_with(".memory.k_norm.weight")
 }
 
-fn write_checkpoint_from(cfg: &Qwen35Config, tag: &str, skip: Option<&str>, dense: Option<&HashMap<String, Vec<f32>>>, layout: Layout) -> PathBuf {
+fn write_checkpoint_from(cfg: &Qwen35Config, tag: &str, skip: Option<&str>, dense: Option<&HashMap<String, Vec<f32>>>, layout: Layout, block: usize) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("qwen35_fp8_source_{tag}_{}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
@@ -156,7 +162,7 @@ fn write_checkpoint_from(cfg: &Qwen35Config, tag: &str, skip: Option<&str>, dens
                 b => b,
             }).collect();
             let (rows, cols) = (shape[0], shape[1]);
-            let (rb, cb) = model::fp8::scale_shape(rows, cols, BLOCK);
+            let (rb, cb) = model::fp8::scale_shape(rows, cols, block);
             let scales: Vec<u8> = (0..rb * cb).flat_map(|_| bf16(0.001 + (rng.next() % 1000) as f32 / 100_000.0)).collect();
             list.push(Raw { name: hf.clone(), dtype: "F8_E4M3", shape, bytes });
             let sname = format!("{hf}_scale_inv");
@@ -191,7 +197,7 @@ fn write_checkpoint_from(cfg: &Qwen35Config, tag: &str, skip: Option<&str>, dens
         write_st(&dir.join(file), tensors);
     }
     let config = match layout {
-        Layout::Multimodal => hf_config_json(cfg, BLOCK),
+        Layout::Multimodal => hf_config_json(cfg, block),
         Layout::TextOnly => hf_text_config_json(cfg),
     };
     std::fs::write(dir.join("config.json"), serde_json::to_vec(&config).unwrap()).unwrap();

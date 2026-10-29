@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `--target qwen35:<gguf>[:kvf32|:kvbf16|:kvint8]` for the request-level
+//! `--target qwen35:<gguf|hf-dir>[:kvf32|:kvbf16|:kvint8]` for the request-level
 //! `brain perf run` scenarios: the released Qwen3.8-27B GGUF served exactly as
 //! `brain serve` serves it.
 //!
@@ -33,7 +33,7 @@ pub(crate) fn parse_spec(rest: &str) -> Result<(&str, Option<KvTier>), String> {
         None => (rest, None),
     };
     if path.is_empty() {
-        return Err("target qwen35: needs a GGUF path: qwen35:<gguf>[:kvf32|:kvbf16|:kvint8]".to_string());
+        return Err("target qwen35: needs a checkpoint path (GGUF file or HF directory): qwen35:<gguf|dir>[:kvf32|:kvbf16|:kvint8]".to_string());
     }
     Ok((path, kv))
 }
@@ -42,11 +42,14 @@ pub(crate) fn parse_spec(rest: &str) -> Result<(&str, Option<KvTier>), String> {
 /// `--device` makes schedulable, budgeted with `brain serve`'s reserve.
 pub(crate) fn build(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     let (path, kv) = parse_spec(rest)?;
-    if !std::path::Path::new(path).is_file() {
-        return Err(format!("qwen35 target: GGUF not found: {path}"));
+    let checkpoint = std::path::Path::new(path);
+    if !checkpoint.is_file() && !checkpoint.is_dir() {
+        return Err(format!("qwen35 target: checkpoint not found (a GGUF file or an HF directory): {path}"));
     }
     let machine = serving::Machine::probe(crate::compute_set());
-    let id = std::path::Path::new(path).file_stem().map_or_else(|| path.to_string(), |s| s.to_string_lossy().into_owned());
+    // A directory's name is its id as it is (`Qwen3.8-27B-FP8` has dots); a file's loses its extension.
+    let named = if checkpoint.is_dir() { checkpoint.file_name() } else { checkpoint.file_stem() };
+    let id = named.map_or_else(|| path.to_string(), |s| s.to_string_lossy().into_owned());
     // Everything but the KV tier the target names is left to the server's own defaults.
     let cfg = catalog::resident_qwen35::Qwen35GgufServeConfig { kv, ..Default::default() };
     let served = catalog::resident_qwen35::gguf_resident(path, &id, &machine.gpus, RESERVE_BYTES, &cfg)?;

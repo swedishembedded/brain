@@ -31,6 +31,7 @@ pub mod init;
 pub mod lora;
 mod lora_sites;
 pub mod model;
+pub mod resident_checkpoint;
 pub mod sample;
 pub mod score;
 pub mod serve;

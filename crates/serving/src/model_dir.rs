@@ -182,6 +182,18 @@ fn is_released_qwen35(local: &brain_modelstore::LocalModel) -> bool {
     local.weights.to_string_lossy().ends_with(".gguf") && local.card.as_ref().is_some_and(|c| brain_family(&c.family) == "qwen35")
 }
 
+/// The HuggingFace directory of a released Qwen3.5/3.8 checkpoint (the FP8 release, or a bf16 one) that `local`
+/// names as its `weights` role, served by the same paged multi-card resident as a released GGUF with every
+/// tensor held as stored. `None` for any other model: a brain-format `.safetensors` file keeps the one-block
+/// engine.
+fn hf_qwen35_dir(local: &brain_modelstore::LocalModel) -> Option<PathBuf> {
+    if local.card.as_ref().is_none_or(|c| brain_family(&c.family) != "qwen35") {
+        return None;
+    }
+    let dir = local.roles.as_ref()?.get("weights")?;
+    (dir.is_dir() && dir.join("config.json").is_file()).then(|| dir.clone())
+}
+
 /// How many released Qwen3.8 GGUFs each repo directory holds.
 fn released_qwen35_per_repo(bases: &[&brain_modelstore::LocalModel]) -> BTreeMap<PathBuf, usize> {
     let mut counts = BTreeMap::new();
@@ -462,6 +474,10 @@ fn register_compound(local: &brain_modelstore::LocalModel, scan: &mut Scan, erro
     }
     if !scan.seen.insert(id.clone()) {
         errors.push(DiscoveryError { dir: local.dir.clone(), family, reason: format!("duplicate model id '{id}'") });
+        return;
+    }
+    if let Some(dir) = hf_qwen35_dir(local) {
+        scan.register_released_qwen35(&dir.to_string_lossy(), &id);
         return;
     }
     match build_for_local(local, scan.qwen_cfg_for(&id), scan.settings.qwen35.fp32) {

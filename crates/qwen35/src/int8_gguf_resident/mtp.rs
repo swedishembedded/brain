@@ -376,12 +376,14 @@ pub(crate) fn checkpoint_has_mtp(mg: &MmapGguf, cfg: &Qwen35Config) -> bool {
 impl Qwen35GgufInstance {
     /// Load the checkpoint's MTP head if it has one (and `mode` wants it).
     pub(super) fn enable_mtp(&mut self, gguf_path: &str, tier: &TierPolicy, gpu_index: usize, normed_hidden: bool) -> Result<bool, String> {
+        // Only a GGUF's MTP block is wired; an HF directory's `mtp.safetensors` is not (`ResidentCheckpoint`'s doc).
+        let Some(mg) = self.ckpt.gguf() else { return Ok(false) };
         let (target_norm, embed_name) = {
-            let names = endpoint_names(&self.mg, &self.cfg)?;
+            let names = endpoint_names(mg, &self.cfg)?;
             (names.1, self.embed.name.clone())
         };
         let head_gpu = &self.shards.last().expect("a plan always has at least one stage").qwen35.gpu;
-        let loaded = MtpDrafter::load(gguf_path, &self.mg, &self.cfg, tier, gpu_index, head_gpu, self.cap, self.state_rows(), self.kv_tier, self.kv_layout, &target_norm, &embed_name, normed_hidden)?;
+        let loaded = MtpDrafter::load(gguf_path, mg, &self.cfg, tier, gpu_index, head_gpu, self.cap, self.state_rows(), self.kv_tier, self.kv_layout, &target_norm, &embed_name, normed_hidden)?;
         self.mtp = loaded;
         Ok(self.mtp.is_some())
     }

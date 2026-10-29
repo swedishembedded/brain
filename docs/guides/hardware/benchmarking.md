@@ -48,7 +48,7 @@ weights of that shape — no checkpoint needed, good for hardware comparison)
 or `qwen:out/qwen.safetensors` (a real checkpoint). Run `brain perf --help`
 for the full list of target specs (one per served model family).
 
-`qwen35:<gguf>[:kvf32|:kvbf16|:kvint8]` measures the released Qwen3.8-27B GGUF
+`qwen35:<gguf|hf-dir>[:kvf32|:kvbf16|:kvint8]` measures the released Qwen3.8-27B GGUF (or a HuggingFace directory such as `Qwen3.8-27B-FP8`, every tensor held as the release stores it)
 end to end through the shared scheduler. The engine is built by the same code
 `brain serve` runs, so weight tier, context, KV pool, prefix slots and
 speculation are what the server would pick for the cards `--device` allows;
@@ -76,7 +76,7 @@ brain perf run longctx --target qwen35:/path/to/model.gguf \
 brain perf run longctx --target qwen:/path/to/Qwen3-8B --context 32768
 ```
 
-Targets: `qwen35:<gguf>[:kvf32|:kvbf16|:kvint8]` for the Qwen3.8 GGUF resident
+Targets: `qwen35:<gguf|hf-dir>[:kvf32|:kvbf16|:kvint8]` for the Qwen3.8 GGUF resident
 (int8 weights, as released; the suffix picks the KV cache storage, f32 when
 absent), and `qwen:<weights>[:i8w][:kvf32]` for the Qwen3 paged serving engine.
 The planner charges the KV tier's real bytes, so the batch the sweep can reach
