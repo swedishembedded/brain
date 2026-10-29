@@ -406,6 +406,13 @@ impl ProviderRegistry {
         reg
     }
 
+    /// Whether the provider named `name` is in the chain and not disabled (`BRAIN_NO_PROVIDER`): a native tier that
+    /// reaches the device without a provider request of its own (the dequantize-in-register int8 linears) follows the
+    /// same switch the provider's own dispatches do, so a reference-only registry and a disabled `cuda` stay on WGSL.
+    pub fn runs(&self, name: &str) -> bool {
+        self.chain.iter().any(|p| p.name() == name) && !self.disabled.iter().any(|d| d == name)
+    }
+
     /// Add a preferred provider ahead of the reference provider - checked
     /// FIRST by [`Self::resolve`], but the reference stays last regardless
     /// of call order.

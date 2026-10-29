@@ -1448,7 +1448,9 @@ impl Ops {
         let Weight::I8 { w: wb, s: sw, n, k } = w else { return false };
         let (m, n, k) = (act.m, *n, *k);
         let params = [m, k / 4, n];
-        if w.group() != 32 || !self.gpu.int8_linear_bf16_input(&params) {
+        // The bf16 candidates are the CUDA provider's native tier: a registry without it (or with it disabled) stays on
+        // the reference kernels.
+        if w.group() != 32 || !self.providers.runs("cuda") || !self.gpu.int8_linear_bf16_input(&params) {
             return false;
         }
         let mut prep = Vec::new();
@@ -1568,7 +1570,7 @@ impl Ops {
         // The packed form is made only where some linear of this width reads it: when this device's tuned table has
         // every int8 linear of these rows and this width on a candidate that reads bf16 rows, the two quantisation
         // dispatches (and the scratch) are skipped and a stray product that does need them makes them then.
-        let deferred = self.gpu.int8_packed_unneeded(rows, k / 4);
+        let deferred = self.providers.runs("cuda") && self.gpu.int8_packed_unneeded(rows, k / 4);
         let quant = (!deferred).then(|| self.quantize_rows(s, x, xr0, rows, k));
         Act { x: x.clone(), xr0, m: rows, k, quant: std::cell::RefCell::new(quant), quant_deferred: deferred, xgs: Default::default(), bf16: Default::default() }
     }
@@ -2434,7 +2436,7 @@ impl Ops {
                 return None;
             }
             // A member the tuned table puts on a dequantize-in-register candidate runs as its own product.
-            if matches!(w, Weight::I8 { .. }) && self.gpu.int8_linear_bf16_input(&[m, k / 4, *n]) {
+            if matches!(w, Weight::I8 { .. }) && self.providers.runs("cuda") && self.gpu.int8_linear_bf16_input(&[m, k / 4, *n]) {
                 return None;
             }
             params.push(*n);
