@@ -2925,7 +2925,7 @@ impl Qwen35 {
 
         // out_proj (LoRA/int8 dispatch stays local). Fresh `Ops::act` call:
         // `gated` is a different activation from `xn1` above.
-        let out = g.storage((n * d) as u64);
+        let out = g.storage_uninit((n * d) as u64);
         {
             let mut s = Vec::new();
             let act3 = if epilogue { self.quant_epilogue(0, &gated, None, n, value_dim).1 } else { self.ops_act(&mut s, &gated, n, value_dim) };
@@ -2968,9 +2968,9 @@ impl Qwen35 {
 
         // q/k/v proj (LoRA/int8 dispatch stays local - see `model::gqa_mixer`'s
         // own module doc). xn1 quantized once (`Ops::act`), shared by q/k/v.
-        let q_full = g.storage((n * qpd) as u64);
-        let k = g.storage((n * kvd) as u64);
-        let v = g.storage((n * kvd) as u64);
+        let q_full = g.storage_uninit((n * qpd) as u64);
+        let k = g.storage_uninit((n * kvd) as u64);
+        let v = g.storage_uninit((n * kvd) as u64);
         let mut s1 = Vec::new();
         let act1 = match pre {
             Some(a) => a,
@@ -3157,7 +3157,7 @@ impl Qwen35 {
 
         // o_proj (LoRA/int8 dispatch stays local). Fresh `Ops::act` call:
         // `ctx_gated` is a different activation from `xn1` above.
-        let out = g.storage((n * d) as u64);
+        let out = g.storage_uninit((n * d) as u64);
         {
             let mut s = Vec::new();
             let act2 = match o_proj_act {
@@ -4329,9 +4329,9 @@ impl Qwen35 {
     fn quant_epilogue(&self, mode: u32, a: &DeviceBuffer, b: Option<&DeviceBuffer>, rows: u32, k: u32) -> (Option<DeviceBuffer>, Act) {
         let g = &self.gpu;
         let n = (rows * k) as u64;
-        let y = (mode != 0).then(|| g.storage(n));
-        let xq = g.storage(n / 4);
-        let sx = g.storage(model::int8::act_scale_len(rows as usize, k as usize) as u64);
+        let y = (mode != 0).then(|| g.storage_uninit(n));
+        let xq = g.storage_uninit(n / 4);
+        let sx = g.storage_uninit(model::int8::act_scale_len(rows as usize, k as usize) as u64);
         // Mode 0 reads no `b` and writes no `y`; the slots are still bound, and
         // alias what is already there.
         let step = g
@@ -4352,10 +4352,10 @@ impl Qwen35 {
         let g = &self.gpu;
         let d = self.cfg.d_model;
         let n = (rows * d) as u64;
-        let sum = b.map(|_| g.storage(n));
-        let xn = g.storage(n);
-        let xq = g.storage(n / 4);
-        let sx = g.storage(model::int8::act_scale_len(rows as usize, d as usize) as u64);
+        let sum = b.map(|_| g.storage_uninit(n));
+        let xn = g.storage_uninit(n);
+        let xq = g.storage_uninit(n / 4);
+        let sx = g.storage_uninit(model::int8::act_scale_len(rows as usize, d as usize) as u64);
         // Without an addend the kernel reads neither `b` nor writes `sum`; the
         // slots still have to be bound, so they alias what is already there.
         let step = g
@@ -5346,7 +5346,7 @@ impl Qwen35 {
             let (xn1, pre1) = match st.front.take() {
                 Some((xn, act)) => (xn, Some(act)),
                 None => {
-                    let xn1 = g.storage((n * d) as u64);
+                    let xn1 = g.storage_uninit((n * d) as u64);
                     g.submit(&[], &[rms_step(g, &st.res, self.w(&format!("blocks.{l}.ln1.weight")), &xn1, d, n)]);
                     (xn1, None)
                 }
@@ -5359,9 +5359,9 @@ impl Qwen35 {
                 let (sum, xn, act) = self.rms_quant_front(&st.res, Some(&mixer_out), self.w(&ln2), n);
                 (sum.expect("an add front hands back its sum"), xn, Some(act))
             } else {
-                let xmid = g.storage((n * d) as u64);
+                let xmid = g.storage_uninit((n * d) as u64);
                 g.submit(&[], &[g.step(ADD2, &[&st.res, &mixer_out, &xmid], &[n * d], n * d)]);
-                let xn2 = g.storage((n * d) as u64);
+                let xn2 = g.storage_uninit((n * d) as u64);
                 g.submit(&[], &[rms_step(g, &xmid, self.w(&ln2), &xn2, d, n)]);
                 (xmid, xn2, None)
             };
@@ -5373,7 +5373,7 @@ impl Qwen35 {
                 st.res = sum.expect("an add front hands back its sum");
                 st.front = Some((xn, act));
             } else {
-                let res_next = g.storage((n * d) as u64);
+                let res_next = g.storage_uninit((n * d) as u64);
                 g.submit(&[], &[g.step(ADD2, &[&xmid, &mlp_out, &res_next], &[n * d], n * d)]);
                 st.res = res_next;
             }
