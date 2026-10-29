@@ -208,3 +208,28 @@ fn random_shapes_are_byte_identical() {
         check(&gpu, rows, k, r.next_u32() % 3, &a, &b, "seeded");
     }
 }
+
+#[test]
+fn the_no_pack_flag_produces_the_same_activation_and_leaves_the_packed_rows_alone() {
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda(&gpu) {
+        brain_testutil::skip_unavailable("native fused kernels need a CUDA device");
+        return;
+    }
+    for (rows, k, mode) in [(1u32, 17408u32, 1u32), (3, 6144, 2), (8, 4128, 1)] {
+        let n = (rows * k) as usize;
+        let a = values(n, 31 + u64::from(k), 4.0);
+        let b = values(n, 32 + u64::from(k), 4.0);
+        let (ab, bb) = (gpu.storage_init("a", &a), gpu.storage_init("b", &b));
+        let (y_p, y_u) = (gpu.storage(n as u64), gpu.storage(n as u64));
+        let (xq, sx) = (gpu.storage_init("xq", &[f32::from_bits(0xdead_beef); 1]), gpu.storage_init("sx", &[f32::from_bits(0xdead_beef); 1]));
+        let (xq_p, sx_p) = (gpu.storage((rows * k / 4) as u64), gpu.storage((rows * k / 32) as u64));
+        let packed = gpu.fused_step(Fused::QuantEpilogue, &[&ab, &bb, &y_p, &xq_p, &sx_p], &[k, rows, mode, 0]).expect("offered");
+        let unpacked = gpu.fused_step(Fused::QuantEpilogue, &[&ab, &bb, &y_u, &xq, &sx], &[k, rows, mode, 1]).expect("offered");
+        gpu.submit(&[], &[packed, unpacked]);
+        gpu.poll_wait();
+        assert_eq!(bits(gpu.read(&y_u, n)), bits(gpu.read(&y_p, n)), "the product differs: rows={rows} k={k} mode={mode}");
+        assert_eq!(bits(gpu.read(&xq, 1)), vec![0xdead_beef], "the packed rows were written");
+        assert_eq!(bits(gpu.read(&sx, 1)), vec![0xdead_beef], "the scales were written");
+    }
+}

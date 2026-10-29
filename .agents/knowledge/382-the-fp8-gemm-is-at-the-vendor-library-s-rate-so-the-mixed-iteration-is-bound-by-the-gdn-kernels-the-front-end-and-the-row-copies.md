@@ -33,3 +33,10 @@ Four candidates sized for a decode step of at most 8 rows (x tile of 8 rows inst
 0.59-0.66 of the read roof on the large classes, `m8r4s6` 0.54-0.68, the others 0.3-0.5), and the client c = 1 rate went 50.1 -> 48.3 tok/s (noise
 to slightly worse). The stream is not limited by shared memory or ring depth. Per-kernel durations inside the decode graph are inflated by
 programmatic dependent launch (a kernel counts from its early start, 24.1 ms of kernel time against 17.6 ms of union busy time).
+
+The int8 packing of the fused front ends (same note, landed): `add_rms_quant` and `quant_epilogue` wrote the int8 rows and group scales of every
+layer's activations although no weight of an FP8, bf16, NF4 or f32 build reads them (the unfused `ops_act` already knew: `reads_float_acts`). A flag
+(`add_rms_quant` flags bit 1, `quant_epilogue` flags bit 0) now skips the max, the scales, the byte exchange and the stores, and `Qwen35` hands back the float
+`Act` (`packs_activations`); mode 0 of the epilogue, which would write nothing, is no launch. FP8 27B, c = 1 / 4 / 16 / 64 output tok/s 50 / 203 / 360 / 500 ->
+53 / 213 / 376 / 520, ITL p99 at 16 216 -> 205 ms, 31K TTFT 6.64 -> 6.36 s; `qwen35_fp8_parity` identical (98.44 %, KL 1.526e-3). The training forward does not use the fused
+front ends, so the training rate is unchanged by this commit (no regression: the flag is off by default and an int8 build packs as before).

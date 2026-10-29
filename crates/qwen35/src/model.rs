@@ -1282,6 +1282,9 @@ pub struct Qwen35 {
     /// Whether a decode step may use the native fused kernels where the device
     /// offers them - see [`Self::set_decode_fusion`].
     decode_fusion: Cell<bool>,
+    /// Two one-word buffers the fused front ends bind in place of the packed int8 rows and their scales when no weight
+    /// reads them ([`Self::packs_activations`]): the kernel writes neither, but a dispatch may not bind one buffer twice.
+    unpacked_slots: std::cell::OnceCell<(DeviceBuffer, DeviceBuffer)>,
     /// Whether `slot_decode` replays a recorded step ([`Self::set_slot_decode_tape`]).
     slot_decode_tapes: Cell<bool>,
     /// Whether the pooled Gated-DeltaNet decode runs the occupancy-built candidate ([`Self::set_gdn_pool_wide`]).
@@ -2094,6 +2097,7 @@ impl Qwen35 {
             exact_rounds: Cell::new(true),
             exact_decode: Cell::new(None),
             decode_fusion: Cell::new(true),
+            unpacked_slots: std::cell::OnceCell::new(),
             slot_decode_tapes: Cell::new(false),
             gdn_pool_wide: Cell::new(true),
         }
@@ -4320,6 +4324,18 @@ impl Qwen35 {
             && widths.iter().all(|&k| gpu_core::Fused::QuantEpilogue.serves(&[k, rows, 0, 0]))
     }
 
+    /// Whether some weight of this build reads packed int8 activation rows. FP8, bf16, NF4 and f32 tiers read float rows
+    /// (`ops_act` hands them [`Ops::act_f32`]), so the fused front ends skip the packing there and the `Act` they
+    /// return is the float one.
+    fn unpacked_slots(&self) -> (&DeviceBuffer, &DeviceBuffer) {
+        let (xq, sx) = self.unpacked_slots.get_or_init(|| (self.gpu.storage(1), self.gpu.storage(1)));
+        (xq, sx)
+    }
+
+    fn packs_activations(&self) -> bool {
+        !self.weights.values().all(reads_float_acts)
+    }
+
     /// One launch that produces the activation an int8 linear reads AND
     /// quantises it: `mode` 0 quantises `a` as it is, 1 produces `silu(a) * b`,
     /// 2 produces `a * sigmoid(b)`. Returns `(product, act)`; `product` is
@@ -4330,6 +4346,18 @@ impl Qwen35 {
         let g = &self.gpu;
         let n = (rows * k) as u64;
         let y = (mode != 0).then(|| g.storage_uninit(n));
+        // No weight of this build reads packed int8 rows (FP8, bf16, NF4 tiers): the kernel then writes the product
+        // only, and mode 0, which would write nothing, is no launch at all.
+        if !self.packs_activations() {
+            if let Some(y) = &y {
+                let (xq, sx) = self.unpacked_slots();
+                let step = g
+                    .fused_step(gpu_core::Fused::QuantEpilogue, &[a, b.unwrap_or(a), y, xq, sx], &[k, rows, mode, 1])
+                    .expect("fused_epilogue_ok said the device serves this shape");
+                g.submit(&[], &[step]);
+            }
+            return (y.clone(), self.ops.act_f32(y.as_ref().unwrap_or(a), 0, rows, k));
+        }
         let xq = g.storage_uninit(n / 4);
         let sx = g.storage_uninit(model::int8::act_scale_len(rows as usize, k as usize) as u64);
         // Mode 0 reads no `b` and writes no `y`; the slots are still bound, and
@@ -4354,19 +4382,26 @@ impl Qwen35 {
         let n = (rows * d) as u64;
         let sum = b.map(|_| g.storage_uninit(n));
         let xn = g.storage_uninit(n);
-        let xq = g.storage_uninit(n / 4);
-        let sx = g.storage_uninit(model::int8::act_scale_len(rows as usize, d as usize) as u64);
+        let pack = self.packs_activations();
+        // Nothing reads the packed rows of an FP8/bf16/NF4 build: the kernel then writes `sum` and `xn` only, and the
+        // two buffers it would have written are one word each.
+        let (xq, sx) = if pack {
+            (g.storage_uninit(n / 4), g.storage_uninit(model::int8::act_scale_len(rows as usize, d as usize) as u64))
+        } else {
+            let (xq, sx) = self.unpacked_slots();
+            (xq.clone(), sx.clone())
+        };
         // Without an addend the kernel reads neither `b` nor writes `sum`; the
         // slots still have to be bound, so they alias what is already there.
         let step = g
             .fused_step(
                 gpu_core::Fused::AddRmsQuant,
                 &[a, b.unwrap_or(a), w, sum.as_ref().unwrap_or(&xn), &xn, &xq, &sx],
-                &[d, rows, f(RMS_EPS), b.is_some() as u32],
+                &[d, rows, f(RMS_EPS), b.is_some() as u32 | if pack { 0 } else { 2 }],
             )
             .expect("fused_front_ok said the device serves this shape");
         g.submit(&[], &[step]);
-        let act = self.ops.act_prequantized(&xn, &sx, &xq, rows, d);
+        let act = if pack { self.ops.act_prequantized(&xn, &sx, &xq, rows, d) } else { self.ops.act_f32(&xn, 0, rows, d) };
         (sum, xn, act)
     }
 

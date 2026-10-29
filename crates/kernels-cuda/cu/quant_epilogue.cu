@@ -21,7 +21,8 @@
 // (`silu_mul` / `sigmoid` + `mul`, then `max_abs_rows`, then `quant_pack`) and
 // produces what that chain produces to the last bit.
 //
-//   params : u32 [k, rows, mode, 0]
+//   params : u32 [k, rows, mode, flags]   flags bit 0: produce `y` only - no int8 packing (`xq`, `sx` are not written);
+//                                         a consumer that reads bf16 or E4M3 rows has no use for them
 //   a, b   : [rows, k] f32   (b is not read in mode 0)
 //   y      : [rows, k] f32   the activation itself (an fp32 linear reads it)
 //   xq     : [rows, k/4] u32 packed int8 activation
@@ -93,6 +94,7 @@ brain_quant_epilogue(const unsigned int* params, const float* a, const float* b,
     const unsigned int k = params[0];
     const unsigned int rows = params[1];
     const unsigned int mode = params[2];
+    const bool pack = (params[3] & 1u) == 0u;
 
     // The grid is `rows * CLUSTER` blocks, a row's cluster consecutive, so every block of a cluster takes the same
     // early return below (none, or all of them).
@@ -138,6 +140,7 @@ brain_quant_epilogue(const unsigned int* params, const float* a, const float* b,
             r = __fmul_rn(r, __fdiv_rn(1.0f, __fadd_rn(1.0f, expf(-w[j]))));
         }
         v[j] = r;
+        if (!pack) { continue; }
         float mx = fabsf(r);
 #pragma unroll
         for (int o = 16; o > 0; o >>= 1) { mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, o)); }
@@ -156,10 +159,12 @@ brain_quant_epilogue(const unsigned int* params, const float* a, const float* b,
         const unsigned int c = t + BRAIN_QE_THREADS * i;
         if (i < BRAIN_QE_MAX_ELEMS && c < k) {
             if (two) { y[base + c] = v[j]; }
+            if (!pack) { continue; }
             const float q = fminf(fmaxf(rintf(__fmul_rn(v[j], rscale[j])), -127.0f), 127.0f);
             qbytes[c] = static_cast<signed char>(static_cast<int>(q));
         }
     }
+    if (!pack) { return; }  // cluster-uniform
     __syncthreads();
     const unsigned int words = k >> 2;
     constexpr unsigned int SLICE_WORDS = BRAIN_QE_THREADS / 4;

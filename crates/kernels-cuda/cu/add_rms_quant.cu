@@ -17,7 +17,8 @@
 // decode token runs 128 times back to back on a 5120-wide row, and produces
 // exactly what that chain produces, to the last bit.
 //
-//   params : u32 [d, rows, eps (f32 bits), flags]   flags bit 0: add `b` first
+//   params : u32 [d, rows, eps (f32 bits), flags]   flags bit 0: add `b` first; bit 1: no int8 packing (`xq`, `sx` are not
+//                                                   written) for consumers that read bf16 or E4M3 rows
 //   a, b   : [rows, d] f32     b is not read (and sum is not written) without bit 0
 //   w      : [d] f32           the norm gain
 //   sum    : [rows, d] f32     a + b, the residual stream's next value
@@ -107,6 +108,7 @@ brain_add_rms_quant(const unsigned int* params, const float* a, const float* b, 
     const unsigned int rows = params[1];
     const float eps = __uint_as_float(params[2]);
     const bool add = (params[3] & 1u) != 0u;
+    const bool pack = (params[3] & 2u) == 0u;
 
     const unsigned int row = blockIdx.y * gridDim.x + blockIdx.x;
     if (row >= rows) { return; }  // block-uniform
@@ -184,6 +186,7 @@ brain_add_rms_quant(const unsigned int* params, const float* a, const float* b, 
     for (int i = 0; i < BRAIN_ARQ_PER; ++i) {
         const float y = __fmul_rn(__fmul_rn(v[i], inv), g[i]);
         v[i] = y;
+        if (!pack) { continue; }
         float mx = fabsf(y);
         for (int o = 16; o > 0; o >>= 1) { mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, o)); }
         const float scale = __fdiv_rn(fmaxf(mx, 1e-8f), 127.0f);
@@ -198,10 +201,12 @@ brain_add_rms_quant(const unsigned int* params, const float* a, const float* b, 
         const unsigned int c = lane + BRAIN_ARQ_LANES * (quarter * BRAIN_ARQ_PER + i);
         if (c < d) {
             xn[base + c] = v[i];
+            if (!pack) { continue; }
             const float q = fminf(fmaxf(rintf(__fmul_rn(v[i], rscale[i])), -127.0f), 127.0f);
             qbytes[c] = static_cast<signed char>(static_cast<int>(q));
         }
     }
+    if (!pack) { return; }  // block-uniform
     __syncthreads();
     const unsigned int words = d >> 2;
     for (unsigned int gw = tid; gw < words; gw += BRAIN_ARQ_THREADS) {
