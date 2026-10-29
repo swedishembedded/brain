@@ -973,6 +973,10 @@ struct Waiting {
     /// preempted sequence's context starts with, so they stay valid through a
     /// recompute.
     embeds: Option<std::sync::Arc<PromptEmbeds>>,
+    /// The first prompt token outside the vocabulary, found once when the request was queued (O(prompt)) so
+    /// admission, which looks at every waiting request each iteration, does not scan the prompt again. `None`
+    /// for a prompt that passed, which is every one a preempted sequence requeues.
+    bad_token: Option<u32>,
 }
 
 /// What a sequence preempted by recompute carries through the waiting queue so
@@ -1011,6 +1015,9 @@ struct Prefilling {
     prompt: Vec<u32>,
     /// Prompt tokens already in.
     done: usize,
+    /// Blocks the prompt adopts from the prefix cache, asked of the decoder once at admission: they are resident
+    /// already and owed nothing (see [`Scheduler::prefill_owed`]).
+    adopted: u32,
     max_new: usize,
     stop: Vec<u32>,
     adapter: Option<AdapterId>,
@@ -1063,6 +1070,11 @@ struct Running {
     stop_token: Option<u32>,
     /// The prompt's embedding rows, kept for a recompute (see [`Waiting::embeds`]).
     embeds: Option<std::sync::Arc<PromptEmbeds>>,
+}
+
+/// The block tables of the sequences `in_batch` marks, in `running` order. O(running).
+fn active_tables<'a>(running: &'a mut [Running], in_batch: &[bool]) -> Vec<&'a mut BlockTable> {
+    running.iter_mut().zip(in_batch).filter(|(_, &on)| on).map(|(r, _)| &mut r.table).collect()
 }
 
 /// Accept a freshly sampled token into `r`.
@@ -1260,7 +1272,8 @@ impl<D: PagedDecoder> Scheduler<D> {
             return id;
         }
         self.started.insert(id, std::time::Instant::now());
-        self.waiting.push_back(Waiting { id, req, adapter, sample, seed, resume: None, embeds });
+        let bad_token = self.invalid_token(&req.prompt);
+        self.waiting.push_back(Waiting { id, req, adapter, sample, seed, resume: None, embeds, bad_token });
         id
     }
 
@@ -1388,23 +1401,34 @@ impl<D: PagedDecoder> Scheduler<D> {
         self.dec
     }
 
+    /// Every sequence's generated tokens so far, by request id: running, preempted to host RAM, and
+    /// preempted by recompute (the same set [`Self::tokens_of`] reads). One O(sequences) pass, so a caller
+    /// that streams every open request each iteration pays O(sequences) per iteration instead of a
+    /// linear find per request (O(sequences^2)). The map borrows the scheduler; read what you need from
+    /// it before the next `&mut` call.
+    pub fn streams(&self) -> HashMap<u64, &[u32]> {
+        self.streaming_sequences().collect()
+    }
+
+    /// The `(id, generated tokens)` of every sequence a streaming caller may read.
+    fn streaming_sequences(&self) -> impl Iterator<Item = (u64, &[u32])> {
+        // Preempted sequences are included: preemption is invisible to a caller
+        // streaming a response, so its progress must stay readable while its
+        // KV sits in host RAM or is being recomputed.
+        let preempted = self.waiting.iter().filter_map(|w| w.resume.as_ref().map(|r| (w.id, r.generated.as_slice())));
+        self.running.iter().chain(self.swapped.iter()).map(|r| (r.id, r.generated.as_slice())).chain(preempted)
+    }
+
     /// All tokens generated so far for a still-running sequence (`None` if
     /// `id` is unknown, queued, or already reaped) — the seam a streaming
     /// caller uses to emit the NEW suffix each iteration without waiting for
     /// the sequence to finish (`step`/`step_report` only return a completed
     /// sequence's full token list, not a running one's partial progress).
+    ///
+    /// A linear find: right for one request. A caller reading every open
+    /// request per iteration uses [`Self::streams`].
     pub fn tokens_of(&self, id: u64) -> Option<&[u32]> {
-        // Preempted sequences are included: preemption is invisible to a caller
-        // streaming a response, so its progress must stay readable while its
-        // KV sits in host RAM or is being recomputed.
-        let preempted = self.waiting.iter().filter_map(|w| w.resume.as_ref().map(|r| (w.id, r.generated.as_slice())));
-        self.running
-            .iter()
-            .chain(self.swapped.iter())
-            .map(|r| (r.id, r.generated.as_slice()))
-            .chain(preempted)
-            .find(|&(rid, _)| rid == id)
-            .map(|(_, generated)| generated)
+        self.streaming_sequences().find(|&(rid, _)| rid == id).map(|(_, generated)| generated)
     }
 
     /// Requests admitted but not yet started.
@@ -1555,13 +1579,17 @@ impl<D: PagedDecoder> Scheduler<D> {
         }
     }
 
-    /// Device blocks the running batch needs to append one more token each.
+    /// Device blocks the running batch needs to append one more token each. O(running).
     fn blocks_for_next_token(&self) -> u32 {
-        self.running
-            .iter()
-            .filter(|r| !r.done)
-            .map(|r| self.dec.blocks_for(r.table.len() + 1).saturating_sub(r.table.blocks().len() as u32))
-            .sum()
+        self.running.iter().map(|r| self.next_token_blocks(r)).sum()
+    }
+
+    /// Blocks `r` needs to append one more token (none once it is done).
+    fn next_token_blocks(&self, r: &Running) -> u32 {
+        if r.done {
+            return 0;
+        }
+        self.dec.blocks_for(r.table.len() + 1).saturating_sub(r.table.blocks().len() as u32)
     }
 
     /// Device blocks the sequences still being prefilled have been promised
@@ -1569,17 +1597,20 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// takes them chunk by chunk, so until it has, the pool looks emptier than
     /// it is. A prefill that has not started yet holds no blocks; the ones it
     /// will adopt from the prefix cache are resident already and owed nothing.
+    /// O(prefilling): the adopted count was taken at admission, not re-asked
+    /// (a prefix-cache lookup hashes the whole prompt) on every call.
     fn prefill_debt(&self) -> u32 {
-        self.prefilling
-            .iter()
-            .map(|p| {
-                let held = match p.table.blocks().len() as u32 {
-                    0 => self.adopted_blocks(&p.prompt, p.adapter, p.embeds.is_some()),
-                    n => n,
-                };
-                self.dec.blocks_for(p.prompt.len() as u32 + 1).saturating_sub(held)
-            })
-            .sum()
+        self.prefilling.iter().map(|p| self.prefill_owed(p)).sum()
+    }
+
+    /// Blocks `p` is still owed: its prompt and first token, less what it holds
+    /// (or, before it holds any, what it adopts from the cache).
+    fn prefill_owed(&self, p: &Prefilling) -> u32 {
+        let held = match p.table.blocks().len() as u32 {
+            0 => p.adopted,
+            n => n,
+        };
+        self.dec.blocks_for(p.prompt.len() as u32 + 1).saturating_sub(held)
     }
 
     /// Blocks a fresh prefill of `prompt` will adopt from the prefix cache
@@ -1632,18 +1663,23 @@ impl<D: PagedDecoder> Scheduler<D> {
     ///
     /// The last active sequence is never preempted: it has nothing to yield to.
     fn ensure_decode_room(&mut self, report: &mut StepReport) {
+        // The total is computed once and each victim's own share is subtracted when it leaves, so choosing V
+        // victims among B sequences costs O(B + V), not O(B x V) from recounting the batch per victim.
         let mut need = self.committed_blocks();
         if self.dec.free_blocks() >= need {
             return;
         }
         self.dec.reclaim_prefix(need - self.dec.free_blocks());
+        let mut active = self.running.iter().filter(|r| !r.done).count();
+        let promoted: std::collections::HashSet<u64> = report.promoted.iter().copied().collect();
         while self.dec.free_blocks() < need {
             if let Some(p) = self.prefilling.pop_back() {
+                need -= self.prefill_owed(&p);
                 self.requeue_prefilling(p);
-                need = self.committed_blocks();
+                debug_assert_eq!(need, self.committed_blocks(), "the running total follows every sequence that left");
                 continue;
             }
-            if self.running.iter().filter(|r| !r.done).count() <= 1 {
+            if active <= 1 {
                 return;
             }
             // Prefer not to re-demote a sequence promoted in THIS iteration: it
@@ -1654,10 +1690,12 @@ impl<D: PagedDecoder> Scheduler<D> {
             let pos = self
                 .running
                 .iter()
-                .rposition(|r| !r.done && !report.promoted.contains(&r.id))
+                .rposition(|r| !r.done && !promoted.contains(&r.id))
                 .or_else(|| self.running.iter().rposition(|r| !r.done))
                 .expect("at least two active sequences");
             let mut r = self.running.remove(pos);
+            need -= self.next_token_blocks(&r);
+            active -= 1;
             match self.dec.demote_sequence(r.id, &mut r.table) {
                 Ok(_) => {
                     report.demoted.push(r.id);
@@ -1668,7 +1706,7 @@ impl<D: PagedDecoder> Scheduler<D> {
                     self.requeue_for_recompute(r);
                 }
             }
-            need = self.committed_blocks();
+            debug_assert_eq!(need, self.committed_blocks(), "the running total follows every sequence that left");
         }
     }
 
@@ -1681,7 +1719,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             self.unpin(p.adapter);
         }
         let req = Request { prompt: p.prompt, max_new: p.max_new, stop: p.stop };
-        self.waiting.push_front(Waiting { id: p.id, req, adapter: p.adapter, sample: p.sample, seed: p.seed, resume: p.resume, embeds: p.embeds });
+        self.waiting.push_front(Waiting { id: p.id, req, adapter: p.adapter, sample: p.sample, seed: p.seed, resume: p.resume, embeds: p.embeds, bad_token: None });
     }
 
     /// Preempt a decoding sequence by recompute (see [`Self::ensure_decode_room`]):
@@ -1695,7 +1733,7 @@ impl<D: PagedDecoder> Scheduler<D> {
         let uncached = context.pop();
         debug_assert_eq!(uncached, Some(next_input), "the newest token is the one with no cache entry yet");
         let req = Request { prompt: context, max_new, stop };
-        self.waiting.push_front(Waiting { id, req, adapter, sample, seed, resume: Some(Resume { generated, logprobs, next_input, spec, rng, think, cached_tokens }), embeds });
+        self.waiting.push_front(Waiting { id, req, adapter, sample, seed, resume: Some(Resume { generated, logprobs, next_input, spec, rng, think, cached_tokens }), embeds, bad_token: None });
     }
 
     /// Index of the first waiting request that can be admitted this
@@ -1719,7 +1757,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             if w.resume.is_some() {
                 return Some(pos);
             }
-            let verdict = match self.static_refusal(&w.req.prompt, w.req.max_new) {
+            let verdict = match self.queued_refusal(w.bad_token, w.req.prompt.len(), w.req.max_new) {
                 Some(reason) => Admissibility::Refused(reason),
                 None => self.adapter_verdict(adapter),
             };
@@ -1805,7 +1843,7 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// scheduler's admission applies the same test, so a caller that asks first gets the
     /// refusal the queue would have given it - without waiting for a slot to find out.
     pub fn refusal(&mut self, req: &Request, adapter: Option<AdapterId>) -> Option<RejectReason> {
-        if let Some(reason) = self.static_refusal(&req.prompt, req.max_new) {
+        if let Some(reason) = self.queued_refusal(self.invalid_token(&req.prompt), req.prompt.len(), req.max_new) {
             return Some(reason);
         }
         match self.adapter_verdict(adapter) {
@@ -1821,17 +1859,24 @@ impl<D: PagedDecoder> Scheduler<D> {
         embeds.refusal(req.prompt.len(), self.dec.embed_width()).map(|why| RejectReason::InvalidEmbeds { why })
     }
 
-    /// A prompt that exceeds the engine's capacity, or a token outside the vocabulary.
+    /// The first token of `prompt` outside the vocabulary, if any. O(prompt): done once per request, at
+    /// submission, not on every admission pass.
+    fn invalid_token(&self, prompt: &[u32]) -> Option<u32> {
+        let vocab = self.dec.vocab() as u32;
+        prompt.iter().copied().find(|&t| t >= vocab)
+    }
+
+    /// Why a queued prompt (of `prompt_len` tokens, `bad_token` its [`Self::invalid_token`]) can never be
+    /// served: a token outside the vocabulary, or more than the engine's capacity. O(1).
     ///
     /// A sequence can only ever run alone in the pool, so it must fit it: the KV
     /// of every token but the last one it produces.
-    fn static_refusal(&self, prompt: &[u32], max_new: usize) -> Option<RejectReason> {
-        let cap = self.sequence_capacity();
-        let vocab = self.dec.vocab() as u32;
-        if let Some(&token) = prompt.iter().find(|&&t| t >= vocab) {
-            return Some(RejectReason::InvalidToken { token, vocab });
+    fn queued_refusal(&self, bad_token: Option<u32>, prompt_len: usize, max_new: usize) -> Option<RejectReason> {
+        if let Some(token) = bad_token {
+            return Some(RejectReason::InvalidToken { token, vocab: self.dec.vocab() as u32 });
         }
-        let need = prompt.len() + max_new;
+        let need = prompt_len + max_new;
+        let cap = self.sequence_capacity();
         (need.saturating_sub(1) > cap).then_some(RejectReason::ExceedsCapacity { need: need as u32, capacity: cap as u32 })
     }
 
@@ -1928,7 +1973,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             }
             None => BlockTable::new(),
         };
-        self.prefilling.push_back(Prefilling { id, prompt: req.prompt, done: 0, max_new: req.max_new, stop: req.stop, adapter, sample, seed, table, resume, embeds, shared_hint: None });
+        self.prefilling.push_back(Prefilling { id, prompt: req.prompt, done: 0, adopted: cached, max_new: req.max_new, stop: req.stop, adapter, sample, seed, table, resume, embeds, shared_hint: None });
         self.hint_for_waiting_sharers();
         true
     }
@@ -2132,6 +2177,11 @@ impl<D: PagedDecoder> Scheduler<D> {
         //    back below). With work waiting, the window stays 1 so admission
         //    latency is never traded away silently.
         let active: Vec<usize> = (0..self.running.len()).filter(|&i| !self.running[i].done).collect();
+        // Membership as a mask: the decode step picks the batch's tables out of `running` in one pass.
+        let mut in_batch = vec![false; self.running.len()];
+        for &i in &active {
+            in_batch[i] = true;
+        }
         let decode_range = gpu_core::markers::range(c"serve.decode");
         'decode: {
         if active.is_empty() || self.speculative_step(&active) {
@@ -2170,12 +2220,7 @@ impl<D: PagedDecoder> Scheduler<D> {
                 k = 1;
             }
             let decoded = catch_device_oom(|| -> Vec<Vec<(u32, f32)>> { if all_greedy {
-                let mut refs: Vec<&mut BlockTable> = Vec::new();
-                for (idx, r) in self.running.iter_mut().enumerate() {
-                    if active.contains(&idx) {
-                        refs.push(&mut r.table);
-                    }
-                }
+                let mut refs = active_tables(&mut self.running, &in_batch);
                 // Greedy tokens are deterministic: probability one, logprob zero.
                 let greedy = if k > 1 {
                     self.dec.forward_batched_greedy_window(&mut refs, &inputs, k)
@@ -2188,12 +2233,7 @@ impl<D: PagedDecoder> Scheduler<D> {
                 // has banned tokens to step over needs those and one more.
                 let wide = active.iter().any(|&i| self.running[i].sample.needs_candidates());
                 let candidates = {
-                    let mut refs: Vec<&mut BlockTable> = Vec::new();
-                    for (idx, r) in self.running.iter_mut().enumerate() {
-                        if active.contains(&idx) {
-                            refs.push(&mut r.table);
-                        }
-                    }
+                    let mut refs = active_tables(&mut self.running, &in_batch);
                     let k = if wide { self.dec.topk_capacity() } else { (banned_max + 1).min(self.dec.topk_capacity()) };
                     self.dec.forward_batched_topk(&mut refs, &inputs, k)
                 };

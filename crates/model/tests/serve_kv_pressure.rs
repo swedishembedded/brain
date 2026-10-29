@@ -42,11 +42,13 @@ struct Mock {
     host_budget: u32,
     host: HashMap<u64, HostCopy>,
     stats: OffloadStats,
+    /// How often the scheduler asked for the vocabulary (it validates prompts against it).
+    vocab_calls: std::sync::atomic::AtomicUsize,
 }
 
 impl Mock {
     fn new(blocks: u32, host_budget: u32) -> Mock {
-        Mock { alloc: BlockAllocator::new(blocks, BLOCK), kv: HashMap::new(), host_budget, host: HashMap::new(), stats: OffloadStats::default() }
+        Mock { alloc: BlockAllocator::new(blocks, BLOCK), kv: HashMap::new(), host_budget, host: HashMap::new(), stats: OffloadStats::default(), vocab_calls: Default::default() }
     }
 
     fn write(&mut self, block: u32, offset: u32, token: u32) {
@@ -84,6 +86,7 @@ impl PagedDecoder for Mock {
         4096
     }
     fn vocab(&self) -> usize {
+        self.vocab_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         VOCAB
     }
     fn blocks_for(&self, tokens: u32) -> u32 {
@@ -323,4 +326,47 @@ fn cancelling_a_preempted_request_returns_its_progress_and_frees_everything() {
     }
     assert!(!sched.pending());
     assert_eq!(sched.free_blocks(), POOL_BLOCKS);
+}
+
+/// Every sequence a streaming caller can read is in `streams()`, with the tokens `tokens_of` gives it,
+/// whether it is running, preempted by recompute, or demoted to host RAM; and nothing else is.
+#[test]
+fn streams_agree_with_tokens_of_through_preemption() {
+    for host_budget in [0, 6] {
+        let mut sched = Scheduler::new(Mock::new(POOL_BLOCKS, host_budget), 8);
+        let ids: Vec<u64> = SEEDS.iter().map(|&s| sched.submit(request(s))).collect();
+        let mut preempted_seen = false;
+        while sched.pending() {
+            let report = sched.step_report();
+            preempted_seen |= !report.recomputed.is_empty() || !report.demoted.is_empty();
+            let streams = sched.streams();
+            for &id in &ids {
+                assert_eq!(streams.get(&id).copied(), sched.tokens_of(id), "request {id}");
+            }
+            assert!(streams.len() <= ids.len());
+        }
+        assert!(preempted_seen, "the pool pressure must preempt someone for the test to mean anything");
+        assert!(sched.streams().is_empty());
+    }
+}
+
+/// A request that waits for the pool is validated once, when it is queued, not again on every iteration
+/// it waits: the vocabulary is not consulted per step per waiting prompt.
+#[test]
+fn a_waiting_prompt_is_validated_once_not_every_iteration() {
+    let mut sched = Scheduler::new(Mock::new(POOL_BLOCKS, 0), 8);
+    // Two requests that each need most of the pool: the second waits for the first to finish.
+    let long = |seed| Request { prompt: prompt(seed, 60), max_new: 30, stop: Vec::new() };
+    sched.submit(long(1));
+    sched.submit(long(2));
+    let mut waited_steps = 0;
+    while sched.pending() {
+        sched.step();
+        if sched.waiting_len() > 0 {
+            waited_steps += 1;
+        }
+    }
+    assert!(waited_steps >= 20, "the second request must wait many iterations ({waited_steps}) for this to mean anything");
+    let calls = sched.decoder_mut().vocab_calls.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(calls < 10, "{calls} vocabulary lookups over {waited_steps} iterations of a waiting request");
 }

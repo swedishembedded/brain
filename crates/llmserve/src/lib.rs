@@ -459,18 +459,28 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
         let mut finished: Vec<(usize, ActionResult)> = Vec::new();
         let mut order: Vec<usize> = self.open.iter().copied().collect();
         order.sort_unstable();
-        for bi in order {
-            let id = self.jobs[bi].id.expect("an open job is scheduled");
-            let Some(all_tokens) = self.sched.tokens_of(id) else { continue };
-            let seq = self.jobs[bi].seq.as_mut().expect("an open job has its stream");
-            if seq.advance(tok, all_tokens, &mut |p| progress(bi, p)) {
-                let completion = self.sched.completion_of(id);
-                let (toks, logprobs) = self.sched.cancel_detailed(id).unwrap_or_default();
-                let seq = self.jobs[bi].seq.take().expect("checked above");
-                let outcome = Self::conclude(&self.jobs[bi], self.front.label(), seq, tok, &toks, &logprobs, completion, &mut |p| progress(bi, p));
-                self.open.remove(&bi);
-                finished.push((bi, Ok(outcome)));
+        // Stream every open job from one pass over the scheduler's sequences (O(open jobs), not a find
+        // per job); the jobs that stopped are cancelled and concluded after, once its borrow is released.
+        let mut stopped: Vec<usize> = Vec::new();
+        {
+            let streams = self.sched.streams();
+            for bi in order {
+                let id = self.jobs[bi].id.expect("an open job is scheduled");
+                let Some(&all_tokens) = streams.get(&id) else { continue };
+                let seq = self.jobs[bi].seq.as_mut().expect("an open job has its stream");
+                if seq.advance(tok, all_tokens, &mut |p| progress(bi, p)) {
+                    stopped.push(bi);
+                }
             }
+        }
+        for bi in stopped {
+            let id = self.jobs[bi].id.expect("an open job is scheduled");
+            let completion = self.sched.completion_of(id);
+            let (toks, logprobs) = self.sched.cancel_detailed(id).unwrap_or_default();
+            let seq = self.jobs[bi].seq.take().expect("checked above");
+            let outcome = Self::conclude(&self.jobs[bi], self.front.label(), seq, tok, &toks, &logprobs, completion, &mut |p| progress(bi, p));
+            self.open.remove(&bi);
+            finished.push((bi, Ok(outcome)));
         }
         if self.open.is_empty() {
             return finished;
