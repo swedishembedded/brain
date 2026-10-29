@@ -111,15 +111,35 @@ impl PackedSource {
     /// large table). `None` when the name is unknown or the range leaves the
     /// tensor. The decoded span is at most the range rounded out to the tensor's
     /// tile quantum.
+    ///
+    /// The pages read stay mapped: a point read is repeated on the same hot rows (every serving round looks the
+    /// same tokens' embeddings up again), and dropping the mapping after each read costs a `madvise` and a page
+    /// fault per row - 15 ms of host time in front of a 600-row round. A table's pages are bounded by the table.
     pub fn read_range(&self, name: &str, start: u64, len: u64) -> Result<Option<Vec<f32>>, String> {
         let Some(b) = self.tensors.get(name) else { return Ok(None) };
         let Some(end) = start.checked_add(len).filter(|&e| e <= b.desc.numel() && len > 0) else { return Ok(None) };
         let q = b.desc.tile_quantum();
         let span = start / q * q..(end.div_ceil(q) * q).min(b.desc.numel());
         let (mut read, mut out) = (TileBuf::default(), Vec::new());
-        self.decode_range(b, &span, &mut read, &mut out)?;
+        self.decode_range(b, &span, &mut read, &mut out, false)?;
         out.truncate((end - span.start) as usize);
         out.drain(..(start - span.start) as usize);
+        Ok(Some(out))
+    }
+
+    /// Rows `rows` of the 2-D tensor `name` (`row_len` elements each) concatenated in the order asked, the rows decoded in
+    /// parallel. `None` when the name is unknown or a row leaves the tensor. See [`Self::read_range`].
+    pub fn read_rows(&self, name: &str, rows: &[usize], row_len: usize) -> Result<Option<Vec<f32>>, String> {
+        let Some(b) = self.tensors.get(name) else { return Ok(None) };
+        let numel = b.desc.numel();
+        if row_len == 0 || rows.iter().any(|&r| r.checked_add(1).and_then(|e| e.checked_mul(row_len)).is_none_or(|e| e as u64 > numel)) {
+            return Ok(None);
+        }
+        let decoded = backend_cpu::par::map(rows.len(), |i| self.read_range(name, (rows[i] * row_len) as u64, row_len as u64));
+        let mut out = Vec::with_capacity(rows.len() * row_len);
+        for row in decoded {
+            out.extend_from_slice(&row?.expect("the row was bounds-checked above"));
+        }
         Ok(Some(out))
     }
 
@@ -131,7 +151,7 @@ impl PackedSource {
 
     /// Decode tile `elems` of `b` into `out` (replacing its contents), with
     /// `read` as the staging buffer.
-    fn decode_range(&self, b: &Bound, elems: &Range<u64>, read: &mut TileBuf, out: &mut Vec<f32>) -> Result<(), String> {
+    fn decode_range(&self, b: &Bound, elems: &Range<u64>, read: &mut TileBuf, out: &mut Vec<f32>, release: bool) -> Result<(), String> {
         let desc = &b.desc;
         self.reader.read_blocks(desc, elems, read)?;
         let t = Tile { elems: elems.clone(), payload: &read.payload, scales: read.scales.iter().map(Vec::as_slice).collect() };
@@ -141,7 +161,9 @@ impl PackedSource {
         if b.add != 0.0 {
             out.iter_mut().for_each(|v| *v += b.add);
         }
-        self.reader.release(desc, elems);
+        if release {
+            self.reader.release(desc, elems);
+        }
         Ok(())
     }
 
@@ -160,7 +182,7 @@ impl PackedSource {
         let mut start = 0;
         while start < numel {
             let elems = start..(start + tile).min(numel);
-            self.decode_range(b, &elems, &mut read, &mut out)?;
+            self.decode_range(b, &elems, &mut read, &mut out, true)?;
             f(start, &out);
             start = elems.end;
         }
@@ -174,14 +196,14 @@ impl PackedSource {
         let mut read = TileBuf::default();
         if tile >= numel {
             let mut out = Vec::new();
-            self.decode_range(b, &(0..numel), &mut read, &mut out)?;
+            self.decode_range(b, &(0..numel), &mut read, &mut out, true)?;
             return Ok(out);
         }
         let (mut whole, mut part) = (Vec::with_capacity(numel as usize), Vec::new());
         let mut start = 0;
         while start < numel {
             let elems = start..(start + tile).min(numel);
-            self.decode_range(b, &elems, &mut read, &mut part)?;
+            self.decode_range(b, &elems, &mut read, &mut part, true)?;
             whole.extend_from_slice(&part);
             start = elems.end;
         }

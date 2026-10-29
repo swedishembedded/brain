@@ -54,7 +54,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 
 use backend_api::arch::{ArchDesc, TierLevel, TierSupport};
 use backend_api::{
@@ -92,13 +92,9 @@ const LIBRARY_GEMM_PLACEHOLDER: &str = r#"extern "C" __global__ void brain_libra
 pub struct CudaStep {
     kind: usize,
     threads: u32,
-    /// The uniform stream's device allocation - **shared** between every step
-    /// of the same shape, not private to this one.
-    ///
-    /// `None` only for a kernel that declares no uniform block. See
-    /// [`CudaBackend::uniform_for`] for why this is keyed on the dispatch's
-    /// structure rather than allocated per step, and why writing the
-    /// parameters into it is therefore deferred to `submit`.
+    /// The uniform block the CALLER supplied (`step_buf`); `None` for a step that carries its `params`, whose block
+    /// is chosen when it is issued (the eager batch's parameter block) or captured (the graph's own), so recording a
+    /// step allocates nothing on the device.
     uniform: Option<Arc<exec::DeviceMem>>,
     /// This step's own parameter words, carried rather than uploaded at record
     /// time. Empty when the caller supplied the uniform buffer itself
@@ -165,7 +161,7 @@ pub(crate) struct Compiled {
     /// Per storage binding, in order: whether the kernel may write it. What
     /// orders a use against other streams' work (see [`exec::Fences`]).
     pub(crate) writes: Vec<bool>,
-    takes_uniform: bool,
+    pub(crate) takes_uniform: bool,
     /// Whether the entry point takes the bound range lengths after its
     /// pointers: true for a generated kernel (see `wgsl_cuda::Kernel`), false
     /// for a native one, whose signature is the provider's own.
@@ -196,36 +192,6 @@ struct NativeKey {
     bindings: &'static [backend_api::BindKind],
     shared_bytes: u32,
     launch: backend_api::CudaLaunch,
-}
-
-/// What a uniform allocation is shared by: the dispatch's **structure**, with
-/// its parameter VALUES and its thread count deliberately left out.
-///
-/// Excluding the values is the whole basis of graph replay - see
-/// [`CudaBackend::uniform_for`]. Excluding the thread count is the less
-/// obvious half and matters just as much: the grid is not a property of the
-/// storage, and keying on it would hand every advancing sequence position a
-/// fresh uniform address, which is precisely the event
-/// `cuGraphExecKernelNodeSetParams` exists to survive. The parameter *length*
-/// is in the key because it is the allocation's size, which is structure.
-#[derive(Clone, PartialEq, Eq, Hash)]
-struct UniformKey {
-    kind: usize,
-    words: usize,
-    bufs: Vec<(usize, u64)>,
-}
-
-/// A cached uniform allocation, plus proof that the key still means what it
-/// meant.
-///
-/// The key identifies buffers by the address of their `Arc`. A raw address is
-/// only an identity while the thing at it is alive, so the weak handles are
-/// what make the key safe to trust: a `Weak` reserves the allocation's slot,
-/// so no later `Arc` can occupy that address, and a dead one says this entry
-/// describes buffers that no longer exist.
-struct UniformSlot {
-    mem: Arc<exec::DeviceMem>,
-    keep: Vec<Weak<exec::DeviceMem>>,
 }
 
 /// Page-locked host memory the unbatched path stages its parameters through.
@@ -310,9 +276,7 @@ const PARAM_BLOCK_WORDS: usize = 1 << 14;
 
 /// The device block the parameters of a batch of eagerly issued dispatches are uploaded into with ONE copy.
 ///
-/// The per-shape uniform allocations ([`CudaBackend::uniform_for`]) exist so a captured graph's node addresses
-/// stay stable; issued one by one they cost a host-to-device copy in front of every kernel, and the copy is a
-/// stream operation: the kernel before it must finish, the copy engine runs it, and only then may the next kernel
+/// A parameter copy in front of every kernel is a stream operation: the kernel before it must finish, the copy engine runs it, and only then may the next kernel
 /// start. Measured on the 27B mixed iteration (nsys): 14 us of card idle per kernel, 61 of 234 ms. A batch that is
 /// issued eagerly instead packs its steps' parameters into one image, copies it into this block once, and points
 /// each kernel's uniform argument at its slice.
@@ -472,13 +436,6 @@ pub struct CudaBackend {
     /// panic three dispatches later, by which time the provider has already
     /// promised to serve the request.
     native: Arc<Mutex<Vec<Arc<Compiled>>>>,
-    /// Uniform allocations shared by every step of the same shape - see
-    /// [`UniformKey`].
-    uniforms: Mutex<HashMap<UniformKey, UniformSlot>>,
-    /// The allocator epoch at which [`Self::release_dead_uniforms`] last swept
-    /// `uniforms`. A buffer can only die by being freed, which moves the
-    /// epoch, so an unchanged epoch means there is nothing new to find.
-    uniforms_swept_at: AtomicU64,
     /// Page-locked staging for the unbatched path - see [`StagingPool`].
     staging: Mutex<StagingPool>,
     /// The device block an eagerly issued batch's parameters are uploaded into, one copy for the batch - see
@@ -601,8 +558,6 @@ impl CudaBackend {
             ctx,
             compiled,
             native,
-            uniforms: Mutex::new(HashMap::new()),
-            uniforms_swept_at: AtomicU64::new(0),
             staging: Mutex::new(StagingPool::default()),
             param_block: Mutex::new(None),
             upload_ring: std::sync::OnceLock::new(),
@@ -816,81 +771,6 @@ impl CudaBackend {
             })
     }
 
-    /// The uniform allocation every step of this shape shares.
-    ///
-    /// Not one per step, and the reason is the whole basis of graph capture: a
-    /// graph node holds a device *address*, so a uniform allocated afresh per
-    /// dispatch would give every token a new address and no submission would
-    /// ever be replayable. The key is therefore the dispatch's structure - the
-    /// kernel, the buffers it binds and the size of its parameter block - with
-    /// the parameter VALUES excluded, so that a position advancing by one
-    /// reuses the same storage rather than invalidating everything.
-    ///
-    /// What that buys is paid for in `submit` rather than here: two steps of
-    /// the same shape in one submission now share storage, so the parameters
-    /// cannot be uploaded when the step is recorded (the second would
-    /// overwrite the first before either had run). They are uploaded in stream
-    /// order between the two dispatches instead, which is correct for the same
-    /// reason the dispatches themselves are ordered.
-    fn uniform_for(&self, kind: usize, bufs: &[(Arc<exec::DeviceMem>, u64)], words: usize) -> Arc<exec::DeviceMem> {
-        let key = UniformKey {
-            kind,
-            words,
-            bufs: bufs.iter().map(|(m, o)| (Arc::as_ptr(m) as usize, *o)).collect(),
-        };
-        let mut cache = self.uniforms.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(slot) = cache.get(&key) {
-            if slot.keep.iter().all(|w| w.strong_count() > 0) {
-                return slot.mem.clone();
-            }
-            // The key's addresses no longer name the buffers they were formed
-            // from, so the entry is meaningless rather than stale.
-            cache.remove(&key);
-        }
-        // Entries whose buffers are gone are the only thing that can make this
-        // map grow without bound, and they can only be found by looking, so
-        // the sweep is here rather than on a timer.
-        if cache.len() >= 4096 {
-            cache.retain(|_, s| s.keep.iter().all(|w| w.strong_count() > 0));
-        }
-        self.counters.uniform_allocs.fetch_add(1, Ordering::Relaxed);
-        // Not cleared: the allocation is exactly the `words` parameters, and every submission of the step uploads
-        // all of them in stream order before its dispatch, so a clear would only be overwritten (it was one
-        // memset per dispatch of a prefill round over fresh buffers, ~2,000 a round on a 27B hybrid model).
-        let mem = Arc::new(self.alloc((words * 4).max(4) as u64, "a step's uniform stream"));
-        cache.insert(
-            key,
-            UniformSlot { mem: mem.clone(), keep: bufs.iter().map(|(m, _)| Arc::downgrade(m)).collect() },
-        );
-        mem
-    }
-
-    /// Free the uniform blocks of steps whose buffers no longer exist.
-    ///
-    /// Such an entry can never be matched again (its key names addresses of
-    /// freed allocations), but it keeps a device allocation resident. They used
-    /// to be found only when the table reached its size cap or the same key was
-    /// asked for again, so a handle that outlived its model kept one block per
-    /// distinct step shape until it was dropped. Called where the host has just
-    /// synchronised, so nothing in flight can still be reading a block.
-    fn release_dead_uniforms(&self) {
-        let epoch = self.ctx.alloc_epoch();
-        if self.uniforms_swept_at.swap(epoch, Ordering::AcqRel) == epoch {
-            return;
-        }
-        let dead: Vec<UniformSlot> = {
-            let mut cache = self.uniforms.lock().unwrap_or_else(|e| e.into_inner());
-            let keys: Vec<UniformKey> = cache
-                .iter()
-                .filter(|(_, s)| !s.keep.iter().all(|w| w.strong_count() > 0))
-                .map(|(k, _)| k.clone())
-                .collect();
-            keys.iter().filter_map(|k| cache.remove(k)).collect()
-        };
-        // Freed outside the lock: `cuMemFree` waits for the device.
-        drop(dead);
-    }
-
     fn record(
         &self,
         kind: usize,
@@ -923,8 +803,12 @@ impl CudaBackend {
                 (mem, off_words * 4)
             })
             .collect();
-        let uniform = Some(self.uniform_for(kind, &bufs, params.len()));
-        Step::new(CudaStep { kind, threads, uniform, params: params.to_vec(), bufs, lens, library })
+        // The parameters travel with the step: where a kernel reads them from is decided when the step is issued (the
+        // eager batch's parameter block) or captured (the graph's), never by a per-shape device allocation.
+        if !params.is_empty() {
+            self.counters.uniform_allocs.fetch_add(1, Ordering::Relaxed);
+        }
+        Step::new(CudaStep { kind, threads, uniform: None, params: params.to_vec(), bufs, lens, library })
     }
 
     /// Everything a dispatch needs, resolved before anything is issued.
@@ -944,12 +828,19 @@ impl CudaBackend {
             st.bufs.len()
         );
         let mut args: Vec<CuDevicePtr> = Vec::with_capacity(2 * st.bufs.len() + 1);
+        // A step that carries parameters gets its block address when it is issued or captured; until then the slot is 0.
         let uniform = if c.takes_uniform {
-            let u = st.uniform.as_ref().unwrap_or_else(|| {
-                panic!("backend-cuda: kernel '{name}' declares a uniform block but the dispatch bound none")
-            });
-            args.push(u.device_ptr());
-            Some(u.clone())
+            match (st.uniform.as_ref(), st.params.is_empty()) {
+                (Some(u), _) => {
+                    args.push(u.device_ptr());
+                    Some(u.clone())
+                }
+                (None, false) => {
+                    args.push(0);
+                    None
+                }
+                (None, true) => panic!("backend-cuda: kernel '{name}' declares a uniform block but the dispatch bound none"),
+            }
         } else {
             None
         };
@@ -1039,11 +930,8 @@ impl CudaBackend {
             return;
         }
         let mut guard = self.param_block.lock().unwrap_or_else(|e| e.into_inner());
-        let block = guard.get_or_insert_with(|| ParamBlock {
-            mem: self.alloc((PARAM_BLOCK_WORDS * 4) as u64, "the eager parameter block"),
-            image: Vec::with_capacity(PARAM_BLOCK_WORDS),
-        });
-        let carries = |r: &Resolved| r.library.is_none() && r.uniform.is_some() && !r.params.is_empty();
+        let block = self.param_block_of(&mut guard);
+        let carries = |r: &Resolved| r.owns_params();
         let mut from = 0;
         while from < resolved.len() {
             block.image.clear();
@@ -1077,30 +965,28 @@ impl CudaBackend {
         }
     }
 
-    /// Issue one resolved dispatch on its own - the timed path. Its parameters go to the step's shared uniform
-    /// first; see [`Self::issue_eager`] for the batched form.
+    /// Issue one resolved dispatch on its own - the timed path: its parameters are copied into the parameter block
+    /// and the device is waited for, so the clock does not bill the copy engine's idle compute to the kernel
+    /// (while the copy engine runs, the compute engine is idle and a device shared with another context may switch to
+    /// it; knowledge #212). See [`Self::issue_eager`] for the batched form.
     fn issue(&self, r: &Resolved) {
-        if r.library.is_none() {
-            if let (Some(u), false) = (r.uniform.as_ref(), r.params.is_empty()) {
-                // Enqueued on the dispatch stream, NOT performed synchronously.
-                // A synchronous copy would run on the legacy stream and therefore
-                // drain the device between every pair of dispatches - see
-                // `StagingPool`. On the stream it is simply ordered: the previous
-                // step's kernel has read this shared uniform before the next step
-                // overwrites it.
-                self.stage_upload(u, &r.params);
-                if self.timing.load(Ordering::Acquire) {
-                    // A timed launch starts its clock only once its upload has
-                    // landed. While the copy engine runs it, the compute engine is
-                    // idle and a device shared with another context may switch to
-                    // it; started earlier, the clock would bill that context's whole
-                    // time slice to this kernel (knowledge #212). Timing already
-                    // issues launch by launch, so this costs a wait, not batching.
-                    self.ctx.sync().unwrap_or_else(|e| panic!("backend-cuda: device synchronise failed: {e}"));
-                }
-            }
+        if !r.owns_params() {
+            self.launch(r, None);
+            return;
         }
-        self.launch(r, None);
+        let mut guard = self.param_block.lock().unwrap_or_else(|e| e.into_inner());
+        let block = self.param_block_of(&mut guard);
+        self.stage_upload(&block.mem, &r.params);
+        self.ctx.sync().unwrap_or_else(|e| panic!("backend-cuda: device synchronise failed: {e}"));
+        self.launch(r, Some(block.mem.device_ptr()));
+    }
+
+    /// The parameter block, allocated on first use.
+    fn param_block_of<'a>(&self, slot: &'a mut Option<ParamBlock>) -> &'a mut ParamBlock {
+        slot.get_or_insert_with(|| ParamBlock {
+            mem: self.alloc((PARAM_BLOCK_WORDS * 4) as u64, "the eager parameter block"),
+            image: Vec::with_capacity(PARAM_BLOCK_WORDS),
+        })
     }
 
     /// Enqueue `r`'s kernel (or library product) on this handle's stream; its parameters are already in place.
@@ -1272,7 +1158,7 @@ impl CudaBackend {
                 .iter()
                 .map(|r| NodeSig {
                     kernel: Arc::as_ptr(&r.compiled) as usize,
-                    uniform: r.uniform.as_ref().map(|u| Arc::as_ptr(u) as usize).unwrap_or(0),
+                    uniform: r.uniform.as_ref().map(|u| Arc::as_ptr(u) as usize).unwrap_or(0), // a caller-supplied block only
                     words: r.params.len(),
                     bufs: r.bufs.iter().map(|(m, off)| (Arc::as_ptr(m) as usize, *off)).collect(),
                     lens: r.lens.clone(),
@@ -2170,7 +2056,8 @@ impl backend_api::Backend for CudaBackend {
         let waited = std::time::Instant::now();
         self.drain_staging();
         crate::live::host_waited(waited.elapsed().as_nanos() as u64);
-        self.release_dead_uniforms();
+        // The device has drained, so an ordering event no buffer names any more has nothing left to order.
+        self.fence_events.lock().unwrap_or_else(|e| e.into_inner()).retain(|e| Arc::strong_count(e) > 1);
         if self.timing.load(Ordering::Acquire) {
             self.collect_timings();
         }

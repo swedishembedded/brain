@@ -140,6 +140,9 @@ Increments, each measured (nsys card-busy %, API calls per iteration, client tok
 - **B1 (done, knowledge 381): the clears and fences.** Buffers a kernel overwrites are `storage_uninit` (the serving GDN fold with its five
   scratch buffers instead of eighteen, attention context, the fused decode output, the uploaded index words), and the cross-handle ordering
   events are reused: memsets per mixed iteration 930 -> 20, event create/destroy 6000 -> 0, card busy 79 -> 81 %.
+- **B2 (done, knowledge 381): the host in front of and behind the forward.** Embedding rows are read without dropping their pages after each
+  row and decoded in parallel (15 ms), and recording a step allocates no per-shape device uniform (the 7 ms drain-time free). Card busy 81 -> 90 %,
+  c=16 / c=64 output 337 / 465 -> 360 / 500 tok/s, 31K TTFT 7.03 -> 6.64 s.
 - **B: the arena (rest).** Intermediates of a bucket at fixed offsets of one allocation (no pool alloc/free: ~11000 calls per iteration; no
   clears of overwritten buffers; row views instead of the 1008 `concat_split` copies), which is also what makes C replayable.
 - **C: the full round as a plan, then graph lowering** with the row count bucketed (bounded graph memory), the per-step metadata

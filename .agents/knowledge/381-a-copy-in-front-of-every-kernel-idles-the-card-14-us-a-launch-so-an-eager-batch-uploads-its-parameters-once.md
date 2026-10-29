@@ -39,3 +39,18 @@ output tok/s at c = 1 / 4 / 16 / 64 49 / 200 / 340 / 460 -> 49 / 200 / 337 / 465
 the API counts). What bounds the iteration now (nsys, CPU sampling): 15 ms of host work before the first kernel (tables, index uploads, 15 % of the samples in
 `madvise` from large host frees) and a 7 ms host gap after the last layer, together 22 of 158 ms, plus 5400 launches at 15 us host cost each.
 Card tests in a debug build (0xFF-filled uninit): `gdn_chunk_fwd_train_tc`, `gguf_mixed_step` pass; `gguf_conformance` 12/13 as before.
+
+Increment B2 (same note): the host work in front of and behind the forward, found by symbolizing an nsys CPU profile of a frame-pointer
+release build (`CARGO_PROFILE_RELEASE_STRIP=none`, `-C force-frame-pointers=yes`; the IP base recovered from the return addresses, which
+must follow a `bl`). Two costs, both host-side and both in brain:
+1. **15 ms before the first kernel was the embedding lookup.** `ResidentCheckpoint::embed_rows` read each row of the FP8 table from the
+   mapped file one after the other and `madvise(DONTNEED)`-ed the pages after every row (a 64 KiB page and a fault per row, 117 of 193
+   `forward_mixed` samples). Point reads now keep their pages (`PackedSource::read_range`; the streaming tile reads still release) and the
+   rows decode in parallel (`PackedSource::read_rows`).
+2. **The 7 ms gap behind the last layer was `release_dead_uniforms`.** Every recorded step took a per-shape device allocation for its
+   parameters (keyed on kernel and buffers, so fresh buffers made a fresh key each round) and the next drain freed the dead ones with a
+   synchronising `cuMemFree`. Since increment A no path reads that allocation: an eager batch copies parameters into the parameter block, a
+   graph into its own. A step carrying parameters now allocates nothing when recorded (`Resolved::owns_params`).
+Median mixed iteration (nsys): 158 -> 144.5 ms, card busy 81 -> 90 % (all iterations 89 %), pool allocs 5450 -> 2140, memsets 20 -> 138
+(kept by other paths), API calls 38000 -> 27000. Client output tok/s at c = 1 / 4 / 16 / 64: 49 / 200 / 337 / 465 -> 50 / 203 / 360 / 500; TTFT p50 at 16
+1.05 -> 0.95 s; 31K-prompt TTFT 7.03 -> 6.64 s. Parity identical (98.44 %, KL 1.526e-3).

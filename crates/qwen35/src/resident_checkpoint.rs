@@ -208,21 +208,7 @@ impl ResidentCheckpoint {
     pub fn embed_rows(&self, name: &str, rows: &[usize], d: usize) -> Option<Result<Vec<f32>, String>> {
         match self {
             ResidentCheckpoint::Gguf(mg) => mg.tensor_rows(name, rows, d),
-            ResidentCheckpoint::Hf(hf) => {
-                let total = hf.src.numel(name)?;
-                if d == 0 || rows.iter().any(|&r| r.checked_add(1).and_then(|e| e.checked_mul(d)).is_none_or(|e| e > total)) {
-                    return None;
-                }
-                let mut out = Vec::with_capacity(rows.len() * d);
-                for &r in rows {
-                    match hf.src.read_range(name, (r * d) as u64, d as u64) {
-                        Ok(Some(row)) => out.extend_from_slice(&row),
-                        Ok(None) => return None,
-                        Err(e) => return Some(Err(e)),
-                    }
-                }
-                Some(Ok(out))
-            }
+            ResidentCheckpoint::Hf(hf) => hf.src.read_rows(name, rows, d).transpose(),
         }
     }
 

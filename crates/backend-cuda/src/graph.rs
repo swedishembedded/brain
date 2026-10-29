@@ -255,6 +255,12 @@ pub(crate) struct Resolved {
 }
 
 impl Resolved {
+    /// Whether the step carries parameters for a uniform block nobody supplied: the backend copies them where the kernel
+    /// reads them (the eager batch's block, a graph's private one).
+    pub(crate) fn owns_params(&self) -> bool {
+        self.library.is_none() && self.uniform.is_none() && self.compiled.takes_uniform && !self.params.is_empty()
+    }
+
     /// Every allocation the dispatch uses and whether it writes it: the storage
     /// bindings as the kernel declares them, and the uniform block, which the
     /// submission writes its parameters into.
@@ -498,14 +504,11 @@ impl GraphCache {
         let mut words = 0usize;
         let mut slots = Vec::with_capacity(steps.len());
         for s in steps {
-            slots.push(match (s.uniform.as_ref(), s.params.is_empty()) {
-                (Some(_), false) => {
-                    let at = words;
-                    words += s.params.len().next_multiple_of(STAGING_ALIGN_WORDS);
-                    Some((at, s.params.len()))
-                }
-                _ => None,
-            });
+            slots.push(s.owns_params().then(|| {
+                let at = words;
+                words += s.params.len().next_multiple_of(STAGING_ALIGN_WORDS);
+                (at, s.params.len())
+            }));
         }
         // The graph's parameters: a page-locked image and the device block every node's uniform pointer points into.
         // Both are made before the capture opens and are zeroed, padding included.
@@ -808,7 +811,7 @@ impl Frozen {
         for (_, steps) in &segments {
             let mut idx = Vec::with_capacity(steps.len());
             for s in steps {
-                if s.uniform.is_some() && !s.params.is_empty() {
+                if s.owns_params() {
                     let mem = ctx.alloc((s.params.len() * 4).max(4))?;
                     // SAFETY: `u32` has no padding, so the words are valid bytes.
                     let bytes = unsafe { std::slice::from_raw_parts(s.params.as_ptr() as *const u8, s.params.len() * 4) };
