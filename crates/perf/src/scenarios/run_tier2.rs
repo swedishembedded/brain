@@ -308,6 +308,7 @@ pub fn simple_class(input: usize, output: usize, slo: Slo) -> Class {
         output: Lengths::Fixed(output.max(1)),
         weight: 1.0,
         slo,
+        shared_prefix: 0,
     }
 }
 

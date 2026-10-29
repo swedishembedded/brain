@@ -178,6 +178,7 @@ pub fn class_from(base: &Workload) -> Class {
         output: crate::workload::Lengths::Fixed(64),
         weight: 1.0,
         slo: Slo::ttfa(1000.0),
+        shared_prefix: 0,
     })
 }
 

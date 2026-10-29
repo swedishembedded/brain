@@ -68,6 +68,13 @@ pub struct PerfRequest {
     pub class: usize,
     /// Deterministic per-request seed, so payloads reproduce exactly.
     pub seed: u64,
+    /// Leading input artifacts every request of the class shares (a common
+    /// document or system prompt), realised from [`Self::prefix_seed`]; the
+    /// rest come from [`Self::seed`]. `0` shares nothing.
+    pub shared_prefix: usize,
+    /// Seed of the shared leading artifacts: the same for every request of a
+    /// class in a run.
+    pub prefix_seed: u64,
 }
 
 /// What a target is, for the result fingerprint.
@@ -257,7 +264,7 @@ mod tests {
     #[test]
     fn one_shot_request_collapses_to_a_single_artifact() {
         let mut t = FakeTarget::new(4, 1);
-        t.submit(PerfRequest { input_artifacts: 8, output_artifacts: 1, class: 0, seed: data::rng::random_seed() });
+        t.submit(PerfRequest { input_artifacts: 8, output_artifacts: 1, class: 0, seed: data::rng::random_seed(), shared_prefix: 0, prefix_seed: 0 });
         let mut out = Vec::new();
         while t.step(&mut out) {}
         let arts = out.iter().filter(|e| e.kind == EmissionKind::Artifact).count();
@@ -269,8 +276,8 @@ mod tests {
     #[test]
     fn artifact_count_matches_the_request() {
         let mut t = FakeTarget::new(2, 2);
-        t.submit(PerfRequest { input_artifacts: 4, output_artifacts: 5, class: 0, seed: data::rng::random_seed() });
-        t.submit(PerfRequest { input_artifacts: 4, output_artifacts: 3, class: 0, seed: data::rng::random_seed() });
+        t.submit(PerfRequest { input_artifacts: 4, output_artifacts: 5, class: 0, seed: data::rng::random_seed(), shared_prefix: 0, prefix_seed: 0 });
+        t.submit(PerfRequest { input_artifacts: 4, output_artifacts: 3, class: 0, seed: data::rng::random_seed(), shared_prefix: 0, prefix_seed: 0 });
         let mut out = Vec::new();
         while t.step(&mut out) {}
         for (id, want) in [(0u64, 5usize), (1, 3)] {
@@ -283,7 +290,7 @@ mod tests {
     fn concurrency_cap_is_respected() {
         let mut t = FakeTarget::new(2, 1);
         for i in 0..6 {
-            t.submit(PerfRequest { input_artifacts: 4, output_artifacts: 4, class: 0, seed: i });
+            t.submit(PerfRequest { input_artifacts: 4, output_artifacts: 4, class: 0, seed: i, shared_prefix: 0, prefix_seed: 0 });
         }
         let mut out = Vec::new();
         t.step(&mut out);

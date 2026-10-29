@@ -36,6 +36,7 @@ pub fn default_classes() -> Vec<Class> {
             output: Lengths::Fixed(128),
             weight: 4.0,
             slo: Slo::interactive(500.0, 50.0),
+            shared_prefix: 0,
         },
         Class {
             name: "rag".into(),
@@ -43,6 +44,7 @@ pub fn default_classes() -> Vec<Class> {
             output: Lengths::Fixed(256),
             weight: 2.0,
             slo: Slo::interactive(4000.0, 80.0),
+            shared_prefix: 0,
         },
         Class {
             name: "agent".into(),
@@ -51,6 +53,7 @@ pub fn default_classes() -> Vec<Class> {
             weight: 1.0,
             // A coding agent cares about a steady stream, not first byte.
             slo: Slo { ttfa_ms: Some(10_000.0), ial_ms: Some(80.0), e2e_ms: None },
+            shared_prefix: 0,
         },
         Class {
             name: "batch".into(),
@@ -59,6 +62,7 @@ pub fn default_classes() -> Vec<Class> {
             weight: 1.0,
             // Background work: no latency contract at all.
             slo: Slo::NONE,
+            shared_prefix: 0,
         },
     ]
 }

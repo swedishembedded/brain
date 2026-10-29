@@ -162,6 +162,7 @@ mod tests {
                 output: Lengths::Fixed(out),
                 weight: 1.0,
                 slo: Slo::NONE,
+                shared_prefix: 0,
             }],
             arrival,
             num_requests: n,

@@ -171,6 +171,9 @@ pub fn fidelity_requests() -> Vec<PerfRequest> {
             output_artifacts: FIDELITY_MAX_NEW as usize,
             class: 0,
             seed: 0x5EED ^ i,
+            // Nothing is shared, so the prefix seed is never drawn from.
+            shared_prefix: 0,
+            prefix_seed: 0x5EED ^ i,
         })
         .collect()
 }
@@ -231,13 +234,16 @@ impl<D: PagedDecoder> PagedLlmTarget<D> {
     pub fn new(sched: Scheduler<D>, info: TargetInfo, stop: Vec<u32>, vocab: u32) -> PagedLlmTarget<D> {
         PagedLlmTarget { sched, info, stop, vocab, submitted: 0 }
     }
+}
 
-    /// Synthetic prompt of exactly `n` tokens, deterministic in `seed`. Content
-    /// is irrelevant to cost; only length and determinism matter.
-    fn prompt(&self, n: usize, seed: u64) -> Vec<u32> {
-        let mut rng = data::rng::Rng::new(seed);
-        (0..n).map(|_| (rng.next_u64() % self.vocab.max(1) as u64) as u32).collect()
-    }
+/// `n` synthetic token ids below `vocab`, deterministic in the seeds: the first `shared` drawn from `prefix_seed`
+/// (identical across the requests of a class), the rest from `seed`. Content is irrelevant to cost; only length,
+/// determinism and what is shared matter.
+fn synthetic_prompt(n: usize, shared: usize, prefix_seed: u64, seed: u64, vocab: u32) -> Vec<u32> {
+    let draw = |rng: &mut data::rng::Rng| (rng.next_u64() % vocab.max(1) as u64) as u32;
+    let (mut common, mut own) = (data::rng::Rng::new(prefix_seed), data::rng::Rng::new(seed));
+    let shared = shared.min(n);
+    (0..shared).map(|_| draw(&mut common)).chain((shared..n).map(|_| draw(&mut own))).collect()
 }
 
 impl<D: PagedDecoder> PerfTarget for PagedLlmTarget<D> {
@@ -246,7 +252,7 @@ impl<D: PagedDecoder> PerfTarget for PagedLlmTarget<D> {
     }
 
     fn submit(&mut self, req: PerfRequest) -> ReqId {
-        let prompt = self.prompt(req.input_artifacts, req.seed);
+        let prompt = synthetic_prompt(req.input_artifacts, req.shared_prefix, req.prefix_seed, req.seed, self.vocab);
         self.submitted += 1;
         // `ignore_stop` is expressed by passing no stop ids: a synthetic run must
         // produce the full requested length, or the workload silently shortens
@@ -369,7 +375,7 @@ impl<D: PagedDecoder> PerfTarget for PagedLlmTarget<D> {
     /// deterministic, so the gate demands exactness.
     fn fidelity(&mut self) -> Option<crate::fidelity::Fidelity> {
         let prompts: Vec<Vec<u32>> =
-            (0..3u64).map(|i| self.prompt(FIDELITY_PROMPT_TOKENS as usize, 0x5EED ^ i)).collect();
+            (0..3u64).map(|i| synthetic_prompt(FIDELITY_PROMPT_TOKENS as usize, 0, 0, 0x5EED ^ i, self.vocab)).collect();
         let max_new = FIDELITY_MAX_NEW as usize;
 
         // Sequential reference: one request at a time, drained to completion.
@@ -709,6 +715,17 @@ impl PerfTarget for ExecutorTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_synthetic_prompt_starts_with_its_classs_shared_tokens() {
+        let a = synthetic_prompt(64, 48, 9, 1, 1000);
+        let b = synthetic_prompt(64, 48, 9, 2, 1000);
+        assert_eq!(a.len(), 64);
+        assert_eq!(a[..48], b[..48], "the shared part depends only on the prefix seed");
+        assert_ne!(a[48..], b[48..], "the rest is the request's own");
+        assert_eq!(synthetic_prompt(16, 48, 9, 1, 1000)[..], a[..16], "a prompt shorter than the shared part is all shared");
+        assert!(a.iter().all(|&t| t < 1000));
+    }
     use capability::{Action, ActionResult, ActionSpec, Manifest, Outcome};
 
     /// A provider whose action streams `steps` progress callbacks.
@@ -759,7 +776,7 @@ mod tests {
     }
 
     fn req(out: usize) -> PerfRequest {
-        PerfRequest { input_artifacts: 8, output_artifacts: out, class: 0, seed: data::rng::random_seed() }
+        PerfRequest { input_artifacts: 8, output_artifacts: out, class: 0, seed: data::rng::random_seed(), shared_prefix: 0, prefix_seed: 0 }
     }
 
     #[test]
@@ -1127,9 +1144,8 @@ impl HttpTarget {
     /// count re-derived from the target. The realistic-agentic-prompt shape
     /// (long shared system preamble + a short user turn) is what the serving-
     /// performance audit measured against; this is the synthetic stand-in.
-    fn synth_system_prompt(n_tokens: usize, seed: u64) -> String {
-        let mut rng = data::rng::Rng::new(seed);
-        (0..n_tokens.max(1)).map(|_| format!("tok{}", rng.next_u64() % 4096)).collect::<Vec<_>>().join(" ")
+    fn synth_system_prompt(n_tokens: usize, shared: usize, prefix_seed: u64, seed: u64) -> String {
+        synthetic_prompt(n_tokens.max(1), shared, prefix_seed, seed, 4096).iter().map(|t| format!("tok{t}")).collect::<Vec<_>>().join(" ")
     }
 
     /// The streaming chat-completion request for one [`PerfRequest`], byte-for-byte
@@ -1139,7 +1155,7 @@ impl HttpTarget {
         let body = serde_json::json!({
             "model": self.model,
             "messages": [
-                {"role": "system", "content": HttpTarget::synth_system_prompt(req.input_artifacts, req.seed)},
+                {"role": "system", "content": HttpTarget::synth_system_prompt(req.input_artifacts, req.shared_prefix, req.prefix_seed, req.seed)},
                 {"role": "user", "content": "Continue the sequence."},
             ],
             "max_tokens": req.output_artifacts,

@@ -98,6 +98,9 @@ pub struct Class {
     /// Share of total requests belonging to this class (weights are normalised).
     pub weight: f64,
     pub slo: Slo,
+    /// Leading input artifacts every request of this class shares
+    /// ([`PerfRequest::shared_prefix`]); `0` shares nothing.
+    pub shared_prefix: usize,
 }
 
 /// The latency contract a class must satisfy to count as goodput.
@@ -168,6 +171,8 @@ impl Workload {
                 output_artifacts: c.output.sample(&mut rng).max(1),
                 class: ci,
                 seed: self.seed.wrapping_add(i as u64),
+                shared_prefix: c.shared_prefix,
+                prefix_seed: self.seed ^ (0x5eed_0000_0000_0000 | ci as u64),
             });
         }
         out
@@ -258,6 +263,8 @@ fn gamma_interarrival(rng: &mut Rng, rate: f64, shape: f64) -> f64 {
 /// for non-token targets (frame/embed/image_gen/speech). Every one runs on
 /// every device, so a single grid characterises a model on a machine.
 pub fn standard(name: &str, arrival: Arrival, num_requests: usize, seed: u64) -> Option<Workload> {
+    // A document of 7K tokens every request shares, then its own 1K-token question.
+    let shared_prefix = if name == "shared_prefix" { 7168 } else { 0 };
     let (input, output, slo) = match name {
         "interactive" => (128, 256, Slo::interactive(500.0, 50.0)),
         "chat" => (1024, 256, Slo::interactive(2000.0, 50.0)),
@@ -288,6 +295,7 @@ pub fn standard(name: &str, arrival: Arrival, num_requests: usize, seed: u64) ->
             output: Lengths::Fixed(output),
             weight: 1.0,
             slo,
+            shared_prefix,
         }],
         arrival,
         num_requests,
@@ -331,6 +339,7 @@ pub fn scaled(w: &Workload, div: usize) -> Workload {
     for c in &mut out.classes {
         c.input = shrink(c.input);
         c.output = shrink(c.output);
+        c.shared_prefix /= d;
     }
     out
 }
@@ -373,6 +382,7 @@ mod tests {
                 output: Lengths::Fixed(4),
                 weight: 1.0,
                 slo: Slo::NONE,
+                shared_prefix: 0,
             }],
             arrival: Arrival::Saturated,
             num_requests: 64,
@@ -390,6 +400,18 @@ mod tests {
         let mut w = standard("chat", Arrival::Saturated, 10, 1).unwrap();
         w.warmup_requests = 5;
         assert_eq!(w.requests().len(), 15);
+    }
+
+    /// `shared_prefix` is a document every request shares followed by its own question, so a prefix cache can serve
+    /// the document; before, every prompt was drawn from its own seed and nothing was shared.
+    #[test]
+    fn the_shared_prefix_workload_shares_its_document_across_requests() {
+        let w = standard("shared_prefix", Arrival::Saturated, 4, 7).unwrap();
+        let reqs = w.requests();
+        assert!(reqs.iter().all(|r| r.shared_prefix == 7168 && r.input_artifacts == 8192));
+        assert!(reqs.windows(2).all(|p| p[0].prefix_seed == p[1].prefix_seed && p[0].seed != p[1].seed));
+        assert_eq!(scaled(&w, 8).requests()[0].shared_prefix, 7168 / 8, "scaling shrinks the shared part too");
+        assert!(standard("chat", Arrival::Saturated, 2, 7).unwrap().requests().iter().all(|r| r.shared_prefix == 0));
     }
 
     #[test]
