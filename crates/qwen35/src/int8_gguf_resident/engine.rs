@@ -78,6 +78,8 @@ struct Resume {
 
 type PrefixCache = SnapshotPrefixCache<Resume>;
 use super::background::{PrefillDone, PrefillTask, TaskStart};
+use super::mtp::{FeedStart, FeedStep, PromptFeed};
+use super::pace::PrefillPace;
 use super::{KvLayout, KvWindow, MultiPrefillJob, Qwen35GgufInstance, MODEL};
 
 /// Candidates a non-greedy pick can sample from. Real sampling is exact
@@ -117,6 +119,11 @@ fn choose_next(remaining: &[usize], streak: &mut u32) -> Option<usize> {
 
 /// Weight of the newest sequence in the running mean of MTP prefill-feed time.
 const FEED_EWMA: f64 = 0.3;
+
+/// Pairs of a deferred MTP prompt feed run with each slice of prompt (and each draft call): two rounds of the
+/// head, about 5 ms, so a thousand-token prompt's feed is spread over four decode steps.
+// perf-number: a 128-row round of the head takes about 2.5 ms (host prep and projection 1.1, layer 1.4)
+const FEED_ROWS_PER_SLICE: usize = 256;
 
 /// Bound on the upload quanta one scoring call drives before reporting that the
 /// adapter cannot become resident (see [`Qwen35GgufEngine::score_supervised`]).
@@ -164,6 +171,34 @@ pub struct Qwen35GgufEngine {
     background: Option<Background>,
     /// Prompts that fit one slice started in a row while a longer one waited ([`MAX_SHORT_STREAK`]).
     short_streak: u32,
+    /// Prompt feeds to the MTP head begun and not finished, oldest first.
+    feeds: Vec<DeferredFeed>,
+    /// How much device time a background prompt gets between decode steps.
+    pace: PrefillPace,
+    /// When the last paced slice ended: the next one's start less this is the decode iteration in between.
+    slice_ended: Option<std::time::Instant>,
+}
+
+/// A prompt's feed to the MTP head that is run a few rounds at a time between decode steps instead of when the
+/// prompt is in ([`Qwen35GgufEngine::advance_feeds`]), and what finishing it settles.
+struct DeferredFeed {
+    feed: PromptFeed,
+    namespace: KvNamespace,
+    /// The prompt: the cache entries filed from it are marked valid for the head by its tokens.
+    prompt: Vec<u32>,
+    /// Seconds the rounds run so far took.
+    secs: f64,
+}
+
+/// How a slice that ends a prompt hands over to what follows it.
+#[derive(Clone, Copy)]
+struct SliceExit {
+    /// The recurrent state is in the slot's pool row and not in the working copy (a multi-sequence forward leaves
+    /// it there).
+    state_in_pool: bool,
+    /// The MTP head's feed of the prompt is begun now and run later ([`DeferredFeed`]): a sync feed is tens of
+    /// milliseconds in which no running sequence decodes.
+    defer_feed: bool,
 }
 
 /// A prompt slice read in while sequences decode, and what finishing it needs.
@@ -171,9 +206,6 @@ struct Background {
     task: PrefillTask,
     p: PartialPrefill,
     end: usize,
-    /// The slice's rows, once a pump between decode steps found it finished; the
-    /// scheduler's next prefill call files it.
-    done: Option<PrefillDone>,
 }
 
 /// Run decode-side device work on the urgent lane when prompts are read in
@@ -230,11 +262,18 @@ pub struct PrefillPolicy {
     /// finish later (21 s against 11 s). It pays where the weights, not the host, bound
     /// a slice.
     pub batch_tokens: usize,
+    /// The scheduler iteration length, decode step included, that a prompt read in beside decoding sequences is
+    /// allowed to stretch their token interval to. Each iteration the prompt gets the device time the decode
+    /// iteration leaves under this (and never less than a quarter of the iteration), recorded and waited for
+    /// before the decode step, so the step runs on an idle card ([`super::pace`]). Only prompts read in while
+    /// something decodes are paced: with nothing decoding a prompt goes in at the card's speed.
+    // perf-number: a p99 token interval of 50 ms is the interactive budget; the mean iteration is held under 45
+    pub step_target: std::time::Duration,
 }
 
 impl Default for PrefillPolicy {
     fn default() -> PrefillPolicy {
-        PrefillPolicy { slice_tokens: 512, batch_tokens: 0 }
+        PrefillPolicy { slice_tokens: 512, batch_tokens: 0, step_target: std::time::Duration::from_millis(45) }
     }
 }
 
@@ -308,6 +347,9 @@ impl Qwen35GgufEngine {
             background_on,
             background: None,
             short_streak: 0,
+            feeds: Vec::new(),
+            pace: PrefillPace::new(PrefillPolicy::default().step_target),
+            slice_ended: None,
         }
     }
 
@@ -454,7 +496,9 @@ impl Qwen35GgufEngine {
     /// the engine is handed to a scheduler.
     pub fn set_prefill_policy(&mut self, policy: PrefillPolicy) {
         assert!(policy.slice_tokens > 0, "{MODEL}: a prefill slice of 0 tokens never finishes a prompt");
+        assert!(!policy.step_target.is_zero(), "{MODEL}: a step target of 0 leaves a prompt no device time");
         self.prefill = policy;
+        self.pace = PrefillPace::new(policy.step_target);
     }
 
     /// Read prompts in on each card's normal stream while decode runs on its
@@ -507,10 +551,8 @@ impl Qwen35GgufEngine {
         let adapter_slots: Vec<u32> = tables.iter().map(|t| adapters::slot_of(self.inst.stage_models(), t.kv_namespace())).collect();
         let (slots, positions) = self.next_positions(tables);
         self.inst.set_adapter_rows(&adapter_slots);
-        self.pump_background();
         let hidden = self.inst.stack_decode_hidden(inputs, &slots, &positions).unwrap_or_else(|e| panic!("{e}"));
         self.inst.set_adapter_rows(&[]);
-        self.pump_background();
         // A batch the scheduler will not speculate over (past the crossover or the
         // verify scratch) is not worth tracking for the drafter either.
         if slots.len() > self.spec_batch_limit.min(self.inst.speculation_rows() as usize) {
@@ -627,7 +669,8 @@ impl Qwen35GgufEngine {
     /// prompt for reuse. `state_in_pool`: the recurrent state is in the slot's pool
     /// row and not in the working copy (a multi-sequence forward leaves it there).
     #[allow(clippy::too_many_arguments)]
-    fn finish_slice(&mut self, slot: u32, table: &BlockTable, prompt: &[u32], mut p: PartialPrefill, end: usize, hidden: Vec<f32>, state_in_pool: bool) -> PrefillProgress {
+    fn finish_slice(&mut self, slot: u32, table: &BlockTable, prompt: &[u32], mut p: PartialPrefill, end: usize, hidden: Vec<f32>, exit: SliceExit) -> PrefillProgress {
+        let SliceExit { state_in_pool, defer_feed } = exit;
         let consumed = end - p.done;
         p.done = end;
         p.fresh = false;
@@ -644,29 +687,73 @@ impl Qwen35GgufEngine {
         }
         let head_rows_filled = if p.mtp_feed {
             let started = std::time::Instant::now();
-            let fed = self.inst.mtp_after_prefill(slot, prompt, p.start, p.prefix_hidden.as_deref(), &p.rows_hidden);
-            if self.inst.has_mtp() {
-                let secs = started.elapsed().as_secs_f64();
-                self.feed_secs = Some(self.feed_secs.map_or(secs, |m| m + FEED_EWMA * (secs - m)));
+            match self.inst.mtp_begin_feed(slot, prompt, p.start, p.prefix_hidden.as_deref(), &p.rows_hidden) {
+                FeedStart::Pending(feed) if defer_feed => {
+                    self.feeds.push(DeferredFeed { feed, namespace: table.kv_namespace(), prompt: prompt.to_vec(), secs: started.elapsed().as_secs_f64() });
+                    // The cache entries are marked once the feed has run.
+                    return PrefillProgress::Done(hidden);
+                }
+                FeedStart::Pending(mut feed) => {
+                    let filled = loop {
+                        match self.inst.mtp_advance_feed(&mut feed, usize::MAX) {
+                            FeedStep::More => {}
+                            step => break step == FeedStep::Done,
+                        }
+                    };
+                    self.observe_feed_secs(started.elapsed().as_secs_f64());
+                    filled
+                }
+                FeedStart::Complete => {
+                    self.observe_feed_secs(started.elapsed().as_secs_f64());
+                    true
+                }
+                FeedStart::Unavailable => !self.inst.has_mtp(),
             }
-            fed || !self.inst.has_mtp()
         } else {
             self.inst.mtp_skip_prefill(slot);
             false
         };
-        // What is cached is the checkpoint and any branch point, filed when the prefill passed them (see
-        // `slice_end`): a prompt that resumed from a checkpoint of its own length or later leaves that entry as it
-        // is. The feed above filled the head's rows of every position before the prompt's end, theirs among them, so
-        // a prompt resuming from either drafts with the head.
+        self.mark_head_rows(slot, table.kv_namespace(), prompt, head_rows_filled);
+        PrefillProgress::Done(hidden)
+    }
+
+    /// Fold the seconds a prompt's feed to the head took into [`PagedDecoder::spec_prefill_cost`]'s average.
+    fn observe_feed_secs(&mut self, secs: f64) {
+        if self.inst.has_mtp() {
+            self.feed_secs = Some(self.feed_secs.map_or(secs, |m| m + FEED_EWMA * (secs - m)));
+        }
+    }
+
+    /// What is cached is the checkpoint and any branch point, filed when the prefill passed them (see
+    /// `slice_end`): a prompt that resumed from a checkpoint of its own length or later leaves that entry as it
+    /// is. The feed filled the head's rows of every position before the prompt's end, theirs among them, so a
+    /// prompt resuming from either drafts with the head (`valid`).
+    fn mark_head_rows(&mut self, slot: u32, namespace: KvNamespace, prompt: &[u32], valid: bool) {
         for pending in self.pending.get_mut(&slot).into_iter().flatten() {
-            pending.mtp_valid = head_rows_filled;
+            pending.mtp_valid = valid;
         }
         for len in self.filed.remove(&slot).unwrap_or_default() {
-            if let Some(resume) = self.cache.payload_mut(table.kv_namespace(), &prompt[..len]) {
-                resume.mtp_valid = head_rows_filled;
+            if let Some(resume) = self.cache.payload_mut(namespace, &prompt[..len]) {
+                resume.mtp_valid = valid;
             }
         }
-        PrefillProgress::Done(hidden)
+    }
+
+    /// Run up to `rows` pairs of the oldest unfinished prompt feed through the MTP head. A finished feed marks the
+    /// cache entries filed from its prompt as valid for the head.
+    fn advance_feeds(&mut self, rows: usize) {
+        let Some(df) = self.feeds.first_mut() else { return };
+        let started = std::time::Instant::now();
+        let step = self.inst.mtp_advance_feed(&mut df.feed, rows);
+        df.secs += started.elapsed().as_secs_f64();
+        if step == FeedStep::More {
+            return;
+        }
+        let DeferredFeed { feed, namespace, prompt, secs } = self.feeds.remove(0);
+        if step == FeedStep::Done {
+            self.observe_feed_secs(secs);
+        }
+        self.mark_head_rows(feed.slot(), namespace, &prompt, step == FeedStep::Done);
     }
 
     /// Where a slice of at most `budget` tokens ends: a slice that would run past the prompt's branch point or its
@@ -754,7 +841,7 @@ impl Qwen35GgufEngine {
         let end = self.slice_end(&p, prompt.len(), budget);
         let resume = !p.fresh && p.done > 0;
         let hidden = self.forward_slice(table, prompt, &mut p, end, resume);
-        self.finish_slice(slot, table, prompt, p, end, hidden, false)
+        self.finish_slice(slot, table, prompt, p, end, hidden, SliceExit { state_in_pool: false, defer_feed: false })
     }
 
     /// The next slices of several sequences, the rows of all of them through the
@@ -813,7 +900,7 @@ impl Qwen35GgufEngine {
             }
         }
         for ((i, slot, p, end), (h, in_pool)) in live.into_iter().zip(hidden) {
-            answers[i] = Some(self.finish_slice(slot, jobs[i].table, jobs[i].prompt, p, end, h, in_pool));
+            answers[i] = Some(self.finish_slice(slot, jobs[i].table, jobs[i].prompt, p, end, h, SliceExit { state_in_pool: in_pool, defer_feed: false }));
         }
         answers.into_iter().map(|a| a.expect("every job was answered")).collect()
     }
@@ -843,7 +930,7 @@ impl Qwen35GgufEngine {
         let from = if p.done == 0 { TaskStart::Fresh } else { TaskStart::Continue };
         let collect = self.inst.has_mtp() && p.mtp_feed;
         let task = self.inst.prefill_task(job.prompt, p.done, end, slot, from, collect);
-        self.background = Some(Background { task, p, end, done: None });
+        self.background = Some(Background { task, p, end });
         None
     }
 
@@ -869,15 +956,28 @@ impl Qwen35GgufEngine {
         choose_next(&remaining, &mut self.short_streak).map(|k| open[k])
     }
 
-    /// Hand each card whose prefill round has finished its next one, without
-    /// waiting for any: called around every decode step, so a card does not sit
-    /// idle until the scheduler's next prefill call.
-    fn pump_background(&mut self) {
-        if let Some(bg) = self.background.as_mut().filter(|b| b.done.is_none()) {
-            // The rounds belong on the normal lane even when this runs inside a decode step.
-            let inst = &self.inst;
-            bg.done = gpu_core::lane::normal(|| inst.pump_prefill(&mut bg.task, false)).unwrap_or_else(|e| panic!("{e}"));
+    /// One paced slice of the prompt being read in ([`PrefillPace`]): record the layers the decode iteration just
+    /// measured leaves room for, and wait for the cards to finish them, so the decode step that follows runs on
+    /// idle cards. `Some` once the prompt's slice is in.
+    fn pump_paced(&mut self) -> Option<PrefillDone> {
+        let started = std::time::Instant::now();
+        self.pace.observe_iteration(self.slice_ended.map(|ended| (started - ended).as_secs_f64()));
+        let bg = self.background.as_mut().expect("a prompt is being read in");
+        let rows = bg.task.upcoming_rows();
+        let layers = self.pace.layers(rows);
+        let inst = &self.inst;
+        let (done, spent_all) = gpu_core::lane::normal(|| {
+            let done = inst.pump_prefill(&mut bg.task, Some(layers)).unwrap_or_else(|e| panic!("{e}"));
+            inst.settle_prefill();
+            (done, bg.task.is_recording())
+        });
+        let now = std::time::Instant::now();
+        // A slice that finished its round recorded fewer layers than asked: its time says nothing about a layer's cost.
+        if spent_all {
+            self.pace.observe_slice(layers, rows, (now - started).as_secs_f64());
         }
+        self.slice_ended = Some(now);
+        done
     }
 
     /// See [`PagedDecoder::prefill_background`]: one prompt at a time, oldest
@@ -886,6 +986,9 @@ impl Qwen35GgufEngine {
     fn read_prompts_in(&mut self, jobs: &mut [PrefillJob<'_>], wait: bool) -> Vec<PrefillProgress> {
         let mut answers: Vec<Option<PrefillProgress>> = (0..jobs.len()).map(|_| None).collect();
         let mut consumed = vec![0usize; jobs.len()];
+        // Nothing decodes while the prompt is waited for, so the head's feeds finish; between decode steps a few
+        // rounds of the oldest go in with each slice.
+        self.advance_feeds(if wait { usize::MAX } else { FEED_ROWS_PER_SLICE });
         loop {
             if self.background.is_none() {
                 let Some(i) = self.next_prompt(jobs, &answers) else { break };
@@ -897,29 +1000,31 @@ impl Qwen35GgufEngine {
             let bg = self.background.as_mut().expect("a prompt is being read in");
             let slot = bg.task.slot();
             let i = jobs.iter().position(|j| j.table.state_row() == Some(slot)).unwrap_or_else(|| panic!("{MODEL}: the prompt read in for slot {slot} is not among the scheduler's prefilling sequences"));
-            let finished = match bg.done.take() {
-                Some(done) => Some(done),
-                None => self.inst.pump_prefill(&mut bg.task, wait).unwrap_or_else(|e| panic!("{e}")),
+            let finished = if wait {
+                self.slice_ended = None;
+                self.inst.pump_prefill(&mut bg.task, None).unwrap_or_else(|e| panic!("{e}"))
+            } else {
+                self.pump_paced()
             };
             let Some(done) = finished else { break };
             let Background { mut p, end, .. } = self.background.take().expect("checked above");
             p.rows_hidden.extend_from_slice(&done.all);
-            match self.finish_slice(slot, jobs[i].table, jobs[i].prompt, p, end, done.last, false) {
+            match self.finish_slice(slot, jobs[i].table, jobs[i].prompt, p, end, done.last, SliceExit { state_in_pool: false, defer_feed: !wait }) {
+                // Back to the scheduler after a slice: a prompt that arrived meanwhile is considered now, and
+                // the decode step runs before the next slice. A finished prompt starts decoding.
                 PrefillProgress::Partial { consumed: c } => {
                     consumed[i] += c;
-                    // Back to the scheduler between slices: a prompt that arrived meanwhile is considered now.
-                    if wait {
-                        break;
-                    }
+                    break;
                 }
                 finished => {
                     answers[i] = Some(finished);
-                    // Nothing decodes yet: hand the scheduler the sequence that can.
-                    if wait {
-                        break;
-                    }
+                    break;
                 }
             }
+        }
+        // The next slice may follow after a pause with no prompt in: that gap is not a decode iteration.
+        if self.background.is_none() {
+            self.slice_ended = None;
         }
         answers.into_iter().zip(consumed).map(|(a, c)| a.unwrap_or(PrefillProgress::Partial { consumed: c })).collect()
     }
@@ -999,6 +1104,7 @@ impl PagedDecoder for Qwen35GgufEngine {
                 gpu_core::lane::normal(|| self.inst.abandon_prefill(bg.task));
             }
             self.inst.mtp_release(slot);
+            self.feeds.retain(|f| f.feed.slot() != slot);
             self.partial.remove(&slot);
             self.filed.remove(&slot);
         }
@@ -1112,6 +1218,9 @@ impl PagedDecoder for Qwen35GgufEngine {
             let hidden = self.decode_hidden(tables, inputs);
             self.inst.head_topk_rows(&hidden, inputs.len() as u32, k)
         })
+    }
+    fn step_latency_target(&self) -> Option<std::time::Duration> {
+        Some(self.prefill.step_target)
     }
     fn prefix_stats(&self) -> (u64, u64, usize) {
         self.cache.stats()
@@ -1249,6 +1358,9 @@ impl Qwen35GgufEngine {
         if !self.inst.has_mtp() {
             return vec![Vec::new(); queries.len()];
         }
+        // No prompt is being read in to carry the feeds on; a feed not finished by now would keep its sequence
+        // from drafting.
+        self.advance_feeds(FEED_ROWS_PER_SLICE);
         let slots: Vec<u32> = queries.iter().map(|q| self.slot(q.table)).collect();
         let consumed: Vec<u32> = queries.iter().map(|q| q.table.len()).collect();
         let next: Vec<u32> = queries.iter().map(|q| *q.context.last().expect("a running sequence has context")).collect();

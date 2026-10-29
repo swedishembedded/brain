@@ -143,6 +143,7 @@
 mod background;
 mod engine;
 mod mtp;
+mod pace;
 mod speculate;
 pub use speculate::{SpecCost, SpecServing, SpeculativeMode};
 pub use engine::{checkpoint_len, PrefillPolicy, Qwen35GgufEngine, SpecTimes};

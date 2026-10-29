@@ -4999,12 +4999,13 @@ impl Qwen35 {
     }
 
     /// Record layers of a round begun by [`Self::begin_prefill_chunk`] until it is complete (`budget` `None`) or
-    /// `budget` of host time is spent (always at least one layer). `Some` with the round's `[n, d_model]` block
-    /// once every layer is recorded; the device may still be running them.
+    /// `budget` layers are recorded (always at least one; a short round that runs as decode steps issues one
+    /// group). `Some` with the round's `[n, d_model]` block once every layer is recorded; the device may still be
+    /// running them.
     ///
-    /// `caches` are the ones the round began with. Recording is host work that is paced by the device once the
-    /// launch queue is full, so a caller that also has latency-bound work to issue bounds it with `budget`.
-    pub(crate) fn advance_prefill_chunk(&self, round: &mut ChunkRound, caches: &DecodeCaches, budget: Option<std::time::Duration>) -> Option<DeviceBuffer> {
+    /// `caches` are the ones the round began with. The device time a call puts on the card is its layer count
+    /// times a layer's cost, which a caller that also has latency-bound work to issue bounds with `budget`.
+    pub(crate) fn advance_prefill_chunk(&self, round: &mut ChunkRound, caches: &DecodeCaches, budget: Option<usize>) -> Option<DeviceBuffer> {
         let r = match round {
             ChunkRound::Exact(r) => return self.advance_exact_round(r, caches, budget),
             ChunkRound::Layers(r) => r,
@@ -5205,13 +5206,13 @@ impl Qwen35 {
         StackState { res, front, layer: self.shard.start, types, pooled, drain_pooled, reclaim_budget, fused, epilogue }
     }
 
-    /// Record layers of the round `st` stands for - one at a time, until the stage's last or until `budget` of host
-    /// time is spent (always at least one) - and, on the last, the epilogue. `Some` with the round's block once every
+    /// Record layers of the round `st` stands for - one at a time, until the stage's last or until `budget` layers
+    /// are recorded (always at least one) - and, on the last, the epilogue. `Some` with the round's block once every
     /// layer is recorded; the device may still be running them.
-    fn advance_layer_stack(&self, st: &mut StackState, n: u32, label: &str, mixer: &mut PrefillMixer<'_>, budget: Option<std::time::Duration>) -> Option<DeviceBuffer> {
+    fn advance_layer_stack(&self, st: &mut StackState, n: u32, label: &str, mixer: &mut PrefillMixer<'_>, budget: Option<usize>) -> Option<DeviceBuffer> {
         let g = &self.gpu;
         let d = self.cfg.d_model;
-        let started = std::time::Instant::now();
+        let first = st.layer;
         while st.layer < self.shard.end {
             let l = st.layer;
             let ty = st.types[l];
@@ -5319,7 +5320,7 @@ impl Qwen35 {
                 eprintln!("qwen35::run_prefill_chunk_stage: {label} n={n} layer {l} ({ty:?}) last-row rms = {rms}");
             }
             st.layer += 1;
-            if st.layer < self.shard.end && budget.is_some_and(|b| started.elapsed() >= b) {
+            if st.layer < self.shard.end && budget.is_some_and(|b| st.layer - first >= b.max(1)) {
                 return None;
             }
         }
@@ -5435,7 +5436,7 @@ impl Qwen35 {
     ///
     /// Same contract as [`Self::run_prefill_chunk_stage`]: `[n, d_model]`,
     /// final-normed on a head stage, the raw residual block otherwise.
-    fn advance_exact_round(&self, r: &mut ExactRound, caches: &DecodeCaches, budget: Option<std::time::Duration>) -> Option<DeviceBuffer> {
+    fn advance_exact_round(&self, r: &mut ExactRound, caches: &DecodeCaches, budget: Option<usize>) -> Option<DeviceBuffer> {
         let d = self.cfg.d_model as usize;
         assert!(caches.gqa_cap > 0, "qwen35::advance_exact_round: a KV block of 0 rows");
         let total = r.tokens.len();
@@ -5457,13 +5458,12 @@ impl Qwen35 {
         }
         // Each group's output is read before the next group is issued, which is
         // also the drain the scratch arenas require between passes.
-        let started = std::time::Instant::now();
         while r.done < total {
             let len = step.min(total - r.done);
             let rows = self.gpu.read(&group(r.done, len), len * d);
             r.out.extend(rows);
             r.done += len;
-            if r.done < total && budget.is_some_and(|b| started.elapsed() >= b) {
+            if r.done < total && budget.is_some() {
                 return None;
             }
         }
@@ -6922,7 +6922,7 @@ mod tests {
         let mut calls = 0;
         let out = loop {
             calls += 1;
-            if let Some(out) = m.advance_prefill_chunk(&mut round, &caches, Some(std::time::Duration::ZERO)) {
+            if let Some(out) = m.advance_prefill_chunk(&mut round, &caches, Some(1)) {
                 break out;
             }
             assert!(calls < 100, "the round never finished");
@@ -6977,7 +6977,7 @@ mod tests {
         let mut calls = 0;
         let out = loop {
             calls += 1;
-            if let Some(out) = m.advance_prefill_chunk(&mut round, &caches, Some(std::time::Duration::ZERO)) {
+            if let Some(out) = m.advance_prefill_chunk(&mut round, &caches, Some(1)) {
                 break out;
             }
             assert!(calls < 100, "the round never finished");

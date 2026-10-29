@@ -52,6 +52,8 @@ const MAX_BATCH_ROWS: usize = 128;
 
 /// Prompt rows fed to the head per prefill round.
 const PREFILL_ROUND_ROWS: usize = 128;
+/// Rows of a prompt's feed whose host side is prepared at once (a multiple of [`PREFILL_ROUND_ROWS`]).
+const FEED_PREP_ROWS: usize = 8 * PREFILL_ROUND_ROWS;
 
 /// Scratch arena of the `eh_proj` projection.
 const FC_ARENA: &str = "qwen35.mtp.fc";
@@ -69,6 +71,43 @@ struct SlotState {
     /// pair for row `r` is `(hidden[r], toks[r + 1])`; the last row's partner
     /// is the sequence's next input, which only the draft call knows.
     toks: Vec<u32>,
+}
+
+/// A prompt's feed to the head that was begun and is not finished ([`Qwen35GgufInstance::mtp_begin_feed`]).
+pub(super) struct PromptFeed {
+    slot: u32,
+    /// Head position of the first pair.
+    first: usize,
+    /// Pairs run so far.
+    done: usize,
+    /// `[pairs]`: the token each pair is partnered with.
+    tokens: Vec<u32>,
+    /// `[pairs, d]`: the target's hidden state of each pair.
+    hidden: Vec<f32>,
+}
+
+impl PromptFeed {
+    pub(super) fn slot(&self) -> u32 {
+        self.slot
+    }
+}
+
+/// How [`Qwen35GgufInstance::mtp_begin_feed`] found the prompt.
+pub(super) enum FeedStart {
+    /// No head, or no hidden state to continue a cached prefix from: the slot drafts from scratch.
+    Unavailable,
+    /// Nothing to run: the prompt has no complete pair.
+    Complete,
+    Pending(PromptFeed),
+}
+
+/// What one [`Qwen35GgufInstance::mtp_advance_feed`] left.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FeedStep {
+    More,
+    Done,
+    /// The head failed on the prompt; the slot drafts from scratch.
+    Failed,
 }
 
 impl SlotState {
@@ -99,6 +138,8 @@ pub(super) struct MtpDrafter {
     mg: MmapGguf,
     embed: EmbedTable,
     slots: std::collections::HashMap<u32, SlotState>,
+    /// Slots whose prompt feed is begun and not finished ([`PromptFeed`]): they neither draft nor record steps.
+    feeding: std::collections::HashSet<u32>,
     /// Forwards run, for the benchmark.
     pub(super) forwards: u64,
     /// Wall time of the pieces of a forward: host prep and projection, the layer
@@ -106,17 +147,17 @@ pub(super) struct MtpDrafter {
     pub(super) times: [std::time::Duration; 3],
 }
 
-/// `x * rsqrt(mean(x^2) + eps) * w` per `d`-wide row of `x`.
-fn rms_rows(x: &[f32], w: &[f32], eps: f32) -> Vec<f32> {
-    let d = w.len();
-    let mut out = Vec::with_capacity(x.len());
-    for row in x.chunks_exact(d) {
-        let ms = row.iter().map(|v| v * v).sum::<f32>() / d as f32;
-        let r = 1.0 / (ms + eps).sqrt();
-        out.extend(row.iter().zip(w).map(|(v, w)| v * r * w));
+/// `row * rsqrt(mean(row^2) + eps) * w`, written to `out`.
+fn rms_row_into(row: &[f32], w: &[f32], eps: f32, out: &mut [f32]) {
+    let ms = row.iter().map(|v| v * v).sum::<f32>() / w.len() as f32;
+    let r = 1.0 / (ms + eps).sqrt();
+    for ((o, v), w) in out.iter_mut().zip(row).zip(w) {
+        *o = v * r * w;
     }
-    out
 }
+
+/// Rows a host thread prepares at least, below which splitting the work costs more than it saves.
+const MIN_ROWS_PER_THREAD: usize = 32;
 
 impl MtpDrafter {
     /// `Ok(None)` when the checkpoint carries no MTP block.
@@ -175,35 +216,51 @@ impl MtpDrafter {
             mg: MmapGguf::open(gguf_path).map_err(|e| format!("{MODEL}: cannot reopen '{gguf_path}': {e}"))?,
             embed: EmbedTable { name: embed_name.to_string(), d },
             slots: std::collections::HashMap::new(),
+            feeding: std::collections::HashSet::new(),
             forwards: 0,
             times: Default::default(),
         }))
     }
 
     fn embed_rows(&self, tokens: &[u32]) -> Result<Vec<f32>, String> {
-        let mut out = Vec::with_capacity(tokens.len() * self.d);
-        for &t in tokens {
-            out.extend(self.mg.tensor_range(&self.embed.name, t as usize * self.d, self.d).ok_or_else(|| format!("{MODEL}: token {t} is outside the embedding"))??);
-        }
-        Ok(out)
+        let rows: Vec<usize> = tokens.iter().map(|&t| t as usize).collect();
+        self.mg.tensor_rows(&self.embed.name, &rows, self.d).ok_or_else(|| {
+            let bad = tokens.iter().find(|&&t| self.mg.tensor_range(&self.embed.name, t as usize * self.d, self.d).is_none()).copied().unwrap_or(0);
+            format!("{MODEL}: token {bad} is outside the embedding")
+        })?
     }
 
-    /// The `[n, 2d]` input of `eh_proj` for rows pairing `hidden[i]` with `tokens[i]`.
+    /// The `[n, 2d]` input of `eh_proj` for rows pairing `hidden[i]` with `tokens[i]`. Rows are independent, so
+    /// they are normed on several threads (a thousand-row prompt is about 22 ms of norms on one).
     fn fc_input(&self, tokens: &[u32], hidden: &[f32], hidden_is_target: bool) -> Result<Vec<f32>, String> {
         let d = self.d;
-        let e = rms_rows(&self.embed_rows(tokens)?, &self.enorm, self.eps);
-        let h: Vec<f32> = if self.normed_hidden {
-            let norm = if hidden_is_target { &self.target_norm_host } else { &self.head_norm_host };
-            rms_rows(hidden, norm, self.eps)
-        } else {
-            hidden.to_vec()
-        };
-        let h = rms_rows(&h, &self.hnorm, self.eps);
-        let mut x = Vec::with_capacity(tokens.len() * 2 * d);
-        for (er, hr) in e.chunks_exact(d).zip(h.chunks_exact(d)) {
-            x.extend_from_slice(er);
-            x.extend_from_slice(hr);
-        }
+        let embedded = self.embed_rows(tokens)?;
+        let hidden_norm: Option<&[f32]> = self.normed_hidden.then(|| if hidden_is_target { &self.target_norm_host[..] } else { &self.head_norm_host[..] });
+        let (enorm, hnorm, eps) = (&self.enorm[..], &self.hnorm[..], self.eps);
+        let mut x = vec![0.0f32; tokens.len() * 2 * d];
+        let rows_per_thread = tokens.len().div_ceil(std::thread::available_parallelism().map_or(1, |n| n.get()).min(16)).max(MIN_ROWS_PER_THREAD);
+        std::thread::scope(|scope| {
+            for (i, block) in x.chunks_mut(rows_per_thread * 2 * d).enumerate() {
+                let first = i * rows_per_thread;
+                let (embedded, hidden) = (&embedded, hidden);
+                scope.spawn(move || {
+                    let mut normed = vec![0.0f32; d];
+                    for (r, out) in block.chunks_exact_mut(2 * d).enumerate() {
+                        let row = first + r;
+                        let (e, h) = out.split_at_mut(d);
+                        rms_row_into(&embedded[row * d..(row + 1) * d], enorm, eps, e);
+                        let h_in = &hidden[row * d..(row + 1) * d];
+                        match hidden_norm {
+                            Some(norm) => {
+                                rms_row_into(h_in, norm, eps, &mut normed);
+                                rms_row_into(&normed, hnorm, eps, h);
+                            }
+                            None => rms_row_into(h_in, hnorm, eps, h),
+                        }
+                    }
+                });
+            }
+        });
         Ok(x)
     }
 
@@ -240,14 +297,22 @@ impl MtpDrafter {
         Ok(out)
     }
 
-    /// Feed one sequence's prompt-sized run of complete pairs through the
-    /// chunked path: head positions `from..from + tokens.len()`.
-    fn feed_chunk(&mut self, head_gpu: &Gpu, slot: u32, from: u32, tokens: &[u32], hidden: &[f32], hidden_is_target: bool) -> Result<(), String> {
-        self.forwards += 1;
-        let x = self.fc_input(tokens, hidden, hidden_is_target)?;
-        let ehp = self.project(head_gpu, &x);
+    /// Feed one sequence's run of complete pairs through the chunked path: head positions
+    /// `from..from + tokens.len()`, in rounds of [`PREFILL_ROUND_ROWS`]. The host side of the run (the
+    /// embedding rows, the norms) is prepared [`FEED_PREP_ROWS`] at a time, so the CPU pool is entered once per
+    /// several rounds and not once per round, while the prepared rows stay bounded for a long prompt.
+    fn feed_run(&mut self, head_gpu: &Gpu, slot: u32, from: u32, tokens: &[u32], hidden: &[f32], hidden_is_target: bool) -> Result<(), String> {
+        let d = self.d;
         let view = self.caches.view(slot);
-        self.stage.prefill_chunk_stage(tokens, from, &view, Some(&ehp));
+        for (g, group) in tokens.chunks(FEED_PREP_ROWS).enumerate() {
+            let at = g * FEED_PREP_ROWS;
+            let x = self.fc_input(group, &hidden[at * d..(at + group.len()) * d], hidden_is_target)?;
+            for (i, (round, x)) in group.chunks(PREFILL_ROUND_ROWS).zip(x.chunks(PREFILL_ROUND_ROWS * 2 * d)).enumerate() {
+                self.forwards += 1;
+                let ehp = self.project(head_gpu, x);
+                self.stage.prefill_chunk_stage(round, from + (at + i * PREFILL_ROUND_ROWS) as u32, &view, Some(&ehp));
+            }
+        }
         Ok(())
     }
 }
@@ -345,32 +410,66 @@ impl Qwen35GgufInstance {
     /// later prompt may resume from); `false` when the head was absent or the feed
     /// stopped early.
     pub(super) fn mtp_after_prefill(&mut self, slot: u32, prompt: &[u32], start: usize, prev_hidden: Option<&[f32]>, carry: &[f32]) -> bool {
-        let Self { mtp, shards, .. } = self;
-        let Some(m) = mtp.as_mut() else { return false };
-        let head_gpu = &shards.last().expect("a stage").qwen35.gpu;
+        match self.mtp_begin_feed(slot, prompt, start, prev_hidden, carry) {
+            FeedStart::Unavailable => false,
+            FeedStart::Complete => true,
+            FeedStart::Pending(mut feed) => loop {
+                match self.mtp_advance_feed(&mut feed, usize::MAX) {
+                    FeedStep::More => {}
+                    FeedStep::Done => break true,
+                    FeedStep::Failed => break false,
+                }
+            },
+        }
+    }
+
+    /// Start [`Self::mtp_after_prefill`]'s work without doing the head's forwards: the slot's state is set as the
+    /// finished feed leaves it, and the pairs still to run are handed back as a [`PromptFeed`] for
+    /// [`Self::mtp_advance_feed`] to run a few rounds at a time. Until it is done the slot does not draft (a draft
+    /// would attend over rows the feed has not written) and its decode steps are not recorded: the sequence
+    /// resumes drafting from the first step after the feed, as one that was not fed does.
+    pub(super) fn mtp_begin_feed(&mut self, slot: u32, prompt: &[u32], start: usize, prev_hidden: Option<&[f32]>, carry: &[f32]) -> FeedStart {
+        let Self { mtp, .. } = self;
+        let Some(m) = mtp.as_mut() else { return FeedStart::Unavailable };
         let d = m.d;
         let (first, hidden): (usize, Vec<f32>) = match (start, prev_hidden) {
             (0, _) => (0, carry.to_vec()),
             (s, Some(prev)) => (s - 1, prev.iter().chain(carry).copied().collect()),
-            (_, None) => return false, // no hidden state for the cached prefix's last row: this slot drafts from scratch
+            (_, None) => return FeedStart::Unavailable, // no hidden state for the cached prefix's last row: this slot drafts from scratch
         };
         let len = prompt.len();
         debug_assert_eq!(hidden.len(), (len - first) * d);
-        // Complete pairs: positions first..len-1 pair with prompt[j + 1].
-        let mut at = first;
-        while at + 1 < len {
-            let n = (len - 1 - at).min(PREFILL_ROUND_ROWS);
-            let toks = &prompt[at + 1..at + 1 + n];
-            let h = &hidden[(at - first) * d..(at - first + n) * d];
-            if let Err(e) = m.feed_chunk(head_gpu, slot, at as u32, toks, h, true) {
-                eprintln!("{MODEL}: MTP prefill failed, this sequence drafts from scratch: {e}");
-                m.slots.insert(slot, SlotState { fed: len as u32 - 1, ..SlotState::default() });
-                return false;
-            }
-            at += n;
-        }
         m.slots.insert(slot, SlotState { fed: (len - 1) as u32, hidden: hidden[(len - 1 - first) * d..].to_vec(), toks: vec![prompt[len - 1]] });
-        true
+        // Complete pairs: positions first..len-1 pair with prompt[j + 1].
+        if first + 1 >= len {
+            return FeedStart::Complete;
+        }
+        let n = len - 1 - first;
+        m.feeding.insert(slot);
+        FeedStart::Pending(PromptFeed { slot, first, done: 0, tokens: prompt[first + 1..first + 1 + n].to_vec(), hidden: hidden[..n * d].to_vec() })
+    }
+
+    /// Run up to `rows` more of `feed`'s pairs through the head.
+    pub(super) fn mtp_advance_feed(&mut self, feed: &mut PromptFeed, rows: usize) -> FeedStep {
+        let Self { mtp, shards, .. } = self;
+        let Some(m) = mtp.as_mut() else { return FeedStep::Failed };
+        let head_gpu = &shards.last().expect("a stage").qwen35.gpu;
+        let d = m.d;
+        let end = feed.tokens.len().min(feed.done.saturating_add(rows));
+        let run = m.feed_run(head_gpu, feed.slot, (feed.first + feed.done) as u32, &feed.tokens[feed.done..end], &feed.hidden[feed.done * d..end * d], true);
+        if let Err(e) = run {
+            eprintln!("{MODEL}: MTP prefill failed, this sequence drafts from scratch: {e}");
+            m.feeding.remove(&feed.slot);
+            let len = feed.first + feed.tokens.len() + 1;
+            m.slots.insert(feed.slot, SlotState { fed: len as u32 - 1, ..SlotState::default() });
+            return FeedStep::Failed;
+        }
+        feed.done = end;
+        if end < feed.tokens.len() {
+            return FeedStep::More;
+        }
+        m.feeding.remove(&feed.slot);
+        FeedStep::Done
     }
 
     /// A prompt was prefilled without feeding the head (it would not pay): the slot
@@ -378,6 +477,7 @@ impl Qwen35GgufInstance {
     pub(super) fn mtp_skip_prefill(&mut self, slot: u32) {
         if let Some(m) = self.mtp.as_mut() {
             m.slots.remove(&slot);
+            m.feeding.remove(&slot);
         }
     }
 
@@ -405,6 +505,9 @@ impl Qwen35GgufInstance {
         let Some(m) = self.mtp.as_mut() else { return };
         let d = m.d;
         for (i, (&slot, &tok)) in slots.iter().zip(inputs).enumerate() {
+            if m.feeding.contains(&slot) {
+                continue;
+            }
             let st = m.slots.entry(slot).or_default();
             st.hidden.extend_from_slice(&hidden[i * d..(i + 1) * d]);
             st.toks.push(tok);
@@ -419,9 +522,11 @@ impl Qwen35GgufInstance {
         let d = m.d;
         let mut at = 0usize;
         for (i, &slot) in slots.iter().enumerate() {
-            let st = m.slots.entry(slot).or_default();
-            st.hidden.extend_from_slice(&hidden[at * d..(at + keep[i]) * d]);
-            st.toks.extend_from_slice(&rows[i][..keep[i]]);
+            if !m.feeding.contains(&slot) {
+                let st = m.slots.entry(slot).or_default();
+                st.hidden.extend_from_slice(&hidden[at * d..(at + keep[i]) * d]);
+                st.toks.extend_from_slice(&rows[i][..keep[i]]);
+            }
             at += rows[i].len();
         }
         self.mtp_flush_long(slots);
@@ -434,13 +539,16 @@ impl Qwen35GgufInstance {
         let Some(m) = mtp.as_mut() else { return };
         let head_gpu = &shards.last().expect("a stage").qwen35.gpu;
         for &slot in slots {
+            if m.feeding.contains(&slot) {
+                continue;
+            }
             let st = m.slots.get(&slot).expect("just recorded");
             if st.rows() <= MAX_PENDING_ROWS {
                 continue;
             }
             let (fed, n) = (st.fed, st.rows() - 1);
             let (toks, hidden) = (st.toks[1..=n].to_vec(), st.hidden[..n * m.d].to_vec());
-            match m.feed_chunk(head_gpu, slot, fed, &toks, &hidden, true) {
+            match m.feed_run(head_gpu, slot, fed, &toks, &hidden, true) {
                 Ok(()) => {
                     let st = m.slots.get_mut(&slot).expect("present");
                     st.fed += n as u32;
@@ -462,6 +570,7 @@ impl Qwen35GgufInstance {
         if let Some(m) = self.mtp.as_mut() {
             for slot in slots {
                 m.slots.remove(slot);
+                m.feeding.remove(slot);
             }
         }
     }
@@ -470,6 +579,7 @@ impl Qwen35GgufInstance {
     pub(super) fn mtp_release(&mut self, slot: u32) {
         if let Some(m) = self.mtp.as_mut() {
             m.slots.remove(&slot);
+            m.feeding.remove(&slot);
         }
     }
 
@@ -488,13 +598,13 @@ impl Qwen35GgufInstance {
         // the target consumed. One whose does not (it was not tracked while
         // speculation was off for a big batch) starts over from here: it drafts
         // again once a step has given the head a fresh row to continue from.
-        for i in 0..n {
+        for i in (0..n).filter(|&i| !m.feeding.contains(&slots[i])) {
             let in_step = m.slots.get(&slots[i]).is_some_and(|st| st.fed + st.rows() as u32 == consumed[i] && st.hidden.len() == st.rows() * d);
             if !in_step {
                 m.slots.insert(slots[i], SlotState { fed: consumed[i], ..SlotState::default() });
             }
         }
-        let live: Vec<usize> = (0..n).filter(|&i| ks[i] > 0 && m.slots.get(&slots[i]).is_some_and(|st| st.rows() > 0)).collect();
+        let live: Vec<usize> = (0..n).filter(|&i| ks[i] > 0 && !m.feeding.contains(&slots[i]) && m.slots.get(&slots[i]).is_some_and(|st| st.rows() > 0)).collect();
         if live.is_empty() {
             return out;
         }

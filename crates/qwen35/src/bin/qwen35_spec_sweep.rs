@@ -238,7 +238,7 @@ fn main() {
     // Without --prefill-slice a prompt goes in whole (and, the default being one sequence at a time, alone).
     let sliced = a.prefill_slice != u32::MAX;
     let batch_tokens = a.prefill_batch.unwrap_or(PrefillPolicy::default().batch_tokens);
-    let policy = PrefillPolicy { slice_tokens: if sliced { a.prefill_slice as usize } else { usize::MAX }, batch_tokens };
+    let policy = PrefillPolicy { slice_tokens: if sliced { a.prefill_slice as usize } else { usize::MAX }, batch_tokens, ..PrefillPolicy::default() };
     let r = Qwen35GgufResident::new(a.gguf.clone(), devices, a.ctx, tier).with_kv_tier(a.kv).with_max_batch(max_batch).with_speculation(spec).with_prefill_policy(policy);
     let cost = r.estimate_multi(&r.instance_key("generate", &capability::Invocation::new()));
     let placed: Vec<Device> = cost.devices().collect();

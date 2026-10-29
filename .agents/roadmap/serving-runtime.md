@@ -93,12 +93,22 @@ Gap list, by what the profile attributes (in the order it would move goodput):
   202 / 357 ms to 120 / 179 ms (max 393 / 410 to 201 / 198 ms) on `chat` 1024-token prompts. What is left of it: the MTP
   head's prompt feed (`finish_slice`, 42-56 ms of synchronous normal-lane work per prompt), decode steps running 1.5-2x
   slower while a prefill shares the card (SM sharing; item 8's step-cost model should price it), and a lone prompt reading
-  in at half the sliced speed in background mode (1.56 s against 0.76 s for 1731 tokens, `gguf_resident_real`).
+  in at half the sliced speed in background mode (1.56 s against 0.76 s for 1731 tokens, `gguf_resident_real`): all
+  but the SM sharing fixed 2026-10-29 (knowledge 375), which is avoided by time-slicing, not reduced.
 
 Page size (256 rows today) is part of item 3 and is chosen per cache group by
 measurement (16-256), not fixed globally.
 
 ## Done
+
+- 2026-10-29 (8, decode cadence under prefill; knowledge 375): background rounds are at most 512 rows (a lone 1731-token
+  prompt 1.56 -> 0.75 s); a prompt gets one paced slice of device time per iteration (`PrefillPace`, `PrefillPolicy::step_target`
+  45 ms), waited for before the decode step so the step runs on an idle card; the MTP prompt feed is parallel on the host
+  (42 -> 22 ms) and run 256 rows with each slice; the gate does not speculate where a speculative step misses the latency
+  target and a plain one meets it (`PagedDecoder::step_latency_target`). Chat 1 / 4 / 16: inter-token p99 46 / 121 / 180 ->
+  39 / 63 / 68 ms, max 76 / 170 / 198 -> 77 / 97 / 125, output 64.5 / 138.5 / 181.6 -> 58.2 / 102.2 / 120.8 tok/s, TTFT p99
+  473 / 1969 / 9477 -> 478 / 3023 / 14842 ms, goodput 36.3 / 2.9 / 0 -> 47.3 / 2.1 / 0. `gguf_resident_real` passes
+  (20 of 20). Open: `step_target` as a serve flag; the 40-60 ms decode iterations at b=5-6; TTFT under the pacing at 4+ clients.
 
 - 2026-10-29 (8, decode stalls behind prefill; knowledge 374): the scheduler thread, not the device, was where a decode
   step waited. A graph retired after a free called `cuMemFreeHost`, which waits for every stream: the urgent head of a

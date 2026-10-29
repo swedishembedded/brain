@@ -29,7 +29,6 @@
 //! next prompt when this one is done.
 
 use std::collections::VecDeque;
-use std::time::Duration;
 
 use gpu_core::DeviceBuffer;
 
@@ -37,16 +36,16 @@ use super::{Qwen35GgufInstance, MODEL};
 use crate::adapter_serving as adapters;
 use crate::model::{ChunkRound, StageRows};
 
-/// Host time one non-waiting [`Qwen35GgufInstance::pump_prefill`] spends recording a stage's round.
+/// Rows of one background round, at most.
 ///
-/// A round is recorded layer by layer and the recording is paced by the device once its launch queue is full: a
-/// 960-row round of the 27B is over a thousand launches and a few hundred milliseconds of device work, and recording
-/// all of it in one call held the scheduler for as long as the device took to drain the queue enough to take the
-/// rest, which no decode step issued meanwhile could shorten (knowledge 374). Bounded, the scheduler is back at its
-/// decode step after this long and the rest of the round follows on its next pumps; the queue still holds many
-/// layers, so the device stays busy.
-// perf-number: a layer of that round records in about 1.5 ms when the queue has room; 16 ms is about ten layers
-const PUMP_RECORD_BUDGET: Duration = Duration::from_millis(16);
+/// A round is the unit the pump records, the device runs and a decode step can interleave with, and the widest
+/// ([`Qwen35GgufInstance::prefill_round_rows`], 2048) is not the fastest: a 1731-token prompt alone went in at 1.56 s
+/// as one 2048-row round, 0.97 s as two 1024-row rounds, 0.75 s as four 512-row rounds and 0.86 s as 256-row rounds,
+/// against 0.76 s sliced at 512 rows (GH200, Qwen3.8-27B Q8_0). Narrower rounds also hold the scratch arena and
+/// the launch queue for less time between two decode steps.
+// perf-number: measured by `gguf_resident_real::a_lone_prompt_reads_in_at_least_as_fast_in_the_background`
+const BACKGROUND_ROUND_ROWS: usize = 512;
+
 /// What the working copy of the recurrent state holds when a task starts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TaskStart {
@@ -93,6 +92,18 @@ impl PrefillTask {
     /// The slot this task prefills.
     pub(crate) fn slot(&self) -> u32 {
         self.slot
+    }
+
+    /// Rows of the round the first stage is recording, or begins next: what a pump's layers cost is proportional
+    /// to it.
+    pub(crate) fn upcoming_rows(&self) -> usize {
+        let k = if self.running[0].is_some() { self.next[0] - 1 } else { self.next[0] };
+        self.round(k.min(self.rounds - 1)).len()
+    }
+
+    /// Whether some stage has layers of its round still to record.
+    pub(crate) fn is_recording(&self) -> bool {
+        self.running.iter().any(|r| matches!(r, Some(StageRound::Recording(_))))
     }
 
     fn finished(&self) -> bool {
@@ -142,7 +153,7 @@ impl Qwen35GgufInstance {
     /// submitted yet; [`Self::pump_prefill`] does that.
     pub(crate) fn prefill_task(&self, prompt: &[u32], start: usize, end: usize, slot: u32, from: TaskStart, collect: bool) -> PrefillTask {
         assert!(start < end && end <= prompt.len(), "{MODEL}: a prefill task needs at least one new token");
-        let rows = self.prefill_round_rows() as usize;
+        let rows = (self.prefill_round_rows() as usize).min(BACKGROUND_ROUND_ROWS);
         let tokens = prompt[start..end].to_vec();
         let rounds = tokens.len().div_ceil(rows);
         let stages = self.shards.len();
@@ -164,11 +175,12 @@ impl Qwen35GgufInstance {
     }
 
     /// Advance `task`: record the layers of each stage's round, read back each round that has finished and begin
-    /// the next one wherever the input is there. Without `wait` it never waits for a card (one pass, recording at
-    /// most [`PUMP_RECORD_BUDGET`] per stage); with `wait` it runs the task to its end. `Some` once the task is done.
-    pub(crate) fn pump_prefill(&self, task: &mut PrefillTask, wait: bool) -> Result<Option<PrefillDone>, String> {
+    /// the next one wherever the input is there. With `layers` it makes one pass that never waits for a card,
+    /// recording at most that many layers (or short-round groups) per stage; with `None` it runs the task to its
+    /// end. `Some` once the task is done.
+    pub(crate) fn pump_prefill(&self, task: &mut PrefillTask, layers: Option<usize>) -> Result<Option<PrefillDone>, String> {
         let d = self.cfg.d_model as usize;
-        let budget = (!wait).then_some(PUMP_RECORD_BUDGET);
+        let (wait, budget) = (layers.is_none(), layers);
         loop {
             // Later stages first: their submissions go out before stage 0's,
             // which in a waiting pump is followed by a blocking read.
@@ -228,6 +240,14 @@ impl Qwen35GgufInstance {
             if !wait {
                 return Ok(None);
             }
+        }
+    }
+
+    /// Wait until every stage's normal lane has finished what the task put on it, so the next decode step shares
+    /// the card with no prefill kernel.
+    pub(crate) fn settle_prefill(&self) {
+        for s in &self.shards {
+            s.qwen35.gpu.poll_wait();
         }
     }
 

@@ -441,6 +441,7 @@ impl Qwen35GgufServeConfig {
         qwen35::int8_gguf_resident::PrefillPolicy {
             slice_tokens: self.prefill_slice.map_or(default.slice_tokens, |n| n as usize),
             batch_tokens: self.prefill_batch.map_or(default.batch_tokens, |n| n as usize),
+            ..default
         }
     }
 
