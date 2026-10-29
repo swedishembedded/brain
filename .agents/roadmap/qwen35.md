@@ -26,6 +26,10 @@ structurally and never parity-claimed here.
 
 ## Done
 
+- [x] FP8 release served natively (2026-10-29, `serving-runtime.md` item 17, knowledge 378): the paged resident reads a HuggingFace
+  directory through `ResidentCheckpoint`; linears stay E4M3 with 128 x 128 scales; `matmul_fp8_native` candidates (dequantize-in-register
+  streaming for 1-128 rows, Hopper bf16-operand and e4m3 wgmma GEMMs); gates `fp8_linear_native`, `hf_fp8_conformance`,
+  `qwen35_fp8_parity <hf-dir> <text file>` (the same weights decoded to bf16 as reference; `qwen35_gguf_score --tier bf16`).
 - [x] M1: hoist the zero-coupling GDN scratch allocators (`gdn_chunk_size`,
   `GdnScratchBufs`/`GdnScratchTrainBufs`/`GdnBwdScratchBufs`) out of
   `crates/qwen35moe/src/model.rs` into `crates/model/src/gdn.rs`, migrate qwen35moe.
