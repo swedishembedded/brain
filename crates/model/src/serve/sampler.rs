@@ -297,12 +297,178 @@ impl SampleContext<'_> {
     }
 }
 
+/// What the processors need to know about one sequence's context, kept as the
+/// context grows so a step does not re-read all of it.
+///
+/// Built lazily from the tokens a call is given (`fed` of them are already
+/// ingested) and never looks at a token twice: the repetition penalty's seen
+/// set, the presence/frequency counts and DRY's live matches are all updated
+/// per accepted token, and a step then only consults them for the K
+/// candidates. One state belongs to one sequence's append-only context; a
+/// call whose context is shorter than what was ingested, or whose request
+/// params ask for different processors, starts it over.
+#[derive(Clone, Debug, Default)]
+pub struct ProcessorState {
+    /// Context tokens ingested so far.
+    fed: usize,
+    prompt_len: usize,
+    /// Which structures the ingested tokens were folded into (so a change of params rebuilds).
+    shape: Shape,
+    /// Every token of the whole context (repetition penalty).
+    seen: std::collections::HashSet<u32>,
+    /// Occurrences in the generated part (presence and frequency penalties).
+    counts: HashMap<u32, u32>,
+    dry: DryState,
+}
+
+/// The params a [`ProcessorState`] was built for.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Shape {
+    seen: bool,
+    counts: bool,
+    /// DRY's params when active (its allowed length and breakers shape the matches).
+    dry: Option<DryParams>,
+}
+
+impl Shape {
+    fn of(params: &SampleParams) -> Shape {
+        Shape {
+            seen: params.repetition_penalty != 1.0 && params.repetition_penalty > 0.0,
+            counts: params.presence_penalty != 0.0 || params.frequency_penalty != 0.0,
+            dry: params.dry.active().then_some(params.dry),
+        }
+    }
+}
+
+impl ProcessorState {
+    /// Fold `ctx.context[self.fed..]` into the structures the params need.
+    /// O(new tokens) for the penalties; DRY adds O(live matches) per token.
+    fn sync(&mut self, params: &SampleParams, ctx: &SampleContext<'_>) {
+        let shape = Shape::of(params);
+        if shape != self.shape || ctx.context.len() < self.fed || ctx.prompt_len != self.prompt_len {
+            *self = ProcessorState { prompt_len: ctx.prompt_len, shape, ..ProcessorState::default() };
+        }
+        for p in self.fed..ctx.context.len() {
+            let token = ctx.context[p];
+            if self.shape.seen {
+                self.seen.insert(token);
+            }
+            if self.shape.counts && p >= self.prompt_len {
+                *self.counts.entry(token).or_insert(0) += 1;
+            }
+            if let Some(dry) = &self.shape.dry {
+                self.dry.push(ctx.context, p, (dry.allowed_length as usize).max(1), dry.breakers());
+            }
+        }
+        self.fed = ctx.context.len();
+    }
+}
+
+/// DRY's incremental form of llama.cpp's Z-array over the reversed context.
+///
+/// For every earlier end position `e` it tracks `len`, the length of the
+/// longest common suffix of `context[..=e]` and the whole context so far, for
+/// the positions where that is at least `allowed` (the only ones that are
+/// penalised). Appending a token extends the live matches whose next token
+/// equals it and starts the new ones, which have length exactly `allowed`, by a
+/// hash lookup of the last `allowed` tokens; a step's cost is the number of
+/// live matches (none or a handful in ordinary text, one per period in a
+/// degenerate repetition loop) instead of the whole context.
+#[derive(Clone, Debug, Default)]
+struct DryState {
+    /// `(end position, common suffix length >= allowed)`; none ends at the context's own last token.
+    live: Vec<(u32, u32)>,
+    /// Rolling hash of the last `allowed` tokens, and the end positions each hash value occurred at.
+    window_hash: u64,
+    index: HashMap<u64, Vec<u32>>,
+    /// Tokens since the last sequence breaker (the whole context when none): a repeat is cut to this.
+    since_breaker: usize,
+}
+
+/// The polynomial base of the rolling hash; odd so multiplication is invertible mod 2^64.
+const HASH_BASE: u64 = 0x9E37_79B9_7F4A_7C15;
+
+impl DryState {
+    /// Ingest `context[p]`, the token at position `p == context.len()` of what was fed before.
+    fn push(&mut self, context: &[u32], p: usize, allowed: usize, breakers: &[u32]) {
+        let x = context[p];
+        self.since_breaker = if breakers.contains(&x) { 0 } else { self.since_breaker + 1 };
+        // Matches ending at e continue to e + 1 when that token is x.
+        let mut next = Vec::with_capacity(self.live.len());
+        for &(e, len) in &self.live {
+            if context[e as usize + 1] == x {
+                next.push((e + 1, len + 1));
+            }
+        }
+        // The rolling hash of context[p+1-allowed..=p].
+        self.window_hash = self.window_hash.wrapping_mul(HASH_BASE).wrapping_add(u64::from(x) + 1);
+        if p >= allowed {
+            let out = u64::from(context[p - allowed]) + 1;
+            self.window_hash = self.window_hash.wrapping_sub(out.wrapping_mul(HASH_BASE.wrapping_pow(allowed as u32)));
+        }
+        if p + 1 >= allowed {
+            // A match of exactly `allowed` tokens starts here for each earlier occurrence of the same
+            // window that cannot be extended one token to the left (those are already live).
+            if let Some(ends) = self.index.get(&self.window_hash) {
+                for &e in ends {
+                    let e = e as usize;
+                    let extends_left = e >= allowed && context[e - allowed] == context[p - allowed];
+                    if !extends_left && context[e + 1 - allowed..=e] == context[p + 1 - allowed..=p] {
+                        next.push((e as u32, allowed as u32));
+                    }
+                }
+            }
+            self.index.entry(self.window_hash).or_default().push(p as u32);
+        }
+        self.live = next;
+    }
+
+    /// Each penalised token's penalty (the largest over the matches that predict it), as llama.cpp's DRY.
+    /// `n` is the context length. Cost O(live matches).
+    fn penalties(&self, context: &[u32], dry: &DryParams) -> HashMap<u32, f32> {
+        let mut out = HashMap::new();
+        let allowed = dry.allowed_length as usize;
+        let n = context.len();
+        // A repeat is not matched across a sequence breaker; one just ended is nothing to repeat.
+        let rep_limit = self.since_breaker;
+        if n < 2 || rep_limit < allowed.max(1) {
+            return out;
+        }
+        // base^e must stay finite in f32.
+        let max_exponent = if dry.base > 1.0 { (f32::MAX.ln() / dry.base.ln()).floor() as i64 } else { i64::MAX };
+        for &(e, len) in &self.live {
+            let len = (len as usize).min(rep_limit);
+            if len == 0 || len < allowed {
+                continue;
+            }
+            let exponent = ((len - allowed) as i64).min(max_exponent);
+            let penalty = dry.multiplier * dry.base.powi(exponent as i32);
+            let slot = out.entry(context[e as usize + 1]).or_insert(0.0f32);
+            *slot = slot.max(penalty);
+        }
+        out
+    }
+}
+
 /// Apply the request's processors to `candidates` (token, logit), then restore
 /// the descending order the rest of the sampler relies on.
+///
+/// Stateless form: builds a [`ProcessorState`] from the whole context, so one
+/// call costs O(context) (plus the penalised tokens). A scheduler step calls
+/// [`apply_processors_with`] with the sequence's own state instead.
 pub fn apply_processors(candidates: &mut [(u32, f32)], params: &SampleParams, ctx: &SampleContext<'_>) {
+    apply_processors_with(candidates, params, ctx, &mut ProcessorState::default());
+}
+
+/// [`apply_processors`] over a sequence's incremental state: O(tokens appended
+/// since the previous call) to fold them in (DRY: plus its live matches), then
+/// O(K) hash lookups for the K candidates, instead of rescanning the context
+/// per token. `state` must only ever see the one sequence's growing context.
+pub fn apply_processors_with(candidates: &mut [(u32, f32)], params: &SampleParams, ctx: &SampleContext<'_>, state: &mut ProcessorState) {
     if !params.has_processors() || ctx.context.is_empty() {
         return;
     }
+    state.sync(params, ctx);
     if params.no_repeat.active() {
         let banned = params.no_repeat.banned(ctx.generated());
         for (t, l) in candidates.iter_mut() {
@@ -311,27 +477,22 @@ pub fn apply_processors(candidates: &mut [(u32, f32)], params: &SampleParams, ct
             }
         }
     }
-    if params.repetition_penalty != 1.0 && params.repetition_penalty > 0.0 {
-        let seen: std::collections::HashSet<u32> = ctx.context.iter().copied().collect();
+    if state.shape.seen {
         for (t, l) in candidates.iter_mut() {
-            if seen.contains(t) {
+            if state.seen.contains(t) {
                 *l = if *l > 0.0 { *l / params.repetition_penalty } else { *l * params.repetition_penalty };
             }
         }
     }
-    if params.presence_penalty != 0.0 || params.frequency_penalty != 0.0 {
-        let mut counts: HashMap<u32, u32> = HashMap::new();
-        for &t in ctx.generated() {
-            *counts.entry(t).or_insert(0) += 1;
-        }
+    if state.shape.counts {
         for (t, l) in candidates.iter_mut() {
-            if let Some(&n) = counts.get(t) {
+            if let Some(&n) = state.counts.get(t) {
                 *l -= params.frequency_penalty * n as f32 + params.presence_penalty;
             }
         }
     }
-    if params.dry.active() {
-        let penalties = dry_penalties(ctx.context, &params.dry);
+    if state.shape.dry.is_some() {
+        let penalties = state.dry.penalties(ctx.context, &params.dry);
         for (t, l) in candidates.iter_mut() {
             if let Some(p) = penalties.get(t) {
                 *l -= p;
@@ -340,66 +501,6 @@ pub fn apply_processors(candidates: &mut [(u32, f32)], params: &SampleParams, ct
     }
     // Stable, so equal logits keep the decoder's order; NaN sorts last.
     candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or_else(|| a.1.is_nan().cmp(&b.1.is_nan())));
-}
-
-/// The DRY penalty of every token that would continue a repeat in `context`
-/// (llama.cpp's algorithm: a Z-array over the reversed context gives, for each
-/// earlier position, how many tokens before it equal the tokens before the end;
-/// the token that followed that earlier position is the one penalised, by the
-/// longest repeat it would continue).
-fn dry_penalties(context: &[u32], dry: &DryParams) -> HashMap<u32, f32> {
-    let mut out = HashMap::new();
-    let n = context.len();
-    let allowed = dry.allowed_length as usize;
-    if n < 2 {
-        return out;
-    }
-    let rev: Vec<u32> = context.iter().rev().copied().collect();
-    // A repeat is not matched across a sequence breaker: only the tokens after
-    // the most recent one (counting from the end) can be part of it.
-    let rep_limit = rev.iter().position(|t| dry.breakers().contains(t)).unwrap_or(n);
-    if rep_limit < allowed.max(1) {
-        return out;
-    }
-    let z = z_array(&rev);
-    // base^e must stay finite in f32.
-    let max_exponent = if dry.base > 1.0 { (f32::MAX.ln() / dry.base.ln()).floor() as i64 } else { i64::MAX };
-    for i in 1..n {
-        let len = z[i].min(rep_limit);
-        if len == 0 || len < allowed {
-            continue;
-        }
-        // The earlier occurrence ended at original index n-1-i; the token after it is rev[i-1].
-        let exponent = ((len - allowed) as i64).min(max_exponent);
-        let penalty = dry.multiplier * dry.base.powi(exponent as i32);
-        let slot = out.entry(rev[i - 1]).or_insert(0.0f32);
-        *slot = slot.max(penalty);
-    }
-    out
-}
-
-/// `z[i]` is the length of the longest common prefix of `s` and `s[i..]` (`z[0] = s.len()`).
-fn z_array(s: &[u32]) -> Vec<usize> {
-    let n = s.len();
-    let mut z = vec![0usize; n];
-    if n == 0 {
-        return z;
-    }
-    z[0] = n;
-    let (mut l, mut r) = (0usize, 0usize);
-    for i in 1..n {
-        if i < r {
-            z[i] = (r - i).min(z[i - l]);
-        }
-        while i + z[i] < n && s[z[i]] == s[i + z[i]] {
-            z[i] += 1;
-        }
-        if i + z[i] > r {
-            l = i;
-            r = i + z[i];
-        }
-    }
-    z
 }
 
 #[cfg(test)]
@@ -558,10 +659,177 @@ mod tests {
     #[test]
     fn the_z_array_matches_its_definition() {
         let s = [1u32, 2, 1, 2, 1, 3];
-        let z = z_array(&s);
+        let z = reference_z_array(&s);
         for i in 0..s.len() {
             let want = (0..s.len() - i).take_while(|&k| s[k] == s[i + k]).count();
             assert_eq!(z[i], want, "z[{i}]");
         }
+    }
+
+    // ---- the incremental state against the whole-context implementation it replaced ----
+
+    /// The pre-incremental implementation, kept as the oracle: it rescans the whole context per call.
+    fn reference_apply(candidates: &mut [(u32, f32)], params: &SampleParams, ctx: &SampleContext<'_>) {
+        if !params.has_processors() || ctx.context.is_empty() {
+            return;
+        }
+        if params.no_repeat.active() {
+            let banned = params.no_repeat.banned(ctx.generated());
+            for (t, l) in candidates.iter_mut() {
+                if banned.contains(t) {
+                    *l = f32::NEG_INFINITY;
+                }
+            }
+        }
+        if params.repetition_penalty != 1.0 && params.repetition_penalty > 0.0 {
+            let seen: std::collections::HashSet<u32> = ctx.context.iter().copied().collect();
+            for (t, l) in candidates.iter_mut() {
+                if seen.contains(t) {
+                    *l = if *l > 0.0 { *l / params.repetition_penalty } else { *l * params.repetition_penalty };
+                }
+            }
+        }
+        if params.presence_penalty != 0.0 || params.frequency_penalty != 0.0 {
+            let mut counts: HashMap<u32, u32> = HashMap::new();
+            for &t in ctx.generated() {
+                *counts.entry(t).or_insert(0) += 1;
+            }
+            for (t, l) in candidates.iter_mut() {
+                if let Some(&n) = counts.get(t) {
+                    *l -= params.frequency_penalty * n as f32 + params.presence_penalty;
+                }
+            }
+        }
+        if params.dry.active() {
+            let penalties = reference_dry_penalties(ctx.context, &params.dry);
+            for (t, l) in candidates.iter_mut() {
+                if let Some(p) = penalties.get(t) {
+                    *l -= p;
+                }
+            }
+        }
+        // Stable, so equal logits keep the decoder's order; NaN sorts last.
+        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or_else(|| a.1.is_nan().cmp(&b.1.is_nan())));
+    }
+
+    /// The DRY penalty of every token that would continue a repeat in `context`
+    /// (llama.cpp's algorithm: a Z-array over the reversed context gives, for each
+    /// earlier position, how many tokens before it equal the tokens before the end;
+    /// the token that followed that earlier position is the one penalised, by the
+    /// longest repeat it would continue).
+    fn reference_dry_penalties(context: &[u32], dry: &DryParams) -> HashMap<u32, f32> {
+        let mut out = HashMap::new();
+        let n = context.len();
+        let allowed = dry.allowed_length as usize;
+        if n < 2 {
+            return out;
+        }
+        let rev: Vec<u32> = context.iter().rev().copied().collect();
+        // A repeat is not matched across a sequence breaker: only the tokens after
+        // the most recent one (counting from the end) can be part of it.
+        let rep_limit = rev.iter().position(|t| dry.breakers().contains(t)).unwrap_or(n);
+        if rep_limit < allowed.max(1) {
+            return out;
+        }
+        let z = reference_z_array(&rev);
+        // base^e must stay finite in f32.
+        let max_exponent = if dry.base > 1.0 { (f32::MAX.ln() / dry.base.ln()).floor() as i64 } else { i64::MAX };
+        for i in 1..n {
+            let len = z[i].min(rep_limit);
+            if len == 0 || len < allowed {
+                continue;
+            }
+            // The earlier occurrence ended at original index n-1-i; the token after it is rev[i-1].
+            let exponent = ((len - allowed) as i64).min(max_exponent);
+            let penalty = dry.multiplier * dry.base.powi(exponent as i32);
+            let slot = out.entry(rev[i - 1]).or_insert(0.0f32);
+            *slot = slot.max(penalty);
+        }
+        out
+    }
+
+    /// `z[i]` is the length of the longest common prefix of `s` and `s[i..]` (`z[0] = s.len()`).
+    fn reference_z_array(s: &[u32]) -> Vec<usize> {
+        let n = s.len();
+        let mut z = vec![0usize; n];
+        if n == 0 {
+            return z;
+        }
+        z[0] = n;
+        let (mut l, mut r) = (0usize, 0usize);
+        for i in 1..n {
+            if i < r {
+                z[i] = (r - i).min(z[i - l]);
+            }
+            while i + z[i] < n && s[z[i]] == s[i + z[i]] {
+                z[i] += 1;
+            }
+            if i + z[i] > r {
+                l = i;
+                r = i + z[i];
+            }
+        }
+        z
+    }
+
+
+    /// Every processor combination, each prefix of random contexts over a small alphabet (so
+    /// repeats, breakers and ties are everywhere), one persistent state per sequence: the
+    /// incremental result is the reference's, token for token and logit for logit.
+    #[test]
+    fn incremental_processors_equal_the_whole_context_reference() {
+        let mut rng = data::rng::Lcg::new(3);
+        let variants = [
+            SampleParams { repetition_penalty: 1.3, ..params() },
+            SampleParams { presence_penalty: 0.4, frequency_penalty: 0.15, ..params() },
+            SampleParams { dry: DryParams::new(0.8, 1.75, 2, &[]), ..params() },
+            SampleParams { dry: DryParams::new(1.0, 2.0, 3, &[1, 5]), ..params() },
+            SampleParams { dry: DryParams::new(1.0, 1.5, 0, &[]), ..params() },
+            SampleParams { dry: DryParams::new(0.5, 1.2, 1, &[4]), repetition_penalty: 0.7, presence_penalty: 0.1, frequency_penalty: 0.2, ..params() },
+        ];
+        for params in variants {
+            for _ in 0..40 {
+                let alphabet = 2 + (rng.unit() * 6.0) as u32;
+                let n = 1 + (rng.unit() * 70.0) as usize;
+                let context: Vec<u32> = (0..n).map(|_| (rng.unit() * alphabet as f32) as u32).collect();
+                let prompt_len = (rng.unit() * 6.0) as usize;
+                let mut state = ProcessorState::default();
+                for end in 1..=n {
+                    let ctx = ctx(&context[..end], prompt_len.min(end));
+                    let base: Vec<(u32, f32)> = (0..alphabet + 1).map(|t| (t, 5.0 - t as f32 * 0.7 + rng.signed() * 0.1)).collect();
+                    let (mut want, mut got) = (base.clone(), base);
+                    reference_apply(&mut want, &params, &ctx);
+                    apply_processors_with(&mut got, &params, &ctx, &mut state);
+                    assert_eq!(got, want, "params {params:?} context {:?} prompt {prompt_len}", &context[..end]);
+                }
+            }
+        }
+    }
+
+    /// A state handed a different sequence's shorter context starts over instead of mixing them.
+    #[test]
+    fn a_state_reused_for_another_context_starts_over() {
+        let p = SampleParams { repetition_penalty: 2.0, dry: DryParams::new(1.0, 2.0, 2, &[]), ..params() };
+        let mut state = ProcessorState::default();
+        let mut c = vec![(1u32, 4.0f32), (2, 3.0), (3, 2.0)];
+        apply_processors_with(&mut c, &p, &ctx(&[1, 2, 3, 1, 2, 3], 0), &mut state);
+        let mut got = vec![(1u32, 4.0f32), (2, 3.0), (3, 2.0)];
+        apply_processors_with(&mut got, &p, &ctx(&[3, 3], 0), &mut state);
+        let mut want = vec![(1u32, 4.0f32), (2, 3.0), (3, 2.0)];
+        reference_apply(&mut want, &p, &ctx(&[3, 3], 0));
+        assert_eq!(got, want);
+    }
+
+    /// The per-token work does not grow with the context: folding in one more token of a
+    /// 20k-token non-repeating context touches a bounded number of structures. Counted, not timed.
+    #[test]
+    fn dry_keeps_no_live_matches_in_text_that_does_not_repeat() {
+        let p = SampleParams { dry: DryParams::new(1.0, 1.75, 2, &[]), ..params() };
+        let context: Vec<u32> = (0..20_000u32).collect();
+        let mut state = ProcessorState::default();
+        let mut c = vec![(0u32, 1.0f32)];
+        apply_processors_with(&mut c, &p, &ctx(&context, 0), &mut state);
+        assert!(state.dry.live.is_empty(), "{} live matches in a context with no repeat", state.dry.live.len());
+        assert_eq!(state.fed, 20_000);
     }
 }

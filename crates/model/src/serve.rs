@@ -28,7 +28,7 @@ mod speculate;
 pub mod rows;
 pub mod conformance;
 pub use embeds::PromptEmbeds;
-pub use sampler::{apply_processors, ngram_followers, DryParams, NoRepeatNgram, SampleContext, ThinkingBudget, MAX_DRY_BREAKERS, MAX_NGRAM_ALLOW, MAX_THINK_CLOSE, MAX_THINK_LEAD};
+pub use sampler::{apply_processors, apply_processors_with, ngram_followers, DryParams, NoRepeatNgram, ProcessorState, SampleContext, ThinkingBudget, MAX_DRY_BREAKERS, MAX_NGRAM_ALLOW, MAX_THINK_CLOSE, MAX_THINK_LEAD};
 pub use speculate::{verify_proposals, DraftQuery, Drafter, NgramDrafter, SpecPolicy, SpecStats, Verdict};
 
 /// The seam a model's paged serving engine implements. Every method mirrors
@@ -660,11 +660,17 @@ pub fn sample_from_topk_with_logprob(candidates: &[(u32, f32)], params: SamplePa
 /// choice (greedy or drawn) and the reported log-probability are those of the
 /// processed distribution. With no processor asked for it is the plain function.
 pub fn sample_in_context(candidates: &[(u32, f32)], params: SampleParams, ctx: &SampleContext<'_>, rng: &mut data::rng::Rng) -> (u32, f32) {
+    sample_in_context_with(candidates, params, ctx, &mut ProcessorState::default(), rng)
+}
+
+/// [`sample_in_context`] over the sequence's own [`ProcessorState`]: the scheduler's per-token form, which
+/// folds only the tokens appended since the previous step into the penalties instead of rescanning the context.
+pub fn sample_in_context_with(candidates: &[(u32, f32)], params: SampleParams, ctx: &SampleContext<'_>, state: &mut ProcessorState, rng: &mut data::rng::Rng) -> (u32, f32) {
     if !params.has_processors() {
         return sample_from_topk_impl(candidates, params, rng);
     }
     let mut processed = candidates.to_vec();
-    apply_processors(&mut processed, &params, ctx);
+    apply_processors_with(&mut processed, &params, ctx, state);
     sample_from_topk_impl(&processed, params, rng)
 }
 
@@ -1044,6 +1050,8 @@ struct Running {
     sample: SampleParams,
     /// Where the sequence is in its think block when a thinking budget was asked for.
     think: Option<sampler::ThinkState>,
+    /// What the logit processors have read of `context` so far (empty until a processor is asked for).
+    procs: ProcessorState,
     /// The seed `rng` started from, kept so a preempted sequence can be
     /// requeued as the request it was.
     seed: u64,
@@ -1844,7 +1852,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             // before the preemption, so the prefill's own output is not used.
             let mut context = prompt;
             context.push(next_input);
-            self.running.push(Running { id, table, adapter, generated, logprobs, max_new, stop, next_input, context, spec, done: false, sample, think, seed, rng, embeds, cached_tokens, stop_token: None });
+            self.running.push(Running { id, table, adapter, generated, logprobs, max_new, stop, next_input, context, spec, done: false, sample, think, procs: ProcessorState::default(), seed, rng, embeds, cached_tokens, stop_token: None });
             return;
         }
         let cached_tokens = table.cached_rows() as usize;
@@ -1864,7 +1872,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             let candidates = self.dec.admit_topk(&hidden, k);
             sample_in_context(&candidates, sample, &SampleContext { context: &prompt, prompt_len: prompt.len() }, &mut rng)
         };
-        let mut r = Running { id, table, adapter, generated: Vec::new(), logprobs: Vec::new(), max_new, stop, next_input: first, context: prompt, spec: speculate::SeqSpec::new(), done: false, sample, think, seed, rng, embeds, cached_tokens, stop_token: None };
+        let mut r = Running { id, table, adapter, generated: Vec::new(), logprobs: Vec::new(), max_new, stop, next_input: first, context: prompt, spec: speculate::SeqSpec::new(), done: false, sample, think, procs: ProcessorState::default(), seed, rng, embeds, cached_tokens, stop_token: None };
         accept_token(&mut r, first, first_logprob);
         report.admitted.push(id);
         self.running.push(r);
@@ -2195,7 +2203,7 @@ impl<D: PagedDecoder> Scheduler<D> {
                     .map(|(bi, &si)| {
                         let r = &mut self.running[si];
                         let ctx = SampleContext { context: &r.context, prompt_len: r.context.len() - r.generated.len() };
-                        vec![sample_in_context(&candidates[bi], r.sample, &ctx, &mut r.rng)]
+                        vec![sample_in_context_with(&candidates[bi], r.sample, &ctx, &mut r.procs, &mut r.rng)]
                     })
                     .collect()
             }});
@@ -2434,6 +2442,7 @@ mod tests {
             done: false,
             sample: SampleParams::greedy(),
             think: None,
+            procs: ProcessorState::default(),
             seed: data::rng::random_seed(),
             rng: data::rng::Rng::new(data::rng::random_seed()),
             embeds: None,
