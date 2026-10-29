@@ -2840,7 +2840,8 @@ impl Qwen35 {
                 let c = round.caches;
                 let (sl, hl) = (self.cfg.gdn_state_len() as u32, self.cfg.gdn_hist_len() as u32);
                 let whole = round.segs.len() == 1 && round.decode.is_none() && gdn_stream_pieces(round.segs[0].rows).count() == 1;
-                let all = (!whole).then(|| g.storage((n * value_dim) as u64));
+                // The decode rows and the segments cover every row, so `all` needs no clear.
+                let all = (!whole).then(|| g.storage_uninit((n * value_dim) as u64));
                 let mut only = None;
                 // A mixed round's leading decode rows: one recurrent step each, from and back into the sequence's pool row.
                 if let (Some(dec), Some(all)) = (&round.decode, &all) {
@@ -2907,7 +2908,7 @@ impl Qwen35 {
                 let gated = match pieces[..] {
                     [(off, rows, chunk)] => piece(off, rows, chunk),
                     _ => {
-                        let all = g.storage((n * value_dim) as u64);
+                        let all = g.storage_uninit((n * value_dim) as u64);
                         for &(off, rows, chunk) in &pieces {
                             self.put_rows_copy(&piece(off, rows, chunk), &all, value_dim, off, rows);
                         }
@@ -3060,7 +3061,8 @@ impl Qwen35 {
                 let kv = self.kv_kernels(layer);
                 let (qpd, kvd) = (c.q_proj_dim(), c.kv_dim());
                 let whole = round.segs.len() == 1 && round.decode.is_none();
-                let all = (!whole).then(|| g.storage((n * shape.qd()) as u64));
+                // The decode rows and the segments cover every row, so `all` needs no clear.
+                let all = (!whole).then(|| g.storage_uninit((n * shape.qd()) as u64));
                 let mut only = None;
                 // A mixed round's leading decode rows: paged decode attention over each sequence's own window.
                 if let (Some(dec), Some(all)) = (&round.decode, &all) {
@@ -3897,7 +3899,8 @@ impl Qwen35 {
 
     /// Rows `[row0, row0 + rows)` of a `[total_rows, width]` buffer as their own buffer.
     fn take_rows(&self, src: &DeviceBuffer, width: u32, total_rows: u32, row0: u32, rows: u32) -> DeviceBuffer {
-        let dst = self.gpu.storage(rows as u64 * width as u64);
+        // Every word is written by the copy below, so the buffer needs no clear.
+        let dst = self.gpu.storage_uninit(rows as u64 * width as u64);
         // Rows are the channels of one batch entry and a plane is a whole row, so a
         // block copies a contiguous run instead of one element.
         let count = rows * width;
