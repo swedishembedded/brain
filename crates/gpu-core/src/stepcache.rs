@@ -53,7 +53,10 @@ use crate::Step;
 /// `bufs` holds `alloc_id`s as `usize` rather than the pointers themselves:
 /// the value is an identity to compare, never dereferenced, and a raw pointer
 /// would make the map neither `Send` nor `Sync`.
-#[derive(PartialEq, Eq, Hash)]
+///
+/// Hashing and equality are defined once, on [`KeyView`], so a lookup can
+/// present its call's own slices ([`CallKey`]) and match an owned `Key` without
+/// first building one (three boxed slices) just to look.
 struct Key {
     kind: usize,
     threads: u32,
@@ -65,6 +68,113 @@ struct Key {
     /// different dispatches - and because an empty slice can never collide
     /// with a non-empty one, the two families share this map safely.
     offs: Box<[(u64, u64)]>,
+}
+
+/// The fields of a [`Key`], readable from an owned key or from a call's borrowed arguments alike.
+trait KeyView {
+    fn kind(&self) -> usize;
+    fn threads(&self) -> u32;
+    fn buf_count(&self) -> usize;
+    fn buf_id(&self, i: usize) -> usize;
+    fn params(&self) -> &[u32];
+    fn offs(&self) -> &[(u64, u64)];
+}
+
+impl KeyView for Key {
+    fn kind(&self) -> usize {
+        self.kind
+    }
+    fn threads(&self) -> u32 {
+        self.threads
+    }
+    fn buf_count(&self) -> usize {
+        self.bufs.len()
+    }
+    fn buf_id(&self, i: usize) -> usize {
+        self.bufs[i]
+    }
+    fn params(&self) -> &[u32] {
+        &self.params
+    }
+    fn offs(&self) -> &[(u64, u64)] {
+        &self.offs
+    }
+}
+
+/// A lookup's arguments as a key: nothing is copied.
+struct CallKey<'a> {
+    kind: usize,
+    threads: u32,
+    bufs: &'a [&'a DeviceBuffer],
+    params: &'a [u32],
+    offs: &'a [(u64, u64)],
+}
+
+impl KeyView for CallKey<'_> {
+    fn kind(&self) -> usize {
+        self.kind
+    }
+    fn threads(&self) -> u32 {
+        self.threads
+    }
+    fn buf_count(&self) -> usize {
+        self.bufs.len()
+    }
+    fn buf_id(&self, i: usize) -> usize {
+        self.bufs[i].alloc_id() as usize
+    }
+    fn params(&self) -> &[u32] {
+        self.params
+    }
+    fn offs(&self) -> &[(u64, u64)] {
+        self.offs
+    }
+}
+
+impl std::hash::Hash for dyn KeyView + '_ {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.kind().hash(state);
+        self.threads().hash(state);
+        self.buf_count().hash(state);
+        for i in 0..self.buf_count() {
+            self.buf_id(i).hash(state);
+        }
+        self.params().hash(state);
+        self.offs().hash(state);
+    }
+}
+
+impl PartialEq for dyn KeyView + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind() == other.kind()
+            && self.threads() == other.threads()
+            && self.buf_count() == other.buf_count()
+            && (0..self.buf_count()).all(|i| self.buf_id(i) == other.buf_id(i))
+            && self.params() == other.params()
+            && self.offs() == other.offs()
+    }
+}
+
+impl Eq for dyn KeyView + '_ {}
+
+impl std::hash::Hash for Key {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (self as &dyn KeyView).hash(state)
+    }
+}
+
+impl PartialEq for Key {
+    fn eq(&self, other: &Key) -> bool {
+        (self as &dyn KeyView) == (other as &dyn KeyView)
+    }
+}
+
+impl Eq for Key {}
+
+impl<'a> std::borrow::Borrow<dyn KeyView + 'a> for Key {
+    fn borrow(&self) -> &(dyn KeyView + 'a) {
+        self
+    }
 }
 
 struct Entry {
@@ -116,7 +226,8 @@ impl StepCache {
         }
     }
 
-    /// The dispatch recorded for this exact call before, if there was one.
+    /// The dispatch recorded for this exact call before, if there was one. Allocation-free: the call's own
+    /// slices are the lookup key.
     pub(crate) fn get(
         &mut self,
         kind: usize,
@@ -125,7 +236,8 @@ impl StepCache {
         params: &[u32],
         threads: u32,
     ) -> Option<Step> {
-        match self.map.get_mut(&Self::key(kind, bufs, offsets, params, threads)) {
+        let call = CallKey { kind, threads, bufs, params, offs: offsets };
+        match self.map.get_mut(&call as &dyn KeyView) {
             Some(e) => {
                 e.reused = true;
                 self.hits += 1;
