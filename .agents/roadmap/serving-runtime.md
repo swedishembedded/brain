@@ -113,7 +113,9 @@ measurement (16-256), not fixed globally.
   target and a plain one meets it (`PagedDecoder::step_latency_target`). Chat 1 / 4 / 16: inter-token p99 46 / 121 / 180 ->
   39 / 63 / 68 ms, max 76 / 170 / 198 -> 77 / 97 / 125, output 64.5 / 138.5 / 181.6 -> 58.2 / 102.2 / 120.8 tok/s, TTFT p99
   473 / 1969 / 9477 -> 478 / 3023 / 14842 ms, goodput 36.3 / 2.9 / 0 -> 47.3 / 2.1 / 0. `gguf_resident_real` passes
-  (20 of 20). Open: `step_target` as a serve flag; the 40-60 ms decode iterations at b=5-6; TTFT under the pacing at 4+ clients.
+  (20 of 20). Open: `step_target` as a serve flag; the 40-60 ms decode iterations at b=5-6; TTFT under the pacing at 4+ clients;
+  an operator choice between this latency-paced mode and a throughput-first one (the overlapped pump it replaced gave
+  26-33 % more output at 4-16 clients), decided by measurement once item 14 shortens prefill.
 
 - 2026-10-29 (8, decode stalls behind prefill; knowledge 374): the scheduler thread, not the device, was where a decode
   step waited. A graph retired after a free called `cuMemFreeHost`, which waits for every stream: the urgent head of a
