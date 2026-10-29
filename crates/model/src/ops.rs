@@ -131,7 +131,7 @@ pub fn concat_rows_parallel(parts: &[&[f32]]) -> Vec<f32> {
 use gpu_core::provider::library::{self, GemmPrecision, LibraryGemmProvider};
 use gpu_core::provider::{LowerCtx, Operand, OpRequest, Pass, ProviderRegistry, Role};
 use gpu_core::select::{self, Dtype, KernelSelector, KernelVariant, Op, OpShape};
-use gpu_core::{DeviceBuffer, DeviceCaps, Gpu, Step};
+use gpu_core::{DeviceBuffer, DeviceCaps, Fp8Act, Gpu, Step};
 
 use crate::dispatch::I8Scratch;
 
@@ -815,6 +815,7 @@ impl Weight {
             let w = ops.gpu.storage(packed.len() as u64);
             ops.gpu.write(&w, &packed);
             let s = ops.gpu.storage_init("weight_scale_fp8", &scales);
+            ops.gpu.prepare_fp8_linear();
             return Weight::FP8 { w, s, n: n as u32, k: k as u32, fmt, block: FP8_BLOCK };
         }
         match want.promote(&ops.caps.numeric) {
@@ -1234,6 +1235,9 @@ pub struct Act {
     /// step precedes the first such product in the step order, which is the
     /// order every later product is submitted in.
     bf16: std::cell::RefCell<Option<DeviceBuffer>>,
+    /// These rows quantised to E4M3 with a scale per row per 128 of K (the bytes and the scales), made by the first FP8-weight
+    /// product whose chosen candidate reads them and shared by the rest, like `bf16`.
+    e4m3: std::cell::RefCell<Option<(DeviceBuffer, DeviceBuffer)>>,
 }
 
 /// A model-facing façade over `backend_api::select`'s kernel selector,
@@ -1454,17 +1458,7 @@ impl Ops {
             return false;
         }
         let mut prep = Vec::new();
-        let shared = act.bf16.borrow().clone();
-        let (xb, fresh) = match shared {
-            Some(xb) => (xb, false),
-            None => {
-                let x_op = library::Operand { buf: &act.x, range: (act.xr0 as u64 * k as u64, m as u64 * k as u64) };
-                match library::cast_bf16(&self.gpu, &mut prep, &x_op, m as u64 * k as u64) {
-                    Some(xb) => (xb, true),
-                    None => return false,
-                }
-            }
-        };
+        let Some((xb, fresh)) = self.bf16_rows(act, &mut prep) else { return false };
         let Some((step, _)) = self.gpu.int8_dequant_step(&[&xb, wb, sw, y], &[(0, 0), (0, 0), (0, 0), (yoff, m as u64 * n as u64)], &params) else { return false };
         s.append(&mut prep);
         s.push(step);
@@ -1472,6 +1466,63 @@ impl Ops {
             *act.bf16.borrow_mut() = Some(xb);
         }
         true
+    }
+
+    /// An FP8-weight product (E4M3 bytes with the checkpoint's 128 x 128 block scales, held as stored) on the native
+    /// candidate this device's tuned table names for its shape class: the weight bytes are decoded in registers or shared
+    /// memory against the bf16 rows of `act` (rounded once, shared by every product that reads them) and the sum is f32
+    /// across all of K, with one scale per 128 of K. `false` leaves the product to the tile decode. Only whole matrices.
+    fn fp8_forward(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), act: &Act, y: &DeviceBuffer, yoff: u64) -> bool {
+        let Weight::FP8 { w: wb, s: sb, n, k, fmt: crate::fp8::Fp8Format::E4M3, block } = w else { return false };
+        let (m, n, k) = (act.m, *n, *k);
+        if *block != FP8_BLOCK || rows != (0, n) || !k.is_multiple_of(FP8_BLOCK) || !self.providers.runs("cuda") || !self.gpu.has_fp8_linear() {
+            return false;
+        }
+        let params = [m, k / 4, n];
+        let Some(form) = self.gpu.fp8_linear_act(&params) else { return false };
+        let out = (yoff, m as u64 * n as u64);
+        let mut prep = Vec::new();
+        let step = match form {
+            Fp8Act::Bf16 => {
+                let Some((xb, fresh)) = self.bf16_rows(act, &mut prep) else { return false };
+                let Some((step, _)) = self.gpu.fp8_linear_step(form, &[&xb, wb, sb, y], &[(0, 0), (0, 0), (0, 0), out], &params) else { return false };
+                if fresh {
+                    *act.bf16.borrow_mut() = Some(xb);
+                }
+                step
+            }
+            Fp8Act::E4m3 => {
+                let shared = act.e4m3.borrow().clone();
+                let (xq, sx, fresh) = match shared {
+                    Some((xq, sx)) => (xq, sx, false),
+                    None => {
+                        let x_op = library::Operand { buf: &act.x, range: (act.xr0 as u64 * k as u64, m as u64 * k as u64) };
+                        let Some((xq, sx)) = library::quantize_e4m3_rows(&self.gpu, &mut prep, &x_op, m, k) else { return false };
+                        (xq, sx, true)
+                    }
+                };
+                let Some((step, _)) = self.gpu.fp8_linear_step(form, &[&xq, wb, &sx, sb, y], &[(0, 0), (0, 0), (0, 0), (0, 0), out], &params) else { return false };
+                if fresh {
+                    *act.e4m3.borrow_mut() = Some((xq, sx));
+                }
+                step
+            }
+        };
+        s.append(&mut prep);
+        s.push(step);
+        true
+    }
+
+    /// The rows of `act` rounded to bf16, from an earlier product on these rows or cast now (the cast step is pushed into
+    /// `prep`; the second value is whether it is new, to be remembered on `act` once the product that needs it is kept).
+    /// `None` when the device declines the cast.
+    fn bf16_rows(&self, act: &Act, prep: &mut Vec<Step>) -> Option<(DeviceBuffer, bool)> {
+        if let Some(xb) = act.bf16.borrow().clone() {
+            return Some((xb, false));
+        }
+        let k = act.k;
+        let x_op = library::Operand { buf: &act.x, range: (act.xr0 as u64 * k as u64, act.m as u64 * k as u64) };
+        library::cast_bf16(&self.gpu, prep, &x_op, act.m as u64 * k as u64).map(|xb| (xb, true))
     }
 
     /// The bf16 weight rows `rows` of `w` as the library path reads them: the buffer and the range to bind.
@@ -1572,7 +1623,7 @@ impl Ops {
         // dispatches (and the scratch) are skipped and a stray product that does need them makes them then.
         let deferred = self.providers.runs("cuda") && self.gpu.int8_packed_unneeded(rows, k / 4);
         let quant = (!deferred).then(|| self.quantize_rows(s, x, xr0, rows, k));
-        Act { x: x.clone(), xr0, m: rows, k, quant: std::cell::RefCell::new(quant), quant_deferred: deferred, xgs: Default::default(), bf16: Default::default() }
+        Act { x: x.clone(), xr0, m: rows, k, quant: std::cell::RefCell::new(quant), quant_deferred: deferred, xgs: Default::default(), bf16: Default::default(), e4m3: Default::default() }
     }
 
     /// The packed int8 form of rows `[xr0, xr0 + rows)` of `x`: scratch sized for exactly `[0, xr0 + rows)` and the
@@ -1607,7 +1658,7 @@ impl Ops {
     pub fn act_prequantized(&self, x: &DeviceBuffer, sx: &DeviceBuffer, xq: &DeviceBuffer, rows: u32, k: u32) -> Act {
         assert!(rows > 0, "Ops::act_prequantized: rows must be > 0 (got 0)");
         assert_eq!(k % 4, 0, "int8 K must be a multiple of 4 (got {k})");
-        Act { x: x.clone(), xr0: 0, m: rows, k, quant: std::cell::RefCell::new(Some(Arc::new(I8Scratch::from_parts(sx.clone(), k, xq.clone())))), quant_deferred: false, xgs: Default::default(), bf16: Default::default() }
+        Act { x: x.clone(), xr0: 0, m: rows, k, quant: std::cell::RefCell::new(Some(Arc::new(I8Scratch::from_parts(sx.clone(), k, xq.clone())))), quant_deferred: false, xgs: Default::default(), bf16: Default::default(), e4m3: Default::default() }
     }
 
     /// [`Ops::act`], plus the affine K-quant group-sum prepass
@@ -1643,7 +1694,7 @@ impl Ops {
             xr0 + rows,
             k,
         ));
-        Act { x: x.clone(), xr0, m: rows, k, quant: std::cell::RefCell::new(Some(Arc::new(quant))), quant_deferred: false, xgs: std::cell::RefCell::new(Some(xgs)), bf16: Default::default() }
+        Act { x: x.clone(), xr0, m: rows, k, quant: std::cell::RefCell::new(Some(Arc::new(quant))), quant_deferred: false, xgs: std::cell::RefCell::new(Some(xgs)), bf16: Default::default(), e4m3: Default::default() }
     }
 
     /// [`Ops::act`] for a caller whose weights are ALL fp32-family, so the
@@ -1662,7 +1713,7 @@ impl Ops {
     /// whatever a missing buffer would have held.
     pub fn act_f32(&self, x: &DeviceBuffer, xr0: u32, rows: u32, k: u32) -> Act {
         assert!(rows > 0, "Ops::act_f32: rows must be > 0 (got 0)");
-        Act { x: x.clone(), xr0, m: rows, k, quant: Default::default(), quant_deferred: false, xgs: Default::default(), bf16: Default::default() }
+        Act { x: x.clone(), xr0, m: rows, k, quant: Default::default(), quant_deferred: false, xgs: Default::default(), bf16: Default::default(), e4m3: Default::default() }
     }
 
     /// [`Self::act_f32`] for all `rows` rows of `x` whose bf16 rounding a fused kernel has already produced
@@ -1670,7 +1721,7 @@ impl Ops {
     /// read this activation take it instead of casting it again.
     pub fn act_f32_with_bf16(&self, x: &DeviceBuffer, rows: u32, k: u32, bf16: DeviceBuffer) -> Act {
         assert!(rows > 0, "Ops::act_f32_with_bf16: rows must be > 0 (got 0)");
-        Act { x: x.clone(), xr0: 0, m: rows, k, quant: Default::default(), quant_deferred: false, xgs: Default::default(), bf16: std::cell::RefCell::new(Some(bf16)) }
+        Act { x: x.clone(), xr0: 0, m: rows, k, quant: Default::default(), quant_deferred: false, xgs: Default::default(), bf16: std::cell::RefCell::new(Some(bf16)), e4m3: Default::default() }
     }
 
     /// The f32 rows of an activation built by [`Self::act_f32`]: the buffer, its
@@ -2575,7 +2626,7 @@ impl Ops {
         assert_eq!(act.k, k, "Ops::matmul_rows: activation width {} does not match weight K {k}", act.k);
         assert!(count > 0 && first as u64 + count as u64 <= n as u64, "Ops::matmul_rows: rows {first}+{count} outside the {n} rows of the weight");
         if matches!(self.linear_plan(w, count), LinearPlan::TileDecode { .. }) {
-            if self.small_m_gemv(s, w, rows, act, y, yoff) {
+            if self.fp8_forward(s, w, rows, act, y, yoff) || self.small_m_gemv(s, w, rows, act, y, yoff) {
                 return;
             }
             return self.forward_tiled(s, w, rows, act, y, yoff);

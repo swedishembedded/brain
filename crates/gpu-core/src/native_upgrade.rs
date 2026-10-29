@@ -102,6 +102,9 @@ pub enum ActFormat {
     /// The fp32 activations rounded to bf16 (round-to-nearest-even, one `cast_f32_bf16`), the form a bf16
     /// tensor-core candidate consumes. No quantisation step and no scale operand: its resolution is the bf16 ulp.
     Bf16,
+    /// The fp32 activations quantised to E4M3 with one f32 scale per row per 128 elements (`quant_e4m3_128`): the form of the
+    /// FP8 tensor-core GEMM. Its storage resolution is E4M3's (three mantissa bits) at the block's scale.
+    Fp8Group128,
 }
 
 /// How a candidate reads the stored weights (int8 codes with one f32 scale per 32 elements).
@@ -127,6 +130,8 @@ impl Input {
     pub const PACKED: Input = Input { act: ActFormat::Int8Group32, weight: WeightRead::Stored };
     /// The dequantize-in-register candidates: bf16 activations, weights `code * scale` rounded to bf16.
     pub const DEQUANT_BF16: Input = Input { act: ActFormat::Bf16, weight: WeightRead::Bf16 };
+    /// The FP8 tensor-core candidates: E4M3 activations with a scale per 128, the weights as stored.
+    pub const FP8_NATIVE: Input = Input { act: ActFormat::Fp8Group128, weight: WeightRead::Stored };
 }
 
 /// The bindings of a [`Input::DEQUANT_BF16`] candidate: params, the bf16 activation rows, the int8 weight codes, the
@@ -277,6 +282,14 @@ pub(crate) const PREFILL_SLOT: &str = "matmul_i8_prefill";
 /// The pipeline-slot number of [`PREFILL_SLOT`]: past every model kernel index, so no dispatch redirect matches it.
 pub(crate) const PREFILL_KIND: usize = usize::MAX;
 
+/// The tuning slot of the FP8 linear (E4M3 weights with 128 x 128 block scales), every row count: like [`PREFILL_SLOT`] it is
+/// not a redirect of a model-registered kernel but a virtual slot the handle holds when its model registers the FP8 GEMV
+/// (`matmul_fp8_gemv*`), tuned by [`crate::native_tune`] and asked for through [`crate::Gpu::fp8_linear_step`].
+pub(crate) const FP8_SLOT: &str = "matmul_fp8_native";
+
+/// The pipeline-slot number of [`FP8_SLOT`]: past every model kernel index and [`PREFILL_KIND`].
+pub(crate) const FP8_KIND: usize = usize::MAX - 1;
+
 /// Rows of the prefill-sized GEMM candidates that need no more than the smallest tile: past the decode regime, up
 /// to where a bigger tile fills the device.
 const PREFILL_SMALL_MAX_ROWS: u32 = 128;
@@ -290,6 +303,41 @@ fn serves_i8_prefill(p: &[u32]) -> bool {
             *m > backend_api::select::DECODE_REGIME_MAX_ROWS && *n >= 1 && *kg >= 16 && kg % 16 == 0 && u64::from(*m) * u64::from(*n) <= u64::from(u32::MAX)
         }
         _ => false,
+    }
+}
+
+/// An FP8 linear's `Params { m, kg, n }`: K a whole number of 128-wide scale blocks (`kg % 32 == 0`), an output and a weight
+/// the 32-bit offsets of the kernels cover.
+fn fp8_shape(p: &[u32]) -> Option<(u32, u32, u32)> {
+    match p {
+        [m, kg, n, ..] if *m >= 1 && *n >= 1 && *kg >= 32 && kg % 32 == 0 && dq_offsets_fit(*kg, *n) && u64::from(*m) * u64::from(*n) <= u64::from(u32::MAX) => Some((*m, *kg, *n)),
+        _ => None,
+    }
+}
+
+/// The dequantize-in-register streaming candidates of the FP8 linear: up to 64 rows with 64 weight rows a block.
+fn serves_fp8_stream_narrow(p: &[u32]) -> bool {
+    fp8_shape(p).is_some_and(|(m, ..)| m <= kernels_cuda::I8_STREAM_MANY_ROWS)
+}
+
+/// The wide FP8 streaming candidates: up to [`kernels_cuda::I8_DQ_STREAM_WIDE_ROWS`] rows with 128 weight rows a block.
+fn serves_fp8_stream_wide(p: &[u32]) -> bool {
+    fp8_shape(p).is_some_and(|(m, ..)| m <= kernels_cuda::I8_DQ_STREAM_WIDE_ROWS)
+}
+
+/// The Hopper FP8 GEMM: the rows a 128-row tile is worth filling, K a whole number of 128-wide scale blocks.
+fn serves_fp8_wgmma(p: &[u32]) -> bool {
+    fp8_shape(p).is_some_and(|(m, ..)| m > backend_api::select::DECODE_REGIME_MAX_ROWS)
+}
+
+/// Cluster shape and dynamic shared memory of the FP8 streaming candidate at a split of `split` blocks, `bn` weight rows
+/// a block, room for `rows` rows of x and `stages` stages.
+const fn fp8_dq_stream_launch(split: u32, bn: u32, rows: u32, stages: u32) -> CudaLaunch {
+    CudaLaunch {
+        dynamic_shared_bytes: kernels_cuda::fp8_dq_stream_dynamic_shared_bytes(bn, rows, stages),
+        shared_opt_in: true,
+        cluster: if split > 1 { Some([split, 1, 1]) } else { None },
+        ..CudaLaunch::NONE
     }
 }
 
@@ -728,6 +776,105 @@ fn serves_moe_nvfp4_gather(p: &[u32]) -> bool {
 fn moe_nvfp4_gather_blocks(p: &[u32], _tile: (u32, u32)) -> u32 {
     p[0] * p[2].div_ceil(QGEMV_COLS)
 }
+
+/// The bindings of an FP8 candidate: params, the bf16 activation rows, the E4M3 weight bytes, the 128 x 128 block scales, the
+/// output. The same four buffers as the int8 dequantize candidates, so one dispatch shape serves both.
+const FP8_BINDINGS: &[BindKind] = I8_DEQUANT_BINDINGS;
+
+/// The candidates of [`FP8_SLOT`], the FP8 linear, in preference order: the first row that serves a dispatch is the
+/// untuned default, the rest are what [`crate::native_tune`] times against it. The dequantize-in-register candidates read
+/// bf16 activations and decode the weight bytes times their block scale ([`Input::DEQUANT_BF16`]); the tensor-core GEMM
+/// reads E4M3 activations and the weights as stored ([`Input::FP8_NATIVE`]); the bf16 forms come first, so an untuned
+/// device keeps the activations at the finer resolution.
+pub(crate) const FP8_ROWS: &[Row] = &[
+    Row {
+        slow: "matmul_fp8_gemv",
+        target: Target::Named("matmul_fp8_dq_stream_r1"),
+        bindings: FP8_BINDINGS,
+        serves: serves_fp8_stream_narrow,
+        blocks: i8_stream_blocks::<1>,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        input: Input::DEQUANT_BF16,
+        launch: fp8_dq_stream_launch(1, 64, kernels_cuda::I8_STREAM_MANY_ROWS, 3),
+    },
+    Row {
+        slow: "matmul_fp8_gemv",
+        target: Target::Named("matmul_fp8_dq_stream_r2"),
+        bindings: FP8_BINDINGS,
+        serves: serves_fp8_stream_narrow,
+        blocks: i8_stream_blocks::<2>,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        input: Input::DEQUANT_BF16,
+        launch: fp8_dq_stream_launch(2, 64, kernels_cuda::I8_STREAM_MANY_ROWS, 3),
+    },
+    Row {
+        slow: "matmul_fp8_gemv",
+        target: Target::Named("matmul_fp8_dq_stream_r4"),
+        bindings: FP8_BINDINGS,
+        serves: serves_fp8_stream_narrow,
+        blocks: i8_stream_blocks::<4>,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        input: Input::DEQUANT_BF16,
+        launch: fp8_dq_stream_launch(4, 64, kernels_cuda::I8_STREAM_MANY_ROWS, 3),
+    },
+    Row {
+        slow: "matmul_fp8_gemv",
+        target: Target::Named("matmul_fp8_dq_stream_q2"),
+        bindings: FP8_BINDINGS,
+        serves: serves_fp8_stream_wide,
+        blocks: i8_stream_blocks::<2>,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        input: Input::DEQUANT_BF16,
+        launch: fp8_dq_stream_launch(2, 128, kernels_cuda::I8_DQ_STREAM_WIDE_ROWS, 3),
+    },
+    Row {
+        slow: "matmul_fp8_gemv",
+        target: Target::Named("matmul_fp8_dq_stream_q4"),
+        bindings: FP8_BINDINGS,
+        serves: serves_fp8_stream_wide,
+        blocks: i8_stream_blocks::<4>,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        input: Input::DEQUANT_BF16,
+        launch: fp8_dq_stream_launch(4, 128, kernels_cuda::I8_DQ_STREAM_WIDE_ROWS, 3),
+    },
+    Row {
+        slow: "matmul_fp8_gemv",
+        target: Target::Named("matmul_fp8_dq_wgmma"),
+        bindings: FP8_BINDINGS,
+        serves: serves_fp8_wgmma,
+        blocks: gemm_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        input: Input::DEQUANT_BF16,
+        launch: CudaLaunch {
+            dynamic_shared_bytes: kernels_cuda::FP8_DQ_WGMMA_DYNAMIC_SHARED_BYTES,
+            shared_opt_in: true,
+            arch: backend_api::ArchFeatures::Required,
+            ..CudaLaunch::NONE
+        },
+    },
+    Row {
+        slow: "matmul_fp8_gemv",
+        target: Target::Named("matmul_fp8_wgmma"),
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_fp8_wgmma,
+        blocks: gemm_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        input: Input::FP8_NATIVE,
+        launch: CudaLaunch {
+            dynamic_shared_bytes: kernels_cuda::FP8_WGMMA_DYNAMIC_SHARED_BYTES,
+            shared_opt_in: true,
+            arch: backend_api::ArchFeatures::Required,
+            ..CudaLaunch::NONE
+        },
+    },
+];
 
 /// The candidates of [`PREFILL_SLOT`], the prefill-sized int8 GEMM, in preference order: the first row that serves
 /// a dispatch is the untuned default (the routing the provider had before the slot was measured), the rest are
@@ -2363,6 +2510,14 @@ fn disabled() -> bool {
     WITHHELD.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whether a row belongs to a virtual tuning slot (a candidate set no model-registered kernel is redirected to) and which.
+#[derive(Clone, Copy)]
+enum Virtual {
+    No,
+    Prefill,
+    Fp8,
+}
+
 /// One resolved redirect for a handle.
 #[derive(Clone, Debug)]
 pub(crate) struct Active {
@@ -2396,12 +2551,19 @@ pub(crate) fn resolve(
         return Vec::new();
     };
     let prefill = names.iter().any(|n| n == "matmul_i8_dyn");
+    // The FP8 linear's slot exists for a model that registers the FP8 GEMV (every variant carries the base name).
+    let fp8 = names.iter().any(|n| n.starts_with("matmul_fp8_gemv"));
     ROWS.iter()
         .filter(|_| !disabled())
-        .map(|row| (row, false))
-        .chain(PREFILL_ROWS.iter().filter(|_| prefill).map(|row| (row, true)))
-        .filter_map(|(row, is_prefill)| {
-            let slow = if is_prefill { PREFILL_KIND } else { names.iter().position(|n| n == row.slow)? };
+        .map(|row| (row, Virtual::No))
+        .chain(PREFILL_ROWS.iter().filter(|_| prefill).map(|row| (row, Virtual::Prefill)))
+        .chain(FP8_ROWS.iter().filter(|_| fp8 && !disabled()).map(|row| (row, Virtual::Fp8)))
+        .filter_map(|(row, virtual_slot)| {
+            let slow = match virtual_slot {
+                Virtual::No => names.iter().position(|n| n == row.slow)?,
+                Virtual::Prefill => PREFILL_KIND,
+                Virtual::Fp8 => FP8_KIND,
+            };
             if row.requires_wgsl_upgrade {
                 wgsl_upgrades.iter().find(|a| a.slow == slow)?;
             }
@@ -2415,7 +2577,11 @@ pub(crate) fn resolve(
                 shared_bytes: k.shared_bytes,
                 launch: CudaLaunch { programmatic: k.programmatic, ..row.launch },
             })?;
-            let slot = if is_prefill { PREFILL_SLOT } else { row.slow };
+            let slot = match virtual_slot {
+                Virtual::No => row.slow,
+                Virtual::Prefill => PREFILL_SLOT,
+                Virtual::Fp8 => FP8_SLOT,
+            };
             Some(Active { slow, slot, id, kernel: k.name, reported: k.reported, tile: k.tile, serves: row.serves, blocks: row.blocks, align_words: row.align_words, input: row.input })
         })
         .collect()
@@ -2636,6 +2802,40 @@ mod tests {
         assert!(!serves_i8_gemv(&[33, 1280, 64]), "past the decode regime");
         assert!(!serves_i8_gemv(&[1, 1284, 64]), "K not a whole number of scale groups");
         assert!(!serves_i8_gemv(&[1, 1280]), "short params");
+    }
+
+    /// The FP8 linear's candidate set: every row is a registered FP8 kernel reading bf16 rows, the decode streaming kernels
+    /// serve the rows they are sized for, the Hopper GEMM the rows past the decode regime, and nothing serves a width that is
+    /// not a whole number of 128-wide scale blocks.
+    #[test]
+    fn the_fp8_linear_candidates_serve_the_shapes_they_are_built_for() {
+        let name = |r: &Row| match r.target {
+            Target::Named(n) => n,
+            Target::Operator { .. } => unreachable!("named rows"),
+        };
+        for r in FP8_ROWS {
+            let k = kernels_cuda::get(name(r)).unwrap_or_else(|| panic!("{} is not a registered kernel", name(r)));
+            assert_eq!(k.weight, Dtype::F8E4M3, "{}", name(r));
+            if r.input == Input::FP8_NATIVE {
+                assert_eq!(r.bindings, I8_GEMV_BINDINGS, "{}", name(r));
+            } else {
+                assert_eq!(r.input, Input::DEQUANT_BF16, "{}", name(r));
+                assert_eq!(r.bindings, FP8_BINDINGS);
+            }
+        }
+        let serving = |p: &[u32]| FP8_ROWS.iter().filter(|r| (r.serves)(p)).map(name).collect::<Vec<_>>();
+        // Decode of one token over a 5120 x 5120 weight (K = 5120 = 1280 words): the streaming kernels only.
+        let one = serving(&[1, 1280, 5120]);
+        assert!(!one.is_empty() && one.iter().all(|n| n.contains("stream")), "{one:?}");
+        // 100 rows: the wide streaming kernels and the GEMM, not the narrow ones.
+        let hundred = serving(&[100, 1280, 5120]);
+        assert!(hundred.contains(&"matmul_fp8_dq_stream_q2") && hundred.contains(&"matmul_fp8_dq_wgmma") && !hundred.contains(&"matmul_fp8_dq_stream_r1"), "{hundred:?}");
+        // A prefill round: the two GEMMs (bf16 operands decoded in shared memory, E4M3 operands as stored).
+        assert_eq!(serving(&[1024, 1280, 17408]), vec!["matmul_fp8_dq_wgmma", "matmul_fp8_wgmma"]);
+        // K = 5000 is not whole 128-wide blocks.
+        assert!(serving(&[1, 1250, 64]).is_empty());
+        // The weight must stay addressable with 32-bit byte offsets.
+        assert!(serving(&[1, 1280, 1 << 20]).is_empty());
     }
 
     /// A window of single-element planes (the channel-window ops over a row-major

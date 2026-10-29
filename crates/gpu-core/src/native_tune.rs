@@ -72,6 +72,9 @@ struct Grid {
     /// against the memory roof); wider classes are compute-bound (timed on one copy of the weights, graded against the
     /// tensor-core roof, a weight read once per row tile is not flattered by the L2).
     stream_max_rows: u32,
+    /// Whether the slot's weights are FP8 E4M3 bytes with 128 x 128 block scales (`K` a multiple of 128) rather than
+    /// int8 codes with a scale per 32.
+    fp8: bool,
 }
 
 impl Grid {
@@ -91,6 +94,7 @@ const DECODE: Grid = Grid {
     n_reps: [[256, 1024, 4096, 16384], [64, 256, 1024, 4096]],
     footprint_bytes: 192 << 20,
     stream_max_rows: u32::MAX,
+    fp8: false,
 };
 
 /// The rows past the decode regime to a round of thousands of rows (bytes classes of about 10, 30, 60 and 100 MB of
@@ -104,12 +108,29 @@ const PREFILL: Grid = Grid {
     n_reps: [[2048, 5120, 10240, 17408], [512, 1536, 3072, 5120]],
     footprint_bytes: 192 << 20,
     stream_max_rows: 128,
+    fp8: false,
+};
+
+/// The FP8 linear, every row count: the streaming classes of the decode steps of any batch up to 128 rows (the weights are
+/// read once for all of them) and the compute-bound rounds past it. Weight bytes are one byte a weight, so the bytes classes
+/// are the int8 grids' (about 1.5 to 90 MB per class at a decode batch, 10 to 100 MB for a round).
+const FP8: Grid = Grid {
+    rows: &[(1, 1), (2, 2), (3, 4), (5, 8), (9, 16), (17, 32), (33, 64), (65, 128), (129, 256), (257, 512), (513, 1024), (1025, 4096)],
+    open_top: true,
+    k: [5120, 17408],
+    bytes_bounds: [4 << 20, 16 << 20, 64 << 20],
+    n_reps: [[256, 1024, 4096, 16384], [64, 256, 1024, 4096]],
+    footprint_bytes: 192 << 20,
+    stream_max_rows: 128,
+    fp8: true,
 };
 
 /// The grid a slot is tuned on; a slot not named here is a decode-regime slot.
 fn grid(slot: &str) -> &'static Grid {
     if slot == crate::native_upgrade::PREFILL_SLOT {
         &PREFILL
+    } else if slot == crate::native_upgrade::FP8_SLOT {
+        &FP8
     } else {
         &DECODE
     }
@@ -262,7 +283,7 @@ fn measure_int8_roof(gpu: &Gpu) -> Option<f32> {
 /// The slots whose candidates this module knows how to build a synthetic problem and a reference for: the int8
 /// decode linear and the prefill-sized int8 GEMM. A slot with several rows that is not listed (the K-quant narrow
 /// and wide blocks) keeps its row-count rule until it has a problem generator here.
-const TUNABLE_SLOTS: [&str; 2] = ["matmul_i8_gemv", crate::native_upgrade::PREFILL_SLOT];
+const TUNABLE_SLOTS: [&str; 3] = ["matmul_i8_gemv", crate::native_upgrade::PREFILL_SLOT, crate::native_upgrade::FP8_SLOT];
 
 static AUTOTUNE: AtomicBool = AtomicBool::new(true);
 static FORCED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
@@ -454,6 +475,50 @@ fn scales(n: usize, salt: u64) -> Vec<f32> {
     (0..n).map(|i| 1e-3 + (mix(salt << 40 | i as u64) % 1000) as f32 * 1e-5).collect()
 }
 
+/// Pseudo-random E4M3 bytes four to a word, the NaN codes (`0x7F`, `0xFF`) replaced by the largest finite one: a real checkpoint
+/// holds none, and a NaN weight would make every candidate's output NaN.
+fn packed_e4m3(words: usize, salt: u64) -> Vec<u32> {
+    packed_i8(words, salt)
+        .into_iter()
+        .map(|w| w.to_le_bytes().map(|b| if b & 0x7F == 0x7F { b ^ 0x01 } else { b }))
+        .map(u32::from_le_bytes)
+        .collect()
+}
+
+/// One positive scale per 128 x 128 block (`weight_scale_inv` is bf16 in the release: the values are exact in bf16).
+fn block_scales(count: usize, salt: u64) -> Vec<f32> {
+    scales(count, salt).into_iter().map(|s| f32::from_bits(s.to_bits() & 0xFFFF_0000)).collect()
+}
+
+/// The E4M3FN byte nearest to `x` (ties to even, saturating at 448), as `cvt.rn.satfinite.e4m3x2.f32` rounds.
+fn encode_e4m3(x: f32) -> u8 {
+    let sign = if x.is_sign_negative() { 0x80u8 } else { 0 };
+    let a = f64::from(x).abs();
+    if a.is_nan() {
+        return sign | 0x7E;
+    }
+    if a == 0.0 {
+        return sign;
+    }
+    // Step of the binade (the subnormal binade's is 2^-9), then the nearest multiple, ties to even.
+    let e = (a.log2().floor() as i32).max(-6);
+    let step = 2f64.powi(e - 3);
+    let q = ((a / step).round_ties_even() * step).min(448.0);
+    if q < 2f64.powi(-6) {
+        return sign | (q / 2f64.powi(-9)).round() as u8;
+    }
+    let e = q.log2().floor() as i32;
+    let m = ((q / 2f64.powi(e) - 1.0) * 8.0).round() as u8;
+    sign | (((e + 7) as u8) << 3) | m
+}
+
+/// The value of an E4M3 byte (sign, 4 exponent bits at bias 7, 3 mantissa bits, subnormals below exponent 1), exactly.
+fn e4m3(b: u8) -> f64 {
+    let (e, m) = (i32::from((b >> 3) & 0xF), f64::from(b & 7));
+    let magnitude = if e == 0 { m / 8.0 * 2f64.powi(-6) } else { (1.0 + m / 8.0) * 2f64.powi(e - 7) };
+    if b & 0x80 != 0 { -magnitude } else { magnitude }
+}
+
 fn byte(words: &[u32], idx: usize) -> i32 {
     i32::from((words[idx / 4] >> (8 * (idx % 4))) as u8 as i8)
 }
@@ -494,6 +559,9 @@ struct Acts {
     xq: Vec<u32>,
     sx: Vec<f32>,
     bf16: Vec<u32>,
+    /// The E4M3 form (`quant_e4m3_128`) and its scales, one per 128 of K; empty unless K is a multiple of 128.
+    q8: Vec<u32>,
+    s8: Vec<f32>,
 }
 
 impl Acts {
@@ -525,7 +593,21 @@ impl Acts {
             }
         }
         let bf16 = x.chunks(2).map(|p| (round_bf16(f64::from(p[0])) as f32).to_bits() >> 16 | (round_bf16(f64::from(p[1])) as f32).to_bits() & 0xFFFF_0000).collect();
-        Acts { m, kg, x, xq, sx, bf16 }
+        // The E4M3 form, as `quant_e4m3_128` makes it: scale = amax / 448 per 128, byte = nearest E4M3 of x / scale.
+        let (mut q8, mut s8) = (Vec::new(), Vec::new());
+        if k.is_multiple_of(128) {
+            q8 = vec![0u32; total / 4];
+            for (g, chunk) in x.as_chunks::<128>().0.iter().enumerate() {
+                let scale = chunk.iter().fold(0.0f32, |a, v| a.max(v.abs())) / 448.0;
+                s8.push(scale);
+                for (e, v) in chunk.iter().enumerate() {
+                    let idx = g * 128 + e;
+                    let b = if scale > 0.0 { encode_e4m3(*v / scale) } else { 0 };
+                    q8[idx / 4] |= u32::from(b) << (8 * (idx % 4));
+                }
+            }
+        }
+        Acts { m, kg, x, xq, sx, bf16, q8, s8 }
     }
 
     /// `x[r, idx]` as a consumer of `format` sees it (`None`: as produced).
@@ -536,6 +618,7 @@ impl Acts {
             None => f64::from(self.x[at]),
             Some(ActFormat::Int8Group32) => f64::from(byte(&self.xq, at)) * f64::from(self.sx[r as usize * (k / 32) + idx / 32]),
             Some(ActFormat::Bf16) => round_bf16(f64::from(self.x[at])),
+            Some(ActFormat::Fp8Group128) => e4m3((self.q8[at / 4] >> (8 * (at % 4))) as u8) * f64::from(self.s8[r as usize * (k / 128) + idx / 128]),
         }
     }
 }
@@ -545,13 +628,20 @@ struct Stored<'a> {
     w: &'a [u32],
     sw: &'a [f32],
     kg: u32,
+    /// E4M3 bytes with a scale per 128 x 128 block instead of int8 codes with one per 32.
+    fp8: bool,
 }
 
 impl Stored<'_> {
     /// `w[c, idx]` as a consumer of `read` sees it (`None`: as stored, `code * scale`, exact in f64).
     fn value(&self, read: Option<WeightRead>, c: u32, idx: usize) -> f64 {
         let k = (self.kg * 4) as usize;
-        let stored = f64::from(byte(self.w, c as usize * k + idx)) * f64::from(self.sw[c as usize * (k / 32) + idx / 32]);
+        let at = c as usize * k + idx;
+        let stored = if self.fp8 {
+            e4m3((self.w[at / 4] >> (8 * (at % 4))) as u8) * f64::from(self.sw[(c as usize / 128) * (k / 128) + idx / 128])
+        } else {
+            f64::from(byte(self.w, at)) * f64::from(self.sw[c as usize * (k / 32) + idx / 32])
+        };
         match read {
             None | Some(WeightRead::Stored) => stored,
             Some(WeightRead::Bf16) => round_bf16(stored),
@@ -638,6 +728,14 @@ pub fn check_shape(gpu: &Gpu, params: [u32; 3]) -> Vec<(String, Verdict)> {
     time_class(gpu, grid(slot), &cands, (m, kg, n), &Acts::new(m, kg), &Roofs { gbs: None, floor_us: None, int8_tops: None }, false)
 }
 
+/// [`check_shape`] for the FP8 linear's candidates (`params` = `[m, k/4, n]`, `k` a multiple of 128). For tests.
+#[doc(hidden)]
+pub fn check_fp8_shape(gpu: &Gpu, params: [u32; 3]) -> Vec<(String, Verdict)> {
+    let [m, kg, n] = params;
+    let cands: Vec<&crate::native_upgrade::Active> = crate::native_upgrade::candidates(gpu.native_rows(), crate::native_upgrade::FP8_KIND, &params).collect();
+    time_class(gpu, &FP8, &cands, (m, kg, n), &Acts::new(m, kg), &Roofs { gbs: None, floor_us: None, int8_tops: None }, false)
+}
+
 /// Tune every multi-candidate slot of `gpu` (once per device and build) and return the table, or `None` when this
 /// handle has no slot with a choice to make.
 pub(crate) fn ensure(gpu: &Gpu, slots: &[(usize, &'static str)]) -> Option<Arc<Tuned>> {
@@ -684,7 +782,7 @@ fn device_key(gpu: &Gpu, slots: &[(usize, &'static str)]) -> String {
     sources.sort_unstable();
     sources.dedup();
     let srcs: Vec<&str> = sources.iter().filter_map(|n| kernels_cuda::get(n).map(|k| k.src)).collect();
-    let fp = fnv(&srcs) ^ fnv(&[env!("CARGO_PKG_VERSION"), &format!("admission-{ALPHA}"), &format!("{:?}", [&DECODE, &PREFILL].map(|g| (g.rows, g.k, g.bytes_bounds, g.n_reps, g.footprint_bytes, g.stream_max_rows)))]);
+    let fp = fnv(&srcs) ^ fnv(&[env!("CARGO_PKG_VERSION"), &format!("admission-{ALPHA}"), &format!("{:?}", [&DECODE, &PREFILL, &FP8].map(|g| (g.rows, g.k, g.bytes_bounds, g.n_reps, g.footprint_bytes, g.stream_max_rows, g.fp8)))]);
     let slug: String = format!("{desc}-{}-{cc}", gpu.kind()).chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
     format!("{slug}-{fp:016x}")
 }
@@ -869,21 +967,29 @@ impl Roofs {
 fn time_class(gpu: &Gpu, g: &Grid, cands: &[&crate::native_upgrade::Active], (m, kg, n): (u32, u32, u32), acts: &Acts, roofs: &Roofs, timing: bool) -> Vec<(String, Verdict)> {
     debug_assert!(acts.m == m && acts.kg == kg);
     let k = kg * 4;
+    // Scales per weight: a row of int8 codes holds `k / 32`, an FP8 weight one per 128 x 128 block.
     let groups = (k / 32) as usize;
-    let w = packed_i8(n as usize * kg as usize, 3);
-    let sw = scales(n as usize * groups, 4);
+    let scale_words = if g.fp8 { (n as usize).div_ceil(128) * (k as usize / 128) } else { n as usize * groups };
+    let w = if g.fp8 { packed_e4m3(n as usize * kg as usize, 3) } else { packed_i8(n as usize * kg as usize, 3) };
+    let sw = if g.fp8 { block_scales(scale_words, 4) } else { scales(scale_words, 4) };
     let xq = gpu.storage(u64::from(m * kg));
     let sxb = gpu.storage((m as usize * groups) as u64);
     let xb = gpu.storage(u64::from(m) * u64::from(kg) * 2);
+    let x8 = gpu.storage(u64::from(m * kg).max(1));
+    let sx8 = gpu.storage((acts.s8.len() as u64).max(1));
     gpu.write(&xq, &acts.xq);
     gpu.write_f32(&sxb, &acts.sx);
     gpu.write(&xb, &acts.bf16);
-    let wbytes = u64::from(n) * u64::from(kg) * 4 + u64::from(n) * groups as u64 * 4;
+    if !acts.q8.is_empty() {
+        gpu.write(&x8, &acts.q8);
+        gpu.write_f32(&sx8, &acts.s8);
+    }
+    let wbytes = u64::from(n) * u64::from(kg) * 4 + scale_words as u64 * 4;
     let copies = if !timing || !g.streams(m) { 1 } else { g.footprint_bytes.div_ceil(wbytes).clamp(1, 128) as usize };
     let weights: Vec<_> = (0..copies)
         .map(|i| {
             let wb = gpu.storage(u64::from(n) * u64::from(kg));
-            let sb = gpu.storage(n as u64 * groups as u64);
+            let sb = gpu.storage(scale_words as u64);
             if i == 0 {
                 gpu.write(&wb, &w);
                 gpu.write_f32(&sb, &sw);
@@ -893,7 +999,7 @@ fn time_class(gpu: &Gpu, g: &Grid, cands: &[&crate::native_upgrade::Active], (m,
         .collect();
     let out = gpu.storage(u64::from(m) * u64::from(n));
     let positions = sample_positions(m, n);
-    let stored = Stored { w: &w, sw: &sw, kg };
+    let stored = Stored { w: &w, sw: &sw, kg, fp8: g.fp8 };
     // The reference and, per input form, the error of rounding the inputs to it: computed once per form.
     let reference: Vec<(f64, f64)> = positions.iter().map(|&(r, c)| dot(acts, &stored, None, r, c)).collect();
     let mut resolution: Vec<(Input, Errors)> = Vec::new();
@@ -914,6 +1020,7 @@ fn time_class(gpu: &Gpu, g: &Grid, cands: &[&crate::native_upgrade::Active], (m,
         let step = |wi: &(crate::DeviceBuffer, crate::DeviceBuffer)| match a.input.act {
             ActFormat::Int8Group32 => gpu.native_step_raw(a.id, &[&xq, &wi.0, &sxb, &wi.1, &out], &params, blocks),
             ActFormat::Bf16 => gpu.native_step_raw(a.id, &[&xb, &wi.0, &wi.1, &out], &params, blocks),
+            ActFormat::Fp8Group128 => gpu.native_step_raw(a.id, &[&x8, &wi.0, &sx8, &wi.1, &out], &params, blocks),
         };
         let Some(check) = step(&weights[0]) else {
             results.push((a.kernel.to_owned(), Verdict::Rejected("backend declined the launch".into())));
@@ -1140,13 +1247,30 @@ mod tests {
         assert_eq!(missing_classes(&parse_store(&text(&all[1..])).unwrap(), &["s"]).len(), 1, "an absent class is missing too");
     }
 
+    /// The host emulation of `quant_e4m3_128`'s rounding: every finite E4M3 value encodes to its own byte, a tie between two
+    /// neighbours goes to the even mantissa, and a value past 448 saturates.
+    #[test]
+    fn the_e4m3_encoder_rounds_to_nearest_even_and_saturates() {
+        for b in 0..=255u8 {
+            if b & 0x7F != 0x7F {
+                assert_eq!(encode_e4m3(e4m3(b) as f32), if b == 0x80 { 0x80 } else { b }, "byte {b:#04x}");
+            }
+        }
+        assert_eq!(encode_e4m3(1.0625), 0x38, "the midpoint of 1.0 and 1.125 goes to the even mantissa (1.0)");
+        assert_eq!(encode_e4m3(1.1875), 0x3A, "the midpoint of 1.125 and 1.25 goes to the even mantissa (1.25)");
+        assert_eq!(encode_e4m3(1000.0), 0x7E);
+        assert_eq!(encode_e4m3(-1000.0), 0xFE);
+        assert_eq!(encode_e4m3(2f32.powi(-10)), 0x00, "below half the smallest subnormal rounds to zero");
+        assert_eq!(encode_e4m3(1.9999), 0x40, "a value that rounds up into the next binade");
+    }
+
     /// The errors of a candidate over the positions of a small synthetic class, against the f64 reference of the
     /// stored representation, and of rounding the inputs to `input`'s forms.
     fn class_errors(input: Input, candidate: impl Fn(&Acts, &Stored, u32, u32) -> f64) -> (Errors, Errors, Errors) {
         let (m, kg, n) = (4u32, 64u32, 40u32);
         let acts = Acts::new(m, kg);
         let (w, sw) = (packed_i8(n as usize * kg as usize, 3), scales(n as usize * kg as usize / 8, 4));
-        let stored = Stored { w: &w, sw: &sw, kg };
+        let stored = Stored { w: &w, sw: &sw, kg, fp8: false };
         let positions = sample_positions(m, n);
         let reference: Vec<(f64, f64)> = positions.iter().map(|&(r, c)| dot(&acts, &stored, None, r, c)).collect();
         let diff = |f: &dyn Fn(u32, u32) -> f64| Errors::of(&positions.iter().zip(&reference).map(|(&(r, c), (t, _))| (f(r, c) - t).abs()).collect::<Vec<_>>());

@@ -78,27 +78,27 @@ pub enum Layout {
 /// A fresh scratch dir holding the checkpoint; `skip` drops one canonical
 /// tensor (to test the refusal path).
 pub fn write_checkpoint(cfg: &Qwen35Config, tag: &str, skip: Option<&str>) -> PathBuf {
-    write_checkpoint_from(cfg, tag, skip, None, Layout::Multimodal, BLOCK)
+    write_checkpoint_from(cfg, tag, skip, None, Layout::Multimodal, BLOCK, false)
 }
 
 /// [`write_checkpoint`] with the FP8 scale grid of `block` x `block` (128 in the real release, which the
 /// resident tier holds as stored; [`BLOCK`] elsewhere).
 pub fn write_checkpoint_blocked(cfg: &Qwen35Config, tag: &str, block: usize) -> PathBuf {
-    write_checkpoint_from(cfg, tag, None, None, Layout::Multimodal, block)
+    write_checkpoint_from(cfg, tag, None, None, Layout::Multimodal, block, false)
 }
 
 /// [`write_checkpoint`] holding `values` (brain-canonical, as `qwen35::init::init_weights` makes them) in the
 /// same layout, every tensor bf16 (the recurrence's `A_log` f32) instead of random FP8 bytes: a model whose
 /// weights are sane enough to train, in a file the packed loader reads like the real release.
 pub fn write_dense_checkpoint(cfg: &Qwen35Config, tag: &str, values: &HashMap<String, Vec<f32>>) -> PathBuf {
-    write_checkpoint_from(cfg, tag, None, Some(values), Layout::Multimodal, BLOCK)
+    write_checkpoint_from(cfg, tag, None, Some(values), Layout::Multimodal, BLOCK, false)
 }
 
 /// [`write_dense_checkpoint`] in a text-only release's layout (EdgeRock): no
 /// vision tower or MTP shard, `model.layers.*` names, the anchor-memory
 /// tensors of `cfg`, and a tied head when `cfg` ties it.
 pub fn write_text_only_checkpoint(cfg: &Qwen35Config, tag: &str, values: &HashMap<String, Vec<f32>>) -> PathBuf {
-    write_checkpoint_from(cfg, tag, None, Some(values), Layout::TextOnly, BLOCK)
+    write_checkpoint_from(cfg, tag, None, Some(values), Layout::TextOnly, BLOCK, false)
 }
 
 /// A plain RMSNorm gain is stored as `w` and applied as `1 + w` (`qwen35::import`).
@@ -113,7 +113,7 @@ fn stored_as_offset_from_one(canon: &str) -> bool {
         || canon.ends_with(".memory.k_norm.weight")
 }
 
-fn write_checkpoint_from(cfg: &Qwen35Config, tag: &str, skip: Option<&str>, dense: Option<&HashMap<String, Vec<f32>>>, layout: Layout, block: usize) -> PathBuf {
+fn write_checkpoint_from(cfg: &Qwen35Config, tag: &str, skip: Option<&str>, dense: Option<&HashMap<String, Vec<f32>>>, layout: Layout, block: usize, tame: bool) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("qwen35_fp8_source_{tag}_{}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
@@ -159,6 +159,8 @@ fn write_checkpoint_from(cfg: &Qwen35Config, tag: &str, skip: Option<&str>, dens
         if fp8 {
             let bytes: Vec<u8> = (0..numel).map(|_| match (rng.next() & 0xff) as u8 {
                 b if b & 0x7f == 0x7f => 0x38, // e4m3fn NaN
+                // Conditioned: exponent field folded into 3..=10 (magnitudes 2^-4 to 2^3), the sign and mantissa kept.
+                b if tame => (b & 0x87) | ((((b >> 3) & 0xf) % 8 + 3) << 3),
                 b => b,
             }).collect();
             let (rows, cols) = (shape[0], shape[1]);
@@ -252,3 +254,42 @@ pub fn hf_config_json(cfg: &Qwen35Config, block: usize) -> serde_json::Value {
     })
 }
 
+
+/// [`write_checkpoint_blocked`] whose FP8 codes are confined to magnitudes between 2^-4 and 2^3: a model whose logits stay
+/// decisive, so a greedy decode compares across batch shapes without a near-tie turning rounding noise into another token
+/// (the random full-range codes make a residual stream with a dynamic range that does).
+pub fn write_checkpoint_conditioned(cfg: &Qwen35Config, tag: &str, block: usize) -> PathBuf {
+    write_checkpoint_from(cfg, tag, None, None, Layout::Multimodal, block, true)
+}
+
+/// A model whose linears all have a contraction width of a whole 128-block (the FP8 tier's rule) with the real
+/// architecture's mix: GDN and GQA layers, a gated query, grouped value heads. The shape the resident serves from
+/// a `write_checkpoint_blocked(.., 128)` directory in tests.
+pub fn fp8_resident_cfg() -> Qwen35Config {
+    Qwen35Config {
+        d_model: 128,
+        intermediate_size: 256,
+        vocab: 64,
+        n_layers: 4,
+        n_heads: 2,
+        n_kv_heads: 1,
+        head_dim: 64,
+        mrope_section: [3, 3, 2],
+        linear_num_key_heads: 2,
+        linear_num_value_heads: 4,
+        linear_key_head_dim: 32,
+        linear_value_head_dim: 32,
+        max_position_embeddings: 512,
+        ..Qwen35Config::tiny()
+    }
+}
+
+/// A `tokenizer.json` beside the checkpoint with the two chat terminators as special tokens, enough for the resident to
+/// build its tokenizer and stop ids (the tests drive it with token ids).
+pub fn write_tokenizer(dir: &Path) {
+    let json = serde_json::json!({
+        "model": {"vocab": {"a": 0, "b": 1}, "merges": []},
+        "added_tokens": [{"content": "<|endoftext|>", "id": 62}, {"content": "<|im_end|>", "id": 63}],
+    });
+    std::fs::write(dir.join("tokenizer.json"), json.to_string()).unwrap();
+}

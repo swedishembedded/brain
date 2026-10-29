@@ -17,8 +17,8 @@
 //! the in-process trainer (`brain::score_tokens_qwen35`); comparing the two is
 //! what says whether the adapter that trained is the adapter that serves.
 //!
-//! Usage: `qwen35_gguf_score <Q8_0.gguf> <records.jsonl> [--adapter FILE]
-//!        [--adapter-slots N] [--adapter-rank-cap N] [--cap N] [--kv int8|bf16|f32]
+//! Usage: `qwen35_gguf_score <Q8_0.gguf|hf-dir> <records.jsonl> [--adapter FILE]
+//!        [--adapter-slots N] [--adapter-rank-cap N] [--cap N] [--kv int8|bf16|f32] [--tier stored|bf16]
 //!        [--device D] [--backend B] [--limit N] [--out FILE]`
 //!
 //! The records are the form [`qwen35::score`] documents: one JSONL object per
@@ -34,13 +34,11 @@
 //! supervised positions. Nothing but these lines goes to stdout, so a caller
 //! can pipe them; the summary goes to stderr.
 
-use checkpoint::gguf::MmapGguf;
-use data::chat_template::ChatTemplate;
-use data::qwen_tokenizer::QwenBpe;
 use model::adapter::bank::{AdapterBankConfig, AdapterTargets, VerifiedAdapter};
 use model::kv_tier::KvTier;
 use model::serve::AdapterId;
 use qwen35::int8_gguf_resident::{budgeted_gpus, Qwen35GgufResident};
+use qwen35::resident_checkpoint::ResidentCheckpoint;
 use residency::multi::MultiDeviceResidentModel;
 use residency::{Device, ResidentModel};
 
@@ -67,10 +65,9 @@ fn main() {
     };
     // The checkpoint's tokenizer and chat template, read from the header only.
     let (records, longest) = {
-        let mg = MmapGguf::open(gguf).unwrap_or_else(|e| panic!("open the checkpoint: {e}"));
-        let gtok = mg.tokenizer().expect("the checkpoint carries a tokenizer");
-        let tok = QwenBpe::from_gguf(&gtok).unwrap_or_else(|e| panic!("embedded tokenizer: {e}"));
-        let tmpl = ChatTemplate::from_gguf(&gtok).unwrap_or_else(|e| panic!("embedded chat template: {e}"));
+        let ckpt = ResidentCheckpoint::open(gguf).unwrap_or_else(|e| panic!("open the checkpoint: {e}"));
+        let (tok, _) = ckpt.tokenizer().unwrap_or_else(|e| panic!("tokenizer: {e}"));
+        let tmpl = ckpt.chat_template().unwrap_or_else(|e| panic!("{e}"));
         let mut records = qwen35::score::read_records(std::path::Path::new(records_path), &tok, &tmpl).unwrap_or_else(|e| panic!("{e}"));
         if let Some(limit) = flag(&args, "--limit").map(|v| v.parse::<usize>().expect("--limit is a number")) {
             records.truncate(limit);
@@ -91,7 +88,12 @@ fn main() {
     // The stored Q8_0 tier, which is what the evaluation server holds its
     // weights at when no `--weights` override is given: a scoring pass must see
     // the arithmetic the served request sees.
-    let tier = qwen35::int8_gguf_resident::held_tiers_at(gguf).unwrap_or_else(|e| panic!("{e}"));
+    // `--tier bf16` scores the same weights decoded to bf16 instead (an FP8 release's reference arithmetic).
+    let tier = match flag(&args, "--tier") {
+        None | Some("stored") => qwen35::int8_gguf_resident::held_tiers_at(gguf).unwrap_or_else(|e| panic!("{e}")),
+        Some("bf16") => model::ops::TierPolicy::uniform(gpu_core::select::Dtype::BF16),
+        Some(other) => panic!("--tier is stored or bf16, not {other:?}"),
+    };
     let resident = Qwen35GgufResident::new(gguf.clone(), devices, cap, tier).with_kv_tier(kv);
     let key = resident.instance_key("generate", &capability::Invocation::new());
     let placed: Vec<Device> = resident.estimate_multi(&key).devices().collect();

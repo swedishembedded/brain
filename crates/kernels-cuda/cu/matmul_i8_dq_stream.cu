@@ -54,6 +54,26 @@
 // Row tails: weight rows past n read the last row and are dropped; rows of x past m read the last row and are
 // dropped; a final stage with fewer than four groups copies only the groups that exist.
 //
+// FP8 weights (BRAIN_DQS_FP8)
+// ---------------------------
+// The same kernel, compiled with BRAIN_DQS_FP8 defined, streams an FP8 E4M3 weight with the checkpoint's block scales:
+//
+//   params : u32 [m, kg, n]   kg = K/4 packed words per weight row, K a multiple of 128
+//   w_q    : [N, kg] u32      weights, 4 E4M3 bytes per word
+//   sw     : [ceil(N/128), K/128] f32   one scale per 128 x 128 block (`weight_scale_inv`): value = decode(byte) * scale
+//
+// A stage covers 128 bytes of K per weight row, which is exactly one scale block, and a block of this kernel covers 64 or
+// 128 weight rows starting at a multiple of its size, so it lies in ONE band of 128 rows: the scale of a whole stage of a
+// whole block is one number, copied by one cp.async and applied by one multiply per weight pair. (The int8 tier has a
+// scale per 32 codes and so four per row per stage; its fold is what knowledge 372 bounds, and this tier has a quarter
+// of it by construction.)
+//
+// An E4M3 byte b = s eeee mmm is decoded as the bf16 bit pattern p = s << 15 | (b & 0x7F) << 4, which as a bf16 is
+// decode(b) * 2^-120 EXACTLY for the normal codes (exponent field e is the bf16 exponent of 2^(e-127)) and for the
+// subnormal ones (m * 2^-9 is the bf16 subnormal m/8 * 2^-126 times 2^120). One bf16x2 multiply by scale * 2^120 then yields
+// decode(b) * scale rounded once to bf16, with the 2^-120 and the block scale in the one multiplicand. The product is the
+// weight the bf16 tensor core consumes; the error is the rounding of that one product, at most 2^-9 relative.
+//
 // No `__restrict__`: brain's device buffers alias by design.
 
 #ifndef BRAIN_DQS_WARPS
@@ -81,10 +101,14 @@
 #define BRAIN_DQS_KB 128
 #define BRAIN_DQS_GPS 4
 #define BRAIN_DQS_XB 256
-// Stage layout (bytes): weights, x, weight scales.
+// Stage layout (bytes): weights, x, weight scales (int8: four f32 per weight row; FP8: the one scale of the stage's block).
 #define BRAIN_DQS_W_BYTES (BRAIN_DQS_BN * BRAIN_DQS_KB)
 #define BRAIN_DQS_X_BYTES (BRAIN_DQS_MAX_ROWS * BRAIN_DQS_XB)
+#ifdef BRAIN_DQS_FP8
+#define BRAIN_DQS_SW_BYTES 16
+#else
 #define BRAIN_DQS_SW_BYTES (BRAIN_DQS_BN * BRAIN_DQS_GPS * 4)
+#endif
 #define BRAIN_DQS_STAGE_BYTES (BRAIN_DQS_W_BYTES + BRAIN_DQS_X_BYTES + BRAIN_DQS_SW_BYTES)
 // Rows covered by one pass of the block's threads over a 16-byte-chunk copy of the weight tile (8 chunks a row), the x tile
 // (16 chunks a row) and the scale tile (4 groups a row).
@@ -181,6 +205,22 @@ __device__ __forceinline__ void brain_dqs_dequant4(unsigned int word, unsigned i
     hi = brain_dqs_dequant2(u23, scale2, k);
 }
 
+// Two E4M3 bytes in the HIGH bytes of the 16-bit lanes of `x` -> bf16x2 of decode(byte) * scale (scale2: scale * 2^120 in both
+// lanes, see the header): the sign stays in bit 15, the seven exponent and mantissa bits move from bits 14..8 to 10..4.
+__device__ __forceinline__ unsigned int brain_dqs_fp8_pair(unsigned int x, unsigned int scale2) {
+    const unsigned int pattern = ((x >> 4) & 0x07F007F0u) | (x & 0x80008000u);
+    return brain_dqs_fma2(pattern, scale2, 0u);
+}
+
+// Four E4M3 bytes (one word) -> two bf16x2 registers, bytes (0,1) and (2,3), in k order.
+__device__ __forceinline__ void brain_dqs_fp8_dequant4(unsigned int word, unsigned int scale2, unsigned int& lo, unsigned int& hi) {
+    unsigned int x01, x23;
+    asm("prmt.b32 %0, %1, 0, 0x1404;\n" : "=r"(x01) : "r"(word));
+    asm("prmt.b32 %0, %1, 0, 0x3424;\n" : "=r"(x23) : "r"(word));
+    lo = brain_dqs_fp8_pair(x01, scale2);
+    hi = brain_dqs_fp8_pair(x23, scale2);
+}
+
 __device__ __forceinline__ unsigned int brain_dqs_splat_bf16(float s) {
     unsigned int d;
     asm("cvt.rn.bf16x2.f32 %0, %1, %1;\n" : "=r"(d) : "f"(s));
@@ -226,7 +266,7 @@ struct BrainDqsCopies {
     unsigned int wdst;     // smem offset of chunk 0; chunk i is BRAIN_DQS_WROWS rows further on
     unsigned int xsrc[X];  // x chunk i: byte offset of (row, 2 * 8 * ch) in xb
     unsigned int xdst;     // smem offset of chunk 0 within the x tile; chunk i is BRAIN_DQS_XROWS rows further on
-    unsigned int ssrc[S];  // scale word i: element offset of (row, 0) in sw
+    unsigned int ssrc[S];  // scale word i: element offset of (row, 0) in sw (int8); FP8: ssrc[0] is the element offset of this block's band in sw
     unsigned int wch, xch, sgi;
 };
 
@@ -249,10 +289,15 @@ __device__ __forceinline__ void brain_dqs_prepare(BrainDqsCopies<T>& c, unsigned
     }
     c.xdst = xrow * BRAIN_DQS_XB + ((c.xch ^ ((xrow & 3u) << 1)) << 4);
     c.sgi = tid & 3u;
+#ifdef BRAIN_DQS_FP8
+    // The block's band of 128 weight rows and the 128-wide scale blocks along K (K / 128 = groups / 4 of them).
+    c.ssrc[0] = (n0 >> 7) * (groups >> 2);
+#else
 #pragma unroll
     for (int i = 0; i < BrainDqsCopies<T>::S; ++i) {
         c.ssrc[i] = min(n0 + (tid >> 2) + BRAIN_DQS_SROWS * i, n - 1u) * groups + c.sgi;
     }
+#endif
 }
 
 template <int T>
@@ -279,12 +324,17 @@ __device__ __forceinline__ void brain_dqs_issue(const BrainDqsCopies<T>& c, unsi
         }
     }
     const unsigned int sws = xs + BRAIN_DQS_X_BYTES;
+#ifdef BRAIN_DQS_FP8
+    // K is a whole number of scale blocks, so every stage exists in full and `s` is its scale block along K.
+    if (threadIdx.x == 0u) { brain_dqs_cp4(sws, sw + (c.ssrc[0] + s)); }
+#else
     if (full || g0 + c.sgi < groups) {
 #pragma unroll
         for (int i = 0; i < BrainDqsCopies<T>::S; ++i) {
             brain_dqs_cp4(sws + (threadIdx.x + BRAIN_DQS_THREADS * i) * 4u, sw + (c.ssrc[i] + g0));
         }
     }
+#endif
 }
 
 // One scale group (32 k) of one 16-row weight tile against T tiles of eight rows of x, accumulated into f.
@@ -296,10 +346,17 @@ __device__ __forceinline__ void brain_dqs_group(float (&f)[T][4], const BrainDqC
     brain_dqs_ldsm4(af, wmat_addr);
     // af[0], af[1]: rows g and g + 8, bytes 4t..4t+3 of k 0..15; af[2], af[3]: the same of k 16..31.
     unsigned int a1[4], a2[4];
+#ifdef BRAIN_DQS_FP8
+    brain_dqs_fp8_dequant4(af[0], sl, a1[0], a1[2]);
+    brain_dqs_fp8_dequant4(af[1], sh, a1[1], a1[3]);
+    brain_dqs_fp8_dequant4(af[2], sl, a2[0], a2[2]);
+    brain_dqs_fp8_dequant4(af[3], sh, a2[1], a2[3]);
+#else
     brain_dqs_dequant4(af[0], sl, k, a1[0], a1[2]);
     brain_dqs_dequant4(af[1], sh, k, a1[1], a1[3]);
     brain_dqs_dequant4(af[2], sl, k, a2[0], a2[2]);
     brain_dqs_dequant4(af[3], sh, k, a2[1], a2[3]);
+#endif
 #pragma unroll
     for (int t = 0; t < T; ++t) {
         unsigned int b0, b1, c0, c1;
@@ -369,12 +426,19 @@ __device__ __forceinline__ void brain_dqs_block(const unsigned char* wq, const u
         const unsigned int gin = min((unsigned int)BRAIN_DQS_GPS, groups - (first + i) * BRAIN_DQS_GPS);  // groups in this stage
 #pragma unroll
         for (int a = 0; a < AT; ++a) {
+#ifdef BRAIN_DQS_FP8
+            // The stage's one scale, times 2^120 (the decoded pattern's offset), for every row and group.
+            const unsigned int s2 = brain_dqs_splat_bf16(sws[0] * 1.329227995784916e36f);
+            const unsigned int sl[4] = {s2, s2, s2, s2};
+            const unsigned int sh[4] = {s2, s2, s2, s2};
+#else
             // The four scales of the stage for this thread's rows g and g + 8 of the tile, as bf16 pairs.
             const unsigned int arow0 = (warp * AT + a) * 16u;
             const float4 lo = *reinterpret_cast<const float4*>(sws + (arow0 + g) * BRAIN_DQS_GPS);
             const float4 hi = *reinterpret_cast<const float4*>(sws + (arow0 + g + 8u) * BRAIN_DQS_GPS);
             const unsigned int sl[4] = {brain_dqs_splat_bf16(lo.x), brain_dqs_splat_bf16(lo.y), brain_dqs_splat_bf16(lo.z), brain_dqs_splat_bf16(lo.w)};
             const unsigned int sh[4] = {brain_dqs_splat_bf16(hi.x), brain_dqs_splat_bf16(hi.y), brain_dqs_splat_bf16(hi.z), brain_dqs_splat_bf16(hi.w)};
+#endif
             if (gin == BRAIN_DQS_GPS) {
 #pragma unroll
                 for (int j = 0; j < BRAIN_DQS_GPS; ++j) {

@@ -44,5 +44,9 @@ name = "gguf_conformance"
 harness = false
 
 [[test]]
+name = "hf_fp8_conformance"
+harness = false
+
+[[test]]
 name = "gguf_score"
 harness = false

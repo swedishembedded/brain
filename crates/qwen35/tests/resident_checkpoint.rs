@@ -20,35 +20,14 @@
 use gpu_core::select::Dtype;
 use gpu_core::Gpu;
 use model::ops::TierPolicy;
-use qwen35::config::Qwen35Config;
 use qwen35::model::{pipelines, Qwen35};
 use qwen35::resident_checkpoint::ResidentCheckpoint;
 
 mod common;
-use common::hf_fixture::write_checkpoint_blocked;
+use common::hf_fixture::{fp8_resident_cfg as fp8_cfg, write_checkpoint_blocked};
 
 /// The real release's scale grid.
 const BLOCK: usize = 128;
-
-/// A model whose linears all have a contraction width of a whole 128-block (the FP8 tier's rule), with the
-/// real architecture's mix: GDN and GQA layers, a gated query, grouped value heads.
-fn fp8_cfg() -> Qwen35Config {
-    Qwen35Config {
-        d_model: 128,
-        intermediate_size: 256,
-        vocab: 64,
-        n_layers: 4,
-        n_heads: 2,
-        n_kv_heads: 1,
-        head_dim: 64,
-        mrope_section: [3, 3, 2],
-        linear_num_key_heads: 2,
-        linear_num_value_heads: 4,
-        linear_key_head_dim: 32,
-        linear_value_head_dim: 32,
-        ..Qwen35Config::tiny()
-    }
-}
 
 fn checkpoint(tag: &str) -> (std::path::PathBuf, ResidentCheckpoint) {
     let dir = write_checkpoint_blocked(&fp8_cfg(), tag, BLOCK);

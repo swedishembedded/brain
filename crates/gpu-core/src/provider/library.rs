@@ -194,6 +194,28 @@ pub fn cast_bf16(gpu: &Gpu, steps: &mut Vec<Step>, x: &Operand, count: u64) -> O
     Some(scratch)
 }
 
+/// Bindings of `quant_e4m3_128`: params, the fp32 rows, the E4M3 bytes, the scales.
+const QUANT_E4M3_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageReadWrite, BindKind::StorageReadWrite];
+
+/// Quantise `rows` rows of `k` fp32 values of `x` to E4M3 with one scale per row per 128 elements and push the step: the
+/// activation operand of the FP8 tensor-core GEMM. Returns the bytes (`rows * k / 4` words) and the scales
+/// (`rows * k / 128` floats). `None` when the device declines the kernel or the window is not one it takes (`k` a multiple of 128,
+/// the window 16-byte aligned).
+pub fn quantize_e4m3_rows(gpu: &Gpu, steps: &mut Vec<Step>, x: &Operand, rows: u32, k: u32) -> Option<(DeviceBuffer, DeviceBuffer)> {
+    let elems = u64::from(rows) * u64::from(k);
+    if rows == 0 || !k.is_multiple_of(128) || elems > u64::from(u32::MAX) || !x.range.0.is_multiple_of(4) {
+        return None;
+    }
+    let kernel = kernels_cuda::get("quant_e4m3_128")?;
+    let id = gpu.native_kernel(kernel, QUANT_E4M3_BINDINGS)?;
+    // Every byte and every scale is written, so the scratch is not cleared.
+    let q = gpu.storage_uninit(elems.div_ceil(4));
+    let s = gpu.storage_uninit(elems / 128);
+    let step = gpu.step_native_sliced(id, &[x.buf, &q, &s], &[(x.range.0, elems), (0, 0), (0, 0)], &[rows, k], kernel.blocks_for(1, elems as u32))?;
+    steps.push(step);
+    Some((q, s))
+}
+
 impl LibraryGemmProvider {
     /// The provider for `gpu` under `precision`, reading the backend's own
     /// availability answer. Logs the decision once per process.

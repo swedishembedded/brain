@@ -38,6 +38,14 @@
 //
 // Row tails: weight rows past n and rows of x past m are zero-filled and dropped at the store.
 //
+// FP8 weights (BRAIN_DQW_FP8): compiled with it defined, the weights are E4M3 bytes with one f32 scale per 128 x 128 block
+// (`sw` is [ceil(N/128), K/128], K a multiple of 128) and the tile's 128 weight rows lie in one band, so a k-tile's scale is
+// ONE number (two k-tiles share each). The dequantisation is `matmul_i8_dq_stream.cu`'s: the E4M3 byte becomes the bf16
+// bit pattern decode(b) * 2^-120, one bf16x2 multiply by scale * 2^120 gives decode(b) * scale rounded once to bf16. The
+// accumulators still run straight across K: there is no fold at all, which is the point of the format against the int8
+// tier's scale per 32 codes (an fp8 wgmma on E4M3 activations would halve the tensor-core time again; that needs the
+// activations quantised per 128 and is a separate candidate).
+//
 // No `__restrict__`: brain's device buffers alias by design.
 
 #define BRAIN_DQW_BM 128
@@ -50,6 +58,8 @@
 // Bytes per ring stage: the activation tile (128 rows x 128 bytes), the raw weight tile (128 rows x 64 bytes), 256 scales.
 #define BRAIN_DQW_X_BYTES (BRAIN_DQW_BM * 128)
 #define BRAIN_DQW_R_BYTES (BRAIN_DQW_BN * BRAIN_DQW_BK)
+// (FP8 uses the first 4 bytes of this area for the one scale of the tile: a stage stays a whole number of KiB so that every
+// activation tile keeps the 1024-byte alignment of the 128-byte swizzle.)
 #define BRAIN_DQW_S_BYTES (BRAIN_DQW_BN * 2 * 4)
 #define BRAIN_DQW_STAGE_BYTES (BRAIN_DQW_X_BYTES + BRAIN_DQW_R_BYTES + BRAIN_DQW_S_BYTES)
 // The three dequantised weight tiles (128 rows x 128 bytes each), after the ring. Three, not two: the tile written for
@@ -61,6 +71,11 @@
 
 #ifndef BRAIN_PDL_ENTRY
 #define BRAIN_PDL_ENTRY() do {} while (0)
+#endif
+
+// The kernel's entry point; the FP8 build is registered under its own name.
+#ifndef BRAIN_DQW_ENTRY
+#define BRAIN_DQW_ENTRY brain_matmul_i8_dq_wgmma
 #endif
 
 __device__ __forceinline__ unsigned int brain_dqw_smem(const void* p) {
@@ -159,6 +174,21 @@ __device__ __forceinline__ void brain_dqw_dequant4(unsigned int word, unsigned i
     hi = brain_dqw_dequant2(u23, scale2, k);
 }
 
+// Two E4M3 bytes in the HIGH bytes of the 16-bit lanes of `x` -> bf16x2 of decode(byte) * scale (scale2: scale * 2^120 in both lanes).
+__device__ __forceinline__ unsigned int brain_dqw_fp8_pair(unsigned int x, unsigned int scale2) {
+    const unsigned int pattern = ((x >> 4) & 0x07F007F0u) | (x & 0x80008000u);
+    return brain_dqw_fma2(pattern, scale2, 0u);
+}
+
+// Four consecutive E4M3 bytes (one word) -> two bf16x2 registers, bytes (0,1) and (2,3), in k order.
+__device__ __forceinline__ void brain_dqw_fp8_dequant4(unsigned int word, unsigned int scale2, unsigned int& lo, unsigned int& hi) {
+    unsigned int x01, x23;
+    asm("prmt.b32 %0, %1, 0, 0x1404;\n" : "=r"(x01) : "r"(word));
+    asm("prmt.b32 %0, %1, 0, 0x3424;\n" : "=r"(x23) : "r"(word));
+    lo = brain_dqw_fp8_pair(x01, scale2);
+    hi = brain_dqw_fp8_pair(x23, scale2);
+}
+
 __device__ __forceinline__ unsigned int brain_dqw_splat_bf16(float s) {
     unsigned int d;
     asm("cvt.rn.bf16x2.f32 %0, %1, %1;\n" : "=r"(d) : "f"(s));
@@ -166,13 +196,14 @@ __device__ __forceinline__ unsigned int brain_dqw_splat_bf16(float s) {
 }
 
 extern "C" __global__ void __launch_bounds__(BRAIN_DQW_THREADS, 1)
-brain_matmul_i8_dq_wgmma(const unsigned int* params, const unsigned int* xb, const unsigned int* wq, const float* sw, float* out) {
+BRAIN_DQW_ENTRY(const unsigned int* params, const unsigned int* xb, const unsigned int* wq, const float* sw, float* out) {
     BRAIN_PDL_ENTRY();
     extern __shared__ unsigned char brain_dqw_smem_raw[];
     const unsigned int M = params[0];
     const unsigned int K = params[1] * 4u;
     const unsigned int N = params[2];
     const unsigned int ng = K / 32u;
+    const unsigned int kblocks = K / 128u;  // FP8: scale blocks along K
     const unsigned int ktiles = K / BRAIN_DQW_BK;
 
     // Flat 1-D grid, row tile fastest: the blocks that run together share a weight tile.
@@ -222,9 +253,13 @@ brain_matmul_i8_dq_wgmma(const unsigned int* params, const unsigned int* xb, con
         w_len[it] = r < N ? 16u : 0u;
         w_src[it] = w8 + (unsigned long long)(r < N ? r : 0u) * K + rc * 16u;
     }
+#ifdef BRAIN_DQW_FP8
+    const float* const s_src = sw + (unsigned long long)(n0 >> 7) * kblocks;
+#else
     const unsigned int s_row = n0 + (tid >> 1);
     const bool s_ok = s_row < N;
     const float* const s_src = sw + (unsigned long long)(s_ok ? s_row : 0u) * ng + (tid & 1u);
+#endif
 
     auto load_stage = [&](unsigned int slot, unsigned int kt) {
         const unsigned int st = base + slot * BRAIN_DQW_STAGE_BYTES;
@@ -232,7 +267,11 @@ brain_matmul_i8_dq_wgmma(const unsigned int* params, const unsigned int* xb, con
         for (int it = 0; it < 4; ++it) { brain_dqw_cp16(st + x_dst + 4096u * it, x_src[it] + kt * 128u, x_len[it]); }
 #pragma unroll
         for (int it = 0; it < 2; ++it) { brain_dqw_cp16(st + BRAIN_DQW_X_BYTES + (rrow + 64u * it) * 64u + rc * 16u, w_src[it] + kt * 64u, w_len[it]); }
+#ifdef BRAIN_DQW_FP8
+        if (tid == 0u) { brain_dqw_cp4(st + BRAIN_DQW_X_BYTES + BRAIN_DQW_R_BYTES, s_src + (kt >> 1), 4u); }
+#else
         brain_dqw_cp4(st + BRAIN_DQW_X_BYTES + BRAIN_DQW_R_BYTES + tid * 4u, s_src + kt * 2u, s_ok ? 4u : 0u);
+#endif
     };
 
     // Dequantising a k-tile's raw weights (ring slot `slot`) into a bf16 tile (0..2): `load_raw` reads this thread's two
@@ -250,7 +289,11 @@ brain_matmul_i8_dq_wgmma(const unsigned int* params, const unsigned int* xb, con
         for (int it = 0; it < 2; ++it) {
             const unsigned int row = rrow + 64u * it;
             raw_codes[it] = *reinterpret_cast<const uint4*>(raw + row * 64u + rc * 16u);
+#ifdef BRAIN_DQW_FP8
+            raw_scales[it] = scales[0];
+#else
             raw_scales[it] = scales[row * 2u + (rc >> 1)];
+#endif
         }
     };
     auto store_dequantised = [&](unsigned int dst) {
@@ -258,12 +301,20 @@ brain_matmul_i8_dq_wgmma(const unsigned int* params, const unsigned int* xb, con
         for (int it = 0; it < 2; ++it) {
             const unsigned int row = rrow + 64u * it;
             const uint4 v = raw_codes[it];
-            const unsigned int s2 = brain_dqw_splat_bf16(raw_scales[it]);
             uint4 lo, hi;  // codes 0-7 and 8-15 as bf16: logical 16-byte chunks 2 rc and 2 rc + 1 of the row
+#ifdef BRAIN_DQW_FP8
+            const unsigned int s2 = brain_dqw_splat_bf16(raw_scales[it] * 1.329227995784916e36f);
+            brain_dqw_fp8_dequant4(v.x, s2, lo.x, lo.y);
+            brain_dqw_fp8_dequant4(v.y, s2, lo.z, lo.w);
+            brain_dqw_fp8_dequant4(v.z, s2, hi.x, hi.y);
+            brain_dqw_fp8_dequant4(v.w, s2, hi.z, hi.w);
+#else
+            const unsigned int s2 = brain_dqw_splat_bf16(raw_scales[it]);
             brain_dqw_dequant4(v.x, s2, consts, lo.x, lo.y);
             brain_dqw_dequant4(v.y, s2, consts, lo.z, lo.w);
             brain_dqw_dequant4(v.z, s2, consts, hi.x, hi.y);
             brain_dqw_dequant4(v.w, s2, consts, hi.z, hi.w);
+#endif
             unsigned char* tile = gen + BRAIN_DQW_STAGES * BRAIN_DQW_STAGE_BYTES + dst * BRAIN_DQW_D_BYTES + row * 128u;
             *reinterpret_cast<uint4*>(tile + (((2u * rc) ^ (row & 7u)) << 4)) = lo;
             *reinterpret_cast<uint4*>(tile + (((2u * rc + 1u) ^ (row & 7u)) << 4)) = hi;

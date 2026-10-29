@@ -284,7 +284,11 @@ impl TensorSink for DeviceWeightSink<'_> {
             (Tier::F16, _) => Weight::F16 { w: payload, n, k },
             (Tier::I8, Some(s)) => Weight::I8 { w: payload, s, n, k },
             (Tier::Nf4, Some(s)) => Weight::NF4 { w: payload, s, n, k },
-            (Tier::Fp8(fmt, block), Some(s)) => Weight::FP8 { w: payload, s, n, k, fmt, block },
+            (Tier::Fp8(fmt, block), Some(s)) => {
+                // Measure the native candidates now, not inside the first recorded product.
+                gpu.prepare_fp8_linear();
+                Weight::FP8 { w: payload, s, n, k, fmt, block }
+            }
             (Tier::Micro(kind), Some(s)) => Weight::Micro { w: payload, s, n, k, kind, global: p.global },
             (_, None) => unreachable!("a scaled tier always allocates its scale plane in begin"),
         });

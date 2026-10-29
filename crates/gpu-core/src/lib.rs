@@ -326,7 +326,16 @@ mod native_tune;
 /// Native kernels a model asks for by name - see [`native_upgrade::Fused`].
 #[cfg(not(target_arch = "wasm32"))]
 pub use native_upgrade::{native_kernels_enabled, set_native_kernels, Fused};
-pub use native_tune::{check_shape as native_check_shape, clear_forced as clear_forced_candidates, force_candidate, offered as native_candidates_offered, report as native_selection_report, report_for_default_device as native_selection_report_for_default_device, set_autotune as set_native_autotune, unknown_forced as unknown_forced_candidates, Verdict as NativeVerdict};
+/// The form an FP8-weight linear's chosen candidate reads its activations in ([`Gpu::fp8_linear_act`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fp8Act {
+    /// The fp32 rows rounded to bf16 (one `cast_f32_bf16`): the dequantize-in-register candidates.
+    Bf16,
+    /// The rows quantised to E4M3 with a scale per row per 128 of K (`quant_e4m3_128`): the FP8 tensor-core GEMM.
+    E4m3,
+}
+
+pub use native_tune::{check_fp8_shape as native_check_fp8_shape, check_shape as native_check_shape, clear_forced as clear_forced_candidates, force_candidate, offered as native_candidates_offered, report as native_selection_report, report_for_default_device as native_selection_report_for_default_device, set_autotune as set_native_autotune, unknown_forced as unknown_forced_candidates, Verdict as NativeVerdict};
 
 /// The `OperatorProvider` ABI, registry, WGSL reference provider and
 /// cross-provider parity harness (`kernel-performance.md` Phase 8, M8.3).
@@ -808,6 +817,9 @@ mod native_facade {
         native_upgrades: Vec<crate::native_upgrade::Active>,
         /// The device's measured choice among the candidates of each native slot - see [`crate::native_tune`].
         tuned: std::sync::OnceLock<Option<Arc<crate::native_tune::Tuned>>>,
+        /// The FP8 linear's table, measured on first use ([`Gpu::prepare_fp8_linear`]) so a model with no FP8 weight never
+        /// pays for it.
+        tuned_fp8: std::sync::OnceLock<Option<Arc<crate::native_tune::Tuned>>>,
         /// The native fused kernels this handle has been asked about, and what
         /// the backend answered - resolved lazily, because resolving compiles
         /// the kernel and most handles never ask. See [`Gpu::fused_step`].
@@ -891,6 +903,7 @@ mod native_facade {
                 upgrades,
                 native_upgrades,
                 tuned: std::sync::OnceLock::new(),
+                tuned_fp8: std::sync::OnceLock::new(),
                 fused: Mutex::new(Vec::new()),
                 mem_device,
                 grants: Mutex::new(Vec::new()),
@@ -905,7 +918,7 @@ mod native_facade {
             };
             // A slot with several native candidates has its choice measured once per device (or read from the
             // store) before the handle is used; every other handle skips this at the cost of one scan.
-            let mut slots: Vec<(usize, &'static str)> = gpu.native_upgrades.iter().map(|a| (a.slow, a.slot)).collect();
+            let mut slots: Vec<(usize, &'static str)> = gpu.native_upgrades.iter().filter(|a| a.slow != crate::native_upgrade::FP8_KIND).map(|a| (a.slow, a.slot)).collect();
             slots.dedup();
             let _ = gpu.tuned.set(crate::native_tune::ensure(&gpu, &slots));
             gpu
@@ -923,6 +936,47 @@ mod native_facade {
 
         fn tuned_table(&self) -> Option<&crate::native_tune::Tuned> {
             self.tuned.get().and_then(|t| t.as_deref())
+        }
+
+        /// Measure (once per device and build, or read from the store) the FP8 linear's candidates before the first FP8
+        /// weight is used: called when an FP8 weight is placed on the device, so the tuning never runs inside a recorded
+        /// step. A handle with no FP8 candidates (a backend that cannot compile the registry, a device below their floor)
+        /// does nothing.
+        pub fn prepare_fp8_linear(&self) {
+            self.tuned_fp8.get_or_init(|| crate::native_tune::ensure(self, &[(crate::native_upgrade::FP8_KIND, crate::native_upgrade::FP8_SLOT)]));
+        }
+
+        /// Whether this handle has native candidates for the FP8 linear at all.
+        pub fn has_fp8_linear(&self) -> bool {
+            self.native_upgrades.iter().any(|a| a.slow == crate::native_upgrade::FP8_KIND)
+        }
+
+        /// The step for an FP8-weight linear (E4M3 bytes with a 128 x 128 block scale) on the candidate the tuned table
+        /// names for the shape class: `bufs` are the bf16 activation rows, the weight bytes, the block scales and the
+        /// output (`offsets` their windows), `params` is `[m, k/4, n]`. With the name the backend times it under. `None`
+        /// when no candidate serves the dispatch (a shape outside every candidate, a binding off their alignment): the
+        /// caller keeps the tile decode.
+        pub fn fp8_linear_step(&self, act: crate::Fp8Act, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32]) -> Option<(Step, &'static str)> {
+            let tuned = self.tuned_fp8.get().and_then(|t| t.as_deref());
+            let form = match act {
+                crate::Fp8Act::Bf16 => crate::native_upgrade::ActFormat::Bf16,
+                crate::Fp8Act::E4m3 => crate::native_upgrade::ActFormat::Fp8Group128,
+            };
+            let a = crate::native_upgrade::serving(&self.native_upgrades, crate::native_upgrade::FP8_KIND, params, tuned, Some(offsets), Some(form))?;
+            let step = self.be().step_native_sliced(a.id, bufs, offsets, params, (a.blocks)(params, a.tile))?;
+            Some((step, a.reported))
+        }
+
+        /// The activation form the candidate this device's tuned table names for an FP8-weight linear (`params` =
+        /// `[m, k/4, n]`) reads, or `None` when no candidate serves the shape: the caller prepares that form (the bf16
+        /// rows, or the E4M3 rows with their scales) and hands it to [`Self::fp8_linear_step`].
+        pub fn fp8_linear_act(&self, params: &[u32]) -> Option<crate::Fp8Act> {
+            let tuned = self.tuned_fp8.get().and_then(|t| t.as_deref());
+            let a = crate::native_upgrade::serving(&self.native_upgrades, crate::native_upgrade::FP8_KIND, params, tuned, None, None)?;
+            Some(match a.input.act {
+                crate::native_upgrade::ActFormat::Fp8Group128 => crate::Fp8Act::E4m3,
+                _ => crate::Fp8Act::Bf16,
+            })
         }
 
         /// The memory device a handle on this backend, on this thread, is

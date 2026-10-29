@@ -91,6 +91,20 @@ pub const fn i8_stream_dynamic_shared_bytes(bn: u32, rows: u32, stages: u32) -> 
 pub const fn i8_dq_stream_dynamic_shared_bytes(bn: u32, rows: u32, stages: u32) -> u32 {
     stages * (bn * 128 + rows * 256 + bn * 16)
 }
+/// Dynamic shared memory per block of `matmul_fp8_dq_stream_*` with `bn` weight rows a block, room for `rows` rows of x and
+/// `stages` stages: [`i8_dq_stream_dynamic_shared_bytes`] with the one f32 scale of a 128 x 128 block (16 bytes, aligned)
+/// where the int8 tier keeps four per weight row. A test holds it to the source.
+pub const fn fp8_dq_stream_dynamic_shared_bytes(bn: u32, rows: u32, stages: u32) -> u32 {
+    stages * (bn * 128 + rows * 256 + 16)
+}
+/// Dynamic shared memory per block of `matmul_fp8_dq_wgmma`: the int8 kernel's ([`I8_DQ_WGMMA_DYNAMIC_SHARED_BYTES`]). The FP8
+/// build keeps the stage's scale area at the int8 size (it needs 4 bytes of it) so a stage stays a whole number of KiB and
+/// every activation tile keeps the 1024-byte alignment of the 128-byte swizzle.
+pub const FP8_DQ_WGMMA_DYNAMIC_SHARED_BYTES: u32 = I8_DQ_WGMMA_DYNAMIC_SHARED_BYTES;
+/// Dynamic shared memory per block of `matmul_fp8_wgmma`: a ring of 4 stages (a 128-row activation tile and a 128-row weight
+/// tile of 128-byte rows, then 1 KiB of scales: 33792 bytes each) and 1 KiB to align the ring to the 128-byte swizzle pattern.
+/// A test holds it to the source.
+pub const FP8_WGMMA_DYNAMIC_SHARED_BYTES: u32 = 4 * (2 * 128 * 128 + 1024) + 1024;
 /// Dynamic shared memory per block of `matmul_i8_dq_wgmma`: a ring of 5 stages (a 128-row bf16 activation tile of 128-byte rows,
 /// a 128-row raw int8 weight tile of 64-byte rows and 256 f32 scales: 25600 bytes each), three 128 x 128-byte dequantised weight
 /// tiles and 1 KiB to align the ring to the 128-byte swizzle pattern. A test holds it to the source.
@@ -2038,6 +2052,170 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/bf16_gemv.cu"),
     },
     CudaKernel {
+        name: "matmul_fp8_dq_stream_r1",
+        // FP8 twin of `matmul_i8_dq_stream_*`: E4M3 weight codes with the checkpoint's 128 x 128 block scale become bf16 in
+        // registers (one scale per stage of K, no per-group fold), the activations are bf16 and the accumulation is f32
+        // across all of K. cp.async ring through shared memory, ldmatrix, mma.sync m16n8k16, 64 weight rows a block, K
+        // split over a cluster of 1 block(s) (the cluster size is the launch's).
+        op: Op::MatMul,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_matmul_fp8_dq_stream_r1",
+        what: "FP8 E4M3 block-scaled weight matmul for 1 to 64 rows of bf16 x that decodes the weight bytes times their 128 x 128 block scale to bf16 in registers and accumulates in f32 across K (cp.async ring, ldmatrix, mma.sync m16n8k16, 64 weight rows a block), K split over 1 block(s) of a cluster; agrees with the f64 reference of the stored weights to the bf16 resolution of its inputs",
+        reported: "native:matmul_fp8_dq_stream_r1",
+        block_dim: 128,
+        tile: (64, 64),
+        // The stage ring is dynamic shared memory (`fp8_dq_stream_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_DQS_FP8 1\n#define BRAIN_DQS_STAGES 3\n#define BRAIN_DQS_MAX_ROWS 64\n#define BRAIN_DQS_MIN_BLOCKS 4\n#define brain_matmul_i8_dq_stream brain_matmul_fp8_dq_stream_r1\n", include_str!("../cu/matmul_i8_dq_stream.cu")),
+    },
+    CudaKernel {
+        name: "matmul_fp8_dq_stream_r2",
+        // FP8 twin of `matmul_i8_dq_stream_*`: E4M3 weight codes with the checkpoint's 128 x 128 block scale become bf16 in
+        // registers (one scale per stage of K, no per-group fold), the activations are bf16 and the accumulation is f32
+        // across all of K. cp.async ring through shared memory, ldmatrix, mma.sync m16n8k16, 64 weight rows a block, K
+        // split over a cluster of 2 block(s) (the cluster size is the launch's).
+        op: Op::MatMul,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: CLUSTER_MIN_CC,
+        entry: "brain_matmul_fp8_dq_stream_r2",
+        what: "FP8 E4M3 block-scaled weight matmul for 1 to 64 rows of bf16 x that decodes the weight bytes times their 128 x 128 block scale to bf16 in registers and accumulates in f32 across K (cp.async ring, ldmatrix, mma.sync m16n8k16, 64 weight rows a block), K split over 2 block(s) of a cluster; agrees with the f64 reference of the stored weights to the bf16 resolution of its inputs",
+        reported: "native:matmul_fp8_dq_stream_r2",
+        block_dim: 128,
+        tile: (64, 64),
+        // The stage ring is dynamic shared memory (`fp8_dq_stream_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_DQS_FP8 1\n#define BRAIN_DQS_STAGES 3\n#define BRAIN_DQS_MAX_ROWS 64\n#define BRAIN_DQS_MIN_BLOCKS 4\n#define brain_matmul_i8_dq_stream brain_matmul_fp8_dq_stream_r2\n", include_str!("../cu/matmul_i8_dq_stream.cu")),
+    },
+    CudaKernel {
+        name: "matmul_fp8_dq_stream_r4",
+        // FP8 twin of `matmul_i8_dq_stream_*`: E4M3 weight codes with the checkpoint's 128 x 128 block scale become bf16 in
+        // registers (one scale per stage of K, no per-group fold), the activations are bf16 and the accumulation is f32
+        // across all of K. cp.async ring through shared memory, ldmatrix, mma.sync m16n8k16, 64 weight rows a block, K
+        // split over a cluster of 4 block(s) (the cluster size is the launch's).
+        op: Op::MatMul,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: CLUSTER_MIN_CC,
+        entry: "brain_matmul_fp8_dq_stream_r4",
+        what: "FP8 E4M3 block-scaled weight matmul for 1 to 64 rows of bf16 x that decodes the weight bytes times their 128 x 128 block scale to bf16 in registers and accumulates in f32 across K (cp.async ring, ldmatrix, mma.sync m16n8k16, 64 weight rows a block), K split over 4 block(s) of a cluster; agrees with the f64 reference of the stored weights to the bf16 resolution of its inputs",
+        reported: "native:matmul_fp8_dq_stream_r4",
+        block_dim: 128,
+        tile: (64, 64),
+        // The stage ring is dynamic shared memory (`fp8_dq_stream_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_DQS_FP8 1\n#define BRAIN_DQS_STAGES 3\n#define BRAIN_DQS_MAX_ROWS 64\n#define BRAIN_DQS_MIN_BLOCKS 4\n#define brain_matmul_i8_dq_stream brain_matmul_fp8_dq_stream_r4\n", include_str!("../cu/matmul_i8_dq_stream.cu")),
+    },
+    CudaKernel {
+        name: "matmul_fp8_dq_stream_q2",
+        // FP8 twin of `matmul_i8_dq_stream_*`: E4M3 weight codes with the checkpoint's 128 x 128 block scale become bf16 in
+        // registers (one scale per stage of K, no per-group fold), the activations are bf16 and the accumulation is f32
+        // across all of K. cp.async ring through shared memory, ldmatrix, mma.sync m16n8k16, 128 weight rows a block, K
+        // split over a cluster of 2 block(s) (the cluster size is the launch's).
+        op: Op::MatMul,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: CLUSTER_MIN_CC,
+        entry: "brain_matmul_fp8_dq_stream_q2",
+        what: "FP8 E4M3 block-scaled weight matmul for 1 to 128 rows of bf16 x that decodes the weight bytes times their 128 x 128 block scale to bf16 in registers and accumulates in f32 across K (cp.async ring, ldmatrix, mma.sync m16n8k16, 128 weight rows a block), K split over 2 block(s) of a cluster; agrees with the f64 reference of the stored weights to the bf16 resolution of its inputs",
+        reported: "native:matmul_fp8_dq_stream_q2",
+        block_dim: 256,
+        tile: (128, 128),
+        // The stage ring is dynamic shared memory (`fp8_dq_stream_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_DQS_FP8 1\n#define BRAIN_DQS_WARPS 8\n#define BRAIN_DQS_STAGES 3\n#define BRAIN_DQS_MAX_ROWS 128\n#define BRAIN_DQS_MIN_BLOCKS 1\n#define brain_matmul_i8_dq_stream brain_matmul_fp8_dq_stream_q2\n", include_str!("../cu/matmul_i8_dq_stream.cu")),
+    },
+    CudaKernel {
+        name: "matmul_fp8_dq_stream_q4",
+        // FP8 twin of `matmul_i8_dq_stream_*`: E4M3 weight codes with the checkpoint's 128 x 128 block scale become bf16 in
+        // registers (one scale per stage of K, no per-group fold), the activations are bf16 and the accumulation is f32
+        // across all of K. cp.async ring through shared memory, ldmatrix, mma.sync m16n8k16, 128 weight rows a block, K
+        // split over a cluster of 4 block(s) (the cluster size is the launch's).
+        op: Op::MatMul,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: CLUSTER_MIN_CC,
+        entry: "brain_matmul_fp8_dq_stream_q4",
+        what: "FP8 E4M3 block-scaled weight matmul for 1 to 128 rows of bf16 x that decodes the weight bytes times their 128 x 128 block scale to bf16 in registers and accumulates in f32 across K (cp.async ring, ldmatrix, mma.sync m16n8k16, 128 weight rows a block), K split over 4 block(s) of a cluster; agrees with the f64 reference of the stored weights to the bf16 resolution of its inputs",
+        reported: "native:matmul_fp8_dq_stream_q4",
+        block_dim: 256,
+        tile: (128, 128),
+        // The stage ring is dynamic shared memory (`fp8_dq_stream_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_DQS_FP8 1\n#define BRAIN_DQS_WARPS 8\n#define BRAIN_DQS_STAGES 3\n#define BRAIN_DQS_MAX_ROWS 128\n#define BRAIN_DQS_MIN_BLOCKS 1\n#define brain_matmul_i8_dq_stream brain_matmul_fp8_dq_stream_q4\n", include_str!("../cu/matmul_i8_dq_stream.cu")),
+    },
+    CudaKernel {
+        name: "matmul_fp8_dq_wgmma",
+        // Hopper prefill candidate of the FP8 linear: warpgroup `wgmma` m64n128k16 on bf16 operands, the activations A (bf16
+        // rows) and the weights B, decoded from their E4M3 bytes times the block scale into shared memory while the tensor
+        // cores run the previous k-tile. One scale per 128 of K, no fold; one f32 accumulation across K.
+        op: Op::MatMul,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_matmul_fp8_dq_wgmma",
+        what: "FP8 E4M3 block-scaled weight GEMM against bf16 activations on Hopper warpgroup tensor cores (wgmma m64n128k16, 128x128 tile, cp.async ring) with the weight bytes times their 128 x 128 block scale decoded to bf16 while the previous k-tile runs; agrees with the f64 reference of the stored weights to the bf16 resolution of its inputs",
+        reported: "native:matmul_fp8_dq_wgmma",
+        block_dim: 256,
+        // 128 rows of x x 128 weight rows per block.
+        tile: (128, 128),
+        // The ring and the decoded tiles are dynamic shared memory (`FP8_DQ_WGMMA_DYNAMIC_SHARED_BYTES`).
+        shared_bytes: 0,
+        programmatic: false,
+        src: concat!("#define BRAIN_DQW_FP8 1\n#define BRAIN_DQW_ENTRY brain_matmul_fp8_dq_wgmma\n", include_str!("../cu/matmul_i8_dq_wgmma.cu")),
+    },
+    CudaKernel {
+        name: "matmul_fp8_wgmma",
+        // Hopper prefill candidate of the FP8 linear on the FP8 tensor cores themselves: warpgroup `wgmma` m64n128k32 on
+        // E4M3 operands, the weights as the release stores them and the activations quantised per row per 128 of K
+        // (`quant_e4m3_128`). The scales fold once per 128 of K, 64 fused multiply-adds a thread against 4 wgmma.
+        op: Op::MatMul,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_matmul_fp8_wgmma",
+        what: "FP8 E4M3 block-scaled weight GEMM against E4M3 activations (one scale per row per 128 of K) on Hopper warpgroup tensor cores (wgmma m64n128k32, 128x128 tile, cp.async ring), the activation and weight scales folded once per 128 of K; agrees with the f64 reference of the stored weights to the E4M3 resolution of its activations",
+        reported: "native:matmul_fp8_wgmma",
+        block_dim: 256,
+        // 128 rows of x x 128 weight rows per block.
+        tile: (128, 128),
+        // The ring is dynamic shared memory (`FP8_WGMMA_DYNAMIC_SHARED_BYTES`).
+        shared_bytes: 0,
+        programmatic: false,
+        src: include_str!("../cu/matmul_fp8_wgmma.cu"),
+    },
+    CudaKernel {
+        name: "quant_e4m3_128",
+        op: Op::Elementwise,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: FP8_CVT_MIN_CC,
+        entry: "brain_quant_e4m3_128",
+        what: "fp32 activation rows to E4M3 with one f32 scale (amax / 448) per 128 elements, round-to-nearest-even and saturating: the activation operand of the FP8 tensor-core GEMM",
+        reported: "native:quant_e4m3_128",
+        block_dim: 256,
+        // 8 warps a block, a warp per 128-element block: 1024 elements per block.
+        tile: (1, 1024),
+        shared_bytes: 0,
+        programmatic: false,
+        src: include_str!("../cu/quant_e4m3_128.cu"),
+    },
+    CudaKernel {
         name: "matmul_fp8_gemv",
         // The native twin of `matmul_fp8_gemv.wgsl` (every row-capacity variant), redirected to by name by
         // `gpu_core::native_upgrade`: the decode-regime product of a stored FP8 weight.
@@ -3380,6 +3558,37 @@ mod tests {
         assert!(joined.contains("issues wgmma.mma_async but declares min_cc"), "{joined}");
     }
 
+    /// The FP8 kernels decode an E4M3 byte `b` as the bf16 bit pattern `(b & 0x80) << 8 | (b & 0x7F) << 4` and multiply it by
+    /// `scale * 2^120`. The pattern is `decode(b) * 2^-120` as a bf16 number for every finite code, the subnormals included
+    /// (checked here against an independent decode; the multiply is then a single rounding of `decode(b) * scale`).
+    #[test]
+    fn the_fp8_bit_pattern_is_the_decoded_value_scaled_by_two_to_the_minus_120() {
+        let bf16_value = |bits: u16| -> f64 {
+            let (sign, exp, mant) = (bits >> 15, i32::from((bits >> 7) & 0xFF), f64::from(bits & 0x7F));
+            let magnitude = if exp == 0 { mant / 128.0 * 2f64.powi(-126) } else { (1.0 + mant / 128.0) * 2f64.powi(exp - 127) };
+            if sign == 1 { -magnitude } else { magnitude }
+        };
+        let e4m3 = |b: u8| -> f64 {
+            let (exp, mant) = (i32::from((b >> 3) & 0xF), f64::from(b & 7));
+            let magnitude = if exp == 0 { mant / 8.0 * 2f64.powi(-6) } else { (1.0 + mant / 8.0) * 2f64.powi(exp - 7) };
+            if b & 0x80 != 0 { -magnitude } else { magnitude }
+        };
+        for b in 0..=255u8 {
+            if b & 0x7F == 0x7F {
+                continue; // the NaN codes of E4M3FN: a checkpoint holds none
+            }
+            let x = u32::from(b) << 8; // the byte in the high byte of a 16-bit lane, as the kernels' `prmt` places it
+            let pattern = (((x >> 4) & 0x07F0) | (x & 0x8000)) as u16;
+            assert_eq!(bf16_value(pattern) * 2f64.powi(120), e4m3(b), "byte {b:#04x}");
+        }
+        // The one-word form on two lanes: byte 0 in lane 0, byte 1 in lane 1.
+        let word = 0x0000_B438u32; // bytes 0x38 (1.0) and 0xB4 (-0.3125)... positions 0, 1
+        let x = ((word & 0xFF) << 8) | ((word >> 8 & 0xFF) << 24);
+        let pair = ((x >> 4) & 0x07F0_07F0) | (x & 0x8000_8000);
+        assert_eq!(bf16_value((pair & 0xFFFF) as u16) * 2f64.powi(120), 1.0);
+        assert_eq!(bf16_value((pair >> 16) as u16) * 2f64.powi(120), e4m3(0xB4));
+    }
+
     /// The shared-memory formulas the launches size their rings by are the sources' own stage layouts.
     #[test]
     fn the_streaming_sources_and_the_rust_shared_memory_formulas_agree_on_the_stage_layout() {
@@ -3401,6 +3610,15 @@ mod tests {
             ],
         );
         assert_eq!(i8_stream_dynamic_shared_bytes(64, 32, 5), 5 * (64 * 128 + 32 * 128 + 64 * 16 + 32 * 16));
+        // The FP8 builds of the dequantize-in-register kernels keep one scale (16 bytes) a stage, not four per weight row.
+        has("matmul_fp8_dq_stream_r1", &["#define BRAIN_DQS_KB 128", "#define BRAIN_DQS_XB 256", "#define BRAIN_DQS_SW_BYTES 16"]);
+        assert_eq!(fp8_dq_stream_dynamic_shared_bytes(64, 64, 3), 3 * (64 * 128 + 64 * 256 + 16));
+        assert_eq!(fp8_dq_stream_dynamic_shared_bytes(64, 64, 3) + 3 * (64 * 16 - 16), i8_dq_stream_dynamic_shared_bytes(64, 64, 3));
+        has("matmul_fp8_dq_wgmma", &["#define BRAIN_DQW_S_BYTES (BRAIN_DQW_BN * 2 * 4)", "#define BRAIN_DQW_X_BYTES (BRAIN_DQW_BM * 128)", "#define BRAIN_DQW_R_BYTES (BRAIN_DQW_BN * BRAIN_DQW_BK)", "#define BRAIN_DQW_STAGES 5"]);
+        assert_eq!((128 * 128 + 128 * 64 + 128 * 2 * 4) % 1024, 0, "a ring stage is a whole number of KiB, so every swizzled tile stays 1024-byte aligned");
+        has("matmul_fp8_wgmma", &["#define BRAIN_FW_STAGES 4", "#define BRAIN_FW_X_BYTES (BRAIN_FW_BM * 128)", "#define BRAIN_FW_W_BYTES (BRAIN_FW_BN * 128)", "#define BRAIN_FW_S_BYTES 1024"]);
+        assert_eq!(FP8_WGMMA_DYNAMIC_SHARED_BYTES, 4 * (128 * 128 * 2 + 1024) + 1024);
+        assert_eq!((128 * 128 * 2 + 1024) % 1024, 0);
         has(
             "matmul_i8_wgstream_n64_s2",
             &[

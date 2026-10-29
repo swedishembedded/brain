@@ -136,6 +136,18 @@ impl ResidentCheckpoint {
         }
     }
 
+    /// The checkpoint's chat template (a GGUF's `tokenizer.chat_template`, an HF directory's `chat_template.jinja` or
+    /// `tokenizer_config.json`), for tools that render conversations themselves.
+    pub fn chat_template(&self) -> Result<data::chat_template::ChatTemplate, String> {
+        match self {
+            ResidentCheckpoint::Gguf(mg) => {
+                let gtok = mg.tokenizer().ok_or("it carries no embedded tokenizer (tokenizer.ggml.* KV)")?;
+                data::chat_template::ChatTemplate::from_gguf(&gtok).map_err(|e| format!("embedded chat template: {e}"))
+            }
+            ResidentCheckpoint::Hf(hf) => data::chat_template::ChatTemplate::from_model_dir(&hf.dir).map_err(|e| format!("chat template: {e}")),
+        }
+    }
+
     /// Whether the tokenizer can be built, for the cheap "is this servable" check.
     pub fn has_tokenizer(&self) -> bool {
         match self {
