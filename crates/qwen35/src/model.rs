@@ -3113,6 +3113,17 @@ impl Qwen35 {
         self.mlp_fwd_pre(prefix, xn2, None, false, n)
     }
 
+    /// The feed-forward sublayer of decoder layer `l` as the serving layer loops
+    /// (decode, verify, prefill) run it: `xn2` is the normalised mixer output
+    /// (`pre` its int8 packing when a fused front made one) and the result the
+    /// `[n, d_model]` product the residual adds. This is the ONE place those
+    /// loops reach the feed-forward block, so a layer kind with a different
+    /// block (the sparse-MoE sibling's router and experts)
+    /// is a new arm here and nothing else in them changes.
+    fn ffn_fwd_pre(&self, l: usize, xn2: &DeviceBuffer, pre: Option<Act>, epilogue: bool, n: u32) -> DeviceBuffer {
+        self.mlp_fwd_pre(&format!("blocks.{l}.mlp"), xn2, pre, epilogue, n).0
+    }
+
     /// [`Self::mlp_fwd`] given `xn2`'s activation already quantised - see
     /// [`Self::layer_gdn_fwd_pre`].
     fn mlp_fwd_pre(&self, prefix: &str, xn2: &DeviceBuffer, pre: Option<Act>, epilogue: bool, n: u32) -> (DeviceBuffer, Option<MlpLayerActs>) {
@@ -4750,7 +4761,7 @@ impl Qwen35 {
                 (xmid, xn2, None)
             };
 
-            let (mlp_out, _) = self.mlp_fwd_pre(&format!("blocks.{l}.mlp"), &xn2, pre2, epilogue, bsz);
+            let mlp_out = self.ffn_fwd_pre(l, &xn2, pre2, epilogue, bsz);
             if fused && l + 1 < self.shard.end {
                 // The next layer's first norm rides on this residual add.
                 let (sum, xn, act) = self.rms_quant_front(&xmid, Some(&mlp_out), self.w(&format!("blocks.{}.ln1.weight", l + 1)), bsz);
@@ -5192,7 +5203,7 @@ impl Qwen35 {
                 (xmid, xn2, None)
             };
 
-            let (mlp_out, _) = self.mlp_fwd_pre(&format!("blocks.{l}.mlp"), &xn2, pre2, epilogue, n);
+            let mlp_out = self.ffn_fwd_pre(l, &xn2, pre2, epilogue, n);
             if fused && l + 1 < self.shard.end {
                 // The next layer's first norm rides on this residual add.
                 let (sum, xn, act) = self.rms_quant_front(&xmid, Some(&mlp_out), self.w(&format!("blocks.{}.ln1.weight", l + 1)), n);
