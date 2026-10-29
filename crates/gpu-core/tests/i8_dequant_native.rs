@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! The gate for the dequantize-in-register candidates of the int8 linear (`matmul_i8_dq_stream_*` for the decode and
-//! many-row slots): int8 weight codes times their group scale become bf16 in
+//! many-row slots, `matmul_i8_dq_wgmma` for the Hopper prefill slot): int8 weight codes times their group scale become bf16 in
 //! registers, the activations are bf16 rows, the accumulation is one f32 sum across K.
 //!
 //! Swedish Embedded AB implements tensor-core inference kernels for quantised language models. If your team needs
@@ -93,6 +93,9 @@ fn the_dequantize_gemm_of_the_prefill_slot_passes_the_admission_rule_on_ragged_s
     }
     let served = admitted_everywhere(&gpu, &shapes);
     assert!(served.contains("matmul_i8_dq_stream_q2"), "the wide streaming candidate served none of the shapes: {served:?}");
+    if gpu.caps().arch.compute_capability.is_some_and(|cc| cc >= kernels_cuda::WGMMA_MIN_CC) {
+        assert!(served.contains("matmul_i8_dq_wgmma"), "the Hopper prefill GEMM served none of the shapes: {served:?}");
+    }
 }
 
 /// Device time (`(rows, K, N)`: the 27B's gate/up and down projections) of every candidate that serves a shape, weights cycled past the L2 for the streaming shapes, as the
@@ -108,7 +111,7 @@ fn device_time(shapes: &[(u32, u32, u32)]) {
         return;
     }
     assert!(gpu.set_kernel_timing(true), "this device cannot time kernels");
-    let names = ["matmul_i8_dq_stream_r1", "matmul_i8_dq_stream_r2", "matmul_i8_dq_stream_r4", "matmul_i8_dq_stream_q2", "matmul_i8_dq_stream_q4"];
+    let names = ["matmul_i8_dq_stream_r1", "matmul_i8_dq_stream_r2", "matmul_i8_dq_stream_r4", "matmul_i8_dq_stream_q2", "matmul_i8_dq_stream_q4", "matmul_i8_dq_wgmma"];
     for &(m, k, n) in shapes {
         let (kg, groups) = (k / 4, (k / 32) as usize);
         let params = [m, kg, n];

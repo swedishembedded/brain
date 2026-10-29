@@ -91,6 +91,10 @@ pub const fn i8_stream_dynamic_shared_bytes(bn: u32, rows: u32, stages: u32) -> 
 pub const fn i8_dq_stream_dynamic_shared_bytes(bn: u32, rows: u32, stages: u32) -> u32 {
     stages * (bn * 128 + rows * 256 + bn * 16)
 }
+/// Dynamic shared memory per block of `matmul_i8_dq_wgmma`: a ring of 5 stages (a 128-row bf16 activation tile of 128-byte rows,
+/// a 128-row raw int8 weight tile of 64-byte rows and 256 f32 scales: 25600 bytes each), three 128 x 128-byte dequantised weight
+/// tiles and 1 KiB to align the ring to the 128-byte swizzle pattern. A test holds it to the source.
+pub const I8_DQ_WGMMA_DYNAMIC_SHARED_BYTES: u32 = 5 * (128 * 128 + 128 * 64 + 128 * 2 * 4) + 3 * 128 * 128 + 1024;
 /// Dynamic shared memory per block of `matmul_i8_wgstream_*` for `xn` rows of x (the source's
 /// `BRAIN_WGS_STAGES` x `BRAIN_WGS_STAGE_BYTES` + `BRAIN_WGS_XP_BYTES` + 1 KiB to align the ring to the 128-byte swizzle
 /// pattern): per stage a 128-row weight tile and the x tile at 128 bytes of K a row, and their raw group scales.
@@ -1179,6 +1183,27 @@ pub const ALL: &[CudaKernel] = &[
         shared_bytes: 0,
         programmatic: true,
         src: concat!("#define BRAIN_I8S_MAX_ROWS 64\n#define BRAIN_I8S_STAGES 3\n#define BRAIN_I8S_MIN_BLOCKS 4\n#define brain_matmul_i8_stream brain_matmul_i8_stream_r4\n", include_str!("../cu/matmul_i8_stream.cu")),
+    },
+    CudaKernel {
+        name: "matmul_i8_dq_wgmma",
+        // Hopper prefill candidate of the int8 linear: warpgroup `wgmma` m64n128k16 on bf16 operands, the activations A
+        // (bf16 rows) and the weights B, dequantised from their int8 codes times the group scale into shared memory while the
+        // tensor cores run the previous k-tile. No per-group fold; one f32 accumulation across K.
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_matmul_i8_dq_wgmma",
+        what: "int8-weight GEMM against bf16 activations on Hopper warpgroup tensor cores (wgmma m64n128k16, 128x128 tile, cp.async ring) with the weight codes times their group scale dequantised to bf16 while the previous k-tile runs; agrees with the f64 reference of the stored weights to the bf16 resolution of its inputs",
+        reported: "native:matmul_i8_dq_wgmma",
+        block_dim: 256,
+        // 128 rows of x x 128 weight rows per block.
+        tile: (128, 128),
+        // The ring and the dequantised tiles are dynamic shared memory (`I8_DQ_WGMMA_DYNAMIC_SHARED_BYTES`).
+        shared_bytes: 0,
+        programmatic: false,
+        src: include_str!("../cu/matmul_i8_dq_wgmma.cu"),
     },
     CudaKernel {
         name: "matmul_i8_dq_stream_r1",

@@ -314,6 +314,20 @@ fn serves_i8_dq_stream_wide(p: &[u32]) -> bool {
     }
 }
 
+/// The dequantize-in-register prefill GEMM's shapes: rows past the decode regime, whole scale groups of K, an output the
+/// 32-bit row arithmetic covers.
+fn serves_i8_dq_prefill(p: &[u32]) -> bool {
+    match p {
+        [m, kg, n, ..] => *m > backend_api::select::DECODE_REGIME_MAX_ROWS && *n >= 1 && *kg >= 8 && kg % 8 == 0 && u64::from(*m) * u64::from(*n) <= u64::from(u32::MAX) && dq_offsets_fit(*kg, *n),
+        _ => false,
+    }
+}
+
+/// The Hopper dequantize-in-shared-memory prefill GEMM: those shapes with whole 64-deep k-tiles.
+fn serves_i8_dq_wgmma(p: &[u32]) -> bool {
+    serves_i8_dq_prefill(p) && p[1].is_multiple_of(16)
+}
+
 /// The small-tile prefill candidate: the rows that do not fill a bigger tile.
 fn serves_i8_prefill_small(p: &[u32]) -> bool {
     serves_i8_prefill(p) && p[0] <= PREFILL_SMALL_MAX_ROWS
@@ -742,6 +756,22 @@ pub(crate) const PREFILL_ROWS: &[Row] = &[
         align_words: 4,
         input: Input::PACKED,
         launch: CudaLaunch::NONE,
+    },
+    Row {
+        slow: "matmul_i8_dyn",
+        target: Target::Named("matmul_i8_dq_wgmma"),
+        bindings: I8_DEQUANT_BINDINGS,
+        serves: serves_i8_dq_wgmma,
+        blocks: gemm_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        input: Input::DEQUANT_BF16,
+        launch: CudaLaunch {
+            dynamic_shared_bytes: kernels_cuda::I8_DQ_WGMMA_DYNAMIC_SHARED_BYTES,
+            shared_opt_in: true,
+            arch: backend_api::ArchFeatures::Required,
+            ..CudaLaunch::NONE
+        },
     },
     Row {
         slow: "matmul_i8_dyn",
@@ -2497,6 +2527,7 @@ mod tests {
             [
                 "matmul_i8_mma_m128",
                 "matmul_i8_mma",
+                "matmul_i8_dq_wgmma",
                 "matmul_i8_dq_stream_q2",
                 "matmul_i8_dq_stream_q4",
                 "matmul_i8_stream_r1",
