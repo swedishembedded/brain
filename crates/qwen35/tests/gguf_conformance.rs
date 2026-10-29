@@ -327,6 +327,9 @@ fn questions_arriving_together_prefill_their_document_once() {
     let mut e = engine_with_cap(16, KvTier::F32, 0, CAP);
     // Slices of 32 tokens: the 128-token document is four of them, long enough to be worth waiting for.
     e.set_prefill_policy(PrefillPolicy { slice_tokens: 32, ..PrefillPolicy::default() });
+    // The claim is about prefix reuse, answers equal to the solo run's: rows of a mixed forward meet a different
+    // GEMM than a lone sequence's (`gguf_mixed_step.rs` covers the mixed iteration at its own tolerance).
+    e.set_mixed_step(false);
     let mut sched = Scheduler::new(e, 4);
     let ids: Vec<u64> = (2..5).map(|q| sched.submit(Request { prompt: ask(q), max_new: 6, stop: Vec::new() })).collect();
     let mut got = sched.run();

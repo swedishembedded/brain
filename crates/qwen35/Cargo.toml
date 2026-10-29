@@ -50,3 +50,7 @@ harness = false
 [[test]]
 name = "gguf_score"
 harness = false
+
+[[test]]
+name = "gguf_mixed_step"
+harness = false

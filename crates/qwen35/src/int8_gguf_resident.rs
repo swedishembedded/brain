@@ -2001,6 +2001,20 @@ impl Qwen35GgufInstance {
             && self.prefill_adapter_slot.get() == LORA_SLOT_NONE
     }
 
+    /// Whether a forward can carry running sequences' next tokens and prompt rows together
+    /// ([`Self::mixed_hidden`]): the multi-sequence round is available, nothing needs the rows of a decode step
+    /// to be those of a step of their own (the MTP head records each decode step's hidden states; exact decode
+    /// promises a row its bits whatever its neighbours), and no adapter bank, sliding window or anchor memory is
+    /// in play.
+    pub(crate) fn mixed_available(&self) -> bool {
+        self.multi_prefill_available()
+            && !self.has_mtp()
+            && !self.exact_decode
+            && adapters::bytes(self.stage_models()) == 0
+            && self.cfg.swa_window.is_none()
+            && self.cfg.anchor_memory.is_none()
+    }
+
     /// [`Self::prefill_hidden`] for SEVERAL sequences in one forward: job `i`
     /// prefills `prompt[start..end]` of slot `slot`, and every projection and MLP
     /// runs once over the jobs' rows together (see
@@ -2011,20 +2025,43 @@ impl Qwen35GgufInstance {
     /// the pool row is where the state is left. Returns each job's last row's
     /// `[d_model]` pre-norm hidden state and, when `collect`, all its rows'.
     fn prefill_hidden_multi(&self, jobs: &[MultiPrefillJob<'_>], collect: bool) -> Result<Vec<MultiPrefillRows>, String> {
+        self.forward_rows(None, jobs, collect).map(|(_, rows)| rows)
+    }
+
+    /// [`Self::prefill_hidden_multi`] with the next token of each sequence of `decode` (tokens, slots and positions,
+    /// as [`Self::stack_decode_hidden`] takes them) carried by the same forward: its first element is the decode
+    /// rows' `[bsz, d_model]` pre-norm hidden block, empty without any.
+    fn mixed_hidden(&self, decode: (&[u32], &[u32], &[u32]), jobs: &[MultiPrefillJob<'_>], collect: bool) -> Result<(Vec<f32>, Vec<MultiPrefillRows>), String> {
+        self.forward_rows(Some(decode), jobs, collect)
+    }
+
+    fn forward_rows(&self, decode: Option<(&[u32], &[u32], &[u32])>, jobs: &[MultiPrefillJob<'_>], collect: bool) -> Result<(Vec<f32>, Vec<MultiPrefillRows>), String> {
         let d = self.cfg.d_model as usize;
         assert!(!jobs.is_empty() && jobs.iter().all(|j| j.start < j.end && j.end <= j.prompt.len()), "{MODEL}: a multi-sequence prefill needs at least one new token per job");
-        let tokens: Vec<u32> = jobs.iter().flat_map(|j| j.prompt[j.start..j.end].iter().copied()).collect();
+        let lead = decode.map_or(0, |(tokens, slots, positions)| {
+            assert!(tokens.len() == slots.len() && tokens.len() == positions.len(), "{MODEL}: a decode row needs one slot and position per token");
+            debug_assert!(slots.iter().collect::<std::collections::HashSet<_>>().len() == slots.len(), "{MODEL}: a mixed forward names a decode slot twice");
+            tokens.len()
+        });
+        let tokens: Vec<u32> = decode.map_or(&[][..], |(tokens, ..)| tokens).iter().copied().chain(jobs.iter().flat_map(|j| j.prompt[j.start..j.end].iter().copied())).collect();
         let embedded = self.embed_rows(&tokens)?;
         let carry = self.chain_stages(
             &embedded,
             |s, rows| {
                 let segs: Vec<PrefillSeg<'_>> =
                     jobs.iter().map(|j| PrefillSeg { tokens: &j.prompt[j.start..j.end], pos_start: j.start as u32, gqa_window: s.caches.window(j.slot), slot: j.slot }).collect();
-                s.qwen35.run_prefill_multi_stage(&segs, &s.caches.pooled(), Some(rows))
+                match decode {
+                    None => s.qwen35.run_prefill_multi_stage(&segs, &s.caches.pooled(), Some(rows)),
+                    Some((tokens, slots, positions)) => {
+                        let seqs = s.caches.batch(slots, positions);
+                        let caches = BatchDecodeCaches { gqa_kv: &s.caches.gqa_kv, gqa_cap: s.caches.kv_block(), seqs: &seqs, one_sequence: false, gdn_pool: Some(s.caches.gdn_pool()), memory: &[] };
+                        s.qwen35.run_mixed_stage(Some((tokens, &caches)), &segs, &s.caches.pooled(), Some(rows))
+                    }
+                }
             },
             |_, _| {},
         );
-        let mut row0 = 0usize;
+        let mut row0 = lead;
         let mut out = Vec::with_capacity(jobs.len());
         for j in jobs {
             let rows = j.end - j.start;
@@ -2032,7 +2069,7 @@ impl Qwen35GgufInstance {
             out.push(MultiPrefillRows { last: block[(rows - 1) * d..].to_vec(), all: if collect { block.to_vec() } else { Vec::new() } });
             row0 += rows;
         }
-        Ok(out)
+        Ok((carry[..lead * d].to_vec(), out))
     }
 
     /// Recurrent-state rows the stages hold ([`KvLayout::state_rows`]).

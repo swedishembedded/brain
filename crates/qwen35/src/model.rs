@@ -946,6 +946,20 @@ struct SegRound {
 pub(crate) struct MultiRound<'a> {
     caches: &'a PooledCaches<'a>,
     segs: Vec<SegRound>,
+    /// Decode rows that lead the round's activation rows (a mixed round, [`Qwen35::run_mixed_stage`]); the
+    /// sequences' prompt rows follow them.
+    decode: Option<MixedDecode<'a>>,
+}
+
+/// The decode rows of a mixed round, as the mixers see them: one token of each of `rows` unrelated sequences.
+struct MixedDecode<'a> {
+    rows: u32,
+    /// `[rows]` u32: each row's recurrent-state pool row.
+    slot_rows: &'a DeviceBuffer,
+    paged: &'a model::gqa_mixer::PagedDecodeBatch<'a>,
+    /// `[rows, rotary_dim/2]` M-RoPE tables at each row's own position.
+    cos: &'a DeviceBuffer,
+    sin: &'a DeviceBuffer,
 }
 
 /// Everything [`Qwen35::layer_gqa_fwd`]'s training branch saves for
@@ -2811,9 +2825,17 @@ impl Qwen35 {
             GdnCall::Segments(round) => {
                 let c = round.caches;
                 let (sl, hl) = (self.cfg.gdn_state_len() as u32, self.cfg.gdn_hist_len() as u32);
-                let whole = round.segs.len() == 1;
+                let whole = round.segs.len() == 1 && round.decode.is_none();
                 let all = (!whole).then(|| g.storage((n * value_dim) as u64));
                 let mut only = None;
+                // A mixed round's leading decode rows: one recurrent step each, from and back into the sequence's pool row.
+                if let (Some(dec), Some(all)) = (&round.decode, &all) {
+                    let (qkv_d, b_d, a_d, z_d) = (self.take_rows(&mixed_qkv, conv_dim, n, 0, dec.rows), self.take_rows(&bproj, nvh, n, 0, dec.rows), self.take_rows(&aproj, nvh, n, 0, dec.rows), self.take_rows(&z, value_dim, n, 0, dec.rows));
+                    let dec_shape = model::gdn_mixer::GdnMixerShape { gdn: GdnShape { b: dec.rows, t: 1, chunk: 1, ..shape.gdn }, ..shape };
+                    let pool = model::gdn_mixer::GdnPoolRows { state: &c.gdn_state[l], hist: &c.gdn_hist[l], rows: dec.slot_rows, gather: POOL_ROWS_GATHER2, scatter: POOL_ROWS_SCATTER2, fuse: self.decode_fusion.get(), bf16: false, wide: self.gdn_pool_wide.get() };
+                    let gated_d = model::gdn_mixer::gdn_mixer_decode_state_fwd(g, &gdn_mixer_ids(), &gdn_mixer_decode_ids(), &dec_shape, &weights, &qkv_d, &b_d, &a_d, &z_d, &model::gdn_mixer::GdnDecodeState::Pool(pool));
+                    self.put_rows_copy(&gated_d, all, value_dim, 0, dec.rows);
+                }
                 for seg in &round.segs {
                     let rows = seg.rows;
                     let (qkv_i, b_i, a_i, z_i) = if whole {
@@ -2995,9 +3017,16 @@ impl Qwen35 {
             Some(GqaCached::Segments(round, layer)) => {
                 let kv = self.kv_kernels(layer);
                 let (qpd, kvd) = (c.q_proj_dim(), c.kv_dim());
-                let whole = round.segs.len() == 1;
+                let whole = round.segs.len() == 1 && round.decode.is_none();
                 let all = (!whole).then(|| g.storage((n * shape.qd()) as u64));
                 let mut only = None;
+                // A mixed round's leading decode rows: paged decode attention over each sequence's own window.
+                if let (Some(dec), Some(all)) = (&round.decode, &all) {
+                    let (q_d, k_d, v_d) = (self.take_rows(&q_full, qpd, n, 0, dec.rows), self.take_rows(&k, kvd, n, 0, dec.rows), self.take_rows(&v, kvd, n, 0, dec.rows));
+                    let dec_weights = model::gqa_mixer::GqaMixerWeights { q_norm: weights.q_norm, k_norm: weights.k_norm, cos: dec.cos, sin: dec.sin };
+                    let ctx_d = model::gqa_mixer::gqa_mixer_decode_batched_kv_fwd(g, &gqa_mixer_ids(), &kv, DECODE_SOFTMAX_BATCHED, &shape, &dec_weights, &q_d, &k_d, &v_d, layer, dec.rows, dec.paged);
+                    self.put_rows_copy(&ctx_d, all, shape.qd(), 0, dec.rows);
+                }
                 for seg in &round.segs {
                     let rows = seg.rows;
                     let (q_i, k_i, v_i) = if whole {
@@ -4400,6 +4429,37 @@ impl Qwen35 {
         }
     }
 
+    /// The paged-attention view of a decode step's per-step inputs.
+    ///
+    /// A ring is a fixed-size window, so its attention scratch has one size and one split count at every position:
+    /// the step is the same dispatch list from the first token to the last, which is what a recording needs. Any
+    /// other window sizes it to the longest live sequence, in buckets; `exact_ctx` (the exact-decode regime) sizes
+    /// it from the configured context instead.
+    fn paged_decode_batch<'a>(&self, caches: &BatchDecodeCaches, inputs: &'a DecodeInputs, exact_ctx: Option<u32>) -> model::gqa_mixer::PagedDecodeBatch<'a> {
+        let live = |s: &BatchSeq| if s.window.is_ring() { model::gqa_mixer::ring_live(s.pos, caches.gqa_cap) } else { s.pos + 1 };
+        let longest = caches.seqs.iter().map(live).max().unwrap_or(1);
+        let cap_bound = caches.gqa_cap * inputs.max_bt;
+        let all_ring = caches.seqs.iter().all(|s| s.window.is_ring());
+        model::gqa_mixer::PagedDecodeBatch {
+            blocks: &inputs.blocks,
+            offsets: &inputs.offsets,
+            block_tables: &inputs.block_tables,
+            seq_lens: &inputs.seq_lens,
+            block_size: caches.gqa_cap,
+            max_bt: inputs.max_bt,
+            // The scores/probs stride, and with it those buffers' size and the
+            // scores kernel's grid. Pure addressing (see
+            // `gqa_decode_batched_step`'s own doc), so it only has to cover the
+            // longest live sequence - and it is rounded UP to a bucket so that
+            // it, and everything sized from it, is the same from one token to
+            // the next. Sized exactly it changed every token: a fresh buffer
+            // and a new grid per attention layer, which defeats both the arena
+            // and the replayed graph. Now both change once per bucket.
+            cap: if all_ring { cap_bound } else { exact_ctx.unwrap_or(longest).next_multiple_of(DECODE_CAP_BUCKET).min(cap_bound) },
+            pin_splits: exact_ctx.is_some(),
+        }
+    }
+
     /// Set a decode step's per-step inputs for `caches`' rows: the one place the host's view of the batch (positions,
     /// rings, slots) becomes the data the step's kernels read. `tokens` is `None` on a step that starts from a residual.
     /// Every write comes before the step's first dispatch.
@@ -4615,38 +4675,13 @@ impl Qwen35 {
         };
         let tok_buf = input_override.is_none().then_some(&inputs.tok);
         self.write_decode_inputs(inputs, if tok_buf.is_some() { Some(tokens) } else { None }, caches);
-        let DecodeInputs { cos, sin, blocks, offsets, slot_rows, block_tables, seq_lens, max_bt, memory, .. } = inputs;
-        let max_bt = *max_bt;
+        let DecodeInputs { cos, sin, slot_rows, memory, .. } = inputs;
         let memory_step = memory.as_ref().map(|(shape, read, push)| (shape, read, push));
         // A verify step's per-sequence layout, uploaded with the rest of the
         // step's inputs (a write after the first dispatch would split the pass).
         let verify_layout = verify.map(|v| v.upload(g));
-        let live = |s: &BatchSeq| if s.window.is_ring() { model::gqa_mixer::ring_live(s.pos, caches.gqa_cap) } else { s.pos + 1 };
-        let longest = caches.seqs.iter().map(live).max().unwrap_or(1);
-        let cap_bound = caches.gqa_cap * max_bt;
         let exact_ctx = self.exact_decode.get().filter(|_| verify.is_none());
-        // A ring is a fixed-size window, so its attention scratch has one size and one split count at every position:
-        // the step is the same dispatch list from the first token to the last, which is what a recording needs. Any other
-        // window sizes it to the longest live sequence, in buckets.
-        let all_ring = caches.seqs.iter().all(|s| s.window.is_ring());
-        let paged = model::gqa_mixer::PagedDecodeBatch {
-            blocks,
-            offsets,
-            block_tables,
-            seq_lens,
-            block_size: caches.gqa_cap,
-            max_bt,
-            // The scores/probs stride, and with it those buffers' size and the
-            // scores kernel's grid. Pure addressing (see
-            // `gqa_decode_batched_step`'s own doc), so it only has to cover the
-            // longest live sequence - and it is rounded UP to a bucket so that
-            // it, and everything sized from it, is the same from one token to
-            // the next. Sized exactly it changed every token: a fresh buffer
-            // and a new grid per attention layer, which defeats both the arena
-            // and the replayed graph. Now both change once per bucket.
-            cap: if all_ring { cap_bound } else { exact_ctx.unwrap_or(longest).next_multiple_of(DECODE_CAP_BUCKET).min(cap_bound) },
-            pin_splits: exact_ctx.is_some(),
-        };
+        let paged = self.paged_decode_batch(caches, inputs, exact_ctx);
 
         if let Some(tok_buf) = tok_buf {
             self.embed_rows(tok_buf, bsz, &res);
@@ -5088,16 +5123,29 @@ impl Qwen35 {
     /// which this function is not for: the caller sends such a round through the
     /// single-sequence path).
     pub(crate) fn run_prefill_multi_stage(&self, segs: &[PrefillSeg<'_>], caches: &PooledCaches<'_>, input_override: Option<StageRows<'_>>) -> DeviceBuffer {
+        self.run_mixed_stage(None, segs, caches, input_override)
+    }
+
+    /// **One forward over decode rows and prompt rows together** - [`Self::run_prefill_multi_stage`] with the
+    /// next token of each sequence of `decode` in front of the prompt segments' rows. Every projection, the MLP
+    /// and the norms run once over all rows, so the weights are read once for the lot; the token mixers split the
+    /// rows: the decode rows take the batched decode kernels (the recurrent step reading each sequence's pool row
+    /// in place, paged decode attention) and the segments the chunked ones. A decode row is the row a decode step
+    /// computes except where a kernel is picked by the number of rows (the projections see `n` rows, not the
+    /// decode batch's).
+    pub(crate) fn run_mixed_stage(&self, decode: Option<(&[u32], &BatchDecodeCaches<'_>)>, segs: &[PrefillSeg<'_>], caches: &PooledCaches<'_>, input_override: Option<StageRows<'_>>) -> DeviceBuffer {
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
         assert!(!segs.is_empty(), "qwen35::run_prefill_multi_stage: no sequences");
         assert!(c.lora.is_none(), "qwen35::run_prefill_multi_stage: a LoRA build's adapter scratch is sized for one sequence's round");
-        let n: u32 = segs.iter().map(|s| s.tokens.len() as u32).sum();
+        assert!(c.anchor_memory.is_none() && c.swa_window.is_none(), "qwen35::run_mixed_stage: neither an anchor memory nor a sliding window is implemented for mixed rows");
+        let lead = decode.map_or(0, |(tokens, _)| tokens.len() as u32);
+        let n: u32 = lead + segs.iter().map(|s| s.tokens.len() as u32).sum::<u32>();
         assert!(segs.iter().all(|s| !s.tokens.is_empty()), "qwen35::run_prefill_multi_stage: a sequence with no rows");
         let res = if self.shard.embed {
             assert!(input_override.is_none(), "qwen35: run_prefill_multi_stage got an input_override on the EMBED stage");
-            let all: Vec<u32> = segs.iter().flat_map(|s| s.tokens.iter().copied()).collect();
+            let all: Vec<u32> = decode.map_or(&[][..], |(tokens, _)| tokens).iter().copied().chain(segs.iter().flat_map(|s| s.tokens.iter().copied())).collect();
             let tok_buf = g.storage(n as u64);
             g.write(&tok_buf, &all);
             let res = g.storage((n * d) as u64);
@@ -5115,8 +5163,17 @@ impl Qwen35 {
         // absolute M-RoPE positions, the single-block table its KV window is, and
         // its causal lengths.
         let yarn = c.rope_table();
-        let mut row0 = 0u32;
+        let mut row0 = lead;
         let mut round = Vec::with_capacity(segs.len());
+        // The decode rows' per-step inputs, written before the round's first dispatch like a decode step's.
+        let decode_inputs = decode.map(|(tokens, dcaches)| {
+            assert_eq!(tokens.len(), dcaches.seqs.len(), "qwen35::run_mixed_stage: {} tokens for {} sequences", tokens.len(), dcaches.seqs.len());
+            let longest_blocks = dcaches.seqs.iter().map(|s| s.window.blocks().len()).max().unwrap_or(1).max(1) as u32;
+            let inputs = self.alloc_decode_inputs_at(lead, longest_blocks);
+            self.write_decode_inputs(&inputs, None, dcaches);
+            inputs
+        });
+        let paged = decode.zip(decode_inputs.as_ref()).map(|((_, dcaches), inputs)| self.paged_decode_batch(dcaches, inputs, None));
         for seg in segs {
             let rows = seg.tokens.len() as u32;
 
@@ -5148,7 +5205,8 @@ impl Qwen35 {
             });
             row0 += rows;
         }
-        let round = MultiRound { caches, segs: round };
+        let mixed = decode_inputs.as_ref().zip(paged.as_ref()).map(|(inputs, paged)| MixedDecode { rows: lead, slot_rows: &inputs.slot_rows, paged, cos: &inputs.cos, sin: &inputs.sin });
+        let round = MultiRound { caches, segs: round, decode: mixed };
         let mut mixer = |l: usize, ty: LayerType, _res: &DeviceBuffer, xn1: &DeviceBuffer, pre: Option<Act>, epilogue: bool| -> DeviceBuffer {
             match ty {
                 LayerType::Linear => self.layer_gdn_fwd_pre(l, xn1, pre, epilogue, n, GdnCall::Segments(&round)).0,

@@ -32,7 +32,7 @@ use gpu_core::DeviceStats;
 use model::adapter::bank::{AdapterBankConfig, AdapterError, AdapterInfo, BankedEngine, UnloadStatus, VerifiedAdapter};
 use model::dispatch::LORA_SLOT_NONE;
 use model::paged::{BlockAllocator, BlockTable, KvNamespace, BASE_KV_NAMESPACE};
-use model::serve::{AdapterAvailability, AdapterId, DraftQuery, PagedDecoder, PrefillJob, PrefillProgress};
+use model::serve::{AdapterAvailability, AdapterId, DraftQuery, MixedLimits, MixedOutcome, PagedDecoder, PrefillJob, PrefillProgress};
 
 use crate::adapter_serving as adapters;
 
@@ -40,6 +40,11 @@ use model::snapshot_prefix::{Entry as CacheEntry, SnapshotPrefixCache};
 
 /// Prompts shorter than this are not worth a snapshot row and a retained block.
 const MIN_CACHED_TOKENS: usize = 64;
+
+/// Prompt rows a mixed iteration always carries when a prompt waits (`MixedLimits::min_prompt_rows`): a round wide
+/// enough to run as a tensor-core GEMM, so a prompt behind a busy decode batch still advances at a useful rate.
+// perf-number: a 128-row round is the smallest the prefill GEMM kernels serve at tile width
+const MIN_MIXED_PROMPT_ROWS: usize = 128;
 
 /// Branch-point hints held for prompts not yet started; the oldest goes first (a hint whose prompt was cancelled
 /// before it started is never taken).
@@ -163,6 +168,10 @@ pub struct Qwen35GgufEngine {
     /// Wall time spent in the speculation hooks, for the benchmark.
     times: SpecTimes,
     prefill: PrefillPolicy,
+    /// Whether an iteration with prompts to read in runs them and the decode rows as one forward
+    /// ([`PagedDecoder::mixed_step`]); on wherever the instance can ([`Qwen35GgufInstance::mixed_available`]), and
+    /// then it supersedes the background lane and its pacing.
+    mixed: bool,
     /// Whether prompts are read in on each card's normal stream while decode
     /// steps run on its urgent one (see [`super::background`]): set when every
     /// stage's device can prioritise. Decode then never waits for a prompt.
@@ -200,6 +209,9 @@ struct SliceExit {
     /// milliseconds in which no running sequence decodes.
     defer_feed: bool,
 }
+
+/// A job's slice about to run: `(job index, slot, progress, end)`.
+type LiveSlice = (usize, u32, PartialPrefill, usize);
 
 /// A prompt slice read in while sequences decode, and what finishing it needs.
 struct Background {
@@ -325,7 +337,8 @@ impl Qwen35GgufEngine {
             KvLayout::Paged { block_rows, pool_rows } => (BlockAllocator::new(pool_rows / block_rows, block_rows), (0..inst.max_batch).rev().collect()),
         };
         let cache = PrefixCache::new(inst.prefix_slots);
-        let background_on = inst.background_prefill_available();
+        let mixed = inst.mixed_available();
+        let background_on = !mixed && inst.background_prefill_available();
         if background_on {
             inst.share_pools_across_lanes();
         }
@@ -344,6 +357,7 @@ impl Qwen35GgufEngine {
             feed_secs: None,
             times: SpecTimes::default(),
             prefill: PrefillPolicy::default(),
+            mixed,
             background_on,
             background: None,
             short_streak: 0,
@@ -508,9 +522,28 @@ impl Qwen35GgufEngine {
     /// Call before the engine is handed to a scheduler.
     pub fn set_background_prefill(&mut self, on: bool) {
         assert!(self.background.is_none(), "{MODEL}: the prefill mode changed with a prompt being read in");
+        // Asking for the background lane is asking for it instead of the mixed iteration.
+        self.mixed &= !on;
         self.background_on = on && self.inst.background_prefill_available();
         if self.background_on {
             self.inst.share_pools_across_lanes();
+        }
+    }
+
+    /// Run an iteration's decode rows and prompt slices as one forward (`true`, the default wherever the instance
+    /// can, see [`Qwen35GgufInstance::mixed_available`]) or as separate passes (`false`: the background lane where
+    /// every stage prioritises, slices between decode steps otherwise). Call before the engine is handed to a
+    /// scheduler.
+    pub fn set_mixed_step(&mut self, on: bool) {
+        assert!(self.background.is_none(), "{MODEL}: the prefill mode changed with a prompt being read in");
+        self.mixed = on && self.inst.mixed_available();
+        if self.mixed {
+            self.background_on = false;
+        } else if !on {
+            self.background_on = self.inst.background_prefill_available();
+            if self.background_on {
+                self.inst.share_pools_across_lanes();
+            }
         }
     }
 
@@ -565,6 +598,15 @@ impl Qwen35GgufEngine {
 }
 
 impl Qwen35GgufEngine {
+    /// One decode step's candidates: `cands == 0` the greedy pick `(token, 0.0)`, else that many `(token, logit)`.
+    fn decode_candidates(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], cands: usize) -> Vec<Vec<(u32, f32)>> {
+        if cands == 0 {
+            self.forward_batched_greedy(tables, inputs).into_iter().map(|t| vec![(t, 0.0)]).collect()
+        } else {
+            self.forward_batched_topk(tables, inputs, cands)
+        }
+    }
+
     /// A sequence's first slice: reserve its slot, look the prompt up in the prefix
     /// cache and seed from it (the seeded recurrent state is left in the working
     /// copy). `Some(hidden)` when the whole prompt was cached, so nothing needs
@@ -854,6 +896,17 @@ impl Qwen35GgufEngine {
         if jobs.len() < 2 || adapter_in_play || !self.inst.multi_prefill_available() {
             return jobs.iter_mut().map(|j| self.prefill_slice(j.table, j.prompt, j.budget)).collect();
         }
+        let (mut answers, live) = self.begin_slices(jobs);
+        let rows: usize = live.iter().map(|(_, _, p, end)| end - p.done).sum();
+        self.run_slices(jobs, &mut answers, live, None, rows > gpu_core::select::DECODE_REGIME_MAX_ROWS as usize);
+        answers.into_iter().map(|a| a.expect("every job was answered")).collect()
+    }
+
+    /// The first half of a multi-sequence prefill: a job that starts reserves its slot, seeds from the prefix cache and
+    /// has its starting state written to its pool row (the next sequence's seeding overwrites the working copy). The
+    /// answers of the jobs already settled (a prompt that was wholly cached), and the jobs with rows to run as
+    /// `(job index, slot, progress, end)`.
+    fn begin_slices(&mut self, jobs: &mut [PrefillJob<'_>]) -> (Vec<Option<PrefillProgress>>, Vec<LiveSlice>) {
         let mut answers: Vec<Option<PrefillProgress>> = Vec::with_capacity(jobs.len());
         for j in jobs.iter_mut() {
             assert!(!j.prompt.is_empty(), "{MODEL}: empty prompt");
@@ -873,20 +926,33 @@ impl Qwen35GgufEngine {
             }
             answers.push(None);
         }
-        // (index, slot, progress, end) of every sequence that still has rows to run.
-        let mut live: Vec<(usize, u32, PartialPrefill, usize)> = Vec::new();
+        let mut live = Vec::new();
         for (i, j) in jobs.iter().enumerate().filter(|(i, _)| answers[*i].is_none()) {
             let slot = self.slot(j.table);
             let p = self.partial.remove(&slot).expect("a prefill in progress has its state");
             let end = self.slice_end(&p, j.prompt.len(), j.budget);
             live.push((i, slot, p, end));
         }
-        let rows: usize = live.iter().map(|(_, _, p, end)| end - p.done).sum();
+        (answers, live)
+    }
+
+    /// The second half: run the rows of `live` and settle each job's answer. `multi` runs them as one forward (with
+    /// `decode`, the next token of running sequences as `(tokens, slots, positions)`, when the forward carries any;
+    /// returned as their hidden block); otherwise one sequence's slice after another.
+    fn run_slices(&mut self, jobs: &mut [PrefillJob<'_>], answers: &mut [Option<PrefillProgress>], mut live: Vec<LiveSlice>, decode: Option<(&[u32], &[u32], &[u32])>, multi: bool) -> Vec<f32> {
         let mut hidden: Vec<(Vec<f32>, bool)> = Vec::with_capacity(live.len());
-        if live.len() >= 2 && rows > gpu_core::select::DECODE_REGIME_MAX_ROWS as usize {
+        let mut decoded = Vec::new();
+        if live.len() >= 2 && multi || decode.is_some() && !live.is_empty() {
             let has_mtp = self.inst.has_mtp() && live.iter().any(|(_, _, p, _)| p.mtp_feed);
-            let multi: Vec<MultiPrefillJob<'_>> = live.iter().map(|(i, slot, p, end)| MultiPrefillJob { prompt: &*jobs[*i].prompt, start: p.done, end: *end, slot: *slot }).collect();
-            let out = self.inst.prefill_hidden_multi(&multi, has_mtp).unwrap_or_else(|e| panic!("{e}"));
+            let jobs_view: Vec<MultiPrefillJob<'_>> = live.iter().map(|(i, slot, p, end)| MultiPrefillJob { prompt: &*jobs[*i].prompt, start: p.done, end: *end, slot: *slot }).collect();
+            let out = match decode {
+                Some(decode) => self.inst.mixed_hidden(decode, &jobs_view, has_mtp).map(|(rows, out)| {
+                    decoded = rows;
+                    out
+                }),
+                None => self.inst.prefill_hidden_multi(&jobs_view, has_mtp),
+            }
+            .unwrap_or_else(|e| panic!("{e}"));
             for ((_, _, p, _), r) in live.iter_mut().zip(out) {
                 if p.mtp_feed {
                     p.rows_hidden.extend_from_slice(&r.all);
@@ -902,7 +968,7 @@ impl Qwen35GgufEngine {
         for ((i, slot, p, end), (h, in_pool)) in live.into_iter().zip(hidden) {
             answers[i] = Some(self.finish_slice(slot, jobs[i].table, jobs[i].prompt, p, end, h, SliceExit { state_in_pool: in_pool, defer_feed: false }));
         }
-        answers.into_iter().map(|a| a.expect("every job was answered")).collect()
+        decoded
     }
 }
 
@@ -1186,6 +1252,37 @@ impl PagedDecoder for Qwen35GgufEngine {
         let progress = self.read_prompts_in(jobs, wait);
         self.times.prefill += started.elapsed();
         progress
+    }
+    fn mixed_step(&self) -> Option<MixedLimits> {
+        self.mixed.then(|| MixedLimits { max_rows: self.inst.prefill_round_rows() as usize, min_prompt_rows: MIN_MIXED_PROMPT_ROWS })
+    }
+    fn forward_mixed(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], cands: usize, jobs: &mut [PrefillJob<'_>]) -> MixedOutcome {
+        assert_eq!(tables.len(), inputs.len(), "{MODEL}: tables/inputs length mismatch");
+        // A forward of only one kind, or one an adapter row takes part in (its correction is routed per row of a
+        // dispatch of exactly those rows), is the separate pass.
+        let adapter_in_play = tables.iter().map(|t| t.kv_namespace()).chain(jobs.iter().map(|j| j.table.kv_namespace())).any(|ns| adapters::slot_of(self.inst.stage_models(), ns) != LORA_SLOT_NONE);
+        if tables.is_empty() || jobs.is_empty() || adapter_in_play || !self.mixed {
+            let prefilled = if jobs.is_empty() { Vec::new() } else { self.prefill_chunks(jobs) };
+            let decoded = self.decode_candidates(tables, inputs, cands);
+            return MixedOutcome { decoded, prefilled };
+        }
+        let started = std::time::Instant::now();
+        let (mut answers, live) = self.begin_slices(jobs);
+        if live.is_empty() {
+            // Every prompt was served from the cache: nothing to carry.
+            let prefilled = answers.into_iter().map(|a| a.expect("every job was answered")).collect();
+            return MixedOutcome { decoded: self.decode_candidates(tables, inputs, cands), prefilled };
+        }
+        let (slots, positions) = self.next_positions(tables);
+        let hidden = self.run_slices(jobs, &mut answers, live, Some((inputs, &slots, &positions)), true);
+        let rows = inputs.len() as u32;
+        let decoded = if cands == 0 {
+            self.inst.head_argmax_rows(&hidden, rows).into_iter().map(|t| vec![(t, 0.0)]).collect()
+        } else {
+            self.inst.head_topk_rows(&hidden, rows, cands.clamp(1, TOPK_CAPACITY) as u32)
+        };
+        self.times.prefill += started.elapsed();
+        MixedOutcome { decoded, prefilled: answers.into_iter().map(|a| a.expect("every job was answered")).collect() }
     }
     fn logits(&self, hidden: &[f32]) -> Vec<f32> {
         decode_lane(self.background_on, || self.inst.head_logits_rows(hidden, 1))
