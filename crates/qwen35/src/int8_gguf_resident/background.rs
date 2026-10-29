@@ -29,12 +29,24 @@
 //! next prompt when this one is done.
 
 use std::collections::VecDeque;
+use std::time::Duration;
 
 use gpu_core::DeviceBuffer;
 
 use super::{Qwen35GgufInstance, MODEL};
 use crate::adapter_serving as adapters;
-use crate::model::StageRows;
+use crate::model::{ChunkRound, StageRows};
+
+/// Host time one non-waiting [`Qwen35GgufInstance::pump_prefill`] spends recording a stage's round.
+///
+/// A round is recorded layer by layer and the recording is paced by the device once its launch queue is full: a
+/// 960-row round of the 27B is over a thousand launches and a few hundred milliseconds of device work, and recording
+/// all of it in one call held the scheduler for as long as the device took to drain the queue enough to take the
+/// rest, which no decode step issued meanwhile could shorten (knowledge 374). Bounded, the scheduler is back at its
+/// decode step after this long and the rest of the round follows on its next pumps; the queue still holds many
+/// layers, so the device stays busy.
+// perf-number: a layer of that round records in about 1.5 ms when the queue has room; 16 ms is about ten layers
+const PUMP_RECORD_BUDGET: Duration = Duration::from_millis(16);
 /// What the working copy of the recurrent state holds when a task starts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TaskStart {
@@ -43,6 +55,14 @@ pub(crate) enum TaskStart {
     /// The state after the task's first token, already in place - a seeded
     /// cached prefix, or the previous slice of the same prompt.
     Continue,
+}
+
+/// A stage's round in flight.
+enum StageRound {
+    /// Layers still being recorded; the round's input and tables are in place.
+    Recording(ChunkRound),
+    /// Every layer recorded; the buffer the stage will leave its output in, which the device may still be filling.
+    Issued(DeviceBuffer),
 }
 
 /// One sequence's slice of prompt on its way through the stages.
@@ -56,8 +76,8 @@ pub(crate) struct PrefillTask {
     collect: bool,
     /// Per stage: the next round it takes.
     next: Vec<usize>,
-    /// Per stage: the round it is running and the buffer it will leave its output in.
-    running: Vec<Option<DeviceBuffer>>,
+    /// Per stage: the round it is running, being recorded or issued whole.
+    running: Vec<Option<StageRound>>,
     /// Per stage: the outputs of the stage before it, in round order, waiting to be taken.
     /// Device buffers: the boundary rows stay on the card that made them until the next stage copies them.
     handed: Vec<VecDeque<DeviceBuffer>>,
@@ -143,21 +163,21 @@ impl Qwen35GgufInstance {
         }
     }
 
-    /// Advance `task`: read back each stage's round that has finished and
-    /// submit its next one wherever the input is there. Without `wait` it never
-    /// waits for a card (one pass); with `wait` it runs the task to its end.
-    /// `Some` once the task is done.
+    /// Advance `task`: record the layers of each stage's round, read back each round that has finished and begin
+    /// the next one wherever the input is there. Without `wait` it never waits for a card (one pass, recording at
+    /// most [`PUMP_RECORD_BUDGET`] per stage); with `wait` it runs the task to its end. `Some` once the task is done.
     pub(crate) fn pump_prefill(&self, task: &mut PrefillTask, wait: bool) -> Result<Option<PrefillDone>, String> {
         let d = self.cfg.d_model as usize;
+        let budget = (!wait).then_some(PUMP_RECORD_BUDGET);
         loop {
             // Later stages first: their submissions go out before stage 0's,
             // which in a waiting pump is followed by a blocking read.
             for s in (0..self.shards.len()).rev() {
                 let stage = &self.shards[s];
-                if task.running[s].is_some() && (wait || stage.qwen35.lane_idle()) {
+                if matches!(task.running[s], Some(StageRound::Issued(_))) && (wait || stage.qwen35.lane_idle()) {
                     let k = task.next[s] - 1;
                     let n = task.round(k).len();
-                    let out = task.running[s].take().expect("checked");
+                    let Some(StageRound::Issued(out)) = task.running[s].take() else { unreachable!("checked above") };
                     if s + 1 < self.shards.len() {
                         // The next stage copies the rows device to device; the host neither reads nor waits for them.
                         task.handed[s + 1].push_back(out);
@@ -191,9 +211,15 @@ impl Qwen35GgufInstance {
                     }
                     let pos = task.pos0 + (k * task.rows) as u32;
                     let caches = stage.caches.view(task.slot);
-                    let out = stage.qwen35.run_prefill_chunk_stage(task.round(k), pos, &caches, Some(input));
-                    task.running[s] = Some(out);
+                    let round = stage.qwen35.begin_prefill_chunk(task.round(k), pos, &caches, Some(input));
+                    task.running[s] = Some(StageRound::Recording(round));
                     task.next[s] = k + 1;
+                }
+                if let Some(StageRound::Recording(round)) = task.running[s].as_mut() {
+                    let caches = stage.caches.view(task.slot);
+                    if let Some(out) = stage.qwen35.advance_prefill_chunk(round, &caches, budget) {
+                        task.running[s] = Some(StageRound::Issued(out));
+                    }
                 }
             }
             if task.finished() {
@@ -209,9 +235,11 @@ impl Qwen35GgufInstance {
     /// still running, so the next task's rounds and the released rows are not
     /// written under it.
     pub(crate) fn abandon_prefill(&self, task: PrefillTask) {
-        for (s, running) in task.running.iter().enumerate() {
-            if running.is_some() {
-                self.shards[s].qwen35.gpu.poll_wait();
+        for (s, running) in task.running.into_iter().enumerate() {
+            match running {
+                Some(StageRound::Recording(round)) => self.shards[s].qwen35.abandon_prefill_chunk(round),
+                Some(StageRound::Issued(_)) => self.shards[s].qwen35.gpu.poll_wait(),
+                None => {}
             }
         }
     }

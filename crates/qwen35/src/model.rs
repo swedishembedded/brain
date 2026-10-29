@@ -1359,7 +1359,7 @@ pub(crate) struct BatchDecodeCaches<'a> {
     /// recurrent buffers, at successive `pos`. A Gated-DeltaNet layer then has
     /// to take the rows in order, each from the state the previous one left,
     /// which is what makes this a verify round and not a batch - see
-    /// [`Qwen35::run_exact_round`].
+    /// [`Qwen35::advance_exact_round`].
     pub one_sequence: bool,
     /// Where the sequences' Gated-DeltaNet state lives when it is pooled by
     /// physical block. `None`: each [`BatchSeq`] carries its own buffers.
@@ -2106,7 +2106,7 @@ impl Qwen35 {
     /// (the default), a round of up to [`DECODE_REGIME_MAX_ROWS`] rows is
     /// computed by the decode tape's own machinery and agrees with decoding the
     /// same tokens one at a time to the last bit (see
-    /// [`Self::run_exact_round`]); off, every round takes the chunk tape, whose
+    /// [`Self::advance_exact_round`]); off, every round takes the chunk tape, whose
     /// attention and recurrence are different arithmetic. Only a device that is
     /// offered the native recurrent kernel has the exact form at all.
     ///
@@ -4880,6 +4880,14 @@ impl Qwen35 {
         caches: &DecodeCaches,
         input_override: Option<StageRows<'_>>,
     ) -> DeviceBuffer {
+        let mut round = self.begin_prefill_chunk(tokens, pos_start, caches, input_override);
+        self.advance_prefill_chunk(&mut round, caches, None).expect("an unbounded advance finishes the round")
+    }
+
+    /// Start a chunk round: everything [`Self::run_prefill_chunk_stage`] does before its first layer (the
+    /// input rows, the round's position tables), left for [`Self::advance_prefill_chunk`] to carry through the
+    /// layers a few at a time. A short round that runs as decode steps is finished here.
+    pub(crate) fn begin_prefill_chunk(&self, tokens: &[u32], pos_start: u32, caches: &DecodeCaches, input_override: Option<StageRows<'_>>) -> ChunkRound {
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
@@ -4900,7 +4908,16 @@ impl Qwen35 {
         );
 
         if self.exact_round_ok(n) {
-            return self.run_exact_round(tokens, pos_start, caches, input_override);
+            // The rows of the round are kept, owned: its groups are issued over several calls.
+            let input = input_override.map(|x| match x {
+                StageRows::Host(rows) => ExactInput::Host(rows.to_vec()),
+                device => {
+                    let rows = g.storage(device.words() as u64);
+                    device.load_into(g, &rows);
+                    ExactInput::Device(rows)
+                }
+            });
+            return ChunkRound::Exact(Box::new(ExactRound { tokens: tokens.to_vec(), pos_start, input, done: 0, out: Vec::new() }));
         }
 
         // `input_override` is the round's input rows: on a non-embed stage the
@@ -4967,6 +4984,36 @@ impl Qwen35 {
         g.write(&tables, &row_tables);
         g.write(&seq_lens, &(0..n).map(|i| pos_start + i + 1).collect::<Vec<u32>>());
 
+        ChunkRound::Layers(Box::new(LayerRound { n, pos_start, ring_block, slot, max_bt, blocks, offsets, tables, seq_lens, cos, sin, stack: self.begin_layer_stack(res, n) }))
+    }
+
+    /// Give up a round begun by [`Self::begin_prefill_chunk`] that is not finished: wait for what of it the device
+    /// has been given, and hand back the scratch its layers held.
+    pub(crate) fn abandon_prefill_chunk(&self, round: ChunkRound) {
+        self.gpu.poll_wait();
+        if let ChunkRound::Layers(r) = round {
+            if r.stack.pooled {
+                self.gpu.scratch_release();
+            }
+        }
+    }
+
+    /// Record layers of a round begun by [`Self::begin_prefill_chunk`] until it is complete (`budget` `None`) or
+    /// `budget` of host time is spent (always at least one layer). `Some` with the round's `[n, d_model]` block
+    /// once every layer is recorded; the device may still be running them.
+    ///
+    /// `caches` are the ones the round began with. Recording is host work that is paced by the device once the
+    /// launch queue is full, so a caller that also has latency-bound work to issue bounds it with `budget`.
+    pub(crate) fn advance_prefill_chunk(&self, round: &mut ChunkRound, caches: &DecodeCaches, budget: Option<std::time::Duration>) -> Option<DeviceBuffer> {
+        let r = match round {
+            ChunkRound::Exact(r) => return self.advance_exact_round(r, caches, budget),
+            ChunkRound::Layers(r) => r,
+        };
+        let c = &self.cfg;
+        let g = &self.gpu;
+        let d = c.d_model;
+        let (n, pos_start, ring_block, slot, max_bt) = (r.n, r.pos_start, r.ring_block, r.slot, r.max_bt);
+        let (blocks, offsets, tables, seq_lens, cos, sin) = (&r.blocks, &r.offsets, &r.tables, &r.seq_lens, &r.cos, &r.sin);
         let mut mixer = |l: usize, ty: LayerType, res_in: &DeviceBuffer, xn1: &DeviceBuffer, pre: Option<Act>, epilogue: bool| -> DeviceBuffer {
             match ty {
                 LayerType::Linear => {
@@ -4976,7 +5023,7 @@ impl Qwen35 {
                 LayerType::Full if c.swa_window.is_some() => {
                     let window = c.swa_window.expect("checked by the guard");
                     let row0 = ring_block * window;
-                    let rc = RingChunkCtx { start: pos_start, window, row0, layer: &caches.gqa_kv[l], cos: &cos, sin: &sin };
+                    let rc = RingChunkCtx { start: pos_start, window, row0, layer: &caches.gqa_kv[l], cos, sin };
                     let attn = self.layer_gqa_fwd_pre(&format!("blocks.{l}.self_attn"), xn1, pre, epilogue, n, Some(GqaCached::Ring(&rc))).0;
                     if !c.layer_has_memory(l) {
                         return attn;
@@ -4984,7 +5031,7 @@ impl Qwen35 {
                     let shape = self.memory_shape_of(1, n);
                     let project = self.memory_project(l, &shape, n);
                     let pool = caches.memory[l].as_ref().expect("a memory layer has a bank pool");
-                    let memory = model::anchor_memory::anchor_memory_chunk_fwd(g, &self.memory_ids(), &shape, &self.memory_weights_at(l, &cos, &sin), &project, res_in, pool, slot, pos_start);
+                    let memory = model::anchor_memory::anchor_memory_chunk_fwd(g, &self.memory_ids(), &shape, &self.memory_weights_at(l, cos, sin), &project, res_in, pool, slot, pos_start);
                     let sum = g.storage((n * d) as u64);
                     g.submit(&[], &[g.step(ADD2, &[&attn, &memory, &sum], &[n * d], n * d)]);
                     sum
@@ -4999,14 +5046,14 @@ impl Qwen35 {
                         offsets: offsets.clone(),
                         tables: tables.clone(),
                         seq_lens: seq_lens.clone(),
-                        cos: &cos,
-                        sin: &sin,
+                        cos,
+                        sin,
                     };
                     self.layer_gqa_fwd_pre(&format!("blocks.{l}.self_attn"), xn1, pre, epilogue, n, Some(GqaCached::Chunk(&ctx))).0
                 }
             }
         };
-        self.prefill_layer_stack(res, n, &format!("pos_start={pos_start}"), &mut mixer)
+        self.advance_layer_stack(&mut r.stack, n, &format!("pos_start={pos_start}"), &mut mixer, budget)
     }
 
     /// Whether this build can run [`Self::run_prefill_multi_stage`]: not a LoRA build,
@@ -5116,9 +5163,11 @@ impl Qwen35 {
     /// final norm. The residual, MLP, scratch-arena and drain discipline lives here once
     /// for [`Self::run_prefill_chunk_stage`] (one sequence's rows) and
     /// [`Self::run_prefill_multi_stage`] (several sequences' rows in one forward).
-    fn prefill_layer_stack(&self, mut res: DeviceBuffer, n: u32, label: &str, mixer: &mut PrefillMixer<'_>) -> DeviceBuffer {
+    ///
+    /// The loop is resumable: this opens it, [`Self::advance_layer_stack`] records layers from where `StackState`
+    /// stands, so a caller with latency-bound work to issue can take a round a few layers at a time.
+    fn begin_layer_stack(&self, res: DeviceBuffer, n: u32) -> StackState {
         let g = &self.gpu;
-        let d = self.cfg.d_model;
         let pooled = n >= self.chunk_arena_min_rows.get();
         if pooled {
             // The quantised activations and the GEMM outputs are allocated by
@@ -5149,13 +5198,23 @@ impl Qwen35 {
         let fused = self.fused_front_ok(n);
         let epilogue = self.fused_epilogue_ok(n);
         // The next layer's `(xn1, activation)`, when the previous layer produced it.
-        let mut front = (fused && self.shard.start < self.shard.end).then(|| {
+        let front = (fused && self.shard.start < self.shard.end).then(|| {
             let (_, xn, act) = self.rms_quant_front(&res, None, self.w(&format!("blocks.{}.ln1.weight", self.shard.start)), n);
             (xn, act)
         });
-        #[allow(clippy::needless_range_loop)]
-        for l in self.shard.start..self.shard.end {
-            let ty = types[l];
+        StackState { res, front, layer: self.shard.start, types, pooled, drain_pooled, reclaim_budget, fused, epilogue }
+    }
+
+    /// Record layers of the round `st` stands for - one at a time, until the stage's last or until `budget` of host
+    /// time is spent (always at least one) - and, on the last, the epilogue. `Some` with the round's block once every
+    /// layer is recorded; the device may still be running them.
+    fn advance_layer_stack(&self, st: &mut StackState, n: u32, label: &str, mixer: &mut PrefillMixer<'_>, budget: Option<std::time::Duration>) -> Option<DeviceBuffer> {
+        let g = &self.gpu;
+        let d = self.cfg.d_model;
+        let started = std::time::Instant::now();
+        while st.layer < self.shard.end {
+            let l = st.layer;
+            let ty = st.types[l];
 
             // M6.10: a replay arena, not a fixed drain schedule. Every layer's
             // outer temporaries (`xn1`, `xmid`, `xn2`, `res_next`) are the
@@ -5178,41 +5237,41 @@ impl Qwen35 {
             // else, and the `poll_wait` this scope's reuse requires is not
             // owed - see that constant's own doc for why the trade flips with
             // the row count.
-            let _scope = pooled.then(|| g.scratch_scope());
+            let _scope = st.pooled.then(|| g.scratch_scope());
 
-            let (xn1, pre1) = match front.take() {
+            let (xn1, pre1) = match st.front.take() {
                 Some((xn, act)) => (xn, Some(act)),
                 None => {
                     let xn1 = g.storage((n * d) as u64);
-                    g.submit(&[], &[rms_step(g, &res, self.w(&format!("blocks.{l}.ln1.weight")), &xn1, d, n)]);
+                    g.submit(&[], &[rms_step(g, &st.res, self.w(&format!("blocks.{l}.ln1.weight")), &xn1, d, n)]);
                     (xn1, None)
                 }
             };
 
-            let mixer_out = mixer(l, ty, &res, &xn1, pre1, epilogue);
+            let mixer_out = mixer(l, ty, &st.res, &xn1, pre1, st.epilogue);
 
             let ln2 = format!("blocks.{l}.ln2.weight");
-            let (xmid, xn2, pre2) = if fused {
-                let (sum, xn, act) = self.rms_quant_front(&res, Some(&mixer_out), self.w(&ln2), n);
+            let (xmid, xn2, pre2) = if st.fused {
+                let (sum, xn, act) = self.rms_quant_front(&st.res, Some(&mixer_out), self.w(&ln2), n);
                 (sum.expect("an add front hands back its sum"), xn, Some(act))
             } else {
                 let xmid = g.storage((n * d) as u64);
-                g.submit(&[], &[g.step(ADD2, &[&res, &mixer_out, &xmid], &[n * d], n * d)]);
+                g.submit(&[], &[g.step(ADD2, &[&st.res, &mixer_out, &xmid], &[n * d], n * d)]);
                 let xn2 = g.storage((n * d) as u64);
                 g.submit(&[], &[rms_step(g, &xmid, self.w(&ln2), &xn2, d, n)]);
                 (xmid, xn2, None)
             };
 
-            let mlp_out = self.ffn_fwd_pre(l, &xn2, pre2, epilogue, n);
-            if fused && l + 1 < self.shard.end {
+            let mlp_out = self.ffn_fwd_pre(l, &xn2, pre2, st.epilogue, n);
+            if st.fused && l + 1 < self.shard.end {
                 // The next layer's first norm rides on this residual add.
                 let (sum, xn, act) = self.rms_quant_front(&xmid, Some(&mlp_out), self.w(&format!("blocks.{}.ln1.weight", l + 1)), n);
-                res = sum.expect("an add front hands back its sum");
-                front = Some((xn, act));
+                st.res = sum.expect("an add front hands back its sum");
+                st.front = Some((xn, act));
             } else {
                 let res_next = g.storage((n * d) as u64);
                 g.submit(&[], &[g.step(ADD2, &[&xmid, &mlp_out, &res_next], &[n * d], n * d)]);
-                res = res_next;
+                st.res = res_next;
             }
 
             // The liveness boundary itself: recording (the `g.submit` calls
@@ -5242,7 +5301,7 @@ impl Qwen35 {
             //
             // The second disjunct is a different obligation with the same
             // remedy - see `reclaim_budget` above.
-            if (pooled && drain_pooled) || g.pending_reclaim_bytes() > reclaim_budget {
+            if (st.pooled && st.drain_pooled) || g.pending_reclaim_bytes() > st.reclaim_budget {
                 g.poll_wait();
             }
             g.flush();
@@ -5252,12 +5311,16 @@ impl Qwen35 {
             // (`Gpu::read` flushes and blocks), so it is correct on both sides
             // of the `pooled` branch above.
             if !self.taps.borrow().is_empty() && self.taps.borrow().contains(&l) {
-                self.tapped.borrow_mut().push((l, g.read(&res, (n * d) as usize)));
+                self.tapped.borrow_mut().push((l, g.read(&st.res, (n * d) as usize)));
             }
             if std::env::var_os("QWEN35_DEBUG_LAYER_RMS").is_some() {
-                let last_row = g.read(&res, (n * d) as usize)[((n - 1) * d) as usize..].to_vec();
+                let last_row = g.read(&st.res, (n * d) as usize)[((n - 1) * d) as usize..].to_vec();
                 let rms = (last_row.iter().map(|v| v * v).sum::<f32>() / last_row.len() as f32).sqrt();
                 eprintln!("qwen35::run_prefill_chunk_stage: {label} n={n} layer {l} ({ty:?}) last-row rms = {rms}");
+            }
+            st.layer += 1;
+            if st.layer < self.shard.end && budget.is_some_and(|b| started.elapsed() >= b) {
+                return None;
             }
         }
         if std::env::var("QWEN35_DEBUG_SCRATCH_HELD").is_ok() {
@@ -5277,7 +5340,7 @@ impl Qwen35 {
         // (`n < CHUNK_ARENA_MIN_ROWS`): there is nothing this round put in the
         // arena to give back, and a round that ran unpooled has no business
         // reaching into the allocator state at all.
-        if pooled {
+        if st.pooled {
             g.scratch_release();
         }
 
@@ -5286,11 +5349,17 @@ impl Qwen35 {
         // residual block for the next stage to pick up as `input_override`.
         if self.shard.head {
             let xn_final = g.storage((n * d) as u64);
-            g.submit(&[], &[rms_step(g, &res, self.w("norm.weight"), &xn_final, d, n)]);
-            xn_final
+            g.submit(&[], &[rms_step(g, &st.res, self.w("norm.weight"), &xn_final, d, n)]);
+            Some(xn_final)
         } else {
-            res
+            Some(st.res.clone())
         }
+    }
+
+    /// [`Self::begin_layer_stack`] and every layer of it at once.
+    fn prefill_layer_stack(&self, res: DeviceBuffer, n: u32, label: &str, mixer: &mut PrefillMixer<'_>) -> DeviceBuffer {
+        let mut st = self.begin_layer_stack(res, n);
+        self.advance_layer_stack(&mut st, n, label, mixer, None).expect("an unbounded advance finishes the stack")
     }
 
     /// Rows of one group of an exact round: [`gpu_core::select::exact_decode_group_rows`],
@@ -5303,7 +5372,7 @@ impl Qwen35 {
     }
 
     /// Whether a round of `n` rows runs as plain decode steps
-    /// ([`Self::run_exact_round`]) rather than as a chunk.
+    /// ([`Self::advance_exact_round`]) rather than as a chunk.
     ///
     /// Up to [`DECODE_REGIME_MAX_ROWS`] rows, where the device is offered the
     /// native recurrent kernel the decode tape runs on and
@@ -5366,29 +5435,39 @@ impl Qwen35 {
     ///
     /// Same contract as [`Self::run_prefill_chunk_stage`]: `[n, d_model]`,
     /// final-normed on a head stage, the raw residual block otherwise.
-    fn run_exact_round(&self, tokens: &[u32], pos_start: u32, caches: &DecodeCaches, input_override: Option<StageRows<'_>>) -> DeviceBuffer {
+    fn advance_exact_round(&self, r: &mut ExactRound, caches: &DecodeCaches, budget: Option<std::time::Duration>) -> Option<DeviceBuffer> {
         let d = self.cfg.d_model as usize;
-        assert!(caches.gqa_cap > 0, "qwen35::run_exact_round: a KV block of 0 rows");
+        assert!(caches.gqa_cap > 0, "qwen35::advance_exact_round: a KV block of 0 rows");
+        let total = r.tokens.len();
         let group = |start: usize, len: usize| -> DeviceBuffer {
             let seqs: Vec<BatchSeq> = (0..len)
-                .map(|i| BatchSeq { window: caches.gqa_window, slot: 0, pos: pos_start + (start + i) as u32, gdn_state: caches.gdn_state, gdn_hist: caches.gdn_hist })
+                .map(|i| BatchSeq { window: caches.gqa_window, slot: 0, pos: r.pos_start + (start + i) as u32, gdn_state: caches.gdn_state, gdn_hist: caches.gdn_hist })
                 .collect();
             let batch = BatchDecodeCaches { gqa_kv: caches.gqa_kv, gqa_cap: caches.gqa_cap, seqs: &seqs, one_sequence: true, gdn_pool: None, memory: caches.memory };
-            let x = input_override.map(|x| x.slice(start * d, (start + len) * d));
-            self.run_decode_batch(&tokens[start..start + len], &batch, x)
+            let rows = r.input.as_ref().map(|input| match input {
+                ExactInput::Host(rows) => StageRows::Host(rows),
+                ExactInput::Device(rows) => StageRows::device(&self.gpu, rows, total * d),
+            });
+            let x = rows.map(|x| x.slice(start * d, (start + len) * d));
+            self.run_decode_batch(&r.tokens[start..start + len], &batch, x)
         };
         let step = self.exact_group_rows();
-        if tokens.len() <= step {
-            return group(0, tokens.len());
+        if total <= step {
+            return Some(group(0, total));
         }
         // Each group's output is read before the next group is issued, which is
         // also the drain the scratch arenas require between passes.
-        let mut out = Vec::with_capacity(tokens.len() * d);
-        for start in (0..tokens.len()).step_by(step) {
-            let len = step.min(tokens.len() - start);
-            out.extend(self.gpu.read(&group(start, len), len * d));
+        let started = std::time::Instant::now();
+        while r.done < total {
+            let len = step.min(total - r.done);
+            let rows = self.gpu.read(&group(r.done, len), len * d);
+            r.out.extend(rows);
+            r.done += len;
+            if r.done < total && budget.is_some_and(|b| started.elapsed() >= b) {
+                return None;
+            }
         }
-        self.gpu.storage_init("qwen35.round.out", &out)
+        Some(self.gpu.storage_init("qwen35.round.out", &r.out))
     }
 
     /// Whether pushing a prompt through this build in multi-row ROUNDS
@@ -6721,6 +6800,66 @@ impl model::Model for Qwen35 {
     }
 }
 
+/// Where a prefill round's layer loop stands between [`Qwen35::advance_layer_stack`] calls: the residual the next
+/// layer reads, the fused front it brings, and the round's scratch discipline.
+pub(crate) struct StackState {
+    res: DeviceBuffer,
+    /// The next layer's `(xn1, activation)`, when the previous layer produced it.
+    front: Option<(DeviceBuffer, Act)>,
+    /// The next layer to record.
+    layer: usize,
+    types: Vec<LayerType>,
+    pooled: bool,
+    drain_pooled: bool,
+    reclaim_budget: u64,
+    fused: bool,
+    epilogue: bool,
+}
+
+/// One sequence's chunk round between [`Qwen35::begin_prefill_chunk`] and the last of its
+/// [`Qwen35::advance_prefill_chunk`] calls.
+pub(crate) enum ChunkRound {
+    /// Layers still to record; the round's tables and where the loop stands.
+    Layers(Box<LayerRound>),
+    /// A short round, which runs as decode steps a group of rows at a time.
+    Exact(Box<ExactRound>),
+}
+
+/// A short round on its way through the decode machinery: the rows still to run and what the finished ones gave.
+pub(crate) struct ExactRound {
+    tokens: Vec<u32>,
+    pos_start: u32,
+    input: Option<ExactInput>,
+    /// Rows run so far.
+    done: usize,
+    /// Their output rows, `[done, d_model]`.
+    out: Vec<f32>,
+}
+
+/// A round's input rows, owned so the round can outlive the caller's borrow of them.
+enum ExactInput {
+    Host(Vec<f32>),
+    /// On this stage's own device.
+    Device(DeviceBuffer),
+}
+
+/// The state of a chunk round that records layer by layer: the position tables every layer shares and the stack.
+pub(crate) struct LayerRound {
+    n: u32,
+    pos_start: u32,
+    /// The ring window's block and bank row (`0` for a paged window).
+    ring_block: u32,
+    slot: u32,
+    max_bt: u32,
+    blocks: DeviceBuffer,
+    offsets: DeviceBuffer,
+    tables: DeviceBuffer,
+    seq_lens: DeviceBuffer,
+    cos: DeviceBuffer,
+    sin: DeviceBuffer,
+    stack: StackState,
+}
+
 /// A prefill round's token mixer for one layer: given the layer index, its type,
 /// the normed input, the fused epilogue the next GEMM may apply and whether the
 /// input is quantised, it returns the mixer output (see `prefill_layer_stack`).
@@ -6755,6 +6894,96 @@ mod tests {
         let caches = m.own_caches();
         let out = m.run_decode_step(token_id, pos, &caches, input.map(StageRows::Host));
         m.gpu.read(&out, m.cfg.d_model as usize)
+    }
+
+    /// A chunk round recorded a layer at a time (a host-time budget too small for two layers) is the round recorded
+    /// whole: same block, bit for bit, and it really took several calls. The round is pooled, the regime a served
+    /// prefill round runs in, so the scratch arena carries across the calls.
+    #[test]
+    fn a_chunk_round_recorded_layer_by_layer_equals_the_whole_round() {
+        let cfg = Qwen35Config { n_layers: 8, ..Qwen35Config::tiny_i8() };
+        let t = cfg.block_size;
+        let d = cfg.d_model as usize;
+        let init = crate::init::init_weights(&cfg, 7);
+        let m = Qwen35::new_i8(cfg.clone(), 1, t, &init);
+        m.set_chunk_arena_min_rows(1);
+        let tokens: Vec<u32> = (0..12).map(|i| (i * 5 + 3) % cfg.vocab).collect();
+
+        m.reset_decode_cache();
+        let want = {
+            let caches = m.own_caches();
+            let out = m.run_prefill_chunk_stage(&tokens, 0, &caches, None);
+            m.gpu.read(&out, tokens.len() * d)
+        };
+
+        m.reset_decode_cache();
+        let caches = m.own_caches();
+        let mut round = m.begin_prefill_chunk(&tokens, 0, &caches, None);
+        let mut calls = 0;
+        let out = loop {
+            calls += 1;
+            if let Some(out) = m.advance_prefill_chunk(&mut round, &caches, Some(std::time::Duration::ZERO)) {
+                break out;
+            }
+            assert!(calls < 100, "the round never finished");
+        };
+        assert_eq!(calls, cfg.n_layers as usize, "a zero budget records exactly one layer per call");
+        assert_eq!(m.gpu.read(&out, tokens.len() * d), want, "recording a round in pieces changed what it computes");
+        // The state the round left is the whole round's: one more token decodes the same either way.
+        let after = m.gpu.read(&m.run_decode_step(5, tokens.len() as u32, &caches, None), d);
+        m.reset_decode_cache();
+        let caches = m.own_caches();
+        let _ = m.run_prefill_chunk_stage(&tokens, 0, &caches, None);
+        assert_eq!(m.gpu.read(&m.run_decode_step(5, tokens.len() as u32, &caches, None), d), after);
+    }
+
+    /// A short round that runs as decode steps, group by group, gives the same block when its groups are issued over
+    /// several calls (a budget too small for a second group) as when they are issued at once.
+    #[test]
+    fn a_short_round_issued_a_group_at_a_time_equals_the_whole_round() {
+        // Wide recurrent heads: the shape the native recurrent kernel is offered for.
+        let cfg = Qwen35Config {
+            n_layers: 8,
+            d_model: 640,
+            intermediate_size: 1280,
+            block_size: 64,
+            max_position_embeddings: 64,
+            head_dim: 256,
+            mrope_section: [11, 11, 10],
+            linear_key_head_dim: 128,
+            linear_value_head_dim: 128,
+            ..Qwen35Config::tiny_i8()
+        };
+        let d = cfg.d_model as usize;
+        let init = crate::init::init_weights(&cfg, 11);
+        let m = Qwen35::new_i8(cfg.clone(), 1, cfg.block_size, &init);
+        let step = m.exact_group_rows();
+        let tokens: Vec<u32> = (0..3 * step + 1).map(|i| (i as u32 * 5 + 3) % cfg.vocab).collect();
+        if !m.exact_round_ok(tokens.len() as u32) {
+            brain_testutil::skip_unavailable("short rounds run as decode steps only where the native recurrent kernel is offered");
+            return;
+        }
+
+        m.reset_decode_cache();
+        let want = {
+            let caches = m.own_caches();
+            let out = m.run_prefill_chunk_stage(&tokens, 0, &caches, None);
+            m.gpu.read(&out, tokens.len() * d)
+        };
+
+        m.reset_decode_cache();
+        let caches = m.own_caches();
+        let mut round = m.begin_prefill_chunk(&tokens, 0, &caches, None);
+        let mut calls = 0;
+        let out = loop {
+            calls += 1;
+            if let Some(out) = m.advance_prefill_chunk(&mut round, &caches, Some(std::time::Duration::ZERO)) {
+                break out;
+            }
+            assert!(calls < 100, "the round never finished");
+        };
+        assert_eq!(calls, 4, "a zero budget issues one group of {step} rows per call");
+        assert_eq!(m.gpu.read(&out, tokens.len() * d), want, "issuing a short round in pieces changed what it computes");
     }
 
     /// The two-GPU int8 resident-serving seam, end to end at tiny scale: the

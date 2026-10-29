@@ -89,12 +89,29 @@ Gap list, by what the profile attributes (in the order it would move goodput):
   rows), the 7-8 ms target is still open (knowledge 373).
 - Prefill is bound by the group-32 scale fold (knowledge 372): 15-23 % of the int8 tensor-core roof.
 - 128K concurrency is KV-capacity bound: item 10 (Grace tier) and a smaller KV tier, or the second card (item 12).
-- Prefill slices block decode: inter-token p99 400-830 ms under load (item 8's step-cost model).
+- Prefill blocking decode: found and mostly fixed 2026-10-29 (knowledge 374): inter-token p99 at concurrency 4 / 16 went
+  202 / 357 ms to 120 / 179 ms (max 393 / 410 to 201 / 198 ms) on `chat` 1024-token prompts. What is left of it: the MTP
+  head's prompt feed (`finish_slice`, 42-56 ms of synchronous normal-lane work per prompt), decode steps running 1.5-2x
+  slower while a prefill shares the card (SM sharing; item 8's step-cost model should price it), and a lone prompt reading
+  in at half the sliced speed in background mode (1.56 s against 0.76 s for 1731 tokens, `gguf_resident_real`).
 
 Page size (256 rows today) is part of item 3 and is chosen per cache group by
 measurement (16-256), not fixed globally.
 
 ## Done
+
+- 2026-10-29 (8, decode stalls behind prefill; knowledge 374): the scheduler thread, not the device, was where a decode
+  step waited. A graph retired after a free called `cuMemFreeHost`, which waits for every stream: the urgent head of a
+  new prompt's first token took 145 ms behind the next prompt's queued round (`GraphCache::retire` now keeps the
+  parameter blocks for the next capture). The background pump recorded a whole 960-row round (1425 launches) per call
+  and blocked in `cuLaunchKernel` for the 140 ms the device needed to drain its launch queue; a chunk round is now
+  `begin_prefill_chunk` / `advance_prefill_chunk` over a resumable layer loop (and a short round's groups), and a
+  non-waiting pump records for at most 16 ms (`PUMP_RECORD_BUDGET`). Chat 1024-token prompts, `perf run sweep` 1 / 4 / 16
+  (inter-token p99 / max ms, output tok/s, TTFT p99 ms): 44 / 57, 202 / 393, 357 / 410; 65.5, 130.9, 164.6; 447, 1965,
+  10023 became 44 / 59, 120 / 201, 179 / 198; 64.0, 136.4, 182.8; 531, 2032, 8973. Gates:
+  `gpu-core/tests/urgent_lane.rs` (an invalidated graph retires without waiting for the normal lane),
+  `qwen35` `model::tests::a_chunk_round_recorded_layer_by_layer_equals_the_whole_round` and
+  `a_short_round_issued_a_group_at_a_time_equals_the_whole_round` (bit-equal to the whole round).
 
 - 2026-10-28 (2a): `PagedDecoder::cached_prefix_blocks` peeks how many blocks a
   fresh prefill adopts from the prefix cache; `admit_one` and `prefill_debt`
