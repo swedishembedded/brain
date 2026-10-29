@@ -289,6 +289,29 @@ fn a_resumed_prefill_is_bitwise_a_cold_one() {
     assert!(warm.iter().zip(&cold).all(|(w, c)| w.to_bits() == c.to_bits()), "a resumed prefill's hidden row differs from a cold prefill's");
 }
 
+/// Prompts that share a document and then diverge: the first one's checkpoint ends past the document, so the second
+/// cannot resume and files the state where it leaves the first (a branch point on a whole recurrent chunk); every
+/// later prompt sharing the document resumes from it, to the hidden row of a cold prefill.
+fn prompts_sharing_a_document_resume_from_where_they_part() {
+    const CAP: u32 = 320;
+    let doc = prompt_of(1, 128);
+    let ask = |seed: u32| doc.iter().copied().chain(prompt_of(seed, 100)).collect::<Vec<u32>>();
+    let mut e = engine_with_cap(16, KvTier::F32, 0, CAP);
+    cache_prompt(&mut e, &ask(2));
+    cache_prompt(&mut e, &ask(3));
+    assert_eq!(e.prefix_stats().0, 0, "the first entry ends 64 tokens past the document: the second prompt cannot resume");
+    let third = ask(4);
+    let mut table = BlockTable::new();
+    let warm = e.prefill(&mut table, &third);
+    assert_eq!(e.prefix_stats().0, 128, "the third prompt resumes from the document");
+    e.release_table(&mut table);
+    let mut cold_engine = engine_with_cap(16, KvTier::F32, 0, CAP);
+    let mut table = BlockTable::new();
+    let cold = cold_engine.prefill(&mut table, &third);
+    cold_engine.release_table(&mut table);
+    assert!(warm.iter().zip(&cold).all(|(w, c)| w.to_bits() == c.to_bits()), "a prefill resumed from a branch point differs from a cold one");
+}
+
 const RECORDED: [[u32; 12]; 3] = [[10, 9, 26, 17, 9, 10, 1, 8, 21, 12, 2, 4], [11, 9, 1, 19, 2, 13, 4, 26, 11, 18, 17, 22], [22, 12, 2, 12, 7, 17, 22, 14, 9, 1, 28, 16]];
 
 gpu_core::card_tests!(
@@ -302,5 +325,6 @@ gpu_core::card_tests!(
     reclaim_spares_the_prefix_the_waiting_prompt_resumes_from,
     single_stream_greedy_decoding_is_reproducible,
     a_resumed_prefill_is_bitwise_a_cold_one,
-    a_prompt_diverging_in_its_last_tokens_resumes_from_the_cached_prompts_checkpoint
+    a_prompt_diverging_in_its_last_tokens_resumes_from_the_cached_prompts_checkpoint,
+    prompts_sharing_a_document_resume_from_where_they_part
 );

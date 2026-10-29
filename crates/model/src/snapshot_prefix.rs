@@ -55,11 +55,31 @@ pub struct Entry<P> {
     /// valid, ...): opaque to the cache.
     pub payload: P,
     stamp: u64,
+    /// A branch point ([`SnapshotPrefixCache::branch_point`]): a prefix
+    /// different prompts continue, kept while they extend it.
+    branch: bool,
 }
 
 impl<P> Entry<P> {
     pub fn new(tokens: Vec<u32>, table: BlockTable, snap_row: u32, payload: P) -> Entry<P> {
-        Entry { tokens, table, snap_row, payload, stamp: 0 }
+        Entry { tokens, table, snap_row, payload, stamp: 0, branch: false }
+    }
+
+    /// This entry as a branch point: the prompts that extend it are other
+    /// continuations of a shared prefix, not later turns replacing it, so it is
+    /// neither superseded by them nor taken as their earlier turn's row; it
+    /// leaves the cache only by recency.
+    pub fn branch(mut self) -> Entry<P> {
+        self.branch = true;
+        self
+    }
+
+    /// Whether `self` is a cached prefix of `prompt` in `namespace` that a turn
+    /// extending it replaces. A branch point is replaced only by the same prefix
+    /// filed again (two prompts that left one document at once both file it).
+    fn superseded_by(&self, namespace: KvNamespace, prompt: &[u32]) -> bool {
+        let prefix = self.table.kv_namespace() == namespace && self.tokens.len() <= prompt.len() && prompt[..self.tokens.len()] == self.tokens[..];
+        prefix && (!self.branch || self.tokens.len() == prompt.len())
     }
 }
 
@@ -109,6 +129,28 @@ impl<P> SnapshotPrefixCache<P> {
         &self.entries[i]
     }
 
+    /// Where `prompt` leaves the cached prompt it shares the most with, floored
+    /// to a multiple of `align`, when that is at least `min` tokens and longer
+    /// than any cached prefix of `prompt`; `None` otherwise.
+    ///
+    /// A recurrent layer resumes only from the state exactly after a cached
+    /// prefix, so two prompts that share a long document and then diverge leave
+    /// nothing the next prompt sharing that document can resume from: each
+    /// entry ends inside its own continuation. A prefill that files the state
+    /// at the branch point as an entry ([`Entry::branch`]) turns the document
+    /// into a prefix every later such prompt resumes from.
+    pub fn branch_point(&self, namespace: KvNamespace, prompt: &[u32], align: usize, min: usize) -> Option<usize> {
+        let resumable = self.peek(namespace, prompt).map_or(0, |i| self.entries[i].tokens.len());
+        let shared = self
+            .entries
+            .iter()
+            .filter(|e| e.table.kv_namespace() == namespace)
+            .map(|e| e.tokens.iter().zip(prompt).take_while(|(a, b)| a == b).count())
+            .max()?;
+        let at = shared / align.max(1) * align.max(1);
+        (at >= min && at > resumable && at < prompt.len()).then_some(at)
+    }
+
     /// A snapshot row for a prefill of `prompt` (in `namespace`) that is about
     /// to finish: a free one, else the row of an entry `prompt` supersedes (a
     /// cached prefix of it: the earlier turn of the same conversation, which
@@ -127,13 +169,7 @@ impl<P> SnapshotPrefixCache<P> {
         if let Some(row) = self.free_rows.pop() {
             return (Some(row), None);
         }
-        let superseded = self
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.table.kv_namespace() == namespace && e.tokens.len() <= prompt.len() && prompt[..e.tokens.len()] == e.tokens[..])
-            .map(|(i, _)| i)
-            .next();
+        let superseded = self.entries.iter().position(|e| e.superseded_by(namespace, prompt));
         let victim = superseded.or_else(|| self.entries.iter().enumerate().min_by_key(|(_, e)| e.stamp).map(|(i, _)| i));
         match victim {
             Some(i) => {
@@ -152,8 +188,7 @@ impl<P> SnapshotPrefixCache<P> {
         let mut retired = Vec::new();
         let mut i = 0;
         while i < self.entries.len() {
-            let e = &self.entries[i];
-            if e.table.kv_namespace() == entry.table.kv_namespace() && e.tokens.len() <= entry.tokens.len() && entry.tokens[..e.tokens.len()] == e.tokens[..] {
+            if self.entries[i].superseded_by(entry.table.kv_namespace(), &entry.tokens) {
                 let e = self.entries.remove(i);
                 self.free_rows.push(e.snap_row);
                 retired.push(e.table);
@@ -226,6 +261,49 @@ mod tests {
         assert_eq!(c.lookup(BASE_KV_NAMESPACE, &[1, 2, 3]).map(|i| c.entry(i).tokens.len()), Some(3), "an identical prompt hits");
         assert!(c.lookup(BASE_KV_NAMESPACE, &[1, 2]).is_none(), "a prompt shorter than the entry cannot reuse it");
         assert!(c.lookup(BASE_KV_NAMESPACE, &[7, 7, 7]).is_none());
+    }
+
+    /// Two prompts that share a document and then diverge leave no entry the next such prompt can resume from:
+    /// every entry ends past the shared part. The branch point is where they part, on the alignment, and only when
+    /// it is a prefix the cache cannot already resume from.
+    #[test]
+    fn the_branch_point_is_where_a_prompt_leaves_a_cached_one() {
+        let mut c = SnapshotPrefixCache::<u32>::new(4);
+        let doc: Vec<u32> = (0..10).collect();
+        let first: Vec<u32> = doc.iter().copied().chain([50, 51, 52]).collect();
+        let r = c.take_row(BASE_KV_NAMESPACE, &first).0.unwrap();
+        c.insert(entry(&first, r));
+        let second: Vec<u32> = doc.iter().copied().chain([60, 61, 62]).collect();
+        assert_eq!(c.branch_point(BASE_KV_NAMESPACE, &second, 4, 4), Some(8), "10 shared tokens, floored to the alignment");
+        assert_eq!(c.branch_point(BASE_KV_NAMESPACE, &second, 4, 12), None, "shorter than the minimum is not worth a row");
+        assert_eq!(c.branch_point(7, &second, 4, 4), None, "only entries of the prompt's own namespace count");
+        let extended: Vec<u32> = first.iter().copied().chain([53]).collect();
+        assert_eq!(c.branch_point(BASE_KV_NAMESPACE, &extended, 4, 4), None, "a prompt the entry is a prefix of resumes from it instead");
+        assert_eq!(c.branch_point(BASE_KV_NAMESPACE, &[9, 9, 9, 9, 9, 9], 4, 4), None);
+
+        // Filed, the branch entry serves every later prompt that shares the document.
+        let r = c.take_row(BASE_KV_NAMESPACE, &second[..8]).0.unwrap();
+        c.insert(entry(&second[..8], r).branch());
+        let third: Vec<u32> = doc.iter().copied().chain([70]).collect();
+        assert_eq!(c.peek(BASE_KV_NAMESPACE, &third).map(|i| c.entry(i).tokens.len()), Some(8));
+        assert_eq!(c.branch_point(BASE_KV_NAMESPACE, &third, 4, 4), None, "the cache already resumes from 8");
+    }
+
+    /// A branch entry is shared by different continuations: a longer prompt it is a prefix of does not supersede it,
+    /// and a finishing prefill does not take its row as its own earlier turn's.
+    #[test]
+    fn a_branch_entry_outlives_the_prompts_that_extend_it() {
+        let mut c = SnapshotPrefixCache::<u32>::new(2);
+        let r = c.take_row(BASE_KV_NAMESPACE, &[]).0.unwrap();
+        c.insert(entry(&[1, 2, 3, 4], r).branch());
+        let r = c.take_row(BASE_KV_NAMESPACE, &[]).0.unwrap();
+        assert!(c.insert(entry(&[1, 2, 3, 4, 5, 6], r)).is_empty(), "the branch entry is not retired");
+        assert_eq!(c.stats().2, 2);
+        let (row, evicted) = c.take_row(BASE_KV_NAMESPACE, &[1, 2, 3, 4, 5, 6, 7]);
+        assert!(row.is_some() && evicted.is_some());
+        assert_eq!(c.peek(BASE_KV_NAMESPACE, &[1, 2, 3, 4, 9]).map(|i| c.entry(i).tokens.len()), Some(4), "the conversation's own entry went, not the branch");
+        let r = c.take_row(BASE_KV_NAMESPACE, &[]).0.unwrap();
+        assert_eq!(c.insert(entry(&[1, 2, 3, 4], r).branch()).len(), 1, "the same branch point filed twice is kept once");
     }
 
     /// A conversation that grows replaces its own earlier entry, freeing the

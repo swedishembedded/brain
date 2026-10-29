@@ -131,7 +131,7 @@ pub struct Qwen35GgufEngine {
     /// A finished prefill's cache record, held until its sequence ends: the
     /// sequence's block becomes the cache entry's KV only then (decoding
     /// appends rows past the prompt and never rewrites the prompt's own).
-    pending: HashMap<u32, Pending>,
+    pending: HashMap<u32, Vec<Pending>>,
     /// Prompts being prefilled over several scheduler iterations, by slot.
     partial: HashMap<u32, PartialPrefill>,
     /// The sequences and row counts of the verify step awaiting its commit.
@@ -245,10 +245,16 @@ struct PartialPrefill {
     /// Feed the MTP head this prompt: the engine's [`Qwen35GgufEngine::set_spec_prefill`]
     /// when the prompt began, and only on a prefix whose own head rows are valid.
     mtp_feed: bool,
+    /// Where this prompt leaves a cached one it shares a long prefix with
+    /// (`SnapshotPrefixCache::branch_point`): the state there is filed too, so the
+    /// next prompt sharing that prefix resumes from it.
+    branch: Option<usize>,
 }
 
 /// What a sequence's prefill leaves for the cache once the sequence is over.
 struct Pending {
+    /// A branch point ([`PartialPrefill::branch`]) rather than the prompt's checkpoint.
+    branch: bool,
     tokens: Vec<u32>,
     snap_row: u32,
     last_hidden: Vec<f32>,
@@ -564,7 +570,13 @@ impl Qwen35GgufEngine {
             prefix_hidden = Some(e.payload.last_hidden.clone());
             start = rows;
         }
-        self.partial.insert(slot, PartialPrefill { start, done: start, fresh: true, cacheable, prefix_hidden, rows_hidden: Vec::new(), mtp_feed: self.spec_prefill && seed_valid });
+        // A branch point needs the entry to share the sequence's blocks, which only the paged layout does.
+        let paged = matches!(self.inst.kv_layout, KvLayout::Paged { .. });
+        let branch = (cacheable && paged)
+            .then(|| self.cache.branch_point(table.kv_namespace(), prompt, CHECKPOINT_ALIGN, MIN_CACHED_TOKENS))
+            .flatten()
+            .filter(|&b| b > start && b < checkpoint_len(prompt.len()));
+        self.partial.insert(slot, PartialPrefill { start, done: start, fresh: true, cacheable, prefix_hidden, rows_hidden: Vec::new(), mtp_feed: self.spec_prefill && seed_valid, branch });
         None
     }
 
@@ -609,7 +621,9 @@ impl Qwen35GgufEngine {
             // The checkpoint is cached in place of the whole prompt. Its MTP head rows are filled once the whole
             // prompt is in (below), so it is filed without them and marked once they are.
             if p.cacheable && end == checkpoint_len(prompt.len()) {
-                self.file_prefix(slot, namespace, &prompt[..end], &hidden, false, state_in_pool);
+                self.file_prefix(slot, namespace, &prompt[..end], &hidden, false, state_in_pool, false);
+            } else if p.branch == Some(end) {
+                self.file_prefix(slot, namespace, &prompt[..end], &hidden, false, state_in_pool, true);
             }
             self.partial.insert(slot, p);
             return PrefillProgress::Partial { consumed };
@@ -626,32 +640,29 @@ impl Qwen35GgufEngine {
             self.inst.mtp_skip_prefill(slot);
             false
         };
-        // What is cached is the checkpoint, filed when the prefill passed it (see `slice_end`): a prompt that
-        // resumed from a checkpoint of its own length or later leaves that entry as it is. The feed above filled the
-        // head's rows of every position before the prompt's end, the checkpoint's among them, so a prompt resuming
-        // from it drafts with the head.
-        if let Some(pending) = self.pending.get_mut(&slot).filter(|e| e.tokens.len() == checkpoint_len(prompt.len())) {
+        // What is cached is the checkpoint and any branch point, filed when the prefill passed them (see
+        // `slice_end`): a prompt that resumed from a checkpoint of its own length or later leaves that entry as it
+        // is. The feed above filled the head's rows of every position before the prompt's end, theirs among them, so
+        // a prompt resuming from either drafts with the head.
+        for pending in self.pending.get_mut(&slot).into_iter().flatten() {
             pending.mtp_valid = head_rows_filled;
         }
         PrefillProgress::Done(hidden)
     }
 
-    /// Where a slice of at most `budget` tokens ends: a slice that would run past the prompt's checkpoint stops there,
-    /// so the state at the checkpoint can be filed (see [`finish_slice`](Self::finish_slice)).
+    /// Where a slice of at most `budget` tokens ends: a slice that would run past the prompt's branch point or its
+    /// checkpoint stops there, so the state at it can be filed (see [`finish_slice`](Self::finish_slice)).
     fn slice_end(&self, p: &PartialPrefill, prompt_len: usize, budget: usize) -> usize {
         let end = p.done + budget.min(prompt_len - p.done);
-        let checkpoint = checkpoint_len(prompt_len);
-        if p.cacheable && p.done < checkpoint && end > checkpoint {
-            checkpoint
-        } else {
-            end
-        }
+        let checkpoint = p.cacheable.then(|| checkpoint_len(prompt_len));
+        [p.branch, checkpoint].into_iter().flatten().filter(|&stop| p.done < stop && end > stop).min().unwrap_or(end)
     }
 
-    /// File `tokens` (a prompt, or its checkpoint) for reuse once the sequence is over: take a snapshot row, snapshot
-    /// the working recurrent state into it, and leave the entry pending. `hidden` is the last of `tokens`' rows.
-    /// `state_in_pool`: the state is in the slot's pool row and not in the working copy.
-    fn file_prefix(&mut self, slot: u32, namespace: KvNamespace, tokens: &[u32], hidden: &[f32], mtp_valid: bool, state_in_pool: bool) {
+    /// File `tokens` (a prompt's checkpoint, or its `branch` point) for reuse once the sequence is over: take a
+    /// snapshot row, snapshot the working recurrent state into it, and leave the entry pending. `hidden` is the last
+    /// of `tokens`' rows. `state_in_pool`: the state is in the slot's pool row and not in the working copy.
+    #[allow(clippy::too_many_arguments)]
+    fn file_prefix(&mut self, slot: u32, namespace: KvNamespace, tokens: &[u32], hidden: &[f32], mtp_valid: bool, state_in_pool: bool, branch: bool) {
         let (row, evicted) = self.cache.take_row(namespace, tokens);
         self.release_retired(evicted);
         if let Some(row) = row {
@@ -659,8 +670,15 @@ impl Qwen35GgufEngine {
                 self.inst.load_work_state(slot);
             }
             self.inst.snapshot_prefill_state(row);
-            self.pending.insert(slot, Pending { tokens: tokens.to_vec(), snap_row: row, last_hidden: hidden.to_vec(), mtp_valid });
+            self.pending.entry(slot).or_default().push(Pending { branch, tokens: tokens.to_vec(), snap_row: row, last_hidden: hidden.to_vec(), mtp_valid });
         }
+    }
+
+    /// Hand a finished sequence's pending record to the cache as an entry over `table`.
+    fn file_entry(&mut self, p: Pending, table: BlockTable) {
+        let entry = CacheEntry::new(p.tokens, table, p.snap_row, Resume { last_hidden: p.last_hidden, mtp_valid: p.mtp_valid });
+        let retired = self.cache.insert(if p.branch { entry.branch() } else { entry });
+        self.release_retired(retired);
     }
 
     fn prefill_slice(&mut self, table: &mut BlockTable, prompt: &[u32], budget: usize) -> PrefillProgress {
@@ -919,12 +937,19 @@ impl PagedDecoder for Qwen35GgufEngine {
             self.inst.mtp_release(slot);
             self.partial.remove(&slot);
         }
-        match row.and_then(|slot| self.pending.remove(&slot)) {
-            Some(p) => {
-                t.truncate(p.tokens.len() as u32, &mut self.alloc);
+        let mut pending = row.and_then(|slot| self.pending.remove(&slot)).unwrap_or_default();
+        // The longest entry takes the sequence's own table; a shorter one (a branch point) shares its leading blocks.
+        pending.sort_by_key(|p| p.tokens.len());
+        match pending.pop() {
+            Some(last) => {
+                for p in pending {
+                    let mut table = t.fork(&mut self.alloc);
+                    table.truncate(p.tokens.len() as u32, &mut self.alloc);
+                    self.file_entry(p, table);
+                }
+                t.truncate(last.tokens.len() as u32, &mut self.alloc);
                 let table = std::mem::replace(t, BlockTable::new());
-                let retired = self.cache.insert(CacheEntry::new(p.tokens, table, p.snap_row, Resume { last_hidden: p.last_hidden, mtp_valid: p.mtp_valid }));
-                self.release_retired(retired);
+                self.file_entry(last, table);
             }
             None => t.release(&mut self.alloc),
         }
