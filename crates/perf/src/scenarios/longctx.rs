@@ -128,6 +128,13 @@ pub trait LongContextEngine {
         None
     }
 
+    /// The devices the loaded model runs on, for a per-kernel profile of its
+    /// steps ([`Options::kernels`]); empty (the default) when the engine cannot
+    /// say, and the profile then reports that instead of a table.
+    fn devices(&self) -> Vec<&gpu_core::Gpu> {
+        Vec::new()
+    }
+
     /// Free everything `load` built.
     fn unload(&mut self);
 
@@ -151,6 +158,11 @@ pub struct Options {
     /// The device label recorded in the artifact.
     pub device: String,
     pub smoke: bool,
+    /// Also profile each batch size's decode steps per kernel on the device
+    /// (the engine's [`LongContextEngine::devices`]) and roll the table up
+    /// into phases. Each kernel is then timed alone, so the table ranks and
+    /// the wall-clock rows stay the measurement.
+    pub kernels: bool,
 }
 
 /// Parse a comma-separated list of positive integers into an ascending,
@@ -261,6 +273,10 @@ pub fn run(engine: &mut dyn LongContextEngine, opt: &Options) -> Result<Artifact
     for &(batch, fit) in &fitting {
         let measured = measure_batch(engine, batch, position, opt.steps);
         let used = engine.device_used_bytes();
+        let profile = match &measured {
+            Ok(_) if opt.kernels => Some(kernel_profile(engine, batch, position, opt.steps)),
+            _ => None,
+        };
         engine.release_batch();
         match measured {
             Ok(mut times) => {
@@ -276,6 +292,11 @@ pub fn run(engine: &mut dyn LongContextEngine, opt: &Options) -> Result<Artifact
                     "ms_per_step_min": r3(min),
                     "tok_per_s_total": r3(total),
                     "tok_per_s_per_stream": r3(total / batch as f64),
+                    "kernel_profile": match profile {
+                        Some(Ok(p)) => p,
+                        Some(Err(e)) => json!({ "error": e }),
+                        None => Value::Null,
+                    },
                 }));
                 last_fit = Some(batch);
             }
@@ -370,6 +391,55 @@ fn measure_batch(engine: &mut dyn LongContextEngine, batch: u32, position: u32, 
         engine.decode_step(&vec![position + w; batch as usize])?;
     }
     (0..steps).map(|s| engine.decode_step(&vec![position + WARMUP_STEPS + s; batch as usize])).collect()
+}
+
+/// Kernels listed per batch size in a profile; the phases account for the rest.
+const PROFILE_TOP_KERNELS: usize = 24;
+
+/// `steps` decode steps of `batch` rows (the timed steps' positions) with every
+/// device timing each kernel: the merged per-kernel table, its rollup into the
+/// phases of a step (`gpu_core::profile::phases`, one classifier for every
+/// model) and the launches per step. Timing serialises the dispatches, so the
+/// table is an upper bound that ranks; the row's wall-clock figures stay the
+/// measurement.
+fn kernel_profile(engine: &mut dyn LongContextEngine, batch: u32, position: u32, steps: u32) -> Result<Value, String> {
+    let timed = engine.devices().iter().fold(false, |any, g| {
+        let on = g.set_kernel_timing(true);
+        g.reset_kernel_times();
+        any | on
+    });
+    if !timed {
+        engine.devices().iter().for_each(|g| {
+            g.set_kernel_timing(false);
+        });
+        return Err("this engine's devices cannot time kernels (or it does not name them)".into());
+    }
+    let ran = (0..steps).try_for_each(|s| engine.decode_step(&vec![position + WARMUP_STEPS + s; batch as usize]).map(|_| ()));
+    let mut merged: std::collections::BTreeMap<String, (f64, u64)> = std::collections::BTreeMap::new();
+    for g in engine.devices() {
+        for (name, ms, calls) in g.kernel_times().unwrap_or_default() {
+            let e = merged.entry(name).or_insert((0.0, 0));
+            e.0 += ms;
+            e.1 += calls;
+        }
+        g.set_kernel_timing(false);
+    }
+    ran?;
+    let mut rows: Vec<(String, f64, u64)> = merged.into_iter().map(|(n, (ms, calls))| (n, ms, calls)).collect();
+    rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let per = steps.max(1) as f64;
+    let total_ms: f64 = rows.iter().map(|r| r.1).sum();
+    let launches: u64 = rows.iter().map(|r| r.2).sum();
+    let phases: Vec<Value> = gpu_core::profile::phases(&rows)
+        .iter()
+        .map(|p| json!({ "phase": p.phase.label(), "ms_per_step": r3(p.ms / per), "calls_per_step": r3(p.calls as f64 / per), "share": r3(p.ms / total_ms.max(1e-12)) }))
+        .collect();
+    let kernels: Vec<Value> = rows
+        .iter()
+        .take(PROFILE_TOP_KERNELS)
+        .map(|(n, ms, calls)| json!({ "kernel": n, "ms_per_step": r3(ms / per), "calls_per_step": r3(*calls as f64 / per) }))
+        .collect();
+    Ok(json!({ "steps": steps, "device_ms_per_step": r3(total_ms / per), "launches_per_step": r3(launches as f64 / per), "phases": phases, "kernels": kernels }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -485,6 +555,33 @@ pub fn render(art: &Artifact) -> String {
             f(&r["tok_per_s_per_stream"], 2),
         ));
     }
+    for r in art.curve.iter().flatten() {
+        let k = &r["kernel_profile"];
+        if k.is_null() {
+            continue;
+        }
+        if let Some(e) = k["error"].as_str() {
+            s.push_str(&format!("\nbatch {}: no kernel profile ({e})\n", r["batch"]));
+            continue;
+        }
+        s.push_str(&format!(
+            "\nbatch {} per-kernel device time (each kernel timed alone: ranks, does not add up to the step): {} ms/step, {} launches/step\n{:<28} {:>9} {:>7} {:>11}\n",
+            r["batch"],
+            f(&k["device_ms_per_step"], 2),
+            f(&k["launches_per_step"], 0),
+            "phase",
+            "ms/step",
+            "share",
+            "calls/step"
+        ));
+        for ph in k["phases"].as_array().into_iter().flatten() {
+            s.push_str(&format!("{:<28} {:>9} {:>6}% {:>11}\n", ph["phase"].as_str().unwrap_or("?"), f(&ph["ms_per_step"], 2), f(&(ph["share"].as_f64().unwrap_or(0.0) * 100.0).into(), 1), f(&ph["calls_per_step"], 0)));
+        }
+        s.push_str(&format!("{:<48} {:>9} {:>11}\n", "kernel", "ms/step", "calls/step"));
+        for kr in k["kernels"].as_array().into_iter().flatten() {
+            s.push_str(&format!("{:<48} {:>9} {:>11}\n", kr["kernel"].as_str().unwrap_or("?"), f(&kr["ms_per_step"], 3), f(&kr["calls_per_step"], 0)));
+        }
+    }
     if let Some(r) = p["single_stream_decode"].as_object() {
         s.push_str(&format!("\nsingle stream: {} tok/s\n", f(&r["tok_per_s"], 1)));
     }
@@ -570,7 +667,24 @@ mod tests {
     }
 
     fn opts() -> Options {
-        Options { context: 1024, ladder: vec![1, 2, 4, 8, 16], prefill: vec![], steps: 4, device: "gpu".into(), smoke: false }
+        Options { context: 1024, ladder: vec![1, 2, 4, 8, 16], prefill: vec![], steps: 4, device: "gpu".into(), smoke: false, kernels: false }
+    }
+
+    /// A kernel profile asked of an engine that names no devices is reported per row with its reason, never left out
+    /// silently, and the wall-clock rows are unchanged by it.
+    #[test]
+    fn a_kernel_profile_without_device_timing_says_why_in_every_row() {
+        let mut e = Fake::new();
+        let art = run(&mut e, &Options { kernels: true, ..opts() }).unwrap();
+        let curve = art.curve.as_ref().unwrap();
+        assert!(!curve.is_empty());
+        for r in curve {
+            assert!(r["kernel_profile"]["error"].as_str().is_some_and(|e| e.contains("cannot time kernels")), "{r}");
+            assert!(r["ms_per_step_median"].as_f64().is_some());
+        }
+        assert!(render(&art).contains("no kernel profile"));
+        let plain = run(&mut Fake::new(), &opts()).unwrap();
+        assert!(plain.curve.as_ref().unwrap().iter().all(|r| r["kernel_profile"].is_null()), "not asked for, not run");
     }
 
     #[test]

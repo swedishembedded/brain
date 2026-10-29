@@ -100,6 +100,10 @@ OPTIONS
   --prefill <a,b,c>     longctx: prompt lengths for the real cold-prefill table
                         (default none)
   --steps <N>           longctx: timed decode steps per batch size (default 8)
+  --kernels             longctx: also profile each batch size's decode steps per kernel on
+                        the device and roll the table up into phases (linear, experts,
+                        attention, recurrent mixer, norm/epilogue, sampling) - the same
+                        report for every model; each kernel is timed alone, so it ranks
   --requests <N>        measured requests per level (default 64)
   --input <N>           override the workload's prompt length
   --output <N>          override the workload's output length. THIS is what
@@ -389,6 +393,7 @@ fn run(args: &[String]) {
             "--context" => longctx.context = Some(parse_flag(args, &mut i, "--context")),
             "--prefill" => longctx.prefill = Some(val(args, &mut i, "--prefill")),
             "--steps" => longctx.steps = Some(parse_flag(args, &mut i, "--steps")),
+            "--kernels" => longctx.kernels = true,
             "--requests" => opt.num_requests = val(args, &mut i, "--requests").parse().unwrap_or(opt.num_requests),
             "--input" => opt.input_override = val(args, &mut i, "--input").parse().ok(),
             "--output" => opt.output_override = val(args, &mut i, "--output").parse().ok(),

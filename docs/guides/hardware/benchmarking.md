@@ -91,6 +91,16 @@ device ms per step (`--device` and `--backend` pick the cards and the API), and 
 kv_tier_decode_bench -- --ignored --nocapture` times one attention layer per KV
 tier, interleaved min-of-N, against the triad.
 
+`--kernels` adds, for every batch size, a per-kernel profile of its decode steps
+on the device: the kernels ranked by device time, rolled up into the phases of a
+step (linear, experts, attention, recurrent mixer, norm/epilogue, sampling) with
+launches per step. It is the same report for every model the scenario serves.
+Each kernel is timed on its own, so the table ranks kernels rather than adding up
+to the step's wall time, which stays the measurement. For the timeline itself and
+per-kernel hardware counters, run the same command under the vendor's profiler
+(Nsight Systems and Nsight Compute on NVIDIA): the serving loop marks its steps
+and phases as named ranges there.
+
 It reports, in one artifact and one table:
 
 - **Prefill** - real, cold prefill of each `--prefill` prompt length into one

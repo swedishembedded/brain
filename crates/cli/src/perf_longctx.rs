@@ -217,6 +217,10 @@ impl LongContextEngine for Qwen35Engine {
         driver_used_bytes()
     }
 
+    fn devices(&self) -> Vec<&gpu_core::Gpu> {
+        self.inst.as_ref().map_or_else(Vec::new, |i| (0..i.stages()).map(|s| i.stage_gpu(s)).collect())
+    }
+
     fn unload(&mut self) {
         self.inst = None;
     }
@@ -356,6 +360,10 @@ impl LongContextEngine for Qwen35MoeEngine {
 
     fn device_used_bytes(&self) -> Option<u64> {
         driver_used_bytes()
+    }
+
+    fn devices(&self) -> Vec<&gpu_core::Gpu> {
+        self.eng.as_ref().map(|e| vec![e.gpu()]).unwrap_or_default()
     }
 
     fn unload(&mut self) {
@@ -519,6 +527,10 @@ impl LongContextEngine for QwenPagedEngine {
         driver_used_bytes()
     }
 
+    fn devices(&self) -> Vec<&gpu_core::Gpu> {
+        self.eng.as_ref().map(|e| vec![e.gpu()]).unwrap_or_default()
+    }
+
     fn unload(&mut self) {
         self.tables.clear();
         self.eng = None;
@@ -543,6 +555,8 @@ pub struct Args {
     pub ladder: Option<String>,
     pub prefill: Option<String>,
     pub steps: Option<u32>,
+    /// `--kernels`: profile each batch size's decode steps per kernel.
+    pub kernels: bool,
 }
 
 /// Defaults when a flag is absent. A context is always stated in the artifact,
@@ -572,7 +586,7 @@ pub fn options(args: &Args, device: &str, smoke: bool) -> Result<perf::scenarios
         prefill.truncate(1);
         prefill.iter_mut().for_each(|n| *n = (*n).min(128));
     }
-    Ok(perf::scenarios::longctx::Options { context, ladder, prefill, steps, device: device.to_string(), smoke })
+    Ok(perf::scenarios::longctx::Options { context, ladder, prefill, steps, device: device.to_string(), smoke, kernels: args.kernels })
 }
 
 /// Run the scenario on the engine `spec` names.
@@ -623,7 +637,7 @@ mod tests {
 
     #[test]
     fn smoke_shrinks_the_run_and_flags_are_validated() {
-        let args = Args { context: Some(131_072), ladder: Some("1,2,4,8".into()), prefill: Some("4096,8192".into()), steps: Some(16) };
+        let args = Args { context: Some(131_072), ladder: Some("1,2,4,8".into()), prefill: Some("4096,8192".into()), steps: Some(16), kernels: false };
         let o = options(&args, "gpu", true).unwrap();
         assert!(o.smoke && o.context <= 256 && o.steps == 2 && o.ladder == vec![1, 2] && o.prefill == vec![128]);
         let full = options(&args, "gpu", false).unwrap();
