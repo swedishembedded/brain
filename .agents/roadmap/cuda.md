@@ -1314,13 +1314,28 @@ decode GEMM the provider took for 9-32 rows bypassed the slot and now leaves the
 reach 60-80 % of the roof where the matrix is large (K 5120 x N 16384: 2.7 TB/s) and stay at 30-60 % for small
 matrices (launch floor) and for 25-32 rows at K=17408 (scale-fixup issue bound: 12 FP ops per MMA per thread).
 
+Prefill-sized class grid and compute roof landed (knowledge 372): `gpu_core::native_tune` now tunes a second slot,
+`matmul_i8_prefill` (a virtual slot a handle holds when its model registers `matmul_i8_dyn`; the CUDA provider asks
+`Gpu::prefill_gemm_step` instead of routing by row count), on 48 classes (rows 33-4096+, K 5120/17408, four weight-size
+classes), every candidate checked against the f64 oracle, graded against a measured int8 tensor-core roof (1191 TOPS on
+the GH200 by an `mma.sync` probe) as well as the memory roof. Candidates: `matmul_i8_mma_m128` and `matmul_i8_mma` (the old
+routing, now the untuned default) and `matmul_i8_wgmma`, a Hopper warpgroup GEMM (`wgmma` m64n128k32, 128x128 tile, 4-stage
+cp.async ring, group scales folded per k32 in registers; sm_90a, K % 128). GH200, 27B Q8_0: the warpgroup kernel wins from
+about 512 rows (222-276 TOPS against 190-216), `mma.sync` keeps 129-256 rows (145-198 TOPS); all classes stay at 15-23 % of
+the MMA roof because the group-scale fold, not the MMA, is the bound (~3 issue slots per output per k32; `wgmma` without
+the fold: ~950 TOPS). The fold now runs on two fused multiply-adds per element with the activation scale rounded to 21 bits.
+End to end (`qwen35_gguf_prefill_profile`, depth 8192): 1024 rows 2634 -> 3034 tok/s, 2048 rows 2699 -> 3342, 4096 rows 3396;
+`TENSOR_CORE_PREFILL_TOKENS` 1024 -> 2048. `brain perf run longctx` prefill 1K/8K/32K: 2852/2740/2392 -> 3347/3607/2892 tok/s.
+Open: overlap the fold with the next group's `wgmma` (BN 64 or a producer warpgroup), a narrower warpgroup tile for 129-256
+rows, `matmul_i8_dyn`-slot (DiT) use of the same candidates, and the other tiers' prefill classes.
+
 Open, in the order the gap list ranks them: (1) lift the streaming candidate further: fold the group-scale fixup
 (issue bound at 17-32 rows), issue the weight copies ahead of the `griddepcontrol.wait`, TMA/`cp.async.bulk` and
 wgmma, fewer launches for the small matrices (fused multi-matrix streaming); then the fp8 and bf16 tiers with the same
 structure; (2) problem generators and oracles so the other tiers' multi-row slots (K-quant narrow/wide, q4, fp8, nvfp4)
-join the tuner, and a prefill-sized (`matmul_i8_dyn`) class grid; (3) the attention and the GDN decode kernels as
-candidate sets; (4) a compute roof per tensor-core precision for the compute-bound classes (the decode classes are
+join the tuner, and (the prefill-sized class grid landed, see above); (3) the attention and the GDN decode kernels as
+candidate sets; (4) a compute roof per tensor-core precision (int8 landed; the decode classes are
 memory-bound at 32 rows and below, so only the memory roof is graded today); (5) the driver version in the store key.
 The f16-weight warpgroup int8 GEMM of the dropped `perf-wgmma-f16` branch (commit 7dea031a6, parity speed with the tiled
-GEMM) belongs here as a prefill candidate once (2) exists; `b27-decode-attn-wip` (4305fa87a) was superseded by the
+GEMM) belongs here as a prefill candidate (the int8 warpgroup candidate above is its fold-in-registers form); `b27-decode-attn-wip` (4305fa87a) was superseded by the
 native int8 decode attention and its shared-prefix test already on main.

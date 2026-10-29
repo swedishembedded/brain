@@ -181,6 +181,42 @@ fn serves_i8_mma_m32(p: &[u32]) -> bool {
     serves_i8_batched(p, backend_api::select::DECODE_REGIME_MAX_ROWS, 16)
 }
 
+/// The tuning slot of the prefill-sized int8 GEMM. The CUDA provider lowers the int8 prefill GEMM
+/// (`provider::cuda`), not a redirect of a model-registered kernel, so its candidates are not rows of the
+/// kernel `matmul_i8_dyn` (whose rows must stay bit-identical to the WGSL tier): they live under this virtual slot,
+/// which a handle holds when its model registers `matmul_i8_dyn` (the provider's reference kernel), is tuned
+/// by [`crate::native_tune`] like any slot, and is asked for by the provider through [`prefill_gemm`].
+pub(crate) const PREFILL_SLOT: &str = "matmul_i8_prefill";
+
+/// The pipeline-slot number of [`PREFILL_SLOT`]: past every model kernel index, so no dispatch redirect matches it.
+pub(crate) const PREFILL_KIND: usize = usize::MAX;
+
+/// Rows of the prefill-sized GEMM candidates that need no more than the smallest tile: past the decode regime, up
+/// to where a bigger tile fills the device.
+const PREFILL_SMALL_MAX_ROWS: u32 = 128;
+
+/// Whether `p` is a prefill-sized int8 GEMM `Params { m, kg, n }` every prefill candidate can run: rows past the
+/// decode regime (the GEMV slot owns those), `K` a whole number of 64-element staged tiles, an output the 32-bit
+/// row arithmetic covers.
+fn serves_i8_prefill(p: &[u32]) -> bool {
+    match p {
+        [m, kg, n, ..] => {
+            *m > backend_api::select::DECODE_REGIME_MAX_ROWS && *n >= 1 && *kg >= 16 && kg % 16 == 0 && u64::from(*m) * u64::from(*n) <= u64::from(u32::MAX)
+        }
+        _ => false,
+    }
+}
+
+/// The small-tile prefill candidate: the rows that do not fill a bigger tile.
+fn serves_i8_prefill_small(p: &[u32]) -> bool {
+    serves_i8_prefill(p) && p[0] <= PREFILL_SMALL_MAX_ROWS
+}
+
+/// The Hopper warpgroup candidate: whole 128-deep k-tiles.
+fn serves_i8_prefill_wgmma(p: &[u32]) -> bool {
+    serves_i8_prefill(p) && p[1].is_multiple_of(32)
+}
+
 /// `matmul_q4_gemv`'s (and `matmul_kq_gemv`'s) `Params { m, k, n }` with the
 /// RAW `k`: the int8 GEMV's decode regime, `K` a whole number of 32-element
 /// weight-scale groups.
@@ -571,6 +607,51 @@ fn serves_moe_nvfp4_gather(p: &[u32]) -> bool {
 fn moe_nvfp4_gather_blocks(p: &[u32], _tile: (u32, u32)) -> u32 {
     p[0] * p[2].div_ceil(QGEMV_COLS)
 }
+
+/// The candidates of [`PREFILL_SLOT`], the prefill-sized int8 GEMM, in preference order: the first row that serves
+/// a dispatch is the untuned default (the routing the provider had before the slot was measured), the rest are
+/// what [`crate::native_tune`] times against it. Every row states the capability it needs through its registry
+/// entry's floor, so a device only ever sees the candidates it can run. `slow` names the kernel a handle must
+/// register for these rows to exist: the provider's reference kernel.
+pub(crate) const PREFILL_ROWS: &[Row] = &[
+    Row {
+        slow: "matmul_i8_dyn",
+        target: Target::Named("matmul_i8_mma_m128"),
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_i8_prefill_small,
+        blocks: gemm_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        launch: CudaLaunch::NONE,
+    },
+    Row {
+        slow: "matmul_i8_dyn",
+        target: Target::Named("matmul_i8_mma"),
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_i8_prefill,
+        blocks: gemm_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        launch: CudaLaunch::NONE,
+    },
+    // The Hopper warpgroup GEMM: `wgmma` is arch-specific (`sm_90a`), so the launch requires it, and its ring of
+    // stages is dynamic shared memory above the default limit.
+    Row {
+        slow: "matmul_i8_dyn",
+        target: Target::Named("matmul_i8_wgmma"),
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_i8_prefill_wgmma,
+        blocks: gemm_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        launch: CudaLaunch {
+            dynamic_shared_bytes: kernels_cuda::I8_WGMMA_DYNAMIC_SHARED_BYTES,
+            shared_opt_in: true,
+            arch: backend_api::ArchFeatures::Required,
+            ..CudaLaunch::NONE
+        },
+    },
+];
 
 pub(crate) const ROWS: &[Row] = &[
     Row {
@@ -1985,15 +2066,16 @@ pub(crate) fn resolve(
     backend: &dyn Backend,
     wgsl_upgrades: &[crate::upgrade::Active],
 ) -> Vec<Active> {
-    if disabled() {
-        return Vec::new();
-    }
     let Some(cc) = backend.caps().arch.compute_capability else {
         return Vec::new();
     };
+    let prefill = names.iter().any(|n| n == "matmul_i8_dyn");
     ROWS.iter()
-        .filter_map(|row| {
-            let slow = names.iter().position(|n| n == row.slow)?;
+        .filter(|_| !disabled())
+        .map(|row| (row, false))
+        .chain(PREFILL_ROWS.iter().filter(|_| prefill).map(|row| (row, true)))
+        .filter_map(|(row, is_prefill)| {
+            let slow = if is_prefill { PREFILL_KIND } else { names.iter().position(|n| n == row.slow)? };
             if row.requires_wgsl_upgrade {
                 wgsl_upgrades.iter().find(|a| a.slow == slow)?;
             }
@@ -2007,7 +2089,8 @@ pub(crate) fn resolve(
                 shared_bytes: k.shared_bytes,
                 launch: CudaLaunch { programmatic: k.programmatic, ..row.launch },
             })?;
-            Some(Active { slow, slot: row.slow, id, kernel: k.name, reported: k.reported, tile: k.tile, serves: row.serves, blocks: row.blocks, align_words: row.align_words })
+            let slot = if is_prefill { PREFILL_SLOT } else { row.slow };
+            Some(Active { slow, slot, id, kernel: k.name, reported: k.reported, tile: k.tile, serves: row.serves, blocks: row.blocks, align_words: row.align_words })
         })
         .collect()
 }
@@ -2084,6 +2167,40 @@ mod tests {
         for m in kernels_cuda::I8_GEMV_MMA_MIN_ROWS..=backend_api::select::DECODE_REGIME_MAX_ROWS {
             let p = [m, 1280, 1024];
             assert!(rows.iter().filter(|r| (r.serves)(&p)).count() >= 3, "m={m} should have a choice");
+        }
+    }
+
+    /// The prefill slot's rows are candidates like the decode slot's: each names a registry entry that exists at
+    /// the capability it declares, a device below a candidate's floor is never offered it, the first row that serves a
+    /// shape is the untuned default (the routing the provider had before the slot was measured), and the decode
+    /// regime - the GEMV slot's - is served by none of them.
+    #[test]
+    fn the_prefill_slot_is_a_candidate_set_with_declared_capabilities() {
+        let name = |r: &Row| match r.target {
+            Target::Named(n) => n,
+            Target::Operator { .. } => panic!("the prefill candidates are named"),
+        };
+        let names: Vec<&str> = PREFILL_ROWS.iter().map(name).collect();
+        assert_eq!(names, ["matmul_i8_mma_m128", "matmul_i8_mma", "matmul_i8_wgmma"], "first is the untuned default");
+        let offered = |cc| PREFILL_ROWS.iter().filter(|r| r.target.resolve(cc).is_some()).map(name).collect::<Vec<_>>();
+        assert!(offered(kernels_cuda::DP4A_MIN_CC).is_empty(), "no prefill candidate runs below the tensor-core floor");
+        assert_eq!(offered(kernels_cuda::MMA_S8_MIN_CC), ["matmul_i8_mma_m128", "matmul_i8_mma"]);
+        assert_eq!(offered(kernels_cuda::WGMMA_MIN_CC), names, "Hopper offers the warpgroup GEMM too");
+        let first = |p: &[u32]| PREFILL_ROWS.iter().find(|r| (r.serves)(p)).map(name);
+        assert_eq!(first(&[33, 1280, 1024]), Some("matmul_i8_mma_m128"));
+        assert_eq!(first(&[128, 1280, 1024]), Some("matmul_i8_mma_m128"));
+        assert_eq!(first(&[129, 1280, 1024]), Some("matmul_i8_mma"));
+        assert_eq!(first(&[4096, 1280, 1024]), Some("matmul_i8_mma"));
+        assert_eq!(first(&[32, 1280, 1024]), None, "the decode regime is the GEMV slot's");
+        assert_eq!(first(&[256, 1288, 1024]), None, "K must be a whole number of 64-element staged tiles (K = 5152 is not)");
+        let wgmma = PREFILL_ROWS.iter().find(|r| name(r) == "matmul_i8_wgmma").expect("the row");
+        assert!((wgmma.serves)(&[256, 1280, 1024]));
+        assert!(!(wgmma.serves)(&[256, 1296, 1024]), "the warpgroup GEMM wants whole 128-deep k-tiles (K = 5184 is 81 x 64)");
+        assert_eq!(wgmma.launch.arch, backend_api::ArchFeatures::Required);
+        assert_eq!(wgmma.launch.dynamic_shared_bytes, kernels_cuda::I8_WGMMA_DYNAMIC_SHARED_BYTES);
+        for r in PREFILL_ROWS {
+            assert_eq!(r.slow, "matmul_i8_dyn", "the rows exist on a handle whose model registers the provider's reference kernel");
+            assert_eq!(r.bindings.len(), I8_GEMV_BINDINGS.len());
         }
     }
 

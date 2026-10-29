@@ -2615,6 +2615,17 @@ mod native_facade {
             crate::native_upgrade::serving(&self.native_upgrades, kind, params, self.tuned_table(), None).map(|a| a.kernel)
         }
 
+        /// The step for a prefill-sized int8 GEMM (`params` is `matmul_i8_dyn`'s `[m, k/4, n]`, `bufs` its five
+        /// bindings with their `offsets`) on the candidate this device's tuned table names for the shape class, with
+        /// the name the backend times it under. `None` when no candidate of the prefill slot serves the dispatch (the
+        /// handle's model does not register `matmul_i8_dyn`, the shape is outside every candidate, or a binding is
+        /// off every candidate's alignment): the caller keeps the WGSL tier.
+        pub fn prefill_gemm_step(&self, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32]) -> Option<(Step, &'static str)> {
+            let a = crate::native_upgrade::serving(&self.native_upgrades, crate::native_upgrade::PREFILL_KIND, params, self.tuned_table(), Some(offsets))?;
+            let step = self.be().step_native_sliced(a.id, bufs, offsets, params, (a.blocks)(params, a.tile))?;
+            Some((step, a.reported))
+        }
+
         /// The pipeline slot a kernel name occupies on this handle, or `None`
         /// if this model did not register it.
         ///

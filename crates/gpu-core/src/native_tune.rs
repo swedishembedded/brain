@@ -49,19 +49,59 @@ use std::sync::{Arc, Mutex};
 const TIE: f64 = 0.97;
 /// Ops achieving less than this fraction of their roofline bound are listed as the device's gap.
 pub const GAP_THRESHOLD: f64 = 0.6;
-/// Row buckets of the decode regime: `(lo, hi)` inclusive, timed at `hi`.
-const ROW_BUCKETS: [(u32, u32); 7] = [(1, 1), (2, 2), (3, 4), (5, 8), (9, 16), (17, 24), (25, 32)];
-/// `K` classes, timed at their representative.
-const K_CLASSES: [u32; 2] = [5120, 17408];
-/// Upper bound (exclusive) of the weight-bytes classes, in bytes; the last class is unbounded.
-const BYTES_BOUNDS: [u64; 3] = [3 << 20, 12 << 20, 48 << 20];
-/// Output columns timed for each bytes class at each `K` class (about 1.5, 6, 24 and 90 MB of weights).
-const N_REPS: [[u32; 4]; 2] = [[256, 1024, 4096, 16384], [64, 256, 1024, 4096]];
-/// Distinct weight bytes cycled per timing, past the L2 of any current part.
-const FOOTPRINT_BYTES: u64 = 192 << 20;
+/// The shape-class grid of one slot: row buckets (`(lo, hi)` inclusive, timed at `hi`), the `K` classes (timed at
+/// their representative), the weight-bytes classes with the output columns timed for each, and how weights are
+/// cycled while timing.
+struct Grid {
+    rows: &'static [(u32, u32)],
+    /// Whether rows past the last bucket belong to it (a prefill round may be any width) or to no class.
+    open_top: bool,
+    k: [u32; 2],
+    /// Upper bound (exclusive) of the weight-bytes classes, in bytes; the last class is unbounded.
+    bytes_bounds: [u64; 3],
+    /// Output columns timed for each bytes class at each `K` class.
+    n_reps: [[u32; 4]; 2],
+    /// Distinct weight bytes cycled per timing; `0` times the problem on one copy (a compute-bound class has its
+    /// weights read once per row tile, so the L2 does not flatter it).
+    footprint_bytes: u64,
+}
+
+/// The decode regime: weight-streaming classes, timed with the weights cycled past the L2 so the stream is
+/// DRAM-bound as in a real decode step (about 1.5, 6, 24 and 90 MB of weights per bytes class).
+const DECODE: Grid = Grid {
+    rows: &[(1, 1), (2, 2), (3, 4), (5, 8), (9, 16), (17, 24), (25, 32)],
+    open_top: false,
+    k: [5120, 17408],
+    bytes_bounds: [3 << 20, 12 << 20, 48 << 20],
+    n_reps: [[256, 1024, 4096, 16384], [64, 256, 1024, 4096]],
+    footprint_bytes: 192 << 20,
+};
+
+/// A prefill round: compute-bound classes from the first row past the decode regime to a round of thousands of
+/// rows (bytes classes of about 10, 30, 60 and 100 MB of weights).
+const PREFILL: Grid = Grid {
+    rows: &[(33, 64), (65, 128), (129, 256), (257, 512), (513, 1024), (1025, 4096)],
+    open_top: true,
+    k: [5120, 17408],
+    bytes_bounds: [20 << 20, 45 << 20, 80 << 20],
+    n_reps: [[2048, 5120, 10240, 17408], [512, 1536, 3072, 5120]],
+    footprint_bytes: 0,
+};
+
+/// The grid a slot is tuned on; a slot not named here is a decode-regime slot.
+fn grid(slot: &str) -> &'static Grid {
+    if slot == crate::native_upgrade::PREFILL_SLOT {
+        &PREFILL
+    } else {
+        &DECODE
+    }
+}
+
 const TRIALS: usize = 3;
+/// Launches timed per candidate at least, so a class with one weight copy still has several to take the minimum of.
+const MIN_LAUNCHES: usize = 6;
 /// Wall time one device's tuning may take; classes not reached keep their default candidate until a rebuild retunes.
-const BUDGET: std::time::Duration = std::time::Duration::from_secs(25);
+const BUDGET: std::time::Duration = std::time::Duration::from_secs(40);
 
 /// The read-bandwidth probe: every thread streams 16-byte vectors with the loads a decode GEMV issues (L1
 /// no-allocate) and folds them, so the number is the read roof of the access type the candidates are graded on.
@@ -122,10 +162,89 @@ fn measure_read_roof(gpu: &Gpu) -> Option<(f32, f32)> {
     (best.is_finite() && best > 0.0 && best < f64::MAX && floor < f64::MAX).then(|| ((ROOF_BYTES as f64 / (best * 1e-3) / 1e9) as f32, (floor * 1e3) as f32))
 }
 
+/// The int8 tensor-core probe (`mma.sync m16n8k32`): every warp issues independent MMAs on operands held in registers,
+/// so nothing but the matrix pipeline limits it - the roof of the compute-bound classes' `mma.sync` candidates.
+/// Params `[iterations]`.
+static ROOF_MMA_S8: kernels_cuda::CudaKernel = kernels_cuda::CudaKernel {
+    name: "roof_mma_s8",
+    op: backend_api::select::Op::MatMul,
+    weight: backend_api::select::Dtype::I8,
+    by_name: true,
+    source: backend_api::ImplSource::Tuned,
+    min_cc: kernels_cuda::MMA_S8_MIN_CC,
+    entry: "brain_roof_mma_s8",
+    what: "device int8 tensor-core throughput probe: independent mma.sync m16n8k32 chains on register operands",
+    reported: "native:roof_mma_s8",
+    block_dim: 128,
+    tile: (1, 1),
+    shared_bytes: 0,
+    programmatic: false,
+    src: r#"
+extern "C" __global__ void __launch_bounds__(128)
+brain_roof_mma_s8(const unsigned int* params, unsigned int* out) {
+    const unsigned int iters = params[0];
+    const unsigned int t = blockIdx.x * 128u + threadIdx.x;
+    const unsigned int a0 = t * 0x9E3779B1u, a1 = a0 ^ 0x85EBCA6Bu, a2 = a0 + 0xC2B2AE35u, a3 = a1 + 0x27D4EB2Fu;
+    const unsigned int b0 = a2 ^ 0x165667B1u, b1 = a3 + 0x9E3779B9u;
+    unsigned int acc[16][4];
+#pragma unroll
+    for (int j = 0; j < 16; ++j) { acc[j][0] = acc[j][1] = acc[j][2] = acc[j][3] = 0u; }
+    for (unsigned int i = 0; i < iters; ++i) {
+#pragma unroll
+        for (int j = 0; j < 16; ++j) {
+            asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};\n"
+                         : "+r"(acc[j][0]), "+r"(acc[j][1]), "+r"(acc[j][2]), "+r"(acc[j][3])
+                         : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+        }
+    }
+    unsigned int x = 0u;
+#pragma unroll
+    for (int j = 0; j < 16; ++j) { x ^= acc[j][0] ^ acc[j][1] ^ acc[j][2] ^ acc[j][3]; }
+    out[t] = x;
+}
+"#,
+};
+const ROOF_MMA_BINDINGS: &[backend_api::BindKind] = &[backend_api::BindKind::Uniform, backend_api::BindKind::StorageReadWrite];
+/// MMAs per warp the probe issues per timed launch: long enough that the ramp is noise.
+const ROOF_MMA_ITERS: u32 = 512;
+/// Operations of one `m16n8k32` MMA: 16 x 8 x 32 multiply-adds.
+const MMA_OPS: f64 = 2.0 * 16.0 * 8.0 * 32.0;
+
+/// Device milliseconds of one launch of the probe `kernel` on `blocks` blocks, the best of a few runs.
+fn time_probe(gpu: &Gpu, kernel: &'static kernels_cuda::CudaKernel, bindings: &'static [backend_api::BindKind], params: &[u32], blocks: u32, out_words: u64) -> Option<f64> {
+    let id = gpu.native_kernel(kernel, bindings)?;
+    let out = gpu.storage(out_words);
+    let steps: Vec<_> = (0..6).filter_map(|_| gpu.native_step_raw(id, &[&out], params, blocks)).collect();
+    let time = |steps: &[crate::Step]| -> Option<f64> {
+        gpu.reset_kernel_times();
+        gpu.submit(&[], steps);
+        gpu.poll_wait();
+        let t = gpu.kernel_times()?;
+        let (ms, calls) = t.iter().filter(|r| r.0 == kernel.reported).fold((0.0, 0u64), |a, r| (a.0 + r.1, a.1 + r.2));
+        (calls > 0).then(|| ms / calls as f64)
+    };
+    time(&steps[..2])?; // warm clocks and the pipeline
+    let best = (0..4).filter_map(|_| time(&steps)).fold(f64::MAX, f64::min);
+    (best.is_finite() && best > 0.0 && best < f64::MAX).then_some(best)
+}
+
+/// The device's int8 tensor-core roof in TOPS: the fastest of its matrix-multiply paths (`mma.sync`, and the
+/// warpgroup path where the device has it) on register operands; `None` where no probe compiles or runs.
+fn measure_int8_roof(gpu: &Gpu) -> Option<f32> {
+    let cc = gpu.caps().arch.compute_capability?;
+    if cc < kernels_cuda::MMA_S8_MIN_CC {
+        return None;
+    }
+    let blocks = gpu.caps().compute_units.unwrap_or(16) * 4;
+    let ms = time_probe(gpu, &ROOF_MMA_S8, ROOF_MMA_BINDINGS, &[ROOF_MMA_ITERS], blocks, u64::from(blocks) * 128)?;
+    let ops = f64::from(blocks) * 4.0 * f64::from(ROOF_MMA_ITERS) * 16.0 * MMA_OPS;
+    Some((ops / (ms * 1e-3) / 1e12) as f32)
+}
+
 /// The slots whose candidates this module knows how to build a synthetic problem and an oracle for: the int8
-/// decode linear. A slot with several rows that is not listed (the K-quant narrow and wide blocks) keeps its
-/// row-count rule until it has a problem generator here.
-const TUNABLE_SLOTS: [&str; 1] = ["matmul_i8_gemv"];
+/// decode linear and the prefill-sized int8 GEMM. A slot with several rows that is not listed (the K-quant narrow
+/// and wide blocks) keeps its row-count rule until it has a problem generator here.
+const TUNABLE_SLOTS: [&str; 2] = ["matmul_i8_gemv", crate::native_upgrade::PREFILL_SLOT];
 
 static AUTOTUNE: AtomicBool = AtomicBool::new(true);
 static FORCED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
@@ -160,7 +279,7 @@ pub fn unknown_forced(offered: &[(String, String)]) -> Vec<(String, String)> {
     FORCED.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|f| !offered.contains(f)).cloned().collect()
 }
 
-/// A shape class of the decode regime.
+/// A shape class of one slot's grid ([`grid`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Class {
     rows: usize,
@@ -169,25 +288,29 @@ struct Class {
 }
 
 impl Class {
-    fn of(m: u32, kg: u32, n: u32) -> Option<Class> {
-        let rows = ROW_BUCKETS.iter().position(|&(lo, hi)| (lo..=hi).contains(&m))?;
-        let k = if kg * 4 <= K_CLASSES[0] * 3 / 2 { 0 } else { 1 };
+    fn of(g: &Grid, m: u32, kg: u32, n: u32) -> Option<Class> {
+        let rows = match g.rows.iter().position(|&(lo, hi)| (lo..=hi).contains(&m)) {
+            Some(r) => r,
+            None if g.open_top && m > g.rows[g.rows.len() - 1].1 => g.rows.len() - 1,
+            None => return None,
+        };
+        let k = if kg * 4 <= g.k[0] * 3 / 2 { 0 } else { 1 };
         let bytes = u64::from(n) * u64::from(kg) * 4 * 9 / 8;
-        Some(Class { rows, k, bytes: BYTES_BOUNDS.iter().position(|&b| bytes < b).unwrap_or(BYTES_BOUNDS.len()) })
+        Some(Class { rows, k, bytes: g.bytes_bounds.iter().position(|&b| bytes < b).unwrap_or(g.bytes_bounds.len()) })
     }
 
-    fn all() -> impl Iterator<Item = Class> {
-        (0..ROW_BUCKETS.len()).flat_map(|rows| (0..K_CLASSES.len()).flat_map(move |k| (0..=BYTES_BOUNDS.len()).map(move |bytes| Class { rows, k, bytes })))
+    fn all(g: &Grid) -> impl Iterator<Item = Class> + '_ {
+        (0..g.rows.len()).flat_map(move |rows| (0..g.k.len()).flat_map(move |k| (0..=g.bytes_bounds.len()).map(move |bytes| Class { rows, k, bytes })))
     }
 
     /// The problem this class is timed on: `(m, kg, n)`.
-    fn problem(self) -> (u32, u32, u32) {
-        (ROW_BUCKETS[self.rows].1, K_CLASSES[self.k] / 4, N_REPS[self.k][self.bytes])
+    fn problem(self, g: &Grid) -> (u32, u32, u32) {
+        (g.rows[self.rows].1, g.k[self.k] / 4, g.n_reps[self.k][self.bytes])
     }
 
-    fn label(self) -> String {
-        let (lo, hi) = ROW_BUCKETS[self.rows];
-        let (_, kg, n) = self.problem();
+    fn label(self, g: &Grid) -> String {
+        let (lo, hi) = g.rows[self.rows];
+        let (_, kg, n) = self.problem(g);
         format!("rows {lo}-{hi}, K~{}, N~{n}", kg * 4)
     }
 }
@@ -213,7 +336,7 @@ pub struct Entry {
 
 impl Entry {
     pub fn describe(&self) -> String {
-        self.class.label()
+        self.class.label(grid(&self.slot))
     }
 
     /// The winner's fraction of its roofline bound, when a roof was measured.
@@ -233,6 +356,9 @@ pub struct Tuned {
     pub roof_gbs: Option<f32>,
     /// The measured cost of an almost empty launch, microseconds: the bound of a projection too small to stream.
     pub floor_us: Option<f32>,
+    /// The measured int8 tensor-core compute roof, TOPS: the fastest of the device's int8 matrix-multiply paths on
+    /// operands held in registers. The bound of the compute-bound (prefill) classes.
+    pub int8_tops: Option<f32>,
     pub entries: Vec<Entry>,
     /// Whether this table was read from the persistent store rather than measured by this process.
     pub from_store: bool,
@@ -245,7 +371,7 @@ impl Tuned {
             return Some(k.clone());
         }
         let class = match params {
-            [m, kg, n, ..] => Class::of(*m, *kg, *n)?,
+            [m, kg, n, ..] => Class::of(grid(slot), *m, *kg, *n)?,
             _ => return None,
         };
         self.entries.iter().find(|e| e.slot == slot && e.class == class).map(|e| e.best.clone())
@@ -357,7 +483,7 @@ fn device_key(gpu: &Gpu, slots: &[(usize, &'static str)]) -> String {
     sources.sort_unstable();
     sources.dedup();
     let srcs: Vec<&str> = sources.iter().filter_map(|n| kernels_cuda::get(n).map(|k| k.src)).collect();
-    let fp = fnv(&srcs) ^ fnv(&[env!("CARGO_PKG_VERSION"), &format!("{ROW_BUCKETS:?}{K_CLASSES:?}{BYTES_BOUNDS:?}{N_REPS:?}")]);
+    let fp = fnv(&srcs) ^ fnv(&[env!("CARGO_PKG_VERSION"), &format!("{:?}", [&DECODE, &PREFILL].map(|g| (g.rows, g.k, g.bytes_bounds, g.n_reps)))]);
     let slug: String = format!("{desc}-{}-{cc}", gpu.kind()).chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
     format!("{slug}-{fp:016x}")
 }
@@ -375,8 +501,8 @@ fn load(key: &str) -> Option<Tuned> {
 fn parse_store(text: &str) -> Option<Tuned> {
     let mut lines = text.lines();
     let header: Vec<&str> = lines.next()?.split('|').collect();
-    let [tag, device, roof, floor] = header[..] else { return None };
-    if tag != "native-tune-v2" {
+    let [tag, device, roof, floor, tops] = header[..] else { return None };
+    if tag != "native-tune-v3" {
         return None;
     }
     let mut entries = Vec::new();
@@ -396,7 +522,7 @@ fn parse_store(text: &str) -> Option<Tuned> {
         }
         entries.push(Entry { slot: slot.to_owned(), class, best: best.to_owned(), results: rs });
     }
-    Some(Tuned { device: device.to_owned(), roof_gbs: roof.parse().ok(), floor_us: floor.parse().ok(), entries, from_store: true })
+    Some(Tuned { device: device.to_owned(), roof_gbs: roof.parse().ok(), floor_us: floor.parse().ok(), int8_tops: tops.parse().ok(), entries, from_store: true })
 }
 
 /// The `(slot, class)` pairs of `slots` that `t` holds no measurement for: absent, or saved unmeasured because the
@@ -404,7 +530,7 @@ fn parse_store(text: &str) -> Option<Tuned> {
 fn missing_classes(t: &Tuned, slots: &[&str]) -> Vec<(String, Class)> {
     slots
         .iter()
-        .flat_map(|&slot| Class::all().map(move |c| (slot, c)))
+        .flat_map(|&slot| Class::all(grid(slot)).map(move |c| (slot, c)))
         .filter(|&(slot, c)| !t.entries.iter().any(|e| e.slot == slot && e.class == c && !e.results.is_empty()))
         .map(|(slot, c)| (slot.to_owned(), c))
         .collect()
@@ -445,7 +571,8 @@ fn store_results(results: &[(String, Verdict)]) -> String {
 
 fn save(key: &str, t: &Tuned) {
     let Some(path) = store_path(key) else { return };
-    let mut text = format!("native-tune-v2|{}|{}|{}\n", t.device, t.roof_gbs.map(|r| r.to_string()).unwrap_or_default(), t.floor_us.map(|r| r.to_string()).unwrap_or_default());
+    let opt = |v: Option<f32>| v.map(|r| r.to_string()).unwrap_or_default();
+    let mut text = format!("native-tune-v3|{}|{}|{}|{}\n", t.device, opt(t.roof_gbs), opt(t.floor_us), opt(t.int8_tops));
     for e in &t.entries {
         text += &format!("{}|{}|{}|{}|{}|{}\n", e.slot, e.class.rows, e.class.k, e.class.bytes, e.best, store_results(&e.results));
     }
@@ -466,12 +593,14 @@ fn measure(gpu: &Gpu, slots: &[(usize, &'static str)], prior: Option<&Tuned>) ->
         Some((r, f)) => (Some(r), Some(f)),
         None => (None, None),
     };
+    let int8_tops = timing.then(|| measure_int8_roof(gpu)).flatten();
     let started = std::time::Instant::now();
     let mut entries = Vec::new();
     let mut served: HashMap<(&str, Class), Vec<&str>> = HashMap::new();
     for &(kind, slot) in slots {
-        for class in Class::all() {
-            let (m, kg, n) = class.problem();
+        let g = grid(slot);
+        for class in Class::all(g) {
+            let (m, kg, n) = class.problem(g);
             let params = [m, kg, n];
             let cands: Vec<&crate::native_upgrade::Active> = crate::native_upgrade::candidates(gpu.native_rows(), kind, &params).collect();
             if cands.is_empty() {
@@ -484,7 +613,7 @@ fn measure(gpu: &Gpu, slots: &[(usize, &'static str)], prior: Option<&Tuned>) ->
             }
             // Past the budget a class is left unmeasured (filled from its neighbours below) rather than delaying the
             // start further; the next start measures it.
-            let results = if started.elapsed() > BUDGET { Vec::new() } else { time_class(gpu, &cands, m, kg, n, roof_gbs, floor_us, timing) };
+            let results = if started.elapsed() > BUDGET { Vec::new() } else { time_class(gpu, g, &cands, (m, kg, n), &Roofs { gbs: roof_gbs, floor_us, int8_tops }, timing) };
             let mut best: Option<(&str, f64)> = None;
             for (name, v) in &results {
                 if let Verdict::Timed { us, .. } = v {
@@ -501,12 +630,32 @@ fn measure(gpu: &Gpu, slots: &[(usize, &'static str)], prior: Option<&Tuned>) ->
     fill_untimed(&mut entries, |slot, class, name| served.get(&(slot, class)).is_some_and(|names| names.contains(&name)));
     gpu.set_kernel_timing(false);
     let device = crate::adapter_info().map(|(d, _)| d).unwrap_or_else(|| gpu.kind().to_owned());
-    Tuned { device, roof_gbs, floor_us, entries, from_store: false }
+    Tuned { device, roof_gbs, floor_us, int8_tops, entries, from_store: false }
 }
 
-/// Run and time each candidate on one synthetic problem.
-#[allow(clippy::too_many_arguments)]
-fn time_class(gpu: &Gpu, cands: &[&crate::native_upgrade::Active], m: u32, kg: u32, n: u32, roof_gbs: Option<f32>, floor_us: Option<f32>, timing: bool) -> Vec<(String, Verdict)> {
+/// The device's measured roofs, the bounds a class's fraction is taken against.
+struct Roofs {
+    /// Memory read roof, GB/s.
+    gbs: Option<f32>,
+    /// Launch floor, microseconds.
+    floor_us: Option<f32>,
+    /// int8 tensor-core roof, TOPS.
+    int8_tops: Option<f32>,
+}
+
+impl Roofs {
+    /// The best time (ms) a problem of `ops` operations over `wbytes` of weights can take: the slower of the compute
+    /// and the memory bound, never under the launch floor. `None` while the roof it needs is unmeasured. A
+    /// weight-streaming (decode) class has no compute bound, it is far under the compute roof at these rows.
+    fn bound_ms(&self, compute_bound: bool, ops: f64, wbytes: u64) -> Option<f64> {
+        let mem = wbytes as f64 / (f64::from(self.gbs?) * 1e9) * 1e3;
+        let compute = if compute_bound { ops / (f64::from(self.int8_tops?) * 1e12) * 1e3 } else { 0.0 };
+        Some(mem.max(compute).max(f64::from(self.floor_us.unwrap_or(0.0)) * 1e-3))
+    }
+}
+
+/// Run and time each candidate on one synthetic problem `(m, kg, n)` of grid `g`.
+fn time_class(gpu: &Gpu, g: &Grid, cands: &[&crate::native_upgrade::Active], (m, kg, n): (u32, u32, u32), roofs: &Roofs, timing: bool) -> Vec<(String, Verdict)> {
     let k = kg * 4;
     let groups = (k / 32) as usize;
     let x = packed_i8((m * kg) as usize, 1);
@@ -518,7 +667,7 @@ fn time_class(gpu: &Gpu, cands: &[&crate::native_upgrade::Active], m: u32, kg: u
     gpu.write(&xq, &x);
     gpu.write_f32(&sxb, &sx);
     let wbytes = u64::from(n) * u64::from(kg) * 4 + u64::from(n) * groups as u64 * 4;
-    let copies = FOOTPRINT_BYTES.div_ceil(wbytes).clamp(1, 128) as usize;
+    let copies = if g.footprint_bytes == 0 { 1 } else { g.footprint_bytes.div_ceil(wbytes).clamp(1, 128) as usize };
     let weights: Vec<_> = (0..copies)
         .map(|i| {
             let wb = gpu.storage(u64::from(n) * u64::from(kg));
@@ -555,7 +704,10 @@ fn time_class(gpu: &Gpu, cands: &[&crate::native_upgrade::Active], m: u32, kg: u
             results.push((a.kernel.to_owned(), Verdict::Timed { us: f64::NAN, gbs: 0.0, frac: None }));
             continue;
         }
-        let steps: Vec<_> = weights.iter().filter_map(step).collect();
+        // A single copy of the weights is launched repeatedly: a launch is timed by the backend's own events, and the
+        // minimum over several makes a short kernel's figure the uncontended one.
+        let launches = copies.max(MIN_LAUNCHES);
+        let steps: Vec<_> = (0..launches).filter_map(|i| step(&weights[i % copies])).collect();
         let time = |steps: &[crate::Step]| {
             gpu.reset_kernel_times();
             gpu.submit(&[], steps);
@@ -572,8 +724,10 @@ fn time_class(gpu: &Gpu, cands: &[&crate::native_upgrade::Active], m: u32, kg: u
         }
         let gbs = wbytes as f64 / (best * 1e-3) / 1e9;
         // A decode-regime int8 linear moves its weights once and does far fewer operations than the roof allows per
-        // byte, so its bound is the memory roof; the fraction is that bound's time over the measured time.
-        let frac = roof_gbs.map(|r| (wbytes as f64 / (f64::from(r) * 1e9) * 1e3).max(f64::from(floor_us.unwrap_or(0.0)) * 1e-3) / best);
+        // byte, so its bound is the memory roof; a prefill-sized one is bound by the tensor cores. The fraction is the
+        // bound's time over the measured time.
+        let ops = 2.0 * f64::from(m) * f64::from(n) * f64::from(k);
+        let frac = roofs.bound_ms(g.footprint_bytes == 0, ops, wbytes).map(|b| b / best);
         results.push((a.kernel.to_owned(), Verdict::Timed { us: best * 1e3, gbs, frac }));
     }
     results
@@ -599,10 +753,17 @@ pub fn report() -> String {
     let mut out = String::new();
     for (_, t) in tables.iter() {
         let roof = t.roof_gbs.map(|r| format!("{r:.0} GB/s")).unwrap_or_else(|| "not measured".into());
-        out += &format!("native kernel selection on {} (memory roof {roof}, {})\n", t.device, if t.from_store { "from the store" } else { "measured now" });
-        out += &format!("{:<18} {:<28} {:<22} {:>8} {:>8} {:>7}  other candidates\n", "slot", "shape class", "chosen", "us", "GB/s", "roof");
+        let tops = t.int8_tops.map(|r| format!("{r:.0} TOPS")).unwrap_or_else(|| "not measured".into());
+        out += &format!("native kernel selection on {} (memory roof {roof}, int8 tensor-core roof {tops}, {})\n", t.device, if t.from_store { "from the store" } else { "measured now" });
+        out += &format!("{:<18} {:<28} {:<22} {:>8} {:>8} {:>7}  other candidates\n", "slot", "shape class", "chosen", "us", "GB/s|TOPS", "roof");
         for e in &t.entries {
-            let (us, gbs, frac) = match e.results.iter().find(|(k, _)| *k == e.best) {
+            let g = grid(&e.slot);
+            let (us, rate, frac) = match e.results.iter().find(|(k, _)| *k == e.best) {
+                // A compute-bound class reports the operations it ran a second, a streaming one its weight bandwidth.
+                Some((_, Verdict::Timed { us, frac, .. })) if g.footprint_bytes == 0 => {
+                    let (m, kg, n) = e.class.problem(g);
+                    (*us, 2.0 * f64::from(m) * f64::from(n) * f64::from(kg) * 4.0 / (*us * 1e-6) / 1e12, *frac)
+                }
                 Some((_, Verdict::Timed { us, gbs, frac })) => (*us, *gbs, *frac),
                 _ => (f64::NAN, 0.0, None),
             };
@@ -621,7 +782,7 @@ pub fn report() -> String {
                 e.describe(),
                 e.best,
                 us,
-                gbs,
+                rate,
                 frac.map(|f| format!("{:.0}%", f * 100.0)).unwrap_or_else(|| "-".into()),
                 others.join(", ")
             );
@@ -645,10 +806,10 @@ pub fn offered() -> Vec<(String, String)> {
 }
 
 /// The selection table of the process's default device, built by opening a handle that registers the kernel slots
-/// the native candidate sets cover (the int8 decode linear): what `brain roofline --kernels` prints, with no model
+/// the native candidate sets cover (the int8 decode linear and prefill GEMM): what `brain roofline --kernels` prints, with no model
 /// loaded.
 pub fn report_for_default_device() -> String {
-    let _gpu = Gpu::new(&[("matmul_i8_gemv", kernels::MATMUL_I8_GEMV)]);
+    let _gpu = Gpu::new(&[("matmul_i8_gemv", kernels::MATMUL_I8_GEMV), ("matmul_i8_dyn", kernels::MATMUL_I8_DYN)]);
     report()
 }
 
@@ -661,25 +822,42 @@ mod tests {
         for m in 1..=32u32 {
             for kg in [8u32, 256, 1280, 4352, 9000] {
                 for n in [1u32, 48, 1024, 5120, 17408, 248320] {
-                    let c = Class::of(m, kg, n).expect("a decode-regime shape has a class");
-                    assert!((ROW_BUCKETS[c.rows].0..=ROW_BUCKETS[c.rows].1).contains(&m));
+                    let c = Class::of(&DECODE, m, kg, n).expect("a decode-regime shape has a class");
+                    assert!((DECODE.rows[c.rows].0..=DECODE.rows[c.rows].1).contains(&m));
                 }
             }
         }
-        assert!(Class::of(33, 1280, 1024).is_none(), "past the decode regime nothing is tuned here");
-        for c in Class::all() {
-            let (m, kg, n) = c.problem();
-            assert_eq!(Class::of(m, kg, n), Some(c), "{}: the problem timed for a class falls in that class", c.label());
+        assert!(Class::of(&DECODE, 33, 1280, 1024).is_none(), "past the decode regime nothing is tuned on the decode grid");
+        for g in [&DECODE, &PREFILL] {
+            for c in Class::all(g) {
+                let (m, kg, n) = c.problem(g);
+                assert_eq!(Class::of(g, m, kg, n), Some(c), "{}: the problem timed for a class falls in that class", c.label(g));
+            }
         }
+    }
+
+    /// The prefill grid starts where the decode grid ends and takes every wider round into its last class, so no
+    /// prefill-sized dispatch is left to the default for being wider than the grid.
+    #[test]
+    fn the_prefill_grid_continues_the_decode_grid_and_is_open_above() {
+        let decode_top = DECODE.rows[DECODE.rows.len() - 1].1;
+        assert_eq!(PREFILL.rows[0].0, decode_top + 1);
+        for pair in PREFILL.rows.windows(2) {
+            assert_eq!(pair[0].1 + 1, pair[1].0, "buckets are contiguous");
+        }
+        let top = Class::of(&PREFILL, PREFILL.rows[PREFILL.rows.len() - 1].1, 1280, 5120).unwrap();
+        assert_eq!(Class::of(&PREFILL, 1 << 20, 1280, 5120), Some(top));
+        assert_eq!(grid(crate::native_upgrade::PREFILL_SLOT).footprint_bytes, 0);
     }
 
     #[test]
     fn a_table_names_its_choice_per_class_and_a_forced_candidate_wins() {
-        let class = Class::of(12, 1280, 5120).unwrap();
+        let class = Class::of(&DECODE, 12, 1280, 5120).unwrap();
         let t = Tuned {
             device: "test".into(),
             roof_gbs: Some(1000.0),
             floor_us: Some(5.0),
+            int8_tops: Some(600.0),
             entries: vec![Entry { slot: "slot".into(), class, best: "fast".into(), results: vec![("fast".into(), Verdict::Timed { us: 1.0, gbs: 500.0, frac: Some(0.5) })] }],
             from_store: false,
         };
@@ -720,8 +898,8 @@ mod tests {
     #[test]
     fn a_stored_table_with_unmeasured_classes_is_incomplete() {
         let line = |e: &Entry| format!("{}|{}|{}|{}|{}|{}\n", e.slot, e.class.rows, e.class.k, e.class.bytes, e.best, store_results(&e.results));
-        let all: Vec<Entry> = Class::all().map(|class| Entry { class, ..timed("s", 0, "gemv") }).collect();
-        let text = |entries: &[Entry]| "native-tune-v2|dev|3700|6.5\n".to_owned() + &entries.iter().map(line).collect::<String>();
+        let all: Vec<Entry> = Class::all(&DECODE).map(|class| Entry { class, ..timed("s", 0, "gemv") }).collect();
+        let text = |entries: &[Entry]| "native-tune-v3|dev|3700|6.5|600\n".to_owned() + &entries.iter().map(line).collect::<String>();
         let complete = parse_store(&text(&all)).expect("a whole table parses");
         assert!(missing_classes(&complete, &["s"]).is_empty());
         let mut cut = all.clone();
@@ -734,7 +912,7 @@ mod tests {
 
     #[test]
     fn the_store_round_trips_a_table() {
-        let class = Class::of(12, 1280, 5120).unwrap();
+        let class = Class::of(&DECODE, 12, 1280, 5120).unwrap();
         let entry = Entry {
             slot: "slot".into(),
             class,

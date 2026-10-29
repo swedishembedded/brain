@@ -43,7 +43,8 @@
 //!   (`[m, k, n]`) the portable `matmul.wgsl` reads;
 //! * the int8 dynamic-activation GEMM, `[Act, Weight, ActScale, WeightScale,
 //!   Out]` with group-32 weight scales - the prefill GEMM of every int8
-//!   resident model, run on int8 tensor cores (`matmul_i8_mma`). It is taken
+//!   resident model, run on int8 tensor cores: the candidate the device's tuned table names for the shape class
+//!   (`native_upgrade::PREFILL_SLOT`, chosen by `native_tune`). It is taken
 //!   only above the GEMV's crossover ([`select::i8_gemv_max_rows_at`]: the whole
 //!   decode regime on a device with a compute capability, whose GEMV slot picks
 //!   its candidate by measurement - below that the GEMV family is the right shape), only when K is a
@@ -64,17 +65,6 @@ use super::{LowerCtx, Lowered, OpRequest, OperatorProvider, Pass, Role};
 /// `matmul.wgsl`'s own `@binding` order, which the f32 GEMM mirrors: uniform,
 /// activations, weights, output.
 const MATMUL_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
-
-/// `matmul_i8_dyn.wgsl`'s own `@binding` order: uniform, packed activations,
-/// packed weights, per-token activation scale, group weight scale, output.
-const MATMUL_I8_BINDINGS: &[BindKind] = &[
-    BindKind::Uniform,
-    BindKind::StorageRead,
-    BindKind::StorageRead,
-    BindKind::StorageRead,
-    BindKind::StorageRead,
-    BindKind::StorageReadWrite,
-];
 
 /// `paged_flash_prefill_hd256.wgsl`'s own `@binding` order: uniform, queries,
 /// K pool, V pool, block tables, sequence lengths, context output.
@@ -185,22 +175,6 @@ impl CudaProvider {
             return kernels_cuda::get("matmul_i8_mma").filter(|k| k.min_cc <= self.cc);
         }
         kernels_cuda::find(op, dtype, self.cc)
-    }
-
-    /// The int8 tensor-core GEMM for `rows` activation rows: the 64x64-tile
-    /// `matmul_i8_mma` for prefill-sized row counts, and the smaller-tile
-    /// siblings (`_m16`, `_m32`, `_m128`) for the row counts of a batched
-    /// decode step, where a big tile leaves most of the device without a block
-    /// and the weights stream at a fraction of the memory bandwidth. All are
-    /// the same source at a different tile, so the result is bit-identical.
-    pub fn i8_mma_kernel(&self, rows: u32) -> Option<&'static CudaKernel> {
-        let name = match rows {
-            0..=16 => "matmul_i8_mma_m16",
-            17..=32 => "matmul_i8_mma_m32",
-            33..=128 => "matmul_i8_mma_m128",
-            _ => "matmul_i8_mma",
-        };
-        kernels_cuda::get(name).filter(|k| k.min_cc <= self.cc)
     }
 
     /// [`Self::kernel`]'s registry name - what a test or a diagnostic reports
@@ -1259,20 +1233,31 @@ impl OperatorProvider for CudaProvider {
                 ))
             }
         };
-        let k = if dt == Dtype::I8 { self.i8_mma_kernel(req.shape.m) } else { self.kernel(select::Op::MatMul, dt) };
+        let bufs: Vec<&backend_api::DeviceBuffer> = req.operands.iter().map(|o| o.buf).collect();
+        let offsets: Vec<(u64, u64)> = req.operands.iter().map(|o| o.range).collect();
+        if dt == Dtype::I8 {
+            // The kernel is the device's measured choice for the shape class (`gpu_core::native_tune`, the
+            // `matmul_i8_prefill` slot), not a row-count rule written here.
+            let (step, reported) = ctx.gpu.prefill_gemm_step(&bufs, &offsets, req.attrs).ok_or_else(|| {
+                format!(
+                    "cuda::CudaProvider::lower: no native int8 prefill candidate serves m={} n={} k={} (params {:?}) on this device - falling back to the WGSL reference provider",
+                    req.shape.m, req.shape.n, req.shape.k, req.attrs
+                )
+            })?;
+            ctx.steps.push(step);
+            return Ok(Lowered::new(1, vec![reported]));
+        }
+        let k = self.kernel(select::Op::MatMul, dt);
         let k = k.ok_or_else(|| {
             format!("cuda::CudaProvider::lower: no native {dt:?} MatMul kernel at compute capability {}.{}", self.cc.0, self.cc.1)
         })?;
-        let bindings = if dt == Dtype::I8 { MATMUL_I8_BINDINGS } else { MATMUL_BINDINGS };
-        let Some(id) = ctx.gpu.native_kernel(k, bindings) else {
+        let Some(id) = ctx.gpu.native_kernel(k, MATMUL_BINDINGS) else {
             return Err(format!(
                 "cuda::CudaProvider::lower: this device declined the native {dt:?} matmul kernel \
                  (register_native returned None) - falling back to the WGSL reference provider"
             ));
         };
 
-        let bufs: Vec<&backend_api::DeviceBuffer> = req.operands.iter().map(|o| o.buf).collect();
-        let offsets: Vec<(u64, u64)> = req.operands.iter().map(|o| o.range).collect();
         // The uniform is the reference kernel's own (`[m, k, n]` for f32,
         // `[m, k/4, n]` for int8), passed through untouched - the native
         // kernel reads the identical layout on purpose, so there is no second

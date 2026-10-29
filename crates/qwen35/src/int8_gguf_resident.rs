@@ -284,10 +284,14 @@ const MAX_PREFILL_TOKENS: u32 = 256;
 /// | 1024 | 610      | 1679  |
 /// | 2048 | 1028     | 1993  |
 ///
-/// 1024 rows of scratch is well under a gigabyte per stage, which every device
-/// that can hold this model's weights has to spare; going further buys little
-/// for a prompt that is rarely a multiple of the round anyway.
-const TENSOR_CORE_PREFILL_TOKENS: u32 = 1024;
+/// Re-measured with the prefill GEMM chosen per shape class (the Hopper
+/// warpgroup candidate wins from about 512 rows): the 2048-row round is
+/// faster than 1024 on `qwen35_gguf_prefill_profile` and on `brain perf run
+/// longctx` prompts of 1K/8K/32K, and 4096 rows buy only a little more for
+/// twice the scratch (the cuda.md ledger has the numbers). 2048 rows of
+/// scratch is still about a gigabyte per stage, which every device that can
+/// hold this model's weights has to spare.
+const TENSOR_CORE_PREFILL_TOKENS: u32 = 2048;
 
 /// Hidden rows one head readback of [`Qwen35GgufInstance::teacher_forced_scores`]
 /// projects at once. The readback is `[rows, vocab]` on the host, which at this
