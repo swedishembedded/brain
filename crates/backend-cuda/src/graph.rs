@@ -186,6 +186,12 @@ pub(crate) struct LiveNode {
 unsafe impl Send for LiveNode {}
 unsafe impl Sync for LiveNode {}
 
+/// The two halves of a graph's parameter copy: the page-locked host image and the device block it is copied into.
+struct ParamBlock {
+    staging: exec::PinnedMem,
+    device: exec::DeviceMem,
+}
+
 pub(crate) struct LiveGraph {
     sig: SubmitSig,
     /// The context's graph epoch when this was captured.
@@ -294,6 +300,16 @@ const MAX_LIVE: usize = 8;
 /// submission this large.
 const WINDOWED_MIN_NODES: usize = 128;
 
+/// How many parameter blocks a cache keeps for its next captures.
+///
+/// A graph retired with its stale buffers (see [`GraphCache::retire`]) hands its parameter block over instead of
+/// freeing it, because `cuMemFreeHost` and `cuMemFree` wait for the whole device. Sized to a full set of live graphs
+/// being replaced at once.
+const MAX_SPARE_PARAMS: usize = 2 * MAX_LIVE;
+
+/// How much larger than its request a spare parameter block may be and still be reused for it.
+const SPARE_PARAMS_SLACK: usize = 2;
+
 /// How many distinct recent shapes [`GraphCache::seen`] remembers.
 const MAX_SEEN: usize = 8;
 
@@ -325,6 +341,9 @@ pub(crate) struct GraphCache {
     /// layers, and capturing each of those paid an instantiation (milliseconds)
     /// per submission - a one-row chunk round went from 143 ms to 1473 ms.
     previous: Option<(u64, u64)>,
+    /// Parameter blocks of retired graphs, kept for the next capture - see [`Self::retire`]. Bounded by
+    /// [`MAX_SPARE_PARAMS`].
+    spare_params: Vec<ParamBlock>,
     /// Captures or replays that returned an error - see [`Self::forget`].
     failures: u32,
     /// Set while a replayed graph may still be executing.
@@ -339,6 +358,48 @@ pub(crate) struct GraphCache {
 }
 
 impl GraphCache {
+    /// Release the graphs `doomed` selects. The caller has settled the handle (no replay of them can still be running).
+    ///
+    /// Their parameter blocks are kept for the next capture rather than freed: `cuMemFreeHost` and `cuMemFree` wait
+    /// for every stream of the device, so freeing them here made the handle's next submission - a decode step on the
+    /// urgent lane - wait for whatever the other lane had queued, a prefill round's worth of milliseconds.
+    fn retire(&mut self, doomed: impl Fn(&LiveGraph) -> bool) {
+        let (gone, kept): (Vec<LiveGraph>, Vec<LiveGraph>) = std::mem::take(&mut self.live).into_iter().partition(|g| doomed(g));
+        self.live = kept;
+        self.recycle(gone);
+    }
+
+    /// Drop `gone`, keeping their parameter blocks as [`Self::retire`] says.
+    fn recycle(&mut self, gone: Vec<LiveGraph>) {
+        for mut graph in gone {
+            if let (Some(staging), Some(device)) = (graph.staging.take(), graph._params.take()) {
+                if self.spare_params.len() < MAX_SPARE_PARAMS {
+                    self.spare_params.push(ParamBlock { staging, device });
+                }
+            }
+        }
+    }
+
+    /// A parameter block of at least `words` u32s, zeroed on the host and the device: the smallest spare that is not
+    /// wastefully larger, else a new one. Zeroed because the padding between two steps' parameters is part of the one
+    /// copy and must not be whatever the block last held.
+    fn param_block_for(&mut self, ctx: &exec::Context, words: usize) -> Result<ParamBlock, String> {
+        let best = self
+            .spare_params
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.staging.words() >= words && b.staging.words() <= words.saturating_mul(SPARE_PARAMS_SLACK))
+            .min_by_key(|(_, b)| b.staging.words())
+            .map(|(i, _)| i);
+        let block = match best {
+            Some(i) => self.spare_params.swap_remove(i),
+            None => ParamBlock { staging: ctx.pinned(words)?, device: ctx.alloc(words * 4)? },
+        };
+        ctx.zero(&block.device)?;
+        block.staging.fill_at(0, &vec![0u32; block.staging.words()]);
+        Ok(block)
+    }
+
     /// Wait for the device if a replay may still be running.
     ///
     /// Required before **discarding** a captured graph, not only before
@@ -373,7 +434,7 @@ impl GraphCache {
         // so a graph captured before one describes memory it no longer owns.
         if self.live.iter().any(|l| l.epoch != epoch) {
             self.settle(ctx);
-            self.live.retain(|l| l.epoch == epoch);
+            self.retire(|l| l.epoch != epoch);
         }
         if let Some(i) = self.live.iter().position(|l| l.sig == *sig) {
             return Plan::Replay(i);
@@ -412,7 +473,7 @@ impl GraphCache {
     /// instantiated graph and page-locked staging.
     pub fn drained(&mut self, epoch: u64) {
         self.in_flight = false;
-        self.live.retain(|l| l.epoch == epoch);
+        self.retire(|l| l.epoch != epoch);
     }
 
     /// Record `steps` into a graph, instantiate it and adopt it.
@@ -446,20 +507,13 @@ impl GraphCache {
                 _ => None,
             });
         }
-        let staging = if words > 0 { Some(ctx.pinned(words)?) } else { None };
-        // The device block every node's uniform pointer will point into. Also
-        // allocated before the capture opens, and zeroed along with its host
-        // image: the alignment padding between two steps' parameters is part
-        // of the one copy and must not be whatever the allocator left there.
-        let params = if words > 0 {
-            let block = ctx.alloc(words * 4)?;
-            ctx.zero(&block)?;
-            if let Some(st) = staging.as_ref() {
-                st.fill_at(0, &vec![0u32; words]);
-            }
-            Some(block)
+        // The graph's parameters: a page-locked image and the device block every node's uniform pointer points into.
+        // Both are made before the capture opens and are zeroed, padding included.
+        let (staging, params) = if words > 0 {
+            let block = self.param_block_for(ctx, words)?;
+            (Some(block.staging), Some(block.device))
         } else {
-            None
+            (None, None)
         };
 
         let capture = ctx.begin_capture()?;
@@ -541,7 +595,8 @@ impl GraphCache {
         // pinned staging and its hold on every buffer it named.
         if self.live.len() > MAX_LIVE {
             self.settle(ctx);
-            self.live.truncate(MAX_LIVE);
+            let oldest = self.live.split_off(MAX_LIVE);
+            self.recycle(oldest);
         }
         Ok(())
     }
@@ -660,7 +715,7 @@ impl GraphCache {
     /// that decision once.
     pub fn forget(&mut self, ctx: &exec::Context) -> bool {
         self.settle(ctx);
-        self.live.clear();
+        self.retire(|_| true);
         self.seen.clear();
         self.previous = None;
         self.failures += 1;

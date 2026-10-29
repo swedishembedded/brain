@@ -101,7 +101,10 @@ fn a_buffer_past_4_gib_is_addressed_without_a_32_bit_wrap() {
         assert_eq!(peek(&b, &x, &out, 7), 0, "...or aliased onto the start of the buffer");
     }
     b.poll_wait();
-    assert_eq!(live_resources().device_bytes, before.device_bytes, "the 5 GiB buffer was not returned");
+    // The retired graphs' parameter blocks are kept for the next capture (a few dozen bytes each, bounded), and go
+    // with the handle below.
+    let kept = live_resources().device_bytes - before.device_bytes;
+    assert!(kept < (1 << 20), "the 5 GiB buffer was not returned ({kept} bytes still held)");
     // The handle's own staging, modules and stream go with it.
     drop(b);
     assert_eq!(live_resources(), before, "dropping the backend left a driver object behind");

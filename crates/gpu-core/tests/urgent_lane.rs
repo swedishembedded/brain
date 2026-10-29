@@ -40,6 +40,8 @@ struct Operands {
     w: gpu_core::DeviceBuffer,
     sw: gpu_core::DeviceBuffer,
     out: gpu_core::DeviceBuffer,
+    /// Zeroed by `submit_clearing`; a buffer a captured graph names without any step's uniform naming it.
+    scratch: gpu_core::DeviceBuffer,
     m: u32,
     k: u32,
     n: u32,
@@ -57,13 +59,20 @@ impl Operands {
         gpu.write_f32(&sx, &vec![0.01; (m * (k / 32)) as usize]);
         let sw = gpu.storage(u64::from(n * (k / 32)));
         gpu.write_f32(&sw, &vec![0.02; (n * (k / 32)) as usize]);
-        Operands { x, sx, w, sw, out: gpu.storage(u64::from(m * n)), m, k, n }
+        Operands { x, sx, w, sw, out: gpu.storage(u64::from(m * n)), scratch: gpu.storage(1), m, k, n }
     }
 
     fn submit(&self, gpu: &Gpu, kind: usize) {
         let threads = if kind == K_GEMV { Dispatch::Workgroups(self.n) } else { Dispatch::Threads(self.m * self.n) };
         let step = gpu.dispatch(kind, &[&self.x, &self.w, &self.sx, &self.sw, &self.out], &[self.m, self.k / 4, self.n], threads);
         gpu.submit(&[], &[step]);
+    }
+
+    /// [`Self::submit`] with `scratch` as the submission's clear.
+    fn submit_clearing(&self, gpu: &Gpu, kind: usize) {
+        let threads = if kind == K_GEMV { Dispatch::Workgroups(self.n) } else { Dispatch::Threads(self.m * self.n) };
+        let step = gpu.dispatch(kind, &[&self.x, &self.w, &self.sx, &self.sw, &self.out], &[self.m, self.k / 4, self.n], threads);
+        gpu.submit(&[&self.scratch], &[step]);
     }
 
     fn bits(&self, gpu: &Gpu) -> Vec<u32> {
@@ -122,6 +131,40 @@ fn an_urgent_read_does_not_wait_for_the_normal_lane() {
     let bulk_ms = t.elapsed().as_secs_f64() * 1e3;
     assert!(still_busy, "the normal lane finished its {bulk_ms:.1} ms of work before the urgent read returned ({urgent_ms:.2} ms)");
     assert!(gpu.is_idle(), "a drained lane is idle");
+}
+
+/// A decode step whose captured graph was invalidated (a buffer it named was
+/// freed) retires that graph on the urgent lane's next submission. Retiring must
+/// not call anything that waits for the whole device: the driver's page-locked
+/// free does, and with a prefill queued on the normal lane it held the decode
+/// loop for the rest of that queue (knowledge 374).
+#[test]
+fn retiring_an_invalidated_graph_in_the_urgent_lane_does_not_wait_for_the_normal_lane() {
+    let Some(gpu) = urgent_cuda() else { return };
+    let bulk = Operands::new(&gpu, 64, 5120, 17408, 3);
+    let mut decode = lane::urgent(|| Operands::new(&gpu, 1, 5120, 1024, 4));
+    // Three identical submissions: the second is captured, the third replays it.
+    lane::urgent(|| {
+        for _ in 0..3 {
+            decode.submit_clearing(&gpu, K_GEMV);
+            let _ = decode.bits(&gpu);
+        }
+        // Freeing the buffer the graph clears makes the graph stale.
+        decode.scratch = gpu.storage(1);
+    });
+    for _ in 0..40 {
+        bulk.submit(&gpu, K_GEMM);
+    }
+    assert!(!gpu.is_idle(), "forty prefill GEMMs were finished as soon as they were queued");
+    let urgent_ms = lane::urgent(|| {
+        let t = Instant::now();
+        decode.submit_clearing(&gpu, K_GEMV);
+        let _ = decode.bits(&gpu);
+        t.elapsed().as_secs_f64() * 1e3
+    });
+    let still_busy = !gpu.is_idle();
+    gpu.poll_wait();
+    assert!(still_busy, "the urgent lane's first step after an invalidation waited for the normal lane's whole queue ({urgent_ms:.1} ms)");
 }
 
 /// A decode GEMV's latency: alone, behind a running prefill GEMM in the same
