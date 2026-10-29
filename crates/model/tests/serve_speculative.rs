@@ -579,10 +579,10 @@ fn the_ngram_drafter_copies_what_the_context_repeats() {
     let mut d = NgramDrafter::new(2);
     let table = BlockTable::new();
     let ctx = [5u32, 6, 7, 8, 9, 1, 2, 5, 6];
-    let q = DraftQuery { context: &ctx, table: &table };
+    let q = DraftQuery { id: 0, context: &ctx, table: &table };
     assert_eq!(d.draft(&[q], &[3]), vec![vec![7, 8, 9]]);
     let ctx = [1u32, 2, 3, 4];
-    let q = DraftQuery { context: &ctx, table: &table };
+    let q = DraftQuery { id: 0, context: &ctx, table: &table };
     assert_eq!(d.draft(&[q], &[3]), vec![Vec::<u32>::new()], "no earlier occurrence, no proposal");
 }
 

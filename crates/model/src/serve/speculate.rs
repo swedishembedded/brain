@@ -43,6 +43,8 @@ use super::*;
 
 /// What a drafter may look at for one sequence.
 pub struct DraftQuery<'a> {
+    /// The request id: stable for the life of the sequence, so a drafter can keep per-sequence state.
+    pub id: u64,
     /// The prompt followed by every token generated so far. The last element
     /// is the token the next decode step consumes.
     pub context: &'a [u32],
@@ -63,35 +65,91 @@ pub trait Drafter: Send {
 /// context's trailing `n` tokens and propose what followed it. Free to run,
 /// and strong exactly where generations copy their context (code edits, tool
 /// call arguments, quoted text).
+///
+/// Each sequence keeps an index of the n-grams it has seen (hash chains over
+/// start positions, latest first), extended by only the tokens appended since
+/// its previous query, so a query costs O(new tokens x n) to index plus O(n)
+/// for the lookup (chains are walked past a hash collision only), not a
+/// backwards scan of the whole context. A sequence that is absent from a
+/// round loses its index (bounded memory) and is re-indexed, once, when it
+/// returns.
 pub struct NgramDrafter {
     n: usize,
+    seqs: HashMap<u64, GramIndex>,
+}
+
+/// One sequence's n-gram index. `head[h]` is the latest start whose n-gram hashes to `h`; `prev[s]` the start
+/// before `s` with the same hash (or [`NO_START`]). Only starts below `indexed` are in it.
+#[derive(Default)]
+struct GramIndex {
+    head: HashMap<u64, u32>,
+    prev: Vec<u32>,
+    indexed: usize,
+}
+
+const NO_START: u32 = u32::MAX;
+
+fn gram_hash(gram: &[u32]) -> u64 {
+    gram.iter().fold(0xCBF2_9CE4_8422_2325u64, |h, &t| (h ^ u64::from(t)).wrapping_mul(0x0000_0100_0000_01B3))
+}
+
+impl GramIndex {
+    /// Index every n-gram that starts before `upto` (`context[..upto + n - 1]` must exist).
+    fn extend(&mut self, context: &[u32], n: usize, upto: usize) {
+        for start in self.indexed..upto {
+            let previous = self.head.insert(gram_hash(&context[start..start + n]), start as u32);
+            self.prev.push(previous.unwrap_or(NO_START));
+        }
+        self.indexed = self.indexed.max(upto);
+    }
+
+    /// The latest indexed start whose n-gram equals `gram`.
+    fn latest(&self, context: &[u32], gram: &[u32]) -> Option<usize> {
+        let mut at = *self.head.get(&gram_hash(gram))?;
+        while at != NO_START {
+            let start = at as usize;
+            if &context[start..start + gram.len()] == gram {
+                return Some(start);
+            }
+            at = self.prev[start];
+        }
+        None
+    }
 }
 
 impl NgramDrafter {
     /// Match on the trailing `n` tokens (`n >= 1`).
     pub fn new(n: usize) -> NgramDrafter {
-        NgramDrafter { n: n.max(1) }
+        NgramDrafter { n: n.max(1), seqs: HashMap::new() }
     }
 }
 
 impl Drafter for NgramDrafter {
     fn draft(&mut self, queries: &[DraftQuery], ks: &[usize]) -> Vec<Vec<u32>> {
-        queries
+        let n = self.n;
+        let mut kept: HashMap<u64, GramIndex> = HashMap::with_capacity(queries.len());
+        let out = queries
             .iter()
             .zip(ks)
             .map(|(q, &k)| {
                 let c = q.context;
-                if k == 0 || c.len() <= self.n {
-                    return Vec::new();
-                }
-                let suffix = &c[c.len() - self.n..];
-                let hit = (0..c.len() - self.n).rev().find(|&i| &c[i..i + self.n] == suffix);
-                match hit {
-                    Some(i) => c[i + self.n..].iter().take(k).copied().collect(),
-                    None => Vec::new(),
-                }
+                let mut index = self.seqs.remove(&q.id).filter(|i| i.indexed < c.len()).unwrap_or_default();
+                let proposal = if k == 0 || c.len() <= n {
+                    Vec::new()
+                } else {
+                    // Earlier occurrences start at most `c.len() - n - 1`: the suffix itself is not one.
+                    index.extend(c, n, c.len() - n);
+                    match index.latest(c, &c[c.len() - n..]) {
+                        Some(i) => c[i + n..].iter().take(k).copied().collect(),
+                        None => Vec::new(),
+                    }
+                };
+                kept.insert(q.id, index);
+                proposal
             })
-            .collect()
+            .collect();
+        self.seqs = kept;
+        out
     }
 }
 
@@ -477,7 +535,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             ks[widest] -= 1;
             rows -= 1;
         }
-        let queries: Vec<DraftQuery> = active.iter().map(|&i| DraftQuery { context: &self.running[i].context, table: &self.running[i].table }).collect();
+        let queries: Vec<DraftQuery> = active.iter().map(|&i| DraftQuery { id: self.running[i].id, context: &self.running[i].context, table: &self.running[i].table }).collect();
         let mut props = match self.drafter.as_mut() {
             Some(d) => d.draft(&queries, &ks),
             None => self.dec.draft(&queries, &ks),
@@ -624,5 +682,43 @@ mod tests {
     fn a_target_that_plain_steps_miss_too_changes_nothing() {
         let mut g = measured();
         assert!(g.speculate(2, Some(0.010)));
+    }
+
+    /// The incremental n-gram index answers what the backwards scan it replaced answered, for
+    /// contexts that grow round by round, several sequences sharing one drafter, and a sequence
+    /// that drops out of a round and returns.
+    #[test]
+    fn the_ngram_index_equals_the_backwards_scan() {
+        fn scan(c: &[u32], n: usize, k: usize) -> Vec<u32> {
+            if k == 0 || c.len() <= n {
+                return Vec::new();
+            }
+            let suffix = &c[c.len() - n..];
+            match (0..c.len() - n).rev().find(|&i| &c[i..i + n] == suffix) {
+                Some(i) => c[i + n..].iter().take(k).copied().collect(),
+                None => Vec::new(),
+            }
+        }
+        let table = BlockTable::new();
+        let mut rng = data::rng::Lcg::new(9);
+        for n in 1..=4 {
+            let mut drafter = NgramDrafter::new(n);
+            let mut contexts: Vec<Vec<u32>> = vec![Vec::new(); 3];
+            for round in 0..120 {
+                for c in contexts.iter_mut() {
+                    for _ in 0..1 + (rng.unit() * 3.0) as usize {
+                        c.push((rng.unit() * 4.0) as u32);
+                    }
+                }
+                // Sequence 2 sits out some rounds.
+                let present: Vec<usize> = (0..3).filter(|&i| i != 2 || round % 5 != 0).collect();
+                let queries: Vec<DraftQuery> = present.iter().map(|&i| DraftQuery { id: i as u64, context: &contexts[i], table: &table }).collect();
+                let ks: Vec<usize> = present.iter().map(|_| (rng.unit() * 5.0) as usize).collect();
+                let got = drafter.draft(&queries, &ks);
+                for (j, &i) in present.iter().enumerate() {
+                    assert_eq!(got[j], scan(&contexts[i], n, ks[j]), "n {n} round {round} sequence {i}");
+                }
+            }
+        }
     }
 }
