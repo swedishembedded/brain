@@ -553,6 +553,28 @@ multi-times wins on more than one model's forward and backward pass in a single
 day. Follow it in order; most of the steps end the work early, and the ones
 that end it early are the cheap ones.
 
+### F.0 Profile with the driver's own tools - always
+
+**Standing rule.** Profiling or optimizing brain on an NVIDIA system uses Nsight
+Systems (`nsys`) and Nsight Compute (`ncu`); on any other vendor's system, the
+equivalent driver-native tool set (for AMD the ROCm profilers, for Intel the
+oneAPI/VTune GPU tools, on Apple the Metal System Trace and GPU counters, on an
+Arm Mali or Adreno part the vendor's GPU profiler). brain's own per-kernel timers
+(`gpu_core::profile`, the `perf` tables) rank kernels; they do not replace these
+tools, which show what the timers cannot:
+
+- **The timeline** (`nsys profile -t cuda,osrt,nvtx --cuda-graph-trace=node`):
+  whether the decode and prefill streams really overlap, where the host thread
+  blocks in the driver (a synchronous free, a full launch queue, a readback), and
+  how long the device sits idle between steps. Two of the 27B's inter-token
+  stalls were host-side driver calls no device timer could see (#374).
+- **The kernel** (`ncu`, filtered with `-k` and `-c`): achieved bandwidth and
+  throughput against the hardware's peaks, occupancy, and the stall reasons
+  behind a kernel running below its roof - the evidence a rewrite starts from.
+
+A finding states which tool and which run showed it. Run either tool on the card
+you were given, keep reports outside the repository, and delete them when done.
+
 ### F.1 Profile per KERNEL KIND, and publish the table
 
 Not per model, not per layer. Group contiguous runs of one kernel in submit

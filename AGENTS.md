@@ -139,6 +139,9 @@ enforces it.
   Intel NPU is a separate whole-graph export path (`crates/npu`), not a backend.
 - **Weight-only quantization is group-wise** (`model::int8::GROUP`), never
   whole-channel. See `kernels.md`.
+- **Profile with the driver's own tools.** On NVIDIA systems profiling or
+  optimizing brain uses `nsys` (timeline) and `ncu` (kernels); elsewhere the
+  vendor's equivalent. See `kernels.md` section F.0.
 - **Fix selection, not copies.** Before writing a kernel, look for a faster
   sibling; before dispatching one, read its `Params`; before optimizing,
   profile per kernel kind. A finding from an audit or sweep is a hypothesis
