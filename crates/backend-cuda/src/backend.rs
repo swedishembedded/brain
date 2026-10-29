@@ -305,6 +305,27 @@ impl StagingPool {
     }
 }
 
+/// Words of the device block an eager batch's parameters are copied into (64 KiB).
+const PARAM_BLOCK_WORDS: usize = 1 << 14;
+
+/// The device block the parameters of a batch of eagerly issued dispatches are uploaded into with ONE copy.
+///
+/// The per-shape uniform allocations ([`CudaBackend::uniform_for`]) exist so a captured graph's node addresses
+/// stay stable; issued one by one they cost a host-to-device copy in front of every kernel, and the copy is a
+/// stream operation: the kernel before it must finish, the copy engine runs it, and only then may the next kernel
+/// start. Measured on the 27B mixed iteration (nsys): 14 us of card idle per kernel, 61 of 234 ms. A batch that is
+/// issued eagerly instead packs its steps' parameters into one image, copies it into this block once, and points
+/// each kernel's uniform argument at its slice.
+///
+/// One block is safe to reuse for every batch because the stream orders the copy of the next batch after every
+/// kernel of the previous one, and the lock around [`CudaBackend::issue_eager`] keeps two threads sharing the
+/// handle from interleaving a copy with another batch's launches.
+struct ParamBlock {
+    mem: exec::DeviceMem,
+    /// The image being packed, reused so a batch allocates nothing.
+    image: Vec<u32>,
+}
+
 /// What the handle knows about one registered kernel before anything compiles
 /// it.
 struct KernelSrc {
@@ -460,6 +481,9 @@ pub struct CudaBackend {
     uniforms_swept_at: AtomicU64,
     /// Page-locked staging for the unbatched path - see [`StagingPool`].
     staging: Mutex<StagingPool>,
+    /// The device block an eagerly issued batch's parameters are uploaded into, one copy for the batch - see
+    /// [`ParamBlock`].
+    param_block: Mutex<Option<ParamBlock>>,
     /// The pinned ring [`backend_api::Backend::write_bytes_at`] stages through, once
     /// [`backend_api::Backend::enable_staged_writes`] has built it.
     upload_ring: std::sync::OnceLock<crate::upload_ring::UploadRing>,
@@ -577,6 +601,7 @@ impl CudaBackend {
             uniforms: Mutex::new(HashMap::new()),
             uniforms_swept_at: AtomicU64::new(0),
             staging: Mutex::new(StagingPool::default()),
+            param_block: Mutex::new(None),
             upload_ring: std::sync::OnceLock::new(),
             graph,
             capturing: AtomicBool::new(false),
@@ -999,38 +1024,102 @@ impl CudaBackend {
         pool.reset();
     }
 
-    /// Issue one resolved dispatch on its own - the unbatched path, and the
-    /// answer whenever a submission's shape is new.
+    /// Issue a batch of resolved dispatches in order, without a capture.
+    ///
+    /// The parameters of the steps that carry some are packed into one image per [`PARAM_BLOCK_WORDS`] and copied
+    /// into [`ParamBlock`] once, instead of one copy per step (see there for the measured cost). A timed run keeps
+    /// the per-step upload: it waits for each copy so the clock does not bill the copy engine's idle compute.
+    fn issue_eager(&self, resolved: &[Resolved]) {
+        if self.timing.load(Ordering::Acquire) {
+            resolved.iter().for_each(|r| self.issue(r));
+            return;
+        }
+        let mut guard = self.param_block.lock().unwrap_or_else(|e| e.into_inner());
+        let block = guard.get_or_insert_with(|| ParamBlock {
+            mem: self.alloc((PARAM_BLOCK_WORDS * 4) as u64, "the eager parameter block"),
+            image: Vec::with_capacity(PARAM_BLOCK_WORDS),
+        });
+        let carries = |r: &Resolved| r.library.is_none() && r.uniform.is_some() && !r.params.is_empty();
+        let mut from = 0;
+        while from < resolved.len() {
+            block.image.clear();
+            let mut to = from;
+            while to < resolved.len() {
+                let r = &resolved[to];
+                if carries(r) {
+                    let take = r.params.len().next_multiple_of(STAGING_ALIGN_WORDS);
+                    assert!(take <= PARAM_BLOCK_WORDS, "backend-cuda: a step's {} parameter words exceed the {PARAM_BLOCK_WORDS}-word block", r.params.len());
+                    if block.image.len() + take > PARAM_BLOCK_WORDS {
+                        break;
+                    }
+                    block.image.extend_from_slice(&r.params);
+                    block.image.resize(block.image.len() + take - r.params.len(), 0);
+                }
+                to += 1;
+            }
+            if !block.image.is_empty() {
+                self.stage_upload(&block.mem, &block.image);
+            }
+            let mut at = 0usize;
+            for r in &resolved[from..to] {
+                if carries(r) {
+                    self.launch(r, Some(block.mem.device_ptr() + (at * 4) as CuDevicePtr));
+                    at += r.params.len().next_multiple_of(STAGING_ALIGN_WORDS);
+                } else {
+                    self.launch(r, None);
+                }
+            }
+            from = to;
+        }
+    }
+
+    /// Issue one resolved dispatch on its own - the timed path. Its parameters go to the step's shared uniform
+    /// first; see [`Self::issue_eager`] for the batched form.
     fn issue(&self, r: &Resolved) {
+        if r.library.is_none() {
+            if let (Some(u), false) = (r.uniform.as_ref(), r.params.is_empty()) {
+                // Enqueued on the dispatch stream, NOT performed synchronously.
+                // A synchronous copy would run on the legacy stream and therefore
+                // drain the device between every pair of dispatches - see
+                // `StagingPool`. On the stream it is simply ordered: the previous
+                // step's kernel has read this shared uniform before the next step
+                // overwrites it.
+                self.stage_upload(u, &r.params);
+                if self.timing.load(Ordering::Acquire) {
+                    // A timed launch starts its clock only once its upload has
+                    // landed. While the copy engine runs it, the compute engine is
+                    // idle and a device shared with another context may switch to
+                    // it; started earlier, the clock would bill that context's whole
+                    // time slice to this kernel (knowledge #212). Timing already
+                    // issues launch by launch, so this costs a wait, not batching.
+                    self.ctx.sync().unwrap_or_else(|e| panic!("backend-cuda: device synchronise failed: {e}"));
+                }
+            }
+        }
+        self.launch(r, None);
+    }
+
+    /// Enqueue `r`'s kernel (or library product) on this handle's stream; its parameters are already in place.
+    /// `uniform` names where the parameters are when that is not the step's own uniform allocation.
+    fn launch(&self, r: &Resolved, uniform: Option<CuDevicePtr>) {
         if let Some(gemm) = &r.library {
             self.issue_library_gemm(gemm, r);
             return;
         }
         let timed = self.timing.load(Ordering::Acquire);
-        if let (Some(u), false) = (r.uniform.as_ref(), r.params.is_empty()) {
-            // Enqueued on the dispatch stream, NOT performed synchronously.
-            // A synchronous copy would run on the legacy stream and therefore
-            // drain the device between every pair of dispatches - see
-            // `StagingPool`. On the stream it is simply ordered: the previous
-            // step's kernel has read this shared uniform before the next step
-            // overwrites it.
-            self.stage_upload(u, &r.params);
-            if timed {
-                // A timed launch starts its clock only once its upload has
-                // landed. While the copy engine runs it, the compute engine is
-                // idle and a device shared with another context may switch to
-                // it; started earlier, the clock would bill that context's whole
-                // time slice to this kernel (knowledge #212). Timing already
-                // issues launch by launch, so this costs a wait, not batching.
-                self.ctx.sync().unwrap_or_else(|e| panic!("backend-cuda: device synchronise failed: {e}"));
-            }
-        }
         let (gx, gy) = grid_ws(r.threads, r.per_block);
         let start = timed.then(|| self.stamp()).flatten();
         // SAFETY: `r.func` was resolved from `r.compiled`'s module, which `r`
         // holds an `Arc` to, and `r.args` is that entry point's argument list.
-        unsafe { self.ctx.launch_shaped(r.func, (gx, gy, 1), (r.compiled.block_dim, 1, 1), &r.compiled.shape, &r.args) }
-            .unwrap_or_else(|e| panic!("backend-cuda: launching kernel '{}' failed: {e}", r.compiled.name));
+        let launched = match uniform {
+            None => unsafe { self.ctx.launch_shaped(r.func, (gx, gy, 1), (r.compiled.block_dim, 1, 1), &r.compiled.shape, &r.args) },
+            Some(at) => {
+                let mut args = r.args.clone();
+                args[0] = at;
+                unsafe { self.ctx.launch_shaped(r.func, (gx, gy, 1), (r.compiled.block_dim, 1, 1), &r.compiled.shape, &args) }
+            }
+        };
+        launched.unwrap_or_else(|e| panic!("backend-cuda: launching kernel '{}' failed: {e}", r.compiled.name));
         self.counters.host_launches.fetch_add(1, Ordering::Relaxed);
         crate::live::host_launched(1);
         if let Some(start) = start {
@@ -1291,9 +1380,7 @@ impl CudaBackend {
                     .zero(c)
                     .unwrap_or_else(|e| panic!("backend-cuda: clearing a buffer failed: {e}"));
             }
-            for r in &resolved {
-                self.issue(r);
-            }
+            self.issue_eager(&resolved);
         }
         self.fence_out(touched());
     }

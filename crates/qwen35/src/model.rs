@@ -5342,6 +5342,10 @@ impl Qwen35 {
             // owed - see that constant's own doc for why the trade flips with
             // the row count.
             let _scope = st.pooled.then(|| g.scratch_scope());
+            // The layer's dispatches are held and issued as one batch when it ends (before the scope above, which
+            // drops after it): the backend then uploads their parameters with one copy instead of one in front of
+            // every kernel (knowledge 381).
+            let _pass = g.pass_scope();
 
             let (xn1, pre1) = match st.front.take() {
                 Some((xn, act)) => (xn, Some(act)),

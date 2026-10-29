@@ -105,6 +105,32 @@ Gap list, by what the profile attributes (in the order it would move goodput):
   in at half the sliced speed in background mode (1.56 s against 0.76 s for 1731 tokens, `gguf_resident_real`): all
   but the SM sharing fixed 2026-10-29 (knowledge 375), which is avoided by time-slicing, not reduced.
 
+## Step plan and replay (design, 2026-10-29; items 4, 5, 17 and the host cost of knowledge 379-381)
+
+The engine today records a layer round as thousands of independent dispatches, each allocating its intermediates, clearing some,
+and (on CUDA) uploading its own parameters; only an exactly repeated decode step is captured. Under concurrency that makes brain
+host- and idle-bound (card busy 39-66 % of a mixed iteration, 15-30 % of vLLM's throughput). The architecture that replaces it,
+behind the existing `Gpu::step`/`submit` API so the WGSL reference path and old hardware keep working:
+
+1. **Step plan.** The engine emits a layer round or decode step as an op list once per shape bucket (decode rows, prompt rows, batch,
+   context bucket). A planner resolves the kernel choice of each op through the tuner, assigns every intermediate to an offset in
+   ONE arena by lifetime (no per-op alloc/free; no clear of a buffer its writer overwrites), and packs all launch parameters into ONE
+   device-resident parameter block.
+2. **Per-step metadata.** A step uploads only what changed (positions, block-table rows, slot ids) into the device-resident batch
+   state (item 4); the plan itself is not rebuilt.
+3. **Lowering per backend.** CUDA: one graph per bucket, replayed with one launch, segmented around ops a capture cannot hold
+   (item 5, #356). Vulkan: command-buffer replay. wgpu/CPU: a plain loop over the plan. Same ops, same results.
+
+Increments, each measured (nsys card-busy %, API calls per iteration, client tok/s) and pushed on its own:
+
+- **A (done, knowledge 381): the parameter block.** A held batch of eagerly issued dispatches uploads its parameters with one copy
+  (`CudaBackend::issue_eager`), and the prefill/mixed layer loop issues per layer (`pass_scope`). Card busy 66 -> 79 %, copies per
+  mixed iteration 4545 -> 480, c=16 / c=64 output 291 / 384 -> 340 / 460 tok/s.
+- **B: the arena.** Intermediates of a bucket at fixed offsets of one allocation (no pool alloc/free: ~11000 calls per iteration; no
+  clears of overwritten buffers; row views instead of the 1008 `concat_split` copies), which is also what makes C replayable.
+- **C: the full round as a plan, then graph lowering** with the row count bucketed (bounded graph memory), the per-step metadata
+  upload of item 4, and the other backends' lowerings.
+
 ## Mixed iterations (design, 2026-10-29; items 8 and 11)
 
 Measured gap (FP8 27B, one GH200, `vllm bench serve` chat 1K in / 128 out, output tok/s at concurrency 1 / 4 / 16 / 64):
@@ -139,6 +165,9 @@ measurement (16-256), not fixed globally.
 
 ## Done
 
+- 2026-10-29 (step plan, increment A; knowledge 381): eager batches upload their kernel parameters with one copy instead of one in front of
+  every kernel (nsys: 14 us of card idle per kernel), and the prefill/mixed layer loop issues one batch per layer. FP8 27B output tok/s at
+  1 / 4 / 16 / 64: 47 / 192 / 291 / 384 -> 49 / 200 / 340 / 460, card busy 66 -> 79 % of a mixed iteration; parity unchanged.
 - 2026-10-29 (8, 11; knowledge 379): the mixed iteration. `PagedDecoder::mixed_step` / `forward_mixed` run the decode rows of every
   running sequence and a prompt slice of several sequences as one forward; `StepCost::prompt_rows` sizes the slice from a decayed
   fit of iteration seconds against rows and `step_latency_target` (floor 512 rows, 25 % stretch when the target is out of reach, the
