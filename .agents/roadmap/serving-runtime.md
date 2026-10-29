@@ -68,8 +68,8 @@ claimed before its baseline exists.
 | 10 | Grace memory as a managed warm KV tier: page-granular async promotion/demotion through the existing upload ring; direct coherent reads measured separately (G9) | `model::kv_offload`, `backend-cuda` | warm-prefix hits served from host without whole-sequence swaps | open |
 | 11 | Batched adapters in prefill and speculation (G8) | `qwen35`, `llmserve` | adapter traffic keeps multi-sequence prefill | open |
 | 12 | Device-resident inter-GPU transfers and collectives (G10) | `model::collective`, residency | no host-staged per-token transfer on supported devices | in progress: peer copy and link measurement (A) and the 27B stage boundary (B) and the NCCL communicator (C) done, tensor-parallel use and the head hand-off open |
-| 13 | Precision admission by input resolution: a candidate is admitted when its local error stays within alpha (8) x the error of rounding its inputs to their storage resolution, with model-level quality evaluation as a separate gate; the fixed 2e-5 bar against brain's own int8 semantics admits nothing but that semantics | `gpu-core` (`native_tune`), `model` | candidates of a different arithmetic (bf16 dequant-in-register, fp8) are admitted or refused by the rule, and the quality gate runs on the real checkpoint | open |
-| 14 | Dequantize-in-register int8 linears: weight codes x group scale to bf16 in registers, bf16 activations, one fp32 accumulation over all of K (no per-group fold, no activation quantization), for decode GEMV/streaming and prefill GEMM (the fold bounds both, #372 #373) | `kernels-cuda`, `gpu-core` | decode linears and prefill GEMM measured against the read and tensor-core roofs with nsys/ncu | open |
+| 13 | Precision admission by input resolution: a candidate is admitted when its local error stays within alpha (8) x the error of rounding its inputs to their storage resolution, with model-level quality evaluation as a separate gate; the fixed 2e-5 bar against brain's own int8 semantics admits nothing but that semantics | `gpu-core` (`native_tune`), `model` | candidates of a different arithmetic (bf16 dequant-in-register, fp8) are admitted or refused by the rule, and the quality gate runs on the real checkpoint | done 2026-10-29 (knowledge 376): candidates declare their input forms (`native_upgrade::Input`), the tuner grades against the f64 reference of the stored representation; every int8 candidate and every bf16 one is admitted; the gate is `qwen35_gguf_logit_check` (`--kernel slot=candidate`) on the released 27B; fp8 rows join by declaring a form |
+| 14 | Dequantize-in-register int8 linears: weight codes x group scale to bf16 in registers, bf16 activations, one fp32 accumulation over all of K (no per-group fold, no activation quantization), for decode GEMV/streaming and prefill GEMM (the fold bounds both, #372 #373) | `kernels-cuda`, `gpu-core` | decode linears and prefill GEMM measured against the read and tensor-core roofs with nsys/ncu | in progress (knowledge 377): streaming candidates for 33-128 rows (`matmul_i8_dq_stream_{r,q}*`, 14-55 % less time than the best integer candidate) and the Hopper prefill GEMM (`matmul_i8_dq_wgmma`, 0.8x the time) landed and measured; 5-32 rows lost to the integer stream (2.0-2.2 against 2.4-2.8 TB/s) and rows 1-4 are held by the exact-decode contract |
 | 15 | Workload-weighted tuning: classes timed in order of the served model's shape histogram x expected saving per second of tuning, not grid order (the budget cut left 17-32 rows untuned) | `gpu-core` (`native_tune`) | the served model's dominant classes are always measured first | open |
 | 16 | Compressed KV read natively: K8/V4 (4-bit values) with attention computed on the codes in decode, prefill, append and verify; capacity +33 % over int8 KV where KV binds (128K) | `model::kv_tier`, `kernels-cuda` | quality gate on long prompts; 128K concurrency and decode tok/s measured | open |
 | 17 | Native FP8 tier for block-128 FP8 releases: fp8 weights resident, fp8 tensor-core prefill with one fold per 128 of K | `model`, `kernels-cuda`, `qwen35` | the FP8 27B served natively, prefill and decode measured against the int8 tier | open |
@@ -91,8 +91,12 @@ Gap list, by what the profile attributes (in the order it would move goodput):
   the m128 tensor-core GEMM reads them at ~0.8 TB/s (batch 48 at 8K: 35 of 53 ms). Extending the weight-streaming
   regime past 32 rows is the high-concurrency lever (`cuda.md`). First step landed 2026-10-29: streaming candidates for
   33-128 rows chosen by measurement (batch 48 at 8K 51.9 -> 47.6 ms, batch 64 58.3 -> 53.9 ms; 27 % of the roof at 48
-  rows), the 7-8 ms target is still open (knowledge 373).
-- Prefill is bound by the group-32 scale fold (knowledge 372): 15-23 % of the int8 tensor-core roof.
+  rows), the 7-8 ms target is still open (knowledge 373). Second step landed 2026-10-29 (item 14): bf16 dequantize-in-register streaming
+  candidates for 33-128 rows take 45-86 % of the integer candidates' time (batch 48 at 8K: 48.0 -> 40.3 ms, batch 64 53.3 -> 49.8 ms,
+  batch 128 92.5 -> 88.0 ms); below 33 rows the integer stream stays ahead.
+- Prefill is bound by the group-32 scale fold (knowledge 372): 15-23 % of the int8 tensor-core roof. Landed 2026-10-29 (item 14, knowledge
+  377): the Hopper dequantize GEMM runs the 27B's linears in 0.8x the time (1024 rows: 207.7 -> 171.6 ms of 300.5 -> 274.5 ms, 3408 -> 3730
+  tok/s) and reads 330-370 TFLOPS of a bf16 roof near 990; the bound is now the staging, not the arithmetic.
 - 128K concurrency is KV-capacity bound: item 10 (Grace tier) and a smaller KV tier, or the second card (item 12).
 - Prefill blocking decode: found and mostly fixed 2026-10-29 (knowledge 374): inter-token p99 at concurrency 4 / 16 went
   202 / 357 ms to 120 / 179 ms (max 393 / 410 to 201 / 198 ms) on `chat` 1024-token prompts. What is left of it: the MTP
@@ -106,6 +110,21 @@ measurement (16-256), not fixed globally.
 
 ## Done
 
+- 2026-10-29 (13 precision admission, 14 dequantize-in-register linears; knowledge 376, 377): candidates declare the activation and
+  weight forms they consume (`native_upgrade::Input`), `native_tune` admits a candidate within 8x the error of rounding those
+  forms against the f64 reference of the stored representation (all int8 candidates and all bf16 ones pass), a dispatch hands each
+  candidate its own activation form (bf16 rows from one `cast_f32_bf16` shared by the products of an activation; the packed int8
+  pair is skipped when every class of the row bucket reads bf16). Candidates: `matmul_i8_dq_stream_{r1,r2,r4}` (33-64 rows),
+  `matmul_i8_dq_stream_{q2,q4}` (65-128), `matmul_i8_dq_wgmma` (Hopper, K % 64). GH200, 27B Q8_0, kv int8, base -> new:
+  `qwen35_decode_profile` (8K, 6 steps) ms/step 48 rows 48.0 -> 40.3, 64 rows 53.3 -> 49.8, 128 rows 92.5 -> 88.0, 1-32 rows within
+  noise; `qwen35_gguf_prefill_profile 256 1024` round 300.5 -> 274.5 ms (3408 -> 3730 tok/s); `brain perf run longctx` prefill
+  1K/8K/32K 3348/3682/3175 -> 3669/3860/3308 tok/s, decode 48/64/128 rows 1010/1201/1378 -> 1200/1310/1475 tok/s; `brain perf run
+  sweep chat` output tok/s 58.5/100.0/116.2 -> 59.8/102.9/128.2 at concurrency 1/4/16, inter-token p99 43.2/67.7/75.1 -> 41.7/66.4/69.1
+  ms, TTFT p99 470/3051/15088 -> 451/4012/13537 ms (a second run at concurrency 4 gave 3191 -> 2834 ms: queueing behind prefill,
+  spread over 1 s between identical runs), goodput unchanged (44.9 / 2.1 / 0). Quality gate (`qwen35_gguf_logit_check`, `qwen35_gguf_score`, real
+  prompts, released 27B): batched decode of 48 / 72 streams against the streams alone 1.0x the numerics floor (rel-L2 9.7e-3 / 9.2e-3, old
+  9.9e-3 / 9.5e-3); perplexity of 9283 source-code tokens 7.7415 -> 7.7486 (+0.09 %), argmax identical to the old path in 98.8 %; every
+  argmax flip is a near-tie (margin <= 0.12).
 - 2026-10-29 (8, decode cadence under prefill; knowledge 375): background rounds are at most 512 rows (a lone 1731-token
   prompt 1.56 -> 0.75 s); a prompt gets one paced slice of device time per iteration (`PrefillPace`, `PrefillPolicy::step_target`
   45 ms), waited for before the decode step so the step runs on an idle card; the MTP prompt feed is parallel on the host

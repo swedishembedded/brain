@@ -1344,6 +1344,21 @@ measured and reverted. Open for this range: overlap that hides both the fold (tw
 fold on packed math, the K=5120 x N=17408 gate/up classes (136 blocks of 128 rows leave four SMs double-loaded), and a
 raised `DECODE_REGIME_MAX_ROWS` only once a candidate beats the tiled GEMM there.
 
+Dequantize-in-register candidates (knowledge 376, 377; roadmap `serving-runtime.md` items 13 and 14): a candidate row now declares the
+activation form it reads (`native_upgrade::Input`: packed int8 with a scale per 32, or bf16 rows) and the weight form, the tuner
+grades it by the admission rule (error within 8x the error of rounding its own inputs, against the f64 reference of the stored
+weights) and a dispatch hands each candidate its own form (`Gpu::int8_linear_bf16_input`, `Gpu::int8_dequant_step`; `Ops::act` skips
+the quantisation pair when every class of the row bucket reads bf16). The int8 codes times their group scale become bf16 in
+registers (about 2.5 instructions per weight, `cu/matmul_i8_dq_stream.cu`) or in shared memory ahead of `wgmma`
+(`cu/matmul_i8_dq_wgmma.cu`), the accumulation runs across K with no fold. GH200: 33-64 rows `matmul_i8_dq_stream_r{1,2,4}` take
+45-86 % of the integer candidates' time (all 16 classes), 65-128 rows `_q{2,4}` 69-83 % (K 5120 x N 17408: 98 %), the prefill
+`matmul_i8_dq_wgmma` 74-89 % from 129 rows (K 17408 x N 512-1536 at 129-512 rows keep `mma`, four weight tiles idle the card); the
+27B's prefill round (1024 rows) 300.5 -> 274.5 ms. Below 33 rows nothing beat the integer stream (eight variants, 2.0-2.2 against
+2.4-2.8 TB/s: the bf16 activations double the x tile the ring copies; loads alone stop at 2.3-2.5 TB/s). A bf16 `mma.sync` GEMM with
+the dequantisation in the MMA warps was slower than the int8 `wgmma` (242 against 268 TFLOPS) and is not registered. Open: the
+sub-33-row classes (x not copied per block), a fused rmsnorm that writes the bf16 rows only (the fused front ends still write the
+packed pair, 17 ms of a prefill round), a 128 x 256 warpgroup tile, the fp8 form on the same Input seam.
+
 Open, in the order the gap list ranks them: (1) lift the streaming candidate further: fold the group-scale fixup
 (issue bound at 17-32 rows), issue the weight copies ahead of the `griddepcontrol.wait`, TMA/`cp.async.bulk` and
 wgmma, fewer launches for the small matrices (fused multi-matrix streaming); then the fp8 and bf16 tiers with the same

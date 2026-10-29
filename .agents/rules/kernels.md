@@ -267,6 +267,28 @@ existing caller. Assume nothing about units.
     porting a kernel to a narrower tier, recompute the per-thread bytes of
     every operand against the weights.*
 
+13. **A 32-bit logic instruction takes one immediate: `(x & 0x007F007F) | 0x43004300` is TWO `lop3`.** The
+    dequantising kernels (`matmul_i8_dq_*`) spent 36 % of their issue slots on `LOP3`, twice the count the algorithm
+    needs, because both constants were immediates and the compiler emitted the AND and the OR separately. Holding the
+    constants in registers (`mov.b32` in an `asm volatile`, so constant propagation cannot fold them back) and writing
+    the `lop3.b32 ... 0xEA` yourself removed a quarter of the dequantisation. *Read the SASS instruction mix of a kernel
+    that is issue-bound (`ncu --import-source yes`, source page) before reasoning about it; the count you expect and the
+    count that executes differ.*
+
+14. **An `mma.sync` A operand is a contiguous register quad: load it so the load's output pair IS a register pair.**
+    In a bf16 `mma.sync` prefill GEMM (measured, not registered: knowledge 377) with the activations as A and eight-byte shared loads giving `(a0, a2)` and `(a1, a3)`, the compiler spent an
+    `IMAD.MOV` per register to line the quad up (11 % of the instructions, 4 per MMA). Making the weights the A operand
+    (their dequantised registers are written straight into the quad) and the activations the B operand (an eight-byte
+    load is a B pair as it is) removed them and took the 4096 x 5120 x 5120 GEMM from 213 to 242 TFLOPS. *When the operand roles are free,
+    choose them by which side's registers are produced by arithmetic and which by a load.*
+
+15. **An MMA's reduction order is free: permute k to match the cheap load.** `ldmatrix` of int8 data gives thread `t`
+    four consecutive bytes, not the bytes `(2t, 2t+1, 2t+8, 2t+9)` the MMA's k positions name. Both operands may carry the
+    same permutation of k inside each 16-deep step (position `2t+j` takes true k `4t+j`, position `2t+8+j` takes `4t+2+j`):
+    the product is unchanged, the weights come from one `ldmatrix`, and the activations from one eight-byte load. This
+    only works while the other operand is loaded by registers; a descriptor-fed operand (`wgmma` from shared memory)
+    cannot be permuted, which is why `matmul_i8_dq_wgmma` dequantises into a natural-order tile instead.
+
 ## D. Constraints that will bite you
 
 - **A buffer a dispatch writes is bound ONCE.** wgpu tracks usage per buffer for the
