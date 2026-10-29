@@ -859,6 +859,20 @@ struct GqaDecodeCtx<'a> {
     sin: &'a DeviceBuffer,
 }
 
+/// How a sequence's `rows` prompt rows run through the Gated DeltaNet recurrence: `(row offset, rows, chunk)` pieces in
+/// order, each continuing from the state the one before left. The recurrence is sequential over chunks (one launch
+/// walks them, about a hundred microseconds a chunk), so the chunk must be as large as the kernels take (64):
+/// `model::gdn::gdn_chunk_size`, the largest divisor of the round, would walk a 600-row slice in 75 chunks of 8 and a
+/// 195-row one in 195 chunks of 1. The whole multiple of 64 runs as full chunks and the remainder (below 64) as one
+/// chunk of its own size.
+fn gdn_stream_pieces(rows: u32) -> impl Iterator<Item = (u32, u32, u32)> {
+    const CHUNK: u32 = 64;
+    let full = rows / CHUNK * CHUNK;
+    let head = (full > 0).then_some((0, full, CHUNK));
+    let tail = (rows > full).then_some((full, rows - full, rows - full));
+    head.into_iter().chain(tail)
+}
+
 /// Which recurrent-state shape a [`Qwen35::layer_gdn_fwd`] call is running in:
 /// the Gated-DeltaNet counterpart of [`GqaCached`], and the same three-way
 /// split - a whole-sequence forward that starts from zero state, one sequence's
@@ -2825,7 +2839,7 @@ impl Qwen35 {
             GdnCall::Segments(round) => {
                 let c = round.caches;
                 let (sl, hl) = (self.cfg.gdn_state_len() as u32, self.cfg.gdn_hist_len() as u32);
-                let whole = round.segs.len() == 1 && round.decode.is_none();
+                let whole = round.segs.len() == 1 && round.decode.is_none() && gdn_stream_pieces(round.segs[0].rows).count() == 1;
                 let all = (!whole).then(|| g.storage((n * value_dim) as u64));
                 let mut only = None;
                 // A mixed round's leading decode rows: one recurrent step each, from and back into the sequence's pool row.
@@ -2837,28 +2851,30 @@ impl Qwen35 {
                     self.put_rows_copy(&gated_d, all, value_dim, 0, dec.rows);
                 }
                 for seg in &round.segs {
-                    let rows = seg.rows;
-                    let (qkv_i, b_i, a_i, z_i) = if whole {
-                        (mixed_qkv.clone(), bproj.clone(), aproj.clone(), z.clone())
-                    } else {
-                        (
-                            self.take_rows(&mixed_qkv, conv_dim, n, seg.row0, rows),
-                            self.take_rows(&bproj, nvh, n, seg.row0, rows),
-                            self.take_rows(&aproj, nvh, n, seg.row0, rows),
-                            self.take_rows(&z, value_dim, n, seg.row0, rows),
-                        )
-                    };
-                    // The sequence's state row becomes the working copy, the rows
-                    // run on it, and it is written back.
+                    // The sequence's state row becomes the working copy, the rows run on it piece by piece, and it is
+                    // written back.
                     g.submit(&[], &[g.step(c.gather, &[&c.gdn_state[l], &c.gdn_hist[l], &seg.slot, &c.work_state[l], &c.work_hist[l]], &[1, sl, hl], sl + hl)]);
-                    let seg_shape = model::gdn_mixer::GdnMixerShape { gdn: GdnShape { t: rows, chunk: gdn_chunk_size(rows), ..shape.gdn }, ..shape };
-                    let cont = model::gdn_mixer::GdnStream { state: &c.work_state[l], hist: &c.work_hist[l] };
-                    let (gated_i, _) = model::gdn_mixer::gdn_mixer_stream_fwd(g, &gdn_mixer_ids(), &seg_shape, &weights, &qkv_i, &b_i, &a_i, &z_i, rows, false, Some(cont));
-                    g.submit(&[], &[g.step(c.scatter, &[&c.work_state[l], &c.work_hist[l], &seg.slot, &c.gdn_state[l], &c.gdn_hist[l]], &[1, sl, hl], sl + hl)]);
-                    match &all {
-                        Some(all) => self.put_rows_copy(&gated_i, all, value_dim, seg.row0, rows),
-                        None => only = Some(gated_i),
+                    for (off, rows, chunk) in gdn_stream_pieces(seg.rows) {
+                        let cont = model::gdn_mixer::GdnStream { state: &c.work_state[l], hist: &c.work_hist[l] };
+                        let (qkv_i, b_i, a_i, z_i) = if whole {
+                            (mixed_qkv.clone(), bproj.clone(), aproj.clone(), z.clone())
+                        } else {
+                            let row0 = seg.row0 + off;
+                            (
+                                self.take_rows(&mixed_qkv, conv_dim, n, row0, rows),
+                                self.take_rows(&bproj, nvh, n, row0, rows),
+                                self.take_rows(&aproj, nvh, n, row0, rows),
+                                self.take_rows(&z, value_dim, n, row0, rows),
+                            )
+                        };
+                        let seg_shape = model::gdn_mixer::GdnMixerShape { gdn: GdnShape { t: rows, chunk, ..shape.gdn }, ..shape };
+                        let (gated_i, _) = model::gdn_mixer::gdn_mixer_stream_fwd(g, &gdn_mixer_ids(), &seg_shape, &weights, &qkv_i, &b_i, &a_i, &z_i, rows, false, Some(cont));
+                        match &all {
+                            Some(all) => self.put_rows_copy(&gated_i, all, value_dim, seg.row0 + off, rows),
+                            None => only = Some(gated_i),
+                        }
                     }
+                    g.submit(&[], &[g.step(c.scatter, &[&c.work_state[l], &c.work_hist[l], &seg.slot, &c.gdn_state[l], &c.gdn_hist[l]], &[1, sl, hl], sl + hl)]);
                 }
                 (all.or(only).expect("a round has at least one sequence"), None)
             }
@@ -2874,6 +2890,32 @@ impl Qwen35 {
                     (gated, acts.map(|a| GdnSaved::Full(Box::new(a))))
                 }
             },
+            GdnCall::Chunk(cont) if !self.is_train => {
+                // The round in whole chunks of 64 and a last short chunk, as a mixed round's segments run.
+                let pieces: Vec<_> = gdn_stream_pieces(n).collect();
+                let piece = |off: u32, rows: u32, chunk: u32| {
+                    let seg_shape = model::gdn_mixer::GdnMixerShape { gdn: GdnShape { t: rows, chunk, ..shape.gdn }, ..shape };
+                    let cont = model::gdn_mixer::GdnStream { state: cont.state, hist: cont.hist };
+                    match pieces.len() {
+                        1 => model::gdn_mixer::gdn_mixer_stream_fwd(g, &gdn_mixer_ids(), &seg_shape, &weights, &mixed_qkv, &bproj, &aproj, &z, rows, false, Some(cont)).0,
+                        _ => {
+                            let (qkv_i, b_i, a_i, z_i) = (self.take_rows(&mixed_qkv, conv_dim, n, off, rows), self.take_rows(&bproj, nvh, n, off, rows), self.take_rows(&aproj, nvh, n, off, rows), self.take_rows(&z, value_dim, n, off, rows));
+                            model::gdn_mixer::gdn_mixer_stream_fwd(g, &gdn_mixer_ids(), &seg_shape, &weights, &qkv_i, &b_i, &a_i, &z_i, rows, false, Some(cont)).0
+                        }
+                    }
+                };
+                let gated = match pieces[..] {
+                    [(off, rows, chunk)] => piece(off, rows, chunk),
+                    _ => {
+                        let all = g.storage((n * value_dim) as u64);
+                        for &(off, rows, chunk) in &pieces {
+                            self.put_rows_copy(&piece(off, rows, chunk), &all, value_dim, off, rows);
+                        }
+                        all
+                    }
+                };
+                (gated, None)
+            }
             GdnCall::Chunk(cont) => {
                 let (gated, acts) = model::gdn_mixer::gdn_mixer_stream_fwd(g, &gdn_mixer_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, n, self.is_train, Some(cont));
                 (gated, acts.map(|a| GdnSaved::Full(Box::new(a))))

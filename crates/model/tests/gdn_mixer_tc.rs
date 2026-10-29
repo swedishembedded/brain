@@ -30,8 +30,8 @@ use model::gdn::{GdnFastIds, GdnShape};
 use model::gdn_mixer::{gdn_mixer_bwd, gdn_mixer_fwd, GdnMixerGrads, GdnMixerShape};
 use model::gdn_segment::{gdn_mixer_seg_bwd, gdn_mixer_seg_fwd, GdnMixerInputs};
 
-fn shape(t: u32) -> GdnMixerShape {
-    GdnMixerShape { gdn: GdnShape { b: 1, h: 6, t, dk: 128, dv: 128, chunk: 64 }, nkh: 2, conv_kernel: 4, rms_eps: 1e-6 }
+fn shape(t: u32, chunk: u32) -> GdnMixerShape {
+    GdnMixerShape { gdn: GdnShape { b: 1, h: 6, t, dk: 128, dv: 128, chunk }, nkh: 2, conv_kernel: 4, rms_eps: 1e-6 }
 }
 
 struct Run {
@@ -83,9 +83,10 @@ fn the_tensor_core_layer_matches_the_portable_layer_forward_and_backward() {
         eprintln!("gdn_mixer_tc: this device does not take the fast kernels - nothing to run");
         return;
     }
-    // Two chunks per head at the real chunk of 64 rows, and a longer sequence.
-    for t in [128u32, 320] {
-        let s = shape(t);
+    // Two chunks per head at the real chunk of 64 rows, a longer sequence, and one short chunk of a size that is no
+    // multiple of the MMA tile (the remainder of a prompt slice, which serving runs as a chunk of its own).
+    for (t, chunk) in [(128u32, 64u32), (320, 64), (36, 36), (13, 13), (63, 63)] {
+        let s = shape(t, chunk);
         // seed: fixed fixture so a failure reproduces on the same values
         let h = Host::random(&s, 20261016);
         for train in [true, false] {
@@ -93,11 +94,11 @@ fn the_tensor_core_layer_matches_the_portable_layer_forward_and_backward() {
             assert!(want.gated.iter().any(|v| v.abs() > 1e-3), "degenerate fixture: forward output is ~0");
             let tol = 1e-4;
             let e = rel_diff(&got.gated, &want.gated);
-            println!("t={t} train={train} gated: {e:.2e}");
+            println!("t={t} chunk={chunk} train={train} gated: {e:.2e}");
             assert!(e <= tol, "t={t} train={train}: gated differs by {e:.3e}");
             for ((name, a), (_, b)) in got.grads.iter().zip(&want.grads) {
                 let e = rel_diff(a, b);
-                println!("t={t} train={train} {name}: {e:.2e}");
+                println!("t={t} chunk={chunk} train={train} {name}: {e:.2e}");
                 assert!(e <= tol, "t={t} train={train}: {name} differs by {e:.3e}");
             }
         }
@@ -143,7 +144,7 @@ fn the_fused_convolution_matches_the_portable_chain_in_a_segmented_layer_with_a_
         return;
     }
     // Three rounds of 128 rows (two chunks each) and an uneven tail round: every boundary carries a conv history.
-    let s = shape(320);
+    let s = shape(320, 64);
     // seed: fixed fixture so a failure reproduces on the same values
     let h = Host::random(&s, 20261017);
     for segment_tokens in [128u32, 192] {
