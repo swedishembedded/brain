@@ -845,11 +845,18 @@ enum St {
     /// the invalid-header policy of re-labeling the whole call is unavailable).
     XmlBetween,
     /// Inside a `<parameter=` header, awaiting the `>` that ends the key.
-    XmlKey,
+    /// `scanned` is how much of `pending` is known to hold no `>`, so a push
+    /// searches only the new bytes.
+    XmlKey { scanned: usize },
     /// Inside a parameter value, awaiting `</parameter>`. The value is
     /// buffered whole (its JSON form - verbatim when it parses as JSON,
     /// escaped as a string otherwise - can only be chosen once it is complete).
-    XmlValue { key: String },
+    ///
+    /// `scanned` is the offset up to which `pending` is known not to start a
+    /// `</parameter>` (all but the last marker-length minus one bytes), so each
+    /// push searches the new bytes plus that overlap instead of the whole
+    /// buffered value: O(value) over a value's pushes, not O(value^2).
+    XmlValue { key: String, scanned: usize },
     CallTail,
 }
 
@@ -892,6 +899,8 @@ pub struct ChatScanner {
 
 const MARKERS_CONTENT: [&str; 2] = ["<think>", "<tool_call>"];
 const MARKERS_THINK: [&str; 1] = ["</think>"];
+/// Ends a Qwen3.8 XML parameter value.
+const XML_VALUE_END: &str = "</parameter>";
 const MARKERS_TAIL: [&str; 1] = ["</tool_call>"];
 /// Markers that end the current position inside a Qwen3.8 XML call: the next
 /// parameter block, or the end of the parameter list.
@@ -976,7 +985,7 @@ impl ChatScanner {
                 self.pending.clear();
                 self.close_call(out);
             }
-            St::XmlBetween | St::XmlKey => {
+            St::XmlBetween | St::XmlKey { .. } => {
                 self.note(ScanAnomaly::TruncatedToolCall);
                 // The call header already streamed as a ToolCallStart, so the
                 // whole-call re-labeling the JSON header does here is
@@ -993,7 +1002,7 @@ impl ChatScanner {
                 let raw = std::mem::take(&mut self.pending);
                 let value = raw.strip_prefix('\n').unwrap_or(&raw);
                 let value = value.strip_suffix('\n').unwrap_or(value);
-                let St::XmlValue { key } = &self.state else { unreachable!("XmlValue arm") };
+                let St::XmlValue { key, .. } = &self.state else { unreachable!("XmlValue arm") };
                 let key = key.clone();
                 let fragment = xml_push_parameter_state(&mut self.cur_args, &key, value);
                 out.push(ChatEvent::ToolCallArgs { index: self.next_index, fragment });
@@ -1185,27 +1194,37 @@ impl ChatScanner {
                                 self.xml_close_object(out);
                                 self.state = St::CallTail;
                             } else {
-                                self.state = St::XmlKey;
+                                self.state = St::XmlKey { scanned: 0 };
                             }
                         }
                     }
                 }
-                St::XmlKey => match self.pending.find('>') {
-                    None => return,
+                St::XmlKey { scanned } => match find_from(&self.pending, ">", *scanned) {
+                    None => {
+                        let seen = self.pending.len();
+                        self.state = St::XmlKey { scanned: seen };
+                        return;
+                    }
                     Some(gt) => {
                         let key: String = self.pending.drain(..gt).collect();
                         self.pending.drain(..1);
-                        self.state = St::XmlValue { key };
+                        self.state = St::XmlValue { key, scanned: 0 };
                     }
                 },
-                St::XmlValue { key } => match self.pending.find("</parameter>") {
+                St::XmlValue { key, scanned } => match find_from(&self.pending, XML_VALUE_END, *scanned) {
                     // The value buffers whole in `pending` - its JSON form
                     // (verbatim vs escaped) is only decidable at the block
                     // end, so nothing may be emitted or dropped early.
-                    None => return,
+                    None => {
+                        let resume = resume_offset(&self.pending, XML_VALUE_END.len());
+                        if let St::XmlValue { scanned, .. } = &mut self.state {
+                            *scanned = resume;
+                        }
+                        return;
+                    }
                     Some(pos) => {
                         let raw: String = self.pending.drain(..pos).collect();
-                        self.pending.drain(.."</parameter>".len());
+                        self.pending.drain(..XML_VALUE_END.len());
                         let value = raw.strip_prefix('\n').unwrap_or(&raw);
                         let value = value.strip_suffix('\n').unwrap_or(value);
                         let fragment = xml_push_parameter_state(&mut self.cur_args, key, value);
@@ -1386,6 +1405,23 @@ impl ChatScanner {
             }
         }
     }
+}
+
+/// `s.find(marker)` resuming at byte offset `from` (a char boundary, as
+/// [`resume_offset`] yields): the offset in `s`, not in the tail.
+fn find_from(s: &str, marker: &str, from: usize) -> Option<usize> {
+    s[from..].find(marker).map(|p| p + from)
+}
+
+/// Where the next search for a `marker_len`-byte marker may resume once `s` is
+/// known to hold none: a marker can only begin in the last `marker_len - 1`
+/// bytes (it would have been found otherwise), rounded down to a char boundary.
+fn resume_offset(s: &str, marker_len: usize) -> usize {
+    let mut at = s.len().saturating_sub(marker_len - 1);
+    while !s.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
 }
 
 /// The length (in bytes) of the longest suffix of `s` that is a proper prefix
@@ -1994,6 +2030,43 @@ mod tests {
             assert_eq!(run_flavor(text, TemplateFlavor::Qwen38, Chunk::SplitAt(at)), whole, "mismatch splitting at byte {at}");
         }
         assert_eq!(run_flavor(text, TemplateFlavor::Qwen38, Chunk::ByteAtATime), whole, "mismatch feeding one byte at a time");
+    }
+
+    /// A value full of near-misses of its own end marker (`</param`, `</parameter` cut one
+    /// byte short, multi-byte text around them) scans the same however it is chunked: the
+    /// resumed marker search must not skip a marker that straddles two pushes.
+    #[test]
+    fn scanner_qwen38_value_with_marker_lookalikes_is_chunking_invariant() {
+        let value = "é</param </parameter € </parameteR></ </parameter\u{1F600}</paramet";
+        let text = format!("<tool_call>\n<function=f>\n<parameter=k>\n{value}\n</parameter>\n<parameter=n>\n7\n</parameter>\n</function>\n</tool_call>");
+        let whole = run_flavor_utf8(&text, 0);
+        for chunk in 1..=13 {
+            assert_eq!(run_flavor_utf8(&text, chunk), whole, "chunk {chunk}");
+        }
+        let mut scanner = ChatScanner::with_flavor(false, TemplateFlavor::Qwen38);
+        scanner.push(&text, &mut Vec::new());
+        scanner.finish(&mut Vec::new());
+        let [call] = scanner.tool_calls() else { panic!("one call expected") };
+        let args: serde_json::Value = serde_json::from_str(&call.arguments).unwrap();
+        assert_eq!(args["k"], value);
+        assert_eq!(args["n"], 7);
+    }
+
+    /// Feed `text` in `chunk`-byte pushes rounded up to char boundaries (`0` = whole).
+    fn run_flavor_utf8(text: &str, chunk: usize) -> Vec<ChatEvent> {
+        let mut scanner = ChatScanner::with_flavor(false, TemplateFlavor::Qwen38);
+        let mut events = Vec::new();
+        let mut at = 0;
+        while at < text.len() {
+            let mut end = if chunk == 0 { text.len() } else { (at + chunk).min(text.len()) };
+            while !text.is_char_boundary(end) {
+                end += 1;
+            }
+            scanner.push(&text[at..end], &mut events);
+            at = end;
+        }
+        scanner.finish(&mut events);
+        coalesce(events)
     }
 
     #[test]
