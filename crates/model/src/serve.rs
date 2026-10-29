@@ -2031,6 +2031,8 @@ impl<D: PagedDecoder> Scheduler<D> {
     }
 
     fn step_inner(&mut self, report: &mut StepReport) -> Vec<(u64, Vec<u32>)> {
+        // Named ranges on the driver-native profiler's timeline (NVTX under Nsight): one per iteration, one per phase.
+        let _step = gpu_core::markers::range(c"serve.step");
         // 0. Resume preempted sequences before anything else touches the pool:
         //    work already in flight outranks work still queued.
         self.resume_swapped(report);
@@ -2047,6 +2049,7 @@ impl<D: PagedDecoder> Scheduler<D> {
         //    must run between bursts of admissions). Nothing new is admitted
         //    while a preempted sequence is still waiting for its blocks - see
         //    `Scheduler::swapped`.
+        let prefill_range = gpu_core::markers::range(c"serve.admit_prefill");
         let interleaved = self.dec.prefill_interleave_tokens().is_some();
         let mut budget_left = self.prefill_budget as usize;
         let mut worked = false;
@@ -2110,6 +2113,7 @@ impl<D: PagedDecoder> Scheduler<D> {
         //    token - the classic "newest first" victim choice, so the sequences
         //    closest to finishing (and to releasing their blocks) are the ones
         //    that keep running.
+        drop(prefill_range);
         self.ensure_decode_room(report);
 
         // 3. Batched decode over every running (not-done) sequence. When
@@ -2120,6 +2124,7 @@ impl<D: PagedDecoder> Scheduler<D> {
         //    back below). With work waiting, the window stays 1 so admission
         //    latency is never traded away silently.
         let active: Vec<usize> = (0..self.running.len()).filter(|&i| !self.running[i].done).collect();
+        let decode_range = gpu_core::markers::range(c"serve.decode");
         'decode: {
         if active.is_empty() || self.speculative_step(&active) {
             break 'decode;
@@ -2244,6 +2249,7 @@ impl<D: PagedDecoder> Scheduler<D> {
         }
         }
 
+        drop(decode_range);
         // 4. Reap completed sequences, returning their blocks to the pool.
         let mut completed = Vec::new();
         let mut i = 0;

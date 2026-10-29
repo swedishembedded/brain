@@ -298,6 +298,10 @@ pub mod devgroup;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod link;
 
+/// Named host ranges on the driver-native profiler's timeline (NVTX on NVIDIA),
+/// for every model and backend.
+pub mod markers;
+
 /// Per-kernel-kind profiling of a recorded pass - the one implementation the
 /// model benches share.
 #[cfg(not(target_arch = "wasm32"))]

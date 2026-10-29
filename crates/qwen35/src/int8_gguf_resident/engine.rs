@@ -960,6 +960,7 @@ impl Qwen35GgufEngine {
     /// measured leaves room for, and wait for the cards to finish them, so the decode step that follows runs on
     /// idle cards. `Some` once the prompt's slice is in.
     fn pump_paced(&mut self) -> Option<PrefillDone> {
+        let _slice = gpu_core::markers::range(c"prefill.paced_slice");
         let started = std::time::Instant::now();
         self.pace.observe_iteration(self.slice_ended.map(|ended| (started - ended).as_secs_f64()));
         let bg = self.background.as_mut().expect("a prompt is being read in");
