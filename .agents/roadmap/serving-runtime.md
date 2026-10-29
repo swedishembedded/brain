@@ -105,6 +105,35 @@ Gap list, by what the profile attributes (in the order it would move goodput):
   in at half the sliced speed in background mode (1.56 s against 0.76 s for 1731 tokens, `gguf_resident_real`): all
   but the SM sharing fixed 2026-10-29 (knowledge 375), which is avoided by time-slicing, not reduced.
 
+## Mixed iterations (design, 2026-10-29; items 8 and 11)
+
+Measured gap (FP8 27B, one GH200, `vllm bench serve` chat 1K in / 128 out, output tok/s at concurrency 1 / 4 / 16 / 64):
+vLLM 79 / 299 / 759 / 1241, SGLang 86 / 214 / 781 / 1044, brain 46 / 117 / 166 / 173, with TTFT p50 6.6 s at 16 and 41.8 s at 64.
+Brain runs prefill and decode as separate device passes (a paced background prefill, one prompt at a time, beside the decode
+step), so prompts queue and each pass reads the weights alone. The reference servers build one batch per iteration: the next
+token of every running sequence plus prompt chunks of several requests under a token budget, one forward, each weight read once.
+
+Design (the scheduler decides, the model executes):
+
+- `model::serve` owns the policy. `PagedDecoder::mixed_step() -> Option<MixedLimits>` declares the capability (`max_rows` per
+  forward, `min_prompt_rows`); `forward_mixed(tables, inputs, cands, jobs) -> MixedOutcome` runs the decode rows (`cands == 0`
+  greedy, else top-k) and the prompt jobs as one forward. The default runs `prefill_chunks` then the decode step, so an engine
+  that does not override it keeps today's separate passes, and every consumer of the old methods (prefix cache, branch points,
+  in-flight sharing, preemption, adapters, speculation outside prompt reading) is untouched.
+- The budget is `StepCost::prompt_rows`: a decayed least-squares fit of iteration seconds against rows (`fixed + per_row * rows`,
+  O(1) per iteration), turned into the rows that fit `step_latency_target()` after the decode rows; never below
+  `min_prompt_rows` (a prompt always advances), never above the room in the forward; with nothing decoding the forward is
+  filled (no token interval to protect). Prompt rows are shared over the prefilling sequences oldest first with the existing
+  per-sequence share (`allot_prefill`, O(prefilling)).
+- Speculation is not run in an iteration that reads prompts in (verify rows are another shape of forward); plain iterations
+  (nothing prefilling) keep speculation and the decode window.
+- The qwen35 paged engine implements `forward_mixed` on the multi-sequence prefill round (`run_prefill_multi_stage`): decode
+  rows go first, their recurrent layers through the pooled decode kernel and their attention through paged decode attention,
+  the prompt segments through the chunked recurrence and chunk attention, every projection and MLP once over all rows. It
+  supersedes `PrefillPace` time-slicing and the background lane where the mixed step is available.
+- Open choice recorded by knowledge 375 (latency-paced against throughput-first) becomes one knob: `step_latency_target`
+  (`None` fills every forward).
+
 Page size (256 rows today) is part of item 3 and is chosen per cache group by
 measurement (16-256), not fixed globally.
 

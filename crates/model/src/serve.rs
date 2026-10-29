@@ -22,11 +22,13 @@ use std::collections::{HashMap, VecDeque};
 
 use crate::paged::{BlockAllocator, BlockTable, KvNamespace};
 
+mod budget;
 mod embeds;
 mod sampler;
 mod speculate;
 pub mod rows;
 pub mod conformance;
+pub use budget::{MixedLimits, StepCost};
 pub use embeds::PromptEmbeds;
 pub use sampler::{apply_processors, apply_processors_with, ngram_followers, DryParams, NoRepeatNgram, ProcessorState, SampleContext, ThinkingBudget, MAX_DRY_BREAKERS, MAX_NGRAM_ALLOW, MAX_THINK_CLOSE, MAX_THINK_LEAD};
 pub use speculate::{verify_proposals, DraftQuery, Drafter, NgramDrafter, SpecPolicy, SpecStats, Verdict};
@@ -308,6 +310,39 @@ pub trait PagedDecoder {
         self.prefill_chunks(jobs)
     }
 
+    // ---- mixed iterations (optional) ----
+    //
+    // A decoder whose forward can carry the next token of every running sequence AND slices of the prompts
+    // still being read in as ONE pass (each weight read once for both) says so with `mixed_step`. The
+    // scheduler then runs one such forward per iteration, sizing the prompt part from the decoder's latency
+    // target and the cost of the iterations it has timed ([`StepCost`]), instead of separate prefill and
+    // decode passes. This supersedes the background prefill above for a decoder that offers both.
+
+    /// The shape of mixed iteration this decoder takes, or `None` (the default) if it runs prefill and decode
+    /// as separate passes.
+    fn mixed_step(&self) -> Option<MixedLimits> {
+        None
+    }
+
+    /// One iteration as one forward: the decode step of `tables` (row `i` is `inputs[i]` at the next position
+    /// of `tables[i]`, as [`Self::forward_batched_greedy`] / [`Self::forward_batched_topk`] take them) and the
+    /// next slice of every job (the semantics of [`Self::prefill_chunks`]). `cands == 0` asks for greedy
+    /// picks, answered `(token, 0.0)`; `cands >= 1` for that many `(token, logit)` candidates, best first,
+    /// clamped to [`Self::topk_capacity`]. Either part may be empty. Each decode row must equal what the
+    /// separate decode step gives, and each job what the separate prefill gives, up to the decoder's
+    /// numerics. The default runs the two passes one after the other.
+    fn forward_mixed(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], cands: usize, jobs: &mut [PrefillJob<'_>]) -> MixedOutcome {
+        let prefilled = if jobs.is_empty() { Vec::new() } else { self.prefill_chunks(jobs) };
+        let decoded = if tables.is_empty() {
+            Vec::new()
+        } else if cands == 0 {
+            self.forward_batched_greedy(tables, inputs).into_iter().map(|t| vec![(t, 0.0)]).collect()
+        } else {
+            self.forward_batched_topk(tables, inputs, cands)
+        };
+        MixedOutcome { decoded, prefilled }
+    }
+
     /// A prefill call unwound with a device allocation failure
     /// ([`gpu_core::DeviceOutOfMemory`]): drop whatever prompt the decoder was
     /// reading in and leave the device idle, so the scheduler can release the
@@ -504,6 +539,14 @@ pub struct PrefillJob<'a> {
     pub budget: usize,
     /// The embedding rows of the prompt, when it carries any.
     pub embeds: Option<&'a PromptEmbeds>,
+}
+
+/// What one [`PagedDecoder::forward_mixed`] call produced.
+pub struct MixedOutcome {
+    /// Per decode row, its candidates (`cands == 0`: the greedy token with logprob 0).
+    pub decoded: Vec<Vec<(u32, f32)>>,
+    /// One answer per job, in job order.
+    pub prefilled: Vec<PrefillProgress>,
 }
 
 /// `f`, with a device allocation failure it unwinds with
@@ -1077,6 +1120,20 @@ fn active_tables<'a>(running: &'a mut [Running], in_batch: &[bool]) -> Vec<&'a m
     running.iter_mut().zip(in_batch).filter(|(_, &on)| on).map(|(r, _)| &mut r.table).collect()
 }
 
+/// The token each sequence of `active` samples from its candidates (`candidates[bi]` for `active[bi]`): real
+/// sampling under the sequence's own parameters, penalties and random stream.
+fn sample_rows(running: &mut [Running], active: &[usize], candidates: &[Vec<(u32, f32)>]) -> Vec<Vec<(u32, f32)>> {
+    active
+        .iter()
+        .enumerate()
+        .map(|(bi, &si)| {
+            let r = &mut running[si];
+            let ctx = SampleContext { context: &r.context, prompt_len: r.context.len() - r.generated.len() };
+            vec![sample_in_context_with(&candidates[bi], r.sample, &ctx, &mut r.procs, &mut r.rng)]
+        })
+        .collect()
+}
+
 /// Accept a freshly sampled token into `r`.
 ///
 /// If `next` is one of the sequence's stop ids, `r` is marked done WITHOUT
@@ -1157,8 +1214,10 @@ pub struct Scheduler<D: PagedDecoder> {
     gate: speculate::CostGate,
     /// Whether new prompts prepare the drafter - see [`speculate::PrefillGate`].
     prefill_gate: speculate::PrefillGate,
-    /// Seconds, for the cost gate.
+    /// Seconds, for the cost gate and the mixed iteration's cost model.
     clock: Box<dyn Fn() -> f64 + Send>,
+    /// What a mixed iteration of a given number of rows costs - see [`StepCost`].
+    step_cost: StepCost,
 }
 
 impl<D: PagedDecoder> Scheduler<D> {
@@ -1190,6 +1249,7 @@ impl<D: PagedDecoder> Scheduler<D> {
                 let start = std::time::Instant::now();
                 Box::new(move || start.elapsed().as_secs_f64())
             },
+            step_cost: StepCost::default(),
         }
     }
 
@@ -1990,8 +2050,23 @@ impl<D: PagedDecoder> Scheduler<D> {
         if self.prefilling.is_empty() {
             return;
         }
+        let takes = self.allot_prefill(self.prefill_budget as usize);
+        let mut jobs: Vec<PrefillJob<'_>> =
+            self.prefilling.iter_mut().zip(&takes).filter(|(_, &take)| take > 0).map(|(p, &take)| PrefillJob { table: &mut p.table, prompt: &p.prompt, budget: take, embeds: p.embeds.as_deref() }).collect();
+        let progress = catch_device_oom(|| self.dec.prefill_chunks(&mut jobs));
+        drop(jobs);
+        match progress {
+            Ok(progress) => self.settle_prefill(&takes, progress, report),
+            Err(oom) => self.refuse_prefilling(report, oom),
+        }
+    }
+
+    /// Split `budget` prompt rows over the prefilling sequences, oldest first: each gets at most
+    /// [`PagedDecoder::prefill_interleave_tokens`] while later ones wait for theirs, and what is left after every
+    /// sequence has had its share goes to the oldest. One entry per prefilling sequence; O(prefilling).
+    fn allot_prefill(&self, budget: usize) -> Vec<usize> {
         let share = self.dec.prefill_interleave_tokens().unwrap_or(usize::MAX).max(1);
-        let mut left = self.prefill_budget as usize;
+        let mut left = budget;
         let mut takes = vec![0usize; self.prefilling.len()];
         for pass_cap in [share, usize::MAX] {
             for (p, take) in self.prefilling.iter().zip(&mut takes) {
@@ -2000,15 +2075,13 @@ impl<D: PagedDecoder> Scheduler<D> {
                 left -= room;
             }
         }
-        let mut jobs: Vec<PrefillJob<'_>> =
-            self.prefilling.iter_mut().zip(&takes).filter(|(_, &take)| take > 0).map(|(p, &take)| PrefillJob { table: &mut p.table, prompt: &p.prompt, budget: take, embeds: p.embeds.as_deref() }).collect();
-        let progress = catch_device_oom(|| self.dec.prefill_chunks(&mut jobs));
-        drop(jobs);
-        let progress = match progress {
-            Ok(progress) => progress,
-            Err(oom) => return self.refuse_prefilling(report, oom),
-        };
-        assert_eq!(progress.len(), takes.iter().filter(|&&t| t > 0).count(), "prefill_chunks answers every job");
+        takes
+    }
+
+    /// Record what a prefill call answered for the sequences `takes` gave rows to (one answer per non-zero
+    /// take, in order): advance the partial ones and start decoding the ones whose prompt is in, oldest first.
+    fn settle_prefill(&mut self, takes: &[usize], progress: Vec<PrefillProgress>, report: &mut StepReport) {
+        assert_eq!(progress.len(), takes.iter().filter(|&&t| t > 0).count(), "the prefill call answers every job");
         let mut finished = Vec::new();
         let mut answers = progress.into_iter();
         for (idx, p) in self.prefilling.iter_mut().enumerate() {
@@ -2107,7 +2180,11 @@ impl<D: PagedDecoder> Scheduler<D> {
         let mut budget_left = self.prefill_budget as usize;
         let mut worked = false;
         let batched = self.dec.prefill_batch_tokens().is_some();
-        if self.dec.background_prefill() {
+        let mixed = self.dec.mixed_step();
+        if mixed.is_some() {
+            // The prompts are read in by the iteration's one forward (below), beside the decode rows.
+            while self.admit_one(report, |_| true) {}
+        } else if self.dec.background_prefill() {
             self.prefill_in_background(report);
         } else if batched {
             self.prefill_batched(report);
@@ -2184,6 +2261,10 @@ impl<D: PagedDecoder> Scheduler<D> {
         }
         let decode_range = gpu_core::markers::range(c"serve.decode");
         'decode: {
+        if let Some(limits) = mixed.filter(|_| !self.prefilling.is_empty()) {
+            self.mixed_iteration(limits, &active, &in_batch, report);
+            break 'decode;
+        }
         if active.is_empty() || self.speculative_step(&active) {
             break 'decode;
         }
@@ -2208,8 +2289,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             // The no-repeat filter bans a handful of tokens known from the history before the step: a
             // step whose history bans none is plain greedy, one that bans some asks for that many extra
             // candidates and takes the best that is not banned.
-            let banned_max = active.iter().map(|&i| self.running[i].sample.no_repeat.banned(&self.running[i].generated).len()).max().unwrap_or(0);
-            let all_greedy = banned_max == 0 && active.iter().all(|&i| !self.running[i].sample.needs_candidates());
+            let (all_greedy, banned_max) = self.sampling_mode(&active);
             // A thinking budget is checked on the host after every token, so such a batch takes no window either;
             // neither does a filter that must see each token before the next is chosen.
             let host_checked = active.iter().any(|&i| self.running[i].think.is_some_and(|t| t.watching()) || self.running[i].sample.no_repeat.active());
@@ -2229,23 +2309,12 @@ impl<D: PagedDecoder> Scheduler<D> {
                 };
                 greedy.into_iter().map(|row| row.into_iter().map(|t| (t, 0.0)).collect()).collect()
             } else {
-                // Real sampling and the penalties read the whole candidate list; a step that only
-                // has banned tokens to step over needs those and one more.
-                let wide = active.iter().any(|&i| self.running[i].sample.needs_candidates());
+                let wanted = self.candidates_wanted(&active, banned_max);
                 let candidates = {
                     let mut refs = active_tables(&mut self.running, &in_batch);
-                    let k = if wide { self.dec.topk_capacity() } else { (banned_max + 1).min(self.dec.topk_capacity()) };
-                    self.dec.forward_batched_topk(&mut refs, &inputs, k)
+                    self.dec.forward_batched_topk(&mut refs, &inputs, wanted)
                 };
-                active
-                    .iter()
-                    .enumerate()
-                    .map(|(bi, &si)| {
-                        let r = &mut self.running[si];
-                        let ctx = SampleContext { context: &r.context, prompt_len: r.context.len() - r.generated.len() };
-                        vec![sample_in_context_with(&candidates[bi], r.sample, &ctx, &mut r.procs, &mut r.rng)]
-                    })
-                    .collect()
+                sample_rows(&mut self.running, &active, &candidates)
             }});
             let window = match decoded {
                 Ok(window) => window,
@@ -2262,34 +2331,7 @@ impl<D: PagedDecoder> Scheduler<D> {
                     break 'decode;
                 }
             };
-            for (bi, &si) in active.iter().enumerate() {
-                let r = &mut self.running[si];
-                let mut used = 0usize;
-                for &(next, logprob) in &window[bi] {
-                    // The budget ran out: the closing sequence replaces the model's choice.
-                    let (next, logprob) = match r.think.and_then(|t| t.forced_next()) {
-                        Some(forced) => (forced, 0.0),
-                        None => (next, logprob),
-                    };
-                    // `used` counts consumed window slots (a real decode step
-                    // happened and wrote a KV-cache entry) regardless of
-                    // whether `next` ends up in `generated` - EOS still
-                    // occupies a real slot, it just isn't output text.
-                    used += 1;
-                    accept_token(r, next, logprob);
-                    if r.done {
-                        break;
-                    }
-                }
-                // A sequence that finished mid-window consumed only `used`
-                // inputs; the remaining pre-allocated slots hold garbage K/V
-                // and are rolled back so the pool never leaks waste.
-                let surplus = (k - used) as u32;
-                if surplus > 0 {
-                    let len = r.table.len();
-                    r.table.truncate(len - surplus, self.dec.alloc_mut());
-                }
-            }
+            self.accept_window(&active, &window, k);
             if self.dec.spec_cost_aware() {
                 let produced: usize = active.iter().map(|&i| self.running[i].generated.len()).sum::<usize>() - generated_before;
                 self.gate.observe_plain(speculate::CostGate::bucket(active.len()), produced, (self.clock)() - plain_started);
@@ -2315,6 +2357,101 @@ impl<D: PagedDecoder> Scheduler<D> {
             }
         }
         completed
+    }
+
+    /// `(every row is plain greedy, most tokens any row's no-repeat filter bans)` for the sequences `active`.
+    /// The filter bans a handful of tokens known from the history before the step: a step whose history bans
+    /// none is plain greedy, one that bans some asks for that many extra candidates and takes the best that is
+    /// not banned.
+    fn sampling_mode(&self, active: &[usize]) -> (bool, usize) {
+        let banned_max = active.iter().map(|&i| self.running[i].sample.no_repeat.banned(&self.running[i].generated).len()).max().unwrap_or(0);
+        let all_greedy = banned_max == 0 && active.iter().all(|&i| !self.running[i].sample.needs_candidates());
+        (all_greedy, banned_max)
+    }
+
+    /// Candidates per row a non-greedy step asks for. Real sampling and the penalties read the whole candidate
+    /// list; a step that only has banned tokens to step over needs those and one more.
+    fn candidates_wanted(&self, active: &[usize], banned_max: usize) -> usize {
+        if active.iter().any(|&i| self.running[i].sample.needs_candidates()) {
+            self.dec.topk_capacity()
+        } else {
+            (banned_max + 1).min(self.dec.topk_capacity())
+        }
+    }
+
+    /// Take the tokens a decode step produced (`window[bi]` for sequence `active[bi]`, at most `k` each) into
+    /// their sequences, and roll back the slots a sequence that finished mid-window did not use.
+    fn accept_window(&mut self, active: &[usize], window: &[Vec<(u32, f32)>], k: usize) {
+        for (bi, &si) in active.iter().enumerate() {
+            let r = &mut self.running[si];
+            let mut used = 0usize;
+            for &(next, logprob) in &window[bi] {
+                // The budget ran out: the closing sequence replaces the model's choice.
+                let (next, logprob) = match r.think.and_then(|t| t.forced_next()) {
+                    Some(forced) => (forced, 0.0),
+                    None => (next, logprob),
+                };
+                // `used` counts consumed window slots (a real decode step
+                // happened and wrote a KV-cache entry) regardless of
+                // whether `next` ends up in `generated` - EOS still
+                // occupies a real slot, it just isn't output text.
+                used += 1;
+                accept_token(r, next, logprob);
+                if r.done {
+                    break;
+                }
+            }
+            // A sequence that finished mid-window consumed only `used`
+            // inputs; the remaining pre-allocated slots hold garbage K/V
+            // and are rolled back so the pool never leaks waste.
+            let surplus = (k - used) as u32;
+            if surplus > 0 {
+                let len = r.table.len();
+                r.table.truncate(len - surplus, self.dec.alloc_mut());
+            }
+        }
+    }
+
+    /// **One mixed iteration** ([`PagedDecoder::mixed_step`]): the next token of every sequence in `active` and
+    /// a slice of the prompts still being read in, as one forward. The slice is sized from the decoder's
+    /// latency target and the cost of the iterations timed so far ([`StepCost::prompt_rows`]), and shared out
+    /// over the prefilling sequences as [`Self::allot_prefill`] does. Speculation is not run while prompts go
+    /// in: its verify rows are another shape of forward.
+    fn mixed_iteration(&mut self, limits: MixedLimits, active: &[usize], in_batch: &[bool], report: &mut StepReport) {
+        let started = (self.clock)();
+        let target = self.dec.step_latency_target().map(|t| t.as_secs_f64());
+        let prompt_rows = self.step_cost.prompt_rows(limits, active.len(), target);
+        let takes = self.allot_prefill(prompt_rows);
+        let inputs: Vec<u32> = active.iter().map(|&i| self.running[i].next_input).collect();
+        let (all_greedy, banned_max) = self.sampling_mode(active);
+        let cands = if all_greedy { 0 } else { self.candidates_wanted(active, banned_max) };
+        let mut tables = active_tables(&mut self.running, in_batch);
+        let mut jobs: Vec<PrefillJob<'_>> =
+            self.prefilling.iter_mut().zip(&takes).filter(|(_, &take)| take > 0).map(|(p, &take)| PrefillJob { table: &mut p.table, prompt: &p.prompt, budget: take, embeds: p.embeds.as_deref() }).collect();
+        let outcome = {
+            let _forward = gpu_core::markers::range(c"serve.mixed");
+            catch_device_oom(|| self.dec.forward_mixed(&mut tables, &inputs, cands, &mut jobs))
+        };
+        drop((tables, jobs));
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(oom) => {
+                // The forward carried every sequence and prompt in flight and its answers are lost with the unwind:
+                // all are refused with a classed error (blocks returned), and the server goes on.
+                for &i in active.iter().rev() {
+                    let mut r = self.running.remove(i);
+                    self.dec.release_table(&mut r.table);
+                    self.unpin(r.adapter);
+                    report.rejected.push((r.id, RejectReason::DeviceOutOfMemory { bytes: oom.bytes }));
+                }
+                return self.refuse_prefilling(report, oom);
+            }
+        };
+        let rows = active.len() + takes.iter().sum::<usize>();
+        self.step_cost.observe(rows, (self.clock)() - started);
+        let window = if all_greedy { outcome.decoded } else { sample_rows(&mut self.running, active, &outcome.decoded) };
+        self.accept_window(active, &window, 1);
+        self.settle_prefill(&takes, outcome.prefilled, report);
     }
 
     /// Drive to completion, returning every request's tokens keyed by id.
