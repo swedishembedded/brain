@@ -26,7 +26,7 @@ use audio::conv::{conv1d_bwd, conv1d_fwd, Conv1d, ConvKernels};
 
 use crate::block::{kv_expand_bwd, kv_expand_fwd, rmsnorm_bwd, rmsnorm_fwd, KernelIds};
 use crate::gdn::{
-    gdn_chunk_bwd, gdn_chunk_bwd_tokens, gdn_chunk_fwd, gdn_chunk_fwd_tokens, gdn_chunk_fwd_train, gdn_chunk_fwd_train_tokens, gdn_qk_bwd_tokens, gdn_recurrent_step, tokens_prefix_offered, GdnBwdIds, GdnBwdScratchBufs, GdnChunkMajorOut, GdnIds, GdnRecurrentScratch, GdnScratchBufs, GdnTokenInputs,
+    gdn_chunk_bwd, gdn_chunk_bwd_tokens, gdn_chunk_fwd, gdn_chunk_fwd_tokens, gdn_chunk_fwd_train, gdn_chunk_fwd_train_tokens, gdn_qk_bwd_tokens, gdn_recurrent_step, tokens_prefix_offered, GdnBwdIds, GdnBwdScratchBufs, GdnChunkMajorOut, GdnIds, GdnRecurrentScratch, GdnScratchBufs, GdnTokScratchBufs, GdnTokenInputs,
     GdnScratchTrainBufs, GdnShape,
 };
 
@@ -370,9 +370,13 @@ pub fn gdn_mixer_stream_fwd(
         (None, Some(zeroed)) => zeroed,
         (None, None) => unreachable!("owned_initial is Some whenever cont is None"),
     };
-    let final_state = g.storage(state_len);
-    let out_cm = g.storage(gdn.bhc() as u64 * chunk as u64 * vhd as u64);
     let scratch_train = if is_train { Some(GdnScratchTrainBufs::new(g, &gdn)) } else { None };
+    // The serving fold below writes every word of the end state and of the output; the portable sequences keep
+    // their zero-fresh buffers.
+    let fold_infer = scratch_train.is_none() && tokens_prefix_offered(g, &ids.chunk, &gdn, group);
+    let final_state = if fold_infer { g.storage_uninit(state_len) } else { g.storage(state_len) };
+    let out_len = gdn.bhc() as u64 * chunk as u64 * vhd as u64;
+    let out_cm = if fold_infer { g.storage_uninit(out_len) } else { g.storage(out_len) };
     let cm_len = |dim: u32| b as u64 * nvh as u64 * n_chunks as u64 * chunk as u64 * dim as u64;
 
     // The training forward on a device with the tensor-core prefix reads query, key, value, beta and
@@ -395,16 +399,16 @@ pub fn gdn_mixer_stream_fwd(
 
     // The same fold for a forward that saves nothing for a backward (the first pass of a recompute
     // step, serving prefill): only the chunk-major query and key the recurrence reads are written.
-    let fused_infer = scratch_train.is_none()
-        && tokens_prefix_offered(g, &ids.chunk, &gdn, group)
+    let fused_infer = fold_infer
         && {
-            let (query_cm, key_cm) = (g.storage(cm_len(khd)), g.storage(cm_len(khd)));
-            let scratch = GdnScratchBufs::new(g, &gdn);
+            // The prep kernel writes every word of both, the recurrence every word of the output and the end state.
+            let (query_cm, key_cm) = (g.storage_uninit(cm_len(khd)), g.storage_uninit(cm_len(khd)));
+            let scratch = GdnTokScratchBufs::new(g, &gdn);
             let tok = GdnTokenInputs { query: &query, key: &key, value: &value, raw_g: &g_decay, beta: &beta, group, l2_eps: 1e-6 };
             match gdn_chunk_fwd_tokens(g, &ids.chunk, &gdn, &tok, &query_cm, &key_cm, initial_state, &scratch.as_ref(), &out_cm, &final_state, true) {
                 Some((steps, token_major)) => {
                     out_is_tok.set(token_major);
-                    g.submit(&scratch.clears(), &steps);
+                    g.submit(&[], &steps);
                     true
                 }
                 None => false,
@@ -907,7 +911,8 @@ pub fn gdn_mixer_decode_pooled_fused(
     if gdn.t != 1 || gdn.dk != 128 || gdn.dv != 128 || shape.conv_kernel != 4 || shape.nkh == 0 || !gdn.h.is_multiple_of(shape.nkh) {
         return None;
     }
-    let gated = g.storage(gdn.b as u64 * shape.value_dim() as u64);
+    // The fused decode kernel writes every word of each sequence's output row.
+    let gated = g.storage_uninit(gdn.b as u64 * shape.value_dim() as u64);
     let params = [shape.nkh, gdn.h, shape.group(), f(1e-6), f(shape.rms_eps), f(1.0f32 / (gdn.dk as f32).sqrt()), gdn.b, 0];
     let bufs = [mixed_qkv, w.conv1d_weight, pool.hist, bproj, aproj, w.a_log, w.dt_bias, pool.state, z, w.norm_weight, &gated, pool.rows];
     let exact = if pool.bf16 { gpu_core::Fused::GdnDecodePoolBf16 } else { gpu_core::Fused::GdnDecodePool };

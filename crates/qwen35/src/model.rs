@@ -5225,7 +5225,8 @@ impl Qwen35 {
             let positions: Vec<[u32; 3]> = (0..rows).map(|i| [seg.pos_start + i; 3]).collect();
             let (cos, sin) = qwen3vl::mrope::mrope_tables_scaled(&positions, c.mrope_section, c.rotary_dim(), c.rope_theta, yarn.as_ref().map(|(f, a)| (f.as_slice(), *a)));
             let words = |w: &[u32]| {
-                let buf = g.storage(w.len() as u64);
+                // The write below fills every word.
+                let buf = g.storage_uninit(w.len() as u64);
                 g.write(&buf, w);
                 buf
             };

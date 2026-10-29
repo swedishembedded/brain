@@ -489,6 +489,43 @@ impl GdnScratchBufs {
     }
 }
 
+/// The scratch [`gdn_chunk_fwd_tokens`] reads and writes: the five buffers its prep and recurrence kernels pass between
+/// them. The prep kernel writes every word of each before the recurrence reads it, so none is cleared, and the
+/// thirteen buffers of [`GdnScratch`] that the portable sequence needs are not allocated at all.
+pub struct GdnTokScratch<'a> {
+    pub g_cs: &'a DeviceBuffer,
+    pub exp_g_cs: &'a DeviceBuffer,
+    pub u: &'a DeviceBuffer,
+    pub w: &'a DeviceBuffer,
+    pub intra_scores: &'a DeviceBuffer,
+}
+
+/// Owner of a [`GdnTokScratch`].
+pub struct GdnTokScratchBufs {
+    g_cs: DeviceBuffer,
+    exp_g_cs: DeviceBuffer,
+    u: DeviceBuffer,
+    w: DeviceBuffer,
+    intra_scores: DeviceBuffer,
+}
+
+impl GdnTokScratchBufs {
+    pub fn new(g: &Gpu, shape: &GdnShape) -> GdnTokScratchBufs {
+        let (bhc, c, dk, dv) = (shape.bhc() as u64, shape.chunk as u64, shape.dk as u64, shape.dv as u64);
+        GdnTokScratchBufs {
+            g_cs: g.storage_uninit(bhc * c),
+            exp_g_cs: g.storage_uninit(bhc * c),
+            u: g.storage_uninit(bhc * c * dv),
+            w: g.storage_uninit(bhc * c * dk),
+            intra_scores: g.storage_uninit(bhc * c * c),
+        }
+    }
+
+    pub fn as_ref(&self) -> GdnTokScratch<'_> {
+        GdnTokScratch { g_cs: &self.g_cs, exp_g_cs: &self.exp_g_cs, u: &self.u, w: &self.w, intra_scores: &self.intra_scores }
+    }
+}
+
 /// Owned scratch for one [`gdn_chunk_fwd_train`] call - the training-mode
 /// sibling of [`GdnScratchBufs`] that additionally saves the per-chunk
 /// history [`gdn_chunk_bwd`] reads back (see [`GdnScratchTrain`]'s own doc for
@@ -1528,7 +1565,7 @@ pub fn gdn_chunk_fwd_tokens(
     query_cm: &DeviceBuffer,
     key_cm: &DeviceBuffer,
     initial_state: &DeviceBuffer,
-    scratch: &GdnScratch,
+    scratch: &GdnTokScratch,
     out: &DeviceBuffer,
     final_state: &DeviceBuffer,
     out_token_major: bool,

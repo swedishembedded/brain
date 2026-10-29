@@ -634,7 +634,8 @@ pub fn gqa_mixer_chunk_kv_fwd_paged(
     let qd = shape.qd();
     let prep = qkv_prepare(g, ids, shape, w, q_full, k, n);
 
-    let ctx = g.storage((n * qd) as u64);
+    // Every head of every row is written by the attention kernel.
+    let ctx = g.storage_uninit((n * qd) as u64);
     g.submit(&[], &crate::block::gqa_chunk_step_kv_paged(g, kv, softmax, nh, nkv, hd, start, n, &prep.q_normed, &prep.k_normed, v, layer, paging, seq_lens, &ctx));
     gate_ctx(g, ids, &ctx, &prep.q_gate, n, qd).1
 }
@@ -684,7 +685,8 @@ pub fn gqa_mixer_decode_batched_kv_attend(
     let qd = shape.qd();
     let prep = qkv_prepare(g, ids, shape, w, q_full, k, batch);
 
-    let ctx = g.storage((batch * qd) as u64);
+    // Every head of every sequence is written by the attention kernel.
+    let ctx = g.storage_uninit((batch * qd) as u64);
     g.submit(
         &[],
         &crate::block::gqa_decode_batched_step_kv(

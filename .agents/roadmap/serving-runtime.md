@@ -121,12 +121,26 @@ behind the existing `Gpu::step`/`submit` API so the WGSL reference path and old 
 3. **Lowering per backend.** CUDA: one graph per bucket, replayed with one launch, segmented around ops a capture cannot hold
    (item 5, #356). Vulkan: command-buffer replay. wgpu/CPU: a plain loop over the plan. Same ops, same results.
 
+End state (user direction, 2026-10-29): the card executes a whole step standalone and the host only collects results.
+
+- Per shape bucket the kernel choices, arena offsets, parameter block and graph are precomputed; a step is one metadata upload plus one
+  graph launch.
+- Decode is device-resident for K steps (gap G12, decode window): sampling, stop checks and the next inputs stay on the device, one
+  launch runs K steps, and the host harvests tokens and admits work between launches.
+- The plan is built per stage and device from the start. Cross-card edges are plan nodes on the same stream: peer copies
+  (`Gpu::copy_to`, 128 GB/s measured over NVLink) or NCCL collectives (`gpu_core::devgroup`), so layer-split and tensor-parallel come
+  from the plan and not from a separate path.
+- Older hardware keeps the same plan lowered to a plain loop or a Vulkan command buffer.
+
 Increments, each measured (nsys card-busy %, API calls per iteration, client tok/s) and pushed on its own:
 
 - **A (done, knowledge 381): the parameter block.** A held batch of eagerly issued dispatches uploads its parameters with one copy
   (`CudaBackend::issue_eager`), and the prefill/mixed layer loop issues per layer (`pass_scope`). Card busy 66 -> 79 %, copies per
   mixed iteration 4545 -> 480, c=16 / c=64 output 291 / 384 -> 340 / 460 tok/s.
-- **B: the arena.** Intermediates of a bucket at fixed offsets of one allocation (no pool alloc/free: ~11000 calls per iteration; no
+- **B1 (done, knowledge 381): the clears and fences.** Buffers a kernel overwrites are `storage_uninit` (the serving GDN fold with its five
+  scratch buffers instead of eighteen, attention context, the fused decode output, the uploaded index words), and the cross-handle ordering
+  events are reused: memsets per mixed iteration 930 -> 20, event create/destroy 6000 -> 0, card busy 79 -> 81 %.
+- **B: the arena (rest).** Intermediates of a bucket at fixed offsets of one allocation (no pool alloc/free: ~11000 calls per iteration; no
   clears of overwritten buffers; row views instead of the 1008 `concat_split` copies), which is also what makes C replayable.
 - **C: the full round as a plan, then graph lowering** with the row count bucketed (bounded graph memory), the per-step metadata
   upload of item 4, and the other backends' lowerings.

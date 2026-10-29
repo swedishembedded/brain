@@ -30,3 +30,12 @@ Quality: `qwen35_fp8_parity` (2 prompts, 851 + 845 tokens, 32 steps) is identica
 mean KL 1.526e-3, worst rel-L2 7.45e-2. Card tests: `gguf_mixed_step` 3/3, `gguf_conformance` 12/13 (`prompts_sharing_a_document_resume_from_where_they_part`
 fails on main too), `hf_fp8_conformance`, qwen35 lib 156 on CPU. `brain-backend-cuda` tests: `catalogue_coverage` (rdft ReverseBits), `mem_pool`
 and `staged_writes` fail on the commit before this change too.
+
+Increment B1 (same note): the zero-fresh clears and per-submission events. nsys of the median mixed iteration, memsets 930 -> 20 (the serving
+GDN fold cleared eighteen scratch buffers of which its kernels use five, plus the chunk-major query/key, end state and output; attention
+context, the fused decode output and the uploaded index words were cleared before being written in full), `cuEventCreate`/`Destroy` 3100/3000 -> 0
+(ordering events are re-recorded once no buffer fence names them), allocs 6950 -> 5450. Card busy 79 -> 81 %, median iteration 166 -> 158 ms; client
+output tok/s at c = 1 / 4 / 16 / 64 49 / 200 / 340 / 460 -> 49 / 200 / 337 / 465, ITL p99 at 16 238 -> 231 ms, 31K TTFT 7.10 -> 7.03 s (within noise except
+the API counts). What bounds the iteration now (nsys, CPU sampling): 15 ms of host work before the first kernel (tables, index uploads, 15 % of the samples in
+`madvise` from large host frees) and a 7 ms host gap after the last layer, together 22 of 158 ms, plus 5400 launches at 15 us host cost each.
+Card tests in a debug build (0xFF-filled uninit): `gdn_chunk_fwd_train_tc`, `gguf_mixed_step` pass; `gguf_conformance` 12/13 as before.

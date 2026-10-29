@@ -510,6 +510,9 @@ pub struct CudaBackend {
     /// replayed graph reports one duration for the whole graph.
     timing: AtomicBool,
     kernel_times: Mutex<KernelTimes>,
+    /// Ordering events this handle has created, reused once no buffer's fence names them any more - see
+    /// [`Self::ordering_event`].
+    fence_events: Mutex<Vec<Arc<exec::Event>>>,
     /// **Last field on purpose.** Rust drops a struct's fields in declaration
     /// order, and every other field above either holds device memory, a loaded
     /// module or an instantiated graph - all of which are resources OF this
@@ -612,6 +615,7 @@ impl CudaBackend {
             counters: Counters::default(),
             timing: AtomicBool::new(false),
             kernel_times: Mutex::new(KernelTimes::default()),
+            fence_events: Mutex::new(Vec::new()),
         }
     }
 
@@ -1182,6 +1186,27 @@ impl CudaBackend {
         buf
     }
 
+    /// An ordering event stamped on this handle's stream now. One no buffer's fence references any more is
+    /// re-recorded instead of a new one created and destroyed per submission (3000 create/destroy pairs a mixed
+    /// iteration): a stream that already waited on it waited on the earlier record, which re-recording leaves alone.
+    fn ordering_event(&self) -> Result<Arc<exec::Event>, String> {
+        /// Events kept for reuse; past it a fresh one is created and dropped as before.
+        const FENCE_EVENT_CAP: usize = 4096;
+        let mut pool = self.fence_events.lock().unwrap_or_else(|e| e.into_inner());
+        let event = match pool.iter().find(|e| Arc::strong_count(e) == 1) {
+            Some(e) => e.clone(),
+            None => {
+                let e = Arc::new(self.ctx.ordering_event()?);
+                if pool.len() < FENCE_EVENT_CAP {
+                    pool.push(e.clone());
+                }
+                e
+            }
+        };
+        self.ctx.record(&event)?;
+        Ok(event)
+    }
+
     /// Record that this handle's stream has just done work on `bufs`, so any
     /// other handle that uses one of them first waits for it. See
     /// [`Self::fence_in`].
@@ -1189,8 +1214,8 @@ impl CudaBackend {
         if !exec::several_contexts_open() {
             return;
         }
-        let event = match self.ctx.ordering_event().and_then(|e| self.ctx.record(&e).map(|()| e)) {
-            Ok(e) => Arc::new(e),
+        let event = match self.ordering_event() {
+            Ok(e) => e,
             Err(e) => {
                 tracing::warn!(reason = %e, "backend-cuda: cannot record an ordering event");
                 return;

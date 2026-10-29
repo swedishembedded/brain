@@ -364,7 +364,7 @@ fn the_recurrence_output_can_be_written_token_major_and_matches_the_chunk_major_
         eprintln!("gdn_chunk_fwd_train_tc: this device does not take the fast kernels - nothing to run");
         return;
     }
-    use model::gdn::{gdn_chunk_fwd_tokens, gdn_chunk_fwd_train_tokens, GdnScratchBufs, GdnTokenInputs};
+    use model::gdn::{gdn_chunk_fwd_tokens, gdn_chunk_fwd_train_tokens, GdnTokScratchBufs, GdnTokenInputs};
     for (b, h, t, chunk, group) in [(1u32, 6u32, 256u32, 64u32, 3u32), (2, 6, 96, 32, 3)] {
         let shape = GdnShape { b, h, t, dk: 128, dv: 128, chunk };
         let (bhc, bh) = (shape.bhc() as usize, shape.bh() as usize);
@@ -393,9 +393,9 @@ fn the_recurrence_output_can_be_written_token_major_and_matches_the_chunk_major_
                     g.submit(&scratch.clears(), &steps);
                     flag
                 } else {
-                    let scratch = GdnScratchBufs::new(&g, &shape);
+                    let scratch = GdnTokScratchBufs::new(&g, &shape);
                     let (steps, flag) = gdn_chunk_fwd_tokens(&g, &ids, &shape, &tok, &qcm, &kcm, &initial, &scratch.as_ref(), &out, &fin, want_tok).expect("served");
-                    g.submit(&scratch.clears(), &steps);
+                    g.submit(&[], &steps);
                     flag
                 };
                 assert_eq!(flag, want_tok, "b={b} train={train}: the tensor-core recurrence must honour the token-major request");
