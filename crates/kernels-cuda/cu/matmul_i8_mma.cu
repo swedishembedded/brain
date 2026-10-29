@@ -32,21 +32,27 @@
 // MMA here starts from a fresh accumulator, and its result is folded into
 // an f32 running total through that group's two scales before the next MMA.
 //
-// The fold is the bottleneck, not the MMA, so it is built from the two
-// cheapest instructions available:
+// The fold is the bottleneck, not the MMA, so it is built from the cheapest
+// instructions available:
 //   * the MMA accumulator is SEEDED with 0x4B400000 (the float 1.5 * 2^23),
 //     so the integer result i comes back as the bit pattern of the float
 //     (1.5 * 2^23 + i) - exact for |i| < 2^22, and |i| <= 32 * 127 * 128 here.
 //     That replaces the int->float conversion, which runs at a fraction of
 //     the FMA rate, with a free reinterpret;
-//   * one FADD removes the bias (exact) and one FFMA applies the scale.
+//   * two FFMAs per element finish the group: fma(d, xa, -bias * xa) is the
+//     sum i times the activation scale xa, and fma(that, sw, total) applies
+//     the weight scale. The first is exact up to its one rounding because
+//     bias * xa is exact, which holds when xa has at most 22 significant bits;
+//     the kernel rounds the activation scale to 21 (relative change at most
+//     4.8e-7, see `brain_round21`) instead of paying a bias subtraction and a
+//     scale product per element.
 // The sum inside a group is exact integer arithmetic; across groups it is f32
-// in ascending group order, as in the portable kernel. The one difference
-// from it is that the scale multiply-add is a single fused rounding rather
-// than two (the backend compiles with --fmad=false, so the portable kernel's
-// `acc += f32(c) * s` rounds twice; `fmaf` below is explicit and still
-// fused). Agreement is therefore to f32 rounding of the running sum, not bit
-// identity.
+// in ascending group order, as in the portable kernel. It differs from it by
+// the activation scale's 21-bit rounding and by fused rather than separately
+// rounded multiply-adds (the backend compiles with --fmad=false, so the
+// portable kernel's `acc += f32(c) * s` rounds twice; `fmaf` below is explicit
+// and still fused). Agreement is therefore to f32 rounding of the running sum
+// (about 1e-6 of the output's rms), not bit identity.
 //
 // Data movement: 4-stage cp.async pipeline, one __syncthreads per 64-deep
 // k-tile. Tiles are stored 64 bytes per row with the 16-byte chunk index
@@ -119,6 +125,15 @@ __device__ __forceinline__ void brain_mma_s8(unsigned int (&d)[4], const unsigne
     asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %10, %10, %10};\n"
                  : "=r"(d[0]), "=r"(d[1]), "=r"(d[2]), "=r"(d[3])
                  : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1), "r"(FLOAT_BIAS_BITS));
+}
+
+// The activation scale rounded to 21 significant bits, so that `bias * scale` is exact (the bias has two
+// significant bits). The fold then needs no bias subtraction and no scale product: fma(d, xa, -bias * xa) is
+// the integer sum i times xa rounded once (d = bias + i exactly), and one more fused multiply-add scales it by the
+// weight scale into the total. The relative change of the scale is at most 2^-21 = 4.8e-7, under the f32
+// rounding noise of the running sum of K/32 terms.
+__device__ __forceinline__ float brain_round21(float x) {
+    return __uint_as_float((__float_as_uint(x) + 3u) & ~7u);
 }
 
 // Byte offset of 16-byte chunk `c` (0..3) of tile row `r` inside a 64-byte-row
@@ -296,12 +311,13 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_matmul_i8_mma(const 
                     const float s1 = ks == 0 ? sc[nt].z : sc[nt].w;   // column 2t + 1
                     // Rows g and g + 8 of the m16 tile.
                     const unsigned int xr = wm * WM + mt * 16u + (lane >> 2);
-                    const float xa = xs[xr * 2u + ks];
-                    const float xb = xs[(xr + 8u) * 2u + ks];
-                    f[mt][nt][0] = fmaf(__uint_as_float(d[0]) - FLOAT_BIAS, s0 * xa, f[mt][nt][0]);
-                    f[mt][nt][1] = fmaf(__uint_as_float(d[1]) - FLOAT_BIAS, s1 * xa, f[mt][nt][1]);
-                    f[mt][nt][2] = fmaf(__uint_as_float(d[2]) - FLOAT_BIAS, s0 * xb, f[mt][nt][2]);
-                    f[mt][nt][3] = fmaf(__uint_as_float(d[3]) - FLOAT_BIAS, s1 * xb, f[mt][nt][3]);
+                    const float xa = brain_round21(xs[xr * 2u + ks]);
+                    const float xb = brain_round21(xs[(xr + 8u) * 2u + ks]);
+                    const float nxa = -FLOAT_BIAS * xa, nxb = -FLOAT_BIAS * xb;
+                    f[mt][nt][0] = fmaf(fmaf(__uint_as_float(d[0]), xa, nxa), s0, f[mt][nt][0]);
+                    f[mt][nt][1] = fmaf(fmaf(__uint_as_float(d[1]), xa, nxa), s1, f[mt][nt][1]);
+                    f[mt][nt][2] = fmaf(fmaf(__uint_as_float(d[2]), xb, nxb), s0, f[mt][nt][2]);
+                    f[mt][nt][3] = fmaf(fmaf(__uint_as_float(d[3]), xb, nxb), s1, f[mt][nt][3]);
                 }
             }
         }

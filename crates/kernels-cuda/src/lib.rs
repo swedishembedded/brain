@@ -69,6 +69,16 @@ pub const FP8_CVT_MIN_CC: Cc = (8, 9);
 /// The compute capability that introduced thread-block clusters and their distributed shared memory: Hopper.
 pub const CLUSTER_MIN_CC: Cc = (9, 0);
 
+/// The compute capability that introduced warpgroup matrix multiply (`wgmma.mma_async`, asynchronous tensor-core
+/// work reading its operands from shared memory by descriptor): Hopper. The instruction is arch-specific (`sm_90a`),
+/// so a kernel using it is also registered with `ArchFeatures::Required`.
+pub const WGMMA_MIN_CC: Cc = (9, 0);
+
+/// Dynamic shared memory per block of `matmul_i8_wgmma`: a ring of 4 stages (a 128 x 128 activation tile, a
+/// 128 x 128 weight tile and their 4 group scales per row, 36864 bytes each) and 1 KiB to align the ring to the
+/// 128-byte swizzle pattern. A test holds it to the source.
+pub const I8_WGMMA_DYNAMIC_SHARED_BYTES: u32 = 4 * (2 * 128 * 128 + 2 * 4 * 128 * 4) + 1024;
+
 /// Dynamic shared memory per block of `matmul_i8_stream_*` with `bn` weight rows a block and `stages` stages (the
 /// source's `BRAIN_I8S_STAGE_BYTES` x `BRAIN_I8S_STAGES`): per stage `bn` rows x 128 bytes of weights, 32 rows of x x
 /// 128 bytes and their four scale groups each. A test holds it to the source.
@@ -324,6 +334,26 @@ pub const ALL: &[CudaKernel] = &[
             "#define brain_matmul_i8_mma brain_matmul_i8_mma_m128\n",
             include_str!("../cu/matmul_i8_mma.cu")
         ),
+    },
+    CudaKernel {
+        name: "matmul_i8_wgmma",
+        // A prefill-GEMM candidate, asked for by name through `gpu_core::native_upgrade`'s prefill slot and chosen
+        // per shape class by measurement; never resolved by `find`.
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_matmul_i8_wgmma",
+        what: "int8 warpgroup GEMM (wgmma m64n128k32 from a cp.async ring) with group-32 activation and weight scales folded per k32 in registers; agrees with matmul_i8_mma to f32 rounding",
+        reported: "native:matmul_i8_wgmma",
+        block_dim: 256,
+        // 128 activation rows x 128 weight rows per block (two warpgroups of 64 rows); row tile fastest.
+        tile: (128, 128),
+        // The stage ring is dynamic shared memory (`I8_WGMMA_DYNAMIC_SHARED_BYTES`).
+        shared_bytes: 0,
+        programmatic: false,
+        src: include_str!("../cu/matmul_i8_wgmma.cu"),
     },
     CudaKernel {
         name: "flash_prefill_f16_hd256",
@@ -2985,6 +3015,14 @@ pub fn check_table(table: &[CudaKernel]) -> Vec<String> {
                 k.name, k.min_cc.0, k.min_cc.1, MMA_S8_MIN_CC.0, MMA_S8_MIN_CC.1
             ));
         }
+        // `wgmma.mma_async` is a Hopper instruction (and arch-specific): a lower floor would offer the kernel to
+        // parts that cannot run it.
+        if code.contains("wgmma.mma_async") && k.min_cc < WGMMA_MIN_CC {
+            errs.push(format!(
+                "{}: issues wgmma.mma_async but declares min_cc {}.{}, below the capability that introduced it ({}.{})",
+                k.name, k.min_cc.0, k.min_cc.1, WGMMA_MIN_CC.0, WGMMA_MIN_CC.1
+            ));
+        }
         if k.block_dim == 0 || k.block_dim % 32 != 0 {
             errs.push(format!(
                 "{}: block_dim {} is not a non-zero multiple of the warp granularity every CUDA \
@@ -3017,6 +3055,25 @@ pub fn check_table(table: &[CudaKernel]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_wgmma_source_and_the_rust_constant_agree_on_the_ring() {
+        let k = get("matmul_i8_wgmma").expect("registered");
+        let define = |name: &str| -> u32 {
+            let line = k.src.lines().find_map(|l| l.strip_prefix(&format!("#define {name} "))).unwrap_or_else(|| panic!("matmul_i8_wgmma.cu defines {name}"));
+            line.split_whitespace().next().and_then(|v| v.parse().ok()).unwrap_or_else(|| panic!("{name} is a number"))
+        };
+        let (bm, bn, bk, stages) = (define("BM"), define("BN"), define("BK"), define("STAGES"));
+        assert_eq!((bm, bn), k.tile, "the registered tile is the source's");
+        assert_eq!(define("THREADS"), k.block_dim);
+        // Per stage: the activation and weight tiles and four group scales per row of each.
+        let stage = (bm + bn) * bk + (bm + bn) * 4 * 4;
+        assert_eq!(I8_WGMMA_DYNAMIC_SHARED_BYTES, stages * stage + 1024);
+        let mut wgmma = *k;
+        wgmma.min_cc = (8, 0);
+        let joined = check_table(&[wgmma]).join("\n");
+        assert!(joined.contains("issues wgmma.mma_async but declares min_cc"), "{joined}");
+    }
+
     #[test]
     fn the_gemv_source_and_the_rust_constant_agree_on_where_the_tensor_core_block_starts() {
         let src = get("matmul_i8_gemv").expect("registered").src;
