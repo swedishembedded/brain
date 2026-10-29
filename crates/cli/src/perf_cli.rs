@@ -56,6 +56,9 @@ OPTIONS
                           qwen35:<gguf>[:kvf32|:kvbf16|:kvint8]
                                                    the released Qwen3.8-27B GGUF,
                                                    built as `brain serve` builds it
+                          qwen35moe:<gguf>[:kvf32|:kvbf16|:kvint8]
+                                                   the Qwen3.6-35B-A3B GGUF behind
+                                                   its serving engine
                           lfm:<weights>:<tok.json> the LFM2.5 encoder behind the
                                                    residency executor (unit: sequence)
                           flux2[:<W>x<H>x<steps>[:<precision>]]
@@ -148,6 +151,10 @@ targets (--target):
                                      `--device` cards); the `:kv` suffix pins the GQA cache
                                      storage (the server's default when absent - `longctx`
                                      defaults to f32 instead). Also `longctx`.
+  qwen35moe:<gguf>[:kvf32|:kvbf16|:kvint8]
+                                     the Qwen3.6-35B-A3B GGUF through the shared scheduler on the
+                                     first `--device` card (context 8192, 16 resident sequences,
+                                     int8 weights); also `longctx`.
   qwen:<weights.brain>[:i8w][:kvf32]         the paged serving engine on a real checkpoint (also `longctx`)
                                      (:i8w opts IN to int8 weights, off by default; :kvf32 opts
                                      OUT of int8 KV, which is ON by default -- either order, both optional.
@@ -675,6 +682,9 @@ fn build_target(spec: &str, workload: &str, input_override: Option<usize>, outpu
     if let Some(rest) = spec.strip_prefix("qwen35:") {
         return crate::perf_qwen35::build(rest);
     }
+    if let Some(rest) = spec.strip_prefix("qwen35moe:") {
+        return crate::perf_qwen35moe::build(rest);
+    }
     if let Some(rest) = spec.strip_prefix("http:") {
         return build_http(rest, workload, input_override, output_override);
     }
@@ -765,7 +775,7 @@ fn build_target(spec: &str, workload: &str, input_override: Option<usize>, outpu
     Err(format!(
         "unknown --target {spec:?} \
          (expected 'qwen-synth:<L>x<D>x<H>[xV][:i8w][:kvf32]', 'qwen:<weights>[:i8w][:kvf32]', \
-         'qwen35:<gguf>[:kvf32|:kvbf16|:kvint8]', 'http:qwen-synth:<L>x<D>x<H>[xV]:<tokenizer.json>', 'http:qwen:<weights>:<tokenizer.json>', \
+         'qwen35:<gguf>[:kvf32|:kvbf16|:kvint8]', 'qwen35moe:<gguf>[:kvf32|:kvbf16|:kvint8]', 'http:qwen-synth:<L>x<D>x<H>[xV]:<tokenizer.json>', 'http:qwen:<weights>:<tokenizer.json>', \
          'lfm:<weights>:<tokenizer.json>', 'kronos:<tokenizer-dir>:<decoder-dir>', \
          'chronos2:<weights>', 'fincast:<weights>', 'timesfm3:<weights>', 'flux2[:<W>x<H>x<steps>[:<precision>]]', \
          'wan[:<frames>x<W>x<H>x<steps>]', 'ltxv[:<frames>x<W>x<H>x<steps>]', \

@@ -56,6 +56,11 @@ the optional suffix pins the KV cache storage. Goodput, TTFT, prefix-hit rate,
 free KV blocks and swap counters in the artifact are therefore the served
 behaviour. It needs GPUs and refuses (naming the file) a missing checkpoint.
 
+`qwen35moe:<gguf>[:kvf32|:kvbf16|:kvint8]` does the same for the Qwen3.6-35B-A3B
+GGUF on the first `--device` card, through that model's own serving engine
+(context 8192, 16 resident sequences, int8 weights; the KV suffix defaults to
+`BRAIN_QWEN35_KV`, f32 when unset).
+
 `--smoke` shrinks a run to a few seconds, useful for a quick sanity check
 rather than a real measurement.
 
