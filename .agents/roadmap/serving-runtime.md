@@ -280,3 +280,9 @@ measurement (16-256), not fixed globally.
   759 / 1241, SGLang 86 / 214 / 781 / 1044). Quality against the same weights as bf16: greedy agreement 100 %, rel-L2 2.3e-2, KL 1.1e-3.
   The BPE merge loop was quadratic in the piece length and held the lane for seconds on whitespace-free prompts (fixed). Open: the m <= 8
   FP8 GEMV, a persistent e4m3 GEMM, an rms-norm -> e4m3 fusion, MTP from `mtp.safetensors`, and the prefill/decode interleave (items 8, 11).
+- 2026-10-29 (launch cut, knowledge 380): the card sat inside `brain_gdn_chunk_loop_tc` for 52 % of a mixed iteration because a round was chunked
+  by its largest divisor (a 600-row slice in 75 chunks of 8); sequences now run whole chunks of 64 plus one short chunk (`gdn_stream_pieces`), and
+  the zero-fresh buffers a kernel overwrites became `storage_uninit` (memsets 1230 -> 858 an iteration). `brain serve` + `vllm bench serve`
+  output tok/s at 1 / 4 / 16 / 64: 50 / 187 / 208 / 237 -> 47 / 190 / 294 / 366, ITL p99 at 16 589 -> 293 ms, 31K TTFT 7.3 s. Open, by weight:
+  the host's CUDA API calls per mixed forward (launch, parameter upload, pool alloc; a bucketed graph replay of the layer round, row-view
+  binding instead of the `concat_split` copies), the e4m3 front end, stream-K GEMM fill (items 4, 5, 8, 14, 17).
