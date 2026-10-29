@@ -725,6 +725,127 @@ fn finish_rows(gpu: &Gpu, per: HashMap<usize, (f64, usize, u64, u64, u64, bool)>
         .collect()
 }
 
+/// The phase of a model step a kernel belongs to, for every model: judged from
+/// the kernel family its recorded name carries, so no dispatch site has to
+/// label its work for a profile to attribute it.
+///
+/// A decode step's kernel table is merged across every layer and every
+/// projection, so the largest row of it says a kernel name but not which part
+/// of the step it is. These phases are the split an optimization needs: what
+/// streams the weights ([`Phase::Linear`]), what touches the paged KV
+/// ([`Phase::Attention`]), a recurrent mixer such as Gated-DeltaNet's ([`Phase::Recurrent`]), a mixture-of-experts layer's routing and expert products ([`Phase::Experts`]),
+/// the norms/adds/quantisers between them ([`Phase::NormEpilogue`]), the
+/// head's greedy/top-k reduction ([`Phase::Sampling`]), and everything
+/// the classifier does not recognise - reported rather than silently dropped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Phase {
+    /// Weight-streaming matrix products: `matmul_*`, the GEMV/GEMM variants,
+    /// the fused multi-GEMV and any vendor-library GEMM.
+    Linear,
+    /// A mixture-of-experts layer: its router, the routing tables and the
+    /// expert products (which stream only the selected experts' weights).
+    Experts,
+    /// Paged GQA decode attention: scores/softmax/apply, the KV append, the
+    /// fused prep and its partial rotation.
+    Attention,
+    /// A recurrent (linear-attention / state-space) mixer: Gated-DeltaNet's
+    /// conv, gates, delta-rule `bmm`, recurrent state and its pool staging.
+    Recurrent,
+    /// RMSNorm, residual add, activation quantisation and the elementwise
+    /// glue between two linears.
+    NormEpilogue,
+    /// The head's greedy/top-k reduction.
+    Sampling,
+    /// A kernel the classifier does not recognise.
+    Other,
+}
+
+impl Phase {
+    /// Every phase, in report order (largest expected share first).
+    pub const ALL: [Phase; 7] =
+        [Phase::Linear, Phase::Experts, Phase::Attention, Phase::Recurrent, Phase::NormEpilogue, Phase::Sampling, Phase::Other];
+
+    /// The phase's name in a report.
+    pub fn label(self) -> &'static str {
+        match self {
+            Phase::Linear => "linear (gemv/gemm)",
+            Phase::Experts => "experts (moe)",
+            Phase::Attention => "attention + kv append",
+            Phase::Recurrent => "recurrent mixer",
+            Phase::NormEpilogue => "norm/add/quant",
+            Phase::Sampling => "sampling (head reduce)",
+            Phase::Other => "other",
+        }
+    }
+
+    /// Which phase a kernel name belongs to, by the family its name carries -
+    /// what the backend records (`native:...`, a WGSL catalogue name, or
+    /// `library_gemm ...`) rather than a per-call-site label, so no dispatch
+    /// site has to change for the profile to attribute its time.
+    pub fn of_kernel(name: &str) -> Phase {
+        let n = name.to_ascii_lowercase();
+        let any = |pats: &[&str]| pats.iter().any(|p| n.contains(p));
+        if any(&["moe", "expert", "router", "route_"]) {
+            // An expert layer's products carry a gemv/gemm name too: the layer is
+            // its own phase, so it is matched first.
+            Phase::Experts
+        } else if any(&["matmul", "gemv", "gemm", "nvfp4"]) {
+            // Weight-streaming products first: no attention, mixer or glue
+            // name below contains one of these, and a vendor library's
+            // `library_gemm` label is a product too.
+            Phase::Linear
+        } else if any(&["attn", "attention", "gqa", "kv_append", "flash", "softmax", "paged", "rope"]) {
+            Phase::Attention
+        } else if any(&["gdn", "bmm", "conv1d", "causal_conv", "kv_expand", "pool_rows"]) {
+            Phase::Recurrent
+        } else if any(&["rms", "norm", "add", "quant", "silu", "sigmoid", "concat", "splice", "l2", "decay", "gather", "scatter", "sub", "mul", "scale_row", "max_abs"]) {
+            Phase::NormEpilogue
+        } else if any(&["argmax", "topk", "sample"]) {
+            Phase::Sampling
+        } else {
+            Phase::Other
+        }
+    }
+}
+
+/// One phase's device time over a profiled decode table.
+#[derive(Clone, Debug)]
+pub struct PhaseCost {
+    pub phase: Phase,
+    /// Device milliseconds summed over every kernel the phase owns.
+    pub ms: f64,
+    /// Invocations summed the same way.
+    pub calls: u64,
+}
+
+impl PhaseCost {
+    /// Device milliseconds this phase costs per decode step.
+    pub fn ms_per_step(&self, steps: u32) -> f64 {
+        if steps > 0 {
+            self.ms / steps as f64
+        } else {
+            0.0
+        }
+    }
+}
+
+/// Roll a merged `(kernel, ms, calls)` table up into phases, largest first.
+///
+/// The rollup is a partition: every row lands in exactly one phase, so the
+/// summed milliseconds and calls are those of the table (an upper bound on real device time when each dispatch is timed alone).
+pub fn phases(rows: &[(String, f64, u64)]) -> Vec<PhaseCost> {
+    let mut out: Vec<PhaseCost> = Phase::ALL.iter().map(|&phase| PhaseCost { phase, ms: 0.0, calls: 0 }).collect();
+    for (name, ms, calls) in rows {
+        let phase = Phase::of_kernel(name);
+        let slot = out.iter_mut().find(|p| p.phase == phase).expect("ALL covers every phase");
+        slot.ms += ms;
+        slot.calls += calls;
+    }
+    out.retain(|p| p.calls > 0 || p.ms > 0.0);
+    out.sort_by(|a, b| b.ms.total_cmp(&a.ms).then(a.phase.cmp(&b.phase)));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -920,5 +1041,90 @@ mod arithmetic_tests {
         assert!(audit.fallbacks(&["matmul_gemv_reg", "matmul_reg3"]).is_empty());
         let rows = vec![("library_gemm 8x16x128 F32.F32.F32 tA b1".to_string(), 1.0, 1)];
         assert!(ArithmeticAudit::of(&rows).fallbacks(&["library_gemm *"]).is_empty(), "a trailing * covers a name prefix");
+    }
+
+    /// The classifier is what makes a merged kernel table readable as the
+    /// phases a decode step is made of, so every kernel family the served
+    /// path dispatches is pinned to its phase by name.
+    #[test]
+    fn every_decode_kernel_lands_in_the_phase_whose_bytes_it_streams() {
+        for (name, want) in [
+            // Weight-streaming products: layers, the head, multi/fused variants.
+            ("native:matmul_i8_gemv", Phase::Linear),
+            ("matmul_i8_gemv_reg", Phase::Linear),
+            ("native:matmul_i8_gemv_multi", Phase::Linear),
+            ("native:matmul_i8_gemv_wide", Phase::Linear),
+            ("native:matmul_i8_mma_m16", Phase::Linear),
+            ("native:matmul_i8_mma_m32", Phase::Linear),
+            ("matmul_i8_dyn", Phase::Linear),
+            ("library_gemm 8x5120x5120 F32.F32.F32 b1", Phase::Linear),
+            // Paged GQA attention, its KV append and its fused prep.
+            ("native:decode_attn_batched_i8", Phase::Attention),
+            ("native:paged_flash_decode_gqa_hd256_kv8", Phase::Attention),
+            ("native:paged_flash_decode_gqa_combine", Phase::Attention),
+            ("native:kv_append_i8_clipped", Phase::Attention),
+            ("paged_kv_append_i8_clipped_batched", Phase::Attention),
+            ("native:gqa_decode_prep", Phase::Attention),
+            ("rope2d_partial", Phase::Attention),
+            ("paged_decode_scores_i8_batched", Phase::Attention),
+            ("decode_softmax_batched", Phase::Attention),
+            // Gated-DeltaNet's stateful mixer, its delta-rule bmm and its state staging.
+            ("native:gdn_decode_pool", Phase::Recurrent),
+            ("native:gdn_commit_pool", Phase::Recurrent),
+            ("gdn_causal_conv1d_step", Phase::Recurrent),
+            ("gdn_recurrent_step", Phase::Recurrent),
+            ("bmm", Phase::Recurrent),
+            ("bmm_acc", Phase::Recurrent),
+            ("causal_conv1d_step", Phase::Recurrent),
+            ("kv_expand", Phase::Recurrent),
+            ("pool_rows_gather2", Phase::Recurrent),
+            ("pool_rows_scatter2", Phase::Recurrent),
+            // Norm, residual add, activation quantisation and the glue between them.
+            ("native:add_rms_quant", Phase::NormEpilogue),
+            ("native:quant_epilogue", Phase::NormEpilogue),
+            ("rmsnorm_rows", Phase::NormEpilogue),
+            ("add2", Phase::NormEpilogue),
+            ("silu_mul", Phase::NormEpilogue),
+            ("concat_split", Phase::NormEpilogue),
+            ("max_abs_rows", Phase::NormEpilogue),
+            ("quant_pack", Phase::NormEpilogue),
+            // The head's greedy/top-k reduction.
+            ("argmax_final", Phase::Sampling),
+            ("argmax_part", Phase::Sampling),
+            ("topk_rows", Phase::Sampling),
+            // Nothing is dropped silently: an unknown name is reported.
+            // An expert layer is its own phase, though its products are GEMMs.
+            ("moe_i8_grouped", Phase::Experts),
+            ("native:moe_i8_grouped_mma", Phase::Experts),
+            ("moe_router_topk", Phase::Experts),
+            ("something_new", Phase::Other),
+        ] {
+            assert_eq!(Phase::of_kernel(name), want, "kernel {name}");
+        }
+    }
+
+    /// The rollup is a partition of the measured table: every millisecond and
+    /// every call appears exactly once, largest phase first, so a share of the
+    /// step can be read off it without losing what the table said.
+    #[test]
+    fn the_phase_rollup_is_a_partition_of_the_kernel_table() {
+        let rows = vec![
+            ("native:matmul_i8_gemv".to_string(), 10.0, 100),
+            ("native:matmul_i8_mma_m16".to_string(), 5.0, 20),
+            ("native:decode_attn_batched_i8".to_string(), 2.0, 16),
+            ("native:gdn_decode_pool".to_string(), 3.0, 48),
+            ("add2".to_string(), 1.0, 640),
+            ("argmax_final".to_string(), 0.25, 8),
+            ("something_new".to_string(), 0.5, 1),
+        ];
+        let phases = phases(&rows);
+        assert!((phases.iter().map(|p| p.ms).sum::<f64>() - 21.75).abs() < 1e-12);
+        assert_eq!(phases.iter().map(|p| p.calls).sum::<u64>(), 833);
+        assert_eq!(phases[0].phase, Phase::Linear);
+        assert!((phases[0].ms - 15.0).abs() < 1e-12);
+        assert_eq!(phases[0].calls, 120);
+        assert_eq!(phases.iter().find(|p| p.phase == Phase::Sampling).map(|p| p.calls), Some(8));
+        assert_eq!(phases.iter().find(|p| p.phase == Phase::Other).map(|p| p.calls), Some(1));
+        assert!(phases.windows(2).all(|w| w[0].ms >= w[1].ms), "phases are ordered by time");
     }
 }

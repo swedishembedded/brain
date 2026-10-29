@@ -212,7 +212,7 @@ struct BatchStep {
     allocs_per_step: f64,
     launches_per_step: f64,
     replays_per_step: f64,
-    phases: Vec<qwen35::int8_gguf_resident::PhaseCost>,
+    phases: Vec<gpu_core::profile::PhaseCost>,
     /// `(kernel, ms/step, calls/step)` of the whole step, for the full table.
     rows: Vec<(String, f64, u64)>,
 }
@@ -250,7 +250,7 @@ fn synthetic_sweep(path: &str, devices: Vec<(Device, u64)>, tier: &model::ops::T
             allocs_per_step: p.alloc_calls as f64 / p.steps as f64,
             launches_per_step: p.host_launches as f64 / p.steps as f64,
             replays_per_step: p.graph_replays as f64 / p.steps as f64,
-            phases: qwen35::int8_gguf_resident::decode_phases(&p.rows),
+            phases: gpu_core::profile::phases(&p.rows),
             rows: p.rows.iter().map(|(name, ms, calls)| (name.clone(), ms / p.steps as f64, calls / p.steps as u64)).collect(),
         });
         // The head's own table names the kernels, so a change there is visible.
@@ -303,7 +303,7 @@ fn synthetic_sweep(path: &str, devices: Vec<(Device, u64)>, tier: &model::ops::T
         for ph in &m.phases {
             let ms = ph.ms_per_step(steps);
             let gbs = match ph.phase {
-                qwen35::int8_gguf_resident::DecodePhase::Linear => weight_bytes as f64 / 1e6 / ms.max(1e-9),
+                gpu_core::profile::Phase::Linear => weight_bytes as f64 / 1e6 / ms.max(1e-9),
                 _ => f64::NAN,
             };
             println!(
@@ -315,7 +315,7 @@ fn synthetic_sweep(path: &str, devices: Vec<(Device, u64)>, tier: &model::ops::T
                 if gbs.is_finite() { format!("{gbs:.0}") } else { "-".to_string() }
             );
         }
-        let linear_ms = m.phases.iter().find(|p| p.phase == qwen35::int8_gguf_resident::DecodePhase::Linear).map_or(0.0, |p| p.ms_per_step(steps));
+        let linear_ms = m.phases.iter().find(|p| p.phase == gpu_core::profile::Phase::Linear).map_or(0.0, |p| p.ms_per_step(steps));
         let layer_linear_ms = linear_ms - m.head_ms;
         if layer_linear_ms > 0.0 {
             println!(
