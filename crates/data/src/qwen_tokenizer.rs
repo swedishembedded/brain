@@ -421,12 +421,8 @@ impl Tokenizer for QwenBpe {
     /// exactly as `tokenizers` does.
     fn decode(&self, ids: &[u32]) -> String {
         let mut bytes: Vec<u8> = Vec::new();
-        for tok in ids.iter().filter_map(|id| self.decoder.get(id)) {
-            let mapped: Option<Vec<u8>> = tok.chars().map(|c| self.byte_decoder.get(&c).copied()).collect();
-            match mapped {
-                Some(b) => bytes.extend(b),
-                None => bytes.extend_from_slice(tok.as_bytes()),
-            }
+        for &id in ids {
+            self.push_token_bytes(id, &mut bytes);
         }
         String::from_utf8_lossy(&bytes).into_owned()
     }
@@ -437,6 +433,18 @@ impl Tokenizer for QwenBpe {
 }
 
 impl QwenBpe {
+    /// Append the bytes token `id` decodes to (nothing for an unknown id).
+    /// O(token length). [`Tokenizer::decode`] and [`Utf8Decoder`] are both
+    /// this plus UTF-8 assembly.
+    pub fn push_token_bytes(&self, id: u32, out: &mut Vec<u8>) {
+        let Some(tok) = self.decoder.get(&id) else { return };
+        if tok.chars().all(|c| self.byte_decoder.contains_key(&c)) {
+            out.extend(tok.chars().map(|c| self.byte_decoder[&c]));
+        } else {
+            out.extend_from_slice(tok.as_bytes());
+        }
+    }
+
     /// Normalize and pre-tokenize one already-special-free span.
     fn pretokenize(&self, text: &str) -> Vec<String> {
         match &self.normalizer {
@@ -461,6 +469,67 @@ impl QwenBpe {
         for piece in self.pretokenize(rest) {
             self.encode_piece(&piece, out);
         }
+    }
+}
+
+/// Incremental detokenizer over one growing token sequence: the text of every
+/// token fed so far, in order, without re-decoding the earlier ones.
+///
+/// `tok.decode(all)` per step is O(G) and O(G^2) over a generation of G
+/// tokens; this feeds each token once (O(token length)) and carries the
+/// incomplete UTF-8 tail (a multi-byte character split across tokens) to the
+/// next call. Everything it has emitted plus [`Utf8Decoder::flush`] equals
+/// `String::from_utf8_lossy` of the concatenated token bytes, which is what
+/// `decode` returns.
+#[derive(Debug, Default, Clone)]
+pub struct Utf8Decoder {
+    /// Tokens of the sequence already consumed.
+    fed: usize,
+    /// Bytes of an incomplete trailing UTF-8 sequence (at most 3).
+    pending: Vec<u8>,
+}
+
+impl Utf8Decoder {
+    /// Consume `ids[self.fed..]` (the sequence only ever grows) and append the
+    /// text they complete to `out`. An invalid byte becomes U+FFFD exactly as
+    /// `from_utf8_lossy` writes it; a possibly-incomplete tail is held back.
+    pub fn feed(&mut self, tok: &QwenBpe, ids: &[u32], out: &mut String) {
+        let mut bytes = std::mem::take(&mut self.pending);
+        for &id in &ids[self.fed.min(ids.len())..] {
+            tok.push_token_bytes(id, &mut bytes);
+        }
+        self.fed = ids.len();
+        let mut rest = bytes.as_slice();
+        loop {
+            match std::str::from_utf8(rest) {
+                Ok(valid) => {
+                    out.push_str(valid);
+                    rest = &[];
+                    break;
+                }
+                Err(e) => {
+                    let (valid, tail) = rest.split_at(e.valid_up_to());
+                    out.push_str(std::str::from_utf8(valid).expect("validated prefix"));
+                    match e.error_len() {
+                        Some(n) => {
+                            out.push('\u{FFFD}');
+                            rest = &tail[n..];
+                        }
+                        None => {
+                            rest = tail;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        self.pending = rest.to_vec();
+    }
+
+    /// The held-back tail as lossy text (U+FFFD for an incomplete sequence):
+    /// what is still missing from `decode` once the sequence has ended.
+    pub fn flush(&mut self) -> String {
+        String::from_utf8_lossy(&std::mem::take(&mut self.pending)).into_owned()
     }
 }
 
@@ -569,6 +638,50 @@ mod tests {
             "added_tokens": [{"content": "<|a|>", "id": 256u32}, {"content": "<|a|b|>", "id": 257u32}],
         });
         QwenBpe::from_json_bytes(json.to_string().as_bytes()).unwrap()
+    }
+
+    /// The incremental detokenizer is `decode` fed in pieces: whatever the
+    /// chunking, and including invalid and split UTF-8, the emitted text plus
+    /// the final flush is byte-for-byte `decode(all)`.
+    #[test]
+    fn utf8_decoder_matches_decode_for_any_chunking() {
+        let t = byte_tok();
+        let mut rng = crate::rng::Lcg::new(11);
+        for _ in 0..500 {
+            let n = (rng.unit() * 40.0) as usize;
+            // Bias toward lead/continuation bytes so sequences split and break.
+            let ids: Vec<u32> = (0..n)
+                .map(|_| match (rng.unit() * 4.0) as u32 {
+                    0 => 0x80 + (rng.unit() * 64.0) as u32,
+                    1 => 0xC2 + (rng.unit() * 30.0) as u32,
+                    2 => 0x41 + (rng.unit() * 20.0) as u32,
+                    _ => (rng.unit() * 300.0) as u32,
+                })
+                .collect();
+            let mut dec = Utf8Decoder::default();
+            let mut got = String::new();
+            let mut at = 0;
+            while at < ids.len() {
+                at = (at + 1 + (rng.unit() * 3.0) as usize).min(ids.len());
+                dec.feed(&t, &ids[..at], &mut got);
+            }
+            got.push_str(&dec.flush());
+            assert_eq!(got, t.decode(&ids), "ids {ids:?}");
+        }
+    }
+
+    /// A split multi-byte character is held until complete, then emitted whole.
+    #[test]
+    fn utf8_decoder_holds_a_split_character_back() {
+        let t = byte_tok();
+        let euro = "€".as_bytes();
+        let ids: Vec<u32> = [b"Hi".as_slice(), euro].concat().iter().map(|&b| b as u32).collect();
+        let (mut dec, mut out) = (Utf8Decoder::default(), String::new());
+        dec.feed(&t, &ids[..4], &mut out);
+        assert_eq!(out, "Hi", "an incomplete tail is not emitted, and never as U+FFFD");
+        dec.feed(&t, &ids, &mut out);
+        assert_eq!(out, "Hi€");
+        assert_eq!(dec.flush(), "");
     }
 
     /// Specials are cut leftmost, longest first, wherever they sit in the text.

@@ -40,8 +40,8 @@ const SESSION_IDLE_SECS: u64 = 600;
 
 struct StreamSession {
     st: StreamState,
-    /// Byte length of the transcript already returned to the client — the decoded
-    /// text grows monotonically, so each step returns `full[decoded..]`.
+    /// Byte length of the transcript already returned to the client; zero until
+    /// the first visible text, which is when the leading blank is trimmed.
     decoded: usize,
     /// Tokens already returned to the client.
     tok_seen: usize,
@@ -111,10 +111,11 @@ impl StreamSessions {
                 if eos {
                     enc.stream_finish(&mut sess.st);
                 }
-                let full = detok.decode(sess.st.tokens());
-                let new_text = full.get(sess.decoded..).unwrap_or("").to_string();
                 let new_tokens: Vec<u32> = sess.st.tokens()[sess.tok_seen..].to_vec();
-                sess.decoded = full.len();
+                // Decode the window's new tokens only; the transcript's leading blank is trimmed once.
+                let raw = detok.decode_untrimmed(&new_tokens);
+                let new_text = if sess.decoded == 0 { raw.trim_start().to_string() } else { raw };
+                sess.decoded += new_text.len();
                 sess.tok_seen = sess.st.tokens().len();
                 sess.last_used = Instant::now();
                 let o = transcription_outcome(new_text, &new_tokens)

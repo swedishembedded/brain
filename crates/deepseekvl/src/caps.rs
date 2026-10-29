@@ -210,11 +210,15 @@ impl Session {
         let generated = self.vlm.generate_batch(&requests, &mut |r, id| {
             let (st, max_new) = (&mut streams[r], requests[r].max_new);
             st.out_ids.push(id);
-            let (delta, now, stop) = qwen3::chat::visible_delta(&st.printed, &text_of(&st.out_ids), &stops);
+            // Only the new token's text is decoded (O(1) per step, not a re-decode of the reply).
+            let mut appended = String::new();
+            st.detok.feed(&tok, &st.out_ids, &mut appended);
+            let appended = if st.started { appended.as_str() } else { appended.trim_start() };
+            st.started |= !appended.is_empty();
+            let (delta, stop) = qwen3::chat::visible_append(&mut st.printed, appended, &stops);
             if !delta.is_empty() {
                 progress(at[r], Progress::token(st.out_ids.len() as u32, max_new as u32, delta));
             }
-            st.printed = now;
             st.stop_at = stop;
             st.cancelled = st.stop_at.is_none() && invs[at[r]].cancel.is_cancelled();
             st.stop_at.is_none() && !st.cancelled
@@ -285,6 +289,10 @@ struct Prepared {
 struct Stream {
     out_ids: Vec<u32>,
     printed: String,
+    /// Incremental detokenizer over `out_ids`.
+    detok: data::qwen_tokenizer::Utf8Decoder,
+    /// Text has begun: the reply's leading whitespace is dropped until then.
+    started: bool,
     stop_at: Option<usize>,
     /// The request's token fired and stopped its decode.
     cancelled: bool,

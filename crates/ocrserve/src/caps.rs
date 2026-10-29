@@ -9,7 +9,7 @@
 //! `.streaming()` and a `Media::Text` output, and both HTTP handlers always
 //! populate `messages`, never a bare `prompt`.
 //!
-//! * **Real per-token streaming**, diffed with `qwen3::chat::stream_delta` so a
+//! * **Real per-token streaming**, diffed with `data::qwen_tokenizer::Utf8Decoder` so a
 //!   multi-byte character never escapes half-decoded, and **real EOS early
 //!   stop**: a page that finishes frees its KV blocks that step.
 //! * **Real token accounting.** `prompt_tokens` / `completion_tokens` /

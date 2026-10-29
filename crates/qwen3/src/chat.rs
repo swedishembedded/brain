@@ -22,7 +22,7 @@
 
 use capability::{Blob, CancelToken, Invocation, Media, Outcome, Progress};
 use data::qwen_chat::{self, ChatEvent, ChatMessage, ChatScanner, Role, ToolCallMsg};
-use data::qwen_tokenizer::QwenBpe;
+use data::qwen_tokenizer::{QwenBpe, Utf8Decoder};
 use data::tokenizer::Tokenizer;
 use model::serve::{DryParams, SampleParams, ThinkingBudget};
 use serde_json::json;
@@ -224,48 +224,44 @@ pub fn parse_stops(raw: Option<&str>) -> Result<Vec<String>, String> {
     Ok(arr.iter().filter_map(|s| s.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string()).collect())
 }
 
-/// Split the freshly-decoded `full` text into the fragment safe to emit now and
-/// the new "printed" prefix, holding back a trailing replacement char (an
-/// incomplete multi-byte UTF-8 sequence awaiting the next token). `full` always
-/// extends `printed`, so concatenating every emitted fragment — plus a final
-/// flush of any held-back tail — reproduces `full` byte-for-byte.
-pub fn stream_delta(printed: &str, full: &str) -> (String, String) {
-    let safe = full.strip_suffix('\u{FFFD}').unwrap_or(full);
-    let delta = safe.get(printed.len()..).unwrap_or("").to_string();
-    (delta, safe.to_string())
-}
-
 /// If `text` ends with any stop string, the byte index where the earliest such
 /// match begins (so `text[..idx]` is the truncated output); else `None`.
 pub fn find_stop(text: &str, stops: &[String]) -> Option<usize> {
     stops.iter().filter(|s| text.ends_with(s.as_str())).map(|s| text.len() - s.len()).min()
 }
 
-/// One streaming step: what is safe to EMIT now, the new "printed" prefix, and
-/// where a stop string begins if this step completed one.
+/// One streaming step: append the newly decoded `appended` text to `printed`
+/// and decide what is safe to EMIT now and where a stop string begins if this
+/// step completed one.
 ///
-/// [`stream_delta`] alone answers "what is new", which is not the same question
-/// as "what may the caller see". A stop string is excluded from the final
-/// output ([`SeqState::finish`] truncates at `stop_at`), so emitting the delta
-/// that COMPLETES one hands a streaming caller text that the non-streaming
-/// caller never receives: accumulate the deltas of an SSE response and you got
-/// a different answer than the same request without `stream`. Deciding both
-/// here, in one place, is what keeps those two views of one generation equal.
+/// `appended` is only the NEW text ([`data::qwen_tokenizer::Utf8Decoder`]
+/// holds back an incomplete multi-byte tail), so a step costs O(delta + longest
+/// stop), not O(text so far): [`find_stop`] compares each stop against the end
+/// of `printed` only.
+///
+/// "What is new" is not the same question as "what may the caller see". A stop
+/// string is excluded from the final output ([`SeqState::finish`] truncates at
+/// `stop_at`), so emitting the delta that COMPLETES one hands a streaming
+/// caller text that the non-streaming caller never receives: accumulate the
+/// deltas of an SSE response and you got a different answer than the same
+/// request without `stream`. Deciding both here, in one place, is what keeps
+/// those two views of one generation equal.
 ///
 /// The one case it cannot repair: a stop string that straddles back into text
 /// ALREADY sent (`printed` ends with its first half). Nothing can un-send that,
 /// so this emits nothing further and leaves the truncation to `finish` - the
 /// stream is then a prefix-superset of the final text by at most the part of
 /// the stop string that had already gone out.
-pub fn visible_delta(printed: &str, full: &str, stops: &[String]) -> (String, String, Option<usize>) {
-    let (delta, new_printed) = stream_delta(printed, full);
-    let stop_at = find_stop(&new_printed, stops);
+pub fn visible_append(printed: &mut String, appended: &str, stops: &[String]) -> (String, Option<usize>) {
+    let before = printed.len();
+    printed.push_str(appended);
+    let stop_at = find_stop(printed, stops);
     let emit = match stop_at {
-        Some(idx) if idx >= printed.len() => new_printed[printed.len()..idx].to_string(),
+        Some(idx) if idx >= before => printed[before..idx].to_string(),
         Some(_) => String::new(),
-        None => delta,
+        None => appended.to_string(),
     };
-    (emit, new_printed, stop_at)
+    (emit, stop_at)
 }
 
 /// Read the four shared sampling params (with the spec defaults).
@@ -670,6 +666,7 @@ pub fn parse_reply(inv: &Invocation, text: &str) -> Result<Outcome, String> {
         stops: Vec::new(),
         cancel: CancelToken::default(),
         printed: String::new(),
+        detok: Utf8Decoder::default(),
         scan: ChatScanner::with_flavor(prompt.thinking_open, prompt.flavor),
         stop_at: None,
         cancelled: false,
@@ -690,6 +687,9 @@ pub struct SeqState {
     stops: Vec<String>,
     cancel: CancelToken,
     printed: String,
+    /// Incremental detokenizer over the generated tokens: `printed` grows by
+    /// the new tokens' text only.
+    detok: Utf8Decoder,
     scan: ChatScanner,
     stop_at: Option<usize>,
     cancelled: bool,
@@ -718,6 +718,7 @@ impl SeqState {
             stops: req.stops.clone(),
             cancel,
             printed: String::new(),
+            detok: Utf8Decoder::default(),
             scan: if req.raw { ChatScanner::raw() } else { ChatScanner::with_flavor(req.thinking_open, req.flavor) },
             stop_at: None,
             cancelled: false,
@@ -736,13 +737,18 @@ impl SeqState {
     /// what has already been printed, honouring stop-strings and
     /// cancellation. Returns `true` once this sequence should stop.
     ///
-    /// What reaches `progress` is [`visible_delta`]'s emit, not the raw new
+    /// What reaches `progress` is [`visible_append`]'s emit, not the raw new
     /// text: a streaming caller must end up with exactly the text
     /// [`SeqState::finish`] reports, never the stop string that finish cuts.
+    ///
+    /// Cost per call: O(new tokens + longest stop string), independent of how
+    /// much was generated before (the detokenizer and the stop check both
+    /// resume from where the previous call stopped), so a generation of G
+    /// tokens costs O(G) here, not O(G^2).
     pub fn advance(&mut self, tok: &QwenBpe, all_tokens: &[u32], progress: &mut dyn FnMut(Progress)) -> bool {
-        let full = tok.decode(all_tokens);
-        let (delta, new_printed, stop_at) = visible_delta(&self.printed, &full, &self.stops);
-        self.printed = new_printed;
+        let mut appended = String::new();
+        self.detok.feed(tok, all_tokens, &mut appended);
+        let (delta, stop_at) = visible_append(&mut self.printed, &appended, &self.stops);
         if !delta.is_empty() {
             let mut evs = Vec::new();
             self.scan.push(&delta, &mut evs);
@@ -964,30 +970,6 @@ mod tests {
         assert_eq!(find_stop("all done", &overlap), Some(0));
     }
 
-    /// The delta bookkeeping used by streaming callers: concatenated per-token
-    /// deltas (plus a final flush of a held-back tail) must reproduce the
-    /// full decoded text — even when a multi-byte char is split across two
-    /// tokens (transient U+FFFD).
-    #[test]
-    fn stream_deltas_reconstruct_full_text() {
-        // Simulated per-step `decode(ids_out)` outputs, incl. a split euro sign.
-        let steps = ["Hi", "Hi\u{FFFD}", "Hi€", "Hi€!"];
-        let mut printed = String::new();
-        let mut concat = String::new();
-        for full in steps {
-            let (delta, np) = stream_delta(&printed, full);
-            concat.push_str(&delta);
-            printed = np;
-        }
-        let full = *steps.last().unwrap();
-        if full.len() > printed.len() {
-            concat.push_str(&full[printed.len()..]); // final flush
-        }
-        assert_eq!(concat, "Hi€!");
-        // No replacement char ever escapes into an emitted fragment.
-        assert!(!concat.contains('\u{FFFD}'));
-    }
-
     /// REGRESSION: a streaming caller must not be shown text that the final
     /// outcome truncates away. A stop string is cut from the answer, so the
     /// step that completes one may only emit what comes BEFORE it - otherwise
@@ -998,18 +980,54 @@ mod tests {
     fn the_step_that_completes_a_stop_string_emits_only_the_text_before_it() {
         let stops = vec!["END".to_string()];
         // Ordinary step: nothing to withhold.
-        let (emit, printed, stop_at) = visible_delta("all ", "all don", &stops);
+        let mut printed = String::from("all ");
+        let (emit, stop_at) = visible_append(&mut printed, "don", &stops);
         assert_eq!((emit.as_str(), printed.as_str(), stop_at), ("don", "all don", None));
         // The stop string arrives whole in one step: nothing visible is added.
-        let (emit, printed, stop_at) = visible_delta("all done ", "all done END", &stops);
+        let mut printed = String::from("all done ");
+        let (emit, stop_at) = visible_append(&mut printed, "END", &stops);
         assert_eq!(emit, "", "the stop string itself is never streamed");
         assert_eq!(printed, "all done END");
         assert_eq!(stop_at, Some(9));
         assert_eq!(&printed[..stop_at.unwrap()], "all done ", "what finish() reports is exactly what was streamed");
         // The stop string arrives with visible text ahead of it in one step.
-        let (emit, printed, stop_at) = visible_delta("all ", "all done END", &stops);
+        let mut printed = String::from("all ");
+        let (emit, stop_at) = visible_append(&mut printed, "done END", &stops);
         assert_eq!(emit, "done ");
         assert_eq!(&printed[..stop_at.unwrap()], "all done ");
+    }
+
+    /// The incremental step equals the whole-text step it replaced, on random
+    /// text and stop strings: same emitted fragments, same stop position.
+    #[test]
+    fn incremental_visible_append_equals_the_whole_text_reference() {
+        // The reference: re-derive everything from the full text each step.
+        fn reference(printed: &str, full: &str, stops: &[String]) -> (String, String, Option<usize>) {
+            let stop_at = find_stop(full, stops);
+            let emit = match stop_at {
+                Some(idx) if idx >= printed.len() => full[printed.len()..idx].to_string(),
+                Some(_) => String::new(),
+                None => full[printed.len()..].to_string(),
+            };
+            (emit, full.to_string(), stop_at)
+        }
+        let stops = vec!["END".to_string(), "xyz".to_string(), "é!".to_string()];
+        let alphabet = ["a", "b", "E", "N", "D", "x", "y", "z", "é", "!", " ", "€"];
+        let mut rng = data::rng::Lcg::new(5);
+        for _ in 0..300 {
+            let (mut printed, mut full) = (String::new(), String::new());
+            for _ in 0..30 {
+                let chunk: String = (0..1 + (rng.unit() * 3.0) as usize).map(|_| alphabet[(rng.unit() * alphabet.len() as f32) as usize % alphabet.len()]).collect();
+                full.push_str(&chunk);
+                let want = reference(&printed, &full, &stops);
+                let before = printed.clone();
+                let (emit, stop_at) = visible_append(&mut printed, &chunk, &stops);
+                assert_eq!((emit, printed.clone(), stop_at), want, "after {before:?} + {chunk:?}");
+                if stop_at.is_some() {
+                    break;
+                }
+            }
+        }
     }
 
     /// The one case the stream cannot repair, pinned so it stays a KNOWN
@@ -1019,7 +1037,8 @@ mod tests {
     #[test]
     fn a_stop_string_straddling_already_streamed_text_cannot_be_unsent() {
         let stops = vec!["END".to_string()];
-        let (emit, printed, stop_at) = visible_delta("all doneEN", "all doneEND", &stops);
+        let mut printed = String::from("all doneEN");
+        let (emit, stop_at) = visible_append(&mut printed, "D", &stops);
         assert_eq!(emit, "", "nothing further is emitted once the cut is behind the stream");
         assert_eq!(stop_at, Some(8));
         assert_eq!(&printed[..stop_at.unwrap()], "all done", "the outcome is still truncated correctly");

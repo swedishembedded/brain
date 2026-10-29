@@ -60,21 +60,26 @@ impl Detokenizer {
     /// Decode emitted (non-blank) RNN-T token ids to transcription text. Metaspace
     /// `▁` → space (leading one dropped); special/added tokens are skipped.
     pub fn decode(&self, ids: &[u32]) -> String {
-        let mut raw = String::new();
+        self.decode_untrimmed(ids).trim_start().to_string()
+    }
+
+    /// The text of `ids` with metaspace turned into spaces and NO leading trim:
+    /// the piece of a transcript a later chunk of tokens appends. Concatenating
+    /// it over consecutive chunks equals the untrimmed text of their
+    /// concatenation, so a streaming caller decodes each token once (O(chunk))
+    /// instead of re-decoding the whole transcript per window (O(n^2)), and
+    /// trims the start of the first non-empty chunk only.
+    pub fn decode_untrimmed(&self, ids: &[u32]) -> String {
+        let mut out = String::new();
         for &id in ids {
             if self.special.contains(&id) {
                 continue;
             }
             if let Some(p) = self.id_to_piece.get(&id) {
-                raw.push_str(p);
+                out.extend(p.chars().map(|ch| if ch == METASPACE { ' ' } else { ch }));
             }
         }
-        // Metaspace → space, then trim the single leading space the scheme prepends.
-        let mut out = String::with_capacity(raw.len());
-        for ch in raw.chars() {
-            out.push(if ch == METASPACE { ' ' } else { ch });
-        }
-        out.trim_start().to_string()
+        out
     }
 }
 
@@ -95,5 +100,25 @@ mod tests {
         assert_eq!(d.decode(&[10, 11, 12]), "hello world");
         // special token id 0 is dropped
         assert_eq!(d.decode(&[10, 11, 0, 12]), "hello world");
+    }
+
+    /// A streaming caller decodes only each window's new tokens: the chunks'
+    /// texts, with the leading blank trimmed once, concatenate to the decode of
+    /// every token so far.
+    #[test]
+    fn chunked_decode_concatenates_to_the_whole_decode() {
+        let json = r#"{
+            "model": { "type": "BPE", "vocab": { "▁": 9, "▁he": 10, "llo": 11, "▁world": 12, "<unk>": 0 } },
+            "added_tokens": [ { "id": 0, "content": "<unk>" } ]
+        }"#;
+        let d = Detokenizer::from_json_bytes(json.as_bytes()).expect("build");
+        let ids = [9, 0, 9, 10, 11, 12, 12];
+        for cut in 0..=ids.len() {
+            let (head, tail) = ids.split_at(cut);
+            let mut streamed = d.decode_untrimmed(head).trim_start().to_string();
+            let tail = d.decode_untrimmed(tail);
+            streamed.push_str(if streamed.is_empty() { tail.trim_start() } else { &tail });
+            assert_eq!(streamed, d.decode(&ids), "split at {cut}");
+        }
     }
 }
