@@ -84,7 +84,9 @@ Gap list, by what the profile attributes (in the order it would move goodput):
 
 - Decode linears stream weights at 1.3-1.9 TB/s of the measured ~3.7 TB/s roof within 32 rows, and above 32 rows
   the m128 tensor-core GEMM reads them at ~0.8 TB/s (batch 48 at 8K: 35 of 53 ms). Extending the weight-streaming
-  regime past 32 rows is the high-concurrency lever (`cuda.md`).
+  regime past 32 rows is the high-concurrency lever (`cuda.md`). First step landed 2026-10-29: streaming candidates for
+  33-128 rows chosen by measurement (batch 48 at 8K 51.9 -> 47.6 ms, batch 64 58.3 -> 53.9 ms; 27 % of the roof at 48
+  rows), the 7-8 ms target is still open (knowledge 373).
 - Prefill is bound by the group-32 scale fold (knowledge 372): 15-23 % of the int8 tensor-core roof.
 - 128K concurrency is KV-capacity bound: item 10 (Grace tier) and a smaller KV tier, or the second card (item 12).
 - Prefill slices block decode: inter-token p99 400-830 ms under load (item 8's step-cost model).

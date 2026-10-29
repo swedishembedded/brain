@@ -1329,6 +1329,21 @@ End to end (`qwen35_gguf_prefill_profile`, depth 8192): 1024 rows 2634 -> 3034 t
 Open: overlap the fold with the next group's `wgmma` (BN 64 or a producer warpgroup), a narrower warpgroup tile for 129-256
 rows, `matmul_i8_dyn`-slot (DiT) use of the same candidates, and the other tiers' prefill classes.
 
+Many-row weight streaming (knowledge 373): the prefill slot's 33-128-row classes are timed streaming (weights past the
+L2, memory roof) and offer `matmul_i8_stream_r{1,2,4}` (the mma.sync stream kernel at up to 64 rows) and
+`matmul_i8_wgstream_n{64,128}_s{2,4}` (`cu/matmul_i8_wgstream.cu`: `wgmma` with the weights as A and the batch as B, cluster
+split of K). GH200, 27B Q8_0, kv int8, 8 steps, `qwen35_decode_profile --context 8192`, base -> new ms/step (tok/s): 48 rows
+51.9 -> 47.6 (924 -> 1008), 64 58.3 -> 53.9 (1097 -> 1188), 96 84.4 -> 82.8, 128 92.8 -> 93.8 (noise); 1-32 rows unchanged
+within noise. At 32K: 48 rows 67.3 -> 64.4 ms. `brain perf run longctx` (8K): 48 946 -> 981, 64 1116 -> 1169 tok/s; 32K 48 rows
+712 -> 745. Linears (weight GB/s of the 3676 GB/s roof): 48 rows 889 -> 984 (24 -> 27 %), 64 860 -> 969 (23 -> 26 %), 96 574
+-> 581 (16 %), 128 592 -> 600 (16 %); within 32 rows unchanged (1-8: 2.0-2.5 TB/s, 16-32: 1.3-1.6 TB/s). The 7-8 ms target
+for 48-128 rows is not reached: every structure tried (mma.sync ring, warpgroup `wgmma`, two accumulator sets, scale
+preparation in shared memory, 256-byte row visits) stays at 1.1-1.3 TB/s from 48 rows; see the note for what was
+measured and reverted. Open for this range: overlap that hides both the fold (two FFMA per output) and the stage barrier
+(a producer warp with `setmaxnreg`, TMA/`cp.async.bulk` with the descriptors the kernel arguments cannot carry today), a
+fold on packed math, the K=5120 x N=17408 gate/up classes (136 blocks of 128 rows leave four SMs double-loaded), and a
+raised `DECODE_REGIME_MAX_ROWS` only once a candidate beats the tiled GEMM there.
+
 Open, in the order the gap list ranks them: (1) lift the streaming candidate further: fold the group-scale fixup
 (issue bound at 17-32 rows), issue the weight copies ahead of the `griddepcontrol.wait`, TMA/`cp.async.bulk` and
 wgmma, fewer launches for the small matrices (fused multi-matrix streaming); then the fp8 and bf16 tiers with the same

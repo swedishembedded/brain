@@ -376,8 +376,9 @@ fn every_prefill_candidate_agrees_with_the_f64_oracle_on_ragged_shapes() {
     let offered: Vec<String> = gpu_core::native_candidates_offered().into_iter().filter(|(slot, _)| slot == "matmul_i8_prefill").map(|(_, k)| k).collect();
     assert!(offered.len() >= 2, "the prefill slot offers a choice on this device, got {offered:?}");
     let mut ran: Vec<&str> = Vec::new();
-    // (m, n, k): a partial row tile, a partial column tile, odd N, K at 64 and at 128 granularity, a wide round.
-    for (i, &(m, n, k)) in [(300u32, 5136u32, 5120u32), (129, 2050, 1024), (1100, 643, 4096), (64, 4096, 5184), (2050, 256, 2048)].iter().enumerate() {
+    // (m, n, k): a partial row tile, a partial column tile, odd N, K at 64 and at 128 granularity, a wide round, and the
+    // rows of a large decode batch (33-128) the weight-streaming candidates serve.
+    for (i, &(m, n, k)) in [(300u32, 5136u32, 5120u32), (129, 2050, 1024), (1100, 643, 4096), (64, 4096, 5184), (2050, 256, 2048), (40, 5136, 5120), (100, 2050, 4096), (33, 643, 1280)].iter().enumerate() {
         let p = Problem::new(m, n, k, 0x2000 + i as u64);
         let d = Device::upload(&gpu, &p);
         for cand in &offered {

@@ -7,7 +7,7 @@
 // then you can procure our services by sending an email to
 // info@swedishembedded.com.
 //
-// Weight-streaming skinny-M INT8 matmul for 5 to 32 rows of x, the same
+// Weight-streaming skinny-M INT8 matmul for 5 to 32 rows of x (up to 64 where BRAIN_I8S_MAX_ROWS says so), the same
 // buffers and uniform as `matmul_i8_gemv`:
 //
 //   params : u32 [m, kg, n]   kg = K/4 packed words per row, K a multiple of 32
@@ -71,7 +71,10 @@
 // Bytes of K per stage and row (one cache line), and the scale groups in it.
 #define BRAIN_I8S_KB 128
 #define BRAIN_I8S_GPS 4
+// Rows of x one launch serves (a multiple of 8): sizes the x stages in shared memory.
+#ifndef BRAIN_I8S_MAX_ROWS
 #define BRAIN_I8S_MAX_ROWS 32
+#endif
 // Stage layout (bytes): weights, x, weight scales, activation scales.
 #define BRAIN_I8S_W_BYTES (BRAIN_I8S_BN * BRAIN_I8S_KB)
 #define BRAIN_I8S_X_BYTES (BRAIN_I8S_MAX_ROWS * BRAIN_I8S_KB)
@@ -336,5 +339,11 @@ brain_matmul_i8_stream(const unsigned int* params, const unsigned int* xq, const
     if (m <= 8u)       { brain_i8s_block<1>(w8, x8, sx, sw, out, m, groups, n, n0, rank, csize, brain_i8s_smem_base); }
     else if (m <= 16u) { brain_i8s_block<2>(w8, x8, sx, sw, out, m, groups, n, n0, rank, csize, brain_i8s_smem_base); }
     else if (m <= 24u) { brain_i8s_block<3>(w8, x8, sx, sw, out, m, groups, n, n0, rank, csize, brain_i8s_smem_base); }
+#if BRAIN_I8S_MAX_ROWS > 32
+    else if (m <= 32u) { brain_i8s_block<4>(w8, x8, sx, sw, out, m, groups, n, n0, rank, csize, brain_i8s_smem_base); }
+    else if (m <= 48u) { brain_i8s_block<6>(w8, x8, sx, sw, out, m, groups, n, n0, rank, csize, brain_i8s_smem_base); }
+    else if (m <= 64u) { brain_i8s_block<8>(w8, x8, sx, sw, out, m, groups, n, n0, rank, csize, brain_i8s_smem_base); }
+#else
     else               { brain_i8s_block<4>(w8, x8, sx, sw, out, m, groups, n, n0, rank, csize, brain_i8s_smem_base); }
+#endif
 }

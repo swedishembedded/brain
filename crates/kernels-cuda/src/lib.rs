@@ -79,14 +79,22 @@ pub const WGMMA_MIN_CC: Cc = (9, 0);
 /// 128-byte swizzle pattern. A test holds it to the source.
 pub const I8_WGMMA_DYNAMIC_SHARED_BYTES: u32 = 4 * (2 * 128 * 128 + 2 * 4 * 128 * 4) + 1024;
 
-/// Dynamic shared memory per block of `matmul_i8_stream_*` with `bn` weight rows a block and `stages` stages (the
-/// source's `BRAIN_I8S_STAGE_BYTES` x `BRAIN_I8S_STAGES`): per stage `bn` rows x 128 bytes of weights, 32 rows of x x
-/// 128 bytes and their four scale groups each. A test holds it to the source.
-pub const fn i8_stream_dynamic_shared_bytes(bn: u32, stages: u32) -> u32 {
-    stages * (bn * 128 + 32 * 128 + bn * 16 + 32 * 16)
+/// Dynamic shared memory per block of `matmul_i8_stream_*` with `bn` weight rows a block, room for `rows` rows of x and
+/// `stages` stages (the source's `BRAIN_I8S_STAGE_BYTES` x `BRAIN_I8S_STAGES`): per stage `bn` rows x 128 bytes of
+/// weights, `rows` rows of x x 128 bytes and their four scale groups each. A test holds it to the source.
+pub const fn i8_stream_dynamic_shared_bytes(bn: u32, rows: u32, stages: u32) -> u32 {
+    stages * (bn * 128 + rows * 128 + bn * 16 + rows * 16)
 }
-/// Weight rows a block of the narrow and the wide streaming candidates covers.
-pub const I8_STREAM_BN: [u32; 2] = [64, 128];
+/// Dynamic shared memory per block of `matmul_i8_wgstream_*` for `xn` rows of x (the source's
+/// `BRAIN_WGS_STAGES` x `BRAIN_WGS_STAGE_BYTES` + `BRAIN_WGS_XP_BYTES` + 1 KiB to align the ring to the 128-byte swizzle
+/// pattern): per stage a 128-row weight tile and the x tile at 128 bytes of K a row, and their raw group scales.
+pub const fn i8_wgstream_dynamic_shared_bytes(xn: u32) -> u32 {
+    4 * (128 * 128 + xn * 128 + 128 * 16 + xn * 16) + 2 * 4 * (xn / 2) * 16 + 1024
+}
+/// Rows of x of the widest `matmul_i8_wgstream_*` candidate.
+pub const I8_WGSTREAM_MAX_ROWS: u32 = 128;
+/// Rows of x the many-row streaming candidates (`matmul_i8_stream_r*`) serve per launch.
+pub const I8_STREAM_MANY_ROWS: u32 = 64;
 /// The splits of K over a cluster the streaming candidate is registered at.
 pub const I8_STREAM_SPLITS: [u32; 4] = [1, 2, 4, 8];
 
@@ -1097,6 +1105,160 @@ pub const ALL: &[CudaKernel] = &[
         shared_bytes: 0,
         programmatic: true,
         src: concat!("#define BRAIN_I8S_ATILES 2\n#define BRAIN_I8S_STAGES 4\n#define brain_matmul_i8_stream brain_matmul_i8_stream_w8\n", include_str!("../cu/matmul_i8_stream.cu")),
+    },
+    CudaKernel {
+        name: "matmul_i8_stream_r1",
+        // Weight-streaming candidate for 33 to 64 rows of x (a decode step of a large batch, past the decode regime):
+        // the `matmul_i8_stream_*` structure with room for 64 rows of x in the stage ring, 64 weight rows a block of
+        // 4 warps and K split over a cluster of 1 block(s) (the cluster size is the launch's, see
+        // `gpu_core::native_upgrade`). One candidate of the int8 prefill-sized GEMM's set.
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // `cp.async` and the int8 MMA from 8.0; the cluster and its distributed shared memory from 9.0.
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_matmul_i8_stream_r1",
+        what: "packed-int8 matmul for 33 to 64 rows of x that streams weights through a cp.async ring into shared memory (64 weight rows a block, ldmatrix, mma.sync m16n8k32), K split over 1 block(s) of a cluster; agrees with matmul_i8_gemv_reg to f32 rounding",
+        reported: "native:matmul_i8_stream_r1",
+        block_dim: 128,
+        tile: (64, 64),
+        // The stage ring is dynamic shared memory (`i8_stream_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_I8S_MAX_ROWS 64\n#define BRAIN_I8S_STAGES 3\n#define BRAIN_I8S_MIN_BLOCKS 4\n#define brain_matmul_i8_stream brain_matmul_i8_stream_r1\n", include_str!("../cu/matmul_i8_stream.cu")),
+    },
+    CudaKernel {
+        name: "matmul_i8_stream_r2",
+        // Weight-streaming candidate for 33 to 64 rows of x (a decode step of a large batch, past the decode regime):
+        // the `matmul_i8_stream_*` structure with room for 64 rows of x in the stage ring, 64 weight rows a block of
+        // 4 warps and K split over a cluster of 2 block(s) (the cluster size is the launch's, see
+        // `gpu_core::native_upgrade`). One candidate of the int8 prefill-sized GEMM's set.
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // `cp.async` and the int8 MMA from 8.0; the cluster and its distributed shared memory from 9.0.
+        min_cc: CLUSTER_MIN_CC,
+        entry: "brain_matmul_i8_stream_r2",
+        what: "packed-int8 matmul for 33 to 64 rows of x that streams weights through a cp.async ring into shared memory (64 weight rows a block, ldmatrix, mma.sync m16n8k32), K split over 2 block(s) of a cluster; agrees with matmul_i8_gemv_reg to f32 rounding",
+        reported: "native:matmul_i8_stream_r2",
+        block_dim: 128,
+        tile: (64, 64),
+        // The stage ring is dynamic shared memory (`i8_stream_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_I8S_MAX_ROWS 64\n#define BRAIN_I8S_STAGES 3\n#define BRAIN_I8S_MIN_BLOCKS 4\n#define brain_matmul_i8_stream brain_matmul_i8_stream_r2\n", include_str!("../cu/matmul_i8_stream.cu")),
+    },
+    CudaKernel {
+        name: "matmul_i8_stream_r4",
+        // Weight-streaming candidate for 33 to 64 rows of x (a decode step of a large batch, past the decode regime):
+        // the `matmul_i8_stream_*` structure with room for 64 rows of x in the stage ring, 64 weight rows a block of
+        // 4 warps and K split over a cluster of 4 block(s) (the cluster size is the launch's, see
+        // `gpu_core::native_upgrade`). One candidate of the int8 prefill-sized GEMM's set.
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // `cp.async` and the int8 MMA from 8.0; the cluster and its distributed shared memory from 9.0.
+        min_cc: CLUSTER_MIN_CC,
+        entry: "brain_matmul_i8_stream_r4",
+        what: "packed-int8 matmul for 33 to 64 rows of x that streams weights through a cp.async ring into shared memory (64 weight rows a block, ldmatrix, mma.sync m16n8k32), K split over 4 block(s) of a cluster; agrees with matmul_i8_gemv_reg to f32 rounding",
+        reported: "native:matmul_i8_stream_r4",
+        block_dim: 128,
+        tile: (64, 64),
+        // The stage ring is dynamic shared memory (`i8_stream_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_I8S_MAX_ROWS 64\n#define BRAIN_I8S_STAGES 3\n#define BRAIN_I8S_MIN_BLOCKS 4\n#define brain_matmul_i8_stream brain_matmul_i8_stream_r4\n", include_str!("../cu/matmul_i8_stream.cu")),
+    },
+    CudaKernel {
+        name: "matmul_i8_wgstream_n64_s2",
+        // Weight-streaming candidate for 33 to 64 rows of x on Hopper warpgroup tensor cores: the weights are the
+        // `wgmma` m64n64k32 A operand and the batch of x its B operand, a cp.async ring feeds both, and the
+        // group-scale fold is two fused multiply-adds per output. 128 weight rows a block, K split over a cluster of
+        // 2 block(s) (the cluster size is the launch's, see `gpu_core::native_upgrade`).
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // `wgmma` is arch-specific (`sm_90a`), so the launch also requires it (`ArchFeatures::Required`).
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_matmul_i8_wgstream_n64_s2",
+        what: "packed-int8 matmul for 33 to 64 rows of x that streams weights through a cp.async ring into shared memory and runs them on Hopper warpgroup tensor cores (wgmma m64n64k32, 128 weight rows a block), K split over 2 block(s) of a cluster; agrees with matmul_i8_gemv_reg to f32 rounding",
+        reported: "native:matmul_i8_wgstream_n64_s2",
+        block_dim: 256,
+        tile: (64, 128),
+        // The stage ring is dynamic shared memory (`i8_wgstream_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_WGS_N 64\n#define brain_matmul_i8_wgstream brain_matmul_i8_wgstream_n64_s2\n#define BRAIN_WGS_MIN_BLOCKS 2\n", include_str!("../cu/matmul_i8_wgstream.cu")),
+    },
+    CudaKernel {
+        name: "matmul_i8_wgstream_n64_s4",
+        // Weight-streaming candidate for 33 to 64 rows of x on Hopper warpgroup tensor cores: the weights are the
+        // `wgmma` m64n64k32 A operand and the batch of x its B operand, a cp.async ring feeds both, and the
+        // group-scale fold is two fused multiply-adds per output. 128 weight rows a block, K split over a cluster of
+        // 4 block(s) (the cluster size is the launch's, see `gpu_core::native_upgrade`).
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // `wgmma` is arch-specific (`sm_90a`), so the launch also requires it (`ArchFeatures::Required`).
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_matmul_i8_wgstream_n64_s4",
+        what: "packed-int8 matmul for 33 to 64 rows of x that streams weights through a cp.async ring into shared memory and runs them on Hopper warpgroup tensor cores (wgmma m64n64k32, 128 weight rows a block), K split over 4 block(s) of a cluster; agrees with matmul_i8_gemv_reg to f32 rounding",
+        reported: "native:matmul_i8_wgstream_n64_s4",
+        block_dim: 256,
+        tile: (64, 128),
+        // The stage ring is dynamic shared memory (`i8_wgstream_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_WGS_N 64\n#define brain_matmul_i8_wgstream brain_matmul_i8_wgstream_n64_s4\n#define BRAIN_WGS_MIN_BLOCKS 2\n", include_str!("../cu/matmul_i8_wgstream.cu")),
+    },
+    CudaKernel {
+        name: "matmul_i8_wgstream_n128_s2",
+        // Weight-streaming candidate for 33 to 128 rows of x on Hopper warpgroup tensor cores: the weights are the
+        // `wgmma` m64n128k32 A operand and the batch of x its B operand, a cp.async ring feeds both, and the
+        // group-scale fold is two fused multiply-adds per output. 128 weight rows a block, K split over a cluster of
+        // 2 block(s) (the cluster size is the launch's, see `gpu_core::native_upgrade`).
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // `wgmma` is arch-specific (`sm_90a`), so the launch also requires it (`ArchFeatures::Required`).
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_matmul_i8_wgstream_n128_s2",
+        what: "packed-int8 matmul for 33 to 128 rows of x that streams weights through a cp.async ring into shared memory and runs them on Hopper warpgroup tensor cores (wgmma m64n128k32, 128 weight rows a block), K split over 2 block(s) of a cluster; agrees with matmul_i8_gemv_reg to f32 rounding",
+        reported: "native:matmul_i8_wgstream_n128_s2",
+        block_dim: 256,
+        tile: (128, 128),
+        // The stage ring is dynamic shared memory (`i8_wgstream_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_WGS_N 128\n#define brain_matmul_i8_wgstream brain_matmul_i8_wgstream_n128_s2\n#define BRAIN_WGS_MIN_BLOCKS 1\n", include_str!("../cu/matmul_i8_wgstream.cu")),
+    },
+    CudaKernel {
+        name: "matmul_i8_wgstream_n128_s4",
+        // Weight-streaming candidate for 33 to 128 rows of x on Hopper warpgroup tensor cores: the weights are the
+        // `wgmma` m64n128k32 A operand and the batch of x its B operand, a cp.async ring feeds both, and the
+        // group-scale fold is two fused multiply-adds per output. 128 weight rows a block, K split over a cluster of
+        // 4 block(s) (the cluster size is the launch's, see `gpu_core::native_upgrade`).
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // `wgmma` is arch-specific (`sm_90a`), so the launch also requires it (`ArchFeatures::Required`).
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_matmul_i8_wgstream_n128_s4",
+        what: "packed-int8 matmul for 33 to 128 rows of x that streams weights through a cp.async ring into shared memory and runs them on Hopper warpgroup tensor cores (wgmma m64n128k32, 128 weight rows a block), K split over 4 block(s) of a cluster; agrees with matmul_i8_gemv_reg to f32 rounding",
+        reported: "native:matmul_i8_wgstream_n128_s4",
+        block_dim: 256,
+        tile: (128, 128),
+        // The stage ring is dynamic shared memory (`i8_wgstream_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_WGS_N 128\n#define brain_matmul_i8_wgstream brain_matmul_i8_wgstream_n128_s4\n#define BRAIN_WGS_MIN_BLOCKS 1\n", include_str!("../cu/matmul_i8_wgstream.cu")),
     },
     CudaKernel {
         name: "matmul_i8_gemv_multi",
@@ -3072,6 +3234,48 @@ mod tests {
         wgmma.min_cc = (8, 0);
         let joined = check_table(&[wgmma]).join("\n");
         assert!(joined.contains("issues wgmma.mma_async but declares min_cc"), "{joined}");
+    }
+
+    /// The shared-memory formulas the launches size their rings by are the sources' own stage layouts.
+    #[test]
+    fn the_streaming_sources_and_the_rust_shared_memory_formulas_agree_on_the_stage_layout() {
+        let has = |kernel: &str, lines: &[&str]| {
+            let src = get(kernel).expect("registered").src;
+            for l in lines {
+                assert!(src.lines().any(|x| x == *l || x.starts_with(&format!("{l} "))), "{kernel}: the source no longer states `{l}`, which i8_*stream_dynamic_shared_bytes encodes");
+            }
+        };
+        has(
+            "matmul_i8_stream_s1",
+            &[
+                "#define BRAIN_I8S_KB 128",
+                "#define BRAIN_I8S_GPS 4",
+                "#define BRAIN_I8S_W_BYTES (BRAIN_I8S_BN * BRAIN_I8S_KB)",
+                "#define BRAIN_I8S_X_BYTES (BRAIN_I8S_MAX_ROWS * BRAIN_I8S_KB)",
+                "#define BRAIN_I8S_SW_BYTES (BRAIN_I8S_BN * BRAIN_I8S_GPS * 4)",
+                "#define BRAIN_I8S_SX_BYTES (BRAIN_I8S_MAX_ROWS * BRAIN_I8S_GPS * 4)",
+            ],
+        );
+        assert_eq!(i8_stream_dynamic_shared_bytes(64, 32, 5), 5 * (64 * 128 + 32 * 128 + 64 * 16 + 32 * 16));
+        has(
+            "matmul_i8_wgstream_n64_s2",
+            &[
+                "#define BRAIN_WGS_WGS 2",
+                "#define BRAIN_WGS_STAGES 4",
+                "#define BRAIN_WGS_KB 128",
+                "#define BRAIN_WGS_BM (64 * BRAIN_WGS_WGS)",
+                "#define BRAIN_WGS_W_BYTES (BRAIN_WGS_BM * BRAIN_WGS_KB)",
+                "#define BRAIN_WGS_X_BYTES (BRAIN_WGS_N * BRAIN_WGS_KB)",
+                "#define BRAIN_WGS_SW_BYTES (BRAIN_WGS_BM * 16)",
+                "#define BRAIN_WGS_SX_BYTES (BRAIN_WGS_N * 16)",
+                "#define BRAIN_WGS_XP_BYTES (2 * 4 * BRAIN_WGS_XP_PAIRS * 16)",
+                "#define BRAIN_WGS_XP_PAIRS (BRAIN_WGS_N / 2)",
+            ],
+        );
+        for n in [64u32, 128] {
+            let stage = 128 * 128 + n * 128 + 128 * 16 + n * 16;
+            assert_eq!(i8_wgstream_dynamic_shared_bytes(n), 4 * stage + 2 * 4 * (n / 2) * 16 + 1024);
+        }
     }
 
     #[test]

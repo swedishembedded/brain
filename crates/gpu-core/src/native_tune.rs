@@ -61,9 +61,20 @@ struct Grid {
     bytes_bounds: [u64; 3],
     /// Output columns timed for each bytes class at each `K` class.
     n_reps: [[u32; 4]; 2],
-    /// Distinct weight bytes cycled per timing; `0` times the problem on one copy (a compute-bound class has its
-    /// weights read once per row tile, so the L2 does not flatter it).
+    /// Distinct weight bytes cycled per timing of a streaming class, so the weights come from memory and not from the
+    /// L2.
     footprint_bytes: u64,
+    /// Classes of at most this many rows stream their weights (timed on [`Grid::footprint_bytes`] of weights, graded
+    /// against the memory roof); wider classes are compute-bound (timed on one copy of the weights, graded against the
+    /// tensor-core roof, a weight read once per row tile is not flattered by the L2).
+    stream_max_rows: u32,
+}
+
+impl Grid {
+    /// Whether a class timed at `m` rows streams its weights.
+    fn streams(&self, m: u32) -> bool {
+        m <= self.stream_max_rows
+    }
 }
 
 /// The decode regime: weight-streaming classes, timed with the weights cycled past the L2 so the stream is
@@ -75,17 +86,20 @@ const DECODE: Grid = Grid {
     bytes_bounds: [3 << 20, 12 << 20, 48 << 20],
     n_reps: [[256, 1024, 4096, 16384], [64, 256, 1024, 4096]],
     footprint_bytes: 192 << 20,
+    stream_max_rows: u32::MAX,
 };
 
-/// A prefill round: compute-bound classes from the first row past the decode regime to a round of thousands of
-/// rows (bytes classes of about 10, 30, 60 and 100 MB of weights).
+/// The rows past the decode regime to a round of thousands of rows (bytes classes of about 10, 30, 60 and 100 MB of
+/// weights). Up to 128 rows (a decode step of a large batch) the step still reads every weight once and is bound by
+/// that read: those classes stream, like the decode grid's. Wider rounds are compute-bound.
 const PREFILL: Grid = Grid {
-    rows: &[(33, 64), (65, 128), (129, 256), (257, 512), (513, 1024), (1025, 4096)],
+    rows: &[(33, 48), (49, 64), (65, 96), (97, 128), (129, 256), (257, 512), (513, 1024), (1025, 4096)],
     open_top: true,
     k: [5120, 17408],
     bytes_bounds: [20 << 20, 45 << 20, 80 << 20],
     n_reps: [[2048, 5120, 10240, 17408], [512, 1536, 3072, 5120]],
-    footprint_bytes: 0,
+    footprint_bytes: 192 << 20,
+    stream_max_rows: 128,
 };
 
 /// The grid a slot is tuned on; a slot not named here is a decode-regime slot.
@@ -483,7 +497,7 @@ fn device_key(gpu: &Gpu, slots: &[(usize, &'static str)]) -> String {
     sources.sort_unstable();
     sources.dedup();
     let srcs: Vec<&str> = sources.iter().filter_map(|n| kernels_cuda::get(n).map(|k| k.src)).collect();
-    let fp = fnv(&srcs) ^ fnv(&[env!("CARGO_PKG_VERSION"), &format!("{:?}", [&DECODE, &PREFILL].map(|g| (g.rows, g.k, g.bytes_bounds, g.n_reps)))]);
+    let fp = fnv(&srcs) ^ fnv(&[env!("CARGO_PKG_VERSION"), &format!("{:?}", [&DECODE, &PREFILL].map(|g| (g.rows, g.k, g.bytes_bounds, g.n_reps, g.footprint_bytes, g.stream_max_rows)))]);
     let slug: String = format!("{desc}-{}-{cc}", gpu.kind()).chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
     format!("{slug}-{fp:016x}")
 }
@@ -667,7 +681,7 @@ fn time_class(gpu: &Gpu, g: &Grid, cands: &[&crate::native_upgrade::Active], (m,
     gpu.write(&xq, &x);
     gpu.write_f32(&sxb, &sx);
     let wbytes = u64::from(n) * u64::from(kg) * 4 + u64::from(n) * groups as u64 * 4;
-    let copies = if g.footprint_bytes == 0 { 1 } else { g.footprint_bytes.div_ceil(wbytes).clamp(1, 128) as usize };
+    let copies = if !g.streams(m) { 1 } else { g.footprint_bytes.div_ceil(wbytes).clamp(1, 128) as usize };
     let weights: Vec<_> = (0..copies)
         .map(|i| {
             let wb = gpu.storage(u64::from(n) * u64::from(kg));
@@ -727,7 +741,7 @@ fn time_class(gpu: &Gpu, g: &Grid, cands: &[&crate::native_upgrade::Active], (m,
         // byte, so its bound is the memory roof; a prefill-sized one is bound by the tensor cores. The fraction is the
         // bound's time over the measured time.
         let ops = 2.0 * f64::from(m) * f64::from(n) * f64::from(k);
-        let frac = roofs.bound_ms(g.footprint_bytes == 0, ops, wbytes).map(|b| b / best);
+        let frac = roofs.bound_ms(!g.streams(m), ops, wbytes).map(|b| b / best);
         results.push((a.kernel.to_owned(), Verdict::Timed { us: best * 1e3, gbs, frac }));
     }
     results
@@ -760,7 +774,7 @@ pub fn report() -> String {
             let g = grid(&e.slot);
             let (us, rate, frac) = match e.results.iter().find(|(k, _)| *k == e.best) {
                 // A compute-bound class reports the operations it ran a second, a streaming one its weight bandwidth.
-                Some((_, Verdict::Timed { us, frac, .. })) if g.footprint_bytes == 0 => {
+                Some((_, Verdict::Timed { us, frac, .. })) if !g.streams(e.class.problem(g).0) => {
                     let (m, kg, n) = e.class.problem(g);
                     (*us, 2.0 * f64::from(m) * f64::from(n) * f64::from(kg) * 4.0 / (*us * 1e-6) / 1e12, *frac)
                 }
@@ -847,7 +861,9 @@ mod tests {
         }
         let top = Class::of(&PREFILL, PREFILL.rows[PREFILL.rows.len() - 1].1, 1280, 5120).unwrap();
         assert_eq!(Class::of(&PREFILL, 1 << 20, 1280, 5120), Some(top));
-        assert_eq!(grid(crate::native_upgrade::PREFILL_SLOT).footprint_bytes, 0);
+        // The classes that still read every weight once stream; the wider rounds are compute-bound.
+        assert!(PREFILL.streams(128) && !PREFILL.streams(129));
+        assert!(DECODE.streams(32));
     }
 
     #[test]

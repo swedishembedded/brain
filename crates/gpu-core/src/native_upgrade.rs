@@ -156,17 +156,48 @@ fn serves_i8_stream(p: &[u32]) -> bool {
     serves_i8_batched(p, backend_api::select::DECODE_REGIME_MAX_ROWS, 8)
 }
 
-/// Blocks of the weight-streaming candidate split over `SPLIT` blocks of a cluster: 64 weight rows a cluster.
+/// Blocks of the weight-streaming candidate split over `SPLIT` blocks of a cluster: one tile of weight rows a cluster.
 fn i8_stream_blocks<const SPLIT: u32>(p: &[u32], tile: (u32, u32)) -> u32 {
     p[2].div_ceil(tile.1) * SPLIT
 }
 
-/// Cluster shape and dynamic shared memory of the weight-streaming candidate at a split of `split` blocks.
-const fn i8_stream_launch(split: u32, bn: u32, stages: u32) -> CudaLaunch {
+/// Cluster shape and dynamic shared memory of the weight-streaming candidate at a split of `split` blocks, `bn` weight
+/// rows a block, room for `rows` rows of x and `stages` stages.
+const fn i8_stream_launch(split: u32, bn: u32, rows: u32, stages: u32) -> CudaLaunch {
     CudaLaunch {
-        dynamic_shared_bytes: kernels_cuda::i8_stream_dynamic_shared_bytes(bn, stages),
+        dynamic_shared_bytes: kernels_cuda::i8_stream_dynamic_shared_bytes(bn, rows, stages),
         shared_opt_in: true,
         cluster: if split > 1 { Some([split, 1, 1]) } else { None },
+        ..CudaLaunch::NONE
+    }
+}
+
+/// The many-row weight-streaming candidates serve the rows past the decode regime up to
+/// [`kernels_cuda::I8_STREAM_MANY_ROWS`]: a step of a large batch is still bound by reading the weights once.
+fn serves_i8_stream_many(p: &[u32]) -> bool {
+    match p {
+        [m, kg, n, ..] => {
+            (backend_api::select::DECODE_REGIME_MAX_ROWS + 1..=kernels_cuda::I8_STREAM_MANY_ROWS).contains(m) && *n >= 1 && *kg >= 8 && kg % 8 == 0
+        }
+        _ => false,
+    }
+}
+
+/// The warpgroup weight-streaming candidates serve up to `ROWS` rows of x past the decode regime, whole 128-byte k-tiles.
+fn serves_i8_wgstream<const ROWS: u32>(p: &[u32]) -> bool {
+    match p {
+        [m, kg, n, ..] => (backend_api::select::DECODE_REGIME_MAX_ROWS + 1..=ROWS).contains(m) && *n >= 1 && *kg >= 32 && kg % 32 == 0,
+        _ => false,
+    }
+}
+
+/// Launch of the warpgroup weight-streaming candidate for `xn` rows of x with K split over a cluster of `split` blocks.
+const fn i8_wgstream_launch(split: u32, xn: u32) -> CudaLaunch {
+    CudaLaunch {
+        dynamic_shared_bytes: kernels_cuda::i8_wgstream_dynamic_shared_bytes(xn),
+        shared_opt_in: true,
+        cluster: Some([split, 1, 1]),
+        arch: backend_api::ArchFeatures::Required,
         ..CudaLaunch::NONE
     }
 }
@@ -634,6 +665,79 @@ pub(crate) const PREFILL_ROWS: &[Row] = &[
         align_words: 4,
         launch: CudaLaunch::NONE,
     },
+    // The weight-streaming candidates of the many-row decode step (33-128 rows of x): the structure of the decode
+    // linear's streaming set (`matmul_i8_stream_*`) with room for 128 rows of x.
+    Row {
+        slow: "matmul_i8_dyn",
+        target: Target::Named("matmul_i8_stream_r1"),
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_i8_stream_many,
+        blocks: i8_stream_blocks::<1>,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        launch: i8_stream_launch(1, 64, kernels_cuda::I8_STREAM_MANY_ROWS, 3),
+    },
+    Row {
+        slow: "matmul_i8_dyn",
+        target: Target::Named("matmul_i8_stream_r2"),
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_i8_stream_many,
+        blocks: i8_stream_blocks::<2>,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        launch: i8_stream_launch(2, 64, kernels_cuda::I8_STREAM_MANY_ROWS, 3),
+    },
+    Row {
+        slow: "matmul_i8_dyn",
+        target: Target::Named("matmul_i8_stream_r4"),
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_i8_stream_many,
+        blocks: i8_stream_blocks::<4>,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        launch: i8_stream_launch(4, 64, kernels_cuda::I8_STREAM_MANY_ROWS, 3),
+    },
+    // The same, with the weights as the A operand of a warpgroup `wgmma` (`matmul_i8_wgstream.cu`).
+    Row {
+        slow: "matmul_i8_dyn",
+        target: Target::Named("matmul_i8_wgstream_n64_s2"),
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_i8_wgstream::<64>,
+        blocks: i8_stream_blocks::<2>,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        launch: i8_wgstream_launch(2, 64),
+    },
+    Row {
+        slow: "matmul_i8_dyn",
+        target: Target::Named("matmul_i8_wgstream_n64_s4"),
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_i8_wgstream::<64>,
+        blocks: i8_stream_blocks::<4>,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        launch: i8_wgstream_launch(4, 64),
+    },
+    Row {
+        slow: "matmul_i8_dyn",
+        target: Target::Named("matmul_i8_wgstream_n128_s2"),
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_i8_wgstream::<128>,
+        blocks: i8_stream_blocks::<2>,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        launch: i8_wgstream_launch(2, 128),
+    },
+    Row {
+        slow: "matmul_i8_dyn",
+        target: Target::Named("matmul_i8_wgstream_n128_s4"),
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_i8_wgstream::<128>,
+        blocks: i8_stream_blocks::<4>,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        launch: i8_wgstream_launch(4, 128),
+    },
     // The Hopper warpgroup GEMM: `wgmma` is arch-specific (`sm_90a`), so the launch requires it, and its ring of
     // stages is dynamic shared memory above the default limit.
     Row {
@@ -918,7 +1022,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: i8_stream_blocks::<1>,
         requires_wgsl_upgrade: true,
         align_words: 4,
-        launch: i8_stream_launch(1, 64, 5),
+        launch: i8_stream_launch(1, 64, 32, 5),
     },
     Row {
         slow: "matmul_i8_gemv",
@@ -928,7 +1032,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: i8_stream_blocks::<2>,
         requires_wgsl_upgrade: true,
         align_words: 4,
-        launch: i8_stream_launch(2, 64, 5),
+        launch: i8_stream_launch(2, 64, 32, 5),
     },
     Row {
         slow: "matmul_i8_gemv",
@@ -938,7 +1042,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: i8_stream_blocks::<4>,
         requires_wgsl_upgrade: true,
         align_words: 4,
-        launch: i8_stream_launch(4, 64, 5),
+        launch: i8_stream_launch(4, 64, 32, 5),
     },
     Row {
         slow: "matmul_i8_gemv",
@@ -948,7 +1052,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: i8_stream_blocks::<8>,
         requires_wgsl_upgrade: true,
         align_words: 4,
-        launch: i8_stream_launch(8, 64, 5),
+        launch: i8_stream_launch(8, 64, 32, 5),
     },
     Row {
         slow: "matmul_i8_gemv",
@@ -958,7 +1062,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: i8_stream_blocks::<1>,
         requires_wgsl_upgrade: true,
         align_words: 4,
-        launch: i8_stream_launch(1, 128, 4),
+        launch: i8_stream_launch(1, 128, 32, 4),
     },
     Row {
         slow: "matmul_i8_gemv",
@@ -968,7 +1072,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: i8_stream_blocks::<2>,
         requires_wgsl_upgrade: true,
         align_words: 4,
-        launch: i8_stream_launch(2, 128, 4),
+        launch: i8_stream_launch(2, 128, 32, 4),
     },
     Row {
         slow: "matmul_i8_gemv",
@@ -978,7 +1082,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: i8_stream_blocks::<4>,
         requires_wgsl_upgrade: true,
         align_words: 4,
-        launch: i8_stream_launch(4, 128, 4),
+        launch: i8_stream_launch(4, 128, 32, 4),
     },
     Row {
         slow: "matmul_i8_gemv",
@@ -988,7 +1092,7 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: i8_stream_blocks::<8>,
         requires_wgsl_upgrade: true,
         align_words: 4,
-        launch: i8_stream_launch(8, 128, 4),
+        launch: i8_stream_launch(8, 128, 32, 4),
     },
     // The q4 (W4A8) decode GEMV: the int8 row's structure over 4-bit weights,
     // bit-identical to `matmul_q4_gemv_reg` (`tests/q4_gemv_native.rs`).
@@ -2181,10 +2285,25 @@ mod tests {
             Target::Operator { .. } => panic!("the prefill candidates are named"),
         };
         let names: Vec<&str> = PREFILL_ROWS.iter().map(name).collect();
-        assert_eq!(names, ["matmul_i8_mma_m128", "matmul_i8_mma", "matmul_i8_wgmma"], "first is the untuned default");
+        assert_eq!(
+            names,
+            [
+                "matmul_i8_mma_m128",
+                "matmul_i8_mma",
+                "matmul_i8_stream_r1",
+                "matmul_i8_stream_r2",
+                "matmul_i8_stream_r4",
+                "matmul_i8_wgstream_n64_s2",
+                "matmul_i8_wgstream_n64_s4",
+                "matmul_i8_wgstream_n128_s2",
+                "matmul_i8_wgstream_n128_s4",
+                "matmul_i8_wgmma"
+            ],
+            "first is the untuned default"
+        );
         let offered = |cc| PREFILL_ROWS.iter().filter(|r| r.target.resolve(cc).is_some()).map(name).collect::<Vec<_>>();
         assert!(offered(kernels_cuda::DP4A_MIN_CC).is_empty(), "no prefill candidate runs below the tensor-core floor");
-        assert_eq!(offered(kernels_cuda::MMA_S8_MIN_CC), ["matmul_i8_mma_m128", "matmul_i8_mma"]);
+        assert_eq!(offered(kernels_cuda::MMA_S8_MIN_CC), ["matmul_i8_mma_m128", "matmul_i8_mma", "matmul_i8_stream_r1"]);
         assert_eq!(offered(kernels_cuda::WGMMA_MIN_CC), names, "Hopper offers the warpgroup GEMM too");
         let first = |p: &[u32]| PREFILL_ROWS.iter().find(|r| (r.serves)(p)).map(name);
         assert_eq!(first(&[33, 1280, 1024]), Some("matmul_i8_mma_m128"));
@@ -2193,6 +2312,13 @@ mod tests {
         assert_eq!(first(&[4096, 1280, 1024]), Some("matmul_i8_mma"));
         assert_eq!(first(&[32, 1280, 1024]), None, "the decode regime is the GEMV slot's");
         assert_eq!(first(&[256, 1288, 1024]), None, "K must be a whole number of 64-element staged tiles (K = 5152 is not)");
+        // The many-row streaming candidates serve the step of a large batch (33-64 or 33-128 rows) and nothing past it.
+        for r in PREFILL_ROWS.iter().filter(|r| name(r).contains("stream_")) {
+            let top = if name(r).contains("n128") { 128 } else { kernels_cuda::I8_STREAM_MANY_ROWS };
+            let k = if name(r).contains("wgstream") { 1280 } else { 1288 };
+            assert!((r.serves)(&[33, k, 1024]) && (r.serves)(&[top, k, 1024]), "{}", name(r));
+            assert!(!(r.serves)(&[32, k, 1024]) && !(r.serves)(&[top + 1, k, 1024]), "{}", name(r));
+        }
         let wgmma = PREFILL_ROWS.iter().find(|r| name(r) == "matmul_i8_wgmma").expect("the row");
         assert!((wgmma.serves)(&[256, 1280, 1024]));
         assert!(!(wgmma.serves)(&[256, 1296, 1024]), "the warpgroup GEMM wants whole 128-deep k-tiles (K = 5184 is 81 x 64)");
