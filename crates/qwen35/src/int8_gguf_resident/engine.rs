@@ -41,6 +41,10 @@ use model::snapshot_prefix::{Entry as CacheEntry, SnapshotPrefixCache};
 /// Prompts shorter than this are not worth a snapshot row and a retained block.
 const MIN_CACHED_TOKENS: usize = 64;
 
+/// Branch-point hints held for prompts not yet started; the oldest goes first (a hint whose prompt was cancelled
+/// before it started is never taken).
+const MAX_PREFIX_HINTS: usize = 16;
+
 /// Trailing prompt tokens an entry leaves out. A chat prompt ends with the generation prompt (the assistant's role
 /// header and, with thinking on, its opening tag); the next turn's prompt re-renders that position as the finished
 /// assistant message, whose tokens differ (`<think>` followed by one newline against `<think>` followed by a blank
@@ -132,6 +136,11 @@ pub struct Qwen35GgufEngine {
     /// sequence's block becomes the cache entry's KV only then (decoding
     /// appends rows past the prompt and never rewrites the prompt's own).
     pending: HashMap<u32, Vec<Pending>>,
+    /// Lengths of the entries a prefill still running filed at once (paged KV), whose MTP head rows are marked
+    /// valid when its prompt is in.
+    filed: HashMap<u32, Vec<usize>>,
+    /// Prefixes a prompt not yet started is to file as branch points ([`Self::hint_branch`]).
+    hints: Vec<(KvNamespace, Vec<u32>)>,
     /// Prompts being prefilled over several scheduler iterations, by slot.
     partial: HashMap<u32, PartialPrefill>,
     /// The sequences and row counts of the verify step awaiting its commit.
@@ -162,7 +171,6 @@ struct Background {
     task: PrefillTask,
     p: PartialPrefill,
     end: usize,
-    namespace: KvNamespace,
     /// The slice's rows, once a pump between decode steps found it finished; the
     /// scheduler's next prefill call files it.
     done: Option<PrefillDone>,
@@ -288,6 +296,8 @@ impl Qwen35GgufEngine {
             free_rows,
             cache,
             pending: HashMap::new(),
+            filed: HashMap::new(),
+            hints: Vec::new(),
             partial: HashMap::new(),
             verifying: None,
             spec_batch_limit: usize::MAX,
@@ -575,7 +585,10 @@ impl Qwen35GgufEngine {
         let branch = (cacheable && paged)
             .then(|| self.cache.branch_point(table.kv_namespace(), prompt, CHECKPOINT_ALIGN, MIN_CACHED_TOKENS))
             .flatten()
-            .filter(|&b| b > start && b < checkpoint_len(prompt.len()));
+            .into_iter()
+            .chain(self.take_hints(table.kv_namespace(), prompt))
+            .filter(|&b| b > start && b < checkpoint_len(prompt.len()))
+            .min();
         self.partial.insert(slot, PartialPrefill { start, done: start, fresh: true, cacheable, prefix_hidden, rows_hidden: Vec::new(), mtp_feed: self.spec_prefill && seed_valid, branch });
         None
     }
@@ -613,7 +626,8 @@ impl Qwen35GgufEngine {
     /// -- when the prompt is in - hand the MTP head its hidden states and file the
     /// prompt for reuse. `state_in_pool`: the recurrent state is in the slot's pool
     /// row and not in the working copy (a multi-sequence forward leaves it there).
-    fn finish_slice(&mut self, slot: u32, namespace: KvNamespace, prompt: &[u32], mut p: PartialPrefill, end: usize, hidden: Vec<f32>, state_in_pool: bool) -> PrefillProgress {
+    #[allow(clippy::too_many_arguments)]
+    fn finish_slice(&mut self, slot: u32, table: &BlockTable, prompt: &[u32], mut p: PartialPrefill, end: usize, hidden: Vec<f32>, state_in_pool: bool) -> PrefillProgress {
         let consumed = end - p.done;
         p.done = end;
         p.fresh = false;
@@ -621,9 +635,9 @@ impl Qwen35GgufEngine {
             // The checkpoint is cached in place of the whole prompt. Its MTP head rows are filled once the whole
             // prompt is in (below), so it is filed without them and marked once they are.
             if p.cacheable && end == checkpoint_len(prompt.len()) {
-                self.file_prefix(slot, namespace, &prompt[..end], &hidden, false, state_in_pool, false);
+                self.file_prefix(slot, table, &prompt[..end], &hidden, state_in_pool, false);
             } else if p.branch == Some(end) {
-                self.file_prefix(slot, namespace, &prompt[..end], &hidden, false, state_in_pool, true);
+                self.file_prefix(slot, table, &prompt[..end], &hidden, state_in_pool, true);
             }
             self.partial.insert(slot, p);
             return PrefillProgress::Partial { consumed };
@@ -647,6 +661,11 @@ impl Qwen35GgufEngine {
         for pending in self.pending.get_mut(&slot).into_iter().flatten() {
             pending.mtp_valid = head_rows_filled;
         }
+        for len in self.filed.remove(&slot).unwrap_or_default() {
+            if let Some(resume) = self.cache.payload_mut(table.kv_namespace(), &prompt[..len]) {
+                resume.mtp_valid = head_rows_filled;
+            }
+        }
         PrefillProgress::Done(hidden)
     }
 
@@ -658,23 +677,65 @@ impl Qwen35GgufEngine {
         [p.branch, checkpoint].into_iter().flatten().filter(|&stop| p.done < stop && end > stop).min().unwrap_or(end)
     }
 
-    /// File `tokens` (a prompt's checkpoint, or its `branch` point) for reuse once the sequence is over: take a
-    /// snapshot row, snapshot the working recurrent state into it, and leave the entry pending. `hidden` is the last
-    /// of `tokens`' rows. `state_in_pool`: the state is in the slot's pool row and not in the working copy.
-    #[allow(clippy::too_many_arguments)]
-    fn file_prefix(&mut self, slot: u32, namespace: KvNamespace, tokens: &[u32], hidden: &[f32], mtp_valid: bool, state_in_pool: bool, branch: bool) {
-        let (row, evicted) = self.cache.take_row(namespace, tokens);
+    /// File `tokens` (a prompt's checkpoint, or its `branch` point) of the sequence prefilling into `table` for
+    /// reuse: take a snapshot row and snapshot the working recurrent state into it. With paged KV the entry shares
+    /// the sequence's leading blocks, so it is cached at once and a prompt arriving while this sequence still runs
+    /// resumes from it (its MTP head rows are marked valid once the whole prompt is in); the one-block layout keeps
+    /// the entry pending until the sequence ends and its block can be handed over. `hidden` is the last of
+    /// `tokens`' rows. `state_in_pool`: the state is in the slot's pool row and not in the working copy.
+    fn file_prefix(&mut self, slot: u32, table: &BlockTable, tokens: &[u32], hidden: &[f32], state_in_pool: bool, branch: bool) {
+        let (row, evicted) = self.cache.take_row(table.kv_namespace(), tokens);
         self.release_retired(evicted);
-        if let Some(row) = row {
-            if state_in_pool {
-                self.inst.load_work_state(slot);
-            }
-            self.inst.snapshot_prefill_state(row);
-            self.pending.entry(slot).or_default().push(Pending { branch, tokens: tokens.to_vec(), snap_row: row, last_hidden: hidden.to_vec(), mtp_valid });
+        let Some(row) = row else { return };
+        if state_in_pool {
+            self.inst.load_work_state(slot);
+        }
+        self.inst.snapshot_prefill_state(row);
+        let pending = Pending { branch, tokens: tokens.to_vec(), snap_row: row, last_hidden: hidden.to_vec(), mtp_valid: false };
+        if matches!(self.inst.kv_layout, KvLayout::Paged { .. }) {
+            let mut shared = table.fork(&mut self.alloc);
+            shared.truncate(tokens.len() as u32, &mut self.alloc);
+            self.file_entry(pending, shared);
+            self.filed.entry(slot).or_default().push(tokens.len());
+        } else {
+            self.pending.entry(slot).or_default().push(pending);
         }
     }
 
-    /// Hand a finished sequence's pending record to the cache as an entry over `table`.
+    /// See [`PagedDecoder::hint_shared_prefix`]: the paged layout files `prompt[..at]`, rounded down to a whole
+    /// recurrent chunk, as a branch point of the prefill into `table` - at once if that prefill has started and not
+    /// passed it, else when it starts (the prompt is matched by its tokens, as the table has no state yet).
+    fn hint_branch(&mut self, table: &BlockTable, prompt: &[u32], at: usize) -> bool {
+        let at = at.min(prompt.len()) / CHECKPOINT_ALIGN * CHECKPOINT_ALIGN;
+        if !matches!(self.inst.kv_layout, KvLayout::Paged { .. }) || at < MIN_CACHED_TOKENS || !self.cache.enabled() {
+            return false;
+        }
+        let Some(slot) = table.state_row() else {
+            if self.hints.len() >= MAX_PREFIX_HINTS {
+                self.hints.remove(0);
+            }
+            self.hints.push((table.kv_namespace(), prompt[..at].to_vec()));
+            return true;
+        };
+        match self.partial.get_mut(&slot) {
+            Some(p) if p.done < at => {
+                if at < checkpoint_len(prompt.len()) {
+                    p.branch = Some(p.branch.map_or(at, |b| b.min(at)));
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The lengths of the hinted prefixes ([`Self::hint_branch`]) `prompt` begins with, removing them.
+    fn take_hints(&mut self, namespace: KvNamespace, prompt: &[u32]) -> Vec<usize> {
+        let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.hints).into_iter().partition(|(ns, tokens)| *ns == namespace && prompt.starts_with(tokens));
+        self.hints = rest;
+        mine.into_iter().map(|(_, tokens)| tokens.len()).collect()
+    }
+
+    /// Hand a pending record to the cache as an entry over `table`.
     fn file_entry(&mut self, p: Pending, table: BlockTable) {
         let entry = CacheEntry::new(p.tokens, table, p.snap_row, Resume { last_hidden: p.last_hidden, mtp_valid: p.mtp_valid });
         let retired = self.cache.insert(if p.branch { entry.branch() } else { entry });
@@ -693,7 +754,7 @@ impl Qwen35GgufEngine {
         let end = self.slice_end(&p, prompt.len(), budget);
         let resume = !p.fresh && p.done > 0;
         let hidden = self.forward_slice(table, prompt, &mut p, end, resume);
-        self.finish_slice(slot, table.kv_namespace(), prompt, p, end, hidden, false)
+        self.finish_slice(slot, table, prompt, p, end, hidden, false)
     }
 
     /// The next slices of several sequences, the rows of all of them through the
@@ -752,7 +813,7 @@ impl Qwen35GgufEngine {
             }
         }
         for ((i, slot, p, end), (h, in_pool)) in live.into_iter().zip(hidden) {
-            answers[i] = Some(self.finish_slice(slot, jobs[i].table.kv_namespace(), jobs[i].prompt, p, end, h, in_pool));
+            answers[i] = Some(self.finish_slice(slot, jobs[i].table, jobs[i].prompt, p, end, h, in_pool));
         }
         answers.into_iter().map(|a| a.expect("every job was answered")).collect()
     }
@@ -782,7 +843,7 @@ impl Qwen35GgufEngine {
         let from = if p.done == 0 { TaskStart::Fresh } else { TaskStart::Continue };
         let collect = self.inst.has_mtp() && p.mtp_feed;
         let task = self.inst.prefill_task(job.prompt, p.done, end, slot, from, collect);
-        self.background = Some(Background { task, p, end, namespace: job.table.kv_namespace(), done: None });
+        self.background = Some(Background { task, p, end, done: None });
         None
     }
 
@@ -841,9 +902,9 @@ impl Qwen35GgufEngine {
                 None => self.inst.pump_prefill(&mut bg.task, wait).unwrap_or_else(|e| panic!("{e}")),
             };
             let Some(done) = finished else { break };
-            let Background { mut p, end, namespace, .. } = self.background.take().expect("checked above");
+            let Background { mut p, end, .. } = self.background.take().expect("checked above");
             p.rows_hidden.extend_from_slice(&done.all);
-            match self.finish_slice(slot, namespace, jobs[i].prompt, p, end, done.last, false) {
+            match self.finish_slice(slot, jobs[i].table, jobs[i].prompt, p, end, done.last, false) {
                 PrefillProgress::Partial { consumed: c } => {
                     consumed[i] += c;
                     // Back to the scheduler between slices: a prompt that arrived meanwhile is considered now.
@@ -924,6 +985,9 @@ impl PagedDecoder for Qwen35GgufEngine {
         }
         self.alloc.free_blocks() - before
     }
+    fn hint_shared_prefix(&mut self, table: &mut BlockTable, prompt: &[u32], at: usize) -> bool {
+        self.hint_branch(table, prompt, at)
+    }
     /// A sequence that prefilled a cacheable prompt hands the blocks of its
     /// prompt to the prefix cache instead of freeing them (the rows decoding
     /// appended past the prompt are dropped); any other sequence frees all its
@@ -936,6 +1000,7 @@ impl PagedDecoder for Qwen35GgufEngine {
             }
             self.inst.mtp_release(slot);
             self.partial.remove(&slot);
+            self.filed.remove(&slot);
         }
         let mut pending = row.and_then(|slot| self.pending.remove(&slot)).unwrap_or_default();
         // The longest entry takes the sequence's own table; a shorter one (a branch point) shares its leading blocks.

@@ -201,6 +201,18 @@ pub trait PagedDecoder {
         None
     }
 
+    /// Make `prompt[..at]` resumable for later prompts as soon as this
+    /// sequence's prefill (of `prompt`, into `table`, possibly not started yet)
+    /// has passed it, not only once the sequence ends; the decoder may round
+    /// `at` down to a point it can resume from. Returns whether it will: the
+    /// scheduler holds back a waiting request that shares that prefix only
+    /// then, and admits it once the prefill is past `at`, so requests arriving
+    /// together prefill a shared document once. The default declines.
+    fn hint_shared_prefix(&mut self, table: &mut BlockTable, prompt: &[u32], at: usize) -> bool {
+        let _ = (table, prompt, at);
+        false
+    }
+
     /// Prefill the next slice of `prompt` into `table`: at most `budget` (>= 1)
     /// tokens, continuing where the previous call for this sequence stopped
     /// (`table` is empty on the first). The default prefills the whole prompt.
@@ -993,6 +1005,10 @@ struct Prefilling {
     table: BlockTable,
     resume: Option<Resume>,
     embeds: Option<std::sync::Arc<PromptEmbeds>>,
+    /// What the decoder answered when asked to make a prefix of this prompt
+    /// resumable for a waiting request ([`PagedDecoder::hint_shared_prefix`]):
+    /// the prefix it will file, or `None` once it declined. Unasked: unset.
+    shared_hint: Option<Option<usize>>,
 }
 
 /// A sequence the scheduler is actively decoding.
@@ -1692,6 +1708,7 @@ impl<D: PagedDecoder> Scheduler<D> {
                 None => self.adapter_verdict(adapter),
             };
             match verdict {
+                Admissibility::Admissible if self.waits_for_shared_prefill(pos) => pos += 1,
                 Admissibility::Admissible => return Some(pos),
                 Admissibility::AdapterLoading => pos += 1,
                 Admissibility::Refused(reject) => {
@@ -1702,6 +1719,69 @@ impl<D: PagedDecoder> Scheduler<D> {
             }
         }
         None
+    }
+
+    /// Whether the waiting request at `pos` should let a sequence still
+    /// prefilling the start of its prompt get past it first.
+    ///
+    /// Requests that arrive together and share a document (one system prompt,
+    /// one file, different questions) would each prefill it, since none of
+    /// them is cached when they are admitted. When the shared part is at least
+    /// two prefill slices, the scheduler asks the decoder to make it resumable
+    /// as soon as the earlier prefill has passed it
+    /// ([`PagedDecoder::hint_shared_prefix`]) and, if it agrees, steps over the
+    /// request until then; it is admitted afterwards and resumes from the
+    /// prefix. The wait is bounded by that one prefill's progress, and a
+    /// decoder that declines is not asked again for that prefill.
+    fn waits_for_shared_prefill(&mut self, pos: usize) -> bool {
+        let Some(slice) = self.dec.prefill_interleave_tokens() else { return false };
+        let w = &self.waiting[pos];
+        if w.embeds.is_some() {
+            return false;
+        }
+        let shared = |p: &Prefilling| p.prompt.iter().zip(&w.req.prompt).take_while(|(a, b)| a == b).count();
+        let best = self
+            .prefilling
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.adapter == w.adapter && p.embeds.is_none() && p.shared_hint != Some(None))
+            .map(|(i, p)| (i, shared(p)))
+            .filter(|&(i, at)| at >= 2 * slice && self.prefilling[i].done < at)
+            .max_by_key(|&(_, at)| at);
+        let Some((i, at)) = best else { return false };
+        let p = &mut self.prefilling[i];
+        match p.shared_hint {
+            Some(Some(filed)) if filed <= at => true,
+            _ => {
+                let agreed = self.dec.hint_shared_prefix(&mut p.table, &p.prompt, at);
+                p.shared_hint = Some(agreed.then_some(at));
+                agreed
+            }
+        }
+    }
+
+    /// Ask the decoder to make the prefix the newest prefilling sequence shares
+    /// with a waiting request resumable as its prefill passes it
+    /// ([`PagedDecoder::hint_shared_prefix`]), when that is at least two slices:
+    /// a decoder that prefills one prompt at a time admits the waiting request
+    /// only after this prefill, which then leaves the shared part cached.
+    fn hint_for_waiting_sharers(&mut self) {
+        let Some(slice) = self.dec.prefill_interleave_tokens() else { return };
+        let Some(p) = self.prefilling.back_mut() else { return };
+        if p.embeds.is_some() {
+            return;
+        }
+        let at = self
+            .waiting
+            .iter()
+            .filter(|w| w.adapter == p.adapter && w.embeds.is_none())
+            .map(|w| w.req.prompt.iter().zip(&p.prompt).take_while(|(a, b)| a == b).count())
+            .max()
+            .filter(|&at| at >= 2 * slice);
+        if let Some(at) = at {
+            let agreed = self.dec.hint_shared_prefix(&mut p.table, &p.prompt, at);
+            p.shared_hint = Some(agreed.then_some(at));
+        }
     }
 
     /// Whether `req` (for `adapter`) can ever be served by this decoder, without queueing it:
@@ -1832,7 +1912,8 @@ impl<D: PagedDecoder> Scheduler<D> {
             }
             None => BlockTable::new(),
         };
-        self.prefilling.push_back(Prefilling { id, prompt: req.prompt, done: 0, max_new: req.max_new, stop: req.stop, adapter, sample, seed, table, resume, embeds });
+        self.prefilling.push_back(Prefilling { id, prompt: req.prompt, done: 0, max_new: req.max_new, stop: req.stop, adapter, sample, seed, table, resume, embeds, shared_hint: None });
+        self.hint_for_waiting_sharers();
         true
     }
 

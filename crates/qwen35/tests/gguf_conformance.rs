@@ -21,7 +21,7 @@ use model::lora::device_adapter::{AdapterSite, DeviceAdapter};
 use model::serve::conformance::{self, Conformance};
 use model::paged::BlockTable;
 use model::serve::{AdapterId, PagedDecoder, Request, Scheduler};
-use qwen35::int8_gguf_resident::{budgeted_gpus, Qwen35GgufEngine, Qwen35GgufResident};
+use qwen35::int8_gguf_resident::{budgeted_gpus, PrefillPolicy, Qwen35GgufEngine, Qwen35GgufResident};
 
 /// Per-sequence capacity: the prefix test's 152-token prompt (the engine caches a checkpoint on a 64-token boundary
 /// at least 16 tokens short of the prompt's end) plus its 8-token extension and decode.
@@ -312,6 +312,30 @@ fn prompts_sharing_a_document_resume_from_where_they_part() {
     assert!(warm.iter().zip(&cold).all(|(w, c)| w.to_bits() == c.to_bits()), "a prefill resumed from a branch point differs from a cold one");
 }
 
+/// Questions about one document submitted together: none of them is cached when they are admitted, so the scheduler
+/// holds the later ones back while the first files the document as it passes it, and they resume from it. Each still
+/// answers exactly as it does alone.
+fn questions_arriving_together_prefill_their_document_once() {
+    const CAP: u32 = 320;
+    let doc = prompt_of(1, 128);
+    let ask = |seed: u32| doc.iter().copied().chain(prompt_of(seed, 100)).collect::<Vec<u32>>();
+    let solo = |prompt: Vec<u32>| {
+        let mut sched = Scheduler::new(engine_with_cap(16, KvTier::F32, 0, CAP), 1);
+        let id = sched.submit(Request { prompt, max_new: 6, stop: Vec::new() });
+        sched.run().remove(&id).expect("finished")
+    };
+    let mut e = engine_with_cap(16, KvTier::F32, 0, CAP);
+    // Slices of 32 tokens: the 128-token document is four of them, long enough to be worth waiting for.
+    e.set_prefill_policy(PrefillPolicy { slice_tokens: 32, ..PrefillPolicy::default() });
+    let mut sched = Scheduler::new(e, 4);
+    let ids: Vec<u64> = (2..5).map(|q| sched.submit(Request { prompt: ask(q), max_new: 6, stop: Vec::new() })).collect();
+    let mut got = sched.run();
+    assert_eq!(sched.prefix_stats().0, 2 * 128, "the second and third question resume from the document");
+    for (id, q) in ids.into_iter().zip(2..5) {
+        assert_eq!(got.remove(&id).expect("finished"), solo(ask(q)), "question {q} answers as it does alone");
+    }
+}
+
 const RECORDED: [[u32; 12]; 3] = [[10, 9, 26, 17, 9, 10, 1, 8, 21, 12, 2, 4], [11, 9, 1, 19, 2, 13, 4, 26, 11, 18, 17, 22], [22, 12, 2, 12, 7, 17, 22, 14, 9, 1, 28, 16]];
 
 gpu_core::card_tests!(
@@ -326,5 +350,6 @@ gpu_core::card_tests!(
     single_stream_greedy_decoding_is_reproducible,
     a_resumed_prefill_is_bitwise_a_cold_one,
     a_prompt_diverging_in_its_last_tokens_resumes_from_the_cached_prompts_checkpoint,
-    prompts_sharing_a_document_resume_from_where_they_part
+    prompts_sharing_a_document_resume_from_where_they_part,
+    questions_arriving_together_prefill_their_document_once
 );

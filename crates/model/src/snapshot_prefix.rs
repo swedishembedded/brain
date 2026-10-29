@@ -129,6 +129,12 @@ impl<P> SnapshotPrefixCache<P> {
         &self.entries[i]
     }
 
+    /// The payload of the entry for exactly `tokens` in `namespace`, to update
+    /// what became true of it after it was filed (`None` once it is gone).
+    pub fn payload_mut(&mut self, namespace: KvNamespace, tokens: &[u32]) -> Option<&mut P> {
+        self.entries.iter_mut().find(|e| e.table.kv_namespace() == namespace && e.tokens == tokens).map(|e| &mut e.payload)
+    }
+
     /// Where `prompt` leaves the cached prompt it shares the most with, floored
     /// to a multiple of `align`, when that is at least `min` tokens and longer
     /// than any cached prefix of `prompt`; `None` otherwise.
@@ -287,6 +293,9 @@ mod tests {
         let third: Vec<u32> = doc.iter().copied().chain([70]).collect();
         assert_eq!(c.peek(BASE_KV_NAMESPACE, &third).map(|i| c.entry(i).tokens.len()), Some(8));
         assert_eq!(c.branch_point(BASE_KV_NAMESPACE, &third, 4, 4), None, "the cache already resumes from 8");
+        *c.payload_mut(BASE_KV_NAMESPACE, &second[..8]).expect("filed") = 5;
+        assert_eq!(c.entry(c.peek(BASE_KV_NAMESPACE, &third).unwrap()).payload, 5);
+        assert!(c.payload_mut(BASE_KV_NAMESPACE, &second[..7]).is_none(), "only the exact prefix names an entry");
     }
 
     /// A branch entry is shared by different continuations: a longer prompt it is a prefix of does not supersede it,
@@ -302,8 +311,7 @@ mod tests {
         let (row, evicted) = c.take_row(BASE_KV_NAMESPACE, &[1, 2, 3, 4, 5, 6, 7]);
         assert!(row.is_some() && evicted.is_some());
         assert_eq!(c.peek(BASE_KV_NAMESPACE, &[1, 2, 3, 4, 9]).map(|i| c.entry(i).tokens.len()), Some(4), "the conversation's own entry went, not the branch");
-        let r = c.take_row(BASE_KV_NAMESPACE, &[]).0.unwrap();
-        assert_eq!(c.insert(entry(&[1, 2, 3, 4], r).branch()).len(), 1, "the same branch point filed twice is kept once");
+        assert_eq!(c.insert(entry(&[1, 2, 3, 4], row.unwrap()).branch()).len(), 1, "the same branch point filed twice is kept once");
     }
 
     /// A conversation that grows replaces its own earlier entry, freeing the
