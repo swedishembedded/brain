@@ -129,6 +129,8 @@ pub struct Qwen35Q8 {
     /// width this module's sole quant call site (`xn2` feeding every
     /// expert's gate/up) ever reads.
     pub xq: DeviceBuffer,
+    /// Rows `sx`/`xq` hold: the `n_tokens` they were built for.
+    rows: u32,
     k_max_abs_row: usize,
     k_quant_pack: usize,
 }
@@ -225,7 +227,7 @@ impl Qwen35Q8 {
         // own `h` is quantized separately by `moe_swiglu_quant`.
         let sx = gpu.storage(model::int8::act_scale_len(n_tokens as usize, d).max(1) as u64);
         let xq = gpu.storage(((n_tokens as u64) * (d as u64) / 4).max(1));
-        Qwen35Q8 { moe, sx, xq, k_max_abs_row, k_quant_pack }
+        Qwen35Q8 { moe, sx, xq, rows: n_tokens, k_max_abs_row, k_quant_pack }
     }
 
     /// Quantize activation `x` `[n_tokens · k]` into `self.xq` with fresh
@@ -235,9 +237,25 @@ impl Qwen35Q8 {
     /// once every earlier consumer's step has already been pushed ahead of it
     /// in the same (or an earlier, already-submitted) step list - identical in
     /// spirit to `qwen3::q8::Q8::quant`'s own doc.
+    /// `n_tokens` may not exceed [`Self::rows`]: the packing would be written past
+    /// the end of `xq`/`sx` (a wider pass packs into buffers of its own with
+    /// [`Self::quant_into`]).
     pub fn quant(&self, gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, k: u32, n_tokens: u32) {
-        s.push(gpu.step(self.k_max_abs_row, &[x, &self.sx], &[n_tokens, k], n_tokens));
-        s.push(gpu.step(self.k_quant_pack, &[x, &self.sx, &self.xq], &[n_tokens, k], n_tokens * k / 4));
+        assert!(n_tokens <= self.rows, "qwen35 q8: {n_tokens} rows do not fit the {}-row activation packing", self.rows);
+        self.quant_into(gpu, s, x, k, n_tokens, &self.xq, &self.sx);
+    }
+
+    /// [`Self::quant`] into caller-owned `xq` (`[n_tokens * k / 4]`) and `sx`
+    /// (`act_scale_len(n_tokens, k)`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn quant_into(&self, gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, k: u32, n_tokens: u32, xq: &DeviceBuffer, sx: &DeviceBuffer) {
+        s.push(gpu.step(self.k_max_abs_row, &[x, sx], &[n_tokens, k], n_tokens));
+        s.push(gpu.step(self.k_quant_pack, &[x, sx, xq], &[n_tokens, k], n_tokens * k / 4));
+    }
+
+    /// Rows the shared activation packing holds.
+    pub fn rows(&self) -> u32 {
+        self.rows
     }
 }
 

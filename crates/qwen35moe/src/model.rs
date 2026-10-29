@@ -2514,13 +2514,21 @@ impl Qwen35 {
         let p = |s: &str| format!("blocks.{l}.{s}");
 
         // `xn2` and its int8 packing: from the fused front when there is one, else
-        // made here (the normalisation, then the model's shared packing scratch).
-        let own_xn2;
+        // made here (the normalisation, then the model's shared packing scratch, or
+        // room of its own for a pass wider than that scratch - a prefill round of
+        // a model whose scratch is sized for a decode step).
+        let (own_xn2, own_xq, own_sx);
         let (xn2, xq, sx): (&DeviceBuffer, &DeviceBuffer, &DeviceBuffer) = match front {
             Some(f) => (&f.xn, &f.xq, &f.sx),
-            None => {
+            None if n <= q8.rows() => {
                 own_xn2 = g.storage((n * d) as u64);
                 (&own_xn2, &q8.xq, &q8.sx)
+            }
+            None => {
+                own_xn2 = g.storage((n * d) as u64);
+                own_xq = g.storage((n * d / 4) as u64);
+                own_sx = g.storage(model::int8::act_scale_len(n as usize, d as usize) as u64);
+                (&own_xn2, &own_xq, &own_sx)
             }
         };
         let logits = g.storage((n * width) as u64);
@@ -2566,7 +2574,7 @@ impl Qwen35 {
         let mut steps = Vec::new();
         if front.is_none() {
             steps.push(rmsnorm_fwd(g, &kernel_ids(), xmid, self.w(&p("ln2.weight")), xn2, d, n, c.rms_eps));
-            q8.quant(g, &mut steps, xn2, d, n);
+            q8.quant_into(g, &mut steps, xn2, d, n, xq, sx);
         }
         // Through the `Ops` façade, not the naive one-thread-per-output `matmul`: at
         // decode's one row that kernel walks the whole `k = d_model` serially per

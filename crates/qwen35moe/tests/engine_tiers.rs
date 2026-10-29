@@ -159,6 +159,30 @@ fn an_int8_engine_built_from_a_source_tracks_the_fp32_engine() {
     assert!(e < 0.1, "the int8 engine's prompt hidden differs from fp32's by {e:e}");
 }
 
+/// A quantized engine sizes its shared activation packing for a decode step (64 rows) while a prefill round is
+/// wider: the round must pack into room of its own, not past the end of that buffer (a 256-row round wrote three
+/// buffers' worth beyond it on the 35B). Wide and narrow rounds give one prompt the same hidden state.
+#[test]
+fn a_prefill_round_wider_than_the_decode_packing_is_packed_in_room_of_its_own() {
+    let gpu = gpu_core::testgpu::dev(pipelines());
+    if !gpu.caps().numeric.int8_dot {
+        return brain_testutil::skip_unavailable("no packed int8 dot on this device");
+    }
+    let c = cfg();
+    let w = weights(&c);
+    let p = prompt(&c, 4, 150);
+    let hidden = |rows: u32| {
+        let mut e = build(&gpu, &c, &w, EngineOptions::new(256, 1).with_tier(TierPolicy::uniform(Dtype::I8)).with_prefill_chunk(rows));
+        let mut t = BlockTable::new();
+        let h = e.prefill(&mut t, &p);
+        e.release_table(&mut t);
+        h
+    };
+    let (wide, narrow) = (hidden(160), hidden(32));
+    let e = rel_l2(&wide, &narrow);
+    assert!(e < 1e-3, "a 160-row round's prompt hidden differs from 32-row rounds' by {e:e}");
+}
+
 /// Grouping each expert's slots is a speed choice: the grouped GEMM computes a
 /// slot exactly as the one-slot-per-pass kernel does, so an engine that always
 /// groups (a prefill round, then batched decode) is bit-for-bit one that never

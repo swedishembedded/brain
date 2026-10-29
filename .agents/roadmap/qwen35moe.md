@@ -226,3 +226,17 @@ hot path of the 35B's prefill.
 `fast_path_parity_real` itself fails at HEAD (prompt 3 prefill hidden rel-L2
 5.06e-2 against its floor), before and after these changes with identical
 numbers; it is an existing defect of the real-checkpoint gate, not of this work.
+It is not the packing overflow below either: with that fixed the gate still
+reports 5.056e-2 on prompt 3 (2026-10-29, gpu1). Open.
+
+Fixed 2026-10-29: the int8 engine built its model with the 64-row decode scratch
+(`SERVING_T`) and the unfused prefill path packed a whole round's activations
+(up to 256 rows) into that scratch, writing past `Qwen35Q8::xq`/`sx` on the
+device. `Qwen35Q8::quant` now refuses rows past its capacity and a wider pass
+packs into room of its own (`engine_tiers::a_prefill_round_wider_than_the_decode_packing_is_packed_in_room_of_its_own`).
+The 6-9 % prefill gap of the step-1 port above should be re-measured against
+this corrected baseline before it is chased further.
+
+Open (found 2026-10-29, CUDA on gpu1, unchanged by the fix): `tests/serve.rs`
+`batched_decode_matches_each_sequence_decoded_alone` fails - sequence 1 of a
+batch of 4 picks a different token at decode step 5 than alone.

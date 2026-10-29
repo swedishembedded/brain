@@ -479,9 +479,10 @@ impl Engine {
             opts.max_concurrent,
             opts.max_seq_len
         );
-        // `t` sizes this instance's fixed scratch. A quantized build has no
-        // `rows`-bound scratch (its expert dispatch allocates per call), so the
-        // smallest `t` serves; an fp32 build's grouped-GEMM expert scratch is
+        // `t` sizes this instance's fixed scratch. A quantized build's only
+        // `rows`-bound scratch is the expert sublayer's activation packing, and a
+        // pass wider than it packs into room of its own, so the smallest `t`
+        // serves; an fp32 build's grouped-GEMM expert scratch is
         // asserted against `rows * top_k` at dispatch, and the widest row count
         // this engine submits is a prefill round or one decode token per resident
         // sequence.
