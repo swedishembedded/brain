@@ -365,6 +365,14 @@ pub trait PagedDecoder {
         None
     }
 
+    /// The step duration the decoder is asked to hold for the sequences it carries (their token interval), when it
+    /// has such a target. A cost-aware scheduler ([`Self::spec_cost_aware`]) then does not speculate where a
+    /// speculative step exceeds it and a plain one does not, whatever speculation gains in tokens a second. `None`
+    /// (the default) ranks the two by throughput alone.
+    fn step_latency_target(&self) -> Option<std::time::Duration> {
+        None
+    }
+
     /// Whether prompts that begin from now on prepare the drafter. Off, their
     /// sequences are decoded without drafts until they end. Called by the
     /// scheduler before it starts prefilling; the default ignores it.
@@ -2030,7 +2038,7 @@ impl<D: PagedDecoder> Scheduler<D> {
         // Prompts that begin now prepare the drafter only if speculation will repay it.
         if self.spec_policy.enabled && self.dec.spec_max_draft() > 0 && self.dec.spec_cost_aware() {
             let active = (self.running.len() + self.prefilling.len() + self.waiting.len()).clamp(1, self.max_running.max(1));
-            let prepare = self.prefill_gate.prepare(&self.gate, active, self.dec.spec_prefill_cost());
+            let prepare = self.prefill_gate.prepare(&self.gate, active, self.dec.spec_prefill_cost(), self.dec.step_latency_target().map(|t| t.as_secs_f64()));
             self.dec.set_spec_prefill(prepare);
         }
 

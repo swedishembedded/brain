@@ -196,6 +196,9 @@ const RATE_EWMA: f64 = 0.25;
 const GATE_REFRESH_STEPS: u32 = 24;
 /// Speculation must beat plain decoding by this factor to be used.
 const GATE_MARGIN: f64 = 1.02;
+/// How many times longer a speculative mode that misses the decoder's latency target waits to be tried
+/// again: each try is a step over the target, so it is rationed to well under 1 % of the steps.
+const LATENCY_REFRESH_FACTOR: u32 = 16;
 
 impl Rate {
     fn observe(&mut self, tokens: usize, secs: f64) {
@@ -244,14 +247,28 @@ impl CostGate {
         ((usize::BITS - active.max(1).leading_zeros()) as usize - 1).min(8)
     }
 
-    /// Whether the next step over this bucket should speculate.
-    pub(super) fn speculate(&mut self, bucket: usize) -> bool {
+    /// Whether speculative steps of this bucket are too slow for the latency `target` (seconds a step may take)
+    /// while plain ones meet it: the throughput they gain is paid for in the token interval of every sequence in the
+    /// step, which the target says matters more.
+    fn over_latency_target(&self, bucket: usize, target: Option<f64>) -> bool {
+        let b = &self.buckets[bucket];
+        target.is_some_and(|t| b.spec.samples > 0 && b.plain.samples > 0 && b.spec.secs > t && b.plain.secs <= t)
+    }
+
+    /// Whether the next step over this bucket should speculate, given the latency `target` of a step, if the
+    /// decoder holds one.
+    pub(super) fn speculate(&mut self, bucket: usize, target: Option<f64>) -> bool {
+        let over = self.over_latency_target(bucket, target);
         let b = &mut self.buckets[bucket];
         if b.spec.samples == 0 {
             return true; // learn what speculation costs here
         }
         if b.plain.samples == 0 {
             return false; // and what plain decoding does
+        }
+        if over {
+            b.since_spec += 1;
+            return b.since_spec >= GATE_REFRESH_STEPS * LATENCY_REFRESH_FACTOR;
         }
         if b.spec.per_second() >= b.plain.per_second() * GATE_MARGIN {
             b.since_plain += 1;
@@ -264,9 +281,13 @@ impl CostGate {
 
     /// Seconds of decoding a generated token saves when this bucket speculates:
     /// the difference of the two measured per-token costs, `None` until both
-    /// modes have been timed here. Zero where speculation is the slower one.
-    pub(super) fn saved_secs_per_token(&self, bucket: usize) -> Option<f64> {
+    /// modes have been timed here. Zero where speculation is the slower one, or is not used for missing the
+    /// latency `target`.
+    pub(super) fn saved_secs_per_token(&self, bucket: usize, target: Option<f64>) -> Option<f64> {
         let b = &self.buckets[bucket];
+        if self.over_latency_target(bucket, target) {
+            return Some(0.0);
+        }
         (b.plain.samples > 0 && b.spec.samples > 0).then(|| (1.0 / b.plain.per_second() - 1.0 / b.spec.per_second()).max(0.0))
     }
 
@@ -307,9 +328,9 @@ impl PrefillGate {
     }
 
     /// Prepare the drafter for a prompt whose sequence will decode among about `active` others.
-    pub(super) fn prepare(&mut self, gate: &CostGate, active: usize, cost: Option<f64>) -> bool {
+    pub(super) fn prepare(&mut self, gate: &CostGate, active: usize, cost: Option<f64>, target: Option<f64>) -> bool {
         let (Some(cost), Some(reply)) = (cost, self.reply_tokens) else { return true };
-        let Some(saved) = gate.saved_secs_per_token(CostGate::bucket(active)) else { return true };
+        let Some(saved) = gate.saved_secs_per_token(CostGate::bucket(active), target) else { return true };
         if reply * saved >= cost {
             self.skipped = 0;
             return true;
@@ -444,7 +465,7 @@ impl<D: PagedDecoder> Scheduler<D> {
         }
         let bucket = CostGate::bucket(active.len());
         let gated = self.dec.spec_cost_aware();
-        if gated && !self.gate.speculate(bucket) {
+        if gated && !self.gate.speculate(bucket, self.dec.step_latency_target().map(|t| t.as_secs_f64())) {
             return false;
         }
         let started = (self.clock)();
@@ -557,5 +578,51 @@ impl<D: PagedDecoder> Scheduler<D> {
             ks.push(k);
         }
         ks
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A bucket of four sequences where plain steps take 20 ms for four tokens and speculative ones 60 ms for
+    /// sixteen: more tokens a second, a longer wait between them.
+    fn measured() -> CostGate {
+        let mut g = CostGate::default();
+        for _ in 0..4 {
+            g.observe_plain(2, 4, 0.020);
+            g.observe_spec(2, 16, 0.060);
+        }
+        g
+    }
+
+    #[test]
+    fn without_a_latency_target_the_faster_mode_wins() {
+        let mut g = measured();
+        assert!(g.speculate(2, None), "267 tokens a second beat 200");
+    }
+
+    #[test]
+    fn a_mode_that_misses_the_latency_target_is_not_used_and_is_tried_rarely() {
+        let mut g = measured();
+        let target = Some(0.045);
+        let steps = GATE_REFRESH_STEPS * LATENCY_REFRESH_FACTOR * 2;
+        let tries = (0..steps)
+            .filter(|_| {
+                let speculated = g.speculate(2, target);
+                if speculated {
+                    g.observe_spec(2, 16, 0.060);
+                }
+                speculated
+            })
+            .count();
+        assert_eq!(tries, 2, "once in {} steps, not every {GATE_REFRESH_STEPS}", GATE_REFRESH_STEPS * LATENCY_REFRESH_FACTOR);
+        assert_eq!(g.saved_secs_per_token(2, target), Some(0.0), "so a prompt's drafter preparation does not pay");
+    }
+
+    #[test]
+    fn a_target_that_plain_steps_miss_too_changes_nothing() {
+        let mut g = measured();
+        assert!(g.speculate(2, Some(0.010)));
     }
 }
