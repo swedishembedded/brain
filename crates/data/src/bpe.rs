@@ -90,75 +90,74 @@ pub fn bytes_to_unicode() -> [char; 256] {
     table
 }
 
-/// All adjacent symbol pairs of `word`, deduplicated, preserving first-seen
-/// order is unimportant (we only test membership / pick min rank), so a `Vec`
-/// of unique pairs suffices.
-pub(crate) fn get_pairs(word: &[String]) -> Vec<(String, String)> {
-    let mut pairs = Vec::new();
-    for w in word.windows(2) {
-        let pair = (w[0].clone(), w[1].clone());
-        if !pairs.contains(&pair) {
-            pairs.push(pair);
-        }
-    }
-    pairs
-}
-
 /// Apply the BPE merge loop to a single pre-token already expressed as a vector
 /// of single-character symbol strings (each char is a byte-mapped unicode
 /// char), using `ranks` (`(left,right) -> priority`, lower = merged first).
 /// Shared by [`Gpt2Bpe`] and the Qwen tokenizer — only the rank table differs.
-pub(crate) fn bpe_merge(
-    ranks: &HashMap<(String, String), u32>,
-    token_chars: Vec<String>,
-) -> Vec<String> {
-    if token_chars.len() <= 1 {
+///
+/// The best pair is taken from a min-heap over the adjacent pairs of a linked
+/// list of symbols, so a piece of `n` symbols costs `O(n log n)` instead of
+/// the `O(n^2)` of rescanning every pair after each merge: a prompt with no
+/// whitespace (a minified file, base64, the llama tokenizer's whole-input
+/// piece) is one piece, and the quadratic form held the serving lane for
+/// seconds. The result is the textbook loop's: the lowest rank first, the
+/// leftmost occurrence among equals, so overlapping runs (`a a a`) merge left
+/// to right.
+pub(crate) fn bpe_merge(ranks: &HashMap<(String, String), u32>, token_chars: Vec<String>) -> Vec<String> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    const NONE: usize = usize::MAX;
+    let n = token_chars.len();
+    if n <= 1 {
         return token_chars;
     }
+    let mut sym = token_chars;
+    let mut prev: Vec<usize> = (0..n).map(|i| i.wrapping_sub(1)).collect();
+    prev[0] = NONE;
+    let mut next: Vec<usize> = (1..=n).collect();
+    next[n - 1] = NONE;
+    // Bumped whenever a symbol's text changes, so a queued pair that names an older text is recognised as stale.
+    let mut version = vec![0u32; n];
+    let mut alive = vec![true; n];
 
-    let mut word = token_chars;
-    loop {
-        let pairs = get_pairs(&word);
-        if pairs.is_empty() {
-            break;
+    // (rank, left, right, left version, right version): ordered by rank, then position.
+    type Entry = Reverse<(u32, usize, usize, u32, u32)>;
+    let mut heap: BinaryHeap<Entry> = BinaryHeap::new();
+    let push = |heap: &mut BinaryHeap<Entry>, sym: &[String], version: &[u32], l: usize, r: usize| {
+        if let Some(&rank) = ranks.get(&(sym[l].clone(), sym[r].clone())) {
+            heap.push(Reverse((rank, l, r, version[l], version[r])));
         }
-
-        // Find the pair with the lowest (best) rank.
-        let mut best: Option<(&(String, String), u32)> = None;
-        for pair in &pairs {
-            if let Some(&rank) = ranks.get(pair) {
-                match best {
-                    Some((_, br)) if rank >= br => {}
-                    _ => best = Some((pair, rank)),
-                }
-            }
+    };
+    for l in 0..n - 1 {
+        push(&mut heap, &sym, &version, l, l + 1);
+    }
+    while let Some(Reverse((_, l, r, vl, vr))) = heap.pop() {
+        if !alive[l] || !alive[r] || next[l] != r || version[l] != vl || version[r] != vr {
+            continue;
         }
-        let (first, second) = match best {
-            Some((pair, _)) => (pair.0.clone(), pair.1.clone()),
-            None => break, // no mergeable pair remains
-        };
-
-        // Merge every non-overlapping occurrence of (first, second).
-        let mut new_word = Vec::with_capacity(word.len());
-        let mut i = 0;
-        while i < word.len() {
-            if i + 1 < word.len() && word[i] == first && word[i + 1] == second {
-                let mut merged = String::with_capacity(first.len() + second.len());
-                merged.push_str(&first);
-                merged.push_str(&second);
-                new_word.push(merged);
-                i += 2;
-            } else {
-                new_word.push(word[i].clone());
-                i += 1;
-            }
+        let right = std::mem::take(&mut sym[r]);
+        sym[l].push_str(&right);
+        version[l] += 1;
+        alive[r] = false;
+        next[l] = next[r];
+        if next[r] != NONE {
+            prev[next[r]] = l;
         }
-        word = new_word;
-        if word.len() == 1 {
-            break;
+        if prev[l] != NONE {
+            push(&mut heap, &sym, &version, prev[l], l);
+        }
+        if next[l] != NONE {
+            push(&mut heap, &sym, &version, l, next[l]);
         }
     }
-    word
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i != NONE {
+        out.push(std::mem::take(&mut sym[i]));
+        i = next[i];
+    }
+    out
 }
 
 impl Gpt2Bpe {
@@ -411,6 +410,107 @@ impl Tokenizer for Gpt2Bpe {
 #[cfg(test)]
 mod tests {
     use super::*;
+/// All adjacent symbol pairs of `word`, deduplicated, preserving first-seen
+/// order is unimportant (we only test membership / pick min rank), so a `Vec`
+/// of unique pairs suffices.
+fn get_pairs(word: &[String]) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    for w in word.windows(2) {
+        let pair = (w[0].clone(), w[1].clone());
+        if !pairs.contains(&pair) {
+            pairs.push(pair);
+        }
+    }
+    pairs
+}
+
+
+    /// The textbook merge loop (rescan every pair, merge every non-overlapping occurrence of the best one): the
+    /// definition `bpe_merge` must reproduce.
+    fn reference_merge(ranks: &HashMap<(String, String), u32>, token_chars: Vec<String>) -> Vec<String> {
+        if token_chars.len() <= 1 {
+            return token_chars;
+        }
+        let mut word = token_chars;
+        loop {
+            let mut best: Option<((String, String), u32)> = None;
+            for pair in get_pairs(&word) {
+                if let Some(&rank) = ranks.get(&pair) {
+                    if best.as_ref().is_none_or(|(_, br)| rank < *br) {
+                        best = Some((pair, rank));
+                    }
+                }
+            }
+            let Some(((first, second), _)) = best else { break };
+            let mut merged_word = Vec::with_capacity(word.len());
+            let mut i = 0;
+            while i < word.len() {
+                if i + 1 < word.len() && word[i] == first && word[i + 1] == second {
+                    merged_word.push(format!("{first}{second}"));
+                    i += 2;
+                } else {
+                    merged_word.push(word[i].clone());
+                    i += 1;
+                }
+            }
+            word = merged_word;
+            if word.len() == 1 {
+                break;
+            }
+        }
+        word
+    }
+
+    /// Ranks as a trained merge table has them (a merge's result exists before any merge that uses it), on a small
+    /// alphabet so equal pairs repeat and overlap.
+    fn trained_ranks(seed: u64, merges: usize) -> HashMap<(String, String), u32> {
+        let mut state = seed;
+        let mut next = move |m: usize| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((state >> 33) as usize) % m
+        };
+        let mut vocab: Vec<String> = "abc".chars().map(String::from).collect();
+        let mut ranks = HashMap::new();
+        while ranks.len() < merges {
+            let (l, r) = (vocab[next(vocab.len())].clone(), vocab[next(vocab.len())].clone());
+            // One merge per vocabulary entry, as a trained table has it.
+            let merged = format!("{l}{r}");
+            if !vocab.contains(&merged) && ranks.insert((l, r), ranks.len() as u32).is_none() {
+                vocab.push(merged);
+            }
+        }
+        ranks
+    }
+
+    #[test]
+    fn the_heap_merge_equals_the_textbook_loop() {
+        for seed in 0..40u64 {
+            let ranks = trained_ranks(seed, 6 + (seed as usize % 20));
+            let mut state = seed + 1000;
+            for len in [2usize, 3, 5, 12, 40, 150] {
+                let word: Vec<String> = (0..len)
+                    .map(|_| {
+                        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                        ["a", "b", "c"][((state >> 33) % 3) as usize].to_string()
+                    })
+                    .collect();
+                assert_eq!(bpe_merge(&ranks, word.clone()), reference_merge(&ranks, word.clone()), "seed {seed} word {word:?}");
+            }
+        }
+    }
+
+    /// A 100 000 symbol piece (no whitespace to split it) merges in well under a second: the textbook loop takes
+    /// minutes on it.
+    #[test]
+    fn a_long_piece_without_whitespace_merges_in_linear_log_time() {
+        let ranks = trained_ranks(7, 30);
+        let word: Vec<String> = (0..100_000).map(|i| ["a", "b", "c"][(i * 7 + i / 3) % 3].to_string()).collect();
+        let start = std::time::Instant::now();
+        let merged = bpe_merge(&ranks, word);
+        assert!(!merged.is_empty());
+        assert!(start.elapsed() < std::time::Duration::from_secs(2), "took {:?}", start.elapsed());
+    }
+
 
     fn tok() -> Gpt2Bpe {
         Gpt2Bpe::new()

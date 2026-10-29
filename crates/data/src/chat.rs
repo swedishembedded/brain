@@ -954,7 +954,7 @@ mod tests {
         let samples = ChatSample::from_jsonl(&path).unwrap();
         assert_eq!(samples[0].messages[0].reasoning_content.as_deref(), Some("r"));
         std::fs::write(&path, line("user")).unwrap();
-        let err = ChatSample::from_jsonl(&path).err().expect("refused").to_string();
+        let err = ChatSample::from_jsonl(&path).expect_err("refused").to_string();
         assert!(err.contains("reasoning_content"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
