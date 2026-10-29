@@ -15,7 +15,7 @@
 //   state = state * exp(g_last) + (key_c * exp(g_last - g_cs))^T @ v_new
 //
 // run as three-pass TF32 `mma.sync.m16n8k8` (about 20 mantissa bits, fp32
-// accumulation and fp32 state). A head is split over four blocks of 32 value
+// accumulation and fp32 state). Eight warps a block: four 16-row tiles of the chunk, each split over two halves of the block's columns. A head is split over four blocks of 32 value
 // columns (192 blocks for the model's 48 heads, all resident at once); each block keeps its 128 x 32 slice of the state in shared memory for
 // all chunks and streams the chunk's w, query, intra and key tiles through
 // two shared buffers. NOT bit-identical to the fp32 kernel; the model gates it
@@ -41,7 +41,9 @@
 #define CS 32                 // value columns per block
 #define MMA_NT (CS / 8)           // 8-column MMA tiles per block
 #define SPLITS (D / CS)       // blocks per head
-#define THREADS 128           // 4 warps, one 16-row tile of the chunk each
+#define THREADS 256           // 8 warps: four 16-row tiles of the chunk, each split over two halves of the block's columns
+#define WARPS_M 4             // warps down the chunk's rows
+#define MMA_NTW (MMA_NT / 2)  // 8-column MMA tiles one warp owns
 #define SA (D + 4)            // row stride of the staged A tiles (conflict-free fragment loads)
 #define SS (CS + 8)           // row stride of the state slice and of v_new (conflict-free as a k-major B operand)
 
@@ -109,7 +111,9 @@ __device__ __forceinline__ void brain_gdn_chunk_loop_tc_body(const unsigned int*
 
     const unsigned int tid = threadIdx.x, lane = tid & 31u, warp = tid >> 5;
     const unsigned int g = lane >> 2, t4 = lane & 3u;
-    const unsigned int m0 = warp * 16u;                  // this warp's chunk rows
+    const unsigned int wr = warp % WARPS_M, wc = warp / WARPS_M;
+    const unsigned int m0 = wr * 16u;                    // this warp's chunk rows
+    const unsigned int n0 = wc * (MMA_NTW * 8u);         // and its first column of the block's slice
     const unsigned int c8 = (C + 7u) & ~7u;              // contraction length over chunk rows
 
     for (unsigned int i = tid; i < D * CS; i += THREADS) {
@@ -162,20 +166,20 @@ __device__ __forceinline__ void brain_gdn_chunk_loop_tc_body(const unsigned int*
         __syncthreads();
 
         // v_new = u - w @ state, and the inter-chunk output (scaled query) @ state, both from the OLD state.
-        float acc[MMA_NT][4], acc2[MMA_NT][4];
+        float acc[MMA_NTW][4], acc2[MMA_NTW][4];
 #pragma unroll
-        for (int t = 0; t < MMA_NT; ++t) {
+        for (int t = 0; t < MMA_NTW; ++t) {
 #pragma unroll
             for (int i = 0; i < 4; ++i) { acc[t][i] = 0.0f; acc2[t][i] = 0.0f; }
         }
-        warp_mma_acc<MMA_NT>(acc, D, m0, 0, [&](unsigned int r, unsigned int k) { return sA[r * SA + k]; }, [&](unsigned int k, unsigned int n) { return sS[k * SS + n]; });
-        warp_mma_acc<MMA_NT>(acc2, D, m0, 0, [&](unsigned int r, unsigned int k) { return sB[r * SA + k]; }, [&](unsigned int k, unsigned int n) { return sS[k * SS + n]; });
+        warp_mma_acc<MMA_NTW>(acc, D, m0, n0, [&](unsigned int r, unsigned int k) { return sA[r * SA + k]; }, [&](unsigned int k, unsigned int n) { return sS[k * SS + n]; });
+        warp_mma_acc<MMA_NTW>(acc2, D, m0, n0, [&](unsigned int r, unsigned int k) { return sB[r * SA + k]; }, [&](unsigned int k, unsigned int n) { return sS[k * SS + n]; });
 #pragma unroll
-        for (int t = 0; t < MMA_NT; ++t) {
+        for (int t = 0; t < MMA_NTW; ++t) {
 #pragma unroll
             for (int i = 0; i < 4; ++i) {
                 const unsigned int r = m0 + g + ((i & 2) ? 8u : 0u);
-                const unsigned int col = t * 8 + 2 * t4 + (i & 1);
+                const unsigned int col = n0 + t * 8 + 2 * t4 + (i & 1);
                 sV[r * SS + col] = r < C ? u[off_dk + (unsigned long long)r * D + j0 + col] - acc[t][i] : 0.0f;
             }
         }
@@ -203,14 +207,14 @@ __device__ __forceinline__ void brain_gdn_chunk_loop_tc_body(const unsigned int*
         __syncthreads();
 
         // out += intra @ v_new.
-        warp_mma_acc<MMA_NT>(acc2, c8, m0, 0, [&](unsigned int r, unsigned int k) { return sA[r * SA + k]; }, [&](unsigned int k, unsigned int n) { return sV[k * SS + n]; });
+        warp_mma_acc<MMA_NTW>(acc2, c8, m0, n0, [&](unsigned int r, unsigned int k) { return sA[r * SA + k]; }, [&](unsigned int k, unsigned int n) { return sV[k * SS + n]; });
 #pragma unroll
-        for (int t = 0; t < MMA_NT; ++t) {
+        for (int t = 0; t < MMA_NTW; ++t) {
 #pragma unroll
             for (int h2 = 0; h2 < 2; ++h2) {
                 const unsigned int r = m0 + g + h2 * 8u;
                 if (r < C) {
-                    *reinterpret_cast<float2*>(out_chunk + (unsigned long long)r * out_stride + j0 + t * 8 + 2 * t4) = make_float2(acc2[t][2 * h2], acc2[t][2 * h2 + 1]);
+                    *reinterpret_cast<float2*>(out_chunk + (unsigned long long)r * out_stride + j0 + n0 + t * 8 + 2 * t4) = make_float2(acc2[t][2 * h2], acc2[t][2 * h2 + 1]);
                 }
             }
         }
@@ -219,19 +223,19 @@ __device__ __forceinline__ void brain_gdn_chunk_loop_tc_body(const unsigned int*
         const float decay = expf(g_last);
 #pragma unroll
         for (int mi = 0; mi < 2; ++mi) {
-            float up[MMA_NT][4];
+            float up[MMA_NTW][4];
 #pragma unroll
-            for (int t = 0; t < MMA_NT; ++t) {
+            for (int t = 0; t < MMA_NTW; ++t) {
 #pragma unroll
                 for (int i = 0; i < 4; ++i) { up[t][i] = 0.0f; }
             }
-            const unsigned int p0 = (warp + 4u * mi) * 16u;
-            warp_mma_acc<MMA_NT>(up, c8, p0, 0, [&](unsigned int p, unsigned int c) { return sB[c * SA + p]; }, [&](unsigned int c, unsigned int n) { return sV[c * SS + n]; });
+            const unsigned int p0 = (wr + 4u * mi) * 16u;
+            warp_mma_acc<MMA_NTW>(up, c8, p0, n0, [&](unsigned int p, unsigned int c) { return sB[c * SA + p]; }, [&](unsigned int c, unsigned int n) { return sV[c * SS + n]; });
 #pragma unroll
-            for (int t = 0; t < MMA_NT; ++t) {
+            for (int t = 0; t < MMA_NTW; ++t) {
 #pragma unroll
                 for (int i = 0; i < 4; ++i) {
-                    float* s = &sS[(p0 + g + ((i & 2) ? 8u : 0u)) * SS + t * 8 + 2 * t4 + (i & 1)];
+                    float* s = &sS[(p0 + g + ((i & 2) ? 8u : 0u)) * SS + n0 + t * 8 + 2 * t4 + (i & 1)];
                     *s = *s * decay + up[t][i];
                 }
             }
@@ -246,13 +250,13 @@ __device__ __forceinline__ void brain_gdn_chunk_loop_tc_body(const unsigned int*
     }
 }
 
-extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_chunk_loop_tc(const unsigned int* params, const float* key, const float* query, const float* w,
+extern "C" __global__ void __launch_bounds__(THREADS, 2) brain_gdn_chunk_loop_tc(const unsigned int* params, const float* key, const float* query, const float* w,
                                                                                const float* u, const float* g_cs, const float* exp_g_cs, const float* intra,
                                                                                const float* initial_state, float* out, float* final_state) {
     brain_gdn_chunk_loop_tc_body<false>(params, key, query, w, u, g_cs, exp_g_cs, intra, initial_state, out, final_state, nullptr, nullptr);
 }
 
-extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_chunk_loop_train_tc(const unsigned int* params, const float* key, const float* query,
+extern "C" __global__ void __launch_bounds__(THREADS, 2) brain_gdn_chunk_loop_train_tc(const unsigned int* params, const float* key, const float* query,
                                                                                      const float* w, const float* u, const float* g_cs, const float* exp_g_cs,
                                                                                      const float* intra, const float* initial_state, float* out,
                                                                                      float* final_state, float* state_hist, float* decay_hist) {

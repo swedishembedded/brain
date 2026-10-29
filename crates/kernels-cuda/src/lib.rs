@@ -3168,7 +3168,7 @@ pub const ALL: &[CudaKernel] = &[
         entry: "brain_gdn_chunk_loop_tc",
         what: "Gated DeltaNet's whole across-chunk recurrence in one launch on three-pass TF32 tensor cores (fp32 state and accumulation), head split over four 32-column blocks",
         reported: "native:gdn_chunk_loop_tc",
-        block_dim: 128,
+        block_dim: 256,
         tile: (64, 32),
         // Everything is dynamic: see `GDN_CHUNK_LOOP_TC_DYNAMIC_SHARED_BYTES` in gpu-core.
         shared_bytes: 0,
@@ -3185,7 +3185,7 @@ pub const ALL: &[CudaKernel] = &[
         entry: "brain_gdn_chunk_loop_train_tc",
         what: "gdn_chunk_loop_tc plus the training histories (the state entering every chunk and each row's decay scale) the backward sweep reads, in the same single launch",
         reported: "native:gdn_chunk_loop_train_tc",
-        block_dim: 128,
+        block_dim: 256,
         tile: (64, 32),
         shared_bytes: 0,
         programmatic: false,

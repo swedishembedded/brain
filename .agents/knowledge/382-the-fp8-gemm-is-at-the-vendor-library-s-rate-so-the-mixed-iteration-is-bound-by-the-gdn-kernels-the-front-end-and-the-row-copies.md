@@ -40,3 +40,11 @@ layer's activations although no weight of an FP8, bf16, NF4 or f32 build reads t
 `Act` (`packs_activations`); mode 0 of the epilogue, which would write nothing, is no launch. FP8 27B, c = 1 / 4 / 16 / 64 output tok/s 50 / 203 / 360 / 500 ->
 53 / 213 / 376 / 520, ITL p99 at 16 216 -> 205 ms, 31K TTFT 6.64 -> 6.36 s; `qwen35_fp8_parity` identical (98.44 %, KL 1.526e-3). The training forward does not use the fused
 front ends, so the training rate is unchanged by this commit (no regression: the flag is off by default and an int8 build packs as before).
+
+The GDN across-chunk recurrence (same note, landed): ncu on `gdn_chunk_loop_tc` for a 2048-row prompt (32 chunks, 192 blocks on 132 SMs): 1.18 ms, 37 us a
+chunk, issue slots 18.6 % busy, 1.45 active warps a scheduler, 7.2 cycles between issues, 161 M warp instructions: latency bound, too few warps
+to hide the dependent mma/shuffle chain. The block now has eight warps (four 16-row tiles of the chunk, each split over two halves of the block's 32 columns, same
+per-element accumulation order so the result is bit-identical) and `__launch_bounds__(256, 2)` (a first try without the bound spilled to 148 registers, one block an
+SM, and gained nothing: 1.23 ms): 0.77 ms (-35 %), 2.85 active warps. Mixed iteration (nsys): the recurrence 15.9 -> 11.0 ms, with the quant_epilogue change above the
+median iteration 145 -> 134 ms, card busy 89 %. The training forward and the `train` entry share the body; `gdn_chunk_fwd_train_tc`, `gdn_chunk_fwd_fast`,
+`gdn_chunk_fwd_train_fast`, `gdn_mixer_tc/stream/segmented`, `gdn_chunk_bwd` pass; the W8K NF4 train probe stays at 963-968 tokens/s (the recurrence is a small share of a training step).
