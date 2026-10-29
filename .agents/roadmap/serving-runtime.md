@@ -63,7 +63,7 @@ claimed before its baseline exists.
 | 5 | Graph-safe library execution: find #356's root cause, verify eager vs replay per tier and shape | `backend-cuda`, `gpu-core` | replay keeps library GEMMs with bit-level parity | open |
 | 6 | Shape-driven attention and GEMM selection over phase, batch, KV length, KV tier, page size | `kernel-performance.md` owns it | selection table covers the context x batch matrix | open |
 | 7 | Exact device sampling over the full vocabulary (G5) | `model::serve`, `kernels-cuda` | distribution tests match the host reference; no logits readback | open |
-| 8 | Cost- and cache-aware scheduling: order by uncached work, shared in-flight prefixes, bounded-fairness aging, calibrated step-cost model (G11) | `model::serve` | goodput and tail latency improve on mixed traffic with bounded starvation | in progress: shared in-flight prefixes done; uncached-work ordering, aging and the step-cost model open |
+| 8 | Cost- and cache-aware scheduling: order by uncached work, shared in-flight prefixes, bounded-fairness aging, calibrated step-cost model (G11) | `model::serve` | goodput and tail latency improve on mixed traffic with bounded starvation | in progress: shared in-flight prefixes and the mixed iteration with its step-cost model done (knowledge 379); uncached-work ordering and aging open |
 | 9 | One logical prefix index (radix over content, namespace, revision) over block-sharing and snapshot physical forms; retention by saved work per byte | `model::paged`, `model::snapshot_prefix` | longest-prefix match without scanning entries | in progress: hybrid branch points (a shared document is resumable) done; the radix index and retention by saved work open |
 | 10 | Grace memory as a managed warm KV tier: page-granular async promotion/demotion through the existing upload ring; direct coherent reads measured separately (G9) | `model::kv_offload`, `backend-cuda` | warm-prefix hits served from host without whole-sequence swaps | open |
 | 11 | Batched adapters in prefill and speculation (G8) | `qwen35`, `llmserve` | adapter traffic keeps multi-sequence prefill | open |
@@ -138,6 +138,17 @@ Page size (256 rows today) is part of item 3 and is chosen per cache group by
 measurement (16-256), not fixed globally.
 
 ## Done
+
+- 2026-10-29 (8, 11; knowledge 379): the mixed iteration. `PagedDecoder::mixed_step` / `forward_mixed` run the decode rows of every
+  running sequence and a prompt slice of several sequences as one forward; `StepCost::prompt_rows` sizes the slice from a decayed
+  fit of iteration seconds against rows and `step_latency_target` (floor 512 rows, 25 % stretch when the target is out of reach, the
+  whole forward when nothing decodes); the qwen35 paged engine implements it on `Qwen35::run_mixed_stage` (pooled recurrent step and
+  paged decode attention for the leading rows, chunked kernels for the segments). FP8 27B through `brain serve` + `vllm bench serve`,
+  output tok/s at 1 / 4 / 16 / 64: 46 / 117 / 166 / 173 -> 50 / 187 / 208 / 237 (vLLM 79 / 299 / 759 / 1241), TTFT p50 at 16 / 64 6.6 /
+  41.8 -> 2.5 / 2.0 s. Left: the mixed forward is host-bound at small slices (2970 launches, card busy 48 of 97 ms) and its fp8 GEMMs
+  underfill the card at 142-600 rows (ncu 23-28 % SM); MTP builds, adapter banks and exact decode keep the background lane and
+  `PrefillPace`, which therefore stay until the mixed step carries them (verify rows are more rows, adapter routing per row); the
+  decode copies (`concat_split`) and a graph replay of the chunk round; speculation is off while prompts go in.
 
 - 2026-10-29 (host-path complexity audit; every serving-path scan checked against the source, host CPU timings): streaming
   detokenisation feeds each token once (`Utf8Decoder`; G=16000 4.61 s -> 1.0 ms per generation, shared by `SeqState`,
