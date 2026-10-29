@@ -54,7 +54,7 @@ claimed before its baseline exists.
 
 | order | item | owner | done when | status |
 |---|---|---|---|---|
-| 1 | Serving qualification suite: contexts 4K-128K (256K/1M where supported) x concurrency 1-64 x traffic (steady, burst, recorded agent trajectories, shared prefixes); TTFT, TPOT, p50/p95/p99, goodput under SLO, cache-hit tokens, KV occupancy, bytes per phase | `perf`, `cli`, `llmserve` | repeatable GH200 numbers with per-phase attribution | open |
+| 1 | Serving qualification suite: contexts 4K-128K (256K/1M where supported) x concurrency 1-64 x traffic (steady, burst, recorded agent trajectories, shared prefixes); TTFT, TPOT, p50/p95/p99, goodput under SLO, cache-hit tokens, KV occupancy, bytes per phase | `perf`, `cli`, `llmserve` | repeatable GH200 numbers with per-phase attribution | in progress: `qwen35:` request-level target, honest `longctx` and `shared_prefix`, one-card baseline below; recorded agent trajectories and 256K/1M open |
 | 2a | Admission and prefill debt charge only blocks not adopted from the prefix cache (`PagedDecoder::cached_prefix_blocks`) | `model::serve` | `model/tests/serve_prefix_admission.rs` | done |
 | 2b | Incremental reservation: charge the next scheduled slice plus bounded decode headroom, not the whole prompt, with a guaranteed route to completion | `model::serve` | mixed long/short prompts admit without full-prompt reservation; no deadlock or leak under the KV-pressure tests | open |
 | 2c | Admission/eviction as one transaction; victim choice by restore cost, not recency | `model::serve` | a failed admission rolls back without losing cache entries | open |
@@ -63,11 +63,31 @@ claimed before its baseline exists.
 | 5 | Graph-safe library execution: find #356's root cause, verify eager vs replay per tier and shape | `backend-cuda`, `gpu-core` | replay keeps library GEMMs with bit-level parity | open |
 | 6 | Shape-driven attention and GEMM selection over phase, batch, KV length, KV tier, page size | `kernel-performance.md` owns it | selection table covers the context x batch matrix | open |
 | 7 | Exact device sampling over the full vocabulary (G5) | `model::serve`, `kernels-cuda` | distribution tests match the host reference; no logits readback | open |
-| 8 | Cost- and cache-aware scheduling: order by uncached work, shared in-flight prefixes, bounded-fairness aging, calibrated step-cost model (G11) | `model::serve` | goodput and tail latency improve on mixed traffic with bounded starvation | open |
-| 9 | One logical prefix index (radix over content, namespace, revision) over block-sharing and snapshot physical forms; retention by saved work per byte | `model::paged`, `model::snapshot_prefix` | longest-prefix match without scanning entries | open |
+| 8 | Cost- and cache-aware scheduling: order by uncached work, shared in-flight prefixes, bounded-fairness aging, calibrated step-cost model (G11) | `model::serve` | goodput and tail latency improve on mixed traffic with bounded starvation | in progress: shared in-flight prefixes done; uncached-work ordering, aging and the step-cost model open |
+| 9 | One logical prefix index (radix over content, namespace, revision) over block-sharing and snapshot physical forms; retention by saved work per byte | `model::paged`, `model::snapshot_prefix` | longest-prefix match without scanning entries | in progress: hybrid branch points (a shared document is resumable) done; the radix index and retention by saved work open |
 | 10 | Grace memory as a managed warm KV tier: page-granular async promotion/demotion through the existing upload ring; direct coherent reads measured separately (G9) | `model::kv_offload`, `backend-cuda` | warm-prefix hits served from host without whole-sequence swaps | open |
 | 11 | Batched adapters in prefill and speculation (G8) | `qwen35`, `llmserve` | adapter traffic keeps multi-sequence prefill | open |
 | 12 | Device-resident inter-GPU transfers and collectives (G10) | `model::collective`, residency | no host-staged per-token transfer on supported devices | in progress: peer copy and link measurement (A) and the 27B stage boundary (B) and the NCCL communicator (C) done, tensor-parallel use and the head hand-off open |
+
+## Baseline (2026-10-29, one GH200, Qwen3.8-27B Q8_0, int8 KV)
+
+Measured on an otherwise idle card (`brain perf run longctx --target qwen35:<gguf>:kvint8`,
+`qwen35_decode_profile`, `brain perf run sweep --target qwen35:<gguf>`); artifacts are kept outside the repository.
+
+| context | single stream | best total decode | largest batch that fits | prefill (1K / 8K / 32K prompt) |
+|---|---|---|---|---|
+| 8K | 72.5 tok/s | 1307 tok/s at batch 128 | >= 128 | 2852 / 2740 / 2392 tok/s, after the prefill GEMM work 3347 / 3607 / 2892 |
+| 32K | 69.9 tok/s | 692 tok/s at batch 48 | 53 | same |
+| 128K | 62.5 tok/s | 234 tok/s at batch 8 | 15 (KV capacity: ~4 GiB per 128K sequence) | same |
+
+Gap list, by what the profile attributes (in the order it would move goodput):
+
+- Decode linears stream weights at 1.3-1.9 TB/s of the measured ~3.7 TB/s roof within 32 rows, and above 32 rows
+  the m128 tensor-core GEMM reads them at ~0.8 TB/s (batch 48 at 8K: 35 of 53 ms). Extending the weight-streaming
+  regime past 32 rows is the high-concurrency lever (`cuda.md`).
+- Prefill is bound by the group-32 scale fold (knowledge 372): 15-23 % of the int8 tensor-core roof.
+- 128K concurrency is KV-capacity bound: item 10 (Grace tier) and a smaller KV tier, or the second card (item 12).
+- Prefill slices block decode: inter-token p99 400-830 ms under load (item 8's step-cost model).
 
 Page size (256 rows today) is part of item 3 and is chosen per cache group by
 measurement (16-256), not fixed globally.
@@ -128,5 +148,21 @@ measurement (16-256), not fixed globally.
   27B resident's end-to-end step with a real model (no model may load on this
   node for this work), so the per-token saving is arithmetic only: a 20 KiB
   decode boundary is about 0.2 us on the link, and the host wait it replaces is
-  what is saved. `brain devices` link rows were not run: the CLI does not build
-  at present (`crates/perf` is mid-edit by another change).
+  what is saved. `brain devices` lists the pair: direct peer access,
+  128.7 GB/s gpu0->gpu1 and 129.2 GB/s gpu1->gpu0.
+- 2026-10-29 (1): measurement fixes found by the baseline: `perf run <scenario>
+  --target qwen35:<gguf>` measures the served engine through the shared
+  scheduler; `longctx` plans only on the `--device` cards (it counted both cards
+  of the node) and times the served greedy tape (a full-logits readback made a
+  false 32-row cliff); the `shared_prefix` workload now shares its document
+  (7168 of 8192 tokens; it shared nothing). The int8 tuner no longer persists
+  classes its budget did not reach as tuned (17-32-row decode steps ran on the
+  slowest candidate: 32 rows 76.9 -> 47.4 ms at 32K).
+- 2026-10-29 (9, 8): a prompt that leaves a cached one files the recurrent
+  state where they part (a branch point), and requests arriving together that
+  share a document wait for the first prefill to pass it
+  (`PagedDecoder::hint_shared_prefix`); paged entries are cached the moment they
+  are snapshotted. shared_prefix at concurrency 1/4/16: output 25.6/29.3/28.9 ->
+  57.2/110.4/143.4 tok/s, TTFT p99 3.6/16.1/66 -> 0.49/2.1/11.5 s, prefix hit
+  rate 0 -> 86 %. Gates: `model/tests/serve_inflight_prefix.rs`,
+  `qwen35/tests/gguf_conformance.rs` (resumed prefills bit-equal to cold ones).
