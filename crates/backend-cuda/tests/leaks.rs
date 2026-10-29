@@ -301,10 +301,7 @@ fn buffers_created_through_the_backend_are_returned() {
     let _s = serial();
     let Some(p) = probe() else { return };
     let b = backend().expect("a context opened, so a backend must");
-    let warm = b.storage(WORDS as u64);
-    drop(warm);
-    let base = baseline(&p);
-    for _ in 0..5 {
+    let round = || {
         let held = vec![
             b.storage(WORDS as u64),
             b.storage_init("init", &vec![1.0f32; WORDS]),
@@ -313,6 +310,14 @@ fn buffers_created_through_the_backend_are_returned() {
         ];
         let _ = b.read(&held[1], 4);
         drop(held);
+    };
+    // One round before the baseline: the backend keeps the ordering events a
+    // round's fences used for reuse (bounded, freed with the backend), so the
+    // baseline is its steady state and any growth past it is a leak.
+    round();
+    let base = baseline(&p);
+    for _ in 0..5 {
+        round();
     }
     assert_returned(&p, &base, "backend buffers");
 }
