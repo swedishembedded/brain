@@ -337,7 +337,17 @@ fn env_ambient() -> Option<u32> {
 
 /// The ambient canonical index (pin > env), before any scoped override.
 pub fn ambient_gpu() -> Option<u32> {
-    match *AMBIENT_PIN.lock().unwrap_or_else(|e| e.into_inner()) {
+    let pin = || *AMBIENT_PIN.lock().unwrap_or_else(|e| e.into_inner());
+    // `BRAIN_DEVICE` writes the pin when the ambient set resolves. With no pin
+    // written yet, resolve it now, so a constructor that never asked for the
+    // compute set (`Gpu::try_new_cuda` in a test binary) still lands on the
+    // selected card. A pin already written (the CLI's `--device`, an explicit
+    // `set_ambient_gpu`) is never overridden by this late resolution.
+    #[cfg(not(target_arch = "wasm32"))]
+    if pin().is_none() {
+        ambient_compute_set();
+    }
+    match pin() {
         Some(pin) => pin,
         None => env_ambient(),
     }

@@ -23,7 +23,7 @@ use std::process::Command;
 /// Re-run this test binary in a child process with `BRAIN_DEVICE` set (or
 /// unset, for `None`), executing only the `print_ambient` helper below, and
 /// return its `(compute_set debug, ambient_gpu pin debug, stderr)`.
-fn run_ambient(device: Option<&str>) -> (String, String, String) {
+fn run_ambient(device: Option<&str>) -> (String, String, String, String) {
     let exe = std::env::current_exe().expect("current_exe");
     let mut cmd = Command::new(exe);
     cmd.args(["--exact", "print_ambient", "--ignored", "--nocapture", "--test-threads=1"]);
@@ -56,9 +56,10 @@ fn run_ambient(device: Option<&str>) -> (String, String, String) {
             .find_map(|l| l.split_once(marker).map(|(_, rest)| rest.to_string()))
             .unwrap_or_else(|| panic!("no {marker} line in stdout:\n{stdout}"))
     };
+    let selected = extract("AMBIENT_SELECTED:");
     let set_dbg = extract("AMBIENT_SET_DEBUG:");
     let pin_dbg = extract("AMBIENT_GPU_PIN:");
-    (set_dbg, pin_dbg, stderr)
+    (selected, set_dbg, pin_dbg, stderr)
 }
 
 /// The subprocess entry point `run_ambient` invokes. Never runs as part of
@@ -67,6 +68,9 @@ fn run_ambient(device: Option<&str>) -> (String, String, String) {
 #[test]
 #[ignore = "invoked as a subprocess by the other tests in this file"]
 fn print_ambient() {
+    // First, before anything resolves the compute set: the card a constructor
+    // that never asks for the set (`Gpu::try_new_cuda`) would open.
+    println!("AMBIENT_SELECTED:{:?}", gpu_core::devices::selected_device().map(|d| d.index));
     let set = gpu_core::ambient_compute_set();
     println!("AMBIENT_SET_DEBUG:{set:?}");
     println!("AMBIENT_GPU_PIN:{:?}", gpu_core::devices::ambient_gpu());
@@ -108,7 +112,7 @@ fn device_and_brain_device_agree_on_every_token() {
             .unwrap_or_else(|e| panic!("token {tok:?} must parse: {e}"))
             .resolve(&inv)
             .unwrap_or_else(|e| panic!("token {tok:?} must resolve on {inv:?}: {e}"));
-        let (got_dbg, _pin, stderr) = run_ambient(Some(tok));
+        let (_selected, got_dbg, _pin, stderr) = run_ambient(Some(tok));
         assert_eq!(
             got_dbg,
             format!("{want:?}"),
@@ -131,7 +135,7 @@ fn brain_device_gpu_index_pins_the_specific_card_not_just_the_backend() {
     }
     let idx = inv.gpus - 1;
     let tok = format!("gpu{idx}");
-    let (set_dbg, pin_dbg, _stderr) = run_ambient(Some(&tok));
+    let (selected, set_dbg, pin_dbg, _stderr) = run_ambient(Some(&tok));
     let want = gpu_core::DeviceSpec::parse(&tok).unwrap().resolve(&inv).unwrap();
     assert_eq!(set_dbg, format!("{want:?}"));
     assert_eq!(
@@ -139,6 +143,10 @@ fn brain_device_gpu_index_pins_the_specific_card_not_just_the_backend() {
         format!("Some({idx})"),
         "BRAIN_DEVICE={tok:?} must explicitly pin the ambient GPU to {idx}, got {pin_dbg}"
     );
+    // The first selection a process makes, with nothing resolved yet, is that
+    // card too: a test binary building its handle with `Gpu::try_new_cuda`
+    // under `BRAIN_DEVICE=gpu1` once opened gpu0.
+    assert_eq!(selected, format!("Some({idx})"), "BRAIN_DEVICE={tok:?} must select gpu{idx} before anything resolved the set");
 }
 
 /// An out-of-range `BRAIN_DEVICE=gpu<N>` must fall back to the default
@@ -149,7 +157,7 @@ fn brain_device_invalid_gpu_index_falls_back_to_all_devices_without_panicking() 
     let inv = gpu_core::Inventory::probe();
     let bad = inv.gpus + 99;
     let tok = format!("gpu{bad}");
-    let (set_dbg, _pin, stderr) = run_ambient(Some(&tok));
+    let (_selected, set_dbg, _pin, stderr) = run_ambient(Some(&tok));
     let want_fallback = gpu_core::DeviceSpec::default().resolve(&inv).unwrap();
     assert_eq!(
         set_dbg,
@@ -173,6 +181,6 @@ fn brain_device_invalid_gpu_index_falls_back_to_all_devices_without_panicking() 
 fn absent_brain_device_matches_absent_device_flag() {
     let inv = gpu_core::Inventory::probe();
     let want = gpu_core::DeviceSpec::parse("").unwrap().resolve(&inv).unwrap();
-    let (set_dbg, _pin, _stderr) = run_ambient(None);
+    let (_selected, set_dbg, _pin, _stderr) = run_ambient(None);
     assert_eq!(set_dbg, format!("{want:?}"));
 }
