@@ -201,3 +201,39 @@ fn random_shapes_are_byte_identical() {
         check(&gpu, rows, d, r.next_u32().is_multiple_of(2), &a, &b, &w, "seeded");
     }
 }
+
+/// `v` rounded to bf16 the way `cast_f32_bf16` does: nearest even, NaN to the quiet NaN.
+fn bf16_bits(v: f32) -> u32 {
+    let b = v.to_bits();
+    if (b & 0x7fff_ffff) > 0x7f80_0000 {
+        return 0x7fc0;
+    }
+    b.wrapping_add(0x7fff + ((b >> 16) & 1)) >> 16
+}
+
+#[test]
+fn the_bf16_flag_writes_the_rows_cast_f32_bf16_would_make_and_leaves_the_packed_rows_alone() {
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda(&gpu) {
+        brain_testutil::skip_unavailable("native fused kernels need a CUDA device");
+        return;
+    }
+    for (rows, d, add) in [(1u32, 5120u32, true), (4, 5120, false), (2, 4128, true)] {
+        let n = (rows * d) as usize;
+        let a = values(n, 41 + u64::from(d), 3.0);
+        let b = values(n, 42 + u64::from(d), 3.0);
+        let w = values(d as usize, 43, 2.0);
+        let (ab, bb, wb) = (gpu.storage_init("a", &a), gpu.storage_init("b", &b), gpu.storage_init("w", &w));
+        let (sum, xn, bf16) = (gpu.storage(n as u64), gpu.storage(n as u64), gpu.storage(n as u64 / 2));
+        let sx = gpu.storage_init("sx", &[f32::from_bits(0xdead_beef); 1]);
+        let step = gpu
+            .fused_step(Fused::AddRmsQuant, &[&ab, &bb, &wb, &sum, &xn, &bf16, &sx], &[d, rows, EPS.to_bits(), add as u32 | 2 | 4])
+            .expect("offered");
+        gpu.submit(&[], &[step]);
+        gpu.poll_wait();
+        let xn_host = gpu.read(&xn, n);
+        let want: Vec<u32> = xn_host.chunks(2).map(|p| bf16_bits(p[0]) | bf16_bits(p[1]) << 16).collect();
+        assert_eq!(bits(gpu.read(&bf16, n / 2)), want, "the bf16 rows differ: rows={rows} d={d} add={add}");
+        assert_eq!(bits(gpu.read(&sx, 1)), vec![0xdead_beef], "the scales were written");
+    }
+}

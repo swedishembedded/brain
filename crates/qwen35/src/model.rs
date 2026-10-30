@@ -4370,6 +4370,13 @@ impl Qwen35 {
         !self.weights.values().all(reads_float_acts)
     }
 
+    /// Whether the fused front ends also write the bf16 rows of their activation (`cast_f32_bf16`'s result, in the same
+    /// pass): the FP8 products the tuned table has read bf16 rows then need no cast launch. A build that packs int8
+    /// activations leaves the slots to the packing.
+    fn fused_writes_bf16(&self) -> bool {
+        !self.packs_activations() && self.weights.values().any(|w| w.dtype() == Dtype::F8E4M3)
+    }
+
     /// One launch that produces the activation an int8 linear reads AND
     /// quantises it: `mode` 0 quantises `a` as it is, 1 produces `silu(a) * b`,
     /// 2 produces `a * sigmoid(b)`. Returns `(product, act)`; `product` is
@@ -4385,10 +4392,15 @@ impl Qwen35 {
         if !self.packs_activations() {
             if let Some(y) = &y {
                 let (xq, sx) = self.unpacked_slots();
+                // The `xq` slot takes the bf16 rows of the product when an FP8 product will read them (flags bit 1).
+                let bf16 = self.fused_writes_bf16().then(|| g.storage_uninit(n / 2));
                 let step = g
-                    .fused_step(gpu_core::Fused::QuantEpilogue, &[a, b.unwrap_or(a), y, xq, sx], &[k, rows, mode, 1])
+                    .fused_step(gpu_core::Fused::QuantEpilogue, &[a, b.unwrap_or(a), y, bf16.as_ref().unwrap_or(xq), sx], &[k, rows, mode, 1 | if bf16.is_some() { 2 } else { 0 }])
                     .expect("fused_epilogue_ok said the device serves this shape");
                 g.submit(&[], &[step]);
+                if let Some(bf16) = bf16 {
+                    return (Some(y.clone()), self.ops.act_f32_with_bf16(y, rows, k, bf16));
+                }
             }
             return (y.clone(), self.ops.act_f32(y.as_ref().unwrap_or(a), 0, rows, k));
         }
@@ -4419,11 +4431,13 @@ impl Qwen35 {
         let pack = self.packs_activations();
         // Nothing reads the packed rows of an FP8/bf16/NF4 build: the kernel then writes `sum` and `xn` only, and the
         // two buffers it would have written are one word each.
+        // The `xq` slot takes the bf16 rows of `xn` when an FP8 product will read them (flags bit 2).
+        let bf16 = self.fused_writes_bf16().then(|| g.storage_uninit(n / 2));
         let (xq, sx) = if pack {
             (g.storage_uninit(n / 4), g.storage_uninit(model::int8::act_scale_len(rows as usize, d as usize) as u64))
         } else {
             let (xq, sx) = self.unpacked_slots();
-            (xq.clone(), sx.clone())
+            (bf16.clone().unwrap_or_else(|| xq.clone()), sx.clone())
         };
         // Without an addend the kernel reads neither `b` nor writes `sum`; the
         // slots still have to be bound, so they alias what is already there.
@@ -4431,11 +4445,15 @@ impl Qwen35 {
             .fused_step(
                 gpu_core::Fused::AddRmsQuant,
                 &[a, b.unwrap_or(a), w, sum.as_ref().unwrap_or(&xn), &xn, &xq, &sx],
-                &[d, rows, f(RMS_EPS), b.is_some() as u32 | if pack { 0 } else { 2 }],
+                &[d, rows, f(RMS_EPS), b.is_some() as u32 | if pack { 0 } else { 2 } | if bf16.is_some() { 4 } else { 0 }],
             )
             .expect("fused_front_ok said the device serves this shape");
         g.submit(&[], &[step]);
-        let act = if pack { self.ops.act_prequantized(&xn, &sx, &xq, rows, d) } else { self.ops.act_f32(&xn, 0, rows, d) };
+        let act = match (pack, bf16) {
+            (true, _) => self.ops.act_prequantized(&xn, &sx, &xq, rows, d),
+            (false, Some(bf16)) => self.ops.act_f32_with_bf16(&xn, rows, d, bf16),
+            (false, None) => self.ops.act_f32(&xn, 0, rows, d),
+        };
         (sum, xn, act)
     }
 
