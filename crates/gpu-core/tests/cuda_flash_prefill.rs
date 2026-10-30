@@ -329,10 +329,12 @@ impl Device {
 const SPEEDUP_ATTEMPTS: usize = 3;
 
 fn device() -> Option<Gpu> {
-    let Ok(gpu) = Gpu::try_new_cuda(kernel_list()) else {
-        eprintln!("cuda_flash_prefill: no CUDA device on this box - skipping");
+    // `BRAIN_DEVICE` picks the card (`gpu_core::testgpu::dev`); a CPU selection skips.
+    let gpu = gpu_core::testgpu::dev(kernel_list());
+    if gpu.kind() != "cuda" {
+        eprintln!("cuda_flash_prefill: no CUDA device selected - skipping");
         return None;
-    };
+    }
     let cc = gpu.caps().arch.compute_capability.expect("the CUDA backend reports its capability");
     if kernels_cuda::find(select::Op::PagedAttentionFused, Dtype::F32, cc).is_none() {
         eprintln!("cuda_flash_prefill: compute capability {}.{} is below the kernel's floor - skipping", cc.0, cc.1);
@@ -645,5 +647,26 @@ fn both_flash_versions_stay_close_to_fp32_at_large_score_magnitudes() {
                 assert!(rel <= 3e-3, "{kv:?} at score scale {}x, v2={v2}: rel-L2 {rel:.2e} from the fp32 kernel (bar 3e-3)", mag * mag);
             }
         }
+    }
+}
+
+/// The int8-cache prefill kernel at the serving chunk (512 rows) at growing context, for `ncu -k regex:flash_prefill -c 1`:
+/// `cargo test --release -p brain-gpu-core --test cuda_flash_prefill -- --ignored --nocapture contexts`.
+#[test]
+#[ignore = "a timing report for kernel work, not a spec"]
+fn the_int8_cache_prefill_rates_at_growing_contexts() {
+    let Some(gpu) = device() else { return };
+    gpu_core::provider::cuda::set_flash_prefill_v2(true);
+    for (n, start) in [(512u32, 512u32), (512, 3584), (512, 7680), (512, 15872), (512, 31232)] {
+        let p = Problem::new(Case { n, start, block_size: 4096, scatter: false }, 23);
+        let (seen, stored) = p.as_stored(Kv::Int8);
+        let d = TierDevice::upload(&gpu, &seen, Kv::Int8, &stored);
+        let native = d.native(&gpu, &seen).expect("native step");
+        let _ = d.base.run(&gpu, &native, &seen);
+        assert!(gpu.set_kernel_timing(true));
+        let ms = (0..TRIALS).map(|_| d.base.trial_ms(&gpu, &native, "flash_prefill_f16_hd256_v2_kv8")).fold(f64::MAX, f64::min);
+        gpu.set_kernel_timing(false);
+        let flops = 4.0 * f64::from(n) * (f64::from(start) + f64::from(n) / 2.0) * 256.0 * 24.0;
+        eprintln!("cuda_flash_prefill: int8 n={n} ctx={}: {ms:.3} ms ({:.0} TFLOPS causal)", start + n, flops / ms / 1e9);
     }
 }

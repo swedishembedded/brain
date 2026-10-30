@@ -424,3 +424,47 @@ fn the_recurrence_output_can_be_written_token_major_and_matches_the_chunk_major_
         }
     }
 }
+
+/// The serving prefill forward at the production shape (48 value heads of 128, 8192 tokens, chunks of 64): a bench for
+/// `ncu -k regex:<kernel> -c 1` on the kernel's own binary instead of a model server, and a wall-clock per-launch figure.
+/// `cargo test --release -p brain-model --test gdn_chunk_fwd_train_tc -- --ignored --nocapture production_shape`.
+#[test]
+#[ignore = "a bench at the production shape, run by hand"]
+fn production_shape_prefill_forward_bench() {
+    let g = gpu_core::testgpu::dev(PIPES);
+    if !model::gdn::use_fast_kernels(&g) {
+        return;
+    }
+    use model::gdn::{gdn_chunk_fwd_tokens, GdnTokScratchBufs, GdnTokenInputs};
+    let (h, t, chunk, group) = (48u32, 8192u32, 64u32, 3u32);
+    let shape = GdnShape { b: 1, h, t, dk: 128, dv: 128, chunk };
+    let (bhc, bh) = (shape.bhc() as usize, shape.bh() as usize);
+    let (heads, nkh) = (h as usize, (h / group) as usize);
+    let tokens = t as usize;
+    let mut s = 21u64;
+    let q = g.storage_init("q", &rand(&mut s, tokens * nkh * 128, 1.0));
+    let k = g.storage_init("k", &rand(&mut s, tokens * nkh * 128, 1.0));
+    let v = g.storage_init("v", &rand(&mut s, tokens * heads * 128, 1.0));
+    let raw_g = g.storage_init("g", &rand(&mut s, tokens * heads, 0.2).iter().map(|x| -x.abs()).collect::<Vec<_>>());
+    let beta = g.storage_init("beta", &rand(&mut s, tokens * heads, 0.5).iter().map(|x| x + 0.5).collect::<Vec<_>>());
+    let initial = g.storage_init("s0", &rand(&mut s, bh * 128 * 128, 0.1));
+    let ids = ids(&g, Tier::TensorCore);
+    let tok = GdnTokenInputs { query: &q, key: &k, value: &v, raw_g: &raw_g, beta: &beta, group, l2_eps: 1e-6 };
+    let len = bhc * chunk as usize * 128;
+    let (qcm, kcm) = (g.storage(len as u64), g.storage(len as u64));
+    let out = g.storage(len as u64);
+    let fin = g.storage((bh * 128 * 128) as u64);
+    let scratch = GdnTokScratchBufs::new(&g, &shape);
+    let mut run = || {
+        let (steps, _) = gdn_chunk_fwd_tokens(&g, &ids, &shape, &tok, &qcm, &kcm, &initial, &scratch.as_ref(), &out, &fin, true).expect("served");
+        g.submit(&[], &steps);
+        g.poll_wait();
+    };
+    run();
+    let start = std::time::Instant::now();
+    let reps = 5;
+    for _ in 0..reps {
+        run();
+    }
+    println!("gdn prefill forward, {t} tokens x {h} heads: {:.3} ms a layer", start.elapsed().as_secs_f64() * 1e3 / reps as f64);
+}

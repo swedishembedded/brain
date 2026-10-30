@@ -48,3 +48,12 @@ per-element accumulation order so the result is bit-identical) and `__launch_bou
 SM, and gained nothing: 1.23 ms): 0.77 ms (-35 %), 2.85 active warps. Mixed iteration (nsys): the recurrence 15.9 -> 11.0 ms, with the quant_epilogue change above the
 median iteration 145 -> 134 ms, card busy 89 %. The training forward and the `train` entry share the body; `gdn_chunk_fwd_train_tc`, `gdn_chunk_fwd_fast`,
 `gdn_chunk_fwd_train_fast`, `gdn_mixer_tc/stream/segmented`, `gdn_chunk_bwd` pass; the W8K NF4 train probe stays at 963-968 tokens/s (the recurrence is a small share of a training step).
+
+Kernel iteration without a server (same note): the benches run on the kernels' own test binaries at the production shape, one `ncu -k regex:<kernel> -c 1` takes
+15 s. `gdn_chunk_fwd_train_tc -- --ignored production_shape` (48 heads, 8192 tokens, serving token-major forward): 3.8 ms a layer on gpu1 (ncu: prep 1.68 ms,
+recurrence 3.03 ms; prep issue slots 48 % busy, the recurrence's tensor pipe 18 % busy with 792 M warp instructions: the 8-warp split halved each warp's A-operand
+reuse, so the next step is staging the TF32 hi/lo split once instead of per warp). `cuda_flash_prefill -- --ignored contexts` (int8 KV, 512-row chunk):
+0.16 / 0.62 / 1.23 / 2.47 / 4.77 ms at 1K / 4K / 8K / 16K / 31K context = 60-83 TFLOPS causal; ncu at 1K: 192 blocks of 128 threads (24 heads x 8 row tiles), 0.73
+wave, 253 registers, 1.4 active warps a scheduler, tensor pipe 12.6 % busy, stalls led by `wait` (1.65) and short scoreboard (0.79): too few warps and too short
+a chain per warp to hide the mma/ldmatrix latency. A 31K prompt spends about 2.4 s of its 6.3 s TTFT in this kernel; FlashAttention-3-class (wgmma, TMA, warp
+specialisation, or at least split-KV blocks for the long contexts) is the way to 4-6x. Not started: it is a new Hopper kernel with an int8/FP8 KV decode in its producer.
