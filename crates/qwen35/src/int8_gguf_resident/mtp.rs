@@ -285,9 +285,14 @@ impl MtpDrafter {
     fn forward(&mut self, head_gpu: &Gpu, slots: &[u32], positions: &[u32], tokens: &[u32], hidden: &[f32], hidden_is_target: bool) -> Result<Vec<f32>, String> {
         self.forwards += 1;
         let t0 = std::time::Instant::now();
+        let prep = gpu_core::markers::range(c"mtp.prep");
         let x = self.fc_input(tokens, hidden, hidden_is_target)?;
+        drop(prep);
+        let proj = gpu_core::markers::range(c"mtp.project");
         let ehp = self.project(head_gpu, &x);
+        drop(proj);
         let t1 = std::time::Instant::now();
+        let _layer = gpu_core::markers::range(c"mtp.layer");
         let seqs = self.caches.batch(slots, positions);
         let caches = BatchDecodeCaches { gqa_kv: &self.caches.gqa_kv, gqa_cap: self.caches.kv_block(), seqs: &seqs, one_sequence: false, gdn_pool: None, memory: &[] };
         let out = self.stage.decode_batch_stage(tokens, &caches, Some(&ehp));
@@ -720,7 +725,10 @@ impl Qwen35GgufInstance {
             head_time.set(head_time.get() + t.elapsed());
             out
         };
-        let first = argmax_rows(m, &prev);
+        let first = {
+            let _head = gpu_core::markers::range(c"mtp.head");
+            argmax_rows(m, &prev)
+        };
         for (q, &i) in live.iter().enumerate() {
             out[i].push(first[q]);
         }

@@ -186,6 +186,8 @@ pub struct SpecStats {
     /// Steps where speculation was on but the drafter proposed nothing, so the
     /// step was plain decode.
     pub plain_steps: u64,
+    /// Steps the cost gate sent to plain decoding because speculation had measured slower.
+    pub gated_steps: u64,
 }
 
 impl SpecStats {
@@ -519,7 +521,10 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// every sequence untouched for the plain step.
     pub(super) fn speculative_step(&mut self, active: &[usize]) -> bool {
         let Some(proposals) = self.propose(active, true) else { return false };
-        let scored = self.dec.forward_batched_verify(&mut active_tables(&mut self.running, active), &proposals.rows, proposals.cands);
+        let scored = {
+            let _verify = gpu_core::markers::range(c"spec.verify");
+            self.dec.forward_batched_verify(&mut active_tables(&mut self.running, active), &proposals.rows, proposals.cands)
+        };
         self.settle_verified(active, proposals, scored);
         true
     }
@@ -552,6 +557,7 @@ impl<D: PagedDecoder> Scheduler<D> {
         let bucket = CostGate::bucket(active.len());
         let gated = gated && self.dec.spec_cost_aware();
         if gated && !self.gate.speculate(bucket, self.dec.step_latency_target().map(|t| t.as_secs_f64())) {
+            self.spec_stats.gated_steps += 1;
             return None;
         }
         let started = (self.clock)();
@@ -564,10 +570,12 @@ impl<D: PagedDecoder> Scheduler<D> {
             rows -= 1;
         }
         let queries: Vec<DraftQuery> = active.iter().map(|&i| DraftQuery { id: self.running[i].id, context: &self.running[i].context, table: &self.running[i].table }).collect();
+        let draft_range = gpu_core::markers::range(c"spec.draft");
         let mut props = match self.drafter.as_mut() {
             Some(d) => d.draft(&queries, &ks),
             None => self.dec.draft(&queries, &ks),
         };
+        drop(draft_range);
         drop(queries);
         assert_eq!(props.len(), active.len(), "a drafter must answer every query");
         let vocab = self.dec.vocab() as u32;
@@ -613,7 +621,10 @@ impl<D: PagedDecoder> Scheduler<D> {
             keep.push(v.accepted + 1);
             verdicts.push(v);
         }
-        self.dec.commit_verified(&mut active_tables(&mut self.running, active), &keep);
+        {
+            let _commit = gpu_core::markers::range(c"spec.commit");
+            self.dec.commit_verified(&mut active_tables(&mut self.running, active), &keep);
+        }
 
         self.spec_stats.verify_steps += 1;
         let tokens_before: usize = active.iter().map(|&i| self.running[i].generated.len()).sum();

@@ -1528,7 +1528,11 @@ impl Qwen35GgufEngine {
             let slot = adapters::slot_of(self.inst.stage_models(), t.kv_namespace());
             adapter_rows.extend(std::iter::repeat_n(slot, r.len()));
         }
-        for (t, r) in tables.iter_mut().zip(rows) {
+        // A round whose sequences all carry the same number of rows can be a replayed graph: the rows are padded to the widest
+        // (a padded row repeats the sequence's last token and is never kept), so the graph's shape holds as the windows move.
+        let padded = if adapter_rows.iter().all(|&s| s == LORA_SLOT_NONE) { self.padded_verify_rows(tables, rows) } else { None };
+        let work: &[Vec<u32>] = padded.as_deref().unwrap_or(rows);
+        for (t, r) in tables.iter_mut().zip(work) {
             assert!(!r.is_empty(), "{MODEL}: a verify row set is never empty");
             let first = t.len();
             for _ in 0..r.len() {
@@ -1537,20 +1541,57 @@ impl Qwen35GgufEngine {
             slots.push(self.slot(t));
             positions.push(first);
         }
-        let row_refs: Vec<&[u32]> = rows.iter().map(|r| r.as_slice()).collect();
-        self.inst.set_adapter_rows(&adapter_rows);
-        let hidden = self.inst.stack_verify_hidden(&row_refs, &slots, &positions).unwrap_or_else(|e| panic!("{e}"));
-        self.inst.set_adapter_rows(&[]);
-        let n = rows.iter().map(|r| r.len()).sum::<usize>() as u32;
-        let flat: Vec<Vec<(u32, f32)>> = if cands <= 1 {
-            self.inst.head_argmax_rows(&hidden, n).into_iter().map(|t| vec![(t, 0.0)]).collect()
-        } else {
-            self.inst.head_topk_rows(&hidden, n, cands.min(TOPK_CAPACITY) as u32)
+        let row_refs: Vec<&[u32]> = work.iter().map(|r| r.as_slice()).collect();
+        let n = work.iter().map(|r| r.len()).sum::<usize>() as u32;
+        let kind = if cands <= 1 { HeadKind::Argmax } else { HeadKind::TopK(cands.min(TOPK_CAPACITY) as u32) };
+        let planned = padded.as_ref().and_then(|_| self.inst.verify_planned(&row_refs, &slots, &positions, kind));
+        let (picked, hidden): (Vec<Vec<(u32, f32)>>, Vec<f32>) = match planned {
+            Some((HeadOut::Ids(ids), hidden)) => (ids.into_iter().map(|t| vec![(t, 0.0)]).collect(), hidden),
+            Some((HeadOut::TopK(top), hidden)) => (top, hidden),
+            None => {
+                self.inst.set_adapter_rows(&adapter_rows);
+                let layers = gpu_core::markers::range(c"verify.layers");
+                let hidden = self.inst.stack_verify_hidden(&row_refs, &slots, &positions).unwrap_or_else(|e| panic!("{e}"));
+                drop(layers);
+                self.inst.set_adapter_rows(&[]);
+                let _head = gpu_core::markers::range(c"verify.head");
+                let picked = if cands <= 1 { self.inst.head_argmax_rows(&hidden, n).into_iter().map(|t| vec![(t, 0.0)]).collect() } else { self.inst.head_topk_rows(&hidden, n, cands.min(TOPK_CAPACITY) as u32) };
+                (picked, hidden)
+            }
         };
-        self.verifying = Some(Verifying { slots, rows: rows.to_vec(), hidden });
+        self.verifying = Some(Verifying { slots, rows: work.to_vec(), hidden });
         self.times.verify += t0.elapsed();
-        let mut flat = flat.into_iter();
-        rows.iter().map(|r| flat.by_ref().take(r.len()).collect()).collect()
+        let mut flat = picked.into_iter();
+        // What was asked for: the padding rows' answers are dropped, and their positions leave the tables
+        // (the caller's tables hold exactly the rows it sent).
+        rows.iter()
+            .zip(work)
+            .zip(tables.iter_mut())
+            .map(|((r, w), t)| {
+                let mut answers: Vec<_> = flat.by_ref().take(w.len()).collect();
+                answers.truncate(r.len());
+                let len = t.len();
+                t.truncate(len - (w.len() - r.len()) as u32, &mut self.alloc);
+                answers
+            })
+            .collect()
+    }
+
+    /// `rows` padded to one row count when the round can run as a replayed graph and the padding fits (scratch rows, free blocks);
+    /// `None` when it cannot or when nothing needs padding beyond what is there.
+    fn padded_verify_rows(&self, tables: &[&mut BlockTable], rows: &[Vec<u32>]) -> Option<Vec<Vec<u32>>> {
+        let widest = rows.iter().map(Vec::len).max()?;
+        let per_seq = widest.next_multiple_of(2).clamp(2, self.inst.max_verify_rows_per_sequence() as usize);
+        if !self.inst.verify_plans_available() || per_seq * rows.len() > self.inst.speculation_rows() as usize || widest > per_seq {
+            return None;
+        }
+        let block = self.alloc.block_size();
+        let blocks_after = |len: u32, extra: usize| (len + extra as u32).div_ceil(block);
+        let extra_blocks: u32 = tables.iter().zip(rows).map(|(t, r)| blocks_after(t.len(), per_seq) - blocks_after(t.len(), r.len())).sum();
+        if extra_blocks > self.alloc.free_blocks() {
+            return None;
+        }
+        Some(rows.iter().map(|r| r.iter().copied().chain(std::iter::repeat_n(*r.last().expect("a verify row set is never empty"), per_seq - r.len())).collect()).collect())
     }
     /// [`PagedDecoder::commit_verified`]'s work.
     fn commit_rows(&mut self, keep: &[usize]) {

@@ -1398,6 +1398,8 @@ pub struct Qwen35GgufInstance {
     mtp: Option<mtp::MtpDrafter>,
     /// Recorded decode steps ([`Self::decode_planned`]).
     plans: RefCell<DecodePlans>,
+    /// The recorded verify rounds, kept apart so a speculating server's plain steps keep theirs.
+    verify_plans: RefCell<DecodePlans>,
     /// Whether a plain decode step may replay a recording (on by default).
     plans_on: Cell<bool>,
 }
@@ -1965,7 +1967,13 @@ impl Qwen35GgufInstance {
         self.plans_on.set(on);
         if !on {
             self.plans.borrow_mut().clear();
+            self.verify_plans.borrow_mut().clear();
         }
+    }
+
+    /// Whether a verify round can be recorded and replayed ([`Self::verify_planned`]): the conditions of a recorded decode step.
+    pub(super) fn verify_plans_available(&self) -> bool {
+        self.plans_on.get() && self.shards.len() == 1 && !self.exact_decode && self.embeds_on_device()
     }
 
     /// Recorded decode steps held now.
@@ -1992,7 +2000,7 @@ impl Qwen35GgufInstance {
         }
         let seqs = s.caches.batch(slots, positions);
         let caches = BatchDecodeCaches { gqa_kv: &s.caches.gqa_kv, gqa_cap: s.caches.kv_block(), seqs: &seqs, one_sequence: false, gdn_pool: Some(s.caches.gdn_pool()), memory: &[] };
-        let key = PlanKey { rows, cap: s.qwen35.paged_step_shape(&caches).0, head: kind };
+        let key = PlanKey { rows, per_seq: 0, cap: s.qwen35.paged_step_shape(&caches).0, head: kind };
         let looked = self.plans.borrow_mut().lookup(key);
         let plan = match looked {
             Ok(plan) => {
@@ -2002,7 +2010,7 @@ impl Qwen35GgufInstance {
             Err(false) => return None,
             Err(true) => {
                 let (tape, inputs, out) = s.qwen35.record_decode_step(tokens, &caches, |hidden| self.record_head(hidden, rows, kind));
-                DecodePlan { key, tape, inputs, out }
+                DecodePlan { key, tape, inputs, out, verify: None }
             }
         };
         let g = &s.qwen35.gpu;
@@ -2013,6 +2021,63 @@ impl Qwen35GgufInstance {
         };
         self.plans.borrow_mut().put(plan);
         Some(out)
+    }
+
+    /// **A verify round as a replayed graph**: `rows` (every sequence the same number of them, `rows[i]` consecutive tokens of the
+    /// sequence in `slots[i]` from `positions[i]`) through the layers and the head of `kind`, recorded after it held for a few rounds
+    /// and replayed from then on, with the packed `[sum(rows), d_model]` hidden block read back for the drafter. The recurrent state
+    /// of each sequence is left after its last row and the states between rows kept for [`Self::commit_verify`], as
+    /// [`Self::stack_verify_hidden`] does.
+    ///
+    /// `None` when the round does not qualify (the ordinary path runs it, with the same arithmetic): the conditions of
+    /// [`Self::decode_planned`], rows of different counts, or no scratch room for the rows.
+    pub(super) fn verify_planned(&self, rows: &[&[u32]], slots: &[u32], positions: &[u32], kind: HeadKind) -> Option<(HeadOut, Vec<f32>)> {
+        if !self.plans_on.get() || self.shards.len() != 1 || self.exact_decode || !self.embeds_on_device() {
+            return None;
+        }
+        let per_seq = rows.first()?.len() as u32;
+        if rows.iter().any(|r| r.len() as u32 != per_seq) || per_seq < 2 {
+            return None;
+        }
+        let s = &self.shards[0];
+        let total = per_seq * rows.len() as u32;
+        let tokens: Vec<u32> = rows.iter().flat_map(|r| r.iter().copied()).collect();
+        if total > self.spec_rows || slots.iter().any(|&sl| sl >= s.caches.slots) || tokens.iter().any(|&t| t >= self.cfg.vocab) {
+            return None;
+        }
+        let counts = vec![per_seq; rows.len()];
+        let row_slots: Vec<u32> = slots.iter().flat_map(|&sl| std::iter::repeat_n(sl, per_seq as usize)).collect();
+        let row_positions: Vec<u32> = positions.iter().flat_map(|&p| p..p + per_seq).collect();
+        if row_positions.iter().any(|&p| p >= self.cap) {
+            return None;
+        }
+        let seqs = s.caches.batch(&row_slots, &row_positions);
+        let caches = BatchDecodeCaches { gqa_kv: &s.caches.gqa_kv, gqa_cap: s.caches.kv_block(), seqs: &seqs, one_sequence: false, gdn_pool: Some(s.caches.gdn_pool()), memory: &[] };
+        let key = PlanKey { rows: total, per_seq, cap: s.qwen35.paged_step_shape(&caches).0, head: kind };
+        let verify = crate::model::verify::VerifyBatch::new(slots, &counts, &s.caches.verify_snaps);
+        let g = &s.qwen35.gpu;
+        let looked = self.verify_plans.borrow_mut().lookup(key);
+        let plan = match looked {
+            Ok(plan) => {
+                s.qwen35.write_decode_inputs(&plan.inputs, Some(&tokens), &caches);
+                let (layout, _) = plan.verify.as_ref().expect("a verify recording keeps its layout");
+                verify.write_layout(g, layout);
+                plan
+            }
+            Err(false) => return None,
+            Err(true) => {
+                let (tape, inputs, layout, hidden, out) = s.qwen35.record_verify_step(&tokens, &caches, &verify, |hidden| self.record_head(hidden, total, kind));
+                DecodePlan { key, tape, inputs, out, verify: Some((layout, hidden)) }
+            }
+        };
+        g.replay_tape(&plan.tape);
+        let out = match &plan.out {
+            PlanOut::Argmax(ids) => HeadOut::Ids(model::readout::read_argmax(g, ids, total)),
+            PlanOut::TopK(top) => HeadOut::TopK(top.read(g)),
+        };
+        let hidden = self.hidden_to_host(&plan.verify.as_ref().expect("a verify recording keeps its hidden block").1, total as usize);
+        self.verify_plans.borrow_mut().put(plan);
+        Some((out, hidden))
     }
 
     /// The head of `kind` over `hidden` recorded into the open tape: the final norm, the projection and the reduction,
@@ -4094,6 +4159,7 @@ impl Qwen35GgufResident {
             spec_rows: 0,
             mtp: None,
             plans: RefCell::default(),
+            verify_plans: RefCell::default(),
             plans_on: Cell::new(true),
         };
         let last_gpu = plan.stages.last().map(|(_, s, _)| s.gpu_index).unwrap_or(0);

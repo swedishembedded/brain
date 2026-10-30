@@ -4941,7 +4941,7 @@ impl Qwen35 {
         if let Some(step) = group.filter(|&step| tokens.len() as u32 > step) {
             return self.run_decode_batch_exact_groups(tokens, caches, input_override, step);
         }
-        let hidden = self.decode_batch_dispatches(tokens, caches, input_override, verify, None);
+        let hidden = self.decode_batch_dispatches(tokens, caches, input_override, verify, None, None);
         // The step's banks that filled a block commit once its dispatches are issued (see `decode_memory_commits`).
         self.commit_memory_blocks(caches.memory, &self.decode_memory_commits(caches.seqs));
         hidden
@@ -4951,7 +4951,15 @@ impl Qwen35 {
     /// issues after, see [`Self::commit_memory_blocks`]). With `persist` the step's per-step inputs live in those
     /// buffers (the caller rewrites them before every replay of a recording of this call), the scratch arena and the
     /// pass are left to the recording, and nothing in the dispatch list depends on the positions.
-    fn decode_batch_dispatches(&self, tokens: &[u32], caches: &BatchDecodeCaches, input_override: Option<StageRows<'_>>, verify: Option<&verify::VerifyBatch>, persist: Option<&DecodeInputs>) -> DeviceBuffer {
+    fn decode_batch_dispatches(
+        &self,
+        tokens: &[u32],
+        caches: &BatchDecodeCaches,
+        input_override: Option<StageRows<'_>>,
+        verify: Option<&verify::VerifyBatch>,
+        persist: Option<&DecodeInputs>,
+        persist_layout: Option<&verify::VerifyLayout>,
+    ) -> DeviceBuffer {
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
@@ -5029,8 +5037,8 @@ impl Qwen35 {
         // previous stage's residual, on the embed stage the caller's own input
         // embeddings in place of the token gather (`Qwen35::prefill_embeds`).
         assert!(
-            persist.is_none() || (input_override.is_none() && verify.is_none() && self.exact_decode.get().is_none() && self.adapter_rows.get() == 0),
-            "qwen35::decode_batch_dispatches: a recorded step is a plain token step (no verify round, exact-decode regime or adapter rows)"
+            persist.is_none() || (input_override.is_none() && verify.is_some() == persist_layout.is_some() && self.exact_decode.get().is_none() && self.adapter_rows.get() == 0),
+            "qwen35::decode_batch_dispatches: a recorded step is a token step or a verify round with its own layout (no hand-off, exact-decode regime or adapter rows)"
         );
         let owned_inputs;
         let inputs = match persist {
@@ -5061,7 +5069,16 @@ impl Qwen35 {
         let memory_step = memory.as_ref().map(|(shape, read, push)| (shape, read, push));
         // A verify step's per-sequence layout, uploaded with the rest of the
         // step's inputs (a write after the first dispatch would split the pass).
-        let verify_layout = verify.map(|v| v.upload(g));
+        let uploaded;
+        let verify_layout = match (verify, persist_layout) {
+            // A recording keeps its layout buffers; the caller rewrites them before each replay.
+            (_, Some(layout)) => Some(layout),
+            (Some(v), None) => {
+                uploaded = v.upload(g);
+                Some(&uploaded)
+            }
+            (None, None) => None,
+        };
         let exact_ctx = self.exact_decode.get().filter(|_| verify.is_none());
         let paged = self.paged_decode_batch(caches, inputs, exact_ctx);
 
@@ -6360,7 +6377,7 @@ impl Qwen35 {
                 let inputs = self.alloc_decode_inputs_at(bsz, 1);
                 // Building the step writes the inputs for these rows too (host writes land immediately).
                 g.begin_tape();
-                let hidden = self.decode_batch_dispatches(tokens, caches, None, None, Some(&inputs));
+                let hidden = self.decode_batch_dispatches(tokens, caches, None, None, Some(&inputs), None);
                 let tape = g.end_tape();
                 SlotDecodeTape { bsz, fusion, tape, inputs, hidden }
             }
@@ -6381,9 +6398,24 @@ impl Qwen35 {
         let g = &self.gpu;
         let inputs = self.alloc_decode_inputs_at(tokens.len() as u32, self.paged_step_shape(caches).1);
         g.begin_tape();
-        let hidden = self.decode_batch_dispatches(tokens, caches, None, None, Some(&inputs));
+        let hidden = self.decode_batch_dispatches(tokens, caches, None, None, Some(&inputs), None);
         let out = tail(&hidden);
         (g.end_tape(), inputs, out)
+    }
+
+    /// [`Self::record_decode_step`] for a speculative verify round: the rows of `verify` (`caches` has one entry per row, a
+    /// sequence's rows consecutive), and whatever `tail` issues behind them. Recorded for every round with the same row counts per
+    /// sequence and [`Self::paged_step_shape`]: before each replay the caller rewrites the inputs
+    /// ([`Self::write_decode_inputs`]) and the layout ([`verify::VerifyBatch::write_layout`]), and the snapshots the round leaves are the
+    /// pass's own. Returns the tape, the inputs and the layout it binds, the hidden block it leaves, and `tail`'s answer.
+    pub(crate) fn record_verify_step<R>(&self, tokens: &[u32], caches: &BatchDecodeCaches, verify: &verify::VerifyBatch, tail: impl FnOnce(&DeviceBuffer) -> R) -> (Tape, DecodeInputs, verify::VerifyLayout, DeviceBuffer, R) {
+        let g = &self.gpu;
+        let inputs = self.alloc_decode_inputs_at(tokens.len() as u32, self.paged_step_shape(caches).1);
+        let layout = verify.upload(g);
+        g.begin_tape();
+        let hidden = self.decode_batch_dispatches(tokens, caches, None, Some(verify), Some(&inputs), Some(&layout));
+        let out = tail(&hidden);
+        (g.end_tape(), inputs, layout, hidden, out)
     }
 
     /// Copy slot `slot`'s recurrent state and conv history between its row of the pool (`into_work`: pool to the

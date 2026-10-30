@@ -96,6 +96,14 @@ impl<'a> VerifyBatch<'a> {
             .collect()
     }
 
+    /// Rewrite the buffers of a layout uploaded earlier ([`Self::upload`]) for this batch, which has the same row counts
+    /// as the batch the layout was made for: a recorded round is replayed with the sequences it is handed.
+    pub(crate) fn write_layout(&self, g: &Gpu, layout: &VerifyLayout) {
+        g.write(&layout.rows, self.slots);
+        g.write(&layout.counts, self.counts);
+        g.write(&layout.offs, &self.offsets());
+    }
+
     /// Upload the layout to `g`. Called before the pass's first dispatch.
     pub(crate) fn upload(&self, g: &Gpu) -> VerifyLayout {
         let put = |v: &[u32]| {

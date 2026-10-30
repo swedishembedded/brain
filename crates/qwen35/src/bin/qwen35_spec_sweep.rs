@@ -215,10 +215,14 @@ const TOOLS: &str = r#"[
 /// The rendered, tokenized prompt of request `i` of `workload`.
 fn prompt_ids(tok: &data::qwen_tokenizer::QwenBpe, workload: &str, i: usize) -> Vec<u32> {
     if workload == "random" {
-        // The serving benchmark's prompts: RANDOM_PROMPT_TOKENS uniformly drawn ordinary tokens, no chat markup.
+        // The serving benchmark's prompts: RANDOM_PROMPT_TOKENS uniformly drawn ordinary tokens decoded to text, which the
+        // chat template then wraps like any user message (thinking on, the template's default).
         // seed: a fixed stream per request index, so two runs of the sweep compare token for token
         let mut rng = data::rng::Lcg::new(0x5eed + i as u64);
-        return (0..RANDOM_PROMPT_TOKENS).map(|_| 1000 + (rng.unit() * 100_000.0) as u32).collect();
+        let ids: Vec<u32> = (0..RANDOM_PROMPT_TOKENS).map(|_| 1000 + (rng.unit() * 100_000.0) as u32).collect();
+        let messages = serde_json::json!([{ "role": "user", "content": tok.decode(&ids) }]).to_string();
+        let inv = qwen35::caps::with_template_flavor_default(&capability::Invocation::new().set("messages", serde_json::json!(messages)));
+        return qwen3::chat::parse_request(tok, &inv).expect("render the chat prompt").ids;
     }
     let (tasks, tools): (&[&str; 16], bool) = if workload == "code" { (&CODE_TASKS, false) } else { (&AGENT_TASKS, true) };
     // Distinct requests past 16: the same task, a different variant tag.
@@ -571,6 +575,7 @@ fn main() {
                 stats.plain_steps - stats0.plain_steps,
                 sched.decoder_mut().instance().mtp_forwards() - fwd0
             );
+            println!("         steps the cost gate sent to plain decoding: {}", stats.gated_steps - stats0.gated_steps);
             let times = sched.decoder_mut().spec_times();
             println!(
                 "         time in draft {:.0} ms, verify {:.0} ms, commit {:.0} ms of {:.0} ms",

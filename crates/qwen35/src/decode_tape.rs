@@ -121,6 +121,9 @@ pub(crate) enum HeadKind {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct PlanKey {
     pub rows: u32,
+    /// Rows each sequence carries when the step is a speculative verify round (every sequence the same number); 0 for a
+    /// plain decode step, one row each.
+    pub per_seq: u32,
     /// Keys of attention capacity the step was built at ([`Qwen35::paged_step_shape`](crate::model::Qwen35)).
     pub cap: u32,
     pub head: HeadKind,
@@ -138,6 +141,8 @@ pub(crate) struct DecodePlan {
     pub tape: Tape,
     pub inputs: DecodeInputs,
     pub out: PlanOut,
+    /// A verify round's per-sequence layout and the hidden block it leaves for the host (the drafter's input).
+    pub verify: Option<(crate::model::verify::VerifyLayout, DeviceBuffer)>,
 }
 
 /// Recordings kept per instance. A serving batch moves between a handful of row counts and, slowly, context buckets, so
