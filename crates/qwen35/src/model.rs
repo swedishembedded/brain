@@ -3314,8 +3314,11 @@ impl Qwen35 {
         }
         let (h, down_act) = if epilogue {
             // `silu(gate) * up` and its quantisation for `down` in one launch.
-            let (h, act) = self.quant_epilogue(1, &gate_pre, Some(&up), n, ff);
-            (h.expect("a silu_mul epilogue hands back its product"), Some(act))
+            let (h, act) = self.silu_mul_e4m3(&gate_pre, &up, n, ff).unwrap_or_else(|| {
+                let (h, act) = self.quant_epilogue(1, &gate_pre, Some(&up), n, ff);
+                (h.expect("a silu_mul epilogue hands back its product"), act)
+            });
+            (h, Some(act))
         } else {
             let h = g.storage_uninit((n * ff) as u64); // both silu_mul forms write all n * ff words
             // On the vendor-library path the product and its bf16 rounding come out of one pass, and the
@@ -4420,6 +4423,23 @@ impl Qwen35 {
     /// activations leaves the slots to the packing.
     fn fused_writes_bf16(&self) -> bool {
         !self.packs_activations() && self.weights.values().any(|w| w.dtype() == Dtype::F8E4M3)
+    }
+
+    /// The MLP product `silu(gate) * up` with the E4M3 rows of the FP8 `down` projection written in the same pass (the
+    /// product is kept for the consumers of its fp32 rows). `None` unless this build packs no int8 rows, `down` reads E4M3
+    /// activations at this row count on this device and the device offers the kernel: the callers then take
+    /// [`Self::quant_epilogue`] and the product's own quantisation launch.
+    fn silu_mul_e4m3(&self, gate: &DeviceBuffer, up: &DeviceBuffer, rows: u32, k: u32) -> Option<(DeviceBuffer, Act)> {
+        if self.packs_activations() || !self.ops.fp8_reads_e4m3(rows, k, self.cfg.d_model) {
+            return None;
+        }
+        let g = &self.gpu;
+        let product = g.storage_uninit(rows as u64 * k as u64);
+        let mut steps = Vec::new();
+        let (q, s) = gpu_core::provider::library::silu_mul_quantize_e4m3_rows(g, &mut steps, gate, up, &product, rows, k)?;
+        g.submit(&[], &steps);
+        let act = self.ops.act_f32_with_e4m3(&product, rows, k, q, s);
+        Some((product, act))
     }
 
     /// One launch that produces the activation an int8 linear reads AND

@@ -2606,6 +2606,23 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/topk_rows_f32.cu"),
     },
     CudaKernel {
+        name: "silu_mul_quant_e4m3_128",
+        op: Op::Elementwise,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: FP8_CVT_MIN_CC,
+        entry: "brain_silu_mul_quant_e4m3_128",
+        what: "the SwiGLU product silu(gate) * up of fp32 rows and its E4M3 quantisation (one f32 scale, amax / 448, per 128 elements) in one pass: `quant_epilogue` and `quant_e4m3_128` without the product read back",
+        reported: "native:silu_mul_quant_e4m3_128",
+        block_dim: 256,
+        // 8 warps a block, a warp per 128-element block: 1024 elements per block.
+        tile: (1, 1024),
+        shared_bytes: 0,
+        programmatic: false,
+        src: include_str!("../cu/silu_mul_quant_e4m3_128.cu"),
+    },
+    CudaKernel {
         name: "quant_e4m3_128",
         op: Op::Elementwise,
         weight: Dtype::F32,

@@ -227,6 +227,28 @@ pub fn quantize_e4m3_rows_into(gpu: &Gpu, steps: &mut Vec<Step>, x: &Operand, ro
     Some(())
 }
 
+/// Bindings of `silu_mul_quant_e4m3_128`: params, gate rows, up rows, the fp32 product, the E4M3 bytes, the scales.
+const SILU_MUL_QUANT_E4M3_BINDINGS: &[BindKind] =
+    &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite, BindKind::StorageReadWrite, BindKind::StorageReadWrite];
+
+/// `silu(gate) * up` of two `[rows, k]` fp32 buffers into `product`, quantised to E4M3 in the same pass
+/// ([`quantize_e4m3_rows`] of the product, without reading it back): pushes the step and returns the bytes and scales.
+/// `None` when the device declines the kernel or the shape is not one it takes (`k` a multiple of 128).
+pub fn silu_mul_quantize_e4m3_rows(gpu: &Gpu, steps: &mut Vec<Step>, gate: &DeviceBuffer, up: &DeviceBuffer, product: &DeviceBuffer, rows: u32, k: u32) -> Option<(DeviceBuffer, DeviceBuffer)> {
+    let elems = u64::from(rows) * u64::from(k);
+    if rows == 0 || !k.is_multiple_of(128) || elems > u64::from(u32::MAX) {
+        return None;
+    }
+    let kernel = kernels_cuda::get("silu_mul_quant_e4m3_128")?;
+    let id = gpu.native_kernel(kernel, SILU_MUL_QUANT_E4M3_BINDINGS)?;
+    // Every byte and every scale is written, so the scratch is not cleared.
+    let q = gpu.storage_uninit(elems.div_ceil(4));
+    let s = gpu.storage_uninit(elems / 128);
+    let step = gpu.step_native(id, &[gate, up, product, &q, &s], &[rows, k], kernel.blocks_for(1, elems as u32))?;
+    steps.push(step);
+    Some((q, s))
+}
+
 impl LibraryGemmProvider {
     /// The provider for `gpu` under `precision`, reading the backend's own
     /// availability answer. Logs the decision once per process.

@@ -409,3 +409,8 @@ measurement (16-256), not fixed globally.
   programs whose buffers no other stream touched (`Fence::seq`, `CudaBackend::foreign_fences`); `Gpu::reclaim_due` drops the `cuMemGetInfo` of every prefill round. Output tok/s c = 1 / 4 / 16 / 64
   74.0 / 287.8 / 536.3 / 777.6 -> 80.4 / 305.9 / 580.8 / 836.6 (same session), gap between tokens at c = 1 550 -> ~150 us, greedy chats byte-identical. Open: device sampler + K-step decode, `fresh` GDN segments, mixed tail on the card,
   prefill attention row offsets, lifetime-planned arena + graph per row-count bucket for mixed iterations and training, per-stage plans for cross-card chains.
+- 2026-10-30 (mixed-iteration audit, knowledge 391): the c=64 figures of shared-seed sweeps (851, 857, 882 tok/s, ITL p50 25 ms) carried prefix-cache hits of the c=16 prompts; with a seed per
+  concurrency the same code serves c=64 at 735-745 tok/s (ITL p50 90 ms), c=16 520. New `--itl-target-ms N` (model-agnostic serving limit, Qwen3.8 GGUF engine; others report it ignored): 45 / 90 ms
+  at c=64 trade TTFT (3.8 s / 1.2 s) for gaps, throughput 798 / 845 against 851 default (shared-seed numbers), it does not buy throughput. Landed `silu_mul_quant_e4m3_128` (MLP product + E4M3 rows
+  in one pass, bit-identical to the pair, 104 -> 48 us a layer, +0.5 % served). Tried and not kept (no un-profiled gain): retaining the pool's working set, an M-RoPE row cache. Open items and the
+  per-kernel table in knowledge 391.
