@@ -1394,12 +1394,20 @@ impl Qwen35GgufInstance {
     /// one, ordered on the two streams, so the host neither waits for a stage nor carries its output. Only
     /// the first stage's input (the embedding rows, which live in the mapped file) and the last stage's output
     /// (which the head projects) cross the host. A stage whose layer range is empty passes its input through.
-    fn chain_stages<'s>(
+    fn chain_stages<'s>(&'s self, input: &[f32], run: impl FnMut(&'s DeviceShard, StageRows<'_>) -> DeviceBuffer, observe: impl FnMut(&Gpu, &DeviceBuffer)) -> Vec<f32> {
+        let words = input.len();
+        self.chain_stages_with(input, run, observe, |g, out| g.read(out, words))
+    }
+
+    /// [`Self::chain_stages`] with the last stage's output handed to `finish` instead of read whole: a caller that
+    /// needs a few rows of a large block (a mixed round's decode rows and each prompt's last row) reads only those.
+    fn chain_stages_with<'s, R>(
         &'s self,
         input: &[f32],
         mut run: impl FnMut(&'s DeviceShard, StageRows<'_>) -> DeviceBuffer,
         mut observe: impl FnMut(&Gpu, &DeviceBuffer),
-    ) -> Vec<f32> {
+        finish: impl FnOnce(&Gpu, &DeviceBuffer) -> R,
+    ) -> R {
         let words = input.len();
         let mut prev: Option<(&Gpu, DeviceBuffer)> = None;
         for s in &self.shards {
@@ -1412,7 +1420,7 @@ impl Qwen35GgufInstance {
             prev = Some((&s.qwen35.gpu, out));
         }
         let (g, out) = prev.expect("a plan always has at least one stage");
-        g.read(&out, words)
+        finish(g, &out)
     }
 
     /// One token through EVERY stage in order, then the head - returning
@@ -2045,7 +2053,19 @@ impl Qwen35GgufInstance {
         });
         let tokens: Vec<u32> = decode.map_or(&[][..], |(tokens, ..)| tokens).iter().copied().chain(jobs.iter().flat_map(|j| j.prompt[j.start..j.end].iter().copied())).collect();
         let embedded = self.embed_rows(&tokens)?;
-        let carry = self.chain_stages(
+        // Only the rows the caller uses cross to the host: the decode rows, and per job its last row (every row
+        // when `collect`, the drafter's feed).
+        let wanted: Vec<(usize, usize)> = {
+            let mut row0 = lead;
+            let mut spans = vec![(0, lead)];
+            for j in jobs {
+                let rows = j.end - j.start;
+                spans.push(if collect { (row0, rows) } else { (row0 + rows - 1, 1) });
+                row0 += rows;
+            }
+            spans
+        };
+        let blocks = self.chain_stages_with(
             &embedded,
             |s, rows| {
                 let segs: Vec<PrefillSeg<'_>> =
@@ -2060,16 +2080,28 @@ impl Qwen35GgufInstance {
                 }
             },
             |_, _| {},
+            |g, out| {
+                wanted
+                    .iter()
+                    .map(|&(row0, rows)| {
+                        let mut block = vec![0.0f32; rows * d];
+                        if rows > 0 {
+                            g.read_into(out, (row0 * d) as u64, &mut block);
+                        }
+                        block
+                    })
+                    .collect::<Vec<_>>()
+            },
         );
-        let mut row0 = lead;
-        let mut out = Vec::with_capacity(jobs.len());
-        for j in jobs {
-            let rows = j.end - j.start;
-            let block = &carry[row0 * d..(row0 + rows) * d];
-            out.push(MultiPrefillRows { last: block[(rows - 1) * d..].to_vec(), all: if collect { block.to_vec() } else { Vec::new() } });
-            row0 += rows;
-        }
-        Ok((carry[..lead * d].to_vec(), out))
+        let mut blocks = blocks.into_iter();
+        let decoded = blocks.next().expect("the decode rows come first");
+        let out = blocks
+            .map(|block| {
+                let last = block[block.len() - d..].to_vec();
+                MultiPrefillRows { last, all: if collect { block } else { Vec::new() } }
+            })
+            .collect();
+        Ok((decoded, out))
     }
 
     /// Recurrent-state rows the stages hold ([`KvLayout::state_rows`]).

@@ -135,12 +135,17 @@ impl PackedSource {
         if row_len == 0 || rows.iter().any(|&r| r.checked_add(1).and_then(|e| e.checked_mul(row_len)).is_none_or(|e| e as u64 > numel)) {
             return Ok(None);
         }
-        let decoded = backend_cpu::par::map(rows.len(), |i| self.read_range(name, (rows[i] * row_len) as u64, row_len as u64));
-        let mut out = Vec::with_capacity(rows.len() * row_len);
-        for row in decoded {
-            out.extend_from_slice(&row?.expect("the row was bounds-checked above"));
+        // Each worker decodes its rows straight into their place in the result.
+        let mut out = vec![0.0f32; rows.len() * row_len];
+        let failure = std::sync::Mutex::new(None);
+        backend_cpu::par::rows_mut(&mut out, row_len, |i, dst| match self.read_range(name, (rows[i] * row_len) as u64, row_len as u64) {
+            Ok(row) => dst.copy_from_slice(&row.expect("the row was bounds-checked above")),
+            Err(e) => *failure.lock().unwrap_or_else(|p| p.into_inner()) = Some(e),
+        });
+        match failure.into_inner().unwrap_or_else(|p| p.into_inner()) {
+            Some(e) => Err(e),
+            None => Ok(Some(out)),
         }
-        Ok(Some(out))
     }
 
     /// The format and bytes of every tensor served, as stored, under the names the model asks for.
