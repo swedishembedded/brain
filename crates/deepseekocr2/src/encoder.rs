@@ -84,8 +84,6 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("silu_mul", kernels::SILU_MUL),
     ("silu_bwd_da", kernels::SILU_BWD_DA),
     ("silu_bwd_db", kernels::SILU_BWD_DB),
-    // The shared adapter runtime (`model::adapter::exec`) dispatches it for the vision tower's LoRA.
-    ("axpy", kernels::AXPY),
     ("adamw", kernels::ADAMW),
     ("gradnorm_sq", kernels::GRADNORM_SQ),
     ("grad_scale", kernels::GRAD_SCALE),
