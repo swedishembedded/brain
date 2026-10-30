@@ -341,4 +341,15 @@ measurement (16-256), not fixed globally.
   overlap of S and the softmax and a 128-key S tile (364 -> ~500 TFLOPS), cluster multicast of the K/V fetch, the bf16 cache (still version 2),
   the training forward/backward (dense forward and `flash_attn_bwd_f16` still on `mma.sync`, unchanged), selection through the measured
   candidate tuner instead of the capability floor (the kernel is chosen where the part has `wgmma`; the tuner has no attention slot yet).
+- 2026-10-30 (GDN prefill on bf16 tensor cores, knowledge 384): the Gated DeltaNet serving prefill has a second form, `gdn_chunk_prep_tok_bf16` +
+  `gdn_chunk_loop_bf16` (bf16 operands rounded once in the prep, fp32 accumulation, fp32 state in registers, prefetched tiles), chosen per device by
+  measurement (`gpu-core/src/gdn_prefill_tune.rs`, slot `gdn_prefill`, `--kernel gdn_prefill=exact|bf16` pins it) and admitted within 4 bf16 steps
+  of the exact TF32 form; the triangular solve of both preps goes by panels of eight rows. 48 heads x 8192 tokens a layer 3.83 -> 1.20 ms (prep
+  1.66 -> 0.85, recurrence 2.97 -> 0.77 in ncu, before the prep went to three blocks an SM); served output tok/s at 1 / 4 / 16 / 64 52.6 / 213.9 / 390.1 / 535.8 -> 53.1 / 210.0 / 400.5 /
+  573.8, 31K TTFT 4.87 -> 4.49 s; `qwen35_fp8_parity` (8 x 1800 tokens) 98.83 % / KL 1.55e-3 -> 99.22 % / 1.19e-3. W8K NF4 train probe 937 -> 981
+  tok/s (the checkpointed forward takes it; losses equal to the fourth digit). Open, by weight: a 31K prefill is now 2.13 s FP8 GEMM (0.78 PFLOPS),
+  0.51 s attention, 0.25 s GDN, 0.7 s of elementwise kernels around the GDN layers (`mul`, `quant_epilogue`, `quant_e4m3_128`, `add_rms_quant`,
+  `rmsnorm_rows`, `gdn_conv_silu_tok`) and 0.8 s of wall clock over the kernel sum; the GDN train-form forward and the backward (436 ms of a 5.4 s
+  W8K device step) need a restructuring, not a bf16 flag (9 % / 5 % faster with bf16 operands: bound by staging and barriers); the single-split
+  attention at 1K / 4K needs the round's context in `PrefillShape` (about 0.3 ms of a 130 ms iteration).
 
