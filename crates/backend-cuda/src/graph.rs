@@ -737,6 +737,10 @@ impl GraphCache {
 /// tape`): the dispatches are the same and what varies reaches them through
 /// buffers, so a launch needs none of that.
 ///
+/// How a frozen program is cut into graphs: steps in the first, steps in each later one (the same cuts a held pass is
+/// issued in, [`crate::backend::PASS_FIRST_FLUSH_STEPS`] and [`crate::backend::PASS_FLUSH_STEPS`]).
+const FREEZE_CHUNKS: (usize, usize) = (crate::backend::PASS_FIRST_FLUSH_STEPS, crate::backend::PASS_FLUSH_STEPS);
+
 /// Parameters are frozen by giving every step its own PRIVATE uniform block,
 /// filled once before the capture. The shared uniform blocks the eager path and a
 /// [`GraphCache`] use are keyed on a dispatch's structure with its parameter
@@ -749,8 +753,10 @@ impl GraphCache {
 /// private uniforms, the buffers cleared first - and the modules the kernels
 /// live in, so no address can be freed and recycled behind it.
 pub(crate) struct Frozen {
-    _graph: exec::Graph,
-    pub(crate) exec: exec::GraphExec,
+    _graphs: Vec<exec::Graph>,
+    /// The program's graphs in launch order: one, or - for a long program - a short first graph (so the card starts
+    /// while the host is still launching) followed by longer ones. Stream order sequences them.
+    pub(crate) execs: Vec<exec::GraphExec>,
     /// Buffers (and their allocator-visible owners) the nodes read or write.
     /// Every allocation the program uses, and whether any of its steps writes it.
     pub(crate) touched: Vec<(Arc<exec::DeviceMem>, bool)>,
@@ -758,6 +764,9 @@ pub(crate) struct Frozen {
     _modules: Vec<Arc<crate::backend::Compiled>>,
     /// Dispatches in the program, for the host-cost counters.
     pub(crate) dispatches: usize,
+    /// [`crate::backend::CudaBackend::foreign_fences`] when the buffers were last checked for other streams' work
+    /// (`u64::MAX`: never). A launch while it is unchanged has nothing new to wait for.
+    pub(crate) fenced_at: std::sync::atomic::AtomicU64,
 }
 
 // Same reasoning as `LiveNode`: the contents are opaque driver handles and
@@ -779,7 +788,7 @@ impl Frozen {
     /// order - as one program. Fails, having issued nothing, if the driver
     /// refuses any part of it.
     pub fn capture(ctx: &exec::Context, segments: Vec<(Vec<Arc<exec::DeviceMem>>, Vec<Resolved>)>) -> Result<Frozen, String> {
-        Self::capture_inner(ctx, segments, None).map(|(f, _)| f)
+        Self::capture_inner(ctx, segments, None, Some(FREEZE_CHUNKS)).map(|(f, _)| f)
     }
 
     /// [`Self::capture`] with an event recorded after every dispatch (and one
@@ -788,7 +797,7 @@ impl Frozen {
     pub fn capture_profiled(ctx: &exec::Context, segments: Vec<(Vec<Arc<exec::DeviceMem>>, Vec<Resolved>)>) -> Result<Profiled, String> {
         let mut stamps = Vec::new();
         let start = ctx.event()?;
-        let (frozen, _) = Self::capture_inner(ctx, segments, Some((&start, &mut stamps)))?;
+        let (frozen, _) = Self::capture_inner(ctx, segments, Some((&start, &mut stamps)), None)?;
         Ok(Profiled { frozen, stamps, start })
     }
 
@@ -796,6 +805,7 @@ impl Frozen {
         ctx: &exec::Context,
         segments: Vec<(Vec<Arc<exec::DeviceMem>>, Vec<Resolved>)>,
         mut stamps: Option<(&exec::Event, &mut Vec<(String, exec::Event)>)>,
+        chunks: Option<(usize, usize)>,
     ) -> Result<(Frozen, ()), String> {
         // The library handle is created (it allocates) before a capture opens, not by the first product inside one: a program
         // whose first library product is its own would otherwise fail to freeze.
@@ -825,10 +835,11 @@ impl Frozen {
             private.push(idx);
         }
 
-        let capture = ctx.begin_capture()?;
+        let mut capture = ctx.begin_capture()?;
         if let Some((start, _)) = &stamps {
             ctx.record_in_capture(start)?;
         }
+        let (mut graphs, mut execs, mut in_graph) = (Vec::new(), Vec::new(), 0usize);
         let mut touched: Vec<(Arc<exec::DeviceMem>, bool)> = Vec::new();
         let mut modules: Vec<Arc<crate::backend::Compiled>> = Vec::new();
         let mut dispatches = 0usize;
@@ -838,6 +849,19 @@ impl Frozen {
                 touched.push((c.clone(), true));
             }
             for (s, own) in steps.iter().zip(idx) {
+                // A long program is several graphs: the first is short, so the card is running while the host launches
+                // the rest (launching a graph costs the host time in proportion to its nodes, and a monolithic one
+                // starts nothing before its last node is queued).
+                if let Some((first, rest)) = chunks {
+                    if in_graph >= if execs.is_empty() { first } else { rest } {
+                        let graph = capture.finish()?;
+                        execs.push(ctx.instantiate(&graph)?);
+                        graphs.push(graph);
+                        capture = ctx.begin_capture()?;
+                        in_graph = 0;
+                    }
+                }
+                in_graph += 1;
                 let mut args = s.args.clone();
                 if let Some(u) = own {
                     // `Resolved::args[0]` is the uniform pointer of a kernel that takes one.
@@ -868,7 +892,8 @@ impl Frozen {
             }
         }
         let graph = capture.finish()?;
-        let exec = ctx.instantiate(&graph)?;
+        execs.push(ctx.instantiate(&graph)?);
+        graphs.push(graph);
         modules.sort_by_key(|m| Arc::as_ptr(m) as usize);
         modules.dedup_by_key(|m| Arc::as_ptr(m) as usize);
         // One entry per allocation, a write if any step writes it.
@@ -878,6 +903,6 @@ impl Frozen {
             *keep_w |= same && *w;
             same
         });
-        Ok((Frozen { _graph: graph, exec, touched, _uniforms: uniforms, _modules: modules, dispatches }, ()))
+        Ok((Frozen { _graphs: graphs, execs, touched, _uniforms: uniforms, _modules: modules, dispatches, fenced_at: std::sync::atomic::AtomicU64::new(u64::MAX) }, ()))
     }
 }

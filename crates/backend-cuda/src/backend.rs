@@ -470,6 +470,13 @@ pub struct CudaBackend {
     /// Ordering events this handle has created, reused once no buffer's fence names them any more - see
     /// [`Self::ordering_event`].
     fence_events: Mutex<Vec<Arc<exec::Event>>>,
+    /// Records made so far with [`Self::ordering_event`], the stamp of [`exec::Fence::seq`].
+    fence_seq: AtomicU64,
+    /// For each other stream, the latest record of it this handle's stream has waited for ([`Self::fence_in`]).
+    waited: Mutex<HashMap<u64, u64>>,
+    /// [`Self::fence_out`] calls this handle made, against [`FENCE_OUTS`] (all handles): their difference is the
+    /// fences other streams have published, which a frozen program checks before it scans its buffers again.
+    own_fence_outs: AtomicU64,
     /// **Last field on purpose.** Rust drops a struct's fields in declaration
     /// order, and every other field above either holds device memory, a loaded
     /// module or an instantiated graph - all of which are resources OF this
@@ -492,6 +499,9 @@ pub struct CudaBackend {
 /// been held when `flush` is called, so a repeating pass is cut at the same
 /// steps every iteration and each chunk repeats and replays.
 pub const PASS_FLUSH_STEPS: usize = 256;
+
+/// [`CudaBackend::fence_out`] calls made by all handles of the process.
+static FENCE_OUTS: AtomicU64 = AtomicU64::new(0);
 
 /// The same threshold for the FIRST chunk of a pass: the host time spent before
 /// the card has anything to do is the part of the build that is not hidden
@@ -571,6 +581,9 @@ impl CudaBackend {
             timing: AtomicBool::new(false),
             kernel_times: Mutex::new(KernelTimes::default()),
             fence_events: Mutex::new(Vec::new()),
+            fence_seq: AtomicU64::new(0),
+            waited: Mutex::new(HashMap::new()),
+            own_fence_outs: AtomicU64::new(0),
         }
     }
 
@@ -1046,21 +1059,32 @@ impl CudaBackend {
         if !exec::several_contexts_open() {
             return;
         }
-        let mut waited: Vec<*const exec::Event> = Vec::new();
+        let mut waited = self.waited.lock().unwrap_or_else(|e| e.into_inner());
         for (m, write) in uses {
             if m.rows_shared.load(Ordering::Acquire) {
                 continue;
             }
             let guard = m.fence.lock().unwrap_or_else(|e| e.into_inner());
             for f in guard.conflicting(write) {
-                if f.stream_id != self.ctx.stream_id() && !waited.contains(&Arc::as_ptr(&f.event)) {
-                    waited.push(Arc::as_ptr(&f.event));
-                    if let Err(e) = self.ctx.wait_event(&f.event) {
-                        tracing::warn!(reason = %e, "backend-cuda: cannot order this stream after another handle's work");
+                // A stream orders its own work, and waiting for a record of another stream covers every earlier record
+                // of it: a buffer last written (say, a weight at load) long before is not waited for again.
+                if f.stream_id == self.ctx.stream_id() || waited.get(&f.stream_id).is_some_and(|&seen| seen >= f.seq) {
+                    continue;
+                }
+                match self.ctx.wait_event(&f.event) {
+                    Ok(()) => {
+                        waited.insert(f.stream_id, f.seq);
                     }
+                    Err(e) => tracing::warn!(reason = %e, "backend-cuda: cannot order this stream after another handle's work"),
                 }
             }
         }
+    }
+
+    /// Fences other handles have published since this handle last looked, as a counter: unchanged means no buffer has
+    /// a new fence from another stream.
+    fn foreign_fences(&self) -> u64 {
+        FENCE_OUTS.load(Ordering::Acquire).wrapping_sub(self.own_fence_outs.load(Ordering::Acquire))
     }
 
     /// Wrap a freshly allocated and zeroed allocation as a buffer, fenced so
@@ -1075,7 +1099,7 @@ impl CudaBackend {
     /// An ordering event stamped on this handle's stream now. One no buffer's fence references any more is
     /// re-recorded instead of a new one created and destroyed per submission (3000 create/destroy pairs a mixed
     /// iteration): a stream that already waited on it waited on the earlier record, which re-recording leaves alone.
-    fn ordering_event(&self) -> Result<Arc<exec::Event>, String> {
+    fn ordering_event(&self) -> Result<(Arc<exec::Event>, u64), String> {
         /// Events kept for reuse; past it a fresh one is created and dropped as before.
         const FENCE_EVENT_CAP: usize = 4096;
         let mut pool = self.fence_events.lock().unwrap_or_else(|e| e.into_inner());
@@ -1090,7 +1114,9 @@ impl CudaBackend {
             }
         };
         self.ctx.record(&event)?;
-        Ok(event)
+        // Stamped under the pool's lock, with the record: along this stream the stamps rise with the records.
+        let seq = self.fence_seq.fetch_add(1, Ordering::AcqRel) + 1;
+        Ok((event, seq))
     }
 
     /// Record that this handle's stream has just done work on `bufs`, so any
@@ -1100,7 +1126,7 @@ impl CudaBackend {
         if !exec::several_contexts_open() {
             return;
         }
-        let event = match self.ordering_event() {
+        let (event, seq) = match self.ordering_event() {
             Ok(e) => e,
             Err(e) => {
                 tracing::warn!(reason = %e, "backend-cuda: cannot record an ordering event");
@@ -1111,8 +1137,10 @@ impl CudaBackend {
             if m.rows_shared.load(Ordering::Acquire) {
                 continue;
             }
-            m.fence.lock().unwrap_or_else(|e| e.into_inner()).record(exec::Fence { stream_id: self.ctx.stream_id(), event: Arc::clone(&event) }, write);
+            m.fence.lock().unwrap_or_else(|e| e.into_inner()).record(exec::Fence { stream_id: self.ctx.stream_id(), event: Arc::clone(&event), seq }, write);
         }
+        self.own_fence_outs.fetch_add(1, Ordering::AcqRel);
+        FENCE_OUTS.fetch_add(1, Ordering::AcqRel);
     }
 
     /// An event recorded on this handle's stream now, from the pool when one is
@@ -1657,7 +1685,7 @@ impl backend_api::Backend for CudaBackend {
         // One launch to warm the graph (first launch uploads and may stall), then `reps` measured.
         let measured = (0..=reps).try_for_each(|rep| -> Result<(), String> {
             self.fence_in(frozen.touched.iter().map(|(m, w)| (m, *w)));
-            self.ctx.launch_graph(&frozen.exec)?;
+            self.ctx.launch_graph(&frozen.execs[0])?;
             self.fence_out(frozen.touched.iter().map(|(m, w)| (m, *w)));
             self.ctx.sync()?;
             if rep == 0 {
@@ -1690,10 +1718,20 @@ impl backend_api::Backend for CudaBackend {
         }
         let f = program.downcast_ref::<Frozen>();
         let t0 = std::time::Instant::now();
-        self.fence_in(f.touched.iter().map(|(m, w)| (m, *w)));
-        if let Err(e) = self.ctx.launch_graph(&f.exec) {
-            tracing::warn!(reason = %e, "backend-cuda: launching a frozen program failed; submitting its steps one by one");
-            return false;
+        // A program binds hundreds of buffers (every weight): scanning them for other streams' work is the largest host
+        // cost of its launch, and is owed only when another stream has published a fence since the last launch.
+        let foreign = self.foreign_fences();
+        if f.fenced_at.load(Ordering::Acquire) != foreign {
+            self.fence_in(f.touched.iter().map(|(m, w)| (m, *w)));
+            f.fenced_at.store(foreign, Ordering::Release);
+        }
+        for (at, exec) in f.execs.iter().enumerate() {
+            if let Err(e) = self.ctx.launch_graph(exec) {
+                // Once a graph has been launched the rest of the program cannot be submitted again from its start.
+                assert!(at == 0, "backend-cuda: launching graph {at} of a frozen program failed after the first was queued: {e}");
+                tracing::warn!(reason = %e, "backend-cuda: launching a frozen program failed; submitting its steps one by one");
+                return false;
+            }
         }
         self.fence_out(f.touched.iter().map(|(m, w)| (m, *w)));
         self.counters.submits.fetch_add(1, Ordering::Relaxed);

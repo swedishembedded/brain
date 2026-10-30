@@ -1568,6 +1568,9 @@ pub fn several_contexts_open() -> bool {
 pub struct Fence {
     pub stream_id: u64,
     pub event: std::sync::Arc<Event>,
+    /// Position of the event's record among the records of its stream (rising along the stream): a stream that has
+    /// waited for a record of this stream at or after `seq` has waited for this one too.
+    pub seq: u64,
 }
 
 /// The work other streams may still be doing to an allocation, split by what
