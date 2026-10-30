@@ -3,3 +3,4 @@ crates/qwen35/src/bin/qwen35_bench.rs	bench_gqa:Lcg::new(11)	rng	bench-input: sy
 crates/qwen35/src/bin/qwen35_bench.rs	bench_mlp:Lcg::new(13)	rng	bench-input: synthetic input that defines the measured workload
 crates/qwen35/src/bin/qwen35_prefill_profile.rs	main:init_weights#1=7	positional	bench-input: synthetic weights and inputs that define the measured workload
 crates/qwen35/src/bin/stream_train_step.rs	main:init_lora_only#1=20260820	positional	bench-input: synthetic weights and inputs that define the measured workload
+crates/qwen35/src/bin/qwen35_spec_sweep.rs	prompt_ids:Lcg::new(0x5eed)	rng	bench-input: the same random prompt tokens for a request index in every run, so two modes compare token for token

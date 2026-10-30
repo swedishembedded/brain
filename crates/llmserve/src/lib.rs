@@ -618,11 +618,19 @@ pub fn run_open_scheduled<D: PagedDecoder>(
 pub fn scheduler_metrics<D: PagedDecoder>(sched: &Scheduler<D>) -> Vec<(String, serde_json::Value)> {
     let (hit, looked, cached) = sched.prefix_stats();
     let rate = if looked > 0 { hit as f64 / looked as f64 } else { 0.0 };
+    let spec = sched.spec_stats();
+    let accept = if spec.proposed > 0 { spec.accepted as f64 / spec.proposed as f64 } else { 0.0 };
     vec![
         ("kv_prefix_hit_rate".to_string(), serde_json::json!(rate)),
         ("kv_prefix_hit_tokens".to_string(), serde_json::json!(hit)),
         ("kv_prefix_lookup_tokens".to_string(), serde_json::json!(looked)),
         ("kv_prefix_cached_blocks".to_string(), serde_json::json!(cached)),
+        ("spec_verify_steps".to_string(), serde_json::json!(spec.verify_steps)),
+        ("spec_rounds".to_string(), serde_json::json!(spec.rounds)),
+        ("spec_proposed".to_string(), serde_json::json!(spec.proposed)),
+        ("spec_accepted".to_string(), serde_json::json!(spec.accepted)),
+        ("spec_accept_rate".to_string(), serde_json::json!(accept)),
+        ("spec_tokens_per_round".to_string(), serde_json::json!(spec.tokens_per_round())),
     ]
 }
 

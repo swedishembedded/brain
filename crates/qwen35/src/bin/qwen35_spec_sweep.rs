@@ -25,7 +25,7 @@
 //! Usage:
 //!   qwen35_spec_sweep <Qwen3.8-27B*.gguf> --speculative off|auto|mtp|ngram
 //!       [--ctx 4096] [--kv bf16] [--batches 1,8,16,32,64,128]
-//!       [--workload code|agent|both] [--new 128] [--dump FILE]
+//!       [--workload code|agent|both|random] [--new 128] [--dump FILE]
 //!       [--batch-limit N] [--raw-hidden] [--equivalence] [--temp T]
 //!       [--prefill-slice N] [--prefill-batch N] [--mix LEN:NEW,LEN:NEW,...] [--backend cuda|vulkan|wgpu]
 //!
@@ -50,6 +50,9 @@ use residency::{Device, ResidentModel};
 const REAL_PROMPT: &str = include_str!("../../tests/fixtures/real_prompt.txt");
 
 const RESERVE: u64 = 2 << 30;
+
+/// Prompt length of the `random` workload.
+const RANDOM_PROMPT_TOKENS: usize = 1024;
 
 struct Args {
     gguf: String,
@@ -120,7 +123,8 @@ fn parse_args() -> Args {
                     "code" => vec!["code"],
                     "agent" => vec!["agent"],
                     "both" => vec!["code", "agent"],
-                    other => panic!("--workload code|agent|both, got {other}"),
+                    "random" => vec!["random"],
+                    other => panic!("--workload code|agent|both|random, got {other}"),
                 }
             }
             "--new" => a.new_tokens = value("--new").parse().expect("--new N"),
@@ -156,7 +160,7 @@ fn parse_args() -> Args {
         }
     }
     if a.gguf.is_empty() {
-        eprintln!("usage: qwen35_spec_sweep <Qwen3.8-27B*.gguf> --speculative off|auto|mtp|ngram [--ctx N] [--kv f32|bf16|int8|fp8] [--batches a,b,c] [--workload code|agent|both] [--new N] [--dump FILE]");
+        eprintln!("usage: qwen35_spec_sweep <Qwen3.8-27B*.gguf> --speculative off|auto|mtp|ngram [--ctx N] [--kv f32|bf16|int8|fp8] [--batches a,b,c] [--workload code|agent|both|random] [--new N] [--dump FILE]");
         std::process::exit(2);
     }
     a
@@ -210,6 +214,12 @@ const TOOLS: &str = r#"[
 
 /// The rendered, tokenized prompt of request `i` of `workload`.
 fn prompt_ids(tok: &data::qwen_tokenizer::QwenBpe, workload: &str, i: usize) -> Vec<u32> {
+    if workload == "random" {
+        // The serving benchmark's prompts: RANDOM_PROMPT_TOKENS uniformly drawn ordinary tokens, no chat markup.
+        // seed: a fixed stream per request index, so two runs of the sweep compare token for token
+        let mut rng = data::rng::Lcg::new(0x5eed + i as u64);
+        return (0..RANDOM_PROMPT_TOKENS).map(|_| 1000 + (rng.unit() * 100_000.0) as u32).collect();
+    }
     let (tasks, tools): (&[&str; 16], bool) = if workload == "code" { (&CODE_TASKS, false) } else { (&AGENT_TASKS, true) };
     // Distinct requests past 16: the same task, a different variant tag.
     let text = if i < 16 { tasks[i % 16].to_string() } else { format!("{} (variant {})", tasks[i % 16], i / 16) };
@@ -521,11 +531,12 @@ fn main() {
                 .map(|i| {
                     let prompt = prompt_ids(&tok, workload, i);
                     assert!(prompt.len() + a.new_tokens + 8 <= a.ctx as usize, "prompt of {} tokens does not fit --ctx", prompt.len());
-                    sched.submit_sampled(Request { prompt, max_new: a.new_tokens, stop: stop.clone() }, SampleParams { temp: a.temp, top_k: 20, top_p: 0.95, ..SampleParams::greedy() }, seed_base.wrapping_add(i as u64))
+                    sched.submit_sampled(Request { prompt, max_new: a.new_tokens, stop: if workload == &"random" { Vec::new() } else { stop.clone() } }, SampleParams { temp: a.temp, top_k: 20, top_p: 0.95, ..SampleParams::greedy() }, seed_base.wrapping_add(i as u64))
                 })
                 .collect();
-            // Admit everything (prefill), then time the decode alone.
-            while sched.running_len() < b as usize {
+            // Admit everything (prefill), then time the decode alone (the `random` workload times the whole request).
+            // The `random` workload is the serving benchmark's shape: prompts and decode share the wall clock.
+            while *workload != "random" && sched.running_len() < b as usize {
                 sched.step();
             }
             let before: usize = ids.iter().map(|&id| sched.tokens_of(id).map_or(0, <[u32]>::len)).sum();

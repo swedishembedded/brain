@@ -398,6 +398,11 @@ fn log_request_tokens(exec: &residency::Executor, model: &str, outcome: &Outcome
         if let (Some(hit), Some(looked)) = (get("kv_prefix_hit_tokens"), get("kv_prefix_lookup_tokens")) {
             line += &format!(", kv_cache_hit_tokens={hit} (cumulative), kv_cache_lookup_tokens={looked} (cumulative)");
         }
+        if let (Some(rounds), Some(accept), Some(per_round)) = (get("spec_rounds"), get("spec_accept_rate"), get("spec_tokens_per_round")) {
+            if rounds.as_u64().unwrap_or(0) > 0 {
+                line += &format!(", spec_rounds={rounds} spec_accept_rate={accept:.3} spec_tokens_per_round={per_round:.2} (cumulative)");
+            }
+        }
     }
     residency::log::info(&line);
 }
