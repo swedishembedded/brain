@@ -455,7 +455,7 @@ fn production_shape_prefill_forward_bench() {
     let out = g.storage(len as u64);
     let fin = g.storage((bh * 128 * 128) as u64);
     let scratch = GdnTokScratchBufs::new(&g, &shape);
-    let mut run = || {
+    let run = || {
         let (steps, _) = gdn_chunk_fwd_tokens(&g, &ids, &shape, &tok, &qcm, &kcm, &initial, &scratch.as_ref(), &out, &fin, true).expect("served");
         g.submit(&[], &steps);
         g.poll_wait();
