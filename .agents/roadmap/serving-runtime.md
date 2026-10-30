@@ -147,6 +147,11 @@ Increments, each measured (nsys card-busy %, API calls per iteration, client tok
   clears of overwritten buffers; row views instead of the 1008 `concat_split` copies), which is also what makes C replayable.
 - **C: the full round as a plan, then graph lowering** with the row count bucketed (bounded graph memory), the per-step metadata
   upload of item 4, and the other backends' lowerings.
+- **Training on the same seams (2026-10-30, knowledge 389).** Shared pieces the 27B LoRA step now uses: `Gpu::retain_freed_blocks` (the pool's
+  release threshold follows the working set instead of the serving-sized 4 GiB; a loop that cycles more than that must raise it or it maps its
+  memory again after every synchronisation), `pass_scope` per layer, native `mul`/`splice_add`/`splice`. The training step is 96 % card busy
+  without a graph; what B/C would still give it is the 0.2 s of launch gaps and a host-free step, and it needs the same two things serving
+  waits for (serving re-checked after these changes: c=1/4/16/64 79.0/300.9/573.1/850.0 tok/s, 31K TTFT 3.99 s): lifetime-planned arena offsets (a W8K step requests 1.5 TB of buffers over a 40 GB peak) and graph-safe library GEMMs (item 5).
 
 ## Mixed iterations (design, 2026-10-29; items 8 and 11)
 
