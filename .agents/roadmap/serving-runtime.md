@@ -414,3 +414,5 @@ measurement (16-256), not fixed globally.
   at c=64 trade TTFT (3.8 s / 1.2 s) for gaps, throughput 798 / 845 against 851 default (shared-seed numbers), it does not buy throughput. Landed `silu_mul_quant_e4m3_128` (MLP product + E4M3 rows
   in one pass, bit-identical to the pair, 104 -> 48 us a layer, +0.5 % served). Tried and not kept (no un-profiled gain): retaining the pool's working set, an M-RoPE row cache. Open items and the
   per-kernel table in knowledge 391.
+
+Mixed-iteration idle (knowledge 392, 2026-10-30): a prompt start no longer waits on the device (zeroed pool row) and a finished prompt's first token rides the forward's head pass; scheduling floor curve is flat (713-775 tok/s at c=64 over floors 256-2048); remaining idle <= 1.4 ms, so asynchronous scheduling (row 4) is worth ~1.5 %.
