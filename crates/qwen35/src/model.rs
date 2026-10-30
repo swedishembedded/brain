@@ -955,6 +955,18 @@ pub(crate) struct PooledCaches<'a> {
     pub scatter: usize,
 }
 
+/// Per-row coordinates of a whole round (decode rows, then each sequence's prompt rows): where a row's K/V is
+/// appended and the M-RoPE table at its own position.
+struct RoundRows {
+    /// `[n]` u32: the physical block of each row's K/V append.
+    blocks: DeviceBuffer,
+    /// `[n]` u32: the row inside that block.
+    offsets: DeviceBuffer,
+    /// `[n, rotary_dim/2]` M-RoPE tables at each row's position.
+    cos: DeviceBuffer,
+    sin: DeviceBuffer,
+}
+
 /// One sequence of a multi-sequence round, as the layers see it.
 struct SegRound {
     rows: u32,
@@ -964,18 +976,17 @@ struct SegRound {
     slot: DeviceBuffer,
     start: u32,
     max_bt: u32,
-    blocks: DeviceBuffer,
-    offsets: DeviceBuffer,
     tables: DeviceBuffer,
     seq_lens: DeviceBuffer,
-    cos: DeviceBuffer,
-    sin: DeviceBuffer,
 }
 
 /// A multi-sequence round: the caches and every sequence's coordinates.
 pub(crate) struct MultiRound<'a> {
     caches: &'a PooledCaches<'a>,
     segs: Vec<SegRound>,
+    /// The coordinates of every row of the round, decode rows first, for the attention front half and the K/V
+    /// append, which run once over the whole round.
+    rows: RoundRows,
     /// The segments' table for the one-pass Gated DeltaNet kernels (`model::gdn_segments`), where the device serves them.
     gdn: Option<model::gdn_segments::GdnSegmentRound>,
     /// Decode rows that lead the round's activation rows (a mixed round, [`Qwen35::run_mixed_stage`]); the
@@ -989,9 +1000,6 @@ struct MixedDecode<'a> {
     /// `[rows]` u32: each row's recurrent-state pool row.
     slot_rows: &'a DeviceBuffer,
     paged: &'a model::gqa_mixer::PagedDecodeBatch<'a>,
-    /// `[rows, rotary_dim/2]` M-RoPE tables at each row's own position.
-    cos: &'a DeviceBuffer,
-    sin: &'a DeviceBuffer,
 }
 
 /// Everything [`Qwen35::layer_gqa_fwd`]'s training branch saves for
@@ -3053,7 +3061,7 @@ impl Qwen35 {
             Some(GqaCached::Ring(rc)) => (rc.cos, rc.sin),
             Some(GqaCached::Decode(dc)) => (dc.cos, dc.sin),
             // Each sequence of a multi-sequence round brings its own tables below.
-            Some(GqaCached::Segments(round, _)) => (&round.segs[0].cos, &round.segs[0].sin),
+            Some(GqaCached::Segments(round, _)) => (&round.rows.cos, &round.rows.sin),
         };
         let weights = model::gqa_mixer::GqaMixerWeights { q_norm: self.w(&p("q_norm.weight")), k_norm: self.w(&p("k_norm.weight")), cos, sin };
         // Set by the decode arm that fuses the sigmoid gate into the quantiser.
@@ -3115,49 +3123,44 @@ impl Qwen35 {
                 None,
             ),
             Some(GqaCached::Segments(round, layer)) => {
+                // The front half (split, QK norm, rotation) and the K/V append run once over every row of the round,
+                // whichever sequences they belong to; only the attention, which reads a sequence's own keys, is
+                // per sequence. A row's arithmetic does not depend on its neighbours, so each row is what it was
+                // when every sequence ran the chain on its own rows.
                 let kv = self.kv_kernels(layer);
-                let (qpd, kvd) = (c.q_proj_dim(), c.kv_dim());
-                let whole = round.segs.len() == 1 && round.decode.is_none();
-                // The decode rows and the segments cover every row, so `all` needs no clear.
-                let all = (!whole).then(|| g.storage_uninit((n * shape.qd()) as u64));
-                let mut only = None;
-                // A mixed round's leading decode rows: paged decode attention over each sequence's own window.
-                if let (Some(dec), Some(all)) = (&round.decode, &all) {
-                    let (q_d, k_d, v_d) = (self.take_rows(&q_full, qpd, n, 0, dec.rows), self.take_rows(&k, kvd, n, 0, dec.rows), self.take_rows(&v, kvd, n, 0, dec.rows));
-                    let dec_weights = model::gqa_mixer::GqaMixerWeights { q_norm: weights.q_norm, k_norm: weights.k_norm, cos: dec.cos, sin: dec.sin };
-                    let ctx_d = model::gqa_mixer::gqa_mixer_decode_batched_kv_fwd(g, &gqa_mixer_ids(), &kv, DECODE_SOFTMAX_BATCHED, &shape, &dec_weights, &q_d, &k_d, &v_d, layer, dec.rows, dec.paged);
-                    self.put_rows_copy(&ctx_d, all, shape.qd(), 0, dec.rows);
+                let ids = gqa_mixer_ids();
+                let prep = model::gqa_mixer::qkv_prepare(g, &ids, &shape, &weights, &q_full, &k, n);
+                g.submit(&[], &model::block::kv_append_rows(g, &kv, nkv, hd, round.caches.gqa_cap, n, &prep.k_normed, &v, layer, &round.rows.blocks, &round.rows.offsets));
+                // The decode rows and the segments cover every row, so `ctx` needs no clear.
+                let ctx = g.storage_uninit((n * shape.qd()) as u64);
+                // The decode rows lead the round, so their queries and outputs are the heads of the round's buffers.
+                if let Some(dec) = &round.decode {
+                    let p = dec.paged;
+                    g.submit(
+                        &[],
+                        &model::block::gqa_decode_batched_attend_steps_kv(g, &kv, DECODE_SOFTMAX_BATCHED, nh, nkv, hd, dec.rows, p.block_size, p.max_bt, p.cap, p.pin_splits, &prep.q_normed, layer, p.block_tables, p.seq_lens, &ctx),
+                    );
                 }
                 for seg in &round.segs {
                     let rows = seg.rows;
-                    let (q_i, k_i, v_i) = if whole {
-                        (q_full.clone(), k.clone(), v.clone())
-                    } else {
-                        (self.take_rows(&q_full, qpd, n, seg.row0, rows), self.take_rows(&k, kvd, n, seg.row0, rows), self.take_rows(&v, kvd, n, seg.row0, rows))
-                    };
-                    let seg_weights = model::gqa_mixer::GqaMixerWeights { q_norm: weights.q_norm, k_norm: weights.k_norm, cos: &seg.cos, sin: &seg.sin };
-                    let ctx_i = model::gqa_mixer::gqa_mixer_chunk_kv_fwd_paged(
-                        g,
-                        &gqa_mixer_ids(),
-                        &kv,
-                        DECODE_SOFTMAX_BATCHED,
-                        &shape,
-                        &seg_weights,
-                        &q_i,
-                        &k_i,
-                        &v_i,
-                        rows,
-                        seg.start,
-                        layer,
-                        &model::block::ChunkPaging { block_size: round.caches.gqa_cap, max_bt: seg.max_bt, blocks: &seg.blocks, offsets: &seg.offsets, tables: &seg.tables },
-                        &seg.seq_lens,
+                    let whole = rows == n;
+                    let (q_i, ctx_i) = if whole { (prep.q_normed.clone(), ctx.clone()) } else { (self.take_rows(&prep.q_normed, shape.qd(), n, seg.row0, rows), g.storage_uninit((rows * shape.qd()) as u64)) };
+                    g.submit(
+                        &[],
+                        &model::block::gqa_chunk_attend_steps_kv_paged(g, &kv, DECODE_SOFTMAX_BATCHED, nh, nkv, hd, seg.start, rows, &q_i, layer, round.caches.gqa_cap, seg.max_bt, &seg.tables, &seg.seq_lens, &ctx_i),
                     );
-                    match &all {
-                        Some(all) => self.put_rows_copy(&ctx_i, all, shape.qd(), seg.row0, rows),
-                        None => only = Some(ctx_i),
+                    if !whole {
+                        self.put_rows_copy(&ctx_i, &ctx, shape.qd(), seg.row0, rows);
                     }
                 }
-                (all.or(only).expect("a round has at least one sequence"), None)
+                if epilogue {
+                    // The sigmoid output gate rides on the quantisation for `o_proj`, as in a decode step.
+                    let (gated, act) = self.quant_epilogue(2, &ctx, Some(&prep.q_gate), n, shape.qd());
+                    o_proj_act = Some(act);
+                    (gated.expect("a gated epilogue hands back its product"), None)
+                } else {
+                    (model::gqa_mixer::gate_ctx(g, &ids, &ctx, &prep.q_gate, n, shape.qd()).1, None)
+                }
             }
             Some(GqaCached::Decode(dc)) if epilogue => {
                 // The sigmoid output gate rides on the quantisation below. The
@@ -5337,42 +5340,40 @@ impl Qwen35 {
             inputs
         });
         let paged = decode.zip(decode_inputs.as_ref()).map(|((_, dcaches), inputs)| self.paged_decode_batch(dcaches, inputs, None));
+        let words = |w: &[u32]| {
+            // The write below fills every word.
+            let buf = g.storage_uninit(w.len() as u64);
+            g.write(&buf, w);
+            buf
+        };
+        // Every row of the round in order: where its K/V goes and its own position (the decode rows' coordinates are
+        // the ones `write_decode_inputs` derives).
+        let (mut all_blocks, mut all_offsets, mut all_positions): (Vec<u32>, Vec<u32>, Vec<[u32; 3]>) = (Vec::new(), Vec::new(), Vec::new());
+        if let Some((_, dcaches)) = decode {
+            for s in dcaches.seqs {
+                all_blocks.push(s.window.blocks()[(s.pos / caches.gqa_cap) as usize]);
+                all_offsets.push(s.pos % caches.gqa_cap);
+                all_positions.push([s.pos; 3]);
+            }
+        }
         for seg in segs {
             let rows = seg.tokens.len() as u32;
-
-            let positions: Vec<[u32; 3]> = (0..rows).map(|i| [seg.pos_start + i; 3]).collect();
-            let (cos, sin) = qwen3vl::mrope::mrope_tables_scaled(&positions, c.mrope_section, c.rotary_dim(), c.rope_theta, yarn.as_ref().map(|(f, a)| (f.as_slice(), *a)));
-            let words = |w: &[u32]| {
-                // The write below fills every word.
-                let buf = g.storage_uninit(w.len() as u64);
-                g.write(&buf, w);
-                buf
-            };
             let slot = words(&[seg.slot]);
             let (row_blocks, row_offsets, row_tables, max_bt) = seg.gqa_window.chunk_rows(caches.gqa_cap, seg.pos_start, rows);
-            let blocks = words(&row_blocks);
-            let offsets = words(&row_offsets);
+            all_blocks.extend_from_slice(&row_blocks);
+            all_offsets.extend_from_slice(&row_offsets);
+            all_positions.extend((0..rows).map(|i| [seg.pos_start + i; 3]));
             let tables = words(&row_tables);
             let seq_lens = words(&(0..rows).map(|i| seg.pos_start + i + 1).collect::<Vec<u32>>());
-            round.push(SegRound {
-                rows,
-                row0,
-                slot,
-                start: seg.pos_start,
-                max_bt,
-                blocks,
-                offsets,
-                tables,
-                seq_lens,
-                cos: g.storage_init("qwen35.multi.cos", &cos),
-                sin: g.storage_init("qwen35.multi.sin", &sin),
-            });
+            round.push(SegRound { rows, row0, slot, start: seg.pos_start, max_bt, tables, seq_lens });
             row0 += rows;
         }
-        let mixed = decode_inputs.as_ref().zip(paged.as_ref()).map(|(inputs, paged)| MixedDecode { rows: lead, slot_rows: &inputs.slot_rows, paged, cos: &inputs.cos, sin: &inputs.sin });
+        let (cos, sin) = qwen3vl::mrope::mrope_tables_scaled(&all_positions, c.mrope_section, c.rotary_dim(), c.rope_theta, yarn.as_ref().map(|(f, a)| (f.as_slice(), *a)));
+        let rows = RoundRows { blocks: words(&all_blocks), offsets: words(&all_offsets), cos: g.storage_init("qwen35.multi.cos", &cos), sin: g.storage_init("qwen35.multi.sin", &sin) };
+        let mixed = decode_inputs.as_ref().zip(paged.as_ref()).map(|(inputs, paged)| MixedDecode { rows: lead, slot_rows: &inputs.slot_rows, paged });
         let spans: Vec<_> = round.iter().zip(segs).map(|(r, s)| model::gdn_segments::SegmentSpan { row0: r.row0, rows: r.rows, slot: s.slot }).collect();
         let gdn = (c.layer_types().contains(&LayerType::Linear) && !self.is_train).then(|| model::gdn_segments::GdnSegmentRound::new(g, &spans)).flatten();
-        let round = MultiRound { caches, segs: round, gdn, decode: mixed };
+        let round = MultiRound { caches, segs: round, rows, gdn, decode: mixed };
         let mut mixer = |l: usize, ty: LayerType, _res: &DeviceBuffer, xn1: &DeviceBuffer, pre: Option<Act>, epilogue: bool| -> DeviceBuffer {
             match ty {
                 LayerType::Linear => self.layer_gdn_fwd_pre(l, xn1, pre, epilogue, n, GdnCall::Segments(&round)).0,

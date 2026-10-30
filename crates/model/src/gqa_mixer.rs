@@ -799,14 +799,16 @@ pub fn gqa_mixer_decode_fused_kv_attend(
 /// [`gqa_mixer_fwd`] and [`gqa_mixer_chunk_fwd`]: the per-head `[value|gate]`
 /// de-interleave, QK-norm, and partial M-RoPE. Only what happens BETWEEN
 /// these outputs and the output gate differs between the two entry points.
-struct QkvPrepared {
-    q_normed: DeviceBuffer,
-    k_normed: DeviceBuffer,
-    q_value: DeviceBuffer,
-    q_gate: DeviceBuffer,
+pub struct QkvPrepared {
+    pub q_normed: DeviceBuffer,
+    pub k_normed: DeviceBuffer,
+    pub q_value: DeviceBuffer,
+    pub q_gate: DeviceBuffer,
 }
 
-fn qkv_prepare(g: &Gpu, ids: &GqaMixerIds, shape: &GqaMixerShape, w: &GqaMixerWeights, q_full: &DeviceBuffer, k: &DeviceBuffer, n: u32) -> QkvPrepared {
+/// The `[value|gate]` split, QK norm and rotation of `n` rows. Every step works on a row at a time, so the rows may
+/// be any mix of sequences and positions: `w.cos`/`w.sin` carry one table row per row.
+pub fn qkv_prepare(g: &Gpu, ids: &GqaMixerIds, shape: &GqaMixerShape, w: &GqaMixerWeights, q_full: &DeviceBuffer, k: &DeviceBuffer, n: u32) -> QkvPrepared {
     let (nh, nkv, hd) = (shape.n_heads, shape.n_kv_heads, shape.head_dim);
     let (qd, kvd) = (shape.qd(), shape.kvd());
 

@@ -962,31 +962,74 @@ pub fn gqa_chunk_step_kv_paged(
     seq_lens: &DeviceBuffer,
     ctx: &DeviceBuffer,
 ) -> Vec<Step> {
-    let t_max = start + n;
     let ChunkPaging { block_size, max_bt, blocks, offsets, tables } = *paging;
+    let mut steps = kv_append_rows(g, kv, n_kv_heads, head_dim, block_size, n, k_new, v_new, layer, blocks, offsets);
+    steps.extend(gqa_chunk_attend_steps_kv_paged(g, kv, softmax, n_heads, n_kv_heads, head_dim, start, n, q, layer, block_size, max_bt, tables, seq_lens, ctx));
+    steps
+}
+
+/// The K/V appends of `n` rows to `layer`: row `i` lands at `offsets[i]` of block `blocks[i]`. The rows may belong to
+/// any mix of sequences (a decode row, a prompt chunk's consecutive tokens), so a round appends all of its rows with
+/// one pair of launches.
+#[allow(clippy::too_many_arguments)]
+pub fn kv_append_rows(
+    g: &Gpu,
+    kv: &KvKernels,
+    n_kv_heads: u32,
+    head_dim: u32,
+    block_size: u32,
+    n: u32,
+    k_new: &DeviceBuffer,
+    v_new: &DeviceBuffer,
+    layer: &KvLayer,
+    blocks: &DeviceBuffer,
+    offsets: &DeviceBuffer,
+) -> Vec<Step> {
+    let append = KvAppend { batch: n, kv_stride: n_kv_heads * head_dim, block_size, head_dim };
+    vec![kv.append(g, &layer.k, k_new, blocks, offsets, append), kv.append(g, &layer.v, v_new, blocks, offsets, append)]
+}
+
+/// [`gqa_chunk_step_kv_paged`]'s attention over keys already appended: `n` query rows of ONE sequence starting at
+/// absolute position `start`, reading `layer` through `tables` (`[n, max_bt]`) and `seq_lens`.
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_chunk_attend_steps_kv_paged(
+    g: &Gpu,
+    kv: &KvKernels,
+    softmax: usize,
+    n_heads: u32,
+    n_kv_heads: u32,
+    head_dim: u32,
+    start: u32,
+    n: u32,
+    q: &DeviceBuffer,
+    layer: &KvLayer,
+    block_size: u32,
+    max_bt: u32,
+    tables: &DeviceBuffer,
+    seq_lens: &DeviceBuffer,
+    ctx: &DeviceBuffer,
+) -> Vec<Step> {
+    let t_max = start + n;
     assert!(t_max <= block_size * max_bt, "gqa_chunk_step_kv: chunk end {t_max} exceeds the cache capacity {}", block_size * max_bt);
     let kv_stride = n_kv_heads * head_dim;
-    let append = KvAppend { batch: n, kv_stride, block_size, head_dim };
-    let mut steps = vec![kv.append(g, &layer.k, k_new, blocks, offsets, append), kv.append(g, &layer.v, v_new, blocks, offsets, append)];
     if head_dim == 256 && paged_attention_fused(g, true, false, head_dim, 0) {
-        steps.extend(kv.flash_prefill_hd256(g, q, &layer.k, &layer.v, tables, seq_lens, ctx, PrefillShape { n, n_heads, n_kv_heads, head_dim, block_size, max_bt }));
-        return steps;
+        return kv.flash_prefill_hd256(g, q, &layer.k, &layer.v, tables, seq_lens, ctx, PrefillShape { n, n_heads, n_kv_heads, head_dim, block_size, max_bt });
     }
     // Head width 128 has no portable fused kernel, but the native tensor-core one covers it on every tier that has one.
     if head_dim == 128 {
         let shape = PrefillShape { n, n_heads, n_kv_heads, head_dim, block_size, max_bt };
         if let Some(native) = kv.native_flash_prefill(g, q, &layer.k, &layer.v, tables, seq_lens, ctx, shape) {
-            steps.extend(native);
-            return steps;
+            return native;
         }
     }
     let shape = PagedDecodeShape { batch: n, n_heads, group: n_heads / n_kv_heads, head_dim, block_size, kv_stride, cap: t_max, max_bt, scale: 1.0 / (head_dim as f32).sqrt() };
     let scores = g.storage(n as u64 * n_heads as u64 * t_max as u64);
     let probs = g.storage(n as u64 * n_heads as u64 * t_max as u64);
-    steps.push(kv.scores(g, q, &layer.k, tables, seq_lens, &scores, shape));
-    steps.push(g.step(softmax, &[&scores, seq_lens, &probs], &[n, n_heads, t_max], n * n_heads));
-    steps.push(kv.apply(g, &probs, &layer.v, tables, seq_lens, ctx, shape));
-    steps
+    vec![
+        kv.scores(g, q, &layer.k, tables, seq_lens, &scores, shape),
+        g.step(softmax, &[&scores, seq_lens, &probs], &[n, n_heads, t_max], n * n_heads),
+        kv.apply(g, &probs, &layer.v, tables, seq_lens, ctx, shape),
+    ]
 }
 
 // ---- the full GQA attention SUBLAYER (norm -> QKV -> QK-norm -> RoPE ->
