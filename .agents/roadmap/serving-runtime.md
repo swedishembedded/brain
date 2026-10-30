@@ -352,9 +352,16 @@ measurement (16-256), not fixed globally.
   `rmsnorm_rows`, `gdn_conv_silu_tok`) and 0.8 s of wall clock over the kernel sum; the GDN train-form forward and the backward (436 ms of a 5.4 s
   W8K device step) need a restructuring, not a bf16 flag (9 % / 5 % faster with bf16 operands: bound by staging and barriers); the single-split
   attention at 1K / 4K needs the round's context in `PrefillShape` (about 0.3 ms of a 130 ms iteration).
-- 2026-10-30 (one-pass GDN segments, knowledge 385): a mixed round's prompt segments run the Gated DeltaNet mixer as three launches a layer
-  (`gdn_conv_silu_seg`, `gdn_chunk_prep_seg_bf16`, `gdn_chunk_loop_seg_bf16`, `model::gdn_segments`) addressed by a per-round table, on the pools'
-  state and history rows in place and the round's token-major tensors in place: no `take_rows` copies, no gather/scatter of the state, a segment's
-  short remainder is one more chunk of its walk, the gates and the gated norm run once over all rows. Median mixed iteration at c = 16 (nsys)
-  119.4 -> 108.2 ms span, 105.5 -> 95.0 ms of kernels; GDN launches 184 -> 48 a kind; served c = 16 / 64 output tok/s 395 / 568 -> 418 / 610.
+- 2026-10-30 (mixed-iteration glue, knowledge 385): a mixed round's prompt segments run the Gated DeltaNet mixer as three launches a layer
+  (`gdn_conv_silu_seg`, `gdn_chunk_prep_seg_bf16`, `gdn_chunk_loop_seg_bf16`, `model::gdn_segments`), addressed by a per-round table, on the pools' state and
+  history rows and the round's token-major tensors in place (no row copies, no gather/scatter, the short remainder is one more chunk of the walk); the gates
+  are formed in the prep's loads and `gdn_gated_norm` is the gated norm (+ E4M3 rows for the FP8 out projection) in one pass; the decode rows read the
+  projections in place. `MixedLimits::row_quantum` fills the GEMMs' last 128-row tile; a mixed forward reads back only the rows it uses; `topk_rows_f32`
+  is the whole 32-candidate head in one launch (2200 -> 209 us). Median mixed iteration at c = 16 (nsys): 119.4 ms / 690 rows -> 100.7 ms / 768 rows
+  (-24 % per row), launches of the GDN kinds 184 -> 48, `concat_split` 1209 -> 293; served c = 1 / 4 / 16 / 64 output tok/s 53 / 208 / 395 / 568 ->
+  57.9 / 239 / 425-451 / 655. Open, by weight: the FP8 GEMM (61 ms; the 816-block gate/up shape runs at 616 TFLOPS, a 128x256 tile or stream-K would
+  address its 7-wave quantisation), the E4M3 quantisation passes (8 ms; fusing into the 1024-thread epilogue measured slower, knowledge 385), the GQA
+  glue of a mixed round (~6 ms: five splits, two norms, two rotations, two appends, sigmoid/mul/splice a segment; per-round cos/sin tables and one
+  gate kernel), host time before the first kernel (4-6 ms: the embedding decode of the round), the decode step (42 % of a c = 16 run's wall clock:
+  `matmul_fp8_dq_stream_r4` at 2.1 TB/s of 3.5).
 
