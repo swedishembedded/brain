@@ -66,7 +66,14 @@ fn the_streaming_candidates_pass_the_admission_rule_on_ragged_shapes() {
     for kernel in ["matmul_fp8_dq_stream_r1", "matmul_fp8_dq_stream_r2", "matmul_fp8_dq_stream_r4", "matmul_fp8_dq_stream_q2", "matmul_fp8_dq_stream_q4"] {
         assert!(served.contains(kernel), "{kernel} served none of the shapes: {served:?}");
     }
-    for kernel in ["matmul_fp8_gemv_f16_a1w4d3b3", "matmul_fp8_gemv_f16_a1w4d4b5", "matmul_fp8_gemv_f16_a1w2d6b6", "matmul_fp8_gemv_f16_a2w4d4b3"] {
+    for kernel in [
+        "matmul_fp8_gemv_f16_a1w4d3b3",
+        "matmul_fp8_gemv_f16_a1w4d4b5",
+        "matmul_fp8_gemv_f16_a1w2d6b6",
+        "matmul_fp8_gemv_f16_a2w4d4b3",
+        "matmul_fp8_gemv_f16x_t8w8d2b1",
+        "matmul_fp8_gemv_f16x_t4w4d3b3",
+    ] {
         assert!(served.contains(kernel), "{kernel} served none of the shapes: {served:?}");
     }
 }

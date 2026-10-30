@@ -87,3 +87,10 @@ overcount it). FP8 27B, c = 1, int8 KV, ms a token:
    the sampling, ten small uploads and a 110 us `cuGraphLaunch`), 291 us idle between the first graph and the second (the host building 192 steps and a 377 us launch
    of the big graph), 88 us between the last layer and the head. `final_norm_step` runs the head's norm as `add_rms_quant` without the add (2.9 us; bit-equal when the
    unfused norm would have been the cooperative one) and the unneeded packing is skipped. The remaining 0.8 ms a token of host gaps is the next lever.
+5. **Nine to sixteen rows: the rows of x as the A operand.** `matmul_fp8_gemv_f16_*` puts 16 weight rows in the MMA's A operand and the rows of x in the 8-wide B
+   operand: two B tiles at 9-16 rows, each converted bf16 -> f16 per MMA and loaded one cache line a row, and it lost to `r4` there (43 us against 40 at 5120 x 17408).
+   `matmul_fp8_gemv_f16x_*` swaps the operands (16 rows of x are the A operand, converted once per k16 step and shared by the 8 or 4 weight tiles a warp streams; 8 weight rows
+   are the B operand): the activation work no longer grows with the rows. `t8w8d2b1` (64 weight rows a block, 8 warps taking the lines of K in turn, two ring slots, one block an SM) at 16
+   rows, isolated: 5120 x 34816 74.6 -> 64.7 us, 5120 x 17408 40.5 -> 38.7, 17408 x 5120 38.1 -> 35.0, 5120 x 10240 28.5 -> 26.8, 6144 x 5120 18.3 -> 16.3. Smaller blocks (32 rows)
+   re-read x once per 32 weight rows (L2 traffic equal to the weights'); 128-row blocks leave too few blocks for the small matrices. Served, 16 sequences: 483 -> 518 output tok/s,
+   decode step 17.3 -> 15.3 ms (the FP8 GEMVs of the step 12.2 -> 9.9 ms).

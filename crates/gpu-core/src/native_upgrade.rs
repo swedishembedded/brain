@@ -914,6 +914,36 @@ pub(crate) const FP8_ROWS: &[Row] = &[
     },
     Row {
         slow: "matmul_fp8_gemv",
+        target: Target::Named("matmul_fp8_gemv_f16x_t8w8d2b1"),
+        bindings: FP8_BINDINGS,
+        serves: serves_fp8_gemv_f16,
+        blocks: fp8_gemv_f16_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        input: Input::DEQUANT_BF16,
+        launch: CudaLaunch {
+            dynamic_shared_bytes: kernels_cuda::fp8_gemv_f16x_dynamic_shared_bytes(8, 8, 2),
+            shared_opt_in: true,
+            ..CudaLaunch::NONE
+        },
+    },
+    Row {
+        slow: "matmul_fp8_gemv",
+        target: Target::Named("matmul_fp8_gemv_f16x_t4w4d3b3"),
+        bindings: FP8_BINDINGS,
+        serves: serves_fp8_gemv_f16,
+        blocks: fp8_gemv_f16_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        input: Input::DEQUANT_BF16,
+        launch: CudaLaunch {
+            dynamic_shared_bytes: kernels_cuda::fp8_gemv_f16x_dynamic_shared_bytes(4, 4, 3),
+            shared_opt_in: true,
+            ..CudaLaunch::NONE
+        },
+    },
+    Row {
+        slow: "matmul_fp8_gemv",
         target: Target::Named("matmul_fp8_dq_wgmma"),
         bindings: FP8_BINDINGS,
         serves: serves_fp8_wgmma,

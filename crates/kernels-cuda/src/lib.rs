@@ -126,6 +126,11 @@ pub const I8_WGSTREAM_MAX_ROWS: u32 = 128;
 pub const I8_STREAM_MANY_ROWS: u32 = 64;
 /// Dynamic shared memory of `gdn_recur_pool`: one value head's 128 x 128 f32 state (the bf16 build stages half of it).
 pub const GDN_RECUR_TILE_F32_BYTES: u32 = 128 * 128 * 4;
+/// Dynamic shared memory per block of `matmul_fp8_gemv_f16x_*` with `wt` tiles of eight weight rows, `warps` warps and `stages` ring slots a
+/// warp (one line step of 128 k of the tile rows a slot); the warps' partial sums alias the ring after the loop.
+pub const fn fp8_gemv_f16x_dynamic_shared_bytes(wt: u32, warps: u32, stages: u32) -> u32 {
+    warps * stages * wt * 1024
+}
 /// Rows of x the `matmul_fp8_gemv_f16_*` candidates serve per launch.
 pub const FP8_GEMV_F16_ROWS: u32 = 16;
 /// Dynamic shared memory per block of `matmul_fp8_gemv_f16_*` with `at` 16-row weight tiles, `warps` warps and `stages` ring slots
@@ -2319,6 +2324,44 @@ pub const ALL: &[CudaKernel] = &[
         shared_bytes: 0,
         programmatic: true,
         src: concat!("#define BRAIN_FG_AT 2\n#define BRAIN_FG_WARPS 4\n#define BRAIN_FG_DEPTH 4\n#define BRAIN_FG_MIN_BLOCKS 3\n#define brain_matmul_fp8_gemv_f16 brain_matmul_fp8_gemv_f16_a2w4d4b3\n", include_str!("../cu/matmul_fp8_gemv_f16.cu")),
+    },
+    CudaKernel {
+        name: "matmul_fp8_gemv_f16x_t8w8d2b1",
+        // FP8 weight stream with the rows of x as the MMA's A operand (knowledge 386): the activation work does not grow from 9 to 16 rows;
+        // 8 tiles of 8 weight rows a warp, 8 warps taking the line steps of K in turn, 64 weight rows a block.
+        op: Op::MatMul,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_matmul_fp8_gemv_f16x_t8w8d2b1",
+        what: "FP8 E4M3 block-scaled weight matmul for 1 to 16 rows of bf16 x with the rows of x as the A operand of an f16 tensor-core MMA and the weights decoded in hardware as the B operand, the block scale folded once per 128 k in f32 (8 tiles of 8 weight rows a warp, 8 warps a block take the line steps of K in turn, 64 weight rows a block); agrees with the f64 reference of the stored weights to the f16 resolution of its inputs",
+        reported: "native:matmul_fp8_gemv_f16x_t8w8d2b1",
+        block_dim: 256,
+        tile: (1, 64),
+        // The partial sums of the warps alias the ring (dynamic shared memory, `fp8_gemv_f16x_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_FX_WT 8\n#define BRAIN_FX_WARPS 8\n#define BRAIN_FX_DEPTH 2\n#define BRAIN_FX_MIN_BLOCKS 1\n#define brain_matmul_fp8_gemv_f16x brain_matmul_fp8_gemv_f16x_t8w8d2b1\n", include_str!("../cu/matmul_fp8_gemv_f16x.cu")),
+    },
+    CudaKernel {
+        name: "matmul_fp8_gemv_f16x_t4w4d3b3",
+        // FP8 weight stream with the rows of x as the MMA's A operand (knowledge 386): the activation work does not grow from 9 to 16 rows;
+        // 4 tiles of 8 weight rows a warp, 4 warps taking the line steps of K in turn, 32 weight rows a block.
+        op: Op::MatMul,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_matmul_fp8_gemv_f16x_t4w4d3b3",
+        what: "FP8 E4M3 block-scaled weight matmul for 1 to 16 rows of bf16 x with the rows of x as the A operand of an f16 tensor-core MMA and the weights decoded in hardware as the B operand, the block scale folded once per 128 k in f32 (4 tiles of 8 weight rows a warp, 4 warps a block take the line steps of K in turn, 32 weight rows a block); agrees with the f64 reference of the stored weights to the f16 resolution of its inputs",
+        reported: "native:matmul_fp8_gemv_f16x_t4w4d3b3",
+        block_dim: 128,
+        tile: (1, 32),
+        // The partial sums of the warps alias the ring (dynamic shared memory, `fp8_gemv_f16x_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_FX_WT 4\n#define BRAIN_FX_WARPS 4\n#define BRAIN_FX_DEPTH 3\n#define BRAIN_FX_MIN_BLOCKS 3\n#define brain_matmul_fp8_gemv_f16x brain_matmul_fp8_gemv_f16x_t4w4d3b3\n", include_str!("../cu/matmul_fp8_gemv_f16x.cu")),
     },
     CudaKernel {
         name: "matmul_fp8_dq_wgmma",
