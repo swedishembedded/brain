@@ -431,8 +431,8 @@ const GDN_CHUNK_PREP_TOK_TRAIN_BINDINGS: &[BindKind] = &[
 ];
 
 /// Dynamic shared memory of `gdn_chunk_prep_tok_bf16`: bf16 key and query / value tiles (64 x 136), the attn0 / scaled-T
-/// space (two bf16 64 x 72), the fp32 T (64 x 68), four 64-float vectors and the solve's 3 x 8 x 64 partial sums.
-const GDN_CHUNK_PREP_BF16_DYNAMIC_SHARED_BYTES: u32 = 2 * 64 * 136 * 2 + 2 * 64 * 72 * 2 + 64 * 68 * 4 + 4 * 64 * 4 + 3 * 8 * 64 * 4;
+/// space (two bf16 64 x 72), the fp32 T (64 x 68) and four 64-float vectors (the solve's partial sums live in the query tile).
+const GDN_CHUNK_PREP_BF16_DYNAMIC_SHARED_BYTES: u32 = 2 * 64 * 136 * 2 + 2 * 64 * 72 * 2 + 64 * 68 * 4 + 4 * 64 * 4;
 
 /// Dynamic shared memory of `gdn_chunk_prep_tc`: the 64 x 132 key tile, the
 /// 64 x 136 query / value tile, two 64 x 68 matrices (attn0 and the solved T)

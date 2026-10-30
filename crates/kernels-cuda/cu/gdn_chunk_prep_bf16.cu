@@ -39,7 +39,7 @@
 
 #define SA_BYTES (2 * MAXC * STH * 2)  // attn0 (64 x 68 fp32 = 17408 B) is dead once T is solved; two bf16 64 x 72 operands take its place
 
-#define PREP_BF16_SMEM_BYTES (2 * MAXC * SKH * 2 + SA_BYTES + MAXC * SC * 4 + 4 * MAXC * 4 + 3 * 8 * MAXC * 4)
+#define PREP_BF16_SMEM_BYTES (2 * MAXC * SKH * 2 + SA_BYTES + MAXC * SC * 4 + 4 * MAXC * 4)
 
 // One chunk row per warp: the row of `src` (fp32, stride `stride`) is L2-normalised (`x * rsqrt(sum x^2 + eps)`, the
 // formula of `gdn_chunk_prep_tc`), written to the bf16 tile `tile` and, scaled by `row_scale[r] * extra`, to the
@@ -88,7 +88,7 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_chunk_prep_tok_b
     float* sexp = sg + MAXC;          // its exponential
     float* sbeta = sexp + MAXC;
     float* sdec = sbeta + MAXC;       // exp(g_last - g_cs)
-    float* sRed = sdec + MAXC;        // partial sums of the solve, [3][8][64]
+    float* sRed = reinterpret_cast<float*>(sXb);  // partial sums of the solve, [3][8][64]: the query tile is dead and the values load after
 
     const unsigned int tid = threadIdx.x, lane = tid & 31u, warp = tid >> 5;
     const unsigned int g = lane >> 2, t4 = lane & 3u, q = lane >> 3, l8 = lane & 7u;
@@ -180,17 +180,8 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_chunk_prep_tok_b
             }
         }
     }
-    // The query tile is dead: the value rows take its place.
+    // The query tile is dead after this barrier: the solve borrows its space for partial sums, the value rows take it after.
     __syncthreads();
-    for (unsigned int e = tid; e < MAXC * (D / 4); e += THREADS) {
-        const unsigned int r = e / (D / 4), c4 = e % (D / 4);
-        uint2 t = make_uint2(0u, 0u);
-        if (r < C) {
-            const float4 v = *reinterpret_cast<const float4*>(value_src + r * v_stride + c4 * 4);
-            t = make_uint2(brain_pack_bf16(v.x, v.y), brain_pack_bf16(v.z, v.w));
-        }
-        *reinterpret_cast<uint2*>(sXb + r * SKH + c4 * 4) = t;
-    }
 
     // ---- T = (I - attn0)^-1 (fp32) ----
     brain_unit_lower_inverse(sA, sT, sRed, SC, C);
@@ -202,6 +193,16 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_chunk_prep_tok_b
         sTu[r * STH + k] = static_cast<unsigned short>(brain_pack_bf16(t, 0.0f));
         sTw[r * STH + k] = static_cast<unsigned short>(brain_pack_bf16(t * sexp[k], 0.0f));
     }
+    for (unsigned int e = tid; e < MAXC * (D / 4); e += THREADS) {
+        const unsigned int r = e / (D / 4), c4 = e % (D / 4);
+        uint2 t = make_uint2(0u, 0u);
+        if (r < C) {
+            const float4 v = *reinterpret_cast<const float4*>(value_src + r * v_stride + c4 * 4);
+            t = make_uint2(brain_pack_bf16(v.x, v.y), brain_pack_bf16(v.z, v.w));
+        }
+        *reinterpret_cast<uint2*>(sXb + r * SKH + c4 * 4) = t;
+    }
+
     __syncthreads();
 
     // ---- u = (T diag(beta)) @ value and w = (T diag(beta exp_g_cs)) @ key: 64 x 128 outputs, K = chunk rows ----
