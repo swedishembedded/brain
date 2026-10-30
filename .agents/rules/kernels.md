@@ -300,6 +300,19 @@ existing caller. Assume nothing about units.
     warpgroups double the rate); N = 128 costs 127/141; `m64n256k16` with P in registers 219/299 for one/two. The tensor peak is 32 /
     64 / 128 cycles. Size the tile so the product has N >= 128 or give each warpgroup two independent accumulators.
 
+18. **A weight stream that stops at 55-65 % of the read roof with bytes in flight to spare is an instruction and barrier problem.** ncu of
+    `matmul_fp8_dq_stream_r4` (the FP8 decode GEMV): 4.5 thread instructions per weight byte, issue slots 42 % busy, one `__syncthreads` per 8 KB
+    stage, 3 blocks an SM (knowledge 386). Check issue slots and instructions per byte before Little's law. What removed it: each lane
+    `cp.async`-copies its OWN A fragment into a ring only its warp reads and reads the same bytes back (no barrier, the in-flight bytes cost
+    no registers: a register prefetch of the same depth took 255 registers and spilled), `cvt.rn.f16x2.e4m3x2` for the decode (1 instruction a
+    pair, exact), the block scale folded in f32 once per 128 k, and the first copies issued before `griddepcontrol.wait`. 2.0-2.4 -> 2.7-3.1 TB/s.
+
+19. **A kernel that does a serial walk per element-column wants its state staged in shared memory, not in 128 registers.** The pooled GDN decode
+    kept a state column in registers (168 registers, 6 M local-memory spill requests, 2.6 TB/s of DRAM traffic for 0.4 GB of state); staging the
+    head's 64 KB with 16-byte `cp.async` copies and walking it in two passes (recomputing the decayed value instead of holding it) left 3 blocks
+    an SM and no spills. Look at `Local Memory Spilling Requests` and the register count of every kernel with a long unrolled loop before
+    tuning anything else; and cap the unroll (`#pragma unroll 2`) if the compiler hoists every shared load of the loop into registers.
+
 ## D. Constraints that will bite you
 
 - **A buffer a dispatch writes is bound ONCE.** wgpu tracks usage per buffer for the

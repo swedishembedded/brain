@@ -94,3 +94,24 @@ overcount it). FP8 27B, c = 1, int8 KV, ms a token:
    rows, isolated: 5120 x 34816 74.6 -> 64.7 us, 5120 x 17408 40.5 -> 38.7, 17408 x 5120 38.1 -> 35.0, 5120 x 10240 28.5 -> 26.8, 6144 x 5120 18.3 -> 16.3. Smaller blocks (32 rows)
    re-read x once per 32 weight rows (L2 traffic equal to the weights'); 128-row blocks leave too few blocks for the small matrices. Served, 16 sequences: 483 -> 518 output tok/s,
    decode step 17.3 -> 15.3 ms (the FP8 GEMVs of the step 12.2 -> 9.9 ms).
+
+## Result
+
+Decode-step period (nsys, `--cuda-graph-trace=node`, 160 decoding steps of 48-token prompts, int8 KV, speculative off; the nsys numbers carry the profiler's
+own overhead) and served output tok/s (same client, 1K in / 128 out, `bench.sh`):
+
+| sequences | 1 | 4 | 16 | 64 |
+|---|---|---|---|---|
+| step, base (ms) | 16.0 | 16.2 | 20.2 | 40.0 |
+| step, now (ms) | 12.1 | 13.0 | 16.2 | 34.0 |
+| output tok/s, base | 58.7 | 242 | 465 | 675 |
+| output tok/s, now | 76.5 | 295 | 529 | 717 |
+
+Served inter-token latency at one sequence, outside the profiler: 15.7 -> 11.6 ms (target 11.5). 31K TTFT 4.46 -> 4.50 s. `qwen35_fp8_parity` (8 x 1500 tokens): both
+98.44 % / KL 2.73e-3. Greedy chat outputs (6 prompts, 96 tokens, temperature 0): 4 identical to the base token for token, 2 diverge after 300-400 characters; the base
+alone is only 2 of 6 identical between batch 1 and batch 6, so the numerics moved by less than batch composition already moves them. W8K NF4 train probe 1003-1022 tok/s
+(base 1003-1012 on the same node), `gdn_decode_native`, `gqa_decode_prep_native`, `add_rms_quant_native`, `quant_epilogue_native`, `readout_topk`, `fp8_linear_native`,
+`hf_fp8_conformance` pass.
+
+What did not help, measured: PDL `launch_dependents` ahead of `wait` in every small kernel (11.65 -> 11.61 ms, noise); first/later graph chunk sizes 40/128 (worse, 11.93) and 96/256
+(equal); an f32-reading GEMV (no cast launch, +4 us a GEMV); x as the A operand at 17-64 rows (x re-read once per 64 weight rows is as many L2 bytes as the weights).
