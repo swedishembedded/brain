@@ -34,7 +34,7 @@ const BLOCK: u32 = 8;
 const FIXED_SECS: f64 = 0.020;
 const PER_ROW_SECS: f64 = 0.0001;
 const TARGET: std::time::Duration = std::time::Duration::from_millis(45);
-const LIMITS: MixedLimits = MixedLimits { max_rows: 512, min_prompt_rows: 32 };
+const LIMITS: MixedLimits = MixedLimits { max_rows: 512, min_prompt_rows: 32, row_quantum: 1 };
 
 #[derive(Default)]
 struct Log {

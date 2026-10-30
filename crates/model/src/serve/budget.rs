@@ -25,6 +25,9 @@ pub struct MixedLimits {
     /// long a prompt can be held back (no starvation). Also the size of the first slices, before any iteration
     /// has been timed.
     pub min_prompt_rows: usize,
+    /// Rows the forward's matrix products tile by (1 for none). A product costs the same for every row count within a
+    /// tile, so the iteration takes the prompt rows that fill its last tile rather than leave it part empty.
+    pub row_quantum: usize,
 }
 
 /// Weight of the history kept per observation: the fit follows the last few dozen iterations.
@@ -107,7 +110,10 @@ impl StepCost {
         // A target the minimum slice already overruns is replaced by a little more than that slice takes.
         let target = target.max(UNREACHABLE_TARGET_STRETCH * (fixed + per_row * (decode_rows + floor) as f64));
         let rows_under_target = ((target - fixed) / per_row).max(0.0) as usize;
-        rows_under_target.saturating_sub(decode_rows).clamp(floor, room)
+        let rows = rows_under_target.saturating_sub(decode_rows).clamp(floor, room);
+        // The rows beyond the target that complete the last tile cost the rows' own (small) share, not a tile.
+        let filled = (decode_rows + rows).div_ceil(limits.row_quantum.max(1)) * limits.row_quantum.max(1) - decode_rows;
+        filled.min(room)
     }
 }
 
@@ -115,7 +121,7 @@ impl StepCost {
 mod tests {
     use super::*;
 
-    const LIMITS: MixedLimits = MixedLimits { max_rows: 1024, min_prompt_rows: 64 };
+    const LIMITS: MixedLimits = MixedLimits { max_rows: 1024, min_prompt_rows: 64, row_quantum: 1 };
 
     fn trained(fixed: f64, per_row: f64) -> StepCost {
         let mut c = StepCost::default();
@@ -155,8 +161,20 @@ mod tests {
         // 90 ms fixed, 0.1 ms a row: the 45 ms target is out of reach; 64 decode and 64 prompt rows take 102.8 ms,
         // a quarter more is 128.5 ms, which holds (128.5 - 90) / 0.1 - 64 = 321 prompt rows.
         let c = trained(0.090, 0.0001);
-        let rows = c.prompt_rows(MixedLimits { max_rows: 2048, min_prompt_rows: 64 }, 64, Some(0.045));
+        let rows = c.prompt_rows(MixedLimits { max_rows: 2048, min_prompt_rows: 64, row_quantum: 1 }, 64, Some(0.045));
         assert!((319..=322).contains(&rows), "{rows}");
+    }
+
+    #[test]
+    fn the_rows_fill_the_last_tile_of_the_products() {
+        // 20 ms of weights, 0.1 ms a row: 45 ms holds 250 rows, 16 of them decode: 234 prompt rows. 250 rows leave the
+        // second 128-row tile part empty, so the iteration takes the 240 prompt rows that make 256 rows in all.
+        let c = trained(0.020, 0.0001);
+        let tiled = MixedLimits { row_quantum: 128, ..LIMITS };
+        assert_eq!(c.prompt_rows(tiled, 16, Some(0.045)), 240);
+        // Never past the room in the forward.
+        let tight = MixedLimits { max_rows: 250, ..tiled };
+        assert_eq!(c.prompt_rows(tight, 16, Some(0.045)), 234);
     }
 
     #[test]

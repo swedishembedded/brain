@@ -45,6 +45,9 @@ const MIN_CACHED_TOKENS: usize = 64;
 /// enough to run as a tensor-core GEMM, so a prompt behind a busy decode batch still advances at a useful rate.
 // perf-number: a 128-row round is the smallest the prefill GEMM kernels serve at tile width
 const MIN_MIXED_PROMPT_ROWS: usize = 512;
+/// Rows of the matrix products' tile (the FP8 `wgmma` GEMM and the int8 tensor-core GEMMs take 128 rows of activations a
+/// block): a mixed iteration fills its last tile ([`MixedLimits::row_quantum`]).
+const MIXED_ROW_QUANTUM: usize = 128;
 
 /// Branch-point hints held for prompts not yet started; the oldest goes first (a hint whose prompt was cancelled
 /// before it started is never taken).
@@ -1254,7 +1257,7 @@ impl PagedDecoder for Qwen35GgufEngine {
         progress
     }
     fn mixed_step(&self) -> Option<MixedLimits> {
-        self.mixed.then(|| MixedLimits { max_rows: self.inst.prefill_round_rows() as usize, min_prompt_rows: MIN_MIXED_PROMPT_ROWS })
+        self.mixed.then(|| MixedLimits { max_rows: self.inst.prefill_round_rows() as usize, min_prompt_rows: MIN_MIXED_PROMPT_ROWS, row_quantum: MIXED_ROW_QUANTUM })
     }
     fn forward_mixed(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], cands: usize, jobs: &mut [PrefillJob<'_>]) -> MixedOutcome {
         assert_eq!(tables.len(), inputs.len(), "{MODEL}: tables/inputs length mismatch");
