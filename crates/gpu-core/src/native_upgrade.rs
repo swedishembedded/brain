@@ -340,6 +340,11 @@ fn serves_fp8_wgmma(p: &[u32]) -> bool {
     fp8_shape(p).is_some_and(|(m, ..)| m > backend_api::select::DECODE_REGIME_MAX_ROWS)
 }
 
+/// The swapped-operand Hopper FP8 GEMM: 17 to `NX` rows of x against the weights as the MMA's A operand.
+fn serves_fp8_wgmma_swap<const NX: u32>(p: &[u32]) -> bool {
+    fp8_shape(p).is_some_and(|(m, ..)| m > kernels_cuda::FP8_GEMV_F16_ROWS && m <= NX)
+}
+
 /// Cluster shape and dynamic shared memory of the FP8 streaming candidate at a split of `split` blocks, `bn` weight rows
 /// a block, room for `rows` rows of x and `stages` stages.
 const fn fp8_dq_stream_launch(split: u32, bn: u32, rows: u32, stages: u32) -> CudaLaunch {
@@ -970,6 +975,125 @@ pub(crate) const FP8_ROWS: &[Row] = &[
         launch: CudaLaunch {
             dynamic_shared_bytes: kernels_cuda::FP8_WGMMA_DYNAMIC_SHARED_BYTES,
             shared_opt_in: true,
+            arch: backend_api::ArchFeatures::Required,
+            ..CudaLaunch::NONE
+        },
+    },
+    Row {
+        slow: "matmul_fp8_gemv",
+        target: Target::Named("matmul_fp8_wgmma_swap_n64b64"),
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_fp8_wgmma_swap::<64>,
+        blocks: i8_stream_blocks::<1>,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        input: Input::FP8_NATIVE,
+        launch: CudaLaunch {
+            dynamic_shared_bytes: kernels_cuda::fp8_wgmma_swap_dynamic_shared_bytes(64, 64, 4),
+            shared_opt_in: true,
+            cluster: None,
+            arch: backend_api::ArchFeatures::Required,
+            ..CudaLaunch::NONE
+        },
+    },
+    Row {
+        slow: "matmul_fp8_gemv",
+        target: Target::Named("matmul_fp8_wgmma_swap_n64b64s2"),
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_fp8_wgmma_swap::<64>,
+        blocks: i8_stream_blocks::<2>,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        input: Input::FP8_NATIVE,
+        launch: CudaLaunch {
+            dynamic_shared_bytes: kernels_cuda::fp8_wgmma_swap_dynamic_shared_bytes(64, 64, 4),
+            shared_opt_in: true,
+            cluster: Some([2, 1, 1]),
+            arch: backend_api::ArchFeatures::Required,
+            ..CudaLaunch::NONE
+        },
+    },
+    Row {
+        slow: "matmul_fp8_gemv",
+        target: Target::Named("matmul_fp8_wgmma_swap_n64b64s4"),
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_fp8_wgmma_swap::<64>,
+        blocks: i8_stream_blocks::<4>,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        input: Input::FP8_NATIVE,
+        launch: CudaLaunch {
+            dynamic_shared_bytes: kernels_cuda::fp8_wgmma_swap_dynamic_shared_bytes(64, 64, 4),
+            shared_opt_in: true,
+            cluster: Some([4, 1, 1]),
+            arch: backend_api::ArchFeatures::Required,
+            ..CudaLaunch::NONE
+        },
+    },
+    Row {
+        slow: "matmul_fp8_gemv",
+        target: Target::Named("matmul_fp8_wgmma_swap_n32b64"),
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_fp8_wgmma_swap::<32>,
+        blocks: i8_stream_blocks::<1>,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        input: Input::FP8_NATIVE,
+        launch: CudaLaunch {
+            dynamic_shared_bytes: kernels_cuda::fp8_wgmma_swap_dynamic_shared_bytes(64, 32, 4),
+            shared_opt_in: true,
+            cluster: None,
+            arch: backend_api::ArchFeatures::Required,
+            ..CudaLaunch::NONE
+        },
+    },
+    Row {
+        slow: "matmul_fp8_gemv",
+        target: Target::Named("matmul_fp8_wgmma_swap_n32b64s2"),
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_fp8_wgmma_swap::<32>,
+        blocks: i8_stream_blocks::<2>,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        input: Input::FP8_NATIVE,
+        launch: CudaLaunch {
+            dynamic_shared_bytes: kernels_cuda::fp8_wgmma_swap_dynamic_shared_bytes(64, 32, 4),
+            shared_opt_in: true,
+            cluster: Some([2, 1, 1]),
+            arch: backend_api::ArchFeatures::Required,
+            ..CudaLaunch::NONE
+        },
+    },
+    Row {
+        slow: "matmul_fp8_gemv",
+        target: Target::Named("matmul_fp8_wgmma_swap_n32b64s4"),
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_fp8_wgmma_swap::<32>,
+        blocks: i8_stream_blocks::<4>,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        input: Input::FP8_NATIVE,
+        launch: CudaLaunch {
+            dynamic_shared_bytes: kernels_cuda::fp8_wgmma_swap_dynamic_shared_bytes(64, 32, 4),
+            shared_opt_in: true,
+            cluster: Some([4, 1, 1]),
+            arch: backend_api::ArchFeatures::Required,
+            ..CudaLaunch::NONE
+        },
+    },
+    Row {
+        slow: "matmul_fp8_gemv",
+        target: Target::Named("matmul_fp8_wgmma_swap_n64b128s2"),
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_fp8_wgmma_swap::<64>,
+        blocks: i8_stream_blocks::<2>,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        input: Input::FP8_NATIVE,
+        launch: CudaLaunch {
+            dynamic_shared_bytes: kernels_cuda::fp8_wgmma_swap_dynamic_shared_bytes(128, 64, 4),
+            shared_opt_in: true,
+            cluster: Some([2, 1, 1]),
             arch: backend_api::ArchFeatures::Required,
             ..CudaLaunch::NONE
         },

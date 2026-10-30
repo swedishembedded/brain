@@ -337,7 +337,7 @@ pub enum Fp8Act {
     E4m3,
 }
 
-pub use native_tune::{check_fp8_shape as native_check_fp8_shape, check_shape as native_check_shape, clear_forced as clear_forced_candidates, force_candidate, offered as native_candidates_offered, report as native_selection_report, report_for_default_device as native_selection_report_for_default_device, set_autotune as set_native_autotune, read_roof as native_read_roof, time_fp8_shape as native_time_fp8_shape, unknown_forced as unknown_forced_candidates, Verdict as NativeVerdict};
+pub use native_tune::{check_fp8_shape as native_check_fp8_shape, check_shape as native_check_shape, clear_forced as clear_forced_candidates, force_candidate, offered as native_candidates_offered, report as native_selection_report, report_for_default_device as native_selection_report_for_default_device, set_autotune as set_native_autotune, read_roof as native_read_roof, time_fp8_candidates as native_time_fp8_candidates, time_fp8_shape as native_time_fp8_shape, unknown_forced as unknown_forced_candidates, Verdict as NativeVerdict};
 
 /// The `OperatorProvider` ABI, registry, WGSL reference provider and
 /// cross-provider parity harness (`kernel-performance.md` Phase 8, M8.3).

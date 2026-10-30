@@ -73,6 +73,13 @@ fn the_streaming_candidates_pass_the_admission_rule_on_ragged_shapes() {
         "matmul_fp8_gemv_f16_a2w4d4b3",
         "matmul_fp8_gemv_f16x_t8w8d2b1",
         "matmul_fp8_gemv_f16x_t4w4d3b3",
+        "matmul_fp8_wgmma_swap_n64b64",
+        "matmul_fp8_wgmma_swap_n64b64s2",
+        "matmul_fp8_wgmma_swap_n64b64s4",
+        "matmul_fp8_wgmma_swap_n32b64",
+        "matmul_fp8_wgmma_swap_n32b64s2",
+        "matmul_fp8_wgmma_swap_n32b64s4",
+        "matmul_fp8_wgmma_swap_n64b128s2",
     ] {
         assert!(served.contains(kernel), "{kernel} served none of the shapes: {served:?}");
     }
@@ -117,5 +124,47 @@ fn fp8_decode_bandwidth() {
                 println!("{label:22} m={m:<3} {name:28} {v:?}");
             }
         }
+    }
+}
+
+/// Achieved weight bandwidth (rows 32-64) and tensor-core rate (prefill rows) of every FP8 candidate at the production
+/// shapes (`#[ignore]`: a measurement).
+///
+/// ```text
+/// make test/one P=brain-gpu-core T=fp8_linear_native ARGS="--ignored --nocapture fp8_batch_and_prefill_rate"
+/// ```
+#[test]
+#[ignore]
+fn fp8_batch_and_prefill_rate() {
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda_hopper(&gpu) {
+        brain_testutil::skip_unavailable("the FP8 candidates are registered for a CUDA device with warpgroup tensor cores");
+        return;
+    }
+    let shapes = [("gate/up 5120x34816", 5120u32, 34816u32), ("gate 5120x17408", 5120, 17408), ("down 17408x5120", 17408, 5120), ("qkv 5120x10240", 5120, 10240), ("out 6144x5120", 6144, 5120)];
+    for rows in [&[32u32, 48, 64][..], &[512, 768, 2048, 8192][..]] {
+        for (label, k, n) in shapes {
+            for &m in rows {
+                for (name, v) in gpu_core::native_time_fp8_shape(&gpu, [m, k / 4, n]) {
+                    println!("{label:22} m={m:<5} {name:28} {v:?}");
+                }
+            }
+        }
+    }
+}
+
+/// One candidate at one shape, for `ncu -k regex:<kernel> -c 1` (`#[ignore]`: a profiling entry). Edit the two constants.
+#[test]
+#[ignore]
+fn fp8_one_candidate() {
+    const CANDIDATE: &str = "matmul_fp8_wgmma";
+    const SHAPE: [u32; 3] = [2048, 5120 / 4, 34816];
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda_hopper(&gpu) {
+        brain_testutil::skip_unavailable("the FP8 candidates are registered for a CUDA device with warpgroup tensor cores");
+        return;
+    }
+    for (name, v) in gpu_core::native_time_fp8_candidates(&gpu, SHAPE, CANDIDATE) {
+        println!("{name:28} {v:?}");
     }
 }

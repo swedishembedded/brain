@@ -787,8 +787,15 @@ pub fn read_roof(gpu: &Gpu) -> Option<(f32, f32)> {
 /// past the L2 as in a decode step, with the achieved weight bandwidth. For benches.
 #[doc(hidden)]
 pub fn time_fp8_shape(gpu: &Gpu, params: [u32; 3]) -> Vec<(String, Verdict)> {
+    time_fp8_candidates(gpu, params, "")
+}
+
+/// [`time_fp8_shape`] for the candidates whose name contains `only` (all of them when empty): a profiler run that must reach one kernel.
+#[doc(hidden)]
+pub fn time_fp8_candidates(gpu: &Gpu, params: [u32; 3], only: &str) -> Vec<(String, Verdict)> {
     let [m, kg, n] = params;
-    let cands: Vec<&crate::native_upgrade::Active> = crate::native_upgrade::candidates(gpu.native_rows(), crate::native_upgrade::FP8_KIND, &params).collect();
+    let cands: Vec<&crate::native_upgrade::Active> =
+        crate::native_upgrade::candidates(gpu.native_rows(), crate::native_upgrade::FP8_KIND, &params).filter(|a| a.kernel.contains(only)).collect();
     let timing = gpu.set_kernel_timing(true);
     let verdicts = time_class(gpu, &FP8, &cands, (m, kg, n), &Acts::new(m, kg), &Roofs { gbs: Some(4000.0), floor_us: Some(2.0), int8_tops: Some(1000.0) }, timing);
     gpu.set_kernel_timing(false);

@@ -131,6 +131,14 @@ pub const GDN_RECUR_TILE_F32_BYTES: u32 = 128 * 128 * 4;
 pub const fn fp8_gemv_f16x_dynamic_shared_bytes(wt: u32, warps: u32, stages: u32) -> u32 {
     warps * stages * wt * 1024
 }
+/// Dynamic shared memory per block of `matmul_fp8_wgmma_swap_*` with `bn` weight rows, `nx` rows of x and `stages` ring stages: per stage a
+/// swizzled weight tile and x tile of 128-byte rows and 512 bytes of scales, and 1 KiB to align the ring to the 128-byte swizzle pattern.
+/// A test holds it to the source.
+pub const fn fp8_wgmma_swap_dynamic_shared_bytes(bn: u32, nx: u32, stages: u32) -> u32 {
+    stages * (bn * 128 + nx * 128 + 512) + 1024
+}
+/// Rows of x the widest `matmul_fp8_wgmma_swap_*` candidate serves per launch.
+pub const FP8_WGMMA_SWAP_ROWS: u32 = 64;
 /// Rows of x the `matmul_fp8_gemv_f16_*` candidates serve per launch.
 pub const FP8_GEMV_F16_ROWS: u32 = 16;
 /// Dynamic shared memory per block of `matmul_fp8_gemv_f16_*` with `at` 16-row weight tiles, `warps` warps and `stages` ring slots
@@ -2406,6 +2414,153 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/matmul_fp8_wgmma.cu"),
     },
     CudaKernel {
+        name: "matmul_fp8_wgmma_swap_n64b64",
+        // FP8 GEMM for 17 to 64 rows of x on the FP8 tensor cores with the WEIGHTS as the MMA's A operand (knowledge 387): a warpgroup owns
+        // 64 weight rows, the 64 rows of x are the MMA's N side, 64 weight rows a block.
+        op: Op::MatMul,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_matmul_fp8_wgmma_swap_n64b64",
+        what: "FP8 E4M3 block-scaled weight GEMM against E4M3 activations (one scale per row per 128 of K) for up to 64 rows of x on Hopper warpgroup tensor cores with the weights as the A operand (wgmma m64n64k32, 64 weight rows a block, cp.async ring), the scales folded once per 128 of K; agrees with the f64 reference of the stored weights to the E4M3 resolution of its activations",
+        reported: "native:matmul_fp8_wgmma_swap_n64b64",
+        block_dim: 128,
+        // One block per 64 weight rows (times the split), all rows of x.
+        tile: (1, 64),
+        // The ring is dynamic shared memory (`fp8_wgmma_swap_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_FS_NX 64\n#define BRAIN_FS_BN 64\n#define BRAIN_FS_MIN_BLOCKS 3\n#define BRAIN_FS_SPLIT 1
+#define BRAIN_FS_STAGES 4\n#define BRAIN_FS_ENTRY brain_matmul_fp8_wgmma_swap_n64b64\n", include_str!("../cu/matmul_fp8_wgmma_swap.cu")),
+    },
+    CudaKernel {
+        name: "matmul_fp8_wgmma_swap_n64b64s2",
+        // FP8 GEMM for 17 to 64 rows of x on the FP8 tensor cores with the WEIGHTS as the MMA's A operand (knowledge 387): a warpgroup owns
+        // 64 weight rows, the 64 rows of x are the MMA's N side, 64 weight rows a block, K split over a cluster of 2 blocks.
+        op: Op::MatMul,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_matmul_fp8_wgmma_swap_n64b64s2",
+        what: "FP8 E4M3 block-scaled weight GEMM against E4M3 activations (one scale per row per 128 of K) for up to 64 rows of x on Hopper warpgroup tensor cores with the weights as the A operand (wgmma m64n64k32, 64 weight rows a block, K split over a cluster of 2 blocks reduced through distributed shared memory, cp.async ring), the scales folded once per 128 of K; agrees with the f64 reference of the stored weights to the E4M3 resolution of its activations",
+        reported: "native:matmul_fp8_wgmma_swap_n64b64s2",
+        block_dim: 128,
+        // One block per 64 weight rows (times the split), all rows of x.
+        tile: (1, 64),
+        // The ring is dynamic shared memory (`fp8_wgmma_swap_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_FS_NX 64\n#define BRAIN_FS_BN 64\n#define BRAIN_FS_MIN_BLOCKS 3\n#define BRAIN_FS_SPLIT 2
+#define BRAIN_FS_STAGES 4\n#define BRAIN_FS_ENTRY brain_matmul_fp8_wgmma_swap_n64b64s2\n", include_str!("../cu/matmul_fp8_wgmma_swap.cu")),
+    },
+    CudaKernel {
+        name: "matmul_fp8_wgmma_swap_n64b64s4",
+        // FP8 GEMM for 17 to 64 rows of x on the FP8 tensor cores with the WEIGHTS as the MMA's A operand (knowledge 387): a warpgroup owns
+        // 64 weight rows, the 64 rows of x are the MMA's N side, 64 weight rows a block, K split over a cluster of 4 blocks.
+        op: Op::MatMul,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_matmul_fp8_wgmma_swap_n64b64s4",
+        what: "FP8 E4M3 block-scaled weight GEMM against E4M3 activations (one scale per row per 128 of K) for up to 64 rows of x on Hopper warpgroup tensor cores with the weights as the A operand (wgmma m64n64k32, 64 weight rows a block, K split over a cluster of 4 blocks reduced through distributed shared memory, cp.async ring), the scales folded once per 128 of K; agrees with the f64 reference of the stored weights to the E4M3 resolution of its activations",
+        reported: "native:matmul_fp8_wgmma_swap_n64b64s4",
+        block_dim: 128,
+        // One block per 64 weight rows (times the split), all rows of x.
+        tile: (1, 64),
+        // The ring is dynamic shared memory (`fp8_wgmma_swap_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_FS_NX 64\n#define BRAIN_FS_BN 64\n#define BRAIN_FS_MIN_BLOCKS 3\n#define BRAIN_FS_SPLIT 4
+#define BRAIN_FS_STAGES 4\n#define BRAIN_FS_ENTRY brain_matmul_fp8_wgmma_swap_n64b64s4\n", include_str!("../cu/matmul_fp8_wgmma_swap.cu")),
+    },
+    CudaKernel {
+        name: "matmul_fp8_wgmma_swap_n32b64",
+        // FP8 GEMM for 17 to 32 rows of x on the FP8 tensor cores with the WEIGHTS as the MMA's A operand (knowledge 387): a warpgroup owns
+        // 64 weight rows, the 32 rows of x are the MMA's N side, 64 weight rows a block.
+        op: Op::MatMul,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_matmul_fp8_wgmma_swap_n32b64",
+        what: "FP8 E4M3 block-scaled weight GEMM against E4M3 activations (one scale per row per 128 of K) for up to 32 rows of x on Hopper warpgroup tensor cores with the weights as the A operand (wgmma m64n32k32, 64 weight rows a block, cp.async ring), the scales folded once per 128 of K; agrees with the f64 reference of the stored weights to the E4M3 resolution of its activations",
+        reported: "native:matmul_fp8_wgmma_swap_n32b64",
+        block_dim: 128,
+        // One block per 64 weight rows (times the split), all rows of x.
+        tile: (1, 64),
+        // The ring is dynamic shared memory (`fp8_wgmma_swap_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_FS_NX 32\n#define BRAIN_FS_BN 64\n#define BRAIN_FS_MIN_BLOCKS 3\n#define BRAIN_FS_SPLIT 1
+#define BRAIN_FS_STAGES 4\n#define BRAIN_FS_ENTRY brain_matmul_fp8_wgmma_swap_n32b64\n", include_str!("../cu/matmul_fp8_wgmma_swap.cu")),
+    },
+    CudaKernel {
+        name: "matmul_fp8_wgmma_swap_n32b64s2",
+        // FP8 GEMM for 17 to 32 rows of x on the FP8 tensor cores with the WEIGHTS as the MMA's A operand (knowledge 387): a warpgroup owns
+        // 64 weight rows, the 32 rows of x are the MMA's N side, 64 weight rows a block, K split over a cluster of 2 blocks.
+        op: Op::MatMul,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_matmul_fp8_wgmma_swap_n32b64s2",
+        what: "FP8 E4M3 block-scaled weight GEMM against E4M3 activations (one scale per row per 128 of K) for up to 32 rows of x on Hopper warpgroup tensor cores with the weights as the A operand (wgmma m64n32k32, 64 weight rows a block, K split over a cluster of 2 blocks reduced through distributed shared memory, cp.async ring), the scales folded once per 128 of K; agrees with the f64 reference of the stored weights to the E4M3 resolution of its activations",
+        reported: "native:matmul_fp8_wgmma_swap_n32b64s2",
+        block_dim: 128,
+        // One block per 64 weight rows (times the split), all rows of x.
+        tile: (1, 64),
+        // The ring is dynamic shared memory (`fp8_wgmma_swap_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_FS_NX 32\n#define BRAIN_FS_BN 64\n#define BRAIN_FS_MIN_BLOCKS 3\n#define BRAIN_FS_SPLIT 2
+#define BRAIN_FS_STAGES 4\n#define BRAIN_FS_ENTRY brain_matmul_fp8_wgmma_swap_n32b64s2\n", include_str!("../cu/matmul_fp8_wgmma_swap.cu")),
+    },
+    CudaKernel {
+        name: "matmul_fp8_wgmma_swap_n32b64s4",
+        // FP8 GEMM for 17 to 32 rows of x on the FP8 tensor cores with the WEIGHTS as the MMA's A operand (knowledge 387): a warpgroup owns
+        // 64 weight rows, the 32 rows of x are the MMA's N side, 64 weight rows a block, K split over a cluster of 4 blocks.
+        op: Op::MatMul,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_matmul_fp8_wgmma_swap_n32b64s4",
+        what: "FP8 E4M3 block-scaled weight GEMM against E4M3 activations (one scale per row per 128 of K) for up to 32 rows of x on Hopper warpgroup tensor cores with the weights as the A operand (wgmma m64n32k32, 64 weight rows a block, K split over a cluster of 4 blocks reduced through distributed shared memory, cp.async ring), the scales folded once per 128 of K; agrees with the f64 reference of the stored weights to the E4M3 resolution of its activations",
+        reported: "native:matmul_fp8_wgmma_swap_n32b64s4",
+        block_dim: 128,
+        // One block per 64 weight rows (times the split), all rows of x.
+        tile: (1, 64),
+        // The ring is dynamic shared memory (`fp8_wgmma_swap_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_FS_NX 32\n#define BRAIN_FS_BN 64\n#define BRAIN_FS_MIN_BLOCKS 3\n#define BRAIN_FS_SPLIT 4
+#define BRAIN_FS_STAGES 4\n#define BRAIN_FS_ENTRY brain_matmul_fp8_wgmma_swap_n32b64s4\n", include_str!("../cu/matmul_fp8_wgmma_swap.cu")),
+    },
+    CudaKernel {
+        name: "matmul_fp8_wgmma_swap_n64b128s2",
+        // FP8 GEMM for 17 to 64 rows of x on the FP8 tensor cores with the WEIGHTS as the MMA's A operand (knowledge 387): a warpgroup owns
+        // 64 weight rows, the 64 rows of x are the MMA's N side, 128 weight rows a block, K split over a cluster of 2 blocks.
+        op: Op::MatMul,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_matmul_fp8_wgmma_swap_n64b128s2",
+        what: "FP8 E4M3 block-scaled weight GEMM against E4M3 activations (one scale per row per 128 of K) for up to 64 rows of x on Hopper warpgroup tensor cores with the weights as the A operand (wgmma m64n64k32, 128 weight rows a block, K split over a cluster of 2 blocks reduced through distributed shared memory, cp.async ring), the scales folded once per 128 of K; agrees with the f64 reference of the stored weights to the E4M3 resolution of its activations",
+        reported: "native:matmul_fp8_wgmma_swap_n64b128s2",
+        block_dim: 256,
+        // One block per 128 weight rows (times the split), all rows of x.
+        tile: (1, 128),
+        // The ring is dynamic shared memory (`fp8_wgmma_swap_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_FS_NX 64\n#define BRAIN_FS_BN 128\n#define BRAIN_FS_MIN_BLOCKS 1\n#define BRAIN_FS_SPLIT 2
+#define BRAIN_FS_STAGES 4\n#define BRAIN_FS_ENTRY brain_matmul_fp8_wgmma_swap_n64b128s2\n", include_str!("../cu/matmul_fp8_wgmma_swap.cu")),
+    },
+    CudaKernel {
         name: "topk_rows_f32",
         op: Op::ArgMaxRow,
         weight: Dtype::F32,
@@ -4043,6 +4198,8 @@ mod tests {
                 "#define WG_SMEM_END (WG_OFF_BAR + 64)",
             ],
         );
+        has("matmul_fp8_wgmma_swap_n64b64", &["#define BRAIN_FS_STAGES 4", "#define BRAIN_FS_X_BYTES (BRAIN_FS_NX * 128)", "#define BRAIN_FS_W_BYTES (BRAIN_FS_BN * 128)", "#define BRAIN_FS_S_BYTES 512"]);
+        assert_eq!(fp8_wgmma_swap_dynamic_shared_bytes(128, 64, 4), 4 * (128 * 128 + 64 * 128 + 512) + 1024);
         assert_eq!(FP8_WGMMA_DYNAMIC_SHARED_BYTES, 4 * (128 * 128 * 2 + 1024) + 1024);
         assert_eq!((128 * 128 * 2 + 1024) % 1024, 0);
         has(
