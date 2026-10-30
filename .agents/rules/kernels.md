@@ -289,6 +289,17 @@ existing caller. Assume nothing about units.
     only works while the other operand is loaded by registers; a descriptor-fed operand (`wgmma` from shared memory)
     cannot be permuted, which is why `matmul_i8_dq_wgmma` dequantises into a natural-order tile instead.
 
+16. **A `wgmma` behind a branch the compiler cannot prove warp-uniform is issued one at a time.** In the warpgroup flash prefill the 16
+    `m64n64k16` of S sat inside `if (row_is_live)` (a per-thread condition): ptxas put `WARPGROUP.DEPBAR` between every pair of
+    `HGMMA`, and the 16 issues took ~2400 cycles a tile. Running the product unconditionally (a tile past a warpgroup's last row is
+    masked to weight 0 afterwards) removed the waits (SASS: 16 back-to-back `HGMMA`). *After writing a wgmma loop, dump the SASS
+    (`ncu --import-source yes`, source page) and look for `DEPBAR` between the `HGMMA`.*
+
+17. **A dependent chain of small-N `wgmma` is latency bound, not tensor bound.** Probe on a GH200 (`m64n64k16`, both operands from
+    shared memory, 16 into one accumulator): ~95 cycles each for one warpgroup, ~97 each with two warpgroups running at once (so two
+    warpgroups double the rate); N = 128 costs 127/141; `m64n256k16` with P in registers 219/299 for one/two. The tensor peak is 32 /
+    64 / 128 cycles. Size the tile so the product has N >= 128 or give each warpgroup two independent accumulators.
+
 ## D. Constraints that will bite you
 
 - **A buffer a dispatch writes is bound ONCE.** wgpu tracks usage per buffer for the

@@ -804,8 +804,10 @@ impl KvKernels {
 
     /// The native fp16 tensor-core prefill dispatch over `k`/`v` planes alone: `None` when the device, the tier, the head width or
     /// the round's row count has no such kernel (or [`Self::portable_prefill`] withheld it), and the caller keeps its own path.
-    /// Same buffers, uniform and geometry as the portable kernel; it also serves head width 128, which the portable one does not.
-    pub fn native_flash_prefill(&self, g: &Gpu, q: &DeviceBuffer, k: &KvPlane, v: &KvPlane, block_ids: &DeviceBuffer, seq_lens: &DeviceBuffer, ctx: &DeviceBuffer, s: PrefillShape) -> Option<Step> {
+    /// Same buffers and uniform as the portable kernel; it also serves head width 128, which the portable one does not. The
+    /// round is ONE sequence (the tables' rows repeat it), which is what lets a compact head-256 cache take the warpgroup
+    /// kernel and its merge of key splits: more than one step.
+    pub fn native_flash_prefill(&self, g: &Gpu, q: &DeviceBuffer, k: &KvPlane, v: &KvPlane, block_ids: &DeviceBuffer, seq_lens: &DeviceBuffer, ctx: &DeviceBuffer, s: PrefillShape) -> Option<Vec<Step>> {
         self.check(k);
         self.check(v);
         if !self.native_prefill {
@@ -823,14 +825,19 @@ impl KvKernels {
                     KvElement::Bf16 => crate::block::native_paged_flash_prefill_bf16(g, s.head_dim, &bufs, &params, blocks),
                     KvElement::Int8 | KvElement::Fp8E4m3 => None,
                 }
+                .map(|step| vec![step])
             }
             (Some(ks), Some(vs)) => {
                 let bufs = [q, &k.data, &v.data, block_ids, seq_lens, ctx, ks, vs];
-                if self.tier.element == KvElement::Fp8E4m3 {
-                    crate::block::native_paged_flash_prefill_kvfp8(g, s.head_dim, &bufs, &params, blocks)
-                } else {
-                    crate::block::native_paged_flash_prefill_kv8(g, s.head_dim, &bufs, &params, blocks)
-                }
+                let fp8 = self.tier.element == KvElement::Fp8E4m3;
+                crate::block::native_paged_flash_prefill_wg(g, s.head_dim, &bufs, &params, fp8).or_else(|| {
+                    if fp8 {
+                        crate::block::native_paged_flash_prefill_kvfp8(g, s.head_dim, &bufs, &params, blocks)
+                    } else {
+                        crate::block::native_paged_flash_prefill_kv8(g, s.head_dim, &bufs, &params, blocks)
+                    }
+                    .map(|step| vec![step])
+                })
             }
             _ => unreachable!("check() pinned both planes to one tier"),
         }
@@ -839,17 +846,17 @@ impl KvKernels {
     /// The fused causal prefill dispatch over `k`/`v` planes (one pipeline for
     /// every tier; the compact ones read their planes in place): the native kernel where there is one, else the portable
     /// `head_dim = 256` pipeline.
-    pub fn flash_prefill_hd256(&self, g: &Gpu, q: &DeviceBuffer, k: &KvPlane, v: &KvPlane, block_ids: &DeviceBuffer, seq_lens: &DeviceBuffer, ctx: &DeviceBuffer, s: PrefillShape) -> Step {
+    pub fn flash_prefill_hd256(&self, g: &Gpu, q: &DeviceBuffer, k: &KvPlane, v: &KvPlane, block_ids: &DeviceBuffer, seq_lens: &DeviceBuffer, ctx: &DeviceBuffer, s: PrefillShape) -> Vec<Step> {
         if let Some(native) = self.native_flash_prefill(g, q, k, v, block_ids, seq_lens, ctx, s) {
             return native;
         }
         let params = [s.n, s.n_heads, s.n_kv_heads, s.head_dim, s.n_heads / s.n_kv_heads, s.block_size, s.max_bt];
         let grid = Dispatch::Workgroups(s.n_heads * s.n.div_ceil(64));
-        match (&k.scales, &v.scales) {
+        vec![match (&k.scales, &v.scales) {
             (None, None) => g.dispatch(self.prefill_hd256, &[q, &k.data, &v.data, block_ids, seq_lens, ctx], &params, grid),
             (Some(ks), Some(vs)) => g.dispatch(self.prefill_hd256, &[q, &k.data, &v.data, block_ids, seq_lens, ctx, ks, vs], &params, grid),
             _ => unreachable!("check() pinned both planes to one tier"),
-        }
+        }]
     }
 }
 

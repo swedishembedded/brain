@@ -332,3 +332,13 @@ measurement (16-256), not fixed globally.
   output tok/s at 1 / 4 / 16 / 64: 50 / 187 / 208 / 237 -> 47 / 190 / 294 / 366, ITL p99 at 16 589 -> 293 ms, 31K TTFT 7.3 s. Open, by weight:
   the host's CUDA API calls per mixed forward (launch, parameter upload, pool alloc; a bucketed graph replay of the layer round, row-view
   binding instead of the `concat_split` copies), the e4m3 front end, stream-K GEMM fill (items 4, 5, 8, 14, 17).
+- 2026-10-30 (warpgroup prefill attention, knowledge 383): the head_dim 256 prefill over an int8 or FP8 KV cache runs on Hopper warpgroup tensor
+  cores (`flash_prefill_f16_hd256_wg_{kv8,kvfp8}` + `_combine`: producer warpgroup widens the raw bytes, two consumer warpgroups run `wgmma`
+  QK^T and PV, the key range of a block is split over up to 4 blocks), chosen by `paged_flash_prefill_wg_steps` for the one-sequence paged
+  chunk (`KvKernels::native_flash_prefill`) where the part has `wgmma`; `set_flash_prefill_wg(false)` keeps version 2 for an A/B. 512-row chunk
+  at 1K / 4K / 8K / 16K / 31K context 0.162 / 0.615 / 1.231 / 2.464 / 4.82 -> 0.088 / 0.219 / 0.387 / 0.606 / 1.088 ms (60-83 -> 110-364
+  TFLOPS causal); served 31K TTFT 6.2 -> 4.9 s, the 1K sweep unchanged (52.1 / 214.9 / 365 / 525 tok/s at 1 / 4 / 16 / 64). Open: intra-warpgroup
+  overlap of S and the softmax and a 128-key S tile (364 -> ~500 TFLOPS), cluster multicast of the K/V fetch, the bf16 cache (still version 2),
+  the training forward/backward (dense forward and `flash_attn_bwd_f16` still on `mma.sync`, unchanged), selection through the measured
+  candidate tuner instead of the capability floor (the kernel is chosen where the part has `wgmma`; the tuner has no attention slot yet).
+

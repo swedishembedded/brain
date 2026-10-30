@@ -79,6 +79,11 @@ pub const WGMMA_MIN_CC: Cc = (9, 0);
 /// 128-byte swizzle pattern. A test holds it to the source.
 pub const I8_WGMMA_DYNAMIC_SHARED_BYTES: u32 = 4 * (2 * 128 * 128 + 2 * 4 * 128 * 4) + 1024;
 
+/// Dynamic shared memory per block of `flash_prefill_f16_hd256_wg_*`: two 32 KiB Q tiles (one per consumer warpgroup), two 32 KiB K
+/// stages, one 32 KiB V stage, two 16 KiB raw staging tiles each of K and V, the staged raw row scales (2 x 256 bytes a plane),
+/// the K scales of two stages (512 bytes), the V scales (256) and the barriers (64), and 1 KiB to align the tiles to the
+/// 128-byte swizzle pattern. A test holds it to the source.
+pub const FLASH_PREFILL_WG_DYNAMIC_SHARED_BYTES: u32 = 2 * 32768 + 2 * 32768 + 32768 + 4 * 16384 + 2 * 2 * 256 + 512 + 256 + 64 + 1024;
 /// Dynamic shared memory per block of `matmul_i8_stream_*` with `bn` weight rows a block, room for `rows` rows of x and
 /// `stages` stages (the source's `BRAIN_I8S_STAGE_BYTES` x `BRAIN_I8S_STAGES`): per stage `bn` rows x 128 bytes of
 /// weights, `rows` rows of x x 128 bytes and their four scale groups each. A test holds it to the source.
@@ -534,6 +539,76 @@ pub const ALL: &[CudaKernel] = &[
             include_str!("../cu/flash_prefill_f16_hd256.cu"),
             "\n#define brain_flash_prefill_f16_hd256_v2 brain_flash_prefill_f16_hd256_v2_kvfp8\n",
             include_str!("../cu/flash_prefill_f16_hd256_v2.cu")
+        ),
+    },
+    CudaKernel {
+        name: "flash_prefill_f16_hd256_wg_kv8",
+        // Asked for by name by `paged_flash_prefill_wg_steps` for head_dim 256 on a part with warpgroup tensor cores.
+        op: Op::PagedAttentionFused,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // `wgmma` and `setmaxnreg` are arch-specific (`sm_90a`), so the launch also requires it (`ArchFeatures::Required`).
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_flash_prefill_f16_hd256_wg_kv8",
+        what: "flash_prefill_f16_hd256 version 3 over an int8 KV cache with one scale per (token, kv head) row on Hopper warpgroup tensor cores (wgmma): a producer warpgroup widens the raw bytes to fp16 shared-memory tiles, two consumer warpgroups of 64 query rows run QK^T and PV with P in registers; the key range of a block is split over up to `splits_max` blocks and merged by flash_prefill_f16_hd256_wg_combine",
+        reported: "native:flash_prefill_f16_hd256_wg_kv8",
+        block_dim: 384,
+        tile: (128, 1),
+        // Everything is dynamic (opted in): see `FLASH_PREFILL_WG_DYNAMIC_SHARED_BYTES`.
+        shared_bytes: 0,
+        programmatic: false,
+        src: concat!(
+            "#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 2\n",
+            include_str!("../cu/flash_prefill_f16_hd256.cu"),
+            "\n#define brain_flash_prefill_f16_hd256_wg brain_flash_prefill_f16_hd256_wg_kv8\n",
+            include_str!("../cu/flash_prefill_f16_hd256_wg.cu")
+        ),
+    },
+    CudaKernel {
+        name: "flash_prefill_f16_hd256_wg_kvfp8",
+        // Asked for by name by `paged_flash_prefill_wg_steps` for head_dim 256 on a part with warpgroup tensor cores.
+        op: Op::PagedAttentionFused,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // `wgmma` and `setmaxnreg` are arch-specific (`sm_90a`), so the launch also requires it (`ArchFeatures::Required`).
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_flash_prefill_f16_hd256_wg_kvfp8",
+        what: "flash_prefill_f16_hd256 version 3 over an FP8 E4M3 KV cache with one scale per (token, kv head) row on Hopper warpgroup tensor cores (wgmma): a producer warpgroup widens the raw bytes to fp16 shared-memory tiles, two consumer warpgroups of 64 query rows run QK^T and PV with P in registers; the key range of a block is split over up to `splits_max` blocks and merged by flash_prefill_f16_hd256_wg_combine",
+        reported: "native:flash_prefill_f16_hd256_wg_kvfp8",
+        block_dim: 384,
+        tile: (128, 1),
+        // Everything is dynamic (opted in): see `FLASH_PREFILL_WG_DYNAMIC_SHARED_BYTES`.
+        shared_bytes: 0,
+        programmatic: false,
+        src: concat!(
+            "#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 3\n",
+            include_str!("../cu/flash_prefill_f16_hd256.cu"),
+            "\n#define brain_flash_prefill_f16_hd256_wg brain_flash_prefill_f16_hd256_wg_kvfp8\n",
+            include_str!("../cu/flash_prefill_f16_hd256_wg.cu")
+        ),
+    },
+    CudaKernel {
+        name: "flash_prefill_f16_hd256_wg_combine",
+        // Asked for by name beside `flash_prefill_f16_hd256_wg_kv8` / `_kvfp8`: merges the key splits those wrote.
+        op: Op::PagedAttentionFused,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_flash_prefill_combine",
+        what: "merges the key splits of flash_prefill_f16_hd256_wg_*: one block of 256 threads a (row, head) rescales the splits' unnormalised outputs by their running maxima and normalises",
+        reported: "native:flash_prefill_f16_hd256_wg_combine",
+        block_dim: 256,
+        tile: (1, 1),
+        shared_bytes: 0,
+        programmatic: false,
+        src: concat!(
+            "#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 2\n",
+            include_str!("../cu/flash_prefill_f16_hd256.cu"),
+            "\n#define brain_flash_prefill_f16_hd256_wg brain_flash_prefill_f16_hd256_wg_combine_unused\n",
+            include_str!("../cu/flash_prefill_f16_hd256_wg.cu")
         ),
     },
     CudaKernel {
@@ -3617,6 +3692,23 @@ mod tests {
         has("matmul_fp8_dq_wgmma", &["#define BRAIN_DQW_S_BYTES (BRAIN_DQW_BN * 2 * 4)", "#define BRAIN_DQW_X_BYTES (BRAIN_DQW_BM * 128)", "#define BRAIN_DQW_R_BYTES (BRAIN_DQW_BN * BRAIN_DQW_BK)", "#define BRAIN_DQW_STAGES 5"]);
         assert_eq!((128 * 128 + 128 * 64 + 128 * 2 * 4) % 1024, 0, "a ring stage is a whole number of KiB, so every swizzled tile stays 1024-byte aligned");
         has("matmul_fp8_wgmma", &["#define BRAIN_FW_STAGES 4", "#define BRAIN_FW_X_BYTES (BRAIN_FW_BM * 128)", "#define BRAIN_FW_W_BYTES (BRAIN_FW_BN * 128)", "#define BRAIN_FW_S_BYTES 1024"]);
+        has(
+            "flash_prefill_f16_hd256_wg_kv8",
+            &[
+                "#define WG_TILE_BYTES 32768",
+                "#define WG_RAW_BYTES (WG_KEYS * 256)",
+                "#define WG_OFF_K (WG_OFF_Q + 2 * WG_TILE_BYTES)",
+                "#define WG_OFF_V (WG_OFF_K + 2 * WG_TILE_BYTES)",
+                "#define WG_OFF_RAWK (WG_OFF_V + WG_TILE_BYTES)",
+                "#define WG_OFF_RAWV (WG_OFF_RAWK + 2 * WG_RAW_BYTES)",
+                "#define WG_OFF_RSK (WG_OFF_RAWV + 2 * WG_RAW_BYTES)",
+                "#define WG_OFF_RSV (WG_OFF_RSK + 512)",
+                "#define WG_OFF_KS (WG_OFF_RSV + 512)",
+                "#define WG_OFF_VS (WG_OFF_KS + 512)",
+                "#define WG_OFF_BAR (WG_OFF_VS + 256)",
+                "#define WG_SMEM_END (WG_OFF_BAR + 64)",
+            ],
+        );
         assert_eq!(FP8_WGMMA_DYNAMIC_SHARED_BYTES, 4 * (128 * 128 * 2 + 1024) + 1024);
         assert_eq!((128 * 128 * 2 + 1024) % 1024, 0);
         has(

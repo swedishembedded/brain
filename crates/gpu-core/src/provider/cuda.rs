@@ -1032,6 +1032,71 @@ fn paged_flash_prefill_scaled8_step(gpu: &crate::Gpu, head_dim: u32, bufs: &[&ba
     gpu.step_native_sliced(id, bufs, &[(0, 0); 8], params, blocks)
 }
 
+/// The version-3 (warpgroup tensor core) prefill kernels' own `@binding` order: the int8-KV kernel's, then the split scratch.
+const PAGED_FLASH_PREFILL_WG_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+];
+
+/// The merge of the key splits: uniform, sequence lengths, the split scratch, the context.
+const PAGED_FLASH_PREFILL_COMBINE_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
+
+const FLASH_PREFILL_WG_LAUNCH: backend_api::CudaLaunch = backend_api::CudaLaunch {
+    dynamic_shared_bytes: kernels_cuda::FLASH_PREFILL_WG_DYNAMIC_SHARED_BYTES,
+    shared_opt_in: true,
+    arch: backend_api::ArchFeatures::Required,
+    ..backend_api::CudaLaunch::NONE
+};
+
+/// Key splits a block of the version-3 kernel may be divided into at most (the grid is `base blocks x` this; the kernel
+/// decides per block how many of them work).
+const FLASH_PREFILL_WG_SPLITS_MAX: u32 = 4;
+
+static FLASH_PREFILL_WG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Choose the warpgroup (`wgmma`) head_dim 256 prefill attention over an int8 or FP8 KV cache where the part has it (the
+/// default) or version 2, which stays as the fallback and as the baseline of an A/B. Process-wide; takes effect for steps
+/// built after.
+pub fn set_flash_prefill_wg(on: bool) {
+    FLASH_PREFILL_WG.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The steps of the warpgroup tensor-core prefill over an int8 or FP8 KV cache (`bufs` and `params` as
+/// [`paged_flash_prefill_kv8_step`]'s; its `blocks` is derived here), or `None` where the device, the head width, the round
+/// or the switch ([`set_flash_prefill_wg`]) declines and the caller keeps [`paged_flash_prefill_kv8_step`].
+///
+/// The caller states that the round is ONE sequence (`gqa_chunk_step_kv_paged`'s contract): a block covers 128 query rows
+/// that all read the block table of the block's first row, where version 2 holds that only for 64.
+pub fn paged_flash_prefill_wg_steps(gpu: &crate::Gpu, head_dim: u32, bufs: &[&backend_api::DeviceBuffer; 8], params: &[u32], codec: Scaled8) -> Option<Vec<crate::Step>> {
+    if head_dim != 256 || !FLASH_PREFILL_WG.load(std::sync::atomic::Ordering::Relaxed) || !flash_prefill_offered(gpu, head_dim, params) {
+        return None;
+    }
+    let cc = gpu.caps().arch.compute_capability?;
+    let nsm = gpu.caps().compute_units?;
+    let main = kernels_cuda::get(&format!("flash_prefill_f16_hd256_wg_{}", codec.suffix())).filter(|k| k.min_cc <= cc)?;
+    let merge = kernels_cuda::get("flash_prefill_f16_hd256_wg_combine").filter(|k| k.min_cc <= cc)?;
+    let main_id = gpu.native_kernel_launched(main, PAGED_FLASH_PREFILL_WG_BINDINGS, FLASH_PREFILL_WG_LAUNCH)?;
+    let merge_id = gpu.native_kernel_launched(merge, PAGED_FLASH_PREFILL_COMBINE_BINDINGS, backend_api::CudaLaunch { arch: backend_api::ArchFeatures::Required, ..backend_api::CudaLaunch::NONE })?;
+    let (rows, n_heads) = (params[0], params[1]);
+    let mut p = params.to_vec();
+    p.push(FLASH_PREFILL_WG_SPLITS_MAX);
+    p.push(nsm);
+    let scratch = gpu.storage_uninit(u64::from(FLASH_PREFILL_WG_SPLITS_MAX) * u64::from(rows) * u64::from(n_heads) * 258);
+    let blocks = rows.div_ceil(128) * n_heads * FLASH_PREFILL_WG_SPLITS_MAX;
+    let [q, pk, pv, tables, lens, ctx, ks, vs] = *bufs;
+    let attend = gpu.step_native_sliced(main_id, &[q, pk, pv, tables, lens, ctx, ks, vs, &scratch], &[(0, 0); 9], &p, blocks)?;
+    let combine = gpu.step_native_sliced(merge_id, &[lens, &scratch, ctx], &[(0, 0); 3], &p, rows * n_heads)?;
+    Some(vec![attend, combine])
+}
+
 /// `flash_attn_causal_gqa`'s own `@binding` order: uniform, queries, keys, values, context, log-sum-exp.
 const FLASH_GQA_FWD_BINDINGS: &[BindKind] = &[
     BindKind::Uniform,

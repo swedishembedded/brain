@@ -284,15 +284,23 @@ impl Device {
     }
 
     fn run(&self, gpu: &Gpu, step: &gpu_core::Step, p: &Problem) -> Vec<f32> {
-        gpu.submit(&[&self.ctx], std::slice::from_ref(step));
+        self.run_steps(gpu, std::slice::from_ref(step), p)
+    }
+
+    fn run_steps(&self, gpu: &Gpu, steps: &[gpu_core::Step], p: &Problem) -> Vec<f32> {
+        gpu.submit(&[&self.ctx], steps);
         gpu.read(&self.ctx, (p.c.n * N_HEADS * HD) as usize)
     }
 
     /// Device ms of one dispatch of `step`: the mean of three back-to-back dispatches.
     fn trial_ms(&self, gpu: &Gpu, step: &gpu_core::Step, name_part: &str) -> f64 {
+        self.trial_steps_ms(gpu, std::slice::from_ref(step), name_part)
+    }
+
+    fn trial_steps_ms(&self, gpu: &Gpu, steps: &[gpu_core::Step], name_part: &str) -> f64 {
         gpu.reset_kernel_times();
         for _ in 0..3 {
-            gpu.submit(&[], std::slice::from_ref(step));
+            gpu.submit(&[], steps);
         }
         gpu.poll_wait();
         let ms: f64 = gpu.kernel_times().unwrap_or_default().iter().filter(|(n, _, _)| n.contains(name_part)).map(|(_, ms, _)| ms).sum();
@@ -472,6 +480,17 @@ impl TierDevice {
         gpu.dispatch(kind, &self.bufs(), &Device::params(p), gpu_core::Dispatch::Workgroups(N_HEADS * p.c.n.div_ceil(64)))
     }
 
+    /// The warpgroup kernel's steps (attention and the merge of its key splits), for a compact tier that has one.
+    fn native_wg(&self, gpu: &Gpu, p: &Problem) -> Option<Vec<gpu_core::Step>> {
+        let b = self.bufs();
+        let codec = match self.kv {
+            Kv::Int8 => gpu_core::provider::cuda::Scaled8::Int8,
+            Kv::Fp8 => gpu_core::provider::cuda::Scaled8::Fp8E4m3,
+            Kv::Bf16 => return None,
+        };
+        gpu_core::provider::cuda::paged_flash_prefill_wg_steps(gpu, HD, &[b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]], &Device::params(p), codec)
+    }
+
     fn native(&self, gpu: &Gpu, p: &Problem) -> Option<gpu_core::Step> {
         let blocks = N_HEADS * p.c.n.div_ceil(64);
         let b = self.bufs();
@@ -553,6 +572,50 @@ fn version_2_matches_the_original_kernel_on_a_bf16_an_int8_and_an_fp8_cache() {
             let maxdiff = out[0].iter().zip(&out[1]).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
             let bar = 2e-3 * rms(&out[0]);
             assert!(maxdiff <= bar, "{kv:?} case {i} (n={} start={}): version 2 differs from version 1 by {maxdiff:e} (bar {bar:e})", c.n, c.start);
+        }
+    }
+}
+
+/// The warpgroup (`wgmma`) kernel reads an int8 and an FP8 cache in place, agrees with the portable kernel and the f64
+/// oracle, and writes every row. The cases cross the shapes its structure distinguishes: one 128-row block and several, a
+/// ragged tail, rows with no key to attend in a tile, scattered and tiny cache blocks, and key ranges long enough that the
+/// block's keys are split over several blocks and merged.
+#[test]
+fn the_warpgroup_prefill_reads_an_int8_and_an_fp8_cache() {
+    let Some(gpu) = device() else { return };
+    gpu_core::provider::cuda::set_flash_prefill_wg(true);
+    let cases = [
+        Case { n: 256, start: 0, block_size: 4096, scatter: false },
+        Case { n: 77, start: 1000, block_size: 4096, scatter: false },
+        Case { n: 200, start: 300, block_size: 128, scatter: true },
+        Case { n: 64, start: 31, block_size: 16, scatter: true },
+        Case { n: 512, start: 7680, block_size: 4096, scatter: false },
+        Case { n: 129, start: 5000, block_size: 64, scatter: true },
+    ];
+    for kv in [Kv::Int8, Kv::Fp8] {
+        for (i, c) in cases.iter().enumerate() {
+            let desc = format!("{kv:?} case {i} (n={} start={} block={} scatter={})", c.n, c.start, c.block_size, c.scatter);
+            let p = Problem::new(Case { ..*c }, 0xA11CE + i as u64);
+            let (seen, stored) = p.as_stored(kv);
+            let d = TierDevice::upload(&gpu, &seen, kv, &stored);
+            let want = d.base.run(&gpu, &d.portable(&gpu, &seen), &seen);
+            let steps = d.native_wg(&gpu, &seen).expect("the warpgroup kernel must take a head_dim-256 request on a Hopper part");
+            gpu.write(&d.base.ctx, &vec![0x7fc0_0000u32; (seen.c.n * N_HEADS * HD) as usize]);
+            let got = d.base.run_steps(&gpu, &steps, &seen);
+
+            let scale = rms(&want);
+            let maxdiff = want.iter().zip(&got).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+            assert!(got.iter().all(|x| x.is_finite()), "{desc}: non-finite output (a row was left unwritten)");
+            eprintln!("cuda_flash_prefill: warpgroup {desc}: max|wg - portable| = {maxdiff:e} ({:.2e} of rms {scale:e})", maxdiff / scale);
+            assert!(maxdiff <= REL_TOL * scale, "{desc}: differs from the portable kernel by {maxdiff:e} (bar {:e})", REL_TOL * scale);
+            let mut rng = Rng(177 + i as u64);
+            for _ in 0..ORACLE_SAMPLES {
+                let (row, head) = ((rng.next() % seen.c.n as u64) as usize, (rng.next() % N_HEADS as u64) as usize);
+                let truth = seen.oracle(row, head);
+                let base = (row * N_HEADS as usize + head) * HD as usize;
+                let err = (0..HD as usize).map(|e| (got[base + e] as f64 - truth[e]).abs()).fold(0f64, f64::max);
+                assert!(err <= (REL_TOL * scale) as f64, "{desc}: row {row} head {head} is {err:e} from the f64 oracle");
+            }
         }
     }
 }
@@ -650,8 +713,8 @@ fn both_flash_versions_stay_close_to_fp32_at_large_score_magnitudes() {
     }
 }
 
-/// The int8-cache prefill kernel at the serving chunk (512 rows) at growing context, for `ncu -k regex:flash_prefill -c 1`:
-/// `cargo test --release -p brain-gpu-core --test cuda_flash_prefill -- --ignored --nocapture contexts`.
+/// The int8-cache prefill kernels at the serving chunk (512 rows) at growing context, for `ncu -k regex:flash_prefill -c 1`:
+/// `make test/one P=brain-gpu-core T=cuda_flash_prefill ARGS="--ignored --nocapture contexts"`.
 #[test]
 #[ignore = "a timing report for kernel work, not a spec"]
 fn the_int8_cache_prefill_rates_at_growing_contexts() {
@@ -661,12 +724,16 @@ fn the_int8_cache_prefill_rates_at_growing_contexts() {
         let p = Problem::new(Case { n, start, block_size: 4096, scatter: false }, 23);
         let (seen, stored) = p.as_stored(Kv::Int8);
         let d = TierDevice::upload(&gpu, &seen, Kv::Int8, &stored);
-        let native = d.native(&gpu, &seen).expect("native step");
-        let _ = d.base.run(&gpu, &native, &seen);
-        assert!(gpu.set_kernel_timing(true));
-        let ms = (0..TRIALS).map(|_| d.base.trial_ms(&gpu, &native, "flash_prefill_f16_hd256_v2_kv8")).fold(f64::MAX, f64::min);
-        gpu.set_kernel_timing(false);
         let flops = 4.0 * f64::from(n) * (f64::from(start) + f64::from(n) / 2.0) * 256.0 * 24.0;
-        eprintln!("cuda_flash_prefill: int8 n={n} ctx={}: {ms:.3} ms ({:.0} TFLOPS causal)", start + n, flops / ms / 1e9);
+        assert!(gpu.set_kernel_timing(true));
+        for (label, name, wg) in [("v2", "flash_prefill_f16_hd256_v2_kv8", false), ("wg", "flash_prefill_f16_hd256_wg", true)] {
+            gpu_core::provider::cuda::set_flash_prefill_wg(wg);
+            let steps = if wg { d.native_wg(&gpu, &seen).expect("warpgroup step") } else { vec![d.native(&gpu, &seen).expect("native step")] };
+            let _ = d.base.run_steps(&gpu, &steps, &seen);
+            let ms = (0..TRIALS).map(|_| d.base.trial_steps_ms(&gpu, &steps, name)).fold(f64::MAX, f64::min);
+            eprintln!("cuda_flash_prefill: int8 {label} n={n} ctx={}: {ms:.3} ms ({:.0} TFLOPS causal)", start + n, flops / ms / 1e9);
+        }
+        gpu.set_kernel_timing(false);
     }
+    gpu_core::provider::cuda::set_flash_prefill_wg(true);
 }
