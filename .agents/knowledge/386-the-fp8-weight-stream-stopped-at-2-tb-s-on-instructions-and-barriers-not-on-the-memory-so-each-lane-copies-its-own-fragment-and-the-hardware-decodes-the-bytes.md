@@ -75,3 +75,15 @@ overcount it). FP8 27B, c = 1, int8 KV, ms a token:
    one sequence 17.3 -> 14.9 us, 4: 18.7 -> 18.5, 16: 72.5 -> 56.8, 64: 270 -> 155 us a layer. The first version (state in 128 registers, a block per value head)
    was no faster: ncu showed 168 registers and 6 M local-memory spill requests, 2.6 TB/s of DRAM traffic for 400 MB of state; the second let the compiler
    hoist all 128 shared loads (255 registers, two blocks an SM) until the loops were unrolled by two.
+3. **Glue that was a launch each, now one**: the two bf16 gate projections (`in_proj_b`, `in_proj_a`, 48 + 48 launches of 4.7 us) are grouped apart from the
+   FP8 projections and run as one `Bf16GemvMulti` (5.4 us, saves 0.2 ms); with an int8 KV cache the eight-kernel GQA front half (`concat_split` x 2, `rmsnorm_rows` x 2, `rope`
+   x 2, `kv_append_i8` x 2, 27 us a layer) is one `gqa_decode_prep_i8` (4.9 us, saves 0.35 ms): the f32-pool kernel's body ends in the clipped per-head int8 append
+   (max, `min(max, clip) / 127`, `rint(v / scale)`, four to a word), bit-equal to the chain on K, V, the scale tables and the attention output
+   (`gqa_decode_prep_native`, int8 added); the device top-k head (`topk_rows`) keeps the best of each 16-column sub-run in registers so a winner costs one sub-run rescan
+   (not 61 vector loads out of L2): 187 -> 103 us.
+4. **The head is a second graph behind a host round trip.** The step is not one graph: the first 64 held steps are launched as a graph of their own (`PASS_FIRST_FLUSH_STEPS`),
+   the rest follow, and the last layer's residual is read back to the host, uploaded again and normed by `head_rows_on` (the generated RMSNorm, 40 us a row, then the
+   int8 packing the bf16 head never reads). Per token on the card, c = 1: 443 us idle between the previous token's top-k and the first kernel of the next (the readback,
+   the sampling, ten small uploads and a 110 us `cuGraphLaunch`), 291 us idle between the first graph and the second (the host building 192 steps and a 377 us launch
+   of the big graph), 88 us between the last layer and the head. `final_norm_step` runs the head's norm as `add_rms_quant` without the add (2.9 us; bit-equal when the
+   unfused norm would have been the cooperative one) and the unneeded packing is skipped. The remaining 0.8 ms a token of host gaps is the next lever.

@@ -1127,10 +1127,11 @@ fn head_rows_on<R>(
     let x = g.storage(hidden.len() as u64);
     g.write_f32(&x, hidden);
     let normed = g.storage(rows as u64 * d as u64);
-    g.submit(&[], &[crate::model::rms_step(g, &x, final_norm_buf, &normed, d as u32, rows)]);
+    g.submit(&[], &[crate::model::final_norm_step(g, &x, final_norm_buf, &normed, d as u32, rows)]);
 
     let mut s = Vec::new();
-    let act = ops.act(&mut s, &normed, 0, rows, d as u32);
+    // The int8 packing (two launches) only where the head reads it.
+    let act = if crate::train_base::reads_float_acts(head) { ops.act_f32(&normed, 0, rows, d as u32) } else { ops.act(&mut s, &normed, 0, rows, d as u32) };
     let logits_buf = g.storage(rows as u64 * cfg.vocab as u64);
     ops.matmul(&mut s, head, &act, &logits_buf, 0);
     g.submit(&[], &s);

@@ -51,6 +51,15 @@
 // default and every product and sum is an explicit round-to-nearest operation
 // besides.
 //
+// The int8 KV tier (`brain_gqa_decode_prep_i8`, knowledge 386)
+// ----------------------------------------------------------
+// With `--kv-cache int8` the chain after the projections is the same eight kernels with the append replaced by
+// `paged_kv_append_i8_clipped_batched`, and the f32 pools of the kernel above cannot take it. The second entry point runs the same
+// body and ends each key head's block with that append's own arithmetic on the values it holds: the maximum of |value| over the head
+// (order-free), `scale = min(max, clip[head]) / 127` (1 for an all-zero head), `q = clamp(rint(value / scale), -127, 127)` with the
+// correctly rounded division, four int8 to a word, the scale stored per (pool row, kv head). Extra bindings: `clip_k`, `clip_v`
+// (`[nkv]` f32), the two int8 pools as words, and their scale tables.
+//
 // No `__restrict__` anywhere, deliberately: brain's device buffers alias by
 // design (a sliced step binds ranges of one allocation).
 
@@ -68,12 +77,12 @@
 #endif
 #endif
 
-extern "C" __global__ void __launch_bounds__(BRAIN_GPREP_THREADS)
-brain_gqa_decode_prep(const unsigned int* params, const float* q_full, const float* k, const float* v,
-                      const float* q_norm, const float* k_norm, const float* cos_t, const float* sin_t,
-                      const unsigned int* blocks, const unsigned int* offsets,
-                      float* q_out, float* q_gate, float* pool_k, float* pool_v) {
-    BRAIN_PDL_ENTRY();
+template <bool I8>
+__device__ __forceinline__ void brain_gqa_prep_body(const unsigned int* params, const float* q_full, const float* k, const float* v,
+                                                    const float* q_norm, const float* k_norm, const float* cos_t, const float* sin_t,
+                                                    const unsigned int* blocks, const unsigned int* offsets, float* q_out, float* q_gate,
+                                                    float* pool_k, float* pool_v, const float* clip_k, const float* clip_v,
+                                                    unsigned int* words_k, unsigned int* words_v, float* scales_k, float* scales_v) {
     const unsigned int nh = params[0];
     const unsigned int nkv = params[1];
     const unsigned int hd = params[2];
@@ -92,6 +101,10 @@ brain_gqa_decode_prep(const unsigned int* params, const float* q_full, const flo
 
     __shared__ float xs[BRAIN_GPREP_MAX_HD];
     __shared__ float inv_s;
+    // The int8 tier's staging: the head's rotated K and its V, and the two maxima per warp.
+    __shared__ float ys[I8 ? BRAIN_GPREP_MAX_HD : 1];
+    __shared__ float vs[I8 ? BRAIN_GPREP_MAX_HD : 1];
+    __shared__ float maxes[I8 ? 2 * (BRAIN_GPREP_THREADS / 32) : 1];
 
     // The head's own values, loaded before anything is written.
     const unsigned long long kv_row = (unsigned long long)row * nkv * hd;
@@ -132,9 +145,10 @@ brain_gqa_decode_prep(const unsigned int* params, const float* q_full, const flo
     }
     __syncthreads();
 
-    const unsigned long long pool_row = ((unsigned long long)blocks[row] * block_size + offsets[row]) * (nkv * hd);
-    float* dst = is_q ? (q_out + (unsigned long long)row * nh * hd + (unsigned long long)h * hd)
-                      : (pool_k + pool_row + (unsigned long long)h * hd);
+    const unsigned long long slot = (unsigned long long)blocks[row] * block_size + offsets[row];
+    const unsigned long long pool_row = slot * (nkv * hd);
+    float* dst = is_q ? (q_out + (unsigned long long)row * nh * hd + (unsigned long long)h * hd) : (I8 ? nullptr : pool_k + pool_row + (unsigned long long)h * hd);
+    float mk = 0.0f, mv = 0.0f;
 #pragma unroll
     for (int i = 0; i < BRAIN_GPREP_MAX_HD / BRAIN_GPREP_THREADS; ++i) {
         const unsigned int d = t + BRAIN_GPREP_THREADS * i;
@@ -150,12 +164,74 @@ brain_gqa_decode_prep(const unsigned int* params, const float* q_full, const flo
                 const float s = __fmul_rn(sin_r[e], 1.0f);
                 y = __fadd_rn(__fmul_rn(xs[d], c), __fmul_rn(xs[e], s));
             }
-            dst[d] = y;
             if (is_q) {
+                dst[d] = y;
                 q_gate[(unsigned long long)row * nh * hd + (unsigned long long)h * hd + d] = gate[i];
+            } else if (I8) {
+                ys[d] = y;
+                vs[d] = vv[i];
+                mk = fmaxf(mk, fabsf(y));
+                mv = fmaxf(mv, fabsf(vv[i]));
             } else {
+                dst[d] = y;
                 pool_v[pool_row + (unsigned long long)h * hd + d] = vv[i];
             }
         }
     }
+    if (I8 && !is_q) {
+        // The maxima: a warp's by shuffles (exact in any order), the block's from the per-warp ones.
+#pragma unroll
+        for (int o = 16; o > 0; o >>= 1) {
+            mk = fmaxf(mk, __shfl_xor_sync(0xffffffffu, mk, o));
+            mv = fmaxf(mv, __shfl_xor_sync(0xffffffffu, mv, o));
+        }
+        if ((t & 31u) == 0u) { maxes[2 * (t >> 5)] = mk; maxes[2 * (t >> 5) + 1] = mv; }
+        __syncthreads();
+        float bk = 0.0f, bv = 0.0f;
+#pragma unroll
+        for (int w = 0; w < BRAIN_GPREP_THREADS / 32; ++w) { bk = fmaxf(bk, maxes[2 * w]); bv = fmaxf(bv, maxes[2 * w + 1]); }
+        float sk = __fdiv_rn(fminf(bk, clip_k[h]), 127.0f);
+        float sv = __fdiv_rn(fminf(bv, clip_v[h]), 127.0f);
+        if (sk == 0.0f) { sk = 1.0f; }
+        if (sv == 0.0f) { sv = 1.0f; }
+        if (t == 0) {
+            scales_k[slot * nkv + h] = sk;
+            scales_v[slot * nkv + h] = sv;
+        }
+        // Four consecutive elements to a word, each by its head's scale.
+        const unsigned long long word0 = (pool_row + (unsigned long long)h * hd) / 4u;
+        if (t < hd / 4u) {
+            unsigned int pk = 0u, pv = 0u;
+#pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                const int qk = max(-127, min(127, static_cast<int>(rintf(__fdiv_rn(ys[4 * t + j], sk)))));
+                const int qv = max(-127, min(127, static_cast<int>(rintf(__fdiv_rn(vs[4 * t + j], sv)))));
+                pk |= (static_cast<unsigned int>(qk) & 0xffu) << (8 * j);
+                pv |= (static_cast<unsigned int>(qv) & 0xffu) << (8 * j);
+            }
+            words_k[word0 + t] = pk;
+            words_v[word0 + t] = pv;
+        }
+    }
+}
+
+extern "C" __global__ void __launch_bounds__(BRAIN_GPREP_THREADS)
+brain_gqa_decode_prep(const unsigned int* params, const float* q_full, const float* k, const float* v,
+                      const float* q_norm, const float* k_norm, const float* cos_t, const float* sin_t,
+                      const unsigned int* blocks, const unsigned int* offsets,
+                      float* q_out, float* q_gate, float* pool_k, float* pool_v) {
+    BRAIN_PDL_ENTRY();
+    brain_gqa_prep_body<false>(params, q_full, k, v, q_norm, k_norm, cos_t, sin_t, blocks, offsets, q_out, q_gate, pool_k, pool_v, nullptr, nullptr,
+                               nullptr, nullptr, nullptr, nullptr);
+}
+
+extern "C" __global__ void __launch_bounds__(BRAIN_GPREP_THREADS)
+brain_gqa_decode_prep_i8(const unsigned int* params, const float* q_full, const float* k, const float* v,
+                         const float* q_norm, const float* k_norm, const float* cos_t, const float* sin_t,
+                         const unsigned int* blocks, const unsigned int* offsets,
+                         float* q_out, float* q_gate, const float* clip_k, const float* clip_v,
+                         unsigned int* words_k, unsigned int* words_v, float* scales_k, float* scales_v) {
+    BRAIN_PDL_ENTRY();
+    brain_gqa_prep_body<true>(params, q_full, k, v, q_norm, k_norm, cos_t, sin_t, blocks, offsets, q_out, q_gate, nullptr, nullptr, clip_k, clip_v,
+                              words_k, words_v, scales_k, scales_v);
 }

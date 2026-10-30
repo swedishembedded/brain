@@ -2838,6 +2838,26 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/gqa_decode_prep.cu"),
     },
     CudaKernel {
+        name: "gqa_decode_prep_i8",
+        // `gqa_decode_prep` for the int8 KV tier: the same body ending in `paged_kv_append_i8_clipped_batched`'s own arithmetic
+        // (knowledge 386). A fused kernel asked for by name.
+        op: Op::PagedAttention,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_gqa_decode_prep_i8",
+        what: "gated-attention decode prep in one launch for an int8 KV tier, for every row of a batch: value-and-gate split, per-head QK RMSNorm, partial rotary, clipped per-head int8 append of K and V; a block per head per row, bit-identical to the 8-kernel WGSL chain",
+        reported: "native:gqa_decode_prep_i8",
+        block_dim: 256,
+        // One block per head per row (query heads, then key heads).
+        tile: (1, 1),
+        // The head's 512 staged values, its rotated K and V, the maxima and the shared inverse norm.
+        shared_bytes: 512 * 4 + 4 + 2 * 512 * 4 + 16 * 4,
+        programmatic: true,
+        src: include_str!("../cu/gqa_decode_prep.cu"),
+    },
+    CudaKernel {
         name: "conv2d_fwd_f32",
         // Redirected to by name from the WGSL `conv2d` (`gpu_core::native_upgrade`);
         // `Op::Conv2d`'s selector arm belongs to a different call site

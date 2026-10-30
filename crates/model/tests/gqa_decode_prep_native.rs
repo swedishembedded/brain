@@ -110,6 +110,11 @@ struct Case {
 }
 
 fn check(g: &Gpu, c: &Case, seed: u64) {
+    check_tier(g, c, seed, KvTier::F32);
+}
+
+/// [`check`] on a KV tier: the pools (int8 words and their scale tables included) must match the chain bit for bit.
+fn check_tier(g: &Gpu, c: &Case, seed: u64, tier: KvTier) {
     let Case { nh, nkv, hd, half, ctx_len, block_size } = *c;
     let shape = GqaMixerShape { b: 1, t: 1, n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: half, rms_eps: 1e-6 };
     let (qd, kvd) = (shape.qd(), shape.kvd());
@@ -141,25 +146,36 @@ fn check(g: &Gpu, c: &Case, seed: u64) {
     g.write(&seq_lens, &[ctx_len + 1]);
     let paged = PagedDecodeBatch { blocks: &blocks, offsets: &offsets, block_tables: &block_tables, seq_lens: &seq_lens, block_size, max_bt: 1, cap: block_size, pin_splits: false };
 
-    let kv = KvKernels::resolve(g, KvTier::F32).expect("the f32 KV kernels are registered");
+    let kv = KvKernels::resolve(g, tier).expect("the KV kernels are registered");
     let softmax = idx(g, "decode_softmax_batched");
-    let layer = || KvLayer::new(g, KvTier::F32, u64::from(num_blocks * block_size), u64::from(kvd), u64::from(hd));
+    let rows = u64::from(num_blocks * block_size);
+    let layer = || KvLayer::new(g, tier, rows, u64::from(kvd), u64::from(hd));
     let (ref_layer, nat_layer) = (layer(), layer());
+    let words = tier.plane_words(rows, u64::from(kvd), u64::from(hd));
+    // The pool starts as arbitrary words (and, for a scaled tier, arbitrary calibrated ceilings): a row the append does not write must stay as it was.
+    let clip: Vec<f32> = (0..nkv).map(|h| if h % 2 == 0 { f32::MAX } else { 0.9 }).collect();
     for l in [&ref_layer, &nat_layer] {
-        g.write_f32(l.k.data(), &pk0);
-        g.write_f32(l.v.data(), &pv0);
+        g.write_f32(l.k.data(), &pk0[..words.data as usize]);
+        g.write_f32(l.v.data(), &pv0[..words.data as usize]);
+        for plane in [&l.k, &l.v] {
+            if let Some(c) = plane.clip() {
+                g.write_f32(c, &clip);
+            }
+        }
     }
     let (ctx_ref, gate_ref) = gqa_mixer_decode_batched_kv_attend(g, &mixer_ids(g), &kv, softmax, &shape, &w, &q_full, &k, &v, &ref_layer, 1, &paged);
     let (ctx_nat, gate_nat) = gqa_mixer_decode_fused_kv_attend(g, &kv, softmax, &shape, &w, &q_full, &k, &v, &nat_layer, 1, &paged)
         .expect("the fused GQA decode prep was declined on a CUDA device");
     g.poll_wait();
-    let (pk_ref, pv_ref, pk_nat, pv_nat) = (ref_layer.k.data(), ref_layer.v.data(), nat_layer.k.data(), nat_layer.v.data());
-
-    let what = format!("nh={nh} nkv={nkv} hd={hd} half={half} ctx={ctx_len} seed={seed:#x}");
+    let what = format!("{tier} nh={nh} nkv={nkv} hd={hd} half={half} ctx={ctx_len} seed={seed:#x}");
     assert_eq!(bits(g.read(&gate_nat, qd as usize)), bits(g.read(&gate_ref, qd as usize)), "gate half differs: {what}");
     assert_eq!(bits(g.read(&ctx_nat, qd as usize)), bits(g.read(&ctx_ref, qd as usize)), "attention output differs: {what}");
-    assert_eq!(bits(g.read(pk_nat, pool_words)), bits(g.read(pk_ref, pool_words)), "K pool differs: {what}");
-    assert_eq!(bits(g.read(pv_nat, pool_words)), bits(g.read(pv_ref, pool_words)), "V pool differs: {what}");
+    for (name, nat, rf) in [("K", &nat_layer.k, &ref_layer.k), ("V", &nat_layer.v, &ref_layer.v)] {
+        assert_eq!(bits(g.read(nat.data(), words.data as usize)), bits(g.read(rf.data(), words.data as usize)), "{name} pool differs: {what}");
+        if let (Some(a), Some(b)) = (nat.scales(), rf.scales()) {
+            assert_eq!(bits(g.read(a, words.scales as usize)), bits(g.read(b, words.scales as usize)), "{name} scales differ: {what}");
+        }
+    }
 }
 
 #[test]
@@ -172,8 +188,10 @@ fn the_fused_prep_is_offered_only_where_it_can_run() {
     let kv = KvKernels::resolve(&g, KvTier::F32).expect("the f32 KV kernels are registered");
     let softmax = idx(&g, "decode_softmax_batched");
     let layer_in = |tier: KvTier| KvLayer::new(&g, tier, 16, u64::from(shape.kvd()), 64);
+    let kv_i8 = KvKernels::resolve(&g, KvTier::INT8).expect("the int8 KV kernels are registered");
     let try_it = |s: &GqaMixerShape, batch: u32, layer: &KvLayer| {
-        gqa_mixer_decode_fused_kv_attend(&g, &kv, softmax, s, &w, &dummy, &dummy, &dummy, layer, batch, &paged).is_some()
+        let kv = if layer.k.tier() == KvTier::INT8 { &kv_i8 } else { &kv };
+        gqa_mixer_decode_fused_kv_attend(&g, kv, softmax, s, &w, &dummy, &dummy, &dummy, layer, batch, &paged).is_some()
     };
     let f32_layer = layer_in(KvTier::F32);
     if !is_cuda(&g) {
@@ -185,7 +203,8 @@ fn the_fused_prep_is_offered_only_where_it_can_run() {
     assert!(!try_it(&GqaMixerShape { head_dim: 1024, ..shape }, 1, &f32_layer), "a head wider than the block holds");
     assert!(!try_it(&GqaMixerShape { rotary_half: 40, ..shape }, 1, &f32_layer), "a rotated span wider than the head");
     assert!(!try_it(&shape, 1, &layer_in(KvTier::BF16)), "a compact KV tier keeps the tier's own append");
-    assert!(!try_it(&shape, 1, &layer_in(KvTier::INT8)), "a compact KV tier keeps the tier's own append");
+    assert!(try_it(&shape, 1, &layer_in(KvTier::INT8)), "the int8 tier has its own fused append");
+    assert!(!try_it(&GqaMixerShape { head_dim: 30, rotary_half: 8, ..shape }, 1, &layer_in(KvTier::INT8)), "an int8 head is whole words");
 }
 
 #[test]
@@ -201,7 +220,12 @@ fn the_fused_prep_is_byte_identical_to_the_wgsl_chain() {
     // multiple of the 256-thread block.
     for (nh, nkv, hd, half) in [(24u32, 4u32, 256u32, 32u32), (6, 2, 128, 16), (4, 2, 64, 7), (2, 1, 64, 32), (1, 1, 32, 4), (3, 1, 96, 10), (4, 2, 512, 64)] {
         for ctx_len in [0u32, 5, 17] {
-            check(&g, &Case { nh, nkv, hd, half, ctx_len, block_size: 24 }, 0xa11 ^ u64::from(nh * 31 + hd + half + ctx_len));
+            let case = Case { nh, nkv, hd, half, ctx_len, block_size: 24 };
+            let seed = 0xa11 ^ u64::from(nh * 31 + hd + half + ctx_len);
+            check(&g, &case, seed);
+            if hd % 4 == 0 && hd <= 256 {
+                check_tier(&g, &case, seed, KvTier::INT8);
+            }
         }
     }
 }

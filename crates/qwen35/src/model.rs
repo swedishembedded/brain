@@ -601,6 +601,22 @@ fn native_rmsnorm_dx_add(_g: &Gpu, _bufs: [&DeviceBuffer; 5], _d: u32, _rows: u3
 /// order, agreeing to ~3e-6 max_abs - which is exactly why it lives at the call
 /// site behind `rms_variant` rather than in `gpu_core::upgrade`, whose bar is
 /// bit-identity.
+/// [`rms_step`] as the front end kernel (`add_rms_quant` without the add and the packing) where the device offers it and the unfused
+/// norm would have been the cooperative RMSNorm - the only order that kernel reproduces, bit for bit: one launch of 4 us in place of
+/// the generated norm's 40 us a row. The head of a decode token pays it once, after the last layer.
+pub(crate) fn final_norm_step(g: &Gpu, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, dim: u32, rows: u32) -> Step {
+    let coop = block::rms_variant(g, RMSNORM, Some(RMSNORM_ROWS), rows, dim).0 == RMSNORM_ROWS;
+    let params = [dim, rows, f(RMS_EPS), 2];
+    if coop && g.has_fused(gpu_core::Fused::AddRmsQuant) && gpu_core::Fused::AddRmsQuant.serves(&params) {
+        // Without an addend the kernel reads neither `b` nor writes `sum`; the slots still have to be bound, and alias what is there.
+        let (xq, sx) = (g.storage(1), g.storage(1));
+        if let Some(step) = g.fused_step(gpu_core::Fused::AddRmsQuant, &[x, x, w, out, out, &xq, &sx], &params) {
+            return step;
+        }
+    }
+    rms_step(g, x, w, out, dim, rows)
+}
+
 pub fn rms_step(g: &Gpu, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, dim: u32, rows: u32) -> Step {
     let (kind, threads) = block::rms_variant(g, RMSNORM, Some(RMSNORM_ROWS), rows, dim);
     g.dispatch(kind, &[x, w, out], &[dim, rows, f(RMS_EPS)], threads)
@@ -2781,11 +2797,14 @@ impl Qwen35 {
         // in_proj_qkv/b/a/z all read `act1` (xn1 quantized once, shared): one
         // group, which is one launch where the device allows it.
         let (qkv_w, b_w, a_w, z_w) = (p("in_proj_qkv.weight"), p("in_proj_b.weight"), p("in_proj_a.weight"), p("in_proj_z.weight"));
-        let f32s = self.ops_linear_group(&mut s1, &act1, &[(&qkv_w, &mixed_qkv), (&b_w, &bproj), (&a_w, &aproj), (&z_w, &z)]);
-        self.adapt(f32s[0], &mut s1, "in_proj_qkv", xn1, &qkv_w, &mixed_qkv, n, d, conv_dim);
-        self.adapt(f32s[1], &mut s1, "in_proj_b", xn1, &b_w, &bproj, n, d, nvh);
-        self.adapt(f32s[2], &mut s1, "in_proj_a", xn1, &a_w, &aproj, n, d, nvh);
-        self.adapt(f32s[3], &mut s1, "in_proj_z", xn1, &z_w, &z, n, d, value_dim);
+        // The two gate projections are dense bf16 whatever the big projections' tier is, and a group fuses only members of one tier:
+        // grouped apart, the pair is one launch of the multi-GEMV (six blocks each) beside the two big products.
+        let f32s_big = self.ops_linear_group(&mut s1, &act1, &[(&qkv_w, &mixed_qkv), (&z_w, &z)]);
+        let f32s_gates = self.ops_linear_group(&mut s1, &act1, &[(&b_w, &bproj), (&a_w, &aproj)]);
+        self.adapt(f32s_big[0], &mut s1, "in_proj_qkv", xn1, &qkv_w, &mixed_qkv, n, d, conv_dim);
+        self.adapt(f32s_gates[0], &mut s1, "in_proj_b", xn1, &b_w, &bproj, n, d, nvh);
+        self.adapt(f32s_gates[1], &mut s1, "in_proj_a", xn1, &a_w, &aproj, n, d, nvh);
+        self.adapt(f32s_big[1], &mut s1, "in_proj_z", xn1, &z_w, &z, n, d, value_dim);
         self.bank_fwd(&mut s1, xn1, &[(qkv_w.as_str(), &mixed_qkv), (z_w.as_str(), &z), (b_w.as_str(), &bproj), (a_w.as_str(), &aproj)], n);
         g.submit(&[], &s1);
 
@@ -4841,6 +4860,8 @@ impl Qwen35 {
             (xn, act)
         });
 
+        // The final norm's output, when the last layer's residual add produced it.
+        let mut final_norm: Option<DeviceBuffer> = None;
         // `l` is the ABSOLUTE layer index (into `types`, `caches.*` and the
         // `blocks.{l}.*` weight names below), not just a loop counter -
         // exactly as in `Self::run_forward`.
@@ -4934,6 +4955,11 @@ impl Qwen35 {
                 let (sum, xn, act) = self.rms_quant_front(&xmid, Some(&mlp_out), self.w(&format!("blocks.{}.ln1.weight", l + 1)), bsz);
                 res = sum.expect("an add front hands back its sum");
                 front = Some((xn, act));
+            } else if fused && self.shard.head {
+                // The last layer: the final norm rides on the residual add too (the generated one-row RMSNorm is 130 us a call).
+                let (sum, xn, _) = self.rms_quant_front(&xmid, Some(&mlp_out), self.w("norm.weight"), bsz);
+                res = sum.expect("an add front hands back its sum");
+                final_norm = Some(xn);
             } else {
                 let res_next = g.storage((bsz * d) as u64);
                 g.submit(&[], &[g.step(ADD2, &[&xmid, &mlp_out, &res_next], &[bsz * d], bsz * d)]);
@@ -4956,9 +4982,11 @@ impl Qwen35 {
         // `shard.head` branch, at `bsz` rows. A non-head stage returns its raw
         // residual for the next stage to pick up as `input_override`.
         if self.shard.head {
-            let xn_final = g.storage((bsz * d) as u64);
-            g.submit(&[], &[rms_step(g, &res, self.w("norm.weight"), &xn_final, d, bsz)]);
-            xn_final
+            final_norm.unwrap_or_else(|| {
+                let xn_final = g.storage((bsz * d) as u64);
+                g.submit(&[], &[rms_step(g, &res, self.w("norm.weight"), &xn_final, d, bsz)]);
+                xn_final
+            })
         } else {
             res
         }
@@ -5396,7 +5424,7 @@ impl Qwen35 {
             let (_, xn, act) = self.rms_quant_front(&res, None, self.w(&format!("blocks.{}.ln1.weight", self.shard.start)), n);
             (xn, act)
         });
-        StackState { res, front, layer: self.shard.start, types, pooled, drain_pooled, reclaim_budget, fused, epilogue }
+        StackState { res, front, layer: self.shard.start, types, pooled, drain_pooled, reclaim_budget, fused, epilogue, final_norm: None }
     }
 
     /// Record layers of the round `st` stands for - one at a time, until the stage's last or until `budget` layers
@@ -5466,6 +5494,11 @@ impl Qwen35 {
                 let (sum, xn, act) = self.rms_quant_front(&xmid, Some(&mlp_out), self.w(&format!("blocks.{}.ln1.weight", l + 1)), n);
                 st.res = sum.expect("an add front hands back its sum");
                 st.front = Some((xn, act));
+            } else if st.fused && self.shard.head {
+                // The last layer: the final norm rides on the residual add too (the generated RMSNorm is 40-130 us a call).
+                let (sum, xn, _) = self.rms_quant_front(&xmid, Some(&mlp_out), self.w("norm.weight"), n);
+                st.res = sum.expect("an add front hands back its sum");
+                st.final_norm = Some(xn);
             } else {
                 let res_next = g.storage_uninit((n * d) as u64);
                 g.submit(&[], &[g.step(ADD2, &[&xmid, &mlp_out, &res_next], &[n * d], n * d)]);
@@ -5546,9 +5579,11 @@ impl Qwen35 {
         // `shard.head` branch, at `n` rows. A non-head stage hands back its raw
         // residual block for the next stage to pick up as `input_override`.
         if self.shard.head {
-            let xn_final = g.storage((n * d) as u64);
-            g.submit(&[], &[rms_step(g, &st.res, self.w("norm.weight"), &xn_final, d, n)]);
-            Some(xn_final)
+            Some(st.final_norm.take().unwrap_or_else(|| {
+                let xn_final = g.storage((n * d) as u64);
+                g.submit(&[], &[rms_step(g, &st.res, self.w("norm.weight"), &xn_final, d, n)]);
+                xn_final
+            }))
         } else {
             Some(st.res.clone())
         }
@@ -7011,6 +7046,8 @@ pub(crate) struct StackState {
     reclaim_budget: u64,
     fused: bool,
     epilogue: bool,
+    /// The final norm's output, when the last layer's residual add produced it ([`Qwen35::advance_layer_stack`]).
+    final_norm: Option<DeviceBuffer>,
 }
 
 /// One sequence's chunk round between [`Qwen35::begin_prefill_chunk`] and the last of its

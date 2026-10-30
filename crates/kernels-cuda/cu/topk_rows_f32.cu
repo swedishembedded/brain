@@ -25,6 +25,10 @@
 #define BRAIN_TOPK_THREADS 1024
 #define BRAIN_TOPK_WARPS (BRAIN_TOPK_THREADS / 32)
 #define BRAIN_TOPK_MASKED (-3.4e38f)
+// Columns of a sub-run (four 16-byte vectors) and sub-runs of a thread's run: a run is at most 16 * 16 = 256 columns, enough for a
+// vocabulary of 1024 * 256 = 262144 columns (Qwen3.8 has 248320).
+#define BRAIN_TOPK_SUB 16
+#define BRAIN_TOPK_SUBS 16
 
 struct TopkBest {
     float v;
@@ -49,12 +53,16 @@ extern "C" __global__ void __launch_bounds__(BRAIN_TOPK_THREADS) brain_topk_rows
     const unsigned int first = min(t * run, vocab), last = min(first + run, vocab);
     const bool vector = (vocab & 3u) == 0u;  // every run then starts on a 16-byte boundary of an aligned row
 
-    // The best of this thread's columns that are still in the row; a column past the vocabulary or taken is never better.
-    auto scan = [&]() {
+    // A thread's run is BRAIN_TOPK_SUBS sub-runs of BRAIN_TOPK_SUB columns; it keeps the best of each in registers, so taking
+    // a winner out of the row rescans one sub-run (a few vector loads), not the whole run (61 dependent-looking vector loads out
+    // of L2, ~6 us a round, 32 rounds: 190 us a step). A column past the vocabulary or taken is never better.
+    TopkBest sub[BRAIN_TOPK_SUBS];
+    auto scan_sub = [&](unsigned int s) {
         TopkBest b = {BRAIN_TOPK_MASKED, 0xffffffffu};
-        unsigned int c = first;
+        unsigned int c = first + s * BRAIN_TOPK_SUB;
+        const unsigned int end = min(c + BRAIN_TOPK_SUB, last);
         if (vector) {
-            for (; c + 4 <= last; c += 4) {
+            for (; c + 4 <= end; c += 4) {
                 const float4 v = *reinterpret_cast<const float4*>(x + c);
                 // ascending columns: the first of equal values stays
                 if (v.x > b.v) { b.v = v.x; b.i = c; }
@@ -63,13 +71,24 @@ extern "C" __global__ void __launch_bounds__(BRAIN_TOPK_THREADS) brain_topk_rows
                 if (v.w > b.v) { b.v = v.w; b.i = c + 3; }
             }
         }
-        for (; c < last; ++c) {
+        for (; c < end; ++c) {
             const float v = x[c];
             if (v > b.v) { b.v = v; b.i = c; }
         }
         return b;
     };
-    TopkBest mine = scan();
+    // The best of the sub-runs: ascending sub-runs hold ascending columns, so the first of equal values stays.
+    auto best_of_subs = [&]() {
+        TopkBest b = sub[0];
+#pragma unroll
+        for (int s = 1; s < BRAIN_TOPK_SUBS; ++s) {
+            if (sub[s].v > b.v) { b = sub[s]; }
+        }
+        return b;
+    };
+#pragma unroll
+    for (int s = 0; s < BRAIN_TOPK_SUBS; ++s) { sub[s] = scan_sub(s); }
+    TopkBest mine = best_of_subs();
 
     for (unsigned int col = 0; col < cap; ++col) {
         // The block's best: the warps' by shuffles, then the first warp over theirs.
@@ -103,7 +122,12 @@ extern "C" __global__ void __launch_bounds__(BRAIN_TOPK_THREADS) brain_topk_rows
         // The owner of the winning column takes it out of the row and finds its next best.
         if (col + 1 < cap && winner.i / run == t) {
             x[winner.i] = BRAIN_TOPK_MASKED;
-            mine = scan();
+            const unsigned int s = (winner.i - first) / BRAIN_TOPK_SUB;
+#pragma unroll
+            for (int u = 0; u < BRAIN_TOPK_SUBS; ++u) {
+                if (static_cast<unsigned int>(u) == s) { sub[u] = scan_sub(u); }
+            }
+            mine = best_of_subs();
         }
     }
 }

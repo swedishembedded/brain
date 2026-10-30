@@ -326,6 +326,16 @@ impl KvPlane {
         &self.data
     }
 
+    /// `[rows, n_kv_heads]` row scales of a scaled (int8, fp8) plane, for the fused decode prep that appends in place.
+    pub fn scales(&self) -> Option<&DeviceBuffer> {
+        self.scales.as_ref()
+    }
+
+    /// `[n_kv_heads]` calibrated append ceilings of a scaled plane.
+    pub fn clip(&self) -> Option<&DeviceBuffer> {
+        self.clip.as_ref()
+    }
+
     /// Steps that copy token rows `from_row .. from_row + rows` of this plane
     /// over rows `to_row ..` of the SAME plane - element storage and, in the
     /// int8 tier, the per-row scales - so a sequence's cached prefix can seed

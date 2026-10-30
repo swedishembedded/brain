@@ -724,10 +724,13 @@ pub fn gqa_mixer_decode_batched_kv_attend(
 /// sequences, or consecutive tokens of one (a verify round) that differ only in
 /// their `offsets`.
 ///
+/// A layer on the int8 tier takes `gqa_decode_prep_i8`, which ends in the int8 append's own arithmetic (clipped per-head scale, four
+/// int8 to a word).
+///
 /// `None` - nothing submitted, the layer untouched - where the device is not
 /// offered the kernel or the shape is outside it: an empty batch, a
 /// head wider than the block holds, or a layer stored in a compact [`KvTier`]
-/// (the kernel appends `f32` rows). The caller then runs
+/// other than int8 (the kernel appends `f32` or int8 rows). The caller then runs
 /// [`gqa_mixer_decode_batched_kv_attend`], which this is gated byte-for-byte
 /// against (`tests/gqa_decode_prep_native.rs`).
 #[allow(clippy::too_many_arguments)]
@@ -744,8 +747,9 @@ pub fn gqa_mixer_decode_fused_kv_attend(
     batch: u32,
     paged: &PagedDecodeBatch,
 ) -> Option<(DeviceBuffer, DeviceBuffer)> {
-    use crate::kv_tier::KvTier;
-    if batch == 0 || layer.k.tier() != KvTier::F32 || layer.v.tier() != KvTier::F32 {
+    use crate::kv_tier::{KvElement, KvTier};
+    let int8 = layer.k.tier().element() == KvElement::Int8 && layer.v.tier().element() == KvElement::Int8;
+    if batch == 0 || (!int8 && (layer.k.tier() != KvTier::F32 || layer.v.tier() != KvTier::F32)) {
         return None;
     }
     let (nh, nkv, hd) = (shape.n_heads, shape.n_kv_heads, shape.head_dim);
@@ -753,11 +757,17 @@ pub fn gqa_mixer_decode_fused_kv_attend(
     let q_out = g.storage((batch * qd) as u64);
     let q_gate = g.storage((batch * qd) as u64);
     let params = [nh, nkv, hd, shape.rotary_half, gpu_core::f(shape.rms_eps), paged.block_size, batch, 0];
-    let prep = g.fused_step(
-        gpu_core::Fused::GqaDecodePrep,
-        &[q_full, k, v, w.q_norm, w.k_norm, w.cos, w.sin, paged.blocks, paged.offsets, &q_out, &q_gate, layer.k.data(), layer.v.data()],
-        &params,
-    )?;
+    let front: [&DeviceBuffer; 9] = [q_full, k, v, w.q_norm, w.k_norm, w.cos, w.sin, paged.blocks, paged.offsets];
+    let prep = if int8 {
+        let (Some(clip_k), Some(clip_v), Some(scales_k), Some(scales_v)) = (layer.k.clip(), layer.v.clip(), layer.k.scales(), layer.v.scales()) else { return None };
+        let mut bufs: Vec<&DeviceBuffer> = front.to_vec();
+        bufs.extend([&q_out, &q_gate, clip_k, clip_v, layer.k.data(), layer.v.data(), scales_k, scales_v]);
+        g.fused_step(gpu_core::Fused::GqaDecodePrepI8, &bufs, &params)?
+    } else {
+        let mut bufs: Vec<&DeviceBuffer> = front.to_vec();
+        bufs.extend([&q_out, &q_gate, layer.k.data(), layer.v.data()]);
+        g.fused_step(gpu_core::Fused::GqaDecodePrep, &bufs, &params)?
+    };
     g.submit(&[], &[prep]);
 
     let ctx = g.storage((batch * qd) as u64);

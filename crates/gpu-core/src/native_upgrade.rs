@@ -2089,6 +2089,11 @@ pub enum Fused {
     /// norm gains carry one row per token), `q_out, q_gate, pool_k, pool_v`
     /// written.
     GqaDecodePrep,
+    /// `gqa_decode_prep_i8`: [`Fused::GqaDecodePrep`] for an int8 KV tier - the K and V of each key head are appended as clipped int8 words with a
+    /// scale per (pool row, kv head), as `paged_kv_append_i8_clipped_batched` does. Params as [`Fused::GqaDecodePrep`] (`head_dim` a multiple of
+    /// four); bindings `q_full, k, v, q_norm, k_norm, cos, sin, blocks, offsets` read, `q_out, q_gate` written, `clip_k, clip_v` read,
+    /// `pool_k, pool_v` (int8 words) and `scales_k, scales_v` written.
+    GqaDecodePrepI8,
     /// `moe_nvfp4_gateup_silu`: the gate and up projections of an NVFP4 expert bank for the same slots, and `silu(gate) * up`,
     /// in one launch. Params `[slots, k, n, xdiv]`; bindings `x, ids, wg, sg, gg, wu, su, gu` read, `h` written.
     MoeNvfp4GateUp,
@@ -2301,6 +2306,29 @@ const GQA_DECODE_PREP_BINDINGS: &[BindKind] = &[
     BindKind::StorageReadWrite,
 ];
 
+/// `gqa_decode_prep_i8`'s bindings: `gqa_decode_prep`'s through `q_gate`, then `clip_k`, `clip_v` (read), `pool_k`, `pool_v`, `scales_k`,
+/// `scales_v` (written).
+const GQA_DECODE_PREP_I8_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+];
+
 /// `matmul_i8_gemv_multi`'s bindings: params, `xq`, `sx`, then `wq`, `sw`, `out`
 /// for each of four sets.
 /// `matmul_bf16_gemv_multi`'s bindings: params, `x`, then `w` and `y` of each of four sets.
@@ -2400,6 +2428,7 @@ impl Fused {
             Fused::GdnVerifyPool => "gdn_verify_pool",
             Fused::GdnCommitPool => "gdn_commit_pool",
             Fused::GqaDecodePrep => "gqa_decode_prep",
+            Fused::GqaDecodePrepI8 => "gqa_decode_prep_i8",
             Fused::MoeNvfp4GateUp => "moe_nvfp4_gateup_silu",
             Fused::I8GemvMulti => "matmul_i8_gemv_multi",
             Fused::Q4GemvMulti => "matmul_q4_gemv_multi",
@@ -2426,6 +2455,7 @@ impl Fused {
             Fused::GdnVerifyPool => GDN_VERIFY_POOL_BINDINGS,
             Fused::GdnCommitPool => GDN_COMMIT_POOL_BINDINGS,
             Fused::GqaDecodePrep => GQA_DECODE_PREP_BINDINGS,
+            Fused::GqaDecodePrepI8 => GQA_DECODE_PREP_I8_BINDINGS,
             Fused::MoeNvfp4GateUp => MOE_NVFP4_GATEUP_BINDINGS,
             Fused::I8GemvMulti | Fused::Q4GemvMulti => I8_GEMV_MULTI_BINDINGS,
             Fused::Bf16GemvMulti => BF16_GEMV_MULTI_BINDINGS,
@@ -2465,6 +2495,9 @@ impl Fused {
             // rotated span `2 * half` has to fit inside it.
             Fused::GqaDecodePrep => {
                 matches!(params, [nh, nkv, hd, half, _, _, rows, _] if *nh >= 1 && *nkv >= 1 && nh % nkv == 0 && (2..=512).contains(hd) && *half >= 1 && 2 * half <= *hd && *rows >= 1)
+            }
+            Fused::GqaDecodePrepI8 => {
+                matches!(params, [nh, nkv, hd, half, _, _, rows, _] if *nh >= 1 && *nkv >= 1 && nh % nkv == 0 && (4..=512).contains(hd) && hd % 4 == 0 && *half >= 1 && 2 * half <= *hd && *rows >= 1)
             }
             // The single GEMV's own contract for every matrix: one tile of x
             // rows per weight pass and K a whole number of 32-element groups.
@@ -2512,7 +2545,7 @@ impl Fused {
             Fused::GdnRecurPool | Fused::GdnRecurPoolBf16 => params[1] * params[6],
             Fused::GdnConvPool | Fused::GdnConvPoolBf16 => (params[2] * (2 * params[0] + params[1]) * 128).div_ceil(256),
             Fused::GdnCommitPool => params[0] * params[1].div_ceil(GDN_COMMIT_TILE),
-            Fused::GqaDecodePrep => (params[0] + params[1]) * params[6],
+            Fused::GqaDecodePrep | Fused::GqaDecodePrepI8 => (params[0] + params[1]) * params[6],
             Fused::MoeNvfp4GateUp => params[0] * params[2].div_ceil(QGEMV_COLS),
             Fused::I8GemvMulti | Fused::Q4GemvMulti => {
                 let (rows, cols) = self.tile();
