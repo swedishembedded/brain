@@ -640,6 +640,121 @@ pub fn gdn_chunk_prep_tok_bf16_step(gpu: &crate::Gpu, bufs: &[&backend_api::Devi
     gpu.step_native_sliced(id, bufs, &[(0, 0); 12], &params, l.bhc)
 }
 
+/// One prompt segment of a serving round: `rows` consecutive token rows starting at `row0` of the round's token-major
+/// tensors, continuing the recurrent state and convolution history in row `slot` of the layers' pools.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GdnSegmentSpan {
+    pub row0: u32,
+    pub rows: u32,
+    pub slot: u32,
+}
+
+/// The table the segment kernels (`gdn_conv_silu_seg`, `gdn_chunk_prep_seg_bf16`, `gdn_chunk_loop_seg_bf16`) read, built
+/// once for a round and shared by every layer: per segment `[row0, rows, slot, first chunk]`, then per chunk (64 rows,
+/// the last of a segment shorter) `[token row, rows]`.
+pub struct GdnSegmentTable {
+    words: Vec<u32>,
+    segments: u32,
+    chunks: u32,
+    conv_tiles_rows: u32,
+}
+
+/// Rows each thread of `gdn_conv_silu_seg` walks (the launch's blocks are counted in runs of this many rows).
+const GDN_SEG_CHUNK_ROWS: u32 = 64;
+
+impl GdnSegmentTable {
+    /// `spans` in any order; every segment must have rows.
+    pub fn new(spans: &[GdnSegmentSpan]) -> Self {
+        assert!(spans.iter().all(|s| s.rows > 0), "GdnSegmentTable: a segment with no rows");
+        let mut words = Vec::with_capacity(4 * spans.len());
+        let mut chunk_words = Vec::new();
+        let mut chunks = 0u32;
+        let mut conv_tiles_rows = 0u32;
+        for s in spans {
+            words.extend_from_slice(&[s.row0, s.rows, s.slot, chunks]);
+            for off in (0..s.rows).step_by(GDN_SEG_CHUNK_ROWS as usize) {
+                chunk_words.extend_from_slice(&[s.row0 + off, GDN_SEG_CHUNK_ROWS.min(s.rows - off)]);
+                chunks += 1;
+            }
+            conv_tiles_rows += s.rows.div_ceil(GDN_CONV_ROWS_PER_THREAD);
+        }
+        words.extend_from_slice(&chunk_words);
+        Self { words, segments: spans.len() as u32, chunks, conv_tiles_rows }
+    }
+
+    /// The words to upload as the `table` buffer.
+    pub fn words(&self) -> &[u32] {
+        &self.words
+    }
+
+    pub fn segments(&self) -> u32 {
+        self.segments
+    }
+
+    /// Chunks over all segments; the scratch of the prep and the recurrence holds `chunks * heads` 64-row slots.
+    pub fn chunks(&self) -> u32 {
+        self.chunks
+    }
+}
+
+/// Whether this device runs the segment kernels: the bf16 prefill form is its selected candidate
+/// ([`gdn_bf16_prefill_selected`]) and all three kernels are offered at its compute capability.
+pub fn gdn_segment_kernels_served(gpu: &crate::Gpu) -> bool {
+    let Some(cc) = gpu.caps().arch.compute_capability else { return false };
+    gdn_bf16_prefill_selected(gpu)
+        && !super::disabled_providers().iter().any(|d| d == "cuda")
+        && ["gdn_conv_silu_seg", "gdn_chunk_prep_seg_bf16", "gdn_chunk_loop_seg_bf16"].iter().all(|name| kernels_cuda::get(name).is_some_and(|k| k.min_cc <= cc))
+}
+
+/// `gdn_conv_silu_seg`: x, w, table (read); history pool, query, key, value (written).
+static GDN_CONV_SILU_SEG_BINDINGS: [BindKind; 8] = bwd_tc_bindings(3);
+/// `gdn_chunk_prep_seg_bf16`: query, key, value, raw_g, beta, table (read); the seven prep tensors (written).
+static GDN_CHUNK_PREP_SEG_BINDINGS: [BindKind; 14] = bwd_tc_bindings(6);
+/// `gdn_chunk_loop_seg_bf16`: kd, qs, w, u, g_cs, intra, table (read); state pool, out (written).
+static GDN_CHUNK_LOOP_SEG_BINDINGS: [BindKind; 10] = bwd_tc_bindings(7);
+
+/// The segment convolution ([`GdnSegmentTable`]) over the round's `[rows, conv_dim]` activations `x`: `bufs` is `x`, `w`,
+/// `table`, `hist_pool` (`[slots, conv_dim, 3]`, updated in place), then `query`, `key`, `value`. `None` when the
+/// device or the shape does not serve it (the caller keeps the per-segment path).
+pub fn gdn_conv_silu_seg_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 7], l: GdnConvLayout, table: &GdnSegmentTable) -> Option<crate::Step> {
+    let kernel = l.served(gpu).and_then(|_| kernels_cuda::get("gdn_conv_silu_seg"))?;
+    let id = gpu.native_kernel(kernel, &GDN_CONV_SILU_SEG_BINDINGS)?;
+    let blocks = l.conv_dim.div_ceil(GDN_CONV_CHANNELS_PER_BLOCK) * table.conv_tiles_rows;
+    let params = [blocks, l.conv_dim, l.key_dim, l.value_dim, table.segments, l.conv_dim * (l.kernel - 1)];
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 7], &params, blocks)
+}
+
+/// The prep of every chunk of the round's segments: `bufs` is `query, key, value, raw_g, beta, table` (read), then `g_cs,
+/// exp_g_cs, u, w, intra_scores, query_cm, key_cm` (written, `chunks * heads` slots of 64 rows) as for
+/// [`gdn_chunk_prep_tok_bf16_step`].
+pub fn gdn_chunk_prep_seg_bf16_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 13], l: GdnTokenLayout, table: &GdnSegmentTable) -> Option<crate::Step> {
+    if !gdn_chunk_prep_tok_shape_ok(l.head_dim, l.head_dim, l.c_len, l.heads, l.group) {
+        return None;
+    }
+    let cc = gpu.caps().arch.compute_capability?;
+    let kernel = kernels_cuda::get("gdn_chunk_prep_seg_bf16").filter(|k| k.min_cc <= cc)?;
+    let launch = backend_api::CudaLaunch { dynamic_shared_bytes: GDN_CHUNK_PREP_BF16_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..backend_api::CudaLaunch::NONE };
+    let id = gpu.native_kernel_launched(kernel, &GDN_CHUNK_PREP_SEG_BINDINGS, launch)?;
+    let blocks = table.chunks * l.heads;
+    let params = [blocks, 0, l.head_dim, l.head_dim, 0, l.scale.to_bits(), l.heads, table.segments, l.group, l.eps.to_bits()];
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 13], &params, blocks)
+}
+
+/// The bf16 recurrence over every segment of the round, on the pool's state rows in place: `bufs` is `kd, qs, w, u, g_cs,
+/// intra, table` (read), then `state_pool` (`[slots, heads, 128, 128]`, read and written) and `out` (token-major rows).
+pub fn gdn_chunk_loop_seg_bf16_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 9], heads: u32, dk: u32, dv: u32, table: &GdnSegmentTable) -> Option<crate::Step> {
+    if !gdn_chunk_prep_shape_ok(dk, dv, GDN_SEG_CHUNK_ROWS) {
+        return None;
+    }
+    let cc = gpu.caps().arch.compute_capability?;
+    let kernel = kernels_cuda::get("gdn_chunk_loop_seg_bf16").filter(|k| k.min_cc <= cc)?;
+    let launch = backend_api::CudaLaunch { dynamic_shared_bytes: GDN_CHUNK_LOOP_BF16_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..backend_api::CudaLaunch::NONE };
+    let id = gpu.native_kernel_launched(kernel, &GDN_CHUNK_LOOP_SEG_BINDINGS, launch)?;
+    let blocks = table.segments * heads * GDN_CHUNK_LOOP_TC_SPLITS;
+    let params = [blocks, 0, dk, dv, 0, 0, heads, table.segments, heads * dk * dv];
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 9], &params, blocks)
+}
+
 /// [`gdn_chunk_prep_train_step`] reading the mixer's TOKEN-MAJOR tensors
 /// (`gdn_chunk_prep_tok_train_tc`): the L2 normalisation of query and key, the
 /// repeat of their heads from `heads / group` to `heads` and the token-major to

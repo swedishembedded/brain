@@ -352,4 +352,9 @@ measurement (16-256), not fixed globally.
   `rmsnorm_rows`, `gdn_conv_silu_tok`) and 0.8 s of wall clock over the kernel sum; the GDN train-form forward and the backward (436 ms of a 5.4 s
   W8K device step) need a restructuring, not a bf16 flag (9 % / 5 % faster with bf16 operands: bound by staging and barriers); the single-split
   attention at 1K / 4K needs the round's context in `PrefillShape` (about 0.3 ms of a 130 ms iteration).
+- 2026-10-30 (one-pass GDN segments, knowledge 385): a mixed round's prompt segments run the Gated DeltaNet mixer as three launches a layer
+  (`gdn_conv_silu_seg`, `gdn_chunk_prep_seg_bf16`, `gdn_chunk_loop_seg_bf16`, `model::gdn_segments`) addressed by a per-round table, on the pools'
+  state and history rows in place and the round's token-major tensors in place: no `take_rows` copies, no gather/scatter of the state, a segment's
+  short remainder is one more chunk of its walk, the gates and the gated norm run once over all rows. Median mixed iteration at c = 16 (nsys)
+  119.4 -> 108.2 ms span, 105.5 -> 95.0 ms of kernels; GDN launches 184 -> 48 a kind; served c = 16 / 64 output tok/s 395 / 568 -> 418 / 610.
 

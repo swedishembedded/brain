@@ -64,18 +64,22 @@ __device__ __forceinline__ void brain_normalize_rows_bf16(unsigned short* tile, 
     }
 }
 
-extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_chunk_prep_tok_bf16(const unsigned int* params, const float* query, const float* key,
-                                                                                     const float* value, const float* raw_g, const float* beta, float* g_cs_out,
-                                                                                     float* exp_g_cs_out, float* u_out, float* w_out, float* intra_out,
-                                                                                     float* query_cm_out, float* key_cm_out) {
-    const unsigned int bhc = params[0];
-    const unsigned int C = params[1];
-    const float scale = __uint_as_float(params[5]);
-    const unsigned int H = params[6], n_chunks = params[7], group = params[8];
-    const float eps = __uint_as_float(params[9]);
+// The tensors one chunk's prep reads and writes, and the head geometry that addresses them.
+struct PrepOperands {
+    const float *query, *key, *value, *raw_g, *beta;
+    float *g_cs_out, *exp_g_cs_out, *u_out, *w_out, *intra_out, *query_cm_out, *key_cm_out;
+    float scale, eps;
+    unsigned int H, group;
+};
 
-    const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
-    if (blk >= bhc) { return; }  // block-uniform
+// One block's work: the `C` rows (token rows `tok0 ..` of the token-major tensors) of value head `head`. The chunk-major
+// results land at row `row_base` of the scratch tensors (and `intra` at `cc_base`); the caller decides that layout.
+__device__ __forceinline__ void brain_gdn_prep_chunk(const PrepOperands& a, const unsigned int C, const unsigned long long row_base, const unsigned long long cc_base,
+                                                     const unsigned long long tok0, const unsigned int head) {
+    const float scale = a.scale, eps = a.eps;
+    const unsigned int H = a.H, group = a.group;
+    float *g_cs_out = a.g_cs_out, *exp_g_cs_out = a.exp_g_cs_out, *u_out = a.u_out, *w_out = a.w_out, *intra_out = a.intra_out;
+    float *query_cm_out = a.query_cm_out, *key_cm_out = a.key_cm_out;
 
     extern __shared__ __align__(16) unsigned char smem_raw[];
     unsigned short* sKb = reinterpret_cast<unsigned short*>(smem_raw);  // normalised keys, bf16 [64][SKH]
@@ -92,18 +96,13 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_chunk_prep_tok_b
 
     const unsigned int tid = threadIdx.x, lane = tid & 31u, warp = tid >> 5;
     const unsigned int g = lane >> 2, t4 = lane & 3u, q = lane >> 3, l8 = lane & 7u;
-    const unsigned long long row_base = (unsigned long long)blk * C;
-    const unsigned long long cc_base = row_base * C;
-
-    const unsigned int bh = bhc / n_chunks, ci = blk / bh, rem = blk % bh;
-    const unsigned int head = rem % H, src_head = head / group;
-    const unsigned long long tok0 = ((unsigned long long)(rem / H) * n_chunks + ci) * C;
+    const unsigned int src_head = head / group;
     const unsigned long long qk_stride = (unsigned long long)(H / group) * D, v_stride = (unsigned long long)H * D;
-    const float* beta_src = beta + tok0 * H + head;
-    const float* g_src = raw_g + tok0 * H + head;
-    const float* key_src = key + tok0 * qk_stride + (unsigned long long)src_head * D;
-    const float* query_src = query + tok0 * qk_stride + (unsigned long long)src_head * D;
-    const float* value_src = value + tok0 * v_stride + (unsigned long long)head * D;
+    const float* beta_src = a.beta + tok0 * H + head;
+    const float* g_src = a.raw_g + tok0 * H + head;
+    const float* key_src = a.key + tok0 * qk_stride + (unsigned long long)src_head * D;
+    const float* query_src = a.query + tok0 * qk_stride + (unsigned long long)src_head * D;
+    const float* value_src = a.value + tok0 * v_stride + (unsigned long long)head * D;
 
     for (unsigned int i = tid; i < MAXC * SC; i += THREADS) {
         sA[i] = 0.0f;
@@ -246,4 +245,43 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_chunk_prep_tok_b
             }
         }
     }
+}
+
+extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_chunk_prep_tok_bf16(const unsigned int* params, const float* query, const float* key,
+                                                                                     const float* value, const float* raw_g, const float* beta, float* g_cs_out,
+                                                                                     float* exp_g_cs_out, float* u_out, float* w_out, float* intra_out,
+                                                                                     float* query_cm_out, float* key_cm_out) {
+    const unsigned int bhc = params[0];
+    const unsigned int C = params[1];
+    const unsigned int H = params[6], n_chunks = params[7];
+    const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
+    if (blk >= bhc) { return; }  // block-uniform
+    const PrepOperands a = {query, key, value, raw_g, beta, g_cs_out, exp_g_cs_out, u_out, w_out, intra_out, query_cm_out, key_cm_out,
+                            __uint_as_float(params[5]), __uint_as_float(params[9]), H, params[8]};
+    const unsigned long long row_base = (unsigned long long)blk * C;
+    const unsigned int bh = bhc / n_chunks, ci = blk / bh, rem = blk % bh;
+    const unsigned long long tok0 = ((unsigned long long)(rem / H) * n_chunks + ci) * C;
+    brain_gdn_prep_chunk(a, C, row_base, row_base * C, tok0, rem % H);
+}
+
+// The same preparation for every chunk of a round's prompt segments in one launch: block (chunk, head) reads its rows
+// and length from the chunk table (`gdn_segment_table`: [row0, rows, slot, first chunk] per segment, then [token row, C]
+// per chunk) and writes its tensors at a fixed 64-row slot of the scratch, so a segment's last, short chunk needs no
+// launch of its own.
+// Contract: params [chunks * H, unused..., scale (f32 bits) at 5, H at 6, nseg at 7, group at 8, eps (f32 bits) at 9]; the buffers
+// as `brain_gdn_chunk_prep_tok_bf16`, with `table` after `beta`.
+extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_chunk_prep_seg_bf16(const unsigned int* params, const float* query, const float* key,
+                                                                                     const float* value, const float* raw_g, const float* beta,
+                                                                                     const unsigned int* table, float* g_cs_out, float* exp_g_cs_out, float* u_out,
+                                                                                     float* w_out, float* intra_out, float* query_cm_out, float* key_cm_out) {
+    const unsigned int blocks = params[0];
+    const unsigned int H = params[6], nseg = params[7];
+    const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
+    if (blk >= blocks) { return; }  // block-uniform
+    const PrepOperands a = {query, key, value, raw_g, beta, g_cs_out, exp_g_cs_out, u_out, w_out, intra_out, query_cm_out, key_cm_out,
+                            __uint_as_float(params[5]), __uint_as_float(params[9]), H, params[8]};
+    const unsigned int chunk = blk / H, head = blk % H;
+    const unsigned int* entry = table + 4 * nseg + 2 * chunk;
+    const unsigned long long row_base = (unsigned long long)blk * MAXC;
+    brain_gdn_prep_chunk(a, entry[1], row_base, row_base * MAXC, entry[0], head);
 }

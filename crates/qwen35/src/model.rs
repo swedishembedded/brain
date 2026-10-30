@@ -960,6 +960,8 @@ struct SegRound {
 pub(crate) struct MultiRound<'a> {
     caches: &'a PooledCaches<'a>,
     segs: Vec<SegRound>,
+    /// The segments' table for the one-pass Gated DeltaNet kernels (`model::gdn_segments`), where the device serves them.
+    gdn: Option<model::gdn_segments::GdnSegmentRound>,
     /// Decode rows that lead the round's activation rows (a mixed round, [`Qwen35::run_mixed_stage`]); the
     /// sequences' prompt rows follow them.
     decode: Option<MixedDecode<'a>>,
@@ -2850,8 +2852,11 @@ impl Qwen35 {
                 let c = round.caches;
                 let (sl, hl) = (self.cfg.gdn_state_len() as u32, self.cfg.gdn_hist_len() as u32);
                 let whole = round.segs.len() == 1 && round.decode.is_none() && gdn_stream_pieces(round.segs[0].rows).count() == 1;
+                // Every segment in one pass of three kernels on the pools' own rows, where the device serves it.
+                let pools = model::gdn_segments::GdnSegmentPools { state: &c.gdn_state[l], hist: &c.gdn_hist[l] };
+                let batched = round.gdn.as_ref().and_then(|sr| model::gdn_segments::gdn_mixer_segments_fwd(g, &gdn_mixer_ids(), &shape, &weights, sr, &pools, &mixed_qkv, &bproj, &aproj, &z, n));
                 // The decode rows and the segments cover every row, so `all` needs no clear.
-                let all = (!whole).then(|| g.storage_uninit((n * value_dim) as u64));
+                let all = batched.clone().or_else(|| (!whole).then(|| g.storage_uninit((n * value_dim) as u64)));
                 let mut only = None;
                 // A mixed round's leading decode rows: one recurrent step each, from and back into the sequence's pool row.
                 if let (Some(dec), Some(all)) = (&round.decode, &all) {
@@ -2861,7 +2866,7 @@ impl Qwen35 {
                     let gated_d = model::gdn_mixer::gdn_mixer_decode_state_fwd(g, &gdn_mixer_ids(), &gdn_mixer_decode_ids(), &dec_shape, &weights, &qkv_d, &b_d, &a_d, &z_d, &model::gdn_mixer::GdnDecodeState::Pool(pool));
                     self.put_rows_copy(&gated_d, all, value_dim, 0, dec.rows);
                 }
-                for seg in &round.segs {
+                for seg in round.segs.iter().filter(|_| batched.is_none()) {
                     // The sequence's state row becomes the working copy, the rows run on it piece by piece, and it is
                     // written back.
                     g.submit(&[], &[g.step(c.gather, &[&c.gdn_state[l], &c.gdn_hist[l], &seg.slot, &c.work_state[l], &c.work_hist[l]], &[1, sl, hl], sl + hl)]);
@@ -5293,7 +5298,9 @@ impl Qwen35 {
             row0 += rows;
         }
         let mixed = decode_inputs.as_ref().zip(paged.as_ref()).map(|(inputs, paged)| MixedDecode { rows: lead, slot_rows: &inputs.slot_rows, paged, cos: &inputs.cos, sin: &inputs.sin });
-        let round = MultiRound { caches, segs: round, decode: mixed };
+        let spans: Vec<_> = round.iter().zip(segs).map(|(r, s)| model::gdn_segments::SegmentSpan { row0: r.row0, rows: r.rows, slot: s.slot }).collect();
+        let gdn = (c.layer_types().contains(&LayerType::Linear) && !self.is_train).then(|| model::gdn_segments::GdnSegmentRound::new(g, &spans)).flatten();
+        let round = MultiRound { caches, segs: round, gdn, decode: mixed };
         let mut mixer = |l: usize, ty: LayerType, _res: &DeviceBuffer, xn1: &DeviceBuffer, pre: Option<Act>, epilogue: bool| -> DeviceBuffer {
             match ty {
                 LayerType::Linear => self.layer_gdn_fwd_pre(l, xn1, pre, epilogue, n, GdnCall::Segments(&round)).0,

@@ -113,6 +113,72 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_conv_hist_tok(co
     for (unsigned int j = 0; j + 1 < K; ++j) { hist[(unsigned long long)c * (K - 1) + j] = next[j]; }
 }
 
+// The forward for every prompt segment of a round in one launch (`table`: [row0, rows, slot, first chunk] per segment, see
+// `brain_gdn_chunk_prep_seg_bf16`), reading each segment's history from its row of the history pool and leaving the
+// next history there: the block that owns a segment's first rows reads the old history into its window and then
+// overwrites it (no other block of the segment reads it), so the update needs no launch of its own. Rows are global
+// rows of the token-major tensors.
+// Contract: params [blocks, C, key_dim, value_dim, nseg, history words per pool row]; read x [rows, C], w [C, K], table; hist
+// pool [slots, C, K-1] (read and written); write query, key [rows, key_dim], value [rows, value_dim] at the segments' rows.
+extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_conv_silu_seg(const unsigned int* params, const float* x, const float* w, const unsigned int* table,
+                                                                             float* hist_pool, float* query, float* key, float* value) {
+    const unsigned int blocks = params[0], C = params[1], key_dim = params[2], value_dim = params[3], nseg = params[4];
+    const unsigned long long hist_words = params[5];
+    const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x, tiles = (C + THREADS - 1) / THREADS;
+    if (blk >= blocks) { return; }
+    // The segment this block belongs to: each owns channel tiles x runs of ROWS_PER_THREAD rows.
+    unsigned int b = blk, seg = 0;
+    for (; seg < nseg; ++seg) {
+        const unsigned int nb = tiles * ((table[4 * seg + 1] + ROWS_PER_THREAD - 1) / ROWS_PER_THREAD);
+        if (b < nb) { break; }
+        b -= nb;
+    }
+    if (seg == nseg) { return; }
+    const unsigned int row0 = table[4 * seg], rows = table[4 * seg + 1], slot = table[4 * seg + 2];
+    const unsigned int c = (b % tiles) * THREADS + threadIdx.x;
+    const unsigned int r0 = (b / tiles) * ROWS_PER_THREAD;
+    if (c >= C) { return; }
+    const unsigned int r1 = min(r0 + ROWS_PER_THREAD, rows);
+    float* hist = hist_pool + slot * hist_words + (unsigned long long)c * (K - 1);
+    const float* xs = x + (unsigned long long)row0 * C + c;
+
+    float wk[K];
+#pragma unroll
+    for (unsigned int k = 0; k < K; ++k) { wk[k] = w[(unsigned long long)c * K + k]; }
+    // The window feeding the segment's row r0: its inputs before the segment come from the history.
+    float win[K];
+    for (unsigned int k = 0; k < K; ++k) {
+        const int q = (int)r0 + (int)k - (int)(K - 1);
+        win[k] = q >= 0 ? xs[(unsigned long long)q * C] : hist[q + (int)(K - 1)];
+    }
+    if (r0 == 0) {
+        // The last K-1 rows of [hist | x] become the next history; all of them are read before any is written.
+        float next[K - 1];
+        for (unsigned int j = 0; j + 1 < K; ++j) {
+            const unsigned int e = rows + j;
+            next[j] = e < K - 1 ? hist[e] : xs[(unsigned long long)(e - (K - 1)) * C];
+        }
+        for (unsigned int j = 0; j + 1 < K; ++j) { hist[j] = next[j]; }
+    }
+    for (unsigned int r = r0; r < r1; ++r) {
+        if (r != r0) {
+            for (unsigned int k = 0; k + 1 < K; ++k) { win[k] = win[k + 1]; }
+            win[K - 1] = xs[(unsigned long long)r * C];
+        }
+        float acc = 0.0f;
+        for (unsigned int k = 0; k < K; ++k) { acc = acc + win[k] * wk[k]; }
+        const float act = silu_fwd(acc);
+        const unsigned long long row = row0 + r;
+        if (c < key_dim) {
+            query[row * key_dim + c] = act;
+        } else if (c < 2 * key_dim) {
+            key[row * key_dim + (c - key_dim)] = act;
+        } else {
+            value[row * value_dim + (c - 2 * key_dim)] = act;
+        }
+    }
+}
+
 extern "C" __global__ void __launch_bounds__(THREADS)
 brain_gdn_conv_silu_bwd_tok(const unsigned int* params, const float* d_query, const float* d_key, const float* d_value, const float* pre, const float* w,
                             float* d_x, float* d_hist) {

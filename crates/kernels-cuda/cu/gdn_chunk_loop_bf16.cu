@@ -43,19 +43,30 @@
 
 // Dynamic shared memory: (3 * MAXC * SAH + MAXC * SIH + D * SSH + MAXC * SSH) * 2 bytes.
 
-extern "C" __global__ void __launch_bounds__(THREADS, 2) brain_gdn_chunk_loop_bf16(const unsigned int* params, const unsigned short* kd, const unsigned short* qs,
-                                                                                 const unsigned short* w, const float* u, const float* g_cs, const float* exp_g_cs,
-                                                                                 const unsigned short* intra, const float* initial_state, float* out, float* final_state) {
-    const unsigned int bh = params[0];
-    const unsigned int C = params[1];
-    const unsigned int n_chunks = params[4];
-    const float scale = __uint_as_float(params[5]);
-    const unsigned int heads_tok = params[6];
+// Where one chunk of the walk lives: its `C` rows, the scratch row its operands start at (`intra` at `cc_base`), and where its output
+// rows go (`out_chunk`, rows `out_stride` floats apart).
+struct LoopChunk {
+    unsigned int C;
+    unsigned long long row_base, cc_base;
+    float* out_chunk;
+    unsigned long long out_stride;
+};
 
-    const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
-    const unsigned int bhi = blk / SPLITS;
-    const unsigned int j0 = (blk % SPLITS) * CS;
-    if (bhi >= bh) { return; }  // block-uniform
+struct LoopOperands {
+    const unsigned short *kd, *qs, *w, *intra;
+    const float *u, *g_cs;
+};
+
+// One block's walk: the chunks of one value head and one 32-column slice of its state, in order. The state is read from
+// `state_in` before the first chunk and written to `state_out` after the last (both point at the head's [128][128]
+// matrix; they may be the same memory, since a block reads and writes only its own slice). `chunk(ci)` places chunk `ci`.
+template <class ChunkAt>
+__device__ __forceinline__ void brain_gdn_loop_walk(const LoopOperands& op, const unsigned int n_chunks, const unsigned int j0, const float* state_in, float* state_out,
+                                                    ChunkAt chunk_at) {
+    const unsigned short *kd = op.kd, *qs = op.qs, *w = op.w, *intra = op.intra;
+    const float *u = op.u, *g_cs = op.g_cs;
+    const float* initial_state = state_in;
+    float* final_state = state_out;
 
     extern __shared__ __align__(16) unsigned char smem_raw[];
     unsigned short* sW = reinterpret_cast<unsigned short*>(smem_raw);  // w, [64][SAH]
@@ -70,7 +81,6 @@ extern "C" __global__ void __launch_bounds__(THREADS, 2) brain_gdn_chunk_loop_bf
     const unsigned int wr = warp % WARPS_M, wc = warp / WARPS_M;
     const unsigned int m0 = wr * 16u;   // this warp's chunk rows
     const unsigned int n0 = wc * 16u;   // and its first column of the block's slice (two 8-column MMA tiles)
-    const unsigned int c16 = (C + 15u) & ~15u;  // contraction length over chunk rows (staged rows past C are zero)
 
     // ldmatrix lane addressing: matrix q = lane >> 3, row l8 = lane & 7.
     const unsigned int q = lane >> 3, l8 = lane & 7u;
@@ -90,7 +100,7 @@ extern "C" __global__ void __launch_bounds__(THREADS, 2) brain_gdn_chunk_loop_bf
 #pragma unroll
             for (int i = 0; i < 4; ++i) {
                 const unsigned int p = (wr + 4u * mi) * 16u + g + ((i & 2) ? 8u : 0u);
-                st[mi][nt][i] = initial_state[((unsigned long long)bhi * D + p) * D + j0 + n0 + nt * 8 + 2 * t4 + (i & 1)];
+                st[mi][nt][i] = initial_state[(unsigned long long)p * D + j0 + n0 + nt * 8 + 2 * t4 + (i & 1)];
             }
         }
     }
@@ -102,7 +112,9 @@ extern "C" __global__ void __launch_bounds__(THREADS, 2) brain_gdn_chunk_loop_bf
     constexpr int NI = MAXC * MAXC / 8 / THREADS;  // and of the 64 x 64 intra tile
     uint4 wv[NV], qv[NV], kv[NV], iv[NI];
     auto fetch_wq = [&](unsigned int ci) {
-        const unsigned long long row_base = ((unsigned long long)ci * bh + bhi) * C;
+        const LoopChunk ch = chunk_at(ci);
+        const unsigned int C = ch.C;
+        const unsigned long long row_base = ch.row_base;
 #pragma unroll
         for (int it = 0; it < NV; ++it) {
             const unsigned int e = tid + it * THREADS;
@@ -117,7 +129,9 @@ extern "C" __global__ void __launch_bounds__(THREADS, 2) brain_gdn_chunk_loop_bf
         }
     };
     auto fetch_ki = [&](unsigned int ci) {
-        const unsigned long long row_base = ((unsigned long long)ci * bh + bhi) * C;
+        const LoopChunk ch = chunk_at(ci);
+        const unsigned int C = ch.C;
+        const unsigned long long row_base = ch.row_base;
 #pragma unroll
         for (int it = 0; it < NV; ++it) {
             const unsigned int e = tid + it * THREADS;
@@ -129,11 +143,11 @@ extern "C" __global__ void __launch_bounds__(THREADS, 2) brain_gdn_chunk_loop_bf
             const unsigned int e = tid + it * THREADS;
             const unsigned int r = e / (MAXC / 8), c8 = (e % (MAXC / 8)) * 8;
             if (C == MAXC) {  // rows of 128 bytes: aligned vectors
-                iv[it] = *reinterpret_cast<const uint4*>(intra + row_base * C + (unsigned long long)r * C + c8);
+                iv[it] = *reinterpret_cast<const uint4*>(intra + ch.cc_base + (unsigned long long)r * C + c8);
             } else {          // a short chunk's rows are not 16-byte aligned: gather the eight elements
                 unsigned short h[8];
 #pragma unroll
-                for (int j = 0; j < 8; ++j) { h[j] = (r < C && c8 + j < C) ? intra[row_base * C + (unsigned long long)r * C + c8 + j] : (unsigned short)0; }
+                for (int j = 0; j < 8; ++j) { h[j] = (r < C && c8 + j < C) ? intra[ch.cc_base + (unsigned long long)r * C + c8 + j] : (unsigned short)0; }
                 iv[it] = make_uint4(h[0] | (unsigned int)h[1] << 16, h[2] | (unsigned int)h[3] << 16, h[4] | (unsigned int)h[5] << 16, h[6] | (unsigned int)h[7] << 16);
             }
         }
@@ -141,16 +155,14 @@ extern "C" __global__ void __launch_bounds__(THREADS, 2) brain_gdn_chunk_loop_bf
 
     fetch_wq(0);
     for (unsigned int ci = 0; ci < n_chunks; ++ci) {
-        const unsigned long long row_base = ((unsigned long long)ci * bh + bhi) * C;
+        const LoopChunk ch = chunk_at(ci);
+        const unsigned int C = ch.C;
+        const unsigned int c16 = (C + 15u) & ~15u;  // contraction length over chunk rows (staged rows past C are zero)
+        const unsigned long long row_base = ch.row_base;
         const unsigned long long off_dk = row_base * D;
         const float g_last = g_cs[row_base + C - 1];  // (unused beyond the decay below)
-        float* out_chunk = out + off_dk;
-        unsigned long long out_stride = D;
-        if (heads_tok != 0) {
-            const unsigned long long tok0 = ((unsigned long long)(bhi / heads_tok) * n_chunks + ci) * C;
-            out_chunk = out + (tok0 * heads_tok + bhi % heads_tok) * D;
-            out_stride = (unsigned long long)heads_tok * D;
-        }
+        float* out_chunk = ch.out_chunk;
+        const unsigned long long out_stride = ch.out_stride;
 
         // Publish the state entering this chunk: the bf16 B operand of the products below, and the training history.
 #pragma unroll
@@ -282,8 +294,76 @@ extern "C" __global__ void __launch_bounds__(THREADS, 2) brain_gdn_chunk_loop_bf
                 const unsigned int p = (wr + 4u * mi) * 16u + g + h2 * 8u;
                 const float2 v = make_float2(st[mi][nt][2 * h2], st[mi][nt][2 * h2 + 1]);
                 const unsigned int col = j0 + n0 + nt * 8 + 2 * t4;
-                *reinterpret_cast<float2*>(final_state + ((unsigned long long)bhi * D + p) * D + col) = v;
+                *reinterpret_cast<float2*>(final_state + (unsigned long long)p * D + col) = v;
             }
         }
     }
+}
+
+extern "C" __global__ void __launch_bounds__(THREADS, 2) brain_gdn_chunk_loop_bf16(const unsigned int* params, const unsigned short* kd, const unsigned short* qs,
+                                                                                 const unsigned short* w, const float* u, const float* g_cs, const float* exp_g_cs,
+                                                                                 const unsigned short* intra, const float* initial_state, float* out, float* final_state) {
+    const unsigned int bh = params[0];
+    const unsigned int C = params[1];
+    const unsigned int n_chunks = params[4];
+    const unsigned int heads_tok = params[6];
+
+    const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
+    const unsigned int bhi = blk / SPLITS;
+    const unsigned int j0 = (blk % SPLITS) * CS;
+    if (bhi >= bh) { return; }  // block-uniform
+
+    const LoopOperands op = {kd, qs, w, intra, u, g_cs};
+    auto chunk_at = [&](unsigned int ci) {
+        LoopChunk ch;
+        ch.C = C;
+        ch.row_base = ((unsigned long long)ci * bh + bhi) * C;
+        ch.cc_base = ch.row_base * C;
+        ch.out_chunk = out + ch.row_base * D;
+        ch.out_stride = D;
+        if (heads_tok != 0) {
+            const unsigned long long tok0 = ((unsigned long long)(bhi / heads_tok) * n_chunks + ci) * C;
+            ch.out_chunk = out + (tok0 * heads_tok + bhi % heads_tok) * D;
+            ch.out_stride = (unsigned long long)heads_tok * D;
+        }
+        return ch;
+    };
+    brain_gdn_loop_walk(op, n_chunks, j0, initial_state + (unsigned long long)bhi * D * D, final_state + (unsigned long long)bhi * D * D, chunk_at);
+}
+
+// The recurrence of every prompt segment of a round in one launch, on the state rows of the pools themselves: block
+// (segment, head, column slice) walks the segment's chunks from the pool's state row and leaves the end state in the same
+// row, so a round needs no gather or scatter of the state around the kernel. `table` is the chunk table of
+// `brain_gdn_chunk_prep_seg_bf16` (a chunk's operands sit at a 64-row slot of the scratch, its output rows at its token
+// rows of the token-major `out`).
+// Contract: params [segments * H * SPLITS, unused..., H at 6, nseg at 7, state words per pool row at 8]; buffers kd, qs, w, u, g_cs,
+// intra, table, state pool (read and written in place), out.
+extern "C" __global__ void __launch_bounds__(THREADS, 2) brain_gdn_chunk_loop_seg_bf16(const unsigned int* params, const unsigned short* kd, const unsigned short* qs,
+                                                                                     const unsigned short* w, const float* u, const float* g_cs,
+                                                                                     const unsigned short* intra, const unsigned int* table, float* state_pool, float* out) {
+    const unsigned int blocks = params[0];
+    const unsigned int H = params[6], nseg = params[7];
+    const unsigned long long state_words = params[8];
+    const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
+    if (blk >= blocks) { return; }  // block-uniform
+    const unsigned int seg = blk / (H * SPLITS), head = (blk / SPLITS) % H;
+    const unsigned int j0 = (blk % SPLITS) * CS;
+    const unsigned int* sg = table + 4 * seg;
+    const unsigned int rows = sg[1], slot = sg[2], chunk0 = sg[3];
+    const unsigned int n_chunks = (rows + MAXC - 1) / MAXC;
+    const unsigned int* chunks = table + 4 * nseg;
+
+    const LoopOperands op = {kd, qs, w, intra, u, g_cs};
+    auto chunk_at = [&](unsigned int ci) {
+        const unsigned int global = chunk0 + ci;
+        LoopChunk ch;
+        ch.C = chunks[2 * global + 1];
+        ch.row_base = ((unsigned long long)global * H + head) * MAXC;
+        ch.cc_base = ch.row_base * MAXC;
+        ch.out_stride = (unsigned long long)H * D;
+        ch.out_chunk = out + ((unsigned long long)chunks[2 * global] * H + head) * D;
+        return ch;
+    };
+    float* state = state_pool + slot * state_words + (unsigned long long)head * D * D;
+    brain_gdn_loop_walk(op, n_chunks, j0, state, state, chunk_at);
 }
