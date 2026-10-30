@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The 128-byte `CUtensorMap` template the FP8 prefill GEMM carries (`kernels-cuda/cu/matmul_fp8_wgmma_tma.cu`).
+//! The 128-byte `CUtensorMap` templates the FP8 prefill GEMMs carry (`kernels-cuda/cu/matmul_fp8_wgmma_tma.cu` and `matmul_fp8_wgmma_tma_n256.cu`).
 //!
 //! Swedish Embedded AB implements solutions for Hopper tensor-memory-accelerator pipelines for its clients. If your team
 //! needs expertise in feeding warpgroup tensor cores through TMA without a host-side descriptor, you can procure our
@@ -25,7 +25,7 @@ fn device_ordinal() -> i32 {
 }
 
 /// Encode the template with the driver's own `cuTensorMapEncodeTiled`.
-fn encode() -> Option<[u64; 16]> {
+fn encode(boxd: [u32; 2], swizzle: u32) -> Option<[u64; 16]> {
     #[repr(C, align(64))]
     struct Map([u64; 16]);
     type Encode = unsafe extern "C" fn(*mut Map, u32, u32, *mut c_void, *const u64, *const u64, *const u32, *const u32, u32, u32, u32, u32) -> i32;
@@ -47,27 +47,38 @@ fn encode() -> Option<[u64; 16]> {
         let mut map = Map([0; 16]);
         let dims = [TEMPLATE_COLS, TEMPLATE_ROWS];
         let strides = [TEMPLATE_COLS];
-        let boxd = [128u32, 128];
         let elem = [1u32, 1];
-        // CU_TENSOR_MAP_DATA_TYPE_UINT8 = 0, interleave none = 0, swizzle 128B = 3, L2 promotion 256B = 3, OOB fill none (zeros) = 0.
-        let rc = encode(&mut map, 0, 2, TEMPLATE_ADDRESS as *mut c_void, dims.as_ptr(), strides.as_ptr(), boxd.as_ptr(), elem.as_ptr(), 0, 3, 3, 0);
+        // CU_TENSOR_MAP_DATA_TYPE_UINT8 = 0, interleave none = 0, swizzle 32B = 1, 64B = 2, 128B = 3, L2 promotion 256B = 3, OOB fill none (zeros) = 0.
+        let rc = encode(&mut map, 0, 2, TEMPLATE_ADDRESS as *mut c_void, dims.as_ptr(), strides.as_ptr(), boxd.as_ptr(), elem.as_ptr(), 0, swizzle, 3, 0);
         eprintln!("rc {rc}");
         (rc == 0).then_some(map.0)
     }
 }
 
-/// The template the kernel source carries: the words of its `BRAIN_FWT_TEMPLATE` define.
-fn shipped() -> Vec<u64> {
-    let src = include_str!("../../kernels-cuda/cu/matmul_fp8_wgmma_tma.cu");
-    let line = src.lines().find_map(|l| l.strip_prefix("#define BRAIN_FWT_TEMPLATE ")).expect("the kernel defines BRAIN_FWT_TEMPLATE");
+/// The template a kernel source carries: the words of its `define` line.
+fn shipped(src: &str, define: &str) -> Vec<u64> {
+    let line = src.lines().find_map(|l| l.strip_prefix(define)).unwrap_or_else(|| panic!("the kernel defines {define}"));
     line.split(',').map(|w| u64::from_str_radix(w.trim().trim_start_matches("0x").trim_end_matches("ull"), 16).expect("a hexadecimal word")).collect()
 }
 
 #[test]
 fn the_kernel_template_is_what_the_driver_encodes() {
-    let Some(driver) = encode() else {
+    let Some(driver) = encode([128, 128], 3) else {
         brain_testutil::skip_unavailable("a CUDA driver with a device whose context the encoder can borrow");
         return;
     };
-    assert_eq!(shipped(), driver.to_vec(), "regenerate BRAIN_FWT_TEMPLATE from the driver's encoding (print it with `encode()`)");
+    assert_eq!(shipped(include_str!("../../kernels-cuda/cu/matmul_fp8_wgmma_tma.cu"), "#define BRAIN_FWT_TEMPLATE "), driver.to_vec(), "regenerate BRAIN_FWT_TEMPLATE from the driver's encoding (print it with `encode()`)");
+}
+
+#[test]
+fn the_n256_kernel_templates_are_what_the_driver_encodes() {
+    let Some(operands) = encode([128, 128], 3) else {
+        brain_testutil::skip_unavailable("a CUDA driver with a device whose context the encoder can borrow");
+        return;
+    };
+    let src = include_str!("../../kernels-cuda/cu/matmul_fp8_wgmma_tma_n256.cu");
+    assert_eq!(shipped(src, "#define BRAIN_FWT_TEMPLATE "), operands.to_vec(), "regenerate BRAIN_FWT_TEMPLATE from the driver's encoding");
+    // The output map: 64-byte boxes of 16 rows with the 64-byte swizzle.
+    let output = encode([64, 16], 2).expect("the driver encoded the operand map above");
+    assert_eq!(shipped(src, "#define BRAIN_FWT_OUT_TEMPLATE "), output.to_vec(), "regenerate BRAIN_FWT_OUT_TEMPLATE from the driver's encoding");
 }

@@ -340,6 +340,11 @@ fn serves_fp8_wgmma(p: &[u32]) -> bool {
     fp8_shape(p).is_some_and(|(m, ..)| m > backend_api::select::DECODE_REGIME_MAX_ROWS)
 }
 
+/// The FP8 GEMM that stores its output through a tensor map: rows of 16-byte multiples.
+fn serves_fp8_wgmma_tma_store(p: &[u32]) -> bool {
+    serves_fp8_wgmma(p) && p[2].is_multiple_of(4)
+}
+
 /// A persistent grid: a block for every 128 x 128 tile up to the most the kernel keeps tensor maps for, each walking tiles `grid` apart.
 fn fp8_persistent_blocks(p: &[u32], tile: (u32, u32)) -> u32 {
     gemm_blocks(p, tile).min(kernels_cuda::FP8_TMA_MAX_CTAS)
@@ -995,6 +1000,22 @@ pub(crate) const FP8_ROWS: &[Row] = &[
         input: Input::FP8_NATIVE,
         launch: CudaLaunch {
             dynamic_shared_bytes: kernels_cuda::fp8_wgmma_tma_dynamic_shared_bytes(5),
+            shared_opt_in: true,
+            arch: backend_api::ArchFeatures::Required,
+            ..CudaLaunch::NONE
+        },
+    },
+    Row {
+        slow: "matmul_fp8_gemv",
+        target: Target::Named("matmul_fp8_wgmma_tma_n256"),
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_fp8_wgmma_tma_store,
+        blocks: fp8_persistent_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        input: Input::FP8_NATIVE,
+        launch: CudaLaunch {
+            dynamic_shared_bytes: kernels_cuda::fp8_wgmma_tma_n256_dynamic_shared_bytes(4),
             shared_opt_in: true,
             arch: backend_api::ArchFeatures::Required,
             ..CudaLaunch::NONE
@@ -3170,8 +3191,8 @@ mod tests {
         // 100 rows: the wide streaming kernels and the GEMM, not the narrow ones.
         let hundred = serving(&[100, 1280, 5120]);
         assert!(hundred.contains(&"matmul_fp8_dq_stream_q2") && hundred.contains(&"matmul_fp8_dq_wgmma") && !hundred.contains(&"matmul_fp8_dq_stream_r1"), "{hundred:?}");
-        // A prefill round: the two GEMMs (bf16 operands decoded in shared memory, E4M3 operands as stored).
-        assert_eq!(serving(&[1024, 1280, 17408]), vec!["matmul_fp8_dq_wgmma", "matmul_fp8_wgmma"]);
+        // A prefill round: the GEMMs (bf16 operands decoded in shared memory, E4M3 operands as stored by cp.async and by the tensor memory accelerator).
+        assert_eq!(serving(&[1024, 1280, 17408]), vec!["matmul_fp8_dq_wgmma", "matmul_fp8_wgmma", "matmul_fp8_wgmma_tma", "matmul_fp8_wgmma_tma_n256"]);
         // K = 5000 is not whole 128-wide blocks.
         assert!(serving(&[1, 1250, 64]).is_empty());
         // The weight must stay addressable with 32-bit byte offsets.
