@@ -1059,13 +1059,13 @@ pub(crate) fn head_logits_on(
 /// the single largest weight this model has, so projecting `rows` separate
 /// rows through it reads it `rows` times, which would put back per sequence
 /// exactly the traffic batching the body just took out.
-pub(crate) fn head_logits_rows_on(
+pub(crate) fn head_logits_rows_on<'h>(
     g: &Gpu,
     ops: &model::ops::Ops,
     cfg: &Qwen35Config,
     final_norm_buf: &DeviceBuffer,
     head: &Weight,
-    hidden: &[f32],
+    hidden: impl Into<HeadRows<'h>>,
     rows: u32,
 ) -> Vec<f32> {
     head_rows_on(g, ops, cfg, final_norm_buf, head, hidden, rows, |g, logits| g.read(logits, rows as usize * cfg.vocab as usize))
@@ -1074,13 +1074,13 @@ pub(crate) fn head_logits_rows_on(
 /// [`head_logits_rows_on`] reduced to each row's greedy token on the device:
 /// only `rows` indices come back, never the `[rows, vocab]` logits block (at
 /// a batch of 64 over a 248k vocabulary that block is 63 MB per step).
-pub(crate) fn head_argmax_rows_on(
+pub(crate) fn head_argmax_rows_on<'h>(
     g: &Gpu,
     ops: &model::ops::Ops,
     cfg: &Qwen35Config,
     final_norm_buf: &DeviceBuffer,
     head: &Weight,
-    hidden: &[f32],
+    hidden: impl Into<HeadRows<'h>>,
     rows: u32,
 ) -> Vec<u32> {
     head_rows_on(g, ops, cfg, final_norm_buf, head, hidden, rows, |g, logits| crate::model::argmax_rows_of(g, logits, rows, cfg.vocab))
@@ -1088,34 +1088,75 @@ pub(crate) fn head_argmax_rows_on(
 
 /// [`head_logits_rows_on`] reduced to each row's top-`cap` `(token, logit)`
 /// candidates on the device (see [`crate::model::topk_rows_of`]).
-pub(crate) fn head_topk_rows_on(
+pub(crate) fn head_topk_rows_on<'h>(
     g: &Gpu,
     ops: &model::ops::Ops,
     cfg: &Qwen35Config,
     final_norm_buf: &DeviceBuffer,
     head: &Weight,
-    hidden: &[f32],
+    hidden: impl Into<HeadRows<'h>>,
     rows: u32,
     cap: u32,
 ) -> Vec<Vec<(u32, f32)>> {
     head_rows_on(g, ops, cfg, final_norm_buf, head, hidden, rows, |g, logits| crate::model::topk_rows_of(g, logits, rows, cfg.vocab, cap))
 }
 
+/// The residual rows a head epilogue starts from.
+#[derive(Clone, Copy)]
+pub(crate) enum HeadRows<'a> {
+    /// `[rows, d_model]` on the host, uploaded for the epilogue.
+    Host(&'a [f32]),
+    /// `[rows, d_model]` already on the head's card, usually the layer stack's output still being computed: the
+    /// epilogue's dispatches are queued behind it with no read-back in between.
+    Device(&'a DeviceBuffer),
+}
+
+impl<'a> HeadRows<'a> {
+    /// The `words` f32 of these rows on the host (a device source is read, which waits for the card).
+    pub(crate) fn to_host(self, g: &Gpu, words: usize) -> std::borrow::Cow<'a, [f32]> {
+        match self {
+            HeadRows::Host(h) => std::borrow::Cow::Borrowed(h),
+            HeadRows::Device(b) => std::borrow::Cow::Owned(g.read(b, words)),
+        }
+    }
+}
+
+impl<'a> From<&'a [f32]> for HeadRows<'a> {
+    fn from(rows: &'a [f32]) -> Self {
+        HeadRows::Host(rows)
+    }
+}
+
+impl<'a> From<&'a Vec<f32>> for HeadRows<'a> {
+    fn from(rows: &'a Vec<f32>) -> Self {
+        HeadRows::Host(rows)
+    }
+}
+
+impl<'a> From<&'a DeviceBuffer> for HeadRows<'a> {
+    fn from(rows: &'a DeviceBuffer) -> Self {
+        HeadRows::Device(rows)
+    }
+}
+
 /// The shared final-norm + head-matmul epilogue; `reduce` consumes the
 /// `[rows, vocab]` device logits inside the scratch scope that owns them.
-fn head_rows_on<R>(
+fn head_rows_on<'h, R>(
     g: &Gpu,
     ops: &model::ops::Ops,
     cfg: &Qwen35Config,
     final_norm_buf: &DeviceBuffer,
     head: &Weight,
-    hidden: &[f32],
+    hidden: impl Into<HeadRows<'h>>,
     rows: u32,
     reduce: impl FnOnce(&Gpu, &DeviceBuffer) -> R,
 ) -> R {
     let d = cfg.d_model as usize;
     assert!(rows > 0, "head_rows_on: rows must be > 0");
-    assert_eq!(hidden.len(), rows as usize * d, "head_rows_on: hidden must be exactly {rows} [d_model] rows");
+    let hidden = hidden.into();
+    if let HeadRows::Host(h) = hidden {
+        assert_eq!(h.len(), rows as usize * d, "head_rows_on: hidden must be exactly {rows} [d_model] rows");
+    }
     // Same recipe as a decode step's layer stack (`Qwen35::run_decode_batch`):
     // recycled scratch at stable addresses plus one held submission, so the
     // head of a steady-state token is replayed rather than rebuilt - its
@@ -1124,10 +1165,17 @@ fn head_rows_on<R>(
     let _ops_scratch = ops.gpu().scratch_scope_in(crate::model::HEAD_ARENA);
     let _scratch = g.scratch_scope_in(crate::model::HEAD_ARENA);
     let _pass = g.pass_scope();
-    let x = g.storage(hidden.len() as u64);
-    g.write_f32(&x, hidden);
+    let uploaded;
+    let x = match hidden {
+        HeadRows::Host(h) => {
+            uploaded = g.storage(h.len() as u64);
+            g.write_f32(&uploaded, h);
+            &uploaded
+        }
+        HeadRows::Device(x) => x,
+    };
     let normed = g.storage(rows as u64 * d as u64);
-    g.submit(&[], &[crate::model::final_norm_step(g, &x, final_norm_buf, &normed, d as u32, rows)]);
+    g.submit(&[], &[crate::model::final_norm_step(g, x, final_norm_buf, &normed, d as u32, rows)]);
 
     let mut s = Vec::new();
     // The int8 packing (two launches) only where the head reads it.

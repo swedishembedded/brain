@@ -174,6 +174,7 @@ use serde_json::json;
 
 use crate::adapter_serving as adapters;
 use crate::config::{LayerType, Qwen35Config};
+use crate::stream::HeadRows;
 use crate::resident_checkpoint::ResidentCheckpoint;
 pub(crate) use mtp::checkpoint_has_mtp;
 use crate::model::{BatchDecodeCaches, BatchSeq, DecodeCaches, GdnPoolStore, KvWindow, PooledCaches, PrefillSeg, Qwen35, SpecDecodeStats, StageRows};
@@ -1809,6 +1810,24 @@ impl Qwen35GgufInstance {
     /// d_model]` pre-norm hidden block the head projects. Slots must be
     /// distinct (two rows of one sequence would race on its state).
     fn stack_decode_hidden(&self, tokens: &[u32], slots: &[u32], positions: &[u32]) -> Result<Vec<f32>, String> {
+        let hidden = self.stack_decode_hidden_dev(tokens, slots, positions)?;
+        Ok(self.hidden_to_host(&hidden, tokens.len()))
+    }
+
+    /// A decode step's `[rows, d_model]` hidden block, read from the last stage's card.
+    fn hidden_to_host(&self, hidden: &DeviceBuffer, rows: usize) -> Vec<f32> {
+        let (g, ..) = self.head_parts();
+        g.read(hidden, rows * self.cfg.d_model as usize)
+    }
+
+    /// Hold the last stage's dispatches from here to the end of the scope and issue them together: a decode step's
+    /// layers and its head are then one submission (one graph), with no read-back of the residual between them.
+    fn step_scope(&self) -> impl Drop + '_ {
+        self.head_parts().0.pass_scope()
+    }
+
+    /// [`Self::stack_decode_hidden`] leaving the block on the last stage's card, still being computed.
+    fn stack_decode_hidden_dev(&self, tokens: &[u32], slots: &[u32], positions: &[u32]) -> Result<DeviceBuffer, String> {
         let bsz = tokens.len();
         assert!(bsz == positions.len() && bsz == slots.len(), "{MODEL}: a decode step needs one slot and position per token ({bsz} tokens, {} slots, {} positions)", slots.len(), positions.len());
         assert!(bsz > 0, "{MODEL}: stack_decode_hidden on an empty batch");
@@ -1819,7 +1838,7 @@ impl Qwen35GgufInstance {
             }
         }
         debug_assert!(slots.iter().collect::<std::collections::HashSet<_>>().len() == bsz, "{MODEL}: a decode step names a slot twice");
-        let (mut host_rows, words) = (Vec::new(), tokens.len() * self.cfg.d_model as usize);
+        let mut host_rows = Vec::new();
         let first = {
             let _embed = gpu_core::markers::range(c"decode.embed");
             self.first_rows(tokens, &mut host_rows)?
@@ -1832,7 +1851,7 @@ impl Qwen35GgufInstance {
                 s.qwen35.run_decode_batch(tokens, &caches, Some(rows))
             },
             |_, _| {},
-            |g, out| g.read(out, words),
+            |_, out| out.clone(),
         ))
     }
 
@@ -1869,29 +1888,35 @@ impl Qwen35GgufInstance {
     }
 
     /// Each row's greedy token, picked on the device.
-    fn head_argmax_rows(&self, hidden: &[f32], rows: u32) -> Vec<u32> {
+    fn head_argmax_rows<'h>(&self, hidden: impl Into<HeadRows<'h>>, rows: u32) -> Vec<u32> {
         let (g, ops, norm, w) = self.head_parts();
-        let d = self.cfg.d_model as usize;
+        let hidden = hidden.into();
         let Some(step) = self.exact_head_step().filter(|&s| rows > s) else {
             return crate::stream::head_argmax_rows_on(g, ops, &self.cfg, norm, w, hidden, rows);
         };
+        // Exact decode runs the head in groups of rows, which are cut on the host.
+        let d = self.cfg.d_model as usize;
+        let host = hidden.to_host(g, rows as usize * d);
         let mut out = Vec::with_capacity(rows as usize);
         for (start, end) in head_groups(rows, step) {
-            out.extend(crate::stream::head_argmax_rows_on(g, ops, &self.cfg, norm, w, &hidden[start * d..end * d], (end - start) as u32));
+            out.extend(crate::stream::head_argmax_rows_on(g, ops, &self.cfg, norm, w, &host[start * d..end * d], (end - start) as u32));
         }
         out
     }
 
     /// Each row's top-`cap` candidates, extracted on the device.
-    fn head_topk_rows(&self, hidden: &[f32], rows: u32, cap: u32) -> Vec<Vec<(u32, f32)>> {
+    fn head_topk_rows<'h>(&self, hidden: impl Into<HeadRows<'h>>, rows: u32, cap: u32) -> Vec<Vec<(u32, f32)>> {
         let (g, ops, norm, w) = self.head_parts();
-        let d = self.cfg.d_model as usize;
+        let hidden = hidden.into();
         let Some(step) = self.exact_head_step().filter(|&s| rows > s) else {
             return crate::stream::head_topk_rows_on(g, ops, &self.cfg, norm, w, hidden, rows, cap);
         };
+        // Exact decode runs the head in groups of rows, which are cut on the host.
+        let d = self.cfg.d_model as usize;
+        let host = hidden.to_host(g, rows as usize * d);
         let mut out = Vec::with_capacity(rows as usize);
         for (start, end) in head_groups(rows, step) {
-            out.extend(crate::stream::head_topk_rows_on(g, ops, &self.cfg, norm, w, &hidden[start * d..end * d], (end - start) as u32, cap));
+            out.extend(crate::stream::head_topk_rows_on(g, ops, &self.cfg, norm, w, &host[start * d..end * d], (end - start) as u32, cap));
         }
         out
     }
@@ -1944,7 +1969,8 @@ impl Qwen35GgufInstance {
     pub fn decode_batch_greedy_at(&self, tokens: &[u32], positions: &[u32]) -> Result<Vec<u32>, String> {
         self.check_batch_at(tokens, positions)?;
         let slots: Vec<u32> = (0..tokens.len() as u32).collect();
-        let hidden = self.stack_decode_hidden(tokens, &slots, positions)?;
+        let _step = self.step_scope();
+        let hidden = self.stack_decode_hidden_dev(tokens, &slots, positions)?;
         Ok(self.head_argmax_rows(&hidden, tokens.len() as u32))
     }
 

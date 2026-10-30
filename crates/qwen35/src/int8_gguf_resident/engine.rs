@@ -582,21 +582,31 @@ impl Qwen35GgufEngine {
 
     /// One batched decode step for `tables`, returning the `[bsz, d_model]`
     /// hidden block.
-    fn decode_hidden(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<f32> {
+    /// One decode step's layers and then `head` over the hidden block they leave on the card, as ONE submission:
+    /// nothing is read back between the last layer and the head.
+    fn decode_then<R>(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], head: impl FnOnce(&Qwen35GgufInstance, &gpu_core::DeviceBuffer) -> R) -> R {
         assert_eq!(tables.len(), inputs.len(), "{MODEL}: tables/inputs length mismatch");
         let adapter_slots: Vec<u32> = tables.iter().map(|t| adapters::slot_of(self.inst.stage_models(), t.kv_namespace())).collect();
         let (slots, positions) = self.next_positions(tables);
-        self.inst.set_adapter_rows(&adapter_slots);
-        let hidden = self.inst.stack_decode_hidden(inputs, &slots, &positions).unwrap_or_else(|e| panic!("{e}"));
-        self.inst.set_adapter_rows(&[]);
-        // A batch the scheduler will not speculate over (past the crossover or the
-        // verify scratch) is not worth tracking for the drafter either.
-        if slots.len() > self.spec_batch_limit.min(self.inst.speculation_rows() as usize) {
-            self.inst.mtp_forget(&slots);
-        } else {
-            self.inst.mtp_record_step(&slots, inputs, &hidden);
+        let inst = &mut self.inst;
+        // A batch the scheduler will not speculate over (past the crossover or the verify scratch) is not worth
+        // tracking for the drafter either.
+        if slots.len() <= self.spec_batch_limit.min(inst.speculation_rows() as usize) {
+            // The drafter reads the rows on the host, so the layers are waited for before the head.
+            inst.set_adapter_rows(&adapter_slots);
+            let hidden = inst.stack_decode_hidden_dev(inputs, &slots, &positions).unwrap_or_else(|e| panic!("{e}"));
+            inst.set_adapter_rows(&[]);
+            let host = inst.hidden_to_host(&hidden, slots.len());
+            inst.mtp_record_step(&slots, inputs, &host);
+            return head(inst, &hidden);
         }
-        hidden
+        inst.mtp_forget(&slots);
+        let inst = &*inst;
+        let _step = inst.step_scope();
+        inst.set_adapter_rows(&adapter_slots);
+        let hidden = inst.stack_decode_hidden_dev(inputs, &slots, &positions).unwrap_or_else(|e| panic!("{e}"));
+        inst.set_adapter_rows(&[]);
+        head(inst, &hidden)
     }
 }
 
@@ -1304,8 +1314,8 @@ impl PagedDecoder for Qwen35GgufEngine {
             return Vec::new();
         }
         decode_lane(self.background_on, || {
-            let hidden = self.decode_hidden(tables, inputs);
-            self.inst.head_argmax_rows(&hidden, inputs.len() as u32)
+            let rows = inputs.len() as u32;
+            self.decode_then(tables, inputs, |inst, hidden| inst.head_argmax_rows(hidden, rows))
         })
     }
     fn forward_batched_greedy_window(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], k: usize) -> Vec<Vec<u32>> {
@@ -1318,8 +1328,8 @@ impl PagedDecoder for Qwen35GgufEngine {
         }
         let k = k.clamp(1, TOPK_CAPACITY) as u32;
         decode_lane(self.background_on, || {
-            let hidden = self.decode_hidden(tables, inputs);
-            self.inst.head_topk_rows(&hidden, inputs.len() as u32, k)
+            let rows = inputs.len() as u32;
+            self.decode_then(tables, inputs, |inst, hidden| inst.head_topk_rows(hidden, rows, k))
         })
     }
     fn step_latency_target(&self) -> Option<std::time::Duration> {
