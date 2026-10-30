@@ -1915,6 +1915,10 @@ pub(crate) const ROWS: &[Row] = &[
     // (`tests/elementwise_native.rs`).
     Row { slow: "bias_add", target: Target::Named("bias_add_f32"), bindings: BIAS_ADD_BINDINGS, serves: serves_bias_add, blocks: bias_add_blocks, requires_wgsl_upgrade: false, align_words: 1, input: Input::PACKED, launch: CudaLaunch::NONE },
     Row { slow: "add2", target: Target::Named("add2_f32"), bindings: CONCAT2_BINDINGS, serves: serves_flat, blocks: flat_blocks, requires_wgsl_upgrade: false, align_words: 1, input: Input::PACKED, launch: CudaLaunch::NONE },
+    Row { slow: "mul", target: Target::Named("mul_f32"), bindings: CONCAT2_BINDINGS, serves: serves_flat, blocks: flat_blocks, requires_wgsl_upgrade: false, align_words: 1, input: Input::PACKED, launch: CudaLaunch::NONE },
+    // A compact block into `dst` at a flat offset (the MLP row chunks, the vision splice): params [n, base].
+    Row { slow: "splice_add", target: Target::Named("splice_add_f32"), bindings: COPY_BINDINGS, serves: serves_splice, blocks: flat_blocks, requires_wgsl_upgrade: false, align_words: 1, input: Input::PACKED, launch: CudaLaunch::NONE },
+    Row { slow: "splice", target: Target::Named("splice_f32"), bindings: COPY_BINDINGS, serves: serves_splice, blocks: flat_blocks, requires_wgsl_upgrade: false, align_words: 1, input: Input::PACKED, launch: CudaLaunch::NONE },
     Row { slow: "gelu_erf", target: Target::Named("gelu_erf_f32"), bindings: COPY_BINDINGS, serves: serves_flat, blocks: flat_blocks, requires_wgsl_upgrade: false, align_words: 1, input: Input::PACKED, launch: CudaLaunch::NONE },
     Row { slow: "silu", target: Target::Named("silu_f32"), bindings: COPY_BINDINGS, serves: serves_flat, blocks: flat_blocks, requires_wgsl_upgrade: false, align_words: 1, input: Input::PACKED, launch: CudaLaunch::NONE },
     Row { slow: "silu_bwd", target: Target::Named("silu_bwd_f32"), bindings: CONCAT2_BINDINGS, serves: serves_flat, blocks: flat_blocks, requires_wgsl_upgrade: false, align_words: 1, input: Input::PACKED, launch: CudaLaunch::NONE },
@@ -2096,6 +2100,11 @@ fn concat2_blocks(p: &[u32], tile: (u32, u32)) -> u32 {
 /// `[total]`, non-empty.
 fn serves_flat(p: &[u32]) -> bool {
     matches!(p, [total] if *total >= 1)
+}
+
+/// `[n, base]` with something to move; `base + n` must index with 32 bits.
+fn serves_splice(p: &[u32]) -> bool {
+    matches!(p, [n, base] if *n >= 1 && u64::from(*n) + u64::from(*base) <= u64::from(u32::MAX))
 }
 
 /// `bias_add.wgsl`'s bindings: params, the biased `out` (read and written), the `bias` row.

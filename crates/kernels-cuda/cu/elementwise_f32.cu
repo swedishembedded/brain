@@ -6,8 +6,9 @@
 // runs on then you can procure our services by sending an email to info@swedishembedded.com.
 //
 // The elementwise glue of a transformer block, fp32: the native forms of `bias_add.wgsl` (`out[m, n] +=
-// bias[n]`), `add2.wgsl` (`out = a + b`) and `gelu_erf.wgsl` (exact erf GELU), reading the identical buffers and
-// the identical uniforms.
+// bias[n]`), `add2.wgsl` (`out = a + b`), `mul.wgsl` (`out = a * b`), `splice_add.wgsl` / `splice.wgsl` (a
+// compact block accumulated into / copied over `dst` from a flat offset) and `gelu_erf.wgsl` (exact erf GELU),
+// reading the identical buffers and the identical uniforms.
 //
 // The WGSL kernels give one invocation one element and, for the bias, an integer modulo per element. Here a
 // block takes a run of 1024 consecutive elements, four a thread with 16-byte accesses; the bias row is found
@@ -72,6 +73,43 @@ extern "C" __global__ void __launch_bounds__(BRAIN_EW_THREADS) brain_add2(const 
             *reinterpret_cast<float4*>(out + i) = make_float4(x.x + y.x, x.y + y.y, x.z + y.z, x.w + y.w);
         },
         [&](unsigned i) { out[i] = a[i] + b[i]; });
+}
+
+// out = a * b. params [total].
+extern "C" __global__ void __launch_bounds__(BRAIN_EW_THREADS) brain_mul(const unsigned int* params, const float* a, const float* b, float* out) {
+    const unsigned total = params[0];
+    brain_ew_flat(
+        total, brain_ew_aligned(a) && brain_ew_aligned(b) && brain_ew_aligned(out),
+        [&](unsigned i) {
+            const float4 x = *reinterpret_cast<const float4*>(a + i);
+            const float4 y = *reinterpret_cast<const float4*>(b + i);
+            *reinterpret_cast<float4*>(out + i) = make_float4(x.x * y.x, x.y * y.y, x.z * y.z, x.w * y.w);
+        },
+        [&](unsigned i) { out[i] = a[i] * b[i]; });
+}
+
+// dst[base + i] += src[i] (`splice_add.wgsl`). params [total, base].
+extern "C" __global__ void __launch_bounds__(BRAIN_EW_THREADS) brain_splice_add(const unsigned int* params, const float* src, float* dst) {
+    const unsigned total = params[0];
+    float* at = dst + params[1];
+    brain_ew_flat(
+        total, brain_ew_aligned(src) && brain_ew_aligned(at),
+        [&](unsigned i) {
+            const float4 v = *reinterpret_cast<const float4*>(src + i);
+            const float4 d = *reinterpret_cast<const float4*>(at + i);
+            *reinterpret_cast<float4*>(at + i) = make_float4(d.x + v.x, d.y + v.y, d.z + v.z, d.w + v.w);
+        },
+        [&](unsigned i) { at[i] = at[i] + src[i]; });
+}
+
+// dst[base + i] = src[i] (`splice.wgsl`). params [total, base].
+extern "C" __global__ void __launch_bounds__(BRAIN_EW_THREADS) brain_splice(const unsigned int* params, const float* src, float* dst) {
+    const unsigned total = params[0];
+    float* at = dst + params[1];
+    brain_ew_flat(
+        total, brain_ew_aligned(src) && brain_ew_aligned(at),
+        [&](unsigned i) { *reinterpret_cast<float4*>(at + i) = *reinterpret_cast<const float4*>(src + i); },
+        [&](unsigned i) { at[i] = src[i]; });
 }
 
 // 0.5 v (1 + erf(v / sqrt 2)), erf by Abramowitz & Stegun 7.1.26, in the WGSL kernel's order of operations.

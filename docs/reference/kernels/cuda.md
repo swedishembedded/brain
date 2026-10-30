@@ -181,6 +181,9 @@ Every column is stated by the kernel's own registry entry in `crates/kernels-cud
 | `concat2_f32` | Elementwise | F32 | tuned | 5.0 | `brain_concat2` | two NCHW maps concatenated along channels, plane by plane; bit-identical to concat2 |
 | `bias_add_f32` | Elementwise | F32 | tuned | 5.0 | `brain_bias_add` | bias add in place over rows of a width that is a whole number of vectors, four elements a thread with 16-byte accesses; bit-identical to bias_add |
 | `add2_f32` | Elementwise | F32 | tuned | 5.0 | `brain_add2` | a + b over a flat array, four elements a thread with 16-byte accesses; bit-identical to add2 |
+| `mul_f32` | Elementwise | F32 | tuned | 5.0 | `brain_mul` | a * b over a flat array, four elements a thread with 16-byte accesses; bit-identical to mul |
+| `splice_add_f32` | Elementwise | F32 | tuned | 5.0 | `brain_splice_add` | a compact block accumulated into dst from a flat offset, four elements a thread with 16-byte accesses; bit-identical to splice_add |
+| `splice_f32` | Elementwise | F32 | tuned | 5.0 | `brain_splice` | a compact block copied over dst from a flat offset, four elements a thread with 16-byte accesses; bit-identical to splice |
 | `gelu_erf_f32` | Elementwise | F32 | tuned | 5.0 | `brain_gelu_erf` | exact erf GELU over a flat array, four elements a thread with 16-byte accesses; bit-identical to gelu_erf |
 | `silu_f32` | Elementwise | F32 | tuned | 5.0 | `brain_silu_fwd` | SiLU over a flat array, four elements a thread with 16-byte accesses; bit-identical to silu |
 | `silu_bwd_f32` | Elementwise | F32 | tuned | 5.0 | `brain_silu_bwd` | SiLU's input gradient over a flat array, four elements a thread with 16-byte accesses; bit-identical to silu_bwd |

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! The gate for the native elementwise kernels (`kernels_cuda`, `cu/elementwise_f32.cu`) that
-//! `gpu_core::native_upgrade` substitutes for `bias_add`, `add2` and `gelu_erf` on a CUDA device.
+//! `gpu_core::native_upgrade` substitutes for `bias_add`, `add2`, `mul`, `splice_add`, `splice` and `gelu_erf` on a CUDA device.
 //!
 //! Swedish Embedded AB implements document-vision serving for clients who read pages at scale. If your team
 //! needs expertise in putting the memory-bound glue of a transformer tower onto the bandwidth roof of the card it
@@ -19,14 +19,23 @@ const KERNELS: &[(&str, &str)] = &[
     ("bias_add", kernels::BIAS_ADD),
     ("add2", kernels::ADD2),
     ("gelu_erf", kernels::GELU_ERF),
+    ("mul", kernels::MUL),
+    ("splice_add", kernels::SPLICE_ADD),
+    ("splice", kernels::SPLICE),
     ("bias_add_ref", kernels::BIAS_ADD),
     ("add2_ref", kernels::ADD2),
     ("gelu_erf_ref", kernels::GELU_ERF),
+    ("mul_ref", kernels::MUL),
+    ("splice_add_ref", kernels::SPLICE_ADD),
+    ("splice_ref", kernels::SPLICE),
 ];
 const BIAS_ADD: usize = 0;
 const ADD2: usize = 1;
 const GELU: usize = 2;
-const REF: usize = 3;
+const MUL: usize = 3;
+const SPLICE_ADD: usize = 4;
+const SPLICE: usize = 5;
+const REF: usize = 6;
 
 fn is_cuda(gpu: &Gpu) -> bool {
     gpu.kind() == "cuda" && gpu.caps().arch.compute_capability.is_some() && gpu_core::native_kernels_enabled()
@@ -79,6 +88,19 @@ fn the_native_elementwise_kernels_are_bit_identical_to_the_reference() {
         same_bits(&gpu, ADD2, &[&a, &b, &out], 2, &[total], total, &format!("add2 {total}"));
         let x = values(total as usize, 50 + i as u64);
         same_bits(&gpu, GELU, &[&x, &out], 1, &[total], total, &format!("gelu_erf {total}"));
+        same_bits(&gpu, MUL, &[&a, &b, &out], 2, &[total], total, &format!("mul {total}"));
+    }
+
+    assert_eq!(gpu.native_kernel_for(MUL, &[4096 * 768]), Some("mul_f32"));
+    assert_eq!(gpu.native_kernel_for(SPLICE_ADD, &[4096 * 768, 0]), Some("splice_add_f32"));
+    assert_eq!(gpu.native_kernel_for(SPLICE, &[4096 * 768, 8]), Some("splice_f32"));
+    assert_eq!(gpu.native_kernel_for(SPLICE, &[0, 0]), None, "no elements");
+    // (n, base): a block placed at row boundaries, at a base that is not a whole vector, and a short tail.
+    for (i, &(n, base, dst_len)) in [(2048u32 * 5120, 2048 * 5120, 4 * 2048 * 5120), (4096 * 3, 4096, 4096 * 5), (1001, 3, 1100), (7, 1, 64), (1, 0, 4)].iter().enumerate() {
+        let src = values(n as usize, 60 + i as u64);
+        let dst = values(dst_len as usize, 70 + i as u64);
+        same_bits(&gpu, SPLICE_ADD, &[&src, &dst], 1, &[n, base], n, &format!("splice_add {n}@{base}"));
+        same_bits(&gpu, SPLICE, &[&src, &dst], 1, &[n, base], n, &format!("splice {n}@{base}"));
     }
 }
 
