@@ -245,6 +245,12 @@ SERVING POLICY  (one model-agnostic policy for every model that serves it.
                          model's own (int8 for the Qwen3 engine; for the
                          released Qwen3.8 GGUFs the fastest that fits the
                          cards, int8 first).
+  --act-precision auto|f32|bf16
+                         element type of the activations between the FP8
+                         matrix products, for the models that support it (the
+                         Qwen3.8 releases): `auto` (default) is bf16 where the
+                         device has bf16 tensor cores, `f32` the A/B switch.
+                         Accumulation is f32 in every kernel either way.
   --gemm auto|fp32       `fp32` pins exact fp32 arithmetic for the linears (the
                          reference tier); `auto` (default) uses tensor cores
                          where the device has them.

@@ -777,6 +777,93 @@ pub fn check_fp8_shape(gpu: &Gpu, params: [u32; 3]) -> Vec<(String, Verdict)> {
     time_class(gpu, &FP8, &cands, (m, kg, n), &Acts::new(m, kg), &Roofs { gbs: None, floor_us: None, int8_tops: None }, false)
 }
 
+/// The bf16-output twins of the FP8 candidates that serve `params` (`[m, k/4, n]`), each held to its base: the same inputs
+/// through both must give the base's f32 rows rounded to bf16 (nearest even) bit for bit, because the twin differs from its
+/// base in the store alone. One `(twin, rows that differ)` per twin; empty when no twin serves. For tests.
+#[doc(hidden)]
+pub fn check_fp8_bf16_out(gpu: &Gpu, params: [u32; 3]) -> Vec<(String, usize)> {
+    let [m, kg, n] = params;
+    let rows = gpu.native_rows();
+    let asked = [m, kg, n, crate::native_upgrade::FP8_OUT_BF16];
+    let acts = Acts::new(m, kg);
+    let k = kg * 4;
+    let scale_words = (n as usize).div_ceil(128) * (k as usize / 128);
+    let (x8, sx8) = (gpu.storage(u64::from(m * kg).max(1)), gpu.storage((acts.s8.len() as u64).max(1)));
+    gpu.write(&x8, &acts.q8);
+    gpu.write_f32(&sx8, &acts.s8);
+    let (wb, sb) = (gpu.storage(u64::from(n) * u64::from(kg)), gpu.storage(scale_words as u64));
+    gpu.write(&wb, &packed_e4m3(n as usize * kg as usize, 3));
+    gpu.write_f32(&sb, &block_scales(scale_words, 4));
+    let mut out = Vec::new();
+    for base in rows.iter().filter(|a| a.slow == crate::native_upgrade::FP8_KIND && (a.serves)(&params)) {
+        let Some(twin) = crate::native_upgrade::fp8_bf16_out_twin(base.kernel).and_then(|t| rows.iter().find(|a| a.kernel == t && (a.serves)(&asked))) else { continue };
+        let (y32, y16) = (gpu.storage(u64::from(m) * u64::from(n)), gpu.storage((u64::from(m) * u64::from(n)).div_ceil(2)));
+        let (Some(s32), Some(s16)) = (
+            gpu.native_step_raw(base.id, &[&x8, &wb, &sx8, &sb, &y32], &params, (base.blocks)(&params, base.tile)),
+            gpu.native_step_raw(twin.id, &[&x8, &wb, &sx8, &sb, &y16], &params, (twin.blocks)(&params, twin.tile)),
+        ) else {
+            out.push((twin.kernel.to_owned(), usize::MAX));
+            continue;
+        };
+        gpu.submit(&[], &[s32, s16]);
+        gpu.poll_wait();
+        let (full, packed) = (gpu.read(&y32, (m * n) as usize), gpu.read(&y16, (m * n).div_ceil(2) as usize));
+        let differ = full
+            .iter()
+            .enumerate()
+            .filter(|(i, v)| {
+                let bits = v.to_bits();
+                let want = bits.wrapping_add(0x7FFF + ((bits >> 16) & 1)) >> 16;
+                let word = packed[i / 2].to_bits();
+                (if i % 2 == 0 { word & 0xFFFF } else { word >> 16 }) != want
+            })
+            .count();
+        out.push((twin.kernel.to_owned(), differ));
+    }
+    out
+}
+
+/// [`check_fp8_bf16_out`] with the timing on: per twin, `(twin, base microseconds, twin microseconds)` over repeated launches
+/// (the minimum of short runs, as the tuner times). For benches.
+#[doc(hidden)]
+pub fn time_fp8_bf16_out(gpu: &Gpu, params: [u32; 3]) -> Vec<(String, f64, f64)> {
+    let [m, kg, n] = params;
+    let rows = gpu.native_rows();
+    let asked = [m, kg, n, crate::native_upgrade::FP8_OUT_BF16];
+    let acts = Acts::new(m, kg);
+    let scale_words = (n as usize).div_ceil(128) * (kg as usize * 4 / 128);
+    let (x8, sx8) = (gpu.storage(u64::from(m * kg).max(1)), gpu.storage((acts.s8.len() as u64).max(1)));
+    gpu.write(&x8, &acts.q8);
+    gpu.write_f32(&sx8, &acts.s8);
+    let (wb, sb) = (gpu.storage(u64::from(n) * u64::from(kg)), gpu.storage(scale_words as u64));
+    gpu.write(&wb, &packed_e4m3(n as usize * kg as usize, 3));
+    gpu.write_f32(&sb, &block_scales(scale_words, 4));
+    let timing = gpu.set_kernel_timing(true);
+    let mut out = Vec::new();
+    for base in rows.iter().filter(|a| a.slow == crate::native_upgrade::FP8_KIND && (a.serves)(&params)) {
+        let Some(twin) = crate::native_upgrade::fp8_bf16_out_twin(base.kernel).and_then(|t| rows.iter().find(|a| a.kernel == t && (a.serves)(&asked))) else { continue };
+        let (y32, y16) = (gpu.storage(u64::from(m) * u64::from(n)), gpu.storage((u64::from(m) * u64::from(n)).div_ceil(2)));
+        // Base and twin alternate within each trial, so a clock the power cap has lowered by the one hurts the other as much.
+        let run = |a: &crate::native_upgrade::Active, y: &crate::DeviceBuffer| -> Option<f64> {
+            let steps: Vec<_> = (0..16).filter_map(|_| gpu.native_step_raw(a.id, &[&x8, &wb, &sx8, &sb, y], &params, (a.blocks)(&params, a.tile))).collect();
+            gpu.reset_kernel_times();
+            gpu.submit(&[], &steps);
+            gpu.poll_wait();
+            gpu.kernel_times().map(|t| t.iter().filter(|r| r.0 == a.reported).map(|r| r.1).sum::<f64>() / steps.len().max(1) as f64 * 1e3)
+        };
+        let (mut b, mut t) = (f64::MAX, f64::MAX);
+        for _ in 0..6 {
+            b = b.min(run(base, &y32).unwrap_or(f64::MAX));
+            t = t.min(run(twin, &y16).unwrap_or(f64::MAX));
+        }
+        out.push((twin.kernel.to_owned(), b, t));
+    }
+    if timing {
+        gpu.set_kernel_timing(false);
+    }
+    out
+}
+
 /// The device read roof (GB/s) and launch floor (us) of the autotuner's probe. For benches.
 #[doc(hidden)]
 pub fn read_roof(gpu: &Gpu) -> Option<(f32, f32)> {

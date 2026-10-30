@@ -275,6 +275,10 @@ fn refuse_short_params(name: &str, grid: Option<KernelGrid>, params: &[u32]) {
 }
 
 
+/// The element type of the activation stream between matrix products, chosen per device - see [`act_precision::ActPrecision`].
+pub mod act_precision;
+pub use act_precision::{ActChoice, ActPrecision};
+
 /// Per-kernel FLOP/int-OPS/bytes formulas + step-list accounting (offline
 /// `Gpu::cost_of`, online `Gpu::ops_counters`).
 pub mod cost;
@@ -337,7 +341,7 @@ pub enum Fp8Act {
     E4m3,
 }
 
-pub use native_tune::{check_fp8_shape as native_check_fp8_shape, check_shape as native_check_shape, clear_forced as clear_forced_candidates, force_candidate, offered as native_candidates_offered, report as native_selection_report, report_for_default_device as native_selection_report_for_default_device, set_autotune as set_native_autotune, read_roof as native_read_roof, time_fp8_candidates as native_time_fp8_candidates, time_fp8_shape as native_time_fp8_shape, unknown_forced as unknown_forced_candidates, Verdict as NativeVerdict};
+pub use native_tune::{check_fp8_bf16_out as native_check_fp8_bf16_out, time_fp8_bf16_out as native_time_fp8_bf16_out, check_fp8_shape as native_check_fp8_shape, check_shape as native_check_shape, clear_forced as clear_forced_candidates, force_candidate, offered as native_candidates_offered, report as native_selection_report, report_for_default_device as native_selection_report_for_default_device, set_autotune as set_native_autotune, read_roof as native_read_roof, time_fp8_candidates as native_time_fp8_candidates, time_fp8_shape as native_time_fp8_shape, unknown_forced as unknown_forced_candidates, Verdict as NativeVerdict};
 
 /// The `OperatorProvider` ABI, registry, WGSL reference provider and
 /// cross-provider parity harness (`kernel-performance.md` Phase 8, M8.3).
@@ -993,14 +997,24 @@ mod native_facade {
         /// names for the shape class: `bufs` are the bf16 activation rows, the weight bytes, the block scales and the
         /// output (`offsets` their windows), `params` is `[m, k/4, n]`. With the name the backend times it under. `None`
         /// when no candidate serves the dispatch (a shape outside every candidate, a binding off their alignment): the
-        /// caller keeps the tile decode.
-        pub fn fp8_linear_step(&self, act: crate::Fp8Act, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32]) -> Option<(Step, &'static str)> {
+        /// caller keeps the tile decode. `out` is the element type of the output binding: with
+        /// [`crate::ActPrecision::Bf16`] the chosen candidate's bf16-output twin writes `[m, n]` bf16 rows (the output window
+        /// counted in words of two elements), and `None` also means the chosen candidate has no twin.
+        pub fn fp8_linear_step(&self, act: crate::Fp8Act, out: crate::ActPrecision, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32]) -> Option<(Step, &'static str)> {
             let tuned = self.tuned_fp8.get().and_then(|t| t.as_deref());
             let form = match act {
                 crate::Fp8Act::Bf16 => crate::native_upgrade::ActFormat::Bf16,
                 crate::Fp8Act::E4m3 => crate::native_upgrade::ActFormat::Fp8Group128,
             };
-            let a = crate::native_upgrade::serving(self.native_rows_of(crate::native_upgrade::FP8_KIND), crate::native_upgrade::FP8_KIND, params, tuned, Some(offsets), Some(form))?;
+            let rows = self.native_rows_of(crate::native_upgrade::FP8_KIND);
+            let mut a = crate::native_upgrade::serving(rows, crate::native_upgrade::FP8_KIND, params, tuned, Some(offsets), Some(form))?;
+            if out == crate::ActPrecision::Bf16 {
+                // The candidate the tuned table names for this class, in its bf16-output form; a candidate without one (the
+                // streaming GEMVs of the decode regime, whose outputs are small) leaves the product to the f32 output.
+                let twin = crate::native_upgrade::fp8_bf16_out_twin(a.kernel)?;
+                let asked = [params[0], params[1], params[2], crate::native_upgrade::FP8_OUT_BF16];
+                a = rows.iter().find(|t| t.kernel == twin && (t.serves)(&asked) && offsets.iter().all(|&(off, _)| off % t.align_words == 0))?;
+            }
             let step = self.be().step_native_sliced(a.id, bufs, offsets, params, (a.blocks)(params, a.tile))?;
             Some((step, a.reported))
         }

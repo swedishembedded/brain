@@ -131,7 +131,7 @@ pub fn concat_rows_parallel(parts: &[&[f32]]) -> Vec<f32> {
 use gpu_core::provider::library::{self, GemmPrecision, LibraryGemmProvider};
 use gpu_core::provider::{LowerCtx, Operand, OpRequest, Pass, ProviderRegistry, Role};
 use gpu_core::select::{self, Dtype, KernelSelector, KernelVariant, Op, OpShape};
-use gpu_core::{DeviceBuffer, DeviceCaps, Fp8Act, Gpu, Step};
+use gpu_core::{ActPrecision, DeviceBuffer, DeviceCaps, Fp8Act, Gpu, Step};
 
 use crate::dispatch::I8Scratch;
 
@@ -1474,7 +1474,7 @@ impl Ops {
     /// candidate this device's tuned table names for its shape class: the weight bytes are decoded in registers or shared
     /// memory against the bf16 rows of `act` (rounded once, shared by every product that reads them) and the sum is f32
     /// across all of K, with one scale per 128 of K. `false` leaves the product to the tile decode. Only whole matrices.
-    fn fp8_forward(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), act: &Act, y: &DeviceBuffer, yoff: u64) -> bool {
+    fn fp8_forward(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), act: &Act, y: &DeviceBuffer, yoff: u64, out_precision: ActPrecision) -> bool {
         let Weight::FP8 { w: wb, s: sb, n, k, fmt: crate::fp8::Fp8Format::E4M3, block } = w else { return false };
         let (m, n, k) = (act.m, *n, *k);
         if *block != FP8_BLOCK || rows != (0, n) || !k.is_multiple_of(FP8_BLOCK) || !self.providers.runs("cuda") || !self.gpu.has_fp8_linear() {
@@ -1482,12 +1482,12 @@ impl Ops {
         }
         let params = [m, k / 4, n];
         let Some(form) = self.gpu.fp8_linear_act(&params) else { return false };
-        let out = (yoff, m as u64 * n as u64);
+        let out = (yoff, m as u64 * n as u64 / u64::from(4 / out_precision.bytes()));
         let mut prep = Vec::new();
         let step = match form {
             Fp8Act::Bf16 => {
                 let Some((xb, fresh)) = self.bf16_rows(act, &mut prep) else { return false };
-                let Some((step, _)) = self.gpu.fp8_linear_step(form, &[&xb, wb, sb, y], &[(0, 0), (0, 0), (0, 0), out], &params) else { return false };
+                let Some((step, _)) = self.gpu.fp8_linear_step(form, out_precision, &[&xb, wb, sb, y], &[(0, 0), (0, 0), (0, 0), out], &params) else { return false };
                 if fresh {
                     *act.bf16.borrow_mut() = Some(xb);
                 }
@@ -1503,7 +1503,7 @@ impl Ops {
                         (xq, sx, true)
                     }
                 };
-                let Some((step, _)) = self.gpu.fp8_linear_step(form, &[&xq, wb, &sx, sb, y], &[(0, 0), (0, 0), (0, 0), (0, 0), out], &params) else { return false };
+                let Some((step, _)) = self.gpu.fp8_linear_step(form, out_precision, &[&xq, wb, &sx, sb, y], &[(0, 0), (0, 0), (0, 0), (0, 0), out], &params) else { return false };
                 if fresh {
                     *act.e4m3.borrow_mut() = Some((xq, sx));
                 }
@@ -1822,6 +1822,15 @@ impl Ops {
                  this should be unreachable"
             ),
         }
+    }
+
+    /// [`Self::matmul`] of an FP8-weight linear with the output rows stored as bf16 (`y` holds `m * n / 2` words): the
+    /// activation stream after the product carries 2 bytes an element. The sum is the same f32 sum; the epilogue rounds
+    /// it once. `false` (nothing pushed) when the chosen candidate has no bf16-output form - the weight is not FP8, the
+    /// shape is a decode-regime GEMV, `n` is odd - and the caller keeps [`Self::matmul`] and its f32 output.
+    pub fn matmul_bf16_out(&self, s: &mut Vec<Step>, w: &Weight, act: &Act, y: &DeviceBuffer) -> bool {
+        assert_eq!(act.k, w.k(), "Ops::matmul_bf16_out: activation width {} does not match weight K {}", act.k, w.k());
+        self.fp8_forward(s, w, (0, w.n()), act, y, 0, ActPrecision::Bf16)
     }
 
     /// Dispatch invocation count for `(variant, dtype, m, n)` - the same
@@ -2643,7 +2652,7 @@ impl Ops {
         assert_eq!(act.k, k, "Ops::matmul_rows: activation width {} does not match weight K {k}", act.k);
         assert!(count > 0 && first as u64 + count as u64 <= n as u64, "Ops::matmul_rows: rows {first}+{count} outside the {n} rows of the weight");
         if matches!(self.linear_plan(w, count), LinearPlan::TileDecode { .. }) {
-            if self.fp8_forward(s, w, rows, act, y, yoff) || self.small_m_gemv(s, w, rows, act, y, yoff) {
+            if self.fp8_forward(s, w, rows, act, y, yoff, ActPrecision::F32) || self.small_m_gemv(s, w, rows, act, y, yoff) {
                 return;
             }
             return self.forward_tiled(s, w, rows, act, y, yoff);

@@ -231,10 +231,19 @@ pub fn quantize_e4m3_rows_into(gpu: &Gpu, steps: &mut Vec<Step>, x: &Operand, ro
 const SILU_MUL_QUANT_E4M3_BINDINGS: &[BindKind] =
     &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite, BindKind::StorageReadWrite, BindKind::StorageReadWrite];
 
-/// `silu(gate) * up` of two `[rows, k]` fp32 buffers into `product`, quantised to E4M3 in the same pass
-/// ([`quantize_e4m3_rows`] of the product, without reading it back): pushes the step and returns the bytes and scales.
+/// Whether [`silu_mul_quantize_e4m3_rows`] runs for `rows` rows of `k` on this device: a caller that stores its inputs in
+/// the bf16 form asks first, because only this kernel reads them.
+pub fn silu_mul_quantize_e4m3_serves(gpu: &Gpu, rows: u32, k: u32) -> bool {
+    let elems = u64::from(rows) * u64::from(k);
+    rows > 0 && k.is_multiple_of(128) && elems <= u64::from(u32::MAX) && kernels_cuda::get("silu_mul_quant_e4m3_128").is_some_and(|kernel| gpu.native_kernel(kernel, SILU_MUL_QUANT_E4M3_BINDINGS).is_some())
+}
+
+/// `silu(gate) * up` of two `[rows, k]` buffers (`input` says whether their elements are fp32 or bf16 - the FP8 GEMM's
+/// bf16 output) quantised to E4M3 in the same pass ([`quantize_e4m3_rows`] of the product, without reading it back):
+/// pushes the step and returns the bytes and scales. The fp32 product is stored into `product` when one is given, which a
+/// consumer of the fp32 rows (an adapter, a backward) needs; without it the pass writes 4 bytes an element less.
 /// `None` when the device declines the kernel or the shape is not one it takes (`k` a multiple of 128).
-pub fn silu_mul_quantize_e4m3_rows(gpu: &Gpu, steps: &mut Vec<Step>, gate: &DeviceBuffer, up: &DeviceBuffer, product: &DeviceBuffer, rows: u32, k: u32) -> Option<(DeviceBuffer, DeviceBuffer)> {
+pub fn silu_mul_quantize_e4m3_rows(gpu: &Gpu, steps: &mut Vec<Step>, gate: &DeviceBuffer, up: &DeviceBuffer, input: crate::ActPrecision, product: Option<&DeviceBuffer>, rows: u32, k: u32) -> Option<(DeviceBuffer, DeviceBuffer)> {
     let elems = u64::from(rows) * u64::from(k);
     if rows == 0 || !k.is_multiple_of(128) || elems > u64::from(u32::MAX) {
         return None;
@@ -244,7 +253,9 @@ pub fn silu_mul_quantize_e4m3_rows(gpu: &Gpu, steps: &mut Vec<Step>, gate: &Devi
     // Every byte and every scale is written, so the scratch is not cleared.
     let q = gpu.storage_uninit(elems.div_ceil(4));
     let s = gpu.storage_uninit(elems / 128);
-    let step = gpu.step_native(id, &[gate, up, product, &q, &s], &[rows, k], kernel.blocks_for(1, elems as u32))?;
+    let flags = u32::from(product.is_some()) | if input == crate::ActPrecision::Bf16 { 2 } else { 0 };
+    // Without a product the binding is still required; it aliases the bytes the pass writes anyway and is never stored to.
+    let step = gpu.step_native(id, &[gate, up, product.unwrap_or(&q), &q, &s], &[rows, k, flags], kernel.blocks_for(1, elems as u32))?;
     steps.push(step);
     Some((q, s))
 }

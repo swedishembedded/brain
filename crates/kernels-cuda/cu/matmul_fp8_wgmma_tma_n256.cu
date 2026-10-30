@@ -17,6 +17,11 @@
 #ifndef BRAIN_FWT_ENTRY
 #define BRAIN_FWT_ENTRY brain_matmul_fp8_wgmma_tma_n256
 #endif
+// BRAIN_FWT_OUT_BF16: the output rows are bf16 (`out` is [M, N] bf16, N a multiple of 8), accumulated and scaled in f32 and rounded once
+// on the way out: the activation stream between two matrix products then carries 2 bytes an element. The store path is the f32 one: the
+// warp's 16 rows go through shared memory and the tensor memory accelerator stores 64-byte boxes (32 columns), the same byte-typed
+// output map with twice as many columns to a box. Direct 4-byte stores from the accumulator layout wrote half-sectors and ran up to 29 %
+// slower than the f32 kernel (knowledge 394).
 #define BRAIN_FWT_THREADS 384
 #define BRAIN_FWT_MAX_CTAS 132  // grid size at most, and the SM slots of the maps
 
@@ -43,6 +48,13 @@ __device__ __align__(128) unsigned long long brain_fwt_maps[BRAIN_FWT_MAX_CTAS][
 #ifndef BRAIN_PDL_ENTRY
 #define BRAIN_PDL_ENTRY() do {} while (0)
 #endif
+
+// Two floats as one word of bf16 (`lo` in the low half): `cvt.rn.bf16x2.f32`, round to nearest even, the rule `cast_f32_bf16` has.
+__device__ __forceinline__ unsigned int brain_fwt_pack_bf16(float lo, float hi) {
+    unsigned int r;
+    asm("cvt.rn.bf16x2.f32 %0, %1, %2;\n" : "=r"(r) : "f"(hi), "f"(lo));
+    return r;
+}
 
 __device__ __forceinline__ unsigned int brain_fwt_smem(const void* p) {
     return static_cast<unsigned int>(__cvta_generic_to_shared(p));
@@ -228,7 +240,11 @@ BRAIN_FWT_ENTRY(const unsigned int* params, const unsigned int* xq, const unsign
         unsigned long long* const gmaps = &brain_fwt_maps[smid % BRAIN_FWT_MAX_CTAS][0][0];
         brain_fwt_build_map(brain_fwt_template, &brain_fwt_smem_maps[0][0], gmaps, xq, K, M, lane);
         brain_fwt_build_map(brain_fwt_template, &brain_fwt_smem_maps[1][0], gmaps + 16, wq, K, N, lane);
+#ifdef BRAIN_FWT_OUT_BF16
+        brain_fwt_build_map(brain_fwt_out_template, &brain_fwt_smem_maps[2][0], gmaps + 32, out, N * 2u, M, lane);
+#else
         brain_fwt_build_map(brain_fwt_out_template, &brain_fwt_smem_maps[2][0], gmaps + 32, out, N * 4u, M, lane);
+#endif
         unsigned int it = 0;
         for (unsigned int tile = blockIdx.x; tile < tiles; tile += gridDim.x) {
             unsigned int m0, n0;
@@ -328,6 +344,35 @@ BRAIN_FWT_ENTRY(const unsigned int* params, const unsigned int* xq, const unsign
         const unsigned int wrow0 = m0 + cwg * 64u + warp * 16u;  // first output row of this warp
         const unsigned int ebuf_addr = epi_base + (cwg * 4u + warp) * 2048u;
         const unsigned int g = lane >> 2, tq = lane & 3u;
+#ifdef BRAIN_FWT_OUT_BF16
+        // bf16: a 64-byte box row is 32 columns, so a pass takes four column groups of 8 (one 16-byte chunk each) and there are 8 passes.
+#pragma unroll
+        for (int pass = 0; pass < 8; ++pass) {
+            const unsigned int buf = ebuf_addr + (pass & 1) * 1024u;
+            if (pass >= 2) {
+                if (lane == 0u) { brain_fwt_bulk_wait_read<1>(); }
+                __syncwarp();
+            }
+#pragma unroll
+            for (int jj = 0; jj < 4; ++jj) {
+                const int j = 4 * pass + jj;
+                const int h = j >> 4;
+#pragma unroll
+                for (int half = 0; half < 2; ++half) {
+                    const unsigned int row = g + 8u * half;
+                    const unsigned int word = brain_fwt_pack_bf16(t[4 * j + 2 * half] * se[half][h], t[4 * j + 2 * half + 1] * se[half][h]);
+                    const unsigned int off = row * 64u + ((static_cast<unsigned int>(jj) ^ ((row >> 1) & 3u)) << 4) + tq * 4u;
+                    asm volatile("st.shared.b32 [%0], %1;\n" ::"r"(buf + off), "r"(word) : "memory");
+                }
+            }
+            brain_fwt_fence_proxy();
+            __syncwarp();
+            if (lane == 0u) {
+                brain_fwt_tma_store(gmaps_out, buf, (n0 + 32u * pass) * 2u, wrow0);
+                brain_fwt_bulk_commit();
+            }
+        }
+#else
 #pragma unroll
         for (int pass = 0; pass < 16; ++pass) {
             const unsigned int buf = ebuf_addr + (pass & 1) * 1024u;
@@ -355,6 +400,7 @@ BRAIN_FWT_ENTRY(const unsigned int* params, const unsigned int* xq, const unsign
                 brain_fwt_bulk_commit();
             }
         }
+#endif
     }
     if (lane == 0u) { brain_fwt_bulk_wait<0>(); }
 }

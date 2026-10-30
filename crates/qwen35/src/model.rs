@@ -1319,6 +1319,8 @@ pub struct Qwen35 {
     /// Whether a decode step may use the native fused kernels where the device
     /// offers them - see [`Self::set_decode_fusion`].
     decode_fusion: Cell<bool>,
+    /// The element type of the serving activation stream between the matrix products ([`Self::set_act_precision`]).
+    act_precision: Cell<gpu_core::ActPrecision>,
     /// Two one-word buffers the fused front ends bind in place of the packed int8 rows and their scales when no weight
     /// reads them ([`Self::packs_activations`]): the kernel writes neither, but a dispatch may not bind one buffer twice.
     unpacked_slots: std::cell::OnceCell<(DeviceBuffer, DeviceBuffer)>,
@@ -2145,6 +2147,7 @@ impl Qwen35 {
             exact_rounds: Cell::new(true),
             exact_decode: Cell::new(None),
             decode_fusion: Cell::new(true),
+            act_precision: Cell::new(gpu_core::ActPrecision::F32),
             unpacked_slots: std::cell::OnceCell::new(),
             slot_decode_tapes: Cell::new(false),
             gdn_pool_wide: Cell::new(true),
@@ -2250,6 +2253,19 @@ impl Qwen35 {
     /// A/B switch for that gate and for measuring the fusion, not a tuning knob.
     pub fn set_decode_fusion(&self, on: bool) {
         self.decode_fusion.set(on);
+    }
+
+    /// **Choose the element type of the activation stream between the FP8 products** (see [`gpu_core::ActPrecision`]):
+    /// with bf16 the gate and up projections of the MLP store 2 bytes an element and the SwiGLU product reads them so. F32
+    /// until set; a build that trains, serves adapters, or whose device or shape has no bf16-output form keeps f32 whatever
+    /// is asked, per product, with the same results as before.
+    pub fn set_act_precision(&self, precision: gpu_core::ActPrecision) {
+        self.act_precision.set(precision);
+    }
+
+    /// The precision the serving activation stream was asked for.
+    pub fn act_precision(&self) -> gpu_core::ActPrecision {
+        self.act_precision.get()
     }
 
     /// **Ask a chunk pass to hand back the residual leaving specific layers.**
@@ -3296,9 +3312,12 @@ impl Qwen35 {
         let p = |s: &str| format!("{prefix}.{s}");
 
         // The gate and up projections write every row of their outputs (the adapter then adds into them), so
-        // neither needs the clear a zeroed allocation costs.
-        let gate_pre = g.storage_uninit((n * ff) as u64);
-        let up = g.storage_uninit((n * ff) as u64);
+        // neither needs the clear a zeroed allocation costs. On the serving path with FP8 weights they store bf16 rows
+        // when the device has the bf16-output form of the product ([`Self::bf16_gate_up_ok`]): the SwiGLU pass then reads
+        // half the bytes and the product writes half.
+        let mut bf16_rows = epilogue && self.bf16_gate_up_ok(n, ff);
+        let mut gate_pre = g.storage_uninit(if bf16_rows { (n * ff / 2) as u64 } else { (n * ff) as u64 });
+        let mut up = g.storage_uninit(if bf16_rows { (n * ff / 2) as u64 } else { (n * ff) as u64 });
         {
             let mut s = Vec::new();
             let act1 = match pre {
@@ -3306,15 +3325,31 @@ impl Qwen35 {
                 None => self.ops_act(&mut s, xn2, n, d),
             };
             let (gate_w, up_w) = (p("gate.weight"), p("up.weight"));
-            let f32s = self.ops_linear_group(&mut s, &act1, &[(&gate_w, &gate_pre), (&up_w, &up)]);
-            self.adapt(f32s[0], &mut s, "gate", xn2, &gate_w, &gate_pre, n, d, ff);
-            self.adapt(f32s[1], &mut s, "up", xn2, &up_w, &up, n, d, ff);
-            self.bank_fwd(&mut s, xn2, &[(gate_w.as_str(), &gate_pre), (up_w.as_str(), &up)], n);
+            if bf16_rows {
+                // Both or neither: the steps pushed stay either way (they may hold the activation's quantisation, which the
+                // activation remembers for the products after).
+                let mut t = Vec::new();
+                let ok = [(&gate_w, &gate_pre), (&up_w, &up)].iter().all(|(name, out)| self.ops.matmul_bf16_out(&mut t, &self.weights[name.as_str()], &act1, out));
+                s.append(&mut t);
+                if !ok {
+                    bf16_rows = false;
+                    gate_pre = g.storage_uninit((n * ff) as u64);
+                    up = g.storage_uninit((n * ff) as u64);
+                }
+            }
+            if !bf16_rows {
+                let f32s = self.ops_linear_group(&mut s, &act1, &[(&gate_w, &gate_pre), (&up_w, &up)]);
+                self.adapt(f32s[0], &mut s, "gate", xn2, &gate_w, &gate_pre, n, d, ff);
+                self.adapt(f32s[1], &mut s, "up", xn2, &up_w, &up, n, d, ff);
+                self.bank_fwd(&mut s, xn2, &[(gate_w.as_str(), &gate_pre), (up_w.as_str(), &up)], n);
+            }
             g.submit(&[], &s);
         }
         let (h, down_act) = if epilogue {
             // `silu(gate) * up` and its quantisation for `down` in one launch.
-            let (h, act) = self.silu_mul_e4m3(&gate_pre, &up, n, ff).unwrap_or_else(|| {
+            let input = if bf16_rows { gpu_core::ActPrecision::Bf16 } else { gpu_core::ActPrecision::F32 };
+            let (h, act) = self.silu_mul_e4m3(&gate_pre, &up, input, n, ff).unwrap_or_else(|| {
+                assert!(!bf16_rows, "qwen35: bf16 gate/up rows were produced for a SwiGLU pass the device does not run");
                 let (h, act) = self.quant_epilogue(1, &gate_pre, Some(&up), n, ff);
                 (h.expect("a silu_mul epilogue hands back its product"), act)
             });
@@ -4429,17 +4464,38 @@ impl Qwen35 {
     /// product is kept for the consumers of its fp32 rows). `None` unless this build packs no int8 rows, `down` reads E4M3
     /// activations at this row count on this device and the device offers the kernel: the callers then take
     /// [`Self::quant_epilogue`] and the product's own quantisation launch.
-    fn silu_mul_e4m3(&self, gate: &DeviceBuffer, up: &DeviceBuffer, rows: u32, k: u32) -> Option<(DeviceBuffer, Act)> {
-        if self.packs_activations() || !self.ops.fp8_reads_e4m3(rows, k, self.cfg.d_model) {
+    fn silu_mul_e4m3(&self, gate: &DeviceBuffer, up: &DeviceBuffer, input: gpu_core::ActPrecision, rows: u32, k: u32) -> Option<(DeviceBuffer, Act)> {
+        if !self.silu_mul_e4m3_serves(rows, k) {
             return None;
         }
         let g = &self.gpu;
-        let product = g.storage_uninit(rows as u64 * k as u64);
+        // The fp32 product has a consumer only in a backward or under an adapter; otherwise the pass does not write it and the
+        // buffer handed back is the one-word slot every caller of this path leaves unread.
+        let product = self.keeps_fp32_product().then(|| g.storage_uninit(rows as u64 * k as u64));
         let mut steps = Vec::new();
-        let (q, s) = gpu_core::provider::library::silu_mul_quantize_e4m3_rows(g, &mut steps, gate, up, &product, rows, k)?;
+        let (q, s) = gpu_core::provider::library::silu_mul_quantize_e4m3_rows(g, &mut steps, gate, up, input, product.as_ref(), rows, k)?;
         g.submit(&[], &steps);
+        let product = product.unwrap_or_else(|| self.unpacked_slots().0.clone());
         let act = self.ops.act_f32_with_e4m3(&product, rows, k, q, s);
         Some((product, act))
+    }
+
+    /// Whether [`Self::silu_mul_e4m3`] runs for this shape: no int8 packing in this build, `down` reads E4M3 rows at this
+    /// row count and the device offers the kernel.
+    fn silu_mul_e4m3_serves(&self, rows: u32, k: u32) -> bool {
+        !self.packs_activations() && self.ops.fp8_reads_e4m3(rows, k, self.cfg.d_model) && gpu_core::provider::library::silu_mul_quantize_e4m3_serves(&self.gpu, rows, k)
+    }
+
+    /// Whether anything reads the MLP product as fp32 rows: the saved activations of a backward, a training adapter or the
+    /// served adapter bank (their corrections of `down` read it).
+    fn keeps_fp32_product(&self) -> bool {
+        self.is_train || self.adapter.is_some() || self.adapter_bank.borrow().is_some()
+    }
+
+    /// Whether the gate and up products of an MLP of `rows` rows may store bf16: the stream was asked for bf16, nothing reads
+    /// them as fp32 (no backward, no adapter correcting them in place), and the SwiGLU pass that consumes them runs.
+    fn bf16_gate_up_ok(&self, rows: u32, ff: u32) -> bool {
+        self.act_precision.get() == gpu_core::ActPrecision::Bf16 && !self.keeps_fp32_product() && self.silu_mul_e4m3_serves(rows, ff)
     }
 
     /// One launch that produces the activation an int8 linear reads AND

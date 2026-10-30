@@ -332,6 +332,9 @@ pub struct Qwen35GgufServeConfig {
     /// today's numerics and throughput. See
     /// [`Qwen35GgufResident::with_exact_decode`](qwen35::int8_gguf_resident::Qwen35GgufResident::with_exact_decode).
     pub exact_decode: bool,
+    /// The element type of the activation stream between the FP8 products (`--act-precision`); unset is `auto`, bf16 on a
+    /// device with bf16 tensor cores. See [`Qwen35GgufResident::with_act_choice`](qwen35::int8_gguf_resident::Qwen35GgufResident::with_act_choice).
+    pub act_precision: Option<gpu_core::ActChoice>,
     /// Prompt tokens one sequence gets of each scheduler iteration's prefill
     /// while others wait (`the prefill-slice setting`). `None` takes the engine's
     /// default ([`PrefillPolicy::default`](qwen35::int8_gguf_resident::PrefillPolicy)).
@@ -365,6 +368,7 @@ pub const QWEN35_GGUF_POLICY: model::policy::PolicySupport = model::policy::Poli
     fuse_norm: false,
     kv_calibration: false,
     exact_decode: true,
+    act_precision: true,
 };
 
 /// What the brain-checkpoint Qwen3.8 resident honours of a serving policy: the weight tier is the checkpoint's own
@@ -378,6 +382,7 @@ pub const QWEN35_FP32_POLICY: model::policy::PolicySupport = model::policy::Poli
     fuse_norm: false,
     kv_calibration: false,
     exact_decode: true,
+    act_precision: false,
 };
 
 impl Qwen35ServeConfig {
@@ -419,6 +424,7 @@ impl Qwen35GgufServeConfig {
         }
         self.kv = p.kv_cache.or(self.kv);
         self.exact_decode = p.exact_decode;
+        self.act_precision = p.act_precision.or(self.act_precision);
         let l = &p.limits;
         self.ctx = l.ctx.or(self.ctx);
         self.max_batch = l.max_batch.or(self.max_batch);
@@ -584,7 +590,7 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
         let spec = SpecServing { mode, ..SpecServing::default() };
         // Paged KV: sequences hold the blocks their tokens need from one shared pool, so a long context
         // costs only the sequences that use it, and the batch is not multiplied by the context.
-        let r = Qwen35GgufResident::new(gguf_path.to_string(), devices.clone(), cap, tier.clone()).with_kv_tier(kv).with_max_batch(max_batch).with_prefix_slots(prefix_slots).with_speculation(spec).with_exact_decode(cfg.exact_decode).with_kv_block_rows(qwen35::int8_gguf_resident::KV_BLOCK_ROWS);
+        let r = Qwen35GgufResident::new(gguf_path.to_string(), devices.clone(), cap, tier.clone()).with_kv_tier(kv).with_max_batch(max_batch).with_prefix_slots(prefix_slots).with_speculation(spec).with_exact_decode(cfg.exact_decode).with_act_choice(cfg.act_precision.unwrap_or_default()).with_kv_block_rows(qwen35::int8_gguf_resident::KV_BLOCK_ROWS);
         match &bank {
             Some(bank) => r.with_adapter_bank(bank.request()),
             None => r,

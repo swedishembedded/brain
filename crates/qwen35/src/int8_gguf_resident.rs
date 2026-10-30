@@ -3485,6 +3485,8 @@ pub struct Qwen35GgufResident {
     /// Run every decode row independently of its co-batch -
     /// [`Self::with_exact_decode`].
     exact_decode: bool,
+    /// The activation stream's element type - [`Self::with_act_choice`].
+    act_choice: gpu_core::ActChoice,
     /// How the engine spends prefill - [`Self::with_prefill_policy`].
     prefill: PrefillPolicy,
     plan: OnceLock<Plan>,
@@ -3494,7 +3496,7 @@ pub struct Qwen35GgufResident {
 
 impl Qwen35GgufResident {
     pub fn new(gguf_path: String, devices: Vec<(Device, u64)>, cap: u32, tier: TierPolicy) -> Qwen35GgufResident {
-        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, prefix_slots: 0, kv_tier: KvTier::F32, kv_block_rows: 0, kv_pool_rows: 0, model_id: MODEL.to_string(), bank: None, spec: SpecServing::default(), exact_decode: false, prefill: PrefillPolicy::default(), plan: OnceLock::new(), sampling: OnceLock::new() }
+        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, prefix_slots: 0, kv_tier: KvTier::F32, kv_block_rows: 0, kv_pool_rows: 0, model_id: MODEL.to_string(), bank: None, spec: SpecServing::default(), exact_decode: false, act_choice: gpu_core::ActChoice::Auto, prefill: PrefillPolicy::default(), plan: OnceLock::new(), sampling: OnceLock::new() }
     }
 
     /// **Run every decode row independently of its co-batch** (`--exact-decode`):
@@ -3508,6 +3510,14 @@ impl Qwen35GgufResident {
     /// set before the first `estimate_multi` call.
     pub fn with_exact_decode(mut self, on: bool) -> Qwen35GgufResident {
         self.exact_decode = on;
+        self
+    }
+
+    /// **Choose the element type of the activation stream between the FP8 products** (`--act-precision`, see
+    /// [`gpu_core::ActPrecision`]): `Auto` is bf16 on a device with bf16 tensor cores, f32 elsewhere; a forced `F32` is the
+    /// A/B switch. The choice is resolved per card when the model is placed.
+    pub fn with_act_choice(mut self, choice: gpu_core::ActChoice) -> Qwen35GgufResident {
+        self.act_choice = choice;
         self
     }
 
@@ -4016,6 +4026,7 @@ impl Qwen35GgufResident {
             // stage groups its rows and sizes its attention from this
             // instance's per-sequence context.
             qwen35.set_exact_decode(self.exact_decode.then_some(self.cap));
+            qwen35.set_act_precision(self.act_choice.resolve(qwen35.gpu.caps().arch.compute_capability));
             let caches = ShardCaches::new(&qwen35.gpu, &cfg, shard, self.cap, state_rows, self.prefix_slots, self.kv_tier, layout);
             shards.push(DeviceShard { qwen35, caches });
         }

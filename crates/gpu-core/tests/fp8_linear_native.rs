@@ -104,6 +104,27 @@ fn the_wgmma_gemms_pass_the_admission_rule_on_ragged_shapes() {
     }
 }
 
+/// The bf16-output twin of the large-tile GEMM stores exactly their base's f32 rows rounded to bf16 - ragged rows, ragged `n`
+/// (a last band of fewer than 128 or 256 weight rows) and K of one scale block and of many: they differ in the store alone.
+#[test]
+fn the_bf16_output_twins_store_their_bases_rows_rounded_to_bf16() {
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda_hopper(&gpu) {
+        brain_testutil::skip_unavailable("the FP8 candidates are registered for a CUDA device with warpgroup tensor cores");
+        return;
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for m in [33u32, 127, 129, 300, 768, 1000] {
+        for (kg, n) in [(32u32, 18u32), (32, 128), (160, 130), (1280, 264), (1280, 5120), (4352, 1032)] {
+            for (twin, differ) in gpu_core::native_check_fp8_bf16_out(&gpu, [m, kg, n]) {
+                assert_eq!(differ, 0, "{twin} at m={m} kg={kg} n={n}: {differ} elements differ from the base rounded to bf16");
+                seen.insert(twin);
+            }
+        }
+    }
+    assert!(seen.contains("matmul_fp8_wgmma_tma_n256_bf16o"), "the twin served none of the shapes: {seen:?}");
+}
+
 /// Achieved weight bandwidth of every FP8 candidate at the production decode shapes (`#[ignore]`: a measurement).
 ///
 /// ```text
@@ -175,6 +196,29 @@ fn fp8_prefill_tflops() {
                     gpu_core::NativeVerdict::Timed { us, .. } => println!("{label:20} m={m:<6} {name:28} {us:9.1} us {:7.1} TFLOPS", flops / us / 1e6),
                     gpu_core::NativeVerdict::Rejected(why) => println!("{label:20} m={m:<6} {name:28} REJECTED {why}"),
                 }
+            }
+        }
+    }
+}
+
+/// The bf16-output twins against their bases at the mixed-iteration rows (`#[ignore]`: a measurement).
+///
+/// ```text
+/// make test/one P=brain-gpu-core T=fp8_linear_native ARGS="--ignored --nocapture fp8_bf16_out_rate"
+/// ```
+#[test]
+#[ignore]
+fn fp8_bf16_out_rate() {
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda_hopper(&gpu) {
+        brain_testutil::skip_unavailable("the FP8 candidates are registered for a CUDA device with warpgroup tensor cores");
+        return;
+    }
+    let shapes = [("gate/up 5120x17408", 5120u32, 17408u32), ("down 17408x5120", 17408, 5120), ("qkv 5120x10240", 5120, 10240), ("out 6144x5120", 6144, 5120)];
+    for m in [640u32, 768, 2048, 8192] {
+        for (label, k, n) in shapes {
+            for (twin, base, bf16) in gpu_core::native_time_fp8_bf16_out(&gpu, [m, k / 4, n]) {
+                println!("{label:20} m={m:<5} {twin:34} f32 out {base:8.1} us   bf16 out {bf16:8.1} us   {:+.1} %", 100.0 * (bf16 / base - 1.0));
             }
         }
     }

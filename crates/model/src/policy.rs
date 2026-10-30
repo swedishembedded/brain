@@ -20,6 +20,9 @@
 //!   ([`crate::ops::TierPolicy`]'s grammar). Unset: the model's own default.
 //! - `--kv-cache TIER` ([`ServePolicy::kv_cache`]): `f32|bf16|int8|fp8`
 //!   ([`crate::kv_tier::KvTier`]).
+//! - `--act-precision auto|f32|bf16` ([`ServePolicy::act_precision`]): the element type of the activation stream between
+//!   the matrix products ([`gpu_core::ActPrecision`]); `auto` is bf16 on a device with bf16 tensor cores. An A/B switch
+//!   for a model that supports it.
 //! - `--gemm auto|fp32` ([`ServePolicy::gemm`]) and `--no-fuse-norm`,
 //!   `--kv-calibration`, `--exact-decode`: arithmetic, calibration and
 //!   batch-independence switches. `--exact-decode` makes a decode row's result
@@ -78,6 +81,8 @@ pub struct ServePolicy {
     /// Opt in to a calibrated KV clip table beside the checkpoint.
     pub kv_calibration: bool,
     pub gemm: Option<GemmPrecision>,
+    /// `--act-precision`: the activation stream's element type; `None` is the model's own (`auto`).
+    pub act_precision: Option<gpu_core::ActChoice>,
     /// `Some(false)` turns the residual-add plus norm fusion off (an A/B switch).
     pub fuse_norm: Option<bool>,
     /// `--exact-decode`: make a decode row's result independent of which other
@@ -88,7 +93,7 @@ pub struct ServePolicy {
 }
 
 /// The public flags that take a value.
-pub const VALUE_FLAGS: &[&str] = &["--weight-format", "--kv-cache", "--gemm", "--ctx", "--max-batch", "--kv-offload-gb", "--itl-target-ms"];
+pub const VALUE_FLAGS: &[&str] = &["--weight-format", "--kv-cache", "--gemm", "--act-precision", "--ctx", "--max-batch", "--kv-offload-gb", "--itl-target-ms"];
 /// The public switches (no value).
 pub const SWITCH_FLAGS: &[&str] = &["--kv-calibration", "--exact-decode"];
 /// Settings that are derived by default and exist only as the target of a
@@ -114,6 +119,7 @@ impl ServePolicy {
                     other => return Err(format!("--gemm {other:?}: expected auto or fp32")),
                 })
             }
+            "--act-precision" => self.act_precision = Some(gpu_core::ActChoice::parse(value.trim().to_ascii_lowercase().as_str()).ok_or_else(|| format!("--act-precision {value:?}: expected auto, f32 or bf16"))?),
             "--ctx" => self.limits.ctx = Some(count(flag, value)?),
             "--max-batch" => self.limits.max_batch = Some(count(flag, value)?),
             "--itl-target-ms" => match count(flag, value)? {
@@ -148,6 +154,9 @@ impl ServePolicy {
         }
         if let Some(g) = self.gemm {
             v.push(format!("gemm={}", if g == GemmPrecision::Auto { "auto" } else { "fp32" }));
+        }
+        if let Some(a) = self.act_precision {
+            v.push(format!("act-precision={}", match a { gpu_core::ActChoice::Auto => "auto", gpu_core::ActChoice::Force(p) => p.name() }));
         }
         if self.kv_calibration {
             v.push("kv-calibration".into());
@@ -202,6 +211,8 @@ pub struct PolicySupport {
     pub kv_calibration: bool,
     /// `--exact-decode` honoured.
     pub exact_decode: bool,
+    /// `--act-precision` honoured: the model's forward carries its activations in the chosen element type.
+    pub act_precision: bool,
 }
 
 impl PolicySupport {
@@ -235,6 +246,9 @@ impl PolicySupport {
         }
         if policy.exact_decode && !self.exact_decode {
             return Err(format!("{}: --exact-decode is not supported", self.model));
+        }
+        if policy.act_precision.is_some() && !self.act_precision {
+            return Err(format!("{}: --act-precision is not supported", self.model));
         }
         Ok(())
     }
@@ -395,6 +409,7 @@ mod tests {
         fuse_norm: false,
         kv_calibration: false,
         exact_decode: false,
+        act_precision: false,
     };
 
     #[test]
@@ -403,6 +418,7 @@ mod tests {
         p.set("--weight-format", "int8").unwrap();
         p.set("--kv-cache", "fp8").unwrap();
         p.set("--gemm", "fp32").unwrap();
+        p.set("--act-precision", "BF16").unwrap();
         p.set("--ctx", "4096").unwrap();
         p.set("--kv-offload-gb", "1.5").unwrap();
         p.set("--itl-target-ms", "60").unwrap();
@@ -412,10 +428,15 @@ mod tests {
         assert_eq!(p.weights, Some(TierPolicy::uniform(Dtype::I8)));
         assert_eq!(p.kv_cache, Some(KvTier::FP8));
         assert_eq!(p.gemm, Some(GemmPrecision::Fp32Reference));
+        assert_eq!(p.act_precision, Some(gpu_core::ActChoice::Force(gpu_core::ActPrecision::Bf16)));
+        let mut only = ServePolicy::default();
+        only.set("--act-precision", "auto").unwrap();
+        assert!(LLM.check(&only).unwrap_err().contains("--act-precision"), "a model that does not declare it refuses the flag");
+        assert!(PolicySupport { act_precision: true, ..LLM }.check(&only).is_ok());
         assert_eq!((p.limits.ctx, p.limits.kv_offload_gb, p.limits.itl_target_ms), (Some(4096), Some(1.5), Some(60)));
         assert_eq!((p.fuse_norm, p.kv_calibration, p.exact_decode), (Some(false), true, true));
         assert!(p.describe().contains("exact-decode"), "{}", p.describe());
-        for (flag, bad) in [("--ctx", "-1"), ("--kv-cache", "fp4"), ("--gemm", "tf32"), ("--kv-offload-gb", "nan"), ("--weight-format", "q9"), ("--itl-target-ms", "0")] {
+        for (flag, bad) in [("--ctx", "-1"), ("--kv-cache", "fp4"), ("--gemm", "tf32"), ("--act-precision", "fp16"), ("--kv-offload-gb", "nan"), ("--weight-format", "q9"), ("--itl-target-ms", "0")] {
             let e = ServePolicy::default().set(flag, bad).unwrap_err();
             assert!(e.contains(flag), "{e}");
         }

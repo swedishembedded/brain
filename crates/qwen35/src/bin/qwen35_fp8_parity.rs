@@ -17,9 +17,11 @@
 //!
 //! The reference is loaded and measured first, dropped, then the candidate is loaded: the two never share a card, so
 //! a 27B fits. Usage: `qwen35_fp8_parity <hf-dir> <text file> [--prompts N] [--prompt-tokens N] [--steps N]
-//! [--device gpu1] [--backend cuda] [--kv int8] [--gdn-prefill exact|bf16|auto] [--assert-agreement F]`. The reference
+//! [--device gpu1] [--backend cuda] [--kv int8] [--gdn-prefill exact|bf16|auto] [--act-precision auto|f32|bf16]
+//! [--assert-agreement F]`. The reference
 //! always runs the exact (TF32) Gated DeltaNet prefill; the candidate runs the one `--gdn-prefill` names (`auto`, the
-//! default, is the device's measured selection, i.e. what serving runs).
+//! default, is the device's measured selection, i.e. what serving runs); `--act-precision` is the candidate's activation
+//! stream (`auto`, the default, is what serving runs; `f32` is the A/B base).
 
 use model::ops::TierPolicy;
 use qwen35::int8_gguf_resident::{budgeted_gpus, Qwen35GgufInstance, Qwen35GgufResident};
@@ -84,8 +86,8 @@ fn rel_l2(a: &[f32], b: &[f32]) -> f64 {
     (d / n.max(1e-30)).sqrt()
 }
 
-fn load(path: &str, devices: Vec<(Device, u64)>, cap: u32, tier: TierPolicy, kv: model::kv_tier::KvTier) -> Qwen35GgufInstance {
-    let r = Qwen35GgufResident::new(path.to_string(), devices, cap, tier).with_kv_tier(kv);
+fn load(path: &str, devices: Vec<(Device, u64)>, cap: u32, tier: TierPolicy, kv: model::kv_tier::KvTier, act: gpu_core::ActChoice) -> Qwen35GgufInstance {
+    let r = Qwen35GgufResident::new(path.to_string(), devices, cap, tier).with_kv_tier(kv).with_act_choice(act);
     let placed: Vec<Device> = r.estimate_multi(&r.instance_key("generate", &capability::Invocation::new())).devices().collect();
     r.activate_owned(&placed).unwrap_or_else(|e| panic!("activate {path}: {e}"))
 }
@@ -95,7 +97,7 @@ fn main() {
     let flag = |name: &str| a.iter().position(|arg| arg == name).and_then(|i| a.get(i + 1)).cloned();
     let num = |name: &str, default: usize| flag(name).and_then(|v| v.parse().ok()).unwrap_or(default);
     let (Some(path), Some(text_path)) = (a.get(1).cloned(), a.get(2).cloned()) else {
-        eprintln!("usage: qwen35_fp8_parity <hf-dir> <text file> [--prompts N] [--prompt-tokens N] [--steps N] [--device D] [--backend B] [--kv K] [--gdn-prefill exact|bf16|auto] [--assert-agreement F]");
+        eprintln!("usage: qwen35_fp8_parity <hf-dir> <text file> [--prompts N] [--prompt-tokens N] [--steps N] [--device D] [--backend B] [--kv K] [--gdn-prefill exact|bf16|auto] [--act-precision auto|f32|bf16] [--assert-agreement F]");
         std::process::exit(2);
     };
     let (prompts, ptoks, steps) = (num("--prompts", 4), num("--prompt-tokens", 2000), num("--steps", 24));
@@ -118,7 +120,7 @@ fn main() {
     let mut prompt_ids: Vec<Vec<u32>> = Vec::new();
     let mut reference: Vec<(Vec<u32>, Vec<Vec<f32>>)> = Vec::new();
     {
-        let inst = load(&path, devices.clone(), cap, TierPolicy::uniform(gpu_core::select::Dtype::BF16), kv);
+        let inst = load(&path, devices.clone(), cap, TierPolicy::uniform(gpu_core::select::Dtype::BF16), kv, gpu_core::ActChoice::Force(gpu_core::ActPrecision::F32));
         for p in 0..prompts {
             let prompt: Vec<u32> = inst.tokenize(&render(window(&text, p, ptoks))).into_iter().take(cap as usize - steps - 8).collect();
             let trace = inst.tape_comparison_trace(&prompt, steps as u32).expect("greedy trace");
@@ -134,7 +136,8 @@ fn main() {
         form @ ("exact" | "bf16") => gpu_core::force_candidate("gdn_prefill", form),
         other => panic!("--gdn-prefill takes exact, bf16 or auto, not {other}"),
     }
-    let inst = load(&path, devices, cap, held, kv);
+    let act = flag("--act-precision").map_or(gpu_core::ActChoice::Auto, |v| gpu_core::ActChoice::parse(&v).unwrap_or_else(|| panic!("--act-precision takes auto, f32 or bf16, not {v}")));
+    let inst = load(&path, devices, cap, held, kv, act);
     let (mut agree, mut positions, mut big_flips) = (0usize, 0usize, 0usize);
     let (mut sum_rel, mut worst_rel, mut sum_kl) = (0f64, 0f64, 0f64);
     for (p, (ids, ref_logits)) in reference.iter().enumerate() {

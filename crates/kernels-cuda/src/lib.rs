@@ -2468,6 +2468,23 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/matmul_fp8_wgmma_tma_n256.cu"),
     },
     CudaKernel {
+        name: "matmul_fp8_wgmma_tma_n256_bf16o",
+        // `matmul_fp8_wgmma_tma_n256` with the output rows rounded to bf16 in the epilogue and stored through the tensor memory accelerator (knowledge 394).
+        op: Op::MatMul,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_matmul_fp8_wgmma_tma_n256_bf16o",
+        what: "matmul_fp8_wgmma_tma_n256 whose output is [M, N] bf16 (N a multiple of 8): the f32 sum of the product rounded to nearest even on the way out, half the output bytes",
+        reported: "native:matmul_fp8_wgmma_tma_n256_bf16o",
+        block_dim: 384,
+        tile: (128, 256),
+        shared_bytes: 0,
+        programmatic: false,
+        src: concat!("#define BRAIN_FWT_ENTRY brain_matmul_fp8_wgmma_tma_n256_bf16o\n#define BRAIN_FWT_OUT_BF16 1\n", include_str!("../cu/matmul_fp8_wgmma_tma_n256.cu")),
+    },
+    CudaKernel {
         name: "matmul_fp8_wgmma_swap_n64b64",
         // FP8 GEMM for 17 to 64 rows of x on the FP8 tensor cores with the WEIGHTS as the MMA's A operand (knowledge 387): a warpgroup owns
         // 64 weight rows, the 64 rows of x are the MMA's N side, 64 weight rows a block.

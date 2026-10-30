@@ -345,6 +345,29 @@ fn serves_fp8_wgmma_tma_store(p: &[u32]) -> bool {
     serves_fp8_wgmma(p) && p[2].is_multiple_of(4)
 }
 
+/// The fourth word of an FP8 linear's params that asks for the bf16-output twin of a candidate. The kernels ignore it (they read
+/// the first three); only the twins' `serves` look at it, so a dispatch of three words - the tuner's classes, the f32 output -
+/// never selects a twin.
+pub(crate) const FP8_OUT_BF16: u32 = 1;
+
+/// The bf16-output twin of an FP8 candidate that has one: the same arithmetic with the epilogue rounding to bf16.
+pub(crate) fn fp8_bf16_out_twin(kernel: &str) -> Option<&'static str> {
+    match kernel {
+        "matmul_fp8_wgmma_tma_n256" => Some("matmul_fp8_wgmma_tma_n256_bf16o"),
+        _ => None,
+    }
+}
+
+/// A twin serves the dispatch its base serves when the params ask for the bf16 output and a row is a whole number of 4-byte words.
+fn asks_bf16_out(p: &[u32]) -> bool {
+    p.len() == 4 && p[3] == FP8_OUT_BF16 && p[2].is_multiple_of(2)
+}
+
+/// The twin that stores through the tensor map: a row of bf16 is a whole number of 16-byte units.
+fn serves_fp8_wgmma_tma_store_bf16o(p: &[u32]) -> bool {
+    asks_bf16_out(p) && serves_fp8_wgmma(&p[..3]) && p[2].is_multiple_of(8)
+}
+
 /// A persistent grid: a block for every 128 x 128 tile up to the most the kernel keeps tensor maps for, each walking tiles `grid` apart.
 fn fp8_persistent_blocks(p: &[u32], tile: (u32, u32)) -> u32 {
     gemm_blocks(p, tile).min(kernels_cuda::FP8_TMA_MAX_CTAS)
@@ -1010,6 +1033,22 @@ pub(crate) const FP8_ROWS: &[Row] = &[
         target: Target::Named("matmul_fp8_wgmma_tma_n256"),
         bindings: I8_GEMV_BINDINGS,
         serves: serves_fp8_wgmma_tma_store,
+        blocks: fp8_persistent_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        input: Input::FP8_NATIVE,
+        launch: CudaLaunch {
+            dynamic_shared_bytes: kernels_cuda::fp8_wgmma_tma_n256_dynamic_shared_bytes(4),
+            shared_opt_in: true,
+            arch: backend_api::ArchFeatures::Required,
+            ..CudaLaunch::NONE
+        },
+    },
+    Row {
+        slow: "matmul_fp8_gemv",
+        target: Target::Named("matmul_fp8_wgmma_tma_n256_bf16o"),
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_fp8_wgmma_tma_store_bf16o,
         blocks: fp8_persistent_blocks,
         requires_wgsl_upgrade: false,
         align_words: 4,

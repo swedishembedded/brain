@@ -27,7 +27,7 @@ use model::policy::{PolicySupport, ServePolicy};
 use crate::{MAX_CONTEXT, MAX_BATCH, POOL_TOKENS, PREFILL_CHUNK};
 
 /// What an OCR model honours of the model-agnostic serving policy.
-pub const OCR_POLICY: PolicySupport = PolicySupport { model: "deepseek-ocr", weights: &[], weight_rules: false, kv_cache: &["f32", "bf16"], gemm: true, fuse_norm: false, kv_calibration: false, exact_decode: false };
+pub const OCR_POLICY: PolicySupport = PolicySupport { model: "deepseek-ocr", weights: &[], weight_rules: false, kv_cache: &["f32", "bf16"], gemm: true, fuse_norm: false, kv_calibration: false, exact_decode: false, act_precision: false };
 
 /// Most pages one engine decodes together: its step buffers and recorded steps are sized by it.
 pub const MAX_BATCH_CEILING: u32 = 128;
