@@ -340,7 +340,7 @@ pub trait PagedDecoder {
         } else {
             self.forward_batched_topk(tables, inputs, cands)
         };
-        MixedOutcome { decoded, prefilled }
+        MixedOutcome { decoded, prefilled, first: Vec::new() }
     }
 
     /// A prefill call unwound with a device allocation failure
@@ -541,12 +541,20 @@ pub struct PrefillJob<'a> {
     pub embeds: Option<&'a PromptEmbeds>,
 }
 
+/// A job's first-token candidates from a mixed forward's head pass (empty: none).
+type FirstCandidates = Vec<(u32, f32)>;
+
 /// What one [`PagedDecoder::forward_mixed`] call produced.
 pub struct MixedOutcome {
     /// Per decode row, its candidates (`cands == 0`: the greedy token with logprob 0).
     pub decoded: Vec<Vec<(u32, f32)>>,
     /// One answer per job, in job order.
     pub prefilled: Vec<PrefillProgress>,
+    /// For a job that finished ([`PrefillProgress::Done`]), the candidates of its first token, taken from the same
+    /// head pass as the decode rows' (so the head's weights are read once, not once more per finished prompt), in
+    /// the form `cands` asked for. Empty for a job that did not finish or a decoder that has none: the scheduler
+    /// then runs [`PagedDecoder::admit_greedy`] / [`PagedDecoder::admit_topk`] on the job's hidden state.
+    pub first: Vec<Vec<(u32, f32)>>,
 }
 
 /// `f`, with a device allocation failure it unwinds with
@@ -1950,7 +1958,7 @@ impl<D: PagedDecoder> Scheduler<D> {
 
     /// A fully prefilled request becomes a running sequence: its first token is
     /// picked from the prefill's final hidden state.
-    fn start_running(&mut self, p: Prefilling, hidden: Vec<f32>, report: &mut StepReport) {
+    fn start_running(&mut self, p: Prefilling, hidden: Vec<f32>, first_candidates: Vec<(u32, f32)>, report: &mut StepReport) {
         let Prefilling { id, prompt, max_new, stop, adapter, sample, seed, table, resume, embeds, .. } = p;
         if let Some(Resume { generated, logprobs, next_input, spec, rng, think, cached_tokens }) = resume {
             // The cache is whole again; the token to decode next was chosen
@@ -1971,10 +1979,11 @@ impl<D: PagedDecoder> Scheduler<D> {
             // A prompt that ends inside a think block whose budget is zero: the closing tag comes first.
             (forced, 0.0)
         } else if !sample.needs_candidates() {
-            (self.dec.admit_greedy(&hidden), 0.0)
+            (first_candidates.first().map_or_else(|| self.dec.admit_greedy(&hidden), |&(token, _)| token), 0.0)
         } else {
-            let k = self.dec.topk_capacity().max(1);
-            let candidates = self.dec.admit_topk(&hidden, k);
+            // The iteration's head pass gave the full candidate list when it was asked for candidates (see
+            // `mixed_iteration`); a shorter list is the greedy pick and the head runs again.
+            let candidates = if first_candidates.len() >= self.dec.topk_capacity().max(1) { first_candidates } else { self.dec.admit_topk(&hidden, self.dec.topk_capacity().max(1)) };
             sample_in_context(&candidates, sample, &SampleContext { context: &prompt, prompt_len: prompt.len() }, &mut rng)
         };
         let mut r = Running { id, table, adapter, generated: Vec::new(), logprobs: Vec::new(), max_new, stop, next_input: first, context: prompt, spec: speculate::SeqSpec::new(), done: false, sample, think, procs: ProcessorState::default(), seed, rng, embeds, cached_tokens, stop_token: None };
@@ -2056,7 +2065,7 @@ impl<D: PagedDecoder> Scheduler<D> {
         let progress = catch_device_oom(|| self.dec.prefill_chunks(&mut jobs));
         drop(jobs);
         match progress {
-            Ok(progress) => self.settle_prefill(&takes, progress, report),
+            Ok(progress) => self.settle_prefill(&takes, progress, Vec::new(), report),
             Err(oom) => self.refuse_prefilling(report, oom),
         }
     }
@@ -2080,26 +2089,32 @@ impl<D: PagedDecoder> Scheduler<D> {
 
     /// Record what a prefill call answered for the sequences `takes` gave rows to (one answer per non-zero
     /// take, in order): advance the partial ones and start decoding the ones whose prompt is in, oldest first.
-    fn settle_prefill(&mut self, takes: &[usize], progress: Vec<PrefillProgress>, report: &mut StepReport) {
+    ///
+    /// `first` is [`MixedOutcome::first`] (one entry per answer, or none at all when the decoder gave none).
+    fn settle_prefill(&mut self, takes: &[usize], progress: Vec<PrefillProgress>, first: Vec<Vec<(u32, f32)>>, report: &mut StepReport) {
         assert_eq!(progress.len(), takes.iter().filter(|&&t| t > 0).count(), "the prefill call answers every job");
+        assert!(first.is_empty() || first.len() == progress.len(), "a decoder gives the first tokens of every job or of none");
         let mut finished = Vec::new();
-        let mut answers = progress.into_iter();
+        let mut answers = progress.into_iter().enumerate();
+        let mut first = first.into_iter();
         for (idx, p) in self.prefilling.iter_mut().enumerate() {
             if takes[idx] == 0 {
                 continue;
             }
-            match answers.next().expect("one answer per job") {
+            let (_, answer) = answers.next().expect("one answer per job");
+            let candidates = first.next().unwrap_or_default();
+            match answer {
                 PrefillProgress::Partial { consumed } => p.done += consumed,
-                PrefillProgress::Done(hidden) => finished.push((idx, hidden)),
+                PrefillProgress::Done(hidden) => finished.push((idx, hidden, candidates)),
             }
         }
         // Oldest first, as the one-sequence loop starts them.
-        let mut starting: Vec<(Prefilling, Vec<f32>)> = Vec::new();
-        for (idx, hidden) in finished.into_iter().rev() {
-            starting.push((self.prefilling.remove(idx).expect("index just visited"), hidden));
+        let mut starting: Vec<(Prefilling, Vec<f32>, FirstCandidates)> = Vec::new();
+        for (idx, hidden, candidates) in finished.into_iter().rev() {
+            starting.push((self.prefilling.remove(idx).expect("index just visited"), hidden, candidates));
         }
-        for (p, hidden) in starting.into_iter().rev() {
-            self.start_running(p, hidden, report);
+        for (p, hidden, candidates) in starting.into_iter().rev() {
+            self.start_running(p, hidden, candidates, report);
         }
     }
 
@@ -2136,7 +2151,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             starting.push((self.prefilling.remove(idx).expect("index just visited"), hidden));
         }
         for (p, hidden) in starting.into_iter().rev() {
-            self.start_running(p, hidden, report);
+            self.start_running(p, hidden, Vec::new(), report);
         }
     }
 
@@ -2215,7 +2230,7 @@ impl<D: PagedDecoder> Scheduler<D> {
                         PrefillProgress::Done(hidden) => {
                             let consumed = p.prompt.len() - p.done;
                             let p = self.prefilling.pop_front().expect("the front was just prefilled");
-                            self.start_running(p, hidden, report);
+                            self.start_running(p, hidden, Vec::new(), report);
                             consumed
                         }
                     };
@@ -2426,8 +2441,18 @@ impl<D: PagedDecoder> Scheduler<D> {
         let prompt_rows = self.step_cost.prompt_rows(limits, active.len(), target);
         let takes = self.allot_prefill(prompt_rows);
         let inputs: Vec<u32> = active.iter().map(|&i| self.running[i].next_input).collect();
-        let (all_greedy, banned_max) = self.sampling_mode(active);
-        let cands = if all_greedy { 0 } else { self.candidates_wanted(active, banned_max) };
+        let (mut all_greedy, banned_max) = self.sampling_mode(active);
+        // A prompt that ends in this iteration has its first token taken from the same head pass as the decode rows'
+        // ([`MixedOutcome::first`]), so the pass asks for what that prompt's sampling needs too.
+        let finishing_needs_candidates = self.prefilling.iter().zip(&takes).any(|(p, &take)| take > 0 && p.done + take >= p.prompt.len() && p.sample.needs_candidates());
+        all_greedy &= !finishing_needs_candidates;
+        let cands = if all_greedy {
+            0
+        } else if finishing_needs_candidates {
+            self.dec.topk_capacity()
+        } else {
+            self.candidates_wanted(active, banned_max)
+        };
         let mut tables = active_tables(&mut self.running, in_batch);
         let mut jobs: Vec<PrefillJob<'_>> =
             self.prefilling.iter_mut().zip(&takes).filter(|(_, &take)| take > 0).map(|(p, &take)| PrefillJob { table: &mut p.table, prompt: &p.prompt, budget: take, embeds: p.embeds.as_deref() }).collect();
@@ -2457,7 +2482,7 @@ impl<D: PagedDecoder> Scheduler<D> {
         drop(sampled);
         let accepted = gpu_core::markers::range(c"serve.accept");
         self.accept_window(active, &window, 1);
-        self.settle_prefill(&takes, outcome.prefilled, report);
+        self.settle_prefill(&takes, outcome.prefilled, outcome.first, report);
         drop(accepted);
     }
 

@@ -981,6 +981,9 @@ struct ShardCaches {
     scatter: usize,
     gather: usize,
     copy_within: usize,
+    /// One recurrent layer's zero state and zero conv history (a fresh sequence's starting row), cleared once.
+    zero_state: DeviceBuffer,
+    zero_hist: DeviceBuffer,
 }
 
 impl ShardCaches {
@@ -1025,7 +1028,9 @@ impl ShardCaches {
                 (block_rows, true, (0..slots).map(|s| (s * per_slot..(s + 1) * per_slot).take_while(|&b| b < pool_blocks).collect()).collect())
             }
         };
-        let caches = ShardCaches { gqa_kv, pool_state, pool_hist, work_state, work_hist, snap_state, snap_hist, recurrent, full: full_layers, slots, cap, block_rows, paged, slot_tables, verify_snaps: Vec::new(), scatter, gather, copy_within };
+        let (zero_state, zero_hist) = (gpu.storage(state), gpu.storage(hist));
+        let caches = ShardCaches { gqa_kv, pool_state, pool_hist, work_state, work_hist, snap_state, snap_hist, recurrent, full: full_layers, slots, cap, block_rows, paged, slot_tables, verify_snaps: Vec::new(), scatter, gather, copy_within, zero_state, zero_hist };
+        gpu.submit(&[&caches.zero_state, &caches.zero_hist], &[]);
         caches.reset(gpu);
         caches
     }
@@ -1047,6 +1052,21 @@ impl ShardCaches {
     fn reset_work(&self, gpu: &Gpu) {
         let clears: Vec<&DeviceBuffer> = self.work_state.iter().chain(&self.work_hist).collect();
         gpu.submit(&clears, &[]);
+    }
+
+    /// Start `slot`'s pool row from zero state: one row scatter per owned recurrent layer from the shared zero row.
+    /// Unlike [`Self::reset_work`] followed by [`Self::store_work`] it touches no working copy (so nothing waits for
+    /// a copy to be read) and the stream order alone keeps the row ahead of the forward that reads it.
+    fn zero_pool_row(&self, gpu: &Gpu, cfg: &Qwen35Config, slot: u32) {
+        assert!(slot < self.slots, "{MODEL}: slot {slot} is outside this stage's {} slots", self.slots);
+        let ids = gpu.storage_uninit(1);
+        gpu.write(&ids, &[slot]);
+        let (sl, hl) = (cfg.gdn_state_len() as u32, cfg.gdn_hist_len() as u32);
+        let steps: Vec<_> = (0..self.pool_state.len())
+            .filter(|&l| self.recurrent[l])
+            .map(|l| gpu.step(self.scatter, &[&self.zero_state, &self.zero_hist, &ids, &self.pool_state[l], &self.pool_hist[l]], &[1, sl, hl], sl + hl))
+            .collect();
+        gpu.submit(&[], &steps);
     }
 
     /// Make the working copy the GDN state of `slot`: one row scatter per
@@ -2363,6 +2383,13 @@ impl Qwen35GgufInstance {
     fn load_work_state(&self, slot: u32) {
         for s in &self.shards {
             s.caches.load_work(&s.qwen35.gpu, &self.cfg, slot);
+        }
+    }
+
+    /// Start slot `slot`'s pool row from zero state, without the working copy.
+    fn zero_pool_row(&self, slot: u32) {
+        for s in &self.shards {
+            s.caches.zero_pool_row(&s.qwen35.gpu, &self.cfg, slot);
         }
     }
 

@@ -917,7 +917,7 @@ impl Qwen35GgufEngine {
         if jobs.len() < 2 || adapter_in_play || !self.inst.multi_prefill_available() {
             return jobs.iter_mut().map(|j| self.prefill_slice(j.table, j.prompt, j.budget)).collect();
         }
-        let (mut answers, live) = self.begin_slices(jobs);
+        let (mut answers, live) = self.begin_slices(jobs, false);
         let rows: usize = live.iter().map(|(_, _, p, end)| end - p.done).sum();
         self.run_slices(jobs, &mut answers, live, None, rows > gpu_core::select::DECODE_REGIME_MAX_ROWS as usize);
         answers.into_iter().map(|a| a.expect("every job was answered")).collect()
@@ -927,7 +927,10 @@ impl Qwen35GgufEngine {
     /// has its starting state written to its pool row (the next sequence's seeding overwrites the working copy). The
     /// answers of the jobs already settled (a prompt that was wholly cached), and the jobs with rows to run as
     /// `(job index, slot, progress, end)`.
-    fn begin_slices(&mut self, jobs: &mut [PrefillJob<'_>]) -> (Vec<Option<PrefillProgress>>, Vec<LiveSlice>) {
+    ///
+    /// `pooled`: the caller runs every live job as one forward that reads its state from the pool row, so a job that
+    /// starts cold gets a zero row and no working copy is touched.
+    fn begin_slices(&mut self, jobs: &mut [PrefillJob<'_>], pooled: bool) -> (Vec<Option<PrefillProgress>>, Vec<LiveSlice>) {
         let mut answers: Vec<Option<PrefillProgress>> = Vec::with_capacity(jobs.len());
         for j in jobs.iter_mut() {
             assert!(!j.prompt.is_empty(), "{MODEL}: empty prompt");
@@ -940,10 +943,14 @@ impl Qwen35GgufEngine {
                 // The state this sequence starts from goes to its pool row now:
                 // the next sequence's seeding overwrites the working copy.
                 let slot = self.slot(j.table);
-                if self.partial[&slot].start == 0 {
+                if self.partial[&slot].start > 0 {
+                    self.inst.store_prefilled(slot);
+                } else if pooled {
+                    self.inst.zero_pool_row(slot);
+                } else {
                     self.inst.reset_work_state();
+                    self.inst.store_prefilled(slot);
                 }
-                self.inst.store_prefilled(slot);
             }
             answers.push(None);
         }
@@ -1285,27 +1292,39 @@ impl PagedDecoder for Qwen35GgufEngine {
         if tables.is_empty() || jobs.is_empty() || adapter_in_play || !self.mixed {
             let prefilled = if jobs.is_empty() { Vec::new() } else { self.prefill_chunks(jobs) };
             let decoded = self.decode_candidates(tables, inputs, cands);
-            return MixedOutcome { decoded, prefilled };
+            return MixedOutcome { decoded, prefilled, first: Vec::new() };
         }
         let started = std::time::Instant::now();
         let begin = gpu_core::markers::range(c"mixed.begin_slices");
-        let (mut answers, live) = self.begin_slices(jobs);
+        let (mut answers, live) = self.begin_slices(jobs, true);
         drop(begin);
         if live.is_empty() {
             // Every prompt was served from the cache: nothing to carry.
             let prefilled = answers.into_iter().map(|a| a.expect("every job was answered")).collect();
-            return MixedOutcome { decoded: self.decode_candidates(tables, inputs, cands), prefilled };
+            return MixedOutcome { decoded: self.decode_candidates(tables, inputs, cands), prefilled, first: Vec::new() };
         }
         let (slots, positions) = self.next_positions(tables);
         let hidden = self.run_slices(jobs, &mut answers, live, Some((inputs, &slots, &positions)), true);
-        let rows = inputs.len() as u32;
-        let decoded = if cands == 0 {
-            self.inst.head_argmax_rows(&hidden, rows).into_iter().map(|t| vec![(t, 0.0)]).collect()
+        // One head pass for the decode rows and the last row of every prompt that ended here: the head's weights are
+        // read once instead of once more per finished prompt.
+        let d = self.inst.cfg.d_model as usize;
+        let rows = inputs.len();
+        let mut head_rows = hidden;
+        for a in answers.iter().flatten() {
+            if let PrefillProgress::Done(h) = a {
+                head_rows.extend_from_slice(h);
+            }
+        }
+        let picked = if cands == 0 {
+            self.inst.head_argmax_rows(&head_rows, (head_rows.len() / d) as u32).into_iter().map(|t| vec![(t, 0.0)]).collect::<Vec<_>>()
         } else {
-            self.inst.head_topk_rows(&hidden, rows, cands.clamp(1, TOPK_CAPACITY) as u32)
+            self.inst.head_topk_rows(&head_rows, (head_rows.len() / d) as u32, cands.clamp(1, TOPK_CAPACITY) as u32)
         };
+        let mut picked = picked.into_iter();
+        let decoded: Vec<_> = picked.by_ref().take(rows).collect();
+        let first = answers.iter().flatten().map(|a| if matches!(a, PrefillProgress::Done(_)) { picked.next().expect("one pick per finished job") } else { Vec::new() }).collect();
         self.times.prefill += started.elapsed();
-        MixedOutcome { decoded, prefilled: answers.into_iter().map(|a| a.expect("every job was answered")).collect() }
+        MixedOutcome { decoded, prefilled: answers.into_iter().map(|a| a.expect("every job was answered")).collect(), first }
     }
     fn logits(&self, hidden: &[f32]) -> Vec<f32> {
         decode_lane(self.background_on, || self.inst.head_logits_rows(hidden, 1))

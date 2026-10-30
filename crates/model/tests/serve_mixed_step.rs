@@ -50,12 +50,14 @@ struct Toy {
     mixed: bool,
     log: Arc<Mutex<Log>>,
     now: Arc<Mutex<f64>>,
+    /// Times the scheduler asked for a finished prompt's first token with a head pass of its own.
+    admit_heads: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Toy {
     fn new(mixed: bool) -> (Toy, Arc<Mutex<Log>>, Arc<Mutex<f64>>) {
         let (log, now) = (Arc::new(Mutex::new(Log::default())), Arc::new(Mutex::new(0.0)));
-        (Toy { alloc: BlockAllocator::new(4096, BLOCK), history: HashMap::new(), mixed, log: log.clone(), now: now.clone() }, log, now)
+        (Toy { alloc: BlockAllocator::new(4096, BLOCK), history: HashMap::new(), mixed, log: log.clone(), now: now.clone(), admit_heads: Default::default() }, log, now)
     }
 
     fn digest(history: &[u32]) -> u32 {
@@ -125,6 +127,10 @@ impl PagedDecoder for Toy {
     fn prefill_chunk(&mut self, table: &mut BlockTable, prompt: &[u32], budget: usize) -> PrefillProgress {
         self.slice(table, prompt, budget)
     }
+    fn admit_greedy(&self, hidden: &[f32]) -> u32 {
+        self.admit_heads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        hidden[0] as u32
+    }
     fn logits(&self, hidden: &[f32]) -> Vec<f32> {
         let mut l = vec![0.0; VOCAB];
         l[hidden[0] as usize] = 1.0;
@@ -168,14 +174,16 @@ impl PagedDecoder for Toy {
         let prompt_rows: usize = jobs.iter().map(|j| j.budget).sum();
         let rows = tables.len() + prompt_rows;
         assert!(rows <= LIMITS.max_rows, "a forward of {rows} rows exceeds what the decoder takes");
-        let prefilled = jobs.iter_mut().map(|j| self.slice(j.table, j.prompt, j.budget)).collect();
+        let prefilled: Vec<_> = jobs.iter_mut().map(|j| self.slice(j.table, j.prompt, j.budget)).collect();
+        // The first token of a finished prompt comes out of the forward's own head pass.
+        let first = prefilled.iter().map(|p| if let PrefillProgress::Done(h) = p { vec![(h[0] as u32, 0.0)] } else { Vec::new() }).collect();
         let decoded = self.decode(tables, inputs).into_iter().map(|t| vec![(t, 0.0)]).collect();
         let mut now = self.now.lock().unwrap();
         *now += FIXED_SECS + PER_ROW_SECS * rows as f64;
         let mut log = self.log.lock().unwrap();
         log.forwards.push((tables.len(), prompt_rows));
         log.ends.push(*now);
-        MixedOutcome { decoded, prefilled }
+        MixedOutcome { decoded, prefilled, first }
     }
 }
 
@@ -219,6 +227,14 @@ fn mixed_iterations_give_the_tokens_separate_passes_give() {
     let (mut mixed, _) = scheduler(true);
     let (mut separate, _) = scheduler(false);
     assert_eq!(run(&mut mixed, STAGGERED), run(&mut separate, STAGGERED));
+}
+
+#[test]
+fn a_prompt_that_ends_in_a_mixed_forward_needs_no_head_pass_of_its_own() {
+    let (mut s, _) = scheduler(true);
+    let heads = s.decoder_mut().admit_heads.clone();
+    run(&mut s, STAGGERED);
+    assert_eq!(heads.load(std::sync::atomic::Ordering::SeqCst), 0, "a finished prompt's first token was computed outside the forward that finished it");
 }
 
 #[test]
