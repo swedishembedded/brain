@@ -296,8 +296,9 @@ npu/diagnose:
 # Three things were making the full suite take ~an hour, all measured:
 #
 #  1. `cargo test` defaults to the DEBUG profile, so it recompiled the whole
-#     workspace even right after `make build/release`. Tests now run `--release` and
-#     reuse that build.
+#     workspace even right after `make build/release`. Tests now build with
+#     the `fast` profile: release code generation without LTO, whose link
+#     step was most of every test rebuild (Cargo.toml says by how much).
 #  2. Doc-tests link one binary per crate against the full graph - ~18s per
 #     crate for ~30 examples, most of them `no_run`. They are real coverage but
 #     they are not fast feedback, so they get their own lane.
@@ -324,7 +325,7 @@ TEST_THREADS ?= 8
 # the 2xP40 box, so the guard sits at 2400. Making the suite faster is real
 # work (slow-lane moves), not a tighter timeout.
 TEST_TIMEOUT ?= 2400
-CARGO_TEST   ?= cargo test --release --offline
+CARGO_TEST   ?= cargo test --profile fast --offline
 
 # Build first WITHOUT the timeout, then run WITH it. The deadlock guard is a
 # statement about *running tests* - a cold rebuild after an engine change takes
@@ -359,7 +360,14 @@ test:
 # has not been run against the full workspace end to end, only smoke-tested.
 ## test/nextest - the fast lane under cargo-nextest: one process and one timeout per test
 test/nextest:
-	cargo nextest run --release --offline --lib --bins --tests
+	cargo nextest run --cargo-profile fast --offline --lib --bins --tests
+
+# One crate, optionally one test target and filter, for the edit-test loop:
+# `make test/one P=brain-qwen35 T=gguf_mixed_step ARGS="--device gpu1"`.
+## test/one - one crate's tests (P=<package> [T=<test target>] [ARGS=<test args>]), fast profile, seconds per rebuild
+test/one:
+	@test -n "$(P)" || { echo "test/one: set P=<package> (and optionally T=<test target>, ARGS=<test args>)"; exit 2; }
+	$(CARGO_TEST) -p $(P) $(if $(T),--test $(T)) -- $(ARGS)
 
 ## test/package - the spec of the release publishing script against a scratch repository and a fake gh (bats; no build, seconds)
 test/package:
@@ -2112,7 +2120,7 @@ help:
         cuda cuda/aot cuda/install cuda/coverage gh200 gh200/probe gh200/placement \
         environment environment/requirements environment/full environment/openvino \
         npu npu/diagnose \
-        test test/nextest test/package test/doc test/slow test/full test/times test/capability-report \
+        test test/nextest test/one test/package test/doc test/slow test/full test/times test/capability-report \
         test/gradcheck test/rl test/conformance test/cuda-matrix \
         test/parity test/parity/strict test/parity/forecast test/parity/wan \
         test/e2e test/e2e/api-conformance test/e2e/shutdown test/e2e/samples test/e2e/ready \

@@ -75,6 +75,7 @@ make test                            # suite; BRAIN_DEVICE=cpu runs it GPU-free
 make test/full                       # suite + every gate (run before calling work done)
 make test/gradcheck                  # backprop gate
 make test/parity                     # cross-backend parity (CPU == Vulkan == NPU == CUDA)
+make test/one P=<crate> T=<test> ARGS=...  # the edit-test loop: one target, seconds per rebuild
 make check                           # lists the individual gates
 make generate                        # lists the generators (kernel registry and catalogue, indexes)
 make samples/<category>/<name>/run   # one standalone sample
@@ -141,7 +142,13 @@ enforces it.
   whole-channel. See `kernels.md`.
 - **Profile with the driver's own tools.** On NVIDIA systems profiling or
   optimizing brain uses `nsys` (timeline) and `ncu` (kernels); elsewhere the
-  vendor's equivalent. See `kernels.md` section F.0.
+  vendor's equivalent. See `kernels.md` section F.0. Profile a kernel with
+  `ncu` on its own test or bench binary at the production shape (seconds),
+  never through a full model server (minutes per run); `nsys` on the server
+  measures the before/after of the whole step.
+- **Feedback is fast.** Iterate on one focused test (`make test/one`),
+  run the broad gates once before committing, and move a test that takes
+  minutes to the slow lane rather than paying for it on every run.
 - **Fix selection, not copies.** Before writing a kernel, look for a faster
   sibling; before dispatching one, read its `Params`; before optimizing,
   profile per kernel kind. A finding from an audit or sweep is a hypothesis

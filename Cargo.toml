@@ -505,6 +505,16 @@ opt-level = 3
 # a real perf-gate baseline, not by assumption.
 lto = "thin"
 
+# The test and iteration profile: release code generation without LTO. A test
+# binary's thin-LTO link was ~60s of a 74s one-file rebuild of a qwen35 test;
+# without it the rebuild takes 9s, and the `brain` binary 24s. LTO is worth
+# 1-3 % host throughput on the FP8 27B serving sweep (c=4/16), so binaries that
+# are measured or served stay on `release`; correctness tests do not need it.
+# `make test` and its lanes build here (target/fast).
+[profile.fast]
+inherits = "release"
+lto = "off"
+
 # ---------------------------------------------------------------------------
 # Dependency overrides
 # ---------------------------------------------------------------------------
