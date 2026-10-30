@@ -3796,6 +3796,8 @@ impl Qwen35 {
         }
         for l in self.shard.start..self.shard.end {
             self.stream_load(l);
+            // Each frozen weight of the layer is decoded once for all the products that read it (the MLP's row chunks).
+            let _decoded = self.ops.decoded_weights();
             let (x, y) = if self.res_saved.is_some() { (&res[0], &res[1]) } else { (&res[l], &res[l + 1]) };
             let acts = self.layer_forward(l, x, y, false);
             if let Some(saved) = &self.res_saved {
@@ -4157,6 +4159,9 @@ impl Qwen35 {
         let recompute_out = ta.recomputed.then(|| g.storage((n * d) as u64));
         for l in (self.shard.start..self.shard.end).rev() {
             on(LayerEvent::BeforeBackward(l))?;
+            // The rebuild, the MLP row chunks and the input gradients of the layer read each frozen weight
+            // from one decode.
+            let _decoded = self.ops.decoded_weights();
             // This layer's input boundary (decoded into `res[0]` when packed).
             let x = match &self.res_saved {
                 Some(saved) => {

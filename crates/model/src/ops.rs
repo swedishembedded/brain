@@ -1272,6 +1272,8 @@ pub struct Ops {
     decode_dummy: std::sync::OnceLock<DeviceBuffer>,
     /// The transfer handle tiled weight loads upload through, once [`Ops::enable_streamed_uploads`] set it.
     uploads: std::sync::OnceLock<StreamedUploads>,
+    /// Weights decoded for the products of the open [`Ops::decoded_weights`] scope.
+    decoded: std::sync::Mutex<tiled::DecodedWeights>,
 }
 
 /// A transfer [`Gpu`] handle (own stream, bounded pinned staging ring) and the pinned-pool lease that pays for
@@ -1290,7 +1292,7 @@ pub use device_io::{store_device_kernels, DeviceIo, StoreDevice};
 mod device_io;
 pub use upload_source::{stored_tier, stored_tier_policy, upload_fused_from_source, upload_from_source, upload_group_preserved, upload_preserved, FusedGroup};
 pub use upload_source::{conversion_policy, encoding_for};
-pub use tiled::{plan_linear, tile_rows, uniq_padded, EmbeddingGrad, GradDtype, LinearPlan, DEFAULT_TILE_BUDGET_BYTES, GEMV_MAX_ROWS, UNIQ_PAD};
+pub use tiled::{DecodedWeightsScope, plan_linear, tile_rows, uniq_padded, EmbeddingGrad, GradDtype, LinearPlan, DEFAULT_TILE_BUDGET_BYTES, GEMV_MAX_ROWS, UNIQ_PAD};
 
 impl Ops {
     /// [`Ops::with_selector`] with the default policy
@@ -1379,7 +1381,7 @@ impl Ops {
             idx.insert(name, i);
         }
         let gemm = LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Auto);
-        Ok(Ops { gpu, caps, idx, selector, providers, gemm, tile_budget_bytes: DEFAULT_TILE_BUDGET_BYTES, decode_dummy: std::sync::OnceLock::new(), uploads: std::sync::OnceLock::new() })
+        Ok(Ops { gpu, caps, idx, selector, providers, gemm, tile_budget_bytes: DEFAULT_TILE_BUDGET_BYTES, decode_dummy: std::sync::OnceLock::new(), uploads: std::sync::OnceLock::new(), decoded: Default::default() })
     }
 
     /// Choose the arithmetic of the GEMMs against bf16 weights: `Auto` takes

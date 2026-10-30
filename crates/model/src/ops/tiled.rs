@@ -112,6 +112,69 @@ pub fn tile_rows(rows: u32, k: u32, budget_bytes: u64, elem_bytes: u64) -> u32 {
     fit.clamp(1, rows.max(1) as u64) as u32
 }
 
+/// Weights of a layer decoded to bf16 once and shared by every product of the open scope
+/// ([`Ops::decoded_weights`]); keyed by the weight's code buffer and the window decoded.
+#[derive(Default)]
+pub(super) struct DecodedWeights {
+    /// Open scopes (they nest: the outermost owns the cache).
+    depth: u32,
+    windows: std::collections::HashMap<(usize, u32, u32, u32), DeviceBuffer>,
+}
+
+/// The scope in which [`Ops`] decodes a frozen quantized weight once however many products read it; dropping
+/// the outermost guard releases the decoded copies.
+#[must_use = "the decoded weights are released when this guard drops"]
+pub struct DecodedWeightsScope<'a> {
+    ops: &'a Ops,
+}
+
+impl Drop for DecodedWeightsScope<'_> {
+    fn drop(&mut self) {
+        let mut d = self.ops.decoded.lock().unwrap_or_else(|e| e.into_inner());
+        d.depth -= 1;
+        if d.depth == 0 {
+            d.windows.clear();
+        }
+    }
+}
+
+impl Ops {
+    /// Open a scope in which a quantized weight that the library product reads through a bf16 decode (a
+    /// whole-weight window) is decoded the first time and reused by every later product of the scope.
+    ///
+    /// A training layer reads each frozen weight several times: the forward, the rebuild of its activations in
+    /// the backward and the input gradient, and the MLP once per row chunk. Without a scope each read decodes
+    /// again (about 140 us per MLP matrix at 27B width, 7.8 % of a W8K step); with one a layer decodes each
+    /// weight once per pass for the scratch of its largest consumers (a layer's weights in bf16, under 1 GB).
+    ///
+    /// The contract is the caller's: the weights do not change while a scope is open (a frozen base never does;
+    /// an optimizer step belongs outside), and a scope is opened around work that is submitted in the order it
+    /// is built, so a decode is on the stream before the products that read it. Scopes nest.
+    pub fn decoded_weights(&self) -> DecodedWeightsScope<'_> {
+        self.decoded.lock().unwrap_or_else(|e| e.into_inner()).depth += 1;
+        DecodedWeightsScope { ops: self }
+    }
+
+    /// The bf16 decode of rows `first .. first + count` of `w` for the open scope: cached when it was decoded
+    /// before, otherwise the decode step is pushed into `s` and the result cached. `None` outside a scope or
+    /// when the device declines the decode (nothing pushed).
+    fn scoped_decode_bf16(&self, s: &mut Vec<Step>, w: &Weight, first: u32, count: u32) -> Option<DeviceBuffer> {
+        if self.decoded.lock().unwrap_or_else(|e| e.into_inner()).depth == 0 {
+            return None;
+        }
+        let key = (self.decode_planes(w)[0].alloc_id() as usize, first, count, w.k());
+        if let Some(hit) = self.decoded.lock().unwrap_or_else(|e| e.into_inner()).windows.get(&key) {
+            return Some(hit.clone());
+        }
+        let out = self.gpu.storage_uninit(count as u64 * w.k() as u64 / 2);
+        if !self.decode_tile_bf16(s, w, first, count, &out) {
+            return None;
+        }
+        self.decoded.lock().unwrap_or_else(|e| e.into_inner()).windows.insert(key, out.clone());
+        Some(out)
+    }
+}
+
 impl Weight {
     /// The `weight_decode` format of this tier; `None` for `F32`, which is already dense.
     pub fn decode_format(&self) -> Option<DecodeFormat> {
@@ -346,6 +409,11 @@ impl Ops {
         };
         if !bf16 {
             return self.for_each_tile_f32(s, w, rows, product);
+        }
+        if tile >= count {
+            if let Some(decoded) = self.scoped_decode_bf16(s, w, first, count) {
+                return product(s, &Weight::BF16 { w: decoded, n: count, k }, 0, count, tile);
+            }
         }
         let scratch = self.gpu.storage_uninit(tile as u64 * k as u64 / 2);
         let mut done = 0;

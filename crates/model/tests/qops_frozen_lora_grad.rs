@@ -290,6 +290,46 @@ fn the_tensor_core_tier_stays_within_its_stated_tolerances() {
     println!("{}", report.join("\n"));
 }
 
+/// Inside a `decoded_weights` scope a quantized weight is decoded for the first product that reads it and
+/// shared by the later ones (forward, rebuild and input gradient of a training layer); the values do not change.
+#[test]
+fn a_weight_is_decoded_once_per_scope_and_the_products_are_unchanged() {
+    let mut ops = ops();
+    ops.set_gemm_precision(GemmPrecision::Auto);
+    for label in ["nf4", "i8", "fp8_e4m3"] {
+        let mut rng = Lcg::random();
+        let case = build_case(&ops, label, H, K, &mut rng);
+        let g = ops.gpu();
+        let x = g.storage_init("x", &rng.vec_scaled(M * K, 1.0));
+        let product = |steps: &mut Vec<_>| {
+            let y = g.storage((M * H) as u64);
+            ops.matmul_rows(steps, &case.weight, (0, H as u32), &ops.act_f32(&x, 0, M as u32, K as u32), &y, 0);
+            y
+        };
+        let mut steps = Vec::new();
+        let plain = product(&mut steps);
+        let plain_steps = steps.len();
+        g.submit(&[], &steps);
+        let want = g.read(&plain, M * H);
+
+        let _scope = ops.decoded_weights();
+        let mut scoped = Vec::new();
+        let first = product(&mut scoped);
+        let after_first = scoped.len();
+        let second = product(&mut scoped);
+        let second_steps = scoped.len() - after_first;
+        g.submit(&[], &scoped);
+        assert_eq!(g.read(&first, M * H), want, "{label}: the scoped product differs from the unscoped one");
+        assert_eq!(g.read(&second, M * H), want, "{label}: the shared decode gives a different product");
+        if after_first == plain_steps {
+            // The device decodes this tier to f32 (no bf16 tile for the library product): nothing is shared.
+            brain_testutil::skip_unavailable(&format!("{label}: no bf16 tile decode on this device"));
+            continue;
+        }
+        assert!(second_steps < after_first, "{label}: the second product decoded the weight again ({second_steps} steps after {after_first})");
+    }
+}
+
 /// Decoding a weight in many tiles (a budget of three rows of `k` f32) gives the results of one tile.
 #[test]
 fn a_small_tile_budget_changes_nothing_but_the_scratch() {
