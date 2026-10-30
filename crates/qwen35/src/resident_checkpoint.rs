@@ -43,6 +43,28 @@ use model::ops::TierPolicy;
 use crate::config::Qwen35Config;
 use model::shard::Shard;
 
+/// An embedding table held in host memory as the bf16 it is stored in: a row is a copy, never a page fault.
+///
+/// A drafter that reads the embeddings of tokens it did not choose (a whole prompt's, in a feed) would otherwise touch one
+/// cold page of the mapped checkpoint per token, which is milliseconds each on a network file system.
+pub struct HostEmbedding {
+    bits: Vec<u16>,
+    d: usize,
+}
+
+impl HostEmbedding {
+    /// Rows `tokens` (`d` wide) as f32, `None` when a token is outside the table.
+    pub fn rows(&self, tokens: &[u32]) -> Option<Vec<f32>> {
+        let vocab = self.bits.len() / self.d;
+        let mut out = Vec::with_capacity(tokens.len() * self.d);
+        for &t in tokens {
+            let row = self.bits.get(t as usize * self.d..(t as usize + 1) * self.d).filter(|_| (t as usize) < vocab)?;
+            out.extend(row.iter().map(|&b| f32::from_bits(u32::from(b) << 16)));
+        }
+        Some(out)
+    }
+}
+
 /// A checkpoint of the Qwen3.5/3.8 dense architecture a resident engine can be
 /// built from. See the module doc.
 pub enum ResidentCheckpoint {
@@ -227,6 +249,30 @@ impl ResidentCheckpoint {
             ResidentCheckpoint::Gguf(mg) => mg.tensor_rows(name, rows, d),
             ResidentCheckpoint::Hf(hf) => hf.src.read_rows(name, rows, d).transpose(),
         }
+    }
+
+    /// The embedding table `name` (`d` wide) in host memory as stored, for a table the checkpoint keeps in bf16; `None` for
+    /// every other encoding and for a GGUF, whose rows are decoded from the mapping on demand ([`Self::embed_rows`]).
+    pub fn host_embedding(&self, name: &str, d: usize) -> Option<Result<HostEmbedding, String>> {
+        let ResidentCheckpoint::Hf(hf) = self else { return None };
+        let desc = hf.src.descriptor(name)?;
+        if desc.encoding != QuantEncoding::bf16() {
+            return None;
+        }
+        let vocab = hf.src.numel(name)? / d;
+        let mut bits = Vec::with_capacity(vocab * d);
+        // Rows are decoded in parallel, a batch at a time (bounded host staging).
+        const ROWS_PER_BATCH: usize = 8192;
+        for first in (0..vocab).step_by(ROWS_PER_BATCH) {
+            let rows: Vec<usize> = (first..vocab.min(first + ROWS_PER_BATCH)).collect();
+            match hf.src.read_rows(name, &rows, d) {
+                // A bf16 value widened to f32 has no bits below the high half, so the narrowing loses nothing.
+                Ok(Some(f)) => bits.extend(f.iter().map(|v| (v.to_bits() >> 16) as u16)),
+                Ok(None) => return None,
+                Err(e) => return Some(Err(e)),
+            }
+        }
+        Some(Ok(HostEmbedding { bits, d }))
     }
 
     /// The final-norm gain, `[d]`.

@@ -41,6 +41,7 @@
 
 use super::*;
 use checkpoint::TensorSource;
+use crate::resident_checkpoint::HostEmbedding;
 use crate::gguf_import::block_leaf_suffix;
 use model::ops::{Ops, Weight};
 
@@ -137,6 +138,8 @@ pub(super) struct MtpDrafter {
     d: usize,
     /// Embedding rows, read from this handle's own mapping of the checkpoint.
     ckpt: ResidentCheckpoint,
+    /// The embedding table in host memory when the checkpoint stores it as bf16 ([`ResidentCheckpoint::host_embedding`]).
+    host_embedding: Option<HostEmbedding>,
     embed: EmbedTable,
     slots: std::collections::HashMap<u32, SlotState>,
     /// Slots whose prompt feed is begun and not finished ([`PromptFeed`]): they neither draft nor record steps.
@@ -202,6 +205,10 @@ impl MtpDrafter {
             normed_hidden,
             eps: cfg.rms_eps,
             d,
+            host_embedding: match reopened.host_embedding(embed_name, d) {
+                Some(table) => Some(table.map_err(|e| format!("{MODEL}: the embedding table: {e}"))?),
+                None => None,
+            },
             ckpt: reopened,
             embed: EmbedTable { name: embed_name.to_string(), d },
             slots: std::collections::HashMap::new(),
@@ -212,6 +219,9 @@ impl MtpDrafter {
     }
 
     fn embed_rows(&self, tokens: &[u32]) -> Result<Vec<f32>, String> {
+        if let Some(rows) = self.host_embedding.as_ref().and_then(|table| table.rows(tokens)) {
+            return Ok(rows);
+        }
         let rows: Vec<usize> = tokens.iter().map(|&t| t as usize).collect();
         self.ckpt.embed_rows(&self.embed.name, &rows, self.d).ok_or_else(|| {
             let bad = tokens.iter().find(|&&t| self.ckpt.embed_rows(&self.embed.name, &[t as usize], self.d).is_none()).copied().unwrap_or(0);
