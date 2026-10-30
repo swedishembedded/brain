@@ -379,6 +379,15 @@ measurement (16-256), not fixed globally.
   a big GEMM: 12 + 7.8 ms of a 31 ms step at 64 rows, 1.2-1.7 TB/s; x as the A operand re-reads x once per 64 weight rows), the 48 GDN gated-output casts, the
   103 us top-k (a two-phase form), `add_rms_quant` as a 4-block cluster.
 
+- 2026-10-30 (host time out of the step, knowledge 388): (a) the first stage holds a plain bf16/f16 embedding table (2.5 GB, charged in `serving_cost`, refused above 1/16 of the
+  smallest card; GGUF and scaled tables keep the host path) and a decode step / mixed forward uploads token ids only: `mixed.embed` 15.6 ms -> 1 us, `decode.embed` 1.1 ms -> 1 us, c=64 804 -> 837 tok/s, card
+  busy 88 -> 92 % (steady window). (b) a mixed round runs the GQA front half and the K/V append once over all its rows and the gate rides on the `o_proj` quantiser: launches per iteration 2625 -> 1972,
+  c=64 837 -> 857. (c) the decode step's head reads the layers' output on the card in the same submission: the 105 us layer-to-head gap is gone, step 16.14 -> 15.85 ms at c=16 (served +-1 %).
+  Output tok/s c=1/4/16/64: 78.5 / 297.5 / 553.4 / 804.4 -> 78.5 / 299.4 / 568.8 / 850.9; 31K TTFT 4.46 -> 4.08 s; greedy chats byte-identical; W8K NF4 probe 1051 / 1037 -> 1042 / 1048 (not a
+  training path). Step plan status: B (arena with stable offsets) and C (graph per row-count bucket, K-step device-resident decode, device sampler) are NOT done; what the 7.8 % idle is and the
+  levers in order (decode-step recording per (rows, context bucket) as `decode_tape` does for rings, device greedy sampler, `fresh` GDN segments instead of 144 memsets/scatters a new prompt,
+  in-place row offsets for the prefill attention) are listed at the end of knowledge 388. Cross-card edges: `StageRows::Device` / `Gather` already make the first-stage input a plan input, not a host
+  array, and `chain_stages_with` hands the stage output on as a device buffer.
 - 2026-10-30 (FP8 GEMM family, knowledge 387): (a) 17-64 rows: `matmul_fp8_wgmma_swap_n{64,32}b{64,128}[s{2,4}]` put the WEIGHT rows in the MMA's M and the rows of x in its N (no
   128-row padding, 64 weight rows a block, K split over a cluster of 2-4 blocks for the K = 17408 / N = 5120 shapes). 64-row GEMMs (us): gate/up 89.1 -> 73.9, gate 57.5 ->
   36.7, down 85.7 -> 35.6, qkv 30.6 -> 25.6, out 34.3 -> 18.5 (2.0-2.5 TB/s of weight bytes; the x tile re-read from the L2 is as many bytes as the weights, so ~2.4 TB/s is
