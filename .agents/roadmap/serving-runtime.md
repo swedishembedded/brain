@@ -411,7 +411,7 @@ measurement (16-256), not fixed globally.
   the full tile flow holds 1.35 GHz under the card's power limit (660 W module), rescale and the f32 output cost 8-10 % each, and latency-hiding changes (scale prefetch, chunked scales, warpgroup
   lag/alternation, a 2-block multicast cluster) moved nothing. Served (base gpu0 / new gpu1 at the same time, 1K in / 128 out, same client) c = 1 / 4 / 16 / 64 output tok/s 80.6 / 249 / 540 /
   757 -> 79.6 / 253 / 545 / 772, 31K TTFT 3.88 -> 3.73 s. `qwen35_fp8_parity` (8 x 1500 tokens, 32 steps, two texts) 98.05 % / KL 2.51e-3 and 98.05 % / 1.74e-3 -> 98.05 % / 3.16e-3 and 99.22 % /
-  1.50e-3. Open: K split of the tail tiles at 768 rows (gate/up 6.18 waves -> 7, down/out 120 of 132 SMs, qkv 12288 2.18 -> 3), a bf16 output for the FP8 linears, the 17-64 row swap kernels.
+  1.50e-3. Open: K split of the tail tiles (down 17408 x 5120: 119 us at 768 rows but 224 us at 896-1280, two waves of 140-200 tiles; 5 row tiles leave 24 % of the card idle), a bf16 output for the FP8 linears, the 17-64 row swap kernels.
 - 2026-10-30 (recorded decode step, knowledge 390): a plain paged decode step (single stage, embedding on the card, base rows) is recorded with its head per (rows, 128-key capacity bucket, greedy/top-k) after 3 steps
   of the same key and replayed (`Qwen35GgufInstance::decode_planned`, `set_decode_plans`, 8 kept); frozen programs are cut into a 64-step graph then 256-step graphs, and fences skip events a stream already waited for and
   programs whose buffers no other stream touched (`Fence::seq`, `CudaBackend::foreign_fences`); `Gpu::reclaim_due` drops the `cuMemGetInfo` of every prefill round. Output tok/s c = 1 / 4 / 16 / 64
