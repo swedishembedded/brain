@@ -423,4 +423,17 @@ measurement (16-256), not fixed globally.
   in one pass, bit-identical to the pair, 104 -> 48 us a layer, +0.5 % served). Tried and not kept (no un-profiled gain): retaining the pool's working set, an M-RoPE row cache. Open items and the
   per-kernel table in knowledge 391.
 
+- 2026-10-30 (activation precision, knowledge 394): `--act-precision auto|f32|bf16` (`gpu_core::ActPrecision`, bf16 from compute capability 8.0; a model
+  declares support in `PolicySupport`) declares the element type of the activations between the FP8 products. The qwen35 serving forward stores the MLP's gate/up
+  and the Gated DeltaNet mixer's qkv/z as bf16 (`matmul_fp8_wgmma_tma_n256_bf16o`, bit-identical to the f32 kernel rounded to bf16), reads them as bf16 in the
+  SwiGLU pass (product no longer stored), the segment conv/prep/loop/gated norm (leading decode rows widened by `cast_bf16_f32`), and a front end of its own
+  (`add_rms_quant_e4m3`) writes the E4M3 rows of the next FP8 product and leaves `xn` unwritten when nothing reads it. c=64 794.5 -> 835.9 tok/s (+5.2 %), c=16
+  553.2 -> 562.5, c=1/4 unchanged, 31K TTFT 3.71 -> 3.53 s; a mixed iteration 84.8 -> 80.2 ms, a decode-only step 25.3 -> 23.5 ms; kernel time -3.9 %.
+  `qwen35_fp8_parity` inside the base's spread, six greedy chats identical, W8K probe 1608 tok/s with the same losses. Not reached: the 950 / 650 targets. Tried
+  and not kept: wave-aligned mixed-iteration rows (`WaveCost`: 813 -> 790 tok/s at c=64, TTFT -13 %; longer iterations cost every sequence's token interval),
+  direct 4-byte bf16 stores from the accumulator (+16-29 % on the GEMM) and bf16 twins of the 128x128 kernel. Open, by weight: the FP8 GEMMs are 52 % of kernel
+  time and nothing here moved them more than 4 %; `gdn_recur_pool` (7.7 %, f32 state traffic), the GDN chunk kernels (11 %, bound by the chain), `add_rms_quant_e4m3`
+  at 20.8 us against a 15 us byte roof, the bf16 residual (a, sum, b: another ~5 us a front end, needs the stage hand-off, taps and head to read bf16), a bf16 `b`
+  from the down/out products, the GQA layers' q/ctx (16 layers, 3 % of the stream), and the 128x128 tile's twin through a TMA store.
+
 Mixed-iteration idle (knowledge 392, 2026-10-30): a prompt start no longer waits on the device (zeroed pool row) and a finished prompt's first token rides the forward's head pass; scheduling floor curve is flat (713-775 tok/s at c=64 over floors 256-2048); remaining idle <= 1.4 ms, so asynchronous scheduling (row 4) is worth ~1.5 %.

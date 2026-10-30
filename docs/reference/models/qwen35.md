@@ -108,6 +108,11 @@ brain --device gpu0,gpu1 serve --openai
 #                            same bytes and scales as int8). Default: chosen
 #                            from the hardware (see "Defaults" below)
 #   --max-batch N     concurrent decode slots (default 8)
+#   --act-precision auto
+#                            element type of the activations between the FP8
+#                            products of an FP8 release: "bf16", "f32" (the A/B
+#                            switch) or "auto" (bf16 where the device has bf16
+#                            tensor cores). Every kernel accumulates in f32
 #   --exact-decode    make a decode row's tokens and per-token logits
 #                            independent of which sequences share its step
 #                            (default off; costs one extra weight pass per

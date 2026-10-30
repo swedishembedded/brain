@@ -1125,6 +1125,15 @@ dominant share of a backward pass to a negligible one, and the kernel that had
 been invisible behind it became the new dominant share and the next target.
 Stop when the top row is near the roof (§F.2), not when you are tired.
 
+### F.9b Halve the bytes only where the kernel is bound by them, and store a narrow type through the unit that stores wide ones
+
+Halving the element type of an activation stream (f32 to bf16) moves a kernel only if that kernel was bound by the stream. Check the
+profile's per-kernel row against its byte roof before touching the type (knowledge 394): the SwiGLU pass (40 -> 28 us) and the residual front
+end were, the Gated DeltaNet chunk kernels (62-70 us a launch, half the bytes) were bound by their tensor-core chain and state and did not move.
+A narrow store from an MMA accumulator fragment through plain 4-byte global stores wrote half sectors and ran 16-29 % slower than the wide store
+it replaced; stage it in shared memory and store it through the same bulk unit. And keep a variant that adds registers or shared memory to a
+latency-bound kernel (the decode token's one-row front end) a kernel of its own: the shared form cost the decode token 5 us a launch.
+
 ### The shape of the result
 
 One documented run: a conv input-gradient kernel went from over a thousand
