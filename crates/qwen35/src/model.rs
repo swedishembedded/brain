@@ -1753,6 +1753,10 @@ impl Qwen35 {
         shard: Shard,
     ) -> Qwen35 {
         let train = train_opts.is_some();
+        // The serving prefill's Gated DeltaNet form is measured now, not inside the first recorded step.
+        if !train {
+            gpu.prepare_gdn_prefill();
+        }
         if let Err(e) = cfg.check_window_and_memory() {
             panic!("{e}");
         }

@@ -322,6 +322,8 @@ mod upgrade;
 #[cfg(not(target_arch = "wasm32"))]
 mod native_upgrade;
 mod native_tune;
+#[cfg(not(target_arch = "wasm32"))]
+mod gdn_prefill_tune;
 
 /// Native kernels a model asks for by name - see [`native_upgrade::Fused`].
 #[cfg(not(target_arch = "wasm32"))]
@@ -824,6 +826,8 @@ mod native_facade {
         /// The FP8 linear's table, measured on first use ([`Gpu::prepare_fp8_linear`]) so a model with no FP8 weight never
         /// pays for it.
         tuned_fp8: std::sync::OnceLock<Option<Arc<crate::native_tune::Tuned>>>,
+        /// The measured choice of the Gated DeltaNet serving prefill form, see [`Self::prepare_gdn_prefill`].
+        gdn_prefill: std::sync::OnceLock<crate::gdn_prefill_tune::Choice>,
         /// The native fused kernels this handle has been asked about, and what
         /// the backend answered - resolved lazily, because resolving compiles
         /// the kernel and most handles never ask. See [`Gpu::fused_step`].
@@ -916,6 +920,7 @@ mod native_facade {
                 native_by_kind,
                 tuned: std::sync::OnceLock::new(),
                 tuned_fp8: std::sync::OnceLock::new(),
+                gdn_prefill: std::sync::OnceLock::new(),
                 fused: Mutex::new(Vec::new()),
                 mem_device,
                 grants: Mutex::new(Vec::new()),
@@ -962,6 +967,21 @@ mod native_facade {
         /// does nothing.
         pub fn prepare_fp8_linear(&self) {
             self.tuned_fp8.get_or_init(|| crate::native_tune::ensure(self, &[(crate::native_upgrade::FP8_KIND, crate::native_upgrade::FP8_SLOT)]));
+        }
+
+        /// Measure (once per handle) whether this device serves the Gated DeltaNet prefill faster in the bf16 form than in the
+        /// exact TF32 form ([`crate::gdn_prefill_tune`]). Called when a model with Gated DeltaNet layers is placed, so the
+        /// measurement never runs inside a recorded step; until it has run (and under a forced `exact` candidate) the exact
+        /// form is served.
+        pub fn prepare_gdn_prefill(&self) {
+            if crate::native_tune::forced_candidate(crate::gdn_prefill_tune::SLOT).is_none() {
+                self.gdn_prefill.get_or_init(|| crate::gdn_prefill_tune::measure(self));
+            }
+        }
+
+        /// The measured choice of the Gated DeltaNet prefill form, if [`Self::prepare_gdn_prefill`] has run.
+        pub fn gdn_prefill_choice(&self) -> Option<crate::gdn_prefill_tune::Choice> {
+            self.gdn_prefill.get().copied()
         }
 
         /// Whether this handle has native candidates for the FP8 linear at all.

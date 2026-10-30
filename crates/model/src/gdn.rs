@@ -1587,11 +1587,18 @@ pub fn gdn_chunk_fwd_tokens(
         query_cm,
         key_cm,
     ];
-    let prep = native_chunk_prep_tok(g, &bufs, tok_layout(shape, tok))?;
     let (dk, dv, c) = (shape.dk, shape.dv, shape.chunk);
     let (bh, n_chunks) = (shape.bh(), shape.n_chunks());
     let scale = 1.0f32 / (dk as f32).sqrt();
     let loop_bufs = [key_cm, query_cm, scratch.w, scratch.u, scratch.g_cs, scratch.exp_g_cs, scratch.intra_scores, initial_state, out, final_state];
+    // The bf16 form of the prefill (prep writes the loop's operands as bf16, the loop multiplies them on bf16 tensor
+    // cores with an fp32 state) where the device's measured selection chose it; the exact TF32 form otherwise.
+    if out_token_major && bf16_prefill_selected(g) {
+        if let (Some(prep), Some(recurrence)) = (native_chunk_prep_tok_bf16(g, &bufs, tok_layout(shape, tok)), native_chunk_loop_bf16(g, &loop_bufs, bh, c, dk, dv, n_chunks, scale, shape.h)) {
+            return Some((vec![prep, recurrence], true));
+        }
+    }
+    let prep = native_chunk_prep_tok(g, &bufs, tok_layout(shape, tok))?;
     // The recurrence: one tensor-core launch, else the fp32 one. A device that took the prefix above
     // takes at least the fp32 loop (same compute-capability floor family); if neither is offered the
     // whole call declines so the caller runs its portable sequence from the start.
@@ -1626,6 +1633,39 @@ fn tok_layout(shape: &GdnShape, tok: &GdnTokenInputs) -> TokLayout {
 
 #[cfg(target_arch = "wasm32")]
 fn tok_layout(_shape: &GdnShape, _tok: &GdnTokenInputs) -> TokLayout {}
+
+/// Whether the measured selection of this device chose the bf16 prefill form ([`gpu_core::provider::cuda::gdn_bf16_prefill_selected`]).
+#[cfg(not(target_arch = "wasm32"))]
+fn bf16_prefill_selected(g: &Gpu) -> bool {
+    gpu_core::provider::cuda::gdn_bf16_prefill_selected(g)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn bf16_prefill_selected(_g: &Gpu) -> bool {
+    false
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_chunk_prep_tok_bf16(g: &Gpu, bufs: &[&DeviceBuffer; 12], layout: TokLayout) -> Option<Step> {
+    gpu_core::provider::cuda::gdn_chunk_prep_tok_bf16_step(g, bufs, layout)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+fn native_chunk_loop_bf16(g: &Gpu, bufs: &[&DeviceBuffer; 10], bh: u32, c: u32, dk: u32, dv: u32, n_chunks: u32, scale: f32, heads_tok: u32) -> Option<Step> {
+    gpu_core::provider::cuda::gdn_chunk_loop_bf16_step(g, bufs, bh, c, dk, dv, n_chunks, scale, heads_tok)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn native_chunk_prep_tok_bf16(_g: &Gpu, _bufs: &[&DeviceBuffer; 12], _layout: TokLayout) -> Option<Step> {
+    None
+}
+
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)]
+fn native_chunk_loop_bf16(_g: &Gpu, _bufs: &[&DeviceBuffer; 10], _bh: u32, _c: u32, _dk: u32, _dv: u32, _n_chunks: u32, _scale: f32, _heads_tok: u32) -> Option<Step> {
+    None
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 fn native_chunk_prep_tok_train(g: &Gpu, bufs: &[&DeviceBuffer; 21], layout: TokLayout) -> Option<Step> {

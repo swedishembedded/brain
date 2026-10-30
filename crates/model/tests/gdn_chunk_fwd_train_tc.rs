@@ -425,6 +425,62 @@ fn the_recurrence_output_can_be_written_token_major_and_matches_the_chunk_major_
     }
 }
 
+/// The serving prefill forward in its bf16 form (`gdn_prefill` candidate `bf16`: bf16 operands, fp32 accumulation and state)
+/// against the exact TF32 form, on a full chunk, on a short remainder chunk of an even and an odd length (the bf16
+/// `intra` rows are not 16-byte aligned there), and with a non-zero initial state: both outputs agree within a few bf16
+/// rounding steps (2^-9) of the output's rms, and the forward really runs the bf16 kernels.
+#[test]
+fn the_bf16_prefill_form_matches_the_exact_form_within_a_few_bf16_steps() {
+    let g = gpu_core::testgpu::dev(PIPES);
+    if !model::gdn::use_fast_kernels(&g) || g.caps().arch.compute_capability.is_none_or(|cc| cc < (8, 0)) {
+        brain_testutil::skip_unavailable("a device with bf16 tensor cores");
+        return;
+    }
+    use model::gdn::{gdn_chunk_fwd_tokens, GdnTokScratchBufs, GdnTokenInputs};
+    let ids = ids(&g, Tier::TensorCore);
+    // (value heads, key-head group, tokens, chunk): 4 chunks of 64, then one chunk of 24 (even) and of 21 (odd).
+    for (h, group, t, chunk) in [(6u32, 3u32, 256u32, 64u32), (6, 3, 24, 24), (4, 2, 21, 21)] {
+        let shape = GdnShape { b: 1, h, t, dk: 128, dv: 128, chunk };
+        let (bhc, bh) = (shape.bhc() as usize, shape.bh() as usize);
+        let (heads, nkh, tokens) = (h as usize, (h / group) as usize, t as usize);
+        let mut s = 5u64 + u64::from(t);
+        let q = g.storage_init("q", &rand(&mut s, tokens * nkh * 128, 1.0));
+        let k = g.storage_init("k", &rand(&mut s, tokens * nkh * 128, 1.0));
+        let v = g.storage_init("v", &rand(&mut s, tokens * heads * 128, 1.0));
+        let raw_g = g.storage_init("g", &rand(&mut s, tokens * heads, 0.2).iter().map(|x| -x.abs()).collect::<Vec<_>>());
+        let beta = g.storage_init("beta", &rand(&mut s, tokens * heads, 0.5).iter().map(|x| x + 0.5).collect::<Vec<_>>());
+        let initial = g.storage_init("s0", &rand(&mut s, bh * 128 * 128, 0.1));
+        let tok = GdnTokenInputs { query: &q, key: &k, value: &v, raw_g: &raw_g, beta: &beta, group, l2_eps: 1e-6 };
+        let len = bhc * chunk as usize * 128;
+        let (qcm, kcm) = (g.storage(len as u64), g.storage(len as u64));
+        let (out, fin) = (g.storage(len as u64), g.storage((bh * 128 * 128) as u64));
+        let scratch = GdnTokScratchBufs::new(&g, &shape);
+        let run = |form: &str| {
+            gpu_core::force_candidate("gdn_prefill", form);
+            let (steps, token_major) = gdn_chunk_fwd_tokens(&g, &ids, &shape, &tok, &qcm, &kcm, &initial, &scratch.as_ref(), &out, &fin, true).expect("served");
+            assert!(token_major, "the recurrence writes token-major rows");
+            g.reset_kernel_times();
+            g.set_kernel_timing(true);
+            g.submit(&[], &steps);
+            g.poll_wait();
+            let ran: Vec<String> = g.kernel_times().unwrap_or_default().into_iter().map(|r| r.0).collect();
+            (g.read(&out, len), g.read(&fin, bh * 128 * 128), ran)
+        };
+        let (exact_out, exact_fin, exact_ran) = run("exact");
+        let (bf_out, bf_fin, bf_ran) = run("bf16");
+        gpu_core::clear_forced_candidates();
+        assert!(exact_ran.iter().any(|k| k.contains("gdn_chunk_loop_tc")), "exact form ran {exact_ran:?}");
+        assert!(bf_ran.iter().any(|k| k.contains("gdn_chunk_loop_bf16")) && bf_ran.iter().any(|k| k.contains("gdn_chunk_prep_tok_bf16")), "bf16 form ran {bf_ran:?}");
+        let rms = |a: &[f32]| (a.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>() / a.len() as f64).sqrt();
+        let err = |a: &[f32], r: &[f32]| rms(&a.iter().zip(r).map(|(x, y)| x - y).collect::<Vec<_>>()) / rms(r);
+        let (e_out, e_fin) = (err(&bf_out[..tokens * heads * 128], &exact_out[..tokens * heads * 128]), err(&bf_fin, &exact_fin));
+        // Measured 3.1e-3 .. 4.0e-3 on these shapes: a few 2^-9 = 1.95e-3 steps (operands rounded to bf16, accumulation fp32).
+        let bound = 4.0 / 512.0;
+        println!("bf16 vs exact prefill, t={t} chunk={chunk}: output {e_out:.3e}, final state {e_fin:.3e}");
+        assert!(e_out < bound && e_fin < bound, "t={t} chunk={chunk}: output error {e_out:.3e}, final state error {e_fin:.3e}, bound {bound:.3e}");
+    }
+}
+
 /// The serving prefill forward at the production shape (48 value heads of 128, 8192 tokens, chunks of 64): a bench for
 /// `ncu -k regex:<kernel> -c 1` on the kernel's own binary instead of a model server, and a wall-clock per-launch figure.
 /// `cargo test --release -p brain-model --test gdn_chunk_fwd_train_tc -- --ignored --nocapture production_shape`.
@@ -460,11 +516,22 @@ fn production_shape_prefill_forward_bench() {
         g.submit(&[], &steps);
         g.poll_wait();
     };
-    run();
-    let start = std::time::Instant::now();
+    g.prepare_gdn_prefill();
+    println!("measured selection: {:?}", g.gdn_prefill_choice());
     let reps = 5;
-    for _ in 0..reps {
+    let mut outs = Vec::new();
+    for candidate in ["tc", "bf16"] {
+        gpu_core::force_candidate("gdn_prefill", candidate);
         run();
+        let start = std::time::Instant::now();
+        for _ in 0..reps {
+            run();
+        }
+        println!("gdn prefill forward ({candidate}), {t} tokens x {h} heads: {:.3} ms a layer", start.elapsed().as_secs_f64() * 1e3 / reps as f64);
+        outs.push((g.read(&out, len), g.read(&fin, bh * 128 * 128)));
     }
-    println!("gdn prefill forward, {t} tokens x {h} heads: {:.3} ms a layer", start.elapsed().as_secs_f64() * 1e3 / reps as f64);
+    gpu_core::clear_forced_candidates();
+    let rms = |a: &[f32]| (a.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / a.len() as f64).sqrt();
+    let err = |a: &[f32], r: &[f32]| (a.iter().zip(r).map(|(x, y)| (*x as f64 - *y as f64).powi(2)).sum::<f64>() / a.len() as f64).sqrt() / rms(r);
+    println!("bf16 vs exact: out relative rms error {:.3e}, final state {:.3e}", err(&outs[1].0, &outs[0].0), err(&outs[1].1, &outs[0].1));
 }

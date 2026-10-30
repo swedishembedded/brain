@@ -3214,7 +3214,7 @@ pub const ALL: &[CudaKernel] = &[
         // Everything is dynamic: see `GDN_CHUNK_PREP_DYNAMIC_SHARED_BYTES` in gpu-core.
         shared_bytes: 0,
         programmatic: false,
-        src: include_str!("../cu/gdn_chunk_prep_tc.cu"),
+        src: concat!(include_str!("../cu/gdn_chunk_common.cuh"), include_str!("../cu/gdn_chunk_prep_tc.cu")),
     },
     CudaKernel {
         name: "gdn_chunk_prep_train_tc",
@@ -3230,7 +3230,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (64, 128),
         shared_bytes: 0,
         programmatic: false,
-        src: include_str!("../cu/gdn_chunk_prep_tc.cu"),
+        src: concat!(include_str!("../cu/gdn_chunk_common.cuh"), include_str!("../cu/gdn_chunk_prep_tc.cu")),
     },
     CudaKernel {
         name: "gdn_chunk_loop_tc",
@@ -3267,6 +3267,39 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/gdn_chunk_loop_tc.cu"),
     },
     CudaKernel {
+        name: "gdn_chunk_loop_bf16",
+        op: Op::GatedDeltaChunkLoop,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_gdn_chunk_loop_bf16",
+        what: "Gated DeltaNet recurrence with bf16 MMA operands (read as bf16 from gdn_chunk_prep_tok_bf16) and an fp32 state held in registers: one m16n8k16 instead of three TF32 MMAs, a measured candidate of the prefill forward",
+        reported: "native:gdn_chunk_loop_bf16",
+        block_dim: 256,
+        tile: (64, 32),
+        // Everything is dynamic: see `GDN_CHUNK_LOOP_BF16_DYNAMIC_SHARED_BYTES` in gpu-core.
+        shared_bytes: 0,
+        programmatic: false,
+        src: concat!(include_str!("../cu/gdn_chunk_common.cuh"), include_str!("../cu/gdn_chunk_loop_bf16.cu")),
+    },
+    CudaKernel {
+        name: "gdn_chunk_prep_tok_bf16",
+        op: Op::GatedDeltaChunkLoop,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_gdn_chunk_prep_tok_bf16",
+        what: "the token-major chunk prep of the serving prefill on bf16 tensor cores (fp32 triangular solve), writing the tensors the bf16 recurrence multiplies (w, scaled query, decayed key, intra) as bf16",
+        reported: "native:gdn_chunk_prep_tok_bf16",
+        block_dim: 256,
+        tile: (64, 128),
+        shared_bytes: 0,
+        programmatic: false,
+        src: concat!(include_str!("../cu/gdn_chunk_common.cuh"), include_str!("../cu/gdn_chunk_prep_bf16.cu")),
+    },
+    CudaKernel {
         name: "gdn_chunk_prep_tok_train_tc",
         op: Op::GatedDeltaChunkLoop,
         weight: Dtype::F32,
@@ -3280,7 +3313,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (64, 128),
         shared_bytes: 0,
         programmatic: false,
-        src: include_str!("../cu/gdn_chunk_prep_tc.cu"),
+        src: concat!(include_str!("../cu/gdn_chunk_common.cuh"), include_str!("../cu/gdn_chunk_prep_tc.cu")),
     },
     CudaKernel {
         name: "gdn_chunk_prep_tok_tc",
@@ -3296,7 +3329,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (64, 128),
         shared_bytes: 0,
         programmatic: false,
-        src: include_str!("../cu/gdn_chunk_prep_tc.cu"),
+        src: concat!(include_str!("../cu/gdn_chunk_common.cuh"), include_str!("../cu/gdn_chunk_prep_tc.cu")),
     },
     // ---- t-gdn2: the tensor-core Gated DeltaNet chunk backward ----
     CudaKernel {

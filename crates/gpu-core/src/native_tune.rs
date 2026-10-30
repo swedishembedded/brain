@@ -312,6 +312,14 @@ pub fn force_candidate(slot: &str, kernel: &str) {
     FORCED_ANY.store(true, Ordering::Release);
 }
 
+/// The candidate `slot` is pinned to by [`force_candidate`], if any.
+pub fn forced_candidate(slot: &str) -> Option<String> {
+    if !FORCED_ANY.load(Ordering::Acquire) {
+        return None;
+    }
+    FORCED.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(s, _)| s == slot).map(|(_, k)| k.clone())
+}
+
 /// Drop every forced candidate: the tuned choice applies again.
 pub fn clear_forced() {
     FORCED.lock().unwrap_or_else(|e| e.into_inner()).clear();

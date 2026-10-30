@@ -17,7 +17,9 @@
 //!
 //! The reference is loaded and measured first, dropped, then the candidate is loaded: the two never share a card, so
 //! a 27B fits. Usage: `qwen35_fp8_parity <hf-dir> <text file> [--prompts N] [--prompt-tokens N] [--steps N]
-//! [--device gpu1] [--backend cuda] [--kv int8] [--assert-agreement F]`.
+//! [--device gpu1] [--backend cuda] [--kv int8] [--gdn-prefill exact|bf16|auto] [--assert-agreement F]`. The reference
+//! always runs the exact (TF32) Gated DeltaNet prefill; the candidate runs the one `--gdn-prefill` names (`auto`, the
+//! default, is the device's measured selection, i.e. what serving runs).
 
 use model::ops::TierPolicy;
 use qwen35::int8_gguf_resident::{budgeted_gpus, Qwen35GgufInstance, Qwen35GgufResident};
@@ -93,7 +95,7 @@ fn main() {
     let flag = |name: &str| a.iter().position(|arg| arg == name).and_then(|i| a.get(i + 1)).cloned();
     let num = |name: &str, default: usize| flag(name).and_then(|v| v.parse().ok()).unwrap_or(default);
     let (Some(path), Some(text_path)) = (a.get(1).cloned(), a.get(2).cloned()) else {
-        eprintln!("usage: qwen35_fp8_parity <hf-dir> <text file> [--prompts N] [--prompt-tokens N] [--steps N] [--device D] [--backend B] [--kv K] [--assert-agreement F]");
+        eprintln!("usage: qwen35_fp8_parity <hf-dir> <text file> [--prompts N] [--prompt-tokens N] [--steps N] [--device D] [--backend B] [--kv K] [--gdn-prefill exact|bf16|auto] [--assert-agreement F]");
         std::process::exit(2);
     };
     let (prompts, ptoks, steps) = (num("--prompts", 4), num("--prompt-tokens", 2000), num("--steps", 24));
@@ -112,6 +114,7 @@ fn main() {
     drop(ckpt);
 
     // The reference: the same weights as bf16, one prompt's greedy continuation at a time.
+    gpu_core::force_candidate("gdn_prefill", "exact");
     let mut prompt_ids: Vec<Vec<u32>> = Vec::new();
     let mut reference: Vec<(Vec<u32>, Vec<Vec<f32>>)> = Vec::new();
     {
@@ -125,6 +128,12 @@ fn main() {
         }
     }
 
+    gpu_core::clear_forced_candidates();
+    match flag("--gdn-prefill").as_deref().unwrap_or("auto") {
+        "auto" => {}
+        form @ ("exact" | "bf16") => gpu_core::force_candidate("gdn_prefill", form),
+        other => panic!("--gdn-prefill takes exact, bf16 or auto, not {other}"),
+    }
     let inst = load(&path, devices, cap, held, kv);
     let (mut agree, mut positions, mut big_flips) = (0usize, 0usize, 0usize);
     let (mut sum_rel, mut worst_rel, mut sum_kl) = (0f64, 0f64, 0f64);

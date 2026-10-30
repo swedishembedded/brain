@@ -80,7 +80,7 @@
 
 // Dynamic shared memory, in floats: key tile, query / value tile, attn0 and the
 // solved T, then the per-row cumulative decay, its exponential and beta.
-#define PREP_SMEM_FLOATS (MAXC * SK + MAXC * SX + 2 * MAXC * SC + 3 * MAXC)
+#define PREP_SMEM_FLOATS (MAXC * SK + MAXC * SX + 2 * MAXC * SC + 3 * MAXC + 3 * 8 * MAXC)
 
 // x = hi + lo with both parts TF32-representable. Truncation (a mask) instead of `cvt.rna.tf32`: the convert runs on
 // a slow pipe and the splits are most of the instructions around the MMAs. lo = x - hi is exact in fp32 and is then
@@ -179,6 +179,7 @@ __device__ __forceinline__ void brain_gdn_chunk_prep_body(const unsigned int* pa
     float* sg = sT + MAXC * SC;             // cumulative decay
     float* sexp = sg + MAXC;                // exp of it
     float* sbeta = sexp + MAXC;
+    float* sRed = sbeta + MAXC;             // partial sums of the T solve's panels, [3][8][64]
 
     const unsigned int tid = threadIdx.x, lane = tid & 31u, warp = tid >> 5;
     const unsigned int g = lane >> 2, t4 = lane & 3u;
@@ -286,37 +287,8 @@ __device__ __forceinline__ void brain_gdn_chunk_prep_body(const unsigned int* pa
     }
     __syncthreads();
 
-    // ---- T = (I - attn0)^-1 by forward substitution ----
-    // Outer-product form of  T[i][j] = attn0[i][j] + sum_{j<k<i} attn0[i][k] * T[k][j]: once row k is final, every row
-    // below it takes its k term in one parallel step. Each element still sums its terms in ascending k starting from
-    // attn0[i][j], so the result is bit-for-bit the row-by-row recurrence; the dependent chain per step is one
-    // multiply-add instead of up to 63 (the row-by-row form was over half of this kernel's cycles).
-    for (unsigned int e = tid; e < MAXC * SC; e += THREADS) { sT[e] = sA[e]; }
-    __syncthreads();
-    {
-        const unsigned int j = tid & (MAXC - 1), row_lane = tid / MAXC;  // a thread owns column j and every fourth row
-        for (unsigned int k = 1; k + 1 < C; ++k) {
-            if (j < k) {
-                const float t_kj = sT[k * SC + j];
-                // Batches of four rows: the loads of a batch are issued together before its stores (the compiler cannot
-                // prove the shared arrays do not alias, so a plain loop waits for every store).
-                unsigned int i = k + 1 + row_lane;
-                for (; i + 3 * (THREADS / MAXC) < C; i += 4 * (THREADS / MAXC)) {
-                    const unsigned int i1 = i + THREADS / MAXC, i2 = i1 + THREADS / MAXC, i3 = i2 + THREADS / MAXC;
-                    const float c0 = sT[i * SC + j], c1 = sT[i1 * SC + j], c2 = sT[i2 * SC + j], c3 = sT[i3 * SC + j];
-                    const float a0 = sA[i * SC + k], a1 = sA[i1 * SC + k], a2 = sA[i2 * SC + k], a3 = sA[i3 * SC + k];
-                    sT[i * SC + j] = c0 + a0 * t_kj;
-                    sT[i1 * SC + j] = c1 + a1 * t_kj;
-                    sT[i2 * SC + j] = c2 + a2 * t_kj;
-                    sT[i3 * SC + j] = c3 + a3 * t_kj;
-                }
-                for (; i < C; i += THREADS / MAXC) { sT[i * SC + j] = sT[i * SC + j] + sA[i * SC + k] * t_kj; }
-            }
-            __syncthreads();
-        }
-    }
-    if (tid < C) { sT[tid * SC + tid] = 1.0f; }
-    __syncthreads();
+    // ---- T = (I - attn0)^-1 (unit lower triangular, fp32; `brain_unit_lower_inverse`) ----
+    brain_unit_lower_inverse(sA, sT, sRed, SC, C);
     if (TRAIN) {
         for (unsigned int e = tid; e < C * C; e += THREADS) {
             const unsigned int i = e / C, j = e % C;

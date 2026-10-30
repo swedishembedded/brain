@@ -430,10 +430,14 @@ const GDN_CHUNK_PREP_TOK_TRAIN_BINDINGS: &[BindKind] = &[
     BindKind::StorageReadWrite,
 ];
 
+/// Dynamic shared memory of `gdn_chunk_prep_tok_bf16`: bf16 key and query / value tiles (64 x 136), the attn0 / scaled-T
+/// space (two bf16 64 x 72), the fp32 T (64 x 68), four 64-float vectors and the solve's 3 x 8 x 64 partial sums.
+const GDN_CHUNK_PREP_BF16_DYNAMIC_SHARED_BYTES: u32 = 2 * 64 * 136 * 2 + 2 * 64 * 72 * 2 + 64 * 68 * 4 + 4 * 64 * 4 + 3 * 8 * 64 * 4;
+
 /// Dynamic shared memory of `gdn_chunk_prep_tc`: the 64 x 132 key tile, the
 /// 64 x 136 query / value tile, two 64 x 68 matrices (attn0 and the solved T)
-/// and three 64-float vectors (cumulative decay, its exponential, beta), all f32.
-const GDN_CHUNK_PREP_DYNAMIC_SHARED_BYTES: u32 = (64 * 132 + 64 * 136 + 2 * 64 * 68 + 3 * 64) * 4;
+/// and three 64-float vectors (cumulative decay, its exponential, beta) and three 8 x 64 partial-sum panels of the T solve, all f32.
+const GDN_CHUNK_PREP_DYNAMIC_SHARED_BYTES: u32 = (64 * 132 + 64 * 136 + 2 * 64 * 68 + 3 * 64 + 3 * 8 * 64) * 4;
 
 /// What the tensor-core chunk forward needs of the call: the head widths it is
 /// written for, a chunk of at most 64 rows, no `cuda` in `BRAIN_NO_PROVIDER`.
@@ -485,6 +489,10 @@ pub fn gdn_chunk_prep_train_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceB
 /// Dynamic shared memory of `gdn_chunk_loop_tc`: two 64 x 132 staged tiles, the
 /// 128 x 40 state slice, the 64 x 40 `v_new` and one 64-float decay vector, all f32.
 const GDN_CHUNK_LOOP_TC_DYNAMIC_SHARED_BYTES: u32 = (2 * 64 * 132 + 128 * 40 + 64 * 40 + 64) * 4;
+
+/// Dynamic shared memory of `gdn_chunk_loop_bf16`: bf16 w, query and key tiles (64 x 136), intra (64 x 72), the state
+/// copy (128 x 40) and `v_new` (64 x 40).
+const GDN_CHUNK_LOOP_BF16_DYNAMIC_SHARED_BYTES: u32 = (3 * 64 * 136 + 64 * 72 + 128 * 40 + 64 * 40) * 2;
 
 /// Value-column blocks `gdn_chunk_loop_tc` splits each head across.
 const GDN_CHUNK_LOOP_TC_SPLITS: u32 = 4;
@@ -540,6 +548,40 @@ pub fn gdn_chunk_loop_train_tc_step(
     gpu.step_native_sliced(id, bufs, &[(0, 0); 12], &[bh, c_len, dk, dv, n_chunks, scale.to_bits(), heads_tok], bh * GDN_CHUNK_LOOP_TC_SPLITS)
 }
 
+/// Whether the bf16 form of the GDN prefill forward (`gdn_chunk_prep_tok_bf16` + `gdn_chunk_loop_bf16`) is the device's
+/// selected candidate for the serving prefill: pinned by [`crate::force_candidate`] on the `gdn_prefill` slot, else the
+/// outcome of [`crate::Gpu::prepare_gdn_prefill`]'s measurement (the exact form until it has run).
+pub fn gdn_bf16_prefill_selected(gpu: &crate::Gpu) -> bool {
+    match crate::native_tune::forced_candidate(crate::gdn_prefill_tune::SLOT).as_deref() {
+        Some(form) => form == "bf16",
+        None => gpu.gdn_prefill_choice().is_some_and(|c| c.bf16),
+    }
+}
+
+/// [`gdn_chunk_loop_tc_step`] on bf16 operands (`gdn_chunk_loop_bf16`): `bufs` are the same ten, but `key`, `query`, `w` and
+/// `intra_scores` hold the bf16 tensors `gdn_chunk_prep_tok_bf16` wrote (`kd`, `qs`, `w`, `intra`) and `exp_g_cs` is not read.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_chunk_loop_bf16_step(
+    gpu: &crate::Gpu,
+    bufs: &[&backend_api::DeviceBuffer; 10],
+    bh: u32,
+    c_len: u32,
+    dk: u32,
+    dv: u32,
+    n_chunks: u32,
+    scale: f32,
+    heads_tok: u32,
+) -> Option<crate::Step> {
+    if !gdn_chunk_prep_shape_ok(dk, dv, c_len) {
+        return None;
+    }
+    let cc = gpu.caps().arch.compute_capability?;
+    let kernel = kernels_cuda::get("gdn_chunk_loop_bf16").filter(|k| k.min_cc <= cc)?;
+    let launch = backend_api::CudaLaunch { dynamic_shared_bytes: GDN_CHUNK_LOOP_BF16_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..backend_api::CudaLaunch::NONE };
+    let id = gpu.native_kernel_launched(kernel, GDN_CHUNK_LOOP_BINDINGS, launch)?;
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 10], &[bh, c_len, dk, dv, n_chunks, scale.to_bits(), heads_tok], bh * GDN_CHUNK_LOOP_TC_SPLITS)
+}
+
 /// Whether the token-major tensor-core prefix can serve this call: the chunk
 /// forward's own constraints plus a value-head count that is a multiple of the
 /// key-head count.
@@ -579,6 +621,20 @@ pub fn gdn_chunk_prep_tok_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuf
     let cc = gpu.caps().arch.compute_capability?;
     let kernel = kernels_cuda::get("gdn_chunk_prep_tok_tc").filter(|k| k.min_cc <= cc)?;
     let launch = backend_api::CudaLaunch { dynamic_shared_bytes: GDN_CHUNK_PREP_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..backend_api::CudaLaunch::NONE };
+    let id = gpu.native_kernel_launched(kernel, GDN_CHUNK_PREP_TOK_BINDINGS, launch)?;
+    let params = [l.bhc, l.c_len, l.head_dim, l.head_dim, 0, l.scale.to_bits(), l.heads, l.n_chunks, l.group, l.eps.to_bits()];
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 12], &params, l.bhc)
+}
+
+/// [`gdn_chunk_prep_tok_step`] writing the bf16 tensors [`gdn_chunk_loop_bf16_step`] reads (`gdn_chunk_prep_tok_bf16`): the
+/// same twelve buffers, with `w`, `intra_scores`, `query_cm` and `key_cm` holding bf16 (`w`, `intra`, `qs`, `kd`).
+pub fn gdn_chunk_prep_tok_bf16_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 12], l: GdnTokenLayout) -> Option<crate::Step> {
+    if !gdn_chunk_prep_tok_shape_ok(l.head_dim, l.head_dim, l.c_len, l.heads, l.group) {
+        return None;
+    }
+    let cc = gpu.caps().arch.compute_capability?;
+    let kernel = kernels_cuda::get("gdn_chunk_prep_tok_bf16").filter(|k| k.min_cc <= cc)?;
+    let launch = backend_api::CudaLaunch { dynamic_shared_bytes: GDN_CHUNK_PREP_BF16_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..backend_api::CudaLaunch::NONE };
     let id = gpu.native_kernel_launched(kernel, GDN_CHUNK_PREP_TOK_BINDINGS, launch)?;
     let params = [l.bhc, l.c_len, l.head_dim, l.head_dim, 0, l.scale.to_bits(), l.heads, l.n_chunks, l.group, l.eps.to_bits()];
     gpu.step_native_sliced(id, bufs, &[(0, 0); 12], &params, l.bhc)
