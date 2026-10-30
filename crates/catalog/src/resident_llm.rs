@@ -615,7 +615,7 @@ impl QwenServeConfig {
         self.kv_offload_gb = l.kv_offload_gb.unwrap_or(self.kv_offload_gb);
         self.max_prefill_cap = l.max_prefill.unwrap_or(self.max_prefill_cap);
         let mut notes = Vec::new();
-        for (set, name) in [(l.prefix_slots, "prefix-slots"), (l.prefill_slice, "prefill-slice"), (l.prefill_batch, "prefill-batch")] {
+        for (set, name) in [(l.prefix_slots, "prefix-slots"), (l.prefill_slice, "prefill-slice"), (l.prefill_batch, "prefill-batch"), (l.itl_target_ms, "itl-target-ms")] {
             if set.is_some() {
                 notes.push(format!("qwen3: the {name} setting has no meaning for this engine and is ignored"));
             }

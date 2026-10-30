@@ -73,7 +73,7 @@ impl OcrServeConfig {
         self.kv = p.kv_cache.or(self.kv);
         self.gemm = p.gemm.or(self.gemm);
         let mut notes = Vec::new();
-        for (set, name) in [(l.kv_offload_gb.is_some(), "--kv-offload-gb"), (l.kv_tokens.is_some(), "kv-tokens"), (l.max_prefill.is_some(), "max-prefill"), (l.prefix_slots.is_some(), "prefix-slots")] {
+        for (set, name) in [(l.kv_offload_gb.is_some(), "--kv-offload-gb"), (l.kv_tokens.is_some(), "kv-tokens"), (l.max_prefill.is_some(), "max-prefill"), (l.prefix_slots.is_some(), "prefix-slots"), (l.itl_target_ms.is_some(), "--itl-target-ms")] {
             if set {
                 notes.push(format!("{}: {name} has no meaning for this engine and is ignored", OCR_POLICY.model));
             }

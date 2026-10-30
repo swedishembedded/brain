@@ -257,6 +257,16 @@ SERVING POLICY  (one model-agnostic policy for every model that serves it.
                          not fit the GPUs is refused at startup).
   --kv-offload-gb N      host RAM granted for preempted sessions' KV, fractional
                          allowed (default 0, off).
+  --itl-target-ms N      the token interval, in milliseconds, a server holds its
+                         running sequences to while it reads new prompts in
+                         beside them: each iteration carries the next token of
+                         every sequence plus as many prompt rows as fit in N ms.
+                         A longer target reads prompts in faster (earlier
+                         first tokens for the newcomers, longer gaps between
+                         tokens for the others); a shorter one protects the
+                         gaps. Engines that do not mix prompts into decoding
+                         report the setting as ignored (default: the engine's
+                         own, 45 for the Qwen3.8 GGUF models).
   --speculative MODE     speculative decoding for the Qwen3.8 GGUF models:
                          auto|off|mtp|dflash|ngram (default auto = the best
                          drafter the checkpoint offers, off when it has none;

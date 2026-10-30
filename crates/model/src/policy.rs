@@ -28,8 +28,10 @@
 //!   it costs an extra pass over the weights per group and is off by default.
 //! # Limits: only what a person decides is a flag
 //! `--ctx` (cap the window below the model's declared one), `--max-batch` (the
-//! concurrency the service must carry) and `--kv-offload-gb` (host RAM granted
-//! for preempted sessions) are real choices. Everything else a server sizes is
+//! concurrency the service must carry), `--kv-offload-gb` (host RAM granted
+//! for preempted sessions) and `--itl-target-ms` (the token interval a mixed
+//! iteration holds running sequences to) are real choices. Everything else a
+//! server sizes is
 //! derived from the model's metadata, the device and the memory plan, and the
 //! chosen values are reported at startup: the KV pool size, the prefix-cache
 //! slots, the prefill slice and batch, the prefill row cap and the norm fusion
@@ -63,6 +65,9 @@ pub struct ServeLimits {
     pub prefill_slice: Option<u32>,
     /// Prompt rows prefilled across sequences in one forward.
     pub prefill_batch: Option<u32>,
+    /// `--itl-target-ms N`: the iteration length, in milliseconds, a scheduler that mixes prompt rows into the
+    /// decode step holds the running sequences' token interval to; prompt rows fill what the target leaves.
+    pub itl_target_ms: Option<u32>,
 }
 
 /// The typed policy. All fields default to "the model's own choice".
@@ -83,7 +88,7 @@ pub struct ServePolicy {
 }
 
 /// The public flags that take a value.
-pub const VALUE_FLAGS: &[&str] = &["--weight-format", "--kv-cache", "--gemm", "--ctx", "--max-batch", "--kv-offload-gb"];
+pub const VALUE_FLAGS: &[&str] = &["--weight-format", "--kv-cache", "--gemm", "--ctx", "--max-batch", "--kv-offload-gb", "--itl-target-ms"];
 /// The public switches (no value).
 pub const SWITCH_FLAGS: &[&str] = &["--kv-calibration", "--exact-decode"];
 /// Settings that are derived by default and exist only as the target of a
@@ -111,6 +116,10 @@ impl ServePolicy {
             }
             "--ctx" => self.limits.ctx = Some(count(flag, value)?),
             "--max-batch" => self.limits.max_batch = Some(count(flag, value)?),
+            "--itl-target-ms" => match count(flag, value)? {
+                0 => return Err(format!("--itl-target-ms {value:?}: a target of 0 leaves a prompt no device time")),
+                ms => self.limits.itl_target_ms = Some(ms),
+            },
             "kv-tokens" => self.limits.kv_tokens = Some(count(flag, value)?),
             "--kv-offload-gb" => {
                 let gb: f64 = value.trim().parse().map_err(|_| format!("--kv-offload-gb {value:?}: expected a number of GiB"))?;
@@ -147,7 +156,7 @@ impl ServePolicy {
             v.push("exact-decode".into());
         }
         let l = &self.limits;
-        for (name, x) in [("ctx", l.ctx), ("max-batch", l.max_batch), ("kv-tokens", l.kv_tokens), ("prefix-slots", l.prefix_slots), ("max-prefill", l.max_prefill), ("prefill-slice", l.prefill_slice), ("prefill-batch", l.prefill_batch)] {
+        for (name, x) in [("ctx", l.ctx), ("max-batch", l.max_batch), ("itl-target-ms", l.itl_target_ms), ("kv-tokens", l.kv_tokens), ("prefix-slots", l.prefix_slots), ("max-prefill", l.max_prefill), ("prefill-slice", l.prefill_slice), ("prefill-batch", l.prefill_batch)] {
             if let Some(x) = x {
                 v.push(format!("{name}={x}"));
             }
@@ -396,16 +405,17 @@ mod tests {
         p.set("--gemm", "fp32").unwrap();
         p.set("--ctx", "4096").unwrap();
         p.set("--kv-offload-gb", "1.5").unwrap();
+        p.set("--itl-target-ms", "60").unwrap();
         p.switch("no-fuse-norm").unwrap();
         p.switch("--kv-calibration").unwrap();
         p.switch("--exact-decode").unwrap();
         assert_eq!(p.weights, Some(TierPolicy::uniform(Dtype::I8)));
         assert_eq!(p.kv_cache, Some(KvTier::FP8));
         assert_eq!(p.gemm, Some(GemmPrecision::Fp32Reference));
-        assert_eq!((p.limits.ctx, p.limits.kv_offload_gb), (Some(4096), Some(1.5)));
+        assert_eq!((p.limits.ctx, p.limits.kv_offload_gb, p.limits.itl_target_ms), (Some(4096), Some(1.5), Some(60)));
         assert_eq!((p.fuse_norm, p.kv_calibration, p.exact_decode), (Some(false), true, true));
         assert!(p.describe().contains("exact-decode"), "{}", p.describe());
-        for (flag, bad) in [("--ctx", "-1"), ("--kv-cache", "fp4"), ("--gemm", "tf32"), ("--kv-offload-gb", "nan"), ("--weight-format", "q9")] {
+        for (flag, bad) in [("--ctx", "-1"), ("--kv-cache", "fp4"), ("--gemm", "tf32"), ("--kv-offload-gb", "nan"), ("--weight-format", "q9"), ("--itl-target-ms", "0")] {
             let e = ServePolicy::default().set(flag, bad).unwrap_err();
             assert!(e.contains(flag), "{e}");
         }

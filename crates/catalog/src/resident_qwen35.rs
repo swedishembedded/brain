@@ -340,6 +340,9 @@ pub struct Qwen35GgufServeConfig {
     /// (`the prefill-batch setting`); 0 prefills one sequence's slice at a time.
     /// `None` takes the engine's default.
     pub prefill_batch: Option<u32>,
+    /// The token interval, in milliseconds, a mixed iteration holds the running sequences to (`--itl-target-ms`).
+    /// `None` takes the engine's default.
+    pub itl_target_ms: Option<u32>,
     /// Why the serving policy cannot be honoured by this resident (set by
     /// [`Self::apply_policy`]); building the resident refuses with it.
     pub refused: Option<String>,
@@ -424,6 +427,7 @@ impl Qwen35GgufServeConfig {
         self.prefix_slots = l.prefix_slots.or(self.prefix_slots);
         self.prefill_slice = l.prefill_slice.or(self.prefill_slice);
         self.prefill_batch = l.prefill_batch.or(self.prefill_batch);
+        self.itl_target_ms = l.itl_target_ms.or(self.itl_target_ms);
         let mut notes = Vec::new();
         for (set, name) in [(l.kv_offload_gb.is_some(), "--kv-offload-gb"), (l.kv_tokens.is_some(), "kv-tokens"), (l.max_prefill.is_some(), "max-prefill")] {
             if set {
@@ -441,7 +445,7 @@ impl Qwen35GgufServeConfig {
         qwen35::int8_gguf_resident::PrefillPolicy {
             slice_tokens: self.prefill_slice.map_or(default.slice_tokens, |n| n as usize),
             batch_tokens: self.prefill_batch.map_or(default.batch_tokens, |n| n as usize),
-            ..default
+            step_target: self.itl_target_ms.map_or(default.step_target, |ms| std::time::Duration::from_millis(ms.into())),
         }
     }
 
