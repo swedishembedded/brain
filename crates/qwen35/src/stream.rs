@@ -1174,17 +1174,26 @@ fn head_rows_on<'h, R>(
         }
         HeadRows::Device(x) => x,
     };
+    let logits_buf = head_logits_issue(g, ops, cfg, final_norm_buf, head, x, rows);
+    // The reduction's `read` issues the held pass before it waits.
+    reduce(g, &logits_buf)
+}
+
+/// The dispatches of the head epilogue over `x` (`[rows, d_model]`, on `g`'s card): the final norm and the head
+/// projection, leaving the `[rows, vocab]` logits in the returned buffer. Nothing is read, so a recorded step can hold
+/// them ([`gpu_core::tape`]).
+pub(crate) fn head_logits_issue(g: &Gpu, ops: &model::ops::Ops, cfg: &Qwen35Config, final_norm_buf: &DeviceBuffer, head: &Weight, x: &DeviceBuffer, rows: u32) -> DeviceBuffer {
+    let d = cfg.d_model;
     let normed = g.storage(rows as u64 * d as u64);
-    g.submit(&[], &[crate::model::final_norm_step(g, x, final_norm_buf, &normed, d as u32, rows)]);
+    g.submit(&[], &[crate::model::final_norm_step(g, x, final_norm_buf, &normed, d, rows)]);
 
     let mut s = Vec::new();
     // The int8 packing (two launches) only where the head reads it.
-    let act = if crate::train_base::reads_float_acts(head) { ops.act_f32(&normed, 0, rows, d as u32) } else { ops.act(&mut s, &normed, 0, rows, d as u32) };
+    let act = if crate::train_base::reads_float_acts(head) { ops.act_f32(&normed, 0, rows, d) } else { ops.act(&mut s, &normed, 0, rows, d) };
     let logits_buf = g.storage(rows as u64 * cfg.vocab as u64);
     ops.matmul(&mut s, head, &act, &logits_buf, 0);
     g.submit(&[], &s);
-    // The reduction's `read` issues the held pass before it waits.
-    reduce(g, &logits_buf)
+    logits_buf
 }
 
 /// Real end-to-end generation: tokenize `prompt` (`tokenizer_path`, `data::

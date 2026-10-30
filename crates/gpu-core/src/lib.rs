@@ -2018,6 +2018,14 @@ mod native_facade {
         pub fn reclaim_ceiling_bytes(&self) -> u64 {
             backend_api::hardware::reclaim_ceiling(self.max_buffer_bytes())
         }
+        /// Whether a loop that allocates per iteration should drain now: more bytes sit dropped-and-unreclaimed than half
+        /// of [`Self::reclaim_ceiling_bytes`], so one more iteration's allocations could cross it. The ceiling is only
+        /// looked up when something is pending (on a backend that tracks nothing it is never asked: reading it costs a
+        /// driver query).
+        pub fn reclaim_due(&self) -> bool {
+            let pending = self.pending_reclaim_bytes();
+            pending > 0 && pending > self.reclaim_ceiling_bytes() / 2
+        }
         /// [`Self::poll_wait`], bounded: `false` on timeout instead of blocking
         /// forever. See `backend_api::Backend::poll_wait_timeout`'s doc for the
         /// full contract, including which backends actually bound anything

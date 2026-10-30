@@ -164,6 +164,7 @@ use gguf::GdnFixSource;
 use gpu_core::select::Dtype;
 use gpu_core::{DeviceBuffer, Gpu};
 use model::adapter::bank::AdapterBankRequest;
+use crate::decode_tape::{DecodePlan, DecodePlans, HeadKind, PlanKey, PlanOut};
 use model::dispatch::LORA_SLOT_NONE;
 use model::kv_tier::{KvLayer, KvTier};
 use model::ops::TierPolicy;
@@ -1375,6 +1376,32 @@ pub struct Qwen35GgufInstance {
     spec_rows: u32,
     /// The checkpoint's multi-token-prediction head, when loaded - see [`mtp`].
     mtp: Option<mtp::MtpDrafter>,
+    /// Recorded decode steps ([`Self::decode_planned`]).
+    plans: RefCell<DecodePlans>,
+    /// Whether a plain decode step may replay a recording (on by default).
+    plans_on: Cell<bool>,
+}
+
+/// What a decode step's head hands the host.
+pub(crate) enum HeadOut {
+    Ids(Vec<u32>),
+    TopK(Vec<Vec<(u32, f32)>>),
+}
+
+impl HeadOut {
+    pub(crate) fn into_ids(self) -> Vec<u32> {
+        match self {
+            HeadOut::Ids(ids) => ids,
+            HeadOut::TopK(_) => unreachable!("a greedy head answered with candidates"),
+        }
+    }
+
+    pub(crate) fn into_topk(self) -> Vec<Vec<(u32, f32)>> {
+        match self {
+            HeadOut::TopK(top) => top,
+            HeadOut::Ids(_) => unreachable!("a top-k head answered with ids"),
+        }
+    }
 }
 
 /// Row groups `[start, end)` of an exact-decode head projection over `rows`
@@ -1902,6 +1929,81 @@ impl Qwen35GgufInstance {
             out.extend(crate::stream::head_argmax_rows_on(g, ops, &self.cfg, norm, w, &host[start * d..end * d], (end - start) as u32));
         }
         out
+    }
+
+    /// The head of `kind` over `hidden`, read back.
+    fn head_rows(&self, hidden: &DeviceBuffer, rows: u32, kind: HeadKind) -> HeadOut {
+        match kind {
+            HeadKind::Argmax => HeadOut::Ids(self.head_argmax_rows(hidden, rows)),
+            HeadKind::TopK(cap) => HeadOut::TopK(self.head_topk_rows(hidden, rows, cap)),
+        }
+    }
+
+    /// Turn recorded decode steps on or off. Off is the reference every recording is gated against: the same dispatches
+    /// built and launched the ordinary way.
+    pub fn set_decode_plans(&self, on: bool) {
+        self.plans_on.set(on);
+        if !on {
+            self.plans.borrow_mut().clear();
+        }
+    }
+
+    /// Recorded decode steps held now.
+    pub fn decode_plans_held(&self) -> usize {
+        self.plans.borrow().len()
+    }
+
+    /// One decode step of rows `tokens` (slot `slots[i]`, position `positions[i]`) and its head of `kind`, as a replay of
+    /// the recording for this `(rows, context bucket, head)` - made once the key has held for [`RECORD_PLAN_AFTER`]
+    /// steps. The step then costs the host a handful of small input writes and one graph launch: its ~2500 dispatches
+    /// are neither rebuilt nor compared, and the layers and the head are one submission.
+    ///
+    /// `None` when the step does not qualify (the caller runs it the ordinary way, bit-for-bit the same arithmetic): more
+    /// than one stage (the hand-off between cards is not a dispatch a recording holds), embedding rows decoded on the
+    /// host, the exact-decode regime, or a key that has not held yet.
+    fn decode_planned(&self, tokens: &[u32], slots: &[u32], positions: &[u32], kind: HeadKind) -> Option<HeadOut> {
+        if !self.plans_on.get() || self.shards.len() != 1 || self.exact_decode || !self.embeds_on_device() {
+            return None;
+        }
+        let s = &self.shards[0];
+        let rows = tokens.len() as u32;
+        if rows == 0 || rows > s.caches.slots || slots.iter().any(|&sl| sl >= s.caches.slots) || tokens.iter().any(|&t| t >= self.cfg.vocab) {
+            return None;
+        }
+        let seqs = s.caches.batch(slots, positions);
+        let caches = BatchDecodeCaches { gqa_kv: &s.caches.gqa_kv, gqa_cap: s.caches.kv_block(), seqs: &seqs, one_sequence: false, gdn_pool: Some(s.caches.gdn_pool()), memory: &[] };
+        let key = PlanKey { rows, cap: s.qwen35.paged_step_shape(&caches).0, head: kind };
+        let looked = self.plans.borrow_mut().lookup(key);
+        let plan = match looked {
+            Ok(plan) => {
+                s.qwen35.write_decode_inputs(&plan.inputs, Some(tokens), &caches);
+                plan
+            }
+            Err(false) => return None,
+            Err(true) => {
+                let (tape, inputs, out) = s.qwen35.record_decode_step(tokens, &caches, |hidden| self.record_head(hidden, rows, kind));
+                DecodePlan { key, tape, inputs, out }
+            }
+        };
+        let g = &s.qwen35.gpu;
+        g.replay_tape(&plan.tape);
+        let out = match &plan.out {
+            PlanOut::Argmax(ids) => HeadOut::Ids(model::readout::read_argmax(g, ids, rows)),
+            PlanOut::TopK(top) => HeadOut::TopK(top.read(g)),
+        };
+        self.plans.borrow_mut().put(plan);
+        Some(out)
+    }
+
+    /// The head of `kind` over `hidden` recorded into the open tape: the final norm, the projection and the reduction,
+    /// whose answer stays in the returned buffers.
+    fn record_head(&self, hidden: &DeviceBuffer, rows: u32, kind: HeadKind) -> PlanOut {
+        let (g, ops, norm, w) = self.head_parts();
+        let logits = crate::stream::head_logits_issue(g, ops, &self.cfg, norm, w, hidden, rows);
+        match kind {
+            HeadKind::Argmax => PlanOut::Argmax(crate::model::argmax_rows_issue_of(g, &logits, rows, self.cfg.vocab)),
+            HeadKind::TopK(cap) => PlanOut::TopK(crate::model::topk_rows_issue_of(g, &logits, rows, self.cfg.vocab, cap)),
+        }
     }
 
     /// Each row's top-`cap` candidates, extracted on the device.
@@ -3935,6 +4037,8 @@ impl Qwen35GgufResident {
             prefill_adapter_slot: Cell::new(LORA_SLOT_NONE),
             spec_rows: 0,
             mtp: None,
+            plans: RefCell::default(),
+            plans_on: Cell::new(true),
         };
         let last_gpu = plan.stages.last().map(|(_, s, _)| s.gpu_index).unwrap_or(0);
         // A verify pass is a sequence's consecutive tokens, not unrelated

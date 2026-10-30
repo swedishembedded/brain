@@ -3910,7 +3910,6 @@ impl Qwen35 {
         // the next layer's are taken, and the backend refuses an allocation once
         // more than its reclaim ceiling sits dropped-and-unreclaimed. So an
         // unpooled round drains on BYTES, not on a layer count.
-        let reclaim_budget = g.reclaim_ceiling_bytes() / 2;
         let types = c.layer_types();
         #[allow(clippy::needless_range_loop)]
         for l in self.shard.start..self.shard.end {
@@ -3957,7 +3956,7 @@ impl Qwen35 {
             // layer's device work, while the `poll_wait` proves no recycled slot
             // is still being read before `flush` lets this layer's writes
             // reach the device.
-            if pooled || g.pending_reclaim_bytes() > reclaim_budget {
+            if pooled || g.reclaim_due() {
                 g.poll_wait();
             }
             g.flush();

@@ -106,3 +106,83 @@ impl SlotTapes {
         self.tapes.len()
     }
 }
+
+/// What a recorded plan leaves behind for the host: the head it ends in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum HeadKind {
+    /// Each row's greedy token.
+    Argmax,
+    /// Each row's best `n` candidates.
+    TopK(u32),
+}
+
+/// The identity of a recorded paged decode step: everything its dispatch list depends on. The rows' positions, slots,
+/// block tables and tokens are not in it: they are data ([`DecodeInputs`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct PlanKey {
+    pub rows: u32,
+    /// Keys of attention capacity the step was built at ([`Qwen35::paged_step_shape`](crate::model::Qwen35)).
+    pub cap: u32,
+    pub head: HeadKind,
+}
+
+/// The device buffers a plan's head leaves its answer in.
+pub(crate) enum PlanOut {
+    Argmax(DeviceBuffer),
+    TopK(model::readout::TopkOut),
+}
+
+/// One recorded step: layers and head as a single tape, its inputs and its outputs.
+pub(crate) struct DecodePlan {
+    pub key: PlanKey,
+    pub tape: Tape,
+    pub inputs: DecodeInputs,
+    pub out: PlanOut,
+}
+
+/// Recordings kept per instance. A serving batch moves between a handful of row counts and, slowly, context buckets, so
+/// the working set of recordings is small; each holds a step's activations (the logits block dominates), so it is bounded.
+pub(crate) const MAX_PLANS: usize = 8;
+
+/// Consecutive steps with one key before it is recorded: a key seen once or twice (a batch that grows with every
+/// arrival) is cheaper built the ordinary way than recorded.
+pub(crate) const RECORD_PLAN_AFTER: u32 = 3;
+
+/// The instance's recorded steps, most recently used last.
+#[derive(Default)]
+pub(crate) struct DecodePlans {
+    plans: Vec<DecodePlan>,
+    run: Option<(PlanKey, u32)>,
+}
+
+impl DecodePlans {
+    /// Note a step with `key`; the recording for it if there is one, else whether it has now held long enough to be recorded.
+    pub fn lookup(&mut self, key: PlanKey) -> Result<DecodePlan, bool> {
+        self.run = match self.run {
+            Some((k, n)) if k == key => Some((k, n.saturating_add(1))),
+            _ => Some((key, 1)),
+        };
+        match self.plans.iter().position(|p| p.key == key) {
+            Some(at) => Ok(self.plans.remove(at)),
+            None => Err(self.run.is_some_and(|(_, n)| n >= RECORD_PLAN_AFTER)),
+        }
+    }
+
+    /// Put a recording back as the most recently used, dropping the least recently used beyond [`MAX_PLANS`].
+    pub fn put(&mut self, plan: DecodePlan) {
+        if self.plans.len() >= MAX_PLANS {
+            self.plans.remove(0);
+        }
+        self.plans.push(plan);
+    }
+
+    /// Drop every recording (the buffers they bind are about to change or go).
+    pub fn clear(&mut self) {
+        self.plans.clear();
+        self.run = None;
+    }
+
+    pub fn len(&self) -> usize {
+        self.plans.len()
+    }
+}

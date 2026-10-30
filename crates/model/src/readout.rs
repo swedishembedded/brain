@@ -47,6 +47,13 @@ impl ReadoutKernels {
 /// The greedy pick of every row of `logits` (`[rows, vocab]`), reduced on the
 /// device; only the `rows` winning indices are read back.
 pub fn argmax_rows(g: &Gpu, k: ReadoutKernels, logits: &DeviceBuffer, rows: u32, vocab: u32) -> Vec<u32> {
+    let out = argmax_rows_issue(g, k, logits, rows, vocab);
+    read_argmax(g, &out, rows)
+}
+
+/// The dispatches of [`argmax_rows`], submitted without a read: the `[rows]` winning indices are left in the returned
+/// buffer. Split from the read so a recorded step ([`gpu_core::tape`]) can hold the reduction and read after a replay.
+pub fn argmax_rows_issue(g: &Gpu, k: ReadoutKernels, logits: &DeviceBuffer, rows: u32, vocab: u32) -> DeviceBuffer {
     let chunk = vocab.div_ceil(ARGMAX_CHUNKS);
     let part = g.storage(rows as u64 * ARGMAX_CHUNKS as u64 * 2);
     let out = g.storage(rows as u64);
@@ -57,13 +64,47 @@ pub fn argmax_rows(g: &Gpu, k: ReadoutKernels, logits: &DeviceBuffer, rows: u32,
             g.step(k.fin, &[&part, &out], &[rows, ARGMAX_CHUNKS], rows),
         ],
     );
-    g.read(&out, rows as usize).into_iter().map(|x| x as u32).collect()
+    out
+}
+
+/// The indices [`argmax_rows_issue`] left in `out`.
+pub fn read_argmax(g: &Gpu, out: &DeviceBuffer, rows: u32) -> Vec<u32> {
+    g.read(out, rows as usize).into_iter().map(|x| x as u32).collect()
+}
+
+/// Where [`topk_rows_issue`] left a block's candidates: `[rows, cap]` logits and token ids, best first.
+#[derive(Clone)]
+pub struct TopkOut {
+    pub vals: DeviceBuffer,
+    pub idx: DeviceBuffer,
+    pub rows: u32,
+    pub cap: u32,
+}
+
+impl TopkOut {
+    /// The candidates of every row as `(token id, logit)`, read from the card.
+    pub fn read(&self, g: &Gpu) -> Vec<Vec<(u32, f32)>> {
+        let n = (self.rows * self.cap) as usize;
+        let vals = g.read(&self.vals, n);
+        let idx = g.read(&self.idx, n);
+        (0..self.rows as usize)
+            .map(|r| {
+                let s = r * self.cap as usize;
+                idx[s..s + self.cap as usize].iter().map(|&x| x as u32).zip(vals[s..s + self.cap as usize].iter().copied()).collect()
+            })
+            .collect()
+    }
 }
 
 /// Every row's top-`cap` `(token id, logit)` candidates, best first, from
 /// `logits` (`[rows, vocab]`), extracted on the device. Destroys `logits` (the
 /// winners are masked in place).
 pub fn topk_rows(g: &Gpu, k: ReadoutKernels, logits: &DeviceBuffer, rows: u32, vocab: u32, cap: u32) -> Vec<Vec<(u32, f32)>> {
+    topk_rows_issue(g, k, logits, rows, vocab, cap).read(g)
+}
+
+/// The dispatches of [`topk_rows`], submitted without a read.
+pub fn topk_rows_issue(g: &Gpu, k: ReadoutKernels, logits: &DeviceBuffer, rows: u32, vocab: u32, cap: u32) -> TopkOut {
     assert!(cap > 0, "topk_rows: cap must be > 0");
     let vals = g.storage((rows * cap) as u64);
     let idx = g.storage((rows * cap) as u64);
@@ -82,14 +123,7 @@ pub fn topk_rows(g: &Gpu, k: ReadoutKernels, logits: &DeviceBuffer, rows: u32, v
         }
     }
     g.submit(&[], &steps);
-    let vals = g.read(&vals, (rows * cap) as usize);
-    let idx = g.read(&idx, (rows * cap) as usize);
-    (0..rows as usize)
-        .map(|r| {
-            let s = r * cap as usize;
-            idx[s..s + cap as usize].iter().map(|&x| x as u32).zip(vals[s..s + cap as usize].iter().copied()).collect()
-        })
-        .collect()
+    TopkOut { vals, idx, rows, cap }
 }
 
 #[cfg(not(target_arch = "wasm32"))]

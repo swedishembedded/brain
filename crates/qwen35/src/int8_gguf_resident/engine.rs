@@ -88,7 +88,8 @@ type PrefixCache = SnapshotPrefixCache<Resume>;
 use super::background::{PrefillDone, PrefillTask, TaskStart};
 use super::mtp::{FeedStart, FeedStep, PromptFeed};
 use super::pace::PrefillPace;
-use super::{KvLayout, KvWindow, MultiPrefillJob, Qwen35GgufInstance, MODEL};
+use super::{HeadOut, KvLayout, KvWindow, MultiPrefillJob, Qwen35GgufInstance, MODEL};
+use crate::decode_tape::HeadKind;
 
 /// Candidates a non-greedy pick can sample from. Real sampling is exact
 /// within this set; it only bounds how deep into the vocabulary nucleus
@@ -584,11 +585,12 @@ impl Qwen35GgufEngine {
     /// hidden block.
     /// One decode step's layers and then `head` over the hidden block they leave on the card, as ONE submission:
     /// nothing is read back between the last layer and the head.
-    fn decode_then<R>(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], head: impl FnOnce(&Qwen35GgufInstance, &gpu_core::DeviceBuffer) -> R) -> R {
+    fn decode_then(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], kind: HeadKind) -> HeadOut {
         assert_eq!(tables.len(), inputs.len(), "{MODEL}: tables/inputs length mismatch");
         let adapter_slots: Vec<u32> = tables.iter().map(|t| adapters::slot_of(self.inst.stage_models(), t.kv_namespace())).collect();
         let (slots, positions) = self.next_positions(tables);
         let inst = &mut self.inst;
+        let rows = slots.len() as u32;
         // A batch the scheduler will not speculate over (past the crossover or the verify scratch) is not worth
         // tracking for the drafter either.
         if slots.len() <= self.spec_batch_limit.min(inst.speculation_rows() as usize) {
@@ -598,15 +600,21 @@ impl Qwen35GgufEngine {
             inst.set_adapter_rows(&[]);
             let host = inst.hidden_to_host(&hidden, slots.len());
             inst.mtp_record_step(&slots, inputs, &host);
-            return head(inst, &hidden);
+            return inst.head_rows(&hidden, rows, kind);
         }
         inst.mtp_forget(&slots);
         let inst = &*inst;
+        // A batch of base rows only replays its recording; an adapter bank correcting any row changes the dispatches.
+        if adapter_slots.iter().all(|&s| s == LORA_SLOT_NONE) {
+            if let Some(out) = inst.decode_planned(inputs, &slots, &positions, kind) {
+                return out;
+            }
+        }
         let _step = inst.step_scope();
         inst.set_adapter_rows(&adapter_slots);
         let hidden = inst.stack_decode_hidden_dev(inputs, &slots, &positions).unwrap_or_else(|e| panic!("{e}"));
         inst.set_adapter_rows(&[]);
-        head(inst, &hidden)
+        inst.head_rows(&hidden, rows, kind)
     }
 }
 
@@ -1313,10 +1321,7 @@ impl PagedDecoder for Qwen35GgufEngine {
         if tables.is_empty() {
             return Vec::new();
         }
-        decode_lane(self.background_on, || {
-            let rows = inputs.len() as u32;
-            self.decode_then(tables, inputs, |inst, hidden| inst.head_argmax_rows(hidden, rows))
-        })
+        decode_lane(self.background_on, || self.decode_then(tables, inputs, HeadKind::Argmax).into_ids())
     }
     fn forward_batched_greedy_window(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], k: usize) -> Vec<Vec<u32>> {
         assert!((1..=self.decode_window_capacity()).contains(&k), "window {k} exceeds this engine's decode_window_capacity {}", self.decode_window_capacity());
@@ -1327,10 +1332,7 @@ impl PagedDecoder for Qwen35GgufEngine {
             return Vec::new();
         }
         let k = k.clamp(1, TOPK_CAPACITY) as u32;
-        decode_lane(self.background_on, || {
-            let rows = inputs.len() as u32;
-            self.decode_then(tables, inputs, |inst, hidden| inst.head_topk_rows(hidden, rows, k))
-        })
+        decode_lane(self.background_on, || self.decode_then(tables, inputs, HeadKind::TopK(k)).into_topk())
     }
     fn step_latency_target(&self) -> Option<std::time::Duration> {
         Some(self.prefill.step_target)

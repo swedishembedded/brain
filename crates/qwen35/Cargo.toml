@@ -52,5 +52,9 @@ name = "gguf_score"
 harness = false
 
 [[test]]
+name = "decode_plans"
+harness = false
+
+[[test]]
 name = "gguf_mixed_step"
 harness = false

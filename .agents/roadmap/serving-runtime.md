@@ -404,3 +404,8 @@ measurement (16-256), not fixed globally.
   tok/s. `qwen35_fp8_parity` (8 x 1500 tokens, 32 steps) identical to base: 98.05 % / KL 1.392e-3. Training: the NF4 W8K probe does not dispatch the FP8 GEMM (`--layers 64 --tokens 8192 --rank 16 --base nf4 --residuals bf16 --mlp-rows 512`: 801 tok/s base, 836 now, noise). Open, by weight:
   1.2 PFLOPS needs an N of 192-256 per wgmma on one accumulator set (the loop is bound by the ~96 of 128 B/cycle of shared-memory operand reads, 1.08 PFLOPS without the fold); the
   17-64 row GEMMs' SM ingest ceiling (x multicast over a 2-block cluster); wave quantisation of the 272-tile gate/up shape.
+- 2026-10-30 (recorded decode step, knowledge 390): a plain paged decode step (single stage, embedding on the card, base rows) is recorded with its head per (rows, 128-key capacity bucket, greedy/top-k) after 3 steps
+  of the same key and replayed (`Qwen35GgufInstance::decode_planned`, `set_decode_plans`, 8 kept); frozen programs are cut into a 64-step graph then 256-step graphs, and fences skip events a stream already waited for and
+  programs whose buffers no other stream touched (`Fence::seq`, `CudaBackend::foreign_fences`); `Gpu::reclaim_due` drops the `cuMemGetInfo` of every prefill round. Output tok/s c = 1 / 4 / 16 / 64
+  74.0 / 287.8 / 536.3 / 777.6 -> 80.4 / 305.9 / 580.8 / 836.6 (same session), gap between tokens at c = 1 550 -> ~150 us, greedy chats byte-identical. Open: device sampler + K-step decode, `fresh` GDN segments, mixed tail on the card,
+  prefill attention row offsets, lifetime-planned arena + graph per row-count bucket for mixed iterations and training, per-stage plans for cross-card chains.

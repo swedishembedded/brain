@@ -52,6 +52,7 @@ use std::collections::HashMap;
 
 use gpu_core::select::{Dtype, DECODE_REGIME_MAX_ROWS};
 use gpu_core::provider::library;
+use gpu_core::tape::Tape;
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 
 use paramstore::{ParamStore, Role};
@@ -458,6 +459,16 @@ pub(crate) fn argmax_rows_of(g: &Gpu, logits: &DeviceBuffer, rows: u32, vocab: u
 /// (`model::readout::topk_rows`). Destroys `logits`.
 pub(crate) fn topk_rows_of(g: &Gpu, logits: &DeviceBuffer, rows: u32, vocab: u32, cap: u32) -> Vec<Vec<(u32, f32)>> {
     model::readout::topk_rows(g, READOUT, logits, rows, vocab, cap)
+}
+
+/// [`argmax_rows_of`] without the read: the dispatches are submitted and the indices stay in the returned buffer.
+pub(crate) fn argmax_rows_issue_of(g: &Gpu, logits: &DeviceBuffer, rows: u32, vocab: u32) -> DeviceBuffer {
+    model::readout::argmax_rows_issue(g, READOUT, logits, rows, vocab)
+}
+
+/// [`topk_rows_of`] without the read.
+pub(crate) fn topk_rows_issue_of(g: &Gpu, logits: &DeviceBuffer, rows: u32, vocab: u32, cap: u32) -> model::readout::TopkOut {
+    model::readout::topk_rows_issue(g, READOUT, logits, rows, vocab, cap)
 }
 
 // M6.10 (kernel-performance ledger) replaced the fixed-schedule constant
@@ -4567,9 +4578,23 @@ impl Qwen35 {
         // degenerate record.
         let max_bt = match self.exact_decode.get().filter(|_| !verify) {
             Some(ctx) => ctx.div_ceil(caches.gqa_cap).max(1),
+            // A decode step of a growing cache is built at the bucketed capacity, so the step (its grid, its scratch and
+            // its table width) is the same for every token of a bucket: the shape a recording is keyed on.
+            None if !verify && !caches.seqs.iter().any(|s| s.window.is_ring()) => self.paged_step_shape(caches).1,
             None => caches.seqs.iter().map(|s| s.window.blocks().len()).max().unwrap_or(1).max(1) as u32,
         };
         self.alloc_decode_inputs_at(bsz, max_bt)
+    }
+
+    /// `(keys, block-table width)` a decode step over growing (paged) caches is built at: the longest live sequence
+    /// rounded up to [`DECODE_CAP_BUCKET`] keys, and the blocks that many keys span. Everything in the step's dispatch
+    /// list that depends on the context (the attention grid and its key splits, the scores stride, the table width) is
+    /// a function of this pair, so a step is one recording per pair; the keys past a row's live length are never read
+    /// (`seq_lens` bounds every access) and its table entries past its last block are never followed.
+    pub(crate) fn paged_step_shape(&self, caches: &BatchDecodeCaches) -> (u32, u32) {
+        let longest = caches.seqs.iter().map(|s| s.pos + 1).max().unwrap_or(1);
+        let cap = longest.next_multiple_of(DECODE_CAP_BUCKET);
+        (cap, cap.div_ceil(caches.gqa_cap).max(1))
     }
 
     /// [`Self::alloc_decode_inputs`] for a block-table width of `max_bt`.
@@ -4816,7 +4841,10 @@ impl Qwen35 {
         // `input_override` is the batch's input rows: on a non-embed stage the
         // previous stage's residual, on the embed stage the caller's own input
         // embeddings in place of the token gather (`Qwen35::prefill_embeds`).
-        assert!(persist.is_none() || (input_override.is_none() && verify.is_none() && c.swa_window.is_some()), "qwen35::decode_batch_dispatches: a recorded step is a token step of a sliding-window config");
+        assert!(
+            persist.is_none() || (input_override.is_none() && verify.is_none() && self.exact_decode.get().is_none() && self.adapter_rows.get() == 0),
+            "qwen35::decode_batch_dispatches: a recorded step is a plain token step (no verify round, exact-decode regime or adapter rows)"
+        );
         let owned_inputs;
         let inputs = match persist {
             Some(inputs) => {
@@ -5428,7 +5456,6 @@ impl Qwen35 {
         // near this, so it pays nothing; a round large enough to matter drains
         // a handful of times instead of once per layer. Half the ceiling, so
         // one more layer's allocations after the check cannot cross it.
-        let reclaim_budget = g.reclaim_ceiling_bytes() / 2;
         let drain_pooled = self.chunk_arena_drain.get().unwrap_or(!g.submissions_ordered());
         let types = self.cfg.layer_types();
         // The residual add, the norm and the activation quantisation between two linears as ONE launch
@@ -5440,7 +5467,7 @@ impl Qwen35 {
             let (_, xn, act) = self.rms_quant_front(&res, None, self.w(&format!("blocks.{}.ln1.weight", self.shard.start)), n);
             (xn, act)
         });
-        StackState { res, front, layer: self.shard.start, types, pooled, drain_pooled, reclaim_budget, fused, epilogue, final_norm: None }
+        StackState { res, front, layer: self.shard.start, types, pooled, drain_pooled, fused, epilogue, final_norm: None }
     }
 
     /// Record layers of the round `st` stands for - one at a time, until the stage's last or until `budget` layers
@@ -5547,8 +5574,8 @@ impl Qwen35 {
             // its drain.
             //
             // The second disjunct is a different obligation with the same
-            // remedy - see `reclaim_budget` above.
-            if (st.pooled && st.drain_pooled) || g.pending_reclaim_bytes() > st.reclaim_budget {
+            // remedy - see `Gpu::reclaim_due`.
+            if (st.pooled && st.drain_pooled) || g.reclaim_due() {
                 g.poll_wait();
             }
             g.flush();
@@ -6137,6 +6164,19 @@ impl Qwen35 {
         // The commits are issued after the replay, in stream order, and read only the pending blocks the replay pushed.
         self.commit_memory_blocks(caches.memory, &self.decode_memory_commits(caches.seqs));
         hidden
+    }
+
+    /// Record one decode step over `caches`' rows, and whatever `tail` issues behind it (a head), as a [`Tape`] bound to
+    /// the returned [`DecodeInputs`]. The recording is for every step of the same `(rows, `[`Self::paged_step_shape`]`)`:
+    /// before each replay the caller rewrites the inputs ([`Self::write_decode_inputs`]), and nothing but those buffers
+    /// differs between steps. Nothing has run when this returns (a recording launches nothing): the caller replays it.
+    pub(crate) fn record_decode_step<R>(&self, tokens: &[u32], caches: &BatchDecodeCaches, tail: impl FnOnce(&DeviceBuffer) -> R) -> (Tape, DecodeInputs, R) {
+        let g = &self.gpu;
+        let inputs = self.alloc_decode_inputs_at(tokens.len() as u32, self.paged_step_shape(caches).1);
+        g.begin_tape();
+        let hidden = self.decode_batch_dispatches(tokens, caches, None, None, Some(&inputs));
+        let out = tail(&hidden);
+        (g.end_tape(), inputs, out)
     }
 
     /// Copy slot `slot`'s recurrent state and conv history between its row of the pool (`into_work`: pool to the
@@ -7059,7 +7099,6 @@ pub(crate) struct StackState {
     types: Vec<LayerType>,
     pooled: bool,
     drain_pooled: bool,
-    reclaim_budget: u64,
     fused: bool,
     epilogue: bool,
     /// The final norm's output, when the last layer's residual add produced it ([`Qwen35::advance_layer_stack`]).
