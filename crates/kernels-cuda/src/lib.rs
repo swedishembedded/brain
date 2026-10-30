@@ -124,6 +124,13 @@ pub const fn i8_wgstream_dynamic_shared_bytes(xn: u32) -> u32 {
 pub const I8_WGSTREAM_MAX_ROWS: u32 = 128;
 /// Rows of x the many-row streaming candidates (`matmul_i8_stream_r*`) serve per launch.
 pub const I8_STREAM_MANY_ROWS: u32 = 64;
+/// Rows of x the `matmul_fp8_gemv_f16_*` candidates serve per launch.
+pub const FP8_GEMV_F16_ROWS: u32 = 16;
+/// Dynamic shared memory per block of `matmul_fp8_gemv_f16_*` with `at` 16-row weight tiles, `warps` warps and `stages` ring slots
+/// a warp (one line step of 128 k of the tile's rows a slot); the warps' partial sums alias the ring after the loop.
+pub const fn fp8_gemv_f16_dynamic_shared_bytes(at: u32, warps: u32, stages: u32) -> u32 {
+    warps * stages * at * 2048
+}
 /// Rows of x the widest dequantize-in-register streaming candidates (`matmul_i8_dq_stream_q*`) serve per launch.
 pub const I8_DQ_STREAM_WIDE_ROWS: u32 = 128;
 /// The splits of K over a cluster the streaming candidate is registered at.
@@ -2230,6 +2237,86 @@ pub const ALL: &[CudaKernel] = &[
         shared_bytes: 0,
         programmatic: true,
         src: concat!("#define BRAIN_DQS_FP8 1\n#define BRAIN_DQS_WARPS 8\n#define BRAIN_DQS_STAGES 3\n#define BRAIN_DQS_MAX_ROWS 128\n#define BRAIN_DQS_MIN_BLOCKS 1\n#define brain_matmul_i8_dq_stream brain_matmul_fp8_dq_stream_q4\n", include_str!("../cu/matmul_i8_dq_stream.cu")),
+    },
+    CudaKernel {
+        name: "matmul_fp8_gemv_f16_a1w4d3b3",
+        // FP8 weight stream without a staging ring (knowledge 386): each lane loads its A fragment from global memory, the hardware
+        // decodes the E4M3 bytes to f16 (exact), the block scale folds once per 128 k, 4 warps take the line steps of K in turn,
+        // 16 weight rows a block.
+        op: Op::MatMul,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_matmul_fp8_gemv_f16_a1w4d3b3",
+        what: "FP8 E4M3 block-scaled weight matmul for 1 to 16 rows of bf16 x that streams the weights straight from global memory into hardware E4M3 -> f16 decode and f16 tensor-core MMAs, folds the block scale once per 128 k in f32 and accumulates across K (4 warps a block take the line steps of K in turn, 16 weight rows a block); agrees with the f64 reference of the stored weights to the f16 resolution of its inputs",
+        reported: "native:matmul_fp8_gemv_f16_a1w4d3b3",
+        block_dim: 128,
+        tile: (1, 16),
+        // The partial sums of the warps are added through dynamic shared memory (`fp8_gemv_f16_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_FG_AT 1\n#define BRAIN_FG_WARPS 4\n#define BRAIN_FG_DEPTH 3\n#define BRAIN_FG_MIN_BLOCKS 3\n#define brain_matmul_fp8_gemv_f16 brain_matmul_fp8_gemv_f16_a1w4d3b3\n", include_str!("../cu/matmul_fp8_gemv_f16.cu")),
+    },
+    CudaKernel {
+        name: "matmul_fp8_gemv_f16_a1w4d4b5",
+        // FP8 weight stream without a staging ring (knowledge 386): each lane loads its A fragment from global memory, the hardware
+        // decodes the E4M3 bytes to f16 (exact), the block scale folds once per 128 k, 4 warps take the line steps of K in turn,
+        // 16 weight rows a block.
+        op: Op::MatMul,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_matmul_fp8_gemv_f16_a1w4d4b5",
+        what: "FP8 E4M3 block-scaled weight matmul for 1 to 16 rows of bf16 x that streams the weights straight from global memory into hardware E4M3 -> f16 decode and f16 tensor-core MMAs, folds the block scale once per 128 k in f32 and accumulates across K (4 warps a block take the line steps of K in turn, 16 weight rows a block); agrees with the f64 reference of the stored weights to the f16 resolution of its inputs",
+        reported: "native:matmul_fp8_gemv_f16_a1w4d4b5",
+        block_dim: 128,
+        tile: (1, 16),
+        // The partial sums of the warps are added through dynamic shared memory (`fp8_gemv_f16_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_FG_AT 1\n#define BRAIN_FG_WARPS 4\n#define BRAIN_FG_DEPTH 4\n#define BRAIN_FG_MIN_BLOCKS 5\n#define brain_matmul_fp8_gemv_f16 brain_matmul_fp8_gemv_f16_a1w4d4b5\n", include_str!("../cu/matmul_fp8_gemv_f16.cu")),
+    },
+    CudaKernel {
+        name: "matmul_fp8_gemv_f16_a1w2d6b6",
+        // FP8 weight stream without a staging ring (knowledge 386): each lane loads its A fragment from global memory, the hardware
+        // decodes the E4M3 bytes to f16 (exact), the block scale folds once per 128 k, 2 warps take the line steps of K in turn,
+        // 16 weight rows a block.
+        op: Op::MatMul,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_matmul_fp8_gemv_f16_a1w2d6b6",
+        what: "FP8 E4M3 block-scaled weight matmul for 1 to 16 rows of bf16 x that streams the weights straight from global memory into hardware E4M3 -> f16 decode and f16 tensor-core MMAs, folds the block scale once per 128 k in f32 and accumulates across K (2 warps a block take the line steps of K in turn, 16 weight rows a block); agrees with the f64 reference of the stored weights to the f16 resolution of its inputs",
+        reported: "native:matmul_fp8_gemv_f16_a1w2d6b6",
+        block_dim: 64,
+        tile: (1, 16),
+        // The partial sums of the warps are added through dynamic shared memory (`fp8_gemv_f16_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_FG_AT 1\n#define BRAIN_FG_WARPS 2\n#define BRAIN_FG_DEPTH 6\n#define BRAIN_FG_MIN_BLOCKS 6\n#define brain_matmul_fp8_gemv_f16 brain_matmul_fp8_gemv_f16_a1w2d6b6\n", include_str!("../cu/matmul_fp8_gemv_f16.cu")),
+    },
+    CudaKernel {
+        name: "matmul_fp8_gemv_f16_a2w4d4b3",
+        // FP8 weight stream without a staging ring (knowledge 386): each lane loads its A fragment from global memory, the hardware
+        // decodes the E4M3 bytes to f16 (exact), the block scale folds once per 128 k, 4 warps take the line steps of K in turn,
+        // 32 weight rows a block.
+        op: Op::MatMul,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_matmul_fp8_gemv_f16_a2w4d4b3",
+        what: "FP8 E4M3 block-scaled weight matmul for 1 to 16 rows of bf16 x that streams the weights straight from global memory into hardware E4M3 -> f16 decode and f16 tensor-core MMAs, folds the block scale once per 128 k in f32 and accumulates across K (4 warps a block take the line steps of K in turn, 32 weight rows a block); agrees with the f64 reference of the stored weights to the f16 resolution of its inputs",
+        reported: "native:matmul_fp8_gemv_f16_a2w4d4b3",
+        block_dim: 128,
+        tile: (1, 32),
+        // The partial sums of the warps are added through dynamic shared memory (`fp8_gemv_f16_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: true,
+        src: concat!("#define BRAIN_FG_AT 2\n#define BRAIN_FG_WARPS 4\n#define BRAIN_FG_DEPTH 4\n#define BRAIN_FG_MIN_BLOCKS 3\n#define brain_matmul_fp8_gemv_f16 brain_matmul_fp8_gemv_f16_a2w4d4b3\n", include_str!("../cu/matmul_fp8_gemv_f16.cu")),
     },
     CudaKernel {
         name: "matmul_fp8_dq_wgmma",

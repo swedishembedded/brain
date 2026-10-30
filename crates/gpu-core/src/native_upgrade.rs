@@ -325,6 +325,16 @@ fn serves_fp8_stream_wide(p: &[u32]) -> bool {
     fp8_shape(p).is_some_and(|(m, ..)| m <= kernels_cuda::I8_DQ_STREAM_WIDE_ROWS)
 }
 
+/// The f16-MMA FP8 streaming candidates: up to [`kernels_cuda::FP8_GEMV_F16_ROWS`] rows, a weight row a whole number of 128-wide scale blocks.
+fn serves_fp8_gemv_f16(p: &[u32]) -> bool {
+    fp8_shape(p).is_some_and(|(m, ..)| m <= kernels_cuda::FP8_GEMV_F16_ROWS)
+}
+
+/// One block per `tile.1` weight rows: the candidate keeps all of K inside the block.
+fn fp8_gemv_f16_blocks(p: &[u32], tile: (u32, u32)) -> u32 {
+    p[2].div_ceil(tile.1)
+}
+
 /// The Hopper FP8 GEMM: the rows a 128-row tile is worth filling, K a whole number of 128-wide scale blocks.
 fn serves_fp8_wgmma(p: &[u32]) -> bool {
     fp8_shape(p).is_some_and(|(m, ..)| m > backend_api::select::DECODE_REGIME_MAX_ROWS)
@@ -841,6 +851,66 @@ pub(crate) const FP8_ROWS: &[Row] = &[
         align_words: 4,
         input: Input::DEQUANT_BF16,
         launch: fp8_dq_stream_launch(4, 128, kernels_cuda::I8_DQ_STREAM_WIDE_ROWS, 3),
+    },
+    Row {
+        slow: "matmul_fp8_gemv",
+        target: Target::Named("matmul_fp8_gemv_f16_a1w4d3b3"),
+        bindings: FP8_BINDINGS,
+        serves: serves_fp8_gemv_f16,
+        blocks: fp8_gemv_f16_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        input: Input::DEQUANT_BF16,
+        launch: CudaLaunch {
+            dynamic_shared_bytes: kernels_cuda::fp8_gemv_f16_dynamic_shared_bytes(1, 4, 3),
+            shared_opt_in: true,
+            ..CudaLaunch::NONE
+        },
+    },
+    Row {
+        slow: "matmul_fp8_gemv",
+        target: Target::Named("matmul_fp8_gemv_f16_a1w4d4b5"),
+        bindings: FP8_BINDINGS,
+        serves: serves_fp8_gemv_f16,
+        blocks: fp8_gemv_f16_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        input: Input::DEQUANT_BF16,
+        launch: CudaLaunch {
+            dynamic_shared_bytes: kernels_cuda::fp8_gemv_f16_dynamic_shared_bytes(1, 4, 4),
+            shared_opt_in: true,
+            ..CudaLaunch::NONE
+        },
+    },
+    Row {
+        slow: "matmul_fp8_gemv",
+        target: Target::Named("matmul_fp8_gemv_f16_a1w2d6b6"),
+        bindings: FP8_BINDINGS,
+        serves: serves_fp8_gemv_f16,
+        blocks: fp8_gemv_f16_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        input: Input::DEQUANT_BF16,
+        launch: CudaLaunch {
+            dynamic_shared_bytes: kernels_cuda::fp8_gemv_f16_dynamic_shared_bytes(1, 2, 6),
+            shared_opt_in: true,
+            ..CudaLaunch::NONE
+        },
+    },
+    Row {
+        slow: "matmul_fp8_gemv",
+        target: Target::Named("matmul_fp8_gemv_f16_a2w4d4b3"),
+        bindings: FP8_BINDINGS,
+        serves: serves_fp8_gemv_f16,
+        blocks: fp8_gemv_f16_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        input: Input::DEQUANT_BF16,
+        launch: CudaLaunch {
+            dynamic_shared_bytes: kernels_cuda::fp8_gemv_f16_dynamic_shared_bytes(2, 4, 4),
+            shared_opt_in: true,
+            ..CudaLaunch::NONE
+        },
     },
     Row {
         slow: "matmul_fp8_gemv",
@@ -2830,7 +2900,10 @@ mod tests {
         let serving = |p: &[u32]| FP8_ROWS.iter().filter(|r| (r.serves)(p)).map(name).collect::<Vec<_>>();
         // Decode of one token over a 5120 x 5120 weight (K = 5120 = 1280 words): the streaming kernels only.
         let one = serving(&[1, 1280, 5120]);
-        assert!(!one.is_empty() && one.iter().all(|n| n.contains("stream")), "{one:?}");
+        assert!(!one.is_empty() && one.iter().all(|n| n.contains("stream") || n.contains("gemv_f16")), "{one:?}");
+        // The f16 weight streams stop at 16 rows.
+        assert!(serving(&[16, 1280, 5120]).iter().any(|n| n.contains("gemv_f16")));
+        assert!(!serving(&[17, 1280, 5120]).iter().any(|n| n.contains("gemv_f16")));
         // 100 rows: the wide streaming kernels and the GEMM, not the narrow ones.
         let hundred = serving(&[100, 1280, 5120]);
         assert!(hundred.contains(&"matmul_fp8_dq_stream_q2") && hundred.contains(&"matmul_fp8_dq_wgmma") && !hundred.contains(&"matmul_fp8_dq_stream_r1"), "{hundred:?}");

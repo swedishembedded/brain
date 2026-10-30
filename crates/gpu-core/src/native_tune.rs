@@ -777,6 +777,24 @@ pub fn check_fp8_shape(gpu: &Gpu, params: [u32; 3]) -> Vec<(String, Verdict)> {
     time_class(gpu, &FP8, &cands, (m, kg, n), &Acts::new(m, kg), &Roofs { gbs: None, floor_us: None, int8_tops: None }, false)
 }
 
+/// The device read roof (GB/s) and launch floor (us) of the autotuner's probe. For benches.
+#[doc(hidden)]
+pub fn read_roof(gpu: &Gpu) -> Option<(f32, f32)> {
+    gpu.set_kernel_timing(true).then(|| measure_read_roof(gpu)).flatten()
+}
+
+/// [`check_fp8_shape`] with the timing on: every FP8 candidate serving `params` (`[m, k/4, n]`) timed on the weights cycled
+/// past the L2 as in a decode step, with the achieved weight bandwidth. For benches.
+#[doc(hidden)]
+pub fn time_fp8_shape(gpu: &Gpu, params: [u32; 3]) -> Vec<(String, Verdict)> {
+    let [m, kg, n] = params;
+    let cands: Vec<&crate::native_upgrade::Active> = crate::native_upgrade::candidates(gpu.native_rows(), crate::native_upgrade::FP8_KIND, &params).collect();
+    let timing = gpu.set_kernel_timing(true);
+    let verdicts = time_class(gpu, &FP8, &cands, (m, kg, n), &Acts::new(m, kg), &Roofs { gbs: Some(4000.0), floor_us: Some(2.0), int8_tops: Some(1000.0) }, timing);
+    gpu.set_kernel_timing(false);
+    verdicts
+}
+
 /// Tune every multi-candidate slot of `gpu` (once per device and build) and return the table, or `None` when this
 /// handle has no slot with a choice to make.
 pub(crate) fn ensure(gpu: &Gpu, slots: &[(usize, &'static str)]) -> Option<Arc<Tuned>> {

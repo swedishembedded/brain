@@ -66,6 +66,9 @@ fn the_streaming_candidates_pass_the_admission_rule_on_ragged_shapes() {
     for kernel in ["matmul_fp8_dq_stream_r1", "matmul_fp8_dq_stream_r2", "matmul_fp8_dq_stream_r4", "matmul_fp8_dq_stream_q2", "matmul_fp8_dq_stream_q4"] {
         assert!(served.contains(kernel), "{kernel} served none of the shapes: {served:?}");
     }
+    for kernel in ["matmul_fp8_gemv_f16_a1w4d3b3", "matmul_fp8_gemv_f16_a1w4d4b5", "matmul_fp8_gemv_f16_a1w2d6b6", "matmul_fp8_gemv_f16_a2w4d4b3"] {
+        assert!(served.contains(kernel), "{kernel} served none of the shapes: {served:?}");
+    }
 }
 
 #[test]
@@ -84,5 +87,28 @@ fn the_wgmma_gemms_pass_the_admission_rule_on_ragged_shapes() {
     let served = admitted_everywhere(&gpu, &shapes);
     for kernel in ["matmul_fp8_dq_wgmma", "matmul_fp8_wgmma"] {
         assert!(served.contains(kernel), "{kernel} served none of the shapes: {served:?}");
+    }
+}
+
+/// Achieved weight bandwidth of every FP8 candidate at the production decode shapes (`#[ignore]`: a measurement).
+///
+/// ```text
+/// make test/one P=gpu-core T=fp8_linear_native ARGS="--ignored --nocapture fp8_decode_bandwidth"
+/// ```
+#[test]
+#[ignore]
+fn fp8_decode_bandwidth() {
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda_hopper(&gpu) {
+        brain_testutil::skip_unavailable("the FP8 candidates are registered for a CUDA device with warpgroup tensor cores");
+        return;
+    }
+    println!("read roof (GB/s, launch floor us): {:?}", gpu_core::native_read_roof(&gpu));
+    for (label, k, n) in [("gate/up 5120x34816", 5120u32, 34816u32), ("gate 5120x17408", 5120, 17408), ("down 17408x5120", 17408, 5120), ("qkv 5120x10240", 5120, 10240), ("out 6144x5120", 6144, 5120)] {
+        for m in [1u32, 4, 16] {
+            for (name, v) in gpu_core::native_time_fp8_shape(&gpu, [m, k / 4, n]) {
+                println!("{label:22} m={m:<3} {name:28} {v:?}");
+            }
+        }
     }
 }
