@@ -93,13 +93,13 @@ fn the_wgmma_gemms_pass_the_admission_rule_on_ragged_shapes() {
         return;
     }
     let mut shapes = Vec::new();
-    for m in [33u32, 127, 128, 129, 255, 300, 1000] {
+    for m in [33u32, 127, 128, 129, 255, 300, 1000, 2300] {
         for (kg, n) in [(32u32, 17u32), (32, 127), (160, 128), (160, 129), (1280, 260), (4352, 130)] {
             shapes.push([m, kg, n]);
         }
     }
     let served = admitted_everywhere(&gpu, &shapes);
-    for kernel in ["matmul_fp8_dq_wgmma", "matmul_fp8_wgmma"] {
+    for kernel in ["matmul_fp8_dq_wgmma", "matmul_fp8_wgmma", "matmul_fp8_wgmma_tma"] {
         assert!(served.contains(kernel), "{kernel} served none of the shapes: {served:?}");
     }
 }

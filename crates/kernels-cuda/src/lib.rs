@@ -137,6 +137,14 @@ pub const fn fp8_gemv_f16x_dynamic_shared_bytes(wt: u32, warps: u32, stages: u32
 pub const fn fp8_wgmma_swap_dynamic_shared_bytes(bn: u32, nx: u32, stages: u32) -> u32 {
     stages * (bn * 128 + nx * 128 + 512) + 1024
 }
+/// Blocks at most of the persistent `matmul_fp8_wgmma_tma` grid: the source's `BRAIN_FWT_MAX_CTAS`, the number of tensor-map slots it keeps.
+pub const FP8_TMA_MAX_CTAS: u32 = 132;
+/// Dynamic shared memory per block of `matmul_fp8_wgmma_tma` with `stages` ring stages (a 128-row activation tile and a 128-row weight tile
+/// of 128-byte rows, then 1 KiB of scales: 33792 bytes each), two mbarriers a stage and 1 KiB to align the ring to the 128-byte swizzle
+/// pattern. A test holds it to the source.
+pub const fn fp8_wgmma_tma_dynamic_shared_bytes(stages: u32) -> u32 {
+    stages * (2 * 128 * 128 + 1024 + 16) + 1024
+}
 /// Rows of x the widest `matmul_fp8_wgmma_swap_*` candidate serves per launch.
 pub const FP8_WGMMA_SWAP_ROWS: u32 = 64;
 /// Rows of x the `matmul_fp8_gemv_f16_*` candidates serve per launch.
@@ -2414,6 +2422,26 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/matmul_fp8_wgmma.cu"),
     },
     CudaKernel {
+        name: "matmul_fp8_wgmma_tma",
+        // `matmul_fp8_wgmma` with the tile copies done by the tensor memory accelerator, a persistent grid and a producer / two consumer
+        // warpgroup split (knowledge 387). The same arithmetic, bit for bit.
+        op: Op::MatMul,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_matmul_fp8_wgmma_tma",
+        what: "FP8 E4M3 block-scaled weight GEMM against E4M3 activations (one scale per row per 128 of K) on Hopper warpgroup tensor cores (wgmma m64n128k32, 128x128 tile) with the tiles copied by the tensor memory accelerator through tensor maps the kernel builds on the device, a persistent grid, a producer warp and two consumer warpgroups on mbarriers, the scales folded once per 128 of K; bit for bit `matmul_fp8_wgmma`",
+        reported: "native:matmul_fp8_wgmma_tma",
+        block_dim: 384,
+        // 128 rows of x x 128 weight rows per tile; the grid is persistent (`FP8_TMA_MAX_CTAS` blocks at most).
+        tile: (128, 128),
+        // The ring and the barriers are dynamic shared memory (`fp8_wgmma_tma_dynamic_shared_bytes`).
+        shared_bytes: 0,
+        programmatic: false,
+        src: include_str!("../cu/matmul_fp8_wgmma_tma.cu"),
+    },
+    CudaKernel {
         name: "matmul_fp8_wgmma_swap_n64b64",
         // FP8 GEMM for 17 to 64 rows of x on the FP8 tensor cores with the WEIGHTS as the MMA's A operand (knowledge 387): a warpgroup owns
         // 64 weight rows, the 64 rows of x are the MMA's N side, 64 weight rows a block.
@@ -4200,6 +4228,8 @@ mod tests {
         );
         has("matmul_fp8_wgmma_swap_n64b64", &["#define BRAIN_FS_STAGES 4", "#define BRAIN_FS_X_BYTES (BRAIN_FS_NX * 128)", "#define BRAIN_FS_W_BYTES (BRAIN_FS_BN * 128)", "#define BRAIN_FS_S_BYTES 512"]);
         assert_eq!(fp8_wgmma_swap_dynamic_shared_bytes(128, 64, 4), 4 * (128 * 128 + 64 * 128 + 512) + 1024);
+        assert_eq!(fp8_wgmma_tma_dynamic_shared_bytes(5), 5 * (128 * 128 * 2 + 1024 + 16) + 1024);
+        has("matmul_fp8_wgmma_tma", &["#define BRAIN_FWT_STAGES 5", "#define BRAIN_FWT_MAX_CTAS 132  // grid size at most, and the SM slots of the maps", "#define BRAIN_FWT_X_BYTES (BRAIN_FWT_BM * 128)", "#define BRAIN_FWT_W_BYTES (BRAIN_FWT_BN * 128)", "#define BRAIN_FWT_S_BYTES 1024"]);
         assert_eq!(FP8_WGMMA_DYNAMIC_SHARED_BYTES, 4 * (128 * 128 * 2 + 1024) + 1024);
         assert_eq!((128 * 128 * 2 + 1024) % 1024, 0);
         has(

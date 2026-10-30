@@ -313,6 +313,17 @@ existing caller. Assume nothing about units.
     an SM and no spills. Look at `Local Memory Spilling Requests` and the register count of every kernel with a long unrolled loop before
     tuning anything else; and cap the unroll (`#pragma unroll 2`) if the compiler hoists every shared load of the loop into registers.
 
+20. **At 17-64 rows put the weights in the MMA's A operand, not x.** A 128-row x tile at 33-64 rows is half padding and a block per 128 weight rows leaves the
+    card at 2 waves or 80 blocks; `wgmma m64nNk32` with the weight rows as M (64 a warpgroup) and the 32/64 rows of x as N has no padding, 64 weight rows a block,
+    and a K split over a cluster (DSMEM sum in rank order) fills the card for the K = 17408 shapes. 17-64 rows then stream at 2.4 TB/s with x re-read from the L2
+    (knowledge 387). Time a candidate at each row count the batch reaches (32, 48, 64): the winner changes with N and K.
+
+21. **A prefill GEMM that a warp-specialised `cp.async` pipeline cannot speed up is fed by the LSU path; give the tile copies to the TMA.** ncu `--clock-control none`
+    with the tile copies compiled out (0.68 ms against 1.09) and the fold compiled out (0.99) says where the time is before any restructuring. Without a host
+    `CUtensorMap` (brain launches with plain pointers) build the maps on the device: the driver's encoding as a constant template, then `tensormap.replace` of the
+    address, dimensions and row stride (stride in bytes), `tensormap.cp_fenceproxy`, one global slot per SM; hold the template to `cuTensorMapEncodeTiled` in a test.
+    A wrong replace value does not fault, it reads the wrong bytes: run the admission test (`fp8_linear_native`) at once.
+
 ## D. Constraints that will bite you
 
 - **A buffer a dispatch writes is bound ONCE.** wgpu tracks usage per buffer for the

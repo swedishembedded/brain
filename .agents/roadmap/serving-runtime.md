@@ -379,3 +379,14 @@ measurement (16-256), not fixed globally.
   a big GEMM: 12 + 7.8 ms of a 31 ms step at 64 rows, 1.2-1.7 TB/s; x as the A operand re-reads x once per 64 weight rows), the 48 GDN gated-output casts, the
   103 us top-k (a two-phase form), `add_rms_quant` as a 4-block cluster.
 
+- 2026-10-30 (FP8 GEMM family, knowledge 387): (a) 17-64 rows: `matmul_fp8_wgmma_swap_n{64,32}b{64,128}[s{2,4}]` put the WEIGHT rows in the MMA's M and the rows of x in its N (no
+  128-row padding, 64 weight rows a block, K split over a cluster of 2-4 blocks for the K = 17408 / N = 5120 shapes). 64-row GEMMs (us): gate/up 89.1 -> 73.9, gate 57.5 ->
+  36.7, down 85.7 -> 35.6, qkv 30.6 -> 25.6, out 34.3 -> 18.5 (2.0-2.5 TB/s of weight bytes; the x tile re-read from the L2 is as many bytes as the weights, so ~2.4 TB/s is
+  the 5.5 TB/s the SM ingests). Pure decode (tiny prompts, 384 outputs) median ITL at 32 / 64 sequences 24.05 / 33.23 -> 18.15 / 27.33 ms, output tok/s 1255 / 1786 -> 1636 /
+  2130; 16 sequences unchanged (the f16x GEMV keeps 9-16 rows). (b) prefill: `matmul_fp8_wgmma_tma` (persistent, TMA tile copies through tensor maps the kernel builds on the
+  device from a driver-encoded template, producer thread + two consumer warpgroups on mbarriers, grouped tile order), bit-identical to `matmul_fp8_wgmma`: 616-970 -> 880-970
+  TFLOPS at 768-2048 rows (gate/up M = 768 393 -> 308 us), 31K TTFT 4.46 -> 4.11 s. A `cp.async` warp-specialised pipeline, a 256 x 128 tile and double-buffered accumulators
+  did not help (knowledge 387). Served 1 / 4 / 16 / 64 sequences (1K in / 128 out, same client, same node, base run first): 76.2 / 295 / 525 / 712 -> 78.2 / 296 / 545 / 800 output
+  tok/s. `qwen35_fp8_parity` (8 x 1500 tokens, 32 steps) identical to base: 98.05 % / KL 1.392e-3. Training: the NF4 W8K probe does not dispatch the FP8 GEMM (`--layers 64 --tokens 8192 --rank 16 --base nf4 --residuals bf16 --mlp-rows 512`: 801 tok/s base, 836 now, noise). Open, by weight:
+  1.2 PFLOPS needs an N of 192-256 per wgmma on one accumulator set (the loop is bound by the ~96 of 128 B/cycle of shared-memory operand reads, 1.08 PFLOPS without the fold); the
+  17-64 row GEMMs' SM ingest ceiling (x multicast over a 2-block cluster); wave quantisation of the 272-tile gate/up shape.

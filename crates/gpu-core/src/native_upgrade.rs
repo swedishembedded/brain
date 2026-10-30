@@ -340,6 +340,11 @@ fn serves_fp8_wgmma(p: &[u32]) -> bool {
     fp8_shape(p).is_some_and(|(m, ..)| m > backend_api::select::DECODE_REGIME_MAX_ROWS)
 }
 
+/// A persistent grid: a block for every 128 x 128 tile up to the most the kernel keeps tensor maps for, each walking tiles `grid` apart.
+fn fp8_persistent_blocks(p: &[u32], tile: (u32, u32)) -> u32 {
+    gemm_blocks(p, tile).min(kernels_cuda::FP8_TMA_MAX_CTAS)
+}
+
 /// The swapped-operand Hopper FP8 GEMM: 17 to `NX` rows of x against the weights as the MMA's A operand.
 fn serves_fp8_wgmma_swap<const NX: u32>(p: &[u32]) -> bool {
     fp8_shape(p).is_some_and(|(m, ..)| m > kernels_cuda::FP8_GEMV_F16_ROWS && m <= NX)
@@ -974,6 +979,22 @@ pub(crate) const FP8_ROWS: &[Row] = &[
         input: Input::FP8_NATIVE,
         launch: CudaLaunch {
             dynamic_shared_bytes: kernels_cuda::FP8_WGMMA_DYNAMIC_SHARED_BYTES,
+            shared_opt_in: true,
+            arch: backend_api::ArchFeatures::Required,
+            ..CudaLaunch::NONE
+        },
+    },
+    Row {
+        slow: "matmul_fp8_gemv",
+        target: Target::Named("matmul_fp8_wgmma_tma"),
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_fp8_wgmma,
+        blocks: fp8_persistent_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 4,
+        input: Input::FP8_NATIVE,
+        launch: CudaLaunch {
+            dynamic_shared_bytes: kernels_cuda::fp8_wgmma_tma_dynamic_shared_bytes(5),
             shared_opt_in: true,
             arch: backend_api::ArchFeatures::Required,
             ..CudaLaunch::NONE

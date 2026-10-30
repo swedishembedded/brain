@@ -27,6 +27,7 @@ crates/backend-cuda/tests/aot_driver_only.rs	<CHILD>
 crates/backend-cuda/tests/aot_driver_only.rs	BRAIN_NVRTC
 crates/backend-cuda/tests/catalogue_coverage.rs	BRAIN_CUDA_COVERAGE_OUT
 crates/backend-cuda/tests/mem_pool.rs	BRAIN_PRINT_POOL_BENCH
+crates/backend-cuda/tests/tensormap_template.rs	BRAIN_DEVICE
 crates/backend-vulkan/src/lib.rs	BRAIN_VK_NO_SERIAL
 crates/backend-vulkan/src/lib.rs	BRAIN_VK_SERIAL
 crates/backend-vulkan/tests/kernel_timing.rs	BRAIN_VK_SERIAL
