@@ -386,9 +386,10 @@ impl GraphCache {
         }
     }
 
-    /// A parameter block of at least `words` u32s, zeroed on the host and the device: the smallest spare that is not
-    /// wastefully larger, else a new one. Zeroed because the padding between two steps' parameters is part of the one
-    /// copy and must not be whatever the block last held.
+    /// A parameter block of at least `words` u32s, its first `words` staging words zeroed: the smallest spare that is
+    /// not wastefully larger, else a new one. Zeroed because the padding between two steps' parameters is part of the
+    /// one copy and must not be whatever the block last held. The device block is not cleared: that copy overwrites
+    /// every word a kernel can read.
     fn param_block_for(&mut self, ctx: &exec::Context, words: usize) -> Result<ParamBlock, String> {
         let best = self
             .spare_params
@@ -401,8 +402,7 @@ impl GraphCache {
             Some(i) => self.spare_params.swap_remove(i),
             None => ParamBlock { staging: ctx.pinned(words)?, device: ctx.alloc(words * 4)? },
         };
-        ctx.zero(&block.device)?;
-        block.staging.fill_at(0, &vec![0u32; block.staging.words()]);
+        block.staging.fill_at(0, &vec![0u32; words]);
         Ok(block)
     }
 
