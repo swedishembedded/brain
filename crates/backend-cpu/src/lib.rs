@@ -47,6 +47,12 @@ pub type CpuStep = (usize, BindGroup, u32, u32);
 /// native dispatch's `threads` never really described in the first place).
 const NATIVE_BASE: usize = 1 << 30;
 
+/// The fewest kernel invocations one pool task runs. Below it the wake and steal
+/// cost of a task outweighs the work it carries (see the dispatch fan-out). The
+/// kernels that reach the fan-out are the per-element ones (products and
+/// attention take the host paths above), so 16K invocations is ~0.1 ms of work.
+const MIN_CHUNK_INVOCATIONS: u64 = 16 * 1024;
+
 /// One registered native function's signature: the raw uniform pointer and
 /// the bound buffer bases in bind order - exactly the shape `dispatch`'s own
 /// hidden `FastIdx` if-ladder below already reconstructs slices from. A
@@ -1196,9 +1202,14 @@ impl CpuBackend {
             return;
         }
         // ~8 chunks per thread for load balance on divergent kernels (e.g. the
-        // softmax row-loops whose trip count varies with the causal mask).
+        // softmax row-loops whose trip count varies with the causal mask), but
+        // never fewer than `MIN_CHUNK_INVOCATIONS` a chunk: waking and stealing
+        // across a wide pool costs microseconds a task, so a few-thousand
+        // invocation kernel cut into 1152 one-invocation tasks (144 cores) spent
+        // its time in the scheduler - a tiny-model gradcheck took 31 min, 32 s on
+        // one thread.
         let span = (self.shared.threads as u64 * 8).max(1);
-        let mut chunk = total.div_ceil(span).max(1);
+        let mut chunk = total.div_ceil(span).max(MIN_CHUNK_INVOCATIONS);
         // Work-group kernels (workgroup memory + barriers) must be handed whole
         // workgroups per chunk - a workgroup's invocations share scratch and a
         // barrier, so a chunk boundary may not fall mid-workgroup. Round the chunk
@@ -1207,6 +1218,12 @@ impl CpuBackend {
         if let Some(wg) = self.shared.jit.workgroup_size(kind) {
             let wg = wg as u64;
             chunk = chunk.div_ceil(wg) * wg;
+        }
+        if chunk >= total {
+            // One chunk: run it on the calling thread, without the pool.
+            // SAFETY: as below, with the whole range on one thread.
+            unsafe { self.shared.jit.run(kind, 0, total, gx, gy, uniform, bufs.as_ptr()) };
+            return;
         }
         let starts: Vec<u64> = (0..total).step_by(chunk as usize).collect();
         let uni = SendConst(uniform);
