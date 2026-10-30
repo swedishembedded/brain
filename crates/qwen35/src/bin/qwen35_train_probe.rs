@@ -252,6 +252,7 @@ fn main() {
     println!("PROBE build_s={:.1}", t0.elapsed().as_secs_f64());
     let steady = own_gpu_mib();
     println!("PROBE built_mib={}", steady.map_or("n/a".to_string(), |v| v.to_string()));
+    println!("PROBE attention_flash={}", m.attention_is_flash());
 
     let mut rng = Lcg::new(seed ^ 0x5eed);
     let x: Vec<u32> = (0..tokens).map(|_| rng.next_u32() % cfg.vocab).collect();
