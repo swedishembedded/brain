@@ -364,4 +364,18 @@ measurement (16-256), not fixed globally.
   glue of a mixed round (~6 ms: five splits, two norms, two rotations, two appends, sigmoid/mul/splice a segment; per-round cos/sin tables and one
   gate kernel), host time before the first kernel (4-6 ms: the embedding decode of the round), the decode step (42 % of a c = 16 run's wall clock:
   `matmul_fp8_dq_stream_r4` at 2.1 TB/s of 3.5).
+- 2026-10-30 (decode step, knowledge 386): the FP8 27B decode graph (int8 KV, speculative off) at one sequence is 15.8 -> ~10.6 ms of kernels and the served
+  inter-token latency 15.7 -> 11.6 ms. (a) `matmul_fp8_gemv_f16_*`: per-lane `cp.async` A fragments into a warp-private ring, hardware E4M3 -> f16 decode,
+  the block scale folded in f32 once per 128 k, first copies before `griddepcontrol.wait` (1-8 rows; r4 2.0-2.4 -> 2.7-3.1 TB/s isolated, 11.8 -> 7.5 ms of GEMV in
+  the graph); `matmul_fp8_gemv_f16x_*` takes the rows of x as the A operand for 9-16 rows (16 sequences: GEMV 12.2 -> 9.9 ms). (b) the fused front ends write the
+  bf16 rows (256 -> 48 casts a token). (c) the pooled GDN decode is `gdn_conv_pool` + `gdn_recur_pool` (a block per sequence and value head, the state staged by
+  `cp.async`; bit-identical): 17.3 / 18.7 / 72.5 / 270 -> 14.9 / 18.5 / 56.8 / 155 us a layer at 1 / 4 / 16 / 64 sequences. (d) the gate projections are one
+  multi-GEMV, `gqa_decode_prep_i8` fuses the int8-KV attention front half, `topk_rows` 187 -> 103 us, the head norm 40 -> 2.9 us. Decode step (nsys, c = 1 / 4 /
+  16 / 64) 16.0 / 16.2 / 20.2 / 40.0 -> 12.1 / 13.0 / 16.2 / 34.0 ms; served output tok/s at 1 / 4 / 16 / 64 (same client) 58.7 / 242 / 465 / 675 -> 76.5 /
+  295 / 529 / 717; 31K TTFT 4.46 -> 4.50 s (unchanged); `qwen35_fp8_parity` identical to base on the same text (98.44 %, KL 2.74e-3), greedy chat outputs 4 of 6
+  prompts identical to base token for token (the rest diverge after 300-400 characters, as batch 1 vs 6 does in the base itself); W8K NF4 train probe 1003-1022
+  tok/s against 1003-1012 for the base on the same node. Open, by weight: the host (443 us idle before a token's first kernel, 291 us between its two graphs, 88 us
+  at the head round trip: a 110 us and a 377 us `cuGraphLaunch`, the last layer read back and uploaded again), 17-64 rows (`dq_stream_r2` 54 us and `wgmma` 54 us
+  a big GEMM: 12 + 7.8 ms of a 31 ms step at 64 rows, 1.2-1.7 TB/s; x as the A operand re-reads x once per 64 weight rows), the 48 GDN gated-output casts, the
+  103 us top-k (a two-phase form), `add_rms_quant` as a 4-block cluster.
 
