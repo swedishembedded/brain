@@ -203,17 +203,28 @@ const QUANT_E4M3_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageR
 /// the window 16-byte aligned).
 pub fn quantize_e4m3_rows(gpu: &Gpu, steps: &mut Vec<Step>, x: &Operand, rows: u32, k: u32) -> Option<(DeviceBuffer, DeviceBuffer)> {
     let elems = u64::from(rows) * u64::from(k);
+    if rows == 0 || !k.is_multiple_of(128) || elems > u64::from(u32::MAX) {
+        return None;
+    }
+    // Every byte and every scale is written, so the scratch is not cleared.
+    let q = gpu.storage_uninit(elems.div_ceil(4));
+    let s = gpu.storage_uninit(elems / 128);
+    quantize_e4m3_rows_into(gpu, steps, x, rows, k, &q, &s)?;
+    Some((q, s))
+}
+
+/// [`quantize_e4m3_rows`] into the first `rows` rows of buffers the caller holds (`q`: `rows * k / 4` words or more, `s`:
+/// `rows * k / 128` scales or more): the rows of a round a fused kernel did not quantise itself. `None` as there.
+pub fn quantize_e4m3_rows_into(gpu: &Gpu, steps: &mut Vec<Step>, x: &Operand, rows: u32, k: u32, q: &DeviceBuffer, s: &DeviceBuffer) -> Option<()> {
+    let elems = u64::from(rows) * u64::from(k);
     if rows == 0 || !k.is_multiple_of(128) || elems > u64::from(u32::MAX) || !x.range.0.is_multiple_of(4) {
         return None;
     }
     let kernel = kernels_cuda::get("quant_e4m3_128")?;
     let id = gpu.native_kernel(kernel, QUANT_E4M3_BINDINGS)?;
-    // Every byte and every scale is written, so the scratch is not cleared.
-    let q = gpu.storage_uninit(elems.div_ceil(4));
-    let s = gpu.storage_uninit(elems / 128);
-    let step = gpu.step_native_sliced(id, &[x.buf, &q, &s], &[(x.range.0, elems), (0, 0), (0, 0)], &[rows, k], kernel.blocks_for(1, elems as u32))?;
+    let step = gpu.step_native_sliced(id, &[x.buf, q, s], &[(x.range.0, elems), (0, 0), (0, 0)], &[rows, k], kernel.blocks_for(1, elems as u32))?;
     steps.push(step);
-    Some((q, s))
+    Some(())
 }
 
 impl LibraryGemmProvider {

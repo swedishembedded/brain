@@ -907,19 +907,37 @@ pub fn gdn_mixer_decode_pooled_fused(
     z: &DeviceBuffer,
     pool: &GdnPoolRows,
 ) -> Option<DeviceBuffer> {
+    // The fused decode kernel writes every word of each sequence's output row.
+    let gated = g.storage_uninit(shape.gdn.b as u64 * shape.value_dim() as u64);
+    gdn_mixer_decode_pooled_fused_into(g, shape, w, mixed_qkv, bproj, aproj, z, pool, &gated).then_some(gated)
+}
+
+/// [`gdn_mixer_decode_pooled_fused`] writing the batch's `[b, value_dim]` output to the first rows of `gated`, and reading
+/// the first `b` rows of the projections: a mixed round's decode rows lead its row blocks, so they need no copy in or out.
+/// `false` (nothing submitted) where the launch is not served.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_mixer_decode_pooled_fused_into(
+    g: &Gpu,
+    shape: &GdnMixerShape,
+    w: &GdnMixerWeights,
+    mixed_qkv: &DeviceBuffer,
+    bproj: &DeviceBuffer,
+    aproj: &DeviceBuffer,
+    z: &DeviceBuffer,
+    pool: &GdnPoolRows,
+    gated: &DeviceBuffer,
+) -> bool {
     let gdn = shape.gdn;
     if gdn.t != 1 || gdn.dk != 128 || gdn.dv != 128 || shape.conv_kernel != 4 || shape.nkh == 0 || !gdn.h.is_multiple_of(shape.nkh) {
-        return None;
+        return false;
     }
-    // The fused decode kernel writes every word of each sequence's output row.
-    let gated = g.storage_uninit(gdn.b as u64 * shape.value_dim() as u64);
     let params = [shape.nkh, gdn.h, shape.group(), f(1e-6), f(shape.rms_eps), f(1.0f32 / (gdn.dk as f32).sqrt()), gdn.b, 0];
-    let bufs = [mixed_qkv, w.conv1d_weight, pool.hist, bproj, aproj, w.a_log, w.dt_bias, pool.state, z, w.norm_weight, &gated, pool.rows];
+    let bufs = [mixed_qkv, w.conv1d_weight, pool.hist, bproj, aproj, w.a_log, w.dt_bias, pool.state, z, w.norm_weight, gated, pool.rows];
     let exact = if pool.bf16 { gpu_core::Fused::GdnDecodePoolBf16 } else { gpu_core::Fused::GdnDecodePool };
     let wide = if pool.bf16 { gpu_core::Fused::GdnDecodePoolWideBf16 } else { gpu_core::Fused::GdnDecodePoolWide };
-    let step = pool.wide.then(|| g.fused_step(wide, &bufs, &params)).flatten().or_else(|| g.fused_step(exact, &bufs, &params))?;
+    let Some(step) = pool.wide.then(|| g.fused_step(wide, &bufs, &params)).flatten().or_else(|| g.fused_step(exact, &bufs, &params)) else { return false };
     g.submit(&[], &[step]);
-    Some(gated)
+    true
 }
 
 /// The token-major convolution kernels' share of the mixer: the fused forward and backward below run on

@@ -107,12 +107,13 @@ fn a_round_of_segments_equals_each_segment_on_its_own_state_row() {
     let round = GdnSegmentRound::new(&g, &spans).expect("the segment kernels are served on a bf16-prefill device");
     g.reset_kernel_times();
     g.set_kernel_timing(true);
-    let gated = gdn_mixer_segments_fwd(&g, &ids, &s, &w, &round, &GdnSegmentPools { state: &state_pool, hist: &hist_pool }, &mixed, &b, &a, &z, n).expect("served");
+    let out = gdn_mixer_segments_fwd(&g, &ids, &s, &w, &round, &GdnSegmentPools { state: &state_pool, hist: &hist_pool }, &mixed, &b, &a, &z, n, lead, true).expect("served");
+    let gated = out.gated.clone();
     g.poll_wait();
     let ran: Vec<String> = g.kernel_times().unwrap_or_default().into_iter().map(|r| r.0).collect();
     g.set_kernel_timing(false);
     gpu_core::clear_forced_candidates();
-    for kernel in ["gdn_conv_silu_seg", "gdn_chunk_prep_seg_bf16", "gdn_chunk_loop_seg_bf16"] {
+    for kernel in ["gdn_conv_silu_seg", "gdn_chunk_prep_seg_bf16", "gdn_chunk_loop_seg_bf16", "gdn_gated_norm"] {
         assert_eq!(ran.iter().filter(|k| k.contains(kernel)).count(), 1, "{kernel} is one launch for the round; ran {ran:?}");
     }
 
@@ -126,4 +127,16 @@ fn a_round_of_segments_equals_each_segment_on_its_own_state_row() {
     assert!(e_out <= 1e-5, "gated rows differ by {e_out:.3e}");
     assert!(e_state <= 1e-5, "state rows differ by {e_state:.3e}");
     assert_eq!(e_hist, 0.0, "history rows are copies of inputs and must match exactly");
+
+    // The E4M3 rows the pass wrote beside the product are what the standalone quantiser makes of it (rows of the segments).
+    use gpu_core::provider::library::{quantize_e4m3_rows, Operand};
+    let (q, sc) = out.e4m3.expect("asked for");
+    let mut steps = Vec::new();
+    let (q_ref, s_ref) = quantize_e4m3_rows(&g, &mut steps, &Operand { buf: &out.gated, range: (0, u64::from(n) * value_dim as u64) }, n, value_dim as u32).expect("offered");
+    g.submit(&[], &steps);
+    g.poll_wait();
+    let (from_w, from_s) = (lead as usize * value_dim / 4, lead as usize * value_dim / 128);
+    let bits = |v: Vec<f32>| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+    assert_eq!(bits(g.read(&q, n as usize * value_dim / 4))[from_w..], bits(g.read(&q_ref, n as usize * value_dim / 4))[from_w..], "E4M3 bytes differ");
+    assert_eq!(bits(g.read(&sc, n as usize * value_dim / 128))[from_s..], bits(g.read(&s_ref, n as usize * value_dim / 128))[from_s..], "E4M3 scales differ");
 }

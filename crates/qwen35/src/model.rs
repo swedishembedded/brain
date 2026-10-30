@@ -2809,6 +2809,8 @@ impl Qwen35 {
             norm_weight: self.w(&p("norm.weight")),
             ones_khd: &self.ones_khd,
         };
+        // Set by the segments arm when the gated norm also wrote the E4M3 rows the output projection reads.
+        let mut out_proj_act: Option<Act> = None;
         let (gated, internals) = match call {
             GdnCall::Decode(streams) => {
                 // One sequence's step as a single native launch where the device
@@ -2852,19 +2854,33 @@ impl Qwen35 {
                 let c = round.caches;
                 let (sl, hl) = (self.cfg.gdn_state_len() as u32, self.cfg.gdn_hist_len() as u32);
                 let whole = round.segs.len() == 1 && round.decode.is_none() && gdn_stream_pieces(round.segs[0].rows).count() == 1;
-                // Every segment in one pass of three kernels on the pools' own rows, where the device serves it.
+                // Every segment in one pass of the batched kernels on the pools' own rows, where the device serves it.
                 let pools = model::gdn_segments::GdnSegmentPools { state: &c.gdn_state[l], hist: &c.gdn_hist[l] };
-                let batched = round.gdn.as_ref().and_then(|sr| model::gdn_segments::gdn_mixer_segments_fwd(g, &gdn_mixer_ids(), &shape, &weights, sr, &pools, &mixed_qkv, &bproj, &aproj, &z, n));
+                let lead = round.decode.as_ref().map_or(0, |d| d.rows);
+                // The output projection reads E4M3 rows on this device: the gated norm writes them beside its product.
+                let e4m3 = !self.packs_activations() && self.ops.fp8_reads_e4m3(n, value_dim, d);
+                let batched = round.gdn.as_ref().and_then(|sr| model::gdn_segments::gdn_mixer_segments_fwd(g, &gdn_mixer_ids(), &shape, &weights, sr, &pools, &mixed_qkv, &bproj, &aproj, &z, n, lead, e4m3));
                 // The decode rows and the segments cover every row, so `all` needs no clear.
-                let all = batched.clone().or_else(|| (!whole).then(|| g.storage_uninit((n * value_dim) as u64)));
+                let all = batched.as_ref().map(|b| b.gated.clone()).or_else(|| (!whole).then(|| g.storage_uninit((n * value_dim) as u64)));
                 let mut only = None;
                 // A mixed round's leading decode rows: one recurrent step each, from and back into the sequence's pool row.
                 if let (Some(dec), Some(all)) = (&round.decode, &all) {
-                    let (qkv_d, b_d, a_d, z_d) = (self.take_rows(&mixed_qkv, conv_dim, n, 0, dec.rows), self.take_rows(&bproj, nvh, n, 0, dec.rows), self.take_rows(&aproj, nvh, n, 0, dec.rows), self.take_rows(&z, value_dim, n, 0, dec.rows));
                     let dec_shape = model::gdn_mixer::GdnMixerShape { gdn: GdnShape { b: dec.rows, t: 1, chunk: 1, ..shape.gdn }, ..shape };
                     let pool = model::gdn_mixer::GdnPoolRows { state: &c.gdn_state[l], hist: &c.gdn_hist[l], rows: dec.slot_rows, gather: POOL_ROWS_GATHER2, scatter: POOL_ROWS_SCATTER2, fuse: self.decode_fusion.get(), bf16: false, wide: self.gdn_pool_wide.get() };
-                    let gated_d = model::gdn_mixer::gdn_mixer_decode_state_fwd(g, &gdn_mixer_ids(), &gdn_mixer_decode_ids(), &dec_shape, &weights, &qkv_d, &b_d, &a_d, &z_d, &model::gdn_mixer::GdnDecodeState::Pool(pool));
-                    self.put_rows_copy(&gated_d, all, value_dim, 0, dec.rows);
+                    // The decode rows lead every row block: the fused step reads them in place and writes its rows into `all`.
+                    let in_place = batched.is_some() && pool.fuse && model::gdn_mixer::gdn_mixer_decode_pooled_fused_into(g, &dec_shape, &weights, &mixed_qkv, &bproj, &aproj, &z, &pool, all);
+                    if !in_place {
+                        let (qkv_d, b_d, a_d, z_d) = (self.take_rows(&mixed_qkv, conv_dim, n, 0, dec.rows), self.take_rows(&bproj, nvh, n, 0, dec.rows), self.take_rows(&aproj, nvh, n, 0, dec.rows), self.take_rows(&z, value_dim, n, 0, dec.rows));
+                        let gated_d = model::gdn_mixer::gdn_mixer_decode_state_fwd(g, &gdn_mixer_ids(), &gdn_mixer_decode_ids(), &dec_shape, &weights, &qkv_d, &b_d, &a_d, &z_d, &model::gdn_mixer::GdnDecodeState::Pool(pool));
+                        self.put_rows_copy(&gated_d, all, value_dim, 0, dec.rows);
+                    }
+                    // The decode rows' E4M3 rows: the gated norm wrote the segments' only.
+                    if let Some((q, s)) = batched.as_ref().and_then(|b| b.e4m3.as_ref()) {
+                        let mut steps = Vec::new();
+                        let x = gpu_core::provider::library::Operand { buf: all, range: (0, dec.rows as u64 * value_dim as u64) };
+                        gpu_core::provider::library::quantize_e4m3_rows_into(g, &mut steps, &x, dec.rows, value_dim, q, s).expect("the segments' kernels were offered the E4M3 form on this device");
+                        g.submit(&[], &steps);
+                    }
                 }
                 for seg in round.segs.iter().filter(|_| batched.is_none()) {
                     // The sequence's state row becomes the working copy, the rows run on it piece by piece, and it is
@@ -2891,6 +2907,9 @@ impl Qwen35 {
                         }
                     }
                     g.submit(&[], &[g.step(c.scatter, &[&c.work_state[l], &c.work_hist[l], &seg.slot, &c.gdn_state[l], &c.gdn_hist[l]], &[1, sl, hl], sl + hl)]);
+                }
+                if let Some((q, s)) = batched.and_then(|b| b.e4m3) {
+                    out_proj_act = Some(self.ops.act_f32_with_e4m3(all.as_ref().expect("a batched round has its output"), n, value_dim, q, s));
                 }
                 (all.or(only).expect("a round has at least one sequence"), None)
             }
@@ -2943,7 +2962,11 @@ impl Qwen35 {
         let out = g.storage_uninit((n * d) as u64);
         {
             let mut s = Vec::new();
-            let act3 = if epilogue { self.quant_epilogue(0, &gated, None, n, value_dim).1 } else { self.ops_act(&mut s, &gated, n, value_dim) };
+            let act3 = match out_proj_act {
+                Some(act) => act,
+                None if epilogue => self.quant_epilogue(0, &gated, None, n, value_dim).1,
+                None => self.ops_act(&mut s, &gated, n, value_dim),
+            };
             let float_tier = self.ops_linear(&mut s, &act3, &p("out_proj.weight"), &out);
             self.adapt(float_tier, &mut s, "out_proj", &gated, &p("out_proj.weight"), &out, n, value_dim, d);
             self.bank_fwd(&mut s, &gated, &[(p("out_proj.weight").as_str(), &out)], n);

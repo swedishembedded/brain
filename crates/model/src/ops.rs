@@ -1724,6 +1724,21 @@ impl Ops {
         Act { x: x.clone(), xr0: 0, m: rows, k, quant: Default::default(), quant_deferred: false, xgs: Default::default(), bf16: std::cell::RefCell::new(Some(bf16)), e4m3: Default::default() }
     }
 
+    /// [`Self::act_f32`] for `rows` rows of `x` whose E4M3 quantisation (`xq` bytes, `sx` one scale per row per 128 of K,
+    /// as `quant_e4m3_128` makes them) a fused kernel has already produced: the FP8 products that read this activation as
+    /// E4M3 take it instead of quantising it again.
+    pub fn act_f32_with_e4m3(&self, x: &DeviceBuffer, rows: u32, k: u32, xq: DeviceBuffer, sx: DeviceBuffer) -> Act {
+        assert!(rows > 0 && k.is_multiple_of(FP8_BLOCK), "Ops::act_f32_with_e4m3: {rows} rows of {k} (K a multiple of {FP8_BLOCK})");
+        Act { x: x.clone(), xr0: 0, m: rows, k, quant: Default::default(), quant_deferred: false, xgs: Default::default(), bf16: Default::default(), e4m3: std::cell::RefCell::new(Some((xq, sx))) }
+    }
+
+    /// Whether an FP8-weight product of `rows` rows against `n` outputs of width `k` reads E4M3 activations on this device
+    /// (the form its shape class is tuned to): a producer that can write them in its own pass then spares the product a
+    /// separate quantisation launch.
+    pub fn fp8_reads_e4m3(&self, rows: u32, k: u32, n: u32) -> bool {
+        k.is_multiple_of(FP8_BLOCK) && self.providers.runs("cuda") && self.gpu.has_fp8_linear() && self.gpu.fp8_linear_act(&[rows, k / 4, n]) == Some(Fp8Act::E4m3)
+    }
+
     /// The f32 rows of an activation built by [`Self::act_f32`]: the buffer, its
     /// first row, row count and width, for a caller that dispatches a kernel
     /// of its own over them.

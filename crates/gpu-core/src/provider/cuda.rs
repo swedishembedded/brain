@@ -703,13 +703,28 @@ pub fn gdn_segment_kernels_served(gpu: &crate::Gpu) -> bool {
     let Some(cc) = gpu.caps().arch.compute_capability else { return false };
     gdn_bf16_prefill_selected(gpu)
         && !super::disabled_providers().iter().any(|d| d == "cuda")
-        && ["gdn_conv_silu_seg", "gdn_chunk_prep_seg_bf16", "gdn_chunk_loop_seg_bf16"].iter().all(|name| kernels_cuda::get(name).is_some_and(|k| k.min_cc <= cc))
+        && ["gdn_conv_silu_seg", "gdn_chunk_prep_seg_bf16", "gdn_chunk_loop_seg_bf16", "gdn_gated_norm"].iter().all(|name| kernels_cuda::get(name).is_some_and(|k| k.min_cc <= cc))
+}
+
+/// `gdn_gated_norm`: x, w, z (read); out, q, s (written).
+static GDN_GATED_NORM_BINDINGS: [BindKind; 7] = bwd_tc_bindings(3);
+
+/// The gated output norm of a Gated DeltaNet layer (`gdn_gated_norm`) over `head_rows` rows of 128 from row `first`:
+/// `bufs` is `x` (the recurrence output), `w` (the norm gain, 128), `z` (the gate projection), then `out`, and the E4M3
+/// bytes `q` (`head_rows * 32` words) and scales `s` (`head_rows`) written when `e4m3` (any one-word buffers otherwise).
+/// `None` when the device does not offer the kernel.
+pub fn gdn_gated_norm_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 6], head_rows: u32, first: u32, eps: f32, e4m3: bool) -> Option<crate::Step> {
+    let cc = gpu.caps().arch.compute_capability?;
+    let kernel = kernels_cuda::get("gdn_gated_norm").filter(|k| k.min_cc <= cc && !super::disabled_providers().iter().any(|d| d == "cuda"))?;
+    let id = gpu.native_kernel(kernel, &GDN_GATED_NORM_BINDINGS)?;
+    let blocks = head_rows.saturating_sub(first).div_ceil(4);
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 6], &[head_rows, first, eps.to_bits(), e4m3 as u32], blocks)
 }
 
 /// `gdn_conv_silu_seg`: x, w, table (read); history pool, query, key, value (written).
 static GDN_CONV_SILU_SEG_BINDINGS: [BindKind; 8] = bwd_tc_bindings(3);
-/// `gdn_chunk_prep_seg_bf16`: query, key, value, raw_g, beta, table (read); the seven prep tensors (written).
-static GDN_CHUNK_PREP_SEG_BINDINGS: [BindKind; 14] = bwd_tc_bindings(6);
+/// `gdn_chunk_prep_seg_bf16`: query, key, value, b_proj, a_proj, a_log, dt_bias, table (read); the seven prep tensors (written).
+static GDN_CHUNK_PREP_SEG_BINDINGS: [BindKind; 16] = bwd_tc_bindings(8);
 /// `gdn_chunk_loop_seg_bf16`: kd, qs, w, u, g_cs, intra, table (read); state pool, out (written).
 static GDN_CHUNK_LOOP_SEG_BINDINGS: [BindKind; 10] = bwd_tc_bindings(7);
 
@@ -724,10 +739,10 @@ pub fn gdn_conv_silu_seg_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuff
     gpu.step_native_sliced(id, bufs, &[(0, 0); 7], &params, blocks)
 }
 
-/// The prep of every chunk of the round's segments: `bufs` is `query, key, value, raw_g, beta, table` (read), then `g_cs,
-/// exp_g_cs, u, w, intra_scores, query_cm, key_cm` (written, `chunks * heads` slots of 64 rows) as for
-/// [`gdn_chunk_prep_tok_bf16_step`].
-pub fn gdn_chunk_prep_seg_bf16_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 13], l: GdnTokenLayout, table: &GdnSegmentTable) -> Option<crate::Step> {
+/// The prep of every chunk of the round's segments: `bufs` is `query, key, value, b_proj, a_proj, a_log, dt_bias, table`
+/// (read; the gates are formed from the raw projections in the loads), then `g_cs, exp_g_cs, u, w, intra_scores,
+/// query_cm, key_cm` (written, `chunks * heads` slots of 64 rows) as for [`gdn_chunk_prep_tok_bf16_step`].
+pub fn gdn_chunk_prep_seg_bf16_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 15], l: GdnTokenLayout, table: &GdnSegmentTable) -> Option<crate::Step> {
     if !gdn_chunk_prep_tok_shape_ok(l.head_dim, l.head_dim, l.c_len, l.heads, l.group) {
         return None;
     }
@@ -737,7 +752,7 @@ pub fn gdn_chunk_prep_seg_bf16_step(gpu: &crate::Gpu, bufs: &[&backend_api::Devi
     let id = gpu.native_kernel_launched(kernel, &GDN_CHUNK_PREP_SEG_BINDINGS, launch)?;
     let blocks = table.chunks * l.heads;
     let params = [blocks, 0, l.head_dim, l.head_dim, 0, l.scale.to_bits(), l.heads, table.segments, l.group, l.eps.to_bits()];
-    gpu.step_native_sliced(id, bufs, &[(0, 0); 13], &params, blocks)
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 15], &params, blocks)
 }
 
 /// The bf16 recurrence over every segment of the round, on the pool's state rows in place: `bufs` is `kd, qs, w, u, g_cs,

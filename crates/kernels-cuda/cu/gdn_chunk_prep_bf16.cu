@@ -68,6 +68,9 @@ __device__ __forceinline__ void brain_normalize_rows_bf16(unsigned short* tile, 
 struct PrepOperands {
     const float *query, *key, *value, *raw_g, *beta;
     float *g_cs_out, *exp_g_cs_out, *u_out, *w_out, *intra_out, *query_cm_out, *key_cm_out;
+    // Non-null: `raw_g` and `beta` hold the raw projections a_proj and b_proj, and the gates are formed in the loads
+    // (beta = sigmoid(b_proj), raw_g = -exp(a_log) * softplus(a_proj + dt_bias), per value head).
+    const float *a_log, *dt_bias;
     float scale, eps;
     unsigned int H, group;
 };
@@ -109,8 +112,18 @@ __device__ __forceinline__ void brain_gdn_prep_chunk(const PrepOperands& a, cons
         sT[i] = 0.0f;
     }
     if (tid < MAXC) {
-        sbeta[tid] = tid < C ? beta_src[tid * H] : 0.0f;
-        sg[tid] = tid < C ? g_src[tid * H] : 0.0f;
+        float b = 0.0f, gate = 0.0f;
+        if (tid < C) {
+            b = beta_src[tid * H];
+            gate = g_src[tid * H];
+            if (a.a_log != nullptr) {
+                const float x = gate + a.dt_bias[head];
+                b = 1.0f / (1.0f + expf(-b));
+                gate = -expf(a.a_log[head]) * (fmaxf(x, 0.0f) + logf(1.0f + expf(-fabsf(x))));
+            }
+        }
+        sbeta[tid] = b;
+        sg[tid] = gate;
     }
     __syncthreads();
     // The serial sum `gdn_chunk_cumsum_step` performs, so g_cs is bit-identical.
@@ -257,7 +270,7 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_chunk_prep_tok_b
     const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
     if (blk >= bhc) { return; }  // block-uniform
     const PrepOperands a = {query, key, value, raw_g, beta, g_cs_out, exp_g_cs_out, u_out, w_out, intra_out, query_cm_out, key_cm_out,
-                            __uint_as_float(params[5]), __uint_as_float(params[9]), H, params[8]};
+                            nullptr, nullptr, __uint_as_float(params[5]), __uint_as_float(params[9]), H, params[8]};
     const unsigned long long row_base = (unsigned long long)blk * C;
     const unsigned int bh = bhc / n_chunks, ci = blk / bh, rem = blk % bh;
     const unsigned long long tok0 = ((unsigned long long)(rem / H) * n_chunks + ci) * C;
@@ -267,19 +280,20 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_chunk_prep_tok_b
 // The same preparation for every chunk of a round's prompt segments in one launch: block (chunk, head) reads its rows
 // and length from the chunk table (`gdn_segment_table`: [row0, rows, slot, first chunk] per segment, then [token row, C]
 // per chunk) and writes its tensors at a fixed 64-row slot of the scratch, so a segment's last, short chunk needs no
-// launch of its own.
-// Contract: params [chunks * H, unused..., scale (f32 bits) at 5, H at 6, nseg at 7, group at 8, eps (f32 bits) at 9]; the buffers
-// as `brain_gdn_chunk_prep_tok_bf16`, with `table` after `beta`.
+// launch of its own. The gates come in raw (b_proj, a_proj with the layer's a_log and dt_bias) and are formed in the load.
+// Contract: params [chunks * H, unused..., scale (f32 bits) at 5, H at 6, nseg at 7, group at 8, eps (f32 bits) at 9]; read
+// query, key, value, b_proj, a_proj, a_log, dt_bias, table; write the seven tensors of `brain_gdn_chunk_prep_tok_bf16`.
 extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_chunk_prep_seg_bf16(const unsigned int* params, const float* query, const float* key,
-                                                                                     const float* value, const float* raw_g, const float* beta,
-                                                                                     const unsigned int* table, float* g_cs_out, float* exp_g_cs_out, float* u_out,
-                                                                                     float* w_out, float* intra_out, float* query_cm_out, float* key_cm_out) {
+                                                                                     const float* value, const float* b_proj, const float* a_proj,
+                                                                                     const float* a_log, const float* dt_bias, const unsigned int* table,
+                                                                                     float* g_cs_out, float* exp_g_cs_out, float* u_out, float* w_out,
+                                                                                     float* intra_out, float* query_cm_out, float* key_cm_out) {
     const unsigned int blocks = params[0];
     const unsigned int H = params[6], nseg = params[7];
     const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
     if (blk >= blocks) { return; }  // block-uniform
-    const PrepOperands a = {query, key, value, raw_g, beta, g_cs_out, exp_g_cs_out, u_out, w_out, intra_out, query_cm_out, key_cm_out,
-                            __uint_as_float(params[5]), __uint_as_float(params[9]), H, params[8]};
+    const PrepOperands a = {query, key, value, a_proj, b_proj, g_cs_out, exp_g_cs_out, u_out, w_out, intra_out, query_cm_out, key_cm_out,
+                            a_log, dt_bias, __uint_as_float(params[5]), __uint_as_float(params[9]), H, params[8]};
     const unsigned int chunk = blk / H, head = blk % H;
     const unsigned int* entry = table + 4 * nseg + 2 * chunk;
     const unsigned long long row_base = (unsigned long long)blk * MAXC;

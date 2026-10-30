@@ -74,10 +74,18 @@ impl GdnSegmentRound {
     }
 }
 
+/// What [`gdn_mixer_segments_fwd`] hands the output projection.
+pub struct SegmentsOut {
+    /// `[n, value_dim]`, the rows `lead ..` written.
+    pub gated: DeviceBuffer,
+    /// With `e4m3` asked: the E4M3 bytes (`n * value_dim / 4` words) and the scale per row per 128 of `gated`.
+    pub e4m3: Option<(DeviceBuffer, DeviceBuffer)>,
+}
+
 /// The mixer of one layer over every segment of `round`, from the layer's projections `mixed_qkv`, `bproj`, `aproj`, `z`
 /// (all `[n, ...]` for the round's `n` rows) to `gated` (`[n, value_dim]`). Rows not in a segment (a mixed round's
-/// leading decode rows) come back undefined; the caller overwrites them. `None` (nothing submitted, the pools untouched)
-/// when the device or the shape is not served.
+/// leading `lead` decode rows) are left untouched for the caller to fill. `None` (nothing submitted, the pools untouched)
+/// when the device or the shape is not served. With `e4m3`, the E4M3 quantisation of `gated` for FP8 products comes with it.
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::too_many_arguments)]
 pub fn gdn_mixer_segments_fwd(
@@ -92,8 +100,10 @@ pub fn gdn_mixer_segments_fwd(
     aproj: &DeviceBuffer,
     z: &DeviceBuffer,
     n: u32,
-) -> Option<DeviceBuffer> {
-    use gpu_core::provider::cuda::{gdn_chunk_loop_seg_bf16_step, gdn_chunk_prep_seg_bf16_step, gdn_conv_silu_seg_step, GdnConvLayout, GdnTokenLayout};
+    lead: u32,
+    e4m3: bool,
+) -> Option<SegmentsOut> {
+    use gpu_core::provider::cuda::{gdn_chunk_loop_seg_bf16_step, gdn_chunk_prep_seg_bf16_step, gdn_conv_silu_seg_step, gdn_gated_norm_step, GdnConvLayout, GdnTokenLayout};
 
     let gdn = shape.gdn;
     let (nvh, khd, vhd) = (gdn.h, gdn.dk, gdn.dv);
@@ -112,33 +122,23 @@ pub fn gdn_mixer_segments_fwd(
         table,
     )?;
 
-    let beta = g.storage_uninit(n as u64 * nvh as u64);
-    let g_decay = g.storage_uninit(n as u64 * nvh as u64);
     // The prep writes every word of its slots it reads back, so the scratch is not cleared.
     let (g_cs, exp_g_cs, u, wm, intra) = (g.storage_uninit(slots), g.storage_uninit(slots), g.storage_uninit(slots * vhd as u64), g.storage_uninit(slots * khd as u64), g.storage_uninit(slots * 64));
     let (query_cm, key_cm) = (g.storage_uninit(slots * khd as u64), g.storage_uninit(slots * khd as u64));
     let layout = GdnTokenLayout { bhc: 0, c_len: 64, n_chunks: 0, heads: nvh, group, head_dim: khd, scale: 1.0f32 / (khd as f32).sqrt(), eps: 1e-6 };
-    let prep = gdn_chunk_prep_seg_bf16_step(g, &[&query, &key, &value, &g_decay, &beta, &round.buf, &g_cs, &exp_g_cs, &u, &wm, &intra, &query_cm, &key_cm], layout, table)?;
+    let prep = gdn_chunk_prep_seg_bf16_step(g, &[&query, &key, &value, bproj, aproj, w.a_log, w.dt_bias, &round.buf, &g_cs, &exp_g_cs, &u, &wm, &intra, &query_cm, &key_cm], layout, table)?;
     // Every row of a segment is written by the recurrence (a mixed round's decode rows are the caller's).
     let out = g.storage_uninit(n as u64 * value_dim as u64);
     let recurrence = gdn_chunk_loop_seg_bf16_step(g, &[&key_cm, &query_cm, &wm, &u, &g_cs, &intra, &round.buf, pools.state, &out], nvh, khd, vhd, table)?;
 
-    g.submit(&[], &[g.step(ids.sigmoid, &[bproj, &beta], &[n * nvh], n * nvh), g.step(ids.gdn_decay_gate, &[aproj, w.a_log, w.dt_bias, &g_decay], &[n, nvh], n * nvh)]);
-    g.submit(&[], &[conv, prep, recurrence]);
-
-    // Gated RMSNorm ("norm before gate"): RMSNorm(out) * weight, then * SiLU(z); one pass over the round's rows.
-    let normed = g.storage_uninit(n as u64 * value_dim as u64);
-    let z_silu = g.storage_uninit(n as u64 * value_dim as u64);
+    // Gated RMSNorm ("norm before gate"): RMSNorm(out) * weight, then * SiLU(z); one pass over the segments' rows.
     let gated = g.storage_uninit(n as u64 * value_dim as u64);
-    g.submit(
-        &[],
-        &[
-            crate::block::rmsnorm_fwd(g, &ids.kernels, &out, w.norm_weight, &normed, vhd, n * nvh, shape.rms_eps),
-            g.step(ids.silu, &[z, &z_silu], &[n * value_dim], n * value_dim),
-            g.step(ids.mul, &[&normed, &z_silu, &gated], &[n * value_dim], n * value_dim),
-        ],
-    );
-    Some(gated)
+    // With `e4m3` the same pass writes the output projection's E4M3 activation (the rows `lead ..` of it).
+    let (q, s) = if e4m3 { (g.storage_uninit(n as u64 * value_dim as u64 / 4), g.storage_uninit(n as u64 * nvh as u64)) } else { (g.storage_uninit(1), g.storage_uninit(1)) };
+    let norm = gdn_gated_norm_step(g, &[&out, w.norm_weight, z, &gated, &q, &s], n * nvh, lead * nvh, shape.rms_eps, e4m3)?;
+
+    g.submit(&[], &[conv, prep, recurrence, norm]);
+    Some(SegmentsOut { gated, e4m3: e4m3.then_some((q, s)) })
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -155,6 +155,8 @@ pub fn gdn_mixer_segments_fwd(
     _aproj: &DeviceBuffer,
     _z: &DeviceBuffer,
     _n: u32,
-) -> Option<DeviceBuffer> {
+    _lead: u32,
+    _e4m3: bool,
+) -> Option<SegmentsOut> {
     None
 }
