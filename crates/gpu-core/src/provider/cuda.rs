@@ -706,6 +706,23 @@ pub fn gdn_segment_kernels_served(gpu: &crate::Gpu) -> bool {
         && ["gdn_conv_silu_seg", "gdn_chunk_prep_seg_bf16", "gdn_chunk_loop_seg_bf16", "gdn_gated_norm"].iter().all(|name| kernels_cuda::get(name).is_some_and(|k| k.min_cc <= cc))
 }
 
+/// `topk_rows_f32`: logits (masked in place), values, columns.
+static TOPK_ROWS_BINDINGS: [BindKind; 4] = bwd_tc_bindings(0);
+
+/// The `cap` best candidates of every row of `logits` (`[rows, vocab]`) in one launch (`topk_rows_f32`): `bufs` is the
+/// logits (the taken columns are masked to -3.4e38), then `vals` and `idxs` (`[rows, cap]`, the columns as f32).
+/// Best first, the lower column first on equal values, as the chain of argmax rounds it replaces. `None` when the device
+/// does not offer the kernel or the shape is not one it serves (a vocabulary a f32 cannot index exactly).
+pub fn topk_rows_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 3], rows: u32, vocab: u32, cap: u32) -> Option<crate::Step> {
+    if rows == 0 || cap == 0 || cap > vocab || vocab >= 1 << 24 {
+        return None;
+    }
+    let cc = gpu.caps().arch.compute_capability?;
+    let kernel = kernels_cuda::get("topk_rows_f32").filter(|k| k.min_cc <= cc && !super::disabled_providers().iter().any(|d| d == "cuda"))?;
+    let id = gpu.native_kernel(kernel, &TOPK_ROWS_BINDINGS)?;
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 3], &[rows, vocab, cap], rows)
+}
+
 /// `gdn_gated_norm`: x, w, z (read); out, q, s (written).
 static GDN_GATED_NORM_BINDINGS: [BindKind; 7] = bwd_tc_bindings(3);
 
