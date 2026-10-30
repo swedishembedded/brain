@@ -975,7 +975,7 @@ mod native_facade {
         /// form is served.
         pub fn prepare_gdn_prefill(&self) {
             if crate::native_tune::forced_candidate(crate::gdn_prefill_tune::SLOT).is_none() {
-                self.gdn_prefill.get_or_init(|| crate::gdn_prefill_tune::measure(self));
+                self.gdn_prefill.get_or_init(|| crate::gdn_prefill_tune::choose(self));
             }
         }
 

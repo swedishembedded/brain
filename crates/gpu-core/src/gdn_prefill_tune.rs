@@ -64,12 +64,36 @@ fn lcg(seed: &mut u64, n: usize, scale: f32) -> Vec<f32> {
         .collect()
 }
 
-/// Run both forms on a synthetic problem and choose.
-pub(crate) fn measure(gpu: &Gpu) -> Choice {
-    let choice = try_measure(gpu);
+/// The choices this process has measured, by device (adapter, compute capability): several handles on one card share
+/// one measurement.
+static MEASURED: std::sync::Mutex<Vec<(String, Choice)>> = std::sync::Mutex::new(Vec::new());
+
+/// The choice for `gpu`'s device: measured once per process, on a throwaway handle of the same device so the synthetic
+/// problem's buffers are never charged to (or held by) the model's own handle.
+pub(crate) fn choose(gpu: &Gpu) -> Choice {
+    let cc = gpu.caps().arch.compute_capability;
+    if !cc.is_some_and(|cc| cc >= kernels_cuda::MMA_S8_MIN_CC) || kernels_cuda::get("gdn_chunk_loop_bf16").is_none() {
+        return Choice::EXACT;
+    }
+    let key = format!("{}-{cc:?}-{}sm", crate::adapter_info().map(|(d, _)| d).unwrap_or_else(|| gpu.kind().to_owned()), gpu.caps().compute_units.unwrap_or(0));
+    let mut measured = MEASURED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, c)) = measured.iter().find(|(k, _)| *k == key) {
+        return *c;
+    }
+    let probe = gpu.new_like(&[]);
+    let choice = try_measure(&probe);
     // Timing is off in serving (per-launch events cost real time); the tuner is the only thing that turns it on.
-    gpu.set_kernel_timing(false);
-    choice.unwrap_or(Choice::EXACT)
+    probe.set_kernel_timing(false);
+    let choice = choice.unwrap_or(Choice::EXACT);
+    eprintln!(
+        "brain: gdn prefill form on {key}: {} (exact {} us, bf16 {} us, bf16 error {})",
+        if choice.bf16 { "bf16" } else { "exact" },
+        choice.exact_us.map_or("-".into(), |v| format!("{v:.0}")),
+        choice.bf16_us.map_or("-".into(), |v| format!("{v:.0}")),
+        choice.rel_err.map_or("-".into(), |v| format!("{v:.1e}"))
+    );
+    measured.push((key, choice));
+    choice
 }
 
 fn try_measure(gpu: &Gpu) -> Option<Choice> {

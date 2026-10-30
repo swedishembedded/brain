@@ -1753,8 +1753,10 @@ impl Qwen35 {
         shard: Shard,
     ) -> Qwen35 {
         let train = train_opts.is_some();
-        // The serving prefill's Gated DeltaNet form is measured now, not inside the first recorded step.
-        if !train {
+        // The Gated DeltaNet form of the forward that saves nothing (the serving prefill, and a checkpointed training
+        // forward) is measured now, not inside the first recorded step. A training forward that saves for the backward
+        // keeps the exact TF32 kernels, so the gradients come from the exact recompute.
+        if cfg.linear_key_head_dim == 128 && cfg.linear_value_head_dim == 128 {
             gpu.prepare_gdn_prefill();
         }
         if let Err(e) = cfg.check_window_and_memory() {
