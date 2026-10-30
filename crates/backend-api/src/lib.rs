@@ -1600,6 +1600,16 @@ pub trait Backend: Send + Sync {
     /// backend whose frees are already cheap has nothing to hold.
     fn hold_freed_blocks(&self, _on: bool) {}
 
+    /// Raise the most freed device memory the backend keeps for reuse to `bytes` (clamped to the device's memory).
+    ///
+    /// The default bound is a small fraction of the card, sized for a serving loop whose temporaries are a few
+    /// hundred megabytes. A loop whose working set is larger and repeats (a training step cycles tens of gigabytes
+    /// of activations) otherwise gives its freed memory back to the driver at every synchronisation and takes it
+    /// again, a driver allocation of many milliseconds in front of the next kernel. Retained memory is returned
+    /// whenever an allocation would otherwise fail, so a larger bound never runs the card out. The default is a
+    /// no-op.
+    fn retain_freed_blocks(&self, _bytes: u64) {}
+
     /// The device memory this process holds, by the backend's own accounting ([`MemoryUsage`]); `None` for a backend
     /// that does not account for its allocations.
     fn memory_usage(&self) -> Option<MemoryUsage> {

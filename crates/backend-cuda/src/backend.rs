@@ -2106,6 +2106,10 @@ impl backend_api::Backend for CudaBackend {
         self.ctx.hold_freed_blocks(on);
     }
 
+    fn retain_freed_blocks(&self, bytes: u64) {
+        self.ctx.retain_freed_blocks(bytes);
+    }
+
     /// Every launch, copy and clear of a handle goes onto its one stream; another handle's use of a buffer is
     /// ordered by the fences `fence_in` and `fence_out` keep.
     fn submissions_ordered(&self) -> bool {

@@ -1919,8 +1919,13 @@ impl Qwen35 {
             // when the base leaves that room. A bf16 27B base takes 54 GB, and with the
             // freed blocks held its 8K step peaks at about 81 GiB of the 95 (knowledge 311).
             if o.base.want("blocks.0.mlp.gate.weight") != Dtype::F32 || cfg.n_layers <= 32 {
-                gpu.hold_freed_blocks(true);
-                ops.gpu().hold_freed_blocks(true);
+                for handle in [&gpu, ops.gpu()] {
+                    handle.hold_freed_blocks(true);
+                    // The step cycles tens of gigabytes: without this the pool hands everything above its
+                    // default bound back to the driver at every synchronisation and the next kernel waits
+                    // for the driver to map it again.
+                    handle.retain_freed_blocks(u64::MAX);
+                }
             }
         }
         let resident_ft = resident_plan.map(|plan| {

@@ -16,6 +16,8 @@
 //!   an exact repeat;
 //! - **bounded**: after the stream synchronises, the pool holds at most the
 //!   retention cap in idle bytes, however much was churned through it;
+//! - **retained on request**: a loop whose working set is larger than the default cap (a training step) raises the
+//!   cap with `retain_freed_blocks` and then keeps its whole working set across a synchronisation;
 //! - **returned**: turning holding off, dropping the context, and dropping a
 //!   block that outlives its context all bring every counter, the pool count
 //!   included, back to baseline - and the driver's own accounting of this
@@ -96,6 +98,27 @@ fn the_pool_never_retains_more_than_its_cap_once_the_stream_has_run() {
         "the pool retains {} bytes over a cap of {cap} after the stream synchronised",
         ctx.pool_reserved_bytes()
     );
+}
+
+#[test]
+fn a_raised_retention_keeps_a_working_set_larger_than_the_default_cap_across_a_sync() {
+    let _s = serial();
+    let Some(ctx) = pooled() else { return };
+    let default_cap = ctx.cache_cap_bytes();
+    let block = (default_cap / 4).clamp(MIB as u64, 64 * MIB as u64) as usize;
+    let working_set = default_cap * 2;
+    ctx.retain_freed_blocks(u64::MAX);
+    assert!(ctx.cache_cap_bytes() >= working_set, "the cap did not rise: {} against {working_set}", ctx.cache_cap_bytes());
+    let held: Vec<_> = (0..(working_set as usize / block)).map(|_| ctx.alloc(block).expect("alloc")).collect();
+    drop(held);
+    ctx.sync().expect("sync");
+    assert!(
+        ctx.pool_reserved_bytes() >= working_set,
+        "the pool gave back {} of {working_set} bytes at the synchronisation",
+        working_set.saturating_sub(ctx.pool_reserved_bytes())
+    );
+    ctx.hold_freed_blocks(false);
+    assert_eq!(ctx.pool_reserved_bytes(), 0, "turning holding off returns the retained memory");
 }
 
 #[test]

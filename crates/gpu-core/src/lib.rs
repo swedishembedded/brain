@@ -1739,6 +1739,14 @@ mod native_facade {
             self.be().hold_freed_blocks(on);
         }
 
+        /// Let this handle's backend keep up to `bytes` of freed device memory for reuse
+        /// ([`backend_api::Backend::retain_freed_blocks`]): a repeated pass whose working set is larger than the
+        /// default bound (a training step) calls it with `u64::MAX` so its steady state allocates nothing from
+        /// the driver.
+        pub fn retain_freed_blocks(&self, bytes: u64) {
+            self.be().retain_freed_blocks(bytes);
+        }
+
         /// See [`backend_api::Backend::submissions_ordered`].
         pub fn submissions_ordered(&self) -> bool {
             self.inner.submissions_ordered()

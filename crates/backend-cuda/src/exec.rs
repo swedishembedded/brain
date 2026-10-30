@@ -633,6 +633,22 @@ impl Context {
         self.apply_holding();
     }
 
+    /// Raise what [`Self::cached_bytes`] may reach to `bytes`, at most the device's memory (see
+    /// `backend_api::Backend::retain_freed_blocks`). The pool's release threshold follows, so the driver
+    /// stops taking idle memory back at every synchronisation; an allocation that would fail still trims
+    /// ([`Self::alloc`]).
+    pub fn retain_freed_blocks(&self, bytes: u64) {
+        let total = self.mem_info().map(|m| m.1).unwrap_or(0);
+        let cap = if total == 0 { bytes } else { bytes.min(total) };
+        if cap <= self.cache.cap() {
+            return;
+        }
+        self.cache.set_cap(cap);
+        if let Some(pool) = self.pool.get().and_then(|p| p.as_ref()) {
+            pool.set_release_threshold(cap);
+        }
+    }
+
     /// Bytes of freed device blocks this context is holding for reuse. They are
     /// still allocated from the driver (and counted by
     /// [`crate::live_resources`]) until reissued, trimmed, or the context and
@@ -1985,6 +2001,20 @@ impl PoolRef {
             "cuMemPoolSetAttribute",
         )?;
         Ok(this)
+    }
+
+    fn set_release_threshold(&self, bytes: u64) {
+        let mut threshold = bytes;
+        // SAFETY: the attribute takes a `cuuint64_t`, which `threshold` is.
+        let rc = unsafe {
+            if (self.fns.ctx_set_current)(self.ctx) != 0 {
+                return;
+            }
+            (self.pf.pool_set_attribute)(self.pool, MEMPOOL_ATTR_RELEASE_THRESHOLD, &mut threshold as *mut u64 as *mut c_void)
+        };
+        if rc != 0 {
+            tracing::warn!("cuMemPoolSetAttribute (release threshold) failed: {}", self.d.error_text(rc));
+        }
     }
 
     fn attribute(&self, attr: c_int) -> u64 {
