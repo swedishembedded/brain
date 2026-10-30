@@ -50,6 +50,9 @@ struct LoopChunk {
     unsigned long long row_base, cc_base;
     float* out_chunk;
     unsigned long long out_stride;
+    // The output rows are bf16 (`out_chunk` addresses bf16 elements, `out_stride` counts them): the serving segments' form, whose
+    // consumer (the gated norm) reads bf16, so the recurrence output moves 2 bytes an element instead of 4.
+    bool out_bf16;
 };
 
 struct LoopOperands {
@@ -254,7 +257,12 @@ __device__ __forceinline__ void brain_gdn_loop_walk(const LoopOperands& op, cons
             for (int h2 = 0; h2 < 2; ++h2) {
                 const unsigned int r = m0 + g + h2 * 8u;
                 if (r < C) {
-                    *reinterpret_cast<float2*>(out_chunk + (unsigned long long)r * out_stride + j0 + n0 + t * 8 + 2 * t4) = make_float2(acc2[t][2 * h2], acc2[t][2 * h2 + 1]);
+                    const unsigned long long at = (unsigned long long)r * out_stride + j0 + n0 + t * 8 + 2 * t4;
+                    if (ch.out_bf16) {
+                        *reinterpret_cast<unsigned int*>(reinterpret_cast<unsigned short*>(out_chunk) + at) = brain_pack_bf16(acc2[t][2 * h2], acc2[t][2 * h2 + 1]);
+                    } else {
+                        *reinterpret_cast<float2*>(out_chunk + at) = make_float2(acc2[t][2 * h2], acc2[t][2 * h2 + 1]);
+                    }
                 }
             }
         }
@@ -321,6 +329,7 @@ extern "C" __global__ void __launch_bounds__(THREADS, 2) brain_gdn_chunk_loop_bf
         ch.cc_base = ch.row_base * C;
         ch.out_chunk = out + ch.row_base * D;
         ch.out_stride = D;
+        ch.out_bf16 = false;
         if (heads_tok != 0) {
             const unsigned long long tok0 = ((unsigned long long)(bhi / heads_tok) * n_chunks + ci) * C;
             ch.out_chunk = out + (tok0 * heads_tok + bhi % heads_tok) * D;
@@ -336,14 +345,15 @@ extern "C" __global__ void __launch_bounds__(THREADS, 2) brain_gdn_chunk_loop_bf
 // row, so a round needs no gather or scatter of the state around the kernel. `table` is the chunk table of
 // `brain_gdn_chunk_prep_seg_bf16` (a chunk's operands sit at a 64-row slot of the scratch, its output rows at its token
 // rows of the token-major `out`).
-// Contract: params [segments * H * SPLITS, unused..., H at 6, nseg at 7, state words per pool row at 8]; buffers kd, qs, w, u, g_cs,
-// intra, table, state pool (read and written in place), out.
+// Contract: params [segments * H * SPLITS, unused..., H at 6, nseg at 7, state words per pool row at 8, flags at 9 (bit 0: `out` is
+// bf16 rows)]; buffers kd, qs, w, u, g_cs, intra, table, state pool (read and written in place), out.
 extern "C" __global__ void __launch_bounds__(THREADS, 2) brain_gdn_chunk_loop_seg_bf16(const unsigned int* params, const unsigned short* kd, const unsigned short* qs,
                                                                                      const unsigned short* w, const float* u, const float* g_cs,
                                                                                      const unsigned short* intra, const unsigned int* table, float* state_pool, float* out) {
     const unsigned int blocks = params[0];
     const unsigned int H = params[6], nseg = params[7];
     const unsigned long long state_words = params[8];
+    const bool out_bf16 = (params[9] & 1u) != 0u;  // absent is 0: fp32 rows
     const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
     if (blk >= blocks) { return; }  // block-uniform
     const unsigned int seg = blk / (H * SPLITS), head = (blk / SPLITS) % H;
@@ -361,7 +371,10 @@ extern "C" __global__ void __launch_bounds__(THREADS, 2) brain_gdn_chunk_loop_se
         ch.row_base = ((unsigned long long)global * H + head) * MAXC;
         ch.cc_base = ch.row_base * MAXC;
         ch.out_stride = (unsigned long long)H * D;
-        ch.out_chunk = out + ((unsigned long long)chunks[2 * global] * H + head) * D;
+        ch.out_bf16 = out_bf16;
+        // Element offset of the chunk's first row and head, in f32 or bf16 elements of `out` as the flag says.
+        const unsigned long long first = ((unsigned long long)chunks[2 * global] * H + head) * D;
+        ch.out_chunk = out_bf16 ? reinterpret_cast<float*>(reinterpret_cast<unsigned short*>(out) + first) : out + first;
         return ch;
     };
     float* state = state_pool + slot * state_words + (unsigned long long)head * D * D;

@@ -107,7 +107,7 @@ fn a_round_of_segments_equals_each_segment_on_its_own_state_row() {
     let round = GdnSegmentRound::new(&g, &spans).expect("the segment kernels are served on a bf16-prefill device");
     g.reset_kernel_times();
     g.set_kernel_timing(true);
-    let out = gdn_mixer_segments_fwd(&g, &ids, &s, &w, &round, &GdnSegmentPools { state: &state_pool, hist: &hist_pool }, &mixed, &b, &a, &z, n, lead, true).expect("served");
+    let out = gdn_mixer_segments_fwd(&g, &ids, &s, &w, &round, &GdnSegmentPools { state: &state_pool, hist: &hist_pool }, &mixed, &b, &a, &z, n, lead, true, false).expect("served");
     let gated = out.gated.clone();
     g.poll_wait();
     let ran: Vec<String> = g.kernel_times().unwrap_or_default().into_iter().map(|r| r.0).collect();
@@ -140,3 +140,96 @@ fn a_round_of_segments_equals_each_segment_on_its_own_state_row() {
     assert_eq!(bits(g.read(&q, n as usize * value_dim / 4))[from_w..], bits(g.read(&q_ref, n as usize * value_dim / 4))[from_w..], "E4M3 bytes differ");
     assert_eq!(bits(g.read(&sc, n as usize * value_dim / 128))[from_s..], bits(g.read(&s_ref, n as usize * value_dim / 128))[from_s..], "E4M3 scales differ");
 }
+
+/// The value of an E4M3 byte (4 exponent bits, bias 7, 3 mantissa bits, no infinities).
+fn e4m3_value(b: u8) -> f32 {
+    let (sign, exp, man) = (if b & 0x80 != 0 { -1.0f32 } else { 1.0 }, i32::from((b >> 3) & 0xf), f32::from(b & 7));
+    if exp == 0 { sign * man / 8.0 * 2f32.powi(-6) } else { sign * (1.0 + man / 8.0) * 2f32.powi(exp - 7) }
+}
+
+/// `v` rounded to bf16 (nearest even) as an f32 holding the same value.
+fn bf16_exact(v: &[f32]) -> Vec<f32> {
+    v.iter().map(|f| f32::from_bits(((f.to_bits() + 0x7fff + ((f.to_bits() >> 16) & 1)) >> 16) << 16)).collect()
+}
+
+/// `v` packed two bf16 to a word (low half first), the layout of bf16 rows, as the f32-typed words the upload takes.
+fn bf16_words(v: &[f32]) -> Vec<f32> {
+    let bits = |f: f32| (f.to_bits() + 0x7fff + ((f.to_bits() >> 16) & 1)) >> 16;
+    v.chunks(2).map(|p| f32::from_bits(bits(p[0]) | (bits(p[1]) << 16))).collect()
+}
+
+/// The round in bf16 (the FP8 projections' bf16 outputs in, bf16 between the kernels, the E4M3 rows out and no fp32 product
+/// stored) against the same round in fp32 on the same bf16-valued projections: the E4M3 rows it writes dequantize to the
+/// fp32 round's product within what the bf16 intermediates cost, and the recurrent state it leaves agrees to bf16 resolution.
+#[test]
+fn a_round_in_bf16_equals_the_fp32_round_to_bf16_resolution() {
+    let kernels: &'static [(&'static str, &'static str)] = {
+        let mut v = KERNELS.to_vec();
+        v.push(("gdn_ut_fwd", kernels::GDN_UT_FWD));
+        v.push(("bmm_tiled", kernels::BMM_TILED));
+        Box::leak(v.into_boxed_slice())
+    };
+    let Ok(g) = Gpu::try_new_cuda(kernels) else {
+        brain_testutil::skip_unavailable("a CUDA device");
+        return;
+    };
+    if !model::gdn::use_fast_kernels(&g) || g.caps().arch.compute_capability.is_none_or(|cc| cc < (8, 0)) {
+        brain_testutil::skip_unavailable("a device with bf16 tensor cores");
+        return;
+    }
+    gpu_core::force_candidate("gdn_prefill", "bf16");
+    let lead = 3u32;
+    let segs = [(70u32, 4u32), (64, 1), (21, 6), (130, 0)];
+    let mut spans = Vec::new();
+    let mut row = lead;
+    for (rows, slot) in segs {
+        spans.push(SegmentSpan { row0: row, rows, slot });
+        row += rows;
+    }
+    let n = row;
+    let s = shape(n, 64);
+    let h = Host::random(&s, 20261101); // seed: fixed fixture so a failure reproduces on the same values
+    let mut ids = mixer_ids(&g);
+    ids.chunk.fast = Some(GdnFastIds { ut_fwd: gdn_kit::idx(&g, "gdn_ut_fwd"), bmm_tiled: gdn_kit::idx(&g, "bmm_tiled"), tensor_core: true });
+    let dw = DeviceWeights::upload(&g, &s, &h);
+    let w = dw.weights();
+    let (conv_dim, value_dim) = (s.conv_dim() as usize, s.value_dim() as usize);
+    let (sl, hl) = (HEADS as usize * 128 * 128, conv_dim * 3);
+    let pool_slots = 8usize;
+    let mut rng = Lcg::new(11); // seed: fixed fixture
+    let state_h = rng.vec_scaled(pool_slots * sl, 0.05);
+    let hist_h = bf16_exact(&rng.vec_scaled(pool_slots * hl, 1.0));
+    let up = |name: &str, v: &[f32]| g.storage_init(name, v);
+    let (qkv_v, z_v) = (bf16_exact(&h.mixed_qkv), bf16_exact(&h.z));
+    let (b, a) = (up("bproj", &h.bproj), up("aproj", &h.aproj));
+    let round = GdnSegmentRound::new(&g, &spans).expect("served");
+
+    let run = |bf16: bool| {
+        let (state, hist) = (up("state_pool", &state_h), up("hist_pool", &hist_h));
+        let (mixed, z) = if bf16 { (up("mixed16", &bf16_words(&qkv_v)), up("z16", &bf16_words(&z_v))) } else { (up("mixed32", &qkv_v), up("z32", &z_v)) };
+        let out = gdn_mixer_segments_fwd(&g, &ids, &s, &w, &round, &GdnSegmentPools { state: &state, hist: &hist }, &mixed, &b, &a, &z, n, lead, true, bf16).unwrap_or_else(|| panic!("the round was not served (bf16: {bf16})"));
+        g.poll_wait();
+        (out, g.read(&state, pool_slots * sl), g.read(&hist, pool_slots * hl))
+    };
+    let (f32_out, f32_state, f32_hist) = run(false);
+    let (bf_out, bf_state, bf_hist) = run(true);
+    gpu_core::clear_forced_candidates();
+
+    let from = lead as usize * value_dim;
+    let truth = &g.read(&f32_out.gated, n as usize * value_dim)[from..];
+    let dequant = |q: &DeviceBufferPair| -> Vec<f32> {
+        let words = g.read(&q.0, n as usize * value_dim / 4);
+        let scales = g.read(&q.1, n as usize * value_dim / 128);
+        (from..n as usize * value_dim).map(|i| e4m3_value((words[i / 4].to_bits() >> (8 * (i % 4))) as u8) * scales[i / 128]).collect()
+    };
+    let rms = |a: &[f32], b: &[f32]| (a.iter().zip(b).map(|(x, y)| f64::from(x - y).powi(2)).sum::<f64>() / a.len() as f64).sqrt() / (b.iter().map(|y| f64::from(*y).powi(2)).sum::<f64>() / b.len() as f64).sqrt();
+    let (e_f32, e_bf16) = (rms(&dequant(&f32_out.e4m3.clone().expect("asked for")), truth), rms(&dequant(&bf_out.e4m3.clone().expect("asked for")), truth));
+    let e_state = max_rel(&bf_state, &f32_state);
+    println!("E4M3 rows against the fp32 product: fp32 round {e_f32:.3e}, bf16 round {e_bf16:.3e}; state {e_state:.2e}");
+    assert!(truth.iter().any(|v| v.abs() > 1e-3), "degenerate fixture: forward output is ~0");
+    assert!(e_bf16 <= 1.5 * e_f32 + 5e-3, "the bf16 round's E4M3 rows are {e_bf16:.3e} from the product; the fp32 round's are {e_f32:.3e}");
+    assert!(e_state <= 3e-2, "recurrent state differs by {e_state:.3e}");
+    assert_eq!(bf_hist, f32_hist, "the convolution history holds bf16 values widened and must match exactly");
+}
+
+type DeviceBufferPair = (gpu_core::DeviceBuffer, gpu_core::DeviceBuffer);

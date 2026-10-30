@@ -113,6 +113,13 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_conv_hist_tok(co
     for (unsigned int j = 0; j + 1 < K; ++j) { hist[(unsigned long long)c * (K - 1) + j] = next[j]; }
 }
 
+// `v` rounded to bf16, round to nearest even, NaN to the canonical quiet NaN: `cast_f32_bf16`'s own rule.
+__device__ __forceinline__ unsigned int brain_gdn_bf16_bits(float v) {
+    const unsigned int b = __float_as_uint(v);
+    if ((b & 0x7fffffffu) > 0x7f800000u) { return 0x7fc0u; }
+    return (b + 0x7fffu + ((b >> 16) & 1u)) >> 16;
+}
+
 // The forward for every prompt segment of a round in one launch (`table`: [row0, rows, slot, first chunk] per segment, see
 // `brain_gdn_chunk_prep_seg_bf16`), reading each segment's history from its row of the history pool and leaving the
 // next history there: the block that owns a segment's first rows reads the old history into its window and then
@@ -120,9 +127,13 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_conv_hist_tok(co
 // rows of the token-major tensors.
 // Contract: params [blocks, C, key_dim, value_dim, nseg, history words per pool row]; read x [rows, C], w [C, K], table; hist
 // pool [slots, C, K-1] (read and written); write query, key [rows, key_dim], value [rows, value_dim] at the segments' rows.
+// Params word 6 (absent is 0): bit 0, x is bf16 rows; bit 1, query / key / value are written as bf16 rows. The history stays f32 (it
+// holds the bf16 values widened), the window and the sum are f32 either way, so the result is the f32 form's for bf16-valued input
+// rounded once to bf16 on the way out.
 extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_conv_silu_seg(const unsigned int* params, const float* x, const float* w, const unsigned int* table,
                                                                              float* hist_pool, float* query, float* key, float* value) {
     const unsigned int blocks = params[0], C = params[1], key_dim = params[2], value_dim = params[3], nseg = params[4];
+    const bool x_bf16 = (params[6] & 1u) != 0u, out_bf16 = (params[6] & 2u) != 0u;
     const unsigned long long hist_words = params[5];
     const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x, tiles = (C + THREADS - 1) / THREADS;
     if (blk >= blocks) { return; }
@@ -140,7 +151,9 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_conv_silu_seg(co
     if (c >= C) { return; }
     const unsigned int r1 = min(r0 + ROWS_PER_THREAD, rows);
     float* hist = hist_pool + slot * hist_words + (unsigned long long)c * (K - 1);
-    const float* xs = x + (unsigned long long)row0 * C + c;
+    const unsigned long long x0 = (unsigned long long)row0 * C + c;
+    const unsigned short* const xh = reinterpret_cast<const unsigned short*>(x);
+    auto ldx = [&](unsigned long long off) -> float { return x_bf16 ? __uint_as_float(static_cast<unsigned int>(xh[x0 + off]) << 16) : x[x0 + off]; };
 
     float wk[K];
 #pragma unroll
@@ -149,27 +162,36 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_conv_silu_seg(co
     float win[K];
     for (unsigned int k = 0; k < K; ++k) {
         const int q = (int)r0 + (int)k - (int)(K - 1);
-        win[k] = q >= 0 ? xs[(unsigned long long)q * C] : hist[q + (int)(K - 1)];
+        win[k] = q >= 0 ? ldx((unsigned long long)q * C) : hist[q + (int)(K - 1)];
     }
     if (r0 == 0) {
         // The last K-1 rows of [hist | x] become the next history; all of them are read before any is written.
         float next[K - 1];
         for (unsigned int j = 0; j + 1 < K; ++j) {
             const unsigned int e = rows + j;
-            next[j] = e < K - 1 ? hist[e] : xs[(unsigned long long)(e - (K - 1)) * C];
+            next[j] = e < K - 1 ? hist[e] : ldx((unsigned long long)(e - (K - 1)) * C);
         }
         for (unsigned int j = 0; j + 1 < K; ++j) { hist[j] = next[j]; }
     }
     for (unsigned int r = r0; r < r1; ++r) {
         if (r != r0) {
             for (unsigned int k = 0; k + 1 < K; ++k) { win[k] = win[k + 1]; }
-            win[K - 1] = xs[(unsigned long long)r * C];
+            win[K - 1] = ldx((unsigned long long)r * C);
         }
         float acc = 0.0f;
         for (unsigned int k = 0; k < K; ++k) { acc = acc + win[k] * wk[k]; }
         const float act = silu_fwd(acc);
         const unsigned long long row = row0 + r;
-        if (c < key_dim) {
+        if (out_bf16) {
+            const unsigned short h = static_cast<unsigned short>(brain_gdn_bf16_bits(act));
+            if (c < key_dim) {
+                reinterpret_cast<unsigned short*>(query)[row * key_dim + c] = h;
+            } else if (c < 2 * key_dim) {
+                reinterpret_cast<unsigned short*>(key)[row * key_dim + (c - key_dim)] = h;
+            } else {
+                reinterpret_cast<unsigned short*>(value)[row * value_dim + (c - 2 * key_dim)] = h;
+            }
+        } else if (c < key_dim) {
             query[row * key_dim + c] = act;
         } else if (c < 2 * key_dim) {
             key[row * key_dim + (c - key_dim)] = act;

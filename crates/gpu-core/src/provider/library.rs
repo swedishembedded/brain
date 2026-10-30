@@ -194,6 +194,20 @@ pub fn cast_bf16(gpu: &Gpu, steps: &mut Vec<Step>, x: &Operand, count: u64) -> O
     Some(scratch)
 }
 
+/// Widen the first `count` elements of the bf16 buffer `x` (two to a word) to a new fp32 buffer (exact) and push the step. `None`
+/// when the device declines the kernel or `count` is not a multiple of four.
+pub fn widen_bf16(gpu: &Gpu, steps: &mut Vec<Step>, x: &DeviceBuffer, count: u64) -> Option<DeviceBuffer> {
+    if count == 0 || !count.is_multiple_of(ALIGN_ELEMS as u64) || count > u64::from(u32::MAX) {
+        return None;
+    }
+    let kernel = kernels_cuda::get("cast_bf16_f32")?;
+    let id = gpu.native_kernel(kernel, CAST_BINDINGS)?;
+    let wide = gpu.storage_uninit(count);
+    let step = gpu.step_native_sliced(id, &[x, &wide], &[(0, 0), (0, 0)], &[count as u32], kernel.blocks_for(1, count as u32))?;
+    steps.push(step);
+    Some(wide)
+}
+
 /// Bindings of `quant_e4m3_128`: params, the fp32 rows, the E4M3 bytes, the scales.
 const QUANT_E4M3_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageReadWrite, BindKind::StorageReadWrite];
 

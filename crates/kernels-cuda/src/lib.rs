@@ -3583,6 +3583,23 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/cast_f32_bf16.cu"),
     },
     CudaKernel {
+        name: "cast_bf16_f32",
+        op: Op::Elementwise,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_cast_bf16_f32",
+        what: "packed bf16 to fp32 (exact), four elements a thread: the few rows of a bf16 activation that a kernel with only an fp32 form reads",
+        reported: "native:cast_bf16_f32",
+        block_dim: 256,
+        // 1024 elements per block.
+        tile: (1, 1024),
+        shared_bytes: 0,
+        programmatic: false,
+        src: include_str!("../cu/cast_bf16_f32.cu"),
+    },
+    CudaKernel {
         name: "weight_dequant_bf16",
         op: Op::Elementwise,
         weight: Dtype::BF16,

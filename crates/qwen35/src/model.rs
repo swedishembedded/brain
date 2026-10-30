@@ -2825,10 +2825,14 @@ impl Qwen35 {
         // unchanged by in_proj_b/a/z below (no further `act` call on `xn1`
         // happens in between).
         // The four projections write every row of their outputs (the adapter then adds into them).
-        let mixed_qkv = g.storage_uninit((n * conv_dim) as u64);
+        // A round of prompt segments whose mixer runs in bf16 ([`Self::bf16_gdn_ok`]) takes `mixed_qkv` and `z` as the bf16 rows
+        // the FP8 projections store; the other buffers stay f32 (the gates are tiny).
+        let mut bf16_gdn = matches!(&call, GdnCall::Segments(r) if r.gdn.is_some()) && self.bf16_gdn_ok(n, value_dim);
+        let rows_buffer = |width: u32, bf16: bool| g.storage_uninit(if bf16 { (n * width / 2) as u64 } else { (n * width) as u64 });
+        let mut mixed_qkv = rows_buffer(conv_dim, bf16_gdn);
         let bproj = g.storage_uninit((n * nvh) as u64);
         let aproj = g.storage_uninit((n * nvh) as u64);
-        let z = g.storage_uninit((n * value_dim) as u64);
+        let mut z = rows_buffer(value_dim, bf16_gdn);
         let mut s1 = Vec::new();
         let act1 = match pre {
             Some(a) => a,
@@ -2839,8 +2843,20 @@ impl Qwen35 {
         let (qkv_w, b_w, a_w, z_w) = (p("in_proj_qkv.weight"), p("in_proj_b.weight"), p("in_proj_a.weight"), p("in_proj_z.weight"));
         // The two gate projections are dense bf16 whatever the big projections' tier is, and a group fuses only members of one tier:
         // grouped apart, the pair is one launch of the multi-GEMV (six blocks each) beside the two big products.
-        let f32s_big = self.ops_linear_group(&mut s1, &act1, &[(&qkv_w, &mixed_qkv), (&z_w, &z)]);
+        if bf16_gdn {
+            // Both or neither; the steps pushed stay either way (they may hold the activation's quantisation, which it remembers).
+            let mut t = Vec::new();
+            let ok = [(&qkv_w, &mixed_qkv), (&z_w, &z)].iter().all(|(name, out)| self.ops.matmul_bf16_out(&mut t, &self.weights[name.as_str()], &act1, out));
+            s1.append(&mut t);
+            if !ok {
+                bf16_gdn = false;
+                mixed_qkv = rows_buffer(conv_dim, false);
+                z = rows_buffer(value_dim, false);
+            }
+        }
+        let f32s_big = if bf16_gdn { vec![false; 2] } else { self.ops_linear_group(&mut s1, &act1, &[(&qkv_w, &mixed_qkv), (&z_w, &z)]) };
         let f32s_gates = self.ops_linear_group(&mut s1, &act1, &[(&b_w, &bproj), (&a_w, &aproj)]);
+        // (No adapter corrects a bf16 round: [`Self::keeps_fp32_product`] is its precondition.)
         self.adapt(f32s_big[0], &mut s1, "in_proj_qkv", xn1, &qkv_w, &mixed_qkv, n, d, conv_dim);
         self.adapt(f32s_gates[0], &mut s1, "in_proj_b", xn1, &b_w, &bproj, n, d, nvh);
         self.adapt(f32s_gates[1], &mut s1, "in_proj_a", xn1, &a_w, &aproj, n, d, nvh);
@@ -2918,7 +2934,25 @@ impl Qwen35 {
                 let lead = round.decode.as_ref().map_or(0, |d| d.rows);
                 // The output projection reads E4M3 rows on this device: the gated norm writes them beside its product.
                 let e4m3 = !self.packs_activations() && self.ops.fp8_reads_e4m3(n, value_dim, d);
-                let batched = round.gdn.as_ref().and_then(|sr| model::gdn_segments::gdn_mixer_segments_fwd(g, &gdn_mixer_ids(), &shape, &weights, sr, &pools, &mixed_qkv, &bproj, &aproj, &z, n, lead, e4m3));
+                let batched = round.gdn.as_ref().and_then(|sr| model::gdn_segments::gdn_mixer_segments_fwd(g, &gdn_mixer_ids(), &shape, &weights, sr, &pools, &mixed_qkv, &bproj, &aproj, &z, n, lead, e4m3, bf16_gdn));
+                // The decode rows' recurrent step and the per-segment path have an f32 form only: the rows they read are
+                // widened (the leading decode rows alone while the batched kernels took the round, every row if they declined).
+                let widen = |buf: &DeviceBuffer, width: u32, rows: u32| {
+                    let mut steps = Vec::new();
+                    let wide = gpu_core::provider::library::widen_bf16(g, &mut steps, buf, u64::from(rows) * u64::from(width)).expect("the widening kernel was offered with the bf16 round");
+                    g.submit(&[], &steps);
+                    wide
+                };
+                let (mixed_qkv, z) = match (bf16_gdn, batched.is_some()) {
+                    (true, false) => (widen(&mixed_qkv, conv_dim, n), widen(&z, value_dim, n)),
+                    _ => (mixed_qkv, z),
+                };
+                let bf16_lead = bf16_gdn && batched.is_some();
+                let (qkv_dec, z_dec) = match (&round.decode, bf16_lead) {
+                    (Some(dec), true) => (Some(widen(&mixed_qkv, conv_dim, dec.rows)), Some(widen(&z, value_dim, dec.rows))),
+                    _ => (None, None),
+                };
+                let (dec_qkv, dec_z) = (qkv_dec.as_ref().unwrap_or(&mixed_qkv), z_dec.as_ref().unwrap_or(&z));
                 // The decode rows and the segments cover every row, so `all` needs no clear.
                 let all = batched.as_ref().map(|b| b.gated.clone()).or_else(|| (!whole).then(|| g.storage_uninit((n * value_dim) as u64)));
                 let mut only = None;
@@ -2927,9 +2961,12 @@ impl Qwen35 {
                     let dec_shape = model::gdn_mixer::GdnMixerShape { gdn: GdnShape { b: dec.rows, t: 1, chunk: 1, ..shape.gdn }, ..shape };
                     let pool = model::gdn_mixer::GdnPoolRows { state: &c.gdn_state[l], hist: &c.gdn_hist[l], rows: dec.slot_rows, gather: POOL_ROWS_GATHER2, scatter: POOL_ROWS_SCATTER2, fuse: self.decode_fusion.get(), bf16: false, wide: self.gdn_pool_wide.get() };
                     // The decode rows lead every row block: the fused step reads them in place and writes its rows into `all`.
-                    let in_place = batched.is_some() && pool.fuse && model::gdn_mixer::gdn_mixer_decode_pooled_fused_into(g, &dec_shape, &weights, &mixed_qkv, &bproj, &aproj, &z, &pool, all);
+                    let in_place = batched.is_some() && pool.fuse && model::gdn_mixer::gdn_mixer_decode_pooled_fused_into(g, &dec_shape, &weights, dec_qkv, &bproj, &aproj, dec_z, &pool, all);
                     if !in_place {
-                        let (qkv_d, b_d, a_d, z_d) = (self.take_rows(&mixed_qkv, conv_dim, n, 0, dec.rows), self.take_rows(&bproj, nvh, n, 0, dec.rows), self.take_rows(&aproj, nvh, n, 0, dec.rows), self.take_rows(&z, value_dim, n, 0, dec.rows));
+                        let (qkv_d, b_d, a_d, z_d) = match (&qkv_dec, &z_dec) {
+                            (Some(qkv), Some(z)) => (qkv.clone(), self.take_rows(&bproj, nvh, n, 0, dec.rows), self.take_rows(&aproj, nvh, n, 0, dec.rows), z.clone()),
+                            _ => (self.take_rows(&mixed_qkv, conv_dim, n, 0, dec.rows), self.take_rows(&bproj, nvh, n, 0, dec.rows), self.take_rows(&aproj, nvh, n, 0, dec.rows), self.take_rows(&z, value_dim, n, 0, dec.rows)),
+                        };
                         let gated_d = model::gdn_mixer::gdn_mixer_decode_state_fwd(g, &gdn_mixer_ids(), &gdn_mixer_decode_ids(), &dec_shape, &weights, &qkv_d, &b_d, &a_d, &z_d, &model::gdn_mixer::GdnDecodeState::Pool(pool));
                         self.put_rows_copy(&gated_d, all, value_dim, 0, dec.rows);
                     }
@@ -4490,6 +4527,13 @@ impl Qwen35 {
     /// served adapter bank (their corrections of `down` read it).
     fn keeps_fp32_product(&self) -> bool {
         self.is_train || self.adapter.is_some() || self.adapter_bank.borrow().is_some()
+    }
+
+    /// Whether the Gated DeltaNet mixer of a round of `rows` rows may run in bf16: the stream was asked for bf16, nothing reads
+    /// the layer's fp32 rows (no backward, no adapter correcting a projection in place), and the output projection takes the
+    /// E4M3 rows the gated norm writes (the fp32 product of the segments is then not stored).
+    fn bf16_gdn_ok(&self, rows: u32, value_dim: u32) -> bool {
+        self.act_precision.get() == gpu_core::ActPrecision::Bf16 && !self.keeps_fp32_product() && !self.packs_activations() && self.ops.fp8_reads_e4m3(rows, value_dim, self.cfg.d_model)
     }
 
     /// Whether the gate and up products of an MLP of `rows` rows may store bf16: the stream was asked for bf16, nothing reads
