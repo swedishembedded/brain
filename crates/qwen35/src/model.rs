@@ -1011,6 +1011,16 @@ struct MixedDecode<'a> {
     /// `[rows]` u32: each row's recurrent-state pool row.
     slot_rows: &'a DeviceBuffer,
     paged: &'a model::gqa_mixer::PagedDecodeBatch<'a>,
+    /// Set when the leading rows are a speculative verify step (several consecutive rows of a sequence) and not one
+    /// token each of unrelated sequences: the recurrent mixer then runs the verify kernel, which snapshots the state
+    /// between a sequence's rows.
+    verify: Option<MixedVerify<'a>>,
+}
+
+/// The leading rows of a mixed round as a verify step: its sequences, and where each layer snapshots their states.
+struct MixedVerify<'a> {
+    batch: &'a verify::VerifyBatch<'a>,
+    layout: &'a verify::VerifyLayout,
 }
 
 /// Everything [`Qwen35::layer_gqa_fwd`]'s training branch saves for
@@ -2992,13 +3002,22 @@ impl Qwen35 {
                     let dec_shape = model::gdn_mixer::GdnMixerShape { gdn: GdnShape { b: dec.rows, t: 1, chunk: 1, ..shape.gdn }, ..shape };
                     let pool = model::gdn_mixer::GdnPoolRows { state: &c.gdn_state[l], hist: &c.gdn_hist[l], rows: dec.slot_rows, gather: POOL_ROWS_GATHER2, scatter: POOL_ROWS_SCATTER2, fuse: self.decode_fusion.get(), bf16: false, wide: self.gdn_pool_wide.get() };
                     // The decode rows lead every row block: the fused step reads them in place and writes its rows into `all`.
-                    let in_place = batched.is_some() && pool.fuse && model::gdn_mixer::gdn_mixer_decode_pooled_fused_into(g, &dec_shape, &weights, dec_qkv, &bproj, &aproj, dec_z, &pool, all);
+                    let in_place = dec.verify.is_none() && batched.is_some() && pool.fuse && model::gdn_mixer::gdn_mixer_decode_pooled_fused_into(g, &dec_shape, &weights, dec_qkv, &bproj, &aproj, dec_z, &pool, all);
                     if !in_place {
                         let (qkv_d, b_d, a_d, z_d) = match (&qkv_dec, &z_dec) {
                             (Some(qkv), Some(z)) => (qkv.clone(), self.take_rows(&bproj, nvh, n, 0, dec.rows), self.take_rows(&aproj, nvh, n, 0, dec.rows), z.clone()),
                             _ => (self.take_rows(&mixed_qkv, conv_dim, n, 0, dec.rows), self.take_rows(&bproj, nvh, n, 0, dec.rows), self.take_rows(&aproj, nvh, n, 0, dec.rows), self.take_rows(&z, value_dim, n, 0, dec.rows)),
                         };
-                        let gated_d = model::gdn_mixer::gdn_mixer_decode_state_fwd(g, &gdn_mixer_ids(), &gdn_mixer_decode_ids(), &dec_shape, &weights, &qkv_d, &b_d, &a_d, &z_d, &model::gdn_mixer::GdnDecodeState::Pool(pool));
+                        let gated_d = match &dec.verify {
+                            // A sequence's rows in order from its pool row, the state after each row but the last snapshotted.
+                            Some(v) => {
+                                let layout = model::gdn_verify::VerifyLayout { rows: &v.layout.rows, counts: &v.layout.counts, offs: &v.layout.offs, b: v.batch.sequences() };
+                                let seq_pool = model::gdn_mixer::GdnPoolRows { rows: &v.layout.rows, fuse: true, ..pool };
+                                model::gdn_verify::gdn_mixer_verify_pooled_fused(g, &dec_shape, &weights, &qkv_d, &b_d, &a_d, &z_d, &seq_pool, &layout, dec.rows, v.batch.snapshots(l))
+                                    .expect("the verify kernel was offered at engine construction (Qwen35GgufInstance::speculation_supported)")
+                            }
+                            None => model::gdn_mixer::gdn_mixer_decode_state_fwd(g, &gdn_mixer_ids(), &gdn_mixer_decode_ids(), &dec_shape, &weights, &qkv_d, &b_d, &a_d, &z_d, &model::gdn_mixer::GdnDecodeState::Pool(pool)),
+                        };
                         self.put_rows_copy(&gated_d, all, value_dim, 0, dec.rows);
                     }
                     // The decode rows' E4M3 rows: the gated norm wrote the segments' only.
@@ -5495,7 +5514,7 @@ impl Qwen35 {
     /// which this function is not for: the caller sends such a round through the
     /// single-sequence path).
     pub(crate) fn run_prefill_multi_stage(&self, segs: &[PrefillSeg<'_>], caches: &PooledCaches<'_>, input_override: Option<StageRows<'_>>) -> DeviceBuffer {
-        self.run_mixed_stage(None, segs, caches, input_override)
+        self.run_mixed_stage(None, None, segs, caches, input_override)
     }
 
     /// **One forward over decode rows and prompt rows together** - [`Self::run_prefill_multi_stage`] with the
@@ -5505,7 +5524,18 @@ impl Qwen35 {
     /// in place, paged decode attention) and the segments the chunked ones. A decode row is the row a decode step
     /// computes except where a kernel is picked by the number of rows (the projections see `n` rows, not the
     /// decode batch's).
-    pub(crate) fn run_mixed_stage(&self, decode: Option<(&[u32], &BatchDecodeCaches<'_>)>, segs: &[PrefillSeg<'_>], caches: &PooledCaches<'_>, input_override: Option<StageRows<'_>>) -> DeviceBuffer {
+    ///
+    /// With `verify`, the leading rows are a speculative verify step instead: `verify.counts[i]` consecutive tokens of
+    /// the sequence in `verify.slots[i]` (`decode`'s sequences are the rows, a sequence's slot repeated and its
+    /// positions consecutive), their recurrent states snapshotted between rows for [`Self::commit_verify_stage`].
+    pub(crate) fn run_mixed_stage(
+        &self,
+        decode: Option<(&[u32], &BatchDecodeCaches<'_>)>,
+        verify: Option<&verify::VerifyBatch<'_>>,
+        segs: &[PrefillSeg<'_>],
+        caches: &PooledCaches<'_>,
+        input_override: Option<StageRows<'_>>,
+    ) -> DeviceBuffer {
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
@@ -5548,6 +5578,10 @@ impl Qwen35 {
             inputs
         });
         let paged = decode.zip(decode_inputs.as_ref()).map(|((_, dcaches), inputs)| self.paged_decode_batch(dcaches, inputs, None));
+        assert!(verify.is_none() || decode.is_some(), "qwen35::run_mixed_stage: a verify step is the round's leading rows");
+        assert!(verify.is_none_or(|v| v.total_rows() == lead), "qwen35::run_mixed_stage: the verify step's rows are the round's leading rows");
+        // Uploaded with the rest of the round's inputs: a write after the first dispatch would split the pass.
+        let verify_layout = verify.map(|v| v.upload(g));
         let words = |w: &[u32]| {
             // The write below fills every word.
             let buf = g.storage_uninit(w.len() as u64);
@@ -5578,7 +5612,12 @@ impl Qwen35 {
         }
         let (cos, sin) = qwen3vl::mrope::mrope_tables_scaled(&all_positions, c.mrope_section, c.rotary_dim(), c.rope_theta, yarn.as_ref().map(|(f, a)| (f.as_slice(), *a)));
         let rows = RoundRows { blocks: words(&all_blocks), offsets: words(&all_offsets), cos: g.storage_init("qwen35.multi.cos", &cos), sin: g.storage_init("qwen35.multi.sin", &sin) };
-        let mixed = decode_inputs.as_ref().zip(paged.as_ref()).map(|(inputs, paged)| MixedDecode { rows: lead, slot_rows: &inputs.slot_rows, paged });
+        let mixed = decode_inputs.as_ref().zip(paged.as_ref()).map(|(inputs, paged)| MixedDecode {
+            rows: lead,
+            slot_rows: &inputs.slot_rows,
+            paged,
+            verify: verify.zip(verify_layout.as_ref()).map(|(batch, layout)| MixedVerify { batch, layout }),
+        });
         let spans: Vec<_> = round.iter().zip(segs).map(|(r, s)| model::gdn_segments::SegmentSpan { row0: r.row0, rows: r.rows, slot: s.slot }).collect();
         let gdn = (c.layer_types().contains(&LayerType::Linear) && !self.is_train).then(|| model::gdn_segments::GdnSegmentRound::new(g, &spans)).flatten();
         let round = MultiRound { caches, segs: round, rows, gdn, decode: mixed };

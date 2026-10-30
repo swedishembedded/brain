@@ -2223,12 +2223,10 @@ impl Qwen35GgufInstance {
 
     /// Whether a forward can carry running sequences' next tokens and prompt rows together
     /// ([`Self::mixed_hidden`]): the multi-sequence round is available, nothing needs the rows of a decode step
-    /// to be those of a step of their own (the MTP head records each decode step's hidden states; exact decode
-    /// promises a row its bits whatever its neighbours), and no adapter bank, sliding window or anchor memory is
-    /// in play.
+    /// to be those of a step of their own (exact decode promises a row its bits whatever its neighbours), and no
+    /// adapter bank, sliding window or anchor memory is in play.
     pub(crate) fn mixed_available(&self) -> bool {
         self.multi_prefill_available()
-            && !self.has_mtp()
             && !self.exact_decode
             && adapters::bytes(self.stage_models()) == 0
             && self.cfg.swa_window.is_none()
@@ -2245,22 +2243,41 @@ impl Qwen35GgufInstance {
     /// the pool row is where the state is left. Returns each job's last row's
     /// `[d_model]` pre-norm hidden state and, when `collect`, all its rows'.
     fn prefill_hidden_multi(&self, jobs: &[MultiPrefillJob<'_>], collect: bool) -> Result<Vec<MultiPrefillRows>, String> {
-        self.forward_rows(None, jobs, collect).map(|(_, rows)| rows)
+        self.forward_rows(None, None, jobs, collect).map(|(_, rows)| rows)
     }
 
     /// [`Self::prefill_hidden_multi`] with the next token of each sequence of `decode` (tokens, slots and positions,
     /// as [`Self::stack_decode_hidden`] takes them) carried by the same forward: its first element is the decode
     /// rows' `[bsz, d_model]` pre-norm hidden block, empty without any.
     fn mixed_hidden(&self, decode: (&[u32], &[u32], &[u32]), jobs: &[MultiPrefillJob<'_>], collect: bool) -> Result<(Vec<f32>, Vec<MultiPrefillRows>), String> {
-        self.forward_rows(Some(decode), jobs, collect)
+        self.forward_rows(Some(decode), None, jobs, collect)
     }
 
-    fn forward_rows(&self, decode: Option<(&[u32], &[u32], &[u32])>, jobs: &[MultiPrefillJob<'_>], collect: bool) -> Result<(Vec<f32>, Vec<MultiPrefillRows>), String> {
+    /// [`Self::mixed_hidden`] whose leading rows are a speculative verify step ([`Self::stack_verify_hidden`]'s rows):
+    /// `rows[i]` are consecutive tokens of the sequence in `slots[i]`, the first at `positions[i]`. The recurrent state of
+    /// each sequence is left after its last row, the states between rows kept for [`Self::commit_verify`].
+    fn mixed_verify_hidden(&self, rows: &[&[u32]], slots: &[u32], positions: &[u32], jobs: &[MultiPrefillJob<'_>], collect: bool) -> Result<(Vec<f32>, Vec<MultiPrefillRows>), String> {
+        let counts: Vec<u32> = rows.iter().map(|r| r.len() as u32).collect();
+        let total: u32 = counts.iter().sum();
+        if total > self.spec_rows {
+            return Err(format!("{MODEL}: a verify step of {total} rows exceeds the {} rows of scratch", self.spec_rows));
+        }
+        let tokens: Vec<u32> = rows.iter().flat_map(|r| r.iter().copied()).collect();
+        let row_slots: Vec<u32> = slots.iter().zip(&counts).flat_map(|(&s, &c)| std::iter::repeat_n(s, c as usize)).collect();
+        let row_positions: Vec<u32> = positions.iter().zip(&counts).flat_map(|(&p, &c)| p..p + c).collect();
+        if let Some(&p) = row_positions.iter().find(|&&p| p >= self.cap) {
+            return Err(format!("{MODEL}: verify position {p} is beyond this instance's context capacity {}", self.cap));
+        }
+        self.forward_rows(Some((&tokens, &row_slots, &row_positions)), Some((slots, &counts)), jobs, collect)
+    }
+
+    /// `verify`: the leading rows are a verify step over these sequences (slots, rows each) and not unrelated sequences.
+    fn forward_rows(&self, decode: Option<(&[u32], &[u32], &[u32])>, verify: Option<(&[u32], &[u32])>, jobs: &[MultiPrefillJob<'_>], collect: bool) -> Result<(Vec<f32>, Vec<MultiPrefillRows>), String> {
         let d = self.cfg.d_model as usize;
         assert!(!jobs.is_empty() && jobs.iter().all(|j| j.start < j.end && j.end <= j.prompt.len()), "{MODEL}: a multi-sequence prefill needs at least one new token per job");
         let lead = decode.map_or(0, |(tokens, slots, positions)| {
             assert!(tokens.len() == slots.len() && tokens.len() == positions.len(), "{MODEL}: a decode row needs one slot and position per token");
-            debug_assert!(slots.iter().collect::<std::collections::HashSet<_>>().len() == slots.len(), "{MODEL}: a mixed forward names a decode slot twice");
+            debug_assert!(verify.is_some() || slots.iter().collect::<std::collections::HashSet<_>>().len() == slots.len(), "{MODEL}: a mixed forward names a decode slot twice");
             tokens.len()
         });
         let tokens: Vec<u32> = decode.map_or(&[][..], |(tokens, ..)| tokens).iter().copied().chain(jobs.iter().flat_map(|j| j.prompt[j.start..j.end].iter().copied())).collect();
@@ -2291,7 +2308,8 @@ impl Qwen35GgufInstance {
                     Some((tokens, slots, positions)) => {
                         let seqs = s.caches.batch(slots, positions);
                         let caches = BatchDecodeCaches { gqa_kv: &s.caches.gqa_kv, gqa_cap: s.caches.kv_block(), seqs: &seqs, one_sequence: false, gdn_pool: Some(s.caches.gdn_pool()), memory: &[] };
-                        s.qwen35.run_mixed_stage(Some((tokens, &caches)), &segs, &s.caches.pooled(), Some(rows))
+                        let verifying = verify.map(|(seq_slots, counts)| crate::model::verify::VerifyBatch::new(seq_slots, counts, &s.caches.verify_snaps));
+                        s.qwen35.run_mixed_stage(Some((tokens, &caches)), verifying.as_ref(), &segs, &s.caches.pooled(), Some(rows))
                     }
                 }
             },

@@ -402,6 +402,23 @@ impl PrefillGate {
     }
 }
 
+/// What drafting settled for one step: the rows each sequence verifies, ready for the decoder's verify forward.
+pub(super) struct Proposals {
+    /// Per sequence, the proposed tokens (possibly none).
+    props: Vec<Vec<u32>>,
+    /// Per sequence, the proposals it asked for as they stand (what the window adaptation is told).
+    ks: Vec<usize>,
+    /// Per sequence, its next input followed by its proposals.
+    pub(super) rows: Vec<Vec<u32>>,
+    /// Candidates the verify forward returns per row.
+    pub(super) cands: usize,
+    /// Per sequence, the positions its table held before the verify appended its rows.
+    before: Vec<u32>,
+    started: f64,
+    bucket: usize,
+    gated: bool,
+}
+
 /// The outcome of checking one sequence's proposals against the target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Verdict {
@@ -501,30 +518,41 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// the drafter proposed anything. Returns whether it did; `false` leaves
     /// every sequence untouched for the plain step.
     pub(super) fn speculative_step(&mut self, active: &[usize]) -> bool {
+        let Some(proposals) = self.propose(active, true) else { return false };
+        let scored = self.dec.forward_batched_verify(&mut active_tables(&mut self.running, active), &proposals.rows, proposals.cands);
+        self.settle_verified(active, proposals, scored);
+        true
+    }
+
+    /// **Draft for one step** over `active`: `Some` with the rows each sequence verifies (its next input then its
+    /// proposals) when speculation is on, the batch fits the decoder's limits and the drafter proposed anything;
+    /// `None` leaves every sequence untouched for the plain step. `gated`: the step competes with a plain one on the
+    /// measured tokens a second ([`CostGate`]); a mixed iteration, whose time is mostly its prompt rows, is not.
+    pub(super) fn propose(&mut self, active: &[usize], gated: bool) -> Option<Proposals> {
         let kmax = self.spec_policy.max_draft.min(self.dec.spec_max_draft());
-        if !self.spec_policy.enabled || kmax == 0 || active.len() > self.spec_policy.max_batch.min(self.dec.spec_max_batch()) {
-            return false;
+        if active.is_empty() || !self.spec_policy.enabled || kmax == 0 || active.len() > self.spec_policy.max_batch.min(self.dec.spec_max_batch()) {
+            return None;
         }
         let budget = self.dec.spec_row_budget();
         if active.len() > budget {
-            return false;
+            return None;
         }
         // A verify step scores its rows under the base weights only: a decoder's
         // verify path has no per-row adapter selection, so a step that carries a
         // sequence running under an adapter is the plain batched step.
         if active.iter().any(|&i| self.running[i].table.kv_namespace() != crate::paged::BASE_KV_NAMESPACE) {
-            return false;
+            return None;
         }
         // The request's logit processors read the tokens chosen earlier in the same
         // step, which a verify step scores in one pass: a step that carries a
         // sequence with one is the plain step.
         if active.iter().any(|&i| self.running[i].sample.has_processors() || self.running[i].think.is_some_and(|t| t.watching())) {
-            return false;
+            return None;
         }
         let bucket = CostGate::bucket(active.len());
-        let gated = self.dec.spec_cost_aware();
+        let gated = gated && self.dec.spec_cost_aware();
         if gated && !self.gate.speculate(bucket, self.dec.step_latency_target().map(|t| t.as_secs_f64())) {
-            return false;
+            return None;
         }
         let started = (self.clock)();
         let mut ks = self.draft_windows(active, kmax);
@@ -554,7 +582,7 @@ impl<D: PagedDecoder> Scheduler<D> {
         if props.iter().all(|p| p.is_empty()) {
             // Nothing proposed is nothing rejected: the windows stay as they were.
             self.spec_stats.plain_steps += 1;
-            return false;
+            return None;
         }
         for (k, p) in ks.iter_mut().zip(&props) {
             *k = p.len();
@@ -564,8 +592,15 @@ impl<D: PagedDecoder> Scheduler<D> {
         let all_greedy = active.iter().all(|&i| !self.running[i].sample.needs_candidates());
         let cands = if all_greedy { 1 } else { self.dec.topk_capacity().max(1) };
         let before: Vec<u32> = active.iter().map(|&i| self.running[i].table.len()).collect();
+        Some(Proposals { props, ks, rows, cands, before, started, bucket, gated })
+    }
 
-        let scored = self.dec.forward_batched_verify(&mut active_tables(&mut self.running, active), &rows, cands);
+    /// **Settle a verify step**: `scored[i][j]` are the target's candidates for row `j` of sequence `active[i]`
+    /// (`proposals.rows`, scored as one forward). Each sequence keeps the longest prefix of its proposals the target
+    /// agrees with ([`verify_proposals`]) and the target's own next token; the decoder rolls back the rest of its
+    /// state and the tables are truncated to what stands.
+    pub(super) fn settle_verified(&mut self, active: &[usize], proposals: Proposals, scored: Vec<Vec<Vec<(u32, f32)>>>) {
+        let Proposals { props, ks, before, started, bucket, gated, .. } = proposals;
         assert_eq!(scored.len(), active.len(), "forward_batched_verify must answer every sequence");
 
         let mut keep = Vec::with_capacity(active.len());
@@ -605,7 +640,6 @@ impl<D: PagedDecoder> Scheduler<D> {
             let produced: usize = active.iter().map(|&i| self.running[i].generated.len()).sum::<usize>() - tokens_before;
             self.gate.observe_spec(bucket, produced, (self.clock)() - started);
         }
-        true
     }
 
     /// Seconds on the clock the cost gate times steps with (default: wall time).

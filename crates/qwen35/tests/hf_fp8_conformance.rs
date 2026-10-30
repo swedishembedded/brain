@@ -45,7 +45,13 @@ fn engine_speculating(mode: SpeculativeMode) -> Qwen35GgufEngine {
     let device = devices.first().expect("the suite needs a GPU").0;
     let resident = Qwen35GgufResident::new(path, devices, CAP, tier).with_max_batch(4).with_prefix_slots(4).with_kv_block_rows(16).with_kv_tier(KvTier::F32).with_speculation(SpecServing { mode, ..SpecServing::default() });
     let (engine, _, _) = resident.activate_engine(&[device]).expect("the tiny FP8 directory loads");
+
     std::fs::remove_dir_all(dir).ok();
+    engine
+}
+
+fn separate_lanes(mut engine: Qwen35GgufEngine) -> Qwen35GgufEngine {
+    engine.set_mixed_step(false);
     engine
 }
 
@@ -57,9 +63,14 @@ fn the_hf_fp8_engine_conforms() {
 /// The MTP head read from the directory's `mtp.safetensors` (FP8 layer, bf16 projection) drafts, the verify pass
 /// scores its proposals, and the suite's speculation property (tokens equal to plain greedy decode under a drafter
 /// that is right, half right and always wrong) holds on the FP8 tier.
+///
+/// The suite compares token streams exactly, and the fixture's random weights leave logits within 0.01 of a tie
+/// where its periodic prompts repeat: which side a tie falls on depends on whether the prompt was read in alone or in
+/// one forward with the others, so the engine reads prompts in on the separate lane here (the mixed forward's rows
+/// are compared in `hf_fp8_speculative`).
 fn the_hf_fp8_engine_conforms_speculating_with_its_own_mtp_head() {
     assert!(engine_speculating(SpeculativeMode::Mtp).instance().has_mtp(), "the FP8 directory's MTP head is loaded");
-    conformance::run_all(&Conformance { make: || engine_speculating(SpeculativeMode::Mtp), prefix_reuse: true, prefix_prompt_tokens: PREFIX_PROMPT_TOKENS, load_adapter: None });
+    conformance::run_all(&Conformance { make: || separate_lanes(engine_speculating(SpeculativeMode::Mtp)), prefix_reuse: true, prefix_prompt_tokens: PREFIX_PROMPT_TOKENS, load_adapter: None });
 }
 
 gpu_core::card_tests!(the_hf_fp8_engine_conforms, the_hf_fp8_engine_conforms_speculating_with_its_own_mtp_head);

@@ -75,6 +75,11 @@ impl<'a> VerifyBatch<'a> {
         self.slots.len() as u32
     }
 
+    /// Rows of all the sequences together.
+    pub(crate) fn total_rows(&self) -> u32 {
+        self.counts.iter().sum()
+    }
+
     pub(crate) fn snapshots(&self, layer: usize) -> &'a GdnRowSnapshots {
         &self.snaps[layer]
     }

@@ -32,7 +32,7 @@ use gpu_core::DeviceStats;
 use model::adapter::bank::{AdapterBankConfig, AdapterError, AdapterInfo, BankedEngine, UnloadStatus, VerifiedAdapter};
 use model::dispatch::LORA_SLOT_NONE;
 use model::paged::{BlockAllocator, BlockTable, KvNamespace, BASE_KV_NAMESPACE};
-use model::serve::{AdapterAvailability, AdapterId, DraftQuery, MixedLimits, MixedOutcome, PagedDecoder, PrefillJob, PrefillProgress};
+use model::serve::{AdapterAvailability, AdapterId, DraftQuery, MixedLimits, MixedOutcome, MixedVerifyOutcome, PagedDecoder, PrefillJob, PrefillProgress};
 
 use crate::adapter_serving as adapters;
 
@@ -618,7 +618,25 @@ impl Qwen35GgufEngine {
     }
 }
 
+/// The decode rows that lead a multi-sequence forward ([`Qwen35GgufEngine::run_slices`]).
+enum LeadRows<'a> {
+    /// The next token of unrelated sequences: `(tokens, slots, positions)`, a row each.
+    Decode(&'a [u32], &'a [u32], &'a [u32]),
+    /// A speculative verify step: `rows[i]` are consecutive tokens of the sequence in `slots[i]`, the first at `positions[i]`.
+    Verify { rows: &'a [&'a [u32]], slots: &'a [u32], positions: &'a [u32] },
+}
+
 impl Qwen35GgufEngine {
+    /// The MTP head's bookkeeping for decode rows a forward just consumed (`inputs` at `slots`, their `[n, d]` hidden block
+    /// on the host): kept for the next draft while the batch is one speculation may run over, dropped past it.
+    fn record_decode_rows(&mut self, slots: &[u32], inputs: &[u32], hidden: &[f32]) {
+        if slots.len() <= self.spec_batch_limit.min(self.inst.speculation_rows() as usize) {
+            self.inst.mtp_record_step(slots, inputs, hidden);
+        } else {
+            self.inst.mtp_forget(slots);
+        }
+    }
+
     /// One decode step's candidates: `cands == 0` the greedy pick `(token, 0.0)`, else that many `(token, logit)`.
     fn decode_candidates(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], cands: usize) -> Vec<Vec<(u32, f32)>> {
         if cands == 0 {
@@ -967,15 +985,22 @@ impl Qwen35GgufEngine {
     /// The second half: run the rows of `live` and settle each job's answer. `multi` runs them as one forward (with
     /// `decode`, the next token of running sequences as `(tokens, slots, positions)`, when the forward carries any;
     /// returned as their hidden block); otherwise one sequence's slice after another.
-    fn run_slices(&mut self, jobs: &mut [PrefillJob<'_>], answers: &mut [Option<PrefillProgress>], mut live: Vec<LiveSlice>, decode: Option<(&[u32], &[u32], &[u32])>, multi: bool) -> Vec<f32> {
+    fn run_slices(&mut self, jobs: &mut [PrefillJob<'_>], answers: &mut [Option<PrefillProgress>], mut live: Vec<LiveSlice>, decode: Option<LeadRows<'_>>, multi: bool) -> Vec<f32> {
+        // A forward that carries decode rows runs the head's feeds a few rounds with each iteration, as the background lane does,
+        // so a prompt's end does not stall the sequences decoding beside it.
+        let defer_feed = decode.is_some();
         let mut hidden: Vec<(Vec<f32>, bool)> = Vec::with_capacity(live.len());
         let mut decoded = Vec::new();
         if live.len() >= 2 && multi || decode.is_some() && !live.is_empty() {
             let has_mtp = self.inst.has_mtp() && live.iter().any(|(_, _, p, _)| p.mtp_feed);
             let jobs_view: Vec<MultiPrefillJob<'_>> = live.iter().map(|(i, slot, p, end)| MultiPrefillJob { prompt: &*jobs[*i].prompt, start: p.done, end: *end, slot: *slot }).collect();
             let out = match decode {
-                Some(decode) => self.inst.mixed_hidden(decode, &jobs_view, has_mtp).map(|(rows, out)| {
+                Some(LeadRows::Decode(tokens, slots, positions)) => self.inst.mixed_hidden((tokens, slots, positions), &jobs_view, has_mtp).map(|(rows, out)| {
                     decoded = rows;
+                    out
+                }),
+                Some(LeadRows::Verify { rows, slots, positions }) => self.inst.mixed_verify_hidden(rows, slots, positions, &jobs_view, has_mtp).map(|(lead, out)| {
+                    decoded = lead;
                     out
                 }),
                 None => self.inst.prefill_hidden_multi(&jobs_view, has_mtp),
@@ -994,7 +1019,7 @@ impl Qwen35GgufEngine {
             }
         }
         for ((i, slot, p, end), (h, in_pool)) in live.into_iter().zip(hidden) {
-            answers[i] = Some(self.finish_slice(slot, jobs[i].table, jobs[i].prompt, p, end, h, SliceExit { state_in_pool: in_pool, defer_feed: false }));
+            answers[i] = Some(self.finish_slice(slot, jobs[i].table, jobs[i].prompt, p, end, h, SliceExit { state_in_pool: in_pool, defer_feed }));
         }
         decoded
     }
@@ -1304,7 +1329,9 @@ impl PagedDecoder for Qwen35GgufEngine {
             return MixedOutcome { decoded: self.decode_candidates(tables, inputs, cands), prefilled, first: Vec::new() };
         }
         let (slots, positions) = self.next_positions(tables);
-        let hidden = self.run_slices(jobs, &mut answers, live, Some((inputs, &slots, &positions)), true);
+        let hidden = self.run_slices(jobs, &mut answers, live, Some(LeadRows::Decode(inputs, &slots, &positions)), true);
+        self.record_decode_rows(&slots, inputs, &hidden);
+        self.advance_feeds(FEED_ROWS_PER_SLICE);
         // One head pass for the decode rows and the last row of every prompt that ended here: the head's weights are
         // read once instead of once more per finished prompt.
         let d = self.inst.cfg.d_model as usize;
@@ -1325,6 +1352,53 @@ impl PagedDecoder for Qwen35GgufEngine {
         let first = answers.iter().flatten().map(|a| if matches!(a, PrefillProgress::Done(_)) { picked.next().expect("one pick per finished job") } else { Vec::new() }).collect();
         self.times.prefill += started.elapsed();
         MixedOutcome { decoded, prefilled: answers.into_iter().map(|a| a.expect("every job was answered")).collect(), first }
+    }
+    fn forward_mixed_verify(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>], cands: usize, jobs: &mut [PrefillJob<'_>]) -> MixedVerifyOutcome {
+        assert_eq!(tables.len(), rows.len(), "{MODEL}: tables/rows length mismatch");
+        let adapter_in_play = tables.iter().map(|t| t.kv_namespace()).chain(jobs.iter().map(|j| j.table.kv_namespace())).any(|ns| adapters::slot_of(self.inst.stage_models(), ns) != LORA_SLOT_NONE);
+        if tables.is_empty() || jobs.is_empty() || adapter_in_play || !self.mixed {
+            let prefilled = if jobs.is_empty() { Vec::new() } else { self.prefill_chunks(jobs) };
+            let scored = self.forward_batched_verify(tables, rows, cands);
+            return MixedVerifyOutcome { scored, prefilled, first: Vec::new() };
+        }
+        let started = std::time::Instant::now();
+        let (mut answers, live) = self.begin_slices(jobs, true);
+        if live.is_empty() {
+            // Every prompt was served from the cache: nothing to carry.
+            let prefilled = answers.into_iter().map(|a| a.expect("every job was answered")).collect();
+            let scored = self.forward_batched_verify(tables, rows, cands);
+            return MixedVerifyOutcome { scored, prefilled, first: Vec::new() };
+        }
+        let mut slots = Vec::with_capacity(tables.len());
+        let mut positions = Vec::with_capacity(tables.len());
+        for (t, r) in tables.iter_mut().zip(rows) {
+            assert!(!r.is_empty(), "{MODEL}: a verify row set is never empty");
+            positions.push(t.len());
+            for _ in 0..r.len() {
+                t.append(&mut self.alloc).unwrap_or_else(|e| panic!("{MODEL}: KV pool exhausted mid-verify: {e}"));
+            }
+            slots.push(self.slot(t));
+        }
+        let row_refs: Vec<&[u32]> = rows.iter().map(|r| r.as_slice()).collect();
+        let hidden = self.run_slices(jobs, &mut answers, live, Some(LeadRows::Verify { rows: &row_refs, slots: &slots, positions: &positions }), true);
+        // One head pass for the verify rows and the last row of every prompt that ended here, as a plain mixed forward does.
+        let d = self.inst.cfg.d_model as usize;
+        let n_verify: usize = rows.iter().map(Vec::len).sum();
+        let mut head_rows = hidden.clone();
+        for a in answers.iter().flatten() {
+            if let PrefillProgress::Done(h) = a {
+                head_rows.extend_from_slice(h);
+            }
+        }
+        let n = (head_rows.len() / d) as u32;
+        let picked: Vec<Vec<(u32, f32)>> = if cands <= 1 { self.inst.head_argmax_rows(&head_rows, n).into_iter().map(|t| vec![(t, 0.0)]).collect() } else { self.inst.head_topk_rows(&head_rows, n, cands.min(TOPK_CAPACITY) as u32) };
+        let mut picked = picked.into_iter();
+        let scored: Vec<Vec<Vec<(u32, f32)>>> = rows.iter().map(|r| picked.by_ref().take(r.len()).collect()).collect();
+        debug_assert_eq!(scored.iter().map(Vec::len).sum::<usize>(), n_verify);
+        let first = answers.iter().flatten().map(|a| if matches!(a, PrefillProgress::Done(_)) { picked.next().expect("one pick per finished job") } else { Vec::new() }).collect();
+        self.verifying = Some(Verifying { slots, rows: rows.to_vec(), hidden });
+        self.times.verify += started.elapsed();
+        MixedVerifyOutcome { scored, prefilled: answers.into_iter().map(|a| a.expect("every job was answered")).collect(), first }
     }
     fn logits(&self, hidden: &[f32]) -> Vec<f32> {
         decode_lane(self.background_on, || self.inst.head_logits_rows(hidden, 1))

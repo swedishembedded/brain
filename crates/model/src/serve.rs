@@ -343,6 +343,17 @@ pub trait PagedDecoder {
         MixedOutcome { decoded, prefilled, first: Vec::new() }
     }
 
+    /// [`Self::forward_mixed`] whose decode rows are a speculative verify step: `rows[i]` are the consecutive tokens
+    /// of the sequence of `tables[i]` ([`Self::forward_batched_verify`]'s rows), scored in the same forward as the
+    /// next slice of every job. Answers the candidates of every verify row, the jobs' progress, and (for a job that
+    /// finished) the candidates of its first token from the same head pass; the verify is settled with
+    /// [`Self::commit_verified`] as usual. The default runs the two passes one after the other.
+    fn forward_mixed_verify(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>], cands: usize, jobs: &mut [PrefillJob<'_>]) -> MixedVerifyOutcome {
+        let prefilled = if jobs.is_empty() { Vec::new() } else { self.prefill_chunks(jobs) };
+        let scored = self.forward_batched_verify(tables, rows, cands);
+        MixedVerifyOutcome { scored, prefilled, first: Vec::new() }
+    }
+
     /// A prefill call unwound with a device allocation failure
     /// ([`gpu_core::DeviceOutOfMemory`]): drop whatever prompt the decoder was
     /// reading in and leave the device idle, so the scheduler can release the
@@ -554,6 +565,16 @@ pub struct MixedOutcome {
     /// head pass as the decode rows' (so the head's weights are read once, not once more per finished prompt), in
     /// the form `cands` asked for. Empty for a job that did not finish or a decoder that has none: the scheduler
     /// then runs [`PagedDecoder::admit_greedy`] / [`PagedDecoder::admit_topk`] on the job's hidden state.
+    pub first: Vec<Vec<(u32, f32)>>,
+}
+
+/// What one [`PagedDecoder::forward_mixed_verify`] call produced.
+pub struct MixedVerifyOutcome {
+    /// Per sequence, per verify row, its candidates ([`PagedDecoder::forward_batched_verify`]'s answer).
+    pub scored: Vec<Vec<Vec<(u32, f32)>>>,
+    /// One answer per job, in job order.
+    pub prefilled: Vec<PrefillProgress>,
+    /// As [`MixedOutcome::first`].
     pub first: Vec<Vec<(u32, f32)>>,
 }
 
@@ -2433,12 +2454,16 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// **One mixed iteration** ([`PagedDecoder::mixed_step`]): the next token of every sequence in `active` and
     /// a slice of the prompts still being read in, as one forward. The slice is sized from the decoder's
     /// latency target and the cost of the iterations timed so far ([`StepCost::prompt_rows`]), and shared out
-    /// over the prefilling sequences as [`Self::allot_prefill`] does. Speculation is not run while prompts go
-    /// in: its verify rows are another shape of forward.
+    /// over the prefilling sequences as [`Self::allot_prefill`] does. A decoder that speculates has the decode rows verify
+    /// their drafts in the same forward ([`PagedDecoder::forward_mixed_verify`]).
     fn mixed_iteration(&mut self, limits: MixedLimits, active: &[usize], in_batch: &[bool], report: &mut StepReport) {
-        let started = (self.clock)();
         let target = self.dec.step_latency_target().map(|t| t.as_secs_f64());
-        let prompt_rows = self.step_cost.prompt_rows(limits, active.len(), target);
+        // Drafting comes first: the verify rows are decode rows of the forward, and the prompt slice is what the
+        // target leaves after them.
+        let proposals = self.propose(active, false);
+        let decode_rows = proposals.as_ref().map_or(active.len(), |p| p.rows.iter().map(Vec::len).sum());
+        let started = (self.clock)();
+        let prompt_rows = self.step_cost.prompt_rows(limits, decode_rows, target);
         let takes = self.allot_prefill(prompt_rows);
         let inputs: Vec<u32> = active.iter().map(|&i| self.running[i].next_input).collect();
         let (mut all_greedy, banned_max) = self.sampling_mode(active);
@@ -2458,10 +2483,19 @@ impl<D: PagedDecoder> Scheduler<D> {
             self.prefilling.iter_mut().zip(&takes).filter(|(_, &take)| take > 0).map(|(p, &take)| PrefillJob { table: &mut p.table, prompt: &p.prompt, budget: take, embeds: p.embeds.as_deref() }).collect();
         let outcome = {
             let _forward = gpu_core::markers::range(c"serve.mixed");
-            catch_device_oom(|| self.dec.forward_mixed(&mut tables, &inputs, cands, &mut jobs))
+            catch_device_oom(|| match &proposals {
+                Some(p) => {
+                    let o = self.dec.forward_mixed_verify(&mut tables, &p.rows, cands.max(p.cands), &mut jobs);
+                    (o.scored, Vec::new(), o.prefilled, o.first)
+                }
+                None => {
+                    let o = self.dec.forward_mixed(&mut tables, &inputs, cands, &mut jobs);
+                    (Vec::new(), o.decoded, o.prefilled, o.first)
+                }
+            })
         };
         drop((tables, jobs));
-        let outcome = match outcome {
+        let (scored, decoded, prefilled, first) = match outcome {
             Ok(outcome) => outcome,
             Err(oom) => {
                 // The forward carried every sequence and prompt in flight and its answers are lost with the unwind:
@@ -2475,15 +2509,20 @@ impl<D: PagedDecoder> Scheduler<D> {
                 return self.refuse_prefilling(report, oom);
             }
         };
-        let rows = active.len() + takes.iter().sum::<usize>();
+        let rows = decode_rows + takes.iter().sum::<usize>();
         self.step_cost.observe(rows, (self.clock)() - started);
-        let sampled = gpu_core::markers::range(c"serve.sample");
-        let window = if all_greedy { outcome.decoded } else { sample_rows(&mut self.running, active, &outcome.decoded) };
-        drop(sampled);
-        let accepted = gpu_core::markers::range(c"serve.accept");
-        self.accept_window(active, &window, 1);
-        self.settle_prefill(&takes, outcome.prefilled, outcome.first, report);
-        drop(accepted);
+        match proposals {
+            Some(proposals) => self.settle_verified(active, proposals, scored),
+            None => {
+                let sampled = gpu_core::markers::range(c"serve.sample");
+                let window = if all_greedy { decoded } else { sample_rows(&mut self.running, active, &decoded) };
+                drop(sampled);
+                let accepted = gpu_core::markers::range(c"serve.accept");
+                self.accept_window(active, &window, 1);
+                drop(accepted);
+            }
+        }
+        self.settle_prefill(&takes, prefilled, first, report);
     }
 
     /// Drive to completion, returning every request's tokens keyed by id.
