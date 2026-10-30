@@ -40,6 +40,7 @@
 //! time for the rest of the window.
 
 use super::*;
+use checkpoint::TensorSource;
 use crate::gguf_import::block_leaf_suffix;
 use model::ops::{Ops, Weight};
 
@@ -134,8 +135,8 @@ pub(super) struct MtpDrafter {
     normed_hidden: bool,
     eps: f32,
     d: usize,
-    /// Embedding rows, read from this handle's own mapping.
-    mg: MmapGguf,
+    /// Embedding rows, read from this handle's own mapping of the checkpoint.
+    ckpt: ResidentCheckpoint,
     embed: EmbedTable,
     slots: std::collections::HashMap<u32, SlotState>,
     /// Slots whose prompt feed is begun and not finished ([`PromptFeed`]): they neither draft nor record steps.
@@ -163,8 +164,8 @@ impl MtpDrafter {
     /// `Ok(None)` when the checkpoint carries no MTP block.
     #[allow(clippy::too_many_arguments)]
     fn load(
-        gguf_path: &str,
-        mg: &MmapGguf,
+        path: &str,
+        ckpt: &ResidentCheckpoint,
         cfg: &Qwen35Config,
         tier: &TierPolicy,
         gpu_index: usize,
@@ -177,43 +178,31 @@ impl MtpDrafter {
         embed_name: &str,
         normed_hidden: bool,
     ) -> Result<Option<MtpDrafter>, String> {
-        let prefix = format!("blk.{}.", cfg.n_layers);
-        let fc_name = mtp_projection_name(cfg);
         let d = cfg.d_model as usize;
-        match mg.shape(&fc_name) {
-            None => return Ok(None),
-            Some(s) if s == [d, 2 * d] => {}
-            Some(s) => return Err(format!("{MODEL}: {fc_name} has shape {s:?}, expected [{d}, {}]", 2 * d)),
-        }
-        let MtpSource { cfg1, shard, src } = mtp_source(mg, cfg, gpu_index)?;
-        let stage = Qwen35::new_shard_dt(cfg1.clone(), 1, 1, &src, shard.clone(), &stage_tier(cfg, tier, shard.start));
+        let Some(parts) = MtpParts::read(ckpt, cfg, tier, gpu_index, head_gpu)? else { return Ok(None) };
+        let MtpParts { cfg1, shard, stage, fc, enorm, hnorm, head_norm_host } = parts;
         let caches = ShardCaches::new(&stage.gpu, &cfg1, &shard, cap, slots, 0, kv_tier, layout);
-
-        let (w, s) = model::int8::upload_quantized(&mut paramstore::upload::Uploader::new(head_gpu), mg, &fc_name, d, 2 * d).map_err(|e| format!("{MODEL}: {e}"))?;
-        let fc = Weight::I8 { w, s, n: d as u32, k: 2 * d as u32 };
-        let vec = |name: String| -> Result<Vec<f32>, String> {
-            match mg.tensor(&name) {
-                Some(Ok(v)) if v.len() == d => Ok(v),
-                Some(Ok(v)) => Err(format!("{MODEL}: '{name}' has {} elements, expected {d}", v.len())),
-                Some(Err(e)) => Err(format!("{MODEL}: '{name}': {e}")),
-                None => Err(format!("{MODEL}: '{name}' is missing")),
-            }
+        let reopened = ResidentCheckpoint::open(path).map_err(|e| format!("{MODEL}: cannot reopen '{path}': {e}"))?;
+        let target_norm_host = match ckpt.final_norm(target_norm_name) {
+            Some(Ok(v)) if v.len() == d => v,
+            Some(Ok(v)) => return Err(format!("{MODEL}: '{target_norm_name}' has {} elements, expected {d}", v.len())),
+            Some(Err(e)) => return Err(format!("{MODEL}: '{target_norm_name}': {e}")),
+            None => return Err(format!("{MODEL}: '{target_norm_name}' is missing")),
         };
-        let head_norm_host = vec(format!("{prefix}nextn.shared_head_norm.weight"))?;
         Ok(Some(MtpDrafter {
             stage,
             caches,
             ops: Ops::new(head_gpu.share()).map_err(|e| format!("{MODEL}: Ops::new for the MTP projection: {e}"))?,
             fc,
-            enorm: vec(format!("{prefix}nextn.enorm.weight"))?,
-            hnorm: vec(format!("{prefix}nextn.hnorm.weight"))?,
+            enorm,
+            hnorm,
             head_norm: head_gpu.storage_init("qwen35.gguf.mtp_norm", &head_norm_host),
             head_norm_host,
-            target_norm_host: vec(target_norm_name.to_string())?,
+            target_norm_host,
             normed_hidden,
             eps: cfg.rms_eps,
             d,
-            mg: MmapGguf::open(gguf_path).map_err(|e| format!("{MODEL}: cannot reopen '{gguf_path}': {e}"))?,
+            ckpt: reopened,
             embed: EmbedTable { name: embed_name.to_string(), d },
             slots: std::collections::HashMap::new(),
             feeding: std::collections::HashSet::new(),
@@ -224,8 +213,8 @@ impl MtpDrafter {
 
     fn embed_rows(&self, tokens: &[u32]) -> Result<Vec<f32>, String> {
         let rows: Vec<usize> = tokens.iter().map(|&t| t as usize).collect();
-        self.mg.tensor_rows(&self.embed.name, &rows, self.d).ok_or_else(|| {
-            let bad = tokens.iter().find(|&&t| self.mg.tensor_range(&self.embed.name, t as usize * self.d, self.d).is_none()).copied().unwrap_or(0);
+        self.ckpt.embed_rows(&self.embed.name, &rows, self.d).ok_or_else(|| {
+            let bad = tokens.iter().find(|&&t| self.ckpt.embed_rows(&self.embed.name, &[t as usize], self.d).is_none()).copied().unwrap_or(0);
             format!("{MODEL}: token {bad} is outside the embedding")
         })?
     }
@@ -317,6 +306,74 @@ impl MtpDrafter {
     }
 }
 
+/// What the checkpoint gives the drafter, whichever format it is in: the one-layer stage (its weights in the
+/// tier the checkpoint stores them), the projection over the pair `[embed, hidden]`, the two input norms and
+/// the norm in front of the shared head.
+struct MtpParts {
+    cfg1: Qwen35Config,
+    shard: Shard,
+    stage: Qwen35,
+    fc: Weight,
+    enorm: Vec<f32>,
+    hnorm: Vec<f32>,
+    head_norm_host: Vec<f32>,
+}
+
+impl MtpParts {
+    /// `Ok(None)` when the checkpoint carries no MTP head.
+    fn read(ckpt: &ResidentCheckpoint, cfg: &Qwen35Config, tier: &TierPolicy, gpu_index: usize, head_gpu: &Gpu) -> Result<Option<MtpParts>, String> {
+        let d = cfg.d_model as usize;
+        let exact = |name: &str, v: Vec<f32>| if v.len() == d { Ok(v) } else { Err(format!("{MODEL}: '{name}' has {} elements, expected {d}", v.len())) };
+        match ckpt {
+            ResidentCheckpoint::Gguf(mg) => {
+                let prefix = format!("blk.{}.", cfg.n_layers);
+                let fc_name = mtp_projection_name(cfg);
+                match mg.shape(&fc_name) {
+                    None => return Ok(None),
+                    Some(s) if s == [d, 2 * d] => {}
+                    Some(s) => return Err(format!("{MODEL}: {fc_name} has shape {s:?}, expected [{d}, {}]", 2 * d)),
+                }
+                let MtpSource { cfg1, shard, src } = mtp_source(mg, cfg, gpu_index)?;
+                let stage = Qwen35::new_shard_dt(cfg1.clone(), 1, 1, &src, shard.clone(), &stage_tier(cfg, tier, shard.start));
+                let (w, s) = model::int8::upload_quantized(&mut paramstore::upload::Uploader::new(head_gpu), mg, &fc_name, d, 2 * d).map_err(|e| format!("{MODEL}: {e}"))?;
+                let fc = Weight::I8 { w, s, n: d as u32, k: 2 * d as u32 };
+                let vec = |leaf: &str| -> Result<Vec<f32>, String> {
+                    let name = format!("{prefix}{leaf}");
+                    match mg.tensor(&name) {
+                        Some(Ok(v)) => exact(&name, v),
+                        Some(Err(e)) => Err(format!("{MODEL}: '{name}': {e}")),
+                        None => Err(format!("{MODEL}: '{name}' is missing")),
+                    }
+                };
+                Ok(Some(MtpParts { cfg1, shard, stage, fc, enorm: vec("nextn.enorm.weight")?, hnorm: vec("nextn.hnorm.weight")?, head_norm_host: vec("nextn.shared_head_norm.weight")? }))
+            }
+            ResidentCheckpoint::Hf(_) => {
+                let Some(src) = ckpt.mtp_source() else { return Ok(None) };
+                let (cfg1, shard) = mtp_stage_shape(cfg, gpu_index);
+                let stage = Qwen35::new_shard_dt(cfg1.clone(), 1, 1, src, shard.clone(), &stage_tier(cfg, tier, shard.start));
+                let staging = checkpoint::packed::BoundedWorkspace::new(checkpoint::packed::MemoryBudget::new(crate::fp8_source::WEIGHT_STAGING_BYTES, 0));
+                let ops = Ops::new(head_gpu.share()).map_err(|e| format!("{MODEL}: Ops::new for the MTP projection: {e}"))?;
+                let fc = model::ops::upload_preserved(&ops, src, "mtp.fc.weight", d, 2 * d, &staging).map_err(|e| format!("{MODEL}: {e}"))?;
+                let vec = |name: &str| -> Result<Vec<f32>, String> {
+                    let mut out = Vec::with_capacity(d);
+                    src.with_tensor_chunks(name, 1 << 20, &mut |_, chunk| out.extend_from_slice(chunk)).then_some(()).ok_or_else(|| format!("{MODEL}: '{name}' is missing"))?;
+                    exact(name, out)
+                };
+                Ok(Some(MtpParts { cfg1, shard, stage, fc, enorm: vec("mtp.pre_fc_norm_embedding.weight")?, hnorm: vec("mtp.pre_fc_norm_hidden.weight")?, head_norm_host: vec("mtp.norm.weight")? }))
+            }
+        }
+    }
+}
+
+/// The MTP layer as a stage of its own: the full-attention layer of a config truncated to one attention period.
+fn mtp_stage_shape(cfg: &Qwen35Config, gpu_index: usize) -> (Qwen35Config, Shard) {
+    let mut cfg1 = cfg.clone();
+    cfg1.n_layers = cfg.full_attention_interval;
+    cfg1.mtp = false;
+    let layer = (cfg.full_attention_interval - 1) as usize;
+    (cfg1, Shard { start: layer, end: layer + 1, embed: false, head: false, gpu_index })
+}
+
 /// The MTP block's `eh_proj`: the tensor whose presence says the checkpoint
 /// carries a multi-token-prediction head.
 fn mtp_projection_name(cfg: &Qwen35Config) -> String {
@@ -333,11 +390,8 @@ pub(crate) struct MtpSource<'a> {
 
 pub(crate) fn mtp_source<'a>(mg: &'a MmapGguf, cfg: &Qwen35Config, gpu_index: usize) -> Result<MtpSource<'a>, String> {
     let prefix = format!("blk.{}.", cfg.n_layers);
-    let mut cfg1 = cfg.clone();
-    cfg1.n_layers = cfg.full_attention_interval;
-    cfg1.mtp = false;
-    let layer = (cfg.full_attention_interval - 1) as usize;
-    let shard = Shard { start: layer, end: layer + 1, embed: false, head: false, gpu_index };
+    let (cfg1, shard) = mtp_stage_shape(cfg, gpu_index);
+    let layer = shard.start;
     let mut plan = HashMap::new();
     for name in mg.names() {
         let Some(leaf) = name.strip_prefix(&prefix) else { continue };
@@ -375,15 +429,11 @@ pub(crate) fn checkpoint_has_mtp(mg: &MmapGguf, cfg: &Qwen35Config) -> bool {
 
 impl Qwen35GgufInstance {
     /// Load the checkpoint's MTP head if it has one (and `mode` wants it).
-    pub(super) fn enable_mtp(&mut self, gguf_path: &str, tier: &TierPolicy, gpu_index: usize, normed_hidden: bool) -> Result<bool, String> {
-        // Only a GGUF's MTP block is wired; an HF directory's `mtp.safetensors` is not (`ResidentCheckpoint`'s doc).
-        let Some(mg) = self.ckpt.gguf() else { return Ok(false) };
-        let (target_norm, embed_name) = {
-            let names = endpoint_names(mg, &self.cfg)?;
-            (names.1, self.embed.name.clone())
-        };
+    pub(super) fn enable_mtp(&mut self, path: &str, tier: &TierPolicy, gpu_index: usize, normed_hidden: bool) -> Result<bool, String> {
+        let (_, target_norm, _) = self.ckpt.endpoint_names(&self.cfg)?;
+        let embed_name = self.embed.name.clone();
         let head_gpu = &self.shards.last().expect("a plan always has at least one stage").qwen35.gpu;
-        let loaded = MtpDrafter::load(gguf_path, mg, &self.cfg, tier, gpu_index, head_gpu, self.cap, self.state_rows(), self.kv_tier, self.kv_layout, &target_norm, &embed_name, normed_hidden)?;
+        let loaded = MtpDrafter::load(path, &self.ckpt, &self.cfg, tier, gpu_index, head_gpu, self.cap, self.state_rows(), self.kv_tier, self.kv_layout, &target_norm, &embed_name, normed_hidden)?;
         self.mtp = loaded;
         Ok(self.mtp.is_some())
     }

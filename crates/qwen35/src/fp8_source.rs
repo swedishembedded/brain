@@ -91,6 +91,59 @@ fn bindings_for(reader: &PackedReader, cfg: &Qwen35Config, foreign: &[&str]) -> 
     Ok(bindings)
 }
 
+/// The checkpoint's multi-token-prediction head as a [`PackedSource`] under the names of a one-layer stage:
+/// its decoder layer is the full-attention layer `layer` of a config truncated to one attention period
+/// (`blocks.{layer}.*`, the names the layer builders ask for), and its three own norms and the fused
+/// `mtp.fc.weight` (`[d, 2d]`, embedding half first) keep their `mtp.*` names. Plain RMSNorm gains carry the same
+/// `(1+w)` fold as the main stack. `Ok(None)` when the checkpoint holds no `mtp.*` tensor.
+///
+/// `cfg` is the full model's config; fails, naming the tensors, when the head's tensors do not cover the layer
+/// and its endpoints exactly or disagree with the config on a size.
+pub fn open_mtp(dir: &Path, cfg: &Qwen35Config, block: usize) -> Result<Option<PackedSource>, String> {
+    let reader = PackedReader::open(dir).map_err(|e| format!("qwen35 mtp source: {e}"))?.with_fp8_block(block as u32);
+    let layer = (cfg.full_attention_interval - 1) as usize;
+    let mut bindings: Vec<(String, Binding)> = Vec::new();
+    for name in reader.names().into_iter().filter(|n| n.starts_with(MTP_TENSOR_PREFIX)) {
+        let canon = match name.strip_prefix("mtp.layers.0.") {
+            Some(leaf) => {
+                let suffix = crate::import::classify_layer_leaf(leaf, crate::config::LayerType::Full).ok_or_else(|| format!("qwen35 mtp source: unrecognized leaf '{leaf}' in the MTP layer"))?;
+                format!("blocks.{layer}.{suffix}")
+            }
+            None => name.clone(),
+        };
+        let add = if is_plain_rmsnorm_weight(&canon) { 1.0 } else { 0.0 };
+        bindings.push((canon, Binding { source: name, add }));
+    }
+    if bindings.is_empty() {
+        return Ok(None);
+    }
+    let src = PackedSource::new(Box::new(reader), CodecRegistry::reference(), bindings).map_err(|e| format!("qwen35 mtp source: {e}"))?;
+    let d = cfg.d_model as usize;
+    let mut expected: Vec<(String, usize)> = vec![("mtp.fc.weight".into(), 2 * d * d)];
+    expected.extend(["mtp.norm.weight", "mtp.pre_fc_norm_embedding.weight", "mtp.pre_fc_norm_hidden.weight"].map(|n| (n.to_string(), d)));
+    let one_layer = Qwen35Config { n_layers: cfg.full_attention_interval, mtp: false, ..cfg.clone() };
+    expected.extend(one_layer.param_list().into_iter().filter(|(n, _)| n.starts_with(&format!("blocks.{layer}."))));
+    let mut problems: Vec<String> = Vec::new();
+    for (name, numel) in &expected {
+        match src.numel(name) {
+            None => problems.push(format!("missing {name}")),
+            Some(n) if n != *numel => problems.push(format!("{name} has {n} elements, expected {numel}")),
+            Some(_) => {}
+        }
+    }
+    let want: std::collections::HashSet<&str> = expected.iter().map(|(n, _)| n.as_str()).collect();
+    problems.extend(src.names().into_iter().filter(|n| !want.contains(&**n)).map(|n| format!("{n} is not a tensor of the MTP head")));
+    if !problems.is_empty() {
+        problems.sort();
+        problems.truncate(16);
+        return Err(format!("qwen35 mtp source: the MTP tensors do not match the config: {}", problems.join("; ")));
+    }
+    Ok(Some(src))
+}
+
+/// Tensor-name prefix of the multi-token-prediction head in an HF checkpoint.
+const MTP_TENSOR_PREFIX: &str = "mtp.";
+
 /// Host staging a [`PackedBase::weight`] load may hold at once (one tile of the destination encoding).
 pub const WEIGHT_STAGING_BYTES: u64 = 64 << 20;
 

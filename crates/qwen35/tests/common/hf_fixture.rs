@@ -129,11 +129,36 @@ fn write_checkpoint_from(cfg: &Qwen35Config, tag: &str, skip: Option<&str>, dens
     }
     let mut by_file: HashMap<String, Vec<Raw>> = HashMap::new();
     let mut weight_map = serde_json::Map::new();
-    for (canon, numel) in cfg.param_list() {
+    // The multimodal release carries the multi-token-prediction head in `mtp.safetensors`: the full-attention layer
+    // of the first attention period (same leaves, same encodings) plus the projection and the three norms.
+    let mut params = cfg.param_list();
+    if layout == Layout::Multimodal && dense.is_none() {
+        let layer = (cfg.full_attention_interval - 1) as usize;
+        let one_layer = Qwen35Config { n_layers: cfg.full_attention_interval, ..cfg.clone() };
+        let prefix = format!("blocks.{layer}.");
+        for (name, numel) in one_layer.param_list().into_iter().filter(|(n, _)| n.starts_with(&prefix)) {
+            let mtp = format!("mtp.layers.0.{}", &name[prefix.len()..]);
+            if let Some(&shape) = linear_shapes.get(&name) {
+                linear_shapes.insert(mtp.clone(), shape);
+            }
+            params.push((mtp, numel));
+        }
+        params.push(("mtp.fc.weight".into(), 2 * d * d));
+        params.extend(["mtp.norm.weight", "mtp.pre_fc_norm_embedding.weight", "mtp.pre_fc_norm_hidden.weight"].map(|n| (n.to_string(), d)));
+    }
+    for (canon, numel) in params {
         if skip == Some(canon.as_str()) {
             continue;
         }
-        let (file, hf, shape) = if let Some(rest) = canon.strip_prefix("blocks.") {
+        let (file, hf, shape) = if let Some(suffix) = canon.strip_prefix("mtp.layers.0.") {
+            let shape = match linear_shapes.get(&canon) {
+                Some(&(n, k)) => vec![n, k],
+                None => vec![numel],
+            };
+            ("mtp.safetensors".to_string(), format!("mtp.layers.0.{}", hf_leaf(suffix)), shape)
+        } else if let Some(shape) = canon.starts_with("mtp.").then(|| if canon == "mtp.fc.weight" { vec![d, 2 * d] } else { vec![d] }) {
+            ("mtp.safetensors".to_string(), canon.clone(), shape)
+        } else if let Some(rest) = canon.strip_prefix("blocks.") {
             let (l, suffix) = rest.split_once('.').unwrap();
             let hf = format!("{}layers.{l}.{}", decoder_prefix(layout), hf_leaf(suffix));
             let shape = match linear_shapes.get(&canon) {
@@ -188,9 +213,7 @@ fn write_checkpoint_from(cfg: &Qwen35Config, tag: &str, skip: Option<&str>, dens
         }
     }
     if layout == Layout::Multimodal {
-        // Real, present, out-of-scope tensors in their own shard.
-        by_file.entry("mtp.safetensors".into()).or_default().push(Raw { name: "mtp.fc.weight".into(), dtype: "BF16", shape: vec![d, 2 * d], bytes: vec![0; d * 2 * d * 2] });
-        weight_map.insert("mtp.fc.weight".into(), "mtp.safetensors".into());
+        // A real, present, out-of-scope tensor in the shard of the other components.
         by_file.get_mut("outside.safetensors").unwrap().push(Raw { name: "model.visual.patch_embed.weight".into(), dtype: "BF16", shape: vec![4], bytes: vec![0; 8] });
         weight_map.insert("model.visual.patch_embed.weight".into(), "outside.safetensors".into());
     }

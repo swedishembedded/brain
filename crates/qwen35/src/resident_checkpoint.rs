@@ -26,9 +26,9 @@
 //!   [`model::ops::stored_tier`] names (FP8 e4m3 with 128x128 block scales,
 //!   bf16 for the tensors the release keeps unconverted), and the head and
 //!   embedding in bf16, served as stored;
-//! * the multi-token-prediction head is read from the GGUF; an HF directory's
-//!   `mtp.safetensors` is not wired yet, so [`ResidentCheckpoint::has_mtp`]
-//!   says `false` and a request for MTP speculation is refused by name.
+//! * the multi-token-prediction head is the GGUF's `blk.{n_layers}` block, or an
+//!   HF directory's `mtp.*` tensors (`mtp.safetensors`), served in the encoding
+//!   they are stored in ([`ResidentCheckpoint::mtp_source`]).
 
 use std::path::{Path, PathBuf};
 
@@ -49,7 +49,7 @@ pub enum ResidentCheckpoint {
     /// A released GGUF: Q8_0/K-quant tensors in llama.cpp's names.
     Gguf(MmapGguf),
     /// A HuggingFace directory read lazily under brain-canonical names.
-    Hf(HfCheckpoint),
+    Hf(Box<HfCheckpoint>),
 }
 
 /// One stage's tensors, borrowed from a [`ResidentCheckpoint`].
@@ -73,6 +73,8 @@ pub struct HfCheckpoint {
     dir: PathBuf,
     cfg: Qwen35Config,
     src: PackedSource,
+    /// The multi-token-prediction head's tensors under a one-layer stage's names ([`crate::fp8_source::open_mtp`]).
+    mtp: Option<PackedSource>,
 }
 
 /// The ids that end a generation: what the checkpoint declares (a GGUF's `eos`, an HF release's
@@ -93,8 +95,10 @@ impl ResidentCheckpoint {
         if Path::new(path).is_dir() {
             let dir = PathBuf::from(path);
             let cfg = crate::fp8_source::hf_config(&dir)?;
-            let src = crate::fp8_source::open_dir(&dir, &cfg, crate::fp8_source::hf_fp8_block_size(&dir)?)?;
-            Ok(ResidentCheckpoint::Hf(HfCheckpoint { dir, cfg, src }))
+            let block = crate::fp8_source::hf_fp8_block_size(&dir)?;
+            let src = crate::fp8_source::open_dir(&dir, &cfg, block)?;
+            let mtp = crate::fp8_source::open_mtp(&dir, &cfg, block)?;
+            Ok(ResidentCheckpoint::Hf(Box::new(HfCheckpoint { dir, cfg, src, mtp })))
         } else {
             MmapGguf::open(path).map(ResidentCheckpoint::Gguf)
         }
@@ -246,7 +250,18 @@ impl ResidentCheckpoint {
 
     /// Whether the checkpoint carries an MTP head this engine can load.
     pub fn has_mtp(&self, cfg: &Qwen35Config) -> bool {
-        self.gguf().is_some_and(|mg| crate::int8_gguf_resident::checkpoint_has_mtp(mg, cfg))
+        match self {
+            ResidentCheckpoint::Gguf(mg) => crate::int8_gguf_resident::checkpoint_has_mtp(mg, cfg),
+            ResidentCheckpoint::Hf(hf) => hf.mtp.is_some(),
+        }
+    }
+
+    /// The MTP head of an HF directory (`None` for a GGUF, which reads its block through [`Self::gguf`]).
+    pub fn mtp_source(&self) -> Option<&PackedSource> {
+        match self {
+            ResidentCheckpoint::Gguf(_) => None,
+            ResidentCheckpoint::Hf(hf) => hf.mtp.as_ref(),
+        }
     }
 
     /// The weight tier that holds every linear of the checkpoint as it is
@@ -263,6 +278,13 @@ impl ResidentCheckpoint {
                         let name = format!("blocks.{l}.{suffix}");
                         let tier = model::ops::stored_tier(&hf.src, &name).ok_or_else(|| format!("{name}: the checkpoint stores it in an encoding with no resident tier"))?;
                         leaves.push((name, tier, n as u64 * k as u64));
+                    }
+                }
+                if let Some(mtp) = &hf.mtp {
+                    let layer = (cfg.full_attention_interval - 1) as usize;
+                    for (suffix, n, k) in cfg.layer_leaves(crate::config::LayerType::Full) {
+                        let tier = model::ops::stored_tier(mtp, &format!("blocks.{layer}.{suffix}")).ok_or_else(|| format!("{}{suffix}: the checkpoint stores it in an encoding with no resident tier", crate::int8_gguf_resident::MTP_PREFIX))?;
+                        leaves.push((format!("{}{suffix}", crate::int8_gguf_resident::MTP_PREFIX), tier, n as u64 * k as u64));
                     }
                 }
                 Ok(TierPolicy::per_leaf(leaves))

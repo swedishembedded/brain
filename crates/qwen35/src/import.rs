@@ -189,7 +189,7 @@ pub fn fold_plain_rmsnorm_weights(tensors: &mut HashMap<String, Vec<f32>>) {
 /// single `mtp.layers.0.*` layer, always [`LayerType::Full`] shaped) share -
 /// written once so the two callers cannot silently drift apart on a leaf
 /// name.
-fn classify_layer_leaf(leaf: &str, ty: LayerType) -> Option<String> {
+pub(crate) fn classify_layer_leaf(leaf: &str, ty: LayerType) -> Option<String> {
     match leaf {
         "input_layernorm.weight" => Some("ln1.weight".to_string()),
         "post_attention_layernorm.weight" => Some("ln2.weight".to_string()),

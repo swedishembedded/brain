@@ -177,7 +177,7 @@ use crate::adapter_serving as adapters;
 use crate::config::{LayerType, Qwen35Config};
 use crate::stream::HeadRows;
 use crate::resident_checkpoint::ResidentCheckpoint;
-pub(crate) use mtp::checkpoint_has_mtp;
+pub(crate) use mtp::{checkpoint_has_mtp, MTP_PREFIX};
 use crate::model::{BatchDecodeCaches, BatchSeq, DecodeCaches, GdnPoolStore, KvWindow, PooledCaches, PrefillSeg, Qwen35, SpecDecodeStats, StageRows};
 
 /// Catalog id. Names the real upstream release this resident loads, exactly
@@ -472,7 +472,7 @@ pub fn serving_cost(cfg: &Qwen35Config, shape: &ServingShape) -> LayerBytes {
         .collect();
     let mtp = if shape.spec.mtp_head {
         let d = cfg.d_model as u64;
-        cfg.layer_weight_bytes_at(mtp::MTP_PREFIX, LayerType::Full, &shape.tier) + d * 2 * d + shape.window_slots() as u64 * cfg.layer_decode_state_bytes(LayerType::Full, shape.cap, shape.kv)
+        cfg.layer_weight_bytes_at(mtp::MTP_PREFIX, LayerType::Full, &shape.tier) + d * 2 * d * 2 + shape.window_slots() as u64 * cfg.layer_decode_state_bytes(LayerType::Full, shape.cap, shape.kv)
     } else {
         0
     };
