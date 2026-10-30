@@ -2850,6 +2850,26 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/add_rms_quant.cu"),
     },
     CudaKernel {
+        name: "add_rms_quant_e4m3",
+        // `add_rms_quant` with the E4M3 rows of the normalised activation and their scales as its outputs (knowledge 394), asked
+        // for by name like it (`gpu_core::Fused::AddRmsQuantE4m3`).
+        op: Op::RmsNorm,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: FP8_CVT_MIN_CC,
+        entry: "brain_add_rms_quant_e4m3",
+        what: "residual add + RMSNorm + E4M3 rows with one f32 scale per 128 elements in one launch (what quant_e4m3_128 makes of the stored normalised rows, bit for bit), the fp32 normalised rows stored only when asked; 256 threads per row, coalesced, a scale block a warp",
+        reported: "native:add_rms_quant_e4m3",
+        block_dim: 256,
+        // One block per row of x.
+        tile: (1, 1),
+        // The eight warps' partial sums of squares.
+        shared_bytes: 4 * 8,
+        programmatic: true,
+        src: include_str!("../cu/add_rms_quant_e4m3.cu"),
+    },
+    CudaKernel {
         name: "quant_epilogue",
         // A fused kernel asked for by name, like `add_rms_quant`: the operator
         // and tier say what it produces (group scales and a packed int8

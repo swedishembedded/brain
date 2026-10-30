@@ -1023,6 +1023,37 @@ struct GqaLayerActs {
     memory: Option<Box<model::anchor_memory::AnchorMemoryActs>>,
 }
 
+/// Who reads the output of a fused front end ([`Qwen35::rms_quant_front`]): which linears take the normalised rows, and so in which
+/// form they are written.
+#[derive(Clone, Copy, Debug)]
+enum FrontUse {
+    /// The projections of the token mixer of a layer of this type.
+    Mixer(LayerType),
+    /// The gate and up projections of the MLP.
+    Mlp,
+    /// The final norm: the head reads the fp32 rows.
+    Head,
+}
+
+impl FrontUse {
+    /// The output widths of the products that read E4M3 rows of the front's output when the device tunes them so; empty when
+    /// the readers are not FP8 projections.
+    fn product_widths(self, c: &Qwen35Config) -> Vec<u32> {
+        match self {
+            FrontUse::Mixer(LayerType::Linear) => vec![c.linear_conv_dim(), c.linear_value_dim()],
+            FrontUse::Mixer(LayerType::Full) => vec![c.q_proj_dim(), c.kv_dim()],
+            FrontUse::Mlp => vec![c.intermediate_size],
+            FrontUse::Head => Vec::new(),
+        }
+    }
+
+    /// Whether a reader takes the rows as fp32 whatever the projections do: a Gated DeltaNet layer's two gate projections are
+    /// dense and read the fp32 rows.
+    fn reads_f32(self) -> bool {
+        matches!(self, FrontUse::Mixer(LayerType::Linear) | FrontUse::Head)
+    }
+}
+
 /// Everything [`Qwen35::mlp_fwd`]'s training branch saves - universal, every
 /// layer, both mixer types. The dense-MLP analogue of `qwen35moe::model::
 /// MoeLayerActs` (this model has no MoE at all, so no router/expert acts).
@@ -4586,38 +4617,55 @@ impl Qwen35 {
     /// `xn` as a ready [`Act`]. Returns `(sum, xn, act)`; `sum` is `None` when
     /// there was no `b`, and the caller keeps `a` as the residual.
     ///
+    /// `uses` says who reads the result. When every product that reads it takes E4M3 rows at this row count
+    /// ([`FrontUse::reads_e4m3`]) the pass writes those rows and their scales itself - the quantisation launch and its re-read of
+    /// `xn` are gone - and `xn` (fp32) is stored only if something reads it as fp32 ([`FrontUse::reads_f32`]: the dense
+    /// gates of a Gated DeltaNet layer, an adapter, a backward); otherwise the buffer handed back is the one-word slot
+    /// nothing reads.
+    ///
     /// Only call after [`Self::fused_front_ok`].
-    fn rms_quant_front(&self, a: &DeviceBuffer, b: Option<&DeviceBuffer>, w: &DeviceBuffer, rows: u32) -> (Option<DeviceBuffer>, DeviceBuffer, Act) {
+    fn rms_quant_front(&self, a: &DeviceBuffer, b: Option<&DeviceBuffer>, w: &DeviceBuffer, rows: u32, uses: FrontUse) -> (Option<DeviceBuffer>, DeviceBuffer, Act) {
         let g = &self.gpu;
         let d = self.cfg.d_model;
         let n = (rows * d) as u64;
         let sum = b.map(|_| g.storage_uninit(n));
-        let xn = g.storage_uninit(n);
         let pack = self.packs_activations();
+        let widths = uses.product_widths(&self.cfg);
+        let e4m3 = !pack
+            && d.is_multiple_of(128)
+            && !widths.is_empty()
+            && widths.iter().all(|&width| self.ops.fp8_reads_e4m3(rows, d, width))
+            && g.has_fused(gpu_core::Fused::AddRmsQuantE4m3)
+            && gpu_core::Fused::AddRmsQuantE4m3.serves(&[d, rows, f(RMS_EPS), 1]);
+        let store_xn = !e4m3 || uses.reads_f32() || self.keeps_fp32_product();
+        let xn = if store_xn { g.storage_uninit(n) } else { self.unpacked_slots().0.clone() };
         // Nothing reads the packed rows of an FP8/bf16/NF4 build: the kernel then writes `sum` and `xn` only, and the
         // two buffers it would have written are one word each.
-        // The `xq` slot takes the bf16 rows of `xn` when an FP8 product will read them (flags bit 2).
-        let bf16 = self.fused_writes_bf16().then(|| g.storage_uninit(n / 2));
+        // The `xq` slot takes the bf16 rows of `xn` when an FP8 product will read them (flags bit 2), or, in the E4M3 variant of the
+        // kernel, its E4M3 rows (and `sx` their scales).
+        let bf16 = (!e4m3 && self.fused_writes_bf16()).then(|| g.storage_uninit(n / 2));
         let (xq, sx) = if pack {
             (g.storage_uninit(n / 4), g.storage_uninit(model::int8::act_scale_len(rows as usize, d as usize) as u64))
+        } else if e4m3 {
+            (g.storage_uninit(n / 4), g.storage_uninit(n / 128))
         } else {
             let (xq, sx) = self.unpacked_slots();
             (bf16.clone().unwrap_or_else(|| xq.clone()), sx.clone())
         };
         // Without an addend the kernel reads neither `b` nor writes `sum`; the
         // slots still have to be bound, so they alias what is already there.
+        // (The E4M3 kernel is its own variant: its flags are the add and whether `xn` is stored.)
+        let flags = if e4m3 { b.is_some() as u32 | if store_xn { 0 } else { 16 } } else { b.is_some() as u32 | if pack { 0 } else { 2 } | if bf16.is_some() { 4 } else { 0 } };
+        let kernel = if e4m3 { gpu_core::Fused::AddRmsQuantE4m3 } else { gpu_core::Fused::AddRmsQuant };
         let step = g
-            .fused_step(
-                gpu_core::Fused::AddRmsQuant,
-                &[a, b.unwrap_or(a), w, sum.as_ref().unwrap_or(&xn), &xn, &xq, &sx],
-                &[d, rows, f(RMS_EPS), b.is_some() as u32 | if pack { 0 } else { 2 } | if bf16.is_some() { 4 } else { 0 }],
-            )
+            .fused_step(kernel, &[a, b.unwrap_or(a), w, sum.as_ref().unwrap_or(&xn), &xn, &xq, &sx], &[d, rows, f(RMS_EPS), flags])
             .expect("fused_front_ok said the device serves this shape");
         g.submit(&[], &[step]);
-        let act = match (pack, bf16) {
-            (true, _) => self.ops.act_prequantized(&xn, &sx, &xq, rows, d),
-            (false, Some(bf16)) => self.ops.act_f32_with_bf16(&xn, rows, d, bf16),
-            (false, None) => self.ops.act_f32(&xn, 0, rows, d),
+        let act = match (pack, e4m3, bf16) {
+            (true, _, _) => self.ops.act_prequantized(&xn, &sx, &xq, rows, d),
+            (false, true, _) => self.ops.act_f32_with_e4m3(&xn, rows, d, xq, sx),
+            (false, false, Some(bf16)) => self.ops.act_f32_with_bf16(&xn, rows, d, bf16),
+            (false, false, None) => self.ops.act_f32(&xn, 0, rows, d),
         };
         (sum, xn, act)
     }
@@ -5020,7 +5068,7 @@ impl Qwen35 {
         let first_ln1 = format!("blocks.{}.ln1.weight", self.shard.start);
         // The next layer's `(xn1, activation)`, when the previous step produced it.
         let mut front = (fused && self.shard.start < self.shard.end).then(|| {
-            let (_, xn, act) = self.rms_quant_front(&res, None, self.w(&first_ln1), bsz);
+            let (_, xn, act) = self.rms_quant_front(&res, None, self.w(&first_ln1), bsz, FrontUse::Mixer(self.cfg.layer_types()[self.shard.start]));
             (xn, act)
         });
 
@@ -5103,7 +5151,7 @@ impl Qwen35 {
 
             let ln2 = format!("blocks.{l}.ln2.weight");
             let (xmid, xn2, pre2) = if fused {
-                let (sum, xn, act) = self.rms_quant_front(&res, Some(&mixer_out), self.w(&ln2), bsz);
+                let (sum, xn, act) = self.rms_quant_front(&res, Some(&mixer_out), self.w(&ln2), bsz, FrontUse::Mlp);
                 (sum.expect("an add front hands back its sum"), xn, Some(act))
             } else {
                 let xmid = g.storage((bsz * d) as u64);
@@ -5116,12 +5164,12 @@ impl Qwen35 {
             let mlp_out = self.ffn_fwd_pre(l, &xn2, pre2, epilogue, bsz);
             if fused && l + 1 < self.shard.end {
                 // The next layer's first norm rides on this residual add.
-                let (sum, xn, act) = self.rms_quant_front(&xmid, Some(&mlp_out), self.w(&format!("blocks.{}.ln1.weight", l + 1)), bsz);
+                let (sum, xn, act) = self.rms_quant_front(&xmid, Some(&mlp_out), self.w(&format!("blocks.{}.ln1.weight", l + 1)), bsz, FrontUse::Mixer(types[l + 1]));
                 res = sum.expect("an add front hands back its sum");
                 front = Some((xn, act));
             } else if fused && self.shard.head {
                 // The last layer: the final norm rides on the residual add too (the generated one-row RMSNorm is 130 us a call).
-                let (sum, xn, _) = self.rms_quant_front(&xmid, Some(&mlp_out), self.w("norm.weight"), bsz);
+                let (sum, xn, _) = self.rms_quant_front(&xmid, Some(&mlp_out), self.w("norm.weight"), bsz, FrontUse::Head);
                 res = sum.expect("an add front hands back its sum");
                 final_norm = Some(xn);
             } else {
@@ -5584,7 +5632,7 @@ impl Qwen35 {
         let epilogue = self.fused_epilogue_ok(n);
         // The next layer's `(xn1, activation)`, when the previous layer produced it.
         let front = (fused && self.shard.start < self.shard.end).then(|| {
-            let (_, xn, act) = self.rms_quant_front(&res, None, self.w(&format!("blocks.{}.ln1.weight", self.shard.start)), n);
+            let (_, xn, act) = self.rms_quant_front(&res, None, self.w(&format!("blocks.{}.ln1.weight", self.shard.start)), n, FrontUse::Mixer(types[self.shard.start]));
             (xn, act)
         });
         StackState { res, front, layer: self.shard.start, types, pooled, drain_pooled, fused, epilogue, final_norm: None }
@@ -5641,7 +5689,7 @@ impl Qwen35 {
 
             let ln2 = format!("blocks.{l}.ln2.weight");
             let (xmid, xn2, pre2) = if st.fused {
-                let (sum, xn, act) = self.rms_quant_front(&st.res, Some(&mixer_out), self.w(&ln2), n);
+                let (sum, xn, act) = self.rms_quant_front(&st.res, Some(&mixer_out), self.w(&ln2), n, FrontUse::Mlp);
                 (sum.expect("an add front hands back its sum"), xn, Some(act))
             } else {
                 let xmid = g.storage_uninit((n * d) as u64);
@@ -5654,12 +5702,12 @@ impl Qwen35 {
             let mlp_out = self.ffn_fwd_pre(l, &xn2, pre2, st.epilogue, n);
             if st.fused && l + 1 < self.shard.end {
                 // The next layer's first norm rides on this residual add.
-                let (sum, xn, act) = self.rms_quant_front(&xmid, Some(&mlp_out), self.w(&format!("blocks.{}.ln1.weight", l + 1)), n);
+                let (sum, xn, act) = self.rms_quant_front(&xmid, Some(&mlp_out), self.w(&format!("blocks.{}.ln1.weight", l + 1)), n, FrontUse::Mixer(st.types[l + 1]));
                 st.res = sum.expect("an add front hands back its sum");
                 st.front = Some((xn, act));
             } else if st.fused && self.shard.head {
                 // The last layer: the final norm rides on the residual add too (the generated RMSNorm is 40-130 us a call).
-                let (sum, xn, _) = self.rms_quant_front(&xmid, Some(&mlp_out), self.w("norm.weight"), n);
+                let (sum, xn, _) = self.rms_quant_front(&xmid, Some(&mlp_out), self.w("norm.weight"), n, FrontUse::Head);
                 st.res = sum.expect("an add front hands back its sum");
                 st.final_norm = Some(xn);
             } else {

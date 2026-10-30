@@ -2267,6 +2267,10 @@ pub enum Fused {
     /// Params `[d, rows, eps (f32 bits), flags]` (flags bit 0: add `b` first);
     /// bindings `a, b, w` read, `sum, xn, xq, sx` written.
     AddRmsQuant,
+    /// `add_rms_quant_e4m3`: [`Fused::AddRmsQuant`] writing the E4M3 rows of `xn` and their scales (`xq` is `[rows, d/4]` words, `sx`
+    /// `[rows, d/128]` floats) instead of the int8 packing. Flags bit 0: add `b` first; bit 4: `xn` is not stored. `d` a multiple of
+    /// 128.
+    AddRmsQuantE4m3,
     /// `quant_epilogue`: an elementwise producer (`mode` 0 plain, 1 `silu(a) *
     /// b`, 2 `a * sigmoid(b)`) + per-row int8 scale + pack. Params `[k, rows,
     /// mode, 0]`; bindings `a, b` read, `y, xq, sx` written.
@@ -2659,6 +2663,7 @@ impl Fused {
     pub fn registry_name(self) -> &'static str {
         match self {
             Fused::AddRmsQuant => "add_rms_quant",
+            Fused::AddRmsQuantE4m3 => "add_rms_quant_e4m3",
             Fused::QuantEpilogue => "quant_epilogue",
             Fused::GdnDecode => "gdn_decode",
             Fused::GdnDecodePool => "gdn_decode_pool",
@@ -2690,7 +2695,7 @@ impl Fused {
 
     fn bindings(self) -> &'static [BindKind] {
         match self {
-            Fused::AddRmsQuant => ADD_RMS_QUANT_BINDINGS,
+            Fused::AddRmsQuant | Fused::AddRmsQuantE4m3 => ADD_RMS_QUANT_BINDINGS,
             Fused::QuantEpilogue => QUANT_EPILOGUE_BINDINGS,
             Fused::GdnDecode => GDN_DECODE_BINDINGS,
             Fused::GdnDecodePool | Fused::GdnDecodePoolBf16 | Fused::GdnDecodePoolWide | Fused::GdnDecodePoolWideBf16 => GDN_DECODE_POOL_BINDINGS,
@@ -2719,6 +2724,7 @@ impl Fused {
             // registers: up to 80 of them (5120 wide), and a whole number of
             // 32-element scale groups.
             Fused::AddRmsQuant => matches!(params, [d, rows, _, _] if *rows >= 1 && *d >= 32 && d % 32 == 0 && *d <= 64 * 80),
+            Fused::AddRmsQuantE4m3 => matches!(params, [d, rows, _, _] if *rows >= 1 && *d >= 128 && d % 128 == 0 && *d <= 64 * 80),
             // 1024 threads per row keep `k / 1024` elements each in registers:
             // up to 18 of them, in whole 32-element scale groups.
             Fused::QuantEpilogue => matches!(params, [k, rows, mode, _] if *rows >= 1 && *k >= 32 && k % 32 == 0 && *k <= 1024 * 18 && *mode <= 2),
@@ -2782,7 +2788,7 @@ impl Fused {
     /// Blocks a dispatch with these `params` launches.
     pub(crate) fn blocks(self, params: &[u32]) -> u32 {
         match self {
-            Fused::AddRmsQuant | Fused::QuantEpilogue => params[1],
+            Fused::AddRmsQuant | Fused::AddRmsQuantE4m3 | Fused::QuantEpilogue => params[1],
             Fused::GdnDecode => params[0],
             Fused::GdnDecodePool | Fused::GdnDecodePoolBf16 | Fused::GdnDecodePoolWide | Fused::GdnDecodePoolWideBf16 | Fused::GdnVerifyPool => params[0] * params[6],
             // A block a (sequence, value head), and 256 channels a block.

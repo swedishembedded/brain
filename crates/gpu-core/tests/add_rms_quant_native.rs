@@ -237,3 +237,100 @@ fn the_bf16_flag_writes_the_rows_cast_f32_bf16_would_make_and_leaves_the_packed_
         assert_eq!(bits(gpu.read(&sx, 1)), vec![0xdead_beef], "the scales were written");
     }
 }
+
+/// The E4M3 variant (`add_rms_quant_e4m3`) is a wide-row layout of its own (a warp a scale block, the sum of squares by shuffles),
+/// so its normalised rows equal the int8 kernel's up to the order of that sum - a few ulps of the row's mean square - and the
+/// residual sum bit for bit; what it claims exactly is that its E4M3 bytes and scales are what `quant_e4m3_128` makes of the
+/// `xn` it stores, and that with bit 4 it leaves `xn` unwritten.
+#[test]
+fn the_e4m3_variant_writes_what_the_quantiser_makes_of_its_stored_rows() {
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda(&gpu) {
+        brain_testutil::skip_unavailable("not a CUDA device");
+        return;
+    }
+    for (rows, d) in [(1u32, 128u32), (3, 640), (130, 5120), (7, 2560), (5, 1152)] {
+        for add in [true, false] {
+            let n = (rows * d) as usize;
+            let (a, b, w) = (values(n, 31 + u64::from(d), 3.0), values(n, 77, 1.0), values(d as usize, 5, 1.0));
+            let mk = |data: &[f32]| gpu.storage_init("in", data);
+            let (ab, bb, wb) = (mk(&a), mk(&b), mk(&w));
+            // The int8 kernel without the packing: the chain's `sum` and `xn`.
+            let (sum_r, xn_r) = (gpu.storage(n as u64), gpu.storage(n as u64));
+            let (one_q, one_s) = (gpu.storage(1), gpu.storage(1));
+            let step = gpu.fused_step(Fused::AddRmsQuant, &[&ab, &bb, &wb, &sum_r, &xn_r, &one_q, &one_s], &[d, rows, EPS.to_bits(), add as u32 | 2]).expect("offered");
+            gpu.submit(&[], &[step]);
+            for keep in [true, false] {
+                let (sum, xn) = (gpu.storage(n as u64), gpu.storage_init("untouched", &vec![1.5; n]));
+                let (q, s) = (gpu.storage(u64::from(rows * d / 4)), gpu.storage(u64::from(rows * d / 128)));
+                let step = gpu.fused_step(Fused::AddRmsQuantE4m3, &[&ab, &bb, &wb, &sum, &xn, &q, &s], &[d, rows, EPS.to_bits(), add as u32 | if keep { 0 } else { 16 }]).expect("offered");
+                gpu.submit(&[], &[step]);
+                gpu.poll_wait();
+                let ctx = format!("rows={rows} d={d} add={add} keep_xn={keep}");
+                if add {
+                    assert_eq!(bits(gpu.read(&sum, n)), bits(gpu.read(&sum_r, n)), "residual sum differs: {ctx}");
+                }
+                if !keep {
+                    assert!(gpu.read(&xn, n).iter().all(|v| *v == 1.5), "xn was written: {ctx}");
+                    continue;
+                }
+                // The rows agree with the chain's to the order of the sum of squares.
+                let (got, want) = (gpu.read(&xn, n), gpu.read(&xn_r, n));
+                let worst = got.iter().zip(&want).map(|(g, r)| (g - r).abs() / r.abs().max(1e-30)).fold(0.0f32, f32::max);
+                assert!(worst < 1e-5, "normalised rows differ by {worst:.2e} relative: {ctx}");
+                // The bytes and scales are the quantiser's on the rows this kernel stored.
+                let mut steps = Vec::new();
+                let x = gpu_core::provider::library::Operand { buf: &xn, range: (0, n as u64) };
+                let (q_ref, s_ref) = gpu_core::provider::library::quantize_e4m3_rows(&gpu, &mut steps, &x, rows, d).expect("offered");
+                gpu.submit(&[], &steps);
+                gpu.poll_wait();
+                assert_eq!(bits(gpu.read(&q, (rows * d / 4) as usize)), bits(gpu.read(&q_ref, (rows * d / 4) as usize)), "E4M3 bytes differ: {ctx}");
+                assert_eq!(bits(gpu.read(&s, (rows * d / 128) as usize)), bits(gpu.read(&s_ref, (rows * d / 128) as usize)), "E4M3 scales differ: {ctx}");
+            }
+        }
+    }
+}
+
+/// The front end of an E4M3 product at a mixed round's rows, as the two launches it replaces and as one (`#[ignore]`: a measurement).
+///
+/// ```text
+/// make test/one P=brain-gpu-core T=add_rms_quant_native ARGS="--ignored --nocapture add_rms_front_rate"
+/// ```
+#[test]
+#[ignore]
+fn add_rms_front_rate() {
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda(&gpu) {
+        brain_testutil::skip_unavailable("not a CUDA device");
+        return;
+    }
+    let d = 5120u32;
+    for rows in [64u32, 256, 768, 2048] {
+        let n = (rows * d) as usize;
+        let (a, b, w) = (values(n, 1, 3.0), values(n, 2, 1.0), values(d as usize, 5, 1.0));
+        let mk = |data: &[f32]| gpu.storage_init("in", data);
+        let (ab, bb, wb) = (mk(&a), mk(&b), mk(&w));
+        let (sum, xn) = (gpu.storage(n as u64), gpu.storage(n as u64));
+        let (one_q, one_s) = (gpu.storage(1), gpu.storage(1));
+        let (q, s) = (gpu.storage(u64::from(rows * d / 4)), gpu.storage(u64::from(rows * d / 128)));
+        gpu.set_kernel_timing(true);
+        for (label, store_xn) in [("pair (add_rms_quant + quant_e4m3_128)", true), ("one launch, xn stored", true), ("one launch, xn not stored", false)] {
+            let mut steps = Vec::new();
+            for _ in 0..20 {
+                if label.starts_with("pair") {
+                    steps.push(gpu.fused_step(Fused::AddRmsQuant, &[&ab, &bb, &wb, &sum, &xn, &one_q, &one_s], &[d, rows, EPS.to_bits(), 1 | 2]).expect("offered"));
+                    let x = gpu_core::provider::library::Operand { buf: &xn, range: (0, n as u64) };
+                    gpu_core::provider::library::quantize_e4m3_rows(&gpu, &mut steps, &x, rows, d).expect("offered");
+                } else {
+                    steps.push(gpu.fused_step(Fused::AddRmsQuantE4m3, &[&ab, &bb, &wb, &sum, &xn, &q, &s], &[d, rows, EPS.to_bits(), 1 | if store_xn { 0 } else { 16 }]).expect("offered"));
+                }
+            }
+            gpu.reset_kernel_times();
+            gpu.submit(&[], &steps);
+            gpu.poll_wait();
+            let total: f64 = gpu.kernel_times().unwrap_or_default().iter().map(|r| r.1).sum::<f64>() / 20.0 * 1e3;
+            println!("rows {rows:5} {label:40} {total:8.1} us");
+        }
+        gpu.set_kernel_timing(false);
+    }
+}
