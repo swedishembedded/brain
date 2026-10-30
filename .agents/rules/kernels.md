@@ -324,6 +324,14 @@ existing caller. Assume nothing about units.
     address, dimensions and row stride (stride in bytes), `tensormap.cp_fenceproxy`, one global slot per SM; hold the template to `cuTensorMapEncodeTiled` in a test.
     A wrong replace value does not fault, it reads the wrong bytes: run the admission test (`fp8_linear_native`) at once.
 
+22. **A block-scaled FP8 GEMM tile of 128 x 256 carries ONE accumulator set: apply the scale as a ratio on the running sum.** Keep `sum / s_k` in the 128
+    `wgmma` registers, multiply by `s_{k-1} / s_k` before the next block's `wgmma` accumulate into it, multiply by the last scale in the epilogue (a zero scale keeps
+    the old one). Two sets (accumulate + promoted) do not fit 232 registers at N = 256; the rate went 0.95 -> 1.1 PFLOPS (knowledge 393). Judge a variant in
+    cycles, not milliseconds: `ncu --clock-control none` reports a clock of 1.3-1.8 GHz that moves with the work around the tensor cores (power limit), so two
+    builds differ by the cycles per tile AND the clock they hold. Ablate by compiling work out, but keep the result live (`if (acc == 1234.5f) out[tid] = acc`):
+    an unused accumulator lets the compiler drop the multiplies and the stores with it and the "ablation" measures nothing. A cluster `mbarrier.arrive.release.cluster`
+    is a `MEMBAR.ALL.GPU` (a third of the kernel); the default-semantics `mbarrier.arrive.shared::cluster` is enough when the data was read by the async proxy.
+
 ## D. Constraints that will bite you
 
 - **A buffer a dispatch writes is bound ONCE.** wgpu tracks usage per buffer for the

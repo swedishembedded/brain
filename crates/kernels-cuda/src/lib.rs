@@ -2450,7 +2450,7 @@ pub const ALL: &[CudaKernel] = &[
     CudaKernel {
         name: "matmul_fp8_wgmma_tma_n256",
         // `matmul_fp8_wgmma_tma` with a 128 x 256 tile: `wgmma m64n256k32` reads each weight tile from shared memory once for 256 columns, and the
-        // accumulator carries the running sum divided by the last block's scale (knowledge 394).
+        // accumulator carries the running sum divided by the last block's scale (knowledge 393).
         op: Op::MatMul,
         weight: Dtype::F8E4M3,
         by_name: true,
