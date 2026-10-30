@@ -933,9 +933,25 @@ pub fn gdn_mixer_decode_pooled_fused_into(
     }
     let params = [shape.nkh, gdn.h, shape.group(), f(1e-6), f(shape.rms_eps), f(1.0f32 / (gdn.dk as f32).sqrt()), gdn.b, 0];
     let bufs = [mixed_qkv, w.conv1d_weight, pool.hist, bproj, aproj, w.a_log, w.dt_bias, pool.state, z, w.norm_weight, gated, pool.rows];
-    let exact = if pool.bf16 { gpu_core::Fused::GdnDecodePoolBf16 } else { gpu_core::Fused::GdnDecodePool };
     let wide = if pool.bf16 { gpu_core::Fused::GdnDecodePoolWideBf16 } else { gpu_core::Fused::GdnDecodePoolWide };
-    let Some(step) = pool.wide.then(|| g.fused_step(wide, &bufs, &params)).flatten().or_else(|| g.fused_step(exact, &bufs, &params)) else { return false };
+    if let Some(step) = pool.wide.then(|| g.fused_step(wide, &bufs, &params)).flatten() {
+        g.submit(&[], &[step]);
+        return true;
+    }
+    // The exact body as two launches: the conv of every channel, then a block per (sequence, value head) for the rest. The
+    // single-launch body keeps one block per key head (16 of the card's 132 SMs at one sequence) and runs 4x slower at 16.
+    let (conv, recur) = if pool.bf16 { (gpu_core::Fused::GdnConvPoolBf16, gpu_core::Fused::GdnRecurPoolBf16) } else { (gpu_core::Fused::GdnConvPool, gpu_core::Fused::GdnRecurPool) };
+    if g.has_fused(conv) && g.has_fused(recur) && conv.serves(&[shape.nkh, gdn.h, gdn.b]) && recur.serves(&params) {
+        let conv_out = g.storage_uninit(gdn.b as u64 * shape.conv_dim() as u64);
+        let conv_step = g.fused_step(conv, &[mixed_qkv, w.conv1d_weight, pool.hist, &conv_out, pool.rows], &[shape.nkh, gdn.h, gdn.b]);
+        let recur_step = conv_step.is_some().then(|| g.fused_step(recur, &[&conv_out, bproj, aproj, w.a_log, w.dt_bias, pool.state, z, w.norm_weight, gated, pool.rows], &params)).flatten();
+        if let (Some(conv_step), Some(recur_step)) = (conv_step, recur_step) {
+            g.submit(&[], &[conv_step, recur_step]);
+            return true;
+        }
+    }
+    let exact = if pool.bf16 { gpu_core::Fused::GdnDecodePoolBf16 } else { gpu_core::Fused::GdnDecodePool };
+    let Some(step) = g.fused_step(exact, &bufs, &params) else { return false };
     g.submit(&[], &[step]);
     true
 }

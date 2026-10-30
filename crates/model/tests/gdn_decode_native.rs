@@ -469,3 +469,121 @@ fn the_wide_candidate_agrees_with_the_exact_body_within_a_stated_tolerance() {
         }
     }
 }
+
+/// The pooled decode as two launches (the conv of every channel, then a block per sequence and value head) leaves exactly the
+/// bits of the single-launch body, f32 and bf16 pools, one to three value heads a key head, and a ragged batch.
+#[test]
+fn the_split_pooled_decode_is_byte_identical_to_the_single_launch_body() {
+    let g = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda(&g) {
+        brain_testutil::skip_unavailable("native fused kernels need a CUDA device");
+        return;
+    }
+    let (dk, dv, kw) = (128u32, 128u32, 4u32);
+    let round = |x: f32| {
+        let b = x.to_bits();
+        ((b + 0x7fff + ((b >> 16) & 1)) >> 16) as u16
+    };
+    let pack = |v: &[f32]| v.chunks(2).map(|p| f32::from_bits(u32::from(round(p[0])) | u32::from(round(p[1])) << 16)).collect::<Vec<f32>>();
+    for &(nkh, group, picked, pool_rows) in &[(2u32, 3u32, &[1u32][..], 3u32), (16, 3, &[5, 1, 7, 0, 3, 6], 8), (4, 2, &[2, 4, 0], 5), (3, 1, &[0, 1], 2)] {
+        let (nvh, b) = (nkh * group, picked.len() as u32);
+        let shape = GdnMixerShape { gdn: GdnShape { b, h: nvh, t: 1, dk, dv, chunk: 1 }, nkh, conv_kernel: kw, rms_eps: 1e-6 };
+        let (value_dim, conv_dim) = (shape.value_dim(), shape.conv_dim());
+        let state_len = (nvh * dk * dv) as usize;
+        let hist_len = (conv_dim * (kw - 1)) as usize;
+        let mut r = Lcg::new(random_seed());
+        let conv_w = g.storage_init("conv_w", &rnd(&mut r, (conv_dim * kw) as usize, 0.5));
+        let a_log = g.storage_init("a_log", &rnd(&mut r, nvh as usize, 0.5));
+        let dt_bias = g.storage_init("dt_bias", &rnd(&mut r, nvh as usize, 0.5));
+        let norm_w = g.storage_init("norm_w", &rnd(&mut r, dv as usize, 0.5));
+        let ones = g.storage_init("ones", &vec![1.0f32; dk as usize]);
+        let w = GdnMixerWeights { conv1d_weight: &conv_w, a_log: &a_log, dt_bias: &dt_bias, norm_weight: &norm_w, ones_khd: &ones };
+        let mixed = g.storage_init("mixed", &rnd(&mut r, (b * conv_dim) as usize, 1.0));
+        let bp = g.storage_init("bp", &rnd(&mut r, (b * nvh) as usize, 1.0));
+        let ap = g.storage_init("ap", &rnd(&mut r, (b * nvh) as usize, 1.0));
+        let z = g.storage_init("z", &rnd(&mut r, (b * value_dim) as usize, 1.0));
+        let state0 = rnd(&mut r, pool_rows as usize * state_len, 0.3);
+        let hist0 = rnd(&mut r, pool_rows as usize * hist_len, 0.3);
+        let rows = g.storage_init("rows", &picked.iter().map(|&i| f32::from_bits(i)).collect::<Vec<_>>());
+        for bf16 in [false, true] {
+            let (s0, h0) = if bf16 { (pack(&state0), pack(&hist0)) } else { (state0.clone(), hist0.clone()) };
+            let words = |n: usize| if bf16 { n / 2 } else { n };
+            let read = |st: &gpu_core::DeviceBuffer, hi: &gpu_core::DeviceBuffer, gated: &gpu_core::DeviceBuffer| {
+                g.poll_wait();
+                (bits(g.read(gated, (b * value_dim) as usize)), bits(g.read(st, pool_rows as usize * words(state_len))), bits(g.read(hi, pool_rows as usize * words(hist_len))))
+            };
+            // Split: the mixer's own entry.
+            let (st, hi) = (g.storage_init("state", &s0), g.storage_init("hist", &h0));
+            let pool = GdnPoolRows { state: &st, hist: &hi, rows: &rows, gather: idx(&g, "pool_rows_gather2"), scatter: idx(&g, "pool_rows_scatter2"), fuse: true, bf16, wide: false };
+            let gated = gdn_mixer_decode_state_fwd(&g, &ids(&g), &dec_ids(&g), &shape, &w, &mixed, &bp, &ap, &z, &GdnDecodeState::Pool(pool));
+            let split = read(&st, &hi, &gated);
+            // Single launch: the kernel itself.
+            let (st, hi) = (g.storage_init("state", &s0), g.storage_init("hist", &h0));
+            let gated = g.storage(u64::from(b) * u64::from(value_dim));
+            let params = [nkh, nvh, group, gpu_core::f(1e-6), gpu_core::f(1e-6), gpu_core::f(1.0 / (dk as f32).sqrt()), b, 0];
+            let which = if bf16 { gpu_core::Fused::GdnDecodePoolBf16 } else { gpu_core::Fused::GdnDecodePool };
+            let step = g.fused_step(which, &[&mixed, &conv_w, &hi, &bp, &ap, &a_log, &dt_bias, &st, &z, &norm_w, &gated, &rows], &params).expect("offered");
+            g.submit(&[], &[step]);
+            let single = read(&st, &hi, &gated);
+            let ctx = format!("nkh={nkh} group={group} batch={b} bf16={bf16}");
+            assert_eq!(split.0, single.0, "layer output differs: {ctx}");
+            assert_eq!(split.1, single.1, "state pool differs: {ctx}");
+            assert_eq!(split.2, single.2, "window pool differs: {ctx}");
+        }
+    }
+}
+
+/// Device time of the pooled decode at the real Qwen3.8-27B head counts (16 key heads x 3 value heads) for a batch of 1, 4, 16
+/// and 64 sequences (`#[ignore]`: a measurement).
+///
+/// ```text
+/// make test/one P=brain-model T=gdn_decode_native ARGS="--ignored --nocapture gdn_decode_pool_production_shape"
+/// ```
+#[test]
+#[ignore]
+fn gdn_decode_pool_production_shape() {
+    let g = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda(&g) || !g.set_kernel_timing(true) {
+        brain_testutil::skip_unavailable("native fused kernels and device timing need a CUDA device");
+        return;
+    }
+    let (dk, dv, kw, nkh, group) = (128u32, 128u32, 4u32, 16u32, 3u32);
+    let nvh = nkh * group;
+    for b in [1u32, 4, 16, 64] {
+        let shape = GdnMixerShape { gdn: GdnShape { b, h: nvh, t: 1, dk, dv, chunk: 1 }, nkh, conv_kernel: kw, rms_eps: 1e-6 };
+        let (value_dim, conv_dim) = (shape.value_dim(), shape.conv_dim());
+        let state_len = (nvh * dk * dv) as usize;
+        let hist_len = (conv_dim * (kw - 1)) as usize;
+        let mut r = Lcg::new(7);
+        let conv_w = g.storage_init("conv_w", &rnd(&mut r, (conv_dim * kw) as usize, 0.5));
+        let a_log = g.storage_init("a_log", &rnd(&mut r, nvh as usize, 0.5));
+        let dt_bias = g.storage_init("dt_bias", &rnd(&mut r, nvh as usize, 0.5));
+        let norm_w = g.storage_init("norm_w", &rnd(&mut r, dv as usize, 0.5));
+        let ones = g.storage_init("ones", &vec![1.0f32; dk as usize]);
+        let w = GdnMixerWeights { conv1d_weight: &conv_w, a_log: &a_log, dt_bias: &dt_bias, norm_weight: &norm_w, ones_khd: &ones };
+        let mixed = g.storage_init("mixed", &rnd(&mut r, (b * conv_dim) as usize, 1.0));
+        let bp = g.storage_init("bp", &rnd(&mut r, (b * nvh) as usize, 1.0));
+        let ap = g.storage_init("ap", &rnd(&mut r, (b * nvh) as usize, 1.0));
+        let z = g.storage_init("z", &rnd(&mut r, (b * value_dim) as usize, 1.0));
+        let st = g.storage_init("state", &rnd(&mut r, b as usize * state_len, 0.3));
+        let hi = g.storage_init("hist", &rnd(&mut r, b as usize * hist_len, 0.3));
+        let rows = g.storage_init("rows", &(0..b).map(f32::from_bits).collect::<Vec<_>>());
+        let launch = || {
+            let pool = GdnPoolRows { state: &st, hist: &hi, rows: &rows, gather: idx(&g, "pool_rows_gather2"), scatter: idx(&g, "pool_rows_scatter2"), fuse: true, bf16: false, wide: false };
+            let gated = gdn_mixer_decode_state_fwd(&g, &ids(&g), &dec_ids(&g), &shape, &w, &mixed, &bp, &ap, &z, &GdnDecodeState::Pool(pool));
+            g.poll_wait();
+            gated
+        };
+        launch();
+        g.reset_kernel_times();
+        for _ in 0..20 {
+            launch();
+        }
+        let times = g.kernel_times().unwrap_or_default();
+        let total: f64 = times.iter().filter(|t| t.0.contains("gdn_")).map(|t| t.1 / 20.0 * 1e3).sum();
+        for (name, ms, calls) in times.iter().filter(|t| t.0.contains("gdn_")) {
+            println!("batch {b:3}: {name} {:.1} us a launch ({calls} launches)", ms / *calls as f64 * 1e3);
+        }
+        println!("batch {b:3}: total {total:.1} us a layer");
+    }
+}

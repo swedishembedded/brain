@@ -742,3 +742,181 @@ brain_gdn_decode_pool_wide_bf16(const unsigned int* params, const float* mixed, 
     BRAIN_PDL_ENTRY();
     brain_gdn_decode_pool_wide_entry<unsigned short>(params, mixed, conv_w, hist, bproj, aproj, a_log, dt_bias, state, z, norm_w, gated, rows);
 }
+
+// The split pooled decode (knowledge 386)
+// ----------------------------------------
+// `brain_gdn_decode_pool` is one block of 384 threads per (key head, batch row): 16 blocks at one sequence, so 16 of 132 SMs
+// stream the 3 MB of recurrent state, and 3 value heads in lockstep (load all, compute all, store all) leave the memory idle
+// while the one resident block computes: 17 us at one sequence, 72 us at 16, 270 us at 64 (the state traffic is 2 us, 28 us and
+// 110 us at the memory roof). The reason one block owns a whole key head is the conv window of its q and k channels, shared by
+// its value heads and rewritten in place. Take the conv out and the rest has no sharing at all:
+//
+//   brain_gdn_conv_pool   one thread per (batch row, channel): the causal conv + SiLU of q, k and v, the window slid in place by
+//                         the channel's only owner, the activated channels written to `conv_out` [b, conv_dim]
+//   brain_gdn_recur_pool  one block of 128 threads per (batch row, value head): the L2 norms of its key head's q and k (each
+//                         block recomputes them: one thread's ascending walk of 128 values, the reference's own order), the gates,
+//                         the delta-rule recurrence of its 128 state columns, the gated norm
+//
+// Every expression is the fused body's, in its order, so the output and the state and window pools are bit-identical to it
+// (and to the chain it replaces); the blocks are independent, three or more resident an SM, so one block's state load overlaps
+// another's recurrence. The state loads do not depend on the kernel before, so they are issued before `griddepcontrol.wait`.
+
+template <typename S>
+__device__ __forceinline__ void brain_gdn_conv_pool_entry(const unsigned int* params, const float* mixed, const float* conv_w, S* hist,
+                                                          float* conv_out, const unsigned int* rows) {
+    const unsigned int nkh = params[0];
+    const unsigned int nvh = params[1];
+    const unsigned int b = params[2];
+    const unsigned long long conv_dim = 2ull * nkh * BRAIN_GDN_HD + static_cast<unsigned long long>(nvh) * BRAIN_GDN_HD;
+    const unsigned long long idx = static_cast<unsigned long long>(blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= conv_dim * b) { return; }
+    const unsigned long long bi = idx / conv_dim;
+    const unsigned int ch = static_cast<unsigned int>(idx - bi * conv_dim);
+    const unsigned long long row = rows[bi];
+    conv_out[idx] = brain_conv_channel(hist + row * conv_dim * (BRAIN_GDN_KW - 1), conv_w, mixed + bi * conv_dim, ch);
+}
+
+extern "C" __global__ void __launch_bounds__(256)
+brain_gdn_conv_pool(const unsigned int* params, const float* mixed, const float* conv_w, float* hist, float* conv_out, const unsigned int* rows) {
+    BRAIN_PDL_ENTRY();
+    brain_gdn_conv_pool_entry<float>(params, mixed, conv_w, hist, conv_out, rows);
+}
+
+extern "C" __global__ void __launch_bounds__(256)
+brain_gdn_conv_pool_bf16(const unsigned int* params, const float* mixed, const float* conv_w, unsigned short* hist, float* conv_out, const unsigned int* rows) {
+    BRAIN_PDL_ENTRY();
+    brain_gdn_conv_pool_entry<unsigned short>(params, mixed, conv_w, hist, conv_out, rows);
+}
+
+// 16-byte global -> shared copies (`cp.async`) of the state tile, and the shared -> global store of the result.
+__device__ __forceinline__ void brain_gdn_cp16(unsigned int dst, const void* src) {
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"(dst), "l"(src) : "memory");
+}
+
+template <typename S>
+__device__ __forceinline__ void brain_gdn_recur_pool_entry(const unsigned int* params, const float* conv_out, const float* bproj, const float* aproj,
+                                                           const float* a_log, const float* dt_bias, S* state, const float* z, const float* norm_w,
+                                                           float* gated, const unsigned int* rows) {
+    const unsigned int nkh = params[0];
+    const unsigned int nvh = params[1];
+    const unsigned int group = params[2];
+    const float l2_eps = __uint_as_float(params[3]);
+    const float rms_eps = __uint_as_float(params[4]);
+    const float q_scale = __uint_as_float(params[5]);
+    const unsigned int b = params[6];
+    const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
+    const unsigned int bi = blk / nvh;                // batch row
+    const unsigned int vh = blk - bi * nvh;           // value head
+    if (bi >= b) { return; }                          // block-uniform
+    const unsigned int kh = vh / group;
+    const unsigned int j = threadIdx.x;               // column of the head's state
+    const unsigned long long key_dim = static_cast<unsigned long long>(nkh) * BRAIN_GDN_HD;
+    const unsigned long long conv_dim = 2ull * key_dim + static_cast<unsigned long long>(nvh) * BRAIN_GDN_HD;
+    const unsigned long long value_dim = static_cast<unsigned long long>(nvh) * BRAIN_GDN_HD;
+
+    extern __shared__ __align__(16) unsigned char brain_gdn_tile_base[];   // the head's [128][128] state, as stored (f32 or bf16)
+    S* tile = reinterpret_cast<S*>(brain_gdn_tile_base);
+    __shared__ __align__(16) float qk[2][BRAIN_GDN_HD];
+    __shared__ __align__(16) float vo[BRAIN_GDN_HD];
+    __shared__ float gate_s[2];   // beta, decay
+    __shared__ float inv_rms;
+
+    // The whole state tile is requested at once, as 16-byte copies that cost no registers: it is nothing the previous kernel
+    // wrote, so the copies are in flight while that kernel finishes.
+    constexpr unsigned int TILE_BYTES = BRAIN_GDN_HD * BRAIN_GDN_HD * sizeof(S);
+    const unsigned long long row = rows[bi];
+    S* gtile = state + (row * nvh + vh) * BRAIN_GDN_HD * BRAIN_GDN_HD;
+    const unsigned int tile_smem = static_cast<unsigned int>(__cvta_generic_to_shared(tile));
+    for (unsigned int c = j; c < TILE_BYTES / 16u; c += BRAIN_GDN_HD) { brain_gdn_cp16(tile_smem + 16u * c, reinterpret_cast<const unsigned char*>(gtile) + 16ull * c); }
+    asm volatile("cp.async.commit_group;\n" ::: "memory");
+
+    // The conv outputs come from the kernel before.
+    BRAIN_PDL_ENTRY();
+    const float* co = conv_out + bi * conv_dim;
+    qk[0][j] = co[kh * BRAIN_GDN_HD + j];
+    qk[1][j] = co[key_dim + kh * BRAIN_GDN_HD + j];
+    const float v_in = co[2ull * key_dim + vh * BRAIN_GDN_HD + j];
+    if (j == 0) {
+        const float b_in = bproj[bi * nvh + vh];
+        const float a_in = aproj[bi * nvh + vh];
+        gate_s[0] = __fdiv_rn(1.0f, __fadd_rn(1.0f, expf(-b_in)));
+        const float xg = __fadd_rn(a_in, dt_bias[vh]);
+        const float softplus = __fadd_rn(fmaxf(xg, 0.0f), logf(__fadd_rn(1.0f, expf(-fabsf(xg)))));
+        gate_s[1] = expf(__fmul_rn(-expf(a_log[vh]), softplus));
+    }
+    __syncthreads();
+
+    // L2-normalise q and k: one thread each, the reference's own ascending walk.
+    if (j < 2u) {
+        const float r = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(brain_sum_sq(qk[j]), l2_eps)));
+        float4* v4 = reinterpret_cast<float4*>(qk[j]);
+#pragma unroll
+        for (int i = 0; i < BRAIN_GDN_HD / 4; ++i) {
+            const float4 x = v4[i];
+            v4[i] = make_float4(__fmul_rn(x.x, r), __fmul_rn(x.y, r), __fmul_rn(x.z, r), __fmul_rn(x.w, r));
+        }
+    }
+    asm volatile("cp.async.wait_all;\n" ::: "memory");
+    __syncthreads();   // q and k are normalised and every thread's copies have landed
+
+    // The delta rule on column j (the fused body's Phase C for one row), two passes over the column in shared memory: the
+    // decayed value is recomputed in the second pass (the same product), so no 128-register copy of the column is live.
+    const float4* qn4 = reinterpret_cast<const float4*>(qk[0]);
+    const float4* kn4 = reinterpret_cast<const float4*>(qk[1]);
+    const float decay = gate_s[1];
+    S* col = tile + j;
+    float kv = 0.0f;
+#pragma unroll 2
+    for (int i4 = 0; i4 < BRAIN_GDN_HD / 4; ++i4) {
+        const float4 k4 = kn4[i4];
+        kv = __fadd_rn(kv, __fmul_rn(k4.x, __fmul_rn(brain_ld_state(col + (4 * i4 + 0) * BRAIN_GDN_HD), decay)));
+        kv = __fadd_rn(kv, __fmul_rn(k4.y, __fmul_rn(brain_ld_state(col + (4 * i4 + 1) * BRAIN_GDN_HD), decay)));
+        kv = __fadd_rn(kv, __fmul_rn(k4.z, __fmul_rn(brain_ld_state(col + (4 * i4 + 2) * BRAIN_GDN_HD), decay)));
+        kv = __fadd_rn(kv, __fmul_rn(k4.w, __fmul_rn(brain_ld_state(col + (4 * i4 + 3) * BRAIN_GDN_HD), decay)));
+    }
+    const float delta = __fmul_rn(gate_s[0], __fsub_rn(v_in, kv));
+    // The rank-1 update goes through `0.0f + k * delta`, as the reference's `bmm_acc` computes it (a negative zero behaves identically).
+    float o = 0.0f;
+#pragma unroll 2
+    for (int i4 = 0; i4 < BRAIN_GDN_HD / 4; ++i4) {
+        const float4 k4 = kn4[i4];
+        const float4 q4 = qn4[i4];
+        float sn[4];
+        const float kk[4] = {k4.x, k4.y, k4.z, k4.w};
+        const float qq[4] = {q4.x, q4.y, q4.z, q4.w};
+#pragma unroll
+        for (int u = 0; u < 4; ++u) {
+            S* p = col + (4 * i4 + u) * BRAIN_GDN_HD;
+            const float sd = __fmul_rn(brain_ld_state(p), decay);
+            sn[u] = __fadd_rn(sd, __fadd_rn(0.0f, __fmul_rn(kk[u], delta)));
+            o = __fadd_rn(o, __fmul_rn(qq[u], sn[u]));
+            brain_st_state(p, sn[u]);
+        }
+    }
+    vo[j] = __fmul_rn(q_scale, o);
+    __syncthreads();   // every column is final: the tile goes back as 16-byte vectors, and the norm reads the head
+
+    const uint4* src = reinterpret_cast<const uint4*>(tile);
+    uint4* dst = reinterpret_cast<uint4*>(gtile);
+    for (unsigned int c = j; c < TILE_BYTES / 16u; c += BRAIN_GDN_HD) { dst[c] = src[c]; }
+
+    // The gated RMSNorm: the inverse RMS of the head is one thread's ascending walk.
+    if (j == 0) { inv_rms = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(brain_sum_sq(vo), static_cast<float>(BRAIN_GDN_HD)), rms_eps))); }
+    const float nw = norm_w[j];
+    const float zin = z[bi * value_dim + static_cast<unsigned long long>(vh) * BRAIN_GDN_HD + j];
+    __syncthreads();
+    const float nrm = __fmul_rn(__fmul_rn(nw, vo[j]), inv_rms);
+    gated[bi * value_dim + static_cast<unsigned long long>(vh) * BRAIN_GDN_HD + j] = __fmul_rn(nrm, brain_silu(zin));
+}
+
+extern "C" __global__ void __launch_bounds__(BRAIN_GDN_HD, 3)
+brain_gdn_recur_pool(const unsigned int* params, const float* conv_out, const float* bproj, const float* aproj, const float* a_log,
+                     const float* dt_bias, float* state, const float* z, const float* norm_w, float* gated, const unsigned int* rows) {
+    brain_gdn_recur_pool_entry<float>(params, conv_out, bproj, aproj, a_log, dt_bias, state, z, norm_w, gated, rows);
+}
+
+extern "C" __global__ void __launch_bounds__(BRAIN_GDN_HD, 3)
+brain_gdn_recur_pool_bf16(const unsigned int* params, const float* conv_out, const float* bproj, const float* aproj, const float* a_log,
+                          const float* dt_bias, unsigned short* state, const float* z, const float* norm_w, float* gated, const unsigned int* rows) {
+    brain_gdn_recur_pool_entry<unsigned short>(params, conv_out, bproj, aproj, a_log, dt_bias, state, z, norm_w, gated, rows);
+}

@@ -2049,6 +2049,17 @@ pub enum Fused {
     /// `gdn_decode_pool_bf16`: [`Fused::GdnDecodePool`] over pools that store the state and the conv window as bf16
     /// (`unsigned short` elements: widened on load, rounded to nearest even on store); the same params and bindings.
     GdnDecodePoolBf16,
+    /// `gdn_conv_pool` and `gdn_conv_pool_bf16`: the first half of the split pooled decode - the causal conv + SiLU of every
+    /// channel of the batch's sequences, windows slid in place in the pool rows, the activated channels written to a scratch
+    /// `conv_out` (`[b, conv_dim]`). Params `[nkh, nvh, b]`; bindings `mixed`, `conv_w` read, `hist` (RW), `conv_out` written, `rows` read.
+    GdnConvPool,
+    GdnConvPoolBf16,
+    /// `gdn_recur_pool` and `gdn_recur_pool_bf16`: the second half - per (sequence, value head) the L2 norms, gates, recurrence and
+    /// gated norm on the sequence's pool row of `state`. Params as [`Fused::GdnDecodePool`]; bindings `conv_out`, `bproj`, `aproj`,
+    /// `a_log`, `dt_bias` read, `state` (RW), `z`, `norm_w` read, `gated` written, `rows` read. Bit-identical to the pair
+    /// [`Fused::GdnDecodePool`] replaces, with a block per value head and the conv outside, so many more blocks run at once.
+    GdnRecurPool,
+    GdnRecurPoolBf16,
     /// `gdn_decode_pool_wide` and `gdn_decode_pool_wide_bf16`: [`Fused::GdnDecodePool`] built for occupancy (a lane pair per state
     /// column, 64 registers a thread), agreeing with the exact body to f32 reassociation rather than bit for bit; at most two
     /// value heads per key head. The same params and bindings.
@@ -2251,6 +2262,25 @@ const GDN_DECODE_POOL_BINDINGS: &[BindKind] = &[
     BindKind::StorageRead,
 ];
 
+/// `gdn_conv_pool`'s bindings: params, `mixed`, `conv_w`, `hist` (RW), `conv_out`, `rows`.
+const GDN_CONV_POOL_BINDINGS: &[BindKind] =
+    &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite, BindKind::StorageReadWrite, BindKind::StorageRead];
+
+/// `gdn_recur_pool`'s bindings: params, `conv_out`, `bproj`, `aproj`, `a_log`, `dt_bias`, `state` (RW), `z`, `norm_w`, `gated`, `rows`.
+const GDN_RECUR_POOL_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageRead,
+];
+
 /// `gqa_decode_prep`'s bindings: params, `q_full`, `k`, `v`, `q_norm`,
 /// `k_norm`, `cos`, `sin`, `blocks`, `offsets`, `q_out`, `q_gate`, `pool_k`,
 /// `pool_v`.
@@ -2361,6 +2391,10 @@ impl Fused {
             Fused::GdnDecode => "gdn_decode",
             Fused::GdnDecodePool => "gdn_decode_pool",
             Fused::GdnDecodePoolBf16 => "gdn_decode_pool_bf16",
+            Fused::GdnConvPool => "gdn_conv_pool",
+            Fused::GdnConvPoolBf16 => "gdn_conv_pool_bf16",
+            Fused::GdnRecurPool => "gdn_recur_pool",
+            Fused::GdnRecurPoolBf16 => "gdn_recur_pool_bf16",
             Fused::GdnDecodePoolWide => "gdn_decode_pool_wide",
             Fused::GdnDecodePoolWideBf16 => "gdn_decode_pool_wide_bf16",
             Fused::GdnVerifyPool => "gdn_verify_pool",
@@ -2387,6 +2421,8 @@ impl Fused {
             Fused::QuantEpilogue => QUANT_EPILOGUE_BINDINGS,
             Fused::GdnDecode => GDN_DECODE_BINDINGS,
             Fused::GdnDecodePool | Fused::GdnDecodePoolBf16 | Fused::GdnDecodePoolWide | Fused::GdnDecodePoolWideBf16 => GDN_DECODE_POOL_BINDINGS,
+            Fused::GdnConvPool | Fused::GdnConvPoolBf16 => GDN_CONV_POOL_BINDINGS,
+            Fused::GdnRecurPool | Fused::GdnRecurPoolBf16 => GDN_RECUR_POOL_BINDINGS,
             Fused::GdnVerifyPool => GDN_VERIFY_POOL_BINDINGS,
             Fused::GdnCommitPool => GDN_COMMIT_POOL_BINDINGS,
             Fused::GqaDecodePrep => GQA_DECODE_PREP_BINDINGS,
@@ -2420,9 +2456,10 @@ impl Fused {
             Fused::GdnDecodePoolWide | Fused::GdnDecodePoolWideBf16 => {
                 matches!(params, [nkh, nvh, group, _, _, _, b, _] if *nkh >= 1 && (1..=2).contains(group) && *nvh == nkh * group && *b >= 1)
             }
-            Fused::GdnDecodePool | Fused::GdnDecodePoolBf16 | Fused::GdnVerifyPool => {
+            Fused::GdnDecodePool | Fused::GdnDecodePoolBf16 | Fused::GdnVerifyPool | Fused::GdnRecurPool | Fused::GdnRecurPoolBf16 => {
                 matches!(params, [nkh, nvh, group, _, _, _, b, _] if *nkh >= 1 && (1..=3).contains(group) && *nvh == nkh * group && *b >= 1)
             }
+            Fused::GdnConvPool | Fused::GdnConvPoolBf16 => matches!(params, [nkh, nvh, b] if *nkh >= 1 && *nvh >= *nkh && nvh % nkh == 0 && *b >= 1),
             Fused::GdnCommitPool => matches!(params, [b, state_len, hist_len, _] if *b >= 1 && *state_len >= 4 && state_len % 4 == 0 && hist_len % 4 == 0 && hist_len <= state_len),
             // A head is one 256-thread block holding up to 512 values; the
             // rotated span `2 * half` has to fit inside it.
@@ -2471,6 +2508,9 @@ impl Fused {
             Fused::AddRmsQuant | Fused::QuantEpilogue => params[1],
             Fused::GdnDecode => params[0],
             Fused::GdnDecodePool | Fused::GdnDecodePoolBf16 | Fused::GdnDecodePoolWide | Fused::GdnDecodePoolWideBf16 | Fused::GdnVerifyPool => params[0] * params[6],
+            // A block a (sequence, value head), and 256 channels a block.
+            Fused::GdnRecurPool | Fused::GdnRecurPoolBf16 => params[1] * params[6],
+            Fused::GdnConvPool | Fused::GdnConvPoolBf16 => (params[2] * (2 * params[0] + params[1]) * 128).div_ceil(256),
             Fused::GdnCommitPool => params[0] * params[1].div_ceil(GDN_COMMIT_TILE),
             Fused::GqaDecodePrep => (params[0] + params[1]) * params[6],
             Fused::MoeNvfp4GateUp => params[0] * params[2].div_ceil(QGEMV_COLS),
@@ -2511,7 +2551,13 @@ impl Fused {
     /// How it is launched on a device of capability `cc`. A device that cannot launch clusters declines the
     /// registration, and the caller keeps the WGSL chain.
     fn launch_on(self, cc: kernels_cuda::Cc) -> CudaLaunch {
-        if self.clustered(cc) { CudaLaunch { cluster: Some([QUANT_EPILOGUE_CLUSTER, 1, 1]), ..CudaLaunch::NONE } } else { CudaLaunch::NONE }
+        match self {
+            _ if self.clustered(cc) => CudaLaunch { cluster: Some([QUANT_EPILOGUE_CLUSTER, 1, 1]), ..CudaLaunch::NONE },
+            // The recurrence stages a head's whole 128 x 128 state in dynamic shared memory (f32, or bf16 at half the bytes).
+            Fused::GdnRecurPool => CudaLaunch { dynamic_shared_bytes: kernels_cuda::GDN_RECUR_TILE_F32_BYTES, shared_opt_in: true, ..CudaLaunch::NONE },
+            Fused::GdnRecurPoolBf16 => CudaLaunch { dynamic_shared_bytes: kernels_cuda::GDN_RECUR_TILE_F32_BYTES / 2, shared_opt_in: true, ..CudaLaunch::NONE },
+            _ => CudaLaunch::NONE,
+        }
     }
 
     /// Blocks a dispatch with these `params` launches on a device of capability `cc` ([`Self::blocks`], times the

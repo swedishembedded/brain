@@ -124,6 +124,8 @@ pub const fn i8_wgstream_dynamic_shared_bytes(xn: u32) -> u32 {
 pub const I8_WGSTREAM_MAX_ROWS: u32 = 128;
 /// Rows of x the many-row streaming candidates (`matmul_i8_stream_r*`) serve per launch.
 pub const I8_STREAM_MANY_ROWS: u32 = 64;
+/// Dynamic shared memory of `gdn_recur_pool`: one value head's 128 x 128 f32 state (the bf16 build stages half of it).
+pub const GDN_RECUR_TILE_F32_BYTES: u32 = 128 * 128 * 4;
 /// Rows of x the `matmul_fp8_gemv_f16_*` candidates serve per launch.
 pub const FP8_GEMV_F16_ROWS: u32 = 16;
 /// Dynamic shared memory per block of `matmul_fp8_gemv_f16_*` with `at` 16-row weight tiles, `warps` warps and `stages` ring slots
@@ -2667,6 +2669,74 @@ pub const ALL: &[CudaKernel] = &[
         // The shared body's staging, sized for `gdn_decode`'s at most 8 rows
         // (see that entry) though a pooled block walks a single one.
         shared_bytes: 8 * (2 * 128 * 4 + 3 * 128 * 4 + 3 * 3 * 4),
+        programmatic: true,
+        src: include_str!("../cu/gdn_decode.cu"),
+    },
+    CudaKernel {
+        name: "gdn_conv_pool",
+        // The split pooled Gated DeltaNet decode (knowledge 386): `gdn_decode.cu`'s entry points, asked for by name (`gpu_core::Fused`).
+        op: Op::RmsNorm,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_gdn_conv_pool",
+        what: "the causal conv + SiLU of every channel of every sequence of a decode batch, one thread a channel, the windows slid in place in the pool rows; the first half of the split pooled decode, bit-identical to the fused body's conv",
+        reported: "native:gdn_conv_pool",
+        block_dim: 256,
+        tile: (1, 256),
+        shared_bytes: 0,
+        programmatic: true,
+        src: include_str!("../cu/gdn_decode.cu"),
+    },
+    CudaKernel {
+        name: "gdn_conv_pool_bf16",
+        // The split pooled Gated DeltaNet decode (knowledge 386): `gdn_decode.cu`'s entry points, asked for by name (`gpu_core::Fused`).
+        op: Op::RmsNorm,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_gdn_conv_pool_bf16",
+        what: "gdn_conv_pool over a pool that stores the conv window as bf16 (widened on load, rounded to nearest even on store)",
+        reported: "native:gdn_conv_pool_bf16",
+        block_dim: 256,
+        tile: (1, 256),
+        shared_bytes: 0,
+        programmatic: true,
+        src: include_str!("../cu/gdn_decode.cu"),
+    },
+    CudaKernel {
+        name: "gdn_recur_pool",
+        // The split pooled Gated DeltaNet decode (knowledge 386): `gdn_decode.cu`'s entry points, asked for by name (`gpu_core::Fused`).
+        op: Op::RmsNorm,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_gdn_recur_pool",
+        what: "the L2 norms, gates, delta-rule recurrence and gated norm of one value head of one sequence per 128-thread block, the state updated in place in its pool row; the second half of the split pooled decode, bit-identical to the fused body",
+        reported: "native:gdn_recur_pool",
+        block_dim: 128,
+        tile: (1, 1),
+        shared_bytes: (2 * 128 + 128) * 4 + 12,
+        programmatic: true,
+        src: include_str!("../cu/gdn_decode.cu"),
+    },
+    CudaKernel {
+        name: "gdn_recur_pool_bf16",
+        // The split pooled Gated DeltaNet decode (knowledge 386): `gdn_decode.cu`'s entry points, asked for by name (`gpu_core::Fused`).
+        op: Op::RmsNorm,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_gdn_recur_pool_bf16",
+        what: "gdn_recur_pool over a pool that stores the state as bf16 (widened on load, rounded to nearest even on store)",
+        reported: "native:gdn_recur_pool_bf16",
+        block_dim: 128,
+        tile: (1, 1),
+        shared_bytes: (2 * 128 + 128) * 4 + 12,
         programmatic: true,
         src: include_str!("../cu/gdn_decode.cu"),
     },

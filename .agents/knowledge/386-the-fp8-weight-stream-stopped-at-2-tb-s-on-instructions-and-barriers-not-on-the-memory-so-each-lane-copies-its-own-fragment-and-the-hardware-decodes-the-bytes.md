@@ -42,3 +42,36 @@ device events; ncu on the same binary, `-k regex:fp8_dq_stream_r4 -c 1`):
 
 Not solved here: rows 9-16 (the activation fragment is converted per MMA, two x tiles, and the L1 serves the B fragments at 8 lines a load, so the f16 stream
 loses to r4 above 8 rows); a GEMV whose x is the A operand would amortise both.
+
+## The rest of the decode step (non-GEMM)
+
+Critical-path attribution of one decode graph (nsys, `--cuda-graph-trace=node`; the time between consecutive kernel completions, charged to the later
+kernel: a kernel started early by programmatic dependent launch spins in `griddepcontrol.wait`, so its own duration and the union busy time both
+overcount it). FP8 27B, c = 1, int8 KV, ms a token:
+
+| | base | after the GEMV | + fused bf16 rows | + split GDN decode |
+|---|---|---|---|---|
+| step span | 15.81 | 13.15 | 12.24 | 11.15 |
+| FP8 GEMVs | 11.82 | 9.13 | 8.50 | 7.93 |
+| `bf16_gemv_m1` (a/b gates 96 x 4.7 us, lm head 0.7 ms) | 1.14 | 1.16 | 1.15 | 1.12 |
+| `gdn_decode_pool` (+ `gdn_conv_pool`) | 0.86 | 0.87 | 0.86 | 0.46 |
+| `cast_f32_bf16` | 0.51 | 0.52 | 0.09 | 0.08 |
+| `add_rms_quant` | 0.41 | 0.41 | 0.52 | 0.48 |
+| GQA glue (`rmsnorm_rows`, rope, `concat_split`, `kv_append_i8`) | 0.45 | 0.45 | 0.44 | 0.43 |
+| `topk_rows` | 0.19 | 0.19 | 0.19 | 0.19 |
+
+1. **A cast in front of an FP8 product is a launch, not arithmetic**: 1.2 us of kernel and 0.5 us of gap, 256 a token. `add_rms_quant` (flags bit 2) and
+   `quant_epilogue` (flags bit 1) already hold the activation in registers and now store `cast_f32_bf16`'s rows beside it (bit-equal, gated in
+   `add_rms_quant_native` and `quant_epilogue_native`): 256 -> 48 casts (the remaining ones are the GDN gated output, which no fused front end produces).
+   An f32-reading GEMV (the rows rounded to f16 inside the kernel, no cast at all) was tried and is 4 us slower per GEMV at 1 row (twice the x traffic
+   through the L1): not kept.
+2. **`gdn_decode_pool` ran 16 blocks at one sequence and spilled nothing but time**: one block of 384 threads per (key head, sequence) because the q/k
+   conv windows are shared by a key head's value heads and rewritten in place. 17 us at one sequence, 72 us at 16, 270 us at 64 (the 3 MB of state a
+   sequence reads and writes are 2, 28 and 110 us at the memory roof): with one block an SM the load, the 128-step recurrence and the store do not overlap.
+   The conv has no sharing once it is its own kernel: `gdn_conv_pool` (a thread a channel, 2.5 us in the graph) and `gdn_recur_pool` (a block of 128 threads per
+   (sequence, value head): the head's state arrives as 16-byte `cp.async` copies issued before `griddepcontrol.wait`, the recurrence walks it in shared memory in
+   two passes (the decayed value is recomputed, so no 128-register column is live), the q/k norms and the gated norm are the reference's single-thread ascending
+   walks). Bit-identical to the single-launch body on f32 and bf16 pools, 1 to 3 value heads a key head (`gdn_decode_native`). Isolated kernels:
+   one sequence 17.3 -> 14.9 us, 4: 18.7 -> 18.5, 16: 72.5 -> 56.8, 64: 270 -> 155 us a layer. The first version (state in 128 registers, a block per value head)
+   was no faster: ncu showed 168 registers and 6 M local-memory spill requests, 2.6 TB/s of DRAM traffic for 400 MB of state; the second let the compiler
+   hoist all 128 shared loads (255 registers, two blocks an SM) until the loops were unrolled by two.
