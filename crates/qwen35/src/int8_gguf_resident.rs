@@ -65,12 +65,13 @@
 //! So every stage is built with `embed: false, head: false` and this module
 //! owns both ends:
 //!
-//! * the **embedding** is never uploaded and never materialized - decode needs
+//! * the **embedding** is never uploaded as fp32 and never materialized on the host - decode needs
 //!   one ROW per token, and `checkpoint::gguf::MmapGguf::tensor_range`
 //!   dequantizes exactly the quant blocks that row touches, straight out of
 //!   the mapping. It enters stage 0 through `run_decode_step`'s own
 //!   `input_override` seam, the same seam that carries the residual between
-//!   cards, so no new path exists for it.
+//!   cards, so no new path exists for it. (A plain 16-bit table on a card with room for it is the exception:
+//!   the first stage holds it as stored and gathers the step's tokens itself, [`ServingShape::embed`].)
 //! * the **head** is quantized to INT8 (1.42 GB, inside both limits) by
 //!   `model::int8::upload_quantized` straight from the mapping, and lives on
 //!   the last stage's card.
@@ -315,6 +316,10 @@ const SCORE_HEAD_ROWS: usize = 8;
 /// an element. 1.42 GB at the real shape - against 5.09 GB for the fp32 table
 /// this replaces, which is not merely large but IMPOSSIBLE on a 24 GB P40
 /// (past `max_buffer_size`, and 2.4x the 2047 MiB storage-binding limit).
+/// The embedding table is held on the first stage's card when it is at most this fraction (the reciprocal) of the
+/// smallest budgeted card: a 2.5 GB table on a 96 GB card, not on a 24 GB one.
+const EMBED_RESIDENT_MAX_SHARE: u64 = 16;
+
 fn head_bytes(cfg: &Qwen35Config, tier: Dtype) -> u64 {
     model::ops::Weight::bytes_for(tier, cfg.vocab as usize, cfg.d_model as usize)
 }
@@ -326,11 +331,13 @@ fn head_bytes(cfg: &Qwen35Config, tier: Dtype) -> u64 {
 ///   layer_weight_bytes`, itself gated against what `model::ops::Weight::
 ///   upload` really places) plus that layer's own decode state, its KV window
 ///   stored in `kv` (`Qwen35Config::layer_decode_state_bytes`).
-/// * `embed` - **zero**. The `[vocab, d_model]` embedding is never uploaded:
-///   decode only ever needs one ROW per token, so [`Qwen35GgufInstance`] reads
+/// * `embed` - **zero** unless [`ServingShape::embed`] names a tier. The `[vocab, d_model]` embedding is
+///   not uploaded as fp32: decode only ever needs one ROW per token, so [`Qwen35GgufInstance`] reads
 ///   it straight out of the mapping ([`MmapGguf::tensor_range`], which decodes
 ///   only the quant blocks that row touches). 5.09 GB that exists neither in
-///   VRAM nor in host RAM.
+///   VRAM nor in host RAM. A checkpoint that stores the table as plain 16-bit floats on a card with room for it
+///   ([`Qwen35GgufResident::embed_tier`]) holds it on the first stage at that tier instead, so the step's
+///   tokens are the only input that crosses the link, and the charge is the table's bytes.
 /// * `head` - `norm.weight` plus the INT8 `lm_head` ([`head_bytes`]), both
 ///   held by this resident on the last stage's card rather than by the shard
 ///   (the shard is built `head: false`; see [`Qwen35GgufInstance::head`]).
@@ -372,6 +379,10 @@ pub struct ServingShape {
     pub adapter_bank: Option<BankBytes>,
     /// The tier the lm_head is held at ([`ResidentCheckpoint::head_tier`]): int8 for a GGUF, as stored for an HF release.
     pub head: Dtype,
+    /// The tier the first stage holds the embedding table at, or `None` when it stays in the mapping and the host
+    /// decodes the rows of every step ([`ResidentCheckpoint::embed_tier`]). On the card the step's token ids are
+    /// all that crosses the link, and a decode step or mixed forward needs no host work in front of its first kernel.
+    pub embed: Option<Dtype>,
 }
 
 /// An adapter bank's device bytes: beside each layer it corrects, and the row
@@ -385,7 +396,7 @@ pub struct BankBytes {
 impl ServingShape {
     /// `max_batch` sequences of `cap` tokens, no prompt cache, no speculation.
     pub fn new(cap: u32, tier: TierPolicy, kv: KvTier, max_batch: u32) -> ServingShape {
-        ServingShape { cap, tier, kv, max_batch, prefix_slots: 0, kv_pool_rows: 0, spec: SpecCost::NONE, prefill_rows: TENSOR_CORE_PREFILL_TOKENS, adapter_bank: None, head: Dtype::I8 }
+        ServingShape { cap, tier, kv, max_batch, prefix_slots: 0, kv_pool_rows: 0, spec: SpecCost::NONE, prefill_rows: TENSOR_CORE_PREFILL_TOKENS, adapter_bank: None, head: Dtype::I8, embed: None }
     }
 
     /// The same shape for a stack whose prefill forward may carry `rows` rows (the
@@ -463,7 +474,8 @@ pub fn serving_cost(cfg: &Qwen35Config, shape: &ServingShape) -> LayerBytes {
     } else {
         0
     };
-    LayerBytes { per_layer, embed: 0, head: head_bytes(cfg, shape.head) + cfg.d_model as u64 * 4 + mtp + bank.map_or(0, |b| b.head) }
+    let embed = shape.embed.map_or(0, |tier| model::ops::Weight::bytes_for(tier, cfg.vocab as usize, cfg.d_model as usize));
+    LayerBytes { per_layer, embed, head: head_bytes(cfg, shape.head) + cfg.d_model as u64 * 4 + mtp + bank.map_or(0, |b| b.head) }
 }
 
 /// Whether `max_batch` sequences of `cap` tokens make KV planes the kernels
@@ -1211,6 +1223,30 @@ pub struct TapeTrace {
     pub ids: Vec<u32>,
 }
 
+/// What the first stage of a chain starts from.
+enum FirstRows<'a> {
+    /// `[rows, d_model]` embedding rows decoded on the host.
+    Host(&'a [f32]),
+    /// The stage gathers the step's tokens from the embedding table it holds; `words` is the size of the rows it makes.
+    Gather { words: usize },
+}
+
+impl<'a> FirstRows<'a> {
+    fn words(&self) -> usize {
+        match self {
+            FirstRows::Host(x) => x.len(),
+            FirstRows::Gather { words } => *words,
+        }
+    }
+
+    fn stage_rows(&self) -> StageRows<'a> {
+        match self {
+            FirstRows::Host(x) => StageRows::Host(x),
+            FirstRows::Gather { .. } => StageRows::Gather,
+        }
+    }
+}
+
 /// One card's stage: the [`Qwen35`] instance holding that card's layer range,
 /// plus this sequence's decode state on the SAME card.
 ///
@@ -1297,6 +1333,9 @@ pub struct Qwen35GgufInstance {
     /// demand. This is the header + mapping handle, not data.
     ckpt: ResidentCheckpoint,
     embed: EmbedTable,
+    /// Whether the first stage holds the embedding table on its card ([`ServingShape::embed`]); otherwise `embed`
+    /// rows are decoded on the host.
+    embed_resident: bool,
     head: Head,
     tok: QwenBpe,
     /// Stop ids from the GGUF's own embedded tokenizer metadata plus the chat
@@ -1396,23 +1435,24 @@ impl Qwen35GgufInstance {
     /// (which the head projects) cross the host. A stage whose layer range is empty passes its input through.
     fn chain_stages<'s>(&'s self, input: &[f32], run: impl FnMut(&'s DeviceShard, StageRows<'_>) -> DeviceBuffer, observe: impl FnMut(&Gpu, &DeviceBuffer)) -> Vec<f32> {
         let words = input.len();
-        self.chain_stages_with(input, run, observe, |g, out| g.read(out, words))
+        self.chain_stages_with(FirstRows::Host(input), run, observe, |g, out| g.read(out, words))
     }
 
-    /// [`Self::chain_stages`] with the last stage's output handed to `finish` instead of read whole: a caller that
-    /// needs a few rows of a large block (a mixed round's decode rows and each prompt's last row) reads only those.
+    /// [`Self::chain_stages`] with the first stage's input given as [`FirstRows`] and the last stage's output handed to
+    /// `finish` instead of read whole: a caller that needs a few rows of a large block (a mixed round's decode rows
+    /// and each prompt's last row) reads only those.
     fn chain_stages_with<'s, R>(
         &'s self,
-        input: &[f32],
+        first: FirstRows<'_>,
         mut run: impl FnMut(&'s DeviceShard, StageRows<'_>) -> DeviceBuffer,
         mut observe: impl FnMut(&Gpu, &DeviceBuffer),
         finish: impl FnOnce(&Gpu, &DeviceBuffer) -> R,
     ) -> R {
-        let words = input.len();
+        let words = first.words();
         let mut prev: Option<(&Gpu, DeviceBuffer)> = None;
         for s in &self.shards {
             let rows = match &prev {
-                None => StageRows::Host(input),
+                None => first.stage_rows(),
                 Some((from, out)) => StageRows::device(from, out, words),
             };
             let out = run(s, rows);
@@ -1421,6 +1461,25 @@ impl Qwen35GgufInstance {
         }
         let (g, out) = prev.expect("a plan always has at least one stage");
         finish(g, &out)
+    }
+
+    /// The input of the first stage for a step of `tokens`: its embedding rows read from the checkpoint on the host,
+    /// or - when that stage holds the table ([`Self::embeds_on_device`]) - the step's token ids alone, which the
+    /// card gathers itself (no host decode of the rows, no upload of them).
+    fn first_rows<'a>(&self, tokens: &[u32], host_rows: &'a mut Vec<f32>) -> Result<FirstRows<'a>, String> {
+        if self.embeds_on_device() {
+            if let Some(&bad) = tokens.iter().find(|&&t| t >= self.cfg.vocab) {
+                return Err(format!("{MODEL}: token id {bad} is outside '{}'", self.embed.name));
+            }
+            return Ok(FirstRows::Gather { words: tokens.len() * self.cfg.d_model as usize });
+        }
+        *host_rows = self.embed_rows(tokens)?;
+        Ok(FirstRows::Host(host_rows))
+    }
+
+    /// Whether the first stage holds the embedding table on its card (see [`ServingShape::embed`]).
+    fn embeds_on_device(&self) -> bool {
+        self.embed_resident
     }
 
     /// One token through EVERY stage in order, then the head - returning
@@ -1760,15 +1819,20 @@ impl Qwen35GgufInstance {
             }
         }
         debug_assert!(slots.iter().collect::<std::collections::HashSet<_>>().len() == bsz, "{MODEL}: a decode step names a slot twice");
-        let embedded = self.embed_rows(tokens)?;
-        Ok(self.chain_stages(
-            &embedded,
+        let (mut host_rows, words) = (Vec::new(), tokens.len() * self.cfg.d_model as usize);
+        let first = {
+            let _embed = gpu_core::markers::range(c"decode.embed");
+            self.first_rows(tokens, &mut host_rows)?
+        };
+        Ok(self.chain_stages_with(
+            first,
             |s, rows| {
                 let seqs = s.caches.batch(slots, positions);
                 let caches = BatchDecodeCaches { gqa_kv: &s.caches.gqa_kv, gqa_cap: s.caches.kv_block(), seqs: &seqs, one_sequence: false, gdn_pool: Some(s.caches.gdn_pool()), memory: &[] };
                 s.qwen35.run_decode_batch(tokens, &caches, Some(rows))
             },
             |_, _| {},
+            |g, out| g.read(out, words),
         ))
     }
 
@@ -2052,7 +2116,11 @@ impl Qwen35GgufInstance {
             tokens.len()
         });
         let tokens: Vec<u32> = decode.map_or(&[][..], |(tokens, ..)| tokens).iter().copied().chain(jobs.iter().flat_map(|j| j.prompt[j.start..j.end].iter().copied())).collect();
-        let embedded = self.embed_rows(&tokens)?;
+        let mut host_rows = Vec::new();
+        let first = {
+            let _embed = gpu_core::markers::range(c"mixed.embed");
+            self.first_rows(&tokens, &mut host_rows)?
+        };
         // Only the rows the caller uses cross to the host: the decode rows, and per job its last row (every row
         // when `collect`, the drafter's feed).
         let wanted: Vec<(usize, usize)> = {
@@ -2066,7 +2134,7 @@ impl Qwen35GgufInstance {
             spans
         };
         let blocks = self.chain_stages_with(
-            &embedded,
+            first,
             |s, rows| {
                 let segs: Vec<PrefillSeg<'_>> =
                     jobs.iter().map(|j| PrefillSeg { tokens: &j.prompt[j.start..j.end], pos_start: j.start as u32, gqa_window: s.caches.window(j.slot), slot: j.slot }).collect();
@@ -3558,6 +3626,16 @@ impl Qwen35GgufResident {
         auto_pool_rows(&cfg, &self.devices, &self.serving_shape(&mg, &cfg), Some(cap)).ok_or_else(|| format!("a {cap}-token context does not fit the {} budgeted device(s) beside the weights", self.devices.len()))
     }
 
+    /// The tier the first stage holds the embedding table at, when it is worth the card's memory: the checkpoint
+    /// stores a plain 16-bit table ([`ResidentCheckpoint::embed_tier`]) and the table is at most
+    /// [`EMBED_RESIDENT_MAX_SHARE`] of the smallest budgeted card.
+    fn embed_tier(&self, mg: &ResidentCheckpoint, cfg: &Qwen35Config) -> Option<Dtype> {
+        let tier = mg.embed_tier().filter(|_| !cfg.mtp)?;
+        let table = model::ops::Weight::bytes_for(tier, cfg.vocab as usize, cfg.d_model as usize);
+        let smallest = gpu_capacities(&self.devices, 0).iter().map(|&(_, c)| c).min()?;
+        (table <= smallest / EMBED_RESIDENT_MAX_SHARE).then_some(tier)
+    }
+
     /// What this resident will hold on the cards besides the weights, as
     /// configured: speculation is charged only where loading will allocate it
     /// ([`SpecServing::cost`]) - the verify kernels on every budgeted card and,
@@ -3574,6 +3652,7 @@ impl Qwen35GgufResident {
             spec: if self.exact_decode { SpecCost::NONE } else { self.spec.cost(mg.has_mtp(cfg), verify) },
             adapter_bank: self.bank_bytes(cfg),
             head: mg.head_tier(),
+            embed: self.embed_tier(mg, cfg),
             ..ServingShape::new(self.cap, self.tier.clone(), self.kv_tier, self.max_batch).with_prefill_rows(self.prefill.batch_tokens.try_into().unwrap_or(u32::MAX))
         }
     }
@@ -3759,6 +3838,8 @@ impl Qwen35GgufResident {
 
         let layout = self.kv_layout();
         let state_rows = layout.state_rows(self.max_batch, self.prefix_slots);
+        let embed_resident = self.serving_shape(&mg, &cfg).embed.is_some();
+        residency::log::info(&format!("{MODEL}: the embedding table is {}", if embed_resident { "held on the first stage's card" } else { "read from the checkpoint on the host" }));
         let mut shards = Vec::with_capacity(plan.stages.len());
         for (_, placed, _) in &plan.stages {
             // The planner's `embed`/`head` flags say which stage is CHARGED
@@ -3766,7 +3847,7 @@ impl Qwen35GgufResident {
             // (see `DeviceShard`'s own doc - this instance owns both
             // endpoints, because an fp32 `[vocab, d_model]` cannot be a
             // device buffer here at all).
-            let shard = &Shard { embed: false, head: false, ..placed.clone() };
+            let shard = &Shard { embed: placed.embed && embed_resident, head: false, ..placed.clone() };
             let shard_src = mg.shard_source(&cfg, shard)?;
             let src = shard_src.as_source();
             // `b = t = 1`: this instance's own `res`/`logits`/`tokens` and
@@ -3813,6 +3894,7 @@ impl Qwen35GgufResident {
             shards,
             ckpt: mg,
             embed,
+            embed_resident,
             head,
             tok,
             eos,
@@ -3907,6 +3989,16 @@ mod tests {
                 println!("token-by-token pos {pos:4}: logits rms={rms:.4} maxabs={maxabs:.4}");
             }
         }
+    }
+
+    /// A table held on the card is charged at the bytes it is stored in; the default charges nothing.
+    #[test]
+    fn a_resident_embedding_table_is_charged_at_its_stored_tier() {
+        let cfg = Qwen35Config::qwen38_27b();
+        let base = ServingShape::new(2048, TierPolicy::uniform(Dtype::I8), KvTier::F32, 1);
+        let held = serving_cost(&cfg, &ServingShape { embed: Some(Dtype::BF16), ..base.clone() });
+        assert_eq!(serving_cost(&cfg, &base).embed, 0);
+        assert_eq!(held.embed, cfg.vocab as u64 * cfg.d_model as u64 * 2, "a bf16 table is two bytes an element");
     }
 
     /// The endpoints are charged for what this resident ACTUALLY places, and

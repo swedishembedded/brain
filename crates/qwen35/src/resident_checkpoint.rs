@@ -33,7 +33,7 @@
 use std::path::{Path, PathBuf};
 
 use checkpoint::gguf::MmapGguf;
-use checkpoint::packed::PackedSource;
+use checkpoint::packed::{PackedSource, QuantEncoding};
 use checkpoint::TensorSource;
 use data::generation::SamplingDefaults;
 use data::qwen_tokenizer::QwenBpe;
@@ -201,6 +201,19 @@ impl ResidentCheckpoint {
         match self {
             ResidentCheckpoint::Gguf(_) => Dtype::I8,
             ResidentCheckpoint::Hf(_) => Dtype::BF16,
+        }
+    }
+
+    /// The tier the embedding table can be held at on a card without changing a value: the 16-bit float the
+    /// checkpoint stores it in. `None` for a GGUF (a quantized table, decoded row by row from the mapping) and for any
+    /// HF encoding with scales, which the host decodes.
+    pub fn embed_tier(&self) -> Option<Dtype> {
+        match self {
+            ResidentCheckpoint::Gguf(_) => None,
+            ResidentCheckpoint::Hf(hf) => {
+                let enc = &hf.src.descriptor("tok.weight")?.encoding;
+                [(QuantEncoding::bf16(), Dtype::BF16), (QuantEncoding::f16(), Dtype::F16)].into_iter().find(|(e, _)| e == enc).map(|(_, t)| t)
+            }
         }
     }
 

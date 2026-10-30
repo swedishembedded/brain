@@ -4709,6 +4709,7 @@ impl Qwen35 {
         // group's rows would read the wrong adapter's correction: exact
         // grouping stays off while a bank corrects this step (`adapter_rows`
         // is 0 otherwise, and a serving caller refuses the combination).
+        let input_override = input_override.and_then(StageRows::provided);
         let group = if verify.is_none() && !caches.one_sequence && self.adapter_rows.get() == 0 { self.exact_decode_step() } else { None };
         if let Some(step) = group.filter(|&step| tokens.len() as u32 > step) {
             return self.run_decode_batch_exact_groups(tokens, caches, input_override, step);
@@ -5300,11 +5301,13 @@ impl Qwen35 {
         assert!(!segs.is_empty(), "qwen35::run_prefill_multi_stage: no sequences");
         assert!(c.lora.is_none(), "qwen35::run_prefill_multi_stage: a LoRA build's adapter scratch is sized for one sequence's round");
         assert!(c.anchor_memory.is_none() && c.swa_window.is_none(), "qwen35::run_mixed_stage: neither an anchor memory nor a sliding window is implemented for mixed rows");
+        let input_override = input_override.and_then(StageRows::provided);
         let lead = decode.map_or(0, |(tokens, _)| tokens.len() as u32);
         let n: u32 = lead + segs.iter().map(|s| s.tokens.len() as u32).sum::<u32>();
         assert!(segs.iter().all(|s| !s.tokens.is_empty()), "qwen35::run_prefill_multi_stage: a sequence with no rows");
-        let res = if self.shard.embed {
-            assert!(input_override.is_none(), "qwen35: run_prefill_multi_stage got an input_override on the EMBED stage");
+        // The embed stage gathers the round's tokens from its own table unless the caller hands it the rows (the
+        // input embeddings of a prompt, say); any other stage takes the previous stage's residual.
+        let res = if self.shard.embed && input_override.is_none() {
             let all: Vec<u32> = decode.map_or(&[][..], |(tokens, _)| tokens).iter().copied().chain(segs.iter().flat_map(|s| s.tokens.iter().copied())).collect();
             let tok_buf = g.storage(n as u64);
             g.write(&tok_buf, &all);
@@ -5312,7 +5315,7 @@ impl Qwen35 {
             self.embed_rows(&tok_buf, n, &res);
             res
         } else {
-            let x = input_override.expect("qwen35: run_prefill_multi_stage on a NON-EMBED stage needs the previous stage's residual block");
+            let x = input_override.expect("qwen35: run_prefill_multi_stage on a NON-EMBED stage needs the previous stage's residual block (or hold the table)");
             assert_eq!(x.words(), (n * d) as usize, "qwen35: run_prefill_multi_stage input_override must be the round's whole [n, d_model] block");
             let res = g.storage((n * d) as u64);
             x.load_into(g, &res);

@@ -1270,7 +1270,9 @@ impl PagedDecoder for Qwen35GgufEngine {
             return MixedOutcome { decoded, prefilled };
         }
         let started = std::time::Instant::now();
+        let begin = gpu_core::markers::range(c"mixed.begin_slices");
         let (mut answers, live) = self.begin_slices(jobs);
+        drop(begin);
         if live.is_empty() {
             // Every prompt was served from the cache: nothing to carry.
             let prefilled = answers.into_iter().map(|a| a.expect("every job was answered")).collect();

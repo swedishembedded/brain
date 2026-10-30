@@ -34,6 +34,10 @@ pub(crate) enum StageRows<'a> {
         offset_words: usize,
         words: usize,
     },
+    /// No rows: the stage holds the embedding table itself and gathers the step's own tokens on its card
+    /// ([`StageRows::provided`] is `None`). Only the entry points that take the step's tokens accept it
+    /// (decode step, mixed forward); asking it for rows is a bug.
+    Gather,
 }
 
 impl<'a> StageRows<'a> {
@@ -42,11 +46,17 @@ impl<'a> StageRows<'a> {
         StageRows::Device { from, buf, offset_words: 0, words }
     }
 
+    /// These rows, or `None` when the stage gathers the step's tokens from its own embedding table.
+    pub(crate) fn provided(self) -> Option<StageRows<'a>> {
+        (!matches!(self, StageRows::Gather)).then_some(self)
+    }
+
     /// How many f32 words of rows this holds.
     pub(crate) fn words(&self) -> usize {
         match self {
             StageRows::Host(x) => x.len(),
             StageRows::Device { words, .. } => *words,
+            StageRows::Gather => unreachable!("StageRows::Gather carries no rows; the entry point must call `provided()` first"),
         }
     }
 
@@ -56,6 +66,7 @@ impl<'a> StageRows<'a> {
         match *self {
             StageRows::Host(x) => StageRows::Host(&x[start..end]),
             StageRows::Device { from, buf, offset_words, .. } => StageRows::Device { from, buf, offset_words: offset_words + start, words: end - start },
+            StageRows::Gather => unreachable!("StageRows::Gather carries no rows to slice"),
         }
     }
 
@@ -68,6 +79,7 @@ impl<'a> StageRows<'a> {
             StageRows::Device { from, buf, offset_words, words } => {
                 from.copy_to(buf, offset_words as u64 * 4, g, dst, 0, words as u64 * 4);
             }
+            StageRows::Gather => unreachable!("StageRows::Gather carries no rows to load"),
         }
     }
 }

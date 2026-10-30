@@ -2314,6 +2314,7 @@ impl<D: PagedDecoder> Scheduler<D> {
                     let mut refs = active_tables(&mut self.running, &in_batch);
                     self.dec.forward_batched_topk(&mut refs, &inputs, wanted)
                 };
+                let _sample = gpu_core::markers::range(c"serve.sample");
                 sample_rows(&mut self.running, &active, &candidates)
             }});
             let window = match decoded {
@@ -2331,7 +2332,9 @@ impl<D: PagedDecoder> Scheduler<D> {
                     break 'decode;
                 }
             };
+            let accepted = gpu_core::markers::range(c"serve.accept");
             self.accept_window(&active, &window, k);
+            drop(accepted);
             if self.dec.spec_cost_aware() {
                 let produced: usize = active.iter().map(|&i| self.running[i].generated.len()).sum::<usize>() - generated_before;
                 self.gate.observe_plain(speculate::CostGate::bucket(active.len()), produced, (self.clock)() - plain_started);
@@ -2449,9 +2452,13 @@ impl<D: PagedDecoder> Scheduler<D> {
         };
         let rows = active.len() + takes.iter().sum::<usize>();
         self.step_cost.observe(rows, (self.clock)() - started);
+        let sampled = gpu_core::markers::range(c"serve.sample");
         let window = if all_greedy { outcome.decoded } else { sample_rows(&mut self.running, active, &outcome.decoded) };
+        drop(sampled);
+        let accepted = gpu_core::markers::range(c"serve.accept");
         self.accept_window(active, &window, 1);
         self.settle_prefill(&takes, outcome.prefilled, report);
+        drop(accepted);
     }
 
     /// Drive to completion, returning every request's tokens keyed by id.
