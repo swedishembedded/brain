@@ -986,9 +986,9 @@ impl Qwen35GgufEngine {
     /// `decode`, the next token of running sequences as `(tokens, slots, positions)`, when the forward carries any;
     /// returned as their hidden block); otherwise one sequence's slice after another.
     fn run_slices(&mut self, jobs: &mut [PrefillJob<'_>], answers: &mut [Option<PrefillProgress>], mut live: Vec<LiveSlice>, decode: Option<LeadRows<'_>>, multi: bool) -> Vec<f32> {
-        // A forward that carries decode rows runs the head's feeds a few rounds with each iteration, as the background lane does,
-        // so a prompt's end does not stall the sequences decoding beside it.
-        let defer_feed = decode.is_some();
+        // The head's feed of a prompt that ends here runs at once: the sequence drafts from its first step, and a deferred feed
+        // would leave it undrafted for as many iterations as the feeds queued ahead of it take.
+        let defer_feed = false;
         let mut hidden: Vec<(Vec<f32>, bool)> = Vec::with_capacity(live.len());
         let mut decoded = Vec::new();
         if live.len() >= 2 && multi || decode.is_some() && !live.is_empty() {
@@ -1331,7 +1331,6 @@ impl PagedDecoder for Qwen35GgufEngine {
         let (slots, positions) = self.next_positions(tables);
         let hidden = self.run_slices(jobs, &mut answers, live, Some(LeadRows::Decode(inputs, &slots, &positions)), true);
         self.record_decode_rows(&slots, inputs, &hidden);
-        self.advance_feeds(FEED_ROWS_PER_SLICE);
         // One head pass for the decode rows and the last row of every prompt that ended here: the head's weights are
         // read once instead of once more per finished prompt.
         let d = self.inst.cfg.d_model as usize;

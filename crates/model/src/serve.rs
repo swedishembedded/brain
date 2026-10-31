@@ -1241,6 +1241,7 @@ pub struct Scheduler<D: PagedDecoder> {
     spec_stats: SpecStats,
     /// Plain and speculative step rates per batch-size bucket - see [`speculate::CostGate`].
     gate: speculate::CostGate,
+    spec_costs: speculate::SpecCosts,
     /// Whether new prompts prepare the drafter - see [`speculate::PrefillGate`].
     prefill_gate: speculate::PrefillGate,
     /// Seconds, for the cost gate and the mixed iteration's cost model.
@@ -1273,6 +1274,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             spec_policy: SpecPolicy::default(),
             spec_stats: SpecStats::default(),
             gate: speculate::CostGate::default(),
+            spec_costs: speculate::SpecCosts::default(),
             prefill_gate: speculate::PrefillGate::default(),
             clock: {
                 let start = std::time::Instant::now();
@@ -2460,7 +2462,7 @@ impl<D: PagedDecoder> Scheduler<D> {
         let target = self.dec.step_latency_target().map(|t| t.as_secs_f64());
         // Drafting comes first: the verify rows are decode rows of the forward, and the prompt slice is what the
         // target leaves after them.
-        let proposals = self.propose(active, false);
+        let proposals = self.propose(active, true);
         let decode_rows = proposals.as_ref().map_or(active.len(), |p| p.rows.iter().map(Vec::len).sum());
         let started = (self.clock)();
         let prompt_rows = self.step_cost.prompt_rows(limits, decode_rows, target);
@@ -2510,7 +2512,9 @@ impl<D: PagedDecoder> Scheduler<D> {
             }
         };
         let rows = decode_rows + takes.iter().sum::<usize>();
-        self.step_cost.observe(rows, (self.clock)() - started);
+        let iteration_secs = (self.clock)() - started;
+        self.step_cost.observe(rows, iteration_secs);
+        self.spec_costs.observe_mixed(iteration_secs);
         match proposals {
             Some(proposals) => self.settle_verified(active, proposals, scored),
             None => {

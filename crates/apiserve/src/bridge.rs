@@ -400,7 +400,13 @@ fn log_request_tokens(exec: &residency::Executor, model: &str, outcome: &Outcome
         }
         if let (Some(rounds), Some(accept), Some(per_round)) = (get("spec_rounds"), get("spec_accept_rate"), get("spec_tokens_per_round")) {
             if rounds.as_u64().unwrap_or(0) > 0 {
-                line += &format!(", spec_rounds={rounds} spec_accept_rate={accept:.3} spec_tokens_per_round={per_round:.2} (cumulative)");
+                line += &format!(", spec_rounds={rounds} spec_accept_rate={accept:.3} spec_tokens_per_round={per_round:.2}");
+                for name in ["spec_verify_steps", "spec_mixed_verify_steps", "spec_plain_steps", "spec_gated_steps"] {
+                    if let Some(v) = get(name) {
+                        line += &format!(" {name}={v}");
+                    }
+                }
+                line += " (cumulative)";
             }
         }
     }

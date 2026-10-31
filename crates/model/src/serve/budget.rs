@@ -87,6 +87,17 @@ impl StepCost {
         Some((fixed, slope))
     }
 
+    /// Seconds each further row adds to an iteration, when the iterations timed span enough row counts to tell (else `None`:
+    /// the fit would only be proportional).
+    pub fn slope(&self) -> Option<f64> {
+        if self.n < 1.0 {
+            return None;
+        }
+        let mean_x = self.sx / self.n;
+        let var_x = self.sxx / self.n - mean_x * mean_x;
+        (var_x >= MIN_SPREAD_ROWS * MIN_SPREAD_ROWS).then(|| self.line().map_or(0.0, |(_, per_row)| per_row))
+    }
+
     /// Seconds an iteration of `rows` rows is expected to take; `None` before any was timed.
     pub fn predict(&self, rows: usize) -> Option<f64> {
         self.line().map(|(fixed, per_row)| fixed + per_row * rows as f64)
