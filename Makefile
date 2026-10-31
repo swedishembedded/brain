@@ -134,6 +134,10 @@ build/debug:
 build/release:
 	cargo build --release
 
+## build/profiling - the release binary with line tables, for host CPU/cache/lock profiling (target/profiling/brain)
+build/profiling:
+	cargo build --profile profiling -p brain-cli
+
 ## package - lists the package targets; builds nothing
 package:
 	$(LIST_CHILDREN)
@@ -2114,7 +2118,7 @@ help:
 	@bash scripts/make-help.sh
 
 # Declared last so every generated list above is already defined.
-.PHONY: build build/debug build/release \
+.PHONY: build build/debug build/release build/profiling \
         package package/deb package/deb/debug package/deb/release package/deb/publish \
         container container/runtime container/ci container/smoke \
         cuda cuda/aot cuda/install cuda/coverage gh200 gh200/probe gh200/placement \

@@ -515,6 +515,13 @@ lto = "thin"
 inherits = "release"
 lto = "off"
 
+# The host-profiling profile: the release binary with line tables, so a CPU
+# sampler (nsys --sample, perf) resolves inlined frames to source lines. Code
+# generation is release's; only the debug sections are added.
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+
 # ---------------------------------------------------------------------------
 # Dependency overrides
 # ---------------------------------------------------------------------------
