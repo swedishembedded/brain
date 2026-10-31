@@ -2971,7 +2971,7 @@ impl Qwen35 {
                 let (sl, hl) = (self.cfg.gdn_state_len() as u32, self.cfg.gdn_hist_len() as u32);
                 let whole = round.segs.len() == 1 && round.decode.is_none() && gdn_stream_pieces(round.segs[0].rows).count() == 1;
                 // Every segment in one pass of the batched kernels on the pools' own rows, where the device serves it.
-                let pools = model::gdn_segments::GdnSegmentPools { state: &c.gdn_state[l], hist: &c.gdn_hist[l] };
+                let pools = model::gdn_segments::GdnSegmentPools { state: &c.gdn_state[l], hist: &c.gdn_hist[l], bf16: false };
                 let lead = round.decode.as_ref().map_or(0, |d| d.rows);
                 // The output projection reads E4M3 rows on this device: the gated norm writes them beside its product.
                 let e4m3 = !self.packs_activations() && self.ops.fp8_reads_e4m3(n, value_dim, d);

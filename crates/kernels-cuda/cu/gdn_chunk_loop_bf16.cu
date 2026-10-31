@@ -65,7 +65,7 @@ struct LoopOperands {
 // matrix; they may be the same memory, since a block reads and writes only its own slice). `chunk(ci)` places chunk `ci`.
 template <class ChunkAt>
 __device__ __forceinline__ void brain_gdn_loop_walk(const LoopOperands& op, const unsigned int n_chunks, const unsigned int j0, const float* state_in, float* state_out,
-                                                    ChunkAt chunk_at) {
+                                                    ChunkAt chunk_at, const bool state_bf16 = false) {
     const unsigned short *kd = op.kd, *qs = op.qs, *w = op.w, *intra = op.intra;
     const float *u = op.u, *g_cs = op.g_cs;
     const float* initial_state = state_in;
@@ -103,7 +103,8 @@ __device__ __forceinline__ void brain_gdn_loop_walk(const LoopOperands& op, cons
 #pragma unroll
             for (int i = 0; i < 4; ++i) {
                 const unsigned int p = (wr + 4u * mi) * 16u + g + ((i & 2) ? 8u : 0u);
-                st[mi][nt][i] = initial_state[(unsigned long long)p * D + j0 + n0 + nt * 8 + 2 * t4 + (i & 1)];
+                const unsigned long long at = (unsigned long long)p * D + j0 + n0 + nt * 8 + 2 * t4 + (i & 1);
+                st[mi][nt][i] = state_bf16 ? __uint_as_float(static_cast<unsigned int>(reinterpret_cast<const unsigned short*>(initial_state)[at]) << 16) : initial_state[at];
             }
         }
     }
@@ -302,7 +303,11 @@ __device__ __forceinline__ void brain_gdn_loop_walk(const LoopOperands& op, cons
                 const unsigned int p = (wr + 4u * mi) * 16u + g + h2 * 8u;
                 const float2 v = make_float2(st[mi][nt][2 * h2], st[mi][nt][2 * h2 + 1]);
                 const unsigned int col = j0 + n0 + nt * 8 + 2 * t4;
-                *reinterpret_cast<float2*>(final_state + (unsigned long long)p * D + col) = v;
+                if (state_bf16) {
+                    *reinterpret_cast<unsigned int*>(reinterpret_cast<unsigned short*>(final_state) + (unsigned long long)p * D + col) = brain_pack_bf16(v.x, v.y);
+                } else {
+                    *reinterpret_cast<float2*>(final_state + (unsigned long long)p * D + col) = v;
+                }
             }
         }
     }
@@ -345,8 +350,8 @@ extern "C" __global__ void __launch_bounds__(THREADS, 2) brain_gdn_chunk_loop_bf
 // row, so a round needs no gather or scatter of the state around the kernel. `table` is the chunk table of
 // `brain_gdn_chunk_prep_seg_bf16` (a chunk's operands sit at a 64-row slot of the scratch, its output rows at its token
 // rows of the token-major `out`).
-// Contract: params [segments * H * SPLITS, unused..., H at 6, nseg at 7, state words per pool row at 8, flags at 9 (bit 0: `out` is
-// bf16 rows)]; buffers kd, qs, w, u, g_cs, intra, table, state pool (read and written in place), out.
+// Contract: params [segments * H * SPLITS, unused..., H at 6, nseg at 7, state elements per pool row at 8, flags at 9 (bit 0: `out` is
+// bf16 rows; bit 1: the state pool holds bf16 elements)]; buffers kd, qs, w, u, g_cs, intra, table, state pool (read and written in place), out.
 extern "C" __global__ void __launch_bounds__(THREADS, 2) brain_gdn_chunk_loop_seg_bf16(const unsigned int* params, const unsigned short* kd, const unsigned short* qs,
                                                                                      const unsigned short* w, const float* u, const float* g_cs,
                                                                                      const unsigned short* intra, const unsigned int* table, float* state_pool, float* out) {
@@ -354,6 +359,7 @@ extern "C" __global__ void __launch_bounds__(THREADS, 2) brain_gdn_chunk_loop_se
     const unsigned int H = params[6], nseg = params[7];
     const unsigned long long state_words = params[8];
     const bool out_bf16 = (params[9] & 1u) != 0u;  // absent is 0: fp32 rows
+    const bool state_bf16 = (params[9] & 2u) != 0u;  // the pool rows are bf16 elements (`state_words` still counts elements)
     const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
     if (blk >= blocks) { return; }  // block-uniform
     const unsigned int seg = blk / (H * SPLITS), head = (blk / SPLITS) % H;
@@ -377,6 +383,8 @@ extern "C" __global__ void __launch_bounds__(THREADS, 2) brain_gdn_chunk_loop_se
         ch.out_chunk = out_bf16 ? reinterpret_cast<float*>(reinterpret_cast<unsigned short*>(out) + first) : out + first;
         return ch;
     };
-    float* state = state_pool + slot * state_words + (unsigned long long)head * D * D;
-    brain_gdn_loop_walk(op, n_chunks, j0, state, state, chunk_at);
+    // A bf16 pool is addressed in elements: the offset is the same count of two-byte elements instead of four-byte words.
+    const unsigned long long state_at = slot * state_words + (unsigned long long)head * D * D;
+    float* state = state_bf16 ? reinterpret_cast<float*>(reinterpret_cast<unsigned short*>(state_pool) + state_at) : state_pool + state_at;
+    brain_gdn_loop_walk(op, n_chunks, j0, state, state, chunk_at, state_bf16);
 }

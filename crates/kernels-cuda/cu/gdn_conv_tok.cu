@@ -127,13 +127,13 @@ __device__ __forceinline__ unsigned int brain_gdn_bf16_bits(float v) {
 // rows of the token-major tensors.
 // Contract: params [blocks, C, key_dim, value_dim, nseg, history words per pool row]; read x [rows, C], w [C, K], table; hist
 // pool [slots, C, K-1] (read and written); write query, key [rows, key_dim], value [rows, value_dim] at the segments' rows.
-// Params word 6 (absent is 0): bit 0, x is bf16 rows; bit 1, query / key / value are written as bf16 rows. The history stays f32 (it
-// holds the bf16 values widened), the window and the sum are f32 either way, so the result is the f32 form's for bf16-valued input
-// rounded once to bf16 on the way out.
+// Params word 6 (absent is 0): bit 0, x is bf16 rows; bit 1, query / key / value are written as bf16 rows; bit 2, the history pool is
+// bf16 elements (two to a word, `history words per pool row` still counts elements). The window and the sum are f32 either way,
+// so the result is the f32 form's for bf16-valued input rounded once to bf16 on the way out.
 extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_conv_silu_seg(const unsigned int* params, const float* x, const float* w, const unsigned int* table,
                                                                              float* hist_pool, float* query, float* key, float* value) {
     const unsigned int blocks = params[0], C = params[1], key_dim = params[2], value_dim = params[3], nseg = params[4];
-    const bool x_bf16 = (params[6] & 1u) != 0u, out_bf16 = (params[6] & 2u) != 0u;
+    const bool x_bf16 = (params[6] & 1u) != 0u, out_bf16 = (params[6] & 2u) != 0u, hist_bf16 = (params[6] & 4u) != 0u;
     const unsigned long long hist_words = params[5];
     const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x, tiles = (C + THREADS - 1) / THREADS;
     if (blk >= blocks) { return; }
@@ -150,7 +150,13 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_conv_silu_seg(co
     const unsigned int r0 = (b / tiles) * ROWS_PER_THREAD;
     if (c >= C) { return; }
     const unsigned int r1 = min(r0 + ROWS_PER_THREAD, rows);
-    float* hist = hist_pool + slot * hist_words + (unsigned long long)c * (K - 1);
+    const unsigned long long hist_at = slot * hist_words + (unsigned long long)c * (K - 1);
+    unsigned short* const hist_h = reinterpret_cast<unsigned short*>(hist_pool) + hist_at;
+    float* const hist_f = hist_pool + hist_at;
+    auto hist_ld = [&](unsigned int j) -> float { return hist_bf16 ? __uint_as_float(static_cast<unsigned int>(hist_h[j]) << 16) : hist_f[j]; };
+    auto hist_st = [&](unsigned int j, float v) {
+        if (hist_bf16) { hist_h[j] = static_cast<unsigned short>(brain_gdn_bf16_bits(v)); } else { hist_f[j] = v; }
+    };
     const unsigned long long x0 = (unsigned long long)row0 * C + c;
     const unsigned short* const xh = reinterpret_cast<const unsigned short*>(x);
     auto ldx = [&](unsigned long long off) -> float { return x_bf16 ? __uint_as_float(static_cast<unsigned int>(xh[x0 + off]) << 16) : x[x0 + off]; };
@@ -162,16 +168,16 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_conv_silu_seg(co
     float win[K];
     for (unsigned int k = 0; k < K; ++k) {
         const int q = (int)r0 + (int)k - (int)(K - 1);
-        win[k] = q >= 0 ? ldx((unsigned long long)q * C) : hist[q + (int)(K - 1)];
+        win[k] = q >= 0 ? ldx((unsigned long long)q * C) : hist_ld(static_cast<unsigned int>(q + (int)(K - 1)));
     }
     if (r0 == 0) {
         // The last K-1 rows of [hist | x] become the next history; all of them are read before any is written.
         float next[K - 1];
         for (unsigned int j = 0; j + 1 < K; ++j) {
             const unsigned int e = rows + j;
-            next[j] = e < K - 1 ? hist[e] : ldx((unsigned long long)(e - (K - 1)) * C);
+            next[j] = e < K - 1 ? hist_ld(e) : ldx((unsigned long long)(e - (K - 1)) * C);
         }
-        for (unsigned int j = 0; j + 1 < K; ++j) { hist[j] = next[j]; }
+        for (unsigned int j = 0; j + 1 < K; ++j) { hist_st(j, next[j]); }
     }
     for (unsigned int r = r0; r < r1; ++r) {
         if (r != r0) {

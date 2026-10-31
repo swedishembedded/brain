@@ -758,11 +758,11 @@ static GDN_CHUNK_LOOP_SEG_BINDINGS: [BindKind; 10] = bwd_tc_bindings(7);
 /// `table`, `hist_pool` (`[slots, conv_dim, 3]`, updated in place), then `query`, `key`, `value`. `None` when the
 /// device or the shape does not serve it (the caller keeps the per-segment path). With `bf16`, `x` is bf16 rows and the three
 /// outputs are written as bf16 rows.
-pub fn gdn_conv_silu_seg_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 7], l: GdnConvLayout, table: &GdnSegmentTable, bf16: bool) -> Option<crate::Step> {
+pub fn gdn_conv_silu_seg_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 7], l: GdnConvLayout, table: &GdnSegmentTable, bf16: bool, pool_bf16: bool) -> Option<crate::Step> {
     let kernel = l.served(gpu).and_then(|_| kernels_cuda::get("gdn_conv_silu_seg"))?;
     let id = gpu.native_kernel(kernel, &GDN_CONV_SILU_SEG_BINDINGS)?;
     let blocks = l.conv_dim.div_ceil(GDN_CONV_CHANNELS_PER_BLOCK) * table.conv_tiles_rows;
-    let params = [blocks, l.conv_dim, l.key_dim, l.value_dim, table.segments, l.conv_dim * (l.kernel - 1), if bf16 { 1 | 2 } else { 0 }];
+    let params = [blocks, l.conv_dim, l.key_dim, l.value_dim, table.segments, l.conv_dim * (l.kernel - 1), if bf16 { 1 | 2 } else { 0 } | if pool_bf16 { 4 } else { 0 }];
     gpu.step_native_sliced(id, bufs, &[(0, 0); 7], &params, blocks)
 }
 
@@ -786,7 +786,7 @@ pub fn gdn_chunk_prep_seg_bf16_step(gpu: &crate::Gpu, bufs: &[&backend_api::Devi
 /// The bf16 recurrence over every segment of the round, on the pool's state rows in place: `bufs` is `kd, qs, w, u, g_cs,
 /// intra, table` (read), then `state_pool` (`[slots, heads, 128, 128]`, read and written) and `out` (token-major rows, bf16 with
 /// `bf16`).
-pub fn gdn_chunk_loop_seg_bf16_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 9], heads: u32, dk: u32, dv: u32, table: &GdnSegmentTable, bf16: bool) -> Option<crate::Step> {
+pub fn gdn_chunk_loop_seg_bf16_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 9], heads: u32, dk: u32, dv: u32, table: &GdnSegmentTable, bf16: bool, pool_bf16: bool) -> Option<crate::Step> {
     if !gdn_chunk_prep_shape_ok(dk, dv, GDN_SEG_CHUNK_ROWS) {
         return None;
     }
@@ -795,7 +795,7 @@ pub fn gdn_chunk_loop_seg_bf16_step(gpu: &crate::Gpu, bufs: &[&backend_api::Devi
     let launch = backend_api::CudaLaunch { dynamic_shared_bytes: GDN_CHUNK_LOOP_BF16_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..backend_api::CudaLaunch::NONE };
     let id = gpu.native_kernel_launched(kernel, &GDN_CHUNK_LOOP_SEG_BINDINGS, launch)?;
     let blocks = table.segments * heads * GDN_CHUNK_LOOP_TC_SPLITS;
-    let params = [blocks, 0, dk, dv, 0, 0, heads, table.segments, heads * dk * dv, u32::from(bf16)];
+    let params = [blocks, 0, dk, dv, 0, 0, heads, table.segments, heads * dk * dv, u32::from(bf16) | if pool_bf16 { 2 } else { 0 }];
     gpu.step_native_sliced(id, bufs, &[(0, 0); 9], &params, blocks)
 }
 

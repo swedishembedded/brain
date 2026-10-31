@@ -48,6 +48,8 @@ pub struct GdnSegmentRound {
 pub struct GdnSegmentPools<'a> {
     pub state: &'a DeviceBuffer,
     pub hist: &'a DeviceBuffer,
+    /// The pools hold bf16 elements (two to a word) rather than f32 words: the kernels widen on load and round to nearest even on store.
+    pub bf16: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -132,6 +134,7 @@ pub fn gdn_mixer_segments_fwd(
         GdnConvLayout { rows: n, conv_dim, seq_len: n, key_dim, value_dim, kernel: shape.conv_kernel },
         table,
         bf16,
+        pools.bf16,
     )?;
 
     // The prep writes every word of its slots it reads back, so the scratch is not cleared.
@@ -141,7 +144,7 @@ pub fn gdn_mixer_segments_fwd(
     let prep = gdn_chunk_prep_seg_bf16_step(g, &[&query, &key, &value, bproj, aproj, w.a_log, w.dt_bias, &round.buf, &g_cs, &exp_g_cs, &u, &wm, &intra, &query_cm, &key_cm], layout, table, bf16)?;
     // Every row of a segment is written by the recurrence (a mixed round's decode rows are the caller's).
     let out = g.storage_uninit(words(n as u64 * value_dim as u64));
-    let recurrence = gdn_chunk_loop_seg_bf16_step(g, &[&key_cm, &query_cm, &wm, &u, &g_cs, &intra, &round.buf, pools.state, &out], nvh, khd, vhd, table, bf16)?;
+    let recurrence = gdn_chunk_loop_seg_bf16_step(g, &[&key_cm, &query_cm, &wm, &u, &g_cs, &intra, &round.buf, pools.state, &out], nvh, khd, vhd, table, bf16, pools.bf16)?;
 
     // Gated RMSNorm ("norm before gate"): RMSNorm(out) * weight, then * SiLU(z); one pass over the segments' rows.
     // (With `bf16` nothing stores it for the segments' rows; the buffer is the caller's to fill for the decode rows.)
