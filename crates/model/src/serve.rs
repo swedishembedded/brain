@@ -2459,6 +2459,8 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// over the prefilling sequences as [`Self::allot_prefill`] does. A decoder that speculates has the decode rows verify
     /// their drafts in the same forward ([`PagedDecoder::forward_mixed_verify`]).
     fn mixed_iteration(&mut self, limits: MixedLimits, active: &[usize], in_batch: &[bool], report: &mut StepReport) {
+        let lone_prompt = active.is_empty() && self.prefilling.len() == 1;
+        let limits = if lone_prompt { MixedLimits { max_rows: limits.lone_prompt_rows.max(limits.max_rows), ..limits } } else { limits };
         let target = self.dec.step_latency_target().map(|t| t.as_secs_f64());
         // Drafting comes first: the verify rows are decode rows of the forward, and the prompt slice is what the
         // target leaves after them.

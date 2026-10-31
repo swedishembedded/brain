@@ -34,7 +34,7 @@ const BLOCK: u32 = 8;
 const FIXED_SECS: f64 = 0.020;
 const PER_ROW_SECS: f64 = 0.0001;
 const TARGET: std::time::Duration = std::time::Duration::from_millis(45);
-const LIMITS: MixedLimits = MixedLimits { max_rows: 512, min_prompt_rows: 32, row_quantum: 1 };
+const LIMITS: MixedLimits = MixedLimits { max_rows: 512, lone_prompt_rows: 1024, min_prompt_rows: 32, row_quantum: 1 };
 
 #[derive(Default)]
 struct Log {
@@ -173,7 +173,7 @@ impl PagedDecoder for Toy {
         assert_eq!(cands, 0, "greedy only");
         let prompt_rows: usize = jobs.iter().map(|j| j.budget).sum();
         let rows = tables.len() + prompt_rows;
-        assert!(rows <= LIMITS.max_rows, "a forward of {rows} rows exceeds what the decoder takes");
+        assert!(rows <= LIMITS.lone_prompt_rows, "a forward of {rows} rows exceeds what the decoder takes");
         let prefilled: Vec<_> = jobs.iter_mut().map(|j| self.slice(j.table, j.prompt, j.budget)).collect();
         // The first token of a finished prompt comes out of the forward's own head pass.
         let first = prefilled.iter().map(|p| if let PrefillProgress::Done(h) = p { vec![(h[0] as u32, 0.0)] } else { Vec::new() }).collect();
@@ -298,9 +298,17 @@ fn a_prompt_advances_every_iteration_however_busy_decode_is() {
 }
 
 #[test]
-fn with_nothing_decoding_the_forward_is_filled() {
+fn with_nothing_decoding_a_lone_prompt_fills_the_wider_forward() {
     let (mut s, log) = scheduler(true);
     run(&mut s, &[(0, 1, 3000, 2)]);
+    let log = log.lock().unwrap();
+    assert_eq!(log.forwards[0], (0, LIMITS.lone_prompt_rows), "{:?}", log.forwards);
+}
+
+#[test]
+fn with_nothing_decoding_two_prompts_share_the_shared_forward() {
+    let (mut s, log) = scheduler(true);
+    run(&mut s, &[(0, 1, 3000, 2), (0, 2, 3000, 2)]);
     let log = log.lock().unwrap();
     assert_eq!(log.forwards[0], (0, LIMITS.max_rows), "{:?}", log.forwards);
 }
