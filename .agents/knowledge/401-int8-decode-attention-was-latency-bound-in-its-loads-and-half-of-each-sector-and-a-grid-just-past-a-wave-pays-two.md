@@ -20,7 +20,7 @@ Findings (`ncu --clock-control none` on the test binary, 64 x 8K):
 - One division and one block-table lookup a chunk instead of one per row: a chunk's 16 keys lie in one pool block when the block size is a multiple of 16.
 - The grid: splits of 8 tiles (1024 keys) made 512 blocks at 16 x 8K, 1.3 waves of 396 resident blocks. Grids cut finer lose to the fixed cost of a block (single-tile splits run
   at two thirds of the speed of eight-tile splits: query fragments, first loads in flight, records), so the cut is chosen by `waves * (tiles + 6)` over 1..32 tiles a split
-  (`flash_splits_native`).
+  (`flash_splits_kv8`).
 
 Measured, us a layer (GB/s of the roof), before -> now:
 

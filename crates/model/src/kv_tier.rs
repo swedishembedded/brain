@@ -669,27 +669,32 @@ fn flash_splits_pinned(cap: u32, n_kv_heads: u32) -> (u32, u32) {
     flash_splits_for(FLASH_TARGET_WORKGROUPS, cap, 1, n_kv_heads, true)
 }
 
-/// Blocks per multiprocessor the native decode kernel keeps resident (168 registers and two chunk stages bound it at
-/// three: `ptxas -v` and `FLASH_DECODE_KV8_DYNAMIC_SHARED_BYTES`).
-const FLASH_NATIVE_BLOCKS_PER_SM: u32 = 3;
+/// Blocks per multiprocessor a native decode dispatch aims for: the native kernel keeps several blocks resident per SM, and a
+/// decode read is latency bound until each SM has enough rows in flight, so its grid is cut finer than the WGSL tier's (which
+/// measured no gain from it: knowledge 350). The f32 and bf16 kernels.
+const FLASH_NATIVE_BLOCKS_PER_SM: u32 = 2;
 
-/// Most tiles a split of the native decode kernel walks.
-const FLASH_NATIVE_MAX_TILES_PER_SPLIT: u32 = 32;
+/// Blocks per multiprocessor the 8-bit kernels keep resident (168 registers and two chunk stages bound it at three: `ptxas -v`
+/// and `FLASH_DECODE_KV8_DYNAMIC_SHARED_BYTES`).
+const FLASH_KV8_BLOCKS_PER_SM: u32 = 3;
 
-/// What a block of the native decode kernel costs besides its keys, in tiles of 128 keys: its query fragments, the
+/// Most tiles a split of the 8-bit decode kernels walk.
+const FLASH_KV8_MAX_TILES_PER_SPLIT: u32 = 32;
+
+/// What a block of an 8-bit decode kernel costs besides its keys, in tiles of 128 keys: its query fragments, the
 /// first loads in flight before any compute, and its partial records. Measured: a grid of single-tile splits runs at
 /// two thirds of the speed of eight-tile splits.
-const FLASH_NATIVE_BLOCK_COST_TILES: u32 = 6;
+const FLASH_KV8_BLOCK_COST_TILES: u32 = 6;
 
-/// `(splits, tiles per split)` for the native decode kernel, which runs `slots` blocks at once: the cut that costs the
-/// fewest tile-times, `waves * (tiles + FLASH_NATIVE_BLOCK_COST_TILES)`. A wave lasts as long as its longest block, so a
+/// `(splits, tiles per split)` for the 8-bit decode kernels, which run `slots` blocks at once: the cut that costs the
+/// fewest tile-times, `waves * (tiles + FLASH_KV8_BLOCK_COST_TILES)`. A wave lasts as long as its longest block, so a
 /// grid just past a whole number of waves pays a nearly empty last wave (512 blocks on 396 slots is 1.3 waves, two paid
 /// for); a cut that lands the same keys just under a wave, or on many more, shorter blocks, does not.
-fn flash_splits_native(slots: u32, cap: u32, batch: u32, n_kv_heads: u32, pin_one: bool) -> (u32, u32) {
+fn flash_splits_kv8(slots: u32, cap: u32, batch: u32, n_kv_heads: u32, pin_one: bool) -> (u32, u32) {
     let tiles = cap.max(1).div_ceil(FLASH_TILE);
     let groups = (if pin_one { 1 } else { batch } * n_kv_heads).max(1);
-    let cost = |per: u32| u64::from((groups * tiles.div_ceil(per)).div_ceil(slots.max(1))) * u64::from(per + FLASH_NATIVE_BLOCK_COST_TILES);
-    let per_split = (1..=FLASH_NATIVE_MAX_TILES_PER_SPLIT).min_by_key(|&per| (cost(per), per)).expect("a non-empty range");
+    let cost = |per: u32| u64::from((groups * tiles.div_ceil(per)).div_ceil(slots.max(1))) * u64::from(per + FLASH_KV8_BLOCK_COST_TILES);
+    let per_split = (1..=FLASH_KV8_MAX_TILES_PER_SPLIT).min_by_key(|&per| (cost(per), per)).expect("a non-empty range");
     (tiles.div_ceil(per_split), per_split)
 }
 
@@ -813,9 +818,17 @@ impl KvKernels {
         let mut params = [s.batch, s.n_heads, s.n_kv_heads, s.head_dim, group, s.block_size, s.max_bt, n_splits, tiles_per_split];
         // A native kernel's grid fills the device several blocks deep (the split count is a free choice: every split
         // writes its own record, and the combine merges any number of them).
-        if g.native_kernel_for(decode, &params).is_some() {
-            let slots = g.caps().compute_units.map_or(FLASH_TARGET_WORKGROUPS, |cu| cu * FLASH_NATIVE_BLOCKS_PER_SM);
-            (params[7], params[8]) = flash_splits_native(slots, s.cap, s.batch, s.n_kv_heads, s.pin_splits);
+        let sms = g.caps().compute_units;
+        match g.native_kernel_for(decode, &params) {
+            Some("paged_flash_decode_gqa_hd256_kv8" | "paged_flash_decode_gqa_hd256_kvfp8") => {
+                let slots = sms.map_or(FLASH_TARGET_WORKGROUPS, |cu| cu * FLASH_KV8_BLOCKS_PER_SM);
+                (params[7], params[8]) = flash_splits_kv8(slots, s.cap, s.batch, s.n_kv_heads, s.pin_splits);
+            }
+            Some(_) => {
+                let target = sms.map_or(FLASH_TARGET_WORKGROUPS, |cu| cu * FLASH_NATIVE_BLOCKS_PER_SM);
+                (params[7], params[8]) = flash_splits_for(target, s.cap, s.batch, s.n_kv_heads, s.pin_splits);
+            }
+            None => {}
         }
         let n_splits = params[7];
         // Every (sequence, head, split) record is written, a split with no live key included, so the slab needs no clear.
@@ -970,21 +983,21 @@ mod tests {
         assert_ne!(flash_splits(8192, 8, 2), flash_splits(8192, 1, 2));
     }
 
-    /// The native cut covers every tile, keeps the single-sequence split independent of the batch when pinned, and
+    /// The 8-bit cut covers every tile, keeps the single-sequence split independent of the batch when pinned, and
     /// does not leave a nearly empty last wave: 16 sequences of 8K keys on 396 slots are one wave of 384 blocks, not
     /// the 512 blocks (1.3 waves) of the eight-tile cut.
     #[test]
-    fn the_native_cut_covers_the_keys_and_avoids_a_nearly_empty_last_wave() {
-        let slots = 132 * FLASH_NATIVE_BLOCKS_PER_SM;
+    fn the_kv8_cut_covers_the_keys_and_avoids_a_nearly_empty_last_wave() {
+        let slots = 132 * FLASH_KV8_BLOCKS_PER_SM;
         for (cap, batch, nkv) in [(1u32, 1u32, 4u32), (127, 16, 4), (8192, 16, 4), (16_384, 64, 4), (65_536, 64, 4), (131_072, 1, 4)] {
-            let (splits, per) = flash_splits_native(slots, cap, batch, nkv, false);
-            assert!((1..=FLASH_NATIVE_MAX_TILES_PER_SPLIT).contains(&per), "cap {cap}: {per} tiles a split");
+            let (splits, per) = flash_splits_kv8(slots, cap, batch, nkv, false);
+            assert!((1..=FLASH_KV8_MAX_TILES_PER_SPLIT).contains(&per), "cap {cap}: {per} tiles a split");
             assert!(splits * per >= cap.div_ceil(FLASH_TILE), "cap {cap} batch {batch}: {splits} x {per} tiles leave keys out");
         }
-        let (splits, _) = flash_splits_native(slots, 8192, 16, 4, false);
+        let (splits, _) = flash_splits_kv8(slots, 8192, 16, 4, false);
         assert!(16 * 4 * splits <= slots, "{splits} splits of 16 x 4 groups do not fit one wave of {slots}");
         for batch in 1..=8 {
-            assert_eq!(flash_splits_native(slots, 8192, batch, 4, true), flash_splits_native(slots, 8192, 1, 4, true));
+            assert_eq!(flash_splits_kv8(slots, 8192, batch, 4, true), flash_splits_kv8(slots, 8192, 1, 4, true));
         }
     }
 

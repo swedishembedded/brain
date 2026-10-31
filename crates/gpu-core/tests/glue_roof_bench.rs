@@ -122,4 +122,17 @@ fn glue_kernels_against_the_byte_roof_at_a_4096_row_round() {
     let (out, q, sc) = (gpu.storage(1), gpu.storage(u64::from(head_rows) * 32), gpu.storage(u64::from(head_rows)));
     let us = time_us(&gpu, &|| vec![gpu_core::provider::cuda::gdn_gated_norm_step(&gpu, &[&x, &w, &z, &out, &q, &sc], head_rows, 0, 1e-6, true, true).expect("offered")]);
     report("gdn_gated_norm bf16 in, E4M3 out (4096 rows x 48 heads)", us, n as f64 * (2.0 + 2.0 + 1.0) + f64::from(head_rows) * 4.0);
+
+    // A decode step's product kernels (the FP8 build: the fp32 product and its bf16 rows, no int8 packing): the MLP's SwiGLU and
+    // the attention's sigmoid gate at 16 and 64 sequences. Few elements, so this is latency, not bytes; the reference column
+    // is the same bytes at the roof.
+    for rows in [16u32, 64] {
+        for (mode, k, label) in [(1u32, 17408u32, "quant_epilogue silu*up"), (2, 6144, "quant_epilogue ctx*sigmoid")] {
+            let n = (rows * k) as usize;
+            let (a, b) = (filled(&gpu, n), filled(&gpu, n));
+            let (y, bf16, sx) = (gpu.storage(n as u64), gpu.storage(n as u64 / 2), gpu.storage(1));
+            let us = time_us(&gpu, &|| vec![gpu.fused_step(Fused::QuantEpilogue, &[&a, &b, &y, &bf16, &sx], &[k, rows, mode, 1 | 2]).expect("offered")]);
+            report(&format!("{label} f32 + bf16 out ({rows} rows x {k})"), us, n as f64 * (4.0 + 4.0 + 4.0 + 2.0));
+        }
+    }
 }

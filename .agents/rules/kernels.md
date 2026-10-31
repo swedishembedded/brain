@@ -344,6 +344,31 @@ existing caller. Assume nothing about units.
     ran 1.17-1.30 PFLOPS in isolation (not the 1.39 the mean suggested). Time the reference kernel in your own harness (same weights cycling, same card, back to back)
     before setting a target, and interleave A/B runs: the same brain kernel measured 1062 and 1184 TFLOPS depending on the card's power state.
 
+25. **A load instruction must cover whole 32-byte sectors, or a bypass copy fetches every sector twice.** The decode attention read a lane's 64 contiguous bytes of a row with four
+    16-byte loads: one instruction touched 16 bytes of each of 32 sectors and the next instruction found the rest in L1. `cp.async.cg` (no L1) turned that into 2x the L2
+    traffic (141 -> 173 us); reading the pieces lane-interleaved (a lane's piece i at `i * 64 + 16 * lane`) makes an instruction a 64- or 128-byte run (173 -> 132 us). The order of
+    channels inside a dot product is free, so only the other operand's layout and the output index move (knowledge 401). Check `sectors / request` in ncu for any strided gather.
+
+26. **A load-then-compute loop of 8-12 warps an SM is latency bound; stage the next chunk with `cp.async`, and let each lane read back what it copied.** Per-warp stages with
+    lane-interleaved slots need no barrier (the warp's own `cp.async.wait_group` and a `__syncwarp` for data another lane copied). Fewer stages and more resident blocks beat more
+    stages (two stages x three blocks beat three x two: the dependent MMA/convert chains need warps, not bytes). The stage ring is dynamic shared memory with an opt-in
+    (`CudaLaunch::shared_opt_in`); a kernel that fails to compile or load falls back to the WGSL tier silently, so run the native-selection assertion of its test after every edit.
+
+27. **A grid just past a whole number of waves pays the last wave in full.** 512 blocks on 396 resident slots is 1.3 waves, two paid for. Choose the split by `waves * (tiles + block cost)`
+    over the candidate splits (the block cost, measured, was 6 tiles of 128 keys: query fragments, first loads in flight, records) instead of aiming at "enough blocks".
+
+28. **An E4M3 quantiser divides by the same scale 128 times: take the reciprocal once.** The compiler's IEEE division is a reciprocal, a Newton step, a product, a residual, a correction, a
+    range check and a slow-path call (~13 instructions); `e4m3_quant_common.cuh` does the first two once a block and the other three per element, the same operations in the same
+    order, with the division kept for a scale outside the range where that sequence is exact, and `copysign` for the zero a fused product loses. Hold it to the host's f32 quotient
+    and a reference encoder over scales from subnormal to infinite (`e4m3_quant_native`), not to the kernel it replaces (they share the helper). A warp that walks three
+    consecutive blocks with every load first (the loads cannot move past a store through a pointer that may alias) took the SwiGLU pass 184 -> 148 us; eight blocks spilled
+    (220 us), one block 186.
+
+29. **Glue between two projections is bytes moved twice: find the interleaved layout that is read in place.** A gated attention layer's query projection interleaves [query | gate] per head; the chain
+    copied both halves out, normed and rotated the query in two passes, and ran the gate through a decode-regime kernel (506 + 435 us at 4096 rows, 22-45 % of the byte roof). One
+    pass that normalises, rotates and writes the query (the gate stays) and one that reads the gate in place and writes E4M3 rows are 104 + 71 us (knowledge 402). Reproduce a reduction
+    order exactly by giving the fused kernel the same lane map as the chain (`rmsnorm_rows`' 64 lanes), and hold it to the chain bit for bit.
+
 ## D. Constraints that will bite you
 
 - **A buffer a dispatch writes is bound ONCE.** wgpu tracks usage per buffer for the
