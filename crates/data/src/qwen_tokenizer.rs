@@ -457,20 +457,66 @@ impl QwenBpe {
     /// BPE the gaps. One pass over `text` through the [`SpecialMatcher`]: the
     /// cost is the BPE of the gaps plus O(text length x longest special), not
     /// a search per special.
+    ///
+    /// The cut into pieces is one serial scan (a piece's start depends on where the previous one ended); the BPE
+    /// of each piece does not depend on its neighbours, so a text of many pieces is encoded by several threads
+    /// over contiguous runs of them and the runs joined in order, which is exactly the serial encoding.
     fn encode_with_specials(&self, text: &str, out: &mut Vec<u32>) {
+        let mut items: Vec<Item> = Vec::new();
         let mut rest = text;
         while let Some((pos, len, id)) = self.specials.find(rest) {
-            for piece in self.pretokenize(&rest[..pos]) {
-                self.encode_piece(&piece, out);
-            }
-            out.push(id);
+            items.extend(self.pretokenize(&rest[..pos]).into_iter().map(Item::Piece));
+            items.push(Item::Special(id));
             rest = &rest[pos + len..];
         }
-        for piece in self.pretokenize(rest) {
-            self.encode_piece(&piece, out);
+        items.extend(self.pretokenize(rest).into_iter().map(Item::Piece));
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(items.len() / PIECES_PER_THREAD).min(MAX_ENCODE_THREADS);
+        if threads < 2 {
+            self.encode_items(&items, out);
+            return;
+        }
+        let runs: Vec<Vec<u32>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = items
+                .chunks(items.len().div_ceil(threads))
+                .map(|run| {
+                    scope.spawn(move || {
+                        let mut ids = Vec::with_capacity(run.len() + run.len() / 2);
+                        self.encode_items(run, &mut ids);
+                        ids
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic))).collect()
+        });
+        out.reserve(runs.iter().map(Vec::len).sum());
+        for run in runs {
+            out.extend(run);
+        }
+    }
+
+    fn encode_items(&self, items: &[Item], out: &mut Vec<u32>) {
+        for item in items {
+            match item {
+                Item::Piece(piece) => self.encode_piece(piece, out),
+                Item::Special(id) => out.push(*id),
+            }
         }
     }
 }
+
+/// One element of a text cut for encoding: a pre-token to BPE, or a special token already matched.
+enum Item {
+    Piece(String),
+    Special(u32),
+}
+
+/// Pieces per thread below which another thread costs more than it takes: a piece's BPE is a few microseconds and
+/// a thread's start about 50.
+const PIECES_PER_THREAD: usize = 2048;
+
+/// The most threads one encoding uses: the merge tables are shared read-only, but past this the memory system, not
+/// the cores, is the limit.
+const MAX_ENCODE_THREADS: usize = 16;
 
 /// Incremental detokenizer over one growing token sequence: the text of every
 /// token fed so far, in order, without re-decoding the earlier ones.
@@ -597,6 +643,21 @@ mod tests {
             "added_tokens": [{"content": "<pad>", "id": 2u32}],
         });
         QwenBpe::from_json_bytes(json.to_string().as_bytes()).unwrap()
+    }
+
+    /// A text of many pieces is encoded by several threads; the ids are those of encoding it a run at a time.
+    #[test]
+    fn a_long_text_encodes_the_same_in_parallel_as_in_runs() {
+        let json = serde_json::json!({
+            "model": { "vocab": {"a": 0u32, "b": 1u32, "c": 2u32, "ab": 3u32, "abc": 4u32, " ": 5u32}, "merges": ["a b", "ab c"] },
+            "added_tokens": [{"content": "<pad>", "id": 6u32}],
+        });
+        let t = QwenBpe::from_json_bytes(json.to_string().as_bytes()).unwrap();
+        let runs: Vec<String> = (0..40).map(|r| (0..(100 + r * 10)).map(|i| ["ab", "abc", "ba", "cab"][(i * 7 + r) % 4]).collect::<Vec<_>>().join(" ")).collect();
+        let text = runs.join("<pad>");
+        let serial: Vec<u32> = runs.iter().map(|r| t.encode(r)).collect::<Vec<_>>().join(&6);
+        assert!(text.split(' ').count() > 4 * PIECES_PER_THREAD, "the text must be long enough to be split");
+        assert_eq!(t.encode(&text), serial);
     }
 
     #[test]
