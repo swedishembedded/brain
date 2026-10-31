@@ -119,7 +119,7 @@ fn the_tma_decode_candidates_pass_the_admission_rule_on_the_served_shapes() {
         return;
     }
     let mut shapes = Vec::new();
-    for m in [17u32, 33, 48, 64] {
+    for m in [1u32, 2, 5, 8, 15, 16, 17, 33, 48, 64] {
         for (kg, n) in [(1280u32, 34816u32), (1280, 17408), (1280, 10240), (1280, 12288), (4352, 5120), (1536, 5120), (1280, 6144), (1280, 1000)] {
             shapes.push([m, kg, n]);
         }
@@ -189,7 +189,7 @@ fn fp8_batch_and_prefill_rate() {
         return;
     }
     let shapes = [("gate/up 5120x34816", 5120u32, 34816u32), ("gate 5120x17408", 5120, 17408), ("down 17408x5120", 17408, 5120), ("qkv 5120x10240", 5120, 10240), ("out 6144x5120", 6144, 5120)];
-    for rows in [&[32u32, 48, 64][..], &[512, 768, 2048, 8192][..]] {
+    for rows in [&[1u32, 4, 8, 16, 32, 48, 64][..], &[512, 768, 2048, 8192][..]] {
         for (label, k, n) in shapes {
             for &m in rows {
                 for (name, v) in gpu_core::native_time_fp8_shape(&gpu, [m, k / 4, n]) {

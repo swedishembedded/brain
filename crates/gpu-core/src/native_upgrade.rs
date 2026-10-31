@@ -378,9 +378,10 @@ fn serves_fp8_wgmma_swap<const NX: u32>(p: &[u32]) -> bool {
     fp8_shape(p).is_some_and(|(m, ..)| m > kernels_cuda::FP8_GEMV_F16_ROWS && m <= NX)
 }
 
-/// The tensor-memory-accelerator swap GEMM: 17 to 64 rows of x, a row of the output a whole number of 8-byte words.
+/// The tensor-memory-accelerator swap GEMM: 1 to 64 rows of x (the tensor map fills the tile's rows past them with zeros,
+/// and a row past them is never stored), a row of the output a whole number of 8-byte words.
 fn serves_fp8_wgmma_swap_tma(p: &[u32]) -> bool {
-    serves_fp8_wgmma_swap::<64>(p) && p[2].is_multiple_of(2)
+    fp8_shape(p).is_some_and(|(m, ..)| (1..=64).contains(&m)) && p[2].is_multiple_of(2)
 }
 
 /// Cluster shape and dynamic shared memory of the FP8 streaming candidate at a split of `split` blocks, `bn` weight rows
@@ -3398,9 +3399,11 @@ mod tests {
             }
         }
         let serving = |p: &[u32]| FP8_ROWS.iter().filter(|r| (r.serves)(p)).map(name).collect::<Vec<_>>();
-        // Decode of one token over a 5120 x 5120 weight (K = 5120 = 1280 words): the streaming kernels only.
+        // Decode of one token over a 5120 x 5120 weight (K = 5120 = 1280 words): the streaming kernels and the
+        // tensor-map swap GEMM (its zero-filled x tile costs no weight bytes; the tuner times them).
         let one = serving(&[1, 1280, 5120]);
-        assert!(!one.is_empty() && one.iter().all(|n| n.contains("stream") || n.contains("gemv_f16")), "{one:?}");
+        assert!(one.iter().any(|n| n.contains("swap_tma")), "{one:?}");
+        assert!(one.iter().all(|n| n.contains("stream") || n.contains("gemv_f16") || n.contains("swap_tma")), "{one:?}");
         // The f16 weight streams stop at 16 rows.
         assert!(serving(&[16, 1280, 5120]).iter().any(|n| n.contains("gemv_f16")));
         assert!(!serving(&[17, 1280, 5120]).iter().any(|n| n.contains("gemv_f16")));
