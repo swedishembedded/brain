@@ -3087,6 +3087,24 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/gdn_decode.cu"),
     },
     CudaKernel {
+        name: "gdn_decode_pool_stream_bf16",
+        // The streaming pooled decode over bf16 pools, asked for by name (`gpu_core::Fused`); see `cu/gdn_decode.cu`.
+        op: Op::RmsNorm,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_gdn_decode_pool_stream_bf16",
+        what: "the pooled decode step over bf16 pools built for the memory roof: a block a (key head, sequence), the block's state tiles arrive by bulk copy while the conv and gates run, a thread owns two adjacent state columns over half the rows; agrees with the exact body to f32 reassociation and bf16 storage rounding",
+        reported: "native:gdn_decode_pool_stream_bf16",
+        block_dim: 384,
+        // One block per (key head, batch row).
+        tile: (1, 1),
+        shared_bytes: 2 * 128 * 4 + 3 * 128 * 4 + 3 * 2 * 4 + 3 * 2 * 4 + 8 + 2 * 3 * 2 * 64 * 8,
+        programmatic: true,
+        src: include_str!("../cu/gdn_decode.cu"),
+    },
+    CudaKernel {
         name: "gdn_verify_pool",
         // The speculative verify form of `gdn_decode_pool`: a third entry point
         // of that kernel's file. A fused kernel asked for by name (see

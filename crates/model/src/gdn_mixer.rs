@@ -933,6 +933,13 @@ pub fn gdn_mixer_decode_pooled_fused_into(
     }
     let params = [shape.nkh, gdn.h, shape.group(), f(1e-6), f(shape.rms_eps), f(1.0f32 / (gdn.dk as f32).sqrt()), gdn.b, 0];
     let bufs = [mixed_qkv, w.conv1d_weight, pool.hist, bproj, aproj, w.a_log, w.dt_bias, pool.state, z, w.norm_weight, gated, pool.rows];
+    // A bf16 pool streams: one launch whose threads each own two state columns (the memory-roof build).
+    if pool.bf16 && pool.wide {
+        if let Some(step) = g.fused_step(gpu_core::Fused::GdnDecodePoolStreamBf16, &bufs, &params) {
+            g.submit(&[], &[step]);
+            return true;
+        }
+    }
     let wide = if pool.bf16 { gpu_core::Fused::GdnDecodePoolWideBf16 } else { gpu_core::Fused::GdnDecodePoolWide };
     if let Some(step) = pool.wide.then(|| g.fused_step(wide, &bufs, &params)).flatten() {
         g.submit(&[], &[step]);

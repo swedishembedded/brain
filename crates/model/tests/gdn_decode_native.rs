@@ -409,7 +409,7 @@ fn a_multi_row_launch_is_byte_identical_to_the_same_rows_one_step_at_a_time() {
     }
 }
 
-/// The occupancy-built candidate (`Fused::GdnDecodePoolWide`) against the exact body, for an f32 pool and for a bf16 pool: it
+/// The occupancy-built candidates (`Fused::GdnDecodePoolWide`, and the streaming `GdnDecodePoolStreamBf16` a bf16 pool takes at one to three value heads a key head) against the exact body, for an f32 pool and for a bf16 pool: it
 /// reassociates two sums per step, so the layer output and the state agree to f32 rounding (an f32 pool) or, for a bf16 pool
 /// whose stores round, to bf16 storage error; the conv windows are untouched by the reassociation and come out bit for bit.
 #[test]
@@ -428,7 +428,7 @@ fn the_wide_candidate_agrees_with_the_exact_body_within_a_stated_tolerance() {
     };
     let pack = |v: &[f32]| v.chunks(2).map(|p| f32::from_bits(u32::from(round(p[0])) | u32::from(round(p[1])) << 16)).collect::<Vec<f32>>();
     let unpack = |w: &[f32]| w.iter().flat_map(|x| [f32::from_bits(x.to_bits() << 16), f32::from_bits(x.to_bits() & 0xFFFF_0000)]).collect::<Vec<f32>>();
-    for (case, &(nkh, group, picked, pool_rows)) in [(2u32, 2u32, &[1u32][..], 3u32), (16, 2, &[5, 1, 7, 0, 3, 6], 8), (4, 1, &[2, 4, 0], 5)].iter().enumerate() {
+    for (case, &(nkh, group, picked, pool_rows)) in [(2u32, 2u32, &[1u32][..], 3u32), (16, 2, &[5, 1, 7, 0, 3, 6], 8), (4, 1, &[2, 4, 0], 5), (16, 3, &[6, 2, 9, 0, 4, 7, 1], 10)].iter().enumerate() {
         let (nvh, b) = (nkh * group, picked.len() as u32);
         let shape = GdnMixerShape { gdn: GdnShape { b, h: nvh, t: 1, dk, dv, chunk: 1 }, nkh, conv_kernel: kw, rms_eps: 1e-6 };
         let (value_dim, conv_dim) = (shape.value_dim(), shape.conv_dim());
@@ -549,11 +549,11 @@ fn gdn_decode_pool_production_shape() {
     }
     let (dk, dv, kw, nkh, group) = (128u32, 128u32, 4u32, 16u32, 3u32);
     let nvh = nkh * group;
-    for b in [1u32, 4, 16, 64] {
+    for (bf16, b) in [false, true].into_iter().flat_map(|t| [1u32, 4, 16, 64].map(move |b| (t, b))) {
         let shape = GdnMixerShape { gdn: GdnShape { b, h: nvh, t: 1, dk, dv, chunk: 1 }, nkh, conv_kernel: kw, rms_eps: 1e-6 };
         let (value_dim, conv_dim) = (shape.value_dim(), shape.conv_dim());
-        let state_len = (nvh * dk * dv) as usize;
-        let hist_len = (conv_dim * (kw - 1)) as usize;
+        let state_len = (nvh * dk * dv) as usize / if bf16 { 2 } else { 1 };
+        let hist_len = (conv_dim * (kw - 1)) as usize / if bf16 { 2 } else { 1 };
         let mut r = Lcg::new(7);
         let conv_w = g.storage_init("conv_w", &rnd(&mut r, (conv_dim * kw) as usize, 0.5));
         let a_log = g.storage_init("a_log", &rnd(&mut r, nvh as usize, 0.5));
@@ -569,7 +569,7 @@ fn gdn_decode_pool_production_shape() {
         let hi = g.storage_init("hist", &rnd(&mut r, b as usize * hist_len, 0.3));
         let rows = g.storage_init("rows", &(0..b).map(f32::from_bits).collect::<Vec<_>>());
         let launch = || {
-            let pool = GdnPoolRows { state: &st, hist: &hi, rows: &rows, gather: idx(&g, "pool_rows_gather2"), scatter: idx(&g, "pool_rows_scatter2"), fuse: true, bf16: false, wide: false };
+            let pool = GdnPoolRows { state: &st, hist: &hi, rows: &rows, gather: idx(&g, "pool_rows_gather2"), scatter: idx(&g, "pool_rows_scatter2"), fuse: true, bf16, wide: true };
             let gated = gdn_mixer_decode_state_fwd(&g, &ids(&g), &dec_ids(&g), &shape, &w, &mixed, &bp, &ap, &z, &GdnDecodeState::Pool(pool));
             g.poll_wait();
             gated
@@ -582,8 +582,8 @@ fn gdn_decode_pool_production_shape() {
         let times = g.kernel_times().unwrap_or_default();
         let total: f64 = times.iter().filter(|t| t.0.contains("gdn_")).map(|t| t.1 / 20.0 * 1e3).sum();
         for (name, ms, calls) in times.iter().filter(|t| t.0.contains("gdn_")) {
-            println!("batch {b:3}: {name} {:.1} us a launch ({calls} launches)", ms / *calls as f64 * 1e3);
+            println!("{} batch {b:3}: {name} {:.1} us a launch ({calls} launches)", if bf16 { "bf16" } else { "f32 " }, ms / *calls as f64 * 1e3);
         }
-        println!("batch {b:3}: total {total:.1} us a layer");
+        println!("{} batch {b:3}: total {total:.1} us a layer", if bf16 { "bf16" } else { "f32 " });
     }
 }

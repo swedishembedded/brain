@@ -2313,6 +2313,10 @@ pub enum Fused {
     /// value heads per key head. The same params and bindings.
     GdnDecodePoolWide,
     GdnDecodePoolWideBf16,
+    /// `gdn_decode_pool_stream_bf16`: [`Fused::GdnDecodePool`] over bf16 pools built for the memory roof (a thread owns two
+    /// state columns and streams all 128 rows through registers); agrees with the exact body to f32 reassociation and bf16
+    /// storage rounding. At most three value heads per key head. The same params and bindings.
+    GdnDecodePoolStreamBf16,
     /// `gdn_verify_pool`: [`Fused::GdnDecodePool`] for a speculative verify - each
     /// sequence of the batch takes `counts[bi]` (1..=8) consecutive steps, its
     /// inputs and outputs the rows `offs[bi] ..` of packed token arrays, and the
@@ -2672,6 +2676,7 @@ impl Fused {
             Fused::GdnConvPoolBf16 => "gdn_conv_pool_bf16",
             Fused::GdnRecurPool => "gdn_recur_pool",
             Fused::GdnRecurPoolBf16 => "gdn_recur_pool_bf16",
+            Fused::GdnDecodePoolStreamBf16 => "gdn_decode_pool_stream_bf16",
             Fused::GdnDecodePoolWide => "gdn_decode_pool_wide",
             Fused::GdnDecodePoolWideBf16 => "gdn_decode_pool_wide_bf16",
             Fused::GdnVerifyPool => "gdn_verify_pool",
@@ -2698,7 +2703,7 @@ impl Fused {
             Fused::AddRmsQuant | Fused::AddRmsQuantE4m3 => ADD_RMS_QUANT_BINDINGS,
             Fused::QuantEpilogue => QUANT_EPILOGUE_BINDINGS,
             Fused::GdnDecode => GDN_DECODE_BINDINGS,
-            Fused::GdnDecodePool | Fused::GdnDecodePoolBf16 | Fused::GdnDecodePoolWide | Fused::GdnDecodePoolWideBf16 => GDN_DECODE_POOL_BINDINGS,
+            Fused::GdnDecodePool | Fused::GdnDecodePoolBf16 | Fused::GdnDecodePoolWide | Fused::GdnDecodePoolWideBf16 | Fused::GdnDecodePoolStreamBf16 => GDN_DECODE_POOL_BINDINGS,
             Fused::GdnConvPool | Fused::GdnConvPoolBf16 => GDN_CONV_POOL_BINDINGS,
             Fused::GdnRecurPool | Fused::GdnRecurPoolBf16 => GDN_RECUR_POOL_BINDINGS,
             Fused::GdnVerifyPool => GDN_VERIFY_POOL_BINDINGS,
@@ -2736,7 +2741,7 @@ impl Fused {
             Fused::GdnDecodePoolWide | Fused::GdnDecodePoolWideBf16 => {
                 matches!(params, [nkh, nvh, group, _, _, _, b, _] if *nkh >= 1 && (1..=2).contains(group) && *nvh == nkh * group && *b >= 1)
             }
-            Fused::GdnDecodePool | Fused::GdnDecodePoolBf16 | Fused::GdnVerifyPool | Fused::GdnRecurPool | Fused::GdnRecurPoolBf16 => {
+            Fused::GdnDecodePool | Fused::GdnDecodePoolBf16 | Fused::GdnDecodePoolStreamBf16 | Fused::GdnVerifyPool | Fused::GdnRecurPool | Fused::GdnRecurPoolBf16 => {
                 matches!(params, [nkh, nvh, group, _, _, _, b, _] if *nkh >= 1 && (1..=3).contains(group) && *nvh == nkh * group && *b >= 1)
             }
             Fused::GdnConvPool | Fused::GdnConvPoolBf16 => matches!(params, [nkh, nvh, b] if *nkh >= 1 && *nvh >= *nkh && nvh % nkh == 0 && *b >= 1),
@@ -2790,7 +2795,7 @@ impl Fused {
         match self {
             Fused::AddRmsQuant | Fused::AddRmsQuantE4m3 | Fused::QuantEpilogue => params[1],
             Fused::GdnDecode => params[0],
-            Fused::GdnDecodePool | Fused::GdnDecodePoolBf16 | Fused::GdnDecodePoolWide | Fused::GdnDecodePoolWideBf16 | Fused::GdnVerifyPool => params[0] * params[6],
+            Fused::GdnDecodePool | Fused::GdnDecodePoolBf16 | Fused::GdnDecodePoolWide | Fused::GdnDecodePoolWideBf16 | Fused::GdnDecodePoolStreamBf16 | Fused::GdnVerifyPool => params[0] * params[6],
             // A block a (sequence, value head), and 256 channels a block.
             Fused::GdnRecurPool | Fused::GdnRecurPoolBf16 => params[1] * params[6],
             Fused::GdnConvPool | Fused::GdnConvPoolBf16 => (params[2] * (2 * params[0] + params[1]) * 128).div_ceil(256),
@@ -2839,6 +2844,8 @@ impl Fused {
             // The recurrence stages a head's whole 128 x 128 state in dynamic shared memory (f32, or bf16 at half the bytes).
             Fused::GdnRecurPool => CudaLaunch { dynamic_shared_bytes: kernels_cuda::GDN_RECUR_TILE_F32_BYTES, shared_opt_in: true, ..CudaLaunch::NONE },
             Fused::GdnRecurPoolBf16 => CudaLaunch { dynamic_shared_bytes: kernels_cuda::GDN_RECUR_TILE_F32_BYTES / 2, shared_opt_in: true, ..CudaLaunch::NONE },
+            // The streaming decode stages the bf16 states of up to three value heads of a key head.
+            Fused::GdnDecodePoolStreamBf16 => CudaLaunch { dynamic_shared_bytes: 3 * kernels_cuda::GDN_RECUR_TILE_F32_BYTES / 2, shared_opt_in: true, ..CudaLaunch::NONE },
             _ => CudaLaunch::NONE,
         }
     }
