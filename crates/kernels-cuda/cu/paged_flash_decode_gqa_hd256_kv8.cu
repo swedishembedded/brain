@@ -32,8 +32,16 @@
 //   O^T[256, heads] += V^T[256, 16 keys] . P^T[16 keys, heads (8)]               16 channel tiles
 // The first product's accumulator IS the second's B operand (row = head, columns = the quad's keys), so P never
 // leaves registers. The order of channels inside a dot product, and of keys inside a chunk, is free; it is chosen so
-// that every lane reads CONTIGUOUS bytes: a lane loads 64 bytes of each of its two key rows (channels 64 tig ..) and
-// 32 bytes of each of its four value rows (channels 32 gid ..), all as 16-byte loads, issued before any is used.
+// that every load instruction reads WHOLE 32-byte sectors: a lane copies 16-byte pieces of its two key rows (piece w at
+// channels 64 w + 16 tig, so the four lanes of a row read 64 contiguous bytes) and of its four value rows (pieces at
+// channels 16 gid and 128 + 16 gid, so the eight lanes of a row read 128 contiguous bytes). A strided 64-byte read per
+// lane touched half of 32 sectors per instruction, which a bypass copy pays twice (knowledge 401).
+//
+// THE PIPELINE. A chunk's bytes arrive by `cp.async` into the warp's own shared-memory stage (BRAIN_DECODE_STAGES of
+// them; the next chunk's copies are issued before the current one is computed). A lane reads back only what it copied
+// (the 16 pieces; the chunk's 32 scales are read by all lanes), so the only synchronisation is the warp's wait on its
+// copies and a `__syncwarp`. Past the live keys a copy of size 0 zero-fills. The same bytes hold the merge of the four
+// warps after the loop.
 //
 // NUMERICS. An int8 value is exact in f16 (byte permute into the mantissa of 1024, one subtract). The f32 query and
 // the f32 probabilities (times the value row scale) are split into an f16 high part and the f16 rounding of the

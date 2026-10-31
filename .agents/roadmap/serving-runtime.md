@@ -468,3 +468,19 @@ Mixed-iteration idle (knowledge 392, 2026-10-30): a prompt start no longer waits
   (vLLM 413|2.68); 1K chat sweep c1/4/16/64 82.2/258/567/789 -> 82.2/258/605/948 tok/s (median TTFT c16/c64 430/438 -> 893/1027 ms: the burst of 1K prompts is read in at 12.4K rows/s whole prompts first,
   while decode rows wait a 4096-row round). The long-context cells are bound by the prefill row rate (12.4K rows/s in a mixed round against vLLM 15-16K), not by the schedule.
 
+
+- 2026-10-31 (memory-bound kernels of the serving path to the byte roof; knowledge 401, 402; kernel rules 25-29): from an nsys of 8Kx16 (73 rounds of 4096 rows), the glue of a full-attention layer
+  (query split, QK norm, rotation, the output gate: ~1.3 ms a layer, 22-45 % of the roof) and the int8 decode attention (57-68 %) were the kernels furthest from their byte roof; the SwiGLU, norm front end,
+  gated norm and convolution are bound by instructions, not bytes. Landed, each bit-identical to what it replaces unless said: `gqa_qk_prep` (split + QK norm + rotation, the gate left in the
+  projection's output) 506 -> 104 us and `gate_mul_quant_e4m3_128` (ctx * sigmoid(gate) read in place, E4M3 rows out) 435 -> 71 us at 4096 rows; the E4M3 quantisers take one reciprocal a scale
+  (`e4m3_quant_common.cuh`) and the SwiGLU pass walks three 128-blocks a warp with every load first: `silu_mul_quant_e4m3_128` 195 -> 148 us (358 MB, 55 -> 71 % of 3.4 TB/s; issue slots 73-75 % busy,
+  62 instructions an element of `expf` and two IEEE divisions); int8/fp8 decode attention (`cp.async` stages of whole sectors, three blocks an SM, a wave-aware split cut, tolerance-gated as before)
+  us a layer 16x8K 141 -> 120, 16x32K 505 -> 393, 64x8K 509 -> 398, 64x32K 1896 -> 1464 (1.14-1.50x the KV byte time, was 1.48-1.76x). Kernel time of the 8Kx16 run 21.6 -> 20.5 s.
+  gpu0/gpu1 same-card A/B against afa0cb1de, tok/s (|TTFT p50 s): 8Kx1 71.4 -> 72.2 (0.65 -> 0.62), 8Kx16 276 -> 286 (1.46 -> 1.67; gpu1 273 -> 285, 1.48 -> 1.40), 8Kx64 330 -> 344 (gpu1 322 -> 339),
+  32Kx16 75.6 -> 78.7 (gpu1 73.6 -> 76.5), 64Kx4 31.3 -> 32.3 (gpu1 30.4 -> 31.4); 1K chat c1/4/16/64 81.9/255.9/602.2/948.0 -> 82.5/260.8/616.7/961.6, long (31K) TTFT 2861 -> 2724 ms.
+  Full matrix on gpu1 (vLLM | SGLang | brain): 8Kx16 339|326|288, 8Kx64 413|358|339, 16Kx16 188|172|156, 32Kx16 94|77|77, 32Kx64 96|77|79, 64Kx4 39|28|31, 64Kx64 42|30|34; brain's tok/s is below vLLM in all 16
+  cells (82-98 %) and TTFT is lower in the multi-stream cells up to 32Kx16 and at 64Kx4. W8K probe 1629 tok/s (1614). Open, by weight: the FP8 GEMMs (65 % of kernel time, not a glue kernel), prefill attention (8 %),
+  the GDN chunk kernels (6 %, tensor-core chains), the exponential-and-division kernels that stay at 50-70 % of the byte roof while bit-identical to their references (SwiGLU 4.7 %, convolution 1.9 %, gated
+  norm 1.3 %: approximate `ex2`/`rcp` forms would take ~30 us off the SwiGLU pass, not done: it changes bits), the xn f32 store + `cast_f32_bf16` of a Gated DeltaNet layer (~0.9 %: needs a bf16-only
+  activation the small gate GEMMs would have to prove they read), the two segment-row copies of a multi-prompt round (`concat_split`, `splice`: 0.6 %), the f32 `gdn_recur_pool` at 14 rows (36 us for 26 us of
+  bytes: 1.7 waves of 3 blocks an SM), decode attention at 16x8K (1.5x).
