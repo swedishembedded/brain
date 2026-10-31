@@ -45,15 +45,16 @@
 // The shared-memory layout of a block with `WGS` consumer warpgroups (2: both 64-column halves of the value dimension; 1: the half the block
 // is given): a two-stage ring of operand tiles and one output tile a warpgroup. The staged fp32 u tile holds only the block's own columns
 // and is padded to a conflict-free row stride for the accumulator-layout reads.
-template <int WGS>
+template <int WGS, bool FOLD, int STAGES = 2>
 struct WgLayout {
     static constexpr unsigned SU = (WGS == 2 ? D : 64) + 4;
-    static constexpr unsigned U_BYTES = MAXC * SU * 4;
+    // Folded form: u arrives as the prep's fp16 thread-order vectors, 8 KiB per warpgroup, copied as they are.
+    static constexpr unsigned U_BYTES = FOLD ? WGS * 8192 : MAXC * SU * 4;
     static constexpr unsigned DEC = STAGE_U + U_BYTES;  // folded form: scale exp(g_t) of each of the chunk's 64 tokens, then exp(g_last - g_t), then exp(g_last)
     static constexpr unsigned ES = DEC;
     static constexpr unsigned DD = ES + MAXC * 4;
     static constexpr unsigned BYTES = ((DD + MAXC * 4 + 16 + 1023) / 1024) * 1024;
-    static constexpr unsigned OFF_OUT = 2 * BYTES;
+    static constexpr unsigned OFF_OUT = STAGES * BYTES;
     static constexpr unsigned OFF_BAR = OFF_OUT + WGS * OUT_BYTES;
     static constexpr unsigned SMEM_BYTES = OFF_BAR + 64 + 1024;
 };
@@ -81,9 +82,9 @@ struct WgOperands {
 
 // One block's walk over `n_chunks` chunks of one value head. The state is read from / written to `state` (bf16 elements when
 // `state_bf16`), a [key][value column] matrix of the head.
-template <bool FOLD, int WGS, class ChunkAt>
+template <bool FOLD, int WGS, int STAGES, class ChunkAt>
 __device__ __forceinline__ void gdn_loop_wg_walk(const WgOperands& op, const unsigned int n_chunks, void* state, const bool state_bf16, const unsigned int half, ChunkAt chunk_at) {
-    using L = WgLayout<WGS>;
+    using L = WgLayout<WGS, FOLD, STAGES>;
     constexpr unsigned int NT = 128 * WGS;  // threads: every one also stages the next chunk's operands
     extern __shared__ unsigned char gw_smem_raw[];
     const unsigned int raw_addr = brain_smem_addr(gw_smem_raw);
@@ -98,7 +99,7 @@ __device__ __forceinline__ void gdn_loop_wg_walk(const WgOperands& op, const uns
     // the chunk's length read nothing and arrive as zeros.
     auto issue = [&](unsigned int ci) {
         const WgChunk ch = chunk_at(ci);
-        const unsigned int stage = base + (ci & 1u) * L::BYTES;
+        const unsigned int stage = base + (STAGES == 2 ? (ci & 1u) : 0u) * L::BYTES;
         const unsigned int C = ch.C;
         const unsigned long long rb = ch.row_base;
 #pragma unroll
@@ -113,13 +114,23 @@ __device__ __forceinline__ void gdn_loop_wg_walk(const WgOperands& op, const uns
             gw_cp16(stage + STAGE_Q + dst, qs + qk, bytes);
             gw_cp16(stage + STAGE_K + dst, kd + qk, bytes);
         }
-        // u: fp32 rows of the block's columns (128, or its 64) into the padded rows the consumers read in accumulator layout.
-        constexpr unsigned int UV = WGS == 2 ? 32u : 16u;  // 16-byte vectors a row
+        // u: fp32 rows of the block's columns (128, or its 64) into the padded rows the consumers read in accumulator layout, or in the folded
+        // form the fp16 thread-order vectors of the block's warpgroups as one contiguous copy.
+        if (FOLD) {
+            const unsigned short* const uh = reinterpret_cast<const unsigned short*>(u) + (rb / MAXC) * (MAXC * D) + (WGS == 2 ? 0u : 4096u * half);
 #pragma unroll
-        for (int it = 0; it < 64 * UV / NT; ++it) {
-            const unsigned int e = tid + it * NT;
-            const unsigned int r = e / UV, c = e % UV;
-            gw_cp16(stage + STAGE_U + (r * L::SU + c * 4) * 4u, u + (r < C ? (rb + r) * D + (WGS == 2 ? 0u : 64u * half) + c * 4 : 0), r < C ? 16u : 0u);
+            for (int it = 0; it < WGS * 512 / NT; ++it) {
+                const unsigned int e = tid + it * NT;
+                gw_cp16(stage + STAGE_U + 16u * e, uh + 8u * e, 16u);
+            }
+        } else {
+            constexpr unsigned int UV = WGS == 2 ? 32u : 16u;  // 16-byte vectors a row
+#pragma unroll
+            for (int it = 0; it < 64 * UV / NT; ++it) {
+                const unsigned int e = tid + it * NT;
+                const unsigned int r = e / UV, c = e % UV;
+                gw_cp16(stage + STAGE_U + (r * L::SU + c * 4) * 4u, u + (r < C ? (rb + r) * D + (WGS == 2 ? 0u : 64u * half) + c * 4 : 0), r < C ? 16u : 0u);
+            }
         }
         // intra: 64 x 64 bf16, one atom column. A full chunk's rows are 128 bytes (vector copies); a short chunk's rows are C
         // elements apart and gathered.
@@ -183,12 +194,12 @@ __device__ __forceinline__ void gdn_loop_wg_walk(const WgOperands& op, const uns
 
     const unsigned int out_tile = base + L::OFF_OUT + wgi * OUT_BYTES;
     for (unsigned int ci = 0; ci < n_chunks; ++ci) {
-        const unsigned int s = ci & 1u;
+        const unsigned int s = STAGES == 2 ? (ci & 1u) : 0u;
         const WgChunk ch = chunk_at(ci);
         const unsigned int C = ch.C;
         const unsigned int stage = base + s * L::BYTES;
         // The next chunk's operands stream in while this one computes.
-        if (ci + 1 < n_chunks) { issue(ci + 1); }
+        if (STAGES == 2 && ci + 1 < n_chunks) { issue(ci + 1); }
 
         // S^T as the bf16 A operand of the first two products (the state entering the chunk).
         unsigned int sb[8][4];
@@ -201,11 +212,26 @@ __device__ __forceinline__ void gdn_loop_wg_walk(const WgOperands& op, const uns
         }
         // u^T in the accumulator layout, the start of v_new^T = u^T - S^T w^T.
         float va[32], qa[32];
-        const float* const us = reinterpret_cast<const float*>(gen + s * L::BYTES + STAGE_U);
+        if (FOLD) {
+            // This thread's 32 values, four 16-byte vectors lane after lane, fp16.
+            const unsigned char* const uv = gen + s * L::BYTES + STAGE_U + (wgi * 4 + warp) * 2048u + lane * 16u;
 #pragma unroll
-        for (int j = 0; j < 8; ++j) {
+            for (int v = 0; v < 4; ++v) {
+                uint4 p;
+                asm volatile("ld.shared.v4.b32 {%0, %1, %2, %3}, [%4];\n" : "=r"(p.x), "=r"(p.y), "=r"(p.z), "=r"(p.w) : "r"(brain_smem_addr(uv + v * 512)));
+                const unsigned int w4[4] = {p.x, p.y, p.z, p.w};
 #pragma unroll
-            for (int e = 0; e < 4; ++e) { va[4 * j + e] = us[(8 * j + 2 * t4 + (e & 1)) * L::SU + (WGS == 2 ? 64 * cwg : 0u) + 16 * warp + g + 8 * (e >> 1)]; }
+                for (int k = 0; k < 4; ++k) {
+                    asm("{\n.reg .b16 lo, hi;\nmov.b32 {lo, hi}, %2;\ncvt.f32.f16 %0, lo;\ncvt.f32.f16 %1, hi;\n}\n" : "=f"(va[8 * v + 2 * k]), "=f"(va[8 * v + 2 * k + 1]) : "r"(w4[k]));
+                }
+            }
+        } else {
+            const float* const us = reinterpret_cast<const float*>(gen + s * L::BYTES + STAGE_U);
+#pragma unroll
+            for (int j = 0; j < 8; ++j) {
+#pragma unroll
+                for (int e = 0; e < 4; ++e) { va[4 * j + e] = us[(8 * j + 2 * t4 + (e & 1)) * L::SU + (WGS == 2 ? 64 * cwg : 0u) + 16 * warp + g + 8 * (e >> 1)]; }
+            }
         }
         gw_fence();
 #pragma unroll
@@ -296,7 +322,14 @@ __device__ __forceinline__ void gdn_loop_wg_walk(const WgOperands& op, const uns
             }
         }
         // The staged chunk is visible to every thread and no product still reads the slot the next staging will overwrite.
-        if (ci + 1 < n_chunks) { publish(); }
+        if (ci + 1 < n_chunks) {
+            if (STAGES == 1) {
+                // One stage: every thread is done with the tiles before the next chunk overwrites them.
+                __syncthreads();
+                issue(ci + 1);
+            }
+            publish();
+        }
     }
 
     // The state leaves as it arrived.
@@ -348,7 +381,7 @@ extern "C" __global__ void __launch_bounds__(WGT, 1) brain_gdn_chunk_loop_wg(con
         }
         return ch;
     };
-    gdn_loop_wg_walk<false, 2>(op, n_chunks, state, false, 0u, chunk_at);
+    gdn_loop_wg_walk<false, 2, 2>(op, n_chunks, state, false, 0u, chunk_at);
 }
 
 // The recurrence of every prompt segment of a round in one launch, on the state rows of the pools themselves (the contract of
@@ -393,9 +426,9 @@ extern "C" __global__ void __launch_bounds__(WGT, 1) brain_gdn_chunk_loop_seg_wg
     const unsigned long long state_at = slot * state_words + (unsigned long long)head * D * D;
     void* const state = state_bf16 ? static_cast<void*>(reinterpret_cast<unsigned short*>(state_pool) + state_at) : static_cast<void*>(state_pool + state_at);
     if (fold) {
-        gdn_loop_wg_walk<true, 2>(op, n_chunks, state, state_bf16, 0u, chunk_at);
+        gdn_loop_wg_walk<true, 2, 2>(op, n_chunks, state, state_bf16, 0u, chunk_at);
     } else {
-        gdn_loop_wg_walk<false, 2>(op, n_chunks, state, state_bf16, 0u, chunk_at);
+        gdn_loop_wg_walk<false, 2, 2>(op, n_chunks, state, state_bf16, 0u, chunk_at);
     }
 }
 
@@ -437,8 +470,50 @@ extern "C" __global__ void __launch_bounds__(128, 1) brain_gdn_chunk_loop_seg_wg
     const unsigned long long state_at = slot * state_words + (unsigned long long)head * D * D;
     void* const state = state_bf16 ? static_cast<void*>(reinterpret_cast<unsigned short*>(state_pool) + state_at) : static_cast<void*>(state_pool + state_at);
     if (fold) {
-        gdn_loop_wg_walk<true, 1>(op, n_chunks, state, state_bf16, half, chunk_at);
+        gdn_loop_wg_walk<true, 1, 2>(op, n_chunks, state, state_bf16, half, chunk_at);
     } else {
-        gdn_loop_wg_walk<false, 1>(op, n_chunks, state, state_bf16, half, chunk_at);
+        gdn_loop_wg_walk<false, 1, 2>(op, n_chunks, state, state_bf16, half, chunk_at);
     }
+}
+
+// `brain_gdn_chunk_loop_seg_wg_half` with a single stage of operand tiles, so three blocks share a multiprocessor: the form for rounds of
+// many short segments, where the blocks outnumber the multiprocessors and each is short, and prologue, epilogue and waves matter more than
+// overlapping a chunk's staging with the previous chunk's products. Contract and buffers as above.
+extern "C" __global__ void __launch_bounds__(128, 3) brain_gdn_chunk_loop_seg_wg_lean(const unsigned int* params, const unsigned short* kd, const unsigned short* qs,
+                                                                                    const unsigned short* w, const float* u, const float* g_cs,
+                                                                                    const unsigned short* intra, const unsigned int* table, float* state_pool, float* out) {
+    const unsigned int blocks = params[0];
+    const unsigned int H = params[6], nseg = params[7];
+    const unsigned long long state_words = params[8];
+    const bool out_bf16 = (params[9] & 1u) != 0u;
+    const bool state_bf16 = (params[9] & 2u) != 0u;
+    const bool fold = (params[9] & 4u) != 0u;
+    const unsigned long long key_dim = params[10];
+    const unsigned int group = max(params[11], 1u);
+    const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
+    if (blk >= blocks) { return; }  // block-uniform
+    const unsigned int half = blk & 1u;
+    const unsigned int seg = (blk >> 1) / H, head = (blk >> 1) % H;
+    const unsigned int* sg = table + 4 * seg;
+    const unsigned int rows = sg[1], slot = sg[2], chunk0 = sg[3];
+    const unsigned int n_chunks = (rows + MAXC - 1) / MAXC;
+    const unsigned int* chunks = table + 4 * nseg;
+
+    const WgOperands op = {kd, qs, w, intra, u, g_cs, out, out_bf16, __uint_as_float(params[5])};
+    auto chunk_at = [&](unsigned int ci) {
+        const unsigned int global = chunk0 + ci;
+        WgChunk ch;
+        ch.C = chunks[2 * global + 1];
+        ch.row_base = ((unsigned long long)global * H + head) * MAXC;
+        ch.cc_base = ch.row_base * MAXC;
+        ch.out_stride = (unsigned long long)H * D;
+        ch.out_row = ((unsigned long long)chunks[2 * global] * H + head) * D;
+        ch.qk_at = (unsigned long long)chunks[2 * global] * key_dim + (unsigned long long)(head / group) * D;
+        ch.qk_stride = key_dim;
+        return ch;
+    };
+    const unsigned long long state_at = slot * state_words + (unsigned long long)head * D * D;
+    void* const state = state_bf16 ? static_cast<void*>(reinterpret_cast<unsigned short*>(state_pool) + state_at) : static_cast<void*>(state_pool + state_at);
+    // Only the folded form is offered (its smem footprint is what the launch reserves).
+    if (fold) { gdn_loop_wg_walk<true, 1, 1>(op, n_chunks, state, state_bf16, half, chunk_at); }
 }

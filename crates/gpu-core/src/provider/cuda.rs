@@ -605,6 +605,10 @@ const GDN_CHUNK_LOOP_WG_DYNAMIC_SHARED_BYTES: u32 = 2 * 92160 + 2 * 8192 + 64 + 
 /// intra 8 KiB, the padded fp32 u tile 17 KiB, the folded form's decay vectors), one 8 KiB output tile, the barriers and 1 KiB to align.
 const GDN_CHUNK_LOOP_WG_HALF_DYNAMIC_SHARED_BYTES: u32 = 2 * 75776 + 8192 + 64 + 1024;
 
+/// Dynamic shared memory of `gdn_chunk_loop_seg_wg_lean`: one stage of the folded form (the same tiles with u as an 8 KiB fp16 copy), an
+/// 8 KiB output tile, the barriers and 1 KiB to align; three blocks fit a multiprocessor.
+const GDN_CHUNK_LOOP_WG_LEAN_DYNAMIC_SHARED_BYTES: u32 = 66560 + 8192 + 64 + 1024;
+
 /// [`gdn_chunk_loop_bf16_step`] on Hopper warpgroup tensor cores (`gdn_chunk_loop_wg`): the same ten buffers and contract, the state held
 /// in registers across the walk. `None` below compute capability 9.0 (the caller keeps the `mma.sync` form).
 #[allow(clippy::too_many_arguments)]
@@ -867,10 +871,13 @@ pub fn gdn_chunk_loop_seg_bf16_step(gpu: &crate::Gpu, bufs: &[&backend_api::Devi
     }
     let cc = gpu.caps().arch.compute_capability?;
     if gdn_seg_loop_folds(gpu, bf16) {
-        let kernel = kernels_cuda::get("gdn_chunk_loop_seg_wg_half").filter(|k| k.min_cc <= cc)?;
-        let launch = backend_api::CudaLaunch { dynamic_shared_bytes: GDN_CHUNK_LOOP_WG_HALF_DYNAMIC_SHARED_BYTES, shared_opt_in: true, arch: backend_api::ArchFeatures::Required, ..backend_api::CudaLaunch::NONE };
-        let id = gpu.native_kernel_launched(kernel, &GDN_CHUNK_LOOP_SEG_BINDINGS, launch)?;
         let blocks = table.segments * heads * 2;
+        // More blocks than multiprocessors (many short segments): the single-stage form lets three share one and the round runs in one wave.
+        let lean = gpu.caps().compute_units.is_some_and(|sms| blocks > sms) && kernels_cuda::get("gdn_chunk_loop_seg_wg_lean").is_some_and(|k| k.min_cc <= cc);
+        let (kernel, smem) = if lean { ("gdn_chunk_loop_seg_wg_lean", GDN_CHUNK_LOOP_WG_LEAN_DYNAMIC_SHARED_BYTES) } else { ("gdn_chunk_loop_seg_wg_half", GDN_CHUNK_LOOP_WG_HALF_DYNAMIC_SHARED_BYTES) };
+        let kernel = kernels_cuda::get(kernel).filter(|k| k.min_cc <= cc)?;
+        let launch = backend_api::CudaLaunch { dynamic_shared_bytes: smem, shared_opt_in: true, arch: backend_api::ArchFeatures::Required, ..backend_api::CudaLaunch::NONE };
+        let id = gpu.native_kernel_launched(kernel, &GDN_CHUNK_LOOP_SEG_BINDINGS, launch)?;
         let flags = u32::from(bf16) | if pool_bf16 { 2 } else { 0 } | 4;
         let params = [blocks, 0, dk, dv, 0, l.scale.to_bits(), heads, table.segments, heads * dk * dv, flags, heads / l.group * dk, l.group];
         return gpu.step_native_sliced(id, bufs, &[(0, 0); 9], &params, blocks);

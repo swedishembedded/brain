@@ -118,25 +118,33 @@ fn round_of_three() -> Vec<GdnSegmentSpan> {
     vec![GdnSegmentSpan { row0: 0, rows: 300, slot: 0 }, GdnSegmentSpan { row0: 300, rows: 256, slot: 1 }, GdnSegmentSpan { row0: 556, rows: 144, slot: 2 }]
 }
 
+/// A round of many short segments: more blocks than multiprocessors, the single-stage form of the warpgroup recurrence.
+fn round_of_twelve() -> Vec<GdnSegmentSpan> {
+    (0..12).map(|i| GdnSegmentSpan { row0: i * 70, rows: 70, slot: i }).collect()
+}
+
 #[test]
 fn the_warpgroup_recurrence_agrees_with_the_mma_one_over_a_round_of_segments() {
     let _forced = FORCED_SLOT.lock().unwrap_or_else(|e| e.into_inner());
-    let spans = round_of_three();
-    gpu_core::force_candidate("gdn_prefill_loop", "mma");
-    let mma = bench("mma", &spans);
-    gpu_core::force_candidate("gdn_prefill_loop", "wg");
-    let wg = bench("wg", &spans);
-    gpu_core::clear_forced_candidates();
-    let (Some(mma), Some(wg)) = (mma, wg) else { return };
-    let (out, state) = (rel_rms(&wg.0, &mma.0, true), rel_rms(&wg.1, &mma.1, false));
-    assert!(out < 4.0 / 512.0 && state < 4.0 / 512.0, "output {out:.2e}, state {state:.2e}");
+    for spans in [round_of_three(), round_of_twelve()] {
+        gpu_core::force_candidate("gdn_prefill_loop", "mma");
+        let mma = bench("mma", &spans);
+        gpu_core::force_candidate("gdn_prefill_loop", "wg");
+        let wg = bench("wg", &spans);
+        gpu_core::clear_forced_candidates();
+        let (Some(mma), Some(wg)) = (mma, wg) else { return };
+        let (out, state) = (rel_rms(&wg.0, &mma.0, true), rel_rms(&wg.1, &mma.1, false));
+        assert!(out < 4.0 / 512.0 && state < 4.0 / 512.0, "{} segments: output {out:.2e}, state {state:.2e}", spans.len());
+    }
 }
 
 #[test]
 #[ignore = "a bench at the production shape, run by hand"]
 fn the_serving_prefill_layer_at_8k_tokens_and_in_a_700_row_round() {
     let _forced = FORCED_SLOT.lock().unwrap_or_else(|e| e.into_inner());
-    let rounds: [(&str, Vec<GdnSegmentSpan>); 2] = [
+    let rounds: [(&str, Vec<GdnSegmentSpan>); 4] = [
+        ("one 64-row segment", vec![GdnSegmentSpan { row0: 0, rows: 64, slot: 0 }]),
+        ("one 320-row segment", vec![GdnSegmentSpan { row0: 0, rows: 320, slot: 0 }]),
         ("one 8K segment", vec![GdnSegmentSpan { row0: 0, rows: 8192, slot: 0 }]),
         ("700-row round", round_of_three()),
     ];
@@ -173,7 +181,7 @@ fn unpack_bf16(words: &[f32], n: usize) -> Vec<f32> {
 
 /// The bf16 prep (bf16 tensor-core products, `gdn_chunk_prep_tok_bf16`) against the exact one (three-pass TF32,
 /// `gdn_chunk_prep_tok_tc`) on the same inputs: every tensor the recurrence reads agrees to a few bf16 units of relative
-/// rms error (the cumulative decay, which both forms compute alike, exactly). The normalised rows the two forms hand the
+/// rms error (the cumulative decay, which the two forms sum in a different order, to a few fp32 ulps). The normalised rows the two forms hand the
 /// recurrence are different tensors (the bf16 form scales them), so they are not compared.
 #[test]
 fn the_bf16_prep_agrees_with_the_exact_prep_to_bf16_resolution() {
@@ -209,7 +217,7 @@ fn the_bf16_prep_agrees_with_the_exact_prep_to_bf16_resolution() {
     let exact = run(false);
     let fast = run(true);
     let err = |a: &[f32], r: &[f32]| rel_rms(a, r, false);
-    let report = [("g_cs", err(&fast.0, &exact.0), 1e-6), ("u", err(&fast.1, &exact.1), 4.0 / 512.0), ("w", err(&fast.2, &exact.2), 4.0 / 512.0), ("intra", err(&fast.3, &exact.3), 4.0 / 512.0)];
+    let report = [("g_cs", err(&fast.0, &exact.0), 1e-5), ("u", err(&fast.1, &exact.1), 4.0 / 512.0), ("w", err(&fast.2, &exact.2), 4.0 / 512.0), ("intra", err(&fast.3, &exact.3), 4.0 / 512.0)];
     for (name, e, limit) in report {
         println!("   prep {name}: relative rms error {e:.3e} (limit {limit:.1e})");
         assert!(e <= limit, "{name}: {e:.3e} > {limit:.1e}");

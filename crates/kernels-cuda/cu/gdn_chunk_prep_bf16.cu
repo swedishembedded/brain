@@ -85,8 +85,10 @@ __device__ __forceinline__ void brain_cp16(void* dst, const void* src, unsigned 
 // Rows of normalised bf16 `src` (stride `stride`, element offset `src_at`) into `tile` (the rows past C zero) by `cp.async`, one commit group.
 __device__ __forceinline__ void brain_copy_rows_bf16(unsigned short* tile, const float* src, unsigned long long src_at, unsigned long long stride, unsigned int C) {
     const unsigned short* const s = reinterpret_cast<const unsigned short*>(src);
-    for (unsigned int e = threadIdx.x; e < MAXC * (D / 8); e += THREADS) {
-        const unsigned int r = e >> 4, c = e & 15u;
+    const unsigned int c = threadIdx.x & 15u, r0 = threadIdx.x >> 4;  // a thread keeps one 16-byte column; each pass moves 16 rows
+#pragma unroll
+    for (unsigned int it = 0; it < MAXC / (THREADS / 16); ++it) {
+        const unsigned int r = r0 + it * (THREADS / 16);
         brain_cp16(tile + r * SKH + c * 8, s + (r < C ? src_at + r * stride + c * 8 : 0), r < C ? 16u : 0u);
     }
     asm volatile("cp.async.commit_group;\n" ::: "memory");
@@ -143,6 +145,13 @@ __device__ __forceinline__ void brain_acc_to_a_split(const float (&t0)[4], const
     }
 }
 
+// Two floats as fp16 halves (`lo` in the low half), round to nearest even.
+__device__ __forceinline__ unsigned int brain_pack_f16(float lo, float hi) {
+    unsigned int d;
+    asm("cvt.rn.f16x2.f32 %0, %1, %2;\n" : "=r"(d) : "f"(hi), "f"(lo));
+    return d;
+}
+
 __device__ __forceinline__ float brain_ex2(float x) {
     float y;
     asm("ex2.approx.ftz.f32 %0, %1;\n" : "=f"(y) : "f"(x));
@@ -185,7 +194,10 @@ __device__ __forceinline__ void brain_gdn_prep_chunk(const PrepOperands& a, cons
         brain_copy_rows_bf16(sKb, a.key, key_at, qk_stride, C);
         brain_copy_rows_bf16(sXb, a.query, query_at, qk_stride, C);
     }
-    for (unsigned int i = tid; i < MAXC * SC; i += THREADS) { sA[i] = 0.0f; }
+    // A short chunk leaves attn0 entries unwritten: zero them (a full chunk's epilogue writes every entry the solve reads).
+    if (C < MAXC) {
+        for (unsigned int i = tid; i < MAXC * SC; i += THREADS) { sA[i] = 0.0f; }
+    }
     if (tid < MAXC) {
         float b = 0.0f, gate = 0.0f;
         if (tid < C) {
@@ -201,20 +213,18 @@ __device__ __forceinline__ void brain_gdn_prep_chunk(const PrepOperands& a, cons
         sg[tid] = gate;
     }
     __syncthreads();
-    // The serial sum `gdn_chunk_cumsum_step` performs, so g_cs is bit-identical: one thread, the whole row in registers.
-    if (tid == 0) {
-        float v[MAXC];
+    // The cumulative decay: a warp scan, two rows a lane (the additions are reassociated against `gdn_chunk_cumsum_step`'s serial sum,
+    // a few fp32 ulps; the rows past the chunk hold zero so the scan runs over all 64).
+    if (tid < 32u) {
+        const float2 pair = *reinterpret_cast<const float2*>(sg + 2 * tid);
+        float local = pair.x + pair.y, run = local;
 #pragma unroll
-        for (int i = 0; i < MAXC; i += 4) {
-            const float4 x = *reinterpret_cast<const float4*>(sg + i);
-            v[i] = x.x; v[i + 1] = x.y; v[i + 2] = x.z; v[i + 3] = x.w;
+        for (int o = 1; o < 32; o <<= 1) {
+            const float up = __shfl_up_sync(0xffffffffu, run, o);
+            if (tid >= static_cast<unsigned int>(o)) { run += up; }
         }
-#pragma unroll
-        for (int i = 1; i < MAXC; ++i) {
-            if (static_cast<unsigned int>(i) < C) { v[i] = v[i] + v[i - 1]; }
-        }
-#pragma unroll
-        for (int i = 0; i < MAXC; i += 4) { *reinterpret_cast<float4*>(sg + i) = make_float4(v[i], v[i + 1], v[i + 2], v[i + 3]); }
+        const float before = run - local;
+        *reinterpret_cast<float2*>(sg + 2 * tid) = make_float2(before + pair.x, run);
     }
     __syncthreads();
     if (tid < MAXC) {
@@ -289,28 +299,41 @@ __device__ __forceinline__ void brain_gdn_prep_chunk(const PrepOperands& a, cons
             lc[2 * t] = sg[nh * 32u + t * 8 + 2 * t4] * kLog2e;
             lc[2 * t + 1] = sg[nh * 32u + t * 8 + 2 * t4 + 1] * kLog2e;
         }
-        const bool even_rows = (C & 1u) == 0u;
+        if (C == MAXC) {
+            // A full chunk: no bounds, aligned 8-byte and 4-byte stores.
 #pragma unroll
-        for (int t = 0; t < 4; ++t) {
+            for (int t = 0; t < 4; ++t) {
 #pragma unroll
-            for (int h2 = 0; h2 < 2; ++h2) {
-                const unsigned int r = h2 ? r1 : r0;
-                const float lr = h2 ? lr1 : lr0, br = h2 ? br1 : br0;
-                const unsigned int col0 = nh * 32u + t * 8 + 2 * t4;
-                float dm[2], at[2], it[2];
-#pragma unroll
-                for (int e = 0; e < 2; ++e) {
-                    const unsigned int col = col0 + e;
-                    dm[e] = col <= r ? brain_ex2(lr - lc[2 * t + e]) : 0.0f;
-                    at[e] = col < r ? -br * acc_g[t][2 * h2 + e] * dm[e] : 0.0f;
-                    it[e] = scale * acc_i[t][2 * h2 + e] * dm[e];
+                for (int h2 = 0; h2 < 2; ++h2) {
+                    const unsigned int r = h2 ? r1 : r0;
+                    const float lr = h2 ? lr1 : lr0, nbr = -(h2 ? br1 : br0);
+                    const unsigned int col0 = nh * 32u + t * 8 + 2 * t4;
+                    const float d0 = col0 <= r ? brain_ex2(lr - lc[2 * t]) : 0.0f;
+                    const float d1 = col0 + 1 <= r ? brain_ex2(lr - lc[2 * t + 1]) : 0.0f;
+                    const float g0 = acc_g[t][2 * h2], g1 = acc_g[t][2 * h2 + 1], q0 = acc_i[t][2 * h2], q1 = acc_i[t][2 * h2 + 1];
+                    *reinterpret_cast<float2*>(sA + r * SC + col0) = make_float2(col0 < r ? nbr * d0 * g0 : 0.0f, col0 + 1 < r ? nbr * d1 * g1 : 0.0f);
+                    *reinterpret_cast<unsigned int*>(reinterpret_cast<unsigned short*>(intra_out) + cc_base + r * MAXC + col0) = brain_pack_bf16(scale * d0 * q0, scale * d1 * q1);
                 }
-                if (r < C && col0 < C) {
-                    *reinterpret_cast<float2*>(sA + r * SC + col0) = make_float2(at[0], at[1]);
-                    unsigned short* const ip = reinterpret_cast<unsigned short*>(intra_out) + cc_base + (unsigned long long)r * C + col0;
-                    if (even_rows && col0 + 1 < C) {
-                        *reinterpret_cast<unsigned int*>(ip) = brain_pack_bf16(it[0], it[1]);
-                    } else {
+            }
+        } else {
+#pragma unroll
+            for (int t = 0; t < 4; ++t) {
+#pragma unroll
+                for (int h2 = 0; h2 < 2; ++h2) {
+                    const unsigned int r = h2 ? r1 : r0;
+                    const float lr = h2 ? lr1 : lr0, br = h2 ? br1 : br0;
+                    const unsigned int col0 = nh * 32u + t * 8 + 2 * t4;
+                    float at[2], it[2];
+#pragma unroll
+                    for (int e = 0; e < 2; ++e) {
+                        const unsigned int col = col0 + e;
+                        const float dm = col <= r ? brain_ex2(lr - lc[2 * t + e]) : 0.0f;
+                        at[e] = col < r ? -br * acc_g[t][2 * h2 + e] * dm : 0.0f;
+                        it[e] = scale * acc_i[t][2 * h2 + e] * dm;
+                    }
+                    if (r < C && col0 < C) {
+                        *reinterpret_cast<float2*>(sA + r * SC + col0) = make_float2(at[0], at[1]);
+                        unsigned short* const ip = reinterpret_cast<unsigned short*>(intra_out) + cc_base + (unsigned long long)r * C + col0;
                         ip[0] = static_cast<unsigned short>(brain_pack_bf16(it[0], 0.0f));
                         if (col0 + 1 < C) { ip[1] = static_cast<unsigned short>(brain_pack_bf16(it[1], 0.0f)); }
                     }
@@ -346,8 +369,15 @@ __device__ __forceinline__ void brain_gdn_prep_chunk(const PrepOperands& a, cons
 #pragma unroll
             for (int r = 0; r < 16; ++r) {
                 float v = grp < i ? sA[(16u * i + r) * SC + 16u * grp + c] : (static_cast<unsigned int>(r) == c ? 1.0f : 0.0f);
+                // Row r of the diagonal block, four entries a load (the entries from r on are zero or unused).
 #pragma unroll
-                for (int s = 0; s < r; ++s) { v = fmaf(aii[r * SC + s], x[s], v); }
+                for (int s4 = 0; s4 < r; s4 += 4) {
+                    const float4 a4 = *reinterpret_cast<const float4*>(aii + r * SC + s4);
+                    v = fmaf(a4.x, x[s4], v);
+                    if (s4 + 1 < r) { v = fmaf(a4.y, x[s4 + 1], v); }
+                    if (s4 + 2 < r) { v = fmaf(a4.z, x[s4 + 2], v); }
+                    if (s4 + 3 < r) { v = fmaf(a4.w, x[s4 + 3], v); }
+                }
                 x[r] = v;
             }
             if (grp < i) {
@@ -380,12 +410,12 @@ __device__ __forceinline__ void brain_gdn_prep_chunk(const PrepOperands& a, cons
     unsigned int hu[3][4], lu[3][4], hw[3][4], lw[3][4];  // finished block rows, as split A operands
 #pragma unroll
     for (int i = 0; i < 4; ++i) {
-        if (16u * i >= C) { break; }  // block-uniform
 #pragma unroll
         for (int nt = 0; nt < 2; ++nt) {
 #pragma unroll
             for (int e = 0; e < 4; ++e) { xu[2 * i + nt][e] = 0.0f; xw[2 * i + nt][e] = 0.0f; }
         }
+        if (16u * i >= C) { continue; }  // block-uniform; the rows of this block row past the chunk are zero
         // R^T_i (M = value column, K = chunk row) straight from the value / key tiles by a transposing load.
         unsigned int ru[4], rw[4];
         const unsigned int src_off = (16u * i + (q >> 1) * 8u + l8) * SKH + cw + (q & 1u) * 8u;
@@ -432,10 +462,20 @@ __device__ __forceinline__ void brain_gdn_prep_chunk(const PrepOperands& a, cons
                 const unsigned int row = 16u * i + 8u * nt + 2u * t4 + (e & 1u);
                 if (row < C) {
                     const unsigned long long at = (row_base + row) * D + cw + g + ((e & 2u) ? 8u : 0u);
-                    u_out[at] = xu[2 * i + nt][e];
+                    if (a.emit_cm) { u_out[at] = xu[2 * i + nt][e]; }
                     reinterpret_cast<unsigned short*>(w_out)[at] = static_cast<unsigned short>(brain_pack_bf16(xw[2 * i + nt][e], 0.0f));
                 }
             }
+        }
+    }
+    if (!a.emit_cm) {
+        // The folded recurrence reads u as fp16 in the order its threads hold it: this thread's 32 values (tile j, element e: value column
+        // 16 warp + g + 8 (e >> 1), chunk row 8 j + 2 t4 + (e & 1)) in four 16-byte vectors, a warp's vectors lane after lane.
+        unsigned short* const uf = reinterpret_cast<unsigned short*>(u_out) + (row_base / MAXC) * (MAXC * D) + warp * 1024u + lane * 8u;
+#pragma unroll
+        for (int v = 0; v < 4; ++v) {
+            *reinterpret_cast<uint4*>(uf + v * 256) = make_uint4(brain_pack_f16(xu[2 * v][0], xu[2 * v][1]), brain_pack_f16(xu[2 * v][2], xu[2 * v][3]),
+                                                                  brain_pack_f16(xu[2 * v + 1][0], xu[2 * v + 1][1]), brain_pack_f16(xu[2 * v + 1][2], xu[2 * v + 1][3]));
         }
     }
 }
@@ -462,9 +502,9 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_chunk_prep_tok_b
 // per chunk) and writes its tensors at a fixed 64-row slot of the scratch, so a segment's last, short chunk needs no
 // launch of its own. The gates come in raw (b_proj, a_proj with the layer's a_log and dt_bias) and are formed in the load.
 // Contract: params [chunks * H, unused..., scale (f32 bits) at 5, H at 6, nseg at 7, group at 8, eps (f32 bits) at 9, flags at 10
-// (absent is 0; bit 0: query, key and value are bf16 rows; bit 1: query and key are also L2-normalised, as the vector convolution leaves them, required by bit 2; bit 2: the folded recurrence's form: no query_cm / key_cm, and g_cs holds three vectors of 64 floats a chunk-head instead of one)]; read
+// (absent is 0; bit 0: query, key and value are bf16 rows; bit 1: query and key are also L2-normalised, as the vector convolution leaves them, required by bit 2; bit 2: the folded recurrence's form: no query_cm / key_cm, g_cs holds three vectors of 64 floats a chunk-head instead of one, and u is fp16 in thread order, 16 KiB a chunk-head)]; read
 // query, key, value, b_proj, a_proj, a_log, dt_bias, table; write the seven tensors of `brain_gdn_chunk_prep_tok_bf16`.
-extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_chunk_prep_seg_bf16(const unsigned int* params, const float* query, const float* key,
+extern "C" __global__ void __launch_bounds__(THREADS, 3) brain_gdn_chunk_prep_seg_bf16(const unsigned int* params, const float* query, const float* key,
                                                                                      const float* value, const float* b_proj, const float* a_proj,
                                                                                      const float* a_log, const float* dt_bias, const unsigned int* table,
                                                                                      float* g_cs_out, float* exp_g_cs_out, float* u_out, float* w_out,
