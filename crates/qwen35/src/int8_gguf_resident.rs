@@ -296,10 +296,13 @@ const MAX_PREFILL_TOKENS: u32 = 256;
 /// warpgroup candidate wins from about 512 rows): the 2048-row round is
 /// faster than 1024 on `qwen35_gguf_prefill_profile` and on `brain perf run
 /// longctx` prompts of 1K/8K/32K, and 4096 rows buy only a little more for
-/// twice the scratch (the cuda.md ledger has the numbers). 2048 rows of
-/// scratch is still about a gigabyte per stage, which every device that can
-/// hold this model's weights has to spare.
-const TENSOR_CORE_PREFILL_TOKENS: u32 = 2048;
+/// twice the scratch (the cuda.md ledger has the numbers). With the FP8
+/// stack's GEMMs of N = 5120 (down and output projections) a 2048-row round
+/// is 16 x 20 = 320 tiles of 128 x 256, 2.4 waves of the 132 multiprocessors
+/// run as 3; 4096 rows are 640 tiles, 4.8 waves run as 5. One uncached 32.5K
+/// prompt's first token on a GH200: 3.30 s at 2048 rows, 3.10 at 4096, 3.09 at
+/// 8192 (which costs the default context 18 percent, 4096 costs 6).
+const TENSOR_CORE_PREFILL_TOKENS: u32 = 4096;
 
 /// Hidden rows one head readback of [`Qwen35GgufInstance::teacher_forced_scores`]
 /// projects at once. The readback is `[rows, vocab]` on the host, which at this
