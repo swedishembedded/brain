@@ -2805,8 +2805,8 @@ pub const ALL: &[CudaKernel] = &[
         what: "the SwiGLU product silu(gate) * up of fp32 rows and its E4M3 quantisation (one f32 scale, amax / 448, per 128 elements) in one pass: `quant_epilogue` and `quant_e4m3_128` without the product read back",
         reported: "native:silu_mul_quant_e4m3_128",
         block_dim: 256,
-        // 8 warps a block, a warp per 128-element block: 1024 elements per block.
-        tile: (1, 1024),
+        // 8 warps a block, a warp per three 128-element blocks: 3072 elements per block.
+        tile: (1, 3072),
         shared_bytes: 0,
         programmatic: false,
         src: concat!(include_str!("../cu/e4m3_quant_common.cuh"), include_str!("../cu/silu_mul_quant_e4m3_128.cu")),

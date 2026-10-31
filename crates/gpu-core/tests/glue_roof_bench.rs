@@ -113,4 +113,13 @@ fn glue_kernels_against_the_byte_roof_at_a_4096_row_round() {
         steps
     });
     report("gate_mul_quant_e4m3_128 no product (4096x6144)", us, n as f64 * (8.0 + 1.0) + (n / 128) as f64 * 4.0);
+
+    // The Gated DeltaNet output norm: the recurrence output and the gate z (bf16 rows) in, E4M3 rows and scales out (the fp32
+    // product is not stored).
+    let head_rows = rows * 48;
+    let n = head_rows as usize * 128;
+    let (x, z, w) = (filled_bf16(&gpu, n), filled_bf16(&gpu, n), filled(&gpu, 128));
+    let (out, q, sc) = (gpu.storage(1), gpu.storage(u64::from(head_rows) * 32), gpu.storage(u64::from(head_rows)));
+    let us = time_us(&gpu, &|| vec![gpu_core::provider::cuda::gdn_gated_norm_step(&gpu, &[&x, &w, &z, &out, &q, &sc], head_rows, 0, 1e-6, true, true).expect("offered")]);
+    report("gdn_gated_norm bf16 in, E4M3 out (4096 rows x 48 heads)", us, n as f64 * (2.0 + 2.0 + 1.0) + f64::from(head_rows) * 4.0);
 }
