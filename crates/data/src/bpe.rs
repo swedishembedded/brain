@@ -42,10 +42,10 @@ pub struct Gpt2Bpe {
     encoder: HashMap<String, u32>,
     /// id -> token string (inverse of `encoder`)
     decoder: HashMap<u32, String>,
-    /// (left, right) merge pair -> rank (lower = higher priority)
-    bpe_ranks: HashMap<(String, String), u32>,
-    /// byte value -> unicode char used in the string domain
-    byte_encoder: [char; 256],
+    /// The merge rules over ids (lower rank = merged first).
+    merges: MergeTable,
+    /// byte value -> id of its byte-mapped unicode char
+    byte_ids: [u32; 256],
     /// unicode char -> byte value (inverse of `byte_encoder`)
     byte_decoder: HashMap<char, u8>,
 }
@@ -90,74 +90,129 @@ pub fn bytes_to_unicode() -> [char; 256] {
     table
 }
 
-/// Apply the BPE merge loop to a single pre-token already expressed as a vector
-/// of single-character symbol strings (each char is a byte-mapped unicode
-/// char), using `ranks` (`(left,right) -> priority`, lower = merged first).
-/// Shared by [`Gpt2Bpe`] and the Qwen tokenizer — only the rank table differs.
+/// A vocabulary's merge rules over token ids: `(left id, right id) -> (rank, merged id)`. Built once from the
+/// ranked string pairs and the vocabulary, so the merge loop compares and hashes two integers a pair instead of
+/// building two strings, and its result is ids with no lookup after. Shared by every byte-pair tokenizer here
+/// ([`Gpt2Bpe`], the Qwen, CLIP and llama ones): only the rule source differs.
 ///
-/// The best pair is taken from a min-heap over the adjacent pairs of a linked
-/// list of symbols, so a piece of `n` symbols costs `O(n log n)` instead of
-/// the `O(n^2)` of rescanning every pair after each merge: a prompt with no
-/// whitespace (a minified file, base64, the llama tokenizer's whole-input
-/// piece) is one piece, and the quadratic form held the serving lane for
-/// seconds. The result is the textbook loop's: the lowest rank first, the
-/// leftmost occurrence among equals, so overlapping runs (`a a a`) merge left
-/// to right.
-pub(crate) fn bpe_merge(ranks: &HashMap<(String, String), u32>, token_chars: Vec<String>) -> Vec<String> {
-    use std::cmp::Reverse;
-    use std::collections::BinaryHeap;
+/// A rule whose halves or result are not vocabulary entries is dropped: no symbol the loop holds can match it (every
+/// base symbol and every merge result is an entry), so it could never fire.
+pub(crate) struct MergeTable {
+    rules: HashMap<u64, (u32, u32), std::hash::BuildHasherDefault<PairHasher>>,
+}
 
-    const NONE: usize = usize::MAX;
-    let n = token_chars.len();
-    if n <= 1 {
-        return token_chars;
-    }
-    let mut sym = token_chars;
-    let mut prev: Vec<usize> = (0..n).map(|i| i.wrapping_sub(1)).collect();
-    prev[0] = NONE;
-    let mut next: Vec<usize> = (1..=n).collect();
-    next[n - 1] = NONE;
-    // Bumped whenever a symbol's text changes, so a queued pair that names an older text is recognised as stale.
-    let mut version = vec![0u32; n];
-    let mut alive = vec![true; n];
+/// The hash of a packed `(left, right)` id pair: one multiply. The keys come from the tokenizer file, never from a
+/// request (a request only looks pairs up), so the table's layout is not attacker-chosen.
+#[derive(Default)]
+pub(crate) struct PairHasher(u64);
 
-    // (rank, left, right, left version, right version): ordered by rank, then position.
-    type Entry = Reverse<(u32, usize, usize, u32, u32)>;
-    let mut heap: BinaryHeap<Entry> = BinaryHeap::new();
-    let push = |heap: &mut BinaryHeap<Entry>, sym: &[String], version: &[u32], l: usize, r: usize| {
-        if let Some(&rank) = ranks.get(&(sym[l].clone(), sym[r].clone())) {
-            heap.push(Reverse((rank, l, r, version[l], version[r])));
-        }
-    };
-    for l in 0..n - 1 {
-        push(&mut heap, &sym, &version, l, l + 1);
+impl std::hash::Hasher for PairHasher {
+    fn finish(&self) -> u64 {
+        self.0
     }
-    while let Some(Reverse((_, l, r, vl, vr))) = heap.pop() {
-        if !alive[l] || !alive[r] || next[l] != r || version[l] != vl || version[r] != vr {
-            continue;
-        }
-        let right = std::mem::take(&mut sym[r]);
-        sym[l].push_str(&right);
-        version[l] += 1;
-        alive[r] = false;
-        next[l] = next[r];
-        if next[r] != NONE {
-            prev[next[r]] = l;
-        }
-        if prev[l] != NONE {
-            push(&mut heap, &sym, &version, prev[l], l);
-        }
-        if next[l] != NONE {
-            push(&mut heap, &sym, &version, l, next[l]);
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(8) ^ b as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
         }
     }
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i != NONE {
-        out.push(std::mem::take(&mut sym[i]));
-        i = next[i];
+    fn write_u64(&mut self, key: u64) {
+        self.0 = (key ^ (key >> 29)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     }
-    out
+}
+
+fn pair_key(left: u32, right: u32) -> u64 {
+    (left as u64) << 32 | right as u64
+}
+
+/// The id of each byte's [`bytes_to_unicode`] char; `None` for a byte whose char the vocabulary lacks (a byte-level
+/// vocabulary is complete; one that is not cannot encode that byte).
+pub(crate) fn byte_ids(byte_encoder: &[char; 256], encoder: &HashMap<String, u32>) -> [Option<u32>; 256] {
+    let mut buf = [0u8; 4];
+    std::array::from_fn(|b| encoder.get(&*byte_encoder[b].encode_utf8(&mut buf)).copied())
+}
+
+impl MergeTable {
+    /// The rules `(left, right)` in rank order (the first is merged first). A pair listed twice keeps its later rank,
+    /// as a rank map filled in file order does.
+    pub(crate) fn new<L: AsRef<str>, R: AsRef<str>>(ranked: impl IntoIterator<Item = (L, R)>, encoder: &HashMap<String, u32>) -> MergeTable {
+        let mut rules = HashMap::default();
+        let mut merged = String::new();
+        for (rank, (l, r)) in ranked.into_iter().enumerate() {
+            let (l, r) = (l.as_ref(), r.as_ref());
+            merged.clear();
+            merged.push_str(l);
+            merged.push_str(r);
+            if let (Some(&li), Some(&ri), Some(&mi)) = (encoder.get(l), encoder.get(r), encoder.get(merged.as_str())) {
+                rules.insert(pair_key(li, ri), (rank as u32, mi));
+            }
+        }
+        MergeTable { rules }
+    }
+
+    fn rule(&self, left: u32, right: u32) -> Option<(u32, u32)> {
+        self.rules.get(&pair_key(left, right)).copied()
+    }
+
+    /// Apply the merge loop to one pre-token given as the ids of its base symbols, appending the merged ids to `out`.
+    ///
+    /// The best pair is taken from a min-heap over the adjacent pairs of a linked list of symbols, so a piece of `n`
+    /// symbols costs `O(n log n)` instead of the `O(n^2)` of rescanning every pair after each merge: a prompt with no
+    /// whitespace (a minified file, base64, the llama tokenizer's whole-input piece) is one piece, and the quadratic
+    /// form held the serving lane for seconds. The result is the textbook loop's: the lowest rank first, the leftmost
+    /// occurrence among equals, so overlapping runs (`a a a`) merge left to right.
+    pub(crate) fn merge(&self, mut sym: Vec<u32>, out: &mut Vec<u32>) {
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+
+        const NONE: usize = usize::MAX;
+        let n = sym.len();
+        if n <= 1 {
+            out.extend(sym);
+            return;
+        }
+        let mut prev: Vec<usize> = (0..n).map(|i| i.wrapping_sub(1)).collect();
+        prev[0] = NONE;
+        let mut next: Vec<usize> = (1..=n).collect();
+        next[n - 1] = NONE;
+        let mut alive = vec![true; n];
+
+        // (rank, left, right, merged id, left id, right id): ordered by rank, then position. A queued pair is stale
+        // once either side died, stopped being adjacent or changed: a symbol only changes by absorbing its right
+        // neighbour, which makes its text strictly longer, so it never takes an id it held before and comparing
+        // the ids queued with the ids held detects every change.
+        type Entry = Reverse<(u32, usize, usize, u32, u32, u32)>;
+        let mut heap: BinaryHeap<Entry> = BinaryHeap::with_capacity(n);
+        let push = |heap: &mut BinaryHeap<Entry>, sym: &[u32], l: usize, r: usize| {
+            if let Some((rank, merged)) = self.rule(sym[l], sym[r]) {
+                heap.push(Reverse((rank, l, r, merged, sym[l], sym[r])));
+            }
+        };
+        for l in 0..n - 1 {
+            push(&mut heap, &sym, l, l + 1);
+        }
+        while let Some(Reverse((_, l, r, merged, left, right))) = heap.pop() {
+            if !alive[l] || !alive[r] || next[l] != r || sym[l] != left || sym[r] != right {
+                continue;
+            }
+            sym[l] = merged;
+            alive[r] = false;
+            next[l] = next[r];
+            if next[r] != NONE {
+                prev[next[r]] = l;
+            }
+            if prev[l] != NONE {
+                push(&mut heap, &sym, prev[l], l);
+            }
+            if next[l] != NONE {
+                push(&mut heap, &sym, l, next[l]);
+            }
+        }
+        let mut i = 0;
+        while i != NONE {
+            out.push(sym[i]);
+            i = next[i];
+        }
+    }
 }
 
 impl Gpt2Bpe {
@@ -177,20 +232,17 @@ impl Gpt2Bpe {
 
         // Parse vocab.bpe: skip the `#version` header line, then each remaining
         // line is "left right"; line index is the merge rank (priority).
-        let mut bpe_ranks: HashMap<(String, String), u32> = HashMap::new();
-        for (rank, line) in VOCAB_BPE
-            .lines()
-            .skip(1) // drop "#version: 0.2"
-            .filter(|l| !l.is_empty())
-            .enumerate()
-        {
-            let mut it = line.split(' ');
-            let left = it.next().expect("merge line has a left token").to_string();
-            let right = it.next().expect("merge line has a right token").to_string();
-            bpe_ranks.insert((left, right), rank as u32);
-        }
+        let merges = MergeTable::new(
+            VOCAB_BPE
+                .lines()
+                .skip(1) // drop "#version: 0.2"
+                .filter(|l| !l.is_empty())
+                .map(|line| line.split_once(' ').expect("merge line is \"left right\"")),
+            &encoder,
+        );
 
         let byte_encoder = bytes_to_unicode();
+        let byte_ids = byte_ids(&byte_encoder, &encoder).map(|id| id.expect("the embedded vocabulary holds every byte"));
         let mut byte_decoder = HashMap::with_capacity(256);
         for (b, &c) in byte_encoder.iter().enumerate() {
             byte_decoder.insert(c, b as u8);
@@ -199,26 +251,15 @@ impl Gpt2Bpe {
         Gpt2Bpe {
             encoder,
             decoder,
-            bpe_ranks,
-            byte_encoder,
+            merges,
+            byte_ids,
             byte_decoder,
         }
     }
 
     /// Encode a single pre-token (a substring of the original text) into ids.
     fn encode_piece(&self, piece: &str, out: &mut Vec<u32>) {
-        // Map each raw UTF-8 byte of the piece to its unicode char.
-        let token_chars: Vec<String> = piece
-            .bytes()
-            .map(|b| self.byte_encoder[b as usize].to_string())
-            .collect();
-        for sub in bpe_merge(&self.bpe_ranks, token_chars) {
-            let id = *self
-                .encoder
-                .get(&sub)
-                .expect("every BPE subword exists in the encoder");
-            out.push(id);
-        }
+        self.merges.merge(piece.bytes().map(|b| self.byte_ids[b as usize]).collect(), out);
     }
 }
 
@@ -426,7 +467,7 @@ fn get_pairs(word: &[String]) -> Vec<(String, String)> {
 
 
     /// The textbook merge loop (rescan every pair, merge every non-overlapping occurrence of the best one): the
-    /// definition `bpe_merge` must reproduce.
+    /// definition [`MergeTable::merge`] must reproduce.
     fn reference_merge(ranks: &HashMap<(String, String), u32>, token_chars: Vec<String>) -> Vec<String> {
         if token_chars.len() <= 1 {
             return token_chars;
@@ -482,10 +523,28 @@ fn get_pairs(word: &[String]) -> Vec<(String, String)> {
         ranks
     }
 
+    /// The id table of a string rank map, with its vocabulary (the base symbols and every merge result) and the
+    /// inverse to read merged ids back as text.
+    fn id_table(ranks: &HashMap<(String, String), u32>) -> (MergeTable, HashMap<String, u32>, Vec<String>) {
+        let mut ordered: Vec<(&(String, String), &u32)> = ranks.iter().collect();
+        ordered.sort_by_key(|(_, &rank)| rank);
+        let mut texts: Vec<String> = "abc".chars().map(String::from).collect();
+        texts.extend(ordered.iter().map(|((l, r), _)| format!("{l}{r}")));
+        let encoder: HashMap<String, u32> = texts.iter().enumerate().map(|(i, t)| (t.clone(), i as u32)).collect();
+        (MergeTable::new(ordered.iter().map(|((l, r), _)| (l, r)), &encoder), encoder, texts)
+    }
+
+    fn merged_texts(table: &MergeTable, encoder: &HashMap<String, u32>, texts: &[String], word: &[String]) -> Vec<String> {
+        let mut out = Vec::new();
+        table.merge(word.iter().map(|s| encoder[s]).collect(), &mut out);
+        out.iter().map(|&id| texts[id as usize].clone()).collect()
+    }
+
     #[test]
     fn the_heap_merge_equals_the_textbook_loop() {
         for seed in 0..40u64 {
             let ranks = trained_ranks(seed, 6 + (seed as usize % 20));
+            let (table, encoder, texts) = id_table(&ranks);
             let mut state = seed + 1000;
             for len in [2usize, 3, 5, 12, 40, 150] {
                 let word: Vec<String> = (0..len)
@@ -494,7 +553,7 @@ fn get_pairs(word: &[String]) -> Vec<(String, String)> {
                         ["a", "b", "c"][((state >> 33) % 3) as usize].to_string()
                     })
                     .collect();
-                assert_eq!(bpe_merge(&ranks, word.clone()), reference_merge(&ranks, word.clone()), "seed {seed} word {word:?}");
+                assert_eq!(merged_texts(&table, &encoder, &texts, &word), reference_merge(&ranks, word.clone()), "seed {seed} word {word:?}");
             }
         }
     }
@@ -503,14 +562,14 @@ fn get_pairs(word: &[String]) -> Vec<(String, String)> {
     /// minutes on it.
     #[test]
     fn a_long_piece_without_whitespace_merges_in_linear_log_time() {
-        let ranks = trained_ranks(7, 30);
-        let word: Vec<String> = (0..100_000).map(|i| ["a", "b", "c"][(i * 7 + i / 3) % 3].to_string()).collect();
+        let (table, encoder, _) = id_table(&trained_ranks(7, 30));
+        let word: Vec<u32> = (0..100_000).map(|i| encoder[["a", "b", "c"][(i * 7 + i / 3) % 3]]).collect();
         let start = std::time::Instant::now();
-        let merged = bpe_merge(&ranks, word);
+        let mut merged = Vec::new();
+        table.merge(word, &mut merged);
         assert!(!merged.is_empty());
         assert!(start.elapsed() < std::time::Duration::from_secs(2), "took {:?}", start.elapsed());
     }
-
 
     fn tok() -> Gpt2Bpe {
         Gpt2Bpe::new()

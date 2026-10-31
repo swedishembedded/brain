@@ -5,7 +5,7 @@
 //! LFM2.5, DeepSeek, Llama 3, ...).
 //!
 //! Same byte-level BPE family as [`crate::bpe::Gpt2Bpe`] - it reuses the byte
-//! <-> unicode map and the merge loop ([`crate::bpe::bpe_merge`]) - with the
+//! <-> unicode map and the merge loop ([`crate::bpe::MergeTable`]) - with the
 //! checkpoint's vocabulary, merges, and its own declared normalizer and
 //! pre-tokenizer ([`crate::hf_pretok`]): the split a file declares is the one
 //! applied, and a step brain does not implement is refused at load. A GGUF
@@ -23,7 +23,7 @@
 
 use std::collections::HashMap;
 
-use crate::bpe::{bpe_merge, bytes_to_unicode};
+use crate::bpe::{byte_ids, bytes_to_unicode, MergeTable};
 use crate::hf_pretok::{Normalizer, PreTokenizer};
 use crate::special_match::SpecialMatcher;
 use crate::tokenizer::Tokenizer;
@@ -31,7 +31,10 @@ use crate::tokenizer::Tokenizer;
 pub struct QwenBpe {
     encoder: HashMap<String, u32>,
     decoder: HashMap<u32, String>,
-    bpe_ranks: HashMap<(String, String), u32>,
+    /// The merge rules over ids.
+    merges: MergeTable,
+    /// Each byte's id (its byte-mapped char); `None` where the vocabulary lacks it.
+    byte_ids: [Option<u32>; 256],
     byte_encoder: [char; 256],
     byte_decoder: HashMap<char, u8>,
     /// The special/added tokens, matched leftmost-longest in one pass.
@@ -148,7 +151,7 @@ impl QwenBpe {
     ///
     /// Mapping: `tokens[id]` is the token text (already in the GPT-2 byte-encoded
     /// domain, i.e. HF `vocab.json` keys) → `encoder`/`decoder` keyed by index;
-    /// `merges` are the ranked `"a b"` pairs → `bpe_ranks`; tokens whose
+    /// `merges` are the ranked `"a b"` pairs → the id merge table; tokens whose
     /// `token_type` is CONTROL(3) or USER_DEFINED(4) - plus the declared
     /// bos/eos/unk/pad ids - become atomic `specials`. A GGUF carries the
     /// pre-tokenizer's NAME (`tokenizer.ggml.pre`), never its regex: the split
@@ -175,13 +178,9 @@ impl QwenBpe {
         }
 
         // merges: "a b" strings, ranked by their position in the array.
-        let mut bpe_ranks = HashMap::with_capacity(tok.merges.len());
-        for (rank, m) in tok.merges.iter().enumerate() {
-            let mut it = m.splitn(2, ' ');
-            let l = it.next().unwrap().to_string();
-            let r = it.next().ok_or_else(|| format!("gguf merge {rank:?}: missing space in {m:?}"))?.to_string();
-            bpe_ranks.insert((l, r), rank as u32);
-        }
+        let ranked: Vec<(&str, &str)> =
+            tok.merges.iter().enumerate().map(|(rank, m)| m.split_once(' ').ok_or_else(|| format!("gguf merge {rank:?}: missing space in {m:?}"))).collect::<Result<_, _>>()?;
+        let merges = MergeTable::new(ranked, &encoder);
 
         // Specials: control / user-defined tokens are matched atomically before
         // BPE (their text is literal, not byte-encoded). CONTROL=3, USER_DEFINED=4.
@@ -203,6 +202,7 @@ impl QwenBpe {
         let specials = SpecialMatcher::new(specials.iter().map(|(c, id)| (c.as_str(), *id)));
 
         let byte_encoder = bytes_to_unicode();
+        let byte_ids = byte_ids(&byte_encoder, &encoder);
         let mut byte_decoder = HashMap::with_capacity(256);
         for (b, &c) in byte_encoder.iter().enumerate() {
             byte_decoder.insert(c, b as u8);
@@ -214,7 +214,8 @@ impl QwenBpe {
         Ok(QwenBpe {
             encoder,
             decoder,
-            bpe_ranks,
+            merges,
+            byte_ids,
             byte_encoder,
             byte_decoder,
             specials,
@@ -243,9 +244,9 @@ impl QwenBpe {
         }
 
         // merges: array of ["a","b"] pairs (newer) or "a b" strings (older).
-        let mut bpe_ranks = HashMap::new();
+        let mut ranked: Vec<(String, String)> = Vec::new();
         if let Some(merges) = model["merges"].as_array() {
-            for (rank, m) in merges.iter().enumerate() {
+            for m in merges {
                 let (l, r) = if let Some(arr) = m.as_array() {
                     // `.get`, never `arr[0]`: tokenizer.json is an untrusted
                     // user file, and a short merge entry must be an Err, not
@@ -260,7 +261,7 @@ impl QwenBpe {
                 } else {
                     return Err("tokenizer.json: bad merge entry".into());
                 };
-                bpe_ranks.insert((l, r), rank as u32);
+                ranked.push((l, r));
             }
         }
 
@@ -278,6 +279,9 @@ impl QwenBpe {
         let specials = SpecialMatcher::new(specials.iter().map(|(c, id)| (c.as_str(), *id)));
 
         let byte_encoder = bytes_to_unicode();
+        // After the added tokens: the merge results are looked up in the vocabulary the encoder ends with.
+        let merges = MergeTable::new(ranked, &encoder);
+        let byte_ids = byte_ids(&byte_encoder, &encoder);
         let mut byte_decoder = HashMap::with_capacity(256);
         for (b, &c) in byte_encoder.iter().enumerate() {
             byte_decoder.insert(c, b as u8);
@@ -294,7 +298,8 @@ impl QwenBpe {
         Ok(QwenBpe {
             encoder,
             decoder,
-            bpe_ranks,
+            merges,
+            byte_ids,
             byte_encoder,
             byte_decoder,
             specials,
@@ -350,25 +355,25 @@ impl QwenBpe {
         &self.template_prefix
     }
 
-    /// Encode one pre-token (already special-free) into ids via byte-level BPE.
+    /// Encode one pre-token (already special-free) into ids via byte-level BPE. A byte the vocabulary lacks cannot
+    /// be encoded: it is dropped rather than emitted as an UNK the decoder has no way to invert, and the bytes on
+    /// either side merge on their own (no rule can join a symbol the vocabulary does not hold).
     fn encode_piece(&self, piece: &str, out: &mut Vec<u32>) {
-        let chars: Vec<String> = piece
-            .bytes()
-            .map(|b| self.byte_encoder[b as usize].to_string())
-            .collect();
         if self.ignore_merges {
-            if let Some(&id) = self.encoder.get(&chars.concat()) {
+            let mapped: String = piece.bytes().map(|b| self.byte_encoder[b as usize]).collect();
+            if let Some(&id) = self.encoder.get(&mapped) {
                 out.push(id);
                 return;
             }
         }
-        for sub in bpe_merge(&self.bpe_ranks, chars) {
-            // A miss cannot occur for a complete byte-level vocab; drop it rather
-            // than emitting an UNK the decoder has no way to invert.
-            if let Some(&id) = self.encoder.get(&sub) {
-                out.push(id);
+        let mut run: Vec<u32> = Vec::with_capacity(piece.len());
+        for b in piece.bytes() {
+            match self.byte_ids[b as usize] {
+                Some(id) => run.push(id),
+                None => self.merges.merge(std::mem::take(&mut run), out),
             }
         }
+        self.merges.merge(run, out);
     }
 
     /// One ChatML turn: `<|im_start|>{role}\n{content}<|im_end|>\n`. The
@@ -658,6 +663,30 @@ mod tests {
         let serial: Vec<u32> = runs.iter().map(|r| t.encode(r)).collect::<Vec<_>>().join(&6);
         assert!(text.split(' ').count() > 4 * PIECES_PER_THREAD, "the text must be long enough to be split");
         assert_eq!(t.encode(&text), serial);
+    }
+
+    /// Encode rate of the real tokenizer on the text a serving benchmark sends (random vocabulary ids decoded), the
+    /// host cost of every prompt a server admits. Probe, not a gate:
+    /// `QWEN_TOKENIZER=<tokenizer.json> make test/one P=brain-data ARGS="encode_rate_probe --ignored --nocapture"`.
+    #[test]
+    #[ignore = "timing probe on the real tokenizer"]
+    fn encode_rate_probe() {
+        let Some(t) = tok() else { return brain_testutil::skip("QWEN_TOKENIZER is not set") };
+        let mut rng = crate::rng::Lcg::new(1);
+        for tokens in [8_000usize, 32_000] {
+            let ids: Vec<u32> = (0..tokens).map(|_| (rng.next_u64() % 150_000) as u32).collect();
+            let text = t.decode(&ids);
+            let start = std::time::Instant::now();
+            let reps = 5;
+            let mut encoded = Vec::new();
+            for _ in 0..reps {
+                encoded = t.encode(&text);
+            }
+            let ms = start.elapsed().as_secs_f64() * 1e3 / reps as f64;
+            // A digest of the ids, to compare two builds' encodings of the same text.
+            let digest = encoded.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &id| (h ^ id as u64).wrapping_mul(0x100_0000_01b3));
+            println!("{tokens} ids -> {} tokens (digest {digest:016x}): {ms:.2} ms an encode", encoded.len());
+        }
     }
 
     #[test]

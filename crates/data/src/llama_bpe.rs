@@ -7,7 +7,7 @@
 //! # Why this is a separate type and not a mode on [`crate::clip_bpe::ClipBpe`]
 //! or [`crate::bpe::Gpt2Bpe`]
 //!
-//! The byte-pair *merge loop* - [`crate::bpe::bpe_merge`] - is reused
+//! The byte-pair *merge loop* - [`crate::bpe::MergeTable`] - is reused
 //! **verbatim**: same greedy lowest-rank adjacent-pair algorithm, same
 //! `(left, right) -> rank` table shape. Everything upstream of the merge loop
 //! is genuinely different, and none of it is a knob on the existing types:
@@ -25,7 +25,7 @@
 //! all, so merges freely cross what would be word boundaries under a
 //! pre-tokenized scheme (`"  double  space"` merges the run of `▁` characters
 //! together exactly as any other adjacent pair). This is precisely the shape
-//! [`crate::bpe::bpe_merge`] already handles: feed it the WHOLE input as one
+//! [`crate::bpe::MergeTable::merge`] already handles: feed it the WHOLE input as one
 //! "word" instead of one per pre-token, and its existing
 //! get-best-pair-and-merge-all-occurrences loop does the rest.
 //!
@@ -77,7 +77,7 @@ use std::collections::HashMap;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::bpe::bpe_merge;
+use crate::bpe::MergeTable;
 
 /// `U+2581` "lower one eighth block" - SentencePiece's word-boundary marker.
 const METASPACE: char = '\u{2581}';
@@ -126,7 +126,10 @@ struct WireAdded {
 pub struct LlamaBpe {
     encoder: HashMap<String, u32>,
     decoder: HashMap<u32, String>,
-    bpe_ranks: HashMap<(String, String), u32>,
+    /// The merge rules over ids.
+    merges: MergeTable,
+    /// The id of each byte's fallback piece `<0xNN>`.
+    fallback_ids: [u32; 256],
     bos_id: u32,
     eos_id: u32,
     unk_id: u32,
@@ -178,7 +181,8 @@ impl LlamaBpe {
             }
         }
 
-        let mut bpe_ranks: HashMap<(String, String), u32> = HashMap::with_capacity(j.model.merges.len());
+        let fallback_ids: [u32; 256] = std::array::from_fn(|b| encoder[&format!("<0x{b:02X}>")]);
+        let mut ranked: Vec<(String, String)> = Vec::with_capacity(j.model.merges.len());
         for (rank, line) in j.model.merges.iter().enumerate() {
             let mut it = line.split(' ');
             let left = it.next().ok_or_else(|| format!("tokenizer.json: merge {rank} is empty"))?.to_string();
@@ -189,8 +193,9 @@ impl LlamaBpe {
             if !encoder.contains_key(&format!("{left}{right}")) {
                 return Err(format!("tokenizer.json: merge {left:?}+{right:?} produces a token absent from vocab"));
             }
-            bpe_ranks.insert((left, right), rank as u32);
+            ranked.push((left, right));
         }
+        let merges = MergeTable::new(ranked, &encoder);
 
         let added: HashMap<String, u32> = j.added_tokens.into_iter().map(|a| (a.content, a.id)).collect();
         let id_of = |names: &[&str]| -> Result<u32, String> {
@@ -205,7 +210,7 @@ impl LlamaBpe {
         let eos_id = id_of(&["</s>"])?;
         let unk_id = id_of(&["<unk>"])?;
 
-        Ok(LlamaBpe { encoder, decoder, bpe_ranks, bos_id, eos_id, unk_id })
+        Ok(LlamaBpe { encoder, decoder, merges, fallback_ids, bos_id, eos_id, unk_id })
     }
 
     /// Build from a checkpoint DIRECTORY holding `tokenizer.json`.
@@ -244,28 +249,20 @@ impl LlamaBpe {
             normalized.push(if c == ' ' { METASPACE } else { c });
         }
 
-        let mut symbols: Vec<String> = Vec::with_capacity(normalized.len());
-        let mut byte_buf = [0u8; 4];
+        let mut symbols: Vec<u32> = Vec::with_capacity(normalized.len());
+        let mut buf = [0u8; 4];
         for c in normalized.chars() {
-            let s = c.to_string();
-            if self.encoder.contains_key(&s) {
-                symbols.push(s);
-            } else {
-                for &b in c.encode_utf8(&mut byte_buf).as_bytes() {
-                    symbols.push(format!("<0x{b:02X}>"));
-                }
+            let utf8 = c.encode_utf8(&mut buf);
+            match self.encoder.get(&*utf8) {
+                Some(&id) => symbols.push(id),
+                None => symbols.extend(utf8.as_bytes().iter().map(|&b| self.fallback_ids[b as usize])),
             }
         }
-
-        bpe_merge(&self.bpe_ranks, symbols)
-            .into_iter()
-            .map(|s| {
-                *self
-                    .encoder
-                    .get(&s)
-                    .unwrap_or_else(|| panic!("llama BPE produced {s:?}, absent from the vocab - every base symbol and every merge result is a vocab entry by construction"))
-            })
-            .collect()
+        // Every base symbol and every merge product is a vocab entry (checked at load), so the merged ids are all
+        // real tokens.
+        let mut ids = Vec::with_capacity(symbols.len());
+        self.merges.merge(symbols, &mut ids);
+        ids
     }
 
     /// The call site LLaVA/Vicuna actually makes: `[bos] + encode_raw(text)`,

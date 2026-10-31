@@ -7,7 +7,7 @@
 //! # Why this is a separate type and not a parameter on [`Gpt2Bpe`]
 //!
 //! CLIP and GPT-2 share **exactly one** thing: the byte-level BPE *merge loop*.
-//! [`bytes_to_unicode`], [`get_pairs`] and [`bpe_merge`] are reused verbatim
+//! [`bytes_to_unicode`] and the merge loop ([`crate::bpe::MergeTable`]) are reused verbatim
 //! from [`crate::bpe`] — this module adds no merge code. Everything else
 //! differs, and none of it is a knob:
 //!
@@ -58,7 +58,7 @@
 
 use std::collections::HashMap;
 
-use crate::bpe::{bpe_merge, bytes_to_unicode};
+use crate::bpe::{byte_ids, bytes_to_unicode, MergeTable};
 
 /// `<|startoftext|>` — CLIP's BOS.
 pub const BOS: &str = "<|startoftext|>";
@@ -73,8 +73,11 @@ pub const CONTEXT: usize = 77;
 pub struct ClipBpe {
     encoder: HashMap<String, u32>,
     decoder: HashMap<u32, String>,
-    bpe_ranks: HashMap<(String, String), u32>,
-    byte_encoder: [char; 256],
+    /// The merge rules over ids.
+    merges: MergeTable,
+    /// Each byte's id as a symbol inside a word, and as a word's last symbol (its char plus `</w>`).
+    byte_ids: [u32; 256],
+    byte_ids_end: [u32; 256],
     byte_decoder: HashMap<char, u8>,
     bos_id: u32,
     eos_id: u32,
@@ -128,8 +131,7 @@ impl ClipBpe {
         // `merges.txt`: a `#version` header then "left right" per line, in
         // merge-priority order. The header is only skipped when it IS one — the
         // OpenCLIP dumps of the same table do not always carry it.
-        let mut bpe_ranks: HashMap<(String, String), u32> = HashMap::new();
-        let mut rank = 0u32;
+        let mut ranked: Vec<(String, String)> = Vec::new();
         for (lineno, line) in merges_txt.lines().enumerate() {
             if line.is_empty() || line.starts_with("#version") {
                 continue;
@@ -142,9 +144,9 @@ impl ClipBpe {
             if !encoder.contains_key(&format!("{left}{right}")) {
                 return Err(format!("merges.txt line {}: merge {left:?}+{right:?} produces a token absent from vocab.json", lineno + 1));
             }
-            bpe_ranks.insert((left, right), rank);
-            rank += 1;
+            ranked.push((left, right));
         }
+        let merges = MergeTable::new(ranked, &encoder);
 
         let byte_encoder = bytes_to_unicode();
         let mut byte_decoder = HashMap::with_capacity(256);
@@ -160,10 +162,13 @@ impl ClipBpe {
             }
         }
 
+        // Every form is present (checked above).
+        let byte_ids = byte_ids(&byte_encoder, &encoder).map(|id| id.unwrap_or_default());
+        let byte_ids_end: [u32; 256] = std::array::from_fn(|b| encoder.get(&format!("{}{WORD_END}", byte_encoder[b])).copied().unwrap_or_default());
         let id_of = |t: &str| encoder.get(t).copied().ok_or_else(|| format!("vocab.json is missing {t}"));
         let (bos_id, eos_id) = (id_of(BOS)?, id_of(EOS)?);
         let specials = vec![BOS.to_string(), EOS.to_string()];
-        Ok(ClipBpe { encoder, decoder, bpe_ranks, byte_encoder, byte_decoder, bos_id, eos_id, pad_id: eos_id, specials })
+        Ok(ClipBpe { encoder, decoder, merges, byte_ids, byte_ids_end, byte_decoder, bos_id, eos_id, pad_id: eos_id, specials })
     }
 
     /// Build from a HuggingFace tokenizer directory (`vocab.json` +
@@ -271,18 +276,12 @@ impl ClipBpe {
     /// One pre-token: bytes → byte-map chars, `</w>` onto the LAST symbol, then
     /// the shared merge loop.
     fn encode_piece(&self, piece: &str, out: &mut Vec<u32>) {
-        let mut symbols: Vec<String> = piece.bytes().map(|b| self.byte_encoder[b as usize].to_string()).collect();
-        if symbols.is_empty() {
-            return;
-        }
-        let last = symbols.len() - 1;
-        symbols[last].push_str(WORD_END);
-        for sub in bpe_merge(&self.bpe_ranks, symbols) {
-            // Unknown subwords cannot occur: every single byte-map char plus
-            // `</w>` is in the vocab, so the merge loop's output always is too.
-            let id = *self.encoder.get(&sub).unwrap_or_else(|| panic!("BPE produced {sub:?}, absent from the vocab"));
-            out.push(id);
-        }
+        let bytes = piece.as_bytes();
+        let Some((&last, init)) = bytes.split_last() else { return };
+        // Every byte-map char, bare and word-final, and every merge product is a vocab entry (checked at load), so
+        // the merged ids are all real tokens.
+        let symbols: Vec<u32> = init.iter().map(|&b| self.byte_ids[b as usize]).chain([self.byte_ids_end[last as usize]]).collect();
+        self.merges.merge(symbols, out);
     }
 }
 
