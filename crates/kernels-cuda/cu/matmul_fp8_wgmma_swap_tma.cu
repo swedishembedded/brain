@@ -262,7 +262,7 @@ BRAIN_FD_ENTRY(const unsigned int* params, const unsigned int* xq, const unsigne
     if (tid == 0u) {
         for (int s = 0; s < STAGES; ++s) {
             brain_fwt_mbar_init(full_bar + 8u * s, 33u);  // the copy thread's expect_tx arrival and the 32 lanes' cp.async arrivals
-            brain_fwt_mbar_init(empty_bar + 8u * s, 4u);  // one arrival per warp of the consumer warpgroup that took the stage
+            brain_fwt_mbar_init(empty_bar + 8u * s, 128u);  // the threads of the consumer warpgroup that took the stage
         }
         asm volatile("fence.mbarrier_init.release.cluster;\n" ::: "memory");
     }
@@ -342,8 +342,7 @@ BRAIN_FD_ENTRY(const unsigned int* params, const unsigned int* xq, const unsigne
             brain_fwt_wg_wait<0>();
             const float* const sxs = reinterpret_cast<const float*>(gen + STAGES * BRAIN_FD_STAGE_BYTES + slot * BRAIN_FD_SCALE_BYTES);
             const float xs0 = sxs[r0], xs1 = sxs[r1], ws0 = sxs[64], ws1 = sxs[65];
-            __syncwarp();  // every lane has read the slot's scales (and the wgmma have read its tiles)
-            if (lane == 0u) { brain_fwt_mbar_arrive(empty_bar + 8u * slot); }
+            brain_fwt_mbar_arrive(empty_bar + 8u * slot);  // this thread has read the slot's scales (the wgmma have read its tiles)
 #pragma unroll
             for (int j = 0; j < BN / 8; ++j) {
                 const float ws = (n0_in_block + 8u * j >= 128u) ? ws1 : ws0;  // the tile may straddle two weight scale blocks

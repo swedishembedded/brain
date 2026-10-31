@@ -332,6 +332,18 @@ existing caller. Assume nothing about units.
     an unused accumulator lets the compiler drop the multiplies and the stores with it and the "ablation" measures nothing. A cluster `mbarrier.arrive.release.cluster`
     is a `MEMBAR.ALL.GPU` (a third of the kernel); the default-semantics `mbarrier.arrive.shared::cluster` is enough when the data was read by the async proxy.
 
+23. **A TMA-fed 17-64-row FP8 GEMM wants x as the MMA's A operand, a weight tile of any multiple of 8 rows, and two consumer warpgroups on alternate stages.** `wgmma m64nNk32`
+    with the (zero-filled) 64 rows of x as A and BN weight rows as N, a tile cut into `wgmma` of at most 80 columns, BN chosen so tiles x stages fill whole waves of the
+    132 SMs (34816 = 256 x 136), TMA for both tiles into the deepest ring the shared memory allows: gate/up 74 -> 62 us at 64 rows (knowledge 399). Three traps: ptxas
+    serialises every `wgmma` behind a wait when the loop bounds are not provably warp-uniform (C7518) or when non-`wgmma` code reads accumulators in flight (C7514) -
+    NVRTC hides the warning, so compile the source once with the toolkit's `nvcc -arch=sm_90a -cubin --resource-usage` and read it; pass loop bounds read from the
+    params through `__shfl_sync(.., 0)`; and a dispatch helper whose branches differ only in the call must pass the SAME offset arguments in every branch (one branch
+    passed the un-offset pointers and only the 80-column chunk at a nonzero offset failed). A K-split cluster with DSMEM sums, an x-tile multicast across two blocks, and four
+    accumulator chains per stage were each measured and did not help the N = 5120 products.
+24. **Compare with a reference profile by rate at the same shape, not by its mean.** A kernel's mean over a serving run mixes every round size; the same kernel at 8192 rows
+    ran 1.17-1.30 PFLOPS in isolation (not the 1.39 the mean suggested). Time the reference kernel in your own harness (same weights cycling, same card, back to back)
+    before setting a target, and interleave A/B runs: the same brain kernel measured 1062 and 1184 TFLOPS depending on the card's power state.
+
 ## D. Constraints that will bite you
 
 - **A buffer a dispatch writes is bound ONCE.** wgpu tracks usage per buffer for the

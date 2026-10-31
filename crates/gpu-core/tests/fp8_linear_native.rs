@@ -109,6 +109,27 @@ fn the_wgmma_gemms_pass_the_admission_rule_on_ragged_shapes() {
     }
 }
 
+/// The tensor-memory-accelerator decode candidates at the widths and depths of the served 27B (tile counts that wrap the persistent grid more than
+/// once, a long K that keeps the ring turning over, a last tile that ends inside a scale block), at the row counts a batch reaches.
+#[test]
+fn the_tma_decode_candidates_pass_the_admission_rule_on_the_served_shapes() {
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda_hopper(&gpu) {
+        brain_testutil::skip_unavailable("the FP8 candidates are registered for a CUDA device with warpgroup tensor cores");
+        return;
+    }
+    let mut shapes = Vec::new();
+    for m in [17u32, 33, 48, 64] {
+        for (kg, n) in [(1280u32, 34816u32), (1280, 17408), (1280, 10240), (1280, 12288), (4352, 5120), (1536, 5120), (1280, 6144), (1280, 1000)] {
+            shapes.push([m, kg, n]);
+        }
+    }
+    let served = admitted_everywhere(&gpu, &shapes);
+    for kernel in ["matmul_fp8_wgmma_swap_tma_bn80", "matmul_fp8_wgmma_swap_tma_bn96", "matmul_fp8_wgmma_swap_tma_bn136", "matmul_fp8_wgmma_swap_tma_bn136c1", "matmul_fp8_wgmma_swap_tma_bn144c1"] {
+        assert!(served.contains(kernel), "{kernel} served none of the shapes: {served:?}");
+    }
+}
+
 /// The bf16-output twin of the large-tile GEMM stores exactly their base's f32 rows rounded to bf16 - ragged rows, ragged `n`
 /// (a last band of fewer than 128 or 256 weight rows) and K of one scale block and of many: they differ in the store alone.
 #[test]
