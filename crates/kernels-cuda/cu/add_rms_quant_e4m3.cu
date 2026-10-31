@@ -106,10 +106,7 @@ brain_add_rms_quant_e4m3(const unsigned int* params, const float* a, const float
         const float scale = amax / 448.0f;
         unsigned int packed = 0u;
         if (scale > 0.0f) {
-            unsigned short lo, hi;
-            asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;\n" : "=h"(lo) : "f"(__fdiv_rn(y.y, scale)), "f"(__fdiv_rn(y.x, scale)));
-            asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;\n" : "=h"(hi) : "f"(__fdiv_rn(y.w, scale)), "f"(__fdiv_rn(y.z, scale)));
-            packed = (unsigned int)lo | ((unsigned int)hi << 16);
+            packed = brain_e4m3x4(y, scale);
         }
         if (live) {
             xq[(unsigned long long)row * (d >> 2) + (c >> 2)] = packed;

@@ -34,13 +34,6 @@ extern "C" __global__ void __launch_bounds__(BRAIN_QE_THREADS) brain_quant_e4m3_
 #pragma unroll
     for (int o = 16; o > 0; o >>= 1) { amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o)); }
     const float scale = amax / 448.0f;
-    unsigned int packed = 0u;
-    if (scale > 0.0f) {
-        unsigned short lo, hi;
-        asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;\n" : "=h"(lo) : "f"(__fdiv_rn(v.y, scale)), "f"(__fdiv_rn(v.x, scale)));
-        asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;\n" : "=h"(hi) : "f"(__fdiv_rn(v.w, scale)), "f"(__fdiv_rn(v.z, scale)));
-        packed = (unsigned int)lo | ((unsigned int)hi << 16);
-    }
-    q[block * 32ull + lane] = packed;
+    q[block * 32ull + lane] = scale > 0.0f ? brain_e4m3x4(v, scale) : 0u;
     if (lane == 0u) { s[block] = scale; }
 }

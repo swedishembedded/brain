@@ -103,6 +103,14 @@ fn check(gpu: &Gpu, rows: u32, k: u32, gate: &[f32], up: &[f32], what: &str) {
     assert_eq!(bits(gpu.read(&y_w, n as usize)), bits(gpu.read(&y_x, n as usize)), "bf16-row product differs: {ctx}");
     assert_eq!(bits(gpu.read(&s_w, groups)), bits(gpu.read(&s_x, groups)), "bf16-row scales differ: {ctx}");
     assert_eq!(bits(gpu.read(&q_w, words)), bits(gpu.read(&q_x, words)), "bf16-row E4M3 bytes differ: {ctx}");
+
+    // The served form: bf16 rows in, no fp32 product stored.
+    let mut steps = Vec::new();
+    let (q_p, s_p) = gpu_core::provider::library::silu_mul_quantize_e4m3_rows(gpu, &mut steps, &g16, &u16b, ActPrecision::Bf16, None, rows, k).expect("offered");
+    gpu.submit(&[], &steps);
+    gpu.poll_wait();
+    assert_eq!(bits(gpu.read(&s_p, groups)), bits(gpu.read(&s_x, groups)), "bf16-row scales differ without the product: {ctx}");
+    assert_eq!(bits(gpu.read(&q_p, words)), bits(gpu.read(&q_x, words)), "bf16-row E4M3 bytes differ without the product: {ctx}");
 }
 
 #[test]
@@ -113,7 +121,7 @@ fn the_product_and_its_e4m3_rows_equal_the_pair_of_kernels_they_replace() {
         return;
     }
     // The MLP width of the 27B model, a row count that is no multiple of a block's 8 groups, and a single row.
-    for (rows, k) in [(1u32, 128u32), (3, 17408), (768, 17408), (130, 5120)] {
+    for (rows, k) in [(1u32, 128u32), (3, 17408), (768, 17408), (130, 5120), (4096, 17408)] {
         let n = (rows * k) as usize;
         for (seed, spread) in [(11u64, 1.0f32), (12, 40.0)] {
             check(&gpu, rows, k, &values(n, seed, spread), &values(n, seed + 100, spread), "mixed magnitudes with zeros");

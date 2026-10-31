@@ -63,13 +63,7 @@ extern "C" __global__ void __launch_bounds__(WARPS * 32) brain_gdn_gated_norm(co
 #pragma unroll
         for (int o = 16; o > 0; o >>= 1) { amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o)); }
         const float scale = amax / 448.0f;
-        unsigned int packed = 0u;
-        if (scale > 0.0f) {
-            unsigned short lo, hi;
-            asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;\n" : "=h"(lo) : "f"(__fdiv_rn(r.y, scale)), "f"(__fdiv_rn(r.x, scale)));
-            asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;\n" : "=h"(hi) : "f"(__fdiv_rn(r.w, scale)), "f"(__fdiv_rn(r.z, scale)));
-            packed = (unsigned int)lo | ((unsigned int)hi << 16);
-        }
+        const unsigned int packed = scale > 0.0f ? brain_e4m3x4(r, scale) : 0u;
         q[(unsigned long long)row * 32ull + lane] = packed;
         if (lane == 0u) { s[row] = scale; }
     }

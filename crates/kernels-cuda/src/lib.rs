@@ -2809,7 +2809,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (1, 1024),
         shared_bytes: 0,
         programmatic: false,
-        src: include_str!("../cu/silu_mul_quant_e4m3_128.cu"),
+        src: concat!(include_str!("../cu/e4m3_quant_common.cuh"), include_str!("../cu/silu_mul_quant_e4m3_128.cu")),
     },
     CudaKernel {
         name: "quant_e4m3_128",
@@ -2826,7 +2826,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (1, 1024),
         shared_bytes: 0,
         programmatic: false,
-        src: include_str!("../cu/quant_e4m3_128.cu"),
+        src: concat!(include_str!("../cu/e4m3_quant_common.cuh"), include_str!("../cu/quant_e4m3_128.cu")),
     },
     CudaKernel {
         name: "matmul_fp8_gemv",
@@ -3013,7 +3013,7 @@ pub const ALL: &[CudaKernel] = &[
         // The eight warps' partial sums of squares.
         shared_bytes: 4 * 8,
         programmatic: true,
-        src: include_str!("../cu/add_rms_quant_e4m3.cu"),
+        src: concat!(include_str!("../cu/e4m3_quant_common.cuh"), include_str!("../cu/add_rms_quant_e4m3.cu")),
     },
     CudaKernel {
         name: "quant_epilogue",
@@ -4076,7 +4076,7 @@ pub const ALL: &[CudaKernel] = &[
         tile: (4, 128),
         shared_bytes: 0,
         programmatic: false,
-        src: include_str!("../cu/gdn_gated_norm.cu"),
+        src: concat!(include_str!("../cu/e4m3_quant_common.cuh"), include_str!("../cu/gdn_gated_norm.cu")),
     },
     CudaKernel {
         name: "gdn_chunk_loop_seg_bf16",
