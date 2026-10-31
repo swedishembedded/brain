@@ -84,12 +84,14 @@ pub const I8_WGMMA_DYNAMIC_SHARED_BYTES: u32 = 4 * (2 * 128 * 128 + 2 * 4 * 128 
 /// the K scales of two stages (512 bytes), the V scales (256) and the barriers (64), and 1 KiB to align the tiles to the
 /// 128-byte swizzle pattern. A test holds it to the source.
 pub const FLASH_PREFILL_WG_DYNAMIC_SHARED_BYTES: u32 = 2 * 32768 + 2 * 32768 + 32768 + 4 * 16384 + 2 * 2 * 256 + 512 + 256 + 64 + 1024;
-/// Dynamic shared memory per block of `flash_prefill_f16_hd256_wgs`: two 32 KiB Q tiles, two K and two V stages of 32 KiB, the
-/// K and V row scales of two stages (2 x 2 x 256 bytes), the eight barriers (64), and 1 KiB to align the tiles to the 128-byte
-/// swizzle pattern. A test holds it to the source.
-pub const FLASH_PREFILL_WGS_DYNAMIC_SHARED_BYTES: u32 = 2 * 32768 + 2 * 32768 + 2 * 32768 + 2 * 2 * 256 + 64 + 1024;
-/// Bytes of one staged record of `flash_prefill_f16_hd256_wgs_widen_*` (a K tile, a V tile and their 64 row scales each).
-pub const FLASH_PREFILL_WGS_RECORD_BYTES: u64 = 2 * 32768 + 2 * 256;
+/// Dynamic shared memory per block of `flash_prefill_f16_hd256_wgs`: two 32 KiB Q tiles, a 64 KiB K stage and a 64 KiB V stage
+/// (128 keys of 256 fp16 values), their row scales (2 x 512 bytes), the four barriers (64 with padding), and 1 KiB to align the
+/// tiles to the 128-byte swizzle pattern. A test holds it to the source.
+pub const FLASH_PREFILL_WGS_DYNAMIC_SHARED_BYTES: u32 = 2 * 32768 + 2 * 65536 + 2 * 512 + 64 + 1024;
+/// Keys of one tile (and one staged record) of `flash_prefill_f16_hd256_wgs`.
+pub const FLASH_PREFILL_WGS_KEYS: u32 = 128;
+/// Bytes of one staged record of `flash_prefill_f16_hd256_wgs_widen_*` (a K tile, a V tile and their 128 row scales each).
+pub const FLASH_PREFILL_WGS_RECORD_BYTES: u64 = 2 * 65536 + 2 * 512;
 /// Dynamic shared memory per block of `matmul_i8_stream_*` with `bn` weight rows a block, room for `rows` rows of x and
 /// `stages` stages (the source's `BRAIN_I8S_STAGE_BYTES` x `BRAIN_I8S_STAGES`): per stage `bn` rows x 128 bytes of
 /// weights, `rows` rows of x x 128 bytes and their four scale groups each. A test holds it to the source.
@@ -653,9 +655,9 @@ pub const ALL: &[CudaKernel] = &[
         // `wgmma` and `setmaxnreg` are arch-specific (`sm_90a`), so the launch also requires it (`ArchFeatures::Required`).
         min_cc: WGMMA_MIN_CC,
         entry: "brain_flash_prefill_wgs_widen_kv8",
-        what: "widens the keys of a prefill round over an int8 KV cache once into fp16 records (128-byte swizzled 64-key K and V tiles with the row scales beside them) for flash_prefill_f16_hd256_wgs: a block of 128 threads a (64-key tile, kv head), exact",
+        what: "widens the keys of a prefill round over an int8 KV cache once into fp16 records (128-byte swizzled 64-key K and V tiles with the row scales beside them) for flash_prefill_f16_hd256_wgs: a block of 256 threads a (128-key tile, kv head), exact",
         reported: "native:flash_prefill_f16_hd256_wgs_widen_kv8",
-        block_dim: 128,
+        block_dim: 256,
         tile: (1, 1),
         shared_bytes: 0,
         programmatic: false,
@@ -677,9 +679,9 @@ pub const ALL: &[CudaKernel] = &[
         // `wgmma` and `setmaxnreg` are arch-specific (`sm_90a`), so the launch also requires it (`ArchFeatures::Required`).
         min_cc: WGMMA_MIN_CC,
         entry: "brain_flash_prefill_wgs_widen_kvfp8",
-        what: "widens the keys of a prefill round over an FP8 E4M3 KV cache once into fp16 records (128-byte swizzled 64-key K and V tiles with the row scales beside them) for flash_prefill_f16_hd256_wgs: a block of 128 threads a (64-key tile, kv head), exact",
+        what: "widens the keys of a prefill round over an FP8 E4M3 KV cache once into fp16 records (128-byte swizzled 64-key K and V tiles with the row scales beside them) for flash_prefill_f16_hd256_wgs: a block of 256 threads a (128-key tile, kv head), exact",
         reported: "native:flash_prefill_f16_hd256_wgs_widen_kvfp8",
-        block_dim: 128,
+        block_dim: 256,
         tile: (1, 1),
         shared_bytes: 0,
         programmatic: false,
@@ -4767,19 +4769,22 @@ mod tests {
         has(
             "flash_prefill_f16_hd256_wgs",
             &[
-                "#define WGS_STRIDE 66048",
-                "#define WGS_OFF_STAGE_V 32768",
-                "#define WGS_OFF_STAGE_KS 65536",
-                "#define WGS_OFF_STAGE_VS 65792",
+                "#define WGS_KEYS 128",
+                "#define WGS_ATOM_BYTES 16384",
+                "#define WGS_TILE_BYTES 65536",
+                "#define WGS_STRIDE 132096",
+                "#define WGS_OFF_STAGE_V 65536",
+                "#define WGS_OFF_STAGE_KS 131072",
+                "#define WGS_OFF_STAGE_VS 131584",
                 "#define WGS_OFF_K (WGS_OFF_Q + 2 * WG_TILE_BYTES)",
-                "#define WGS_OFF_V (WGS_OFF_K + 2 * WG_TILE_BYTES)",
-                "#define WGS_OFF_KS (WGS_OFF_V + 2 * WG_TILE_BYTES)",
+                "#define WGS_OFF_V (WGS_OFF_K + WGS_TILE_BYTES)",
+                "#define WGS_OFF_KS (WGS_OFF_V + WGS_TILE_BYTES)",
                 "#define WGS_OFF_VS (WGS_OFF_KS + 512)",
                 "#define WGS_OFF_BAR (WGS_OFF_VS + 512)",
                 "#define WGS_SMEM_END (WGS_OFF_BAR + 64)",
             ],
         );
-        assert_eq!(FLASH_PREFILL_WGS_RECORD_BYTES, 66048);
+        assert_eq!(FLASH_PREFILL_WGS_RECORD_BYTES, 132096);
         has("matmul_fp8_wgmma_swap_n64b64", &["#define BRAIN_FS_STAGES 4", "#define BRAIN_FS_X_BYTES (BRAIN_FS_NX * 128)", "#define BRAIN_FS_W_BYTES (BRAIN_FS_BN * 128)", "#define BRAIN_FS_S_BYTES 512"]);
         assert_eq!(fp8_wgmma_swap_dynamic_shared_bytes(128, 64, 4), 4 * (128 * 128 + 64 * 128 + 512) + 1024);
         assert_eq!(fp8_wgmma_tma_dynamic_shared_bytes(5), 5 * (128 * 128 * 2 + 1024 + 16) + 1024);

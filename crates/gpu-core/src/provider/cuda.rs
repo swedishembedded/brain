@@ -1452,7 +1452,7 @@ pub fn paged_flash_prefill_wg_steps(gpu: &crate::Gpu, head_dim: u32, bufs: &[&ba
     let (rows, n_heads, n_kv_heads) = (params[0], params[1], params[2]);
     let splits = if rows >= FLASH_PREFILL_WG_UNSPLIT_ROWS { 1 } else { FLASH_PREFILL_WG_SPLITS_MAX };
     let staged = rows >= FLASH_PREFILL_STAGED_MIN.load(std::sync::atomic::Ordering::Relaxed);
-    let tiles_cap = keys.div_ceil(64);
+    let tiles_cap = keys.div_ceil(kernels_cuda::FLASH_PREFILL_WGS_KEYS);
     let mut p = params.to_vec();
     p.push(splits);
     p.push(nsm);

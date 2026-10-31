@@ -31,20 +31,39 @@
 #error "flash_prefill_f16_hd256_wgs.cu is compiled after flash_prefill_f16_hd256.cu and flash_prefill_f16_hd256_wg.cu"
 #endif
 
-#define WGS_STRIDE 66048              // a staged record: K tile, V tile, 64 K scales, 64 V scales
-#define WGS_OFF_STAGE_V 32768
-#define WGS_OFF_STAGE_KS 65536
-#define WGS_OFF_STAGE_VS 65792
+#define WGS_KEYS 128                  // keys a tile: S = Q K^T is 16 wgmma m64n128k16 (91 % of the tensor peak, against 66 % at n64)
+#define WGS_ATOM_BYTES 16384          // one 128-row x 64-value fp16 swizzle atom column: 128 rows x 128 bytes
+#define WGS_TILE_BYTES 65536          // a 128-row x 256-value fp16 tile: four atom columns
+#define WGS_STRIDE 132096             // a staged record: K tile, V tile, 128 K scales, 128 V scales
+#define WGS_OFF_STAGE_V 65536
+#define WGS_OFF_STAGE_KS 131072
+#define WGS_OFF_STAGE_VS 131584
 
 // Dynamic shared memory layout (offsets from the 1024-aligned base).
 #define WGS_OFF_Q 0                                      // two warpgroups x 32 KiB
-#define WGS_OFF_K (WGS_OFF_Q + 2 * WG_TILE_BYTES)        // two stages x 32 KiB
-#define WGS_OFF_V (WGS_OFF_K + 2 * WG_TILE_BYTES)        // two stages x 32 KiB
-#define WGS_OFF_KS (WGS_OFF_V + 2 * WG_TILE_BYTES)       // K scales, two stages x 64 f32
-#define WGS_OFF_VS (WGS_OFF_KS + 512)                    // V scales, two stages x 64 f32
-#define WGS_OFF_BAR (WGS_OFF_VS + 512)                   // eight 8-byte mbarriers
+#define WGS_OFF_K (WGS_OFF_Q + 2 * WG_TILE_BYTES)        // one stage x 64 KiB
+#define WGS_OFF_V (WGS_OFF_K + WGS_TILE_BYTES)           // one stage x 64 KiB
+#define WGS_OFF_KS (WGS_OFF_V + WGS_TILE_BYTES)          // K scales, 128 f32
+#define WGS_OFF_VS (WGS_OFF_KS + 512)                    // V scales, 128 f32
+#define WGS_OFF_BAR (WGS_OFF_VS + 512)                   // four 8-byte mbarriers
 #define WGS_SMEM_END (WGS_OFF_BAR + 64)
 
+// S (64 x 128 f32, 64 registers a thread) = or += Q (64 x 16 f16) . K (128 x 16 f16)^T, both operands from shared memory by descriptor.
+__device__ __forceinline__ void wgs_mma_s(float (&d)[64], unsigned long long da, unsigned long long db, bool accumulate) {
+    asm volatile(
+        "{\n"
+        ".reg .pred p;\n"
+        "setp.ne.b32 p, %66, 0;\n"
+        "wgmma.mma_async.sync.aligned.m64n128k16.f32.f16.f16 "
+        "{%0, %1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, %14, %15, %16, %17, %18, %19, %20, %21, %22, %23, %24, %25, %26, %27, %28, %29, %30, %31, %32, %33, %34, %35, %36, %37, %38, %39, %40, %41, %42, %43, %44, %45, %46, %47, %48, %49, %50, %51, %52, %53, %54, %55, %56, %57, %58, %59, %60, %61, %62, %63}, %64, %65, p, 1, 1, 0, 0;\n"
+        "}\n"
+        : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31]), "+f"(d[32]), "+f"(d[33]), "+f"(d[34]), "+f"(d[35]), "+f"(d[36]), "+f"(d[37]), "+f"(d[38]), "+f"(d[39]), "+f"(d[40]), "+f"(d[41]), "+f"(d[42]), "+f"(d[43]), "+f"(d[44]), "+f"(d[45]), "+f"(d[46]), "+f"(d[47]), "+f"(d[48]), "+f"(d[49]), "+f"(d[50]), "+f"(d[51]), "+f"(d[52]), "+f"(d[53]), "+f"(d[54]), "+f"(d[55]), "+f"(d[56]), "+f"(d[57]), "+f"(d[58]), "+f"(d[59]), "+f"(d[60]), "+f"(d[61]), "+f"(d[62]), "+f"(d[63])
+        : "l"(da), "l"(db), "r"(static_cast<int>(accumulate)));
+}
+// The V operand descriptor of a 128-key tile: N-major, the 64-value atom columns 16384 bytes apart, the 8-key groups 1024.
+__device__ __forceinline__ unsigned long long wgs_desc_mn(unsigned int addr) {
+    return static_cast<unsigned long long>((addr & 0x3FFFFu) >> 4) | (1024ull << 16) | (64ull << 32) | (1ull << 62);
+}
 __device__ __forceinline__ void wgs_mbar_expect_tx(unsigned int bar, unsigned int bytes) {
     asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n" ::"r"(bar), "r"(bytes) : "memory");
 }
@@ -53,8 +72,8 @@ __device__ __forceinline__ void wgs_bulk_copy(unsigned int dst, const void* src,
 }
 __device__ __forceinline__ void wgs_fence_barrier_init() { asm volatile("fence.mbarrier_init.release.cluster;\n" ::: "memory"); }
 
-// Widens the keys of one (64-key tile, kv head) into its staged record: 128 threads, a pair per key row.
-extern "C" __global__ void __launch_bounds__(128) brain_flash_prefill_wgs_widen(
+// Widens the keys of one (128-key tile, kv head) into its staged record: 256 threads, a pair per key row.
+extern "C" __global__ void __launch_bounds__(256) brain_flash_prefill_wgs_widen(
     const unsigned int* params, const KvT* pool_k, const KvT* pool_v, const unsigned int* block_tables, const unsigned int* seq_lens,
     const float* k_scales, const float* v_scales, unsigned char* stage) {
     const unsigned int bsz = params[0];
@@ -62,15 +81,16 @@ extern "C" __global__ void __launch_bounds__(128) brain_flash_prefill_wgs_widen(
     const unsigned int block_size = params[5];
     const unsigned int tiles_cap = params[9];
     const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;   // tile fastest
+    if (bsz == 0u || tiles_cap == 0u) { return; }
     const unsigned int kt = blk % tiles_cap;
     const unsigned int hkv = blk / tiles_cap;
-    if (bsz == 0u || tiles_cap == 0u || hkv >= n_kv_heads) { return; }
+    if (hkv >= n_kv_heads) { return; }
     const unsigned int max_t = seq_lens[bsz - 1u];
-    if (kt * WG_KEYS >= max_t) { return; }   // past the longest key range: nothing reads this record
+    if (kt * WGS_KEYS >= max_t) { return; }   // past the longest key range: nothing reads this record
 
     const unsigned int row = threadIdx.x >> 1;
     const unsigned int half = threadIdx.x & 1u;
-    const unsigned int j = kt * WG_KEYS + row;
+    const unsigned int j = kt * WGS_KEYS + row;
     const bool live = j < max_t;
     const unsigned long long kv_row = static_cast<unsigned long long>(n_kv_heads) * HD;
     unsigned char* const rec = stage + (static_cast<unsigned long long>(hkv) * tiles_cap + kt) * WGS_STRIDE;
@@ -92,8 +112,8 @@ extern "C" __global__ void __launch_bounds__(128) brain_flash_prefill_wgs_widen(
             wg_widen4(w.y, o0.z, o0.w);
             wg_widen4(w.z, o1.x, o1.y);
             wg_widen4(w.w, o1.z, o1.w);
-            // 16 codes -> d-chunks 2c and 2c + 1 of the row (8 values each), in the atom column c / 4 (version 3's tile layout).
-            unsigned char* const dst = tile + (c >> 2) * WG_SUB_BYTES + row * 128u;
+            // 16 codes -> d-chunks 2c and 2c + 1 of the row (8 values each), in the atom column c / 4.
+            unsigned char* const dst = tile + (c >> 2) * WGS_ATOM_BYTES + row * 128u;
             const unsigned int s0 = ((2u * c) & 7u) ^ (row & 7u);
             const unsigned int s1 = ((2u * c + 1u) & 7u) ^ (row & 7u);
             *reinterpret_cast<uint4*>(dst + s0 * 16u) = o0;
@@ -112,7 +132,6 @@ extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_
     extern __shared__ unsigned char brain_wg_smem_raw[];
     const unsigned int bsz = params[0];
     const unsigned int n_heads = params[1];
-    const unsigned int n_kv_heads = params[2];
     const unsigned int group = params[4];
     const unsigned int smax = params[7];
     const unsigned int nsm = params[8];
@@ -130,33 +149,32 @@ extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_
 
     const unsigned int i0 = qt * WG_ROWS;
     const unsigned int max_t = seq_lens[min(i0 + WG_ROWS - 1u, nrows - 1u)];
-    const unsigned int tiles = (max_t + WG_KEYS - 1u) / WG_KEYS;
-    const unsigned int n_split = wg_eff_splits(tiles, base_blocks, smax, nsm);
+    // The number of splits is decided in the units of version 3 (64-key tiles) so the combine kernel, which knows nothing of this
+    // kernel's tile, agrees; the tiles of a split are then 128 keys. A split can come out empty: it writes an empty partial.
+    const unsigned int n_split = wg_eff_splits((max_t + WG_KEYS - 1u) / WG_KEYS, base_blocks, smax, nsm);
     if (split >= n_split) { return; }
+    const unsigned int tiles = (max_t + WGS_KEYS - 1u) / WGS_KEYS;
     const unsigned int per = (tiles + n_split - 1u) / n_split;
     const unsigned int tile_begin = min(split * per, tiles);
     const unsigned int tile_end = min(tile_begin + per, tiles);
 
     const unsigned int hkv = h / (group == 0u ? 1u : group);
     const unsigned long long q_row = static_cast<unsigned long long>(n_heads) * HD;
-    (void)n_kv_heads;
 
     const unsigned int raw_addr = brain_smem_addr(brain_wg_smem_raw);
     const unsigned int base = (raw_addr + 1023u) & ~1023u;
     unsigned char* const gen = brain_wg_smem_raw + (base - raw_addr);
-    const unsigned int bar_full_k = base + WGS_OFF_BAR;          // + 8 stage
-    const unsigned int bar_empty_k = base + WGS_OFF_BAR + 16u;   // + 8 stage
-    const unsigned int bar_full_v = base + WGS_OFF_BAR + 32u;    // + 8 stage
-    const unsigned int bar_empty_v = base + WGS_OFF_BAR + 48u;   // + 8 stage
+    const unsigned int bar_full_k = base + WGS_OFF_BAR;
+    const unsigned int bar_empty_k = base + WGS_OFF_BAR + 8u;
+    const unsigned int bar_full_v = base + WGS_OFF_BAR + 16u;
+    const unsigned int bar_empty_v = base + WGS_OFF_BAR + 24u;
 
     const unsigned int tid = threadIdx.x;
     if (tid == 0u) {
-        for (unsigned int s = 0; s < 2u; ++s) {
-            wg_mbar_init(bar_full_k + 8u * s, 1u);   // the producer's expect_tx arrival; the bytes land through the copy
-            wg_mbar_init(bar_empty_k + 8u * s, 8u);
-            wg_mbar_init(bar_full_v + 8u * s, 1u);
-            wg_mbar_init(bar_empty_v + 8u * s, 8u);
-        }
+        wg_mbar_init(bar_full_k, 1u);   // the producer's expect_tx arrival; the bytes land through the copy
+        wg_mbar_init(bar_empty_k, 8u);
+        wg_mbar_init(bar_full_v, 1u);
+        wg_mbar_init(bar_empty_v, 8u);
         wgs_fence_barrier_init();
     }
     __syncthreads();
@@ -168,16 +186,15 @@ extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_
         const unsigned char* const rec0 = stage + (static_cast<unsigned long long>(hkv) * tiles_cap) * WGS_STRIDE;
         for (unsigned int kt = tile_begin; kt < tile_end; ++kt) {
             const unsigned int j = kt - tile_begin;
-            const unsigned int s = j & 1u;
             const unsigned char* const rec = rec0 + static_cast<unsigned long long>(kt) * WGS_STRIDE;
-            wg_mbar_wait(bar_empty_k + 8u * s, ((j >> 1) & 1u) ^ 1u);
-            wgs_mbar_expect_tx(bar_full_k + 8u * s, WG_TILE_BYTES + 256u);
-            wgs_bulk_copy(base + WGS_OFF_K + s * WG_TILE_BYTES, rec, WG_TILE_BYTES, bar_full_k + 8u * s);
-            wgs_bulk_copy(base + WGS_OFF_KS + s * 256u, rec + WGS_OFF_STAGE_KS, 256u, bar_full_k + 8u * s);
-            wg_mbar_wait(bar_empty_v + 8u * s, ((j >> 1) & 1u) ^ 1u);
-            wgs_mbar_expect_tx(bar_full_v + 8u * s, WG_TILE_BYTES + 256u);
-            wgs_bulk_copy(base + WGS_OFF_V + s * WG_TILE_BYTES, rec + WGS_OFF_STAGE_V, WG_TILE_BYTES, bar_full_v + 8u * s);
-            wgs_bulk_copy(base + WGS_OFF_VS + s * 256u, rec + WGS_OFF_STAGE_VS, 256u, bar_full_v + 8u * s);
+            wg_mbar_wait(bar_empty_k, (j & 1u) ^ 1u);
+            wgs_mbar_expect_tx(bar_full_k, WGS_TILE_BYTES + 512u);
+            wgs_bulk_copy(base + WGS_OFF_K, rec, WGS_TILE_BYTES, bar_full_k);
+            wgs_bulk_copy(base + WGS_OFF_KS, rec + WGS_OFF_STAGE_KS, 512u, bar_full_k);
+            wg_mbar_wait(bar_empty_v, (j & 1u) ^ 1u);
+            wgs_mbar_expect_tx(bar_full_v, WGS_TILE_BYTES + 512u);
+            wgs_bulk_copy(base + WGS_OFF_V, rec + WGS_OFF_STAGE_V, WGS_TILE_BYTES, bar_full_v);
+            wgs_bulk_copy(base + WGS_OFF_VS, rec + WGS_OFF_STAGE_VS, 512u, bar_full_v);
         }
         return;
     }
@@ -232,17 +249,16 @@ extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_
     // wgmma that the compiler cannot prove warp-uniform makes it wait for each one before issuing the next.
     for (unsigned int kt = tile_begin; kt < tile_end; ++kt) {
         const unsigned int j = kt - tile_begin;
-        const unsigned int ks = j & 1u;
-        const unsigned int parity = (j >> 1) & 1u;
-        wg_mbar_wait(bar_full_k + 8u * ks, parity);
+        const unsigned int parity = j & 1u;
+        wg_mbar_wait(bar_full_k, parity);
 
-        float s[32];
+        float s[64];
         {
-            const unsigned int k_tile = base + WGS_OFF_K + ks * WG_TILE_BYTES;
+            const unsigned int k_tile = base + WGS_OFF_K;
             wg_fence();
 #pragma unroll
             for (int k = 0; k < 16; ++k) {
-                brain_wg_mma_s(s, wg_desc_k(q_tile + (k >> 2) * WG_SUB_BYTES + (k & 3) * 32u), wg_desc_k(k_tile + (k >> 2) * WG_SUB_BYTES + (k & 3) * 32u), k > 0);
+                wgs_mma_s(s, wg_desc_k(q_tile + (k >> 2) * WG_SUB_BYTES + (k & 3) * 32u), wg_desc_k(k_tile + (k >> 2) * WGS_ATOM_BYTES + (k & 3) * 32u), k > 0);
             }
             wg_commit();
         }
@@ -250,10 +266,10 @@ extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_
             wg_wait0();
 
             // ---- row scale of K (already times 1/sqrt(d) log2 e) and, on the few tiles that cross a row's own position, the causal mask.
-            if ((kt + 1u) * WG_KEYS <= wg_min_len) {
+            if ((kt + 1u) * WGS_KEYS <= wg_min_len) {
 #pragma unroll
-                for (int n = 0; n < 8; ++n) {
-                    const float2 kx = *reinterpret_cast<const float2*>(ks2 + ks * 64u + n * 8u + t4 * 2u);
+                for (int n = 0; n < 16; ++n) {
+                    const float2 kx = *reinterpret_cast<const float2*>(ks2 + n * 8u + t4 * 2u);
                     s[4 * n + 0] *= kx.x;
                     s[4 * n + 1] *= kx.y;
                     s[4 * n + 2] *= kx.x;
@@ -261,9 +277,9 @@ extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_
                 }
             } else {
 #pragma unroll
-                for (int n = 0; n < 8; ++n) {
-                    const float2 kx = *reinterpret_cast<const float2*>(ks2 + ks * 64u + n * 8u + t4 * 2u);
-                    const unsigned int j0 = kt * WG_KEYS + n * 8u + t4 * 2u;
+                for (int n = 0; n < 16; ++n) {
+                    const float2 kx = *reinterpret_cast<const float2*>(ks2 + n * 8u + t4 * 2u);
+                    const unsigned int j0 = kt * WGS_KEYS + n * 8u + t4 * 2u;
                     s[4 * n + 0] = j0 < len_a ? s[4 * n + 0] * kx.x : NEG_BIG;
                     s[4 * n + 1] = j0 + 1u < len_a ? s[4 * n + 1] * kx.y : NEG_BIG;
                     s[4 * n + 2] = j0 < len_b ? s[4 * n + 2] * kx.x : NEG_BIG;
@@ -272,13 +288,13 @@ extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_
             }
         }
         __syncwarp();
-        if (lane == 0u) { wg_mbar_arrive(bar_empty_k + 8u * ks); }
+        if (lane == 0u) { wg_mbar_arrive(bar_empty_k); }
 
-        unsigned int pf[4][4];
+        unsigned int pf[8][4];
         {
             float mx_a = NEG_BIG, mx_b = NEG_BIG;
 #pragma unroll
-            for (int n = 0; n < 8; ++n) {
+            for (int n = 0; n < 16; ++n) {
                 mx_a = fmaxf(mx_a, fmaxf(s[4 * n + 0], s[4 * n + 1]));
                 mx_b = fmaxf(mx_b, fmaxf(s[4 * n + 2], s[4 * n + 3]));
             }
@@ -294,7 +310,7 @@ extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_
             const float ref_a = mn_a > NEG_BIG ? mn_a : 0.f, ref_b = mn_b > NEG_BIG ? mn_b : 0.f;
             float sum_a = 0.f, sum_b = 0.f;
 #pragma unroll
-            for (int n = 0; n < 8; ++n) {
+            for (int n = 0; n < 16; ++n) {
                 s[4 * n + 0] = wg_ex2(s[4 * n + 0] - ref_a);
                 s[4 * n + 1] = wg_ex2(s[4 * n + 1] - ref_a);
                 s[4 * n + 2] = wg_ex2(s[4 * n + 2] - ref_b);
@@ -317,13 +333,13 @@ extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_
             }
         }
 
-        wg_mbar_wait(bar_full_v + 8u * ks, parity);   // the V row scales and the V tile of this key tile
+        wg_mbar_wait(bar_full_v, parity);   // the V row scales and the V tile of this key tile
         {
             // P as fp16 A fragments, straight from the score accumulators, times the V row scale.
 #pragma unroll
-            for (int kk = 0; kk < 4; ++kk) {
-                const float2 v0 = *reinterpret_cast<const float2*>(vs1 + ks * 64u + (2 * kk) * 8u + t4 * 2u);
-                const float2 v1 = *reinterpret_cast<const float2*>(vs1 + ks * 64u + (2 * kk + 1) * 8u + t4 * 2u);
+            for (int kk = 0; kk < 8; ++kk) {
+                const float2 v0 = *reinterpret_cast<const float2*>(vs1 + (2 * kk) * 8u + t4 * 2u);
+                const float2 v1 = *reinterpret_cast<const float2*>(vs1 + (2 * kk + 1) * 8u + t4 * 2u);
                 pf[kk][0] = brain_pack_f16x2(s[8 * kk + 0] * v0.x, s[8 * kk + 1] * v0.y);
                 pf[kk][1] = brain_pack_f16x2(s[8 * kk + 2] * v0.x, s[8 * kk + 3] * v0.y);
                 pf[kk][2] = brain_pack_f16x2(s[8 * kk + 4] * v1.x, s[8 * kk + 5] * v1.y);
@@ -331,15 +347,15 @@ extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_
             }
         }
         {
-            const unsigned int v_tile = base + WGS_OFF_V + ks * WG_TILE_BYTES;
+            const unsigned int v_tile = base + WGS_OFF_V;
             wg_fence();
 #pragma unroll
-            for (int kk = 0; kk < 4; ++kk) { brain_wg_mma_pv(o, pf[kk], wg_desc_mn(v_tile + kk * 2048u)); }
+            for (int kk = 0; kk < 8; ++kk) { brain_wg_mma_pv(o, pf[kk], wgs_desc_mn(v_tile + kk * 2048u)); }
             wg_commit();
         }
         wg_wait0();
         __syncwarp();
-        if (lane == 0u) { wg_mbar_arrive(bar_empty_v + 8u * ks); }
+        if (lane == 0u) { wg_mbar_arrive(bar_empty_v); }
     }
 
     // ---- epilogue. l is a per-thread partial of its quad's row sum.

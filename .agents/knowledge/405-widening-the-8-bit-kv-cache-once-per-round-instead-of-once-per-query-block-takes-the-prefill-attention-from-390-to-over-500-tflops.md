@@ -11,25 +11,34 @@ is the producer?
 Result (gpu1 = GH200, `cuda_flash_prefill -- --ignored --nocapture long_prompt_round`, 4096-row round, 24 heads, 4 kv heads, int8 cache; the
 rate includes the widening pass):
 
-| context | in-block widening (`wg`) | widened once (`staged`) |
-|---|---|---|
-| 4K | 301 TFLOPS | 390-405 |
-| 8K | 346 | 465-487 |
-| 16K | 354 | 494-531 |
-| 24K | 367 | 506-547 |
-| 32K | 390 | 507-549 |
+| context | in-block widening (`wg`) | widened once, 64-key tiles | widened once, 128-key tiles |
+|---|---|---|---|
+| 4K | 301-311 TFLOPS | 390-405 | 421-446 |
+| 8K | 346-355 | 465-487 | 496-532 |
+| 16K | 354-381 | 494-531 | 522-540 |
+| 24K | 367-388 | 506-547 | 532-560 |
+| 32K | 390-394 | 507-549 | 518-543 |
 
-(the spread is two runs; the card is power capped and a neighbour on the other card moves the clock). A 512-row chunk gains too: 4K / 8K / 16K /
-31K context 0.219 / 0.388 / 0.610 / 1.088 -> 0.188 / 0.318 / 0.530 / 0.969 ms. ncu at 32K, 4096 rows: tensor pipe active 40 % -> 62 %.
+(ranges are repeated runs on the same card; it is power capped and its clock moves between runs by up to 15 %, so a comparison is made inside
+one process or as best-of-three). A 512-row chunk gains too: 4K / 8K / 16K / 31K context 0.219 / 0.388 / 0.610 / 1.088 -> 0.176 / 0.313 / 0.520 /
+0.920 ms. ncu at 32K, 4096 rows: tensor pipe active 40 % -> 62 % (64-key tiles).
 
 What changed: `flash_prefill_f16_hd256_wgs_widen_{kv8,kvfp8}` widens the round's keys once per layer into a staging buffer of one record per
 (kv head, 64-key tile): the K and V tiles in the exact 128-byte swizzled fp16 layout the tensor cores read, and their row scales (K scale already
 times 1/sqrt(d) log2 e) beside them; keys past the longest sequence are zero with zero scales. `flash_prefill_f16_hd256_wgs` is the version 3
-consumer with its producer warpgroup reduced to one thread issuing `cp.async.bulk` copies of whole tiles into a 2-stage K ring and a 2-stage V
-ring (shared memory 232 KB -> 194 KB, no raw staging, no per-block conversion). The numerics are version 3's bit for bit (the widening is exact, the
+consumer with its producer warpgroup reduced to one thread issuing `cp.async.bulk` copies of whole tiles (no raw staging, no per-block
+conversion). The first form kept 64-key tiles in two-stage rings; the second takes 128-key tiles, one stage each (64 KiB K, 64 KiB V, 198 KB of
+shared memory): S = Q K^T is then 16 `wgmma m64n128k16` whose dependent chain costs 127-141 cycles an instruction against 94-97 for `m64n64k16`
+(knowledge 383 item 5), 91 % of the tensor peak against 66 %, and the per-tile fixed work (barriers, row maxima, rescale vote) is paid per 128 keys. The numerics are version 3's bit for bit (the widening is exact, the
 scales are applied to the fp32 scores and to P as before); the specs in `cuda_flash_prefill.rs` run both forms and print identical differences.
 
 Cost and limits: the pass reads the context's 8-bit bytes and writes 2 bytes per element plus scales: at 32K context 200 MB, about 60 us against a
-6 ms attention; the staging buffer is `n_kv_heads x ceil(keys / 64) x 66048` bytes a layer (270 MB at 64K, 4 kv heads), allocated per step like the
+6 ms attention; the staging buffer is `n_kv_heads x ceil(keys / 128) x 132096` bytes a layer (270 MB at 64K, 4 kv heads), allocated per step like the
 split scratch. Rounds of fewer than `FLASH_PREFILL_STAGED_MIN_ROWS` rows keep the in-block form (their attention is too short to amortise the pass).
 `PrefillShape::keys` carries the round's longest key count to size the buffer.
+
+Tried on top, no gain (each a one-line change on the 64-key form, measured in the same session): an intra-warpgroup overlap (issue S of tile j + 1
+and P V of tile j back to back, softmax of j + 1 under the product; 53 % tensor active, 440 TFLOPS: the dependent S chain in front of P V in the
+in-order tensor queue costs more than the overlap hides, and ptxas serializes every wgmma (C7514) unless the consumers get 240 registers and the
+overlapped region has no condition around a wgmma or its wait); two independent accumulation chains for S (-5 %); the ping-pong turn order of the two
+consumer warpgroups (S0, S1, PV0, PV1; -3 %).
