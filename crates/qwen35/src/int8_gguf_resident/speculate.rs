@@ -297,4 +297,23 @@ mod tests {
         }
         assert!(spec.head > plain.head, "the MTP head is charged on the head's card");
     }
+
+    /// In the paged layout the MTP head's attention layer holds one more layer of the shared pool (that is what the
+    /// engine allocates), not a context-long window per sequence slot: its charge does not grow with the batch or
+    /// the context, so loading the drafter does not shrink the pool every sequence shares.
+    #[test]
+    fn the_paged_mtp_head_charges_one_layer_of_the_shared_pool() {
+        let cfg = Qwen35Config::tiny();
+        let head = |max_batch: u32, cap: u32, mtp_head: bool| {
+            let shape = ServingShape { kv_pool_rows: 4096, spec: SpecCost { scratch_rows: 4, mtp_head }, ..ServingShape::new(cap, TierPolicy::uniform(gpu_core::select::Dtype::I8), KvTier::INT8, max_batch) };
+            serving_cost(&cfg, &shape).head
+        };
+        let mtp = head(2, 1024, true) - head(2, 1024, false);
+        assert_eq!(head(64, 1024, true) - head(64, 1024, false), mtp, "the batch does not multiply the drafter's KV");
+        assert_eq!(head(64, 65536, true) - head(64, 65536, false), mtp, "nor does the context");
+        let full = cfg.layer_types().into_iter().position(|t| t == LayerType::Full).expect("a full-attention layer");
+        let shape = ServingShape { kv_pool_rows: 4096, ..ServingShape::new(1024, TierPolicy::uniform(gpu_core::select::Dtype::I8), KvTier::INT8, 2) };
+        let pool_layer = serving_cost(&cfg, &shape).per_layer[full] - cfg.layer_weight_bytes_at(&format!("blocks.{full}."), LayerType::Full, &shape.tier);
+        assert!(mtp > pool_layer, "the drafter's KV is one pool layer, plus its weights");
+    }
 }

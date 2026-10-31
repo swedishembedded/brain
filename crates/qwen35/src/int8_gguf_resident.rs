@@ -482,7 +482,9 @@ pub fn serving_cost(cfg: &Qwen35Config, shape: &ServingShape) -> LayerBytes {
         .collect();
     let mtp = if shape.spec.mtp_head {
         let d = cfg.d_model as u64;
-        cfg.layer_weight_bytes_at(mtp::MTP_PREFIX, LayerType::Full, &shape.tier) + d * 2 * d * 2 + shape.window_slots() as u64 * cfg.layer_decode_state_bytes(LayerType::Full, shape.cap, shape.kv)
+        // Its attention layer's KV is held the way every full-attention layer's is (`ShardCaches` with the same
+        // layout): one layer of the shared pool when paged, a window per slot otherwise.
+        cfg.layer_weight_bytes_at(mtp::MTP_PREFIX, LayerType::Full, &shape.tier) + d * 2 * d * 2 + layer_state_bytes(cfg, LayerType::Full, shape)
     } else {
         0
     };
