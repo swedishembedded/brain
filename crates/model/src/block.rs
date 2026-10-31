@@ -760,13 +760,13 @@ pub fn native_paged_flash_prefill_kvfp8(g: &Gpu, head_dim: u32, bufs: &[&DeviceB
 /// [`gpu_core::provider::cuda::paged_flash_prefill_wg_steps`], the warpgroup form over an int8 or FP8 E4M3 KV cache of ONE
 /// sequence.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn native_paged_flash_prefill_wg(g: &Gpu, head_dim: u32, bufs: &[&DeviceBuffer; 8], params: &[u32], fp8: bool) -> Option<Vec<Step>> {
+pub fn native_paged_flash_prefill_wg(g: &Gpu, head_dim: u32, bufs: &[&DeviceBuffer; 8], params: &[u32], keys: u32, fp8: bool) -> Option<Vec<Step>> {
     let codec = if fp8 { gpu_core::provider::cuda::Scaled8::Fp8E4m3 } else { gpu_core::provider::cuda::Scaled8::Int8 };
-    gpu_core::provider::cuda::paged_flash_prefill_wg_steps(g, head_dim, bufs, params, codec)
+    gpu_core::provider::cuda::paged_flash_prefill_wg_steps(g, head_dim, bufs, params, keys, codec)
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn native_paged_flash_prefill_wg(_g: &Gpu, _head_dim: u32, _bufs: &[&DeviceBuffer; 8], _params: &[u32], _fp8: bool) -> Option<Vec<Step>> {
+pub fn native_paged_flash_prefill_wg(_g: &Gpu, _head_dim: u32, _bufs: &[&DeviceBuffer; 8], _params: &[u32], _keys: u32, _fp8: bool) -> Option<Vec<Step>> {
     None
 }
 
@@ -1013,11 +1013,11 @@ pub fn gqa_chunk_attend_steps_kv_paged(
     assert!(t_max <= block_size * max_bt, "gqa_chunk_step_kv: chunk end {t_max} exceeds the cache capacity {}", block_size * max_bt);
     let kv_stride = n_kv_heads * head_dim;
     if head_dim == 256 && paged_attention_fused(g, true, false, head_dim, 0) {
-        return kv.flash_prefill_hd256(g, q, &layer.k, &layer.v, tables, seq_lens, ctx, PrefillShape { n, n_heads, n_kv_heads, head_dim, block_size, max_bt });
+        return kv.flash_prefill_hd256(g, q, &layer.k, &layer.v, tables, seq_lens, ctx, PrefillShape { n, n_heads, n_kv_heads, head_dim, block_size, max_bt, keys: t_max });
     }
     // Head width 128 has no portable fused kernel, but the native tensor-core one covers it on every tier that has one.
     if head_dim == 128 {
-        let shape = PrefillShape { n, n_heads, n_kv_heads, head_dim, block_size, max_bt };
+        let shape = PrefillShape { n, n_heads, n_kv_heads, head_dim, block_size, max_bt, keys: t_max };
         if let Some(native) = kv.native_flash_prefill(g, q, &layer.k, &layer.v, tables, seq_lens, ctx, shape) {
             return native;
         }

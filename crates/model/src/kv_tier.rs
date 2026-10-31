@@ -616,6 +616,8 @@ pub struct PrefillShape {
     /// Entries of each row's block table (`1` when one physical block backs the
     /// whole sequence).
     pub max_bt: u32,
+    /// The longest key count of the round (`start + n`): what a kernel that stages the context sizes its scratch by.
+    pub keys: u32,
 }
 
 /// The fused decode's shape: `batch` sequences, one query row each, against a
@@ -871,7 +873,7 @@ impl KvKernels {
             (Some(ks), Some(vs)) => {
                 let bufs = [q, &k.data, &v.data, block_ids, seq_lens, ctx, ks, vs];
                 let fp8 = self.tier.element == KvElement::Fp8E4m3;
-                crate::block::native_paged_flash_prefill_wg(g, s.head_dim, &bufs, &params, fp8).or_else(|| {
+                crate::block::native_paged_flash_prefill_wg(g, s.head_dim, &bufs, &params, s.keys, fp8).or_else(|| {
                     if fp8 {
                         crate::block::native_paged_flash_prefill_kvfp8(g, s.head_dim, &bufs, &params, blocks)
                     } else {

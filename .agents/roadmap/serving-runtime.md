@@ -347,6 +347,10 @@ measurement (16-256), not fixed globally.
   overlap of S and the softmax and a 128-key S tile (364 -> ~500 TFLOPS), cluster multicast of the K/V fetch, the bf16 cache (still version 2),
   the training forward/backward (dense forward and `flash_attn_bwd_f16` still on `mma.sync`, unchanged), selection through the measured
   candidate tuner instead of the capability floor (the kernel is chosen where the part has `wgmma`; the tuner has no attention slot yet).
+- 2026-11-01 (prefill attention widened once per round, knowledge 405): `flash_prefill_f16_hd256_wgs_widen_*` stages the round's int8/FP8 keys once as
+  swizzled fp16 tile records and `flash_prefill_f16_hd256_wgs` bulk-copies them (no producer conversion): 4096-row round at 4K / 8K / 16K / 32K
+  context 301 / 346 / 354 / 390 -> 390-405 / 465-487 / 494-531 / 507-549 TFLOPS causal, tensor pipe 40 -> 62 % active. Open: intra-warpgroup S/softmax/PV
+  overlap, a persistent causal-balanced schedule, the staging buffer shared across layers.
 - 2026-10-30 (GDN prefill on bf16 tensor cores, knowledge 384): the Gated DeltaNet serving prefill has a second form, `gdn_chunk_prep_tok_bf16` +
   `gdn_chunk_loop_bf16` (bf16 operands rounded once in the prep, fp32 accumulation, fp32 state in registers, prefetched tiles), chosen per device by
   measurement (`gpu-core/src/gdn_prefill_tune.rs`, slot `gdn_prefill`, `--kernel gdn_prefill=exact|bf16` pins it) and admitted within 4 bf16 steps

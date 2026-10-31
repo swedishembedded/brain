@@ -488,7 +488,7 @@ impl TierDevice {
             Kv::Fp8 => gpu_core::provider::cuda::Scaled8::Fp8E4m3,
             Kv::Bf16 => return None,
         };
-        gpu_core::provider::cuda::paged_flash_prefill_wg_steps(gpu, HD, &[b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]], &Device::params(p), codec)
+        gpu_core::provider::cuda::paged_flash_prefill_wg_steps(gpu, HD, &[b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]], &Device::params(p), p.c.start + p.c.n, codec)
     }
 
     fn native(&self, gpu: &Gpu, p: &Problem) -> Option<gpu_core::Step> {
@@ -594,9 +594,11 @@ fn the_warpgroup_prefill_reads_an_int8_and_an_fp8_cache() {
         // From 2048 rows the kernel runs unsplit and has no merge step.
         Case { n: 2176, start: 1500, block_size: 512, scatter: true },
     ];
-    for kv in [Kv::Int8, Kv::Fp8] {
+    for (staged, kv) in [false, true].into_iter().flat_map(|staged| [Kv::Int8, Kv::Fp8].map(move |kv| (staged, kv))) {
+        // Staged: the round widens its keys once into fp16 records (every round, whatever its length); unstaged: every block does.
+        gpu_core::provider::cuda::set_flash_prefill_staged_min_rows(if staged { 1 } else { u32::MAX });
         for (i, c) in cases.iter().enumerate() {
-            let desc = format!("{kv:?} case {i} (n={} start={} block={} scatter={})", c.n, c.start, c.block_size, c.scatter);
+            let desc = format!("{kv:?} staged={staged} case {i} (n={} start={} block={} scatter={})", c.n, c.start, c.block_size, c.scatter);
             let p = Problem::new(Case { ..*c }, 0xA11CE + i as u64);
             let (seen, stored) = p.as_stored(kv);
             let d = TierDevice::upload(&gpu, &seen, kv, &stored);
@@ -620,6 +622,7 @@ fn the_warpgroup_prefill_reads_an_int8_and_an_fp8_cache() {
             }
         }
     }
+    gpu_core::provider::cuda::set_flash_prefill_staged_min_rows(gpu_core::provider::cuda::FLASH_PREFILL_STAGED_MIN_ROWS);
 }
 
 /// The compact-tier kernels keep the decode-regime rule of the fp32 one.
@@ -739,8 +742,10 @@ fn int8_prefill_rates(cases: &[(u32, u32)]) {
         let d = TierDevice::upload(&gpu, &seen, Kv::Int8, &stored);
         let flops = 4.0 * f64::from(n) * (f64::from(start) + f64::from(n) / 2.0) * 256.0 * 24.0;
         assert!(gpu.set_kernel_timing(true));
-        for (label, name, wg) in [("v2", "flash_prefill_f16_hd256_v2_kv8", false), ("wg", "flash_prefill_f16_hd256_wg", true)] {
+        // `wg` widens in every block; `staged` widens the round's keys once first (its time is in the rate).
+        for (label, name, wg, staged_min_rows) in [("v2", "flash_prefill_f16_hd256_v2_kv8", false, u32::MAX), ("wg", "flash_prefill_f16_hd256_wg", true, u32::MAX), ("staged", "flash_prefill_f16_hd256_wg", true, 1)] {
             gpu_core::provider::cuda::set_flash_prefill_wg(wg);
+            gpu_core::provider::cuda::set_flash_prefill_staged_min_rows(staged_min_rows);
             let steps = if wg { d.native_wg(&gpu, &seen).expect("warpgroup step") } else { vec![d.native(&gpu, &seen).expect("native step")] };
             let _ = d.base.run_steps(&gpu, &steps, &seen);
             let ms = (0..TRIALS).map(|_| d.base.trial_steps_ms(&gpu, &steps, name)).fold(f64::MAX, f64::min);
@@ -749,4 +754,5 @@ fn int8_prefill_rates(cases: &[(u32, u32)]) {
         gpu.set_kernel_timing(false);
     }
     gpu_core::provider::cuda::set_flash_prefill_wg(true);
+    gpu_core::provider::cuda::set_flash_prefill_staged_min_rows(gpu_core::provider::cuda::FLASH_PREFILL_STAGED_MIN_ROWS);
 }
