@@ -497,3 +497,15 @@ Mixed-iteration idle (knowledge 392, 2026-10-30): a prompt start no longer waits
   norm 1.3 %: approximate `ex2`/`rcp` forms would take ~30 us off the SwiGLU pass, not done: it changes bits), the xn f32 store + `cast_f32_bf16` of a Gated DeltaNet layer (~0.9 %: needs a bf16-only
   activation the small gate GEMMs would have to prove they read), the two segment-row copies of a multi-prompt round (`concat_split`, `splice`: 0.6 %), the f32 `gdn_recur_pool` at 14 rows (36 us for 26 us of
   bytes: 1.7 waves of 3 blocks an SM), decode attention at 16x8K (1.5x).
+
+- 2026-11-01 (host intake, 16-row decode products, the drafter's memory charge; knowledge 406): a same-cell profile against a reference server (8Kx16, nsys,
+  each instant charged to the earliest active kernel so programmatic-dependent successors do not count their wait) found the card idle 2.45 vs 1.22 s, 30-60 ms
+  before every prompt: the serving thread tokenized each prompt twice (screen, then admit) with a merge loop that cloned two strings a pair lookup. Landed:
+  id-keyed BPE merges for every byte-pair tokenizer (`bpe::MergeTable`, same ids; 8K-token encode 21.3 -> 8.1 ms), open groups that take free slots before
+  screening (a request with a slot is parsed once), the tensor-map swap FP8 GEMM offered from 1 row (16-row gate/up 66.8 -> 61.6 us), and the MTP head charged
+  one layer of the shared KV pool instead of `slots x cap` window rows (the pool was cut 737,280 -> 204,800 tokens whenever the drafter loaded; brain's default
+  8Kx64 TTFT 30-32 -> 1.74 s, 32Kx16 37-45 -> 4.0 s). Default flags, 8Kx16 288 -> 300.8 tok/s, 8Kx64 287-306 -> 356.3, 32Kx16 56-71 -> 81.9. Open, by weight:
+  the FP8 prefill GEMM (4096 rows: 1013-1128 vs the reference's 1110-1256 TFLOPS; at equal clock 42 % more instructions, 31 % more L2 bytes, no multicast),
+  GDN `in_proj_qkv` + `in_proj_z` as one FP8 product at decode (the reference's 16384-wide product runs 3.28 TB/s; `Ops::matmul_group` has no FP8 form),
+  the 16-row `down` GEMV (35.7 vs 31.0 us), GDN prefill (1.9 vs 1.2 s of an 8Kx16 cell), the remaining tokenize/render on the serving thread (a text
+  front end has no background parse), an explicit `--speculative auto` that still loses at many streams (8Kx16 267-273 tok/s with no batch limit).
