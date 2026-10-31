@@ -558,6 +558,16 @@ pub fn gdn_bf16_prefill_selected(gpu: &crate::Gpu) -> bool {
     }
 }
 
+/// Whether the bf16 form's recurrence runs on warpgroup tensor cores (`gdn_chunk_loop_wg`, `gdn_chunk_loop_seg_wg`): pinned by
+/// [`crate::force_candidate`] on [`crate::gdn_prefill_tune::LOOP_SLOT`], else the outcome of the measurement of
+/// [`crate::Gpu::prepare_gdn_prefill`] (the `mma.sync` body until it has run).
+pub fn gdn_wg_loop_selected(gpu: &crate::Gpu) -> bool {
+    match crate::native_tune::forced_candidate(crate::gdn_prefill_tune::LOOP_SLOT).as_deref() {
+        Some(body) => body == "wg",
+        None => gpu.gdn_prefill_choice().is_some_and(|c| c.wg),
+    }
+}
+
 /// [`gdn_chunk_loop_tc_step`] on bf16 operands (`gdn_chunk_loop_bf16`): `bufs` are the same ten, but `key`, `query`, `w` and
 /// `intra_scores` hold the bf16 tensors `gdn_chunk_prep_tok_bf16` wrote (`kd`, `qs`, `w`, `intra`) and `exp_g_cs` is not read.
 #[allow(clippy::too_many_arguments)]
@@ -574,6 +584,11 @@ pub fn gdn_chunk_loop_bf16_step(
 ) -> Option<crate::Step> {
     if !gdn_chunk_prep_shape_ok(dk, dv, c_len) {
         return None;
+    }
+    if gdn_wg_loop_selected(gpu) {
+        if let Some(step) = gdn_chunk_loop_wg_step(gpu, bufs, bh, c_len, dk, dv, n_chunks, scale, heads_tok) {
+            return Some(step);
+        }
     }
     let cc = gpu.caps().arch.compute_capability?;
     let kernel = kernels_cuda::get("gdn_chunk_loop_bf16").filter(|k| k.min_cc <= cc)?;
@@ -819,6 +834,15 @@ pub fn gdn_chunk_loop_seg_bf16_step(gpu: &crate::Gpu, bufs: &[&backend_api::Devi
         return None;
     }
     let cc = gpu.caps().arch.compute_capability?;
+    if gdn_wg_loop_selected(gpu) {
+        if let Some(kernel) = kernels_cuda::get("gdn_chunk_loop_seg_wg").filter(|k| k.min_cc <= cc) {
+            let launch = backend_api::CudaLaunch { dynamic_shared_bytes: GDN_CHUNK_LOOP_WG_DYNAMIC_SHARED_BYTES, shared_opt_in: true, arch: backend_api::ArchFeatures::Required, ..backend_api::CudaLaunch::NONE };
+            let id = gpu.native_kernel_launched(kernel, &GDN_CHUNK_LOOP_SEG_BINDINGS, launch)?;
+            let blocks = table.segments * heads;
+            let params = [blocks, 0, dk, dv, 0, 0, heads, table.segments, heads * dk * dv, u32::from(bf16) | if pool_bf16 { 2 } else { 0 }];
+            return gpu.step_native_sliced(id, bufs, &[(0, 0); 9], &params, blocks);
+        }
+    }
     let kernel = kernels_cuda::get("gdn_chunk_loop_seg_bf16").filter(|k| k.min_cc <= cc)?;
     let launch = backend_api::CudaLaunch { dynamic_shared_bytes: GDN_CHUNK_LOOP_BF16_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..backend_api::CudaLaunch::NONE };
     let id = gpu.native_kernel_launched(kernel, &GDN_CHUNK_LOOP_SEG_BINDINGS, launch)?;

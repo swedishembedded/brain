@@ -305,3 +305,40 @@ extern "C" __global__ void __launch_bounds__(WGT, 1) brain_gdn_chunk_loop_wg(con
     };
     gdn_loop_wg_walk(op, n_chunks, state, false, chunk_at);
 }
+
+// The recurrence of every prompt segment of a round in one launch, on the state rows of the pools themselves (the contract of
+// `brain_gdn_chunk_loop_seg_bf16`, whose chunk table and scratch slots it reads): block = one (segment, value head).
+// params [blocks, unused..., H at 6, nseg at 7, state elements per pool row at 8, flags at 9 (bit 0: `out` is bf16 rows; bit 1: the
+// state pool holds bf16 elements)]; buffers kd, qs, w, u, g_cs, intra, table, state pool (read and written in place), out.
+extern "C" __global__ void __launch_bounds__(WGT, 1) brain_gdn_chunk_loop_seg_wg(const unsigned int* params, const unsigned short* kd, const unsigned short* qs,
+                                                                              const unsigned short* w, const float* u, const float* g_cs,
+                                                                              const unsigned short* intra, const unsigned int* table, float* state_pool, float* out) {
+    const unsigned int blocks = params[0];
+    const unsigned int H = params[6], nseg = params[7];
+    const unsigned long long state_words = params[8];
+    const bool out_bf16 = (params[9] & 1u) != 0u;
+    const bool state_bf16 = (params[9] & 2u) != 0u;
+    const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
+    if (blk >= blocks) { return; }  // block-uniform
+    const unsigned int seg = blk / H, head = blk % H;
+    const unsigned int* sg = table + 4 * seg;
+    const unsigned int rows = sg[1], slot = sg[2], chunk0 = sg[3];
+    const unsigned int n_chunks = (rows + MAXC - 1) / MAXC;
+    const unsigned int* chunks = table + 4 * nseg;
+
+    const WgOperands op = {kd, qs, w, intra, u, g_cs, out, out_bf16};
+    auto chunk_at = [&](unsigned int ci) {
+        const unsigned int global = chunk0 + ci;
+        WgChunk ch;
+        ch.C = chunks[2 * global + 1];
+        ch.row_base = ((unsigned long long)global * H + head) * MAXC;
+        ch.cc_base = ch.row_base * MAXC;
+        ch.out_stride = (unsigned long long)H * D;
+        ch.out_row = ((unsigned long long)chunks[2 * global] * H + head) * D;
+        return ch;
+    };
+    // A bf16 pool is addressed in elements: the same count of two-byte elements instead of four-byte words.
+    const unsigned long long state_at = slot * state_words + (unsigned long long)head * D * D;
+    void* const state = state_bf16 ? static_cast<void*>(reinterpret_cast<unsigned short*>(state_pool) + state_at) : static_cast<void*>(state_pool + state_at);
+    gdn_loop_wg_walk(op, n_chunks, state, state_bf16, chunk_at);
+}

@@ -17,12 +17,21 @@
 //! error orders of magnitude larger), and it is chosen when it is faster by more than [`TIE`]. A device without both
 //! forms, or whose timers are unavailable, keeps the exact form. [`crate::force_candidate`] pins the slot
 //! [`SLOT`] to `exact` or `bf16` for A/B measurement and for the tests that need the exact arithmetic.
+//!
+//! Inside the bf16 form the recurrence has two bodies on a Hopper card: the `mma.sync` one and the warpgroup one
+//! (`gdn_chunk_loop_wg`, the state in registers across chunks). They read the same scratch, so the second decision is
+//! taken on the bf16 form's own prepared tensors: the warpgroup body is chosen when its output agrees with the `mma.sync`
+//! body's within [`ADMIT_ULPS`] and it is faster by more than [`TIE`]. [`crate::force_candidate`] pins [`LOOP_SLOT`] to
+//! `mma` or `wg`.
 
 use crate::provider::cuda::{self, GdnTokenLayout};
 use crate::Gpu;
 
 /// The slot name [`crate::force_candidate`] takes.
 pub const SLOT: &str = "gdn_prefill";
+
+/// The slot name [`crate::force_candidate`] takes for the recurrence body of the bf16 form (`mma` or `wg`).
+pub const LOOP_SLOT: &str = "gdn_prefill_loop";
 
 /// The bf16 form must be this much faster than the exact one to displace it.
 const TIE: f64 = 0.97;
@@ -44,15 +53,19 @@ const DIM: u32 = 128;
 #[derive(Debug, Clone, Copy)]
 pub struct Choice {
     pub bf16: bool,
+    /// The bf16 form's recurrence runs on warpgroup tensor cores.
+    pub wg: bool,
     /// Microseconds of one forward of each form, when both were timed.
     pub exact_us: Option<f64>,
     pub bf16_us: Option<f64>,
     /// Relative rms error of the bf16 form's output against the exact form's.
     pub rel_err: Option<f64>,
+    /// Microseconds of the recurrence alone in the `mma.sync` and the warpgroup body.
+    pub loop_us: Option<(f64, f64)>,
 }
 
 impl Choice {
-    const EXACT: Choice = Choice { bf16: false, exact_us: None, bf16_us: None, rel_err: None };
+    const EXACT: Choice = Choice { bf16: false, wg: false, exact_us: None, bf16_us: None, rel_err: None, loop_us: None };
 }
 
 fn lcg(seed: &mut u64, n: usize, scale: f32) -> Vec<f32> {
@@ -86,11 +99,14 @@ pub(crate) fn choose(gpu: &Gpu) -> Choice {
     probe.set_kernel_timing(false);
     let choice = choice.unwrap_or(Choice::EXACT);
     eprintln!(
-        "brain: gdn prefill form on {key}: {} (exact {} us, bf16 {} us, bf16 error {})",
+        "brain: gdn prefill form on {key}: {}{} (exact {} us, bf16 {} us, bf16 error {}; recurrence mma {} us, wg {} us)",
         if choice.bf16 { "bf16" } else { "exact" },
+        if choice.wg { " + warpgroup recurrence" } else { "" },
         choice.exact_us.map_or("-".into(), |v| format!("{v:.0}")),
         choice.bf16_us.map_or("-".into(), |v| format!("{v:.0}")),
-        choice.rel_err.map_or("-".into(), |v| format!("{v:.1e}"))
+        choice.rel_err.map_or("-".into(), |v| format!("{v:.1e}")),
+        choice.loop_us.map_or("-".into(), |v| format!("{:.0}", v.0)),
+        choice.loop_us.map_or("-".into(), |v| format!("{:.0}", v.1))
     );
     measured.push((key, choice));
     choice
@@ -128,6 +144,7 @@ fn try_measure(gpu: &Gpu) -> Option<Choice> {
     gpu.set_kernel_timing(true);
     let mut outs: Vec<Vec<f32>> = Vec::new();
     let mut times: Vec<f64> = Vec::new();
+    let mut loop_best = f64::MAX;
     for (prep, recurrence) in forms {
         let steps = [prep?, recurrence?];
         gpu.submit(&[], &steps);
@@ -142,15 +159,45 @@ fn try_measure(gpu: &Gpu) -> Option<Choice> {
             let ms: f64 = gpu.kernel_times()?.iter().filter(|r| r.0.starts_with("native:gdn_chunk_")).map(|r| r.1).sum();
             if ms > 0.0 {
                 best = best.min(ms * 1e3);
+                loop_best = loop_best.min(gpu.kernel_times()?.iter().filter(|r| r.0.starts_with("native:gdn_chunk_loop")).map(|r| r.1).sum::<f64>() * 1e3);
             }
         }
         times.push(best);
     }
+    // The bf16 form's scratch is still the one in the buffers: its recurrence on the warpgroup body, alone.
+    let wg = match cuda::gdn_chunk_loop_wg_step(gpu, &loop_bufs, bh, c, DIM, DIM, n_chunks, scale, h) {
+        Some(step) => {
+            gpu.submit(&[], &[step]);
+            gpu.poll_wait();
+            let wg_out = gpu.read(&out, len);
+            let mut best = f64::MAX;
+            for _ in 0..4 {
+                gpu.reset_kernel_times();
+                gpu.submit(&[], &[cuda::gdn_chunk_loop_wg_step(gpu, &loop_bufs, bh, c, DIM, DIM, n_chunks, scale, h)?]);
+                gpu.poll_wait();
+                let ms: f64 = gpu.kernel_times()?.iter().filter(|r| r.0.starts_with("native:gdn_chunk_loop")).map(|r| r.1).sum();
+                if ms > 0.0 {
+                    best = best.min(ms * 1e3);
+                }
+            }
+            Some((wg_out, best))
+        }
+        None => None,
+    };
     let rms = |a: &[f32]| (a.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>() / a.len() as f64).sqrt();
     let diff: Vec<f32> = outs[1].iter().zip(&outs[0]).map(|(a, b)| a - b).collect();
     let rel_err = rms(&diff) / rms(&outs[0]).max(1e-30);
     let (exact_us, bf16_us) = (times[0], times[1]);
     let timed = exact_us.is_finite() && bf16_us.is_finite() && exact_us < f64::MAX && bf16_us < f64::MAX;
     let admitted = rel_err.is_finite() && rel_err <= ADMIT_ULPS * BF16_UNIT;
-    Some(Choice { bf16: timed && admitted && bf16_us < exact_us * TIE, exact_us: timed.then_some(exact_us), bf16_us: timed.then_some(bf16_us), rel_err: Some(rel_err) })
+    let bf16 = timed && admitted && bf16_us < exact_us * TIE;
+    let (wg, loop_us) = match wg {
+        Some((wg_out, wg_us)) if loop_best < f64::MAX && wg_us < f64::MAX => {
+            let diff: Vec<f32> = wg_out.iter().zip(&outs[1]).map(|(a, b)| a - b).collect();
+            let wg_err = rms(&diff) / rms(&outs[1]).max(1e-30);
+            (bf16 && wg_err.is_finite() && wg_err <= ADMIT_ULPS * BF16_UNIT && wg_us < loop_best * TIE, Some((loop_best, wg_us)))
+        }
+        _ => (false, None),
+    };
+    Some(Choice { bf16, wg, exact_us: timed.then_some(exact_us), bf16_us: timed.then_some(bf16_us), rel_err: Some(rel_err), loop_us })
 }
