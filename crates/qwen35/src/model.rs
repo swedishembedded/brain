@@ -3251,8 +3251,15 @@ impl Qwen35 {
                 // when every sequence ran the chain on its own rows.
                 let kv = self.kv_kernels(layer);
                 let ids = gqa_mixer_ids();
-                let prep = model::gqa_mixer::qkv_prepare(g, &ids, &shape, &weights, &q_full, &k, n);
-                g.submit(&[], &model::block::kv_append_rows(g, &kv, nkv, hd, round.caches.gqa_cap, n, &prep.k_normed, &v, layer, &round.rows.blocks, &round.rows.offsets));
+                // `q_gate` is `None` when the gate was left in `q_full` for the gate pass to read in place.
+                let (q_normed, k_normed, q_gate) = match self.gqa_front_fused(&shape, &weights, &q_full, &k, n, epilogue) {
+                    Some((q_normed, k_normed)) => (q_normed, k_normed, None),
+                    None => {
+                        let prep = model::gqa_mixer::qkv_prepare(g, &ids, &shape, &weights, &q_full, &k, n);
+                        (prep.q_normed, prep.k_normed, Some(prep.q_gate))
+                    }
+                };
+                g.submit(&[], &model::block::kv_append_rows(g, &kv, nkv, hd, round.caches.gqa_cap, n, &k_normed, &v, layer, &round.rows.blocks, &round.rows.offsets));
                 // The decode rows and the segments cover every row, so `ctx` needs no clear.
                 let ctx = g.storage_uninit((n * shape.qd()) as u64);
                 // The decode rows lead the round, so their queries and outputs are the heads of the round's buffers.
@@ -3260,13 +3267,13 @@ impl Qwen35 {
                     let p = dec.paged;
                     g.submit(
                         &[],
-                        &model::block::gqa_decode_batched_attend_steps_kv(g, &kv, DECODE_SOFTMAX_BATCHED, nh, nkv, hd, dec.rows, p.block_size, p.max_bt, p.cap, p.pin_splits, &prep.q_normed, layer, p.block_tables, p.seq_lens, &ctx),
+                        &model::block::gqa_decode_batched_attend_steps_kv(g, &kv, DECODE_SOFTMAX_BATCHED, nh, nkv, hd, dec.rows, p.block_size, p.max_bt, p.cap, p.pin_splits, &q_normed, layer, p.block_tables, p.seq_lens, &ctx),
                     );
                 }
                 for seg in &round.segs {
                     let rows = seg.rows;
                     let whole = rows == n;
-                    let (q_i, ctx_i) = if whole { (prep.q_normed.clone(), ctx.clone()) } else { (self.take_rows(&prep.q_normed, shape.qd(), n, seg.row0, rows), g.storage_uninit((rows * shape.qd()) as u64)) };
+                    let (q_i, ctx_i) = if whole { (q_normed.clone(), ctx.clone()) } else { (self.take_rows(&q_normed, shape.qd(), n, seg.row0, rows), g.storage_uninit((rows * shape.qd()) as u64)) };
                     g.submit(
                         &[],
                         &model::block::gqa_chunk_attend_steps_kv_paged(g, &kv, DECODE_SOFTMAX_BATCHED, nh, nkv, hd, seg.start, rows, &q_i, layer, round.caches.gqa_cap, seg.max_bt, &seg.tables, &seg.seq_lens, &ctx_i),
@@ -3275,13 +3282,21 @@ impl Qwen35 {
                         self.put_rows_copy(&ctx_i, &ctx, shape.qd(), seg.row0, rows);
                     }
                 }
-                if epilogue {
-                    // The sigmoid output gate rides on the quantisation for `o_proj`, as in a decode step.
-                    let (gated, act) = self.quant_epilogue(2, &ctx, Some(&prep.q_gate), n, shape.qd());
-                    o_proj_act = Some(act);
-                    (gated.expect("a gated epilogue hands back its product"), None)
-                } else {
-                    (model::gqa_mixer::gate_ctx(g, &ids, &ctx, &prep.q_gate, n, shape.qd()).1, None)
+                match &q_gate {
+                    None => {
+                        // The gate was left in the projection's output; it is read there while it rides on the quantisation
+                        // for `o_proj`.
+                        let (gated, act) = self.gate_mul_e4m3(&ctx, &q_full, n, shape.qd(), hd).expect("gqa_front_fused checked the gate pass is served");
+                        o_proj_act = Some(act);
+                        (gated, None)
+                    }
+                    Some(q_gate) if epilogue => {
+                        // The sigmoid output gate rides on the quantisation for `o_proj`, as in a decode step.
+                        let (gated, act) = self.quant_epilogue(2, &ctx, Some(q_gate), n, shape.qd());
+                        o_proj_act = Some(act);
+                        (gated.expect("a gated epilogue hands back its product"), None)
+                    }
+                    Some(q_gate) => (model::gqa_mixer::gate_ctx(g, &ids, &ctx, q_gate, n, shape.qd()).1, None),
                 }
             }
             Some(GqaCached::Decode(dc)) if epilogue => {
@@ -4541,6 +4556,46 @@ impl Qwen35 {
 
     fn packs_activations(&self) -> bool {
         !self.weights.values().all(reads_float_acts)
+    }
+
+    /// The query and key of a gated attention layer over the rows of a prefill round in one launch (split, QK norm, rotation),
+    /// leaving the gate where the projection wrote it. `Some((q_normed, k_normed))` only when the whole front half runs that
+    /// way: nothing needs the gate or the query values as rows of their own (no backward, no adapter), the sigmoid gate rides on
+    /// the quantisation for an FP8 `o_proj` that reads E4M3 rows ([`Self::gate_mul_e4m3`]), and the device offers both kernels.
+    fn gqa_front_fused(&self, shape: &model::gqa_mixer::GqaMixerShape, w: &model::gqa_mixer::GqaMixerWeights, q_full: &DeviceBuffer, k: &DeviceBuffer, n: u32, epilogue: bool) -> Option<(DeviceBuffer, DeviceBuffer)> {
+        let g = &self.gpu;
+        if !epilogue || self.is_train || self.packs_activations() || !self.gate_mul_e4m3_serves(n, shape.qd(), shape.head_dim) {
+            return None;
+        }
+        let qk = gpu_core::provider::library::GqaQkShape { rows: n, n_heads: shape.n_heads, n_kv_heads: shape.n_kv_heads, head_dim: shape.head_dim, rotary_half: shape.rotary_half, rms_eps: shape.rms_eps };
+        let mut steps = Vec::new();
+        let out = gpu_core::provider::library::gqa_qk_prepare(g, &mut steps, &qk, q_full, k, w.q_norm, w.k_norm, w.cos, w.sin)?;
+        g.submit(&[], &steps);
+        Some(out)
+    }
+
+    /// The sigmoid output gate `ctx * sigmoid(gate)` of a gated attention layer with the E4M3 rows of the FP8 `o_proj` written in
+    /// the same pass, the gate read in place from the query projection `q_full` ([`gpu_core::provider::library::gate_mul_quantize_e4m3_rows`]).
+    /// The product is stored for the consumers of its fp32 rows (an adapter, a backward) and is the one-word slot nothing reads
+    /// otherwise. `None` when the pass is not served (see [`Self::gate_mul_e4m3_serves`]).
+    fn gate_mul_e4m3(&self, ctx: &DeviceBuffer, q_full: &DeviceBuffer, rows: u32, k: u32, head_dim: u32) -> Option<(DeviceBuffer, Act)> {
+        if !self.gate_mul_e4m3_serves(rows, k, head_dim) {
+            return None;
+        }
+        let g = &self.gpu;
+        let product = self.keeps_fp32_product().then(|| g.storage_uninit(rows as u64 * k as u64));
+        let mut steps = Vec::new();
+        let (q, s) = gpu_core::provider::library::gate_mul_quantize_e4m3_rows(g, &mut steps, ctx, q_full, product.as_ref(), rows, k, head_dim)?;
+        g.submit(&[], &steps);
+        let product = product.unwrap_or_else(|| self.unpacked_slots().0.clone());
+        let act = self.ops.act_f32_with_e4m3(&product, rows, k, q, s);
+        Some((product, act))
+    }
+
+    /// Whether [`Self::gate_mul_e4m3`] runs for this shape: no int8 packing in this build, `o_proj` reads E4M3 rows at this row
+    /// count and the device offers the kernel.
+    fn gate_mul_e4m3_serves(&self, rows: u32, k: u32, head_dim: u32) -> bool {
+        !self.packs_activations() && self.ops.fp8_reads_e4m3(rows, k, self.cfg.d_model) && gpu_core::provider::library::gate_mul_quantize_e4m3_serves(&self.gpu, rows, k, head_dim)
     }
 
     /// Whether the fused front ends also write the bf16 rows of their activation (`cast_f32_bf16`'s result, in the same

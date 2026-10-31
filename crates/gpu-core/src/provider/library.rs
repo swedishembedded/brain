@@ -274,6 +274,101 @@ pub fn silu_mul_quantize_e4m3_rows(gpu: &Gpu, steps: &mut Vec<Step>, gate: &Devi
     Some((q, s))
 }
 
+/// Bindings of `gate_mul_quant_e4m3_128`: params, the attention output, the query projection's output (the gate is read in
+/// place), the fp32 product, the E4M3 bytes, the scales.
+const GATE_MUL_QUANT_E4M3_BINDINGS: &[BindKind] =
+    &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite, BindKind::StorageReadWrite, BindKind::StorageReadWrite];
+
+/// Whether [`gate_mul_quantize_e4m3_rows`] runs for `rows` rows of `k` with heads of `head_dim` on this device.
+pub fn gate_mul_quantize_e4m3_serves(gpu: &Gpu, rows: u32, k: u32, head_dim: u32) -> bool {
+    let elems = u64::from(rows) * u64::from(k);
+    rows > 0
+        && head_dim > 0
+        && head_dim.is_multiple_of(128)
+        && k.is_multiple_of(head_dim)
+        && 2 * elems <= u64::from(u32::MAX)
+        && kernels_cuda::get("gate_mul_quant_e4m3_128").is_some_and(|kernel| gpu.native_kernel(kernel, GATE_MUL_QUANT_E4M3_BINDINGS).is_some())
+}
+
+/// `ctx * sigmoid(gate)` of a gated attention layer quantised to E4M3 in one pass: `ctx` is `[rows, k]`, `q_full` the query
+/// projection's `[rows, 2 k]` output whose heads interleave `head_dim` query values and `head_dim` gate values (the gate is
+/// read in place). Pushes the step and returns the bytes and scales; the fp32 product is stored into `product` when one is
+/// given (an adapter or a backward reads it). `None` when the device declines or the shape is not one it takes.
+pub fn gate_mul_quantize_e4m3_rows(gpu: &Gpu, steps: &mut Vec<Step>, ctx: &DeviceBuffer, q_full: &DeviceBuffer, product: Option<&DeviceBuffer>, rows: u32, k: u32, head_dim: u32) -> Option<(DeviceBuffer, DeviceBuffer)> {
+    if !gate_mul_quantize_e4m3_serves(gpu, rows, k, head_dim) {
+        return None;
+    }
+    let elems = u64::from(rows) * u64::from(k);
+    let kernel = kernels_cuda::get("gate_mul_quant_e4m3_128")?;
+    let id = gpu.native_kernel(kernel, GATE_MUL_QUANT_E4M3_BINDINGS)?;
+    // Every byte and every scale is written, so the scratch is not cleared.
+    let q = gpu.storage_uninit(elems.div_ceil(4));
+    let s = gpu.storage_uninit(elems / 128);
+    let step = gpu.step_native(id, &[ctx, q_full, product.unwrap_or(&q), &q, &s], &[rows, k, u32::from(product.is_some()), head_dim], kernel.blocks_for(1, elems as u32))?;
+    steps.push(step);
+    Some((q, s))
+}
+
+/// Bindings of `gqa_qk_prep`: params, the query projection, the key projection, the two gains, the two rotation tables, the
+/// normalised and rotated query and key.
+const GQA_QK_PREP_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+];
+
+/// The shape of a gated attention layer's front half over a block of rows (see [`gqa_qk_prepare`]).
+#[derive(Clone, Copy, Debug)]
+pub struct GqaQkShape {
+    pub rows: u32,
+    pub n_heads: u32,
+    pub n_kv_heads: u32,
+    pub head_dim: u32,
+    /// Half the rotated width (`rope2d_partial`'s `half`).
+    pub rotary_half: u32,
+    pub rms_eps: f32,
+}
+
+/// Whether [`gqa_qk_prepare`] runs for `shape` on this device: heads of 256 and a rotated block that fits one.
+pub fn gqa_qk_prepare_serves(gpu: &Gpu, shape: &GqaQkShape) -> bool {
+    shape.rows > 0
+        && shape.head_dim == 256
+        && shape.n_heads > 0
+        && shape.n_kv_heads > 0
+        && shape.rotary_half <= shape.head_dim / 2
+        && u64::from(shape.rows) * u64::from(shape.n_heads + shape.n_kv_heads) <= u64::from(u32::MAX) / 64
+        && u64::from(shape.rows) * u64::from(shape.n_heads) * u64::from(2 * shape.head_dim) <= u64::from(u32::MAX)
+        && kernels_cuda::get("gqa_qk_prep").is_some_and(|kernel| gpu.native_kernel(kernel, GQA_QK_PREP_BINDINGS).is_some())
+}
+
+/// The query and key of a gated attention layer, ready for the attention: `q_full` is the query projection's
+/// `[rows, n_heads * 2 * head_dim]` output (per head the query values then the gate values), `k` the key projection's
+/// `[rows, n_kv_heads * head_dim]`; each head is RMS-normed with its gain (`q_norm`, `k_norm`) and its first `2 * rotary_half`
+/// channels rotated by row `r % rows` of `cos`/`sin`. Bit-identical to `concat_split`, `rmsnorm_rows` and `rope2d_partial` in
+/// sequence, in one launch. Pushes the step and returns `(q, k)`; `None` when the device declines or the shape is not served.
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_qk_prepare(gpu: &Gpu, steps: &mut Vec<Step>, shape: &GqaQkShape, q_full: &DeviceBuffer, k: &DeviceBuffer, q_norm: &DeviceBuffer, k_norm: &DeviceBuffer, cos: &DeviceBuffer, sin: &DeviceBuffer) -> Option<(DeviceBuffer, DeviceBuffer)> {
+    if !gqa_qk_prepare_serves(gpu, shape) {
+        return None;
+    }
+    let kernel = kernels_cuda::get("gqa_qk_prep")?;
+    let id = gpu.native_kernel(kernel, GQA_QK_PREP_BINDINGS)?;
+    let GqaQkShape { rows, n_heads, n_kv_heads, head_dim, rotary_half, rms_eps } = *shape;
+    // Every channel of both outputs is written.
+    let q_out = gpu.storage_uninit(u64::from(rows) * u64::from(n_heads * head_dim));
+    let k_out = gpu.storage_uninit(u64::from(rows) * u64::from(n_kv_heads * head_dim));
+    let heads = rows * (n_heads + n_kv_heads);
+    let step = gpu.step_native(id, &[q_full, k, q_norm, k_norm, cos, sin, &q_out, &k_out], &[rows, n_heads, n_kv_heads, head_dim, rotary_half, rms_eps.to_bits(), rows], kernel.blocks_for(1, heads))?;
+    steps.push(step);
+    Some((q_out, k_out))
+}
+
 impl LibraryGemmProvider {
     /// The provider for `gpu` under `precision`, reading the backend's own
     /// availability answer. Logs the decision once per process.
