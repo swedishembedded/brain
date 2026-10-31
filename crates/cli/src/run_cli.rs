@@ -253,9 +253,9 @@ SERVING POLICY  (one model-agnostic policy for every model that serves it.
                          Accumulation is f32 in every kernel either way.
   --gdn-state f32|bf16   storage of the Gated DeltaNet recurrent state and conv
                          history of running sequences, for the models that
-                         support it (the Qwen3.8 releases): `f32` (default) or
-                         `bf16`, half the bytes per decode step. Refused with
-                         --exact-decode and --speculative.
+                         support it (the Qwen3.8 releases): `bf16` (default on
+                         CUDA), half the bytes per decode step, or `f32`.
+                         --exact-decode keeps f32 and refuses bf16.
   --gemm auto|fp32       `fp32` pins exact fp32 arithmetic for the linears (the
                          reference tier); `auto` (default) uses tensor cores
                          where the device has them.

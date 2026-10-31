@@ -50,6 +50,7 @@ use qwen35::caps::with_template_flavor_default;
 use qwen35::config::{LayerType, Qwen35Config};
 use qwen35::serve::{Engine, Scheduler};
 use gpu_core::defaults::{Hardware, Rule};
+use model::policy::GdnState;
 use std::sync::Arc;
 
 use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
@@ -495,6 +496,19 @@ pub const SPECULATION_DEFAULTS: &[Rule<qwen35::int8_gguf_resident::SpeculativeMo
     Rule { when: |_| true, ranked: &[qwen35::int8_gguf_resident::SpeculativeMode::Off], why: "speculation verifies with CUDA kernels only" },
 ];
 
+/// The element type the recurrent-state pools take when `--gdn-state` is not given. bf16 halves the bytes a decode step streams
+/// from the pool (GDN decode per layer at 1/4/16/64 sequences: 17.8/22.4/56.2/153.5 us at f32, 10.7/11.0/17.9/78.0 us at bf16) and
+/// the placement's per-sequence row. Gate: `qwen35/tests/gdn_state_pool_real.rs` (pooled batched decode on the real FP8 checkpoint,
+/// top-1 agreement and KL against the f32 pool); the bf16 kernels and the verify staging are CUDA's.
+pub const GDN_STATE_DEFAULTS: &[Rule<model::policy::GdnState>] = &[
+    Rule {
+        when: Hardware::cuda_everywhere,
+        ranked: &[model::policy::GdnState::Bf16, model::policy::GdnState::F32],
+        why: "the recurrent state is rounded to bf16 between steps: half the pool bytes a decode step streams, token agreement with the f32 pool gated on the real checkpoint",
+    },
+    Rule { when: |_| true, ranked: &[model::policy::GdnState::F32], why: "the bf16 pool kernels are CUDA's" },
+];
+
 /// Packed verify rows an FP8 directory keeps recurrent-state scratch for (2.4 GiB at the 27B shape): four sequences with a window of three,
 /// eight with one. Past that batch a verify round is compute-bound and the scheduler's own timing keeps decoding plainly.
 pub const HF_SPEC_SCRATCH_ROWS: u32 = 16;
@@ -585,17 +599,23 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
         // grouping would silently defeat --exact-decode. Refuse instead.
         return Err(format!("{MODEL}: --exact-decode is not supported with an adapter bank: a grouped decode step cannot carry per-row adapter slots"));
     }
-    let gdn_bf16 = cfg.gdn_state.is_some_and(|g| g.is_bf16());
-    if gdn_bf16 && cfg.exact_decode {
+    if cfg.gdn_state.is_some_and(|g| g.is_bf16()) && cfg.exact_decode {
         return Err(format!("{MODEL}: --gdn-state bf16 is not supported with --exact-decode: the exact regime is defined on the f32 recurrent state"));
     }
-    if let Some(mode) = cfg.speculative.filter(|&m| gdn_bf16 && m != SpeculativeMode::Off) {
-        return Err(format!("{MODEL}: --gdn-state bf16 is not supported with --speculative {mode:?}: a verify round reads and commits f32 recurrent-state rows"));
-    }
+    let mut chosen = Vec::new();
     let max_batch = cfg.max_batch_or_default();
+    let hw = Hardware::detected();
+    // The exact-decode regime is defined on the f32 recurrent state, so it keeps f32; every other regime takes the rule.
+    let gdn_state = match (cfg.gdn_state, cfg.exact_decode) {
+        (Some(given), _) => given,
+        (None, true) => {
+            chosen.push("--gdn-state f32: the exact-decode regime is defined on the f32 recurrent state".to_string());
+            GdnState::F32
+        }
+        (None, false) => given_or_chosen(None, "--gdn-state", GDN_STATE_DEFAULTS, hw, &mut chosen, |_| Ok(())),
+    };
     let ckpt = ResidentCheckpoint::open(gguf_path).map_err(|e| format!("cannot open '{gguf_path}': {e}"))?;
     let model_cfg = ckpt.config(1).map_err(|e| format!("'{gguf_path}' is not a servable Qwen3.8 checkpoint: {e}"))?;
-    let mut chosen = Vec::new();
     let tier = match &cfg.tier {
         Some(tier) => tier.clone(),
         None => {
@@ -616,7 +636,7 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
         let spec = SpecServing { mode, scratch_rows, batch_limit, ..SpecServing::default() };
         // Paged KV: sequences hold the blocks their tokens need from one shared pool, so a long context
         // costs only the sequences that use it, and the batch is not multiplied by the context.
-        let r = Qwen35GgufResident::new(gguf_path.to_string(), devices.clone(), cap, tier.clone()).with_kv_tier(kv).with_max_batch(max_batch).with_prefix_slots(prefix_slots).with_speculation(spec).with_exact_decode(cfg.exact_decode).with_act_choice(cfg.act_precision.unwrap_or_default()).with_gdn_state(cfg.gdn_state.unwrap_or_default()).with_kv_block_rows(qwen35::int8_gguf_resident::KV_BLOCK_ROWS);
+        let r = Qwen35GgufResident::new(gguf_path.to_string(), devices.clone(), cap, tier.clone()).with_kv_tier(kv).with_max_batch(max_batch).with_prefix_slots(prefix_slots).with_speculation(spec).with_exact_decode(cfg.exact_decode).with_act_choice(cfg.act_precision.unwrap_or_default()).with_gdn_state(gdn_state).with_kv_block_rows(qwen35::int8_gguf_resident::KV_BLOCK_ROWS);
         match &bank {
             Some(bank) => r.with_adapter_bank(bank.request()),
             None => r,
@@ -637,18 +657,11 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
     };
     // Chosen in the order they matter to throughput, each with the ones not yet
     // chosen at their leanest: the KV tier, then speculation, then the prompt cache.
-    let hw = Hardware::detected();
     let probe_cap = cfg.ctx.unwrap_or(1).max(1);
     let kv = given_or_chosen(cfg.kv, "--kv-cache", KV_DEFAULTS, hw, &mut chosen, |kv| fits(build(kv, SpeculativeMode::Off, 0, probe_cap)));
     // The FP8 directory's own MTP head drafts when the scheduler has measured that a round of drafts beats plain decoding at the batch
     // it is serving (it times both, per batch size), so the default is `auto`.
-    let mode = match cfg.speculative {
-        None if gdn_bf16 => {
-            chosen.push("--speculative off: a bf16 recurrent-state pool (--gdn-state bf16) has no verify round".to_string());
-            SpeculativeMode::Off
-        }
-        _ => given_or_chosen(cfg.speculative, "--speculative", SPECULATION_DEFAULTS, hw, &mut chosen, |mode| fits(build(kv, mode, 0, probe_cap))),
-    };
+    let mode = given_or_chosen(cfg.speculative, "--speculative", SPECULATION_DEFAULTS, hw, &mut chosen, |mode| fits(build(kv, mode, 0, probe_cap)));
     if cfg.speculative.is_none() && mode != SpeculativeMode::Off && ResidentCheckpoint::is_hf_dir(gguf_path) {
         chosen.push(format!("--speculative {mode}: the checkpoint's MTP head drafts while at most {HF_DEFAULT_SPEC_BATCH} sequences run (--speculative mtp has no limit)"));
     }
@@ -826,9 +839,9 @@ mod tests {
     }
 
     /// `--gdn-state` reaches the GGUF resident only (the brain-checkpoint resident does not declare it), and a bf16
-    /// pool is refused before anything is placed beside the regimes that need the f32 pool.
+    /// pool is refused before anything is placed beside the exact-decode regime, which needs the f32 pool.
     #[test]
-    fn gdn_state_reaches_the_gguf_resident_and_is_refused_beside_speculation_and_exact_decode() {
+    fn gdn_state_reaches_the_gguf_resident_and_is_refused_beside_exact_decode() {
         let mut p = model::policy::ServePolicy::default();
         p.set("--gdn-state", "bf16").unwrap();
         let mut cfg = Qwen35ServeConfig::default();
@@ -839,9 +852,6 @@ mod tests {
 
         let e = gguf_resident("none.gguf", "t/x", &[], 0, &Qwen35GgufServeConfig { exact_decode: true, ..cfg.gguf.clone() }).err().unwrap();
         assert!(e.contains("--gdn-state bf16") && e.contains("--exact-decode"), "{e}");
-        let spec = Qwen35GgufServeConfig { speculative: Some(qwen35::int8_gguf_resident::SpeculativeMode::Ngram), ..cfg.gguf.clone() };
-        let e = gguf_resident("none.gguf", "t/x", &[], 0, &spec).err().unwrap();
-        assert!(e.contains("--gdn-state bf16") && e.contains("--speculative"), "{e}");
     }
 
     /// The sizing knobs are constructor data with the historical defaults,
@@ -1070,11 +1080,26 @@ mod tests {
         assert_eq!(r.prefix_slots(), DEFAULT_MAX_BATCH, "a warm prompt per concurrent sequence fits");
         let (modes, _) = gpu_core::defaults::candidates(SPECULATION_DEFAULTS, gpu_core::defaults::Hardware::detected());
         assert_eq!(r.speculation().mode, modes[0], "the hardware's best-ranked speculation");
+        let (states, _) = gpu_core::defaults::candidates(GDN_STATE_DEFAULTS, gpu_core::defaults::Hardware::detected());
+        assert_eq!(r.gdn_state(), states[0], "the hardware's best-ranked recurrent-state precision");
         let said = r.chosen_defaults().join("\n");
-        for knob in ["--weight-format i8", "--kv-cache int8", "--speculative", "prefix slots", "--ctx"] {
+        for knob in ["--weight-format i8", "--kv-cache int8", "--gdn-state", "--speculative", "prefix slots", "--ctx"] {
             assert!(said.contains(knob), "every default is reported with its reason; missing {knob}:\n{said}");
         }
         assert_eq!(r.manifest().max_context_tokens, Some(r.cap() as u64));
+        std::fs::remove_file(path).ok();
+    }
+
+    /// The exact-decode regime is defined on the f32 recurrent state: it keeps f32 unless bf16 is asked for (which is refused),
+    /// and an explicit `--gdn-state f32` is honoured whatever the hardware ranks first.
+    #[test]
+    fn exact_decode_and_an_explicit_choice_keep_the_f32_state_pool() {
+        let path = write_servable_gguf("gdn-state-regimes");
+        let build = |cfg: Qwen35GgufServeConfig| gguf_resident(&path, "t/gdn", &gpu_budget(), RESERVED, &cfg).expect("builds");
+        let exact = build(Qwen35GgufServeConfig { exact_decode: true, ..Default::default() });
+        assert_eq!(exact.gdn_state(), GdnState::F32);
+        assert!(exact.chosen_defaults().join("\n").contains("--gdn-state f32"));
+        assert_eq!(build(Qwen35GgufServeConfig { gdn_state: Some(GdnState::F32), ..Default::default() }).gdn_state(), GdnState::F32);
         std::fs::remove_file(path).ok();
     }
 

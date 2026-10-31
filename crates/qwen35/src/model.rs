@@ -3013,11 +3013,10 @@ impl Qwen35 {
                             (Some(qkv), Some(z)) => (qkv.clone(), self.take_rows(&bproj, nvh, n, 0, dec.rows), self.take_rows(&aproj, nvh, n, 0, dec.rows), z.clone()),
                             _ => (self.take_rows(&mixed_qkv, conv_dim, n, 0, dec.rows), self.take_rows(&bproj, nvh, n, 0, dec.rows), self.take_rows(&aproj, nvh, n, 0, dec.rows), self.take_rows(&z, value_dim, n, 0, dec.rows)),
                         };
-                        assert!(!(c.bf16 && dec.verify.is_some()), "qwen35: a speculative verify round needs an f32 recurrent-state pool");
                         let gated_d = match &dec.verify {
                             // A sequence's rows in order from its pool row, the state after each row but the last snapshotted.
                             Some(v) => {
-                                let layout = model::gdn_verify::VerifyLayout { rows: &v.layout.rows, counts: &v.layout.counts, offs: &v.layout.offs, b: v.batch.sequences() };
+                                let layout = model::gdn_verify::VerifyLayout { rows: &v.layout.rows, counts: &v.layout.counts, offs: &v.layout.offs, ident: &v.layout.ident, b: v.batch.sequences() };
                                 let seq_pool = model::gdn_mixer::GdnPoolRows { rows: &v.layout.rows, fuse: true, ..pool };
                                 model::gdn_verify::gdn_mixer_verify_pooled_fused(g, &dec_shape, &weights, &qkv_d, &b_d, &a_d, &z_d, &seq_pool, &layout, dec.rows, v.batch.snapshots(l))
                                     .expect("the verify kernel was offered at engine construction (Qwen35GgufInstance::speculation_supported)")
@@ -5204,19 +5203,18 @@ impl Qwen35 {
                         caches.seqs.iter().map(|s| model::gdn_mixer::GdnStream { state: &s.gdn_state[l], hist: &s.gdn_hist[l] }).collect()
                     };
                     let call = if let (Some(pool), Some(v), Some(layout)) = (&caches.gdn_pool, verify, &verify_layout) {
-                        assert!(!pool.bf16, "qwen35: a speculative verify round needs an f32 recurrent-state pool");
                         GdnCall::VerifyPool {
                             pool: model::gdn_mixer::GdnPoolRows {
                                 state: &pool.state[l],
                                 hist: &pool.hist[l],
                                 rows: &layout.rows,
-                                gather: POOL_ROWS_GATHER2,
-                                scatter: POOL_ROWS_SCATTER2,
+                                gather: pool_gather,
+                                scatter: pool_scatter,
                                 fuse: true,
-                                bf16: false,
+                                bf16: pool.bf16,
                                 wide: false,
                             },
-                            layout: model::gdn_verify::VerifyLayout { rows: &layout.rows, counts: &layout.counts, offs: &layout.offs, b: v.sequences() },
+                            layout: model::gdn_verify::VerifyLayout { rows: &layout.rows, counts: &layout.counts, offs: &layout.offs, ident: &layout.ident, b: v.sequences() },
                             snaps: v.snapshots(l),
                             n_tokens: bsz,
                         }

@@ -36,3 +36,5 @@ Quality gate: NOT passed, so the default stays f32. The teacher-forced `qwen35_f
 numbers for both tiers), so it cannot gate this tier. Greedy chats through the server (six prompts, 300 tokens, temperature 0): the f32 pool is bit-reproducible
 across three runs (base spread zero), bf16 pools diverge in two of five non-empty chats (after 889 of 1067 and 78 of 669 characters). A gate that exercises
 the pool (greedy chats and a pooled teacher-forced decode) and a bf16 state with stochastic or compensated rounding are the open work.
+
+Update: the pool-path gate exists and passes (knowledge 404); bf16 is the CUDA default.

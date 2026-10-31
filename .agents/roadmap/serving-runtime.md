@@ -431,6 +431,14 @@ measurement (16-256), not fixed globally.
   row at half (`ServingShape::gdn_bf16`). Refused up front with `--exact-decode` and any `--speculative` mode (the verify/commit rounds read f32 rows). Tests:
   a bf16-pool multi-sequence prefill round agrees with the sequence alone to bf16 resolution (`model::tests`), policy, placement and refusal unit tests.
   Open: the quality gate that decides the default; a bf16 verify round if speculation over bf16 pools is wanted.
+  2026-10-31 (bf16 pool is the CUDA default, knowledge 404): the verify round stages a bf16 pool through f32 (`gdn_mixer_verify_pooled_fused`: gather the batch's rows, run the
+  unchanged f32 verify kernels on the staging, scatter the last-row state back; `gdn_commit_pooled_bf16` widens the f32 snapshot rows of the rejecting sequences and rounds them into
+  the pool), so speculation serves either precision and the refusal is gone (`--exact-decode` still refuses bf16 and keeps f32). Gate `qwen35/tests/gdn_state_pool_real.rs` (4 sequences x 1024
+  tokens through the pooled batched decode, real FP8 checkpoint, teacher-forced on the f32 pool's served stream): top-1 99.63 %, mean KL 1.08e-4 nats (bars 98.5 % / 1e-3); free-running
+  greedy chats still part from the f32 stream after 237-654 tokens (near ties). `--gdn-state` defaults to bf16 where every card is CUDA (`GDN_STATE_DEFAULTS`). Served, gpu1, brain's default
+  speculation, f32 -> bf16, tok/s | TTFT p50 ms: 8Kx1 86.9|612 -> 87.5|609, 8Kx16 288.4|1606 -> 295.6|1607, 8Kx64 286.8|32463 -> 305.8|29950 (+6.6 %), 32Kx16 71.1|37385 -> 56.3|44644 (worse).
+  Open: 32Kx16 under the default speculation is 8x slower to first token than with `--speculative off` (79 tok/s, TTFT 4.2 s, f32 and bf16 alike) and bf16 loses more of it than f32; the staged
+  verify rows beside prompt slices (mixed verify) are the suspect. Not the pool precision: with speculation off bf16 is 79.7 vs 79.3 tok/s there.
 
 - 2026-10-30 (activation precision, knowledge 394): `--act-precision auto|f32|bf16` (`gpu_core::ActPrecision`, bf16 from compute capability 8.0; a model
   declares support in `PolicySupport`) declares the element type of the activations between the FP8 products. The qwen35 serving forward stores the MLP's gate/up

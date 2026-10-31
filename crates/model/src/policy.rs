@@ -108,6 +108,12 @@ impl GdnState {
     }
 }
 
+impl std::fmt::Display for GdnState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 /// The typed policy. All fields default to "the model's own choice".
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ServePolicy {

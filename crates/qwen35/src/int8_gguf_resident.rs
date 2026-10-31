@@ -2182,6 +2182,11 @@ impl Qwen35GgufInstance {
         self.kv_tier
     }
 
+    /// Whether the per-sequence recurrent-state pools are stored as bf16 (`--gdn-state bf16`).
+    pub fn gdn_state_is_bf16(&self) -> bool {
+        self.shards.first().is_some_and(|s| s.caches.pool_bf16)
+    }
+
     /// One batched decode step with an explicit position per row, returning each
     /// row's `[vocab]` logits: the step a server runs every token, without the
     /// prompt that normally precedes it.
@@ -3678,6 +3683,11 @@ impl Qwen35GgufResident {
         self
     }
 
+    /// The element type the recurrent-state pools are stored in ([`Self::with_gdn_state`]).
+    pub fn gdn_state(&self) -> GdnState {
+        self.gdn_state
+    }
+
     /// How the serving engine spends prefill between decode steps - the slice one
     /// sequence gets and the rows one forward carries across sequences.
     pub fn with_prefill_policy(mut self, policy: PrefillPolicy) -> Qwen35GgufResident {
@@ -3865,16 +3875,11 @@ impl Qwen35GgufResident {
         }
     }
 
-    /// Why the recurrent-state precision chosen by [`Self::with_gdn_state`] cannot serve beside the other settings: a
-    /// bf16 pool has no speculative verify round (its snapshots and commit read f32 rows) and no grouped exact decode.
+    /// Why the recurrent-state precision chosen by [`Self::with_gdn_state`] cannot serve beside the other settings: the
+    /// exact-decode regime is defined on the f32 state, so a bf16 pool has no grouped exact decode. (A speculative verify
+    /// round stages a bf16 pool through f32 rows, so speculation serves either precision.)
     pub fn gdn_state_refusal(&self) -> Option<String> {
-        if !self.gdn_state.is_bf16() {
-            return None;
-        }
-        if self.exact_decode {
-            return Some("--gdn-state bf16 is not supported with --exact-decode: the exact regime is defined on the f32 recurrent state".to_string());
-        }
-        (self.spec.mode != SpeculativeMode::Off).then(|| format!("--gdn-state bf16 is not supported with speculative decoding (--speculative {:?}): a verify round reads and commits f32 recurrent-state rows", self.spec.mode))
+        (self.gdn_state.is_bf16() && self.exact_decode).then(|| "--gdn-state bf16 is not supported with --exact-decode: the exact regime is defined on the f32 recurrent state".to_string())
     }
 
     fn plan_uncached(&self) -> Plan {
@@ -4755,14 +4760,13 @@ mod tests {
         assert_eq!(layer_state_bytes(&cfg, LayerType::Full, &bf16_shape), layer_state_bytes(&cfg, LayerType::Full, &f32_shape), "attention layers are unaffected");
     }
 
-    /// The bf16 pool has no verify round and no grouped exact decode: the combination is refused before anything is
-    /// placed, naming both flags, instead of serving a different regime than the one asked for.
+    /// The bf16 pool has no grouped exact decode: the combination is refused before anything is placed, naming both
+    /// flags, instead of serving a different regime than the one asked for. Speculation is served.
     #[test]
-    fn a_bf16_state_pool_is_refused_with_speculation_and_with_exact_decode() {
+    fn a_bf16_state_pool_is_refused_with_exact_decode_and_serves_speculation() {
         let base = || Qwen35GgufResident::new("model.gguf".into(), vec![(Device::Gpu(0), 96 * GB)], 1, TierPolicy::uniform(Dtype::I8)).with_gdn_state(GdnState::Bf16);
         assert_eq!(base().gdn_state_refusal(), None);
-        let spec = base().with_speculation(SpecServing { mode: SpeculativeMode::Ngram, ..SpecServing::default() }).gdn_state_refusal().expect("speculation refused");
-        assert!(spec.contains("--gdn-state bf16") && spec.contains("--speculative"), "{spec}");
+        assert_eq!(base().with_speculation(SpecServing { mode: SpeculativeMode::Ngram, ..SpecServing::default() }).gdn_state_refusal(), None);
         let exact = base().with_exact_decode(true).gdn_state_refusal().expect("exact decode refused");
         assert!(exact.contains("--gdn-state bf16") && exact.contains("--exact-decode"), "{exact}");
         assert_eq!(base().with_gdn_state(GdnState::F32).with_exact_decode(true).gdn_state_refusal(), None, "the f32 pool serves both");

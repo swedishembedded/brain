@@ -19,6 +19,7 @@
 
 use model::kv_tier::KvTier;
 use model::paged::BlockTable;
+use model::policy::GdnState;
 use model::serve::{PagedDecoder, PrefillJob, PrefillProgress, Request, Scheduler, SpecPolicy};
 use qwen35::config::Qwen35Config;
 use qwen35::int8_gguf_resident::{budgeted_gpus, held_tiers_at, Qwen35GgufEngine, Qwen35GgufResident, SpecServing, SpeculativeMode};
@@ -28,7 +29,7 @@ use common::hf_fixture::{fp8_resident_cfg, write_checkpoint_conditioned, write_t
 
 const CAP: u32 = 512;
 
-fn engine() -> Qwen35GgufEngine {
+fn engine(gdn: GdnState) -> Qwen35GgufEngine {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     // The verify kernels take the 27B's recurrent geometry (key and value heads of 128, a width-4 conv).
@@ -44,6 +45,7 @@ fn engine() -> Qwen35GgufEngine {
         .with_prefix_slots(4)
         .with_kv_block_rows(16)
         .with_kv_tier(KvTier::F32)
+        .with_gdn_state(gdn)
         .with_speculation(SpecServing { mode: SpeculativeMode::Mtp, scratch_rows: 32, ..SpecServing::default() });
     let (mut engine, _, _) = resident.activate_engine(&[device]).expect("the tiny FP8 directory loads");
     std::fs::remove_dir_all(dir).ok();
@@ -58,8 +60,8 @@ fn prompt_of(seed: u32, n: u32) -> Vec<u32> {
 
 /// Staggered requests: the long prompts arrive while the short ones decode, so their slices ride in iterations whose
 /// decode rows verify drafts. Returns every request's tokens and what speculation did.
-fn tokens(speculate: bool) -> (Vec<Vec<u32>>, u64) {
-    let mut sched = Scheduler::new(engine(), 8);
+fn tokens(speculate: bool, gdn: GdnState) -> (Vec<Vec<u32>>, u64) {
+    let mut sched = Scheduler::new(engine(gdn), 8);
     sched.set_speculation(SpecPolicy { enabled: speculate, ..SpecPolicy::default() });
     let mut ids = Vec::new();
     for (seed, len, max_new) in [(1u32, 20u32, 40usize), (2, 33, 40)] {
@@ -78,10 +80,10 @@ fn tokens(speculate: bool) -> (Vec<Vec<u32>>, u64) {
 
 /// Greedy output under speculation is plain decoding's, to the numerics of a verify row against a decode row: every
 /// request starts with the same tokens (a wrong rollback or a wrongly read prompt diverges at once).
-fn speculating_beside_arriving_prompts_gives_the_plain_tokens() {
+fn speculating_beside_arriving_prompts_gives_the_plain_tokens_at(gdn: GdnState) {
     const AGREE: usize = 12;
-    let (plain, none) = tokens(false);
-    let (spec, verified) = tokens(true);
+    let (plain, none) = tokens(false, gdn);
+    let (spec, verified) = tokens(true, gdn);
     assert_eq!(none, 0);
     assert!(verified > 0, "speculation ran");
     for (n, (s, p)) in spec.into_iter().zip(plain).enumerate() {
@@ -91,10 +93,21 @@ fn speculating_beside_arriving_prompts_gives_the_plain_tokens() {
     }
 }
 
+fn speculating_beside_arriving_prompts_gives_the_plain_tokens() {
+    speculating_beside_arriving_prompts_gives_the_plain_tokens_at(GdnState::F32);
+}
+
+/// The same over a bf16 recurrent-state pool: a verify round widens the pool rows into f32 staging and rounds the
+/// state after the last row back, a rejection restores the rounded snapshot. Plain decoding at the same precision
+/// rounds the state after every token, so agreement is to the numerics of a verify row, as for the f32 pool.
+fn speculating_over_bf16_state_pools_gives_the_plain_tokens() {
+    speculating_beside_arriving_prompts_gives_the_plain_tokens_at(GdnState::Bf16);
+}
+
 /// One mixed verify forward against the two passes on twin engines, and the rollback after it: rows of three running
 /// sequences (a next input and two proposals each) beside two fresh prompts.
-fn one_mixed_verify_forward_matches_a_prefill_round_and_a_verify_step() {
-    let (mut a, mut b) = (engine(), engine());
+fn one_mixed_verify_forward_matches_a_prefill_round_and_a_verify_step_at(gdn: GdnState) {
+    let (mut a, mut b) = (engine(gdn), engine(gdn));
     let running: Vec<Vec<u32>> = (0..3).map(|i| prompt_of(10 + i, 20 + 7 * i)).collect();
     let fresh = [prompt_of(20, 100), prompt_of(21, 60)];
     let start = |e: &mut Qwen35GgufEngine| -> (Vec<BlockTable>, Vec<Vec<u32>>) {
@@ -161,4 +174,19 @@ fn one_mixed_verify_forward_matches_a_prefill_round_and_a_verify_step() {
     }
 }
 
-gpu_core::card_tests!(speculating_beside_arriving_prompts_gives_the_plain_tokens, one_mixed_verify_forward_matches_a_prefill_round_and_a_verify_step);
+fn one_mixed_verify_forward_matches_a_prefill_round_and_a_verify_step() {
+    one_mixed_verify_forward_matches_a_prefill_round_and_a_verify_step_at(GdnState::F32);
+}
+
+/// The bf16-pool twin: the mixed forward's verify rows and the separate verify pass both stage the pool through f32, and
+/// the commit after a partial rejection leaves the pool a plain decode step reads the same way on both engines.
+fn one_mixed_verify_forward_over_bf16_pools_matches_a_prefill_round_and_a_verify_step() {
+    one_mixed_verify_forward_matches_a_prefill_round_and_a_verify_step_at(GdnState::Bf16);
+}
+
+gpu_core::card_tests!(
+    speculating_beside_arriving_prompts_gives_the_plain_tokens,
+    speculating_over_bf16_state_pools_gives_the_plain_tokens,
+    one_mixed_verify_forward_matches_a_prefill_round_and_a_verify_step,
+    one_mixed_verify_forward_over_bf16_pools_matches_a_prefill_round_and_a_verify_step
+);

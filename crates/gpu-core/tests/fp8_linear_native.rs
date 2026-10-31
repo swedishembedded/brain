@@ -214,7 +214,7 @@ fn fp8_prefill_tflops() {
         return;
     }
     let shapes = [("gate/up 5120x34816", 5120u32, 34816u32), ("down 17408x5120", 17408, 5120), ("qkv 5120x10240", 5120, 10240), ("qkv 5120x12288", 5120, 12288), ("out 6144x5120", 6144, 5120)];
-    for m in [768u32, 2048, 8192, 31000] {
+    for m in [768u32, 2048, 4096, 8192, 31000] {
         for (label, k, n) in shapes {
             let flops = 2.0 * f64::from(m) * f64::from(k) * f64::from(n);
             for (name, v) in gpu_core::native_time_fp8_candidates(&gpu, [m, k / 4, n], "tma") {

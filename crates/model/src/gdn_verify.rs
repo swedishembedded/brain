@@ -60,6 +60,8 @@ pub struct VerifyLayout<'a> {
     pub counts: &'a DeviceBuffer,
     /// `[b]` u32: index of each sequence's first row in the packed token arrays.
     pub offs: &'a DeviceBuffer,
+    /// `[b]` u32: `0..b`, the rows of the staging a bf16 pool is widened into.
+    pub ident: &'a DeviceBuffer,
     /// Sequences in the batch.
     pub b: u32,
 }
@@ -71,6 +73,10 @@ pub struct VerifyLayout<'a> {
 /// `z` carry the packed token rows; the result is the packed `gated` block
 /// (`[n_tokens, value_dim]`). Each row is what a plain decode step produces for
 /// it, bit for bit.
+///
+/// A bf16 pool (`pool.bf16`) is read and written through f32 staging: its rows are gathered into `b` staging rows, the
+/// kernel runs on those, and the state after each sequence's last row is scattered back (rounded to bf16), so the verify
+/// kernels themselves only ever see f32 rows. The snapshots stay f32 ([`gdn_commit_pooled`] restores from them).
 ///
 /// `None`, nothing submitted, where the device is not offered the kernel or
 /// the head shape is outside its block shape (128-wide key and value heads, a
@@ -92,6 +98,9 @@ pub fn gdn_mixer_verify_pooled_fused(
     let gdn = shape.gdn;
     if gdn.dk != 128 || gdn.dv != 128 || shape.conv_kernel != 4 || shape.nkh == 0 || !gdn.h.is_multiple_of(shape.nkh) {
         return None;
+    }
+    if pool.bf16 {
+        return verify_through_staging(g, shape, w, mixed, bproj, aproj, z, pool, layout, n_tokens, snaps);
     }
     let gated = g.storage(n_tokens as u64 * shape.value_dim() as u64);
     let f = f32::to_bits;
@@ -120,6 +129,35 @@ pub fn gdn_mixer_verify_pooled_fused(
     Some(gated)
 }
 
+/// [`gdn_mixer_verify_pooled_fused`] over a bf16 pool: widen the batch's rows into f32 staging, verify on those, round the
+/// state after each sequence's last row back into the pool. `None` when the f32 kernels decline.
+#[allow(clippy::too_many_arguments)]
+fn verify_through_staging(
+    g: &Gpu,
+    shape: &GdnMixerShape,
+    w: &GdnMixerWeights,
+    mixed: &DeviceBuffer,
+    bproj: &DeviceBuffer,
+    aproj: &DeviceBuffer,
+    z: &DeviceBuffer,
+    pool: &GdnPoolRows,
+    layout: &VerifyLayout,
+    n_tokens: u32,
+    snaps: &GdnRowSnapshots,
+) -> Option<DeviceBuffer> {
+    let state_len = shape.gdn.h * shape.gdn.dk * shape.gdn.dv;
+    let hist_len = shape.conv_dim() * (shape.conv_kernel - 1);
+    let (state, hist) = (g.storage_uninit(layout.b as u64 * state_len as u64), g.storage_uninit(layout.b as u64 * hist_len as u64));
+    let params = [layout.b, state_len, hist_len];
+    let work = layout.b * (state_len + hist_len);
+    g.submit(&[], &[g.step(pool.gather, &[pool.state, pool.hist, pool.rows, &state, &hist], &params, work)]);
+    let staged = GdnPoolRows { state: &state, hist: &hist, rows: layout.ident, bf16: false, ..*pool };
+    let staged_layout = VerifyLayout { rows: layout.ident, ..*layout };
+    let gated = gdn_mixer_verify_pooled_fused(g, shape, w, mixed, bproj, aproj, z, &staged, &staged_layout, n_tokens, snaps)?;
+    g.submit(&[], &[g.step(pool.scatter, &[&state, &hist, pool.rows, pool.state, pool.hist], &params, work)]);
+    Some(gated)
+}
+
 /// Put snapshot row `sel[i]` back over pool row `rows[i]` for every sequence
 /// whose `sel` entry is not `u32::MAX` - the repair for a verify that rejected
 /// part of a sequence's rows. The step is returned, not submitted, so a caller
@@ -131,4 +169,30 @@ pub fn gdn_commit_pooled(g: &Gpu, shape: &GdnMixerShape, pool_state: &DeviceBuff
     let state_len = shape.gdn.h * shape.gdn.dk * shape.gdn.dv;
     let hist_len = shape.conv_dim() * (shape.conv_kernel - 1);
     g.fused_step(gpu_core::Fused::GdnCommitPool, &[pool_state, pool_hist, &snaps.state, &snaps.hist, rows, sel], &[b, state_len, hist_len, 0])
+}
+
+/// [`gdn_commit_pooled`] for a bf16 pool: the `m` sequences that rejected something are listed compactly, `sel[j]` the
+/// snapshot row to restore and `slots[j]` the pool row it goes to. The f32 snapshot rows are gathered (`gather_f32`) into
+/// `stage` (`m` rows of state and history, shared by every layer: the steps run in order) and scattered (`scatter_bf16`)
+/// into the pool, rounding on the way. The steps are returned, not submitted.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_commit_pooled_bf16(
+    g: &Gpu,
+    shape: &GdnMixerShape,
+    pool_state: &DeviceBuffer,
+    pool_hist: &DeviceBuffer,
+    snaps: &GdnRowSnapshots,
+    stage: (&DeviceBuffer, &DeviceBuffer),
+    sel: &DeviceBuffer,
+    slots: &DeviceBuffer,
+    m: u32,
+    (gather_f32, scatter_bf16): (usize, usize),
+) -> [Step; 2] {
+    let state_len = shape.gdn.h * shape.gdn.dk * shape.gdn.dv;
+    let hist_len = shape.conv_dim() * (shape.conv_kernel - 1);
+    let (params, work) = ([m, state_len, hist_len], m * (state_len + hist_len));
+    [
+        g.step(gather_f32, &[&snaps.state, &snaps.hist, sel, stage.0, stage.1], &params, work),
+        g.step(scatter_bf16, &[stage.0, stage.1, slots, pool_state, pool_hist], &params, work),
+    ]
 }
