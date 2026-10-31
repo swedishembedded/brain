@@ -614,7 +614,15 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
     let hw = Hardware::detected();
     let probe_cap = cfg.ctx.unwrap_or(1).max(1);
     let kv = given_or_chosen(cfg.kv, "--kv-cache", KV_DEFAULTS, hw, &mut chosen, |kv| fits(build(kv, SpeculativeMode::Off, 0, probe_cap)));
-    let mode = given_or_chosen(cfg.speculative, "--speculative", SPECULATION_DEFAULTS, hw, &mut chosen, |mode| fits(build(kv, mode, 0, probe_cap)));
+    // The FP8 directory's own MTP head is opt-in (`--speculative mtp|auto`): measured on the serving scoreboard its drafts did not yet repay
+    // their bookkeeping at any concurrency, so the default serves it plainly.
+    let mode = match cfg.speculative {
+        None if ResidentCheckpoint::is_hf_dir(gguf_path) => {
+            chosen.push("--speculative off: the FP8 release's MTP head is opt-in until it repays its bookkeeping (--speculative mtp)".to_string());
+            SpeculativeMode::Off
+        }
+        _ => given_or_chosen(cfg.speculative, "--speculative", SPECULATION_DEFAULTS, hw, &mut chosen, |mode| fits(build(kv, mode, 0, probe_cap))),
+    };
     if cfg.exact_decode && mode != SpeculativeMode::Off {
         chosen.push("--exact-decode: speculation is off in this regime (a verify pass is not grouped)".to_string());
     }
