@@ -31,14 +31,19 @@
 #ifndef BRAIN_FD_ENTRY
 #define BRAIN_FD_ENTRY brain_matmul_fp8_wgmma_swap_tma
 #endif
-#define BRAIN_FD_THREADS 256   // a producer warpgroup (one thread issues the copies) and one consumer warpgroup
+#ifndef BRAIN_FD_CONS
+#define BRAIN_FD_CONS 2  // consumer warpgroups: stage kt belongs to warpgroup kt % BRAIN_FD_CONS (their wgmma chains overlap), the sums meet at the tile's end
+#endif
+#define BRAIN_FD_THREADS (128 * (1 + BRAIN_FD_CONS))  // a producer warpgroup (one thread issues the copies) and the consumer warpgroups
 #define BRAIN_FD_MAX_CTAS 132  // grid size at most, and the SM slots of the maps
 #define BRAIN_FD_BM 64         // rows of x a launch holds
 #define BRAIN_FD_X_BYTES (BRAIN_FD_BM * 128)
 #define BRAIN_FD_W_BYTES (BRAIN_FD_BN * 128)
-// Per stage the x tile, the weight tile, then 1 KiB of scales (64 activation scales, then the two weight block scales): a whole
-// number of KiB keeps every swizzled tile 1024-byte aligned.
-#define BRAIN_FD_STAGE_BYTES (BRAIN_FD_X_BYTES + BRAIN_FD_W_BYTES + 1024)
+// Per stage the x tile and the weight tile (a whole number of KiB, so every swizzled tile stays 1024-byte aligned); the stages' scales (64
+// activation scales, then the two weight block scales: 512 bytes a stage) follow the ring.
+#define BRAIN_FD_STAGE_BYTES (BRAIN_FD_X_BYTES + BRAIN_FD_W_BYTES)
+#define BRAIN_FD_SCALE_BYTES 512
+#define BRAIN_FD_COMB_STRIDE (BRAIN_FD_BN + 8)  // floats a row of the combine buffer: the rows of a warp's float2 stores fall in different banks
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
 #define BRAIN_FD_PDL_WAIT() asm volatile("griddepcontrol.wait;\n" ::: "memory")
@@ -200,11 +205,13 @@ __device__ __forceinline__ void brain_fd_wgmma_n80(float* d, unsigned long long 
         : "l"(da), "l"(db), "r"(accumulate));
 }
 
-// One `wgmma` per chunk of at most 80 columns of the tile: `d` holds the tile's BN / 2 accumulator registers, `db` the descriptor of the tile's first weight row.
+// The columns of each `wgmma` of a BN-column tile: BN cut into the fewest chunks of at most 80 columns, as even as the 8-column granule allows.
+#define BRAIN_FD_CHUNK(BN) ((((BN) + ((BN) + 79) / 80 - 1) / (((BN) + 79) / 80) + 7) / 8 * 8)
+// One `wgmma` per chunk of the tile: `d` holds the tile's BN / 2 accumulator registers, `db` the descriptor of the tile's first weight row.
 template <int OFF, int BN>
 __device__ __forceinline__ void brain_fd_mma(float* d, unsigned long long da, unsigned long long db, int accumulate) {
     if constexpr (OFF < BN) {
-        constexpr int N = (BN - OFF) < 80 ? (BN - OFF) : 80;
+        constexpr int N = (BN - OFF) < BRAIN_FD_CHUNK(BN) ? (BN - OFF) : BRAIN_FD_CHUNK(BN);
         float* const dc = d + OFF / 2;
         const unsigned long long dbc = db + (unsigned long long)(OFF * 128 / 16);  // 16-byte units
         if constexpr (N == 8) { brain_fd_wgmma_n8(dc, da, dbc, accumulate); }
@@ -216,8 +223,8 @@ __device__ __forceinline__ void brain_fd_mma(float* d, unsigned long long da, un
         else if constexpr (N == 56) { brain_fd_wgmma_n56(dc, da, dbc, accumulate); }
         else if constexpr (N == 64) { brain_fd_wgmma_n64(dc, da, dbc, accumulate); }
         else if constexpr (N == 72) { brain_fd_wgmma_n72(dc, da, dbc, accumulate); }
-        else if constexpr (N == 80) { brain_fd_wgmma_n80(d, da, db, accumulate); }
-        brain_fd_mma<OFF + N, BN>(d, da, db, accumulate);
+        else if constexpr (N == 80) { brain_fd_wgmma_n80(dc, da, dbc, accumulate); }
+                brain_fd_mma<OFF + N, BN>(d, da, db, accumulate);
     }
 }
 
@@ -225,6 +232,8 @@ extern "C" __global__ void __launch_bounds__(BRAIN_FD_THREADS, 1)
 BRAIN_FD_ENTRY(const unsigned int* params, const unsigned int* xq, const unsigned int* wq, const float* sx, const float* sw, float* out) {
     constexpr int BN = BRAIN_FD_BN;
     constexpr int STAGES = BRAIN_FD_STAGES;
+    constexpr unsigned int CONS = BRAIN_FD_CONS;
+    static_assert(CONS == 1 || CONS == 2, "one or two consumer warpgroups");
     static_assert(BN % 8 == 0 && BN <= 256, "the weight tile is whole 8-row groups");
     extern __shared__ unsigned char brain_fd_smem_raw[];
     __shared__ __align__(128) unsigned long long brain_fd_smem_maps[2][16];
@@ -232,9 +241,11 @@ BRAIN_FD_ENTRY(const unsigned int* params, const unsigned int* xq, const unsigne
     const unsigned int M = params[0];
     const unsigned int K = params[1] * 4u;
     const unsigned int N = params[2];
-    const unsigned int kblocks = K / 128u;
+    // Values the control flow of the wgmma loop depends on, made provably warp-uniform (a value read from memory is not): otherwise ptxas
+    // serialises each wgmma behind a wait.
+    const unsigned int kblocks = __shfl_sync(0xffffffffu, K / 128u, 0);
     const unsigned int nblocks = (N + 127u) / 128u;
-    const unsigned int tiles = (N + BN - 1u) / BN;
+    const unsigned int tiles = __shfl_sync(0xffffffffu, (N + BN - 1u) / BN, 0);
 
     const unsigned int tid = threadIdx.x;
     const unsigned int lane = tid & 31u;
@@ -243,19 +254,22 @@ BRAIN_FD_ENTRY(const unsigned int* params, const unsigned int* xq, const unsigne
     const unsigned int raw_addr = brain_fwt_smem(brain_fd_smem_raw);
     const unsigned int base = (raw_addr + 1023u) & ~1023u;
     unsigned char* const gen = brain_fd_smem_raw + (base - raw_addr);
-    const unsigned int full_bar = base + STAGES * BRAIN_FD_STAGE_BYTES;  // STAGES mbarriers, then STAGES more
+    const unsigned int scale_base = base + STAGES * BRAIN_FD_STAGE_BYTES;
+    const unsigned int full_bar = scale_base + STAGES * BRAIN_FD_SCALE_BYTES;  // STAGES mbarriers, then STAGES more
     const unsigned int empty_bar = full_bar + 8u * STAGES;
+    const unsigned int comb_addr = (empty_bar + 8u * STAGES + 15u) & ~15u;  // the second consumer's sums, for the first to add
 
     if (tid == 0u) {
         for (int s = 0; s < STAGES; ++s) {
-            brain_fwt_mbar_init(full_bar + 8u * s, 33u);   // the copy thread's expect_tx arrival and the 32 lanes' cp.async arrivals
-            brain_fwt_mbar_init(empty_bar + 8u * s, 128u); // the consumer threads
+            brain_fwt_mbar_init(full_bar + 8u * s, 33u);  // the copy thread's expect_tx arrival and the 32 lanes' cp.async arrivals
+            brain_fwt_mbar_init(empty_bar + 8u * s, 4u);  // one arrival per warp of the consumer warpgroup that took the stage
         }
         asm volatile("fence.mbarrier_init.release.cluster;\n" ::: "memory");
     }
     __syncthreads();
 
     if (tid < 128u) {
+        if constexpr (CONS == 2) { asm volatile("setmaxnreg.dec.sync.aligned.u32 40;\n" ::: "memory"); }
         if (warp != 0u) { return; }
         // One slot per SM: a block owns its SM's shared memory (one resident block), so no two live blocks share a slot.
         unsigned int smid;
@@ -293,7 +307,7 @@ BRAIN_FD_ENTRY(const unsigned int* params, const unsigned int* xq, const unsigne
                     }
                 }
                 if (lane == 0u) { brain_fwt_tma_load(st, gmaps, kt * 128, 0, full_bar + 8u * slot); }
-                const unsigned int sc = st + BRAIN_FD_X_BYTES + BRAIN_FD_W_BYTES;
+                const unsigned int sc = scale_base + slot * BRAIN_FD_SCALE_BYTES;
                 brain_fwt_cp4(sc + lane * 4u, sx_src0 + kt, sx_ok0 ? 4u : 0u);
                 brain_fwt_cp4(sc + (lane + 32u) * 4u, sx_src1 + kt, sx_ok1 ? 4u : 0u);
                 if (lane < 2u) { brain_fwt_cp4(sc + 256u + lane * 4u, sw_src + kt, 4u); }
@@ -305,37 +319,67 @@ BRAIN_FD_ENTRY(const unsigned int* params, const unsigned int* xq, const unsigne
         return;
     }
 
-    // The consumer warpgroup: warp w owns x rows 16 w .. 16 w + 15 (lane / 4 and +8 within), all BN columns.
+    if constexpr (CONS == 2) { asm volatile("setmaxnreg.inc.sync.aligned.u32 232;\n" ::: "memory"); }
+    // Consumer warpgroup `cwg` takes the stages kt = cwg (mod CONS); warp w owns x rows 16 w .. 16 w + 15 (lane / 4 and +8 within), all BN columns.
+    const unsigned int cwg = tid / 128u - 1u;
     const unsigned int r0 = warp * 16u + (lane >> 2), r1 = r0 + 8u;
-    unsigned int it = 0;
-    for (unsigned int tile = blockIdx.x; tile < tiles; tile += gridDim.x) {
+    unsigned int it0 = 0, tile_count = 0;
+    for (unsigned int tile = blockIdx.x; tile < tiles; tile += gridDim.x, ++tile_count) {
         const unsigned int n0 = tile * BN;
         const unsigned int n0_in_block = n0 & 127u;
         float acc[BN / 2];
         float d[BN / 2];
 #pragma unroll
         for (int i = 0; i < BN / 2; ++i) { acc[i] = 0.0f; d[i] = 0.0f; }
-        for (unsigned int kt = 0; kt < kblocks; ++kt, ++it) {
-            const unsigned int slot = it % STAGES;
-            brain_fwt_mbar_wait(full_bar + 8u * slot, (it / STAGES) & 1u);
+        for (unsigned int kt = cwg; kt < kblocks; kt += CONS) {
+            const unsigned int slot = (it0 + kt) % STAGES;
+            brain_fwt_mbar_wait(full_bar + 8u * slot, ((it0 + kt) / STAGES) & 1u);
             const unsigned int st = base + slot * BRAIN_FD_STAGE_BYTES;
             brain_fwt_fence();
 #pragma unroll
             for (int q = 0; q < 4; ++q) { brain_fd_mma<0, BN>(d, brain_fwt_desc(st + q * 32u), brain_fwt_desc(st + BRAIN_FD_X_BYTES + q * 32u), q > 0 ? 1 : 0); }
             brain_fwt_wg_commit();
             brain_fwt_wg_wait<0>();
-            const float* const sxs = reinterpret_cast<const float*>(gen + slot * BRAIN_FD_STAGE_BYTES + BRAIN_FD_X_BYTES + BRAIN_FD_W_BYTES);
+            const float* const sxs = reinterpret_cast<const float*>(gen + STAGES * BRAIN_FD_STAGE_BYTES + slot * BRAIN_FD_SCALE_BYTES);
             const float xs0 = sxs[r0], xs1 = sxs[r1], ws0 = sxs[64], ws1 = sxs[65];
-            brain_fwt_mbar_arrive(empty_bar + 8u * slot);  // the slot's tiles and scales are read
+            __syncwarp();  // every lane has read the slot's scales (and the wgmma have read its tiles)
+            if (lane == 0u) { brain_fwt_mbar_arrive(empty_bar + 8u * slot); }
 #pragma unroll
             for (int j = 0; j < BN / 8; ++j) {
-                const float ws = (n0_in_block + 8u * j >= 128u) ? ws1 : ws0;
+                const float ws = (n0_in_block + 8u * j >= 128u) ? ws1 : ws0;  // the tile may straddle two weight scale blocks
                 const float c0 = xs0 * ws, c1 = xs1 * ws;
                 acc[4 * j] = fmaf(d[4 * j], c0, acc[4 * j]);
                 acc[4 * j + 1] = fmaf(d[4 * j + 1], c0, acc[4 * j + 1]);
                 acc[4 * j + 2] = fmaf(d[4 * j + 2], c1, acc[4 * j + 2]);
                 acc[4 * j + 3] = fmaf(d[4 * j + 3], c1, acc[4 * j + 3]);
             }
+        }
+        it0 += kblocks;
+        if constexpr (CONS == 2) {
+            // The second warpgroup hands its sums to the first (in the thread layout both share), which carries on with the tile.
+            float* const comb = reinterpret_cast<float*>(gen + (comb_addr - base));
+            if (cwg == 1u) {
+                if (tile_count > 0u) { asm volatile("bar.sync 2, 256;\n" ::: "memory"); }  // the first has read the previous tile's sums
+#pragma unroll
+                for (int j = 0; j < BN / 8; ++j) {
+                    const unsigned int c = 8u * j + 2u * (lane & 3u);
+                    *reinterpret_cast<float2*>(comb + r0 * BRAIN_FD_COMB_STRIDE + c) = make_float2(acc[4 * j], acc[4 * j + 1]);
+                    *reinterpret_cast<float2*>(comb + r1 * BRAIN_FD_COMB_STRIDE + c) = make_float2(acc[4 * j + 2], acc[4 * j + 3]);
+                }
+            }
+            asm volatile("bar.sync 1, 256;\n" ::: "memory");
+            if (cwg == 1u) { continue; }
+#pragma unroll
+            for (int j = 0; j < BN / 8; ++j) {
+                const unsigned int c = 8u * j + 2u * (lane & 3u);
+                const float2 a0 = *reinterpret_cast<const float2*>(comb + r0 * BRAIN_FD_COMB_STRIDE + c);
+                const float2 a1 = *reinterpret_cast<const float2*>(comb + r1 * BRAIN_FD_COMB_STRIDE + c);
+                acc[4 * j] += a0.x;
+                acc[4 * j + 1] += a0.y;
+                acc[4 * j + 2] += a1.x;
+                acc[4 * j + 3] += a1.y;
+            }
+            if (tile + gridDim.x < tiles) { asm volatile("bar.arrive 2, 256;\n" ::: "memory"); }
         }
         // acc[4 j + 2 h + c]: x row r0 + 8 h, weight row n0 + 8 j + 2 (lane % 4) + c.
         const unsigned int col0 = n0 + 2u * (lane & 3u);
