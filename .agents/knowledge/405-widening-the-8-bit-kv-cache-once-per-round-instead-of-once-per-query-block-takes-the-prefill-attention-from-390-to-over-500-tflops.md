@@ -11,17 +11,17 @@ is the producer?
 Result (gpu1 = GH200, `cuda_flash_prefill -- --ignored --nocapture long_prompt_round`, 4096-row round, 24 heads, 4 kv heads, int8 cache; the
 rate includes the widening pass):
 
-| context | in-block widening (`wg`) | widened once, 64-key tiles | widened once, 128-key tiles |
-|---|---|---|---|
-| 4K | 301-311 TFLOPS | 390-405 | 421-446 |
-| 8K | 346-355 | 465-487 | 496-532 |
-| 16K | 354-381 | 494-531 | 522-540 |
-| 24K | 367-388 | 506-547 | 532-560 |
-| 32K | 390-394 | 507-549 | 518-543 |
+| context | in-block widening (`wg`) | widened once, 64-key tiles | 128-key tiles | 128-key tiles, warpgroups ping-pong |
+|---|---|---|---|---|
+| 4K | 301-311 TFLOPS | 390-405 | 421-446 | 446-465 |
+| 8K | 346-355 | 465-487 | 496-532 | 527-546 |
+| 16K | 354-381 | 494-531 | 522-540 | 559-566 |
+| 24K | 367-388 | 506-547 | 532-560 | 570-578 |
+| 32K | 390-394 | 507-549 | 518-543 | 567-601 |
 
 (ranges are repeated runs on the same card; it is power capped and its clock moves between runs by up to 15 %, so a comparison is made inside
 one process or as best-of-three). A 512-row chunk gains too: 4K / 8K / 16K / 31K context 0.219 / 0.388 / 0.610 / 1.088 -> 0.176 / 0.313 / 0.520 /
-0.920 ms. ncu at 32K, 4096 rows: tensor pipe active 40 % -> 62 % (64-key tiles).
+0.920 ms. ncu at 32K, 4096 rows: tensor pipe active 40 % -> 62 % (64-key tiles) -> 73 % (128-key tiles with the ping-pong).
 
 What changed: `flash_prefill_f16_hd256_wgs_widen_{kv8,kvfp8}` widens the round's keys once per layer into a staging buffer of one record per
 (kv head, 64-key tile): the K and V tiles in the exact 128-byte swizzled fp16 layout the tensor cores read, and their row scales (K scale already
@@ -41,4 +41,9 @@ Tried on top, no gain (each a one-line change on the 64-key form, measured in th
 and P V of tile j back to back, softmax of j + 1 under the product; 53 % tensor active, 440 TFLOPS: the dependent S chain in front of P V in the
 in-order tensor queue costs more than the overlap hides, and ptxas serializes every wgmma (C7514) unless the consumers get 240 registers and the
 overlapped region has no condition around a wgmma or its wait); two independent accumulation chains for S (-5 %); the ping-pong turn order of the two
-consumer warpgroups (S0, S1, PV0, PV1; -3 %).
+consumer warpgroups on the 64-key form (S0, S1, PV0, PV1; -3 %).
+
+The ping-pong does pay on the 128-key form (+5-8 %, 73 % tensor active): both warpgroups of a block start every tile together, so without a turn
+order their softmaxes coincide and the tensor pipe idles; with the order S0, S1, PV0, PV1 (named barriers 4-7, slot i waited on by warpgroup i % 2
+and arrived at by the warpgroup of slot i - 1, slot 0 primed by warpgroup 1) one warpgroup's softmax runs under the other's products. Knowledge 383
+tried it while the producer was the bottleneck, where there was nothing to gain.

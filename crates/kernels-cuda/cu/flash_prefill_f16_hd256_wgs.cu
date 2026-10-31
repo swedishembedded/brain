@@ -13,7 +13,7 @@
 // and head (about 512 times per kv head at 64K context) by a producer warpgroup that shares shared-memory bandwidth and issue
 // slots with the two consumers (knowledge 383 measured the widening alone at 30 % of the kernel). Here a separate kernel,
 // `brain_flash_prefill_wgs_widen`, widens the round's keys ONCE into a staging buffer that already holds the exact bytes the
-// tensor cores read (128-byte swizzled 64-key fp16 tiles with the row scales beside them), and the attention kernel's
+// tensor cores read (128-byte swizzled 128-key fp16 tiles with the row scales beside them), and the attention kernel's
 // producer is one thread issuing bulk copies (`cp.async.bulk`) of whole tiles. The numerics are version 3's: the widening is
 // exact, the row scales are applied to the fp32 scores (K, times 1/sqrt(d) log2 e) and to the fp16 softmax weights (V),
 // accumulators are fp32.
@@ -21,11 +21,12 @@
 //   widen params : [bsz, n_heads, n_kv_heads, head_dim, group, block_size, max_bt, splits_max, multiprocessors, tiles_cap] u32
 //   widen        : pool_k, pool_v (paged 8-bit planes), block_tables (the FIRST row's table is read: one sequence), seq_lens,
 //                  k_scales, v_scales -> stage
-//   stage        : per (kv head, 64-key tile) a record of WGS_STRIDE bytes: K tile (4 swizzle atom columns of 64 rows x 128 bytes),
-//                  V tile, K row scales x 1/sqrt(d) log2 e (64 f32), V row scales (64 f32). Keys at or past the longest
+//   stage        : per (kv head, 128-key tile) a record of WGS_STRIDE bytes: K tile (4 swizzle atom columns of 128 rows x 128 bytes),
+//                  V tile, K row scales x 1/sqrt(d) log2 e (128 f32), V row scales (128 f32). Keys at or past the longest
 //                  sequence length are zero with zero scales (so a masked key can never poison a product with 0 x NaN).
 //   attention    : params (as above), q, stage, seq_lens, ctx, part -- one block is 384 threads, a producer warpgroup (one
-//                  thread works) and two consumer warpgroups of 64 query rows; key splits and the combine kernel are version 3's.
+//                  thread works) and two consumer warpgroups of 64 query rows that take turns on the tensor cores (ping-pong); S = Q K^T
+//                  is 16 wgmma m64n128k16 a 128-key tile. Key splits and the combine kernel are version 3's.
 
 #ifndef BRAIN_FLASH_HELPERS_ONLY
 #error "flash_prefill_f16_hd256_wgs.cu is compiled after flash_prefill_f16_hd256.cu and flash_prefill_f16_hd256_wg.cu"
@@ -237,6 +238,10 @@ extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_
     }
     wg_fence_proxy();
     wg_named_barrier(2u + cw);
+    // The warpgroups take turns on the tensor cores in the order S0, S1, PV0, PV1, so that one's softmax runs under the other's
+    // products instead of both softmaxes coinciding. Slot i's barrier (4 + i) is waited on by that slot's warpgroup and arrived at
+    // by the previous slot's; slot 0 is primed here. Both warpgroups run the same tile count, so the order never starves.
+    if (cw == 1u) { wg_turn_pass(4u); }
 
     float o[128];
 #pragma unroll
@@ -255,12 +260,14 @@ extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_
         float s[64];
         {
             const unsigned int k_tile = base + WGS_OFF_K;
+            wg_turn_wait(4u + cw);
             wg_fence();
 #pragma unroll
             for (int k = 0; k < 16; ++k) {
                 wgs_mma_s(s, wg_desc_k(q_tile + (k >> 2) * WG_SUB_BYTES + (k & 3) * 32u), wg_desc_k(k_tile + (k >> 2) * WGS_ATOM_BYTES + (k & 3) * 32u), k > 0);
             }
             wg_commit();
+            wg_turn_pass(5u + cw);
         }
         {
             wg_wait0();
@@ -348,10 +355,12 @@ extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_
         }
         {
             const unsigned int v_tile = base + WGS_OFF_V;
+            wg_turn_wait(6u + cw);
             wg_fence();
 #pragma unroll
             for (int kk = 0; kk < 8; ++kk) { brain_wg_mma_pv(o, pf[kk], wgs_desc_mn(v_tile + kk * 2048u)); }
             wg_commit();
+            wg_turn_pass(cw == 0u ? 7u : 4u);
         }
         wg_wait0();
         __syncwarp();

@@ -349,8 +349,9 @@ measurement (16-256), not fixed globally.
   candidate tuner instead of the capability floor (the kernel is chosen where the part has `wgmma`; the tuner has no attention slot yet).
 - 2026-11-01 (prefill attention widened once per round, knowledge 405): `flash_prefill_f16_hd256_wgs_widen_*` stages the round's int8/FP8 keys once as
   swizzled fp16 records of 128 keys and `flash_prefill_f16_hd256_wgs` bulk-copies them (no producer conversion) and runs S as `m64n128k16`: 4096-row
-  round at 4K / 8K / 16K / 24K / 32K context 301 / 346 / 354 / 367 / 390 -> 446 / 532 / 540 / 560 / 543 TFLOPS causal (best of three runs), tensor pipe
-  40 -> 62 % active. Open: a persistent causal-balanced schedule, the staging buffer shared across layers, rounds under 4K context.
+  round at 4K / 8K / 16K / 24K / 32K context 301 / 346 / 354 / 367 / 390 -> 465 / 546 / 566 / 570 / 593 TFLOPS causal (best of three runs; the two
+  consumer warpgroups also take turns on the tensor cores), tensor pipe 40 -> 73 % active. Open: a persistent causal-balanced schedule, the staging
+  buffer shared across layers, rounds under 4K context.
 - 2026-10-30 (GDN prefill on bf16 tensor cores, knowledge 384): the Gated DeltaNet serving prefill has a second form, `gdn_chunk_prep_tok_bf16` +
   `gdn_chunk_loop_bf16` (bf16 operands rounded once in the prep, fp32 accumulation, fp32 state in registers, prefetched tiles), chosen per device by
   measurement (`gpu-core/src/gdn_prefill_tune.rs`, slot `gdn_prefill`, `--kernel gdn_prefill=exact|bf16` pins it) and admitted within 4 bf16 steps
