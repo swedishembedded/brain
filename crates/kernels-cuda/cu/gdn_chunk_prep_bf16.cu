@@ -119,6 +119,8 @@ struct PrepOperands {
     bool qkv_bf16;
     // query and key rows arrive L2-normalised (the vector convolution's output): they are copied, not normalised (needs `qkv_bf16`).
     bool qk_normalized;
+    // Write the scaled chunk-major query / key copies the `mma.sync` recurrence multiplies (the warpgroup recurrence scales the normalised rows itself).
+    bool emit_cm;
 };
 
 // A value as its bf16 high part and the bf16 rounding of the remainder: hi + lo carries about 16 mantissa bits.
@@ -219,9 +221,18 @@ __device__ __forceinline__ void brain_gdn_prep_chunk(const PrepOperands& a, cons
         const float e = expf(sg[tid]);
         sexp[tid] = e;
         sdec[tid] = expf(sg[C - 1] - sg[tid]);
-        if (tid < C) {
-            g_cs_out[row_base + tid] = sg[tid];
-            exp_g_cs_out[row_base + tid] = e;
+        if (a.emit_cm) {
+            if (tid < C) {
+                g_cs_out[row_base + tid] = sg[tid];
+                exp_g_cs_out[row_base + tid] = e;
+            }
+        } else {
+            // Folded recurrence: per chunk-head 192 floats, `scale exp(g_t)` and `exp(g_last - g_t)` of its 64 tokens (zero past C) and
+            // `exp(g_last)` (the state's decay), staged by the recurrence with plain copies.
+            float* const aux = g_cs_out + row_base * 3u;
+            aux[tid] = tid < C ? scale * e : 0.0f;
+            aux[MAXC + tid] = tid < C ? sdec[tid] : 0.0f;
+            if (tid == 0) { *reinterpret_cast<float4*>(aux + 2 * MAXC) = make_float4(expf(sg[C - 1]), 0.0f, 0.0f, 0.0f); }
         }
     }
     __syncthreads();
@@ -229,8 +240,10 @@ __device__ __forceinline__ void brain_gdn_prep_chunk(const PrepOperands& a, cons
     if (a.qk_normalized) {
         asm volatile("cp.async.wait_group 0;\n" ::: "memory");
         __syncthreads();
-        brain_scale_tile_rows(sKb, reinterpret_cast<unsigned short*>(key_cm_out) + row_base * D, C, sdec, 1.0f);
-        brain_scale_tile_rows(sXb, reinterpret_cast<unsigned short*>(query_cm_out) + row_base * D, C, sexp, scale);
+        if (a.emit_cm) {
+            brain_scale_tile_rows(sKb, reinterpret_cast<unsigned short*>(key_cm_out) + row_base * D, C, sdec, 1.0f);
+            brain_scale_tile_rows(sXb, reinterpret_cast<unsigned short*>(query_cm_out) + row_base * D, C, sexp, scale);
+        }
     } else {
         brain_normalize_rows_bf16(sKb, a.key, key_at, a.qkv_bf16, qk_stride, reinterpret_cast<unsigned short*>(key_cm_out) + row_base * D, C, eps, sdec, 1.0f);
         brain_normalize_rows_bf16(sXb, a.query, query_at, a.qkv_bf16, qk_stride, reinterpret_cast<unsigned short*>(query_cm_out) + row_base * D, C, eps, sexp, scale);
@@ -437,7 +450,7 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_chunk_prep_tok_b
     const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
     if (blk >= bhc) { return; }  // block-uniform
     const PrepOperands a = {query, key, value, raw_g, beta, g_cs_out, exp_g_cs_out, u_out, w_out, intra_out, query_cm_out, key_cm_out,
-                            nullptr, nullptr, __uint_as_float(params[5]), __uint_as_float(params[9]), H, params[8], false, false};
+                            nullptr, nullptr, __uint_as_float(params[5]), __uint_as_float(params[9]), H, params[8], false, false, true};
     const unsigned long long row_base = (unsigned long long)blk * C;
     const unsigned int bh = bhc / n_chunks, ci = blk / bh, rem = blk % bh;
     const unsigned long long tok0 = ((unsigned long long)(rem / H) * n_chunks + ci) * C;
@@ -449,7 +462,7 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_chunk_prep_tok_b
 // per chunk) and writes its tensors at a fixed 64-row slot of the scratch, so a segment's last, short chunk needs no
 // launch of its own. The gates come in raw (b_proj, a_proj with the layer's a_log and dt_bias) and are formed in the load.
 // Contract: params [chunks * H, unused..., scale (f32 bits) at 5, H at 6, nseg at 7, group at 8, eps (f32 bits) at 9, flags at 10
-// (absent is 0; bit 0: query, key and value are bf16 rows; bit 1: query and key are also L2-normalised, as the vector convolution leaves them)]; read
+// (absent is 0; bit 0: query, key and value are bf16 rows; bit 1: query and key are also L2-normalised, as the vector convolution leaves them, required by bit 2; bit 2: the folded recurrence's form: no query_cm / key_cm, and g_cs holds three vectors of 64 floats a chunk-head instead of one)]; read
 // query, key, value, b_proj, a_proj, a_log, dt_bias, table; write the seven tensors of `brain_gdn_chunk_prep_tok_bf16`.
 extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_chunk_prep_seg_bf16(const unsigned int* params, const float* query, const float* key,
                                                                                      const float* value, const float* b_proj, const float* a_proj,
@@ -461,7 +474,7 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_chunk_prep_seg_b
     const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
     if (blk >= blocks) { return; }  // block-uniform
     const PrepOperands a = {query, key, value, a_proj, b_proj, g_cs_out, exp_g_cs_out, u_out, w_out, intra_out, query_cm_out, key_cm_out,
-                            a_log, dt_bias, __uint_as_float(params[5]), __uint_as_float(params[9]), H, params[8], (params[10] & 1u) != 0u, (params[10] & 2u) != 0u};
+                            a_log, dt_bias, __uint_as_float(params[5]), __uint_as_float(params[9]), H, params[8], (params[10] & 1u) != 0u, (params[10] & 2u) != 0u, (params[10] & 4u) == 0u};
     const unsigned int chunk = blk / H, head = blk % H;
     const unsigned int* entry = table + 4 * nseg + 2 * chunk;
     const unsigned long long row_base = (unsigned long long)blk * MAXC;

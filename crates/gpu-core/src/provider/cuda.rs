@@ -601,6 +601,10 @@ pub fn gdn_chunk_loop_bf16_step(
 /// u tile, one decay word, to a KiB), two 8 KiB output tiles, the barriers and 1 KiB to align the swizzled tiles.
 const GDN_CHUNK_LOOP_WG_DYNAMIC_SHARED_BYTES: u32 = 2 * 92160 + 2 * 8192 + 64 + 1024;
 
+/// Dynamic shared memory of `gdn_chunk_loop_seg_wg_half`: two stages of the operand tiles with a 64-column u tile (w, query, key 16 KiB each,
+/// intra 8 KiB, the padded fp32 u tile 17 KiB, the folded form's decay vectors), one 8 KiB output tile, the barriers and 1 KiB to align.
+const GDN_CHUNK_LOOP_WG_HALF_DYNAMIC_SHARED_BYTES: u32 = 2 * 75776 + 8192 + 64 + 1024;
+
 /// [`gdn_chunk_loop_bf16_step`] on Hopper warpgroup tensor cores (`gdn_chunk_loop_wg`): the same ten buffers and contract, the state held
 /// in registers across the walk. `None` below compute capability 9.0 (the caller keeps the `mma.sync` form).
 #[allow(clippy::too_many_arguments)]
@@ -831,6 +835,7 @@ pub fn gdn_conv_silu_seg_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuff
 /// query_cm, key_cm` (written, `chunks * heads` slots of 64 rows) as for [`gdn_chunk_prep_tok_bf16_step`]. With `bf16`, `query`,
 /// `key` and `value` are bf16 rows (the convolution's bf16 output).
 pub fn gdn_chunk_prep_seg_bf16_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 15], l: GdnTokenLayout, table: &GdnSegmentTable, bf16: bool) -> Option<crate::Step> {
+    let folds = gdn_seg_loop_folds(gpu, bf16);
     if !gdn_chunk_prep_tok_shape_ok(l.head_dim, l.head_dim, l.c_len, l.heads, l.group) {
         return None;
     }
@@ -839,24 +844,43 @@ pub fn gdn_chunk_prep_seg_bf16_step(gpu: &crate::Gpu, bufs: &[&backend_api::Devi
     let launch = backend_api::CudaLaunch { dynamic_shared_bytes: GDN_CHUNK_PREP_BF16_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..backend_api::CudaLaunch::NONE };
     let id = gpu.native_kernel_launched(kernel, &GDN_CHUNK_PREP_SEG_BINDINGS, launch)?;
     let blocks = table.chunks * l.heads;
-    let params = [blocks, 0, l.head_dim, l.head_dim, 0, l.scale.to_bits(), l.heads, table.segments, l.group, l.eps.to_bits(), if bf16 { 3 } else { 0 }];
+    let params = [blocks, 0, l.head_dim, l.head_dim, 0, l.scale.to_bits(), l.heads, table.segments, l.group, l.eps.to_bits(), if bf16 { 3 } else { 0 } | if folds { 4 } else { 0 }];
     gpu.step_native_sliced(id, bufs, &[(0, 0); 15], &params, blocks)
+}
+
+/// Whether the segment recurrence of a round in the bf16 form is the warpgroup one in its folded form: the recurrence reads the
+/// convolution's normalised key and query rows (`kd` and `qs` of [`gdn_chunk_loop_seg_bf16_step`] are those, token-major) and applies their row scalings
+/// itself, and the prep writes no scaled chunk-major copies of them (`gdn_chunk_prep_seg_bf16_step` consults the same answer).
+pub fn gdn_seg_loop_folds(gpu: &crate::Gpu, bf16: bool) -> bool {
+    let Some(cc) = gpu.caps().arch.compute_capability else { return false };
+    bf16 && gdn_wg_loop_selected(gpu) && kernels_cuda::get("gdn_chunk_loop_seg_wg_half").is_some_and(|k| k.min_cc <= cc)
 }
 
 /// The bf16 recurrence over every segment of the round, on the pool's state rows in place: `bufs` is `kd, qs, w, u, g_cs,
 /// intra, table` (read), then `state_pool` (`[slots, heads, 128, 128]`, read and written) and `out` (token-major rows, bf16 with
-/// `bf16`).
-pub fn gdn_chunk_loop_seg_bf16_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 9], heads: u32, dk: u32, dv: u32, table: &GdnSegmentTable, bf16: bool, pool_bf16: bool) -> Option<crate::Step> {
+/// `bf16`). `kd` and `qs` are the prep's scaled chunk-major copies, or with [`gdn_seg_loop_folds`] the convolution's normalised
+/// `key` and `query` rows. `l` supplies the head geometry (`heads`, `group`, `head_dim`, `scale`).
+pub fn gdn_chunk_loop_seg_bf16_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 9], l: GdnTokenLayout, table: &GdnSegmentTable, bf16: bool, pool_bf16: bool) -> Option<crate::Step> {
+    let (heads, dk, dv) = (l.heads, l.head_dim, l.head_dim);
     if !gdn_chunk_prep_shape_ok(dk, dv, GDN_SEG_CHUNK_ROWS) {
         return None;
     }
     let cc = gpu.caps().arch.compute_capability?;
+    if gdn_seg_loop_folds(gpu, bf16) {
+        let kernel = kernels_cuda::get("gdn_chunk_loop_seg_wg_half").filter(|k| k.min_cc <= cc)?;
+        let launch = backend_api::CudaLaunch { dynamic_shared_bytes: GDN_CHUNK_LOOP_WG_HALF_DYNAMIC_SHARED_BYTES, shared_opt_in: true, arch: backend_api::ArchFeatures::Required, ..backend_api::CudaLaunch::NONE };
+        let id = gpu.native_kernel_launched(kernel, &GDN_CHUNK_LOOP_SEG_BINDINGS, launch)?;
+        let blocks = table.segments * heads * 2;
+        let flags = u32::from(bf16) | if pool_bf16 { 2 } else { 0 } | 4;
+        let params = [blocks, 0, dk, dv, 0, l.scale.to_bits(), heads, table.segments, heads * dk * dv, flags, heads / l.group * dk, l.group];
+        return gpu.step_native_sliced(id, bufs, &[(0, 0); 9], &params, blocks);
+    }
     if gdn_wg_loop_selected(gpu) {
         if let Some(kernel) = kernels_cuda::get("gdn_chunk_loop_seg_wg").filter(|k| k.min_cc <= cc) {
             let launch = backend_api::CudaLaunch { dynamic_shared_bytes: GDN_CHUNK_LOOP_WG_DYNAMIC_SHARED_BYTES, shared_opt_in: true, arch: backend_api::ArchFeatures::Required, ..backend_api::CudaLaunch::NONE };
             let id = gpu.native_kernel_launched(kernel, &GDN_CHUNK_LOOP_SEG_BINDINGS, launch)?;
             let blocks = table.segments * heads;
-            let params = [blocks, 0, dk, dv, 0, 0, heads, table.segments, heads * dk * dv, u32::from(bf16) | if pool_bf16 { 2 } else { 0 }];
+            let params = [blocks, 0, dk, dv, 0, 0, heads, table.segments, heads * dk * dv, u32::from(bf16) | if pool_bf16 { 2 } else { 0 }, 0, 1];
             return gpu.step_native_sliced(id, bufs, &[(0, 0); 9], &params, blocks);
         }
     }

@@ -218,8 +218,6 @@ fn a_round_in_bf16_equals_the_fp32_round_to_bf16_resolution() {
         (out, g.read(&state, pool_slots * sl), g.read(&hist, pool_slots * hl))
     };
     let (f32_out, f32_state, f32_hist) = run(false);
-    let (bf_out, bf_state, bf_hist) = run(true);
-    gpu_core::clear_forced_candidates();
 
     let from = lead as usize * value_dim;
     let truth = &g.read(&f32_out.gated, n as usize * value_dim)[from..];
@@ -229,13 +227,20 @@ fn a_round_in_bf16_equals_the_fp32_round_to_bf16_resolution() {
         (from..n as usize * value_dim).map(|i| e4m3_value((words[i / 4].to_bits() >> (8 * (i % 4))) as u8) * scales[i / 128]).collect()
     };
     let rms = |a: &[f32], b: &[f32]| (a.iter().zip(b).map(|(x, y)| f64::from(x - y).powi(2)).sum::<f64>() / a.len() as f64).sqrt() / (b.iter().map(|y| f64::from(*y).powi(2)).sum::<f64>() / b.len() as f64).sqrt();
-    let (e_f32, e_bf16) = (rms(&dequant(&f32_out.e4m3.clone().expect("asked for")), truth), rms(&dequant(&bf_out.e4m3.clone().expect("asked for")), truth));
-    let e_state = max_rel(&bf_state, &f32_state);
-    println!("E4M3 rows against the fp32 product: fp32 round {e_f32:.3e}, bf16 round {e_bf16:.3e}; state {e_state:.2e}");
+    let e_f32 = rms(&dequant(&f32_out.e4m3.clone().expect("asked for")), truth);
     assert!(truth.iter().any(|v| v.abs() > 1e-3), "degenerate fixture: forward output is ~0");
-    assert!(e_bf16 <= 1.5 * e_f32 + 5e-3, "the bf16 round's E4M3 rows are {e_bf16:.3e} from the product; the fp32 round's are {e_f32:.3e}");
-    assert!(e_state <= 3e-2, "recurrent state differs by {e_state:.3e}");
-    assert_eq!(bf_hist, f32_hist, "the convolution history holds bf16 values widened and must match exactly");
+    // Both bodies of the bf16 form's recurrence (`mma.sync`, and the warpgroup one where the device has it) are held to the same bound.
+    for body in ["mma", "wg"] {
+        gpu_core::force_candidate("gdn_prefill_loop", body);
+        let (bf_out, bf_state, bf_hist) = run(true);
+        let e_bf16 = rms(&dequant(&bf_out.e4m3.clone().expect("asked for")), truth);
+        let e_state = max_rel(&bf_state, &f32_state);
+        println!("{body} recurrence, E4M3 rows against the fp32 product: fp32 round {e_f32:.3e}, bf16 round {e_bf16:.3e}; state {e_state:.2e}");
+        assert!(e_bf16 <= 1.5 * e_f32 + 5e-3, "{body}: the bf16 round's E4M3 rows are {e_bf16:.3e} from the product; the fp32 round's are {e_f32:.3e}");
+        assert!(e_state <= 3e-2, "{body}: recurrent state differs by {e_state:.3e}");
+        assert_eq!(bf_hist, f32_hist, "{body}: the convolution history holds bf16 values widened and must match exactly");
+    }
+    gpu_core::clear_forced_candidates();
 }
 
 /// The words of a bf16 pool read back (two elements to a word, the even element low) as f32 values.

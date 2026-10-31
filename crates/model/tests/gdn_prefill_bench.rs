@@ -57,17 +57,18 @@ fn bench(label: &str, spans: &[GdnSegmentSpan]) -> Option<(Vec<f32>, Vec<f32>)> 
     let rows = u64::from(n);
     let (query, key, value) = (g.storage_uninit(rows * u64::from(KEY_DIM) / 2), g.storage_uninit(rows * u64::from(KEY_DIM) / 2), g.storage_uninit(rows * u64::from(VALUE_DIM) / 2));
     let sl = u64::from(table.chunks() * NVH) * 64;
-    let (g_cs, exp_g_cs, u, wm, intra) = (g.storage_uninit(sl), g.storage_uninit(sl), g.storage_uninit(sl * 128), g.storage_uninit(sl * 128), g.storage_uninit(sl * 64));
+    let (g_cs, exp_g_cs, u, wm, intra) = (g.storage_uninit(sl * 3), g.storage_uninit(sl), g.storage_uninit(sl * 128), g.storage_uninit(sl * 128), g.storage_uninit(sl * 64));
     let (qcm, kcm) = (g.storage_uninit(sl * 128), g.storage_uninit(sl * 128));
     let out = g.storage_uninit(rows * u64::from(VALUE_DIM) / 2);
     let (gated, q8, s8) = (g.storage_uninit(rows * u64::from(VALUE_DIM)), g.storage_uninit(rows * u64::from(VALUE_DIM) / 4), g.storage_uninit(rows * u64::from(NVH)));
 
     let layout = GdnTokenLayout { bhc: 0, c_len: 64, n_chunks: 0, heads: NVH, group: NVH / NKH, head_dim: HD, scale: 1.0 / (HD as f32).sqrt(), eps: 1e-6 };
+    let folds = cuda::gdn_seg_loop_folds(&g, true);
     let steps = || {
         vec![
             cuda::gdn_conv_silu_seg_step(&g, &[&mixed, &conv_w, &tbl, &hist, &query, &key, &value], GdnConvLayout { rows: n, conv_dim: CONV_DIM, seq_len: n, key_dim: KEY_DIM, value_dim: VALUE_DIM, kernel: 4 }, &table, true, false, 1e-6).expect("conv"),
             cuda::gdn_chunk_prep_seg_bf16_step(&g, &[&query, &key, &value, &bproj, &aproj, &a_log, &dt_bias, &tbl, &g_cs, &exp_g_cs, &u, &wm, &intra, &qcm, &kcm], layout, &table, true).expect("prep"),
-            cuda::gdn_chunk_loop_seg_bf16_step(&g, &[&kcm, &qcm, &wm, &u, &g_cs, &intra, &tbl, &state, &out], NVH, HD, HD, &table, true, false).expect("loop"),
+            if folds { cuda::gdn_chunk_loop_seg_bf16_step(&g, &[&key, &query, &wm, &u, &g_cs, &intra, &tbl, &state, &out], layout, &table, true, false) } else { cuda::gdn_chunk_loop_seg_bf16_step(&g, &[&kcm, &qcm, &wm, &u, &g_cs, &intra, &tbl, &state, &out], layout, &table, true, false) }.expect("loop"),
             cuda::gdn_gated_norm_step(&g, &[&out, &norm_w, &z, &gated, &q8, &s8], n * NVH, 0, 1e-6, true, true).expect("norm"),
         ]
     };

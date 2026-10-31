@@ -140,12 +140,16 @@ pub fn gdn_mixer_segments_fwd(
     )?;
 
     // The prep writes every word of its slots it reads back, so the scratch is not cleared.
-    let (g_cs, exp_g_cs, u, wm, intra) = (g.storage_uninit(slots), g.storage_uninit(slots), g.storage_uninit(slots * vhd as u64), g.storage_uninit(slots * khd as u64), g.storage_uninit(slots * 64));
-    let (query_cm, key_cm) = (g.storage_uninit(slots * khd as u64), g.storage_uninit(slots * khd as u64));
+    let folds = gpu_core::provider::cuda::gdn_seg_loop_folds(g, bf16);
+    // The folded recurrence's decay vectors take three words a row of a slot (see `gdn_chunk_prep_seg_bf16_step`).
+    let (g_cs, exp_g_cs, u, wm, intra) = (g.storage_uninit(if folds { 3 * slots } else { slots }), g.storage_uninit(slots), g.storage_uninit(slots * vhd as u64), g.storage_uninit(slots * khd as u64), g.storage_uninit(slots * 64));
+    // The scaled chunk-major copies the `mma.sync` recurrence reads; the warpgroup recurrence reads the convolution's rows instead.
+    let (query_cm, key_cm) = if folds { (g.storage_uninit(1), g.storage_uninit(1)) } else { (g.storage_uninit(slots * khd as u64), g.storage_uninit(slots * khd as u64)) };
     let prep = gdn_chunk_prep_seg_bf16_step(g, &[&query, &key, &value, bproj, aproj, w.a_log, w.dt_bias, &round.buf, &g_cs, &exp_g_cs, &u, &wm, &intra, &query_cm, &key_cm], layout, table, bf16)?;
     // Every row of a segment is written by the recurrence (a mixed round's decode rows are the caller's).
     let out = g.storage_uninit(words(n as u64 * value_dim as u64));
-    let recurrence = gdn_chunk_loop_seg_bf16_step(g, &[&key_cm, &query_cm, &wm, &u, &g_cs, &intra, &round.buf, pools.state, &out], nvh, khd, vhd, table, bf16, pools.bf16)?;
+    let (loop_k, loop_q) = if folds { (&key, &query) } else { (&key_cm, &query_cm) };
+    let recurrence = gdn_chunk_loop_seg_bf16_step(g, &[loop_k, loop_q, &wm, &u, &g_cs, &intra, &round.buf, pools.state, &out], layout, table, bf16, pools.bf16)?;
 
     // Gated RMSNorm ("norm before gate"): RMSNorm(out) * weight, then * SiLU(z); one pass over the segments' rows.
     // (With `bf16` nothing stores it for the segments' rows; the buffer is the caller's to fill for the decode rows.)
