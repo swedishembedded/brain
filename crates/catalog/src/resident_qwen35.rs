@@ -335,6 +335,9 @@ pub struct Qwen35GgufServeConfig {
     /// The element type of the activation stream between the FP8 products (`--act-precision`); unset is `auto`, bf16 on a
     /// device with bf16 tensor cores. See [`Qwen35GgufResident::with_act_choice`](qwen35::int8_gguf_resident::Qwen35GgufResident::with_act_choice).
     pub act_precision: Option<gpu_core::ActChoice>,
+    /// The element type of the Gated DeltaNet recurrent state and conv history pools (`--gdn-state`); unset is f32. See
+    /// [`Qwen35GgufResident::with_gdn_state`](qwen35::int8_gguf_resident::Qwen35GgufResident::with_gdn_state).
+    pub gdn_state: Option<model::policy::GdnState>,
     /// Prompt tokens one sequence gets of each scheduler iteration's prefill
     /// while others wait (`the prefill-slice setting`). `None` takes the engine's
     /// default ([`PrefillPolicy::default`](qwen35::int8_gguf_resident::PrefillPolicy)).
@@ -369,6 +372,7 @@ pub const QWEN35_GGUF_POLICY: model::policy::PolicySupport = model::policy::Poli
     kv_calibration: false,
     exact_decode: true,
     act_precision: true,
+    gdn_state: true,
 };
 
 /// What the brain-checkpoint Qwen3.8 resident honours of a serving policy: the weight tier is the checkpoint's own
@@ -383,6 +387,7 @@ pub const QWEN35_FP32_POLICY: model::policy::PolicySupport = model::policy::Poli
     kv_calibration: false,
     exact_decode: true,
     act_precision: false,
+    gdn_state: false,
 };
 
 impl Qwen35ServeConfig {
@@ -425,6 +430,7 @@ impl Qwen35GgufServeConfig {
         self.kv = p.kv_cache.or(self.kv);
         self.exact_decode = p.exact_decode;
         self.act_precision = p.act_precision.or(self.act_precision);
+        self.gdn_state = p.gdn_state.or(self.gdn_state);
         let l = &p.limits;
         self.ctx = l.ctx.or(self.ctx);
         self.max_batch = l.max_batch.or(self.max_batch);
@@ -570,6 +576,13 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
         // grouping would silently defeat --exact-decode. Refuse instead.
         return Err(format!("{MODEL}: --exact-decode is not supported with an adapter bank: a grouped decode step cannot carry per-row adapter slots"));
     }
+    let gdn_bf16 = cfg.gdn_state.is_some_and(|g| g.is_bf16());
+    if gdn_bf16 && cfg.exact_decode {
+        return Err(format!("{MODEL}: --gdn-state bf16 is not supported with --exact-decode: the exact regime is defined on the f32 recurrent state"));
+    }
+    if let Some(mode) = cfg.speculative.filter(|&m| gdn_bf16 && m != SpeculativeMode::Off) {
+        return Err(format!("{MODEL}: --gdn-state bf16 is not supported with --speculative {mode:?}: a verify round reads and commits f32 recurrent-state rows"));
+    }
     let max_batch = cfg.max_batch_or_default();
     let ckpt = ResidentCheckpoint::open(gguf_path).map_err(|e| format!("cannot open '{gguf_path}': {e}"))?;
     let model_cfg = ckpt.config(1).map_err(|e| format!("'{gguf_path}' is not a servable Qwen3.8 checkpoint: {e}"))?;
@@ -590,7 +603,7 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
         let spec = SpecServing { mode, ..SpecServing::default() };
         // Paged KV: sequences hold the blocks their tokens need from one shared pool, so a long context
         // costs only the sequences that use it, and the batch is not multiplied by the context.
-        let r = Qwen35GgufResident::new(gguf_path.to_string(), devices.clone(), cap, tier.clone()).with_kv_tier(kv).with_max_batch(max_batch).with_prefix_slots(prefix_slots).with_speculation(spec).with_exact_decode(cfg.exact_decode).with_act_choice(cfg.act_precision.unwrap_or_default()).with_kv_block_rows(qwen35::int8_gguf_resident::KV_BLOCK_ROWS);
+        let r = Qwen35GgufResident::new(gguf_path.to_string(), devices.clone(), cap, tier.clone()).with_kv_tier(kv).with_max_batch(max_batch).with_prefix_slots(prefix_slots).with_speculation(spec).with_exact_decode(cfg.exact_decode).with_act_choice(cfg.act_precision.unwrap_or_default()).with_gdn_state(cfg.gdn_state.unwrap_or_default()).with_kv_block_rows(qwen35::int8_gguf_resident::KV_BLOCK_ROWS);
         match &bank {
             Some(bank) => r.with_adapter_bank(bank.request()),
             None => r,
@@ -617,6 +630,10 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
     // The FP8 directory's own MTP head is opt-in (`--speculative mtp|auto`): measured on the serving scoreboard its drafts did not yet repay
     // their bookkeeping at any concurrency, so the default serves it plainly.
     let mode = match cfg.speculative {
+        None if gdn_bf16 => {
+            chosen.push("--speculative off: a bf16 recurrent-state pool (--gdn-state bf16) has no verify round".to_string());
+            SpeculativeMode::Off
+        }
         None if ResidentCheckpoint::is_hf_dir(gguf_path) => {
             chosen.push("--speculative off: the FP8 release's MTP head is opt-in until it repays its bookkeeping (--speculative mtp)".to_string());
             SpeculativeMode::Off
@@ -794,6 +811,25 @@ mod tests {
         let bank = AdapterBankSettings::default();
         let e = gguf_resident_banked("none.gguf", "t/x", &[], 0, &cfg.gguf, Some(bank)).err().unwrap();
         assert!(e.contains("--exact-decode") && e.contains("adapter"), "{e}");
+    }
+
+    /// `--gdn-state` reaches the GGUF resident only (the brain-checkpoint resident does not declare it), and a bf16
+    /// pool is refused before anything is placed beside the regimes that need the f32 pool.
+    #[test]
+    fn gdn_state_reaches_the_gguf_resident_and_is_refused_beside_speculation_and_exact_decode() {
+        let mut p = model::policy::ServePolicy::default();
+        p.set("--gdn-state", "bf16").unwrap();
+        let mut cfg = Qwen35ServeConfig::default();
+        assert_eq!(cfg.gguf.gdn_state, None, "f32 unless asked");
+        cfg.apply_policy(&p).expect("the GGUF resident honours it");
+        assert_eq!(cfg.gguf.gdn_state, Some(model::policy::GdnState::Bf16));
+        assert!(cfg.fp32.refused && cfg.fp32_refused.as_deref().unwrap().contains("--gdn-state"), "the fp32 resident does not declare it");
+
+        let e = gguf_resident("none.gguf", "t/x", &[], 0, &Qwen35GgufServeConfig { exact_decode: true, ..cfg.gguf.clone() }).err().unwrap();
+        assert!(e.contains("--gdn-state bf16") && e.contains("--exact-decode"), "{e}");
+        let spec = Qwen35GgufServeConfig { speculative: Some(qwen35::int8_gguf_resident::SpeculativeMode::Ngram), ..cfg.gguf.clone() };
+        let e = gguf_resident("none.gguf", "t/x", &[], 0, &spec).err().unwrap();
+        assert!(e.contains("--gdn-state bf16") && e.contains("--speculative"), "{e}");
     }
 
     /// The sizing knobs are constructor data with the historical defaults,

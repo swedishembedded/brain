@@ -113,6 +113,11 @@ brain --device gpu0,gpu1 serve --openai
 #                            products of an FP8 release: "bf16", "f32" (the A/B
 #                            switch) or "auto" (bf16 where the device has bf16
 #                            tensor cores). Every kernel accumulates in f32
+#   --gdn-state f32   storage of the Gated DeltaNet recurrent state and conv
+#                            history of running sequences: "f32" (default) or
+#                            "bf16" (half the bytes per decode step, rounded
+#                            to bf16 between steps). Refused with
+#                            --exact-decode and --speculative
 #   --exact-decode    make a decode row's tokens and per-token logits
 #                            independent of which sequences share its step
 #                            (default off; costs one extra weight pass per

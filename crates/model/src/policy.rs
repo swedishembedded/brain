@@ -23,6 +23,9 @@
 //! - `--act-precision auto|f32|bf16` ([`ServePolicy::act_precision`]): the element type of the activation stream between
 //!   the matrix products ([`gpu_core::ActPrecision`]); `auto` is bf16 on a device with bf16 tensor cores. An A/B switch
 //!   for a model that supports it.
+//! - `--gdn-state f32|bf16` ([`ServePolicy::gdn_state`]): the element type the Gated DeltaNet recurrent state and conv
+//!   history are stored in between steps ([`GdnState`]); bf16 halves the bytes a decode step streams, at bf16 rounding of
+//!   the carried state. Default f32.
 //! - `--gemm auto|fp32` ([`ServePolicy::gemm`]) and `--no-fuse-norm`,
 //!   `--kv-calibration`, `--exact-decode`: arithmetic, calibration and
 //!   batch-independence switches. `--exact-decode` makes a decode row's result
@@ -73,6 +76,38 @@ pub struct ServeLimits {
     pub itl_target_ms: Option<u32>,
 }
 
+/// The element type a Gated DeltaNet layer's recurrent state and conv history are stored in between steps
+/// (`--gdn-state`). The arithmetic of every kernel is f32 either way; only the stored pools are rounded.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GdnState {
+    #[default]
+    F32,
+    Bf16,
+}
+
+impl GdnState {
+    /// Parse the `--gdn-state` value (`f32` or `bf16`).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "f32" => Some(Self::F32),
+            "bf16" => Some(Self::Bf16),
+            _ => None,
+        }
+    }
+
+    /// The name a person writes for it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::F32 => "f32",
+            Self::Bf16 => "bf16",
+        }
+    }
+
+    pub fn is_bf16(self) -> bool {
+        self == Self::Bf16
+    }
+}
+
 /// The typed policy. All fields default to "the model's own choice".
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ServePolicy {
@@ -83,6 +118,8 @@ pub struct ServePolicy {
     pub gemm: Option<GemmPrecision>,
     /// `--act-precision`: the activation stream's element type; `None` is the model's own (`auto`).
     pub act_precision: Option<gpu_core::ActChoice>,
+    /// `--gdn-state`: the recurrent-state storage type; `None` is the model's own (f32).
+    pub gdn_state: Option<GdnState>,
     /// `Some(false)` turns the residual-add plus norm fusion off (an A/B switch).
     pub fuse_norm: Option<bool>,
     /// `--exact-decode`: make a decode row's result independent of which other
@@ -93,7 +130,7 @@ pub struct ServePolicy {
 }
 
 /// The public flags that take a value.
-pub const VALUE_FLAGS: &[&str] = &["--weight-format", "--kv-cache", "--gemm", "--act-precision", "--ctx", "--max-batch", "--kv-offload-gb", "--itl-target-ms"];
+pub const VALUE_FLAGS: &[&str] = &["--weight-format", "--kv-cache", "--gemm", "--act-precision", "--gdn-state", "--ctx", "--max-batch", "--kv-offload-gb", "--itl-target-ms"];
 /// The public switches (no value).
 pub const SWITCH_FLAGS: &[&str] = &["--kv-calibration", "--exact-decode"];
 /// Settings that are derived by default and exist only as the target of a
@@ -120,6 +157,7 @@ impl ServePolicy {
                 })
             }
             "--act-precision" => self.act_precision = Some(gpu_core::ActChoice::parse(value.trim().to_ascii_lowercase().as_str()).ok_or_else(|| format!("--act-precision {value:?}: expected auto, f32 or bf16"))?),
+            "--gdn-state" => self.gdn_state = Some(GdnState::parse(value.trim().to_ascii_lowercase().as_str()).ok_or_else(|| format!("--gdn-state {value:?}: expected f32 or bf16"))?),
             "--ctx" => self.limits.ctx = Some(count(flag, value)?),
             "--max-batch" => self.limits.max_batch = Some(count(flag, value)?),
             "--itl-target-ms" => match count(flag, value)? {
@@ -157,6 +195,9 @@ impl ServePolicy {
         }
         if let Some(a) = self.act_precision {
             v.push(format!("act-precision={}", match a { gpu_core::ActChoice::Auto => "auto", gpu_core::ActChoice::Force(p) => p.name() }));
+        }
+        if let Some(g) = self.gdn_state {
+            v.push(format!("gdn-state={}", g.name()));
         }
         if self.kv_calibration {
             v.push("kv-calibration".into());
@@ -213,6 +254,8 @@ pub struct PolicySupport {
     pub exact_decode: bool,
     /// `--act-precision` honoured: the model's forward carries its activations in the chosen element type.
     pub act_precision: bool,
+    /// `--gdn-state` honoured: the recurrent state of a Gated DeltaNet layer can be stored in the chosen element type.
+    pub gdn_state: bool,
 }
 
 impl PolicySupport {
@@ -249,6 +292,9 @@ impl PolicySupport {
         }
         if policy.act_precision.is_some() && !self.act_precision {
             return Err(format!("{}: --act-precision is not supported", self.model));
+        }
+        if policy.gdn_state.is_some() && !self.gdn_state {
+            return Err(format!("{}: --gdn-state is not supported", self.model));
         }
         Ok(())
     }
@@ -410,6 +456,7 @@ mod tests {
         kv_calibration: false,
         exact_decode: false,
         act_precision: false,
+        gdn_state: false,
     };
 
     #[test]
@@ -419,6 +466,7 @@ mod tests {
         p.set("--kv-cache", "fp8").unwrap();
         p.set("--gemm", "fp32").unwrap();
         p.set("--act-precision", "BF16").unwrap();
+        p.set("--gdn-state", "BF16").unwrap();
         p.set("--ctx", "4096").unwrap();
         p.set("--kv-offload-gb", "1.5").unwrap();
         p.set("--itl-target-ms", "60").unwrap();
@@ -429,6 +477,12 @@ mod tests {
         assert_eq!(p.kv_cache, Some(KvTier::FP8));
         assert_eq!(p.gemm, Some(GemmPrecision::Fp32Reference));
         assert_eq!(p.act_precision, Some(gpu_core::ActChoice::Force(gpu_core::ActPrecision::Bf16)));
+        assert_eq!(p.gdn_state, Some(GdnState::Bf16));
+        assert!(p.describe().contains("gdn-state=bf16"), "{}", p.describe());
+        let mut gdn = ServePolicy::default();
+        gdn.set("--gdn-state", "f32").unwrap();
+        assert!(LLM.check(&gdn).unwrap_err().contains("--gdn-state"), "a model that does not declare it refuses the flag");
+        assert!(PolicySupport { gdn_state: true, ..LLM }.check(&gdn).is_ok());
         let mut only = ServePolicy::default();
         only.set("--act-precision", "auto").unwrap();
         assert!(LLM.check(&only).unwrap_err().contains("--act-precision"), "a model that does not declare it refuses the flag");
@@ -436,7 +490,7 @@ mod tests {
         assert_eq!((p.limits.ctx, p.limits.kv_offload_gb, p.limits.itl_target_ms), (Some(4096), Some(1.5), Some(60)));
         assert_eq!((p.fuse_norm, p.kv_calibration, p.exact_decode), (Some(false), true, true));
         assert!(p.describe().contains("exact-decode"), "{}", p.describe());
-        for (flag, bad) in [("--ctx", "-1"), ("--kv-cache", "fp4"), ("--gemm", "tf32"), ("--act-precision", "fp16"), ("--kv-offload-gb", "nan"), ("--weight-format", "q9"), ("--itl-target-ms", "0")] {
+        for (flag, bad) in [("--ctx", "-1"), ("--kv-cache", "fp4"), ("--gemm", "tf32"), ("--act-precision", "fp16"), ("--gdn-state", "fp16"), ("--kv-offload-gb", "nan"), ("--weight-format", "q9"), ("--itl-target-ms", "0")] {
             let e = ServePolicy::default().set(flag, bad).unwrap_err();
             assert!(e.contains(flag), "{e}");
         }

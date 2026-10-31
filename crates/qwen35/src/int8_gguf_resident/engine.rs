@@ -1444,7 +1444,8 @@ impl PagedDecoder for Qwen35GgufEngine {
             KvLayout::Paged { pool_rows, .. } => pool_rows,
         };
         let spec = super::SpecCost { scratch_rows: i.spec_rows, mtp_head: false };
-        let shape = super::ServingShape { prefix_slots: i.prefix_slots, kv_pool_rows: pool_rows, spec, ..super::ServingShape::new(i.cap, i.tier.clone(), i.kv_tier, i.max_batch) };
+        let gdn_bf16 = i.shards.first().is_some_and(|s| s.caches.pool_bf16);
+        let shape = super::ServingShape { prefix_slots: i.prefix_slots, kv_pool_rows: pool_rows, spec, gdn_bf16, ..super::ServingShape::new(i.cap, i.tier.clone(), i.kv_tier, i.max_batch) };
         i.cfg.layer_types().into_iter().map(|ty| super::layer_state_bytes(&i.cfg, ty, &shape)).sum()
     }
     fn kv_pool_capacity_tokens(&self) -> u64 {

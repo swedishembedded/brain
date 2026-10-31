@@ -168,6 +168,7 @@ use crate::decode_tape::{DecodePlan, DecodePlans, HeadKind, PlanKey, PlanOut};
 use model::dispatch::LORA_SLOT_NONE;
 use model::kv_tier::{KvLayer, KvTier};
 use model::ops::TierPolicy;
+use model::policy::GdnState;
 use model::shard::{LayerBytes, Shard};
 use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
@@ -385,6 +386,9 @@ pub struct ServingShape {
     /// decodes the rows of every step ([`ResidentCheckpoint::embed_tier`]). On the card the step's token ids are
     /// all that crosses the link, and a decode step or mixed forward needs no host work in front of its first kernel.
     pub embed: Option<Dtype>,
+    /// The recurrent-state and conv-history pools are stored bf16 (`--gdn-state bf16`): half the bytes a running
+    /// sequence's row takes. The prefix-cache snapshots stay f32.
+    pub gdn_bf16: bool,
 }
 
 /// An adapter bank's device bytes: beside each layer it corrects, and the row
@@ -398,7 +402,7 @@ pub struct BankBytes {
 impl ServingShape {
     /// `max_batch` sequences of `cap` tokens, no prompt cache, no speculation.
     pub fn new(cap: u32, tier: TierPolicy, kv: KvTier, max_batch: u32) -> ServingShape {
-        ServingShape { cap, tier, kv, max_batch, prefix_slots: 0, kv_pool_rows: 0, spec: SpecCost::NONE, prefill_rows: TENSOR_CORE_PREFILL_TOKENS, adapter_bank: None, head: Dtype::I8, embed: None }
+        ServingShape { cap, tier, kv, max_batch, prefix_slots: 0, kv_pool_rows: 0, spec: SpecCost::NONE, prefill_rows: TENSOR_CORE_PREFILL_TOKENS, adapter_bank: None, head: Dtype::I8, embed: None, gdn_bf16: false }
     }
 
     /// The same shape for a stack whose prefill forward may carry `rows` rows (the
@@ -441,7 +445,10 @@ pub(crate) fn layer_state_bytes(cfg: &Qwen35Config, ty: LayerType, shape: &Servi
         LayerType::Full if shape.kv_pool_rows > 0 => 2 * shape.kv.plane_bytes(shape.kv_pool_rows as u64, cfg.kv_dim() as u64, cfg.head_dim as u64),
         LayerType::Full => slots * cfg.layer_decode_state_bytes(ty, shape.cap, shape.kv),
         LayerType::Linear => {
-            (slots + shape.prefix_slots as u64) * cfg.layer_decode_state_bytes(ty, shape.cap, shape.kv)
+            // A pool row is the f32 bytes, or half of them when the pools are bf16; the snapshots are always f32.
+            let row = cfg.layer_decode_state_bytes(ty, shape.cap, shape.kv);
+            slots * if shape.gdn_bf16 { row / 2 } else { row }
+                + shape.prefix_slots as u64 * row
                 + shape.spec.scratch_rows as u64 * (cfg.gdn_state_len() + cfg.gdn_hist_len()) * 4
         }
     }
@@ -976,10 +983,16 @@ struct ShardCaches {
     /// between a sequence's rows (see [`speculate`]); empty until speculation
     /// is enabled.
     verify_snaps: Vec<model::gdn_verify::GdnRowSnapshots>,
-    /// Kernel indices of `pool_rows_scatter2`, `pool_rows_gather2` and `copy_within`
-    /// on this stage's device.
+    /// Whether `pool_state`/`pool_hist` store bf16 (two elements a word, half the words: `--gdn-state bf16`). The work
+    /// copies, the snapshots and the zero row stay f32.
+    pool_bf16: bool,
+    /// Kernel indices of `pool_rows_scatter2`, `pool_rows_gather2` and `copy_within` on this stage's device: the f32
+    /// pair stages the snapshots.
     scatter: usize,
     gather: usize,
+    /// The pair that stages the pools: `scatter`/`gather` for an f32 pool, their bf16 builds for a bf16 one.
+    pool_scatter: usize,
+    pool_gather: usize,
     copy_within: usize,
     /// One recurrent layer's zero state and zero conv history (a fresh sequence's starting row), cleared once.
     zero_state: DeviceBuffer,
@@ -987,12 +1000,16 @@ struct ShardCaches {
 }
 
 impl ShardCaches {
-    fn new(gpu: &Gpu, cfg: &Qwen35Config, shard: &Shard, cap: u32, slots: u32, snapshot_rows: u32, kv_tier: KvTier, layout: KvLayout) -> ShardCaches {
+    #[allow(clippy::too_many_arguments)]
+    fn new(gpu: &Gpu, cfg: &Qwen35Config, shard: &Shard, cap: u32, slots: u32, snapshot_rows: u32, kv_tier: KvTier, layout: KvLayout, pool_bf16: bool) -> ShardCaches {
         assert!(slots > 0, "{MODEL}: ShardCaches needs at least one slot");
         let kv = cfg.kv_dim() as u64;
         let (state, hist) = (cfg.gdn_state_len(), cfg.gdn_hist_len());
         // The row kernels address a pool through u32 element offsets.
         assert!(slots as u64 * state.max(hist) <= u32::MAX as u64, "{MODEL}: {slots} recurrent-state rows of {state} elements are past a u32 element offset");
+        // Two bf16 elements share a word, so a row of either pool must be whole words.
+        assert!(!pool_bf16 || (state % 2 == 0 && hist % 2 == 0), "{MODEL}: a bf16 recurrent-state pool needs even row lengths, got state {state} and history {hist}");
+        let pool_div = if pool_bf16 { 2 } else { 1 };
         let n = cfg.n_layers as usize;
         let types = cfg.layer_types();
         let mut gqa_kv = Vec::with_capacity(n);
@@ -1007,7 +1024,7 @@ impl ShardCaches {
             gqa_kv.push(if full { KvLayer::new(gpu, kv_tier, kv_rows, kv, cfg.head_dim as u64) } else { KvLayer::placeholder(gpu) });
             let lin = shard.owns(l) && *ty == LayerType::Linear;
             recurrent.push(lin);
-            let (ps, ph, ws, wh) = if lin { (slots as u64 * state, slots as u64 * hist, state, hist) } else { (1, 1, 1, 1) };
+            let (ps, ph, ws, wh) = if lin { (slots as u64 * state / pool_div, slots as u64 * hist / pool_div, state, hist) } else { (1, 1, 1, 1) };
             let (ss, sh) = if lin && snapshot_rows > 0 { (snapshot_rows as u64 * state, snapshot_rows as u64 * hist) } else { (1, 1) };
             pool_state.push(gpu.storage(ps));
             pool_hist.push(gpu.storage(ph));
@@ -1018,6 +1035,13 @@ impl ShardCaches {
         }
         let scatter = gpu.kernel_index("pool_rows_scatter2").expect("pool_rows_scatter2 is in the qwen35 kernel set");
         let gather = gpu.kernel_index("pool_rows_gather2").expect("pool_rows_gather2 is in the qwen35 kernel set");
+        let (pool_scatter, pool_gather) = if pool_bf16 {
+            (gpu.kernel_index(crate::model::POOL_ROWS_SCATTER2_BF16), gpu.kernel_index(crate::model::POOL_ROWS_GATHER2_BF16))
+        } else {
+            (Some(scatter), Some(gather))
+        };
+        let pool_scatter = pool_scatter.expect("the bf16 pool scatter is in the qwen35 kernel set");
+        let pool_gather = pool_gather.expect("the bf16 pool gather is in the qwen35 kernel set");
         let copy_within = gpu.kernel_index("copy_within").expect("copy_within is in the qwen35 kernel set");
         let (block_rows, paged, slot_tables) = match layout {
             KvLayout::OneBlock => (cap, false, Vec::new()),
@@ -1029,7 +1053,7 @@ impl ShardCaches {
             }
         };
         let (zero_state, zero_hist) = (gpu.storage(state), gpu.storage(hist));
-        let caches = ShardCaches { gqa_kv, pool_state, pool_hist, work_state, work_hist, snap_state, snap_hist, recurrent, full: full_layers, slots, cap, block_rows, paged, slot_tables, verify_snaps: Vec::new(), scatter, gather, copy_within, zero_state, zero_hist };
+        let caches = ShardCaches { gqa_kv, pool_state, pool_hist, work_state, work_hist, snap_state, snap_hist, recurrent, full: full_layers, slots, cap, block_rows, paged, slot_tables, verify_snaps: Vec::new(), pool_bf16, scatter, gather, pool_scatter, pool_gather, copy_within, zero_state, zero_hist };
         gpu.submit(&[&caches.zero_state, &caches.zero_hist], &[]);
         caches.reset(gpu);
         caches
@@ -1064,7 +1088,7 @@ impl ShardCaches {
         let (sl, hl) = (cfg.gdn_state_len() as u32, cfg.gdn_hist_len() as u32);
         let steps: Vec<_> = (0..self.pool_state.len())
             .filter(|&l| self.recurrent[l])
-            .map(|l| gpu.step(self.scatter, &[&self.zero_state, &self.zero_hist, &ids, &self.pool_state[l], &self.pool_hist[l]], &[1, sl, hl], sl + hl))
+            .map(|l| gpu.step(self.pool_scatter, &[&self.zero_state, &self.zero_hist, &ids, &self.pool_state[l], &self.pool_hist[l]], &[1, sl, hl], sl + hl))
             .collect();
         gpu.submit(&[], &steps);
     }
@@ -1078,7 +1102,7 @@ impl ShardCaches {
         let (sl, hl) = (cfg.gdn_state_len() as u32, cfg.gdn_hist_len() as u32);
         let steps: Vec<_> = (0..self.pool_state.len())
             .filter(|&l| self.recurrent[l])
-            .map(|l| gpu.step(self.scatter, &[&self.work_state[l], &self.work_hist[l], &ids, &self.pool_state[l], &self.pool_hist[l]], &[1, sl, hl], sl + hl))
+            .map(|l| gpu.step(self.pool_scatter, &[&self.work_state[l], &self.work_hist[l], &ids, &self.pool_state[l], &self.pool_hist[l]], &[1, sl, hl], sl + hl))
             .collect();
         gpu.submit(&[], &steps);
         // The scatters must have read the working copy before it is reused.
@@ -1095,7 +1119,7 @@ impl ShardCaches {
         let (sl, hl) = (cfg.gdn_state_len() as u32, cfg.gdn_hist_len() as u32);
         let steps: Vec<_> = (0..self.pool_state.len())
             .filter(|&l| self.recurrent[l])
-            .map(|l| gpu.step(self.gather, &[&self.pool_state[l], &self.pool_hist[l], &ids, &self.work_state[l], &self.work_hist[l]], &[1, sl, hl], sl + hl))
+            .map(|l| gpu.step(self.pool_gather, &[&self.pool_state[l], &self.pool_hist[l], &ids, &self.work_state[l], &self.work_hist[l]], &[1, sl, hl], sl + hl))
             .collect();
         gpu.submit(&[], &steps);
         gpu.poll_wait();
@@ -1196,8 +1220,9 @@ impl ShardCaches {
             gdn_hist: &self.pool_hist,
             work_state: &self.work_state,
             work_hist: &self.work_hist,
-            gather: self.gather,
-            scatter: self.scatter,
+            gather: self.pool_gather,
+            scatter: self.pool_scatter,
+            bf16: self.pool_bf16,
         }
     }
 
@@ -1211,7 +1236,7 @@ impl ShardCaches {
     }
 
     fn gdn_pool(&self) -> GdnPoolStore<'_> {
-        GdnPoolStore { state: &self.pool_state, hist: &self.pool_hist, bf16: false }
+        GdnPoolStore { state: &self.pool_state, hist: &self.pool_hist, bf16: self.pool_bf16 }
     }
 }
 
@@ -3570,6 +3595,8 @@ pub struct Qwen35GgufResident {
     exact_decode: bool,
     /// The activation stream's element type - [`Self::with_act_choice`].
     act_choice: gpu_core::ActChoice,
+    /// The element type the recurrent-state and conv-history pools are stored in - [`Self::with_gdn_state`].
+    gdn_state: GdnState,
     /// How the engine spends prefill - [`Self::with_prefill_policy`].
     prefill: PrefillPolicy,
     plan: OnceLock<Plan>,
@@ -3579,7 +3606,7 @@ pub struct Qwen35GgufResident {
 
 impl Qwen35GgufResident {
     pub fn new(gguf_path: String, devices: Vec<(Device, u64)>, cap: u32, tier: TierPolicy) -> Qwen35GgufResident {
-        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, prefix_slots: 0, kv_tier: KvTier::F32, kv_block_rows: 0, kv_pool_rows: 0, model_id: MODEL.to_string(), bank: None, spec: SpecServing::default(), exact_decode: false, act_choice: gpu_core::ActChoice::Auto, prefill: PrefillPolicy::default(), plan: OnceLock::new(), sampling: OnceLock::new() }
+        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, prefix_slots: 0, kv_tier: KvTier::F32, kv_block_rows: 0, kv_pool_rows: 0, model_id: MODEL.to_string(), bank: None, spec: SpecServing::default(), exact_decode: false, act_choice: gpu_core::ActChoice::Auto, gdn_state: GdnState::F32, prefill: PrefillPolicy::default(), plan: OnceLock::new(), sampling: OnceLock::new() }
     }
 
     /// **Run every decode row independently of its co-batch** (`--exact-decode`):
@@ -3601,6 +3628,16 @@ impl Qwen35GgufResident {
     /// A/B switch. The choice is resolved per card when the model is placed.
     pub fn with_act_choice(mut self, choice: gpu_core::ActChoice) -> Qwen35GgufResident {
         self.act_choice = choice;
+        self
+    }
+
+    /// **Choose the element type of the Gated DeltaNet recurrent-state and conv-history pools** (`--gdn-state`): bf16
+    /// stores two elements to a word, so the pools take half the bytes and a decode step streams half of them, at bf16
+    /// rounding of the carried state. The working copies, the prefix-cache snapshots and every kernel's arithmetic stay
+    /// f32. Speculative decoding and `--exact-decode` need the f32 pool and are refused with bf16
+    /// ([`Self::activate_engine`]). Must be set before the first `estimate_multi` call.
+    pub fn with_gdn_state(mut self, state: GdnState) -> Qwen35GgufResident {
+        self.gdn_state = state;
         self
     }
 
@@ -3791,8 +3828,23 @@ impl Qwen35GgufResident {
         }
     }
 
+    /// Why the recurrent-state precision chosen by [`Self::with_gdn_state`] cannot serve beside the other settings: a
+    /// bf16 pool has no speculative verify round (its snapshots and commit read f32 rows) and no grouped exact decode.
+    pub fn gdn_state_refusal(&self) -> Option<String> {
+        if !self.gdn_state.is_bf16() {
+            return None;
+        }
+        if self.exact_decode {
+            return Some("--gdn-state bf16 is not supported with --exact-decode: the exact regime is defined on the f32 recurrent state".to_string());
+        }
+        (self.spec.mode != SpeculativeMode::Off).then(|| format!("--gdn-state bf16 is not supported with speculative decoding (--speculative {:?}): a verify round reads and commits f32 recurrent-state rows", self.spec.mode))
+    }
+
     fn plan_uncached(&self) -> Plan {
         let refused = |why: String| Plan { refusal: Some(format!("{MODEL}: {why}")), ..Plan::default() };
+        if let Some(why) = self.gdn_state_refusal() {
+            return refused(why);
+        }
         if self.devices.is_empty() {
             return refused("no GPU is budgeted for it (its weights are device buffers; there is no CPU path)".to_string());
         }
@@ -3901,6 +3953,7 @@ impl Qwen35GgufResident {
             adapter_bank: self.bank_bytes(cfg),
             head: mg.head_tier(),
             embed: self.embed_tier(mg, cfg),
+            gdn_bf16: self.gdn_state.is_bf16(),
             ..ServingShape::new(self.cap, self.tier.clone(), self.kv_tier, self.max_batch).with_prefill_rows(self.prefill.batch_tokens.try_into().unwrap_or(u32::MAX))
         }
     }
@@ -4110,7 +4163,7 @@ impl Qwen35GgufResident {
             // instance's per-sequence context.
             qwen35.set_exact_decode(self.exact_decode.then_some(self.cap));
             qwen35.set_act_precision(self.act_choice.resolve(qwen35.gpu.caps().arch.compute_capability));
-            let caches = ShardCaches::new(&qwen35.gpu, &cfg, shard, self.cap, state_rows, self.prefix_slots, self.kv_tier, layout);
+            let caches = ShardCaches::new(&qwen35.gpu, &cfg, shard, self.cap, state_rows, self.prefix_slots, self.kv_tier, layout, self.gdn_state.is_bf16());
             shards.push(DeviceShard { qwen35, caches });
         }
 
@@ -4650,6 +4703,34 @@ mod tests {
         // A fixed context that fits the pool is honoured; one longer than any pool is refused.
         assert!(auto_pool_rows(&cfg, &card, &shape, Some(65_536)).expect("fits") >= 65_536);
         assert_eq!(auto_pool_rows(&cfg, &card, &shape, Some(u32::MAX / 2)), None);
+    }
+
+    /// A bf16 recurrent-state pool halves a running sequence's row in the placement, and nothing else: the prefix-cache
+    /// snapshots stay f32 rows.
+    #[test]
+    fn a_bf16_state_pool_charges_half_the_row_to_running_sequences_and_full_rows_to_snapshots() {
+        let cfg = Qwen35Config::qwen38_27b();
+        let row = cfg.layer_decode_state_bytes(LayerType::Linear, 1, KvTier::INT8);
+        let f32_shape = ServingShape { kv_pool_rows: 4096, prefix_slots: 3, ..ServingShape::new(1, TierPolicy::uniform(Dtype::I8), KvTier::INT8, 5) };
+        let bf16_shape = ServingShape { gdn_bf16: true, ..f32_shape.clone() };
+        assert_eq!(layer_state_bytes(&cfg, LayerType::Linear, &f32_shape), (5 + 3) * row);
+        assert_eq!(layer_state_bytes(&cfg, LayerType::Linear, &bf16_shape), 5 * row / 2 + 3 * row);
+        assert_eq!(layer_state_bytes(&cfg, LayerType::Full, &bf16_shape), layer_state_bytes(&cfg, LayerType::Full, &f32_shape), "attention layers are unaffected");
+    }
+
+    /// The bf16 pool has no verify round and no grouped exact decode: the combination is refused before anything is
+    /// placed, naming both flags, instead of serving a different regime than the one asked for.
+    #[test]
+    fn a_bf16_state_pool_is_refused_with_speculation_and_with_exact_decode() {
+        let base = || Qwen35GgufResident::new("model.gguf".into(), vec![(Device::Gpu(0), 96 * GB)], 1, TierPolicy::uniform(Dtype::I8)).with_gdn_state(GdnState::Bf16);
+        assert_eq!(base().gdn_state_refusal(), None);
+        let spec = base().with_speculation(SpecServing { mode: SpeculativeMode::Ngram, ..SpecServing::default() }).gdn_state_refusal().expect("speculation refused");
+        assert!(spec.contains("--gdn-state bf16") && spec.contains("--speculative"), "{spec}");
+        let exact = base().with_exact_decode(true).gdn_state_refusal().expect("exact decode refused");
+        assert!(exact.contains("--gdn-state bf16") && exact.contains("--exact-decode"), "{exact}");
+        assert_eq!(base().with_gdn_state(GdnState::F32).with_exact_decode(true).gdn_state_refusal(), None, "the f32 pool serves both");
+        let plan = base().with_exact_decode(true).plan().refusal.clone().expect("the plan carries the refusal");
+        assert!(plan.contains("--exact-decode"), "{plan}");
     }
 
     /// An adapter bank is part of what the automatic pool leaves room for: with one

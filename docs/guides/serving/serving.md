@@ -59,6 +59,7 @@ every model that serves it; no flag is spelled with an architecture name.
 | `--kv-cache TIER` | KV-cache storage: `f32`, `bf16`, `int8`, `fp8` |
 | `--gemm auto\|fp32` | `fp32` pins exact fp32 arithmetic (the reference tier); `auto` uses tensor cores where the device has them |
 | `--act-precision auto\|f32\|bf16` | the element type of the activations between the FP8 matrix products of a model that supports it (the Qwen3.8 GGUF and FP8 releases): `auto` (default) is bf16 on a device with bf16 tensor cores and f32 elsewhere, `f32` is the A/B switch; accumulation is f32 inside every kernel either way |
+| `--gdn-state f32\|bf16` | the element type the Gated DeltaNet recurrent state and conv history of a running sequence are stored in (the Qwen3.8 GGUF and FP8 releases): `f32` (default) or `bf16`, which halves the bytes a decode step streams at bf16 rounding of the carried state; arithmetic stays f32 in every kernel. Refused with `--exact-decode` and `--speculative` |
 | `--kv-calibration` | use a `kv_calib.json` beside the checkpoint |
 | `--exact-decode` | make a decode row's result independent of which other requests share its batch: int8 projections (and the head) run in groups small enough to stay on the bit-identical kernel and every row's attention is sized from `--ctx`, at the cost of one extra pass over the weights per group; speculation is off in this regime. Default off |
 | `--ctx N` | cap the context window below the model's declared one |

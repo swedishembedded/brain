@@ -184,7 +184,7 @@ impl MtpDrafter {
         let d = cfg.d_model as usize;
         let Some(parts) = MtpParts::read(ckpt, cfg, tier, gpu_index, head_gpu)? else { return Ok(None) };
         let MtpParts { cfg1, shard, stage, fc, enorm, hnorm, head_norm_host } = parts;
-        let caches = ShardCaches::new(&stage.gpu, &cfg1, &shard, cap, slots, 0, kv_tier, layout);
+        let caches = ShardCaches::new(&stage.gpu, &cfg1, &shard, cap, slots, 0, kv_tier, layout, false);
         let reopened = ResidentCheckpoint::open(path).map_err(|e| format!("{MODEL}: cannot reopen '{path}': {e}"))?;
         let target_norm_host = match ckpt.final_norm(target_norm_name) {
             Some(Ok(v)) if v.len() == d => v,

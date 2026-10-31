@@ -424,6 +424,14 @@ measurement (16-256), not fixed globally.
   in one pass, bit-identical to the pair, 104 -> 48 us a layer, +0.5 % served). Tried and not kept (no un-profiled gain): retaining the pool's working set, an M-RoPE row cache. Open items and the
   per-kernel table in knowledge 391.
 
+- 2026-10-31 (recurrent-state precision): `--gdn-state f32|bf16` (`model::policy::GdnState`, declared in `PolicySupport`; only the qwen35 GGUF/FP8 resident
+  declares it; default f32 until a quality gate decides) stores the resident's per-sequence Gated DeltaNet state and conv-history pools as bf16 (two elements a
+  word, half the words; `ShardCaches::pool_bf16`). The work copies, the prefix-cache snapshots and the zero row stay f32; pool<->work copies use the bf16
+  gather/scatter builds, the decode step the bf16 streaming kernel, the segment prefill kernels take the bf16 pools. The placement charges a running sequence's
+  row at half (`ServingShape::gdn_bf16`). Refused up front with `--exact-decode` and any `--speculative` mode (the verify/commit rounds read f32 rows). Tests:
+  a bf16-pool multi-sequence prefill round agrees with the sequence alone to bf16 resolution (`model::tests`), policy, placement and refusal unit tests.
+  Open: the quality gate that decides the default; a bf16 verify round if speculation over bf16 pools is wanted.
+
 - 2026-10-30 (activation precision, knowledge 394): `--act-precision auto|f32|bf16` (`gpu_core::ActPrecision`, bf16 from compute capability 8.0; a model
   declares support in `PolicySupport`) declares the element type of the activations between the FP8 products. The qwen35 serving forward stores the MLP's gate/up
   and the Gated DeltaNet mixer's qkv/z as bf16 (`matmul_fp8_wgmma_tma_n256_bf16o`, bit-identical to the f32 kernel rounded to bf16), reads them as bf16 in the

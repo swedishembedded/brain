@@ -440,8 +440,8 @@ const MEMORY_TILED_MIN_ROWS: u32 = 32;
 const POOL_ROWS_GATHER2: usize = 96;
 const POOL_ROWS_SCATTER2: usize = 97;
 /// The bf16-pool builds of the two staging kernels, resolved by name (`Qwen35::kernel_by_name`).
-const POOL_ROWS_GATHER2_BF16: &str = "pool_rows_gather2#pool_a=bf16#pool_b=bf16";
-const POOL_ROWS_SCATTER2_BF16: &str = "pool_rows_scatter2_bf16";
+pub(crate) const POOL_ROWS_GATHER2_BF16: &str = "pool_rows_gather2#pool_a=bf16#pool_b=bf16";
+pub(crate) const POOL_ROWS_SCATTER2_BF16: &str = "pool_rows_scatter2_bf16";
 
 /// The readout kernels of this crate's pipeline list (`model::readout`).
 const READOUT: model::readout::ReadoutKernels = model::readout::ReadoutKernels { part: ARGMAX_PART, fin: ARGMAX_FINAL, extract: TOPK_EXTRACT_STEP };
@@ -960,10 +960,12 @@ pub(crate) struct PooledCaches<'a> {
     pub gdn_hist: &'a [DeviceBuffer],
     pub work_state: &'a [DeviceBuffer],
     pub work_hist: &'a [DeviceBuffer],
-    /// Pipeline indices of `pool_rows_gather2` / `pool_rows_scatter2`: row of the
-    /// pool -> work copy, and back.
+    /// Pipeline indices of the pool -> work row gather and the work -> pool row scatter: the f32 pair
+    /// (`pool_rows_gather2` / `pool_rows_scatter2`), or their bf16 builds when `bf16`.
     pub gather: usize,
     pub scatter: usize,
+    /// The state and history pools store bf16 (two elements a word); the work copies stay f32.
+    pub bf16: bool,
 }
 
 /// Per-row coordinates of a whole round (decode rows, then each sequence's prompt rows): where a row's K/V is
@@ -2971,7 +2973,7 @@ impl Qwen35 {
                 let (sl, hl) = (self.cfg.gdn_state_len() as u32, self.cfg.gdn_hist_len() as u32);
                 let whole = round.segs.len() == 1 && round.decode.is_none() && gdn_stream_pieces(round.segs[0].rows).count() == 1;
                 // Every segment in one pass of the batched kernels on the pools' own rows, where the device serves it.
-                let pools = model::gdn_segments::GdnSegmentPools { state: &c.gdn_state[l], hist: &c.gdn_hist[l], bf16: false };
+                let pools = model::gdn_segments::GdnSegmentPools { state: &c.gdn_state[l], hist: &c.gdn_hist[l], bf16: c.bf16 };
                 let lead = round.decode.as_ref().map_or(0, |d| d.rows);
                 // The output projection reads E4M3 rows on this device: the gated norm writes them beside its product.
                 let e4m3 = !self.packs_activations() && self.ops.fp8_reads_e4m3(n, value_dim, d);
@@ -3000,7 +3002,7 @@ impl Qwen35 {
                 // A mixed round's leading decode rows: one recurrent step each, from and back into the sequence's pool row.
                 if let (Some(dec), Some(all)) = (&round.decode, &all) {
                     let dec_shape = model::gdn_mixer::GdnMixerShape { gdn: GdnShape { b: dec.rows, t: 1, chunk: 1, ..shape.gdn }, ..shape };
-                    let pool = model::gdn_mixer::GdnPoolRows { state: &c.gdn_state[l], hist: &c.gdn_hist[l], rows: dec.slot_rows, gather: POOL_ROWS_GATHER2, scatter: POOL_ROWS_SCATTER2, fuse: self.decode_fusion.get(), bf16: false, wide: self.gdn_pool_wide.get() };
+                    let pool = model::gdn_mixer::GdnPoolRows { state: &c.gdn_state[l], hist: &c.gdn_hist[l], rows: dec.slot_rows, gather: c.gather, scatter: c.scatter, fuse: self.decode_fusion.get(), bf16: c.bf16, wide: self.gdn_pool_wide.get() };
                     // The decode rows lead every row block: the fused step reads them in place and writes its rows into `all`.
                     let in_place = dec.verify.is_none() && batched.is_some() && pool.fuse && model::gdn_mixer::gdn_mixer_decode_pooled_fused_into(g, &dec_shape, &weights, dec_qkv, &bproj, &aproj, dec_z, &pool, all);
                     if !in_place {
@@ -3008,6 +3010,7 @@ impl Qwen35 {
                             (Some(qkv), Some(z)) => (qkv.clone(), self.take_rows(&bproj, nvh, n, 0, dec.rows), self.take_rows(&aproj, nvh, n, 0, dec.rows), z.clone()),
                             _ => (self.take_rows(&mixed_qkv, conv_dim, n, 0, dec.rows), self.take_rows(&bproj, nvh, n, 0, dec.rows), self.take_rows(&aproj, nvh, n, 0, dec.rows), self.take_rows(&z, value_dim, n, 0, dec.rows)),
                         };
+                        assert!(!(c.bf16 && dec.verify.is_some()), "qwen35: a speculative verify round needs an f32 recurrent-state pool");
                         let gated_d = match &dec.verify {
                             // A sequence's rows in order from its pool row, the state after each row but the last snapshotted.
                             Some(v) => {
@@ -8270,6 +8273,18 @@ mod tests {
     /// second round's hidden states, which the first round's output alone would hide.
     #[test]
     fn a_multi_sequence_prefill_round_matches_each_sequence_alone() {
+        multi_sequence_prefill_round_against_alone(false, 1e-5);
+    }
+
+    /// The same rounds over recurrent-state and conv-history pools stored as bf16 (`--gdn-state bf16`): the rows the
+    /// second round reads were rounded to bf16 between the rounds, so its hidden states agree with the f32 pool's to
+    /// bf16 resolution (relative 2^-8 of the state, a few 1e-3 of the hidden state here), not bitwise.
+    #[test]
+    fn a_multi_sequence_prefill_round_over_bf16_pools_agrees_to_bf16_resolution() {
+        multi_sequence_prefill_round_against_alone(true, 5e-2);
+    }
+
+    fn multi_sequence_prefill_round_against_alone(bf16_pools: bool, tolerance: f32) {
         use std::collections::HashMap;
         let cfg = Qwen35Config { n_layers: 8, ..Qwen35Config::tiny() };
         let d = cfg.d_model as usize;
@@ -8311,8 +8326,10 @@ mod tests {
         let full = |l: usize| types[l] == LayerType::Full;
         let gqa_kv: Vec<KvLayer> = (0..types.len()).map(|l| if full(l) { KvLayer::new(gpu, model::kv_tier::KvTier::F32, slots as u64 * cap as u64, kv_dim, hd) } else { KvLayer::placeholder(gpu) }).collect();
         let per = |l: usize, n: u64| if full(l) { zeros(1) } else { zeros(n) };
-        let pool_state: Vec<DeviceBuffer> = (0..types.len()).map(|l| per(l, slots as u64 * sl)).collect();
-        let pool_hist: Vec<DeviceBuffer> = (0..types.len()).map(|l| per(l, slots as u64 * hl)).collect();
+        // A bf16 pool holds two elements a word.
+        let pool_div = if bf16_pools { 2 } else { 1 };
+        let pool_state: Vec<DeviceBuffer> = (0..types.len()).map(|l| per(l, slots as u64 * sl / pool_div)).collect();
+        let pool_hist: Vec<DeviceBuffer> = (0..types.len()).map(|l| per(l, slots as u64 * hl / pool_div)).collect();
         let work_state: Vec<DeviceBuffer> = (0..types.len()).map(|l| per(l, sl)).collect();
         let work_hist: Vec<DeviceBuffer> = (0..types.len()).map(|l| per(l, hl)).collect();
         let pooled = PooledCaches {
@@ -8322,8 +8339,9 @@ mod tests {
             gdn_hist: &pool_hist,
             work_state: &work_state,
             work_hist: &work_hist,
-            gather: gpu.kernel_index("pool_rows_gather2").expect("in the qwen35 kernel set"),
-            scatter: gpu.kernel_index("pool_rows_scatter2").expect("in the qwen35 kernel set"),
+            gather: gpu.kernel_index(if bf16_pools { POOL_ROWS_GATHER2_BF16 } else { "pool_rows_gather2" }).expect("in the qwen35 kernel set"),
+            scatter: gpu.kernel_index(if bf16_pools { POOL_ROWS_SCATTER2_BF16 } else { "pool_rows_scatter2" }).expect("in the qwen35 kernel set"),
+            bf16: bf16_pools,
         };
         let round = |segs: &[PrefillSeg<'_>]| -> Vec<f32> {
             let out = m.run_prefill_multi_stage(segs, &pooled, None);
@@ -8337,11 +8355,17 @@ mod tests {
 
         let last_of = |block: &[f32], row: usize| block[row * d..(row + 1) * d].to_vec();
         let maxabs = |x: &[f32], y: &[f32]| x.iter().zip(y).fold(0f32, |m, (p, q)| m.max((p - q).abs()));
+        let mut round2_err = 0f32;
         for (what, got, want) in [("round 1 of A", last_of(&r1, 7), &a1), ("round 1 of B", last_of(&r1, 12), &b1), ("round 2 of A", last_of(&r2, 5), &a2), ("round 2 of B", last_of(&r2, 9), &b2)] {
             let err = maxabs(&got, want);
             assert!(got.iter().all(|x| x.is_finite()), "{what}: non-finite hidden state");
-            assert!(err < 1e-5, "{what}: the multi-sequence round differs from the sequence alone by {err:e}");
+            assert!(err < tolerance, "{what}: the multi-sequence round differs from the sequence alone by {err:e}");
+            if what.starts_with("round 2") {
+                round2_err = round2_err.max(err);
+            }
         }
+        // The second round reads rows the first one stored rounded: a bf16 pool is not silently an f32 one.
+        assert!(!bf16_pools || round2_err > 0.0, "bf16 pools reproduced the f32 pool's second round bit for bit");
     }
 
     /// A sequence's rows are addressed the same way whether one block holds it or
