@@ -4478,7 +4478,9 @@ mod tests {
         let cfg = Qwen35Config::qwen38_27b();
         let i8 = TierPolicy::uniform(Dtype::I8);
         let usable = [(97_871u64 << 20) - (2 << 30)];
-        let why = sizing_refusal(&cfg, &ServingShape::new(4096, i8.clone(), KvTier::F32, 200), &usable).expect("200 f32 sequences of 4096 tokens cannot fit");
+        // 150 f32 sequences of 4096 tokens: not as f32 (or bf16), but as int8 beside the weights, the recurrent state
+        // and the prefill round's workspace.
+        let why = sizing_refusal(&cfg, &ServingShape::new(4096, i8.clone(), KvTier::F32, 150), &usable).expect("150 f32 sequences of 4096 tokens cannot fit");
         assert!(why.contains("a more compact --kv-cache (bf16) would fit") || why.contains("a more compact --kv-cache (int8) would fit"), "{why}");
         assert!(why.contains("GiB weights") && why.contains("GiB KV cache") && why.contains("GiB recurrent state"), "{why}");
         let why = sizing_refusal(&cfg, &ServingShape::new(4096, i8.clone(), KvTier::F32, 1000), &usable).unwrap();
@@ -4815,8 +4817,9 @@ mod tests {
         let cfg = Qwen35Config::qwen38_27b();
         assert_eq!(prefill_workspace_bytes(&cfg, 2048), 2 * prefill_workspace_bytes(&cfg, 1024));
         let i8 = TierPolicy::uniform(Dtype::I8);
+        // A shape starts at the tensor-core round; a wider batched prefill widens the workspace.
         let base = ServingShape::new(8192, i8, KvTier::INT8, 8);
-        assert!(base.with_prefill_rows(4096).stage_workspace(&cfg) > base.stage_workspace(&cfg));
+        assert!(base.with_prefill_rows(2 * TENSOR_CORE_PREFILL_TOKENS).stage_workspace(&cfg) > base.stage_workspace(&cfg));
     }
 
     /// Weights that do not fit the cards at all leave no context to offer.
