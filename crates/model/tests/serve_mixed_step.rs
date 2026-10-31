@@ -34,7 +34,7 @@ const BLOCK: u32 = 8;
 const FIXED_SECS: f64 = 0.020;
 const PER_ROW_SECS: f64 = 0.0001;
 const TARGET: std::time::Duration = std::time::Duration::from_millis(45);
-const LIMITS: MixedLimits = MixedLimits { max_rows: 512, lone_prompt_rows: 1024, min_prompt_rows: 32, row_quantum: 1 };
+const LIMITS: MixedLimits = MixedLimits { max_rows: 1024, min_prompt_rows: 32, row_quantum: 1 };
 
 #[derive(Default)]
 struct Log {
@@ -48,6 +48,8 @@ struct Toy {
     alloc: BlockAllocator,
     history: HashMap<u32, Vec<u32>>,
     mixed: bool,
+    /// Whether the operator asked for a token interval; unasked, a mixed iteration takes every prompt row it has room for.
+    asked: bool,
     log: Arc<Mutex<Log>>,
     now: Arc<Mutex<f64>>,
     /// Times the scheduler asked for a finished prompt's first token with a head pass of its own.
@@ -57,7 +59,7 @@ struct Toy {
 impl Toy {
     fn new(mixed: bool) -> (Toy, Arc<Mutex<Log>>, Arc<Mutex<f64>>) {
         let (log, now) = (Arc::new(Mutex::new(Log::default())), Arc::new(Mutex::new(0.0)));
-        (Toy { alloc: BlockAllocator::new(4096, BLOCK), history: HashMap::new(), mixed, log: log.clone(), now: now.clone(), admit_heads: Default::default() }, log, now)
+        (Toy { alloc: BlockAllocator::new(4096, BLOCK), history: HashMap::new(), mixed, asked: true, log: log.clone(), now: now.clone(), admit_heads: Default::default() }, log, now)
     }
 
     fn digest(history: &[u32]) -> u32 {
@@ -166,6 +168,9 @@ impl PagedDecoder for Toy {
     fn step_latency_target(&self) -> Option<std::time::Duration> {
         Some(TARGET)
     }
+    fn mixed_latency_target(&self) -> Option<std::time::Duration> {
+        self.asked.then_some(TARGET)
+    }
     fn mixed_step(&self) -> Option<MixedLimits> {
         self.mixed.then_some(LIMITS)
     }
@@ -173,7 +178,7 @@ impl PagedDecoder for Toy {
         assert_eq!(cands, 0, "greedy only");
         let prompt_rows: usize = jobs.iter().map(|j| j.budget).sum();
         let rows = tables.len() + prompt_rows;
-        assert!(rows <= LIMITS.lone_prompt_rows, "a forward of {rows} rows exceeds what the decoder takes");
+        assert!(rows <= LIMITS.max_rows, "a forward of {rows} rows exceeds what the decoder takes");
         let prefilled: Vec<_> = jobs.iter_mut().map(|j| self.slice(j.table, j.prompt, j.budget)).collect();
         // The first token of a finished prompt comes out of the forward's own head pass.
         let first = prefilled.iter().map(|p| if let PrefillProgress::Done(h) = p { vec![(h[0] as u32, 0.0)] } else { Vec::new() }).collect();
@@ -298,14 +303,6 @@ fn a_prompt_advances_every_iteration_however_busy_decode_is() {
 }
 
 #[test]
-fn with_nothing_decoding_a_lone_prompt_fills_the_wider_forward() {
-    let (mut s, log) = scheduler(true);
-    run(&mut s, &[(0, 1, 3000, 2)]);
-    let log = log.lock().unwrap();
-    assert_eq!(log.forwards[0], (0, LIMITS.lone_prompt_rows), "{:?}", log.forwards);
-}
-
-#[test]
 fn with_nothing_decoding_two_prompts_share_the_shared_forward() {
     let (mut s, log) = scheduler(true);
     run(&mut s, &[(0, 1, 3000, 2), (0, 2, 3000, 2)]);
@@ -322,4 +319,29 @@ fn a_running_sequence_gets_a_token_every_forward() {
     // The short request decodes from its second forward until it ends: every forward in between carries its row.
     let decoding: Vec<_> = log.forwards.iter().skip(1).take(55).collect();
     assert!(decoding.iter().all(|&&(d, _)| d >= 1), "{decoding:?}");
+}
+
+#[test]
+fn unasked_a_forward_takes_every_prompt_row_it_has_room_for_beside_the_decode_rows() {
+    let (mut toy, log, now) = Toy::new(true);
+    toy.asked = false;
+    let mut s = Scheduler::new(toy, 64);
+    s.set_clock(Box::new(move || *now.lock().unwrap()));
+    let mut load: Vec<(usize, u32, usize, usize)> = (0..8).map(|i| (0, i as u32, 16, 400)).collect();
+    load.extend((0..4).map(|i| (10 + i, 20 + i as u32, 3000, 2)));
+    run(&mut s, &load);
+    let log = log.lock().unwrap();
+    let full: Vec<_> = log.forwards.iter().filter(|&&(d, p)| d > 0 && d + p == LIMITS.max_rows).collect();
+    assert!(!full.is_empty(), "no forward with decode rows was filled to {} rows: {:?}", LIMITS.max_rows, log.forwards);
+}
+
+#[test]
+fn the_prompt_with_the_fewest_rows_left_is_read_in_first_and_the_oldest_still_advances() {
+    let (mut s, log) = scheduler(true);
+    // A long prompt first, then a short one: the short one is complete after two forwards (the oldest's floor first,
+    // then the short prompt whole), while the long one is not.
+    run(&mut s, &[(0, 1, 3000, 2), (0, 2, 300, 2)]);
+    let log = log.lock().unwrap();
+    assert_eq!(log.forwards[0], (0, LIMITS.max_rows), "{:?}", log.forwards);
+    assert_eq!(log.forwards[1].0, 1, "the short prompt was not read in by the first forward and decoding by the second: {:?}", log.forwards);
 }

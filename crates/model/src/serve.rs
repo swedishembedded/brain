@@ -419,6 +419,14 @@ pub trait PagedDecoder {
         None
     }
 
+    /// The iteration length a mixed iteration holds while prompts are read in beside running sequences, when the
+    /// operator asked for one. `None` means no such request: the iteration then takes every prompt row the forward
+    /// has room for (decode rows ride along, so no sequence waits for more than one forward between tokens), which
+    /// reads the queue in at the card's best rate. The default is the general latency target.
+    fn mixed_latency_target(&self) -> Option<std::time::Duration> {
+        self.step_latency_target()
+    }
+
     /// Whether prompts that begin from now on prepare the drafter. Off, their
     /// sequences are decoded without drafts until they end. Called by the
     /// scheduler before it starts prefilling; the default ignores it.
@@ -2110,6 +2118,31 @@ impl<D: PagedDecoder> Scheduler<D> {
         takes
     }
 
+    /// Split `budget` prompt rows over the prefilling sequences so the prompt with the fewest rows left finishes
+    /// first (ties go to the older), each taking everything it can use before the next gets a row. A prompt that
+    /// is read in whole starts decoding sooner than one read in alongside many others, which lowers the mean
+    /// time to first token at the same total rate, and a round that is mostly one prompt's rows runs fewer, longer
+    /// segments through the attention and recurrent kernels. The oldest prefilling sequence is given `floor` rows
+    /// first, so a long prompt behind a stream of short ones still advances. One entry per prefilling sequence;
+    /// O(prefilling log prefilling).
+    fn allot_prefill_shortest_first(&self, budget: usize, floor: usize) -> Vec<usize> {
+        let mut takes = vec![0usize; self.prefilling.len()];
+        let mut left = budget;
+        if let Some(oldest) = self.prefilling.front() {
+            takes[0] = (oldest.prompt.len() - oldest.done).min(floor).min(left);
+            left -= takes[0];
+        }
+        let mut order: Vec<usize> = (0..self.prefilling.len()).collect();
+        order.sort_by_key(|&i| self.prefilling[i].prompt.len() - self.prefilling[i].done - takes[i]);
+        for i in order {
+            let p = &self.prefilling[i];
+            let room = (p.prompt.len() - p.done - takes[i]).min(left);
+            takes[i] += room;
+            left -= room;
+        }
+        takes
+    }
+
     /// Record what a prefill call answered for the sequences `takes` gave rows to (one answer per non-zero
     /// take, in order): advance the partial ones and start decoding the ones whose prompt is in, oldest first.
     ///
@@ -2459,16 +2492,14 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// over the prefilling sequences as [`Self::allot_prefill`] does. A decoder that speculates has the decode rows verify
     /// their drafts in the same forward ([`PagedDecoder::forward_mixed_verify`]).
     fn mixed_iteration(&mut self, limits: MixedLimits, active: &[usize], in_batch: &[bool], report: &mut StepReport) {
-        let lone_prompt = active.is_empty() && self.prefilling.len() == 1;
-        let limits = if lone_prompt { MixedLimits { max_rows: limits.lone_prompt_rows.max(limits.max_rows), ..limits } } else { limits };
-        let target = self.dec.step_latency_target().map(|t| t.as_secs_f64());
+        let target = self.dec.mixed_latency_target().map(|t| t.as_secs_f64());
         // Drafting comes first: the verify rows are decode rows of the forward, and the prompt slice is what the
         // target leaves after them.
         let proposals = self.propose(active, true);
         let decode_rows = proposals.as_ref().map_or(active.len(), |p| p.rows.iter().map(Vec::len).sum());
         let started = (self.clock)();
         let prompt_rows = self.step_cost.prompt_rows(limits, decode_rows, target);
-        let takes = self.allot_prefill(prompt_rows);
+        let takes = self.allot_prefill_shortest_first(prompt_rows, limits.min_prompt_rows);
         let inputs: Vec<u32> = active.iter().map(|&i| self.running[i].next_input).collect();
         let (mut all_greedy, banned_max) = self.sampling_mode(active);
         // A prompt that ends in this iteration has its first token taken from the same head pass as the decode rows'

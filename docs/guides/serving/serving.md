@@ -65,7 +65,7 @@ every model that serves it; no flag is spelled with an architecture name.
 | `--ctx N` | cap the context window below the model's declared one |
 | `--max-batch N` | the concurrency the server must carry |
 | `--kv-offload-gb N` | host RAM granted for preempted sessions' KV |
-| `--itl-target-ms N` | the token interval, in milliseconds, running sequences are held to while new prompts are read in beside them (engines without mixed iterations ignore it with a note; Qwen3.8 GGUF default 45) |
+| `--itl-target-ms N` | the token interval, in milliseconds, running sequences are held to while new prompts are read in beside them (engines without mixed iterations ignore it with a note; Qwen3.8 GGUF default: none, a mixed iteration takes every prompt row its forward has room for) |
 
 Each model declares which formats it supports. A choice a model cannot honour
 is refused by name with the supported set (for example `qwen3: KV cache bf16

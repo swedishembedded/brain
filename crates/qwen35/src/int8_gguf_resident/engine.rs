@@ -46,12 +46,10 @@ const MIN_CACHED_TOKENS: usize = 64;
 // perf-number: a 128-row round is the smallest the prefill GEMM kernels serve at tile width
 const MIN_MIXED_PROMPT_ROWS: usize = 512;
 
-/// Rows a mixed forward carries while more than one sequence is in flight: the 2048 the concurrent columns of the
-/// serving sweep were tuned at. A lone prompt reads in at the full prefill round ([`MixedLimits::lone_prompt_rows`]),
-/// where wider rounds fill the GEMM waves; with a burst of short prompts the same width delayed the first of them
-/// (16 clients, median first-token time 295 -> 373 ms) and cost 3 percent of output rate at 64.
-// perf-number: serving sweep (scoreboard run.sh) on a GH200, 4096-row shared round against 2048
-const MIXED_SHARED_ROWS: usize = 2048;
+/// The iteration length the paced background prefill and the speculation gate hold when no `--itl-target-ms` was given.
+/// The mixed iteration does not use it: unasked, it takes every prompt row the forward has room for.
+// perf-number: a p99 token interval of 50 ms is the interactive budget; the mean iteration is held under 45
+const DEFAULT_STEP_TARGET: std::time::Duration = std::time::Duration::from_millis(45);
 
 /// Rows of the matrix products' tile (the FP8 `wgmma` GEMM and the int8 tensor-core GEMMs take 128 rows of activations a
 /// block): a mixed iteration fills its last tile ([`MixedLimits::row_quantum`]).
@@ -287,17 +285,17 @@ pub struct PrefillPolicy {
     /// a slice.
     pub batch_tokens: usize,
     /// The scheduler iteration length, decode step included, that a prompt read in beside decoding sequences is
-    /// allowed to stretch their token interval to. Each iteration the prompt gets the device time the decode
+    /// allowed to stretch their token interval to; `None` (asked for nothing) lets a mixed iteration take every prompt
+    /// row its forward has room for, and the paced paths hold [`DEFAULT_STEP_TARGET`]. Each iteration the prompt gets the device time the decode
     /// iteration leaves under this (and never less than a quarter of the iteration), recorded and waited for
     /// before the decode step, so the step runs on an idle card ([`super::pace`]). Only prompts read in while
     /// something decodes are paced: with nothing decoding a prompt goes in at the card's speed.
-    // perf-number: a p99 token interval of 50 ms is the interactive budget; the mean iteration is held under 45
-    pub step_target: std::time::Duration,
+    pub step_target: Option<std::time::Duration>,
 }
 
 impl Default for PrefillPolicy {
     fn default() -> PrefillPolicy {
-        PrefillPolicy { slice_tokens: 512, batch_tokens: 0, step_target: std::time::Duration::from_millis(45) }
+        PrefillPolicy { slice_tokens: 512, batch_tokens: 0, step_target: None }
     }
 }
 
@@ -374,7 +372,7 @@ impl Qwen35GgufEngine {
             background: None,
             short_streak: 0,
             feeds: Vec::new(),
-            pace: PrefillPace::new(PrefillPolicy::default().step_target),
+            pace: PrefillPace::new(DEFAULT_STEP_TARGET),
             slice_ended: None,
         }
     }
@@ -522,9 +520,9 @@ impl Qwen35GgufEngine {
     /// the engine is handed to a scheduler.
     pub fn set_prefill_policy(&mut self, policy: PrefillPolicy) {
         assert!(policy.slice_tokens > 0, "{MODEL}: a prefill slice of 0 tokens never finishes a prompt");
-        assert!(!policy.step_target.is_zero(), "{MODEL}: a step target of 0 leaves a prompt no device time");
+        assert!(policy.step_target.is_none_or(|t| !t.is_zero()), "{MODEL}: a step target of 0 leaves a prompt no device time");
         self.prefill = policy;
-        self.pace = PrefillPace::new(policy.step_target);
+        self.pace = PrefillPace::new(policy.step_target.unwrap_or(DEFAULT_STEP_TARGET));
     }
 
     /// Read prompts in on each card's normal stream while decode runs on its
@@ -1319,7 +1317,7 @@ impl PagedDecoder for Qwen35GgufEngine {
         progress
     }
     fn mixed_step(&self) -> Option<MixedLimits> {
-        self.mixed.then(|| MixedLimits { max_rows: (self.inst.prefill_round_rows() as usize).min(MIXED_SHARED_ROWS), lone_prompt_rows: self.inst.prefill_round_rows() as usize, min_prompt_rows: MIN_MIXED_PROMPT_ROWS, row_quantum: MIXED_ROW_QUANTUM })
+        self.mixed.then(|| MixedLimits { max_rows: self.inst.prefill_round_rows() as usize, min_prompt_rows: MIN_MIXED_PROMPT_ROWS, row_quantum: MIXED_ROW_QUANTUM })
     }
     fn forward_mixed(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], cands: usize, jobs: &mut [PrefillJob<'_>]) -> MixedOutcome {
         assert_eq!(tables.len(), inputs.len(), "{MODEL}: tables/inputs length mismatch");
@@ -1439,7 +1437,10 @@ impl PagedDecoder for Qwen35GgufEngine {
         decode_lane(self.background_on, || self.decode_then(tables, inputs, HeadKind::TopK(k)).into_topk())
     }
     fn step_latency_target(&self) -> Option<std::time::Duration> {
-        Some(self.prefill.step_target)
+        Some(self.prefill.step_target.unwrap_or(DEFAULT_STEP_TARGET))
+    }
+    fn mixed_latency_target(&self) -> Option<std::time::Duration> {
+        self.prefill.step_target
     }
     fn prefix_stats(&self) -> (u64, u64, usize) {
         self.cache.stats()

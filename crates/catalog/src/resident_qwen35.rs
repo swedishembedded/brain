@@ -457,7 +457,7 @@ impl Qwen35GgufServeConfig {
         qwen35::int8_gguf_resident::PrefillPolicy {
             slice_tokens: self.prefill_slice.map_or(default.slice_tokens, |n| n as usize),
             batch_tokens: self.prefill_batch.map_or(default.batch_tokens, |n| n as usize),
-            step_target: self.itl_target_ms.map_or(default.step_target, |ms| std::time::Duration::from_millis(ms.into())),
+            step_target: self.itl_target_ms.map(|ms| std::time::Duration::from_millis(ms.into())),
         }
     }
 

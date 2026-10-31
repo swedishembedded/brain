@@ -21,9 +21,6 @@
 pub struct MixedLimits {
     /// Rows (decode rows plus prompt rows) one forward carries at most.
     pub max_rows: usize,
-    /// Rows one forward carries when a single prompt is being read in and nothing decodes: no other sequence waits on
-    /// the iteration, so a wider one only fills the matrix products' waves better. At least `max_rows`.
-    pub lone_prompt_rows: usize,
     /// Prompt rows a waiting prompt is always given when any is waiting, however busy decode is: the bound on how
     /// long a prompt can be held back (no starvation). Also the size of the first slices, before any iteration
     /// has been timed.
@@ -135,7 +132,7 @@ impl StepCost {
 mod tests {
     use super::*;
 
-    const LIMITS: MixedLimits = MixedLimits { max_rows: 1024, lone_prompt_rows: 1024, min_prompt_rows: 64, row_quantum: 1 };
+    const LIMITS: MixedLimits = MixedLimits { max_rows: 1024, min_prompt_rows: 64, row_quantum: 1 };
 
     fn trained(fixed: f64, per_row: f64) -> StepCost {
         let mut c = StepCost::default();
@@ -175,7 +172,7 @@ mod tests {
         // 90 ms fixed, 0.1 ms a row: the 45 ms target is out of reach; 64 decode and 64 prompt rows take 102.8 ms,
         // a quarter more is 128.5 ms, which holds (128.5 - 90) / 0.1 - 64 = 321 prompt rows.
         let c = trained(0.090, 0.0001);
-        let rows = c.prompt_rows(MixedLimits { max_rows: 2048, lone_prompt_rows: 2048, min_prompt_rows: 64, row_quantum: 1 }, 64, Some(0.045));
+        let rows = c.prompt_rows(MixedLimits { max_rows: 2048, min_prompt_rows: 64, row_quantum: 1 }, 64, Some(0.045));
         assert!((319..=322).contains(&rows), "{rows}");
     }
 

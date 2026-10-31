@@ -461,3 +461,10 @@ Mixed-iteration idle (knowledge 392, 2026-10-30): a prompt start no longer waits
   attention 20 % at 385 TFLOPS under the SW power cap (SM clock 1.62 GHz mean, cap active in 73 % of samples); 2.2 s needs a GEMM near 1.3 PFLOPS and attention past 500 TFLOPS at the same power. Open,
   by weight: GEMM energy per FLOP, attention K/V widening shared by the 6 heads of a kv head (30 % of the kernel), the GQA q/k/v split + norm + rope + append fusion (~0.6 ms a layer),
   the 25 ms between the last round and the first token. A card-to-card gap of 2.5 % (gpu0 faster) confounds A/B runs that put base and new on different cards.
+
+- 2026-10-31 (goal matrix, scheduler: round shape and prompt order; knowledge 400): unasked, a mixed iteration takes every prompt row its forward has room for (`Scheduler::mixed_latency_target`,
+  `--itl-target-ms` stays the explicit override), shared rounds are the full 4096 rows (`MixedLimits::lone_prompt_rows` and `MIXED_SHARED_ROWS` removed: the activation scratch is sized for 4096 either
+  way), and the prompt with the fewest rows left is read in first (the oldest still gets the minimum slice). gpu0, tok/s | TTFT p50 s: 8Kx16 252|3.76 -> 280|1.41 (vLLM 339|3.08), 8Kx64 283|32.4 -> 330|2.50
+  (vLLM 413|2.68); 1K chat sweep c1/4/16/64 82.2/258/567/789 -> 82.2/258/605/948 tok/s (median TTFT c16/c64 430/438 -> 893/1027 ms: the burst of 1K prompts is read in at 12.4K rows/s whole prompts first,
+  while decode rows wait a 4096-row round). The long-context cells are bound by the prefill row rate (12.4K rows/s in a mixed round against vLLM 15-16K), not by the schedule.
+
