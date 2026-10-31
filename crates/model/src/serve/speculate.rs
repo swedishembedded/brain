@@ -324,7 +324,7 @@ const RATE_EWMA: f64 = 0.25;
 const GATE_REFRESH_STEPS: u32 = 16;
 /// Steps of a mode the gate measures before it may rule that mode out: the first steps of a shape pay for kernel selection
 /// and recording, and say nothing about what the mode costs once it runs.
-const GATE_WARMUP_STEPS: u32 = 3;
+const GATE_WARMUP_STEPS: u32 = 2;
 /// A step this many times slower than the mode's running estimate is a stall (a first launch, a clock change), not the cost.
 const GATE_OUTLIER_FACTOR: f64 = 3.0;
 
@@ -375,8 +375,8 @@ pub(super) struct CostGate {
 /// each (measured), which no acceptance this workload reaches repays.
 const GATE_MAX_WINDOW: usize = 4;
 
-/// Windows tried first, in this order: the ones that usually win beside the one-proposal round, whose extra row costs a kernel switch.
-const GATE_TRY_ORDER: [usize; 4] = [3, 2, 4, 1];
+/// Windows timed first, in this order; a longer one is timed when it is beside the best (`CostGate::choose`).
+const GATE_TRY_ORDER: [usize; 3] = [2, 1, 3];
 
 impl CostGate {
     /// The bucket of a step over `active` sequences: powers of two.
@@ -909,8 +909,8 @@ mod tests {
             *tried.entry(k).or_insert(0) += 1;
             if k == 0 { g.observe_plain(2, 4, 0.020) } else { g.observe_spec(2, k, 4 * k, 0.020 + 0.003 * k as f64) }
         }
-        for k in 0..=4 {
-            assert!(tried.get(&k).copied().unwrap_or(0) >= GATE_WARMUP_STEPS as usize || k == 0, "window {k} was timed {:?} times", tried.get(&k));
+        for k in GATE_TRY_ORDER {
+            assert!(tried.get(&k).copied().unwrap_or(0) >= GATE_WARMUP_STEPS as usize, "window {k} was timed {:?} times", tried.get(&k));
         }
     }
 

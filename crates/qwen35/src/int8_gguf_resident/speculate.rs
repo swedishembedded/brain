@@ -189,7 +189,11 @@ impl Qwen35GgufInstance {
             s.caches.verify_snaps = snaps;
         }
         self.spec_rows = spec.scratch_rows;
-        let has_mtp = matches!(spec.mode, SpeculativeMode::Auto | SpeculativeMode::Mtp) && self.enable_mtp(gguf_path, tier, gpu_index, spec.mtp_normed_hidden)?;
+        let drafts_on_device = self.device_drafter_supported();
+        if spec.mode == SpeculativeMode::Mtp && !drafts_on_device {
+            return Err(format!("{MODEL}: --speculative mtp drafts on the card that holds the embedding table and the head: it needs one card with the embedding resident, and not --exact-decode"));
+        }
+        let has_mtp = matches!(spec.mode, SpeculativeMode::Auto | SpeculativeMode::Mtp) && drafts_on_device && self.enable_mtp(tier, gpu_index, spec.mtp_normed_hidden)?;
         if spec.mode == SpeculativeMode::Mtp && !has_mtp {
             return Err(format!("{MODEL}: --speculative mtp: '{gguf_path}' carries no multi-token-prediction block"));
         }
@@ -216,10 +220,10 @@ impl Qwen35GgufInstance {
     /// **The verify pass**: `rows[i]` are consecutive tokens of the sequence in
     /// slot `slots[i]`, the first at absolute position `positions[i]`; all of
     /// them go through every stage in one batched step. Returns the packed
-    /// `[sum(rows), d_model]` pre-norm hidden block (sequence after sequence).
+    /// `[sum(rows), d_model]` pre-norm hidden block (sequence after sequence), still on the last card.
     /// The recurrent state of each sequence is left after its LAST row, with the
     /// state after every earlier row kept for [`Self::commit_verify`].
-    pub(super) fn stack_verify_hidden(&self, rows: &[&[u32]], slots: &[u32], positions: &[u32]) -> Result<Vec<f32>, String> {
+    pub(super) fn stack_verify_hidden(&self, rows: &[&[u32]], slots: &[u32], positions: &[u32]) -> Result<DeviceBuffer, String> {
         let counts: Vec<u32> = rows.iter().map(|r| r.len() as u32).collect();
         let total: u32 = counts.iter().sum();
         if total > self.spec_rows {
@@ -232,8 +236,8 @@ impl Qwen35GgufInstance {
             return Err(format!("{MODEL}: verify position {p} is beyond this instance's context capacity {}", self.cap));
         }
         let embedded = self.embed_rows(&tokens)?;
-        Ok(self.chain_stages(
-            &embedded,
+        Ok(self.chain_stages_with(
+            FirstRows::Host(&embedded),
             |s, rows| {
                 let seqs = s.caches.batch(&row_slots, &row_positions);
                 let caches = BatchDecodeCaches { gqa_kv: &s.caches.gqa_kv, gqa_cap: s.caches.kv_block(), seqs: &seqs, one_sequence: false, gdn_pool: Some(s.caches.gdn_pool()), memory: &[] };
@@ -241,6 +245,7 @@ impl Qwen35GgufInstance {
                 s.qwen35.verify_batch(&tokens, &caches, &verify, Some(rows))
             },
             |_, _| {},
+            |_, out| out.clone(),
         ))
     }
 

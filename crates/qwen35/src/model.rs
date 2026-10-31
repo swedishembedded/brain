@@ -263,6 +263,9 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         v.push(("embed_tile", kernels::EMBED_TILE));
         // Copies between two ranges of one buffer (a KV prefix or a pooled state row into another slot).
         v.push(("copy_within", kernels::COPY_WITHIN));
+        // The MTP drafter's row moves: a hidden block scattered into a slot's pending rows, a column range copied into a wider row.
+        v.push(("row_scatter", kernels::ROW_SCATTER));
+        v.push(("copy_cols", kernels::COPY_COLS));
         // `Ops::REQUIRED_KERNELS` also demands the bf16/f16 storage-tier
         // variants even though this crate never builds a `Weight::BF16`/
         // `Weight::F16` and never dispatches the generic `paged_*_batched`
@@ -796,7 +799,7 @@ pub(crate) enum KvWindow<'a> {
 
 impl KvWindow<'_> {
     /// Rows the window holds: `block_size` per block; a ring holds the same rows forever, so any position fits.
-    fn capacity(&self, block_size: u32) -> u32 {
+    pub(crate) fn capacity(&self, block_size: u32) -> u32 {
         match self {
             KvWindow::Ring(_) => u32::MAX,
             _ => block_size * self.blocks().len() as u32,
@@ -5095,8 +5098,12 @@ impl Qwen35 {
         // previous stage's residual, on the embed stage the caller's own input
         // embeddings in place of the token gather (`Qwen35::prefill_embeds`).
         assert!(
-            persist.is_none() || (input_override.is_none() && verify.is_some() == persist_layout.is_some() && self.exact_decode.get().is_none() && self.adapter_rows.get() == 0),
-            "qwen35::decode_batch_dispatches: a recorded step is a token step or a verify round with its own layout (no hand-off, exact-decode regime or adapter rows)"
+            persist.is_none()
+                || ((input_override.is_none() || input_override.is_some_and(|x| x.whole_buffer().is_some()))
+                    && verify.is_some() == persist_layout.is_some()
+                    && self.exact_decode.get().is_none()
+                    && self.adapter_rows.get() == 0),
+            "qwen35::decode_batch_dispatches: a recorded step is a token step, a step over a device block of this card, or a verify round with its own layout (no hand-off, exact-decode regime or adapter rows)"
         );
         let owned_inputs;
         let inputs = match persist {
@@ -5112,9 +5119,15 @@ impl Qwen35 {
         let mut res = match input_override {
             Some(x) => {
                 assert_eq!(x.words(), (bsz * d) as usize, "qwen35: run_decode_batch input_override must be the batch's whole [bsz, d_model] block");
-                let res = g.storage((bsz * d) as u64);
-                x.load_into(g, &res);
-                res
+                match x.whole_buffer().filter(|_| persist.is_some()) {
+                    // A recording reads the block where an earlier dispatch of the same tape leaves it.
+                    Some(block) => block.clone(),
+                    None => {
+                        let res = g.storage((bsz * d) as u64);
+                        x.load_into(g, &res);
+                        res
+                    }
+                }
             }
             None => {
                 assert!(self.shard.embed, "qwen35: run_decode_batch on a NON-EMBED stage needs the previous stage's residual as `input_override` (this stage holds no `tok.weight`)");
@@ -6476,6 +6489,28 @@ impl Qwen35 {
         (g.end_tape(), inputs, layout, hidden, out)
     }
 
+    /// This stage's operator façade: the one whose steps its own card handle accepts (a step built by another handle's
+    /// façade names that handle's kernel numbering).
+    pub(crate) fn ops(&self) -> &Ops {
+        &self.ops
+    }
+
+    /// The embedding table this stage gathers token rows from, when it holds one.
+    pub(crate) fn embed_table(&self) -> Option<&Weight> {
+        self.weights.get("tok.weight")
+    }
+
+    /// The dispatches of this stage's layers over the device block `x` (`[rows, d_model]`, rows as in `caches`), recorded
+    /// into the tape open on this stage's card, with the per-step inputs in `inputs`
+    /// ([`Self::alloc_decode_inputs_at`]; the caller rewrites them with [`Self::write_decode_inputs`] before every
+    /// replay). Returns the block the stage leaves.
+    pub(crate) fn record_layers_over(&self, caches: &BatchDecodeCaches, inputs: &DecodeInputs, x: &DeviceBuffer) -> DeviceBuffer {
+        let rows = inputs.bsz;
+        let tokens = vec![0u32; rows as usize];
+        let block = StageRows::device(&self.gpu, x, (rows * self.cfg.d_model) as usize);
+        self.decode_batch_dispatches(&tokens, caches, Some(block), None, Some(inputs), None)
+    }
+
     /// Copy slot `slot`'s recurrent state and conv history between its row of the pool (`into_work`: pool to the
     /// work buffers a prefill chunk runs against; otherwise back).
     fn stage_slot_state(&self, pool: &SlotPool, slot: u32, into_work: bool) {
@@ -6747,18 +6782,6 @@ impl Qwen35 {
         out.truncate(max_new);
         out_hidden.truncate(max_new);
         (out, out_hidden, stats)
-    }
-
-    /// [`Self::run_decode_step`] for a BATCH: one decode token for each of
-    /// `tokens.len()` independent sequences through THIS stage, staged to the
-    /// host as the whole `[bsz, d_model]` boundary block.
-    ///
-    /// One host round trip per stage per STEP, where the per-sequence form
-    /// pays one per stage per sequence per step - which is the same ratio, on
-    /// the pipeline seam, that [`Self::run_decode_batch`] buys inside a stage.
-    pub(crate) fn decode_batch_stage(&self, tokens: &[u32], caches: &BatchDecodeCaches, input_override: Option<&[f32]>) -> Vec<f32> {
-        let hidden = self.run_decode_batch(tokens, caches, input_override.map(StageRows::Host));
-        self.gpu.read(&hidden, tokens.len() * self.cfg.d_model as usize)
     }
 
     /// Device-side head epilogue: `logits[vocab] = hidden[d_model] @

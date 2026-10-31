@@ -41,24 +41,21 @@
 
 use super::*;
 use checkpoint::TensorSource;
-use crate::resident_checkpoint::HostEmbedding;
 use crate::gguf_import::block_leaf_suffix;
 use model::ops::{Ops, Weight};
 
+mod plan;
+
 /// Hidden rows a slot may hold awaiting a draft before they are fed to the
-/// head anyway (bounds host memory while speculation is off for a while).
+/// head anyway (bounds the pending store while speculation is off for a while).
 const MAX_PENDING_ROWS: usize = 16;
 
-/// Rows one head forward carries; a longer catch-up is split by sequence.
-const MAX_BATCH_ROWS: usize = 128;
+/// Rows of the pending store a slot owns: the rows it may hold before they are fed, plus the widest verify step that
+/// can land on top of them.
+const PENDING_STRIDE: usize = MAX_PENDING_ROWS + model::gdn_verify::MAX_VERIFY_ROWS as usize;
 
-/// Prompt rows fed to the head per prefill round.
-const PREFILL_ROUND_ROWS: usize = 128;
-/// Rows of a prompt's feed whose host side is prepared at once (a multiple of [`PREFILL_ROUND_ROWS`]).
-const FEED_PREP_ROWS: usize = 8 * PREFILL_ROUND_ROWS;
-
-/// Scratch arena of the `eh_proj` projection.
-const FC_ARENA: &str = "qwen35.mtp.fc";
+/// Pairs one chunk of a feed carries: a chunk is one prefill round of the head's layer, so this is the rows of one launch.
+const FEED_CHUNK_ROWS: usize = 1024;
 
 /// What the head has seen of one sequence, and what the target has produced
 /// that it has not.
@@ -67,11 +64,10 @@ struct SlotState {
     /// Head positions `0..fed` are in its KV cache (positions `j` whose pair
     /// `(h_j, x_{j+1})` is complete and was run).
     fed: u32,
-    /// `[rows, d]`: the target's hidden state at positions `fed..fed+rows`.
-    hidden: Vec<f32>,
-    /// `[rows]`: the token the target consumed AT each of those positions. The
-    /// pair for row `r` is `(hidden[r], toks[r + 1])`; the last row's partner
-    /// is the sequence's next input, which only the draft call knows.
+    /// `[rows]`: the token the target consumed AT each of the positions `fed..fed+rows`. The target's hidden state at
+    /// position `fed + r` is row `r` of this slot's span of the pending store ([`MtpDrafter::pend`]), on the card. The
+    /// pair for row `r` is `(hidden[r], toks[r + 1])`; the last row's partner is the sequence's next input, which only
+    /// the draft call knows.
     toks: Vec<u32>,
 }
 
@@ -122,26 +118,24 @@ impl SlotState {
 pub(super) struct MtpDrafter {
     stage: Qwen35,
     pub(super) caches: ShardCaches,
-    ops: Ops,
     fc: Weight,
-    enorm: Vec<f32>,
-    hnorm: Vec<f32>,
     /// `shared_head_norm` on the head's card, for the shared `lm_head`.
     head_norm: DeviceBuffer,
-    head_norm_host: Vec<f32>,
-    /// The target's `output_norm` (host copy), for the convention that hands the
-    /// head the NORMED target hidden state.
-    target_norm_host: Vec<f32>,
+    /// The three norms on the head's card, for the device drafter ([`plan`]).
+    enorm_dev: DeviceBuffer,
+    hnorm_dev: DeviceBuffer,
+    target_norm_dev: DeviceBuffer,
+    /// `[slots, PENDING_STRIDE, d]`: the target's hidden state of every position a slot has consumed and the head has
+    /// not yet fed on, on the card: a recorded target step writes its rows there and the drafter reads them there, so
+    /// the hidden states of a speculating sequence never visit the host.
+    pend: DeviceBuffer,
+    pend_slots: u32,
     /// Hand the head `rmsnorm(h, output_norm)` instead of the raw residual.
     normed_hidden: bool,
-    eps: f32,
     d: usize,
-    /// Embedding rows, read from this handle's own mapping of the checkpoint.
-    ckpt: ResidentCheckpoint,
-    /// The embedding table in host memory when the checkpoint stores it as bf16 ([`ResidentCheckpoint::host_embedding`]).
-    host_embedding: Option<HostEmbedding>,
-    embed: EmbedTable,
     slots: std::collections::HashMap<u32, SlotState>,
+    /// Recorded draft rounds ([`plan`]).
+    draft_plans: std::cell::RefCell<plan::DraftPlans>,
     /// Slots whose prompt feed is begun and not finished ([`PromptFeed`]): they neither draft nor record steps.
     feeding: std::collections::HashSet<u32>,
     /// Forwards run, for the benchmark.
@@ -151,23 +145,10 @@ pub(super) struct MtpDrafter {
     pub(super) times: [std::time::Duration; 3],
 }
 
-/// `row * rsqrt(mean(row^2) + eps) * w`, written to `out`.
-fn rms_row_into(row: &[f32], w: &[f32], eps: f32, out: &mut [f32]) {
-    let ms = row.iter().map(|v| v * v).sum::<f32>() / w.len() as f32;
-    let r = 1.0 / (ms + eps).sqrt();
-    for ((o, v), w) in out.iter_mut().zip(row).zip(w) {
-        *o = v * r * w;
-    }
-}
-
-/// Rows a host thread prepares at least, below which splitting the work costs more than it saves.
-const MIN_ROWS_PER_THREAD: usize = 32;
-
 impl MtpDrafter {
     /// `Ok(None)` when the checkpoint carries no MTP block.
     #[allow(clippy::too_many_arguments)]
     fn load(
-        path: &str,
         ckpt: &ResidentCheckpoint,
         cfg: &Qwen35Config,
         tier: &TierPolicy,
@@ -178,14 +159,12 @@ impl MtpDrafter {
         kv_tier: KvTier,
         layout: KvLayout,
         target_norm_name: &str,
-        embed_name: &str,
         normed_hidden: bool,
     ) -> Result<Option<MtpDrafter>, String> {
         let d = cfg.d_model as usize;
         let Some(parts) = MtpParts::read(ckpt, cfg, tier, gpu_index, head_gpu)? else { return Ok(None) };
         let MtpParts { cfg1, shard, stage, fc, enorm, hnorm, head_norm_host } = parts;
         let caches = ShardCaches::new(&stage.gpu, &cfg1, &shard, cap, slots, 0, kv_tier, layout, false);
-        let reopened = ResidentCheckpoint::open(path).map_err(|e| format!("{MODEL}: cannot reopen '{path}': {e}"))?;
         let target_norm_host = match ckpt.final_norm(target_norm_name) {
             Some(Ok(v)) if v.len() == d => v,
             Some(Ok(v)) => return Err(format!("{MODEL}: '{target_norm_name}' has {} elements, expected {d}", v.len())),
@@ -195,129 +174,21 @@ impl MtpDrafter {
         Ok(Some(MtpDrafter {
             stage,
             caches,
-            ops: Ops::new(head_gpu.share()).map_err(|e| format!("{MODEL}: Ops::new for the MTP projection: {e}"))?,
             fc,
-            enorm,
-            hnorm,
             head_norm: head_gpu.storage_init("qwen35.gguf.mtp_norm", &head_norm_host),
-            head_norm_host,
-            target_norm_host,
+            enorm_dev: head_gpu.storage_init("qwen35.mtp.enorm", &enorm),
+            hnorm_dev: head_gpu.storage_init("qwen35.mtp.hnorm", &hnorm),
+            target_norm_dev: head_gpu.storage_init("qwen35.mtp.target_norm", &target_norm_host),
+            pend: head_gpu.storage((slots as usize * PENDING_STRIDE * d) as u64),
+            pend_slots: slots,
             normed_hidden,
-            eps: cfg.rms_eps,
             d,
-            host_embedding: match reopened.host_embedding(embed_name, d) {
-                Some(table) => Some(table.map_err(|e| format!("{MODEL}: the embedding table: {e}"))?),
-                None => None,
-            },
-            ckpt: reopened,
-            embed: EmbedTable { name: embed_name.to_string(), d },
             slots: std::collections::HashMap::new(),
+            draft_plans: Default::default(),
             feeding: std::collections::HashSet::new(),
             forwards: 0,
             times: Default::default(),
         }))
-    }
-
-    fn embed_rows(&self, tokens: &[u32]) -> Result<Vec<f32>, String> {
-        if let Some(rows) = self.host_embedding.as_ref().and_then(|table| table.rows(tokens)) {
-            return Ok(rows);
-        }
-        let rows: Vec<usize> = tokens.iter().map(|&t| t as usize).collect();
-        self.ckpt.embed_rows(&self.embed.name, &rows, self.d).ok_or_else(|| {
-            let bad = tokens.iter().find(|&&t| self.ckpt.embed_rows(&self.embed.name, &[t as usize], self.d).is_none()).copied().unwrap_or(0);
-            format!("{MODEL}: token {bad} is outside the embedding")
-        })?
-    }
-
-    /// The `[n, 2d]` input of `eh_proj` for rows pairing `hidden[i]` with `tokens[i]`. Rows are independent, so
-    /// they are normed on several threads (a thousand-row prompt is about 22 ms of norms on one).
-    fn fc_input(&self, tokens: &[u32], hidden: &[f32], hidden_is_target: bool) -> Result<Vec<f32>, String> {
-        let d = self.d;
-        let embedded = self.embed_rows(tokens)?;
-        let hidden_norm: Option<&[f32]> = self.normed_hidden.then(|| if hidden_is_target { &self.target_norm_host[..] } else { &self.head_norm_host[..] });
-        let (enorm, hnorm, eps) = (&self.enorm[..], &self.hnorm[..], self.eps);
-        let mut x = vec![0.0f32; tokens.len() * 2 * d];
-        let rows_per_thread = tokens.len().div_ceil(std::thread::available_parallelism().map_or(1, |n| n.get()).min(16)).max(MIN_ROWS_PER_THREAD);
-        std::thread::scope(|scope| {
-            for (i, block) in x.chunks_mut(rows_per_thread * 2 * d).enumerate() {
-                let first = i * rows_per_thread;
-                let (embedded, hidden) = (&embedded, hidden);
-                scope.spawn(move || {
-                    let mut normed = vec![0.0f32; d];
-                    for (r, out) in block.chunks_exact_mut(2 * d).enumerate() {
-                        let row = first + r;
-                        let (e, h) = out.split_at_mut(d);
-                        rms_row_into(&embedded[row * d..(row + 1) * d], enorm, eps, e);
-                        let h_in = &hidden[row * d..(row + 1) * d];
-                        match hidden_norm {
-                            Some(norm) => {
-                                rms_row_into(h_in, norm, eps, &mut normed);
-                                rms_row_into(&normed, hnorm, eps, h);
-                            }
-                            None => rms_row_into(h_in, hnorm, eps, h),
-                        }
-                    }
-                });
-            }
-        });
-        Ok(x)
-    }
-
-    /// `eh_proj` over `[n, 2d]` rows on the head's card.
-    fn project(&self, head_gpu: &Gpu, x: &[f32]) -> Vec<f32> {
-        let n = (x.len() / (2 * self.d)) as u32;
-        let _ops_scratch = self.ops.gpu().scratch_scope_in(FC_ARENA);
-        let _scratch = head_gpu.scratch_scope_in(FC_ARENA);
-        let _pass = head_gpu.pass_scope();
-        let xd = head_gpu.storage(x.len() as u64);
-        head_gpu.write_f32(&xd, x);
-        let mut s = Vec::new();
-        let act = self.ops.act(&mut s, &xd, 0, n, 2 * self.d as u32);
-        let out = head_gpu.storage(n as u64 * self.d as u64);
-        self.ops.matmul(&mut s, &self.fc, &act, &out, 0);
-        head_gpu.submit(&[], &s);
-        head_gpu.read(&out, n as usize * self.d)
-    }
-
-    /// One head forward over packed rows: row `i` pairs `hidden[i]` with
-    /// `tokens[i]` at head position `positions[i]` of slot `slots[i]`.
-    /// Returns the `[n, d]` block output.
-    fn forward(&mut self, head_gpu: &Gpu, slots: &[u32], positions: &[u32], tokens: &[u32], hidden: &[f32], hidden_is_target: bool) -> Result<Vec<f32>, String> {
-        self.forwards += 1;
-        let t0 = std::time::Instant::now();
-        let prep = gpu_core::markers::range(c"mtp.prep");
-        let x = self.fc_input(tokens, hidden, hidden_is_target)?;
-        drop(prep);
-        let proj = gpu_core::markers::range(c"mtp.project");
-        let ehp = self.project(head_gpu, &x);
-        drop(proj);
-        let t1 = std::time::Instant::now();
-        let _layer = gpu_core::markers::range(c"mtp.layer");
-        let seqs = self.caches.batch(slots, positions);
-        let caches = BatchDecodeCaches { gqa_kv: &self.caches.gqa_kv, gqa_cap: self.caches.kv_block(), seqs: &seqs, one_sequence: false, gdn_pool: None, memory: &[] };
-        let out = self.stage.decode_batch_stage(tokens, &caches, Some(&ehp));
-        self.times[0] += t1 - t0;
-        self.times[1] += t1.elapsed();
-        Ok(out)
-    }
-
-    /// Feed one sequence's run of complete pairs through the chunked path: head positions
-    /// `from..from + tokens.len()`, in rounds of [`PREFILL_ROUND_ROWS`]. The host side of the run (the
-    /// embedding rows, the norms) is prepared [`FEED_PREP_ROWS`] at a time, so the CPU pool is entered once per
-    /// several rounds and not once per round, while the prepared rows stay bounded for a long prompt.
-    fn feed_run(&mut self, head_gpu: &Gpu, slot: u32, from: u32, tokens: &[u32], hidden: &[f32], hidden_is_target: bool) -> Result<(), String> {
-        let d = self.d;
-        let view = self.caches.view(slot);
-        for (g, group) in tokens.chunks(FEED_PREP_ROWS).enumerate() {
-            let at = g * FEED_PREP_ROWS;
-            let x = self.fc_input(group, &hidden[at * d..(at + group.len()) * d], hidden_is_target)?;
-            for (i, (round, x)) in group.chunks(PREFILL_ROUND_ROWS).zip(x.chunks(PREFILL_ROUND_ROWS * 2 * d)).enumerate() {
-                self.forwards += 1;
-                let ehp = self.project(head_gpu, x);
-                self.stage.prefill_chunk_stage(round, from + (at + i * PREFILL_ROUND_ROWS) as u32, &view, Some(&ehp));
-            }
-        }
-        Ok(())
     }
 }
 
@@ -444,11 +315,10 @@ pub(crate) fn checkpoint_has_mtp(mg: &MmapGguf, cfg: &Qwen35Config) -> bool {
 
 impl Qwen35GgufInstance {
     /// Load the checkpoint's MTP head if it has one (and `mode` wants it).
-    pub(super) fn enable_mtp(&mut self, path: &str, tier: &TierPolicy, gpu_index: usize, normed_hidden: bool) -> Result<bool, String> {
+    pub(super) fn enable_mtp(&mut self, tier: &TierPolicy, gpu_index: usize, normed_hidden: bool) -> Result<bool, String> {
         let (_, target_norm, _) = self.ckpt.endpoint_names(&self.cfg)?;
-        let embed_name = self.embed.name.clone();
         let head_gpu = &self.shards.last().expect("a plan always has at least one stage").qwen35.gpu;
-        let loaded = MtpDrafter::load(path, &self.ckpt, &self.cfg, tier, gpu_index, head_gpu, self.cap, self.state_rows(), self.kv_tier, self.kv_layout, &target_norm, &embed_name, normed_hidden)?;
+        let loaded = MtpDrafter::load(&self.ckpt, &self.cfg, tier, gpu_index, head_gpu, self.cap, self.state_rows(), self.kv_tier, self.kv_layout, &target_norm, normed_hidden)?;
         self.mtp = loaded;
         Ok(self.mtp.is_some())
     }
@@ -506,7 +376,8 @@ impl Qwen35GgufInstance {
         };
         let len = prompt.len();
         debug_assert_eq!(hidden.len(), (len - first) * d);
-        m.slots.insert(slot, SlotState { fed: (len - 1) as u32, hidden: hidden[(len - 1 - first) * d..].to_vec(), toks: vec![prompt[len - 1]] });
+        m.slots.insert(slot, SlotState { fed: (len - 1) as u32, toks: vec![prompt[len - 1]] });
+        m.write_pending(slot, 0, &hidden[(len - 1 - first) * d..]);
         // Complete pairs: positions first..len-1 pair with prompt[j + 1].
         if first + 1 >= len {
             return FeedStart::Complete;
@@ -518,12 +389,10 @@ impl Qwen35GgufInstance {
 
     /// Run up to `rows` more of `feed`'s pairs through the head.
     pub(super) fn mtp_advance_feed(&mut self, feed: &mut PromptFeed, rows: usize) -> FeedStep {
-        let Self { mtp, shards, .. } = self;
-        let Some(m) = mtp.as_mut() else { return FeedStep::Failed };
-        let head_gpu = &shards.last().expect("a stage").qwen35.gpu;
-        let d = m.d;
+        let Some(d) = self.mtp.as_ref().map(|m| m.d) else { return FeedStep::Failed };
         let end = feed.tokens.len().min(feed.done.saturating_add(rows));
-        let run = m.feed_run(head_gpu, feed.slot, (feed.first + feed.done) as u32, &feed.tokens[feed.done..end], &feed.hidden[feed.done * d..end * d], true);
+        let run = self.mtp_feed_run(feed.slot, (feed.first + feed.done) as u32, &feed.tokens[feed.done..end], &feed.hidden[feed.done * d..end * d]);
+        let m = self.mtp.as_mut().expect("checked above");
         if let Err(e) = run {
             eprintln!("{MODEL}: MTP prefill failed, this sequence drafts from scratch: {e}");
             m.feeding.remove(&feed.slot);
@@ -566,60 +435,104 @@ impl Qwen35GgufInstance {
         }
     }
 
-    /// The target consumed one token in each of `slots` (`inputs`), producing the
-    /// `[n, d]` hidden block `hidden`.
-    pub(super) fn mtp_record_step(&mut self, slots: &[u32], inputs: &[u32], hidden: &[f32]) {
-        let Some(m) = self.mtp.as_mut() else { return };
+    /// The target is about to consume one token in each of `slots` (`inputs`) and leave the `[n, d]` hidden block in a
+    /// device buffer: where each row goes in the pending store (`u32::MAX`: nowhere, a slot that is being fed). The
+    /// tokens are noted now; the caller writes the rows ([`Self::mtp_tap`]) or has the step's recording do it.
+    pub(super) fn mtp_note_step(&mut self, slots: &[u32], inputs: &[u32]) -> Vec<u32> {
+        let Some(m) = self.mtp.as_mut() else { return Vec::new() };
+        slots
+            .iter()
+            .zip(inputs)
+            .map(|(&slot, &tok)| {
+                if m.feeding.contains(&slot) {
+                    return u32::MAX;
+                }
+                let held = m.slots.get(&slot).map_or(0, SlotState::rows);
+                let at = m.pending_row(slot, held);
+                m.slots.entry(slot).or_default().toks.push(tok);
+                at
+            })
+            .collect()
+    }
+
+    /// Where the rows of a verify step land in the pending store: sequence `i` has `rows[i].len()` rows from the first
+    /// free row of its span. Nothing is noted yet: [`Self::mtp_keep_verified`] says how many of them stand.
+    pub(super) fn mtp_verify_destinations(&self, slots: &[u32], counts: &[u32]) -> Vec<u32> {
+        let Some(m) = self.mtp.as_ref() else { return Vec::new() };
+        let mut out = Vec::with_capacity(counts.iter().sum::<u32>() as usize);
+        for (&slot, &n) in slots.iter().zip(counts) {
+            let held = if m.feeding.contains(&slot) { None } else { Some(m.slots.get(&slot).map_or(0, SlotState::rows)) };
+            out.extend((0..n as usize).map(|r| held.map_or(u32::MAX, |h| m.pending_row(slot, h + r))));
+        }
+        out
+    }
+
+    /// The dispatch that writes `n` rows of `hidden` to the pending rows in `idx` (a recorded step ends in it).
+    pub(super) fn mtp_tap_step(&self, g: &Gpu, idx: &DeviceBuffer, hidden: &DeviceBuffer, n: u32) -> gpu_core::Step {
+        self.mtp.as_ref().expect("a tapped step has a head").tap_step(g, idx, hidden, n)
+    }
+
+    /// Write a device block of hidden rows into the pending store at `destinations` (one per row).
+    pub(super) fn mtp_tap(&self, hidden: &DeviceBuffer, destinations: &[u32]) {
+        let Some(m) = self.mtp.as_ref() else { return };
+        let g = &self.shards.last().expect("a stage").qwen35.gpu;
+        let idx = g.storage(destinations.len() as u64);
+        g.write(&idx, destinations);
+        g.submit(&[], &[m.tap_step(g, &idx, hidden, destinations.len() as u32)]);
+    }
+
+    /// [`Self::mtp_tap`] for rows on the host (a mixed forward hands its decode rows back that way): `destinations[i]`
+    /// is where row `i` of `hidden` (`[n, d]`) goes.
+    pub(super) fn mtp_tap_host(&self, hidden: &[f32], destinations: &[u32]) {
+        let Some(m) = self.mtp.as_ref() else { return };
         let d = m.d;
-        for (i, (&slot, &tok)) in slots.iter().zip(inputs).enumerate() {
-            if m.feeding.contains(&slot) {
-                continue;
+        for (i, &dst) in destinations.iter().enumerate().filter(|(_, &dst)| dst != u32::MAX) {
+            m.write_row(dst, &hidden[i * d..(i + 1) * d]);
+        }
+    }
+
+    /// A verify step consumed `rows[i]` for each sequence and kept the first `keep[i]` of them (their hidden rows were
+    /// written at [`Self::mtp_verify_destinations`]).
+    pub(super) fn mtp_keep_verified(&mut self, slots: &[u32], rows: &[Vec<u32>], keep: &[usize]) {
+        let Some(m) = self.mtp.as_mut() else { return };
+        for (i, &slot) in slots.iter().enumerate() {
+            if !m.feeding.contains(&slot) {
+                m.slots.entry(slot).or_default().toks.extend_from_slice(&rows[i][..keep[i]]);
             }
-            let st = m.slots.entry(slot).or_default();
-            st.hidden.extend_from_slice(&hidden[i * d..(i + 1) * d]);
-            st.toks.push(tok);
         }
         self.mtp_flush_long(slots);
     }
 
-    /// A verify step consumed `rows[i]` for each sequence and kept the first
-    /// `keep[i]` of them; `hidden` is its packed `[sum(rows), d]` block.
-    pub(super) fn mtp_record_verified(&mut self, slots: &[u32], rows: &[Vec<u32>], keep: &[usize], hidden: &[f32]) {
-        let Some(m) = self.mtp.as_mut() else { return };
-        let d = m.d;
-        let mut at = 0usize;
-        for (i, &slot) in slots.iter().enumerate() {
-            if !m.feeding.contains(&slot) {
-                let st = m.slots.entry(slot).or_default();
-                st.hidden.extend_from_slice(&hidden[at * d..(at + keep[i]) * d]);
-                st.toks.extend_from_slice(&rows[i][..keep[i]]);
-            }
-            at += rows[i].len();
-        }
+    /// The step noted by [`Self::mtp_note_step`] is done: feed any slot that outgrew [`MAX_PENDING_ROWS`].
+    pub(super) fn mtp_step_done(&mut self, slots: &[u32]) {
         self.mtp_flush_long(slots);
     }
 
     /// Feed any slot whose pending run outgrew [`MAX_PENDING_ROWS`] to the head
     /// (every complete pair; the last row stays pending).
     fn mtp_flush_long(&mut self, slots: &[u32]) {
-        let Self { mtp, shards, .. } = self;
-        let Some(m) = mtp.as_mut() else { return };
-        let head_gpu = &shards.last().expect("a stage").qwen35.gpu;
         for &slot in slots {
+            let Some(m) = self.mtp.as_ref() else { return };
             if m.feeding.contains(&slot) {
                 continue;
             }
-            let st = m.slots.get(&slot).expect("just recorded");
+            let Some(st) = m.slots.get(&slot) else { continue };
             if st.rows() <= MAX_PENDING_ROWS {
                 continue;
             }
-            let (fed, n) = (st.fed, st.rows() - 1);
-            let (toks, hidden) = (st.toks[1..=n].to_vec(), st.hidden[..n * m.d].to_vec());
-            match m.feed_run(head_gpu, slot, fed, &toks, &hidden, true) {
+            let (fed, n, rows) = (st.fed, st.rows() - 1, st.rows());
+            let toks = st.toks[1..=n].to_vec();
+            let head_gpu = &self.shards.last().expect("a stage").qwen35.gpu;
+            let hidden = m.read_pending(head_gpu, slot, rows);
+            let fed_ok = self.mtp_feed_run(slot, fed, &toks, &hidden[..n * m.d]);
+            let m = self.mtp.as_mut().expect("checked above");
+            match fed_ok {
                 Ok(()) => {
+                    // The last row stays pending, moved to the front of the span.
+                    let last = hidden[n * m.d..].to_vec();
+                    m.write_pending(slot, 0, &last);
                     let st = m.slots.get_mut(&slot).expect("present");
                     st.fed += n as u32;
-                    st.hidden.drain(..n * m.d);
                     st.toks.drain(..n);
                 }
                 Err(e) => {
@@ -649,116 +562,50 @@ impl Qwen35GgufInstance {
             m.feeding.remove(&slot);
         }
     }
+}
 
-    /// Propose up to `ks[i]` tokens after `next_inputs[i]` for the sequence in
-    /// `slots[i]`, which has consumed `consumed[i]` positions.
-    pub(super) fn mtp_draft(&mut self, slots: &[u32], consumed: &[u32], next_inputs: &[u32], ks: &[usize]) -> Vec<Vec<u32>> {
-        let n = slots.len();
-        let mut out = vec![Vec::new(); n];
-        let Self { mtp, shards, head, cfg, .. } = self;
-        let Some(m) = mtp.as_mut() else { return out };
-        let last = shards.last().expect("a stage");
-        let head_gpu = &last.qwen35.gpu;
-        let d = m.d;
+impl MtpDrafter {
+    /// Drop the recorded draft rounds.
+    pub(super) fn clear_plans(&self) {
+        self.draft_plans.borrow_mut().clear();
+    }
 
-        // Sequences that can draft: their pending run covers exactly the positions
-        // the target consumed. One whose does not (it was not tracked while
-        // speculation was off for a big batch) starts over from here: it drafts
-        // again once a step has given the head a fresh row to continue from.
-        for i in (0..n).filter(|&i| !m.feeding.contains(&slots[i])) {
-            let in_step = m.slots.get(&slots[i]).is_some_and(|st| st.fed + st.rows() as u32 == consumed[i] && st.hidden.len() == st.rows() * d);
-            if !in_step {
-                m.slots.insert(slots[i], SlotState { fed: consumed[i], ..SlotState::default() });
-            }
+    /// Row of the pending store holding row `row` of `slot`'s pending run, or `u32::MAX` past the slot's span (a slot
+    /// the instance was not sized for is not tracked).
+    fn pending_row(&self, slot: u32, row: usize) -> u32 {
+        if slot < self.pend_slots && row < PENDING_STRIDE {
+            slot * PENDING_STRIDE as u32 + row as u32
+        } else {
+            u32::MAX
         }
-        let live: Vec<usize> = (0..n).filter(|&i| ks[i] > 0 && !m.feeding.contains(&slots[i]) && m.slots.get(&slots[i]).is_some_and(|st| st.rows() > 0)).collect();
-        if live.is_empty() {
-            return out;
-        }
+    }
 
-        // Catch-up: every pending pair, plus the pair that ends at the next input.
-        let (mut s_slots, mut s_pos, mut s_toks, mut s_hidden) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        let mut last_row = Vec::with_capacity(live.len());
-        for &i in &live {
-            let st = &m.slots[&slots[i]];
-            let r = st.rows();
-            for j in 0..r {
-                s_slots.push(slots[i]);
-                s_pos.push(st.fed + j as u32);
-                s_toks.push(if j + 1 < r { st.toks[j + 1] } else { next_inputs[i] });
-            }
-            s_hidden.extend_from_slice(&st.hidden);
-            last_row.push(s_slots.len() - 1);
-        }
-        // One forward per group of whole sequences (a sequence's rows must share
-        // a launch so they see each other), at most MAX_BATCH_ROWS rows each.
-        let mut block = Vec::with_capacity(s_slots.len() * d);
-        let mut from = 0;
-        for q in 0..live.len() {
-            let end = last_row[q] + 1;
-            let next_end = last_row.get(q + 1).map(|&l| l + 1);
-            if next_end.is_some_and(|ne| ne - from <= MAX_BATCH_ROWS) {
-                continue;
-            }
-            match m.forward(head_gpu, &s_slots[from..end], &s_pos[from..end], &s_toks[from..end], &s_hidden[from * d..end * d], true) {
-                Ok(b) => block.extend(b),
-                Err(e) => {
-                    eprintln!("{MODEL}: MTP draft failed: {e}");
-                    return out;
-                }
-            }
-            from = end;
-        }
-        let mut prev: Vec<Vec<f32>> = live.iter().enumerate().map(|(q, _)| block[last_row[q] * d..(last_row[q] + 1) * d].to_vec()).collect();
-        for &i in &live {
-            let st = m.slots.get_mut(&slots[i]).expect("live slot");
-            st.fed = consumed[i];
-            st.hidden.clear();
-            st.toks.clear();
-        }
-        let head_ops = &head.ops;
-        let head_time = std::cell::Cell::new(std::time::Duration::ZERO);
-        let argmax_rows = |m: &MtpDrafter, rows: &[Vec<f32>]| -> Vec<u32> {
-            let t = std::time::Instant::now();
-            let flat: Vec<f32> = rows.iter().flatten().copied().collect();
-            let out = crate::stream::head_argmax_rows_on(head_gpu, head_ops, cfg, &m.head_norm, &head.w, &flat, rows.len() as u32);
-            head_time.set(head_time.get() + t.elapsed());
-            out
-        };
-        let first = {
-            let _head = gpu_core::markers::range(c"mtp.head");
-            argmax_rows(m, &prev)
-        };
-        for (q, &i) in live.iter().enumerate() {
-            out[i].push(first[q]);
-        }
+    /// The step that writes `n` rows of `src` to the pending-store rows named by `idx`.
+    fn tap_step(&self, g: &Gpu, idx: &DeviceBuffer, src: &DeviceBuffer, n: u32) -> gpu_core::Step {
+        let kernel = g.kernel_index("row_scatter").expect("row_scatter is registered with the qwen35 pipelines");
+        let rows = self.pend_slots * PENDING_STRIDE as u32;
+        g.step(kernel, &[idx, src, &self.pend], &[n, self.d as u32, rows], n * self.d as u32)
+    }
 
-        // Extend: proposal `step` pairs the head's own output with the previous proposal.
-        let kmax = live.iter().map(|&i| ks[i]).max().unwrap_or(0);
-        for step in 2..=kmax {
-            let act: Vec<usize> = (0..live.len()).filter(|&q| ks[live[q]] >= step).collect();
-            if act.is_empty() {
-                break;
-            }
-            let slots_a: Vec<u32> = act.iter().map(|&q| slots[live[q]]).collect();
-            let pos_a: Vec<u32> = act.iter().map(|&q| consumed[live[q]] + step as u32 - 2).collect();
-            let toks_a: Vec<u32> = act.iter().map(|&q| *out[live[q]].last().expect("a previous proposal")).collect();
-            let hid_a: Vec<f32> = act.iter().flat_map(|&q| prev[q].iter().copied()).collect();
-            let blk = match m.forward(head_gpu, &slots_a, &pos_a, &toks_a, &hid_a, false) {
-                Ok(b) => b,
-                Err(e) => {
-                    eprintln!("{MODEL}: MTP draft failed: {e}");
-                    break;
-                }
-            };
-            let rows: Vec<Vec<f32>> = act.iter().enumerate().map(|(a, _)| blk[a * d..(a + 1) * d].to_vec()).collect();
-            let next = argmax_rows(m, &rows);
-            for (a, &q) in act.iter().enumerate() {
-                out[live[q]].push(next[a]);
-                prev[q] = rows[a].clone();
-            }
+    /// Write one hidden row to a row of the pending store.
+    fn write_row(&self, row: u32, hidden: &[f32]) {
+        self.stage.gpu.write_f32_at(&self.pend, row as u64 * self.d as u64, hidden);
+    }
+
+    /// Write `hidden` (`[rows, d]`) to the rows of `slot`'s span from `first`.
+    fn write_pending(&self, slot: u32, first: usize, hidden: &[f32]) {
+        let at = self.pending_row(slot, first);
+        if at != u32::MAX {
+            self.stage.gpu.write_f32_at(&self.pend, at as u64 * self.d as u64, hidden);
         }
-        m.times[2] += head_time.get();
-        out
+    }
+
+    /// The first `rows` pending rows of `slot`, on the host.
+    fn read_pending(&self, g: &Gpu, slot: u32, rows: usize) -> Vec<f32> {
+        let idx = g.storage(rows as u64);
+        g.write(&idx, &(0..rows).map(|r| self.pending_row(slot, r)).collect::<Vec<_>>());
+        let out = g.storage((rows * self.d) as u64);
+        g.submit(&[], &[Self::gather_rows_step(g, &idx, &self.pend, &out, rows as u32, self.d as u32)]);
+        g.read(&out, rows * self.d)
     }
 }

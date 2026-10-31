@@ -124,6 +124,8 @@ pub(crate) struct PlanKey {
     /// Rows each sequence carries when the step is a speculative verify round (every sequence the same number); 0 for a
     /// plain decode step, one row each.
     pub per_seq: u32,
+    /// Whether the step ends in a write of its hidden rows into the MTP drafter's pending store.
+    pub tapped: bool,
     /// Keys of attention capacity the step was built at ([`Qwen35::paged_step_shape`](crate::model::Qwen35)).
     pub cap: u32,
     pub head: HeadKind,
@@ -141,8 +143,11 @@ pub(crate) struct DecodePlan {
     pub tape: Tape,
     pub inputs: DecodeInputs,
     pub out: PlanOut,
-    /// A verify round's per-sequence layout and the hidden block it leaves for the host (the drafter's input).
+    /// A verify round's per-sequence layout and the hidden block it leaves.
     pub verify: Option<(crate::model::verify::VerifyLayout, DeviceBuffer)>,
+    /// `[rows]` where each row of the hidden block goes in the drafter's pending store, rewritten before every replay
+    /// (`u32::MAX`: nowhere); the step's last dispatch writes the rows there.
+    pub tap: Option<DeviceBuffer>,
 }
 
 /// Recordings kept per instance. A serving batch moves between a handful of row counts and, slowly, context buckets, so

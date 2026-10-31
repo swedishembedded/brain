@@ -1996,6 +1996,9 @@ impl Qwen35GgufInstance {
         if !on {
             self.plans.borrow_mut().clear();
             self.verify_plans.borrow_mut().clear();
+            if let Some(m) = &self.mtp {
+                m.clear_plans();
+            }
         }
     }
 
@@ -2017,7 +2020,7 @@ impl Qwen35GgufInstance {
     /// `None` when the step does not qualify (the caller runs it the ordinary way, bit-for-bit the same arithmetic): more
     /// than one stage (the hand-off between cards is not a dispatch a recording holds), embedding rows decoded on the
     /// host, the exact-decode regime, or a key that has not held yet.
-    fn decode_planned(&self, tokens: &[u32], slots: &[u32], positions: &[u32], kind: HeadKind) -> Option<HeadOut> {
+    fn decode_planned(&self, tokens: &[u32], slots: &[u32], positions: &[u32], kind: HeadKind, tap: &[u32]) -> Option<HeadOut> {
         if !self.plans_on.get() || self.shards.len() != 1 || self.exact_decode || !self.embeds_on_device() {
             return None;
         }
@@ -2028,7 +2031,7 @@ impl Qwen35GgufInstance {
         }
         let seqs = s.caches.batch(slots, positions);
         let caches = BatchDecodeCaches { gqa_kv: &s.caches.gqa_kv, gqa_cap: s.caches.kv_block(), seqs: &seqs, one_sequence: false, gdn_pool: Some(s.caches.gdn_pool()), memory: &[] };
-        let key = PlanKey { rows, per_seq: 0, cap: s.qwen35.paged_step_shape(&caches).0, head: kind };
+        let key = PlanKey { rows, per_seq: 0, tapped: !tap.is_empty(), cap: s.qwen35.paged_step_shape(&caches).0, head: kind };
         let looked = self.plans.borrow_mut().lookup(key);
         let plan = match looked {
             Ok(plan) => {
@@ -2037,11 +2040,20 @@ impl Qwen35GgufInstance {
             }
             Err(false) => return None,
             Err(true) => {
-                let (tape, inputs, out) = s.qwen35.record_decode_step(tokens, &caches, |hidden| self.record_head(hidden, rows, kind));
-                DecodePlan { key, tape, inputs, out, verify: None }
+                let tap_buf = (!tap.is_empty()).then(|| s.qwen35.gpu.storage(u64::from(rows)));
+                let (tape, inputs, out) = s.qwen35.record_decode_step(tokens, &caches, |hidden| {
+                    if let Some(buf) = &tap_buf {
+                        s.qwen35.gpu.submit(&[], &[self.mtp_tap_step(&s.qwen35.gpu, buf, hidden, rows)]);
+                    }
+                    self.record_head(hidden, rows, kind)
+                });
+                DecodePlan { key, tape, inputs, out, verify: None, tap: tap_buf }
             }
         };
         let g = &s.qwen35.gpu;
+        if let Some(buf) = &plan.tap {
+            g.write(buf, tap);
+        }
         g.replay_tape(&plan.tape);
         let out = match &plan.out {
             PlanOut::Argmax(ids) => HeadOut::Ids(model::readout::read_argmax(g, ids, rows)),
@@ -2053,13 +2065,13 @@ impl Qwen35GgufInstance {
 
     /// **A verify round as a replayed graph**: `rows` (every sequence the same number of them, `rows[i]` consecutive tokens of the
     /// sequence in `slots[i]` from `positions[i]`) through the layers and the head of `kind`, recorded after it held for a few rounds
-    /// and replayed from then on, with the packed `[sum(rows), d_model]` hidden block read back for the drafter. The recurrent state
+    /// and replayed from then on, with the hidden rows written to the drafter's pending store on the card (`tap`). The recurrent state
     /// of each sequence is left after its last row and the states between rows kept for [`Self::commit_verify`], as
     /// [`Self::stack_verify_hidden`] does.
     ///
     /// `None` when the round does not qualify (the ordinary path runs it, with the same arithmetic): the conditions of
     /// [`Self::decode_planned`], rows of different counts, or no scratch room for the rows.
-    pub(super) fn verify_planned(&self, rows: &[&[u32]], slots: &[u32], positions: &[u32], kind: HeadKind) -> Option<(HeadOut, Vec<f32>)> {
+    pub(super) fn verify_planned(&self, rows: &[&[u32]], slots: &[u32], positions: &[u32], kind: HeadKind, tap: &[u32]) -> Option<HeadOut> {
         if !self.plans_on.get() || self.shards.len() != 1 || self.exact_decode || !self.embeds_on_device() {
             return None;
         }
@@ -2081,7 +2093,7 @@ impl Qwen35GgufInstance {
         }
         let seqs = s.caches.batch(&row_slots, &row_positions);
         let caches = BatchDecodeCaches { gqa_kv: &s.caches.gqa_kv, gqa_cap: s.caches.kv_block(), seqs: &seqs, one_sequence: false, gdn_pool: Some(s.caches.gdn_pool()), memory: &[] };
-        let key = PlanKey { rows: total, per_seq, cap: s.qwen35.paged_step_shape(&caches).0, head: kind };
+        let key = PlanKey { rows: total, per_seq, tapped: !tap.is_empty(), cap: s.qwen35.paged_step_shape(&caches).0, head: kind };
         let verify = crate::model::verify::VerifyBatch::new(slots, &counts, &s.caches.verify_snaps);
         let g = &s.qwen35.gpu;
         let looked = self.verify_plans.borrow_mut().lookup(key);
@@ -2094,18 +2106,26 @@ impl Qwen35GgufInstance {
             }
             Err(false) => return None,
             Err(true) => {
-                let (tape, inputs, layout, hidden, out) = s.qwen35.record_verify_step(&tokens, &caches, &verify, |hidden| self.record_head(hidden, total, kind));
-                DecodePlan { key, tape, inputs, out, verify: Some((layout, hidden)) }
+                let tap_buf = (!tap.is_empty()).then(|| g.storage(u64::from(total)));
+                let (tape, inputs, layout, hidden, out) = s.qwen35.record_verify_step(&tokens, &caches, &verify, |hidden| {
+                    if let Some(buf) = &tap_buf {
+                        g.submit(&[], &[self.mtp_tap_step(g, buf, hidden, total)]);
+                    }
+                    self.record_head(hidden, total, kind)
+                });
+                DecodePlan { key, tape, inputs, out, verify: Some((layout, hidden)), tap: tap_buf }
             }
         };
+        if let Some(buf) = &plan.tap {
+            g.write(buf, tap);
+        }
         g.replay_tape(&plan.tape);
         let out = match &plan.out {
             PlanOut::Argmax(ids) => HeadOut::Ids(model::readout::read_argmax(g, ids, total)),
             PlanOut::TopK(top) => HeadOut::TopK(top.read(g)),
         };
-        let hidden = self.hidden_to_host(&plan.verify.as_ref().expect("a verify recording keeps its hidden block").1, total as usize);
         self.verify_plans.borrow_mut().put(plan);
-        Some((out, hidden))
+        Some(out)
     }
 
     /// The head of `kind` over `hidden` recorded into the open tape: the final norm, the projection and the reduction,

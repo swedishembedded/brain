@@ -51,6 +51,15 @@ impl<'a> StageRows<'a> {
         (!matches!(self, StageRows::Gather)).then_some(self)
     }
 
+    /// The whole buffer these rows are, when they are a device buffer read from its first word: what a recorded step can
+    /// name in place of copying the rows.
+    pub(crate) fn whole_buffer(&self) -> Option<&'a DeviceBuffer> {
+        match *self {
+            StageRows::Device { buf, offset_words: 0, .. } => Some(buf),
+            _ => None,
+        }
+    }
+
     /// How many f32 words of rows this holds.
     pub(crate) fn words(&self) -> usize {
         match self {

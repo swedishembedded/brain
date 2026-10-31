@@ -140,6 +140,9 @@ const FEED_EWMA: f64 = 0.3;
 // perf-number: a 128-row round of the head takes about 2.5 ms (host prep and projection 1.1, layer 1.4)
 const FEED_ROWS_PER_SLICE: usize = 256;
 
+/// Pairs of a prompt's feed run before one draft: a prompt's rows go in over a few steps, not one stall of every sequence.
+const FEED_ROWS_PER_DRAFT: usize = 8 * FEED_ROWS_PER_SLICE;
+
 /// Bound on the upload quanta one scoring call drives before reporting that the
 /// adapter cannot become resident (see [`Qwen35GgufEngine::score_supervised`]).
 const ADAPTER_UPLOAD_STEPS: u32 = 1 << 20;
@@ -251,12 +254,11 @@ pub struct SpecTimes {
     pub prefill: std::time::Duration,
 }
 
-/// A verify step awaiting its commit: who it carried, what rows, and the
-/// hidden states they produced (the MTP head's input once rows are kept).
+/// A verify step awaiting its commit: who it carried and what rows (their hidden
+/// states are in the MTP head's pending store, which counts the rows that are kept).
 struct Verifying {
     slots: Vec<u32>,
     rows: Vec<Vec<u32>>,
-    hidden: Vec<f32>,
 }
 
 /// How the engine spends prefill between decode steps.
@@ -599,20 +601,17 @@ impl Qwen35GgufEngine {
         let rows = slots.len() as u32;
         // A batch the scheduler will not speculate over (past the crossover or the verify scratch) is not worth
         // tracking for the drafter either.
-        if slots.len() <= self.spec_batch_limit.min(inst.speculation_rows() as usize) {
-            // The drafter reads the rows on the host, so the layers are waited for before the head.
-            inst.set_adapter_rows(&adapter_slots);
-            let hidden = inst.stack_decode_hidden_dev(inputs, &slots, &positions).unwrap_or_else(|e| panic!("{e}"));
-            inst.set_adapter_rows(&[]);
-            let host = inst.hidden_to_host(&hidden, slots.len());
-            inst.mtp_record_step(&slots, inputs, &host);
-            return inst.head_rows(&hidden, rows, kind);
+        let track = slots.len() <= self.spec_batch_limit.min(inst.speculation_rows() as usize);
+        if !track {
+            inst.mtp_forget(&slots);
         }
-        inst.mtp_forget(&slots);
-        let inst = &*inst;
+        // Where the step's hidden rows go in the drafter's pending store: written by the step itself, on the card.
+        let tap = if track { inst.mtp_note_step(&slots, inputs) } else { Vec::new() };
+        let inst = &mut *inst;
         // A batch of base rows only replays its recording; an adapter bank correcting any row changes the dispatches.
         if adapter_slots.iter().all(|&s| s == LORA_SLOT_NONE) {
-            if let Some(out) = inst.decode_planned(inputs, &slots, &positions, kind) {
+            if let Some(out) = inst.decode_planned(inputs, &slots, &positions, kind, &tap) {
+                inst.mtp_step_done(&slots);
                 return out;
             }
         }
@@ -620,7 +619,13 @@ impl Qwen35GgufEngine {
         inst.set_adapter_rows(&adapter_slots);
         let hidden = inst.stack_decode_hidden_dev(inputs, &slots, &positions).unwrap_or_else(|e| panic!("{e}"));
         inst.set_adapter_rows(&[]);
-        inst.head_rows(&hidden, rows, kind)
+        if !tap.is_empty() {
+            inst.mtp_tap(&hidden, &tap);
+        }
+        let out = inst.head_rows(&hidden, rows, kind);
+        drop(_step);
+        inst.mtp_step_done(&slots);
+        out
     }
 }
 
@@ -637,7 +642,9 @@ impl Qwen35GgufEngine {
     /// on the host): kept for the next draft while the batch is one speculation may run over, dropped past it.
     fn record_decode_rows(&mut self, slots: &[u32], inputs: &[u32], hidden: &[f32]) {
         if slots.len() <= self.spec_batch_limit.min(self.inst.speculation_rows() as usize) {
-            self.inst.mtp_record_step(slots, inputs, hidden);
+            let tap = self.inst.mtp_note_step(slots, inputs);
+            self.inst.mtp_tap_host(hidden, &tap);
+            self.inst.mtp_step_done(slots);
         } else {
             self.inst.mtp_forget(slots);
         }
@@ -996,9 +1003,9 @@ impl Qwen35GgufEngine {
     /// `decode`, the next token of running sequences as `(tokens, slots, positions)`, when the forward carries any;
     /// returned as their hidden block); otherwise one sequence's slice after another.
     fn run_slices(&mut self, jobs: &mut [PrefillJob<'_>], answers: &mut [Option<PrefillProgress>], mut live: Vec<LiveSlice>, decode: Option<LeadRows<'_>>, multi: bool) -> Vec<f32> {
-        // The head's feed of a prompt that ends here runs at once: the sequence drafts from its first step, and a deferred feed
-        // would leave it undrafted for as many iterations as the feeds queued ahead of it take.
-        let defer_feed = false;
+        // The head's feed of a prompt that ends here runs after its first token, between the decode steps that follow: the
+        // sequence drafts from the step the feed is done in, and the first token does not wait for the head's rows.
+        let defer_feed = true;
         let mut hidden: Vec<(Vec<f32>, bool)> = Vec::with_capacity(live.len());
         let mut decoded = Vec::new();
         if multi && !live.is_empty() || decode.is_some() && !live.is_empty() {
@@ -1405,7 +1412,10 @@ impl PagedDecoder for Qwen35GgufEngine {
         let scored: Vec<Vec<Vec<(u32, f32)>>> = rows.iter().map(|r| picked.by_ref().take(r.len()).collect()).collect();
         debug_assert_eq!(scored.iter().map(Vec::len).sum::<usize>(), n_verify);
         let first = answers.iter().flatten().map(|a| if matches!(a, PrefillProgress::Done(_)) { picked.next().expect("one pick per finished job") } else { Vec::new() }).collect();
-        self.verifying = Some(Verifying { slots, rows: rows.to_vec(), hidden });
+        let counts: Vec<u32> = rows.iter().map(|r| r.len() as u32).collect();
+        let dests = self.inst.mtp_verify_destinations(&slots, &counts);
+        self.inst.mtp_tap_host(&hidden, &dests);
+        self.verifying = Some(Verifying { slots, rows: rows.to_vec() });
         self.times.verify += started.elapsed();
         MixedVerifyOutcome { scored, prefilled: answers.into_iter().map(|a| a.expect("every job was answered")).collect(), first }
     }
@@ -1557,22 +1567,27 @@ impl Qwen35GgufEngine {
         let row_refs: Vec<&[u32]> = work.iter().map(|r| r.as_slice()).collect();
         let n = work.iter().map(|r| r.len()).sum::<usize>() as u32;
         let kind = if cands <= 1 { HeadKind::Argmax } else { HeadKind::TopK(cands.min(TOPK_CAPACITY) as u32) };
-        let planned = padded.as_ref().and_then(|_| self.inst.verify_planned(&row_refs, &slots, &positions, kind));
-        let (picked, hidden): (Vec<Vec<(u32, f32)>>, Vec<f32>) = match planned {
-            Some((HeadOut::Ids(ids), hidden)) => (ids.into_iter().map(|t| vec![(t, 0.0)]).collect(), hidden),
-            Some((HeadOut::TopK(top), hidden)) => (top, hidden),
+        // Where each row's hidden state goes in the drafter's pending store (the rows that stand are counted at the commit).
+        let counts: Vec<u32> = work.iter().map(|r| r.len() as u32).collect();
+        let dests = self.inst.mtp_verify_destinations(&slots, &counts);
+        let planned = padded.as_ref().and_then(|_| self.inst.verify_planned(&row_refs, &slots, &positions, kind, &dests));
+        let picked: Vec<Vec<(u32, f32)>> = match planned {
+            Some(HeadOut::Ids(ids)) => ids.into_iter().map(|t| vec![(t, 0.0)]).collect(),
+            Some(HeadOut::TopK(top)) => top,
             None => {
                 self.inst.set_adapter_rows(&adapter_rows);
                 let layers = gpu_core::markers::range(c"verify.layers");
                 let hidden = self.inst.stack_verify_hidden(&row_refs, &slots, &positions).unwrap_or_else(|e| panic!("{e}"));
                 drop(layers);
                 self.inst.set_adapter_rows(&[]);
+                if !dests.is_empty() {
+                    self.inst.mtp_tap(&hidden, &dests);
+                }
                 let _head = gpu_core::markers::range(c"verify.head");
-                let picked = if cands <= 1 { self.inst.head_argmax_rows(&hidden, n).into_iter().map(|t| vec![(t, 0.0)]).collect() } else { self.inst.head_topk_rows(&hidden, n, cands.min(TOPK_CAPACITY) as u32) };
-                (picked, hidden)
+                if cands <= 1 { self.inst.head_argmax_rows(&hidden, n).into_iter().map(|t| vec![(t, 0.0)]).collect() } else { self.inst.head_topk_rows(&hidden, n, cands.min(TOPK_CAPACITY) as u32) }
             }
         };
-        self.verifying = Some(Verifying { slots, rows: work.to_vec(), hidden });
+        self.verifying = Some(Verifying { slots, rows: work.to_vec() });
         self.times.verify += t0.elapsed();
         let mut flat = picked.into_iter();
         // What was asked for: the padding rows' answers are dropped, and their positions leave the tables
@@ -1612,7 +1627,7 @@ impl Qwen35GgufEngine {
         let v = self.verifying.take().expect("commit_verified without a verify step");
         let counts: Vec<u32> = v.rows.iter().map(|r| r.len() as u32).collect();
         self.inst.commit_verify(&v.slots, &counts, keep);
-        self.inst.mtp_record_verified(&v.slots, &v.rows, keep, &v.hidden);
+        self.inst.mtp_keep_verified(&v.slots, &v.rows, keep);
         self.times.commit += t0.elapsed();
     }
     /// [`PagedDecoder::draft`]'s work.
@@ -1622,7 +1637,7 @@ impl Qwen35GgufEngine {
         }
         // No prompt is being read in to carry the feeds on; a feed not finished by now would keep its sequence
         // from drafting.
-        self.advance_feeds(FEED_ROWS_PER_SLICE);
+        self.advance_feeds(FEED_ROWS_PER_DRAFT);
         let slots: Vec<u32> = queries.iter().map(|q| self.slot(q.table)).collect();
         let consumed: Vec<u32> = queries.iter().map(|q| q.table.len()).collect();
         let next: Vec<u32> = queries.iter().map(|q| *q.context.last().expect("a running sequence has context")).collect();
