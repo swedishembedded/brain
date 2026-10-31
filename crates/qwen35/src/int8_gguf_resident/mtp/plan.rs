@@ -33,7 +33,7 @@
 
 use super::*;
 use crate::decode_tape::DecodeInputs;
-use crate::model::rms_step;
+use crate::model::final_norm_step;
 use gpu_core::tape::Tape;
 
 /// Layer invocations a recording holds: the catch-up and the chain steps after the first proposal.
@@ -130,18 +130,18 @@ impl Qwen35GgufInstance {
         g.submit(&[], &s);
         let pair = g.storage(u64::from(rows * 2 * d));
         let e_normed = g.storage(u64::from(rows * d));
-        g.submit(&[], &[rms_step(g, &embedded, &m.enorm_dev, &e_normed, d, rows)]);
+        g.submit(&[], &[final_norm_step(g, &embedded, &m.enorm_dev, &e_normed, d, rows)]);
         g.submit(&[], &[MtpDrafter::copy_cols_step(g, &e_normed, &pair, rows, d, d, 0, 2 * d, 0)]);
         let h_in = match hidden_norm {
             Some(norm) => {
                 let normed = g.storage(u64::from(rows * d));
-                g.submit(&[], &[rms_step(g, hidden, norm, &normed, d, rows)]);
+                g.submit(&[], &[final_norm_step(g, hidden, norm, &normed, d, rows)]);
                 normed
             }
             None => hidden.clone(),
         };
         let h_normed = g.storage(u64::from(rows * d));
-        g.submit(&[], &[rms_step(g, &h_in, &m.hnorm_dev, &h_normed, d, rows)]);
+        g.submit(&[], &[final_norm_step(g, &h_in, &m.hnorm_dev, &h_normed, d, rows)]);
         g.submit(&[], &[MtpDrafter::copy_cols_step(g, &h_normed, &pair, rows, d, d, 0, 2 * d, d)]);
         let proj = g.storage(u64::from(rows * d));
         let mut s = Vec::new();
@@ -273,7 +273,7 @@ impl Qwen35GgufInstance {
             };
             // The shared head over the head's own norm, then the pick.
             let normed = g.storage(u64::from(n * d));
-            g.submit(&[], &[rms_step(g, &out, &m.head_norm, &normed, d, n)]);
+            g.submit(&[], &[final_norm_step(g, &out, &m.head_norm, &normed, d, n)]);
             let logits = crate::stream::head_logits_issue(g, m.stage.ops(), &self.cfg, &m.head_norm, &self.head.w, &out, n);
             let picked = crate::model::argmax_rows_issue_of(g, &logits, n, self.cfg.vocab);
             g.submit(&[], &[MtpDrafter::copy_cols_step(g, &picked, ids, 1, n, n, 0, n, step as u32 * n)]);

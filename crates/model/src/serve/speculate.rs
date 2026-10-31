@@ -308,16 +308,22 @@ const ROUND_MARGIN: f64 = 1.05;
 /// Windows are bounded by the verify kernels' rows per sequence; the economics decide below it.
 const MAX_WINDOW: usize = 7;
 
-/// Running estimate of how many tokens per second a kind of step produces.
+/// Running estimate of how many tokens per second a kind of step produces: the mean round over the last [`RATE_WINDOW`] ones, less
+/// the rounds that took far longer than their median (a recording, a first launch, a clock change). A window follows the text a
+/// sequence is producing (acceptance moves with it) in a handful of rounds, and one stall costs the estimate nothing once it is
+/// trimmed, which a decayed mean it would carry for tens of rounds.
 #[derive(Clone, Copy, Debug, Default)]
 struct Rate {
+    /// Mean tokens and seconds of a round, over the rounds kept.
     tokens: f64,
     secs: f64,
     samples: u32,
+    ring: [(f64, f64); RATE_WINDOW],
+    filled: usize,
 }
 
-/// Weight of the newest step in a [`Rate`].
-const RATE_EWMA: f64 = 0.25;
+/// Rounds a [`Rate`] remembers.
+const RATE_WINDOW: usize = 8;
 /// Steps after which the mode the gate is not using is tried again, so its
 /// estimate follows the workload (acceptance, batch composition) rather than
 /// freezing at the first measurement.
@@ -325,20 +331,25 @@ const GATE_REFRESH_STEPS: u32 = 16;
 /// Steps of a mode the gate measures before it may rule that mode out: the first steps of a shape pay for kernel selection
 /// and recording, and say nothing about what the mode costs once it runs.
 const GATE_WARMUP_STEPS: u32 = 2;
-/// A step this many times slower than the mode's running estimate is a stall (a first launch, a clock change), not the cost.
-const GATE_OUTLIER_FACTOR: f64 = 3.0;
+/// A round this many times slower than the median of the window is a stall, not the cost.
+const GATE_OUTLIER_FACTOR: f64 = 1.5;
 
 impl Rate {
     fn observe(&mut self, tokens: usize, secs: f64) {
-        // The first sample of a mode pays for what it sets up (a recording, a kernel selection): the second replaces it.
-        if self.samples <= 1 {
-            (self.tokens, self.secs) = (tokens as f64, secs);
-        } else {
-            let secs = secs.min(self.secs * GATE_OUTLIER_FACTOR);
-            self.tokens += RATE_EWMA * (tokens as f64 - self.tokens);
-            self.secs += RATE_EWMA * (secs - self.secs);
-        }
         self.samples += 1;
+        // The first sample of a mode pays for what it sets up (a recording, a kernel selection): it stands until the second.
+        if self.samples == 1 {
+            (self.tokens, self.secs) = (tokens as f64, secs);
+            return;
+        }
+        self.ring[(self.samples as usize - 2) % RATE_WINDOW] = (tokens as f64, secs);
+        self.filled = (self.samples as usize - 1).min(RATE_WINDOW);
+        let mut by_secs: Vec<f64> = self.ring[..self.filled].iter().map(|r| r.1).collect();
+        by_secs.sort_by(f64::total_cmp);
+        let limit = by_secs[by_secs.len() / 2] * GATE_OUTLIER_FACTOR;
+        let kept: Vec<&(f64, f64)> = self.ring[..self.filled].iter().filter(|r| r.1 <= limit).collect();
+        self.tokens = kept.iter().map(|r| r.0).sum::<f64>() / kept.len() as f64;
+        self.secs = kept.iter().map(|r| r.1).sum::<f64>() / kept.len() as f64;
     }
 
     fn per_second(&self) -> f64 {
@@ -437,7 +448,12 @@ impl CostGate {
         Some(if best == 0 {
             format!("speculation is off at about {active} running sequences: plain decoding makes {plain:.0} tokens/s per step and no window beats it (the best drafts make {:.0})", (1..=GATE_MAX_WINDOW).map(|k| b.arms[k].per_second()).filter(|r| r.is_finite()).fold(0.0, f64::max))
         } else {
-            format!("speculation is on at about {active} running sequences: {best} proposals a sequence make {lead:.0} tokens/s per step against {plain:.0} plain")
+            format!(
+                "speculation is on at about {active} running sequences: {best} proposals a sequence make {lead:.0} tokens/s per step ({:.2} tokens in {:.1} ms) against {plain:.0} plain ({:.1} ms)",
+                b.arms[best].tokens,
+                b.arms[best].secs * 1e3,
+                b.arms[0].secs * 1e3
+            )
         })
     }
 
@@ -585,9 +601,12 @@ pub(super) struct PrefillGate {
     skipped: u32,
 }
 
+/// Weight of the newest reply in the mean reply length.
+const REPLY_EWMA: f64 = 0.25;
+
 impl PrefillGate {
     pub(super) fn observe_reply(&mut self, tokens: usize) {
-        self.reply_tokens = Some(self.reply_tokens.map_or(tokens as f64, |m| m + RATE_EWMA * (tokens as f64 - m)));
+        self.reply_tokens = Some(self.reply_tokens.map_or(tokens as f64, |m| m + REPLY_EWMA * (tokens as f64 - m)));
     }
 
     /// Prepare the drafter for a prompt whose sequence will decode among about `active` others.
@@ -918,6 +937,21 @@ impl<D: PagedDecoder> Scheduler<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stalled_round_does_not_move_a_rate_and_a_change_of_text_does() {
+        let mut r = Rate::default();
+        for _ in 0..8 {
+            r.observe(2, 0.015);
+        }
+        r.observe(2, 0.200);
+        assert!((r.per_second() - 2.0 / 0.015).abs() < 1.0, "one recording or clock stall is trimmed: {}", r.per_second());
+        // Text that is accepted less: the window follows within its length.
+        for _ in 0..RATE_WINDOW {
+            r.observe(1, 0.015);
+        }
+        assert!((r.per_second() - 1.0 / 0.015).abs() < 1.0, "{}", r.per_second());
+    }
 
     /// A bucket of four sequences where plain steps take 20 ms for four tokens, a window of two 60 ms for sixteen and a
     /// window of three 90 ms for twenty-four: more tokens a second than plain, the same for the longer window.

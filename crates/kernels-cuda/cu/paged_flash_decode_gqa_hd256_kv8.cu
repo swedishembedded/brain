@@ -151,12 +151,15 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_g
     BRAIN_PDL_ENTRY();
     const unsigned int batch = params[0], n_heads = params[1], n_kv = params[2], block_size = params[5], max_bt = params[6];
     const unsigned int n_splits = params[7], tiles_per_split = params[8];
+    // The row is the fastest-varying part of the block index: the rows of one sequence in a speculative verify round are
+    // consecutive and read the same keys, so their blocks run at the same time and the second read of a tile is served by the
+    // L2 the first filled (with the row slowest, they were launched a whole grid apart and the tile was gone).
     const unsigned int wg = blockIdx.y * gridDim.x + blockIdx.x;
-    const unsigned int s = wg % n_splits;
-    const unsigned int wg2 = wg / n_splits;
-    const unsigned int kvh = wg2 % n_kv;
-    const unsigned int b = wg2 / n_kv;
-    if (b >= batch) { return; }  // block-uniform
+    const unsigned int b = wg % batch;
+    const unsigned int wg2 = wg / batch;
+    const unsigned int s = wg2 % n_splits;
+    const unsigned int kvh = wg2 / n_splits;
+    if (kvh >= n_kv) { return; }  // block-uniform
 
     const unsigned int tid = threadIdx.x, lane = tid & 31u, warp = tid >> 5;
     const unsigned int gid = lane >> 2, tig = lane & 3u;
