@@ -38,6 +38,8 @@ use crate::adapter_serving as adapters;
 
 use model::snapshot_prefix::{Entry as CacheEntry, SnapshotPrefixCache};
 
+use super::mtp::HiddenRows;
+
 /// Prompts shorter than this are not worth a snapshot row and a retained block.
 const MIN_CACHED_TOKENS: usize = 64;
 
@@ -311,8 +313,8 @@ struct PartialPrefill {
     fresh: bool,
     cacheable: bool,
     prefix_hidden: Option<Vec<f32>>,
-    /// Hidden states of the prefilled rows, for the MTP head.
-    rows_hidden: Vec<f32>,
+    /// Hidden states of the prefilled rows, slice after slice, for the MTP head's feed.
+    rows_hidden: Vec<HiddenRows>,
     /// Feed the MTP head this prompt: the engine's [`Qwen35GgufEngine::set_spec_prefill`]
     /// when the prompt began, and only on a prefix whose own head rows are valid.
     mtp_feed: bool,
@@ -707,7 +709,7 @@ impl Qwen35GgufEngine {
                 let hidden = e.payload.last_hidden.clone();
                 self.inst.store_prefilled(slot);
                 if seed_valid {
-                    self.inst.mtp_after_prefill(slot, prompt, rows, Some(&hidden), &[]);
+                    self.inst.mtp_after_prefill(slot, prompt, rows, Some(&hidden), Vec::new());
                 } else {
                     self.inst.mtp_skip_prefill(slot);
                 }
@@ -751,9 +753,13 @@ impl Qwen35GgufEngine {
     /// `prompt`. Returns the last row's hidden state.
     fn forward_slice(&mut self, table: &BlockTable, prompt: &[u32], p: &mut PartialPrefill, end: usize, resume: bool) -> Vec<f32> {
         let slot = self.slot(table);
-        let collect = (self.inst.has_mtp() && p.mtp_feed).then_some(&mut p.rows_hidden);
+        let mut rows = Vec::new();
+        let collect = (self.inst.has_mtp() && p.mtp_feed).then_some(&mut rows);
         self.inst.prefill_adapter_slot.set(adapters::slot_of(self.inst.stage_models(), table.kv_namespace()));
         let hidden = self.inst.prefill_hidden(prompt, p.done, end, slot, resume, collect).unwrap_or_else(|e| panic!("{e}"));
+        if !rows.is_empty() {
+            p.rows_hidden.push(HiddenRows::Host(rows));
+        }
         self.inst.prefill_adapter_slot.set(LORA_SLOT_NONE);
         hidden
     }
@@ -781,7 +787,7 @@ impl Qwen35GgufEngine {
         }
         let head_rows_filled = if p.mtp_feed {
             let started = std::time::Instant::now();
-            match self.inst.mtp_begin_feed(slot, prompt, p.start, p.prefix_hidden.as_deref(), &p.rows_hidden) {
+            match self.inst.mtp_begin_feed(slot, prompt, p.start, p.prefix_hidden.as_deref(), std::mem::take(&mut p.rows_hidden)) {
                 FeedStart::Pending(feed) if defer_feed => {
                     self.feeds.push(DeferredFeed { feed, namespace: table.kv_namespace(), prompt: prompt.to_vec(), secs: started.elapsed().as_secs_f64() });
                     // The cache entries are marked once the feed has run.
@@ -1010,23 +1016,21 @@ impl Qwen35GgufEngine {
         let mut decoded = Vec::new();
         if multi && !live.is_empty() || decode.is_some() && !live.is_empty() {
             let has_mtp = self.inst.has_mtp() && live.iter().any(|(_, _, p, _)| p.mtp_feed);
-            let jobs_view: Vec<MultiPrefillJob<'_>> = live.iter().map(|(i, slot, p, end)| MultiPrefillJob { prompt: &*jobs[*i].prompt, start: p.done, end: *end, slot: *slot }).collect();
+            let jobs_view: Vec<MultiPrefillJob<'_>> = live.iter().map(|(i, slot, p, end)| MultiPrefillJob { prompt: &*jobs[*i].prompt, start: p.done, end: *end, slot: *slot, feed: has_mtp && p.mtp_feed }).collect();
             let out = match decode {
-                Some(LeadRows::Decode(tokens, slots, positions)) => self.inst.mixed_hidden((tokens, slots, positions), &jobs_view, has_mtp).map(|(rows, out)| {
+                Some(LeadRows::Decode(tokens, slots, positions)) => self.inst.mixed_hidden((tokens, slots, positions), &jobs_view).map(|(rows, out)| {
                     decoded = rows;
                     out
                 }),
-                Some(LeadRows::Verify { rows, slots, positions }) => self.inst.mixed_verify_hidden(rows, slots, positions, &jobs_view, has_mtp).map(|(lead, out)| {
+                Some(LeadRows::Verify { rows, slots, positions }) => self.inst.mixed_verify_hidden(rows, slots, positions, &jobs_view).map(|(lead, out)| {
                     decoded = lead;
                     out
                 }),
-                None => self.inst.prefill_hidden_multi(&jobs_view, has_mtp),
+                None => self.inst.prefill_hidden_multi(&jobs_view),
             }
             .unwrap_or_else(|e| panic!("{e}"));
             for ((_, _, p, _), r) in live.iter_mut().zip(out) {
-                if p.mtp_feed {
-                    p.rows_hidden.extend_from_slice(&r.all);
-                }
+                p.rows_hidden.extend(r.all);
                 hidden.push((r.last, true));
             }
         } else {
@@ -1145,7 +1149,9 @@ impl Qwen35GgufEngine {
             };
             let Some(done) = finished else { break };
             let Background { mut p, end, .. } = self.background.take().expect("checked above");
-            p.rows_hidden.extend_from_slice(&done.all);
+            if !done.all.is_empty() {
+                p.rows_hidden.push(HiddenRows::Host(done.all));
+            }
             match self.finish_slice(slot, jobs[i].table, jobs[i].prompt, p, end, done.last, SliceExit { state_in_pool: false, defer_feed: !wait }) {
                 // Back to the scheduler after a slice: a prompt that arrived meanwhile is considered now, and
                 // the decode step runs before the next slice. A finished prompt starts decoding.

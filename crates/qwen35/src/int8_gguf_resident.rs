@@ -1250,14 +1250,16 @@ struct MultiPrefillJob<'a> {
     start: usize,
     end: usize,
     slot: u32,
+    /// Keep every row's hidden state for the MTP head's feed ([`MultiPrefillRows::all`]).
+    feed: bool,
 }
 
 /// What a multi-sequence forward hands back for one job.
 struct MultiPrefillRows {
     /// The last row's `[d_model]` pre-norm hidden state.
     last: Vec<f32>,
-    /// Every row's, in order, when asked for (the MTP head's input); else empty.
-    all: Vec<f32>,
+    /// Every row's, in order, when the job feeds the MTP head: copied to a buffer of the card, where the feed reads it.
+    all: Option<mtp::HiddenRows>,
 }
 
 /// The same generated positions scored by both of this crate's decode tapes -
@@ -2355,21 +2357,21 @@ impl Qwen35GgufInstance {
     /// the one-sequence path uses), so the caller has written it there first, and
     /// the pool row is where the state is left. Returns each job's last row's
     /// `[d_model]` pre-norm hidden state and, when `collect`, all its rows'.
-    fn prefill_hidden_multi(&self, jobs: &[MultiPrefillJob<'_>], collect: bool) -> Result<Vec<MultiPrefillRows>, String> {
-        self.forward_rows(None, None, jobs, collect).map(|(_, rows)| rows)
+    fn prefill_hidden_multi(&self, jobs: &[MultiPrefillJob<'_>]) -> Result<Vec<MultiPrefillRows>, String> {
+        self.forward_rows(None, None, jobs).map(|(_, rows)| rows)
     }
 
     /// [`Self::prefill_hidden_multi`] with the next token of each sequence of `decode` (tokens, slots and positions,
     /// as [`Self::stack_decode_hidden`] takes them) carried by the same forward: its first element is the decode
     /// rows' `[bsz, d_model]` pre-norm hidden block, empty without any.
-    fn mixed_hidden(&self, decode: (&[u32], &[u32], &[u32]), jobs: &[MultiPrefillJob<'_>], collect: bool) -> Result<(Vec<f32>, Vec<MultiPrefillRows>), String> {
-        self.forward_rows(Some(decode), None, jobs, collect)
+    fn mixed_hidden(&self, decode: (&[u32], &[u32], &[u32]), jobs: &[MultiPrefillJob<'_>]) -> Result<(Vec<f32>, Vec<MultiPrefillRows>), String> {
+        self.forward_rows(Some(decode), None, jobs)
     }
 
     /// [`Self::mixed_hidden`] whose leading rows are a speculative verify step ([`Self::stack_verify_hidden`]'s rows):
     /// `rows[i]` are consecutive tokens of the sequence in `slots[i]`, the first at `positions[i]`. The recurrent state of
     /// each sequence is left after its last row, the states between rows kept for [`Self::commit_verify`].
-    fn mixed_verify_hidden(&self, rows: &[&[u32]], slots: &[u32], positions: &[u32], jobs: &[MultiPrefillJob<'_>], collect: bool) -> Result<(Vec<f32>, Vec<MultiPrefillRows>), String> {
+    fn mixed_verify_hidden(&self, rows: &[&[u32]], slots: &[u32], positions: &[u32], jobs: &[MultiPrefillJob<'_>]) -> Result<(Vec<f32>, Vec<MultiPrefillRows>), String> {
         let counts: Vec<u32> = rows.iter().map(|r| r.len() as u32).collect();
         let total: u32 = counts.iter().sum();
         if total > self.spec_rows {
@@ -2381,11 +2383,11 @@ impl Qwen35GgufInstance {
         if let Some(&p) = row_positions.iter().find(|&&p| p >= self.cap) {
             return Err(format!("{MODEL}: verify position {p} is beyond this instance's context capacity {}", self.cap));
         }
-        self.forward_rows(Some((&tokens, &row_slots, &row_positions)), Some((slots, &counts)), jobs, collect)
+        self.forward_rows(Some((&tokens, &row_slots, &row_positions)), Some((slots, &counts)), jobs)
     }
 
     /// `verify`: the leading rows are a verify step over these sequences (slots, rows each) and not unrelated sequences.
-    fn forward_rows(&self, decode: Option<(&[u32], &[u32], &[u32])>, verify: Option<(&[u32], &[u32])>, jobs: &[MultiPrefillJob<'_>], collect: bool) -> Result<(Vec<f32>, Vec<MultiPrefillRows>), String> {
+    fn forward_rows(&self, decode: Option<(&[u32], &[u32], &[u32])>, verify: Option<(&[u32], &[u32])>, jobs: &[MultiPrefillJob<'_>]) -> Result<(Vec<f32>, Vec<MultiPrefillRows>), String> {
         let d = self.cfg.d_model as usize;
         assert!(!jobs.is_empty() && jobs.iter().all(|j| j.start < j.end && j.end <= j.prompt.len()), "{MODEL}: a multi-sequence prefill needs at least one new token per job");
         let lead = decode.map_or(0, |(tokens, slots, positions)| {
@@ -2399,14 +2401,14 @@ impl Qwen35GgufInstance {
             let _embed = gpu_core::markers::range(c"mixed.embed");
             self.first_rows(&tokens, &mut host_rows)?
         };
-        // Only the rows the caller uses cross to the host: the decode rows, and per job its last row (every row
-        // when `collect`, the drafter's feed).
+        // Only the rows the caller uses cross to the host: the decode rows, and per job its last row. The rows of a job that feeds the
+        // MTP head are copied on the card instead.
         let wanted: Vec<(usize, usize)> = {
             let mut row0 = lead;
             let mut spans = vec![(0, lead)];
             for j in jobs {
                 let rows = j.end - j.start;
-                spans.push(if collect { (row0, rows) } else { (row0 + rows - 1, 1) });
+                spans.push((row0 + rows - 1, 1));
                 row0 += rows;
             }
             spans
@@ -2428,7 +2430,7 @@ impl Qwen35GgufInstance {
             },
             |_, _| {},
             |g, out| {
-                wanted
+                let host = wanted
                     .iter()
                     .map(|&(row0, rows)| {
                         let mut block = vec![0.0f32; rows * d];
@@ -2437,17 +2439,29 @@ impl Qwen35GgufInstance {
                         }
                         block
                     })
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>();
+                // The feeding jobs' rows stay on the card, ordered behind the forward that produced them.
+                let mut row0 = lead;
+                let fed = jobs
+                    .iter()
+                    .map(|j| {
+                        let rows = j.end - j.start;
+                        let block = j.feed.then(|| {
+                            let buf = g.storage((rows * d) as u64);
+                            g.submit(&[], &[mtp::MtpDrafter::copy_cols_step(g, out, &buf, rows as u32, d as u32, d as u32, (row0 * d) as u32, d as u32, 0)]);
+                            mtp::HiddenRows::Device { buf, rows }
+                        });
+                        row0 += rows;
+                        block
+                    })
+                    .collect::<Vec<_>>();
+                (host, fed)
             },
         );
+        let (blocks, fed) = blocks;
         let mut blocks = blocks.into_iter();
         let decoded = blocks.next().expect("the decode rows come first");
-        let out = blocks
-            .map(|block| {
-                let last = block[block.len() - d..].to_vec();
-                MultiPrefillRows { last, all: if collect { block } else { Vec::new() } }
-            })
-            .collect();
+        let out = blocks.zip(fed).map(|(last, all)| MultiPrefillRows { last, all }).collect();
         Ok((decoded, out))
     }
 

@@ -357,6 +357,9 @@ struct GateBucket {
     arms: [Rate; MAX_WINDOW + 1],
     /// Steps chosen here, for the refresh schedule.
     steps: u32,
+    /// The window that led when last reported ([`CostGate::verdict`]), and how many verdicts were reported.
+    leader: Option<usize>,
+    reported: u32,
 }
 
 /// **The self-calibrating crossover and window.** Whether a speculative step pays, and with how many proposals, depends on the
@@ -374,6 +377,9 @@ pub(super) struct CostGate {
 /// Most proposals a sequence is asked for in a gated round: the verify kernels' padded row counts past four cost a kernel switch
 /// each (measured), which no acceptance this workload reaches repays.
 const GATE_MAX_WINDOW: usize = 4;
+
+/// Verdicts reported per bucket: the first, and the changes after it that a person reading the log needs.
+const GATE_MAX_REPORTS: u32 = 4;
 
 /// Windows timed first, in this order; a longer one is timed when it is beside the best (`CostGate::choose`).
 const GATE_TRY_ORDER: [usize; 3] = [2, 1, 3];
@@ -412,6 +418,27 @@ impl CostGate {
             return if turn.is_multiple_of(3) { 0 } else { beside[turn % 2] };
         }
         best
+    }
+
+    /// What the gate has settled for this bucket, once per change of the leading window: the line the operator reads to learn
+    /// whether speculation runs at this batch size (`None` while it is still timing the windows or when nothing changed).
+    pub(super) fn verdict(&mut self, bucket: usize, active: usize) -> Option<String> {
+        let b = &mut self.buckets[bucket];
+        if b.arms[0].samples == 0 || GATE_TRY_ORDER.iter().any(|&k| b.arms[k].samples < GATE_WARMUP_STEPS) || b.reported >= GATE_MAX_REPORTS {
+            return None;
+        }
+        let best = (0..=GATE_MAX_WINDOW).filter(|&k| b.arms[k].samples > 0).max_by(|&x, &y| b.arms[x].per_second().total_cmp(&b.arms[y].per_second()))?;
+        if b.leader == Some(best) {
+            return None;
+        }
+        b.leader = Some(best);
+        b.reported += 1;
+        let (plain, lead) = (b.arms[0].per_second(), b.arms[best].per_second());
+        Some(if best == 0 {
+            format!("speculation is off at about {active} running sequences: plain decoding makes {plain:.0} tokens/s per step and no window beats it (the best drafts make {:.0})", (1..=GATE_MAX_WINDOW).map(|k| b.arms[k].per_second()).filter(|r| r.is_finite()).fold(0.0, f64::max))
+        } else {
+            format!("speculation is on at about {active} running sequences: {best} proposals a sequence make {lead:.0} tokens/s per step against {plain:.0} plain")
+        })
     }
 
     /// The best speculative window's measured seconds per token and plain decoding's, once both were timed here; the saving of a
@@ -739,6 +766,11 @@ impl<D: PagedDecoder> Scheduler<D> {
         // Speculation is ranked on tokens a second alone: at a fixed batch, a step that produces more tokens a second also gives
         // every sequence a shorter mean interval between tokens, so a step-duration target has nothing to add to the comparison.
         let window = if gated { self.gate.choose(bucket, kmax, None) } else { kmax };
+        if gated {
+            if let Some(line) = self.gate.verdict(bucket, active.len()) {
+                eprintln!("brain: {line}");
+            }
+        }
         if gated && window == 0 {
             self.spec_stats.gated_steps += 1;
             return None;

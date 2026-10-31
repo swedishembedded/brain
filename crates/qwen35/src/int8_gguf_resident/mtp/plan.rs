@@ -104,7 +104,7 @@ struct Round {
 
 impl MtpDrafter {
     /// `copy_cols` of `cols` columns of `src` (row stride `src_stride`) into `dst` (row stride `dst_stride`) at `dst_off`.
-    pub(super) fn copy_cols_step(g: &Gpu, src: &DeviceBuffer, dst: &DeviceBuffer, rows: u32, cols: u32, src_stride: u32, src_off: u32, dst_stride: u32, dst_off: u32) -> gpu_core::Step {
+    pub(in super::super) fn copy_cols_step(g: &Gpu, src: &DeviceBuffer, dst: &DeviceBuffer, rows: u32, cols: u32, src_stride: u32, src_off: u32, dst_stride: u32, dst_off: u32) -> gpu_core::Step {
         let kernel = g.kernel_index("copy_cols").expect("copy_cols is registered with the qwen35 pipelines");
         g.step(kernel, &[src, dst], &[rows, cols, src_stride, src_off, dst_stride, dst_off], rows * cols)
     }
@@ -151,10 +151,10 @@ impl Qwen35GgufInstance {
         proj
     }
 
-    /// Feed the head the pairs `(hidden[i], tokens[i])` (`hidden`: `[n, d]` pre-norm target rows on the host) at head
-    /// positions `from..from + n` of `slot`, a chunk at a time: the prompt's rows, or a slot's pending run that grew too
-    /// long. Each chunk is uploaded, normed, projected and run through the head's layer on the card.
-    pub(super) fn mtp_feed_run(&self, slot: u32, from: u32, tokens: &[u32], hidden: &[f32]) -> Result<(), String> {
+    /// Feed the head the pairs `(hidden[at + i], tokens[i])` (`hidden`: pre-norm target rows) at head positions
+    /// `from..from + tokens.len()` of `slot`, a chunk at a time: the prompt's rows, or a slot's pending run that grew too long.
+    /// Each chunk is normed, projected and run through the head's layer on the card.
+    pub(super) fn mtp_feed_run(&self, slot: u32, from: u32, tokens: &[u32], hidden: &HiddenRun, at: usize) -> Result<(), String> {
         let m = self.mtp.as_ref().expect("a feed has a head");
         let g = &m.stage.gpu;
         let d = self.cfg.d_model as usize;
@@ -163,14 +163,13 @@ impl Qwen35GgufInstance {
         }
         let view = m.caches.view(slot);
         for (i, chunk) in tokens.chunks(FEED_CHUNK_ROWS).enumerate() {
-            let at = i * FEED_CHUNK_ROWS;
+            let off = i * FEED_CHUNK_ROWS;
             let rows = chunk.len() as u32;
             let ids = g.storage(u64::from(rows));
             g.write(&ids, chunk);
-            let h = g.storage((chunk.len() * d) as u64);
-            g.write_f32(&h, &hidden[at * d..(at + chunk.len()) * d]);
+            let h = hidden.stage(g, at + off, chunk.len());
             let proj = self.issue_pairs(g, &ids, &h, m.normed_hidden.then_some(&m.target_norm_dev), rows);
-            m.stage.run_prefill_chunk_stage(chunk, from + at as u32, &view, Some(StageRows::device(g, &proj, chunk.len() * d)));
+            m.stage.run_prefill_chunk_stage(chunk, from + off as u32, &view, Some(StageRows::device(g, &proj, chunk.len() * d)));
         }
         Ok(())
     }

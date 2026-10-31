@@ -495,6 +495,10 @@ pub const SPECULATION_DEFAULTS: &[Rule<qwen35::int8_gguf_resident::SpeculativeMo
     Rule { when: |_| true, ranked: &[qwen35::int8_gguf_resident::SpeculativeMode::Off], why: "speculation verifies with CUDA kernels only" },
 ];
 
+/// Packed verify rows an FP8 directory keeps recurrent-state scratch for (2.4 GiB at the 27B shape): four sequences with a window of three,
+/// eight with one. Past that batch a verify round is compute-bound and the scheduler's own timing keeps decoding plainly.
+pub const HF_SPEC_SCRATCH_ROWS: u32 = 16;
+
 /// How many prompts a GGUF resident keeps for prefix reuse.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrefixCache {
@@ -600,7 +604,8 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
         return Err("no GPU is budgeted for it (its weights are device buffers; there is no CPU path)".to_string());
     }
     let build = |kv, mode, prefix_slots, cap| {
-        let spec = SpecServing { mode, ..SpecServing::default() };
+        let scratch_rows = if ResidentCheckpoint::is_hf_dir(gguf_path) { HF_SPEC_SCRATCH_ROWS } else { SpecServing::default().scratch_rows };
+        let spec = SpecServing { mode, scratch_rows, ..SpecServing::default() };
         // Paged KV: sequences hold the blocks their tokens need from one shared pool, so a long context
         // costs only the sequences that use it, and the batch is not multiplied by the context.
         let r = Qwen35GgufResident::new(gguf_path.to_string(), devices.clone(), cap, tier.clone()).with_kv_tier(kv).with_max_batch(max_batch).with_prefix_slots(prefix_slots).with_speculation(spec).with_exact_decode(cfg.exact_decode).with_act_choice(cfg.act_precision.unwrap_or_default()).with_gdn_state(cfg.gdn_state.unwrap_or_default()).with_kv_block_rows(qwen35::int8_gguf_resident::KV_BLOCK_ROWS);
@@ -627,15 +632,11 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
     let hw = Hardware::detected();
     let probe_cap = cfg.ctx.unwrap_or(1).max(1);
     let kv = given_or_chosen(cfg.kv, "--kv-cache", KV_DEFAULTS, hw, &mut chosen, |kv| fits(build(kv, SpeculativeMode::Off, 0, probe_cap)));
-    // The FP8 directory's own MTP head is opt-in (`--speculative mtp|auto`): measured on the serving scoreboard its drafts did not yet repay
-    // their bookkeeping at any concurrency, so the default serves it plainly.
+    // The FP8 directory's own MTP head drafts when the scheduler has measured that a round of drafts beats plain decoding at the batch
+    // it is serving (it times both, per batch size), so the default is `auto`.
     let mode = match cfg.speculative {
         None if gdn_bf16 => {
             chosen.push("--speculative off: a bf16 recurrent-state pool (--gdn-state bf16) has no verify round".to_string());
-            SpeculativeMode::Off
-        }
-        None if ResidentCheckpoint::is_hf_dir(gguf_path) => {
-            chosen.push("--speculative off: the FP8 release's MTP head is opt-in until it repays its bookkeeping (--speculative mtp)".to_string());
             SpeculativeMode::Off
         }
         _ => given_or_chosen(cfg.speculative, "--speculative", SPECULATION_DEFAULTS, hw, &mut chosen, |mode| fits(build(kv, mode, 0, probe_cap))),

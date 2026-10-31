@@ -80,13 +80,71 @@ pub(super) struct PromptFeed {
     done: usize,
     /// `[pairs]`: the token each pair is partnered with.
     tokens: Vec<u32>,
-    /// `[pairs, d]`: the target's hidden state of each pair.
-    hidden: Vec<f32>,
+    /// The target's hidden state of each pair, row `i` for pair `i`.
+    hidden: HiddenRun,
 }
 
 impl PromptFeed {
     pub(super) fn slot(&self) -> u32 {
         self.slot
+    }
+}
+
+/// A block of the target's hidden rows a feed will read: on the host (the sequential prefill reads its rounds back) or already
+/// on the card (a multi-sequence forward leaves its rows there, and they stay there).
+pub(super) enum HiddenRows {
+    Host(Vec<f32>),
+    Device { buf: DeviceBuffer, rows: usize },
+}
+
+impl HiddenRows {
+    fn rows(&self, d: usize) -> usize {
+        match self {
+            HiddenRows::Host(v) => v.len() / d,
+            HiddenRows::Device { rows, .. } => *rows,
+        }
+    }
+}
+
+/// The rows of consecutive [`HiddenRows`] blocks as one run.
+pub(super) struct HiddenRun {
+    blocks: Vec<HiddenRows>,
+    d: usize,
+}
+
+impl HiddenRun {
+    pub(super) fn new(d: usize, blocks: Vec<HiddenRows>) -> HiddenRun {
+        HiddenRun { blocks, d }
+    }
+
+    pub(super) fn rows(&self) -> usize {
+        self.blocks.iter().map(|b| b.rows(self.d)).sum()
+    }
+
+    /// Rows `from..from + count` of the run as one `[count, d]` device buffer on `g`.
+    pub(super) fn stage(&self, g: &Gpu, from: usize, count: usize) -> DeviceBuffer {
+        let d = self.d;
+        let out = g.storage((count * d) as u64);
+        let (mut at, mut put) = (0usize, 0usize);
+        for block in &self.blocks {
+            let rows = block.rows(d);
+            let (lo, hi) = (from.max(at), (from + count).min(at + rows));
+            if lo < hi {
+                let (src, n) = (lo - at, hi - lo);
+                match block {
+                    HiddenRows::Host(v) => g.write_f32_at(&out, (put * d) as u64, &v[src * d..(src + n) * d]),
+                    HiddenRows::Device { buf, .. } => g.submit(&[], &[MtpDrafter::copy_cols_step(g, buf, &out, n as u32, d as u32, d as u32, (src * d) as u32, d as u32, (put * d) as u32)]),
+                }
+                put += n;
+            }
+            at += rows;
+        }
+        out
+    }
+
+    /// Row `row` of the run, on the host.
+    fn row_host(&self, g: &Gpu, row: usize) -> Vec<f32> {
+        g.read(&self.stage(g, row, 1), self.d)
     }
 }
 
@@ -346,7 +404,7 @@ impl Qwen35GgufInstance {
     /// `true` when every pair of the prompt reached the head's KV (the rows a
     /// later prompt may resume from); `false` when the head was absent or the feed
     /// stopped early.
-    pub(super) fn mtp_after_prefill(&mut self, slot: u32, prompt: &[u32], start: usize, prev_hidden: Option<&[f32]>, carry: &[f32]) -> bool {
+    pub(super) fn mtp_after_prefill(&mut self, slot: u32, prompt: &[u32], start: usize, prev_hidden: Option<&[f32]>, carry: Vec<HiddenRows>) -> bool {
         match self.mtp_begin_feed(slot, prompt, start, prev_hidden, carry) {
             FeedStart::Unavailable => false,
             FeedStart::Complete => true,
@@ -365,33 +423,37 @@ impl Qwen35GgufInstance {
     /// [`Self::mtp_advance_feed`] to run a few rounds at a time. Until it is done the slot does not draft (a draft
     /// would attend over rows the feed has not written) and its decode steps are not recorded: the sequence
     /// resumes drafting from the first step after the feed, as one that was not fed does.
-    pub(super) fn mtp_begin_feed(&mut self, slot: u32, prompt: &[u32], start: usize, prev_hidden: Option<&[f32]>, carry: &[f32]) -> FeedStart {
-        let Self { mtp, .. } = self;
+    pub(super) fn mtp_begin_feed(&mut self, slot: u32, prompt: &[u32], start: usize, prev_hidden: Option<&[f32]>, carry: Vec<HiddenRows>) -> FeedStart {
+        let Self { mtp, shards, .. } = self;
         let Some(m) = mtp.as_mut() else { return FeedStart::Unavailable };
         let d = m.d;
-        let (first, hidden): (usize, Vec<f32>) = match (start, prev_hidden) {
-            (0, _) => (0, carry.to_vec()),
-            (s, Some(prev)) => (s - 1, prev.iter().chain(carry).copied().collect()),
+        let (first, blocks): (usize, Vec<HiddenRows>) = match (start, prev_hidden) {
+            (0, _) => (0, carry),
+            (s, Some(prev)) => (s - 1, std::iter::once(HiddenRows::Host(prev.to_vec())).chain(carry).collect()),
             (_, None) => return FeedStart::Unavailable, // no hidden state for the cached prefix's last row: this slot drafts from scratch
         };
+        let run = HiddenRun::new(d, blocks);
         let len = prompt.len();
-        debug_assert_eq!(hidden.len(), (len - first) * d);
+        debug_assert_eq!(run.rows(), len - first);
         m.slots.insert(slot, SlotState { fed: (len - 1) as u32, toks: vec![prompt[len - 1]] });
-        m.write_pending(slot, 0, &hidden[(len - 1 - first) * d..]);
+        let head_gpu = &shards.last().expect("a stage").qwen35.gpu;
+        m.write_pending(slot, 0, &run.row_host(head_gpu, len - 1 - first));
         // Complete pairs: positions first..len-1 pair with prompt[j + 1].
         if first + 1 >= len {
             return FeedStart::Complete;
         }
         let n = len - 1 - first;
         m.feeding.insert(slot);
-        FeedStart::Pending(PromptFeed { slot, first, done: 0, tokens: prompt[first + 1..first + 1 + n].to_vec(), hidden: hidden[..n * d].to_vec() })
+        FeedStart::Pending(PromptFeed { slot, first, done: 0, tokens: prompt[first + 1..first + 1 + n].to_vec(), hidden: run })
     }
 
     /// Run up to `rows` more of `feed`'s pairs through the head.
     pub(super) fn mtp_advance_feed(&mut self, feed: &mut PromptFeed, rows: usize) -> FeedStep {
-        let Some(d) = self.mtp.as_ref().map(|m| m.d) else { return FeedStep::Failed };
+        if self.mtp.is_none() {
+            return FeedStep::Failed;
+        }
         let end = feed.tokens.len().min(feed.done.saturating_add(rows));
-        let run = self.mtp_feed_run(feed.slot, (feed.first + feed.done) as u32, &feed.tokens[feed.done..end], &feed.hidden[feed.done * d..end * d]);
+        let run = self.mtp_feed_run(feed.slot, (feed.first + feed.done) as u32, &feed.tokens[feed.done..end], &feed.hidden, feed.done);
         let m = self.mtp.as_mut().expect("checked above");
         if let Err(e) = run {
             eprintln!("{MODEL}: MTP prefill failed, this sequence drafts from scratch: {e}");
@@ -524,7 +586,7 @@ impl Qwen35GgufInstance {
             let toks = st.toks[1..=n].to_vec();
             let head_gpu = &self.shards.last().expect("a stage").qwen35.gpu;
             let hidden = m.read_pending(head_gpu, slot, rows);
-            let fed_ok = self.mtp_feed_run(slot, fed, &toks, &hidden[..n * m.d]);
+            let fed_ok = self.mtp_feed_run(slot, fed, &toks, &HiddenRun::new(m.d, vec![HiddenRows::Host(hidden[..n * m.d].to_vec())]), 0);
             let m = self.mtp.as_mut().expect("checked above");
             match fed_ok {
                 Ok(()) => {
