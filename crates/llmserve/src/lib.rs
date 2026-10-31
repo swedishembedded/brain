@@ -589,15 +589,17 @@ pub fn run_open_scheduled<D: PagedDecoder>(
         if group.live() == 0 && front.stale() {
             return OpenGroup::Refresh { numbered: group.jobs.len() };
         }
-        // Whatever waits for a slot is first asked whether it can ever run: a request that
-        // cannot is answered now, not after the running ones finish.
-        feed.screen(&mut |inv| group.refusal(inv));
+        // Free slots are filled first: admission refuses a request that can never run with the
+        // same message, so screening one about to be taken would only parse it twice.
         for inv in feed.take(capacity.saturating_sub(group.live())) {
             let (bi, immediate) = group.admit(&inv, progress);
             if let Some(result) = immediate {
                 feed.finish(bi, result);
             }
         }
+        // Whatever still waits for a slot is asked whether it can ever run: a request that
+        // cannot is answered now, not after the running ones finish.
+        feed.screen(&mut |inv| group.refusal(inv));
         if group.live() == 0 {
             if feed.close() {
                 return OpenGroup::Closed;

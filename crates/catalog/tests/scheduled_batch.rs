@@ -303,3 +303,25 @@ fn a_request_that_cannot_run_is_refused_while_the_group_is_full() {
     assert!(feed.events[0].starts_with("refused: test: needs 34 tokens, engine capacity is 24"), "the over-length request is refused first, before anything finishes: {:?}", feed.events);
     assert_eq!(&feed.events[1..], ["finished 0: ok", "finished 1: ok"], "the running request ends, then the one that fits is served");
 }
+
+/// A request that finds a free slot is parsed once: rendering and tokenizing a long prompt is host time the card
+/// waits for, so the group does not screen what it is about to take (and parse again) anyway.
+#[test]
+fn a_request_with_a_free_slot_is_parsed_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let parses = std::sync::Arc::new(AtomicUsize::new(0));
+    let counted = parses.clone();
+    let front = TextFrontend {
+        tok: byte_tokenizer(),
+        stop: Vec::new(),
+        label: "test",
+        parse: std::sync::Arc::new(move |tok: &QwenBpe, inv: &Invocation| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            raw_parse(tok, inv)
+        }),
+    };
+    let mut feed = WaitingFeed { waiting: vec![(inv("late one", 2, 0.0, 5), false), (inv("late two", 2, 0.0, 6), false)], events: Vec::new() };
+    llmserve::run_open_scheduled(&mut scheduler(4), &front, &[inv("first", 2, 0.0, 4)], 4, 0, &mut |_, _| {}, &mut feed);
+    assert_eq!(feed.events, ["finished 0: ok", "finished 1: ok", "finished 2: ok"]);
+    assert_eq!(parses.load(Ordering::SeqCst), 3, "each of the three requests is parsed once");
+}
