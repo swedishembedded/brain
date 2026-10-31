@@ -453,3 +453,11 @@ Mixed-iteration idle (knowledge 392, 2026-10-30): a prompt start no longer waits
   the prep solves by blocked forward substitution on tensor cores; `gdn_conv_silu_seg_vec` normalises query/key once. Open: 700-row round target 0.08 (block latency: 12.9 k cycles
   a prep block alone), the gated norm (150 us at 8K, 250 MB roof 76) and the convolution (195, roof ~100), a concurrent prep/recurrence kernel to keep the scratch in L2, the train-form
   forward (needs T for the backward).
+
+- 2026-10-31 (long-prompt TTFT, knowledge 398): uncached 32.5K prompt first token 3.50-3.60 -> 2.93-3.00 s (scoreboard long row median TTFT 3405 -> 2929 ms, c=1 131 -> 115 ms, c=4/16/64 unchanged:
+  c=64 861/862 base vs 863/868 new on the same card). A lone prompt's slice takes the multi-sequence forward (embedding gathered on the card, one row read, fused kernels: idle card 276 -> 29 ms,
+  kernel time 3224 -> 2993 ms), reads in at 4096 rows (`MixedLimits::lone_prompt_rows`; shared forwards stay 2048; default context 774144 -> 729088), tokenises on up to 16 threads (87 -> 14 ms)
+  and runs the prefill attention unsplit from 2048 rows (2-12 % per call). Request timeline: JSON 1 ms, tokenise 14, 8 rounds 2927, first token out 25. Bound: GEMMs 54 % at 1.0 PFLOPS and
+  attention 20 % at 385 TFLOPS under the SW power cap (SM clock 1.62 GHz mean, cap active in 73 % of samples); 2.2 s needs a GEMM near 1.3 PFLOPS and attention past 500 TFLOPS at the same power. Open,
+  by weight: GEMM energy per FLOP, attention K/V widening shared by the 6 heads of a kv head (30 % of the kernel), the GQA q/k/v split + norm + rope + append fusion (~0.6 ms a layer),
+  the 25 ms between the last round and the first token. A card-to-card gap of 2.5 % (gpu0 faster) confounds A/B runs that put base and new on different cards.
