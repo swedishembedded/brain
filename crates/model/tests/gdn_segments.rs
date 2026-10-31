@@ -33,8 +33,13 @@ fn max_rel(a: &[f32], reference: &[f32]) -> f64 {
     a.iter().zip(reference).fold(0.0f64, |m, (x, y)| m.max((f64::from(*x) - f64::from(*y)).abs() / scale))
 }
 
+/// Both tests force the `gdn_prefill` candidate and clear it again, and the forced table is process-wide: run in
+/// parallel, one test's clear landed between the other's force and its segment round.
+static FORCED_SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn a_round_of_segments_equals_each_segment_on_its_own_state_row() {
+    let _forced = FORCED_SLOT.lock().unwrap_or_else(|e| e.into_inner());
     let kernels: &'static [(&'static str, &'static str)] = {
         let mut v = KERNELS.to_vec();
         v.push(("gdn_ut_fwd", kernels::GDN_UT_FWD));
@@ -163,6 +168,7 @@ fn bf16_words(v: &[f32]) -> Vec<f32> {
 /// fp32 round's product within what the bf16 intermediates cost, and the recurrent state it leaves agrees to bf16 resolution.
 #[test]
 fn a_round_in_bf16_equals_the_fp32_round_to_bf16_resolution() {
+    let _forced = FORCED_SLOT.lock().unwrap_or_else(|e| e.into_inner());
     let kernels: &'static [(&'static str, &'static str)] = {
         let mut v = KERNELS.to_vec();
         v.push(("gdn_ut_fwd", kernels::GDN_UT_FWD));
