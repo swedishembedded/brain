@@ -499,6 +499,11 @@ pub const SPECULATION_DEFAULTS: &[Rule<qwen35::int8_gguf_resident::SpeculativeMo
 /// eight with one. Past that batch a verify round is compute-bound and the scheduler's own timing keeps decoding plainly.
 pub const HF_SPEC_SCRATCH_ROWS: u32 = 16;
 
+/// Running sequences up to which an FP8 directory speculates when `--speculative` is not given. Past it a request's prompt feed (about
+/// 0.1 s of the card per 8K tokens) and the drafts repay less than they cost on replies of a few hundred tokens: measured with 256 new
+/// tokens, `off` against `auto` 4 streams 176 -> 166 tok/s, 16 streams 290 -> 269; with 768 new tokens 4 streams gain 12 %.
+pub const HF_DEFAULT_SPEC_BATCH: usize = 2;
+
 /// How many prompts a GGUF resident keeps for prefix reuse.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrefixCache {
@@ -604,8 +609,11 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
         return Err("no GPU is budgeted for it (its weights are device buffers; there is no CPU path)".to_string());
     }
     let build = |kv, mode, prefix_slots, cap| {
-        let scratch_rows = if ResidentCheckpoint::is_hf_dir(gguf_path) { HF_SPEC_SCRATCH_ROWS } else { SpecServing::default().scratch_rows };
-        let spec = SpecServing { mode, scratch_rows, ..SpecServing::default() };
+        let hf = ResidentCheckpoint::is_hf_dir(gguf_path);
+        let scratch_rows = if hf { HF_SPEC_SCRATCH_ROWS } else { SpecServing::default().scratch_rows };
+        // An FP8 directory serving by default speculates up to a few running sequences; `--speculative mtp|auto` asks for no limit.
+        let batch_limit = if hf && cfg.speculative.is_none() { HF_DEFAULT_SPEC_BATCH } else { SpecServing::default().batch_limit };
+        let spec = SpecServing { mode, scratch_rows, batch_limit, ..SpecServing::default() };
         // Paged KV: sequences hold the blocks their tokens need from one shared pool, so a long context
         // costs only the sequences that use it, and the batch is not multiplied by the context.
         let r = Qwen35GgufResident::new(gguf_path.to_string(), devices.clone(), cap, tier.clone()).with_kv_tier(kv).with_max_batch(max_batch).with_prefix_slots(prefix_slots).with_speculation(spec).with_exact_decode(cfg.exact_decode).with_act_choice(cfg.act_precision.unwrap_or_default()).with_gdn_state(cfg.gdn_state.unwrap_or_default()).with_kv_block_rows(qwen35::int8_gguf_resident::KV_BLOCK_ROWS);
@@ -641,6 +649,9 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
         }
         _ => given_or_chosen(cfg.speculative, "--speculative", SPECULATION_DEFAULTS, hw, &mut chosen, |mode| fits(build(kv, mode, 0, probe_cap))),
     };
+    if cfg.speculative.is_none() && mode != SpeculativeMode::Off && ResidentCheckpoint::is_hf_dir(gguf_path) {
+        chosen.push(format!("--speculative {mode}: the checkpoint's MTP head drafts while at most {HF_DEFAULT_SPEC_BATCH} sequences run (--speculative mtp has no limit)"));
+    }
     if cfg.exact_decode && mode != SpeculativeMode::Off {
         chosen.push("--exact-decode: speculation is off in this regime (a verify pass is not grouped)".to_string());
     }

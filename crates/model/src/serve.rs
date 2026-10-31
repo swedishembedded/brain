@@ -2237,7 +2237,9 @@ impl<D: PagedDecoder> Scheduler<D> {
         // Prompts that begin now prepare the drafter only if speculation will repay it.
         if self.spec_policy.enabled && self.dec.spec_max_draft() > 0 && self.dec.spec_cost_aware() {
             let active = (self.running.len() + self.prefilling.len() + self.waiting.len()).clamp(1, self.max_running.max(1));
-            let prepare = self.prefill_gate.prepare(&self.gate, active, self.dec.spec_prefill_cost(), self.dec.step_latency_target().map(|t| t.as_secs_f64()));
+            // A batch past the decoder's crossover decodes plainly, so a prompt prepared now would pay for a drafter nothing consults.
+            let speculates = active <= self.spec_policy.max_batch.min(self.dec.spec_max_batch());
+            let prepare = speculates && self.prefill_gate.prepare(&self.gate, active, self.dec.spec_prefill_cost(), self.dec.step_latency_target().map(|t| t.as_secs_f64()));
             self.dec.set_spec_prefill(prepare);
         }
 
