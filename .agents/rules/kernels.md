@@ -677,6 +677,20 @@ tools, which show what the timers cannot:
 A finding states which tool and which run showed it. Run either tool on the card
 you were given, keep reports outside the repository, and delete them when done.
 
+**Fast feedback.** Profile a kernel with `ncu` on its own test or bench binary at
+the production shape (seconds), never through a model server (minutes a run, and
+model load under interception hangs); `nsys` on the server measures the whole
+step before and after. Iterate on one focused target (`make test/one`), run the
+broad gates once before committing.
+
+**The host too.** `make build/profiling` gives the release binary with line
+tables; `nsys profile --sample=process-tree --backtrace=dwarf
+--cpuctxsw=process-tree -t cuda,nvtx,osrt --event-sample=system-wide
+--cpu-core-events=1,2,3,9,10` shows the host's call stacks, context switches,
+lock and futex waits and cache misses (at most five core events at once). On a
+GH200 the 660 W module limit is shared by the CPU, the GPU and memory: a spinning
+or polling host thread takes watts, and so clock, from the card.
+
 ### F.1 Profile per KERNEL KIND, and publish the table
 
 Not per model, not per layer. Group contiguous runs of one kernel in submit

@@ -150,15 +150,9 @@ enforces it.
   Intel NPU is a separate whole-graph export path (`crates/npu`), not a backend.
 - **Weight-only quantization is group-wise** (`model::int8::GROUP`), never
   whole-channel. See `kernels.md`.
-- **Profile with the driver's own tools.** On NVIDIA systems profiling or
-  optimizing brain uses `nsys` (timeline) and `ncu` (kernels); elsewhere the
-  vendor's equivalent. See `kernels.md` section F.0. Profile a kernel with
-  `ncu` on its own test or bench binary at the production shape (seconds),
-  never through a full model server (minutes per run); `nsys` on the server
-  measures the before/after of the whole step.
-- **Feedback is fast.** Iterate on one focused test (`make test/one`),
-  run the broad gates once before committing, and move a test that takes
-  minutes to the slow lane rather than paying for it on every run.
+- **Profile with the driver's own tools** (`nsys`, `ncu` on NVIDIA; the
+  vendor's equivalent elsewhere), and keep feedback fast: one focused test
+  (`make test/one`), `ncu` on a kernel's own binary. See `kernels.md` F.0.
 - **Fix selection, not copies.** Before writing a kernel, look for a faster
   sibling; before dispatching one, read its `Params`; before optimizing,
   profile per kernel kind. A finding from an audit or sweep is a hypothesis
