@@ -535,3 +535,62 @@ fn production_shape_prefill_forward_bench() {
     let err = |a: &[f32], r: &[f32]| (a.iter().zip(r).map(|(x, y)| (*x as f64 - *y as f64).powi(2)).sum::<f64>() / a.len() as f64).sqrt() / rms(r);
     println!("bf16 vs exact: out relative rms error {:.3e}, final state {:.3e}", err(&outs[1].0, &outs[0].0), err(&outs[1].1, &outs[0].1));
 }
+
+/// The warpgroup recurrence (`gdn_chunk_loop_wg`) against the `mma.sync` one (`gdn_chunk_loop_bf16`) on the same prepared
+/// operands at the production shape: output and final state agree to bf16 resolution, and the device time of each.
+/// `make test/one P=brain-model T=gdn_chunk_fwd_train_tc ARGS="--ignored --nocapture loop_wg"`.
+#[test]
+#[ignore = "a bench at the production shape, run by hand"]
+fn loop_wg_matches_the_mma_sync_recurrence_at_the_production_shape() {
+    use gpu_core::provider::cuda::{self, GdnTokenLayout};
+    let g = gpu_core::testgpu::dev(PIPES);
+    if g.caps().arch.compute_capability.is_none_or(|cc| cc < (9, 0)) {
+        brain_testutil::skip_unavailable("a Hopper device");
+        return;
+    }
+    let (h, t, c, group) = (48u32, 8192u32, 64u32, 3u32);
+    let n_chunks = t / c;
+    let (bh, bhc) = (h, h * n_chunks);
+    let (hs, ts, cs) = (h as usize, t as usize, c as usize);
+    let scale = 1.0 / 128f32.sqrt();
+    let layout = GdnTokenLayout { bhc, c_len: c, n_chunks, heads: h, group, head_dim: 128, scale, eps: 1e-6 };
+    let mut s = 33u64;
+    let nkh = hs / group as usize;
+    let q = g.storage_init("q", &rand(&mut s, ts * nkh * 128, 1.0));
+    let k = g.storage_init("k", &rand(&mut s, ts * nkh * 128, 1.0));
+    let v = g.storage_init("v", &rand(&mut s, ts * hs * 128, 1.0));
+    let raw_g = g.storage_init("g", &rand(&mut s, ts * hs, 0.2).iter().map(|x| -x.abs()).collect::<Vec<_>>());
+    let beta = g.storage_init("beta", &rand(&mut s, ts * hs, 0.5).iter().map(|x| x + 0.5).collect::<Vec<_>>());
+    let initial = g.storage_init("s0", &rand(&mut s, bh as usize * 128 * 128, 0.1));
+    let len = bhc as usize * cs * 128;
+    let (g_cs, exp_g_cs) = (g.storage(u64::from(bhc * c)), g.storage(u64::from(bhc * c)));
+    let (u, w, intra) = (g.storage(len as u64), g.storage(len as u64), g.storage(u64::from(bhc * c * c)));
+    let (qcm, kcm) = (g.storage(len as u64), g.storage(len as u64));
+    let prep_bufs = [&q, &k, &v, &raw_g, &beta, &g_cs, &exp_g_cs, &u, &w, &intra, &qcm, &kcm];
+    g.submit(&[], &[cuda::gdn_chunk_prep_tok_bf16_step(&g, &prep_bufs, layout).expect("prep")]);
+    g.poll_wait();
+    let run = |wg: bool| {
+        let out = g.storage(len as u64);
+        let fin = g.storage(bh as u64 * 128 * 128);
+        let bufs = [&kcm, &qcm, &w, &u, &g_cs, &exp_g_cs, &intra, &initial, &out, &fin];
+        let step = if wg { cuda::gdn_chunk_loop_wg_step(&g, &bufs, bh, c, 128, 128, n_chunks, scale, h) } else { cuda::gdn_chunk_loop_bf16_step(&g, &bufs, bh, c, 128, 128, n_chunks, scale, h) }.expect("loop");
+        g.submit(&[], &[step]);
+        g.poll_wait();
+        g.set_kernel_timing(true);
+        g.reset_kernel_times();
+        let reps = 5;
+        for _ in 0..reps {
+            g.submit(&[], &[if wg { cuda::gdn_chunk_loop_wg_step(&g, &bufs, bh, c, 128, 128, n_chunks, scale, h) } else { cuda::gdn_chunk_loop_bf16_step(&g, &bufs, bh, c, 128, 128, n_chunks, scale, h) }.expect("loop")]);
+            g.poll_wait();
+        }
+        let ms: f64 = g.kernel_times().unwrap_or_default().iter().filter(|r| r.0.contains("gdn_chunk_loop")).map(|r| r.1).sum::<f64>() / reps as f64;
+        g.set_kernel_timing(false);
+        (g.read(&out, len), g.read(&fin, bh as usize * 128 * 128), ms)
+    };
+    let (ref_out, ref_fin, ref_ms) = run(false);
+    let (wg_out, wg_fin, wg_ms) = run(true);
+    let rms = |a: &[f32]| (a.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / a.len() as f64).sqrt();
+    let err = |a: &[f32], r: &[f32]| (a.iter().zip(r).map(|(x, y)| (*x as f64 - *y as f64).powi(2)).sum::<f64>() / a.len() as f64).sqrt() / rms(r);
+    println!("loop mma.sync {ref_ms:.3} ms, loop wgmma {wg_ms:.3} ms; output error {:.3e}, final state error {:.3e}", err(&wg_out, &ref_out), err(&wg_fin, &ref_fin));
+    assert!(err(&wg_out, &ref_out) < 4.0 / 512.0 && err(&wg_fin, &ref_fin) < 4.0 / 512.0);
+}

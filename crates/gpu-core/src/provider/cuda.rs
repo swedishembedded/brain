@@ -582,6 +582,34 @@ pub fn gdn_chunk_loop_bf16_step(
     gpu.step_native_sliced(id, bufs, &[(0, 0); 10], &[bh, c_len, dk, dv, n_chunks, scale.to_bits(), heads_tok], bh * GDN_CHUNK_LOOP_TC_SPLITS)
 }
 
+/// Dynamic shared memory of `gdn_chunk_loop_wg`: two stages of operand tiles (w, query, key 16 KiB each, intra 8 KiB, the padded fp32
+/// u tile, one decay word, to a KiB), two 8 KiB output tiles, the barriers and 1 KiB to align the swizzled tiles.
+const GDN_CHUNK_LOOP_WG_DYNAMIC_SHARED_BYTES: u32 = 2 * 92160 + 2 * 8192 + 64 + 1024;
+
+/// [`gdn_chunk_loop_bf16_step`] on Hopper warpgroup tensor cores (`gdn_chunk_loop_wg`): the same ten buffers and contract, the state held
+/// in registers across the walk. `None` below compute capability 9.0 (the caller keeps the `mma.sync` form).
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_chunk_loop_wg_step(
+    gpu: &crate::Gpu,
+    bufs: &[&backend_api::DeviceBuffer; 10],
+    bh: u32,
+    c_len: u32,
+    dk: u32,
+    dv: u32,
+    n_chunks: u32,
+    scale: f32,
+    heads_tok: u32,
+) -> Option<crate::Step> {
+    if !gdn_chunk_prep_shape_ok(dk, dv, c_len) {
+        return None;
+    }
+    let cc = gpu.caps().arch.compute_capability?;
+    let kernel = kernels_cuda::get("gdn_chunk_loop_wg").filter(|k| k.min_cc <= cc)?;
+    let launch = backend_api::CudaLaunch { dynamic_shared_bytes: GDN_CHUNK_LOOP_WG_DYNAMIC_SHARED_BYTES, shared_opt_in: true, arch: backend_api::ArchFeatures::Required, ..backend_api::CudaLaunch::NONE };
+    let id = gpu.native_kernel_launched(kernel, GDN_CHUNK_LOOP_BINDINGS, launch)?;
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 10], &[bh, c_len, dk, dv, n_chunks, scale.to_bits(), heads_tok], bh)
+}
+
 /// Whether the token-major tensor-core prefix can serve this call: the chunk
 /// forward's own constraints plus a value-head count that is a multiple of the
 /// key-head count.

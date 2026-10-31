@@ -3867,6 +3867,24 @@ pub const ALL: &[CudaKernel] = &[
         src: concat!(include_str!("../cu/gdn_chunk_common.cuh"), include_str!("../cu/gdn_chunk_loop_bf16.cu")),
     },
     CudaKernel {
+        name: "gdn_chunk_loop_wg",
+        op: Op::GatedDeltaChunkLoop,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // `wgmma` is arch-specific (`sm_90a`), so the launch also requires it (`ArchFeatures::Required`).
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_gdn_chunk_loop_wg",
+        what: "Gated DeltaNet recurrence on Hopper warpgroup tensor cores: the state held transposed in registers as the accumulator of the update product and re-read as the register A operand of the next chunk's products, chunk operands staged through a two-stage shared-memory ring while the previous chunk computes; a block a (head, sequence)",
+        reported: "native:gdn_chunk_loop_wg",
+        block_dim: 256,
+        tile: (64, 128),
+        // Everything is dynamic: see `GDN_CHUNK_LOOP_WG_DYNAMIC_SHARED_BYTES` in gpu-core.
+        shared_bytes: 0,
+        programmatic: false,
+        src: concat!(include_str!("../cu/gdn_chunk_common.cuh"), include_str!("../cu/gdn_wg_common.cuh"), include_str!("../cu/gdn_chunk_loop_wg.cu")),
+    },
+    CudaKernel {
         name: "gdn_chunk_prep_tok_bf16",
         op: Op::GatedDeltaChunkLoop,
         weight: Dtype::F32,
