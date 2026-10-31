@@ -152,6 +152,13 @@ __device__ __forceinline__ unsigned int brain_pack_f16(float lo, float hi) {
     return d;
 }
 
+// d = a . b with no accumulator input (the first product of a block row).
+__device__ __forceinline__ void brain_mma_bf16_first(float (&d)[4], const unsigned int (&a)[4], unsigned int b0, unsigned int b1) {
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %10, %10, %10};\n"
+                 : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
+                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1), "f"(0.0f));
+}
+
 __device__ __forceinline__ float brain_ex2(float x) {
     float y;
     asm("ex2.approx.ftz.f32 %0, %1;\n" : "=f"(y) : "f"(x));
@@ -410,12 +417,14 @@ __device__ __forceinline__ void brain_gdn_prep_chunk(const PrepOperands& a, cons
     unsigned int hu[3][4], lu[3][4], hw[3][4], lw[3][4];  // finished block rows, as split A operands
 #pragma unroll
     for (int i = 0; i < 4; ++i) {
+        if (16u * i >= C) {  // block-uniform; the rows of this block row past the chunk are zero
 #pragma unroll
-        for (int nt = 0; nt < 2; ++nt) {
+            for (int nt = 0; nt < 2; ++nt) {
 #pragma unroll
-            for (int e = 0; e < 4; ++e) { xu[2 * i + nt][e] = 0.0f; xw[2 * i + nt][e] = 0.0f; }
+                for (int e = 0; e < 4; ++e) { xu[2 * i + nt][e] = 0.0f; xw[2 * i + nt][e] = 0.0f; }
+            }
+            continue;
         }
-        if (16u * i >= C) { continue; }  // block-uniform; the rows of this block row past the chunk are zero
         // R^T_i (M = value column, K = chunk row) straight from the value / key tiles by a transposing load.
         unsigned int ru[4], rw[4];
         const unsigned int src_off = (16u * i + (q >> 1) * 8u + l8) * SKH + cw + (q & 1u) * 8u;
@@ -425,11 +434,15 @@ __device__ __forceinline__ void brain_gdn_prep_chunk(const PrepOperands& a, cons
         for (int nt = 0; nt < 2; ++nt) {
             const unsigned int off = (8u * nt + g) * STP + 2u * t4;
 #pragma unroll
-            for (int part = 0; part < 2; ++part) {
-                const unsigned short* const bu = mat(12 + 4 * i + part);
-                const unsigned short* const bw = mat(12 + 4 * i + 2 + part);
-                brain_mma_bf16(xu[2 * i + nt], ru, *reinterpret_cast<const unsigned int*>(bu + off), *reinterpret_cast<const unsigned int*>(bu + off + 8));
-                brain_mma_bf16(xw[2 * i + nt], rw, *reinterpret_cast<const unsigned int*>(bw + off), *reinterpret_cast<const unsigned int*>(bw + off + 8));
+            {
+                const unsigned short* const bu = mat(12 + 4 * i);
+                const unsigned short* const bw = mat(12 + 4 * i + 2);
+                brain_mma_bf16_first(xu[2 * i + nt], ru, *reinterpret_cast<const unsigned int*>(bu + off), *reinterpret_cast<const unsigned int*>(bu + off + 8));
+                brain_mma_bf16_first(xw[2 * i + nt], rw, *reinterpret_cast<const unsigned int*>(bw + off), *reinterpret_cast<const unsigned int*>(bw + off + 8));
+                const unsigned short* const bul = mat(12 + 4 * i + 1);
+                const unsigned short* const bwl = mat(12 + 4 * i + 3);
+                brain_mma_bf16(xu[2 * i + nt], ru, *reinterpret_cast<const unsigned int*>(bul + off), *reinterpret_cast<const unsigned int*>(bul + off + 8));
+                brain_mma_bf16(xw[2 * i + nt], rw, *reinterpret_cast<const unsigned int*>(bwl + off), *reinterpret_cast<const unsigned int*>(bwl + off + 8));
             }
         }
 #pragma unroll
@@ -454,17 +467,40 @@ __device__ __forceinline__ void brain_gdn_prep_chunk(const PrepOperands& a, cons
             brain_acc_to_a_split(xu[2 * i], xu[2 * i + 1], hu[i], lu[i]);
             brain_acc_to_a_split(xw[2 * i], xw[2 * i + 1], hw[i], lw[i]);
         }
-        // Block row i leaves: u (fp32) and w (bf16) rows, element (value column cw + g (+ 8), chunk row 16 i + 8 nt + 2 t4 (+ 1)).
+        if (a.emit_cm) {
+            // The `mma.sync` recurrence's form: u as fp32 rows (the folded form stores it once, after the last block row).
 #pragma unroll
-        for (int nt = 0; nt < 2; ++nt) {
+            for (int nt = 0; nt < 2; ++nt) {
 #pragma unroll
-            for (int e = 0; e < 4; ++e) {
-                const unsigned int row = 16u * i + 8u * nt + 2u * t4 + (e & 1u);
-                if (row < C) {
-                    const unsigned long long at = (row_base + row) * D + cw + g + ((e & 2u) ? 8u : 0u);
-                    if (a.emit_cm) { u_out[at] = xu[2 * i + nt][e]; }
-                    reinterpret_cast<unsigned short*>(w_out)[at] = static_cast<unsigned short>(brain_pack_bf16(xw[2 * i + nt][e], 0.0f));
+                for (int e = 0; e < 4; ++e) {
+                    const unsigned int row = 16u * i + 8u * nt + 2u * t4 + (e & 1u);
+                    if (row < C) { u_out[(row_base + row) * D + cw + g + ((e & 2u) ? 8u : 0u)] = xu[2 * i + nt][e]; }
                 }
+            }
+        }
+        // Block row i's w: pairs of adjacent chunk rows of one value column, written with `stmatrix.trans` as chunk-row-major 16-byte pieces of this warp's
+        // 32-byte column strip (the attn0 space, dead since the solve, is the staging tile: 64 rows of SKH bf16), then stored whole below.
+        {
+            unsigned short* const sW = reinterpret_cast<unsigned short*>(sA);
+            const unsigned int w0 = brain_pack_bf16(xw[2 * i][0], xw[2 * i][1]), w1 = brain_pack_bf16(xw[2 * i][2], xw[2 * i][3]);
+            const unsigned int w2 = brain_pack_bf16(xw[2 * i + 1][0], xw[2 * i + 1][1]), w3 = brain_pack_bf16(xw[2 * i + 1][2], xw[2 * i + 1][3]);
+            // Lane l addresses stored row (l & 7) of matrix (l >> 3): chunk row 16 i + 8 (m >> 1) + (l & 7), column chunk 2 warp + (m & 1).
+            const unsigned int m = lane >> 3;
+            const unsigned int token = 16u * i + 8u * (m >> 1) + l8;
+            const unsigned int addr = brain_smem_addr(sW + token * SKH + (2u * warp + (m & 1u)) * 8u);
+            asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n" ::"r"(addr), "r"(w0), "r"(w1), "r"(w2), "r"(w3) : "memory");
+        }
+    }
+    {
+        // This warp's w strip, 16 bytes a lane: chunk row (idx >> 1), half (idx & 1) of the strip.
+        __syncwarp();
+        const unsigned short* const sW = reinterpret_cast<const unsigned short*>(sA);
+        unsigned short* const w_cm = reinterpret_cast<unsigned short*>(w_out);
+#pragma unroll
+        for (int it = 0; it < 4; ++it) {
+            const unsigned int idx = lane + 32u * it, token = idx >> 1, hlf = idx & 1u;
+            if (token < C) {
+                *reinterpret_cast<uint4*>(w_cm + (row_base + token) * D + cw + hlf * 8u) = *reinterpret_cast<const uint4*>(sW + token * SKH + (2u * warp + hlf) * 8u);
             }
         }
     }

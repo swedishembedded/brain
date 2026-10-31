@@ -446,3 +446,10 @@ measurement (16-256), not fixed globally.
   from the down/out products, the GQA layers' q/ctx (16 layers, 3 % of the stream), and the 128x128 tile's twin through a TMA store.
 
 Mixed-iteration idle (knowledge 392, 2026-10-30): a prompt start no longer waits on the device (zeroed pool row) and a finished prompt's first token rides the forward's head pass; scheduling floor curve is flat (713-775 tok/s at c=64 over floors 256-2048); remaining idle <= 1.4 ms, so asynchronous scheduling (row 4) is worth ~1.5 %.
+
+- 2026-10-31 (GDN prefill, knowledge 397): prep + recurrence of a layer at 8K tokens 0.146 -> 0.057 us/token (1202 -> 467 us), 700-row round 0.19 -> 0.09. The recurrence runs on
+  warpgroup tensor cores where the tuner measures it faster (`gdn_prefill_loop` slot, `mma|wg`): `gdn_chunk_loop_seg_wg_half` (a block a segment, head and 64-column half; the
+  single-stage `_lean` when blocks outnumber multiprocessors), folded (the convolution's normalised rows, row scalings applied in the recurrence, u as fp16 in thread order);
+  the prep solves by blocked forward substitution on tensor cores; `gdn_conv_silu_seg_vec` normalises query/key once. Open: 700-row round target 0.08 (block latency: 12.9 k cycles
+  a prep block alone), the gated norm (150 us at 8K, 250 MB roof 76) and the convolution (195, roof ~100), a concurrent prep/recurrence kernel to keep the scratch in L2, the train-form
+  forward (needs T for the backward).
