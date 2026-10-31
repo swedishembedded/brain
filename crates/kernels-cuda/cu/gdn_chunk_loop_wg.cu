@@ -102,17 +102,39 @@ __device__ __forceinline__ void gdn_loop_wg_walk(const WgOperands& op, const uns
         const unsigned int stage = base + (STAGES == 2 ? (ci & 1u) : 0u) * L::BYTES;
         const unsigned int C = ch.C;
         const unsigned long long rb = ch.row_base;
+        if (C == MAXC) {
+            // A full chunk: no row is short, so a thread keeps one 16-byte column and steps down its rows by whole passes (the swizzle depends on the row
+            // only modulo 8, and a pass is a multiple of 8 rows), and the sources advance by constant strides.
+            constexpr unsigned int RS = NT / 16;  // rows a pass
+            const unsigned int c = tid & 15u, r0 = tid >> 4;
+            const unsigned int dst0 = (c >> 3) * ATOM_BYTES + r0 * 128u + (((c & 7u) ^ (r0 & 7u)) << 4);
+            const unsigned short* wp = w + (rb + r0) * D + c * 8;
+            const unsigned short* qp = qs + (FOLD ? ch.qk_at + r0 * ch.qk_stride : (rb + r0) * D) + c * 8;
+            const unsigned short* kp = kd + (FOLD ? ch.qk_at + r0 * ch.qk_stride : (rb + r0) * D) + c * 8;
+            const unsigned long long qk_step = FOLD ? RS * ch.qk_stride : RS * D;
 #pragma unroll
-        for (int it = 0; it < 1024 / NT; ++it) {
-            const unsigned int e = tid + it * NT;
-            const unsigned int r = e >> 4, c = e & 15u;
-            const unsigned int dst = (c >> 3) * ATOM_BYTES + r * 128u + (((c & 7u) ^ (r & 7u)) << 4);
-            const unsigned long long at = (rb + r) * D + c * 8;
-            const unsigned int bytes = r < C ? 16u : 0u;
-            gw_cp16(stage + STAGE_W + dst, w + (r < C ? at : 0), bytes);
-            const unsigned long long qk = FOLD ? (r < C ? ch.qk_at + r * ch.qk_stride + c * 8 : 0) : (r < C ? at : 0);
-            gw_cp16(stage + STAGE_Q + dst, qs + qk, bytes);
-            gw_cp16(stage + STAGE_K + dst, kd + qk, bytes);
+            for (int it = 0; it < MAXC / RS; ++it) {
+                const unsigned int dst = dst0 + it * RS * 128u;
+                gw_cp16(stage + STAGE_W + dst, wp, 16u);
+                gw_cp16(stage + STAGE_Q + dst, qp, 16u);
+                gw_cp16(stage + STAGE_K + dst, kp, 16u);
+                wp += RS * D;
+                qp += qk_step;
+                kp += qk_step;
+            }
+        } else {
+#pragma unroll
+            for (int it = 0; it < 1024 / NT; ++it) {
+                const unsigned int e = tid + it * NT;
+                const unsigned int r = e >> 4, c = e & 15u;
+                const unsigned int dst = (c >> 3) * ATOM_BYTES + r * 128u + (((c & 7u) ^ (r & 7u)) << 4);
+                const unsigned long long at = (rb + r) * D + c * 8;
+                const unsigned int bytes = r < C ? 16u : 0u;
+                gw_cp16(stage + STAGE_W + dst, w + (r < C ? at : 0), bytes);
+                const unsigned long long qk = FOLD ? (r < C ? ch.qk_at + r * ch.qk_stride + c * 8 : 0) : (r < C ? at : 0);
+                gw_cp16(stage + STAGE_Q + dst, qs + qk, bytes);
+                gw_cp16(stage + STAGE_K + dst, kd + qk, bytes);
+            }
         }
         // u: fp32 rows of the block's columns (128, or its 64) into the padded rows the consumers read in accumulator layout, or in the folded
         // form the fp16 thread-order vectors of the block's warpgroups as one contiguous copy.
@@ -198,8 +220,6 @@ __device__ __forceinline__ void gdn_loop_wg_walk(const WgOperands& op, const uns
         const WgChunk ch = chunk_at(ci);
         const unsigned int C = ch.C;
         const unsigned int stage = base + s * L::BYTES;
-        // The next chunk's operands stream in while this one computes.
-        if (STAGES == 2 && ci + 1 < n_chunks) { issue(ci + 1); }
 
         // S^T as the bf16 A operand of the first two products (the state entering the chunk).
         unsigned int sb[8][4];
@@ -236,21 +256,18 @@ __device__ __forceinline__ void gdn_loop_wg_walk(const WgOperands& op, const uns
         gw_fence();
 #pragma unroll
         for (int kk = 0; kk < 8; ++kk) { gw_mma_n64<-1>(va, sb[kk], gw_desc_k(stage + STAGE_W + (kk >> 2) * ATOM_BYTES + (kk & 3) * 32u), true); }
+        gw_commit();
 #pragma unroll
         for (int kk = 0; kk < 8; ++kk) { gw_mma_n64<1>(qa, sb[kk], gw_desc_k(stage + STAGE_Q + (kk >> 2) * ATOM_BYTES + (kk & 3) * 32u), kk > 0); }
         gw_commit();
-        gw_wait0();
-        if (FOLD) {
-            // The query product carries no row scaling yet: token n of the accumulator is scaled by scale exp(g_n).
-            const float* const es = reinterpret_cast<const float*>(gen + s * L::BYTES + L::ES);
+        // While the products run: the next chunk's operands start streaming in and the state decays (the products read the bf16 copy).
+        if (STAGES == 2 && ci + 1 < n_chunks) { issue(ci + 1); }
+        const float decay = *reinterpret_cast<const float*>(gen + s * L::BYTES + (FOLD ? L::DD + MAXC * 4 : L::DEC));
 #pragma unroll
-            for (int j = 0; j < 8; ++j) {
-                const float2 t = *reinterpret_cast<const float2*>(es + 8 * j + 2 * t4);
-                qa[4 * j + 0] *= t.x; qa[4 * j + 1] *= t.y; qa[4 * j + 2] *= t.x; qa[4 * j + 3] *= t.y;
-            }
-        }
+        for (int i = 0; i < 64; ++i) { st[i] *= decay; }
+        gw_wait1();
 
-        // v_new^T as the bf16 A operand of the intra-chunk output and the state update.
+        // v_new^T (the first group) as the bf16 A operand of the intra-chunk output and the state update, formed while the query product finishes.
         unsigned int vb[4][4];
 #pragma unroll
         for (int kk = 0; kk < 4; ++kk) {
@@ -272,16 +289,25 @@ __device__ __forceinline__ void gdn_loop_wg_walk(const WgOperands& op, const uns
                 vd[kk][3] = brain_pack_bf16(va[8 * kk + 6] * t1.x, va[8 * kk + 7] * t1.y);
             }
         }
-        const float decay = *reinterpret_cast<const float*>(gen + s * L::BYTES + (FOLD ? L::DD + MAXC * 4 : L::DEC));
+        gw_wait0();  // the query product
+        if (FOLD) {
+            // It carries no row scaling yet: token n of the accumulator is scaled by scale exp(g_n).
+            const float* const es = reinterpret_cast<const float*>(gen + s * L::BYTES + L::ES);
 #pragma unroll
-        for (int i = 0; i < 64; ++i) { st[i] *= decay; }
+            for (int j = 0; j < 8; ++j) {
+                const float2 t = *reinterpret_cast<const float2*>(es + 8 * j + 2 * t4);
+                qa[4 * j + 0] *= t.x; qa[4 * j + 1] *= t.y; qa[4 * j + 2] *= t.x; qa[4 * j + 3] *= t.y;
+            }
+        }
         gw_fence();
+        // Two groups: the intra-chunk product finishes the output while the state update is still running.
 #pragma unroll
         for (int kk = 0; kk < 4; ++kk) { gw_mma_n64<1>(qa, vb[kk], gw_desc_k(stage + STAGE_I + kk * 32u), true); }
+        gw_commit();
 #pragma unroll
         for (int kk = 0; kk < 4; ++kk) { gw_mma_n128_acc(st, FOLD ? vd[kk] : vb[kk], gw_desc_mn(stage + STAGE_K + kk * 2048u)); }
         gw_commit();
-        gw_wait0();
+        gw_wait1();
         // out^T -> the output rows. Rows past the chunk are not written.
         if (op.out_bf16) {
             // The accumulator pairs are adjacent tokens of one column: `stmatrix.trans` writes them as token rows of 16 bytes.
@@ -321,7 +347,9 @@ __device__ __forceinline__ void gdn_loop_wg_walk(const WgOperands& op, const uns
                 }
             }
         }
-        // The staged chunk is visible to every thread and no product still reads the slot the next staging will overwrite.
+        // The state update has landed (the next chunk's products read it) and no product still reads the slot the next staging will overwrite.
+        gw_wait0();
+        // The staged chunk is visible to every thread.
         if (ci + 1 < n_chunks) {
             if (STAGES == 1) {
                 // One stage: every thread is done with the tiles before the next chunk overwrites them.

@@ -19,6 +19,7 @@ __device__ __forceinline__ void gw_fence_proxy() { asm volatile("fence.proxy.asy
 __device__ __forceinline__ void gw_fence() { asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory"); }
 __device__ __forceinline__ void gw_commit() { asm volatile("wgmma.commit_group.sync.aligned;\n" ::: "memory"); }
 __device__ __forceinline__ void gw_wait0() { asm volatile("wgmma.wait_group.sync.aligned 0;\n" ::: "memory"); }
+__device__ __forceinline__ void gw_wait1() { asm volatile("wgmma.wait_group.sync.aligned 1;\n" ::: "memory"); }
 
 // 128-byte-swizzle shared-memory matrix descriptors. K-major operand: 8-row groups 1024 bytes apart. MN-major operand: the
 // 64-value atom columns of the N dimension 8192 bytes apart, the 8-row groups of K 1024 bytes apart.
