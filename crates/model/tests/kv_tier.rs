@@ -720,3 +720,21 @@ fn decode_attention_timing_report() {
     }
     }
 }
+
+/// The achieved rate of the native int8 decode attention (split pass plus merge) against the card's streaming roof at the
+/// served shapes: 16 and 64 sequences at 8K to 64K keys, 4 kv heads of 256.
+#[test]
+#[ignore = "a timing report for kernel work, not a spec"]
+fn decode_attention_roof_report() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let Ok(native) = Gpu::try_new_cuda(kernels()) else {
+        return brain_testutil::skip_unavailable("int8 decode timing: no CUDA device");
+    };
+    const ROOF_GBS: f64 = 3400.0;
+    for (batch, len) in [(16u32, 8192u32), (16, 16_384), (16, 32_768), (16, 65_536), (64, 8192), (64, 16_384), (64, 32_768)] {
+        let bytes = 2.0 * batch as f64 * len as f64 * 4.0 * (256.0 + 4.0);
+        let t = time_decode(&native, KvTier::INT8, batch, len);
+        let gbs = bytes / (t * 1e-3) / 1e9;
+        eprintln!("int8 decode attention batch {batch:2} x {len:6} keys: {:8.1} us, {:6.0} GB/s of {ROOF_GBS} ({:.0} %), {:.2}x the byte time", t * 1e3, gbs, 100.0 * gbs / ROOF_GBS, ROOF_GBS / gbs);
+    }
+}

@@ -109,6 +109,11 @@ pub const FP8_DQ_WGMMA_DYNAMIC_SHARED_BYTES: u32 = I8_DQ_WGMMA_DYNAMIC_SHARED_BY
 /// Dynamic shared memory per block of `matmul_fp8_wgmma`: a ring of 4 stages (a 128-row activation tile and a 128-row weight
 /// tile of 128-byte rows, then 1 KiB of scales: 33792 bytes each) and 1 KiB to align the ring to the 128-byte swizzle pattern.
 /// A test holds it to the source.
+/// Dynamic shared memory per block of `paged_flash_decode_gqa_hd256_kv8`/`_kvfp8`: `BRAIN_DECODE_STAGES` stages of 4 warps' chunks
+/// (the source's `STAGE_BYTES`: 16 pieces of 512 bytes and 32 scales a warp). The merge of the four warps reuses the bytes.
+pub const FLASH_DECODE_KV8_DYNAMIC_SHARED_BYTES: u32 = FLASH_DECODE_KV8_STAGES * 4 * (16 * 512 + 128);
+/// Chunks a warp of the 8-bit decode kernels keeps in flight plus the one it computes (`BRAIN_DECODE_STAGES`).
+const FLASH_DECODE_KV8_STAGES: u32 = 2;
 pub const FP8_WGMMA_DYNAMIC_SHARED_BYTES: u32 = 4 * (2 * 128 * 128 + 1024) + 1024;
 /// Dynamic shared memory per block of `matmul_i8_dq_wgmma`: a ring of 5 stages (a 128-row bf16 activation tile of 128-byte rows,
 /// a 128-row raw int8 weight tile of 64-byte rows and 256 f32 scales: 25600 bytes each), three 128 x 128-byte dequantised weight
@@ -905,10 +910,11 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 128,
         // One block per (sequence, kv head, key split).
         tile: (1, 1),
-        // The query fragments (16 k-steps x 32 lanes x 16 bytes) plus the merge of 4 warps x 8 heads: 256 outputs, max, sum.
-        shared_bytes: 16 * 32 * 16 + 4 * 8 * (256 + 2) * 4,
+        // The query fragments (16 k-steps x 32 lanes x 16 bytes) plus the merge's max and sum of 4 warps x 8 heads; the chunk stages
+        // and the merge's outputs are dynamic (`FLASH_DECODE_KV8_DYNAMIC_SHARED_BYTES`).
+        shared_bytes: 16 * 32 * 16 + 2 * 4 * 8 * 4,
         programmatic: true,
-        src: concat!("#define BRAIN_GRP 6\n", include_str!("../cu/paged_flash_decode_gqa_hd256_kv8.cu")),
+        src: concat!("#define BRAIN_GRP 6\n#define BRAIN_DECODE_STAGES 2\n", include_str!("../cu/paged_flash_decode_gqa_hd256_kv8.cu")),
     },
     CudaKernel {
         name: "paged_flash_decode_gqa_hd256_kvfp8",
@@ -924,10 +930,10 @@ pub const ALL: &[CudaKernel] = &[
         reported: "native:paged_flash_decode_gqa_hd256_kvfp8",
         block_dim: 128,
         tile: (1, 1),
-        shared_bytes: 16 * 32 * 16 + 4 * 8 * (256 + 2) * 4,
+        shared_bytes: 16 * 32 * 16 + 2 * 4 * 8 * 4,
         programmatic: true,
         src: concat!(
-            "#define BRAIN_GRP 6\n#define BRAIN_KV_FP8 1\n#define brain_paged_flash_decode_gqa_hd256_kv8 brain_paged_flash_decode_gqa_hd256_kvfp8\n",
+            "#define BRAIN_GRP 6\n#define BRAIN_DECODE_STAGES 2\n#define BRAIN_KV_FP8 1\n#define brain_paged_flash_decode_gqa_hd256_kv8 brain_paged_flash_decode_gqa_hd256_kvfp8\n",
             include_str!("../cu/paged_flash_decode_gqa_hd256_kv8.cu")
         ),
     },

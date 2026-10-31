@@ -82,6 +82,25 @@ __device__ __forceinline__ void brain_8bit_pairs(unsigned int w, unsigned int& l
 #endif
 }
 
+// Bytes in flight per lane are STAGES - 1 chunks of 256 bytes. A stage holds a warp's chunk: 16 x 512 bytes (the lane-interleaved
+// 16-byte pieces of its 2 key rows and 4 value rows, so a warp's read of piece i is 512 contiguous bytes) and the chunk's 32
+// scales.
+#ifndef BRAIN_DECODE_STAGES
+#define BRAIN_DECODE_STAGES 3
+#endif
+#define WARP_STAGE_BYTES (16 * 512 + 128)
+#define STAGE_BYTES (WARPS * WARP_STAGE_BYTES)
+
+// Copy 16 (or 4) bytes global -> shared without passing through registers; with `ok` false the destination is zero-filled.
+__device__ __forceinline__ void brain_copy16(unsigned int dst, const void* src, bool ok) {
+    const unsigned int n = ok ? 16u : 0u;
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(dst), "l"(src), "r"(n) : "memory");
+}
+__device__ __forceinline__ void brain_copy4(unsigned int dst, const void* src, bool ok) {
+    const unsigned int n = ok ? 4u : 0u;
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 4, %2;\n" ::"r"(dst), "l"(src), "r"(n) : "memory");
+}
+
 // f32 -> nearest f16 -> f32.
 __device__ __forceinline__ float brain_f16_round(float x) {
     float r;
@@ -137,15 +156,17 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_g
     // The query as the first product's A fragments, high and low parts: [k-step][lane] -> (hi a0, hi a2, lo a0, lo a2)
     // (rows gid + 8, the padding of the group to 16, are zero and never stored).
     __shared__ uint4 qf[16][32];
-    __shared__ __align__(16) float red_o[WARPS][8][HD];
     __shared__ float red_m[WARPS][8], red_l[WARPS][8];
+    // The key and value stages (BRAIN_DECODE_STAGES chunks a warp); after the loop the same bytes hold the merge of the four warps.
+    extern __shared__ __align__(16) unsigned char stages[];
+    float(*red_o)[8][HD] = reinterpret_cast<float(*)[8][HD]>(stages);
 
     const float* qb = q + (static_cast<unsigned long long>(b) * n_heads + kvh * BRAIN_GRP) * HD;
     for (unsigned int e = tid; e < 16u * 32u; e += THREADS) {
         const unsigned int st = e >> 5, ln = e & 31u, g = ln >> 2, t = ln & 3u;
         uint4 f = make_uint4(0u, 0u, 0u, 0u);
         if (g < BRAIN_GRP) {
-            const float4 x = *reinterpret_cast<const float4*>(qb + g * HD + t * 64u + st * 4u);
+            const float4 x = *reinterpret_cast<const float4*>(qb + g * HD + (st >> 2) * 64u + t * 16u + (st & 3u) * 4u);
             brain_split2(x.x, x.y, f.x, f.z);
             brain_split2(x.z, x.w, f.y, f.w);
         }
@@ -168,41 +189,73 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_g
     }
     float m_run = NEG_BIG, l_run = 0.f;  // head gid, this lane's share of the sum
 
-    for (unsigned int c0 = k_begin + warp * CHUNK; c0 < k_end; c0 += WARPS * CHUNK) {
-        // ---- loads: key rows gid and gid + 8 (64 bytes each), value rows 2 tig, 2 tig + 1, 2 tig + 8, 2 tig + 9 (32 bytes each).
+    // The chunks this warp walks: k_begin + (warp + WARPS i) * CHUNK for i < n_mine.
+    const unsigned int first = k_begin + warp * CHUNK;
+    const unsigned int n_mine = first < k_end ? (k_end - first + WARPS * CHUNK - 1u) / (WARPS * CHUNK) : 0u;
+    const unsigned int my_stage = static_cast<unsigned int>(__cvta_generic_to_shared(stages)) + warp * WARP_STAGE_BYTES;
+
+    // Chunk i's bytes go to this lane's slots of stage (i mod STAGES): the lane reads back what it copied itself, so the
+    // only synchronisation is the warp's own wait on its copies. Past the live keys a copy of size 0 zero-fills.
+    auto issue = [&](unsigned int i) {
+        if (i < n_mine) {
+            const unsigned int c0 = first + i * (WARPS * CHUNK);
+            const unsigned int at = my_stage + (i % BRAIN_DECODE_STAGES) * STAGE_BYTES;
+            // The 16 keys of a chunk are in one pool block when the block size is a multiple of 16 (the served 64): one table
+            // lookup and one division for the chunk, then a row is the first row plus the key offset times the heads.
+            const bool in_block = (block_size & 15u) == 0u;
+            const unsigned int row0 = in_block ? (bt[c0 / block_size] * block_size + (c0 % block_size)) * n_kv + kvh : 0u;
+            auto row_of = [&](unsigned int d) { return in_block ? row0 + d * n_kv : brain_row(bt, c0 + d, block_size, n_kv, kvh); };
+#pragma unroll
+            for (int r = 0; r < 2; ++r) {
+                const unsigned int j = c0 + gid + 8u * r;
+                const bool ok = j < k_end;
+                const signed char* src = ok ? pool_k + static_cast<unsigned long long>(row_of(j - c0)) * HD + tig * 16u : pool_k;
+#pragma unroll
+                for (int w = 0; w < 4; ++w) { brain_copy16(at + (r * 4 + w) * 512u + lane * 16u, src + w * 64, ok); }
+            }
+#pragma unroll
+            for (int r = 0; r < 4; ++r) {
+                const unsigned int j = c0 + 2u * tig + (r & 1) + 8u * (r >> 1);
+                const bool ok = j < k_end;
+                const signed char* src = ok ? pool_v + static_cast<unsigned long long>(row_of(j - c0)) * HD + gid * 16u : pool_v;
+                brain_copy16(at + (8 + r * 2) * 512u + lane * 16u, src, ok);
+                brain_copy16(at + (8 + r * 2 + 1) * 512u + lane * 16u, src + 128, ok);
+            }
+            // Lanes 0-15 the key scales, 16-31 the value scales, of the chunk's 16 keys.
+            const unsigned int jl = c0 + (lane & 15u);
+            const bool ok = jl < k_end;
+            const float* ssrc = (lane < 16u ? k_scales : v_scales) + (ok ? row_of(jl - c0) : 0u);
+            brain_copy4(at + 8192u + lane * 4u, ssrc, ok);
+        }
+        asm volatile("cp.async.commit_group;\n" ::: "memory");
+    };
+#pragma unroll
+    for (int i = 0; i < BRAIN_DECODE_STAGES - 1; ++i) { issue(i); }
+
+    for (unsigned int i = 0; i < n_mine; ++i) {
+        asm volatile("cp.async.wait_group %0;\n" ::"n"(BRAIN_DECODE_STAGES - 2) : "memory");
+        __syncwarp();  // every lane's copies are visible to the warp, and every lane is done with the stage issued next
+        issue(i + BRAIN_DECODE_STAGES - 1u);
+        const unsigned int c0 = first + i * (WARPS * CHUNK);
+        const unsigned char* sbuf = stages + warp * WARP_STAGE_BYTES + (i % BRAIN_DECODE_STAGES) * STAGE_BYTES;
         uint4 kw[2][4];
         uint4 vw[4][2];
         float ksc[4], vsc[4];
         bool live[4];
 #pragma unroll
         for (int r = 0; r < 2; ++r) {
-            const unsigned int j = c0 + gid + 8u * r;
-            if (j < k_end) {
-                const uint4* src = reinterpret_cast<const uint4*>(pool_k + static_cast<unsigned long long>(brain_row(bt, j, block_size, n_kv, kvh)) * HD + tig * 64u);
 #pragma unroll
-                for (int i = 0; i < 4; ++i) { kw[r][i] = src[i]; }
-            } else {
-#pragma unroll
-                for (int i = 0; i < 4; ++i) { kw[r][i] = make_uint4(0u, 0u, 0u, 0u); }
-            }
+            for (int w = 0; w < 4; ++w) { kw[r][w] = *reinterpret_cast<const uint4*>(sbuf + (r * 4 + w) * 512u + lane * 16u); }
         }
+        const float* scl = reinterpret_cast<const float*>(sbuf + 8192u);
 #pragma unroll
         for (int r = 0; r < 4; ++r) {
-            const unsigned int j = c0 + 2u * tig + (r & 1) + 8u * (r >> 1);
-            live[r] = j < k_end;
-            if (live[r]) {
-                const unsigned int row = brain_row(bt, j, block_size, n_kv, kvh);
-                const uint4* src = reinterpret_cast<const uint4*>(pool_v + static_cast<unsigned long long>(row) * HD + gid * 32u);
-                vw[r][0] = src[0];
-                vw[r][1] = src[1];
-                ksc[r] = k_scales[row];
-                vsc[r] = v_scales[row];
-            } else {
-                vw[r][0] = make_uint4(0u, 0u, 0u, 0u);
-                vw[r][1] = vw[r][0];
-                ksc[r] = 0.f;
-                vsc[r] = 0.f;
-            }
+            const unsigned int jr = 2u * tig + (r & 1) + 8u * (r >> 1);
+            live[r] = c0 + jr < k_end;
+            vw[r][0] = *reinterpret_cast<const uint4*>(sbuf + (8 + r * 2) * 512u + lane * 16u);
+            vw[r][1] = *reinterpret_cast<const uint4*>(sbuf + (8 + r * 2 + 1) * 512u + lane * 16u);
+            ksc[r] = live[r] ? scl[jr] : 0.f;
+            vsc[r] = live[r] ? scl[16u + jr] : 0.f;
         }
 
         // ---- scores: S[head gid, keys 2 tig, 2 tig + 1] (sc[0..1]) and [.., keys 2 tig + 8, + 9] (sc[2..3]).
@@ -271,10 +324,13 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_g
         }
     }
 
-    // ---- merge the four warps. This lane holds heads 2 tig, 2 tig + 1 of channels 32 gid + 2t (+ 1).
+    // ---- merge the four warps. The stage bytes become the merge buffer: every copy has landed and every warp is out of its loop.
+    asm volatile("cp.async.wait_group 0;\n" ::: "memory");
+    __syncthreads();
+    // This lane holds heads 2 tig, 2 tig + 1 of channels 32 gid + 2t (+ 1).
 #pragma unroll
     for (int t = 0; t < 16; ++t) {
-        const unsigned int ch = gid * 32u + 2u * t;
+        const unsigned int ch = (t < 8 ? gid * 16u + 2u * t : 128u + gid * 16u + 2u * (t - 8));
         red_o[warp][2u * tig][ch] = o[t][0];
         red_o[warp][2u * tig + 1u][ch] = o[t][1];
         red_o[warp][2u * tig][ch + 1u] = o[t][2];
