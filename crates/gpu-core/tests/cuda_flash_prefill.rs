@@ -591,6 +591,8 @@ fn the_warpgroup_prefill_reads_an_int8_and_an_fp8_cache() {
         Case { n: 64, start: 31, block_size: 16, scatter: true },
         Case { n: 512, start: 7680, block_size: 4096, scatter: false },
         Case { n: 129, start: 5000, block_size: 64, scatter: true },
+        // From 2048 rows the kernel runs unsplit and has no merge step.
+        Case { n: 2176, start: 1500, block_size: 512, scatter: true },
     ];
     for kv in [Kv::Int8, Kv::Fp8] {
         for (i, c) in cases.iter().enumerate() {
@@ -713,14 +715,25 @@ fn both_flash_versions_stay_close_to_fp32_at_large_score_magnitudes() {
     }
 }
 
-/// The int8-cache prefill kernels at the serving chunk (512 rows) at growing context, for `ncu -k regex:flash_prefill -c 1`:
+/// The int8-cache prefill kernels at the serving chunk at growing context, for `ncu -k regex:flash_prefill -c 1`:
 /// `make test/one P=brain-gpu-core T=cuda_flash_prefill ARGS="--ignored --nocapture contexts"`.
 #[test]
 #[ignore = "a timing report for kernel work, not a spec"]
 fn the_int8_cache_prefill_rates_at_growing_contexts() {
+    int8_prefill_rates(&[(512u32, 512u32), (512, 3584), (512, 7680), (512, 15872), (512, 31232)]);
+}
+
+/// The same at the 4096-row round the server runs a long prompt in.
+#[test]
+#[ignore = "a timing report for kernel work, not a spec"]
+fn the_int8_cache_prefill_rates_at_the_long_prompt_round() {
+    int8_prefill_rates(&[(4096u32, 0u32), (4096, 4096), (4096, 12288), (4096, 20480), (4096, 28672)]);
+}
+
+fn int8_prefill_rates(cases: &[(u32, u32)]) {
     let Some(gpu) = device() else { return };
     gpu_core::provider::cuda::set_flash_prefill_v2(true);
-    for (n, start) in [(512u32, 512u32), (512, 3584), (512, 7680), (512, 15872), (512, 31232)] {
+    for &(n, start) in cases {
         let p = Problem::new(Case { n, start, block_size: 4096, scatter: false }, 23);
         let (seen, stored) = p.as_stored(Kv::Int8);
         let d = TierDevice::upload(&gpu, &seen, Kv::Int8, &stored);

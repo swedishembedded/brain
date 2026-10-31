@@ -242,7 +242,7 @@ extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_
     if (ntq == 0u) { return; }
     const unsigned int base_blocks = ntq * n_heads;
     const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
-    const unsigned int qt = blk % ntq;
+    const unsigned int qt = ntq - 1u - blk % ntq;   // the longest key ranges first
     const unsigned int h = (blk / ntq) % n_heads;
     const unsigned int split = blk / base_blocks;
     if (split >= smax) { return; }   // block-uniform: no barrier is skipped per-thread

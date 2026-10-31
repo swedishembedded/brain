@@ -1375,6 +1375,11 @@ const FLASH_PREFILL_WG_LAUNCH: backend_api::CudaLaunch = backend_api::CudaLaunch
 /// decides per block how many of them work).
 const FLASH_PREFILL_WG_SPLITS_MAX: u32 = 4;
 
+/// Query rows from which the version-3 kernel runs unsplit: 2048 rows are 16 row blocks of 24 heads, 2.9 waves of the
+/// multiprocessors, and a split's partial sums and merge cost more than the wave it saves (4096 rows at 4K-32K context:
+/// 0.92 / 2.08 / 4.18 / 6.25 / 8.19 ms with splits, 0.82 / 1.88 / 3.96 / 5.98 / 7.97 without).
+const FLASH_PREFILL_WG_UNSPLIT_ROWS: u32 = 2048;
+
 static FLASH_PREFILL_WG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 /// Choose the warpgroup (`wgmma`) head_dim 256 prefill attention over an int8 or FP8 KV cache where the part has it (the
@@ -1401,13 +1406,18 @@ pub fn paged_flash_prefill_wg_steps(gpu: &crate::Gpu, head_dim: u32, bufs: &[&ba
     let main_id = gpu.native_kernel_launched(main, PAGED_FLASH_PREFILL_WG_BINDINGS, FLASH_PREFILL_WG_LAUNCH)?;
     let merge_id = gpu.native_kernel_launched(merge, PAGED_FLASH_PREFILL_COMBINE_BINDINGS, backend_api::CudaLaunch { arch: backend_api::ArchFeatures::Required, ..backend_api::CudaLaunch::NONE })?;
     let (rows, n_heads) = (params[0], params[1]);
+    let splits = if rows >= FLASH_PREFILL_WG_UNSPLIT_ROWS { 1 } else { FLASH_PREFILL_WG_SPLITS_MAX };
     let mut p = params.to_vec();
-    p.push(FLASH_PREFILL_WG_SPLITS_MAX);
+    p.push(splits);
     p.push(nsm);
-    let scratch = gpu.storage_uninit(u64::from(FLASH_PREFILL_WG_SPLITS_MAX) * u64::from(rows) * u64::from(n_heads) * 258);
-    let blocks = rows.div_ceil(128) * n_heads * FLASH_PREFILL_WG_SPLITS_MAX;
+    // An unsplit block writes its context directly and leaves the partial sums and their merge alone.
+    let scratch = gpu.storage_uninit(u64::from(splits) * u64::from(rows) * u64::from(n_heads) * 258);
+    let blocks = rows.div_ceil(128) * n_heads * splits;
     let [q, pk, pv, tables, lens, ctx, ks, vs] = *bufs;
     let attend = gpu.step_native_sliced(main_id, &[q, pk, pv, tables, lens, ctx, ks, vs, &scratch], &[(0, 0); 9], &p, blocks)?;
+    if splits == 1 {
+        return Some(vec![attend]);
+    }
     let combine = gpu.step_native_sliced(merge_id, &[lens, &scratch, ctx], &[(0, 0); 3], &p, rows * n_heads)?;
     Some(vec![attend, combine])
 }
