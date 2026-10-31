@@ -128,6 +128,7 @@ pub fn gdn_mixer_segments_fwd(
     // The convolution's outputs: two bytes an element (words of two) with bf16.
     let words = |elems: u64| if bf16 { elems.div_ceil(2) } else { elems };
     let (query, key, value) = (g.storage_uninit(words(n as u64 * key_dim as u64)), g.storage_uninit(words(n as u64 * key_dim as u64)), g.storage_uninit(words(n as u64 * value_dim as u64)));
+    let layout = GdnTokenLayout { bhc: 0, c_len: 64, n_chunks: 0, heads: nvh, group, head_dim: khd, scale: 1.0f32 / (khd as f32).sqrt(), eps: 1e-6 };
     let conv = gdn_conv_silu_seg_step(
         g,
         &[mixed_qkv, w.conv1d_weight, &round.buf, pools.hist, &query, &key, &value],
@@ -135,12 +136,12 @@ pub fn gdn_mixer_segments_fwd(
         table,
         bf16,
         pools.bf16,
+        layout.eps,
     )?;
 
     // The prep writes every word of its slots it reads back, so the scratch is not cleared.
     let (g_cs, exp_g_cs, u, wm, intra) = (g.storage_uninit(slots), g.storage_uninit(slots), g.storage_uninit(slots * vhd as u64), g.storage_uninit(slots * khd as u64), g.storage_uninit(slots * 64));
     let (query_cm, key_cm) = (g.storage_uninit(slots * khd as u64), g.storage_uninit(slots * khd as u64));
-    let layout = GdnTokenLayout { bhc: 0, c_len: 64, n_chunks: 0, heads: nvh, group, head_dim: khd, scale: 1.0f32 / (khd as f32).sqrt(), eps: 1e-6 };
     let prep = gdn_chunk_prep_seg_bf16_step(g, &[&query, &key, &value, bproj, aproj, w.a_log, w.dt_bias, &round.buf, &g_cs, &exp_g_cs, &u, &wm, &intra, &query_cm, &key_cm], layout, table, bf16)?;
     // Every row of a segment is written by the recurrence (a mixed round's decode rows are the caller's).
     let out = g.storage_uninit(words(n as u64 * value_dim as u64));

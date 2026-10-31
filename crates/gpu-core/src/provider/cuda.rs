@@ -430,9 +430,9 @@ const GDN_CHUNK_PREP_TOK_TRAIN_BINDINGS: &[BindKind] = &[
     BindKind::StorageReadWrite,
 ];
 
-/// Dynamic shared memory of `gdn_chunk_prep_tok_bf16`: bf16 key and query / value tiles (64 x 136), the attn0 / scaled-T
-/// space (two bf16 64 x 72), the fp32 T (64 x 68) and four 64-float vectors (the solve's partial sums live in the query tile).
-const GDN_CHUNK_PREP_BF16_DYNAMIC_SHARED_BYTES: u32 = 2 * 64 * 136 * 2 + 2 * 64 * 72 * 2 + 64 * 68 * 4 + 4 * 64 * 4;
+/// Dynamic shared memory of `gdn_chunk_prep_tok_bf16`: bf16 key and query / value tiles (64 x 136), the fp32 attn0 (64 x 68),
+/// four 64-float vectors and the 28 bf16 16 x 24 matrices of the blocked solve.
+const GDN_CHUNK_PREP_BF16_DYNAMIC_SHARED_BYTES: u32 = 2 * 64 * 136 * 2 + 64 * 68 * 4 + 4 * 64 * 4 + (2 * 6 + 4 * 2 * 2) * 16 * 24 * 2;
 
 /// Dynamic shared memory of `gdn_chunk_prep_tc`: the 64 x 132 key tile, the
 /// 64 x 136 query / value tile, two 64 x 68 matrices (attn0 and the solved T)
@@ -700,6 +700,8 @@ pub struct GdnSegmentTable {
     segments: u32,
     chunks: u32,
     conv_tiles_rows: u32,
+    /// Runs of 64 rows over all segments: a block of the vector convolution is one such run of one 128-channel head.
+    conv_vec_runs: u32,
 }
 
 /// Rows each thread of `gdn_conv_silu_seg` walks (the launch's blocks are counted in runs of this many rows).
@@ -713,6 +715,7 @@ impl GdnSegmentTable {
         let mut chunk_words = Vec::new();
         let mut chunks = 0u32;
         let mut conv_tiles_rows = 0u32;
+        let mut conv_vec_runs = 0u32;
         for s in spans {
             words.extend_from_slice(&[s.row0, s.rows, s.slot, chunks]);
             for off in (0..s.rows).step_by(GDN_SEG_CHUNK_ROWS as usize) {
@@ -720,9 +723,10 @@ impl GdnSegmentTable {
                 chunks += 1;
             }
             conv_tiles_rows += s.rows.div_ceil(GDN_CONV_ROWS_PER_THREAD);
+            conv_vec_runs += s.rows.div_ceil(GDN_SEG_CHUNK_ROWS);
         }
         words.extend_from_slice(&chunk_words);
-        Self { words, segments: spans.len() as u32, chunks, conv_tiles_rows }
+        Self { words, segments: spans.len() as u32, chunks, conv_tiles_rows, conv_vec_runs }
     }
 
     /// The words to upload as the `table` buffer.
@@ -800,12 +804,25 @@ static GDN_CHUNK_LOOP_SEG_BINDINGS: [BindKind; 10] = bwd_tc_bindings(7);
 /// The segment convolution ([`GdnSegmentTable`]) over the round's `[rows, conv_dim]` activations `x`: `bufs` is `x`, `w`,
 /// `table`, `hist_pool` (`[slots, conv_dim, 3]`, updated in place), then `query`, `key`, `value`. `None` when the
 /// device or the shape does not serve it (the caller keeps the per-segment path). With `bf16`, `x` is bf16 rows and the three
-/// outputs are written as bf16 rows.
-pub fn gdn_conv_silu_seg_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 7], l: GdnConvLayout, table: &GdnSegmentTable, bf16: bool, pool_bf16: bool) -> Option<crate::Step> {
-    let kernel = l.served(gpu).and_then(|_| kernels_cuda::get("gdn_conv_silu_seg"))?;
+/// outputs are written as bf16 rows, query and key L2-normalised with `qk_eps` (`x * rsqrt(sum x^2 + eps)` per 128-wide head, so the prep
+/// of the bf16 form reads them as they are); this needs `gdn_conv_silu_seg_vec` and heads that are multiples of 128 channels.
+pub fn gdn_conv_silu_seg_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 7], l: GdnConvLayout, table: &GdnSegmentTable, bf16: bool, pool_bf16: bool, qk_eps: f32) -> Option<crate::Step> {
+    l.served(gpu)?;
+    if bf16 {
+        let cc = gpu.caps().arch.compute_capability?;
+        let kernel = kernels_cuda::get("gdn_conv_silu_seg_vec").filter(|k| k.min_cc <= cc)?;
+        if [l.conv_dim, l.key_dim, l.value_dim].iter().any(|d| d % 128 != 0) {
+            return None;
+        }
+        let id = gpu.native_kernel(kernel, &GDN_CONV_SILU_SEG_BINDINGS)?;
+        let blocks = l.conv_dim / 128 * table.conv_vec_runs;
+        let params = [blocks, l.conv_dim, l.key_dim, l.value_dim, table.segments, l.conv_dim * (l.kernel - 1), u32::from(pool_bf16) | 2, qk_eps.to_bits()];
+        return gpu.step_native_sliced(id, bufs, &[(0, 0); 7], &params, blocks);
+    }
+    let kernel = kernels_cuda::get("gdn_conv_silu_seg")?;
     let id = gpu.native_kernel(kernel, &GDN_CONV_SILU_SEG_BINDINGS)?;
     let blocks = l.conv_dim.div_ceil(GDN_CONV_CHANNELS_PER_BLOCK) * table.conv_tiles_rows;
-    let params = [blocks, l.conv_dim, l.key_dim, l.value_dim, table.segments, l.conv_dim * (l.kernel - 1), if bf16 { 1 | 2 } else { 0 } | if pool_bf16 { 4 } else { 0 }];
+    let params = [blocks, l.conv_dim, l.key_dim, l.value_dim, table.segments, l.conv_dim * (l.kernel - 1), if pool_bf16 { 4 } else { 0 }];
     gpu.step_native_sliced(id, bufs, &[(0, 0); 7], &params, blocks)
 }
 
@@ -822,7 +839,7 @@ pub fn gdn_chunk_prep_seg_bf16_step(gpu: &crate::Gpu, bufs: &[&backend_api::Devi
     let launch = backend_api::CudaLaunch { dynamic_shared_bytes: GDN_CHUNK_PREP_BF16_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..backend_api::CudaLaunch::NONE };
     let id = gpu.native_kernel_launched(kernel, &GDN_CHUNK_PREP_SEG_BINDINGS, launch)?;
     let blocks = table.chunks * l.heads;
-    let params = [blocks, 0, l.head_dim, l.head_dim, 0, l.scale.to_bits(), l.heads, table.segments, l.group, l.eps.to_bits(), u32::from(bf16)];
+    let params = [blocks, 0, l.head_dim, l.head_dim, 0, l.scale.to_bits(), l.heads, table.segments, l.group, l.eps.to_bits(), if bf16 { 3 } else { 0 }];
     gpu.step_native_sliced(id, bufs, &[(0, 0); 15], &params, blocks)
 }
 

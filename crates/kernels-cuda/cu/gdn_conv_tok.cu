@@ -48,6 +48,13 @@
 #define ROWS_PER_THREAD 32
 #define K 4                   // taps of the convolution (linear_conv_kernel_dim); the provider declines any other
 
+// 1 / x to the hardware approximation (1 ulp); x = +inf gives 0, as the SiLU of a large negative input needs.
+__device__ __forceinline__ float brain_rcp(float x) {
+    float y;
+    asm("rcp.approx.ftz.f32 %0, %1;\n" : "=f"(y) : "f"(x));
+    return y;
+}
+
 __device__ __forceinline__ float silu_fwd(float v) { return v / (1.0f + expf(-v)); }
 
 __device__ __forceinline__ float silu_bwd(float v, float dy) {
@@ -111,6 +118,13 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_conv_hist_tok(co
         next[j] = e < K - 1 ? hist[(unsigned long long)c * (K - 1) + e] : x[(unsigned long long)(e - (K - 1)) * C + c];
     }
     for (unsigned int j = 0; j + 1 < K; ++j) { hist[(unsigned long long)c * (K - 1) + j] = next[j]; }
+}
+
+// Two floats rounded to bf16 pairs (`lo` in the low half), round to nearest even; NaN inputs stay NaN.
+__device__ __forceinline__ unsigned int brain_pack_bf16(float lo, float hi) {
+    unsigned int d;
+    asm("cvt.rn.bf16x2.f32 %0, %1, %2;\n" : "=r"(d) : "f"(hi), "f"(lo));
+    return d;
 }
 
 // `v` rounded to bf16, round to nearest even, NaN to the canonical quiet NaN: `cast_f32_bf16`'s own rule.
@@ -203,6 +217,152 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_conv_silu_seg(co
             key[row * key_dim + (c - key_dim)] = act;
         } else {
             value[row * value_dim + (c - 2 * key_dim)] = act;
+        }
+    }
+}
+
+// The segment convolution of the serving path (bf16 rows in and out) with eight channels a thread, so every load and store is one
+// 16-byte vector and a warp moves 512 contiguous bytes of a row, and with the L2 normalisation of the query and key heads folded in:
+// the thread that holds a head's 128 channels in sixteen lanes sums their squares by shuffles, so the prep reads normalised rows and the
+// three value heads that share a key head no longer normalise it three times each.
+// A block is 128 channels (one head of the query, key or value) x 64 rows of one segment: eight row phases of eight rows, each
+// starting from a window of the three rows before it (the previous phase's rows, or the history pool's for a segment's first).
+// Contract: params [blocks, C, key_dim, value_dim, nseg, history words per pool row, flags, eps (f32 bits)]; flags bit 0: the history pool
+// holds bf16 elements, bit 1: query and key are written L2-normalised (`x * rsqrt(sum x^2 + eps)` of the bf16-rounded row, the formula of
+// `brain_normalize_rows_bf16`); read x (bf16 rows), w [C, K], table; hist pool (read and written); write query, key, value (bf16 rows).
+// C, key_dim and value_dim are multiples of 128.
+extern "C" __global__ void __launch_bounds__(THREADS, 6) brain_gdn_conv_silu_seg_vec(const unsigned int* params, const float* x, const float* w, const unsigned int* table,
+                                                                                 float* hist_pool, float* query, float* key, float* value) {
+    const unsigned int blocks = params[0], C = params[1], key_dim = params[2], value_dim = params[3], nseg = params[4];
+    const bool hist_bf16 = (params[6] & 1u) != 0u, normalize = (params[6] & 2u) != 0u;
+    const float eps = __uint_as_float(params[7]);
+    const unsigned long long hist_words = params[5];
+    const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x, tiles = C / 128u;
+    if (blk >= blocks) { return; }
+    unsigned int b = blk, seg = 0;
+    for (; seg < nseg; ++seg) {
+        const unsigned int nb = tiles * ((table[4 * seg + 1] + 63u) / 64u);
+        if (b < nb) { break; }
+        b -= nb;
+    }
+    if (seg == nseg) { return; }
+    const unsigned int row0 = table[4 * seg], rows = table[4 * seg + 1], slot = table[4 * seg + 2];
+    const unsigned int ct = b % tiles, rt = b / tiles;
+    const unsigned int lane16 = threadIdx.x & 15u, phase = threadIdx.x >> 4;
+    const unsigned int c0 = ct * 128u + lane16 * 8u;
+    const unsigned int s0 = rt * 64u + phase * 8u;  // the segment row this thread starts at
+    const bool in_range = s0 < rows;
+    const unsigned int s1 = min(s0 + 8u, rows);
+    const bool is_qk = c0 < 2u * key_dim;
+    const unsigned short* const xh = reinterpret_cast<const unsigned short*>(x);
+
+    float wk[8][4];
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        const float4 t = *reinterpret_cast<const float4*>(w + (unsigned long long)(c0 + i) * K);
+        wk[i][0] = t.x; wk[i][1] = t.y; wk[i][2] = t.z; wk[i][3] = t.w;
+    }
+    const unsigned long long hist_at = slot * hist_words + (unsigned long long)c0 * (K - 1);
+    unsigned short* const hist_h = reinterpret_cast<unsigned short*>(hist_pool) + hist_at;
+    float* const hist_f = hist_pool + hist_at;
+    auto hist_ld = [&](unsigned int ch, unsigned int j) -> float { return hist_bf16 ? __uint_as_float(static_cast<unsigned int>(hist_h[ch * (K - 1) + j]) << 16) : hist_f[ch * (K - 1) + j]; };
+    auto unpack = [](uint4 v, float (&o)[8]) {
+        o[0] = __uint_as_float(v.x << 16); o[1] = __uint_as_float(v.x & 0xffff0000u);
+        o[2] = __uint_as_float(v.y << 16); o[3] = __uint_as_float(v.y & 0xffff0000u);
+        o[4] = __uint_as_float(v.z << 16); o[5] = __uint_as_float(v.z & 0xffff0000u);
+        o[6] = __uint_as_float(v.w << 16); o[7] = __uint_as_float(v.w & 0xffff0000u);
+    };
+    auto row_at = [&](int q) -> uint4 { return *reinterpret_cast<const uint4*>(xh + (unsigned long long)(row0 + q) * C + c0); };
+
+    if (in_range) {
+        // Rows s0 - 3 .. s0 + 7 of the segment as bf16 vectors (the three before s0 from the history for a segment's first rows), all requested up
+        // front so the loads overlap; the window of output row rr is rows rr .. rr + 3 of this array, with no moves between rows.
+        uint4 in[11];
+        float hist_win[K - 1][8];
+#pragma unroll
+        for (int k = 0; k < K - 1; ++k) {
+            const int q = (int)s0 + k - (int)(K - 1);
+            in[k] = q >= 0 ? row_at(q) : make_uint4(0u, 0u, 0u, 0u);
+            if (q < 0) {
+#pragma unroll
+                for (int i = 0; i < 8; ++i) { hist_win[k][i] = hist_ld(i, static_cast<unsigned int>(q + (int)(K - 1))); }
+            }
+        }
+#pragma unroll
+        for (int rr = 0; rr < 8; ++rr) { in[K - 1 + rr] = s0 + rr < s1 ? row_at(s0 + rr) : make_uint4(0u, 0u, 0u, 0u); }
+        if (s0 == 0u) {
+            // The last K-1 rows of [hist | x] become the next history; all of them are read before any is written.
+            float next[8][K - 1];
+#pragma unroll
+            for (int j = 0; j < K - 1; ++j) {
+                const unsigned int e = rows + j;
+                if (e < K - 1) {
+#pragma unroll
+                    for (int i = 0; i < 8; ++i) { next[i][j] = hist_ld(i, e); }
+                } else {
+                    float t[8];
+                    unpack(row_at(e - (K - 1)), t);
+#pragma unroll
+                    for (int i = 0; i < 8; ++i) { next[i][j] = t[i]; }
+                }
+            }
+#pragma unroll
+            for (int i = 0; i < 8; ++i) {
+#pragma unroll
+                for (int j = 0; j < K - 1; ++j) {
+                    if (hist_bf16) { hist_h[i * (K - 1) + j] = static_cast<unsigned short>(brain_gdn_bf16_bits(next[i][j])); } else { hist_f[i * (K - 1) + j] = next[i][j]; }
+                }
+            }
+        }
+        // The input rows as f32, unpacked once each, as late as their first use.
+        float x[11][8];
+#pragma unroll
+        for (int k = 0; k < K - 1; ++k) {
+            if ((int)s0 + k - (int)(K - 1) >= 0) {
+                unpack(in[k], x[k]);
+            } else {
+#pragma unroll
+                for (int i = 0; i < 8; ++i) { x[k][i] = hist_win[k][i]; }
+            }
+        }
+#pragma unroll
+        for (int rr = 0; rr < 8; ++rr) {
+            unpack(in[K - 1 + rr], x[K - 1 + rr]);
+            const unsigned int r = s0 + rr;
+            if (r < s1) {
+                unsigned int h[4];
+                float ss = 0.0f;
+#pragma unroll
+                for (int i = 0; i < 8; i += 2) {
+                    float act[2];
+#pragma unroll
+                    for (int d = 0; d < 2; ++d) {
+                        float acc = 0.0f;
+#pragma unroll
+                        for (int k = 0; k < K; ++k) { acc = acc + x[rr + k][i + d] * wk[i + d][k]; }
+                        act[d] = acc * brain_rcp(1.0f + __expf(-acc));
+                    }
+                    h[i / 2] = brain_pack_bf16(act[0], act[1]);
+                    ss = fmaf(__uint_as_float(h[i / 2] << 16), __uint_as_float(h[i / 2] << 16), ss);
+                    ss = fmaf(__uint_as_float(h[i / 2] & 0xffff0000u), __uint_as_float(h[i / 2] & 0xffff0000u), ss);
+                }
+                if (normalize && is_qk) {
+#pragma unroll
+                    for (int o = 8; o > 0; o >>= 1) { ss += __shfl_xor_sync(0xffffffffu, ss, o); }
+                    const float inv = rsqrtf(ss + eps);
+#pragma unroll
+                    for (int i = 0; i < 4; ++i) { h[i] = brain_pack_bf16(__uint_as_float(h[i] << 16) * inv, __uint_as_float(h[i] & 0xffff0000u) * inv); }
+                }
+                const uint4 o = make_uint4(h[0], h[1], h[2], h[3]);
+                const unsigned long long row = row0 + r;
+                if (c0 < key_dim) {
+                    *reinterpret_cast<uint4*>(reinterpret_cast<unsigned short*>(query) + row * key_dim + c0) = o;
+                } else if (c0 < 2u * key_dim) {
+                    *reinterpret_cast<uint4*>(reinterpret_cast<unsigned short*>(key) + row * key_dim + (c0 - key_dim)) = o;
+                } else {
+                    *reinterpret_cast<uint4*>(reinterpret_cast<unsigned short*>(value) + row * value_dim + (c0 - 2u * key_dim)) = o;
+                }
+            }
         }
     }
 }

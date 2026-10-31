@@ -65,7 +65,7 @@ fn bench(label: &str, spans: &[GdnSegmentSpan]) -> Option<(Vec<f32>, Vec<f32>)> 
     let layout = GdnTokenLayout { bhc: 0, c_len: 64, n_chunks: 0, heads: NVH, group: NVH / NKH, head_dim: HD, scale: 1.0 / (HD as f32).sqrt(), eps: 1e-6 };
     let steps = || {
         vec![
-            cuda::gdn_conv_silu_seg_step(&g, &[&mixed, &conv_w, &tbl, &hist, &query, &key, &value], GdnConvLayout { rows: n, conv_dim: CONV_DIM, seq_len: n, key_dim: KEY_DIM, value_dim: VALUE_DIM, kernel: 4 }, &table, true, false).expect("conv"),
+            cuda::gdn_conv_silu_seg_step(&g, &[&mixed, &conv_w, &tbl, &hist, &query, &key, &value], GdnConvLayout { rows: n, conv_dim: CONV_DIM, seq_len: n, key_dim: KEY_DIM, value_dim: VALUE_DIM, kernel: 4 }, &table, true, false, 1e-6).expect("conv"),
             cuda::gdn_chunk_prep_seg_bf16_step(&g, &[&query, &key, &value, &bproj, &aproj, &a_log, &dt_bias, &tbl, &g_cs, &exp_g_cs, &u, &wm, &intra, &qcm, &kcm], layout, &table, true).expect("prep"),
             cuda::gdn_chunk_loop_seg_bf16_step(&g, &[&kcm, &qcm, &wm, &u, &g_cs, &intra, &tbl, &state, &out], NVH, HD, HD, &table, true, false).expect("loop"),
             cuda::gdn_gated_norm_step(&g, &[&out, &norm_w, &z, &gated, &q8, &s8], n * NVH, 0, 1e-6, true, true).expect("norm"),
@@ -164,4 +164,53 @@ fn the_measured_selection_runs_the_recurrence_on_warpgroups_on_a_hopper_card() {
     let choice = g.gdn_prefill_choice().expect("measured");
     println!("measured selection: {choice:?}");
     assert!(choice.bf16 && choice.wg, "{choice:?}");
+}
+
+fn unpack_bf16(words: &[f32], n: usize) -> Vec<f32> {
+    words.iter().flat_map(|w| [f32::from_bits(w.to_bits() << 16), f32::from_bits(w.to_bits() & 0xffff_0000)]).take(n).collect()
+}
+
+/// The bf16 prep (bf16 tensor-core products, `gdn_chunk_prep_tok_bf16`) against the exact one (three-pass TF32,
+/// `gdn_chunk_prep_tok_tc`) on the same inputs: every tensor the recurrence reads agrees to a few bf16 units of relative
+/// rms error (the cumulative decay, which both forms compute alike, exactly). The normalised rows the two forms hand the
+/// recurrence are different tensors (the bf16 form scales them), so they are not compared.
+#[test]
+fn the_bf16_prep_agrees_with_the_exact_prep_to_bf16_resolution() {
+    let g = gpu_core::testgpu::dev(&[]);
+    if g.caps().arch.compute_capability.is_none_or(|cc| cc < (8, 0)) {
+        brain_testutil::skip_unavailable("a device with bf16 tensor cores");
+        return;
+    }
+    let (h, t, c, group) = (NVH, 1024u32, 64u32, NVH / NKH);
+    let n_chunks = t / c;
+    let bhc = h * n_chunks;
+    let layout = GdnTokenLayout { bhc, c_len: c, n_chunks, heads: h, group, head_dim: HD, scale: 1.0 / (HD as f32).sqrt(), eps: 1e-6 };
+    let mut rng = Lcg::new(11);
+    let (ts, hs) = (t as usize, h as usize);
+    let q = g.storage_init("q", &rand(&mut rng, ts * (hs / group as usize) * 128, 1.0));
+    let k = g.storage_init("k", &rand(&mut rng, ts * (hs / group as usize) * 128, 1.0));
+    let v = g.storage_init("v", &rand(&mut rng, ts * hs * 128, 1.0));
+    let raw_g = g.storage_init("g", &rand(&mut rng, ts * hs, 0.2).iter().map(|x| -x.abs()).collect::<Vec<_>>());
+    let beta = g.storage_init("beta", &rand(&mut rng, ts * hs, 0.5).iter().map(|x| x + 0.5).collect::<Vec<_>>());
+    let len = bhc as usize * c as usize * 128;
+    let run = |bf16: bool| {
+        let (g_cs, exp_g_cs) = (g.storage(u64::from(bhc * c)), g.storage(u64::from(bhc * c)));
+        let (u, w, intra) = (g.storage(len as u64), g.storage(len as u64), g.storage(u64::from(bhc * c * c)));
+        let (qcm, kcm) = (g.storage(len as u64), g.storage(len as u64));
+        let bufs = [&q, &k, &v, &raw_g, &beta, &g_cs, &exp_g_cs, &u, &w, &intra, &qcm, &kcm];
+        let step = if bf16 { cuda::gdn_chunk_prep_tok_bf16_step(&g, &bufs, layout) } else { cuda::gdn_chunk_prep_tok_step(&g, &bufs, layout) }.expect("prep");
+        g.submit(&[], &[step]);
+        g.poll_wait();
+        let wide = |b: &gpu_core::DeviceBuffer, n: usize| if bf16 { unpack_bf16(&g.read(b, n / 2), n) } else { g.read(b, n) };
+        let cc = (bhc * c * c) as usize;
+        (g.read(&g_cs, (bhc * c) as usize), g.read(&u, len), wide(&w, len), wide(&intra, cc))
+    };
+    let exact = run(false);
+    let fast = run(true);
+    let err = |a: &[f32], r: &[f32]| rel_rms(a, r, false);
+    let report = [("g_cs", err(&fast.0, &exact.0), 1e-6), ("u", err(&fast.1, &exact.1), 4.0 / 512.0), ("w", err(&fast.2, &exact.2), 4.0 / 512.0), ("intra", err(&fast.3, &exact.3), 4.0 / 512.0)];
+    for (name, e, limit) in report {
+        println!("   prep {name}: relative rms error {e:.3e} (limit {limit:.1e})");
+        assert!(e <= limit, "{name}: {e:.3e} > {limit:.1e}");
+    }
 }
