@@ -96,6 +96,21 @@ pub fn gdn_mixer_verify_pooled_fused(
     let gated = g.storage(n_tokens as u64 * shape.value_dim() as u64);
     let f = f32::to_bits;
     let params = [shape.nkh, gdn.h, shape.group(), f(1e-6), f(shape.rms_eps), f(1.0f32 / (gdn.dk as f32).sqrt()), layout.b, 0];
+    // The split form first: a conv thread per channel and a recurrence block per value head, bit-identical to the fused body
+    // below, whose one block per key head spills its registers and fills 16 of the card's 132 SMs at one sequence.
+    let (conv, recur) = (gpu_core::Fused::GdnConvVerifyPool, gpu_core::Fused::GdnRecurVerifyPool);
+    if g.has_fused(conv) && g.has_fused(recur) && conv.serves(&[shape.nkh, gdn.h, layout.b]) && recur.serves(&params) {
+        let conv_out = g.storage_uninit(n_tokens as u64 * shape.conv_dim() as u64);
+        let conv_step = g.fused_step(conv, &[mixed, w.conv1d_weight, pool.hist, &conv_out, layout.rows, layout.counts, layout.offs, &snaps.hist], &[shape.nkh, gdn.h, layout.b]);
+        let recur_step = conv_step
+            .is_some()
+            .then(|| g.fused_step(recur, &[&conv_out, bproj, aproj, w.a_log, w.dt_bias, pool.state, z, w.norm_weight, &gated, layout.rows, layout.counts, layout.offs, &snaps.state], &params))
+            .flatten();
+        if let (Some(conv_step), Some(recur_step)) = (conv_step, recur_step) {
+            g.submit(&[], &[conv_step, recur_step]);
+            return Some(gated);
+        }
+    }
     let step = g.fused_step(
         gpu_core::Fused::GdnVerifyPool,
         &[mixed, w.conv1d_weight, pool.hist, bproj, aproj, w.a_log, w.dt_bias, pool.state, z, w.norm_weight, &gated, layout.rows, layout.counts, layout.offs, &snaps.state, &snaps.hist],
