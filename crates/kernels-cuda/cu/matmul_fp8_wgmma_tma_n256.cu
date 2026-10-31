@@ -25,12 +25,8 @@
 #define BRAIN_FWT_THREADS 384
 #define BRAIN_FWT_MAX_CTAS 132  // grid size at most, and the SM slots of the maps
 
-// The driver's 128-byte map for a 2-D byte tensor of 256 x 256 at address 0x10000, a 128 x 128 box, the 128-byte swizzle, 256-byte L2 promotion
-// and zero fill.
-#define BRAIN_FWT_TEMPLATE 0x0000000000010000ull, 0x0000001000066010ull, 0x0000000000000000ull, 0x0000000000000000ull, 0x000000ff000000ffull, 0x0000000000000000ull, 0x7f00000000000000ull, 0x000000000000007full, 0x0000000000004000ull, 0x0000000000000400ull, 0x0000000000000000ull, 0x0000000000000000ull, 0x0000000000000000ull, 0x0000000000000000ull, 0x0000000000000000ull, 0x0000000000000000ull
 // The same for the output: a 64-byte box of 16 rows (16 floats a row), the 64-byte swizzle.
 #define BRAIN_FWT_OUT_TEMPLATE 0x0000000000010000ull, 0x0000001000064010ull, 0x0000000000000000ull, 0x0000000000000000ull, 0x000000ff000000ffull, 0x0000000000000000ull, 0x3f00000000000000ull, 0x000000000000000full, 0x0000000000000400ull, 0x0000000000000200ull, 0x0000000000000000ull, 0x0000000000000000ull, 0x0000000000000000ull, 0x0000000000000000ull, 0x0000000000000000ull, 0x0000000000000000ull
-__device__ __constant__ unsigned long long brain_fwt_template[16] = { BRAIN_FWT_TEMPLATE };
 __device__ __constant__ unsigned long long brain_fwt_out_template[16] = { BRAIN_FWT_OUT_TEMPLATE };
 // Each SM's three maps (activations, weights, output), in global memory (the TMA reads a map from global, constant or parameter memory).
 __device__ __align__(128) unsigned long long brain_fwt_maps[BRAIN_FWT_MAX_CTAS][3][16];
@@ -55,33 +51,6 @@ __device__ __forceinline__ unsigned int brain_fwt_pack_bf16(float lo, float hi) 
     asm("cvt.rn.bf16x2.f32 %0, %1, %2;\n" : "=r"(r) : "f"(hi), "f"(lo));
     return r;
 }
-
-__device__ __forceinline__ unsigned int brain_fwt_smem(const void* p) {
-    return static_cast<unsigned int>(__cvta_generic_to_shared(p));
-}
-
-// Global -> shared copy, zero-filled when `bytes` is 0 (a row past the edge of the matrix). The pointer is always valid.
-
-__device__ __forceinline__ void brain_fwt_cp4(unsigned int dst, const void* src, unsigned int bytes) {
-    asm volatile("cp.async.ca.shared.global [%0], [%1], 4, %2;\n" ::"r"(dst), "l"(src), "r"(bytes) : "memory");
-}
-
-__device__ __forceinline__ void brain_fwt_commit() { asm volatile("cp.async.commit_group;\n" ::: "memory"); }
-
-template <int N>
-__device__ __forceinline__ void brain_fwt_wait() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N) : "memory"); }
-
-// Shared-memory matrix descriptor: 128-byte swizzle, K-major, 8-row groups 1024 B apart.
-__device__ __forceinline__ unsigned long long brain_fwt_desc(unsigned int smem_addr) {
-    return static_cast<unsigned long long>((smem_addr & 0x3FFFFu) >> 4) | (1ull << 16) | (64ull << 32) | (1ull << 62);
-}
-
-__device__ __forceinline__ void brain_fwt_fence() { asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory"); }
-__device__ __forceinline__ void brain_fwt_wg_commit() { asm volatile("wgmma.commit_group.sync.aligned;\n" ::: "memory"); }
-template <int N>
-__device__ __forceinline__ void brain_fwt_wg_wait() { asm volatile("wgmma.wait_group.sync.aligned %0;\n" ::"n"(N) : "memory"); }
-// Writes made by cp.async (the generic proxy) are visible to the async proxy (wgmma) after this.
-__device__ __forceinline__ void brain_fwt_fence_proxy() { asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory"); }
 
 // D (64 x 256 f32, 128 registers per thread) = A (64 x 32 e4m3) . B (256 x 32 e4m3)^T, plus D when `accumulate` is set.
 __device__ __forceinline__ void brain_fwt_wgmma(float (&d)[128], unsigned long long da, unsigned long long db, int accumulate) {
@@ -118,65 +87,6 @@ __device__ __forceinline__ void brain_fwt_wgmma(float (&d)[128], unsigned long l
           "+f"(d[112]), "+f"(d[113]), "+f"(d[114]), "+f"(d[115]), "+f"(d[116]), "+f"(d[117]), "+f"(d[118]), "+f"(d[119]),
           "+f"(d[120]), "+f"(d[121]), "+f"(d[122]), "+f"(d[123]), "+f"(d[124]), "+f"(d[125]), "+f"(d[126]), "+f"(d[127])
         : "l"(da), "l"(db), "r"(accumulate));
-}
-
-
-__device__ __forceinline__ void brain_fwt_mbar_init(unsigned int bar, unsigned int count) {
-    asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;\n" ::"r"(bar), "r"(count) : "memory");
-}
-__device__ __forceinline__ void brain_fwt_mbar_arrive(unsigned int bar) {
-    asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];\n" ::"r"(bar) : "memory");
-}
-__device__ __forceinline__ void brain_fwt_mbar_arrive_expect_tx(unsigned int bar, unsigned int bytes) {
-    asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n" ::"r"(bar), "r"(bytes) : "memory");
-}
-// The calling thread's earlier cp.async copies arrive on `bar` when they complete (the arrival is counted in the barrier's init count).
-__device__ __forceinline__ void brain_fwt_mbar_arrive_cp_async(unsigned int bar) {
-    asm volatile("cp.async.mbarrier.arrive.noinc.shared::cta.b64 [%0];\n" ::"r"(bar) : "memory");
-}
-__device__ __forceinline__ void brain_fwt_mbar_wait(unsigned int bar, unsigned int parity) {
-    asm volatile(
-        "{\n"
-        ".reg .pred p;\n"
-        "FWT_WAIT:\n"
-        "mbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1;\n"
-        "@!p bra FWT_WAIT;\n"
-        "}\n" ::"r"(bar), "r"(parity) : "memory");
-}
-
-// 2-D tile load of a `box` (128 bytes of K, 128 rows) at (k byte, row), completing on `bar`.
-__device__ __forceinline__ void brain_fwt_tma_load(unsigned int dst, const void* map, int k, int row, unsigned int bar) {
-    asm volatile(
-        "cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::complete_tx::bytes [%0], [%1, {%2, %3}], [%4];\n"
-        ::"r"(dst), "l"(map), "r"(k), "r"(row), "r"(bar) : "memory");
-}
-
-// 2-D tile store of a `box` from shared memory to (k byte, row), completing in the issuing thread's bulk group.
-__device__ __forceinline__ void brain_fwt_tma_store(const void* map, unsigned int src, int k, int row) {
-    asm volatile("cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [%0, {%1, %2}], [%3];\n" ::"l"(map), "r"(k), "r"(row), "r"(src) : "memory");
-}
-__device__ __forceinline__ void brain_fwt_bulk_commit() { asm volatile("cp.async.bulk.commit_group;\n" ::: "memory"); }
-// Wait until at most N of the thread's bulk stores are still reading their shared-memory source.
-template <int N>
-__device__ __forceinline__ void brain_fwt_bulk_wait_read() { asm volatile("cp.async.bulk.wait_group.read %0;\n" ::"n"(N) : "memory"); }
-template <int N>
-__device__ __forceinline__ void brain_fwt_bulk_wait() { asm volatile("cp.async.bulk.wait_group %0;\n" ::"n"(N) : "memory"); }
-
-// Copy `tmpl` to shared memory, replace the address, dimensions and row stride, and publish the map to global memory (one warp).
-__device__ __forceinline__ void brain_fwt_build_map(const unsigned long long* tmpl, unsigned long long* smem_map, unsigned long long* gmem_map, const void* base, unsigned int cols, unsigned int rows, unsigned int lane) {
-    if (lane < 16u) { smem_map[lane] = tmpl[lane]; }
-    __syncwarp();
-    if (lane == 0u) {
-        const unsigned int s = static_cast<unsigned int>(__cvta_generic_to_shared(smem_map));
-        asm volatile("tensormap.replace.tile.global_address.shared::cta.b1024.b64 [%0], %1;\n" ::"r"(s), "l"(base) : "memory");
-        asm volatile("tensormap.replace.tile.global_dim.shared::cta.b1024.b32 [%0], 0, %1;\n" ::"r"(s), "r"(cols) : "memory");
-        asm volatile("tensormap.replace.tile.global_dim.shared::cta.b1024.b32 [%0], 1, %1;\n" ::"r"(s), "r"(rows) : "memory");
-        asm volatile("tensormap.replace.tile.global_stride.shared::cta.b1024.b64 [%0], 0, %1;\n" ::"r"(s), "l"(static_cast<unsigned long long>(cols)) : "memory");
-    }
-    __syncwarp();
-    const unsigned int s = static_cast<unsigned int>(__cvta_generic_to_shared(smem_map));
-    asm volatile("tensormap.cp_fenceproxy.global.shared::cta.tensormap::generic.release.gpu.sync.aligned [%0], [%1], 128;\n" ::"l"(gmem_map), "r"(s) : "memory");
-    asm volatile("fence.proxy.tensormap::generic.acquire.gpu [%0], 128;\n" ::"l"(gmem_map) : "memory");
 }
 
 // Tile order: the blocks that run together cover BRAIN_FWT_GROUP_M row tiles of a few weight tiles, so the activation rows and the weight

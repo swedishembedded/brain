@@ -76,8 +76,8 @@ fn the_n256_kernel_templates_are_what_the_driver_encodes() {
         brain_testutil::skip_unavailable("a CUDA driver with a device whose context the encoder can borrow");
         return;
     };
+    assert_eq!(shipped(include_str!("../../kernels-cuda/cu/fp8_tma_common.cuh"), "#define BRAIN_FWT_TEMPLATE "), operands.to_vec(), "regenerate BRAIN_FWT_TEMPLATE from the driver's encoding");
     let src = include_str!("../../kernels-cuda/cu/matmul_fp8_wgmma_tma_n256.cu");
-    assert_eq!(shipped(src, "#define BRAIN_FWT_TEMPLATE "), operands.to_vec(), "regenerate BRAIN_FWT_TEMPLATE from the driver's encoding");
     // The output map: 64-byte boxes of 16 rows with the 64-byte swizzle.
     let output = encode([64, 16], 2).expect("the driver encoded the operand map above");
     assert_eq!(shipped(src, "#define BRAIN_FWT_OUT_TEMPLATE "), output.to_vec(), "regenerate BRAIN_FWT_OUT_TEMPLATE from the driver's encoding");

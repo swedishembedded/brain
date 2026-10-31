@@ -80,6 +80,11 @@ fn the_streaming_candidates_pass_the_admission_rule_on_ragged_shapes() {
         "matmul_fp8_wgmma_swap_n32b64s2",
         "matmul_fp8_wgmma_swap_n32b64s4",
         "matmul_fp8_wgmma_swap_n64b128s2",
+        "matmul_fp8_wgmma_swap_tma_bn40",
+        "matmul_fp8_wgmma_swap_tma_bn48",
+        "matmul_fp8_wgmma_swap_tma_bn96",
+        "matmul_fp8_wgmma_swap_tma_bn136",
+        "matmul_fp8_wgmma_swap_tma_bn144",
     ] {
         assert!(served.contains(kernel), "{kernel} served none of the shapes: {served:?}");
     }
