@@ -932,7 +932,11 @@ impl Qwen35GgufEngine {
     /// pool row, so each is written there before the forward.
     fn prefill_slices(&mut self, jobs: &mut [PrefillJob<'_>]) -> Vec<PrefillProgress> {
         let adapter_in_play = jobs.iter().any(|j| adapters::slot_of(self.inst.stage_models(), j.table.kv_namespace()) != LORA_SLOT_NONE);
-        if jobs.len() < 2 || adapter_in_play || !self.inst.multi_prefill_available() {
+        // One prompt's long slice takes the same forward: its embeddings are gathered on the card and only its last
+        // row crosses to the host, where the one-sequence path decodes every row's embedding on the host and reads
+        // the whole block back.
+        let lone_short = jobs.len() == 1 && jobs[0].budget.min(jobs[0].prompt.len()) <= gpu_core::select::DECODE_REGIME_MAX_ROWS as usize;
+        if jobs.is_empty() || lone_short || adapter_in_play || !self.inst.multi_prefill_available() {
             return jobs.iter_mut().map(|j| self.prefill_slice(j.table, j.prompt, j.budget)).collect();
         }
         let (mut answers, live) = self.begin_slices(jobs, false);
@@ -991,7 +995,7 @@ impl Qwen35GgufEngine {
         let defer_feed = false;
         let mut hidden: Vec<(Vec<f32>, bool)> = Vec::with_capacity(live.len());
         let mut decoded = Vec::new();
-        if live.len() >= 2 && multi || decode.is_some() && !live.is_empty() {
+        if multi && !live.is_empty() || decode.is_some() && !live.is_empty() {
             let has_mtp = self.inst.has_mtp() && live.iter().any(|(_, _, p, _)| p.mtp_feed);
             let jobs_view: Vec<MultiPrefillJob<'_>> = live.iter().map(|(i, slot, p, end)| MultiPrefillJob { prompt: &*jobs[*i].prompt, start: p.done, end: *end, slot: *slot }).collect();
             let out = match decode {
