@@ -2856,6 +2856,9 @@ pub use native_facade::{
 /// the CUDA backend is not in use.
 #[cfg(not(target_arch = "wasm32"))]
 pub use backend_cuda::{call_totals as cuda_call_totals, zeroed_by_size as cuda_zeroed_by_size, CallTotals as CudaCallTotals};
+/// Where the CUDA backend finds ahead-of-time kernel images and NVRTC (set by the application before it opens a device).
+#[cfg(not(target_arch = "wasm32"))]
+pub use backend_cuda::{aot as cuda_aot, nvrtc as cuda_nvrtc};
 
 /// What `Gpu::try_storage` and friends return when the process-wide ceiling
 /// (`--limit-vram-total`/`--limit-ram-total`) refuses an allocation.

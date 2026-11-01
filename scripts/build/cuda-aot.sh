@@ -16,14 +16,14 @@
 # reads at run time. A machine that has the NVIDIA driver and no CUDA toolkit
 # then runs those kernels without NVRTC.
 #
-# The directory is $BRAIN_CUDA_AOT_DIR, else `cuda-aot` under the pipeline
-# cache directory. Nothing is written into the repository: the images are
+# The directory is --out DIR (pass the same one to `brain --cuda-aot-dir`), else
+# `cuda-aot` under the pipeline cache directory. Nothing is written into the repository: the images are
 # build products and belong with the other caches.
 #
 # Needs a toolkit lane for NVRTC. LANE=12 builds for Pascal through Hopper
 # (sm_61 70 80 86 89 90 + PTX), LANE=13 for Hopper and newer (sm_90 100 120 +
 # PTX); run both into one directory to cover every card. Without LANE the
-# toolkit already in the environment (CUDA_PATH, BRAIN_NVRTC) is used.
+# toolkit already in the environment (CUDA_PATH) is used.
 #
 # Usage: LANE=12 scripts/build/cuda-aot.sh [--out DIR] [--targets sm_61,...]
 #        [--ptx compute_61|none] [--only SUBSTRING]
@@ -34,8 +34,8 @@ cd "$(dirname "$0")/../.."
 if [ -n "${LANE:-}" ]; then
   eval "$(scripts/build/install-cuda-userspace.py env "$LANE")"
 fi
-if [ -z "${CUDA_PATH:-}" ] && [ -z "${BRAIN_NVRTC:-}" ]; then
-  echo "cuda-aot: no CUDA toolkit in the environment (CUDA_PATH / BRAIN_NVRTC unset)." >&2
+if [ -z "${CUDA_PATH:-}" ]; then
+  echo "cuda-aot: no CUDA toolkit in the environment (CUDA_PATH unset)." >&2
   echo "  install one without root: make cuda/install LANE=12   (or 13)" >&2
   echo "  then: make cuda/aot LANE=12" >&2
   exit 2

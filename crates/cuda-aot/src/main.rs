@@ -107,7 +107,7 @@ fn run() -> Result<(), String> {
     let out = args
         .out
         .or_else(aot::default_dir)
-        .ok_or("no output directory: pass --out, or set BRAIN_CUDA_AOT_DIR")?;
+        .ok_or("no output directory: pass --out")?;
     let toolkit = nvrtc::version()?;
     let mut plan = Plan::for_toolkit(toolkit);
     if let Some(t) = args.targets {

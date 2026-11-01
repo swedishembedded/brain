@@ -51,11 +51,21 @@ use std::path::{Path, PathBuf};
 
 /// The manifest's file name inside an AOT directory.
 pub const MANIFEST_FILE: &str = "manifest.tsv";
-/// Names the AOT directory, overriding the default under the cache directory.
-pub const ENV_DIR: &str = "BRAIN_CUDA_AOT_DIR";
-/// `0` switches the AOT lookup off, so a run exercises NVRTC regardless of
-/// what a directory holds.
-pub const ENV_ENABLE: &str = "BRAIN_CUDA_AOT";
+static DIR: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+static DISABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Name the AOT directory (`None`: `cuda-aot` under the cache directory every backend shares); the CLI's `--cuda-aot-dir`.
+/// The store is read once, when the first kernel looks for an image, so the application sets this before it opens a CUDA
+/// device. Never read from the environment.
+pub fn set_dir(dir: Option<PathBuf>) {
+    *DIR.write().unwrap_or_else(std::sync::PoisonError::into_inner) = dir;
+}
+
+/// Whether kernels look for AOT images at all (`true`, the default); `false` (`--no-cuda-aot`) makes a run exercise NVRTC
+/// whatever a directory holds. Set before the first CUDA device is opened, like [`set_dir`].
+pub fn set_enabled(on: bool) {
+    DISABLED.store(!on, std::sync::atomic::Ordering::Relaxed);
+}
 const FORMAT_LINE: &str = "brain-cuda-aot 1";
 
 /// What an image is: machine code for one real architecture, or portable PTX
@@ -258,13 +268,11 @@ impl Store {
     }
 }
 
-/// Where the AOT images live: [`ENV_DIR`], else `cuda-aot` under the cache
+/// Where the AOT images live: [`set_dir`]'s, else `cuda-aot` under the cache
 /// directory every backend shares.
 pub fn default_dir() -> Option<PathBuf> {
-    if let Ok(d) = std::env::var(ENV_DIR) {
-        if !d.is_empty() {
-            return Some(d.into());
-        }
+    if let Some(d) = DIR.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone() {
+        return Some(d);
     }
     backend_api::cache_dir().map(|d| d.join("cuda-aot"))
 }
@@ -276,7 +284,7 @@ pub fn default_dir() -> Option<PathBuf> {
 pub fn global() -> Result<Option<&'static Store>, &'static str> {
     static STORE: std::sync::OnceLock<Result<Option<Store>, String>> = std::sync::OnceLock::new();
     let r = STORE.get_or_init(|| {
-        if std::env::var(ENV_ENABLE).is_ok_and(|v| v == "0") {
+        if DISABLED.load(std::sync::atomic::Ordering::Relaxed) {
             return Ok(None);
         }
         let Some(dir) = default_dir() else { return Ok(None) };

@@ -767,6 +767,30 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
                 }
             }
             i += 2;
+        } else if argv[i] == "--cuda-aot-dir" {
+            // The directory of ahead-of-time CUDA kernel images (`make cuda/aot`); default `cuda-aot` under the cache.
+            match argv.get(i + 1).filter(|v| !v.is_empty()) {
+                Some(v) => gpu_core::cuda_aot::set_dir(Some(v.into())),
+                None => {
+                    eprintln!("brain: --cuda-aot-dir needs a directory");
+                    std::process::exit(2);
+                }
+            }
+            i += 2;
+        } else if argv[i] == "--no-cuda-aot" {
+            // Kernels never look for ahead-of-time images: every one is compiled by NVRTC.
+            gpu_core::cuda_aot::set_enabled(false);
+            i += 1;
+        } else if argv[i] == "--nvrtc" {
+            // The exact NVRTC library to load (a path or a SONAME) instead of searching CUDA_PATH and the loader path.
+            match argv.get(i + 1).filter(|v| !v.is_empty()) {
+                Some(v) => gpu_core::cuda_nvrtc::set_library(Some(v.clone())),
+                None => {
+                    eprintln!("brain: --nvrtc needs a library path or SONAME");
+                    std::process::exit(2);
+                }
+            }
+            i += 2;
         } else if argv[i] == "--no-autotune" {
             // Every kernel slot keeps its default candidate and the selector its static policy: reproducible benchmarking
             // and A/B runs.

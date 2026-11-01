@@ -1066,10 +1066,10 @@ impl Context {
                 ));
             }
         } else if store.is_none() && !tried.iter().any(|t| t.starts_with("AOT")) {
-            tried.push("AOT: no manifest (BRAIN_CUDA_AOT_DIR, or `cuda-aot` under the cache directory)".to_string());
+            tried.push("AOT: no manifest (--cuda-aot-dir, or `cuda-aot` under the cache directory)".to_string());
         }
         Err(format!(
-            "no usable binary for kernel `{entry}` on {} (sm_{}{}): {}. Run `make cuda/aot` with a CUDA toolkit to build ahead-of-time images, or make NVRTC available (BRAIN_NVRTC, CUDA_PATH)",
+            "no usable binary for kernel `{entry}` on {} (sm_{}{}): {}. Run `make cuda/aot` with a CUDA toolkit to build ahead-of-time images, or make NVRTC available (--nvrtc, CUDA_PATH)",
             self.name,
             self.cc.0,
             self.cc.1,

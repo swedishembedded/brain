@@ -45,9 +45,14 @@ const NVRTC_SUCCESS: NvrtcResult = 0;
 /// and may be absent on a machine that has the runtime.
 const SONAMES: &[&str] = &["libnvrtc.so.13", "libnvrtc.so.12", "libnvrtc.so.11", "libnvrtc.so"];
 
-/// Names an exact NVRTC library to load instead of searching (a path or a
-/// SONAME): the way to pin one toolkit when several are installed.
-const ENV_NVRTC: &str = "BRAIN_NVRTC";
+static LIBRARY: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// Name an exact NVRTC library to load instead of searching (a path or a SONAME): the way to pin one toolkit when several
+/// are installed; the CLI's `--nvrtc`. NVRTC is loaded once, at the first compile, so the application sets this before
+/// it opens a CUDA device. Never read from the environment.
+pub fn set_library(lib: Option<String>) {
+    *LIBRARY.write().unwrap_or_else(std::sync::PoisonError::into_inner) = lib;
+}
 /// The toolkit root whose `lib64`/`lib` hold NVRTC, the same variable the CUDA
 /// toolchain itself uses.
 const ENV_CUDA_PATH: &str = "CUDA_PATH";
@@ -71,7 +76,7 @@ fn candidate_libraries(explicit: Option<&str>, cuda_path: Option<&str>) -> Vec<S
 }
 
 /// Every path or SONAME to try for a toolkit library whose SONAMEs are
-/// `sonames`, in the order NVRTC's own search uses (an explicit `BRAIN_NVRTC`
+/// `sonames`, in the order NVRTC's own search uses (an explicit [`set_library`]
 /// pin is NVRTC-specific and not applied): the toolkit root's `lib64` then
 /// `lib`, then the bare SONAMEs for the system loader.
 pub(crate) fn toolkit_library_candidates(sonames: &[&str]) -> Vec<String> {
@@ -123,7 +128,7 @@ fn nvrtc() -> Result<&'static Nvrtc, &'static str> {
 
 fn load() -> Result<Nvrtc, String> {
     let mut tried = Vec::new();
-    let explicit = std::env::var(ENV_NVRTC).ok();
+    let explicit = LIBRARY.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
     let cuda_path = std::env::var(ENV_CUDA_PATH).ok();
     for soname in &candidate_libraries(explicit.as_deref(), cuda_path.as_deref()) {
         // SAFETY: loading a shared object runs its initialisers; NVRTC's are

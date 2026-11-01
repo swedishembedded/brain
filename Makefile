@@ -187,8 +187,8 @@ cuda:
 	$(LIST_CHILDREN)
 
 # Compile the generated tier and the native kernels into cubins + PTX with a
-# manifest, in the AOT directory the CUDA backend reads (BRAIN_CUDA_AOT_DIR, or
-# `cuda-aot` under the pipeline cache). A machine with a driver and no toolkit
+# manifest, in the AOT directory the CUDA backend reads (`brain --cuda-aot-dir`,
+# or `cuda-aot` under the pipeline cache). A machine with a driver and no toolkit
 # then runs them without NVRTC. `make cuda/aot LANE=12` and `LANE=13` fill one
 # directory in turn; ARGS passes flags through (`ARGS="--targets sm_90"`).
 ## cuda/aot - build the CUDA kernels ahead of time (cubins + PTX + manifest) for

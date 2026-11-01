@@ -11,10 +11,11 @@
 //!
 //! NVRTC is a process-wide singleton, so "NVRTC is not there" cannot be made
 //! true inside the process that builds the images. Each scenario therefore
-//! builds its AOT directory here, then re-runs ONE test of this very binary as
-//! a child with `BRAIN_NVRTC` pointing nowhere and `BRAIN_CUDA_AOT_DIR` at the
-//! directory, and asserts that child ran to its marker line (a child that
-//! skipped for lack of a device would otherwise look like a pass).
+//! builds its AOT directory here, then re-runs ONE ignored test of this very
+//! binary as a child, which points the AOT lookup at that directory and NVRTC
+//! nowhere (`aot::set_dir`, `nvrtc::set_library`) before it opens a device,
+//! and asserts that child ran to its marker line (a child that skipped for lack
+//! of a device would otherwise look like a pass).
 //!
 //! Asserted:
 //! - the AOT cubins run: a native kernel through `Context`, and a catalogue
@@ -33,7 +34,6 @@ use backend_cuda::nvrtc::Target;
 use backend_cuda::CudaBackend;
 use std::path::{Path, PathBuf};
 
-const CHILD: &str = "BRAIN_AOT_CHILD";
 const MARKER: &str = "AOT-CHILD-OK";
 
 const FILL: &str = r#"extern "C" __global__ void aot_fill(unsigned *out) { out[threadIdx.x] = 0xA070u + threadIdx.x; }"#;
@@ -42,11 +42,28 @@ const FILL_OTHER: &str = r#"extern "C" __global__ void aot_fill(unsigned *out) {
 
 const CATALOGUE: &[(&str, &str)] = &[("add2", kernels::ADD2)];
 
+/// A scenario's AOT directory: the same path in the parent that builds it and the child that runs from it.
+fn scenario_dir(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("brain-aot-{name}"))
+}
+
+/// [`scenario_dir`], emptied.
 fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("brain-aot-{name}-{}", std::process::id()));
+    let d = scenario_dir(name);
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
+}
+
+/// The NVRTC library a child pins when it must run without one.
+const NO_NVRTC: &str = "no-such-dir/libnvrtc.so";
+
+/// A child's first statement: the AOT lookup on its scenario's directory and, unless it must compile, NVRTC unloadable.
+fn child_setup(scenario: &str, nvrtc: bool) {
+    aot::set_dir(Some(scenario_dir(scenario)));
+    if !nvrtc {
+        backend_cuda::nvrtc::set_library(Some(NO_NVRTC.to_string()));
+    }
 }
 
 /// The device and a loadable NVRTC, or the reason a scenario cannot be built.
@@ -87,21 +104,14 @@ fn build_into(dir: &Path, ctx: &Context, jobs: &[Job], cubin: bool) {
     assert!(report.built >= jobs.len(), "{report:?}");
 }
 
-/// Re-run `child` of this binary with NVRTC unloadable (or as given) and the
-/// AOT directory set; assert it reached its marker.
-fn run_child(child: &str, dir: &Path, nvrtc: Option<&str>) {
-    let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
-    cmd.args(["--exact", child, "--nocapture", "--test-threads=1"]).env(CHILD, "1").env(aot::ENV_DIR, dir);
-    if let Some(n) = nvrtc {
-        cmd.env("BRAIN_NVRTC", n);
-    }
-    let out = cmd.output().expect("spawn the child test");
+/// Re-run the ignored test `child` of this binary in a process of its own; assert it reached its marker.
+fn run_child(child: &str) {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([child, "--exact", "--ignored", "--nocapture", "--test-threads=1"])
+        .output()
+        .expect("spawn the child test");
     let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success() && text.contains(MARKER), "child `{child}` failed:\n{text}");
-}
-
-fn in_child() -> bool {
-    std::env::var(CHILD).is_ok()
 }
 
 fn read_words(ctx: &Context, mem: &backend_cuda::exec::DeviceMem, n: usize) -> Vec<u32> {
@@ -134,15 +144,14 @@ fn aot_cubins_run_with_no_nvrtc() {
     jobs.push(native_job(FILL));
     build_into(&dir, &ctx, &jobs, true);
     drop(ctx);
-    run_child("child_cubins_run_with_no_nvrtc", &dir, Some("no-such-dir/libnvrtc.so"));
+    run_child("child_cubins_run_with_no_nvrtc");
     std::fs::remove_dir_all(dir).ok();
 }
 
 #[test]
+#[ignore = "run in its own process by its scenario's test"]
 fn child_cubins_run_with_no_nvrtc() {
-    if !in_child() {
-        return;
-    }
+    child_setup("cubins", false);
     assert!(backend_cuda::nvrtc::version().is_err(), "the child must have no NVRTC");
     let ctx = Context::open(0).expect("device");
     expect_fill(&run_fill(&ctx, FILL).expect("an AOT cubin runs"), 0xA070);
@@ -182,15 +191,14 @@ fn aot_ptx_is_compiled_by_the_driver_when_no_cubin_exists() {
     let store = aot::Store::open(&dir).unwrap().expect("manifest");
     assert!(store.entries().iter().all(|e| e.kind == aot::Kind::Ptx), "this scenario ships PTX only");
     drop(ctx);
-    run_child("child_ptx_is_compiled_by_the_driver", &dir, Some("no-such-dir/libnvrtc.so"));
+    run_child("child_ptx_is_compiled_by_the_driver");
     std::fs::remove_dir_all(dir).ok();
 }
 
 #[test]
+#[ignore = "run in its own process by its scenario's test"]
 fn child_ptx_is_compiled_by_the_driver() {
-    if !in_child() {
-        return;
-    }
+    child_setup("ptx", false);
     assert!(backend_cuda::nvrtc::version().is_err());
     let ctx = Context::open(0).expect("device");
     expect_fill(&run_fill(&ctx, FILL).expect("the driver JIT-compiles the PTX"), 0xA070);
@@ -205,15 +213,14 @@ fn a_kernel_with_no_image_is_a_clear_error_and_not_a_crash() {
     let dir = scratch("missing");
     build_into(&dir, &ctx, &[native_job(FILL)], true);
     drop(ctx);
-    run_child("child_missing_image_is_a_clear_error", &dir, Some("no-such-dir/libnvrtc.so"));
+    run_child("child_missing_image_is_a_clear_error");
     std::fs::remove_dir_all(dir).ok();
 }
 
 #[test]
+#[ignore = "run in its own process by its scenario's test"]
 fn child_missing_image_is_a_clear_error() {
-    if !in_child() {
-        return;
-    }
+    child_setup("missing", false);
     let ctx = Context::open(0).expect("device");
     // Same entry point, source the build never saw.
     let e = match run_fill(&ctx, FILL_OTHER) {
@@ -254,15 +261,14 @@ fn a_corrupted_image_is_refused_before_the_driver_sees_it() {
         std::fs::write(&path, bytes).unwrap();
     }
     drop(ctx);
-    run_child("child_corrupt_image_is_refused", &dir, Some("no-such-dir/libnvrtc.so"));
+    run_child("child_corrupt_image_is_refused");
     std::fs::remove_dir_all(dir).ok();
 }
 
 #[test]
+#[ignore = "run in its own process by its scenario's test"]
 fn child_corrupt_image_is_refused() {
-    if !in_child() {
-        return;
-    }
+    child_setup("corrupt", false);
     let ctx = Context::open(0).expect("device");
     let e = run_fill(&ctx, FILL).expect_err("a corrupted image must not load");
     assert!(e.contains("checksum"), "{e}");
@@ -289,15 +295,14 @@ fn an_aot_image_is_used_in_preference_to_compiling() {
     std::fs::write(dir.join(aot::MANIFEST_FILE), m.render()).unwrap();
     drop(ctx);
     // NVRTC left available, so a loader that preferred it could run.
-    run_child("child_aot_precedes_nvrtc", &dir, None);
+    run_child("child_aot_precedes_nvrtc");
     std::fs::remove_dir_all(dir).ok();
 }
 
 #[test]
+#[ignore = "run in its own process by its scenario's test"]
 fn child_aot_precedes_nvrtc() {
-    if !in_child() {
-        return;
-    }
+    child_setup("precedence", true);
     assert!(backend_cuda::nvrtc::version().is_ok(), "this scenario keeps NVRTC available");
     let ctx = Context::open(0).expect("device");
     expect_fill(&run_fill(&ctx, FILL_OTHER).expect("runs"), 0xA070);

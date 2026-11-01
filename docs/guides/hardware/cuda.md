@@ -24,8 +24,8 @@ Hopper systems.
   from ahead-of-time images (below); a kernel with no image and no NVRTC is
   reported by name.
 
-brain finds NVRTC in this order: the library named by `BRAIN_NVRTC` (the only
-one tried when set), then the toolkit under `CUDA_PATH` (`lib64`, then `lib`),
+brain finds NVRTC in this order: the library named by `--nvrtc` (the only
+one tried when given), then the toolkit under `CUDA_PATH` (`lib64`, then `lib`),
 then the system loader, trying `libnvrtc.so.13`, `.12`, `.11` and the
 unversioned name.
 
@@ -56,7 +56,7 @@ make cuda/aot LANE=13     # sm_90 100 120 + PTX (Hopper and newer)
 ```
 
 Run both lanes to fill one directory for a mixed fleet; copy the directory to
-the target machine and point `BRAIN_CUDA_AOT_DIR` at it. The images are build
+the target machine and point `--cuda-aot-dir` at it. The images are build
 products and are never written into the repository; the directory defaults to
 `cuda-aot` under `BRAIN_PIPELINE_CACHE_DIR`. For one kernel on one device the
 backend takes, in order: the cubin for the device's architecture (the
@@ -65,7 +65,7 @@ of the same major, the disk cache or NVRTC, and finally the PTX, which the
 driver compiles itself. Images are matched by a hash of the generated source,
 the entry point, the target, the flags and the launch ABI version, so a stale
 image is never used for edited source, and each image is checked against the
-manifest's checksum before the driver sees it. `BRAIN_CUDA_AOT=0` ignores the
+manifest's checksum before the driver sees it. `--no-cuda-aot` ignores the
 directory. Kernels created at run time by dtype or KV-tier specialisation are
 not in the catalogue and still need NVRTC.
 
