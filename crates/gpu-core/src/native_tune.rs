@@ -1153,6 +1153,7 @@ fn time_class(gpu: &Gpu, g: &Grid, cands: &[&crate::native_upgrade::Active], (m,
         })
         .collect();
     let out = gpu.storage(u64::from(m) * u64::from(n));
+    let poison = vec![f32::NAN; m as usize * n as usize];
     let positions = sample_positions(m, n);
     let stored = Stored { w: &w, sw: &sw, kg, fp8: g.fp8 };
     // The reference and, per input form, the error of rounding the inputs to it: computed once per form.
@@ -1177,6 +1178,9 @@ fn time_class(gpu: &Gpu, g: &Grid, cands: &[&crate::native_upgrade::Active], (m,
             ActFormat::Bf16 => gpu.native_step_raw(a.id, &[&xb, &wi.0, &wi.1, &out], &params, blocks),
             ActFormat::Fp8Group128 => gpu.native_step_raw(a.id, &[&x8, &wi.0, &sx8, &wi.1, &out], &params, blocks),
         };
+        // The output holds NaN before the checked launch, so an element the candidate never stores is an error and not the value an earlier
+        // candidate left in the shared buffer.
+        gpu.write_f32(&out, &poison);
         let Some(check) = step(&weights[0]) else {
             results.push((a.kernel.to_owned(), Verdict::Rejected("backend declined the launch".into())));
             continue;

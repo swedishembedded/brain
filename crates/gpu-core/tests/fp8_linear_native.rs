@@ -210,7 +210,7 @@ fn fp8_prefill_tflops() {
         brain_testutil::skip_unavailable("the FP8 candidates are registered for a CUDA device with warpgroup tensor cores");
         return;
     }
-    let shapes = [("gate/up 5120x34816", 5120u32, 34816u32), ("down 17408x5120", 17408, 5120), ("qkv 5120x10240", 5120, 10240), ("qkv 5120x12288", 5120, 12288), ("out 6144x5120", 6144, 5120)];
+    let shapes = [("gate/up 5120x34816", 5120u32, 34816u32), ("down 17408x5120", 17408, 5120), ("qkv 5120x10240", 5120, 10240), ("qkv 5120x12288", 5120, 12288), ("out 6144x5120", 6144, 5120), ("gdn-in 5120x16384", 5120, 16384)];
     for m in [768u32, 2048, 4096, 8192, 31000] {
         for (label, k, n) in shapes {
             let flops = 2.0 * f64::from(m) * f64::from(k) * f64::from(n);
@@ -287,5 +287,31 @@ fn swap_tma_back_to_back_stress() {
                 eprintln!("swap_tma_back_to_back_stress: k={k} n={n} round {round}");
             }
         }
+    }
+}
+
+/// Back-to-back launches of the persistent prefill candidates over the prefill row counts and the production products,
+/// the workload under which a two-consumer swap form faulted (Xid 13, knowledge 410): a new or changed prefill kernel
+/// runs it clean for several minutes before it lands, then `dmesg | grep -i xid` stays empty (`#[ignore]`: a stress run).
+///
+/// ```text
+/// BRAIN_DEVICE=gpu0 BRAIN_BACKEND=cuda make test/one P=brain-gpu-core T=fp8_linear_native ARGS="--ignored --nocapture prefill_tma_back_to_back_stress"
+/// ```
+#[test]
+#[ignore]
+fn prefill_tma_back_to_back_stress() {
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda_hopper(&gpu) {
+        brain_testutil::skip_unavailable("the FP8 candidates are registered for a CUDA device with warpgroup tensor cores");
+        return;
+    }
+    let shapes = [(5120u32, 34816u32), (17408, 5120), (5120, 10240), (5120, 12288), (6144, 5120), (5120, 16384)];
+    for round in 0..20u32 {
+        for m in [768u32, 2048, 4096, 8192, 129, 2300] {
+            for (k, n) in shapes {
+                let _ = gpu_core::native_time_fp8_candidates(&gpu, [m, k / 4, n], "tma");
+            }
+        }
+        eprintln!("prefill_tma_back_to_back_stress: round {round}");
     }
 }
