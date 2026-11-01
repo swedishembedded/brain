@@ -2450,6 +2450,11 @@ pub enum Fused {
     /// read and `snap_state`, `snap_hist` written. The caller guarantees every
     /// count is in 1..=8.
     GdnVerifyPool,
+    /// `gdn_verify_pool_stream_bf16`: [`Fused::GdnVerifyPool`] over bf16 pools - the body of [`Fused::GdnDecodePoolStreamBf16`] run
+    /// over a sequence's `counts[bi]` rows, each bit-identical to the plain streaming decode step it stands for (the state tile and
+    /// the conv window rounded to bf16 after every row). The snapshots stay f32 (the widening of the bf16 values). The same params
+    /// and bindings as [`Fused::GdnVerifyPool`], with `hist` and `state` bf16 pools.
+    GdnVerifyPoolStreamBf16,
     /// `gdn_conv_verify_pool` and `gdn_recur_verify_pool`: [`Fused::GdnVerifyPool`] as the split form of the plain decode (a conv kernel per
     /// channel, a recurrence block per value head holding the state tile in shared memory), bit-identical to it and without the
     /// register spills the fused body's 384-thread block cannot avoid. The conv takes params `[nkh, nvh, b]` and the bindings `mixed`, `conv_w`
@@ -2463,6 +2468,9 @@ pub enum Fused {
     /// `snap_state`, `snap_hist`, `rows`, `sel` read; `sel` of `u32::MAX` skips
     /// a sequence.
     GdnCommitPool,
+    /// `gdn_commit_pool_bf16`: [`Fused::GdnCommitPool`] over bf16 pools - the pool buffers hold bf16 elements, the snapshots stay f32
+    /// (the widening of bf16 values, narrowed back exactly). The same params and bindings.
+    GdnCommitPoolBf16,
     /// `gqa_decode_prep`: for each of `rows` tokens of a gated-attention layer,
     /// the `[value|gate]` split, the per-head QK RMSNorm, the partial rotary
     /// rotation and the K/V append into the paged pools. Params `[nh, nkv,
@@ -2841,9 +2849,11 @@ impl Fused {
             Fused::GdnDecodePoolWide => "gdn_decode_pool_wide",
             Fused::GdnDecodePoolWideBf16 => "gdn_decode_pool_wide_bf16",
             Fused::GdnVerifyPool => "gdn_verify_pool",
+            Fused::GdnVerifyPoolStreamBf16 => "gdn_verify_pool_stream_bf16",
             Fused::GdnConvVerifyPool => "gdn_conv_verify_pool",
             Fused::GdnRecurVerifyPool => "gdn_recur_verify_pool",
             Fused::GdnCommitPool => "gdn_commit_pool",
+            Fused::GdnCommitPoolBf16 => "gdn_commit_pool_bf16",
             Fused::GqaDecodePrep => "gqa_decode_prep",
             Fused::GqaDecodePrepI8 => "gqa_decode_prep_i8",
             Fused::MoeNvfp4GateUp => "moe_nvfp4_gateup_silu",
@@ -2869,10 +2879,10 @@ impl Fused {
             Fused::GdnDecodePool | Fused::GdnDecodePoolBf16 | Fused::GdnDecodePoolWide | Fused::GdnDecodePoolWideBf16 | Fused::GdnDecodePoolStreamBf16 => GDN_DECODE_POOL_BINDINGS,
             Fused::GdnConvPool | Fused::GdnConvPoolBf16 => GDN_CONV_POOL_BINDINGS,
             Fused::GdnRecurPool | Fused::GdnRecurPoolBf16 => GDN_RECUR_POOL_BINDINGS,
-            Fused::GdnVerifyPool => GDN_VERIFY_POOL_BINDINGS,
+            Fused::GdnVerifyPool | Fused::GdnVerifyPoolStreamBf16 => GDN_VERIFY_POOL_BINDINGS,
             Fused::GdnConvVerifyPool => GDN_CONV_VERIFY_POOL_BINDINGS,
             Fused::GdnRecurVerifyPool => GDN_RECUR_VERIFY_POOL_BINDINGS,
-            Fused::GdnCommitPool => GDN_COMMIT_POOL_BINDINGS,
+            Fused::GdnCommitPool | Fused::GdnCommitPoolBf16 => GDN_COMMIT_POOL_BINDINGS,
             Fused::GqaDecodePrep => GQA_DECODE_PREP_BINDINGS,
             Fused::GqaDecodePrepI8 => GQA_DECODE_PREP_I8_BINDINGS,
             Fused::MoeNvfp4GateUp => MOE_NVFP4_GATEUP_BINDINGS,
@@ -2906,11 +2916,11 @@ impl Fused {
             Fused::GdnDecodePoolWide | Fused::GdnDecodePoolWideBf16 => {
                 matches!(params, [nkh, nvh, group, _, _, _, b, _] if *nkh >= 1 && (1..=2).contains(group) && *nvh == nkh * group && *b >= 1)
             }
-            Fused::GdnDecodePool | Fused::GdnDecodePoolBf16 | Fused::GdnDecodePoolStreamBf16 | Fused::GdnVerifyPool | Fused::GdnRecurVerifyPool | Fused::GdnRecurPool | Fused::GdnRecurPoolBf16 => {
+            Fused::GdnDecodePool | Fused::GdnDecodePoolBf16 | Fused::GdnDecodePoolStreamBf16 | Fused::GdnVerifyPool | Fused::GdnVerifyPoolStreamBf16 | Fused::GdnRecurVerifyPool | Fused::GdnRecurPool | Fused::GdnRecurPoolBf16 => {
                 matches!(params, [nkh, nvh, group, _, _, _, b, _] if *nkh >= 1 && (1..=3).contains(group) && *nvh == nkh * group && *b >= 1)
             }
             Fused::GdnConvPool | Fused::GdnConvPoolBf16 | Fused::GdnConvVerifyPool => matches!(params, [nkh, nvh, b] if *nkh >= 1 && *nvh >= *nkh && nvh % nkh == 0 && *b >= 1),
-            Fused::GdnCommitPool => matches!(params, [b, state_len, hist_len, _] if *b >= 1 && *state_len >= 4 && state_len % 4 == 0 && hist_len % 4 == 0 && hist_len <= state_len),
+            Fused::GdnCommitPool | Fused::GdnCommitPoolBf16 => matches!(params, [b, state_len, hist_len, _] if *b >= 1 && *state_len >= 4 && state_len % 4 == 0 && hist_len % 4 == 0 && hist_len <= state_len),
             // A head is one 256-thread block holding up to 512 values; the
             // rotated span `2 * half` has to fit inside it.
             Fused::GqaDecodePrep => {
@@ -2960,11 +2970,11 @@ impl Fused {
         match self {
             Fused::AddRmsQuant | Fused::AddRmsQuantE4m3 | Fused::QuantEpilogue => params[1],
             Fused::GdnDecode => params[0],
-            Fused::GdnDecodePool | Fused::GdnDecodePoolBf16 | Fused::GdnDecodePoolWide | Fused::GdnDecodePoolWideBf16 | Fused::GdnDecodePoolStreamBf16 | Fused::GdnVerifyPool => params[0] * params[6],
+            Fused::GdnDecodePool | Fused::GdnDecodePoolBf16 | Fused::GdnDecodePoolWide | Fused::GdnDecodePoolWideBf16 | Fused::GdnDecodePoolStreamBf16 | Fused::GdnVerifyPool | Fused::GdnVerifyPoolStreamBf16 => params[0] * params[6],
             // A block a (sequence, value head), and 256 channels a block.
             Fused::GdnRecurPool | Fused::GdnRecurPoolBf16 | Fused::GdnRecurVerifyPool => params[1] * params[6],
             Fused::GdnConvPool | Fused::GdnConvPoolBf16 | Fused::GdnConvVerifyPool => (params[2] * (2 * params[0] + params[1]) * 128).div_ceil(256),
-            Fused::GdnCommitPool => params[0] * params[1].div_ceil(GDN_COMMIT_TILE),
+            Fused::GdnCommitPool | Fused::GdnCommitPoolBf16 => params[0] * params[1].div_ceil(GDN_COMMIT_TILE),
             Fused::GqaDecodePrep | Fused::GqaDecodePrepI8 => (params[0] + params[1]) * params[6],
             Fused::MoeNvfp4GateUp => params[0] * params[2].div_ceil(QGEMV_COLS),
             Fused::I8GemvMulti | Fused::Q4GemvMulti => {
@@ -3010,7 +3020,7 @@ impl Fused {
             Fused::GdnRecurPool | Fused::GdnRecurVerifyPool => CudaLaunch { dynamic_shared_bytes: kernels_cuda::GDN_RECUR_TILE_F32_BYTES, shared_opt_in: true, ..CudaLaunch::NONE },
             Fused::GdnRecurPoolBf16 => CudaLaunch { dynamic_shared_bytes: kernels_cuda::GDN_RECUR_TILE_F32_BYTES / 2, shared_opt_in: true, ..CudaLaunch::NONE },
             // The streaming decode stages the bf16 states of up to three value heads of a key head.
-            Fused::GdnDecodePoolStreamBf16 => CudaLaunch { dynamic_shared_bytes: 3 * kernels_cuda::GDN_RECUR_TILE_F32_BYTES / 2, shared_opt_in: true, ..CudaLaunch::NONE },
+            Fused::GdnDecodePoolStreamBf16 | Fused::GdnVerifyPoolStreamBf16 => CudaLaunch { dynamic_shared_bytes: 3 * kernels_cuda::GDN_RECUR_TILE_F32_BYTES / 2, shared_opt_in: true, ..CudaLaunch::NONE },
             _ => CudaLaunch::NONE,
         }
     }

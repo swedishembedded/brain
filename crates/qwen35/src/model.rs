@@ -3016,7 +3016,7 @@ impl Qwen35 {
                         let gated_d = match &dec.verify {
                             // A sequence's rows in order from its pool row, the state after each row but the last snapshotted.
                             Some(v) => {
-                                let layout = model::gdn_verify::VerifyLayout { rows: &v.layout.rows, counts: &v.layout.counts, offs: &v.layout.offs, ident: &v.layout.ident, b: v.batch.sequences() };
+                                let layout = model::gdn_verify::VerifyLayout { rows: &v.layout.rows, counts: &v.layout.counts, offs: &v.layout.offs, b: v.batch.sequences() };
                                 let seq_pool = model::gdn_mixer::GdnPoolRows { rows: &v.layout.rows, fuse: true, ..pool };
                                 model::gdn_verify::gdn_mixer_verify_pooled_fused(g, &dec_shape, &weights, &qkv_d, &b_d, &a_d, &z_d, &seq_pool, &layout, dec.rows, v.batch.snapshots(l))
                                     .expect("the verify kernel was offered at engine construction (Qwen35GgufInstance::speculation_supported)")
@@ -5214,7 +5214,7 @@ impl Qwen35 {
                                 bf16: pool.bf16,
                                 wide: false,
                             },
-                            layout: model::gdn_verify::VerifyLayout { rows: &layout.rows, counts: &layout.counts, offs: &layout.offs, ident: &layout.ident, b: v.sequences() },
+                            layout: model::gdn_verify::VerifyLayout { rows: &layout.rows, counts: &layout.counts, offs: &layout.offs, b: v.sequences() },
                             snaps: v.snapshots(l),
                             n_tokens: bsz,
                         }

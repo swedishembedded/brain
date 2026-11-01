@@ -534,3 +534,14 @@ Mixed-iteration idle (knowledge 392, 2026-10-30): a prompt start no longer waits
   processes at once; compute-sanitizer memcheck over the K=17408 sweep reports 0 errors (memcheck does not see TMA accesses through a bad tensor map).
   Next memory levers, measured: the staging counts 2.5 live layers (one shared buffer a round would free ~4 GiB at a 737K pool); the verify scratch
   and recurrent pool are 16.4 GiB with the f32 prefix snapshots (kept f32: a bf16 snapshot would make a cache hit differ from a miss).
+
+- 2026-11-01 (exact speculative verify over bf16 pools, knowledge 409): the staged bf16 verify is gone. `gdn_verify_pool_stream_bf16` is the plain streaming decode body over a row loop (the tile
+  rounded to bf16 in shared memory and the window rewritten after every row), snapshots after every row but the last in f32 (the widening of bf16 values), and `gdn_commit_pool_bf16` narrows a
+  snapshot straight into the pool row; `verify_through_staging`, `VerifyLayout::ident` and `gdn_commit_pooled_bf16` are deleted. Gates: `gdn_verify_native` (every verified row, the pool, the snapshots
+  and the commit bit-identical to repeated plain bf16 decode steps; memcheck and racecheck 0 errors) and the strict token-identity assertion in `hf_fp8_speculative` for the bf16 pool (also
+  true on the old path on that tiny fixture; the kernel test is the discriminating gate). nsys 8K x 4 `--speculative mtp`, GPU time of verify + staging + commit kernels a verify round:
+  9.7 ms -> 1.57 ms. Served, gpu1, NPROMPTS=8, mean of two interleaved rounds, base -> now, tok/s | mean TTFT ms | mean TPOT ms (mean ITL ms): default speculation 8Kx1 89.1|565|9.1 (18.2) -> 88.2|570|9.3 (15.8)
+  (rounds 85.1/93.1 against 78.1/98.3: the single stream is dominated by what speculation accepts), 8Kx4 177.5|1563|16.4 (19.2) -> 181.5|1461|16.3 (19.8); `--speculative mtp` 8Kx1 76.8|619|10.9 (15.8) ->
+  89.4|571|9.0 (17.7), 8Kx4 171.7|1300|17.9 (24.1) -> 198.4|1232|15.0 (26.4, +15.5 % tok/s). Open: the verify layer is 21 us against the plain streaming step's 10 us at 4 sequences x ~3 rows (the
+  rows of a block run serially: a split of the row loop over blocks cannot keep the rounding order, a shorter latency chain per row is the lever); the commit is 12 us a layer (a tile copy that could ride the
+  next round's first launch); the strict e2e token test needs a fixture whose state magnitudes make bf16 rounding change a greedy choice to bite.

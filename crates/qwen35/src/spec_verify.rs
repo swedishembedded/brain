@@ -22,7 +22,7 @@
 use gpu_core::{DeviceBuffer, Gpu};
 use model::gdn_verify::{GdnRowSnapshots, MAX_VERIFY_ROWS};
 
-use super::{BatchDecodeCaches, Qwen35, POOL_ROWS_GATHER2, POOL_ROWS_SCATTER2_BF16};
+use super::{BatchDecodeCaches, Qwen35};
 use crate::stage_rows::StageRows;
 
 /// The scratch arena a verify step's layer stack draws from. Its own: a verify
@@ -61,8 +61,6 @@ pub(crate) struct VerifyLayout {
     pub rows: DeviceBuffer,
     pub counts: DeviceBuffer,
     pub offs: DeviceBuffer,
-    /// `0..sequences`: the staging rows of a bf16 pool's widened state.
-    pub ident: DeviceBuffer,
 }
 
 impl<'a> VerifyBatch<'a> {
@@ -113,7 +111,7 @@ impl<'a> VerifyBatch<'a> {
             g.write(&b, v);
             b
         };
-        VerifyLayout { rows: put(self.slots), counts: put(self.counts), offs: put(&self.offsets()), ident: put(&(0..self.sequences()).collect::<Vec<_>>()) }
+        VerifyLayout { rows: put(self.slots), counts: put(self.counts), offs: put(&self.offsets()) }
     }
 }
 
@@ -157,23 +155,13 @@ impl Qwen35 {
         };
         let shape = self.gdn_verify_shape();
         let linear = (0..self.cfg.n_layers as usize).filter(|&l| self.shard.owns(l) && self.cfg.layer_types()[l] == crate::config::LayerType::Linear);
-        let steps: Vec<_> = if pool.bf16 {
-            // The rejecting sequences only, compacted: their snapshot rows widen into f32 staging and round into the pool.
-            let (picked, targets): (Vec<u32>, Vec<u32>) = sel.iter().zip(verify.slots).filter(|(&s, _)| s != u32::MAX).map(|(&s, &slot)| (s, slot)).unzip();
-            let m = picked.len() as u32;
-            let (picked, targets) = (put(&picked), put(&targets));
-            let stage = (g.storage_uninit(m as u64 * shape.gdn.h as u64 * shape.gdn.dk as u64 * shape.gdn.dv as u64), g.storage_uninit(m as u64 * shape.conv_dim() as u64 * (shape.conv_kernel as u64 - 1)));
-            let kernels = (POOL_ROWS_GATHER2, self.kernel_by_name(POOL_ROWS_SCATTER2_BF16));
-            linear.flat_map(|l| model::gdn_verify::gdn_commit_pooled_bf16(g, &shape, &pool.state[l], &pool.hist[l], verify.snapshots(l), (&stage.0, &stage.1), &picked, &targets, m, kernels)).collect()
-        } else {
-            let (rows, sel) = (put(verify.slots), put(&sel));
-            linear
-                .map(|l| {
-                    model::gdn_verify::gdn_commit_pooled(g, &shape, &pool.state[l], &pool.hist[l], verify.snapshots(l), &rows, &sel, verify.sequences())
-                        .expect("the commit kernel was offered at engine construction (Qwen35GgufInstance::speculation_supported)")
-                })
-                .collect()
-        };
+        let (rows, sel) = (put(verify.slots), put(&sel));
+        let steps: Vec<_> = linear
+            .map(|l| {
+                model::gdn_verify::gdn_commit_pooled(g, &shape, &pool.state[l], &pool.hist[l], pool.bf16, verify.snapshots(l), &rows, &sel, verify.sequences())
+                    .expect("the commit kernel was offered at engine construction (Qwen35GgufInstance::speculation_supported)")
+            })
+            .collect();
         g.submit(&[], &steps);
     }
 
@@ -187,7 +175,7 @@ impl Qwen35 {
     /// Whether this stage's device offers every kernel a verify pass runs and
     /// the layer shapes are ones they serve.
     pub(crate) fn verify_supported(&self) -> bool {
-        self.gpu.has_fused(gpu_core::Fused::GdnVerifyPool) && self.gpu.has_fused(gpu_core::Fused::GdnCommitPool) && verify_shape_supported(&self.cfg)
+        self.gpu.has_fused(gpu_core::Fused::GdnVerifyPool) && self.gpu.has_fused(gpu_core::Fused::GdnVerifyPoolStreamBf16) && self.gpu.has_fused(gpu_core::Fused::GdnCommitPool) && self.gpu.has_fused(gpu_core::Fused::GdnCommitPoolBf16) && verify_shape_supported(&self.cfg)
     }
 
     /// Row snapshots for one Gated DeltaNet layer of this stage, with room for

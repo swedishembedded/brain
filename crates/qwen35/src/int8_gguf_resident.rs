@@ -4013,7 +4013,7 @@ impl Qwen35GgufResident {
     fn serving_shape(&self, mg: &ResidentCheckpoint, cfg: &Qwen35Config) -> ServingShape {
         let cards: Vec<u32> = self.devices.iter().filter_map(|(d, _)| if let Device::Gpu(i) = d { Some(*i) } else { None }).collect();
         let hw = gpu_core::defaults::Hardware::detected();
-        let verify = crate::model::verify::verify_shape_supported(cfg) && [gpu_core::Fused::GdnVerifyPool, gpu_core::Fused::GdnCommitPool].iter().all(|&k| hw.offers_fused(k, &cards));
+        let verify = crate::model::verify::verify_shape_supported(cfg) && [gpu_core::Fused::GdnVerifyPool, gpu_core::Fused::GdnVerifyPoolStreamBf16, gpu_core::Fused::GdnCommitPool, gpu_core::Fused::GdnCommitPoolBf16].iter().all(|&k| hw.offers_fused(k, &cards));
         ServingShape {
             native_attention: native_attention(cfg),
             prefix_slots: self.prefix_slots,

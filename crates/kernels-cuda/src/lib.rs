@@ -3366,6 +3366,25 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/gdn_decode.cu"),
     },
     CudaKernel {
+        name: "gdn_verify_pool_stream_bf16",
+        // The speculative verify form of `gdn_decode_pool_stream_bf16` (the same body over a row loop), asked for by name
+        // (`gpu_core::Fused`); see `cu/gdn_decode.cu`.
+        op: Op::RmsNorm,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_gdn_verify_pool_stream_bf16",
+        what: "up to 8 consecutive streaming Gated DeltaNet decode steps for every sequence of a batch over bf16 pools in one launch, the state tile and conv window rounded to bf16 after every row exactly as the plain streaming decode does, f32 snapshots after every row but the last; each row bit-identical to the plain step",
+        reported: "native:gdn_verify_pool_stream_bf16",
+        block_dim: 384,
+        // One block per (key head, sequence).
+        tile: (1, 1),
+        shared_bytes: 2 * 128 * 4 + 3 * 128 * 4 + 3 * 2 * 4 + 3 * 2 * 4 + 8 + 2 * 3 * 2 * 64 * 8,
+        programmatic: true,
+        src: include_str!("../cu/gdn_decode.cu"),
+    },
+    CudaKernel {
         name: "gdn_verify_pool",
         // The speculative verify form of `gdn_decode_pool`: a third entry point
         // of that kernel's file. A fused kernel asked for by name (see
@@ -3430,6 +3449,23 @@ pub const ALL: &[CudaKernel] = &[
         entry: "brain_gdn_commit_pool",
         what: "copies, for each sequence that rejected speculated rows, the snapshot of its last accepted row's recurrent state and conv window back over its pool row; a block per 4096-element tile per sequence",
         reported: "native:gdn_commit_pool",
+        block_dim: 256,
+        tile: (1, 1),
+        shared_bytes: 0,
+        programmatic: true,
+        src: include_str!("../cu/gdn_decode.cu"),
+    },
+    CudaKernel {
+        name: "gdn_commit_pool_bf16",
+        // `gdn_commit_pool` over bf16 pools: the f32 snapshot is narrowed on the way back.
+        op: Op::RmsNorm,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_gdn_commit_pool_bf16",
+        what: "copies, for each sequence that rejected speculated rows, the snapshot of its last accepted row's recurrent state and conv window back over its bf16 pool row (narrowed exactly); a block per 4096-element tile per sequence",
+        reported: "native:gdn_commit_pool_bf16",
         block_dim: 256,
         tile: (1, 1),
         shared_bytes: 0,

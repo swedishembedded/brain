@@ -18,10 +18,14 @@
 //! restores) are exactly what repeated single decode steps produce - and
 //! committing a snapshot puts that state back over the pool row, leaving every
 //! other row of the pool alone.
+//!
+//! The same claim over a pool that stores bf16: plain decode rounds the state and the conv window to bf16 after every
+//! token, so a verified row must too (the snapshots are the f32 widening of those bf16 values), and then greedy
+//! speculation is token for token plain greedy decoding.
 
 use data::rng::{random_seed, Lcg};
 use model::gdn::GdnShape;
-use model::gdn_mixer::{gdn_mixer_decode_fused, GdnMixerShape, GdnMixerWeights, GdnPoolRows, GdnStream};
+use model::gdn_mixer::{gdn_mixer_decode_fused, gdn_mixer_decode_pooled_fused, GdnMixerShape, GdnMixerWeights, GdnPoolRows, GdnStream};
 use model::gdn_verify::{gdn_commit_pooled, gdn_mixer_verify_pooled_fused, GdnRowSnapshots, VerifyLayout};
 
 fn rnd(r: &mut Lcg, n: usize, s: f32) -> Vec<f32> {
@@ -45,8 +49,32 @@ fn u32s(g: &gpu_core::Gpu, v: &[u32]) -> gpu_core::DeviceBuffer {
 /// One verify case: key heads, group, rows per sequence, pool rows, pool row of each sequence.
 type GdnCase<'a> = (u32, u32, &'a [u32], u32, &'a [u32]);
 
+/// bf16 rows as words (two to a word, the even element low) and back.
+fn round_bf16(x: f32) -> u16 {
+    let b = x.to_bits();
+    ((b + 0x7fff + ((b >> 16) & 1)) >> 16) as u16
+}
+
+fn pack_bf16(v: &[f32]) -> Vec<f32> {
+    v.chunks(2).map(|p| f32::from_bits(u32::from(round_bf16(p[0])) | u32::from(round_bf16(p[1])) << 16)).collect()
+}
+
+fn unpack_bf16(w: &[f32]) -> Vec<f32> {
+    w.iter().flat_map(|x| [f32::from_bits(x.to_bits() << 16), f32::from_bits(x.to_bits() & 0xFFFF_0000)]).collect()
+}
+
 #[test]
 fn verify_rows_and_snapshots_equal_repeated_single_steps_and_commit_restores_them() {
+    verify_equals_single_steps(false);
+}
+
+/// Over bf16 pools the reference is the plain pooled decode (the streaming kernel a bf16 pool takes), one step a row.
+#[test]
+fn verify_rows_over_bf16_pools_equal_repeated_plain_decode_steps() {
+    verify_equals_single_steps(true);
+}
+
+fn verify_equals_single_steps(bf16: bool) {
     let g = gpu_core::testgpu::dev(&[]);
     if !is_cuda(&g) {
         brain_testutil::skip_unavailable("native fused kernels need a CUDA device");
@@ -79,8 +107,11 @@ fn verify_rows_and_snapshots_equal_repeated_single_steps_and_commit_restores_the
         let bp = rnd(&mut r, nn * nvh as usize, 1.0);
         let ap = rnd(&mut r, nn * nvh as usize, 1.0);
         let z = rnd(&mut r, nn * value_dim, 1.0);
-        let state0 = rnd(&mut r, pool_rows as usize * state_len, 0.3);
-        let hist0 = rnd(&mut r, pool_rows as usize * hist_len, 0.3);
+        let (state0, hist0) = (rnd(&mut r, pool_rows as usize * state_len, 0.3), rnd(&mut r, pool_rows as usize * hist_len, 0.3));
+        // Elements as the pool stores them: f32, or bf16 words (the starting values are made bf16-exact).
+        let (state0, hist0) = if bf16 { (unpack_bf16(&pack_bf16(&state0)), unpack_bf16(&pack_bf16(&hist0))) } else { (state0, hist0) };
+        let store = |name: &str, v: &[f32]| if bf16 { g.storage_init(name, &pack_bf16(v)) } else { g.storage_init(name, v) };
+        let load = |buf: &gpu_core::DeviceBuffer, n: usize| if bf16 { unpack_bf16(&g.read(buf, n / 2)) } else { g.read(buf, n) };
 
         // Reference: every sequence stepped one row at a time on a private copy
         // of its pool row, recording the state after each row.
@@ -89,44 +120,42 @@ fn verify_rows_and_snapshots_equal_repeated_single_steps_and_commit_restores_the
         let mut ref_snap_hist = vec![0.0f32; nn * hist_len];
         let mut ref_final = (state0.clone(), hist0.clone());
         let mut off = 0usize;
+        let zero_row = u32s(&g, &[0]);
         for (si, &cnt) in counts.iter().enumerate() {
             let slot = slots[si] as usize;
-            let st = g.storage_init("state", &state0[slot * state_len..(slot + 1) * state_len]);
-            let hi = g.storage_init("hist", &hist0[slot * hist_len..(slot + 1) * hist_len]);
+            let st = store("state", &state0[slot * state_len..(slot + 1) * state_len]);
+            let hi = store("hist", &hist0[slot * hist_len..(slot + 1) * hist_len]);
             for row in 0..cnt as usize {
                 let t = off + row;
                 let slice = |v: &[f32], width: usize, name: &str| g.storage_init(name, &v[t * width..(t + 1) * width]);
-                let gated = gdn_mixer_decode_fused(
-                    &g,
-                    &shape,
-                    &w,
-                    &slice(&mixed, conv_dim, "mixed"),
-                    &slice(&bp, nvh as usize, "bp"),
-                    &slice(&ap, nvh as usize, "ap"),
-                    &slice(&z, value_dim, "z"),
-                    &GdnStream { state: &st, hist: &hi },
-                )
+                let (mixed_t, bp_t, ap_t, z_t) = (slice(&mixed, conv_dim, "mixed"), slice(&bp, nvh as usize, "bp"), slice(&ap, nvh as usize, "ap"), slice(&z, value_dim, "z"));
+                let gated = if bf16 {
+                    // The plain bf16 decode: the pooled launch a bf16 pool takes (one sequence, pool row 0).
+                    let pool = GdnPoolRows { state: &st, hist: &hi, rows: &zero_row, gather: 0, scatter: 0, fuse: true, bf16: true, wide: true };
+                    gdn_mixer_decode_pooled_fused(&g, &shape, &w, &mixed_t, &bp_t, &ap_t, &z_t, &pool)
+                } else {
+                    gdn_mixer_decode_fused(&g, &shape, &w, &mixed_t, &bp_t, &ap_t, &z_t, &GdnStream { state: &st, hist: &hi })
+                }
                 .expect("the fused single-step kernel was declined on a CUDA device");
                 ref_gated[t * value_dim..(t + 1) * value_dim].copy_from_slice(&g.read(&gated, value_dim));
                 if row + 1 < cnt as usize {
-                    ref_snap_state[t * state_len..(t + 1) * state_len].copy_from_slice(&g.read(&st, state_len));
-                    ref_snap_hist[t * hist_len..(t + 1) * hist_len].copy_from_slice(&g.read(&hi, hist_len));
+                    ref_snap_state[t * state_len..(t + 1) * state_len].copy_from_slice(&load(&st, state_len));
+                    ref_snap_hist[t * hist_len..(t + 1) * hist_len].copy_from_slice(&load(&hi, hist_len));
                 }
             }
-            ref_final.0[slot * state_len..(slot + 1) * state_len].copy_from_slice(&g.read(&st, state_len));
-            ref_final.1[slot * hist_len..(slot + 1) * hist_len].copy_from_slice(&g.read(&hi, hist_len));
+            ref_final.0[slot * state_len..(slot + 1) * state_len].copy_from_slice(&load(&st, state_len));
+            ref_final.1[slot * hist_len..(slot + 1) * hist_len].copy_from_slice(&load(&hi, hist_len));
             off += cnt as usize;
         }
 
         // The batched verify launch.
-        let (pst, phi) = (g.storage_init("pool_state", &state0), g.storage_init("pool_hist", &hist0));
+        let (pst, phi) = (store("pool_state", &state0), store("pool_hist", &hist0));
         let rows_buf = u32s(&g, slots);
         let offs: Vec<u32> = counts.iter().scan(0u32, |acc, &c| { let o = *acc; *acc += c; Some(o) }).collect();
         let (counts_buf, offs_buf) = (u32s(&g, counts), u32s(&g, &offs));
-        let ident_buf = u32s(&g, &(0..b).collect::<Vec<u32>>());
-        let pool = GdnPoolRows { state: &pst, hist: &phi, rows: &rows_buf, gather: 0, scatter: 0, fuse: true, bf16: false, wide: false };
+        let pool = GdnPoolRows { state: &pst, hist: &phi, rows: &rows_buf, gather: 0, scatter: 0, fuse: true, bf16, wide: bf16 };
         let snaps = GdnRowSnapshots::new(&g, &shape, n);
-        let layout = VerifyLayout { rows: &rows_buf, counts: &counts_buf, offs: &offs_buf, ident: &ident_buf, b };
+        let layout = VerifyLayout { rows: &rows_buf, counts: &counts_buf, offs: &offs_buf, b };
         let gated = gdn_mixer_verify_pooled_fused(
             &g,
             &shape,
@@ -144,8 +173,8 @@ fn verify_rows_and_snapshots_equal_repeated_single_steps_and_commit_restores_the
         g.poll_wait();
 
         assert_eq!(bits(g.read(&gated, nn * value_dim)), bits(ref_gated), "layer outputs differ: {ctx}");
-        assert_eq!(bits(g.read(&pst, pool_rows as usize * state_len)), bits(ref_final.0.clone()), "pool state after the last row differs: {ctx}");
-        assert_eq!(bits(g.read(&phi, pool_rows as usize * hist_len)), bits(ref_final.1.clone()), "pool window after the last row differs: {ctx}");
+        assert_eq!(bits(load(&pst, pool_rows as usize * state_len)), bits(ref_final.0.clone()), "pool state after the last row differs: {ctx}");
+        assert_eq!(bits(load(&phi, pool_rows as usize * hist_len)), bits(ref_final.1.clone()), "pool window after the last row differs: {ctx}");
         let got_snap_state = g.read(&snaps.state, nn * state_len);
         let got_snap_hist = g.read(&snaps.hist, nn * hist_len);
         for (si, &cnt) in counts.iter().enumerate() {
@@ -168,10 +197,10 @@ fn verify_rows_and_snapshots_equal_repeated_single_steps_and_commit_restores_the
             want_hist[slot * hist_len..(slot + 1) * hist_len].copy_from_slice(&ref_snap_hist[offs[0] as usize * hist_len..(offs[0] as usize + 1) * hist_len]);
         }
         let sel_buf = u32s(&g, &sel);
-        let step = gdn_commit_pooled(&g, &shape, &pst, &phi, &snaps, &rows_buf, &sel_buf, b).expect("the commit kernel was declined on a CUDA device");
+        let step = gdn_commit_pooled(&g, &shape, &pst, &phi, bf16, &snaps, &rows_buf, &sel_buf, b).expect("the commit kernel was declined on a CUDA device");
         g.submit(&[], &[step]);
         g.poll_wait();
-        assert_eq!(bits(g.read(&pst, pool_rows as usize * state_len)), bits(want_state), "pool state after commit differs: {ctx}");
-        assert_eq!(bits(g.read(&phi, pool_rows as usize * hist_len)), bits(want_hist), "pool window after commit differs: {ctx}");
+        assert_eq!(bits(load(&pst, pool_rows as usize * state_len)), bits(want_state), "pool state after commit differs: {ctx}");
+        assert_eq!(bits(load(&phi, pool_rows as usize * hist_len)), bits(want_hist), "pool window after commit differs: {ctx}");
     }
 }

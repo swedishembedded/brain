@@ -78,8 +78,10 @@ fn tokens(speculate: bool, gdn: GdnState) -> (Vec<Vec<u32>>, u64) {
     (ids.iter().map(|id| done.remove(id).expect("the request completes")).collect(), verified)
 }
 
-/// Greedy output under speculation is plain decoding's, to the numerics of a verify row against a decode row: every
-/// request starts with the same tokens (a wrong rollback or a wrongly read prompt diverges at once).
+/// Greedy output under speculation is plain decoding's. Over an f32 pool a verify row differs from a decode row by the
+/// numerics of the kernels (the plain step reassociates two sums), so every request starts with the same tokens (a wrong
+/// rollback or a wrongly read prompt diverges at once); over a bf16 pool a verify row IS the plain streaming step, so the
+/// tokens are identical, request for request, to the last one.
 fn speculating_beside_arriving_prompts_gives_the_plain_tokens_at(gdn: GdnState) {
     const AGREE: usize = 12;
     let (plain, none) = tokens(false, gdn);
@@ -88,8 +90,12 @@ fn speculating_beside_arriving_prompts_gives_the_plain_tokens_at(gdn: GdnState) 
     assert!(verified > 0, "speculation ran");
     for (n, (s, p)) in spec.into_iter().zip(plain).enumerate() {
         assert_eq!(s.len(), p.len(), "request {n}");
-        let agree = s.iter().zip(&p).take_while(|(a, b)| a == b).count();
-        assert!(agree >= AGREE.min(s.len()), "request {n} diverges after {agree} tokens: {s:?} against {p:?}");
+        if gdn == GdnState::Bf16 {
+            assert_eq!(s, p, "request {n}: speculation over a bf16 pool is not plain greedy decoding");
+        } else {
+            let agree = s.iter().zip(&p).take_while(|(a, b)| a == b).count();
+            assert!(agree >= AGREE.min(s.len()), "request {n} diverges after {agree} tokens: {s:?} against {p:?}");
+        }
     }
 }
 
@@ -97,9 +103,8 @@ fn speculating_beside_arriving_prompts_gives_the_plain_tokens() {
     speculating_beside_arriving_prompts_gives_the_plain_tokens_at(GdnState::F32);
 }
 
-/// The same over a bf16 recurrent-state pool: a verify round widens the pool rows into f32 staging and rounds the
-/// state after the last row back, a rejection restores the rounded snapshot. Plain decoding at the same precision
-/// rounds the state after every token, so agreement is to the numerics of a verify row, as for the f32 pool.
+/// The same over a bf16 recurrent-state pool: a verify round runs the plain streaming step over each sequence's rows (the
+/// state and the conv window rounded to bf16 after every row), a rejection restores the snapshot of the last kept row.
 fn speculating_over_bf16_state_pools_gives_the_plain_tokens() {
     speculating_beside_arriving_prompts_gives_the_plain_tokens_at(GdnState::Bf16);
 }
@@ -178,7 +183,7 @@ fn one_mixed_verify_forward_matches_a_prefill_round_and_a_verify_step() {
     one_mixed_verify_forward_matches_a_prefill_round_and_a_verify_step_at(GdnState::F32);
 }
 
-/// The bf16-pool twin: the mixed forward's verify rows and the separate verify pass both stage the pool through f32, and
+/// The bf16-pool twin: the mixed forward's verify rows and the separate verify pass both run the streaming verify, and
 /// the commit after a partial rejection leaves the pool a plain decode step reads the same way on both engines.
 fn one_mixed_verify_forward_over_bf16_pools_matches_a_prefill_round_and_a_verify_step() {
     one_mixed_verify_forward_matches_a_prefill_round_and_a_verify_step_at(GdnState::Bf16);
