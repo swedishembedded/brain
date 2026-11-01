@@ -116,22 +116,38 @@ fn assert_adjoint(tag: &str, ax: &[f32], y: &[f32], x: &[f32], aty: &[f32]) {
 /// conv2d_gd must reproduce the already-gated conv2d (p1_conv, p2_blocks,
 /// p3_gradcheck).
 ///
-/// NOT bit-equality, and the reason is worth knowing. `backend-cpu` binds its
-/// AVX2/winograd fast paths BY KERNEL NAME (`find("conv2d")`, lib.rs:127-133), so
-/// the reference here runs vectorized while conv2d_gd — deliberately named
-/// distinctly — runs the generic Cranelift JIT. Same arithmetic, different
-/// summation order, ~1 ULP apart (measured: 1087906882 vs 1087906881).
+/// NOT bit-equality, and NOT a bound in ulps of the result. The two kernels run
+/// different code on most backends: `backend-cpu` binds its AVX2/winograd fast
+/// paths BY KERNEL NAME (`find("conv2d")`, lib.rs:127-133) while the
+/// deliberately differently named conv2d_gd runs the generic JIT, and on CUDA
+/// `conv2d` is served by the tuned implicit-GEMM kernel (16-deep k slices,
+/// explicit FMA) while conv2d_gd is the generated serial loop. Same arithmetic,
+/// different association and rounding. Naming this kernel `conv2d` would have
+/// made it bit-identical by inheriting a DENSE fast path that ignores `groups`
+/// and computes the wrong answer with no error; the disagreement is the price
+/// of not having that bug.
 ///
-/// That gap is the *point*, not a defect: naming this kernel `conv2d` would have
-/// made it bit-identical by silently inheriting a DENSE fast path that ignores
-/// `groups` entirely and computes the wrong answer with no error. A 1-ULP
-/// disagreement is the price of not having that bug.
+/// Why the bound is `n * u * sum|x*w|` and not ulps of the output. Any
+/// evaluation order of an n-term fp32 dot product, with or without FMA, has
+/// error at most gamma_n * S with gamma_n = n*u/(1-n*u), u = 2^-24 and
+/// S = sum|x_i*w_i| (Higham, ASNA 3.1). A result that cancels down to a small
+/// value has the same absolute error as one that does not, so its error in ulps
+/// of the OUTPUT is arbitrarily large while still correct: measured on CUDA,
+/// outputs near 2e-2 built from partial sums of size ~1 differ by 39 ulp (and
+/// 1403 over a run's worst element) between two kernels that each lie within
+/// gamma_27*S of the f64 value. So each kernel is held to the exact (f64) value
+/// within gamma_n*S, which is a proof of "reassociation only" for the pair
+/// (they are then within 2*gamma_n*S of each other). A wrong tap, stride or pad
+/// changes an element by about S/n, some 1e4 times that bound.
 #[test]
 fn conv2d_gd_reproduces_conv2d_at_groups1_dilation1() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, cin, h, w, cout, k) = (2u32, 3u32, 9u32, 7u32, 4u32, 3u32);
     let x = Lcg::random().vec((n * cin * h * w) as usize);
     let wt = Lcg::random().vec((cout * cin * k * k) as usize);
+    let terms = (cin * k * k) as f64;
+    let unit_roundoff = 2f64.powi(-24);
+    let gamma = terms * unit_roundoff / (1.0 - terms * unit_roundoff);
 
     for &(stride, pad) in &[(1u32, 1u32), (2, 1), (1, 0)] {
         let ho = (h + 2 * pad - k) / stride + 1;
@@ -140,21 +156,36 @@ fn conv2d_gd_reproduces_conv2d_at_groups1_dilation1() {
 
         let want = run3(&gpu, 0, &x, &wt, on, &[n, cin, h, w, cout, k, stride, pad, ho, wo]);
         let got = run3(&gpu, 1, &x, &wt, on, &[n, cin, h, w, cout, k, stride, pad, 1, 1, ho, wo]);
-        let mut max_ulp = 0i64;
         for i in 0..on {
-            let ulp = (want[i].to_bits() as i64 - got[i].to_bits() as i64).abs();
-            max_ulp = max_ulp.max(ulp);
-            assert!(
-                (want[i] - got[i]).abs() <= 1e-5 * want[i].abs().max(1.0),
-                "conv2d_gd != conv2d at stride={stride} pad={pad}, element {i}: \
-                 {} vs {} ({ulp} ulp)",
-                want[i],
-                got[i]
-            );
+            let (wo_i, ho_i) = (i % wo as usize, (i / wo as usize) % ho as usize);
+            let co = (i / (wo * ho) as usize) % cout as usize;
+            let img = i / (wo * ho * cout) as usize;
+            let (mut exact, mut abs_sum) = (0f64, 0f64);
+            for ci in 0..cin as usize {
+                for kh in 0..k as usize {
+                    for kw in 0..k as usize {
+                        let hi = (ho_i * stride as usize + kh) as i64 - pad as i64;
+                        let wi = (wo_i * stride as usize + kw) as i64 - pad as i64;
+                        if hi < 0 || hi >= h as i64 || wi < 0 || wi >= w as i64 {
+                            continue;
+                        }
+                        let xv = x[((img * cin as usize + ci) * h as usize + hi as usize) * w as usize + wi as usize];
+                        let wv = wt[((co * cin as usize + ci) * k as usize + kh) * k as usize + kw];
+                        exact += xv as f64 * wv as f64;
+                        abs_sum += (xv as f64 * wv as f64).abs();
+                    }
+                }
+            }
+            let bound = gamma * abs_sum;
+            for (name, v) in [("conv2d", want[i]), ("conv2d_gd", got[i])] {
+                assert!(
+                    (v as f64 - exact).abs() <= bound,
+                    "{name} at stride={stride} pad={pad}, element {i}: {v:e} vs exact {exact:e}, \
+                     error {:.3e} exceeds gamma_n*sum|xw| = {bound:.3e}",
+                    (v as f64 - exact).abs()
+                );
+            }
         }
-        // Pin that the two are within a couple of ULP — i.e. that the difference
-        // really is summation order and not a creeping logic divergence.
-        assert!(max_ulp <= 4, "stride={stride} pad={pad}: max {max_ulp} ulp is too far apart for a pure reassociation");
     }
 }
 

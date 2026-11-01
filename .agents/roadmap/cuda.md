@@ -1135,8 +1135,8 @@ tuned kernel are deferred.**
   `8.940697e-8`, `cuda_graphs.rs`/`cuda_pass.rs` cover the mechanism directly,
   and Qwen3.8-27B's decode runs through it (`decode_steady_state.rs`,
   `gguf_resident_real.rs`). No backward pass has been driven through it.
-- **Two gradcheck tests fail on CUDA and are skipped by name in
-  `scripts/gates/parity-gate.sh`** (they pass on Vulkan; a third, `spectral_mixer_fft_path`, was fixed: the translator now covers every WGSL bit builtin; found 2026-11-01 when
+- **One gradcheck test fails on CUDA and are skipped by name in
+  `scripts/gates/parity-gate.sh`** (they pass on Vulkan; `spectral_mixer_fft_path` was fixed (the translator now covers every WGSL bit builtin) and `conv2d_gd_reproduces_conv2d` was not a defect (the tuned conv2d and the generated conv2d_gd differ only in association and FMA; the test now bounds each against the f64 value by gamma_n*sum|xw|); found 2026-11-01 when
   the gate gained its CUDA leg): `qwen35_lora_on_a_bf16_base_analytic_grads_
   match_finite_differences` (LoRA-A analytic gradients 49-84 % off the finite
   differences; the cause is not diagnosed, bf16 tensor-core rounding of the base
