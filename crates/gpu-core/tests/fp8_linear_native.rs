@@ -264,7 +264,7 @@ fn fp8_class_widths() {
         println!("tuned: {}", line.chars().take(110).collect::<String>());
     }
     for m in [16u32, 32, 64] {
-        for n in [10240u32, 12288, 16384, 17408] {
+        for n in [1024u32, 6144, 10240, 12288, 16384, 17408] {
             let mut timed: Vec<(f64, String)> = gpu_core::native_time_fp8_shape(&gpu, [m, 5120 / 4, n])
                 .into_iter()
                 .filter_map(|(name, v)| match v {
