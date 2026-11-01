@@ -96,6 +96,7 @@ fn to_chat_sample((fact, question, answer): &Triple) -> ChatSample {
         tools: Vec::new(),
         rendered: None,
         media: Vec::new(),
+        rollout: None,
     }
 }
 

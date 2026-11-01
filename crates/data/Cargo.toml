@@ -52,3 +52,4 @@ imageproc = { version = "0.25", default-features = false }
 # private QWEN3_DIR env var. No cycle: testutil pulls modelref/modelstore
 # only, neither of which depends on brain-data.
 brain-testutil.workspace = true
+tempfile.workspace = true

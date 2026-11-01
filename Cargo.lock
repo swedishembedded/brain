@@ -1076,6 +1076,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_norway",
+ "tempfile",
  "unicode-general-category",
  "unicode-normalization",
  "unicode-segmentation",

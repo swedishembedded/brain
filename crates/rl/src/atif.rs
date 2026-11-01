@@ -116,7 +116,7 @@ pub fn to_chat_sample(traj: &Trajectory) -> Result<ChatSample, String> {
     // are handed over in the order serde_json holds them (sorted by key), the
     // same order the SDK's serving path renders a request's tool schemas in.
     let tools = traj.agent.tool_definitions.iter().flatten().map(minijinja::Value::from_serialize).collect();
-    Ok(ChatSample { messages, tools, rendered: None, media: Vec::new() })
+    Ok(ChatSample { messages, tools, rendered: None, media: Vec::new(), rollout: None })
 }
 
 fn push_step(step: &TraceStep, out: &mut Vec<ChatMessage>) -> Result<(), String> {

@@ -185,7 +185,7 @@ fn record(env: &DocumentEnv<'_, QwenBpe>, i: usize) -> ChatSample {
         FactSplit::Train => vec![ChatMessage::assistant(presented, true)],
         FactSplit::Probe => vec![ChatMessage::user(presented), ChatMessage::assistant(expected, true)],
     };
-    ChatSample { messages, tools: Vec::new(), rendered: None, media: Vec::new() }
+    ChatSample { messages, tools: Vec::new(), rendered: None, media: Vec::new(), rollout: None }
 }
 
 impl<'a> Curriculum for DocumentCurriculum<'a> {

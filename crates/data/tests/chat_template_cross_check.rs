@@ -361,6 +361,7 @@ fn a_qwen38_training_prompt_is_the_prompt_the_server_renders() {
         tools: vec![parse_json_ordered(tool).unwrap()],
         rendered: None,
         media: Vec::new(),
+        rollout: None,
     };
     let trained = sample.answers_as_asked(&tmpl, false).expect("renders").expect("assistant turns");
     assert_eq!(trained.len(), 2);

@@ -43,6 +43,7 @@ fn conversation(i: usize) -> ChatSample {
         tools: Vec::new(),
         rendered: None,
         media: Vec::new(),
+        rollout: None,
     }
 }
 
@@ -89,6 +90,7 @@ fn reasoning_is_trained_only_when_kept() {
         tools: Vec::new(),
         rendered: None,
         media: Vec::new(),
+        rollout: None,
     };
     let trained = |opts: RenderOpts| {
         let (ids, mask) = sample.encode_with(&tok, &tmpl, opts).unwrap();
@@ -116,6 +118,7 @@ fn a_preference_pair_keeps_the_think_block_its_candidates_open_with_when_asked()
         tools: Vec::new(),
         rendered: None,
         media: Vec::new(),
+        rollout: None,
     };
     let pair = data::preference::PreferenceSample { chosen: turn("Do not wait."), rejected: turn("Wait.") };
     let supervised = |opts: RenderOpts| {

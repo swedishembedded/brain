@@ -28,6 +28,7 @@ use std::io;
 use std::path::Path;
 
 use crate::binio;
+use crate::chat_rollout::{self, Rollout};
 use crate::chat_template::{ChatTemplate, TemplateError};
 use crate::tokenizer::Tokenizer;
 
@@ -62,7 +63,7 @@ impl ChatExample {
         let mut messages: Vec<ChatMessage> = self.system.iter().map(ChatMessage::system).collect();
         messages.push(ChatMessage::user(self.user.clone()));
         messages.push(ChatMessage::assistant(self.assistant.clone(), true));
-        ChatSample { messages, tools: Vec::new(), rendered: None, media: Vec::new() }
+        ChatSample { messages, tools: Vec::new(), rendered: None, media: Vec::new(), rollout: None }
     }
 }
 
@@ -204,6 +205,9 @@ pub struct ChatSample {
     /// made from a longer conversation may hold more images than its text places; the trainer's preparation keeps the
     /// first as many as the text holds (see [`ChatSample::keep_images_placed_in`]).
     pub media: Vec<ImageBytes>,
+    /// What the collector of the rollout this sample is one call of recorded ([`crate::chat_rollout`]); `None` for
+    /// an ordinary supervised sample, which is an imitation example.
+    pub rollout: Option<Rollout>,
 }
 
 /// Text already rendered through a chat template, in order, each stretch
@@ -211,21 +215,23 @@ pub struct ChatSample {
 /// [`ChatSample::answers_as_asked`] holds one answer as a model is asked for
 /// it (the prompt its template renders for the conversation so far, then the
 /// answer after it); one made by [`ChatSample::answers_packed`] holds several.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Rendered {
     pub segments: Vec<RenderedSegment>,
 }
 
 /// One stretch of a [`Rendered`] text and whether it is supervised.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RenderedSegment {
     pub text: String,
     pub supervised: bool,
+    /// The log-probabilities the sampler gave the tokens of this supervised answer, when the collector recorded them.
+    pub behavior_logprobs: Option<Vec<f32>>,
 }
 
 impl Rendered {
-    fn answer(prompt: &str, completion: &str) -> Self {
-        Self { segments: vec![RenderedSegment { text: prompt.to_string(), supervised: false }, RenderedSegment { text: completion.to_string(), supervised: true }] }
+    fn answer(prompt: &str, completion: &str, behavior_logprobs: Option<Vec<f32>>) -> Self {
+        Self { segments: vec![RenderedSegment { text: prompt.to_string(), supervised: false, behavior_logprobs: None }, RenderedSegment { text: completion.to_string(), supervised: true, behavior_logprobs }] }
     }
 }
 
@@ -251,7 +257,7 @@ impl ChatSample {
                 }
             })
             .collect();
-        ChatSample { messages, tools: self.tools.clone(), rendered: None, media: self.media.clone() }
+        ChatSample { messages, tools: self.tools.clone(), rendered: None, media: self.media.clone(), rollout: self.rollout.clone() }
     }
 
     /// Drop the images the sample's text does not place: a sample made from a longer conversation (one answer of
@@ -304,7 +310,7 @@ impl ChatSample {
 
     /// The first `len` messages as a sample of their own.
     fn until(&self, len: usize) -> ChatSample {
-        ChatSample { messages: self.messages[..len].to_vec(), tools: self.tools.clone(), rendered: None, media: self.media.clone() }
+        ChatSample { messages: self.messages[..len].to_vec(), tools: self.tools.clone(), rendered: None, media: self.media.clone(), rollout: self.rollout.as_ref().map(|r| Rollout { advantage: r.advantage, behavior_logprobs: r.behavior_logprobs[..len].to_vec() }) }
     }
 
     /// This sample's last message as one example the way the model is asked
@@ -316,7 +322,9 @@ impl ChatSample {
         let tools = (!self.tools.is_empty()).then(|| minijinja::Value::from(self.tools.clone()));
         let (full, answer) = tmpl.render_with_supervised_suffix(&values, tools, thinking)?;
         let (prompt, completion) = full.split_at(answer.start);
-        Ok(ChatSample { messages: Vec::new(), tools: self.tools.clone(), rendered: Some(Rendered::answer(prompt, completion)), media: self.media.clone() })
+        let behavior = self.rollout.as_ref().and_then(|r| r.behavior_logprobs.last().cloned().flatten());
+        let rollout = self.rollout.as_ref().map(|r| Rollout { advantage: r.advantage, behavior_logprobs: Vec::new() });
+        Ok(ChatSample { messages: Vec::new(), tools: self.tools.clone(), rendered: Some(Rendered::answer(prompt, completion, behavior)), media: self.media.clone(), rollout })
     }
 
     /// This sample as ONE example in which every supervised answer is
@@ -371,11 +379,13 @@ impl ChatSample {
                     .ok_or_else(|| TemplateError(format!("the prompt of message {at} does not render the earlier answer closed by the end-of-turn marker {end:?}")))?;
                 &prompt[shared + after + end.len()..]
             };
-            segments.push(RenderedSegment { text: context.to_string(), supervised: false });
-            segments.push(RenderedSegment { text: completion.to_string(), supervised: true });
+            segments.push(RenderedSegment { text: context.to_string(), supervised: false, behavior_logprobs: None });
+            let behavior = self.rollout.as_ref().and_then(|r| r.behavior_logprobs[at].clone());
+            segments.push(RenderedSegment { text: completion.to_string(), supervised: true, behavior_logprobs: behavior });
             previous_prompt = prompt.to_string();
         }
-        Ok(Some(ChatSample { messages: Vec::new(), tools: self.tools.clone(), rendered: Some(Rendered { segments }), media: self.media.clone() }))
+        let rollout = self.rollout.as_ref().map(|r| Rollout { advantage: r.advantage, behavior_logprobs: Vec::new() });
+        Ok(Some(ChatSample { messages: Vec::new(), tools: self.tools.clone(), rendered: Some(Rendered { segments }), media: self.media.clone(), rollout }))
     }
 
     /// Whether the last message is the only supervised one and it is an
@@ -434,14 +444,45 @@ impl ChatSample {
     /// message is not prefix-stable -- see `render_with_message_boundaries`'s
     /// doc for exactly when that happens.
     pub fn encode_with(&self, tok: &dyn Tokenizer, tmpl: &ChatTemplate, opts: RenderOpts) -> Result<(Vec<u32>, Vec<bool>), TemplateError> {
+        self.encode_rollout(tok, tmpl, opts).map(|e| (e.ids, e.mask))
+    }
+
+    /// [`ChatSample::encode_with`] that also places the behaviour log-probabilities the collector recorded
+    /// ([`Rollout`]): `behavior[t]` is token `t`'s, NaN where none was recorded.
+    ///
+    /// A supervised answer's log-probabilities are placed on the tokens of the answer as the template renders it after
+    /// its prompt ([`ChatSample::answers_as_asked`], [`ChatSample::answers_packed`]), and there must be exactly one
+    /// per token. The whole-conversation mask also supervises the header of an assistant turn, which no sampler
+    /// sampled, so a sample that still holds its messages and carries log-probabilities is refused.
+    ///
+    /// # Errors
+    /// As [`ChatSample::encode_with`]; the log-probabilities of an answer do not number its tokens; a sample of whole
+    /// messages carries log-probabilities.
+    pub fn encode_rollout(&self, tok: &dyn Tokenizer, tmpl: &ChatTemplate, opts: RenderOpts) -> Result<EncodedSample, TemplateError> {
         if let Some(Rendered { segments }) = &self.rendered {
-            let (mut ids, mut mask) = (Vec::new(), Vec::new());
-            for RenderedSegment { text, supervised } in segments {
+            let (mut ids, mut mask, mut behavior) = (Vec::new(), Vec::new(), Vec::new());
+            let mut answer = 0;
+            for RenderedSegment { text, supervised, behavior_logprobs } in segments {
                 let encoded = tok.encode(text);
+                match behavior_logprobs {
+                    Some(lps) if lps.len() == encoded.len() => behavior.extend_from_slice(lps),
+                    Some(lps) => {
+                        return Err(TemplateError(format!(
+                            "\"behavior_logprobs\" of supervised answer {answer} holds {} values, the answer encodes to {} tokens (the answer as the chat template renders it after its prompt, with its end-of-turn marker)",
+                            lps.len(),
+                            encoded.len()
+                        )))
+                    }
+                    None => behavior.extend(std::iter::repeat_n(f32::NAN, encoded.len())),
+                }
+                answer += usize::from(*supervised);
                 mask.extend(std::iter::repeat_n(*supervised, encoded.len()));
                 ids.extend(encoded);
             }
-            return Ok((ids, mask));
+            return Ok(EncodedSample { ids, mask, behavior });
+        }
+        if self.rollout.as_ref().is_some_and(Rollout::has_behavior) {
+            return Err(TemplateError("\"behavior_logprobs\" are placed on an answer rendered as the model is asked for it; this sample still holds whole messages (render it with answers_as_asked or answers_packed)".to_string()));
         }
         self.validate().map_err(TemplateError)?;
         let messages: Vec<ChatMessage> = if opts.keep_reasoning {
@@ -464,7 +505,14 @@ impl ChatSample {
             mask.extend(std::iter::repeat_n(m.train, tid.len()));
             ids.extend(tid);
         }
-        Ok((ids, mask))
+        let behavior = vec![f32::NAN; ids.len()];
+        Ok(EncodedSample { ids, mask, behavior })
+    }
+
+    /// Whether any message carries behaviour log-probabilities, which only an answer rendered as asked can place.
+    #[must_use]
+    pub fn carries_behavior_logprobs(&self) -> bool {
+        self.rollout.as_ref().is_some_and(Rollout::has_behavior)
     }
 
     /// Parse bench's `generic-messages-v2` JSONL export: one packed sample
@@ -538,6 +586,9 @@ struct WireRecord {
     #[allow(dead_code)]
     #[serde(default)]
     metadata: serde_json::Value,
+    /// The group-relative advantage of the rollout this record is one call of ([`crate::chat_rollout`]).
+    #[serde(default)]
+    advantage: Option<serde_json::Value>,
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -568,6 +619,10 @@ pub(crate) struct WireMessage {
     /// No default: a message with no explicit supervision boundary is
     /// rejected rather than silently treated as all-context or all-trained.
     pub(crate) train: bool,
+    /// Only on a supervised assistant message: what the sampler gave each token of the answer
+    /// ([`crate::chat_rollout`]).
+    #[serde(default)]
+    pub(crate) behavior_logprobs: Option<serde_json::Value>,
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -611,9 +666,19 @@ fn sample_from_wire(record: WireRecord, reader: &dyn ImageReader) -> Result<Chat
     if record.messages.is_empty() {
         return Err("\"messages\" is empty".to_string());
     }
-    let (messages, media) = messages_from_wire_with(record.messages, reader)?;
+    let (messages, media, behavior_logprobs) = messages_from_wire_with(record.messages, reader)?;
     reader.check_record(&media)?;
-    Ok(ChatSample { messages, tools: record.tools, rendered: None, media })
+    let rollout = match record.advantage {
+        Some(advantage) => {
+            let advantage = chat_rollout::check_advantage(&advantage)?;
+            Some(Rollout { advantage, behavior_logprobs })
+        }
+        None => match behavior_logprobs.iter().position(Option::is_some) {
+            Some(at) => return Err(format!("messages[{at}]: \"behavior_logprobs\" belong to a rollout, and the record has no \"advantage\"")),
+            None => None,
+        },
+    };
+    Ok(ChatSample { messages, tools: record.tools, rendered: None, media, rollout })
 }
 
 /// One conversation's wire messages as [`ChatMessage`]s, with the semantic
@@ -622,13 +687,15 @@ fn sample_from_wire(record: WireRecord, reader: &dyn ImageReader) -> Result<Chat
 /// conversation ([`check_tool_pairing`]). `messages[i]` in an error is the
 /// index into `wire`.
 pub(crate) fn messages_from_wire(wire: Vec<WireMessage>) -> Result<Vec<ChatMessage>, String> {
-    messages_from_wire_with(wire, &TextOnly::TRAINER).map(|(messages, _)| messages)
+    messages_from_wire_with(wire, &TextOnly::TRAINER).map(|(messages, _, _)| messages)
 }
 
 /// [`messages_from_wire`] for a reader of images: the conversation's messages, and its images in the order its
-/// text places them.
-fn messages_from_wire_with(wire: Vec<WireMessage>, reader: &dyn ImageReader) -> Result<(Vec<ChatMessage>, Vec<ImageBytes>), String> {
+/// text places them, and the behaviour log-probabilities each message carried.
+#[allow(clippy::type_complexity)]
+fn messages_from_wire_with(wire: Vec<WireMessage>, reader: &dyn ImageReader) -> Result<(Vec<ChatMessage>, Vec<ImageBytes>, Vec<Option<Vec<f32>>>), String> {
     let mut messages = Vec::with_capacity(wire.len());
+    let mut behavior = Vec::with_capacity(wire.len());
     let mut media = Vec::new();
 
     for (i, m) in wire.into_iter().enumerate() {
@@ -653,11 +720,17 @@ fn messages_from_wire_with(wire: Vec<WireMessage>, reader: &dyn ImageReader) -> 
             return Err(format!("messages[{i}]: a \"tool\"-role message must carry \"tool_call_id\""));
         }
 
+        let lps = match &m.behavior_logprobs {
+            Some(_) if !(matches!(m.role, WireRole::Assistant) && m.train) => return Err(format!("messages[{i}]: only a supervised \"assistant\" message carries \"behavior_logprobs\" (its \"train\" is true)")),
+            Some(values) => Some(chat_rollout::check_behavior_logprobs(values).map_err(|e| format!("messages[{i}]: {e}"))?),
+            None => None,
+        };
+        behavior.push(lps);
         let content = m.content.into_text(reader, m.train, &mut media).map_err(|e| format!("messages[{i}]: {e}"))?;
         messages.push(ChatMessage { role: role.to_string(), content, tool_calls, tool_call_id: m.tool_call_id, reasoning_content: m.reasoning_content, train: m.train });
     }
     check_tool_pairing(&messages)?;
-    Ok((messages, media))
+    Ok((messages, media, behavior))
 }
 
 /// The lengths of the runs of `token` in `ids`, in order: how many images a text places, and how many rows each takes.
@@ -872,15 +945,29 @@ const THINK_END: &str = "</think>";
 /// points no tokenizer maps and no template matches.
 const THINK_END_SENTINEL: &str = "\u{F8FF}brain-think-end\u{F8FF}";
 
+/// One sample encoded: its token ids, which of them are supervised, and the behaviour log-probability of each
+/// (NaN where none was recorded).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EncodedSample {
+    pub ids: Vec<u32>,
+    pub mask: Vec<bool>,
+    pub behavior: Vec<f32>,
+}
+
 /// A split's token stream, supervision mask and the start offset of each
 /// example in it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct EncodedSplit {
     pub ids: Vec<u32>,
     pub mask: Vec<bool>,
     pub starts: Vec<usize>,
     /// The images of each example, aligned with `starts` ([`crate::chat_media`]).
     pub media: Vec<Vec<ImageBytes>>,
+    /// The advantage of each example's rollout, aligned with `starts`; NaN for an imitation example
+    /// ([`crate::chat_rollout`]).
+    pub advantage: Vec<f32>,
+    /// The behaviour log-probability of each token, aligned with `ids`; NaN where none was recorded.
+    pub behavior: Vec<f32>,
 }
 
 impl EncodedSplit {
@@ -891,14 +978,25 @@ impl EncodedSplit {
 
     /// [`Self::push`] for an example that also reads `media`, in the order its text places them.
     pub fn push_with_media(&mut self, ids: &[u32], mask: &[bool], media: &[ImageBytes]) {
+        let behavior = vec![f32::NAN; ids.len()];
+        self.push_rollout(&EncodedSample { ids: ids.to_vec(), mask: mask.to_vec(), behavior }, media, None);
+    }
+
+    /// [`Self::push_with_media`] for an example of a rollout: its `advantage` and the behaviour log-probabilities
+    /// `encoded` carries.
+    pub fn push_rollout(&mut self, encoded: &EncodedSample, media: &[ImageBytes], advantage: Option<f32>) {
+        let EncodedSample { ids, mask, behavior } = encoded;
         assert_eq!(ids.len(), mask.len(), "EncodedSplit::push: ids and mask differ in length");
+        assert_eq!(ids.len(), behavior.len(), "EncodedSplit::push: ids and behaviour log-probabilities differ in length");
         if ids.is_empty() {
             return;
         }
         self.media.push(media.to_vec());
+        self.advantage.push(advantage.unwrap_or(f32::NAN));
         self.starts.push(self.ids.len());
         self.ids.extend_from_slice(ids);
         self.mask.extend_from_slice(mask);
+        self.behavior.extend_from_slice(behavior);
     }
 
     /// The longest example, in tokens.
@@ -911,8 +1009,8 @@ impl EncodedSplit {
 pub fn encode_sample_split(samples: &[ChatSample], tok: &dyn Tokenizer, tmpl: &ChatTemplate, opts: RenderOpts) -> Result<EncodedSplit, TemplateError> {
     let mut out = EncodedSplit::default();
     for s in samples {
-        let (i, m) = s.encode_with(tok, tmpl, opts)?;
-        out.push_with_media(&i, &m, &s.media);
+        let encoded = s.encode_rollout(tok, tmpl, opts)?;
+        out.push_rollout(&encoded, &s.media, s.rollout.as_ref().map(|r| r.advantage));
     }
     Ok(out)
 }
@@ -925,6 +1023,7 @@ pub fn write_split(dir: &Path, split: &str, data: &EncodedSplit) -> io::Result<(
     binio::write_mask_bin(&dir.join(format!("{split}.mask.bin")), &data.mask)?;
     let starts: Vec<u64> = data.starts.iter().map(|&s| s as u64).collect();
     binio::write_u64_bin(&dir.join(format!("{split}.ex.bin")), &starts)?;
+    chat_rollout::write(dir, split, &data.advantage, &data.behavior)?;
     crate::chat_media::write(dir, split, &data.media)
 }
 
@@ -1006,6 +1105,7 @@ mod tests {
             tools: Vec::new(),
             rendered: None,
             media: Vec::new(),
+            rollout: None,
         };
         let out = sample.answering_without_thinking("<think>\n\n</think>\n\n");
         let said: Vec<&str> = out.messages.iter().map(|m| m.content.as_str()).collect();
@@ -1070,6 +1170,7 @@ mod tests {
             tools: vec![crate::chat_template::parse_json_ordered(schema).unwrap()],
             rendered: None,
             media: Vec::new(),
+            rollout: None,
         };
         let served = [
             Served::user("Weather in Paris and Rome?"),
@@ -1115,6 +1216,7 @@ mod tests {
             tools: vec![crate::chat_template::parse_json_ordered(schema).unwrap()],
             rendered: None,
             media: Vec::new(),
+            rollout: None,
         };
         let served = [
             Served::user("Weather in Paris?"),
@@ -1301,7 +1403,7 @@ mod tests {
     #[test]
     fn a_tool_message_without_an_id_answers_the_next_unanswered_call_in_order() {
         let call = |id: &str| ToolCall { id: Some(id.into()), name: "f".into(), arguments: "{}".into() };
-        let sample = |messages| ChatSample { messages, tools: Vec::new(), rendered: None, media: Vec::new() };
+        let sample = |messages| ChatSample { messages, tools: Vec::new(), rendered: None, media: Vec::new(), rollout: None };
         let calls = ChatMessage::assistant_tool_calls("", vec![call("a"), call("b")], true);
         sample(vec![ChatMessage::user("q"), calls.clone(), ChatMessage::tool_result("1"), ChatMessage::tool_result("2")]).validate().expect("in order");
         let err = sample(vec![ChatMessage::user("q"), calls, ChatMessage::tool_result("1"), ChatMessage::tool_result("2"), ChatMessage::tool_result("3")]).validate().unwrap_err();
