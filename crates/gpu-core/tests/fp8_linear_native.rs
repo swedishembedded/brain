@@ -244,6 +244,41 @@ fn fp8_qkvz_one_product_against_two() {
     }
 }
 
+/// Every FP8 candidate at the widths of one tuning class (`#[ignore]`: a measurement). The tuned table names ONE winner for a
+/// class of `K` and weight bytes, timed at one representative width; the widths a model serves inside the class can rank the
+/// candidates differently, and this lists the ranking at each.
+///
+/// ```text
+/// make test/one P=brain-gpu-core T=fp8_linear_native ARGS="--ignored --nocapture fp8_class_widths"
+/// ```
+#[test]
+#[ignore]
+fn fp8_class_widths() {
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda_hopper(&gpu) {
+        brain_testutil::skip_unavailable("the FP8 candidates are registered for a CUDA device with warpgroup tensor cores");
+        return;
+    }
+    gpu.prepare_fp8_linear();
+    for line in gpu_core::native_selection_report().lines().filter(|l| l.starts_with("matmul_fp8_native") && l.contains("5120")) {
+        println!("tuned: {}", line.chars().take(110).collect::<String>());
+    }
+    for m in [16u32, 32, 64] {
+        for n in [10240u32, 12288, 16384, 17408] {
+            let mut timed: Vec<(f64, String)> = gpu_core::native_time_fp8_shape(&gpu, [m, 5120 / 4, n])
+                .into_iter()
+                .filter_map(|(name, v)| match v {
+                    NativeVerdict::Timed { us, .. } => Some((us, name)),
+                    NativeVerdict::Rejected(_) => None,
+                })
+                .collect();
+            timed.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let top: Vec<String> = timed.iter().take(4).map(|(us, name)| format!("{name} {us:.1}")).collect();
+            println!("m={m:<3} n={n:<6} {}", top.join(" | "));
+        }
+    }
+}
+
 /// Tensor-core rate (TFLOPS) of the persistent TMA candidates at the production prefill shapes (`#[ignore]`: a measurement).
 ///
 /// ```text

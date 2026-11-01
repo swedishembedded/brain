@@ -63,9 +63,9 @@ struct Grid {
     open_top: bool,
     k: [u32; 2],
     /// Upper bound (exclusive) of the weight-bytes classes, in bytes; the last class is unbounded.
-    bytes_bounds: [u64; 3],
+    bytes_bounds: &'static [u64],
     /// Output columns timed for each bytes class at each `K` class.
-    n_reps: [[u32; 4]; 2],
+    n_reps: [&'static [u32]; 2],
     /// Distinct weight bytes cycled per timing of a streaming class, so the weights come from memory and not from the
     /// L2.
     footprint_bytes: u64,
@@ -91,8 +91,8 @@ const DECODE: Grid = Grid {
     rows: &[(1, 1), (2, 2), (3, 4), (5, 8), (9, 16), (17, 24), (25, 32)],
     open_top: false,
     k: [5120, 17408],
-    bytes_bounds: [3 << 20, 12 << 20, 48 << 20],
-    n_reps: [[256, 1024, 4096, 16384], [64, 256, 1024, 4096]],
+    bytes_bounds: &[3 << 20, 12 << 20, 48 << 20],
+    n_reps: [&[256, 1024, 4096, 16384], &[64, 256, 1024, 4096]],
     footprint_bytes: 192 << 20,
     stream_max_rows: u32::MAX,
     fp8: false,
@@ -105,8 +105,8 @@ const PREFILL: Grid = Grid {
     rows: &[(33, 48), (49, 64), (65, 96), (97, 128), (129, 256), (257, 512), (513, 1024), (1025, 4096)],
     open_top: true,
     k: [5120, 17408],
-    bytes_bounds: [20 << 20, 45 << 20, 80 << 20],
-    n_reps: [[2048, 5120, 10240, 17408], [512, 1536, 3072, 5120]],
+    bytes_bounds: &[20 << 20, 45 << 20, 80 << 20],
+    n_reps: [&[2048, 5120, 10240, 17408], &[512, 1536, 3072, 5120]],
     footprint_bytes: 192 << 20,
     stream_max_rows: 128,
     fp8: false,
@@ -114,15 +114,18 @@ const PREFILL: Grid = Grid {
 
 /// The FP8 linear, every row count: the streaming classes of the decode steps of any batch up to 128 rows (the weights are
 /// read once for all of them) and the compute-bound rounds past it. A class is timed at a width inside its bytes range near
-/// where the products of the large models fall (6, 35, 71 and 200 MB at the narrow `K`, 5, 40, 100 and 321 MB at the wide
-/// one): the winner of a streaming class flips with the width (at 16 rows the tensor-map swap GEMM beats the GEMVs on a
-/// 200 MB product and loses on an 84 MB one), so a representative far from the served widths picks for shapes no model runs.
+/// where the products of the large models fall (6, 35, 71, 100 and 200 MB at the narrow `K`, 5, 40, 60, 100 and 321 MB at the
+/// wide one): the winner of a streaming class flips with the width (at 16 rows the tensor-map swap GEMM beats the GEMVs on a
+/// 200 MB product and loses on an 84 MB one; between a 10240-row and a 17408-row product of `K` = 5120 the ranking of the
+/// first four candidates reorders twice), so a representative far from the served widths picks for shapes no model runs. The
+/// split at 80 MB puts the fused `qkv | z` product (16384 rows) and the MLP's gate and up (17408) on one representative
+/// and the 12288-row query projection on another.
 const FP8: Grid = Grid {
     rows: &[(1, 1), (2, 2), (3, 4), (5, 8), (9, 16), (17, 32), (33, 64), (65, 128), (129, 256), (257, 512), (513, 1024), (1025, 4096)],
     open_top: true,
     k: [5120, 17408],
-    bytes_bounds: [8 << 20, 48 << 20, 128 << 20],
-    n_reps: [[1024, 6144, 12288, 34816], [256, 2048, 5120, 16384]],
+    bytes_bounds: &[8 << 20, 48 << 20, 80 << 20, 128 << 20],
+    n_reps: [&[1024, 6144, 12288, 17408, 34816], &[256, 2048, 3072, 5120, 16384]],
     footprint_bytes: 192 << 20,
     stream_max_rows: 128,
     fp8: true,
@@ -142,8 +145,10 @@ fn grid(slot: &str) -> &'static Grid {
 const TRIALS: usize = 3;
 /// Launches timed per candidate at least, so a class with one weight copy still has several to take the minimum of.
 const MIN_LAUNCHES: usize = 6;
-/// Wall time one device's tuning may take; classes not reached keep their default candidate until a rebuild retunes.
-const BUDGET: std::time::Duration = std::time::Duration::from_secs(40);
+/// Wall time one device's tuning may take; classes not reached keep their default candidate until a rebuild retunes. The
+/// FP8 grid's 120 classes take about 37 s on a Hopper card (96 classes took 29 s): the budget leaves the table room to
+/// finish on a card that is slower or shared.
+const BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The read-bandwidth probe: every thread streams 16-byte vectors with the loads a decode GEMV issues (L1
 /// no-allocate) and folds them, so the number is the read roof of the access type the candidates are graded on.
@@ -1327,6 +1332,22 @@ mod tests {
                 let (m, kg, n) = c.problem(g);
                 assert_eq!(Class::of(g, m, kg, n), Some(c), "{}: the problem timed for a class falls in that class", c.label(g));
             }
+        }
+    }
+
+    /// The products of the 27B model's decode step that stream the most weight bytes are tuned on a representative of their
+    /// own width: the fused `qkv | z` projection (16384 rows) shares the class of the MLP's gate and up (17408 rows) and
+    /// is timed at the width of the latter, while the 12288-row query projection and the 10240-row `in_proj_qkv` of a
+    /// prefill window keep a class timed at their own width. The ranking of the candidates reorders between those widths.
+    #[test]
+    fn the_fp8_grid_tunes_the_fused_projection_and_the_mlp_on_their_own_width() {
+        for m in [1u32, 8, 16, 32, 64, 128] {
+            let class = |n: u32| Class::of(&FP8, m, 1280, n).expect("an FP8 decode shape has a class");
+            assert_eq!(class(16384), class(17408), "m={m}: the fused qkv|z product and the MLP's gate share a class");
+            assert_eq!(class(17408).bytes, FP8.bytes_bounds.len() - 1, "m={m}: below the class of the widest products");
+            assert_eq!(FP8.n_reps[0][class(17408).bytes], 17408, "m={m}: the class is timed at the MLP's width");
+            assert_ne!(class(12288), class(16384), "m={m}: the query projection is timed at its own width");
+            assert_eq!(class(10240), class(12288), "m={m}: the 10240-row projection takes the nearer representative");
         }
     }
 
