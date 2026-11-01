@@ -225,7 +225,11 @@ back 1.3 ms. A pool pays this once per block (freed blocks stay backed) and once
 
 ## Done
 
-- 2026-11-01 (unified state pool, knowledge 424): `--max-batch` slots no longer reserve a recurrent-state row; see the section above. Pool tokens bf16/f32 749568 with none running (622592 before), 746496 .. 602112 from 1 to 64 running; fp8/bf16 1294336 (1187840). Served A/B below when measured.
+- 2026-11-01 (unified state pool, knowledge 424): `--max-batch` slots no longer reserve a recurrent-state row; see the section above. Pool tokens bf16/f32 749568 with none running (622592 before), 746496 .. 602112 from 1 to 64 running; fp8/bf16 1294336 (1187840). Served (`matrix.sh` gpu1, SPEC=off, 256 new tokens, base 76243a969 then unified, two interleaved rounds), bf16 KV / f32 state, mean TTFT s / output tok/s, base r1 r2 -> unified r1 r2:
+  65536x16 52.2 52.6 -> 45.9 46.2 (-12 %), tok/s 39.2 38.9 -> 39.2 38.9; 32768x64 128.6 129.1 -> 109.5 110.4 (-15 %), 75.9 75.5 -> 87.8 87.0 (+15 %); 16384x64 40.9 41.1 -> 38.4 39.0 (-6 %), 177.5 176.8 -> 183.0 180.3;
+  8192x64 tok/s 368.2 369.1 -> 363.0 357.9 (-1.5 to -3 %, the pool holds 602K tokens with 64 running against 623K: workspace grows with the pool and the conv history stays dense); 8192x1 74.1 -> 74.0. fp8 KV / bf16 state 65536x16 TTFT 29.4 29.8 -> 29.8 29.9 and
+  16384x64 21.1 21.2 -> 21.1 21.1: flat (the pool was not the limit there). vLLM: 30.7 s and 25.5 s. Open: the conv history (0.4 GB) is dense; a released state row is unmapped at once (a lazy retention would save the 1.3 ms a block of churn);
+  the mapping cost (1.8 ms a block, once) is in the first cells; multi-card plans keep the static layout; prefix reuse is in 1024-row blocks.
 - 2026-10-29 (step plan, increment A; knowledge 381): eager batches upload their kernel parameters with one copy instead of one in front of
   every kernel (nsys: 14 us of card idle per kernel), and the prefill/mixed layer loop issues one batch per layer. FP8 27B output tok/s at
   1 / 4 / 16 / 64: 47 / 192 / 291 / 384 -> 49 / 200 / 340 / 460, card busy 66 -> 79 % of a mixed iteration; parity unchanged.
