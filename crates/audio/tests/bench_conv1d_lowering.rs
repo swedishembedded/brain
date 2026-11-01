@@ -140,7 +140,7 @@ fn sweep(label: &str, g: &Gpu, transposed: bool, shape: impl Fn(u32) -> Conv1d) 
         };
         // Below `GEMM_CONV1D_MIN_COUT` the selector answers "direct" for both
         // columns, which reads as a meaningless 1.0x - run this sweep with
-        // `BRAIN_CONV1D_GEMM=force` to see the sub-threshold side, which is
+        // `gpu_core::select::set_conv1d_gemm(Some(true))` set first to see the sub-threshold side, which is
         // the half that says where the crossover actually is.
         let t_lowered = best_ms(g, &l);
         let got_lowered = g.read(&o.y, o.want.len());

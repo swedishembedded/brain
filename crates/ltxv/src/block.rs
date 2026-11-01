@@ -2102,7 +2102,7 @@ fn mlp_sublayer_q(gpu: &Gpu, s: &mut Vec<Step>, w: &QFfWeights, tier: QTier, one
 /// per block.
 ///
 /// On by default. `BRAIN_LTXV_NO_SCRATCH_POOL=1` is the opt-out, and it exists
-/// for the same reason `BRAIN_NO_COOP_LN` does: without a force switch the two
+/// for the same reason `--no-coop-ln` does: without a force switch the two
 /// arms cannot be A/B'd in one binary, and a comparison that can only run the
 /// shipped path confirms whatever was written. The arms must agree BIT for
 /// bit - the arena changes when device memory is allocated, never what any

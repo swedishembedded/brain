@@ -707,9 +707,32 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
                 }
             }
             i += 2;
+        } else if argv[i] == "--no-coop-ln" {
+            // LayerNorm stays on the per-element kernels: the cooperative variant's A/B switch.
+            gpu_core::select::set_coop_layernorm(false);
+            i += 1;
+        } else if argv[i] == "--no-coop-gradnorm" {
+            // The optimiser's grad-norm stays single-threaded: the cooperative reduction's A/B switch.
+            gpu_core::select::set_coop_gradnorm(false);
+            i += 1;
+        } else if argv[i] == "--conv1d-gemm" {
+            // `auto` (the measured threshold), `off` (the direct 1D convolutions) or `force` (the GEMM lowering below it).
+            let pin = match argv.get(i + 1).map(String::as_str) {
+                Some("auto") => None,
+                Some("off") => Some(false),
+                Some("force") => Some(true),
+                _ => {
+                    eprintln!("brain: --conv1d-gemm takes auto, off or force");
+                    std::process::exit(2);
+                }
+            };
+            gpu_core::select::set_conv1d_gemm(pin);
+            i += 2;
         } else if argv[i] == "--no-autotune" {
-            // Every kernel slot keeps its default candidate: reproducible benchmarking and A/B runs.
+            // Every kernel slot keeps its default candidate and the selector its static policy: reproducible benchmarking
+            // and A/B runs.
             gpu_core::set_native_autotune(false);
+            gpu_core::select::set_autotune(false);
             i += 1;
         } else if argv[i] == "--kernel" {
             // `--kernel <slot>=<candidate>` pins one kernel slot to one of its candidates (repeatable), wherever the

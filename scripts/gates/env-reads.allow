@@ -10,10 +10,6 @@ crates/backend-api/src/lib.rs	BRAIN_PIPELINE_CACHE_DIR
 crates/backend-api/src/lib.rs	BRAIN_PROFILE
 crates/backend-api/src/lib.rs	HOME
 crates/backend-api/src/lib.rs	XDG_CACHE_HOME
-crates/backend-api/src/select.rs	BRAIN_CONV1D_GEMM
-crates/backend-api/src/select.rs	BRAIN_NO_AUTOTUNE
-crates/backend-api/src/select.rs	BRAIN_NO_COOP_GRADNORM
-crates/backend-api/src/select.rs	BRAIN_NO_COOP_LN
 crates/backend-cpu/src/fast_conv.rs	BRAIN_WINOGRAD
 crates/backend-cpu/src/lib.rs	BRAIN_NO_FASTCONV
 crates/backend-cuda/src/aot.rs	<ENV_DIR>

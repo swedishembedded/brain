@@ -694,7 +694,7 @@ pub fn enumerate_physical_gpus() -> Result<Vec<backend_api::GpuIdentity>, String
 /// `BRAIN_VK_SERIAL=1` forces the Intel-ANV per-dispatch serialize workaround
 /// (`VulkanBackend::flush`) everywhere, for diagnosis. Resolved once per
 /// process via a `OnceLock`, matching `backend_api::select`'s
-/// `BRAIN_NO_COOP_LN`/`BRAIN_NO_COOP_GRADNORM` convention - previously
+/// `--no-coop-ln`/`--no-coop-gradnorm` convention - previously
 /// re-read from the environment on every single `flush()` call.
 fn vk_serial_forced() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

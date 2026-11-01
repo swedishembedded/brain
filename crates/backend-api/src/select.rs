@@ -27,6 +27,7 @@
 //! [`DeviceCaps`](crate::DeviceCaps), never from backend names.
 
 use crate::DeviceCaps;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 /// One logical operation, independent of how it is implemented.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -640,7 +641,7 @@ pub const GEMM_TILE_MIN_COLS: u32 = 128;
 /// Swept by `crates/audio/tests/bench_conv1d_lowering.rs` (`--ignored`), best
 /// of 5, warm-up excluded, box otherwise idle; that test is what to re-run on
 /// another card. `lowered` is the WHOLE lowering including its im2col and
-/// epilogue passes. The sub-threshold half needs `BRAIN_CONV1D_GEMM=force`:
+/// epilogue passes. The sub-threshold half needs `set_conv1d_gemm(Some(true))` (`--conv1d-gemm force`):
 /// without it the selector answers "direct" for both columns and the ratio
 /// reads a meaningless dead heat, which is how a threshold gets "confirmed"
 /// by a measurement that never tested it.
@@ -762,42 +763,62 @@ pub const GEMM_CONV3D_MIN_POS: u32 = 128;
 /// own `GEMM_CONV_BWD_MIN_COUT` constant of the same value.
 pub const GEMM_CONV_BWD_MIN_COUT: u32 = 32;
 
-/// `BRAIN_NO_COOP_LN=1` pins LayerNorm to the per-element kernels — the A/B
-/// switch the end-to-end speedup was measured with, and the fallback if a
-/// driver ever mishandles the cooperative variant. Read once (the policy must
-/// stay a pure function of its inputs for a given process).
+static NO_COOP_LAYERNORM: AtomicBool = AtomicBool::new(false);
+static NO_COOP_GRADNORM: AtomicBool = AtomicBool::new(false);
+/// 0: the measured threshold decides; 1: the direct kernels; 2: the GEMM lowering.
+static CONV1D_GEMM: AtomicU8 = AtomicU8::new(0);
+static NO_AUTOTUNE: AtomicBool = AtomicBool::new(false);
+
+/// Whether LayerNorm may take the cooperative kernels (`true`, the default) or stays on the per-element ones (`false`;
+/// the CLI's `--no-coop-ln`): the A/B switch the end-to-end speedup was measured with, and the fallback if a driver ever
+/// mishandles the cooperative variant. The application sets the selection switches before it builds devices and leaves
+/// them: the policy must stay a pure function of its inputs for a given process. None is read from the environment.
+pub fn set_coop_layernorm(on: bool) {
+    NO_COOP_LAYERNORM.store(!on, Ordering::Relaxed);
+}
+
+/// Whether the optimiser's grad-norm may take the cooperative reduction (`true`, the default) or the single-threaded
+/// `gradnorm_sq` (`false`; `--no-coop-gradnorm`): the A/B switch the speedup and the trajectory-equivalence run were
+/// measured with.
+pub fn set_coop_gradnorm(on: bool) {
+    NO_COOP_GRADNORM.store(!on, Ordering::Relaxed);
+}
+
+/// Pin [`Op::Conv1d`]/[`Op::ConvTranspose1d`] to one side (`--conv1d-gemm auto|off|force`): `Some(false)` the direct
+/// kernels, `Some(true)` the GEMM lowering even below [`GEMM_CONV1D_MIN_COUT`], `None` the threshold decides. The A/B
+/// switch that threshold was measured with - without it a sweep cannot see below the threshold at all - and the fallback
+/// if a driver ever mishandles the register-tiled GEMMs.
+pub fn set_conv1d_gemm(pin: Option<bool>) {
+    CONV1D_GEMM.store(
+        match pin {
+            None => 0,
+            Some(false) => 1,
+            Some(true) => 2,
+        },
+        Ordering::Relaxed,
+    );
+}
+
+/// Whether an [`AutoTuner`] built after this measures (`true`, the default) or answers with the static policy (`false`;
+/// the CLI's `--no-autotune`).
+pub fn set_autotune(on: bool) {
+    NO_AUTOTUNE.store(!on, Ordering::Relaxed);
+}
+
 fn no_coop_layernorm() -> bool {
-    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("BRAIN_NO_COOP_LN").map(|v| v != "0").unwrap_or(false))
+    NO_COOP_LAYERNORM.load(Ordering::Relaxed)
 }
 
-/// `BRAIN_CONV1D_GEMM` pins [`Op::Conv1d`]/[`Op::ConvTranspose1d`] to one
-/// side: `0` to the direct kernels, `force` to the GEMM lowering even below
-/// [`GEMM_CONV1D_MIN_COUT`].
-///
-/// This is the A/B switch that threshold was measured with - without it a
-/// sweep cannot see below the threshold at all, because the selector answers
-/// "direct" on both sides and the ratio reads a meaningless dead heat. It is
-/// also
-/// the fallback if a driver ever mishandles the register-tiled GEMMs. Read
-/// once (the policy must stay a pure function of its inputs for a given
-/// process).
 fn conv1d_gemm_override() -> Option<bool> {
-    static V: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
-    *V.get_or_init(|| match std::env::var("BRAIN_CONV1D_GEMM").ok()?.as_str() {
-        "0" | "off" => Some(false),
-        "1" | "force" => Some(true),
+    match CONV1D_GEMM.load(Ordering::Relaxed) {
+        1 => Some(false),
+        2 => Some(true),
         _ => None,
-    })
+    }
 }
 
-/// `BRAIN_NO_COOP_GRADNORM=1` pins the optimiser's grad-norm to the
-/// single-threaded `gradnorm_sq` — the A/B switch the speedup and the
-/// trajectory-equivalence run were measured with, and the fallback if a driver
-/// ever mishandles the cooperative reduction. Read once (see above).
 fn no_coop_gradnorm() -> bool {
-    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("BRAIN_NO_COOP_GRADNORM").map(|v| v != "0").unwrap_or(false))
+    NO_COOP_GRADNORM.load(Ordering::Relaxed)
 }
 
 /// Every variant that can EXECUTE for `(op, shape)` on this device, with the
@@ -1439,8 +1460,8 @@ pub trait TuneStore: Send + Sync {
 /// measures — each candidate once via the caller's closure (the caller owns
 /// dispatch; this type owns policy). The winner is remembered and persisted.
 /// A measurement that fails (`None`) removes that candidate from contention;
-/// if nothing measures, the static best guess stands. `BRAIN_NO_AUTOTUNE=1`
-/// (read once at construction) forces the static selector everywhere — what
+/// if nothing measures, the static best guess stands. [`set_autotune`]`(false)`
+/// (`--no-autotune`, taken at construction) forces the static selector everywhere - what
 /// CI and reproducible benchmarking use, so an autotuned result can never make
 /// a benchmark unreproducible. A persisted value that is not among today's
 /// candidates is IGNORED, never trusted — the stale-cache rule.
@@ -1458,7 +1479,7 @@ pub struct AutoTuner {
 
 impl AutoTuner {
     pub fn new(store: Option<Box<dyn TuneStore>>) -> AutoTuner {
-        let enabled = std::env::var("BRAIN_NO_AUTOTUNE").map(|v| v == "0").unwrap_or(true);
+        let enabled = !NO_AUTOTUNE.load(Ordering::Relaxed);
         AutoTuner { enabled, store, memo: Default::default(), schedule_memo: Default::default() }
     }
 

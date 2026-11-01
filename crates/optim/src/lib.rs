@@ -500,7 +500,7 @@ impl Optim {
     /// churn across the ~15 crates that construct one, and a model that has not
     /// adopted them still runs. Policy comes from `backend_api::select` so the
     /// capability gate (the CPU JIT cannot execute the barrier) and the
-    /// `BRAIN_NO_COOP_GRADNORM` A/B switch live in one place.
+    /// `--no-coop-gradnorm` A/B switch (`select::set_coop_gradnorm`) live in one place.
     fn coop_gradnorm(&self, gpu: &Gpu) -> Option<(usize, usize)> {
         use gpu_core::select::{candidates, Dtype, Op, OpShape};
         let caps = gpu.caps();

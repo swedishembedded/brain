@@ -1130,7 +1130,7 @@ And two more, from porting the 2D conv-as-GEMM lowering down to 1D:
   you wrote.** Once the selector is wired, both columns of the A/B return the
   *same* path below the threshold and the ratio reads a meaningless 1.00x -
   which looks like evidence and is not. Ship the force switch with the
-  threshold (`BRAIN_CONV1D_GEMM=force`, the same shape as `BRAIN_NO_COOP_LN`)
+  threshold (`--conv1d-gemm force`, the same shape as `--no-coop-ln`)
   and sweep through it.
 
 ### F.7 Put the fix in the SELECTOR, so the next model inherits it

@@ -2078,7 +2078,7 @@ impl Engine {
     /// and row bucket on THIS device (S5). Both candidates are dispatched on
     /// the engine's real buffers - REPS dispatches per timing so submit/poll
     /// overhead amortises - and the winner persists per adapter + kernel
-    /// sources. `BRAIN_NO_AUTOTUNE=1` skips every measurement (static policy).
+    /// sources. `brain --no-autotune` skips every measurement (static policy).
     fn tune_i8(gpu: &Gpu, caps: &DeviceCaps, weights: &HashMap<String, Weight>, scratch: &I8Scratch, max_rows: u32) -> HashMap<(u32, u32, u32), KernelVariant> {
         let fp = gpu_core::tune::source_fingerprint(&[kernels::MATMUL_I8_GEMV, kernels::MATMUL_I8_DYN, &I8_TILE_TN.to_string()]);
         let store = gpu_core::tune::FileTuneStore::for_adapter(fp)
