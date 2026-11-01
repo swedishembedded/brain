@@ -181,6 +181,8 @@ navigation:
         path: examples/learning/rlcd.md
       - source: samples/learning/visualclick/README.md
         path: examples/learning/visualclick.md
+      - source: samples/npu/rockchip/README.md
+        path: examples/npu/rockchip.md
       - source: samples/python/api/deepseek-chat/README.md
         path: examples/python/api/deepseek-chat.md
       - source: samples/python/api/fim-completion/README.md
