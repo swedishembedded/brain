@@ -1473,21 +1473,32 @@ impl Ops {
     /// An FP8-weight product (E4M3 bytes with the checkpoint's 128 x 128 block scales, held as stored) on the native
     /// candidate this device's tuned table names for its shape class: the weight bytes are decoded in registers or shared
     /// memory against the bf16 rows of `act` (rounded once, shared by every product that reads them) and the sum is f32
-    /// across all of K, with one scale per 128 of K. `false` leaves the product to the tile decode. Only whole matrices.
+    /// across all of K, with one scale per 128 of K. `false` leaves the product to the tile decode.
+    ///
+    /// `rows = (first, count)` is a window of the weight's rows: `first` a whole number of scale blocks (so the window's
+    /// scales are a row range of the scale plane and the window is a weight of its own), `count` whole blocks or the
+    /// weight's ragged tail. The candidate is the one the tuned table names for the WINDOW's shape, bound to the window's
+    /// bytes, so a window computes what the same rows held as a separate weight compute, bit for bit.
     fn fp8_forward(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), act: &Act, y: &DeviceBuffer, yoff: u64, out_precision: ActPrecision) -> bool {
-        let Weight::FP8 { w: wb, s: sb, n, k, fmt: crate::fp8::Fp8Format::E4M3, block } = w else { return false };
-        let (m, n, k) = (act.m, *n, *k);
-        if *block != FP8_BLOCK || rows != (0, n) || !k.is_multiple_of(FP8_BLOCK) || !self.providers.runs("cuda") || !self.gpu.has_fp8_linear() {
+        let Weight::FP8 { w: wb, s: sb, n: weight_n, k, fmt: crate::fp8::Fp8Format::E4M3, block } = w else { return false };
+        let (first, count) = rows;
+        let (m, k) = (act.m, *k);
+        let aligned = first.is_multiple_of(FP8_BLOCK) && (count.is_multiple_of(FP8_BLOCK) || first + count == *weight_n);
+        if *block != FP8_BLOCK || !aligned || !k.is_multiple_of(FP8_BLOCK) || !self.providers.runs("cuda") || !self.gpu.has_fp8_linear() {
             return false;
         }
-        let params = [m, k / 4, n];
+        let params = [m, k / 4, count];
         let Some(form) = self.gpu.fp8_linear_act(&params) else { return false };
-        let out = (yoff, m as u64 * n as u64 / u64::from(4 / out_precision.bytes()));
+        let out = (yoff, m as u64 * count as u64 / u64::from(4 / out_precision.bytes()));
+        // The window's bytes (four to a word) and its scales (one word per 128 x 128 block, a block row of `k / 128`).
+        let blocks_per_row = u64::from(k / FP8_BLOCK);
+        let weight_window = if rows == (0, *weight_n) { WHOLE } else { (u64::from(first) * u64::from(k) / 4, u64::from(count) * u64::from(k) / 4) };
+        let scale_window = if rows == (0, *weight_n) { WHOLE } else { (u64::from(first / FP8_BLOCK) * blocks_per_row, u64::from(count.div_ceil(FP8_BLOCK)) * blocks_per_row) };
         let mut prep = Vec::new();
         let step = match form {
             Fp8Act::Bf16 => {
                 let Some((xb, fresh)) = self.bf16_rows(act, &mut prep) else { return false };
-                let Some((step, _)) = self.gpu.fp8_linear_step(form, out_precision, &[&xb, wb, sb, y], &[(0, 0), (0, 0), (0, 0), out], &params) else { return false };
+                let Some((step, _)) = self.gpu.fp8_linear_step(form, out_precision, &[&xb, wb, sb, y], &[WHOLE, weight_window, scale_window, out], &params) else { return false };
                 if fresh {
                     *act.bf16.borrow_mut() = Some(xb);
                 }
@@ -1503,7 +1514,7 @@ impl Ops {
                         (xq, sx, true)
                     }
                 };
-                let Some((step, _)) = self.gpu.fp8_linear_step(form, out_precision, &[&xq, wb, &sx, sb, y], &[(0, 0), (0, 0), (0, 0), (0, 0), out], &params) else { return false };
+                let Some((step, _)) = self.gpu.fp8_linear_step(form, out_precision, &[&xq, wb, &sx, sb, y], &[WHOLE, weight_window, WHOLE, scale_window, out], &params) else { return false };
                 if fresh {
                     *act.e4m3.borrow_mut() = Some((xq, sx));
                 }
@@ -1829,8 +1840,22 @@ impl Ops {
     /// it once. `false` (nothing pushed) when the chosen candidate has no bf16-output form - the weight is not FP8, the
     /// shape is a decode-regime GEMV, `n` is odd - and the caller keeps [`Self::matmul`] and its f32 output.
     pub fn matmul_bf16_out(&self, s: &mut Vec<Step>, w: &Weight, act: &Act, y: &DeviceBuffer) -> bool {
-        assert_eq!(act.k, w.k(), "Ops::matmul_bf16_out: activation width {} does not match weight K {}", act.k, w.k());
-        self.fp8_forward(s, w, (0, w.n()), act, y, 0, ActPrecision::Bf16)
+        self.matmul_rows_bf16_out(s, w, (0, w.n()), act, y)
+    }
+
+    /// [`Self::matmul_bf16_out`] for the row window `rows = (first, count)` of `w` (see [`Self::fp8_forward`] for the
+    /// window's alignment): `y` holds the window's `[m, count]` bf16 rows.
+    pub fn matmul_rows_bf16_out(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), act: &Act, y: &DeviceBuffer) -> bool {
+        assert_eq!(act.k, w.k(), "Ops::matmul_rows_bf16_out: activation width {} does not match weight K {}", act.k, w.k());
+        let (first, count) = rows;
+        assert!(count > 0 && u64::from(first) + u64::from(count) <= u64::from(w.n()), "Ops::matmul_rows_bf16_out: rows {first}+{count} outside the {} rows of the weight", w.n());
+        self.fp8_forward(s, w, rows, act, y, 0, ActPrecision::Bf16)
+    }
+
+    /// Whether FP8-weight products run on the native candidates on this device, which is what lets a row window of an FP8
+    /// weight stand for a weight of its own ([`Self::matmul_rows`]).
+    pub fn fp8_windows_native(&self) -> bool {
+        self.providers.runs("cuda") && self.gpu.has_fp8_linear()
     }
 
     /// Dispatch invocation count for `(variant, dtype, m, n)` - the same
