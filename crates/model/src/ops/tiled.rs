@@ -208,11 +208,11 @@ pub const GEMV_MAX_ROWS: u32 = 8;
 /// the weight once for all of the rows. A recording that holds no library product has no such tile product, so there the
 /// GEMVs serve up to [`GEMV_MAX_ROWS`].
 const LIBRARY_GEMV_MAX_ROWS: u32 = 2;
-/// The NVFP4 GEMV's row cap where the tensor-core product ([`Ops::nvfp4_mma`]) is offered: the register-blocked GEMV reads
-/// the stored bytes once at one and two rows (37 and 70 us at 17408 x 5120), and from three rows the tensor-core product takes
-/// over (58 us at eight rows where the GEMV takes 186, and the vendor library's tile product 215; measured in
-/// `model/tests/qops_nvfp4_dense_shapes.rs`).
-const NVFP4_GEMV_MAX_ROWS_WITH_MMA: u32 = 2;
+/// The NVFP4 GEMV's row cap where the tensor-core product ([`Ops::nvfp4_mma`]) is offered: the register-blocked GEMV reads the
+/// stored bytes once and takes 38 us for the decode token (17408 x 5120), the tensor-core product 55 us; from two rows the
+/// product is faster (55 us against the GEMV's 70, and 56 us at eight rows where the GEMV takes 186 and the vendor library's
+/// tile product 215; measured in `model/tests/qops_nvfp4_dense_shapes.rs`).
+const NVFP4_GEMV_MAX_ROWS_WITH_MMA: u32 = 1;
 /// The NVFP4 GEMV's row cap with the library present and no tensor-core product: the tile product first writes the whole weight
 /// as bf16 (3.6 times the stored bytes) and reads it back, 215 us per 17408 x 5120 projection at every row count up to 256; the
 /// staged GEMV takes 93 us at four rows and loses at eight.
