@@ -33,6 +33,12 @@
 // range lines up exactly, so the code decodes by two masks and a shift and the factor folds into one multiply at the
 // end), and reduces the 16 lanes of a row with warp shuffles.
 //
+// The NVFP4 builds for one and two activation rows (`_m1`, `_m2`, the decode token and its neighbour) are register blocked: a
+// warp owns four consecutive weight rows and a lane dots one activation chunk against the chunks of all four. A chunk holds
+// 32 weights in 16 bytes against 128 bytes of f32 activations, so the unblocked kernel read eight activation bytes per
+// weight byte and sat on the L1 (97 % busy at 10 % of the DRAM rate, measured with ncu on the 5120 x 17408 projection);
+// blocking cuts that to two, and a warp (not a half warp) per group keeps a short weight on every SM.
+//
 // Numerics: each lane accumulates its chunks in ascending order into f32 with fused multiply-adds and the 16 lanes are
 // folded by a butterfly, so the sum is not the WGSL tier's order; the result agrees with it to f32 rounding of the
 // running sum (the gate holds both to an f64 oracle). The decode itself is exact.
@@ -400,49 +406,107 @@ __device__ __forceinline__ void brain_matmul_nvfp4_gemv_staged(const unsigned in
     }
 }
 
+// A decoded 32-weight chunk (`sw16` as in `brain_fp4_dot32`) against activations already in registers.
+__device__ __forceinline__ float brain_fp4_dot32_reg(const float* wf, const unsigned int sw16, const float4* xv) {
+    const float s0 = brain_qg_e4m3_scale(sw16 & 0xFFu);
+    const float s1 = brain_qg_e4m3_scale((sw16 >> 8) & 0xFFu);
+    float b0 = 0.0f, b1 = 0.0f;
+#pragma unroll
+    for (int t = 0; t < 4; ++t) {
+        b0 = fmaf(wf[4 * t + 0], xv[t].x, b0);
+        b0 = fmaf(wf[4 * t + 1], xv[t].y, b0);
+        b0 = fmaf(wf[4 * t + 2], xv[t].z, b0);
+        b0 = fmaf(wf[4 * t + 3], xv[t].w, b0);
+    }
+#pragma unroll
+    for (int t = 0; t < 4; ++t) {
+        b1 = fmaf(wf[16 + 4 * t + 0], xv[4 + t].x, b1);
+        b1 = fmaf(wf[16 + 4 * t + 1], xv[4 + t].y, b1);
+        b1 = fmaf(wf[16 + 4 * t + 2], xv[4 + t].z, b1);
+        b1 = fmaf(wf[16 + 4 * t + 3], xv[4 + t].w, b1);
+    }
+    return fmaf(b1, s1, b0 * s0);
+}
+
+// Weight rows one lane group (a half warp) covers in the register-blocked builds: the activations of a chunk are loaded
+// once and dotted against this many rows' weight chunks, so the activation bytes read per weight byte fall by this
+// factor. An NVFP4 chunk is 32 weights in 16 bytes against 128 bytes of f32 activations: unblocked, a half warp reads
+// eight activation bytes per weight byte and the L1 is the bottleneck (measured 97 % busy at 10 % of the DRAM rate).
+#define BRAIN_FP4_RT 4
+// Lanes per weight row group in those builds: a whole warp, so a short weight (5120 rows) still fills the device.
+#define BRAIN_FP4_LANES 32
+// Weight rows one block covers in those builds.
+#define BRAIN_FP4_RT_COLS ((BRAIN_QG_THREADS / BRAIN_FP4_LANES) * BRAIN_FP4_RT)
+
+// The 32 lanes of a warp summed; every lane holds the total.
+__device__ __forceinline__ float brain_fp4_warp_sum(float v) {
+#pragma unroll
+    for (int off = BRAIN_FP4_LANES / 2; off > 0; off >>= 1) { v += __shfl_xor_sync(0xffffffffu, v, off, BRAIN_FP4_LANES); }
+    return v;
+}
+
+// The register-blocked NVFP4 GEMV for MR (1 or 2) activation rows: each warp owns BRAIN_FP4_RT consecutive weight
+// rows, and a lane walks the chunks of all of them together. The grid is `ceil(count / BRAIN_FP4_RT_COLS)` blocks.
 template <int MR>
-__device__ __forceinline__ void brain_matmul_nvfp4_gemv_body(const unsigned int* params, const float* x, const unsigned int* w, const unsigned int* s, float* y) {
+__device__ __forceinline__ void brain_matmul_nvfp4_gemv_rb_body(const unsigned int* params, const float* x, const unsigned int* w, const unsigned int* s, float* y) {
     const unsigned int m = params[0], k = params[1], count = params[2], first = params[3], xr0 = params[4];
     const float global = __uint_as_float(params[5]);
     const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
-    const unsigned int col = blk * BRAIN_QG_COLS + threadIdx.x / BRAIN_QG_LANES;
-    const unsigned int lane = threadIdx.x % BRAIN_QG_LANES;
-    const bool live = col < count;
+    const unsigned int col0 = blk * BRAIN_FP4_RT_COLS + (threadIdx.x / BRAIN_FP4_LANES) * BRAIN_FP4_RT;
+    const unsigned int lane = threadIdx.x % BRAIN_FP4_LANES;
     const unsigned int chunks = k >> 5;                                    // 32-weight chunks per row
-    const unsigned int row = first + (live ? col : 0u);
-    const uint4* wrow = reinterpret_cast<const uint4*>(w) + static_cast<unsigned long long>(row) * chunks;
-    const unsigned int* srow = s + static_cast<unsigned long long>(row) * (k >> 6);
-
-    float acc[MR];
+    const uint4* wrow[BRAIN_FP4_RT];
+    const unsigned int* srow[BRAIN_FP4_RT];
+    bool live[BRAIN_FP4_RT];
 #pragma unroll
-    for (int r = 0; r < MR; ++r) { acc[r] = 0.0f; }
+    for (int r = 0; r < BRAIN_FP4_RT; ++r) {
+        live[r] = col0 + r < count;
+        const unsigned long long row = first + (live[r] ? col0 + r : 0u);
+        wrow[r] = reinterpret_cast<const uint4*>(w) + row * chunks;
+        srow[r] = s + row * (k >> 6);
+    }
 
-    constexpr int UNROLL = (MR == 1) ? 4 : 2;
-    for (unsigned int j0 = lane; j0 < chunks; j0 += UNROLL * BRAIN_QG_LANES) {
-        uint4 wv[UNROLL];
-        unsigned int sw[UNROLL];
+    float acc[MR][BRAIN_FP4_RT];
+#pragma unroll
+    for (int a = 0; a < MR; ++a) {
+#pragma unroll
+        for (int r = 0; r < BRAIN_FP4_RT; ++r) { acc[a][r] = 0.0f; }
+    }
+
+    constexpr int UNROLL = 2;
+    for (unsigned int j0 = lane; j0 < chunks; j0 += UNROLL * BRAIN_FP4_LANES) {
+        uint4 wv[UNROLL][BRAIN_FP4_RT];
+        unsigned int sw[UNROLL][BRAIN_FP4_RT];
 #pragma unroll
         for (int u = 0; u < UNROLL; ++u) {
-            const unsigned int j = j0 + u * BRAIN_QG_LANES;
-            if (live && j < chunks) {
-                wv[u] = brain_qg_ld_stream(wrow + j);
-                sw[u] = __ldg(srow + (j >> 1)) >> ((j & 1u) * 16u);
-            } else {
-                wv[u] = make_uint4(0u, 0u, 0u, 0u);
-                sw[u] = 0u;
+            const unsigned int j = j0 + u * BRAIN_FP4_LANES;
+#pragma unroll
+            for (int r = 0; r < BRAIN_FP4_RT; ++r) {
+                if (live[r] && j < chunks) {
+                    wv[u][r] = brain_qg_ld_stream(wrow[r] + j);
+                    sw[u][r] = __ldg(srow[r] + (j >> 1)) >> ((j & 1u) * 16u);
+                } else {
+                    wv[u][r] = make_uint4(0u, 0u, 0u, 0u);
+                    sw[u][r] = 0u;
+                }
             }
         }
 #pragma unroll
         for (int u = 0; u < UNROLL; ++u) {
-            const unsigned int j = j0 + u * BRAIN_QG_LANES;
+            const unsigned int j = j0 + u * BRAIN_FP4_LANES;
             if (j < chunks) {
-                float wf[32];
-                brain_fp4_decode32(wv[u], wf);
 #pragma unroll
-                for (int r = 0; r < MR; ++r) {
-                    if (static_cast<unsigned int>(r) < m) {
-                        const float4* xc = reinterpret_cast<const float4*>(x + static_cast<unsigned long long>(xr0 + r) * k) + 8ull * j;
-                        acc[r] += brain_fp4_dot32(wf, sw[u], xc);
+                for (int a = 0; a < MR; ++a) {
+                    // Rows past `m` read row 0's activations and are never stored.
+                    const float4* xc = reinterpret_cast<const float4*>(x + static_cast<unsigned long long>(xr0 + (static_cast<unsigned int>(a) < m ? a : 0)) * k) + 8ull * j;
+                    float4 xv[8];
+#pragma unroll
+                    for (int t = 0; t < 8; ++t) { xv[t] = __ldg(xc + t); }
+#pragma unroll
+                    for (int r = 0; r < BRAIN_FP4_RT; ++r) {
+                        float wf[32];
+                        brain_fp4_decode32(wv[u][r], wf);
+                        acc[a][r] += brain_fp4_dot32_reg(wf, sw[u][r], xv);
                     }
                 }
             }
@@ -451,15 +515,23 @@ __device__ __forceinline__ void brain_matmul_nvfp4_gemv_body(const unsigned int*
     // 2^-14 (E2M1 placed in an f16) times 2^-8 (the E4M3 block scale) is undone once, with the tensor scale.
     const float scale = 4194304.0f * global;
 #pragma unroll
-    for (int r = 0; r < MR; ++r) {
-        const float total = brain_qg_row_sum(acc[r]) * scale;
-        if (static_cast<unsigned int>(r) < m && lane == 0u && live) { y[static_cast<unsigned long long>(r) * count + col] = total; }
+    for (int a = 0; a < MR; ++a) {
+#pragma unroll
+        for (int r = 0; r < BRAIN_FP4_RT; ++r) {
+            const float total = brain_fp4_warp_sum(acc[a][r]) * scale;
+            if (static_cast<unsigned int>(a) < m && lane == 0u && live[r]) { y[static_cast<unsigned long long>(a) * count + col0 + r] = total; }
+        }
     }
 }
 
-extern "C" __global__ void __launch_bounds__(BRAIN_QG_THREADS, 4)
+extern "C" __global__ void __launch_bounds__(BRAIN_QG_THREADS, 2)
 brain_matmul_nvfp4_gemv_m1(const unsigned int* params, const float* x, const unsigned int* w, const unsigned int* s, float* y) {
-    brain_matmul_nvfp4_gemv_body<1>(params, x, w, s, y);
+    brain_matmul_nvfp4_gemv_rb_body<1>(params, x, w, s, y);
+}
+
+extern "C" __global__ void __launch_bounds__(BRAIN_QG_THREADS, 1)
+brain_matmul_nvfp4_gemv_m2(const unsigned int* params, const float* x, const unsigned int* w, const unsigned int* s, float* y) {
+    brain_matmul_nvfp4_gemv_rb_body<2>(params, x, w, s, y);
 }
 
 extern "C" __global__ void __launch_bounds__(BRAIN_QG_THREADS, 2)

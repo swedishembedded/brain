@@ -2981,17 +2981,35 @@ pub const ALL: &[CudaKernel] = &[
     },
     CudaKernel {
         name: "matmul_nvfp4_gemv_m1",
-        // The single-activation-row build of `matmul_nvfp4_gemv`: the decode token, with registers for a deeper load stage.
+        // The single-activation-row build of `matmul_nvfp4_gemv`: the decode token. Each warp owns four weight rows, so one load
+        // of the activations serves four rows' chunks (unblocked, the f32 activation reads were 8 bytes per weight byte).
         op: Op::MatMul,
         weight: Dtype::F4E2M1,
         by_name: true,
         source: ImplSource::Tuned,
         min_cc: BASELINE_MIN_CC,
         entry: "brain_matmul_nvfp4_gemv_m1",
-        what: "the one-activation-row form of matmul_nvfp4_gemv: the same NVFP4 GEMV with a deeper stage of in-flight weight loads, f32 rounding of the running sum against the WGSL tier",
+        what: "the one-activation-row form of matmul_nvfp4_gemv: the same NVFP4 GEMV register-blocked over four weight rows per warp so the activation chunk is read once per four rows, f32 rounding of the running sum against the WGSL tier",
         reported: "native:matmul_nvfp4_gemv_m1",
         block_dim: 256,
-        tile: (1, 16),
+        tile: (1, 32),
+        shared_bytes: 0,
+        programmatic: false,
+        src: include_str!("../cu/fp8_nvfp4_gemv.cu"),
+    },
+    CudaKernel {
+        name: "matmul_nvfp4_gemv_m2",
+        // The two-activation-row build: the same register blocking, both rows' activations loaded once per chunk.
+        op: Op::MatMul,
+        weight: Dtype::F4E2M1,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_matmul_nvfp4_gemv_m2",
+        what: "the two-activation-row form of matmul_nvfp4_gemv: register-blocked over four weight rows per warp, f32 rounding of the running sum against the WGSL tier",
+        reported: "native:matmul_nvfp4_gemv_m2",
+        block_dim: 256,
+        tile: (1, 32),
         shared_bytes: 0,
         programmatic: false,
         src: include_str!("../cu/fp8_nvfp4_gemv.cu"),

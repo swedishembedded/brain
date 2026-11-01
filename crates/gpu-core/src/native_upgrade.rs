@@ -828,6 +828,11 @@ fn qgemv_blocks(p: &[u32], _tile: (u32, u32)) -> u32 {
     p[2].div_ceil(QGEMV_COLS)
 }
 
+/// One block per `tile.1` weight rows: the register-blocked NVFP4 GEMVs cover four rows per lane group.
+fn qgemv_blocked_blocks(p: &[u32], tile: (u32, u32)) -> u32 {
+    p[2].div_ceil(tile.1)
+}
+
 /// The gather's `[slots, k, n, xdiv]`.
 fn serves_moe_nvfp4_gather(p: &[u32]) -> bool {
     matches!(p, [slots, k, n, xdiv] if *slots >= 1 && *n >= 1 && *k >= 64 && k % 64 == 0 && *xdiv >= 1
@@ -1554,7 +1559,7 @@ pub(crate) const ROWS: &[Row] = &[
         target: Target::Named("matmul_nvfp4_gemv_m1"),
         bindings: QGEMV_BINDINGS,
         serves: serves_nvfp4_gemv,
-        blocks: qgemv_blocks,
+        blocks: qgemv_blocked_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
         input: Input::PACKED,
@@ -1562,10 +1567,10 @@ pub(crate) const ROWS: &[Row] = &[
     },
     Row {
         slow: "matmul_nvfp4_gemv#MAXM=2",
-        target: Target::Named("matmul_nvfp4_gemv"),
+        target: Target::Named("matmul_nvfp4_gemv_m2"),
         bindings: QGEMV_BINDINGS,
         serves: serves_nvfp4_gemv,
-        blocks: qgemv_blocks,
+        blocks: qgemv_blocked_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
         input: Input::PACKED,

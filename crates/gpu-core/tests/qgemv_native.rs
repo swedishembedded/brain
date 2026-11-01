@@ -31,6 +31,7 @@ fn kernel_list() -> &'static [(&'static str, &'static str)] {
         let (f4, f4_src) = specialised("matmul_nvfp4_gemv", kernels::MATMUL_NVFP4_GEMV, 8);
         let (f8_1, f8_1_src) = specialised("matmul_fp8_gemv", kernels::MATMUL_FP8_GEMV, 1);
         let (f4_1, f4_1_src) = specialised("matmul_nvfp4_gemv", kernels::MATMUL_NVFP4_GEMV, 1);
+        let (f4_2, f4_2_src) = specialised("matmul_nvfp4_gemv", kernels::MATMUL_NVFP4_GEMV, 2);
         vec![
             (f8, f8_src),
             ("matmul_fp8_gemv_ref", f8_src),
@@ -40,6 +41,7 @@ fn kernel_list() -> &'static [(&'static str, &'static str)] {
             ("moe_nvfp4_gemv_gather_ref", kernels::MOE_NVFP4_GEMV_GATHER),
             (f8_1, f8_1_src),
             (f4_1, f4_1_src),
+            (f4_2, f4_2_src),
         ]
     })
 }
@@ -53,6 +55,8 @@ const GATHER_REF: usize = 5;
 /// The single-row builds (what a decode step dispatches): their own kernels.
 const FP8_M1: usize = 6;
 const FP4_M1: usize = 7;
+/// The two-row build: also register-blocked over four weight rows.
+const FP4_M2: usize = 8;
 
 fn is_cuda(gpu: &Gpu) -> bool {
     gpu.kind() == "cuda" && gpu.caps().arch.compute_capability.is_some()
@@ -164,7 +168,11 @@ fn run_fp4(gpu: &Gpu, c: &Fp4Case, seed: u64) {
     let (xb, wb, sb) = (gpu.storage_init("x", &x), upload_u32(gpu, &codes), upload_u32(gpu, &words_of(&scales)));
     let params = [m as u32, k as u32, count as u32, first as u32, xr0 as u32, global.to_bits(), 1, 0];
     let (native, reference) = (gpu.storage((m * count) as u64), gpu.storage((m * count) as u64));
-    let (kind, expect) = if m == 1 { (FP4_M1, "matmul_nvfp4_gemv_m1") } else { (FP4, "matmul_nvfp4_gemv") };
+    let (kind, expect) = match m {
+        1 => (FP4_M1, "matmul_nvfp4_gemv_m1"),
+        2 => (FP4_M2, "matmul_nvfp4_gemv_m2"),
+        _ => (FP4, "matmul_nvfp4_gemv"),
+    };
     assert_eq!(gpu.native_kernel_for(kind, &params), Some(expect));
     assert_eq!(gpu.native_kernel_for(FP4_REF, &params), None);
     let step = |kind: usize, y: &backend_api::DeviceBuffer, blocks: u32| gpu.dispatch(kind, &[&xb, &wb, &sb, y], &params, Dispatch::Workgroups(blocks));
@@ -246,6 +254,11 @@ fn the_native_nvfp4_gemv_matches_the_oracle_at_every_row_count_and_window() {
         Fp4Case { m: 8, k: 576, count: 33, first: 0 },  // 18 chunks: two lanes take a second
         Fp4Case { m: 2, k: 64, count: 17, first: 3 },   // two chunks: most lanes idle
         Fp4Case { m: 1, k: 4096, count: 1000, first: 0 },
+        // The register-blocked builds cover four weight rows per lane group: counts and windows off that grid.
+        Fp4Case { m: 1, k: 5120, count: 131, first: 5 },
+        Fp4Case { m: 2, k: 2048, count: 301, first: 0 },
+        Fp4Case { m: 2, k: 5120, count: 3, first: 1 },
+        Fp4Case { m: 1, k: 64, count: 1, first: 0 },
     ]
     .iter()
     .enumerate()
