@@ -131,6 +131,12 @@ fn add_discovery(card: &mut Value, info: &ModelInfo, adapter: Option<&AdapterIde
         // OpenRouter's spelling, which agent runtimes read for every dialect.
         card["architecture"]["input_modalities"] = json!(info.caps.input_modalities());
     }
+    if info.caps.vision {
+        // What one request may carry (a request past either is refused with 400),
+        // so a client can leave older pictures out of a long conversation instead.
+        card["max_images_per_request"] = json!(capability::blob::MAX_IMAGES);
+        card["max_image_pixels_per_request"] = json!(capability::blob::MAX_REQUEST_PIXELS);
+    }
     if let Some(max) = info.max_output_tokens {
         card["max_output_tokens"] = json!(max);
     }

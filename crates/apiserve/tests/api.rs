@@ -591,6 +591,9 @@ async fn model_card_derives_capabilities_and_output_limit_from_the_manifest() {
         assert_valid(model_schema.0, model_schema.1, &vision);
         assert_eq!(vision["capabilities"], json!(["chat", "tools", "vision"]), "{provider}: {vision}");
         assert_eq!(vision["architecture"]["input_modalities"], json!(["text", "image"]), "{provider}: {vision}");
+        // What one request may carry, so a client trims its history instead of being refused.
+        assert_eq!(vision["max_images_per_request"], json!(capability::blob::MAX_IMAGES), "{provider}: {vision}");
+        assert_eq!(vision["max_image_pixels_per_request"], json!(capability::blob::MAX_REQUEST_PIXELS), "{provider}: {vision}");
 
         let agent = get_json(&app, provider, &format!("{uri_prefix}/brain-agent"), &key).await;
         assert_valid(model_schema.0, model_schema.1, &agent);
@@ -601,6 +604,7 @@ async fn model_card_derives_capabilities_and_output_limit_from_the_manifest() {
         assert_valid(model_schema.0, model_schema.1, &plain);
         assert_eq!(plain["capabilities"], json!(["chat"]), "{provider}: a chat model without tools does not claim them");
         assert_eq!(plain["architecture"]["input_modalities"], json!(["text"]), "{provider}: a text-only model claims no image");
+        assert!(plain.get("max_images_per_request").is_none(), "{provider}: no image limit on a text model: {plain}");
         assert!(plain.get("max_output_tokens").is_none(), "{provider}: an undeclared bound is absent, not 0: {plain}");
 
         let embed = get_json(&app, provider, &format!("{uri_prefix}/brain-embed"), &key).await;
