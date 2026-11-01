@@ -582,3 +582,12 @@ Mixed-iteration idle (knowledge 392, 2026-10-30): a prompt start no longer waits
   32K x 16 82.8 -> 83.5, 8K x 64 348.4 -> 355.4. Gates: exact f64 attention over ragged / scattered / shared-prefix batches, scores x10 and elements of 1e5, NaN-poisoned outputs and partial records, an ignored
   2,000-launch back-to-back stress (bit-identical, no new Xid). Open: the decode step at 8K x 16 is 42 ms and this kernel is 0.5 ms of it; the 8K x 16 cell is one wave (82 % of the roof); 8K x 1 and 32K x 1 (16 blocks)
   are latency bound at 36 % and 60 %.
+- 2026-11-01 (streaming recurrence over an f32 GDN state pool, knowledge 416): `gdn_recur_pool_stream` (bulk-copy tile in eight chunks, two columns a thread over half the rows, after the unchanged conv) replaces the exact recurrence
+  for f32 pools with the occupancy candidates on, with the fused qkv|z stride (both conv kernels take it as a fourth param) and the verify form `gdn_recur_verify_pool_stream` (same body over the rows: a verified row is bit for bit the plain step;
+  the engine's verify pool now carries `gdn_pool_wide` instead of `false`, which also turns on the in-place qkvz product for verify rounds). Agreement with the exact body over 12 ragged steps: 3e-7 output, 1.4e-7 state (rel L2), windows
+  bit for bit. Recurrence kernel time (event, bench with 4x pool rows) exact -> stream us: 1 seq 12.1 -> 9.4, 4: 18.4 -> 14.5, 16: 48.6 -> 39.2 (76 % of 3.4 TB/s), 64: 139.0 -> 124.6 (95 %); nsys 34.3 / 120. The 28.4 us target
+  is not met at 16 (ramp and block structure, copy-only 35.7). Served gpu1, interleaved twice, tok/s base -> new: 8K x 1 71.7/71.6 -> 70.7/72.6, 8K x 16 306.0/303.2 -> 303.2/307.9, 8K x 64 365.3/365.5 -> 363.8/369.9,
+  32K x 16 85.0/85.1 -> 84.3/85.4 (neutral); MTP 8K x 1, three runs: base 88.4/88.7/90.7, new 80.1/81.9/92.4 (noisy, unresolved). Gates: agreement, in-place byte-identity, verify rows/snapshots/commit, ignored back-to-back stress
+  (bf16 + f32, decode + verify, no new Xid; 596 before and after). Pre-existing failures on the base: `i8_gemv_multi_native` (2), `qops_*` (3). Open: a 28.4 us f32 recurrence needs a read path other than TMA bulk copies; verify-kernel
+  time at 2-4 rows per sequence is unmeasured; the MTP 8K x 1 cell needs a quieter comparison.
+
