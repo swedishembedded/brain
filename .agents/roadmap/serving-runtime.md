@@ -186,6 +186,43 @@ Design (the scheduler decides, the model executes):
 Page size (256 rows today) is part of item 3 and is chosen per cache group by
 measurement (16-256), not fixed globally.
 
+## Unified state pool (design, 2026-11-01; item 3)
+
+The 27B engine reserves a recurrent-state row (the state and conv history of 48 Gated-DeltaNet layers, 150 MB in f32, 75 MB in bf16)
+for each of the `--max-batch` slots at load, and a separate KV pool takes what is left. A server with 16 sequences running and 64
+slots keeps 48 rows (7 GB, 110K tokens of bf16 KV) idle while 64K x 16 is bound by KV capacity. vLLM holds both in one pool and a
+running sequence takes state pages only while it runs.
+
+Baseline at 76243a969 (`--max-batch 64`, `serve` log `default --ctx`, the pool in tokens, constant in the number of running sequences):
+bf16 KV / f32 state 622592; fp8 KV / bf16 state 1187840.
+
+**Mechanism.** Both are sparse device buffers (`Backend::alloc_sparse`; CUDA virtual memory management): an address range reserved
+at load, with memory attached to 2 MiB granules of it when something needs them and taken back when it does not. Addresses never
+change, so the kernels, the recorded graphs and the u32 element indexing are untouched, and a state row's arithmetic does not
+change: the pool kernels still read `pool[row * len ..]`.
+
+- A KV block is one granule of each K and V data plane (`block_rows` = granule / bytes per row: 1024 rows bf16, 2048 fp8 and int8).
+  The block allocator backs a block when it first hands it out (`BlockBacking`); a freed block keeps its memory, so a warm pool costs nothing.
+- A state row maps the granules of its byte range in every recurrent layer's pool on admission (a granule is shared by neighbouring
+  rows when the row is not a whole number of granules; reference counted) and unmaps what no row uses when the sequence leaves.
+  The conv history (4 % of a row) and the working copies stay dense.
+- One budget: the engine charges the memory a state row backs to the block allocator by lending it the matching number of blocks
+  (`BlockAllocator::lend`: the coldest free blocks, which hold no memory) and repays them when the row is released. Backed
+  blocks + backed state granules are then never more than the planned pool. The generic scheduler sees state as blocks, so its
+  admission, preemption and speculation accounting need no new mechanism; it learns one thing, that a sequence without a state row yet
+  owes `PagedDecoder::sequence_state_blocks` blocks beyond its prompt (default 0).
+- The planner sizes one pool: weights, workspace, history pools and verify scratch are placed first, and the rest is the pool in blocks. `--ctx`
+  defaults to the pool less one sequence's state; no `max_batch x state` reservation remains.
+
+**Kept.** Snapshots stay in host memory (`snapshots_on_host`); verify scratch stays dense; bf16 and f32 pools; the scheduler
+contract (one defaulted method added); exactness (no arithmetic changed). **Scope.** One CUDA card whose driver offers virtual
+memory management and the paged layout; other configurations keep the static layout and say so at load. The MTP drafter's KV planes
+join the block set (one granule per plane per block).
+
+**Cost measured on the C prototype** (GH200, gpu1): `cuMemMap` takes a whole physical allocation (offset must be 0), so one handle
+backs one granule: create 19 us (the driver zeroes it), map 1 us, set access 35 us; backing a 64 MiB block (32 planes) 1.8 ms, taking it
+back 1.3 ms. A pool pays this once per block (freed blocks stay backed) and once per state row granule at admission.
+
 ## Done
 
 - 2026-10-29 (step plan, increment A; knowledge 381): eager batches upload their kernel parameters with one copy instead of one in front of

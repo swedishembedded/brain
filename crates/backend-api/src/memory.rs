@@ -93,6 +93,9 @@ pub struct PlacementFacts {
     pub direct_managed_from_host: bool,
     /// Host memory can be registered (pinned in place) for device access.
     pub host_register: bool,
+    /// Address ranges can be reserved and backed with memory in parts on demand
+    /// ([`crate::Backend::alloc_sparse`]).
+    pub sparse_memory: bool,
 }
 
 impl PlacementFacts {
@@ -105,6 +108,7 @@ impl PlacementFacts {
         concurrent_managed_access: false,
         direct_managed_from_host: false,
         host_register: false,
+        sparse_memory: false,
     };
 
     /// Whether an allocation under `policy` can be made and used by kernels.

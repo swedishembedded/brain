@@ -79,6 +79,8 @@ pub struct UsableGpu {
     /// Kernels may use ordinary host memory directly ([`backend_api::PlacementFacts::pageable_memory_access`]): a coherent
     /// Grace-Hopper part, where host memory is reached across the chip-to-chip link.
     pub host_memory_access: bool,
+    /// Address ranges can be backed with memory in parts on demand ([`backend_api::PlacementFacts::sparse_memory`]).
+    pub sparse_memory: bool,
 }
 
 /// The cards the CUDA backend can run on: the driver enumerates them AND
@@ -87,7 +89,7 @@ pub struct UsableGpu {
 /// NVIDIA driver or toolkit.
 pub fn usable_gpus() -> Result<Vec<UsableGpu>, String> {
     let d = driver::driver().map_err(|e| e.to_string())?;
-    let cards: Vec<_> = d.devices()?.iter().map(|dev| UsableGpu { identity: dev.identity(), compute_capability: (dev.cc_major, dev.cc_minor), host_memory_access: dev.placement.pageable_memory_access }).collect();
+    let cards: Vec<_> = d.devices()?.iter().map(|dev| UsableGpu { identity: dev.identity(), compute_capability: (dev.cc_major, dev.cc_minor), host_memory_access: dev.placement.pageable_memory_access, sparse_memory: dev.placement.sparse_memory }).collect();
     if cards.is_empty() {
         return Err("the CUDA driver exposes no device".into());
     }

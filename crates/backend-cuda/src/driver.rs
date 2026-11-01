@@ -89,6 +89,7 @@ const ATTR_HOST_NATIVE_ATOMIC_SUPPORTED: c_int = 86;
 const ATTR_PAGEABLE_MEMORY_ACCESS: c_int = 88;
 const ATTR_CONCURRENT_MANAGED_ACCESS: c_int = 89;
 const ATTR_HOST_REGISTER_SUPPORTED: c_int = 99;
+const ATTR_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED: c_int = 102;
 const ATTR_PAGEABLE_MEMORY_ACCESS_USES_HOST_PAGE_TABLES: c_int = 100;
 const ATTR_DIRECT_MANAGED_MEM_ACCESS_FROM_HOST: c_int = 101;
 
@@ -886,6 +887,7 @@ impl Driver {
             concurrent_managed_access: ask(ATTR_CONCURRENT_MANAGED_ACCESS),
             direct_managed_from_host: ask(ATTR_DIRECT_MANAGED_MEM_ACCESS_FROM_HOST),
             host_register: ask(ATTR_HOST_REGISTER_SUPPORTED),
+            sparse_memory: ask(ATTR_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED) && self.vmm.is_ok(),
         }
     }
 

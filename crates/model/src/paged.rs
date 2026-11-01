@@ -13,15 +13,38 @@
 //! sequence's KV grows one block at a time instead of reserving its worst-case
 //! length up front, and any free block can back any sequence's next logical block.
 
+/// What makes a block usable by kernels, when blocks are not all backed by memory up front.
+///
+/// A pool whose blocks share one device budget with something else (the recurrent state of the running sequences)
+/// reserves the ids of every block it could ever hand out and attaches memory to a block when the allocator hands it
+/// out first. The memory of a block that is freed stays attached until the owner of the budget needs it elsewhere.
+pub trait BlockBacking: Send {
+    /// Make `block` usable by kernels; idempotent. `Err` when the budget cannot back it: the allocator then reports the
+    /// pool exhausted and leaves the block free.
+    fn back(&mut self, block: u32) -> Result<(), String>;
+}
+
+/// The refcount of a block lent out with [`BlockAllocator::lend`]: out of the pool, belonging to no sequence.
+const LENT: u16 = u16::MAX;
+
 /// A pool of physical KV blocks handed out by id. Reference-counted: `alloc`
 /// yields a fresh block (refcount 1), `incref` shares one, `decref` releases a
 /// reference and returns the block to the free list when the last one drops.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct BlockAllocator {
     block_size: u32,
     num_blocks: u32,
-    free: Vec<u32>,     // stack of free physical block ids
-    refcount: Vec<u16>, // per physical block
+    free: Vec<u32>,     // stack of free physical block ids; the top is the most recently freed, the bottom the coldest
+    refcount: Vec<u16>, // per physical block; [`LENT`] while lent out
+    backing: Option<std::sync::Arc<std::sync::Mutex<dyn BlockBacking>>>,
+    /// Why the last [`Self::alloc`] failed, when the backing refused rather than the pool ran dry.
+    backing_error: Option<String>,
+}
+
+impl std::fmt::Debug for BlockAllocator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BlockAllocator").field("block_size", &self.block_size).field("num_blocks", &self.num_blocks).field("free", &self.free.len()).field("backed", &self.backing.is_some()).finish()
+    }
 }
 
 impl BlockAllocator {
@@ -30,7 +53,13 @@ impl BlockAllocator {
         assert!(num_blocks > 0 && block_size > 0);
         // Hand out low ids first (nicer locality) — push high..low so pop yields low.
         let free: Vec<u32> = (0..num_blocks).rev().collect();
-        BlockAllocator { block_size, num_blocks, free, refcount: vec![0; num_blocks as usize] }
+        BlockAllocator { block_size, num_blocks, free, refcount: vec![0; num_blocks as usize], backing: None, backing_error: None }
+    }
+
+    /// The same pool with `backing` asked to back each block before it is handed out.
+    pub fn with_backing(mut self, backing: std::sync::Arc<std::sync::Mutex<dyn BlockBacking>>) -> BlockAllocator {
+        self.backing = Some(backing);
+        self
     }
 
     pub fn block_size(&self) -> u32 {
@@ -51,16 +80,57 @@ impl BlockAllocator {
         self.refcount[block as usize]
     }
 
-    /// Allocate a fresh block (refcount 1), or `None` if the pool is exhausted.
+    /// Allocate a fresh block (refcount 1), or `None` if the pool is exhausted or the backing refused the block
+    /// ([`Self::exhausted`] says which).
     pub fn alloc(&mut self) -> Option<u32> {
         let b = self.free.pop()?;
         debug_assert_eq!(self.refcount[b as usize], 0, "alloc of a live block {b}");
+        if let Some(backing) = &self.backing {
+            if let Err(e) = backing.lock().unwrap_or_else(|e| e.into_inner()).back(b) {
+                self.free.push(b);
+                self.backing_error = Some(e);
+                return None;
+            }
+        }
+        self.backing_error = None;
         self.refcount[b as usize] = 1;
         Some(b)
     }
 
+    /// The message for a failed [`Self::alloc`]: the pool is exhausted, and why the backing refused when it did.
+    pub fn exhausted(&self) -> String {
+        match &self.backing_error {
+            Some(e) => format!("paged KV pool exhausted: the block could not be backed: {e}"),
+            None => "paged KV pool exhausted".to_string(),
+        }
+    }
+
+    /// Take `n` blocks out of the pool for something other than KV, all or nothing: the coldest free blocks, which are
+    /// the ones least likely to hold memory (a block is backed when first handed out and stays backed when freed).
+    /// A lent block is not free, belongs to no sequence and is not backed by this allocator; [`Self::repay`] returns it.
+    pub fn lend(&mut self, n: u32) -> Option<Vec<u32>> {
+        if n as usize > self.free.len() {
+            return None;
+        }
+        let lent: Vec<u32> = self.free.drain(..n as usize).collect();
+        for &b in &lent {
+            self.refcount[b as usize] = LENT;
+        }
+        Some(lent)
+    }
+
+    /// Return blocks lent with [`Self::lend`] to the cold end of the free list.
+    pub fn repay(&mut self, blocks: Vec<u32>) {
+        for &b in &blocks {
+            assert_eq!(self.refcount[b as usize], LENT, "block {b} was not lent");
+            self.refcount[b as usize] = 0;
+        }
+        self.free.splice(0..0, blocks);
+    }
+
     /// Share an existing block (refcount += 1) — prefix sharing / copy-on-write.
     pub fn incref(&mut self, block: u32) {
+        assert_ne!(self.refcount[block as usize], LENT, "block {block} is lent out");
         self.refcount[block as usize] += 1;
     }
 
@@ -68,6 +138,7 @@ impl BlockAllocator {
     pub fn decref(&mut self, block: u32) {
         let rc = &mut self.refcount[block as usize];
         assert!(*rc > 0, "double free of block {block}");
+        assert_ne!(*rc, LENT, "block {block} is lent out");
         *rc -= 1;
         if *rc == 0 {
             self.free.push(block);
@@ -186,7 +257,7 @@ impl BlockTable {
     pub fn append(&mut self, alloc: &mut BlockAllocator) -> Result<(u32, u32), String> {
         let offset = self.len % alloc.block_size();
         if offset == 0 {
-            let b = alloc.alloc().ok_or("paged KV pool exhausted")?;
+            let b = alloc.alloc().ok_or_else(|| alloc.exhausted())?;
             self.blocks.push(b);
         }
         let block = *self.blocks.last().unwrap();
@@ -204,7 +275,7 @@ impl BlockTable {
         // Blocks needed to cover [0, end) that we don't already have.
         let need = end.div_ceil(bs);
         while (self.blocks.len() as u32) < need {
-            let b = alloc.alloc().ok_or("paged KV pool exhausted")?;
+            let b = alloc.alloc().ok_or_else(|| alloc.exhausted())?;
             self.blocks.push(b);
         }
         self.len = end;
@@ -547,6 +618,76 @@ mod tests {
         // b0 is reusable now.
         let b2 = a.alloc().unwrap();
         assert_eq!(b2, b0);
+    }
+
+    /// Records the blocks it was asked to back, and refuses when told to.
+    struct Recorder {
+        backed: Vec<u32>,
+        refuse: bool,
+    }
+
+    impl BlockBacking for Recorder {
+        fn back(&mut self, block: u32) -> Result<(), String> {
+            if self.refuse {
+                return Err("no memory left".to_string());
+            }
+            self.backed.push(block);
+            Ok(())
+        }
+    }
+
+    fn recorded(num_blocks: u32) -> (BlockAllocator, std::sync::Arc<std::sync::Mutex<Recorder>>) {
+        let rec = std::sync::Arc::new(std::sync::Mutex::new(Recorder { backed: Vec::new(), refuse: false }));
+        (BlockAllocator::new(num_blocks, 16).with_backing(rec.clone()), rec)
+    }
+
+    #[test]
+    fn a_backed_allocator_backs_each_block_as_it_hands_it_out() {
+        let (mut a, rec) = recorded(4);
+        let ids: Vec<u32> = (0..3).map(|_| a.alloc().unwrap()).collect();
+        assert_eq!(rec.lock().unwrap().backed, ids, "every block handed out was backed first, in the order handed out");
+        // Sharing a block asks nothing of the backing; a block handed out again is backed again (the backing decides it is already).
+        a.incref(ids[0]);
+        assert_eq!(rec.lock().unwrap().backed.len(), 3);
+    }
+
+    #[test]
+    fn a_block_the_backing_refuses_stays_free_and_the_pool_reports_exhaustion_with_the_reason() {
+        let (mut a, rec) = recorded(2);
+        rec.lock().unwrap().refuse = true;
+        assert_eq!(a.alloc(), None);
+        assert_eq!(a.free_blocks(), 2, "the refused block was not taken");
+        let mut t = BlockTable::new();
+        let err = t.reserve(10, &mut a).unwrap_err();
+        assert!(err.contains("no memory left"), "the reason reaches the caller: {err}");
+        rec.lock().unwrap().refuse = false;
+        assert!(a.alloc().is_some(), "the pool serves again once the backing does");
+    }
+
+    #[test]
+    fn lent_blocks_leave_the_pool_unbacked_and_return_to_its_cold_end() {
+        let (mut a, rec) = recorded(5);
+        let hot = a.alloc().unwrap();
+        a.decref(hot); // the most recently freed block is the next one handed out
+        let lent = a.lend(2).expect("two free blocks");
+        assert_eq!(lent.len(), 2);
+        assert!(!lent.contains(&hot), "lending takes the cold end, so the block just freed (the one most likely backed) stays in service");
+        assert_eq!(a.free_blocks(), 3);
+        assert_eq!(rec.lock().unwrap().backed, vec![hot], "lending asks nothing of the backing");
+        assert_eq!(a.lend(4), None, "all or nothing");
+        assert_eq!(a.free_blocks(), 3);
+        a.repay(lent.clone());
+        assert_eq!(a.free_blocks(), 5);
+        assert_eq!(a.alloc(), Some(hot), "repaid blocks go to the cold end");
+        let rest: Vec<u32> = (0..4).map(|_| a.alloc().unwrap()).collect();
+        assert!(lent.iter().all(|b| rest.contains(b)));
+    }
+
+    #[test]
+    #[should_panic(expected = "not lent")]
+    fn repaying_a_block_that_was_never_lent_is_a_defect() {
+        let mut a = BlockAllocator::new(2, 16);
+        a.repay(vec![0]);
     }
 
     #[test]

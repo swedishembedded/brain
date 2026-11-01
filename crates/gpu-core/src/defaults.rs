@@ -46,6 +46,8 @@ pub struct Card {
     pub compute_capability: Option<(u32, u32)>,
     /// The CUDA backend's kernels on this card may use ordinary host memory directly (a coherent Grace-Hopper part).
     pub host_memory_access: bool,
+    /// The CUDA backend can reserve an address range on this card and back parts of it with memory on demand.
+    pub sparse_memory: bool,
 }
 
 /// What the machine offers.
@@ -80,6 +82,7 @@ impl Hardware {
                     vram_bytes: d.identity.vram_bytes,
                     compute_capability: cuda_card(d.identity.uuid).map(|g| g.compute_capability),
                     host_memory_access: cuda_card(d.identity.uuid).is_some_and(|g| g.host_memory_access),
+                    sparse_memory: cuda_card(d.identity.uuid).is_some_and(|g| g.sparse_memory),
                 })
                 .collect();
             Hardware { cards, cuda_unusable: cuda.err() }
@@ -123,6 +126,14 @@ impl Hardware {
         crate::backend_name() == "cuda"
             && !indices.is_empty()
             && indices.iter().all(|i| self.cards.iter().find(|c| c.index == *i).is_some_and(|c| c.compute_capability.is_some() && c.host_memory_access))
+    }
+
+    /// Whether the CUDA backend serves every one of the cards `indices` and each can back parts of a reserved address
+    /// range with memory on demand: what a memory plan asks before it lets two caches draw on one budget.
+    pub fn sparse_memory_on(&self, indices: &[u32]) -> bool {
+        crate::backend_name() == "cuda"
+            && !indices.is_empty()
+            && indices.iter().all(|i| self.cards.iter().find(|c| c.index == *i).is_some_and(|c| c.compute_capability.is_some() && c.sparse_memory))
     }
 
     /// The lowest compute capability among the cards, when every card has one.
@@ -196,7 +207,7 @@ mod tests {
     use super::*;
 
     fn card(index: u32, vendor_id: u32, gib: u64, cc: Option<(u32, u32)>) -> Card {
-        Card { index, name: format!("card{index}"), vendor_id, vram_bytes: gib << 30, compute_capability: cc, host_memory_access: false }
+        Card { index, name: format!("card{index}"), vendor_id, vram_bytes: gib << 30, compute_capability: cc, host_memory_access: false, sparse_memory: false }
     }
 
     #[test]
