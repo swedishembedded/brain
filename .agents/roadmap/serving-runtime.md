@@ -591,3 +591,13 @@ Mixed-iteration idle (knowledge 392, 2026-10-30): a prompt start no longer waits
   (bf16 + f32, decode + verify, no new Xid; 596 before and after). Pre-existing failures on the base: `i8_gemv_multi_native` (2), `qops_*` (3). Open: a 28.4 us f32 recurrence needs a read path other than TMA bulk copies; verify-kernel
   time at 2-4 rows per sequence is unmeasured; the MTP 8K x 1 cell needs a quieter comparison.
 
+- 2026-11-01 (gate|up and q|k|v as one FP8 product each, knowledge 417): an FP8 inference build holds every layer's `mlp.gate | mlp.up` and every attention layer's `q_proj | k_proj | v_proj` as one weight (`Fusion`, with
+  `in_proj_qkv | in_proj_z`; windows through `Qwen35::linear`); a decode or verify step of <= 128 rows with no adapter multiplies the whole weight. `quant_epilogue` and `silu_mul_quant_e4m3_128` read gate and up at a row
+  stride and the up offset in place (byte-identical to the dense launch over the halves, fp32 and bf16 rows); `qkv_split` takes the q|k|v product apart in one launch (interleaved for `gqa_decode_prep`, query values and
+  gates apart for the bf16-KV chain, replacing both `concat_split`). `set_fused_qkvz_decode` is `set_fused_projections_decode`. nsys, 8K x 16 decode-only steps: median span 17767 -> 17574 us, kernel busy 17207 -> 16911;
+  q|k|v -248 us a step, gate|up ~-230 (the table promised ~0.9 ms together); served gpu1 (bf16 KV, f32 state, no speculation; two interleaved rounds, mean tok/s base -> new) 8K x 1 71.7 -> 73.6, 8K x 16 280 -> 293 (+-6 %
+  between runs of one binary), 8K x 64 346.0 -> 346.2, 32K x 16 80.4 -> 79.7; int8 default 8K x 16 median TPOT 46.2 -> 44.9 ms. A stride added to the dense SwiGLU pass cost the 4096-row prefill pass 173 -> 223 us
+  (nsys) and was fixed before the push. `qwen35_fp8_parity` agreement 97.66 -> 97.27 % (one near-tie flip, margin 0.015), mean rel-L2 2.612e-2 -> 2.609e-2. Gates: bit-identical logits with one candidate pinned (2 and 20
+  rows, f32 and bf16 KV), tuned choice within 5e-2, kernel byte-identity, ignored back-to-back stress of the three kernels and swap-TMA over 5120 x 34816 / 17408 / 14336 (Xid count 596 before and after). Pre-existing
+  failures on the base: `fp8_source`, `lora_seq_len`, `model_i8_smoke`, `model_q4_smoke` (CPU backend). Open: the fused 34816-row product at 16 rows is ~60 us (2.1 TB/s of the weight) against the reference's 3.3 TB/s on a
+  16384-row product; q, k and v could be read in place by `gqa_decode_prep` / `gqa_qk_prep` (removes the 2 us split); a mixed round's leading decode rows still multiply the windows.

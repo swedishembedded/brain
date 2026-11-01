@@ -1690,7 +1690,7 @@ impl Fusion {
         streaming
             && ops.fp8_windows_native()
             && self.parts().iter().all(|part| tier.want(&format!("blocks.{l}.{part}")) == Dtype::F8E4M3)
-            && cfg.d_model % block == 0
+            && cfg.d_model.is_multiple_of(block)
             && self.part_rows(cfg).iter().all(|n| n % block == 0)
     }
 }
