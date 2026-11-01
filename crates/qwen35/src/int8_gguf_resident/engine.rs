@@ -352,11 +352,14 @@ impl Qwen35GgufEngine {
     /// live sequences like any cache.
     pub fn new(mut inst: Qwen35GgufInstance) -> Qwen35GgufEngine {
         let unified = inst.ledger.take();
+        if let Some(ledger) = &unified {
+            ledger.back_all_blocks().unwrap_or_else(|e| panic!("{MODEL}: the KV blocks cannot be backed at load: {e}"));
+        }
         let (alloc, free_rows) = match inst.kv_layout {
             KvLayout::OneBlock => (BlockAllocator::new(inst.max_batch + inst.prefix_slots, inst.cap), Default::default()),
             KvLayout::Paged { block_rows, pool_rows } => {
                 let alloc = BlockAllocator::new(pool_rows / block_rows, block_rows);
-                // The pool backs each block with memory as the allocator first hands it out.
+                // The pool backs a block again when the allocator hands it out after a state row took its memory.
                 (if let Some(ledger) = &unified { alloc.with_backing(ledger.backing()) } else { alloc }, (0..inst.max_batch).collect())
             }
         };

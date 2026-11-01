@@ -176,6 +176,11 @@ impl UnifiedPool {
         Ok(())
     }
 
+    /// Attach memory to every block that has none.
+    pub(crate) fn back_all_blocks(&mut self) -> Result<(), String> {
+        (0..self.block_backed.len() as u32).try_for_each(|b| self.back_block(b))
+    }
+
     /// Take the memory back from block `block`, once nothing reaches it: it must be free and not about to be handed out.
     pub(crate) fn unback_block(&mut self, block: u32) -> Result<(), String> {
         if !self.block_backed[block as usize] {
@@ -241,6 +246,13 @@ pub(crate) struct StateLedger {
 impl StateLedger {
     pub(crate) fn new(pool: UnifiedPool) -> StateLedger {
         StateLedger { pool: Arc::new(Mutex::new(pool)), lent: Vec::new() }
+    }
+
+    /// Back every block now, so that no block is backed on the serving thread the first time a sequence takes it: one block is
+    /// 32 `cuMemCreate` and `cuMemSetAccess` pairs (~4.7 ms), and the ~700 blocks of 64 streams of 8K were 3.3 s of host time in
+    /// the first minute of load. A block a state row displaces gives its memory back (`admit`), as it does from any state.
+    pub(crate) fn back_all_blocks(&self) -> Result<(), String> {
+        self.pool.lock().unwrap_or_else(|e| e.into_inner()).back_all_blocks()
     }
 
     /// The pool, for the allocator that backs blocks through it.
