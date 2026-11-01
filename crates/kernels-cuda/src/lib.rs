@@ -142,7 +142,7 @@ pub const fn i8_wgstream_dynamic_shared_bytes(xn: u32) -> u32 {
 pub const I8_WGSTREAM_MAX_ROWS: u32 = 128;
 /// Rows of x the many-row streaming candidates (`matmul_i8_stream_r*`) serve per launch.
 pub const I8_STREAM_MANY_ROWS: u32 = 64;
-/// Dynamic shared memory of `gdn_recur_pool`: one value head's 128 x 128 f32 state (the bf16 build stages half of it).
+/// Dynamic shared memory of `gdn_recur_pool` and its streaming build: one value head's 128 x 128 f32 state (the bf16 build stages half of it).
 pub const GDN_RECUR_TILE_F32_BYTES: u32 = 128 * 128 * 4;
 /// Dynamic shared memory per block of `matmul_fp8_gemv_f16x_*` with `wt` tiles of eight weight rows, `warps` warps and `stages` ring slots a
 /// warp (one line step of 128 k of the tile rows a slot); the warps' partial sums alias the ring after the loop.
@@ -3257,6 +3257,23 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/gdn_decode.cu"),
     },
     CudaKernel {
+        name: "gdn_recur_pool_stream",
+        // The streaming recurrence of the split pooled decode over an f32 pool, asked for by name (`gpu_core::Fused`); see `cu/gdn_decode.cu`.
+        op: Op::RmsNorm,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_gdn_recur_pool_stream",
+        what: "the L2 norms, gates, delta-rule recurrence and gated norm of one value head of one sequence per 128-thread block over an f32 state pool built for the memory roof: the state tile arrives by one bulk copy, a thread owns two adjacent columns over half the rows, one bulk store returns it; agrees with the exact body to f32 reassociation",
+        reported: "native:gdn_recur_pool_stream",
+        block_dim: 128,
+        tile: (1, 1),
+        shared_bytes: 2 * 128 * 4 + 128 * 4 + 2 * 4 + 2 * 4 + 2 * 2 * 64 * 8 + 8 * 8,
+        programmatic: true,
+        src: include_str!("../cu/gdn_decode.cu"),
+    },
+    CudaKernel {
         name: "gdn_recur_pool_bf16",
         // The split pooled Gated DeltaNet decode (knowledge 386): `gdn_decode.cu`'s entry points, asked for by name (`gpu_core::Fused`).
         op: Op::RmsNorm,
@@ -3401,6 +3418,23 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 128,
         tile: (1, 1),
         shared_bytes: (2 * 128 + 128) * 4 + 12,
+        programmatic: true,
+        src: include_str!("../cu/gdn_decode.cu"),
+    },
+    CudaKernel {
+        name: "gdn_recur_verify_pool_stream",
+        // The speculative verify form of `gdn_recur_pool_stream` (the same body over a row loop), asked for by name (`gpu_core::Fused`).
+        op: Op::RmsNorm,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_gdn_recur_verify_pool_stream",
+        what: "up to 8 consecutive streaming recurrence steps of one value head of one sequence per 128-thread block over an f32 state pool, the tile resident in shared memory throughout, f32 snapshots of the tile after every row but the last; each row bit-identical to the plain streaming step",
+        reported: "native:gdn_recur_verify_pool_stream",
+        block_dim: 128,
+        tile: (1, 1),
+        shared_bytes: 2 * 128 * 4 + 128 * 4 + 2 * 4 + 2 * 4 + 2 * 2 * 64 * 8 + 8 * 8,
         programmatic: true,
         src: include_str!("../cu/gdn_decode.cu"),
     },

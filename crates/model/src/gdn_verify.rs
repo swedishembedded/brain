@@ -80,6 +80,10 @@ pub struct VerifyLayout<'a> {
 /// bit for bit the plain step (`pool.wide` set, the serving default) and greedy speculation is token for token plain
 /// decoding. The snapshots stay f32, the widening of those bf16 values, so a restore is exact.
 ///
+/// An f32 pool with `pool.wide` set runs the streaming recurrence (`gdn_conv_verify_pool` then `gdn_recur_verify_pool_stream`),
+/// the body of the plain f32 decode, so each row is bit for bit that plain step; with `wide` off the plain decode is the exact
+/// body and so is this launch.
+///
 /// `None`, nothing submitted, where the device is not offered the kernel or
 /// the head shape is outside its block shape (128-wide key and value heads, a
 /// 4-tap conv, at most three value heads per key head).
@@ -111,12 +115,19 @@ pub fn gdn_mixer_verify_pooled_fused(
         g.submit(&[], &[step]);
         return Some(gated);
     }
-    // The split form first: a conv thread per channel and a recurrence block per value head, bit-identical to the fused body
+    // An f32 pool takes the streaming recurrence, the body of its plain streaming decode, so each row is bit for bit that step.
+    if crate::gdn_mixer::stream_split_offered(g, shape, pool) && g.has_fused(gpu_core::Fused::GdnConvVerifyPool) && g.has_fused(gpu_core::Fused::GdnRecurVerifyPoolStream) {
+        if let Some(step) = stream_split_step(g, shape, w, mixed, bproj, aproj, z, 0, pool, layout, n_tokens, snaps, &gated) {
+            g.submit(&[], &step);
+            return Some(gated);
+        }
+    }
+    // The split form: a conv thread per channel and a recurrence block per value head, bit-identical to the fused body
     // below, whose one block per key head spills its registers and fills 16 of the card's 132 SMs at one sequence.
     let (conv, recur) = (gpu_core::Fused::GdnConvVerifyPool, gpu_core::Fused::GdnRecurVerifyPool);
-    if g.has_fused(conv) && g.has_fused(recur) && conv.serves(&[shape.nkh, gdn.h, layout.b]) && recur.serves(&params) {
+    if g.has_fused(conv) && g.has_fused(recur) && conv.serves(&[shape.nkh, gdn.h, layout.b, 0]) && recur.serves(&params) {
         let conv_out = g.storage_uninit(n_tokens as u64 * shape.conv_dim() as u64);
-        let conv_step = g.fused_step(conv, &[mixed, w.conv1d_weight, pool.hist, &conv_out, layout.rows, layout.counts, layout.offs, &snaps.hist], &[shape.nkh, gdn.h, layout.b]);
+        let conv_step = g.fused_step(conv, &[mixed, w.conv1d_weight, pool.hist, &conv_out, layout.rows, layout.counts, layout.offs, &snaps.hist], &[shape.nkh, gdn.h, layout.b, 0]);
         let recur_step = conv_step
             .is_some()
             .then(|| g.fused_step(recur, &[&conv_out, bproj, aproj, w.a_log, w.dt_bias, pool.state, z, w.norm_weight, &gated, layout.rows, layout.counts, layout.offs, &snaps.state], &params))
@@ -129,6 +140,38 @@ pub fn gdn_mixer_verify_pooled_fused(
     let step = g.fused_step(fused, &bufs, &params)?;
     g.submit(&[], &[step]);
     Some(gated)
+}
+
+/// The streaming split verify over an f32 pool: the conv of every row (`gdn_conv_verify_pool`), then the streaming recurrence
+/// (`gdn_recur_verify_pool_stream`), both steps returned unsubmitted. `mixed` and `z` are two arrays (`stride` 0) or both the rows
+/// of one fused projection of `stride` columns. `None` where the device declines a launch.
+#[allow(clippy::too_many_arguments)]
+fn stream_split_step(
+    g: &Gpu,
+    shape: &GdnMixerShape,
+    w: &GdnMixerWeights,
+    mixed: &DeviceBuffer,
+    bproj: &DeviceBuffer,
+    aproj: &DeviceBuffer,
+    z: &DeviceBuffer,
+    stride: u32,
+    pool: &GdnPoolRows,
+    layout: &VerifyLayout,
+    n_tokens: u32,
+    snaps: &GdnRowSnapshots,
+    gated: &DeviceBuffer,
+) -> Option<[Step; 2]> {
+    let gdn = shape.gdn;
+    let f = f32::to_bits;
+    let params = [shape.nkh, gdn.h, shape.group(), f(1e-6), f(shape.rms_eps), f(1.0f32 / (gdn.dk as f32).sqrt()), layout.b, stride];
+    let conv_out = g.storage_uninit(n_tokens as u64 * shape.conv_dim() as u64);
+    let conv = g.fused_step(gpu_core::Fused::GdnConvVerifyPool, &[mixed, w.conv1d_weight, pool.hist, &conv_out, layout.rows, layout.counts, layout.offs, &snaps.hist], &[shape.nkh, gdn.h, layout.b, stride])?;
+    let recur = g.fused_step(
+        gpu_core::Fused::GdnRecurVerifyPoolStream,
+        &[&conv_out, bproj, aproj, w.a_log, w.dt_bias, pool.state, z, w.norm_weight, gated, layout.rows, layout.counts, layout.offs, &snaps.state],
+        &params,
+    )?;
+    Some([conv, recur])
 }
 
 /// [`gdn_mixer_verify_pooled_fused`] over the rows of one fused projection `qkvz` (`[n_tokens, qkvz_row_width]`, a row's qkv then
@@ -147,11 +190,19 @@ pub fn gdn_mixer_verify_pooled_qkvz(
     n_tokens: u32,
     snaps: &GdnRowSnapshots,
 ) -> Option<DeviceBuffer> {
-    if !crate::gdn_mixer::qkvz_in_place_offered(g, shape, pool) || !g.has_fused(gpu_core::Fused::GdnVerifyPoolStreamBf16) {
+    if !crate::gdn_mixer::qkvz_in_place_offered(g, shape, pool) {
         return None;
     }
     let gdn = shape.gdn;
     let gated = g.storage(n_tokens as u64 * shape.value_dim() as u64);
+    if !pool.bf16 {
+        let step = stream_split_step(g, shape, w, qkvz, bproj, aproj, qkvz, crate::gdn_mixer::qkvz_row_width(shape), pool, layout, n_tokens, snaps, &gated)?;
+        g.submit(&[], &step);
+        return Some(gated);
+    }
+    if !g.has_fused(gpu_core::Fused::GdnVerifyPoolStreamBf16) {
+        return None;
+    }
     let f = f32::to_bits;
     let params = [shape.nkh, gdn.h, shape.group(), f(1e-6), f(shape.rms_eps), f(1.0f32 / (gdn.dk as f32).sqrt()), layout.b, crate::gdn_mixer::qkvz_row_width(shape)];
     let bufs = [qkvz, w.conv1d_weight, pool.hist, bproj, aproj, w.a_log, w.dt_bias, pool.state, qkvz, w.norm_weight, &gated, layout.rows, layout.counts, layout.offs, &snaps.state, &snaps.hist];

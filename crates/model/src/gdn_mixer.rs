@@ -940,6 +940,10 @@ pub fn gdn_mixer_decode_pooled_fused_into(
             return true;
         }
     }
+    // An f32 pool streams as the split pair: the conv, then the recurrence built for the memory roof.
+    if stream_split_offered(g, shape, pool) && stream_split_step(g, shape, w, mixed_qkv, bproj, aproj, z, 0, pool, gated) {
+        return true;
+    }
     let wide = if pool.bf16 { gpu_core::Fused::GdnDecodePoolWideBf16 } else { gpu_core::Fused::GdnDecodePoolWide };
     if let Some(step) = pool.wide.then(|| g.fused_step(wide, &bufs, &params)).flatten() {
         g.submit(&[], &[step]);
@@ -948,9 +952,9 @@ pub fn gdn_mixer_decode_pooled_fused_into(
     // The exact body as two launches: the conv of every channel, then a block per (sequence, value head) for the rest. The
     // single-launch body keeps one block per key head (16 of the card's 132 SMs at one sequence) and runs 4x slower at 16.
     let (conv, recur) = if pool.bf16 { (gpu_core::Fused::GdnConvPoolBf16, gpu_core::Fused::GdnRecurPoolBf16) } else { (gpu_core::Fused::GdnConvPool, gpu_core::Fused::GdnRecurPool) };
-    if g.has_fused(conv) && g.has_fused(recur) && conv.serves(&[shape.nkh, gdn.h, gdn.b]) && recur.serves(&params) {
+    if g.has_fused(conv) && g.has_fused(recur) && conv.serves(&[shape.nkh, gdn.h, gdn.b, 0]) && recur.serves(&params) {
         let conv_out = g.storage_uninit(gdn.b as u64 * shape.conv_dim() as u64);
-        let conv_step = g.fused_step(conv, &[mixed_qkv, w.conv1d_weight, pool.hist, &conv_out, pool.rows], &[shape.nkh, gdn.h, gdn.b]);
+        let conv_step = g.fused_step(conv, &[mixed_qkv, w.conv1d_weight, pool.hist, &conv_out, pool.rows], &[shape.nkh, gdn.h, gdn.b, 0]);
         let recur_step = conv_step.is_some().then(|| g.fused_step(recur, &[&conv_out, bproj, aproj, w.a_log, w.dt_bias, pool.state, z, w.norm_weight, gated, pool.rows], &params)).flatten();
         if let (Some(conv_step), Some(recur_step)) = (conv_step, recur_step) {
             g.submit(&[], &[conv_step, recur_step]);
@@ -963,15 +967,12 @@ pub fn gdn_mixer_decode_pooled_fused_into(
     true
 }
 
-/// Whether the mixer reads `in_proj_qkv` and `in_proj_z` in place from one fused projection's rows: the streaming kernel of a
-/// bf16 pool ([`gdn_mixer_decode_pooled_qkvz`], and [`crate::gdn_verify::gdn_mixer_verify_pooled_qkvz`] over the same body)
-/// is the only build that takes a row stride, and it serves 128-wide key and value heads, a 4-tap conv and at most three value
-/// heads per key head.
-#[must_use]
-pub fn qkvz_in_place_offered(g: &Gpu, shape: &GdnMixerShape, pool: &GdnPoolRows) -> bool {
+/// Whether an f32 pool is decoded by the streaming split pair (`gdn_conv_pool`, then `gdn_recur_pool_stream`): the occupancy
+/// candidate is on (`pool.wide`, the serving default), the head shape is the block shape (128-wide key and value heads, a 4-tap
+/// conv, at most three value heads per key head) and the device is offered both kernels.
+pub(crate) fn stream_split_offered(g: &Gpu, shape: &GdnMixerShape, pool: &GdnPoolRows) -> bool {
     let gdn = shape.gdn;
-    pool.fuse
-        && pool.bf16
+    !pool.bf16
         && pool.wide
         && gdn.dk == 128
         && gdn.dv == 128
@@ -979,7 +980,41 @@ pub fn qkvz_in_place_offered(g: &Gpu, shape: &GdnMixerShape, pool: &GdnPoolRows)
         && shape.nkh != 0
         && gdn.h.is_multiple_of(shape.nkh)
         && (1..=3).contains(&shape.group())
-        && g.has_fused(gpu_core::Fused::GdnDecodePoolStreamBf16)
+        && g.has_fused(gpu_core::Fused::GdnConvPool)
+        && g.has_fused(gpu_core::Fused::GdnRecurPoolStream)
+}
+
+/// The streaming split pair over an f32 pool, writing the batch's `[b, value_dim]` output to the first rows of `gated`. `mixed`
+/// and `z` are two arrays (`stride` 0) or both the rows of one fused projection of `stride` columns, a row's qkv then its z.
+/// `false` (nothing submitted) where the device declines a launch.
+#[allow(clippy::too_many_arguments)]
+fn stream_split_step(g: &Gpu, shape: &GdnMixerShape, w: &GdnMixerWeights, mixed: &DeviceBuffer, bproj: &DeviceBuffer, aproj: &DeviceBuffer, z: &DeviceBuffer, stride: u32, pool: &GdnPoolRows, gated: &DeviceBuffer) -> bool {
+    let gdn = shape.gdn;
+    let conv_out = g.storage_uninit(gdn.b as u64 * shape.conv_dim() as u64);
+    let params = [shape.nkh, gdn.h, shape.group(), f(1e-6), f(shape.rms_eps), f(1.0f32 / (gdn.dk as f32).sqrt()), gdn.b, stride];
+    let conv_step = g.fused_step(gpu_core::Fused::GdnConvPool, &[mixed, w.conv1d_weight, pool.hist, &conv_out, pool.rows], &[shape.nkh, gdn.h, gdn.b, stride]);
+    let recur_step = conv_step.is_some().then(|| g.fused_step(gpu_core::Fused::GdnRecurPoolStream, &[&conv_out, bproj, aproj, w.a_log, w.dt_bias, pool.state, z, w.norm_weight, gated, pool.rows], &params)).flatten();
+    let (Some(conv_step), Some(recur_step)) = (conv_step, recur_step) else { return false };
+    g.submit(&[], &[conv_step, recur_step]);
+    true
+}
+
+/// Whether the mixer reads `in_proj_qkv` and `in_proj_z` in place from one fused projection's rows: the streaming kernels
+/// ([`gdn_mixer_decode_pooled_qkvz`], and [`crate::gdn_verify::gdn_mixer_verify_pooled_qkvz`] over the same bodies) are the only
+/// builds that take a row stride. A bf16 pool streams in one launch, an f32 pool as the conv then the recurrence; both serve
+/// 128-wide key and value heads, a 4-tap conv and at most three value heads per key head.
+#[must_use]
+pub fn qkvz_in_place_offered(g: &Gpu, shape: &GdnMixerShape, pool: &GdnPoolRows) -> bool {
+    let gdn = shape.gdn;
+    pool.fuse
+        && pool.wide
+        && gdn.dk == 128
+        && gdn.dv == 128
+        && shape.conv_kernel == 4
+        && shape.nkh != 0
+        && gdn.h.is_multiple_of(shape.nkh)
+        && (1..=3).contains(&shape.group())
+        && if pool.bf16 { g.has_fused(gpu_core::Fused::GdnDecodePoolStreamBf16) } else { stream_split_offered(g, shape, pool) }
 }
 
 /// The columns of a fused `in_proj_qkv | in_proj_z` row: the width of the one product, and the row stride the streaming kernels
@@ -998,9 +1033,13 @@ pub fn gdn_mixer_decode_pooled_qkvz(g: &Gpu, shape: &GdnMixerShape, w: &GdnMixer
         return None;
     }
     let gdn = shape.gdn;
+    let gated = g.storage_uninit(gdn.b as u64 * shape.value_dim() as u64);
+    if !pool.bf16 {
+        // The conv's `mixed` and the recurrence's `z` are this array, `z` read after the qkv columns of each row.
+        return stream_split_step(g, shape, w, qkvz, bproj, aproj, qkvz, qkvz_row_width(shape), pool, &gated).then_some(gated);
+    }
     let params = [shape.nkh, gdn.h, shape.group(), f(1e-6), f(shape.rms_eps), f(1.0f32 / (gdn.dk as f32).sqrt()), gdn.b, qkvz_row_width(shape)];
     // `qkvz` is bound twice: the kernel's `mixed` and `z` are this array, `z` read after the qkv columns of each row.
-    let gated = g.storage_uninit(gdn.b as u64 * shape.value_dim() as u64);
     let bufs = [qkvz, w.conv1d_weight, pool.hist, bproj, aproj, w.a_log, w.dt_bias, pool.state, qkvz, w.norm_weight, &gated, pool.rows];
     let step = g.fused_step(gpu_core::Fused::GdnDecodePoolStreamBf16, &bufs, &params)?;
     g.submit(&[], &[step]);

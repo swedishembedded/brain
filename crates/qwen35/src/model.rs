@@ -5350,7 +5350,9 @@ impl Qwen35 {
                                 scatter: pool_scatter,
                                 fuse: true,
                                 bf16: pool.bf16,
-                                wide: false,
+                                // The verify takes the plain decode's arithmetic: a streaming decode (f32 or bf16 pool) is verified by
+                                // the same body, so a verified row is bit for bit the step it stands for.
+                                wide: self.gdn_pool_wide.get(),
                             },
                             layout: model::gdn_verify::VerifyLayout { rows: &layout.rows, counts: &layout.counts, offs: &layout.offs, b: v.sequences() },
                             snaps: v.snapshots(l),

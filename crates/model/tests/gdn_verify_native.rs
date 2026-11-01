@@ -21,7 +21,8 @@
 //!
 //! The same claim over a pool that stores bf16: plain decode rounds the state and the conv window to bf16 after every
 //! token, so a verified row must too (the snapshots are the f32 widening of those bf16 values), and then greedy
-//! speculation is token for token plain greedy decoding.
+//! speculation is token for token plain greedy decoding. And over an f32 pool whose plain decode is the streaming
+//! recurrence (not the exact body): the verify runs that recurrence's own body, so each row is that plain step.
 
 use data::rng::{random_seed, Lcg};
 use model::gdn::GdnShape;
@@ -65,16 +66,26 @@ fn unpack_bf16(w: &[f32]) -> Vec<f32> {
 
 #[test]
 fn verify_rows_and_snapshots_equal_repeated_single_steps_and_commit_restores_them() {
-    verify_equals_single_steps(false);
+    verify_equals_single_steps(false, false);
 }
 
 /// Over bf16 pools the reference is the plain pooled decode (the streaming kernel a bf16 pool takes), one step a row.
 #[test]
 fn verify_rows_over_bf16_pools_equal_repeated_plain_decode_steps() {
-    verify_equals_single_steps(true);
+    verify_equals_single_steps(true, true);
 }
 
-fn verify_equals_single_steps(bf16: bool) {
+/// Over f32 pools with the occupancy candidates on (the serving default) the reference is the plain pooled decode, which
+/// streams: it agrees with the exact body only to f32 reassociation, so a verify that ran the exact body would drift from the
+/// plain decode it must reproduce.
+#[test]
+fn verify_rows_over_f32_pools_equal_repeated_plain_streaming_steps() {
+    verify_equals_single_steps(false, true);
+}
+
+/// `stream`: the pool is the serving default (`wide`), and the reference of a row is the plain pooled decode launch;
+/// off, the exact body (an f32 pool) is the reference.
+fn verify_equals_single_steps(bf16: bool, stream: bool) {
     let g = gpu_core::testgpu::dev(&[]);
     if !is_cuda(&g) {
         brain_testutil::skip_unavailable("native fused kernels need a CUDA device");
@@ -129,9 +140,9 @@ fn verify_equals_single_steps(bf16: bool) {
                 let t = off + row;
                 let slice = |v: &[f32], width: usize, name: &str| g.storage_init(name, &v[t * width..(t + 1) * width]);
                 let (mixed_t, bp_t, ap_t, z_t) = (slice(&mixed, conv_dim, "mixed"), slice(&bp, nvh as usize, "bp"), slice(&ap, nvh as usize, "ap"), slice(&z, value_dim, "z"));
-                let gated = if bf16 {
-                    // The plain bf16 decode: the pooled launch a bf16 pool takes (one sequence, pool row 0).
-                    let pool = GdnPoolRows { state: &st, hist: &hi, rows: &zero_row, gather: 0, scatter: 0, fuse: true, bf16: true, wide: true };
+                let gated = if stream {
+                    // The plain streaming decode: the pooled launch a serving pool takes (one sequence, pool row 0).
+                    let pool = GdnPoolRows { state: &st, hist: &hi, rows: &zero_row, gather: 0, scatter: 0, fuse: true, bf16, wide: true };
                     gdn_mixer_decode_pooled_fused(&g, &shape, &w, &mixed_t, &bp_t, &ap_t, &z_t, &pool)
                 } else {
                     gdn_mixer_decode_fused(&g, &shape, &w, &mixed_t, &bp_t, &ap_t, &z_t, &GdnStream { state: &st, hist: &hi })
@@ -153,7 +164,7 @@ fn verify_equals_single_steps(bf16: bool) {
         let rows_buf = u32s(&g, slots);
         let offs: Vec<u32> = counts.iter().scan(0u32, |acc, &c| { let o = *acc; *acc += c; Some(o) }).collect();
         let (counts_buf, offs_buf) = (u32s(&g, counts), u32s(&g, &offs));
-        let pool = GdnPoolRows { state: &pst, hist: &phi, rows: &rows_buf, gather: 0, scatter: 0, fuse: true, bf16, wide: bf16 };
+        let pool = GdnPoolRows { state: &pst, hist: &phi, rows: &rows_buf, gather: 0, scatter: 0, fuse: true, bf16, wide: stream };
         let snaps = GdnRowSnapshots::new(&g, &shape, n);
         let layout = VerifyLayout { rows: &rows_buf, counts: &counts_buf, offs: &offs_buf, b };
         let gated = gdn_mixer_verify_pooled_fused(
@@ -207,7 +218,7 @@ fn verify_equals_single_steps(bf16: bool) {
 
 /// The verify launch reading `in_proj_qkv` and `in_proj_z` from the one `[tokens, conv_dim + value_dim]` product of a fused
 /// projection leaves exactly the bits of the launch over the two separate arrays: the gated rows, the pool after the last
-/// row, and every snapshot.
+/// row, and every snapshot, for bf16 and f32 pools.
 #[test]
 fn verify_reads_qkv_and_z_in_place_from_one_fused_product() {
     let g = gpu_core::testgpu::dev(&[]);
@@ -217,7 +228,7 @@ fn verify_reads_qkv_and_z_in_place_from_one_fused_product() {
     }
     let (dk, dv, kw) = (128u32, 128u32, 4u32);
     let cases: [GdnCase; 3] = [(2, 3, &[3, 1, 5], 5, &[3, 0, 2]), (4, 2, &[8, 2, 1, 4], 6, &[5, 1, 0, 3]), (16, 3, &[2, 4, 3, 1], 5, &[4, 0, 2, 1])];
-    for (case, &(nkh, group, counts, pool_rows, slots)) in cases.iter().enumerate() {
+    for (case, (&(nkh, group, counts, pool_rows, slots), bf16)) in cases.iter().flat_map(|c| [(c, true), (c, false)]).enumerate() {
         let nvh = nkh * group;
         let b = counts.len() as u32;
         let n: u32 = counts.iter().sum();
@@ -225,7 +236,7 @@ fn verify_reads_qkv_and_z_in_place_from_one_fused_product() {
         let (value_dim, conv_dim) = (shape.value_dim() as usize, shape.conv_dim() as usize);
         let state_len = (nvh * dk * dv) as usize;
         let hist_len = conv_dim * (kw as usize - 1);
-        let ctx = format!("case {case}: nkh={nkh} group={group} counts={counts:?}");
+        let ctx = format!("case {case}: nkh={nkh} group={group} counts={counts:?} bf16={bf16}");
         let mut r = Lcg::new(random_seed());
         let conv_w = g.storage_init("conv_w", &rnd(&mut r, conv_dim * kw as usize, 0.5));
         let a_log = g.storage_init("a_log", &rnd(&mut r, nvh as usize, 0.5));
@@ -239,15 +250,17 @@ fn verify_reads_qkv_and_z_in_place_from_one_fused_product() {
         let bp = g.storage_init("bp", &rnd(&mut r, nn * nvh as usize, 1.0));
         let ap = g.storage_init("ap", &rnd(&mut r, nn * nvh as usize, 1.0));
         let qkvz: Vec<f32> = (0..nn).flat_map(|row| mixed[row * conv_dim..(row + 1) * conv_dim].iter().chain(&z[row * value_dim..(row + 1) * value_dim]).copied()).collect();
-        let state0 = unpack_bf16(&pack_bf16(&rnd(&mut r, pool_rows as usize * state_len, 0.3)));
-        let hist0 = unpack_bf16(&pack_bf16(&rnd(&mut r, pool_rows as usize * hist_len, 0.3)));
+        let (state0, hist0) = (rnd(&mut r, pool_rows as usize * state_len, 0.3), rnd(&mut r, pool_rows as usize * hist_len, 0.3));
+        let (state0, hist0) = if bf16 { (unpack_bf16(&pack_bf16(&state0)), unpack_bf16(&pack_bf16(&hist0))) } else { (state0, hist0) };
+        let store = |name: &str, v: &[f32]| if bf16 { g.storage_init(name, &pack_bf16(v)) } else { g.storage_init(name, v) };
+        let words = |n: usize| if bf16 { n / 2 } else { n };
         let rows_buf = u32s(&g, slots);
         let offs: Vec<u32> = counts.iter().scan(0u32, |acc, &c| { let o = *acc; *acc += c; Some(o) }).collect();
         let (counts_buf, offs_buf) = (u32s(&g, counts), u32s(&g, &offs));
         let layout = VerifyLayout { rows: &rows_buf, counts: &counts_buf, offs: &offs_buf, b };
         let run = |in_place: bool| {
-            let (pst, phi) = (g.storage_init("pool_state", &pack_bf16(&state0)), g.storage_init("pool_hist", &pack_bf16(&hist0)));
-            let pool = GdnPoolRows { state: &pst, hist: &phi, rows: &rows_buf, gather: 0, scatter: 0, fuse: true, bf16: true, wide: true };
+            let (pst, phi) = (store("pool_state", &state0), store("pool_hist", &hist0));
+            let pool = GdnPoolRows { state: &pst, hist: &phi, rows: &rows_buf, gather: 0, scatter: 0, fuse: true, bf16, wide: true };
             let snaps = GdnRowSnapshots::new(&g, &shape, n);
             let gated = if in_place {
                 gdn_mixer_verify_pooled_qkvz(&g, &shape, &w, &g.storage_init("qkvz", &qkvz), &bp, &ap, &pool, &layout, n, &snaps)
@@ -258,8 +271,8 @@ fn verify_reads_qkv_and_z_in_place_from_one_fused_product() {
             g.poll_wait();
             (
                 bits(g.read(&gated, nn * value_dim)),
-                bits(g.read(&pst, pool_rows as usize * state_len / 2)),
-                bits(g.read(&phi, pool_rows as usize * hist_len / 2)),
+                bits(g.read(&pst, pool_rows as usize * words(state_len))),
+                bits(g.read(&phi, pool_rows as usize * words(hist_len))),
                 bits(g.read(&snaps.state, nn * state_len)),
                 bits(g.read(&snaps.hist, nn * hist_len)),
             )
@@ -273,7 +286,7 @@ fn verify_reads_qkv_and_z_in_place_from_one_fused_product() {
     }
 }
 
-/// Back-to-back launches of the streaming decode and verify kernels over a fused projection's rows, at the production head
+/// Back-to-back launches of the streaming decode and verify kernels (bf16 and f32 pools) over a fused projection's rows, at the production head
 /// counts and the decode batch widths: an uninstrumented timing run, since a fault of a shared-memory ring showed only under
 /// back-to-back launches (`#[ignore]`: a stress run of seconds, then `dmesg | grep -i xid` stays empty).
 ///
@@ -300,7 +313,14 @@ fn qkvz_back_to_back_stress() {
     let norm_w = g.storage_init("norm_w", &rnd(&mut r, dv as usize, 0.5));
     let ones = g.storage_init("ones", &vec![1.0f32; dk as usize]);
     let w = GdnMixerWeights { conv1d_weight: &conv_w, a_log: &a_log, dt_bias: &dt_bias, norm_weight: &norm_w, ones_khd: &ones };
-    let (pst, phi) = (g.storage_init("pool_state", &pack_bf16(&rnd(&mut r, pool_rows as usize * state_len, 0.3))), g.storage_init("pool_hist", &pack_bf16(&rnd(&mut r, pool_rows as usize * hist_len, 0.3))));
+    let pools: Vec<(bool, gpu_core::DeviceBuffer, gpu_core::DeviceBuffer)> = [true, false]
+        .into_iter()
+        .map(|bf16| {
+            let (state, hist) = (rnd(&mut r, pool_rows as usize * state_len, 0.3), rnd(&mut r, pool_rows as usize * hist_len, 0.3));
+            let (state, hist) = if bf16 { (pack_bf16(&state), pack_bf16(&hist)) } else { (state, hist) };
+            (bf16, g.storage_init("pool_state", &state), g.storage_init("pool_hist", &hist))
+        })
+        .collect();
     let slots: Vec<u32> = (0..pool_rows).collect();
     let rows_buf = u32s(&g, &slots);
     for round in 0..40u32 {
@@ -311,13 +331,15 @@ fn qkvz_back_to_back_stress() {
             let (counts_buf, offs_buf) = (u32s(&g, &counts), u32s(&g, &offs));
             let qkvz = g.storage_init("qkvz", &rnd(&mut r, n as usize * (conv_dim + value_dim), 1.0));
             let (bp, ap) = (g.storage_init("bp", &rnd(&mut r, n as usize * nvh as usize, 1.0)), g.storage_init("ap", &rnd(&mut r, n as usize * nvh as usize, 1.0)));
-            let pool = GdnPoolRows { state: &pst, hist: &phi, rows: &rows_buf, gather: 0, scatter: 0, fuse: true, bf16: true, wide: true };
             let snaps = GdnRowSnapshots::new(&g, &shape, n);
             let layout = VerifyLayout { rows: &rows_buf, counts: &counts_buf, offs: &offs_buf, b };
-            for _ in 0..8 {
-                let decode_shape = GdnMixerShape { gdn: GdnShape { b, ..shape.gdn }, ..shape };
-                let _ = gdn_mixer_decode_pooled_qkvz(&g, &decode_shape, &w, &qkvz, &bp, &ap, &pool).expect("streaming decode offered");
-                let _ = gdn_mixer_verify_pooled_qkvz(&g, &shape, &w, &qkvz, &bp, &ap, &pool, &layout, n, &snaps).expect("streaming verify offered");
+            for (bf16, pst, phi) in &pools {
+                let pool = GdnPoolRows { state: pst, hist: phi, rows: &rows_buf, gather: 0, scatter: 0, fuse: true, bf16: *bf16, wide: true };
+                for _ in 0..8 {
+                    let decode_shape = GdnMixerShape { gdn: GdnShape { b, ..shape.gdn }, ..shape };
+                    let _ = gdn_mixer_decode_pooled_qkvz(&g, &decode_shape, &w, &qkvz, &bp, &ap, &pool).expect("streaming decode offered");
+                    let _ = gdn_mixer_verify_pooled_qkvz(&g, &shape, &w, &qkvz, &bp, &ap, &pool, &layout, n, &snaps).expect("streaming verify offered");
+                }
             }
             g.poll_wait();
         }
