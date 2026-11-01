@@ -270,6 +270,7 @@ fn clone_batch<'a>(b: &Batch<'a>) -> Batch<'a> {
             Batch::Multimodal { tokens, targets, image_embeds, image_rows }
         }
         Batch::LmWeighted { tokens, targets, weights } => Batch::LmWeighted { tokens, targets, weights },
+        Batch::LmExamples { split, tokens, targets, examples } => Batch::LmExamples { split, tokens, targets, examples },
     }
 }
 

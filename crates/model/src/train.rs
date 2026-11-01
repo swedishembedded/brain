@@ -12,7 +12,7 @@ use data::rng::Rng;
 use crate::objective::{Objective, StepVerdict};
 use crate::{Model, ModelConfig};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::Batch;
+use crate::{Batch, Split};
 #[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashMap;
 use std::path::Path;
@@ -252,8 +252,35 @@ pub fn load_dataset_with_itos(
     dir: &Path,
     opts: &FitOpts,
 ) -> std::io::Result<(TokenDataset, TokenDataset, data::loader::BatchConfig, u32, Option<Vec<char>>)> {
+    refuse_images(dir)?;
     let l = load(dir, opts)?;
     Ok((l.train, l.val, l.batch_cfg, l.vocab, l.itos))
+}
+
+/// [`load_dataset_with_itos`] for a trainer that reads the dataset's images ([`data::chat_media`]) through the
+/// model ([`Batch::LmExamples`]). The other loaders refuse a dataset with images: trained as text, a conversation
+/// about a picture would teach the model to answer without looking at one.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::type_complexity)]
+pub fn load_dataset_with_images(
+    dir: &Path,
+    opts: &FitOpts,
+) -> std::io::Result<(TokenDataset, TokenDataset, data::loader::BatchConfig, u32, Option<Vec<char>>)> {
+    let l = load(dir, opts)?;
+    Ok((l.train, l.val, l.batch_cfg, l.vocab, l.itos))
+}
+
+/// Refuse a dataset directory that holds images: the caller's trainer would train on its text alone.
+#[cfg(not(target_arch = "wasm32"))]
+fn refuse_images(dir: &Path) -> std::io::Result<()> {
+    let split = ["train", "val"].into_iter().find(|split| dir.join(format!("{split}.img.bin")).exists());
+    match split {
+        Some(split) => Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!("{}: the {split} split holds images, and this trainer reads text only; train it with a model that reads images (the qwen35 LoRA fine-tune of a checkpoint with a vision tower)", dir.display()),
+        )),
+        None => Ok(()),
+    }
 }
 
 /// Where each example of `split` starts: its `<split>.ex.bin` index when the
@@ -471,6 +498,8 @@ struct CausalLm {
     drawn_records: u64,
     /// What the micro-steps since the last [`Objective::step_work`] measured.
     work: Option<StepWork>,
+    /// Send each batch as [`Batch::LmExamples`], naming the example in every row, instead of [`Batch::Lm`].
+    tag_examples: bool,
 }
 
 /// One drawn training batch: its rows, their targets, and how many of the rows'
@@ -481,6 +510,8 @@ struct Drawn {
     x: Vec<u32>,
     y: Vec<i32>,
     useful_tokens: u64,
+    /// The example laid out in each row; `None` for a row of padding or of a stream that has no examples.
+    picks: Vec<Option<usize>>,
 }
 
 /// The token half of a micro-step's [`StepWork`]: what the drawn batch holds.
@@ -558,6 +589,18 @@ pub fn causal_lm<M: Model>(
     CausalLm::new(train, val, batch_cfg, itos)
 }
 
+/// [`causal_lm`] whose batches name the dataset example in every row ([`Batch::LmExamples`]), for a model that
+/// reads inputs of its own per example (the images of a vision-language record).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn causal_lm_examples<M: Model>(
+    train: TokenDataset,
+    val: TokenDataset,
+    batch_cfg: BatchConfig,
+    itos: Option<Vec<char>>,
+) -> impl Objective<M> {
+    CausalLm { tag_examples: true, ..CausalLm::new(train, val, batch_cfg, itos) }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 impl<M: Model> Objective<M> for CausalLm {
     fn regime(&self) -> &'static str {
@@ -597,7 +640,7 @@ impl<M: Model> Objective<M> for CausalLm {
         let clock = std::time::Instant::now();
         let drawn = self.draw(rng);
         let targets = targets_to_u32(&drawn.y);
-        model.set_batch(Batch::Lm { tokens: &drawn.x, targets: &targets });
+        self.upload(model, Split::Train, &drawn.x, &targets, &drawn.picks);
         let mut work = work_of(&drawn, &targets);
         work.prepare_secs = clock.elapsed().as_secs_f64();
         let pass = std::time::Instant::now();
@@ -625,7 +668,7 @@ impl<M: Model> Objective<M> for CausalLm {
         let drawn: Vec<Drawn> = (0..k).map(|_| self.draw(rng)).collect();
         let targets: Vec<Vec<u32>> = drawn.iter().map(|d| targets_to_u32(&d.y)).collect();
         let mut work = StepWork { useful_tokens: drawn.iter().map(|d| d.useful_tokens).sum(), supervised_positions: targets.iter().flatten().filter(|&&t| t != IGNORE).count() as u64, ..StepWork::default() };
-        if k > 1 {
+        if k > 1 && !self.tag_examples {
             let batches: Vec<Batch> = drawn.iter().zip(&targets).map(|(d, y)| Batch::Lm { tokens: &d.x, targets: y }).collect();
             let drew = clock.elapsed().as_secs_f64();
             let pass = std::time::Instant::now();
@@ -644,7 +687,7 @@ impl<M: Model> Objective<M> for CausalLm {
         let mut total = 0.0;
         for (drawn, targets) in drawn.iter().zip(&targets) {
             let pass = std::time::Instant::now();
-            model.set_batch(Batch::Lm { tokens: &drawn.x, targets });
+            self.upload(model, Split::Train, &drawn.x, targets, &drawn.picks);
             if mean_supervised > 0.0 {
                 if let Some(objectives) = model.token_objectives() {
                     objectives.set_loss_denominator(mean_supervised);
@@ -668,9 +711,9 @@ impl<M: Model> Objective<M> for CausalLm {
     }
 
     fn loss_probe(&mut self, model: &M, rng: &mut Rng) -> f32 {
-        let (x, y) = self.train.get_batch(&self.batch_cfg, rng);
+        let (x, y, picks) = self.train.get_batch_examples(&self.batch_cfg, rng);
         let targets = targets_to_u32(&y);
-        model.set_batch(Batch::Lm { tokens: &x, targets: &targets });
+        self.upload(model, Split::Train, &x, &targets, &picks);
         model.forward()
     }
 
@@ -686,9 +729,9 @@ impl<M: Model> Objective<M> for CausalLm {
         }
         let mut total = 0.0;
         for _ in 0..batches.max(1) {
-            let (x, y) = self.val.get_batch(&self.batch_cfg, rng);
+            let (x, y, picks) = self.val.get_batch_examples(&self.batch_cfg, rng);
             let targets = targets_to_u32(&y);
-            model.set_batch(Batch::Lm { tokens: &x, targets: &targets });
+            self.upload(model, Split::Val, &x, &targets, &picks);
             total += model.forward();
         }
         Some(total / batches.max(1) as f32)
@@ -702,7 +745,7 @@ impl<M: Model> Objective<M> for CausalLm {
 #[cfg(not(target_arch = "wasm32"))]
 impl CausalLm {
     fn new(train: TokenDataset, val: TokenDataset, batch_cfg: BatchConfig, itos: Option<Vec<char>>) -> CausalLm {
-        CausalLm { train, val, batch_cfg, itos, order: None, shard: None, drawn_records: 0, work: None }
+        CausalLm { train, val, batch_cfg, itos, order: None, shard: None, drawn_records: 0, work: None, tag_examples: false }
     }
 
     /// This rank's next training batch: `batch_size` records of the stream that
@@ -739,6 +782,15 @@ impl CausalLm {
         }
     }
 
+    /// Load a drawn batch into `model`: as [`Batch::LmExamples`] when the run names the examples, else [`Batch::Lm`].
+    fn upload<M: Model>(&self, model: &M, split: Split, tokens: &[u32], targets: &[u32], picks: &[Option<usize>]) {
+        if self.tag_examples {
+            model.set_batch(Batch::LmExamples { split, tokens, targets, examples: picks });
+        } else {
+            model.set_batch(Batch::Lm { tokens, targets });
+        }
+    }
+
     /// The next batch of the whole (unsharded) stream: the next examples of
     /// the epoch order, else (before the run has begun, or for a stream of
     /// tokens) a random draw.
@@ -749,10 +801,10 @@ impl CausalLm {
                 return drawn;
             }
         }
-        let (x, y) = self.train.get_batch(&self.batch_cfg, rng);
+        let (x, y, picks) = self.train.get_batch_examples(&self.batch_cfg, rng);
         // A window drawn from a token stream is all real tokens: the stream has
         // no record boundary to pad at.
-        Drawn { useful_tokens: x.len() as u64, x, y }
+        Drawn { useful_tokens: x.len() as u64, x, y, picks }
     }
 
     /// The example batch `picks` names, with the number of its rows' own tokens.
@@ -760,7 +812,7 @@ impl CausalLm {
     fn draw_examples(&self, picks: &[Option<usize>]) -> Option<Drawn> {
         let (x, y) = self.train.example_batch(&self.batch_cfg, picks)?;
         let useful_tokens = self.train.example_lengths(picks)?.iter().sum::<usize>() as u64;
-        Some(Drawn { x, y, useful_tokens })
+        Some(Drawn { x, y, useful_tokens, picks: picks.to_vec() })
     }
 
     /// The mean per-position loss over every supervised position of the
@@ -777,7 +829,8 @@ impl CausalLm {
             let supervised = y.iter().filter(|&&t| t != data::loader::IGNORE).count();
             if supervised > 0 {
                 let targets = targets_to_u32(&y);
-                model.set_batch(Batch::Lm { tokens: &x, targets: &targets });
+                let picks: Vec<Option<usize>> = (first..first + rows).map(Some).collect();
+                self.upload(model, Split::Val, &x, &targets, &picks);
                 sum += f64::from(model.forward()) * supervised as f64;
                 positions += supervised;
             }
@@ -1941,6 +1994,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
 /// of which exists on the wasm32 inference build.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn fit<M: Model>(dir: &Path, cfg: M::Config, opts: &FitOpts, out: Option<&Path>) -> std::io::Result<(f32, f32)> {
+    refuse_images(dir)?;
     let loaded = load(dir, opts)?;
     let model = build_or_resume::<M>(cfg, opts, out, loaded.vocab);
     let obj = CausalLm::new(loaded.train, loaded.val, loaded.batch_cfg, loaded.itos);
@@ -1971,6 +2025,7 @@ pub fn fit_from<M: Model>(
     out: Option<&Path>,
     init: &std::collections::HashMap<String, Vec<f32>>,
 ) -> std::io::Result<(f32, f32)> {
+    refuse_images(dir)?;
     let loaded = load(dir, opts)?;
     // The MODEL's vocabulary wins, not the dataset's. `fit` takes the
     // dataset's because it is sizing a model that does not exist yet; here
@@ -2239,7 +2294,12 @@ mod tests {
         /// The first supervised target of each batch run forward, in order:
         /// which example it was, when each example's targets are its own.
         drawn: std::rc::Rc<std::cell::RefCell<Vec<u32>>>,
+        /// The split and examples named by each batch that named its examples, in order.
+        named: std::rc::Rc<std::cell::RefCell<Vec<NamedBatch>>>,
     }
+
+    /// A batch that named its examples: the split and the example in each row.
+    type NamedBatch = (Split, Vec<Option<usize>>);
 
     #[derive(Clone)]
     struct RecorderCfg;
@@ -2267,7 +2327,7 @@ mod tests {
     impl Model for Recorder {
         type Config = RecorderCfg;
         fn new(_cfg: RecorderCfg, _b: u32, _t: u32, _init: &HashMap<String, Vec<f32>>) -> Self {
-            Recorder { w: std::cell::RefCell::new(vec![0.0]), moments: std::cell::RefCell::new((vec![0.0], vec![0.0])), targets: Default::default(), saves: Default::default(), adams: Default::default(), denominators: Default::default(), drawn: Default::default(), lrs: Default::default(), indices: Default::default() }
+            Recorder { w: std::cell::RefCell::new(vec![0.0]), moments: std::cell::RefCell::new((vec![0.0], vec![0.0])), targets: Default::default(), saves: Default::default(), adams: Default::default(), denominators: Default::default(), drawn: Default::default(), named: Default::default(), lrs: Default::default(), indices: Default::default() }
         }
         fn init_weights(_cfg: &RecorderCfg, _seed: u64) -> HashMap<String, Vec<f32>> {
             HashMap::new()
@@ -2276,8 +2336,13 @@ mod tests {
             &RecorderCfg
         }
         fn set_batch(&self, b: Batch) {
-            if let Batch::Lm { targets, .. } = b {
-                *self.targets.borrow_mut() = targets.to_vec();
+            match b {
+                Batch::Lm { targets, .. } => *self.targets.borrow_mut() = targets.to_vec(),
+                Batch::LmExamples { split, targets, examples, .. } => {
+                    *self.targets.borrow_mut() = targets.to_vec();
+                    self.named.borrow_mut().push((split, examples.to_vec()));
+                }
+                _ => {}
             }
         }
         fn token_objectives(&self) -> Option<&dyn TokenObjectives> {
@@ -3070,6 +3135,63 @@ mod tests {
         let mut rng = Rng::new(data::rng::random_seed());
         Objective::<Recorder>::micro_steps(&mut obj, &model, &mut rng, 2);
         assert_eq!(*model.denominators.borrow(), vec![4.0, 4.0]);
+    }
+
+    /// A run that asks for it sends each batch with the example in every row, training and held-out alike; the
+    /// others send plain batches.
+    #[test]
+    fn a_run_that_asks_names_the_example_in_every_row_of_every_batch() {
+        let model = Recorder::new(RecorderCfg, 2, 4, &HashMap::new());
+        let mut obj = CausalLm { tag_examples: true, ..examples_objective_batched(&[4; 3], 4, 2) };
+        Objective::<Recorder>::begin(&mut obj, 7, 0);
+        let mut rng = Rng::new(data::rng::random_seed());
+        Objective::<Recorder>::micro_steps(&mut obj, &model, &mut rng, 2);
+        let named = model.named.borrow().clone();
+        assert_eq!(named.len(), 2, "one batch per micro-step, overlapped or not");
+        assert!(named.iter().all(|(split, rows)| *split == Split::Train && rows.len() == 2 && rows.iter().all(Option::is_some)));
+        assert_eq!(*model.drawn.borrow(), vec![10 + named[0].1[0].unwrap() as u32, 10 + named[1].1[0].unwrap() as u32], "the named example is the one in the row");
+
+        model.named.borrow_mut().clear();
+        Objective::<Recorder>::eval(&mut obj, &model, &mut rng, 0);
+        assert_eq!(*model.named.borrow(), vec![(Split::Val, vec![Some(0), Some(1)]), (Split::Val, vec![Some(2), Some(3)])], "the held-out split is walked in order; the example past the last is a row of padding");
+
+        // The loss probe and a random held-out draw take a window of one example per row, and name it too.
+        let one = Recorder::new(RecorderCfg, 1, 4, &HashMap::new());
+        let mut single = CausalLm { tag_examples: true, ..examples_objective(&[4; 3], 4) };
+        for _ in 0..8 {
+            let probed = Objective::<Recorder>::loss_probe(&mut single, &one, &mut rng);
+            let evaluated = Objective::<Recorder>::eval(&mut single, &one, &mut rng, 1).unwrap();
+            let named = one.named.borrow();
+            let (probe, eval) = (&named[named.len() - 2], &named[named.len() - 1]);
+            assert_eq!((probe.0, eval.0), (Split::Train, Split::Val));
+            assert_eq!(probed, 10.0 + probe.1[0].expect("a probe row is an example") as f32, "the example named is the one in the row");
+            assert_eq!(evaluated, 10.0 + eval.1[0].expect("a held-out row is an example") as f32);
+        }
+
+        let plain = Recorder::new(RecorderCfg, 2, 4, &HashMap::new());
+        let mut untagged = examples_objective_batched(&[4; 3], 4, 2);
+        Objective::<Recorder>::begin(&mut untagged, 7, 0);
+        Objective::<Recorder>::micro_steps(&mut untagged, &plain, &mut rng, 1);
+        assert!(plain.named.borrow().is_empty());
+    }
+
+    /// A dataset with images is not loaded by a trainer that would drop them.
+    #[test]
+    fn only_a_trainer_that_reads_images_loads_a_dataset_that_has_them() {
+        let dir = tmp("images");
+        let mut split = data::chat::EncodedSplit::default();
+        split.push_with_media(&[1, 2, 3], &[false, false, true], &[b"img".as_slice().into()]);
+        for name in ["train", "val"] {
+            data::chat::write_split(&dir, name, &split).unwrap();
+        }
+        std::fs::write(dir.join("meta.json"), data::binio::Meta::vocab_only(8)).unwrap();
+        let opts = FitOpts { batch_size: 1, block_size: 4, ..Default::default() };
+        let err = load_dataset_with_itos(&dir, &opts).map(|_| ()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        assert!(err.to_string().contains("train split holds images"), "{err}");
+        load_dataset_with_images(&dir, &opts).expect("a trainer that reads images loads it");
+        data::chat::write_split(&dir, "train", &data::chat::EncodedSplit::default()).unwrap();
+        data::chat::write_split(&dir, "val", &data::chat::EncodedSplit::default()).unwrap();
     }
 
     fn tmp(name: &str) -> std::path::PathBuf {

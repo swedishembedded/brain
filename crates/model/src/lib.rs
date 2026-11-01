@@ -131,7 +131,7 @@ pub use trainprec::{apply_train_precision, OptimizerParts, OptimizerState, Resid
 pub use score::{score_base, score_dataset, score_tuned, supervised_positions, ScoredSet};
 pub use train::{cosine_lr, generate, FitOpts, LrSchedule, IGNORE};
 #[cfg(not(target_arch = "wasm32"))]
-pub use train::{build_or_resume, causal_lm, fit, fit_controlled, fit_controlled_sharded, fit_controlled_sync, fit_distributed, fit_from, fit_with, load_dataset, load_dataset_with_itos, AdapterSnapshots, CheckpointIdentity, FitControl, FitReport, GradSync, StepReport, StepWork};
+pub use train::{build_or_resume, causal_lm, causal_lm_examples, fit, fit_controlled, fit_controlled_sharded, fit_controlled_sync, fit_distributed, fit_from, fit_with, load_dataset, load_dataset_with_images, load_dataset_with_itos, AdapterSnapshots, CheckpointIdentity, FitControl, FitReport, GradSync, StepReport, StepWork};
 
 /// What a batch looks like for a given model. Decoder-LM and seq2seq differ in
 /// whether there is a separate source sequence; this enum keeps `set_batch`
@@ -189,6 +189,18 @@ pub enum Batch<'a> {
     /// any other unsupported `Batch` variant (panic, matching the existing
     /// `Batch::Lm`-only models' own wildcard arm).
     LmWeighted { tokens: &'a [u32], targets: &'a [u32], weights: &'a [f32] },
+    /// [`Batch::Lm`] whose rows are dataset examples that bring inputs of their own beyond tokens (the images of a
+    /// vision-language record): `examples[i]` names the example of `split` laid out in row `i` (`None`: a row of
+    /// padding). The trainer sends this variant only when the run asks for it
+    /// ([`train::causal_lm_examples`]); a model that reads such inputs looks them up by `(split, example)`.
+    LmExamples { split: Split, tokens: &'a [u32], targets: &'a [u32], examples: &'a [Option<usize>] },
+}
+
+/// The part of a prepared dataset a batch is drawn from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Split {
+    Train,
+    Val,
 }
 
 /// The objective head + loss a model's final stage realizes (ADR §2.3). Selected

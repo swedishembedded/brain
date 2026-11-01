@@ -80,6 +80,11 @@ impl PromptEmbeds {
         self.rotary.as_deref()
     }
 
+    /// The rows, `len() * width()` floats: row `i` stands at [`Self::positions`]`[i]`.
+    pub fn rows(&self) -> &[f32] {
+        &self.rows
+    }
+
     /// Floats per row.
     pub fn width(&self) -> usize {
         self.width

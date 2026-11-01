@@ -344,6 +344,17 @@ impl TokenDataset {
         (x, y)
     }
 
+    /// [`TokenDataset::get_batch`], plus the example each row holds (`None` for every row of a plain token stream,
+    /// whose rows are windows of no example).
+    pub fn get_batch_examples(&self, cfg: &BatchConfig, rng: &mut Rng) -> (Vec<u32>, Vec<i32>, Vec<Option<usize>>) {
+        let (x, y, starts) = self.sample_windows(cfg, rng);
+        let picks = match &self.examples {
+            Some(ex) => starts.iter().map(|start| ex.bounds.binary_search_by_key(start, |&(a, _)| a).ok()).collect(),
+            None => vec![None; cfg.batch_size],
+        };
+        (x, y, picks)
+    }
+
     /// [`TokenDataset::get_batch`], plus the per-position reward/advantage
     /// weight (`w[b*block + t]`, matching `x`/`y`'s layout) for `crates/rl`'s
     /// weighted training driver - `1.0` everywhere when this dataset carries
