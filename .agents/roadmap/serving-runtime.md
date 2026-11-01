@@ -525,6 +525,15 @@ Mixed-iteration idle (knowledge 392, 2026-10-30): a prompt start no longer waits
   Open: the epilogue's 16 fences against the reference's one (STSM batch, one TMA store a tile), the reference's 256 x 128 tile with two 64-row waves a warpgroup, and the multicast again on
   top of the scale change.
 
+- 2026-11-01 (FP8 prefill GEMM round 2, knowledge 411): measured interleaved against the reference on one card, `matmul_fp8_wgmma_tma_n256` (f32 out) is at or above it at 2048 / 4096 / 8192 rows on
+  down, qkv (10240, 12288), out and gdn-in, level on gate/up at 4096 and 8192 rows, and 8 % behind on gate/up at 2048 rows (1145-1170 against 1272 TFLOPS); the reference's own figure moves 5-20 % between runs. The card
+  holds 1.27 GHz under this load (ncu `--clock-control none`) at 7.4 TB/s of L2, so the kernel is bound by energy and traffic, not by tensor-pipe idle time. Landed: the last part-filled round of the persistent grid
+  split into 128-column halves (`wgmma m64n128k32`) when at most half the grid is needed (ncu base clock 2048 x 17408 x 5120: 387.5 -> 344.8 us, tensor pipe 72.3 -> 83.8 %; probe down 2048 rows 1121 -> 1204, out 1028 -> 1175 TFLOPS;
+  other shapes unchanged); the tuner's admission check now poisons the shared output buffer (an element a candidate never stored used to pass on an earlier candidate's value); `prefill_tma_back_to_back_stress`
+  (13 minutes, no new Xid; compute-sanitizer memcheck / racecheck / synccheck clean on the split shape); `qwen35_fp8_parity` 98.05 % / KL 3.09e-3 inside the recorded spread. Served A/B (gpu1, SPEC unset, two interleaved rounds): 8K x 1 mean
+  TTFT 571.7 / 574.3 -> 572.4 / 560.0 ms, 16K x 1 1168.0 / 1169.5 -> 1182.9 / 1162.5, 8K x 16 314.7 / 314.1 -> 310.1 / 315.0 tok/s: no change outside the spread. Open: gate/up at 2048 rows, the served 2048-row
+  chunk running 8-20 % over its probe figure, tails over half the grid (down / qkv at 4096 rows), and the multicast measured at the held clock instead of the base clock.
+
 - 2026-11-01 (native-attention memory charge, FP8 tuning grid): the plan charged CUDA decode the portable kernels' four score strips a row (19.4 GiB
   held back at a 737K pool) and nothing for the staged prefill's widened-key buffer; `ServingShape::native_attention` now charges one strip's worth
   a row (measured 16 rows 547 / 686 MiB at 8K / 100K) plus the staging (`flash_prefill_staging_bytes`), and the real-allocation test covers both
