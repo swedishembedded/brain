@@ -151,26 +151,49 @@ fn step_buf_shaped_result_is_byte_identical_to_step() {
     }
 }
 
-/// `BRAIN_NO_KERNEL_UPGRADE=1` must pin `step_buf_shaped` back onto the
-/// registered kernel too - the shape hint is only ever a hint for the seam,
-/// never a second dispatch path around it.
+/// `gpu_core::set_kernel_upgrade(false)` must pin `step_buf_shaped` back onto the registered kernel too - the shape hint
+/// is only ever a hint for the seam, never a second dispatch path around it. Checked in a child process of this binary
+/// ([`with_the_upgrade_off_step_buf_shaped_runs_the_registered_kernel`]): the switch is process-wide.
 #[test]
-fn the_env_switch_disables_step_buf_shaped_too() {
+fn the_switch_disables_step_buf_shaped_too() {
     let exe = std::env::current_exe().expect("test binary path");
     let out = std::process::Command::new(exe)
-        .args(["step_buf_shaped_reaches_the_bucket_ladder", "--exact", "--nocapture"])
-        .env("BRAIN_NO_KERNEL_UPGRADE", "1")
+        .args(["with_the_upgrade_off_step_buf_shaped_runs_the_registered_kernel", "--exact", "--ignored", "--nocapture"])
         .output()
-        .expect("re-run this test binary with the upgrade disabled");
-    let text =
-        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    assert!(
-        !out.status.success(),
-        "with BRAIN_NO_KERNEL_UPGRADE=1 the bucket ladder must be absent, so the assertion above \
-         must FAIL - if it passed, the switch no longer disables step_buf_shaped:\n{text}"
-    );
-    assert!(
-        text.contains("wrong bucket dispatched") || text.contains("skip"),
-        "the failure must be the ladder assertion, not some unrelated breakage:\n{text}"
-    );
+        .expect("re-run this test binary for the child test");
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "with the upgrade off step_buf_shaped must run the registered kernel:\n{text}");
+    assert!(text.contains("1 passed"), "the child test must have run:\n{text}");
+}
+
+/// The child of [`the_switch_disables_step_buf_shaped_too`]: the upgrade switched off before this process builds its
+/// device, every shape dispatched through `step_buf_shaped` runs the registered kernel.
+#[test]
+#[ignore = "changes a process-wide switch: run in its own process by the_switch_disables_step_buf_shaped_too"]
+fn with_the_upgrade_off_step_buf_shaped_runs_the_registered_kernel() {
+    gpu_core::set_kernel_upgrade(false);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    if !gpu.caps().workgroup_reductions {
+        brain_testutil::skip_unavailable("matmul_gemv is not selectable without workgroup reductions");
+        return;
+    }
+    if !gpu.set_kernel_timing(true) {
+        brain_testutil::skip_unavailable("this backend cannot time individual kernels");
+        return;
+    }
+    let (k, n) = (128u32, 64u32);
+    for m in [1u32, 3, 32] {
+        let x = gpu.storage_init("x", &fill((m * k) as usize, 1));
+        let w = gpu.storage_init("w", &fill((n * k) as usize, 2));
+        let out = gpu.storage(u64::from(m * n));
+        let ubuf = gpu.uniform_dynamic(3);
+        gpu.write(&ubuf, &[m, k, n]);
+        gpu.reset_kernel_times();
+        let s = gpu.step_buf_shaped(K_GEMV, &ubuf, &[&x, &w, &out], &[m, k, n], n * 64);
+        gpu.submit(&[], &[s]);
+        gpu.poll_wait();
+        let times = gpu.kernel_times().expect("kernel timing armed above");
+        let ran: Vec<&str> = times.iter().filter(|(_, _, c)| *c > 0).map(|(name, _, _)| name.as_str()).collect();
+        assert_eq!(ran, vec!["matmul_gemv"], "m={m}: with the upgrade off step_buf_shaped must run the registered kernel");
+    }
 }

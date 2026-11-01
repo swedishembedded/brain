@@ -384,7 +384,7 @@ the selector's normal choice, for isolating a regression to one variant):
 `BRAIN_CONV_GEMM`, `BRAIN_CONV_GEMM_MIN`, `BRAIN_NAIVE_CONV`, `BRAIN_TILED_CONV`,
 `BRAIN_WINOGRAD`, `BRAIN_GLMDSA_NAIVE_MM`, `BRAIN_GPT2_NAIVE_MM`, `BRAIN_GPT2_REG1`,
 `BRAIN_LFM2_NAIVE_MM`, `BRAIN_QWEN_NAIVE_MM`, `BRAIN_NO_COOP_GRADNORM`,
-`BRAIN_NO_COOP_LN`, `BRAIN_NO_FASTCONV`, `BRAIN_NO_KERNEL_UPGRADE`,
+`BRAIN_NO_COOP_LN`, `BRAIN_NO_FASTCONV` (the kernel upgrade has the `--no-kernel-upgrade` flag),
 `BRAIN_CONV1D_GEMM` (`0` pins the 1D convolutions to the direct kernels,
 `force` pins them to the GEMM lowering below its `Cout` threshold - the only
 way a sweep can see the sub-threshold side),
@@ -471,8 +471,8 @@ Promote a knob there when the pipeline it tunes becomes real.
 **CUDA memory and profiling knobs:** `BRAIN_CUDA_BLOCK_CACHE_MB` (size of the
 held-freed-block cache in MiB; `0` turns it off, unset sizes it from device
 memory between 256 MiB and 4 GiB), `BRAIN_CUDA_MEMPOOL` (`0` disables the
-stream-ordered pool the held blocks come from), `BRAIN_NO_GDN_FAST` (`1` pins
-Gated DeltaNet prefill to the portable kernels for A/B). The
+stream-ordered pool the held blocks come from); `brain --no-gdn-fast` pins
+Gated DeltaNet prefill to the portable kernels for A/B. The
 `qwen35_gguf_prefill_profile` binary takes `--arena on|off|drain` (the scratch
 arena A/B), `--no-kernel-table` (stop after the production rounds) and
 `--stage-debug` (per step, the residual RMS leaving each card and the head's top

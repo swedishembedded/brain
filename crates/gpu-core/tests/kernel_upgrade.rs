@@ -9,8 +9,8 @@
 //! kernel with the same answer. Nothing in this file names a call site —
 //! that is the point.
 //!
-//! Its own binary, because `BRAIN_NO_KERNEL_UPGRADE` is process-wide and
-//! `bench_max_abs_row.rs` needs it set.
+//! Its own binary, because the kernel-upgrade switch (`gpu_core::set_kernel_upgrade`) is process-wide and
+//! `bench_max_abs_row.rs` turns it off.
 
 /// A "model" that only knows about the slow kernel — exactly what
 /// `crates/flux2`, `crates/qwen` and `crates/s3dit` register today.

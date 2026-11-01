@@ -46,7 +46,7 @@
 //! A row resolved here may be superseded one tier up by a native
 //! kernel on a backend that can compile it - see [`crate::native_upgrade`].
 //!
-//! `BRAIN_NO_KERNEL_UPGRADE=1` disables the whole table (the A/B switch every
+//! [`set_kernel_upgrade`]`(false)` (the CLI's `--no-kernel-upgrade`) disables the whole table (the A/B switch every
 //! measurement below was taken with).
 //!
 //! ## Shape-specialised rows
@@ -295,12 +295,18 @@ pub(crate) const UPGRADES: &[Upgrade] = &[
     },
 ];
 
-/// `BRAIN_NO_KERNEL_UPGRADE=1` pins every model to the kernel it registered —
-/// the A/B switch, and the fallback if a driver ever mishandles a cooperative
-/// variant. Read once (the policy must stay fixed for a given process).
+static DISABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether models get the transparent kernel upgrade (`true`, the default) or each keeps the kernel it registered
+/// (`false`): the A/B switch, and the fallback if a driver ever mishandles a cooperative variant. A handle settles its
+/// kernels when it is built, so the APPLICATION sets this before it builds any `Gpu` (the CLI from `--no-kernel-upgrade`)
+/// and leaves it for the process's life. Never read from the environment.
+pub fn set_kernel_upgrade(enabled: bool) {
+    DISABLED.store(!enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
 fn disabled() -> bool {
-    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("BRAIN_NO_KERNEL_UPGRADE").map(|v| v != "0").unwrap_or(false))
+    DISABLED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// `kernels` plus every applicable fast variant, **appended** so existing

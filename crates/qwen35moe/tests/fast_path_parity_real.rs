@@ -11,9 +11,9 @@
 //!
 //! The fast path is the native int8 kernels, the grouped sparse-MoE GEMM, the fused
 //! decode kernels, the Gated-DeltaNet prefill kernels and replayed decode tapes. The
-//! reference path switches every one of them off (`BRAIN_NO_KERNEL_UPGRADE`,
-//! `BRAIN_NO_GDN_FAST`, no grouping, no fusion, no tapes): the same weights through
-//! the plain kernels. Two of those switches are read once per process, so the
+//! reference path switches every one of them off (`gpu_core::set_kernel_upgrade(false)`,
+//! `model::gdn::set_fast_kernels(false)`, no grouping, no fusion, no tapes): the same weights through
+//! the plain kernels. Two of those switches are process-wide, so the
 //! reference runs in a child process of this test and hands its numbers back as JSON.
 //!
 //! The fast side is fed the reference's greedy tokens (teacher forcing), so one
@@ -195,6 +195,9 @@ fn the_fast_path_follows_the_portable_reference_on_the_real_checkpoint() {
 
     // Child: the reference path. Its switches are read once per process.
     if std::env::var(ROLE_ENV).as_deref() == Ok("reference") {
+        // Before the engine builds its device: every model keeps its registered kernel, the GDN prefill its portable sequence.
+        gpu_core::set_kernel_upgrade(false);
+        model::gdn::set_fast_kernels(false);
         let mut e = engine(&mg, &Mode { fast: false });
         let out = std::env::var(OUT_ENV).expect("the reference child needs an output path");
         std::fs::write(out, runs(&mut e, &prompts, None).to_string())
@@ -215,8 +218,6 @@ fn the_fast_path_follows_the_portable_reference_on_the_real_checkpoint() {
         .args([TEST_NAME, "--exact", "--nocapture"])
         .env(ROLE_ENV, "reference")
         .env(OUT_ENV, &out)
-        .env("BRAIN_NO_KERNEL_UPGRADE", "1")
-        .env("BRAIN_NO_GDN_FAST", "1")
         .status()
         .expect("spawn the reference child");
     assert!(status.success(), "the reference child failed");

@@ -56,7 +56,7 @@ struct Params {
 // accumulator sibling that fixes both - bit-identical, same `Params`, same
 // bindings, same `n * 64` thread count - and `gpu_core::upgrade` substitutes
 // it at dispatch wherever `backend_api::select` heads the decode regime with
-// `WorkgroupPerOutput`. **Edit the two together**; `BRAIN_NO_KERNEL_UPGRADE=1`
+// `WorkgroupPerOutput`. **Edit the two together**; `--no-kernel-upgrade` (`gpu_core::set_kernel_upgrade(false)`)
 // is what pins a GPU back onto this one.
 //
 // So THIS kernel keeps the 2048-float array on purpose: it is what the CPU JIT

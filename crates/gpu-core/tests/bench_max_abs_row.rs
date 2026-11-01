@@ -22,7 +22,7 @@
 //! that card's own figure and read the achieved column, not the percentage.
 //!
 //! Both kernels are registered and dispatched **by index** here, with
-//! `BRAIN_NO_KERNEL_UPGRADE=1` pinning `Gpu::step` to the index it was given.
+//! `gpu_core::set_kernel_upgrade(false)` pinning `Gpu::step` to the index it was given.
 //! Without that, `gpu_core::upgrade` would redirect slot 0 to slot 1 and the
 //! benchmark would measure the same kernel twice and report a confident dead heat.
 //! The end-to-end check that the redirect *does* fire lives in
@@ -57,8 +57,7 @@ const KS: &[(&str, &str)] =
 /// A handle with the transparent upgrade DISABLED, so slot 0 really is the
 /// per-thread kernel. Set before any device is built (the switch is read once).
 fn pinned_gpu() -> Gpu {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| std::env::set_var("BRAIN_NO_KERNEL_UPGRADE", "1"));
+    gpu_core::set_kernel_upgrade(false);
     gpu_core::testgpu::dev(KS)
 }
 

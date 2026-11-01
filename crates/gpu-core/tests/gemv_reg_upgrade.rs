@@ -173,29 +173,33 @@ fn both_kernels_agree_with_a_host_f64_oracle() {
     }
 }
 
-/// `BRAIN_NO_KERNEL_UPGRADE=1` must pin the handle back onto the kernel the
-/// model registered - the A/B switch every measurement of this row was taken
-/// with, and the fallback if a driver ever mishandles the register variant.
+/// `gpu_core::set_kernel_upgrade(false)` must pin the handle back onto the kernel the model registered - the A/B switch
+/// every measurement of this row was taken with, and the fallback if a driver ever mishandles the register variant.
 ///
-/// A subprocess because the switch is read ONCE per process (the policy must
-/// stay fixed for a handle's lifetime), so it cannot be toggled in-test.
+/// The switch is process-wide and set before a device is built, so the check runs in a child process of this binary:
+/// [`with_the_upgrade_off_the_handle_keeps_the_registered_kernel`], which only runs when asked for by name.
 #[test]
-fn the_env_switch_pins_the_handle_back_onto_the_registered_kernel() {
+fn the_switch_pins_the_handle_back_onto_the_registered_kernel() {
     let exe = std::env::current_exe().expect("test binary path");
     let out = std::process::Command::new(exe)
-        .args(["the_upgrade_is_active_and_carries_the_whole_bucket_ladder", "--exact", "--nocapture"])
-        .env("BRAIN_NO_KERNEL_UPGRADE", "1")
+        .args(["with_the_upgrade_off_the_handle_keeps_the_registered_kernel", "--exact", "--ignored", "--nocapture"])
         .output()
-        .expect("re-run this test binary with the upgrade disabled");
-    let text =
-        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    assert!(
-        !out.status.success(),
-        "with BRAIN_NO_KERNEL_UPGRADE=1 the ladder must be absent, so the activity assertion \
-         must FAIL - if it passed, the switch no longer disables the table:\n{text}"
-    );
-    assert!(
-        text.contains("must be active on a device that selects it") || text.contains("skip"),
-        "the failure must be the ladder assertion, not some unrelated breakage:\n{text}"
-    );
+        .expect("re-run this test binary for the child test");
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "with the upgrade off the handle must keep the registered kernel:\n{text}");
+    assert!(text.contains("1 passed"), "the child test must have run:\n{text}");
+}
+
+/// The child of [`the_switch_pins_the_handle_back_onto_the_registered_kernel`]: the upgrade switched off before this
+/// process builds its device, the handle runs the kernel the model registered and no bucket of the ladder.
+#[test]
+#[ignore = "changes a process-wide switch: run in its own process by the_switch_pins_the_handle_back_onto_the_registered_kernel"]
+fn with_the_upgrade_off_the_handle_keeps_the_registered_kernel() {
+    gpu_core::set_kernel_upgrade(false);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    if !gpu.caps().workgroup_reductions {
+        brain_testutil::skip_unavailable("matmul_gemv is not selectable on a backend without workgroup reductions");
+        return;
+    }
+    assert_eq!(gpu.physical_kernel_names(K_GEMV), vec!["matmul_gemv"], "with the upgrade off no bucket of the ladder may be built");
 }

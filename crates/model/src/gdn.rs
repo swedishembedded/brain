@@ -225,9 +225,18 @@ pub struct GdnFastIds {
 /// the portable sequence's batched matmuls were a third of a prefill round)
 /// and newer; every other device keeps the portable dispatch sequence it has
 /// always run. The gate is the queried compute capability (never a device
-/// name), and `BRAIN_NO_GDN_FAST=1` switches it off for A/B measurement.
+/// name), and [`set_fast_kernels`] switches it off for A/B measurement.
 pub fn use_fast_kernels(g: &Gpu) -> bool {
-    std::env::var_os("BRAIN_NO_GDN_FAST").is_none() && g.caps().arch.compute_capability.is_some_and(|cc| cc >= (6, 1))
+    !FAST_KERNELS_OFF.load(std::sync::atomic::Ordering::Relaxed) && g.caps().arch.compute_capability.is_some_and(|cc| cc >= (6, 1))
+}
+
+static FAST_KERNELS_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the Gated DeltaNet prefill may take the workgroup-cooperative kernels ([`use_fast_kernels`], `true` by default)
+/// or stays on the portable dispatch sequence (`false`): the A/B switch (the CLI's `--no-gdn-fast`). Process-wide; takes
+/// effect for dispatches recorded after. Never read from the environment.
+pub fn set_fast_kernels(on: bool) {
+    FAST_KERNELS_OFF.store(!on, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// The shape one call to [`gdn_chunk_fwd`] operates over. `b`/`h` are the

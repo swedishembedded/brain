@@ -180,13 +180,9 @@ fn a_policy_entry_does_not_apply_below_the_compute_capability_it_names() {
 /// was skipped*. Without it, "the tuned provider did not run" and "the tuned
 /// provider was never asked" look identical from the outside.
 fn every_skipped_provider_records_why_it_declined() {
-    // SAFETY (test-only): this test binary is its own process and nothing
-    // else in it reads BRAIN_NO_PROVIDER concurrently.
-    unsafe {
-        std::env::set_var("BRAIN_NO_PROVIDER", "fixture-disabled");
-    }
     let needs_f16 = select::Requirement { f16_compute: true, ..Default::default() };
     let reg = ProviderRegistry::reference(selector())
+        .with_disabled(&["fixture-disabled"])
         .prefer(Arc::new(FixtureProvider {
             name: "fixture-caps-unmet",
             source: ImplSource::Tuned,
@@ -204,9 +200,6 @@ fn every_skipped_provider_records_why_it_declined() {
     let req = request(&[], &[]);
 
     let (_, choice) = reg.resolve_choice(&req, &caps, false);
-    unsafe {
-        std::env::remove_var("BRAIN_NO_PROVIDER");
-    }
 
     assert_eq!(choice.provider, "wgsl", "every preferred provider declined, so the reference runs");
     let declined: Vec<(&str, DeclineReason)> =

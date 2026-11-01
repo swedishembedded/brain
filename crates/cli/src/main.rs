@@ -655,6 +655,26 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
             // native kernels are measured with. Set before any device is built.
             gpu_core::set_native_kernels(false);
             i += 1;
+        } else if argv[i] == "--no-kernel-upgrade" {
+            // Every model keeps the kernel it registered (no transparent upgrade): the A/B switch and the driver fallback.
+            // Set before any device is built.
+            gpu_core::set_kernel_upgrade(false);
+            i += 1;
+        } else if argv[i] == "--no-provider" {
+            // `--no-provider <name>[,<name>]` disables compute providers by name (`cuda`, ...): the bisecting switch for a
+            // suspected provider-specific bug. Set before any device is built.
+            match argv.get(i + 1).filter(|v| !v.trim().is_empty()) {
+                Some(v) => gpu_core::provider::set_disabled_providers(&v.split(',').collect::<Vec<_>>()),
+                None => {
+                    eprintln!("brain: --no-provider needs one or more provider names, e.g. --no-provider cuda");
+                    std::process::exit(2);
+                }
+            }
+            i += 2;
+        } else if argv[i] == "--no-gdn-fast" {
+            // The Gated DeltaNet prefill stays on the portable dispatch sequence: the A/B switch of its cooperative kernels.
+            model::gdn::set_fast_kernels(false);
+            i += 1;
         } else if argv[i] == "--no-autotune" {
             // Every kernel slot keeps its default candidate: reproducible benchmarking and A/B runs.
             gpu_core::set_native_autotune(false);

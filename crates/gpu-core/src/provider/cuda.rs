@@ -221,10 +221,10 @@ impl CudaProvider {
 /// Whether `gpu` runs this provider's tensor-core kernels: its device reports a
 /// compute capability at the int8 / fp16 MMA floor
 /// ([`kernels_cuda::MMA_S8_MIN_CC`]) and `cuda` is not named in
-/// `BRAIN_NO_PROVIDER`. A caller whose numerics depend on the tier (a test
+/// the disabled providers. A caller whose numerics depend on the tier (a test
 /// stating a tolerance, a parity gate) asks this rather than guessing.
 pub fn tensor_core_kernels_enabled(gpu: &crate::Gpu) -> bool {
-    !super::disabled_providers().iter().any(|d| d == "cuda") && gpu.caps().arch.compute_capability.is_some_and(|cc| cc >= kernels_cuda::MMA_S8_MIN_CC)
+    !super::cuda_disabled() && gpu.caps().arch.compute_capability.is_some_and(|cc| cc >= kernels_cuda::MMA_S8_MIN_CC)
 }
 
 /// Value-column blocks `gdn_chunk_loop_f32` splits each head across; its launch
@@ -238,7 +238,7 @@ const GDN_CHUNK_LOOP_SPLITS: u32 = 4;
 /// Like [`paged_flash_prefill_step`] this is a drop-in at one call site
 /// (`model::gdn::gdn_chunk_fwd`), not a provider request. `None` means: the
 /// head widths are not the kernel's `128`, the chunk is longer than its `64`
-/// rows, `cuda` is named in `BRAIN_NO_PROVIDER`, the device reports no
+/// rows, `cuda` is disabled ([`super::set_disabled_providers`]), the device reports no
 /// capability (or one below the kernel's floor), or the backend declined it.
 ///
 /// `bufs` is, in order, `key, query, w, u, g_cs, exp_g_cs, intra_scores,
@@ -256,7 +256,7 @@ pub fn gdn_chunk_loop_step(
     n_chunks: u32,
     scale: f32,
 ) -> Option<crate::Step> {
-    if dk != 128 || dv != 128 || c_len == 0 || c_len > 64 || super::disabled_providers().iter().any(|d| d == "cuda") {
+    if dk != 128 || dv != 128 || c_len == 0 || c_len > 64 || super::cuda_disabled() {
         return None;
     }
     let cc = gpu.caps().arch.compute_capability?;
@@ -281,7 +281,7 @@ pub fn gdn_chunk_loop_train_step(
     n_chunks: u32,
     scale: f32,
 ) -> Option<crate::Step> {
-    if dk != 128 || dv != 128 || c_len == 0 || c_len > 64 || super::disabled_providers().iter().any(|d| d == "cuda") {
+    if dk != 128 || dv != 128 || c_len == 0 || c_len > 64 || super::cuda_disabled() {
         return None;
     }
     let cc = gpu.caps().arch.compute_capability?;
@@ -317,7 +317,7 @@ const GDN_BWD_SWEEP_DYNAMIC_SHARED_BYTES: u32 = (128 * 129 + 2 * 16 * 129 + 16) 
 /// The native single-launch form of the reverse sweep of Gated DeltaNet's
 /// across-chunk recurrence (`model::gdn::gdn_chunk_bwd`), or `None` when the
 /// caller should issue its six dispatches per chunk. Declines on the head
-/// widths, a chunk over 64 rows, `cuda` named in `BRAIN_NO_PROVIDER`, a device
+/// widths, a chunk over 64 rows, `cuda` named in the disabled providers, a device
 /// with no reported capability, or a device that cannot give a block the shared
 /// memory the state gradient needs.
 ///
@@ -334,7 +334,7 @@ pub fn gdn_bwd_sweep_step(
     dv: u32,
     n_chunks: u32,
 ) -> Option<crate::Step> {
-    if dk != 128 || dv != 128 || c_len == 0 || c_len > 64 || super::disabled_providers().iter().any(|d| d == "cuda") {
+    if dk != 128 || dv != 128 || c_len == 0 || c_len > 64 || super::cuda_disabled() {
         return None;
     }
     let cc = gpu.caps().arch.compute_capability?;
@@ -440,9 +440,9 @@ const GDN_CHUNK_PREP_BF16_DYNAMIC_SHARED_BYTES: u32 = 2 * 64 * 136 * 2 + 64 * 68
 const GDN_CHUNK_PREP_DYNAMIC_SHARED_BYTES: u32 = (64 * 132 + 64 * 136 + 2 * 64 * 68 + 3 * 64 + 3 * 8 * 64) * 4;
 
 /// What the tensor-core chunk forward needs of the call: the head widths it is
-/// written for, a chunk of at most 64 rows, no `cuda` in `BRAIN_NO_PROVIDER`.
+/// written for, a chunk of at most 64 rows, no `cuda` in the disabled providers.
 fn gdn_chunk_prep_shape_ok(dk: u32, dv: u32, c_len: u32) -> bool {
-    dk == 128 && dv == 128 && c_len != 0 && c_len <= 64 && !super::disabled_providers().iter().any(|d| d == "cuda")
+    dk == 128 && dv == 128 && c_len != 0 && c_len <= 64 && !super::cuda_disabled()
 }
 
 /// The native tensor-core form of the state-independent half of Gated
@@ -452,7 +452,7 @@ fn gdn_chunk_prep_shape_ok(dk: u32, dv: u32, c_len: u32) -> bool {
 ///
 /// Like [`gdn_chunk_loop_step`] this is a drop-in at one call site, not a
 /// provider request. `None` means: the head widths are not `128`, the chunk is
-/// longer than `64` rows, `cuda` is named in `BRAIN_NO_PROVIDER`, the device
+/// longer than `64` rows, `cuda` is disabled ([`super::set_disabled_providers`]), the device
 /// reports no capability or one below the tensor-core floor
 /// ([`kernels_cuda::MMA_S8_MIN_CC`]), or the backend declined the kernel (for
 /// instance a device that cannot give a block the shared memory it needs).
@@ -809,7 +809,7 @@ impl GdnSegmentTable {
 pub fn gdn_segment_kernels_served(gpu: &crate::Gpu) -> bool {
     let Some(cc) = gpu.caps().arch.compute_capability else { return false };
     gdn_bf16_prefill_selected(gpu)
-        && !super::disabled_providers().iter().any(|d| d == "cuda")
+        && !super::cuda_disabled()
         && ["gdn_conv_silu_seg", "gdn_chunk_prep_seg_bf16", "gdn_chunk_loop_seg_bf16", "gdn_gated_norm"].iter().all(|name| kernels_cuda::get(name).is_some_and(|k| k.min_cc <= cc))
 }
 
@@ -828,7 +828,7 @@ pub fn topk_rows_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 3], 
         return None;
     }
     let cc = gpu.caps().arch.compute_capability?;
-    let kernel = kernels_cuda::get("topk_rows_f32").filter(|k| k.min_cc <= cc && !super::disabled_providers().iter().any(|d| d == "cuda"))?;
+    let kernel = kernels_cuda::get("topk_rows_f32").filter(|k| k.min_cc <= cc && !super::cuda_disabled())?;
     let id = gpu.native_kernel(kernel, &TOPK_ROWS_BINDINGS)?;
     gpu.step_native_sliced(id, bufs, &[(0, 0); 3], &[rows, vocab, cap], rows)
 }
@@ -848,7 +848,7 @@ pub fn gdn_gated_norm_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer;
         return None;
     }
     let cc = gpu.caps().arch.compute_capability?;
-    let kernel = kernels_cuda::get("gdn_gated_norm").filter(|k| k.min_cc <= cc && !super::disabled_providers().iter().any(|d| d == "cuda"))?;
+    let kernel = kernels_cuda::get("gdn_gated_norm").filter(|k| k.min_cc <= cc && !super::cuda_disabled())?;
     let id = gpu.native_kernel(kernel, &GDN_GATED_NORM_BINDINGS)?;
     let blocks = head_rows.saturating_sub(first).div_ceil(16); // four warps of four head rows (`ROWS` in the kernel)
     gpu.step_native_sliced(id, bufs, &[(0, 0); 6], &[head_rows, first, eps.to_bits(), e4m3 as u32 | if bf16 { 2 | 4 | 8 } else { 0 }], blocks)
@@ -1160,7 +1160,7 @@ impl GdnConvLayout {
             && self.seq_len != 0
             && self.rows.is_multiple_of(self.seq_len)
             && self.conv_dim == 2 * self.key_dim + self.value_dim
-            && !super::disabled_providers().iter().any(|d| d == "cuda");
+            && !super::cuda_disabled();
         if !shape_ok {
             return None;
         }
@@ -1181,7 +1181,7 @@ impl GdnConvLayout {
 /// the history precedes row 0 and the call is a single sequence; any buffer otherwise), then `query`, `key`
 /// (`[rows, key_dim]`), `value` (`[rows, value_dim]`) and `pre` (`[rows, conv_dim]`, the pre-activation the
 /// backward reads; written only when `save_pre`, any buffer otherwise). `None` when the kernel size is not 4,
-/// the shape is inconsistent, `cuda` is named in `BRAIN_NO_PROVIDER`, or the device declines.
+/// the shape is inconsistent, `cuda` is disabled ([`super::set_disabled_providers`]), or the device declines.
 pub fn gdn_conv_silu_tok_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 7], l: GdnConvLayout, has_hist: bool, save_pre: bool) -> Option<crate::Step> {
     if has_hist && l.rows != l.seq_len {
         return None;
@@ -1226,10 +1226,10 @@ const SWIGLU_BWD_BLOCK_ELEMS: u32 = 1024;
 
 /// The SwiGLU backward as one launch (`swiglu_bwd_fused`) in place of `silu_bwd_da` and `silu_bwd_db`:
 /// `bufs` is `gate_pre, up, d_h` (read) and `d_gate, d_up` (every element overwritten), all `total` floats.
-/// `None` when `cuda` is named in `BRAIN_NO_PROVIDER`, the device reports no capability, or the backend
+/// `None` when `cuda` is disabled ([`super::set_disabled_providers`]), the device reports no capability, or the backend
 /// declines; the caller then issues the two portable dispatches.
 pub fn swiglu_bwd_fused_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 5], total: u32) -> Option<crate::Step> {
-    if total == 0 || super::disabled_providers().iter().any(|d| d == "cuda") {
+    if total == 0 || super::cuda_disabled() {
         return None;
     }
     let cc = gpu.caps().arch.compute_capability?;
@@ -1245,7 +1245,7 @@ static ADD_RMSNORM_BINDINGS: [BindKind; 6] = bwd_tc_bindings(3);
 /// `rmsnorm_dx_add`: x, w, dy, res (read); dx (written).
 static RMSNORM_DX_ADD_BINDINGS: [BindKind; 6] = bwd_tc_bindings(4);
 
-/// Shared checks of the fused RMSNorm kernels: rows of a multiple of four, no `cuda` in `BRAIN_NO_PROVIDER`.
+/// Shared checks of the fused RMSNorm kernels: rows of a multiple of four, no `cuda` in the disabled providers.
 fn rmsnorm_fused_kernel(gpu: &crate::Gpu, name: &str, d: u32, rows: u32) -> Option<&'static kernels_cuda::CudaKernel> {
     if d == 0 || rows == 0 || !d.is_multiple_of(4) || super::disabled_providers().iter().any(|x| x == "cuda") {
         return None;
@@ -1281,7 +1281,7 @@ pub fn rmsnorm_dx_add_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer;
 /// buffers, same uniform, same launch geometry - so the seam is "try native
 /// first" at that one choice. `None` means any of: the head width is not
 /// `256`, the round is no wider than the decode regime (`params[0]` rows), `cuda`
-/// is named in `BRAIN_NO_PROVIDER`, the device's compute capability is below
+/// is named in the disabled providers, the device's compute capability is below
 /// the kernel's floor (or not reported at all), or the backend declined to take
 /// the kernel. Each is a decline, never a failure.
 ///
@@ -1615,7 +1615,7 @@ const FLASH_GQA_FWD_BINDINGS: &[BindKind] = &[
 ///
 /// Same buffers (`q`, `k`, `v`, `ctx`, `lse`) and uniform (`[b, n_heads, n_kv_heads, t, head_dim, group]`) as
 /// the portable kernel; the launch geometry is its own (64 query rows per block of one (sample, head)).
-/// `None` means: the head width is not 128 or 256, `cuda` is named in `BRAIN_NO_PROVIDER`, the device's compute
+/// `None` means: the head width is not 128 or 256, `cuda` is disabled ([`super::set_disabled_providers`]), the device's compute
 /// capability is below the kernel's floor, or the backend declined the kernel.
 pub fn flash_causal_gqa_fwd_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 5], params: &[u32]) -> Option<crate::Step> {
     let &[b, n_heads, _, t, head_dim, _] = params else { return None };
@@ -1692,7 +1692,7 @@ pub struct FlashBwdBufs<'a> {
 /// `head_dim` 128, as three steps (the call's gradient scale, dQ, dK and dV), or `None` when the caller should
 /// dispatch the portable pair. `params` is the portable kernels' uniform
 /// (`[b, n_heads, n_kv_heads, t, head_dim, group]`); every output is overwritten. `None` means: the head width is
-/// not 128, `cuda` is named in `BRAIN_NO_PROVIDER`, the device's compute capability is below a kernel's floor, or
+/// not 128, `cuda` is disabled ([`super::set_disabled_providers`]), the device's compute capability is below a kernel's floor, or
 /// the backend declined one.
 pub fn flash_causal_gqa_bwd_steps(gpu: &crate::Gpu, bufs: &FlashBwdBufs<'_>, params: &[u32]) -> Option<Vec<crate::Step>> {
     let &[b, n_heads, n_kv, t, head_dim, _] = params else { return None };
@@ -1736,10 +1736,10 @@ const DECODE_ATTN_I8_BINDINGS: &[BindKind] = &[
 /// `bufs` is queries, K pool, V pool, [K scales, V scales for an int8 pool,] block tables, sequence lengths,
 /// context; `params` the triad's `[bsz, n_heads, n_kv_heads, head_dim, group, block_size, max_bt]`. `None` means:
 /// the head width is not 128, the group is wider than 8, fewer than two sequences (the split-key kernel owns one),
-/// `cuda` is named in `BRAIN_NO_PROVIDER`, the device is below the kernel's floor, or the backend declined it.
+/// `cuda` is disabled ([`super::set_disabled_providers`]), the device is below the kernel's floor, or the backend declined it.
 pub fn paged_decode_batched_step(gpu: &crate::Gpu, int8: bool, bufs: &[&backend_api::DeviceBuffer], params: &[u32]) -> Option<crate::Step> {
     let &[bsz, _, n_kv, head_dim, group, _, _] = params else { return None };
-    if head_dim != 128 || !(1..=8).contains(&group) || bsz < 2 || super::disabled_providers().iter().any(|d| d == "cuda") || bufs.len() != if int8 { 8 } else { 6 } {
+    if head_dim != 128 || !(1..=8).contains(&group) || bsz < 2 || super::cuda_disabled() || bufs.len() != if int8 { 8 } else { 6 } {
         return None;
     }
     let cc = gpu.caps().arch.compute_capability?;

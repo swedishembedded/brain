@@ -332,6 +332,7 @@ mod gdn_prefill_tune;
 /// Native kernels a model asks for by name - see [`native_upgrade::Fused`].
 #[cfg(not(target_arch = "wasm32"))]
 pub use native_upgrade::{native_kernels_enabled, set_native_kernels, Fused};
+pub use upgrade::set_kernel_upgrade;
 /// The form an FP8-weight linear's chosen candidate reads its activations in ([`Gpu::fp8_linear_act`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fp8Act {

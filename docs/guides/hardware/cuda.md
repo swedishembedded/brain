@@ -150,7 +150,12 @@ keys - summing in a different order, so it is also held to no more than twice
 the generated tier's own error on the same inputs
 (`crates/gpu-core/tests/flash_bidir_native.rs`, `flash_gqa_kmask_native.rs`).
 `--no-native-kernels` (a global flag, like `--device`) keeps every dispatch on
-the generated tier - the A/B switch the native kernels are measured with.
+the generated tier - the A/B switch the native kernels are measured with. The
+other global A/B switches: `--no-kernel-upgrade` keeps every model on the
+kernel it registered (no transparent upgrade), `--no-provider <name>[,<name>]`
+disables compute providers by name (`cuda`, ...) to bisect a provider-specific
+bug, and `--no-gdn-fast` keeps the Gated DeltaNet prefill on its portable
+dispatch sequence. None of them is read from the environment.
 
 Where several native kernels can serve the same operation (the int8 decode
 linear has a dp4a GEMV, a tensor-core GEMV and two tiled tensor-core GEMMs), brain

@@ -8280,7 +8280,7 @@ mod tests {
         let got_tail: Vec<Vec<f32>> = tail.iter().enumerate().map(|(i, &tok)| decode_stage(&whole_chunked, tok, (prompt.len() + i) as u32, None)).collect();
 
         // The portable paths agree to 9.4e-4 here (measured with
-        // `BRAIN_NO_PROVIDER=cuda`, against a bar of 1e-3). On a device with
+        // the `cuda` provider disabled, against a bar of 1e-3). On a device with
         // tensor cores the chunk round's int8 GEMMs run on int8 MMAs and its
         // attention on fp16 MMAs (`gpu-core/tests/cuda_flash_prefill.rs` states
         // that kernel's own bar), and the same comparison measures 1.08e-3 - the

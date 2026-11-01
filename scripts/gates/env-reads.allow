@@ -549,17 +549,13 @@ crates/gpu-core/src/devices.rs	BRAIN_DEVICE
 crates/gpu-core/src/devices.rs	BRAIN_GPU_INDEX
 crates/gpu-core/src/lower.rs	BRAIN_CONV_COL_MIB
 crates/gpu-core/src/lower.rs	BRAIN_VAE_COL_MIB
-crates/gpu-core/src/provider/mod.rs	BRAIN_NO_PROVIDER
 crates/gpu-core/src/roof.rs	BRAIN_NO_ROOF
 crates/gpu-core/src/roof.rs	BRAIN_ROOF_BUDGET_S
 crates/gpu-core/src/roof.rs	BRAIN_ROOF_WARMUP_S
 crates/gpu-core/src/roof.rs	MOE_SKIP_GPU_TESTS
-crates/gpu-core/src/upgrade.rs	BRAIN_NO_KERNEL_UPGRADE
 crates/gpu-core/tests/bench_matmul.rs	BRAIN_BENCH_REPS
-crates/gpu-core/tests/bench_max_abs_row.rs	BRAIN_NO_KERNEL_UPGRADE
 crates/gpu-core/tests/bench_moe_grouped.rs	BRAIN_BENCH_TOKENS
 crates/gpu-core/tests/bench_upload_cadence.rs	MOE_SKIP_GPU_TESTS
-crates/gpu-core/tests/cuda_impl_policy.rs	BRAIN_NO_PROVIDER
 crates/gpu-core/tests/cuda_placement_tier.rs	BRAIN_COHERENT_TIER
 crates/gpu-core/tests/cuda_placement_tier.rs	BRAIN_LIMIT_RAM_TOTAL
 crates/gpu-core/tests/cuda_placement_tier.rs	BRAIN_LIMIT_VRAM_TOTAL
@@ -568,8 +564,6 @@ crates/gpu-core/tests/device_grammar.rs	BRAIN_BACKEND
 crates/gpu-core/tests/device_grammar.rs	BRAIN_DEVICE
 crates/gpu-core/tests/device_sharing.rs	MOE_SKIP_GPU_TESTS
 crates/gpu-core/tests/device_stats.rs	MOE_SKIP_GPU_TESTS
-crates/gpu-core/tests/gemv_reg_upgrade.rs	BRAIN_NO_KERNEL_UPGRADE
-crates/gpu-core/tests/gemv_reg_upgrade_step_buf.rs	BRAIN_NO_KERNEL_UPGRADE
 crates/gpu-core/tests/i8_gemv_native_bench.rs	BRAIN_BENCH_M
 crates/gpu-core/tests/memory_limit.rs	BRAIN_LIMIT_RAM_TOTAL
 crates/gpu-core/tests/memory_limit.rs	BRAIN_LIMIT_VRAM_TOTAL
@@ -782,7 +776,6 @@ crates/minimaxmusic3/tests/vocoder_parity.rs	BRAIN_MINIMAXMUSIC3_VOCODER
 crates/minimaxmusic3/tests/vocoder_real_chunk.rs	BRAIN_MINIMAXMUSIC3_VOCODER
 crates/model/src/block.rs	BRAIN_NO_FLASH_CROSS
 crates/model/src/block.rs	BRAIN_TILE_BUDGET_WORDS
-crates/model/src/gdn.rs	BRAIN_NO_GDN_FAST
 crates/model/src/kv_tier.rs	<var>
 crates/model/src/shard.rs	BRAIN_STREAM_SHARD
 crates/model/tests/kv_tier_decode_bench.rs	<name>
@@ -987,8 +980,6 @@ crates/qwen35moe/src/model.rs	MOE_SKIP_GPU_TESTS
 crates/qwen35moe/tests/fast_path_parity_real.rs	<OUT_ENV>
 crates/qwen35moe/tests/fast_path_parity_real.rs	<ROLE_ENV>
 crates/qwen35moe/tests/fast_path_parity_real.rs	<gguf_load::GGUF_ENV>
-crates/qwen35moe/tests/fast_path_parity_real.rs	BRAIN_NO_GDN_FAST
-crates/qwen35moe/tests/fast_path_parity_real.rs	BRAIN_NO_KERNEL_UPGRADE
 crates/qwen35moe/tests/gguf_vs_hf_real.rs	BRAIN_MODELS_DIR
 crates/qwen35moe/tests/gguf_vs_hf_real.rs	HOME
 crates/qwen35moe/tests/lora_real_weight_smoke.rs	BRAIN_QWEN35_GGUF

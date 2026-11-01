@@ -230,7 +230,7 @@ impl ArchTag {
 /// Why one provider in the chain did not run.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum DeclineReason {
-    /// Named in `BRAIN_NO_PROVIDER` - skipped before it was asked anything.
+    /// Disabled ([`set_disabled_providers`]) - skipped before it was asked anything.
     Disabled,
     /// Its [`OperatorProvider::requires`] is not satisfied by this device's
     /// capabilities. Carries the requirement so the record says WHAT was
@@ -284,7 +284,7 @@ pub struct ImplChoice {
 /// `Arc` in a [`ProviderRegistry`], resolved from any thread that owns a
 /// `Gpu` handle).
 pub trait OperatorProvider: Send + Sync {
-    /// Stable, lowercase, `[a-z0-9-]+` - used for `BRAIN_NO_PROVIDER`
+    /// Stable, lowercase, `[a-z0-9-]+` - used for [`set_disabled_providers`]
     /// matching and diagnostics. Never changes across a provider's
     /// lifetime; a rename is a breaking change for anyone disabling it by
     /// name.
@@ -332,22 +332,27 @@ pub trait OperatorProvider: Send + Sync {
     fn lower(&self, ctx: &mut LowerCtx, req: &OpRequest) -> Result<Lowered, String>;
 }
 
-/// `BRAIN_NO_PROVIDER=<name>[,<name>]` - disable one or more providers by
-/// name, mirroring `gpu_core::upgrade`'s `BRAIN_NO_KERNEL_UPGRADE` (an A/B
-/// switch for the analogous seam one level down) and `brain_testutil`'s
-/// `BRAIN_REQUIRE_CAPABILITIES` (the same comma-separated-list parse this
-/// function copies exactly: `split(',')`, `trim`, no reserved names). Read
-/// fresh at [`ProviderRegistry::reference`] construction time, not cached - 
-/// a process-wide cache would make this env var untestable per-test the way
-/// `upgrade`'s own `OnceLock` cache already is for its callers.
+static DISABLED: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+/// Whether `cuda` is among [`DISABLED`]: the native dispatch helpers ask it on every step build.
+static CUDA_DISABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Disable compute providers by name, process-wide - the bisecting switch for a suspected provider-specific bug, one level
+/// below [`crate::set_kernel_upgrade`]. The APPLICATION sets it before it builds any `Gpu` (the CLI from `--no-provider
+/// <name>[,<name>]`); a registry takes the list when it is built. Names are trimmed, empty ones dropped. Never read from the
+/// environment.
+pub fn set_disabled_providers(names: &[&str]) {
+    let list: Vec<String> = names.iter().map(|n| n.trim()).filter(|n| !n.is_empty()).map(str::to_string).collect();
+    CUDA_DISABLED.store(list.iter().any(|n| n == "cuda"), std::sync::atomic::Ordering::Relaxed);
+    *DISABLED.write().unwrap_or_else(std::sync::PoisonError::into_inner) = list;
+}
+
 pub(crate) fn disabled_providers() -> Vec<String> {
-    std::env::var("BRAIN_NO_PROVIDER")
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect()
+    DISABLED.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+}
+
+/// Whether the `cuda` provider is disabled ([`set_disabled_providers`]).
+pub(crate) fn cuda_disabled() -> bool {
+    CUDA_DISABLED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// An ordered chain of providers, the reference (WGSL) provider always last
@@ -367,6 +372,13 @@ impl ProviderRegistry {
     /// builds exactly this today.
     pub fn reference(selector: Arc<dyn select::KernelSelector>) -> ProviderRegistry {
         ProviderRegistry { chain: vec![Arc::new(wgsl::WgslProvider::new(selector))], disabled: disabled_providers() }
+    }
+
+    /// This registry with the providers named in `names` disabled as well ([`set_disabled_providers`] for one registry).
+    #[must_use]
+    pub fn with_disabled(mut self, names: &[&str]) -> ProviderRegistry {
+        self.disabled.extend(names.iter().map(|n| n.trim()).filter(|n| !n.is_empty()).map(str::to_string));
+        self
     }
 
     /// **The production registry**: the reference provider, plus whichever
@@ -406,7 +418,7 @@ impl ProviderRegistry {
         reg
     }
 
-    /// Whether the provider named `name` is in the chain and not disabled (`BRAIN_NO_PROVIDER`): a native tier that
+    /// Whether the provider named `name` is in the chain and not disabled ([`set_disabled_providers`]): a native tier that
     /// reaches the device without a provider request of its own (the dequantize-in-register int8 linears) follows the
     /// same switch the provider's own dispatches do, so a reference-only registry and a disabled `cuda` stay on WGSL.
     pub fn runs(&self, name: &str) -> bool {
@@ -422,7 +434,7 @@ impl ProviderRegistry {
         self
     }
 
-    /// The first non-[`BRAIN_NO_PROVIDER`]-disabled provider in the chain
+    /// The first non-[`set_disabled_providers`]-disabled provider in the chain
     /// whose [`OperatorProvider::requires`] is satisfied by `caps` and whose
     /// [`OperatorProvider::accepts`] answers `true` for `req` - the
     /// reference provider always qualifies, so this never falls through
@@ -480,7 +492,7 @@ impl ProviderRegistry {
         // name), never fails `requires`, and always `accepts`. If every
         // entry (including a disabled reference) is skipped, fall back to
         // the reference regardless - refusing to dispatch at all would be
-        // worse than ignoring a misconfigured `BRAIN_NO_PROVIDER=wgsl`. The
+        // worse than ignoring a misconfigured disable of `wgsl`. The
         // reference's own decline stays on the record: it ran despite being
         // disabled, and that is exactly the kind of thing a record is for.
         let reference = self.chain.last().expect("ProviderRegistry::reference always seeds one entry");
@@ -586,22 +598,16 @@ mod tests {
         assert_eq!(chosen.name(), "wgsl");
     }
 
-    /// `BRAIN_NO_PROVIDER=<name>` removes a provider from the chain - proven
+    /// A disabled provider (`with_disabled`, [`set_disabled_providers`]) is removed from the chain - proven
     /// here against the reference provider itself (no second provider exists
     /// yet this wave), which is why `resolve` still must not panic or return
     /// nothing: disabling every entry falls back to the reference anyway
     /// (see `resolve`'s own doc comment on that unreachable-in-practice
     /// case).
     #[test]
-    fn brain_no_provider_removes_a_provider_from_the_chain() {
-        // SAFETY (test-only): no other test in this process reads this var
-        // concurrently with a race that would matter - `disabled_providers`
-        // is read once, synchronously, at construction.
-        unsafe {
-            std::env::set_var("BRAIN_NO_PROVIDER", "wgsl, some-other-provider");
-        }
+    fn a_disabled_provider_is_removed_from_the_chain() {
         let sel: Arc<dyn select::KernelSelector> = Arc::new(select::CachedSelector::new(select::DefaultSelector));
-        let reg = ProviderRegistry::reference(sel);
+        let reg = ProviderRegistry::reference(sel).with_disabled(&["wgsl", " some-other-provider", ""]);
         assert_eq!(reg.disabled, vec!["wgsl".to_string(), "some-other-provider".to_string()]);
 
         let bind = |v: select::KernelVariant| -> (usize, &'static str) {
@@ -620,17 +626,14 @@ mod tests {
             bind: &bind,
         };
         let caps = DeviceCaps::portable_baseline(backend_api::DeviceClass::Cpu);
-        // `wgsl` is named in BRAIN_NO_PROVIDER but is also the only entry, so
+        // `wgsl` is disabled but is also the only entry, so
         // `resolve` still returns it (the documented "never dispatch nothing"
-        // fallback) - the env var's PARSING and the chain-skip loop having
+        // fallback) - the list's PARSING and the chain-skip loop having
         // actually run is what this test pins, via `reg.disabled` above; a
         // resolve returning nothing here would be a worse failure mode than
         // ignoring a misconfigured disable of the only provider that exists.
         let chosen = reg.resolve(&req, &caps, false);
         assert_eq!(chosen.name(), "wgsl");
-        unsafe {
-            std::env::remove_var("BRAIN_NO_PROVIDER");
-        }
     }
 
     #[test]
