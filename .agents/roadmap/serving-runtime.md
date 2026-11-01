@@ -225,6 +225,7 @@ back 1.3 ms. A pool pays this once per block (freed blocks stay backed) and once
 
 ## Done
 
+- 2026-11-01 (unified state pool, knowledge 424): `--max-batch` slots no longer reserve a recurrent-state row; see the section above. Pool tokens bf16/f32 749568 with none running (622592 before), 746496 .. 602112 from 1 to 64 running; fp8/bf16 1294336 (1187840). Served A/B below when measured.
 - 2026-10-29 (step plan, increment A; knowledge 381): eager batches upload their kernel parameters with one copy instead of one in front of
   every kernel (nsys: 14 us of card idle per kernel), and the prefill/mixed layer loop issues one batch per layer. FP8 27B output tok/s at
   1 / 4 / 16 / 64: 47 / 192 / 291 / 384 -> 49 / 200 / 340 / 460, card busy 66 -> 79 % of a mixed iteration; parity unchanged.

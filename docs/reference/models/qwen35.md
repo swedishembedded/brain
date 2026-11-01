@@ -207,7 +207,15 @@ context is then the longest the cards hold beside all of it. The KV cache is
 one pool shared by every sequence and cached prompt (paged, 256-row blocks), so
 the context is bounded by the pool, not multiplied by `--max-batch`: one
 sequence may take the whole pool, and 32 sequences cost their recurrent state
-and their own tokens. A 96 GB card serves a context past a million tokens at
+and their own tokens. On one CUDA card the recurrent state shares that pool
+too: a running sequence's state row (150 MB with an f32 state, 75 MB with
+bf16) takes its memory from the tokens' blocks while the sequence runs and
+returns it when it leaves, so slots that are not running cost nothing and the
+pool, and the default `--ctx`, are what the card holds beside the weights
+with no sequence running (blocks are then one 2 MiB granule of a plane: 1024
+rows with a bf16 KV cache, 2048 with int8 or fp8, and a prefix is reused in
+whole blocks). `brain serve` logs when a configuration keeps a state row
+reserved for each slot instead. A 96 GB card serves a context past a million tokens at
 `--max-batch 32` with the int8 KV tier (beyond the checkpoint's trained
 window, where quality is the operator's to judge). The card also keeps its
 prefill and decode step workspace free, so a long prompt is refused with a

@@ -1613,10 +1613,25 @@ mod native_facade {
             self.be().back_sparse(buf, first, count)
         }
 
-        /// Take the memory back from granules `first .. first + count` of a sparse buffer once the queued work on it is
-        /// done; returns how many were newly unbacked.
+        /// Take the memory back from granules `first .. first + count` of a sparse buffer; returns how many were newly
+        /// unbacked. See [`Self::unback_sparse_many`].
         pub fn unback_sparse(&self, buf: &DeviceBuffer, first: u64, count: u64) -> Result<u64, String> {
-            self.be().unback_sparse(buf, first, count)
+            self.unback_sparse_many(&[(buf, first, count)])
+        }
+
+        /// [`Self::unback_sparse`] for several `(buffer, first granule, count)` ranges after one wait. The work queued on this
+        /// device in either lane finishes first, since a kernel of the other lane may be using the granules; the caller has to
+        /// have stopped issuing work that reaches them.
+        pub fn unback_sparse_many(&self, ranges: &[(&DeviceBuffer, u64, u64)]) -> Result<u64, String> {
+            self.inner.poll_wait();
+            if let Some(urgent) = self.urgent.get().and_then(|u| u.as_deref()) {
+                urgent.poll_wait();
+            }
+            let mut freed = 0;
+            for &(buf, first, count) in ranges {
+                freed += self.inner.unback_sparse(buf, first, count)?;
+            }
+            Ok(freed)
         }
 
         /// The memory device an allocation under `policy` is charged to: the

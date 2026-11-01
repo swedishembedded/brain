@@ -636,7 +636,7 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
         let spec = SpecServing { mode, scratch_rows, batch_limit, ..SpecServing::default() };
         // Paged KV: sequences hold the blocks their tokens need from one shared pool, so a long context
         // costs only the sequences that use it, and the batch is not multiplied by the context.
-        let r = Qwen35GgufResident::new(gguf_path.to_string(), devices.clone(), cap, tier.clone()).with_kv_tier(kv).with_max_batch(max_batch).with_prefix_slots(prefix_slots).with_speculation(spec).with_exact_decode(cfg.exact_decode).with_act_choice(cfg.act_precision.unwrap_or_default()).with_gdn_state(gdn_state).with_kv_block_rows(qwen35::int8_gguf_resident::KV_BLOCK_ROWS);
+        let r = Qwen35GgufResident::new(gguf_path.to_string(), devices.clone(), cap, tier.clone()).with_kv_tier(kv).with_max_batch(max_batch).with_prefix_slots(prefix_slots).with_speculation(spec).with_exact_decode(cfg.exact_decode).with_act_choice(cfg.act_precision.unwrap_or_default()).with_gdn_state(gdn_state).with_kv_block_rows(qwen35::int8_gguf_resident::KV_BLOCK_ROWS).with_unified_pool(true);
         match &bank {
             Some(bank) => r.with_adapter_bank(bank.request()),
             None => r,
@@ -649,7 +649,7 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
         match cfg.ctx {
             // One sequence of the operator's context must fit the pool the cards leave.
             Some(ctx) => r.longest_pool(ctx).map(|_| ()),
-            None => match r.longest_cap()? {
+            None => match r.longest_context()? {
                 c if c >= floor => Ok(()),
                 c => Err(format!("it leaves a {c}-token context, under {floor}")),
             },
@@ -678,12 +678,18 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
             build(kv, mode, prefix_slots, ctx).with_kv_pool_rows(pool)
         }
         None => {
-            let cap = build(kv, mode, prefix_slots, 1).longest_cap()?;
-            chosen.push(format!("--ctx {cap}: the longest context the cards hold beside everything above, with one KV pool of {cap} tokens shared by all sequences"));
-            build(kv, mode, prefix_slots, cap).with_kv_pool_rows(cap)
+            let cap = build(kv, mode, prefix_slots, 1).longest_context()?;
+            let pool = build(kv, mode, prefix_slots, cap).pool_rows_for_context(cap)?;
+            chosen.push(format!("--ctx {cap}: the longest context the cards hold beside everything above, with one KV pool of {pool} tokens shared by all sequences"));
+            build(kv, mode, prefix_slots, cap).with_kv_pool_rows(pool)
         }
     };
     let resident = resident.with_prefill_policy(cfg.prefill_policy_or_default()).with_model_id(id);
+    match resident.unified_pool_notice() {
+        Some(why) => chosen.push(format!("KV and recurrent-state pools separate: a state row is reserved for each of the {max_batch} slots ({why})")),
+        None if resident.unified() => chosen.push("KV and recurrent-state share one pool: a running sequence takes its state row from the KV pool and gives it back, so no slot reserves one".to_string()),
+        None => {}
+    }
     match resident.unservable_reason() {
         Some(reason) => Err(reason),
         None => Ok(Qwen35GgufServed::new(resident, bank, gguf_path, id, chosen)),

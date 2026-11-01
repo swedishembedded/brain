@@ -209,6 +209,13 @@ impl KvTier {
         self.plane_words(rows, kv_stride, head_dim).bytes()
     }
 
+    /// Token rows whose data fills exactly `granule` bytes of one plane, or `None` when no whole number of rows does: the
+    /// rows of a KV block in a sparse plane, backed one granule per block. Scales are per row and sit in their own buffer.
+    pub fn block_rows_for_granule(self, granule: u64, kv_stride: u64, head_dim: u64) -> Option<u32> {
+        let row_bytes = self.plane_words(1, kv_stride, head_dim).data * 4;
+        (row_bytes > 0 && granule.is_multiple_of(row_bytes)).then(|| u32::try_from(granule / row_bytes).ok()).flatten()
+    }
+
     /// Whether a plane of `rows` token rows can be addressed by the kernels'
     /// `u32` element offsets.
     pub fn fits_addressing(rows: u64, kv_stride: u64) -> bool {
@@ -268,6 +275,25 @@ impl KvPlane {
                 }
             }
         }
+    }
+
+    /// [`Self::new`] with the element storage a sparse buffer ([`Gpu::try_alloc_sparse`]): nothing is backed until the caller
+    /// attaches memory to a granule of [`Self::data`] (`Gpu::back_sparse`), and a kernel may only touch rows in backed ones. The
+    /// per-row scales of a scaled tier stay dense, a few bytes a row. `charged` is the memory the caller plans to back the element
+    /// storage with, counted once against any ceiling (see `Gpu::try_alloc_sparse`).
+    pub fn new_sparse(gpu: &Gpu, tier: KvTier, rows: u64, kv_stride: u64, head_dim: u64, charged: u64) -> Result<KvPlane, String> {
+        assert!(head_dim > 0 && kv_stride.is_multiple_of(head_dim), "KvPlane: kv_stride {kv_stride} is not a whole number of {head_dim}-wide heads");
+        assert!(KvTier::fits_addressing(rows, kv_stride), "KvPlane: {rows} rows x {kv_stride} elements exceed the kernels' u32 element index ({MAX_PLANE_ELEMS})");
+        let words = tier.plane_words(rows, kv_stride, head_dim);
+        let data = gpu.try_alloc_sparse("kv.plane", words.data * 4, charged)?;
+        Ok(match tier.scale {
+            KvScale::None => KvPlane { tier, data, scales: None, clip: None, n_kv: 0 },
+            KvScale::PerRow => {
+                assert!(head_dim.is_multiple_of(tier.per_word()), "KvPlane: a {tier} head of {head_dim} elements is not a whole number of packed words");
+                let n_kv = (kv_stride / head_dim) as usize;
+                KvPlane { tier, data, scales: Some(gpu.storage(words.scales)), clip: Some(gpu.storage_init("kv.clip", &vec![f32::MAX; n_kv])), n_kv }
+            }
+        })
     }
 
     /// A one-word `f32` stand-in for a layer that keeps no KV (a GDN layer, or
@@ -393,6 +419,11 @@ impl KvLayer {
     /// Both planes of a layer that keeps `rows` token rows.
     pub fn new(gpu: &Gpu, tier: KvTier, rows: u64, kv_stride: u64, head_dim: u64) -> KvLayer {
         KvLayer { k: KvPlane::new(gpu, tier, rows, kv_stride, head_dim), v: KvPlane::new(gpu, tier, rows, kv_stride, head_dim) }
+    }
+
+    /// [`Self::new`] with sparse element storage - see [`KvPlane::new_sparse`]. `charged` is each plane's share.
+    pub fn new_sparse(gpu: &Gpu, tier: KvTier, rows: u64, kv_stride: u64, head_dim: u64, charged: u64) -> Result<KvLayer, String> {
+        Ok(KvLayer { k: KvPlane::new_sparse(gpu, tier, rows, kv_stride, head_dim, charged)?, v: KvPlane::new_sparse(gpu, tier, rows, kv_stride, head_dim, charged)? })
     }
 
     /// A layer with no KV - see [`KvPlane::placeholder`].
@@ -951,6 +982,25 @@ mod tests {
         assert_eq!(data1, want_data);
         assert_eq!(scales1, want_scales);
         assert_ne!(data1, data0, "the copy must have changed something");
+    }
+
+    /// A sparse plane is backed one granule per block, so a block must be exactly a granule of a data plane.
+    #[test]
+    fn a_block_of_a_sparse_plane_is_one_granule_of_every_tier() {
+        const GRANULE: u64 = 2 << 20;
+        // Qwen3.8-27B: 4 kv heads of 256.
+        let rows = |tier: KvTier| tier.block_rows_for_granule(GRANULE, 1024, 256);
+        assert_eq!(rows(KvTier::F32), Some(512));
+        assert_eq!(rows(KvTier::BF16), Some(1024));
+        assert_eq!(rows(KvTier::INT8), Some(2048));
+        assert_eq!(rows(KvTier::FP8), Some(2048));
+        for tier in KvTier::ALL {
+            let r = rows(tier).unwrap() as u64;
+            assert_eq!(tier.plane_words(r, 1024, 256).data * 4, GRANULE, "{tier}: a block's data is exactly one granule");
+        }
+        // A row that does not divide the granule cannot be a whole number of blocks per granule.
+        assert_eq!(KvTier::BF16.block_rows_for_granule(GRANULE, 1000, 250), None);
+        assert_eq!(KvTier::BF16.block_rows_for_granule(1 << 20, 4096, 256), Some(128), "a granule of 1 MiB");
     }
 
     #[test]

@@ -67,6 +67,15 @@ pub trait PagedDecoder {
     /// KV blocks needed to hold `tokens` cached positions.
     fn blocks_for(&self, tokens: u32) -> u32;
 
+    /// Blocks of the pool a sequence takes beyond its tokens' own when its prefill starts and gives back when it ends: the
+    /// memory of its recurrent-state row, for a hybrid decoder whose state and KV blocks share one pool (the decoder takes
+    /// them from the allocator with `BlockAllocator::lend`, and records the row as the table's state row). Admission and the
+    /// debt of a prefill that has not started charge it, so a burst of admissions does not promise the same blocks to prompts
+    /// and to state rows. An upper bound is fine; the default, for a decoder whose state is not in the pool, is 0.
+    fn sequence_state_blocks(&self) -> u32 {
+        0
+    }
+
     // Prefix reuse comes in two shapes, both keyed by adapter namespace plus exact
     // token prefix and both counted in `prefix_stats`:
     //  * shareable KV blocks (every attention layer): `crate::paged::PrefixCache`,
@@ -1709,7 +1718,16 @@ impl<D: PagedDecoder> Scheduler<D> {
             0 => p.adopted,
             n => n,
         };
-        self.dec.blocks_for(p.prompt.len() as u32 + 1).saturating_sub(held)
+        self.dec.blocks_for(p.prompt.len() as u32 + 1).saturating_sub(held) + self.state_owed(&p.table)
+    }
+
+    /// Blocks a sequence with `table` still owes the pool for its state row: all of them until the decoder has given it one.
+    fn state_owed(&self, table: &BlockTable) -> u32 {
+        if table.state_row().is_none() {
+            self.dec.sequence_state_blocks()
+        } else {
+            0
+        }
     }
 
     /// Blocks a fresh prefill of `prompt` will adopt from the prefix cache
@@ -2051,7 +2069,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             let w = &self.waiting[pos];
             self.adopted_blocks(&w.req.prompt, w.adapter, w.embeds.is_some())
         };
-        let want = self.dec.blocks_for(need as u32 + 1).saturating_sub(cached) + self.committed_blocks();
+        let want = self.dec.blocks_for(need as u32 + 1).saturating_sub(cached) + self.dec.sequence_state_blocks() + self.committed_blocks();
         let free = self.dec.free_blocks();
         if free < want {
             // Cached prefix blocks are reclaimable capacity: live sequences always

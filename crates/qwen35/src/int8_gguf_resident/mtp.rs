@@ -216,13 +216,14 @@ impl MtpDrafter {
         slots: u32,
         kv_tier: KvTier,
         layout: KvLayout,
+        sparse: bool,
         target_norm_name: &str,
         normed_hidden: bool,
     ) -> Result<Option<MtpDrafter>, String> {
         let d = cfg.d_model as usize;
         let Some(parts) = MtpParts::read(ckpt, cfg, tier, gpu_index, head_gpu)? else { return Ok(None) };
         let MtpParts { cfg1, shard, stage, fc, enorm, hnorm, head_norm_host } = parts;
-        let caches = ShardCaches::new(&stage.gpu, &cfg1, &shard, cap, slots, 0, false, kv_tier, layout, false)?;
+        let caches = ShardCaches::new(&stage.gpu, &cfg1, &shard, cap, slots, 0, false, kv_tier, layout, false, sparse)?;
         let target_norm_host = match ckpt.final_norm(target_norm_name) {
             Some(Ok(v)) if v.len() == d => v,
             Some(Ok(v)) => return Err(format!("{MODEL}: '{target_norm_name}' has {} elements, expected {d}", v.len())),
@@ -376,7 +377,7 @@ impl Qwen35GgufInstance {
     pub(super) fn enable_mtp(&mut self, tier: &TierPolicy, gpu_index: usize, normed_hidden: bool) -> Result<bool, String> {
         let (_, target_norm, _) = self.ckpt.endpoint_names(&self.cfg)?;
         let head_gpu = &self.shards.last().expect("a plan always has at least one stage").qwen35.gpu;
-        let loaded = MtpDrafter::load(&self.ckpt, &self.cfg, tier, gpu_index, head_gpu, self.cap, self.state_rows(), self.kv_tier, self.kv_layout, &target_norm, normed_hidden)?;
+        let loaded = MtpDrafter::load(&self.ckpt, &self.cfg, tier, gpu_index, head_gpu, self.cap, self.state_rows(), self.kv_tier, self.kv_layout, self.unified, &target_norm, normed_hidden)?;
         self.mtp = loaded;
         Ok(self.mtp.is_some())
     }

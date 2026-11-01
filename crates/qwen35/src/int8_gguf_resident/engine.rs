@@ -156,7 +156,11 @@ pub struct Qwen35GgufEngine {
     alloc: BlockAllocator,
     /// Recurrent-state rows not owned by a sequence (paged layout only; in the
     /// one-block layout a sequence's row is its block's id).
-    free_rows: Vec<u32>,
+    free_rows: std::collections::BTreeSet<u32>,
+    /// The memory ledger of the unified pool, when the KV planes and state pools are sparse and draw on one budget
+    /// ([`super::unipool`]): a state row is backed, and the blocks it displaces lent from `alloc`, when a sequence is given
+    /// one, and both are returned when it leaves.
+    unified: Option<super::unipool::StateLedger>,
     /// Prompts whose KV rows and recurrent-state snapshot are kept for reuse
     /// (see [`super::prefix`]).
     cache: PrefixCache,
@@ -346,10 +350,15 @@ impl Qwen35GgufEngine {
     /// prompt's retained block never starves an admission. The paged layout's
     /// holds the pool's blocks, and cached prompts' blocks are reclaimed for
     /// live sequences like any cache.
-    pub fn new(inst: Qwen35GgufInstance) -> Qwen35GgufEngine {
+    pub fn new(mut inst: Qwen35GgufInstance) -> Qwen35GgufEngine {
+        let unified = inst.ledger.take();
         let (alloc, free_rows) = match inst.kv_layout {
-            KvLayout::OneBlock => (BlockAllocator::new(inst.max_batch + inst.prefix_slots, inst.cap), Vec::new()),
-            KvLayout::Paged { block_rows, pool_rows } => (BlockAllocator::new(pool_rows / block_rows, block_rows), (0..inst.max_batch).rev().collect()),
+            KvLayout::OneBlock => (BlockAllocator::new(inst.max_batch + inst.prefix_slots, inst.cap), Default::default()),
+            KvLayout::Paged { block_rows, pool_rows } => {
+                let alloc = BlockAllocator::new(pool_rows / block_rows, block_rows);
+                // The pool backs each block with memory as the allocator first hands it out.
+                (if let Some(ledger) = &unified { alloc.with_backing(ledger.backing()) } else { alloc }, (0..inst.max_batch).collect())
+            }
         };
         let cache = PrefixCache::new(inst.prefix_slots);
         let mixed = inst.mixed_available();
@@ -361,6 +370,7 @@ impl Qwen35GgufEngine {
             inst,
             alloc,
             free_rows,
+            unified,
             cache,
             pending: HashMap::new(),
             filed: HashMap::new(),
@@ -398,7 +408,14 @@ impl Qwen35GgufEngine {
         }
         let row = match self.inst.kv_layout {
             KvLayout::OneBlock => table.blocks()[0],
-            KvLayout::Paged { .. } => self.free_rows.pop().unwrap_or_else(|| panic!("{MODEL}: more sequences than the {} recurrent-state rows", self.inst.max_batch)),
+            KvLayout::Paged { .. } => {
+                let row = self.free_rows.pop_first().unwrap_or_else(|| panic!("{MODEL}: more sequences than the {} recurrent-state rows", self.inst.max_batch));
+                if let Some(ledger) = &mut self.unified {
+                    // The scheduler charged the sequence for this ([`PagedDecoder::sequence_state_blocks`]) when it admitted it.
+                    ledger.admit(&mut self.alloc, row).unwrap_or_else(|e| panic!("{MODEL}: the state row of a sequence cannot be backed: {e}"));
+                }
+                row
+            }
         };
         table.set_state_row(row);
         row
@@ -418,6 +435,17 @@ impl Qwen35GgufEngine {
             KvLayout::OneBlock => KvWindow::Block(table.blocks()[0]),
             KvLayout::Paged { .. } => KvWindow::Table(table.blocks()),
         }
+    }
+
+    /// Blocks the pool was built with, lent or not.
+    pub fn alloc_total(&self) -> u32 {
+        self.alloc.num_blocks()
+    }
+
+    /// What the unified pool holds now, when the engine has one: `(blocks backed by memory, state granules backed per
+    /// recurrent layer, blocks lent to the state rows)`.
+    pub fn unified_report(&self) -> Option<(u32, u64, usize)> {
+        self.unified.as_ref().map(super::unipool::StateLedger::report)
     }
 
     /// Give every stage an adapter bank, so sequences can run under LoRA
@@ -1247,6 +1275,9 @@ impl PagedDecoder for Qwen35GgufEngine {
     fn blocks_for(&self, tokens: u32) -> u32 {
         tokens.div_ceil(self.alloc.block_size())
     }
+    fn sequence_state_blocks(&self) -> u32 {
+        self.unified.as_ref().map_or(0, super::unipool::StateLedger::sequence_blocks)
+    }
     /// The blocks [`Self::adopt_cached_blocks`] shares from the entry `prompt` would resume from, less the one it
     /// copies before the sequence writes into it. The one-block layout copies rows into the sequence's own block,
     /// so it adopts none.
@@ -1314,7 +1345,10 @@ impl PagedDecoder for Qwen35GgufEngine {
             None => t.release(&mut self.alloc),
         }
         if let (Some(slot), KvLayout::Paged { .. }) = (row, self.inst.kv_layout) {
-            self.free_rows.push(slot);
+            if let Some(ledger) = &mut self.unified {
+                ledger.release(&mut self.alloc, slot).unwrap_or_else(|e| panic!("{MODEL}: the state row of a sequence cannot be released: {e}"));
+            }
+            self.free_rows.insert(slot);
         }
     }
     /// Prefill into the sequence's own slot (other slots untouched), returning
@@ -1544,7 +1578,7 @@ impl PagedDecoder for Qwen35GgufEngine {
         };
         let spec = super::SpecCost { scratch_rows: i.spec_rows, mtp_head: false };
         let gdn_bf16 = i.shards.first().is_some_and(|s| s.caches.pool_bf16);
-        let shape = super::ServingShape { prefix_slots: i.prefix_slots, kv_pool_rows: pool_rows, spec, gdn_bf16, ..super::ServingShape::new(i.cap, i.tier.clone(), i.kv_tier, i.max_batch) };
+        let shape = super::ServingShape { prefix_slots: i.prefix_slots, kv_pool_rows: pool_rows, spec, gdn_bf16, unified_state: i.unified, ..super::ServingShape::new(i.cap, i.tier.clone(), i.kv_tier, i.max_batch) };
         i.cfg.layer_types().into_iter().map(|ty| super::layer_state_bytes(&i.cfg, ty, &shape)).sum()
     }
     fn kv_pool_capacity_tokens(&self) -> u64 {

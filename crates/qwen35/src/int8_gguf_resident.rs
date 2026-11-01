@@ -146,6 +146,7 @@ mod engine;
 mod mtp;
 mod pace;
 mod speculate;
+mod unipool;
 pub use speculate::{SpecCost, SpecServing, SpeculativeMode};
 pub use engine::{checkpoint_len, PrefillPolicy, Qwen35GgufEngine, SpecTimes};
 
@@ -421,6 +422,14 @@ pub struct ServingShape {
     /// ([`crate::vision_tower::VISION_RESERVE_BYTES`]); charged like the prefill workspace, since it is transient memory
     /// the cards must keep free.
     pub vision_bytes: u64,
+    /// The recurrent-state rows are not reserved up front: they are sparse and draw on the same memory as the KV pool
+    /// ([`unipool`]). The pool is then planned for the KV blocks the running sequences' state displaces too, the state costs the
+    /// card nothing beyond its conv history, and one sequence's context must leave room for its own state row.
+    pub unified_state: bool,
+    /// Pool rows one sequence's state row takes out of the shared pool; 0 unless [`Self::unified_state`].
+    pub sequence_state_rows: u32,
+    /// Rows of a KV block of the paged layout; 0 for the default [`KV_BLOCK_ROWS`]. A pool is whole blocks.
+    pub block_rows: u32,
 }
 
 /// An adapter bank's device bytes: beside each layer it corrects, and the row
@@ -434,7 +443,7 @@ pub struct BankBytes {
 impl ServingShape {
     /// `max_batch` sequences of `cap` tokens, no prompt cache, no speculation.
     pub fn new(cap: u32, tier: TierPolicy, kv: KvTier, max_batch: u32) -> ServingShape {
-        ServingShape { cap, tier, kv, max_batch, prefix_slots: 0, kv_pool_rows: 0, spec: SpecCost::NONE, prefill_rows: TENSOR_CORE_PREFILL_TOKENS, adapter_bank: None, head: Dtype::I8, embed: None, gdn_bf16: false, native_attention: false, snapshots_on_host: false, vision_bytes: 0 }
+        ServingShape { cap, tier, kv, max_batch, prefix_slots: 0, kv_pool_rows: 0, spec: SpecCost::NONE, prefill_rows: TENSOR_CORE_PREFILL_TOKENS, adapter_bank: None, head: Dtype::I8, embed: None, gdn_bf16: false, native_attention: false, snapshots_on_host: false, vision_bytes: 0, unified_state: false, sequence_state_rows: 0, block_rows: 0 }
     }
 
     /// The same shape for a stack whose prefill forward may carry `rows` rows (the
@@ -481,9 +490,11 @@ pub(crate) fn layer_state_bytes(cfg: &Qwen35Config, ty: LayerType, shape: &Servi
         LayerType::Full if shape.kv_pool_rows > 0 => 2 * shape.kv.plane_bytes(shape.kv_pool_rows as u64, cfg.kv_dim() as u64, cfg.head_dim as u64),
         LayerType::Full => slots * cfg.layer_decode_state_bytes(ty, shape.cap, shape.kv),
         LayerType::Linear => {
-            // A pool row is the f32 bytes, or half of them when the pools are bf16; the snapshots are always f32.
+            // A pool row is the f32 bytes, or half of them when the pools are bf16; the snapshots are always f32. A unified
+            // pool holds only the conv history of its rows up front: the state of a running row is part of the KV pool.
             let row = cfg.layer_decode_state_bytes(ty, shape.cap, shape.kv);
-            slots * if shape.gdn_bf16 { row / 2 } else { row }
+            let held = if shape.unified_state { cfg.gdn_hist_len() * 4 } else { row };
+            slots * if shape.gdn_bf16 { held / 2 } else { held }
                 + if shape.snapshots_on_host { 0 } else { shape.prefix_slots as u64 * row }
                 + shape.spec.scratch_rows as u64 * (cfg.gdn_state_len() + cfg.gdn_hist_len()) * 4
         }
@@ -779,8 +790,11 @@ pub fn auto_pool_rows(cfg: &Qwen35Config, devices: &[(Device, u64)], shape: &Ser
         kv_rows_addressable(cfg, rows) && model::shard::plan_fewest_devices(&serving_cost(cfg, &at), &caps).is_some()
     };
     let fit = largest_fitting(fits)?;
-    let rows = if fit >= AUTO_POOL_GRANULE { fit / AUTO_POOL_GRANULE * AUTO_POOL_GRANULE } else { fit / KV_BLOCK_ROWS * KV_BLOCK_ROWS };
-    (rows > 0 && rows >= cap.unwrap_or(0)).then_some(rows)
+    // Whole blocks, and a round number of them: the granule is the block when the block is larger than the round figure.
+    let block = if shape.block_rows > 0 { shape.block_rows } else { KV_BLOCK_ROWS };
+    let granule = AUTO_POOL_GRANULE.max(block).next_multiple_of(block);
+    let rows = if fit >= granule { fit / granule * granule } else { fit / block * block };
+    (rows > 0 && rows >= cap.unwrap_or(0).saturating_add(shape.sequence_state_rows)).then_some(rows)
 }
 
 // ------------------------------------------------------------ the fetch plan
@@ -1057,6 +1071,8 @@ struct ShardCaches {
     /// Whether `pool_state`/`pool_hist` store bf16 (two elements a word, half the words: `--gdn-state bf16`). The work
     /// copies, the snapshots and the zero row stay f32.
     pool_bf16: bool,
+    /// Whether the KV planes and `pool_state` are sparse buffers ([`unipool`]).
+    sparse: bool,
     /// Kernel indices of `pool_rows_scatter2`, `pool_rows_gather2` and `copy_within` on this stage's device: the f32
     /// pair stages the snapshots.
     scatter: usize,
@@ -1075,7 +1091,11 @@ impl ShardCaches {
     /// `snapshots_on_host` puts the prefix-cache snapshot rows in host memory the kernels use directly
     /// ([`ServingShape::snapshots_on_host`]); a host allocation the device refuses is an error, never a quiet one on the card
     /// the plan did not charge.
-    fn new(gpu: &Gpu, cfg: &Qwen35Config, shard: &Shard, cap: u32, slots: u32, snapshot_rows: u32, snapshots_on_host: bool, kv_tier: KvTier, layout: KvLayout, pool_bf16: bool) -> Result<ShardCaches, String> {
+    ///
+    /// `sparse` makes the KV planes and the recurrent-state pools sparse buffers ([`unipool`]): nothing is backed by memory until
+    /// the engine's unified pool attaches it, so the block size must be a granule of a plane and the pool is addressed through
+    /// block tables only.
+    fn new(gpu: &Gpu, cfg: &Qwen35Config, shard: &Shard, cap: u32, slots: u32, snapshot_rows: u32, snapshots_on_host: bool, kv_tier: KvTier, layout: KvLayout, pool_bf16: bool, sparse: bool) -> Result<ShardCaches, String> {
         assert!(slots > 0, "{MODEL}: ShardCaches needs at least one slot");
         let kv = cfg.kv_dim() as u64;
         let (state, hist) = (cfg.gdn_state_len(), cfg.gdn_hist_len());
@@ -1095,12 +1115,18 @@ impl ShardCaches {
                 KvLayout::OneBlock => slots as u64 * cap as u64,
                 KvLayout::Paged { pool_rows, .. } => pool_rows as u64,
             };
-            gqa_kv.push(if full { KvLayer::new(gpu, kv_tier, kv_rows, kv, cfg.head_dim as u64) } else { KvLayer::placeholder(gpu) });
+            gqa_kv.push(match (full, sparse) {
+                (false, _) => KvLayer::placeholder(gpu),
+                (true, false) => KvLayer::new(gpu, kv_tier, kv_rows, kv, cfg.head_dim as u64),
+                (true, true) => KvLayer::new_sparse(gpu, kv_tier, kv_rows, kv, cfg.head_dim as u64, kv_tier.plane_words(kv_rows, kv, cfg.head_dim as u64).data * 4).map_err(|e| format!("{MODEL}: the sparse KV pool: {e}"))?,
+            });
             let lin = shard.owns(l) && *ty == LayerType::Linear;
             recurrent.push(lin);
             let (ps, ph, ws, wh) = if lin { (slots as u64 * state / pool_div, slots as u64 * hist / pool_div, state, hist) } else { (1, 1, 1, 1) };
             let (ss, sh) = if lin && snapshot_rows > 0 { (snapshot_rows as u64 * state, snapshot_rows as u64 * hist) } else { (1, 1) };
-            pool_state.push(gpu.storage(ps));
+            // A sparse state pool is charged to no one here: the memory its rows take is part of the KV pool's, which the
+            // unified pool accounts block by block.
+            pool_state.push(if sparse && lin { gpu.try_alloc_sparse("qwen35.gdn_state_pool", ps * 4, 0).map_err(|e| format!("{MODEL}: the sparse recurrent-state pool: {e}"))? } else { gpu.storage(ps) });
             pool_hist.push(gpu.storage(ph));
             work_state.push(gpu.storage(ws));
             work_hist.push(gpu.storage(wh));
@@ -1129,11 +1155,13 @@ impl ShardCaches {
                 assert!(block_rows > 0 && pool_rows >= block_rows, "{MODEL}: a paged KV pool needs whole blocks ({pool_rows} rows in blocks of {block_rows})");
                 let per_slot = cap.div_ceil(block_rows);
                 let pool_blocks = pool_rows / block_rows;
-                (block_rows, true, (0..slots).map(|s| (s * per_slot..(s + 1) * per_slot).take_while(|&b| b < pool_blocks).collect()).collect())
+                // A sparse pool has no memory behind a block until the engine backs it, so no block is a default.
+                let tables = if sparse { vec![Vec::new(); slots as usize] } else { (0..slots).map(|s| (s * per_slot..(s + 1) * per_slot).take_while(|&b| b < pool_blocks).collect()).collect() };
+                (block_rows, true, tables)
             }
         };
         let (zero_state, zero_hist) = (gpu.storage(state), gpu.storage(hist));
-        let caches = ShardCaches { gqa_kv, pool_state, pool_hist, work_state, work_hist, snap_state, snap_hist, snapshots_on_host, recurrent, full: full_layers, slots, cap, block_rows, paged, slot_tables, slot_rope: vec![None; slots as usize], verify_snaps: Vec::new(), pool_bf16, scatter, gather, pool_scatter, pool_gather, copy_within, zero_state, zero_hist };
+        let caches = ShardCaches { gqa_kv, pool_state, pool_hist, work_state, work_hist, snap_state, snap_hist, snapshots_on_host, recurrent, full: full_layers, slots, cap, block_rows, paged, slot_tables, slot_rope: vec![None; slots as usize], verify_snaps: Vec::new(), pool_bf16, sparse, scatter, gather, pool_scatter, pool_gather, copy_within, zero_state, zero_hist };
         gpu.submit(&[&caches.zero_state, &caches.zero_hist], &[]);
         caches.reset(gpu);
         Ok(caches)
@@ -1147,7 +1175,9 @@ impl ShardCaches {
     /// length is never read (the same argument `Qwen35::reset_decode_cache`
     /// makes).
     fn reset(&self, gpu: &Gpu) {
-        let clears: Vec<&DeviceBuffer> = self.pool_state.iter().chain(&self.pool_hist).chain(&self.work_state).chain(&self.work_hist).collect();
+        // A sparse state pool has nothing to clear until a row is backed, and every row starts from a zero or restored state.
+        let pool_state = self.pool_state.iter().filter(|_| !self.sparse);
+        let clears: Vec<&DeviceBuffer> = pool_state.chain(&self.pool_hist).chain(&self.work_state).chain(&self.work_hist).collect();
         gpu.submit(&clears, &[]);
     }
 
@@ -1542,6 +1572,11 @@ pub struct Qwen35GgufInstance {
     verify_plans: RefCell<DecodePlans>,
     /// Whether a plain decode step may replay a recording (on by default).
     plans_on: Cell<bool>,
+    /// The KV planes and recurrent-state pools are sparse buffers that draw on one budget ([`unipool`]). Only the engine,
+    /// which backs a block when it hands it out and a state row when it admits one, may drive such an instance.
+    unified: bool,
+    /// The pool's memory ledger, until the engine takes it (`Qwen35GgufEngine::new`).
+    ledger: Option<unipool::StateLedger>,
 }
 
 /// What a decode step's head hands the host.
@@ -1575,6 +1610,20 @@ fn head_groups(rows: u32, step: u32) -> impl Iterator<Item = (usize, usize)> {
 }
 
 impl Qwen35GgufInstance {
+    /// The pool the sparse KV planes and state pools of the one stage (and the drafter's KV planes) draw on: block `b` is granule
+    /// `b` of every plane, state row `r` the granules of its byte range in every recurrent layer's pool.
+    fn unified_ledger(&self) -> Result<unipool::StateLedger, String> {
+        let [shard] = self.shards.as_slice() else { return Err(format!("{MODEL}: the unified state pool serves one stage, this instance has {}", self.shards.len())) };
+        let KvLayout::Paged { block_rows, pool_rows } = self.kv_layout else { return Err(format!("{MODEL}: the unified state pool needs the paged KV layout")) };
+        let caches = std::iter::once(&shard.caches).chain(self.mtp.as_ref().map(|m| &m.caches));
+        let kv_planes: Vec<DeviceBuffer> = caches.flat_map(|c| c.gqa_kv.iter().zip(&c.full).filter(|(_, owned)| **owned).flat_map(|(layer, _)| [layer.k.data().clone(), layer.v.data().clone()])).collect();
+        let c = &shard.caches;
+        let state_planes: Vec<DeviceBuffer> = c.pool_state.iter().zip(&c.recurrent).filter(|(_, lin)| **lin).map(|(p, _)| p.clone()).collect();
+        let geo = unipool::StateGeometry::of(&self.cfg, c.pool_bf16, self.max_batch);
+        let pool = unipool::UnifiedPool::new(&shard.qwen35.gpu, kv_planes, state_planes, geo, pool_rows / block_rows).map_err(|e| format!("{MODEL}: the unified state pool: {e}"))?;
+        Ok(unipool::StateLedger::new(pool))
+    }
+
     /// The model config the resident was built from.
     pub fn config(&self) -> &Qwen35Config {
         &self.cfg
@@ -3783,6 +3832,12 @@ pub struct Qwen35GgufResident {
     /// Rows of the shared KV pool of the paged layout ([`Self::with_kv_pool_rows`]);
     /// 0 sizes it as the one-block layout's `(max_batch + prefix_slots) * cap`.
     kv_pool_rows: u32,
+    /// Draw the recurrent-state rows and the KV blocks from one budget ([`Self::with_unified_pool`]).
+    unified_pool: bool,
+    /// ...whatever the size of the model against the pool's blocks ([`Self::with_unified_pool_always`]).
+    unified_pool_always: bool,
+    /// The checkpoint's configuration at capacity 1, read once: what the geometry of a unified pool is computed from.
+    model_cfg: OnceLock<Result<Qwen35Config, String>>,
     /// The id this resident is SERVED under (`Manifest::model`,
     /// `InstanceKey::model`) - set by the caller that resolved the
     /// checkpoint ([`Self::with_model_id`], what
@@ -3816,7 +3871,7 @@ pub struct Qwen35GgufResident {
 
 impl Qwen35GgufResident {
     pub fn new(gguf_path: String, devices: Vec<(Device, u64)>, cap: u32, tier: TierPolicy) -> Qwen35GgufResident {
-        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, prefix_slots: 0, kv_tier: KvTier::F32, kv_block_rows: 0, kv_pool_rows: 0, model_id: MODEL.to_string(), bank: None, spec: SpecServing::default(), exact_decode: false, act_choice: gpu_core::ActChoice::Auto, gdn_state: GdnState::F32, prefill: PrefillPolicy::default(), plan: OnceLock::new(), vision: OnceLock::new(), sampling: OnceLock::new() }
+        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, prefix_slots: 0, kv_tier: KvTier::F32, kv_block_rows: 0, kv_pool_rows: 0, unified_pool: false, unified_pool_always: false, model_cfg: OnceLock::new(), model_id: MODEL.to_string(), bank: None, spec: SpecServing::default(), exact_decode: false, act_choice: gpu_core::ActChoice::Auto, gdn_state: GdnState::F32, prefill: PrefillPolicy::default(), plan: OnceLock::new(), vision: OnceLock::new(), sampling: OnceLock::new() }
     }
 
     /// How this checkpoint reads images, when it does: an HF directory that declares a vision tower and holds its
@@ -3986,7 +4041,7 @@ impl Qwen35GgufResident {
 
     /// How the stages address a sequence's K/V rows.
     fn kv_layout(&self) -> KvLayout {
-        match self.kv_block_rows {
+        match self.block_rows() {
             0 => KvLayout::OneBlock,
             block_rows => {
                 // The default pool backs every sequence and cached prompt at full capacity, whole blocks each.
@@ -4003,6 +4058,113 @@ impl Qwen35GgufResident {
             KvLayout::OneBlock => 0,
             KvLayout::Paged { pool_rows, .. } => pool_rows,
         }
+    }
+
+    /// Rows per KV block: the granule of a sparse plane when the unified pool is in use ([`Self::with_unified_pool`]), else the
+    /// rows [`Self::with_kv_block_rows`] set.
+    pub fn kv_block_rows(&self) -> u32 {
+        self.block_rows()
+    }
+
+    fn block_rows(&self) -> u32 {
+        match self.unified_block_rows() {
+            Some(rows) if self.unified() => rows,
+            _ => self.kv_block_rows,
+        }
+    }
+
+    /// Draw the recurrent-state rows and the KV blocks from one budget instead of reserving a state row for every one of
+    /// `max_batch` sequences up front ([`unipool`]): a sequence takes the memory of its state row from the KV pool while it runs and
+    /// gives it back, and the planner sizes one pool. Needs the paged layout ([`Self::with_kv_block_rows`]) on one CUDA card with
+    /// sparse buffers; [`Self::unified_pool_notice`] says why a resident that asked for it does not get it. Must be set BEFORE the
+    /// first `estimate_multi`/`activate_multi` call.
+    pub fn with_unified_pool(mut self, on: bool) -> Qwen35GgufResident {
+        self.unified_pool = on;
+        self
+    }
+
+    /// [`Self::with_unified_pool`] for a model whose blocks are coarse against its card or its contexts, which the default declines
+    /// ([`Self::unified_pool_unavailable`]): a tiny test model, whose block is hundreds of thousands of rows.
+    pub fn with_unified_pool_always(mut self) -> Qwen35GgufResident {
+        self.unified_pool = true;
+        self.unified_pool_always = true;
+        self
+    }
+
+    /// The checkpoint's configuration, read once.
+    fn model_config(&self) -> Result<&Qwen35Config, String> {
+        self.model_cfg
+            .get_or_init(|| {
+                let mg = ResidentCheckpoint::open(&self.gguf_path).map_err(|e| format!("cannot open '{}': {e}", self.gguf_path))?;
+                mg.config(1).map_err(|e| format!("'{}' is not a servable Qwen3.8 checkpoint: {e}", self.gguf_path))
+            })
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+
+    /// Rows of a KV block that is exactly one granule of a sparse data plane at this KV tier.
+    fn unified_block_rows(&self) -> Option<u32> {
+        let cfg = self.model_config().ok()?;
+        self.kv_tier.block_rows_for_granule(unipool::GRANULE_BYTES, cfg.kv_dim() as u64, cfg.head_dim as u64)
+    }
+
+    /// Why this configuration cannot draw state and KV from one pool, whether or not it asked to.
+    fn unified_pool_unavailable(&self) -> Option<String> {
+        let cards: Vec<u32> = self.devices.iter().filter_map(|(d, _)| if let Device::Gpu(i) = d { Some(*i) } else { None }).collect();
+        if self.kv_block_rows == 0 {
+            return Some("the KV cache is one window per sequence, not paged blocks".to_string());
+        }
+        if self.devices.len() != 1 || cards.len() != 1 {
+            return Some(format!("{} cards are budgeted; the pool serves one", self.devices.len()));
+        }
+        if !gpu_core::defaults::Hardware::detected().sparse_memory_on(&cards) {
+            return Some(format!("the {} backend on gpu{} has no sparse buffers", gpu_core::backend_name(), cards[0]));
+        }
+        if self.unified_block_rows().is_none() {
+            return Some(format!("no whole number of {} KV rows fills a {}-byte granule", self.kv_tier, unipool::GRANULE_BYTES));
+        }
+        if self.unified_pool_always {
+            return None;
+        }
+        // The block is the pool's grain: a context, a pool and a reused prefix are whole blocks.
+        if self.unified_block_rows().is_some_and(|rows| rows > unipool::MAX_BLOCK_ROWS) {
+            return Some(format!("a block would be {} rows, past the {} the pool's grain may be", self.unified_block_rows().unwrap_or(0), unipool::MAX_BLOCK_ROWS));
+        }
+        // The pool lends memory in whole blocks, which must be fine against the card: a block is a granule of every plane.
+        if let Ok(cfg) = self.model_config() {
+            let kv_planes = 2 * cfg.layer_types().iter().filter(|&&t| t == LayerType::Full).count() as u64;
+            let state = unipool::sequence_blocks(&unipool::StateGeometry::of(cfg, self.gdn_state.is_bf16(), self.max_batch), kv_planes) as u64 * kv_planes * unipool::GRANULE_BYTES;
+            let card = self.devices[0].1;
+            if state > card / unipool::MAX_SEQUENCE_STATE_SHARE {
+                return Some(format!("one sequence's state row would take {} MiB of a {} MiB card, too coarse a block to share", state >> 20, card >> 20));
+            }
+        }
+        None
+    }
+
+    /// Whether the state rows and KV blocks share one pool: asked for ([`Self::with_unified_pool`]) and available.
+    pub fn unified(&self) -> bool {
+        self.unified_pool && self.unified_pool_unavailable().is_none()
+    }
+
+    /// Why a resident that asked for the unified pool does not get it, for the operator; `None` when it asked for nothing or has it.
+    pub fn unified_pool_notice(&self) -> Option<String> {
+        self.unified_pool.then(|| self.unified_pool_unavailable()).flatten()
+    }
+
+    /// Pool rows one sequence's state row takes out of the shared pool; 0 without the unified pool. A context of `ctx` tokens
+    /// needs a pool of `ctx` plus this.
+    pub fn sequence_state_rows(&self) -> Result<u32, String> {
+        let mg = ResidentCheckpoint::open(&self.gguf_path).map_err(|e| format!("cannot open '{}': {e}", self.gguf_path))?;
+        let cfg = mg.config(1).map_err(|e| format!("'{}' is not a servable Qwen3.8 checkpoint: {e}", self.gguf_path))?;
+        Ok(self.serving_shape(&mg, &cfg).sequence_state_rows)
+    }
+
+    /// The rows [`ServingShape::sequence_state_rows`] names for this configuration: a sequence's state row, in whole blocks.
+    fn state_rows_of_a_sequence(&self, cfg: &Qwen35Config, mtp_head: bool) -> u32 {
+        let Some(block_rows) = self.unified_block_rows().filter(|_| self.unified()) else { return 0 };
+        let kv_planes = 2 * cfg.layer_types().iter().filter(|&&t| t == LayerType::Full).count() as u64 + if mtp_head { 2 } else { 0 };
+        unipool::sequence_blocks(&unipool::StateGeometry::of(cfg, self.gdn_state.is_bf16(), self.max_batch), kv_planes).saturating_mul(block_rows)
     }
 
     /// See [`Self::with_prefix_slots`].
@@ -4122,6 +4284,17 @@ impl Qwen35GgufResident {
         Plan { refusal: None, cfg: Some(cfg), stages }
     }
 
+    /// The longest context one sequence may have: [`Self::longest_cap`] less the pool rows its own state row takes when state
+    /// and KV share a pool ([`Self::with_unified_pool`]), so a sequence of this length always fits beside its state.
+    pub fn longest_context(&self) -> Result<u32, String> {
+        Ok(self.longest_cap()?.saturating_sub(self.sequence_state_rows()?))
+    }
+
+    /// The pool, in rows, that holds one sequence of `ctx` tokens beside its own state row ([`Self::longest_context`]'s inverse).
+    pub fn pool_rows_for_context(&self, ctx: u32) -> Result<u32, String> {
+        Ok(ctx.saturating_add(self.sequence_state_rows()?))
+    }
+
     /// The total device bytes this checkpoint needs whatever the split, and
     /// the per-layer profile behind it - for a caller sizing budgets or
     /// reporting "will this fit at all?".
@@ -4178,19 +4351,22 @@ impl Qwen35GgufResident {
         let cards: Vec<u32> = self.devices.iter().filter_map(|(d, _)| if let Device::Gpu(i) = d { Some(*i) } else { None }).collect();
         let hw = gpu_core::defaults::Hardware::detected();
         let verify = crate::model::verify::verify_shape_supported(cfg) && [gpu_core::Fused::GdnVerifyPool, gpu_core::Fused::GdnVerifyPoolStreamBf16, gpu_core::Fused::GdnCommitPool, gpu_core::Fused::GdnCommitPoolBf16].iter().all(|&k| hw.offers_fused(k, &cards));
+        // Exact decode runs plain steps, so the verify scratch is not charged: the placement must describe what will be allocated.
+        let spec = if self.exact_decode { SpecCost::NONE } else { self.spec.cost(mg.has_mtp(cfg), verify) };
         ServingShape {
             native_attention: native_attention(cfg),
             snapshots_on_host: self.snapshots_on_host(),
             prefix_slots: self.prefix_slots,
             kv_pool_rows: self.paged_pool_rows(),
-            // Exact decode runs plain steps, so the verify scratch is not
-            // charged: the placement must describe what will be allocated.
-            spec: if self.exact_decode { SpecCost::NONE } else { self.spec.cost(mg.has_mtp(cfg), verify) },
+            spec,
             adapter_bank: self.bank_bytes(cfg),
             head: mg.head_tier(),
             embed: self.embed_tier(mg, cfg),
             gdn_bf16: self.gdn_state.is_bf16(),
             vision_bytes: if self.vision_spec().is_some() { crate::vision_tower::VISION_RESERVE_BYTES } else { 0 },
+            unified_state: self.unified(),
+            sequence_state_rows: self.state_rows_of_a_sequence(cfg, spec.mtp_head),
+            block_rows: self.block_rows(),
             ..ServingShape::new(self.cap, self.tier.clone(), self.kv_tier, self.max_batch).with_prefill_rows(self.prefill.batch_tokens.try_into().unwrap_or(u32::MAX))
         }
     }
@@ -4402,6 +4578,10 @@ impl Qwen35GgufResident {
 
         let layout = self.kv_layout();
         let state_rows = layout.state_rows(self.max_batch, self.prefix_slots);
+        let unified = self.unified();
+        if unified && plan.stages.len() != 1 {
+            return Err(format!("{MODEL}: the unified state pool serves one card and this plan places {} stages", plan.stages.len()));
+        }
         let embed_resident = self.serving_shape(&mg, &cfg).embed.is_some();
         residency::log::info(&format!("{MODEL}: the embedding table is {}", if embed_resident { "held on the first stage's card" } else { "read from the checkpoint on the host" }));
         let mut shards = Vec::with_capacity(plan.stages.len());
@@ -4426,7 +4606,7 @@ impl Qwen35GgufResident {
             // instance's per-sequence context.
             qwen35.set_exact_decode(self.exact_decode.then_some(self.cap));
             qwen35.set_act_precision(self.act_choice.resolve(qwen35.gpu.caps().arch.compute_capability));
-            let caches = ShardCaches::new(&qwen35.gpu, &cfg, shard, self.cap, state_rows, self.prefix_slots, self.snapshots_on_host(), self.kv_tier, layout, self.gdn_state.is_bf16())?;
+            let caches = ShardCaches::new(&qwen35.gpu, &cfg, shard, self.cap, state_rows, self.prefix_slots, self.snapshots_on_host(), self.kv_tier, layout, self.gdn_state.is_bf16(), unified)?;
             shards.push(DeviceShard { qwen35, caches });
         }
 
@@ -4478,6 +4658,8 @@ impl Qwen35GgufResident {
             plans: RefCell::default(),
             verify_plans: RefCell::default(),
             plans_on: Cell::new(true),
+            unified,
+            ledger: None,
         };
         let last_gpu = plan.stages.last().map(|(_, s, _)| s.gpu_index).unwrap_or(0);
         // A verify pass is a sequence's consecutive tokens, not unrelated
@@ -4485,6 +4667,9 @@ impl Qwen35GgufResident {
         // off rather than promise an exactness its tape does not have.
         let spec = if self.exact_decode { SpecServing { mode: SpeculativeMode::Off, ..self.spec } } else { self.spec };
         inst.enable_speculation(spec, &self.gguf_path, &self.tier, last_gpu)?;
+        if unified {
+            inst.ledger = Some(inst.unified_ledger()?);
+        }
         Ok(inst)
     }
 }

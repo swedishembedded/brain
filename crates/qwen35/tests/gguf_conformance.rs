@@ -52,6 +52,16 @@ fn engine_with_pool(kv_block_rows: u32, kv_tier: KvTier, kv_pool_rows: u32) -> Q
 
 /// [`engine_with_pool`] with an explicit per-sequence capacity (a pool smaller than one `CAP` sequence needs a smaller one).
 fn engine_with_cap(kv_block_rows: u32, kv_tier: KvTier, kv_pool_rows: u32, cap: u32) -> Qwen35GgufEngine {
+    engine_on(kv_block_rows, kv_tier, kv_pool_rows, cap, false)
+}
+
+/// An engine whose recurrent-state rows and KV blocks share one pool of `pool_blocks` blocks (a block is a granule of a plane,
+/// thousands of rows of this tiny model), holding sequences of `cap` tokens.
+fn unified_engine(pool_blocks: u32, cap: u32) -> Qwen35GgufEngine {
+    engine_on(16, KvTier::F32, pool_blocks, cap, true)
+}
+
+fn engine_on(kv_block_rows: u32, kv_tier: KvTier, kv_pool_rows: u32, cap: u32, unified: bool) -> Qwen35GgufEngine {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let path = std::env::temp_dir().join(format!("brain-gguf-conformance-{}-{n}.gguf", std::process::id())).to_string_lossy().into_owned();
@@ -59,7 +69,12 @@ fn engine_with_cap(kv_block_rows: u32, kv_tier: KvTier, kv_pool_rows: u32, cap: 
     let devices = budgeted_gpus(&gpu_core::devices::ambient_compute_set().gpus, 2 << 30);
     let device = devices.first().expect("the suite needs a GPU").0;
     let bank = AdapterBankRequest { slots: 2, rank_cap: 4, targets: AdapterTargets::ALL, max_registered: 4 };
-    let resident = Qwen35GgufResident::new(path.clone(), devices, cap, TierPolicy::uniform(Dtype::I8)).with_max_batch(4).with_prefix_slots(4).with_kv_block_rows(kv_block_rows).with_kv_pool_rows(kv_pool_rows).with_kv_tier(kv_tier).with_adapter_bank(bank);
+    let resident = Qwen35GgufResident::new(path.clone(), devices, cap, TierPolicy::uniform(Dtype::I8)).with_max_batch(4).with_prefix_slots(4).with_kv_block_rows(kv_block_rows).with_kv_tier(kv_tier).with_adapter_bank(bank);
+    let resident = if unified { resident.with_unified_pool_always() } else { resident };
+    // The unified pool is `kv_pool_rows` blocks of its own block size, and holds one sequence's state row beside `cap` tokens.
+    let pool = if unified { kv_pool_rows * resident.kv_block_rows() } else { kv_pool_rows };
+    let resident = resident.with_kv_pool_rows(pool);
+    assert_eq!(resident.unified(), unified, "the tiny model {}", resident.unified_pool_notice().unwrap_or_default());
     let (engine, _, _) = resident.activate_engine(&[device]).expect("the tiny GGUF loads");
     std::fs::remove_file(path).ok();
     engine
@@ -69,6 +84,12 @@ fn engine_with_cap(kv_block_rows: u32, kv_tier: KvTier, kv_pool_rows: u32, cap: 
 /// without `--device` the binary reports the test skipped.
 fn the_released_gguf_engine_conforms() {
     conformance::run_all(&Conformance { make: engine, prefix_reuse: true, prefix_prompt_tokens: PREFIX_PROMPT_TOKENS, load_adapter: Some(load_adapter) });
+}
+
+/// The same suite with the recurrent state and the KV blocks drawn from one pool. A block is a granule of a plane (thousands of
+/// rows of this tiny model), so a prefix is reused in whole blocks and none of the suite's prompts fills one.
+fn the_released_gguf_engine_conforms_with_one_pool_for_state_and_kv() {
+    conformance::run_all(&Conformance { make: || unified_engine(16, 192), prefix_reuse: true, prefix_prompt_tokens: PREFIX_PROMPT_TOKENS, load_adapter: Some(load_adapter) });
 }
 
 /// The same suite with every sequence's KV addressed through block tables (16 rows per block, six blocks
@@ -172,6 +193,32 @@ fn a_small_pool_serves_what_fits_and_preempts_what_does_not() {
         assert_eq!(got, want, "{pool_blocks} blocks: tokens differ from the one-block layout's");
         let e = sched.decoder_mut();
         assert_eq!(e.free_blocks(), pool_blocks, "{pool_blocks} blocks: blocks leaked");
+    }
+}
+
+/// The same small pools with the state rows drawn from them. Four sequences take one block each beside the blocks their state rows
+/// displace (two for all four in this tiny model, whose rows share one granule), so eight blocks hold all four and five cannot:
+/// the scheduler preempts and recomputes. With all four running the tokens are the one-block layout's; with fewer running at once
+/// the batch is smaller and this model's arithmetic (a lone row meets a different kernel) moves a late token, so a pool that
+/// preempts is held to finishing every request and giving back every block and state row.
+fn a_unified_small_pool_serves_what_fits_and_preempts_what_does_not() {
+    let prompts: Vec<Vec<u32>> = (0..4u32).map(|k| (1..=20u32).map(|i| 3 + (i * (k + 2) + k) % 26).collect()).collect();
+    let run = |mut sched: Scheduler<Qwen35GgufEngine>| {
+        let ids: Vec<u64> = prompts.iter().map(|p| sched.submit(Request { prompt: p.clone(), max_new: 12, stop: Vec::new() })).collect();
+        let mut done = sched.run();
+        let tokens: Vec<Vec<u32>> = ids.iter().map(|id| done.remove(id).expect("every request completes")).collect();
+        (tokens, sched)
+    };
+    let (want, _) = run(Scheduler::new(engine_with(0), 4));
+    for pool_blocks in [8u32, 5] {
+        let (got, mut sched) = run(Scheduler::new(unified_engine(pool_blocks, 96), 4));
+        assert!(got.iter().all(|t| t.len() == 12), "{pool_blocks} blocks: every request ran its whole budget");
+        if pool_blocks == 8 {
+            assert_eq!(got, want, "{pool_blocks} blocks: tokens differ from the one-block layout's");
+        }
+        let e = sched.decoder_mut();
+        assert_eq!(e.free_blocks(), pool_blocks, "{pool_blocks} blocks: blocks leaked");
+        assert_eq!(e.unified_report().map(|(_, granules, lent)| (granules, lent)), Some((0, 0)), "{pool_blocks} blocks: a state row is still backed");
     }
 }
 
@@ -344,10 +391,12 @@ const RECORDED: [[u32; 12]; 3] = [[10, 9, 26, 17, 9, 10, 1, 8, 21, 12, 2, 4], [1
 gpu_core::card_tests!(
     the_released_gguf_engine_conforms,
     the_released_gguf_engine_conforms_with_its_kv_paged,
+    the_released_gguf_engine_conforms_with_one_pool_for_state_and_kv,
     greedy_tokens_are_the_recorded_ones,
     greedy_tokens_are_the_recorded_ones_with_its_kv_paged,
     paging_does_not_move_the_tokens_of_any_kv_tier,
     a_small_pool_serves_what_fits_and_preempts_what_does_not,
+    a_unified_small_pool_serves_what_fits_and_preempts_what_does_not,
     a_prefix_hit_shares_the_cached_blocks,
     reclaim_spares_the_prefix_the_waiting_prompt_resumes_from,
     single_stream_greedy_decoding_is_reproducible,
