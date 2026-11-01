@@ -231,7 +231,8 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_gdn_conv_silu_seg(co
 // holds bf16 elements, bit 1: query and key are written L2-normalised (`x * rsqrt(sum x^2 + eps)` of the bf16-rounded row, the formula of
 // `brain_normalize_rows_bf16`); read x (bf16 rows), w [C, K], table; hist pool (read and written); write query, key, value (bf16 rows).
 // C, key_dim and value_dim are multiples of 128.
-extern "C" __global__ void __launch_bounds__(THREADS, 6) brain_gdn_conv_silu_seg_vec(const unsigned int* params, const float* x, const float* w, const unsigned int* table,
+// Four blocks an SM (128 registers a thread): at six the window of eleven rows and the weights spilled to local memory (104 -> 71 us a 4096-row round).
+extern "C" __global__ void __launch_bounds__(THREADS, 4) brain_gdn_conv_silu_seg_vec(const unsigned int* params, const float* x, const float* w, const unsigned int* table,
                                                                                  float* hist_pool, float* query, float* key, float* value) {
     const unsigned int blocks = params[0], C = params[1], key_dim = params[2], value_dim = params[3], nseg = params[4];
     const bool hist_bf16 = (params[6] & 1u) != 0u, normalize = (params[6] & 2u) != 0u;

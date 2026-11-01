@@ -12,7 +12,7 @@
 //
 // The chain it replaces is three launches over the whole round (a cooperative RMSNorm, a SiLU and a multiply), each a
 // full read and write of the [rows, heads * 128] tensors; here the three tensors are read once and the result written
-// once. One warp per head row, four values a lane, the mean by a shuffle reduction.
+// once. A half-warp a head row, eight values a lane (16-byte loads of bf16 rows), the mean by a shuffle reduction; a warp walks ROWS rows.
 //
 // A head row is one 128-element group of the E4M3 activation quantisation, so with flag bit 0 the same pass also writes
 // what `quant_e4m3_128` makes of `out` for the output projection: the bytes `q` (four to a word) and one scale per head row
@@ -28,12 +28,25 @@
 
 #define D 128
 #define WARPS 4
+#define PAIRS 2  // pairs of head rows a warp walks (a half-warp a row), all loaded before the first is used
+#define ROWS (2 * PAIRS)
 
-// Four consecutive bf16 of `p` (element index `at`, a multiple of 4) widened to f32: a bf16 is the high half of the f32 of its value.
-__device__ __forceinline__ float4 brain_gn_load_bf16x4(const float* p, unsigned long long at) {
-    const uint2 w = *reinterpret_cast<const uint2*>(reinterpret_cast<const unsigned short*>(p) + at);
-    return make_float4(__uint_as_float(w.x << 16), __uint_as_float(w.x & 0xffff0000u), __uint_as_float(w.y << 16), __uint_as_float(w.y & 0xffff0000u));
+// Eight consecutive elements of `p` (element index `at`, a multiple of 8) widened to f32: bf16 rows are the high halves of the f32 values.
+__device__ __forceinline__ void brain_gn_load8(const float* p, unsigned long long at, bool bf16, float (&o)[8]) {
+    if (bf16) {
+        const uint4 w = *reinterpret_cast<const uint4*>(reinterpret_cast<const unsigned short*>(p) + at);
+        o[0] = __uint_as_float(w.x << 16); o[1] = __uint_as_float(w.x & 0xffff0000u); o[2] = __uint_as_float(w.y << 16); o[3] = __uint_as_float(w.y & 0xffff0000u);
+        o[4] = __uint_as_float(w.z << 16); o[5] = __uint_as_float(w.z & 0xffff0000u); o[6] = __uint_as_float(w.w << 16); o[7] = __uint_as_float(w.w & 0xffff0000u);
+    } else {
+        const float4 a = *reinterpret_cast<const float4*>(p + at), b = *reinterpret_cast<const float4*>(p + at + 4);
+        o[0] = a.x; o[1] = a.y; o[2] = a.z; o[3] = a.w; o[4] = b.x; o[5] = b.y; o[6] = b.z; o[7] = b.w;
+    }
 }
+
+// SiLU from the hardware exponential and quotient: one MUFU each instead of the library's argument reduction and the
+// IEEE division's range check, which made the kernel instruction-bound. The error is a few ulp of f32, far below the
+// E4M3 step the result is rounded to.
+__device__ __forceinline__ float brain_gn_silu(float z) { return __fdividef(z, 1.0f + __expf(-z)); }
 
 extern "C" __global__ void __launch_bounds__(WARPS * 32) brain_gdn_gated_norm(const unsigned int* params, const float* x, const float* w, const float* z, float* out, unsigned int* q, float* s) {
     const unsigned int total = params[0], first = params[1];
@@ -41,30 +54,52 @@ extern "C" __global__ void __launch_bounds__(WARPS * 32) brain_gdn_gated_norm(co
     const bool e4m3 = (params[3] & 1u) != 0u;
     const bool x_bf16 = (params[3] & 2u) != 0u, z_bf16 = (params[3] & 4u) != 0u, store = !e4m3 || (params[3] & 8u) == 0u;
     const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
-    const unsigned int row = first + blk * WARPS + (threadIdx.x >> 5);
-    if (row >= total) { return; }
-    const unsigned int lane = threadIdx.x & 31u;
-    const unsigned long long at = (unsigned long long)row * D + lane * 4;
-    const float4 v = x_bf16 ? brain_gn_load_bf16x4(x, at) : *reinterpret_cast<const float4*>(x + at);
-    float ss = v.x * v.x + v.y * v.y + v.z * v.z + v.w * v.w;
+    const unsigned int hl = threadIdx.x & 15u;  // the eight columns 8 hl .. of this half-warp's row
+    const unsigned int row0 = first + (blk * WARPS + (threadIdx.x >> 5)) * ROWS + ((threadIdx.x >> 4) & 1u);
+    float g[8];
+    {
+        const float4 a = *reinterpret_cast<const float4*>(w + hl * 8), b = *reinterpret_cast<const float4*>(w + hl * 8 + 4);
+        g[0] = a.x; g[1] = a.y; g[2] = a.z; g[3] = a.w; g[4] = b.x; g[5] = b.y; g[6] = b.z; g[7] = b.w;
+    }
+    // All the rows' loads are issued before any is used: the rows of a warp are independent, and the loads of the next row
+    // hide the latency of this row's reductions. A row past the end reads the last row and writes nothing.
+    float v[PAIRS][8], zv[PAIRS][8];
 #pragma unroll
-    for (int o = 16; o > 0; o >>= 1) { ss += __shfl_xor_sync(0xffffffffu, ss, o); }
-    const float inv = 1.0f / sqrtf(ss / (float)D + eps);
-    const float4 g = *reinterpret_cast<const float4*>(w + lane * 4);
-    const float4 zv = z_bf16 ? brain_gn_load_bf16x4(z, at) : *reinterpret_cast<const float4*>(z + at);
-    float4 r;
-    r.x = (v.x * inv * g.x) * (zv.x / (1.0f + expf(-zv.x)));
-    r.y = (v.y * inv * g.y) * (zv.y / (1.0f + expf(-zv.y)));
-    r.z = (v.z * inv * g.z) * (zv.z / (1.0f + expf(-zv.z)));
-    r.w = (v.w * inv * g.w) * (zv.w / (1.0f + expf(-zv.w)));
-    if (store) { *reinterpret_cast<float4*>(out + at) = r; }
-    if (e4m3) {
-        float amax = fmaxf(fmaxf(fabsf(r.x), fabsf(r.y)), fmaxf(fabsf(r.z), fabsf(r.w)));
+    for (unsigned int i = 0; i < PAIRS; ++i) {
+        const unsigned long long at = (unsigned long long)min(row0 + 2 * i, total - 1u) * D + hl * 8;
+        brain_gn_load8(x, at, x_bf16, v[i]);
+        brain_gn_load8(z, at, z_bf16, zv[i]);
+    }
 #pragma unroll
-        for (int o = 16; o > 0; o >>= 1) { amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o)); }
-        const float scale = amax / 448.0f;
-        const unsigned int packed = scale > 0.0f ? brain_e4m3x4(r, scale) : 0u;
-        q[(unsigned long long)row * 32ull + lane] = packed;
-        if (lane == 0u) { s[row] = scale; }
+    for (unsigned int i = 0; i < PAIRS; ++i) {
+        const unsigned int row = row0 + 2 * i;
+        float ss = 0.0f;
+#pragma unroll
+        for (int k = 0; k < 8; ++k) { ss = fmaf(v[i][k], v[i][k], ss); }
+#pragma unroll
+        for (int o = 8; o > 0; o >>= 1) { ss += __shfl_xor_sync(0xffffffffu, ss, o); }
+        const float inv = rsqrtf(ss / (float)D + eps);
+        float r[8];
+        float amax = 0.0f;
+#pragma unroll
+        for (int k = 0; k < 8; ++k) {
+            r[k] = (v[i][k] * inv * g[k]) * brain_gn_silu(zv[i][k]);
+            amax = fmaxf(amax, fabsf(r[k]));
+        }
+#pragma unroll
+        for (int o = 8; o > 0; o >>= 1) { amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o)); }
+        if (row >= total) { continue; }
+        if (store) {
+            float4* const dst = reinterpret_cast<float4*>(out + (unsigned long long)row * D + hl * 8);
+            dst[0] = make_float4(r[0], r[1], r[2], r[3]);
+            dst[1] = make_float4(r[4], r[5], r[6], r[7]);
+        }
+        if (e4m3) {
+            const float scale = amax / 448.0f;
+            const unsigned int lo = scale > 0.0f ? brain_e4m3x4(make_float4(r[0], r[1], r[2], r[3]), scale) : 0u;
+            const unsigned int hi = scale > 0.0f ? brain_e4m3x4(make_float4(r[4], r[5], r[6], r[7]), scale) : 0u;
+            *reinterpret_cast<uint2*>(q + (unsigned long long)row * 32ull + hl * 2) = make_uint2(lo, hi);
+            if (hl == 0u) { s[row] = scale; }
+        }
     }
 }

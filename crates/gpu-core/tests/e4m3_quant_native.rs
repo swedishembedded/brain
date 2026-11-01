@@ -108,3 +108,69 @@ fn the_reciprocal_quotient_makes_the_bytes_the_ieee_quotient_makes() {
         }
     }
 }
+
+fn bf16_round(v: f32) -> f32 {
+    let bits = v.to_bits();
+    f32::from_bits(((bits + 0x7fff + ((bits >> 16) & 1)) >> 16) << 16)
+}
+
+/// `gdn_gated_norm`: `RMSNorm(x) * w * silu(z)` per 128-wide head row and its E4M3 rows, against the definition in f64, for fp32 and for
+/// bf16 inputs, row counts that leave a ragged last block of the kernel, and a first row past zero (rows before it are not touched).
+/// The outputs start as NaN so a row the kernel skips cannot pass on stale data.
+#[test]
+fn the_gated_norm_matches_its_definition_on_both_input_forms() {
+    let gpu = gpu_core::testgpu::dev(&[]);
+    if !is_cuda(&gpu) {
+        brain_testutil::skip_unavailable("not a CUDA device");
+        return;
+    }
+    let table = magnitudes();
+    let mut rng = data::rng::Lcg::new(11);
+    let mut uniform = |scale: f32| (rng.next_u32() % 2_000_001) as f32 / 1_000_000.0 * scale - scale;
+    for (head_rows, first, bf16) in [(37u32, 0u32, false), (37, 5, false), (131, 0, true), (131, 17, true), (16, 0, true)] {
+        let n = head_rows as usize * 128;
+        let round = |v: f32| if bf16 { bf16_round(v) } else { v };
+        let x: Vec<f32> = (0..n).map(|_| round(uniform(3.0))).collect();
+        let z: Vec<f32> = (0..n).map(|_| round(uniform(6.0))).collect();
+        let w: Vec<f32> = (0..128).map(|_| uniform(2.0)).collect();
+        let words = |v: &[f32]| -> Vec<f32> { v.chunks(2).map(|p| f32::from_bits((p[0].to_bits() >> 16) | (p[1].to_bits() & 0xffff0000))).collect() };
+        let (xb, zb) = if bf16 { (gpu.storage_init("x", &words(&x)), gpu.storage_init("z", &words(&z))) } else { (gpu.storage_init("x", &x), gpu.storage_init("z", &z)) };
+        let wb = gpu.storage_init("w", &w);
+        let nan = f32::from_bits(0xffff_ffff);
+        let (out, q, s) = (gpu.storage_init("out", &vec![nan; n]), gpu.storage_init("q", &vec![nan; n / 4]), gpu.storage_init("s", &vec![nan; head_rows as usize]));
+        let eps = 1e-6f32;
+        // Only the E4M3 form is offered over bf16 inputs; the fp32 form stores the product too.
+        let step = gpu_core::provider::cuda::gdn_gated_norm_step(&gpu, &[&xb, &wb, &zb, &out, &q, &s], head_rows, first, eps, true, bf16).expect("gdn_gated_norm offered");
+        gpu.submit(&[], &[step]);
+        gpu.poll_wait();
+        let (product, qw, sc) = (gpu.read(&out, n), gpu.read(&q, n / 4), gpu.read(&s, head_rows as usize));
+        let bytes: Vec<u8> = qw.iter().flat_map(|w| w.to_bits().to_le_bytes()).collect();
+        for row in 0..head_rows as usize {
+            let xs = &x[row * 128..(row + 1) * 128];
+            if (row as u32) < first {
+                assert!(sc[row].is_nan() && bytes[row * 128..(row + 1) * 128].iter().all(|&b| b == 0xff), "row {row} before the first was written");
+                continue;
+            }
+            let inv = 1.0 / (xs.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>() / 128.0 + f64::from(eps)).sqrt();
+            let want: Vec<f64> = (0..128)
+                .map(|i| {
+                    let zi = f64::from(z[row * 128 + i]);
+                    f64::from(xs[i]) * inv * f64::from(w[i]) * zi / (1.0 + (-zi).exp())
+                })
+                .collect();
+            let amax = want.iter().fold(0f64, |m, v| m.max(v.abs()));
+            let scale = f64::from(sc[row]);
+            assert!((scale - amax / 448.0).abs() <= amax / 448.0 * 2e-6, "row {row}: scale {scale:e} vs {:e} (bf16 {bf16})", amax / 448.0);
+            for i in 0..128 {
+                if !bf16 {
+                    assert!((f64::from(product[row * 128 + i]) - want[i]).abs() <= 2e-6 * amax, "row {row} col {i}: product {} vs {}", product[row * 128 + i], want[i]);
+                }
+                // The byte decodes to the value within one E4M3 step (2^-4 relative, 2^-9 absolute below the normals) of the scaled definition.
+                let b = bytes[row * 128 + i];
+                let mag = table[usize::from(b & 0x7f)] * scale;
+                let got = if b & 0x80 != 0 { -mag } else { mag };
+                assert!((got - want[i]).abs() <= want[i].abs() * 0.0625 + scale * 2f64.powi(-9), "row {row} col {i}: byte {b:#x} = {got:e} vs {:e}", want[i]);
+            }
+        }
+    }
+}

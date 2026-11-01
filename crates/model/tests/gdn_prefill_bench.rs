@@ -14,6 +14,8 @@
 use data::rng::Lcg;
 use gpu_core::provider::cuda::{self, GdnConvLayout, GdnSegmentSpan, GdnSegmentTable, GdnTokenLayout};
 
+/// How long the back-to-back stress runs.
+const STRESS_SECONDS: u64 = 240;
 const NVH: u32 = 48;
 const NKH: u32 = 16;
 const HD: u32 = 128;
@@ -159,6 +161,85 @@ fn the_serving_prefill_layer_at_8k_tokens_and_in_a_700_row_round() {
             println!("   wg vs mma: output {:.2e}, state {:.2e}", rel_rms(&wg.0, &mma.0, true), rel_rms(&wg.1, &mma.1, false));
         }
     }
+}
+
+/// The served 4096-row round as 1, 2, 4 and 16 segments, on the selected (warpgroup) recurrence only: the shapes `ncu` profiles.
+#[test]
+#[ignore = "a bench at the production shape, run by hand"]
+fn the_serving_prefill_layer_in_a_4096_row_round() {
+    let _forced = FORCED_SLOT.lock().unwrap_or_else(|e| e.into_inner());
+    gpu_core::force_candidate("gdn_prefill_loop", "wg");
+    for pieces in [1u32, 2, 4, 16] {
+        let rows = 4096 / pieces;
+        let spans: Vec<_> = (0..pieces).map(|i| GdnSegmentSpan { row0: i * rows, rows, slot: i }).collect();
+        bench(&format!("4096-row round as {pieces} segment(s) (wg recurrence)"), &spans);
+    }
+    gpu_core::clear_forced_candidates();
+}
+
+/// The convolution and the gated norm launched back to back, thousands of times, over a 4096-row round: every launch must give the bytes of the
+/// first (poisoned outputs between batches, so a launch that does not run cannot pass on the last one's results). Faults of the kind recorded in
+/// knowledge 410 show only in uninstrumented back-to-back launches; run it (it takes `STRESS_SECONDS`) and compare
+/// `dmesg | grep -i xid` before and after.
+#[test]
+#[ignore = "a stress run of several minutes, by hand"]
+fn the_conv_and_norm_survive_back_to_back_launches() {
+    let g = gpu_core::testgpu::dev(&[]);
+    if g.caps().arch.compute_capability.is_none_or(|cc| cc < (9, 0)) {
+        brain_testutil::skip_unavailable("a Hopper device");
+        return;
+    }
+    let spans = [GdnSegmentSpan { row0: 0, rows: 3000, slot: 0 }, GdnSegmentSpan { row0: 3000, rows: 1096, slot: 1 }];
+    let n = 4096u32;
+    let table = GdnSegmentTable::new(&spans);
+    let tbl = g.storage_uninit(table.words().len() as u64);
+    g.write(&tbl, table.words());
+    let mut rng = Lcg::new(5);
+    let mixed = g.storage_init("qkv", &bf16_words(&rand(&mut rng, n as usize * CONV_DIM as usize, 1.0)));
+    let conv_w = g.storage_init("conv_w", &rand(&mut rng, CONV_DIM as usize * 4, 0.5));
+    let hist0 = rand(&mut rng, 2 * CONV_DIM as usize * 3, 0.5);
+    let hist = g.storage_init("hist", &hist0);
+    let hist0_bits: Vec<u32> = hist0.iter().map(|v| v.to_bits()).collect();
+    let x = g.storage_init("x", &bf16_words(&rand(&mut rng, n as usize * VALUE_DIM as usize, 2.0)));
+    let z = g.storage_init("z", &bf16_words(&rand(&mut rng, n as usize * VALUE_DIM as usize, 4.0)));
+    let norm_w = g.storage_init("norm_w", &rand(&mut rng, HD as usize, 1.0));
+    let rows = u64::from(n);
+    let words = |elems: u64| elems / 2;
+    let (query, key, value) = (g.storage_uninit(words(rows * u64::from(KEY_DIM))), g.storage_uninit(words(rows * u64::from(KEY_DIM))), g.storage_uninit(words(rows * u64::from(VALUE_DIM))));
+    let (gated, q8, s8) = (g.storage_uninit(rows * u64::from(VALUE_DIM)), g.storage_uninit(rows * u64::from(VALUE_DIM) / 4), g.storage_uninit(rows * u64::from(NVH)));
+    let poison = || {
+        for (buf, len) in [(&query, rows * u64::from(KEY_DIM) / 2), (&key, rows * u64::from(KEY_DIM) / 2), (&value, rows * u64::from(VALUE_DIM) / 2), (&q8, rows * u64::from(VALUE_DIM) / 4), (&s8, rows * u64::from(NVH))] {
+            g.write(buf, &vec![0xffff_ffffu32; len as usize]);
+        }
+        // The convolution advances the history pool in place: start every batch from the same one.
+        g.write(&hist, &hist0_bits);
+    };
+    let conv_layout = GdnConvLayout { rows: n, conv_dim: CONV_DIM, seq_len: n, key_dim: KEY_DIM, value_dim: VALUE_DIM, kernel: 4 };
+    let batch = || {
+        let mut steps = Vec::new();
+        for _ in 0..64 {
+            steps.push(cuda::gdn_conv_silu_seg_step(&g, &[&mixed, &conv_w, &tbl, &hist, &query, &key, &value], conv_layout, &table, true, false, 1e-6).expect("conv"));
+            steps.push(cuda::gdn_gated_norm_step(&g, &[&x, &norm_w, &z, &gated, &q8, &s8], n * NVH, 0, 1e-6, true, true).expect("norm"));
+        }
+        steps
+    };
+    let digest = |bufs: &[(&gpu_core::DeviceBuffer, usize)]| -> Vec<u32> { bufs.iter().flat_map(|(b, len)| g.read(b, *len).into_iter().map(f32::to_bits)).collect() };
+    let outputs = [(&query, (rows * u64::from(KEY_DIM) / 2) as usize), (&key, (rows * u64::from(KEY_DIM) / 2) as usize), (&value, (rows * u64::from(VALUE_DIM) / 2) as usize), (&q8, (rows * u64::from(VALUE_DIM) / 4) as usize), (&s8, (rows * u64::from(NVH)) as usize)];
+    poison();
+    g.submit(&[], &batch());
+    g.poll_wait();
+    let first = digest(&outputs);
+    assert!(first.iter().all(|w| *w != 0xffff_ffff), "the first batch left poison behind");
+    let start = std::time::Instant::now();
+    let mut batches = 0u64;
+    while start.elapsed().as_secs() < STRESS_SECONDS {
+        poison();
+        g.submit(&[], &batch());
+        g.poll_wait();
+        assert!(digest(&outputs) == first, "batch {batches}: outputs differ from the first launch");
+        batches += 1;
+    }
+    println!("{batches} batches of 64 conv + 64 norm launches, identical outputs");
 }
 
 #[test]

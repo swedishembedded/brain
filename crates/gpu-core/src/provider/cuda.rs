@@ -798,7 +798,7 @@ pub fn gdn_gated_norm_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer;
     let cc = gpu.caps().arch.compute_capability?;
     let kernel = kernels_cuda::get("gdn_gated_norm").filter(|k| k.min_cc <= cc && !super::disabled_providers().iter().any(|d| d == "cuda"))?;
     let id = gpu.native_kernel(kernel, &GDN_GATED_NORM_BINDINGS)?;
-    let blocks = head_rows.saturating_sub(first).div_ceil(4);
+    let blocks = head_rows.saturating_sub(first).div_ceil(16); // four warps of four head rows (`ROWS` in the kernel)
     gpu.step_native_sliced(id, bufs, &[(0, 0); 6], &[head_rows, first, eps.to_bits(), e4m3 as u32 | if bf16 { 2 | 4 | 8 } else { 0 }], blocks)
 }
 
