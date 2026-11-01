@@ -2478,6 +2478,7 @@ dependencies = [
  "brain-qwen3",
  "brain-qwen35",
  "brain-qwen35moe",
+ "brain-qwen3vl",
  "brain-testutil",
  "libc",
  "minijinja",

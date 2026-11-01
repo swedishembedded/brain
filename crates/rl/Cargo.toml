@@ -63,6 +63,8 @@ brain-gradcheck.workspace = true
 brain-gpt2.workspace = true
 # `tests/conformance.rs` registers `qwen35::Qwen35` (its frozen-base tiers need the device handle and dtype).
 brain-qwen35.workspace = true
+# `tests/external_policy_gradient_gradcheck.rs`: the three-axis rotary positions of a row that holds an image.
+brain-qwen3vl.workspace = true
 brain-gpu-core.workspace = true
 # `tests/conformance.rs` registers `qwen35moe::Qwen35` too.
 brain-qwen35moe.workspace = true

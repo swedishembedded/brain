@@ -19,6 +19,7 @@
 //!
 //! * [`DpoFit`] - preference pairs against the starting policy as reference.
 //! * [`GrpoFit`] - group-relative policy optimisation against an environment.
+//! * [`PolicyGradientFit`] - the same clipped objective on rollouts collected outside brain.
 //! * [`DistillFit`] - top-K forward-KL distillation from teacher distributions.
 //!   Every pass is a weighted cross-entropy, which `Model` computes through the
 //!   chunked LM head (`model::head_ce`), so the logits of a whole vocabulary
@@ -30,6 +31,7 @@ use model::{fit_controlled, FitControl, FitOpts, FitReport, Model};
 use crate::env::{Environment, Verifier};
 use crate::objective::distill::{DistillConfig, DistillExample, DistillTopK};
 use crate::objective::dpo::{Dpo, DpoConfig, PackedPair};
+use crate::objective::external::{ExternalPolicyGradient, PolicyGradientConfig, PolicyGradientStats};
 use crate::objective::grpo::Grpo;
 
 /// The control a visitor consumes: a visitor trains one model.
@@ -131,5 +133,43 @@ impl ModelFit for DistillFit<'_, '_> {
         let control = take_control(&mut self.control, "distillation")?;
         let distill = self.distill.take().ok_or_else(|| std::io::Error::other("a distillation fit trains one model"))?;
         fit_controlled(model, distill, self.opts, None, control)
+    }
+}
+
+/// Policy-gradient training on externally collected rollouts over whichever model the trainer builds
+/// ([`ExternalPolicyGradient`]): the objective is opened on the prepared dataset when the model arrives, and what the
+/// run measured is kept for [`Self::stats`].
+pub struct PolicyGradientFit<'a, 'c> {
+    dir: &'a std::path::Path,
+    config: PolicyGradientConfig,
+    opts: &'a FitOpts,
+    control: Option<FitControl<'c>>,
+    stats: Option<PolicyGradientStats>,
+}
+
+impl<'a, 'c> PolicyGradientFit<'a, 'c> {
+    /// `dir` is the prepared dataset ([`data::chat::prepare_chat_samples`]) of the rollouts.
+    pub fn new(dir: &'a std::path::Path, config: PolicyGradientConfig, opts: &'a FitOpts, control: FitControl<'c>) -> PolicyGradientFit<'a, 'c> {
+        PolicyGradientFit { dir, config, opts, control: Some(control), stats: None }
+    }
+
+    /// What the run measured, after it ran (interrupted or not); `None` before.
+    pub fn stats(&self) -> Option<&PolicyGradientStats> {
+        self.stats.as_ref()
+    }
+
+    /// [`Self::stats`], consuming the visitor.
+    pub fn into_stats(self) -> Option<PolicyGradientStats> {
+        self.stats
+    }
+}
+
+impl ModelFit for PolicyGradientFit<'_, '_> {
+    fn fit<M: Model>(&mut self, model: M) -> std::io::Result<(FitReport, M)> {
+        let control = take_control(&mut self.control, "policy-gradient")?;
+        let mut objective = ExternalPolicyGradient::open(self.dir, self.opts, self.config)?;
+        let result = fit_controlled(model, &mut objective, self.opts, None, control);
+        self.stats = Some(objective.into_stats());
+        result
     }
 }

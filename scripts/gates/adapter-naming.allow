@@ -16,5 +16,4 @@ crates/qwen3/src/bin/qwen_bench.rs	1	per-model device LoRA wiring spelling the .
 crates/qwen3/src/caps.rs	1	per-model adapter param list, init, export or rollout spelling the suffix; derive from the adapter parameter specs
 crates/qwen35/src/bin/qwen35_train_probe.rs	1	per-model device LoRA wiring spelling the .lora_a/.lora_b suffix in param lists, fold and training code; replace with parameter-set driven calls into model::adapter
 crates/qwen3tts/src/train.rs	3	per-model device LoRA wiring spelling the .lora_a/.lora_b suffix in param lists, fold and training code; replace with parameter-set driven calls into model::adapter
-crates/rl/src/objective/grpo.rs	1	per-model device LoRA wiring spelling the .lora_a/.lora_b suffix in param lists, fold and training code; replace with parameter-set driven calls into model::adapter
 crates/testutil/src/adapters.rs	4	test support spelling the suffix to build or read adapters; use the adapter module's naming helpers

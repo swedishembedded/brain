@@ -48,7 +48,7 @@ use model::{Batch, Model, Objective, StepVerdict, IGNORE};
 pub use super::advantage::{group_advantages, group_advantages_with, AdvantageNorm};
 pub use super::grpo_stats::{CycleLog, GrpoStats, NonFiniteSteps, RowRefusal, MAX_CONSECUTIVE_NONFINITE};
 pub use super::grpo_term::{k3_kl, near_clip_boundary, token_term, token_term_banded, ClipBand, TokenTerm, MAX_LOG_RATIO};
-use super::pg_batch::{backward_weighted, PgBatch, PgSpec};
+use super::pg_batch::{backward_weighted, with_adapters_disabled, PgBatch, PgSpec};
 use crate::env::{Environment, Task, Verifier};
 
 /// How a row's per-token loss terms are normalised.
@@ -583,24 +583,9 @@ fn trainer_logprobs<M: Model>(model: &M, row: &PackedRow) -> Vec<f32> {
     training::objectives(model).batch_token_logprobs()
 }
 
-/// The rows' per-position log-probabilities with every LoRA adapter disabled
-/// (its `B` factor zeroed, which makes the adapter an exact no-op), or `None`
-/// for a model without adapters. The adapters are restored before returning.
+/// The rows' per-position log-probabilities with every LoRA adapter disabled, or `None` for a model without adapters.
 fn adapter_off_logprobs<M: Model>(model: &M, rows: &[PackedRow]) -> Option<Vec<Vec<f32>>> {
-    let adapters: Vec<String> = model.param_names().into_iter().filter(|n| n.ends_with(".lora_b")).collect();
-    if adapters.is_empty() {
-        return None;
-    }
-    let saved: Vec<Vec<f32>> = adapters.iter().map(|n| model.read_weight(n)).collect();
-    for (n, w) in adapters.iter().zip(&saved) {
-        model.write_weight(n, &vec![0.0; w.len()]);
-    }
-    let out = rows.iter().map(|r| trainer_logprobs(model, r)).collect();
-    for (n, w) in adapters.iter().zip(&saved) {
-        model.write_weight(n, w);
-    }
-    model.poll_wait();
-    Some(out)
+    with_adapters_disabled(model, || rows.iter().map(|r| trainer_logprobs(model, r)).collect())
 }
 
 /// Whether the accumulated gradients of the trained tensors are finite. A model

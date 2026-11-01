@@ -14,7 +14,7 @@
 //! advantage is NaN has none: it is an imitation token, trained with the plain cross-entropy weight `1.0` and no KL
 //! (what a supervised record in a mixed dataset is).
 
-use model::training;
+use model::{adapter, training};
 use model::{Model, IGNORE};
 
 use super::grpo_term::{k3_kl, token_term_banded, ClipBand};
@@ -138,6 +138,36 @@ pub fn backward_weighted<M: Model>(model: &M, batch: &PgBatch<'_>, spec: &PgSpec
         model.backward();
     }
     terms
+}
+
+/// The adapter tensors a fresh adapter starts at zero (LoRA's `B`): zeroed, the adapter is an exact no-op.
+fn zero_started_names<M: Model>(model: &M) -> Vec<String> {
+    model.param_names().into_iter().filter(|n| adapter::device::init_of(n) == Some(adapter::ParamInit::Zeros)).collect()
+}
+
+/// Whether the model carries adapters and every tensor they start at zero is still zero, so that the policy is the frozen base.
+pub fn adapters_are_zero<M: Model>(model: &M) -> bool {
+    let names = zero_started_names(model);
+    !names.is_empty() && names.iter().all(|n| model.read_weight(n).iter().all(|&w| w == 0.0))
+}
+
+/// Run `read` with every adapter disabled (the tensors it starts at zero zeroed, which makes the adapter an exact no-op) and
+/// restore the adapters before returning; `None` for a model without adapters. The reference policy "the base".
+pub fn with_adapters_disabled<M: Model, R>(model: &M, read: impl FnOnce() -> R) -> Option<R> {
+    let names = zero_started_names(model);
+    if names.is_empty() {
+        return None;
+    }
+    let saved: Vec<Vec<f32>> = names.iter().map(|n| model.read_weight(n)).collect();
+    for (n, w) in names.iter().zip(&saved) {
+        model.write_weight(n, &vec![0.0; w.len()]);
+    }
+    let out = read();
+    for (n, w) in names.iter().zip(&saved) {
+        model.write_weight(n, w);
+    }
+    model.poll_wait();
+    Some(out)
 }
 
 #[cfg(test)]

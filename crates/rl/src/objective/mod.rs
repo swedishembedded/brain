@@ -8,6 +8,7 @@
 pub mod advantage;
 pub mod distill;
 pub mod dpo;
+pub mod external;
 pub mod grpo;
 pub mod grpo_stats;
 pub mod grpo_term;
