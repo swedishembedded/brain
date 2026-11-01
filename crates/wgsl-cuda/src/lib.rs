@@ -1469,9 +1469,9 @@ impl<'a> Gen<'a> {
                 Eval::Matrix(m, t) => matrix::math(*fun, m, t),
                 _ => Err(format!("{fun:?} of something that is not a matrix")),
             },
-            Expression::Math { fun, arg, arg1, arg2, .. } => {
+            Expression::Math { fun, arg, arg1, arg2, arg3 } => {
                 let mut args = vec![self.lanes(*arg, out)?];
-                for h in [arg1, arg2].into_iter().flatten() {
+                for h in [arg1, arg2, arg3].into_iter().flatten() {
                     args.push(self.lanes(*h, out)?);
                 }
                 vector::math_lanes(*fun, &args)
@@ -1716,9 +1716,45 @@ fn math(fun: MathFunction, a: (&str, Ty), rest: &[(String, Ty)]) -> Result<Eval,
         Round => (format!("rintf({x})"), Ty::F32),
         Fract => (format!("(({x}) - floorf({x}))"), Ty::F32),
         Dot4I8Packed => (format!("__brain_dot4i8({x}, {})", arg(0)?), Ty::I32),
+        // Bit builtins, defined on the whole u32/i32 domain. They go through
+        // `__brain_*` helpers that pin the WGSL result for the inputs the
+        // hardware intrinsics leave to convention (zero, -1, a width of 32).
+        ReverseBits => bit_op("__brain_reverse_bits", x, xt, &[])?,
+        CountOneBits => bit_op("__brain_count_one_bits", x, xt, &[])?,
+        CountLeadingZeros => bit_op("__brain_count_leading_zeros", x, xt, &[])?,
+        CountTrailingZeros => bit_op("__brain_count_trailing_zeros", x, xt, &[])?,
+        FirstLeadingBit => bit_op(
+            if xt == Ty::I32 { "__brain_first_leading_bit_i32" } else { "__brain_first_leading_bit_u32" },
+            x,
+            xt,
+            &[],
+        )?,
+        FirstTrailingBit => bit_op("__brain_first_trailing_bit", x, xt, &[])?,
+        ExtractBits => bit_op(
+            if xt == Ty::I32 { "__brain_extract_bits_i32" } else { "__brain_extract_bits_u32" },
+            x,
+            xt,
+            &[arg(0)?, arg(1)?],
+        )?,
+        InsertBits => bit_op("__brain_insert_bits", x, xt, &[arg(0)?, arg(1)?, arg(2)?])?,
         other => return Err(format!("unsupported math function {other:?}")),
     };
     Ok(Eval::Value(v.0, v.1))
+}
+
+/// Calls a `__brain_*` bit helper. The helpers take and return `unsigned int`;
+/// an i32 operand is reinterpreted going in and coming out, so the bit pattern
+/// (not its value) is what the operation sees, as WGSL specifies.
+fn bit_op(helper: &str, x: &str, xt: Ty, rest: &[&str]) -> Result<(String, Ty), String> {
+    if !matches!(xt, Ty::U32 | Ty::I32) {
+        return Err(format!("{helper} needs an integer operand"));
+    }
+    let mut call = format!("{helper}((unsigned int)({x})");
+    for r in rest {
+        call.push_str(&format!(", (unsigned int)({r})"));
+    }
+    call.push(')');
+    Ok(if xt == Ty::I32 { (format!("((int){call})"), Ty::I32) } else { (call, Ty::U32) })
 }
 
 fn cast(v: &str, from: Ty, kind: ScalarKind, convert: Option<u8>) -> Result<Eval, String> {
@@ -1900,6 +1936,47 @@ __device__ __forceinline__ void __brain_sf32(unsigned int* p, size_t off, float 
 // transliteration goes wrong - a zero-extended lane is correct for every
 // positive byte and wrong for every negative one - and the masking form is
 // exact with no implementation-defined shift in it.
+// WGSL bit builtins, defined on the whole domain. `__clz(0)` is 32 and
+// `__brev` is exact, but `__ffs(0)` is 0 and the "first bit" functions return
+// all-ones for an input with no such bit, so each is pinned here.
+__device__ __forceinline__ unsigned int __brain_reverse_bits(unsigned int v) { return __brev(v); }
+__device__ __forceinline__ unsigned int __brain_count_one_bits(unsigned int v) { return (unsigned int)__popc(v); }
+__device__ __forceinline__ unsigned int __brain_count_leading_zeros(unsigned int v) { return (unsigned int)__clz((int)v); }
+__device__ __forceinline__ unsigned int __brain_count_trailing_zeros(unsigned int v) {
+  return v == 0u ? 32u : (unsigned int)(__ffs((int)v) - 1);
+}
+__device__ __forceinline__ unsigned int __brain_first_trailing_bit(unsigned int v) {
+  return v == 0u ? 0xffffffffu : (unsigned int)(__ffs((int)v) - 1);
+}
+__device__ __forceinline__ unsigned int __brain_first_leading_bit_u32(unsigned int v) {
+  return v == 0u ? 0xffffffffu : (unsigned int)(31 - __clz((int)v));
+}
+// i32: the highest bit that differs from the sign bit; 0 and -1 have none.
+__device__ __forceinline__ unsigned int __brain_first_leading_bit_i32(unsigned int v) {
+  unsigned int m = ((int)v < 0) ? ~v : v;
+  return m == 0u ? 0xffffffffu : (unsigned int)(31 - __clz((int)m));
+}
+// offset and count clamp to the 32-bit width as the spec requires; the shifts
+// below never reach 32 because c == 0 returns first.
+__device__ __forceinline__ unsigned int __brain_extract_bits_u32(unsigned int v, unsigned int o, unsigned int c) {
+  o = min(o, 32u);
+  c = min(c, 32u - o);
+  if (c == 0u) return 0u;
+  return (v << (32u - o - c)) >> (32u - c);
+}
+__device__ __forceinline__ unsigned int __brain_extract_bits_i32(unsigned int v, unsigned int o, unsigned int c) {
+  o = min(o, 32u);
+  c = min(c, 32u - o);
+  if (c == 0u) return 0u;
+  return (unsigned int)(((int)(v << (32u - o - c))) >> (32u - c));
+}
+__device__ __forceinline__ unsigned int __brain_insert_bits(unsigned int e, unsigned int n, unsigned int o, unsigned int c) {
+  o = min(o, 32u);
+  c = min(c, 32u - o);
+  if (c == 0u) return e;
+  unsigned int mask = (c == 32u ? 0xffffffffu : ((1u << c) - 1u)) << o;
+  return (e & ~mask) | ((n << o) & mask);
+}
 __device__ __forceinline__ int __brain_dot4i8(unsigned int a, unsigned int b) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 610
   return __dp4a((int)a, (int)b, 0);

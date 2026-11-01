@@ -48,17 +48,16 @@ run "gradcheck suite — CPU backend"    env BRAIN_DEVICE=cpu    cargo test --re
 run "gradcheck suite — Vulkan backend (incl. CPU==GPU forward parity)" \
                                        env BRAIN_DEVICE=vulkan cargo test --release -q -p brain-gradcheck --no-fail-fast -- --test-threads=1 --skip bf16_train::
 
-# CUDA line. Three tests fail on the CUDA backend and pass on Vulkan; they are skipped BY NAME so the rest of the
+# CUDA line. Two tests fail on the CUDA backend and pass on Vulkan; they are skipped BY NAME so the rest of the
 # suite certifies CUDA, and each is an open CUDA parity defect in .agents/roadmap/cuda.md, not a pass:
 #  - qwen35_lora_on_a_bf16_base: analytic LoRA-A gradients differ from finite differences by 49-84 % on CUDA.
 #  - conv2d_gd_reproduces_conv2d: the grouped/dilated conv differs from conv2d by up to 1403 ulp, past its
 #    reassociation bound.
-#  - spectral_mixer_fft_path: the CUDA translator has no ReverseBits, so `rdft_synth` is refused.
 CUDA_DEVICE=$(cuda_device)
 if [ -n "$CUDA_DEVICE" ]; then
     run "gradcheck suite - CUDA backend on $CUDA_DEVICE (incl. CPU==CUDA forward parity)" \
         env BRAIN_DEVICE="$CUDA_DEVICE" BRAIN_BACKEND=cuda cargo test --release -q -p brain-gradcheck --no-fail-fast -- --test-threads=1 \
-        --skip qwen35_lora_on_a_bf16_base --skip conv2d_gd_reproduces_conv2d --skip spectral_mixer_fft_path
+        --skip qwen35_lora_on_a_bf16_base --skip conv2d_gd_reproduces_conv2d
 else
     echo "=== gradcheck suite - CUDA backend: SKIP (no NVIDIA device on this machine) ==="; echo
 fi

@@ -195,6 +195,39 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+/// Every WGSL bit builtin over u32 and i32, including the inputs where the
+/// hardware intrinsics and the spec could differ (0, -1, the sign bit, widths
+/// of 0 and 32). `rdft_synth` needs `reverseBits`; the rest are held to the
+/// same standard so none is refused or wrong when a kernel first uses it.
+const BITS: &str = r#"
+struct P { n: u32 };
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> x: array<u32>;
+@group(0) @binding(2) var<storage, read_write> o: array<u32>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if (i >= p.n) { return; }
+    let u = x[i];
+    let s = bitcast<i32>(u);
+    let off = (i * 7u) % 36u;
+    let cnt = (i * 5u) % 36u;
+    let b = i * 12u;
+    o[b] = reverseBits(u);
+    o[b + 1u] = countOneBits(u);
+    o[b + 2u] = countLeadingZeros(u);
+    o[b + 3u] = countTrailingZeros(u);
+    o[b + 4u] = firstLeadingBit(u);
+    o[b + 5u] = firstTrailingBit(u);
+    o[b + 6u] = bitcast<u32>(firstLeadingBit(s));
+    o[b + 7u] = bitcast<u32>(reverseBits(s));
+    o[b + 8u] = extractBits(u, off, cnt);
+    o[b + 9u] = bitcast<u32>(extractBits(s, off, cnt));
+    o[b + 10u] = insertBits(u, x[(i + 1u) % p.n], off, cnt);
+    o[b + 11u] = bitcast<u32>(countOneBits(s));
+}
+"#;
+
 fn backend() -> Option<CudaBackend> {
     match CudaBackend::try_new(&[
         ("arith", ARITH),
@@ -204,6 +237,7 @@ fn backend() -> Option<CudaBackend> {
         ("matrix", MATRIX),
         ("uniform_load", UNIFORM_LOAD),
         ("trig", TRIG),
+        ("bits", BITS),
     ]) {
         Ok(b) => Some(b),
         Err(e) => {
@@ -401,5 +435,54 @@ fn inverse_trigonometry_and_angle_units_agree_with_the_host() {
         // A unit conversion is one multiply by the f32 constant: exact.
         assert_eq!(got[i * 5 + 3].to_bits(), (v * 1.0f32.to_degrees()).to_bits(), "degrees({v})");
         assert_eq!(got[i * 5 + 4].to_bits(), (v * 1.0f32.to_radians()).to_bits(), "radians({v})");
+    }
+}
+
+/// Host model of the WGSL spec for the bit builtins (not of the CUDA text).
+fn first_leading_u32(v: u32) -> u32 {
+    if v == 0 { u32::MAX } else { 31 - v.leading_zeros() }
+}
+
+fn extract_window(o: u32, c: u32) -> (u32, u32) {
+    let o = o.min(32);
+    (o, c.min(32 - o))
+}
+
+#[test]
+fn bit_builtins_match_the_wgsl_definition_on_edge_and_spread_inputs() {
+    let Some(b) = backend() else { return };
+    let edge = [0u32, 1, 2, 0x8000_0000, 0xffff_ffff, 0x7fff_ffff, 0x8000_0001, 0x0000_ff00, 0xdead_beef];
+    let x: Vec<u32> = (0..N).map(|i| if i < edge.len() { edge[i] } else { (i as u32).wrapping_mul(2654435761).rotate_left(i as u32 % 32) }).collect();
+    let words: Vec<f32> = x.iter().map(|w| f32::from_bits(*w)).collect();
+    let bx = b.storage_init("x", &words);
+    let out = b.storage((N * 12) as u64);
+    b.submit(&[], &[b.step(7, &[&bx, &out], &[N as u32], N as u32)]);
+    let got: Vec<u32> = b.read(&out, N * 12).iter().map(|f| f.to_bits()).collect();
+    for i in 0..N {
+        let u = x[i];
+        let s = u as i32;
+        let (off, cnt) = extract_window((i as u32 * 7) % 36, (i as u32 * 5) % 36);
+        let ext_u = if cnt == 0 { 0 } else { (u << (32 - off - cnt)) >> (32 - cnt) };
+        let ext_s = if cnt == 0 { 0 } else { ((u << (32 - off - cnt)) as i32 >> (32 - cnt)) as u32 };
+        let mask = if cnt == 0 { 0 } else { (if cnt == 32 { u32::MAX } else { (1u32 << cnt) - 1 }) << off };
+        let ins = (u & !mask) | ((x[(i + 1) % N] << off.min(31)) & mask);
+        let fl_s = if s < 0 { first_leading_u32(!u) } else { first_leading_u32(u) };
+        let want = [
+            u.reverse_bits(),
+            u.count_ones(),
+            u.leading_zeros(),
+            u.trailing_zeros(),
+            first_leading_u32(u),
+            if u == 0 { u32::MAX } else { u.trailing_zeros() },
+            fl_s,
+            u.reverse_bits(),
+            ext_u,
+            ext_s,
+            ins,
+            u.count_ones(),
+        ];
+        for (k, w) in want.iter().enumerate() {
+            assert_eq!(got[i * 12 + k], *w, "input {u:#010x} (index {i}) builtin {k}: {:#x} vs {w:#x}", got[i * 12 + k]);
+        }
     }
 }
