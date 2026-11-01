@@ -26,7 +26,7 @@
 //!
 //! * `Gpu::pending_reclaim_bytes` - the accumulation, observable directly,
 //!   so the ORDERING property needs kilobytes and no threshold at all.
-//! * `BRAIN_GPU_RECLAIM_CEILING` - the backend's own refuse-to-allocate
+//! * `gpu_core::hardware::set_reclaim_ceiling` - the backend's own refuse-to-allocate
 //!   threshold, lowered so a loop can actually cross it with megabyte
 //!   buffers instead of the gigabytes a real checkpoint needs. It resolves
 //!   once per process (`backend_api::hardware::reclaim_ceiling`), so each
@@ -203,7 +203,6 @@ fn child(helper: &str) -> (bool, String) {
     let exe = std::env::current_exe().expect("current_exe");
     let out = std::process::Command::new(exe)
         .args(["--exact", helper, "--ignored", "--nocapture", "--test-threads=1"])
-        .env("BRAIN_GPU_RECLAIM_CEILING", CEILING.to_string())
         .output()
         .expect("spawn subprocess");
     let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
@@ -265,6 +264,7 @@ fn the_same_loop_through_transient_stays_under_the_ceiling() {
 #[test]
 #[ignore = "child process of a_loop_that_never_reclaims_is_refused_at_the_ceiling"]
 fn unreclaimed_loop_helper() {
+    gpu_core::hardware::set_reclaim_ceiling(Some(CEILING));
     let gpu = Gpu::open(Some("gpu"), KERNELS);
     for _ in 0..LAYERS {
         let layer = Layer::streamed(&gpu);
@@ -278,6 +278,7 @@ fn unreclaimed_loop_helper() {
 #[test]
 #[ignore = "child process of the_same_loop_through_transient_stays_under_the_ceiling"]
 fn transient_loop_helper() {
+    gpu_core::hardware::set_reclaim_ceiling(Some(CEILING));
     let gpu = Gpu::open(Some("gpu"), KERNELS);
     let mut peak = 0u64;
     for _ in 0..LAYERS {

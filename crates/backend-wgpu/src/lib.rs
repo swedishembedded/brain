@@ -395,7 +395,7 @@ impl PlCache {
 /// is slow - but finite: `wait_indefinitely()` (the previous value everywhere)
 /// made a wedged queue block the process forever rather than error, which is
 /// why past hangs (`omni_bench encode-vision`, `gpu_core::roofline`) presented as
-/// unkillable instead of as a reported failure. Override with `BRAIN_GPU_WAIT_S`.
+/// unkillable instead of as a reported failure. Override with `--gpu-wait-s`.
 ///
 /// One shared parse, in [`backend_api::hardware`], so a backend cannot end up
 /// with its own subtly different ladder or (worse) none at all.
@@ -1174,7 +1174,7 @@ impl WgpuBackend {
                 }
                 panic!(
                     "{what}: GPU submit did not complete within {timeout:?} \
-                     (BRAIN_GPU_WAIT_S) -- device likely wedged"
+                     (--gpu-wait-s) -- device likely wedged"
                 );
             }
             Err(e) => panic!("{what}: {e}"),
@@ -2450,7 +2450,7 @@ impl WgpuBackend {
     /// of Memory" hours into a run (see [`Self::pending_reclaim_bytes`]'s
     /// own doc for the real incidents this reproduces).
     ///
-    /// `BRAIN_GPU_RECLAIM_CEILING` overrides the threshold (bytes) - the only
+    /// `backend_api::hardware::set_reclaim_ceiling` overrides the threshold (bytes) - the only
     /// way to cross it without allocating gigabytes, which is what
     /// `gpu_core::transient`'s own regression tests need. Production never
     /// sets it; see `backend_api::hardware::reclaim_ceiling`.
@@ -2472,7 +2472,7 @@ impl WgpuBackend {
     }
 
     /// The [`Self::track`] threshold: this device's own single-buffer ceiling
-    /// unless `BRAIN_GPU_RECLAIM_CEILING` overrides it (tests only - see
+    /// unless `backend_api::hardware::set_reclaim_ceiling` overrides it (tests only - see
     /// `backend_api::hardware::reclaim_ceiling`, which does the one parse and
     /// resolves it once per process, so this stays a plain load per
     /// allocation).
@@ -3128,7 +3128,7 @@ pub fn register() {
 /// What this crate still owns about device-init concurrency: the WIRING.
 ///
 /// The mechanisms themselves (exclusion, re-entrancy, the bound, the
-/// `BRAIN_GPU_WAIT_S` ladder) are gated where they now live, in
+/// `--gpu-wait-s` ladder) are gated where they now live, in
 /// `backend_api::hardware`'s own tests. What can only be checked here is that
 /// this backend is actually plugged into them, because a future refactor
 /// re-introducing a crate-private lock would leave every one of those tests
@@ -3161,7 +3161,7 @@ mod gpu_lock_tests {
     }
 
     /// [`super::bounded`] must report a wedge rather than hang, at whatever
-    /// `BRAIN_GPU_WAIT_S` resolves to. Checks the wiring, not the mechanism:
+    /// `--gpu-wait-s` resolves to. Checks the wiring, not the mechanism:
     /// with a bound that has already elapsed, a call that never returns must
     /// still come back.
     #[test]

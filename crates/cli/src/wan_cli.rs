@@ -110,7 +110,7 @@ Devices:
 Cost: a step is TWO transformer forwards whenever guidance > 1. 81 frames at
 832x480 is 32,760 tokens per forward; start smaller (--frames 9 --width 256
 --height 256 --steps 8) to check the whole path before a long run.
-$BRAIN_GPU_WAIT_S is raised to 1200s unless already set: a forward here is one
+The device wait bound is raised to 1200s unless --gpu-wait-s set it: a forward here is one
 submit of the whole block stack, far past the backend's 30s deadlock guard.
 
 brain wan finetune - train a LoRA adapter on a folder of captioned video clips
@@ -260,9 +260,9 @@ fn t2v(args: &[String]) -> Result<(), String> {
     // makes every large generation die as "device likely wedged". Raise it
     // only when the user has expressed no opinion, and say so - the guard is
     // also what turns a genuinely wedged queue into an error instead of a hang.
-    if std::env::var_os("BRAIN_GPU_WAIT_S").is_none() {
-        std::env::set_var("BRAIN_GPU_WAIT_S", "1200");
-        eprintln!("wan: BRAIN_GPU_WAIT_S unset -> 1200s (one forward is the whole 30-block stack in one submit)");
+    if gpu_core::hardware::wait_timeout_override().is_none() {
+        gpu_core::hardware::set_wait_timeout(Some(std::time::Duration::from_secs(1200)));
+        eprintln!("wan: --gpu-wait-s unset -> 1200s (one forward is the whole 30-block stack in one submit)");
     }
 
     let tokens = cfg.token_count(o.frames, o.width, o.height).ok_or_else(|| format!("{} frames is not of the form 1 + 4k", o.frames))?;

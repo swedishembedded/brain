@@ -53,14 +53,13 @@
 //! Run explicitly with, e.g.:
 //! ```text
 //! BRAIN_QWEN35_GGUF=/path/to/Qwen3.5-35B-A3B-Q4_K_M.gguf \
-//!   BRAIN_GPU_WAIT_S=600 \
 //!   cargo test -p brain-qwen35moe --release --test lora_real_weight_smoke \
 //!   -- --nocapture --ignored
 //! ```
 //! `--ignored` because this test is also marked `#[ignore]` (real multi-GB
 //! I/O and a nontrivial forward/backward at real hidden width, over two real
 //! GPUs -- not something `cargo test`'s default run should pay for even when
-//! the env var happens to be set). `BRAIN_GPU_WAIT_S` is raised because a
+//! the env var happens to be set). The device wait bound is raised (in the test) because a
 //! real forward+backward through a 256-expert MoE at every one of `n_layers`
 //! layers is genuinely slow on this hardware (Tesla P40, no tensor cores) --
 //! see `crates/backend-wgpu/src/lib.rs`'s `gpu_wait_timeout` doc; this is a
@@ -81,6 +80,7 @@ fn lora_finetune_on_real_pipeline_sharded_weights_reduces_loss() {
         brain_testutil::skip("BRAIN_QWEN35_GGUF unset (set it to a downloaded Qwen3.5-35B-A3B*.gguf to run this)");
         return;
     };
+    gpu_core::hardware::set_wait_timeout(Some(std::time::Duration::from_secs(600)));
 
     let gpus: Vec<usize> = std::env::var("BRAIN_QWEN35_SMOKE_GPUS")
         .ok()

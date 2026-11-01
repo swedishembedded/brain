@@ -248,11 +248,11 @@ option.
 
 One transformer forward is the whole 30-block stack in a single submit, which at
 any real size is minutes rather than seconds, so `brain wan t2v` raises the
-<!-- perf-number: BRAIN_GPU_WAIT_S is a configured timeout the command sets, not a measurement -->
-backend's `BRAIN_GPU_WAIT_S` deadlock guard to 1200 s unless the caller has
+<!-- perf-number: the device wait bound is a configured timeout the command sets, not a measurement -->
+backend's `--gpu-wait-s` deadlock guard to 1200 s unless the caller has
 already set it. `brain serve` does not raise it, because the same process may
-be serving models for which that guard is doing its job - export it yourself
-when serving Wan.
+be serving models for which that guard is doing its job - pass `--gpu-wait-s`
+yourself when serving Wan.
 
 Image-to-video additionally needs a CLIP ViT-H/14 vision tower in
 `BRAIN_WAN_CLIP`. That one is not auto-fetched, because it ships with the I2V

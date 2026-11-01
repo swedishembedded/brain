@@ -10,7 +10,7 @@
 //! which then failed the first render after the fit.
 //!
 //! The backend's threshold is lowered for this binary alone
-//! (`BRAIN_GPU_RECLAIM_CEILING`, read once per process), so a small fit
+//! (`gpu_core::hardware::set_reclaim_ceiling`, process-wide), so a small fit
 //! crosses it.
 //!
 //! Swedish Embedded AB implements GPU training engines that run for hours
@@ -24,7 +24,7 @@ use splat::Kernels;
 
 #[test]
 fn a_fit_returns_its_device_memory() {
-    std::env::set_var("BRAIN_GPU_RECLAIM_CEILING", "65536");
+    gpu_core::hardware::set_reclaim_ceiling(Some(65536));
     let g = gpu_core::Gpu::new(splat::PIPELINES);
     let mut s = Splats::default();
     for i in 0..400 {

@@ -3,9 +3,6 @@ crates/arch/src/lib.rs	BRAIN_CAMPPLUS_DIR
 crates/arch/src/lib.rs	BRAIN_LLAVA_WEIGHTS
 crates/arch/src/lib.rs	BRAIN_S3TOKENIZER_V2
 crates/arch/src/lib.rs	BRAIN_S3TOKENIZER_V3
-crates/backend-api/src/hardware.rs	BRAIN_GPU_MAX_UNSYNCED_WORKGROUPS
-crates/backend-api/src/hardware.rs	BRAIN_GPU_RECLAIM_CEILING
-crates/backend-api/src/hardware.rs	BRAIN_GPU_WAIT_S
 crates/backend-api/src/lib.rs	BRAIN_PIPELINE_CACHE_DIR
 crates/backend-api/src/lib.rs	BRAIN_PROFILE
 crates/backend-api/src/lib.rs	HOME
@@ -184,7 +181,6 @@ crates/cli/src/supply.rs	BRAIN_QWEN3TTS_WEIGHTS
 crates/cli/src/supply.rs	YOLO_RAW_PT
 crates/cli/src/tts_serve.rs	BRAIN_QWEN3TTS_NPU_DEVICE
 crates/cli/src/tts_serve.rs	BRAIN_QWEN3TTS_RES
-crates/cli/src/wan_cli.rs	BRAIN_GPU_WAIT_S
 crates/cli/src/wan_cli.rs	BRAIN_WAN_DIT_DTYPE
 crates/cli/src/wan_report.rs	BRAIN_CLIP_DIR
 crates/cli/tests/device_routing.rs	BRAIN_DEVICE
@@ -558,7 +554,6 @@ crates/gpu-core/tests/memory_limit.rs	BRAIN_LIMIT_VRAM_TOTAL
 crates/gpu-core/tests/roofline.rs	MOE_SKIP_GPU_TESTS
 crates/gpu-core/tests/scratch_arena.rs	MOE_SKIP_GPU_TESTS
 crates/gpu-core/tests/step_cache.rs	MOE_SKIP_GPU_TESTS
-crates/gpu-core/tests/transient_reclaim.rs	BRAIN_GPU_RECLAIM_CEILING
 crates/horizon/tests/batching.rs	MOE_SKIP_GPU_TESTS
 crates/horizon/tests/calibration.rs	MOE_SKIP_GPU_TESTS
 crates/horizon/tests/calibration_measure.rs	<name>
@@ -911,7 +906,6 @@ crates/qwen35/src/gguf_import.rs	BRAIN_QWEN35_GGUF
 crates/qwen35/src/int8_gguf_resident.rs	<REAL_GGUF_ENV>
 crates/qwen35/src/model.rs	BRAIN_LIMIT_RAM_TOTAL
 crates/qwen35/src/model.rs	BRAIN_LIMIT_VRAM_TOTAL
-crates/qwen35/tests/chunk_round_reclaim.rs	BRAIN_GPU_RECLAIM_CEILING
 crates/qwen35/tests/cuda_leaks.rs	<REAL_GGUF_ENV>
 crates/qwen35/tests/dflash2_real.rs	BRAIN_DFLASH2_DUMP
 crates/qwen35/tests/dflash2_real.rs	BRAIN_DFLASH2_GGUF
@@ -1159,7 +1153,6 @@ crates/splat/tests/s1_project_naive.rs	MOE_SKIP_GPU_TESTS
 crates/splat/tests/s23_ray_renderer.rs	NOAA
 crates/splat/tests/s23_ray_renderer.rs	NOFILT
 crates/splat/tests/s23_ray_renderer.rs	PROBE_MASK
-crates/splat/tests/s26_device_memory.rs	BRAIN_GPU_RECLAIM_CEILING
 crates/splat/tests/s2_tiled_parity.rs	MOE_SKIP_GPU_TESTS
 crates/splat/tests/s5_bwd_fit.rs	MOE_SKIP_GPU_TESTS
 crates/supir/src/bin/supir_bench.rs	BRAIN_SUPIR_ALLOW_FULL_MEMORY
@@ -1240,7 +1233,6 @@ crates/vulkan/src/pipeline_cache.rs	XDG_CACHE_HOME
 crates/vulkan/src/shader.rs	BRAIN_GPU_CHECKED
 crates/vulkan/tests/peak_flops.rs	BRAIN_VK_DEVICE
 crates/vulkan/tests/peak_flops.rs	BRAIN_VK_NDEV
-crates/wan/src/bin/wan_bench.rs	BRAIN_GPU_WAIT_S
 crates/wan/src/block.rs	BRAIN_WAN_ATTN
 crates/wan/src/finetune.rs	BRAIN_WAN_T5_DEVICE
 crates/wan/src/pipeline.rs	<var>
@@ -1258,7 +1250,6 @@ crates/wan/tests/dit_parity.rs	BRAIN_MODELS_DIR
 crates/wan/tests/dit_parity.rs	BRAIN_WAN_DIT
 crates/wan/tests/finetune_ab.rs	BRAIN_CLIP_DIR
 crates/wan/tests/gguf_direct_real.rs	BRAIN_DEVICE
-crates/wan/tests/gguf_direct_real.rs	BRAIN_GPU_WAIT_S
 crates/wan/tests/gguf_direct_real.rs	BRAIN_WAN_GGUF
 crates/wan/tests/gguf_direct_real.rs	BRAIN_WAN_GGUF_OUT
 crates/wan/tests/gguf_import_real.rs	BRAIN_WAN_GGUF

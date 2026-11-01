@@ -719,7 +719,7 @@ impl VkContext {
 
     /// Block the calling host thread until the timeline's counter reaches
     /// `value` (`vkWaitSemaphores`) - bounded, never `u64::MAX`, matching
-    /// every other device wait in this file (`BRAIN_GPU_WAIT_S`). Touches
+    /// every other device wait in this file (`--gpu-wait-s`). Touches
     /// neither `queue` nor `command_pool`, so - unlike `wait_for_fences` in
     /// `run_cmd`/`dispatch` above - this deliberately does NOT require
     /// [`Self::queue_guard`]: a semaphore wait does not race a concurrent
@@ -736,7 +736,7 @@ impl VkContext {
         match self.device.wait_semaphores(&wait_info, backend_api::hardware::wait_timeout_ns()) {
             Ok(()) => {}
             Err(vk::Result::TIMEOUT) => panic!(
-                "GPU timeline wait did not reach value {value} within (BRAIN_GPU_WAIT_S) -- device likely wedged"
+                "GPU timeline wait did not reach value {value} within (--gpu-wait-s) -- device likely wedged"
             ),
             Err(vk::Result::ERROR_DEVICE_LOST) => panic!("GPU device lost while waiting on the timeline semaphore"),
             Err(e) => panic!("wait_semaphores: {e:?}"),
@@ -908,11 +908,11 @@ impl VkContext {
             self.device.queue_submit(self.queue, &[vk::SubmitInfo::default().command_buffers(&cmds)], fence).expect("submit");
             // Bounded, never `u64::MAX`: an unbounded fence wait is what turns
             // a wedged queue into an unkillable process instead of a reported
-            // failure. Same `BRAIN_GPU_WAIT_S` ceiling every other wait on a
+            // failure. Same `--gpu-wait-s` ceiling every other wait on a
             // device in this workspace uses.
             self.device
                 .wait_for_fences(&[fence], true, backend_api::hardware::wait_timeout_ns())
-                .expect("wait_for_fences timed out or failed (BRAIN_GPU_WAIT_S) -- device likely wedged");
+                .expect("wait_for_fences timed out or failed (--gpu-wait-s) -- device likely wedged");
             self.device.destroy_fence(fence, None);
             self.device.free_command_buffers(self.command_pool, &cmds);
         }
@@ -1089,7 +1089,7 @@ impl VkContext {
             // Bounded, never `u64::MAX` - see `run_cmd`'s wait.
             self.device
                 .wait_for_fences(&[fence], true, backend_api::hardware::wait_timeout_ns())
-                .expect("wait_for_fences timed out or failed (BRAIN_GPU_WAIT_S) -- device likely wedged");
+                .expect("wait_for_fences timed out or failed (--gpu-wait-s) -- device likely wedged");
 
             self.device.destroy_fence(fence, None);
             self.device.free_command_buffers(self.command_pool, &cmds);

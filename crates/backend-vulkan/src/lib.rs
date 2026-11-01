@@ -54,7 +54,7 @@ pub mod coopmat;
 /// prefill dispatch is slow — but finite: `u64::MAX` (the previous value) made a
 /// wedged queue block the process forever rather than error, which is why past
 /// hangs (`omni_bench encode-vision`, `gpu_core::roofline`) presented as unkillable
-/// instead of as a reported failure. Override with `BRAIN_GPU_WAIT_S`.
+/// instead of as a reported failure. Override with `--gpu-wait-s`.
 ///
 /// One shared parse, in [`backend_api::hardware`]: this used to be a private
 /// transcription of the same ladder `backend-wgpu` also kept privately, and a
@@ -1909,7 +1909,7 @@ impl VulkanBackend {
             // Do NOT silently retry -- report which submit wedged rather than
             // masking it with another indefinite wait.
             Err(vk::Result::TIMEOUT) => panic!(
-                "GPU submit did not complete within {:.1}s (BRAIN_GPU_WAIT_S) -- \
+                "GPU submit did not complete within {:.1}s (--gpu-wait-s) -- \
                  device likely wedged",
                 timeout_ns as f64 / 1e9
             ),

@@ -384,7 +384,7 @@ fn wan_gguf_int8_memory_probe() {
 }
 
 /// Root-cause probe for the int4 "GPU submit did not complete" failure: build
-/// int4 alone, with `BRAIN_GPU_WAIT_S` raised well past the backend's default
+/// int4 alone, with the device wait bound raised well past the backend's default
 /// deadlock guard (the same fix `wan_cli.rs`'s `t2v` applies
 /// for the SAME reason - "one forward is the whole block stack in ONE
 /// submit"), and time the build and forward phases separately.
@@ -402,7 +402,7 @@ fn wan_gguf_int8_memory_probe() {
 /// `WanDtype::Int4`'s own doc), not a dispatch/binding bug.
 ///
 /// ```text
-/// BRAIN_GPU_WAIT_S=600 cargo test --release -p brain-wan --test gguf_direct_real \
+/// cargo test --release -p brain-wan --test gguf_direct_real \
 ///   -- --ignored --nocapture wan_gguf_int4_timing_probe
 /// ```
 #[test]
@@ -411,10 +411,7 @@ fn wan_gguf_int4_timing_probe() {
     let Some(path) = gguf_path() else { return };
     let src = WanGgufSource::open(&path).expect("open WanGgufSource");
     let cfg = src.config().clone();
-    if std::env::var_os("BRAIN_GPU_WAIT_S").is_none() {
-        std::env::set_var("BRAIN_GPU_WAIT_S", "600");
-    }
-    eprintln!("BRAIN_GPU_WAIT_S={:?}", std::env::var("BRAIN_GPU_WAIT_S"));
+    gpu_core::hardware::set_wait_timeout(Some(std::time::Duration::from_secs(600)));
 
     let (f, h, w) = (1u32, 16u32, 16u32);
     let inputs = random_inputs(&cfg, f, h, w);
@@ -565,9 +562,7 @@ fn wan_gguf_int8_and_int4_dit_match_fp32_and_degrade_smoothly_with_depth() {
     // long enough to exceed the backend's default deadlock guard. Same fix
     // `wan_cli.rs`'s `t2v` applies for the identical reason ("one forward is
     // the whole block stack in ONE submit").
-    if std::env::var_os("BRAIN_GPU_WAIT_S").is_none() {
-        std::env::set_var("BRAIN_GPU_WAIT_S", "300");
-    }
+    gpu_core::hardware::set_wait_timeout(Some(std::time::Duration::from_secs(300)));
     let Some(path) = gguf_path() else { return };
     let src = WanGgufSource::open(&path).expect("open WanGgufSource");
     let cfg = src.config().clone();

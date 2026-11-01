@@ -26,6 +26,7 @@ pub use backend_api::{
     f, AllocPolicy, BufUsage, DeviceBuffer, DeviceCaps, DeviceClass, DeviceOutOfMemory, DeviceStats, MemAdvice, MemoryLimits, MemoryUsage,
     NumericSupport, PlacementFacts, PrefetchTarget, Step, StepMeta,
 };
+pub use backend_api::hardware;
 pub use backend_api::runtime;
 pub use backend_api::select;
 
@@ -2028,7 +2029,7 @@ mod native_facade {
         /// the same loop is free at a small working set and fatal at a large
         /// one, and only this number says where the line is on THIS device.
         /// Resolved through `backend_api::hardware::reclaim_ceiling`, so it
-        /// honours `BRAIN_GPU_RECLAIM_CEILING` exactly as the check itself
+        /// honours `backend_api::hardware::set_reclaim_ceiling` exactly as the check itself
         /// does - a caller budgeting against it cannot disagree with the
         /// backend about where the ceiling is.
         pub fn reclaim_ceiling_bytes(&self) -> u64 {

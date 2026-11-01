@@ -746,6 +746,27 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
                 }
             }
             i += 2;
+        } else if argv[i] == "--gpu-wait-s" {
+            // The longest one wait on a device may take before the device counts as wedged (seconds, finite and positive).
+            match argv.get(i + 1).and_then(|v| gpu_core::hardware::parse_wait_seconds(v)) {
+                Some(t) => gpu_core::hardware::set_wait_timeout(Some(t)),
+                None => {
+                    eprintln!("brain: --gpu-wait-s needs a finite, positive number of seconds (a bad value must not lift the bound)");
+                    std::process::exit(2);
+                }
+            }
+            i += 2;
+        } else if argv[i] == "--max-unsynced-workgroups" {
+            // Workgroups a backend may queue before a host-synchronised flush: lower it on a driver that times out under
+            // long unsynchronised runs.
+            match argv.get(i + 1).and_then(|v| v.parse::<u64>().ok()).filter(|&w| w > 0) {
+                Some(w) => gpu_core::hardware::set_max_unsynced_workgroups(Some(w)),
+                None => {
+                    eprintln!("brain: --max-unsynced-workgroups needs a positive count (0 would serialise every dispatch)");
+                    std::process::exit(2);
+                }
+            }
+            i += 2;
         } else if argv[i] == "--no-autotune" {
             // Every kernel slot keeps its default candidate and the selector its static policy: reproducible benchmarking
             // and A/B runs.

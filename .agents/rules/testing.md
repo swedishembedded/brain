@@ -222,12 +222,12 @@ tuned from the environment instead of a recompile.
 - `MOE_SKIP_GPU_TESTS` - skips device-dependent tests on a machine with no GPU; read only by
   `brain_testutil::gpu_tests_skipped` (fatal under `BRAIN_REQUIRE_FIXTURES`).
 - `SHARD_TEST_GPUS` - how many GPUs a pipeline/tensor-parallel sharding test should assume.
-- `BRAIN_GPU_RECLAIM_CEILING` - overrides `backend_api::hardware::reclaim_ceiling`'s
+- `backend_api::hardware::set_reclaim_ceiling` - overrides `backend_api::hardware::reclaim_ceiling`'s
   dropped-but-not-yet-reclaimed-memory threshold (bytes) so a test can cross it
   with megabyte buffers instead of the multi-gigabyte scale the real ceiling
   only becomes reachable at in production - see `gpu_core::Transient`'s own
-  tests. Resolved once per process, so a test wanting a different ceiling
-  needs its own process.
+  tests. Process-wide, so a test wanting a different ceiling sets it in a
+  child process of its own.
 
 **Benchmark knobs:**
 - `BRAIN_BENCH_REPS` - repetition count for a benchmark harness.

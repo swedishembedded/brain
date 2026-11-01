@@ -64,15 +64,16 @@
 
 #![cfg(not(target_arch = "wasm32"))]
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 /// Default ceiling for any single wait on the GPU, in seconds.
 const DEFAULT_WAIT_S: f64 = 30.0;
 
-/// The process-wide ceiling for one wait on a device, from `BRAIN_GPU_WAIT_S`.
+/// The process-wide ceiling for one wait on a device: [`set_wait_timeout`]'s, else the default.
 ///
-/// The one parse of that variable in the workspace. It used to be transcribed
-/// per backend (`backend-wgpu`'s `gpu_wait_timeout`, `backend-vulkan`'s
+/// The one answer in the workspace. It used to be transcribed per backend
+/// (`backend-wgpu`'s `gpu_wait_timeout`, `backend-vulkan`'s
 /// `gpu_wait_timeout_ns`), which is how a new call site ends up with no bound
 /// at all: there was nothing shared to reach for.
 ///
@@ -80,22 +81,27 @@ const DEFAULT_WAIT_S: f64 = 30.0;
 /// but always finite. An unbounded wait on a device is what turns a driver
 /// fault into an unkillable process instead of a reported failure.
 pub fn wait_timeout() -> Duration {
-    parse_wait_timeout(std::env::var("BRAIN_GPU_WAIT_S").ok().as_deref())
+    wait_timeout_override().unwrap_or(Duration::from_secs_f64(DEFAULT_WAIT_S))
 }
 
-/// [`wait_timeout`]'s parsing rule as a pure function, so the ladder is
-/// testable without mutating a process-global environment variable that every
-/// other test in the same binary would race.
-///
-/// Anything that is not a finite, strictly positive number is ignored rather
-/// than clamped or rejected: a bad value must not be able to turn the bound
-/// off (`0`, `-1`, `inf`, `NaN` all mean "no usable bound").
-fn parse_wait_timeout(raw: Option<&str>) -> Duration {
-    let secs = raw
-        .and_then(|v| v.parse::<f64>().ok())
-        .filter(|v| v.is_finite() && *v > 0.0)
-        .unwrap_or(DEFAULT_WAIT_S);
-    Duration::from_secs_f64(secs)
+/// 0: no override.
+static WAIT_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Set the process-wide ceiling for one wait on a device (`None` restores the default); the CLI's `--gpu-wait-s`. A zero
+/// timeout is no bound and is taken as `None`. Never read from the environment.
+pub fn set_wait_timeout(t: Option<Duration>) {
+    WAIT_NS.store(t.map_or(0, |t| t.as_nanos().min(u64::MAX as u128) as u64), Ordering::Relaxed);
+}
+
+/// [`set_wait_timeout`]'s override, if one was set.
+pub fn wait_timeout_override() -> Option<Duration> {
+    Some(WAIT_NS.load(Ordering::Relaxed)).filter(|&ns| ns > 0).map(Duration::from_nanos)
+}
+
+/// A wait ceiling in seconds as an operator writes it: a finite, strictly positive number, else `None` - a bad value must
+/// not be able to turn the bound off (`0`, `-1`, `inf`, `NaN` all mean "no usable bound"), so the caller refuses it.
+pub fn parse_wait_seconds(raw: &str) -> Option<Duration> {
+    raw.trim().parse::<f64>().ok().filter(|v| v.is_finite() && *v > 0.0).map(Duration::from_secs_f64)
 }
 
 /// [`wait_timeout`] in nanoseconds, for the Vulkan APIs that take a `u64`
@@ -106,8 +112,8 @@ pub fn wait_timeout_ns() -> u64 {
 
 /// How many bytes of dropped-but-not-yet-reclaimed device memory a backend
 /// tolerates before it refuses the next allocation - `device_max` (the
-/// device's own single-buffer ceiling) unless `BRAIN_GPU_RECLAIM_CEILING`
-/// names a byte count.
+/// device's own single-buffer ceiling) unless [`set_reclaim_ceiling`]
+/// named a byte count.
 ///
 /// The default is the right production number and is explained where the
 /// check lives (`backend_wgpu::WgpuBackend::track`). The override exists for
@@ -117,32 +123,25 @@ pub fn wait_timeout_ns() -> u64 {
 /// same mechanism be crossed with megabyte buffers in a second - see
 /// `gpu_core::Transient`'s own tests.
 ///
-/// Resolved ONCE per process (this is read on every device allocation; a
-/// `getenv` there would be a syscall-ish lookup per buffer), so a test that
-/// wants a different ceiling needs its own process - the same shape and same
-/// rationale as `memauth::limits`.
+/// Process-wide: a test that wants a different ceiling sets it before its process builds a device, in a process of its
+/// own (every other test in the binary would see it).
 pub fn reclaim_ceiling(device_max: u64) -> u64 {
-    static OVERRIDE: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
-    OVERRIDE
-        .get_or_init(|| parse_reclaim_ceiling(std::env::var("BRAIN_GPU_RECLAIM_CEILING").ok().as_deref()))
-        .unwrap_or(device_max)
+    Some(RECLAIM_CEILING.load(Ordering::Relaxed)).filter(|&b| b > 0).unwrap_or(device_max)
 }
 
-/// [`reclaim_ceiling`]'s parsing rule as a pure function - same reason
-/// [`parse_wait_timeout`] is factored out: testable without mutating a
-/// process-global every other test in the binary would race.
-///
-/// Anything that is not a strictly positive integer is ignored rather than
-/// clamped, so a bad value falls back to the device's own ceiling instead of
-/// turning the check off (`0`) or making it fire immediately.
-fn parse_reclaim_ceiling(raw: Option<&str>) -> Option<u64> {
-    raw.and_then(|v| v.trim().parse::<u64>().ok()).filter(|v| *v > 0)
+/// 0: the device's own ceiling.
+static RECLAIM_CEILING: AtomicU64 = AtomicU64::new(0);
+
+/// Lower the reclaim ceiling to `bytes` (`None`, or `Some(0)`, which would turn the check off, restores the device's own);
+/// the CLI's `--reclaim-ceiling`. Never read from the environment.
+pub fn set_reclaim_ceiling(bytes: Option<u64>) {
+    RECLAIM_CEILING.store(bytes.unwrap_or(0), Ordering::Relaxed);
 }
 
 /// How much un-synchronised GPU work (in WORKGROUPS, summed `gx * gy`) a
 /// backend lets accumulate into one command buffer before it forces a real
-/// host-synchronised flush - 4096 unless `BRAIN_GPU_MAX_UNSYNCED_WORKGROUPS`
-/// names a count.
+/// host-synchronised flush - 4096 unless [`set_max_unsynced_workgroups`]
+/// named a count.
 ///
 /// # Why a bound has to exist at all
 ///
@@ -211,28 +210,21 @@ fn parse_reclaim_ceiling(raw: Option<&str>) -> Option<u64> {
 /// (`BRAIN_VK_SERIAL=1`, `BRAIN_WGPU_SERIAL=1`) remain the maximally
 /// conservative option for a shape this heuristic does not cover.
 ///
-/// Resolved ONCE per process (read on every submit), same reason and same
-/// shape as [`reclaim_ceiling`].
+/// Read on every submit: one atomic load.
 pub fn max_unsynced_workgroups() -> u64 {
     /// See this function's own doc for how this is derived.
     const DEFAULT: u64 = 4_096;
-    static OVERRIDE: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
-    OVERRIDE
-        .get_or_init(|| {
-            parse_max_unsynced_workgroups(std::env::var("BRAIN_GPU_MAX_UNSYNCED_WORKGROUPS").ok().as_deref())
-        })
-        .unwrap_or(DEFAULT)
+    Some(MAX_UNSYNCED_WORKGROUPS.load(Ordering::Relaxed)).filter(|&w| w > 0).unwrap_or(DEFAULT)
 }
 
-/// [`max_unsynced_workgroups`]'s parsing rule as a pure function - same
-/// reason [`parse_reclaim_ceiling`] is factored out.
-///
-/// Anything that is not a strictly positive integer falls back to the
-/// default rather than being clamped, so a bad value cannot turn batching
-/// off entirely (`0` would synchronise after every single dispatch, which is
-/// the orders-of-magnitude-slower serialized path).
-fn parse_max_unsynced_workgroups(raw: Option<&str>) -> Option<u64> {
-    raw.and_then(|v| v.trim().parse::<u64>().ok()).filter(|v| *v > 0)
+/// 0: the default.
+static MAX_UNSYNCED_WORKGROUPS: AtomicU64 = AtomicU64::new(0);
+
+/// Set how many workgroups a backend may queue before a host-synchronised flush (`None` restores the default); the
+/// CLI's `--max-unsynced-workgroups`. `Some(0)` would synchronise after every dispatch (the serialized path) and is
+/// taken as `None`. Never read from the environment.
+pub fn set_max_unsynced_workgroups(workgroups: Option<u64>) {
+    MAX_UNSYNCED_WORKGROUPS.store(workgroups.unwrap_or(0), Ordering::Relaxed);
 }
 
 // ---- mutual exclusion over the physical device ------------------------------
@@ -341,7 +333,7 @@ impl std::fmt::Display for Wedged {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} exceeded {:?} (BRAIN_GPU_WAIT_S) -- driver likely wedged; see `backend_api::hardware::bounded`",
+            "{} exceeded {:?} (--gpu-wait-s) -- driver likely wedged; see `backend_api::hardware::bounded`",
             self.what, self.timeout
         )
     }
@@ -388,7 +380,7 @@ pub fn try_bounded_for<T: Send + 'static>(
 /// [`try_bounded_for`] with an explicit timeout, panicking on a wedge.
 ///
 /// Split from [`bounded`] so the timeout behaviour itself is testable without
-/// touching the process-global `BRAIN_GPU_WAIT_S`, which every test in the
+/// touching the process-wide wait bound (`set_wait_timeout`), which every test in the
 /// same binary would otherwise race.
 pub fn bounded_for<T: Send + 'static>(what: &str, timeout: Duration, f: impl FnOnce() -> T + Send + 'static) -> T {
     match try_bounded_for(what, timeout, f) {
@@ -464,7 +456,7 @@ mod tests {
         });
         let err = got.expect_err("a call that never returns must not report success");
         assert_eq!(err.what, "test op");
-        assert!(err.to_string().contains("BRAIN_GPU_WAIT_S"), "the failure must name the knob that set the bound: {err}");
+        assert!(err.to_string().contains("--gpu-wait-s"), "the failure must name the knob that set the bound: {err}");
     }
 
     /// [`device_init_lock`] must actually exclude a second holder on another
@@ -536,43 +528,15 @@ mod tests {
         assert!(taken.load(Ordering::SeqCst), "the NPU class blocked on a GPU-class holder");
     }
 
-    /// A bad `BRAIN_GPU_WAIT_S` must fall back to the default bound, never
-    /// disable it. `0`/negative/non-finite all mean "no usable bound", and a
-    /// silently unbounded wait is the failure mode this whole module exists
-    /// to remove.
+    /// An unusable wait setting is refused, never taken as "no bound": `0`/negative/non-finite all mean "no usable
+    /// bound", and a silently unbounded wait is the failure mode this whole module exists to remove.
     #[test]
-    fn an_unusable_wait_setting_falls_back_to_the_default_bound() {
-        let default = Duration::from_secs_f64(DEFAULT_WAIT_S);
-        for bad in [None, Some(""), Some("0"), Some("-1"), Some("abc"), Some("inf"), Some("NaN")] {
-            assert_eq!(parse_wait_timeout(bad), default, "{bad:?} must not disable the bound");
+    fn an_unusable_wait_setting_is_refused() {
+        for bad in ["", "0", "-1", "abc", "inf", "NaN"] {
+            assert_eq!(parse_wait_seconds(bad), None, "{bad:?} must not disable the bound");
         }
-        assert_eq!(parse_wait_timeout(Some("1200")), Duration::from_secs(1200));
-        assert_eq!(parse_wait_timeout(Some("0.5")), Duration::from_millis(500));
-    }
-
-    /// A malformed reclaim ceiling must fall back to the device's own limit,
-    /// never disable the check (`0` would make every pending byte legal) and
-    /// never make it fire on the first allocation.
-    #[test]
-    fn a_bad_reclaim_ceiling_falls_back_to_the_device_limit() {
-        for bad in [None, Some(""), Some("0"), Some("-1"), Some("abc"), Some("1.5")] {
-            assert_eq!(parse_reclaim_ceiling(bad), None, "{bad:?} must not override the device limit");
-        }
-        assert_eq!(parse_reclaim_ceiling(Some("4194304")), Some(4 << 20));
-        assert_eq!(parse_reclaim_ceiling(Some(" 4194304 ")), Some(4 << 20));
-    }
-
-    /// A malformed ceiling must fall back to the default, and must never
-    /// resolve to `0`: a ceiling of zero synchronises after every dispatch,
-    /// which is the serialized path and orders of magnitude slower than the
-    /// batching this whole mechanism exists to keep.
-    #[test]
-    fn a_bad_unsynced_ceiling_falls_back_to_the_default() {
-        for bad in [None, Some(""), Some("0"), Some("-1"), Some("abc"), Some("1.5")] {
-            assert_eq!(parse_max_unsynced_workgroups(bad), None, "{bad:?} must not override the default");
-        }
-        assert_eq!(parse_max_unsynced_workgroups(Some("512")), Some(512));
-        assert_eq!(parse_max_unsynced_workgroups(Some(" 512 ")), Some(512));
+        assert_eq!(parse_wait_seconds("1200"), Some(Duration::from_secs(1200)));
+        assert_eq!(parse_wait_seconds(" 0.5 "), Some(Duration::from_millis(500)));
     }
 
     /// The resolved default must stay under a single attention-sized

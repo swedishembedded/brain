@@ -42,8 +42,6 @@ the flag that replaced it, and has no effect in the environment.
 | `BRAIN_BACKEND` | how the selected hardware is driven: `wgpu`, `vulkan`, `cuda` or `cpu`; same values as `--backend` (the flag wins). `cuda` needs a GPU in the device set and fails by name rather than falling back | chosen from the hardware: `cuda` where every card is NVIDIA's and CUDA can run (driver plus NVRTC or the ahead-of-time kernels), `wgpu` on any other GPU, else `cpu`; `brain devices` prints the choice and why |
 | `BRAIN_GPU_INDEX` | pins a specific GPU card index (parsed once, at first use) | first/best card |
 | `BRAIN_VK_DEVICE` | forces a specific Vulkan physical-device index, overriding brain's discrete-GPU-first ranking | automatic ranking |
-| `BRAIN_GPU_WAIT_S` | seconds to wait for a GPU submit to complete before treating the device as wedged | backend default |
-| `BRAIN_GPU_MAX_UNSYNCED_WORKGROUPS` | workgroups a backend may queue before forcing a host-synchronised flush; lower it on a driver that times out under long unsynchronised runs | 4096 |
 | `BRAIN_QWEN_STEP_CACHE` | `0` disables the Qwen capability path's recorded-step cache, re-recording every dispatch - an A/B seam for measuring what the recording buys | on |
 | `BRAIN_WM_RENDERER` | `software` or `accelerated`, forcing the world-model window's SDL renderer instead of letting it choose | chosen from the driver |
 | `BRAIN_SPLAT_PROFILE` | set (any value) to print `splat fit`'s per-stage timing breakdown | off |

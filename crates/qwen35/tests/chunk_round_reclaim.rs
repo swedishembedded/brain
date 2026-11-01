@@ -26,7 +26,7 @@
 //! a size that would otherwise have been fatal.
 //!
 //! Gating that needs the ceiling to be genuinely CROSSED, which in production
-//! takes gigabytes. `BRAIN_GPU_RECLAIM_CEILING` lowers it so a `tiny()`-dims
+//! takes gigabytes. `gpu_core::hardware::set_reclaim_ceiling` lowers it so a `tiny()`-dims
 //! round crosses it in kilobytes instead - the same mechanism, the same code
 //! path, a second rather than a multi-GB allocation. It is resolved once per
 //! process (`backend_api::hardware::reclaim_ceiling`), so the work runs in a
@@ -61,6 +61,8 @@ const CEILING: u64 = 512 * 1024;
 /// this gate is that gate's claim plus a ceiling, and a different fixture would
 /// make a disagreement between them hard to attribute.
 fn replay_matches(pooled: bool) {
+    // Run only in a child process (the helpers below), so the lowered ceiling reaches no other test.
+    gpu_core::hardware::set_reclaim_ceiling(Some(CEILING));
     let cfg = Qwen35Config { n_layers: 8, ..Qwen35Config::tiny() };
     let init = qwen35::init::init_weights(&cfg, 7);
     let m = Qwen35::new_on(Gpu::new(pipelines()), cfg.clone(), 1, cfg.block_size, &init);
@@ -106,7 +108,6 @@ fn child(helper: &str) -> (bool, String) {
     let exe = std::env::current_exe().expect("current_exe");
     let out = std::process::Command::new(exe)
         .args(["--exact", helper, "--ignored", "--nocapture", "--test-threads=1"])
-        .env("BRAIN_GPU_RECLAIM_CEILING", CEILING.to_string())
         .output()
         .expect("spawn subprocess");
     let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));

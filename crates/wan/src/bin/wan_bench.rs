@@ -458,8 +458,8 @@ fn main() {
     // a real generation's shape, far past that default. Raise it only when the
     // caller has expressed no opinion: the guard is still what turns a
     // genuinely wedged queue into an error instead of a hang.
-    if std::env::var_os("BRAIN_GPU_WAIT_S").is_none() {
-        std::env::set_var("BRAIN_GPU_WAIT_S", "1200");
+    if gpu_core::hardware::wait_timeout_override().is_none() {
+        gpu_core::hardware::set_wait_timeout(Some(std::time::Duration::from_secs(1200)));
     }
     let args: Vec<String> = std::env::args().collect();
     let mode = args.get(1).map(|s| s.as_str()).unwrap_or("dit");
