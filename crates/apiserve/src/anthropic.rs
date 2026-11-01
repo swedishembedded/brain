@@ -195,7 +195,7 @@ fn flatten_message(m: &Value) -> Value {
         "assistant" => "assistant",
         _ => "user",
     };
-    let mut out = json!({ "role": role, "content": content_text(m.get("content")) });
+    let mut out = json!({ "role": role, "content": message_content(m.get("content")) });
     let reasoning: String = m
         .get("content")
         .and_then(Value::as_array)
@@ -208,6 +208,25 @@ fn flatten_message(m: &Value) -> Value {
         out["reasoning_content"] = json!(reasoning);
     }
     out
+}
+
+/// The contract `content` of one turn: its text, or - when it has an `image` block - its typed parts in order (`text`
+/// parts and payload-free `image_url` markers, the shape the OpenAI surface hands over), so a model that reads images
+/// sees each where the client put it. The image's pixels travel as a blob ([`crate::media`]).
+fn message_content(c: Option<&Value>) -> Value {
+    let Some(blocks) = c.and_then(Value::as_array).filter(|b| b.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("image"))) else {
+        return json!(content_text(c));
+    };
+    Value::Array(
+        blocks
+            .iter()
+            .filter_map(|b| match b.get("type").and_then(Value::as_str) {
+                Some("image") => Some(json!({ "type": "image_url", "image_url": {} })),
+                None | Some("text") => b.get("text").and_then(Value::as_str).map(|t| json!({ "type": "text", "text": t })),
+                _ => None,
+            })
+            .collect(),
+    )
 }
 
 /// Flatten Anthropic content (string, or an array of blocks) to the text of its

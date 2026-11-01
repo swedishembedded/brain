@@ -3297,6 +3297,35 @@ async fn openai_chat_multimodal_content_preserves_typed_parts_for_the_chat_templ
     assert_eq!(parts[2]["audio"], true);
 }
 
+/// An Anthropic image block reaches a model that reads images where the client put it: as an `image_url` part of the
+/// turn's typed content, between the text around it - the same shape the OpenAI surface hands over - and the turns
+/// without an image stay plain strings.
+#[tokio::test]
+async fn anthropic_image_block_keeps_its_place_among_the_text_of_its_turn() {
+    let (app, key) = messages_echo_app(Provider::Anthropic);
+    let body = json!({
+        "model": "brain-messagesecho", "max_tokens": 16,
+        "messages": [
+            {"role": "user", "content": [
+                {"type": "text", "text": "look at"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/x-ppm", "data": TINY_PPM_B64}},
+                {"type": "text", "text": "and tell me"},
+            ]},
+            {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+        ],
+    });
+    let (st, v) = post_json(&app, Provider::Anthropic, &key, "/v1/messages", &body).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let echoed = v["content"][0]["text"].as_str().expect("echoed messages JSON string");
+    let messages: Value = serde_json::from_str(echoed).expect("echoed text is valid JSON");
+    let parts = messages[0]["content"].as_array().expect("a turn with an image keeps typed parts");
+    assert_eq!(parts.iter().map(|p| p["type"].as_str().unwrap()).collect::<Vec<_>>(), ["text", "image_url", "text"]);
+    assert_eq!(parts[0]["text"], "look at");
+    assert_eq!(parts[2]["text"], "and tell me");
+    assert!(!echoed.contains(TINY_PPM_B64), "the payload stays in the blob");
+    assert_eq!(messages[1]["content"], "ok", "a turn without an image is a string, as before");
+}
+
 /// Minimal-blast-radius guarantee: a message whose content is an array of
 /// ONLY "text" parts (no image/audio) keeps flattening to a plain string,
 /// byte-identical to this session's pre-fix behavior -- every OTHER model's
