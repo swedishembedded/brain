@@ -299,3 +299,36 @@ fn the_halves_of_one_wide_product_read_in_place_equal_the_dense_pair() {
     }
     assert!(!Fused::QuantEpilogue.serves(&[64, 1, 1, 0, 96, 64]), "a b window running past the row stride");
 }
+
+/// Back-to-back launches of the wide-product form at the served decode shapes (knowledge 410): 2,000 launches a shape, every
+/// result the first's, and `dmesg | grep -ci xid` unchanged (`#[ignore]`: a stress run).
+///
+/// ```text
+/// BRAIN_DEVICE=gpu1 BRAIN_BACKEND=cuda make test/one P=brain-gpu-core T=quant_epilogue_native ARGS="--ignored --nocapture back_to_back"
+/// ```
+#[test]
+#[ignore]
+fn the_wide_product_form_survives_back_to_back_launches() {
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda(&gpu) {
+        brain_testutil::skip_unavailable("native fused kernels need a CUDA device");
+        return;
+    }
+    for rows in [1u32, 16, 64] {
+        let k = 17408u32;
+        let wide = values(2 * (rows * k) as usize, 61, 4.0);
+        let wb = gpu.storage_init("wide", &wide);
+        let n = (rows * k) as usize;
+        let (y, bf16, sx) = (gpu.storage(n as u64), gpu.storage(n as u64 / 2), gpu.storage(1));
+        let step = || gpu.fused_step(Fused::QuantEpilogue, &[&wb, &wb, &y, &bf16, &sx], &[k, rows, 1, 1 | 2, 2 * k, k]).expect("offered");
+        gpu.submit(&[], &[step()]);
+        gpu.poll_wait();
+        let want = (bits(gpu.read(&y, n)), bits(gpu.read(&bf16, n / 2)));
+        for round in 0..10 {
+            let steps: Vec<_> = (0..200).map(|_| step()).collect();
+            gpu.submit(&[], &steps);
+            gpu.poll_wait();
+            assert_eq!((bits(gpu.read(&y, n)), bits(gpu.read(&bf16, n / 2))), want, "rows={rows} round {round}");
+        }
+    }
+}

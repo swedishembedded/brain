@@ -2875,6 +2875,23 @@ pub const ALL: &[CudaKernel] = &[
         src: concat!(include_str!("../cu/e4m3_quant_common.cuh"), include_str!("../cu/gate_mul_quant_e4m3_128.cu")),
     },
     CudaKernel {
+        name: "qkv_split",
+        op: Op::Elementwise,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_qkv_split",
+        what: "the rows of the one product a fused q|k|v weight makes taken apart in a single launch: the query projection (as the unfused product writes it, or de-interleaved into query values and gates), the keys and the values as dense buffers; pure copies",
+        reported: "native:qkv_split",
+        block_dim: 256,
+        // A thread per four elements of a row.
+        tile: (1, 1024),
+        shared_bytes: 0,
+        programmatic: false,
+        src: include_str!("../cu/qkv_split.cu"),
+    },
+    CudaKernel {
         name: "gqa_qk_prep",
         op: Op::Elementwise,
         weight: Dtype::F32,

@@ -179,3 +179,42 @@ fn the_halves_of_one_wide_product_read_in_place_equal_the_dense_pair() {
         assert_eq!(bits(gpu.read(&strided_bf16.4, groups)), s_d, "bf16 scales differ without the product: {ctx}");
     }
 }
+
+/// Back-to-back launches of the wide-product forms at the served decode shapes (the workload under which a two-consumer FP8
+/// form faulted, knowledge 410): 2,000 launches of each, every result the dense pair's, and `dmesg | grep -ci xid` unchanged
+/// (`#[ignore]`: a stress run).
+///
+/// ```text
+/// BRAIN_DEVICE=gpu1 BRAIN_BACKEND=cuda make test/one P=brain-gpu-core T=silu_mul_quant_e4m3_native ARGS="--ignored --nocapture back_to_back"
+/// ```
+#[test]
+#[ignore]
+fn the_wide_product_forms_survive_back_to_back_launches() {
+    let gpu = gpu_core::testgpu::dev(&[]);
+    if !is_cuda(&gpu) {
+        brain_testutil::skip_unavailable("not a CUDA device");
+        return;
+    }
+    for rows in [17u32, 64, 128] {
+        let k = 17408u32;
+        let n = (rows * k) as usize;
+        let (gate, up) = (bf16_exact(&values(n, 41, 3.0)), bf16_exact(&values(n, 42, 3.0)));
+        let wide: Vec<f32> = (0..rows as usize).flat_map(|r| gate[r * k as usize..][..k as usize].iter().chain(&up[r * k as usize..][..k as usize]).copied().collect::<Vec<_>>()).collect();
+        let wb = gpu.storage_init("wide16", &bf16_words(&wide));
+        let mut steps = Vec::new();
+        let (q_want, _) = gpu_core::provider::library::silu_mul_quantize_e4m3_gate_up(&gpu, &mut steps, &wb, ActPrecision::Bf16, None, rows, k).expect("offered");
+        gpu.submit(&[], &steps);
+        gpu.poll_wait();
+        let want = bits(gpu.read(&q_want, n / 4));
+        for round in 0..10 {
+            let mut steps = Vec::new();
+            let mut last = None;
+            for _ in 0..200 {
+                last = gpu_core::provider::library::silu_mul_quantize_e4m3_gate_up(&gpu, &mut steps, &wb, ActPrecision::Bf16, None, rows, k);
+            }
+            gpu.submit(&[], &steps);
+            gpu.poll_wait();
+            assert_eq!(bits(gpu.read(&last.expect("offered").0, n / 4)), want, "rows={rows} round {round}");
+        }
+    }
+}

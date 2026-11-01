@@ -681,9 +681,30 @@ pub fn gqa_mixer_decode_batched_kv_attend(
     batch: u32,
     paged: &PagedDecodeBatch,
 ) -> (DeviceBuffer, DeviceBuffer) {
+    gqa_mixer_decode_batched_kv_attend_query(g, ids, kv, softmax, shape, w, QueryRows::Interleaved(q_full), k, v, layer, batch, paged)
+}
+
+/// [`gqa_mixer_decode_batched_kv_attend`] given the query projection either as it is written (value and gate interleaved by
+/// head) or already taken apart (what one `qkv_split` launch makes of a fused q|k|v product, in place of the two
+/// `concat_split` launches).
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_mixer_decode_batched_kv_attend_query(
+    g: &Gpu,
+    ids: &GqaMixerIds,
+    kv: &KvKernels,
+    softmax: usize,
+    shape: &GqaMixerShape,
+    w: &GqaMixerWeights,
+    query: QueryRows<'_>,
+    k: &DeviceBuffer,
+    v: &DeviceBuffer,
+    layer: &KvLayer,
+    batch: u32,
+    paged: &PagedDecodeBatch,
+) -> (DeviceBuffer, DeviceBuffer) {
     let (nh, nkv, hd) = (shape.n_heads, shape.n_kv_heads, shape.head_dim);
     let qd = shape.qd();
-    let prep = qkv_prepare(g, ids, shape, w, q_full, k, batch);
+    let prep = qkv_prepare_query(g, ids, shape, w, query, k, batch);
 
     // Every head of every sequence is written by the attention kernel.
     let ctx = g.storage_uninit((batch * qd) as u64);
@@ -713,6 +734,26 @@ pub fn gqa_mixer_decode_batched_kv_attend(
         ),
     );
     (ctx, prep.q_gate)
+}
+
+/// The uniform of the native decode front half (`gqa_decode_prep`) for a batch of `batch` rows.
+fn decode_prep_params(shape: &GqaMixerShape, block_size: u32, batch: u32) -> [u32; 8] {
+    [shape.n_heads, shape.n_kv_heads, shape.head_dim, shape.rotary_half, gpu_core::f(shape.rms_eps), block_size, batch, 0]
+}
+
+/// Which native decode front half serves `batch` rows of this layer: `Some(false)` the f32-KV one, `Some(true)` the int8-KV one
+/// (`gqa_decode_prep_i8`), `None` where neither runs (an empty batch, a KV tier the kernels do not append, a device or a head
+/// shape outside them) and [`gqa_mixer_decode_fused_kv_attend`] declines. A caller that wants to know before it produces its
+/// inputs - whether the chain of `concat_split`, norm and rotation will run on a de-interleaved query or the one kernel on the
+/// projection's interleaved rows - asks here.
+pub fn decode_prep_form(g: &Gpu, shape: &GqaMixerShape, layer: &KvLayer, batch: u32, block_size: u32) -> Option<bool> {
+    use crate::kv_tier::{KvElement, KvTier};
+    let int8 = layer.k.tier().element() == KvElement::Int8 && layer.v.tier().element() == KvElement::Int8;
+    if batch == 0 || (!int8 && (layer.k.tier() != KvTier::F32 || layer.v.tier() != KvTier::F32)) {
+        return None;
+    }
+    let which = if int8 { gpu_core::Fused::GqaDecodePrepI8 } else { gpu_core::Fused::GqaDecodePrep };
+    (g.has_fused(which) && which.serves(&decode_prep_params(shape, block_size, batch))).then_some(int8)
 }
 
 /// [`gqa_mixer_decode_batched_kv_attend`] with the whole front half - the
@@ -747,16 +788,12 @@ pub fn gqa_mixer_decode_fused_kv_attend(
     batch: u32,
     paged: &PagedDecodeBatch,
 ) -> Option<(DeviceBuffer, DeviceBuffer)> {
-    use crate::kv_tier::{KvElement, KvTier};
-    let int8 = layer.k.tier().element() == KvElement::Int8 && layer.v.tier().element() == KvElement::Int8;
-    if batch == 0 || (!int8 && (layer.k.tier() != KvTier::F32 || layer.v.tier() != KvTier::F32)) {
-        return None;
-    }
+    let int8 = decode_prep_form(g, shape, layer, batch, paged.block_size)?;
     let (nh, nkv, hd) = (shape.n_heads, shape.n_kv_heads, shape.head_dim);
     let qd = shape.qd();
     let q_out = g.storage((batch * qd) as u64);
     let q_gate = g.storage((batch * qd) as u64);
-    let params = [nh, nkv, hd, shape.rotary_half, gpu_core::f(shape.rms_eps), paged.block_size, batch, 0];
+    let params = decode_prep_params(shape, paged.block_size, batch);
     let front: [&DeviceBuffer; 9] = [q_full, k, v, w.q_norm, w.k_norm, w.cos, w.sin, paged.blocks, paged.offsets];
     let prep = if int8 {
         let (Some(clip_k), Some(clip_v), Some(scales_k), Some(scales_v)) = (layer.k.clip(), layer.v.clip(), layer.k.scales(), layer.v.scales()) else { return None };
@@ -809,23 +846,43 @@ pub struct QkvPrepared {
 /// The `[value|gate]` split, QK norm and rotation of `n` rows. Every step works on a row at a time, so the rows may
 /// be any mix of sequences and positions: `w.cos`/`w.sin` carry one table row per row.
 pub fn qkv_prepare(g: &Gpu, ids: &GqaMixerIds, shape: &GqaMixerShape, w: &GqaMixerWeights, q_full: &DeviceBuffer, k: &DeviceBuffer, n: u32) -> QkvPrepared {
+    qkv_prepare_query(g, ids, shape, w, QueryRows::Interleaved(q_full), k, n)
+}
+
+/// The query projection's `n` rows as [`qkv_prepare`] takes them or already taken apart.
+#[derive(Clone, Copy)]
+pub enum QueryRows<'a> {
+    /// `[n, n_heads * 2 * head_dim]`: per head the query values then the gate values.
+    Interleaved(&'a DeviceBuffer),
+    /// The query values and the gates, each `[n, n_heads * head_dim]`.
+    Split { value: &'a DeviceBuffer, gate: &'a DeviceBuffer },
+}
+
+/// [`qkv_prepare`] over a query that may already be taken apart.
+pub fn qkv_prepare_query(g: &Gpu, ids: &GqaMixerIds, shape: &GqaMixerShape, w: &GqaMixerWeights, query: QueryRows<'_>, k: &DeviceBuffer, n: u32) -> QkvPrepared {
     let (nh, nkv, hd) = (shape.n_heads, shape.n_kv_heads, shape.head_dim);
     let (qd, kvd) = (shape.qd(), shape.kvd());
 
-    // Per-head de-interleaved split of q_full's [query|gate] halves - NOT a
-    // whole-row split. Fold n_heads into concat_split's own N so each head's
-    // 2*head_dim block splits into its own first/second half.
-    let q_value = g.storage_uninit((n * qd) as u64);
-    let q_gate = g.storage_uninit((n * qd) as u64);
-    g.submit(
-        &[],
-        &[
-            // Each (row, head) is a batch entry of two channels (value, gate) of `hd`
-            // contiguous elements: a plane is a whole half, not one element.
-            g.step(ids.concat_split, &[q_full, &q_value], &[n * nh, 2, 1, 0, 1, hd], n * nh * hd),
-            g.step(ids.concat_split, &[q_full, &q_gate], &[n * nh, 2, 1, 1, 1, hd], n * nh * hd),
-        ],
-    );
+    let (q_value, q_gate) = match query {
+        QueryRows::Split { value, gate } => (value.clone(), gate.clone()),
+        QueryRows::Interleaved(q_full) => {
+            // Per-head de-interleaved split of q_full's [query|gate] halves - NOT a
+            // whole-row split. Fold n_heads into concat_split's own N so each head's
+            // 2*head_dim block splits into its own first/second half.
+            let q_value = g.storage_uninit((n * qd) as u64);
+            let q_gate = g.storage_uninit((n * qd) as u64);
+            g.submit(
+                &[],
+                &[
+                    // Each (row, head) is a batch entry of two channels (value, gate) of `hd`
+                    // contiguous elements: a plane is a whole half, not one element.
+                    g.step(ids.concat_split, &[q_full, &q_value], &[n * nh, 2, 1, 0, 1, hd], n * nh * hd),
+                    g.step(ids.concat_split, &[q_full, &q_gate], &[n * nh, 2, 1, 1, 1, hd], n * nh * hd),
+                ],
+            );
+            (q_value, q_gate)
+        }
+    };
 
     let q_normed = g.storage_uninit((n * qd) as u64);
     let k_normed = g.storage_uninit((n * kvd) as u64);

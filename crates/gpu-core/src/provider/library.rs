@@ -337,6 +337,68 @@ const GQA_QK_PREP_BINDINGS: &[BindKind] = &[
     BindKind::StorageReadWrite,
 ];
 
+/// Bindings of `qkv_split`: params, the fused product, four outputs.
+const QKV_SPLIT_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageReadWrite, BindKind::StorageReadWrite, BindKind::StorageReadWrite, BindKind::StorageReadWrite];
+
+/// The widths of one row of a gated attention layer's fused q|k|v product: `[q: heads x (hd values, hd gates) | k | v]`.
+#[derive(Clone, Copy, Debug)]
+pub struct QkvRow {
+    pub rows: u32,
+    /// Query values a row (`n_heads * head_dim`); the query projection is twice that.
+    pub q_dim: u32,
+    pub head_dim: u32,
+    /// Key (and value) width a row.
+    pub kv_dim: u32,
+}
+
+/// What [`qkv_split_rows`] hands back.
+#[derive(Clone)]
+pub enum QkvParts {
+    /// `q_full` as the unfused projection writes it (value and gate interleaved by head), `k`, `v`.
+    Interleaved { q_full: DeviceBuffer, k: DeviceBuffer, v: DeviceBuffer },
+    /// The query values and the gates apart (what two `concat_split` launches make), `k`, `v`.
+    Split { q_value: DeviceBuffer, q_gate: DeviceBuffer, k: DeviceBuffer, v: DeviceBuffer },
+}
+
+/// Whether [`qkv_split_rows`] runs for `row` on this device.
+pub fn qkv_split_serves(gpu: &Gpu, row: &QkvRow) -> bool {
+    let width = 2 * u64::from(row.q_dim) + 2 * u64::from(row.kv_dim);
+    row.rows > 0
+        && row.head_dim > 0
+        && row.q_dim.is_multiple_of(row.head_dim)
+        && [row.q_dim, row.head_dim, row.kv_dim].iter().all(|n| n.is_multiple_of(4))
+        && u64::from(row.rows) * width <= u64::from(u32::MAX)
+        && kernels_cuda::get("qkv_split").is_some_and(|kernel| gpu.native_kernel(kernel, QKV_SPLIT_BINDINGS).is_some())
+}
+
+/// The `[rows, 2 q_dim + 2 kv_dim]` product of a fused q|k|v weight taken apart in one launch into dense buffers, bit for
+/// bit its elements: `deinterleave` also separates the query heads' values from their gates. `None` when the device declines
+/// or the shape is not served (nothing is pushed).
+pub fn qkv_split_rows(gpu: &Gpu, steps: &mut Vec<Step>, product: &DeviceBuffer, row: &QkvRow, deinterleave: bool) -> Option<QkvParts> {
+    if !qkv_split_serves(gpu, row) {
+        return None;
+    }
+    let kernel = kernels_cuda::get("qkv_split")?;
+    let id = gpu.native_kernel(kernel, QKV_SPLIT_BINDINGS)?;
+    let QkvRow { rows, q_dim, head_dim, kv_dim } = *row;
+    let (rows64, q64, kv64) = (u64::from(rows), u64::from(q_dim), u64::from(kv_dim));
+    // Every element of every output is written.
+    let parts = if deinterleave {
+        QkvParts::Split { q_value: gpu.storage_uninit(rows64 * q64), q_gate: gpu.storage_uninit(rows64 * q64), k: gpu.storage_uninit(rows64 * kv64), v: gpu.storage_uninit(rows64 * kv64) }
+    } else {
+        QkvParts::Interleaved { q_full: gpu.storage_uninit(rows64 * 2 * q64), k: gpu.storage_uninit(rows64 * kv64), v: gpu.storage_uninit(rows64 * kv64) }
+    };
+    let elems = rows * (2 * q_dim + 2 * kv_dim);
+    let params = [rows, q_dim, head_dim, kv_dim, u32::from(deinterleave)];
+    let step = match &parts {
+        // (The fourth output is unwritten here; a binding must still be a buffer of its own.)
+        QkvParts::Interleaved { q_full, k, v } => gpu.step_native(id, &[product, q_full, k, v, &gpu.storage_uninit(1)], &params, kernel.blocks_for(1, elems))?,
+        QkvParts::Split { q_value, q_gate, k, v } => gpu.step_native(id, &[product, q_value, q_gate, k, v], &params, kernel.blocks_for(1, elems))?,
+    };
+    steps.push(step);
+    Some(parts)
+}
+
 /// The shape of a gated attention layer's front half over a block of rows (see [`gqa_qk_prepare`]).
 #[derive(Clone, Copy, Debug)]
 pub struct GqaQkShape {

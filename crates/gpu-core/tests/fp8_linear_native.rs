@@ -360,7 +360,8 @@ fn swap_tma_back_to_back_stress() {
         brain_testutil::skip_unavailable("the FP8 candidates are registered for a CUDA device with warpgroup tensor cores");
         return;
     }
-    for (k, n) in [(5120u32, 34816u32), (17408, 16384), (5120, 16384)] {
+    // 5120 x 34816 and 5120 x 17408 are the fused gate|up weight and a lone gate; 5120 x 14336 the fused q|k|v of an attention layer.
+    for (k, n) in [(5120u32, 34816u32), (5120, 17408), (5120, 14336), (17408, 16384), (5120, 16384)] {
         for round in 0..30u32 {
             for m in [1u32, 2, 4, 8, 16, 17, 24, 32, 48, 64] {
                 let _ = gpu_core::native_time_fp8_candidates(&gpu, [m, k / 4, n], "swap_tma");

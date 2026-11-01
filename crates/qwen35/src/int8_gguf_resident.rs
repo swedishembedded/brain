@@ -1791,10 +1791,10 @@ impl Qwen35GgufInstance {
         }
     }
 
-    /// Every stage's [`Qwen35::set_fused_qkvz_decode`].
-    pub fn set_fused_qkvz_decode(&self, on: bool) {
+    /// Every stage's [`Qwen35::set_fused_projections_decode`].
+    pub fn set_fused_projections_decode(&self, on: bool) {
         for s in &self.shards {
-            s.qwen35.set_fused_qkvz_decode(on);
+            s.qwen35.set_fused_projections_decode(on);
         }
     }
 

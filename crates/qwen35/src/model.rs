@@ -1262,10 +1262,9 @@ pub struct Qwen35 {
     /// narrower tier AND the device caps support it, in which case
     /// `Weight::upload` promotes it to that tier (see [`Self::ops_linear`]).
     weights: HashMap<String, Weight>,
-    /// Whether the Gated DeltaNet layers hold `in_proj_qkv` and `in_proj_z` as ONE FP8 weight ([`FUSED_QKVZ_LEAF`], rows
-    /// `qkv | z`) in `weights` instead of two: a decode step is one product over it, a prefill round two products over its
-    /// row windows ([`Self::linear`]).
-    fused_qkvz: bool,
+    /// The projections some layer holds as ONE FP8 weight ([`Fusion`]) in `weights` instead of several: a decode step is one
+    /// product over it, a prefill round one product per row window ([`Self::linear`]).
+    fused: FusedProjections,
     /// The per-layer linears of a resident low-precision full fine-tune, their master copies and state
     /// ([`TrainOpts::resident`]); `weights` then holds handles to its device weights and the parameter store
     /// holds none of them.
@@ -1378,9 +1377,9 @@ pub struct Qwen35 {
     slot_decode_tapes: Cell<bool>,
     /// Whether the pooled Gated-DeltaNet decode runs the occupancy-built candidate ([`Self::set_gdn_pool_wide`]).
     gdn_pool_wide: Cell<bool>,
-    /// Whether a decode or verify step takes the one product over a fused `in_proj_qkv | in_proj_z` weight
-    /// ([`Self::set_fused_qkvz_decode`]); off, it multiplies the weight's two windows as a prefill round does.
-    fused_qkvz_decode: Cell<bool>,
+    /// Whether a decode or verify step takes the one product over a fused weight ([`Self::set_fused_projections_decode`]);
+    /// off, it multiplies the weight's windows as a prefill round does.
+    fused_decode: Cell<bool>,
 }
 
 /// Which per-sequence GQA cache / GDN recurrent state one [`Qwen35::
@@ -1624,32 +1623,123 @@ pub(crate) fn is_quantizable_linear(name: &str) -> bool {
     !name.contains(".memory.") && LEAVES.iter().any(|leaf| name.ends_with(leaf))
 }
 
+/// A group of a layer's projections that an FP8 inference build holds as ONE weight, their rows in this order (whole 128-row
+/// scale blocks each, so a row window is a weight of its own, [`Qwen35::linear`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fusion {
+    /// `in_proj_qkv | in_proj_z` of a Gated DeltaNet layer.
+    Qkvz,
+    /// `gate | up` of a layer's SwiGLU MLP.
+    GateUp,
+    /// `q_proj | k_proj | v_proj` of an attention layer (`q_proj` with its gate).
+    Qkv,
+}
+
+impl Fusion {
+    /// The groups a layer of type `ty` can hold.
+    fn of_layer(ty: LayerType) -> [Self; 2] {
+        match ty {
+            LayerType::Linear => [Self::Qkvz, Self::GateUp],
+            LayerType::Full => [Self::Qkv, Self::GateUp],
+        }
+    }
+
+    /// The checkpoint leaves (under `blocks.{l}.`) the group replaces, in row order.
+    fn parts(self) -> &'static [&'static str] {
+        match self {
+            Self::Qkvz => &["linear_attn.in_proj_qkv.weight", "linear_attn.in_proj_z.weight"],
+            Self::GateUp => &["mlp.gate.weight", "mlp.up.weight"],
+            Self::Qkv => &["self_attn.q_proj.weight", "self_attn.k_proj.weight", "self_attn.v_proj.weight"],
+        }
+    }
+
+    /// The name, under a layer's prefix (`blocks.{l}.`), of the one weight that holds the group.
+    fn weight_name(self, layer_prefix: &str) -> String {
+        match self {
+            Self::Qkvz => format!("{layer_prefix}linear_attn.{FUSED_QKVZ_LEAF}"),
+            Self::GateUp => format!("{layer_prefix}mlp.{FUSED_GATE_UP_LEAF}"),
+            Self::Qkv => format!("{layer_prefix}self_attn.{FUSED_QKV_LEAF}"),
+        }
+    }
+
+    /// The rows of each part ([`Self::parts`]), unused entries 0.
+    fn part_rows(self, cfg: &Qwen35Config) -> [u32; 3] {
+        match self {
+            Self::Qkvz => [cfg.linear_conv_dim(), cfg.linear_value_dim(), 0],
+            Self::GateUp => [cfg.intermediate_size, cfg.intermediate_size, 0],
+            Self::Qkv => [cfg.q_proj_dim(), cfg.kv_dim(), cfg.kv_dim()],
+        }
+    }
+
+    fn total_rows(self, cfg: &Qwen35Config) -> u32 {
+        self.part_rows(cfg).iter().sum()
+    }
+
+    /// Whether layer `l` of an inference build at `tier` holds the group as one FP8 weight: every part is FP8 tier, the
+    /// device runs FP8 products natively on row windows (a window must be a weight of its own for the prefill to keep its
+    /// numerics), the rows are whole scale blocks, and for `in_proj_qkv | in_proj_z` the streaming GDN kernels that read the
+    /// fused product in place are offered.
+    fn held_at(self, cfg: &Qwen35Config, tier: &TierPolicy, ops: &Ops, gpu: &Gpu, l: usize) -> bool {
+        let block = model::ops::FP8_BLOCK;
+        let streaming = self != Self::Qkvz
+            || (gpu.has_fused(gpu_core::Fused::GdnDecodePoolStreamBf16)
+                && gpu.has_fused(gpu_core::Fused::GdnVerifyPoolStreamBf16)
+                && cfg.linear_key_head_dim == 128
+                && cfg.linear_value_head_dim == 128
+                && cfg.linear_conv_kernel_dim == 4);
+        streaming
+            && ops.fp8_windows_native()
+            && self.parts().iter().all(|part| tier.want(&format!("blocks.{l}.{part}")) == Dtype::F8E4M3)
+            && cfg.d_model % block == 0
+            && self.part_rows(cfg).iter().all(|n| n % block == 0)
+    }
+}
+
+/// Where the SwiGLU pass reads gate and up from.
+#[derive(Clone, Copy)]
+enum SwigluRows<'a> {
+    /// Two `[rows, ff]` buffers.
+    Pair(&'a DeviceBuffer, &'a DeviceBuffer),
+    /// The one `[rows, 2 ff]` product of a fused gate|up weight: gate columns first, read in place.
+    GateUp(&'a DeviceBuffer),
+}
+
+/// Which [`Fusion`]s some layer of a build holds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct FusedProjections {
+    qkvz: bool,
+    gate_up: bool,
+    qkv: bool,
+}
+
+impl FusedProjections {
+    fn set(&mut self, which: Fusion) {
+        match which {
+            Fusion::Qkvz => self.qkvz = true,
+            Fusion::GateUp => self.gate_up = true,
+            Fusion::Qkv => self.qkv = true,
+        }
+    }
+
+    fn any(self) -> bool {
+        self.qkvz || self.gate_up || self.qkv
+    }
+}
+
 /// The leaf (under `blocks.{l}.linear_attn.`) of the one FP8 weight a decode-serving build holds in place of
 /// `in_proj_qkv` and `in_proj_z`: their rows, `qkv` first, whole 128-row scale blocks each.
 const FUSED_QKVZ_LEAF: &str = "in_proj_qkvz.weight";
 
-/// Most rows of a decode or verify step that take the one product over the fused `in_proj_qkv | in_proj_z` weight: the FP8
-/// linear's streaming classes, where the step reads every weight once for all its rows. Past them the two windows' products
-/// (the prefill's own) are the better pair.
-const FUSED_QKVZ_MAX_ROWS: u32 = 128;
+/// The leaf (under `blocks.{l}.mlp.`) of the one FP8 weight that holds `gate` and `up`, `gate` rows first.
+const FUSED_GATE_UP_LEAF: &str = "gate_up.weight";
 
-/// Whether layer `l` of an inference build at `tier` holds its `in_proj_qkv` and `in_proj_z` as one FP8 weight: both are FP8
-/// tier, the device runs FP8 products natively on row windows (a window must be a weight of its own for the prefill to keep
-/// its numerics), the streaming GDN kernels that read the fused product in place are offered, and the rows are whole scale
-/// blocks.
-fn fuses_qkvz(cfg: &Qwen35Config, tier: &TierPolicy, ops: &Ops, gpu: &Gpu, l: usize) -> bool {
-    let leaf = |s: &str| format!("blocks.{l}.linear_attn.{s}.weight");
-    let block = model::ops::FP8_BLOCK;
-    tier.want(&leaf("in_proj_qkv")) == Dtype::F8E4M3
-        && tier.want(&leaf("in_proj_z")) == Dtype::F8E4M3
-        && ops.fp8_windows_native()
-        && gpu.has_fused(gpu_core::Fused::GdnDecodePoolStreamBf16)
-        && gpu.has_fused(gpu_core::Fused::GdnVerifyPoolStreamBf16)
-        && cfg.linear_key_head_dim == 128
-        && cfg.linear_value_head_dim == 128
-        && cfg.linear_conv_kernel_dim == 4
-        && [cfg.linear_conv_dim(), cfg.linear_value_dim(), cfg.d_model].iter().all(|n| n % block == 0)
-}
+/// The leaf (under `blocks.{l}.self_attn.`) of the one FP8 weight that holds `q_proj`, `k_proj` and `v_proj`, in that order.
+const FUSED_QKV_LEAF: &str = "qkv_proj.weight";
+
+/// Most rows of a decode or verify step that take the one product over a fused weight: the FP8 linear's streaming classes,
+/// where the step reads every weight once for all its rows. Past them the windows' products (the prefill's own) are the
+/// better set.
+const FUSED_MAX_ROWS: u32 = 128;
 
 /// The precision of each tensor a resident full fine-tune of `shard` leaves in the parameter store (the norms and
 /// recurrent-mixer parameters), checked against what the store trains: the run's precision governs the resident
@@ -2040,34 +2130,31 @@ impl Qwen35 {
             };
             weights.insert(name, w);
         };
-        let mut fused_qkvz = false;
+        let mut fused = FusedProjections::default();
         let mut fused_parts: Vec<(String, Weight)> = Vec::new();
         for (l, ty) in cfg.layer_types().iter().enumerate() {
             if !shard.owns(l) {
                 continue;
             }
-            // A Gated DeltaNet layer of an FP8 inference build holds its `in_proj_qkv` and `in_proj_z` as one weight.
-            let fuse = !train && resident_plan.is_none() && *ty == LayerType::Linear && fuses_qkvz(&cfg, tier, &ops, &gpu, l);
-            let fused = fuse.then(|| {
-                let (qkv, z) = (format!("blocks.{l}.linear_attn.in_proj_qkv.weight"), format!("blocks.{l}.linear_attn.in_proj_z.weight"));
-                let rows = (cfg.linear_conv_dim() + cfg.linear_value_dim()) as usize;
-                model::ops::upload_fused_from_source(&ops, src, &[&qkv, &z], rows, cfg.d_model as usize, Dtype::F8E4M3, &staging)
-            });
-            let fused = match fused {
-                Some(Ok(w)) => {
-                    fused_parts.push((format!("blocks.{l}.linear_attn.{FUSED_QKVZ_LEAF}"), w));
-                    fused_qkvz = true;
-                    true
+            // An FP8 inference build holds each group of projections [`Fusion`] names as one weight.
+            let mut held_fused: Vec<&str> = Vec::new();
+            if !train && resident_plan.is_none() {
+                for which in Fusion::of_layer(*ty).into_iter().filter(|which| which.held_at(&cfg, tier, &ops, &gpu, l)) {
+                    let names: Vec<String> = which.parts().iter().map(|part| format!("blocks.{l}.{part}")).collect();
+                    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+                    match model::ops::upload_fused_from_source(&ops, src, &names, which.total_rows(&cfg) as usize, cfg.d_model as usize, Dtype::F8E4M3, &staging) {
+                        Ok(w) => {
+                            fused_parts.push((which.weight_name(&format!("blocks.{l}.")), w));
+                            fused.set(which);
+                            held_fused.extend(which.parts());
+                        }
+                        // The parts are stored in encodings that cannot join (a mixed checkpoint): separate weights, as every other build holds them.
+                        Err(why) => eprintln!("qwen35: layer {l} keeps {:?} as separate weights: {why}", which.parts()),
+                    }
                 }
-                // The parts are stored in encodings that cannot join (a mixed checkpoint): two weights, as every other build holds them.
-                Some(Err(why)) => {
-                    eprintln!("qwen35: layer {l} keeps in_proj_qkv and in_proj_z as two weights: {why}");
-                    false
-                }
-                None => false,
-            };
+            }
             for (suffix, n, k) in cfg.layer_leaves(*ty) {
-                if fused && (suffix == "linear_attn.in_proj_qkv.weight" || suffix == "linear_attn.in_proj_z.weight") {
+                if held_fused.contains(&suffix) {
                     continue;
                 }
                 let name = format!("blocks.{l}.{suffix}");
@@ -2232,7 +2319,7 @@ impl Qwen35 {
             mtp_acts: RefCell::new(None),
             ops,
             weights,
-            fused_qkvz,
+            fused,
             resident: resident_ft.map(RefCell::new),
             resident_norm: Cell::new(None),
             backward_pending: Cell::new(false),
@@ -2254,7 +2341,7 @@ impl Qwen35 {
             exact_rounds: Cell::new(true),
             exact_decode: Cell::new(None),
             decode_fusion: Cell::new(true),
-            fused_qkvz_decode: Cell::new(true),
+            fused_decode: Cell::new(true),
             act_precision: Cell::new(gpu_core::ActPrecision::F32),
             unpacked_slots: std::cell::OnceCell::new(),
             slot_decode_tapes: Cell::new(false),
@@ -2364,17 +2451,30 @@ impl Qwen35 {
     }
 
     /// Whether this build holds the Gated DeltaNet layers' `in_proj_qkv` and `in_proj_z` as one FP8 weight each
-    /// ([`FUSED_QKVZ_LEAF`]).
+    /// ([`Fusion::Qkvz`]).
     #[must_use]
     pub fn holds_fused_qkvz(&self) -> bool {
-        self.fused_qkvz
+        self.fused.qkvz
     }
 
-    /// **Take the one product over a fused `in_proj_qkv | in_proj_z` weight in a decode or verify step (on by default), or the
-    /// two products over its windows** that a prefill round multiplies. Only matters to a build that holds the two as one
-    /// weight; the A/B switch for measuring what the single launch saves and for checking that it computes what the two do.
-    pub fn set_fused_qkvz_decode(&self, on: bool) {
-        self.fused_qkvz_decode.set(on);
+    /// Whether this build holds each layer's `gate` and `up` as one FP8 weight ([`Fusion::GateUp`]).
+    #[must_use]
+    pub fn holds_fused_gate_up(&self) -> bool {
+        self.fused.gate_up
+    }
+
+    /// Whether this build holds the attention layers' `q_proj`, `k_proj` and `v_proj` as one FP8 weight each
+    /// ([`Fusion::Qkv`]).
+    #[must_use]
+    pub fn holds_fused_qkv(&self) -> bool {
+        self.fused.qkv
+    }
+
+    /// **Take the one product over a fused weight in a decode or verify step (on by default), or the products over its
+    /// windows** that a prefill round multiplies. Only matters to a build that holds projections as one weight; the A/B
+    /// switch for measuring what the single launch saves and for checking that it computes what the windows do.
+    pub fn set_fused_projections_decode(&self, on: bool) {
+        self.fused_decode.set(on);
     }
 
     /// **Choose the element type of the activation stream between the FP8 products** (see [`gpu_core::ActPrecision`]):
@@ -2577,31 +2677,58 @@ impl Qwen35 {
     }
 
     /// Per-layer linear `name` (a checkpoint tensor name, [`is_quantizable_linear`]) and the rows of the weight that hold
-    /// it: all of a weight of its own, or its window of the fused `in_proj_qkv | in_proj_z` weight of a Gated DeltaNet
-    /// layer ([`FUSED_QKVZ_LEAF`]). `None` for a name held in no `Ops` weight.
+    /// it: all of a weight of its own, or its window of the fused weight of its [`Fusion`]. `None` for a name held in no
+    /// `Ops` weight.
     fn linear(&self, name: &str) -> Option<(&Weight, (u32, u32))> {
         if let Some(w) = self.weights.get(name) {
             return Some((w, (0, w.n())));
         }
-        if !self.fused_qkvz {
+        if !self.fused.any() {
             return None;
         }
-        let (layer, leaf) = name.rsplit_once("linear_attn.")?;
-        let rows = match leaf {
-            "in_proj_qkv.weight" => (0, self.cfg.linear_conv_dim()),
-            "in_proj_z.weight" => (self.cfg.linear_conv_dim(), self.cfg.linear_value_dim()),
-            _ => return None,
-        };
-        self.weights.get(&format!("{layer}linear_attn.{FUSED_QKVZ_LEAF}")).map(|w| (w, rows))
+        // Every layer type's groups: a part's suffix identifies its group whichever layer it is asked for.
+        [Fusion::Qkvz, Fusion::GateUp, Fusion::Qkv].into_iter().find_map(|which| {
+            let rows = which.part_rows(&self.cfg);
+            which.parts().iter().enumerate().find_map(|(i, part)| {
+                let layer_prefix = name.strip_suffix(part)?;
+                let first: u32 = rows[..i].iter().sum();
+                self.weights.get(&which.weight_name(layer_prefix)).map(|w| (w, (first, rows[i])))
+            })
+        })
+    }
+
+    /// Whether a decode or verify step of `n` rows may multiply a fused weight whole: the A/B switch is on, the step is within
+    /// [`FUSED_MAX_ROWS`], and nothing corrects the projections one by one (an adapter's correction adds into each
+    /// projection's own output; a training build keeps their rows).
+    fn fused_decode_open(&self, n: u32) -> bool {
+        self.fused_decode.get() && n <= FUSED_MAX_ROWS && self.adapter_rows.get() == 0 && self.cfg.lora.is_none() && !self.is_train
+    }
+
+    /// The fused `q_proj | k_proj | v_proj` weight of the attention layer under `prefix` when a decode step of `n` rows
+    /// multiplies it whole and one launch takes its rows apart ([`gpu_core::provider::library::qkv_split_rows`]).
+    fn qkv_decode_weight(&self, prefix: &str, shape: &model::gqa_mixer::GqaMixerShape, n: u32) -> Option<&Weight> {
+        if !self.fused.qkv || !self.fused_decode_open(n) {
+            return None;
+        }
+        let row = gpu_core::provider::library::QkvRow { rows: n, q_dim: shape.qd(), head_dim: shape.head_dim, kv_dim: shape.kvd() };
+        gpu_core::provider::library::qkv_split_serves(&self.gpu, &row).then(|| self.weights.get(&format!("{prefix}.{FUSED_QKV_LEAF}"))).flatten()
+    }
+
+    /// The fused `gate | up` weight of the MLP under `prefix` when a decode step of `n` rows multiplies it whole.
+    fn gate_up_decode_weight(&self, prefix: &str, n: u32) -> Option<&Weight> {
+        if !self.fused.gate_up || !self.fused_decode_open(n) {
+            return None;
+        }
+        self.weights.get(&format!("{prefix}.{FUSED_GATE_UP_LEAF}"))
     }
 
     /// The fused `in_proj_qkv | in_proj_z` weight `fused_name` of a Gated DeltaNet layer when a decode or verify step of `n`
     /// rows takes its one product: the layer holds the fused weight, the step is a decode batch or a verify round over a bf16
     /// pool the streaming kernel reads in place ([`model::gdn_mixer::qkvz_in_place_offered`]), it is at most
-    /// [`FUSED_QKVZ_MAX_ROWS`] rows, and no adapter corrects the two projections (an adapter's correction adds into each
+    /// [`FUSED_MAX_ROWS`] rows, and no adapter corrects the two projections (an adapter's correction adds into each
     /// projection's own output). `None` runs the two products over the weight's windows, the prefill's.
     fn qkvz_decode_weight(&self, fused_name: &str, call: &GdnCall, shape: &model::gdn_mixer::GdnMixerShape, n: u32) -> Option<&Weight> {
-        if !self.fused_qkvz || !self.fused_qkvz_decode.get() || n > FUSED_QKVZ_MAX_ROWS || self.adapter_rows.get() != 0 || self.cfg.lora.is_some() {
+        if !self.fused.qkvz || !self.fused_decode_open(n) {
             return None;
         }
         let (GdnCall::DecodePool(pool) | GdnCall::VerifyPool { pool, .. }) = call else { return None };
@@ -3293,30 +3420,60 @@ impl Qwen35 {
         let (qpd, kvd) = (c.q_proj_dim(), c.kv_dim());
         let p = |s: &str| format!("{prefix}.{s}");
 
-        // q/k/v proj (LoRA/int8 dispatch stays local - see `model::gqa_mixer`'s
-        // own module doc). xn1 quantized once (`Ops::act`), shared by q/k/v.
-        let q_full = g.storage_uninit((n * qpd) as u64);
-        let k = g.storage_uninit((n * kvd) as u64);
-        let v = g.storage_uninit((n * kvd) as u64);
-        let mut s1 = Vec::new();
-        let act1 = match pre {
-            Some(a) => a,
-            None => self.ops_act(&mut s1, xn1, n, d),
+        let shape = model::gqa_mixer::GqaMixerShape { b: self.b, t: self.run_len(), n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: c.rotary_dim() / 2, rms_eps: c.rms_eps };
+        // A decode step multiplies a fused q|k|v weight in ONE product and one launch takes the rows apart: as the projection
+        // writes them where the native decode front half reads them, with the query's values and gates apart where the chain of
+        // norm and rotation does.
+        let fused = match &cached {
+            Some(GqaCached::Decode(dc)) if epilogue => self.qkv_decode_weight(prefix, &shape, n).map(|w| (w, self.decode_fusion.get() && model::gqa_mixer::decode_prep_form(g, &shape, dc.layer, n, dc.paged.block_size).is_some())),
+            _ => None,
         };
-        let (q_w, k_w, v_w) = (p("q_proj.weight"), p("k_proj.weight"), p("v_proj.weight"));
-        let f32s = self.ops_linear_group(&mut s1, &act1, &[(&q_w, &q_full), (&k_w, &k), (&v_w, &v)]);
-        self.adapt(f32s[0], &mut s1, "q_proj", xn1, &q_w, &q_full, n, d, qpd);
-        self.adapt(f32s[1], &mut s1, "k_proj", xn1, &k_w, &k, n, d, kvd);
-        self.adapt(f32s[2], &mut s1, "v_proj", xn1, &v_w, &v, n, d, kvd);
-        self.bank_fwd(&mut s1, xn1, &[(q_w.as_str(), &q_full), (k_w.as_str(), &k), (v_w.as_str(), &v)], n);
-        g.submit(&[], &s1);
+        // Set where the query came apart into its values and gates.
+        let mut query_apart: Option<(DeviceBuffer, DeviceBuffer)> = None;
+        let (q_full, k, v) = if let Some((w, prep_kernel)) = fused {
+            let mut s1 = Vec::new();
+            let act1 = match pre {
+                Some(a) => a,
+                None => self.ops_act(&mut s1, xn1, n, d),
+            };
+            let product = g.storage_uninit(u64::from(n) * u64::from(w.n()));
+            self.ops.matmul_rows(&mut s1, w, (0, w.n()), &act1, &product, 0);
+            let row = gpu_core::provider::library::QkvRow { rows: n, q_dim: shape.qd(), head_dim: hd, kv_dim: kvd };
+            let parts = gpu_core::provider::library::qkv_split_rows(g, &mut s1, &product, &row, !prep_kernel).expect("qkv_decode_weight checked the split is served");
+            g.submit(&[], &s1);
+            match parts {
+                gpu_core::provider::library::QkvParts::Interleaved { q_full, k, v } => (q_full, k, v),
+                gpu_core::provider::library::QkvParts::Split { q_value, q_gate, k, v } => {
+                    query_apart = Some((q_value, q_gate));
+                    (g.storage_uninit(1), k, v)
+                }
+            }
+        } else {
+            // q/k/v proj (LoRA/int8 dispatch stays local - see `model::gqa_mixer`'s
+            // own module doc). xn1 quantized once (`Ops::act`), shared by q/k/v.
+            let q_full = g.storage_uninit((n * qpd) as u64);
+            let k = g.storage_uninit((n * kvd) as u64);
+            let v = g.storage_uninit((n * kvd) as u64);
+            let mut s1 = Vec::new();
+            let act1 = match pre {
+                Some(a) => a,
+                None => self.ops_act(&mut s1, xn1, n, d),
+            };
+            let (q_w, k_w, v_w) = (p("q_proj.weight"), p("k_proj.weight"), p("v_proj.weight"));
+            let f32s = self.ops_linear_group(&mut s1, &act1, &[(&q_w, &q_full), (&k_w, &k), (&v_w, &v)]);
+            self.adapt(f32s[0], &mut s1, "q_proj", xn1, &q_w, &q_full, n, d, qpd);
+            self.adapt(f32s[1], &mut s1, "k_proj", xn1, &k_w, &k, n, d, kvd);
+            self.adapt(f32s[2], &mut s1, "v_proj", xn1, &v_w, &v, n, d, kvd);
+            self.bank_fwd(&mut s1, xn1, &[(q_w.as_str(), &q_full), (k_w.as_str(), &k), (v_w.as_str(), &v)], n);
+            g.submit(&[], &s1);
+            (q_full, k, v)
+        };
 
         // split+qknorm+rope+attention+gating - LoRA/dtype-agnostic, shared
         // with `crates/qwen35moe` (`model::gqa_mixer`). Both SERVING arms
         // supply their OWN M-RoPE table (real absolute positions, not `0..t`)
         // and attend the persistent KV cache instead of an isolated `[T,T]`
         // causal block - see `GqaCached`.
-        let shape = model::gqa_mixer::GqaMixerShape { b: self.b, t: self.run_len(), n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: c.rotary_dim() / 2, rms_eps: c.rms_eps };
         let (cos, sin) = match &cached {
             None => (&self.cos, &self.sin),
             Some(GqaCached::Chunk(ch)) => (ch.cos, ch.sin),
@@ -3446,28 +3603,20 @@ impl Qwen35 {
                 // KV tier where the device is offered it, and the chain of eight
                 // otherwise.
                 let kv = self.kv_kernels(dc.layer);
+                // (A query that came apart in the split launch never meets the native front half, which reads it interleaved.)
+                let query = match &query_apart {
+                    Some((value, gate)) => model::gqa_mixer::QueryRows::Split { value, gate },
+                    None => model::gqa_mixer::QueryRows::Interleaved(&q_full),
+                };
                 let (ctx, q_gate) = self
                     .decode_fusion
                     .get()
                     .then(|| {
-                        model::gqa_mixer::gqa_mixer_decode_fused_kv_attend(g, &kv, DECODE_SOFTMAX_BATCHED, &shape, &weights, &q_full, &k, &v, dc.layer, n, dc.paged)
+                        query_apart.is_none().then(|| model::gqa_mixer::gqa_mixer_decode_fused_kv_attend(g, &kv, DECODE_SOFTMAX_BATCHED, &shape, &weights, &q_full, &k, &v, dc.layer, n, dc.paged)).flatten()
                     })
                     .flatten()
                     .unwrap_or_else(|| {
-                        model::gqa_mixer::gqa_mixer_decode_batched_kv_attend(
-                            g,
-                            &gqa_mixer_ids(),
-                            &kv,
-                            DECODE_SOFTMAX_BATCHED,
-                            &shape,
-                            &weights,
-                            &q_full,
-                            &k,
-                            &v,
-                            dc.layer,
-                            n,
-                            dc.paged,
-                        )
+                        model::gqa_mixer::gqa_mixer_decode_batched_kv_attend_query(g, &gqa_mixer_ids(), &kv, DECODE_SOFTMAX_BATCHED, &shape, &weights, query, &k, &v, dc.layer, n, dc.paged)
                     });
                 let (gated, act) = self.quant_epilogue(2, &ctx, Some(&q_gate), n, shape.qd());
                 o_proj_act = Some(act);
@@ -3520,7 +3669,7 @@ impl Qwen35 {
     /// activation) - same "quantize once, share across sibling linears"
     /// discipline `layer_gdn_fwd`/`layer_gqa_fwd` use.
     fn mlp_fwd(&self, prefix: &str, xn2: &DeviceBuffer, n: u32) -> (DeviceBuffer, Option<MlpLayerActs>) {
-        self.mlp_fwd_pre(prefix, xn2, None, false, n)
+        self.mlp_fwd_pre(prefix, xn2, None, false, false, n)
     }
 
     /// The feed-forward sublayer of decoder layer `l` as the serving layer loops
@@ -3530,14 +3679,14 @@ impl Qwen35 {
     /// loops reach the feed-forward block, so a layer kind with a different
     /// block (the sparse-MoE sibling's router and experts)
     /// is a new arm here and nothing else in them changes.
-    fn ffn_fwd_pre(&self, l: usize, xn2: &DeviceBuffer, pre: Option<Act>, epilogue: bool, n: u32) -> DeviceBuffer {
-        self.mlp_fwd_pre(&format!("blocks.{l}.mlp"), xn2, pre, epilogue, n).0
+    fn ffn_fwd_pre(&self, l: usize, xn2: &DeviceBuffer, pre: Option<Act>, epilogue: bool, decode: bool, n: u32) -> DeviceBuffer {
+        self.mlp_fwd_pre(&format!("blocks.{l}.mlp"), xn2, pre, epilogue, decode, n).0
     }
 
     /// [`Self::mlp_fwd`] given `xn2`'s activation already quantised - see
     /// [`Self::layer_gdn_fwd_pre`].
-    fn mlp_fwd_pre(&self, prefix: &str, xn2: &DeviceBuffer, pre: Option<Act>, epilogue: bool, n: u32) -> (DeviceBuffer, Option<MlpLayerActs>) {
-        let (out, acts) = self.mlp_fwd_core(prefix, xn2, pre, epilogue, true, n);
+    fn mlp_fwd_pre(&self, prefix: &str, xn2: &DeviceBuffer, pre: Option<Act>, epilogue: bool, decode: bool, n: u32) -> (DeviceBuffer, Option<MlpLayerActs>) {
+        let (out, acts) = self.mlp_fwd_core(prefix, xn2, pre, epilogue, decode, true, n);
         (out.expect("qwen35: mlp_fwd_core was asked for the output"), acts)
     }
 
@@ -3545,11 +3694,12 @@ impl Qwen35 {
     /// product: what the backward needs to rebuild for a chunk whose output
     /// the forward already produced and nothing reads again.
     fn mlp_acts_only(&self, prefix: &str, xn2: &DeviceBuffer, n: u32) -> MlpLayerActs {
-        self.mlp_fwd_core(prefix, xn2, None, false, false, n).1.expect("qwen35: backward() requires a training build")
+        self.mlp_fwd_core(prefix, xn2, None, false, false, false, n).1.expect("qwen35: backward() requires a training build")
     }
 
-    /// [`Self::mlp_fwd_pre`] with the `down` projection optional (`want_out`).
-    fn mlp_fwd_core(&self, prefix: &str, xn2: &DeviceBuffer, pre: Option<Act>, epilogue: bool, want_out: bool, n: u32) -> (Option<DeviceBuffer>, Option<MlpLayerActs>) {
+    /// [`Self::mlp_fwd_pre`] with the `down` projection optional (`want_out`). `decode` says the rows are a decode or verify
+    /// step's, whose epilogue form multiplies a fused gate|up weight whole ([`Self::gate_up_decode_weight`]).
+    fn mlp_fwd_core(&self, prefix: &str, xn2: &DeviceBuffer, pre: Option<Act>, epilogue: bool, decode: bool, want_out: bool, n: u32) -> (Option<DeviceBuffer>, Option<MlpLayerActs>) {
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
@@ -3561,8 +3711,14 @@ impl Qwen35 {
         // when the device has the bf16-output form of the product ([`Self::bf16_gate_up_ok`]): the SwiGLU pass then reads
         // half the bytes and the product writes half.
         let mut bf16_rows = epilogue && self.bf16_gate_up_ok(n, ff);
-        let mut gate_pre = g.storage_uninit(if bf16_rows { (n * ff / 2) as u64 } else { (n * ff) as u64 });
-        let mut up = g.storage_uninit(if bf16_rows { (n * ff / 2) as u64 } else { (n * ff) as u64 });
+        // A decode step's epilogue form multiplies a fused gate|up weight in ONE product and the SwiGLU pass reads the halves in place.
+        let fused_w = if epilogue && decode { self.gate_up_decode_weight(prefix, n) } else { None };
+        let rows_buffer = |width: u32, bf16: bool| g.storage_uninit(if bf16 { (n * width / 2) as u64 } else { (n * width) as u64 });
+        let (mut gate_pre, mut up) = match fused_w {
+            Some(_) => (g.storage_uninit(1), g.storage_uninit(1)),
+            None => (rows_buffer(ff, bf16_rows), rows_buffer(ff, bf16_rows)),
+        };
+        let mut gate_up = fused_w.map(|_| rows_buffer(2 * ff, bf16_rows));
         {
             let mut s = Vec::new();
             let act1 = match pre {
@@ -3570,32 +3726,58 @@ impl Qwen35 {
                 None => self.ops_act(&mut s, xn2, n, d),
             };
             let (gate_w, up_w) = (p("gate.weight"), p("up.weight"));
-            if bf16_rows {
-                // Both or neither: the steps pushed stay either way (they may hold the activation's quantisation, which the
-                // activation remembers for the products after).
-                let mut t = Vec::new();
-                let ok = [(&gate_w, &gate_pre), (&up_w, &up)].iter().all(|(name, out)| self.ops.matmul_bf16_out(&mut t, &self.weights[name.as_str()], &act1, out));
-                s.append(&mut t);
-                if !ok {
-                    bf16_rows = false;
-                    gate_pre = g.storage_uninit((n * ff) as u64);
-                    up = g.storage_uninit((n * ff) as u64);
+            if let Some(w) = fused_w {
+                if bf16_rows {
+                    // The steps pushed stay either way (they may hold the activation's quantisation, which the activation remembers).
+                    let mut t = Vec::new();
+                    let ok = self.ops.matmul_rows_bf16_out(&mut t, w, (0, w.n()), &act1, gate_up.as_ref().expect("a fused weight has its product"));
+                    s.append(&mut t);
+                    if !ok {
+                        bf16_rows = false;
+                        gate_up = Some(rows_buffer(2 * ff, false));
+                    }
                 }
-            }
-            if !bf16_rows {
-                let f32s = self.ops_linear_group(&mut s, &act1, &[(&gate_w, &gate_pre), (&up_w, &up)]);
-                self.adapt(f32s[0], &mut s, "gate", xn2, &gate_w, &gate_pre, n, d, ff);
-                self.adapt(f32s[1], &mut s, "up", xn2, &up_w, &up, n, d, ff);
-                self.bank_fwd(&mut s, xn2, &[(gate_w.as_str(), &gate_pre), (up_w.as_str(), &up)], n);
+                if !bf16_rows {
+                    self.ops.matmul_rows(&mut s, w, (0, w.n()), &act1, gate_up.as_ref().expect("a fused weight has its product"), 0);
+                }
+            } else {
+                if bf16_rows {
+                    // Both or neither: the steps pushed stay either way (they may hold the activation's quantisation, which the
+                    // activation remembers for the products after).
+                    let mut t = Vec::new();
+                    let ok = [(&gate_w, &gate_pre), (&up_w, &up)].iter().all(|(name, out)| {
+                        let (w, rows) = self.linear(name).unwrap_or_else(|| panic!("qwen35: no Ops weight for {name}"));
+                        self.ops.matmul_rows_bf16_out(&mut t, w, rows, &act1, out)
+                    });
+                    s.append(&mut t);
+                    if !ok {
+                        bf16_rows = false;
+                        gate_pre = rows_buffer(ff, false);
+                        up = rows_buffer(ff, false);
+                    }
+                }
+                if !bf16_rows {
+                    let f32s = self.ops_linear_group(&mut s, &act1, &[(&gate_w, &gate_pre), (&up_w, &up)]);
+                    self.adapt(f32s[0], &mut s, "gate", xn2, &gate_w, &gate_pre, n, d, ff);
+                    self.adapt(f32s[1], &mut s, "up", xn2, &up_w, &up, n, d, ff);
+                    self.bank_fwd(&mut s, xn2, &[(gate_w.as_str(), &gate_pre), (up_w.as_str(), &up)], n);
+                }
             }
             g.submit(&[], &s);
         }
         let (h, down_act) = if epilogue {
             // `silu(gate) * up` and its quantisation for `down` in one launch.
             let input = if bf16_rows { gpu_core::ActPrecision::Bf16 } else { gpu_core::ActPrecision::F32 };
-            let (h, act) = self.silu_mul_e4m3(&gate_pre, &up, input, n, ff).unwrap_or_else(|| {
+            let rows = match &gate_up {
+                Some(gate_up) => SwigluRows::GateUp(gate_up),
+                None => SwigluRows::Pair(&gate_pre, &up),
+            };
+            let (h, act) = self.silu_mul_e4m3(rows, input, n, ff).unwrap_or_else(|| {
                 assert!(!bf16_rows, "qwen35: bf16 gate/up rows were produced for a SwiGLU pass the device does not run");
-                let (h, act) = self.quant_epilogue(1, &gate_pre, Some(&up), n, ff);
+                let (h, act) = match rows {
+                    SwigluRows::Pair(gate, up) => self.quant_epilogue(1, gate, Some(up), n, ff),
+                    SwigluRows::GateUp(gate_up) => self.quant_epilogue_rows(1, gate_up, Some(gate_up), n, ff, (2 * ff, ff)),
+                };
                 (h.expect("a silu_mul epilogue hands back its product"), act)
             });
             (h, Some(act))
@@ -4749,7 +4931,7 @@ impl Qwen35 {
     /// product is kept for the consumers of its fp32 rows). `None` unless this build packs no int8 rows, `down` reads E4M3
     /// activations at this row count on this device and the device offers the kernel: the callers then take
     /// [`Self::quant_epilogue`] and the product's own quantisation launch.
-    fn silu_mul_e4m3(&self, gate: &DeviceBuffer, up: &DeviceBuffer, input: gpu_core::ActPrecision, rows: u32, k: u32) -> Option<(DeviceBuffer, Act)> {
+    fn silu_mul_e4m3(&self, from: SwigluRows<'_>, input: gpu_core::ActPrecision, rows: u32, k: u32) -> Option<(DeviceBuffer, Act)> {
         if !self.silu_mul_e4m3_serves(rows, k) {
             return None;
         }
@@ -4758,7 +4940,10 @@ impl Qwen35 {
         // buffer handed back is the one-word slot every caller of this path leaves unread.
         let product = self.keeps_fp32_product().then(|| g.storage_uninit(rows as u64 * k as u64));
         let mut steps = Vec::new();
-        let (q, s) = gpu_core::provider::library::silu_mul_quantize_e4m3_rows(g, &mut steps, gate, up, input, product.as_ref(), rows, k)?;
+        let (q, s) = match from {
+            SwigluRows::Pair(gate, up) => gpu_core::provider::library::silu_mul_quantize_e4m3_rows(g, &mut steps, gate, up, input, product.as_ref(), rows, k)?,
+            SwigluRows::GateUp(gate_up) => gpu_core::provider::library::silu_mul_quantize_e4m3_gate_up(g, &mut steps, gate_up, input, product.as_ref(), rows, k)?,
+        };
         g.submit(&[], &steps);
         let product = product.unwrap_or_else(|| self.unpacked_slots().0.clone());
         let act = self.ops.act_f32_with_e4m3(&product, rows, k, q, s);
@@ -4797,6 +4982,13 @@ impl Qwen35 {
     ///
     /// Only call after [`Self::fused_epilogue_ok`].
     fn quant_epilogue(&self, mode: u32, a: &DeviceBuffer, b: Option<&DeviceBuffer>, rows: u32, k: u32) -> (Option<DeviceBuffer>, Act) {
+        self.quant_epilogue_rows(mode, a, b, rows, k, (k, 0))
+    }
+
+    /// [`Self::quant_epilogue`] reading its inputs at `(row stride, b offset)`: `b` element `c` of row `r` is
+    /// `b[r * stride + offset + c]`, `a`'s is `a[r * stride + c]` (the dense pair is `(k, 0)`; the halves of one gate|up
+    /// product are `a` = `b`, `(2 k, k)`).
+    fn quant_epilogue_rows(&self, mode: u32, a: &DeviceBuffer, b: Option<&DeviceBuffer>, rows: u32, k: u32, (stride, b_offset): (u32, u32)) -> (Option<DeviceBuffer>, Act) {
         let g = &self.gpu;
         let n = (rows * k) as u64;
         let y = (mode != 0).then(|| g.storage_uninit(n));
@@ -4808,7 +5000,7 @@ impl Qwen35 {
                 // The `xq` slot takes the bf16 rows of the product when an FP8 product will read them (flags bit 1).
                 let bf16 = self.fused_writes_bf16().then(|| g.storage_uninit(n / 2));
                 let step = g
-                    .fused_step(gpu_core::Fused::QuantEpilogue, &[a, b.unwrap_or(a), y, bf16.as_ref().unwrap_or(xq), sx], &[k, rows, mode, 1 | if bf16.is_some() { 2 } else { 0 }, k, 0])
+                    .fused_step(gpu_core::Fused::QuantEpilogue, &[a, b.unwrap_or(a), y, bf16.as_ref().unwrap_or(xq), sx], &[k, rows, mode, 1 | if bf16.is_some() { 2 } else { 0 }, stride, b_offset])
                     .expect("fused_epilogue_ok said the device serves this shape");
                 g.submit(&[], &[step]);
                 if let Some(bf16) = bf16 {
@@ -4822,7 +5014,7 @@ impl Qwen35 {
         // Mode 0 reads no `b` and writes no `y`; the slots are still bound, and
         // alias what is already there.
         let step = g
-            .fused_step(gpu_core::Fused::QuantEpilogue, &[a, b.unwrap_or(a), y.as_ref().unwrap_or(&xq), &xq, &sx], &[k, rows, mode, 0, k, 0])
+            .fused_step(gpu_core::Fused::QuantEpilogue, &[a, b.unwrap_or(a), y.as_ref().unwrap_or(&xq), &xq, &sx], &[k, rows, mode, 0, stride, b_offset])
             .expect("fused_epilogue_ok said the device serves this shape");
         g.submit(&[], &[step]);
         let act = self.ops.act_prequantized(y.as_ref().unwrap_or(a), &sx, &xq, rows, k);
@@ -5406,7 +5598,7 @@ impl Qwen35 {
                 (xmid, xn2, None)
             };
 
-            let mlp_out = self.ffn_fwd_pre(l, &xn2, pre2, epilogue, bsz);
+            let mlp_out = self.ffn_fwd_pre(l, &xn2, pre2, epilogue, true, bsz);
             if fused && l + 1 < self.shard.end {
                 // The next layer's first norm rides on this residual add.
                 let (sum, xn, act) = self.rms_quant_front(&xmid, Some(&mlp_out), self.w(&format!("blocks.{}.ln1.weight", l + 1)), bsz, FrontUse::Mixer(types[l + 1]));
@@ -5964,7 +6156,7 @@ impl Qwen35 {
                 (xmid, xn2, None)
             };
 
-            let mlp_out = self.ffn_fwd_pre(l, &xn2, pre2, st.epilogue, n);
+            let mlp_out = self.ffn_fwd_pre(l, &xn2, pre2, st.epilogue, false, n);
             if st.fused && l + 1 < self.shard.end {
                 // The next layer's first norm rides on this residual add.
                 let (sum, xn, act) = self.rms_quant_front(&xmid, Some(&mlp_out), self.w(&format!("blocks.{}.ln1.weight", l + 1)), n, FrontUse::Mixer(st.types[l + 1]));

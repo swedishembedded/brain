@@ -12,6 +12,7 @@
 
 #![allow(dead_code)]
 
+pub mod fused_decode;
 pub mod hf_fixture;
 
 use std::collections::HashMap;
