@@ -392,6 +392,11 @@ pub struct ServingShape {
     /// The recurrent-state and conv-history pools are stored bf16 (`--gdn-state bf16`): half the bytes a running
     /// sequence's row takes. The prefix-cache snapshots stay f32.
     pub gdn_bf16: bool,
+    /// The cards run the native attention kernels (CUDA on every card, a fused decode shape): a decode step keeps
+    /// split partials instead of context-long score strips, and a long prefill round widens its context's keys
+    /// into a staging buffer ([`gpu_core::provider::cuda::flash_prefill_staging_bytes`]). `false` charges the
+    /// portable kernels' strips.
+    pub native_attention: bool,
 }
 
 /// An adapter bank's device bytes: beside each layer it corrects, and the row
@@ -405,7 +410,7 @@ pub struct BankBytes {
 impl ServingShape {
     /// `max_batch` sequences of `cap` tokens, no prompt cache, no speculation.
     pub fn new(cap: u32, tier: TierPolicy, kv: KvTier, max_batch: u32) -> ServingShape {
-        ServingShape { cap, tier, kv, max_batch, prefix_slots: 0, kv_pool_rows: 0, spec: SpecCost::NONE, prefill_rows: TENSOR_CORE_PREFILL_TOKENS, adapter_bank: None, head: Dtype::I8, embed: None, gdn_bf16: false }
+        ServingShape { cap, tier, kv, max_batch, prefix_slots: 0, kv_pool_rows: 0, spec: SpecCost::NONE, prefill_rows: TENSOR_CORE_PREFILL_TOKENS, adapter_bank: None, head: Dtype::I8, embed: None, gdn_bf16: false, native_attention: false }
     }
 
     /// The same shape for a stack whose prefill forward may carry `rows` rows (the
@@ -421,7 +426,7 @@ impl ServingShape {
     /// sequences and the verify rows speculation batches.
     pub fn stage_workspace(&self, cfg: &Qwen35Config) -> u64 {
         let rows = self.max_batch.max(self.spec.scratch_rows).max(1);
-        prefill_workspace_bytes(cfg, self.prefill_rows) + decode_scratch_bytes(cfg, rows, self.cap)
+        prefill_workspace_bytes(cfg, self.prefill_rows) + prefill_staging_bytes(cfg, self.cap, self.native_attention) + decode_scratch_bytes(cfg, rows, self.cap, !self.native_attention)
     }
 
     /// The same shape at another context.
@@ -629,17 +634,38 @@ pub fn prefill_workspace_bytes(cfg: &Qwen35Config, rows: u32) -> u64 {
     rows as u64 * layer_words * 4 * num / den
 }
 
+/// Whether this process serves `cfg` with the native attention kernels on every card ([`ServingShape::native_attention`]):
+/// the CUDA backend on cards that all run it, and a head width and group the fused decode attention is specialised for.
+pub fn native_attention(cfg: &Qwen35Config) -> bool {
+    gpu_core::backend_name() == "cuda"
+        && gpu_core::defaults::Hardware::detected().cuda_everywhere()
+        && model::kv_tier::flash_decode_shape(cfg.head_dim, cfg.n_heads / cfg.n_kv_heads.max(1))
+}
+
+/// The staging buffer a native prefill round over a context of `cap` widens its keys into, live for as many layers as
+/// the round's other activations ([`PREFILL_LIVE_LAYERS`]); nothing for the portable kernels.
+pub fn prefill_staging_bytes(cfg: &Qwen35Config, cap: u32, native_attention: bool) -> u64 {
+    if !native_attention {
+        return 0;
+    }
+    gpu_core::provider::cuda::flash_prefill_staging_bytes(cfg.n_kv_heads, cap) * PREFILL_LIVE_LAYERS.0 / PREFILL_LIVE_LAYERS.1
+}
+
 /// Device bytes one decode (or verify) step of `rows` rows allocates at a
-/// context of `cap`: per row the attention's score and probability strips of
+/// context of `cap`: per row the portable attention's score and probability strips of
 /// two layers in flight (`n_heads * cap` f32 each), which is what grows with the
 /// context, and a fixed share for the step's other activations and the replay
 /// arena it fills on first use. Measured on a GH200 at the real 27B shape
-/// (`tests/gguf_resident_real.rs`, 8 rows, first step): 268 MiB at a context
+/// (`tests/gguf_resident_real.rs`, 8 rows, first step, before the fused decode): 268 MiB at a context
 /// of 8192 and 540 MiB at 100000; charged with a margin.
-pub fn decode_scratch_bytes(cfg: &Qwen35Config, rows: u32, cap: u32) -> u64 {
+/// With the fused decode attention ([`ServingShape::native_attention`], `strips` false) no score or probability
+/// strips exist, and what grows with the context is one `n_heads * cap` f32 strip's worth a row. Measured on a GH200
+/// at the real 27B shape (int8 KV, first step of each width): 16 rows 547 MiB at a context of 8192 and 686 MiB at
+/// 100000, 8 rows 288 and 364 MiB, 32 rows 1058 and 64 rows 2382 MiB at 8192.
+pub fn decode_scratch_bytes(cfg: &Qwen35Config, rows: u32, cap: u32, strips: bool) -> u64 {
     const FIXED_PER_ROW: u64 = 40 << 20;
-    const STRIPS_IN_FLIGHT: u64 = 4;
-    rows as u64 * (FIXED_PER_ROW + STRIPS_IN_FLIGHT * cfg.n_heads as u64 * cap as u64 * 4)
+    let strips_in_flight: u64 = if strips { 4 } else { 1 };
+    rows as u64 * (FIXED_PER_ROW + strips_in_flight * cfg.n_heads as u64 * cap as u64 * 4)
 }
 
 /// Granularity of [`auto_cap`]'s answer, so the advertised context is a round
@@ -3989,6 +4015,7 @@ impl Qwen35GgufResident {
         let hw = gpu_core::defaults::Hardware::detected();
         let verify = crate::model::verify::verify_shape_supported(cfg) && [gpu_core::Fused::GdnVerifyPool, gpu_core::Fused::GdnCommitPool].iter().all(|&k| hw.offers_fused(k, &cards));
         ServingShape {
+            native_attention: native_attention(cfg),
             prefix_slots: self.prefix_slots,
             kv_pool_rows: self.paged_pool_rows(),
             // Exact decode runs plain steps, so the verify scratch is not
@@ -4811,6 +4838,24 @@ mod tests {
         assert_eq!(sizing_refusal(&cfg, &shape, &[tight + workspace]), None, "with the workspace beside it the configuration fits");
         let why = sizing_refusal(&cfg, &shape, &[tight]).expect("no room for the prefill round");
         assert!(why.contains("prefill"), "the refusal names the prefill workspace: {why}");
+    }
+
+    /// The native attention kernels keep no context-long score strips at decode (one strip's worth a row grows with the
+    /// context, measured in `tests/gguf_resident_real.rs`) but widen a long round's keys into a staging buffer: the
+    /// workspace charges exactly that, so a CUDA card does not hold back the portable kernels' strips for nothing.
+    #[test]
+    fn native_attention_charges_its_staging_and_not_the_portable_strips() {
+        let cfg = Qwen35Config::qwen38_27b();
+        let portable = ServingShape::new(737_280, TierPolicy::uniform(Dtype::I8), KvTier::INT8, 64);
+        let native = ServingShape { native_attention: true, ..portable.clone() };
+        assert_eq!(decode_scratch_bytes(&cfg, 64, 737_280, false) * 4 - (64 * (40u64 << 20)) * 3, decode_scratch_bytes(&cfg, 64, 737_280, true), "a quarter of the strips");
+        assert!(native.stage_workspace(&cfg) < portable.stage_workspace(&cfg), "the native step holds back less");
+        assert_eq!(
+            native.stage_workspace(&cfg) - portable.stage_workspace(&cfg) + decode_scratch_bytes(&cfg, 64, 737_280, true) - decode_scratch_bytes(&cfg, 64, 737_280, false),
+            prefill_staging_bytes(&cfg, 737_280, true),
+            "and the difference besides the strips is the staging"
+        );
+        assert_eq!(prefill_staging_bytes(&cfg, 737_280, false), 0, "the portable prefill stages nothing");
     }
 
     /// The workspace follows the rows a round carries, and the batched-prefill setting widens them.

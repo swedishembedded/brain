@@ -34,7 +34,7 @@ use model::kv_tier::KvTier;
 use model::ops::TierPolicy;
 use model::shard::Shard;
 use qwen35::config::{LayerType, Qwen35Config};
-use qwen35::int8_gguf_resident::{decode_scratch_bytes, endpoint_names, layer_cost, prefill_round_rows_for, prefill_workspace_bytes, resident_config, shard_fetch_plan, shard_source, Qwen35GgufResident};
+use qwen35::int8_gguf_resident::{decode_scratch_bytes, endpoint_names, layer_cost, native_attention, prefill_round_rows_for, prefill_staging_bytes, prefill_workspace_bytes, resident_config, shard_fetch_plan, shard_source, Qwen35GgufResident};
 use residency::multi::MultiDeviceResidentModel;
 use residency::model::Instance;
 use residency::{Device, ResidentModel};
@@ -1202,8 +1202,9 @@ fn covers_a_round_and_a_step_at(path: &str, devices: &[(Device, u64)], cfg: &Qwe
     inst.prefill_timed(&prompt).expect("prefill");
     let transient = probe.memory_usage().unwrap().peak_live - live;
     let rows = prefill_round_rows_for(true);
-    let planned = prefill_workspace_bytes(cfg, rows);
-    println!("cap {cap}: prefill rows {rows}: measured {} MiB, planned {} MiB", transient >> 20, planned >> 20);
+    let native = native_attention(cfg);
+    let planned = prefill_workspace_bytes(cfg, rows) + prefill_staging_bytes(cfg, cap, native);
+    println!("cap {cap}: native attention {native}: prefill rows {rows}: measured {} MiB, planned {} MiB", transient >> 20, planned >> 20);
     assert!(planned >= transient, "the planner charges {planned} bytes of prefill workspace but a real round allocated {transient}");
 
     // Widest first: the first step also fills the replay arena for its row count.
@@ -1214,7 +1215,7 @@ fn covers_a_round_and_a_step_at(path: &str, devices: &[(Device, u64)], cfg: &Qwe
         let live = probe.memory_usage().unwrap().live;
         inst.decode_batch_greedy_at(&toks, &pos).expect("decode");
         let measured = probe.memory_usage().unwrap().peak_live - live;
-        let planned = decode_scratch_bytes(cfg, rows, cap);
+        let planned = decode_scratch_bytes(cfg, rows, cap, !native);
         println!("cap {cap}: decode {rows} rows: measured {} MiB, planned {} MiB", measured >> 20, planned >> 20);
         assert!(planned >= measured, "the planner charges {planned} bytes of decode scratch at {rows} rows but a step allocated {measured}");
     }

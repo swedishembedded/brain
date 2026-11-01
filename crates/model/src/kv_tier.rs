@@ -421,6 +421,13 @@ const FLASH_COMBINE: &str = "paged_flash_decode_gqa_combine";
 /// multi-head attention (DeepSeek-OCR's decoder: 10 heads of 128). Any other shape keeps the triad.
 const FLASH_SHAPES: [(u32, u32); 4] = [(256, 6), (256, 8), (256, 4), (128, 1)];
 
+/// Whether the fused decode attention has a specialisation for `head_dim` and GQA `group` ([`FLASH_SHAPES`]): on a
+/// device with work-group reductions such a model's decode keeps split partials and no `[batch, n_heads, cap]`
+/// score and probability slabs ([`KvKernels::flash_decode_available`]). What a memory plan asks before a device opens.
+pub fn flash_decode_shape(head_dim: u32, group: u32) -> bool {
+    FLASH_SHAPES.contains(&(head_dim, group))
+}
+
 /// The compile-time constants of the fused decode kernel for one shape: `GRP`, and for the
 /// non-native head width `HD` and its 4-channel piece count `HD4`.
 fn decode_params(head_dim: u32, group: u32) -> Vec<(&'static str, u32)> {

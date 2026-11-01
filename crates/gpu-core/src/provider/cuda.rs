@@ -1431,6 +1431,13 @@ pub fn set_flash_prefill_staged_min_rows(rows: u32) {
     FLASH_PREFILL_STAGED_MIN.store(rows, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Device bytes of the staging buffer a staged warpgroup prefill round widens its keys into, for `n_kv_heads` heads
+/// and a context of `keys`: one record a (kv head, key tile), the K and V tiles in the layout the tensor cores read
+/// and their row scales. The one formula the allocation and a memory plan both use.
+pub fn flash_prefill_staging_bytes(n_kv_heads: u32, keys: u32) -> u64 {
+    u64::from(n_kv_heads) * u64::from(keys.div_ceil(kernels_cuda::FLASH_PREFILL_WGS_KEYS)) * kernels_cuda::FLASH_PREFILL_WGS_RECORD_BYTES
+}
+
 /// The steps of the warpgroup tensor-core prefill over an int8 or FP8 KV cache (`bufs` and `params` as
 /// [`paged_flash_prefill_kv8_step`]'s; its `blocks` is derived here; `keys` is the longest key count of the round, the last
 /// row's sequence length), or `None` where the device, the head width, the round or the switch ([`set_flash_prefill_wg`])
@@ -1467,8 +1474,7 @@ pub fn paged_flash_prefill_wg_steps(gpu: &crate::Gpu, head_dim: u32, bufs: &[&ba
         let main = kernels_cuda::get("flash_prefill_f16_hd256_wgs").filter(|k| k.min_cc <= cc)?;
         let widen_id = gpu.native_kernel_launched(widen, PAGED_FLASH_PREFILL_WGS_WIDEN_BINDINGS, backend_api::CudaLaunch { arch: backend_api::ArchFeatures::Required, ..backend_api::CudaLaunch::NONE })?;
         let main_id = gpu.native_kernel_launched(main, PAGED_FLASH_PREFILL_WGS_BINDINGS, FLASH_PREFILL_WGS_LAUNCH)?;
-        // One record a (kv head, 64-key tile): the K and V tiles in the layout the tensor cores read, and their row scales.
-        let stage = gpu.storage_uninit(u64::from(n_kv_heads) * u64::from(tiles_cap) * kernels_cuda::FLASH_PREFILL_WGS_RECORD_BYTES / 4);
+        let stage = gpu.storage_uninit(flash_prefill_staging_bytes(n_kv_heads, keys) / 4);
         steps.push(gpu.step_native_sliced(widen_id, &[pk, pv, tables, lens, ks, vs, &stage], &[(0, 0); 7], &p, tiles_cap * n_kv_heads)?);
         steps.push(gpu.step_native_sliced(main_id, &[q, &stage, lens, ctx, &scratch], &[(0, 0); 5], &p, blocks)?);
     } else {
