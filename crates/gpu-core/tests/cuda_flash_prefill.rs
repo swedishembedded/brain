@@ -594,7 +594,7 @@ fn the_warpgroup_prefill_reads_a_bf16_an_int8_and_an_fp8_cache() {
         // From 2048 rows the kernel runs unsplit and has no merge step.
         Case { n: 2176, start: 1500, block_size: 512, scatter: true },
     ];
-    // A bf16 cache has only the staged form (an unstaged round declines, `a_bf16_round_below_the_staged_rows_declines`).
+    // A bf16 cache has only the staged form (`short_rounds_are_staged_by_their_tier_and_context`).
     let tiers = [(false, Kv::Int8), (false, Kv::Fp8), (true, Kv::Int8), (true, Kv::Fp8), (true, Kv::Bf16)];
     for (staged, kv) in tiers {
         // Staged: the round widens its keys once into fp16 records (every round, whatever its length); unstaged: every block does.
@@ -658,16 +658,20 @@ fn staged_back_to_back_stress() {
     gpu_core::provider::cuda::set_flash_prefill_staged_min_rows(gpu_core::provider::cuda::FLASH_PREFILL_STAGED_MIN_ROWS);
 }
 
-/// Below the staged row count a bf16 round has no warpgroup form and keeps version 2.
+/// Which short rounds are staged at the default settings: a bf16 round always (it has no form that widens in every block, and
+/// version 2 is slower than a widen pass at any row count), an 8-bit round from `FLASH_PREFILL_STAGED_MIN_KEYS` keys (a
+/// staged round is a widen pass, the attention and the merge of its key splits; an unstaged one the attention and the merge).
 #[test]
-fn a_bf16_round_below_the_staged_rows_declines() {
+fn short_rounds_are_staged_by_their_tier_and_context() {
     let Some(gpu) = device() else { return };
-    let p = Problem::new(Case { n: 128, start: 64, block_size: 4096, scatter: false }, 9);
-    let (seen, stored) = p.as_stored(Kv::Bf16);
-    let d = TierDevice::upload(&gpu, &seen, Kv::Bf16, &stored);
-    gpu_core::provider::cuda::set_flash_prefill_staged_min_rows(u32::MAX);
-    assert!(d.native_wg(&gpu, &seen).is_none(), "an unstaged bf16 round must decline");
     gpu_core::provider::cuda::set_flash_prefill_staged_min_rows(gpu_core::provider::cuda::FLASH_PREFILL_STAGED_MIN_ROWS);
+    for (kv, start, staged) in [(Kv::Bf16, 300, true), (Kv::Bf16, 4000, true), (Kv::Int8, 300, false), (Kv::Int8, 4000, true), (Kv::Fp8, 300, false), (Kv::Fp8, 4000, true)] {
+        let p = Problem::new(Case { n: 128, start, block_size: 4096, scatter: false }, 9);
+        let (seen, stored) = p.as_stored(kv);
+        let d = TierDevice::upload(&gpu, &seen, kv, &stored);
+        let steps = d.native_wg(&gpu, &seen).expect("a 128-row round takes the warpgroup kernel");
+        assert_eq!(steps.len(), if staged { 3 } else { 2 }, "{kv:?} 128 rows behind {start} keys: staged must be {staged}");
+    }
 }
 
 /// The compact-tier kernels keep the decode-regime rule of the fp32 one.
@@ -786,23 +790,44 @@ fn the_int8_cache_prefill_rates_at_the_long_prompt_round() {
     int8_prefill_rates(&[(4096u32, 0u32), (4096, 4096), (4096, 12288), (4096, 20480), (4096, 28672)]);
 }
 
+/// The prefill of every compact tier at the short rounds a busy server runs (a chunk tail or a mixed round's prompt rows):
+/// version 2, the form that widens in every block (8-bit tiers) and the staged form, which a bf16 round takes at every row count.
+#[test]
+#[ignore = "a timing report for kernel work, not a spec"]
+fn the_compact_cache_prefill_rates_at_short_rounds() {
+    for kv in [Kv::Bf16, Kv::Int8, Kv::Fp8] {
+        prefill_rates(kv, &[(64u32, 448u32), (128, 384), (64, 1984), (128, 1920), (64, 8000), (128, 8000), (128, 32000), (255, 8000)]);
+    }
+}
+
 fn int8_prefill_rates(cases: &[(u32, u32)]) {
+    prefill_rates(Kv::Int8, cases);
+}
+
+fn prefill_rates(kv: Kv, cases: &[(u32, u32)]) {
     let Some(gpu) = device() else { return };
     gpu_core::provider::cuda::set_flash_prefill_v2(true);
+    let (v2_name, forms): (&str, &[(&str, bool, u32)]) = match kv {
+        // `wg` widens in every block; `staged` widens the round's keys once first (its time is in the rate). A bf16 cache has
+        // only the staged form.
+        Kv::Bf16 => ("flash_prefill_f16_hd256_v2_bf16", &[("v2", false, u32::MAX), ("staged", true, 1)]),
+        Kv::Int8 => ("flash_prefill_f16_hd256_v2_kv8", &[("v2", false, u32::MAX), ("wg", true, u32::MAX), ("staged", true, 1)]),
+        Kv::Fp8 => ("flash_prefill_f16_hd256_v2_kvfp8", &[("v2", false, u32::MAX), ("wg", true, u32::MAX), ("staged", true, 1)]),
+    };
     for &(n, start) in cases {
         let p = Problem::new(Case { n, start, block_size: 4096, scatter: false }, 23);
-        let (seen, stored) = p.as_stored(Kv::Int8);
-        let d = TierDevice::upload(&gpu, &seen, Kv::Int8, &stored);
+        let (seen, stored) = p.as_stored(kv);
+        let d = TierDevice::upload(&gpu, &seen, kv, &stored);
         let flops = 4.0 * f64::from(n) * (f64::from(start) + f64::from(n) / 2.0) * 256.0 * 24.0;
         assert!(gpu.set_kernel_timing(true));
-        // `wg` widens in every block; `staged` widens the round's keys once first (its time is in the rate).
-        for (label, name, wg, staged_min_rows) in [("v2", "flash_prefill_f16_hd256_v2_kv8", false, u32::MAX), ("wg", "flash_prefill_f16_hd256_wg", true, u32::MAX), ("staged", "flash_prefill_f16_hd256_wg", true, 1)] {
+        for &(label, wg, staged_min_rows) in forms {
+            let name = if wg { "flash_prefill_f16_hd256_w" } else { v2_name };
             gpu_core::provider::cuda::set_flash_prefill_wg(wg);
             gpu_core::provider::cuda::set_flash_prefill_staged_min_rows(staged_min_rows);
             let steps = if wg { d.native_wg(&gpu, &seen).expect("warpgroup step") } else { vec![d.native(&gpu, &seen).expect("native step")] };
             let _ = d.base.run_steps(&gpu, &steps, &seen);
             let ms = (0..TRIALS).map(|_| d.base.trial_steps_ms(&gpu, &steps, name)).fold(f64::MAX, f64::min);
-            eprintln!("cuda_flash_prefill: int8 {label} n={n} ctx={}: {ms:.3} ms ({:.0} TFLOPS causal)", start + n, flops / ms / 1e9);
+            eprintln!("cuda_flash_prefill: {kv:?} {label} n={n} ctx={}: {ms:.3} ms ({:.0} TFLOPS causal)", start + n, flops / ms / 1e9);
         }
         gpu.set_kernel_timing(false);
     }

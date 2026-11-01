@@ -1512,14 +1512,22 @@ const FLASH_PREFILL_WGS_LAUNCH: backend_api::CudaLaunch = backend_api::CudaLaunc
 };
 
 /// Query rows from which the prefill widens the round's keys once ([`paged_flash_prefill_wg_steps`]) instead of in every block:
-/// the pass costs a read and a write of the whole context per layer, which a round of fewer rows does not amortise.
+/// the pass costs a read and a write of the whole context per layer, which a round of fewer rows over a short context does not
+/// amortise.
 pub const FLASH_PREFILL_STAGED_MIN_ROWS: u32 = 256;
+
+/// Keys from which a round of any row count is staged: at a long context one 128-row block of 24 heads already widens each
+/// key six times (once a head of its group), more than the pass's write and read of it cost
+/// (`the_compact_cache_prefill_rates_at_short_rounds`: the form that widens in every block is ahead up to 2K keys, the staged
+/// form from 8K).
+pub const FLASH_PREFILL_STAGED_MIN_KEYS: u32 = 4096;
 
 static FLASH_PREFILL_STAGED_MIN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(FLASH_PREFILL_STAGED_MIN_ROWS);
 
 /// Set the row count from which the warpgroup prefill widens the round's keys once into a staging buffer (default
-/// [`FLASH_PREFILL_STAGED_MIN_ROWS`]); `u32::MAX` keeps the form that widens in every block, the baseline of an A/B, and `1`
-/// stages every round (a test). Process-wide; takes effect for steps built after.
+/// [`FLASH_PREFILL_STAGED_MIN_ROWS`]; a round of [`FLASH_PREFILL_STAGED_MIN_KEYS`] keys or more is staged too); `u32::MAX`
+/// keeps the form that widens in every block for an 8-bit cache whatever the context, the baseline of an A/B, and `1` stages
+/// every round (a test). Process-wide; takes effect for steps built after.
 pub fn set_flash_prefill_staged_min_rows(rows: u32) {
     FLASH_PREFILL_STAGED_MIN.store(rows, std::sync::atomic::Ordering::Relaxed);
 }
@@ -1535,22 +1543,22 @@ pub fn flash_prefill_staging_bytes(n_kv_heads: u32, keys: u32) -> u64 {
 /// [`paged_flash_prefill_kv8_step`]'s, or [`paged_flash_prefill_bf16_step`]'s six for a bf16 cache; its `blocks` is derived
 /// here; `keys` is the longest key count of the round, the last row's sequence length), or `None` where the device, the head
 /// width, the round or the switch ([`set_flash_prefill_wg`]) declines and the caller keeps its version-2 step. A bf16 cache
-/// has only the staged form: a round below the staged row count declines.
+/// has only the staged form and takes it at every row count.
 ///
 /// The caller states that the round is ONE sequence (`gqa_chunk_step_kv_paged`'s contract): a block covers 128 query rows
 /// that all read the block table of the block's first row, where version 2 holds that only for 64.
 ///
-/// A round of [`FLASH_PREFILL_STAGED_MIN_ROWS`] rows or more (see [`set_flash_prefill_staged_min_rows`]) first widens its keys once into a staging buffer of fp16 tiles
+/// A round of [`FLASH_PREFILL_STAGED_MIN_ROWS`] rows or [`FLASH_PREFILL_STAGED_MIN_KEYS`] keys or more (see [`set_flash_prefill_staged_min_rows`]) first widens its keys once into a staging buffer of fp16 tiles
 /// (`flash_prefill_f16_hd256_wgs_widen_*`) that the attention then bulk-copies, instead of every block widening them again.
 pub fn paged_flash_prefill_wg_steps(gpu: &crate::Gpu, head_dim: u32, bufs: &[&backend_api::DeviceBuffer], params: &[u32], keys: u32, kv: WgKv) -> Option<Vec<crate::Step>> {
     assert_eq!(bufs.len(), kv.buffers(), "{kv:?}: the round binds {} buffers", kv.buffers());
     if head_dim != 256 || !FLASH_PREFILL_WG.load(std::sync::atomic::Ordering::Relaxed) || !flash_prefill_offered(gpu, head_dim, params) {
         return None;
     }
-    let staged = params[0] >= FLASH_PREFILL_STAGED_MIN.load(std::sync::atomic::Ordering::Relaxed);
-    if !staged && kv == WgKv::Bf16 {
-        return None;
-    }
+    // The row count weighs staging against widening in every block; a bf16 cache has no form that widens in every block and
+    // its alternative, version 2, is slower than a widen pass at any row count (`the_compact_cache_prefill_rates_at_short_rounds`), so it always stages.
+    let min_rows = FLASH_PREFILL_STAGED_MIN.load(std::sync::atomic::Ordering::Relaxed);
+    let staged = kv == WgKv::Bf16 || (min_rows != u32::MAX && (params[0] >= min_rows || keys >= FLASH_PREFILL_STAGED_MIN_KEYS));
     let cc = gpu.caps().arch.compute_capability?;
     let nsm = gpu.caps().compute_units?;
     let merge = kernels_cuda::get("flash_prefill_f16_hd256_wg_combine").filter(|k| k.min_cc <= cc)?;
