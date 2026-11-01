@@ -593,16 +593,16 @@ impl AdapterSync {
 /// never changes what a running sequence reads. An adapter offered while a
 /// group runs is routable from the next group; a request naming it earlier is
 /// answered "no model".
-pub struct AdaptedInstance<D: PagedDecoder + BankedEngine> {
-    front: TextFrontend,
+pub struct AdaptedInstance<D: PagedDecoder + BankedEngine, F: Frontend = TextFrontend> {
+    front: F,
     sched: Scheduler<D>,
     capacity: usize,
     adapters: AdapterSync,
 }
 
-impl<D: PagedDecoder + BankedEngine> AdaptedInstance<D> {
+impl<D: PagedDecoder + BankedEngine, F: Frontend> AdaptedInstance<D, F> {
     /// `capacity` is the number of requests the scheduler runs at once.
-    pub fn new(front: TextFrontend, sched: Scheduler<D>, capacity: usize, registry: Arc<AdapterRegistry>) -> AdaptedInstance<D> {
+    pub fn new(front: F, sched: Scheduler<D>, capacity: usize, registry: Arc<AdapterRegistry>) -> AdaptedInstance<D, F> {
         let mut instance = AdaptedInstance { front, sched, capacity, adapters: AdapterSync::new(registry) };
         // Every adapter offered so far is registered with the engine before
         // the first request, so a cold instance answers an adapter request
@@ -612,7 +612,7 @@ impl<D: PagedDecoder + BankedEngine> AdaptedInstance<D> {
     }
 }
 
-impl<D: PagedDecoder + BankedEngine + Send> Instance for AdaptedInstance<D> {
+impl<D: PagedDecoder + BankedEngine + Send, F: Frontend + Send> Instance for AdaptedInstance<D, F> {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         self.run_batch(action, std::slice::from_ref(inv), &mut |_i, p| progress(p)).pop().unwrap()
     }
@@ -642,12 +642,12 @@ impl<D: PagedDecoder + BankedEngine + Send> Instance for AdaptedInstance<D> {
 
 /// The request front end of a family, plus the adapter a request's model id
 /// stamped.
-struct AdaptedFrontend<'a> {
-    front: &'a TextFrontend,
+struct AdaptedFrontend<'a, F: Frontend> {
+    front: &'a F,
     adapters: &'a AdapterSync,
 }
 
-impl Frontend for AdaptedFrontend<'_> {
+impl<F: Frontend> Frontend for AdaptedFrontend<'_, F> {
     fn tok(&self) -> &data::qwen_tokenizer::QwenBpe {
         self.front.tok()
     }
@@ -659,6 +659,15 @@ impl Frontend for AdaptedFrontend<'_> {
     }
     fn parse(&self, inv: &Invocation) -> Result<llmserve::ParsedRequest, String> {
         self.front.parse(inv)
+    }
+    fn parse_embedded(&self, inv: &Invocation) -> Result<(llmserve::ParsedRequest, Option<model::serve::PromptEmbeds>), String> {
+        self.front.parse_embedded(inv)
+    }
+    fn parse_in_background(&self, inv: &Invocation) -> Option<llmserve::Encoding> {
+        self.front.parse_in_background(inv)
+    }
+    fn encodes_inputs(&self) -> bool {
+        self.front.encodes_inputs()
     }
     fn route(&self, inv: &Invocation) -> Result<Option<(AdapterId, AdapterIdentity)>, String> {
         inv.get_str(ADAPTER_PARAM).map(|name| self.adapters.route(&name)).transpose()

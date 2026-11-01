@@ -3805,7 +3805,7 @@ impl Qwen35GgufResident {
             .get_or_init(|| match ResidentCheckpoint::is_hf_dir(&self.gguf_path).then(|| crate::vision_tower::read_spec(std::path::Path::new(&self.gguf_path))) {
                 Some(Ok(spec)) => spec,
                 Some(Err(e)) => {
-                    residency::log::warn(&format!("{MODEL}: '{}' declares a vision tower that cannot be served, so it serves text only: {e}", self.gguf_path));
+                    eprintln!("brain: {MODEL}: '{}' declares a vision tower that cannot be served, so it serves text only: {e}", self.gguf_path);
                     None
                 }
                 None => None,
@@ -4310,6 +4310,7 @@ impl Qwen35GgufResident {
         let (gpu, d_model) = (instance.stage_gpu(0).share(), instance.config().d_model);
         let tower = crate::vision_tower::VisionTower::open(std::path::Path::new(&self.gguf_path), spec, &gpu, d_model, crate::vision_tower::SERVING_MAX_IMAGE_PIXELS)?;
         let (tok, _) = ResidentCheckpoint::open(&self.gguf_path)?.tokenizer()?;
+        eprintln!("brain: {}: reads images: vision tower loaded on the decoder's card (images up to {} pixels)", self.model_id, tower.spec().geometry.max_pixels);
         crate::vision_frontend::VisionFrontend::new(text, tok, tower, context, parse_request).map(Ok)
     }
 

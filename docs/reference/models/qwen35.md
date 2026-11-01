@@ -19,7 +19,7 @@ path (see the note at the end of this page).
 | Training from scratch | [x] |
 | LoRA fine-tune         | [x] (rank/alpha adapters on all 12 targetable GDN/GQA/MLP projections) |
 | MTP head               | [x] (structural - no reference oracle available, gradchecked and overfit-tested only) |
-| Vision input            | [x] served from the HF directories of the FP8 and NVFP4 releases (`image_url` parts of `/v1/chat/completions`, batched beside text requests); parity-gated against the reference on the released weights; a GGUF has no vision weights and refuses images - see "Image input" |
+| Vision input            | [x] served from the HF directory of the FP8 release (`image_url` parts of `/v1/chat/completions`, batched beside text requests); parity-gated against the reference on the released weights; a GGUF has no vision weights and refuses images - see "Image input" |
 | CLI                    | [x] |
 | HTTP API               | [x] |
 | D-Bus                  | [x] |
@@ -62,9 +62,9 @@ brain serve
 
 ## Image input
 
-A release that carries the vision tower - the HF directories `Qwen/Qwen3.8-27B-FP8` and
-`nvidia/Qwen3.8-27B-NVFP4` (their `model.visual.*` tensors, `preprocessor_config.json` and the
-`vision_config` of `config.json`) - reads images over the chat endpoints:
+A release that carries the vision tower - the HF directory `Qwen/Qwen3.8-27B-FP8` (its `model.visual.*` tensors,
+`preprocessor_config.json` and the `vision_config` of `config.json`; the NVFP4 release carries the same bf16 tower
+and reads images as soon as its linears are served) - reads images over the chat endpoints:
 
 ```bash
 brain serve --checkpoint <dir of the release> --device gpu1 --max-batch 32 --openai 8000

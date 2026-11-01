@@ -143,6 +143,7 @@ impl ImageBuild {
         if inv.cancel.is_cancelled() {
             return Err("cancelled".to_string());
         }
+        let started = std::time::Instant::now();
         let images = request_images(inv)?;
         let sizes: Vec<(u32, (u32, u32))> = images.iter().map(|i| self.tower.tokens_for(i.h, i.w)).collect();
         let image_tokens: usize = sizes.iter().map(|&(n, _)| n as usize).sum();
@@ -177,6 +178,7 @@ impl ImageBuild {
         }
         let positions: Vec<u32> = req.ids.iter().enumerate().filter(|(_, &t)| t == self.tokens.image).map(|(i, _)| i as u32).collect();
 
+        let prepared = started.elapsed();
         let width = self.tower.spec().config.out_hidden_size as usize;
         let mut rows_f32 = Vec::with_capacity(positions.len() * width);
         let mut grids = Vec::with_capacity(images.len());
@@ -189,6 +191,12 @@ impl ImageBuild {
             rows_f32.extend_from_slice(&encoded.rows);
             grids.push((1, grid.0, grid.1));
         }
+        residency::log::info(&format!(
+            "qwen35: {} image(s), {image_tokens} tokens: decode and render {:.0} ms, tower {:.0} ms",
+            images.len(),
+            prepared.as_secs_f64() * 1e3,
+            (started.elapsed() - prepared).as_secs_f64() * 1e3
+        ));
         let rotary = qwen3vl::mrope::get_rope_index(&req.ids, self.tokens.image, &grids);
         let embeds = PromptEmbeds::new(width, positions, rows_f32).map_err(|e| format!("vision rows: {e}"))?.with_rotary_positions(rotary);
         Ok((req, Some(embeds)))

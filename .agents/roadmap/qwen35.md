@@ -26,6 +26,36 @@ structurally and never parity-claimed here.
 
 ## Done
 
+- [x] Image input served (2026-11-01; `Qwen/Qwen3.8-27B-FP8` HF directory, one GH200): `image_url` parts of `/v1/chat/completions` and
+  Anthropic `image` blocks reach the model. The request path is `vision_frontend` (placeholders expanded in the messages, the
+  checkpoint's `preprocessor_config.json` through `qwen3vl::preprocess::ImageGeometry`, antialiased bicubic on the 8-bit pixels), the
+  tower is `qwen3vl`'s reused ViT on its own handle of the decoder's card (`vision_tower`; weights read and size-checked by
+  `qwen3vl::import::load_vision`), and the paged engine takes `PromptEmbeds` with the reference's three-axis rotary positions
+  (`BatchSeq::rope`/`DecodeCaches::rope`/`PrefillSeg::rope`, one `qwen3vl::mrope::PromptRope` per slot: a prompt row rotates at its
+  `get_rope_index` position, every later row at its KV row shifted by a constant). A model that declares no `image` input refuses a
+  request with an image (400 naming the model: the GGUF, which had silently dropped it); pixel limits (36 MP an image, 64 MP a
+  request, 8 images) refuse from the header.
+  Parity against `transformers` on the released weights (`tools/goldens/qwen35_vl_dump_reference.py`, `tests/hf_fp8_vision_real.rs`,
+  a 288 x 256 picture, 72 image tokens, 97 prompt tokens): patches exact; tower features rel-L2 8.3e-6, merger rows 6.4e-6 (float32
+  tower against the float32 reference); prompt token ids and every prompt token's rotary triple exact; logits at the end of the prompt
+  cosine 0.9991 / rel-L2 0.044 with the weights decoded to bf16 (the reference's arithmetic) and 0.9917 / 0.130 with the FP8 kernels
+  (text on the same weights, `qwen35_fp8_parity`: mean 0.034, worst 0.10 over 100-token prompts); the next two tokens of the greedy
+  continuation are the reference's with logits within 0.012 and 0.04 (bf16-decoded) and 0.15 and 0.31 (FP8) of the reference's.
+  Served (`brain serve --checkpoint <FP8 dir> --device gpu1 --max-batch 32`): the 1200 x 1000 L-bracket sketch is 1195 prompt tokens
+  and is read ("Enclosure bracket - all dims in mm - plate 4 mm", the views, the 4 / 40 / R3 / 60 / 15 / 30 / 28 / 16 / 18 / 12 / 36
+  dimensions); two images in one message are told apart; an image in an earlier turn of a tool-calling conversation is still read
+  (turn 2 calls the tool with the 40 mm leg); three image requests and five text requests in flight together answer exactly as
+  they do alone. Latency of a one-token reply on a quiet card (fast profile, tower on float32 kernels): 1200 x 1000 (1178 tokens)
+  0.79 s of which the tower 0.58 s; 1500 x 1000 (1.5 MP, 1457 tokens) 1.04 s of which the tower 0.79 s; the decoder's prefill
+  of those rows is the remaining 0.2 s (about 6 000 rows/s with the tower's activations resident beside it).
+  Open: (1) the tower is the larger share of an image's prefill (8 patches per ms on float32 kernels, about 12 TFLOP/s by a rough count, far under the tensor-core peak): bf16 tensor-core ViT kernels are the next lever; (2) a prompt with images does not use the prefix cache (so
+  a conversation re-encodes and re-prefills its pictures every turn): a cache keyed by the image digest in the engine's namespace
+  and a store of encoded rows would give it back; (3) a prompt with images does not draft with the MTP head; (4) `nvidia/Qwen3.8-27B-NVFP4`
+  carries the same bf16 tower (same tensor names) but this build has no resident tier for its linears, so only the FP8 directory
+  was served end to end; (5) the serving bound on an image is 4 MP (the checkpoint's own is 16.7 MP, 16384 rows), a flag away.
+  Found on the way: the embedded-prompt conformance property (`model::serve::conformance`) placed its rows early in the prompt,
+  which a model decided by its last tokens never feels; it now also puts rows at the end. `gguf_conformance`'s
+  `prompts_sharing_a_document_resume_from_where_they_part` fails on the commit this work branched from (not caused here).
 - [x] FP8 release served natively (2026-10-29, `serving-runtime.md` item 17, knowledge 378): the paged resident reads a HuggingFace
   directory through `ResidentCheckpoint`; linears stay E4M3 with 128 x 128 scales; `matmul_fp8_native` candidates (dequantize-in-register
   streaming for 1-128 rows, Hopper bf16-operand and e4m3 wgmma GEMMs); gates `fp8_linear_native`, `hf_fp8_conformance`,
@@ -2978,13 +3008,8 @@ two-card INT8 27B, against the same instance's own 6.70 tok/s plain decode:
   about MTP's OWN correctness as a predictor, not about whether the
   overall decode loop it feeds into stays correct - M17's gate 1 proves
   the latter unconditionally, by causality, regardless of the former).
-- Vision + decoder fused end-to-end on real weights is not runnable (needs both
-  towers resident simultaneously).
-- Vision tower's OWN standalone real-weight parity (M10's original plan
-  bullet 2, `outside.safetensors`'s `model.visual.*`, ~0.9 GB) was not done -
-  M10 landed the two decoder-mixer types (both now cosine=1.0 against the
-  real reference) plus embed/lm_head; the vision tower still only has M9's
-  real-DIMS/random-weight parity, not real-weight parity.
+- (Closed 2026-11-01, see "Image input served" under Done: the vision tower and the fused vision +
+  decoder path have real-weight parity against the reference.)
 - No NPU (`NpuModel`) implementation this port - the firmware blocker on this
   exact host is diagnosed separately, not re-run here.
 - `crate::serve::Engine` (M11) is single-GPU, one truly-active sequence at a

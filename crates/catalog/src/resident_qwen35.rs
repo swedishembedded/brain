@@ -785,10 +785,14 @@ impl MultiDeviceResidentModel for Qwen35GgufServed {
     /// continuous-batching scheduler, so up to `max_batch` requests of the
     /// base and of any adapters decode in ONE batched step per iteration.
     fn activate_multi(&self, _key: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
-        let (sched, tok, stop) = self.inner.activate_scheduler(devices)?;
+        let (mut sched, tok, stop) = self.inner.activate_scheduler(devices)?;
         let capacity = self.inner.max_batch() as usize;
-        let front = llmserve::TextFrontend::new(tok, stop, "qwen35", std::sync::Arc::new(qwen35::int8_gguf_resident::parse_request));
-        Ok(Box::new(AdaptedInstance::new(front, sched, capacity, self.adapters.clone())))
+        let text = llmserve::TextFrontend::new(tok, stop, "qwen35", std::sync::Arc::new(qwen35::int8_gguf_resident::parse_request));
+        // A checkpoint with a vision tower also reads images.
+        match self.inner.vision_front_end(&mut sched, text)? {
+            Ok(front) => Ok(Box::new(AdaptedInstance::new(front, sched, capacity, self.adapters.clone()))),
+            Err(text) => Ok(Box::new(AdaptedInstance::new(text, sched, capacity, self.adapters.clone()))),
+        }
     }
 }
 
