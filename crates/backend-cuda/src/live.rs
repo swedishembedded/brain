@@ -70,6 +70,10 @@ pub struct LiveResources {
     pub system_allocs: u64,
     /// Bytes in those blocks, as requested.
     pub system_bytes: u64,
+    /// Outstanding sparse buffers: reserved address ranges whose parts are backed on demand.
+    pub sparse_allocs: u64,
+    /// Bytes of physical memory currently mapped into those ranges.
+    pub sparse_backed_bytes: u64,
 }
 
 /// Monotonic, process-wide totals of the calls whose per-step repetition is a
@@ -190,6 +194,8 @@ struct Counters {
     pool_allocs: AtomicU64,
     pool_bytes: AtomicU64,
     managed_allocs: AtomicU64,
+    sparse_allocs: AtomicU64,
+    sparse_backed_bytes: AtomicU64,
     managed_bytes: AtomicU64,
     system_allocs: AtomicU64,
     system_bytes: AtomicU64,
@@ -210,6 +216,8 @@ static COUNTERS: Counters = Counters {
     pool_allocs: AtomicU64::new(0),
     pool_bytes: AtomicU64::new(0),
     managed_allocs: AtomicU64::new(0),
+    sparse_allocs: AtomicU64::new(0),
+    sparse_backed_bytes: AtomicU64::new(0),
     managed_bytes: AtomicU64::new(0),
     system_allocs: AtomicU64::new(0),
     system_bytes: AtomicU64::new(0),
@@ -234,6 +242,8 @@ pub fn live_resources() -> LiveResources {
         pool_allocs: c.pool_allocs.load(Ordering::Relaxed),
         pool_bytes: c.pool_bytes.load(Ordering::Relaxed),
         managed_allocs: c.managed_allocs.load(Ordering::Relaxed),
+        sparse_allocs: c.sparse_allocs.load(Ordering::Relaxed),
+        sparse_backed_bytes: c.sparse_backed_bytes.load(Ordering::Relaxed),
         managed_bytes: c.managed_bytes.load(Ordering::Relaxed),
         system_allocs: c.system_allocs.load(Ordering::Relaxed),
         system_bytes: c.system_bytes.load(Ordering::Relaxed),
@@ -348,6 +358,18 @@ pub(crate) fn managed_alloc(bytes: usize) {
 pub(crate) fn managed_free(bytes: usize) {
     down(&COUNTERS.managed_allocs);
     COUNTERS.managed_bytes.fetch_sub(bytes as u64, Ordering::Relaxed);
+}
+pub(crate) fn sparse_alloc() {
+    up(&COUNTERS.sparse_allocs);
+}
+pub(crate) fn sparse_free() {
+    down(&COUNTERS.sparse_allocs);
+}
+pub(crate) fn sparse_backed(bytes: usize) {
+    COUNTERS.sparse_backed_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+}
+pub(crate) fn sparse_unbacked(bytes: usize) {
+    COUNTERS.sparse_backed_bytes.fetch_sub(bytes as u64, Ordering::Relaxed);
 }
 pub(crate) fn system_alloc(bytes: usize) {
     up(&COUNTERS.system_allocs);

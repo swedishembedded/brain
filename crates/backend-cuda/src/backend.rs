@@ -2185,6 +2185,25 @@ impl backend_api::Backend for CudaBackend {
         Ok(self.wrap_initialised(mem))
     }
 
+    fn sparse_granule(&self) -> Option<u64> {
+        self.ctx.sparse_granule().ok().map(|g| g as u64)
+    }
+
+    fn alloc_sparse(&self, label: &str, bytes: u64) -> Result<DeviceBuffer, String> {
+        let mem = self.ctx.alloc_sparse(bytes as usize).map_err(|e| format!("backend-cuda: sparse allocation of {bytes} bytes for {label} failed: {e}"))?;
+        Ok(self.wrap_initialised(mem))
+    }
+
+    fn back_sparse(&self, buf: &DeviceBuffer, first: u64, count: u64) -> Result<u64, String> {
+        // Fresh memory reads as zero, but the kernels queued so far may still write the granules around it.
+        CudaBuf::of(buf).mem.back(first as usize, count as usize).map(|n| n as u64)
+    }
+
+    fn unback_sparse(&self, buf: &DeviceBuffer, first: u64, count: u64) -> Result<u64, String> {
+        self.issue_held();
+        CudaBuf::of(buf).mem.unback(first as usize, count as usize).map(|n| n as u64)
+    }
+
     fn prefetch(&self, buf: &DeviceBuffer, offset_bytes: u64, bytes: u64, target: backend_api::PrefetchTarget) -> Result<(), String> {
         let mem = &CudaBuf::of(buf).mem;
         self.ctx.prefetch(mem, offset_bytes as usize, bytes as usize, target == backend_api::PrefetchTarget::Device)?;

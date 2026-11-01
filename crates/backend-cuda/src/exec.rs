@@ -543,6 +543,44 @@ impl Context {
         Ok(self.placed(p as CuDevicePtr, bytes, Origin::System { layout, stream }))
     }
 
+    /// The granularity of a sparse buffer: physical memory is mapped and unmapped in whole multiples of this many
+    /// bytes, at offsets that are multiples of it. `Err` where the driver has no virtual memory management.
+    pub fn sparse_granule(&self) -> Result<usize, String> {
+        let vmm = self.d.vmm().map_err(str::to_string)?;
+        let prop = self.sparse_prop()?;
+        self.make_current()?;
+        let mut granule = 0usize;
+        // SAFETY: `prop` is a fully initialised property block and `granule` a valid out-parameter.
+        self.d.check(unsafe { (vmm.granularity)(&mut granule, &prop, 0) }, "cuMemGetAllocationGranularity")?;
+        Ok(granule)
+    }
+
+    fn sparse_prop(&self) -> Result<crate::driver::CuMemAllocationProp, String> {
+        Ok(crate::driver::CuMemAllocationProp {
+            kind: 1,
+            requested_handle_types: 0,
+            location: self.device_location()?,
+            win32_handle_meta_data: std::ptr::null_mut(),
+            alloc_flags: [0; 8],
+        })
+    }
+
+    /// Reserve `bytes` of address space (rounded up to the granule) with nothing behind it: a kernel that touches
+    /// a part not yet backed ([`DeviceMem::back`]) faults. The memory is only what the caller maps in.
+    pub fn alloc_sparse(&self, bytes: usize) -> Result<DeviceMem, String> {
+        let vmm = self.d.vmm().map_err(str::to_string)?;
+        let granule = self.sparse_granule()?;
+        let len = bytes.max(1).div_ceil(granule) * granule;
+        self.make_current()?;
+        let mut ptr: CuDevicePtr = 0;
+        // SAFETY: `ptr` is a valid out-parameter; alignment 0 asks for the default, which is at least the granule.
+        self.d.check(unsafe { (vmm.address_reserve)(&mut ptr, len, 0, 0, 0) }, "cuMemAddressReserve")?;
+        crate::live::sparse_alloc();
+        let stream = self.stream_guard.clone().ok_or("no stream")?;
+        let backing = SparseBacking { granule, handles: std::sync::Mutex::new(vec![0; len / granule]), prop: self.sparse_prop()?, stream };
+        Ok(self.placed(ptr, len, Origin::Sparse(backing)))
+    }
+
     fn placed(&self, ptr: CuDevicePtr, bytes: usize, origin: Origin) -> DeviceMem {
         DeviceMem {
             d: self.d,
@@ -1792,6 +1830,87 @@ impl DeviceMem {
     pub fn host_ptr(&self) -> Option<*mut u8> {
         matches!(self.origin, Origin::Managed | Origin::System { .. }).then_some(self.ptr as *mut u8)
     }
+
+    /// The granule of a sparse allocation ([`Context::sparse_granule`]), or `None` for any other.
+    pub fn sparse_granule(&self) -> Option<usize> {
+        match &self.origin {
+            Origin::Sparse(b) => Some(b.granule),
+            _ => None,
+        }
+    }
+
+    /// Back the granules `first .. first + count` of a sparse allocation with fresh physical memory, readable and
+    /// writable by this device. Granules already backed are left alone, so the call is idempotent; the contents of a
+    /// newly backed granule are zero. Returns the number of granules newly backed.
+    pub fn back(&self, first: usize, count: usize) -> Result<usize, String> {
+        let Origin::Sparse(b) = &self.origin else { return Err("back: not a sparse allocation".to_string()) };
+        let vmm = self.d.vmm().map_err(str::to_string)?;
+        let mut handles = b.handles.lock().unwrap_or_else(|e| e.into_inner());
+        let end = first.checked_add(count).filter(|&e| e <= handles.len()).ok_or_else(|| format!("back: granules {first}..{} are past the {} this allocation spans", first.saturating_add(count), handles.len()))?;
+        // SAFETY: the context is retained for the life of `self`.
+        self.d.check(unsafe { (self.fns.ctx_set_current)(self.ctx) }, "cuCtxSetCurrent")?;
+        let access = crate::driver::CuMemAccessDesc { location: b.prop.location, flags: 3 };
+        let mut backed = 0;
+        for g in first..end {
+            if handles[g] != 0 {
+                continue;
+            }
+            let at = self.ptr + (g * b.granule) as CuDevicePtr;
+            let mut handle = 0u64;
+            // SAFETY: `handle` is a valid out-parameter and `prop` describes device memory on this context's device.
+            self.d.check(unsafe { (vmm.create)(&mut handle, b.granule, &b.prop, 0) }, "cuMemCreate")?;
+            // SAFETY: `at .. at + granule` lies inside the reserved range and holds no mapping (its handle slot is 0).
+            let mapped = self.d.check(unsafe { (vmm.map)(at, b.granule, 0, handle, 0) }, "cuMemMap").and_then(|()| self.d.check(unsafe { (vmm.set_access)(at, b.granule, &access, 1) }, "cuMemSetAccess"));
+            if let Err(e) = mapped {
+                // SAFETY: undoes exactly what this iteration did; an unmap of an unmapped range is the error we ignore.
+                unsafe {
+                    (vmm.unmap)(at, b.granule);
+                    (vmm.release)(handle);
+                }
+                return Err(e);
+            }
+            handles[g] = handle;
+            crate::live::sparse_backed(b.granule);
+            backed += 1;
+        }
+        Ok(backed)
+    }
+
+    /// Take the physical memory back from granules `first .. first + count` of a sparse allocation, after waiting
+    /// for the work this handle's stream and the other streams have queued on it. Granules not backed are left
+    /// alone. Returns the number newly unbacked. A kernel that reads an unbacked granule faults.
+    pub fn unback(&self, first: usize, count: usize) -> Result<usize, String> {
+        let Origin::Sparse(b) = &self.origin else { return Err("unback: not a sparse allocation".to_string()) };
+        let vmm = self.d.vmm().map_err(str::to_string)?;
+        let mut handles = b.handles.lock().unwrap_or_else(|e| e.into_inner());
+        let end = first.checked_add(count).filter(|&e| e <= handles.len()).ok_or_else(|| format!("unback: granules {first}..{} are past the {} this allocation spans", first.saturating_add(count), handles.len()))?;
+        if !handles[first..end].iter().any(|&h| h != 0) {
+            return Ok(0);
+        }
+        self.d.check(unsafe { (self.fns.ctx_set_current)(self.ctx) }, "cuCtxSetCurrent")?;
+        // SAFETY: the stream outlives this call (`b.stream` holds it).
+        self.d.check(unsafe { (self.fns.stream_synchronize)(b.stream.stream) }, "cuStreamSynchronize")?;
+        for f in std::mem::take(&mut *self.fence.lock().unwrap_or_else(|e| e.into_inner())).into_all() {
+            f.event.synchronize()?;
+        }
+        let mut freed = 0;
+        for g in first..end {
+            let handle = std::mem::take(&mut handles[g]);
+            if handle == 0 {
+                continue;
+            }
+            let at = self.ptr + (g * b.granule) as CuDevicePtr;
+            // SAFETY: the granule is mapped to `handle` (its slot was nonzero) and no work of this device uses it.
+            unsafe {
+                self.d.check((vmm.unmap)(at, b.granule), "cuMemUnmap")?;
+                self.d.check((vmm.release)(handle), "cuMemRelease")?;
+            }
+            crate::live::sparse_unbacked(b.granule);
+            freed += 1;
+        }
+        Ok(freed)
+    }
+
     /// Record that a captured graph names this block's address, so freeing it
     /// invalidates graphs ([`Context::graph_epoch`]). Idempotent.
     pub fn mark_graph_referenced(&self) {
@@ -1814,7 +1933,24 @@ enum Origin {
     /// A stream-ordered pool block; freed back to its pool without waiting for
     /// the device.
     Pool(Arc<PoolRef>),
+    /// A reserved address range whose granules are backed by physical memory on demand
+    /// ([`DeviceMem::back`]); the memory is returned and the range freed when it drops.
+    Sparse(SparseBacking),
 }
+
+/// The physical memory behind the mapped granules of a sparse [`DeviceMem`].
+struct SparseBacking {
+    granule: usize,
+    /// Per granule: the physical allocation mapped there, or 0.
+    handles: std::sync::Mutex<Vec<u64>>,
+    prop: crate::driver::CuMemAllocationProp,
+    /// Waited on before any granule is unmapped: a kernel of this handle may still be using it.
+    stream: Arc<StreamGuard>,
+}
+
+// SAFETY: the property block's only pointer is null and never read by this process.
+unsafe impl Send for SparseBacking {}
+unsafe impl Sync for SparseBacking {}
 
 impl DeviceMem {
     /// Stop ordering other streams' uses of this allocation against each other
@@ -1873,6 +2009,32 @@ impl Drop for DeviceMem {
                         } else {
                             crate::live::managed_free(len);
                         }
+                    }
+                }
+            }
+            Origin::Sparse(b) => {
+                // Same wait as for system memory: a kernel of any handle may still be using the mapped granules.
+                // SAFETY: the context outlives the stream guard; every mapped handle is unmapped and released once,
+                // then the range is freed.
+                unsafe {
+                    let mut idle = (self.fns.ctx_set_current)(self.ctx) == 0 && (self.fns.stream_synchronize)(b.stream.stream) == 0;
+                    for f in &fence {
+                        idle = idle && (self.fns.event_synchronize)(f.event.ev) == 0;
+                    }
+                    match self.d.vmm() {
+                        Ok(vmm) if idle => {
+                            for (g, handle) in b.handles.lock().unwrap_or_else(|e| e.into_inner()).iter_mut().enumerate() {
+                                if *handle != 0 {
+                                    (vmm.unmap)(self.ptr + (g * b.granule) as CuDevicePtr, b.granule);
+                                    (vmm.release)(*handle);
+                                    crate::live::sparse_unbacked(b.granule);
+                                    *handle = 0;
+                                }
+                            }
+                            (vmm.address_free)(self.ptr, len);
+                            crate::live::sparse_free();
+                        }
+                        _ => tracing::warn!("a sparse allocation could not be waited for and was left mapped"),
                     }
                 }
             }

@@ -1555,6 +1555,38 @@ pub trait Backend: Send + Sync {
         }
     }
 
+    /// The granule of this backend's sparse buffers ([`Self::alloc_sparse`]): backing memory is attached and taken
+    /// back in whole granules. `None` where the backend has no sparse buffers.
+    fn sparse_granule(&self) -> Option<u64> {
+        None
+    }
+
+    /// A buffer of `bytes` (rounded up to the granule) whose address range is reserved but backed by no memory:
+    /// [`Self::back_sparse`] attaches memory to granules of it and [`Self::unback_sparse`] takes it back. A kernel
+    /// that touches an unbacked granule faults, so the caller backs every granule a dispatch can reach first.
+    /// Backing memory comes from the device when it is attached and returns to it when it is taken back, so
+    /// sparse buffers that are never all backed at once share the memory between them. A newly backed granule
+    /// reads as zero. The address of a granule never changes, so a recorded program naming the buffer stays valid.
+    /// An `Err` where the backend has none.
+    fn alloc_sparse(&self, label: &str, bytes: u64) -> Result<DeviceBuffer, String> {
+        let _ = bytes;
+        Err(format!("{} backend does not support sparse buffers ({label})", self.kind()))
+    }
+
+    /// Attach memory to the granules `first .. first + count` of a sparse buffer; granules already backed are left
+    /// alone. Returns how many were newly backed.
+    fn back_sparse(&self, buf: &DeviceBuffer, first: u64, count: u64) -> Result<u64, String> {
+        let _ = (buf, first, count);
+        Err(format!("{} backend does not support sparse buffers", self.kind()))
+    }
+
+    /// Take the memory back from granules `first .. first + count` of a sparse buffer once the work queued on it has
+    /// finished; granules not backed are left alone. Returns how many were newly unbacked.
+    fn unback_sparse(&self, buf: &DeviceBuffer, first: u64, count: u64) -> Result<u64, String> {
+        let _ = (buf, first, count);
+        Err(format!("{} backend does not support sparse buffers", self.kind()))
+    }
+
     /// Move `[offset_bytes, offset_bytes + bytes)` of a managed or system
     /// buffer toward `target`, ordered on the backend's stream. An `Err` where
     /// the backend has no such operation or the buffer is not placed memory.

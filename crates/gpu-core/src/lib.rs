@@ -1594,6 +1594,31 @@ mod native_facade {
             self.be().alloc_placed(label, size, policy)
         }
 
+        /// The granule of this device's sparse buffers ([`Self::try_alloc_sparse`]), or `None` when the backend has none.
+        pub fn sparse_granule(&self) -> Option<u64> {
+            self.inner.sparse_granule()
+        }
+
+        /// A sparse buffer of `bytes`: an address range with no memory behind it until [`Self::back_sparse`] attaches
+        /// some to granules of it (`backend_api::Backend::alloc_sparse` has the contract). `charged` is what this
+        /// buffer adds to the process ceiling, if one is published: the share of the device's memory the caller
+        /// plans to back it with, since several sparse buffers draw on the same memory and the ceiling counts it once.
+        pub fn try_alloc_sparse(&self, label: &str, bytes: u64, charged: u64) -> Result<DeviceBuffer, String> {
+            self.try_charge("sparse", charged).map_err(|d| memauth::denial_message(self.mem_device, "sparse", charged, d))?;
+            self.be().alloc_sparse(label, bytes)
+        }
+
+        /// Attach memory to the granules `first .. first + count` of a sparse buffer; returns how many were newly backed.
+        pub fn back_sparse(&self, buf: &DeviceBuffer, first: u64, count: u64) -> Result<u64, String> {
+            self.be().back_sparse(buf, first, count)
+        }
+
+        /// Take the memory back from granules `first .. first + count` of a sparse buffer once the queued work on it is
+        /// done; returns how many were newly unbacked.
+        pub fn unback_sparse(&self, buf: &DeviceBuffer, first: u64, count: u64) -> Result<u64, String> {
+            self.be().unback_sparse(buf, first, count)
+        }
+
         /// The memory device an allocation under `policy` is charged to: the
         /// card for device and managed memory (managed pages may migrate to it, so
         /// the card's share is the safe count), the host for system memory.

@@ -119,6 +119,9 @@ pub struct Driver {
     /// Managed allocation, prefetch and advice, resolved separately: a driver
     /// without them has no placement policies and everything else works.
     place: Result<PlaceFns, String>,
+    /// Virtual memory management (reserve an address range, map physical memory into parts of it on demand),
+    /// resolved separately: a driver without it has no sparse buffers and everything else works.
+    vmm: Result<VmmFns, String>,
     /// Device-to-device access and copies, resolved separately: a driver
     /// without them has no peer path and everything else works.
     peer: Result<PeerFns, String>,
@@ -403,6 +406,45 @@ pub struct PlaceFns {
     pub(crate) advise: unsafe extern "C" fn(CuDevicePtr, usize, c_int, CuMemLocation) -> CuResult,
 }
 
+/// `CUmemAllocationProp`: what a physical allocation is and where it lives (32 bytes).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CuMemAllocationProp {
+    /// `CU_MEM_ALLOCATION_TYPE_PINNED` (1).
+    pub kind: c_int,
+    /// `CUmemAllocationHandleType`: 0, no shareable handle.
+    pub requested_handle_types: c_int,
+    pub location: CuMemLocation,
+    pub win32_handle_meta_data: *mut std::ffi::c_void,
+    /// `compressionType`, `gpuDirectRDMACapable`, `usage` and the reserved bytes: all zero.
+    pub alloc_flags: [u8; 8],
+}
+
+/// `CUmemAccessDesc`: who may touch a mapped range, and how.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CuMemAccessDesc {
+    pub location: CuMemLocation,
+    /// `CU_MEM_ACCESS_FLAGS_PROT_READWRITE` (3).
+    pub flags: c_int,
+}
+
+/// Virtual memory management: an address range reserved once, physical memory created and mapped into parts
+/// of it and unmapped again on demand. The address of a mapped byte never changes, so a recorded graph that names the
+/// range stays valid as parts of it come and go.
+///
+/// `cuMemMap` takes a whole physical allocation (its `offset` must be zero), so one handle backs one mapping.
+pub struct VmmFns {
+    pub(crate) granularity: unsafe extern "C" fn(*mut usize, *const CuMemAllocationProp, c_int) -> CuResult,
+    pub(crate) address_reserve: unsafe extern "C" fn(*mut CuDevicePtr, usize, usize, CuDevicePtr, u64) -> CuResult,
+    pub(crate) address_free: unsafe extern "C" fn(CuDevicePtr, usize) -> CuResult,
+    pub(crate) create: unsafe extern "C" fn(*mut u64, usize, *const CuMemAllocationProp, u64) -> CuResult,
+    pub(crate) release: unsafe extern "C" fn(u64) -> CuResult,
+    pub(crate) map: unsafe extern "C" fn(CuDevicePtr, usize, usize, u64, u64) -> CuResult,
+    pub(crate) unmap: unsafe extern "C" fn(CuDevicePtr, usize) -> CuResult,
+    pub(crate) set_access: unsafe extern "C" fn(CuDevicePtr, usize, *const CuMemAccessDesc, usize) -> CuResult,
+}
+
 /// Device-to-device access, copies and the link questions.
 ///
 /// A missing symbol disables the peer path only; a pair of cards then moves data
@@ -495,9 +537,11 @@ fn load() -> Result<Driver, String> {
         let graph = load_graph(&lib);
         let pool = load_pool(&lib);
         let place = load_place(&lib);
+        let vmm = load_vmm(&lib);
         let peer = load_peer(&lib);
         let d = Driver {
             peer,
+            vmm,
             exec,
             graph,
             pool,
@@ -615,6 +659,23 @@ unsafe fn load_place(lib: &libloading::Library) -> Result<PlaceFns, String> {
     })
 }
 
+/// Resolve the virtual memory management half. A missing symbol disables sparse buffers only.
+///
+/// # Safety
+/// Same contract as [`load_exec`].
+unsafe fn load_vmm(lib: &libloading::Library) -> Result<VmmFns, String> {
+    Ok(VmmFns {
+        granularity: sym(lib, b"cuMemGetAllocationGranularity\0")?,
+        address_reserve: sym(lib, b"cuMemAddressReserve\0")?,
+        address_free: sym(lib, b"cuMemAddressFree\0")?,
+        create: sym(lib, b"cuMemCreate\0")?,
+        release: sym(lib, b"cuMemRelease\0")?,
+        map: sym(lib, b"cuMemMap\0")?,
+        unmap: sym(lib, b"cuMemUnmap\0")?,
+        set_access: sym(lib, b"cuMemSetAccess\0")?,
+    })
+}
+
 /// Resolve the device-to-device half. A missing symbol disables the peer path
 /// only.
 ///
@@ -664,6 +725,10 @@ impl Driver {
     }
 
     /// The placement entry points, or why this driver has none.
+    pub fn vmm(&self) -> Result<&VmmFns, &str> {
+        self.vmm.as_ref().map_err(|e| e.as_str())
+    }
+
     pub fn place(&self) -> Result<&PlaceFns, &str> {
         self.place.as_ref().map_err(|e| e.as_str())
     }
