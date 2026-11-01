@@ -860,19 +860,19 @@ fn decode_attention_timing_report() {
 }
 
 /// The native decode attention (split pass plus merge) per layer at the served matrix cells, with the rate on the bytes it must
-/// read against the card's streaming roof, for the bf16 and int8 pools.
+/// read against the card's streaming roof, for the bf16, int8 and FP8 pools at 1, 4, 16 and 64 rows of 8K, 32K and 64K keys.
 #[test]
 #[ignore = "a timing report for kernel work, not a spec"]
 fn decode_attention_matrix_cell_report() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let Some(g) = cuda_gpu("decode timing: no CUDA device") else { return };
     const ROOF_GBS: f64 = 3400.0;
-    for tier in [KvTier::BF16, KvTier::INT8] {
+    for tier in [KvTier::BF16, KvTier::INT8, KvTier::FP8] {
         let row_bytes = match tier.element() {
             KvElement::Bf16 => 2.0 * 256.0,
             _ => 256.0 + 4.0,
         };
-        for (batch, len) in [(1u32, 8192u32), (16, 8192), (64, 8192), (1, 32_768), (16, 32_768)] {
+        for (batch, len) in [1u32, 4, 16, 64].into_iter().flat_map(|b| [8192u32, 32_768, 65_536].map(|l| (b, l))) {
             let bytes = 2.0 * batch as f64 * len as f64 * 4.0 * row_bytes;
             let (t, parts) = time_decode_parts(&g, tier, batch, len);
             let gbs = bytes / (t * 1e-3) / 1e9;
