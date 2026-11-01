@@ -1,0 +1,4 @@
+# Recorded rates (higher is better) for device class cpu-Neoverse_V2_x144; see scripts/gates/perf-floor-gate.sh.
+# op rate unit
+matmul_f32_m1_1024x4096 3.168 GFLOPS
+matmul_f32_m256_1024x4096 185.965 GFLOPS

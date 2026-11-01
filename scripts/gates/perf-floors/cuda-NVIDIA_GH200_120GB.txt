@@ -1,0 +1,15 @@
+# Recorded rates (higher is better) for device class cuda-NVIDIA_GH200_120GB; see scripts/gates/perf-floor-gate.sh.
+# op rate unit
+fp8_gemv_portable_m1_5120x17408 1386.865 GB/s
+fp8_gemv_portable_m8_5120x17408 220.866 GB/s
+matmul_f32_m1_1024x4096 44.722 GFLOPS
+matmul_f32_m256_1024x4096 11269.597 GFLOPS
+flash_prefill_portable_n4096 5.151 TFLOPS
+flash_prefill_native_n4096 76.468 TFLOPS
+decode_attn_portable_b16_s2048 653.143 GB/s
+decode_attn_native_b16_s2048 1366.005 GB/s
+fp8_native_m1_5120x17408 2828.386 GB/s
+fp8_native_m16_5120x17408 2490.800 GB/s
+fp8_native_m64_5120x17408 2477.510 GB/s
+fp8_native_m4096_5120x17408 1155.877 TFLOPS
+gdn_chunk_native_bhc1536_c64 1192.449 GB/s

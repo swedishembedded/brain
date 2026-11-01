@@ -1,0 +1,8 @@
+# Recorded rates (higher is better) for device class vulkan-NVIDIA_GH200_120GB; see scripts/gates/perf-floor-gate.sh.
+# op rate unit
+fp8_gemv_portable_m1_5120x17408 664.869 GB/s
+fp8_gemv_portable_m8_5120x17408 107.668 GB/s
+matmul_f32_m1_1024x4096 115.561 GFLOPS
+matmul_f32_m256_1024x4096 496.593 GFLOPS
+flash_prefill_portable_n4096 5.869 TFLOPS
+decode_attn_portable_b16_s2048 258.036 GB/s

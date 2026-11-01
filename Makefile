@@ -419,8 +419,8 @@ test/slow:
 # fixtures, so unlike `test/parity/strict` it carries no narrowing knob and no
 # "green because skipped" risk.
 ## test/full - release gate: test + test/doc + test/slow + test/e2e + test/conformance + test/rl + test/gradcheck + test/package + every check/* gate
-##   + test/parity + test/parity/strict (needs make testdata/fetch)
-test/full: test test/doc test/slow test/e2e test/conformance test/rl test/gradcheck test/package check/scripts check/env-reads check/env-writes check/test-skips check/seed-literals check/serve-conformance test/gates check/spdx check/paths check/scope check/saved-policy check/agents-md check/files check/samples check/sdk-features check/make-targets check/generated test/parity test/parity/strict
+##   + test/parity + test/parity/strict (needs make testdata/fetch) + test/perf
+test/full: test test/doc test/slow test/e2e test/conformance test/rl test/gradcheck test/package check/scripts check/env-reads check/env-writes check/test-skips check/seed-literals check/serve-conformance test/gates check/spdx check/paths check/scope check/saved-policy check/agents-md check/files check/samples check/sdk-features check/make-targets check/generated test/parity test/parity/strict test/perf
 
 # Rank every test binary by wall time; --budget fails if any exceeds it. This is
 # what keeps the fast lane fast.
@@ -496,10 +496,36 @@ test/cuda-matrix:
 
 # Cross-backend parity gate: CPU == Vulkan == NPU (gradcheck on both backends +
 # direct CPU-vs-GPU forward parity + TTS NPU codec vs CPU reference).
-## test/parity - default: cross-backend parity gate, CPU == Vulkan == NPU
+## test/parity - default: cross-backend parity gate, CPU == Vulkan == CUDA (where present) == NPU
 ##   (test/parity/strict, /forecast and /wan are separate)
 test/parity:
 	scripts/gates/parity-gate.sh
+
+# Per-backend performance floors: the hot ops of serving timed on each backend
+# this machine has (CPU, Vulkan, CUDA) by one focused test binary, compared with
+# the rates recorded per device class in scripts/gates/perf-floors/. A couple of
+# minutes, not a model run. BRAIN_DEVICE=gpuN picks the CUDA card; PERF_FLOOR_TOLERANCE
+# (default 0.25) is the fraction a rate may fall below its floor.
+## test/perf - default: per-backend hot-op performance floors on every available backend
+##   (test/perf/cpu, /vulkan, /cuda run one backend; test/perf/record re-records the floors)
+test/perf:
+	scripts/gates/perf-floor-gate.sh
+
+## test/perf/cpu - hot-op performance floors on the CPU backend
+test/perf/cpu:
+	scripts/gates/perf-floor-gate.sh cpu
+
+## test/perf/vulkan - hot-op performance floors on the Vulkan backend
+test/perf/vulkan:
+	scripts/gates/perf-floor-gate.sh vulkan
+
+## test/perf/cuda - hot-op performance floors on the CUDA backend
+test/perf/cuda:
+	scripts/gates/perf-floor-gate.sh cuda
+
+## test/perf/record - re-record the floors of every available backend from this machine's rates (review the diff)
+test/perf/record:
+	scripts/gates/perf-floor-gate.sh --record
 
 # Reference parity with skipping DISABLED.
 # `test/parity/wan` generalized to every fixture-gated parity suite. Cargo
