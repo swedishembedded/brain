@@ -253,6 +253,12 @@ match that score's own count; the served and in-process sides of a
 train-serve comparison then score exactly the same tokens.
 `crates/sdk/examples/emit_held_out_records.rs` is the command-line form.
 
+On `qwen35` a message's `content` may also be a list of parts, `{"type": "text"}` and `{"type": "image_url",
+"image_url": {"url": "data:image/png;base64,..."}}`, when the base carries a vision tower: the images are read as
+serving reads them, with a frozen tower, and a record the base cannot read is refused by line instead of trained as
+text ([Qwen3.8-27B: fine-tuning on conversations with images](models/qwen35.md#fine-tuning-on-conversations-with-images)).
+`validate_chat_dataset_for` checks such a file against the base, and `ChatDatasetSummary` counts its images.
+
 The three fine-tuners (`ChatFineTune`, `ChatFullFineTune`,
 `PreferenceFineTune`) take `.arch("qwen3")` or `.arch("qwen35")`, the
 architecture's `brain_arch` id. `ChatFineTune` on `qwen35`, the Qwen3.8-27B

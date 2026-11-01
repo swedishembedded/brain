@@ -299,3 +299,25 @@ fn a_run_records_every_step_s_phases_and_token_accounting() {
     assert!((total["useful_tokens_per_s"].as_f64().unwrap() - useful / step_secs).abs() < 1e-6);
     assert!((total["computed_tokens_per_s"].as_f64().unwrap() - computed / step_secs).abs() < 1e-6);
 }
+
+/// A record with an image part is not trained as text on a base that cannot read it: the run is refused before a
+/// device is claimed, naming the file, the record and why, and so is the dataset check that precedes it.
+#[test]
+fn an_image_record_on_a_base_without_a_vision_tower_is_refused_not_trained_as_text() {
+    let model = qwen35_chat_model_dir("q35-image-refused");
+    let record = serde_json::json!({
+        "messages": [
+            {"role": "user", "train": false, "content": [{"type": "text", "text": "ab"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]},
+            {"role": "assistant", "train": true, "content": "ba"}
+        ]
+    });
+    let dataset = model.join("images.jsonl");
+    std::fs::write(&dataset, format!("{}\n{record}\n", serde_json::json!({"messages": [{"role": "user", "train": false, "content": "ab"}, {"role": "assistant", "train": true, "content": "ba"}]}))).unwrap();
+
+    let err = ChatFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap()).arch("qwen35").dataset(&dataset).out_dir(model.join("run")).steps(2).device(cpu()).run().expect_err("an image the base cannot read").to_string();
+    assert!(err.contains("images.jsonl:2:") && err.contains("messages[0]") && err.contains("no vision tower"), "{err}");
+    assert!(!model.join("run").join("adapter.safetensors").exists(), "nothing was trained");
+
+    let err = brain::validate_chat_dataset(&dataset).unwrap_err();
+    assert!(err.contains(":2:") && err.contains("reads text only"), "{err}");
+}

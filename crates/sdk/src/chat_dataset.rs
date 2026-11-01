@@ -48,6 +48,10 @@ pub struct ChatDatasetSummary {
     pub trained_messages: usize,
     /// Conversations carrying a tool schema.
     pub records_with_tools: usize,
+    /// Conversations holding at least one image.
+    pub records_with_images: usize,
+    /// Images across every conversation.
+    pub images: usize,
 }
 
 /// Parse `path` and, given the checkpoint that will train on it, ENCODE every
@@ -71,11 +75,14 @@ pub fn validate_chat_dataset_for(
     model_dir: impl AsRef<Path>,
 ) -> Result<ChatDatasetSummary, String> {
     let path = path.as_ref();
-    let summary = validate_chat_dataset(path)?;
     let model_dir = model_dir.as_ref();
+    // The records are read as the base reads them: a base with a vision tower takes image parts.
+    let arch = crate::study::arch_of_checkpoint(model_dir).map_or("qwen3", |a| a.id);
+    let images = crate::finetune::image_reader(arch, model_dir).map_err(|e| e.to_string())?;
+    let summary = validate_chat_dataset_with(path, &*images)?;
     let (tok, tmpl) = crate::finetune::tokenizer_and_template(model_dir).map_err(|e| e.to_string())?;
     let render = data::chat::RenderOpts::default();
-    crate::finetune::Asked { tok: &tok, tmpl: &tmpl, no_think: None, render, pack: false }.read(path).map_err(|e| e.to_string())?;
+    crate::finetune::Asked { tok: &tok, tmpl: &tmpl, no_think: None, render, pack: false, images: &*images }.read(path).map_err(|e| e.to_string())?;
     Ok(summary)
 }
 
@@ -85,11 +92,17 @@ pub fn validate_chat_dataset_for(
 /// dataset is usually machine-produced and "invalid" is not an actionable
 /// thing to tell whoever produced it.
 pub fn validate_chat_dataset(path: impl AsRef<Path>) -> Result<ChatDatasetSummary, String> {
-    let path = path.as_ref();
-    let samples = ChatSample::from_jsonl(path).map_err(|e| e.to_string())?;
+    validate_chat_dataset_with(path.as_ref(), &data::chat::TextOnly::TRAINER)
+}
+
+/// [`validate_chat_dataset`] for a trainer whose `images` reader takes image parts.
+pub(crate) fn validate_chat_dataset_with(path: &Path, images: &dyn data::chat::ImageReader) -> Result<ChatDatasetSummary, String> {
+    let samples = ChatSample::from_jsonl_with(path, images).map_err(|e| e.to_string())?;
 
     let mut summary = ChatDatasetSummary { records: samples.len(), ..Default::default() };
     for sample in &samples {
+        summary.images += sample.media.len();
+        summary.records_with_images += usize::from(!sample.media.is_empty());
         summary.messages += sample.messages.len();
         summary.trained_messages += sample.messages.iter().filter(|m| m.train).count();
         if !sample.tools.is_empty() {

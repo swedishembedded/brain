@@ -90,6 +90,11 @@ brain qwen35 finetune DATA_DIR --base BASE --out OUT --mode lora [--base-format 
 A batch wider than one with more than 8192 tokens per micro-step is refused
 with the equivalent `--batch 1 --grad-accum G`.
 
+Conversations with images train on this verb too, when the base is a release with its vision tower: a prepared
+dataset that holds images (`ChatFineTune` writes one) is read with the tower of `--base`, which stays frozen. A dataset
+with images over a base without one is refused. See
+[Qwen3.8-27B: fine-tuning on conversations with images](../../reference/models/qwen35.md#fine-tuning-on-conversations-with-images).
+
 ### Using the adapter on the quantised base: `brain qwen35 sample-adapter`
 
 ```

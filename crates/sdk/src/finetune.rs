@@ -770,7 +770,8 @@ impl ChatFineTune {
         let (tok, tmpl) = tokenizer_and_template(&model_dir)?;
         let no_think = if self.thinking { None } else { tmpl.no_think_block() };
         let render = data::chat::RenderOpts { keep_reasoning: no_think.is_some() };
-        let asked = Asked { tok: &tok, tmpl: &tmpl, no_think: no_think.as_deref(), render, pack: self.pack_answers };
+        let images = image_reader(arch.id, &model_dir)?;
+        let asked = Asked { tok: &tok, tmpl: &tmpl, no_think: no_think.as_deref(), render, pack: self.pack_answers, images: &*images };
         let train_samples = asked.read(dataset)?;
         let dataset_records = train_samples.len();
         let mut replay_samples = Vec::new();
@@ -784,6 +785,8 @@ impl ChatFineTune {
         let held_out = self.held_out.as_deref().map(|path| asked.read(path)).transpose()?;
         let held_out_text = self.held_out_text.as_deref().map(|path| asked.read(path)).transpose()?;
         let monitor = self.monitor.as_deref().map(|path| asked.read(path)).transpose()?;
+        refuse_images_in(held_out.as_deref(), "held-out")?;
+        refuse_images_in(held_out_text.as_deref(), "held-out text")?;
         if self.eval_every == 0 && self.evaluations_dir.is_some() {
             return Err(Error::Backend("ChatFineTune: keeping the evaluations needs eval_every > 0".to_string()));
         }
@@ -1251,7 +1254,7 @@ pub fn score_chat(base: &str, adapter: Option<&Path>, held_out: &Path) -> Result
     let weights_str = utf8(&open)?;
     qwen3::checkpoint_config(weights_str).map_err(Error::Backend)?;
     let (tok, tmpl) = tokenizer_and_template(&model_dir)?;
-    let records = Asked { tok: &tok, tmpl: &tmpl, no_think: None, render: data::chat::RenderOpts::default(), pack: false }.read(held_out)?;
+    let records = Asked { tok: &tok, tmpl: &tmpl, no_think: None, render: data::chat::RenderOpts::default(), pack: false, images: &data::chat::TextOnly::TRAINER }.read(held_out)?;
     let mut longest = 0usize;
     for (i, r) in records.iter().enumerate() {
         let (ids, _) = r.encode(&tok, &tmpl).map_err(|e| Error::Backend(format!("{}: record {}: {e}", held_out.display(), i + 1)))?;
@@ -1557,7 +1560,7 @@ pub fn emit_held_out_records(base: &str, dataset: &Path, out: &Path, thinking: b
     std::fs::write(&tmp, held.iter().map(|r| r.as_str()).collect::<Vec<_>>().join("\n")).map_err(|e| Error::Backend(format!("{}: {e}", tmp.display())))?;
     let no_think = if thinking { None } else { tmpl.no_think_block() };
     let render = data::chat::RenderOpts { keep_reasoning: no_think.is_some() };
-    let asked = Asked { tok: &tok, tmpl: &tmpl, no_think: no_think.as_deref(), render, pack: false };
+    let asked = Asked { tok: &tok, tmpl: &tmpl, no_think: no_think.as_deref(), render, pack: false, images: &data::chat::TextOnly::TRAINER };
     let samples = asked.read(&tmp);
     std::fs::remove_file(&tmp).ok();
     let samples = samples?;
@@ -1641,6 +1644,9 @@ pub(crate) struct Asked<'a> {
     pub render: data::chat::RenderOpts,
     /// A record of several supervised answers is one packed example.
     pub pack: bool,
+    /// How the records' image parts are read: [`image_reader`] for a base that reads images, else a reader that
+    /// refuses them.
+    pub images: &'a dyn data::chat::ImageReader,
 }
 
 impl Asked<'_> {
@@ -1653,11 +1659,11 @@ impl Asked<'_> {
     /// (whole-record masking refuses those); any other record keeps its shape,
     /// its answers following the no-think block when there is one.
     pub(crate) fn read(&self, path: &Path) -> Result<Vec<ChatSample>> {
-        let summary = crate::validate_chat_dataset(path).map_err(Error::Backend)?;
+        let summary = crate::chat_dataset::validate_chat_dataset_with(path, self.images).map_err(Error::Backend)?;
         if summary.trained_messages == 0 {
             return Err(Error::Backend(format!("{}: holds no supervised turns (`\"train\": true`)", path.display())));
         }
-        let records = ChatSample::from_jsonl(path).map_err(|e| Error::Backend(format!("{}: {e}", path.display())))?;
+        let records = ChatSample::from_jsonl_with(path, self.images).map_err(|e| Error::Backend(format!("{}: {e}", path.display())))?;
         let mut samples = Vec::with_capacity(records.len());
         for (at, record) in records.iter().enumerate() {
             let invalid = |e: &dyn std::fmt::Display| Error::Backend(format!("{}: record {} cannot be encoded for training: {e}", path.display(), at + 1));
@@ -1683,13 +1689,38 @@ impl Asked<'_> {
                 (None, Some(block)) => samples.push(record.answering_without_thinking(block)),
             }
         }
-        for (at, sample) in samples.iter().enumerate() {
+        for (at, sample) in samples.iter_mut().enumerate() {
             let (ids, mask) = sample.encode_with(self.tok, self.tmpl, self.render).map_err(|e| Error::Backend(format!("{}: example {} cannot be encoded for training: {e}", path.display(), at + 1)))?;
+            // An example made from one answer of a longer record holds the images its text places, the first ones.
+            if let Some(placeholder) = self.images.placeholder_token() {
+                sample.keep_images_placed_in(data::chat::token_runs(&ids, placeholder).len()).map_err(|e| Error::Backend(format!("{}: example {}: {e}", path.display(), at + 1)))?;
+            }
             if !mask.iter().any(|m| *m) {
                 return Err(Error::Backend(format!("{}: example {} encodes to {} token(s) with none supervised, so training on it would be a no-op", path.display(), at + 1, ids.len())));
             }
         }
         Ok(samples)
+    }
+}
+
+/// How a base's records are read for training: with the vision tower's geometry and placeholder tokens when the base
+/// reads images (a `qwen35` checkpoint with a vision tower), else as text only, refusing an image part.
+pub(crate) fn image_reader(arch_id: &str, model_dir: &Path) -> Result<Box<dyn data::chat::ImageReader>> {
+    if arch_id == "qwen35" {
+        if let Some(reader) = qwen35::vision_sft::VisionReader::open(model_dir).map_err(|e| Error::Backend(format!("{}: {e}", model_dir.display())))? {
+            return Ok(Box::new(reader));
+        }
+        return Ok(Box::new(data::chat::TextOnly::NO_TOWER));
+    }
+    Ok(Box::new(data::chat::TextOnly::TRAINER))
+}
+
+/// Refuse held-out records that hold images: a held-out set is scored by a text pass, and scoring it without its
+/// pictures would report a number about a different task. The monitoring set reads them.
+fn refuse_images_in(records: Option<&[ChatSample]>, what: &str) -> Result<()> {
+    match records {
+        Some(records) if records.iter().any(|r| !r.media.is_empty()) => Err(Error::Backend(format!("ChatFineTune: the {what} records hold images, and a held-out set is scored without them; pass them as .monitor(..), which reads images"))),
+        _ => Ok(()),
     }
 }
 
@@ -1955,6 +1986,10 @@ mod tests {
     }
 
     fn read_lines_packing(lines: &[&str], no_think: bool, pack: bool) -> Result<Vec<ChatSample>> {
+        read_lines_with(lines, no_think, pack, &data::chat::TextOnly::TRAINER)
+    }
+
+    fn read_lines_with(lines: &[&str], no_think: bool, pack: bool, images: &dyn data::chat::ImageReader) -> Result<Vec<ChatSample>> {
         let tmpl = ChatTemplate::compile(&std::fs::read_to_string(brain_testutil::testdata("qwen3/chat_template.jinja")).unwrap()).unwrap();
         let chars: String = (32u8..127).map(char::from).chain(['\n']).collect();
         let tok = data::tokenizer::CharTokenizer::from_corpus(&chars);
@@ -1965,9 +2000,47 @@ mod tests {
         std::fs::write(&path, lines.join("\n")).unwrap();
         let no_think_block = no_think.then(|| tmpl.no_think_block().unwrap());
         let render = data::chat::RenderOpts { keep_reasoning: no_think };
-        let read = Asked { tok: &tok, tmpl: &tmpl, no_think: no_think_block.as_deref(), render, pack }.read(&path);
+        let read = Asked { tok: &tok, tmpl: &tmpl, no_think: no_think_block.as_deref(), render, pack, images }.read(&path);
         std::fs::remove_file(&path).unwrap();
         read
+    }
+
+    /// Reads `fake:<name>` URLs; an image stands for three `~` rows.
+    struct Pictures;
+
+    impl data::chat::ImageReader for Pictures {
+        fn image(&self, url: &str) -> std::result::Result<(data::chat::ImageBytes, String), String> {
+            let name = url.strip_prefix("fake:").ok_or_else(|| format!("{url} is not a picture"))?;
+            Ok((name.as_bytes().into(), "~~~".to_string()))
+        }
+        fn check_text(&self, _text: &str) -> std::result::Result<(), String> {
+            Ok(())
+        }
+        fn placeholder_token(&self) -> Option<u32> {
+            use data::tokenizer::Tokenizer;
+            Some(data::tokenizer::CharTokenizer::from_corpus(&(32u8..127).map(char::from).chain(['\n']).collect::<String>()).encode("~")[0])
+        }
+    }
+
+    /// An example made from one answer of a longer record holds the images its text places, the first ones; the
+    /// record read whole holds them all.
+    #[test]
+    fn an_example_holds_the_images_its_own_text_places() {
+        let image = |name: &str| format!(r#"{{"type":"image_url","image_url":{{"url":"fake:{name}"}}}}"#);
+        let record = format!(
+            r#"{{"messages":[{{"role":"user","content":[{}],"train":false}},{{"role":"assistant","content":"a1","train":true}},{{"role":"user","content":[{}],"train":false}},{{"role":"assistant","content":"a2","train":true}}]}}"#,
+            image("one"),
+            image("two")
+        );
+        let names = |samples: &[ChatSample]| samples.iter().map(|s| s.media.iter().map(|m| String::from_utf8(m.to_vec()).unwrap()).collect::<Vec<_>>()).collect::<Vec<_>>();
+        let per_answer = read_lines_with(&[&record], true, false, &Pictures).unwrap();
+        assert_eq!(names(&per_answer), vec![vec!["one"], vec!["one", "two"]], "each answer is asked after its own context");
+        for no_think in [false, true] {
+            let packed = read_lines_with(&[&record], no_think, true, &Pictures).unwrap();
+            assert_eq!(names(&packed), vec![vec!["one", "two"]], "a packed record holds every image, no_think={no_think}");
+        }
+        let err = read_lines_with(&[&record], true, false, &data::chat::TextOnly::NO_TOWER).map(|_| ()).unwrap_err().to_string();
+        assert!(err.contains("no vision tower") && err.contains(":1:"), "{err}");
     }
 
     const ANSWER: &str = r#"{"messages":[{"role":"user","content":"q","train":false},{"role":"assistant","content":"a","train":true}]}"#;

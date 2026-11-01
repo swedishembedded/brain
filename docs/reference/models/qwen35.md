@@ -341,6 +341,47 @@ What it does differently:
 Gated by `crates/qwen35/tests/gguf_resident_real.rs` (real file + real cards,
 self-skipping loudly without either).
 
+## Fine-tuning on conversations with images
+
+`ChatFineTune` (`.arch("qwen35")`, any `.base_format`) trains a LoRA adapter on `generic-messages-v2` records whose
+message `content` is a list of parts, an OpenAI `image_url` part (an inline `data:` URL, as `brain serve` takes) among
+them, when the base is a release that carries the vision tower (the `Qwen/Qwen3.8-27B-FP8` directory):
+
+```json
+{"messages": [
+  {"role": "user", "train": false, "content": [
+    {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}},
+    {"type": "text", "text": "Which part is this, and what is its length?"}]},
+  {"role": "assistant", "train": true, "content": "A 40 mm dowel pin."}]}
+```
+
+No flag changes: the record carries its images. They are read as serving reads the same conversation - the
+checkpoint's `preprocessor_config.json` geometry (an image above 4 megapixels is scaled down to that, as in serving),
+the same placeholder tokens, the vision tower's rows spliced at them, the same three-axis M-RoPE positions - by the same
+code (`vision_frontend::prompt_embeds`), so the model is trained on the inputs it is served.
+
+* **The tower is frozen.** No gradient is computed for the vision tower or for the rows it produces, and no adapter is
+  attached to it; LoRA trains on the decoder as for text. The loss covers the supervised assistant tokens only.
+* **Images belong to the context.** An image part in a supervised turn is refused; so is any image in a held-out set
+  (`held_out`, `held_out_text`), which is scored without them - give those records as `.monitor(..)`, which reads
+  them.
+* **Refusals, never a text-only fallback.** A record whose image cannot be decoded, is not an inline `data:` URL,
+  declares more than 36 megapixels (refused from its header) or holds more than 8 images, text that contains the
+  placeholder tokens (`<|image_pad|>` and the like), or an image part over a base without a vision tower, is refused
+  before a device is claimed, naming the file, the line and the reason. The text trainers (`ChatFullFineTune`,
+  `PreferenceFineTune`, the qwen3 fine-tuners) refuse a dataset with images instead of training on its text alone.
+* **An example holds the images its prompt places.** A record of several supervised answers trains one example per
+  answer (or one packed example), each with the images that precede it.
+* **Memory and time.** Every image adds its rows (one per 32 x 32 pixels, at most 4096 for the 4 megapixel cap) to the
+  sequence the decoder trains on, so a row's activations grow with them: set `.max_block` for the rows plus the text.
+  The tower's weights sit on the training card beside the decoder (the 27B's tower is 0.45 B parameters, held as f32;
+  allow about 4 GiB with the activations of a largest image) and its forward runs once per image per draw of the record,
+  on the training device, through the ordinary kernels. Rows are not cached between draws.
+* **Batching.** Rows with and without images may share a batch.
+
+The prepared dataset (`out_dir/prepared`) keeps the images as a sidecar of its token files, and `brain qwen35 finetune
+<prepared dir>` trains from it directly.
+
 ## LoRA training
 
 Three LoRA paths exist, at very different scales:
