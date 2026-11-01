@@ -793,6 +793,11 @@ fn native_decode_survives_back_to_back_launches_at_served_shapes() {
 /// Device time of the 27B's int8 decode attention (split pass plus merge) per layer at agent context lengths, with the
 /// achieved rate on the KV bytes it must read, for the native kernel and for the generated WGSL tier.
 fn time_decode(g: &Gpu, tier: KvTier, batch: u32, len: u32) -> f64 {
+    time_decode_parts(g, tier, batch, len).0
+}
+
+/// [`time_decode`] with the best iteration's time per kernel (name, ms).
+fn time_decode_parts(g: &Gpu, tier: KvTier, batch: u32, len: u32) -> (f64, Vec<(String, f64)>) {
     let (n_heads, n_kv, block_size) = (24u32, 4u32, 64u32);
     let per = len.div_ceil(block_size);
     let num_blocks = batch * per;
@@ -811,13 +816,17 @@ fn time_decode(g: &Gpu, tier: KvTier, batch: u32, len: u32) -> f64 {
     g.submit(&[], &steps);
     g.poll_wait();
     g.set_kernel_timing(true);
-    let mut best = f64::MAX;
+    let mut best = (f64::MAX, vec![]);
     for _ in 0..9 {
         g.reset_kernel_times();
         let steps = kernels.flash_decode(g, &q, &kc, &vc, &table, &seq_lens, &ctx, shape);
         g.submit(&[], &steps);
         g.poll_wait();
-        best = best.min(g.kernel_times().unwrap_or_default().iter().map(|(_, ms, _)| ms).sum::<f64>());
+        let parts: Vec<(String, f64)> = g.kernel_times().unwrap_or_default().iter().map(|(name, ms, _)| (name.to_string(), *ms)).collect();
+        let total = parts.iter().map(|(_, ms)| ms).sum::<f64>();
+        if total < best.0 {
+            best = (total, parts);
+        }
     }
     g.set_kernel_timing(false);
     best
@@ -865,9 +874,10 @@ fn decode_attention_matrix_cell_report() {
         };
         for (batch, len) in [(1u32, 8192u32), (16, 8192), (64, 8192), (1, 32_768), (16, 32_768)] {
             let bytes = 2.0 * batch as f64 * len as f64 * 4.0 * row_bytes;
-            let t = time_decode(&g, tier, batch, len);
+            let (t, parts) = time_decode_parts(&g, tier, batch, len);
             let gbs = bytes / (t * 1e-3) / 1e9;
-            eprintln!("{tier} decode attention batch {batch:2} x {len:6} keys: {:8.1} us, {:6.0} GB/s ({:.0} % of {ROOF_GBS})", t * 1e3, gbs, 100.0 * gbs / ROOF_GBS);
+            let parts: Vec<String> = parts.iter().map(|(name, ms)| format!("{name} {:.1}", ms * 1e3)).collect();
+            eprintln!("{tier} decode attention batch {batch:2} x {len:6} keys: {:8.1} us, {:6.0} GB/s ({:.0} % of {ROOF_GBS}); us per kernel: {}", t * 1e3, gbs, 100.0 * gbs / ROOF_GBS, parts.join(", "));
         }
     }
 }

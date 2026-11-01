@@ -1085,7 +1085,7 @@ pub const ALL: &[CudaKernel] = &[
         // cp.async ring and the merge's outputs are dynamic (`FLASH_DECODE_BF16_DYNAMIC_SHARED_BYTES`).
         shared_bytes: 16 * 3 * 32 * 8 + 2 * 4 * 8 * 4,
         programmatic: true,
-        src: concat!("#define BRAIN_GRP 6\n", include_str!("../cu/paged_flash_decode_gqa_hd256_kvbf16.cu")),
+        src: concat!("#define BRAIN_GRP 6\n#define BRAIN_DECODE_STAGES 3\n", include_str!("../cu/paged_flash_decode_gqa_hd256_kvbf16.cu")),
     },
     CudaKernel {
         name: "paged_flash_decode_gqa_combine",
