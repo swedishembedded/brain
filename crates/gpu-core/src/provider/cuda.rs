@@ -601,9 +601,9 @@ pub fn gdn_chunk_loop_bf16_step(
 /// u tile, one decay word, to a KiB), two 8 KiB output tiles, the barriers and 1 KiB to align the swizzled tiles.
 const GDN_CHUNK_LOOP_WG_DYNAMIC_SHARED_BYTES: u32 = 2 * 92160 + 2 * 8192 + 64 + 1024;
 
-/// Dynamic shared memory of `gdn_chunk_loop_seg_wg_half`: two stages of the operand tiles with a 64-column u tile (w, query, key 16 KiB each,
-/// intra 8 KiB, the padded fp32 u tile 17 KiB, the folded form's decay vectors), one 8 KiB output tile, the barriers and 1 KiB to align.
-const GDN_CHUNK_LOOP_WG_HALF_DYNAMIC_SHARED_BYTES: u32 = 2 * 75776 + 8192 + 64 + 1024;
+/// Dynamic shared memory of `gdn_chunk_loop_seg_wg_half`: three stages of the folded form's operand tiles (w, query, key 16 KiB each, intra 8 KiB,
+/// u as an 8 KiB fp16 copy, the decay vectors: 65 KiB), one 8 KiB output tile, the barriers and 1 KiB to align.
+const GDN_CHUNK_LOOP_WG_HALF_DYNAMIC_SHARED_BYTES: u32 = 3 * 66560 + 8192 + 64 + 1024;
 
 /// Dynamic shared memory of `gdn_chunk_loop_seg_wg_lean`: one stage of the folded form (the same tiles with u as an 8 KiB fp16 copy), an
 /// 8 KiB output tile, the barriers and 1 KiB to align; three blocks fit a multiprocessor.
@@ -872,8 +872,9 @@ pub fn gdn_chunk_loop_seg_bf16_step(gpu: &crate::Gpu, bufs: &[&backend_api::Devi
     let cc = gpu.caps().arch.compute_capability?;
     if gdn_seg_loop_folds(gpu, bf16) {
         let blocks = table.segments * heads * 2;
-        // More blocks than multiprocessors (many short segments): the single-stage form lets three share one and the round runs in one wave.
-        let lean = gpu.caps().compute_units.is_some_and(|sms| blocks > sms) && kernels_cuda::get("gdn_chunk_loop_seg_wg_lean").is_some_and(|k| k.min_cc <= cc);
+        // More than two blocks a multiprocessor (three or more segments of the 48 heads): the single-stage form lets three share one and the round runs in
+        // one wave; up to two waves of the three-stage form, whose copies run two chunks ahead, are faster (4096 rows as two segments 122 against 133 us).
+        let lean = gpu.caps().compute_units.is_some_and(|sms| blocks > 2 * sms) && kernels_cuda::get("gdn_chunk_loop_seg_wg_lean").is_some_and(|k| k.min_cc <= cc);
         let (kernel, smem) = if lean { ("gdn_chunk_loop_seg_wg_lean", GDN_CHUNK_LOOP_WG_LEAN_DYNAMIC_SHARED_BYTES) } else { ("gdn_chunk_loop_seg_wg_half", GDN_CHUNK_LOOP_WG_HALF_DYNAMIC_SHARED_BYTES) };
         let kernel = kernels_cuda::get(kernel).filter(|k| k.min_cc <= cc)?;
         let launch = backend_api::CudaLaunch { dynamic_shared_bytes: smem, shared_opt_in: true, arch: backend_api::ArchFeatures::Required, ..backend_api::CudaLaunch::NONE };

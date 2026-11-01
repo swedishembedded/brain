@@ -99,7 +99,7 @@ __device__ __forceinline__ void gdn_loop_wg_walk(const WgOperands& op, const uns
     // the chunk's length read nothing and arrive as zeros.
     auto issue = [&](unsigned int ci) {
         const WgChunk ch = chunk_at(ci);
-        const unsigned int stage = base + (STAGES == 2 ? (ci & 1u) : 0u) * L::BYTES;
+        const unsigned int stage = base + (STAGES > 1 ? ci % STAGES : 0u) * L::BYTES;
         const unsigned int C = ch.C;
         const unsigned long long rb = ch.row_base;
         if (C == MAXC) {
@@ -183,14 +183,17 @@ __device__ __forceinline__ void gdn_loop_wg_walk(const WgOperands& op, const uns
         gw_cp_commit();
     };
     // The copies of the chunk the next iteration works on have landed, and are visible to the tensor cores and to every thread.
-    auto publish = [&]() {
-        asm volatile("cp.async.wait_group 0;\n" ::: "memory");
+    // With a deeper ring the chunks beyond the next one may still be in flight (`pending` of them, the newest groups).
+    auto publish = [&](unsigned int pending) {
+        if (pending == 0u) { asm volatile("cp.async.wait_group 0;\n" ::: "memory"); } else { asm volatile("cp.async.wait_group 1;\n" ::: "memory"); }
         gw_fence_proxy();
         __syncthreads();
     };
 
     issue(0);
-    publish();
+    // A ring of three stages keeps the chunk after the next one in flight while this one runs (two stages: only the next one).
+    if (STAGES == 3 && n_chunks > 1) { issue(1); }
+    publish(STAGES == 3 && n_chunks > 1 ? 1u : 0u);
 
     // ================= consumer warpgroups =================
     const unsigned int cwg = WGS == 2 ? tid >> 7 : half;   // 0 or 1: value columns 64 cwg ..
@@ -216,7 +219,7 @@ __device__ __forceinline__ void gdn_loop_wg_walk(const WgOperands& op, const uns
 
     const unsigned int out_tile = base + L::OFF_OUT + wgi * OUT_BYTES;
     for (unsigned int ci = 0; ci < n_chunks; ++ci) {
-        const unsigned int s = STAGES == 2 ? (ci & 1u) : 0u;
+        const unsigned int s = STAGES > 1 ? ci % STAGES : 0u;
         const WgChunk ch = chunk_at(ci);
         const unsigned int C = ch.C;
         const unsigned int stage = base + s * L::BYTES;
@@ -261,7 +264,7 @@ __device__ __forceinline__ void gdn_loop_wg_walk(const WgOperands& op, const uns
         for (int kk = 0; kk < 8; ++kk) { gw_mma_n64<1>(qa, sb[kk], gw_desc_k(stage + STAGE_Q + (kk >> 2) * ATOM_BYTES + (kk & 3) * 32u), kk > 0); }
         gw_commit();
         // While the products run: the next chunk's operands start streaming in and the state decays (the products read the bf16 copy).
-        if (STAGES == 2 && ci + 1 < n_chunks) { issue(ci + 1); }
+        if (STAGES > 1 && ci + STAGES - 1 < n_chunks) { issue(ci + STAGES - 1); }
         const float decay = *reinterpret_cast<const float*>(gen + s * L::BYTES + (FOLD ? L::DD + MAXC * 4 : L::DEC));
 #pragma unroll
         for (int i = 0; i < 64; ++i) { st[i] *= decay; }
@@ -356,7 +359,7 @@ __device__ __forceinline__ void gdn_loop_wg_walk(const WgOperands& op, const uns
                 __syncthreads();
                 issue(ci + 1);
             }
-            publish();
+            publish(STAGES == 3 && ci + 2 < n_chunks ? 1u : 0u);
         }
     }
 
@@ -498,7 +501,7 @@ extern "C" __global__ void __launch_bounds__(128, 1) brain_gdn_chunk_loop_seg_wg
     const unsigned long long state_at = slot * state_words + (unsigned long long)head * D * D;
     void* const state = state_bf16 ? static_cast<void*>(reinterpret_cast<unsigned short*>(state_pool) + state_at) : static_cast<void*>(state_pool + state_at);
     if (fold) {
-        gdn_loop_wg_walk<true, 1, 2>(op, n_chunks, state, state_bf16, half, chunk_at);
+        gdn_loop_wg_walk<true, 1, 3>(op, n_chunks, state, state_bf16, half, chunk_at);
     } else {
         gdn_loop_wg_walk<false, 1, 2>(op, n_chunks, state, state_bf16, half, chunk_at);
     }
