@@ -53,8 +53,19 @@ pub use events::ppm::{decode_p6, encode_p6};
 /// *is* supported when the magic matches nothing — an unrecognised blob is
 /// usually a truncated download or a path mix-up, not an exotic format.
 pub fn decode(bytes: &[u8]) -> Result<Rgb8, String> {
+    decode_bounded(bytes, u64::MAX)
+}
+
+/// [`decode`] for bytes from an untrusted caller: an image of more than `max_pixels` pixels is refused from its
+/// header, before a pixel is decoded (a PNG a few kilobytes long can declare billions of them), and the decoder's own
+/// allocation is bounded to the same figure.
+pub fn decode_bounded(bytes: &[u8], max_pixels: u64) -> Result<Rgb8, String> {
+    let too_big = |w: u64, h: u64| format!("image of {w}x{h} pixels is over the limit of {max_pixels} pixels");
     if bytes.starts_with(b"P6") {
         let (px, w, h) = decode_p6(bytes)?;
+        if u64::from(w) * u64::from(h) > max_pixels {
+            return Err(too_big(w.into(), h.into()));
+        }
         return Rgb8::new(w, h, px);
     }
     let fmt = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
@@ -67,9 +78,17 @@ pub fn decode(bytes: &[u8]) -> Result<Rgb8, String> {
             &bytes[..bytes.len().min(4)]
         ));
     };
-    let img = image::load_from_memory_with_format(bytes, fmt)
-        .map_err(|e| format!("decoding {fmt:?}: {e}"))?
-        .to_rgb8();
+    let reader = || image::ImageReader::with_format(std::io::Cursor::new(bytes), fmt);
+    let (w, h) = reader().into_dimensions().map_err(|e| format!("decoding {fmt:?}: {e}"))?;
+    if u64::from(w) * u64::from(h) > max_pixels {
+        return Err(too_big(w.into(), h.into()));
+    }
+    let mut decoder = reader();
+    let mut limits = image::Limits::default();
+    // The decoded image and its working copies: 8 bytes a pixel covers an RGBA16 source.
+    limits.max_alloc = Some(max_pixels.saturating_mul(8).max(1 << 20));
+    decoder.limits(limits);
+    let img = decoder.decode().map_err(|e| format!("decoding {fmt:?}: {e}"))?.to_rgb8();
     let (w, h) = (img.width(), img.height());
     Rgb8::new(w, h, img.into_raw())
 }
@@ -226,6 +245,51 @@ mod tests {
     fn unknown_magic_names_what_is_supported() {
         let e = decode(b"GIF89a").unwrap_err();
         assert!(e.contains("P6"), "error should list the supported formats, got: {e}");
+    }
+
+    /// A PNG that is only a signature, a valid IHDR and the start of its pixel stream, declaring `w x h`: all a decompression bomb needs to announce.
+    fn png_declaring(w: u32, h: u32) -> Vec<u8> {
+        let crc = |bytes: &[u8]| {
+            let mut c = 0xFFFF_FFFFu32;
+            for &b in bytes {
+                c ^= u32::from(b);
+                for _ in 0..8 {
+                    c = (c >> 1) ^ (0xEDB8_8320 & (c & 1).wrapping_neg());
+                }
+            }
+            !c
+        };
+        let mut ihdr = b"IHDR".to_vec();
+        ihdr.extend_from_slice(&w.to_be_bytes());
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13];
+        png.extend_from_slice(&ihdr);
+        png.extend_from_slice(&crc(&ihdr).to_be_bytes());
+        // The first bytes of the pixel stream, which is where a decoder stops reading the header.
+        let idat = b"IDAT\x78\x01".to_vec();
+        png.extend_from_slice(&[0, 0, 0, 2]);
+        png.extend_from_slice(&idat);
+        png.extend_from_slice(&crc(&idat).to_be_bytes());
+        png
+    }
+
+    #[test]
+    fn an_image_over_the_pixel_limit_is_refused_from_its_header() {
+        let bomb = png_declaring(60_000, 60_000);
+        let e = decode_bounded(&bomb, 36_000_000).unwrap_err();
+        assert!(e.contains("60000x60000") && e.contains("limit"), "{e}");
+        // Within the limit it reaches the decoder, which fails on the missing data - not on the limit.
+        let e = decode_bounded(&png_declaring(100, 100), 36_000_000).unwrap_err();
+        assert!(!e.contains("limit"), "{e}");
+    }
+
+    #[test]
+    fn a_decoded_image_over_the_limit_is_refused_for_every_format() {
+        let img = tiny();
+        let ppm = encode_p6(&img.px, img.w, img.h);
+        assert!(decode_bounded(&ppm, 2).is_ok());
+        assert!(decode_bounded(&ppm, 1).unwrap_err().contains("limit"));
     }
 
     #[test]

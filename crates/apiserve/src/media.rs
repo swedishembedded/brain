@@ -33,6 +33,14 @@ use crate::b64;
 /// anything is decoded past it.
 pub const MAX_IMAGES: usize = 8;
 
+/// The most pixels one image may declare (a 6000 x 6000 photograph). The image is refused from its header, before it is
+/// decoded: a PNG a few kilobytes long can declare billions of pixels, and a decoded pixel is twelve bytes of float.
+pub const MAX_IMAGE_PIXELS: u64 = 36_000_000;
+
+/// The most pixels all of a request's images may declare together: [`MAX_IMAGES`] full-size photographs would hold
+/// gigabytes while one request runs.
+pub const MAX_REQUEST_PIXELS: u64 = 64_000_000;
+
 /// The blob name of the `i`th image of a request: `image`, then `image1`,
 /// `image2`, ...
 pub fn image_key(i: usize) -> String {
@@ -49,6 +57,8 @@ pub fn image_key(i: usize) -> String {
 pub struct ExtractedMedia {
     pub images: Vec<Blob>,
     pub audio: Option<Blob>,
+    /// Pixels of the images so far, against [`MAX_REQUEST_PIXELS`].
+    pixels: u64,
 }
 
 impl ExtractedMedia {
@@ -64,8 +74,19 @@ impl ExtractedMedia {
         if self.images.len() == MAX_IMAGES {
             return Err(format!("a request may carry at most {MAX_IMAGES} images"));
         }
+        let dim = |k: &str| blob.meta.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+        self.pixels += dim("w") * dim("h");
+        if self.pixels > MAX_REQUEST_PIXELS {
+            return Err(format!("the images of a request may hold at most {MAX_REQUEST_PIXELS} pixels together"));
+        }
         self.images.push(blob);
         Ok(())
+    }
+
+    /// Decode one image's bytes (PNG/JPEG/PPM) into brain's HWC-f32 image blob, refusing one over [`MAX_IMAGE_PIXELS`].
+    fn decode_image(bytes: &[u8]) -> Result<Blob, String> {
+        let rgb = imaging::codec::decode_bounded(bytes, MAX_IMAGE_PIXELS)?;
+        Ok(capability::blob::image_blob(&rgb.to_hwc_unit(), rgb.w, rgb.h, 3))
     }
 }
 
@@ -81,17 +102,13 @@ fn data_url_payload(url: &str) -> Option<&str> {
 /// `imaging::codec::decode`) into brain's HWC-f32 image blob.
 fn decode_image_data_url(data_url: &str) -> Result<Blob, String> {
     let payload = data_url_payload(data_url).ok_or_else(|| "image_url: only inline 'data:...;base64,...' URLs are supported (no external fetch)".to_string())?;
-    let bytes = b64::decode(payload)?;
-    let rgb = imaging::codec::decode(&bytes)?;
-    Ok(capability::blob::image_blob(&rgb.to_hwc_unit(), rgb.w, rgb.h, 3))
+    ExtractedMedia::decode_image(&b64::decode(payload)?)
 }
 
 /// Decode one image content block's raw base64 payload (Anthropic's own
 /// `source.data` - no `data:` URL wrapper, unlike OpenAI's `image_url`).
 fn decode_image_base64(payload: &str) -> Result<Blob, String> {
-    let bytes = b64::decode(payload)?;
-    let rgb = imaging::codec::decode(&bytes)?;
-    Ok(capability::blob::image_blob(&rgb.to_hwc_unit(), rgb.w, rgb.h, 3))
+    ExtractedMedia::decode_image(&b64::decode(payload)?)
 }
 
 /// Decode one `input_audio` part's base64 payload (a whole WAV/MP3 FILE per
@@ -265,5 +282,50 @@ mod tests {
         ]);
         let err = extract_openai(messages.as_array().unwrap()).unwrap_err();
         assert!(err.contains("wav"), "error should name the supported format, got: {err}");
+    }
+
+    /// A PNG that is a signature, a valid IHDR declaring `w x h` and the start of the pixel stream: all a bomb needs.
+    fn png_declaring(w: u32, h: u32) -> Vec<u8> {
+        let crc = |bytes: &[u8]| {
+            let mut c = 0xFFFF_FFFFu32;
+            for &b in bytes {
+                c ^= u32::from(b);
+                for _ in 0..8 {
+                    c = (c >> 1) ^ (0xEDB8_8320 & (c & 1).wrapping_neg());
+                }
+            }
+            !c
+        };
+        let mut ihdr = b"IHDR".to_vec();
+        ihdr.extend_from_slice(&w.to_be_bytes());
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+        let idat = b"IDAT\x78\x01".to_vec();
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13];
+        png.extend_from_slice(&ihdr);
+        png.extend_from_slice(&crc(&ihdr).to_be_bytes());
+        png.extend_from_slice(&[0, 0, 0, 2]);
+        png.extend_from_slice(&idat);
+        png.extend_from_slice(&crc(&idat).to_be_bytes());
+        png
+    }
+
+    #[test]
+    fn an_image_declaring_more_pixels_than_the_limit_is_refused_before_it_is_decoded() {
+        let url = format!("data:image/png;base64,{}", crate::b64::encode(&png_declaring(65_535, 65_535)));
+        let messages = json!([{"role": "user", "content": [{"type": "image_url", "image_url": {"url": url}}]}]);
+        let err = extract_openai(messages.as_array().unwrap()).unwrap_err();
+        assert!(err.contains("limit"), "{err}");
+        let blocks = json!([{"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": crate::b64::encode(&png_declaring(65_535, 65_535))}}]}]);
+        assert!(extract_anthropic(blocks.as_array().unwrap()).unwrap_err().contains("limit"));
+    }
+
+    #[test]
+    fn the_images_of_one_request_share_a_pixel_budget() {
+        let mut media = ExtractedMedia::default();
+        let image = |w: u64| Blob::new(Media::Image, Vec::new()).with_meta(json!({"w": w, "h": 1000, "c": 3}));
+        media.push_image(image(30_000)).expect("30 MP is within the budget");
+        let err = media.push_image(image(40_000)).unwrap_err();
+        assert!(err.contains("together"), "{err}");
     }
 }

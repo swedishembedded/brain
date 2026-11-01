@@ -959,6 +959,36 @@ async fn an_image_block_for_a_model_that_cannot_read_images_is_refused_on_the_an
     assert!(v["error"]["message"].as_str().unwrap().contains("brain-chat"));
 }
 
+/// A PNG that is a signature, an IHDR declaring 65535 x 65535 pixels and the start of the pixel stream: a few dozen bytes
+/// that would decode to 12 GB of floats.
+const PIXEL_BOMB_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAA//8AAP//CAIAAAA5Z04HAAAAAklEQVR4AewaftI=";
+
+/// Image bytes are hostile input: one declaring more pixels than the limit is a 400 from its header, before any
+/// allocation, on a model that does read images.
+#[tokio::test]
+async fn an_image_declaring_billions_of_pixels_is_a_400_not_an_allocation() {
+    let (app, key) = vision_chat_app(Provider::OpenAI);
+    let body = json!({"model": "brain-vision-chat", "messages": [{"role": "user", "content": [
+        {"type": "text", "text": "what is this?"},
+        {"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{PIXEL_BOMB_PNG}")}},
+    ]}]});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    assert_valid("openai.json", "ErrorResponse", &v);
+    assert!(v["error"]["message"].as_str().unwrap().contains("pixels"), "the error names the limit: {v}");
+}
+
+/// An image that is not an image, a truncated one, and a payload that is not base64 are 400s too.
+#[tokio::test]
+async fn a_malformed_image_is_a_400() {
+    let (app, key) = vision_chat_app(Provider::OpenAI);
+    for url in ["data:image/png;base64,AAAA", "data:image/png;base64,!!!!", "data:image/png,rawbytes", "https://example.com/a.png"] {
+        let body = json!({"model": "brain-vision-chat", "messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": url}}]}]});
+        let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{url}: {v}");
+    }
+}
+
 // -------------------------------------------------------------- chat: SSE
 
 #[tokio::test]
