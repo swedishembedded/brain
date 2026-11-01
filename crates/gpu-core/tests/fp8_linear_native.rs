@@ -80,9 +80,6 @@ fn the_streaming_candidates_pass_the_admission_rule_on_ragged_shapes() {
         "matmul_fp8_wgmma_swap_n32b64s2",
         "matmul_fp8_wgmma_swap_n32b64s4",
         "matmul_fp8_wgmma_swap_n64b128s2",
-        "matmul_fp8_wgmma_swap_tma_bn80",
-        "matmul_fp8_wgmma_swap_tma_bn96",
-        "matmul_fp8_wgmma_swap_tma_bn136",
         "matmul_fp8_wgmma_swap_tma_bn136c1",
         "matmul_fp8_wgmma_swap_tma_bn144c1",
     ] {
@@ -125,7 +122,7 @@ fn the_tma_decode_candidates_pass_the_admission_rule_on_the_served_shapes() {
         }
     }
     let served = admitted_everywhere(&gpu, &shapes);
-    for kernel in ["matmul_fp8_wgmma_swap_tma_bn80", "matmul_fp8_wgmma_swap_tma_bn96", "matmul_fp8_wgmma_swap_tma_bn136", "matmul_fp8_wgmma_swap_tma_bn136c1", "matmul_fp8_wgmma_swap_tma_bn144c1"] {
+    for kernel in ["matmul_fp8_wgmma_swap_tma_bn136c1", "matmul_fp8_wgmma_swap_tma_bn144c1"] {
         assert!(served.contains(kernel), "{kernel} served none of the shapes: {served:?}");
     }
 }
@@ -263,5 +260,32 @@ fn fp8_one_candidate() {
     }
     for (name, v) in gpu_core::native_time_fp8_candidates(&gpu, SHAPE, CANDIDATE) {
         println!("{name:28} {v:?}");
+    }
+}
+
+/// Back-to-back launches of every tensor-map decode candidate over the decode widths and the wide products, the
+/// workload under which the removed two-consumer form faulted (Xid 13, knowledge 410): a reproducer to run against any
+/// new swap candidate before it may join (`#[ignore]`: a stress run of a minute).
+///
+/// ```text
+/// BRAIN_DEVICE=gpu0 BRAIN_BACKEND=cuda make test/one P=brain-gpu-core T=fp8_linear_native ARGS="--ignored --nocapture swap_tma_back_to_back_stress"
+/// ```
+#[test]
+#[ignore]
+fn swap_tma_back_to_back_stress() {
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda_hopper(&gpu) {
+        brain_testutil::skip_unavailable("the FP8 candidates are registered for a CUDA device with warpgroup tensor cores");
+        return;
+    }
+    for (k, n) in [(5120u32, 34816u32), (17408, 16384)] {
+        for round in 0..30u32 {
+            for m in [1u32, 2, 4, 8, 16, 17, 24, 32, 48, 64] {
+                let _ = gpu_core::native_time_fp8_candidates(&gpu, [m, k / 4, n], "swap_tma");
+            }
+            if round % 10 == 0 {
+                eprintln!("swap_tma_back_to_back_stress: k={k} n={n} round {round}");
+            }
+        }
     }
 }

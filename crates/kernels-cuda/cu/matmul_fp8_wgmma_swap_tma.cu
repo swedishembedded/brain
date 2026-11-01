@@ -20,6 +20,8 @@
 // A tile may straddle two 128-column weight scale blocks: both scales are staged and each 8-column group picks its own.
 //
 // The weight copies of the first stages are issued before `griddepcontrol.wait` (they do not depend on the previous kernel).
+// One consumer warpgroup: a form with two warpgroups on alternate K blocks, their sums combined in shared memory at the tile's
+// end, faulted intermittently under back-to-back launches (Xid 13, warp errors; knowledge 410) and was removed.
 // No `__restrict__`: brain's device buffers alias by design.
 
 #ifndef BRAIN_FD_BN
@@ -31,10 +33,7 @@
 #ifndef BRAIN_FD_ENTRY
 #define BRAIN_FD_ENTRY brain_matmul_fp8_wgmma_swap_tma
 #endif
-#ifndef BRAIN_FD_CONS
-#define BRAIN_FD_CONS 2  // consumer warpgroups: stage kt belongs to warpgroup kt % BRAIN_FD_CONS (their wgmma chains overlap), the sums meet at the tile's end
-#endif
-#define BRAIN_FD_THREADS (128 * (1 + BRAIN_FD_CONS))  // a producer warpgroup (one thread issues the copies) and the consumer warpgroups
+#define BRAIN_FD_THREADS 256  // a producer warpgroup (one thread issues the copies) and the consumer warpgroup
 #define BRAIN_FD_MAX_CTAS 132  // grid size at most, and the SM slots of the maps
 #define BRAIN_FD_BM 64         // rows of x a launch holds
 #define BRAIN_FD_X_BYTES (BRAIN_FD_BM * 128)
@@ -43,7 +42,6 @@
 // activation scales, then the two weight block scales: 512 bytes a stage) follow the ring.
 #define BRAIN_FD_STAGE_BYTES (BRAIN_FD_X_BYTES + BRAIN_FD_W_BYTES)
 #define BRAIN_FD_SCALE_BYTES 512
-#define BRAIN_FD_COMB_STRIDE (BRAIN_FD_BN + 8)  // floats a row of the combine buffer: the rows of a warp's float2 stores fall in different banks
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
 #define BRAIN_FD_PDL_WAIT() asm volatile("griddepcontrol.wait;\n" ::: "memory")
@@ -232,8 +230,6 @@ extern "C" __global__ void __launch_bounds__(BRAIN_FD_THREADS, 1)
 BRAIN_FD_ENTRY(const unsigned int* params, const unsigned int* xq, const unsigned int* wq, const float* sx, const float* sw, float* out) {
     constexpr int BN = BRAIN_FD_BN;
     constexpr int STAGES = BRAIN_FD_STAGES;
-    constexpr unsigned int CONS = BRAIN_FD_CONS;
-    static_assert(CONS == 1 || CONS == 2, "one or two consumer warpgroups");
     static_assert(BN % 8 == 0 && BN <= 256, "the weight tile is whole 8-row groups");
     extern __shared__ unsigned char brain_fd_smem_raw[];
     __shared__ __align__(128) unsigned long long brain_fd_smem_maps[2][16];
@@ -257,7 +253,6 @@ BRAIN_FD_ENTRY(const unsigned int* params, const unsigned int* xq, const unsigne
     const unsigned int scale_base = base + STAGES * BRAIN_FD_STAGE_BYTES;
     const unsigned int full_bar = scale_base + STAGES * BRAIN_FD_SCALE_BYTES;  // STAGES mbarriers, then STAGES more
     const unsigned int empty_bar = full_bar + 8u * STAGES;
-    const unsigned int comb_addr = (empty_bar + 8u * STAGES + 15u) & ~15u;  // the second consumer's sums, for the first to add
 
     if (tid == 0u) {
         for (int s = 0; s < STAGES; ++s) {
@@ -269,7 +264,6 @@ BRAIN_FD_ENTRY(const unsigned int* params, const unsigned int* xq, const unsigne
     __syncthreads();
 
     if (tid < 128u) {
-        if constexpr (CONS == 2) { asm volatile("setmaxnreg.dec.sync.aligned.u32 40;\n" ::: "memory"); }
         if (warp != 0u) { return; }
         // One slot per SM: a block owns its SM's shared memory (one resident block), so no two live blocks share a slot.
         unsigned int smid;
@@ -319,19 +313,17 @@ BRAIN_FD_ENTRY(const unsigned int* params, const unsigned int* xq, const unsigne
         return;
     }
 
-    if constexpr (CONS == 2) { asm volatile("setmaxnreg.inc.sync.aligned.u32 232;\n" ::: "memory"); }
-    // Consumer warpgroup `cwg` takes the stages kt = cwg (mod CONS); warp w owns x rows 16 w .. 16 w + 15 (lane / 4 and +8 within), all BN columns.
-    const unsigned int cwg = tid / 128u - 1u;
+    // The consumer warpgroup takes every stage; warp w owns x rows 16 w .. 16 w + 15 (lane / 4 and +8 within), all BN columns.
     const unsigned int r0 = warp * 16u + (lane >> 2), r1 = r0 + 8u;
-    unsigned int it0 = 0, tile_count = 0;
-    for (unsigned int tile = blockIdx.x; tile < tiles; tile += gridDim.x, ++tile_count) {
+    unsigned int it0 = 0;
+    for (unsigned int tile = blockIdx.x; tile < tiles; tile += gridDim.x) {
         const unsigned int n0 = tile * BN;
         const unsigned int n0_in_block = n0 & 127u;
         float acc[BN / 2];
         float d[BN / 2];
 #pragma unroll
         for (int i = 0; i < BN / 2; ++i) { acc[i] = 0.0f; d[i] = 0.0f; }
-        for (unsigned int kt = cwg; kt < kblocks; kt += CONS) {
+        for (unsigned int kt = 0; kt < kblocks; ++kt) {
             const unsigned int slot = (it0 + kt) % STAGES;
             brain_fwt_mbar_wait(full_bar + 8u * slot, ((it0 + kt) / STAGES) & 1u);
             const unsigned int st = base + slot * BRAIN_FD_STAGE_BYTES;
@@ -354,32 +346,6 @@ BRAIN_FD_ENTRY(const unsigned int* params, const unsigned int* xq, const unsigne
             }
         }
         it0 += kblocks;
-        if constexpr (CONS == 2) {
-            // The second warpgroup hands its sums to the first (in the thread layout both share), which carries on with the tile.
-            float* const comb = reinterpret_cast<float*>(gen + (comb_addr - base));
-            if (cwg == 1u) {
-                if (tile_count > 0u) { asm volatile("bar.sync 2, 256;\n" ::: "memory"); }  // the first has read the previous tile's sums
-#pragma unroll
-                for (int j = 0; j < BN / 8; ++j) {
-                    const unsigned int c = 8u * j + 2u * (lane & 3u);
-                    *reinterpret_cast<float2*>(comb + r0 * BRAIN_FD_COMB_STRIDE + c) = make_float2(acc[4 * j], acc[4 * j + 1]);
-                    *reinterpret_cast<float2*>(comb + r1 * BRAIN_FD_COMB_STRIDE + c) = make_float2(acc[4 * j + 2], acc[4 * j + 3]);
-                }
-            }
-            asm volatile("bar.sync 1, 256;\n" ::: "memory");
-            if (cwg == 1u) { continue; }
-#pragma unroll
-            for (int j = 0; j < BN / 8; ++j) {
-                const unsigned int c = 8u * j + 2u * (lane & 3u);
-                const float2 a0 = *reinterpret_cast<const float2*>(comb + r0 * BRAIN_FD_COMB_STRIDE + c);
-                const float2 a1 = *reinterpret_cast<const float2*>(comb + r1 * BRAIN_FD_COMB_STRIDE + c);
-                acc[4 * j] += a0.x;
-                acc[4 * j + 1] += a0.y;
-                acc[4 * j + 2] += a1.x;
-                acc[4 * j + 3] += a1.y;
-            }
-            if (tile + gridDim.x < tiles) { asm volatile("bar.arrive 2, 256;\n" ::: "memory"); }
-        }
         // acc[4 j + 2 h + c]: x row r0 + 8 h, weight row n0 + 8 j + 2 (lane % 4) + c.
         const unsigned int col0 = n0 + 2u * (lane & 3u);
 #pragma unroll

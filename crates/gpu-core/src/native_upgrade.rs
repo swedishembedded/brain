@@ -1224,54 +1224,6 @@ pub(crate) const FP8_ROWS: &[Row] = &[
 
     Row {
         slow: "matmul_fp8_gemv",
-        target: Target::Named("matmul_fp8_wgmma_swap_tma_bn80"),
-        bindings: I8_GEMV_BINDINGS,
-        serves: serves_fp8_wgmma_swap_tma,
-        blocks: fp8_persistent_blocks,
-        requires_wgsl_upgrade: false,
-        align_words: 4,
-        input: Input::FP8_NATIVE,
-        launch: CudaLaunch {
-            dynamic_shared_bytes: kernels_cuda::fp8_wgmma_swap_tma_dynamic_shared_bytes(80, 11, 2),
-            shared_opt_in: true,
-            arch: backend_api::ArchFeatures::Required,
-            ..CudaLaunch::NONE
-        },
-    },
-    Row {
-        slow: "matmul_fp8_gemv",
-        target: Target::Named("matmul_fp8_wgmma_swap_tma_bn96"),
-        bindings: I8_GEMV_BINDINGS,
-        serves: serves_fp8_wgmma_swap_tma,
-        blocks: fp8_persistent_blocks,
-        requires_wgsl_upgrade: false,
-        align_words: 4,
-        input: Input::FP8_NATIVE,
-        launch: CudaLaunch {
-            dynamic_shared_bytes: kernels_cuda::fp8_wgmma_swap_tma_dynamic_shared_bytes(96, 9, 2),
-            shared_opt_in: true,
-            arch: backend_api::ArchFeatures::Required,
-            ..CudaLaunch::NONE
-        },
-    },
-    Row {
-        slow: "matmul_fp8_gemv",
-        target: Target::Named("matmul_fp8_wgmma_swap_tma_bn136"),
-        bindings: I8_GEMV_BINDINGS,
-        serves: serves_fp8_wgmma_swap_tma,
-        blocks: fp8_persistent_blocks,
-        requires_wgsl_upgrade: false,
-        align_words: 4,
-        input: Input::FP8_NATIVE,
-        launch: CudaLaunch {
-            dynamic_shared_bytes: kernels_cuda::fp8_wgmma_swap_tma_dynamic_shared_bytes(136, 7, 2),
-            shared_opt_in: true,
-            arch: backend_api::ArchFeatures::Required,
-            ..CudaLaunch::NONE
-        },
-    },
-    Row {
-        slow: "matmul_fp8_gemv",
         target: Target::Named("matmul_fp8_wgmma_swap_tma_bn136c1"),
         bindings: I8_GEMV_BINDINGS,
         serves: serves_fp8_wgmma_swap_tma,
@@ -1280,7 +1232,7 @@ pub(crate) const FP8_ROWS: &[Row] = &[
         align_words: 4,
         input: Input::FP8_NATIVE,
         launch: CudaLaunch {
-            dynamic_shared_bytes: kernels_cuda::fp8_wgmma_swap_tma_dynamic_shared_bytes(136, 8, 1),
+            dynamic_shared_bytes: kernels_cuda::fp8_wgmma_swap_tma_dynamic_shared_bytes(136, 8),
             shared_opt_in: true,
             arch: backend_api::ArchFeatures::Required,
             ..CudaLaunch::NONE
@@ -1296,7 +1248,7 @@ pub(crate) const FP8_ROWS: &[Row] = &[
         align_words: 4,
         input: Input::FP8_NATIVE,
         launch: CudaLaunch {
-            dynamic_shared_bytes: kernels_cuda::fp8_wgmma_swap_tma_dynamic_shared_bytes(144, 8, 1),
+            dynamic_shared_bytes: kernels_cuda::fp8_wgmma_swap_tma_dynamic_shared_bytes(144, 8),
             shared_opt_in: true,
             arch: backend_api::ArchFeatures::Required,
             ..CudaLaunch::NONE
