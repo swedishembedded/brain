@@ -1879,9 +1879,20 @@ pub fn profile_enabled() -> bool {
     std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+static CACHE_DIR: std::sync::RwLock<Option<std::path::PathBuf>> = std::sync::RwLock::new(None);
+
+/// Name the directory derived data persists in (`None` restores the platform's cache location); the CLI's `--cache-dir`.
+/// Set before devices are built: pipeline blobs, autotune records and kernel images are found there. Never read from the
+/// environment.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn set_cache_dir(dir: Option<std::path::PathBuf>) {
+    *CACHE_DIR.write().unwrap_or_else(std::sync::PoisonError::into_inner) = dir;
+}
+
 /// Where derived, re-creatable data is persisted between runs -
-/// `BRAIN_PIPELINE_CACHE_DIR`, else `XDG_CACHE_HOME/brain`, else
-/// `~/.cache/brain`. `None` means there is nowhere to persist, which is always
+/// [`set_cache_dir`]'s directory, else `XDG_CACHE_HOME/brain`, else
+/// `~/.cache/brain` (the platform's cache locations). `None` means there is nowhere to persist, which is always
 /// survivable: everything under it can be recomputed.
 ///
 /// It lives here, in the crate a backend depends on and nothing else, because
@@ -1891,8 +1902,8 @@ pub fn profile_enabled() -> bool {
 /// silently stops being read after an environment change.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn cache_dir() -> Option<std::path::PathBuf> {
-    if let Ok(d) = std::env::var("BRAIN_PIPELINE_CACHE_DIR") {
-        return Some(d.into());
+    if let Some(d) = CACHE_DIR.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone() {
+        return Some(d);
     }
     if let Ok(d) = std::env::var("XDG_CACHE_HOME") {
         return Some(std::path::Path::new(&d).join("brain"));

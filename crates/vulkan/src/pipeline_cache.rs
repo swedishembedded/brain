@@ -33,7 +33,7 @@ const HEADER_VERSION_ONE: u32 = 1;
 static DIR_OVERRIDE: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 /// Point every `VkContext` built in this process at `dir` instead of the
-/// real `BRAIN_PIPELINE_CACHE_DIR`/`~/.cache/brain` - or clear the override
+/// workspace's cache directory (`backend_api::cache_dir`) - or clear the override
 /// with `None`. Test-only.
 pub fn set_dir_override(dir: Option<PathBuf>) {
     *DIR_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()) = dir;
@@ -43,13 +43,7 @@ fn dir() -> Option<PathBuf> {
     if let Some(d) = DIR_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()).clone() {
         return Some(d);
     }
-    if let Ok(d) = std::env::var("BRAIN_PIPELINE_CACHE_DIR") {
-        return Some(d.into());
-    }
-    if let Ok(d) = std::env::var("XDG_CACHE_HOME") {
-        return Some(Path::new(&d).join("brain"));
-    }
-    std::env::var("HOME").ok().map(|h| Path::new(&h).join(".cache/brain"))
+    backend_api::cache_dir()
 }
 
 /// Where this device's cache blob lives, or `None` if there is nowhere to

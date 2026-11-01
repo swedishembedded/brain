@@ -32,7 +32,7 @@ pub fn source_fingerprint(sources: &[&str]) -> u64 {
     h
 }
 
-/// The one cache-directory resolution (`BRAIN_PIPELINE_CACHE_DIR` >
+/// The one cache-directory resolution (`backend_api::set_cache_dir` >
 /// `XDG_CACHE_HOME/brain` > `~/.cache/brain`) — shared with `roof`'s persist
 /// layer, which used to carry a verbatim copy, and re-exported as
 /// `gpu_core::cache_dir` for anything else in the workspace that needs a

@@ -163,7 +163,6 @@ See [`docs/guides/serving/serving.md`](../guides/serving/serving.md) for what ad
 
 | Variable | Meaning | Default |
 | --- | --- | --- |
-| `BRAIN_PIPELINE_CACHE_DIR` | directory for the GPU pipeline/shader cache | backend default |
 | `BRAIN_QWEN35MOE_CTX` | Qwen3.5 MoE built context length | model default |
 | `BRAIN_QWEN35MOE_MAX_BATCH` | Qwen3.5 MoE serving batch slots | model default |
 | `BRAIN_LFM2_BATCH` | LFM batched-forward slots per instance | 2 |
@@ -230,7 +229,6 @@ page under `docs/reference/models/`.
 | Variable | Meaning | Default |
 | --- | --- | --- |
 | `BRAIN_MODELS_DIR` | model directory scanned at startup | `$XDG_DATA_HOME/brain/models` |
-| `BRAIN_PIPELINE_CACHE_DIR` | GPU pipeline/shader cache directory | backend default |
 | `BRAIN_OV_CACHE` | OpenVINO compiled-graph cache directory | `$TMPDIR/brain_ov_cache` |
 | `BRAIN_MINILM_DIR` | encoder checkpoint directory for the `salesconv_embed` developer binary | the MiniLM checkpoint under the models directory |
 | `BRAIN_QWEN3TTS_RES` | resources base for `brain qwen3tts serve`'s default paths | unset |

@@ -510,7 +510,7 @@ fn mark_measure_failed(key: &DeviceKey) {
 }
 
 /// Redirect where measured roofs persist (`None` restores the default
-/// `~/.cache/brain` / `BRAIN_PIPELINE_CACHE_DIR` resolution). A TEST seam:
+/// `gpu_core::cache_dir` resolution). A TEST seam:
 /// tests that exercise `ensure()` point this at a temp dir so they never
 /// mutate the developer's real cache - see `tests/roofline.rs`.
 pub fn set_cache_dir(dir: Option<std::path::PathBuf>) {

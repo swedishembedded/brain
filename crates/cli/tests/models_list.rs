@@ -32,7 +32,7 @@ fn bin() -> String {
 }
 
 fn run(models_dir: &Path, args: &[&str]) -> (bool, String, String) {
-    let out = Command::new(bin()).arg("models").args(args).env("BRAIN_MODELS_DIR", models_dir).env_remove("BRAIN_PIPELINE_CACHE_DIR").output().expect("run brain models");
+    let out = Command::new(bin()).arg("models").args(args).env("BRAIN_MODELS_DIR", models_dir).output().expect("run brain models");
     (out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
 }
 
@@ -169,9 +169,9 @@ fn list_unprofiled_local_model_reports_not_profiled_not_a_missing_column() {
     let cache = scratch("not-profiled-cache");
 
     let out = Command::new(bin())
-        .args(["models", "list", "--arch", "qwen3", "--plain"])
+        .args(["models", "list", "--arch", "qwen3", "--plain", "--cache-dir"])
+        .arg(&cache)
         .env("BRAIN_MODELS_DIR", &dir)
-        .env("BRAIN_PIPELINE_CACHE_DIR", &cache)
         .output()
         .unwrap();
     assert!(out.status.success());
@@ -312,16 +312,16 @@ fn brain_flops_on_a_real_checkpoint_populates_the_cache_brain_models_list_reads(
     let path = write_real_qwen3_base(&store, "Qwen", "Qwen3-0.6B");
 
     let flops_out = Command::new(bin())
-        .args(["flops", "--model", "qwen", "--weights", path.to_str().unwrap(), "--batch", "1"])
-        .env("BRAIN_PIPELINE_CACHE_DIR", &cache)
+        .args(["flops", "--model", "qwen", "--weights", path.to_str().unwrap(), "--batch", "1", "--cache-dir"])
+        .arg(&cache)
         .output()
         .expect("run brain flops");
     assert!(flops_out.status.success(), "brain flops --weights failed: {}", String::from_utf8_lossy(&flops_out.stderr));
 
     let list_out = Command::new(bin())
-        .args(["models", "list", "--arch", "qwen3", "--plain"])
+        .args(["models", "list", "--arch", "qwen3", "--plain", "--cache-dir"])
+        .arg(&cache)
         .env("BRAIN_MODELS_DIR", &dir)
-        .env("BRAIN_PIPELINE_CACHE_DIR", &cache)
         .output()
         .expect("run brain models list");
     assert!(list_out.status.success());

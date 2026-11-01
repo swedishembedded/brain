@@ -290,6 +290,9 @@ pub mod cost;
 pub mod tune;
 /// The workspace's one cache-directory resolution - see [`tune::cache_dir`].
 pub use tune::cache_dir;
+/// Name the workspace's cache directory ([`cache_dir`]), from the CLI's `--cache-dir`.
+#[cfg(not(target_arch = "wasm32"))]
+pub use backend_api::set_cache_dir;
 
 /// The device's own measured roofline - the denominator every "% of peak"
 /// claim in this engine divides by, so that claim is about the device that ran.

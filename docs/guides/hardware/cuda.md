@@ -19,7 +19,7 @@ Hopper systems.
 - **The NVIDIA driver.** That is all a model needs to *run* once its kernels
   are compiled.
 - **NVRTC** (`libnvrtc`, part of the CUDA toolkit) to compile kernels the first
-  time each is used; the result is cached on disk (`BRAIN_PIPELINE_CACHE_DIR`).
+  time each is used; the result is cached on disk (`--cache-dir`).
   Without it a machine can still run every catalogue kernel and native kernel
   from ahead-of-time images (below); a kernel with no image and no NVRTC is
   reported by name.
@@ -58,7 +58,7 @@ make cuda/aot LANE=13     # sm_90 100 120 + PTX (Hopper and newer)
 Run both lanes to fill one directory for a mixed fleet; copy the directory to
 the target machine and point `--cuda-aot-dir` at it. The images are build
 products and are never written into the repository; the directory defaults to
-`cuda-aot` under `BRAIN_PIPELINE_CACHE_DIR`. For one kernel on one device the
+`cuda-aot` under the cache directory (`--cache-dir`). For one kernel on one device the
 backend takes, in order: the cubin for the device's architecture (the
 arch-specific one first when the kernel asks for it), a cubin for a lower minor
 of the same major, the disk cache or NVRTC, and finally the PTX, which the

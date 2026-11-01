@@ -46,7 +46,7 @@
 //! # Where it lives
 //!
 //! `gpu_core::cache_dir()` - the one cache-directory resolution this
-//! workspace already has (`BRAIN_PIPELINE_CACHE_DIR`, else
+//! workspace already has (`brain --cache-dir`, else
 //! `XDG_CACHE_HOME/brain`, else `~/.cache/brain`), not a second copy of that
 //! ladder. Set `BRAIN_LTXV_TEXT_CACHE=0` to disable.
 //!
@@ -397,7 +397,7 @@ mod tests {
     use super::*;
 
     /// Several tests below mutate PROCESS-WIDE environment variables this
-    /// module reads (`BRAIN_PIPELINE_CACHE_DIR`, `BRAIN_LTXV_TEXT_CACHE`,
+    /// module reads (the cache directory, `BRAIN_LTXV_TEXT_CACHE`,
     /// `BRAIN_LTXV_TEXT_CACHE_MAX_BYTES`), and `cargo test` runs one
     /// binary's tests on many threads. Without a guard they race: one test's
     /// cache directory, budget or off-switch lands in the middle of
@@ -463,7 +463,7 @@ mod tests {
         let tmp = std::env::temp_dir().join("brain-ltxv-text-cache-test");
         // SAFETY-equivalent note: this test owns the process's cache dir for
         // its duration; it runs single-threaded within its own binary.
-        unsafe { std::env::set_var("BRAIN_PIPELINE_CACHE_DIR", &tmp) };
+        gpu_core::set_cache_dir(Some(tmp.clone()));
         let k = key();
         let enc = Encoded {
             a_ctx_cond: None,
@@ -491,7 +491,7 @@ mod tests {
         assert!(load(&k).is_none(), "an entry whose key does not match must be a miss");
 
         std::fs::remove_dir_all(&tmp).ok();
-        unsafe { std::env::remove_var("BRAIN_PIPELINE_CACHE_DIR") };
+        gpu_core::set_cache_dir(None);
     }
 
     /// Write `n` byte-sized entries into `dir`, entry `i` last used `n - i`
@@ -553,7 +553,7 @@ mod tests {
         let _env = env_guard();
         let tmp = std::env::temp_dir().join("brain-ltxv-text-cache-budget-test");
         std::fs::remove_dir_all(&tmp).ok();
-        unsafe { std::env::set_var("BRAIN_PIPELINE_CACHE_DIR", &tmp) };
+        gpu_core::set_cache_dir(Some(tmp.clone()));
         unsafe { std::env::remove_var("BRAIN_LTXV_TEXT_CACHE") };
         unsafe { std::env::remove_var("BRAIN_LTXV_TEXT_CACHE_MAX_BYTES") };
         let enc = Encoded { ctx_cond: vec![1.0; 8], ctx_uncond: vec![0.0; 8], context_valid: vec![1.0; 2], context_len: 2, a_ctx_cond: None, a_ctx_uncond: None };
@@ -590,7 +590,7 @@ mod tests {
 
         std::fs::remove_dir_all(&tmp).ok();
         unsafe { std::env::remove_var("BRAIN_LTXV_TEXT_CACHE_MAX_BYTES") };
-        unsafe { std::env::remove_var("BRAIN_PIPELINE_CACHE_DIR") };
+        gpu_core::set_cache_dir(None);
     }
 
     #[test]

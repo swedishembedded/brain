@@ -791,6 +791,16 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
                 }
             }
             i += 2;
+        } else if argv[i] == "--cache-dir" {
+            // Where derived data persists (pipeline blobs, autotune records, kernel images); default the platform's cache.
+            match argv.get(i + 1).filter(|v| !v.is_empty()) {
+                Some(v) => gpu_core::set_cache_dir(Some(v.into())),
+                None => {
+                    eprintln!("brain: --cache-dir needs a directory");
+                    std::process::exit(2);
+                }
+            }
+            i += 2;
         } else if argv[i] == "--no-autotune" {
             // Every kernel slot keeps its default candidate and the selector its static policy: reproducible benchmarking
             // and A/B runs.

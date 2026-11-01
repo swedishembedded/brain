@@ -3,7 +3,6 @@ crates/arch/src/lib.rs	BRAIN_CAMPPLUS_DIR
 crates/arch/src/lib.rs	BRAIN_LLAVA_WEIGHTS
 crates/arch/src/lib.rs	BRAIN_S3TOKENIZER_V2
 crates/arch/src/lib.rs	BRAIN_S3TOKENIZER_V3
-crates/backend-api/src/lib.rs	BRAIN_PIPELINE_CACHE_DIR
 crates/backend-api/src/lib.rs	BRAIN_PROFILE
 crates/backend-api/src/lib.rs	HOME
 crates/backend-api/src/lib.rs	XDG_CACHE_HOME
@@ -21,11 +20,8 @@ crates/backend-wgpu/src/lib.rs	BRAIN_GPU_GL
 crates/backend-wgpu/src/lib.rs	BRAIN_GPU_MEM_PERF
 crates/backend-wgpu/src/lib.rs	BRAIN_GPU_NO_READ_STAGING_REUSE
 crates/backend-wgpu/src/lib.rs	BRAIN_GPU_VALIDATION
-crates/backend-wgpu/src/lib.rs	BRAIN_PIPELINE_CACHE_DIR
 crates/backend-wgpu/src/lib.rs	BRAIN_WGPU_NO_SERIAL
 crates/backend-wgpu/src/lib.rs	BRAIN_WGPU_SERIAL
-crates/backend-wgpu/src/lib.rs	HOME
-crates/backend-wgpu/src/lib.rs	XDG_CACHE_HOME
 crates/backend-wgpu/tests/adapter_enumeration.rs	MOE_SKIP_GPU_TESTS
 crates/backend-wgpu/tests/common/mod.rs	MOE_SKIP_GPU_TESTS
 crates/backend-wgpu/tests/read_staging_reuse.rs	BRAIN_GPU_NO_READ_STAGING_REUSE
@@ -183,7 +179,6 @@ crates/cli/tests/flops_diffusion_cli.rs	BRAIN_FLUX2_VAE
 crates/cli/tests/forecast_finetune_timesfm3.rs	MOE_SKIP_GPU_TESTS
 crates/cli/tests/lpips_cli.rs	BRAIN_DEVICE
 crates/cli/tests/models_list.rs	BRAIN_MODELS_DIR
-crates/cli/tests/models_list.rs	BRAIN_PIPELINE_CACHE_DIR
 crates/cli/tests/models_list.rs	MOE_SKIP_GPU_TESTS
 crates/cli/tests/oos_skill_eval.rs	<k>
 crates/cli/tests/oos_skill_eval.rs	BRAIN_DEVICE
@@ -658,7 +653,6 @@ crates/ltxv/src/pipeline.rs	BRAIN_LTXV_UPSAMPLER_TEMPORAL
 crates/ltxv/src/pipeline.rs	BRAIN_LTXV_VAE
 crates/ltxv/src/text_cache.rs	BRAIN_LTXV_TEXT_CACHE
 crates/ltxv/src/text_cache.rs	BRAIN_LTXV_TEXT_CACHE_MAX_BYTES
-crates/ltxv/src/text_cache.rs	BRAIN_PIPELINE_CACHE_DIR
 crates/ltxv/src/vae3d.rs	BRAIN_LTXV_VAE_NO_SHARED_WEIGHTS
 crates/ltxv/src/vae3d.rs	BRAIN_LTXV_VAE_TAPS
 crates/ltxv/src/vae3d.rs	BRAIN_LTXV_VAE_TILE
@@ -1222,9 +1216,6 @@ crates/vulkan/build.rs	OUT_DIR
 crates/vulkan/src/context.rs	BRAIN_VK_ALLOC_DEBUG
 crates/vulkan/src/context.rs	BRAIN_VK_DEVICE
 crates/vulkan/src/context.rs	BRAIN_VK_VALIDATE
-crates/vulkan/src/pipeline_cache.rs	BRAIN_PIPELINE_CACHE_DIR
-crates/vulkan/src/pipeline_cache.rs	HOME
-crates/vulkan/src/pipeline_cache.rs	XDG_CACHE_HOME
 crates/vulkan/src/shader.rs	BRAIN_GPU_CHECKED
 crates/vulkan/tests/peak_flops.rs	BRAIN_VK_DEVICE
 crates/vulkan/tests/peak_flops.rs	BRAIN_VK_NDEV

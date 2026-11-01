@@ -342,17 +342,10 @@ struct PlCache {
 }
 
 impl PlCache {
-    /// Where cache blobs live: `BRAIN_PIPELINE_CACHE_DIR`, else
-    /// `$XDG_CACHE_HOME/brain`, else `~/.cache/brain`. `None` = nowhere to
+    /// Where cache blobs live: the workspace's one cache directory (`backend_api::cache_dir`). `None` = nowhere to
     /// persist, which simply disables the warm start.
     fn dir() -> Option<std::path::PathBuf> {
-        if let Ok(d) = std::env::var("BRAIN_PIPELINE_CACHE_DIR") {
-            return Some(d.into());
-        }
-        if let Ok(d) = std::env::var("XDG_CACHE_HOME") {
-            return Some(std::path::Path::new(&d).join("brain"));
-        }
-        std::env::var("HOME").ok().map(|h| std::path::Path::new(&h).join(".cache/brain"))
+        backend_api::cache_dir()
     }
 
     /// Open (or freshly create) the persisted cache for this adapter.
