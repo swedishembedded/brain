@@ -56,6 +56,9 @@ impl ClipBand {
 pub struct TokenTerm {
     pub weight: f32,
     pub loss: f32,
+    /// The policy term sat outside the clip band on the side its advantage pushes toward, so it contributes no
+    /// gradient (`false` for a token without an advantage).
+    pub clipped: bool,
 }
 
 /// [`token_term_banded`] with a symmetric band `[1 - clip_eps, 1 + clip_eps]`.
@@ -80,6 +83,7 @@ pub fn token_term_banded(old_lp: f32, new_lp: f32, advantage: f32, band: ClipBan
     let ratio = (new_lp - old_lp).min(MAX_LOG_RATIO).exp();
     let mut weight = 0.0f32;
     let mut loss = 0.0f32;
+    let mut clipped_out = false;
 
     if advantage != 0.0 {
         let unclipped = ratio * advantage;
@@ -88,6 +92,8 @@ pub fn token_term_banded(old_lp: f32, new_lp: f32, advantage: f32, band: ClipBan
         loss += -surrogate;
         if unclipped <= clipped {
             weight += advantage * ratio;
+        } else {
+            clipped_out = true;
         }
     }
 
@@ -98,7 +104,7 @@ pub fn token_term_banded(old_lp: f32, new_lp: f32, advantage: f32, band: ClipBan
         loss += kl_beta * (eu - u - 1.0);
     }
 
-    TokenTerm { weight, loss }
+    TokenTerm { weight, loss, clipped: clipped_out }
 }
 
 /// The k3 estimator of `KL(policy || reference)` at one sampled token,

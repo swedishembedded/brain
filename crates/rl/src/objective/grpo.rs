@@ -48,6 +48,7 @@ use model::{Batch, Model, Objective, StepVerdict, IGNORE};
 pub use super::advantage::{group_advantages, group_advantages_with, AdvantageNorm};
 pub use super::grpo_stats::{CycleLog, GrpoStats, NonFiniteSteps, RowRefusal, MAX_CONSECUTIVE_NONFINITE};
 pub use super::grpo_term::{k3_kl, near_clip_boundary, token_term, token_term_banded, ClipBand, TokenTerm, MAX_LOG_RATIO};
+use super::pg_batch::{backward_weighted, PgBatch, PgSpec};
 use crate::env::{Environment, Task, Verifier};
 
 /// How a row's per-token loss terms are normalised.
@@ -542,38 +543,12 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
     fn train_row<M: Model>(&mut self, model: &M, row: &PackedRow, denominator: Option<f32>) -> (f32, bool) {
         model.set_batch(Batch::Lm { tokens: &row.tokens, targets: &row.targets });
         let _ = model.forward();
-        let objectives = training::objectives(model);
-        if let Some(d) = denominator {
-            objectives.set_loss_denominator(d);
-        }
-        let new_lp = objectives.batch_token_logprobs();
-        let supervised: Vec<usize> = (0..row.tokens.len()).filter(|&i| row.targets[i] != IGNORE).collect();
-        if supervised.iter().any(|&i| !new_lp[i].is_finite()) {
-            return (0.0, false);
-        }
-        let band = self.band();
-        let kl_beta = self.cfg.kl_beta;
-        let mut weights = vec![0f32; row.tokens.len()];
-        let (mut total, mut kl_sum, mut ratio_dev) = (0.0f32, 0.0f32, 0.0f32);
-        for &i in &supervised {
-            let ref_lp = row.has_ref.then_some(row.ref_lp[i]);
-            let term = token_term_banded(row.old_lp[i], new_lp[i], row.advantage[i], band, ref_lp.filter(|_| kl_beta > 0.0), kl_beta);
-            weights[i] = term.weight;
-            total += term.loss;
-            if let Some(r) = ref_lp {
-                kl_sum += k3_kl(r, new_lp[i]);
-            }
-            if row.version == self.version {
-                ratio_dev = ratio_dev.max(((new_lp[i] - row.old_lp[i]).exp() - 1.0).abs());
-            }
-        }
-        let finite = total.is_finite() && weights.iter().all(|w| w.is_finite());
-        if finite {
-            objectives.set_loss_weights(&weights);
-            model.backward();
-        }
-        self.stats.record_row(ratio_dev, row.has_ref.then_some((kl_sum, row.supervised)));
-        (total / denominator.unwrap_or(row.supervised as f32), finite)
+        let batch = PgBatch { targets: &row.targets, old_lp: &row.old_lp, ref_lp: row.has_ref.then_some(&row.ref_lp[..]), advantage: &row.advantage };
+        let spec = PgSpec { band: self.band(), kl_beta: self.cfg.kl_beta };
+        let terms = backward_weighted(model, &batch, &spec, denominator);
+        let ratio_dev = if row.version == self.version { terms.max_ratio_dev } else { 0.0 };
+        self.stats.record_row(ratio_dev, row.has_ref.then_some((terms.kl_sum, row.supervised)));
+        (terms.loss / denominator.unwrap_or(row.supervised as f32), terms.finite)
     }
 }
 
