@@ -22,6 +22,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
+use capability::blob::image_key;
 use capability::{Action, ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, ParamSpec, ParamType, Progress, Provider};
 use data::chat_template::ChatTemplate;
 use imaging::Rgb8;
@@ -35,7 +36,7 @@ use crate::model::{GenOptions, MiniCpmV, Prepared};
 pub const MODEL: &str = "brain/minicpmv";
 
 /// Images one request may carry: `image`, then `image1` ... `image7`.
-pub const MAX_IMAGES: usize = 8;
+pub use capability::blob::MAX_IMAGES;
 
 /// The per-sequence context a served instance is built for (prompt plus
 /// reply). A 36-slice image at 4x is about 9k placeholder rows.
@@ -45,14 +46,6 @@ pub const SERVE_CONTEXT: u32 = 16384;
 pub const SERVE_CONCURRENT: u32 = 4;
 
 pub const DEFAULT_MAX_NEW: i64 = 512;
-
-fn image_key(i: usize) -> String {
-    if i == 0 {
-        "image".to_string()
-    } else {
-        format!("image{i}")
-    }
-}
 
 pub fn generate_spec() -> ActionSpec {
     let mut spec = ActionSpec::new("generate", "MiniCPM-V 4.6: up to 8 images and a video + a conversation in, text out (streamed per token)")

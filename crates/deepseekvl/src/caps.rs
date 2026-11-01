@@ -16,6 +16,7 @@
 
 use std::sync::Mutex;
 
+use capability::blob::image_key;
 use capability::{Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress, Provider};
 use imaging::pixels::Rgb8;
 use serde_json::{json, Value};
@@ -30,7 +31,7 @@ pub const MODEL: &str = "brain/deepseekvl";
 /// Images one request may carry: `image`, then `image1` ... `image7`. What a
 /// request may actually fit is the served context's business: each image is
 /// 576 rows of it.
-pub const MAX_IMAGES: usize = 8;
+pub use capability::blob::MAX_IMAGES;
 
 /// The longest context either checkpoint's position table covers. A served
 /// composite is built for whatever KV cache fits its decoder's card, up to
@@ -38,14 +39,6 @@ pub const MAX_IMAGES: usize = 8;
 pub const MAX_CONTEXT: u32 = 16384;
 
 pub const DEFAULT_MAX_NEW: i64 = 512;
-
-fn image_key(i: usize) -> String {
-    if i == 0 {
-        "image".to_string()
-    } else {
-        format!("image{i}")
-    }
-}
 
 /// The `generate` action for `model_desc`.
 pub fn generate_spec(model_desc: &str) -> ActionSpec {

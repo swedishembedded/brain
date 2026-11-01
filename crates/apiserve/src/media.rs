@@ -31,7 +31,7 @@ use crate::b64;
 /// The most images one request may carry. Each is decoded to a float image
 /// held in memory while the request runs, so the count is bounded before
 /// anything is decoded past it.
-pub const MAX_IMAGES: usize = 8;
+pub use capability::blob::MAX_IMAGES;
 
 /// The most pixels one image may declare (a 6000 x 6000 photograph). The image is refused from its header, before it is
 /// decoded: a PNG a few kilobytes long can declare billions of pixels, and a decoded pixel is twelve bytes of float.
@@ -41,15 +41,7 @@ pub const MAX_IMAGE_PIXELS: u64 = 36_000_000;
 /// gigabytes while one request runs.
 pub const MAX_REQUEST_PIXELS: u64 = 64_000_000;
 
-/// The blob name of the `i`th image of a request: `image`, then `image1`,
-/// `image2`, ...
-pub fn image_key(i: usize) -> String {
-    if i == 0 {
-        "image".to_string()
-    } else {
-        format!("image{i}")
-    }
-}
+use capability::blob::image_key;
 
 /// The images (in order) and at most one audio clip found across a request's
 /// messages, ready to attach to an `Invocation` via `.blob(...)`.

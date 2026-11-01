@@ -199,14 +199,8 @@ fn default_ctx_len() -> u32 {
 /// `generate_spec()` can declare a fixed, self-describing set of optional
 /// inputs (`image1`..`image{MAX_IMAGES-1}`) rather than an open-ended one;
 /// 8 is a practical ceiling for a single chat turn, not a checkpoint limit.
-pub const MAX_IMAGES: usize = 8;
-
-/// The wire name of image `i` (0-based): `image`, `image1`, `image2`, … --
-/// the ONE place this numbering is spelled, so `generate_spec()` and
-/// [`decode_images`] cannot drift about what key holds image 2.
-fn image_key(i: usize) -> String {
-    if i == 0 { "image".to_string() } else { format!("image{i}") }
-}
+pub use capability::blob::MAX_IMAGES;
+use capability::blob::image_key;
 
 /// Decode every image blob present, contiguous from `image` (required) up to
 /// [`MAX_IMAGES`] -- stops at the first missing numbered key, so `image`,

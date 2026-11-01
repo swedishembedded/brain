@@ -23,6 +23,19 @@ pub fn image_blob(hwc: &[f32], w: u32, h: u32, c: u32) -> Blob {
     Blob::new(Media::Image, bytes).with_meta(json!({"w": w, "h": h, "c": c}))
 }
 
+/// The most images one request carries to a model that reads several: the blobs `image`, `image1`, ... `image7`
+/// ([`image_key`]).
+pub const MAX_IMAGES: usize = 8;
+
+/// The blob name of the `i`th image of a request: `image`, then `image1`, `image2`, ...
+pub fn image_key(i: usize) -> String {
+    if i == 0 {
+        "image".to_string()
+    } else {
+        format!("image{i}")
+    }
+}
+
 /// Decode a named HWC-f32 blob to `(hwc, w, h, c)`. Validates the media (an
 /// image-like blob: `image`/`mask`, or untyped `bytes` from a client that sent no
 /// media tag), the `{w,h}` metadata, and that the payload is a whole number of
