@@ -669,6 +669,10 @@ const FLASH_DECODE_BINDINGS: &[BindKind] =
 const FLASH_DECODE_KV8_LAUNCH: CudaLaunch =
     CudaLaunch { dynamic_shared_bytes: kernels_cuda::FLASH_DECODE_KV8_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..CudaLaunch::NONE };
 
+/// The ring of the bf16 decode kernel is dynamic shared memory, opted in.
+const FLASH_DECODE_BF16_LAUNCH: CudaLaunch =
+    CudaLaunch { dynamic_shared_bytes: kernels_cuda::FLASH_DECODE_BF16_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..CudaLaunch::NONE };
+
 /// The query heads per kv head the native int8 decode kernel is compiled for
 /// (`BRAIN_GRP` in its registry entry).
 const FLASH_DECODE_GROUP: u32 = 6;
@@ -1657,14 +1661,14 @@ pub(crate) const ROWS: &[Row] = &[
     },
     Row {
         slow: "paged_flash_decode_gqa_hd256#GRP=6#kv=bf16",
-        target: Target::Named("paged_flash_decode_gqa_hd256_bf16"),
+        target: Target::Named("paged_flash_decode_gqa_hd256_kvbf16"),
         bindings: FLASH_DECODE_BINDINGS,
         serves: serves_flash_decode,
         blocks: flash_decode_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
         input: Input::PACKED,
-        launch: CudaLaunch::NONE,
+        launch: FLASH_DECODE_BF16_LAUNCH,
     },
     Row {
         slow: "paged_flash_decode_gqa_hd256#GRP=6#kv=fp8",

@@ -537,8 +537,25 @@ fn fused_decode_reads_compact_planes_as_exact_attention_reads_their_decoded_valu
 /// SAME physical blocks, the way the prefix cache shares them). The output equals exact attention over the decoded
 /// planes at the bound the WGSL tier is held to.
 fn native_decode_is_exact_at_agent_contexts(g: &Gpu, tier: KvTier, lens: &[u32], shared_blocks: u32) {
+    native_decode_is_exact_at(g, tier, lens, shared_blocks, Magnitudes::UNIT);
+}
+
+/// Factors on the query, the keys and the values of [`native_decode_is_exact_at`]: `UNIT` is the agent-context spec;
+/// the others push the scores (`q`) or the stored elements (`kv`) out to where a narrower or lossier operand format fails.
+#[derive(Clone, Copy)]
+struct Magnitudes {
+    q: f32,
+    k: f32,
+    v: f32,
+}
+
+impl Magnitudes {
+    const UNIT: Magnitudes = Magnitudes { q: 1.0, k: 1.0, v: 1.0 };
+}
+
+fn native_decode_is_exact_at(g: &Gpu, tier: KvTier, lens: &[u32], shared_blocks: u32, mag: Magnitudes) {
     let (n_heads, n_kv, block_size) = (24u32, 4u32, 64u32);
-    let label = format!("{tier} lens {lens:?}, {shared_blocks} shared blocks");
+    let label = format!("{tier} lens {lens:?}, {shared_blocks} shared blocks, q x{} k x{} v x{}", mag.q, mag.k, mag.v);
     let own_blocks: u32 = lens.iter().enumerate().map(|(b, &len)| len.div_ceil(block_size) - if b == 0 { 0 } else { shared_blocks }).sum();
     let num_blocks = (shared_blocks + own_blocks) * 2 + 1;
     let mut next = 0u32;
@@ -565,7 +582,11 @@ fn native_decode_is_exact_at_agent_contexts(g: &Gpu, tier: KvTier, lens: &[u32],
     let s = Shape { n_heads, n_kv, head_dim: 256, block_size, num_blocks };
     let stride = s.kv_stride() as usize;
     let prefix_tokens = (shared_blocks * block_size) as usize;
-    let (prefix_k, prefix_v) = (random(0xA1, prefix_tokens * stride), random(0xA2, prefix_tokens * stride));
+    let scaled = |mut v: Vec<f32>, by: f32| {
+        v.iter_mut().for_each(|x| *x *= by);
+        v
+    };
+    let (prefix_k, prefix_v) = (scaled(random(0xA1, prefix_tokens * stride), mag.k), scaled(random(0xA2, prefix_tokens * stride), mag.v));
     let (mut blocks, mut offsets, mut krows, mut vrows) = (vec![], vec![], vec![], vec![]);
     for (b, &len) in lens.iter().enumerate() {
         let skip = if b == 0 { 0 } else { prefix_tokens };
@@ -578,8 +599,8 @@ fn native_decode_is_exact_at_agent_contexts(g: &Gpu, tier: KvTier, lens: &[u32],
             krows.extend_from_slice(&prefix_k);
             vrows.extend_from_slice(&prefix_v);
         }
-        krows.extend(random(0xB000 + b as u64, (len as usize - skip) * stride));
-        vrows.extend(random(0xC000 + b as u64, (len as usize - skip) * stride));
+        krows.extend(scaled(random(0xB000 + b as u64, (len as usize - skip) * stride), mag.k));
+        vrows.extend(scaled(random(0xC000 + b as u64, (len as usize - skip) * stride), mag.v));
     }
     let (kc, vc) = (filled(g, tier, &s, &krows, &blocks, &offsets), filled(g, tier, &s, &vrows, &blocks, &offsets));
     let kdec = kc.read_dequantized(g, s.rows() as usize, stride, s.head_dim as usize);
@@ -591,16 +612,17 @@ fn native_decode_is_exact_at_agent_contexts(g: &Gpu, tier: KvTier, lens: &[u32],
     for (b, t) in tables.iter().enumerate() {
         table_h[b * max_bt as usize..b * max_bt as usize + t.len()].copy_from_slice(t);
     }
-    let q_h: Vec<f32> = random(0xC0FFEE, (batch * n_heads * 256) as usize).iter().map(|x| x * 0.5).collect();
+    let q_h = scaled(random(0xC0FFEE, (batch * n_heads * 256) as usize), 0.5 * mag.q);
     let (q, table, seq_lens) = (g.storage_init("q", &q_h), u32s(g, &table_h), u32s(g, lens));
-    let ctx = g.storage((batch * n_heads * 256) as u64);
+    // NaN-poisoned: a row the merge does not write fails the comparison instead of passing on a zero.
+    let ctx = g.storage_init("ctx", &vec![f32::NAN; (batch * n_heads * 256) as usize]);
     let kernels = KvKernels::resolve(g, tier).unwrap();
     let shape = FlashDecodeShape { batch, n_heads, n_kv_heads: n_kv, head_dim: 256, block_size, max_bt, cap: *lens.iter().max().unwrap(), pin_splits: false };
     assert!(kernels.flash_decode_available(g, 256, n_heads / n_kv), "{label}: the fused decode must be available");
     let (slow, native) = match () {
         _ if tier == KvTier::INT8 => ("paged_flash_decode_gqa_hd256#GRP=6#kv=int8", "paged_flash_decode_gqa_hd256_kv8"),
         _ if tier == KvTier::FP8 => ("paged_flash_decode_gqa_hd256#GRP=6#kv=fp8", "paged_flash_decode_gqa_hd256_kvfp8"),
-        _ if tier == KvTier::BF16 => ("paged_flash_decode_gqa_hd256#GRP=6#kv=bf16", "paged_flash_decode_gqa_hd256_bf16"),
+        _ if tier == KvTier::BF16 => ("paged_flash_decode_gqa_hd256#GRP=6#kv=bf16", "paged_flash_decode_gqa_hd256_kvbf16"),
         _ => ("paged_flash_decode_gqa_hd256#GRP=6", "paged_flash_decode_gqa_hd256_f32"),
     };
     let kernel = g.kernel_index(slow).expect("the decode kernel is registered");
@@ -630,11 +652,24 @@ fn native_decode_is_exact_at_agent_contexts(g: &Gpu, tier: KvTier, lens: &[u32],
                 let have = got[(b * n_heads as usize + h) * hd + d] as f64;
                 let err = (want - have).abs();
                 worst = worst.max(err / want.abs().max(0.05));
-                assert!(err <= 2e-5 + 2e-4 * want.abs(), "{label} b={b} len={len} h={h} d={d}: native decode {have} vs exact {want}");
+                // The floor scales with the values: a sum of terms of magnitude `v` cancels down to its own scale only up to round-off in `v`.
+                assert!(err <= 2e-5 * mag.v.max(1.0) as f64 + 2e-4 * want.abs(), "{label} b={b} len={len} h={h} d={d}: native decode {have} vs exact {want}");
             }
         }
     }
     eprintln!("native decode at {label}: worst relative error to exact {worst:.2e}");
+}
+
+/// An explicitly opened CUDA device, or `None` (skipped) when there is none: the ambient GPU may be another backend, which
+/// keeps the WGSL tier.
+fn cuda_gpu(what: &str) -> Option<Gpu> {
+    match Gpu::try_new_cuda(kernels()) {
+        Ok(g) if g.caps().arch.compute_capability.is_some() => Some(g),
+        _ => {
+            brain_testutil::skip_unavailable(what);
+            None
+        }
+    }
 }
 
 #[test]
@@ -643,14 +678,7 @@ fn native_decode_of_every_tier_is_exact_at_agent_contexts_over_a_shared_prefix_o
     if brain_testutil::gpu_tests_skipped() {
         return;
     }
-    // Opened as CUDA explicitly: the ambient GPU may be another backend, which keeps the WGSL tier.
-    let g = match Gpu::try_new_cuda(kernels()) {
-        Ok(g) if g.caps().arch.compute_capability.is_some() => g,
-        _ => {
-            brain_testutil::skip_unavailable("native int8 decode attention: no CUDA device");
-            return;
-        }
-    };
+    let Some(g) = cuda_gpu("native decode attention: no CUDA device") else { return };
     // One sequence at 48k; 1k + 13k + 48k with the two long ones on one 10,240-token prefix; eight agents at 1-4k
     // on one 1,024-token prefix; sixteen short ones (partly empty splits, a one-key sequence).
     for tier in KvTier::ALL {
@@ -658,6 +686,107 @@ fn native_decode_of_every_tier_is_exact_at_agent_contexts_over_a_shared_prefix_o
         native_decode_is_exact_at_agent_contexts(&g, tier, &[1024, 13_000, 48_000], 160);
         native_decode_is_exact_at_agent_contexts(&g, tier, &[4096, 1100, 2047, 3000, 1025, 4000, 1500, 2500], 16);
         native_decode_is_exact_at_agent_contexts(&g, tier, &[1, 129, 64, 65, 300, 127, 128, 700, 5, 200, 333, 1000, 63, 2, 900, 450], 0);
+    }
+}
+
+/// A bf16 pool's operands are stored as they are, so its kernel must keep two ranges the scaled tiers never see: scores in
+/// the tens (the exponent's absolute error is the score's relative error times its size, so an operand split that keeps too
+/// few bits shows here) and stored elements beyond the f16 range (a kernel that narrows a bf16 element to f16 turns 1e5 into
+/// infinity).
+#[test]
+fn native_decode_of_the_bf16_tier_is_exact_at_large_scores_and_beyond_the_f16_range_on_cuda() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    if brain_testutil::gpu_tests_skipped() {
+        return;
+    }
+    let Some(g) = cuda_gpu("native decode attention: no CUDA device") else { return };
+    // Scores in the tens; keys, then values, beyond the f16 range (the query shrunk so the scores stay moderate).
+    for mag in [Magnitudes { q: 10.0, k: 1.0, v: 1.0 }, Magnitudes { q: 1e-5, k: 1e5, v: 1.0 }, Magnitudes { q: 1.0, k: 1.0, v: 1e5 }] {
+        native_decode_is_exact_at(&g, KvTier::BF16, &[13_000, 2047, 129, 1], 0, mag);
+        native_decode_is_exact_at(&g, KvTier::BF16, &[4096, 1100, 3000, 1025], 16, mag);
+    }
+}
+
+/// Every partial record of a bf16-pool dispatch is written, whatever the split policy cuts: the records start NaN, the
+/// grid is cut far finer than the keys need (most splits are past the live keys), and no record may stay NaN.
+#[test]
+fn native_bf16_decode_writes_every_partial_record_including_splits_past_the_live_keys_on_cuda() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    if brain_testutil::gpu_tests_skipped() {
+        return;
+    }
+    let Some(g) = cuda_gpu("native decode attention: no CUDA device") else { return };
+    let (n_heads, n_kv, block_size, hd) = (24u32, 4u32, 64u32, 256u32);
+    let tier = KvTier::BF16;
+    let lens = [1u32, 130, 64, 700];
+    let batch = lens.len() as u32;
+    let max_bt = 12u32;
+    let num_blocks = batch * max_bt;
+    let s = Shape { n_heads, n_kv, head_dim: hd, block_size, num_blocks };
+    let table_h: Vec<u32> = (0..batch).flat_map(|b| (0..max_bt).map(move |i| i * batch + b)).collect();
+    let (mut blocks, mut offsets) = (vec![], vec![]);
+    for (b, &len) in lens.iter().enumerate() {
+        let (bl, of) = place(len, block_size, &table_h[b * max_bt as usize..][..max_bt as usize]);
+        blocks.extend(bl);
+        offsets.extend(of);
+    }
+    let rows = |seed| random(seed, blocks.len() * s.kv_stride() as usize);
+    let (kc, vc) = (filled(&g, tier, &s, &rows(1), &blocks, &offsets), filled(&g, tier, &s, &rows(2), &blocks, &offsets));
+    let q = g.storage_init("q", &random(3, (batch * n_heads * hd) as usize));
+    let (table, seq_lens) = (u32s(&g, &table_h), u32s(&g, &lens));
+    let kernel = g.kernel_index("paged_flash_decode_gqa_hd256#GRP=6#kv=bf16").expect("the decode kernel is registered");
+    let (n_splits, tiles_per_split) = (9u32, 1u32);
+    let params = [batch, n_heads, n_kv, hd, n_heads / n_kv, block_size, max_bt, n_splits, tiles_per_split];
+    assert_eq!(g.native_kernel_for(kernel, &params), Some("paged_flash_decode_gqa_hd256_kvbf16"));
+    let n_part = (batch * n_heads * n_splits * (hd + 2)) as usize;
+    let part = g.storage_init("part", &vec![f32::NAN; n_part]);
+    let step = g.dispatch(kernel, &[&q, kc.data(), vc.data(), &table, &seq_lens, &part], &params, gpu_core::Dispatch::Workgroups(batch * n_kv * n_splits));
+    g.submit(&[], &[step]);
+    let got = g.read(&part, n_part);
+    for (i, rec) in got.chunks(hd as usize + 2).enumerate() {
+        assert!(rec.iter().all(|x| x.is_finite()), "partial record {i} (sequence {}, split {}) holds a non-finite value", i / (n_heads * n_splits) as usize, i % n_splits as usize);
+    }
+}
+
+/// Back-to-back launches of the native decode kernels at served shapes (knowledge 410: a kernel is admitted on agreement AND on
+/// surviving its own launches in a row, which instrumented single launches miss). Every one of 2,000 launches must return the
+/// first launch's bits. Run it with `dmesg | grep -ci xid` before and after.
+#[test]
+#[ignore = "a stress run for kernel work (minutes), not a spec"]
+fn native_decode_survives_back_to_back_launches_at_served_shapes() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(g) = cuda_gpu("decode stress: no CUDA device") else { return };
+    for tier in [KvTier::BF16, KvTier::INT8] {
+        for (batch, len) in [(16u32, 8192u32), (64, 1024), (1, 32_768)] {
+            let (n_heads, n_kv, block_size) = (24u32, 4u32, 64u32);
+            let per = len.div_ceil(block_size);
+            let s = Shape { n_heads, n_kv, head_dim: 256, block_size, num_blocks: batch * per };
+            let table_h: Vec<u32> = (0..batch).flat_map(|b| (0..per).map(move |i| i * batch + b)).collect();
+            let (mut blocks, mut offsets) = (vec![], vec![]);
+            for b in 0..batch as usize {
+                let (bl, of) = place(len, block_size, &table_h[b * per as usize..][..per as usize]);
+                blocks.extend(bl);
+                offsets.extend(of);
+            }
+            let rows = |seed| random(seed, blocks.len() * s.kv_stride() as usize);
+            let (kc, vc) = (filled(&g, tier, &s, &rows(1), &blocks, &offsets), filled(&g, tier, &s, &rows(2), &blocks, &offsets));
+            let q = g.storage_init("q", &random(3, (batch * n_heads * 256) as usize));
+            let (table, seq_lens) = (u32s(&g, &table_h), u32s(&g, &vec![len; batch as usize]));
+            let ctx = g.storage_init("ctx", &vec![f32::NAN; (batch * n_heads * 256) as usize]);
+            let kernels = KvKernels::resolve(&g, tier).unwrap();
+            let shape = FlashDecodeShape { batch, n_heads, n_kv_heads: n_kv, head_dim: 256, block_size, max_bt: per, cap: len, pin_splits: false };
+            g.submit(&[], &kernels.flash_decode(&g, &q, &kc, &vc, &table, &seq_lens, &ctx, shape));
+            let first = g.read(&ctx, (batch * n_heads * 256) as usize);
+            assert!(first.iter().all(|x| x.is_finite()), "{tier} {batch} x {len}: the first launch wrote a non-finite value");
+            for round in 0..20 {
+                for _ in 0..100 {
+                    g.submit(&[], &kernels.flash_decode(&g, &q, &kc, &vc, &table, &seq_lens, &ctx, shape));
+                }
+                let again = g.read(&ctx, first.len());
+                assert!(again.iter().zip(&first).all(|(a, b)| a.to_bits() == b.to_bits()), "{tier} {batch} x {len}: launch {} differs from the first", (round + 1) * 100);
+            }
+            eprintln!("{tier} {batch} x {len}: 2,000 back-to-back launches, every result bit-identical");
+        }
     }
 }
 
@@ -718,6 +847,28 @@ fn decode_attention_timing_report() {
             tg / tn
         );
     }
+    }
+}
+
+/// The native decode attention (split pass plus merge) per layer at the served matrix cells, with the rate on the bytes it must
+/// read against the card's streaming roof, for the bf16 and int8 pools.
+#[test]
+#[ignore = "a timing report for kernel work, not a spec"]
+fn decode_attention_matrix_cell_report() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(g) = cuda_gpu("decode timing: no CUDA device") else { return };
+    const ROOF_GBS: f64 = 3400.0;
+    for tier in [KvTier::BF16, KvTier::INT8] {
+        let row_bytes = match tier.element() {
+            KvElement::Bf16 => 2.0 * 256.0,
+            _ => 256.0 + 4.0,
+        };
+        for (batch, len) in [(1u32, 8192u32), (16, 8192), (64, 8192), (1, 32_768), (16, 32_768)] {
+            let bytes = 2.0 * batch as f64 * len as f64 * 4.0 * row_bytes;
+            let t = time_decode(&g, tier, batch, len);
+            let gbs = bytes / (t * 1e-3) / 1e9;
+            eprintln!("{tier} decode attention batch {batch:2} x {len:6} keys: {:8.1} us, {:6.0} GB/s ({:.0} % of {ROOF_GBS})", t * 1e3, gbs, 100.0 * gbs / ROOF_GBS);
+        }
     }
 }
 

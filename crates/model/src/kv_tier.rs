@@ -687,6 +687,9 @@ const FLASH_NATIVE_BLOCKS_PER_SM: u32 = 2;
 /// and `FLASH_DECODE_KV8_DYNAMIC_SHARED_BYTES`).
 const FLASH_KV8_BLOCKS_PER_SM: u32 = 3;
 
+/// Blocks per multiprocessor the bf16 kernel keeps resident: its ring of 96 KiB bounds it at two (`FLASH_DECODE_BF16_DYNAMIC_SHARED_BYTES`).
+const FLASH_BF16_BLOCKS_PER_SM: u32 = 2;
+
 /// Most tiles a split of the 8-bit decode kernels walk.
 const FLASH_KV8_MAX_TILES_PER_SPLIT: u32 = 32;
 
@@ -829,8 +832,9 @@ impl KvKernels {
         // writes its own record, and the combine merges any number of them).
         let sms = g.caps().compute_units;
         match g.native_kernel_for(decode, &params) {
-            Some("paged_flash_decode_gqa_hd256_kv8" | "paged_flash_decode_gqa_hd256_kvfp8") => {
-                let slots = sms.map_or(FLASH_TARGET_WORKGROUPS, |cu| cu * FLASH_KV8_BLOCKS_PER_SM);
+            Some(name @ ("paged_flash_decode_gqa_hd256_kv8" | "paged_flash_decode_gqa_hd256_kvfp8" | "paged_flash_decode_gqa_hd256_kvbf16")) => {
+                let per_sm = if name.ends_with("bf16") { FLASH_BF16_BLOCKS_PER_SM } else { FLASH_KV8_BLOCKS_PER_SM };
+                let slots = sms.map_or(FLASH_TARGET_WORKGROUPS, |cu| cu * per_sm);
                 (params[7], params[8]) = flash_splits_kv8(slots, s.cap, s.batch, s.n_kv_heads, s.pin_splits);
             }
             Some(_) => {
