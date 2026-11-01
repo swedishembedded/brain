@@ -670,13 +670,19 @@ pub fn native_attention(cfg: &Qwen35Config) -> bool {
         && model::kv_tier::flash_decode_shape(cfg.head_dim, cfg.n_heads / cfg.n_kv_heads.max(1))
 }
 
-/// The staging buffer a native prefill round over a context of `cap` widens its keys into, live for as many layers as
-/// the round's other activations ([`PREFILL_LIVE_LAYERS`]); nothing for the portable kernels.
+/// How many staging buffers a prefill round holds at once, as a ratio. Only the attention layers stage, one in four of
+/// this family's layers, so the layers the host queues ahead ([`PREFILL_LIVE_LAYERS`]) hold one: measured on a GH200 at
+/// the real 27B shape (`tests/gguf_resident_real.rs`, 4096-row rounds behind 8K, 100K and 200K keys), the round's peak
+/// grew by 0.92 of one buffer from 8K to 200K keys. Charged as 5/4 so the bound holds with a margin.
+const PREFILL_LIVE_STAGING: (u64, u64) = (5, 4);
+
+/// The staging buffer a native prefill round over a context of `cap` widens its keys into ([`PREFILL_LIVE_STAGING`] of
+/// them at once); nothing for the portable kernels.
 pub fn prefill_staging_bytes(cfg: &Qwen35Config, cap: u32, native_attention: bool) -> u64 {
     if !native_attention {
         return 0;
     }
-    gpu_core::provider::cuda::flash_prefill_staging_bytes(cfg.n_kv_heads, cap) * PREFILL_LIVE_LAYERS.0 / PREFILL_LIVE_LAYERS.1
+    gpu_core::provider::cuda::flash_prefill_staging_bytes(cfg.n_kv_heads, cap) * PREFILL_LIVE_STAGING.0 / PREFILL_LIVE_STAGING.1
 }
 
 /// Device bytes one decode (or verify) step of `rows` rows allocates at a

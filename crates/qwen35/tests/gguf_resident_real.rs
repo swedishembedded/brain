@@ -1161,7 +1161,7 @@ fn the_checkpoint_is_held_as_it_is_stored() {
 }
 
 /// Contexts the gate loads the checkpoint at: the decode step's scratch grows with the context.
-const CAPS: [u32; 2] = [8192, 100_000];
+const CAPS: [u32; 3] = [8192, 100_000, 200_000];
 
 /// The planner's prefill and decode workspace against what a real prefill round and decode step allocate on a
 /// card: the placement keeps this free, so a figure under the measurement lets a served model run out of device
@@ -1194,8 +1194,9 @@ fn covers_a_round_and_a_step_at(path: &str, devices: &[(Device, u64)], cfg: &Qwe
     let placed: Vec<Device> = r.estimate_multi(&key).devices().collect();
     let inst = r.activate_owned(&placed).expect("activate the real checkpoint");
 
-    // Several full rounds, so the largest round runs after earlier ones have filled the pool.
-    let prompt: Vec<u32> = (0..5000u32).map(|i| 1000 + i % 5000).collect();
+    // Several full rounds up to nearly `cap` keys, so the largest round runs after earlier ones have filled the pool and
+    // the staging buffer of its longest key range is in the peak.
+    let prompt: Vec<u32> = (0..cap.saturating_sub(1000).max(5000)).map(|i| 1000 + i % 5000).collect();
     inst.prefill_timed(&prompt[..64]).expect("warm");
     let live = probe.memory_usage().unwrap().live;
     probe.reset_memory_peak();
