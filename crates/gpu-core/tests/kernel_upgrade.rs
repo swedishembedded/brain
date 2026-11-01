@@ -91,7 +91,7 @@ fn unchanged_dispatch_site_gets_correct_scales() {
 /// harnesses map `meta.kernel` through **their own** kernel list — the FLUX.2
 /// DiT profiler indexes a 14-entry `const KERNELS` array with it — so a step
 /// carrying the appended slot panics them. `meta` therefore records what the
-/// caller asked for; the backend's `BRAIN_PROFILE` records what ran.
+/// caller asked for; the backend's `--kernel-profile` records what ran.
 #[test]
 fn meta_stays_in_the_callers_index_space() {
     let gpu = gpu_core::testgpu::dev(AS_A_MODEL_REGISTERS_IT);

@@ -679,7 +679,7 @@ impl LtxVaeDecoder {
     /// lh*32, lw*32]`. No clamp is applied - upstream clamps to `[-1,1]`
     /// outside the model. `unpatchify` runs on the host after readback.
     ///
-    /// Each host-side stage is timed under `BRAIN_PROFILE`.
+    /// Each host-side stage is timed under `--kernel-profile`.
     ///
     /// The kernel table (`Gpu::kernel_times`) attributes DEVICE time and
     /// nothing else. A decode's wall clock also carries the latent upload, the

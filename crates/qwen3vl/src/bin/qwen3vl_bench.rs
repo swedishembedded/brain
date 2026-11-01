@@ -288,9 +288,8 @@ fn vision_mode(args: &Args) {
 
 fn caption_mode(args: &Args) {
     if args.profile {
-        // The backend reads this once, at construction, so it has to be set
-        // before the resident is built rather than left to the caller's shell.
-        std::env::set_var("BRAIN_PROFILE", "1");
+        // The backend takes this at construction, so it is set before the resident is built.
+        gpu_core::profile::set_profile(true);
     }
     let dir = std::env::var("BRAIN_QWEN3VL_WEIGHTS").unwrap_or_default();
     if dir.is_empty() {

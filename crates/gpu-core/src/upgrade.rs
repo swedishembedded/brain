@@ -347,7 +347,7 @@ impl Upgrade {
     /// one per bucket for a shape-specialised one. The specialised sources come
     /// from `kernels::template`, so the WGSL stays a SINGLE file (one source,
     /// tunable constants) and each variant carries the `stem#KNOB=value` name
-    /// that machinery already gives them - which is also what `BRAIN_PROFILE=1`
+    /// that machinery already gives them - which is also what `--kernel-profile`
     /// prints, so a profile says which bucket ran.
     fn variants(&self) -> Vec<(&'static str, &'static str)> {
         let Some((knob, _)) = self.knob else {

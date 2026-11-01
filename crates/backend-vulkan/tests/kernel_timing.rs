@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Per-kernel device timestamp timing (`BRAIN_PROFILE`) on `backend-vulkan`.
+//! Per-kernel device timestamp timing (`--kernel-profile`) on `backend-vulkan`.
 //!
 //! Before this, `set_kernel_timing`/`kernel_times` inherited `backend-api`'s
 //! defaults (`false`/`None`), so `gpu_core::profile` fell back to host-

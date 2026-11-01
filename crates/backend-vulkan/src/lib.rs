@@ -23,7 +23,7 @@
 //! semaphore, with **no host wait** unless the caller actually needs the
 //! result (`read`/`write`/`poll_wait` call `drain`) - up to `RING_SIZE`
 //! submissions can be outstanding on the device at once per handle. The
-//! Intel-ANV sliced-binding workaround and `BRAIN_PROFILE` device timing
+//! Intel-ANV sliced-binding workaround and `--kernel-profile` device timing
 //! still fence-wait synchronously (see `flush`'s own doc for why). Transient
 //! per-dispatch uniform buffers and descriptor sets are reclaimed once no
 //! step names them any more - the caller has dropped every clone AND the
@@ -352,7 +352,7 @@ const MAX_TIMED_DISPATCHES: usize = 8192;
 /// flush + host wait, regardless of how many `read`/`poll_wait`/`flush` calls
 /// the caller makes on its own (M6.9).
 ///
-/// Root cause this guards against: `flush`'s fast path (no `BRAIN_PROFILE`,
+/// Root cause this guards against: `flush`'s fast path (no `--kernel-profile`,
 /// no Intel-ANV sliced workaround) records EVERY step a caller has `submit`ted
 /// since the last flush into ONE command buffer and submits it asynchronously
 /// (`flush_async`) with no host wait - by design (M6.2's whole point is that
@@ -529,7 +529,7 @@ pub struct VulkanBackend {
     /// Idle transient uniforms and descriptor sets, refilled as the steps
     /// leasing them drop (see [`VkStep::lease`]).
     recycler: Arc<Recycler>,
-    /// Per-kernel-kind device timestamp timing (`BRAIN_PROFILE`). See
+    /// Per-kernel-kind device timestamp timing (`--kernel-profile`). See
     /// `VkProfile`'s doc — degrades to "unavailable" on a device/queue that
     /// cannot write timestamps, never substitutes host time.
     profile: VkProfile,
@@ -1422,7 +1422,7 @@ impl VulkanBackend {
     }
 
     /// Send every pending dispatch to the device. On the fast path (no Intel-
-    /// ANV workaround, no `BRAIN_PROFILE` timing) this is asynchronous, per
+    /// ANV workaround, no `--kernel-profile` timing) this is asynchronous, per
     /// `Backend::flush`'s own contract ("WITHOUT waiting for completion"):
     /// the batch is recorded into a reused ring slot ([`CmdSlot`]) and
     /// submitted signalling the shared timeline semaphore, with NO host wait
@@ -1430,7 +1430,7 @@ impl VulkanBackend {
     /// result calls [`Self::drain`] (via `read`/`poll_wait`/`write`), which is
     /// the "no host wait unless data is actually needed" half of M6.2.
     ///
-    /// The Intel-ANV serialize workaround and `BRAIN_PROFILE` device-timing
+    /// The Intel-ANV serialize workaround and `--kernel-profile` device-timing
     /// paths are unchanged from before M6.2: both already need a host wait
     /// for reasons unrelated to pipelining (a real driver barrier bug; timestamp
     /// query results must be read back before they can be recorded), so
@@ -1650,7 +1650,7 @@ impl VulkanBackend {
     /// Emit the per-buffer hazard analysis (see [`Self::flush_chunk`]'s doc,
     /// unchanged by M6.2) plus the bind+dispatch pair for every step in
     /// `chunk`, into an already-begun `cmd`. Shared by the synchronous
-    /// (`flush_chunk`: serial-workaround and `BRAIN_PROFILE` timing paths)
+    /// (`flush_chunk`: serial-workaround and `--kernel-profile` timing paths)
     /// and asynchronous (`flush_async`, M6.2) recording paths so this hazard
     /// analysis has exactly one implementation rather than two copies that
     /// could drift. `on_dispatch(i)` runs immediately after dispatch `i` is
@@ -2125,12 +2125,12 @@ impl Backend for VulkanBackend {
 
     fn dump_profile(&self) {
         let Some(mut rows) = self.kernel_times() else {
-            eprintln!("=== GPU kernel time (BRAIN_PROFILE, vulkan) === unavailable: this queue cannot write timestamps");
+            eprintln!("=== GPU kernel time (--kernel-profile, vulkan) === unavailable: this queue cannot write timestamps");
             return;
         };
         let total: f64 = rows.iter().map(|(_, ms, _)| ms).sum();
         rows.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        eprintln!("=== GPU kernel time (BRAIN_PROFILE, timestamp queries, total {total:.1} ms) ===");
+        eprintln!("=== GPU kernel time (--kernel-profile, timestamp queries, total {total:.1} ms) ===");
         for (name, ms, calls) in &rows {
             let pct = if total > 0.0 { 100.0 * ms / total } else { 0.0 };
             eprintln!("  {name:<28} {ms:8.1} ms  {calls:6} calls  ({pct:4.1}%)");

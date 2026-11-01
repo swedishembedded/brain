@@ -60,7 +60,7 @@ unsafe fn silu_avx2(x: &[f32], out: &mut [f32]) {
 /// the one every MoE/dense decoder in this tree uses: `qwen3`, `glm`,
 /// `qwen35moe`, `deepseekv2`, `lfm`, ...). Unlike [`silu`] above this reads
 /// TWO operands, so it needed its own microkernel rather than reuse. A real
-/// DeepSeek-OCR resident-server run (`BRAIN_PROFILE`, quiet machine) found
+/// DeepSeek-OCR resident-server run (`--kernel-profile`, quiet machine) found
 /// this among the largest single entries in the decoder's own profiled CPU
 /// time, behind only the matmul family - tens of thousands
 /// of decode-step calls, each a single row (`moe_ff` or `d_model` wide, a few
@@ -2716,7 +2716,7 @@ mod tests {
     // Perf microbench at DeepSeek-OCR's real decoder shape (12-layer MoE,
     // d_model=1280, moe_ff=896, 64 experts top_k=6 - see
     // `deepseek2::config::DeepseekV2Config::real`) - the kernel this repo's own
-    // `BRAIN_PROFILE` run measured as the majority of the whole decode loop.
+    // `--kernel-profile` run measured as the majority of the whole decode loop.
     // `m=283` is the real prompt-prefill row count that run used.
     //
     // A single-decode-row (`m=1`) variant of this bench was tried and DROPPED:
@@ -3515,7 +3515,7 @@ mod tests {
 
     // ---------------------------------------------------------------------
     // silu_mul / scale_add: a real DeepSeek-OCR resident-server run
-    // (BRAIN_PROFILE, quiet machine) found these two elementwise kernels among
+    // (--kernel-profile, quiet machine) found these two elementwise kernels among
     // the largest single entries EACH in the decoder's own profiled CPU time
     // (bigger than everything but matmul/moe_linear_gated) -- neither had a
     // FastIdx entry, so every decode-step call (single row, d_model=1280 or

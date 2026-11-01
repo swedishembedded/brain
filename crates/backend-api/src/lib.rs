@@ -1694,7 +1694,7 @@ pub trait Backend: Send + Sync {
     /// Zero the per-kernel accumulators.
     fn reset_kernel_times(&self) {}
 
-    /// Print the per-kernel `BRAIN_PROFILE` timing table NOW (stderr). The
+    /// Print the per-kernel `--kernel-profile` timing table NOW (stderr). The
     /// dump otherwise fires only at drop - which a RESIDENT model held in a
     /// static never reaches, so its profile was unreadable by construction.
     /// No-op when profiling is off or the backend does not time kernels.
@@ -1718,7 +1718,7 @@ pub trait Backend: Send + Sync {
     /// decode-tape-per-bsz-bucket mechanism has nothing to replay if the
     /// provider ran eagerly instead of pushing a [`Step`]), the per-dispatch
     /// cost accounting (`gpu_core::cost`), and the profiler
-    /// (`BRAIN_PROFILE`'s per-kernel table). Routing through
+    /// (`--kernel-profile`'s per-kernel table). Routing through
     /// `register_native`/`step_native` instead makes a non-WGSL kernel a
     /// [`Step`] like any other - pushed onto the caller's tape by
     /// `gpu_core::provider::LowerCtx`, submitted and timed by the same
@@ -1868,15 +1868,24 @@ pub trait Backend: Send + Sync {
     }
 }
 
-/// Whether `BRAIN_PROFILE` asks for profiling output - the ONE parse of that
-/// variable, for every backend and model crate.
+/// Whether profiling output is asked for ([`set_profile`]) - the ONE answer, for every backend and model crate.
 ///
-/// They each carried their own and had drifted: the Vulkan backend used
-/// `var(..).is_ok()`, so `BRAIN_PROFILE=0` turned profiling ON there and OFF
-/// everywhere else. One flag, one meaning: set and not `"0"` is on.
+/// They each used to carry their own parse of an environment variable and had drifted (one turned profiling ON for the
+/// value that meant OFF everywhere else). One switch, one meaning.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn profile_enabled() -> bool {
-    std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false)
+    PROFILE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+static PROFILE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Ask every backend and model crate for profiling output: per-kernel dispatch timing printed at exit and the host-side
+/// stage timings (the CLI's `--kernel-profile`). A backend takes it when it is built, so the application sets it first.
+/// Never read from the environment.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn set_profile(on: bool) {
+    PROFILE.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1946,7 +1955,7 @@ pub trait DeviceCollective: Send + Sync {
 }
 
 /// Per-handle device-op counters - the queryable form of what
-/// `BRAIN_PROFILE` used to print only to stderr. What a benchmark records so
+/// `--kernel-profile` used to print only to stderr. What a benchmark records so
 /// "how many submits/readbacks did this run cost" is machine-readable.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DeviceStats {

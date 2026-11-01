@@ -851,10 +851,10 @@ impl DeepseekV2 {
         // `raw_words`/`with_tensor_chunks` pull per tensor) vs this
         // constructor's OWN scratch-buffer allocation below (`res`/`dres`,
         // the per-layer attention/MoE buffers, LoRA scratch). Gated on the
-        // same `BRAIN_PROFILE` convention `deepseek2ocr::stage_time` and
+        // same `--kernel-profile` convention `deepseek2ocr::stage_time` and
         // `wgsl-cpu::Jit::new` already print through, so a load-time profile
         // shows all three brackets on one timeline.
-        let profile = std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false);
+        let profile = gpu_core::profile::enabled();
         let t_ps = std::time::Instant::now();
         let n_params = roles.len();
         let mut ps = ParamStore::new_with_roles_src(&gpu, roles, src);

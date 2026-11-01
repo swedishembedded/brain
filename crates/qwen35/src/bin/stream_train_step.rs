@@ -127,7 +127,7 @@ fn main() {
 
             let t0 = Instant::now();
             trainer.lora.zero_grads(&trainer.gpu);
-            // `BRAIN_PROFILE=1` prints the per-kernel device time of the step (the shared profile table).
+            // `--kernel-profile` prints the per-kernel device time of the step (the shared profile table).
             let loss = gpu_core::profile::device_table(&trainer.gpu, "streamed step", || trainer.forward_backward(&cfg, &loader, &x0, &targets));
             trainer.lora.adamw_step(&trainer.gpu, step, lr);
             trainer.gpu.poll_wait();

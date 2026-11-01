@@ -591,7 +591,7 @@ impl DeepseekOcr {
     }
 
     /// The decoder's own device handle - the one to call `dump_profile()` on
-    /// for a `BRAIN_PROFILE` breakdown of a `generate_greedy`/`generate_greedy_kv`
+    /// for a `--kernel-profile` breakdown of a `generate_greedy`/`generate_greedy_kv`
     /// run. The decode loop is where this model's own profile found the
     /// dominant per-token cost, so this is the handle that matters; the
     /// encoder (SAM/CLIP) runs on its own separate `Gpu` instances, built

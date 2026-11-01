@@ -323,11 +323,13 @@ impl PassProfile {
     }
 }
 
-/// Whether `BRAIN_PROFILE` asks for profiling output - see
+/// Whether `--kernel-profile` asks for profiling output - see
 /// [`backend_api::profile_enabled`], which every backend shares.
 pub use backend_api::profile_enabled as enabled;
+/// Turn profiling output on for every backend and model crate ([`backend_api::set_profile`]).
+pub use backend_api::set_profile;
 
-/// Wall time of a host-side STAGE to stderr under `BRAIN_PROFILE` - the coarse
+/// Wall time of a host-side STAGE to stderr under `--kernel-profile` - the coarse
 /// timeline above the per-kernel tables.
 ///
 /// Device timestamps ([`crate::Gpu::kernel_times`]) attribute time BETWEEN
@@ -342,10 +344,10 @@ pub fn stage_time(name: &str, since: Instant) {
     }
 }
 
-/// Run `f` and, under `BRAIN_PROFILE`, print the DEVICE time each kernel kind
+/// Run `f` and, under `--kernel-profile`, print the DEVICE time each kernel kind
 /// spent inside it on `gpu`, largest first, with the stage's wall time beside
 /// the kernel total - the gap between the two is host time the card waited
-/// through. Without `BRAIN_PROFILE` this is `f()` and nothing else.
+/// through. Without `--kernel-profile` this is `f()` and nothing else.
 ///
 /// Kernel timing is switched on for the stage only (a backend times launches
 /// one by one while it is on, so it is never left on behind a caller), and the

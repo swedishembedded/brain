@@ -1389,7 +1389,7 @@ mod native_facade {
             self.inner.stats()
         }
 
-        /// Print the per-kernel `BRAIN_PROFILE` table now - the resident-model
+        /// Print the per-kernel `--kernel-profile` table now - the resident-model
         /// escape hatch for a profile that otherwise only prints at drop.
         pub fn dump_profile(&self) {
             self.inner.dump_profile()
@@ -2111,7 +2111,7 @@ mod native_facade {
         /// `meta.kernel` through *their own* kernel list (`flux2_bench` does
         /// exactly that), and an appended pipeline slot would index past the end
         /// of it. Which kernel physically ran is the backend's record -
-        /// `BRAIN_PROFILE=1` names the real pipeline.
+        /// `--kernel-profile` names the real pipeline.
         /// Dispatch, with the caller stating what it is counting.
         ///
         /// Prefer this to [`Gpu::step`] everywhere; for a cooperative kernel

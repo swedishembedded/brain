@@ -105,15 +105,15 @@ impl Jit {
     /// Parse and JIT-compile every `(name, wgsl_src)` kernel. Returns an error
     /// string identifying the offending kernel on the first failure.
     pub fn new(kernels: &[(&str, &str)]) -> Result<Jit, String> {
-        // Host-side construction cost, not GPU-kernel-dispatch time -- gated on
-        // the same `BRAIN_PROFILE` convention `deepseek2ocr::stage_time` and
-        // `backend-cpu`'s own per-kernel table already use, so a load-time
-        // profile shows this bracket beside the streaming-upload one it
-        // competes with for the same 20+ seconds. See
-        // `deepseek-ocr`'s model-construction investigation for why this
-        // needed a real number instead of a guess.
+        Self::new_profiled(kernels, false)
+    }
+
+    /// [`Self::new`], printing the construction's host-side cost when `profile` is on (the caller's `--kernel-profile`):
+    /// not GPU-kernel-dispatch time, so a load-time profile shows this bracket beside the streaming-upload one it competes
+    /// with for the same 20+ seconds. See `deepseek-ocr`'s model-construction investigation for why this needed a real
+    /// number instead of a guess.
+    pub fn new_profiled(kernels: &[(&str, &str)], profile: bool) -> Result<Jit, String> {
         let t0 = std::time::Instant::now();
-        let profile = std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false);
         let mut flags = settings::builder();
         flags.set("opt_level", "speed").unwrap();
         // We synthesise our own bounds via the kernels' early-return mask, so the

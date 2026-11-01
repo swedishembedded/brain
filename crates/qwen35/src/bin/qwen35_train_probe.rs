@@ -60,7 +60,7 @@ const USAGE: &str = "usage: qwen35_train_probe [--tokens N] [--layers N] [--base
      [--recompute on|off] [--gdn-segment N] [--head-budget WORDS] [--flash-min-t N] [--residuals f32|bf16|fp8] [--mlp-rows N] \\
      [--seed N] [--gemm-precision auto|fp32|bf16] [--profile] [--device gpuN|cpu] [--backend cuda|cpu|vulkan|wgpu]
   Builds the first --layers layers of the real Qwen3.8-27B shape with random weights and times --steps LoRA steps at --tokens
-  tokens. Every result is a `PROBE key=value` line on stdout. With BRAIN_PROFILE set, each step also prints the device
+  tokens. Every result is a `PROBE key=value` line on stdout. With --kernel-profile set, each step also prints the device
   time per kernel kind.";
 
 /// Every flag that takes a value; anything else starting with `--` is refused.

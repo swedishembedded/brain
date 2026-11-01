@@ -273,7 +273,7 @@ fn used_classes(data: &DetectData) -> std::collections::BTreeSet<u32> {
 
 /// Run the shared training loop over the train split. Prints loss periodically
 /// and returns `(first_loss, last_loss)`.
-/// Per-kernel device time of the step just run, largest first (BRAIN_PROFILE).
+/// Per-kernel device time of the step just run, largest first (--kernel-profile).
 fn print_kernel_table(gpu: &gpu_core::Gpu) {
     let Some(mut rows) = gpu.kernel_times() else {
         eprintln!("kernel table: this backend cannot time kernels");
@@ -326,14 +326,14 @@ fn run_train_loop(model: &Yolo, data: &DetectData, cfg: &TrainCfg) -> (f32, f32)
             gts.extend(gts_for(data, idx, j as u32));
         }
         let t_step = std::time::Instant::now();
-        // Under BRAIN_PROFILE, attribute the second step's DEVICE time per kernel
+        // Under --kernel-profile, attribute the second step's DEVICE time per kernel
         // (the first step pays one-time kernel compilation).
         let kernel_table = gpu_core::profile::enabled() && step == 1;
         if kernel_table {
             model.gpu.reset_kernel_times();
             model.gpu.set_kernel_timing(true);
         }
-        // Under BRAIN_PROFILE, count the step's host round trips: every
+        // Under --kernel-profile, count the step's host round trips: every
         // readback drains the device and leaves it idle while the host works.
         let ops_before = if gpu_core::profile::enabled() { model.gpu.stats() } else { None };
         model.set_image(&img_batch);

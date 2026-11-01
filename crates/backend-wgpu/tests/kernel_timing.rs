@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The `BRAIN_PROFILE` timestamp path must MEASURE a flush without BECOMING
+//! The `--kernel-profile` timestamp path must MEASURE a flush without BECOMING
 //! one.
 //!
 //! Swedish Embedded AB implements GPU profiling instrumentation for inference

@@ -237,16 +237,16 @@ impl ParamStore {
         // streams its own weights gets the identical guarantees without
         // re-deriving them. See that module's doc for what each one prevents.
         //
-        // Per-phase accumulators for the `BRAIN_PROFILE` summary below --
+        // Per-phase accumulators for the `--kernel-profile` summary below --
         // added while chasing DeepSeek-OCR's 20+ second model-construction
         // cost: this loop is the whole of that cost on the CPU backend, and it
         // was never known whether the source read + device upload (`Uploader::
         // tensor`, which allocates the device buffer AND streams the source's
         // bytes into it) or the periodic staging-reclaim drain (`Uploader::
         // maybe_drain`) dominated it. Kept cheap (a couple `Instant::now()`
-        // calls per tensor) and silent unless `BRAIN_PROFILE` is set, same
+        // calls per tensor) and silent unless `--kernel-profile` is set, same
         // gate `deepseekocr`/`wgsl-cpu` already use.
-        let profile = std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false);
+        let profile = gpu_core::profile::enabled();
         let mut t_upload = std::time::Duration::ZERO;
         let mut t_flush = std::time::Duration::ZERO;
         let mut up = upload::Uploader::new(gpu);

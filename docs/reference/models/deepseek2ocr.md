@@ -275,7 +275,7 @@ sized by `rows * top_k`, not `rows * n_experts`.
 For the actual measured numbers behind these changes - wall-clock deltas,
 per-kernel profiles, and the full history of what was tried and what didn't
 pan out - see `.agents/roadmap/deepseek2ocr.md`, or measure your own build
-with `BRAIN_PROFILE=1` and `brain perf run` (see
+with `--kernel-profile` and `brain perf run` (see
 [Performance](../../concepts/execution/performance.md)); numbers measured on one machine
 at one point in this model's development are not a promise for yours.
 
@@ -306,7 +306,7 @@ grouped tensor-core GEMM (a gather GEMV below seven rows), the dense linears and
 graph launch. The vision towers run their linears as TF32 library products of the fp32 weights as stored, SAM's four global-attention
 blocks as batched TF32 products, and CLIP with the fused attention. Up to 64 pages decode together over a 128k-token pool. Tests fail by
 kernel name when a product falls back to the CUDA cores (`ArithmeticAudit`; the declared exceptions are the router and SAM's
-convolutions), and `BRAIN_PROFILE=1` prints each pass's tensor-core share. Without tensor cores the same code runs the fp32 kernels.
+convolutions), and `--kernel-profile` prints each pass's tensor-core share. Without tensor cores the same code runs the fp32 kernels.
 
 **Serving flags.** `brain serve` honours `--max-batch N` (pages decoded together, 1 to 128, default 64), `--ctx N` (tokens one page may hold),
 `--kv-cache f32|bf16` (default bf16; the pool is sized in bytes, so f32 holds half the tokens) and `--gemm fp32` (the decoder's reference tier and every

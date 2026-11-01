@@ -334,7 +334,7 @@ impl Container {
     /// tensor's `Vec<f32>` is MOVED into the result rather than copied.
     ///
     /// Measured on a real 32.76 GB fp32 checkpoint (`brain serve`'s Qwen3-8B
-    /// activation, `BRAIN_PROFILE=1`'s `re-load checkpoint tensors for engine
+    /// activation, `--kernel-profile`'s `re-load checkpoint tensors for engine
     /// build` stage): the clone in `by_role` was, on its own, a bigger cost
     /// than reading and decoding the entire file - a single-threaded copy of
     /// data nothing keeps a second reference to. `checkpoint::load(path)`

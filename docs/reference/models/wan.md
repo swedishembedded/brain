@@ -197,7 +197,7 @@ see the support table.
 
 ## Hardware and limits
 
-Reproduce these on your own hardware with `wan_bench` and `BRAIN_PROFILE=1`;
+Reproduce these on your own hardware with `wan_bench` and `--kernel-profile`;
 figures are deliberately not quoted here, because a number written into a doc
 outlives the hardware, driver and code that produced it and the reader has no
 way to tell when it stopped being true. What follows is the SHAPE of the cost,

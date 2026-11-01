@@ -2000,7 +2000,7 @@ impl Denoiser for Pipeline {
         &self.cfg
     }
     // The text encoder and the DiT print their per-kernel device tables under
-    // `BRAIN_PROFILE` (`gpu_core::profile::device_table`, the encoder's inside
+    // `--kernel-profile` (`gpu_core::profile::device_table`, the encoder's inside
     // `Pipeline::encode_prompt`, where it is resident); the VAE graphs time
     // themselves on their own handles (`Pipeline::decode_tokens`,
     // `Pipeline::encode_image_whole`). Otherwise these are plain calls.

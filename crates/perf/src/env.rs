@@ -53,7 +53,6 @@ pub struct Env {
 /// Flags that materially change how fast brain runs. Recorded on every result.
 const TRACKED_FLAGS: &[&str] = &[
     "BRAIN_DEVICE",
-    "BRAIN_PROFILE",
     "BRAIN_NO_FASTCONV",
     "MOE_SKIP_GPU_TESTS",
     "RAYON_NUM_THREADS",

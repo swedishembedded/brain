@@ -12,7 +12,7 @@
 //! so there is no single Step list to hand that profiler. Instead each mode
 //! here wall-clock-times the real call (the number that decides whether a
 //! change worked, same floor `PassProfile::total_secs` measures) and prints
-//! the roofline + weight-budget context around it; run with `BRAIN_PROFILE=1`
+//! the roofline + weight-budget context around it; run with `--kernel-profile`
 //! for the engine's own per-kernel-kind breakdown of the SAME submitted work
 //! (`gpu_core::Gpu::dump_profile`), which needs no returned Step list either.
 //!

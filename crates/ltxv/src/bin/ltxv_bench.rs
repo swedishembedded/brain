@@ -411,7 +411,7 @@ fn bench_decode(path: &str, mode: &str, crop: Option<(u32, u32, u32, u32)>) {
 // -------------------------------------------------------------- streamed ---
 
 /// Cumulative DEVICE kernel time on `gpu` since it was opened, in ms - the sum
-/// of the same per-kernel table `BRAIN_PROFILE` prints.
+/// of the same per-kernel table `--kernel-profile` prints.
 ///
 /// A resident session holds ONE device for its whole life, so this counter is
 /// cumulative across every forward that ran on it and a single call's device
@@ -482,10 +482,9 @@ fn report_call(label: &str, layers: u32, wall: f64, device_ms: Option<f64>, prev
 /// a full generation + VAE decode to notice.
 fn bench_streamed(layers: u32, t: u32, ctx_len: u32, reuse_cache: bool, resident: bool, distinct_timesteps: u32, warm_reps: u32) {
     let path = std::env::var("BRAIN_LTXV_DIT").unwrap_or_else(|_| panic!("set BRAIN_LTXV_DIT=<path to the real ltx-2.5-22b-distilled-transformer GGUF>"));
-    // stage_time (gpu_core::profile) only prints under BRAIN_PROFILE; this
-    // bench's whole purpose is that breakdown, so turn it on unconditionally
-    // rather than asking the caller to remember an extra env var.
-    std::env::set_var("BRAIN_PROFILE", "1");
+    // stage_time (gpu_core::profile) only prints with profiling on; this
+    // bench's whole purpose is that breakdown, so turn it on unconditionally.
+    gpu_core::profile::set_profile(true);
 
     let cfg = LtxDitConfig { num_layers: layers, ..LtxDitConfig::ltx25_22b() };
     cfg.assert_supported();
@@ -725,7 +724,7 @@ fn bench_av(tokens: u32, ctx_len: u32, frames: u32, fps: u32) {
 /// does not otherwise need.
 fn bench_streamed_av(layers: u32, tv: u32, ctx_len: u32, ta: u32, reuse_cache: bool, resident: bool, distinct_timesteps: u32, warm_reps: u32) {
     let path = std::env::var("BRAIN_LTXV_DIT").unwrap_or_else(|_| panic!("set BRAIN_LTXV_DIT=<path to the real ltx-2.5-22b-distilled-transformer GGUF>"));
-    std::env::set_var("BRAIN_PROFILE", "1");
+    gpu_core::profile::set_profile(true);
 
     let mut cfg = ltxv::LtxAvDitConfig::ltx25();
     cfg.video.num_layers = layers;

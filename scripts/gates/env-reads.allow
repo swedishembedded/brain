@@ -3,7 +3,6 @@ crates/arch/src/lib.rs	BRAIN_CAMPPLUS_DIR
 crates/arch/src/lib.rs	BRAIN_LLAVA_WEIGHTS
 crates/arch/src/lib.rs	BRAIN_S3TOKENIZER_V2
 crates/arch/src/lib.rs	BRAIN_S3TOKENIZER_V3
-crates/backend-api/src/lib.rs	BRAIN_PROFILE
 crates/backend-api/src/lib.rs	HOME
 crates/backend-api/src/lib.rs	XDG_CACHE_HOME
 crates/backend-cpu/src/fast_conv.rs	BRAIN_WINOGRAD
@@ -262,7 +261,6 @@ crates/decide/src/bin/decide_probe.rs	HOME
 crates/decide/src/bin/salesconv_embed.rs	BRAIN_MINILM_DIR
 crates/decide/src/bin/salesconv_embed.rs	HOME
 crates/deepseek2/src/lora.rs	MOE_SKIP_GPU_TESTS
-crates/deepseek2/src/model.rs	BRAIN_PROFILE
 crates/deepseek2/src/model.rs	MOE_SKIP_GPU_TESTS
 crates/deepseek2/tests/backend_parity.rs	MOE_SKIP_GPU_TESTS
 crates/deepseek2/tests/common/real_lm.rs	BRAIN_DEEPSEEK_OCR_LM_ST
@@ -270,7 +268,6 @@ crates/deepseek2/tests/common/real_lm.rs	MOE_SKIP_GPU_TESTS
 crates/deepseek2/tests/gradcheck.rs	MOE_SKIP_GPU_TESTS
 crates/deepseek2/tests/shard_parity.rs	MOE_SKIP_GPU_TESTS
 crates/deepseek2/tests/shard_parity.rs	SHARD_TEST_GPUS
-crates/deepseek2ocr/src/lib.rs	BRAIN_PROFILE
 crates/deepseek2ocr/tests/common/real_vision.rs	BRAIN_DEVICE
 crates/deepseekocr2/tests/common/real_vision.rs	BRAIN_DEVICE
 crates/deepseekocr2/tests/train_overfit.rs	MOE_SKIP_GPU_TESTS
@@ -630,7 +627,6 @@ crates/ltxv/src/bin/ltxv_bench.rs	BRAIN_LTXV_DECODE_UPSAMPLE_RAW
 crates/ltxv/src/bin/ltxv_bench.rs	BRAIN_LTXV_DIT
 crates/ltxv/src/bin/ltxv_bench.rs	BRAIN_LTXV_PIXEL_DUMP
 crates/ltxv/src/bin/ltxv_bench.rs	BRAIN_LTXV_VAE
-crates/ltxv/src/bin/ltxv_bench.rs	BRAIN_PROFILE
 crates/ltxv/src/block.rs	BRAIN_LTXV_NO_PIPELINE
 crates/ltxv/src/block.rs	BRAIN_LTXV_NO_SCRATCH_POOL
 crates/ltxv/src/devplan.rs	BRAIN_LTXV_CFG_PARALLEL
@@ -812,7 +808,6 @@ crates/npu/tests/wm_onnx.rs	BRAIN_OV_PROBE
 crates/npu/tests/wm_onnx.rs	MOE_SKIP_GPU_TESTS
 crates/ouro/tests/forward.rs	BRAIN_BACKEND
 crates/ouro/tests/parity.rs	BRAIN_OURO_DIR
-crates/paramstore/src/lib.rs	BRAIN_PROFILE
 crates/paramstore/src/lib.rs	MOE_SKIP_GPU_TESTS
 crates/paramstore/src/upload.rs	MOE_SKIP_GPU_TESTS
 crates/perf/src/env.rs	<f>
@@ -1023,7 +1018,6 @@ crates/qwen3tts/tests/talker.rs	BRAIN_QWEN3TTS_CKPT
 crates/qwen3tts/tests/talker.rs	MOE_SKIP_GPU_TESTS
 crates/qwen3tts/tests/talker_policy.rs	BRAIN_QWEN3TTS_CKPT
 crates/qwen3tts/tests/talker_policy.rs	BRAIN_QWEN3TTS_WEIGHTS
-crates/qwen3vl/src/bin/qwen3vl_bench.rs	BRAIN_PROFILE
 crates/qwen3vl/src/bin/qwen3vl_bench.rs	BRAIN_QWEN3VL_WEIGHTS
 crates/qwen3vl/src/caps.rs	<DIR_VAR>
 crates/qwen3vl/src/caps.rs	BRAIN_QWEN3VL_CTX
@@ -1075,7 +1069,6 @@ crates/s3dit/tests/real_parity.rs	BRAIN_S3DIT_SHARD
 crates/s3dit/tests/shard_2card.rs	BRAIN_DEV_GPU
 crates/s3dit/tests/shard_parity.rs	BRAIN_DEV_GPU
 crates/s3tokenizer/tests/s3tokenizer_parity.rs	BRAIN_S3TOKENIZER_V2
-crates/sam1/src/bin/sam1_bench.rs	BRAIN_PROFILE
 crates/sam1/src/bin/sam1_bench.rs	MOE_SKIP_GPU_TESTS
 crates/sam1/tests/deepseek_vl_parity.rs	MOE_SKIP_GPU_TESTS
 crates/sam1/tests/gradcheck.rs	MOE_SKIP_GPU_TESTS
@@ -1242,7 +1235,6 @@ crates/wan/tests/gguf_import_real.rs	BRAIN_WAN_GGUF
 crates/wan/tests/gguf_import_real.rs	BRAIN_WAN_GGUF_OUT
 crates/wan/tests/vae_parity.rs	BRAIN_MODELS_DIR
 crates/wan/tests/vae_parity.rs	BRAIN_WAN_VAE
-crates/wgsl-cpu/src/lib.rs	BRAIN_PROFILE
 crates/wm-core/src/vq.rs	MOE_SKIP_GPU_TESTS
 crates/wm-core/tests/attn_bias.rs	MOE_SKIP_GPU_TESTS
 crates/wm-core/tests/attn_bwd.rs	MOE_SKIP_GPU_TESTS

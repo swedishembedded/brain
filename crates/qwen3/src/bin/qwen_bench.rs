@@ -7,7 +7,7 @@
 //! Why this exists. `vqgan_bench`, `unet_bench` and `flux2_bench` cover the
 //! conv/diffusion datapaths; the LLM datapath had no per-kernel-kind profiler at
 //! all, so every recorded qwen number came from
-//! `BRAIN_PROFILE`'s timestamp table — and, more importantly, all of them were
+//! `--kernel-profile`'s timestamp table - and, more importantly, all of them were
 //! measured on `qwen-synth:8x512x8` (47 M params, vocab 32 k). That target
 //! **structurally cannot express Qwen3-0.6B**: it forces `head_dim = d/h` and
 //! `d_ff = 4d`, while the real model has `head_dim` 128 (so `q_dim` 2048 ≠

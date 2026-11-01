@@ -60,7 +60,7 @@ sets the same levels for entry points with no CLI in the loop:
 | --- | --- | --- |
 | `BRAIN_TRACE` | comma-separated `<family>=<level>` trace levels, e.g. `ltxv=5,gpu=3`; any `--trace*` flag on the command line overrides it entirely | unset (no tracing) |
 
-This is separate from `BRAIN_PROFILE` below, which prints per-kernel dispatch
+This is separate from the `--kernel-profile` flag, which prints per-kernel dispatch
 timing at exit: tracing is an event stream over a run, profiling is a summary
 table over its kernels.
 
@@ -77,7 +77,6 @@ Most users never need these - they exist for GPU-driver quirks and profiling.
 | `BRAIN_GPU_VALIDATION` | enables wgpu debug/validation instance flags | off |
 | `BRAIN_GPU_CHECKED` | enables extra wgpu-side checked-mode assertions | off |
 | `BRAIN_GPU_MEM_PERF` | switches wgpu's memory allocator to its performance-hint mode | off |
-| `BRAIN_PROFILE` | enables per-kernel dispatch timing, printed at exit | off |
 | `BRAIN_VERBOSE` | CLI/serving log verbosity (`0` = quiet) | 0 |
 
 **NPU capability boundary.** brain can run a subset of models on an Intel NPU

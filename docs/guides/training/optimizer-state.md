@@ -193,7 +193,7 @@ refusal with the arithmetic.
 room for all of it (the update is then a device kernel), in host memory otherwise (`moments=host` forces it). On a
 machine of several CPU/GPU modules the host half of a run (decoding the base, the host update, every transfer) runs on
 the cores of the module the card is wired to and in that module's memory; the cores are read from the kernel
-(`local_cpulist` of the card's PCI device), nothing is configured. `BRAIN_PROFILE=1` prints the placement decision,
+(`local_cpulist` of the card's PCI device), nothing is configured. `--kernel-profile` prints the placement decision,
 the host core count and the time of each stage of a run.
 
 Resume is exact wherever the state lives. The generic fit loop writes the

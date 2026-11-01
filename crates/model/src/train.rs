@@ -1707,7 +1707,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
             parts.gpu.reset_memory_peak();
         }
         model.zero_grads();
-        // Under BRAIN_PROFILE the first step prints the device time of each kernel kind it ran.
+        // Under --kernel-profile the first step prints the device time of each kernel kind it ran.
         let step_loss = match model.optimizer_parts().filter(|_| step == first_step) {
             Some(parts) => gpu_core::profile::device_table(parts.gpu, "fit: first step, forward and backward", || obj.micro_steps(&model, &mut rng, opts.grad_accum.max(1))),
             None => obj.micro_steps(&model, &mut rng, opts.grad_accum.max(1)),

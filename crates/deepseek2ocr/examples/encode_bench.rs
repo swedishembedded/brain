@@ -14,7 +14,7 @@
 //! cargo run --release -p brain-deepseek2ocr --example encode_bench -- --dir <model dir> [--runs 5] [--gemm auto|fp32]
 //! ```
 //!
-//! `BRAIN_PROFILE=1` adds the per-kernel table of each tower.
+//! `--kernel-profile` adds the per-kernel table of each tower.
 
 use deepseek2ocr::config::DeepseekOcrConfig;
 use deepseek2ocr::encoder::DeepEncoder;
@@ -61,7 +61,7 @@ fn main() {
         ms[0]
     };
     let (g, t) = (time(&global, 1024), time(&tile, TILE_SIDE));
-    // Under BRAIN_PROFILE, one more pass of each with the device's per-kernel table (SAM's and CLIP's cards separately).
+    // Under --kernel-profile, one more pass of each with the device's per-kernel table (SAM's and CLIP's cards separately).
     for (label, enc, side) in [("global 1024", &global, 1024u32), ("tile", &tile, TILE_SIDE)] {
         let image = vec![0.1f32; 3 * (side * side) as usize];
         gpu_core::profile::device_table(&enc.sam().gpu, &format!("{label}: sam"), || gpu_core::profile::device_table(&enc.clip().gpu, &format!("{label}: clip"), || enc.forward(&image)));

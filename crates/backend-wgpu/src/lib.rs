@@ -621,7 +621,7 @@ struct DeviceShared {
     /// device so `new_like` compilations hit it too. `None` where the feature
     /// is absent (wasm, non-Vulkan) or there is nowhere to persist.
     plcache: Option<std::sync::Arc<PlCache>>,
-    /// `BRAIN_PROFILE` per-kernel GPU timing (native only, and only when the
+    /// `--kernel-profile` per-kernel GPU timing (native only, and only when the
     /// adapter has TIMESTAMP_QUERY): each dispatch runs in its own compute pass
     /// with begin/end timestamps, resolved and accumulated per kernel name.
     /// Pure observability - the non-profiling flush path is untouched.
@@ -1072,7 +1072,7 @@ pub struct WgpuBackend {
     /// what the driver can preempt. Reset by `flush_inner`, the one place
     /// `pending` is emptied.
     pending_workgroups: std::sync::atomic::AtomicU64,
-    /// Whether `BRAIN_PROFILE` prints the op-count summary at drop. The
+    /// Whether `--kernel-profile` prints the op-count summary at drop. The
     /// counters themselves are ALWAYS maintained (relaxed atomics, negligible
     /// next to a dispatch) so `Backend::stats` is queryable on every run.
     profile: bool,
@@ -1283,7 +1283,7 @@ fn fold_ticks(
     }
 }
 
-/// Per-kernel GPU-time accumulator for the `BRAIN_PROFILE` timestamp path.
+/// Per-kernel GPU-time accumulator for the `--kernel-profile` timestamp path.
 #[cfg(not(target_arch = "wasm32"))]
 struct GpuProfile {
     names: Vec<String>,
@@ -1307,14 +1307,14 @@ struct GpuProfile {
     /// surfaced by `dump_profile`/`kernel_times` so a corrupted pass reads as
     /// "N samples missing", never as a silently wrong total (M6.6).
     unavailable_ticks: std::sync::atomic::AtomicU64,
-    /// Whether flushes currently accumulate timings. Off unless BRAIN_PROFILE
+    /// Whether flushes currently accumulate timings. Off unless --kernel-profile
     /// asked, or a profiler called `set_kernel_timing(true)`.
     on: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl WgpuBackend {
-    /// Print the `BRAIN_PROFILE` op counts + per-kernel timestamp table now —
+    /// Print the `--kernel-profile` op counts + per-kernel timestamp table now -
     /// what `Drop` prints, callable while a RESIDENT backend is still alive
     /// (a static never drops, so its profile was otherwise unreadable).
     pub fn dump_profile_now(&self) {
@@ -1332,7 +1332,7 @@ impl WgpuBackend {
         use std::sync::atomic::Ordering::Relaxed;
         if self.profile {
             eprintln!(
-                "=== GPU op counts (BRAIN_PROFILE) === uniforms={} bind_groups={} submits={} dispatches={} readbacks={} writes={}",
+                "=== GPU op counts (--kernel-profile) === uniforms={} bind_groups={} submits={} dispatches={} readbacks={} writes={}",
                 self.stats_uniform.load(Relaxed),
                 self.stats_bg.load(Relaxed),
                 self.stats_submit.load(Relaxed),
@@ -1350,14 +1350,14 @@ impl WgpuBackend {
             // the timestamp buffers are allocated whenever the ADAPTER supports
             // them, so profiling can be switched on at runtime, but accumulating
             // is gated separately. Printing the header anyway put a
-            // "BRAIN_PROFILE" banner with a negative-zero total into the stderr of
+            // "--kernel-profile" banner with a negative-zero total into the stderr of
             // every ordinary run, once per device dropped - output that names an
             // env var the run did not set and reports a total of nothing.
             if rows.is_empty() {
                 return;
             }
             let total: f64 = rows.iter().map(|r| r.1).sum();
-            eprintln!("=== GPU kernel time (BRAIN_PROFILE, timestamp queries, total {total:.1} ms) ===");
+            eprintln!("=== GPU kernel time (--kernel-profile, timestamp queries, total {total:.1} ms) ===");
             for (i, ms, c) in rows {
                 eprintln!(
                     "  {:<20} {:8.1} ms  {:5} calls  ({:4.1}%)",
@@ -1642,13 +1642,13 @@ impl WgpuBackend {
         // memory (up to 32 KiB); the downlevel default caps that at 16 KiB, so
         // request whatever the adapter actually supports.
         limits.max_compute_workgroup_storage_size = adapter_limits.max_compute_workgroup_storage_size;
-        // BRAIN_PROFILE: per-kernel GPU timing wants timestamp queries. Opt-in
+        // --kernel-profile: per-kernel GPU timing wants timestamp queries. Opt-in
         // and adapter-gated, so the default request stays feature-empty (the
         // portability invariant) and profiling degrades to op counts where the
         // feature is absent (WebGPU, old drivers).
         let profile_on = backend_api::profile_enabled();
         // Timestamps are requested whenever the adapter has them, not only under
-        // BRAIN_PROFILE: `Backend::set_kernel_timing` lets a profiler turn
+        // --kernel-profile: `Backend::set_kernel_timing` lets a profiler turn
         // per-kernel DEVICE timing on at runtime, and it must not require the
         // process to have been started with an env var. Requesting an unused
         // feature costs nothing; ACCUMULATING is what is gated (see `timing`).
@@ -2317,7 +2317,7 @@ impl WgpuBackend {
         }
     }
 
-    /// The `BRAIN_PROFILE` timestamp flush: one compute pass PER dispatch, each
+    /// The `--kernel-profile` timestamp flush: one compute pass PER dispatch, each
     /// bracketed by begin/end timestamps, resolved and read back synchronously,
     /// accumulated per kernel. Slower than the production single-pass flush (the
     /// readback stalls the queue once per flush) but numerically identical —

@@ -197,7 +197,7 @@ impl Action for CaptionAction {
             let projector = model::projector::MlpProjector::new(gpu, proj.cfg, IMG_TOKENS, &proj.weights)?;
             gpu.submit(&[], &projector.forward(gpu, &[&featb]));
             let out = gpu.read(projector.out(), (IMG_TOKENS * d) as usize);
-            // A resident device never drops, so its BRAIN_PROFILE table would
+            // A resident device never drops, so its --kernel-profile table would
             // otherwise never print; surface it while the stage lock is held.
             gpu.dump_profile();
             out
@@ -323,7 +323,7 @@ fn load_decode(dir: &str, precision: &str) -> Result<DecodeStage, String> {
     })
 }
 
-/// Stage wall time to stderr when `BRAIN_PROFILE` is set — the resident
+/// Stage wall time to stderr when `--kernel-profile` is set - the resident
 /// provider's coarse timeline above the per-kernel tables. Hoisted to
 /// `gpu_core::profile::stage_time` once a second resident (`omni`) needed the
 /// same line.

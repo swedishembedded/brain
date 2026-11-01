@@ -224,9 +224,9 @@ impl DeepEncoder {
     /// [`Self::forward`] without the readback - everything up to and including
     /// the projector's submit, leaving the result in `glue.proj_out`.
     ///
-    /// Each stage is bracketed with [`crate::stage_time`] (`BRAIN_PROFILE`-gated,
+    /// Each stage is bracketed with [`crate::stage_time`] (`--kernel-profile`-gated,
     /// same convention [`crate::caps::Session`] uses for the load/generate
-    /// timeline) -- the per-kernel `BRAIN_PROFILE` table sums SAM + CLIP + glue
+    /// timeline) -- the per-kernel `--kernel-profile` table sums SAM + CLIP + glue
     /// dispatches together because they submit through three different `Gpu`
     /// handles, so this is the only view of where wall time splits BETWEEN the
     /// three towers rather than within one of them.

@@ -801,6 +801,10 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
                 }
             }
             i += 2;
+        } else if argv[i] == "--kernel-profile" {
+            // Per-kernel dispatch timing printed at exit, and the host-side stage timings.
+            gpu_core::profile::set_profile(true);
+            i += 1;
         } else if argv[i] == "--no-autotune" {
             // Every kernel slot keeps its default candidate and the selector its static policy: reproducible benchmarking
             // and A/B runs.

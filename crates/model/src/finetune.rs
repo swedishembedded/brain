@@ -60,7 +60,7 @@ pub trait ModelFit {
     fn fit<M: Model>(&mut self, model: M) -> std::io::Result<(FitReport, M)>;
 }
 
-/// Wall-clock stage timer printed under `BRAIN_PROFILE`, for callers that do not depend on `gpu-core`.
+/// Wall-clock stage timer printed under `--kernel-profile`, for callers that do not depend on `gpu-core`.
 pub use gpu_core::profile::stage_time;
 
 /// Next-token cross-entropy over a prepared dataset: the supervised fine-tune.

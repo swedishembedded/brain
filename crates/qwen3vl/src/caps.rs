@@ -1000,12 +1000,12 @@ pub fn linear_dtype(dir: &str, max_pixels: u32, precision: Precision) -> Result<
     with_resident(dir, max_pixels, precision, |hot| Ok(hot.model.linear_dtype().map(|dt| name(dt).to_string())))
 }
 
-/// Print the per-kernel `BRAIN_PROFILE` table for this checkpoint's resident.
+/// Print the per-kernel `--kernel-profile` table for this checkpoint's resident.
 ///
 /// The accumulator normally prints when the device drops, and a resident
 /// model's device never does - so on this path the table was simply never
 /// emitted. `Gpu::dump_profile` is the escape hatch for exactly that; this is
-/// where a caller with a checkpoint path can reach it. `BRAIN_PROFILE` must
+/// where a caller with a checkpoint path can reach it. `--kernel-profile` must
 /// already be set when the resident is BUILT, since the backend reads it once
 /// at construction.
 pub fn dump_profile(dir: &str, max_pixels: u32, precision: Precision) -> Result<(), String> {

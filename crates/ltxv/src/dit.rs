@@ -1240,7 +1240,7 @@ pub fn load_head_tensors_from_source(src: &dyn TensorSource, cfg: &LtxDitConfig)
 /// cache's hit/miss split) and `5` (every layer individually: index, hit or
 /// miss, and the GGUF-read / quantize / GPU milliseconds it cost). The
 /// per-layer breadcrumb is the one this function's own Phase 8 attribution
-/// needed and had to reconstruct by hand from summed `BRAIN_PROFILE` stage
+/// needed and had to reconstruct by hand from summed `--kernel-profile` stage
 /// totals - the totals stay, since the perf gates read them; the trace is
 /// what makes a single anomalous layer visible rather than averaged away.
 #[allow(clippy::too_many_arguments)]
@@ -1442,7 +1442,7 @@ pub fn forward_q_streamed_in(
     // blocks from `src` on EVERY forward call) had never been split into its
     // three real components. Accumulate each block's own three stage
     // durations across the whole loop and report ONE coarse total per stage
-    // under `BRAIN_PROFILE` (`gpu_core::profile::stage_time`'s own
+    // under `--kernel-profile` (`gpu_core::profile::stage_time`'s own
     // convention: a coarse timeline, not a per-iteration log) - this is what
     // tells apart hypothesis (a) GPU dispatch/compute, (b) GGUF
     // read+dequantize-to-fp32 I/O, and (c) host-side int8 quantize+upload.
@@ -1483,9 +1483,9 @@ pub fn forward_q_streamed_in(
     gpu_core::profile::stage_time("forward_q_streamed: activation/context/adaLN upload to device (per forward)", std::time::Instant::now() - t_block.record_upload);
     gpu_core::profile::stage_time("forward_q_streamed: block submit+wait (sum over all layers)", std::time::Instant::now() - t_block.compute);
     gpu_core::profile::stage_time("forward_q_streamed: device->host readback (per forward)", std::time::Instant::now() - t_block.readback);
-    // The same sums `BRAIN_PROFILE` already prints, restated as trace fields so
+    // The same sums `--kernel-profile` already prints, restated as trace fields so
     // a run can be analysed from ONE stream instead of correlating two
-    // mechanisms by hand. `BRAIN_PROFILE` is untouched apart from the upload
+    // mechanisms by hand. `--kernel-profile` is untouched apart from the upload
     // bucket being split out of what used to be one "upload+forward+wait"
     // total - the split is the whole measurement this phase turns on.
     tracing::debug!(

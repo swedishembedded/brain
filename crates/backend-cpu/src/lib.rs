@@ -64,7 +64,7 @@ type NativeHostFn = Arc<dyn Fn(*const u32, &[*mut u8]) + Send + Sync>;
 /// [`backend_api::Backend::register_native`]/`step_native` seam, the CPU
 /// ISA-pack half of it.
 struct NativeEntry {
-    #[allow(dead_code)] // read only via BRAIN_PROFILE-style diagnostics, not yet wired
+    #[allow(dead_code)] // read only via --kernel-profile-style diagnostics, not yet wired
     name: &'static str,
     f: NativeHostFn,
 }
@@ -109,9 +109,9 @@ struct CpuShared {
     jit: Jit,
     threads: usize,
     /// Kernel names in index order (mirrors the registry passed to `new`), used
-    /// for the optional `BRAIN_PROFILE=1` per-kernel timing breakdown.
+    /// for the optional `--kernel-profile` per-kernel timing breakdown.
     names: Vec<String>,
-    /// Per-kernel accumulated wall time + call count for `BRAIN_PROFILE`.
+    /// Per-kernel accumulated wall time + call count for `--kernel-profile`.
     profile: Option<Mutex<Vec<(std::time::Duration, u64)>>>,
     /// Native fast-path kernel indices, resolved by name once at construction.
     /// All `None` (and the fast path off) under `BRAIN_NO_FASTCONV=1` / non-AVX2.
@@ -263,7 +263,7 @@ impl CpuBackend {
     }
 
     pub fn new(kernels: &[(&str, &str)]) -> CpuBackend {
-        let jit = Jit::new(kernels).expect("WGSL->CPU JIT compilation failed");
+        let jit = Jit::new_profiled(kernels, backend_api::profile_enabled()).expect("WGSL->CPU JIT compilation failed");
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
         // A process can build several engine instances (e.g. the TTS pipeline
         // makes one per component); log the adapter line only once.
@@ -539,7 +539,7 @@ impl CpuBackend {
         }
     }
 
-    /// Print the accumulated per-kernel timing breakdown (only if `BRAIN_PROFILE`
+    /// Print the accumulated per-kernel timing breakdown (only if `--kernel-profile`
     /// was set). Sorted by total time descending.
     pub fn dump_profile(&self) {
         let Some(prof) = &self.shared.profile else { return };
@@ -548,7 +548,7 @@ impl CpuBackend {
             g.iter().enumerate().map(|(i, (d, c))| (i, *d, *c)).filter(|r| r.2 > 0).collect();
         rows.sort_by_key(|row| std::cmp::Reverse(row.1));
         let total: std::time::Duration = g.iter().map(|(d, _)| *d).sum();
-        eprintln!("=== BRAIN_PROFILE (CPU backend, total {:.1} ms) ===", total.as_secs_f64() * 1e3);
+        eprintln!("=== --kernel-profile (CPU backend, total {:.1} ms) ===", total.as_secs_f64() * 1e3);
         for (i, d, c) in rows {
             eprintln!(
                 "  {:<16} {:8.1} ms  {:5} calls  ({:4.1}%)",

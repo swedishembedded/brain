@@ -4,7 +4,7 @@
 //! Where one training step of the timeline model spends its time, on the
 //! device `BRAIN_BACKEND` selects: batch assembly on the host, the upload,
 //! forward, backward and the optimiser step, each timed to completion, then
-//! (under `BRAIN_PROFILE=1`) the per-kernel table.
+//! (under `--kernel-profile`) the per-kernel table.
 //!
 //! The shape is a cohort model's: 256 subjects of 96 token rows, two layers
 //! of width 64, 21 hazard knots, three outcome codes. Kernel shapes depend on

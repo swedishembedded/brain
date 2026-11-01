@@ -10,7 +10,7 @@ page for where real, current numbers live.
 
 ## Profiling and the roofline probe
 
-Set `BRAIN_PROFILE=1` on any `brain` run to get a per-kernel breakdown: time,
+Pass `--kernel-profile` to any `brain` run to get a per-kernel breakdown: time,
 call count, bytes moved, and - where the device supports it - the percentage
 of that device's own measured compute or memory-bandwidth ceiling the kernel
 is hitting.
@@ -37,7 +37,7 @@ compile time and hope. A selector inspects the device's capabilities (and,
 for some operations, the shape of the work) and dispatches to whichever
 registered variant is expected to be fastest there, falling back to a safe
 default when a device lacks what a faster variant needs. You do not choose
-kernels by hand; the engine does, and `BRAIN_PROFILE=1` shows you which one
+kernels by hand; the engine does, and `--kernel-profile` shows you which one
 actually ran.
 
 ## INT8 inference

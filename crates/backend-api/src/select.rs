@@ -73,7 +73,7 @@ pub enum Op {
     /// therefore steps by `d_model` across a warp (`d_out[(b*T+i)*d_model +
     /// h*hd + d]`, `i` the thread-varying index) - `Op::MaxAbsRow`'s
     /// coalescing bug, not merely a slow reduction. Measured live in a real
-    /// training pass (`brain gpt2 train`, `BRAIN_PROFILE=1`): `attn_bwd_
+    /// training pass (`brain gpt2 train`, `--kernel-profile`): `attn_bwd_
     /// dscores` alone was a leading share of total GPU time at `T=512`, ahead of both
     /// forward GEMM families in that profile.
     /// `attn_bwd_d{q,k,v}` are a DIFFERENT shape (thread-varying index is

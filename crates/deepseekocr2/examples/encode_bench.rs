@@ -14,7 +14,7 @@
 //! cargo run --release -p brain-deepseekocr2 --example encode_bench -- --dir <model dir> [--runs 5]
 //! ```
 //!
-//! `BRAIN_PROFILE=1` adds the per-kernel table of each stage.
+//! `--kernel-profile` adds the per-kernel table of each stage.
 
 use deepseekocr2::encoder::{sam_tokens_from_nchw, Resampler};
 use deepseekocr2::serve::TILE_SIDE;
@@ -73,7 +73,7 @@ fn main() {
             t.elapsed().as_secs_f64() * 1e3
         })
     };
-    // Under BRAIN_PROFILE, the per-kernel table of one pass over six tiles.
+    // Under --kernel-profile, the per-kernel table of one pass over six tiles.
     let refs: Vec<&[f32]> = (0..6).map(|_| tile_tokens.as_slice()).collect();
     gpu_core::profile::device_table(resampler.gpu(), "resampler x6 tiles", || resampler.encode_views(&refs, true));
     println!(

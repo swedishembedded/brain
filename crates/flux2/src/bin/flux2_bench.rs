@@ -186,7 +186,7 @@ fn is_int8_tier(name: &str, shape: &[usize]) -> bool {
 /// `flux2::import_bfl` (name map + two-way manifest coverage) and
 /// `model::int8::quantize_weight` over exactly the tensors the int8 tier
 /// packs. Host only - no GPU, so it runs while a card is busy; the upload is
-/// the remaining term and is timed on the device by `BRAIN_PROFILE`.
+/// the remaining term and is timed on the device by `--kernel-profile`.
 fn bench_load(path: &str, variant: &str) {
     let cfg = match Flux2Config::from_name(variant) {
         Ok(c) => c,

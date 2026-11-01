@@ -294,7 +294,7 @@ pub fn slots_for(per_block: u64, num_layers: u32, t: usize, device: memauth::Dev
 /// yet both streamed forwards rebuilt them on the HOST in f64 and re-uploaded
 /// them on EVERY call. At a real generation's token count that build is a
 /// visible share of a warm forward's wall clock (it is its own
-/// `BRAIN_PROFILE` stage, `RoPE table build (host, f64)`), and the upload is
+/// `--kernel-profile` stage, `RoPE table build (host, f64)`), and the upload is
 /// `heads * t * head_dim/2` floats twice over, per table, per forward - the
 /// audio+video path has FOUR such tables.
 ///

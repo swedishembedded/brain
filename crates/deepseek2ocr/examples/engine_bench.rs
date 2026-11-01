@@ -9,7 +9,7 @@
 //! The decoder engine's step cost at a batch size, without the server around it:
 //! prefill `B` sequences (a 283-token OCR-shaped prompt with a 273-row image
 //! run each), then time batched decode steps, and print the device counters
-//! (`BRAIN_PROFILE=1` adds the per-kernel-kind table).
+//! (`--kernel-profile` adds the per-kernel-kind table).
 //!
 //! ```text
 //! cargo run --release -p brain-deepseek2ocr --example engine_bench -- \
@@ -60,7 +60,7 @@ fn main() {
     let rows: Vec<f32> = (0..image_rows * d).map(|i| (((i * 2654435761usize) >> 9) % 2001) as f32 / 4000.0 - 0.25).collect();
     let embeds = PromptEmbeds::run(d, 1, rows).expect("rows");
 
-    // Under BRAIN_PROFILE the prefill runs with the device's per-kernel table too.
+    // Under --kernel-profile the prefill runs with the device's per-kernel table too.
     let profiled = gpu_core::profile::enabled();
     let timed_prefill = profiled && engine.gpu().set_kernel_timing(true);
     engine.gpu().reset_kernel_times();
@@ -88,7 +88,7 @@ fn main() {
     }
     let mut per_step = Vec::new();
     let mut digest = 0xcbf29ce484222325u64;
-    // Under BRAIN_PROFILE the decode steps run with the device's per-kernel table.
+    // Under --kernel-profile the decode steps run with the device's per-kernel table.
     let timed = profiled && engine.gpu().set_kernel_timing(true);
     engine.gpu().reset_kernel_times();
     let t_all = Instant::now();

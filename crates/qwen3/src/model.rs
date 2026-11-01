@@ -4030,7 +4030,7 @@ impl Qwen {
     /// list to build the per-kernel-kind table needed
     /// before anyone optimises, and until this existed there was no
     /// way to get one for a decoder LM at all: every recorded qwen number
-    /// came from `BRAIN_PROFILE`'s timestamp table on a
+    /// came from `--kernel-profile`'s timestamp table on a
     /// synthetic shape. Same contract and same reason as
     /// `vqgan::train::VqganTrainer::fwd_steps`.
     pub fn fwd_steps(&self) -> &[Step] {

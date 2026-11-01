@@ -61,7 +61,7 @@ use crate::thinker_plan::{layer_cost, place_fewest_devices, ThinkerPlacement, EM
 /// How much of a generation went into RE-READING streamed layer weights, as
 /// opposed to running kernels on them.
 ///
-/// `BRAIN_PROFILE`'s per-kernel tables are device timestamps, so they see only
+/// `--kernel-profile`'s per-kernel tables are device timestamps, so they see only
 /// the dispatches; on this path most of the wall clock is spent with no kernel
 /// running at all, re-reading the layers that did not fit. Without this counter
 /// the kernel table reports a small total and silently omits the term that
@@ -87,7 +87,7 @@ mod stream_stats {
     }
 }
 
-/// Print what streaming cost, then each device's own `BRAIN_PROFILE` kernel
+/// Print what streaming cost, then each device's own `--kernel-profile` kernel
 /// table. A resident model's `Gpu` never drops, so the backend's drop-time dump
 /// never fires and the tables are unreadable by construction without this - the
 /// same escape hatch `fastvlm::caps` uses (`Gpu::dump_profile`).
@@ -98,7 +98,7 @@ pub fn dump_stream_profile(gpus: &[Gpu]) {
     let (secs, loads, bytes) = stream_stats::read();
     if loads > 0 {
         eprintln!(
-            "=== omni streamed weights (BRAIN_PROFILE) === {loads} layer load(s), {:.2} GiB re-read, {:.1} s ({:.2} GiB/s)",
+            "=== omni streamed weights (--kernel-profile) === {loads} layer load(s), {:.2} GiB re-read, {:.1} s ({:.2} GiB/s)",
             bytes as f64 / (1u64 << 30) as f64,
             secs,
             bytes as f64 / (1u64 << 30) as f64 / secs.max(f64::MIN_POSITIVE)
@@ -341,7 +341,7 @@ fn run_layers(
                 let layer = load_thinker_layer(&mut up, reader, l as u32, cfg.n_experts).unwrap_or_else(|e| panic!("omni: {e}"));
                 // Charged BEFORE the dispatches that consume it, so this is the
                 // re-read cost alone and never overlaps the kernel table. Only
-                // under BRAIN_PROFILE: the byte figure re-walks this layer's
+                // under --kernel-profile: the byte figure re-walks this layer's
                 // ~384 tensor headers, which is nothing against a 2.4 GiB read
                 // but is not worth paying when nobody reads the number.
                 if gpu_core::profile::enabled() {

@@ -330,7 +330,7 @@ impl Flux2Model {
         // non-ReBAR card the un-reclaimed staging OOMs the device (observed
         // 22 GiB for 15.5 GiB of weights on a P40 — zimage's dev.rs documents
         // the same). Flush roughly every GiB.
-        // Build-time spans, printed under `BRAIN_PROFILE`. Device timestamps
+        // Build-time spans, printed under `--kernel-profile`. Device timestamps
         // cannot see any of this: the load is host work plus queue writes,
         // with no kernel running, so a per-kernel table reports a near-zero
         // total for a phase that on a real 9B checkpoint outweighs several

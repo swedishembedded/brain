@@ -20,7 +20,7 @@
 //! does not apply here. `Gpu::kernel_times()` (`set_kernel_timing` +
 //! `reset_kernel_times`) still gives the accumulated per-kernel-kind DEVICE
 //! time across every submit in one forward -- the same accounting
-//! `BRAIN_PROFILE`'s table uses -- so that is the per-kernel breakdown source.
+//! `--kernel-profile`'s table uses -- so that is the per-kernel breakdown source.
 //!
 //! **Windowed vs global, isolated by a one-block tower.** A block's own
 //! per-forward cost cannot be read off the 12-block real config directly (patch
@@ -66,7 +66,7 @@ fn best_forward(enc: &SamEncoder, reps: usize) -> f64 {
 }
 
 /// Per-kernel-kind device time table for one forward, via `kernel_times()` --
-/// the same accumulator `BRAIN_PROFILE` reads, retrieved as data rather than
+/// the same accumulator `--kernel-profile` reads, retrieved as data rather than
 /// printed at drop.
 fn kernel_table(enc: &SamEncoder) -> Vec<(String, f64, u64)> {
     let timed = enc.gpu.set_kernel_timing(true);
@@ -144,15 +144,14 @@ fn bench_backend(label: &str, gpu: Gpu, reps: usize) {
 }
 
 /// `sam1_bench profile` -- one full-tower forward on the CPU backend, with
-/// `BRAIN_PROFILE`'s own per-kernel wall-time accumulator (the CPU backend has
+/// `--kernel-profile`'s own per-kernel wall-time accumulator (the CPU backend has
 /// no device-timestamp path, so `Gpu::kernel_times()` -- this file's
 /// `kernel_table` -- reports nothing there; `dump_profile()` is the CPU
 /// backend's own accounting, gated the same way). Fast (one forward, no
 /// one-block/wgpu legs) so it fits comfortably inside one blocking call.
 fn profile_mode() {
-    // Must be set before `CpuBackend::new` builds (it reads the env once at
-    // construction), so set it here rather than relying on the caller's shell.
-    std::env::set_var("BRAIN_PROFILE", "1");
+    // Must be set before `CpuBackend::new` builds (it takes it at construction).
+    gpu_core::profile::set_profile(true);
     let cfg = SamViTConfig::deepseek_ocr();
     let init: HashMap<String, Vec<f32>> = init_dense(&cfg, 7);
     let image = synthetic_image(&cfg);
@@ -165,7 +164,7 @@ fn profile_mode() {
     // concurrently (a separate agent's builds/tests in another worktree), so a
     // single sample can be contamined by contention the same way §F.1 warns a
     // per-group drain contaminates a kernel table. The per-kernel table below
-    // is still just the LAST forward's accumulation (BRAIN_PROFILE sums across
+    // is still just the LAST forward's accumulation (--kernel-profile sums across
     // every forward since the backend was built, so this is really "3 forwards
     // worth", divide by 3 for a per-forward per-kernel estimate).
     let mut best = f64::INFINITY;
