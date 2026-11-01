@@ -2496,6 +2496,11 @@ pub enum Fused {
     /// in a single launch - each output bit-identical to the single `matmul_bf16_gemv` on that matrix. Params `[m, k, n0,
     /// n1, n2, n3]` (`n_i == 0` leaves set `i` unused); bindings `x`, then for each set its `w` (read) and `y` (written).
     Bf16GemvMulti,
+    /// `matmul_bf16_gemv_splitk`: [`Fused::Bf16GemvMulti`]'s matrices for 2 to 16 rows (`m`), each `n_i` a multiple of 16 and `k` a
+    /// multiple of 32 up to 8192, on Hopper: 16 weight rows a cluster of 8 blocks that split K, tensor-core products of the
+    /// activations rounded to bf16 (what `cast_f32_bf16` makes of them) with f32 accumulation, no cast launch and no reduction
+    /// launch. Params and bindings as [`Fused::Bf16GemvMulti`].
+    Bf16GemvSplitK,
     /// `conv2d_dw_partial`: the dense conv weight gradient over `S` slices of
     /// `chunk` output positions each. Params: the conv uniform `[N, Cin, H, W,
     /// Cout, K, stride, pad, Ho, Wo]` then `[S, chunk]`; bindings `dy`, `x`
@@ -2600,6 +2605,12 @@ const ADD_RMS_QUANT_E4M3_CLUSTER: u32 = 5;
 /// The most rows [`Fused::AddRmsQuantE4m3`] runs as clusters: a decode step's. Past it a launch has more clusters than the card
 /// holds at once and the five blocks a row cost more than the one block saves.
 pub const ADD_RMS_QUANT_E4M3_CLUSTER_MAX_ROWS: u32 = 32;
+
+/// Blocks (K slices) of one 16-row tile of `matmul_bf16_gemv_splitk` (`BRAIN_BS_SPLIT` in its source).
+const BF16_GEMV_SPLITK_CLUSTER: u32 = 8;
+
+/// The most activation rows `matmul_bf16_gemv_splitk` serves (one m16 tile of the tensor-core product).
+pub const BF16_GEMV_SPLITK_MAX_ROWS: u32 = 16;
 
 /// `add_rms_quant`'s bindings: params, `a`, `b`, `w`, `sum`, `xn`, `xq`, `sx`.
 const ADD_RMS_QUANT_BINDINGS: &[BindKind] = &[
@@ -2867,6 +2878,7 @@ impl Fused {
             Fused::I8GemvMulti => "matmul_i8_gemv_multi",
             Fused::Q4GemvMulti => "matmul_q4_gemv_multi",
             Fused::Bf16GemvMulti => "matmul_bf16_gemv_multi",
+            Fused::Bf16GemvSplitK => "matmul_bf16_gemv_splitk",
             Fused::Conv2dDwPartial => "conv2d_dw_partial_f32",
             Fused::Conv2dDwReduce => "conv2d_dw_reduce_f32",
             Fused::I8wDx => "matmul_i8w_dx",
@@ -2895,7 +2907,7 @@ impl Fused {
             Fused::MoeNvfp4GateUp => MOE_NVFP4_GATEUP_BINDINGS,
             Fused::MatmulNvfp4Mma8 | Fused::MatmulNvfp4Mma16 | Fused::MatmulNvfp4Mma32 | Fused::MatmulNvfp4Mma64 => NVFP4_MMA_BINDINGS,
             Fused::I8GemvMulti | Fused::Q4GemvMulti => I8_GEMV_MULTI_BINDINGS,
-            Fused::Bf16GemvMulti => BF16_GEMV_MULTI_BINDINGS,
+            Fused::Bf16GemvMulti | Fused::Bf16GemvSplitK => BF16_GEMV_MULTI_BINDINGS,
             Fused::Conv2dDwPartial => CONV2D_DW_PARTIAL_BINDINGS,
             Fused::Conv2dDwReduce => CONV2D_DW_REDUCE_BINDINGS,
             Fused::I8wDx => I8W_DX_BINDINGS,
@@ -2951,6 +2963,10 @@ impl Fused {
                 matches!(params, [m, k, n0, ..] if params.len() == 6 && *m >= 1 && *m <= rows && *k >= 32 && k % 32 == 0 && *n0 >= 1)
             }
             Fused::Bf16GemvMulti => matches!(params, [m, k, n0, ..] if params.len() == 6 && (1..=8).contains(m) && *k >= 8 && k % 8 == 0 && *n0 >= 1),
+            Fused::Bf16GemvSplitK => {
+                matches!(params, [m, k, n0, ..] if params.len() == 6 && (1..=BF16_GEMV_SPLITK_MAX_ROWS).contains(m) && *k >= 32 && k % 32 == 0 && *k <= 8192 && *n0 >= 1)
+                    && params[2..6].iter().all(|n| n % 16 == 0)
+            }
             // The dense conv uniform plus a split whose slices are whole
             // stages and together cover every position, none of them empty.
             Fused::Conv2dDwPartial => {
@@ -2999,6 +3015,7 @@ impl Fused {
             }
             // Channel tiles x column tiles x slices; the kernel numbers them
             // channel-tile fastest.
+            Fused::Bf16GemvSplitK => params[2..6].iter().map(|n| n / 16).sum(),
             Fused::Bf16GemvMulti => {
                 let cols = if params[0] == 1 { BF16_GEMV_COLS } else { BF16_GEMV_STAGED_COLS };
                 params[2..6].iter().map(|n| n.div_ceil(cols)).sum::<u32>()
@@ -3025,6 +3042,7 @@ impl Fused {
         match self {
             Fused::QuantEpilogue => Some(QUANT_EPILOGUE_CLUSTER),
             Fused::AddRmsQuantE4m3Cluster => Some(ADD_RMS_QUANT_E4M3_CLUSTER),
+            Fused::Bf16GemvSplitK => Some(BF16_GEMV_SPLITK_CLUSTER),
             _ => None,
         }
     }

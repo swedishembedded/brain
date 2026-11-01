@@ -2561,12 +2561,18 @@ impl Ops {
         self.gpu.fused_step(fused, &bufs, &params)
     }
 
-    /// [`Self::fused_group`] for dense bf16 weights: the decode GEMV's own conditions (rows, `k`), every member the same `k`.
+    /// [`Self::fused_group`] for dense bf16 weights, every member the same `k`: the decode GEMV's own conditions (one row) run the
+    /// multi GEMV; 2 to 16 rows run the split-K tensor-core form where the device has it, which also takes the activations as
+    /// they are (no cast launch) and needs no reduction launch.
     fn fused_bf16_group(&self, group: &[(&Weight, &DeviceBuffer)], act: &Act) -> Option<Step> {
         let (m, k) = (act.m, act.k);
-        if m == 0 || m > self.dense_gemv_max_rows() || !k.is_multiple_of(8) {
+        let which = if m != 0 && m <= self.dense_gemv_max_rows() && k.is_multiple_of(8) {
+            gpu_core::Fused::Bf16GemvMulti
+        } else if (2..=gpu_core::BF16_GEMV_SPLITK_MAX_ROWS).contains(&m) && self.providers.runs("cuda") {
+            gpu_core::Fused::Bf16GemvSplitK
+        } else {
             return None;
-        }
+        };
         let mut params = vec![m, k];
         for (w, _) in group {
             let Weight::BF16 { n, k: wk, .. } = w else { return None };
@@ -2586,7 +2592,7 @@ impl Ops {
                 _ => bufs.extend([&act.x, &unused[i - group.len()]]),
             }
         }
-        self.gpu.fused_step(gpu_core::Fused::Bf16GemvMulti, &bufs, &params)
+        self.gpu.fused_step(which, &bufs, &params)
     }
 
     /// `dX[m, k] = sum_n dY[m, n] * W[n, k]` (`accumulate` selects overwrite

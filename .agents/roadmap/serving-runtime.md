@@ -622,3 +622,8 @@ Mixed-iteration idle (knowledge 392, 2026-10-30): a prompt start no longer waits
   A 1024-thread block a row was 12 % faster isolated and made the step 1.9 % slower: its 20 KiB of shared memory kept the PDL-launched FP8 product (210 KiB of its ring) from being resident beside it. nsys exclusive
   time moved from the norm to the product; the step period (topk to topk) is the metric. 8K x 16 decode-only step period median, nsys: 17934 -> 17588 us (-1.9 %); the fused norm 16 rows 6.1 -> 5.5 us (events).
   Open: the f32 `add_rms_quant` (65 launches a step, 5.4 us each exclusive) is bound by its 80 + 64 dependent adds (bit-identity with the WGSL chain) and a cluster form is slower (knowledge 420).
+- 2026-11-01 (decode glue, step 2: the GDN gate pair in one cluster kernel, knowledge 422): `matmul_bf16_gemv_splitk` serves `Ops::matmul_group` of dense bf16 weights at 2..16 rows on Hopper (a 16-row tile a
+  cluster of 8 blocks that split K, tensor-core products of the bf16-rounded f32 activation, ascending reductions through shared memory; no cast launch, no reduction launch; matrices a multiple of 16 rows, k a
+  multiple of 32 up to 8192). nsys, 8K x 16 decode-only: the gate pair 671 -> 272 us a step (vLLM 317); step period median 17588 -> 17085 us. Gates: the f64 oracle of the bf16 operands over 9 shapes (1e-5 of the
+  terms' norm), the same bits on a second launch, `ops_matmul_group` (one launch, within 1e-4 of the library products), an ignored 3,000-launch stress. Open: the 49 `cast_f32_bf16` launches a step (1.7 us each) sit between the recurrence and
+  the output projection; 64 rows (the 8K x 64 cell) still runs the library pair.

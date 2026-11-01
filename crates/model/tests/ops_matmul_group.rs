@@ -111,3 +111,44 @@ fn a_group_that_cannot_merge_is_the_separate_matmuls() {
         assert!(big_m >= 2, "a batch past the GEMV tile must not be merged");
     }
 }
+
+/// A pair of thin dense bf16 projections at a decode step's rows (a Gated DeltaNet layer's two gates over 2 to 16 sequences) is ONE
+/// launch where the device runs block clusters, and each output is the separate product's to the order of the f32 sum: both round
+/// the activation to bf16 and multiply it by the same bf16 weight, so they differ only by the accumulation order.
+#[test]
+fn a_bf16_pair_at_decode_rows_is_one_launch_and_agrees_with_the_separate_products() {
+    let gpu = gpu_core::testgpu::dev(model::ops::kernel_list());
+    let cuda = is_cuda(&gpu) && gpu.has_fused(gpu_core::Fused::Bf16GemvSplitK);
+    drop(gpu);
+    for (m, k, ns) in [(2u32, 5120u32, [48u32, 48u32]), (16, 5120, [48, 48]), (7, 1056, [16, 32])] {
+        let gpu = gpu_core::testgpu::dev(model::ops::kernel_list());
+        let ops = Ops::new(gpu).expect("Ops::new");
+        let g = ops.gpu();
+        let mut rng = Lcg::new(0x51c7 ^ u64::from(m));
+        let x = g.storage_init("x", &rng.vec_scaled((m * k) as usize, 1.0));
+        let weights: Vec<Weight> = ns.iter().map(|&n| Weight::upload(&ops, &rng.vec_scaled((n * k) as usize, 1.0), n as usize, k as usize, Dtype::BF16)).collect();
+        let mut steps = Vec::new();
+        let act = ops.act(&mut steps, &x, 0, m, k);
+        let grouped: Vec<DeviceBuffer> = ns.iter().map(|&n| g.storage((m * n) as u64)).collect();
+        let separate: Vec<DeviceBuffer> = ns.iter().map(|&n| g.storage((m * n) as u64)).collect();
+        let pairs: Vec<(&Weight, &DeviceBuffer)> = weights.iter().zip(&grouped).collect();
+        let before = steps.len();
+        ops.matmul_group(&mut steps, &pairs, &act);
+        let pushed = steps.len() - before;
+        for (w, y) in weights.iter().zip(&separate) {
+            ops.matmul(&mut steps, w, &act, y, 0);
+        }
+        g.submit(&[], &steps);
+        g.poll_wait();
+        if cuda {
+            assert_eq!(pushed, 1, "the pair (m={m} k={k} ns={ns:?}) should be ONE launch");
+        }
+        for (i, &n) in ns.iter().enumerate() {
+            let (a, b) = (g.read(&grouped[i], (m * n) as usize), g.read(&separate[i], (m * n) as usize));
+            let rms = (b.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>() / b.len() as f64).sqrt();
+            for (j, (u, v)) in a.iter().zip(&b).enumerate() {
+                assert!((f64::from(*u) - f64::from(*v)).abs() <= 1e-4 * rms + 1e-9, "weight {i} output {j}: {u} against {v} (rms {rms}), m={m} k={k}");
+            }
+        }
+    }
+}

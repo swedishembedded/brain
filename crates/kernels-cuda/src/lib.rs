@@ -2282,6 +2282,25 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/bf16_gemv.cu"),
     },
     CudaKernel {
+        name: "matmul_bf16_gemv_splitk",
+        // Up to four thin dense bf16 matrices that read one f32 activation of 2 to 16 rows, in one launch, K split over a cluster of
+        // 8 blocks (the cluster size is the launch's, see `gpu_core::native_upgrade`). A fused kernel asked for by name.
+        op: Op::MatMul,
+        weight: Dtype::BF16,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: CLUSTER_MIN_CC,
+        entry: "brain_matmul_bf16_gemv_splitk",
+        what: "up to four bf16 projections of one f32 activation (2 to 16 rows, rounded to bf16 as cast_f32_bf16 does) in one launch with no cast and no reduction launch: 16 weight rows a cluster of 8 blocks, K split between the blocks, mma.sync m16n8k16 with f32 accumulation, reduced through shared memory in ascending order; agrees with the f64 product of the bf16 operands to f32 accumulation",
+        reported: "native:matmul_bf16_gemv_splitk",
+        block_dim: 256,
+        tile: (16, 16),
+        // Each warp's partial 16 x 16 tile and the block's.
+        shared_bytes: 4 * (8 * 16 * 16 + 16 * 16),
+        programmatic: true,
+        src: include_str!("../cu/bf16_gemv_splitk.cu"),
+    },
+    CudaKernel {
         name: "matmul_fp8_dq_stream_r1",
         // FP8 twin of `matmul_i8_dq_stream_*`: E4M3 weight codes with the checkpoint's 128 x 128 block scale become bf16 in
         // registers (one scale per stage of K, no per-group fold), the activations are bf16 and the accumulation is f32
