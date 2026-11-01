@@ -21,7 +21,6 @@
 //! The model store must hold `Qwen/Qwen3.8-27B-FP8` (`BRAIN_MODELS_DIR`), `testdata/` the golden and its picture.
 //! Run with `-- --device gpu1 --backend cuda`; without `--device` the binary reports the test skipped.
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -33,21 +32,12 @@ use model::serve::{PagedDecoder, PrefillProgress};
 use qwen35::int8_gguf_resident::{budgeted_gpus, held_tiers_at, parse_request, Qwen35GgufResident};
 use serde_json::json;
 
+mod common;
+
+use common::golden_vl::{golden, ints};
+
 const CAP: u32 = 512;
 const QUESTION: &str = "Describe the part and list every dimension written on it.";
-
-fn golden() -> Option<HashMap<String, Vec<f32>>> {
-    let path = brain_testutil::testdata("golden/qwen35/vl/qwen35_vl.safetensors");
-    if !Path::new(&path).exists() {
-        brain_testutil::skip(&format!("fixture {path} absent - run tools/goldens/qwen35_vl_dump_reference.py"));
-        return None;
-    }
-    Some(checkpoint::safetensors::read(&path).expect("read the golden").into_iter().map(|t| (t.name, t.data)).collect())
-}
-
-fn ints(v: &[f32]) -> Vec<u32> {
-    v.iter().map(|&x| x.round() as u32).collect()
-}
 
 fn argmax(v: &[f32]) -> u32 {
     v.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i as u32).unwrap()

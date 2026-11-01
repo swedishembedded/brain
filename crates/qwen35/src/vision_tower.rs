@@ -109,11 +109,16 @@ impl VisionTower {
     /// merger must project to; `max_pixels` lowers the checkpoint's own upper bound on an image's size (a serving
     /// limit: an image is scaled down to it, never refused for it).
     pub fn open(dir: &Path, spec: VisionSpec, decoder: &Gpu, d_model: u32, max_pixels: u32) -> Result<VisionTower, String> {
+        let reader = checkpoint::weightio::WeightReader::open_hf_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let weights = qwen3vl::import::load_vision(&reader, &spec.config)?;
+        Self::from_weights(spec, &weights, decoder, d_model, max_pixels)
+    }
+
+    /// The tower of `weights` (read by `qwen3vl::import::load_vision`, or built by a test) on the card `decoder` runs on.
+    pub fn from_weights(spec: VisionSpec, weights: &qwen3vl::import::TowerWeights, decoder: &Gpu, d_model: u32, max_pixels: u32) -> Result<VisionTower, String> {
         if spec.config.out_hidden_size != d_model {
             return Err(format!("the vision merger projects to {} but the decoder is {d_model} wide", spec.config.out_hidden_size));
         }
-        let reader = checkpoint::weightio::WeightReader::open_hf_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        let weights = qwen3vl::import::load_vision(&reader, &spec.config)?;
         // Its own handle on the decoder's device, holding its freed blocks: on CUDA a free waits for every stream of
         // the process, so a tower that freed its temporaries per image would stall the decoder.
         let gpu = decoder.new_like(vision_pipelines());

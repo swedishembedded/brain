@@ -92,3 +92,5 @@ brain-modernbert.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true
+# `qwen35_image_record_fd`: the three-axis rotary positions of a prompt with an image.
+brain-qwen3vl.workspace = true

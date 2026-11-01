@@ -61,6 +61,10 @@ name = "hf_fp8_vision_real"
 harness = false
 
 [[test]]
+name = "vision_train_real"
+harness = false
+
+[[test]]
 name = "gguf_score"
 harness = false
 

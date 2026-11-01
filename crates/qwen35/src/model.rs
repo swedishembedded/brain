@@ -68,6 +68,7 @@ use model::kv_tier::{KvKernels, KvLayer};
 pub use model::gdn::gdn_chunk_size;
 use model::ops::{Act, Ops, TierPolicy, Weight};
 use model::saved::SavedFormat;
+use model::serve::PromptEmbeds;
 use model::Shard;
 use optim::Optim;
 
@@ -1353,7 +1354,13 @@ pub struct Qwen35 {
     /// The image-placeholder runs `run_forward` overwrites and `backward`
     /// routes to [`Self::read_d_img_embeds`], set by
     /// [`Self::enable_mm_splices`]. Empty (the default) makes both a no-op.
-    splice: model::vlm::SpliceRuns,
+    splice: RefCell<model::vlm::SpliceRuns>,
+    /// The vision tower and the images of a vision-language training set ([`crate::vision_sft::VisionFeed`]); a batch
+    /// naming its examples ([`model::Batch::LmExamples`]) reads its rows through it. `None` on a text-only model.
+    vision_feed: RefCell<Option<crate::vision_sft::VisionFeed>>,
+    /// The splice and the rotary tables hold a batch's images ([`Self::install_prompt_embeds`]); the next batch
+    /// takes them out again.
+    vision_inputs: Cell<bool>,
 
     // ---- single-sequence incremental decode (see `Self::step`) ------------
     // Mirrors `qwen35moe::model::Qwen35`'s own decode-cache fields exactly
@@ -2394,7 +2401,9 @@ impl Qwen35 {
             adapter,
             adapter_bank: RefCell::new(None),
             adapter_rows: Cell::new(0),
-            splice: model::vlm::SpliceRuns::none(),
+            splice: RefCell::new(model::vlm::SpliceRuns::none()),
+            vision_feed: RefCell::new(None),
+            vision_inputs: Cell::new(false),
             dec_pos: Cell::new(0),
             dec_cap: t,
             decode,
@@ -2923,8 +2932,14 @@ impl Qwen35 {
     /// [`Qwen35Config::rope_table`]'s own doc.
     fn mrope_tables(cfg: &Qwen35Config, rows: u32, row_len: u32) -> (Vec<f32>, Vec<f32>) {
         let positions: Vec<[u32; 3]> = (0..rows).flat_map(|_| (0..row_len).map(|ti| [ti, ti, ti])).collect();
+        Self::mrope_tables_at(cfg, &positions)
+    }
+
+    /// The M-RoPE tables for `positions`, one three-axis position per row of the batch (YaRN-scaled when the config
+    /// asks for it, exactly as the serving paths build theirs).
+    fn mrope_tables_at(cfg: &Qwen35Config, positions: &[[u32; 3]]) -> (Vec<f32>, Vec<f32>) {
         let yarn = cfg.rope_table();
-        qwen3vl::mrope::mrope_tables_scaled(&positions, cfg.mrope_section, cfg.rotary_dim(), cfg.rope_theta, yarn.as_ref().map(|(f, a)| (f.as_slice(), *a)))
+        qwen3vl::mrope::mrope_tables_scaled(positions, cfg.mrope_section, cfg.rotary_dim(), cfg.rope_theta, yarn.as_ref().map(|(f, a)| (f.as_slice(), *a)))
     }
 
     /// The tokens per sequence worth computing for `targets` (`b` rows of `t_user`):
@@ -3105,13 +3120,13 @@ impl Qwen35 {
     /// rows concatenated in this order and [`Self::read_d_img_embeds`] returns
     /// their gradient the same way. The runs must not overlap.
     pub fn enable_mm_splices(&mut self, runs: &[(u32, u32)]) {
-        self.splice = model::vlm::SpliceRuns::new(&self.gpu, runs, self.cfg.d_model);
+        *self.splice.get_mut() = model::vlm::SpliceRuns::new(&self.gpu, runs, self.cfg.d_model);
     }
 
     /// Turn the splice off again: the next `forward()` reads every row from
     /// the token embedding (a text-only example after an image one).
     pub fn disable_mm_splice(&mut self) {
-        self.splice = model::vlm::SpliceRuns::none();
+        *self.splice.get_mut() = model::vlm::SpliceRuns::none();
     }
 
     /// The AdamW moments of trainable parameter `name` (`None` before the
@@ -3129,14 +3144,105 @@ impl Qwen35 {
     /// row-major, in run order) to splice into the residual stream on the next
     /// `forward()`.
     pub fn write_img_embeds(&self, data: &[f32]) {
-        self.splice.write(&self.gpu, data);
+        self.splice.borrow().write(&self.gpu, data);
     }
 
     /// Read the gradient of the spliced image embeddings after `backward()`,
     /// in run order - feeds the vision tower/connector backward. Requires a
     /// `new_train_on` build (see [`Self::backward`]'s splice-gradient step).
     pub fn read_d_img_embeds(&self) -> Vec<f32> {
-        self.splice.read_grad(&self.gpu)
+        self.splice.borrow().read_grad(&self.gpu)
+    }
+
+    // ---- images in a training batch (see `crate::vision_sft`) ----
+
+    /// Give this model the vision tower and the images of a vision-language training set. A batch that names its
+    /// examples ([`model::Batch::LmExamples`]) then reads each example's images through it.
+    pub fn attach_vision(&self, feed: crate::vision_sft::VisionFeed) {
+        *self.vision_feed.borrow_mut() = Some(feed);
+    }
+
+    /// Undo what the previous batch's images left in the splice and the rotary tables, so a text batch after an
+    /// image batch reads plain embeddings at plain positions.
+    fn clear_vision_inputs(&self) {
+        if self.vision_inputs.replace(false) {
+            *self.splice.borrow_mut() = model::vlm::SpliceRuns::none();
+            let (cos, sin) = Self::mrope_tables(&self.cfg, self.b, self.t);
+            self.gpu.write_f32(&self.cos, &cos);
+            self.gpu.write_f32(&self.sin, &sin);
+            self.rope_compact.set(false);
+        }
+    }
+
+    /// [`Self::set_batch`] for rows that are dataset examples: each example's images run through the vision tower
+    /// and their rows are spliced into the residual stream at the placeholder tokens, at the three-axis rotary
+    /// positions serving gives the same prompt. A model with no vision attached reads the batch as plain text.
+    fn set_batch_examples(&self, split: model::Split, tokens: &[u32], targets: &[u32], examples: &[Option<usize>]) {
+        let feed = self.vision_feed.borrow();
+        let Some(feed) = feed.as_ref() else {
+            self.clear_vision_inputs();
+            Self::set_batch(self, tokens, targets);
+            self.reset_loss_weights();
+            return;
+        };
+        let row = self.t_user as usize;
+        assert_eq!(examples.len(), self.b as usize, "qwen35: {} examples named for {} rows", examples.len(), self.b);
+        let embeds: Vec<Option<PromptEmbeds>> = examples
+            .iter()
+            .enumerate()
+            .map(|(s, example)| example.map(|e| feed.embeds(split, e, &tokens[s * row..(s + 1) * row])).transpose().map(Option::flatten))
+            .collect::<Result<_, String>>()
+            .unwrap_or_else(|why| panic!("qwen35: {why}"));
+        self.set_batch_embeds(tokens, targets, &embeds);
+    }
+
+    /// [`Self::set_batch`] for rows whose prompts carry embedding rows: `embeds[s]` is batch row `s`'s
+    /// [`PromptEmbeds`] (`None` for a text row), the type serving takes. Each row's rows are spliced over the
+    /// residual rows of their placeholder tokens, and the rotary tables take the three-axis positions the embeds
+    /// carry (a row's own index where they carry none). Rows past the run length the batch computes (the padding
+    /// tail, and anything after the last supervised position) are dropped with the tokens they stand at.
+    ///
+    /// The rows are inputs, not parameters: no gradient is kept for them.
+    pub fn set_batch_embeds(&self, tokens: &[u32], targets: &[u32], embeds: &[Option<PromptEmbeds>]) {
+        assert_eq!(embeds.len(), self.b as usize, "qwen35: embeds for {} rows in a batch of {}", embeds.len(), self.b);
+        self.clear_vision_inputs();
+        Self::set_batch(self, tokens, targets);
+        self.reset_loss_weights();
+        let (run, d) = (self.run_len() as usize, self.cfg.d_model as usize);
+        let (mut runs, mut rows): (Vec<(u32, u32)>, Vec<f32>) = (Vec::new(), Vec::new());
+        let mut previous = None;
+        for (s, e) in embeds.iter().enumerate() {
+            let Some(e) = e else { continue };
+            assert_eq!(e.width(), d, "qwen35: image rows are {} wide, the decoder {d}", e.width());
+            for (k, &position) in e.positions().iter().enumerate().take_while(|(_, &p)| (p as usize) < run) {
+                let flat = s * run + position as usize;
+                match runs.last_mut() {
+                    Some(last) if previous.is_some_and(|p| p + 1 == flat) => last.1 += 1,
+                    _ => runs.push((flat as u32, 1)),
+                }
+                previous = Some(flat);
+                rows.extend_from_slice(&e.rows()[k * d..(k + 1) * d]);
+            }
+        }
+        if runs.is_empty() {
+            return;
+        }
+        let splice = model::vlm::SpliceRuns::new(&self.gpu, &runs, d as u32);
+        splice.write(&self.gpu, &rows);
+        *self.splice.borrow_mut() = splice;
+        // Every row of the batch has a rotary position: its prompt's, where it has images, else its own index.
+        let positions: Vec<[u32; 3]> = embeds
+            .iter()
+            .flat_map(|e| {
+                let own = e.as_ref().and_then(PromptEmbeds::rotary_positions);
+                (0..run).map(move |i| own.and_then(|p| p.get(i).copied()).unwrap_or([i as u32; 3]))
+            })
+            .collect();
+        let (cos, sin) = Self::mrope_tables_at(&self.cfg, &positions);
+        self.gpu.write_f32(&self.cos, &cos);
+        self.gpu.write_f32(&self.sin, &sin);
+        self.rope_compact.set(self.b > 1);
+        self.vision_inputs.set(true);
     }
 
     /// Overwrite the M-RoPE `cos`/`sin` tables (`[b*t, rotary_dim/2]`
@@ -4326,8 +4432,9 @@ impl Qwen35 {
             // tokens (see `Self::enable_mm_splice`'s doc). No-op unless
             // enabled. Only meaningful on the embed stage (operates on
             // `res[0]`, right after the gather above).
-            if !self.splice.is_empty() {
-                g.submit(&[], &self.splice.fwd(g, SPLICE, &res[0], 0, n));
+            let splice = self.splice.borrow();
+            if !splice.is_empty() {
+                g.submit(&[], &splice.fwd(g, SPLICE, &res[0], 0, n));
             }
         }
 
@@ -4779,8 +4886,9 @@ impl Qwen35 {
             // a spurious `tok.weight` gradient from those rows. No-op unless
             // `enable_mm_splice` was called. Only meaningful on the embed
             // stage (operates on `res[0]`/`dres[0]`).
-            if !self.splice.is_empty() {
-                g.submit(&[], &self.splice.bwd(g, SPLICE_BWD, &d_res_next));
+            let splice = self.splice.borrow();
+            if !splice.is_empty() {
+                g.submit(&[], &splice.bwd(g, SPLICE_BWD, &d_res_next));
             }
 
             // ---- embedding backward (tok.weight), over the distinct looked-up rows ----
@@ -6541,6 +6649,17 @@ impl Qwen35 {
     /// token prefill would, so [`Self::step`] continues from it. Returns the
     /// last row's final-norm hidden state.
     pub fn prefill_embeds(&self, embeds: &[f32], max_chunk: u32) -> Vec<f32> {
+        self.prefill_embeds_with(embeds, None, max_chunk)
+    }
+
+    /// [`Self::prefill_embeds`] for a prompt whose rotary positions are not its rows' indices (a prompt with images:
+    /// an image of `h x w` rows spans `max(h, w)` positions), given as `rope` - the positions serving gives the same
+    /// prompt ([`PromptEmbeds::rotary_positions`]).
+    pub fn prefill_embeds_rotary(&self, embeds: &[f32], rope: &PromptRope, max_chunk: u32) -> Vec<f32> {
+        self.prefill_embeds_with(embeds, Some(rope), max_chunk)
+    }
+
+    fn prefill_embeds_with(&self, embeds: &[f32], rope: Option<&PromptRope>, max_chunk: u32) -> Vec<f32> {
         assert_eq!(self.b, 1, "qwen35::prefill_embeds requires b==1 (single sequence)");
         assert!(max_chunk > 0, "qwen35::prefill_embeds: max_chunk must be > 0");
         let d = self.cfg.d_model as usize;
@@ -6553,7 +6672,7 @@ impl Qwen35 {
             pos + n as u32,
             self.dec_cap
         );
-        let caches = self.own_caches();
+        let caches = DecodeCaches { rope, ..self.own_caches() };
         // The ids are unread when the rows are supplied; only the round length is.
         let lengths = vec![0u32; max_chunk as usize];
         let mut hidden = None;
@@ -7725,14 +7844,17 @@ impl model::Model for Qwen35 {
     fn set_batch(&self, batch: model::Batch) {
         match batch {
             model::Batch::Lm { tokens, targets } => {
+                self.clear_vision_inputs();
                 Qwen35::set_batch(self, tokens, targets);
                 self.reset_loss_weights();
             }
+            model::Batch::LmExamples { split, tokens, targets, examples } => self.set_batch_examples(split, tokens, targets, examples),
             model::Batch::LmWeighted { tokens, targets, weights } => {
+                self.clear_vision_inputs();
                 Qwen35::set_batch(self, tokens, targets);
                 self.write_loss_weights(weights);
             }
-            _ => panic!("qwen35::Qwen35 only supports Batch::Lm / Batch::LmWeighted"),
+            _ => panic!("qwen35::Qwen35 only supports Batch::Lm / Batch::LmExamples / Batch::LmWeighted"),
         }
     }
     fn token_objectives(&self) -> Option<&dyn model::training::TokenObjectives> {

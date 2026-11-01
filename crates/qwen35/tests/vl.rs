@@ -17,25 +17,17 @@
 //! `get_rope_index`'s own independent host computation exactly, (d) the
 //! splice backward actually flows a nonzero gradient to `d_img_embeds`.
 
-use std::collections::HashMap;
-
 use data::rng::Rng;
+use common::vision_fixture::{merger_weights, vision_weights};
 use qwen35::config::Qwen35Config;
 use qwen35::init::init_weights;
 use qwen35::vl::Qwen35Vl;
 use qwen3vl::config::VisionConfig;
 use qwen3vl::mrope::get_rope_index;
 
-const IMG: u32 = 7;
+mod common;
 
-fn rand_map(mut rng: Rng, specs: &[(&str, usize, bool)]) -> HashMap<String, Vec<f32>> {
-    let mut m = HashMap::new();
-    for &(name, n, ones) in specs {
-        let v = if ones { vec![1.0; n] } else { (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect() };
-        m.insert(name.to_string(), v);
-    }
-    m
-}
+const IMG: u32 = 7;
 
 /// Tiny vision config whose merger output width matches `Qwen35Config::
 /// tiny()`'s `d_model` (96) at the merger boundary, mirroring `qwen35moe/
@@ -55,48 +47,6 @@ fn tiny_vcfg() -> VisionConfig {
         tokens_per_second: 2,
         deepstack_indexes: vec![], // this model has none - see `vl.rs`'s module doc
     }
-}
-
-fn vision_weights(vcfg: &VisionConfig, seed: u64) -> HashMap<String, Vec<f32>> {
-    let (c, pv, mlp) = (vcfg.hidden as usize, vcfg.patch_vec_dim() as usize, vcfg.intermediate as usize);
-    let mut specs: Vec<(String, usize, bool)> = vec![
-        ("patch_embed.weight".into(), c * pv, false),
-        ("patch_embed.bias".into(), c, false),
-        ("pos_embed".into(), vcfg.num_position_embeddings as usize * c, false),
-    ];
-    for b in 0..vcfg.depth {
-        specs.extend([
-            (format!("blocks.{b}.norm1.weight"), c, true),
-            (format!("blocks.{b}.norm1.bias"), c, false),
-            (format!("blocks.{b}.qkv.weight"), 3 * c * c, false),
-            (format!("blocks.{b}.qkv.bias"), 3 * c, false),
-            (format!("blocks.{b}.proj.weight"), c * c, false),
-            (format!("blocks.{b}.proj.bias"), c, false),
-            (format!("blocks.{b}.norm2.weight"), c, true),
-            (format!("blocks.{b}.norm2.bias"), c, false),
-            (format!("blocks.{b}.fc1.weight"), mlp * c, false),
-            (format!("blocks.{b}.fc1.bias"), mlp, false),
-            (format!("blocks.{b}.fc2.weight"), c * mlp, false),
-            (format!("blocks.{b}.fc2.bias"), c, false),
-        ]);
-    }
-    let refs: Vec<(&str, usize, bool)> = specs.iter().map(|(n, s, o)| (n.as_str(), *s, *o)).collect();
-    rand_map(Rng::new(seed), &refs)
-}
-
-fn merger_weights(in_dim: u32, merge: u32, out_dim: u32, seed: u64) -> HashMap<String, Vec<f32>> {
-    let merged = in_dim * merge * merge;
-    rand_map(
-        Rng::new(seed),
-        &[
-            ("ln.weight", in_dim as usize, true),
-            ("ln.bias", in_dim as usize, false),
-            ("fc1.weight", (merged * merged) as usize, false),
-            ("fc1.bias", merged as usize, false),
-            ("fc2.weight", (out_dim * merged) as usize, false),
-            ("fc2.bias", out_dim as usize, false),
-        ],
-    )
 }
 
 /// Build a tiny end-to-end model: tokens `[1, 2, IMG, IMG, IMG, IMG, 3]` (a

@@ -84,8 +84,9 @@ pub fn finetune_from(base: &str, dir: &Path, opts: &FitOpts, mode: &Mode, out: &
         Mode::FullOffload => build_full(cfg, opts, &*init)?,
         Mode::Lora { .. } => Qwen35::new_train_opts_on(Gpu::new(pipelines()), cfg, opts.batch_size, opts.block_size, &*init, &TrainOpts::default()),
     };
-    let (train, val, bcfg, _vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
-    let obj = model::causal_lm::<Qwen35>(train, val, bcfg, itos);
+    let (train, val, bcfg, _vocab, itos) = model::load_dataset_with_images(dir, opts)?;
+    crate::vision_sft::attach_for_dataset(&m, Path::new(base), dir)?;
+    let obj = model::causal_lm_examples::<Qwen35>(train, val, bcfg, itos);
     let (report, _) = model::fit_controlled(m, obj, opts, Some(Path::new(out)), step_progress_control(&mut step_progress()))?;
     Ok((report.initial_loss, report.final_loss.unwrap_or(report.initial_loss)))
 }
@@ -504,9 +505,10 @@ pub fn finetune_lora_scored_tuned(
     held_out: &[&Path],
 ) -> std::io::Result<(model::FitReport, Qwen35, Vec<model::ScoredSet>)> {
     let m = build_lora_model(base, opts, rank, alpha, tuning, resume_from, run)?;
-    let (train_set, val, bcfg, _vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
+    let (train_set, val, bcfg, _vocab, itos) = model::load_dataset_with_images(dir, opts)?;
+    crate::vision_sft::attach_for_dataset(&m, base, dir)?;
     let mut scored = model::score_base(&m, held_out, opts, resume_from.is_some())?;
-    let obj = model::causal_lm::<Qwen35>(train_set, val, bcfg, itos);
+    let obj = model::causal_lm_examples::<Qwen35>(train_set, val, bcfg, itos);
     let (report, trained) = model::fit_controlled(m, obj, opts, None, control)?;
     if !report.interrupted {
         model::score_tuned(&trained, held_out, opts, &mut scored)?;

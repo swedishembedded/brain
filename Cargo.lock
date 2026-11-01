@@ -1572,6 +1572,7 @@ dependencies = [
  "brain-qwen3",
  "brain-qwen35",
  "brain-qwen35moe",
+ "brain-qwen3vl",
  "brain-rrdbnet",
  "brain-sam1",
  "brain-sam2",

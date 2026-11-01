@@ -13,7 +13,9 @@
 #![allow(dead_code)]
 
 pub mod fused_decode;
+pub mod golden_vl;
 pub mod hf_fixture;
+pub mod vision_fixture;
 
 use std::collections::HashMap;
 

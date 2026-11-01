@@ -56,6 +56,45 @@ structurally and never parity-claimed here.
   Found on the way: the embedded-prompt conformance property (`model::serve::conformance`) placed its rows early in the prompt,
   which a model decided by its last tokens never feels; it now also puts rows at the end. `gguf_conformance`'s
   `prompts_sharing_a_document_resume_from_where_they_part` fails on the commit this work branched from (not caused here).
+- [x] LoRA SFT on conversations with images (2026-11-01; tiny fixtures on CPU; real weights NOT yet run, see Open): a
+  `generic-messages-v2` record's message `content` may be a list of `text` and `image_url` (inline `data:` URL) parts
+  (`data::chat::ImageReader`; `ChatSample::media`; the prepared dataset keeps the files in a per-split sidecar,
+  `data::chat_media`, aligned with the example index). `qwen35::vision_sft::VisionReader` reads them with the geometry serving
+  reads (`preprocessor_config.json` through `ImageGeometry`, capped at `SERVING_MAX_IMAGE_PIXELS`), writes the placeholder block
+  `vision_frontend::placeholder_run` (the one function `expand_images` also uses), and refuses by line: an undecodable image, a
+  non-`data:` URL, a header over 36 MP, more than 8 images, placeholder text typed by hand, an image in a supervised turn, any
+  image over a base with no vision tower (and the text trainers, which refuse a dataset with a sidecar). The rows and rotary
+  positions are `vision_frontend::prompt_embeds`, the function the serving front end builds a request's `PromptEmbeds` with, run
+  per draw by `VisionFeed` through `VisionTower` on the decoder's card; `Qwen35::set_batch_embeds` splices them (`SpliceRuns`) and
+  writes the M-RoPE tables (`mrope_tables_at`, YaRN-scaled as in serving), clipped to the run length the batch computes, and the next
+  batch takes them out again. `Batch::LmExamples` (sent by `model::causal_lm_examples`, which Qwen3.8's trainer always uses) names
+  the example of every row, probe and held-out draws included. The tower is frozen: no gradient kept for its rows, no adapter, loss
+  on the supervised tokens only. Entry points unchanged: `ChatFineTune` (`.arch("qwen35")`), `finetune_streamed*`,
+  `brain qwen35 finetune <prepared dir>`; no new flag.
+  Gates (CPU, tiny config `Qwen35Config::tiny()` + a 2-block tower with random weights, `tests/vision_train.rs`): the training
+  forward's last-position logits equal `prefill_embeds_rotary` (the inference build's chunked prefill over the same rows and
+  `PromptRope`) to 0 (bitwise: same kernels), while plain row positions move them by 1.5e-4 and another picture by 5.4e-4, so the
+  comparison can fail at its 1e-5 tolerance; a text batch after an image batch reproduces the text-only logits to 1e-6; a
+  two-row batch (image row, text row) has the loss its rows have alone; `gradcheck/tests/qwen35_image_record_fd.rs`: 62 adapter
+  tensors on an image record, worst abs error 1.1e-4, worst rel error 6.7e-2 (the existing adapter-kind gate's thresholds,
+  4e-3 / 8e-2); `vision_train_streamed.rs`: `finetune_streamed` (bf16 base, recomputed activations) over a base file with its vision
+  release beside it trains an image record (loss 3.37 -> 2.46 in 10 steps) and the picture changes the loss before the first step
+  at the f32 and bf16 tiers. Found on the way: the fit loop's loss probe and random held-out draw took windows of the dataset
+  without naming their examples, so the reported initial loss ignored the pictures; they name them now.
+  Memory: an image adds its rows (one per 32 x 32 pixels, at most 4096 at the 4 MP serving cap) to the row the decoder trains, so
+  the activations of a step grow with the sequence exactly as for text of that length; the tower adds its weights (0.45 B
+  parameters as f32, 1.8 GB) and the activations of the largest image (the 4 GiB `VISION_RESERVE_BYTES` of serving) to the card,
+  and its forward runs once per image per draw (rows are not cached; a cache keyed by image digest is the lever if tower time
+  shows in a profile).
+  Open: (1) the real-weight check on a free card, `cargo test -p brain-qwen35 --test vision_train_real -- --device gpu<i>
+  --backend cuda` (needs `Qwen/Qwen3.8-27B-FP8` in the model store and the golden of `tools/goldens/qwen35_vl_dump_reference.py`):
+  the training build (bf16 base, recompute) must reproduce the reference's logits at the end of the golden prompt within cosine
+  0.999 / rel-L2 0.06, the envelope `hf_fp8_vision_real` holds the served engine to on the bf16-decoded weights; then a short
+  `ChatFineTune` (`.base_format("bf16")`, rank 16, 20 steps) over two image records must print finite, falling losses, a tower
+  load and a device peak within the card; (2) the long-sequence settings (segmented GDN layers, bf16 residual stream, chunked MLP,
+  from 2048 tokens) are exercised by text runs, and image rows reach them through the same `set_batch` but no image run at that
+  length has been made; (3) held-out sets (`held_out`, `held_out_text`) are scored by a text pass and refuse images, monitoring
+  reads them; (4) `stream_train.rs` (the CPU layer-streaming trainer) and `score_tokens_qwen35` read text only.
 - [x] FP8 release served natively (2026-10-29, `serving-runtime.md` item 17, knowledge 378): the paged resident reads a HuggingFace
   directory through `ResidentCheckpoint`; linears stay E4M3 with 128 x 128 scales; `matmul_fp8_native` candidates (dequantize-in-register
   streaming for 1-128 rows, Hopper bf16-operand and e4m3 wgmma GEMMs); gates `fp8_linear_native`, `hf_fp8_conformance`,

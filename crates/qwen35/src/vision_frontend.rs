@@ -27,7 +27,7 @@ use llmserve::{Encoding, Frontend, ParsedRequest, TextFrontend};
 use model::serve::PromptEmbeds;
 use serde_json::{json, Value};
 
-use crate::vision_tower::{VisionTokens, VisionTower};
+use crate::vision_tower::VisionTower;
 
 /// The literal placeholder strings the chat template writes for an image; the tokenizer turns each into one token.
 const IMAGE_START: &str = "<|vision_start|>";
@@ -59,14 +59,31 @@ pub fn has_images(inv: &Invocation) -> bool {
     inv.get_blob("image").is_some()
 }
 
+/// Whether `text` holds a reserved placeholder literal. Text a client controls must not: typed by hand it would become
+/// a placeholder token that has no row.
+pub fn holds_reserved_text(text: &str) -> bool {
+    RESERVED.iter().any(|r| text.contains(r))
+}
+
+/// The reason message text is refused when it holds a placeholder literal.
+pub fn reserved_text_refusal() -> String {
+    format!("message text must not contain the image placeholder tokens ({})", RESERVED.join(", "))
+}
+
 /// Whether any string inside `v` holds a reserved placeholder literal.
 fn holds_reserved(v: &Value) -> bool {
     match v {
-        Value::String(s) => RESERVED.iter().any(|r| s.contains(r)),
+        Value::String(s) => holds_reserved_text(s),
         Value::Array(a) => a.iter().any(holds_reserved),
-        Value::Object(o) => o.iter().any(|(k, v)| RESERVED.iter().any(|r| k.contains(r)) || holds_reserved(v)),
+        Value::Object(o) => o.iter().any(|(k, v)| holds_reserved_text(k) || holds_reserved(v)),
         _ => false,
     }
+}
+
+/// The prompt text that stands for one image of `rows` decoder rows: the run of placeholder tokens between the vision
+/// markers. The one place a request (serving) or a record (training) writes an image into text.
+pub fn placeholder_run(rows: u32) -> String {
+    format!("{IMAGE_START}{}{IMAGE_END}", IMAGE_PAD.repeat(rows as usize))
 }
 
 /// The request's `messages` with every `image_url` part replaced by its placeholder run (`rows[i]` image tokens for the
@@ -78,7 +95,7 @@ fn holds_reserved(v: &Value) -> bool {
 pub fn expand_images(messages: &Value, rows: &[u32]) -> Result<Value, String> {
     let list = messages.as_array().ok_or_else(|| invalid("'messages' must be an array"))?;
     if holds_reserved(messages) {
-        return Err(invalid(format!("message text must not contain the image placeholder tokens ({})", RESERVED.join(", "))));
+        return Err(invalid(reserved_text_refusal()));
     }
     let mut next = 0usize;
     let mut out = Vec::with_capacity(list.len());
@@ -92,9 +109,7 @@ pub fn expand_images(messages: &Value, rows: &[u32]) -> Result<Value, String> {
                     Some("image_url") | Some("image") => {
                         let n = *rows.get(next).ok_or_else(|| invalid(format!("the request has more image parts than images ({})", rows.len())))?;
                         next += 1;
-                        text.push_str(IMAGE_START);
-                        text.push_str(&IMAGE_PAD.repeat(n as usize));
-                        text.push_str(IMAGE_END);
+                        text.push_str(&placeholder_run(n));
                     }
                     Some(other) => return Err(invalid(format!("content part '{other}' is not read by this model (text and images only)"))),
                 }
@@ -111,17 +126,48 @@ pub fn expand_images(messages: &Value, rows: &[u32]) -> Result<Value, String> {
 
 /// The lengths of the runs of `image` tokens in `ids`, in order.
 pub fn placeholder_runs(ids: &[u32], image: u32) -> Vec<usize> {
-    let mut runs = Vec::new();
-    let mut prev = false;
-    for &t in ids {
-        match (t == image, prev) {
-            (true, true) => *runs.last_mut().expect("a run is open") += 1,
-            (true, false) => runs.push(1),
-            _ => {}
-        }
-        prev = t == image;
+    data::chat::token_runs(ids, image)
+}
+
+/// Why [`prompt_embeds`] did not produce rows.
+#[derive(Debug, PartialEq, Eq)]
+pub enum EmbedRefusal {
+    /// The caller stopped waiting.
+    Cancelled,
+    /// The prompt and its images disagree.
+    Invalid(String),
+}
+
+/// The rows and rotary positions of a prompt holding `images`, as the decoder takes them ([`PromptEmbeds`]): each
+/// image through the vision tower, standing at its run of placeholder tokens in `ids`, and the three-axis rotary
+/// position of every prompt token. Serving builds a request's embeds with this, and training a record's: the rows and
+/// positions a model is trained on are exactly the ones it is served.
+///
+/// `ids` must hold one run of `tower.tokens_for(image)` placeholder tokens per image, in order. `cancelled` is polled
+/// between images.
+pub fn prompt_embeds(tower: &VisionTower, ids: &[u32], images: &[Rgb8], cancelled: &dyn Fn() -> bool) -> Result<PromptEmbeds, EmbedRefusal> {
+    let tokens = tower.spec().tokens;
+    let sizes: Vec<(u32, (u32, u32))> = images.iter().map(|i| tower.tokens_for(i.h, i.w)).collect();
+    let runs = placeholder_runs(ids, tokens.image);
+    if runs.iter().map(|&r| r as u32).ne(sizes.iter().map(|&(n, _)| n)) {
+        let rows: Vec<u32> = sizes.iter().map(|&(n, _)| n).collect();
+        return Err(EmbedRefusal::Invalid(format!("the prompt holds image runs of {runs:?} tokens, the images need {rows:?}")));
     }
-    runs
+    let positions: Vec<u32> = ids.iter().enumerate().filter(|(_, &t)| t == tokens.image).map(|(i, _)| i as u32).collect();
+    let width = tower.spec().config.out_hidden_size as usize;
+    let mut rows = Vec::with_capacity(positions.len() * width);
+    let mut grids = Vec::with_capacity(images.len());
+    for (image, &(_, grid)) in images.iter().zip(&sizes) {
+        if cancelled() {
+            return Err(EmbedRefusal::Cancelled);
+        }
+        let encoded = tower.encode(image);
+        debug_assert_eq!(encoded.grid, grid, "the tower and the prompt agree on the grid");
+        rows.extend_from_slice(&encoded.rows);
+        grids.push((1, grid.0, grid.1));
+    }
+    let rotary = qwen3vl::mrope::get_rope_index(ids, tokens.image, &grids);
+    Ok(PromptEmbeds::new(width, positions, rows).map_err(|e| EmbedRefusal::Invalid(format!("vision rows: {e}")))?.with_rotary_positions(rotary))
 }
 
 /// What a request for the image worker carries and where its result goes.
@@ -131,7 +177,6 @@ type Job = (Invocation, mpsc::Sender<Result<(ParsedRequest, Option<PromptEmbeds>
 struct ImageBuild {
     tok: QwenBpe,
     tower: Arc<VisionTower>,
-    tokens: VisionTokens,
     /// The most prompt tokens the scheduler can hold for one sequence.
     context: usize,
     parse: fn(&QwenBpe, &Invocation) -> Result<ParsedRequest, String>,
@@ -172,33 +217,17 @@ impl ImageBuild {
         let rendered = inv.without_blobs().set("messages", json!(expanded.to_string()));
         let req = (self.parse)(&self.tok, &rendered)?;
 
-        let runs = placeholder_runs(&req.ids, self.tokens.image);
-        if runs.iter().map(|&r| r as u32).ne(rows.iter().copied()) {
-            return Err(invalid(format!("the prompt holds image runs of {runs:?} tokens, the images need {rows:?}")));
-        }
-        let positions: Vec<u32> = req.ids.iter().enumerate().filter(|(_, &t)| t == self.tokens.image).map(|(i, _)| i as u32).collect();
-
         let prepared = started.elapsed();
-        let width = self.tower.spec().config.out_hidden_size as usize;
-        let mut rows_f32 = Vec::with_capacity(positions.len() * width);
-        let mut grids = Vec::with_capacity(images.len());
-        for (image, &(_, grid)) in images.iter().zip(&sizes) {
-            if inv.cancel.is_cancelled() {
-                return Err("cancelled".to_string());
-            }
-            let encoded = self.tower.encode(image);
-            debug_assert_eq!(encoded.grid, grid, "the tower and the prompt agree on the grid");
-            rows_f32.extend_from_slice(&encoded.rows);
-            grids.push((1, grid.0, grid.1));
-        }
+        let embeds = prompt_embeds(&self.tower, &req.ids, &images, &|| inv.cancel.is_cancelled()).map_err(|refusal| match refusal {
+            EmbedRefusal::Cancelled => "cancelled".to_string(),
+            EmbedRefusal::Invalid(why) => invalid(why),
+        })?;
         residency::log::info(&format!(
             "qwen35: {} image(s), {image_tokens} tokens: decode and render {:.0} ms, tower {:.0} ms",
             images.len(),
             prepared.as_secs_f64() * 1e3,
             (started.elapsed() - prepared).as_secs_f64() * 1e3
         ));
-        let rotary = qwen3vl::mrope::get_rope_index(&req.ids, self.tokens.image, &grids);
-        let embeds = PromptEmbeds::new(width, positions, rows_f32).map_err(|e| format!("vision rows: {e}"))?.with_rotary_positions(rotary);
         Ok((req, Some(embeds)))
     }
 }
@@ -221,7 +250,7 @@ impl VisionFrontend {
                 return Err(format!("the tokenizer's {literal} is not token {id}, which the checkpoint's config names"));
             }
         }
-        let build = Arc::new(ImageBuild { tok, tower: Arc::new(tower), tokens, context, parse });
+        let build = Arc::new(ImageBuild { tok, tower: Arc::new(tower), context, parse });
         let (queue, jobs) = mpsc::channel::<Job>();
         let worker_build = build.clone();
         let worker = std::thread::Builder::new()
