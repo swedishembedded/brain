@@ -601,3 +601,18 @@ Mixed-iteration idle (knowledge 392, 2026-10-30): a prompt start no longer waits
   rows, f32 and bf16 KV), tuned choice within 5e-2, kernel byte-identity, ignored back-to-back stress of the three kernels and swap-TMA over 5120 x 34816 / 17408 / 14336 (Xid count 596 before and after). Pre-existing
   failures on the base: `fp8_source`, `lora_seq_len`, `model_i8_smoke`, `model_q4_smoke` (CPU backend). Open: the fused 34816-row product at 16 rows is ~60 us (2.1 TB/s of the weight) against the reference's 3.3 TB/s on a
   16384-row product; q, k and v could be read in place by `gqa_decode_prep` / `gqa_qk_prep` (removes the 2 us split); a mixed round's leading decode rows still multiply the windows.
+
+- 2026-11-01 (the mixed FP8 / NVFP4 release served as stored, knowledge 419): `nvidia/Qwen3.8-27B-NVFP4` (per-tensor static FP8 attention and GDN projections, NVFP4 MLPs and head, bf16 MTP) loads onto the tiers it is
+  stored in: a lossless `Repack` writes the tensor's f32 scale on a 128 x 128 tile grid (a fused q|k|v or qkv|z keeps each part's scale, a bf16 grid would round it), NVFP4 is `Weight::Micro` (`Dtype::F4E2M1`,
+  built only from tensors stored so), the resident holds an NVFP4 head as stored, and the E4M3-only producers (`silu_mul_e4m3`, `gate_mul_e4m3`, the fused front end, the gated norm) run only where every reader is FP8
+  (`E4m3Readers`). Engines on the GH200 (no FP4 tensor cores): vLLM 0.32 serves it (Cutlass FP8 + Humming W4A16; 8K x 1 TPOT 10.4 ms); SGLang 0.5.22 dies at CUDA-graph capture by default (the fused SiLU+FP4-quant
+  hands a tuple to the FP4 Marlin op: `apply_fp4_marlin_linear() Expected a value of type 'Tensor' for argument 'input' but instead found type 'tuple'`) and serves with `SGLANG_DISABLE_SILU_FP4_QUANT_FUSION=1`.
+  NVFP4 kernels, device events, 17408 x 5120 gate/up (FP8 36 us at 1-16 rows, 1213 at 8192): 1 row 102 -> 38 us (GEMV, 4 weight rows a warp: ncu showed L1 97 % busy at DRAM 10 %, 8 activation bytes per weight byte),
+  2 rows 239 -> 55, 8 rows 239 -> 56, 16 rows 229 -> 68, 32 rows ~230 -> 142, 64 rows 228 -> 253 (`matmul_nvfp4_mma8/16/32/64`: codes decoded in registers into `mma.m16n8k16` fragments; the tile decode wrote the whole
+  weight as bf16 per product, 192 live per decode step: the first 8-stream batch ran out of memory at any `--ctx`), 256 rows 241 -> 236 and 8192 rows 2480 -> 2284 (tile decode + library, unchanged). LM head 1 row 1253 -> 396 us (FP8 350).
+  Parity (`qwen35_fp8_parity --reference`, 8 x ~1300 tokens, 32 steps): NVFP4 vs the FP8 release 93.36 % agreement, mean rel-L2 9.43e-2, mean KL 1.76e-2 nats (2 flips above margin 0.5); NVFP4 vs its own bf16 decode 98.83 %,
+  rel-L2 1.85e-2, KL 1.17e-3; per-tier f32-oracle fixture exact (rel-L2 < 1e-12 on the CPU backend), CUDA kernels against f64 oracles. Served gpu1, bf16 KV / f32 state / no speculation, "8192:1 8192:16 32768:16", tok/s | TTFT p50 ms
+  | TPOT p50 ms: brain 60.5 | 909 | 13.0, 203.1 | 1954 | 69.3, 54.9 | 6673 | 259.9; vLLM 74.9 | 783 | 10.3, 266.5 | 4374 | 42.8, 70.5 | 9737 | 186.9; SGLang (kill switch) 66.6 | 1343 | 9.6, 166.9 | 11677 | 50.4,
+  39.0 | 53596 | 148.6 (the FP8 release at the same settings: brain 71.8 | 568, 305.1 | 1198, 82.6 | 4212; vLLM 76.4, 337.2, 93.2). Open: a product of 256 or more rows still decodes the tile and calls the library (prefill
+  8192 rows 2284 us against FP8's 1213; 8K x 1 TTFT 909 ms against vLLM's 783), the 64-row build is no faster than the tile decode and the head at 64 rows is 2.5 ms, 8K x 16 TPOT 69 ms against vLLM's 43;
+  `qops_gemv_small_m` fails on the base at its FP8 check (the half-precision `matmul_fp8_gemv_f16_*` candidate against a 1e-5 tolerance).
