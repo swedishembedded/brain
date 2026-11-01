@@ -23,8 +23,8 @@ use std::fmt;
 use std::ops::Range;
 
 use super::budget::{resident_file_bytes, BoundedWorkspace, Pool};
-use super::codec::{CodecRegistry, EncodeCtx, Tile, TileBuf};
-use super::encoding::{Element, QuantEncoding, ScaleGranularity, TensorDescriptor};
+use super::codec::{scale_at, CodecRegistry, EncodeCtx, Tile, TileBuf};
+use super::encoding::{Element, FloatFormat, QuantEncoding, ScaleGranularity, TensorDescriptor};
 use super::reader::PackedTensorReader;
 use super::sink::TensorSink;
 use crate::gguf::GgmlType;
@@ -142,9 +142,24 @@ pub struct Loader<'a> {
     pub config: LoadConfig,
 }
 
-/// Is `(src, dst)` a lossless layout change the executor implements?
-fn repack_supported(src: &QuantEncoding, dst: &QuantEncoding) -> bool {
-    matches!(src.element, Element::Ggml(GgmlType::Q8_0)) && *dst == QuantEncoding::int8_blocked(32)
+/// The lossless layout changes the executor implements.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RepackKind {
+    /// GGUF Q8_0 blocks to int8 codes plus an f32 scale per block.
+    Q8_0ToInt8,
+    /// FP8 with one static per-tensor scale to the same bytes under a tile grid whose every scale is that value
+    /// (an f32 grid holds any such scale exactly).
+    TensorScaleToTiles,
+}
+
+/// The lossless layout change from `src` to `dst`, when the executor implements one.
+fn repack_kind(src: &QuantEncoding, dst: &QuantEncoding) -> Option<RepackKind> {
+    if matches!(src.element, Element::Ggml(GgmlType::Q8_0)) && *dst == QuantEncoding::int8_blocked(32) {
+        return Some(RepackKind::Q8_0ToInt8);
+    }
+    let per_tensor = matches!(src.scales.as_slice(), [s] if s.granularity == ScaleGranularity::Tensor);
+    let f32_tiles = matches!(dst.scales.as_slice(), [s] if matches!(s.granularity, ScaleGranularity::Tile2d { .. }) && s.format == FloatFormat::F32);
+    (matches!(src.element, Element::Float(FloatFormat::E4M3Fn | FloatFormat::E5M2)) && src.element == dst.element && per_tensor && f32_tiles).then_some(RepackKind::TensorScaleToTiles)
 }
 
 /// Lossless Q8_0 -> int8 codes + f32 block scales, one tile.
@@ -160,6 +175,18 @@ fn repack_q8_0(tile: &Tile<'_>, out: &mut TileBuf) {
     }
 }
 
+/// Per-tensor FP8 -> the same bytes under a tile grid, one tile (whole scale bands): every grid scale is the tensor's.
+fn repack_tensor_scale(src: &TensorDescriptor, dst: &TensorDescriptor, tile: &Tile<'_>, out: &mut TileBuf) {
+    let scale = scale_at(src.encoding.scales[0].format, tile.scales[0], 0);
+    out.payload.clear();
+    out.payload.extend_from_slice(tile.payload);
+    out.scales.resize_with(1, Vec::new);
+    out.scales[0].clear();
+    for _ in dst.scale_range(0, &tile.elems) {
+        out.scales[0].extend_from_slice(&scale.to_le_bytes());
+    }
+}
+
 impl Loader<'_> {
     /// Plan loading `name` under `policy`.
     pub fn plan(&self, name: &str, policy: &LoadPolicy) -> Result<LoadStep, String> {
@@ -168,7 +195,7 @@ impl Loader<'_> {
             LoadPolicy::Preserve => (LoadOp::Preserve, src.clone()),
             LoadPolicy::Repack(e) if *e == src.encoding => (LoadOp::Preserve, src.clone()),
             LoadPolicy::Repack(e) => {
-                if !repack_supported(&src.encoding, e) {
+                if repack_kind(&src.encoding, e).is_none() {
                     return Err(format!("{name}: no lossless repack from {} to {e}; request Convert explicitly if a numeric change is intended", src.encoding));
                 }
                 (LoadOp::Repack, TensorDescriptor::new(name, src.shape.clone(), e.clone()))
@@ -184,7 +211,8 @@ impl Loader<'_> {
         }
         let mut quantum = src.tile_quantum();
         if op == LoadOp::Repack {
-            quantum = lcm(quantum, dst.tile_quantum());
+            // Whole scale bands, so a tile's grid scales are its own.
+            quantum = lcm(quantum, dst.encode_quantum());
         }
         if op == LoadOp::Convert {
             quantum = lcm(quantum, dst.encode_quantum());
@@ -269,7 +297,11 @@ impl Loader<'_> {
             match step.op {
                 LoadOp::Preserve => sink.write_tile(&step.dst, &src_tile)?,
                 LoadOp::Repack => {
-                    repack_q8_0(&src_tile, &mut encoded);
+                    match repack_kind(&step.src.encoding, &step.dst.encoding) {
+                        Some(RepackKind::Q8_0ToInt8) => repack_q8_0(&src_tile, &mut encoded),
+                        Some(RepackKind::TensorScaleToTiles) => repack_tensor_scale(&step.src, &step.dst, &src_tile, &mut encoded),
+                        None => return Err(format!("{}: no lossless repack from {} to {}", step.src.name, step.src.encoding, step.dst.encoding)),
+                    }
                     sink.write_tile(&step.dst, &Tile { elems: elems.clone(), payload: &encoded.payload, scales: encoded.scales.iter().map(Vec::as_slice).collect() })?;
                 }
                 LoadOp::Convert => {
@@ -528,6 +560,38 @@ mod tests {
         };
         assert_eq!(decode(QuantEncoding::int8_blocked(32), &b), decode(QuantEncoding::ggml(GgmlType::Q8_0), &a), "repack must not change a single decoded value");
         let err = l.plan("w", &LoadPolicy::Repack(QuantEncoding::nf4_blocked(32))).unwrap_err();
+        assert!(err.contains("no lossless repack"), "{err}");
+    }
+
+    /// Spec: a static per-tensor FP8 scale repacks to the tile grid of that same scale without a single bit changing
+    /// (an f32 scale a bf16 grid would round), in tiles of whole scale bands, and the repack is refused when the
+    /// destination scale format could not hold the scale.
+    #[test]
+    fn per_tensor_fp8_repacks_to_a_tile_grid_of_the_exact_f32_scale() {
+        let dir = TmpDir::new("tensor-scale");
+        let (rows, cols) = (256usize, 64usize);
+        let w = e4m3_bytes(5, rows * cols);
+        let scale = 0.012_345_679_f32; // not a bf16 value
+        assert_ne!(half::bf16::from_f32(scale).to_f32(), scale);
+        write_safetensors(
+            &dir.join("m.safetensors"),
+            &[
+                RawTensor { name: "w", dtype: "F8_E4M3", shape: vec![rows as u64, cols as u64], bytes: w.clone() },
+                RawTensor { name: "w_scale", dtype: "F32", shape: vec![], bytes: scale.to_le_bytes().to_vec() },
+            ],
+        );
+        let r = PackedReader::open(&dir.join("m.safetensors")).unwrap();
+        let (codecs, budget) = (CodecRegistry::reference(), MemoryBudget::new(1 << 20, 0));
+        let l = loader(&r, &codecs, &budget, 20_000);
+        let mut dst = QuantEncoding::fp8_e4m3_tiled(128);
+        dst.scales[0].format = FloatFormat::F32;
+        let mut sink = MemorySink::default();
+        let rep = l.load("w", &LoadPolicy::Repack(dst), &mut sink).unwrap();
+        assert!(!rep.step.decodes_to_f32 && rep.tiles_written > 1, "{} tiles", rep.tiles_written);
+        assert_eq!(sink.payload, w, "the bytes are copied");
+        let grid: Vec<u8> = (0..2).flat_map(|_| scale.to_le_bytes()).collect();
+        assert_eq!(sink.scales[0], grid, "every band of the grid holds the tensor's f32 scale");
+        let err = l.plan("w", &LoadPolicy::Repack(QuantEncoding::fp8_e4m3_tiled(128))).unwrap_err();
         assert!(err.contains("no lossless repack"), "{err}");
     }
 

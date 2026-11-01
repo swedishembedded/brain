@@ -153,7 +153,7 @@ pub fn decode_float_code(f: FloatFormat, code: u32) -> f32 {
 }
 
 /// The `i`-th value of a little-endian packed sidecar of format `f`.
-fn scale_at(f: FloatFormat, bytes: &[u8], i: usize) -> f32 {
+pub(super) fn scale_at(f: FloatFormat, bytes: &[u8], i: usize) -> f32 {
     match f.bits() {
         32 => decode_float_code(f, u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap())),
         16 => decode_float_code(f, u16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]) as u32),
