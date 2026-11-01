@@ -6,9 +6,8 @@
 //! That must be invisible: the same loss, the same per-position logprobs and
 //! the same gradients as one whole-batch chunk - weighted loss included.
 //!
-//! Its own test binary with a single test: the chunking is forced through the
-//! process-wide `BRAIN_TILE_BUDGET_WORDS`, which a concurrently running test
-//! would also see.
+//! The chunking is forced by a tile budget scoped to the test's thread
+//! (`model::block::with_tile_budget_words`).
 
 use std::collections::HashMap;
 
@@ -57,13 +56,10 @@ fn a_chunked_head_trains_exactly_like_a_whole_one() {
     let y: Vec<u32> = (0..t).map(|i| if i % 5 == 3 { qwen3::IGNORE } else { (i * 7 + 2) % cfg.vocab }).collect();
     let weights: Vec<f32> = (0..t).map(|i| 0.5 + (i % 3) as f32 * 0.25).collect();
 
-    std::env::remove_var("BRAIN_TILE_BUDGET_WORDS");
     let whole = run(&cfg, &init, &x, &y, &weights);
     // One 64-row chunk of logits fits; the embedding and head weight
     // (23 x 16 words) still take a single vocab tile.
-    std::env::set_var("BRAIN_TILE_BUDGET_WORDS", (64 * cfg.vocab).to_string());
-    let chunked = run(&cfg, &init, &x, &y, &weights);
-    std::env::remove_var("BRAIN_TILE_BUDGET_WORDS");
+    let chunked = model::block::with_tile_budget_words(64 * u64::from(cfg.vocab), || run(&cfg, &init, &x, &y, &weights));
 
     assert!((chunked.loss - whole.loss).abs() <= 1e-5 * whole.loss.abs(), "loss {} vs {}", chunked.loss, whole.loss);
     assert!(max_rel(&chunked.logprobs, &whole.logprobs) <= 1e-5, "per-position logprobs differ");

@@ -17,10 +17,6 @@ use std::collections::HashMap;
 
 use qwen3::{LoraCfg, Qwen, QwenConfig};
 
-/// The tile budget is a process-global environment variable: the tests that
-/// set it run one at a time.
-static TILE_BUDGET: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 fn gpu_disabled() -> bool {
     std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
 }
@@ -52,7 +48,6 @@ fn a_head_beyond_the_binding_budget_is_differentiated_in_tiles() {
     if gpu_disabled() {
         return;
     }
-    let _serial = TILE_BUDGET.lock().unwrap_or_else(|e| e.into_inner());
     for (tied, lora) in [(true, false), (false, false), (false, true)] {
         let cfg = config(tied, lora);
         let mut init = qwen3::init_weights(&cfg, 3);
@@ -62,13 +57,12 @@ fn a_head_beyond_the_binding_budget_is_differentiated_in_tiles() {
                 v.iter_mut().enumerate().for_each(|(i, x)| *x = ((i * 7 + n.len()) % 11) as f32 * 0.02 - 0.1);
             }
         }
-        std::env::remove_var("BRAIN_TILE_BUDGET_WORDS");
         let (want_loss, want, _) = grads(&cfg, &init);
         // A third of the head per binding: three vocab tiles.
-        std::env::set_var("BRAIN_TILE_BUDGET_WORDS", (cfg.vocab as u64 * cfg.d_model as u64 / 3).to_string());
-        assert!(model::block::vocab_tiles(cfg.vocab as u64, cfg.d_model as u64).len() > 1, "the budget forces tiling");
-        let (loss, got, tiled) = grads(&cfg, &init);
-        std::env::remove_var("BRAIN_TILE_BUDGET_WORDS");
+        let (loss, got, tiled) = model::block::with_tile_budget_words(cfg.vocab as u64 * cfg.d_model as u64 / 3, || {
+            assert!(model::block::vocab_tiles(cfg.vocab as u64, cfg.d_model as u64).len() > 1, "the budget forces tiling");
+            grads(&cfg, &init)
+        });
 
         let label = format!("tied={tied} lora={lora}");
         assert!((loss - want_loss).abs() < 1e-5 * want_loss.abs().max(1.0), "{label}: loss {loss} vs {want_loss}");
@@ -89,7 +83,6 @@ fn a_bf16_head_beyond_the_binding_budget_is_differentiated_in_tiles() {
     if gpu_disabled() {
         return;
     }
-    let _serial = TILE_BUDGET.lock().unwrap_or_else(|e| e.into_inner());
     for tied in [true, false] {
         let cfg = config(tied, true);
         let mut init = qwen3::init_weights(&cfg, 3);
@@ -105,16 +98,13 @@ fn a_bf16_head_beyond_the_binding_budget_is_differentiated_in_tiles() {
             let g: Vec<(String, Vec<f32>)> = model::Model::optimized_params(m).unwrap().into_iter().map(|n| (n.clone(), m.read_grad(&n))).collect();
             (loss, g)
         };
-        std::env::remove_var("BRAIN_TILE_BUDGET_WORDS");
         let whole = build();
         if whole.head_dtype() != qwen3::Dtype::BF16 {
             return; // no bf16 storage path on this device
         }
         let (want_loss, want) = run(&whole);
         // A third of the packed head per binding: several vocab tiles.
-        std::env::set_var("BRAIN_TILE_BUDGET_WORDS", (cfg.vocab as u64 * cfg.d_model as u64 / 2 / 3).to_string());
-        let tiled = build();
-        std::env::remove_var("BRAIN_TILE_BUDGET_WORDS");
+        let tiled = model::block::with_tile_budget_words(cfg.vocab as u64 * cfg.d_model as u64 / 2 / 3, build);
         let (loss, got) = run(&tiled);
         let label = format!("tied={tied}");
         assert!((loss - want_loss).abs() < 1e-5 * want_loss.abs().max(1.0), "{label}: loss {loss} vs {want_loss}");

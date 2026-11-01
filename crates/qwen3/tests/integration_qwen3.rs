@@ -35,9 +35,7 @@ fn dir() -> Option<PathBuf> {
 /// binding cap) uses the fast `matmul_reg3` (~40 ms). Turns a ~60 s step into ~1 s.
 fn setup() {
     set_default_backend(Backend::Wgpu);
-    if std::env::var("BRAIN_TILE_BUDGET_WORDS").is_err() {
-        std::env::set_var("BRAIN_TILE_BUDGET_WORDS", "200000000");
-    }
+    model::block::set_tile_budget_words(Some(200_000_000));
 }
 fn weights(d: &Path) -> PathBuf {
     d.join("brain/qwen3-0.6b.safetensors")

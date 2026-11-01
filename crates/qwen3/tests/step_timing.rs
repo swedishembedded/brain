@@ -18,9 +18,7 @@ fn step_timing() {
         return brain_testutil::skip("set QWEN3_DIR to a real Qwen3 checkpoint dir");
     };
     set_default_backend(Backend::Wgpu);
-    if std::env::var("BRAIN_TILE_BUDGET_WORDS").is_err() {
-        std::env::set_var("BRAIN_TILE_BUDGET_WORDS", "200000000");
-    }
+    model::block::set_tile_budget_words(Some(200_000_000));
     let w = format!("{d}/brain/qwen3-0.6b-ft512.safetensors");
     let c = checkpoint::load(&w);
     let mut cfg = QwenConfig::from_json(&c.header["config"]);

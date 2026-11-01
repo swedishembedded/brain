@@ -3381,7 +3381,7 @@ pub fn layernorm_dx_bwd(
 /// over vocab, used only when the device's real limit is not available.
 ///
 /// ~96 MiB, chosen for the smallest limit brain has met (128 MB on Mesa-GL).
-/// `BRAIN_TILE_BUDGET_WORDS` overrides everything (e.g. tiny, to force tiling in
+/// [`set_tile_budget_words`] overrides everything (e.g. tiny, to force tiling in
 /// tests).
 pub const TILE_BUDGET_WORDS: u64 = 24 * 1024 * 1024;
 
@@ -3391,11 +3391,22 @@ pub const TILE_BUDGET_WORDS: u64 = 24 * 1024 * 1024;
 const TILE_BUDGET_FRACTION: u64 = 2;
 
 pub fn tile_budget_words() -> u64 {
-    std::env::var("BRAIN_TILE_BUDGET_WORDS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .filter(|&w| w > 0)
-        .unwrap_or(TILE_BUDGET_WORDS)
+    forced_tile_budget_words().unwrap_or(TILE_BUDGET_WORDS)
+}
+
+static TILE_BUDGET_OVERRIDE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Force the tile budget of every device to `words`, process-wide (`None` restores the queried budgets): a test that
+/// must reach the tiled paths on a device that would never tile, or an operator holding bindings small. Set before models
+/// are built; [`with_tile_budget_words`] is the thread-scoped form a test suite running models side by side needs. Never
+/// read from the environment.
+pub fn set_tile_budget_words(words: Option<u64>) {
+    TILE_BUDGET_OVERRIDE.store(words.filter(|&w| w > 0).unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The budget a [`with_tile_budget_words`] scope or [`set_tile_budget_words`] forces, the scope first.
+fn forced_tile_budget_words() -> Option<u64> {
+    TILE_BUDGET_SCOPE.with(std::cell::Cell::get).or_else(|| Some(TILE_BUDGET_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed)).filter(|&w| w > 0))
 }
 
 /// The largest budget [`tile_budget_words_for`] can return on any device: a
@@ -3403,7 +3414,7 @@ pub fn tile_budget_words() -> u64 {
 /// a pre-flight estimate made before a device exists, where an upper bound is
 /// the safe side.
 pub fn tile_budget_words_upper_bound() -> u64 {
-    if let Some(w) = std::env::var("BRAIN_TILE_BUDGET_WORDS").ok().and_then(|s| s.parse::<u64>().ok()).filter(|&w| w > 0) {
+    if let Some(w) = forced_tile_budget_words() {
         return w;
     }
     (u32::MAX as u64 / TILE_BUDGET_FRACTION / 4).max(TILE_BUDGET_WORDS)
@@ -3416,7 +3427,7 @@ thread_local! {
 /// Run `build` with the tile budget of the devices it builds on forced to
 /// `words`, for this thread only: a model built inside it tiles its LM head
 /// and weights as a small device would. The process-wide
-/// `BRAIN_TILE_BUDGET_WORDS` does the same for every thread, which a test
+/// [`set_tile_budget_words`] does the same for every thread, which a test
 /// suite running models side by side cannot use. Scopes nest.
 pub fn with_tile_budget_words<R>(words: u64, build: impl FnOnce() -> R) -> R {
     struct Restore(Option<u64>);
@@ -3440,14 +3451,9 @@ pub fn with_tile_budget_words<R>(words: u64, build: impl FnOnce() -> R) -> R {
 /// ran at a fraction of one percent of the compute roof, and letting it
 /// collapse cut the whole pass by an order of magnitude.
 ///
-/// An explicit `BRAIN_TILE_BUDGET_WORDS` still wins, so tests can force tiling.
+/// A forced budget ([`with_tile_budget_words`], [`set_tile_budget_words`]) still wins, so tests can force tiling.
 pub fn tile_budget_words_for(gpu: &Gpu) -> u64 {
-    if let Some(w) = TILE_BUDGET_SCOPE.with(std::cell::Cell::get) {
-        return w;
-    }
-    if let Some(w) =
-        std::env::var("BRAIN_TILE_BUDGET_WORDS").ok().and_then(|s| s.parse::<u64>().ok()).filter(|&w| w > 0)
-    {
+    if let Some(w) = forced_tile_budget_words() {
         return w;
     }
     tile_budget_words_from(&gpu.memory_limits())
@@ -4145,7 +4151,7 @@ mod tests {
 
     /// A small budget must still force the tiled path, which is what
     /// `crates/t5/tests/smoke.rs` relies on to exercise the sliced-binding
-    /// `embed_tile` branch at toy size (it sets `BRAIN_TILE_BUDGET_WORDS=4096`,
+    /// `embed_tile` branch at toy size (it sets a forced tile budget of 4096 words,
     /// and `tile_budget_words_for` honours that ahead of any device limit).
     #[test]
     fn a_small_budget_still_forces_the_tiled_path() {
@@ -4166,11 +4172,11 @@ mod tests {
     /// `v0` works), which is the only case a real model ever presents - but
     /// nothing enforced it for a `d_model` that is NOT, and a caller whose
     /// budget forces multiple tiles at such a shape (a toy test config under
-    /// `BRAIN_TILE_BUDGET_WORDS`, or a real one racing a concurrently-running
+    /// a forced tile budget, or a real one racing a concurrently-running
     /// test that sets it) produced an unaligned offset and a
     /// `wgpu::Device::create_bind_group` validation panic - `qwen3::serve`'s
-    /// `kv_probe_cfg` (`d_model: 20`) under a leaked `BRAIN_TILE_BUDGET_WORDS
-    /// = 128` is the exact case that reproduced it (`v0 = 6` -> byte offset
+    /// `kv_probe_cfg` (`d_model: 20`) under a leaked forced tile budget of
+    /// 128 words is the exact case that reproduced it (`v0 = 6` -> byte offset
     /// 480, not a multiple of 256).
     #[test]
     fn every_multi_tile_boundary_clears_the_storage_binding_alignment_at_any_d_model() {
@@ -4193,7 +4199,7 @@ mod tests {
         }
 
         // The exact regression: `kv_probe_cfg`'s d_model=20 under a leaked
-        // BRAIN_TILE_BUDGET_WORDS=128 must not reproduce the 480B offset.
+        // a tile budget of 128 words must not reproduce the 480B offset.
         let tiles = tiles_with_budget(29, 20, 128);
         for &(v0, _) in &tiles {
             assert_eq!((v0 as u64 * 20 * 4) % 256, 0, "kv_probe_cfg regression: v0={v0} must be 256B-aligned at d_model=20");

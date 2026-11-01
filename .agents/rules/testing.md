@@ -400,8 +400,8 @@ in one binary).
 **Profiling / roofline internals:**
 `brain --roof-probe auto|off|on` (whether the roofline probe runs; `auto`
 skips the CPU backend),
-`BRAIN_TILE_BUDGET_WORDS` (override the tiled-matmul binding-size budget used
-for kernel selection).
+`model::block::set_tile_budget_words` / `with_tile_budget_words` (force the
+tiled-matmul binding-size budget, process-wide or for one thread).
 
 **Training-memory tradeoff:** `BRAIN_OFFLOAD_ADAM` (keep optimizer state in
 host RAM instead of device memory).

@@ -64,7 +64,7 @@ fn force_tiled_embedding() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     // SAFETY: the only `set_var` in this binary, serialised by `ONCE`, and every
     // test funnels through here before any code reads the environment.
-    ONCE.call_once(|| unsafe { std::env::set_var("BRAIN_TILE_BUDGET_WORDS", "4096") });
+    ONCE.call_once(|| model::block::set_tile_budget_words(Some(4096)));
 }
 
 #[test]

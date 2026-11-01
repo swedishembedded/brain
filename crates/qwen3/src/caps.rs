@@ -1685,20 +1685,16 @@ mod tests {
     }
 
     /// The tile budget picks how the LM head is tiled, which reorders its
-    /// sums, so a test that publishes it through the process environment
-    /// changes the bytes of every training running in the same process at that
-    /// moment: the seed test above trains twice and failed when one run fell
-    /// inside another test's window (`model::block::with_tile_budget_words` is
-    /// the thread-scoped form).
-    /// No test of this crate may write it.
+    /// sums, so a test that forces it process-wide changes the bytes of every
+    /// training running in the same process at that moment: the seed test above
+    /// trains twice and failed when one run fell inside another test's window
+    /// (`model::block::with_tile_budget_words` is the thread-scoped form).
+    /// No lib test of this crate may force it process-wide.
     #[test]
-    fn no_lib_test_publishes_the_tile_budget_through_the_process_environment() {
-        let var = "BRAIN_TILE_BUDGET_WORDS";
+    fn no_lib_test_forces_the_tile_budget_process_wide() {
+        let call = ["set_tile_budget_words", "("].concat();
         for (file, src) in [("model.rs", include_str!("model.rs")), ("serve.rs", include_str!("serve.rs"))] {
-            for call in ["set_var", "remove_var"] {
-                let write = format!("{call}(\"{var}\"");
-                assert!(!src.contains(&write), "{file} writes {var} to the process environment; scope it to the thread with model::block::with_tile_budget_words");
-            }
+            assert!(!src.contains(&call), "{file} forces the tile budget process-wide; scope it to the thread with model::block::with_tile_budget_words");
         }
     }
 

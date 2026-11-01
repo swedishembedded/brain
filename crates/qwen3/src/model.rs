@@ -479,7 +479,7 @@ const HEAD_TILE_ALIGN: u32 = 64;
 /// Rounding the stride DOWN keeps every tile inside the budget it was sized
 /// for. A single tile needs no alignment at all (its offset is 0), so a small
 /// vocab is returned untouched; a stride under one alignment unit (only
-/// reachable via an artificially tiny `BRAIN_TILE_BUDGET_WORDS`) is raised to
+/// reachable via an artificially tiny forced tile budget) is raised to
 /// one, since a correct binding beats a budget that no real device imposes.
 fn align_head_tiles(base: &[(u32, u32)], vocab: u32) -> Vec<(u32, u32)> {
     if base.len() <= 1 {

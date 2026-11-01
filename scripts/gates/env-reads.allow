@@ -769,7 +769,6 @@ crates/minimaxmusic3/tests/global_llm_int8_tier.rs	BRAIN_MINIMAXMUSIC3_LM
 crates/minimaxmusic3/tests/global_llm_parity.rs	BRAIN_MINIMAXMUSIC3_LM
 crates/minimaxmusic3/tests/vocoder_parity.rs	BRAIN_MINIMAXMUSIC3_VOCODER
 crates/minimaxmusic3/tests/vocoder_real_chunk.rs	BRAIN_MINIMAXMUSIC3_VOCODER
-crates/model/src/block.rs	BRAIN_TILE_BUDGET_WORDS
 crates/model/src/kv_tier.rs	<var>
 crates/model/tests/kv_tier_decode_bench.rs	<name>
 crates/model/tests/matmul_rows.rs	BRAIN_NO_FASTCONV
@@ -862,7 +861,6 @@ crates/qwen3/tests/batched_prefill.rs	MOE_SKIP_GPU_TESTS
 crates/qwen3/tests/bench_train_p40.rs	BRAIN_QWEN_NAIVE_MM
 crates/qwen3/tests/bench_train_p40.rs	MOE_SKIP_GPU_TESTS
 crates/qwen3/tests/bf16_dx_reg.rs	MOE_SKIP_GPU_TESTS
-crates/qwen3/tests/chunked_head.rs	BRAIN_TILE_BUDGET_WORDS
 crates/qwen3/tests/chunked_head.rs	MOE_SKIP_GPU_TESTS
 crates/qwen3/tests/deepseek_gguf_parity.rs	DEEPSEEK_CODER_GGUF_DIR
 crates/qwen3/tests/deepseek_parity.rs	MOE_SKIP_GPU_TESTS
@@ -883,11 +881,9 @@ crates/qwen3/tests/gguf_serving_real.rs	BRAIN_QWEN_TOKENIZER
 crates/qwen3/tests/gguf_vs_safetensors_real.rs	BRAIN_QWEN3_GGUF
 crates/qwen3/tests/gguf_vs_safetensors_real.rs	BRAIN_QWEN3_HF_DIR
 crates/qwen3/tests/gguf_vs_safetensors_real.rs	BRAIN_QWEN3_PARITY_LAYERS
-crates/qwen3/tests/head_tiled_backward.rs	BRAIN_TILE_BUDGET_WORDS
 crates/qwen3/tests/head_tiled_backward.rs	MOE_SKIP_GPU_TESTS
 crates/qwen3/tests/hf_shard_source_real.rs	BRAIN_QWEN3_HF_DIR
 crates/qwen3/tests/integration_qwen3.rs	<k>
-crates/qwen3/tests/integration_qwen3.rs	BRAIN_TILE_BUDGET_WORDS
 crates/qwen3/tests/integration_qwen3.rs	QWEN3_DIR
 crates/qwen3/tests/kv_offload_real.rs	BRAIN_QWEN3_CKPT
 crates/qwen3/tests/lora_adapter_file.rs	MOE_SKIP_GPU_TESTS
@@ -914,7 +910,6 @@ crates/qwen3/tests/shard_microbatch.rs	SHARD_TEST_GPUS
 crates/qwen3/tests/shard_parity.rs	MOE_SKIP_GPU_TESTS
 crates/qwen3/tests/shard_parity.rs	SHARD_TEST_GPUS
 crates/qwen3/tests/step_timing.rs	BLK
-crates/qwen3/tests/step_timing.rs	BRAIN_TILE_BUDGET_WORDS
 crates/qwen3/tests/step_timing.rs	LORA
 crates/qwen3/tests/step_timing.rs	QWEN3_DIR
 crates/qwen35/src/bin/import_profile.rs	BRAIN_QWEN35_DIR
@@ -1191,7 +1186,6 @@ crates/t5encoder/src/train.rs	MOE_SKIP_GPU_TESTS
 crates/t5encoder/tests/parity.rs	<var>
 crates/t5encoder/tests/parity.rs	BRAIN_T5ENCODER_XXL
 crates/t5encoder/tests/parity.rs	BRAIN_TESTDATA
-crates/t5encoder/tests/smoke.rs	BRAIN_TILE_BUDGET_WORDS
 crates/t5encoder/tests/tiny_ref.rs	BRAIN_TESTDATA
 crates/t5encoder/tests/umt5_parity.rs	<var>
 crates/t5encoder/tests/umt5_parity.rs	BRAIN_WAN_T5

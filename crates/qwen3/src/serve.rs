@@ -4977,8 +4977,7 @@ mod tests {
     #[test]
     fn head_matmul_over_binding_cap_does_not_panic() {
         // `head_matmul_tiled_matches_untiled_within_tolerance` holds this same
-        // lock while it mutates the process-global `BRAIN_TILE_BUDGET_WORDS`
-        // env var. Cargo runs `#[test]`s on parallel threads in one process,
+        // lock while it forces a tiny tile budget. Cargo runs `#[test]`s on parallel threads in one process,
         // and without this guard the two can race: if this test's dispatch
         // happens to run while the other has forced the tile budget down to
         // 128 words, `block::vocab_tiles_on` would slice THIS test's ~8.4M-row
@@ -5027,7 +5026,7 @@ mod tests {
     /// uses for exactly this reason.
     ///
     /// `n`/`k` stay tiny (well under the real binding cap) so the fast path
-    /// would ordinarily never tile at all; `BRAIN_TILE_BUDGET_WORDS` forces
+    /// would ordinarily never tile at all; a forced tile budget forces
     /// [`Self::mm_tiled_into`]'s own tile split (via `block::vocab_tiles_on`)
     /// down to a few rows per tile, so this exercises MULTIPLE dispatches and
     /// checks output columns at tile boundaries, not just the trivial
@@ -5064,7 +5063,7 @@ mod tests {
         let out_tiled = g.storage((m * n) as u64);
         let mut steps = Vec::new();
         eng.mm_tiled_into(&mut steps, &xb, &wb, &out_tiled, m, k, n);
-        assert!(steps.len() > 1, "BRAIN_TILE_BUDGET_WORDS=128 at k=8 must force more than one tile, got {}", steps.len());
+        assert!(steps.len() > 1, "a 128-word tile budget at k=8 must force more than one tile, got {}", steps.len());
         g.submit(&[], &steps);
         g.poll_wait();
         let tiled = g.read(&out_tiled, (m * n) as usize);
@@ -6805,15 +6804,14 @@ mod tests {
     /// valid oracle here (unlike the test above, whose whole point is that
     /// the untiled dispatch panics at real scale).
     ///
-    /// Deliberately does NOT force tiling via `BRAIN_TILE_BUDGET_WORDS`
+    /// Deliberately does NOT force tiling via a forced tile budget
     /// (`block::tile_budget_words_for`'s override, already exercised by
     /// `block::tests::a_small_budget_still_forces_the_tiled_path` and
-    /// `crates/t5/tests/smoke.rs`): that env var is process-global, and after
-    /// this fix `Engine::vocab_tiles` reads it on EVERY forward pass, not
-    /// just tiling-focused tests - `cargo test`'s parallel runner mutating it
-    /// here would race every OTHER concurrently-running test in this module
-    /// that builds an `Engine` and embeds a token, not just ones that opted
-    /// into the convention via `brain_testutil::env_lock`. Three tile
+    /// `crates/t5/tests/smoke.rs`): a process-wide budget is read by
+    /// `Engine::vocab_tiles` on EVERY forward pass, not just tiling-focused
+    /// tests - `cargo test`'s parallel runner changing it here would race every
+    /// OTHER concurrently-running test in this module that builds an `Engine`
+    /// and embeds a token. Three tile
     /// boundaries are chosen directly instead (this is a kernel/dispatch
     /// correctness check, not a re-test of the budget MATH - `block::
     /// vocab_tiles_on`'s own tests already cover that, including the exact
