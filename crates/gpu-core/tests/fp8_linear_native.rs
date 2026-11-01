@@ -202,6 +202,48 @@ fn fp8_batch_and_prefill_rate() {
     }
 }
 
+/// A Gated DeltaNet layer's `in_proj_qkv` (10240 rows) and `in_proj_z` (6144 rows) at the decode widths: the best candidate
+/// of each product against the best candidate of the ONE product over their 16384 rows (`#[ignore]`: a measurement).
+///
+/// ```text
+/// make test/one P=brain-gpu-core T=fp8_linear_native ARGS="--ignored --nocapture fp8_qkvz_one_product_against_two"
+/// ```
+#[test]
+#[ignore]
+fn fp8_qkvz_one_product_against_two() {
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda_hopper(&gpu) {
+        brain_testutil::skip_unavailable("the FP8 candidates are registered for a CUDA device with warpgroup tensor cores");
+        return;
+    }
+    let best = |m: u32, n: u32| {
+        gpu_core::native_time_fp8_shape(&gpu, [m, 5120 / 4, n])
+            .into_iter()
+            .filter_map(|(name, v)| match v {
+                NativeVerdict::Timed { us, gbs, .. } => Some((us, gbs, name)),
+                NativeVerdict::Rejected(_) => None,
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .expect("a candidate serves the shape")
+    };
+    for m in [1u32, 4, 8, 16, 24, 32, 48, 64, 96, 128] {
+        let (qkv, z, both) = (best(m, 10240), best(m, 6144), best(m, 16384));
+        println!(
+            "m={m:<4} qkv {:6.1} us {:5.0} GB/s {:28} | z {:6.1} us {:5.0} GB/s {:28} | sum {:6.1} us | one product {:6.1} us {:5.0} GB/s {}",
+            qkv.0,
+            qkv.1,
+            qkv.2,
+            z.0,
+            z.1,
+            z.2,
+            qkv.0 + z.0,
+            both.0,
+            both.1,
+            both.2
+        );
+    }
+}
+
 /// Tensor-core rate (TFLOPS) of the persistent TMA candidates at the production prefill shapes (`#[ignore]`: a measurement).
 ///
 /// ```text

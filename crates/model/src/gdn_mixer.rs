@@ -970,7 +970,8 @@ pub fn gdn_mixer_decode_pooled_fused_into(
 #[must_use]
 pub fn qkvz_in_place_offered(g: &Gpu, shape: &GdnMixerShape, pool: &GdnPoolRows) -> bool {
     let gdn = shape.gdn;
-    pool.bf16
+    pool.fuse
+        && pool.bf16
         && pool.wide
         && gdn.dk == 128
         && gdn.dv == 128

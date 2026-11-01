@@ -1262,6 +1262,10 @@ pub struct Qwen35 {
     /// narrower tier AND the device caps support it, in which case
     /// `Weight::upload` promotes it to that tier (see [`Self::ops_linear`]).
     weights: HashMap<String, Weight>,
+    /// Whether the Gated DeltaNet layers hold `in_proj_qkv` and `in_proj_z` as ONE FP8 weight ([`FUSED_QKVZ_LEAF`], rows
+    /// `qkv | z`) in `weights` instead of two: a decode step is one product over it, a prefill round two products over its
+    /// row windows ([`Self::linear`]).
+    fused_qkvz: bool,
     /// The per-layer linears of a resident low-precision full fine-tune, their master copies and state
     /// ([`TrainOpts::resident`]); `weights` then holds handles to its device weights and the parameter store
     /// holds none of them.
@@ -1374,6 +1378,9 @@ pub struct Qwen35 {
     slot_decode_tapes: Cell<bool>,
     /// Whether the pooled Gated-DeltaNet decode runs the occupancy-built candidate ([`Self::set_gdn_pool_wide`]).
     gdn_pool_wide: Cell<bool>,
+    /// Whether a decode or verify step takes the one product over a fused `in_proj_qkv | in_proj_z` weight
+    /// ([`Self::set_fused_qkvz_decode`]); off, it multiplies the weight's two windows as a prefill round does.
+    fused_qkvz_decode: Cell<bool>,
 }
 
 /// Which per-sequence GQA cache / GDN recurrent state one [`Qwen35::
@@ -1615,6 +1622,33 @@ pub(crate) fn is_quantizable_linear(name: &str) -> bool {
     ];
     // The anchor memory's projections share leaf names (`memory.q_proj.weight`) but are plain fp32 parameters.
     !name.contains(".memory.") && LEAVES.iter().any(|leaf| name.ends_with(leaf))
+}
+
+/// The leaf (under `blocks.{l}.linear_attn.`) of the one FP8 weight a decode-serving build holds in place of
+/// `in_proj_qkv` and `in_proj_z`: their rows, `qkv` first, whole 128-row scale blocks each.
+const FUSED_QKVZ_LEAF: &str = "in_proj_qkvz.weight";
+
+/// Most rows of a decode or verify step that take the one product over the fused `in_proj_qkv | in_proj_z` weight: the FP8
+/// linear's streaming classes, where the step reads every weight once for all its rows. Past them the two windows' products
+/// (the prefill's own) are the better pair.
+const FUSED_QKVZ_MAX_ROWS: u32 = 128;
+
+/// Whether layer `l` of an inference build at `tier` holds its `in_proj_qkv` and `in_proj_z` as one FP8 weight: both are FP8
+/// tier, the device runs FP8 products natively on row windows (a window must be a weight of its own for the prefill to keep
+/// its numerics), the streaming GDN kernels that read the fused product in place are offered, and the rows are whole scale
+/// blocks.
+fn fuses_qkvz(cfg: &Qwen35Config, tier: &TierPolicy, ops: &Ops, gpu: &Gpu, l: usize) -> bool {
+    let leaf = |s: &str| format!("blocks.{l}.linear_attn.{s}.weight");
+    let block = model::ops::FP8_BLOCK;
+    tier.want(&leaf("in_proj_qkv")) == Dtype::F8E4M3
+        && tier.want(&leaf("in_proj_z")) == Dtype::F8E4M3
+        && ops.fp8_windows_native()
+        && gpu.has_fused(gpu_core::Fused::GdnDecodePoolStreamBf16)
+        && gpu.has_fused(gpu_core::Fused::GdnVerifyPoolStreamBf16)
+        && cfg.linear_key_head_dim == 128
+        && cfg.linear_value_head_dim == 128
+        && cfg.linear_conv_kernel_dim == 4
+        && [cfg.linear_conv_dim(), cfg.linear_value_dim(), cfg.d_model].iter().all(|n| n % block == 0)
 }
 
 /// The precision of each tensor a resident full fine-tune of `shard` leaves in the parameter store (the norms and
@@ -2006,11 +2040,36 @@ impl Qwen35 {
             };
             weights.insert(name, w);
         };
+        let mut fused_qkvz = false;
+        let mut fused_parts: Vec<(String, Weight)> = Vec::new();
         for (l, ty) in cfg.layer_types().iter().enumerate() {
             if !shard.owns(l) {
                 continue;
             }
+            // A Gated DeltaNet layer of an FP8 inference build holds its `in_proj_qkv` and `in_proj_z` as one weight.
+            let fuse = !train && resident_plan.is_none() && *ty == LayerType::Linear && fuses_qkvz(&cfg, tier, &ops, &gpu, l);
+            let fused = fuse.then(|| {
+                let (qkv, z) = (format!("blocks.{l}.linear_attn.in_proj_qkv.weight"), format!("blocks.{l}.linear_attn.in_proj_z.weight"));
+                let rows = (cfg.linear_conv_dim() + cfg.linear_value_dim()) as usize;
+                model::ops::upload_fused_from_source(&ops, src, &[&qkv, &z], rows, cfg.d_model as usize, Dtype::F8E4M3, &staging)
+            });
+            let fused = match fused {
+                Some(Ok(w)) => {
+                    fused_parts.push((format!("blocks.{l}.linear_attn.{FUSED_QKVZ_LEAF}"), w));
+                    fused_qkvz = true;
+                    true
+                }
+                // The parts are stored in encodings that cannot join (a mixed checkpoint): two weights, as every other build holds them.
+                Some(Err(why)) => {
+                    eprintln!("qwen35: layer {l} keeps in_proj_qkv and in_proj_z as two weights: {why}");
+                    false
+                }
+                None => false,
+            };
             for (suffix, n, k) in cfg.layer_leaves(*ty) {
+                if fused && (suffix == "linear_attn.in_proj_qkv.weight" || suffix == "linear_attn.in_proj_z.weight") {
+                    continue;
+                }
                 let name = format!("blocks.{l}.{suffix}");
                 let want = tier.want(&name);
                 upload(name, n, k, want);
@@ -2053,6 +2112,7 @@ impl Qwen35 {
                 upload(name.to_string(), cfg.vocab, cfg.d_model, want);
             }
         }
+        weights.extend(fused_parts);
 
         // LoRA scratch (rank `r`; max projection output across all 12
         // targetable leaves - `crate::config::lora_targets` - mirrors
@@ -2172,6 +2232,7 @@ impl Qwen35 {
             mtp_acts: RefCell::new(None),
             ops,
             weights,
+            fused_qkvz,
             resident: resident_ft.map(RefCell::new),
             resident_norm: Cell::new(None),
             backward_pending: Cell::new(false),
@@ -2193,6 +2254,7 @@ impl Qwen35 {
             exact_rounds: Cell::new(true),
             exact_decode: Cell::new(None),
             decode_fusion: Cell::new(true),
+            fused_qkvz_decode: Cell::new(true),
             act_precision: Cell::new(gpu_core::ActPrecision::F32),
             unpacked_slots: std::cell::OnceCell::new(),
             slot_decode_tapes: Cell::new(false),
@@ -2299,6 +2361,20 @@ impl Qwen35 {
     /// A/B switch for that gate and for measuring the fusion, not a tuning knob.
     pub fn set_decode_fusion(&self, on: bool) {
         self.decode_fusion.set(on);
+    }
+
+    /// Whether this build holds the Gated DeltaNet layers' `in_proj_qkv` and `in_proj_z` as one FP8 weight each
+    /// ([`FUSED_QKVZ_LEAF`]).
+    #[must_use]
+    pub fn holds_fused_qkvz(&self) -> bool {
+        self.fused_qkvz
+    }
+
+    /// **Take the one product over a fused `in_proj_qkv | in_proj_z` weight in a decode or verify step (on by default), or the
+    /// two products over its windows** that a prefill round multiplies. Only matters to a build that holds the two as one
+    /// weight; the A/B switch for measuring what the single launch saves and for checking that it computes what the two do.
+    pub fn set_fused_qkvz_decode(&self, on: bool) {
+        self.fused_qkvz_decode.set(on);
     }
 
     /// **Choose the element type of the activation stream between the FP8 products** (see [`gpu_core::ActPrecision`]):
@@ -2478,16 +2554,59 @@ impl Qwen35 {
     /// per member, whether LoRA applies to it, exactly as [`Self::ops_linear`]
     /// reports it.
     fn ops_linear_group(&self, s: &mut Vec<Step>, act: &Act, group: &[(&str, &DeviceBuffer)]) -> Vec<bool> {
-        let members: Vec<(&Weight, &DeviceBuffer)> =
-            group.iter().map(|(name, out)| (self.weights.get(*name).unwrap_or_else(|| panic!("qwen35: no Ops weight for {name}")), *out)).collect();
-        if self.decode_fusion.get() {
-            self.ops.matmul_group(s, &members, act);
+        let members: Vec<(&Weight, (u32, u32), &DeviceBuffer)> = group
+            .iter()
+            .map(|(name, out)| {
+                let (w, rows) = self.linear(name).unwrap_or_else(|| panic!("qwen35: no Ops weight for {name}"));
+                (w, rows, *out)
+            })
+            .collect();
+        if members.iter().any(|(w, rows, _)| *rows != (0, w.n())) {
+            // A member that is a window of a fused weight is a product of its own rows ([`Self::linear`]).
+            for (w, rows, out) in &members {
+                self.ops.matmul_rows(s, w, *rows, act, out, 0);
+            }
+        } else if self.decode_fusion.get() {
+            let whole: Vec<(&Weight, &DeviceBuffer)> = members.iter().map(|(w, _, out)| (*w, *out)).collect();
+            self.ops.matmul_group(s, &whole, act);
         } else {
-            for (w, out) in &members {
+            for (w, _, out) in &members {
                 self.ops.matmul(s, w, act, out, 0);
             }
         }
-        members.iter().map(|(w, _)| reads_float_acts(w)).collect()
+        members.iter().map(|(w, ..)| reads_float_acts(w)).collect()
+    }
+
+    /// Per-layer linear `name` (a checkpoint tensor name, [`is_quantizable_linear`]) and the rows of the weight that hold
+    /// it: all of a weight of its own, or its window of the fused `in_proj_qkv | in_proj_z` weight of a Gated DeltaNet
+    /// layer ([`FUSED_QKVZ_LEAF`]). `None` for a name held in no `Ops` weight.
+    fn linear(&self, name: &str) -> Option<(&Weight, (u32, u32))> {
+        if let Some(w) = self.weights.get(name) {
+            return Some((w, (0, w.n())));
+        }
+        if !self.fused_qkvz {
+            return None;
+        }
+        let (layer, leaf) = name.rsplit_once("linear_attn.")?;
+        let rows = match leaf {
+            "in_proj_qkv.weight" => (0, self.cfg.linear_conv_dim()),
+            "in_proj_z.weight" => (self.cfg.linear_conv_dim(), self.cfg.linear_value_dim()),
+            _ => return None,
+        };
+        self.weights.get(&format!("{layer}linear_attn.{FUSED_QKVZ_LEAF}")).map(|w| (w, rows))
+    }
+
+    /// The fused `in_proj_qkv | in_proj_z` weight `fused_name` of a Gated DeltaNet layer when a decode or verify step of `n`
+    /// rows takes its one product: the layer holds the fused weight, the step is a decode batch or a verify round over a bf16
+    /// pool the streaming kernel reads in place ([`model::gdn_mixer::qkvz_in_place_offered`]), it is at most
+    /// [`FUSED_QKVZ_MAX_ROWS`] rows, and no adapter corrects the two projections (an adapter's correction adds into each
+    /// projection's own output). `None` runs the two products over the weight's windows, the prefill's.
+    fn qkvz_decode_weight(&self, fused_name: &str, call: &GdnCall, shape: &model::gdn_mixer::GdnMixerShape, n: u32) -> Option<&Weight> {
+        if !self.fused_qkvz || !self.fused_qkvz_decode.get() || n > FUSED_QKVZ_MAX_ROWS || self.adapter_rows.get() != 0 || self.cfg.lora.is_some() {
+            return None;
+        }
+        let (GdnCall::DecodePool(pool) | GdnCall::VerifyPool { pool, .. }) = call else { return None };
+        model::gdn_mixer::qkvz_in_place_offered(&self.gpu, shape, pool).then(|| self.weights.get(fused_name)).flatten()
     }
 
     /// Which arithmetic the bf16/NF4-weight GEMMs and the LoRA products of this
@@ -2505,9 +2624,9 @@ impl Qwen35 {
     pub fn precision_report(&self) -> checkpoint::packed::PrecisionReport {
         let mut report = checkpoint::packed::PrecisionReport::default();
         for (name, numel) in self.cfg.param_list() {
-            if let Some(w) = self.weights.get(&name).filter(|_| !self.ps.weight.contains_key(&name)) {
+            if let Some((w, (_, rows))) = self.linear(&name).filter(|_| !self.ps.weight.contains_key(&name)) {
                 let format = model::ops::encoding_for(w.dtype()).map_or_else(|| w.dtype().name().to_string(), |e| e.to_string());
-                report.push(&name, vec![w.n() as u64, w.k() as u64], format, w.resident_bytes());
+                report.push(&name, vec![rows as u64, w.k() as u64], format, Weight::bytes_for(w.dtype(), rows as usize, w.k() as usize));
             } else if self.ps.weight.contains_key(&name) {
                 report.push(&name, vec![numel as u64], checkpoint::packed::QuantEncoding::f32().to_string(), numel as u64 * 4);
             }
@@ -2522,7 +2641,7 @@ impl Qwen35 {
     /// uploaded as an `Ops` weight (norms, embeddings, the LM head, and any
     /// leaf `tier` left at F32 - see [`Self::w`] for those).
     pub fn linear_dtype(&self, name: &str) -> Option<Dtype> {
-        self.weights.get(name).map(Weight::dtype)
+        self.linear(name).map(|(w, _)| w.dtype())
     }
 
     /// The activation an [`Self::ops_linear`] dispatch reads, packed for int8
@@ -2873,45 +2992,6 @@ impl Qwen35 {
         // The four projections write every row of their outputs (the adapter then adds into them).
         // A round of prompt segments whose mixer runs in bf16 ([`Self::bf16_gdn_ok`]) takes `mixed_qkv` and `z` as the bf16 rows
         // the FP8 projections store; the other buffers stay f32 (the gates are tiny).
-        let mut bf16_gdn = matches!(&call, GdnCall::Segments(r) if r.gdn.is_some()) && self.bf16_gdn_ok(n, value_dim);
-        let rows_buffer = |width: u32, bf16: bool| g.storage_uninit(if bf16 { (n * width / 2) as u64 } else { (n * width) as u64 });
-        let mut mixed_qkv = rows_buffer(conv_dim, bf16_gdn);
-        let bproj = g.storage_uninit((n * nvh) as u64);
-        let aproj = g.storage_uninit((n * nvh) as u64);
-        let mut z = rows_buffer(value_dim, bf16_gdn);
-        let mut s1 = Vec::new();
-        let act1 = match pre {
-            Some(a) => a,
-            None => self.ops_act(&mut s1, xn1, n, d),
-        };
-        // in_proj_qkv/b/a/z all read `act1` (xn1 quantized once, shared): one
-        // group, which is one launch where the device allows it.
-        let (qkv_w, b_w, a_w, z_w) = (p("in_proj_qkv.weight"), p("in_proj_b.weight"), p("in_proj_a.weight"), p("in_proj_z.weight"));
-        // The two gate projections are dense bf16 whatever the big projections' tier is, and a group fuses only members of one tier:
-        // grouped apart, the pair is one launch of the multi-GEMV (six blocks each) beside the two big products.
-        if bf16_gdn {
-            // Both or neither; the steps pushed stay either way (they may hold the activation's quantisation, which it remembers).
-            let mut t = Vec::new();
-            let ok = [(&qkv_w, &mixed_qkv), (&z_w, &z)].iter().all(|(name, out)| self.ops.matmul_bf16_out(&mut t, &self.weights[name.as_str()], &act1, out));
-            s1.append(&mut t);
-            if !ok {
-                bf16_gdn = false;
-                mixed_qkv = rows_buffer(conv_dim, false);
-                z = rows_buffer(value_dim, false);
-            }
-        }
-        let f32s_big = if bf16_gdn { vec![false; 2] } else { self.ops_linear_group(&mut s1, &act1, &[(&qkv_w, &mixed_qkv), (&z_w, &z)]) };
-        let f32s_gates = self.ops_linear_group(&mut s1, &act1, &[(&b_w, &bproj), (&a_w, &aproj)]);
-        // (No adapter corrects a bf16 round: [`Self::keeps_fp32_product`] is its precondition.)
-        self.adapt(f32s_big[0], &mut s1, "in_proj_qkv", xn1, &qkv_w, &mixed_qkv, n, d, conv_dim);
-        self.adapt(f32s_gates[0], &mut s1, "in_proj_b", xn1, &b_w, &bproj, n, d, nvh);
-        self.adapt(f32s_gates[1], &mut s1, "in_proj_a", xn1, &a_w, &aproj, n, d, nvh);
-        self.adapt(f32s_big[1], &mut s1, "in_proj_z", xn1, &z_w, &z, n, d, value_dim);
-        self.bank_fwd(&mut s1, xn1, &[(qkv_w.as_str(), &mixed_qkv), (z_w.as_str(), &z), (b_w.as_str(), &bproj), (a_w.as_str(), &aproj)], n);
-        g.submit(&[], &s1);
-
-        // conv+split+l2norm+decay-gate+recurrence+gated-norm - LoRA/dtype-
-        // agnostic, shared with `crates/qwen35moe` (`model::gdn_mixer`).
         // A chunked round is ONE sequence's `n` rows, with its own chunk size
         // (`n` is a round's length, unrelated to this instance's construction
         // -time `t`); a batched decode step is `n` DIFFERENT sequences' one
@@ -2923,6 +3003,59 @@ impl Qwen35 {
             GdnCall::Rows(_) => GdnShape { b: 1, h: nvh, t: n, dk: khd, dv: vhd, chunk: 1 },
         };
         let shape = model::gdn_mixer::GdnMixerShape { gdn: gdn_shape, nkh: c.linear_num_key_heads, conv_kernel: c.linear_conv_kernel_dim, rms_eps: c.rms_eps };
+        // A decode or verify step of a layer holding `in_proj_qkv | in_proj_z` as one weight multiplies it in ONE product, and the
+        // mixer reads the qkv and z columns of the product's rows in place.
+        let fused_decode = self.qkvz_decode_weight(&p(FUSED_QKVZ_LEAF), &call, &shape, n);
+        let mut bf16_gdn = fused_decode.is_none() && matches!(&call, GdnCall::Segments(r) if r.gdn.is_some()) && self.bf16_gdn_ok(n, value_dim);
+        let rows_buffer = |width: u32, bf16: bool| g.storage_uninit(if bf16 { (n * width / 2) as u64 } else { (n * width) as u64 });
+        let (mut mixed_qkv, mut z) = match fused_decode {
+            Some(_) => (g.storage_uninit(1), g.storage_uninit(1)),
+            None => (rows_buffer(conv_dim, bf16_gdn), rows_buffer(value_dim, bf16_gdn)),
+        };
+        let bproj = g.storage_uninit((n * nvh) as u64);
+        let aproj = g.storage_uninit((n * nvh) as u64);
+        let mut s1 = Vec::new();
+        let act1 = match pre {
+            Some(a) => a,
+            None => self.ops_act(&mut s1, xn1, n, d),
+        };
+        // in_proj_qkv/b/a/z all read `act1` (xn1 quantized once, shared): one
+        // group, which is one launch where the device allows it.
+        let (qkv_w, b_w, a_w, z_w) = (p("in_proj_qkv.weight"), p("in_proj_b.weight"), p("in_proj_a.weight"), p("in_proj_z.weight"));
+        let qkvz = fused_decode.map(|w| {
+            let product = g.storage_uninit(u64::from(n) * u64::from(w.n()));
+            self.ops.matmul_rows(&mut s1, w, (0, w.n()), &act1, &product, 0);
+            product
+        });
+        // The two gate projections are dense bf16 whatever the big projections' tier is, and a group fuses only members of one tier:
+        // grouped apart, the pair is one launch of the multi-GEMV (six blocks each) beside the two big products.
+        if bf16_gdn {
+            // Both or neither; the steps pushed stay either way (they may hold the activation's quantisation, which it remembers).
+            let mut t = Vec::new();
+            let ok = [(&qkv_w, &mixed_qkv), (&z_w, &z)].iter().all(|(name, out)| {
+                let (w, rows) = self.linear(name).unwrap_or_else(|| panic!("qwen35: no Ops weight for {name}"));
+                self.ops.matmul_rows_bf16_out(&mut t, w, rows, &act1, out)
+            });
+            s1.append(&mut t);
+            if !ok {
+                bf16_gdn = false;
+                mixed_qkv = rows_buffer(conv_dim, false);
+                z = rows_buffer(value_dim, false);
+            }
+        }
+        // (No adapter corrects the fused product either: [`Self::qkvz_decode_weight`] needs none.)
+        let f32s_big = if bf16_gdn || qkvz.is_some() { vec![false; 2] } else { self.ops_linear_group(&mut s1, &act1, &[(&qkv_w, &mixed_qkv), (&z_w, &z)]) };
+        let f32s_gates = self.ops_linear_group(&mut s1, &act1, &[(&b_w, &bproj), (&a_w, &aproj)]);
+        // (No adapter corrects a bf16 round: [`Self::keeps_fp32_product`] is its precondition.)
+        self.adapt(f32s_big[0], &mut s1, "in_proj_qkv", xn1, &qkv_w, &mixed_qkv, n, d, conv_dim);
+        self.adapt(f32s_gates[0], &mut s1, "in_proj_b", xn1, &b_w, &bproj, n, d, nvh);
+        self.adapt(f32s_gates[1], &mut s1, "in_proj_a", xn1, &a_w, &aproj, n, d, nvh);
+        self.adapt(f32s_big[1], &mut s1, "in_proj_z", xn1, &z_w, &z, n, d, value_dim);
+        self.bank_fwd(&mut s1, xn1, &[(qkv_w.as_str(), &mixed_qkv), (z_w.as_str(), &z), (b_w.as_str(), &bproj), (a_w.as_str(), &aproj)], n);
+        g.submit(&[], &s1);
+
+        // conv+split+l2norm+decay-gate+recurrence+gated-norm - LoRA/dtype-
+        // agnostic, shared with `crates/qwen35moe` (`model::gdn_mixer`).
         let weights = model::gdn_mixer::GdnMixerWeights {
             conv1d_weight: self.w(&p("conv1d.weight")),
             a_log: self.w(&p("A_log")),
@@ -2947,23 +3080,29 @@ impl Qwen35 {
                 (gated, None)
             }
             GdnCall::DecodePool(pool) => {
-                let gated = model::gdn_mixer::gdn_mixer_decode_state_fwd(
-                    g,
-                    &gdn_mixer_ids(),
-                    &gdn_mixer_decode_ids(),
-                    &shape,
-                    &weights,
-                    &mixed_qkv,
-                    &bproj,
-                    &aproj,
-                    &z,
-                    &model::gdn_mixer::GdnDecodeState::Pool(pool),
-                );
+                let gated = match &qkvz {
+                    Some(qkvz) => model::gdn_mixer::gdn_mixer_decode_pooled_qkvz(g, &shape, &weights, qkvz, &bproj, &aproj, &pool).expect("qkvz_in_place_offered said the streaming decode reads the fused product"),
+                    None => model::gdn_mixer::gdn_mixer_decode_state_fwd(
+                        g,
+                        &gdn_mixer_ids(),
+                        &gdn_mixer_decode_ids(),
+                        &shape,
+                        &weights,
+                        &mixed_qkv,
+                        &bproj,
+                        &aproj,
+                        &z,
+                        &model::gdn_mixer::GdnDecodeState::Pool(pool),
+                    ),
+                };
                 (gated, None)
             }
             GdnCall::VerifyPool { pool, layout, snaps, n_tokens } => {
-                let gated = model::gdn_verify::gdn_mixer_verify_pooled_fused(g, &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, &pool, &layout, n_tokens, snaps)
-                    .expect("the verify kernel was offered at engine construction (Qwen35GgufInstance::speculation_supported)");
+                let gated = match &qkvz {
+                    Some(qkvz) => model::gdn_verify::gdn_mixer_verify_pooled_qkvz(g, &shape, &weights, qkvz, &bproj, &aproj, &pool, &layout, n_tokens, snaps),
+                    None => model::gdn_verify::gdn_mixer_verify_pooled_fused(g, &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, &pool, &layout, n_tokens, snaps),
+                }
+                .expect("the verify kernel was offered at engine construction (Qwen35GgufInstance::speculation_supported)");
                 (gated, None)
             }
             GdnCall::Rows(stream) => {
@@ -6996,7 +7135,7 @@ impl Qwen35 {
     /// The resident tier of linear `name`, `None` for a tensor held outside
     /// the [`Weight`] table (embeddings and norms live in the parameter store).
     pub fn weight_tier(&self, name: &str) -> Option<Dtype> {
-        self.weights.get(name).map(Weight::dtype)
+        self.linear(name).map(|(w, _)| w.dtype())
     }
 
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
@@ -7005,8 +7144,12 @@ impl Qwen35 {
             self.gpu.flush();
             return self.resident.as_ref().expect("indexed").borrow_mut().read_master(&self.ops, i).unwrap_or_else(|e| panic!("qwen35 resident full fine-tune: reading {name}: {e}"));
         }
-        match self.weights.get(name).filter(|_| !self.ps.weight.contains_key(name)) {
-            Some(w) => self.ops.read_host(w),
+        match self.linear(name).filter(|_| !self.ps.weight.contains_key(name)) {
+            Some((w, (first, count))) => {
+                let all = self.ops.read_host(w);
+                let k = w.k() as usize;
+                all[first as usize * k..(first + count) as usize * k].to_vec()
+            }
             None => self.ps.read_weight(&self.gpu, name),
         }
     }
@@ -7017,8 +7160,9 @@ impl Qwen35 {
             self.resident.as_ref().expect("indexed").borrow_mut().write_master(&self.ops, i, data).unwrap_or_else(|e| panic!("qwen35 resident full fine-tune: writing {name}: {e}"));
             return;
         }
-        match self.weights.get(name).filter(|_| !self.ps.weight.contains_key(name)) {
-            Some(w) => write_weight_host(&self.gpu, w, data),
+        match self.linear(name).filter(|_| !self.ps.weight.contains_key(name)) {
+            Some((w, rows)) if rows != (0, w.n()) => panic!("qwen35: {name} is a window of a fused weight and cannot be rewritten alone: rewriting it would requantize its neighbour's scale blocks"),
+            Some((w, _)) => write_weight_host(&self.gpu, w, data),
             None => self.gpu.write(self.w(name), bytemuck::cast_slice(data)),
         }
     }

@@ -1782,6 +1782,13 @@ impl Qwen35GgufInstance {
         }
     }
 
+    /// Every stage's [`Qwen35::set_fused_qkvz_decode`].
+    pub fn set_fused_qkvz_decode(&self, on: bool) {
+        for s in &self.shards {
+            s.qwen35.set_fused_qkvz_decode(on);
+        }
+    }
+
     /// Every stage's [`Qwen35::set_chunk_arena_drain`].
     pub fn set_chunk_arena_drain(&self, drain: Option<bool>) {
         for s in &self.shards {
