@@ -627,3 +627,11 @@ Mixed-iteration idle (knowledge 392, 2026-10-30): a prompt start no longer waits
   multiple of 32 up to 8192). nsys, 8K x 16 decode-only: the gate pair 671 -> 272 us a step (vLLM 317); step period median 17588 -> 17085 us. Gates: the f64 oracle of the bf16 operands over 9 shapes (1e-5 of the
   terms' norm), the same bits on a second launch, `ops_matmul_group` (one launch, within 1e-4 of the library products), an ignored 3,000-launch stress. Open: the 49 `cast_f32_bf16` launches a step (1.7 us each) sit between the recurrence and
   the output projection; 64 rows (the 8K x 64 cell) still runs the library pair.
+- 2026-11-01 (decode glue, result and the attention gap, knowledge 420, 422, 423): 8K x 16 decode-only steps, bf16 KV / f32 state / no speculation, nsys, base -> now: step period (topk to topk) median 17934 -> 16951 us (-5.5 %),
+  median span 17784 -> 16891, kernel busy 17120 -> 16539; the fused E4M3 norm 612 -> 575 us (exclusive time moves to the product it overlaps: not a cost), the gate pair 671 (+ the library's reductions) -> 261, nothing
+  else moved (swap-TMA product 5197 -> 5164, decode attention 3032 -> 3029, f32 `add_rms_quant` 354 -> 354). Served gpu1 (`matrix.sh`, SPEC=off, interleaved, four rounds on 8K x 16, two on the rest), median ITL ms
+  base -> now: 8K x 1 11.12 / 11.14 -> 11.15 / 11.13, 8K x 16 17.45 / 17.33 / 17.31 / 17.46 -> 16.92 / 16.95 / 17.37 / 16.89 (-2.1 % on the mean), 8K x 64 33.64 / 33.49 -> 34.40 / 33.54, 32K x 16 26.91 / 27.00 ->
+  26.56 / 26.30; fp8 KV / bf16 state 8K x 16 16.33 / 16.28 -> 15.77 / 15.87 (-3.4 %). Output tok/s is flat inside its +-2 % run-to-run spread (the cell is mostly prefill and mixed rounds: median ITL 17.4 ms against
+  a mean TPOT of 39 ms). The decode attention is not closed: 189 us a layer against vLLM's 155, and what is missing is the idle tail of its single wave (SM active cycles avg 280 k, max 311 k, min 182 k of 316 k;
+  DRAM 72 %); a tail of each block's range as an atomically claimed unit, or a flat cut over the whole batch's tiles, is the design (knowledge 423). Open: the f32 `add_rms_quant` mixer fronts (65 launches, 5.4 us),
+  the 49 `cast_f32_bf16`, 64-row gate pairs, the attention tail.
