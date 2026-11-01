@@ -2408,6 +2408,7 @@ mod native_facade {
             if !which.serves(params) {
                 return None;
             }
+            let which = which.form_for(params, self.caps().arch.compute_capability);
             let id = self.fused_id(which)?;
             self.step_native(id, bufs, params, which.blocks_on(params, self.caps().arch.compute_capability))
         }
@@ -2420,6 +2421,7 @@ mod native_facade {
             if !which.serves(params) {
                 return None;
             }
+            let which = which.form_for(params, self.caps().arch.compute_capability);
             let id = self.fused_id(which)?;
             self.step_native_sliced(id, bufs, offsets, params, which.blocks_on(params, self.caps().arch.compute_capability))
         }

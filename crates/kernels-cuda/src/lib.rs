@@ -3225,6 +3225,29 @@ pub const ALL: &[CudaKernel] = &[
         src: concat!(include_str!("../cu/e4m3_quant_common.cuh"), include_str!("../cu/add_rms_quant_e4m3.cu")),
     },
     CudaKernel {
+        name: "add_rms_quant_e4m3_cluster",
+        // `add_rms_quant_e4m3` with each row split over a cluster of five blocks, one 1024-element span each (the cluster size is the
+        // launch's, see `gpu_core::native_upgrade`).
+        op: Op::RmsNorm,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: CLUSTER_MIN_CC,
+        entry: "brain_add_rms_quant_e4m3_cluster",
+        what: "add_rms_quant_e4m3 with each row split over a cluster of five blocks on five SMs, one 1024-element span each, the sum of squares exchanged through the cluster's shared memory in the one-block form's order; bit-identical to the one-block form",
+        reported: "native:add_rms_quant_e4m3_cluster",
+        block_dim: 256,
+        tile: (1, 1),
+        // The squares of the block's span and the eight warps' partial sums of squares.
+        shared_bytes: 16 * 256 + 4 * 8,
+        programmatic: true,
+        src: concat!(
+            "#define BRAIN_ARE_CLUSTER 5\n#define brain_add_rms_quant_e4m3 brain_add_rms_quant_e4m3_cluster\n",
+            include_str!("../cu/e4m3_quant_common.cuh"),
+            include_str!("../cu/add_rms_quant_e4m3.cu")
+        ),
+    },
+    CudaKernel {
         name: "quant_epilogue",
         // A fused kernel asked for by name, like `add_rms_quant`: the operator
         // and tier say what it produces (group scales and a packed int8

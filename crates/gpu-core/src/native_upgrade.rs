@@ -2358,6 +2358,13 @@ pub enum Fused {
     /// `[rows, d/128]` floats) instead of the int8 packing. Flags bit 0: add `b` first; bit 4: `xn` is not stored. `d` a multiple of
     /// 128.
     AddRmsQuantE4m3,
+    /// The one-block form of [`Fused::AddRmsQuantE4m3`] (a row in one block of 256 threads): what the op runs at the many rows of a
+    /// prefill or a mixed round, and on a device without block clusters. Same params and bindings; it exists for a gate that holds
+    /// the two forms to the same bits and for a measurement of each.
+    AddRmsQuantE4m3Block,
+    /// The cluster form of [`Fused::AddRmsQuantE4m3`] (a row over a cluster of five blocks, Hopper): what the op runs at the few rows of
+    /// a decode step ([`ADD_RMS_QUANT_E4M3_CLUSTER_MAX_ROWS`]). Same params and bindings.
+    AddRmsQuantE4m3Cluster,
     /// `quant_epilogue`: an elementwise producer (`mode` 0 plain, 1 `silu(a) *
     /// b`, 2 `a * sigmoid(b)`) + per-row int8 scale + pack. Params `[k, rows,
     /// mode, 0]`; bindings `a, b` read, `y, xq, sx` written.
@@ -2586,6 +2593,13 @@ const CONV_DW_REDUCE_BLOCK: u32 = 256;
 
 /// Blocks of one `quant_epilogue` row (`BRAIN_QE_CLUSTER` in its source).
 const QUANT_EPILOGUE_CLUSTER: u32 = 4;
+
+/// Blocks of one `add_rms_quant_e4m3` row (`BRAIN_ARE_CLUSTER` in its source): one 1024-element span of a row of at most 5120 each.
+const ADD_RMS_QUANT_E4M3_CLUSTER: u32 = 5;
+
+/// The most rows [`Fused::AddRmsQuantE4m3`] runs as clusters: a decode step's. Past it a launch has more clusters than the card
+/// holds at once and the five blocks a row cost more than the one block saves.
+pub const ADD_RMS_QUANT_E4M3_CLUSTER_MAX_ROWS: u32 = 32;
 
 /// `add_rms_quant`'s bindings: params, `a`, `b`, `w`, `sum`, `xn`, `xq`, `sx`.
 const ADD_RMS_QUANT_BINDINGS: &[BindKind] = &[
@@ -2822,7 +2836,8 @@ impl Fused {
     pub fn registry_name(self) -> &'static str {
         match self {
             Fused::AddRmsQuant => "add_rms_quant",
-            Fused::AddRmsQuantE4m3 => "add_rms_quant_e4m3",
+            Fused::AddRmsQuantE4m3 | Fused::AddRmsQuantE4m3Block => "add_rms_quant_e4m3",
+            Fused::AddRmsQuantE4m3Cluster => "add_rms_quant_e4m3_cluster",
             Fused::QuantEpilogue => "quant_epilogue",
             Fused::GdnDecode => "gdn_decode",
             Fused::GdnDecodePool => "gdn_decode_pool",
@@ -2865,7 +2880,7 @@ impl Fused {
 
     fn bindings(self) -> &'static [BindKind] {
         match self {
-            Fused::AddRmsQuant | Fused::AddRmsQuantE4m3 => ADD_RMS_QUANT_BINDINGS,
+            Fused::AddRmsQuant | Fused::AddRmsQuantE4m3 | Fused::AddRmsQuantE4m3Block | Fused::AddRmsQuantE4m3Cluster => ADD_RMS_QUANT_BINDINGS,
             Fused::QuantEpilogue => QUANT_EPILOGUE_BINDINGS,
             Fused::GdnDecode => GDN_DECODE_BINDINGS,
             Fused::GdnDecodePool | Fused::GdnDecodePoolBf16 | Fused::GdnDecodePoolWide | Fused::GdnDecodePoolWideBf16 | Fused::GdnDecodePoolStreamBf16 => GDN_DECODE_POOL_BINDINGS,
@@ -2897,7 +2912,7 @@ impl Fused {
             // registers: up to 80 of them (5120 wide), and a whole number of
             // 32-element scale groups.
             Fused::AddRmsQuant => matches!(params, [d, rows, _, _] if *rows >= 1 && *d >= 32 && d % 32 == 0 && *d <= 64 * 80),
-            Fused::AddRmsQuantE4m3 => matches!(params, [d, rows, _, _] if *rows >= 1 && *d >= 128 && d % 128 == 0 && *d <= 64 * 80),
+            Fused::AddRmsQuantE4m3 | Fused::AddRmsQuantE4m3Block | Fused::AddRmsQuantE4m3Cluster => matches!(params, [d, rows, _, _] if *rows >= 1 && *d >= 128 && d % 128 == 0 && *d <= 64 * 80),
             // 1024 threads per row keep `k / 1024` elements each in registers:
             // up to 18 of them, in whole 32-element scale groups.
             // The inputs are rows of `stride` elements and `b` starts `b_offset` into each: both fit in the stride.
@@ -2967,7 +2982,7 @@ impl Fused {
     /// Blocks a dispatch with these `params` launches.
     pub(crate) fn blocks(self, params: &[u32]) -> u32 {
         match self {
-            Fused::AddRmsQuant | Fused::AddRmsQuantE4m3 | Fused::QuantEpilogue => params[1],
+            Fused::AddRmsQuant | Fused::AddRmsQuantE4m3 | Fused::AddRmsQuantE4m3Block | Fused::AddRmsQuantE4m3Cluster | Fused::QuantEpilogue => params[1],
             Fused::GdnDecode => params[0],
             Fused::GdnDecodePool | Fused::GdnDecodePoolBf16 | Fused::GdnDecodePoolWide | Fused::GdnDecodePoolWideBf16 | Fused::GdnDecodePoolStreamBf16 | Fused::GdnVerifyPool | Fused::GdnVerifyPoolStreamBf16 => params[0] * params[6],
             // A block a (sequence, value head), and 256 channels a block.
@@ -3001,22 +3016,41 @@ impl Fused {
         }
     }
 
-    /// Whether `which` runs as clusters of [`QUANT_EPILOGUE_CLUSTER`] blocks per row on a device of capability `cc`:
-    /// `quant_epilogue` from Hopper, where a block cluster exists (`quant_epilogue_cluster`).
-    fn clustered(self, cc: kernels_cuda::Cc) -> bool {
-        self == Fused::QuantEpilogue && cc >= kernels_cuda::CLUSTER_MIN_CC
+    /// The blocks of a cluster that serve one row of this kernel on a device of capability `cc`, where a block cluster exists
+    /// (Hopper). `None`: one block a row.
+    fn cluster_blocks(self, cc: kernels_cuda::Cc) -> Option<u32> {
+        if cc < kernels_cuda::CLUSTER_MIN_CC {
+            return None;
+        }
+        match self {
+            Fused::QuantEpilogue => Some(QUANT_EPILOGUE_CLUSTER),
+            Fused::AddRmsQuantE4m3Cluster => Some(ADD_RMS_QUANT_E4M3_CLUSTER),
+            _ => None,
+        }
     }
 
     /// The registry entry this kernel resolves to on a device of capability `cc`.
     fn registry_name_on(self, cc: kernels_cuda::Cc) -> &'static str {
-        if self.clustered(cc) { "quant_epilogue_cluster" } else { self.registry_name() }
+        if self.cluster_blocks(cc).is_some() && self == Fused::QuantEpilogue { "quant_epilogue_cluster" } else { self.registry_name() }
+    }
+
+    /// The form of this op that serves a launch with `params` on a device of capability `cc`: `AddRmsQuantE4m3` is the cluster
+    /// form at a decode step's few rows and the one-block form at a prefill's many.
+    pub(crate) fn form_for(self, params: &[u32], cc: Option<kernels_cuda::Cc>) -> Fused {
+        let rows = params.get(1).copied().unwrap_or(u32::MAX);
+        let clusters = cc.is_some_and(|cc| cc >= kernels_cuda::CLUSTER_MIN_CC);
+        match self {
+            Fused::AddRmsQuantE4m3 if clusters && rows <= ADD_RMS_QUANT_E4M3_CLUSTER_MAX_ROWS => Fused::AddRmsQuantE4m3Cluster,
+            Fused::AddRmsQuantE4m3 => Fused::AddRmsQuantE4m3Block,
+            _ => self,
+        }
     }
 
     /// How it is launched on a device of capability `cc`. A device that cannot launch clusters declines the
     /// registration, and the caller keeps the WGSL chain.
     fn launch_on(self, cc: kernels_cuda::Cc) -> CudaLaunch {
         match self {
-            _ if self.clustered(cc) => CudaLaunch { cluster: Some([QUANT_EPILOGUE_CLUSTER, 1, 1]), ..CudaLaunch::NONE },
+            _ if self.cluster_blocks(cc).is_some() => CudaLaunch { cluster: self.cluster_blocks(cc).map(|n| [n, 1, 1]), ..CudaLaunch::NONE },
             // The recurrence stages a head's whole 128 x 128 state in dynamic shared memory (f32, or bf16 at half the bytes).
             Fused::GdnRecurPool | Fused::GdnRecurVerifyPool | Fused::GdnRecurPoolStream | Fused::GdnRecurVerifyPoolStream => CudaLaunch { dynamic_shared_bytes: kernels_cuda::GDN_RECUR_TILE_F32_BYTES, shared_opt_in: true, ..CudaLaunch::NONE },
             Fused::GdnRecurPoolBf16 => CudaLaunch { dynamic_shared_bytes: kernels_cuda::GDN_RECUR_TILE_F32_BYTES / 2, shared_opt_in: true, ..CudaLaunch::NONE },
@@ -3029,7 +3063,7 @@ impl Fused {
     /// Blocks a dispatch with these `params` launches on a device of capability `cc` ([`Self::blocks`], times the
     /// cluster where the kernel runs as one).
     pub(crate) fn blocks_on(self, params: &[u32], cc: Option<kernels_cuda::Cc>) -> u32 {
-        let per = if cc.is_some_and(|cc| self.clustered(cc)) { QUANT_EPILOGUE_CLUSTER } else { 1 };
+        let per = cc.and_then(|cc| self.cluster_blocks(cc)).unwrap_or(1);
         self.blocks(params) * per
     }
 

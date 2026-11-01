@@ -616,3 +616,9 @@ Mixed-iteration idle (knowledge 392, 2026-10-30): a prompt start no longer waits
   39.0 | 53596 | 148.6 (the FP8 release at the same settings: brain 71.8 | 568, 305.1 | 1198, 82.6 | 4212; vLLM 76.4, 337.2, 93.2). Open: a product of 256 or more rows still decodes the tile and calls the library (prefill
   8192 rows 2284 us against FP8's 1213; 8K x 1 TTFT 909 ms against vLLM's 783), the 64-row build is no faster than the tile decode and the head at 64 rows is 2.5 ms, 8K x 16 TPOT 69 ms against vLLM's 43;
   `qops_gemv_small_m` fails on the base at its FP8 check (the half-precision `matmul_fp8_gemv_f16_*` candidate against a 1e-5 tolerance).
+
+- 2026-11-01 (decode glue, step 1: the fused norm as a cluster of five small blocks, knowledge 420): `add_rms_quant_e4m3_cluster` (one 1024-element span a 256-thread block, 4 KiB of shared memory, the squares
+  exchanged through the cluster in the one-block form's order: bit for bit, a host model of the order is the gate) serves `Fused::AddRmsQuantE4m3` for <= 32 rows on Hopper; the one-block form serves the rest.
+  A 1024-thread block a row was 12 % faster isolated and made the step 1.9 % slower: its 20 KiB of shared memory kept the PDL-launched FP8 product (210 KiB of its ring) from being resident beside it. nsys exclusive
+  time moved from the norm to the product; the step period (topk to topk) is the metric. 8K x 16 decode-only step period median, nsys: 17934 -> 17588 us (-1.9 %); the fused norm 16 rows 6.1 -> 5.5 us (events).
+  Open: the f32 `add_rms_quant` (65 launches a step, 5.4 us each exclusive) is bound by its 80 + 64 dependent adds (bit-identity with the WGSL chain) and a cluster form is slower (knowledge 420).

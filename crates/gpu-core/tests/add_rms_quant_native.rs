@@ -144,7 +144,7 @@ fn byte_identical_to_the_wgsl_chain_over_shapes() {
         brain_testutil::skip_unavailable("native fused kernels need a CUDA device");
         return;
     }
-    for (rows, d) in [(1u32, 5120u32), (1, 32), (1, 96), (1, 160), (2, 992), (3, 4096), (8, 5120), (1, 4224), (2, 2048), (1, 17 * 64)] {
+    for (rows, d) in [(1u32, 5120u32), (1, 32), (1, 96), (1, 160), (2, 992), (3, 4096), (8, 5120), (1, 4224), (2, 2048), (1, 17 * 64), (16, 5120)] {
         let n = (rows * d) as usize;
         let seed = u64::from(rows) * 131 + u64::from(d);
         let a = values(n, seed, 1.0);
@@ -291,6 +291,109 @@ fn the_e4m3_variant_writes_what_the_quantiser_makes_of_its_stored_rows() {
     }
 }
 
+/// `xn` of one row as the E4M3 variant's order defines it: the sum of squares is the old 256-thread block's - thread `t` adds
+/// the squares of float4 `t`, `t + 256`, ... (element by element, one float4 a 1024-element span) into one accumulator, a
+/// 32-lane xor-shuffle tree folds the accumulators of a warp, and the eight warp partials are added in ascending order.
+fn e4m3_variant_row(x: &[f32], w: &[f32], d: usize) -> Vec<f32> {
+    let chain: Vec<f32> = (0..256)
+        .map(|t| {
+            let mut ss = 0.0f32;
+            for k in 0..5 {
+                for j in 0..4 {
+                    let c = k * 1024 + 4 * t + j;
+                    if c < d {
+                        ss += x[c] * x[c];
+                    }
+                }
+            }
+            ss
+        })
+        .collect();
+    let mut total = 0.0f32;
+    for warp in chain.chunks(32) {
+        let mut lanes = warp.to_vec();
+        for o in [16usize, 8, 4, 2, 1] {
+            lanes = (0..32).map(|l| lanes[l] + lanes[l ^ o]).collect();
+        }
+        total += lanes[0];
+    }
+    let inv = 1.0 / (total / d as f32 + EPS).sqrt();
+    (0..d).map(|c| x[c] * inv * w[c]).collect()
+}
+
+/// The E4M3 variant's `xn` is, bit for bit, the order its doc comment fixes (not merely close to the int8 kernel's), at every
+/// width it serves, with and without the residual add, in each form the op takes (one block a row, a cluster of blocks a row, and the
+/// op itself, which picks by the rows): a change of how the row is spread over threads or blocks may not move one bit.
+#[test]
+fn the_e4m3_variant_keeps_the_order_of_its_sum_of_squares() {
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda(&gpu) {
+        brain_testutil::skip_unavailable("not a CUDA device");
+        return;
+    }
+    let forms = [Fused::AddRmsQuantE4m3, Fused::AddRmsQuantE4m3Block, Fused::AddRmsQuantE4m3Cluster];
+    for (rows, d) in [(1u32, 128u32), (3, 640), (16, 5120), (33, 5120), (130, 5120), (5, 4096), (2, 4224), (4, 2560)] {
+        for add in [true, false] {
+            let (du, n) = (d as usize, (rows * d) as usize);
+            let (a, b, w) = (values(n, 11 + u64::from(d), 3.0), values(n, 78, 1.0), values(du, 6, 1.0));
+            let mk = |data: &[f32]| gpu.storage_init("in", data);
+            let (ab, bb, wb) = (mk(&a), mk(&b), mk(&w));
+            for form in forms {
+                if !gpu.has_fused(form) {
+                    continue;
+                }
+                let (sum, xn) = (gpu.storage(n as u64), gpu.storage(n as u64));
+                let (q, s) = (gpu.storage(u64::from(rows * d / 4)), gpu.storage(u64::from(rows * d / 128)));
+                let step = gpu.fused_step(form, &[&ab, &bb, &wb, &sum, &xn, &q, &s], &[d, rows, EPS.to_bits(), add as u32]).expect("offered");
+                gpu.submit(&[], &[step]);
+                gpu.poll_wait();
+                let got = gpu.read(&xn, n);
+                for r in 0..rows as usize {
+                    let x: Vec<f32> = (0..du).map(|c| if add { a[r * du + c] + b[r * du + c] } else { a[r * du + c] }).collect();
+                    assert_eq!(bits(got[r * du..(r + 1) * du].to_vec()), bits(e4m3_variant_row(&x, &w, du)), "{form:?} rows={rows} d={d} add={add} row {r}");
+                }
+            }
+        }
+    }
+}
+
+/// The cluster form survives back-to-back launches of itself at a decode step's rows and at a launch with more clusters than the
+/// card holds at once, each returning the first launch's bits (`#[ignore]`: a stress; knowledge 410 - a fault of a cluster kernel
+/// showed only under launch pressure, never in a one-launch-a-shape gate).
+///
+/// ```text
+/// make test/one P=brain-gpu-core T=add_rms_quant_native ARGS="--ignored --nocapture cluster_form_survives"
+/// ```
+#[test]
+#[ignore]
+fn cluster_form_survives_back_to_back_launches() {
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda(&gpu) || !gpu.has_fused(Fused::AddRmsQuantE4m3Cluster) {
+        brain_testutil::skip_unavailable("not a CUDA device with block clusters");
+        return;
+    }
+    let form = Fused::AddRmsQuantE4m3Cluster;
+    for (rows, d, launches) in [(16u32, 5120u32, 2000usize), (1, 5120, 2000), (32, 5120, 2000), (130, 5120, 500), (16, 2560, 2000)] {
+        let n = (rows * d) as usize;
+        let (a, b, w) = (values(n, 21, 3.0), values(n, 22, 1.0), values(d as usize, 23, 1.0));
+        let mk = |data: &[f32]| gpu.storage_init("in", data);
+        let (ab, bb, wb) = (mk(&a), mk(&b), mk(&w));
+        let (sum, xn) = (gpu.storage(n as u64), gpu.storage(n as u64));
+        let (q, s) = (gpu.storage(u64::from(rows * d / 4)), gpu.storage(u64::from(rows * d / 128)));
+        let step = || gpu.fused_step(form, &[&ab, &bb, &wb, &sum, &xn, &q, &s], &[d, rows, EPS.to_bits(), 1]).expect("offered");
+        let read = || (bits(gpu.read(&xn, n)), bits(gpu.read(&sum, n)), bits(gpu.read(&q, (rows * d / 4) as usize)));
+        gpu.submit(&[], &[step()]);
+        gpu.poll_wait();
+        let first = read();
+        for chunk in 0..launches / 100 {
+            let steps: Vec<_> = (0..100).map(|_| step()).collect();
+            gpu.submit(&[], &steps);
+            gpu.poll_wait();
+            assert!(read() == first, "rows={rows} d={d}: launch block {chunk} returned other bits than the first launch");
+        }
+    }
+}
+
 /// The front end of an E4M3 product at a mixed round's rows, as the two launches it replaces and as one (`#[ignore]`: a measurement).
 ///
 /// ```text
@@ -305,7 +408,7 @@ fn add_rms_front_rate() {
         return;
     }
     let d = 5120u32;
-    for rows in [64u32, 256, 768, 2048] {
+    for rows in [1u32, 8, 16, 32, 48, 64, 128, 256, 768, 2048] {
         let n = (rows * d) as usize;
         let (a, b, w) = (values(n, 1, 3.0), values(n, 2, 1.0), values(d as usize, 5, 1.0));
         let mk = |data: &[f32]| gpu.storage_init("in", data);
@@ -314,7 +417,11 @@ fn add_rms_front_rate() {
         let (one_q, one_s) = (gpu.storage(1), gpu.storage(1));
         let (q, s) = (gpu.storage(u64::from(rows * d / 4)), gpu.storage(u64::from(rows * d / 128)));
         gpu.set_kernel_timing(true);
-        for (label, store_xn) in [("pair (add_rms_quant + quant_e4m3_128)", true), ("one launch, xn stored", true), ("one launch, xn not stored", false)] {
+        for (label, store_xn) in [("pair (add_rms_quant + quant_e4m3_128)", true), ("one block, xn stored", true), ("one block, xn not stored", false), ("cluster, xn stored", true), ("cluster, xn not stored", false)] {
+            let form = if label.starts_with("cluster") { Fused::AddRmsQuantE4m3Cluster } else { Fused::AddRmsQuantE4m3Block };
+            if !gpu.has_fused(form) {
+                continue;
+            }
             let mut steps = Vec::new();
             for _ in 0..20 {
                 if label.starts_with("pair") {
@@ -322,7 +429,7 @@ fn add_rms_front_rate() {
                     let x = gpu_core::provider::library::Operand { buf: &xn, range: (0, n as u64) };
                     gpu_core::provider::library::quantize_e4m3_rows(&gpu, &mut steps, &x, rows, d).expect("offered");
                 } else {
-                    steps.push(gpu.fused_step(Fused::AddRmsQuantE4m3, &[&ab, &bb, &wb, &sum, &xn, &q, &s], &[d, rows, EPS.to_bits(), 1 | if store_xn { 0 } else { 16 }]).expect("offered"));
+                    steps.push(gpu.fused_step(form, &[&ab, &bb, &wb, &sum, &xn, &q, &s], &[d, rows, EPS.to_bits(), 1 | if store_xn { 0 } else { 16 }]).expect("offered"));
                 }
             }
             gpu.reset_kernel_times();
