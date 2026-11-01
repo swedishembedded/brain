@@ -472,19 +472,19 @@ Promote a knob there when the pipeline it tunes becomes real.
 held-freed-block cache in MiB; `0` turns it off, unset sizes it from device
 memory between 256 MiB and 4 GiB), `BRAIN_CUDA_MEMPOOL` (`0` disables the
 stream-ordered pool the held blocks come from), `BRAIN_NO_GDN_FAST` (`1` pins
-Gated DeltaNet prefill to the portable kernels for A/B), `BRAIN_PREFILL_ARENA`
-(`0` runs the `qwen35_gguf_prefill_profile` rounds without the scratch arena),
-`BRAIN_PREFILL_PROFILE_SKIP_TABLE` (stop that profile after the production
-rounds). The
+Gated DeltaNet prefill to the portable kernels for A/B). The
+`qwen35_gguf_prefill_profile` binary takes `--arena on|off|drain` (the scratch
+arena A/B), `--no-kernel-table` (stop after the production rounds) and
+`--stage-debug` (per step, the residual RMS leaving each card and the head's top
+five tokens: separates a plumbing bug from a weights bug;
+`Qwen35GgufInstance::set_stage_debug` in-process). The
 `qwen35moe_decode_profile` binary reads `BRAIN_PROFILE_PREFILL=<tokens>`
 (profile a cold prefill of that many tokens instead of decode),
 `BRAIN_PROFILE_CONTEXT=<tokens>` (the synthetic decode context),
 `BRAIN_PROFILE_BATCH=<sequences>` (sequences decoded together),
 `BRAIN_PROFILE_CHUNK=<tokens>` (its prefill round size) and
 `BRAIN_PROFILE_GROUPED_MIN_ROWS=<rows>` (the row count from which its expert
-GEMMs group their slots). `BRAIN_QWEN35_GGUF_DEBUG=1` makes the sharded GGUF
-resident dump, per step, the residual RMS leaving each card and the head's top
-five tokens (separates a plumbing bug from a weights bug).
+GEMMs group their slots).
 
 **Backend internals:** `BRAIN_VK_ALLOC_DEBUG` (verbose Vulkan allocator
 logging), `BRAIN_WGPU_SERIAL` / `BRAIN_WGPU_NO_SERIAL` (force / disable the

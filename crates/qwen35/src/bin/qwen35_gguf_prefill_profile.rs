@@ -21,6 +21,12 @@
 //! Usage:
 //!   qwen35_gguf_prefill_profile <path to Qwen3.8-27B*.gguf> [depth] [rows] [rounds]
 //!       [--device gpu0,gpu1] [--backend wgpu|vulkan|cuda] [--kv f32|bf16|int8|fp8] [--flash-prefill v1|v2]
+//!       [--arena on|off|drain] [--no-kernel-table] [--stage-debug]
+//!
+//! `--arena` is an A/B switch: `off` runs the rounds without the scratch arena (and so without its per-layer drain), `on`
+//! forces it on (its per-layer drain skipped where the backend orders its submissions), `drain` forces it on WITH the
+//! per-layer drain; unset keeps the default. `--no-kernel-table` stops after the timed rounds, for attaching a sampling
+//! profiler without the kernel timers. `--stage-debug` prints each step's per-stage residual RMS and top tokens.
 //!
 //! `depth` (default 256) prompt tokens establish the KV depth first, `rows`
 //! (default 256) is the round width, `rounds` (default 4) the rounds per
@@ -69,22 +75,21 @@ fn main() {
     println!("qwen35 prefill profile: {} layers, weight tier {}, kv {kv}, {} stage(s), backend {}", cfg.n_layers, tier.summary(), placed.len(), gpu_core::backend_name());
     let inst = r.activate_owned(&placed).expect("activate the real checkpoint");
 
-    // A/B switch: `BRAIN_PREFILL_ARENA=0` runs the rounds without the scratch arena
-    // (and so without its per-layer drain), `1` forces it on (its per-layer drain is skipped where the backend orders its
-    // submissions), `drain` forces it on WITH the per-layer drain.
-    match std::env::var("BRAIN_PREFILL_ARENA").as_deref() {
-        Ok("0") => inst.set_chunk_arena_min_rows(u32::MAX),
-        Ok("1") => inst.set_chunk_arena_min_rows(1),
-        Ok("drain") => {
+    match flag("--arena").as_deref() {
+        None => {}
+        Some("off") => inst.set_chunk_arena_min_rows(u32::MAX),
+        Some("on") => inst.set_chunk_arena_min_rows(1),
+        Some("drain") => {
             inst.set_chunk_arena_min_rows(1);
             inst.set_chunk_arena_drain(Some(true));
         }
-        _ => {}
+        Some(other) => panic!("--arena takes on, off or drain, not {other}"),
     }
+    inst.set_stage_debug(a.iter().any(|arg| arg == "--stage-debug"));
 
     let seed = inst.tokenize("The quick brown fox jumps over the lazy dog while a kalman filter estimates the state of a noisy system. ");
     let prompt: Vec<u32> = seed.iter().cycle().take(depth as usize).copied().collect();
-    let p = inst.profile_prefill_rounds(&prompt, rows, rounds);
+    let p = inst.profile_prefill_rounds(&prompt, rows, rounds, !a.iter().any(|arg| arg == "--no-kernel-table"));
 
     println!();
     println!("depth {depth}, {rows} rows, {rounds} round(s) per region - fastest round reported (a shared card only ever adds time)");

@@ -2402,9 +2402,8 @@ impl Qwen35 {
     /// This exists for cross-model consumers of the target's INTERNALS, of
     /// which the DFlash2 drafter (`crate::dflash2`) is the first: it
     /// cross-attends to the concatenated residuals of five specific layers,
-    /// which no amount of reading this model's OUTPUT can reconstruct. It is
-    /// deliberately not an env-var dump like `QWEN35_DEBUG_LAYER_RMS` beside
-    /// it - a drafter needs the values in-process, every round, not printed.
+    /// which no amount of reading this model's OUTPUT can reconstruct. A
+    /// per-layer diagnostic reads the same taps.
     ///
     /// Costs one `[n, d_model]` readback per tapped layer per chunk when the
     /// list is non-empty, and one `Vec::is_empty` per layer when it is not.
@@ -5705,7 +5704,7 @@ impl Qwen35 {
                 }
             }
         };
-        self.advance_layer_stack(&mut r.stack, n, &format!("pos_start={pos_start}"), &mut mixer, budget)
+        self.advance_layer_stack(&mut r.stack, n, &mut mixer, budget)
     }
 
     /// Whether this build can run [`Self::run_prefill_multi_stage`]: not a LoRA build,
@@ -5852,7 +5851,7 @@ impl Qwen35 {
                 LayerType::Full => self.layer_gqa_fwd_pre(&format!("blocks.{l}.self_attn"), xn1, pre, epilogue, n, Some(GqaCached::Segments(&round, &caches.gqa_kv[l]))).0,
             }
         };
-        self.prefill_layer_stack(res, n, &format!("{} sequences", segs.len()), &mut mixer)
+        self.prefill_layer_stack(res, n, &mut mixer)
     }
 
     /// The layers of a prefill round, whatever shape its sequences take: this stage's
@@ -5905,7 +5904,7 @@ impl Qwen35 {
     /// Record layers of the round `st` stands for - one at a time, until the stage's last or until `budget` layers
     /// are recorded (always at least one) - and, on the last, the epilogue. `Some` with the round's block once every
     /// layer is recorded; the device may still be running them.
-    fn advance_layer_stack(&self, st: &mut StackState, n: u32, label: &str, mixer: &mut PrefillMixer<'_>, budget: Option<usize>) -> Option<DeviceBuffer> {
+    fn advance_layer_stack(&self, st: &mut StackState, n: u32, mixer: &mut PrefillMixer<'_>, budget: Option<usize>) -> Option<DeviceBuffer> {
         let g = &self.gpu;
         let d = self.cfg.d_model;
         let first = st.layer;
@@ -6019,19 +6018,10 @@ impl Qwen35 {
             if !self.taps.borrow().is_empty() && self.taps.borrow().contains(&l) {
                 self.tapped.borrow_mut().push((l, g.read(&st.res, (n * d) as usize)));
             }
-            if std::env::var_os("QWEN35_DEBUG_LAYER_RMS").is_some() {
-                let last_row = g.read(&st.res, (n * d) as usize)[((n - 1) * d) as usize..].to_vec();
-                let rms = (last_row.iter().map(|v| v * v).sum::<f32>() / last_row.len() as f32).sqrt();
-                eprintln!("qwen35::run_prefill_chunk_stage: {label} n={n} layer {l} ({ty:?}) last-row rms = {rms}");
-            }
             st.layer += 1;
             if st.layer < self.shard.end && budget.is_some_and(|b| st.layer - first >= b.max(1)) {
                 return None;
             }
-        }
-        if std::env::var("QWEN35_DEBUG_SCRATCH_HELD").is_ok() {
-            let (n_slots, words) = g.scratch_held();
-            eprintln!("qwen35::run_prefill_chunk_stage: arena holds {n_slots} slots, {words} words ({:.2} MiB) at round end (n_layers this shard={}, n={})", words as f64 * 4.0 / (1024.0 * 1024.0), self.shard.end - self.shard.start, n);
         }
         // The per-layer scratch pool this loop built is worth exactly as
         // much as the layer count that reused it; a caller entering the next
@@ -6065,9 +6055,9 @@ impl Qwen35 {
     }
 
     /// [`Self::begin_layer_stack`] and every layer of it at once.
-    fn prefill_layer_stack(&self, res: DeviceBuffer, n: u32, label: &str, mixer: &mut PrefillMixer<'_>) -> DeviceBuffer {
+    fn prefill_layer_stack(&self, res: DeviceBuffer, n: u32, mixer: &mut PrefillMixer<'_>) -> DeviceBuffer {
         let mut st = self.begin_layer_stack(res, n);
-        self.advance_layer_stack(&mut st, n, label, mixer, None).expect("an unbounded advance finishes the stack")
+        self.advance_layer_stack(&mut st, n, mixer, None).expect("an unbounded advance finishes the stack")
     }
 
     /// Rows of one group of an exact round: [`gpu_core::select::exact_decode_group_rows`],

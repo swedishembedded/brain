@@ -932,16 +932,11 @@ crates/qwen3/tests/step_timing.rs	BRAIN_TILE_BUDGET_WORDS
 crates/qwen3/tests/step_timing.rs	LORA
 crates/qwen3/tests/step_timing.rs	QWEN3_DIR
 crates/qwen35/src/bin/import_profile.rs	BRAIN_QWEN35_DIR
-crates/qwen35/src/bin/qwen35_gguf_prefill_profile.rs	BRAIN_PREFILL_ARENA
 crates/qwen35/src/caps.rs	QWEN_TOKENIZER
 crates/qwen35/src/gguf_import.rs	BRAIN_QWEN35_GGUF
 crates/qwen35/src/int8_gguf_resident.rs	<REAL_GGUF_ENV>
-crates/qwen35/src/int8_gguf_resident.rs	BRAIN_PREFILL_PROFILE_SKIP_TABLE
-crates/qwen35/src/int8_gguf_resident.rs	BRAIN_QWEN35_GGUF_DEBUG
 crates/qwen35/src/model.rs	BRAIN_LIMIT_RAM_TOTAL
 crates/qwen35/src/model.rs	BRAIN_LIMIT_VRAM_TOTAL
-crates/qwen35/src/model.rs	QWEN35_DEBUG_LAYER_RMS
-crates/qwen35/src/model.rs	QWEN35_DEBUG_SCRATCH_HELD
 crates/qwen35/tests/chunk_round_reclaim.rs	BRAIN_GPU_RECLAIM_CEILING
 crates/qwen35/tests/cuda_leaks.rs	<REAL_GGUF_ENV>
 crates/qwen35/tests/dflash2_real.rs	BRAIN_DFLASH2_DUMP

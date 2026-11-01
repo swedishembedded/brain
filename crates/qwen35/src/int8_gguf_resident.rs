@@ -1486,6 +1486,8 @@ pub struct Qwen35GgufInstance {
     /// ([`LORA_SLOT_NONE`]: the base). Set by the engine around
     /// [`Self::prefill_hidden`]; a prefill is one sequence, so one slot.
     prefill_adapter_slot: Cell<u32>,
+    /// Whether every step prints the residual RMS leaving each stage and the head's top five tokens ([`Self::set_stage_debug`]).
+    stage_debug: Cell<bool>,
     /// Packed rows a speculative verify step may carry (0: this instance does
     /// not speculate) - see [`speculate`].
     spec_rows: u32,
@@ -1637,7 +1639,7 @@ impl Qwen35GgufInstance {
     /// its input straight through.
     fn stack_step(&self, token_id: u32, pos: u32, slot: u32) -> Result<Vec<f32>, String> {
         let embedded = self.embed_row(token_id)?;
-        let debug = std::env::var_os("BRAIN_QWEN35_GGUF_DEBUG").is_some();
+        let debug = self.stage_debug.get();
         let mut per_stage_rms = Vec::new();
         let carry = self.chain_stages(
             &embedded,
@@ -1699,7 +1701,7 @@ impl Qwen35GgufInstance {
         let n = tokens.len();
         assert!(n > 0, "{MODEL}: stack_chunk_carry on an empty round");
         let embedded = self.embed_rows(tokens)?;
-        let debug = std::env::var_os("BRAIN_QWEN35_GGUF_DEBUG").is_some();
+        let debug = self.stage_debug.get();
         let mut per_stage_rms = Vec::new();
         let mut taps: Vec<(usize, Vec<f32>)> = Vec::new();
         let adapter_slot = self.prefill_adapter_slot.get();
@@ -1761,6 +1763,13 @@ impl Qwen35GgufInstance {
     /// architecture dispatches kernels this one never compiled.
     pub fn stage_gpu(&self, stage: usize) -> &Gpu {
         &self.shards[stage].qwen35.gpu
+    }
+
+    /// Print, every step, the residual RMS leaving each stage and the head's top five tokens (off by default): the
+    /// diagnostic that tells a plumbing bug across a card boundary (a residual that explodes or collapses) from a weights bug
+    /// (a healthy residual, wrong top tokens), which decoded text alone cannot.
+    pub fn set_stage_debug(&self, on: bool) {
+        self.stage_debug.set(on);
     }
 
     /// Move every stage's scratch-arena threshold - see
@@ -2647,7 +2656,7 @@ impl Qwen35GgufInstance {
         }
     }
 
-    /// Opt-in (`BRAIN_QWEN35_GGUF_DEBUG=1`) per-step dump: the RMS of the
+    /// Per-step dump while [`Self::set_stage_debug`] is on: the RMS of the
     /// residual leaving each card, and the top-5 `(token, logit, text)` the
     /// head prefers.
     ///
@@ -2657,7 +2666,7 @@ impl Qwen35GgufInstance {
     /// bug) versus a healthy residual whose top logits are simply the wrong
     /// tokens (a weights bug). Costs nothing when unset.
     fn debug_step(&self, pos: u32, per_stage_rms: &[f32], logits: &[f32]) {
-        if std::env::var_os("BRAIN_QWEN35_GGUF_DEBUG").is_none() {
+        if !self.stage_debug.get() {
             return;
         }
         let mut top: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
@@ -3397,12 +3406,12 @@ impl Qwen35GgufInstance {
     /// the fastest round, not the mean. This runs `rounds` real chunk rounds
     /// (layer stack + head, the production path) after warming up on `prompt`,
     /// timing each, then runs `rounds` more with per-kernel device timing
-    /// armed (the layer stack only), one table per round.
+    /// armed (the layer stack only), one table per round, unless `kernel_table` is false.
     /// [`PrefillRoundsProfile`] reports the best round of each region.
     ///
     /// Panics rather than truncating if the prompt plus the profiled rounds run
     /// past capacity.
-    pub fn profile_prefill_rounds(&self, prompt: &[u32], rows: u32, rounds: u32) -> PrefillRoundsProfile {
+    pub fn profile_prefill_rounds(&self, prompt: &[u32], rows: u32, rounds: u32, kernel_table: bool) -> PrefillRoundsProfile {
         assert!(rows > 0 && rounds > 0, "profile_prefill_rounds: rows and rounds must be > 0");
         assert!(!prompt.is_empty(), "profile_prefill_rounds: needs a non-empty prompt to establish decode state");
         let need = prompt.len() as u64 + 2 * rows as u64 * rounds as u64;
@@ -3425,9 +3434,9 @@ impl Qwen35GgufInstance {
             pos += rows;
         }
 
-        // `BRAIN_PREFILL_PROFILE_SKIP_TABLE=1` stops after the production rounds -
-        // for attaching a sampling profiler to them without the kernel timers.
-        if std::env::var_os("BRAIN_PREFILL_PROFILE_SKIP_TABLE").is_some() {
+        // Without the table the profile stops after the production rounds - for attaching a sampling profiler to them
+        // without the kernel timers.
+        if !kernel_table {
             return PrefillRoundsProfile { rows, round_s, table: Vec::new() };
         }
         let timed = self.shards.iter().all(|s| s.qwen35.gpu.set_kernel_timing(true));
@@ -4333,6 +4342,7 @@ impl Qwen35GgufResident {
             kv_layout: layout,
             taps: RefCell::new(None),
             prefill_adapter_slot: Cell::new(LORA_SLOT_NONE),
+            stage_debug: Cell::new(false),
             spec_rows: 0,
             mtp: None,
             plans: RefCell::default(),
