@@ -32,6 +32,7 @@ fn kernel_list() -> &'static [(&'static str, &'static str)] {
         let (f8_1, f8_1_src) = specialised("matmul_fp8_gemv", kernels::MATMUL_FP8_GEMV, 1);
         let (f4_1, f4_1_src) = specialised("matmul_nvfp4_gemv", kernels::MATMUL_NVFP4_GEMV, 1);
         let (f4_2, f4_2_src) = specialised("matmul_nvfp4_gemv", kernels::MATMUL_NVFP4_GEMV, 2);
+        let (f4_4, f4_4_src) = specialised("matmul_nvfp4_gemv", kernels::MATMUL_NVFP4_GEMV, 4);
         vec![
             (f8, f8_src),
             ("matmul_fp8_gemv_ref", f8_src),
@@ -42,6 +43,7 @@ fn kernel_list() -> &'static [(&'static str, &'static str)] {
             (f8_1, f8_1_src),
             (f4_1, f4_1_src),
             (f4_2, f4_2_src),
+            (f4_4, f4_4_src),
         ]
     })
 }
@@ -57,6 +59,8 @@ const FP8_M1: usize = 6;
 const FP4_M1: usize = 7;
 /// The two-row build: also register-blocked over four weight rows.
 const FP4_M2: usize = 8;
+/// The three-to-four-row build.
+const FP4_M4: usize = 9;
 
 fn is_cuda(gpu: &Gpu) -> bool {
     gpu.kind() == "cuda" && gpu.caps().arch.compute_capability.is_some()
@@ -171,6 +175,7 @@ fn run_fp4(gpu: &Gpu, c: &Fp4Case, seed: u64) {
     let (kind, expect) = match m {
         1 => (FP4_M1, "matmul_nvfp4_gemv_m1"),
         2 => (FP4_M2, "matmul_nvfp4_gemv_m2"),
+        3 | 4 => (FP4_M4, "matmul_nvfp4_gemv_m4"),
         _ => (FP4, "matmul_nvfp4_gemv"),
     };
     assert_eq!(gpu.native_kernel_for(kind, &params), Some(expect));
@@ -259,6 +264,7 @@ fn the_native_nvfp4_gemv_matches_the_oracle_at_every_row_count_and_window() {
         Fp4Case { m: 2, k: 2048, count: 301, first: 0 },
         Fp4Case { m: 2, k: 5120, count: 3, first: 1 },
         Fp4Case { m: 1, k: 64, count: 1, first: 0 },
+        Fp4Case { m: 3, k: 2048, count: 77, first: 2 },
     ]
     .iter()
     .enumerate()

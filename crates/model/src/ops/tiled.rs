@@ -204,10 +204,15 @@ impl Weight {
 /// Activation rows up to which a stored FP8 or NVFP4 weight is read by its own float-read GEMV kernel (decode batches)
 /// instead of the tile decode: the weight's bytes are streamed once for all of the rows.
 pub const GEMV_MAX_ROWS: u32 = 8;
-/// The FP8 and NVFP4 GEMVs' row cap: they are decode-bound, and past two rows the tile decode feeding the bf16
-/// tensor-core product reads the weight once for all of the rows. A recording that holds no library product has no such
-/// tile product, so there the GEMVs serve up to [`GEMV_MAX_ROWS`].
+/// The FP8 GEMV's row cap: it is decode-bound, and past two rows the tile decode feeding the bf16 tensor-core product reads
+/// the weight once for all of the rows. A recording that holds no library product has no such tile product, so there the
+/// GEMVs serve up to [`GEMV_MAX_ROWS`].
 const LIBRARY_GEMV_MAX_ROWS: u32 = 2;
+/// The NVFP4 GEMV's row cap with the library present. Its tile product first writes the whole weight as bf16 (3.6 times the
+/// stored bytes) and reads it back, a floor of 215 us per 17408 x 5120 projection at every row count up to 256; the GEMV reads
+/// 0.56 bytes per weight once and takes 93 us at four rows, 186 us at eight (down: 253 us, the loss), so it serves four
+/// (measured in `model/tests/qops_nvfp4_dense_shapes.rs`).
+const LIBRARY_NVFP4_GEMV_MAX_ROWS: u32 = 4;
 /// Activation rows up to which a dense bf16 weight is read by its own GEMV instead of the library's tensor-core product: the
 /// single decode token. The multi-row build is not yet competitive (measured at eight rows: the library is three times faster).
 const DENSE_GEMV_MAX_ROWS: u32 = 1;
@@ -227,7 +232,11 @@ impl Ops {
         if m == 0 || m > GEMV_MAX_ROWS || !self.gpu.caps().workgroup_reductions {
             return false;
         }
-        let max_rows = if self.gpu.declines_library() { GEMV_MAX_ROWS } else { LIBRARY_GEMV_MAX_ROWS };
+        let max_rows = match w {
+            Weight::Micro { kind: MicroScaled::Nvfp4, .. } if !self.gpu.declines_library() => LIBRARY_NVFP4_GEMV_MAX_ROWS,
+            _ if self.gpu.declines_library() => GEMV_MAX_ROWS,
+            _ => LIBRARY_GEMV_MAX_ROWS,
+        };
         // A workgroup covers 4 weight rows per round and amortises its decode table over `rpw` rounds, as many as keep
         // about 4 workgroups per multiprocessor busy: a tall weight (the LM head) walks many rounds, a short one few.
         let tiles = count.div_ceil(4);

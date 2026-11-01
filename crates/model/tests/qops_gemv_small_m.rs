@@ -8,8 +8,9 @@
 //! Spec: a stored FP8 or NVFP4 weight multiplied against up to `GEMV_MAX_ROWS` activation rows is read by its own
 //! float-read kernel (no decoded scratch), and the product equals the host product of the exact decoded weight, for
 //! every row count, a row window that does not start at 0 and a ragged row count; above the row cap the tile decode
-//! answers instead and agrees. Where the vendor library has the tile product (the default) the cap is two rows, since
-//! the tile product reads the weight once for more rows than that; while the library declines (a recording that is
+//! answers instead and agrees. Where the vendor library has the tile product (the default) the FP8 cap is two rows, since
+//! the tile product reads the weight once for more rows than that (an NVFP4 weight keeps four rows: its tile
+//! product writes the whole weight as bf16 first); while the library declines (a recording that is
 //! replayed as a graph) the GEMVs serve all `GEMV_MAX_ROWS`.
 
 use checkpoint::packed::{CodecRegistry, QuantEncoding, TensorDescriptor, TensorSink, Tile};
@@ -41,7 +42,13 @@ fn host_product(x: &[f32], m: usize, k: usize, wd: &[f32], first: usize, count: 
 }
 
 fn check(ops: &Ops, w: &Weight, label: &str) {
-    let gemv_rows = if ops.gpu().declines_library() { GEMV_MAX_ROWS as usize } else { 2 };
+    // With the library present the FP8 GEMV serves two rows and the NVFP4 GEMV four (its tile product writes the whole
+    // weight as bf16 first).
+    let gemv_rows = match w {
+        _ if ops.gpu().declines_library() => GEMV_MAX_ROWS as usize,
+        Weight::Micro { .. } => 4,
+        _ => 2,
+    };
     let (n, k) = (w.n() as usize, w.k() as usize);
     let g = ops.gpu();
     let wd = decode_weight(ops, w);

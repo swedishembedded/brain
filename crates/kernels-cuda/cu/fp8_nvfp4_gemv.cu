@@ -339,71 +339,31 @@ __device__ __forceinline__ float brain_fp4_dot32_smem(const float* wf, const uns
     return fmaf(b1, s1, b0 * s0);
 }
 
-// The multi-row (2 to 8) NVFP4 build: as `brain_matmul_fp8_gemv_staged`, the activations of a round staged in shared memory.
-template <int MR>
-__device__ __forceinline__ void brain_matmul_nvfp4_gemv_staged(const unsigned int* params, const float* x, const unsigned int* w, const unsigned int* s, float* y) {
-    const unsigned int m = params[0], k = params[1], count = params[2], first = params[3], xr0 = params[4];
-    const float global = __uint_as_float(params[5]);
-    const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
-    const unsigned int col = blk * BRAIN_QG_COLS + threadIdx.x / BRAIN_QG_LANES;
-    const unsigned int lane = threadIdx.x % BRAIN_QG_LANES;
-    const bool live = col < count;
-    const unsigned int chunks = k >> 5;
-    const unsigned int row = first + (live ? col : 0u);
-    const uint4* wrow = reinterpret_cast<const uint4*>(w) + static_cast<unsigned long long>(row) * chunks;
-    const unsigned int* srow = s + static_cast<unsigned long long>(row) * (k >> 6);
-    const float4* x4 = reinterpret_cast<const float4*>(x);
-    __shared__ float4 xs[MR][BRAIN_QG_KB / 4];
-
-    float acc[MR];
+// `brain_fp4_dot32` against a chunk of activations held in shared memory TRANSPOSED: float4 `t` of chunk `c` is `xs[t * BRAIN_FP4_NCH + c]`,
+// so the 32 lanes of a warp (consecutive chunks) read 32 consecutive float4 and the access is free of bank conflicts (the chunk-major
+// layout puts the lanes 128 bytes apart).
+#define BRAIN_FP4_NCH (BRAIN_QG_KB / 32)
+__device__ __forceinline__ float brain_fp4_dot32_smem_t(const float* wf, const unsigned int sw16, const float4* xs) {
+    const float s0 = brain_qg_e4m3_scale(sw16 & 0xFFu);
+    const float s1 = brain_qg_e4m3_scale((sw16 >> 8) & 0xFFu);
+    float b0 = 0.0f, b1 = 0.0f;
 #pragma unroll
-    for (int r = 0; r < MR; ++r) { acc[r] = 0.0f; }
-    constexpr int UNROLL = 2;
-    for (unsigned int kb = 0; kb < k; kb += BRAIN_QG_KB) {
-        const unsigned int kn = (k - kb) < BRAIN_QG_KB ? (k - kb) : BRAIN_QG_KB;
-        const unsigned int v4 = kn >> 2;
-        for (unsigned int i = threadIdx.x; i < m * v4; i += BRAIN_QG_THREADS) {
-            const unsigned int r = i / v4, c = i - r * v4;
-            xs[r][c] = __ldg(x4 + static_cast<unsigned long long>(xr0 + r) * (k >> 2) + (kb >> 2) + c);
-        }
-        __syncthreads();
-        const unsigned int nch = kn >> 5, cbase = kb >> 5;
-        for (unsigned int c0 = lane; c0 < nch; c0 += UNROLL * BRAIN_QG_LANES) {
-            uint4 wv[UNROLL];
-            unsigned int sw[UNROLL];
-#pragma unroll
-            for (int u = 0; u < UNROLL; ++u) {
-                const unsigned int c = c0 + u * BRAIN_QG_LANES;
-                if (live && c < nch) {
-                    const unsigned int j = cbase + c;
-                    wv[u] = brain_qg_ld_stream(wrow + j);
-                    sw[u] = __ldg(srow + (j >> 1)) >> ((j & 1u) * 16u);
-                } else {
-                    wv[u] = make_uint4(0u, 0u, 0u, 0u);
-                    sw[u] = 0u;
-                }
-            }
-#pragma unroll
-            for (int u = 0; u < UNROLL; ++u) {
-                const unsigned int c = c0 + u * BRAIN_QG_LANES;
-                if (c < nch) {
-                    float wf[32];
-                    brain_fp4_decode32(wv[u], wf);
-#pragma unroll
-                    for (int r = 0; r < MR; ++r) {
-                        if (static_cast<unsigned int>(r) < m) { acc[r] += brain_fp4_dot32_smem(wf, sw[u], &xs[r][8u * c]); }
-                    }
-                }
-            }
-        }
-        __syncthreads();
+    for (int t = 0; t < 4; ++t) {
+        const float4 xv = xs[t * BRAIN_FP4_NCH];
+        b0 = fmaf(wf[4 * t + 0], xv.x, b0);
+        b0 = fmaf(wf[4 * t + 1], xv.y, b0);
+        b0 = fmaf(wf[4 * t + 2], xv.z, b0);
+        b0 = fmaf(wf[4 * t + 3], xv.w, b0);
     }
-    const float scale = 4194304.0f * global;
 #pragma unroll
-    for (int r = 0; r < MR; ++r) {
-        const float total = brain_qg_row_sum(acc[r]) * scale;
-        if (static_cast<unsigned int>(r) < m && lane == 0u && live) { y[static_cast<unsigned long long>(r) * count + col] = total; }
+    for (int t = 0; t < 4; ++t) {
+        const float4 xv = xs[(4 + t) * BRAIN_FP4_NCH];
+        b1 = fmaf(wf[16 + 4 * t + 0], xv.x, b1);
+        b1 = fmaf(wf[16 + 4 * t + 1], xv.y, b1);
+        b1 = fmaf(wf[16 + 4 * t + 2], xv.z, b1);
+        b1 = fmaf(wf[16 + 4 * t + 3], xv.w, b1);
     }
+    return fmaf(b1, s1, b0 * s0);
 }
 
 // A decoded 32-weight chunk (`sw16` as in `brain_fp4_dot32`) against activations already in registers.
@@ -524,6 +484,94 @@ __device__ __forceinline__ void brain_matmul_nvfp4_gemv_rb_body(const unsigned i
     }
 }
 
+// The multi-row (up to MR <= 8) NVFP4 build: the register blocking of `brain_matmul_nvfp4_gemv_rb_body` with the activation rows
+// of a round staged in shared memory (as `brain_matmul_fp8_gemv_staged`), since MR rows' chunks no longer fit in registers.
+// One weight chunk is decoded once and dotted against every row.
+template <int MR>
+__device__ __forceinline__ void brain_matmul_nvfp4_gemv_staged_rb(const unsigned int* params, const float* x, const unsigned int* w, const unsigned int* s, float* y) {
+    const unsigned int m = params[0], k = params[1], count = params[2], first = params[3], xr0 = params[4];
+    const float global = __uint_as_float(params[5]);
+    const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
+    const unsigned int col0 = blk * BRAIN_FP4_RT_COLS + (threadIdx.x / BRAIN_FP4_LANES) * BRAIN_FP4_RT;
+    const unsigned int lane = threadIdx.x % BRAIN_FP4_LANES;
+    const unsigned int chunks = k >> 5;
+    const uint4* wrow[BRAIN_FP4_RT];
+    const unsigned int* srow[BRAIN_FP4_RT];
+    bool live[BRAIN_FP4_RT];
+#pragma unroll
+    for (int r = 0; r < BRAIN_FP4_RT; ++r) {
+        live[r] = col0 + r < count;
+        const unsigned long long row = first + (live[r] ? col0 + r : 0u);
+        wrow[r] = reinterpret_cast<const uint4*>(w) + row * chunks;
+        srow[r] = s + row * (k >> 6);
+    }
+    const float4* x4 = reinterpret_cast<const float4*>(x);
+    __shared__ float4 xs[MR][BRAIN_QG_KB / 4];
+
+    float acc[MR][BRAIN_FP4_RT];
+#pragma unroll
+    for (int a = 0; a < MR; ++a) {
+#pragma unroll
+        for (int r = 0; r < BRAIN_FP4_RT; ++r) { acc[a][r] = 0.0f; }
+    }
+    constexpr int UNROLL = 2;
+    for (unsigned int kb = 0; kb < k; kb += BRAIN_QG_KB) {
+        const unsigned int kn = (k - kb) < BRAIN_QG_KB ? (k - kb) : BRAIN_QG_KB;
+        const unsigned int v4 = kn >> 2;
+        for (unsigned int i = threadIdx.x; i < m * v4; i += BRAIN_QG_THREADS) {
+            const unsigned int r = i / v4, c = i - r * v4;
+            // float4 `c` is element `t = c % 8` of chunk `c / 8`.
+            xs[r][(c & 7u) * BRAIN_FP4_NCH + (c >> 3)] = __ldg(x4 + static_cast<unsigned long long>(xr0 + r) * (k >> 2) + (kb >> 2) + c);
+        }
+        __syncthreads();
+        const unsigned int nch = kn >> 5, cbase = kb >> 5;
+        for (unsigned int c0 = lane; c0 < nch; c0 += UNROLL * BRAIN_FP4_LANES) {
+            uint4 wv[UNROLL][BRAIN_FP4_RT];
+            unsigned int sw[UNROLL][BRAIN_FP4_RT];
+#pragma unroll
+            for (int u = 0; u < UNROLL; ++u) {
+                const unsigned int c = c0 + u * BRAIN_FP4_LANES;
+#pragma unroll
+                for (int r = 0; r < BRAIN_FP4_RT; ++r) {
+                    if (live[r] && c < nch) {
+                        const unsigned int j = cbase + c;
+                        wv[u][r] = brain_qg_ld_stream(wrow[r] + j);
+                        sw[u][r] = __ldg(srow[r] + (j >> 1)) >> ((j & 1u) * 16u);
+                    } else {
+                        wv[u][r] = make_uint4(0u, 0u, 0u, 0u);
+                        sw[u][r] = 0u;
+                    }
+                }
+            }
+#pragma unroll
+            for (int u = 0; u < UNROLL; ++u) {
+                const unsigned int c = c0 + u * BRAIN_FP4_LANES;
+                if (c < nch) {
+#pragma unroll
+                    for (int r = 0; r < BRAIN_FP4_RT; ++r) {
+                        float wf[32];
+                        brain_fp4_decode32(wv[u][r], wf);
+#pragma unroll
+                        for (int a = 0; a < MR; ++a) {
+                            if (static_cast<unsigned int>(a) < m) { acc[a][r] += brain_fp4_dot32_smem_t(wf, sw[u][r], &xs[a][c]); }
+                        }
+                    }
+                }
+            }
+        }
+        __syncthreads();
+    }
+    const float scale = 4194304.0f * global;
+#pragma unroll
+    for (int a = 0; a < MR; ++a) {
+#pragma unroll
+        for (int r = 0; r < BRAIN_FP4_RT; ++r) {
+            const float total = brain_fp4_warp_sum(acc[a][r]) * scale;
+            if (static_cast<unsigned int>(a) < m && lane == 0u && live[r]) { y[static_cast<unsigned long long>(a) * count + col0 + r] = total; }
+        }
+    }
+}
+
 extern "C" __global__ void __launch_bounds__(BRAIN_QG_THREADS, 2)
 brain_matmul_nvfp4_gemv_m1(const unsigned int* params, const float* x, const unsigned int* w, const unsigned int* s, float* y) {
     brain_matmul_nvfp4_gemv_rb_body<1>(params, x, w, s, y);
@@ -535,8 +583,13 @@ brain_matmul_nvfp4_gemv_m2(const unsigned int* params, const float* x, const uns
 }
 
 extern "C" __global__ void __launch_bounds__(BRAIN_QG_THREADS, 2)
+brain_matmul_nvfp4_gemv_m4(const unsigned int* params, const float* x, const unsigned int* w, const unsigned int* s, float* y) {
+    brain_matmul_nvfp4_gemv_staged_rb<4>(params, x, w, s, y);
+}
+
+extern "C" __global__ void __launch_bounds__(BRAIN_QG_THREADS, 1)
 brain_matmul_nvfp4_gemv(const unsigned int* params, const float* x, const unsigned int* w, const unsigned int* s, float* y) {
-    brain_matmul_nvfp4_gemv_staged<BRAIN_QG_MAXM>(params, x, w, s, y);
+    brain_matmul_nvfp4_gemv_staged_rb<BRAIN_QG_MAXM>(params, x, w, s, y);
 }
 
 // ---- NVFP4 expert gather ---------------------------------------------------------------------------------------------
