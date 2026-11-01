@@ -56,6 +56,7 @@ fn encode_matches_the_qwen_chat_oracle_text_with_correct_mask_boundaries() {
         ],
         tools: Vec::new(),
         rendered: None,
+        media: Vec::new(),
     };
 
     let (ids, mask) = sample.encode(&tok, &tmpl).expect("encode");
@@ -110,6 +111,7 @@ fn encode_fails_loudly_rather_than_mismask_a_tool_call_then_final_answer_convers
         ],
         tools: Vec::new(),
         rendered: None,
+        media: Vec::new(),
     };
 
     let err = sample.encode(&tok, &tmpl).unwrap_err();

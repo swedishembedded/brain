@@ -137,7 +137,7 @@ struct WireTurn {
 
 impl WireTurn {
     fn into_message(self, train: bool) -> WireMessage {
-        WireMessage { role: self.role, content: self.content, tool_calls: self.tool_calls, tool_call_id: self.tool_call_id, reasoning_content: self.reasoning_content, train }
+        WireMessage { role: self.role, content: self.content.into(), tool_calls: self.tool_calls, tool_call_id: self.tool_call_id, reasoning_content: self.reasoning_content, train }
     }
 }
 
@@ -172,7 +172,7 @@ fn pair_from_wire(record: WirePreference) -> Result<PreferenceSample, String> {
         let mut wire: Vec<WireMessage> = prompt.iter().cloned().map(|t| t.into_message(false)).collect();
         wire.push(turn.into_message(true));
         let messages = messages_from_wire(wire).map_err(|e| format!("\"prompt\" + \"{field}\" (messages[{prompt_len}] is \"{field}\"): {e}"))?;
-        Ok(ChatSample { messages, tools: record.tools.clone(), rendered: None })
+        Ok(ChatSample { messages, tools: record.tools.clone(), rendered: None, media: Vec::new() })
     };
     let chosen = complete("chosen", &record.prompt, record.chosen)?;
     let rejected = complete("rejected", &record.prompt, record.rejected)?;

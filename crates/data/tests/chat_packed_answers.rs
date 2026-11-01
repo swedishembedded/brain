@@ -45,6 +45,7 @@ fn trajectory(train: [bool; 3]) -> ChatSample {
         ],
         tools: Vec::new(),
         rendered: None,
+        media: Vec::new(),
     }
 }
 

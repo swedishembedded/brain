@@ -62,7 +62,7 @@ impl ChatExample {
         let mut messages: Vec<ChatMessage> = self.system.iter().map(ChatMessage::system).collect();
         messages.push(ChatMessage::user(self.user.clone()));
         messages.push(ChatMessage::assistant(self.assistant.clone(), true));
-        ChatSample { messages, tools: Vec::new(), rendered: None }
+        ChatSample { messages, tools: Vec::new(), rendered: None, media: Vec::new() }
     }
 }
 
@@ -199,6 +199,11 @@ pub struct ChatSample {
     /// Set on a sample made by [`ChatSample::answers_as_asked`]: the text to
     /// encode, which `messages` then no longer describe.
     pub rendered: Option<Rendered>,
+    /// The images the conversation's `image_url` parts carried, in the order the prompt places them, as supplied
+    /// (encoded files). Each stands in the text as the placeholder block the [`ImageReader`] wrote for it. A sample
+    /// made from a longer conversation may hold more images than its text places; the trainer's preparation keeps the
+    /// first as many as the text holds (see [`ChatSample::keep_images_placed_in`]).
+    pub media: Vec<ImageBytes>,
 }
 
 /// Text already rendered through a chat template, in order, each stretch
@@ -246,7 +251,18 @@ impl ChatSample {
                 }
             })
             .collect();
-        ChatSample { messages, tools: self.tools.clone(), rendered: None }
+        ChatSample { messages, tools: self.tools.clone(), rendered: None, media: self.media.clone() }
+    }
+
+    /// Drop the images the sample's text does not place: a sample made from a longer conversation (one answer of
+    /// several, each rendered after its own context) holds the whole conversation's images, and its text places the
+    /// first `placed` of them. Refuses a text that places more images than the conversation has.
+    pub fn keep_images_placed_in(&mut self, placed: usize) -> Result<(), String> {
+        if placed > self.media.len() {
+            return Err(format!("the text places {placed} image(s), the record carries {}", self.media.len()));
+        }
+        self.media.truncate(placed);
+        Ok(())
     }
 
     /// Whether a supervised assistant turn calls a tool. Such a turn is not
@@ -288,7 +304,7 @@ impl ChatSample {
 
     /// The first `len` messages as a sample of their own.
     fn until(&self, len: usize) -> ChatSample {
-        ChatSample { messages: self.messages[..len].to_vec(), tools: self.tools.clone(), rendered: None }
+        ChatSample { messages: self.messages[..len].to_vec(), tools: self.tools.clone(), rendered: None, media: self.media.clone() }
     }
 
     /// This sample's last message as one example the way the model is asked
@@ -300,7 +316,7 @@ impl ChatSample {
         let tools = (!self.tools.is_empty()).then(|| minijinja::Value::from(self.tools.clone()));
         let (full, answer) = tmpl.render_with_supervised_suffix(&values, tools, thinking)?;
         let (prompt, completion) = full.split_at(answer.start);
-        Ok(ChatSample { messages: Vec::new(), tools: self.tools.clone(), rendered: Some(Rendered::answer(prompt, completion)) })
+        Ok(ChatSample { messages: Vec::new(), tools: self.tools.clone(), rendered: Some(Rendered::answer(prompt, completion)), media: self.media.clone() })
     }
 
     /// This sample as ONE example in which every supervised answer is
@@ -359,7 +375,7 @@ impl ChatSample {
             segments.push(RenderedSegment { text: completion.to_string(), supervised: true });
             previous_prompt = prompt.to_string();
         }
-        Ok(Some(ChatSample { messages: Vec::new(), tools: self.tools.clone(), rendered: Some(Rendered { segments }) }))
+        Ok(Some(ChatSample { messages: Vec::new(), tools: self.tools.clone(), rendered: Some(Rendered { segments }), media: self.media.clone() }))
     }
 
     /// Whether the last message is the only supervised one and it is an
@@ -471,6 +487,15 @@ impl ChatSample {
     /// (`benchlib/datasets/formats/schema.py`, `validate_record`), so a
     /// malformed export fails the bench build, not just the brain read.
     pub fn from_jsonl(path: &Path) -> io::Result<Vec<ChatSample>> {
+        Self::from_jsonl_with(path, &TextOnly::TRAINER)
+    }
+
+    /// [`Self::from_jsonl`] for a model that may read images: a message's `content` may also be a list of parts,
+    /// `{"type": "text", "text": ...}` and `{"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}`
+    /// (the OpenAI shape the serving API takes), and `reader` turns each image part into the prompt text that stands
+    /// for it. The decoded files travel on the sample ([`ChatSample::media`]). A reader that reads no images
+    /// ([`TextOnly`]) refuses a record with an image part, naming the line.
+    pub fn from_jsonl_with(path: &Path, reader: &dyn ImageReader) -> io::Result<Vec<ChatSample>> {
         let text = std::fs::read_to_string(path)?;
         let mut out = Vec::new();
         for (lineno, line) in text.lines().enumerate() {
@@ -481,7 +506,7 @@ impl ChatSample {
             let record: WireRecord = serde_json::from_str(line).map_err(|e| {
                 io::Error::new(io::ErrorKind::InvalidData, format!("{}:{}: {e}", path.display(), lineno + 1))
             })?;
-            out.push(sample_from_wire(record).map_err(|e| {
+            out.push(sample_from_wire(record, reader).map_err(|e| {
                 io::Error::new(io::ErrorKind::InvalidData, format!("{}:{}: {e}", path.display(), lineno + 1))
             })?);
         }
@@ -531,7 +556,7 @@ pub(crate) struct WireMessage {
     /// Required: bench's exporter always writes this key (possibly `""`),
     /// never omits it -- an absent `content` is a real shape violation, not
     /// something to paper over with a default.
-    pub(crate) content: String,
+    pub(crate) content: WireContent,
     #[serde(default)]
     pub(crate) tool_calls: Vec<WireToolCall>,
     /// Only meaningful on `WireRole::Tool`.
@@ -582,11 +607,13 @@ pub(crate) struct WireFunction {
 /// `benchlib/datasets/formats/schema.py`'s `validate_record` (structural)
 /// plus `build.py`'s automatic tool-call-resolution check (semantic) are the
 /// bench-side half.
-fn sample_from_wire(record: WireRecord) -> Result<ChatSample, String> {
+fn sample_from_wire(record: WireRecord, reader: &dyn ImageReader) -> Result<ChatSample, String> {
     if record.messages.is_empty() {
         return Err("\"messages\" is empty".to_string());
     }
-    Ok(ChatSample { messages: messages_from_wire(record.messages)?, tools: record.tools, rendered: None })
+    let (messages, media) = messages_from_wire_with(record.messages, reader)?;
+    reader.check_record(&media)?;
+    Ok(ChatSample { messages, tools: record.tools, rendered: None, media })
 }
 
 /// One conversation's wire messages as [`ChatMessage`]s, with the semantic
@@ -595,7 +622,14 @@ fn sample_from_wire(record: WireRecord) -> Result<ChatSample, String> {
 /// conversation ([`check_tool_pairing`]). `messages[i]` in an error is the
 /// index into `wire`.
 pub(crate) fn messages_from_wire(wire: Vec<WireMessage>) -> Result<Vec<ChatMessage>, String> {
+    messages_from_wire_with(wire, &TextOnly::TRAINER).map(|(messages, _)| messages)
+}
+
+/// [`messages_from_wire`] for a reader of images: the conversation's messages, and its images in the order its
+/// text places them.
+fn messages_from_wire_with(wire: Vec<WireMessage>, reader: &dyn ImageReader) -> Result<(Vec<ChatMessage>, Vec<ImageBytes>), String> {
     let mut messages = Vec::with_capacity(wire.len());
+    let mut media = Vec::new();
 
     for (i, m) in wire.into_iter().enumerate() {
         let role = match m.role {
@@ -619,10 +653,156 @@ pub(crate) fn messages_from_wire(wire: Vec<WireMessage>) -> Result<Vec<ChatMessa
             return Err(format!("messages[{i}]: a \"tool\"-role message must carry \"tool_call_id\""));
         }
 
-        messages.push(ChatMessage { role: role.to_string(), content: m.content, tool_calls, tool_call_id: m.tool_call_id, reasoning_content: m.reasoning_content, train: m.train });
+        let content = m.content.into_text(reader, m.train, &mut media).map_err(|e| format!("messages[{i}]: {e}"))?;
+        messages.push(ChatMessage { role: role.to_string(), content, tool_calls, tool_call_id: m.tool_call_id, reasoning_content: m.reasoning_content, train: m.train });
     }
     check_tool_pairing(&messages)?;
-    Ok(messages)
+    Ok((messages, media))
+}
+
+/// The lengths of the runs of `token` in `ids`, in order: how many images a text places, and how many rows each takes.
+pub fn token_runs(ids: &[u32], token: u32) -> Vec<usize> {
+    let mut runs = Vec::new();
+    let mut inside = false;
+    for &id in ids {
+        match (id == token, inside) {
+            (true, true) => *runs.last_mut().expect("a run is open") += 1,
+            (true, false) => runs.push(1),
+            _ => {}
+        }
+        inside = id == token;
+    }
+    runs
+}
+
+/// A decoded image file as the record supplied it (PNG, JPEG, ...), shared by every sample made from the record.
+pub type ImageBytes = std::sync::Arc<[u8]>;
+
+/// How a model that reads images turns a record's image parts into training text. The model's side decides what an
+/// image becomes in the prompt (its run of placeholder tokens) and what text it refuses; this module only parses the
+/// record and keeps the files.
+pub trait ImageReader {
+    /// The image at `url` (a `data:` URL) and the prompt text that stands for it, or why it cannot be trained on.
+    fn image(&self, url: &str) -> Result<(ImageBytes, String), String>;
+    /// Refuse message text the model's placeholders would corrupt (a hand-typed placeholder token has no row).
+    fn check_text(&self, text: &str) -> Result<(), String>;
+    /// The token id standing at every row an image contributes, to count the images a text places.
+    fn placeholder_token(&self) -> Option<u32>;
+    /// Refuse a conversation whose images, together, exceed what the model trains on.
+    fn check_record(&self, _media: &[ImageBytes]) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// The reader of a trainer that reads text only: an image part is refused, with the reason it carries.
+pub struct TextOnly(pub &'static str);
+
+impl TextOnly {
+    /// A trainer that reads no images.
+    pub const TRAINER: TextOnly = TextOnly("this trainer reads text only; images are read by the LoRA fine-tune of a model whose checkpoint has a vision tower");
+    /// A base model with no vision tower.
+    pub const NO_TOWER: TextOnly = TextOnly("the base model has no vision tower to read images with");
+}
+
+impl ImageReader for TextOnly {
+    fn image(&self, _url: &str) -> Result<(ImageBytes, String), String> {
+        Err(format!("an image part cannot be trained on: {}", self.0))
+    }
+    fn check_text(&self, _text: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn placeholder_token(&self) -> Option<u32> {
+        None
+    }
+}
+
+/// A message's `content` on the wire: a string, or a list of typed parts.
+pub(crate) enum WireContent {
+    Text(String),
+    Parts(Vec<WirePart>),
+}
+
+impl From<String> for WireContent {
+    fn from(text: String) -> Self {
+        WireContent::Text(text)
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+pub(crate) enum WirePart {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: WireImageUrl },
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WireImageUrl {
+    url: String,
+    /// The OpenAI resolution hint. Accepted, and ignored exactly as the serving API ignores it.
+    #[allow(dead_code)]
+    #[serde(default)]
+    detail: Option<String>,
+}
+
+impl<'de> serde::Deserialize<'de> for WireContent {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = WireContent;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a string, or a list of {\"type\": \"text\"} and {\"type\": \"image_url\"} parts")
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<WireContent, E> {
+                Ok(WireContent::Text(v.to_string()))
+            }
+            fn visit_string<E: serde::de::Error>(self, v: String) -> Result<WireContent, E> {
+                Ok(WireContent::Text(v))
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<WireContent, A::Error> {
+                let mut parts = Vec::new();
+                while let Some(part) = seq.next_element()? {
+                    parts.push(part);
+                }
+                Ok(WireContent::Parts(parts))
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+impl WireContent {
+    /// The message's text, its image parts replaced by what `reader` writes for them (their files pushed on
+    /// `media`). An image in a supervised turn is refused: the model is trained to write text.
+    fn into_text(self, reader: &dyn ImageReader, train: bool, media: &mut Vec<ImageBytes>) -> Result<String, String> {
+        let parts = match self {
+            WireContent::Text(text) => {
+                reader.check_text(&text)?;
+                return Ok(text);
+            }
+            WireContent::Parts(parts) => parts,
+        };
+        let mut text = String::new();
+        for (j, part) in parts.into_iter().enumerate() {
+            match part {
+                WirePart::Text { text: t } => {
+                    reader.check_text(&t).map_err(|e| format!("content[{j}]: {e}"))?;
+                    text.push_str(&t);
+                }
+                WirePart::ImageUrl { image_url } => {
+                    if train {
+                        return Err(format!("content[{j}]: an image part in a supervised turn - the model is trained to write text, not to read images it writes"));
+                    }
+                    let (bytes, stands_for) = reader.image(&image_url.url).map_err(|e| format!("content[{j}]: {e}"))?;
+                    media.push(bytes);
+                    text.push_str(&stands_for);
+                }
+            }
+        }
+        Ok(text)
+    }
 }
 
 /// The pairing rules every conversation that reaches training obeys, whatever
@@ -699,15 +879,23 @@ pub struct EncodedSplit {
     pub ids: Vec<u32>,
     pub mask: Vec<bool>,
     pub starts: Vec<usize>,
+    /// The images of each example, aligned with `starts` ([`crate::chat_media`]).
+    pub media: Vec<Vec<ImageBytes>>,
 }
 
 impl EncodedSplit {
     /// Append one example.
     pub fn push(&mut self, ids: &[u32], mask: &[bool]) {
+        self.push_with_media(ids, mask, &[]);
+    }
+
+    /// [`Self::push`] for an example that also reads `media`, in the order its text places them.
+    pub fn push_with_media(&mut self, ids: &[u32], mask: &[bool], media: &[ImageBytes]) {
         assert_eq!(ids.len(), mask.len(), "EncodedSplit::push: ids and mask differ in length");
         if ids.is_empty() {
             return;
         }
+        self.media.push(media.to_vec());
         self.starts.push(self.ids.len());
         self.ids.extend_from_slice(ids);
         self.mask.extend_from_slice(mask);
@@ -724,7 +912,7 @@ pub fn encode_sample_split(samples: &[ChatSample], tok: &dyn Tokenizer, tmpl: &C
     let mut out = EncodedSplit::default();
     for s in samples {
         let (i, m) = s.encode_with(tok, tmpl, opts)?;
-        out.push(&i, &m);
+        out.push_with_media(&i, &m, &s.media);
     }
     Ok(out)
 }
@@ -736,7 +924,8 @@ pub fn write_split(dir: &Path, split: &str, data: &EncodedSplit) -> io::Result<(
     binio::write_u32_bin(&dir.join(format!("{split}.u32.bin")), &data.ids)?;
     binio::write_mask_bin(&dir.join(format!("{split}.mask.bin")), &data.mask)?;
     let starts: Vec<u64> = data.starts.iter().map(|&s| s as u64).collect();
-    binio::write_u64_bin(&dir.join(format!("{split}.ex.bin")), &starts)
+    binio::write_u64_bin(&dir.join(format!("{split}.ex.bin")), &starts)?;
+    crate::chat_media::write(dir, split, &data.media)
 }
 
 /// Write a train/val split of packed [`ChatSample`]s to `dir` (see the
@@ -816,6 +1005,7 @@ mod tests {
             messages: vec![ChatMessage::user("q"), answering("first", true), answering("context", false), answering("<think>x</think>done", true), call.clone()],
             tools: Vec::new(),
             rendered: None,
+            media: Vec::new(),
         };
         let out = sample.answering_without_thinking("<think>\n\n</think>\n\n");
         let said: Vec<&str> = out.messages.iter().map(|m| m.content.as_str()).collect();
@@ -879,6 +1069,7 @@ mod tests {
             ],
             tools: vec![crate::chat_template::parse_json_ordered(schema).unwrap()],
             rendered: None,
+            media: Vec::new(),
         };
         let served = [
             Served::user("Weather in Paris and Rome?"),
@@ -923,6 +1114,7 @@ mod tests {
             ],
             tools: vec![crate::chat_template::parse_json_ordered(schema).unwrap()],
             rendered: None,
+            media: Vec::new(),
         };
         let served = [
             Served::user("Weather in Paris?"),
@@ -1109,7 +1301,7 @@ mod tests {
     #[test]
     fn a_tool_message_without_an_id_answers_the_next_unanswered_call_in_order() {
         let call = |id: &str| ToolCall { id: Some(id.into()), name: "f".into(), arguments: "{}".into() };
-        let sample = |messages| ChatSample { messages, tools: Vec::new(), rendered: None };
+        let sample = |messages| ChatSample { messages, tools: Vec::new(), rendered: None, media: Vec::new() };
         let calls = ChatMessage::assistant_tool_calls("", vec![call("a"), call("b")], true);
         sample(vec![ChatMessage::user("q"), calls.clone(), ChatMessage::tool_result("1"), ChatMessage::tool_result("2")]).validate().expect("in order");
         let err = sample(vec![ChatMessage::user("q"), calls, ChatMessage::tool_result("1"), ChatMessage::tool_result("2"), ChatMessage::tool_result("3")]).validate().unwrap_err();

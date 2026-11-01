@@ -33,13 +33,7 @@ use crate::b64;
 /// anything is decoded past it.
 pub use capability::blob::MAX_IMAGES;
 
-/// The most pixels one image may declare (a 6000 x 6000 photograph). The image is refused from its header, before it is
-/// decoded: a PNG a few kilobytes long can declare billions of pixels, and a decoded pixel is twelve bytes of float.
-pub const MAX_IMAGE_PIXELS: u64 = 36_000_000;
-
-/// The most pixels all of a request's images may declare together: [`MAX_IMAGES`] full-size photographs would hold
-/// gigabytes while one request runs.
-pub const MAX_REQUEST_PIXELS: u64 = 64_000_000;
+pub use capability::blob::{MAX_IMAGE_PIXELS, MAX_REQUEST_PIXELS};
 
 use capability::blob::image_key;
 
@@ -82,18 +76,10 @@ impl ExtractedMedia {
     }
 }
 
-/// Decode a `data:<mime>;base64,<payload>` URL's payload, or `None` if `url`
-/// isn't a data URL (a real `http(s)://` URL - out of scope, see module doc).
-fn data_url_payload(url: &str) -> Option<&str> {
-    let rest = url.strip_prefix("data:")?;
-    let (_, payload) = rest.split_once(";base64,")?;
-    Some(payload)
-}
-
 /// Decode one image content part's bytes (PNG/JPEG/PPM, via
 /// `imaging::codec::decode`) into brain's HWC-f32 image blob.
 fn decode_image_data_url(data_url: &str) -> Result<Blob, String> {
-    let payload = data_url_payload(data_url).ok_or_else(|| "image_url: only inline 'data:...;base64,...' URLs are supported (no external fetch)".to_string())?;
+    let payload = capability::blob::data_url_payload(data_url).ok_or_else(|| "image_url: only inline 'data:...;base64,...' URLs are supported (no external fetch)".to_string())?;
     ExtractedMedia::decode_image(&b64::decode(payload)?)
 }
 

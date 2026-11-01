@@ -46,6 +46,7 @@ fn tool_conversation(final_train: bool) -> ChatSample {
         ],
         tools: Vec::new(),
         rendered: None,
+        media: Vec::new(),
     }
 }
 

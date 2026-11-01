@@ -27,6 +27,23 @@ pub fn image_blob(hwc: &[f32], w: u32, h: u32, c: u32) -> Blob {
 /// ([`image_key`]).
 pub const MAX_IMAGES: usize = 8;
 
+/// The most pixels one image may declare (a 6000 x 6000 photograph). The image is refused from its header, before it is
+/// decoded: a PNG a few kilobytes long can declare billions of pixels, and a decoded pixel is twelve bytes of float.
+/// Serving and training read images under the same bound.
+pub const MAX_IMAGE_PIXELS: u64 = 36_000_000;
+
+/// The most pixels all of a request's (or a training record's) images may declare together: [`MAX_IMAGES`]
+/// full-size photographs would hold gigabytes while the request runs.
+pub const MAX_REQUEST_PIXELS: u64 = 64_000_000;
+
+/// The base64 payload of an inline `data:<mime>;base64,<payload>` URL, or `None` when `url` is not one (a real
+/// `http(s)://` URL is never fetched on a client's behalf).
+pub fn data_url_payload(url: &str) -> Option<&str> {
+    let rest = url.strip_prefix("data:")?;
+    let (_, payload) = rest.split_once(";base64,")?;
+    Some(payload)
+}
+
 /// The blob name of the `i`th image of a request: `image`, then `image1`, `image2`, ...
 pub fn image_key(i: usize) -> String {
     if i == 0 {
