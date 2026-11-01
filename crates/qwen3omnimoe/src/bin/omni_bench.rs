@@ -38,11 +38,9 @@
 //! measurement - a real-scale `thinker-layer` run sat at 12 MB RSS and next to
 //! no CPU for hours of wall-clock before being killed, entirely inside the
 //! probe (confirmed by bisecting: the process never got past `banner()`'s
-//! first print). `gpu_core::roof` already ships the fix as an env var —
-//! `BRAIN_NO_ROOF=1` skips the probe and `banner()` reports "roofline
-//! unmeasured" instead of guessing. **Set it for any CPU-backend run of this
-//! bench** (`BRAIN_DEVICE=cpu BRAIN_NO_ROOF=1 omni_bench thinker-layer`);
-//! on a real GPU backend the probe is fast and safe to leave on.
+//! first print). `gpu_core::roof` now skips the probe on the CPU backend by
+//! default (`roof::Probe::Auto`) and `banner()` reports "roofline unmeasured"
+//! instead of guessing; on a real GPU backend the probe is fast and runs.
 //!
 //! No `perf/omni` Makefile target: none of this bench's direct analogs
 //! (`qwen_bench`, `vqgan_bench`, `unet_bench`, `zimage_bench`,

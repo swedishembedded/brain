@@ -289,18 +289,8 @@ const MIN_PROBE_SECONDS: f64 = 0.05;
 /// contract `ensure`'s doc already promises callers (render `-`, never a
 /// guess) - rather than blocking indefinitely. Every rung of a healthy probe
 /// clears `MIN_PROBE_SECONDS` in one or two dispatches, so this is a
-/// generous multiple of that, not a tight budget. Override with
-/// `BRAIN_ROOF_BUDGET_S`.
-const DEFAULT_ROOF_BUDGET_S: f64 = 10.0;
-
-fn roof_budget() -> std::time::Duration {
-    let secs = std::env::var("BRAIN_ROOF_BUDGET_S")
-        .ok()
-        .and_then(|v| v.parse::<f64>().ok())
-        .filter(|v| v.is_finite() && *v > 0.0)
-        .unwrap_or(DEFAULT_ROOF_BUDGET_S);
-    std::time::Duration::from_secs_f64(secs)
-}
+/// generous multiple of that, not a tight budget.
+const ROOF_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Continuous work issued before ANY rung of the probe, so the ceiling is
 /// measured at the device's operating point rather than at its idle clock.
@@ -318,8 +308,7 @@ fn roof_budget() -> std::time::Duration {
 ///
 /// The `roof_fma` chain is register-resident and dependency-free, so this
 /// phase is the most direct way there is to ask the device for its clock.
-/// Override with `BRAIN_ROOF_WARMUP_S`; `0` restores the old cold behaviour.
-const DEFAULT_ROOF_WARMUP_S: f64 = 2.0;
+const ROOF_WARMUP: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Trip count for one warm-up dispatch: `1 Mi` threads x 64 iterations x 16
 /// FLOP is about a GFLOP of work, i.e. milliseconds on any real GPU and still
@@ -327,15 +316,6 @@ const DEFAULT_ROOF_WARMUP_S: f64 = 2.0;
 /// count - this phase is not a measurement, and a warm-up whose own dispatch
 /// length grew with the device would be unbounded.
 const WARMUP_ITERS: u32 = 64;
-
-fn roof_warmup() -> std::time::Duration {
-    let secs = std::env::var("BRAIN_ROOF_WARMUP_S")
-        .ok()
-        .and_then(|v| v.parse::<f64>().ok())
-        .filter(|v| v.is_finite() && *v >= 0.0)
-        .unwrap_or(DEFAULT_ROOF_WARMUP_S);
-    std::time::Duration::from_secs_f64(secs)
-}
 
 /// Which (backend, physical device) a cached/persisted [`Roofs`] belongs to.
 ///
@@ -392,7 +372,7 @@ static CACHE: Mutex<Vec<(DeviceKey, Roofs)>> = Mutex::new(Vec::new());
 static MEASURE: Mutex<()> = Mutex::new(());
 
 /// Which `DeviceKey`s have already concluded "unprobeable" this process: the
-/// probe allocates 512 MiB and can take the full `roof_budget()` before
+/// probe allocates 512 MiB and can take the full `ROOF_BUDGET` before
 /// reaching that conclusion, and re-running it on every later `ensure` call
 /// on the SAME device repays that cost for the same answer. Per-device (not
 /// one process-wide flag): a multi-GPU box where one card genuinely cannot be
@@ -402,24 +382,50 @@ static MEASURE: Mutex<()> = Mutex::new(());
 /// to remove, just relocated into this flag instead of `CACHE`.
 static MEASURE_FAILED: Mutex<Vec<DeviceKey>> = Mutex::new(Vec::new());
 
+/// Whether [`ensure`] and [`reprofile`] probe the device ([`set_probe`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Probe {
+    /// Probe every backend but the CPU one (the default).
+    Auto,
+    /// Never probe: the roofs are unmeasured.
+    Off,
+    /// Probe whatever the backend, the CPU one included.
+    On,
+}
+
+static PROBE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Set whether the roofline probe runs, process-wide (the CLI's `--roof-probe auto|off|on`). Never read from the
+/// environment.
+pub fn set_probe(p: Probe) {
+    PROBE.store(p as u8, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn probe() -> Probe {
+    match PROBE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => Probe::Off,
+        2 => Probe::On,
+        _ => Probe::Auto,
+    }
+}
+
 /// The roofs for this process's device, measuring them once if needed.
 ///
 /// Returns `None` when the device cannot be probed - callers must then print
-/// `-`, never a guess. Set `BRAIN_NO_ROOF=1` to skip probing entirely (useful
-/// when a run must not spend the probe's fraction of a second, or to reproduce
-/// pre-roofline output).
+/// `-`, never a guess - or when [`set_probe`] said not to probe: [`Probe::Off`]
+/// skips probing entirely (a run that must not spend the probe's fraction of a
+/// second, or that reproduces pre-roofline output).
 ///
-/// Defaults to skipped (as if `BRAIN_NO_ROOF=1`) on the CPU backend, where the
-/// probe's calibration loop has a known-bad interaction with `backend-cpu`'s
-/// rayon dispatch - a per-call-site opt-out is what every new caller was
-/// once asked to add by hand; this applies it once at the source instead.
-/// Set `BRAIN_NO_ROOF=0` to force the probe to run anyway, even on the CPU
-/// backend.
+/// [`Probe::Auto`] (the default) skips the CPU backend, where the probe's
+/// calibration loop has a known-bad interaction with `backend-cpu`'s rayon
+/// dispatch - a per-call-site opt-out is what every new caller was once asked
+/// to add by hand; this applies it once at the source instead. [`Probe::On`]
+/// runs the probe anyway, even on the CPU backend.
 pub fn ensure(gpu: &Gpu) -> Option<Roofs> {
-    match std::env::var("BRAIN_NO_ROOF").as_deref() {
-        Ok(v) if v != "0" => return None,
-        Ok("0") => {} // explicit opt-in, overrides the CPU-default-off below
-        _ => {
+    match probe() {
+        Probe::Off => return None,
+        Probe::On => {}
+        Probe::Auto => {
             if gpu.caps().class == backend_api::DeviceClass::Cpu {
                 return None;
             }
@@ -522,7 +528,7 @@ pub fn known(backend: &'static str, identity: Option<&backend_api::GpuIdentity>)
 
 /// Force a fresh measurement of `gpu`'s roofline, bypassing (and then
 /// overwriting) both the in-memory and on-disk cache [`ensure`] would
-/// otherwise serve. `BRAIN_NO_ROOF=1` still wins - a caller asking to skip
+/// otherwise serve. [`Probe::Off`] still wins - a caller asking to skip
 /// probing entirely is honored even here, so this is "reprofile if roofing is
 /// allowed at all", not an unconditional override of that opt-out.
 ///
@@ -530,7 +536,7 @@ pub fn known(backend: &'static str, identity: Option<&backend_api::GpuIdentity>)
 /// profile`) needs: every OTHER caller wants [`ensure`]'s cache-first
 /// behavior, and should keep calling that, not this.
 pub fn reprofile(gpu: &Gpu) -> Option<Roofs> {
-    if matches!(std::env::var("BRAIN_NO_ROOF").as_deref(), Ok(v) if v != "0") {
+    if probe() == Probe::Off {
         return None;
     }
     let key = DeviceKey::of(gpu);
@@ -628,15 +634,12 @@ fn best_of(gpu: &Gpu, steps: &[crate::Step], reps: usize, deadline: Instant) -> 
 /// `pub(crate)` (M8.7): `NativeF16Provider::probe` warms the SAME probe
 /// device up before timing it, matching [`measure`]'s own order.
 ///
-/// Adds at most `roof_warmup()` plus one dispatch to `measure`'s wall clock -
+/// Adds at most `ROOF_WARMUP` plus one dispatch to `measure`'s wall clock -
 /// the deadline is checked before each submit, and `WARMUP_ITERS` bounds how
 /// long any single one can be. A device that times out mid-warm-up returns
 /// early and lets the first real rung report the failure.
 pub(crate) fn warm_up(gpu: &Gpu) {
-    let budget = roof_warmup();
-    if budget.is_zero() {
-        return;
-    }
+    let budget = ROOF_WARMUP;
     let inp = gpu.storage(FMA_THREADS as u64);
     let out = gpu.storage(FMA_THREADS as u64);
     let (c, d) = (backend_api::f(0.5), backend_api::f(0.5));
@@ -664,7 +667,7 @@ pub(crate) fn measure_compute(gpu: &Gpu) -> Option<f32> {
     // hardware, which would understate the roof), no NaNs.
     let (c, d) = (backend_api::f(0.5), backend_api::f(0.5));
 
-    let deadline = Instant::now() + roof_budget();
+    let deadline = Instant::now() + ROOF_BUDGET;
     let mut iters: u32 = 256;
     loop {
         if Instant::now() >= deadline {
@@ -705,7 +708,7 @@ fn measure_int8(gpu: &Gpu) -> Option<f32> {
         .compute_capability
         .and_then(|cc| kernels_cuda::get("roof_dp4a").filter(|k| k.min_cc <= cc))
         .and_then(|k| gpu.native_kernel(k, NATIVE_DP4A_BINDINGS).map(|id| (id, k.block_dim)));
-    let deadline = Instant::now() + roof_budget();
+    let deadline = Instant::now() + ROOF_BUDGET;
     let mut iters: u32 = 256;
     loop {
         if Instant::now() >= deadline {
@@ -767,7 +770,7 @@ pub(crate) fn measure_f16(gpu: &Gpu) -> Option<f32> {
     // `1.0`): no overflow, no denormals, no NaNs, sourced from the uniform so
     // the loop cannot be constant-folded away.
     let (c, d) = (backend_api::f(0.5), backend_api::f(0.5));
-    let deadline = Instant::now() + roof_budget();
+    let deadline = Instant::now() + ROOF_BUDGET;
     let mut iters: u32 = 256;
     loop {
         if Instant::now() >= deadline {
@@ -793,7 +796,7 @@ fn measure_bandwidth(gpu: &Gpu, elems: u64) -> Option<f32> {
 
     // One pass over 512 MiB is already only milliseconds on a fast card;
     // repeat the same dispatch until the timed region clears the launch floor.
-    let deadline = Instant::now() + roof_budget();
+    let deadline = Instant::now() + ROOF_BUDGET;
     let mut passes = 1usize;
     loop {
         if Instant::now() >= deadline {

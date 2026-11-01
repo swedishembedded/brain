@@ -549,9 +549,6 @@ crates/gpu-core/src/devices.rs	BRAIN_DEVICE
 crates/gpu-core/src/devices.rs	BRAIN_GPU_INDEX
 crates/gpu-core/src/lower.rs	BRAIN_CONV_COL_MIB
 crates/gpu-core/src/lower.rs	BRAIN_VAE_COL_MIB
-crates/gpu-core/src/roof.rs	BRAIN_NO_ROOF
-crates/gpu-core/src/roof.rs	BRAIN_ROOF_BUDGET_S
-crates/gpu-core/src/roof.rs	BRAIN_ROOF_WARMUP_S
 crates/gpu-core/src/roof.rs	MOE_SKIP_GPU_TESTS
 crates/gpu-core/tests/bench_matmul.rs	BRAIN_BENCH_REPS
 crates/gpu-core/tests/bench_moe_grouped.rs	BRAIN_BENCH_TOKENS

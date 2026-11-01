@@ -675,6 +675,19 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
             // The Gated DeltaNet prefill stays on the portable dispatch sequence: the A/B switch of its cooperative kernels.
             model::gdn::set_fast_kernels(false);
             i += 1;
+        } else if argv[i] == "--roof-probe" {
+            // Whether the roofline probe runs: `auto` (every backend but the CPU one), `off`, or `on` (the CPU backend too).
+            let probe = match argv.get(i + 1).map(String::as_str) {
+                Some("auto") => gpu_core::roof::Probe::Auto,
+                Some("off") => gpu_core::roof::Probe::Off,
+                Some("on") => gpu_core::roof::Probe::On,
+                _ => {
+                    eprintln!("brain: --roof-probe takes auto, off or on");
+                    std::process::exit(2);
+                }
+            };
+            gpu_core::roof::set_probe(probe);
+            i += 2;
         } else if argv[i] == "--no-autotune" {
             // Every kernel slot keeps its default candidate: reproducible benchmarking and A/B runs.
             gpu_core::set_native_autotune(false);

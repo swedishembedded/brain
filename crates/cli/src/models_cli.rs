@@ -338,7 +338,7 @@ fn run_reprofile(locals: &[LocalModel]) {
     let gpu = gpu_core::Gpu::new(&[]);
     match gpu_core::roof::reprofile(&gpu) {
         Some(_) => println!("hardware roofline refreshed - see 'brain roofline' for the full picture"),
-        None => println!("hardware roofline: unavailable on this device/backend (BRAIN_NO_ROOF, or an unprobeable backend)"),
+        None => println!("hardware roofline: unavailable on this device/backend (--roof-probe off, or an unprobeable backend)"),
     }
     let mut priced = 0;
     for l in locals {

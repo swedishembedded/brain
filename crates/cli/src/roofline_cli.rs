@@ -310,7 +310,7 @@ fn gpu_rows(reprofile: bool) -> Vec<Row> {
                 rate: None,
                 rate_unit: None,
                 bandwidth_gbs: None,
-                note: Some("roofline unavailable on this device/backend (BRAIN_NO_ROOF, or an unprobeable backend)".into()),
+                note: Some("roofline unavailable on this device/backend (--roof-probe off, or an unprobeable backend)".into()),
             }),
         }
     }

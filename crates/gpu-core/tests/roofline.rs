@@ -259,7 +259,7 @@ fn reprofile_overwrites_a_stale_cached_value() {
 }
 
 /// `ensure` must not run any probe kernel at all on the CPU backend unless the
-/// caller explicitly opts in (`BRAIN_NO_ROOF=0`) — see the doc on `roof::ensure`.
+/// caller explicitly opts in (`roof::set_probe(Probe::On)`) - see the doc on `roof::ensure`.
 /// A probe that actually launched would take at minimum `MIN_PROBE_SECONDS`
 /// per rung; this test's bound (well under that) is only clearable by the
 /// default-off skip returning immediately.

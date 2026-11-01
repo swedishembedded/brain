@@ -398,11 +398,8 @@ compares the shipped path against bit for bit, and the only way to A/B the two
 in one binary).
 
 **Profiling / roofline internals:**
-`BRAIN_NO_ROOF` (skip the roofline probe), `BRAIN_ROOF_BUDGET_S` (its time
-budget), `BRAIN_ROOF_WARMUP_S` (how long the probe keeps the device busy
-before timing anything, so the roof is measured at the device's operating
-point and not at the frequency an idle GPU parks at; `0` restores the old
-cold-start behaviour and is the A/B switch for that fix),
+`brain --roof-probe auto|off|on` (whether the roofline probe runs; `auto`
+skips the CPU backend),
 `BRAIN_TILE_BUDGET_WORDS` (override the tiled-matmul binding-size budget used
 for kernel selection).
 
