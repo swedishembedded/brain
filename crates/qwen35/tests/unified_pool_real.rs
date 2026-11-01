@@ -129,3 +129,27 @@ fn a_running_sequence_takes_its_state_row_from_the_block_pool_and_gives_it_back(
     assert_eq!(engine.free_blocks(), total, "an idle server holds no state");
     assert_eq!(engine.unified_report().map(|(_, g, l)| (g, l)), Some((0, 0)));
 }
+
+#[test]
+fn a_row_released_while_others_run_stays_backed_for_the_next_sequence() {
+    let Some(path) = checkpoint() else { return };
+    let Some(r) = resident(&path, 4, true, 16) else { return };
+    if !r.0.unified() {
+        brain_testutil::skip_unavailable(&format!("no unified pool here: {}", r.0.unified_pool_notice().unwrap_or_default()));
+        return;
+    }
+    let mut engine = engine(&r);
+    let prompt = engine.instance().tokenize("A server at its concurrency limit replaces a finished sequence at once.");
+    let (mut first, mut second) = (BlockTable::new(), BlockTable::new());
+    engine.prefill(&mut first, &prompt);
+    engine.prefill(&mut second, &prompt);
+    let both = engine.unified_report().expect("a unified engine reports");
+    engine.release_table(&mut second);
+    assert_eq!(engine.unified_report().map(|(_, g, l)| (g, l)), Some((both.1, both.2)), "the released row keeps its memory while the first sequence runs");
+    let mut third = BlockTable::new();
+    engine.prefill(&mut third, &prompt);
+    assert_eq!(engine.unified_report().map(|(_, g, l)| (g, l)), Some((both.1, both.2)), "the next sequence takes that row: no memory is attached");
+    engine.release_table(&mut first);
+    engine.release_table(&mut third);
+    assert_eq!(engine.unified_report().map(|(_, g, l)| (g, l)), Some((0, 0)), "an idle server holds no state");
+}

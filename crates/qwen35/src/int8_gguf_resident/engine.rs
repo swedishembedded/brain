@@ -412,7 +412,9 @@ impl Qwen35GgufEngine {
         let row = match self.inst.kv_layout {
             KvLayout::OneBlock => table.blocks()[0],
             KvLayout::Paged { .. } => {
-                let row = self.free_rows.pop_first().unwrap_or_else(|| panic!("{MODEL}: more sequences than the {} recurrent-state rows", self.inst.max_batch));
+                // A row the last sequence left backed first: it costs no memory operation.
+                let kept = self.unified.as_ref().and_then(super::unipool::StateLedger::retained_row).filter(|r| self.free_rows.remove(r));
+                let row = kept.or_else(|| self.free_rows.pop_first()).unwrap_or_else(|| panic!("{MODEL}: more sequences than the {} recurrent-state rows", self.inst.max_batch));
                 if let Some(ledger) = &mut self.unified {
                     // The scheduler charged the sequence for this ([`PagedDecoder::sequence_state_blocks`]) when it admitted it.
                     ledger.admit(&mut self.alloc, row).unwrap_or_else(|e| panic!("{MODEL}: the state row of a sequence cannot be backed: {e}"));
