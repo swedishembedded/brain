@@ -44,6 +44,8 @@ pub struct Card {
     pub vram_bytes: u64,
     /// CUDA compute capability, when the CUDA backend can run on the card.
     pub compute_capability: Option<(u32, u32)>,
+    /// The CUDA backend's kernels on this card may use ordinary host memory directly (a coherent Grace-Hopper part).
+    pub host_memory_access: bool,
 }
 
 /// What the machine offers.
@@ -65,9 +67,9 @@ impl Hardware {
         HW.get_or_init(|| {
             let cuda = backend_cuda::usable_gpus();
             // A card is matched by its UUID, the identity both enumerations share.
-            let cc_of = |uuid: Option<[u8; 16]>| {
+            let cuda_card = |uuid: Option<[u8; 16]>| {
                 let uuid = uuid?;
-                cuda.as_ref().ok()?.iter().find(|g| g.identity.uuid == Some(uuid)).map(|g| g.compute_capability)
+                cuda.as_ref().ok()?.iter().find(|g| g.identity.uuid == Some(uuid))
             };
             let cards = crate::devices::gpus()
                 .iter()
@@ -76,7 +78,8 @@ impl Hardware {
                     name: d.identity.name.clone(),
                     vendor_id: d.identity.vendor_id,
                     vram_bytes: d.identity.vram_bytes,
-                    compute_capability: cc_of(d.identity.uuid),
+                    compute_capability: cuda_card(d.identity.uuid).map(|g| g.compute_capability),
+                    host_memory_access: cuda_card(d.identity.uuid).is_some_and(|g| g.host_memory_access),
                 })
                 .collect();
             Hardware { cards, cuda_unusable: cuda.err() }
@@ -112,6 +115,14 @@ impl Hardware {
         crate::backend_name() == "cuda"
             && !indices.is_empty()
             && indices.iter().all(|i| self.cards.iter().find(|c| c.index == *i).and_then(|c| c.compute_capability).is_some_and(|cc| which.offered_at(cc)))
+    }
+
+    /// Whether the CUDA backend serves every one of the cards `indices` and its kernels there may use ordinary host memory
+    /// directly: what a memory plan asks before it puts rarely touched state in host memory instead of on the card.
+    pub fn host_memory_on(&self, indices: &[u32]) -> bool {
+        crate::backend_name() == "cuda"
+            && !indices.is_empty()
+            && indices.iter().all(|i| self.cards.iter().find(|c| c.index == *i).is_some_and(|c| c.compute_capability.is_some() && c.host_memory_access))
     }
 
     /// The lowest compute capability among the cards, when every card has one.
@@ -185,7 +196,7 @@ mod tests {
     use super::*;
 
     fn card(index: u32, vendor_id: u32, gib: u64, cc: Option<(u32, u32)>) -> Card {
-        Card { index, name: format!("card{index}"), vendor_id, vram_bytes: gib << 30, compute_capability: cc }
+        Card { index, name: format!("card{index}"), vendor_id, vram_bytes: gib << 30, compute_capability: cc, host_memory_access: false }
     }
 
     #[test]

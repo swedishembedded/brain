@@ -397,6 +397,11 @@ pub struct ServingShape {
     /// into a staging buffer ([`gpu_core::provider::cuda::flash_prefill_staging_bytes`]). `false` charges the
     /// portable kernels' strips.
     pub native_attention: bool,
+    /// The prefix-cache snapshots (one f32 recurrent-state row a cached prompt, written when a prompt ends and read
+    /// when a later one starts with it) live in host memory the kernels use directly: a coherent Grace-Hopper card
+    /// ([`gpu_core::defaults::Hardware::host_memory_on`]). They are then charged to no card, and the pool every sequence
+    /// shares keeps the room (64 snapshots of the 27B are 9.7 GiB).
+    pub snapshots_on_host: bool,
 }
 
 /// An adapter bank's device bytes: beside each layer it corrects, and the row
@@ -410,7 +415,7 @@ pub struct BankBytes {
 impl ServingShape {
     /// `max_batch` sequences of `cap` tokens, no prompt cache, no speculation.
     pub fn new(cap: u32, tier: TierPolicy, kv: KvTier, max_batch: u32) -> ServingShape {
-        ServingShape { cap, tier, kv, max_batch, prefix_slots: 0, kv_pool_rows: 0, spec: SpecCost::NONE, prefill_rows: TENSOR_CORE_PREFILL_TOKENS, adapter_bank: None, head: Dtype::I8, embed: None, gdn_bf16: false, native_attention: false }
+        ServingShape { cap, tier, kv, max_batch, prefix_slots: 0, kv_pool_rows: 0, spec: SpecCost::NONE, prefill_rows: TENSOR_CORE_PREFILL_TOKENS, adapter_bank: None, head: Dtype::I8, embed: None, gdn_bf16: false, native_attention: false, snapshots_on_host: false }
     }
 
     /// The same shape for a stack whose prefill forward may carry `rows` rows (the
@@ -456,7 +461,7 @@ pub(crate) fn layer_state_bytes(cfg: &Qwen35Config, ty: LayerType, shape: &Servi
             // A pool row is the f32 bytes, or half of them when the pools are bf16; the snapshots are always f32.
             let row = cfg.layer_decode_state_bytes(ty, shape.cap, shape.kv);
             slots * if shape.gdn_bf16 { row / 2 } else { row }
-                + shape.prefix_slots as u64 * row
+                + if shape.snapshots_on_host { 0 } else { shape.prefix_slots as u64 * row }
                 + shape.spec.scratch_rows as u64 * (cfg.gdn_state_len() + cfg.gdn_hist_len()) * 4
         }
     }
@@ -994,6 +999,9 @@ struct ShardCaches {
     /// reuse (dummy at non-owned / GQA layers).
     snap_state: Vec<DeviceBuffer>,
     snap_hist: Vec<DeviceBuffer>,
+    /// The snapshot rows are host memory ([`ServingShape::snapshots_on_host`]): they are written and read by the copy
+    /// engine (about 88 GB/s across the chip-to-chip link here), not by a kernel's stores (8-32 GB/s into pageable memory).
+    snapshots_on_host: bool,
     /// `[layer]`: whether this stage owns the layer and it is a Gated-DeltaNet one.
     recurrent: Vec<bool>,
     /// `[layer]`: whether this stage owns the layer and it is a full-attention one.
@@ -1032,7 +1040,10 @@ struct ShardCaches {
 
 impl ShardCaches {
     #[allow(clippy::too_many_arguments)]
-    fn new(gpu: &Gpu, cfg: &Qwen35Config, shard: &Shard, cap: u32, slots: u32, snapshot_rows: u32, kv_tier: KvTier, layout: KvLayout, pool_bf16: bool) -> ShardCaches {
+    /// `snapshots_on_host` puts the prefix-cache snapshot rows in host memory the kernels use directly
+    /// ([`ServingShape::snapshots_on_host`]); a host allocation the device refuses is an error, never a quiet one on the card
+    /// the plan did not charge.
+    fn new(gpu: &Gpu, cfg: &Qwen35Config, shard: &Shard, cap: u32, slots: u32, snapshot_rows: u32, snapshots_on_host: bool, kv_tier: KvTier, layout: KvLayout, pool_bf16: bool) -> Result<ShardCaches, String> {
         assert!(slots > 0, "{MODEL}: ShardCaches needs at least one slot");
         let kv = cfg.kv_dim() as u64;
         let (state, hist) = (cfg.gdn_state_len(), cfg.gdn_hist_len());
@@ -1061,8 +1072,14 @@ impl ShardCaches {
             pool_hist.push(gpu.storage(ph));
             work_state.push(gpu.storage(ws));
             work_hist.push(gpu.storage(wh));
-            snap_state.push(gpu.storage(ss));
-            snap_hist.push(gpu.storage(sh));
+            if snapshots_on_host && lin && snapshot_rows > 0 {
+                let host = |label: &str, words: u64| gpu.try_alloc_placed(label, words * 4, gpu_core::AllocPolicy::System).map_err(|e| format!("{MODEL}: the prefix-cache snapshots in host memory: {e}"));
+                snap_state.push(host("qwen35.gdn_snapshot_state", ss)?);
+                snap_hist.push(host("qwen35.gdn_snapshot_hist", sh)?);
+            } else {
+                snap_state.push(gpu.storage(ss));
+                snap_hist.push(gpu.storage(sh));
+            }
         }
         let scatter = gpu.kernel_index("pool_rows_scatter2").expect("pool_rows_scatter2 is in the qwen35 kernel set");
         let gather = gpu.kernel_index("pool_rows_gather2").expect("pool_rows_gather2 is in the qwen35 kernel set");
@@ -1084,10 +1101,10 @@ impl ShardCaches {
             }
         };
         let (zero_state, zero_hist) = (gpu.storage(state), gpu.storage(hist));
-        let caches = ShardCaches { gqa_kv, pool_state, pool_hist, work_state, work_hist, snap_state, snap_hist, recurrent, full: full_layers, slots, cap, block_rows, paged, slot_tables, verify_snaps: Vec::new(), pool_bf16, scatter, gather, pool_scatter, pool_gather, copy_within, zero_state, zero_hist };
+        let caches = ShardCaches { gqa_kv, pool_state, pool_hist, work_state, work_hist, snap_state, snap_hist, snapshots_on_host, recurrent, full: full_layers, slots, cap, block_rows, paged, slot_tables, verify_snaps: Vec::new(), pool_bf16, scatter, gather, pool_scatter, pool_gather, copy_within, zero_state, zero_hist };
         gpu.submit(&[&caches.zero_state, &caches.zero_hist], &[]);
         caches.reset(gpu);
-        caches
+        Ok(caches)
     }
 
     /// Zero every GDN recurrent state / conv history (pool and work) for fresh
@@ -1160,6 +1177,17 @@ impl ShardCaches {
     /// owned recurrent layer) - the state a later prompt that starts with this
     /// one resumes from.
     fn snapshot_work(&self, gpu: &Gpu, cfg: &Qwen35Config, row: u32) {
+        if self.snapshots_on_host {
+            // The work copy is one row: each layer's state and window are one contiguous copy into row `row`.
+            let (sl, hl) = (cfg.gdn_state_len() * 4, cfg.gdn_hist_len() * 4);
+            for l in (0..self.snap_state.len()).filter(|&l| self.recurrent[l]) {
+                gpu.copy_to(&self.work_state[l], 0, gpu, &self.snap_state[l], row as u64 * sl, sl);
+                gpu.copy_to(&self.work_hist[l], 0, gpu, &self.snap_hist[l], row as u64 * hl, hl);
+            }
+            // No wait: the copies are ordered before the kernels that overwrite the work rows, and nothing on the host
+            // reads a snapshot (waiting here cost a 6.7 ms gap in an 8K prompt's prefill).
+            return;
+        }
         let ids = gpu.storage(1);
         gpu.write(&ids, &[row]);
         let (sl, hl) = (cfg.gdn_state_len() as u32, cfg.gdn_hist_len() as u32);
@@ -1174,6 +1202,15 @@ impl ShardCaches {
     /// Make snapshot row `row` the working GDN state (one row gather per owned
     /// recurrent layer).
     fn restore_work(&self, gpu: &Gpu, cfg: &Qwen35Config, row: u32) {
+        if self.snapshots_on_host {
+            let (sl, hl) = (cfg.gdn_state_len() * 4, cfg.gdn_hist_len() * 4);
+            for l in (0..self.snap_state.len()).filter(|&l| self.recurrent[l]) {
+                gpu.copy_to(&self.snap_state[l], row as u64 * sl, gpu, &self.work_state[l], 0, sl);
+                gpu.copy_to(&self.snap_hist[l], row as u64 * hl, gpu, &self.work_hist[l], 0, hl);
+            }
+            // No wait: the kernels that read the work rows are ordered after the copies.
+            return;
+        }
         let ids = gpu.storage(1);
         gpu.write(&ids, &[row]);
         let (sl, hl) = (cfg.gdn_state_len() as u32, cfg.gdn_hist_len() as u32);
@@ -3988,6 +4025,14 @@ impl Qwen35GgufResident {
         longest.ok_or_else(|| format!("{} does not fit across the {} budgeted device(s) even with a one-token context", self.gguf_path, self.devices.len()))
     }
 
+    /// Whether this resident keeps its prefix-cache snapshots in host memory ([`ServingShape::snapshots_on_host`]): it keeps
+    /// some, and every card it is budgeted on lets the kernels use host memory directly. The one answer the memory plan
+    /// and the allocation both take.
+    fn snapshots_on_host(&self) -> bool {
+        let cards: Vec<u32> = self.devices.iter().filter_map(|(d, _)| if let Device::Gpu(i) = d { Some(*i) } else { None }).collect();
+        self.prefix_slots > 0 && gpu_core::defaults::Hardware::detected().host_memory_on(&cards)
+    }
+
     /// The largest shared KV pool, in rows, this configuration leaves room for
     /// when every sequence is held to `cap` tokens ([`auto_pool_rows`]).
     pub fn longest_pool(&self, cap: u32) -> Result<u32, String> {
@@ -4016,6 +4061,7 @@ impl Qwen35GgufResident {
         let verify = crate::model::verify::verify_shape_supported(cfg) && [gpu_core::Fused::GdnVerifyPool, gpu_core::Fused::GdnVerifyPoolStreamBf16, gpu_core::Fused::GdnCommitPool, gpu_core::Fused::GdnCommitPoolBf16].iter().all(|&k| hw.offers_fused(k, &cards));
         ServingShape {
             native_attention: native_attention(cfg),
+            snapshots_on_host: self.snapshots_on_host(),
             prefix_slots: self.prefix_slots,
             kv_pool_rows: self.paged_pool_rows(),
             // Exact decode runs plain steps, so the verify scratch is not
@@ -4234,7 +4280,7 @@ impl Qwen35GgufResident {
             // instance's per-sequence context.
             qwen35.set_exact_decode(self.exact_decode.then_some(self.cap));
             qwen35.set_act_precision(self.act_choice.resolve(qwen35.gpu.caps().arch.compute_capability));
-            let caches = ShardCaches::new(&qwen35.gpu, &cfg, shard, self.cap, state_rows, self.prefix_slots, self.kv_tier, layout, self.gdn_state.is_bf16());
+            let caches = ShardCaches::new(&qwen35.gpu, &cfg, shard, self.cap, state_rows, self.prefix_slots, self.snapshots_on_host(), self.kv_tier, layout, self.gdn_state.is_bf16())?;
             shards.push(DeviceShard { qwen35, caches });
         }
 
@@ -4838,6 +4884,20 @@ mod tests {
         assert_eq!(sizing_refusal(&cfg, &shape, &[tight + workspace]), None, "with the workspace beside it the configuration fits");
         let why = sizing_refusal(&cfg, &shape, &[tight]).expect("no room for the prefill round");
         assert!(why.contains("prefill"), "the refusal names the prefill workspace: {why}");
+    }
+
+    /// Prefix-cache snapshots kept in host memory are charged to no card: the recurrent layers' state shrinks by exactly
+    /// the snapshot rows (64 cached prompts of the 27B are 9.7 GiB of f32 rows), which is room the shared KV pool keeps.
+    #[test]
+    fn host_snapshots_leave_their_bytes_to_the_pool() {
+        let cfg = Qwen35Config::qwen38_27b();
+        let card = ServingShape { prefix_slots: 64, kv_pool_rows: 737_280, ..ServingShape::new(737_280, TierPolicy::uniform(Dtype::I8), KvTier::INT8, 64) };
+        let host = ServingShape { snapshots_on_host: true, ..card.clone() };
+        let (on_card, on_host) = (serving_cost(&cfg, &card), serving_cost(&cfg, &host));
+        let linear = cfg.layer_types().into_iter().filter(|t| *t == LayerType::Linear).count() as u64;
+        let row = cfg.layer_decode_state_bytes(LayerType::Linear, 737_280, KvTier::INT8);
+        assert_eq!(on_card.total() - on_host.total(), linear * 64 * row, "exactly the snapshot rows move off the card");
+        assert!(linear * 64 * row > 9 << 30, "and they are worth it: {} bytes", linear * 64 * row);
     }
 
     /// The native attention kernels keep no context-long score strips at decode (one strip's worth a row grows with the
