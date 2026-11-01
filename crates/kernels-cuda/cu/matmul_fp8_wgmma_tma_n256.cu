@@ -34,12 +34,11 @@ __device__ __align__(128) unsigned long long brain_fwt_maps[BRAIN_FWT_MAX_CTAS][
 #define BRAIN_FWT_BM 128
 #define BRAIN_FWT_BN 256
 
-// Bytes per ring stage: the activation tile and the weight tile (128 rows x 128 bytes each), then 1 KiB for the scales
-// (128 activation scales and one weight scale): a whole number of KiB, so every swizzled tile stays 1024-byte aligned.
+// Bytes per ring stage: the activation tile and the weight tile (128 rows x 128 bytes each), a whole number of KiB so every swizzled tile stays
+// 1024-byte aligned. The block scales are not staged: the consumers read them from global memory a block ahead.
 #define BRAIN_FWT_X_BYTES (BRAIN_FWT_BM * 128)
 #define BRAIN_FWT_W_BYTES (BRAIN_FWT_BN * 128)
-#define BRAIN_FWT_S_BYTES 1024
-#define BRAIN_FWT_STAGE_BYTES (BRAIN_FWT_X_BYTES + BRAIN_FWT_W_BYTES + BRAIN_FWT_S_BYTES)
+#define BRAIN_FWT_STAGE_BYTES (BRAIN_FWT_X_BYTES + BRAIN_FWT_W_BYTES)
 
 #ifndef BRAIN_PDL_ENTRY
 #define BRAIN_PDL_ENTRY() do {} while (0)
@@ -134,14 +133,13 @@ BRAIN_FWT_ENTRY(const unsigned int* params, const unsigned int* xq, const unsign
 
     const unsigned int raw_addr = brain_fwt_smem(brain_fwt_smem_raw);
     const unsigned int base = (raw_addr + 1023u) & ~1023u;
-    unsigned char* const gen = brain_fwt_smem_raw + (base - raw_addr);
     const unsigned int full_bar = base + STAGES * BRAIN_FWT_STAGE_BYTES;  // STAGES mbarriers, then STAGES more
     const unsigned int empty_bar = full_bar + 8u * STAGES;
     const unsigned int epi_base = (empty_bar + 8u * STAGES + 1023u) & ~1023u;  // 16 boxes of 1 KiB: two a consumer warp
 
     if (tid == 0u) {
         for (int s = 0; s < STAGES; ++s) {
-            brain_fwt_mbar_init(full_bar + 8u * s, 33u);    // the TMA thread's expect_tx arrival and the 32 lanes' cp.async arrivals
+            brain_fwt_mbar_init(full_bar + 8u * s, 1u);     // the TMA thread's expect_tx arrival
             brain_fwt_mbar_init(empty_bar + 8u * s, 256u);  // the consumers' threads
         }
         asm volatile("fence.mbarrier_init.release.cluster;\n" ::: "memory");
@@ -167,17 +165,6 @@ BRAIN_FWT_ENTRY(const unsigned int* params, const unsigned int* xq, const unsign
         for (unsigned int tile = blockIdx.x; tile < tiles; tile += gridDim.x) {
             unsigned int m0, n0;
             brain_fwt_tile(tile, tiles_m, tiles_n, m0, n0);
-            const float* sx_src[4];
-            bool sx_ok[4];
-#pragma unroll
-            for (int h = 0; h < 4; ++h) {
-                const unsigned int r = m0 + lane + 32u * h;
-                sx_ok[h] = r < M;
-                sx_src[h] = sx + (unsigned long long)(sx_ok[h] ? r : 0u) * kblocks;
-            }
-            // Lane 0 and 1 stage the weight scales of the tile's two 128-column blocks (the second clamped to the last block when N ends inside the tile).
-            const unsigned int nb = min((n0 >> 7) + (lane & 1u), nblocks - 1u);
-            const float* const sw_src = sw + (unsigned long long)nb * kblocks;
             for (unsigned int kt = 0; kt < kblocks; ++kt, ++it) {
                 const unsigned int slot = it % STAGES;
                 if (it >= (unsigned int)STAGES) { brain_fwt_mbar_wait(empty_bar + 8u * slot, ((it / STAGES) - 1u) & 1u); }
@@ -188,10 +175,6 @@ BRAIN_FWT_ENTRY(const unsigned int* params, const unsigned int* xq, const unsign
                     brain_fwt_tma_load(st + BRAIN_FWT_X_BYTES, gmaps + 16, kt * 128, n0, full_bar + 8u * slot);
                     brain_fwt_tma_load(st + BRAIN_FWT_X_BYTES + 128u * 128u, gmaps + 16, kt * 128, n0 + 128u, full_bar + 8u * slot);
                 }
-#pragma unroll
-                for (int h = 0; h < 4; ++h) { brain_fwt_cp4(st + BRAIN_FWT_X_BYTES + BRAIN_FWT_W_BYTES + (lane + 32u * h) * 4u, sx_src[h] + kt, sx_ok[h] ? 4u : 0u); }
-                if (lane < 2u) { brain_fwt_cp4(st + BRAIN_FWT_X_BYTES + BRAIN_FWT_W_BYTES + 512u + lane * 4u, sw_src + kt, 4u); }
-                brain_fwt_mbar_arrive_cp_async(full_bar + 8u * slot);
             }
         }
         brain_fwt_wait<0>();
@@ -205,9 +188,18 @@ BRAIN_FWT_ENTRY(const unsigned int* params, const unsigned int* xq, const unsign
     const unsigned long long* const gmaps_out = &brain_fwt_maps[smid % BRAIN_FWT_MAX_CTAS][2][0];
     bool out_map_acquired = false;
     const unsigned int frow = cwg * 64u + warp * 16u + (lane >> 2);
-    const unsigned int fcol = (lane & 3u) * 2u;
     const unsigned long long a_desc = brain_fwt_desc(base + cwg * (64u * 128u)), b_desc = brain_fwt_desc(base + BRAIN_FWT_X_BYTES);
     unsigned int it = 0;
+    // Scales of the first block of a tile for this thread's two rows and the tile's two weight column blocks.
+    float a0 = 0.0f, a1 = 0.0f, b0 = 0.0f, b1 = 0.0f;
+    auto row_live = [&](unsigned int tile_m0, unsigned int offset) { return tile_m0 + frow + offset < M; };
+    auto first_scales = [&](unsigned int tile_m0, unsigned int tile_n0) {
+        a0 = row_live(tile_m0, 0u) ? sx[(unsigned long long)(tile_m0 + frow) * kblocks] : 0.0f;
+        a1 = row_live(tile_m0, 8u) ? sx[(unsigned long long)(tile_m0 + frow + 8u) * kblocks] : 0.0f;
+        b0 = sw[(unsigned long long)min(tile_n0 >> 7, nblocks - 1u) * kblocks];
+        b1 = sw[(unsigned long long)min((tile_n0 >> 7) + 1u, nblocks - 1u) * kblocks];
+    };
+    bool first_requested = false;
     for (unsigned int tile = blockIdx.x; tile < tiles; tile += gridDim.x) {
         unsigned int m0, n0;
         brain_fwt_tile(tile, tiles_m, tiles_n, m0, n0);
@@ -217,6 +209,14 @@ BRAIN_FWT_ENTRY(const unsigned int* params, const unsigned int* xq, const unsign
 #pragma unroll
         for (int i = 0; i < 128; ++i) { t[i] = 0.0f; }
         float se[2][2] = {{1.0f, 1.0f}, {1.0f, 1.0f}};
+        // The scales are read from global memory a block ahead of their use (rows past M have scale 0, as the zero-filled copies had), so the
+        // loads' latency hides behind the block before; the first block's were requested before the previous tile's epilogue.
+        const float* const sxp0 = sx + (unsigned long long)(row_live(m0, 0u) ? m0 + frow : 0u) * kblocks;
+        const float* const sxp1 = sx + (unsigned long long)(row_live(m0, 8u) ? m0 + frow + 8u : 0u) * kblocks;
+        const float live0 = row_live(m0, 0u) ? 1.0f : 0.0f, live1 = row_live(m0, 8u) ? 1.0f : 0.0f;
+        const float* const swp0 = sw + (unsigned long long)min(n0 >> 7, nblocks - 1u) * kblocks;
+        const float* const swp1 = sw + (unsigned long long)min((n0 >> 7) + 1u, nblocks - 1u) * kblocks;
+        if (!first_requested) { first_scales(m0, n0); }
         for (unsigned int kt = 0; kt < kblocks; ++kt, ++it) {
             const unsigned int slot = it % STAGES;
             brain_fwt_mbar_wait(full_bar + 8u * slot, (it / STAGES) & 1u);
@@ -224,13 +224,16 @@ BRAIN_FWT_ENTRY(const unsigned int* params, const unsigned int* xq, const unsign
             const unsigned long long slot_units = static_cast<unsigned long long>(slot) * (BRAIN_FWT_STAGE_BYTES >> 4);
             const unsigned long long da = a_desc + slot_units, db = b_desc + slot_units;
 
-            const float* const sxs = reinterpret_cast<const float*>(gen + slot * BRAIN_FWT_STAGE_BYTES + BRAIN_FWT_X_BYTES + BRAIN_FWT_W_BYTES);
+            const unsigned int nk = min(kt + 1u, kblocks - 1u);
+            const float na0 = sxp0[nk] * live0, na1 = sxp1[nk] * live1, nb0 = swp0[nk], nb1 = swp1[nk];
+            const float xs[2] = {a0, a1}, ws[2] = {b0, b1};
+            a0 = na0; a1 = na1; b0 = nb0; b1 = nb1;
             float r[2][2];
 #pragma unroll
             for (int row = 0; row < 2; ++row) {
 #pragma unroll
                 for (int h = 0; h < 2; ++h) {
-                    float s = sxs[frow + 8u * row] * sxs[128 + h];
+                    float s = xs[row] * ws[h];
                     if (!(s > 0.0f)) { s = se[row][h]; }  // a block of zeros: the sum keeps its scale
                     r[row][h] = brain_fwt_ratio(se[row][h], s);
                     se[row][h] = s;
@@ -250,6 +253,14 @@ BRAIN_FWT_ENTRY(const unsigned int* params, const unsigned int* xq, const unsign
             brain_fwt_wg_commit();
             brain_fwt_wg_wait<0>();
             brain_fwt_mbar_arrive(empty_bar + 8u * slot);  // the slot's tiles and scales are read
+        }
+
+        // The next tile's first scales are requested now, so the epilogue hides their latency.
+        first_requested = tile + gridDim.x < tiles;
+        if (first_requested) {
+            unsigned int nm0, nn0;
+            brain_fwt_tile(tile + gridDim.x, tiles_m, tiles_n, nm0, nn0);
+            first_scales(nm0, nn0);
         }
 
         // out[m, n] = t * scale: the warp's 16 rows go to shared memory 16 columns at a time (thread layout of the m64n256 accumulator: rows r and

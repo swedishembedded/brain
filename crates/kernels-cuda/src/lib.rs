@@ -159,10 +159,10 @@ pub const fn fp8_wgmma_tma_dynamic_shared_bytes(stages: u32) -> u32 {
     stages * (2 * 128 * 128 + 1024 + 16) + 1024
 }
 /// Dynamic shared memory per block of `matmul_fp8_wgmma_tma_n256` with `stages` ring stages (a 128-row activation tile and a 256-row weight tile
-/// of 128-byte rows, then 1 KiB of scales: 50176 bytes each), 1 KiB for the two mbarriers a stage, 16 KiB of output boxes (two 1 KiB boxes for each
+/// of 128-byte rows: 49152 bytes each), 1 KiB for the two mbarriers a stage, 16 KiB of output boxes (two 1 KiB boxes for each
 /// of the eight consumer warps) and 1 KiB to align the ring to the 128-byte swizzle pattern. A test holds it to the source.
 pub const fn fp8_wgmma_tma_n256_dynamic_shared_bytes(stages: u32) -> u32 {
-    stages * (128 * 128 + 256 * 128 + 1024) + 1024 + 16 * 1024 + 1024
+    stages * (128 * 128 + 256 * 128) + 1024 + 16 * 1024 + 1024
 }
 /// Dynamic shared memory per block of `matmul_fp8_wgmma_swap_tma_*` with `bn` weight rows a tile, `stages` ring stages (a 64-row x tile and a
 /// `bn`-row weight tile of 128-byte rows, 512 bytes of scales and two 8-byte mbarriers each), 1 KiB to align the ring to the 128-byte swizzle pattern
@@ -4789,8 +4789,8 @@ mod tests {
         assert_eq!(fp8_wgmma_swap_dynamic_shared_bytes(128, 64, 4), 4 * (128 * 128 + 64 * 128 + 512) + 1024);
         assert_eq!(fp8_wgmma_tma_dynamic_shared_bytes(5), 5 * (128 * 128 * 2 + 1024 + 16) + 1024);
         has("matmul_fp8_wgmma_tma", &["#define BRAIN_FWT_STAGES 5", "#define BRAIN_FWT_MAX_CTAS 132  // grid size at most, and the SM slots of the maps", "#define BRAIN_FWT_X_BYTES (BRAIN_FWT_BM * 128)", "#define BRAIN_FWT_W_BYTES (BRAIN_FWT_BN * 128)", "#define BRAIN_FWT_S_BYTES 1024"]);
-        assert_eq!(fp8_wgmma_tma_n256_dynamic_shared_bytes(4), 4 * (128 * 128 + 256 * 128 + 1024) + 1024 + 16 * 1024 + 1024);
-        has("matmul_fp8_wgmma_tma_n256", &["#define BRAIN_FWT_STAGES 4", "#define BRAIN_FWT_MAX_CTAS 132  // grid size at most, and the SM slots of the maps", "#define BRAIN_FWT_X_BYTES (BRAIN_FWT_BM * 128)", "#define BRAIN_FWT_W_BYTES (BRAIN_FWT_BN * 128)", "#define BRAIN_FWT_S_BYTES 1024", "#define BRAIN_FWT_BN 256"]);
+        assert_eq!(fp8_wgmma_tma_n256_dynamic_shared_bytes(4), 4 * (128 * 128 + 256 * 128) + 1024 + 16 * 1024 + 1024);
+        has("matmul_fp8_wgmma_tma_n256", &["#define BRAIN_FWT_STAGES 4", "#define BRAIN_FWT_MAX_CTAS 132  // grid size at most, and the SM slots of the maps", "#define BRAIN_FWT_X_BYTES (BRAIN_FWT_BM * 128)", "#define BRAIN_FWT_W_BYTES (BRAIN_FWT_BN * 128)", "#define BRAIN_FWT_BN 256"]);
         assert_eq!(FP8_WGMMA_DYNAMIC_SHARED_BYTES, 4 * (128 * 128 * 2 + 1024) + 1024);
         assert_eq!((128 * 128 * 2 + 1024) % 1024, 0);
         has(
