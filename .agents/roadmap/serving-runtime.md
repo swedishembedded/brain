@@ -509,3 +509,18 @@ Mixed-iteration idle (knowledge 392, 2026-10-30): a prompt start no longer waits
   GDN `in_proj_qkv` + `in_proj_z` as one FP8 product at decode (the reference's 16384-wide product runs 3.28 TB/s; `Ops::matmul_group` has no FP8 form),
   the 16-row `down` GEMV (35.7 vs 31.0 us), GDN prefill (1.9 vs 1.2 s of an 8Kx16 cell), the remaining tokenize/render on the serving thread (a text
   front end has no background parse), an explicit `--speculative auto` that still loses at many streams (8Kx16 267-273 tok/s with no batch limit).
+- 2026-11-01 (FP8 128 x 256 prefill GEMM against the reference, knowledge 407): at 4096 rows the reference (DeepGEMM `sm90_fp8_gemm_1d2d`, 256 x 128 tile, 2-block multicast cluster)
+  kept the tensor pipe 88.6 % busy (ncu, equal clock) and `matmul_fp8_wgmma_tma_n256` 76.7 %; a copy of the loop with no scale logic reached 89 %, so the per-block scale path
+  (not the epilogue, whose removal moved nothing, and not L2 traffic) was the gap. Landed in two commits: the consumer loop's instruction diet (`rcp.approx.ftz` ratios, descriptors as base
+  plus constants, role through a shuffle for the uniform datapath: 402 -> 330 M instructions) and the consumers loading their own block scales from global memory a block ahead (and
+  the next tile's first block before the epilogue) instead of the producer's 4-byte `cp.async` staging: SM active cycles 1.715 -> 1.648 -> 1.550 M, ncu duration at the base clock
+  1.49 -> 1.37 ms against the reference's 1.30; bit-identical sums (`qwen35_fp8_parity` 8 x 1500, 32 steps: 98.44 % / KL 1.784e-3). TFLOPS at 2048 / 4096 / 8192 rows gate/up
+  1106 / 1116 / 1106 -> 1161 / 1179 / 1178, down 1056 / 1166 / 1153 -> 1133 / 1208 / 1143, qkv 10240 1125 / 1107 / 1086 -> 1192 / 1165 / 1142, out 965 / 1127 / 1122 -> 1031 / 1190 /
+  1163 (the reference on the same card, interleaved: gate/up 4096 rows 1134-1175 us against our 1237, 1306 before). Measured and dropped: a fence-free 2-block TMA multicast of the weight tile (L2
+  bytes 9.44 -> 7.94 GB, duration unchanged), warpgroup turn-taking on the tensor core, producer-computed ratios (+10 % cycles), ratio prefetch before the wgmma wait (+15 %), two accumulator
+  halves with `wait_group 1` (ptxas serialises the wgmma, C7514). Served A/B on one card (`matrix.sh`, SPEC unset, 8 prompts a cell, two rounds each, base = origin/main before):
+  output tok/s / median TTFT s, mean of two rounds, base -> now: 8K x 1 77.6 / 0.595 -> 83.2 / 0.570 (speculation decides the single-stream rate: 75.5-90.4 within a binary), 8K x 16 245.9 / 3.05 ->
+  246.8 / 3.06 (rounds 3.05, 3.05 -> 2.94, 3.18: no difference), 16K x 16 145.5 / 6.16 -> 150.0 / 5.93 (-3.7 % TTFT). An earlier pair with the instruction diet alone (base mean of two rounds,
+  8K x 16 3.18 -> 3.00 s, 16K x 16 6.20 -> 5.97 s) shows the same size; the card-to-card spread of one binary (3.05-3.26 s at 8K x 16) is as large as the gain.
+  Open: the epilogue's 16 fences against the reference's one (STSM batch, one TMA store a tile), the reference's 256 x 128 tile with two 64-row waves a warpgroup, and the multicast again on
+  top of the scale change.
