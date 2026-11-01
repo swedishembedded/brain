@@ -2875,7 +2875,10 @@ impl Fused {
             Fused::AddRmsQuantE4m3 => matches!(params, [d, rows, _, _] if *rows >= 1 && *d >= 128 && d % 128 == 0 && *d <= 64 * 80),
             // 1024 threads per row keep `k / 1024` elements each in registers:
             // up to 18 of them, in whole 32-element scale groups.
-            Fused::QuantEpilogue => matches!(params, [k, rows, mode, _] if *rows >= 1 && *k >= 32 && k % 32 == 0 && *k <= 1024 * 18 && *mode <= 2),
+            // The inputs are rows of `stride` elements and `b` starts `b_offset` into each: both fit in the stride.
+            Fused::QuantEpilogue => {
+                matches!(params, [k, rows, mode, _, stride, b_offset] if *rows >= 1 && *k >= 32 && k % 32 == 0 && *k <= 1024 * 18 && *mode <= 2 && u64::from(*b_offset) + u64::from(*k) <= u64::from(*stride))
+            }
             // A block is one key head's `group` value heads, 128 threads each
             // (3 is what one SM's registers hold at 128 live state words).
             Fused::GdnDecode => {

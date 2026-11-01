@@ -48,7 +48,7 @@ fn check(gpu: &Gpu, rows: u32, heads: u32, hd: u32, ctx_v: &[f32], q_full_v: &[f
     let y_r = gpu.storage(n);
     let (xq, sx) = (gpu.storage(1), gpu.storage(1));
     let split = gpu.step(CONCAT_SPLIT, &[&q_full, &gate], &[rows * heads, 2, 1, 1, 1, hd], rows * heads * hd);
-    let epilogue = gpu.fused_step(Fused::QuantEpilogue, &[&ctx, &gate, &y_r, &xq, &sx], &[k, rows, 2, 1]).expect("quant_epilogue offered");
+    let epilogue = gpu.fused_step(Fused::QuantEpilogue, &[&ctx, &gate, &y_r, &xq, &sx], &[k, rows, 2, 1, k, 0]).expect("quant_epilogue offered");
     gpu.submit(&[], &[split, epilogue]);
     let mut steps = Vec::new();
     let x = gpu_core::provider::library::Operand { buf: &y_r, range: (0, n) };

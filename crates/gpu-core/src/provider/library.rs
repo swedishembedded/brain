@@ -258,8 +258,22 @@ pub fn silu_mul_quantize_e4m3_serves(gpu: &Gpu, rows: u32, k: u32) -> bool {
 /// consumer of the fp32 rows (an adapter, a backward) needs; without it the pass writes 4 bytes an element less.
 /// `None` when the device declines the kernel or the shape is not one it takes (`k` a multiple of 128).
 pub fn silu_mul_quantize_e4m3_rows(gpu: &Gpu, steps: &mut Vec<Step>, gate: &DeviceBuffer, up: &DeviceBuffer, input: crate::ActPrecision, product: Option<&DeviceBuffer>, rows: u32, k: u32) -> Option<(DeviceBuffer, DeviceBuffer)> {
+    silu_mul_quantize_e4m3_strided(gpu, steps, gate, up, input, product, rows, k, k, 0)
+}
+
+/// [`silu_mul_quantize_e4m3_rows`] over the two halves of ONE `[rows, 2 k]` product, gate columns first (the output of a
+/// fused gate|up weight): the pass reads them in place, and its result equals the dense pair's over the halves copied apart.
+pub fn silu_mul_quantize_e4m3_gate_up(gpu: &Gpu, steps: &mut Vec<Step>, gate_up: &DeviceBuffer, input: crate::ActPrecision, product: Option<&DeviceBuffer>, rows: u32, k: u32) -> Option<(DeviceBuffer, DeviceBuffer)> {
+    silu_mul_quantize_e4m3_strided(gpu, steps, gate_up, gate_up, input, product, rows, k, 2 * k, k)
+}
+
+/// The kernel's one launch: element `c` of row `r` of the gate is `gate[r * stride + c]` and of the up
+/// `up[r * stride + up_offset + c]` (a dense pair is stride `k`, offset 0).
+#[allow(clippy::too_many_arguments)]
+fn silu_mul_quantize_e4m3_strided(gpu: &Gpu, steps: &mut Vec<Step>, gate: &DeviceBuffer, up: &DeviceBuffer, input: crate::ActPrecision, product: Option<&DeviceBuffer>, rows: u32, k: u32, stride: u32, up_offset: u32) -> Option<(DeviceBuffer, DeviceBuffer)> {
     let elems = u64::from(rows) * u64::from(k);
-    if rows == 0 || !k.is_multiple_of(128) || elems > u64::from(u32::MAX) {
+    // Every element offset the pass computes is a 64-bit one; the alignment of its 16-byte accesses is the stride's and the offset's.
+    if rows == 0 || !k.is_multiple_of(128) || elems > u64::from(u32::MAX) || !stride.is_multiple_of(8) || !up_offset.is_multiple_of(8) || u64::from(up_offset) + u64::from(k) > u64::from(stride) {
         return None;
     }
     let kernel = kernels_cuda::get("silu_mul_quant_e4m3_128")?;
@@ -269,7 +283,7 @@ pub fn silu_mul_quantize_e4m3_rows(gpu: &Gpu, steps: &mut Vec<Step>, gate: &Devi
     let s = gpu.storage_uninit(elems / 128);
     let flags = u32::from(product.is_some()) | if input == crate::ActPrecision::Bf16 { 2 } else { 0 };
     // Without a product the binding is still required; it aliases the bytes the pass writes anyway and is never stored to.
-    let step = gpu.step_native(id, &[gate, up, product.unwrap_or(&q), &q, &s], &[rows, k, flags], kernel.blocks_for(1, elems as u32))?;
+    let step = gpu.step_native(id, &[gate, up, product.unwrap_or(&q), &q, &s], &[rows, k, flags, stride, up_offset], kernel.blocks_for(1, elems as u32))?;
     steps.push(step);
     Some((q, s))
 }

@@ -59,7 +59,7 @@ fn check(gpu: &Gpu, rows: u32, k: u32, gate: &[f32], up: &[f32], what: &str) {
     // Reference: the epilogue's product, then the standalone quantiser.
     let y_r = gpu.storage(n);
     let (xq, sx) = (gpu.storage(1), gpu.storage(1));
-    let step = gpu.fused_step(Fused::QuantEpilogue, &[&gb, &ub, &y_r, &xq, &sx], &[k, rows, 1, 1]).expect("quant_epilogue offered");
+    let step = gpu.fused_step(Fused::QuantEpilogue, &[&gb, &ub, &y_r, &xq, &sx], &[k, rows, 1, 1, k, 0]).expect("quant_epilogue offered");
     gpu.submit(&[], &[step]);
     let mut steps = Vec::new();
     let x = gpu_core::provider::library::Operand { buf: &y_r, range: (0, n) };
@@ -127,5 +127,55 @@ fn the_product_and_its_e4m3_rows_equal_the_pair_of_kernels_they_replace() {
             check(&gpu, rows, k, &values(n, seed, spread), &values(n, seed + 100, spread), "mixed magnitudes with zeros");
         }
         check(&gpu, rows, k, &vec![0.0; n], &values(n, 5, 1.0), "all-zero gate gives all-zero blocks");
+    }
+}
+
+/// The gate|up product of a fused weight, `[rows, 2 k]` with the gate columns first, read in place gives the product, bytes
+/// and scales of the dense pair over the halves copied apart: for fp32 rows and for the bf16 rows of the FP8 GEMM's output,
+/// with and without the fp32 product stored.
+#[test]
+fn the_halves_of_one_wide_product_read_in_place_equal_the_dense_pair() {
+    let gpu = gpu_core::testgpu::dev(&[]);
+    if !is_cuda(&gpu) {
+        brain_testutil::skip_unavailable("not a CUDA device");
+        return;
+    }
+    for (rows, k) in [(1u32, 128u32), (16, 17408), (17, 17408), (128, 17408), (9, 5120)] {
+        let n = (rows * k) as usize;
+        let (gate, up) = (bf16_exact(&values(n, 21 + u64::from(k), 3.0)), bf16_exact(&values(n, 22 + u64::from(k), 3.0)));
+        let wide = |g: &[f32], u: &[f32]| -> Vec<f32> { (0..rows as usize).flat_map(|r| g[r * k as usize..][..k as usize].iter().chain(&u[r * k as usize..][..k as usize]).copied().collect::<Vec<_>>()).collect() };
+        let ctx = format!("rows={rows} k={k}");
+        let (groups, words) = (n / 128, n / 4);
+        let mut steps = Vec::new();
+        let dense_f32 = {
+            let (gb, ub) = (gpu.storage_init("gate", &gate), gpu.storage_init("up", &up));
+            let y = gpu.storage(n as u64);
+            let (q, s) = gpu_core::provider::library::silu_mul_quantize_e4m3_rows(&gpu, &mut steps, &gb, &ub, ActPrecision::F32, Some(&y), rows, k).expect("offered");
+            (y, q, s)
+        };
+        let strided_f32 = {
+            let wb = gpu.storage_init("wide", &wide(&gate, &up));
+            let y = gpu.storage(n as u64);
+            let (q, s) = gpu_core::provider::library::silu_mul_quantize_e4m3_gate_up(&gpu, &mut steps, &wb, ActPrecision::F32, Some(&y), rows, k).expect("offered");
+            (y, q, s)
+        };
+        let strided_bf16 = {
+            let wb = gpu.storage_init("wide16", &bf16_words(&wide(&gate, &up)));
+            let y = gpu.storage(n as u64);
+            let (q, s) = gpu_core::provider::library::silu_mul_quantize_e4m3_gate_up(&gpu, &mut steps, &wb, ActPrecision::Bf16, Some(&y), rows, k).expect("offered");
+            let (q2, s2) = gpu_core::provider::library::silu_mul_quantize_e4m3_gate_up(&gpu, &mut steps, &wb, ActPrecision::Bf16, None, rows, k).expect("offered");
+            (y, q, s, q2, s2)
+        };
+        gpu.submit(&[], &steps);
+        gpu.poll_wait();
+        let (y_d, q_d, s_d) = (bits(gpu.read(&dense_f32.0, n)), bits(gpu.read(&dense_f32.1, words)), bits(gpu.read(&dense_f32.2, groups)));
+        assert_eq!(bits(gpu.read(&strided_f32.0, n)), y_d, "fp32 product differs: {ctx}");
+        assert_eq!(bits(gpu.read(&strided_f32.1, words)), q_d, "fp32 bytes differ: {ctx}");
+        assert_eq!(bits(gpu.read(&strided_f32.2, groups)), s_d, "fp32 scales differ: {ctx}");
+        assert_eq!(bits(gpu.read(&strided_bf16.0, n)), y_d, "bf16 product differs: {ctx}");
+        assert_eq!(bits(gpu.read(&strided_bf16.1, words)), q_d, "bf16 bytes differ: {ctx}");
+        assert_eq!(bits(gpu.read(&strided_bf16.2, groups)), s_d, "bf16 scales differ: {ctx}");
+        assert_eq!(bits(gpu.read(&strided_bf16.3, words)), q_d, "bf16 bytes differ without the product: {ctx}");
+        assert_eq!(bits(gpu.read(&strided_bf16.4, groups)), s_d, "bf16 scales differ without the product: {ctx}");
     }
 }

@@ -4683,7 +4683,7 @@ impl Qwen35 {
         self.decode_fusion.get()
             && !self.weights.values().all(|w| matches!(w, Weight::F32 { .. }))
             && g.has_fused(gpu_core::Fused::QuantEpilogue)
-            && widths.iter().all(|&k| gpu_core::Fused::QuantEpilogue.serves(&[k, rows, 0, 0]))
+            && widths.iter().all(|&k| gpu_core::Fused::QuantEpilogue.serves(&[k, rows, 0, 0, k, 0]))
     }
 
     /// Whether some weight of this build reads packed int8 activation rows. FP8, bf16, NF4 and f32 tiers read float rows
@@ -4808,7 +4808,7 @@ impl Qwen35 {
                 // The `xq` slot takes the bf16 rows of the product when an FP8 product will read them (flags bit 1).
                 let bf16 = self.fused_writes_bf16().then(|| g.storage_uninit(n / 2));
                 let step = g
-                    .fused_step(gpu_core::Fused::QuantEpilogue, &[a, b.unwrap_or(a), y, bf16.as_ref().unwrap_or(xq), sx], &[k, rows, mode, 1 | if bf16.is_some() { 2 } else { 0 }])
+                    .fused_step(gpu_core::Fused::QuantEpilogue, &[a, b.unwrap_or(a), y, bf16.as_ref().unwrap_or(xq), sx], &[k, rows, mode, 1 | if bf16.is_some() { 2 } else { 0 }, k, 0])
                     .expect("fused_epilogue_ok said the device serves this shape");
                 g.submit(&[], &[step]);
                 if let Some(bf16) = bf16 {
@@ -4822,7 +4822,7 @@ impl Qwen35 {
         // Mode 0 reads no `b` and writes no `y`; the slots are still bound, and
         // alias what is already there.
         let step = g
-            .fused_step(gpu_core::Fused::QuantEpilogue, &[a, b.unwrap_or(a), y.as_ref().unwrap_or(&xq), &xq, &sx], &[k, rows, mode, 0])
+            .fused_step(gpu_core::Fused::QuantEpilogue, &[a, b.unwrap_or(a), y.as_ref().unwrap_or(&xq), &xq, &sx], &[k, rows, mode, 0, k, 0])
             .expect("fused_epilogue_ok said the device serves this shape");
         g.submit(&[], &[step]);
         let act = self.ops.act_prequantized(y.as_ref().unwrap_or(a), &sx, &xq, rows, k);

@@ -122,7 +122,7 @@ fn fused_kernels_against_the_chains_they_replace() {
             s.push(gpu.dispatch(QUANT, &[produced, &sx, &xq], &[rows, k], Dispatch::Threads(rows * k / 4)));
             s
         });
-        let fused = time_us(&gpu, &|| vec![gpu.fused_step(Fused::QuantEpilogue, &[&a, &b, &y, &xq, &sx], &[k, rows, mode, 0]).expect("quant_epilogue offered")]);
+        let fused = time_us(&gpu, &|| vec![gpu.fused_step(Fused::QuantEpilogue, &[&a, &b, &y, &xq, &sx], &[k, rows, mode, 0, k, 0]).expect("quant_epilogue offered")]);
         println!("{label:<44} {chain:>10.1} {fused:>10.1}");
     }
 }

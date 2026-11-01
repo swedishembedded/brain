@@ -131,7 +131,7 @@ fn glue_kernels_against_the_byte_roof_at_a_4096_row_round() {
             let n = (rows * k) as usize;
             let (a, b) = (filled(&gpu, n), filled(&gpu, n));
             let (y, bf16, sx) = (gpu.storage(n as u64), gpu.storage(n as u64 / 2), gpu.storage(1));
-            let us = time_us(&gpu, &|| vec![gpu.fused_step(Fused::QuantEpilogue, &[&a, &b, &y, &bf16, &sx], &[k, rows, mode, 1 | 2]).expect("offered")]);
+            let us = time_us(&gpu, &|| vec![gpu.fused_step(Fused::QuantEpilogue, &[&a, &b, &y, &bf16, &sx], &[k, rows, mode, 1 | 2, k, 0]).expect("offered")]);
             report(&format!("{label} f32 + bf16 out ({rows} rows x {k})"), us, n as f64 * (4.0 + 4.0 + 4.0 + 2.0));
         }
     }

@@ -16,11 +16,14 @@
 // arithmetic is those two kernels' own expressions (`x / (1 + expf(-x))` then `* b`, explicit round-to-nearest; the scale
 // and the bytes as `quant_e4m3_128` makes them), so the result equals the pair's bit for bit.
 //
-//   params : u32 [rows, k, flags]   k a multiple of 128. flags bit 0: store the product `y` (a build with no consumer of the
+//   params : u32 [rows, k, flags, stride, up_offset]   k a multiple of 128. flags bit 0: store the product `y` (a build with no consumer of the
 //                                   fp32 product - no adapter, no backward - skips its 4 bytes an element); bit 1: `a` and `b`
 //                                   are bf16 rows (the FP8 GEMM's bf16 output, [rows, k / 2] words each), widened exactly in
 //                                   registers, so the activation stream carries 2 bytes an element instead of 4
-//   a, b   : [rows, k] f32 (bf16 with bit 1)   gate and up rows (16-byte aligned)
+//   a, b   : f32 (bf16 with bit 1) gate and up rows (16-byte aligned): element c of row r of the gate is `a[r * stride + c]`
+//            and of the up `b[r * stride + up_offset + c]`. A dense pair is stride k, offset 0; the two halves of one
+//            [rows, 2 k] product (gate first, the fused gate|up weight's output) are `a` = `b` = the product, stride 2 k,
+//            offset k: the pass reads them in place and the result is the dense pair's, byte for byte.
 //   y      : [rows, k] f32           written with bit 0 only
 //   q      : [rows, k] bytes  E4M3, four to a word
 //   s      : [rows, k / 128] f32
@@ -43,7 +46,10 @@ brain_silu_mul_quant_e4m3_128(const unsigned int* params, const float* a, const 
     const unsigned long long k = params[1];
     const bool keep = (params[2] & 1u) != 0u;
     const bool bf16_in = (params[2] & 2u) != 0u;
-    const unsigned long long total = rows * (k / 128ull);
+    const unsigned long long stride = params[3];
+    const unsigned long long up_offset = params[4];
+    const unsigned long long blocks_per_row = k / 128ull;
+    const unsigned long long total = rows * blocks_per_row;
     const unsigned long long first = (((unsigned long long)blockIdx.y * gridDim.x + blockIdx.x) * BRAIN_SMQ_WARPS + (threadIdx.x >> 5)) * BRAIN_SMQ_BLOCKS;
     if (first >= total) { return; }
     const unsigned lane = threadIdx.x & 31u;
@@ -54,16 +60,19 @@ brain_silu_mul_quant_e4m3_128(const unsigned int* params, const float* a, const 
 #pragma unroll
     for (int i = 0; i < BRAIN_SMQ_BLOCKS; ++i) {
         if (i >= live) { break; }
-        const unsigned long long at = (first + i) * 128ull + 4ull * lane;
+        const unsigned long long row = (first + i) / blocks_per_row;
+        const unsigned long long col = ((first + i) - row * blocks_per_row) * 128ull + 4ull * lane;
+        const unsigned long long at = row * stride + col;
+        const unsigned long long up_at = at + up_offset;
         if (bf16_in) {
             // Four bf16 are one 8-byte access; a bf16 is the high half of the f32 with the same value.
             const uint2 gw = *reinterpret_cast<const uint2*>(reinterpret_cast<const unsigned short*>(a) + at);
-            const uint2 uw = *reinterpret_cast<const uint2*>(reinterpret_cast<const unsigned short*>(b) + at);
+            const uint2 uw = *reinterpret_cast<const uint2*>(reinterpret_cast<const unsigned short*>(b) + up_at);
             g[i] = make_float4(__uint_as_float(gw.x << 16), __uint_as_float(gw.x & 0xffff0000u), __uint_as_float(gw.y << 16), __uint_as_float(gw.y & 0xffff0000u));
             u[i] = make_float4(__uint_as_float(uw.x << 16), __uint_as_float(uw.x & 0xffff0000u), __uint_as_float(uw.y << 16), __uint_as_float(uw.y & 0xffff0000u));
         } else {
             g[i] = *reinterpret_cast<const float4*>(a + at);
-            u[i] = *reinterpret_cast<const float4*>(b + at);
+            u[i] = *reinterpret_cast<const float4*>(b + up_at);
         }
     }
 #pragma unroll

@@ -103,7 +103,7 @@ fn run(gpu: &Gpu, rows: u32, k: u32, mode: u32, a: &[f32], b: &[f32]) -> (Out, O
     let sx_n = gpu.storage(groups as u64);
     let xq_n = gpu.storage(words as u64);
     let step = gpu
-        .fused_step(Fused::QuantEpilogue, &[&ab, &bb, &y_n, &xq_n, &sx_n], &[k, rows, mode, 0])
+        .fused_step(Fused::QuantEpilogue, &[&ab, &bb, &y_n, &xq_n, &sx_n], &[k, rows, mode, 0, k, 0])
         .expect("the fused kernel was declined on a CUDA device");
     gpu.submit(&[], &[step]);
     gpu.poll_wait();
@@ -134,11 +134,11 @@ fn the_fused_kernel_is_offered_only_where_it_can_run() {
         return;
     }
     assert!(gpu.has_fused(Fused::QuantEpilogue));
-    assert!(Fused::QuantEpilogue.serves(&[17408, 1, 1, 0]));
-    assert!(!Fused::QuantEpilogue.serves(&[17392, 1, 1, 0]), "k not a multiple of 32 is not whole scale groups");
-    assert!(!Fused::QuantEpilogue.serves(&[1024 * 19, 1, 1, 0]), "wider than the registers hold");
-    assert!(!Fused::QuantEpilogue.serves(&[64, 1, 3, 0]), "unknown mode");
-    assert!(!Fused::QuantEpilogue.serves(&[64, 0, 1, 0]), "no rows");
+    assert!(Fused::QuantEpilogue.serves(&[17408, 1, 1, 0, 17408, 0]));
+    assert!(!Fused::QuantEpilogue.serves(&[17392, 1, 1, 0, 17392, 0]), "k not a multiple of 32 is not whole scale groups");
+    assert!(!Fused::QuantEpilogue.serves(&[1024 * 19, 1, 1, 0, 1024 * 19, 0]), "wider than the registers hold");
+    assert!(!Fused::QuantEpilogue.serves(&[64, 1, 3, 0, 64, 0]), "unknown mode");
+    assert!(!Fused::QuantEpilogue.serves(&[64, 0, 1, 0, 64, 0]), "no rows");
 }
 
 #[test]
@@ -224,8 +224,8 @@ fn the_no_pack_flag_produces_the_same_activation_and_leaves_the_packed_rows_alon
         let (y_p, y_u) = (gpu.storage(n as u64), gpu.storage(n as u64));
         let (xq, sx) = (gpu.storage_init("xq", &[f32::from_bits(0xdead_beef); 1]), gpu.storage_init("sx", &[f32::from_bits(0xdead_beef); 1]));
         let (xq_p, sx_p) = (gpu.storage((rows * k / 4) as u64), gpu.storage((rows * k / 32) as u64));
-        let packed = gpu.fused_step(Fused::QuantEpilogue, &[&ab, &bb, &y_p, &xq_p, &sx_p], &[k, rows, mode, 0]).expect("offered");
-        let unpacked = gpu.fused_step(Fused::QuantEpilogue, &[&ab, &bb, &y_u, &xq, &sx], &[k, rows, mode, 1]).expect("offered");
+        let packed = gpu.fused_step(Fused::QuantEpilogue, &[&ab, &bb, &y_p, &xq_p, &sx_p], &[k, rows, mode, 0, k, 0]).expect("offered");
+        let unpacked = gpu.fused_step(Fused::QuantEpilogue, &[&ab, &bb, &y_u, &xq, &sx], &[k, rows, mode, 1, k, 0]).expect("offered");
         gpu.submit(&[], &[packed, unpacked]);
         gpu.poll_wait();
         assert_eq!(bits(gpu.read(&y_u, n)), bits(gpu.read(&y_p, n)), "the product differs: rows={rows} k={k} mode={mode}");
@@ -257,11 +257,45 @@ fn the_bf16_flag_writes_the_rows_cast_f32_bf16_would_make_and_leaves_the_scales_
         let (ab, bb) = (gpu.storage_init("a", &a), gpu.storage_init("b", &b));
         let (y, bf16) = (gpu.storage(n as u64), gpu.storage(n as u64 / 2));
         let sx = gpu.storage_init("sx", &[f32::from_bits(0xdead_beef); 1]);
-        let step = gpu.fused_step(Fused::QuantEpilogue, &[&ab, &bb, &y, &bf16, &sx], &[k, rows, mode, 1 | 2]).expect("offered");
+        let step = gpu.fused_step(Fused::QuantEpilogue, &[&ab, &bb, &y, &bf16, &sx], &[k, rows, mode, 1 | 2, k, 0]).expect("offered");
         gpu.submit(&[], &[step]);
         gpu.poll_wait();
         let want: Vec<u32> = gpu.read(&y, n).chunks(2).map(|p| bf16_bits(p[0]) | bf16_bits(p[1]) << 16).collect();
         assert_eq!(bits(gpu.read(&bf16, n / 2)), want, "the bf16 rows differ: rows={rows} k={k} mode={mode}");
         assert_eq!(bits(gpu.read(&sx, 1)), vec![0xdead_beef], "the scales were written");
     }
+}
+
+/// The two halves of one `[rows, 2 k]` product (gate columns first), read in place with the row stride and the up offset,
+/// give the product, the activation and the scales of the dense pair over the halves copied apart: the packed form that
+/// quantises to int8 and the form that writes the bf16 rows both.
+#[test]
+fn the_halves_of_one_wide_product_read_in_place_equal_the_dense_pair() {
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda(&gpu) {
+        brain_testutil::skip_unavailable("native fused kernels need a CUDA device");
+        return;
+    }
+    for (rows, k, mode) in [(1u32, 17408u32, 1u32), (16, 17408, 1), (5, 4128, 1), (3, 6144, 2)] {
+        let n = (rows * k) as usize;
+        let (a, b) = (values(n, 71 + u64::from(k), 4.0), values(n, 72 + u64::from(k), 4.0));
+        let wide: Vec<f32> = (0..rows as usize).flat_map(|r| a[r * k as usize..][..k as usize].iter().chain(&b[r * k as usize..][..k as usize]).copied()).collect();
+        let (ab, bb, wb) = (gpu.storage_init("a", &a), gpu.storage_init("b", &b), gpu.storage_init("wide", &wide));
+        for flags in [0u32, 1, 1 | 2] {
+            let words = if flags & 2 != 0 { n / 2 } else { n / 4 };
+            let outs = || (gpu.storage(n as u64), gpu.storage(words as u64), gpu.storage(n as u64 / 32));
+            let ((y_d, xq_d, sx_d), (y_s, xq_s, sx_s)) = (outs(), outs());
+            let dense = gpu.fused_step(Fused::QuantEpilogue, &[&ab, &bb, &y_d, &xq_d, &sx_d], &[k, rows, mode, flags, k, 0]).expect("offered");
+            let strided = gpu.fused_step(Fused::QuantEpilogue, &[&wb, &wb, &y_s, &xq_s, &sx_s], &[k, rows, mode, flags, 2 * k, k]).expect("offered");
+            gpu.submit(&[], &[dense, strided]);
+            gpu.poll_wait();
+            let ctx = format!("rows={rows} k={k} mode={mode} flags={flags}");
+            assert_eq!(bits(gpu.read(&y_s, n)), bits(gpu.read(&y_d, n)), "the product differs: {ctx}");
+            assert_eq!(bits(gpu.read(&xq_s, words)), bits(gpu.read(&xq_d, words)), "the activation differs: {ctx}");
+            if flags == 0 {
+                assert_eq!(bits(gpu.read(&sx_s, n / 32)), bits(gpu.read(&sx_d, n / 32)), "the scales differ: {ctx}");
+            }
+        }
+    }
+    assert!(!Fused::QuantEpilogue.serves(&[64, 1, 1, 0, 96, 64]), "a b window running past the row stride");
 }

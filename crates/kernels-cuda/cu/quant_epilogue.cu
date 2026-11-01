@@ -21,11 +21,13 @@
 // (`silu_mul` / `sigmoid` + `mul`, then `max_abs_rows`, then `quant_pack`) and
 // produces what that chain produces to the last bit.
 //
-//   params : u32 [k, rows, mode, flags]   flags bit 0: produce `y` only - no int8 packing (`xq`, `sx` are not written);
+//   params : u32 [k, rows, mode, flags, stride, b_offset]   flags bit 0: produce `y` only - no int8 packing (`xq`, `sx` are not written);
 //                                         a consumer that reads bf16 or E4M3 rows has no use for them; bit 1 (with bit 0):
 //                                         `xq` receives the activation rounded to bf16 instead ([rows, k/2] u32, the rows
 //                                         `cast_f32_bf16` would make), so a bf16-reading product needs no cast launch
-//   a, b   : [rows, k] f32   (b is not read in mode 0)
+//   a, b   : f32, element c of row r of `a` is `a[r * stride + c]` and of `b` (not read in mode 0) `b[r * stride + b_offset + c]`:
+//            a dense pair is stride k, offset 0; the two halves of one [rows, 2 k] product (the fused gate|up weight's output) are
+//            `a` = `b` = the product, stride 2 k, offset k, read in place with the dense pair's result. `y`, `xq` and `sx` are dense.
 //   y      : [rows, k] f32   the activation itself (an fp32 linear reads it)
 //   xq     : [rows, k/4] u32 packed int8 activation
 //   sx     : [rows, k/32] f32 per-group scale
@@ -114,6 +116,8 @@ brain_quant_epilogue(const unsigned int* params, const float* a, const float* b,
     if (row >= rows) { return; }  // cluster-uniform
     const unsigned int t = threadIdx.x;
     const unsigned long long base = (unsigned long long)row * k;
+    const unsigned long long in_base = (unsigned long long)row * params[4];
+    const unsigned long long b_base = in_base + params[5];
 
     __shared__ unsigned int qwords[BRAIN_QE_THREADS * BRAIN_QE_MAX_ELEMS / 4];
     signed char* qbytes = reinterpret_cast<signed char*>(qwords);
@@ -131,8 +135,8 @@ brain_quant_epilogue(const unsigned int* params, const float* a, const float* b,
         const unsigned int i = rank + BRAIN_QE_CLUSTER * j;
         const unsigned int c = t + BRAIN_QE_THREADS * i;
         const bool live = i < BRAIN_QE_MAX_ELEMS && c < k;
-        v[j] = live ? a[base + c] : 0.0f;
-        w[j] = (live && two) ? b[base + c] : 0.0f;
+        v[j] = live ? a[in_base + c] : 0.0f;
+        w[j] = (live && two) ? b[b_base + c] : 0.0f;
     }
 
     // Phase 2: the producer, then each slice's group scale: element c = t + THREADS * i lies in group c / 32, the

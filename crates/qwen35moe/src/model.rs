@@ -1928,7 +1928,7 @@ impl Qwen35 {
         self.decode_fusion.get()
             && self.q8.is_some()
             && g.has_fused(gpu_core::Fused::QuantEpilogue)
-            && widths.iter().all(|&k| gpu_core::Fused::QuantEpilogue.serves(&[k, rows, 0, 0]))
+            && widths.iter().all(|&k| gpu_core::Fused::QuantEpilogue.serves(&[k, rows, 0, 0, k, 0]))
     }
 
     /// One launch that produces the activation an int8 linear reads AND quantises
@@ -1945,7 +1945,7 @@ impl Qwen35 {
         // Mode 0 reads no `b` and writes no `y`; the slots are still bound, and
         // alias what is already there.
         let step = g
-            .fused_step(gpu_core::Fused::QuantEpilogue, &[a, b.unwrap_or(a), y.as_ref().unwrap_or(&xq), &xq, &sx], &[k, rows, mode, 0])
+            .fused_step(gpu_core::Fused::QuantEpilogue, &[a, b.unwrap_or(a), y.as_ref().unwrap_or(&xq), &xq, &sx], &[k, rows, mode, 0, k, 0])
             .expect("fused_epilogue_ok said the device serves this shape");
         g.submit(&[], &[step]);
         let act = self.ops.act_prequantized(y.as_ref().unwrap_or(a), &sx, &xq, rows, k);

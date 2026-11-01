@@ -2848,7 +2848,7 @@ pub const ALL: &[CudaKernel] = &[
         source: ImplSource::Tuned,
         min_cc: FP8_CVT_MIN_CC,
         entry: "brain_silu_mul_quant_e4m3_128",
-        what: "the SwiGLU product silu(gate) * up of fp32 rows and its E4M3 quantisation (one f32 scale, amax / 448, per 128 elements) in one pass: `quant_epilogue` and `quant_e4m3_128` without the product read back",
+        what: "the SwiGLU product silu(gate) * up of fp32 rows and its E4M3 quantisation (one f32 scale, amax / 448, per 128 elements) in one pass: `quant_epilogue` and `quant_e4m3_128` without the product read back; gate and up are read at a row stride, so the halves of one fused gate|up product need no copy",
         reported: "native:silu_mul_quant_e4m3_128",
         block_dim: 256,
         // 8 warps a block, a warp per three 128-element blocks: 3072 elements per block.
@@ -3108,7 +3108,7 @@ pub const ALL: &[CudaKernel] = &[
         source: ImplSource::Tuned,
         min_cc: BASELINE_MIN_CC,
         entry: "brain_quant_epilogue",
-        what: "silu_mul / sigmoid-gate / plain producer + per-group int8 scales + pack in one launch; 1024 threads per row, bit-identical to the chain it replaces",
+        what: "silu_mul / sigmoid-gate / plain producer + per-group int8 scales + pack in one launch; 1024 threads per row, inputs read at a row stride (the halves of one gate|up product in place), bit-identical to the chain it replaces",
         reported: "native:quant_epilogue",
         block_dim: 1024,
         tile: (1, 1),
