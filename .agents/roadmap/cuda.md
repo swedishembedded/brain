@@ -978,6 +978,38 @@ reductions went from 933 ms to 11.8 ms of the step and the whole step's kernel
 time to about 187 ms. Step-1 loss moved to 50.8131 (the forward's batch
 statistics are re-associated) and is identical run to run.
 
+### Cross-backend gates with CUDA in them (2026-11-01)
+
+- `make test/parity` runs the whole gradcheck suite and the model FD suites
+  (MoE/ViT backward) on CUDA (`BRAIN_BACKEND=cuda`, the card `BRAIN_DEVICE=gpuN`
+  names, else the least-used NVIDIA card), so CPU == Vulkan == CUDA is certified
+  where a card exists and the leg prints a SKIP naming the missing device
+  otherwise. Wall time on a GH200: the CUDA gradcheck line 2 min 40 s serial, the
+  model FD line 2 s, of a gate whose CPU and Vulkan lines were there before.
+- `make test/perf` (`scripts/gates/perf-floor-gate.sh`, binary
+  `crates/gpu-core/tests/perf_floor.rs`) times the hot ops on each backend and
+  fails a rate more than `PERF_FLOOR_TOLERANCE` (0.25) under the floor recorded
+  in `scripts/gates/perf-floors/<backend>-<device>.txt`; `make test/perf/record`
+  re-records. A device class without a floor file is reported UNGATED, never
+  judged against another machine's numbers. About 8 s for all three backends
+  once built. Spread of repeated runs on an idle card: within 12 % (the tolerance
+  covers a card shared with a light neighbour, not a served benchmark).
+- What it times: the f32 GEMM (every backend), the FP8 GEMV at m=1/8,
+  4096-row flash prefill and split-key decode attention (the WGSL kernels, on
+  Vulkan and CUDA), and on CUDA the native FP8 candidates (m=1/16/64 and a
+  4096-row round), tensor-core flash prefill, batched decode attention and GDN
+  chunk forward. The CPU backend runs none of the cooperative WGSL kernels (its
+  attention and int8 paths are native fast paths with no single op to time), so
+  its floors are the f32 GEMM only. Not timed: the GDN decode recurrence (a fused
+  pipeline of small kernels in the model, no single op) and bf16/NVFP4 weights.
+- Reading the first floors side by side (GH200): the same WGSL FP8 GEMV at m=1
+  moves 665 GB/s through Vulkan and 1387 GB/s through CUDA, the native candidate
+  2828 GB/s; the f32 GEMM at 256 rows is 497 GFLOPS on Vulkan and 11270 on CUDA;
+  the portable 4096-row flash prefill is 5.9 vs 5.2 TFLOPS and the tensor-core one
+  76 TFLOPS. The portable FP8 GEMV at m=8 is 108 / 221 GB/s: far under its m=1
+  rate, a candidate for the gap list (serving reaches the m=8 width through the
+  native candidates, which this line does not time).
+
 ## Not delivered - what is still missing
 
 **One model's forward, one tuned kernel. Backward, breadth and every other
@@ -1103,9 +1135,16 @@ tuned kernel are deferred.**
   `8.940697e-8`, `cuda_graphs.rs`/`cuda_pass.rs` cover the mechanism directly,
   and Qwen3.8-27B's decode runs through it (`decode_steady_state.rs`,
   `gguf_resident_real.rs`). No backward pass has been driven through it.
-- **`scripts/gates/parity-gate.sh` runs one CUDA step**
-  (`cuda_provider_matmul`, which skips without a device); the wider catalogue
-  and the backward kernels are not in it.
+- **Three gradcheck tests fail on CUDA and are skipped by name in
+  `scripts/gates/parity-gate.sh`** (they pass on Vulkan; found 2026-11-01 when
+  the gate gained its CUDA leg): `qwen35_lora_on_a_bf16_base_analytic_grads_
+  match_finite_differences` (LoRA-A analytic gradients 49-84 % off the finite
+  differences; the cause is not diagnosed, bf16 tensor-core rounding of the base
+  is the first suspect), `conv2d_gd_reproduces_conv2d_at_groups1_dilation1`
+  (1403 ulp apart, past the reassociation bound) and
+  `spectral_mixer_fft_path_gradients_match_finite_differences` (`rdft_synth`
+  uses `reverseBits`, which the CUDA translator refuses). Each skip leaves the
+  gate; fixing them removes the `--skip`.
 - **No cost formulas** for CUDA steps in `gpu-core/src/cost.rs` (a coverage
   ratchet), and `step_native` carries no `StepMeta`, so profiling would show
   `<no-meta>`.
