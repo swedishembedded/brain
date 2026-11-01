@@ -79,9 +79,10 @@ Pass `--device` to any command that runs a model:
 Device selectors can be combined as a comma-separated union, e.g.
 `--device gpu1,cpu0-3` to use one GPU alongside a slice of CPU cores.
 
-The `BRAIN_DEVICE` and `BRAIN_GPU_INDEX` environment variables select a
-device the same way, ambiently, for cases where passing `--device` on every
-invocation isn't convenient.
+The `brain` CLI is configured by its flags alone: `BRAIN_DEVICE`,
+`BRAIN_BACKEND` and `BRAIN_GPU_INDEX` in the environment do not change what it
+runs on (it says so when one is set). They are read only by programs with no
+CLI in the loop, such as test binaries.
 
 ## Picking hardware for your workload
 

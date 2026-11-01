@@ -1334,6 +1334,21 @@ pub fn resolve_ambient_compute_set() -> ComputeSet {
     set
 }
 
+/// The compute set of a brain CLI run given no `--device`: every device this machine has, whatever the environment says.
+/// The CLI is configured by its flags alone, so a `BRAIN_DEVICE` or `BRAIN_BACKEND` left in the environment does not
+/// change what it runs on; when one is set it says so once, so a script that relied on it learns the flag to pass.
+/// **CLI-only**: a process with no CLI in the loop resolves [`ambient_compute_set`].
+#[cfg(not(target_arch = "wasm32"))]
+pub fn resolve_cli_default_compute_set() -> ComputeSet {
+    let set = |v: Option<std::ffi::OsString>| v.is_some_and(|v| !v.is_empty());
+    for (var, flag, present) in [("BRAIN_DEVICE", "--device", set(std::env::var_os("BRAIN_DEVICE"))), ("BRAIN_BACKEND", "--backend", set(std::env::var_os("BRAIN_BACKEND")))] {
+        if present {
+            eprintln!("brain: {var} is ignored by the brain CLI (configuration is by flags); pass {flag} instead");
+        }
+    }
+    DeviceSpec::default().resolve(&Inventory::probe()).expect("the empty/default device spec always resolves")
+}
+
 /// Resolve a `--device` text and an optional `--backend` override against this
 /// machine, make the result the process's compute set and return it: the CLI's
 /// start-up for a program that is not the CLI (a test binary, a profiling

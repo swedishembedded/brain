@@ -62,35 +62,22 @@ fn device_npu_out_of_range_index_reports_clear_diagnostic_and_exits_nonzero() {
     );
 }
 
-/// `brain npu ...` used to bypass `select_backend` entirely (the
-/// `argv.get(1) == Some("npu")` special case A4 deleted). Confirm it still
-/// flows through the exact same `--device` resolution as any other
-/// subcommand by checking the identical out-of-range diagnostic fires there
-/// too - not a different error shape, not a silent pass-through.
-///
-/// `brain npu ...`'s OWN `--device` flag is a different, deprecated-alias
-/// grammar (the OpenVINO target device, translated to `--ov-device`), so this
-/// uses `BRAIN_DEVICE` - untouched by that translation - to reach brain's own
-/// compute-device grammar for this subcommand specifically.
+/// The brain CLI is configured by its flags alone: a `BRAIN_DEVICE` left in the environment does not choose its devices -
+/// here an out-of-range `npu5`, which `--device npu5` would refuse - and the CLI says it ignored it, so a script that
+/// relied on the variable learns the flag to pass. `brain npu ...` is the subcommand to check it on: its own `--device`
+/// is a deprecated alias of `--ov-device`, so the variable used to be the only way to reach brain's device grammar there.
 #[test]
-fn brain_npu_subcommand_flows_through_the_same_device_resolution() {
+fn the_cli_ignores_brain_device_in_the_environment_and_says_so() {
     let output = Command::new(bin())
         .args(["npu", "check"])
         .env("BRAIN_DEVICE", "npu5")
         .output()
-        .expect("run BRAIN_DEVICE=npu5 brain npu check");
+        .expect("run brain npu check with BRAIN_DEVICE=npu5 in the environment");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("npu5 requested but this machine has"),
-        "brain npu ... should hit the SAME DeviceSpec::resolve diagnostic as \
-         every other subcommand, got stderr: {stderr}"
-    );
-    assert!(
-        output.status.code().is_some(),
-        "must not be killed by a signal (a panic/abort): {:?}",
-        output.status
-    );
+    assert!(stderr.contains("BRAIN_DEVICE is ignored by the brain CLI"), "the CLI must say it ignored BRAIN_DEVICE, got stderr: {stderr}");
+    assert!(!stderr.contains("npu5 requested but this machine has"), "BRAIN_DEVICE must not reach the device grammar, got stderr: {stderr}");
+    assert!(output.status.code().is_some(), "must not be killed by a signal (a panic/abort): {:?}", output.status);
 }
 
 /// The `NPU_REQUESTED` global/reader this phase deleted must never reappear

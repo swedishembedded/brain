@@ -34,7 +34,7 @@ fn run(args: &[&str]) -> std::process::Output {
     Command::new(bin())
         .args(args)
         .stdin(Stdio::null())
-        .env("BRAIN_DEVICE", "cpu")
+        .args(["--device", "cpu"])
         // These tests pin the CPU device. An ambient backend choice (a CUDA
         // lane exporting BRAIN_BACKEND) would make the binary warn that the
         // backend needs a GPU, which is not what is under test.
@@ -149,7 +149,7 @@ fn status_exits_nonzero_when_no_server_is_running() {
     let out = Command::new(bin())
         .args(["serve", "--status"])
         .stdin(Stdio::null())
-        .env("BRAIN_DEVICE", "cpu")
+        .args(["--device", "cpu"])
         .env("XDG_RUNTIME_DIR", &state)
         .output()
         .expect("run brain serve --status");
@@ -242,7 +242,7 @@ fn serve_command(dir: &std::path::Path, base: &std::path::Path, extra: &[&str]) 
         .arg(dir.join("run"))
         .args(extra)
         .stdin(Stdio::null())
-        .env("BRAIN_DEVICE", "cpu")
+        .args(["--device", "cpu"])
         .env_remove("BRAIN_AUTO_FETCH");
     cmd
 }
@@ -295,7 +295,7 @@ fn the_environment_names_no_checkpoint() {
     let out = Command::new(bin())
         .args(["serve", "--openai", "127.0.0.1:0", "--seed", "1", "--models-dir", models.to_str().unwrap(), "--runtime-dir", run_dir.to_str().unwrap(), "--adapter", adapter.to_str().unwrap()])
         .stdin(Stdio::null())
-        .env("BRAIN_DEVICE", "cpu")
+        .args(["--device", "cpu"])
         .env("BRAIN_QWEN_WEIGHTS", &base)
         .env_remove("BRAIN_AUTO_FETCH")
         .output()
@@ -318,7 +318,7 @@ fn an_adapter_with_no_checkpoint_names_the_flag_that_selects_one() {
         .arg("--runtime-dir")
         .arg(dir.0.join("run"))
         .stdin(Stdio::null())
-        .env("BRAIN_DEVICE", "cpu")
+        .args(["--device", "cpu"])
         .env_remove("BRAIN_QWEN_WEIGHTS")
         .env_remove("BRAIN_AUTO_FETCH")
         .output()
@@ -415,7 +415,7 @@ fn every_startup_resolver_scans_the_models_dir_flag_not_the_environment_store() 
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .env("BRAIN_DEVICE", "cpu")
+        .args(["--device", "cpu"])
         .env("BRAIN_MODELS_DIR", &env_store)
         .env("HOME", &home)
         .env_remove("XDG_DATA_HOME")

@@ -115,7 +115,7 @@ fn finetune_lora_writes_a_named_adapter_the_store_can_resolve() {
             "--dataset-id",
             "test-dataset",
         ])
-        .env("BRAIN_DEVICE", "cpu")
+        .args(["--device", "cpu"])
         .output()
         .expect("run brain qwen3 finetune --lora");
     assert!(
@@ -166,7 +166,7 @@ fn finetune_lora_writes_a_named_adapter_the_store_can_resolve() {
             "48",
             "--fresh",
         ])
-        .env("BRAIN_DEVICE", "cpu")
+        .args(["--device", "cpu"])
         .output()
         .expect("run brain qwen3 finetune --lora a second time");
     assert!(out2.status.success(), "retrain-and-overwrite failed: {}", String::from_utf8_lossy(&out2.stderr));
@@ -205,7 +205,7 @@ fn training_an_adapter_that_exists_continues_it_unless_asked_to_start_over() {
                 "--lr", "0.003", "--seed", "7",
             ])
             .args(extra)
-            .env("BRAIN_DEVICE", "cpu")
+            .args(["--device", "cpu"])
             .output()
             .expect("run brain qwen3 finetune --lora");
         let stdout = String::from_utf8_lossy(&out.stdout).to_string();

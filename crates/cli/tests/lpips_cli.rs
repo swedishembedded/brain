@@ -15,7 +15,7 @@ fn write_ppm(path: &std::path::Path, shade: u8) {
 
 fn distance(a: &std::path::Path, b: &std::path::Path) -> f64 {
     let out = Command::new(env!("CARGO_BIN_EXE_brain"))
-        .env("BRAIN_DEVICE", "cpu")
+        .args(["--device", "cpu"])
         .args(["lpips", "distance", "--json", "--in"])
         .arg(format!("a={}", a.display()))
         .arg("--in")

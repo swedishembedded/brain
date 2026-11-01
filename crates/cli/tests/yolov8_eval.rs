@@ -13,7 +13,7 @@ const N_IMAGES: usize = 20;
 fn brain(args: &[&str]) -> Output {
     let out = Command::new(env!("CARGO_BIN_EXE_brain"))
         .args(args)
-        .env("BRAIN_DEVICE", "cpu")
+        .args(["--device", "cpu"])
         .output()
         .expect("run brain");
     assert!(out.status.success(), "brain {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));

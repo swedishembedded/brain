@@ -49,7 +49,7 @@ fn depth_image_headless_is_deterministic() {
                 "zipdepth", "--image", img.to_str().unwrap(),
                 "--weights", &ckpt, "--headless", "--out", out.to_str().unwrap(),
             ])
-            .env("BRAIN_DEVICE", "cpu")
+            .args(["--device", "cpu"])
             .env("DISPLAY", "")
             .output()
             .expect("run brain zipdepth");

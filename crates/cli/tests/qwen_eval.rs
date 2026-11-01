@@ -94,7 +94,7 @@ fn eval_scores_base_alone_and_base_plus_adapter_side_by_side() {
             "qwen3", "finetune", "--lora", "4", "--weights", "Qwen/Qwen3-0.6B", "--adapter", "test-owner/eval-adapter", "--dataset",
             dataset_dir.to_str().unwrap(), "--models-dir", store_dir.to_str().unwrap(), "--steps", "2", "--batch", "1", "--block", "48",
         ])
-        .env("BRAIN_DEVICE", "cpu")
+        .args(["--device", "cpu"])
         .output()
         .expect("run brain qwen3 finetune --lora");
     assert!(train_out.status.success(), "training the adapter failed: {}", String::from_utf8_lossy(&train_out.stderr));
@@ -102,7 +102,7 @@ fn eval_scores_base_alone_and_base_plus_adapter_side_by_side() {
     // Base score alone.
     let base_only = Command::new(bin())
         .args(["qwen3", "eval", "--weights", "Qwen/Qwen3-0.6B", "--jsonl", dataset_dir.join("validation.jsonl").to_str().unwrap(), "--models-dir", store_dir.to_str().unwrap(), "--block", "48"])
-        .env("BRAIN_DEVICE", "cpu")
+        .args(["--device", "cpu"])
         .output()
         .expect("run brain qwen3 eval (base only)");
     assert!(base_only.status.success(), "base-only eval failed: {}", String::from_utf8_lossy(&base_only.stderr));
@@ -116,7 +116,7 @@ fn eval_scores_base_alone_and_base_plus_adapter_side_by_side() {
             "qwen3", "eval", "--weights", "Qwen/Qwen3-0.6B", "--adapter", "test-owner/eval-adapter", "--jsonl", dataset_dir.join("validation.jsonl").to_str().unwrap(), "--models-dir",
             store_dir.to_str().unwrap(), "--block", "48",
         ])
-        .env("BRAIN_DEVICE", "cpu")
+        .args(["--device", "cpu"])
         .output()
         .expect("run brain qwen3 eval (with adapter)");
     assert!(with_adapter.status.success(), "with-adapter eval failed: {}", String::from_utf8_lossy(&with_adapter.stderr));

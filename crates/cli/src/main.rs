@@ -846,15 +846,14 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
         }
     });
 
-    // An explicit `--device` flag takes precedence over `BRAIN_DEVICE` and is
-    // resolved directly (still hard-exiting on a bad value - the user just
-    // typed it). With no flag, `BRAIN_DEVICE` - if any - is resolved by
-    // `gpu_core::devices::resolve_ambient_compute_set()`, which is the body of
-    // `ambient_compute_set()` and lives in the ONE file that reads
-    // `BRAIN_DEVICE` (shared with every non-CLI caller: test binaries, library
-    // callers with no CLI in the loop). `apply()` runs here either way for the
-    // CLI-only half `ambient_compute_set()` deliberately skips (rayon pool
-    // sizing / CPU affinity - see `ComputeSet::apply`'s doc).
+    // An explicit `--device` flag is resolved directly (still hard-exiting on a
+    // bad value - the user just typed it). With no flag the CLI runs on every
+    // device the machine has: it is configured by its flags alone, never by
+    // `BRAIN_DEVICE`/`BRAIN_BACKEND` left in the environment
+    // (`gpu_core::devices::resolve_cli_default_compute_set` says so when one is
+    // set). `apply()` runs here either way for the CLI-only half
+    // `ambient_compute_set()` deliberately skips (rayon pool sizing / CPU
+    // affinity - see `ComputeSet::apply`'s doc).
     //
     // One resolution, then one optional `--backend` override on top of it,
     // then publish - in that order, because `--backend` must reach the set
@@ -880,7 +879,7 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
                 }
             }
         }
-        None => gpu_core::devices::resolve_ambient_compute_set(),
+        None => gpu_core::devices::resolve_cli_default_compute_set(),
     };
 
     // An unsatisfiable `--backend` is a hard error, never a quiet demotion to

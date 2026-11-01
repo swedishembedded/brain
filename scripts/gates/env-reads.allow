@@ -176,7 +176,6 @@ crates/cli/src/wan_report.rs	BRAIN_CLIP_DIR
 crates/cli/tests/device_routing.rs	BRAIN_DEVICE
 crates/cli/tests/flops_diffusion_cli.rs	BRAIN_FLUX2_VAE
 crates/cli/tests/forecast_finetune_timesfm3.rs	MOE_SKIP_GPU_TESTS
-crates/cli/tests/lpips_cli.rs	BRAIN_DEVICE
 crates/cli/tests/models_list.rs	BRAIN_MODELS_DIR
 crates/cli/tests/models_list.rs	MOE_SKIP_GPU_TESTS
 crates/cli/tests/oos_skill_eval.rs	<k>
@@ -192,17 +191,13 @@ crates/cli/tests/oos_skill_eval.rs	OOS_OUT
 crates/cli/tests/oos_skill_eval.rs	OOS_SHARD
 crates/cli/tests/oos_skill_eval.rs	OOS_UNIVARIATE
 crates/cli/tests/perf_longctx.rs	BRAIN_QWEN35_GGUF
-crates/cli/tests/qwen_eval.rs	BRAIN_DEVICE
 crates/cli/tests/qwen_eval.rs	QWEN3_DIR
-crates/cli/tests/qwen_lora_finetune.rs	BRAIN_DEVICE
 crates/cli/tests/qwen_lora_finetune.rs	QWEN3_DIR
 crates/cli/tests/serve_cli.rs	BRAIN_AUTO_FETCH
 crates/cli/tests/serve_cli.rs	BRAIN_BACKEND
 crates/cli/tests/serve_cli.rs	BRAIN_DEVICE
 crates/cli/tests/serve_cli.rs	BRAIN_MODELS_DIR
 crates/cli/tests/serve_cli.rs	BRAIN_QWEN_WEIGHTS
-crates/cli/tests/yolov8_eval.rs	BRAIN_DEVICE
-crates/cli/tests/zipdepth_smoke.rs	BRAIN_DEVICE
 crates/cli/tests/zipdepth_smoke.rs	ZIPDEPTH_PTH
 crates/clip/src/caps.rs	BRAIN_CLIP_DIR
 crates/clip/tests/deepseek_ocr_real.rs	BRAIN_DEVICE
