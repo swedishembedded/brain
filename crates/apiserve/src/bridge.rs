@@ -41,6 +41,7 @@ struct Pending(Option<Box<dyn Ticket>>);
 impl Pending {
     /// Asks the hooks whether this call may run.
     fn begin(state: &AppState, model: &str, action: &str, invocation: &Invocation) -> Result<Pending, ApiError> {
+        refuse_unread_images(&state.exec, state.provider, model, action, invocation)?;
         match &state.hooks {
             None => Ok(Pending(None)),
             Some(hooks) => hooks.begin(&Call { provider: state.provider, caller: state.caller.as_ref(), model, action, invocation }).map(|ticket| Pending(Some(ticket))),
@@ -62,6 +63,28 @@ impl Drop for Pending {
             let _ = ticket.finish(CallResult::Refused);
         }
     }
+}
+
+/// Refuses a request that carries images to a model whose `action` takes no `image` input.
+///
+/// The images are attached to every chat invocation as blobs, and a model that declares no such input would never
+/// read them: it would answer the text alone, as if it had looked at the picture. A model not yet known to the
+/// executor (one still to be fetched) is checked again once it is, by the same call.
+pub fn refuse_unread_images(exec: &residency::Executor, provider: Provider, model: &str, action: &str, inv: &Invocation) -> Result<(), ApiError> {
+    if inv.get_blob("image").is_none() {
+        return Ok(());
+    }
+    let manifests = exec.manifests();
+    let Some(spec) = manifests.iter().find(|m| m.model == model).and_then(|m| m.actions.iter().find(|a| a.name == action)) else {
+        return Ok(());
+    };
+    if spec.inputs.iter().any(|b| b.name == "image") {
+        return Ok(());
+    }
+    Err(ApiError::invalid_request(
+        provider,
+        format!("model '{model}' does not read images: its '{action}' action takes no image input (a text-only model, or a checkpoint loaded without vision weights); resend without image parts"),
+    ))
 }
 
 /// Auto-fetch entry point: `model` didn't resolve against `resolve` (the caller's
@@ -663,6 +686,12 @@ pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn resi
                 jobs.remove(&id);
                 return;
             }
+        }
+        // The fetched model's manifest is known now: images it cannot read are refused before the job is queued.
+        if let Err(e) = refuse_unread_images(&exec, provider, &model_owned, &action_owned, &inv) {
+            let _ = tx.send(StreamMsg::Err(e));
+            jobs.remove(&id);
+            return;
         }
 
         // Model is ready -- submit the real job, forwarding into the SAME

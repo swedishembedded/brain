@@ -878,6 +878,87 @@ async fn chat_bad_bodies_are_400() {
     }
 }
 
+// ------------------------------------------------- chat: images a model cannot read
+
+/// A 1x1 PNG, as an OpenAI `image_url` data URL.
+const TINY_PNG_URL: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+fn image_chat_body(model: &str) -> Value {
+    json!({"model": model, "messages": [{"role": "user", "content": [
+        {"type": "text", "text": "what is this?"},
+        {"type": "image_url", "image_url": {"url": TINY_PNG_URL}},
+    ]}]})
+}
+
+/// A model that reads images: a runnable chat model whose `generate` declares the `image` input.
+struct FakeVisionChat;
+impl ResidentModel for FakeVisionChat {
+    fn manifest(&self) -> Manifest {
+        let mut m = chat_manifest();
+        m.model = "brain-vision-chat".to_string();
+        m.actions[0] = m.actions[0].clone().input(BlobSpec::new("image", Media::Image, "an image the model reads"));
+        m
+    }
+    fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+        InstanceKey::new("brain-vision-chat", "default")
+    }
+    fn estimate(&self, _k: &InstanceKey) -> MemCost {
+        MemCost::default()
+    }
+    fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(FakeChatInst))
+    }
+}
+
+fn vision_chat_app(provider: Provider) -> (Router, String) {
+    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(FakeChat), Arc::new(FakeVisionChat)];
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Cpu, 8 << 30, 0);
+    let key = "sk-brain-test-key".to_string();
+    (router(AppState::new(Executor::start(models, budgets, Policy::default()), key.clone(), provider)), key)
+}
+
+/// A model whose `generate` declares no image input must refuse a request that carries one: answering the text alone
+/// would present a reading of a picture the model never saw.
+#[tokio::test]
+async fn an_image_for_a_model_that_cannot_read_images_is_a_400_naming_the_model() {
+    let (app, key) = vision_chat_app(Provider::OpenAI);
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &image_chat_body("brain-chat")).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    assert_valid("openai.json", "ErrorResponse", &v);
+    let msg = v["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("brain-chat") && msg.contains("image"), "the refusal names the model and the input: {msg}");
+
+    let mut streaming = image_chat_body("brain-chat");
+    streaming["stream"] = json!(true);
+    let (st, _) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &streaming).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "a streamed request is refused before its event stream opens");
+
+    // The same text without the image is served: only the unread input is refused.
+    let (st, _) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &json!({"model": "brain-chat", "messages": [{"role": "user", "content": "hi"}]})).await;
+    assert_eq!(st, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn an_image_for_a_model_that_reads_images_is_served() {
+    let (app, key) = vision_chat_app(Provider::OpenAI);
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &image_chat_body("brain-vision-chat")).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["choices"][0]["message"]["content"], "Hello world");
+}
+
+#[tokio::test]
+async fn an_image_block_for_a_model_that_cannot_read_images_is_refused_on_the_anthropic_surface() {
+    let (app, key) = vision_chat_app(Provider::Anthropic);
+    let body = json!({"model": "brain-chat", "max_tokens": 8, "messages": [{"role": "user", "content": [
+        {"type": "text", "text": "what is this?"},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": &TINY_PNG_URL["data:image/png;base64,".len()..]}},
+    ]}]});
+    let (st, v) = post_json(&app, Provider::Anthropic, &key, "/v1/messages", &body).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    assert!(v["error"]["message"].as_str().unwrap().contains("brain-chat"));
+}
+
 // -------------------------------------------------------------- chat: SSE
 
 #[tokio::test]
@@ -2291,6 +2372,7 @@ impl ResidentModel for FakeToolCallChat {
                 .param(ParamSpec::new("enable_thinking", ParamType::Bool, "thinking").default(json!(true)))
                 .param(ParamSpec::new("preserve_thinking", ParamType::Bool, "preserve history reasoning"))
                 .param(ParamSpec::new("template_flavor", ParamType::Str, "chat template flavor"))
+                .input(BlobSpec::new("image", Media::Image, "an image the model reads"))
                 .output(BlobSpec::new("text", Media::Text, "generated text"))],
         )
     }
@@ -3110,6 +3192,7 @@ impl ResidentModel for MessagesEchoChat {
                 .streaming()
                 .param(ParamSpec::new("prompt", ParamType::Str, "the prompt"))
                 .param(ParamSpec::new("messages", ParamType::Str, "chat messages"))
+                .input(BlobSpec::new("image", Media::Image, "an image the model reads"))
                 .output(BlobSpec::new("text", Media::Text, "generated text"))],
         )
     }
