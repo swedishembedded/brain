@@ -16,7 +16,7 @@
 //! explicit Convert otherwise, never a whole-tensor f32 copy. A source without a packed view (or a tier
 //! the executor cannot produce) falls back to the f32 interface, which is bounded by one tensor.
 
-use checkpoint::packed::{BoundedWorkspace, LoadConfig, LoadPolicy, LoadRequest, QuantEncoding, TensorDescriptor};
+use checkpoint::packed::{BoundedWorkspace, Element, FloatFormat, LoadConfig, LoadPolicy, LoadRequest, QuantEncoding, ScaleGranularity, TensorDescriptor};
 use checkpoint::TensorSource;
 
 use super::{DeviceWeightSink, Dtype, Ops, TierPolicy, Weight, FP8_BLOCK};
@@ -52,10 +52,31 @@ pub fn conversion_policy(desc: &TensorDescriptor, tier: Option<Dtype>) -> LoadPo
 }
 
 /// The resident tier that holds tensor `name` of `src` exactly as the source stores it, or `None` when the source has
-/// no packed view of it or no tier is that encoding.
+/// no packed view of it or no tier is that encoding. A static per-tensor FP8 scale is held as that scale on a tile grid
+/// (`F8E4M3`, exact); NVFP4 is held as [`Weight::Micro`] (`F4E2M1`, only by [`upload_from_source`]
+/// of a tensor stored that way).
 pub fn stored_tier(src: &dyn TensorSource, name: &str) -> Option<Dtype> {
     let stored = src.packed_descriptor(name)?.encoding;
-    [Dtype::F32, Dtype::BF16, Dtype::F16, Dtype::I8, Dtype::NF4, Dtype::F8E4M3].into_iter().find(|d| encoding_for(*d).as_ref() == Some(&stored))
+    if stored == QuantEncoding::nvfp4() {
+        return Some(Dtype::F4E2M1);
+    }
+    let held = fp8_tiles_of(&stored).unwrap_or(stored);
+    [Dtype::F32, Dtype::BF16, Dtype::F16, Dtype::I8, Dtype::NF4, Dtype::F8E4M3].into_iter().find(|d| encoding_for(*d).as_ref() == Some(&held) || (*d == Dtype::F8E4M3 && held == fp8_f32_tiles()))
+}
+
+/// The FP8 E4M3 tile grid with f32 scales: the encoding that holds a tensor stored with ONE static scale exactly (the
+/// same bytes, the scale on every tile) or a block-scaled tensor whose scales are f32, where the tier's own bf16 grid
+/// would round them.
+fn fp8_f32_tiles() -> QuantEncoding {
+    let mut tiles = QuantEncoding::fp8_e4m3_tiled(FP8_BLOCK);
+    tiles.scales[0].format = FloatFormat::F32;
+    tiles
+}
+
+/// [`fp8_f32_tiles`] when `stored` is FP8 E4M3 with one static scale per tensor, else `None`.
+fn fp8_tiles_of(stored: &QuantEncoding) -> Option<QuantEncoding> {
+    let per_tensor = matches!(stored.scales.as_slice(), [s] if s.granularity == ScaleGranularity::Tensor);
+    (per_tensor && stored.element == Element::Float(FloatFormat::E4M3Fn)).then(fp8_f32_tiles)
 }
 
 /// The tier policy that keeps every tensor of `names` in the encoding `src` stores it in (so a bf16 or int8
@@ -84,8 +105,14 @@ fn upload_packed(ops: &Ops, src: &dyn TensorSource, names: &[&str], n: usize, k:
     }
     let enc = encoding_of(ops, want)?;
     let config = LoadConfig::default();
-    // Lossless layout change first (Q8_0 to int8 blocks); an explicit numeric Convert otherwise.
-    for policy in [LoadPolicy::Repack(enc.clone()), LoadPolicy::Convert(enc)] {
+    // Lossless layout change first (Q8_0 to int8 blocks, a per-tensor FP8 scale to an f32 tile grid, an f32 FP8 grid as
+    // it is); an explicit numeric Convert otherwise.
+    let mut policies = vec![LoadPolicy::Repack(enc.clone())];
+    if want == Dtype::F8E4M3 {
+        policies.push(LoadPolicy::Repack(fp8_f32_tiles()));
+    }
+    policies.push(LoadPolicy::Convert(enc));
+    for policy in policies {
         let mut sink = DeviceWeightSink::new(ops);
         let req = LoadRequest { policy: &policy, workspace: staging, config: &config };
         match src.load_packed(names, &req, &mut sink) {
@@ -98,8 +125,14 @@ fn upload_packed(ops: &Ops, src: &dyn TensorSource, names: &[&str], n: usize, k:
 }
 
 /// Upload tensor `name` of `src` as an `[n, k]` weight of tier `want`; `None` when the source has no such
-/// tensor. `staging` bounds the host memory a packed load may hold at once.
+/// tensor (for `F4E2M1`, none stored as NVFP4). `staging` bounds the host memory a packed load may hold at once.
 pub fn upload_from_source(ops: &Ops, src: &dyn TensorSource, name: &str, n: usize, k: usize, want: Dtype, staging: &BoundedWorkspace) -> Option<Weight> {
+    // `F4E2M1` asks for the stored NVFP4 bytes as they are ([`Weight::Micro`]); a tensor stored any other way has no
+    // such tier to be made into here (`Weight::upload` would build the W4A8 int4 layout, a different weight).
+    if want == Dtype::F4E2M1 {
+        let stored_nvfp4 = src.packed_descriptor(name).is_some_and(|d| d.encoding == QuantEncoding::nvfp4());
+        return stored_nvfp4.then(|| upload_preserved(ops, src, name, n, k, staging).unwrap_or_else(|e| panic!("upload {name}: {e}")));
+    }
     if let Some(w) = upload_packed(ops, src, &[name], n, k, want, staging) {
         return Some(w);
     }
