@@ -88,7 +88,9 @@ fn run(engine: &mut Qwen35GgufEngine, prompt: &[u32], embeds: Option<&PromptEmbe
 }
 
 fn close(a: &[f32], b: &[f32], tol: f32) -> bool {
-    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() <= tol * (1.0 + y.abs()))
+    let worst = a.iter().zip(b).map(|(x, y)| (x - y).abs() / (1.0 + y.abs())).fold(0.0f32, f32::max);
+    println!("worst relative difference {worst:.2e} (tolerance {tol:.0e})");
+    a.len() == b.len() && worst <= tol
 }
 
 fn default_rotary() -> Vec<[u32; 3]> {
