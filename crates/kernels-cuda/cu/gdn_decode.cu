@@ -1135,6 +1135,11 @@ brain_gdn_recur_verify_pool(const unsigned int* params, const float* conv_out, c
 // The same body runs a speculative verify (`brain_gdn_verify_pool_stream_bf16`): a block takes a sequence's `counts[bi]` rows
 // in order with the state tiles resident in shared memory throughout, so each row sees the tile rounded to bf16 by the row
 // before, exactly as consecutive plain steps do through the pool; one-row decode is the same code with the row loop folded away.
+//
+// `params[7]` is the row stride of a fused projection: the layer's `in_proj_qkv` and `in_proj_z` computed as ONE product of
+// `stride = conv_dim + value_dim` columns, a row's qkv in its first `conv_dim` columns and its z in the rest. `mixed` and `z` are then
+// the same array, read in place at that stride (no split copy between the product and this launch); 0 keeps the two separate
+// arrays at their own widths.
 
 #define BRAIN_GDN_STREAM_THREADS (BRAIN_GDN_MAX_GROUP * 128)
 #define BRAIN_GDN_STREAM_TILE_BYTES (BRAIN_GDN_HD * BRAIN_GDN_HD * 2)
@@ -1183,6 +1188,11 @@ __device__ __forceinline__ void brain_gdn_stream_body(const unsigned int* params
     const unsigned long long conv_dim = 2ull * key_dim + value_dim;
     const unsigned long long state_len = value_dim * BRAIN_GDN_HD;
     const unsigned long long hist_len = conv_dim * (BRAIN_GDN_KW - 1);
+    // Where a token's qkv row and z row start: the fused projection's row (z after the qkv columns) or two separate arrays.
+    const unsigned long long fused_stride = params[7];
+    const unsigned long long mixed_stride = fused_stride != 0ull ? fused_stride : conv_dim;
+    const unsigned long long z_stride = fused_stride != 0ull ? fused_stride : value_dim;
+    const float* const z_rows = fused_stride != 0ull ? z + conv_dim : z;
 
     extern __shared__ __align__(128) unsigned char brain_gdn_stream_tiles[];
     __shared__ __align__(16) float qk[2][BRAIN_GDN_HD];
@@ -1216,7 +1226,7 @@ __device__ __forceinline__ void brain_gdn_stream_body(const unsigned int* params
 
         // Phase A. The convolution of the block's channels, each window slid by exactly one thread: q and k of the key head, v of
         // each of its value heads. A thread owns the same channels on every row, so its window is read back from the row it wrote.
-        const float* mixed_row = mixed + tok * conv_dim;
+        const float* mixed_row = mixed + tok * mixed_stride;
         for (unsigned int c = t; c < channels; c += BRAIN_GDN_STREAM_THREADS) {
             const unsigned int part = c / BRAIN_GDN_HD, i = c % BRAIN_GDN_HD;   // 0: q, 1: k, 2 + s: v of slot s
             const unsigned long long ch = part == 0 ? kh * BRAIN_GDN_HD + i : part == 1 ? key_dim + kh * BRAIN_GDN_HD + i : 2ull * key_dim + (kh * group + (part - 2)) * BRAIN_GDN_HD + i;
@@ -1349,7 +1359,7 @@ __device__ __forceinline__ void brain_gdn_stream_body(const unsigned int* params
         if (live && half == 0u) {
             const float inv_rms = 1.0f / sqrtf((sq_s[slot][0] + sq_s[slot][1]) / static_cast<float>(BRAIN_GDN_HD) + rms_eps);
             const unsigned long long at = tok * value_dim + static_cast<unsigned long long>(vh) * BRAIN_GDN_HD + 2 * p;
-            const float2 zz = *reinterpret_cast<const float2*>(z + at);
+            const float2 zz = *reinterpret_cast<const float2*>(z_rows + tok * z_stride + static_cast<unsigned long long>(vh) * BRAIN_GDN_HD + 2 * p);
             const float2 nw = *reinterpret_cast<const float2*>(norm_w + 2 * p);
             *reinterpret_cast<float2*>(gated + at) = make_float2(nw.x * o0 * inv_rms * (zz.x / (1.0f + expf(-zz.x))), nw.y * o1 * inv_rms * (zz.y / (1.0f + expf(-zz.y))));
         }

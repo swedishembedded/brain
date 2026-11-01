@@ -26,7 +26,7 @@ use data::rng::{random_seed, Lcg};
 use gpu_core::Gpu;
 use model::block::{KernelIds, UNREGISTERED};
 use model::gdn::{GdnBwdIds, GdnConvIds, GdnIds, GdnShape};
-use model::gdn_mixer::{gdn_mixer_decode_fused, gdn_mixer_decode_fwd, gdn_mixer_decode_state_fwd, gdn_mixer_rows_fused, GdnDecodeState, GdnMixerDecodeIds, GdnMixerIds, GdnMixerShape, GdnMixerWeights, GdnPoolRows, GdnStream};
+use model::gdn_mixer::{gdn_mixer_decode_fused, gdn_mixer_decode_fwd, gdn_mixer_decode_pooled_fused, gdn_mixer_decode_pooled_qkvz, gdn_mixer_decode_state_fwd, gdn_mixer_rows_fused, GdnDecodeState, GdnMixerDecodeIds, GdnMixerIds, GdnMixerShape, GdnMixerWeights, GdnPoolRows, GdnStream};
 
 const KERNELS: &[(&str, &str)] = &[
     ("rmsnorm", kernels::RMSNORM),
@@ -467,6 +467,66 @@ fn the_wide_candidate_agrees_with_the_exact_body_within_a_stated_tolerance() {
             assert!(rel_l2(&wide.1, &exact.1) < tol_state, "state pool: {ctx}: {}", rel_l2(&wide.1, &exact.1));
             assert_eq!(bits(wide.2), bits(exact.2), "window pool: {ctx}");
         }
+    }
+}
+
+/// The streaming decode reading `in_proj_qkv` and `in_proj_z` from the one `[b, conv_dim + value_dim]` product of a fused
+/// projection ([`gdn_mixer_decode_pooled_qkvz`]) leaves exactly the bits of the same launch over the two separate arrays: the
+/// kernel only changes where it reads, so the layer output, the state pool and the conv window are byte-identical. Ragged
+/// batches (pool rows out of order) and every head count the block shape serves, the production 16 x 3 among them.
+#[test]
+fn the_streaming_decode_reads_qkv_and_z_in_place_from_one_fused_product() {
+    let g = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda(&g) {
+        brain_testutil::skip_unavailable("native fused kernels need a CUDA device");
+        return;
+    }
+    let (dk, dv, kw) = (128u32, 128u32, 4u32);
+    let round = |x: f32| {
+        let b = x.to_bits();
+        ((b + 0x7fff + ((b >> 16) & 1)) >> 16) as u16
+    };
+    let pack = |v: &[f32]| v.chunks(2).map(|p| f32::from_bits(u32::from(round(p[0])) | u32::from(round(p[1])) << 16)).collect::<Vec<f32>>();
+    for &(nkh, group, picked, pool_rows) in &[(2u32, 3u32, &[1u32][..], 3u32), (16, 3, &[5, 1, 7, 0, 3, 6], 8), (4, 2, &[2, 4, 0], 5), (16, 3, &[9, 2, 6, 0, 4, 7, 1, 3, 5, 8, 10, 11, 12, 13, 14, 15], 16)] {
+        let (nvh, b) = (nkh * group, picked.len() as u32);
+        let shape = GdnMixerShape { gdn: GdnShape { b, h: nvh, t: 1, dk, dv, chunk: 1 }, nkh, conv_kernel: kw, rms_eps: 1e-6 };
+        let (value_dim, conv_dim) = (shape.value_dim() as usize, shape.conv_dim() as usize);
+        let state_len = (nvh * dk * dv) as usize;
+        let hist_len = conv_dim * (kw as usize - 1);
+        let mut r = Lcg::new(random_seed());
+        let conv_w = g.storage_init("conv_w", &rnd(&mut r, conv_dim * kw as usize, 0.5));
+        let a_log = g.storage_init("a_log", &rnd(&mut r, nvh as usize, 0.5));
+        let dt_bias = g.storage_init("dt_bias", &rnd(&mut r, nvh as usize, 0.5));
+        let norm_w = g.storage_init("norm_w", &rnd(&mut r, dv as usize, 0.5));
+        let ones = g.storage_init("ones", &vec![1.0f32; dk as usize]);
+        let w = GdnMixerWeights { conv1d_weight: &conv_w, a_log: &a_log, dt_bias: &dt_bias, norm_weight: &norm_w, ones_khd: &ones };
+        let bn = b as usize;
+        let mixed = rnd(&mut r, bn * conv_dim, 1.0);
+        let z = rnd(&mut r, bn * value_dim, 1.0);
+        let bp = g.storage_init("bp", &rnd(&mut r, bn * nvh as usize, 1.0));
+        let ap = g.storage_init("ap", &rnd(&mut r, bn * nvh as usize, 1.0));
+        // The fused projection's rows: each row's qkv, then its z.
+        let qkvz: Vec<f32> = (0..bn).flat_map(|row| mixed[row * conv_dim..(row + 1) * conv_dim].iter().chain(&z[row * value_dim..(row + 1) * value_dim]).copied()).collect();
+        let state0 = pack(&rnd(&mut r, pool_rows as usize * state_len, 0.3));
+        let hist0 = pack(&rnd(&mut r, pool_rows as usize * hist_len, 0.3));
+        let rows = g.storage_init("rows", &picked.iter().map(|&i| f32::from_bits(i)).collect::<Vec<_>>());
+        let run = |in_place: bool| {
+            let (st, hi) = (g.storage_init("state", &state0), g.storage_init("hist", &hist0));
+            let pool = GdnPoolRows { state: &st, hist: &hi, rows: &rows, gather: idx(&g, "pool_rows_gather2"), scatter: idx(&g, "pool_rows_scatter2"), fuse: true, bf16: true, wide: true };
+            let gated = if in_place {
+                gdn_mixer_decode_pooled_qkvz(&g, &shape, &w, &g.storage_init("qkvz", &qkvz), &bp, &ap, &pool)
+            } else {
+                gdn_mixer_decode_pooled_fused(&g, &shape, &w, &g.storage_init("mixed", &mixed), &bp, &ap, &g.storage_init("z", &z), &pool)
+            }
+            .expect("the streaming decode was declined on a CUDA device");
+            g.poll_wait();
+            (bits(g.read(&gated, bn * value_dim)), bits(g.read(&st, pool_rows as usize * state_len / 2)), bits(g.read(&hi, pool_rows as usize * hist_len / 2)))
+        };
+        let ctx = format!("nkh={nkh} group={group} batch={b}");
+        let (apart, together) = (run(false), run(true));
+        assert_eq!(together.0, apart.0, "layer output differs: {ctx}");
+        assert_eq!(together.1, apart.1, "state pool differs: {ctx}");
+        assert_eq!(together.2, apart.2, "window pool differs: {ctx}");
     }
 }
 

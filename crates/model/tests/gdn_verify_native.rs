@@ -25,8 +25,8 @@
 
 use data::rng::{random_seed, Lcg};
 use model::gdn::GdnShape;
-use model::gdn_mixer::{gdn_mixer_decode_fused, gdn_mixer_decode_pooled_fused, GdnMixerShape, GdnMixerWeights, GdnPoolRows, GdnStream};
-use model::gdn_verify::{gdn_commit_pooled, gdn_mixer_verify_pooled_fused, GdnRowSnapshots, VerifyLayout};
+use model::gdn_mixer::{gdn_mixer_decode_fused, gdn_mixer_decode_pooled_fused, gdn_mixer_decode_pooled_qkvz, GdnMixerShape, GdnMixerWeights, GdnPoolRows, GdnStream};
+use model::gdn_verify::{gdn_commit_pooled, gdn_mixer_verify_pooled_fused, gdn_mixer_verify_pooled_qkvz, GdnRowSnapshots, VerifyLayout};
 
 fn rnd(r: &mut Lcg, n: usize, s: f32) -> Vec<f32> {
     (0..n).map(|_| r.scaled(s)).collect()
@@ -202,5 +202,124 @@ fn verify_equals_single_steps(bf16: bool) {
         g.poll_wait();
         assert_eq!(bits(load(&pst, pool_rows as usize * state_len)), bits(want_state), "pool state after commit differs: {ctx}");
         assert_eq!(bits(load(&phi, pool_rows as usize * hist_len)), bits(want_hist), "pool window after commit differs: {ctx}");
+    }
+}
+
+/// The verify launch reading `in_proj_qkv` and `in_proj_z` from the one `[tokens, conv_dim + value_dim]` product of a fused
+/// projection leaves exactly the bits of the launch over the two separate arrays: the gated rows, the pool after the last
+/// row, and every snapshot.
+#[test]
+fn verify_reads_qkv_and_z_in_place_from_one_fused_product() {
+    let g = gpu_core::testgpu::dev(&[]);
+    if !is_cuda(&g) {
+        brain_testutil::skip_unavailable("native fused kernels need a CUDA device");
+        return;
+    }
+    let (dk, dv, kw) = (128u32, 128u32, 4u32);
+    let cases: [GdnCase; 3] = [(2, 3, &[3, 1, 5], 5, &[3, 0, 2]), (4, 2, &[8, 2, 1, 4], 6, &[5, 1, 0, 3]), (16, 3, &[2, 4, 3, 1], 5, &[4, 0, 2, 1])];
+    for (case, &(nkh, group, counts, pool_rows, slots)) in cases.iter().enumerate() {
+        let nvh = nkh * group;
+        let b = counts.len() as u32;
+        let n: u32 = counts.iter().sum();
+        let shape = GdnMixerShape { gdn: GdnShape { b: 1, h: nvh, t: 1, dk, dv, chunk: 1 }, nkh, conv_kernel: kw, rms_eps: 1e-6 };
+        let (value_dim, conv_dim) = (shape.value_dim() as usize, shape.conv_dim() as usize);
+        let state_len = (nvh * dk * dv) as usize;
+        let hist_len = conv_dim * (kw as usize - 1);
+        let ctx = format!("case {case}: nkh={nkh} group={group} counts={counts:?}");
+        let mut r = Lcg::new(random_seed());
+        let conv_w = g.storage_init("conv_w", &rnd(&mut r, conv_dim * kw as usize, 0.5));
+        let a_log = g.storage_init("a_log", &rnd(&mut r, nvh as usize, 0.5));
+        let dt_bias = g.storage_init("dt_bias", &rnd(&mut r, nvh as usize, 0.5));
+        let norm_w = g.storage_init("norm_w", &rnd(&mut r, dv as usize, 0.5));
+        let ones = g.storage_init("ones", &vec![1.0f32; dk as usize]);
+        let w = GdnMixerWeights { conv1d_weight: &conv_w, a_log: &a_log, dt_bias: &dt_bias, norm_weight: &norm_w, ones_khd: &ones };
+        let nn = n as usize;
+        let mixed = rnd(&mut r, nn * conv_dim, 1.0);
+        let z = rnd(&mut r, nn * value_dim, 1.0);
+        let bp = g.storage_init("bp", &rnd(&mut r, nn * nvh as usize, 1.0));
+        let ap = g.storage_init("ap", &rnd(&mut r, nn * nvh as usize, 1.0));
+        let qkvz: Vec<f32> = (0..nn).flat_map(|row| mixed[row * conv_dim..(row + 1) * conv_dim].iter().chain(&z[row * value_dim..(row + 1) * value_dim]).copied()).collect();
+        let state0 = unpack_bf16(&pack_bf16(&rnd(&mut r, pool_rows as usize * state_len, 0.3)));
+        let hist0 = unpack_bf16(&pack_bf16(&rnd(&mut r, pool_rows as usize * hist_len, 0.3)));
+        let rows_buf = u32s(&g, slots);
+        let offs: Vec<u32> = counts.iter().scan(0u32, |acc, &c| { let o = *acc; *acc += c; Some(o) }).collect();
+        let (counts_buf, offs_buf) = (u32s(&g, counts), u32s(&g, &offs));
+        let layout = VerifyLayout { rows: &rows_buf, counts: &counts_buf, offs: &offs_buf, b };
+        let run = |in_place: bool| {
+            let (pst, phi) = (g.storage_init("pool_state", &pack_bf16(&state0)), g.storage_init("pool_hist", &pack_bf16(&hist0)));
+            let pool = GdnPoolRows { state: &pst, hist: &phi, rows: &rows_buf, gather: 0, scatter: 0, fuse: true, bf16: true, wide: true };
+            let snaps = GdnRowSnapshots::new(&g, &shape, n);
+            let gated = if in_place {
+                gdn_mixer_verify_pooled_qkvz(&g, &shape, &w, &g.storage_init("qkvz", &qkvz), &bp, &ap, &pool, &layout, n, &snaps)
+            } else {
+                gdn_mixer_verify_pooled_fused(&g, &shape, &w, &g.storage_init("mixed", &mixed), &bp, &ap, &g.storage_init("z", &z), &pool, &layout, n, &snaps)
+            }
+            .expect("the verify kernel was declined on a CUDA device");
+            g.poll_wait();
+            (
+                bits(g.read(&gated, nn * value_dim)),
+                bits(g.read(&pst, pool_rows as usize * state_len / 2)),
+                bits(g.read(&phi, pool_rows as usize * hist_len / 2)),
+                bits(g.read(&snaps.state, nn * state_len)),
+                bits(g.read(&snaps.hist, nn * hist_len)),
+            )
+        };
+        let (apart, together) = (run(false), run(true));
+        assert_eq!(together.0, apart.0, "gated rows differ: {ctx}");
+        assert_eq!(together.1, apart.1, "pool state differs: {ctx}");
+        assert_eq!(together.2, apart.2, "pool window differs: {ctx}");
+        assert_eq!(together.3, apart.3, "state snapshots differ: {ctx}");
+        assert_eq!(together.4, apart.4, "window snapshots differ: {ctx}");
+    }
+}
+
+/// Back-to-back launches of the streaming decode and verify kernels over a fused projection's rows, at the production head
+/// counts and the decode batch widths: an uninstrumented timing run, since a fault of a shared-memory ring showed only under
+/// back-to-back launches (`#[ignore]`: a stress run of seconds, then `dmesg | grep -i xid` stays empty).
+///
+/// ```text
+/// BRAIN_DEVICE=gpu0 BRAIN_BACKEND=cuda make test/one P=brain-model T=gdn_verify_native ARGS="--ignored --nocapture qkvz_back_to_back_stress"
+/// ```
+#[test]
+#[ignore]
+fn qkvz_back_to_back_stress() {
+    let g = gpu_core::testgpu::dev(&[]);
+    if !is_cuda(&g) {
+        brain_testutil::skip_unavailable("native fused kernels need a CUDA device");
+        return;
+    }
+    let (dk, dv, kw, nkh, group, pool_rows) = (128u32, 128u32, 4u32, 16u32, 3u32, 64u32);
+    let nvh = nkh * group;
+    let shape = GdnMixerShape { gdn: GdnShape { b: 1, h: nvh, t: 1, dk, dv, chunk: 1 }, nkh, conv_kernel: kw, rms_eps: 1e-6 };
+    let (value_dim, conv_dim) = (shape.value_dim() as usize, shape.conv_dim() as usize);
+    let (state_len, hist_len) = ((nvh * dk * dv) as usize, conv_dim * (kw as usize - 1));
+    let mut r = Lcg::new(random_seed());
+    let conv_w = g.storage_init("conv_w", &rnd(&mut r, conv_dim * kw as usize, 0.5));
+    let a_log = g.storage_init("a_log", &rnd(&mut r, nvh as usize, 0.5));
+    let dt_bias = g.storage_init("dt_bias", &rnd(&mut r, nvh as usize, 0.5));
+    let norm_w = g.storage_init("norm_w", &rnd(&mut r, dv as usize, 0.5));
+    let ones = g.storage_init("ones", &vec![1.0f32; dk as usize]);
+    let w = GdnMixerWeights { conv1d_weight: &conv_w, a_log: &a_log, dt_bias: &dt_bias, norm_weight: &norm_w, ones_khd: &ones };
+    let (pst, phi) = (g.storage_init("pool_state", &pack_bf16(&rnd(&mut r, pool_rows as usize * state_len, 0.3))), g.storage_init("pool_hist", &pack_bf16(&rnd(&mut r, pool_rows as usize * hist_len, 0.3))));
+    let slots: Vec<u32> = (0..pool_rows).collect();
+    let rows_buf = u32s(&g, &slots);
+    for round in 0..40u32 {
+        for b in [1u32, 4, 16, 33, 64] {
+            let counts: Vec<u32> = (0..b).map(|i| 1 + (i + round) % 4).collect();
+            let n: u32 = counts.iter().sum();
+            let offs: Vec<u32> = counts.iter().scan(0u32, |acc, &c| { let o = *acc; *acc += c; Some(o) }).collect();
+            let (counts_buf, offs_buf) = (u32s(&g, &counts), u32s(&g, &offs));
+            let qkvz = g.storage_init("qkvz", &rnd(&mut r, n as usize * (conv_dim + value_dim), 1.0));
+            let (bp, ap) = (g.storage_init("bp", &rnd(&mut r, n as usize * nvh as usize, 1.0)), g.storage_init("ap", &rnd(&mut r, n as usize * nvh as usize, 1.0)));
+            let pool = GdnPoolRows { state: &pst, hist: &phi, rows: &rows_buf, gather: 0, scatter: 0, fuse: true, bf16: true, wide: true };
+            let snaps = GdnRowSnapshots::new(&g, &shape, n);
+            let layout = VerifyLayout { rows: &rows_buf, counts: &counts_buf, offs: &offs_buf, b };
+            for _ in 0..8 {
+                let decode_shape = GdnMixerShape { gdn: GdnShape { b, ..shape.gdn }, ..shape };
+                let _ = gdn_mixer_decode_pooled_qkvz(&g, &decode_shape, &w, &qkvz, &bp, &ap, &pool).expect("streaming decode offered");
+                let _ = gdn_mixer_verify_pooled_qkvz(&g, &shape, &w, &qkvz, &bp, &ap, &pool, &layout, n, &snaps).expect("streaming verify offered");
+            }
+            g.poll_wait();
+        }
     }
 }

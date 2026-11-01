@@ -131,6 +131,35 @@ pub fn gdn_mixer_verify_pooled_fused(
     Some(gated)
 }
 
+/// [`gdn_mixer_verify_pooled_fused`] over the rows of one fused projection `qkvz` (`[n_tokens, qkvz_row_width]`, a row's qkv then
+/// its z), read in place by the streaming kernel: the bits of the launch over two separate arrays holding the same values. `None`
+/// - nothing submitted - where [`crate::gdn_mixer::qkvz_in_place_offered`] says no.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_mixer_verify_pooled_qkvz(
+    g: &Gpu,
+    shape: &GdnMixerShape,
+    w: &GdnMixerWeights,
+    qkvz: &DeviceBuffer,
+    bproj: &DeviceBuffer,
+    aproj: &DeviceBuffer,
+    pool: &GdnPoolRows,
+    layout: &VerifyLayout,
+    n_tokens: u32,
+    snaps: &GdnRowSnapshots,
+) -> Option<DeviceBuffer> {
+    if !crate::gdn_mixer::qkvz_in_place_offered(g, shape, pool) || !g.has_fused(gpu_core::Fused::GdnVerifyPoolStreamBf16) {
+        return None;
+    }
+    let gdn = shape.gdn;
+    let gated = g.storage(n_tokens as u64 * shape.value_dim() as u64);
+    let f = f32::to_bits;
+    let params = [shape.nkh, gdn.h, shape.group(), f(1e-6), f(shape.rms_eps), f(1.0f32 / (gdn.dk as f32).sqrt()), layout.b, crate::gdn_mixer::qkvz_row_width(shape)];
+    let bufs = [qkvz, w.conv1d_weight, pool.hist, bproj, aproj, w.a_log, w.dt_bias, pool.state, qkvz, w.norm_weight, &gated, layout.rows, layout.counts, layout.offs, &snaps.state, &snaps.hist];
+    let step = g.fused_step(gpu_core::Fused::GdnVerifyPoolStreamBf16, &bufs, &params)?;
+    g.submit(&[], &[step]);
+    Some(gated)
+}
+
 /// Put snapshot row `sel[i]` back over pool row `rows[i]` for every sequence
 /// whose `sel` entry is not `u32::MAX` - the repair for a verify that rejected
 /// part of a sequence's rows. A bf16 pool (`bf16`) takes the f32 snapshot

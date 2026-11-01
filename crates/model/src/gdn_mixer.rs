@@ -963,6 +963,49 @@ pub fn gdn_mixer_decode_pooled_fused_into(
     true
 }
 
+/// Whether the mixer reads `in_proj_qkv` and `in_proj_z` in place from one fused projection's rows: the streaming kernel of a
+/// bf16 pool ([`gdn_mixer_decode_pooled_qkvz`], and [`crate::gdn_verify::gdn_mixer_verify_pooled_qkvz`] over the same body)
+/// is the only build that takes a row stride, and it serves 128-wide key and value heads, a 4-tap conv and at most three value
+/// heads per key head.
+#[must_use]
+pub fn qkvz_in_place_offered(g: &Gpu, shape: &GdnMixerShape, pool: &GdnPoolRows) -> bool {
+    let gdn = shape.gdn;
+    pool.bf16
+        && pool.wide
+        && gdn.dk == 128
+        && gdn.dv == 128
+        && shape.conv_kernel == 4
+        && shape.nkh != 0
+        && gdn.h.is_multiple_of(shape.nkh)
+        && (1..=3).contains(&shape.group())
+        && g.has_fused(gpu_core::Fused::GdnDecodePoolStreamBf16)
+}
+
+/// The columns of a fused `in_proj_qkv | in_proj_z` row: the width of the one product, and the row stride the streaming kernels
+/// read it at (`qkv` in the first `conv_dim` columns, `z` in the last `value_dim`).
+#[must_use]
+pub fn qkvz_row_width(shape: &GdnMixerShape) -> u32 {
+    shape.conv_dim() + shape.value_dim()
+}
+
+/// [`gdn_mixer_decode_pooled_fused`] over the rows of one fused projection `qkvz` (`[b, qkvz_row_width]`, a row's qkv then its
+/// z), read in place by the streaming kernel: the bits of the launch over two separate arrays holding the same values.
+/// `None` - nothing submitted - where [`qkvz_in_place_offered`] says no.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_mixer_decode_pooled_qkvz(g: &Gpu, shape: &GdnMixerShape, w: &GdnMixerWeights, qkvz: &DeviceBuffer, bproj: &DeviceBuffer, aproj: &DeviceBuffer, pool: &GdnPoolRows) -> Option<DeviceBuffer> {
+    if !qkvz_in_place_offered(g, shape, pool) {
+        return None;
+    }
+    let gdn = shape.gdn;
+    let params = [shape.nkh, gdn.h, shape.group(), f(1e-6), f(shape.rms_eps), f(1.0f32 / (gdn.dk as f32).sqrt()), gdn.b, qkvz_row_width(shape)];
+    // `qkvz` is bound twice: the kernel's `mixed` and `z` are this array, `z` read after the qkv columns of each row.
+    let gated = g.storage_uninit(gdn.b as u64 * shape.value_dim() as u64);
+    let bufs = [qkvz, w.conv1d_weight, pool.hist, bproj, aproj, w.a_log, w.dt_bias, pool.state, qkvz, w.norm_weight, &gated, pool.rows];
+    let step = g.fused_step(gpu_core::Fused::GdnDecodePoolStreamBf16, &bufs, &params)?;
+    g.submit(&[], &[step]);
+    Some(gated)
+}
+
 /// The token-major convolution kernels' share of the mixer: the fused forward and backward below run on
 /// the opt-in the tensor-core chunk kernels use ([`crate::gdn::GdnFastIds::tensor_core`]) and decline for
 /// any convolution but four taps.
