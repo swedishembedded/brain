@@ -98,3 +98,45 @@ fn a_directory_without_a_tokenizer_is_unservable_by_name() {
     assert!(err.contains("tokenizer.json"), "{err}");
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// Spec: a mixed-precision release (NVFP4 MLPs and head, FP8 attention with one static f32 scale per tensor, bf16 MTP head) is
+/// held as each tensor is stored - the MLPs and the head in the microscaling tier, the attention linears as FP8 with their
+/// scale exact - and a model built at those tiers computes what the same weights decoded to f32 compute (every decode is
+/// exact, so only the arithmetic differs). The projections that no longer read E4M3 rows (the MLP's) keep their f32 rows.
+#[test]
+fn a_mixed_release_is_held_as_stored_and_computes_what_its_decoded_weights_compute() {
+    let cfg0 = fp8_cfg();
+    let dir = common::hf_fixture::write_mixed_release_checkpoint(&cfg0, "mixed");
+    let ckpt = ResidentCheckpoint::open(dir.to_str().unwrap()).expect("the fixture opens");
+    let cfg = ckpt.config(24).unwrap();
+    let tiers = ckpt.held_tiers(&cfg).unwrap();
+    for (l, ty) in cfg.layer_types().into_iter().enumerate() {
+        for (suffix, _, _) in cfg.layer_leaves(ty) {
+            let want = match suffix {
+                s if s.contains("in_proj_a") || s.contains("in_proj_b") => Dtype::BF16,
+                s if s.starts_with("mlp.") => Dtype::F4E2M1,
+                _ => Dtype::F8E4M3,
+            };
+            assert_eq!(tiers.want(&format!("blocks.{l}.{suffix}")), want, "blocks.{l}.{suffix}");
+        }
+    }
+    assert_eq!(tiers.want(cfg.head_weight()), Dtype::F4E2M1, "an NVFP4 head stays NVFP4");
+    assert_eq!(ckpt.head_tier(), Dtype::F4E2M1, "the resident engine holds that head as stored");
+
+    let shard = model::shard::Shard { start: 0, end: cfg.n_layers as usize, embed: true, head: true, gpu_index: 0 };
+    let src_holder = ckpt.shard_source(&cfg, &shard).unwrap();
+    let src = src_holder.as_source();
+    let held = Qwen35::new_on_dt(Gpu::new_cpu(pipelines()), cfg.clone(), 1, cfg.block_size, src, &tiers);
+    let dense = Qwen35::new_on_dt(Gpu::new_cpu(pipelines()), cfg.clone(), 1, cfg.block_size, src, &TierPolicy::uniform(Dtype::F32));
+    assert_eq!(held.weight_tier("blocks.0.mlp.gate.weight"), Some(Dtype::F4E2M1));
+    assert_eq!(held.weight_tier("blocks.0.linear_attn.in_proj_qkv.weight"), Some(Dtype::F8E4M3));
+    assert_eq!(held.weight_tier(cfg.head_weight()), Some(Dtype::F4E2M1));
+
+    let tokens: Vec<u32> = (0..cfg.block_size).map(|i| (i * 7 + 3) % cfg.vocab).collect();
+    let (a, b) = (held.logits_all(&tokens), dense.logits_all(&tokens));
+    let num: f64 = a.iter().zip(&b).map(|(x, y)| ((x - y) as f64).powi(2)).sum();
+    let den: f64 = b.iter().map(|y| (*y as f64).powi(2)).sum();
+    assert!(b.iter().any(|v| v.abs() > 1e-6), "the reference is degenerate");
+    assert!((num / den).sqrt() < 1e-4, "mixed-release logits drift from the decoded weights' by rel-L2 {}", (num / den).sqrt());
+    std::fs::remove_dir_all(dir).ok();
+}

@@ -616,7 +616,8 @@ impl Qwen35Config {
             .into_iter()
             .map(|(suffix, n, k)| {
                 let (n, k) = (u64::from(n), u64::from(k));
-                match tier.want(&format!("{prefix}{suffix}")) {
+                let want = tier.want(&format!("{prefix}{suffix}"));
+                match want {
                     gpu_core::select::Dtype::F32 => n * k * 4,
                     gpu_core::select::Dtype::BF16 | gpu_core::select::Dtype::F16 => n * k * 2,
                     gpu_core::select::Dtype::I8 => n * k + n * k.div_ceil(group) * 4,
@@ -630,22 +631,13 @@ impl Qwen35Config {
                     // table), only `bits` differs.
                     gpu_core::select::Dtype::Q4K => n * (k / 2 + k.div_ceil(group).div_ceil(2) * 4 + k.div_ceil(256) * 4),
                     gpu_core::select::Dtype::Q8K => n * (k + k.div_ceil(group).div_ceil(2) * 4 + k.div_ceil(256) * 4),
-                    // M8.5: `NF4`/`F4E2M1` share `Q4`'s exact physical layout
-                    // (4-bit codes, 8/`u32`, one `f32` scale per `group`) -
-                    // only the codebook a device kernel looks each code up in
-                    // differs, which costs nothing on disk/VRAM. No
-                    // `TierPolicy` in this tree selects either yet
-                    // (`model::ops::Weight::upload` does not build a
-                    // `Weight::NF4`/`Weight::F4E2M1`, M8.5's own follow-up),
-                    // so this arm exists only for exhaustiveness today.
-                    gpu_core::select::Dtype::NF4 | gpu_core::select::Dtype::F4E2M1 => {
-                        n * k / 2 + n * k.div_ceil(group) * 4
-                    }
+                    // `NF4` shares `Q4`'s exact physical layout (4-bit codes, 8/`u32`, one `f32` scale per `group`).
+                    gpu_core::select::Dtype::NF4 => n * k / 2 + n * k.div_ceil(group) * 4,
+                    // `F4E2M1` is `Weight::Micro` NVFP4 as a checkpoint stores it (the per-tensor `global` is a host scalar).
+                    gpu_core::select::Dtype::F4E2M1 => model::ops::Weight::bytes_for(want, n as usize, k as usize),
                     // M8.6: 1 byte/weight plus one `f32` scale per 128x128
                     // block (`model::fp8::scale_shape`'s own shape math,
-                    // reused rather than reimplemented). Same "no
-                    // `TierPolicy` selects this yet" caveat as `NF4`/
-                    // `F4E2M1` above.
+                    // reused rather than reimplemented).
                     gpu_core::select::Dtype::F8E4M3 | gpu_core::select::Dtype::F8E5M2 => {
                         let (rb, cb) = model::fp8::scale_shape(n as usize, k as usize, 128);
                         n * k + (rb * cb) as u64 * 4

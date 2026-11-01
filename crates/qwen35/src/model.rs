@@ -1073,6 +1073,53 @@ impl FrontUse {
     }
 }
 
+/// Which families of main-stack projections the build holds as FP8 E4M3 in every layer. The passes that write a
+/// producer's E4M3 rows in place of its fp32 rows ([`Qwen35::silu_mul_e4m3`], [`Qwen35::gate_mul_e4m3`], the E4M3
+/// variants of the fused front end and the gated norm) skip the fp32 rows, so they run only where EVERY reader of those
+/// rows is an FP8 projection; a mixed release (FP8 attention next to NVFP4 MLPs) keeps the fp32 rows for the float-read
+/// tiers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct E4m3Readers {
+    /// `in_proj_qkv`, `in_proj_z`, `q_proj`, `k_proj`, `v_proj`: the readers of a mixer's front end.
+    mixer_in: bool,
+    /// `gate` and `up`: the readers of the MLP's front end.
+    mlp_in: bool,
+    /// `down`: the reader of the SwiGLU product.
+    down: bool,
+    /// `o_proj`: the reader of the gated attention context.
+    o_proj: bool,
+    /// `out_proj`: the reader of the gated norm of a Gated DeltaNet layer.
+    out_proj: bool,
+}
+
+impl E4m3Readers {
+    fn of(cfg: &Qwen35Config, tier: &TierPolicy, shard: &Shard) -> Self {
+        let all_fp8 = |leaves: &[(LayerType, &str)]| {
+            (0..cfg.n_layers as usize).filter(|l| shard.owns(*l)).all(|l| {
+                let ty = cfg.layer_types()[l];
+                leaves.iter().filter(|(t, _)| *t == ty).all(|(_, leaf)| tier.want(&format!("blocks.{l}.{leaf}.weight")) == Dtype::F8E4M3)
+            })
+        };
+        use LayerType::{Full, Linear};
+        E4m3Readers {
+            mixer_in: all_fp8(&[(Linear, "linear_attn.in_proj_qkv"), (Linear, "linear_attn.in_proj_z"), (Full, "self_attn.q_proj"), (Full, "self_attn.k_proj"), (Full, "self_attn.v_proj")]),
+            mlp_in: all_fp8(&[(Linear, "mlp.gate"), (Linear, "mlp.up"), (Full, "mlp.gate"), (Full, "mlp.up")]),
+            down: all_fp8(&[(Linear, "mlp.down"), (Full, "mlp.down")]),
+            o_proj: all_fp8(&[(Full, "self_attn.o_proj")]),
+            out_proj: all_fp8(&[(Linear, "linear_attn.out_proj")]),
+        }
+    }
+
+    /// Whether every reader of a fused front end's rows ([`FrontUse`]) is an FP8 projection.
+    fn front(self, uses: FrontUse) -> bool {
+        match uses {
+            FrontUse::Mixer(_) => self.mixer_in,
+            FrontUse::Mlp => self.mlp_in,
+            FrontUse::Head => true,
+        }
+    }
+}
+
 /// Everything [`Qwen35::mlp_fwd`]'s training branch saves - universal, every
 /// layer, both mixer types. The dense-MLP analogue of `qwen35moe::model::
 /// MoeLayerActs` (this model has no MoE at all, so no router/expert acts).
@@ -1269,6 +1316,8 @@ pub struct Qwen35 {
     /// The projections some layer holds as ONE FP8 weight ([`Fusion`]) in `weights` instead of several: a decode step is one
     /// product over it, a prefill round one product per row window ([`Self::linear`]).
     fused: FusedProjections,
+    /// Which projection families are FP8 in every layer: where the E4M3-only producers may run.
+    e4m3_readers: E4m3Readers,
     /// The per-layer linears of a resident low-precision full fine-tune, their master copies and state
     /// ([`TrainOpts::resident`]); `weights` then holds handles to its device weights and the parameter store
     /// holds none of them.
@@ -2147,6 +2196,7 @@ impl Qwen35 {
             };
             weights.insert(name, w);
         };
+        let e4m3_readers = E4m3Readers::of(&cfg, tier, &shard);
         let mut fused = FusedProjections::default();
         let mut fused_parts: Vec<(String, Weight)> = Vec::new();
         for (l, ty) in cfg.layer_types().iter().enumerate() {
@@ -2337,6 +2387,7 @@ impl Qwen35 {
             ops,
             weights,
             fused,
+            e4m3_readers,
             resident: resident_ft.map(RefCell::new),
             resident_norm: Cell::new(None),
             backward_pending: Cell::new(false),
@@ -3261,7 +3312,7 @@ impl Qwen35 {
                 let pools = model::gdn_segments::GdnSegmentPools { state: &c.gdn_state[l], hist: &c.gdn_hist[l], bf16: c.bf16 };
                 let lead = round.decode.as_ref().map_or(0, |d| d.rows);
                 // The output projection reads E4M3 rows on this device: the gated norm writes them beside its product.
-                let e4m3 = !self.packs_activations() && self.ops.fp8_reads_e4m3(n, value_dim, d);
+                let e4m3 = !self.packs_activations() && self.e4m3_readers.out_proj && self.ops.fp8_reads_e4m3(n, value_dim, d);
                 let batched = round.gdn.as_ref().and_then(|sr| model::gdn_segments::gdn_mixer_segments_fwd(g, &gdn_mixer_ids(), &shape, &weights, sr, &pools, &mixed_qkv, &bproj, &aproj, &z, n, lead, e4m3, bf16_gdn));
                 // The decode rows' recurrent step and the per-segment path have an f32 form only: the rows they read are
                 // widened (the leading decode rows alone while the batched kernels took the round, every row if they declined).
@@ -4934,7 +4985,7 @@ impl Qwen35 {
     /// Whether [`Self::gate_mul_e4m3`] runs for this shape: no int8 packing in this build, `o_proj` reads E4M3 rows at this row
     /// count and the device offers the kernel.
     fn gate_mul_e4m3_serves(&self, rows: u32, k: u32, head_dim: u32) -> bool {
-        !self.packs_activations() && self.ops.fp8_reads_e4m3(rows, k, self.cfg.d_model) && gpu_core::provider::library::gate_mul_quantize_e4m3_serves(&self.gpu, rows, k, head_dim)
+        !self.packs_activations() && self.e4m3_readers.o_proj && self.ops.fp8_reads_e4m3(rows, k, self.cfg.d_model) && gpu_core::provider::library::gate_mul_quantize_e4m3_serves(&self.gpu, rows, k, head_dim)
     }
 
     /// Whether the fused front ends also write the bf16 rows of their activation (`cast_f32_bf16`'s result, in the same
@@ -4970,7 +5021,7 @@ impl Qwen35 {
     /// Whether [`Self::silu_mul_e4m3`] runs for this shape: no int8 packing in this build, `down` reads E4M3 rows at this
     /// row count and the device offers the kernel.
     fn silu_mul_e4m3_serves(&self, rows: u32, k: u32) -> bool {
-        !self.packs_activations() && self.ops.fp8_reads_e4m3(rows, k, self.cfg.d_model) && gpu_core::provider::library::silu_mul_quantize_e4m3_serves(&self.gpu, rows, k)
+        !self.packs_activations() && self.e4m3_readers.down && self.ops.fp8_reads_e4m3(rows, k, self.cfg.d_model) && gpu_core::provider::library::silu_mul_quantize_e4m3_serves(&self.gpu, rows, k)
     }
 
     /// Whether anything reads the MLP product as fp32 rows: the saved activations of a backward, a training adapter or the
@@ -4983,7 +5034,7 @@ impl Qwen35 {
     /// the layer's fp32 rows (no backward, no adapter correcting a projection in place), and the output projection takes the
     /// E4M3 rows the gated norm writes (the fp32 product of the segments is then not stored).
     fn bf16_gdn_ok(&self, rows: u32, value_dim: u32) -> bool {
-        self.act_precision.get() == gpu_core::ActPrecision::Bf16 && !self.keeps_fp32_product() && !self.packs_activations() && self.ops.fp8_reads_e4m3(rows, value_dim, self.cfg.d_model)
+        self.act_precision.get() == gpu_core::ActPrecision::Bf16 && !self.keeps_fp32_product() && !self.packs_activations() && self.e4m3_readers.out_proj && self.ops.fp8_reads_e4m3(rows, value_dim, self.cfg.d_model)
     }
 
     /// Whether the gate and up products of an MLP of `rows` rows may store bf16: the stream was asked for bf16, nothing reads
@@ -5056,7 +5107,7 @@ impl Qwen35 {
         let n = (rows * d) as u64;
         let sum = b.map(|_| g.storage_uninit(n));
         let pack = self.packs_activations();
-        let widths = uses.product_widths(&self.cfg);
+        let widths = if self.e4m3_readers.front(uses) { uses.product_widths(&self.cfg) } else { Vec::new() };
         let e4m3 = !pack
             && d.is_multiple_of(128)
             && !widths.is_empty()

@@ -105,7 +105,11 @@ pub(crate) fn table_tier(tier: &TierPolicy, cfg: &Qwen35Config, train: bool, nam
     // An inference build below fp32 holds the tables in 16 bits too (never narrower: the head's logits decide the
     // sampled token): a decode step reads the head once, and at fp32 that is the largest single read of the step.
     let inference_16bit = !train && tier.want(name) != Dtype::F32;
+    // A head the checkpoint stores as NVFP4 stays NVFP4 (its release quantized it that way, its rule says so by name;
+    // a policy's default tier never reaches a table, whose gather and logits need the stored values).
+    let stored_nvfp4_head = !train && name == cfg.head_weight() && name != "tok.weight" && tier.rule_for(name) == Some(Dtype::F4E2M1);
     match (narrow_lora_base, inference_16bit) {
+        _ if stored_nvfp4_head => Some(Dtype::F4E2M1),
         (true, _) => Some(Dtype::BF16),
         (_, true) => Some(if tier.want(name) == Dtype::F16 { Dtype::F16 } else { Dtype::BF16 }),
         _ => None,

@@ -222,11 +222,22 @@ impl ResidentCheckpoint {
 
     /// The tier the lm_head is held at: int8 for a GGUF (its tensor is a
     /// quantized one and a fp32 table cannot be a device buffer on small
-    /// cards), as stored (bf16) for an HF release, which keeps it unconverted.
+    /// cards), as stored (bf16) for an HF release, which keeps it unconverted (NVFP4 where the release stores it so).
     pub fn head_tier(&self) -> Dtype {
         match self {
             ResidentCheckpoint::Gguf(_) => Dtype::I8,
-            ResidentCheckpoint::Hf(_) => Dtype::BF16,
+            ResidentCheckpoint::Hf(hf) => Self::hf_head_tier(hf),
+        }
+    }
+
+    /// An HF release's head: NVFP4 where the release quantized it so (the microscaling tier reads the stored bytes; the logits
+    /// decide the sampled token, but they are the release's own), bf16 otherwise.
+    fn hf_head_tier(hf: &HfCheckpoint) -> Dtype {
+        let head = hf.cfg.head_weight();
+        if head != "tok.weight" && model::ops::stored_tier(&hf.src, head) == Some(Dtype::F4E2M1) {
+            Dtype::F4E2M1
+        } else {
+            Dtype::BF16
         }
     }
 
@@ -333,7 +344,10 @@ impl ResidentCheckpoint {
                         leaves.push((format!("{}{suffix}", crate::int8_gguf_resident::MTP_PREFIX), tier, n as u64 * k as u64));
                     }
                 }
-                Ok(TierPolicy::per_leaf(leaves))
+                let policy = TierPolicy::per_leaf(leaves);
+                // An untied head is a table: held at 16 bits whatever the leaves are, unless the checkpoint stores it
+                // as NVFP4, which a rule naming it says (even where that is the policy's default tier).
+                Ok(if Self::hf_head_tier(hf) == Dtype::F4E2M1 { policy.with(&[cfg.head_weight()], Dtype::F4E2M1) } else { policy })
             }
         }
     }

@@ -114,6 +114,11 @@ fn stored_as_offset_from_one(canon: &str) -> bool {
 }
 
 fn write_checkpoint_from(cfg: &Qwen35Config, tag: &str, skip: Option<&str>, dense: Option<&HashMap<String, Vec<f32>>>, layout: Layout, block: usize, tame: bool) -> PathBuf {
+    write_release(cfg, tag, skip, dense, layout, block, tame, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_release(cfg: &Qwen35Config, tag: &str, skip: Option<&str>, dense: Option<&HashMap<String, Vec<f32>>>, layout: Layout, block: usize, tame: bool, mixed: bool) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("qwen35_fp8_source_{tag}_{}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
@@ -129,6 +134,8 @@ fn write_checkpoint_from(cfg: &Qwen35Config, tag: &str, skip: Option<&str>, dens
     }
     let mut by_file: HashMap<String, Vec<Raw>> = HashMap::new();
     let mut weight_map = serde_json::Map::new();
+    // A mixed release says per module how it is quantized (`hf_quant_config.json`, ModelOpt's `quantized_layers`).
+    let mut quantized_layers = serde_json::Map::new();
     // The multimodal release carries the multi-token-prediction head in `mtp.safetensors`: the full-attention layer
     // of the first attention period (same leaves, same encodings) plus the projection and the three norms.
     let mut params = cfg.param_list();
@@ -179,9 +186,37 @@ fn write_checkpoint_from(cfg: &Qwen35Config, tag: &str, skip: Option<&str>, dens
         // FP8-quantized in the real release: the big linears, except the GDN
         // in_proj_a/b gates (kept bf16, which also covers a mixed layer).
         let fp8 = dense.is_none() && linear_shapes.contains_key(&canon) && !canon.contains("in_proj_a") && !canon.contains("in_proj_b");
+        // A mixed release (MIXED_PRECISION): NVFP4 MLPs and head, per-tensor FP8 attention, the MTP head left bf16.
+        let nvfp4 = mixed && ((fp8 && canon.contains(".mlp.") && !canon.starts_with("mtp.")) || canon == "lm_head.weight");
+        let fp8 = fp8 && !(mixed && canon.starts_with("mtp."));
         let list = by_file.entry(file.clone()).or_default();
         weight_map.insert(hf.clone(), file.clone().into());
-        if fp8 {
+        if nvfp4 || (fp8 && mixed) {
+            let module = hf.strip_suffix(".weight").expect("a linear is a .weight").to_string();
+            quantized_layers.insert(module, if nvfp4 { serde_json::json!({"quant_algo": "NVFP4", "group_size": 16}) } else { serde_json::json!({"quant_algo": "FP8"}) });
+        }
+        if nvfp4 {
+            // Two E2M1 codes per byte (every nibble is a value), E4M3 scales per 16 (positive, no NaN), an f32 global scale.
+            let (rows, cols) = (shape[0], shape[1]);
+            let codes: Vec<u8> = (0..rows * cols / 2).map(|_| rng.next() as u8).collect();
+            let block_scales: Vec<u8> = (0..rows * cols / 16).map(|_| 0x30 + (rng.next() % 16) as u8).collect();
+            list.push(Raw { name: hf.clone(), dtype: "U8", shape: vec![rows, cols / 2], bytes: codes });
+            for (suffix, dtype, sshape, bytes) in [("_scale", "F8_E4M3", vec![rows, cols / 16], block_scales), ("_scale_2", "F32", vec![], (0.002f32 + (rng.next() % 100) as f32 * 1e-5).to_le_bytes().to_vec())] {
+                let sname = format!("{hf}{suffix}");
+                weight_map.insert(sname.clone(), file.clone().into());
+                list.push(Raw { name: sname, dtype, shape: sshape, bytes });
+            }
+        } else if fp8 && mixed {
+            // One static f32 scale per tensor, one a bf16 grid would round.
+            let bytes: Vec<u8> = (0..numel).map(|_| match (rng.next() & 0xff) as u8 {
+                b if b & 0x7f == 0x7f => 0x38,
+                b => (b & 0x87) | ((((b >> 3) & 0xf) % 8 + 3) << 3),
+            }).collect();
+            list.push(Raw { name: hf.clone(), dtype: "F8_E4M3", shape, bytes });
+            let sname = format!("{hf}_scale");
+            weight_map.insert(sname.clone(), file.clone().into());
+            list.push(Raw { name: sname, dtype: "F32", shape: vec![], bytes: (0.001f32 + (rng.next() % 1000) as f32 / 100_000.0 + 1e-7).to_le_bytes().to_vec() });
+        } else if fp8 {
             let bytes: Vec<u8> = (0..numel).map(|_| match (rng.next() & 0xff) as u8 {
                 b if b & 0x7f == 0x7f => 0x38, // e4m3fn NaN
                 // Conditioned: exponent field folded into 3..=10 (magnitudes 2^-4 to 2^3), the sign and mantissa kept.
@@ -226,6 +261,10 @@ fn write_checkpoint_from(cfg: &Qwen35Config, tag: &str, skip: Option<&str>, dens
         Layout::TextOnly => hf_text_config_json(cfg),
     };
     std::fs::write(dir.join("config.json"), serde_json::to_vec(&config).unwrap()).unwrap();
+    if mixed {
+        let declared = serde_json::json!({"producer": {"name": "modelopt"}, "quantization": {"quant_algo": "MIXED_PRECISION", "kv_cache_quant_algo": null, "quantized_layers": quantized_layers}});
+        std::fs::write(dir.join("hf_quant_config.json"), serde_json::to_vec(&declared).unwrap()).unwrap();
+    }
     std::fs::write(dir.join("model.safetensors.index.json"), serde_json::to_vec(&serde_json::json!({"weight_map": weight_map})).unwrap()).unwrap();
     dir
 }
@@ -283,6 +322,13 @@ pub fn hf_config_json(cfg: &Qwen35Config, block: usize) -> serde_json::Value {
 /// (the random full-range codes make a residual stream with a dynamic range that does).
 pub fn write_checkpoint_conditioned(cfg: &Qwen35Config, tag: &str, block: usize) -> PathBuf {
     write_checkpoint_from(cfg, tag, None, None, Layout::Multimodal, block, true)
+}
+
+/// A checkpoint as a mixed-precision release lays itself out (`MIXED_PRECISION`): NVFP4 (E2M1 codes, an E4M3 scale per 16,
+/// an f32 global scale) for the MLPs and the head, FP8 with one static f32 `weight_scale` per tensor for the attention
+/// projections, bf16 for the rest and the MTP head. FP8 codes conditioned as in [`write_checkpoint_conditioned`].
+pub fn write_mixed_release_checkpoint(cfg: &Qwen35Config, tag: &str) -> PathBuf {
+    write_release(cfg, tag, None, None, Layout::Multimodal, 128, true, true)
 }
 
 /// A model whose linears all have a contraction width of a whole 128-block (the FP8 tier's rule) with the real

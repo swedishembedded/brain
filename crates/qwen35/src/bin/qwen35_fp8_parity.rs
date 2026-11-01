@@ -15,8 +15,12 @@
 //! the positions that pick another argmax with the reference margin over its runner-up (a flip at a large margin is a
 //! defect, a flip at a near-tie is numeric drift), and the mean KL in nats.
 //!
+//! `--reference <hf-dir>` names another release as the reference, held as it stores itself (a different quantization of
+//! the same model: the FP8 release against an NVFP4 candidate): the logits then differ by the two quantizations, not by
+//! one kernel choice.
+//!
 //! The reference is loaded and measured first, dropped, then the candidate is loaded: the two never share a card, so
-//! a 27B fits. Usage: `qwen35_fp8_parity <hf-dir> <text file> [--prompts N] [--prompt-tokens N] [--steps N]
+//! a 27B fits. Usage: `qwen35_fp8_parity <hf-dir> <text file> [--reference <hf-dir>] [--prompts N] [--prompt-tokens N] [--steps N]
 //! [--device gpu1] [--backend cuda] [--kv int8] [--gdn-prefill exact|bf16|auto] [--act-precision auto|f32|bf16]
 //! [--assert-agreement F]`. The reference
 //! always runs the exact (TF32) Gated DeltaNet prefill; the candidate runs the one `--gdn-prefill` names (`auto`, the
@@ -97,7 +101,7 @@ fn main() {
     let flag = |name: &str| a.iter().position(|arg| arg == name).and_then(|i| a.get(i + 1)).cloned();
     let num = |name: &str, default: usize| flag(name).and_then(|v| v.parse().ok()).unwrap_or(default);
     let (Some(path), Some(text_path)) = (a.get(1).cloned(), a.get(2).cloned()) else {
-        eprintln!("usage: qwen35_fp8_parity <hf-dir> <text file> [--prompts N] [--prompt-tokens N] [--steps N] [--device D] [--backend B] [--kv K] [--gdn-prefill exact|bf16|auto] [--act-precision auto|f32|bf16] [--assert-agreement F]");
+        eprintln!("usage: qwen35_fp8_parity <hf-dir> <text file> [--reference <hf-dir>] [--prompts N] [--prompt-tokens N] [--steps N] [--device D] [--backend B] [--kv K] [--gdn-prefill exact|bf16|auto] [--act-precision auto|f32|bf16] [--assert-agreement F]");
         std::process::exit(2);
     };
     let (prompts, ptoks, steps) = (num("--prompts", 4), num("--prompt-tokens", 2000), num("--steps", 24));
@@ -115,12 +119,21 @@ fn main() {
     let held = ckpt.held_tiers(&ckpt.config(1).expect("config")).expect("tiers");
     drop(ckpt);
 
-    // The reference: the same weights as bf16, one prompt's greedy continuation at a time.
+    // The reference: the same weights as bf16 (or the release `--reference` names, as it stores itself), one prompt's greedy
+    // continuation at a time.
+    let (ref_path, ref_tier) = match flag("--reference") {
+        Some(dir) => {
+            let other = ResidentCheckpoint::open(&dir).unwrap_or_else(|e| panic!("open {dir}: {e}"));
+            let tiers = other.held_tiers(&other.config(1).expect("config")).expect("tiers");
+            (dir, tiers)
+        }
+        None => (path.clone(), TierPolicy::uniform(gpu_core::select::Dtype::BF16)),
+    };
     gpu_core::force_candidate("gdn_prefill", "exact");
     let mut prompt_ids: Vec<Vec<u32>> = Vec::new();
     let mut reference: Vec<(Vec<u32>, Vec<Vec<f32>>)> = Vec::new();
     {
-        let inst = load(&path, devices.clone(), cap, TierPolicy::uniform(gpu_core::select::Dtype::BF16), kv, gpu_core::ActChoice::Force(gpu_core::ActPrecision::F32));
+        let inst = load(&ref_path, devices.clone(), cap, ref_tier, kv, gpu_core::ActChoice::Force(gpu_core::ActPrecision::F32));
         for p in 0..prompts {
             let prompt: Vec<u32> = inst.tokenize(&render(window(&text, p, ptoks))).into_iter().take(cap as usize - steps - 8).collect();
             let trace = inst.tape_comparison_trace(&prompt, steps as u32).expect("greedy trace");
@@ -163,7 +176,7 @@ fn main() {
     }
     let agreement = agree as f64 / positions as f64;
     println!(
-        "fp8 vs bf16-decoded: {positions} positions, greedy agreement {:.2} %, mean rel-L2 {:.3e}, worst rel-L2 {worst_rel:.3e}, mean KL {:.3e} nats, flips at margin > 0.5: {big_flips}",
+        "{path} vs {ref_path} (bf16-decoded when the same): {positions} positions, greedy agreement {:.2} %, mean rel-L2 {:.3e}, worst rel-L2 {worst_rel:.3e}, mean KL {:.3e} nats, flips at margin > 0.5: {big_flips}",
         100.0 * agreement,
         sum_rel / positions as f64,
         sum_kl / positions as f64
