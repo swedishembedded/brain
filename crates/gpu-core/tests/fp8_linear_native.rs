@@ -122,7 +122,7 @@ fn the_tma_decode_candidates_pass_the_admission_rule_on_the_served_shapes() {
     }
     let mut shapes = Vec::new();
     for m in [1u32, 2, 5, 8, 15, 16, 17, 33, 48, 64] {
-        for (kg, n) in [(1280u32, 34816u32), (1280, 17408), (1280, 10240), (1280, 12288), (4352, 5120), (1536, 5120), (1280, 6144), (1280, 1000)] {
+        for (kg, n) in [(1280u32, 34816u32), (1280, 17408), (1280, 16384), (1280, 10240), (1280, 12288), (4352, 5120), (1536, 5120), (1280, 6144), (1280, 1000)] {
             shapes.push([m, kg, n]);
         }
     }
@@ -325,7 +325,7 @@ fn swap_tma_back_to_back_stress() {
         brain_testutil::skip_unavailable("the FP8 candidates are registered for a CUDA device with warpgroup tensor cores");
         return;
     }
-    for (k, n) in [(5120u32, 34816u32), (17408, 16384)] {
+    for (k, n) in [(5120u32, 34816u32), (17408, 16384), (5120, 16384)] {
         for round in 0..30u32 {
             for m in [1u32, 2, 4, 8, 16, 17, 24, 32, 48, 64] {
                 let _ = gpu_core::native_time_fp8_candidates(&gpu, [m, k / 4, n], "swap_tma");

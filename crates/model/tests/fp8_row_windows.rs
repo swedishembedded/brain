@@ -135,3 +135,50 @@ fn one_candidate_on_the_whole_weight_and_on_its_parts_gives_the_same_bits() {
     }
     gpu_core::clear_forced_candidates();
 }
+
+/// Back-to-back launches of the two windows and of the whole fused weight at the production shapes of a Gated DeltaNet layer
+/// (`in_proj_qkv` 10240 rows, `in_proj_z` 6144, K = 5120) over the decode and prefill widths, with no synchronisation between
+/// launches: sliced bindings under the timing that faulted a tensor-map decode kernel once (`#[ignore]`: a stress run of
+/// seconds, then `dmesg | grep -i xid` stays empty).
+///
+/// ```text
+/// BRAIN_DEVICE=gpu0 BRAIN_BACKEND=cuda make test/one P=brain-model T=fp8_row_windows ARGS="--ignored --nocapture windows_back_to_back_stress"
+/// ```
+#[test]
+#[ignore]
+fn windows_back_to_back_stress() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let ops = Ops::new(Gpu::new(training_kernel_list())).expect("Ops::new");
+    if !ops.fp8_windows_native() {
+        return brain_testutil::skip_unavailable("row windows of an FP8 weight need the native FP8 candidates (CUDA, Hopper)");
+    }
+    const KP: usize = 5120;
+    const N1: u32 = 10240;
+    const N2: u32 = 6144;
+    let g = ops.gpu();
+    let mut rng = Lcg::new(data::rng::random_seed());
+    // Rows of random values quantize to every scale and code the kernels see; one block row of values repeated keeps the host cheap.
+    let band = rng.vec_scaled(128 * KP, 0.5);
+    let raw: Vec<f32> = band.iter().copied().cycle().take((N1 + N2) as usize * KP).collect();
+    let fused = Weight::upload(&ops, &raw, (N1 + N2) as usize, KP, Dtype::F8E4M3);
+    for round in 0..40u32 {
+        for m in [1usize, 4, 16, 33, 64, 128, 1024, 2048] {
+            let x = g.storage_init("x", &rng.vec_scaled(m * KP, 1.0));
+            let (y1, y2, y) = (g.storage((m * N1 as usize) as u64), g.storage((m * N2 as usize) as u64), g.storage((m * (N1 + N2) as usize) as u64));
+            let act = ops.act_f32(&x, 0, m as u32, KP as u32);
+            for _ in 0..6 {
+                let mut steps = Vec::new();
+                ops.matmul_rows(&mut steps, &fused, (0, N1), &act, &y1, 0);
+                ops.matmul_rows(&mut steps, &fused, (N1, N2), &act, &y2, 0);
+                if m <= 128 {
+                    ops.matmul_rows(&mut steps, &fused, (0, N1 + N2), &act, &y, 0);
+                }
+                g.submit(&[], &steps);
+            }
+        }
+        g.poll_wait();
+        if round % 10 == 0 {
+            eprintln!("windows_back_to_back_stress: round {round}");
+        }
+    }
+}
