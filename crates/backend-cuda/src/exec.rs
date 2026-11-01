@@ -155,7 +155,7 @@ pub struct Context {
     holding: std::sync::atomic::AtomicBool,
     /// Whether kept blocks live in the stream-ordered pool (when the driver has
     /// one) rather than the exact-size cache. On unless
-    /// `BRAIN_CUDA_MEMPOOL=0` or [`Context::use_stream_ordered_pool`] says off.
+    /// `backend_api::runtime::set_stream_pool(false)` or [`Context::use_stream_ordered_pool`] says off.
     pool_wanted: std::sync::atomic::AtomicBool,
     /// Held for as long as this handle's stream is being captured. A drain
     /// started by another handle takes it before waiting on the stream; see
@@ -225,7 +225,7 @@ impl Context {
             graph_epoch: Arc::new(AtomicU64::new(0)),
             pool: std::sync::OnceLock::new(),
             holding: std::sync::atomic::AtomicBool::new(false),
-            pool_wanted: std::sync::atomic::AtomicBool::new(std::env::var("BRAIN_CUDA_MEMPOOL").map(|v| v != "0").unwrap_or(true)),
+            pool_wanted: std::sync::atomic::AtomicBool::new(backend_api::runtime::stream_pool()),
             cache: Arc::new(BlockCache::new(d, fns, ctx, primary, 0)),
             capture_gate: Arc::new(Mutex::new(())),
             blas: std::sync::OnceLock::new(),
@@ -658,7 +658,7 @@ impl Context {
     }
 
     /// The most [`Self::cached_bytes`] can ever be: a fraction of the card's
-    /// memory, bounded both ways. `BRAIN_CUDA_BLOCK_CACHE_MB` overrides it (`0`
+    /// memory, bounded both ways. `backend_api::runtime::set_block_cache_bytes` overrides it (`0`
     /// switches the cache off).
     pub fn cache_cap_bytes(&self) -> u64 {
         self.cache.cap()
@@ -2172,10 +2172,10 @@ struct HeldBlock {
 }
 
 /// The cache cap for a card with `total` bytes of memory: a sixteenth of it,
-/// between 256 MiB and 4 GiB, unless `BRAIN_CUDA_BLOCK_CACHE_MB` says otherwise.
+/// between 256 MiB and 4 GiB, unless `backend_api::runtime::set_block_cache_bytes` says otherwise.
 fn cache_cap_for(total: u64) -> u64 {
-    if let Some(mb) = std::env::var("BRAIN_CUDA_BLOCK_CACHE_MB").ok().and_then(|v| v.parse::<u64>().ok()) {
-        return mb << 20;
+    if let Some(bytes) = backend_api::runtime::block_cache_bytes() {
+        return bytes;
     }
     (total / 16).clamp(256 << 20, 4 << 30)
 }

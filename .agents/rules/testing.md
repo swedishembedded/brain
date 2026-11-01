@@ -464,10 +464,10 @@ Promote a knob there when the pipeline it tunes becomes real.
   the `ltxv_bench` binary (decoded-pixel dump, upsampler selection, and
   low-frequency substitution for isolating decode error).
 
-**CUDA memory and profiling knobs:** `BRAIN_CUDA_BLOCK_CACHE_MB` (size of the
-held-freed-block cache in MiB; `0` turns it off, unset sizes it from device
-memory between 256 MiB and 4 GiB), `BRAIN_CUDA_MEMPOOL` (`0` disables the
-stream-ordered pool the held blocks come from); `brain --no-gdn-fast` pins
+**CUDA memory and profiling knobs:** `brain --block-cache-mb <MiB>` (size of the
+held-freed-block cache; `0` turns it off, unset sizes it from device memory
+between 256 MiB and 4 GiB), `--no-mempool` (disables the stream-ordered pool the
+held blocks come from), `--no-graphs` (no graph capture); `--no-gdn-fast` pins
 Gated DeltaNet prefill to the portable kernels for A/B. The
 `qwen35_gguf_prefill_profile` binary takes `--arena on|off|drain` (the scratch
 arena A/B), `--no-kernel-table` (stop after the production rounds) and

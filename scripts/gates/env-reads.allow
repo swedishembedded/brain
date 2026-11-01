@@ -14,9 +14,6 @@ crates/backend-cpu/src/fast_conv.rs	BRAIN_WINOGRAD
 crates/backend-cpu/src/lib.rs	BRAIN_NO_FASTCONV
 crates/backend-cuda/src/aot.rs	<ENV_DIR>
 crates/backend-cuda/src/aot.rs	<ENV_ENABLE>
-crates/backend-cuda/src/backend.rs	<ENV_GRAPHS>
-crates/backend-cuda/src/exec.rs	BRAIN_CUDA_BLOCK_CACHE_MB
-crates/backend-cuda/src/exec.rs	BRAIN_CUDA_MEMPOOL
 crates/backend-cuda/src/nvrtc.rs	<ENV_CUDA_PATH>
 crates/backend-cuda/src/nvrtc.rs	<ENV_NVRTC>
 crates/backend-cuda/tests/aot_driver_only.rs	<CHILD>

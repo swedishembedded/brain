@@ -728,6 +728,24 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
             };
             gpu_core::select::set_conv1d_gemm(pin);
             i += 2;
+        } else if argv[i] == "--no-graphs" {
+            // Every dispatch is launched on its own instead of captured into graphs and replayed (bisects a capture bug).
+            gpu_core::runtime::set_graph_capture(false);
+            i += 1;
+        } else if argv[i] == "--no-mempool" {
+            // Scratch blocks come from the exact-size cache of freed blocks instead of the stream-ordered pool.
+            gpu_core::runtime::set_stream_pool(false);
+            i += 1;
+        } else if argv[i] == "--block-cache-mb" {
+            // The most idle MiB of freed device blocks a backend keeps (`0` keeps none); unset sizes it from the card.
+            match argv.get(i + 1).and_then(|v| v.parse::<u64>().ok()) {
+                Some(mb) => gpu_core::runtime::set_block_cache_bytes(Some(mb << 20)),
+                None => {
+                    eprintln!("brain: --block-cache-mb needs a number of MiB (0 keeps none)");
+                    std::process::exit(2);
+                }
+            }
+            i += 2;
         } else if argv[i] == "--no-autotune" {
             // Every kernel slot keeps its default candidate and the selector its static policy: reproducible benchmarking
             // and A/B runs.

@@ -508,14 +508,6 @@ static FENCE_OUTS: AtomicU64 = AtomicU64::new(0);
 /// behind device work, so it is the one worth keeping short.
 pub const PASS_FIRST_FLUSH_STEPS: usize = 64;
 
-/// Turns submission capture off when set to `0`, `off` or `false`.
-const ENV_GRAPHS: &str = "BRAIN_CUDA_GRAPHS";
-
-/// Whether submission capture is on, given the value of [`ENV_GRAPHS`].
-fn graphs_enabled(value: Option<&str>) -> bool {
-    !matches!(value.map(|v| v.trim().to_ascii_lowercase()).as_deref(), Some("0" | "off" | "false"))
-}
-
 impl CudaBackend {
     /// Open CUDA ordinal `ordinal` and register `kernels`.
     ///
@@ -527,8 +519,8 @@ impl CudaBackend {
         let caps = query_caps(&ctx)?;
         let identity = ctx.device_info().identity();
         let graph = match ctx.graphs() {
-            Ok(_) if !graphs_enabled(std::env::var(ENV_GRAPHS).ok().as_deref()) => {
-                tracing::info!("backend-cuda: graph capture is switched off by {ENV_GRAPHS}; every dispatch will be launched on its own");
+            Ok(_) if !backend_api::runtime::graph_capture() => {
+                tracing::info!("backend-cuda: graph capture is switched off (backend_api::runtime::set_graph_capture); every dispatch will be launched on its own");
                 None
             }
             Ok(_) => Some(Mutex::new(GraphCache::default())),
@@ -1630,7 +1622,7 @@ impl backend_api::Backend for CudaBackend {
 
     /// Capture `segments` as one graph with every parameter frozen at its current
     /// value - see [`crate::graph::Frozen`]. `None` when graph capture is off for
-    /// this handle (`BRAIN_CUDA_GRAPHS=0`) or the driver refuses; the caller then
+    /// this handle (`backend_api::runtime::set_graph_capture(false)`) or the driver refuses; the caller then
     /// submits the original steps, which is always correct.
     fn freeze(&self, segments: &[(Vec<&DeviceBuffer>, &[Step])]) -> Option<backend_api::Program> {
         self.graph.as_ref()?;
@@ -2446,18 +2438,6 @@ mod tests {
         assert!(!caps.numeric.f16 && !caps.numeric.bf16, "storage is not fast arithmetic");
     }
 
-    /// `BRAIN_CUDA_GRAPHS` is the way to bisect a suspected capture bug on a
-    /// running system without a rebuild: `0`, `off` or `false` turns submission
-    /// capture off; anything else, or nothing, leaves it on.
-    #[test]
-    fn graph_capture_can_be_switched_off_from_the_environment() {
-        for off in ["0", "off", "false", "OFF", " False "] {
-            assert!(!graphs_enabled(Some(off)), "{off:?}");
-        }
-        for on in [None, Some(""), Some("1"), Some("on"), Some("yes")] {
-            assert!(graphs_enabled(on), "{on:?}");
-        }
-    }
 
     /// Registering a catalogue compiles nothing. The whole point of the lazy
     /// path is that a handle is cheap to build; a regression to eager

@@ -174,7 +174,7 @@ candidate for an A/B run, and `--no-autotune` keeps every slot on its default.
 A repeated submission is also recorded into a CUDA graph and replayed, and a
 decode step is replayed whole, from recycled scratch buffers, in a few chunks so
 the card starts before the host has built the rest of the step.
-`BRAIN_CUDA_GRAPHS=0` turns that off. `qwen35_decode_profile` reports the
+`--no-graphs` turns that off. `qwen35_decode_profile` reports the
 per-token spread and the host calls per token (a steady-state token makes no
 allocation and no individual launch).
 
@@ -263,13 +263,13 @@ device. While a handle is holding freed blocks (`Gpu::hold_freed_blocks`, which
 (`cuMemAllocFromPoolAsync`, `cuMemFreeAsync`): a free is enqueued instead of
 waited for, and any block that fits is reissued, whatever its size. The pool keeps
 at most the retention cap of idle bytes (a sixteenth of the card, 256 MiB to
-4 GiB; `BRAIN_CUDA_BLOCK_CACHE_MB` overrides) once its stream has run, returns all
+4 GiB; `--block-cache-mb <MiB>` overrides) once its stream has run, returns all
 of it when holding stops, and is destroyed with the handle. A block larger than
 half the cap, a model weight, goes to the driver directly.
 
 On a Grace-Hopper node one prefill-shaped round (268 blocks) cost the host about
 2000 microseconds through the driver, 200 through the pool, and 32 through the
-older exact-size cache on an idle device. `BRAIN_CUDA_MEMPOOL=0` selects that
+older exact-size cache on an idle device. `--no-mempool` selects that
 cache, which is used automatically where the driver has no memory pools. Freeing
 a block that no captured graph names no longer discards graphs.
 

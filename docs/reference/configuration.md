@@ -166,7 +166,6 @@ See [`docs/guides/serving/serving.md`](../guides/serving/serving.md) for what ad
 | Variable | Meaning | Default |
 | --- | --- | --- |
 | `BRAIN_PIPELINE_CACHE_DIR` | directory for the GPU pipeline/shader cache | backend default |
-| `BRAIN_CUDA_GRAPHS` | `0`, `off` or `false` turns off CUDA graph capture, so every dispatch is launched on its own; for bisecting a suspected capture bug on a running system | on |
 | `BRAIN_NVRTC` | exact NVRTC library to load for the CUDA backend (a path or a SONAME); the only library tried when set | search `CUDA_PATH`, then the system loader |
 | `BRAIN_CUDA_AOT_DIR` | directory of ahead-of-time CUDA images and their manifest (`make cuda/aot`) | `cuda-aot` under the pipeline cache directory |
 | `BRAIN_CUDA_AOT` | `0` ignores the ahead-of-time directory so kernels compile with NVRTC | on |

@@ -26,6 +26,7 @@ pub use backend_api::{
     f, AllocPolicy, BufUsage, DeviceBuffer, DeviceCaps, DeviceClass, DeviceOutOfMemory, DeviceStats, MemAdvice, MemoryLimits, MemoryUsage,
     NumericSupport, PlacementFacts, PrefetchTarget, Step, StepMeta,
 };
+pub use backend_api::runtime;
 pub use backend_api::select;
 
 /// How a kernel's threads map onto the work it is given, and how many params
