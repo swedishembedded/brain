@@ -196,6 +196,111 @@ pub fn normalize_unit(pixels: &mut [f32]) {
     }
 }
 
+/// How a checkpoint's image processor sizes and normalizes an image: the fields of its `preprocessor_config.json`
+/// that decide the pixels the vision tower sees and the number of decoder tokens the image becomes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImageGeometry {
+    pub patch_size: u32,
+    /// Patches merged per side into one decoder token (`spatial_merge_size`).
+    pub merge_size: u32,
+    pub temporal_patch_size: u32,
+    /// The image is scaled up to at least this many pixels (`size.shortest_edge`).
+    pub min_pixels: u32,
+    /// The image is scaled down to at most this many pixels (`size.longest_edge`).
+    pub max_pixels: u32,
+    pub mean: [f32; 3],
+    pub std: [f32; 3],
+}
+
+/// An image cut into the vision tower's patches.
+pub struct ImagePatches {
+    /// The image's size after the resize: both sides multiples of `patch_size * merge_size`.
+    pub h_bar: u32,
+    pub w_bar: u32,
+    /// `[patches, 3 * temporal * patch^2]` in spatial-merge-block order ([`pack_patches`]).
+    pub pixels: Vec<f32>,
+}
+
+impl ImageGeometry {
+    /// Read a `preprocessor_config.json`. Every field the pixels depend on must be present and sane: a missing one is
+    /// an error, not a default, since a wrong default would feed the tower a picture it was not trained on.
+    pub fn from_json(v: &serde_json::Value) -> Result<ImageGeometry, String> {
+        let num = |path: &str, v: Option<&serde_json::Value>| -> Result<u32, String> {
+            v.and_then(|x| x.as_u64()).filter(|&n| n > 0 && n <= u32::MAX as u64).map(|n| n as u32).ok_or_else(|| format!("preprocessor_config.json: '{path}' must be a positive integer"))
+        };
+        let triple = |name: &str| -> Result<[f32; 3], String> {
+            let a = v.get(name).and_then(|x| x.as_array()).filter(|a| a.len() == 3).ok_or_else(|| format!("preprocessor_config.json: '{name}' must be three numbers"))?;
+            let mut out = [0f32; 3];
+            for (o, x) in out.iter_mut().zip(a) {
+                *o = x.as_f64().filter(|f| f.is_finite()).ok_or_else(|| format!("preprocessor_config.json: '{name}' must be three numbers"))? as f32;
+            }
+            Ok(out)
+        };
+        let size = v.get("size");
+        let g = ImageGeometry {
+            patch_size: num("patch_size", v.get("patch_size"))?,
+            merge_size: num("merge_size", v.get("merge_size"))?,
+            temporal_patch_size: num("temporal_patch_size", v.get("temporal_patch_size"))?,
+            min_pixels: num("size.shortest_edge", size.and_then(|s| s.get("shortest_edge")))?,
+            max_pixels: num("size.longest_edge", size.and_then(|s| s.get("longest_edge")))?,
+            mean: triple("image_mean")?,
+            std: triple("image_std")?,
+        };
+        if g.min_pixels > g.max_pixels {
+            return Err(format!("preprocessor_config.json: size.shortest_edge {} is above size.longest_edge {}", g.min_pixels, g.max_pixels));
+        }
+        if g.std.iter().any(|&s| s <= 0.0) {
+            return Err("preprocessor_config.json: 'image_std' must be positive".to_string());
+        }
+        Ok(g)
+    }
+
+    /// These bounds with the upper one lowered to `max_pixels` when that is less (a serving limit under the checkpoint's own).
+    pub fn capped_at(mut self, max_pixels: u32) -> ImageGeometry {
+        self.max_pixels = self.max_pixels.min(max_pixels.max(self.factor() * self.factor()));
+        self.min_pixels = self.min_pixels.min(self.max_pixels);
+        self
+    }
+
+    /// Both sides of a resized image are multiples of this.
+    pub fn factor(&self) -> u32 {
+        self.patch_size * self.merge_size
+    }
+
+    /// The size an image of `height x width` is resized to: aspect ratio kept, sides snapped to the factor, area inside the bounds.
+    pub fn target(&self, height: u32, width: u32) -> (u32, u32) {
+        smart_resize(height, width, self.factor(), self.min_pixels, self.max_pixels)
+    }
+
+    /// The decoder tokens an image of `height x width` becomes, and their `(rows, columns)` after the merge.
+    pub fn tokens(&self, height: u32, width: u32) -> (u32, (u32, u32)) {
+        let (h_bar, w_bar) = self.target(height, width);
+        let (gh, gw) = patch_grid(h_bar, w_bar, self.patch_size);
+        (gh * gw / (self.merge_size * self.merge_size), (gh / self.merge_size, gw / self.merge_size))
+    }
+
+    /// Resize `img` to [`Self::target`] (torch's antialiased bicubic on the 8-bit pixels, as the checkpoint's processor does),
+    /// normalize, and cut it into patches.
+    pub fn patches(&self, img: &imaging::pixels::Rgb8) -> ImagePatches {
+        let (h_bar, w_bar) = self.target(img.h, img.w);
+        let resized;
+        let img = if (img.h, img.w) == (h_bar, w_bar) {
+            img
+        } else {
+            resized = imaging::host::resize_bicubic_torch_u8(img, w_bar as usize, h_bar as usize);
+            &resized
+        };
+        let (h, w) = (h_bar as usize, w_bar as usize);
+        let mut chw = vec![0f32; 3 * h * w];
+        for (i, px) in img.px.as_chunks::<3>().0.iter().enumerate() {
+            for (c, &v) in px.iter().enumerate() {
+                chw[c * h * w + i] = (v as f32 / 255.0 - self.mean[c]) / self.std[c];
+            }
+        }
+        ImagePatches { h_bar, w_bar, pixels: pack_patches(&chw, 3, h_bar, w_bar, self.patch_size, self.merge_size, self.temporal_patch_size) }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,5 +443,54 @@ mod tests {
         let mut p = vec![0.0, 0.5, 1.0];
         normalize_unit(&mut p);
         assert_eq!(p, vec![-1.0, 0.0, 1.0]);
+    }
+
+    fn qwen38_config() -> serde_json::Value {
+        serde_json::json!({"size": {"longest_edge": 16777216, "shortest_edge": 65536}, "patch_size": 16, "temporal_patch_size": 2, "merge_size": 2,
+            "image_mean": [0.5, 0.5, 0.5], "image_std": [0.5, 0.5, 0.5]})
+    }
+
+    #[test]
+    fn the_checkpoints_preprocessor_config_decides_the_geometry() {
+        let g = ImageGeometry::from_json(&qwen38_config()).unwrap();
+        assert_eq!((g.factor(), g.min_pixels, g.max_pixels), (32, 65536, 16_777_216));
+        // 1000 x 1200: 1000/32 = 31.25 -> 31 rows of 32, 1200/32 = 37.5 -> 38 (half to even) columns of 32.
+        assert_eq!(g.target(1000, 1200), (992, 1216));
+        assert_eq!(g.tokens(1000, 1200), (62 * 76 / 4, (31, 38)));
+        // Below the lower bound the image is scaled up, above the upper one down - never refused, never cut.
+        let (h, w) = g.target(50, 50);
+        assert!(h * w >= 65536 && h % 32 == 0 && w % 32 == 0);
+        let (h, w) = g.target(7000, 7000);
+        assert!(h * w <= 16_777_216 && h % 32 == 0 && w % 32 == 0, "{h}x{w}");
+    }
+
+    #[test]
+    fn a_serving_cap_lowers_the_upper_bound_and_a_missing_field_is_an_error() {
+        let g = ImageGeometry::from_json(&qwen38_config()).unwrap().capped_at(1_048_576);
+        let (h, w) = g.target(4000, 6000);
+        assert!(h * w <= 1_048_576, "{h}x{w}");
+        for field in ["patch_size", "merge_size", "temporal_patch_size", "image_mean", "image_std", "size"] {
+            let mut v = qwen38_config();
+            v.as_object_mut().unwrap().remove(field);
+            assert!(ImageGeometry::from_json(&v).unwrap_err().contains(if field == "size" { "size." } else { field }), "{field}");
+        }
+        let mut v = qwen38_config();
+        v["size"]["shortest_edge"] = serde_json::json!(1 << 30);
+        assert!(ImageGeometry::from_json(&v).is_err(), "a lower bound above the upper one");
+    }
+
+    #[test]
+    fn an_image_already_at_its_target_size_is_normalized_and_packed_not_resampled() {
+        let g = ImageGeometry::from_json(&qwen38_config()).unwrap();
+        let (w, h) = (256u32, 256u32);
+        let px: Vec<u8> = (0..(w * h * 3) as usize).map(|i| (i % 251) as u8).collect();
+        let img = imaging::pixels::Rgb8::new(w, h, px.clone()).unwrap();
+        let p = g.patches(&img);
+        assert_eq!((p.h_bar, p.w_bar), (256, 256));
+        assert_eq!(p.pixels.len(), 256 * 3 * 2 * 16 * 16);
+        // Patch row 0 is the top-left 16x16 block: channel 0, both temporal slots hold the same frame, first pixel (0, 0).
+        let v0 = (px[0] as f32 / 255.0 - 0.5) / 0.5;
+        assert_eq!(p.pixels[0], v0);
+        assert_eq!(p.pixels[16 * 16], v0, "the temporal slot repeats the frame");
     }
 }

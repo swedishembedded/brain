@@ -44,6 +44,8 @@ mod stage_rows;
 pub mod stream;
 pub mod stream_train;
 pub mod train_base;
+pub mod vision_frontend;
+pub mod vision_tower;
 pub mod vl;
 
 pub use config::{LayerType, Qwen35Config};

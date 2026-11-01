@@ -117,6 +117,47 @@ pub fn get_rope_index(tokens: &[u32], image_token_id: u32, grids: &[(u32, u32, u
     get_rope_index_multi(tokens, &[(image_token_id, grids)])
 }
 
+/// The rotary positions of one sequence whose prompt carries images: the 3-axis position of every prompt token
+/// ([`get_rope_index`]) and, past the prompt, the plain text run that continues from the last anchor.
+///
+/// A prompt token's KV row is its index; its rotary position is not, because an image of `h x w` merged tokens
+/// spans only `max(h, w)` positions. Every generated token therefore sits at its KV row shifted by a constant
+/// ([`Self::at`]), and a prompt row at the position `get_rope_index` gave it. A sequence without images has no
+/// `PromptRope`: its rotary position is its KV row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromptRope {
+    prompt: Vec<[u32; 3]>,
+    /// The position of the first token after the prompt on all three axes.
+    next: u32,
+}
+
+impl PromptRope {
+    /// The positions of `tokens` whose `image_token_id` runs are the images with the merged grids `grids`
+    /// (one `(1, h, w)` per image, in order).
+    pub fn of_prompt(tokens: &[u32], image_token_id: u32, grids: &[(u32, u32, u32)]) -> PromptRope {
+        PromptRope::new(get_rope_index(tokens, image_token_id, grids))
+    }
+
+    /// The positions `prompt` gives its tokens (one per prompt token, as [`get_rope_index`] returns them).
+    pub fn new(prompt: Vec<[u32; 3]>) -> PromptRope {
+        let next = prompt.iter().flatten().copied().max().map_or(0, |m| m + 1);
+        PromptRope { prompt, next }
+    }
+
+    /// Number of prompt tokens the positions cover.
+    pub fn prompt_len(&self) -> usize {
+        self.prompt.len()
+    }
+
+    /// The rotary position of the token stored in KV row `row`.
+    pub fn at(&self, row: u32) -> [u32; 3] {
+        match self.prompt.get(row as usize) {
+            Some(&p) => p,
+            None => [self.next + (row - self.prompt.len() as u32); 3],
+        }
+    }
+}
+
 /// One placeholder token kind and the `(t, h, w)` grid extent of each of its
 /// occurrences, in the order they appear in the prompt: `(placeholder token
 /// id, per-occurrence extents)`. A prompt mixing image, audio and video
@@ -582,5 +623,20 @@ mod tests {
         let tokens = [7, 7, IMG, IMG, IMG, IMG, 7];
         let grids = [(1u32, 2u32, 2u32)];
         assert_eq!(get_rope_index(&tokens, IMG, &grids), get_rope_index_multi(&tokens, &[(IMG, &grids)]));
+    }
+
+    #[test]
+    fn prompt_rope_continues_the_text_run_past_an_image_that_spans_fewer_positions_than_it_has_tokens() {
+        // Two text tokens, a 2x2 image (four tokens, two positions wide), two more text tokens: 8 KV rows, but
+        // the last prompt token sits at position 5 and the first generated token at 6.
+        const IMG: u32 = 999;
+        let tokens = [7, 7, IMG, IMG, IMG, IMG, 7, 7];
+        let rope = PromptRope::of_prompt(&tokens, IMG, &[(1, 2, 2)]);
+        assert_eq!(rope.prompt_len(), 8);
+        assert_eq!(rope.at(1), [1, 1, 1]);
+        assert_eq!([rope.at(2), rope.at(3), rope.at(4), rope.at(5)], [[2, 2, 2], [2, 2, 3], [2, 3, 2], [2, 3, 3]]);
+        assert_eq!(rope.at(7), [5, 5, 5]);
+        assert_eq!(rope.at(8), [6, 6, 6], "the first generated token (KV row 8)");
+        assert_eq!(rope.at(11), [9, 9, 9], "later rows keep the constant shift");
     }
 }

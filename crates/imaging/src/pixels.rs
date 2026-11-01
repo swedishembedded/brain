@@ -43,6 +43,13 @@ impl Rgb8 {
         u8_to_unit(&self.px)
     }
 
+    /// The 8-bit image of interleaved HWC f32 in `[0, 1]` (the inverse of [`Self::to_hwc_unit`]: a value that came
+    /// from a byte returns to it exactly). Errors when the buffer is not `w * h * 3` floats.
+    pub fn from_hwc_unit(hwc: &[f32], w: u32, h: u32) -> Result<Rgb8, String> {
+        let px = hwc.iter().map(|&v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect();
+        Rgb8::new(w, h, px)
+    }
+
     /// Full-image rectangle.
     pub fn rect(&self) -> Rect {
         Rect { x: 0, y: 0, w: self.w, h: self.h }

@@ -32,7 +32,8 @@ use gpu_core::DeviceStats;
 use model::adapter::bank::{AdapterBankConfig, AdapterError, AdapterInfo, BankedEngine, UnloadStatus, VerifiedAdapter};
 use model::dispatch::LORA_SLOT_NONE;
 use model::paged::{BlockAllocator, BlockTable, KvNamespace, BASE_KV_NAMESPACE};
-use model::serve::{AdapterAvailability, AdapterId, DraftQuery, MixedLimits, MixedOutcome, MixedVerifyOutcome, PagedDecoder, PrefillJob, PrefillProgress};
+use model::serve::{AdapterAvailability, AdapterId, DraftQuery, MixedLimits, MixedOutcome, MixedVerifyOutcome, PagedDecoder, PrefillJob, PrefillProgress, PromptEmbeds};
+use qwen3vl::mrope::PromptRope;
 
 use crate::adapter_serving as adapters;
 
@@ -666,12 +667,16 @@ impl Qwen35GgufEngine {
     /// copy). `Some(hidden)` when the whole prompt was cached, so nothing needs
     /// computing and the sequence is already complete; otherwise its progress is
     /// recorded for [`Self::forward_slice`].
-    fn begin_prefill(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Option<Vec<f32>> {
+    ///
+    /// A prompt with `embeds` (a vision tower's rows) is never looked up in the prefix cache and never filed in
+    /// it: its placeholder tokens say nothing about the rows, so the same tokens with other rows would resume from
+    /// the wrong state. It does not feed the MTP head either, whose rows would be those of the placeholders.
+    fn begin_prefill(&mut self, table: &mut BlockTable, prompt: &[u32], embeds: Option<&PromptEmbeds>) -> Option<Vec<f32>> {
         assert!(prompt.len() <= self.inst.cap as usize, "{MODEL}: prompt of {} tokens exceeds the per-sequence capacity of {}", prompt.len(), self.inst.cap);
         if let Some(&bad) = prompt.iter().find(|&&t| t >= self.inst.cfg.vocab) {
             panic!("{MODEL}: prompt token {bad} is outside the model vocabulary ({})", self.inst.cfg.vocab);
         }
-        let cacheable = prompt.len() >= MIN_CACHED_TOKENS && self.cache.enabled();
+        let cacheable = embeds.is_none() && prompt.len() >= MIN_CACHED_TOKENS && self.cache.enabled();
         let hit = if cacheable { self.cache.lookup(table.kv_namespace(), prompt) } else { None };
         // The paged layout resumes by sharing the entry's blocks; the one-block layout copies the rows into
         // the sequence's own window below.
@@ -682,6 +687,8 @@ impl Qwen35GgufEngine {
         table.reserve(rest, &mut self.alloc).unwrap_or_else(|e| panic!("{MODEL}: KV pool exhausted: {e}"));
         let slot = self.assign_state_row(table);
         self.inst.set_blocks(slot, table.blocks());
+        // Every sequence starts here, so a slot's rotary positions never outlive its sequence.
+        self.inst.set_rope(slot, embeds.and_then(PromptEmbeds::rotary_positions).map(|p| std::sync::Arc::new(PromptRope::new(p.to_vec()))));
         let mut start = 0;
         // The cached prefix's last hidden state: the MTP head's input at the
         // position the new tokens continue from.
@@ -725,9 +732,10 @@ impl Qwen35GgufEngine {
             .flatten()
             .into_iter()
             .chain(self.take_hints(table.kv_namespace(), prompt))
-            .filter(|&b| b > start && b < checkpoint_len(prompt.len()))
+            .filter(|&b| embeds.is_none() && b > start && b < checkpoint_len(prompt.len()))
             .min();
-        self.partial.insert(slot, PartialPrefill { start, done: start, fresh: true, cacheable, prefix_hidden, rows_hidden: Vec::new(), mtp_feed: self.spec_prefill && seed_valid, branch });
+        let mtp_feed = embeds.is_none() && self.spec_prefill && seed_valid;
+        self.partial.insert(slot, PartialPrefill { start, done: start, fresh: true, cacheable, prefix_hidden, rows_hidden: Vec::new(), mtp_feed, branch });
         None
     }
 
@@ -751,12 +759,12 @@ impl Qwen35GgufEngine {
     /// One sequence's slice on its own, from the working copy of the recurrent
     /// state (or the slot's pool row when `resume`): the rows `p.done..end` of
     /// `prompt`. Returns the last row's hidden state.
-    fn forward_slice(&mut self, table: &BlockTable, prompt: &[u32], p: &mut PartialPrefill, end: usize, resume: bool) -> Vec<f32> {
+    fn forward_slice(&mut self, table: &BlockTable, prompt: &[u32], embeds: Option<&PromptEmbeds>, p: &mut PartialPrefill, end: usize, resume: bool) -> Vec<f32> {
         let slot = self.slot(table);
         let mut rows = Vec::new();
         let collect = (self.inst.has_mtp() && p.mtp_feed).then_some(&mut rows);
         self.inst.prefill_adapter_slot.set(adapters::slot_of(self.inst.stage_models(), table.kv_namespace()));
-        let hidden = self.inst.prefill_hidden(prompt, p.done, end, slot, resume, collect).unwrap_or_else(|e| panic!("{e}"));
+        let hidden = self.inst.prefill_hidden_with(prompt, p.done, end, slot, resume, collect, embeds).unwrap_or_else(|e| panic!("{e}"));
         if !rows.is_empty() {
             p.rows_hidden.push(HiddenRows::Host(rows));
         }
@@ -929,10 +937,10 @@ impl Qwen35GgufEngine {
         self.release_retired(retired);
     }
 
-    fn prefill_slice(&mut self, table: &mut BlockTable, prompt: &[u32], budget: usize) -> PrefillProgress {
+    fn prefill_slice(&mut self, table: &mut BlockTable, prompt: &[u32], embeds: Option<&PromptEmbeds>, budget: usize) -> PrefillProgress {
         assert!(!prompt.is_empty(), "{MODEL}: empty prompt");
         if table.is_empty() {
-            if let Some(hidden) = self.begin_prefill(table, prompt) {
+            if let Some(hidden) = self.begin_prefill(table, prompt, embeds) {
                 return PrefillProgress::Done(hidden);
             }
         }
@@ -940,7 +948,7 @@ impl Qwen35GgufEngine {
         let mut p = self.partial.remove(&slot).expect("a prefill in progress has its state");
         let end = self.slice_end(&p, prompt.len(), budget);
         let resume = !p.fresh && p.done > 0;
-        let hidden = self.forward_slice(table, prompt, &mut p, end, resume);
+        let hidden = self.forward_slice(table, prompt, embeds, &mut p, end, resume);
         self.finish_slice(slot, table, prompt, p, end, hidden, SliceExit { state_in_pool: false, defer_feed: false })
     }
 
@@ -956,7 +964,7 @@ impl Qwen35GgufEngine {
         // the whole block back.
         let lone_short = jobs.len() == 1 && jobs[0].budget.min(jobs[0].prompt.len()) <= gpu_core::select::DECODE_REGIME_MAX_ROWS as usize;
         if jobs.is_empty() || lone_short || adapter_in_play || !self.inst.multi_prefill_available() {
-            return jobs.iter_mut().map(|j| self.prefill_slice(j.table, j.prompt, j.budget)).collect();
+            return jobs.iter_mut().map(|j| self.prefill_slice(j.table, j.prompt, None, j.budget)).collect();
         }
         let (mut answers, live) = self.begin_slices(jobs, false);
         let rows: usize = live.iter().map(|(_, _, p, end)| end - p.done).sum();
@@ -976,7 +984,7 @@ impl Qwen35GgufEngine {
         for j in jobs.iter_mut() {
             assert!(!j.prompt.is_empty(), "{MODEL}: empty prompt");
             if j.table.is_empty() {
-                let cached = self.begin_prefill(j.table, j.prompt);
+                let cached = self.begin_prefill(j.table, j.prompt, None);
                 if let Some(hidden) = cached {
                     answers.push(Some(PrefillProgress::Done(hidden)));
                     continue;
@@ -1036,7 +1044,7 @@ impl Qwen35GgufEngine {
         } else {
             for (i, _, p, end) in live.iter_mut() {
                 let resume = p.done > 0;
-                hidden.push((self.forward_slice(&*jobs[*i].table, jobs[*i].prompt, p, *end, resume), false));
+                hidden.push((self.forward_slice(&*jobs[*i].table, jobs[*i].prompt, None, p, *end, resume), false));
             }
         }
         for ((i, slot, p, end), (h, in_pool)) in live.into_iter().zip(hidden) {
@@ -1054,7 +1062,7 @@ impl Qwen35GgufEngine {
     fn start_background(&mut self, job: &mut PrefillJob<'_>) -> Option<PrefillProgress> {
         assert!(!job.prompt.is_empty(), "{MODEL}: empty prompt");
         if job.table.is_empty() {
-            if let Some(hidden) = self.begin_prefill(job.table, job.prompt) {
+            if let Some(hidden) = self.begin_prefill(job.table, job.prompt, None) {
                 return Some(PrefillProgress::Done(hidden));
             }
         }
@@ -1171,6 +1179,44 @@ impl Qwen35GgufEngine {
         }
         answers.into_iter().zip(consumed).map(|(a, c)| a.unwrap_or(PrefillProgress::Partial { consumed: c })).collect()
     }
+}
+
+impl Qwen35GgufEngine {
+    /// Run the next slice of every job of `jobs` that carries embedding rows, one sequence at a time on the
+    /// one-sequence path (rows that are not tokens cannot be gathered by token id, resumed from a cached prefix or
+    /// carried in a forward with other sequences' rows), and return their answers in job order (`None` for a text
+    /// job) with the text jobs to run as the caller would.
+    ///
+    /// `background`: the caller reads prompts in on another lane, whose slice in flight uses the working copy of the
+    /// recurrent state this path uses too, so an embedded prompt waits (no progress) until that slice is in.
+    fn prefill_embedded_jobs<'j>(&mut self, jobs: &'j mut [PrefillJob<'_>], background: bool) -> (Vec<Option<PrefillProgress>>, Vec<PrefillJob<'j>>) {
+        let busy = background && self.background.is_some();
+        let answers: Vec<Option<PrefillProgress>> = jobs
+            .iter_mut()
+            .map(|j| {
+                j.embeds.map(|e| if busy { PrefillProgress::Partial { consumed: 0 } } else { self.prefill_slice(j.table, j.prompt, Some(e), j.budget) })
+            })
+            .collect();
+        let text = jobs.iter_mut().zip(&answers).filter(|(_, a)| a.is_none()).map(|(j, _)| PrefillJob { table: &mut *j.table, prompt: j.prompt, budget: j.budget, embeds: None }).collect();
+        (answers, text)
+    }
+
+    /// `text` over the jobs of `jobs` without embedding rows, and [`Self::prefill_embedded_jobs`] over the rest;
+    /// the answers in job order.
+    fn prefill_apart_embedded(&mut self, jobs: &mut [PrefillJob<'_>], background: bool, text: impl FnOnce(&mut Self, &mut [PrefillJob<'_>]) -> Vec<PrefillProgress>) -> Vec<PrefillProgress> {
+        if jobs.iter().all(|j| j.embeds.is_none()) {
+            return text(self, jobs);
+        }
+        let (answers, mut rest) = self.prefill_embedded_jobs(jobs, background);
+        let text_answers = text(self, &mut rest);
+        merge_answers(answers, text_answers)
+    }
+}
+
+/// The answers of a job list in job order: `embedded[i]` where the job was an embedded one, else the next of `text`.
+fn merge_answers(embedded: Vec<Option<PrefillProgress>>, text: Vec<PrefillProgress>) -> Vec<PrefillProgress> {
+    let mut text = text.into_iter();
+    embedded.into_iter().map(|a| a.or_else(|| text.next()).expect("one answer per job")).collect()
 }
 
 impl BankedEngine for Qwen35GgufEngine {
@@ -1296,7 +1342,16 @@ impl PagedDecoder for Qwen35GgufEngine {
     /// hands the MTP head the prompt's hidden states.
     fn prefill_chunk(&mut self, table: &mut BlockTable, prompt: &[u32], budget: usize) -> PrefillProgress {
         let started = std::time::Instant::now();
-        let progress = self.prefill_slice(table, prompt, budget);
+        let progress = self.prefill_slice(table, prompt, None, budget);
+        self.times.prefill += started.elapsed();
+        progress
+    }
+    fn embed_width(&self) -> Option<usize> {
+        Some(self.inst.cfg.d_model as usize)
+    }
+    fn prefill_chunk_embeds(&mut self, table: &mut BlockTable, prompt: &[u32], embeds: &PromptEmbeds, budget: usize) -> PrefillProgress {
+        let started = std::time::Instant::now();
+        let progress = self.prefill_slice(table, prompt, Some(embeds), budget);
         self.times.prefill += started.elapsed();
         progress
     }
@@ -1306,7 +1361,7 @@ impl PagedDecoder for Qwen35GgufEngine {
     }
     fn prefill_chunks(&mut self, jobs: &mut [PrefillJob<'_>]) -> Vec<PrefillProgress> {
         let started = std::time::Instant::now();
-        let progress = self.prefill_slices(jobs);
+        let progress = self.prefill_apart_embedded(jobs, false, |engine, text| engine.prefill_slices(text));
         self.times.prefill += started.elapsed();
         progress
     }
@@ -1325,7 +1380,7 @@ impl PagedDecoder for Qwen35GgufEngine {
     }
     fn prefill_background(&mut self, jobs: &mut [PrefillJob<'_>], wait: bool) -> Vec<PrefillProgress> {
         let started = std::time::Instant::now();
-        let progress = self.read_prompts_in(jobs, wait);
+        let progress = self.prefill_apart_embedded(jobs, true, |engine, text| engine.read_prompts_in(text, wait));
         self.times.prefill += started.elapsed();
         progress
     }
@@ -1337,6 +1392,14 @@ impl PagedDecoder for Qwen35GgufEngine {
         // A forward of only one kind, or one an adapter row takes part in (its correction is routed per row of a
         // dispatch of exactly those rows), is the separate pass.
         let adapter_in_play = tables.iter().map(|t| t.kv_namespace()).chain(jobs.iter().map(|j| j.table.kv_namespace())).any(|ns| adapters::slot_of(self.inst.stage_models(), ns) != LORA_SLOT_NONE);
+        if jobs.iter().any(|j| j.embeds.is_some()) {
+            // The embedded prompts' slices go in first, one sequence at a time; the rest is the forward it would have been.
+            let (answers, mut text) = self.prefill_embedded_jobs(jobs, false);
+            let mut out = self.forward_mixed(tables, inputs, cands, &mut text);
+            out.prefilled = merge_answers(answers, out.prefilled);
+            out.first = Vec::new();
+            return out;
+        }
         if tables.is_empty() || jobs.is_empty() || adapter_in_play || !self.mixed {
             let prefilled = if jobs.is_empty() { Vec::new() } else { self.prefill_chunks(jobs) };
             let decoded = self.decode_candidates(tables, inputs, cands);
@@ -1378,6 +1441,13 @@ impl PagedDecoder for Qwen35GgufEngine {
     fn forward_mixed_verify(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>], cands: usize, jobs: &mut [PrefillJob<'_>]) -> MixedVerifyOutcome {
         assert_eq!(tables.len(), rows.len(), "{MODEL}: tables/rows length mismatch");
         let adapter_in_play = tables.iter().map(|t| t.kv_namespace()).chain(jobs.iter().map(|j| j.table.kv_namespace())).any(|ns| adapters::slot_of(self.inst.stage_models(), ns) != LORA_SLOT_NONE);
+        if jobs.iter().any(|j| j.embeds.is_some()) {
+            let (answers, mut text) = self.prefill_embedded_jobs(jobs, false);
+            let mut out = self.forward_mixed_verify(tables, rows, cands, &mut text);
+            out.prefilled = merge_answers(answers, out.prefilled);
+            out.first = Vec::new();
+            return out;
+        }
         if tables.is_empty() || jobs.is_empty() || adapter_in_play || !self.mixed {
             let prefilled = if jobs.is_empty() { Vec::new() } else { self.prefill_chunks(jobs) };
             let scored = self.forward_batched_verify(tables, rows, cands);
@@ -1658,6 +1728,9 @@ impl Qwen35GgufEngine {
                 .map(|(q, &k)| k.min((q.table.blocks().len() as u32 * block_rows + 1).saturating_sub(q.table.len()) as usize))
                 .collect(),
         };
+        // The head knows nothing of an image's rotary positions or of rows it was not fed: a sequence with images
+        // decodes plainly, and what it would have drafted is the target's work.
+        let ks: Vec<usize> = ks.iter().zip(&slots).map(|(&k, &slot)| if self.inst.has_rope(slot) { 0 } else { k }).collect();
         let t0 = std::time::Instant::now();
         let out = self.inst.mtp_draft(&slots, &consumed, &next, &ks);
         self.times.draft += t0.elapsed();

@@ -19,7 +19,7 @@ path (see the note at the end of this page).
 | Training from scratch | [x] |
 | LoRA fine-tune         | [x] (rank/alpha adapters on all 12 targetable GDN/GQA/MLP projections) |
 | MTP head               | [x] (structural - no reference oracle available, gradchecked and overfit-tested only) |
-| Vision input            | [x] (real-dims parity-tested tower; end-to-end splice is structural only - no reference oracle for the composite) |
+| Vision input            | [x] served from the HF directories of the FP8 and NVFP4 releases (`image_url` parts of `/v1/chat/completions`, batched beside text requests); parity-gated against the reference on the released weights; a GGUF has no vision weights and refuses images - see "Image input" |
 | CLI                    | [x] |
 | HTTP API               | [x] |
 | D-Bus                  | [x] |
@@ -59,6 +59,49 @@ the models directory holds more than one.
 ```bash
 brain serve
 ```
+
+## Image input
+
+A release that carries the vision tower - the HF directories `Qwen/Qwen3.8-27B-FP8` and
+`nvidia/Qwen3.8-27B-NVFP4` (their `model.visual.*` tensors, `preprocessor_config.json` and the
+`vision_config` of `config.json`) - reads images over the chat endpoints:
+
+```bash
+brain serve --checkpoint <dir of the release> --device gpu1 --max-batch 32 --openai 8000
+```
+
+and a request names the model as the server lists it (`GET /v1/models`; `Qwen/Qwen3.8-27B-FP8` for the FP8 directory):
+
+```json
+{"model": "Qwen/Qwen3.8-27B-FP8", "messages": [{"role": "user", "content": [
+  {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}},
+  {"type": "text", "text": "Describe the part and list every dimension written on it."}]}]}
+```
+
+The Anthropic `image` block (base64 source) is read the same way. Several images, in any turn of the conversation,
+keep their place among the text; tool calls and reasoning work as for text.
+
+* **What the model sees.** The image is resized as the checkpoint's own processor does (`preprocessor_config.json`:
+  patch 16, merge 2, area between `size.shortest_edge` and `size.longest_edge`, sides snapped to multiples of 32,
+  antialiased bicubic on the 8-bit pixels), normalized, and run through the vision tower on the same card as the
+  decoder; its rows stand at the image's placeholder tokens (one per 32 x 32 pixels) with the three-axis M-RoPE
+  positions the reference gives them. `usage.prompt_tokens` counts them. An image above 4 megapixels is scaled down to
+  that (the serving bound under the checkpoint's 16.7 MP, which would hold more of the card than the decoder can
+  spare); a smaller one is never enlarged past the checkpoint's lower bound.
+* **Refusals, never a silent drop.** A model that reads no image - any text-only model, and a GGUF of this model,
+  which has no vision weights - answers a request with an image part with `400` naming the model. So does an image
+  part without an image or the reverse, a content part other than text and images, the placeholder tokens
+  (`<|image_pad|>` and the like) typed into text, and images that need more tokens than the context holds.
+* **Hostile bytes.** An image is refused from its header above 36 megapixels (a request's images share 64), at most 8
+  images ride in a request, the body is bounded to 8 MiB, and only inline `data:` URLs are read (nothing is fetched).
+* **Batching and caching.** An image request is built (decoded, resized, encoded) on a worker beside the scheduler,
+  which keeps decoding other requests meanwhile, and then joins the same batch as text requests. A prompt with images is
+  neither looked up in nor filed in the prefix cache - its placeholder tokens say nothing of its pixels, so two
+  pictures can never share a cached prefix - and does not draft with the MTP head: it decodes plainly. Its prompt is
+  read in alone, between the text requests' slices, not in a forward with them.
+* **Validated** on the released weights against `transformers` (`tests/hf_fp8_vision_real.rs`): the patches, the
+  tower's features and the merger's rows, the prompt's token ids and rotary positions, and the logits at the end of the
+  prompt and over the continuation. Measured numbers live in the roadmap ledger.
 
 ## Serving the real checkpoint from its GGUF (multi-GPU, INT8)
 
@@ -470,8 +513,8 @@ reading claims below, they have very different capabilities:
   running sequences decode in one batched step and prompts prefill in chunked
   rounds. On CUDA devices a prompt is read in on each card's normal stream
   while the decode steps run on a high-priority one, so the sequences already
-  generating keep generating while a new prompt is prefilled. Text only (no
-  vision). See "Serving the real checkpoint from its GGUF" above.
+  generating keep generating while a new prompt is prefilled. Text only from a GGUF (an HF
+  directory with the vision tower also reads images, see "Image input"). See "Serving the real checkpoint from its GGUF" above.
 - **The streaming path** (`crate::stream`/`crate::stream_train`, behind
   `generate --streaming true` and the standalone `stream_train_step`
   binary - see "LoRA training" above) runs the REAL checkpoint on a machine

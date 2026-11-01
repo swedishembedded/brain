@@ -22,6 +22,10 @@
 //! decoder's prefix reuse. Two prompts with the same tokens and different rows
 //! are different prompts; [`PromptEmbeds::digest`] is the content hash a
 //! decoder keys reuse by (or it keeps embedding spans out of reuse).
+//!
+//! A decoder whose rotary position is not a row's index (multi-axis M-RoPE: an
+//! image occupies fewer positions than it has rows) reads the position of every
+//! prompt row from [`PromptEmbeds::rotary_positions`].
 
 /// The embedding rows of a prompt, at ascending prompt positions.
 #[derive(Clone, Debug, PartialEq)]
@@ -29,6 +33,8 @@ pub struct PromptEmbeds {
     width: usize,
     positions: Vec<u32>,
     rows: Vec<f32>,
+    /// The rotary position of every prompt row, on three axes, when it is not the row's index.
+    rotary: Option<Vec<[u32; 3]>>,
     digest: u64,
 }
 
@@ -48,8 +54,8 @@ impl PromptEmbeds {
         if let Some(bad) = rows.iter().position(|v| !v.is_finite()) {
             return Err(format!("embedding value {bad} is not finite"));
         }
-        let digest = fingerprint(width, &positions, &rows);
-        Ok(PromptEmbeds { width, positions, rows, digest })
+        let digest = fingerprint(width, &positions, &rows, None);
+        Ok(PromptEmbeds { width, positions, rows, rotary: None, digest })
     }
 
     /// One contiguous run of `rows` (`rows.len() / width` of them) starting at prompt position `start`.
@@ -59,6 +65,19 @@ impl PromptEmbeds {
         }
         let n = (rows.len() / width) as u32;
         PromptEmbeds::new(width, (start..start + n).collect(), rows)
+    }
+
+    /// These rows with the rotary position of each of the prompt's rows (all of them, text included) on the three
+    /// axes of a multi-axis rotary embedding. The positions are part of the prompt's identity ([`Self::digest`]).
+    pub fn with_rotary_positions(mut self, rotary: Vec<[u32; 3]>) -> PromptEmbeds {
+        self.digest = fingerprint(self.width, &self.positions, &self.rows, Some(&rotary));
+        self.rotary = Some(rotary);
+        self
+    }
+
+    /// The rotary position of every prompt row, when the prompt carries them.
+    pub fn rotary_positions(&self) -> Option<&[[u32; 3]]> {
+        self.rotary.as_deref()
     }
 
     /// Floats per row.
@@ -121,14 +140,17 @@ impl PromptEmbeds {
         }
         match self.positions.last() {
             Some(&last) if last as usize >= prompt_len => Some(format!("a row stands at position {last}, the prompt has {prompt_len} tokens")),
-            _ => None,
+            _ => match &self.rotary {
+                Some(r) if r.len() != prompt_len => Some(format!("{} rotary positions for a prompt of {prompt_len} tokens", r.len())),
+                _ => None,
+            },
         }
     }
 }
 
 /// FNV-1a over the content, 64 bit. Not cryptographic: it separates prompts
 /// inside one process's cache, where an attacker cannot choose both sides.
-fn fingerprint(width: usize, positions: &[u32], rows: &[f32]) -> u64 {
+fn fingerprint(width: usize, positions: &[u32], rows: &[f32], rotary: Option<&[[u32; 3]]>) -> u64 {
     const PRIME: u64 = 0x0000_0100_0000_01b3;
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut mix = |bytes: &[u8]| {
@@ -144,6 +166,14 @@ fn fingerprint(width: usize, positions: &[u32], rows: &[f32]) -> u64 {
     }
     for v in rows {
         mix(&v.to_bits().to_le_bytes());
+    }
+    if let Some(rotary) = rotary {
+        mix(&(rotary.len() as u64).to_le_bytes());
+        for axes in rotary {
+            for a in axes {
+                mix(&a.to_le_bytes());
+            }
+        }
     }
     h
 }
@@ -176,6 +206,19 @@ mod tests {
         assert_eq!(a.digest(), PromptEmbeds::run(2, 4, vec![1.0, 2.0, 3.0, 4.0]).unwrap().digest());
         assert_ne!(a.digest(), PromptEmbeds::run(2, 4, vec![1.0, 2.0, 3.0, 4.5]).unwrap().digest(), "a different value");
         assert_ne!(a.digest(), PromptEmbeds::run(2, 5, vec![1.0, 2.0, 3.0, 4.0]).unwrap().digest(), "a different position");
+    }
+
+    #[test]
+    fn rotary_positions_are_part_of_the_prompts_identity_and_must_cover_it() {
+        let plain = PromptEmbeds::run(2, 1, vec![0.0; 4]).unwrap();
+        let rotary = vec![[0, 0, 0], [1, 1, 1], [1, 1, 2], [3, 3, 3]];
+        let with = plain.clone().with_rotary_positions(rotary.clone());
+        assert_eq!(with.rotary_positions(), Some(&rotary[..]));
+        assert_ne!(plain.digest(), with.digest(), "the same rows at other rotary positions are another prompt");
+        let moved = plain.clone().with_rotary_positions(vec![[0, 0, 0], [1, 1, 1], [1, 2, 1], [3, 3, 3]]);
+        assert_ne!(with.digest(), moved.digest());
+        assert_eq!(with.refusal(4, Some(2)), None);
+        assert!(with.refusal(5, Some(2)).unwrap().contains("rotary"), "one position per prompt row");
     }
 
     #[test]

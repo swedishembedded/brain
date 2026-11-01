@@ -23,6 +23,7 @@ brain-kernels.workspace = true
 brain-data.workspace = true
 brain-qwen3.workspace = true
 brain-qwen3vl.workspace = true
+brain-imaging.workspace = true
 brain-audio.workspace = true
 brain-weightset.workspace = true
 brain-modelref.workspace = true
@@ -49,6 +50,14 @@ harness = false
 
 [[test]]
 name = "hf_fp8_speculative"
+harness = false
+
+[[test]]
+name = "hf_fp8_embedded_prompt"
+harness = false
+
+[[test]]
+name = "hf_fp8_vision_real"
 harness = false
 
 [[test]]

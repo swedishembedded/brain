@@ -335,7 +335,10 @@ pub fn embedded_prompts_batch_and_never_share_a_prefix<D: PagedDecoder>(c: &Conf
     };
     let len = c.prefix_prompt_tokens.max(24);
     let prompt = tokens(vocab, 7, len);
-    let run = |seed: usize| PromptEmbeds::run(width, 4, rows(width, 12, seed)).expect("rows");
+    // Rows early in the prompt (inside any prefix a decoder may cache) and rows ending at its last position: a model
+    // whose greedy output is decided by its last tokens (a recurrent one forgets the early rows) is moved by the latter.
+    let positions: Vec<u32> = (4..16u32).chain(len as u32 - 12..len as u32).collect();
+    let run = |seed: usize| PromptEmbeds::new(width, positions.clone(), rows(width, positions.len(), seed)).expect("rows");
     let (ea, eb) = (run(1), run(2));
     let (out_a, out_b) = (alone_embedded(c, &prompt, &ea, 6), alone_embedded(c, &prompt, &eb, 6));
     let out_tokens = alone(c, &prompt, 6);

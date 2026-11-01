@@ -169,10 +169,13 @@ use model::dispatch::LORA_SLOT_NONE;
 use model::kv_tier::{KvLayer, KvTier};
 use model::ops::TierPolicy;
 use model::policy::GdnState;
+use model::serve::PromptEmbeds;
 use model::shard::{LayerBytes, Shard};
 use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use serde_json::json;
+
+use qwen3vl::mrope::PromptRope;
 
 use crate::adapter_serving as adapters;
 use crate::config::{LayerType, Qwen35Config};
@@ -402,6 +405,10 @@ pub struct ServingShape {
     /// ([`gpu_core::defaults::Hardware::host_memory_on`]). They are then charged to no card, and the pool every sequence
     /// shares keeps the room (64 snapshots of the 27B are 9.7 GiB).
     pub snapshots_on_host: bool,
+    /// Device bytes the vision tower and its image activations take beside the decoder, when the checkpoint reads images
+    /// ([`crate::vision_tower::VISION_RESERVE_BYTES`]); charged like the prefill workspace, since it is transient memory
+    /// the cards must keep free.
+    pub vision_bytes: u64,
 }
 
 /// An adapter bank's device bytes: beside each layer it corrects, and the row
@@ -415,7 +422,7 @@ pub struct BankBytes {
 impl ServingShape {
     /// `max_batch` sequences of `cap` tokens, no prompt cache, no speculation.
     pub fn new(cap: u32, tier: TierPolicy, kv: KvTier, max_batch: u32) -> ServingShape {
-        ServingShape { cap, tier, kv, max_batch, prefix_slots: 0, kv_pool_rows: 0, spec: SpecCost::NONE, prefill_rows: TENSOR_CORE_PREFILL_TOKENS, adapter_bank: None, head: Dtype::I8, embed: None, gdn_bf16: false, native_attention: false, snapshots_on_host: false }
+        ServingShape { cap, tier, kv, max_batch, prefix_slots: 0, kv_pool_rows: 0, spec: SpecCost::NONE, prefill_rows: TENSOR_CORE_PREFILL_TOKENS, adapter_bank: None, head: Dtype::I8, embed: None, gdn_bf16: false, native_attention: false, snapshots_on_host: false, vision_bytes: 0 }
     }
 
     /// The same shape for a stack whose prefill forward may carry `rows` rows (the
@@ -431,7 +438,7 @@ impl ServingShape {
     /// sequences and the verify rows speculation batches.
     pub fn stage_workspace(&self, cfg: &Qwen35Config) -> u64 {
         let rows = self.max_batch.max(self.spec.scratch_rows).max(1);
-        prefill_workspace_bytes(cfg, self.prefill_rows) + prefill_staging_bytes(cfg, self.cap, self.native_attention) + decode_scratch_bytes(cfg, rows, self.cap, !self.native_attention)
+        prefill_workspace_bytes(cfg, self.prefill_rows) + prefill_staging_bytes(cfg, self.cap, self.native_attention) + decode_scratch_bytes(cfg, rows, self.cap, !self.native_attention) + self.vision_bytes
     }
 
     /// The same shape at another context.
@@ -1018,6 +1025,9 @@ struct ShardCaches {
     /// give the slot, which is what callers that never publish blocks (the
     /// single-sequence APIs) see; the serving engine replaces it per sequence.
     slot_tables: Vec<Vec<u32>>,
+    /// `[slot]`: the rotary positions of the sequence in that slot when its prompt carries images; `None` for a text
+    /// sequence, which rotates every row at its KV row.
+    slot_rope: Vec<Option<std::sync::Arc<PromptRope>>>,
     /// `[layer]`: where a speculative verify step keeps the recurrent state
     /// between a sequence's rows (see [`speculate`]); empty until speculation
     /// is enabled.
@@ -1101,7 +1111,7 @@ impl ShardCaches {
             }
         };
         let (zero_state, zero_hist) = (gpu.storage(state), gpu.storage(hist));
-        let caches = ShardCaches { gqa_kv, pool_state, pool_hist, work_state, work_hist, snap_state, snap_hist, snapshots_on_host, recurrent, full: full_layers, slots, cap, block_rows, paged, slot_tables, verify_snaps: Vec::new(), pool_bf16, scatter, gather, pool_scatter, pool_gather, copy_within, zero_state, zero_hist };
+        let caches = ShardCaches { gqa_kv, pool_state, pool_hist, work_state, work_hist, snap_state, snap_hist, snapshots_on_host, recurrent, full: full_layers, slots, cap, block_rows, paged, slot_tables, slot_rope: vec![None; slots as usize], verify_snaps: Vec::new(), pool_bf16, scatter, gather, pool_scatter, pool_gather, copy_within, zero_state, zero_hist };
         gpu.submit(&[&caches.zero_state, &caches.zero_hist], &[]);
         caches.reset(gpu);
         Ok(caches)
@@ -1272,10 +1282,21 @@ impl ShardCaches {
         }
     }
 
+    /// Publish the rotary positions of the sequence running in `slot` (`None`: a text sequence). Every rotary table the
+    /// stage builds for the slot reads them, so the engine calls this when a prompt with images starts and when a
+    /// slot is given to a sequence without.
+    fn set_rope(&mut self, slot: u32, rope: Option<std::sync::Arc<PromptRope>>) {
+        self.slot_rope[slot as usize] = rope;
+    }
+
+    fn rope(&self, slot: u32) -> Option<&PromptRope> {
+        self.slot_rope[slot as usize].as_deref()
+    }
+
     /// The single-sequence view (prefill, and any single-token step): GQA
     /// window of `slot`, GDN state on the working copy.
     fn view(&self, slot: u32) -> DecodeCaches<'_> {
-        DecodeCaches { gqa_kv: &self.gqa_kv, gqa_cap: self.kv_block(), gqa_window: self.window(slot), gdn_state: &self.work_state, gdn_hist: &self.work_hist, slot: 0, memory: &[] }
+        DecodeCaches { gqa_kv: &self.gqa_kv, gqa_cap: self.kv_block(), gqa_window: self.window(slot), gdn_state: &self.work_state, gdn_hist: &self.work_hist, slot: 0, memory: &[], rope: self.rope(slot) }
     }
 
     /// The pools as a multi-sequence prefill round works on them
@@ -1300,7 +1321,7 @@ impl ShardCaches {
     /// between steps without renumbering the ones that stay. The GDN state is
     /// the pool ([`Self::gdn_pool`]), found by slot.
     fn batch(&self, slots: &[u32], positions: &[u32]) -> Vec<BatchSeq<'_>> {
-        slots.iter().zip(positions).map(|(&slot, &pos)| BatchSeq { window: self.window(slot), slot, pos, gdn_state: &[], gdn_hist: &[] }).collect()
+        slots.iter().zip(positions).map(|(&slot, &pos)| BatchSeq { window: self.window(slot), slot, pos, rope: self.rope(slot), gdn_state: &[], gdn_hist: &[] }).collect()
     }
 
     fn gdn_pool(&self) -> GdnPoolStore<'_> {
@@ -1571,6 +1592,23 @@ impl Qwen35GgufInstance {
         })?
     }
 
+    /// [`Self::embed_rows`] of `tokens` (the prompt rows `pos_start..`) with the rows `embeds` stands at those
+    /// positions in place of the token embeddings. The placeholder token's own row is gathered and overwritten, so a
+    /// prompt's placeholders are ordinary vocabulary ids.
+    fn embed_rows_spliced(&self, tokens: &[u32], pos_start: u32, embeds: Option<&PromptEmbeds>) -> Result<Vec<f32>, String> {
+        let mut rows = self.embed_rows(tokens)?;
+        let Some(embeds) = embeds else { return Ok(rows) };
+        let d = self.cfg.d_model as usize;
+        if embeds.width() != d {
+            return Err(format!("{MODEL}: embedding rows are {} floats wide, the model takes {d}", embeds.width()));
+        }
+        for (pos, row) in embeds.rows_in(pos_start, pos_start + tokens.len() as u32) {
+            let at = (pos - pos_start) as usize * d;
+            rows[at..at + d].copy_from_slice(row);
+        }
+        Ok(rows)
+    }
+
     /// `input` through EVERY stage in order, returning the last stage's output on the host. `run` is one
     /// stage's forward over its input rows; `observe` sees each stage's output (and the handle that owns it)
     /// before the next stage starts.
@@ -1697,10 +1735,15 @@ impl Qwen35GgufInstance {
     /// structurally a prefill round" true in the code and not just in a
     /// comment.
     fn stack_chunk_carry(&self, tokens: &[u32], pos_start: u32, slot: u32) -> Result<(Vec<f32>, Vec<f32>), String> {
+        self.stack_chunk_carry_with(tokens, pos_start, slot, None)
+    }
+
+    /// [`Self::stack_chunk_carry`] for a prompt some of whose rows are `embeds` instead of token embeddings.
+    fn stack_chunk_carry_with(&self, tokens: &[u32], pos_start: u32, slot: u32, embeds: Option<&PromptEmbeds>) -> Result<(Vec<f32>, Vec<f32>), String> {
         let d = self.cfg.d_model as usize;
         let n = tokens.len();
         assert!(n > 0, "{MODEL}: stack_chunk_carry on an empty round");
-        let embedded = self.embed_rows(tokens)?;
+        let embedded = self.embed_rows_spliced(tokens, pos_start, embeds)?;
         let debug = self.stage_debug.get();
         let mut per_stage_rms = Vec::new();
         let mut taps: Vec<(usize, Vec<f32>)> = Vec::new();
@@ -2369,7 +2412,14 @@ impl Qwen35GgufInstance {
     /// slot's pool row, and `resume` says the working state is NOT already the
     /// state after `start` tokens (another sequence used it since), so it is
     /// loaded from that pool row first.
-    fn prefill_hidden(&self, prompt: &[u32], start: usize, end: usize, slot: u32, resume: bool, mut collect: Option<&mut Vec<f32>>) -> Result<Vec<f32>, String> {
+    fn prefill_hidden(&self, prompt: &[u32], start: usize, end: usize, slot: u32, resume: bool, collect: Option<&mut Vec<f32>>) -> Result<Vec<f32>, String> {
+        self.prefill_hidden_with(prompt, start, end, slot, resume, collect, None)
+    }
+
+    /// [`Self::prefill_hidden`] for a prompt some of whose rows are `embeds` (a vision tower's rows) instead of token
+    /// embeddings.
+    #[allow(clippy::too_many_arguments)]
+    fn prefill_hidden_with(&self, prompt: &[u32], start: usize, end: usize, slot: u32, resume: bool, mut collect: Option<&mut Vec<f32>>, embeds: Option<&PromptEmbeds>) -> Result<Vec<f32>, String> {
         let d = self.cfg.d_model as usize;
         assert!(start < end && end <= prompt.len(), "{MODEL}: a continued prefill needs at least one new token");
         if start == 0 {
@@ -2386,7 +2436,7 @@ impl Qwen35GgufInstance {
         if self.shards.iter().all(|s| s.qwen35.chunked_prefill_is_profitable()) {
             let mut pos = start as u32;
             for round in rest.chunks(self.prefill_round_rows() as usize) {
-                let (carry, _) = self.stack_chunk_carry(round, pos, slot)?;
+                let (carry, _) = self.stack_chunk_carry_with(round, pos, slot, embeds)?;
                 last = carry[(round.len() - 1) * d..].to_vec();
                 if let Some(all) = collect.as_deref_mut() {
                     all.extend_from_slice(&carry);
@@ -2396,7 +2446,7 @@ impl Qwen35GgufInstance {
         } else {
             let adapter_slot = self.prefill_adapter_slot.get();
             for (i, &t) in rest.iter().enumerate() {
-                let embedded = self.embed_row(t)?;
+                let embedded = self.embed_rows_spliced(&[t], (start + i) as u32, embeds)?;
                 self.set_adapter_rows(&[adapter_slot]);
                 let carry = self.chain_stages(&embedded, |s, rows| s.qwen35.run_decode_step(t, (start + i) as u32, &s.caches.view(slot), Some(rows)), |_, _| {});
                 self.set_adapter_rows(&[]);
@@ -2503,7 +2553,7 @@ impl Qwen35GgufInstance {
             first,
             |s, rows| {
                 let segs: Vec<PrefillSeg<'_>> =
-                    jobs.iter().map(|j| PrefillSeg { tokens: &j.prompt[j.start..j.end], pos_start: j.start as u32, gqa_window: s.caches.window(j.slot), slot: j.slot }).collect();
+                    jobs.iter().map(|j| PrefillSeg { tokens: &j.prompt[j.start..j.end], pos_start: j.start as u32, gqa_window: s.caches.window(j.slot), slot: j.slot, rope: s.caches.rope(j.slot) }).collect();
                 match decode {
                     None => s.qwen35.run_prefill_multi_stage(&segs, &s.caches.pooled(), Some(rows)),
                     Some((tokens, slots, positions)) => {
@@ -2554,6 +2604,19 @@ impl Qwen35GgufInstance {
     /// Recurrent-state rows the stages hold ([`KvLayout::state_rows`]).
     fn state_rows(&self) -> u32 {
         self.kv_layout.state_rows(self.max_batch, self.prefix_slots)
+    }
+
+    /// Whether the sequence in state row `slot` has rotary positions of its own (its prompt carries images).
+    fn has_rope(&self, slot: u32) -> bool {
+        self.shards.first().is_some_and(|s| s.caches.rope(slot).is_some())
+    }
+
+    /// Publish the rotary positions of the sequence in state row `slot` to every stage (`None`: a text sequence,
+    /// whose rows rotate at their index). Called when a sequence starts, before its first row is computed.
+    fn set_rope(&mut self, slot: u32, rope: Option<std::sync::Arc<PromptRope>>) {
+        for s in &mut self.shards {
+            s.caches.set_rope(slot, rope.clone());
+        }
     }
 
     /// Publish the blocks of the sequence in state row `slot` to every stage and
@@ -3723,13 +3786,31 @@ pub struct Qwen35GgufResident {
     /// How the engine spends prefill - [`Self::with_prefill_policy`].
     prefill: PrefillPolicy,
     plan: OnceLock<Plan>,
+    /// What the checkpoint reads of images, found once ([`Self::vision_spec`]).
+    vision: OnceLock<Option<crate::vision_tower::VisionSpec>>,
     /// The sampling defaults the GGUF declares, read once (see [`Self::sampling_defaults`]).
     sampling: OnceLock<data::generation::SamplingDefaults>,
 }
 
 impl Qwen35GgufResident {
     pub fn new(gguf_path: String, devices: Vec<(Device, u64)>, cap: u32, tier: TierPolicy) -> Qwen35GgufResident {
-        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, prefix_slots: 0, kv_tier: KvTier::F32, kv_block_rows: 0, kv_pool_rows: 0, model_id: MODEL.to_string(), bank: None, spec: SpecServing::default(), exact_decode: false, act_choice: gpu_core::ActChoice::Auto, gdn_state: GdnState::F32, prefill: PrefillPolicy::default(), plan: OnceLock::new(), sampling: OnceLock::new() }
+        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, prefix_slots: 0, kv_tier: KvTier::F32, kv_block_rows: 0, kv_pool_rows: 0, model_id: MODEL.to_string(), bank: None, spec: SpecServing::default(), exact_decode: false, act_choice: gpu_core::ActChoice::Auto, gdn_state: GdnState::F32, prefill: PrefillPolicy::default(), plan: OnceLock::new(), vision: OnceLock::new(), sampling: OnceLock::new() }
+    }
+
+    /// How this checkpoint reads images, when it does: an HF directory that declares a vision tower and holds its
+    /// tensors. A release that declares one it cannot deliver is served as text only, with the reason logged: its
+    /// manifest then takes no image input, so a request with one is refused by name.
+    pub fn vision_spec(&self) -> Option<&crate::vision_tower::VisionSpec> {
+        self.vision
+            .get_or_init(|| match ResidentCheckpoint::is_hf_dir(&self.gguf_path).then(|| crate::vision_tower::read_spec(std::path::Path::new(&self.gguf_path))) {
+                Some(Ok(spec)) => spec,
+                Some(Err(e)) => {
+                    residency::log::warn(&format!("{MODEL}: '{}' declares a vision tower that cannot be served, so it serves text only: {e}", self.gguf_path));
+                    None
+                }
+                None => None,
+            })
+            .as_ref()
     }
 
     /// **Run every decode row independently of its co-batch** (`--exact-decode`):
@@ -4087,6 +4168,7 @@ impl Qwen35GgufResident {
             head: mg.head_tier(),
             embed: self.embed_tier(mg, cfg),
             gdn_bf16: self.gdn_state.is_bf16(),
+            vision_bytes: if self.vision_spec().is_some() { crate::vision_tower::VISION_RESERVE_BYTES } else { 0 },
             ..ServingShape::new(self.cap, self.tier.clone(), self.kv_tier, self.max_batch).with_prefill_rows(self.prefill.batch_tokens.try_into().unwrap_or(u32::MAX))
         }
     }
@@ -4143,9 +4225,17 @@ impl ResidentModel for Qwen35GgufResident {
         .output(BlobSpec::new("text", Media::Text, "the generated text"));
         let generate = llmserve::with_token_capture(generate);
         let generate = llmserve::with_sampling_defaults(generate, MODEL, self.sampling_defaults());
+        // A checkpoint with a vision tower reads images: the action declares them, so the API serves a request with one
+        // and refuses it for a text-only checkpoint (whose manifest has no image input).
+        let reads_images = self.vision_spec().is_some();
+        let generate = (0..if reads_images { capability::blob::MAX_IMAGES } else { 0 }).fold(generate, |spec, i| {
+            let help = if i == 0 { "an image of the conversation, in the order its `image_url` parts appear: raw HWC f32 pixels in [0,1], meta {w,h}" } else { "a further image, read only when every earlier one is present" };
+            spec.input(BlobSpec::new(&capability::blob::image_key(i), Media::Image, help))
+        });
+        let modality = if reads_images { "Reads images (the checkpoint's vision tower on the same card)." } else { "Text only." };
         Manifest::new(
             &self.model_id,
-            "Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, served INT8 and GPU-resident directly from a released GGUF (no fp32 intermediate on disk), layer-sharded across as many cards as its real per-layer bytes need. Text only; no MTP self-speculative decode; continuous batching of up to max_batch sequences per dispatch.",
+            &format!("Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, served GPU-resident directly from a released checkpoint (no fp32 intermediate on disk), layer-sharded across as many cards as its real per-layer bytes need. {modality} Continuous batching of up to max_batch sequences per dispatch."),
             vec![generate],
         )
         .with_max_context_tokens(self.cap as u64)
@@ -4200,12 +4290,29 @@ impl MultiDeviceResidentModel for Qwen35GgufResident {
     /// `max_batch` requests decode in ONE batched step per iteration and join
     /// and leave between steps - the same loop every brain LLM is served by.
     fn activate_multi(&self, _key: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
-        let (sched, tok, stop) = self.activate_scheduler(devices)?;
-        Ok(Box::new(llmserve::ScheduledInstance::new(llmserve::TextFrontend::new(tok, stop, "qwen35", std::sync::Arc::new(parse_request)), sched, self.max_batch as usize)))
+        let (mut sched, tok, stop) = self.activate_scheduler(devices)?;
+        let text = llmserve::TextFrontend::new(tok, stop, "qwen35", std::sync::Arc::new(parse_request));
+        match self.vision_front_end(&mut sched, text)? {
+            Ok(front) => Ok(Box::new(llmserve::ScheduledInstance::new(front, sched, self.max_batch as usize))),
+            Err(text) => Ok(Box::new(llmserve::ScheduledInstance::new(text, sched, self.max_batch as usize))),
+        }
     }
 }
 
 impl Qwen35GgufResident {
+    /// The front end that reads images, when the checkpoint has a vision tower: the tower is loaded onto the card
+    /// `sched`'s first stage runs on, and requests with images are built beside the `text` front end, which keeps
+    /// serving requests without. `Err(text)` hands `text` back for a checkpoint that reads no images.
+    pub fn vision_front_end(&self, sched: &mut model::serve::Scheduler<Qwen35GgufEngine>, text: llmserve::TextFrontend) -> Result<Result<crate::vision_frontend::VisionFrontend, llmserve::TextFrontend>, String> {
+        let Some(spec) = self.vision_spec().cloned() else { return Ok(Err(text)) };
+        let context = sched.sequence_capacity();
+        let instance = sched.decoder_mut().instance();
+        let (gpu, d_model) = (instance.stage_gpu(0).share(), instance.config().d_model);
+        let tower = crate::vision_tower::VisionTower::open(std::path::Path::new(&self.gguf_path), spec, &gpu, d_model, crate::vision_tower::SERVING_MAX_IMAGE_PIXELS)?;
+        let (tok, _) = ResidentCheckpoint::open(&self.gguf_path)?.tokenizer()?;
+        crate::vision_frontend::VisionFrontend::new(text, tok, tower, context, parse_request).map(Ok)
+    }
+
     /// The scheduler every consumer of this resident serves through: the
     /// activated engine ([`Self::activate_engine`]) under the generic
     /// continuous-batching `model::serve::Scheduler` with `max_batch` running

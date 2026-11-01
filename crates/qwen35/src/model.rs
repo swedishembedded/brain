@@ -71,6 +71,8 @@ use model::saved::SavedFormat;
 use model::Shard;
 use optim::Optim;
 
+use qwen3vl::mrope::PromptRope;
+
 use crate::config::{LayerType, Qwen35Config};
 pub use crate::decode_state::{slot_state_bytes, SlotPool, SlotTiers};
 use crate::decode_tape::{DecodeInputs, SlotDecodeTape};
@@ -949,6 +951,8 @@ pub(crate) struct PrefillSeg<'a> {
     pub gqa_window: KvWindow<'a>,
     /// The sequence's row of the recurrent-state pools.
     pub slot: u32,
+    /// The sequence's rotary positions when its prompt carries images ([`rope_at`]).
+    pub rope: Option<&'a PromptRope>,
 }
 
 /// The pooled caches a multi-sequence prefill round reads and extends: every
@@ -1423,6 +1427,17 @@ pub(crate) struct DecodeCaches<'a> {
     /// Per-layer anchor-memory banks (EdgeRock; `None` entries at layers without a memory, an empty slice for a
     /// model without one).
     pub memory: &'a [Option<model::anchor_memory::AnchorBankPool>],
+    /// The sequence's rotary positions when its prompt carries images; `None` rotates every row at its KV row
+    /// ([`rope_at`]).
+    pub rope: Option<&'a PromptRope>,
+}
+
+/// The rotary position of KV row `row` of a sequence with the given `rope` (`None`: no images, so the row itself).
+pub(crate) fn rope_at(rope: Option<&PromptRope>, row: u32) -> [u32; 3] {
+    match rope {
+        Some(r) => r.at(row),
+        None => [row; 3],
+    }
 }
 
 /// One sequence's coordinates in a [`Qwen35::run_decode_batch`] call: where
@@ -1441,6 +1456,8 @@ pub(crate) struct BatchSeq<'a> {
     /// Absolute decode position of this step's token for this sequence. The
     /// rows of one batch are unrelated positions.
     pub pos: u32,
+    /// The sequence's rotary positions when its prompt carries images ([`rope_at`]).
+    pub rope: Option<&'a PromptRope>,
     /// Per-layer recurrent state / conv history, indexed by ABSOLUTE layer
     /// index with a dummy at full-attention indices - [`DecodeCaches`]'s own
     /// convention, and the same buffers.
@@ -5115,6 +5132,7 @@ impl Qwen35 {
             window: caches.gqa_window,
             slot: caches.slot,
             pos,
+            rope: caches.rope,
             gdn_state: caches.gdn_state,
             gdn_hist: caches.gdn_hist,
         }];
@@ -5241,7 +5259,7 @@ impl Qwen35 {
         // The batch's M-RoPE table at each sequence's OWN position, and the four paged-KV index buffers. The rows of
         // one batch are unrelated positions and unrelated physical blocks, which is the whole difference from a chunk.
         let yarn = c.rope_table();
-        let positions: Vec<[u32; 3]> = seqs.iter().map(|s| [s.pos, s.pos, s.pos]).collect();
+        let positions: Vec<[u32; 3]> = seqs.iter().map(|s| rope_at(s.rope, s.pos)).collect();
         let (cos_rows, sin_rows) = qwen3vl::mrope::mrope_tables_scaled(&positions, c.mrope_section, c.rotary_dim(), c.rope_theta, yarn.as_ref().map(|(f, a)| (f.as_slice(), *a)));
         g.write_f32(&inputs.cos, &cos_rows);
         g.write_f32(&inputs.sin, &sin_rows);
@@ -5300,7 +5318,7 @@ impl Qwen35 {
             let end = (start + step).min(tokens.len());
             let seqs: Vec<BatchSeq> = caches.seqs[start..end]
                 .iter()
-                .map(|s| BatchSeq { window: s.window, slot: s.slot, pos: s.pos, gdn_state: s.gdn_state, gdn_hist: s.gdn_hist })
+                .map(|s| BatchSeq { window: s.window, slot: s.slot, pos: s.pos, rope: s.rope, gdn_state: s.gdn_state, gdn_hist: s.gdn_hist })
                 .collect();
             let pool = caches.gdn_pool.as_ref().map(|p| GdnPoolStore { state: p.state, hist: p.hist, bf16: p.bf16 });
             let group = BatchDecodeCaches { gqa_kv: caches.gqa_kv, gqa_cap: caches.gqa_cap, seqs: &seqs, one_sequence: false, gdn_pool: pool, memory: caches.memory };
@@ -5803,7 +5821,7 @@ impl Qwen35 {
         // Built ONCE per round, shared by every GQA layer in it: the round's
         // own M-RoPE table (absolute positions), its causal `seq_lens`, and
         // the single-block table a flat per-sequence KV cache degenerates to.
-        let positions: Vec<[u32; 3]> = (0..n).map(|i| [pos_start + i, pos_start + i, pos_start + i]).collect();
+        let positions: Vec<[u32; 3]> = (0..n).map(|i| rope_at(caches.rope, pos_start + i)).collect();
         // `mrope_tables_scaled`, not plain `mrope_tables`: this is the THIRD
         // M-RoPE call site (`run_forward` and `run_decode_batch` are the other
         // two), and a round that rotates its keys unscaled while the decode
@@ -6013,7 +6031,7 @@ impl Qwen35 {
             for s in dcaches.seqs {
                 all_blocks.push(s.window.blocks()[(s.pos / caches.gqa_cap) as usize]);
                 all_offsets.push(s.pos % caches.gqa_cap);
-                all_positions.push([s.pos; 3]);
+                all_positions.push(rope_at(s.rope, s.pos));
             }
         }
         for seg in segs {
@@ -6022,7 +6040,7 @@ impl Qwen35 {
             let (row_blocks, row_offsets, row_tables, max_bt) = seg.gqa_window.chunk_rows(caches.gqa_cap, seg.pos_start, rows);
             all_blocks.extend_from_slice(&row_blocks);
             all_offsets.extend_from_slice(&row_offsets);
-            all_positions.extend((0..rows).map(|i| [seg.pos_start + i; 3]));
+            all_positions.extend((0..rows).map(|i| rope_at(seg.rope, seg.pos_start + i)));
             let tables = words(&row_tables);
             let seq_lens = words(&(0..rows).map(|i| seg.pos_start + i + 1).collect::<Vec<u32>>());
             round.push(SegRound { rows, row0, slot, start: seg.pos_start, max_bt, tables, seq_lens });
@@ -6333,7 +6351,7 @@ impl Qwen35 {
         let total = r.tokens.len();
         let group = |start: usize, len: usize| -> DeviceBuffer {
             let seqs: Vec<BatchSeq> = (0..len)
-                .map(|i| BatchSeq { window: caches.gqa_window, slot: 0, pos: r.pos_start + (start + i) as u32, gdn_state: caches.gdn_state, gdn_hist: caches.gdn_hist })
+                .map(|i| BatchSeq { window: caches.gqa_window, slot: 0, pos: r.pos_start + (start + i) as u32, rope: caches.rope, gdn_state: caches.gdn_state, gdn_hist: caches.gdn_hist })
                 .collect();
             let batch = BatchDecodeCaches { gqa_kv: caches.gqa_kv, gqa_cap: caches.gqa_cap, seqs: &seqs, one_sequence: true, gdn_pool: None, memory: caches.memory };
             let rows = r.input.as_ref().map(|input| match input {
@@ -6677,6 +6695,7 @@ impl Qwen35 {
             gdn_hist: &pool.work_hist,
             slot,
             memory: &pool.memory,
+            rope: None,
         };
         self.stage_slot_state(pool, slot, true);
         let mut hidden = None;
@@ -6708,7 +6727,7 @@ impl Qwen35 {
             assert!(seen.insert(slot), "qwen35::slot_decode: slot {slot} twice in one batch");
             assert!(token < self.cfg.vocab, "qwen35::slot_decode: token {token} exceeds vocab {}", self.cfg.vocab);
         }
-        let seqs: Vec<BatchSeq> = items.iter().map(|&(slot, _)| BatchSeq { window: KvWindow::Ring(slot), slot, pos: pool.position(slot), gdn_state: &[], gdn_hist: &[] }).collect();
+        let seqs: Vec<BatchSeq> = items.iter().map(|&(slot, _)| BatchSeq { window: KvWindow::Ring(slot), slot, pos: pool.position(slot), rope: None, gdn_state: &[], gdn_hist: &[] }).collect();
         let caches = BatchDecodeCaches {
             gqa_kv: &pool.gqa_kv,
             gqa_cap: pool.window,
@@ -6953,6 +6972,7 @@ impl Qwen35 {
             gdn_hist: &dec.gdn_hist,
             slot: 0,
             memory: &dec.memory,
+            rope: None,
         }
     }
 
@@ -8752,7 +8772,7 @@ mod tests {
             let n: usize = segs.iter().map(|s| s.tokens.len()).sum();
             gpu.read(&out, n * d)
         };
-        let seg = |tokens: &'static [u32], pos_start: u32, slot: u32| PrefillSeg { tokens, pos_start, gqa_window: KvWindow::Block(slot), slot };
+        let seg = |tokens: &'static [u32], pos_start: u32, slot: u32| PrefillSeg { tokens, pos_start, gqa_window: KvWindow::Block(slot), slot, rope: None };
         let (a, b): (&'static [u32], &'static [u32]) = (Box::leak(a.into_boxed_slice()), Box::leak(b.into_boxed_slice()));
         let r1 = round(&[seg(&a[..8], 0, 0), seg(&b[..5], 0, 1)]);
         let r2 = round(&[seg(&a[8..], 8, 0), seg(&b[5..], 5, 1)]);
