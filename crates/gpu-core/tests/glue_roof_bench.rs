@@ -77,6 +77,14 @@ fn glue_kernels_against_the_byte_roof_at_a_4096_row_round() {
         steps
     });
     report("silu_mul_quant_e4m3_128 bf16 in, no product (4096x17408)", us, bytes);
+    // The same pass over the halves of one [rows, 2 k] gate|up product, read in place.
+    let wide = filled_bf16(&gpu, 2 * n);
+    let us = time_us(&gpu, &|| {
+        let mut steps = Vec::new();
+        gpu_core::provider::library::silu_mul_quantize_e4m3_gate_up(&gpu, &mut steps, &wide, ActPrecision::Bf16, None, rows, k).expect("offered");
+        steps
+    });
+    report("silu_mul_quant_e4m3_128 gate|up in place, bf16, no product (4096x17408)", us, bytes);
 
     // The norm front end: a, b in (f32), sum out (f32), E4M3 rows + scales out; xn is stored only for a GDN layer's dense gates.
     let d = 5120u32;
@@ -133,6 +141,11 @@ fn glue_kernels_against_the_byte_roof_at_a_4096_row_round() {
             let (y, bf16, sx) = (gpu.storage(n as u64), gpu.storage(n as u64 / 2), gpu.storage(1));
             let us = time_us(&gpu, &|| vec![gpu.fused_step(Fused::QuantEpilogue, &[&a, &b, &y, &bf16, &sx], &[k, rows, mode, 1 | 2, k, 0]).expect("offered")]);
             report(&format!("{label} f32 + bf16 out ({rows} rows x {k})"), us, n as f64 * (4.0 + 4.0 + 4.0 + 2.0));
+            if mode == 1 {
+                let wide = filled(&gpu, 2 * n);
+                let us = time_us(&gpu, &|| vec![gpu.fused_step(Fused::QuantEpilogue, &[&wide, &wide, &y, &bf16, &sx], &[k, rows, mode, 1 | 2, 2 * k, k]).expect("offered")]);
+                report(&format!("{label} gate|up in place, f32 + bf16 out ({rows} rows x {k})"), us, n as f64 * (4.0 + 4.0 + 4.0 + 2.0));
+            }
         }
     }
 }

@@ -49,6 +49,7 @@ brain_silu_mul_quant_e4m3_128(const unsigned int* params, const float* a, const 
     const unsigned long long stride = params[3];
     const unsigned long long up_offset = params[4];
     const unsigned long long blocks_per_row = k / 128ull;
+    const bool dense = stride == k;
     const unsigned long long total = rows * blocks_per_row;
     const unsigned long long first = (((unsigned long long)blockIdx.y * gridDim.x + blockIdx.x) * BRAIN_SMQ_WARPS + (threadIdx.x >> 5)) * BRAIN_SMQ_BLOCKS;
     if (first >= total) { return; }
@@ -60,9 +61,13 @@ brain_silu_mul_quant_e4m3_128(const unsigned int* params, const float* a, const 
 #pragma unroll
     for (int i = 0; i < BRAIN_SMQ_BLOCKS; ++i) {
         if (i >= live) { break; }
-        const unsigned long long row = (first + i) / blocks_per_row;
-        const unsigned long long col = ((first + i) - row * blocks_per_row) * 128ull + 4ull * lane;
-        const unsigned long long at = row * stride + col;
+        // A dense pair (the launch-uniform common case, every prefill round) is the flat element index; only the rows of a wide
+        // product need the row and column apart.
+        unsigned long long at = (first + i) * 128ull + 4ull * lane;
+        if (!dense) {
+            const unsigned long long row = (first + i) / blocks_per_row;
+            at = row * stride + ((first + i) - row * blocks_per_row) * 128ull + 4ull * lane;
+        }
         const unsigned long long up_at = at + up_offset;
         if (bf16_in) {
             // Four bf16 are one 8-byte access; a bf16 is the high half of the f32 with the same value.
