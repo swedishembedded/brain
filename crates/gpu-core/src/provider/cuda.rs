@@ -609,6 +609,49 @@ const GDN_CHUNK_LOOP_WG_HALF_DYNAMIC_SHARED_BYTES: u32 = 3 * 66560 + 8192 + 64 +
 /// 8 KiB output tile, the barriers and 1 KiB to align; three blocks fit a multiprocessor.
 const GDN_CHUNK_LOOP_WG_LEAN_DYNAMIC_SHARED_BYTES: u32 = 66560 + 8192 + 64 + 1024;
 
+/// Dynamic shared memory of `gdn_chunk_loop_seg_wg_full`: two stages of the operand tiles with both warpgroups' fp16 u copies (74 KiB),
+/// two 8 KiB output tiles, the barriers and 1 KiB to align.
+const GDN_CHUNK_LOOP_WG_FOLD_DYNAMIC_SHARED_BYTES: u32 = 2 * 75776 + 2 * 8192 + 64 + 1024;
+
+/// The slot a test pins the launch form of the folded segment recurrence to (`half`, `full` or `lean`); unpinned, [`gdn_loop_form`] chooses.
+pub const GDN_LOOP_FORM_SLOT: &str = "gdn_prefill_loop_form";
+
+/// How the folded recurrence of a round is launched: a block a (segment, head, 64-column half) with a three-stage ring (`Half`), a block a
+/// (segment, head) of both halves on two warpgroups (`Full`), or a block a half with one stage so three share a multiprocessor (`Lean`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GdnLoopForm {
+    Half,
+    Full,
+    Lean,
+}
+
+/// The form with the shortest recurrence for a round whose segments run `chains` chunks (measured on a GH200, 4096-row rounds, us):
+/// the chain of the longest segment sets the time, and the form sets what one chunk of it costs and how many blocks queue for
+/// the multiprocessors.
+/// * `Half` costs ~1.8 us a chunk with a multiprocessor to itself (one segment 118; 3900 + 196 rows 115 against 155 `Full` and 198 `Lean`;
+///   3500 + 300 + 296 105 against 144 and 209).
+/// * `Full` is 2.5-2.9 us a chunk but half the blocks: two segments of similar length fit the multiprocessors at once where `Half`
+///   queues a second wave (2048 + 2048 rows 92 against 123; 2600 + 1496 115 against 127; 3000 + 1096 129 against 115).
+/// * `Lean` shares a multiprocessor among three blocks at ~3.3 us a chunk: it wins only where most blocks are short (1024 x 4 rows 96
+///   against 103; 16 x 256 rows 126 against 147).
+fn gdn_loop_form(sms: u32, heads: u32, chains: &[u32]) -> GdnLoopForm {
+    match crate::native_tune::forced_candidate(GDN_LOOP_FORM_SLOT).as_deref() {
+        Some("half") => return GdnLoopForm::Half,
+        Some("full") => return GdnLoopForm::Full,
+        Some("lean") => return GdnLoopForm::Lean,
+        _ => {}
+    }
+    let segments = chains.len() as u32;
+    let (longest, shortest) = (chains.iter().copied().max().unwrap_or(0), chains.iter().copied().min().unwrap_or(0));
+    if segments * heads > sms && longest <= 24 {
+        GdnLoopForm::Lean
+    } else if segments == 2 && 2 * shortest >= longest && segments * heads <= sms {
+        GdnLoopForm::Full
+    } else {
+        GdnLoopForm::Half
+    }
+}
+
 /// [`gdn_chunk_loop_bf16_step`] on Hopper warpgroup tensor cores (`gdn_chunk_loop_wg`): the same ten buffers and contract, the state held
 /// in registers across the walk. `None` below compute capability 9.0 (the caller keeps the `mma.sync` form).
 #[allow(clippy::too_many_arguments)]
@@ -706,6 +749,8 @@ pub struct GdnSegmentSpan {
 pub struct GdnSegmentTable {
     words: Vec<u32>,
     segments: u32,
+    /// Chunks of each segment, in table order: the length of each recurrence chain.
+    chain_chunks: Vec<u32>,
     chunks: u32,
     conv_tiles_rows: u32,
     /// Runs of 64 rows over all segments: a block of the vector convolution is one such run of one 128-channel head.
@@ -724,6 +769,7 @@ impl GdnSegmentTable {
         let mut chunks = 0u32;
         let mut conv_tiles_rows = 0u32;
         let mut conv_vec_runs = 0u32;
+        let mut chain_chunks = Vec::with_capacity(spans.len());
         for s in spans {
             words.extend_from_slice(&[s.row0, s.rows, s.slot, chunks]);
             for off in (0..s.rows).step_by(GDN_SEG_CHUNK_ROWS as usize) {
@@ -732,14 +778,20 @@ impl GdnSegmentTable {
             }
             conv_tiles_rows += s.rows.div_ceil(GDN_CONV_ROWS_PER_THREAD);
             conv_vec_runs += s.rows.div_ceil(GDN_SEG_CHUNK_ROWS);
+            chain_chunks.push(s.rows.div_ceil(GDN_SEG_CHUNK_ROWS));
         }
         words.extend_from_slice(&chunk_words);
-        Self { words, segments: spans.len() as u32, chunks, conv_tiles_rows, conv_vec_runs }
+        Self { words, segments: spans.len() as u32, chain_chunks, chunks, conv_tiles_rows, conv_vec_runs }
     }
 
     /// The words to upload as the `table` buffer.
     pub fn words(&self) -> &[u32] {
         &self.words
+    }
+
+    /// The chunks of each segment: the recurrence is one sequential chain of that many steps a (segment, head).
+    pub fn chain_chunks(&self) -> &[u32] {
+        &self.chain_chunks
     }
 
     pub fn segments(&self) -> u32 {
@@ -872,10 +924,12 @@ pub fn gdn_chunk_loop_seg_bf16_step(gpu: &crate::Gpu, bufs: &[&backend_api::Devi
     let cc = gpu.caps().arch.compute_capability?;
     if gdn_seg_loop_folds(gpu, bf16) {
         let blocks = table.segments * heads * 2;
-        // More than two blocks a multiprocessor (three or more segments of the 48 heads): the single-stage form lets three share one and the round runs in
-        // one wave; up to two waves of the three-stage form, whose copies run two chunks ahead, are faster (4096 rows as two segments 122 against 133 us).
-        let lean = gpu.caps().compute_units.is_some_and(|sms| blocks > 2 * sms) && kernels_cuda::get("gdn_chunk_loop_seg_wg_lean").is_some_and(|k| k.min_cc <= cc);
-        let (kernel, smem) = if lean { ("gdn_chunk_loop_seg_wg_lean", GDN_CHUNK_LOOP_WG_LEAN_DYNAMIC_SHARED_BYTES) } else { ("gdn_chunk_loop_seg_wg_half", GDN_CHUNK_LOOP_WG_HALF_DYNAMIC_SHARED_BYTES) };
+        let form = gdn_loop_form(gpu.caps().compute_units.unwrap_or(0), heads, table.chain_chunks());
+        let (kernel, smem, blocks) = match form {
+            GdnLoopForm::Full => ("gdn_chunk_loop_seg_wg_full", GDN_CHUNK_LOOP_WG_FOLD_DYNAMIC_SHARED_BYTES, blocks / 2),
+            GdnLoopForm::Half => ("gdn_chunk_loop_seg_wg_half", GDN_CHUNK_LOOP_WG_HALF_DYNAMIC_SHARED_BYTES, blocks),
+            GdnLoopForm::Lean => ("gdn_chunk_loop_seg_wg_lean", GDN_CHUNK_LOOP_WG_LEAN_DYNAMIC_SHARED_BYTES, blocks),
+        };
         let kernel = kernels_cuda::get(kernel).filter(|k| k.min_cc <= cc)?;
         let launch = backend_api::CudaLaunch { dynamic_shared_bytes: smem, shared_opt_in: true, arch: backend_api::ArchFeatures::Required, ..backend_api::CudaLaunch::NONE };
         let id = gpu.native_kernel_launched(kernel, &GDN_CHUNK_LOOP_SEG_BINDINGS, launch)?;

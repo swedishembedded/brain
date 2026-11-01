@@ -418,18 +418,19 @@ extern "C" __global__ void __launch_bounds__(WGT, 1) brain_gdn_chunk_loop_wg(con
 // The recurrence of every prompt segment of a round in one launch, on the state rows of the pools themselves (the contract of
 // `brain_gdn_chunk_loop_seg_bf16`, whose chunk table and scratch slots it reads): block = one (segment, value head).
 // params [blocks, unused..., scale (f32 bits) at 5, H at 6, nseg at 7, state elements per pool row at 8, flags at 9 (bit 0: `out` is bf16
-// rows; bit 1: the state pool holds bf16 elements; bit 2: folded form), key_dim at 10, value heads per key head at 11]; buffers kd, qs, w, u,
-// g_cs, intra, table, state pool (read and written in place), out. In the folded form `kd` and `qs` are the normalised key and query rows of the
-// round (token-major, `key_dim` apart) instead of the prep's scaled chunk-major copies.
-extern "C" __global__ void __launch_bounds__(WGT, 1) brain_gdn_chunk_loop_seg_wg(const unsigned int* params, const unsigned short* kd, const unsigned short* qs,
-                                                                              const unsigned short* w, const float* u, const float* g_cs,
-                                                                              const unsigned short* intra, const unsigned int* table, float* state_pool, float* out) {
+// rows; bit 1: the state pool holds bf16 elements), key_dim at 10, value heads per key head at 11]; buffers kd, qs, w, u,
+// g_cs, intra, table, state pool (read and written in place), out. In the folded form (`brain_gdn_chunk_loop_seg_wg_full`) `kd` and `qs` are
+// the normalised key and query rows of the round (token-major, `key_dim` apart) and u arrives as fp16 vectors instead of the prep's scaled
+// chunk-major copies and fp32 rows. The two forms are two entry points because they need different dynamic shared memory and the launch
+// configuration is fixed when a kernel is first registered.
+template <bool FOLD>
+__device__ __forceinline__ void gdn_seg_wg_block(const unsigned int* params, const unsigned short* kd, const unsigned short* qs, const unsigned short* w, const float* u,
+                                                 const float* g_cs, const unsigned short* intra, const unsigned int* table, float* state_pool, float* out) {
     const unsigned int blocks = params[0];
     const unsigned int H = params[6], nseg = params[7];
     const unsigned long long state_words = params[8];
     const bool out_bf16 = (params[9] & 1u) != 0u;
     const bool state_bf16 = (params[9] & 2u) != 0u;
-    const bool fold = (params[9] & 4u) != 0u;
     const unsigned long long key_dim = params[10];
     const unsigned int group = max(params[11], 1u);
     const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
@@ -456,11 +457,20 @@ extern "C" __global__ void __launch_bounds__(WGT, 1) brain_gdn_chunk_loop_seg_wg
     // A bf16 pool is addressed in elements: the same count of two-byte elements instead of four-byte words.
     const unsigned long long state_at = slot * state_words + (unsigned long long)head * D * D;
     void* const state = state_bf16 ? static_cast<void*>(reinterpret_cast<unsigned short*>(state_pool) + state_at) : static_cast<void*>(state_pool + state_at);
-    if (fold) {
-        gdn_loop_wg_walk<true, 2, 2>(op, n_chunks, state, state_bf16, 0u, chunk_at);
-    } else {
-        gdn_loop_wg_walk<false, 2, 2>(op, n_chunks, state, state_bf16, 0u, chunk_at);
-    }
+    gdn_loop_wg_walk<FOLD, 2, 2>(op, n_chunks, state, state_bf16, 0u, chunk_at);
+}
+
+extern "C" __global__ void __launch_bounds__(WGT, 1) brain_gdn_chunk_loop_seg_wg(const unsigned int* params, const unsigned short* kd, const unsigned short* qs,
+                                                                              const unsigned short* w, const float* u, const float* g_cs,
+                                                                              const unsigned short* intra, const unsigned int* table, float* state_pool, float* out) {
+    gdn_seg_wg_block<false>(params, kd, qs, w, u, g_cs, intra, table, state_pool, out);
+}
+
+// The folded form: a block a (segment, head) on both warpgroups, for rounds of two segments of similar length (see `gdn_loop_form` in the provider).
+extern "C" __global__ void __launch_bounds__(WGT, 1) brain_gdn_chunk_loop_seg_wg_full(const unsigned int* params, const unsigned short* kd, const unsigned short* qs,
+                                                                                    const unsigned short* w, const float* u, const float* g_cs,
+                                                                                    const unsigned short* intra, const unsigned int* table, float* state_pool, float* out) {
+    gdn_seg_wg_block<true>(params, kd, qs, w, u, g_cs, intra, table, state_pool, out);
 }
 
 // `brain_gdn_chunk_loop_seg_wg` with one consumer warpgroup a block: block = (segment, value head, 64-column half), twice the blocks for the

@@ -14,8 +14,8 @@
 use data::rng::Lcg;
 use gpu_core::provider::cuda::{self, GdnConvLayout, GdnSegmentSpan, GdnSegmentTable, GdnTokenLayout};
 
-/// How long the back-to-back stress runs.
-const STRESS_SECONDS: u64 = 240;
+/// How long the back-to-back stress runs on each launch form of the recurrence.
+const STRESS_SECONDS_A_FORM: u64 = 60;
 const NVH: u32 = 48;
 const NKH: u32 = 16;
 const HD: u32 = 128;
@@ -135,6 +135,8 @@ fn rounds_of_one_and_two() -> [Vec<GdnSegmentSpan>; 3] {
     ]
 }
 
+/// The warpgroup recurrence in each of its launch forms (a block a half of a head with a three-stage ring, a block a head on two warpgroups, a
+/// single-stage block a half) against the `mma.sync` one over rounds of one to twelve segments, whole and short chunks.
 #[test]
 fn the_warpgroup_recurrence_agrees_with_the_mma_one_over_a_round_of_segments() {
     let _forced = FORCED_SLOT.lock().unwrap_or_else(|e| e.into_inner());
@@ -142,11 +144,14 @@ fn the_warpgroup_recurrence_agrees_with_the_mma_one_over_a_round_of_segments() {
         gpu_core::force_candidate("gdn_prefill_loop", "mma");
         let mma = bench("mma", &spans);
         gpu_core::force_candidate("gdn_prefill_loop", "wg");
-        let wg = bench("wg", &spans);
+        for form in ["half", "full", "lean"] {
+            gpu_core::force_candidate(cuda::GDN_LOOP_FORM_SLOT, form);
+            let wg = bench(form, &spans);
+            let (Some(mma), Some(wg)) = (&mma, wg) else { return };
+            let (out, state) = (rel_rms(&wg.0, &mma.0, true), rel_rms(&wg.1, &mma.1, false));
+            assert!(out < 4.0 / 512.0 && state < 4.0 / 512.0, "{} segments, {form}: output {out:.2e}, state {state:.2e}", spans.len());
+        }
         gpu_core::clear_forced_candidates();
-        let (Some(mma), Some(wg)) = (mma, wg) else { return };
-        let (out, state) = (rel_rms(&wg.0, &mma.0, true), rel_rms(&wg.1, &mma.1, false));
-        assert!(out < 4.0 / 512.0 && state < 4.0 / 512.0, "{} segments: output {out:.2e}, state {state:.2e}", spans.len());
     }
 }
 
@@ -179,6 +184,11 @@ fn the_serving_prefill_layer_at_8k_tokens_and_in_a_700_row_round() {
 fn the_serving_prefill_layer_in_a_4096_row_round() {
     let _forced = FORCED_SLOT.lock().unwrap_or_else(|e| e.into_inner());
     gpu_core::force_candidate("gdn_prefill_loop", "wg");
+    for lens in [vec![3900u32, 196], vec![3500, 300, 296], vec![3000, 1096], vec![2600, 1496], vec![2048, 2048], vec![3584, 256, 128, 128], vec![1024, 1024, 1024, 1024]] {
+        let mut row0 = 0;
+        let spans: Vec<_> = lens.iter().enumerate().map(|(i, &rows)| { let s = GdnSegmentSpan { row0, rows, slot: i as u32 }; row0 += rows; s }).collect();
+        bench(&format!("4096-row round of {lens:?} (wg recurrence)"), &spans);
+    }
     for pieces in [1u32, 2, 3, 4, 16] {
         let rows = 4096 / pieces;
         let spans: Vec<_> = (0..pieces).map(|i| GdnSegmentSpan { row0: i * rows, rows, slot: i }).collect();
@@ -190,11 +200,17 @@ fn the_serving_prefill_layer_in_a_4096_row_round() {
 /// The four segment kernels of a layer (convolution, prep, recurrence, gated norm) launched back to back over a 4096-row round of two segments,
 /// many layers at a time: every batch must end in the bytes of the first (the outputs poisoned and the state and history pools reset between
 /// batches, so a launch that does not run cannot pass on the last one's results). Faults of the kind recorded in knowledge 410 show only in
-/// uninstrumented back-to-back launches; it runs for `STRESS_SECONDS` - compare `dmesg | grep -i xid` before and after.
+/// uninstrumented back-to-back launches; it runs for `STRESS_SECONDS_A_FORM` on each launch form - compare `dmesg | grep -i xid` before and after.
 #[test]
 #[ignore = "a stress run of several minutes, by hand"]
 fn the_segment_kernels_survive_back_to_back_launches() {
     let _forced = FORCED_SLOT.lock().unwrap_or_else(|e| e.into_inner());
+    for form in ["half", "full", "lean", "alternate"] {
+        stress_segment_kernels(form);
+    }
+}
+
+fn stress_segment_kernels(form: &str) {
     let g = gpu_core::testgpu::dev(&[]);
     if g.caps().arch.compute_capability.is_none_or(|cc| cc < (9, 0)) {
         brain_testutil::skip_unavailable("a Hopper device");
@@ -227,10 +243,12 @@ fn the_segment_kernels_survive_back_to_back_launches() {
     let conv_layout = GdnConvLayout { rows: n, conv_dim: CONV_DIM, seq_len: n, key_dim: KEY_DIM, value_dim: VALUE_DIM, kernel: 4 };
     let layers = || {
         let mut steps = Vec::new();
-        for _ in 0..8 {
-            steps.push(cuda::gdn_conv_silu_seg_step(&g, &[&mixed, &conv_w, &tbl, &hist, &query, &key, &value], conv_layout, &table, true, false, 1e-6).expect("conv"));
+        for layer in 0..8 {
+            // Alternate layers between two launch forms of the recurrence (the served rounds alternate them from round to round).
+            gpu_core::force_candidate(cuda::GDN_LOOP_FORM_SLOT, if form == "alternate" { if layer % 2 == 0 { "full" } else { "half" } } else { form });
+            steps.push(cuda::gdn_conv_silu_seg_step(&g, &[&mixed, &conv_w, &tbl, &hist, &query, &key, &value], conv_layout, &table, true, true, 1e-6).expect("conv"));
             steps.push(cuda::gdn_chunk_prep_seg_bf16_step(&g, &[&query, &key, &value, &bproj, &aproj, &a_log, &dt_bias, &tbl, &g_cs, &exp_g_cs, &u, &wm, &intra, &qcm, &kcm], layout, &table, true).expect("prep"));
-            steps.push(cuda::gdn_chunk_loop_seg_bf16_step(&g, &[&key, &query, &wm, &u, &g_cs, &intra, &tbl, &state, &out], layout, &table, true, false).expect("loop"));
+            steps.push(cuda::gdn_chunk_loop_seg_bf16_step(&g, &[&key, &query, &wm, &u, &g_cs, &intra, &tbl, &state, &out], layout, &table, true, true).expect("loop"));
             steps.push(cuda::gdn_gated_norm_step(&g, &[&out, &norm_w, &z, &gated, &q8, &s8], n * NVH, 0, 1e-6, true, true).expect("norm"));
         }
         steps
@@ -255,7 +273,7 @@ fn the_segment_kernels_survive_back_to_back_launches() {
     }
     let start = std::time::Instant::now();
     let mut batches = 0u64;
-    while start.elapsed().as_secs() < STRESS_SECONDS {
+    while start.elapsed().as_secs() < STRESS_SECONDS_A_FORM {
         reset();
         g.submit(&[], &layers());
         g.poll_wait();
@@ -263,7 +281,7 @@ fn the_segment_kernels_survive_back_to_back_launches() {
         batches += 1;
     }
     gpu_core::clear_forced_candidates();
-    println!("{batches} batches of 8 layers (convolution, prep, recurrence, norm), identical results");
+    println!("{form}: {batches} batches of 8 layers (convolution, prep, recurrence, norm), identical results");
 }
 
 #[test]
