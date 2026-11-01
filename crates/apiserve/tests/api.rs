@@ -503,6 +503,20 @@ fn agent_chat_manifest() -> Manifest {
     )
 }
 
+/// A chat model whose `generate` action reads images beside the prompt.
+fn vision_chat_manifest() -> Manifest {
+    Manifest::new(
+        "brain-vision",
+        "a chat model that reads images",
+        vec![ActionSpec::new("generate", "generate text")
+            .streaming()
+            .param(ParamSpec::new("prompt", ParamType::Str, "the prompt").required())
+            .param(ParamSpec::new("tools", ParamType::Str, "JSON array of tool definitions"))
+            .input(BlobSpec::new("image", Media::Image, "the images of the conversation"))
+            .output(BlobSpec::new("text", Media::Text, "generated text"))],
+    )
+}
+
 /// An app over `models` for `provider`, plus the executor it serves from, so a test
 /// can change what is attached to a model the way a hot swap does.
 fn app_over(models: Vec<Manifest>, provider: Provider) -> (Router, Executor, String) {
@@ -570,7 +584,13 @@ async fn model_card_derives_capabilities_and_output_limit_from_the_manifest() {
         (Provider::OpenAI, "/v1/models", ("openai.json", "Model")),
         (Provider::OpenRouter, "/models", ("openrouter.json", "Model")),
     ] {
-        let (app, _exec, key) = app_over(vec![agent_chat_manifest(), chat_manifest(), embed_manifest()], provider);
+        let (app, _exec, key) = app_over(vec![agent_chat_manifest(), chat_manifest(), embed_manifest(), vision_chat_manifest()], provider);
+
+        // A model that reads images says so, as a client sizing its requests reads it.
+        let vision = get_json(&app, provider, &format!("{uri_prefix}/brain-vision"), &key).await;
+        assert_valid(model_schema.0, model_schema.1, &vision);
+        assert_eq!(vision["capabilities"], json!(["chat", "tools", "vision"]), "{provider}: {vision}");
+        assert_eq!(vision["architecture"]["input_modalities"], json!(["text", "image"]), "{provider}: {vision}");
 
         let agent = get_json(&app, provider, &format!("{uri_prefix}/brain-agent"), &key).await;
         assert_valid(model_schema.0, model_schema.1, &agent);
@@ -580,6 +600,7 @@ async fn model_card_derives_capabilities_and_output_limit_from_the_manifest() {
         let plain = get_json(&app, provider, &format!("{uri_prefix}/brain-chat"), &key).await;
         assert_valid(model_schema.0, model_schema.1, &plain);
         assert_eq!(plain["capabilities"], json!(["chat"]), "{provider}: a chat model without tools does not claim them");
+        assert_eq!(plain["architecture"]["input_modalities"], json!(["text"]), "{provider}: a text-only model claims no image");
         assert!(plain.get("max_output_tokens").is_none(), "{provider}: an undeclared bound is absent, not 0: {plain}");
 
         let embed = get_json(&app, provider, &format!("{uri_prefix}/brain-embed"), &key).await;

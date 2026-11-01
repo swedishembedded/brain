@@ -44,6 +44,8 @@ pub struct CapSet {
     pub chat: bool,
     /// Chat whose `generate` action accepts `tools` (function calling).
     pub tools: bool,
+    /// Chat whose `generate` action reads `image` inputs beside the prompt.
+    pub vision: bool,
     pub embeddings: bool,
     pub image: bool,
 }
@@ -54,9 +56,18 @@ impl CapSet {
         self.chat || self.embeddings || self.image
     }
 
+    /// What a chat request to this model may carry, as model cards spell it.
+    pub fn input_modalities(&self) -> Vec<&'static str> {
+        if self.vision {
+            vec!["text", "image"]
+        } else {
+            vec!["text"]
+        }
+    }
+
     /// The capability names a model card lists, in a fixed order.
     pub fn names(&self) -> Vec<&'static str> {
-        [("chat", self.chat), ("tools", self.tools), ("embeddings", self.embeddings), ("images", self.image)]
+        [("chat", self.chat), ("tools", self.tools), ("vision", self.vision), ("embeddings", self.embeddings), ("images", self.image)]
             .into_iter()
             .filter_map(|(name, on)| on.then_some(name))
             .collect()
@@ -100,7 +111,9 @@ pub fn api_caps(m: &Manifest) -> CapSet {
     let embeddings = m.actions.iter().any(|a| a.name == "embed" && a.params.iter().any(|p| p.name == "text"));
     let image = text2image_action(m).is_some();
     let tools = chat && m.actions.iter().any(|a| a.name == "generate" && a.params.iter().any(|p| p.name == "tools"));
-    CapSet { chat, tools, embeddings, image }
+    // The same rule the chat bridge refuses images by: the action takes an `image` input.
+    let vision = chat && m.actions.iter().any(|a| a.name == "generate" && a.inputs.iter().any(|b| b.name == "image"));
+    CapSet { chat, tools, vision, embeddings, image }
 }
 
 /// Does `provider` expose a model with capabilities `caps`?

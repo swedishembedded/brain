@@ -127,6 +127,10 @@ fn add_discovery(card: &mut Value, info: &ModelInfo, adapter: Option<&AdapterIde
     if !capabilities.is_empty() {
         card["capabilities"] = json!(capabilities);
     }
+    if info.caps.chat {
+        // OpenRouter's spelling, which agent runtimes read for every dialect.
+        card["architecture"]["input_modalities"] = json!(info.caps.input_modalities());
+    }
     if let Some(max) = info.max_output_tokens {
         card["max_output_tokens"] = json!(max);
     }
@@ -151,8 +155,8 @@ fn openrouter_card(info: &ModelInfo) -> Value {
         "description": format!("brain-served model '{name}'"),
         "context_length": ctx,
         "architecture": {
-            "modality": "text->text",
-            "input_modalities": ["text"],
+            "modality": if info.caps.vision { "text+image->text" } else { "text->text" },
+            "input_modalities": info.caps.input_modalities(),
             "output_modalities": ["text"],
             "tokenizer": "Other",
             "instruct_type": Value::Null,
