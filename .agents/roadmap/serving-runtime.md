@@ -524,3 +524,13 @@ Mixed-iteration idle (knowledge 392, 2026-10-30): a prompt start no longer waits
   8K x 16 3.18 -> 3.00 s, 16K x 16 6.20 -> 5.97 s) shows the same size; the card-to-card spread of one binary (3.05-3.26 s at 8K x 16) is as large as the gain.
   Open: the epilogue's 16 fences against the reference's one (STSM batch, one TMA store a tile), the reference's 256 x 128 tile with two 64-row waves a warpgroup, and the multicast again on
   top of the scale change.
+
+- 2026-11-01 (native-attention memory charge, FP8 tuning grid): the plan charged CUDA decode the portable kernels' four score strips a row (19.4 GiB
+  held back at a 737K pool) and nothing for the staged prefill's widened-key buffer; `ServingShape::native_attention` now charges one strip's worth
+  a row (measured 16 rows 547 / 686 MiB at 8K / 100K) plus the staging (`flash_prefill_staging_bytes`), and the real-allocation test covers both
+  contexts: default pool 737,280 -> 851,968 tokens, 64Kx16 TTFT 49.5 -> 46.4 s. The FP8 tuning grid times its classes near the served widths (16-row
+  gate/up now on the swap GEMM; below served noise). Open: an intermittent `unspecified launch failure` seen twice on gpu0 (once in a server's first
+  tuning pass on the new grid, once in a sweep of `native_check_fp8_shape` over the grid's problems), not reproduced in 14 later sweeps, alone or two
+  processes at once; compute-sanitizer memcheck over the K=17408 sweep reports 0 errors (memcheck does not see TMA accesses through a bad tensor map).
+  Next memory levers, measured: the staging counts 2.5 live layers (one shared buffer a round would free ~4 GiB at a 737K pool); the verify scratch
+  and recurrent pool are 16.4 GiB with the f32 prefix snapshots (kept f32: a bf16 snapshot would make a cache hit differ from a miss).
