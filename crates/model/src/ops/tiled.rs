@@ -208,11 +208,16 @@ pub const GEMV_MAX_ROWS: u32 = 8;
 /// the weight once for all of the rows. A recording that holds no library product has no such tile product, so there the
 /// GEMVs serve up to [`GEMV_MAX_ROWS`].
 const LIBRARY_GEMV_MAX_ROWS: u32 = 2;
-/// The NVFP4 GEMV's row cap with the library present. Its tile product first writes the whole weight as bf16 (3.6 times the
-/// stored bytes) and reads it back, a floor of 215 us per 17408 x 5120 projection at every row count up to 256; the GEMV reads
-/// 0.56 bytes per weight once and takes 93 us at four rows, 186 us at eight (down: 253 us, the loss), so it serves four
-/// (measured in `model/tests/qops_nvfp4_dense_shapes.rs`).
+/// The NVFP4 GEMV's row cap where the tensor-core product ([`Ops::nvfp4_mma`]) is offered: the register-blocked GEMV reads
+/// the stored bytes once at one and two rows (37 and 70 us at 17408 x 5120), and from three rows the tensor-core product takes
+/// over (58 us at eight rows where the GEMV takes 186, and the vendor library's tile product 215; measured in
+/// `model/tests/qops_nvfp4_dense_shapes.rs`).
+const NVFP4_GEMV_MAX_ROWS_WITH_MMA: u32 = 2;
+/// The NVFP4 GEMV's row cap with the library present and no tensor-core product: the tile product first writes the whole weight
+/// as bf16 (3.6 times the stored bytes) and reads it back, 215 us per 17408 x 5120 projection at every row count up to 256; the
+/// staged GEMV takes 93 us at four rows and loses at eight.
 const LIBRARY_NVFP4_GEMV_MAX_ROWS: u32 = 4;
+
 /// Activation rows up to which a dense bf16 weight is read by its own GEMV instead of the library's tensor-core product: the
 /// single decode token. The multi-row build is not yet competitive (measured at eight rows: the library is three times faster).
 const DENSE_GEMV_MAX_ROWS: u32 = 1;
@@ -233,6 +238,7 @@ impl Ops {
             return false;
         }
         let max_rows = match w {
+            Weight::Micro { kind: MicroScaled::Nvfp4, .. } if self.gpu.has_fused(gpu_core::Fused::MatmulNvfp4Mma8) => NVFP4_GEMV_MAX_ROWS_WITH_MMA,
             Weight::Micro { kind: MicroScaled::Nvfp4, .. } if !self.gpu.declines_library() => LIBRARY_NVFP4_GEMV_MAX_ROWS,
             _ if self.gpu.declines_library() => GEMV_MAX_ROWS,
             _ => LIBRARY_GEMV_MAX_ROWS,
@@ -259,6 +265,36 @@ impl Ops {
             }
             _ => false,
         }
+    }
+
+    /// The product of an NVFP4 weight against up to 64 activation rows on the bf16 tensor cores by the kernel that decodes the
+    /// stored codes into its operand fragments ([`gpu_core::Fused::MatmulNvfp4Mma8`] and its wider builds): the weight is read once at its stored
+    /// bytes and no bf16 copy of it is written, which is what the tile decode feeding the vendor library does for every row count
+    /// above the GEMV's. `false` (nothing pushed) when the weight is not NVFP4, the device or the shape is not served, or the
+    /// activations cannot be rounded to bf16; the caller then takes the tile decode.
+    pub(super) fn nvfp4_mma(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), act: &Act, y: &DeviceBuffer, yoff: u64) -> bool {
+        let Weight::Micro { w: wb, s: sb, kind: MicroScaled::Nvfp4, global, .. } = w else { return false };
+        let (first, count) = rows;
+        let (m, k) = (act.m, w.k());
+        let params = [m, k, count, first, 0, global.to_bits(), 0, 0];
+        let which = match m {
+            0..=8 => gpu_core::Fused::MatmulNvfp4Mma8,
+            9..=16 => gpu_core::Fused::MatmulNvfp4Mma16,
+            17..=32 => gpu_core::Fused::MatmulNvfp4Mma32,
+            _ => gpu_core::Fused::MatmulNvfp4Mma64,
+        };
+        if !self.providers.runs("cuda") || !which.serves(&params) {
+            return false;
+        }
+        let mut prep = Vec::new();
+        let Some((xb, fresh)) = self.bf16_rows(act, &mut prep) else { return false };
+        let Some(step) = self.gpu.fused_step_sliced(which, &[&xb, wb, sb, y], &[WHOLE, WHOLE, WHOLE, (yoff, m as u64 * count as u64)], &params) else { return false };
+        s.append(&mut prep);
+        s.push(step);
+        if fresh {
+            *act.bf16.borrow_mut() = Some(xb);
+        }
+        true
     }
 
     /// Activation rows up to which a dense bf16 weight is read by its own GEMV on this device.

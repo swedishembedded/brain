@@ -2679,7 +2679,7 @@ impl Ops {
         assert_eq!(act.k, k, "Ops::matmul_rows: activation width {} does not match weight K {k}", act.k);
         assert!(count > 0 && first as u64 + count as u64 <= n as u64, "Ops::matmul_rows: rows {first}+{count} outside the {n} rows of the weight");
         if matches!(self.linear_plan(w, count), LinearPlan::TileDecode { .. }) {
-            if self.fp8_forward(s, w, rows, act, y, yoff, ActPrecision::F32) || self.small_m_gemv(s, w, rows, act, y, yoff) {
+            if self.fp8_forward(s, w, rows, act, y, yoff, ActPrecision::F32) || self.small_m_gemv(s, w, rows, act, y, yoff) || self.nvfp4_mma(s, w, rows, act, y, yoff) {
                 return;
             }
             return self.forward_tiled(s, w, rows, act, y, yoff);

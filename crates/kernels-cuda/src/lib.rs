@@ -3032,6 +3032,82 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/fp8_nvfp4_gemv.cu"),
     },
     CudaKernel {
+        name: "matmul_nvfp4_mma8",
+        // A fused kernel asked for by name (`gpu_core::Fused::MatmulNvfp4Mma8`): no WGSL twin; the model keeps the tile decode and the
+        // vendor-library product for devices that are not offered it.
+        op: Op::MatMul,
+        weight: Dtype::F4E2M1,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: (8, 0),
+        entry: "brain_matmul_nvfp4_mma8",
+        what: "NVFP4 weight against up to 8 bf16 activation rows on the tensor cores: the 4-bit codes and their block scales are decoded in registers into mma.m16n8k16 operand fragments (weight rows as the 16-row dimension), eight K-slices a block meet in shared memory; no bf16 copy of the weight, f32 accumulation",
+        reported: "native:matmul_nvfp4_mma8",
+        block_dim: 512,
+        // Weight rows per block.
+        tile: (1, 64),
+        shared_bytes: 2048,
+        programmatic: false,
+        src: include_str!("../cu/fp8_nvfp4_gemv.cu"),
+    },
+    CudaKernel {
+        name: "matmul_nvfp4_mma16",
+        // A fused kernel asked for by name (`gpu_core::Fused::MatmulNvfp4Mma16`): no WGSL twin; the model keeps the tile decode and the
+        // vendor-library product for devices that are not offered it.
+        op: Op::MatMul,
+        weight: Dtype::F4E2M1,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: (8, 0),
+        entry: "brain_matmul_nvfp4_mma16",
+        what: "NVFP4 weight against up to 16 bf16 activation rows on the tensor cores: the 4-bit codes and their block scales are decoded in registers into mma.m16n8k16 operand fragments (weight rows as the 16-row dimension), eight K-slices a block meet in shared memory; no bf16 copy of the weight, f32 accumulation",
+        reported: "native:matmul_nvfp4_mma16",
+        block_dim: 512,
+        // Weight rows per block.
+        tile: (1, 64),
+        shared_bytes: 4096,
+        programmatic: false,
+        src: include_str!("../cu/fp8_nvfp4_gemv.cu"),
+    },
+    CudaKernel {
+        name: "matmul_nvfp4_mma32",
+        // A fused kernel asked for by name (`gpu_core::Fused::MatmulNvfp4Mma32`): no WGSL twin; the model keeps the tile decode and the
+        // vendor-library product for devices that are not offered it.
+        op: Op::MatMul,
+        weight: Dtype::F4E2M1,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: (8, 0),
+        entry: "brain_matmul_nvfp4_mma32",
+        what: "NVFP4 weight against up to 32 bf16 activation rows on the tensor cores: the 4-bit codes and their block scales are decoded in registers into mma.m16n8k16 operand fragments (weight rows as the 16-row dimension), eight K-slices a block meet in shared memory; no bf16 copy of the weight, f32 accumulation",
+        reported: "native:matmul_nvfp4_mma32",
+        block_dim: 512,
+        // Weight rows per block.
+        tile: (1, 64),
+        shared_bytes: 8192,
+        programmatic: false,
+        src: include_str!("../cu/fp8_nvfp4_gemv.cu"),
+    },
+    CudaKernel {
+        name: "matmul_nvfp4_mma64",
+        // A fused kernel asked for by name (`gpu_core::Fused::MatmulNvfp4Mma64`): no WGSL twin; the model keeps the tile decode and the
+        // vendor-library product for devices that are not offered it.
+        op: Op::MatMul,
+        weight: Dtype::F4E2M1,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: (8, 0),
+        entry: "brain_matmul_nvfp4_mma64",
+        what: "NVFP4 weight against up to 64 bf16 activation rows on the tensor cores: the 4-bit codes and their block scales are decoded in registers into mma.m16n8k16 operand fragments (weight rows as the 16-row dimension), four K-slices a block meet in shared memory; no bf16 copy of the weight, f32 accumulation",
+        reported: "native:matmul_nvfp4_mma64",
+        block_dim: 256,
+        // Weight rows per block.
+        tile: (1, 64),
+        shared_bytes: 8192,
+        programmatic: false,
+        src: include_str!("../cu/fp8_nvfp4_gemv.cu"),
+    },
+    CudaKernel {
         name: "moe_nvfp4_gemv_gather",
         // The native twin of `moe_nvfp4_gemv_gather.wgsl`: the decode regime's expert GEMV over an NVFP4 bank.
         op: Op::MoeExpertLinear,

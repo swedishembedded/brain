@@ -87,8 +87,8 @@ fn fp8_and_nvfp4_products_at_the_dense_27b_shapes() {
     let mut rng = Lcg::random();
     println!("{:<18} {:<7} {:>5} {:>10} {:>9} {:>9}  kernels (ms)", "shape", "tier", "rows", "total us", "GB/s", "TFLOPS");
     for (label, n, k, rows) in [
-        ("gate/up 17408x5120", 17408usize, 5120usize, vec![1u32, 2, 3, 4, 8, 16, 64, 256, 2048, 8192]),
-        ("down 5120x17408", 5120, 17408, vec![1, 2, 3, 4, 8, 16, 64, 256, 2048, 8192]),
+        ("gate/up 17408x5120", 17408usize, 5120usize, vec![1u32, 2, 3, 4, 8, 16, 24, 32, 48, 64, 256, 2048, 8192]),
+        ("down 5120x17408", 5120, 17408, vec![1, 2, 3, 4, 8, 16, 24, 32, 48, 64, 256, 2048, 8192]),
         ("lm_head 248320x5120", 248_320, 5120, vec![1, 2, 3, 4, 8, 16, 64]),
     ] {
         let mut fp8_enc = QuantEncoding::fp8_e4m3_tiled(128);

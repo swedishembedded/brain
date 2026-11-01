@@ -333,6 +333,18 @@ fn head_bytes(cfg: &Qwen35Config, tier: Dtype) -> u64 {
     model::ops::Weight::bytes_for(tier, cfg.vocab as usize, cfg.d_model as usize)
 }
 
+/// Device bytes a stage keeps for the decoded tile of an NVFP4 product ([`Ops::tile_budget_bytes`] of f32, or the bf16 tile the
+/// vendor library multiplies, two of which can be live while a decode step and a prefill round overlap). The other tiers read
+/// their stored bytes natively and hold none. Unreserved, the context takes every byte and the first batched step runs out of
+/// memory allocating the tile.
+fn tile_decode_scratch_bytes(tier: &TierPolicy) -> u64 {
+    if tier.dtypes().any(|d| d == Dtype::F4E2M1) {
+        2 * model::ops::DEFAULT_TILE_BUDGET_BYTES
+    } else {
+        0
+    }
+}
+
 /// The byte-exact per-stage cost model this resident hands to
 /// `model::shard::plan_fewest_devices`, at `cap` decode positions.
 ///
@@ -438,7 +450,11 @@ impl ServingShape {
     /// sequences and the verify rows speculation batches.
     pub fn stage_workspace(&self, cfg: &Qwen35Config) -> u64 {
         let rows = self.max_batch.max(self.spec.scratch_rows).max(1);
-        prefill_workspace_bytes(cfg, self.prefill_rows) + prefill_staging_bytes(cfg, self.cap, self.native_attention) + decode_scratch_bytes(cfg, rows, self.cap, !self.native_attention) + self.vision_bytes
+        prefill_workspace_bytes(cfg, self.prefill_rows)
+            + prefill_staging_bytes(cfg, self.cap, self.native_attention)
+            + decode_scratch_bytes(cfg, rows, self.cap, !self.native_attention)
+            + self.vision_bytes
+            + tile_decode_scratch_bytes(&self.tier)
     }
 
     /// The same shape at another context.
@@ -5041,6 +5057,17 @@ mod tests {
             "and the difference besides the strips is the staging"
         );
         assert_eq!(prefill_staging_bytes(&cfg, 737_280, false), 0, "the portable prefill stages nothing");
+    }
+
+    /// A tier the product reads through a decoded bf16 tile (NVFP4: the vendor library's GEMM needs the whole tile written first)
+    /// holds that tile's scratch besides the round's activations; the tiers that read their stored bytes natively hold none.
+    #[test]
+    fn a_tile_decoded_tier_holds_back_the_scratch_of_its_tile() {
+        let cfg = Qwen35Config::qwen38_27b();
+        let shape = |tier: TierPolicy| ServingShape::new(8192, tier, KvTier::INT8, 8).stage_workspace(&cfg);
+        let fp8 = TierPolicy::uniform(Dtype::F8E4M3);
+        assert_eq!(shape(fp8.clone().with(&["mlp.up"], Dtype::BF16)), shape(fp8.clone()), "bf16 and FP8 products read their stored bytes");
+        assert_eq!(shape(fp8.clone().with(&["mlp"], Dtype::F4E2M1)) - shape(fp8), 2 * model::ops::DEFAULT_TILE_BUDGET_BYTES);
     }
 
     /// The workspace follows the rows a round carries, and the batched-prefill setting widens them.

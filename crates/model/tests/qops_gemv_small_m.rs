@@ -9,9 +9,9 @@
 //! float-read kernel (no decoded scratch), and the product equals the host product of the exact decoded weight, for
 //! every row count, a row window that does not start at 0 and a ragged row count; above the row cap the tile decode
 //! answers instead and agrees. Where the vendor library has the tile product (the default) the FP8 cap is two rows, since
-//! the tile product reads the weight once for more rows than that (an NVFP4 weight keeps four rows: its tile
-//! product writes the whole weight as bf16 first); while the library declines (a recording that is
-//! replayed as a graph) the GEMVs serve all `GEMV_MAX_ROWS`.
+//! the tile product reads the weight once for more rows than that (an NVFP4 weight: two where the tensor-core product takes over
+//! from the third row, four without it, since the tile product writes the whole weight as bf16 first); while the library
+//! declines (a recording that is replayed as a graph) the other GEMVs serve all `GEMV_MAX_ROWS`.
 
 use checkpoint::packed::{CodecRegistry, QuantEncoding, TensorDescriptor, TensorSink, Tile};
 use data::rng::Lcg;
@@ -42,9 +42,10 @@ fn host_product(x: &[f32], m: usize, k: usize, wd: &[f32], first: usize, count: 
 }
 
 fn check(ops: &Ops, w: &Weight, label: &str) {
-    // With the library present the FP8 GEMV serves two rows and the NVFP4 GEMV four (its tile product writes the whole
-    // weight as bf16 first).
+    // With the library present the FP8 GEMV serves two rows; so does the NVFP4 GEMV where the tensor-core product takes over from
+    // the third row, and four where it does not (the tile product writes the whole weight as bf16 first).
     let gemv_rows = match w {
+        Weight::Micro { .. } if ops.gpu().has_fused(gpu_core::Fused::MatmulNvfp4Mma8) => 2,
         _ if ops.gpu().declines_library() => GEMV_MAX_ROWS as usize,
         Weight::Micro { .. } => 4,
         _ => 2,

@@ -755,6 +755,9 @@ const MOE_NVFP4_GATHER_BINDINGS: &[BindKind] = &[
     BindKind::StorageReadWrite,
 ];
 
+/// `matmul_nvfp4_mma`'s bindings: params, `xb`, `w`, `s`, `y`.
+const NVFP4_MMA_BINDINGS: &[BindKind] = QGEMV_BINDINGS;
+
 /// `moe_nvfp4_gateup_silu`'s bindings: params, `x`, `ids`, `wg`, `sg`, `gg`, `wu`, `su`, `gu`, `h`.
 const MOE_NVFP4_GATEUP_BINDINGS: &[BindKind] = &[
     BindKind::Uniform,
@@ -2458,6 +2461,18 @@ pub enum Fused {
     /// `moe_nvfp4_gateup_silu`: the gate and up projections of an NVFP4 expert bank for the same slots, and `silu(gate) * up`,
     /// in one launch. Params `[slots, k, n, xdiv]`; bindings `x, ids, wg, sg, gg, wu, su, gu` read, `h` written.
     MoeNvfp4GateUp,
+    /// `matmul_nvfp4_mma8`, `..16`, `..32`, `..64`: an NVFP4 weight multiplied against up to 8, 16, 32 or 64 activation rows on the bf16
+    /// tensor cores, the codes decoded in registers into the operand fragments (no bf16 copy of the weight). One build per
+    /// activation-tile count, since the accumulators of a lane grow with it. Params `[m, k, count, first, pad, global_bits, pad,
+    /// pad]` (`k` a whole number of 128-weight groups); bindings `xb` (the activations rounded to bf16, `[m, k]`), `w`, `s`
+    /// read, `y` (`[m, count]` f32) written.
+    MatmulNvfp4Mma8,
+    /// [`Fused::MatmulNvfp4Mma8`] for up to 16 activation rows.
+    MatmulNvfp4Mma16,
+    /// [`Fused::MatmulNvfp4Mma8`] for up to 32 activation rows.
+    MatmulNvfp4Mma32,
+    /// [`Fused::MatmulNvfp4Mma8`] for up to 64 activation rows.
+    MatmulNvfp4Mma64,
     /// `matmul_i8_gemv_multi`: up to four int8 matrices that read ONE packed
     /// activation, multiplied in a single launch - each output bit-identical to
     /// the single `matmul_i8_gemv` on that matrix. Params `[m, kg, n0, n1, n2,
@@ -2830,6 +2845,10 @@ impl Fused {
             Fused::GqaDecodePrep => "gqa_decode_prep",
             Fused::GqaDecodePrepI8 => "gqa_decode_prep_i8",
             Fused::MoeNvfp4GateUp => "moe_nvfp4_gateup_silu",
+            Fused::MatmulNvfp4Mma8 => "matmul_nvfp4_mma8",
+            Fused::MatmulNvfp4Mma16 => "matmul_nvfp4_mma16",
+            Fused::MatmulNvfp4Mma32 => "matmul_nvfp4_mma32",
+            Fused::MatmulNvfp4Mma64 => "matmul_nvfp4_mma64",
             Fused::I8GemvMulti => "matmul_i8_gemv_multi",
             Fused::Q4GemvMulti => "matmul_q4_gemv_multi",
             Fused::Bf16GemvMulti => "matmul_bf16_gemv_multi",
@@ -2859,6 +2878,7 @@ impl Fused {
             Fused::GqaDecodePrep => GQA_DECODE_PREP_BINDINGS,
             Fused::GqaDecodePrepI8 => GQA_DECODE_PREP_I8_BINDINGS,
             Fused::MoeNvfp4GateUp => MOE_NVFP4_GATEUP_BINDINGS,
+            Fused::MatmulNvfp4Mma8 | Fused::MatmulNvfp4Mma16 | Fused::MatmulNvfp4Mma32 | Fused::MatmulNvfp4Mma64 => NVFP4_MMA_BINDINGS,
             Fused::I8GemvMulti | Fused::Q4GemvMulti => I8_GEMV_MULTI_BINDINGS,
             Fused::Bf16GemvMulti => BF16_GEMV_MULTI_BINDINGS,
             Fused::Conv2dDwPartial => CONV2D_DW_PARTIAL_BINDINGS,
@@ -2935,6 +2955,9 @@ impl Fused {
                 matches!(params, [rows, k] if *rows >= 1 && *k >= 1 && u64::from(*rows) * u64::from(*k) <= u64::from(u32::MAX))
             }
             Fused::MoeNvfp4GateUp => serves_moe_nvfp4_gather(params),
+            Fused::MatmulNvfp4Mma8 | Fused::MatmulNvfp4Mma16 | Fused::MatmulNvfp4Mma32 | Fused::MatmulNvfp4Mma64 => {
+                matches!(params, [m, k, count, ..] if (1..=self.mma_rows()).contains(m) && *count >= 1 && *k >= 128 && k % 128 == 0)
+            }
             Fused::FlashGqaKmask => matches!(params, [bsz, nh, nkv, t, hd, group]
                 if *bsz >= 1 && *nkv >= 1 && *t >= 1 && *hd == FLASH_BIDIR_HEAD_DIM && nh % nkv == 0 && *group == nh / nkv && *group >= 1
                     && u64::from(*bsz) * u64::from(*nh) * u64::from(t.div_ceil(FLASH_BIDIR_ROWS)) <= u64::from(u32::MAX)),
@@ -2953,6 +2976,8 @@ impl Fused {
             Fused::GdnCommitPool | Fused::GdnCommitPoolBf16 => params[0] * params[1].div_ceil(GDN_COMMIT_TILE),
             Fused::GqaDecodePrep | Fused::GqaDecodePrepI8 => (params[0] + params[1]) * params[6],
             Fused::MoeNvfp4GateUp => params[0] * params[2].div_ceil(QGEMV_COLS),
+            // The weight rows a block covers: two row-warps of the registry tile's rows.
+            Fused::MatmulNvfp4Mma8 | Fused::MatmulNvfp4Mma16 | Fused::MatmulNvfp4Mma32 | Fused::MatmulNvfp4Mma64 => params[2].div_ceil(self.tile().1),
             Fused::I8GemvMulti | Fused::Q4GemvMulti => {
                 let (rows, cols) = self.tile();
                 params[0].div_ceil(rows) * params[2..6].iter().map(|n| n.div_ceil(cols)).sum::<u32>()
@@ -3012,6 +3037,16 @@ impl Fused {
     /// memory plan asks before any device is opened.
     pub fn offered_at(self, cc: kernels_cuda::Cc) -> bool {
         !disabled() && kernels_cuda::get(self.registry_name_on(cc)).is_some_and(|k| k.min_cc <= cc)
+    }
+
+    /// Activation rows the tensor-core NVFP4 build serves (its accumulators hold `8 * tiles` columns).
+    fn mma_rows(self) -> u32 {
+        match self {
+            Fused::MatmulNvfp4Mma8 => 8,
+            Fused::MatmulNvfp4Mma16 => 16,
+            Fused::MatmulNvfp4Mma32 => 32,
+            _ => 64,
+        }
     }
 
     /// The registry entry's output tile.

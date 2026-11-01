@@ -367,3 +367,50 @@ fn the_native_router_topk_selects_the_reference_experts() {
         }
     }
 }
+
+/// The tensor-core NVFP4 product equals the f64 product of the bf16-rounded activations and the exact decoded weight, for every
+/// row count up to 64 (whole and ragged 8-row activation tiles), a window that does not start at row 0, a weight whose rows
+/// are not a multiple of the 64 a block covers, and a K of one group up to the 5120 / 17408 of the 27B.
+#[test]
+fn the_tensor_core_nvfp4_product_matches_the_oracle_of_the_bf16_activations() {
+    use gpu_core::Fused;
+    let gpu = gpu_core::testgpu::dev(kernel_list());
+    if !is_cuda(&gpu) || !gpu.has_fused(Fused::MatmulNvfp4Mma64) {
+        return brain_testutil::skip_unavailable("the tensor-core NVFP4 product needs a CUDA device with bf16 tensor cores");
+    }
+    let base = data::rng::random_seed();
+    for (i, &(m, k, count, first)) in [(1usize, 128usize, 1usize, 0usize), (5, 256, 63, 0), (8, 5120, 200, 0), (13, 512, 65, 7), (16, 5120, 17408, 0), (33, 1024, 130, 3), (64, 17408, 300, 0), (64, 640, 64, 0), (2, 128, 100, 0)].iter().enumerate() {
+        let seed = base.wrapping_add(i as u64 * 29);
+        let n = first + count + 3;
+        let mut r = Lcg::new(seed);
+        let codes: Vec<u32> = (0..n * k / 8).map(|_| r.next_u32()).collect();
+        let scales = scale_bytes(n * k / 16, seed + 1);
+        let global = 0.0071f32;
+        let x = Lcg::new(seed + 2).vec_scaled(m * k, 1.0);
+        let xr: Vec<f32> = x.iter().map(|v| half::bf16::from_f32(*v).to_f32()).collect();
+        let xw: Vec<u32> = xr.chunks(2).map(|p| u32::from(half::bf16::from_f32(p[0]).to_bits()) | u32::from(half::bf16::from_f32(p[1]).to_bits()) << 16).collect();
+        let (xb, wb, sb) = (upload_u32(&gpu, &xw), upload_u32(&gpu, &codes), upload_u32(&gpu, &words_of(&scales)));
+        let y = gpu.storage((m * count) as u64);
+        let params = [m as u32, k as u32, count as u32, first as u32, 0, global.to_bits(), 0, 0];
+        let which = match m {
+            0..=8 => Fused::MatmulNvfp4Mma8,
+            9..=16 => Fused::MatmulNvfp4Mma16,
+            17..=32 => Fused::MatmulNvfp4Mma32,
+            _ => Fused::MatmulNvfp4Mma64,
+        };
+        let step = gpu.fused_step(which, &[&xb, &wb, &sb, &y], &params).expect("served shape");
+        gpu.submit(&[], &[step]);
+        gpu.poll_wait();
+        let mut want = Vec::new();
+        for a in 0..m {
+            for c in 0..count {
+                let terms: Vec<f64> = (0..k).map(|j| f64::from(xr[a * k + j]) * fp4_weight(&codes, &scales, global, k, first + c, j)).collect();
+                want.push((terms.iter().sum::<f64>(), terms.iter().map(|t| t * t).sum::<f64>().sqrt()));
+            }
+        }
+        assert_matches(&format!("mma m={m} k={k} count={count} first={first}"), &gpu.read(&y, m * count), &want);
+    }
+    assert!(!Fused::MatmulNvfp4Mma64.serves(&[65, 128, 64, 0, 0, 0, 0, 0]), "past 64 activation rows");
+    assert!(!Fused::MatmulNvfp4Mma8.serves(&[9, 128, 64, 0, 0, 0, 0, 0]), "past the build's rows");
+    assert!(!Fused::MatmulNvfp4Mma64.serves(&[8, 192, 64, 0, 0, 0, 0, 0]), "k not a whole number of 128-weight groups");
+}

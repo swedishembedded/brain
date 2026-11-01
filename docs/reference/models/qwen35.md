@@ -37,6 +37,14 @@ checkpoint from its GGUF" below. That path reads
 `unsloth/Qwen3.8-27B-GGUF`'s `Q8_0` file (or any other quant) directly and
 never writes an fp32 intermediate.
 
+A **mixed-precision release** of the same model (`nvidia/Qwen3.8-27B-NVFP4`: FP8 attention and Gated DeltaNet projections with one
+static `weight_scale` per tensor, NVFP4 MLPs and head, a bf16 MTP head) is served from its published files, with no conversion and no
+flag: `brain pull https://huggingface.co/nvidia/Qwen3.8-27B-NVFP4`, then `brain serve`. Each tensor reaches the card in the format it is
+stored in. A per-tensor FP8 scale is held exactly (the same f32 scale on every 128 x 128 tile of the weight, never rounded to bf16), NVFP4
+is the microscaling tier (E2M1 codes, E4M3 scale per 16, f32 tensor scale) read directly with float activations (W4A16). The release's
+static `input_scale`s are not used: brain quantises activations dynamically per 128 elements, which tracks the activation at least as
+closely as one calibrated scale.
+
 ## Running it
 
 ```bash

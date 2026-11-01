@@ -592,6 +592,155 @@ brain_matmul_nvfp4_gemv(const unsigned int* params, const float* x, const unsign
     brain_matmul_nvfp4_gemv_staged_rb<BRAIN_QG_MAXM>(params, x, w, s, y);
 }
 
+// ---- NVFP4 tensor-core product ---------------------------------------------------------------------------------------
+
+// `y[a, c] = global * sum_k bf16(x[a, k]) * e2m1(w[first + c, k]) * e4m3(scale[k / 16])` for up to 64 activation rows on the bf16
+// tensor cores, reading the stored bytes once: the weight chunks are decoded in registers straight into the A fragments of
+// `mma.m16n8k16` (weight rows are the 16-row dimension, activation rows the 8-column dimension), so the bf16 copy of the weight
+// that the vendor library's GEMM needs (3.6 times the stored bytes, written and read back) never exists. Params as the GEMV
+// (`[m, k, count, first, pad, global_bits, pad, pad]`, k % 128 == 0, m <= 64); `xb` the activations rounded to bf16, [m, k].
+//
+// The K order is permuted: a lane of a quad owns a whole 32-weight chunk of its row (one 16-byte load, two block scales), and a
+// k16 step takes four consecutive weights of each chunk of a 128-weight group; the activation fragment of the same step reads
+// the same four positions per lane (`x[32 t + 4 s .. + 3]`, one 8-byte load), so the sum over the step is the sum over the
+// chunk positions it pairs. A permutation of the contraction index leaves the product unchanged. The scale multiplies in f32
+// before the bf16 rounding: an E2M1 value times an E4M3 scale has at most five significant bits, so the rounding is exact.
+//
+// A CTA is 16 warps: two row-warps of RT 16-row tiles by eight K-slices; the slices' partial sums meet in shared memory. The
+// build is a template over the number of 8-row activation tiles NT (the accumulators of a lane are RT x NT x 4 registers: a
+// build for 64 rows with RT = 2 spills at the 128 registers a 512-thread block leaves) and the row tiles per warp RT.
+
+__device__ __forceinline__ unsigned int brain_fp4_pack_bf16(float lo, float hi) {
+    unsigned int r;
+    asm("cvt.rn.bf16x2.f32 %0, %1, %2;" : "=r"(r) : "f"(hi), "f"(lo));
+    return r;
+}
+
+// Four consecutive weights (16 bits of E2M1 codes) times `sc` (the block scale placed as 2^22 * e4m3 * 2^-8) as two bf16 pairs.
+__device__ __forceinline__ void brain_fp4_a_pairs(const unsigned int codes16, const float sc, unsigned int& p01, unsigned int& p23) {
+    const float2 a = brain_qg_e2m1_pair((codes16 & 0x000Fu) | ((codes16 << 12) & 0x000F0000u));
+    const float2 b = brain_qg_e2m1_pair(((codes16 >> 8) & 0x000Fu) | ((codes16 << 4) & 0x000F0000u));
+    p01 = brain_fp4_pack_bf16(a.x * sc, a.y * sc);
+    p23 = brain_fp4_pack_bf16(b.x * sc, b.y * sc);
+}
+
+__device__ __forceinline__ void brain_mma_bf16_16816(float* d, const unsigned int a0, const unsigned int a1, const unsigned int a2, const unsigned int a3, const unsigned int b0, const unsigned int b1) {
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};"
+                 : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
+                 : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+}
+
+template <int NT, int RT, int KS>
+__device__ __forceinline__ void brain_matmul_nvfp4_mma_body(const unsigned int* params, const unsigned int* xb, const unsigned int* w, const unsigned int* s, float* y) {
+    constexpr int ROWS = 2 * RT * 16;                            // weight rows a block covers
+    constexpr int THREADS = 64 * KS;                             // two row-warps by KS K-slices
+    constexpr int MAXM = 8 * NT;
+    const unsigned int m = params[0], k = params[1], count = params[2], first = params[3];
+    const float global = __uint_as_float(params[5]);
+    const unsigned int warp = threadIdx.x >> 5, lane = threadIdx.x & 31u;
+    const unsigned int rw = warp & 1u, ks = warp >> 1;           // row-warp, K-slice
+    const unsigned int g = lane >> 2, t = lane & 3u;
+    const unsigned int chunks = k >> 5;                          // 32-weight chunks per row
+    const unsigned int groups = k >> 7;                          // 128-weight groups per row
+    const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
+    const unsigned int row0 = blk * ROWS + rw * (RT * 16u);
+
+    __shared__ float accs[ROWS][MAXM];
+    for (unsigned int i = threadIdx.x; i < ROWS * MAXM; i += THREADS) { (&accs[0][0])[i] = 0.0f; }
+
+    // The 2 RT weight rows of the lane: g and g + 8 of each 16-row tile.
+    const uint4* wrow[2 * RT];
+    const unsigned int* srow[2 * RT];
+#pragma unroll
+    for (int r = 0; r < 2 * RT; ++r) {
+        const unsigned int row = row0 + (r >> 1) * 16u + g + (r & 1) * 8u;
+        const unsigned long long src = first + (row < count ? row : count - 1u);
+        wrow[r] = reinterpret_cast<const uint4*>(w) + src * chunks;
+        srow[r] = s + src * (k >> 6);
+    }
+    const uint2* xb2 = reinterpret_cast<const uint2*>(xb);
+
+    float acc[RT][NT][4];
+#pragma unroll
+    for (int ti = 0; ti < RT; ++ti) {
+#pragma unroll
+        for (int j = 0; j < NT; ++j) {
+#pragma unroll
+            for (int c = 0; c < 4; ++c) { acc[ti][j][c] = 0.0f; }
+        }
+    }
+    // Row of this lane in each 8-row activation tile (clamped: the surplus rows of the last tile are never stored).
+    const unsigned int xrow0 = (g < m ? g : m - 1u) * (k >> 2);
+
+    for (unsigned int grp = ks; grp < groups; grp += KS) {
+        const unsigned int c = 4u * grp + t;                    // this lane's chunk of the group
+        uint4 wv[2 * RT];
+        unsigned int sw[2 * RT];
+#pragma unroll
+        for (int r = 0; r < 2 * RT; ++r) {
+            wv[r] = brain_qg_ld_stream(wrow[r] + c);
+            sw[r] = __ldg(srow[r] + (c >> 1)) >> ((c & 1u) * 16u);
+        }
+#pragma unroll
+        for (int st = 0; st < 8; ++st) {
+            // Weights 4 st .. 4 st + 3 of every chunk: 16 bits of codes, block scale `st / 4`.
+            unsigned int a[2 * RT][2];
+#pragma unroll
+            for (int r = 0; r < 2 * RT; ++r) {
+                const unsigned int word = (st >> 1) == 0 ? wv[r].x : (st >> 1) == 1 ? wv[r].y : (st >> 1) == 2 ? wv[r].z : wv[r].w;
+                const unsigned int codes16 = (word >> ((st & 1) * 16)) & 0xFFFFu;
+                const float sc = brain_qg_e4m3_scale((sw[r] >> ((st >> 2) * 8)) & 0xFFu) * 4194304.0f;
+                brain_fp4_a_pairs(codes16, sc, a[r][0], a[r][1]);
+            }
+#pragma unroll
+            for (int j = 0; j < NT; ++j) {
+                const unsigned int arow = 8u * j + g;
+                const unsigned int xr = arow < m ? xrow0 + j * 8u * (k >> 2) : xrow0;
+                const uint2 bv = __ldg(xb2 + xr + (grp << 5) + 8u * t + st);   // x[row][128 grp + 32 t + 4 st .. + 3]
+#pragma unroll
+                for (int ti = 0; ti < RT; ++ti) { brain_mma_bf16_16816(acc[ti][j], a[2 * ti][0], a[2 * ti + 1][0], a[2 * ti][1], a[2 * ti + 1][1], bv.x, bv.y); }
+            }
+        }
+    }
+    __syncthreads();
+    // D fragment: c0, c1 (row g, columns 2 t, 2 t + 1), c2, c3 (row g + 8): the K-slices' partial sums add in shared memory.
+#pragma unroll
+    for (int ti = 0; ti < RT; ++ti) {
+#pragma unroll
+        for (int j = 0; j < NT; ++j) {
+#pragma unroll
+            for (int c = 0; c < 4; ++c) {
+                const unsigned int r = rw * (RT * 16u) + ti * 16u + g + (c >> 1) * 8u, a = 8u * j + 2u * t + (c & 1);
+                if (a < m) { atomicAdd(&accs[r][a], acc[ti][j][c]); }
+            }
+        }
+    }
+    __syncthreads();
+    for (unsigned int i = threadIdx.x; i < static_cast<unsigned int>(ROWS) * m; i += THREADS) {
+        const unsigned int r = i % ROWS, a = i / ROWS;
+        const unsigned int row = blk * ROWS + r;
+        if (row < count) { y[static_cast<unsigned long long>(a) * count + row] = accs[r][a] * global; }
+    }
+}
+
+// One entry per number of 8-row activation tiles: 8 rows (RT 2), 16, 32 and 64 (RT 1).
+extern "C" __global__ void __launch_bounds__(512, 1)
+brain_matmul_nvfp4_mma8(const unsigned int* params, const unsigned int* xb, const unsigned int* w, const unsigned int* s, float* y) {
+    brain_matmul_nvfp4_mma_body<1, 2, 8>(params, xb, w, s, y);
+}
+extern "C" __global__ void __launch_bounds__(512, 1)
+brain_matmul_nvfp4_mma16(const unsigned int* params, const unsigned int* xb, const unsigned int* w, const unsigned int* s, float* y) {
+    brain_matmul_nvfp4_mma_body<2, 2, 8>(params, xb, w, s, y);
+}
+extern "C" __global__ void __launch_bounds__(512, 1)
+brain_matmul_nvfp4_mma32(const unsigned int* params, const unsigned int* xb, const unsigned int* w, const unsigned int* s, float* y) {
+    brain_matmul_nvfp4_mma_body<4, 2, 8>(params, xb, w, s, y);
+}
+extern "C" __global__ void __launch_bounds__(256, 1)
+brain_matmul_nvfp4_mma64(const unsigned int* params, const unsigned int* xb, const unsigned int* w, const unsigned int* s, float* y) {
+    brain_matmul_nvfp4_mma_body<8, 2, 4>(params, xb, w, s, y);
+}
+
 // ---- NVFP4 expert gather ---------------------------------------------------------------------------------------------
 
 // One block covers 16 weight rows of ONE slot's expert; the grid is slot-major, `ceil(n / 16)` blocks per slot.
