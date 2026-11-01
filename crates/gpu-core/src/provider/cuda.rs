@@ -1372,6 +1372,33 @@ impl Scaled8 {
     }
 }
 
+/// The cache a warpgroup prefill round reads ([`paged_flash_prefill_wg_steps`]): bf16 planes alone, or 8-bit planes with
+/// their row scales.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WgKv {
+    Bf16,
+    Scaled(Scaled8),
+}
+
+impl WgKv {
+    /// The kernel-name suffix of the cache (`flash_prefill_f16_hd256_wgs_widen_<suffix>`).
+    fn suffix(self) -> &'static str {
+        match self {
+            WgKv::Bf16 => "bf16",
+            WgKv::Scaled(codec) => codec.suffix(),
+        }
+    }
+
+    /// Buffers the round binds: queries, K and V planes, block tables, sequence lengths, context, and the row scales of an
+    /// 8-bit cache.
+    fn buffers(self) -> usize {
+        match self {
+            WgKv::Bf16 => 6,
+            WgKv::Scaled(_) => 8,
+        }
+    }
+}
+
 /// [`paged_flash_prefill_step`] over an int8 KV cache: `bufs` are the portable
 /// kv8 kernel's own - queries, K data, V data, block tables, sequence lengths,
 /// context, then the K and V row scales.
@@ -1454,7 +1481,18 @@ const PAGED_FLASH_PREFILL_WGS_BINDINGS: &[BindKind] = &[
     BindKind::StorageReadWrite,
 ];
 
-/// The widening pass's bindings: uniform, K and V planes, block tables, sequence lengths, K and V row scales, the records.
+/// The widening pass's bindings over a bf16 cache: uniform, K and V planes, block tables, sequence lengths, the records.
+const PAGED_FLASH_PREFILL_WGS_WIDEN_BF16_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+];
+
+/// The widening pass's bindings over an 8-bit cache: uniform, K and V planes, block tables, sequence lengths, K and V row
+/// scales, the records.
 const PAGED_FLASH_PREFILL_WGS_WIDEN_BINDINGS: &[BindKind] = &[
     BindKind::Uniform,
     BindKind::StorageRead,
@@ -1493,18 +1531,24 @@ pub fn flash_prefill_staging_bytes(n_kv_heads: u32, keys: u32) -> u64 {
     u64::from(n_kv_heads) * u64::from(keys.div_ceil(kernels_cuda::FLASH_PREFILL_WGS_KEYS)) * kernels_cuda::FLASH_PREFILL_WGS_RECORD_BYTES
 }
 
-/// The steps of the warpgroup tensor-core prefill over an int8 or FP8 KV cache (`bufs` and `params` as
-/// [`paged_flash_prefill_kv8_step`]'s; its `blocks` is derived here; `keys` is the longest key count of the round, the last
-/// row's sequence length), or `None` where the device, the head width, the round or the switch ([`set_flash_prefill_wg`])
-/// declines and the caller keeps [`paged_flash_prefill_kv8_step`].
+/// The steps of the warpgroup tensor-core prefill over an int8, FP8 or bf16 KV cache (`bufs` and `params` as
+/// [`paged_flash_prefill_kv8_step`]'s, or [`paged_flash_prefill_bf16_step`]'s six for a bf16 cache; its `blocks` is derived
+/// here; `keys` is the longest key count of the round, the last row's sequence length), or `None` where the device, the head
+/// width, the round or the switch ([`set_flash_prefill_wg`]) declines and the caller keeps its version-2 step. A bf16 cache
+/// has only the staged form: a round below the staged row count declines.
 ///
 /// The caller states that the round is ONE sequence (`gqa_chunk_step_kv_paged`'s contract): a block covers 128 query rows
 /// that all read the block table of the block's first row, where version 2 holds that only for 64.
 ///
 /// A round of [`FLASH_PREFILL_STAGED_MIN_ROWS`] rows or more (see [`set_flash_prefill_staged_min_rows`]) first widens its keys once into a staging buffer of fp16 tiles
 /// (`flash_prefill_f16_hd256_wgs_widen_*`) that the attention then bulk-copies, instead of every block widening them again.
-pub fn paged_flash_prefill_wg_steps(gpu: &crate::Gpu, head_dim: u32, bufs: &[&backend_api::DeviceBuffer; 8], params: &[u32], keys: u32, codec: Scaled8) -> Option<Vec<crate::Step>> {
+pub fn paged_flash_prefill_wg_steps(gpu: &crate::Gpu, head_dim: u32, bufs: &[&backend_api::DeviceBuffer], params: &[u32], keys: u32, kv: WgKv) -> Option<Vec<crate::Step>> {
+    assert_eq!(bufs.len(), kv.buffers(), "{kv:?}: the round binds {} buffers", kv.buffers());
     if head_dim != 256 || !FLASH_PREFILL_WG.load(std::sync::atomic::Ordering::Relaxed) || !flash_prefill_offered(gpu, head_dim, params) {
+        return None;
+    }
+    let staged = params[0] >= FLASH_PREFILL_STAGED_MIN.load(std::sync::atomic::Ordering::Relaxed);
+    if !staged && kv == WgKv::Bf16 {
         return None;
     }
     let cc = gpu.caps().arch.compute_capability?;
@@ -1513,7 +1557,6 @@ pub fn paged_flash_prefill_wg_steps(gpu: &crate::Gpu, head_dim: u32, bufs: &[&ba
     let merge_id = gpu.native_kernel_launched(merge, PAGED_FLASH_PREFILL_COMBINE_BINDINGS, backend_api::CudaLaunch { arch: backend_api::ArchFeatures::Required, ..backend_api::CudaLaunch::NONE })?;
     let (rows, n_heads, n_kv_heads) = (params[0], params[1], params[2]);
     let splits = if rows >= FLASH_PREFILL_WG_UNSPLIT_ROWS { 1 } else { FLASH_PREFILL_WG_SPLITS_MAX };
-    let staged = rows >= FLASH_PREFILL_STAGED_MIN.load(std::sync::atomic::Ordering::Relaxed);
     let tiles_cap = keys.div_ceil(kernels_cuda::FLASH_PREFILL_WGS_KEYS);
     let mut p = params.to_vec();
     p.push(splits);
@@ -1522,20 +1565,26 @@ pub fn paged_flash_prefill_wg_steps(gpu: &crate::Gpu, head_dim: u32, bufs: &[&ba
     // An unsplit block writes its context directly and leaves the partial sums and their merge alone.
     let scratch = gpu.storage_uninit(u64::from(splits) * u64::from(rows) * u64::from(n_heads) * 258);
     let blocks = rows.div_ceil(128) * n_heads * splits;
-    let [q, pk, pv, tables, lens, ctx, ks, vs] = *bufs;
+    let (q, ctx, lens) = (bufs[0], bufs[5], bufs[4]);
     let mut steps = Vec::with_capacity(3);
     if staged {
-        let widen = kernels_cuda::get(&format!("flash_prefill_f16_hd256_wgs_widen_{}", codec.suffix())).filter(|k| k.min_cc <= cc)?;
+        let widen = kernels_cuda::get(&format!("flash_prefill_f16_hd256_wgs_widen_{}", kv.suffix())).filter(|k| k.min_cc <= cc)?;
         let main = kernels_cuda::get("flash_prefill_f16_hd256_wgs").filter(|k| k.min_cc <= cc)?;
-        let widen_id = gpu.native_kernel_launched(widen, PAGED_FLASH_PREFILL_WGS_WIDEN_BINDINGS, backend_api::CudaLaunch { arch: backend_api::ArchFeatures::Required, ..backend_api::CudaLaunch::NONE })?;
+        let widen_bindings = if kv == WgKv::Bf16 { PAGED_FLASH_PREFILL_WGS_WIDEN_BF16_BINDINGS } else { PAGED_FLASH_PREFILL_WGS_WIDEN_BINDINGS };
+        let widen_id = gpu.native_kernel_launched(widen, widen_bindings, backend_api::CudaLaunch { arch: backend_api::ArchFeatures::Required, ..backend_api::CudaLaunch::NONE })?;
         let main_id = gpu.native_kernel_launched(main, PAGED_FLASH_PREFILL_WGS_BINDINGS, FLASH_PREFILL_WGS_LAUNCH)?;
         let stage = gpu.storage_uninit(flash_prefill_staging_bytes(n_kv_heads, keys) / 4);
-        steps.push(gpu.step_native_sliced(widen_id, &[pk, pv, tables, lens, ks, vs, &stage], &[(0, 0); 7], &p, tiles_cap * n_kv_heads)?);
+        // K and V planes, block tables, sequence lengths, then the row scales of an 8-bit cache.
+        let mut widen_bufs: Vec<&backend_api::DeviceBuffer> = bufs[1..5].iter().chain(&bufs[6..]).copied().collect();
+        widen_bufs.push(&stage);
+        steps.push(gpu.step_native_sliced(widen_id, &widen_bufs, &[(0, 0); 7][..widen_bufs.len()], &p, tiles_cap * n_kv_heads)?);
         steps.push(gpu.step_native_sliced(main_id, &[q, &stage, lens, ctx, &scratch], &[(0, 0); 5], &p, blocks)?);
     } else {
-        let main = kernels_cuda::get(&format!("flash_prefill_f16_hd256_wg_{}", codec.suffix())).filter(|k| k.min_cc <= cc)?;
+        let main = kernels_cuda::get(&format!("flash_prefill_f16_hd256_wg_{}", kv.suffix())).filter(|k| k.min_cc <= cc)?;
         let main_id = gpu.native_kernel_launched(main, PAGED_FLASH_PREFILL_WG_BINDINGS, FLASH_PREFILL_WG_LAUNCH)?;
-        steps.push(gpu.step_native_sliced(main_id, &[q, pk, pv, tables, lens, ctx, ks, vs, &scratch], &[(0, 0); 9], &p, blocks)?);
+        let mut main_bufs = bufs.to_vec();
+        main_bufs.push(&scratch);
+        steps.push(gpu.step_native_sliced(main_id, &main_bufs, &[(0, 0); 9], &p, blocks)?);
     }
     if splits > 1 {
         steps.push(gpu.step_native_sliced(merge_id, &[lens, &scratch, ctx], &[(0, 0); 3], &p, rows * n_heads)?);

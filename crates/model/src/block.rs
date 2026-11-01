@@ -757,16 +757,23 @@ pub fn native_paged_flash_prefill_kvfp8(g: &Gpu, head_dim: u32, bufs: &[&DeviceB
     gpu_core::provider::cuda::paged_flash_prefill_kvfp8_step(g, head_dim, bufs, params, blocks)
 }
 
-/// [`gpu_core::provider::cuda::paged_flash_prefill_wg_steps`], the warpgroup form over an int8 or FP8 E4M3 KV cache of ONE
-/// sequence.
+/// [`gpu_core::provider::cuda::paged_flash_prefill_wg_steps`], the warpgroup form over a bf16, int8 or FP8 E4M3 KV cache of
+/// ONE sequence (`bufs` the six of a bf16 cache, the eight of an 8-bit one); `None` for an fp32 cache.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn native_paged_flash_prefill_wg(g: &Gpu, head_dim: u32, bufs: &[&DeviceBuffer; 8], params: &[u32], keys: u32, fp8: bool) -> Option<Vec<Step>> {
-    let codec = if fp8 { gpu_core::provider::cuda::Scaled8::Fp8E4m3 } else { gpu_core::provider::cuda::Scaled8::Int8 };
-    gpu_core::provider::cuda::paged_flash_prefill_wg_steps(g, head_dim, bufs, params, keys, codec)
+pub fn native_paged_flash_prefill_wg(g: &Gpu, head_dim: u32, bufs: &[&DeviceBuffer], params: &[u32], keys: u32, element: crate::kv_tier::KvElement) -> Option<Vec<Step>> {
+    use crate::kv_tier::KvElement;
+    use gpu_core::provider::cuda::{Scaled8, WgKv};
+    let kv = match element {
+        KvElement::F32 => return None,
+        KvElement::Bf16 => WgKv::Bf16,
+        KvElement::Int8 => WgKv::Scaled(Scaled8::Int8),
+        KvElement::Fp8E4m3 => WgKv::Scaled(Scaled8::Fp8E4m3),
+    };
+    gpu_core::provider::cuda::paged_flash_prefill_wg_steps(g, head_dim, bufs, params, keys, kv)
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn native_paged_flash_prefill_wg(_g: &Gpu, _head_dim: u32, _bufs: &[&DeviceBuffer; 8], _params: &[u32], _keys: u32, _fp8: bool) -> Option<Vec<Step>> {
+pub fn native_paged_flash_prefill_wg(_g: &Gpu, _head_dim: u32, _bufs: &[&DeviceBuffer], _params: &[u32], _keys: u32, _element: crate::kv_tier::KvElement) -> Option<Vec<Step>> {
     None
 }
 

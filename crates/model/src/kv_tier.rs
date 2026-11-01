@@ -870,17 +870,19 @@ impl KvKernels {
                 // The fp32 and bf16 tiers' planes are what the fp16 tensor-core kernels read (same buffers, uniform and
                 // geometry as the portable one).
                 let bufs = [q, &k.data, &v.data, block_ids, seq_lens, ctx];
-                match self.tier.element {
-                    KvElement::F32 => crate::block::native_paged_flash_prefill(g, s.head_dim, &bufs, &params, blocks),
-                    KvElement::Bf16 => crate::block::native_paged_flash_prefill_bf16(g, s.head_dim, &bufs, &params, blocks),
-                    KvElement::Int8 | KvElement::Fp8E4m3 => None,
-                }
-                .map(|step| vec![step])
+                crate::block::native_paged_flash_prefill_wg(g, s.head_dim, &bufs, &params, s.keys, self.tier.element).or_else(|| {
+                    match self.tier.element {
+                        KvElement::F32 => crate::block::native_paged_flash_prefill(g, s.head_dim, &bufs, &params, blocks),
+                        KvElement::Bf16 => crate::block::native_paged_flash_prefill_bf16(g, s.head_dim, &bufs, &params, blocks),
+                        KvElement::Int8 | KvElement::Fp8E4m3 => None,
+                    }
+                    .map(|step| vec![step])
+                })
             }
             (Some(ks), Some(vs)) => {
                 let bufs = [q, &k.data, &v.data, block_ids, seq_lens, ctx, ks, vs];
                 let fp8 = self.tier.element == KvElement::Fp8E4m3;
-                crate::block::native_paged_flash_prefill_wg(g, s.head_dim, &bufs, &params, s.keys, fp8).or_else(|| {
+                crate::block::native_paged_flash_prefill_wg(g, s.head_dim, &bufs, &params, s.keys, self.tier.element).or_else(|| {
                     if fp8 {
                         crate::block::native_paged_flash_prefill_kvfp8(g, s.head_dim, &bufs, &params, blocks)
                     } else {

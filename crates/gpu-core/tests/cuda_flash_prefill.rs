@@ -482,13 +482,13 @@ impl TierDevice {
 
     /// The warpgroup kernel's steps (attention and the merge of its key splits), for a compact tier that has one.
     fn native_wg(&self, gpu: &Gpu, p: &Problem) -> Option<Vec<gpu_core::Step>> {
-        let b = self.bufs();
-        let codec = match self.kv {
-            Kv::Int8 => gpu_core::provider::cuda::Scaled8::Int8,
-            Kv::Fp8 => gpu_core::provider::cuda::Scaled8::Fp8E4m3,
-            Kv::Bf16 => return None,
+        use gpu_core::provider::cuda::{Scaled8, WgKv};
+        let kv = match self.kv {
+            Kv::Int8 => WgKv::Scaled(Scaled8::Int8),
+            Kv::Fp8 => WgKv::Scaled(Scaled8::Fp8E4m3),
+            Kv::Bf16 => WgKv::Bf16,
         };
-        gpu_core::provider::cuda::paged_flash_prefill_wg_steps(gpu, HD, &[b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]], &Device::params(p), p.c.start + p.c.n, codec)
+        gpu_core::provider::cuda::paged_flash_prefill_wg_steps(gpu, HD, &self.bufs(), &Device::params(p), p.c.start + p.c.n, kv)
     }
 
     fn native(&self, gpu: &Gpu, p: &Problem) -> Option<gpu_core::Step> {
@@ -576,12 +576,12 @@ fn version_2_matches_the_original_kernel_on_a_bf16_an_int8_and_an_fp8_cache() {
     }
 }
 
-/// The warpgroup (`wgmma`) kernel reads an int8 and an FP8 cache in place, agrees with the portable kernel and the f64
-/// oracle, and writes every row. The cases cross the shapes its structure distinguishes: one 128-row block and several, a
-/// ragged tail, rows with no key to attend in a tile, scattered and tiny cache blocks, and key ranges long enough that the
-/// block's keys are split over several blocks and merged.
+/// The warpgroup (`wgmma`) kernel reads an int8 and an FP8 cache in place (and a bf16 one through its staged records),
+/// agrees with the portable kernel and the f64 oracle, and writes every row. The cases cross the shapes its structure
+/// distinguishes: one 128-row block and several, a ragged tail, rows with no key to attend in a tile, scattered and tiny
+/// cache blocks, and key ranges long enough that the block's keys are split over several blocks and merged.
 #[test]
-fn the_warpgroup_prefill_reads_an_int8_and_an_fp8_cache() {
+fn the_warpgroup_prefill_reads_a_bf16_an_int8_and_an_fp8_cache() {
     let Some(gpu) = device() else { return };
     gpu_core::provider::cuda::set_flash_prefill_wg(true);
     let cases = [
@@ -594,7 +594,9 @@ fn the_warpgroup_prefill_reads_an_int8_and_an_fp8_cache() {
         // From 2048 rows the kernel runs unsplit and has no merge step.
         Case { n: 2176, start: 1500, block_size: 512, scatter: true },
     ];
-    for (staged, kv) in [false, true].into_iter().flat_map(|staged| [Kv::Int8, Kv::Fp8].map(move |kv| (staged, kv))) {
+    // A bf16 cache has only the staged form (an unstaged round declines, `a_bf16_round_below_the_staged_rows_declines`).
+    let tiers = [(false, Kv::Int8), (false, Kv::Fp8), (true, Kv::Int8), (true, Kv::Fp8), (true, Kv::Bf16)];
+    for (staged, kv) in tiers {
         // Staged: the round widens its keys once into fp16 records (every round, whatever its length); unstaged: every block does.
         gpu_core::provider::cuda::set_flash_prefill_staged_min_rows(if staged { 1 } else { u32::MAX });
         for (i, c) in cases.iter().enumerate() {
@@ -622,6 +624,49 @@ fn the_warpgroup_prefill_reads_an_int8_and_an_fp8_cache() {
             }
         }
     }
+    gpu_core::provider::cuda::set_flash_prefill_staged_min_rows(gpu_core::provider::cuda::FLASH_PREFILL_STAGED_MIN_ROWS);
+}
+
+/// The staged rounds of every tier submitted back to back many times without a wait between them (knowledge 410: a TMA
+/// fault showed only under back-to-back launches) give the output of the first round, bit for bit, every time. Run it clean
+/// before a staged kernel lands, then `dmesg | grep -i xid` stays empty (`#[ignore]`: a stress run).
+///
+/// ```text
+/// BRAIN_DEVICE=gpu0 BRAIN_BACKEND=cuda make test/one P=brain-gpu-core T=cuda_flash_prefill ARGS="--ignored --nocapture staged_back_to_back"
+/// ```
+#[test]
+#[ignore = "a stress run"]
+fn staged_back_to_back_stress() {
+    let Some(gpu) = device() else { return };
+    gpu_core::provider::cuda::set_flash_prefill_staged_min_rows(1);
+    for kv in [Kv::Bf16, Kv::Int8, Kv::Fp8] {
+        for (i, c) in [Case { n: 2176, start: 1500, block_size: 512, scatter: true }, Case { n: 200, start: 300, block_size: 128, scatter: true }].into_iter().enumerate() {
+            let p = Problem::new(c, 0x5EED + i as u64);
+            let (seen, stored) = p.as_stored(kv);
+            let d = TierDevice::upload(&gpu, &seen, kv, &stored);
+            let steps = d.native_wg(&gpu, &seen).expect("the warpgroup kernel must take a head_dim-256 request on a Hopper part");
+            let first = d.base.run_steps(&gpu, &steps, &seen);
+            for round in 0..20 {
+                for _ in 0..50 {
+                    gpu.submit(&[], &steps);
+                }
+                assert_eq!(d.base.run_steps(&gpu, &steps, &seen), first, "{kv:?} case {i}: round {round} changed the output");
+            }
+            eprintln!("staged_back_to_back_stress: {kv:?} case {i}: 1000 rounds identical");
+        }
+    }
+    gpu_core::provider::cuda::set_flash_prefill_staged_min_rows(gpu_core::provider::cuda::FLASH_PREFILL_STAGED_MIN_ROWS);
+}
+
+/// Below the staged row count a bf16 round has no warpgroup form and keeps version 2.
+#[test]
+fn a_bf16_round_below_the_staged_rows_declines() {
+    let Some(gpu) = device() else { return };
+    let p = Problem::new(Case { n: 128, start: 64, block_size: 4096, scatter: false }, 9);
+    let (seen, stored) = p.as_stored(Kv::Bf16);
+    let d = TierDevice::upload(&gpu, &seen, Kv::Bf16, &stored);
+    gpu_core::provider::cuda::set_flash_prefill_staged_min_rows(u32::MAX);
+    assert!(d.native_wg(&gpu, &seen).is_none(), "an unstaged bf16 round must decline");
     gpu_core::provider::cuda::set_flash_prefill_staged_min_rows(gpu_core::provider::cuda::FLASH_PREFILL_STAGED_MIN_ROWS);
 }
 
@@ -689,7 +734,7 @@ fn the_int8_cache_prefill_rates_at_the_serving_chunk() {
 /// Scores are exponentiated, so an error in `q . k` becomes a relative error in the attention weight: what matters is
 /// the absolute error of the score, which grows with the operands' magnitude, and the unit-scale cases above hide that.
 /// A real model's scaled scores reach several tens, so this scales queries and keys until the scores have a standard
-/// deviation of `mag * mag` (up to 16) and holds both kernel versions to the portable fp32 kernel by relative L2 over
+/// deviation of `mag * mag` (up to 16) and holds both kernel versions and the staged warpgroup form to the portable fp32 kernel by relative L2 over
 /// the whole output. Measured: 3e-4 at unit scale growing to 1.3e-3 at mag = 4; the bar is 3e-3. (Through the 27B's logits the
 /// same kernels differ from fp32 by 0.1 - that is the W8A8 model's own sensitivity, `qwen35_gguf_logit_check` reports it
 /// next to its floor - so the kernel is gated here, where the cause of an error can be told.)
@@ -714,6 +759,14 @@ fn both_flash_versions_stay_close_to_fp32_at_large_score_magnitudes() {
                 eprintln!("cuda_flash_prefill: {kv:?} score scale {}x v2={v2}: rel-L2 to the portable kernel {rel:.2e}", mag * mag);
                 assert!(rel <= 3e-3, "{kv:?} at score scale {}x, v2={v2}: rel-L2 {rel:.2e} from the fp32 kernel (bar 3e-3)", mag * mag);
             }
+            // The staged warpgroup form, every tier.
+            gpu_core::provider::cuda::set_flash_prefill_staged_min_rows(1);
+            let steps = d.native_wg(&gpu, &seen).expect("the warpgroup kernel must take a head_dim-256 request on a Hopper part");
+            gpu_core::provider::cuda::set_flash_prefill_staged_min_rows(gpu_core::provider::cuda::FLASH_PREFILL_STAGED_MIN_ROWS);
+            let got = d.base.run_steps(&gpu, &steps, &seen);
+            let rel = (want.iter().zip(&got).map(|(a, b)| ((a - b) as f64).powi(2)).sum::<f64>() / norm).sqrt();
+            eprintln!("cuda_flash_prefill: {kv:?} score scale {}x staged: rel-L2 to the portable kernel {rel:.2e}", mag * mag);
+            assert!(rel <= 3e-3, "{kv:?} at score scale {}x, staged: rel-L2 {rel:.2e} from the fp32 kernel (bar 3e-3)", mag * mag);
         }
     }
 }

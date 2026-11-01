@@ -6,7 +6,7 @@
 // compact paged KV cache then you can procure our services by sending an email to
 // info@swedishembedded.com.
 //
-// Fused causal paged-attention PREFILL at head_dim 256 over an int8 or FP8 E4M3 cache, version 4 of flash_prefill_f16_hd256.cu:
+// Fused causal paged-attention PREFILL at head_dim 256 over an int8, FP8 E4M3 or bf16 cache, version 4 of flash_prefill_f16_hd256.cu:
 // the warpgroup kernel of flash_prefill_f16_hd256_wg.cu with the KV widening taken out of its inner loop.
 //
 // Version 3 widens each key tile's 8-bit bytes to fp16 inside every block, so a tile is widened once per 128-row query block
@@ -20,7 +20,9 @@
 //
 //   widen params : [bsz, n_heads, n_kv_heads, head_dim, group, block_size, max_bt, splits_max, multiprocessors, tiles_cap] u32
 //   widen        : pool_k, pool_v (paged 8-bit planes), block_tables (the FIRST row's table is read: one sequence), seq_lens,
-//                  k_scales, v_scales -> stage
+//                  k_scales, v_scales -> stage. Over a bf16 cache (BRAIN_KV_TIER 1) there are no scales: each value is rounded
+//                  to fp16 as version 2 rounds it, the K row scale is 1/sqrt(d) log2 e and the V row scale 1. Compiled with
+//                  BRAIN_WGS_WIDEN_ONLY that pass alone is built (the attention kernel needs the warpgroup file's helpers).
 //   stage        : per (kv head, 128-key tile) a record of WGS_STRIDE bytes: K tile (4 swizzle atom columns of 128 rows x 128 bytes),
 //                  V tile, K row scales x 1/sqrt(d) log2 e (128 f32), V row scales (128 f32). Keys at or past the longest
 //                  sequence length are zero with zero scales (so a masked key can never poison a product with 0 x NaN).
@@ -74,9 +76,15 @@ __device__ __forceinline__ void wgs_bulk_copy(unsigned int dst, const void* src,
 __device__ __forceinline__ void wgs_fence_barrier_init() { asm volatile("fence.mbarrier_init.release.cluster;\n" ::: "memory"); }
 
 // Widens the keys of one (128-key tile, kv head) into its staged record: 256 threads, a pair per key row.
+#if BRAIN_KV_TIER == 1
+extern "C" __global__ void __launch_bounds__(256) brain_flash_prefill_wgs_widen(
+    const unsigned int* params, const KvT* pool_k, const KvT* pool_v, const unsigned int* block_tables, const unsigned int* seq_lens,
+    unsigned char* stage) {
+#else
 extern "C" __global__ void __launch_bounds__(256) brain_flash_prefill_wgs_widen(
     const unsigned int* params, const KvT* pool_k, const KvT* pool_v, const unsigned int* block_tables, const unsigned int* seq_lens,
     const float* k_scales, const float* v_scales, unsigned char* stage) {
+#endif
     const unsigned int bsz = params[0];
     const unsigned int n_kv_heads = params[2];
     const unsigned int block_size = params[5];
@@ -104,6 +112,21 @@ extern "C" __global__ void __launch_bounds__(256) brain_flash_prefill_wgs_widen(
     for (int plane = 0; plane < 2; ++plane) {
         const KvT* const src = plane == 0 ? ksrc : vsrc;
         unsigned char* const tile = rec + plane * WGS_OFF_STAGE_V;
+#if BRAIN_KV_TIER == 1
+#pragma unroll
+        for (int i = 0; i < 16; ++i) {
+            // 8 bf16 (d-chunk c of the row) -> 8 fp16, rounded as version 2 rounds them: a bf16 is the top half of an f32.
+            const unsigned int c = 2u * i + half;
+            const uint4 w = live ? *reinterpret_cast<const uint4*>(src + c * 8u) : make_uint4(0u, 0u, 0u, 0u);
+            uint4 o;
+            o.x = brain_pack_f16x2(__uint_as_float(w.x << 16), __uint_as_float(w.x & 0xffff0000u));
+            o.y = brain_pack_f16x2(__uint_as_float(w.y << 16), __uint_as_float(w.y & 0xffff0000u));
+            o.z = brain_pack_f16x2(__uint_as_float(w.z << 16), __uint_as_float(w.z & 0xffff0000u));
+            o.w = brain_pack_f16x2(__uint_as_float(w.w << 16), __uint_as_float(w.w & 0xffff0000u));
+            unsigned char* const dst = tile + (c >> 3) * WGS_ATOM_BYTES + row * 128u;
+            *reinterpret_cast<uint4*>(dst + ((c & 7u) ^ (row & 7u)) * 16u) = o;
+        }
+#else
 #pragma unroll
         for (int i = 0; i < 8; ++i) {
             const unsigned int c = 2u * i + half;
@@ -120,13 +143,21 @@ extern "C" __global__ void __launch_bounds__(256) brain_flash_prefill_wgs_widen(
             *reinterpret_cast<uint4*>(dst + s0 * 16u) = o0;
             *reinterpret_cast<uint4*>(dst + s1 * 16u) = o1;
         }
+#endif
     }
     if (half == 0u) {
+#if BRAIN_KV_TIER == 1
+        reinterpret_cast<float*>(rec + WGS_OFF_STAGE_KS)[row] = live ? SM_SCALE_LOG2 : 0.f;
+        reinterpret_cast<float*>(rec + WGS_OFF_STAGE_VS)[row] = live ? 1.f : 0.f;
+#else
         const unsigned long long srow = prow * n_kv_heads + hkv;
         reinterpret_cast<float*>(rec + WGS_OFF_STAGE_KS)[row] = live ? k_scales[srow] * SM_SCALE_LOG2 : 0.f;
         reinterpret_cast<float*>(rec + WGS_OFF_STAGE_VS)[row] = live ? v_scales[srow] : 0.f;
+#endif
     }
 }
+
+#ifndef BRAIN_WGS_WIDEN_ONLY
 
 extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_f16_hd256_wgs(
     const unsigned int* params, const float* q, const unsigned char* stage, const unsigned int* seq_lens, float* ctx, float* part) {
@@ -396,3 +427,4 @@ extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_
         }
     }
 }
+#endif  // BRAIN_WGS_WIDEN_ONLY
