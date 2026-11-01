@@ -89,6 +89,14 @@ __device__ __forceinline__ void brain_fwt_wgmma(float (&d)[128], unsigned long l
         : "l"(da), "l"(db), "r"(accumulate));
 }
 
+// a / s with the hardware reciprocal (`rcp.approx.ftz`, 1 ulp, no range scaling): the scales are products of two positive normal floats far from
+// the edges of the range, so the library division's denormal handling (about ten instructions a quotient) never applies.
+__device__ __forceinline__ float brain_fwt_ratio(float a, float s) {
+    float r;
+    asm("rcp.approx.ftz.f32 %0, %1;\n" : "=f"(r) : "f"(s));
+    return a * r;
+}
+
 // Tile order: the blocks that run together cover BRAIN_FWT_GROUP_M row tiles of a few weight tiles, so the activation rows and the weight
 // rows they read stay in the L2 whatever M is (a plain column-major walk of a 64-row-tile problem keeps every activation tile live).
 #ifndef BRAIN_FWT_GROUP_M
@@ -120,7 +128,7 @@ BRAIN_FWT_ENTRY(const unsigned int* params, const unsigned int* xq, const unsign
     const unsigned int tiles = tiles_m * tiles_n;
 
     const unsigned int tid = threadIdx.x;
-    const unsigned int wg = tid / 128;  // 0: producer; 1, 2: consumers of rows 64 * (wg - 1) ..
+    const unsigned int wg = __shfl_sync(0xffffffffu, tid / 128u, 0);  // 0: producer; a shuffle, so the compiler keeps the role in uniform registers; 1, 2: consumers of rows 64 * (wg - 1) ..
     const unsigned int lane = tid & 31u;
     const unsigned int warp = (tid >> 5) & 3u;
 
@@ -198,6 +206,7 @@ BRAIN_FWT_ENTRY(const unsigned int* params, const unsigned int* xq, const unsign
     bool out_map_acquired = false;
     const unsigned int frow = cwg * 64u + warp * 16u + (lane >> 2);
     const unsigned int fcol = (lane & 3u) * 2u;
+    const unsigned long long a_desc = brain_fwt_desc(base + cwg * (64u * 128u)), b_desc = brain_fwt_desc(base + BRAIN_FWT_X_BYTES);
     unsigned int it = 0;
     for (unsigned int tile = blockIdx.x; tile < tiles; tile += gridDim.x) {
         unsigned int m0, n0;
@@ -211,9 +220,9 @@ BRAIN_FWT_ENTRY(const unsigned int* params, const unsigned int* xq, const unsign
         for (unsigned int kt = 0; kt < kblocks; ++kt, ++it) {
             const unsigned int slot = it % STAGES;
             brain_fwt_mbar_wait(full_bar + 8u * slot, (it / STAGES) & 1u);
-            const unsigned int st = base + slot * BRAIN_FWT_STAGE_BYTES;
-            const unsigned int a_base = st + cwg * (64u * 128u);
-            const unsigned int b_base = st + BRAIN_FWT_X_BYTES;
+            // The descriptors of the stage's first 32 of K (16-byte units); the next 32 are 2 units on.
+            const unsigned long long slot_units = static_cast<unsigned long long>(slot) * (BRAIN_FWT_STAGE_BYTES >> 4);
+            const unsigned long long da = a_desc + slot_units, db = b_desc + slot_units;
 
             const float* const sxs = reinterpret_cast<const float*>(gen + slot * BRAIN_FWT_STAGE_BYTES + BRAIN_FWT_X_BYTES + BRAIN_FWT_W_BYTES);
             float r[2][2];
@@ -223,7 +232,7 @@ BRAIN_FWT_ENTRY(const unsigned int* params, const unsigned int* xq, const unsign
                 for (int h = 0; h < 2; ++h) {
                     float s = sxs[frow + 8u * row] * sxs[128 + h];
                     if (!(s > 0.0f)) { s = se[row][h]; }  // a block of zeros: the sum keeps its scale
-                    r[row][h] = __fdividef(se[row][h], s);
+                    r[row][h] = brain_fwt_ratio(se[row][h], s);
                     se[row][h] = s;
                 }
             }
@@ -237,7 +246,7 @@ BRAIN_FWT_ENTRY(const unsigned int* params, const unsigned int* xq, const unsign
             }
             brain_fwt_fence();
 #pragma unroll
-            for (int q = 0; q < 4; ++q) { brain_fwt_wgmma(t, brain_fwt_desc(a_base + q * 32u), brain_fwt_desc(b_base + q * 32u), 1); }
+            for (int q = 0; q < 4; ++q) { brain_fwt_wgmma(t, da + 2ull * q, db + 2ull * q, 1); }
             brain_fwt_wg_commit();
             brain_fwt_wg_wait<0>();
             brain_fwt_mbar_arrive(empty_bar + 8u * slot);  // the slot's tiles and scales are read

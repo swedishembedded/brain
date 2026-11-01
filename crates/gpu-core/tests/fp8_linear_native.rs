@@ -240,8 +240,8 @@ fn fp8_bf16_out_rate() {
         brain_testutil::skip_unavailable("the FP8 candidates are registered for a CUDA device with warpgroup tensor cores");
         return;
     }
-    let shapes = [("gate/up 5120x17408", 5120u32, 17408u32), ("down 17408x5120", 17408, 5120), ("qkv 5120x10240", 5120, 10240), ("out 6144x5120", 6144, 5120)];
-    for m in [640u32, 768, 2048, 8192] {
+    let shapes = [("gate/up 5120x34816", 5120u32, 34816u32), ("gate 5120x17408", 5120, 17408), ("down 17408x5120", 17408, 5120), ("qkv 5120x10240", 5120, 10240), ("out 6144x5120", 6144, 5120)];
+    for m in [640u32, 768, 2048, 4096, 8192] {
         for (label, k, n) in shapes {
             for (twin, base, bf16) in gpu_core::native_time_fp8_bf16_out(&gpu, [m, k / 4, n]) {
                 println!("{label:20} m={m:<5} {twin:34} f32 out {base:8.1} us   bf16 out {bf16:8.1} us   {:+.1} %", 100.0 * (bf16 / base - 1.0));
