@@ -280,3 +280,12 @@ fn a_mistaken_configuration_is_refused_before_anything_trains() {
     assert!(err.to_string().contains("TokenSum"), "{err}");
     assert!(ExternalPolicyGradient::open(dir.path(), &wide, PolicyGradientConfig { loss_agg: LossAgg::TokenSum, ..Default::default() }).is_ok());
 }
+
+#[test]
+fn a_supervised_trainer_refuses_a_dataset_that_carries_advantages() {
+    let dir = tempfile::tempdir().unwrap();
+    write_dataset(dir.path(), &[Row::new(&[1, 2, 3, 4], 2, Some(1.0))]);
+    let err = model::load_dataset_with_images(dir.path(), &opts(1, 1, 1e-2)).err().expect("refused");
+    assert!(err.to_string().contains("advantages") && err.to_string().contains("policy_gradient"), "{err}");
+    assert!(model::load_rollout_dataset(dir.path(), &opts(1, 1, 1e-2)).is_ok());
+}

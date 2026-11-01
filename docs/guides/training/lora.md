@@ -112,6 +112,34 @@ prompt. The tokenizer is `tokenizer.json` in the base directory unless
 
 The `f32` tier is the existing trainer for small and merged checkpoints.
 
+## Reinforcement learning from collected rollouts
+
+A LoRA adapter on Qwen3.8-27B (or continuing an existing one) can be trained with a policy gradient on multi-turn
+rollouts an orchestrator collected outside brain: every model call of an agent is a chat record (user and tool turns may
+carry images), its trained assistant turn is the action, and the record carries the `"advantage"` of its rollout
+(and, when the sampler recorded them, `"behavior_logprobs"` on the action). Records with a negative advantage push their
+action's probability down; this is not imitation of successes. The record format, the objective (clipped ratio,
+k3 KL to the base or to the adapter the run started from) and the SDK call are in
+[`ChatFineTune::policy_gradient`](../../reference/sdk.md#policy-gradient-fine-tuning-on-collected-rollouts).
+
+The call an orchestrator makes is `ChatFineTune` with `.policy_gradient(..)`; the clip half-width, the KL coefficient,
+the reference policy (`Base`, or `StartOfRun`: the adapter the run begins from), the loss normalisation and the sampling
+temperature are fields of `PolicyGradientConfig`, and `.continue_from(adapter)` continues an existing adapter:
+
+```rust
+brain::ChatFineTune::from_pretrained("Qwen/Qwen3.8-27B-FP8").arch("qwen35").base_format("bf16")
+    .dataset("rollouts.jsonl").continue_from("round-3.safetensors").out_dir("runs/round-4")
+    .steps(40).grad_accum(8)
+    .policy_gradient(brain::PolicyGradientConfig { clip_eps: 0.2, kl_beta: 0.02, reference: brain::ReferencePolicy::Base, ..Default::default() })
+    .run()?;
+```
+
+`brain qwen35 finetune` trains prepared datasets by imitation only and does not read the advantage sidecars
+(`<split>.adv.bin`, `<split>.blp.bin`) the SDK's preparation writes beside the token files.
+
+Run it on a card with the real weights before relying on it: the tests behind it run a tiny model on the CPU
+(see `.agents/roadmap/grpo-corrections.md` for what a real-weight check should run).
+
 ## Images and video: `brain minicpmv finetune`
 
 MiniCPM-V 4.6 fine-tunes on conversations with image and video parts, the

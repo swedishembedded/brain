@@ -19,3 +19,32 @@ that sampled, never steps on an empty batch and normalises per token (knowledge
       knowledge 292 when it exists.
 - [ ] `Grpo` trains one row per forward (`b = 1`). Rows of one group could share
       a batch once `logits_all` is no longer the sampling bottleneck.
+
+## Policy gradient on external rollouts
+
+`ChatFineTune::policy_gradient` (`crates/rl/src/objective/external.rs`) trains the clipped GRPO/PPO objective on chat
+records an orchestrator collected outside brain (a record per model call, the advantage of its rollout in
+`"advantage"`, the sampler's log-probabilities in the assistant message's `"behavior_logprobs"`). It runs through the
+same `pg_batch::backward_weighted` step `Grpo` uses, so the clipped surrogate and the k3 KL exist once. Format, objective
+and call: `docs/reference/sdk.md`. Gated on the CPU with a tiny `qwen35` LoRA model: finite differences of the adapters
+on text rows (positive, negative, zero and no advantage, KL on) and on rows holding an image
+(`crates/rl/tests/external_policy_gradient_gradcheck.rs`); the advantage's direction, the clip per side, the KL against
+its definition, the on-policy first step and the supervised parity of a record without an advantage
+(`external_policy_gradient.rs`); the SDK run end to end on a qwen35 checkpoint, continuing an adapter
+(`crates/sdk/tests/chat_finetune_policy_gradient.rs`).
+
+- [ ] A real-weight check, on a card, which has not run: Qwen3.8-27B-FP8 as a bf16 base with a rank-16 adapter, the
+      records of a few rollout groups with and without images and with the sampler's log-probabilities. It should
+      (1) confirm that the first step's ratios are 1 within bf16 noise when no log-probabilities were recorded and that
+      recorded ones from the serving engine give ratios near 1 at step 0 (the size of the serve/train log-probability gap
+      is what decides whether `clip_eps` 0.2 is loose enough for them), (2) show the mean log-probability of positive-
+      and negative-advantage actions moving apart over 20-40 steps on `score_tokens_qwen35`, and (3) record the
+      peak device memory and the seconds of the start-of-run pass per 1000 tokens.
+- [ ] `brain qwen35 finetune` (the CLI) reads no advantage sidecar; the SDK is the one entry point.
+- [ ] Only `qwen35` bases; `qwen3` is refused by name. Held-out and monitoring selection are refused for these runs.
+- [ ] The start-of-run and reference passes are one forward per example before the first step; they could be skipped
+      for the examples whose log-probabilities are all recorded and whose KL is not wanted (already done) or cached on
+      disk across rounds that continue the same adapter.
+- [ ] Per-sequence normalisation (`LossAgg::SeqMean`, the default) needs a batch of one sequence; long agent calls
+      weigh less per token than short ones under it (`TokenSum` is the alternative, see knowledge 290).
+

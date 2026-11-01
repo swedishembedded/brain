@@ -131,7 +131,7 @@ pub use trainprec::{apply_train_precision, OptimizerParts, OptimizerState, Resid
 pub use score::{score_base, score_dataset, score_tuned, supervised_positions, ScoredSet};
 pub use train::{cosine_lr, generate, FitOpts, LrSchedule, IGNORE};
 #[cfg(not(target_arch = "wasm32"))]
-pub use train::{build_or_resume, causal_lm, causal_lm_examples, fit, fit_controlled, fit_controlled_sharded, fit_controlled_sync, fit_distributed, fit_from, fit_with, load_dataset, load_dataset_with_images, load_dataset_with_itos, AdapterSnapshots, CheckpointIdentity, FitControl, FitReport, GradSync, StepReport, StepWork};
+pub use train::{build_or_resume, causal_lm, causal_lm_examples, fit, fit_controlled, fit_controlled_sharded, fit_controlled_sync, fit_distributed, fit_from, fit_with, load_dataset, load_dataset_with_images, load_dataset_with_itos, load_rollout_dataset, AdapterSnapshots, CheckpointIdentity, FitControl, FitReport, GradSync, StepReport, StepWork};
 
 /// What a batch looks like for a given model. Decoder-LM and seq2seq differ in
 /// whether there is a separate source sequence; this enum keeps `set_batch`

@@ -69,6 +69,7 @@ use data::chat_template::ChatTemplate;
 use data::qwen_tokenizer::QwenBpe;
 
 use model::training::Capability;
+use rl::objective::external::{PolicyGradientConfig, PolicyGradientStats};
 
 use crate::{CancelToken, Device, Error, Result};
 
@@ -130,6 +131,8 @@ pub struct ChatFineTune {
     pack_answers: bool,
     /// What each step's backward keeps of its forward ([`ChatFineTune::activations`]); `None` is the base's own default.
     activations: Option<model::saved::SavedPolicy>,
+    /// Train with the clipped policy-gradient objective on rollout records ([`ChatFineTune::policy_gradient`]).
+    policy_gradient: Option<PolicyGradientConfig>,
 }
 
 /// The architecture a [`ChatFineTune`] trains, with the tier its frozen base
@@ -281,6 +284,33 @@ impl ChatFamily {
     }
 }
 
+impl ChatFamily {
+    /// [`Self::train`] with the clipped policy-gradient objective over the rollout records of `prepared_dir`.
+    #[allow(clippy::too_many_arguments)]
+    fn train_policy_gradient(
+        &self,
+        open: &Path,
+        prepared_dir: &Path,
+        opts: &model::FitOpts,
+        rank: u32,
+        alpha: f32,
+        tuning: model::adapter::device::AdapterTuning,
+        continue_from: Option<&Path>,
+        control: model::FitControl<'_>,
+        config: PolicyGradientConfig,
+    ) -> std::io::Result<(model::FitReport, TrainedLora, PolicyGradientStats)> {
+        match self {
+            ChatFamily::Qwen3(_) => Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "policy-gradient training on rollouts is wired for qwen35 bases; this base is qwen3")),
+            ChatFamily::Qwen35(dtype) => {
+                let run = qwen35::finetune::StreamedRun { dtype: *dtype, recompute: qwen35_recompute(*dtype, opts.precision.activations)?, long: qwen35::finetune::LongSeqOverrides::default() };
+                let mut fit = rl::fit::PolicyGradientFit::new(prepared_dir, config, opts, control);
+                let (report, trained) = qwen35::finetune::finetune_lora_visited(open, prepared_dir, opts, rank, alpha, tuning, continue_from, &run, &mut fit)?;
+                Ok((report, TrainedLora::Qwen35(Box::new(trained)), fit.into_stats().unwrap_or_default()))
+            }
+        }
+    }
+}
+
 /// The tier the automatic choice picks, before it is named per family.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BaseTierChoice {
@@ -380,6 +410,7 @@ impl ChatFineTune {
             thinking: true,
             pack_answers: false,
             activations: None,
+            policy_gradient: None,
         }
     }
 
@@ -512,6 +543,27 @@ impl ChatFineTune {
     /// parent (`trained_from`).
     pub fn continue_from(mut self, adapter: impl Into<PathBuf>) -> Self {
         self.continue_from = Some(adapter.into());
+        self
+    }
+
+    /// Train with the clipped policy-gradient objective of GRPO/PPO on rollouts an orchestrator collected, instead
+    /// of imitating every record (reinforcement learning from external rollouts).
+    ///
+    /// Each record is one model call of an agent (its trained assistant turn is the action) and carries the
+    /// `"advantage"` of the rollout it belongs to, optionally with `"behavior_logprobs"` on the action
+    /// ([`data::chat_rollout`]). A record with a negative advantage lowers the probability of its action, one with
+    /// a positive advantage raises it; a record without an advantage is imitated. `config` sets the clip half-width,
+    /// the KL coefficient and its reference policy (the base, or the adapter [`ChatFineTune::continue_from`] starts
+    /// from), the loss normalisation and the sampling temperature; see
+    /// [`rl::objective::external`] for what each means and exactly which policy the importance ratio is taken
+    /// against when no behaviour log-probabilities were recorded.
+    ///
+    /// Records with an advantage are refused without this call (supervised training would silently ignore the
+    /// advantage). Needs a `qwen35` base; incompatible with the held-out sets, [`ChatFineTune::eval_every`] and
+    /// selection on a monitoring loss. The run's statistics are on the outcome
+    /// ([`ChatFineTuneOutcome::policy_gradient`]) and its settings on the adapter's card.
+    pub fn policy_gradient(mut self, config: PolicyGradientConfig) -> Self {
+        self.policy_gradient = Some(config);
         self
     }
 
@@ -733,6 +785,46 @@ impl ChatFineTune {
         self
     }
 
+    /// The settings a policy-gradient run cannot honour, refused before any file is read.
+    fn check_policy_gradient_setup(&self, arch_id: &str) -> Result<()> {
+        let Some(config) = &self.policy_gradient else { return Ok(()) };
+        let refuse = |why: String| Err(Error::Backend(format!("ChatFineTune: policy_gradient: {why}")));
+        config.validate().or_else(refuse)?;
+        if arch_id != "qwen35" {
+            return refuse(format!("training on rollouts is wired for qwen35 bases, not {arch_id}"));
+        }
+        if self.eval_every > 0 || self.patience > 0 || self.keep_best {
+            return refuse("a run has no monitoring loss to select on; leave eval_every, patience and keep_best unset (its statistics are on the outcome)".to_string());
+        }
+        if self.held_out.is_some() || self.held_out_text.is_some() {
+            return refuse("held-out sets are scored by the supervised pass; score the exported adapter with score_tokens_qwen35 instead".to_string());
+        }
+        Ok(())
+    }
+
+    /// Records that carry an advantage need the objective that reads it, and that objective needs some; neither a
+    /// held-out set nor a monitoring set has any (they are scored without it). `sets` is `(name, carries an advantage)`.
+    fn check_rollout_records(&self, sets: &[(&str, bool)]) -> Result<()> {
+        let carrying = |name: &str| sets.iter().any(|(n, carries)| *n == name && *carries);
+        match &self.policy_gradient {
+            None => match sets.iter().find(|(_, carries)| *carries) {
+                Some((name, _)) => Err(Error::Backend(format!(
+                    "ChatFineTune: the {name} records carry an \"advantage\", which supervised training would ignore; call .policy_gradient(..) to train on the rollouts, or remove the field"
+                ))),
+                None => Ok(()),
+            },
+            Some(_) => {
+                if let Some(name) = ["held-out", "held-out text", "monitoring"].into_iter().find(|n| carrying(n)) {
+                    return Err(Error::Backend(format!("ChatFineTune: policy_gradient: the {name} records carry an \"advantage\"; that set is scored without one")));
+                }
+                if !carrying("dataset") && !carrying("replay") {
+                    return Err(Error::Backend("ChatFineTune: policy_gradient: no record of the dataset carries an \"advantage\"; this would be supervised training (drop .policy_gradient(..))".to_string()));
+                }
+                Ok(())
+            }
+        }
+    }
+
     /// Run to completion.
     pub fn run(&self) -> Result<ChatFineTuneOutcome> {
         self.run_with(&CancelToken::default(), |_| {})
@@ -764,6 +856,7 @@ impl ChatFineTune {
         let open = qwen3::store_checkpoint_path(&weights, &model_dir);
         let weights_str = utf8(&open)?;
         let family = ChatFamily::of(arch.id, self.bf16_base, self.int8_base, self.nf4_base, self.base_format.as_deref())?;
+        self.check_policy_gradient_setup(arch.id)?;
 
         // Every file is checked against the base's own template before a
         // device is claimed.
@@ -787,6 +880,14 @@ impl ChatFineTune {
         let monitor = self.monitor.as_deref().map(|path| asked.read(path)).transpose()?;
         refuse_images_in(held_out.as_deref(), "held-out")?;
         refuse_images_in(held_out_text.as_deref(), "held-out text")?;
+        let carries = |records: Option<&[ChatSample]>| records.is_some_and(|r| r.iter().any(|s| s.rollout.is_some()));
+        self.check_rollout_records(&[
+            ("dataset", carries(Some(&train_samples))),
+            ("replay", carries(Some(&replay_samples)) || weighted_samples.iter().any(|(records, _)| carries(Some(records)))),
+            ("held-out", carries(held_out.as_deref())),
+            ("held-out text", carries(held_out_text.as_deref())),
+            ("monitoring", carries(monitor.as_deref())),
+        ])?;
         if self.eval_every == 0 && self.evaluations_dir.is_some() {
             return Err(Error::Backend("ChatFineTune: keeping the evaluations needs eval_every > 0".to_string()));
         }
@@ -872,6 +973,13 @@ impl ChatFineTune {
             "weight_decay_bits": self.weight_decay.to_bits(),
             "repeats": repeats,
             "grad_accum": self.grad_accum,
+            "policy_gradient": self.policy_gradient.map(|c| serde_json::json!({
+                "clip_eps_bits": c.clip_eps.to_bits(),
+                "kl_beta_bits": c.kl_beta.to_bits(),
+                "reference": c.reference.name(),
+                "loss_agg": format!("{:?}", c.loss_agg),
+                "temperature_bits": c.temperature.to_bits(),
+            })),
         });
         let mut step_work: Vec<model::StepWork> = Vec::new();
         let mut on_step = |s: &model::StepReport| {
@@ -889,7 +997,16 @@ impl ChatFineTune {
         };
         let control = model::FitControl { on_step: Some(&mut on_step), state: Some(&state_path), state_every: self.checkpoint_every, identity, snapshots, grad_sync: None };
         let held_out_refs: Vec<&Path> = held_out_dirs.iter().map(PathBuf::as_path).collect();
-        let (report, trained, scored) = family.train(&open, &prepared_dir, &opts, rank, alpha, self.tuning, self.continue_from.as_deref(), control, &held_out_refs).map_err(|e| Error::Backend(format!("training: {e}")))?;
+        let (report, trained, scored, policy_gradient) = match self.policy_gradient {
+            Some(config) => {
+                let (report, trained, stats) = family.train_policy_gradient(&open, &prepared_dir, &opts, rank, alpha, self.tuning, self.continue_from.as_deref(), control, config).map_err(|e| Error::Backend(format!("training: {e}")))?;
+                (report, trained, Vec::new(), Some(PolicyGradientOutcome { config, stats }))
+            }
+            None => {
+                let (report, trained, scored) = family.train(&open, &prepared_dir, &opts, rank, alpha, self.tuning, self.continue_from.as_deref(), control, &held_out_refs).map_err(|e| Error::Backend(format!("training: {e}")))?;
+                (report, trained, scored, None)
+            }
+        };
         // In-process scores (qwen35): the sets come back in the order they were given.
         let mut in_process = scored.into_iter();
         let mut take_scored = |present: bool| if present { in_process.next() } else { None };
@@ -937,6 +1054,7 @@ impl ChatFineTune {
             base_tier: family.tier_name().to_string(),
             base_tier_reason,
             step_work,
+            policy_gradient,
         };
         if report.interrupted {
             outcome.status = FineTuneStatus::Cancelled;
@@ -948,7 +1066,7 @@ impl ChatFineTune {
         let adapter_id = self.adapter_id.clone().unwrap_or_else(|| format!("{base_id}:local:chat:latest"));
         let provenance = checkpoint::st::TrainingProvenance {
             code_revision: format!("brain {}", env!("CARGO_PKG_VERSION")),
-            regime: "sft_lora".to_string(),
+            regime: if self.policy_gradient.is_some() { "policy_gradient_lora" } else { "sft_lora" }.to_string(),
             seed,
             hyperparams: serde_json::json!({
                 "rank": rank,
@@ -965,6 +1083,7 @@ impl ChatFineTune {
                 "train_records": outcome.train_records,
                 "replay_records": outcome.replay_records,
                 "monitor_records": outcome.monitor_records,
+                "policy_gradient": outcome.policy_gradient.as_ref().map(PolicyGradientOutcome::summary_json),
             }),
             environment: gpu_core::backend_name().to_string(),
             gate: None,
@@ -1098,6 +1217,44 @@ pub struct ChatFineTuneOutcome {
     /// those the state it resumed already trained. The training record carries
     /// the same, with the totals, under `step_work` and `work`.
     pub step_work: Vec<model::StepWork>,
+    /// How a [`ChatFineTune::policy_gradient`] run was trained and what each step measured; `None` for a
+    /// supervised run.
+    pub policy_gradient: Option<PolicyGradientOutcome>,
+}
+
+/// A [`ChatFineTune::policy_gradient`] run: its settings and the statistics of every optimiser step it took.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PolicyGradientOutcome {
+    pub config: PolicyGradientConfig,
+    /// Per step: the mean advantage-weighted loss, clip fraction, KL to the reference and importance-ratio range
+    /// ([`rl::objective::external::PolicyGradientStep`]), and how the behaviour policy was known for the dataset's
+    /// tokens.
+    pub stats: PolicyGradientStats,
+}
+
+impl PolicyGradientOutcome {
+    /// The settings, the dataset's make-up and the run's means: what the adapter's card and the training record say
+    /// about how it was trained.
+    fn summary_json(&self) -> serde_json::Value {
+        let c = &self.config;
+        let s = &self.stats;
+        serde_json::json!({
+            "clip_eps": c.clip_eps,
+            "kl_beta": c.kl_beta,
+            "reference": c.reference.name(),
+            "loss_agg": format!("{:?}", c.loss_agg),
+            "temperature": c.temperature,
+            "sequences_with_advantage": s.sequences_with_advantage,
+            "sequences_imitation": s.sequences_imitation,
+            "tokens_recorded_behavior": s.tokens_recorded_behavior,
+            "tokens_start_of_run_behavior": s.tokens_start_of_run_behavior,
+            "steps_skipped_nonfinite": s.steps_skipped_nonfinite,
+            "mean_loss": s.mean_loss(),
+            "mean_clip_fraction": s.mean_clip_fraction(),
+            "mean_kl": s.mean_kl(),
+            "last_step": s.steps.last(),
+        })
+    }
 }
 
 impl ChatFineTuneOutcome {
@@ -1139,6 +1296,11 @@ impl ChatFineTuneOutcome {
             "base_tier_reason": self.base_tier_reason,
             "step_work": self.step_work_json(),
             "work": self.work_json(),
+            "policy_gradient": self.policy_gradient.as_ref().map(|p| {
+                let mut summary = p.summary_json();
+                summary["steps"] = serde_json::json!(p.stats.steps);
+                summary
+            }),
         })
     }
 
@@ -1665,6 +1827,8 @@ impl Asked<'_> {
         }
         let records = ChatSample::from_jsonl_with(path, self.images).map_err(|e| Error::Backend(format!("{}: {e}", path.display())))?;
         let mut samples = Vec::with_capacity(records.len());
+        // The record each sample came from, so an error about an example names its record.
+        let mut origins: Vec<usize> = Vec::with_capacity(records.len());
         for (at, record) in records.iter().enumerate() {
             let invalid = |e: &dyn std::fmt::Display| Error::Backend(format!("{}: record {} cannot be encoded for training: {e}", path.display(), at + 1));
             // Whole-record masking is exact for plain answers in thinking mode
@@ -1673,24 +1837,32 @@ impl Asked<'_> {
             if self.pack && record.messages.iter().filter(|m| m.train).count() > 1 {
                 if let Some(packed) = record.answers_packed(self.tmpl, self.no_think.is_none()).map_err(|e| invalid(&e))? {
                     samples.push(packed);
+                    origins.push(at);
                     continue;
                 }
             }
-            let per_answer = if self.no_think.is_some() || record.supervises_tool_calls() {
+            // A rollout's action is the answer as the model is asked for it: what the sampler drew and recorded
+            // log-probabilities of. Only the per-answer rendering supervises exactly that (the whole-conversation mask
+            // also covers the turn's header, which no sampler drew and a negative advantage must not push down).
+            let per_answer = if self.no_think.is_some() || record.supervises_tool_calls() || record.rollout.is_some() {
                 record.answers_as_asked(self.tmpl, self.no_think.is_none()).map_err(|e| invalid(&e))?
             } else if record.supervises_only_final_turn() && record.context_holds_tool_turns() {
                 record.final_turn_as_asked(self.tmpl, true).map_err(|e| invalid(&e))?.map(|asked| vec![asked])
             } else {
                 None
             };
+            let before = samples.len();
             match (per_answer, self.no_think) {
                 (Some(asked), _) => samples.extend(asked),
                 (None, None) => samples.push(record.clone()),
                 (None, Some(block)) => samples.push(record.answering_without_thinking(block)),
             }
+            origins.extend(std::iter::repeat_n(at, samples.len() - before));
         }
         for (at, sample) in samples.iter_mut().enumerate() {
-            let (ids, mask) = sample.encode_with(self.tok, self.tmpl, self.render).map_err(|e| Error::Backend(format!("{}: example {} cannot be encoded for training: {e}", path.display(), at + 1)))?;
+            let (ids, mask) = sample
+                .encode_with(self.tok, self.tmpl, self.render)
+                .map_err(|e| Error::Backend(format!("{}: record {} (example {}) cannot be encoded for training: {e}", path.display(), origins[at] + 1, at + 1)))?;
             // An example made from one answer of a longer record holds the images its text places, the first ones.
             if let Some(placeholder) = self.images.placeholder_token() {
                 sample.keep_images_placed_in(data::chat::token_runs(&ids, placeholder).len()).map_err(|e| Error::Backend(format!("{}: example {}: {e}", path.display(), at + 1)))?;

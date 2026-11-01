@@ -253,6 +253,7 @@ pub fn load_dataset_with_itos(
     opts: &FitOpts,
 ) -> std::io::Result<(TokenDataset, TokenDataset, data::loader::BatchConfig, u32, Option<Vec<char>>)> {
     refuse_images(dir)?;
+    refuse_rollouts(dir)?;
     let l = load(dir, opts)?;
     Ok((l.train, l.val, l.batch_cfg, l.vocab, l.itos))
 }
@@ -266,8 +267,33 @@ pub fn load_dataset_with_images(
     dir: &Path,
     opts: &FitOpts,
 ) -> std::io::Result<(TokenDataset, TokenDataset, data::loader::BatchConfig, u32, Option<Vec<char>>)> {
+    refuse_rollouts(dir)?;
     let l = load(dir, opts)?;
     Ok((l.train, l.val, l.batch_cfg, l.vocab, l.itos))
+}
+
+/// [`load_dataset_with_images`] for a trainer that reads the advantages of rollouts ([`data::chat_rollout`]): the
+/// supervised loaders refuse such a dataset, because imitating every record would ignore the advantage.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::type_complexity)]
+pub fn load_rollout_dataset(
+    dir: &Path,
+    opts: &FitOpts,
+) -> std::io::Result<(TokenDataset, TokenDataset, data::loader::BatchConfig, u32, Option<Vec<char>>)> {
+    let l = load(dir, opts)?;
+    Ok((l.train, l.val, l.batch_cfg, l.vocab, l.itos))
+}
+
+/// Refuse a dataset directory whose records carry rollout advantages: a supervised trainer would imitate them all.
+#[cfg(not(target_arch = "wasm32"))]
+fn refuse_rollouts(dir: &Path) -> std::io::Result<()> {
+    match ["train", "val"].into_iter().find(|split| dir.join(format!("{split}.adv.bin")).exists()) {
+        Some(split) => Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!("{}: the {split} split carries rollout advantages, and a supervised trainer would imitate every record; train it with a policy-gradient objective (ChatFineTune::policy_gradient)", dir.display()),
+        )),
+        None => Ok(()),
+    }
 }
 
 /// Refuse a dataset directory that holds images: the caller's trainer would train on its text alone.

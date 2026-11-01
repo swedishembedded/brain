@@ -173,8 +173,14 @@ pub use model::TrainPrecision;
 /// What one optimizer step of a run measured: its phases' seconds and its
 /// token accounting (see [`ChatFineTuneOutcome::step_work`]).
 pub use model::StepWork;
+/// The settings and statistics of [`ChatFineTune::policy_gradient`]: reinforcement learning from rollouts collected
+/// outside brain.
 #[cfg(feature = "study")]
-pub use finetune::{emit_held_out_records, score_chat, score_tokens, score_tokens_qwen35, HeldOutRecords, ChatFineTune, ChatFineTuneOutcome, FineTuneProgress, FineTuneStatus, HeldOutScore, MonitorPoint, RecordReadout, Selection, TokenReadout, TokenScore};
+pub use rl::objective::external::{PolicyGradientConfig, PolicyGradientStats, PolicyGradientStep, ReferencePolicy};
+#[cfg(feature = "study")]
+pub use rl::objective::grpo::LossAgg;
+#[cfg(feature = "study")]
+pub use finetune::{emit_held_out_records, score_chat, score_tokens, score_tokens_qwen35, HeldOutRecords, ChatFineTune, ChatFineTuneOutcome, FineTuneProgress, FineTuneStatus, HeldOutScore, MonitorPoint, PolicyGradientOutcome, RecordReadout, Selection, TokenReadout, TokenScore};
 #[cfg(feature = "study")]
 mod full_finetune;
 #[cfg(feature = "study")]

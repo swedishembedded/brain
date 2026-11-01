@@ -280,7 +280,7 @@ impl ExternalPolicyGradient {
         if cfg.loss_agg == LossAgg::SeqMean && opts.batch_size != 1 {
             return Err(invalid(format!("a sequence-mean objective trains one sequence per batch row group, the batch holds {}; use loss_agg TokenSum or a batch of 1", opts.batch_size)));
         }
-        let (train, _val, batch_cfg, _vocab, _itos) = model::load_dataset_with_images(dir, opts)?;
+        let (train, _val, batch_cfg, _vocab, _itos) = model::load_rollout_dataset(dir, opts)?;
         let tokens = binio::read_tokens_u32(&dir.join("train"))?;
         let starts: Vec<usize> = binio::read_u64_bin(&dir.join("train.ex.bin"))?.into_iter().map(|s| s as usize).collect();
         if starts.is_empty() {

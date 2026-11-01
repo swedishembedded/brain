@@ -516,6 +516,28 @@ pub fn finetune_lora_scored_tuned(
     Ok((report, trained, scored))
 }
 
+/// LoRA training on the streamed frozen base at `base`, run by the caller's `fit` (a [`model::finetune::ModelFit`]
+/// visitor: any objective written over [`model::Model`]) instead of the supervised loop. The model is built exactly
+/// as [`finetune_lora_scored_tuned`] builds it, and the vision tower and images of the prepared dataset in `dir` are
+/// attached when it has any, so the visitor trains records with images through the shared vision path
+/// ([`model::Batch::LmExamples`]). `resume_from` continues an adapter file's factors. Returns the trained model.
+#[allow(clippy::too_many_arguments)]
+pub fn finetune_lora_visited(
+    base: &Path,
+    dir: &Path,
+    opts: &FitOpts,
+    rank: u32,
+    alpha: f32,
+    tuning: AdapterTuning,
+    resume_from: Option<&Path>,
+    run: &StreamedRun,
+    fit: &mut impl model::finetune::ModelFit,
+) -> std::io::Result<(model::FitReport, Qwen35)> {
+    let m = build_lora_model(base, opts, rank, alpha, tuning, resume_from, run)?;
+    crate::vision_sft::attach_for_dataset(&m, base, dir)?;
+    fit.fit(m)
+}
+
 /// The `(rank, alpha)` a saved adapter file was trained with, and the tuning its
 /// scale has to be reproduced under.
 ///

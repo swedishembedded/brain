@@ -461,6 +461,88 @@ copy is held while training, and the first step's margin is exactly zero
   outcome's `train_score` and `held_out_score` are the same measurement
   against the run's own reference. Unmeasured values are `None`.
 
+### Policy-gradient fine-tuning on collected rollouts
+
+`ChatFineTune::policy_gradient(config)` (the `study` feature, `qwen35` bases) trains the LoRA adapter with the clipped
+policy-gradient objective of GRPO/PPO on rollouts an orchestrator collected outside brain, instead of imitating every
+record. Each model call of an agent is one chat record whose trained assistant turn is the action; the orchestrator
+scores the rollout with an independent verifier, computes the group-relative advantage and writes it on every record of
+that rollout. A record with a negative advantage lowers the probability of its action, one with a positive advantage
+raises it.
+
+```json
+{"advantage": -0.83, "messages": [
+  {"role": "system", "content": "...", "train": false},
+  {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}, {"type": "text", "text": "Which part is this?"}], "train": false},
+  {"role": "assistant", "content": "A 40 mm dowel pin.", "train": true, "behavior_logprobs": [-0.11, -0.52, -1.9, -0.03, -0.4, -0.07, -0.01]}]}
+```
+
+- `"advantage"` (record, optional): a finite number, the weight of every supervised token of the record. A record
+  without one is an imitation example (plain cross-entropy), so rollouts and supervised records mix.
+- `"behavior_logprobs"` (supervised assistant message, optional, needs an `"advantage"`): the log-probability the sampler
+  gave each token of the answer, one per token of the answer as the chat template renders it after its prompt: the
+  answer's text and the end-of-turn marker that closes it (the generation prompt is context, not sampled). Values are
+  finite and at most 0. A count that does not match the answer's tokens is refused naming the file, the record and both
+  counts. The log-probabilities are those of `softmax(logits / temperature)`; give the sampling temperature as
+  `PolicyGradientConfig::temperature`.
+- Images and tool turns: records carry them exactly as in supervised fine-tuning (an image in a context turn, never in
+  a supervised one); they train through the same vision path.
+
+```rust
+use brain::{ChatFineTune, LossAgg, PolicyGradientConfig, ReferencePolicy};
+
+let outcome = ChatFineTune::from_pretrained("Qwen/Qwen3.8-27B-FP8")
+    .arch("qwen35")
+    .base_format("bf16")
+    .dataset("rollouts.jsonl")
+    .continue_from("adapters/round-3.safetensors") // optional: continue an adapter, else a fresh one
+    .out_dir("runs/round-4")
+    .steps(40)
+    .grad_accum(8)
+    .policy_gradient(PolicyGradientConfig {
+        clip_eps: 0.2,                         // ratio clipped to [0.8, 1.2]
+        kl_beta: 0.02,                         // k3 KL to the reference; 0 for none
+        reference: ReferencePolicy::Base,      // the base, or StartOfRun: the adapter this run began from
+        loss_agg: LossAgg::SeqMean,            // per-sequence token mean (GRPO), or TokenSum
+        temperature: 1.0,                      // the temperature the collector sampled with
+        log_kl: true,                          // report the KL even when kl_beta is 0
+    })
+    .run()?;
+for step in &outcome.policy_gradient.unwrap().stats.steps {
+    println!("{} loss {:.4} clip {:.3} kl {:?} ratio {:.3}..{:.3}", step.step, step.loss, step.clip_fraction, step.kl, step.ratio_min, step.ratio_max);
+}
+```
+
+The loss of a supervised token with advantage `A`, behaviour log-probability `old`, current log-probability `new` and
+reference `ref` is `-min(r A, clip(r, 1 - eps, 1 + eps) A) + beta * (e^u - u - 1)` with `r = exp(new - old)` and
+`u = ref - new`; a token clipped on the side its advantage pushes toward has no gradient. The objective, the per-token
+weight and the KL estimator are the ones `rl::objective::grpo::Grpo` trains through (`rl::objective::pg_batch`), so a
+brain-sampled GRPO run and an external-rollout run cannot drift apart.
+
+- **Behaviour policy.** The recorded `behavior_logprobs` where there are some. Where there are none the importance ratio
+  is taken against the adapter the run **started from** (a fresh adapter: the base), measured by one forward pass over
+  the dataset before the first step: the first optimiser step is the plain on-policy estimator `-A * log p` (ratio 1),
+  and the clip bounds how far later steps and epochs move a token from where the run began. It is a proxy for the true
+  behaviour policy and exact when the rollouts were sampled from the adapter being continued.
+- **Reference policy.** `Base` (the adapter disabled) or `StartOfRun` (the adapter being continued); the same for a
+  fresh adapter. Measured by a forward pass before the first step (two passes when a continued adapter is compared with
+  the base).
+- **Cost.** One extra forward pass over the dataset before the first step (two with a continued adapter and the base
+  as reference) when behaviour log-probabilities are missing or a KL is wanted, then one forward and one backward per
+  micro-batch as in supervised training.
+- **Reported.** `outcome.policy_gradient` holds the settings and, per optimiser step, the mean advantage-weighted loss,
+  the clip fraction, the mean KL to the reference, the ratio mean / min / max, the mean advantage and the imitation
+  tokens; `training.json` has the same, and the adapter card's provenance (`regime: "policy_gradient_lora"`) the
+  settings and the means.
+- **Refused before a device is claimed.** Records with an advantage without `.policy_gradient(..)` (supervised
+  training would silently ignore it); `.policy_gradient(..)` without any record carrying one; an invalid setting; a
+  base that is not `qwen35`; `eval_every`, `patience`, `keep_best`, `held_out` and `held_out_text` (a run has no
+  monitoring loss to select on: score the exported adapter with `score_tokens_qwen35`); a held-out or monitoring set
+  that carries advantages; `SeqMean` with more than one sequence per batch row.
+- `.continue_from`, `.grad_accum`, `.steps`, `.lr`, `.rank`, `.base_format`, `.activations`, `.checkpoint_every` and
+  `run_with(&cancel, ..)` behave as on supervised `ChatFineTune`; an interrupted run resumes from its state (a state
+  from other policy-gradient settings is refused like any other different run).
+
 ## Text embedding
 
 ```rust
