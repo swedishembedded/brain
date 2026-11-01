@@ -2549,7 +2549,7 @@ pub const ALL: &[CudaKernel] = &[
         source: ImplSource::Tuned,
         min_cc: WGMMA_MIN_CC,
         entry: "brain_matmul_fp8_wgmma_tma_n256",
-        what: "FP8 E4M3 block-scaled weight GEMM against E4M3 activations (one scale per row per 128 of K) on Hopper warpgroup tensor cores (wgmma m64n256k32, 128x256 tile) with the tiles copied by the tensor memory accelerator, a persistent grid, a producer warp and two consumer warpgroups on mbarriers, the block scales applied as a ratio on the running sum; agrees with matmul_fp8_wgmma_tma to f32 rounding",
+        what: "FP8 E4M3 block-scaled weight GEMM against E4M3 activations (one scale per row per 128 of K) on Hopper warpgroup tensor cores (wgmma m64n256k32, 128x256 tile) with the tiles copied by the tensor memory accelerator, a persistent grid, a producer warp and two consumer warpgroups on mbarriers, the block scales applied as a ratio on the running sum, the last part-filled round of the grid split into column halves; agrees with matmul_fp8_wgmma_tma to f32 rounding",
         reported: "native:matmul_fp8_wgmma_tma_n256",
         block_dim: 384,
         // 128 rows of x x 256 weight rows per tile; the grid is persistent (`FP8_TMA_MAX_CTAS` blocks at most).

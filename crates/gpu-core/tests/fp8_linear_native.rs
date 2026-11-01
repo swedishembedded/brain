@@ -100,6 +100,11 @@ fn the_wgmma_gemms_pass_the_admission_rule_on_ragged_shapes() {
             shapes.push([m, kg, n]);
         }
     }
+    // More tiles than the persistent grid has blocks, the last round at most half full: the 128 x 256 kernel splits those tiles into column halves.
+    // The last band of weight rows is 100 wide (the second half of its tile is out of range) and the last band of rows ragged.
+    for (m, kg, n) in [(1000u32, 160u32, 5220u32), (300, 160, 12000), (1000, 160, 5120)] {
+        shapes.push([m, kg, n]);
+    }
     let served = admitted_everywhere(&gpu, &shapes);
     for kernel in ["matmul_fp8_dq_wgmma", "matmul_fp8_wgmma", "matmul_fp8_wgmma_tma", "matmul_fp8_wgmma_tma_n256"] {
         assert!(served.contains(kernel), "{kernel} served none of the shapes: {served:?}");
