@@ -2416,21 +2416,26 @@ pub fn flash_cross_supported(caps: &gpu_core::DeviceCaps) -> bool {
     !no_flash_cross() && caps.workgroup_reductions && caps.max_workgroup_size >= FLASH_CROSS_REG2_WS && caps.workgroup_mem_bytes >= FLASH_CROSS_REG2_SHARED
 }
 
-/// `BRAIN_NO_FLASH_CROSS=1` pins cross-attention to the caller's materialized
+/// [`set_flash_cross`]`(false)` pins cross-attention to the caller's materialized
 /// scores/softmax/apply trio - the A/B switch this kernel's speedup was
 /// measured with, the way a correctness gate reaches the reference arm on a
 /// device that would otherwise always take the fused one, and the fallback if
-/// a driver ever mishandles a 48 KiB workgroup allocation. Same shape as
-/// `backend_api::select`'s `BRAIN_NO_COOP_LN`, and read once for the same
-/// reason: the policy must stay a pure function of its inputs for a given
-/// process.
+/// a driver ever mishandles a 48 KiB workgroup allocation.
 ///
 /// Without a switch here an A/B on a capable device compares the fused path
 /// against itself and reports a meaningless parity - which looks like evidence
 /// and is not.
 fn no_flash_cross() -> bool {
-    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("BRAIN_NO_FLASH_CROSS").map(|v| v != "0").unwrap_or(false))
+    NO_FLASH_CROSS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+static NO_FLASH_CROSS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether text cross-attention may take the fused flash kernel (`true`, the default) or stays on the materialized trio
+/// (`false`; the CLI's `--no-flash-cross`). The APPLICATION sets it before it builds models and leaves it: the policy must
+/// stay a pure function of its inputs for a given process. Never read from the environment.
+pub fn set_flash_cross(on: bool) {
+    NO_FLASH_CROSS.store(!on, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// The seven layout numbers [`flash_cross_step`] needs beyond the buffers -

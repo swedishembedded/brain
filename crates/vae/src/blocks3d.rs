@@ -328,7 +328,7 @@ pub struct Builder3d<'a> {
 /// processes `floor(budget / CinKKK)` output positions per GEMM, trading scratch
 /// for chunk count. The 3D operand is `KT` times the 2D one for the same image,
 /// which is exactly why it is chunked rather than materialised whole. Override
-/// with `BRAIN_CONV_COL_MIB` (or its original name `BRAIN_VAE_COL_MIB`), the
+/// with `gpu_core::lower::set_col_budget_mib` (the CLI's `--conv-col-mib`), the
 /// same variable every other lowering reads - one decode uses several and a
 /// caller tuning device memory means all of them. See [`gpu_core::lower`].
 const COL_BUDGET_MIB: u64 = 512;

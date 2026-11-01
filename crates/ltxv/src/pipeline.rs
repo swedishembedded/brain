@@ -3545,7 +3545,7 @@ fn check_audio_request(paths: &Paths, o: &GenOpts) -> Result<(), String> {
 /// host-fp32 reference arm ([`crate::av_stream::AvDenoiser`]) instead of the
 /// quantized, device-resident one ([`RealAvDit`]).
 ///
-/// Same shape as `BRAIN_NO_FLASH_CROSS`, and there for the same three reasons:
+/// Same shape as `model::block::set_flash_cross`, and there for the same three reasons:
 /// the A/B a measurement of the quantized arm needs (without a switch, an A/B
 /// on a capable machine compares the quantized path against itself and reports
 /// a meaningless parity), a reference definition of the math that the

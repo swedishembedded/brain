@@ -833,8 +833,8 @@ pub enum GnStats {
 /// processes `floor(budget / CinKK)` output positions per GEMM, so this trades
 /// scratch for the number of chunks; at 512² the largest operand would be
 /// 2.4 GB unchunked, which is both unbindable and hostile to a card shared with
-/// a resident DiT. Override with `BRAIN_CONV_COL_MIB` (or its original name
-/// `BRAIN_VAE_COL_MIB`) - the knob is shared with every other lowering in the
+/// a resident DiT. Override with `gpu_core::lower::set_col_budget_mib` (the CLI's
+/// `--conv-col-mib`) - the knob is shared with every other lowering in the
 /// tree, see [`gpu_core::lower`].
 const COL_BUDGET_MIB: u64 = 512;
 

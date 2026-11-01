@@ -388,7 +388,7 @@ the selector's normal choice, for isolating a regression to one variant):
 `BRAIN_CONV1D_GEMM` (`0` pins the 1D convolutions to the direct kernels,
 `force` pins them to the GEMM lowering below its `Cout` threshold - the only
 way a sweep can see the sub-threshold side),
-`BRAIN_NO_FLASH_CROSS` (any value but `0` pins text cross-attention to the
+`brain --no-flash-cross` (pins text cross-attention to the
 materialized scores/softmax/apply trio instead of the fused flash kernel;
 without it an A/B on a capable device compares the fused path against itself),
 `BRAIN_LTXV_NO_SCRATCH_POOL` (`1` makes an LTX-2.5 block forward create and
@@ -406,10 +406,9 @@ for kernel selection).
 **Training-memory tradeoff:** `BRAIN_OFFLOAD_ADAM` (keep optimizer state in
 host RAM instead of device memory).
 
-**Conv-as-GEMM scratch budget:** `BRAIN_CONV_COL_MIB` caps the im2col scratch
-(MiB) for every conv lowering - 1D (`audio::conv`), 2D and 3D (`vae::blocks`,
-`vae::blocks3d`). `BRAIN_VAE_COL_MIB` is the original name of the same knob and
-is still honoured.
+**Conv-as-GEMM scratch budget:** `brain --conv-col-mib <MiB>` caps the im2col
+scratch for every conv lowering - 1D (`audio::conv`), 2D and 3D (`vae::blocks`,
+`vae::blocks3d`).
 
 **Per-model dev/debug knobs:** `BRAIN_VAE_TAPS`,
 `BRAIN_QWEN3OMNIMOE_DEBUG_LOGITS`, `BRAIN_OMNI_DEBUG_LOGITS` (top-3 logit dump

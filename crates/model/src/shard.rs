@@ -414,16 +414,21 @@ pub struct StreamPlan {
 }
 
 /// Opt out of streaming multi-GPU placement without changing any code path:
-/// `BRAIN_STREAM_SHARD=0` forces [`StreamPlan::auto`] to resolve a single
+/// [`set_stream_shard`]`(false)` (the CLI's `--no-stream-shard`) forces [`StreamPlan::auto`] to resolve a single
 /// stage. Deliberately an opt-OUT - a split plan is bit-identical to the
 /// unsplit one (see [`StreamPlan`]'s contract), so using the cards the box has
 /// is the right default, and the handle exists for bisecting a suspected
 /// driver problem or for leaving a card free for another process.
-///
-/// Follows `ltxv::devplan`'s `BRAIN_LTXV_CFG_PARALLEL` convention, spelling
-/// included.
 pub fn stream_shard_enabled() -> bool {
-    !matches!(std::env::var("BRAIN_STREAM_SHARD").as_deref(), Ok("0") | Ok("false") | Ok("off"))
+    !NO_STREAM_SHARD.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+static NO_STREAM_SHARD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether a streaming checkpoint may split over the cards of the device set (`true`, the default) or keeps one stage.
+/// Process-wide; takes effect for plans resolved after. Never read from the environment.
+pub fn set_stream_shard(on: bool) {
+    NO_STREAM_SHARD.store(!on, std::sync::atomic::Ordering::Relaxed);
 }
 
 impl StreamPlan {

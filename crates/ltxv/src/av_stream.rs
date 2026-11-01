@@ -26,7 +26,7 @@
 //! (`crate::pipeline::av_fp32_reference`) and by `ltxv_bench av`. Without a
 //! switch, an A/B compares the quantized path against itself and reports a
 //! meaningless parity - which looks like evidence and is not. It is the same
-//! shape as `BRAIN_NO_FLASH_CROSS`, and it exists for the same three reasons:
+//! shape as `model::block::set_flash_cross`, and it exists for the same three reasons:
 //! a reference definition of the math, a measurement's other column, and a
 //! fallback if the quantized arm ever misbehaves on a driver.
 //!

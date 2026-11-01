@@ -155,7 +155,10 @@ other global A/B switches: `--no-kernel-upgrade` keeps every model on the
 kernel it registered (no transparent upgrade), `--no-provider <name>[,<name>]`
 disables compute providers by name (`cuda`, ...) to bisect a provider-specific
 bug, and `--no-gdn-fast` keeps the Gated DeltaNet prefill on its portable
-dispatch sequence. None of them is read from the environment.
+dispatch sequence. `--no-flash-cross` keeps text cross-attention on the
+materialized trio, `--no-stream-shard` keeps a streaming checkpoint on one
+stage, and `--conv-col-mib <MiB>` caps the im2col scratch of lowered
+convolutions. None of them is read from the environment.
 
 Where several native kernels can serve the same operation (the int8 decode
 linear has a dp4a GEMV, a tensor-core GEMV and two tiled tensor-core GEMMs), brain

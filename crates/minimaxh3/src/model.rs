@@ -771,7 +771,7 @@ mod tests {
         // or CPU run, one stage per card on a multi-card one. The reference
         // tolerances below are the SAME either way: the split carries only
         // the residual, host-staged, and an f32 round trip is lossless
-        // (`BRAIN_STREAM_SHARD=0` forces the single-stage arm for a
+        // (`model::shard::set_stream_shard(false)` forces the single-stage arm for a
         // side-by-side check).
         let dit = crate::dit_shard::StreamingDit::open(&cfg, Some(&device_str));
         eprintln!("  block placement: {}", dit.plan().describe());

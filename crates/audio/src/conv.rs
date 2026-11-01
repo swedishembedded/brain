@@ -224,7 +224,7 @@ impl ConvScratch {
     /// bug at all (a mutation that ignored `pos0` passed the whole
     /// shape-coverage suite until a case forced three chunks).
     ///
-    /// `BRAIN_CONV_COL_MIB` still wins over this, since an operator capping
+    /// `gpu_core::lower::set_col_budget_mib` still wins over this, since an operator capping
     /// device memory means it.
     pub fn with_budget_mib(mib: u64) -> ConvScratch {
         ConvScratch { budget_mib: mib.max(1), ..ConvScratch::default() }

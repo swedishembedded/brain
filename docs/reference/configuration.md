@@ -74,7 +74,6 @@ Most users never need these - they exist for GPU-driver quirks and profiling.
 | --- | --- | --- |
 | `BRAIN_VK_SERIAL` | forces one-dispatch-at-a-time submission on the native-Vulkan backend; works around a hang on some Intel integrated-GPU drivers | auto-detected by vendor |
 | `BRAIN_VK_NO_SERIAL` | forces the opposite of `BRAIN_VK_SERIAL` even on a vendor that's normally auto-serialized | unset |
-| `BRAIN_STREAM_SHARD` | `0`/`false`/`off` opts a streaming checkpoint out of automatic multi-GPU placement, forcing a single stage; a split plan is always bit-identical to the unsplit one, so this is for bisecting a driver problem or freeing a card for another process, not correctness | on (splits when it helps) |
 | `BRAIN_VK_VALIDATE` | enables Vulkan validation layers on the native-Vulkan backend | off |
 | `BRAIN_GPU_GL` | forces the OpenGL backend instead of Vulkan (wgpu) | off |
 | `BRAIN_GPU_VALIDATION` | enables wgpu debug/validation instance flags | off |

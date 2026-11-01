@@ -688,6 +688,25 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
             };
             gpu_core::roof::set_probe(probe);
             i += 2;
+        } else if argv[i] == "--no-flash-cross" {
+            // Text cross-attention stays on the materialized scores/softmax/apply trio: the fused kernel's A/B switch.
+            model::block::set_flash_cross(false);
+            i += 1;
+        } else if argv[i] == "--no-stream-shard" {
+            // A streaming checkpoint keeps one stage instead of splitting over the device set's cards (a split is
+            // bit-identical; this bisects a driver problem or leaves a card free).
+            model::shard::set_stream_shard(false);
+            i += 1;
+        } else if argv[i] == "--conv-col-mib" {
+            // Caps the im2col scratch of every lowered convolution, in MiB.
+            match argv.get(i + 1).and_then(|v| v.parse::<u64>().ok()).filter(|&m| m > 0) {
+                Some(mib) => gpu_core::lower::set_col_budget_mib(Some(mib)),
+                None => {
+                    eprintln!("brain: --conv-col-mib needs a positive number of MiB");
+                    std::process::exit(2);
+                }
+            }
+            i += 2;
         } else if argv[i] == "--no-autotune" {
             // Every kernel slot keeps its default candidate: reproducible benchmarking and A/B runs.
             gpu_core::set_native_autotune(false);

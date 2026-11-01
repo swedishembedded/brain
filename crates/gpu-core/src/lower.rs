@@ -19,20 +19,23 @@
 //! the "snap the chunk to a whole GEMM tile" rule cannot be got right in one
 //! copy and wrong in another.
 
-/// Ceiling on the im2col scratch, in f32 words.
-///
-/// `BRAIN_CONV_COL_MIB` overrides it; `BRAIN_VAE_COL_MIB` is honoured as the
-/// original name of the same knob, from when only the VAE lowerings had one.
+/// Ceiling on the im2col scratch, in f32 words: [`set_col_budget_mib`] when the application set one, else `default_mib`.
 /// Bigger means fewer, larger GEMMs and more resident scratch - the trade is
 /// device memory, which is why it is a knob at all: a lowered conv running
 /// beside a resident DiT has far less of it to spend.
 pub fn col_budget_floats(default_mib: u64) -> u64 {
-    let mib = std::env::var("BRAIN_CONV_COL_MIB")
-        .or_else(|_| std::env::var("BRAIN_VAE_COL_MIB"))
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(default_mib);
+    let set = COL_BUDGET_MIB.load(std::sync::atomic::Ordering::Relaxed);
+    let mib = if set == 0 { default_mib } else { set };
     mib.max(1) * 1024 * 1024 / 4
+}
+
+static COL_BUDGET_MIB: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Cap the im2col scratch of every lowered convolution at `mib` MiB, process-wide (the CLI's `--conv-col-mib`); `None`
+/// restores each lowering's own default. An operator capping device memory means it, so it wins over a lowering's own
+/// budget. Never read from the environment.
+pub fn set_col_budget_mib(mib: Option<u64>) {
+    COL_BUDGET_MIB.store(mib.unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Output positions per lowered GEMM: as many rows of `row_floats` as the
