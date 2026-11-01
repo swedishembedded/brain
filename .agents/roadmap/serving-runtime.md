@@ -575,3 +575,10 @@ Mixed-iteration idle (knowledge 392, 2026-10-30): a prompt start no longer waits
   on and off, NVFP4 weights). The first matched cell showed a bf16 cache still on version-2 prefill attention (180.9 ms per 8K prompt against 30 ms staged); `flash_prefill_f16_hd256_wgs_widen_bf16` stages it with version 2's
   rounding. Served gpu1, FP8 / bf16 KV / f32 state / no speculation, interleaved twice, tok/s | median TTFT ms: 8K x 1 66.7 | 783 -> 70.5 | 595, 32K x 1 34.0 | 4303 -> 43.9 | 2636, 8K x 16 203.3 | 3752 -> 221.0 | 3322.
   The references at the same settings: vLLM 8K x 1 76.4 | 555, 32K x 1 46.9 | 2563, 8K x 16 337.2 | 3124; SGLang 8K x 1 72.9 | 599. Open: decode at bf16 KV + f32 state (8K x 16 is 35 % behind vLLM).
+- 2026-11-01 (decode attention over a bf16 KV pool, knowledge 415): `paged_flash_decode_gqa_hd256_kvbf16` replaces the TF32 form for `kv=bf16` (its `BRAIN_KV_BF16` variant is deleted): bf16 mma with Q and P split into
+  three bf16 parts (two fail the large-score spec), the keys as the rows of the score product (half the tensor instructions) with `movmatrix` into the value product's layout, a three-unit `cp.async` ring of half chunks
+  (two blocks an SM), `flash_splits_kv8` cut at two blocks an SM. Kernel time a layer on gpu1 (split + combine): 8K x 16 225 -> 194 us (kernel 186, the roof for its 537 MB is 158; the brief's 77 us counted one plane),
+  8K x 64 841 -> 704, 32K x 16 830 -> 699 (90 % of the roof). Served, gpu1, FP8 / bf16 KV / f32 state / no speculation, interleaved twice, mean of two, tok/s base -> new: 8K x 1 70.6 -> 70.6, 8K x 16 287.0 -> 295.7,
+  32K x 16 82.8 -> 83.5, 8K x 64 348.4 -> 355.4. Gates: exact f64 attention over ragged / scattered / shared-prefix batches, scores x10 and elements of 1e5, NaN-poisoned outputs and partial records, an ignored
+  2,000-launch back-to-back stress (bit-identical, no new Xid). Open: the decode step at 8K x 16 is 42 ms and this kernel is 0.5 ms of it; the 8K x 16 cell is one wave (82 % of the roof); 8K x 1 and 32K x 1 (16 blocks)
+  are latency bound at 36 % and 60 %.
