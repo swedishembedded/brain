@@ -420,7 +420,7 @@ test/slow:
 # "green because skipped" risk.
 ## test/full - release gate: test + test/doc + test/slow + test/e2e + test/conformance + test/rl + test/gradcheck + test/package + every check/* gate
 ##   + test/parity + test/parity/strict (needs make testdata/fetch) + test/perf
-test/full: test test/doc test/slow test/e2e test/conformance test/rl test/gradcheck test/package check/scripts check/env-reads check/env-writes check/test-skips check/seed-literals check/serve-conformance test/gates check/spdx check/paths check/scope check/saved-policy check/agents-md check/files check/samples check/sdk-features check/make-targets check/generated test/parity test/parity/strict test/perf
+test/full: test test/doc test/slow test/e2e test/conformance test/rl test/gradcheck test/package check/scripts check/env-reads check/env-writes check/test-skips check/seed-literals check/serve-conformance test/gates check/spdx check/copyright check/paths check/scope check/saved-policy check/agents-md check/files check/samples check/sdk-features check/make-targets check/generated test/parity test/parity/strict test/perf
 
 # Rank every test binary by wall time; --budget fails if any exceeds it. This is
 # what keeps the fast lane fast.
@@ -904,6 +904,10 @@ check/scripts:
 ## check/spdx - SPDX-License-Identifier + copyright header gate
 check/spdx:
 	python3 scripts/spdx/check.py $$(git ls-files)
+
+## check/copyright - every copyright notice names its holder the same way
+check/copyright:
+	bash scripts/gates/check-copyright.sh
 
 ## check/paths - no baked-in absolute machine paths under crates/
 check/paths:
@@ -2156,7 +2160,7 @@ help:
         test/e2e test/e2e/api-conformance test/e2e/shutdown test/e2e/samples test/e2e/ready \
         test/e2e/claude-code test/e2e/scheduler test/e2e/quickstart test/e2e/deb \
         test/e2e/results-hygiene test/e2e/s3dit-int8 \
-        check check/workspace check/clippy check/scripts check/env-reads check/test-skips check/seed-literals check/seed-literals/tests check/serve-conformance test/gates test/gates/env-reads test/gates/test-skips test/gates/seed-literals test/gates/group-kernels _train/need-wrapper qwen35 qwen35/train qwen35/train/probe qwen35/train/step check/spdx check/paths check/scope check/saved-policy check/hf-fixtures \
+        check check/workspace check/clippy check/scripts check/env-reads check/test-skips check/seed-literals check/seed-literals/tests check/serve-conformance test/gates test/gates/env-reads test/gates/test-skips test/gates/seed-literals test/gates/group-kernels _train/need-wrapper qwen35 qwen35/train qwen35/train/probe qwen35/train/step check/spdx check/copyright check/paths check/scope check/saved-policy check/hf-fixtures \
         check/files check/samples check/sdk-features check/make-targets \
         check/generated check/generated/kernels-wgsl-table check/generated/kernels-cuda-table \
         check/generated/samples-manifest \

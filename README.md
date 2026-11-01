@@ -151,4 +151,4 @@ to ship.
 Apache-2.0 - see [`LICENSE`](LICENSE). Model weights carry their own licenses;
 see [`docs/compliance/third-party-models.md`](docs/compliance/third-party-models.md).
 
-Copyright (c) 2026 Swedish Embedded AB.
+Copyright (c) 2026 Martin Schröder.

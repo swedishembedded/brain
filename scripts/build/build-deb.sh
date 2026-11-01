@@ -97,8 +97,8 @@ Description: Swedish Embedded model training and inference runtime
  under /usr/share/dbus-1/system.d/.
 EOF
 cat >"${STAGING}/usr/share/doc/brain/copyright" <<'EOF'
-Copyright: 2026 Swedish Embedded
-License: MIT
+Copyright: 2026 Martin Schröder <info@swedishembedded.com>
+License: Apache-2.0
 EOF
 cat >"${STAGING}/usr/share/doc/brain/README.Debian" <<'EOF'
 brain for Debian
