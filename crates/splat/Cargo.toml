@@ -30,3 +30,4 @@ bytemuck.workspace = true
 brain-imaging.workspace = true
 # `data::rng::Lcg` - the one deterministic test PRNG (tests only).
 brain-data.workspace = true
+brain-testutil.workspace = true

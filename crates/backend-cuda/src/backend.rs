@@ -1374,6 +1374,16 @@ fn bytemuck_words(params: &[u32]) -> &[u8] {
 /// reached through sub-range bindings (`step_sliced`).
 const BINDABLE_BYTES_MAX: u64 = u32::MAX as u64;
 
+/// The most a single binding of 4-byte elements (`array<f32>`, `array<u32>`)
+/// can name: a `u32` element index reaches 2^32 of them, and the generator
+/// computes the address in `size_t`.
+const WORD_BINDABLE_BYTES_MAX: u64 = (u32::MAX as u64 + 1) * 4;
+
+/// [`WORD_BINDABLE_BYTES_MAX`] bounded by the card's memory.
+pub(crate) fn word_binding_bytes_for(total_bytes: u64) -> u64 {
+    total_bytes.min(WORD_BINDABLE_BYTES_MAX)
+}
+
 /// The floor of the working set: the portable binding figure, which is what
 /// tile budgets were sized against before the limits were split. A card is never
 /// given a smaller slab than this.
@@ -2157,6 +2167,12 @@ impl backend_api::Backend for CudaBackend {
         memory_limits_for(self.ctx.device_info().total_mem, 0).max_binding_bytes
     }
 
+    /// A binding of 4-byte elements: a `u32` element index reaches 2^32 of
+    /// them (see [`WORD_BINDABLE_BYTES_MAX`]), four times the byte figure.
+    fn max_word_binding_bytes(&self) -> u64 {
+        word_binding_bytes_for(self.ctx.device_info().total_mem)
+    }
+
     /// The largest single allocation, from `cuMemGetInfo`.
     ///
     /// Free memory rather than total: an allocation larger than what is free
@@ -2372,6 +2388,15 @@ mod tests {
         assert_eq!(big.workspace_bytes, GIB, "a sixty-fourth of 96 GiB is 1.5 GiB, capped at 1 GiB");
         assert!(big.working_set_bytes > p40_class.working_set_bytes);
         assert!(big.is_consistent());
+    }
+
+    /// A binding of 4-byte elements reaches four times the byte figure (2^32
+    /// elements), never more than the card holds.
+    #[test]
+    fn a_word_binding_reaches_four_times_the_byte_binding() {
+        assert_eq!(word_binding_bytes_for(96 * GIB), 16 * GIB);
+        assert_eq!(word_binding_bytes_for(GIB), GIB);
+        assert!(word_binding_bytes_for(96 * GIB) > memory_limits_for(96 * GIB, 0).max_binding_bytes);
     }
 
     /// A card smaller than the portable binding must not be told it can bind more

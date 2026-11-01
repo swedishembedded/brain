@@ -2757,6 +2757,7 @@ dependencies = [
  "brain-imaging",
  "brain-kernels",
  "brain-seed",
+ "brain-testutil",
  "bytemuck",
  "serde_json",
 ]

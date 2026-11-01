@@ -1511,6 +1511,17 @@ pub trait Backend: Send + Sync {
         2 * 1024 * 1024 * 1024 - 1
     }
 
+    /// The largest binding, in bytes, of an array whose elements are 4 bytes
+    /// (`array<f32>`, `array<u32>`): what a kernel indexing by `u32` ELEMENT
+    /// reaches. [`Self::max_storage_binding_bytes`] must hold for any element
+    /// type, down to one byte, so it can be a quarter of this; a backend that
+    /// addresses in 64 bits overrides this with the larger figure. Buffers of
+    /// words (gradient records, sort keys, scan scratch) size against this
+    /// one.
+    fn max_word_binding_bytes(&self) -> u64 {
+        self.max_storage_binding_bytes()
+    }
+
     /// The largest SINGLE allocation this device will accept, in bytes - a
     /// different ceiling from [`Self::max_storage_binding_bytes`] and usually
     /// the larger of the two: a buffer may legally be bigger than any one

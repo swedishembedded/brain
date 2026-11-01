@@ -2100,6 +2100,13 @@ mod native_facade {
         pub fn max_storage_binding_bytes(&self) -> u64 {
             self.inner.max_storage_binding_bytes()
         }
+        /// Largest binding of a 4-byte-element array (`array<f32>`,
+        /// `array<u32>`) in bytes: at least [`Self::max_storage_binding_bytes`],
+        /// and larger where the backend addresses with more than 32 bits. Word
+        /// buffers - gradient records, sort keys - size against this.
+        pub fn max_word_binding_bytes(&self) -> u64 {
+            self.inner.max_word_binding_bytes()
+        }
         /// The device's memory limits as four separate answers - allocation,
         /// binding, workspace and working set. See `backend_api::MemoryLimits`
         /// for which consumer reads which; tile and slab budgets read the

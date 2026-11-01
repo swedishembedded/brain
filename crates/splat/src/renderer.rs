@@ -313,7 +313,7 @@ impl Renderer {
         let total = gpu.read(ctotal, 1)[0].to_bits() as usize;
         if self.grow && total > self.isect_cap {
             // keys and values are one word each, the largest single binding
-            let ceiling = (gpu.max_storage_binding_bytes() / 4) as usize;
+            let ceiling = (gpu.max_word_binding_bytes() / 4) as usize;
             let cap = (total + total / 4).min(ceiling);
             // the replaced buffers are reclaimed before anything allocates
             // again (see `gpu_core::reclaiming`)
@@ -712,7 +712,7 @@ pub struct BwdScratch {
 
 impl BwdScratch {
     pub fn new(gpu: &Gpu, max_n: usize, max_px: usize, rec_cap: usize) -> BwdScratch {
-        let limit = gpu.max_storage_binding_bytes();
+        let limit = gpu.max_word_binding_bytes();
         let cap = initial_record_capacity(max_n, rec_cap, limit);
         let mut s = BwdScratch {
             recs: gpu.storage(0),
@@ -773,7 +773,7 @@ impl BwdScratch {
     }
 
     fn limit(&self, gpu: &Gpu) -> u64 {
-        self.limit.unwrap_or_else(|| gpu.max_storage_binding_bytes())
+        self.limit.unwrap_or_else(|| gpu.max_word_binding_bytes())
     }
 
     /// How many instances of `channels` one band's slot grid may hold.
