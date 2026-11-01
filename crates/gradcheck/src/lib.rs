@@ -1957,7 +1957,17 @@ pub fn check_qwen35_lora_on(seed: u64, base: gpu_core::select::Dtype) -> Report 
             }
         }
     }
-    let opts = TrainOpts { base: model::ops::TierPolicy::uniform(base), ..TrainOpts::default() };
+    // Pinned to the fp32 kernels: on a device with a vendor GEMM library the default tier rounds the activation
+    // operand of a bf16 base's products to bf16, which makes the forward loss a staircase in every parameter. A
+    // central difference of it then measures the staircase (400 ulp of the loss at eps 1e-3 on CUDA, against a
+    // true change of 40), not the gradient, while the analytic gradient still agrees with the CPU's to 3e-3
+    // relative L2. The tensor-core tier is held to the reference separately, on training signal, by
+    // `qwen35/tests/lora_gemm_precision.rs`.
+    let opts = TrainOpts {
+        base: model::ops::TierPolicy::uniform(base),
+        gemm_precision: gpu_core::provider::library::GemmPrecision::Fp32Reference,
+        ..TrainOpts::default()
+    };
     let model = Qwen35::new_train_opts_on(gpu_core::Gpu::new(qwen35::model::pipelines()), cfg, 1, 12, &init, &opts);
     let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 29).collect();
     let y: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % 29).collect();

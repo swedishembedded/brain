@@ -1135,14 +1135,17 @@ tuned kernel are deferred.**
   `8.940697e-8`, `cuda_graphs.rs`/`cuda_pass.rs` cover the mechanism directly,
   and Qwen3.8-27B's decode runs through it (`decode_steady_state.rs`,
   `gguf_resident_real.rs`). No backward pass has been driven through it.
-- **One gradcheck test fails on CUDA and are skipped by name in
-  `scripts/gates/parity-gate.sh`** (they pass on Vulkan; `spectral_mixer_fft_path` was fixed (the translator now covers every WGSL bit builtin) and `conv2d_gd_reproduces_conv2d` was not a defect (the tuned conv2d and the generated conv2d_gd differ only in association and FMA; the test now bounds each against the f64 value by gamma_n*sum|xw|); found 2026-11-01 when
-  the gate gained its CUDA leg): `qwen35_lora_on_a_bf16_base_analytic_grads_
-  match_finite_differences` (LoRA-A analytic gradients 49-84 % off the finite
-  differences; the cause is not diagnosed, bf16 tensor-core rounding of the base
-  is the first suspect), `conv2d_gd_reproduces_conv2d_at_groups1_dilation1`
-  (1403 ulp apart, past the reassociation bound). Each skip leaves the
-  gate; fixing them removes the `--skip`.
+- **Three gradcheck tests that failed on CUDA (found 2026-11-01 when the
+  parity gate gained its CUDA leg) are closed and their `--skip`s are gone**:
+  `spectral_mixer_fft_path` (the translator refused `reverseBits`; every WGSL
+  bit builtin now translates, held to a host model of the spec on the card),
+  `conv2d_gd_reproduces_conv2d` (not a defect: the tuned conv2d and the
+  generated conv2d_gd differ only in association and FMA, and each is within
+  gamma_n*sum|xw| of the f64 value, which the test now asserts) and
+  `qwen35_lora_on_a_bf16_base` (not a backward defect: the default GEMM tier
+  rounds activations to bf16, so the FD of the CUDA loss is a staircase; the
+  analytic gradients match the CPU's to 5e-3, and the check now pins the fp32
+  reference tier; knowledge 408).
 - **No cost formulas** for CUDA steps in `gpu-core/src/cost.rs` (a coverage
   ratchet), and `step_native` carries no `StepMeta`, so profiling would show
   `<no-meta>`.

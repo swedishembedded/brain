@@ -48,14 +48,12 @@ run "gradcheck suite — CPU backend"    env BRAIN_DEVICE=cpu    cargo test --re
 run "gradcheck suite — Vulkan backend (incl. CPU==GPU forward parity)" \
                                        env BRAIN_DEVICE=vulkan cargo test --release -q -p brain-gradcheck --no-fail-fast -- --test-threads=1 --skip bf16_train::
 
-# CUDA line. One test fails on the CUDA backend and pass on Vulkan; they are skipped BY NAME so the rest of the
-# suite certifies CUDA, and each is an open CUDA parity defect in .agents/roadmap/cuda.md, not a pass:
-#  - qwen35_lora_on_a_bf16_base: analytic LoRA-A gradients differ from finite differences by 49-84 % on CUDA.
+# CUDA line: the whole suite, no skips (three tests that failed here were fixed or shown to be properties of the check;
+# see .agents/roadmap/cuda.md and knowledge 408).
 CUDA_DEVICE=$(cuda_device)
 if [ -n "$CUDA_DEVICE" ]; then
     run "gradcheck suite - CUDA backend on $CUDA_DEVICE (incl. CPU==CUDA forward parity)" \
-        env BRAIN_DEVICE="$CUDA_DEVICE" BRAIN_BACKEND=cuda cargo test --release -q -p brain-gradcheck --no-fail-fast -- --test-threads=1 \
-        --skip qwen35_lora_on_a_bf16_base
+        env BRAIN_DEVICE="$CUDA_DEVICE" BRAIN_BACKEND=cuda cargo test --release -q -p brain-gradcheck --no-fail-fast -- --test-threads=1
 else
     echo "=== gradcheck suite - CUDA backend: SKIP (no NVIDIA device on this machine) ==="; echo
 fi
