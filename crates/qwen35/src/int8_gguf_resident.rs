@@ -4139,7 +4139,7 @@ impl MultiDeviceResidentModel for Qwen35GgufResident {
     /// and leave between steps - the same loop every brain LLM is served by.
     fn activate_multi(&self, _key: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
         let (sched, tok, stop) = self.activate_scheduler(devices)?;
-        Ok(Box::new(llmserve::ScheduledInstance::new(llmserve::TextFrontend { tok, stop, label: "qwen35", parse: std::sync::Arc::new(parse_request) }, sched, self.max_batch as usize)))
+        Ok(Box::new(llmserve::ScheduledInstance::new(llmserve::TextFrontend::new(tok, stop, "qwen35", std::sync::Arc::new(parse_request)), sched, self.max_batch as usize)))
     }
 }
 

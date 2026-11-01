@@ -741,16 +741,69 @@ impl JobFeed for CountingFeed<'_> {
 pub type ParseFn = std::sync::Arc<dyn Fn(&QwenBpe, &Invocation) -> Result<ParsedRequest, String> + Send + Sync>;
 
 /// The [`Frontend`] of a base-model-only family.
+///
+/// Rendering and tokenizing a prompt is host work the card would wait for if the serving thread did it (milliseconds
+/// for a long prompt), so a request is built on the front end's own intake threads ([`Frontend::parse_in_background`]),
+/// started on first use and ended when the front end is dropped; the scheduler keeps decoding meanwhile.
 pub struct TextFrontend {
-    pub tok: QwenBpe,
-    pub stop: Vec<u32>,
-    pub label: &'static str,
-    pub parse: ParseFn,
+    build: std::sync::Arc<TextBuild>,
+    stop: Vec<u32>,
+    label: &'static str,
+    /// The intake threads' queue; `None` when no thread could be started (requests are then built inline).
+    intake: std::sync::OnceLock<Option<std::sync::mpsc::Sender<IntakeJob>>>,
+}
+
+/// What building a text request needs, shared with the intake threads.
+struct TextBuild {
+    tok: QwenBpe,
+    parse: ParseFn,
+}
+
+/// Threads that build text requests: a long prompt's build does not hold up the short ones that arrive with it (one
+/// thread made every request wait behind the slowest build), and more would only contend for the tokenizer's own
+/// threads.
+const INTAKE_THREADS: usize = 4;
+
+/// A request for the intake threads and where its result goes.
+type IntakeJob = (Invocation, std::sync::mpsc::Sender<Result<(ParsedRequest, Option<PromptEmbeds>), String>>);
+
+impl TextFrontend {
+    pub fn new(tok: QwenBpe, stop: Vec<u32>, label: &'static str, parse: ParseFn) -> TextFrontend {
+        TextFrontend { build: std::sync::Arc::new(TextBuild { tok, parse }), stop, label, intake: std::sync::OnceLock::new() }
+    }
+
+    fn intake(&self) -> Option<&std::sync::mpsc::Sender<IntakeJob>> {
+        self.intake
+            .get_or_init(|| {
+                let (tx, rx) = std::sync::mpsc::channel::<IntakeJob>();
+                let rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
+                let mut started = 0;
+                for i in 0..INTAKE_THREADS {
+                    let (build, rx) = (self.build.clone(), rx.clone());
+                    let spawned = std::thread::Builder::new().name(format!("{}-intake-{i}", self.label)).spawn(move || loop {
+                        // One job at a time off the shared queue; the queue closes when the front end is dropped.
+                        let Ok((inv, reply)) = rx.lock().unwrap_or_else(|e| e.into_inner()).recv() else { return };
+                        // The scheduler may have dropped the receiver (the request was cancelled): nothing to deliver.
+                        let _ = reply.send((build.parse)(&build.tok, &inv).map(|req| (req, None)));
+                    });
+                    match spawned {
+                        Ok(_) => started += 1,
+                        Err(e) => residency::log::warn(&format!("{}: intake thread {i} did not start ({e})", self.label)),
+                    }
+                }
+                if started == 0 {
+                    residency::log::warn(&format!("{}: no intake thread; requests are built on the serving thread", self.label));
+                    return None;
+                }
+                Some(tx)
+            })
+            .as_ref()
+    }
 }
 
 impl Frontend for TextFrontend {
     fn tok(&self) -> &QwenBpe {
-        &self.tok
+        &self.build.tok
     }
     fn stop(&self) -> &[u32] {
         &self.stop
@@ -759,6 +812,11 @@ impl Frontend for TextFrontend {
         self.label
     }
     fn parse(&self, inv: &Invocation) -> Result<ParsedRequest, String> {
-        (self.parse)(&self.tok, inv)
+        (self.build.parse)(&self.build.tok, inv)
+    }
+    fn parse_in_background(&self, inv: &Invocation) -> Option<Encoding> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.intake()?.send((inv.clone(), tx)).ok()?;
+        Some(rx)
     }
 }

@@ -150,7 +150,7 @@ impl ResidentModel for EdgeRockResident {
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         let tok = QwenBpe::from_file(&self.dir.join("tokenizer.json").to_string_lossy())?;
         let stop = data::generation::stop_ids(Some(&self.dir), &tok, None, Some("<|im_end|>")).map_err(|e| format!("edgerock: {e}"))?;
-        let front = Arc::new(TextFrontend { tok, stop, label: "edgerock", parse: Arc::new(|tok, inv| parse_request(tok, &with_template_flavor_default(inv))) });
+        let front = Arc::new(TextFrontend::new(tok, stop, "edgerock", Arc::new(|tok, inv| parse_request(tok, &with_template_flavor_default(inv)))));
         let src = qwen35::fp8_source::open_dir(&self.dir, &self.cfg, qwen35::fp8_source::hf_fp8_block_size(&self.dir)?)?;
         let names = src.names().into_iter().map(str::to_string).collect();
         let host = HostWeights::from_source(Box::new(src), names);

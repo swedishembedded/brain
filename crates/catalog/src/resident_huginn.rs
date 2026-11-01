@@ -218,12 +218,7 @@ impl ResidentModel for HuginnResident {
             return Err("huginn: the checkpoint declares no end-of-text token".to_string());
         }
         let format = qwen3::chat::ChatFormat::for_checkpoint(dir.as_deref(), &tok);
-        let front = Arc::new(TextFrontend {
-            tok,
-            stop,
-            label: "huginn",
-            parse: Arc::new(move |tok: &data::qwen_tokenizer::QwenBpe, inv: &Invocation| parse(tok, &format, inv)),
-        });
+        let front = Arc::new(TextFrontend::new(tok, stop, "huginn", Arc::new(move |tok: &data::qwen_tokenizer::QwenBpe, inv: &Invocation| parse(tok, &format, inv))));
         let path = self.path.clone();
         let (ctx, block, batch) = (self.ctx, self.block_size, self.max_batch);
         // The depth is resolved here, not left to the engine's own default:

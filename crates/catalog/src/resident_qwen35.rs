@@ -250,7 +250,7 @@ impl ResidentModel for Qwen35Resident {
         let ctx = self.ctx();
         let max_concurrent = self.max_concurrent();
         let exact_decode = self.sizing.exact_decode;
-        let front = Arc::new(TextFrontend { tok, stop, label: "qwen35", parse: Arc::new(parse_qwen35) });
+        let front = Arc::new(TextFrontend::new(tok, stop, "qwen35", Arc::new(parse_qwen35)));
         let (config, host) = HostWeights::open(&self.path, |config| Qwen35Config::from_json(config).param_list().into_iter().map(|(name, _)| name).collect())?;
         let build: Build = Box::new(move |host, device| {
             let sched = on_device(device, || {
@@ -787,7 +787,7 @@ impl MultiDeviceResidentModel for Qwen35GgufServed {
     fn activate_multi(&self, _key: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
         let (sched, tok, stop) = self.inner.activate_scheduler(devices)?;
         let capacity = self.inner.max_batch() as usize;
-        let front = llmserve::TextFrontend { tok, stop, label: "qwen35", parse: std::sync::Arc::new(qwen35::int8_gguf_resident::parse_request) };
+        let front = llmserve::TextFrontend::new(tok, stop, "qwen35", std::sync::Arc::new(qwen35::int8_gguf_resident::parse_request));
         Ok(Box::new(AdaptedInstance::new(front, sched, capacity, self.adapters.clone())))
     }
 }

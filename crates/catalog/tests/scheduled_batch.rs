@@ -33,7 +33,7 @@ fn raw_parse(tok: &QwenBpe, inv: &Invocation) -> Result<qwen3::chat::ParsedReque
 }
 
 fn front() -> TextFrontend {
-    TextFrontend { tok: byte_tokenizer(), stop: Vec::new(), label: "test", parse: std::sync::Arc::new(raw_parse) }
+    TextFrontend::new(byte_tokenizer(), Vec::new(), "test", std::sync::Arc::new(raw_parse))
 }
 
 fn cfg() -> Qwen35Config {
@@ -311,17 +311,60 @@ fn a_request_with_a_free_slot_is_parsed_once() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let parses = std::sync::Arc::new(AtomicUsize::new(0));
     let counted = parses.clone();
-    let front = TextFrontend {
-        tok: byte_tokenizer(),
-        stop: Vec::new(),
-        label: "test",
-        parse: std::sync::Arc::new(move |tok: &QwenBpe, inv: &Invocation| {
+    let front = TextFrontend::new(
+        byte_tokenizer(),
+        Vec::new(),
+        "test",
+        std::sync::Arc::new(move |tok: &QwenBpe, inv: &Invocation| {
             counted.fetch_add(1, Ordering::SeqCst);
             raw_parse(tok, inv)
         }),
-    };
+    );
     let mut feed = WaitingFeed { waiting: vec![(inv("late one", 2, 0.0, 5), false), (inv("late two", 2, 0.0, 6), false)], events: Vec::new() };
     llmserve::run_open_scheduled(&mut scheduler(4), &front, &[inv("first", 2, 0.0, 4)], 4, 0, &mut |_, _| {}, &mut feed);
-    assert_eq!(feed.events, ["finished 0: ok", "finished 1: ok", "finished 2: ok"]);
+    // Requests are built in parallel, so the two late ones may be admitted (and finish) in either order.
+    let mut events = feed.events.clone();
+    events.sort();
+    assert_eq!(events, ["finished 0: ok", "finished 1: ok", "finished 2: ok"]);
     assert_eq!(parses.load(Ordering::SeqCst), 3, "each of the three requests is parsed once");
+}
+
+/// A text front end tokenizes and renders a request off the serving thread: while a newly arrived request's prompt is
+/// being built, the running ones keep decoding, so a long prompt's host work does not idle the card. The slow build
+/// waits for a gate that only a token streamed after the build began opens; built inline, the build holds the serving
+/// thread, nothing streams, and only the build's own safety timeout releases it.
+#[test]
+fn a_text_request_is_built_while_the_others_keep_decoding() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (began, gate, released_by_gate) = (std::sync::Arc::new(AtomicBool::new(false)), std::sync::Arc::new(AtomicBool::new(false)), std::sync::Arc::new(AtomicBool::new(false)));
+    let (b, g, released) = (began.clone(), gate.clone(), released_by_gate.clone());
+    let front = TextFrontend::new(
+        byte_tokenizer(),
+        Vec::new(),
+        "test",
+        std::sync::Arc::new(move |tok: &QwenBpe, inv: &Invocation| {
+            if inv.get_bool("slow").unwrap_or(false) {
+                b.store(true, Ordering::SeqCst);
+                for _ in 0..500 {
+                    if g.load(Ordering::SeqCst) {
+                        released.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+            raw_parse(tok, inv)
+        }),
+    );
+    // The slow request arrives as the group starts (the feed's first poll), with every token of the fast one still to come.
+    let mut feed = ScriptedFeed { late: vec![(1, inv("slow one", 3, 0.0, 7).set("slow", json!(true)))], polls: 0, finished: Vec::new() };
+    let (b, g) = (began.clone(), gate.clone());
+    llmserve::run_open_scheduled(&mut scheduler(4), &front, &[inv("fast one", 14, 0.0, 8)], 4, 0, &mut |i, _| {
+        if i == 0 && b.load(Ordering::SeqCst) {
+            g.store(true, Ordering::SeqCst);
+        }
+    }, &mut feed);
+    assert!(released_by_gate.load(Ordering::SeqCst), "the slow request's build held the serving thread until its timeout: nothing decoded meanwhile");
+    assert_eq!(feed.finished.len(), 2);
+    assert!(feed.finished.iter().all(|(_, r)| r.is_ok()), "{:?}", feed.finished);
 }
