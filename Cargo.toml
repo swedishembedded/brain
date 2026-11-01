@@ -455,11 +455,17 @@ openvino = { version = "0.11", default-features = false, features = ["runtime-li
 
 # HTTP provider-API surface (crates/apiserve): axum/tower/tokio stack. Confined to
 # that crate - the core compute graph never links these.
-axum = { version = "0.7" }
+axum = { version = "0.7", features = ["multipart"] }
 tower = { version = "0.5", features = ["limit", "load-shed", "timeout", "util"] }
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
 tokio-stream = "0.1"
+# Speech uploads (crates/audio's `decode`): libopus, the reference decoder,
+# built from its bundled source (BSD-3-Clause; needs cmake), and the pure-Rust
+# Ogg and Matroska/WebM demuxers around it. Models only ever see 16 kHz PCM.
+opus = "0.4"
+ogg = "0.9"
+matroska-demuxer = "0.8"
 futures = "0.3"
 async-stream = "0.3"
 uuid = { version = "1", features = ["v4"] }

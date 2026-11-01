@@ -2,10 +2,12 @@
 
 ## Prerequisites
 
-The only hard prerequisite is a **Rust toolchain** (install via
-[rustup](https://rustup.rs)) — brain is a self-contained Cargo workspace, and
-the core build/test path needs nothing else: no Python, no PyTorch, no
-external C/C++ dependencies.
+The hard prerequisites are a **Rust toolchain** (install via
+[rustup](https://rustup.rs)) and **CMake with a C compiler** (Debian/Ubuntu:
+`sudo apt install cmake build-essential`). brain is a self-contained Cargo
+workspace: no Python, no PyTorch, and one C library, libopus, which the
+build compiles from its bundled source so the speech-to-text API can decode
+Opus recordings (the format browsers record).
 
 A few things are optional, needed only for specific paths:
 

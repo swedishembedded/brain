@@ -30,7 +30,8 @@ use crate::png;
 use crate::state::AppState;
 use crate::surface::Provider;
 
-/// OpenAI chat/embeddings/image routes (merged onto the shared `/models` router).
+/// OpenAI chat/embeddings/image/transcription routes (merged onto the shared
+/// `/models` router).
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/chat/completions", post(chat_completions))
@@ -41,6 +42,8 @@ pub fn routes() -> Router<AppState> {
         .route("/embeddings", post(embeddings))
         .route("/v1/images/generations", post(images_generations))
         .route("/images/generations", post(images_generations))
+        .route("/v1/audio/transcriptions", post(crate::audio::transcriptions))
+        .route("/audio/transcriptions", post(crate::audio::transcriptions))
 }
 
 /// `POST /chat/completions` — real chat (non-stream + SSE) on the OpenAI dialect.

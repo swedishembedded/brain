@@ -15,7 +15,7 @@ transducer. For offline batch transcription of a complete clip instead, see
 | Inference             | [x] |
 | LoRA fine-tune         | [ ] |
 | CLI                    | [x] |
-| HTTP API               | [ ] |
+| HTTP API               | [x] (`/v1/audio/transcriptions`) |
 | D-Bus                  | [x] |
 | Batched/streaming serving | [x] (real streaming + batching: concurrent windows sharing a language prompt fold into one forward pass) |
 
@@ -72,5 +72,7 @@ BRAIN_NEMOTRONASR=/path/to/nemotron/hf dbus-run-session -- bash -c '
 
 ## Hardware and limits
 
-No LoRA/fine-tuning or from-scratch training command today. No HTTP
-endpoint - CLI and D-Bus only.
+No LoRA/fine-tuning or from-scratch training command today. Offline
+`transcribe` is served over HTTP on `POST /v1/audio/transcriptions` (see
+[the HTTP reference](../api/http.md)); the live `transcribe_stream` session is
+D-Bus only.

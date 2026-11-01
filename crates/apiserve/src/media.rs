@@ -89,20 +89,19 @@ fn decode_image_base64(payload: &str) -> Result<Blob, String> {
     ExtractedMedia::decode_image(&b64::decode(payload)?)
 }
 
-/// Decode one `input_audio` part's base64 payload (a whole WAV/MP3 FILE per
-/// OpenAI's schema - not raw PCM) into brain's raw-16kHz-mono-PCM audio
-/// blob (`audio::asr_caps`'s wire convention). Only WAV is actually
-/// decodable today - no MP3 decoder exists in this workspace - an MP3
-/// payload errors clearly rather than silently producing garbage/empty
-/// audio.
+/// Decode one `input_audio` part's base64 payload (a whole recording FILE per
+/// OpenAI's schema - not raw PCM) into brain's raw-16kHz-mono-PCM audio blob
+/// (`audio::asr_caps`'s wire convention), through the same decoder as
+/// `/audio/transcriptions`: WAV, Ogg/Opus or WebM/Opus, told from the bytes.
+/// A `format` naming anything else (MP3, for which no decoder exists here) is
+/// refused clearly rather than guessed at.
 fn decode_input_audio(b64_data: &str, format: &str) -> Result<Blob, String> {
-    if format != "wav" {
-        return Err(format!("input_audio: only format 'wav' is supported (no MP3 decoder in this workspace), got {format:?}"));
+    if !matches!(format, "wav" | "ogg" | "opus" | "webm") {
+        return Err(format!("input_audio: format {format:?} is not supported; accepted formats are {}", audio::decode::ACCEPTED_FORMATS));
     }
     let bytes = b64::decode(b64_data)?;
-    // The shared "WAV file → brain audio blob" decode (`brain do --in
-    // audio=clip.wav` goes through the same one).
-    audio::asr_caps::audio_blob_from_wav(&bytes).map_err(|e| format!("input_audio: {e}"))
+    let samples = audio::decode::decode_speech(&bytes, crate::audio::MAX_TRANSCRIPTION_SECONDS).map_err(|e| format!("input_audio: {e}"))?;
+    Ok(audio::asr_caps::audio_blob_from_samples(&samples))
 }
 
 /// Scan OpenAI-shaped `messages` (the RAW pre-flatten request array) for

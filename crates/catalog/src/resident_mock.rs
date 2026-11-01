@@ -142,6 +142,47 @@ impl ResidentModel for MockResident {
     }
 }
 
+/// The deterministic mock speech-to-text model (`BRAIN_MOCK`, beside
+/// [`MockResident`]): speech-only, so it exercises exactly the path a real ASR
+/// checkpoint takes - discovered from its `transcribe` action alone, listed as
+/// audio-in/text-out, served on `/audio/transcriptions`.
+pub const ASR_MODEL: &str = "brain/mock-asr";
+
+/// The text [`MockAsrResident`] answers for `samples` of 16 kHz audio: the
+/// duration it received, so every layer above can assert what arrived.
+pub fn mock_transcript(samples: usize) -> String {
+    format!("mock transcript {} ms", samples * 1000 / audio::asr_caps::ASR_SAMPLE_RATE as usize)
+}
+
+pub struct MockAsrResident;
+
+impl ResidentModel for MockAsrResident {
+    fn manifest(&self) -> Manifest {
+        Manifest::new(ASR_MODEL, "deterministic mock speech-to-text model", vec![audio::asr_caps::transcribe_spec()])
+    }
+    fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
+        InstanceKey::new(ASR_MODEL, "default")
+    }
+    fn estimate(&self, _key: &InstanceKey) -> MemCost {
+        MemCost::new(16 << 20, 0)
+    }
+    fn activate(&self, _key: &InstanceKey, _device: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(MockAsrInstance))
+    }
+}
+
+struct MockAsrInstance;
+
+impl Instance for MockAsrInstance {
+    fn run(&mut self, action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        if action != "transcribe" {
+            return Err(format!("mock-asr: unknown action '{action}'"));
+        }
+        let samples = audio::asr_caps::wav_from_blob(inv.get_blob("audio").ok_or("mock-asr: transcribe needs an `audio` blob")?)?;
+        Ok(audio::asr_caps::transcription_outcome(mock_transcript(samples.len()), &[]))
+    }
+}
+
 /// The built mock instance (holds nothing — actions are pure functions).
 struct MockInstance;
 
@@ -511,6 +552,15 @@ mod tests {
             MockResident.manifest().actions.iter().any(|a| a.name == "forecast"),
             "forecast must be advertised"
         );
+    }
+
+    #[test]
+    fn mock_asr_is_a_speech_only_model_reporting_what_it_heard() {
+        let caps = apiserve::api_caps(&MockAsrResident.manifest());
+        assert!(caps.transcription && !caps.chat && !caps.embeddings && !caps.image);
+        let inv = Invocation::new().blob("audio", audio::asr_caps::audio_blob_from_samples(&[0.0; 8_000]));
+        let out = MockAsrInstance.run("transcribe", &inv, &mut |_| {}).unwrap();
+        assert_eq!(out.outputs["text"], "mock transcript 500 ms");
     }
 
     #[test]

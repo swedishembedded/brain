@@ -30,7 +30,12 @@
 //!   action; image-*editing* models (restore/upscale/vqgan) emit `Image` too but have
 //!   no such action and would otherwise be advertised on a route that answers 404 for them.
 //!
-//! OpenAI/OpenRouter expose Chat ∪ Embeddings ∪ ImageGen; Anthropic exposes Chat.
+//! - **Transcription**: an action **named `transcribe`** taking an `audio` blob and
+//!   emitting `Text` - the shared speech-to-text contract
+//!   (`audio::asr_caps::transcribe_spec`) that `/audio/transcriptions` dispatches.
+//!
+//! OpenAI/OpenRouter expose Chat ∪ Embeddings ∪ ImageGen ∪ Transcription;
+//! Anthropic exposes Chat.
 
 use capability::{Manifest, Media};
 use residency::Executor;
@@ -48,12 +53,14 @@ pub struct CapSet {
     pub vision: bool,
     pub embeddings: bool,
     pub image: bool,
+    /// Speech to text, served on `/audio/transcriptions`.
+    pub transcription: bool,
 }
 
 impl CapSet {
     /// Does this model advertise any exposable capability?
     pub fn any(&self) -> bool {
-        self.chat || self.embeddings || self.image
+        self.chat || self.embeddings || self.image || self.transcription
     }
 
     /// What a chat request to this model may carry, as model cards spell it.
@@ -67,7 +74,14 @@ impl CapSet {
 
     /// The capability names a model card lists, in a fixed order.
     pub fn names(&self) -> Vec<&'static str> {
-        [("chat", self.chat), ("tools", self.tools), ("vision", self.vision), ("embeddings", self.embeddings), ("images", self.image)]
+        [
+            ("chat", self.chat),
+            ("tools", self.tools),
+            ("vision", self.vision),
+            ("embeddings", self.embeddings),
+            ("images", self.image),
+            ("transcription", self.transcription),
+        ]
             .into_iter()
             .filter_map(|(name, on)| on.then_some(name))
             .collect()
@@ -113,7 +127,12 @@ pub fn api_caps(m: &Manifest) -> CapSet {
     let tools = chat && m.actions.iter().any(|a| a.name == "generate" && a.params.iter().any(|p| p.name == "tools"));
     // The same rule the chat bridge refuses images by: the action takes an `image` input.
     let vision = chat && m.actions.iter().any(|a| a.name == "generate" && a.inputs.iter().any(|b| b.name == "image"));
-    CapSet { chat, tools, vision, embeddings, image }
+    let transcription = m.actions.iter().any(|a| {
+        a.name == "transcribe"
+            && a.inputs.iter().any(|b| b.name == "audio" && b.media == Media::Audio)
+            && a.outputs.iter().any(|o| o.media == Media::Text)
+    });
+    CapSet { chat, tools, vision, embeddings, image, transcription }
 }
 
 /// Does `provider` expose a model with capabilities `caps`?
@@ -121,7 +140,8 @@ pub fn exposes(provider: Provider, caps: CapSet) -> bool {
     match provider {
         // The Anthropic Messages API is chat-only.
         Provider::Anthropic => caps.chat,
-        // OpenAI/OpenRouter carry chat, embeddings, and image generation.
+        // OpenAI/OpenRouter carry chat, embeddings, image generation and
+        // transcription.
         Provider::OpenAI | Provider::OpenRouter => caps.any(),
     }
 }
@@ -166,6 +186,16 @@ pub fn resolve_text(manifests: &[Manifest], model: &str) -> Option<bool> {
 /// is a `model_not_found`. Snapshot-taking — see [`resolve_chat`].
 pub fn resolve_embed(manifests: &[Manifest], model: &str) -> bool {
     manifests.iter().any(|m| m.model == model && api_caps(m).embeddings)
+}
+
+/// Resolve a transcription request's `model` string: `Some` when there is a
+/// manifest whose `model == id` that advertises transcription, holding whether
+/// its `transcribe` action declares a `language` param (so a requested language
+/// is passed only to a model that takes one). Snapshot-taking - see
+/// [`resolve_chat`].
+pub fn resolve_transcription(manifests: &[Manifest], model: &str) -> Option<bool> {
+    let m = manifests.iter().find(|m| m.model == model && api_caps(m).transcription)?;
+    Some(m.actions.iter().any(|a| a.name == "transcribe" && a.params.iter().any(|p| p.name == "language")))
 }
 
 /// Resolve an image request's `model` string to the **action name** to invoke: is

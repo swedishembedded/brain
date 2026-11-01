@@ -5,8 +5,9 @@
 //! OpenAI (it reuses [`crate::openai::handle_chat`]) with `native = true`, which
 //! adds OpenRouter's `native_finish_reason` (the contract finish_reason,
 //! verbatim) and the
-//! `system_fingerprint` its `ChatResult` requires. Embeddings and image generation
-//! reuse the shared OpenAI handlers verbatim (identical request grammar).
+//! `system_fingerprint` its `ChatResult` requires. Embeddings, image generation
+//! and transcription reuse the shared handlers verbatim (identical request
+//! grammar; transcription also takes OpenRouter's JSON `input_audio`).
 
 use axum::body::Bytes;
 use axum::extract::State;
@@ -18,7 +19,8 @@ use crate::auth::CallerExt;
 use crate::openai;
 use crate::state::AppState;
 
-/// OpenRouter chat/embeddings/image routes (merged onto the shared `/models` router).
+/// OpenRouter chat/embeddings/image/transcription routes (merged onto the
+/// shared `/models` router).
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/chat/completions", post(chat_completions))
@@ -27,6 +29,8 @@ pub fn routes() -> Router<AppState> {
         .route("/embeddings", post(embeddings))
         .route("/v1/images/generations", post(images_generations))
         .route("/images/generations", post(images_generations))
+        .route("/v1/audio/transcriptions", post(crate::audio::transcriptions))
+        .route("/audio/transcriptions", post(crate::audio::transcriptions))
 }
 
 /// `POST /chat/completions` — the OpenAI chat handler with OpenRouter's response

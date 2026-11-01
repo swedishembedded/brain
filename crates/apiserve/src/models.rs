@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 
 use residency::AdapterIdentity;
 
-use crate::catalog::{self, ModelInfo};
+use crate::catalog::{self, CapSet, ModelInfo};
 use crate::error::ApiError;
 use crate::state::AppState;
 use crate::surface::Provider;
@@ -145,6 +145,33 @@ fn add_discovery(card: &mut Value, info: &ModelInfo, adapter: Option<&AdapterIde
     }
 }
 
+/// What a model takes in and gives out, in OpenRouter's modality names: text
+/// for chat and embeddings, audio for a transcription model, and image output
+/// for an image generator. A model that does several lists the union.
+fn modalities(caps: CapSet) -> (Vec<&'static str>, Vec<&'static str>) {
+    let mut input = Vec::new();
+    let mut output = Vec::new();
+    if caps.chat || caps.embeddings || caps.image {
+        input.push("text");
+    }
+    if caps.vision {
+        input.push("image");
+    }
+    if caps.transcription {
+        input.push("audio");
+    }
+    if caps.chat || caps.transcription {
+        output.push("text");
+    }
+    if caps.embeddings {
+        output.push("embeddings");
+    }
+    if caps.image {
+        output.push("image");
+    }
+    (input, output)
+}
+
 /// OpenRouter's richer model card (validates against its `Model` schema).
 /// `context_length` is a real, documented field of this dialect (unlike
 /// OpenAI's) - use the model's actual capacity when known, the conservative
@@ -153,6 +180,7 @@ fn add_discovery(card: &mut Value, info: &ModelInfo, adapter: Option<&AdapterIde
 fn openrouter_card(info: &ModelInfo) -> Value {
     let name = info.name.as_str();
     let ctx = info.max_context_tokens.unwrap_or(FALLBACK_CONTEXT_LENGTH);
+    let (input, output) = modalities(info.caps);
     json!({
         "id": name,
         "canonical_slug": name,
@@ -161,9 +189,9 @@ fn openrouter_card(info: &ModelInfo) -> Value {
         "description": format!("brain-served model '{name}'"),
         "context_length": ctx,
         "architecture": {
-            "modality": if info.caps.vision { "text+image->text" } else { "text->text" },
-            "input_modalities": info.caps.input_modalities(),
-            "output_modalities": ["text"],
+            "modality": format!("{}->{}", input.join("+"), output.join("+")),
+            "input_modalities": input,
+            "output_modalities": output,
             "tokenizer": "Other",
             "instruct_type": Value::Null,
         },

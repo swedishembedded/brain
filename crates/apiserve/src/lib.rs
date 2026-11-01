@@ -39,6 +39,7 @@
 //! and these HTTP surfaces.
 
 pub mod anthropic;
+pub mod audio;
 pub mod auth;
 pub mod b64;
 pub mod bridge;

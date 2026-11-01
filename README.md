@@ -67,7 +67,7 @@ runs ([`docs/guides/hardware/choosing-hardware.md`](docs/guides/hardware/choosin
 
 ## Get started
 
-Build it (a recent stable Rust toolchain is all it needs):
+Build it (a recent stable Rust toolchain, plus CMake and a C compiler for the bundled libopus):
 
 ```bash
 make build/release

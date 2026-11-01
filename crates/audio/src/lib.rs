@@ -30,6 +30,7 @@ pub mod act;
 pub mod asr_caps;
 pub mod asr_frontend;
 pub mod conv;
+pub mod decode;
 pub mod istft;
 pub mod kaldi_fbank;
 pub mod mel;

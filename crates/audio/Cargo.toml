@@ -16,6 +16,9 @@ brain-data.workspace = true
 brain-capability.workspace = true
 serde_json.workspace = true
 bytemuck.workspace = true
+opus.workspace = true
+ogg.workspace = true
+matroska-demuxer.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true

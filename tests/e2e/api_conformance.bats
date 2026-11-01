@@ -877,3 +877,85 @@ get_url() {
   grep -qi '^retry-after:[[:space:]]*[0-9]' "$hdrs"    # a numeric back-off hint
   validate openai.json ErrorResponse "$out"
 }
+
+# ----------------------------------------------------------- transcription
+
+# A 16-bit mono WAV of <seconds> of a quiet tone at <rate>, made with the
+# standard library so the suite needs no audio tool: wav_file <path> <seconds> <rate>
+wav_file() {
+  python3 -I - "$1" "$2" "$3" <<'PY'
+import math, struct, sys, wave
+path, seconds, rate = sys.argv[1], float(sys.argv[2]), int(sys.argv[3])
+with wave.open(path, "wb") as w:
+    w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate)
+    w.writeframes(b"".join(struct.pack("<h", int(3000 * math.sin(i * 0.05))) for i in range(int(seconds * rate))))
+PY
+}
+
+# Multipart upload helper: upload <provider> <path> <file> [extra curl -F args...]
+upload() {
+  local prov="$1" path="$2" file="$3"
+  shift 3
+  local out="$CONF_DIR/resp.json"
+  STATUS=$(curl -sS --max-time 15 -o "$out" -w '%{http_code}' \
+    -H "$(auth_hdr "$prov")" -F "file=@$file" "$@" -X POST "$(base "$prov")$path")
+  RESP="$out"
+}
+
+@test "transcription: the speech-only mock is listed as audio in, text out" {
+  get_url openai /v1/models
+  [ "$(jq -r '.data[] | select(.id == "brain/mock-asr") | .capabilities | join(",")' "$RESP")" = "transcription" ]
+  get_url openrouter /models
+  [ "$(jq -r '.data[] | select(.id == "brain/mock-asr") | .architecture.modality' "$RESP")" = "audio->text" ]
+  validate openrouter.json ModelsListResponse "$RESP"
+  get_url anthropic /v1/models
+  [ "$(jq -r '.data | map(.id) | index("brain/mock-asr")' "$RESP")" = "null" ]
+}
+
+@test "transcription: a multipart WAV is transcribed on openai and openrouter" {
+  wav_file "$CONF_DIR/clip.wav" 2.5 48000
+  upload openai /v1/audio/transcriptions "$CONF_DIR/clip.wav" -F model=brain/mock-asr -F language=en
+  [ "$STATUS" -eq 200 ]
+  [ "$(jq -r '.text' "$RESP")" = "mock transcript 2500 ms" ]
+  [ "$(jq -r '.usage.seconds' "$RESP")" = "2.5" ]
+  upload openrouter /audio/transcriptions "$CONF_DIR/clip.wav" -F model=brain/mock-asr
+  [ "$STATUS" -eq 200 ]
+  [ "$(jq -r '.text' "$RESP")" = "mock transcript 2500 ms" ]
+}
+
+@test "transcription: openrouter JSON input_audio is transcribed" {
+  wav_file "$CONF_DIR/clip.wav" 1 16000
+  jq -n --arg data "$(base64 -w0 "$CONF_DIR/clip.wav")" \
+    '{model: "brain/mock-asr", input_audio: {data: $data, format: "wav"}}' > "$CONF_DIR/req.json"
+  post_json openrouter /v1/audio/transcriptions "@$CONF_DIR/req.json"
+  [ "$STATUS" -eq 200 ]
+  [ "$(jq -r '.text' "$RESP")" = "mock transcript 1000 ms" ]
+}
+
+@test "transcription: Opus in Ogg and in live WebM, as real encoders write them" {
+  command -v ffmpeg >/dev/null 2>&1 || skip "ffmpeg not installed (the Rust unit tests still cover Opus)"
+  wav_file "$CONF_DIR/clip.wav" 3 16000
+  ffmpeg -v error -y -i "$CONF_DIR/clip.wav" -c:a libopus -b:a 24k "$CONF_DIR/clip.ogg"
+  ffmpeg -v error -y -i "$CONF_DIR/clip.wav" -c:a libopus -b:a 24k -live 1 -f webm "$CONF_DIR/clip.webm"
+  for f in clip.ogg clip.webm; do
+    upload openai /v1/audio/transcriptions "$CONF_DIR/$f" -F model=brain/mock-asr
+    [ "$STATUS" -eq 200 ]
+    # Opus framing pads and trims a few milliseconds at the edges.
+    ms=$(jq -r '.text' "$RESP" | awk '{print $3}')
+    [ "$ms" -ge 2950 ] && [ "$ms" -le 3050 ]
+  done
+}
+
+@test "transcription: bad uploads are 400 in the dialect's error shape, no key is 401" {
+  printf 'ID3 not a recording' > "$CONF_DIR/clip.mp3"
+  upload openai /v1/audio/transcriptions "$CONF_DIR/clip.mp3" -F model=brain/mock-asr
+  [ "$STATUS" -eq 400 ]
+  validate openai.json ErrorResponse "$RESP"
+  jq -r '.error.message' "$RESP" | grep -q 'wav, ogg (opus), webm (opus)'
+  wav_file "$CONF_DIR/clip.wav" 1 16000
+  upload openai /v1/audio/transcriptions "$CONF_DIR/clip.wav" -F model=brain/mock
+  [ "$STATUS" -eq 404 ]
+  local st
+  st=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -F "file=@$CONF_DIR/clip.wav" -F model=brain/mock-asr "$(base openai)/v1/audio/transcriptions")
+  [ "$st" -eq 401 ]
+}

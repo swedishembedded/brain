@@ -36,7 +36,20 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
 | token count | `POST /v1/messages/count_tokens` | - | - |
 | embeddings | - | `POST /embeddings` | `POST /embeddings` |
 | image generation | - | `POST /images/generations` | `POST /images/generations` |
+| transcription (speech to text) | - | `POST /audio/transcriptions` | `POST /audio/transcriptions` |
 
+- **Transcription** (`POST /v1/audio/transcriptions`, also without `/v1`): an
+  OpenAI multipart form (`file`, `model`, optional `language` as an ISO-639-1
+  code; `response_format` may only be `json`) or OpenRouter's JSON
+  (`{"model", "input_audio": {"data": <base64>, "format"}, "language"?}`). The
+  recording may be WAV (any rate, mono or stereo), Ogg/Opus or WebM/Opus,
+  including the unknown-length WebM a live browser `MediaRecorder` writes; the
+  container is read from the bytes, not from `format`. At most 300 s and the
+  8 MiB body limit per request. A malformed, unsupported, empty or over-long
+  recording is a 400 before any model runs. The answer is
+  `{"text", "usage": {"type": "duration", "seconds"}}`, where `seconds` is the
+  decoded duration. `language` reaches a model only if its `transcribe` action
+  takes one.
 - **Streaming** (`stream:true`): Anthropic emits `message_start`, then per content
   block (the thinking block, when the model reasons, then the text block)
   `content_block_start → content_block_delta* → content_block_stop`, then
@@ -201,7 +214,8 @@ error `code`: `not_installed` (404), `failed_to_load` (500),
 ## Which models each provider exposes
 
 `/models` per provider lists only the loaded models whose capability fits that
-provider: OpenAI/OpenRouter = chat ∪ embeddings ∪ image-gen; Anthropic = chat. A model
+provider: OpenAI/OpenRouter = chat ∪ embeddings ∪ image-gen ∪ transcription;
+Anthropic = chat. A model
 that can't satisfy an endpoint → `model_not_found` (404).
 
 Models come from the **global model directory** (`--models-dir` / `BRAIN_MODELS_DIR`,
@@ -223,7 +237,7 @@ The Anthropic entry is unchanged.
 
 | Field | Meaning |
 |---|---|
-| `capabilities` | Names derived from the model's manifest: `chat`, `tools` (chat whose `generate` accepts `tools`), `vision` (chat whose `generate` reads `image` inputs; image parts sent to any other model are refused with 400), `embeddings`, `images`. |
+| `capabilities` | Names derived from the model's manifest: `chat`, `tools` (chat whose `generate` accepts `tools`), `vision` (chat whose `generate` reads `image` inputs; image parts sent to any other model are refused with 400), `embeddings`, `images`, `transcription` (a `transcribe` action taking `audio`). On OpenRouter the card's `architecture` modalities follow from the same set, e.g. `audio->text` for a speech model. |
 | `max_images_per_request`, `max_image_pixels_per_request` | On a `vision` model: the most images, and pixels over all of them, one request may carry; a request past either is refused with 400. |
 | `architecture.input_modalities` | On a chat model: `["text", "image"]` for a `vision` model, else `["text"]` (the field an agent runtime reads to decide whether it may attach images). |
 | `max_output_tokens` | The most new tokens one request may ask for, when the model's `generate` action declares an upper bound. On OpenRouter it is also `top_provider.max_completion_tokens`. |

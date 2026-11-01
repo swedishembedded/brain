@@ -14,7 +14,7 @@ Qwen3-1.7B decoder. For live/streaming transcription instead, see
 | Inference             | [x] |
 | LoRA fine-tune         | [ ] |
 | CLI                    | [x] |
-| HTTP API               | [ ] |
+| HTTP API               | [x] (`/v1/audio/transcriptions`) |
 | D-Bus                  | [x] |
 | Batched/streaming serving | [ ] (offline, single-request) |
 
@@ -65,4 +65,5 @@ protocol.
 ## Hardware and limits
 
 No LoRA/fine-tuning or from-scratch training command today. Processes one
-request at a time. No HTTP endpoint - CLI and D-Bus only.
+request at a time. Served over HTTP on `POST /v1/audio/transcriptions`
+(see [the HTTP reference](../api/http.md)), the CLI and D-Bus.
