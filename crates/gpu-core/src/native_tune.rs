@@ -113,14 +113,16 @@ const PREFILL: Grid = Grid {
 };
 
 /// The FP8 linear, every row count: the streaming classes of the decode steps of any batch up to 128 rows (the weights are
-/// read once for all of them) and the compute-bound rounds past it. Weight bytes are one byte a weight, so the bytes classes
-/// are the int8 grids' (about 1.5 to 90 MB per class at a decode batch, 10 to 100 MB for a round).
+/// read once for all of them) and the compute-bound rounds past it. A class is timed at a width inside its bytes range near
+/// where the products of the large models fall (6, 35, 71 and 200 MB at the narrow `K`, 5, 40, 100 and 321 MB at the wide
+/// one): the winner of a streaming class flips with the width (at 16 rows the tensor-map swap GEMM beats the GEMVs on a
+/// 200 MB product and loses on an 84 MB one), so a representative far from the served widths picks for shapes no model runs.
 const FP8: Grid = Grid {
     rows: &[(1, 1), (2, 2), (3, 4), (5, 8), (9, 16), (17, 32), (33, 64), (65, 128), (129, 256), (257, 512), (513, 1024), (1025, 4096)],
     open_top: true,
     k: [5120, 17408],
-    bytes_bounds: [4 << 20, 16 << 20, 64 << 20],
-    n_reps: [[256, 1024, 4096, 16384], [64, 256, 1024, 4096]],
+    bytes_bounds: [8 << 20, 48 << 20, 128 << 20],
+    n_reps: [[1024, 6144, 12288, 34816], [256, 2048, 5120, 16384]],
     footprint_bytes: 192 << 20,
     stream_max_rows: 128,
     fp8: true,
@@ -1326,6 +1328,18 @@ mod tests {
 
     /// The prefill grid starts where the decode grid ends and takes every wider round into its last class, so no
     /// prefill-sized dispatch is left to the default for being wider than the grid.
+    /// A class is timed on a problem that belongs to it: each grid's representative widths fall inside their own bytes
+    /// class, at either `K` class.
+    #[test]
+    fn every_class_is_timed_on_a_problem_of_its_own_class() {
+        for g in [&DECODE, &PREFILL, &FP8] {
+            for class in Class::all(g) {
+                let (m, kg, n) = class.problem(g);
+                assert_eq!(Class::of(g, m, kg, n), Some(class), "the representative {m} x {kg} x {n} is timed for another class");
+            }
+        }
+    }
+
     #[test]
     fn the_prefill_grid_continues_the_decode_grid_and_is_open_above() {
         let decode_top = DECODE.rows[DECODE.rows.len() - 1].1;
