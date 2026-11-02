@@ -659,6 +659,16 @@ Mixed-iteration idle (knowledge 392, 2026-10-30): a prompt start no longer waits
   8192 rows 2284 us against FP8's 1213; 8K x 1 TTFT 909 ms against vLLM's 783), the 64-row build is no faster than the tile decode and the head at 64 rows is 2.5 ms, 8K x 16 TPOT 69 ms against vLLM's 43;
   `qops_gemv_small_m` fails on the base at its FP8 check (the half-precision `matmul_fp8_gemv_f16_*` candidate against a 1e-5 tolerance).
 
+- 2026-11-02 (NVFP4 on the FP8 tensor cores, knowledge 433): an NVFP4 weight now feeds the FP8 tensor cores from its codes, no bf16 copy: `matmul_nvfp4_wgmma` (256 x 128 tile, persistent grid, two decoder warpgroups that turn the TMA-loaded code and scale tiles into the
+  swizzled E4M3 operand in shared memory through a table of 256 entries a scale byte and four `prmt` per eight codes, two consumer warpgroups on `wgmma m64n128k32`) from 17 rows (33 for a weight under 96 tiles), and `matmul_nvfp4_mmae{8,16,32}` (E4M3 `mma.sync`, the
+  codes decoded in registers) for 2 to 16 rows (32); the weight operand is `RN_e4m3(code * scale / 8)` (worst relative error 0.0476), the activations E4M3 with one scale a row (`quant_e4m3_row`; a scale along K cost a quarter of the kernel). Whole products, gpu0, us,
+  base -> now: gate/up 16 rows 70 -> 55, 64 rows 258 -> 86, 256 rows 236 -> 104, 8192 rows 2289 -> 1615 (FP8 42 / 42 / 67 / 1212); down 16 rows 65 -> 48, 64 rows 214 -> 126, 8192 rows 2387 -> 1818; lm_head 16 rows 651 -> 522, 64 rows 2482 -> 619 (FP8 387 / 385).
+  Parity (`qwen35_fp8_parity`, 8 x ~1300 tokens, the release against its own bf16 decode): 98.83 % -> 99.61 % agreement, mean KL 1.17e-3 -> 1.685e-3 (the E4M3 activations cost the MLP what they cost the FP8 release, 1.76e-3; the brief's KL bar is not met), no flip above margin 0.5.
+  Served gpu0 (bf16 KV, f32 state, no speculation, two interleaved rounds, base b79ecf10c) tok/s | TTFT ms | TPOT ms: 8K x 1 67.2 | 936 | 11.3 -> 71.5 | 700 | 11.3; 8K x 16 218.5 | 4805 | 54.1 -> 260.7 | 3976 | 45.5 (vLLM 266.5 | 4374 | 42.8); 32K x 16 62.7 | 18638 | 180.3 -> 74.4 |
+  15527 | 152.3 (vLLM 70.5 | 9737 | 186.9 from the 2026-11-01 run); 8K x 64 241.9 | 15325 | 200.2 -> 307.8 | 12637 | 155.6. Stress (20 launches a batch, 40 s at each served shape, bit-identical, no new Xid). Open: the autotuner does not time these candidates (thresholds
+  `NVFP4_WGMMA_MIN_ROWS` / `NVFP4_WGMMA_FILL_TILES` instead: `native_tune` knows int8 and FP8 weights only); 16 rows 53 us (gate/up) against FP8's 35; the 5120-row down projection fills 40 of 132 SMs in the GEMM; 8192 rows 1566 us against FP8's 1271;
+  an E4M3 row-scaled producer for the silu product; bf16 operands (exact weights, KL 1.17e-3) would need a bf16 `wgmma` at half the rate.
+
 - 2026-11-01 (decode glue, step 1: the fused norm as a cluster of five small blocks, knowledge 420): `add_rms_quant_e4m3_cluster` (one 1024-element span a 256-thread block, 4 KiB of shared memory, the squares
   exchanged through the cluster in the one-block form's order: bit for bit, a host model of the order is the gate) serves `Fused::AddRmsQuantE4m3` for <= 32 rows on Hopper; the one-block form serves the rest.
   A 1024-thread block a row was 12 % faster isolated and made the step 1.9 % slower: its 20 KiB of shared memory kept the PDL-launched FP8 product (210 KiB of its ring) from being resident beside it. nsys exclusive
