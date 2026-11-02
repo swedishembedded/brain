@@ -48,7 +48,7 @@ fn an_nvfp4_weight_against_many_rows_runs_on_the_fp8_tensor_cores_and_agrees_to_
     if ops.gpu().kind() != "cuda" || !ops.gpu().has_fused(gpu_core::Fused::MatmulNvfp4Wgmma) {
         return brain_testutil::skip_unavailable("the NVFP4 tensor-core product needs a CUDA device with warpgroup tensor cores");
     }
-    for (n, k) in [(300usize, 512usize), (4500, 256)] {
+    for (n, k) in [(300usize, 512usize), (13_000, 256)] {
         let w = nvfp4_weight(&ops, n, k);
         let wd = decode_weight(&ops, &w);
         let g = ops.gpu();

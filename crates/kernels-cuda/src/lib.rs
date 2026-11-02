@@ -5107,6 +5107,11 @@ mod tests {
         has("matmul_fp8_wgmma_tma", &["#define BRAIN_FWT_STAGES 5", "#define BRAIN_FWT_MAX_CTAS 132  // grid size at most, and the SM slots of the maps", "#define BRAIN_FWT_X_BYTES (BRAIN_FWT_BM * 128)", "#define BRAIN_FWT_W_BYTES (BRAIN_FWT_BN * 128)", "#define BRAIN_FWT_S_BYTES 1024"]);
         assert_eq!(fp8_wgmma_tma_n256_dynamic_shared_bytes(4), 4 * (128 * 128 + 256 * 128) + 1024 + 16 * 1024 + 1024);
         has("matmul_fp8_wgmma_tma_n256", &["#define BRAIN_FWT_STAGES 4", "#define BRAIN_FWT_MAX_CTAS 132  // grid size at most, and the SM slots of the maps", "#define BRAIN_FWT_X_BYTES (BRAIN_FWT_BM * 128)", "#define BRAIN_FWT_W_BYTES (BRAIN_FWT_BN * 128)", "#define BRAIN_FWT_BN 256"]);
+        assert_eq!(nvfp4_wgmma_dynamic_shared_bytes(3), 3 * (256 * 128 + 128 * 128 + 128 * 64 + 128 * 16) + 256 + 1024);
+        has(
+            "matmul_nvfp4_wgmma",
+            &["#define BRAIN_NW_STAGES 3", "#define BRAIN_NW_MAX_CTAS 132", "#define BRAIN_NW_BM 256", "#define BRAIN_NW_BN 128", "#define BRAIN_NW_THREADS 512", "#define BRAIN_NW_A_BYTES (BRAIN_NW_BM * 128)", "#define BRAIN_NW_C_BYTES (BRAIN_NW_BN * 64)", "#define BRAIN_NW_S_BYTES (BRAIN_NW_BN * 16)"],
+        );
         assert_eq!(FP8_WGMMA_DYNAMIC_SHARED_BYTES, 4 * (128 * 128 * 2 + 1024) + 1024);
         assert_eq!((128 * 128 * 2 + 1024) % 1024, 0);
         has(
