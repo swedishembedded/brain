@@ -26,11 +26,13 @@ fn managed_and_system_buffers_run_a_kernel_through_the_facade() {
     };
     let facts = gpu.placement_facts();
     let src = gpu.storage_init("src", &(0..N).map(|i| i as f32).collect::<Vec<_>>());
-    for policy in [AllocPolicy::Managed, AllocPolicy::System] {
+    for policy in [AllocPolicy::Managed, AllocPolicy::System, AllocPolicy::Pinned] {
         let made = gpu.try_alloc_placed("out", N as u64 * 4, policy);
         assert_eq!(made.is_ok(), facts.supports(policy), "{policy:?}: {:?}", made.as_ref().err());
         let Ok(out) = made else { continue };
-        gpu.prefetch(&out, 0, N as u64 * 4, PrefetchTarget::Device).expect("prefetch");
+        if policy != AllocPolicy::Pinned {
+            gpu.prefetch(&out, 0, N as u64 * 4, PrefetchTarget::Device).expect("prefetch");
+        }
         let step = gpu.step(0, &[&out, &src], &[N, 3.0f32.to_bits()], N);
         gpu.submit(&[], &[step]);
         let got = gpu.read(&out, N as usize);

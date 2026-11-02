@@ -117,6 +117,7 @@ impl PlacementFacts {
             AllocPolicy::Device => true,
             AllocPolicy::Managed => self.managed_memory,
             AllocPolicy::System => self.pageable_memory_access,
+            AllocPolicy::Pinned => self.pageable_memory_access && self.host_register,
         }
     }
 }
@@ -141,6 +142,12 @@ pub enum AllocPolicy {
     /// allocator put it, which on a coherent node is the CPU's memory, read by
     /// the GPU across the link.
     System,
+    /// [`Self::System`] memory page-locked with the driver
+    /// ([`PlacementFacts::host_register`] as well): a copy between it and device
+    /// memory runs on the copy engine without holding the host, where a copy into
+    /// pageable memory is staged by the driver and returns only once it is done.
+    /// For host-tier buffers the device fills and reads with copies while kernels run.
+    Pinned,
 }
 
 /// Advice about a managed or system range, as the driver's `cuMemAdvise` takes

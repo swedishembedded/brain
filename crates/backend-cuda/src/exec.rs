@@ -37,7 +37,7 @@
 use crate::driver::{
     CU_EVENT_DISABLE_TIMING, CU_EVENT_RECORD_EXTERNAL, CU_STREAM_NON_BLOCKING,
     CuContext, CuDevicePtr, CuFunction, CuGraph, CuGraphExec, CuGraphNode, CuKernelNodeParams,
-    CuEvent, CuMemLocation, CuMemPool, CuMemPoolProps, MEM_ATTACH_GLOBAL, CuModule, CuStream, Driver, ExecFns, GraphFns, PoolFns,
+    CuEvent, CuMemLocation, CuMemPool, CuMemPoolProps, MEM_ATTACH_GLOBAL, HOST_REGISTER_PORTABLE, CuModule, CuStream, Driver, ExecFns, GraphFns, PoolFns,
     CAPTURE_MODE_THREAD_LOCAL, CAPTURE_STATUS_ACTIVE, MEMPOOL_ATTR_RELEASE_THRESHOLD,
     MEMPOOL_ATTR_RESERVED_MEM_CURRENT, MEMPOOL_ATTR_USED_MEM_CURRENT,
 };
@@ -526,6 +526,19 @@ impl Context {
     /// zero-filled without being touched (fresh pages), so first touch stays the
     /// caller's. Needs the device to access pageable memory; refused otherwise.
     pub fn alloc_system(&self, bytes: usize) -> Result<DeviceMem, String> {
+        self.alloc_host(bytes, false)
+    }
+
+    /// [`Self::alloc_system`], page-locked with the driver (`cuMemHostRegister`), so copies between it and device memory
+    /// run on the copy engine without holding the host. Needs the device to register host memory as well.
+    pub fn alloc_pinned(&self, bytes: usize) -> Result<DeviceMem, String> {
+        if !self.info.placement.host_register {
+            return Err("this device cannot register host memory".to_string());
+        }
+        self.alloc_host(bytes, true)
+    }
+
+    fn alloc_host(&self, bytes: usize, pinned: bool) -> Result<DeviceMem, String> {
         if !self.info.placement.pageable_memory_access {
             return Err("this device cannot access pageable host memory".to_string());
         }
@@ -538,9 +551,21 @@ impl Context {
         if p.is_null() {
             return Err(format!("host allocation of {len} bytes failed"));
         }
+        if pinned {
+            let registered = self.d.place().map_err(str::to_string).and_then(|pf| {
+                self.make_current()?;
+                // SAFETY: `p` is `len` freshly allocated bytes; they are unregistered before they are freed (`Drop`).
+                self.d.check(unsafe { (pf.host_register)(p.cast(), len, HOST_REGISTER_PORTABLE) }, "cuMemHostRegister")
+            });
+            if let Err(e) = registered {
+                // SAFETY: the block came from `alloc_zeroed` with this layout and nothing else holds it.
+                unsafe { std::alloc::dealloc(p, layout) };
+                return Err(e);
+            }
+        }
         crate::live::system_alloc(len);
         let stream = self.stream_guard.clone().ok_or("no stream")?;
-        Ok(self.placed(p as CuDevicePtr, bytes, Origin::System { layout, stream }))
+        Ok(self.placed(p as CuDevicePtr, bytes, Origin::System { layout, stream, pinned }))
     }
 
     /// The granularity of a sparse buffer: physical memory is mapped and unmapped in whole multiples of this many
@@ -601,6 +626,9 @@ impl Context {
     fn placed_range(&self, mem: &DeviceMem, offset: usize, bytes: usize) -> Result<(CuDevicePtr, usize), String> {
         if !matches!(mem.origin, Origin::Managed | Origin::System { .. }) {
             return Err("prefetch and advice apply to managed or system memory, not device memory".to_string());
+        }
+        if matches!(mem.origin, Origin::System { pinned: true, .. }) {
+            return Err("prefetch and advice do not apply to pinned memory: its pages are locked where they are".to_string());
         }
         let end = offset.checked_add(bytes).ok_or("range overflows")?;
         if end > mem.len {
@@ -1926,7 +1954,8 @@ enum Origin {
     /// A host allocation brain made for kernels to use directly (needs address
     /// translation services). Freed on the host, after the device is done with
     /// it. An explicit placement policy.
-    System { layout: std::alloc::Layout, stream: Arc<StreamGuard> },
+    /// `pinned`: page-locked with the driver (`cuMemHostRegister`), unregistered before it is freed.
+    System { layout: std::alloc::Layout, stream: Arc<StreamGuard>, pinned: bool },
     /// `cuMemAlloc`; goes to the exact-size cache when that is holding, else
     /// back to the driver.
     Driver { cache: Arc<BlockCache> },
@@ -2038,7 +2067,7 @@ impl Drop for DeviceMem {
                     }
                 }
             }
-            Origin::System { layout, stream } => {
+            Origin::System { layout, stream, pinned } => {
                 // The device may still be reading these host pages. Wait for this
                 // handle's stream and for the last foreign stream that touched
                 // them, and release them only if the wait succeeded: freeing
@@ -2049,6 +2078,10 @@ impl Drop for DeviceMem {
                     let mut idle = (self.fns.ctx_set_current)(self.ctx) == 0 && (self.fns.stream_synchronize)(stream.stream) == 0;
                     for f in &fence {
                         idle = idle && (self.fns.event_synchronize)(f.event.ev) == 0;
+                    }
+                    if idle && *pinned {
+                        // A page-locked block is unlocked before the host allocator takes it back.
+                        idle = crate::driver::driver().ok().and_then(|d| d.place().ok()).is_some_and(|pf| (pf.host_unregister)((self.ptr as *mut u8).cast()) == 0);
                     }
                     if idle {
                         std::alloc::dealloc(self.ptr as *mut u8, *layout);

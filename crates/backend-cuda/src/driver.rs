@@ -405,6 +405,8 @@ pub struct PlaceFns {
     pub(crate) alloc_managed: unsafe extern "C" fn(*mut CuDevicePtr, usize, u32) -> CuResult,
     pub(crate) prefetch_async: unsafe extern "C" fn(CuDevicePtr, usize, CuMemLocation, u32, CuStream) -> CuResult,
     pub(crate) advise: unsafe extern "C" fn(CuDevicePtr, usize, c_int, CuMemLocation) -> CuResult,
+    pub(crate) host_register: unsafe extern "C" fn(*mut std::ffi::c_void, usize, u32) -> CuResult,
+    pub(crate) host_unregister: unsafe extern "C" fn(*mut std::ffi::c_void) -> CuResult,
 }
 
 /// `CUmemAllocationProp`: what a physical allocation is and where it lives (32 bytes).
@@ -471,6 +473,8 @@ const P2P_ATTR_NATIVE_ATOMIC_SUPPORTED: c_int = 3;
 
 /// `CU_MEM_ATTACH_GLOBAL`.
 pub const MEM_ATTACH_GLOBAL: u32 = 1;
+/// `CU_MEMHOSTREGISTER_PORTABLE`: the registered memory is page-locked for every context, not only the current one.
+pub const HOST_REGISTER_PORTABLE: u32 = 1;
 
 /// `CUmemPoolProps`, laid out for the fields brain sets and padded to the
 /// largest size any driver generation has used (88 bytes; the trailing members
@@ -657,6 +661,8 @@ unsafe fn load_place(lib: &libloading::Library) -> Result<PlaceFns, String> {
         alloc_managed: sym(lib, b"cuMemAllocManaged\0")?,
         prefetch_async: sym(lib, b"cuMemPrefetchAsync_v2\0")?,
         advise: sym(lib, b"cuMemAdvise_v2\0")?,
+        host_register: sym(lib, b"cuMemHostRegister_v2\0")?,
+        host_unregister: sym(lib, b"cuMemHostUnregister\0")?,
     })
 }
 

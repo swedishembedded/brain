@@ -2196,6 +2196,7 @@ impl backend_api::Backend for CudaBackend {
             AllocPolicy::Device => return Ok(self.buffer(label, size, BufUsage::STORAGE)),
             AllocPolicy::Managed => self.ctx.alloc_managed(size.max(4) as usize),
             AllocPolicy::System => self.ctx.alloc_system(size.max(4) as usize),
+            AllocPolicy::Pinned => self.ctx.alloc_pinned(size.max(4) as usize),
         }
         .map_err(|e| format!("backend-cuda: {policy:?} allocation of {size} bytes for {label} failed: {e}"))?;
         Ok(self.wrap_initialised(mem))

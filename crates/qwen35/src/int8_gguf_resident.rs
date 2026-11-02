@@ -1131,7 +1131,10 @@ impl ShardCaches {
             work_state.push(gpu.storage(ws));
             work_hist.push(gpu.storage(wh));
             if snapshots_on_host && lin && snapshot_rows > 0 {
-                let host = |label: &str, words: u64| gpu.try_alloc_placed(label, words * 4, gpu_core::AllocPolicy::System).map_err(|e| format!("{MODEL}: the prefix-cache snapshots in host memory: {e}"));
+                // Page-locked where the device can register host memory: a snapshot is a copy from the state pool, and a copy
+                // into pageable memory holds the serving thread until it is done (16 ms a prompt at 8K x 16, the GPU idle).
+                let policy = if gpu.placement_facts().supports(gpu_core::AllocPolicy::Pinned) { gpu_core::AllocPolicy::Pinned } else { gpu_core::AllocPolicy::System };
+                let host = |label: &str, words: u64| gpu.try_alloc_placed(label, words * 4, policy).map_err(|e| format!("{MODEL}: the prefix-cache snapshots in host memory: {e}"));
                 snap_state.push(host("qwen35.gdn_snapshot_state", ss)?);
                 snap_hist.push(host("qwen35.gdn_snapshot_hist", sh)?);
             } else {

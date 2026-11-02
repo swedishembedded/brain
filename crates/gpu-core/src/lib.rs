@@ -1636,10 +1636,10 @@ mod native_facade {
 
         /// The memory device an allocation under `policy` is charged to: the
         /// card for device and managed memory (managed pages may migrate to it, so
-        /// the card's share is the safe count), the host for system memory.
+        /// the card's share is the safe count), the host for system and pinned memory.
         pub fn placed_pool(&self, policy: backend_api::AllocPolicy) -> memauth::Device {
             match policy {
-                backend_api::AllocPolicy::System => memauth::Device::Cpu,
+                backend_api::AllocPolicy::System | backend_api::AllocPolicy::Pinned => memauth::Device::Cpu,
                 _ => self.mem_device,
             }
         }
@@ -3182,11 +3182,12 @@ mod tests {
         let gpu = Gpu::new_cpu(&[("add2", kernels::ADD2)]);
         assert_eq!(gpu.placement_facts(), PlacementFacts::NONE);
         assert!(gpu.try_alloc_placed("device", 64, AllocPolicy::Device).is_ok());
-        for policy in [AllocPolicy::Managed, AllocPolicy::System] {
+        for policy in [AllocPolicy::Managed, AllocPolicy::System, AllocPolicy::Pinned] {
             let e = gpu.try_alloc_placed("placed", 64, policy).err().expect("refused");
             assert!(e.contains("cannot make"), "{e}");
         }
         assert_eq!(gpu.placed_pool(AllocPolicy::System), memauth::Device::Cpu, "system memory is the host's bytes");
+        assert_eq!(gpu.placed_pool(AllocPolicy::Pinned), memauth::Device::Cpu, "pinned memory is the host's bytes");
         assert_eq!(gpu.placed_pool(AllocPolicy::Device), gpu.memory_device());
     }
 

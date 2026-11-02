@@ -68,7 +68,11 @@ fn axpy_on(b: &CudaBackend, policy: AllocPolicy) {
     let got = b.read(&out, N);
     assert!(got.iter().enumerate().all(|(i, &v)| v == 2.0 * i as f32), "{policy:?}: kernel result differs from device memory's");
 
-    if policy != AllocPolicy::Device {
+    if policy == AllocPolicy::Pinned {
+        // Page-locked memory stays where it is: prefetch and advice are refused by name, never passed to the driver.
+        let e = b.prefetch(&out, 0, (N * 4) as u64, PrefetchTarget::Device).expect_err("pinned memory cannot be prefetched");
+        assert!(e.contains("pinned"), "{e}");
+    } else if policy != AllocPolicy::Device {
         // Prefetch both ways and every advice leave the numbers alone.
         b.prefetch(&out, 0, (N * 4) as u64, PrefetchTarget::Device).expect("prefetch to device");
         run(b);
@@ -111,7 +115,7 @@ fn a_policy_is_honoured_exactly_when_the_facts_allow_it() {
     let _s = serial();
     let Some(b) = backend() else { return };
     let facts = b.placement_facts();
-    for policy in [AllocPolicy::Device, AllocPolicy::Managed, AllocPolicy::System] {
+    for policy in [AllocPolicy::Device, AllocPolicy::Managed, AllocPolicy::System, AllocPolicy::Pinned] {
         let r = b.alloc_placed("probe", 4096, policy);
         assert_eq!(r.is_ok(), facts.supports(policy), "{policy:?}: allocation outcome disagrees with the reported facts: {:?}", r.err());
     }
@@ -129,6 +133,9 @@ fn placed_memory_computes_and_is_returned() {
     }
     if facts.supports(AllocPolicy::System) {
         axpy_on(&b, AllocPolicy::System);
+    }
+    if facts.supports(AllocPolicy::Pinned) {
+        axpy_on(&b, AllocPolicy::Pinned);
     }
     b.poll_wait();
     let now = live_resources();
@@ -153,6 +160,9 @@ fn the_host_sees_what_it_wrote_in_placed_memory() {
     }
     if facts.supports(AllocPolicy::System) {
         blocks.push(ctx.alloc_system(1 << 20).expect("system"));
+    }
+    if facts.supports(AllocPolicy::Pinned) {
+        blocks.push(ctx.alloc_pinned(1 << 20).expect("pinned"));
     }
     for m in &blocks {
         let p = m.host_ptr().expect("placed memory has a host address");
