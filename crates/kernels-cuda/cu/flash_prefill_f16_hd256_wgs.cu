@@ -278,8 +278,10 @@ extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_
 #pragma unroll
     for (int i = 0; i < 128; ++i) { o[i] = 0.f; }
     float m_a = NEG_BIG, m_b = NEG_BIG, l_a = 0.f, l_b = 0.f;
+#ifndef BRAIN_WGS_UNIT_SCALE
     const float* const ks2 = reinterpret_cast<const float*>(gen + WGS_OFF_KS);
     const float* const vs1 = reinterpret_cast<const float*>(gen + WGS_OFF_VS);
+#endif
 
     // Every warp runs every tile, a tile past a warpgroup's last row included (the mask weighs all of it 0): a branch around the
     // wgmma that the compiler cannot prove warp-uniform makes it wait for each one before issuing the next.
@@ -303,6 +305,21 @@ extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_
         {
             wg_wait0();
 
+#ifdef BRAIN_WGS_UNIT_SCALE
+            // ---- A bf16 cache has one scale for every key, 1/sqrt(d) log2 e, so the scores stay raw here and the scale is folded
+            // into the exponent's fused multiply-add below: one multiply fewer a score. Only the causal mask is applied, on the few
+            // tiles that cross a row's own position.
+            if ((kt + 1u) * WGS_KEYS > wg_min_len) {
+#pragma unroll
+                for (int n = 0; n < 16; ++n) {
+                    const unsigned int j0 = kt * WGS_KEYS + n * 8u + t4 * 2u;
+                    s[4 * n + 0] = j0 < len_a ? s[4 * n + 0] : NEG_BIG;
+                    s[4 * n + 1] = j0 + 1u < len_a ? s[4 * n + 1] : NEG_BIG;
+                    s[4 * n + 2] = j0 < len_b ? s[4 * n + 2] : NEG_BIG;
+                    s[4 * n + 3] = j0 + 1u < len_b ? s[4 * n + 3] : NEG_BIG;
+                }
+            }
+#else
             // ---- row scale of K (already times 1/sqrt(d) log2 e) and, on the few tiles that cross a row's own position, the causal mask.
             if ((kt + 1u) * WGS_KEYS <= wg_min_len) {
 #pragma unroll
@@ -324,6 +341,7 @@ extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_
                     s[4 * n + 3] = j0 + 1u < len_b ? s[4 * n + 3] * kx.y : NEG_BIG;
                 }
             }
+#endif
         }
         __syncwarp();
         if (lane == 0u) { wg_mbar_arrive(bar_empty_k); }
@@ -340,6 +358,11 @@ extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_
             mx_a = fmaxf(mx_a, __shfl_xor_sync(0xffffffffu, mx_a, 2));
             mx_b = fmaxf(mx_b, __shfl_xor_sync(0xffffffffu, mx_b, 1));
             mx_b = fmaxf(mx_b, __shfl_xor_sync(0xffffffffu, mx_b, 2));
+#ifdef BRAIN_WGS_UNIT_SCALE
+            // The running maximum lives in the scaled (log2) domain; a row with no live key keeps NEG_BIG, which scaling would lift.
+            mx_a = mx_a > NEG_BIG ? mx_a * SM_SCALE_LOG2 : NEG_BIG;
+            mx_b = mx_b > NEG_BIG ? mx_b * SM_SCALE_LOG2 : NEG_BIG;
+#endif
             const float mn_a = fmaxf(m_a, mx_a), mn_b = fmaxf(m_b, mx_b);
             const float al_a = wg_ex2(m_a - mn_a), al_b = wg_ex2(m_b - mn_b);
             m_a = mn_a;
@@ -349,10 +372,18 @@ extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_
             float sum_a = 0.f, sum_b = 0.f;
 #pragma unroll
             for (int n = 0; n < 16; ++n) {
+#ifdef BRAIN_WGS_UNIT_SCALE
+                // A masked score (NEG_BIG, unscaled) stays far below any reference after the scale: it weighs 0.
+                s[4 * n + 0] = wg_ex2(fmaf(s[4 * n + 0], SM_SCALE_LOG2, -ref_a));
+                s[4 * n + 1] = wg_ex2(fmaf(s[4 * n + 1], SM_SCALE_LOG2, -ref_a));
+                s[4 * n + 2] = wg_ex2(fmaf(s[4 * n + 2], SM_SCALE_LOG2, -ref_b));
+                s[4 * n + 3] = wg_ex2(fmaf(s[4 * n + 3], SM_SCALE_LOG2, -ref_b));
+#else
                 s[4 * n + 0] = wg_ex2(s[4 * n + 0] - ref_a);
                 s[4 * n + 1] = wg_ex2(s[4 * n + 1] - ref_a);
                 s[4 * n + 2] = wg_ex2(s[4 * n + 2] - ref_b);
                 s[4 * n + 3] = wg_ex2(s[4 * n + 3] - ref_b);
+#endif
                 sum_a += s[4 * n + 0] + s[4 * n + 1];
                 sum_b += s[4 * n + 2] + s[4 * n + 3];
             }
@@ -373,15 +404,23 @@ extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_
 
         wg_mbar_wait(bar_full_v, parity);   // the V row scales and the V tile of this key tile
         {
-            // P as fp16 A fragments, straight from the score accumulators, times the V row scale.
+            // P as fp16 A fragments, straight from the score accumulators, times the V row scale (1 for every live key of a bf16
+            // cache, and a masked key's weight is already 0, so that multiply is left out there).
 #pragma unroll
             for (int kk = 0; kk < 8; ++kk) {
+#ifdef BRAIN_WGS_UNIT_SCALE
+                pf[kk][0] = brain_pack_f16x2(s[8 * kk + 0], s[8 * kk + 1]);
+                pf[kk][1] = brain_pack_f16x2(s[8 * kk + 2], s[8 * kk + 3]);
+                pf[kk][2] = brain_pack_f16x2(s[8 * kk + 4], s[8 * kk + 5]);
+                pf[kk][3] = brain_pack_f16x2(s[8 * kk + 6], s[8 * kk + 7]);
+#else
                 const float2 v0 = *reinterpret_cast<const float2*>(vs1 + (2 * kk) * 8u + t4 * 2u);
                 const float2 v1 = *reinterpret_cast<const float2*>(vs1 + (2 * kk + 1) * 8u + t4 * 2u);
                 pf[kk][0] = brain_pack_f16x2(s[8 * kk + 0] * v0.x, s[8 * kk + 1] * v0.y);
                 pf[kk][1] = brain_pack_f16x2(s[8 * kk + 2] * v0.x, s[8 * kk + 3] * v0.y);
                 pf[kk][2] = brain_pack_f16x2(s[8 * kk + 4] * v1.x, s[8 * kk + 5] * v1.y);
                 pf[kk][3] = brain_pack_f16x2(s[8 * kk + 6] * v1.x, s[8 * kk + 7] * v1.y);
+#endif
             }
         }
         {

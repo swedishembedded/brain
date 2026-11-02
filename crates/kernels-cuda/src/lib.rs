@@ -756,6 +756,30 @@ pub const ALL: &[CudaKernel] = &[
         ),
     },
     CudaKernel {
+        name: "flash_prefill_f16_hd256_wgs_bf16",
+        // Asked for by name by `paged_flash_prefill_wgs_steps` for head_dim 256 on a part with warpgroup tensor cores.
+        op: Op::PagedAttentionFused,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // `wgmma` and `setmaxnreg` are arch-specific (`sm_90a`), so the launch also requires it (`ArchFeatures::Required`).
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_flash_prefill_f16_hd256_wgs_bf16",
+        what: "flash_prefill_f16_hd256_wgs for the records of a bf16 cache, whose row scales are all 1/sqrt(d) log2 e and 1, so the K scale is folded into the exponent's fused multiply-add and the V scale is left out (fewer non-tensor-core instructions a score, the lever on a power-limited card): version 4 over the fp16 records flash_prefill_f16_hd256_wgs_widen_* stages: one thread of a producer warpgroup bulk-copies whole key tiles (cp.async.bulk, mbarriers), two consumer warpgroups of 64 query rows run QK^T and PV on Hopper tensor cores (wgmma) with P in registers; the key range of a block is split as in version 3 and merged by flash_prefill_f16_hd256_wg_combine",
+        reported: "native:flash_prefill_f16_hd256_wgs_bf16",
+        block_dim: 384,
+        tile: (128, 1),
+        shared_bytes: 0,
+        programmatic: false,
+        src: concat!(
+            "#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 2\n#define BRAIN_WGS_UNIT_SCALE 1\n#define brain_flash_prefill_f16_hd256_wgs brain_flash_prefill_f16_hd256_wgs_bf16\n",
+            include_str!("../cu/flash_prefill_f16_hd256.cu"),
+            "\n#define brain_flash_prefill_f16_hd256_wg brain_flash_prefill_f16_hd256_wg_unused\n#define brain_flash_prefill_wgs_widen brain_flash_prefill_wgs_widen_unused\n",
+            include_str!("../cu/flash_prefill_f16_hd256_wg.cu"),
+            include_str!("../cu/flash_prefill_f16_hd256_wgs.cu")
+        ),
+    },
+    CudaKernel {
         name: "flash_prefill_f16_hd256_wg_combine",
         // Asked for by name beside `flash_prefill_f16_hd256_wg_kv8` / `_kvfp8`: merges the key splits those wrote.
         op: Op::PagedAttentionFused,

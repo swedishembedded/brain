@@ -1577,7 +1577,8 @@ pub fn paged_flash_prefill_wg_steps(gpu: &crate::Gpu, head_dim: u32, bufs: &[&ba
     let mut steps = Vec::with_capacity(3);
     if staged {
         let widen = kernels_cuda::get(&format!("flash_prefill_f16_hd256_wgs_widen_{}", kv.suffix())).filter(|k| k.min_cc <= cc)?;
-        let main = kernels_cuda::get("flash_prefill_f16_hd256_wgs").filter(|k| k.min_cc <= cc)?;
+        // A bf16 cache's records carry unit row scales, which its attention variant leaves out of the inner loop.
+        let main = kernels_cuda::get(if kv == WgKv::Bf16 { "flash_prefill_f16_hd256_wgs_bf16" } else { "flash_prefill_f16_hd256_wgs" }).filter(|k| k.min_cc <= cc)?;
         let widen_bindings = if kv == WgKv::Bf16 { PAGED_FLASH_PREFILL_WGS_WIDEN_BF16_BINDINGS } else { PAGED_FLASH_PREFILL_WGS_WIDEN_BINDINGS };
         let widen_id = gpu.native_kernel_launched(widen, widen_bindings, backend_api::CudaLaunch { arch: backend_api::ArchFeatures::Required, ..backend_api::CudaLaunch::NONE })?;
         let main_id = gpu.native_kernel_launched(main, PAGED_FLASH_PREFILL_WGS_BINDINGS, FLASH_PREFILL_WGS_LAUNCH)?;

@@ -821,6 +821,21 @@ fn the_bf16_cache_prefill_rates_at_the_8k_prompt_chunks() {
     prefill_rates(Kv::Bf16, &[(4096u32, 0u32), (3968, 3924), (2048, 0), (2048, 6144)]);
 }
 
+/// A bf16 cache at the 4096-row round a long prompt is served in, over contexts of 4K to 64K: the shapes that decide a
+/// prefill-dominated run. The sustained figure is the one to read (the card holds a lower clock under load than a best trial).
+#[test]
+#[ignore = "a timing report for kernel work, not a spec"]
+fn the_bf16_cache_prefill_rates_at_the_long_prompt_round() {
+    prefill_rates(Kv::Bf16, &[(4096u32, 0u32), (4096, 4096), (4096, 12288), (4096, 28672), (4096, 61440)]);
+}
+
+/// One 4096-row round behind 28672 cached tokens on a bf16 cache, for `ncu -k regex:wgs -c 1`.
+#[test]
+#[ignore = "a timing report for kernel work, not a spec"]
+fn the_bf16_cache_prefill_rate_at_a_32k_context() {
+    prefill_rates(Kv::Bf16, &[(4096u32, 28672u32)]);
+}
+
 fn int8_prefill_rates(cases: &[(u32, u32)]) {
     prefill_rates(Kv::Int8, cases);
 }
