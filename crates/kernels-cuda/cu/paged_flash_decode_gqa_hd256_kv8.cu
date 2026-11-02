@@ -33,14 +33,13 @@
 // The first product's accumulator IS the second's B operand (row = head, columns = the quad's keys), so P never
 // leaves registers. The order of channels inside a dot product, and of keys inside a chunk, is free; it is chosen so
 // that every load instruction reads WHOLE 32-byte sectors: a lane copies 16-byte pieces of its two key rows (piece w at
-// channels 64 w + 16 tig, so the four lanes of a row read 64 contiguous bytes) and of its four value rows (pieces at
-// channels 16 gid and 128 + 16 gid, so the eight lanes of a row read 128 contiguous bytes). A strided 64-byte read per
+// channels 64 w + 16 tig, so the four lanes of a row read 64 contiguous bytes) and, the same way, of its value rows. A strided 64-byte read per
 // lane touched half of 32 sectors per instruction, which a bypass copy pays twice (knowledge 401).
 //
 // THE PIPELINE. A chunk's bytes arrive by `cp.async` into the warp's own shared-memory stage (BRAIN_DECODE_STAGES of
-// them; the next chunk's copies are issued before the current one is computed). A lane reads back only what it copied
-// (the 16 pieces; the chunk's 32 scales are read by all lanes), so the only synchronisation is the warp's wait on its
-// copies and a `__syncwarp`. Past the live keys a copy of size 0 zero-fills. The same bytes hold the merge of the four
+// them; the next chunk's copies are issued before the current one is computed). A lane reads back the keys it copied itself and
+// the values of its warp (the lanes copy for each other, see the value fetch; the chunk's 32 scales are read by all lanes),
+// so the only synchronisation is the warp's wait on its copies and a `__syncwarp`. Past the live keys a copy of size 0 zero-fills. The same bytes hold the merge of the four
 // warps after the loop.
 //
 // NUMERICS. An int8 value is exact in f16 (byte permute into the mantissa of 1024, one subtract). The f32 query and
@@ -98,6 +97,11 @@ __device__ __forceinline__ void brain_8bit_pairs(unsigned int w, unsigned int& l
 #endif
 #define WARP_STAGE_BYTES (16 * 512 + 128)
 #define STAGE_BYTES (WARPS * WARP_STAGE_BYTES)
+
+// The 16-byte slot, in a value unit's 512-byte row of slots, that lane (gid, tig) reads its piece from: the pieces of channel
+// groups gid = 2 m and 2 m + 1 of one key pair are neighbours, so the two halves of a 32-byte sector of a value row sit side by
+// side in shared memory.
+__device__ __forceinline__ unsigned int brain_value_slot(unsigned int gid, unsigned int tig) { return ((gid >> 1) * 4u + tig) * 2u + (gid & 1u); }
 
 // Copy 16 (or 4) bytes global -> shared without passing through registers; with `ok` false the destination is zero-filled.
 __device__ __forceinline__ void brain_copy16(unsigned int dst, const void* src, bool ok) {
@@ -163,6 +167,7 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_g
 
     const unsigned int tid = threadIdx.x, lane = tid & 31u, warp = tid >> 5;
     const unsigned int gid = lane >> 2, tig = lane & 3u;
+    const unsigned int vslot = brain_value_slot(gid, tig);
 
     // The query as the first product's A fragments, high and low parts: [k-step][lane] -> (hi a0, hi a2, lo a0, lo a2)
     // (rows gid + 8, the padding of the group to 16, are zero and never stored).
@@ -205,7 +210,7 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_g
     const unsigned int n_mine = first < k_end ? (k_end - first + WARPS * CHUNK - 1u) / (WARPS * CHUNK) : 0u;
     const unsigned int my_stage = static_cast<unsigned int>(__cvta_generic_to_shared(stages)) + warp * WARP_STAGE_BYTES;
 
-    // Chunk i's bytes go to this lane's slots of stage (i mod STAGES): the lane reads back what it copied itself, so the
+    // Chunk i's bytes go to this lane's slots of stage (i mod STAGES): the lane reads back the keys it copied itself and the values its warp copied, so the
     // only synchronisation is the warp's own wait on its copies. Past the live keys a copy of size 0 zero-fills.
     auto issue = [&](unsigned int i) {
         if (i < n_mine) {
@@ -224,13 +229,22 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_g
 #pragma unroll
                 for (int w = 0; w < 4; ++w) { brain_copy16(at + (r * 4 + w) * 512u + lane * 16u, src + w * 64, ok); }
             }
+            // The values as the keys: eight rows an instruction, a row's 64 contiguous bytes read by four adjacent lanes (piece
+            // P = 4 w + b of the row's 16 pieces), the two halves of a 32-byte sector in ADJACENT slots (`brain_value_slot`).
+            // Eight lanes of one row reading 128 bytes into slots four apart made the memory system return every sector twice
+            // (the bf16 kernel's finding, knowledge 432). The piece goes to its consumer's slot: gid_v = P mod 8, tig_v = a / 2,
+            // pp = P / 8, r = 2 h + a mod 2.
+            {
+                const unsigned int a = lane >> 2, b = lane & 3u;
+                const unsigned int lane_slot = (a & 1u) * 1024u + (((b >> 1) * 4u + (a >> 1)) * 2u + (b & 1u)) * 16u;
 #pragma unroll
-            for (int r = 0; r < 4; ++r) {
-                const unsigned int j = c0 + 2u * tig + (r & 1) + 8u * (r >> 1);
-                const bool ok = j < k_end;
-                const signed char* src = ok ? pool_v + static_cast<unsigned long long>(row_of(j - c0)) * HD + gid * 16u : pool_v;
-                brain_copy16(at + (8 + r * 2) * 512u + lane * 16u, src, ok);
-                brain_copy16(at + (8 + r * 2 + 1) * 512u + lane * 16u, src + 128, ok);
+                for (int h = 0; h < 2; ++h) {
+                    const unsigned int j = c0 + 8u * h + a;
+                    const bool ok = j < k_end;
+                    const signed char* src = ok ? pool_v + static_cast<unsigned long long>(row_of(j - c0)) * HD + b * 16u : pool_v;
+#pragma unroll
+                    for (int w = 0; w < 4; ++w) { brain_copy16(at + 8u * 512u + h * 2048u + (w >> 1) * 512u + (w & 1) * 256u + lane_slot, src + w * 64, ok); }
+                }
             }
             // Lanes 0-15 the key scales, 16-31 the value scales, of the chunk's 16 keys.
             const unsigned int jl = c0 + (lane & 15u);
@@ -263,8 +277,8 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_g
         for (int r = 0; r < 4; ++r) {
             const unsigned int jr = 2u * tig + (r & 1) + 8u * (r >> 1);
             live[r] = c0 + jr < k_end;
-            vw[r][0] = *reinterpret_cast<const uint4*>(sbuf + (8 + r * 2) * 512u + lane * 16u);
-            vw[r][1] = *reinterpret_cast<const uint4*>(sbuf + (8 + r * 2 + 1) * 512u + lane * 16u);
+            vw[r][0] = *reinterpret_cast<const uint4*>(sbuf + (8 + r * 2) * 512u + vslot * 16u);
+            vw[r][1] = *reinterpret_cast<const uint4*>(sbuf + (8 + r * 2 + 1) * 512u + vslot * 16u);
             ksc[r] = live[r] ? scl[jr] : 0.f;
             vsc[r] = live[r] ? scl[16u + jr] : 0.f;
         }

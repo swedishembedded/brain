@@ -36,6 +36,21 @@ Question (the brief of 2026-11-02): brain trails vLLM at 8K x 64 by about 4 s of
 
 16 x 8K is 3.05 TB/s (90 % of 3.4), 64 x 64K 3.53 TB/s. Exact: the decode specs (ragged, scattered, shared blocks, NaN-poisoned records, empty splits) and 2,000 back-to-back launches at 16 x 8K, 64 x 1K, 1 x 32K per tier are unchanged.
 
+## The 8-bit kernels had the same value copy
+
+The int8 and FP8 kernel (`paged_flash_decode_gqa_hd256_kv8.cu`) got the same fetch. int8 / FP8 us a layer, before -> after: 16 x 8K 119.8 / 119.3 -> 109.7 / 108.4; 16 x 32K 402 / 396 -> 364 / 363; 64 x 8K 403 / 401.5 -> 364.5 / 365.3; 64 x 32K 1486 / 1483 -> 1342 / 1348; 64 x 64K 2905 / 2900 -> 2640 / 2638 (97 % of 3.4 TB/s); 1 x 8K 24 us. Same specs and 2,000 back-to-back launches, unchanged.
+
+## Served A/B (gpu0, bf16 KV, f32 GDN state, no speculation, two interleaved rounds, base = the build before the change, tok/s)
+
+| cell | base | new |
+|---|---|---|
+| 8K x 16 | 317.8, 316.4 | 320.4, 297.3 (one slow round) |
+| 8K x 64 | 380.9, 371.6 | 382.8, 383.4 |
+| 32K x 16 | 88.5, 89.0 | 88.2, 88.5 |
+| 64K x 4 | 37.2, 37.6 | 37.6, 37.3 |
+
+FP8 KV (one round each, only the bf16 kernel and the append changed, so the arm is a control): 8K x 64 405.0 -> 403.2, 32K x 16 91.7 -> 91.5. The 64-row gain is +0.5 to +3 %, within the card's round-to-round spread: decode attention is about 6 % of the step, so 10 % of it is 0.6 %. The 12 % throughput gap to vLLM is not in the attention kernels: the GPU idles 7.6 s of an 80 s window against vLLM's 2.7 s.
+
 ## Rules
 
 - Read ncu's "L2 Theoretical Sectors Global" and "Excessive" per instruction before trusting a bandwidth number: L2 to L1 bytes above DRAM bytes is a load pattern, not a memory-system limit.
