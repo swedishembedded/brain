@@ -406,6 +406,14 @@ impl Qwen35GgufEngine {
         }
     }
 
+    /// Repay up to `want` blocks from released state rows that are still backed. They go before cached prefixes: a retained
+    /// row saves ~30 ms of memory operations, a cached prefix a whole prefill.
+    fn reclaim_state_rows(&mut self, want: u32) {
+        if let Some(ledger) = &mut self.unified {
+            ledger.reclaim(&mut self.alloc, want).unwrap_or_else(|e| panic!("{MODEL}: a released state row cannot be taken back: {e}"));
+        }
+    }
+
     /// Give the sequence a recurrent-state row if it has none: the block's id in
     /// the one-block layout (so the row and the window are the same slot), a
     /// free row in the paged one. The table must already hold its blocks.
@@ -1242,6 +1250,7 @@ impl Qwen35GgufEngine {
     fn reclaim_keeping(&mut self, want: u32, prompt: Prompt<'_>, adapter: Option<AdapterId>) -> u32 {
         let namespace = adapter.map_or(BASE_KV_NAMESPACE, |a| a.kv_namespace());
         let before = self.alloc.free_blocks();
+        self.reclaim_state_rows(want);
         while self.alloc.free_blocks() - before < want {
             let Some(table) = self.cache.evict_lru_keeping(namespace, prompt) else { break };
             self.release_retired([table]);
@@ -1327,6 +1336,7 @@ impl PagedDecoder for Qwen35GgufEngine {
     /// Evict least recently used cached prompts until `want` blocks are freed.
     fn reclaim_prefix(&mut self, want: u32) -> u32 {
         let before = self.alloc.free_blocks();
+        self.reclaim_state_rows(want);
         while self.alloc.free_blocks() - before < want {
             let Some(table) = self.cache.evict_lru() else { break };
             self.release_retired([table]);
@@ -1375,7 +1385,7 @@ impl PagedDecoder for Qwen35GgufEngine {
         }
         if let (Some(slot), KvLayout::Paged { .. }) = (row, self.inst.kv_layout) {
             if let Some(ledger) = &mut self.unified {
-                ledger.release(&mut self.alloc, slot).unwrap_or_else(|e| panic!("{MODEL}: the state row of a sequence cannot be released: {e}"));
+                ledger.release(slot);
             }
             self.free_rows.insert(slot);
         }

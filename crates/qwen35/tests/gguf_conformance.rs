@@ -217,6 +217,8 @@ fn a_unified_small_pool_serves_what_fits_and_preempts_what_does_not() {
             assert_eq!(got, want, "{pool_blocks} blocks: tokens differ from the one-block layout's");
         }
         let e = sched.decoder_mut();
+        // Released state rows stay backed until the scheduler reclaims their blocks.
+        e.reclaim_prefix(u32::MAX);
         assert_eq!(e.free_blocks(), pool_blocks, "{pool_blocks} blocks: blocks leaked");
         assert_eq!(e.unified_report().map(|(_, granules, lent)| (granules, lent)), Some((0, 0)), "{pool_blocks} blocks: a state row is still backed");
     }

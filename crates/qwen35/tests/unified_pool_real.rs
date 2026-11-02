@@ -96,9 +96,12 @@ fn a_unified_pool_serves_the_tokens_of_pools_that_reserve_a_state_row_per_slot()
 
     let (uni_engine, streams) = serve(engine(&unified), &prompts, 2, 64);
     assert_eq!(streams, reference, "the unified pool's tokens are the separate pools' tokens");
+    // Released state rows stay backed for the next sequences until the scheduler reclaims their blocks.
+    let mut uni_engine = uni_engine;
+    uni_engine.reclaim_prefix(u32::MAX);
     assert_eq!(uni_engine.free_blocks(), uni_engine.alloc_total(), "every block, lent or not, is back in the pool");
     let (_, state_granules, lent) = uni_engine.unified_report().expect("a unified engine reports");
-    assert_eq!((state_granules, lent), (0, 0), "an idle server holds no state row");
+    assert_eq!((state_granules, lent), (0, 0), "a reclaimed server holds no state row");
 }
 
 #[test]
@@ -126,7 +129,9 @@ fn a_running_sequence_takes_its_state_row_from_the_block_pool_and_gives_it_back(
     for mut table in tables {
         engine.release_table(&mut table);
     }
-    assert_eq!(engine.free_blocks(), total, "an idle server holds no state");
+    // Released rows stay backed for the next sequences; they are capacity the scheduler reclaims when it runs short.
+    engine.reclaim_prefix(u32::MAX);
+    assert_eq!(engine.free_blocks(), total, "every block comes back once reclaimed");
     assert_eq!(engine.unified_report().map(|(_, g, l)| (g, l)), Some((0, 0)));
 }
 
@@ -151,5 +156,13 @@ fn a_row_released_while_others_run_stays_backed_for_the_next_sequence() {
     assert_eq!(engine.unified_report().map(|(_, g, l)| (g, l)), Some((both.1, both.2)), "the next sequence takes that row: no memory is attached");
     engine.release_table(&mut first);
     engine.release_table(&mut third);
-    assert_eq!(engine.unified_report().map(|(_, g, l)| (g, l)), Some((0, 0)), "an idle server holds no state");
+    assert_eq!(engine.unified_report().map(|(_, g, l)| (g, l)), Some((both.1, both.2)), "an idle server keeps the rows for the next burst");
+    let mut fourth = BlockTable::new();
+    engine.prefill(&mut fourth, &prompt);
+    assert_eq!(engine.unified_report().map(|(_, g, l)| (g, l)), Some((both.1, both.2)), "a sequence after an idle spell attaches no memory");
+    engine.release_table(&mut fourth);
+    let free = engine.free_blocks();
+    assert_eq!(engine.reclaim_prefix(both.2 as u32), both.2 as u32, "the rows' blocks are reclaimable capacity");
+    assert_eq!(engine.free_blocks(), free + both.2 as u32);
+    assert_eq!(engine.unified_report().map(|(_, g, l)| (g, l)), Some((0, 0)), "a reclaimed pool holds no state");
 }

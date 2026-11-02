@@ -19,7 +19,8 @@
 //!   memory, so a warm pool costs nothing.
 //! * State row `r` is the byte range `r * row_bytes ..` of every recurrent layer's pool. Admitting the sequence attaches
 //!   memory to the granules of that range, shared (reference counted) with the neighbouring rows when a row is not a whole
-//!   number of granules; releasing it takes back the granules no row uses.
+//!   number of granules. A released row stays backed for the next sequence; when the scheduler runs short of blocks it
+//!   reclaims released rows first ([`StateLedger::reclaim`]), which takes back the granules no row uses.
 //!
 //! # One budget
 //!
@@ -236,26 +237,24 @@ impl BlockBacking for UnifiedPool {
     }
 }
 
-/// Released state rows the ledger keeps backed while other sequences run, at most. Backing a row is one `cuMemCreate` and one
-/// `cuMemSetAccess` per granule per recurrent layer (~140 us each) and the blocks lent to cover it give their memory back (1.3 ms
-/// a block): a server at its concurrency limit that finishes a sequence and admits the next in the same moment paid ~30 ms on
-/// the host thread every time (3.8 s of a 94 s run at 64 streams of 8K), where the next sequence can take the row the last one left.
-const RETAINED_ROWS: usize = 8;
-
 /// The engine's side of the pool: the shared pool the allocator backs blocks through, and the blocks lent to cover the state
 /// rows backed now.
+///
+/// A released row stays backed until the scheduler needs its blocks ([`Self::reclaim`]): backing a row is one `cuMemCreate` and
+/// one `cuMemSetAccess` per granule per recurrent layer (~140 us each) on the serving thread, ~30 ms a row, and the blocks lent to
+/// cover it are blocks of a pool that is backed at load anyway, so keeping it costs no device memory. Dropping released rows
+/// eagerly (beyond eight while others ran, all of them once the server went idle) made every burst of requests after an idle
+/// spell, and every admission past the eighth at a concurrency limit, pay that cost before its first token.
 pub(crate) struct StateLedger {
     pool: Arc<Mutex<UnifiedPool>>,
     lent: Vec<u32>,
-    /// Rows released but still backed, oldest first: at most [`RETAINED_ROWS`], and none once no sequence runs.
+    /// Rows released but still backed, oldest first.
     retained: std::collections::VecDeque<u32>,
-    /// Rows admitted and not released: sequences running.
-    running: u32,
 }
 
 impl StateLedger {
     pub(crate) fn new(pool: UnifiedPool) -> StateLedger {
-        StateLedger { pool: Arc::new(Mutex::new(pool)), lent: Vec::new(), retained: Default::default(), running: 0 }
+        StateLedger { pool: Arc::new(Mutex::new(pool)), lent: Vec::new(), retained: Default::default() }
     }
 
     /// Back every block now, so that no block is backed on the serving thread the first time a sequence takes it: one block is
@@ -285,16 +284,15 @@ impl StateLedger {
     /// attach memory to the row's granules. `Err` when the allocator has no blocks to lend: the scheduler's admission should
     /// have kept that from happening.
     pub(crate) fn admit(&mut self, alloc: &mut BlockAllocator, row: u32) -> Result<(), String> {
-        self.running += 1;
         if let Some(at) = self.retained.iter().position(|&r| r == row) {
             self.retained.remove(at);
             return Ok(());
         }
         let mut pool = self.pool.lock().unwrap_or_else(|e| e.into_inner());
         let mut extra = pool.state_blocks_with(row).saturating_sub(self.lent.len() as u32);
-        if extra > 0 && alloc.free_blocks() < extra {
+        while extra > 0 && alloc.free_blocks() < extra && !self.retained.is_empty() {
             // Memory kept for the next sequence goes before a sequence is refused.
-            Self::drop_retained(&mut self.retained, &mut self.lent, &mut pool, alloc, 0)?;
+            Self::drop_oldest(&mut self.retained, &mut self.lent, &mut pool, alloc)?;
             extra = pool.state_blocks_with(row).saturating_sub(self.lent.len() as u32);
         }
         if extra > 0 {
@@ -307,22 +305,26 @@ impl StateLedger {
         pool.back_state_row(row)
     }
 
-    /// Release state row `row`. It stays backed for the next sequence while others run (the oldest retained rows beyond
-    /// [`RETAINED_ROWS`] go); once none runs, the memory only retained rows used is taken back and the blocks lent for it repaid.
-    pub(crate) fn release(&mut self, alloc: &mut BlockAllocator, row: u32) -> Result<(), String> {
-        self.running -= 1;
+    /// Release state row `row`. It stays backed for the next sequence until [`Self::reclaim`] wants its blocks.
+    pub(crate) fn release(&mut self, row: u32) {
         self.retained.push_back(row);
-        let mut pool = self.pool.lock().unwrap_or_else(|e| e.into_inner());
-        let keep = if self.running == 0 { 0 } else { RETAINED_ROWS };
-        Self::drop_retained(&mut self.retained, &mut self.lent, &mut pool, alloc, keep)
     }
 
-    /// Take the memory back from the oldest retained rows until `keep` remain, and repay the blocks no longer needed.
-    fn drop_retained(retained: &mut std::collections::VecDeque<u32>, lent: &mut Vec<u32>, pool: &mut UnifiedPool, alloc: &mut BlockAllocator, keep: usize) -> Result<(), String> {
-        while retained.len() > keep {
-            let row = retained.pop_front().expect("longer than keep");
-            pool.release_state_row(row)?;
+    /// Give the allocator back up to `want` blocks from the oldest retained rows: the capacity the scheduler reclaims before it
+    /// refuses or preempts a sequence. Returns the blocks repaid.
+    pub(crate) fn reclaim(&mut self, alloc: &mut BlockAllocator, want: u32) -> Result<u32, String> {
+        let before = alloc.free_blocks();
+        let mut pool = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+        while alloc.free_blocks() - before < want && !self.retained.is_empty() {
+            Self::drop_oldest(&mut self.retained, &mut self.lent, &mut pool, alloc)?;
         }
+        Ok(alloc.free_blocks() - before)
+    }
+
+    /// Take the memory back from the oldest retained row and repay the blocks no longer needed.
+    fn drop_oldest(retained: &mut std::collections::VecDeque<u32>, lent: &mut Vec<u32>, pool: &mut UnifiedPool, alloc: &mut BlockAllocator) -> Result<(), String> {
+        let row = retained.pop_front().expect("a retained row");
+        pool.release_state_row(row)?;
         let needed = pool.state_blocks() as usize;
         if lent.len() > needed {
             alloc.repay(lent.split_off(needed));
