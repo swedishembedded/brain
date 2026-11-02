@@ -169,7 +169,7 @@ use crate::decode_tape::{DecodePlan, DecodePlans, HeadKind, PlanKey, PlanOut};
 use model::dispatch::LORA_SLOT_NONE;
 use model::kv_tier::{KvLayer, KvTier};
 use model::ops::TierPolicy;
-use model::policy::GdnState;
+use model::policy::{GdnState, LinearActivations};
 use model::serve::PromptEmbeds;
 use model::shard::{LayerBytes, Shard};
 use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
@@ -329,6 +329,13 @@ const SCORE_HEAD_ROWS: usize = 8;
 /// The embedding table is held on the first stage's card when it is at most this fraction (the reciprocal) of the
 /// smallest budgeted card: a 2.5 GB table on a 96 GB card, not on a 24 GB one.
 const EMBED_RESIDENT_MAX_SHARE: u64 = 16;
+
+/// What the serve log says about `--linear-activations` when it was given and `tier` holds no micro-scaled (NVFP4) weight
+/// that it could apply to: FP8 checkpoints are W8A8 by design and bf16 weights have no quantized product.
+fn linear_activations_note(choice: LinearActivations, tier: &TierPolicy) -> Option<String> {
+    (choice != LinearActivations::Auto && !tier.dtypes().any(|d| d == Dtype::F4E2M1))
+        .then(|| format!("--linear-activations {choice} has no effect: this checkpoint holds no NVFP4 weights (FP8 products are W8A8, bf16 weights have no quantized product)"))
+}
 
 fn head_bytes(cfg: &Qwen35Config, tier: Dtype) -> u64 {
     model::ops::Weight::bytes_for(tier, cfg.vocab as usize, cfg.d_model as usize)
@@ -3878,6 +3885,8 @@ pub struct Qwen35GgufResident {
     act_choice: gpu_core::ActChoice,
     /// The element type the recurrent-state and conv-history pools are stored in - [`Self::with_gdn_state`].
     gdn_state: GdnState,
+    /// The activation operand precision of the quantized-weight linears - [`Self::with_linear_activations`].
+    linear_activations: LinearActivations,
     /// How the engine spends prefill - [`Self::with_prefill_policy`].
     prefill: PrefillPolicy,
     plan: OnceLock<Plan>,
@@ -3889,7 +3898,7 @@ pub struct Qwen35GgufResident {
 
 impl Qwen35GgufResident {
     pub fn new(gguf_path: String, devices: Vec<(Device, u64)>, cap: u32, tier: TierPolicy) -> Qwen35GgufResident {
-        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, prefix_slots: 0, kv_tier: KvTier::F32, kv_block_rows: 0, kv_pool_rows: 0, unified_pool: false, unified_pool_always: false, model_cfg: OnceLock::new(), model_id: MODEL.to_string(), bank: None, spec: SpecServing::default(), exact_decode: false, act_choice: gpu_core::ActChoice::Auto, gdn_state: GdnState::F32, prefill: PrefillPolicy::default(), plan: OnceLock::new(), vision: OnceLock::new(), sampling: OnceLock::new() }
+        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, prefix_slots: 0, kv_tier: KvTier::F32, kv_block_rows: 0, kv_pool_rows: 0, unified_pool: false, unified_pool_always: false, model_cfg: OnceLock::new(), model_id: MODEL.to_string(), bank: None, spec: SpecServing::default(), exact_decode: false, act_choice: gpu_core::ActChoice::Auto, gdn_state: GdnState::F32, linear_activations: LinearActivations::Auto, prefill: PrefillPolicy::default(), plan: OnceLock::new(), vision: OnceLock::new(), sampling: OnceLock::new() }
     }
 
     /// How this checkpoint reads images, when it does: an HF directory that declares a vision tower and holds its
@@ -3938,6 +3947,20 @@ impl Qwen35GgufResident {
     pub fn with_gdn_state(mut self, state: GdnState) -> Qwen35GgufResident {
         self.gdn_state = state;
         self
+    }
+
+    /// **Choose the precision of the activation operand the quantized-weight linears feed their products**
+    /// (`--linear-activations`): NVFP4 weights read E4M3 activations (W4A8, faster) or bf16 ones (W4A16). `Auto` is
+    /// [`LinearActivations::AUTO`]. A tier where it has no effect (FP8 checkpoints are W8A8, bf16 weights) ignores it, and
+    /// the placement log says so once. Must be set before the first `estimate_multi` call.
+    pub fn with_linear_activations(mut self, choice: LinearActivations) -> Qwen35GgufResident {
+        self.linear_activations = choice;
+        self
+    }
+
+    /// The setting of [`Self::with_linear_activations`].
+    pub fn linear_activations(&self) -> LinearActivations {
+        self.linear_activations
     }
 
     /// The element type the recurrent-state pools are stored in ([`Self::with_gdn_state`]).
@@ -4610,6 +4633,9 @@ impl Qwen35GgufResident {
         // tok/s).
         let workspace = self.serving_shape(&mg, &cfg).stage_workspace(&cfg);
         residency::log::info(&format!("{MODEL}: freed activation blocks are kept up to the stage workspace, {:.1} GiB", workspace as f64 / (1u64 << 30) as f64));
+        if let Some(note) = linear_activations_note(self.linear_activations, &self.tier) {
+            residency::log::info(&format!("{MODEL}: {note}"));
+        }
         let mut shards = Vec::with_capacity(plan.stages.len());
         for (_, placed, _) in &plan.stages {
             // The planner's `embed`/`head` flags say which stage is CHARGED
@@ -4626,7 +4652,8 @@ impl Qwen35GgufResident {
             // every config). The real per-sequence cache is `ShardCaches`
             // below, at `self.cap` - the same split `crate::serve::Engine`
             // makes for the same reason.
-            let qwen35 = Qwen35::new_shard_dt(cfg.clone(), 1, 1, src, shard.clone(), &self.tier);
+            let mut qwen35 = Qwen35::new_shard_dt(cfg.clone(), 1, 1, src, shard.clone(), &self.tier);
+            qwen35.set_linear_activations(self.linear_activations);
             // Exact decode is a property of the STEP, not of one card: every
             // stage groups its rows and sizes its attention from this
             // instance's per-sequence context.
@@ -5210,6 +5237,16 @@ mod tests {
         assert_eq!(base().with_gdn_state(GdnState::F32).with_exact_decode(true).gdn_state_refusal(), None, "the f32 pool serves both");
         let plan = base().with_exact_decode(true).plan().refusal.clone().expect("the plan carries the refusal");
         assert!(plan.contains("--exact-decode"), "{plan}");
+    }
+
+    #[test]
+    fn linear_activations_say_so_once_where_they_have_no_effect() {
+        let fp8 = TierPolicy::uniform(Dtype::F8E4M3);
+        let nvfp4 = TierPolicy::uniform(Dtype::F4E2M1);
+        assert_eq!(linear_activations_note(LinearActivations::Auto, &fp8), None, "nothing asked, nothing to say");
+        let note = linear_activations_note(LinearActivations::Bf16, &fp8).expect("an FP8 checkpoint ignores it");
+        assert!(note.contains("--linear-activations bf16") && note.contains("no effect"), "{note}");
+        assert_eq!(linear_activations_note(LinearActivations::E4m3, &nvfp4), None, "an NVFP4 weight honours it");
     }
 
     /// An adapter bank is part of what the automatic pool leaves room for: with one

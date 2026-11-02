@@ -339,6 +339,9 @@ pub struct Qwen35GgufServeConfig {
     /// The element type of the Gated DeltaNet recurrent state and conv history pools (`--gdn-state`); unset is f32. See
     /// [`Qwen35GgufResident::with_gdn_state`](qwen35::int8_gguf_resident::Qwen35GgufResident::with_gdn_state).
     pub gdn_state: Option<model::policy::GdnState>,
+    /// The activation operand precision of the quantized-weight linears (`--linear-activations`); unset is `auto`. See
+    /// [`Qwen35GgufResident::with_linear_activations`](qwen35::int8_gguf_resident::Qwen35GgufResident::with_linear_activations).
+    pub linear_activations: Option<model::policy::LinearActivations>,
     /// Prompt tokens one sequence gets of each scheduler iteration's prefill
     /// while others wait (`the prefill-slice setting`). `None` takes the engine's
     /// default ([`PrefillPolicy::default`](qwen35::int8_gguf_resident::PrefillPolicy)).
@@ -374,6 +377,7 @@ pub const QWEN35_GGUF_POLICY: model::policy::PolicySupport = model::policy::Poli
     exact_decode: true,
     act_precision: true,
     gdn_state: true,
+    linear_activations: true,
 };
 
 /// What the brain-checkpoint Qwen3.8 resident honours of a serving policy: the weight tier is the checkpoint's own
@@ -389,6 +393,7 @@ pub const QWEN35_FP32_POLICY: model::policy::PolicySupport = model::policy::Poli
     exact_decode: true,
     act_precision: false,
     gdn_state: false,
+    linear_activations: false,
 };
 
 impl Qwen35ServeConfig {
@@ -432,6 +437,7 @@ impl Qwen35GgufServeConfig {
         self.exact_decode = p.exact_decode;
         self.act_precision = p.act_precision.or(self.act_precision);
         self.gdn_state = p.gdn_state.or(self.gdn_state);
+        self.linear_activations = p.linear_activations.or(self.linear_activations);
         let l = &p.limits;
         self.ctx = l.ctx.or(self.ctx);
         self.max_batch = l.max_batch.or(self.max_batch);
@@ -636,7 +642,7 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
         let spec = SpecServing { mode, scratch_rows, batch_limit, ..SpecServing::default() };
         // Paged KV: sequences hold the blocks their tokens need from one shared pool, so a long context
         // costs only the sequences that use it, and the batch is not multiplied by the context.
-        let r = Qwen35GgufResident::new(gguf_path.to_string(), devices.clone(), cap, tier.clone()).with_kv_tier(kv).with_max_batch(max_batch).with_prefix_slots(prefix_slots).with_speculation(spec).with_exact_decode(cfg.exact_decode).with_act_choice(cfg.act_precision.unwrap_or_default()).with_gdn_state(gdn_state).with_kv_block_rows(qwen35::int8_gguf_resident::KV_BLOCK_ROWS).with_unified_pool(true);
+        let r = Qwen35GgufResident::new(gguf_path.to_string(), devices.clone(), cap, tier.clone()).with_kv_tier(kv).with_max_batch(max_batch).with_prefix_slots(prefix_slots).with_speculation(spec).with_exact_decode(cfg.exact_decode).with_act_choice(cfg.act_precision.unwrap_or_default()).with_gdn_state(gdn_state).with_linear_activations(cfg.linear_activations.unwrap_or_default()).with_kv_block_rows(qwen35::int8_gguf_resident::KV_BLOCK_ROWS).with_unified_pool(true);
         match &bank {
             Some(bank) => r.with_adapter_bank(bank.request()),
             None => r,
@@ -846,6 +852,18 @@ mod tests {
         let bank = AdapterBankSettings::default();
         let e = gguf_resident_banked("none.gguf", "t/x", &[], 0, &cfg.gguf, Some(bank)).err().unwrap();
         assert!(e.contains("--exact-decode") && e.contains("adapter"), "{e}");
+    }
+
+    /// `--linear-activations` reaches the GGUF resident only; the brain-checkpoint resident refuses it by name.
+    #[test]
+    fn linear_activations_reach_the_gguf_resident_and_the_fp32_resident_refuses_them() {
+        let mut p = model::policy::ServePolicy::default();
+        p.set("--linear-activations", "bf16").unwrap();
+        let mut cfg = Qwen35ServeConfig::default();
+        assert_eq!(cfg.gguf.linear_activations, None, "auto unless asked");
+        cfg.apply_policy(&p).expect("the GGUF resident honours it");
+        assert_eq!(cfg.gguf.linear_activations, Some(model::policy::LinearActivations::Bf16));
+        assert!(cfg.fp32.refused && cfg.fp32_refused.as_deref().unwrap().contains("--linear-activations"));
     }
 
     /// `--gdn-state` reaches the GGUF resident only (the brain-checkpoint resident does not declare it), and a bf16

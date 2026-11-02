@@ -7029,6 +7029,12 @@ impl Qwen35 {
         &self.ops
     }
 
+    /// **Choose the activation operand precision of the quantized-weight linears** (`--linear-activations`, see
+    /// [`model::policy::LinearActivations`]); FP8 and bf16 weights ignore it.
+    pub fn set_linear_activations(&mut self, choice: model::policy::LinearActivations) {
+        self.ops.set_linear_activations(choice);
+    }
+
     /// The embedding table this stage gathers token rows from, when it holds one.
     pub(crate) fn embed_table(&self) -> Option<&Weight> {
         self.weights.get("tok.weight")

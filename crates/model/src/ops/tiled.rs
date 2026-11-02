@@ -311,12 +311,13 @@ impl Ops {
     /// exists and the tensor cores run at the FP8 rate. From [`NVFP4_WGMMA_MIN_ROWS`] rows ([`NVFP4_WGMMA_FILL_TILES`] says when) on the Hopper
     /// warpgroup GEMM that decodes a tile into shared memory ([`gpu_core::Fused::MatmulNvfp4Wgmma`]); from two rows up to there on the `mma.sync` builds
     /// that decode in registers ([`gpu_core::Fused::MatmulNvfp4MmaE8`] and its wider builds), which read the weight once for the few rows of a decode batch.
-    /// `false` (nothing pushed) when the weight is not NVFP4, the device, the shape or the row count is not served; the caller then takes the next form.
+    /// `false` (nothing pushed) when the weight is not NVFP4, the activations are set to bf16 ([`Ops::set_linear_activations`]), the device, the
+    /// shape or the row count is not served; the caller then takes the next form.
     pub(super) fn nvfp4_e4m3(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), act: &Act, y: &DeviceBuffer, yoff: u64) -> bool {
         let Weight::Micro { w: wb, s: sb, kind: MicroScaled::Nvfp4, global, .. } = w else { return false };
         let (first, count) = rows;
         let (m, k) = (act.m, w.k());
-        if m < 2 || !self.providers.runs("cuda") {
+        if m < 2 || !self.linear_activations.is_e4m3() || !self.providers.runs("cuda") {
             return false;
         }
         let min_wgmma_rows = if count.div_ceil(128) >= NVFP4_WGMMA_FILL_TILES { NVFP4_WGMMA_MIN_ROWS } else { NVFP4_WGMMA_MIN_ROWS_FEW_TILES };

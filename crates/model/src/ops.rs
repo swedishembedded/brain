@@ -1296,6 +1296,8 @@ pub struct Ops {
     /// checks and parity gates pin [`GemmPrecision::Fp32Reference`] through
     /// [`Ops::set_gemm_precision`].
     gemm: LibraryGemmProvider,
+    /// The precision of the activation operand quantized-weight products feed ([`Ops::set_linear_activations`]).
+    linear_activations: crate::policy::LinearActivations,
     /// Bytes of decoded f32 scratch one tile of a quantized product may use (see [`tiled`]).
     tile_budget_bytes: u64,
     /// A tiny buffer bound to the `weight_decode` bindings a tier does not use.
@@ -1411,7 +1413,7 @@ impl Ops {
             idx.insert(name, i);
         }
         let gemm = LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Auto);
-        Ok(Ops { gpu, caps, idx, selector, providers, gemm, tile_budget_bytes: DEFAULT_TILE_BUDGET_BYTES, decode_dummy: std::sync::OnceLock::new(), uploads: std::sync::OnceLock::new(), decoded: Default::default() })
+        Ok(Ops { gpu, caps, idx, selector, providers, gemm, linear_activations: Default::default(), tile_budget_bytes: DEFAULT_TILE_BUDGET_BYTES, decode_dummy: std::sync::OnceLock::new(), uploads: std::sync::OnceLock::new(), decoded: Default::default() })
     }
 
     /// Choose the arithmetic of the GEMMs against bf16 weights: `Auto` takes
@@ -1421,6 +1423,18 @@ impl Ops {
     /// cross-backend parity use). See [`gpu_core::provider::library`].
     pub fn set_gemm_precision(&mut self, precision: GemmPrecision) {
         self.gemm = LibraryGemmProvider::for_gpu(&self.gpu, precision);
+    }
+
+    /// Choose the precision of the activation operand quantized-weight products feed (`--linear-activations`): an NVFP4 weight
+    /// reads E4M3 activations (one scale per row, W4A8) or bf16 ones (W4A16). `Auto` takes
+    /// [`crate::policy::LinearActivations::AUTO`]. FP8 and bf16 weights ignore it.
+    pub fn set_linear_activations(&mut self, choice: crate::policy::LinearActivations) {
+        self.linear_activations = choice;
+    }
+
+    /// The setting of [`Self::set_linear_activations`].
+    pub fn linear_activations(&self) -> crate::policy::LinearActivations {
+        self.linear_activations
     }
 
     /// The vendor-library GEMM provider (inactive on a device without the

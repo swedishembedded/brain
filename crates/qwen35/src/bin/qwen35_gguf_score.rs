@@ -19,7 +19,7 @@
 //!
 //! Usage: `qwen35_gguf_score <Q8_0.gguf|hf-dir> <records.jsonl> [--adapter FILE]
 //!        [--adapter-slots N] [--adapter-rank-cap N] [--cap N] [--kv int8|bf16|f32] [--tier stored|bf16]
-//!        [--gdn-state f32|bf16] [--top K] [--device D] [--backend B] [--limit N] [--out FILE]`
+//!        [--gdn-state f32|bf16] [--linear-activations auto|bf16|e4m3] [--top K] [--device D] [--backend B] [--limit N] [--out FILE]`
 //!
 //! `--top K` adds `"top"`: for every position `1..tokens` (all of them, not only the supervised ones), the K most likely
 //! next tokens as `[id, logprob]` pairs, most likely first - an engine's numerics compared with another's along the same
@@ -63,7 +63,7 @@ fn main() {
     let (Some(gguf), Some(records_path)) = (args.get(1), args.get(2)) else {
         eprintln!(
             "usage: qwen35_gguf_score <Q8_0.gguf> <records.jsonl> [--adapter FILE] [--adapter-slots N] \
-             [--adapter-rank-cap N] [--cap N] [--kv int8|bf16|f32] [--tier stored|bf16] [--gdn-state f32|bf16] [--top K] \
+             [--adapter-rank-cap N] [--cap N] [--kv int8|bf16|f32] [--tier stored|bf16] [--gdn-state f32|bf16] [--linear-activations auto|bf16|e4m3] [--top K] \
              [--device D] [--backend B] [--limit N] [--out FILE]"
         );
         std::process::exit(2);
@@ -100,8 +100,9 @@ fn main() {
         Some(other) => panic!("--tier is stored or bf16, not {other:?}"),
     };
     let gdn = flag(&args, "--gdn-state").map_or(model::policy::GdnState::default(), |v| model::policy::GdnState::parse(v).unwrap_or_else(|| panic!("--gdn-state is f32 or bf16, not {v:?}")));
+    let linear_activations = flag(&args, "--linear-activations").map_or(model::policy::LinearActivations::default(), |v| model::policy::LinearActivations::parse(v).unwrap_or_else(|| panic!("--linear-activations is auto, bf16 or e4m3, not {v:?}")));
     let top_k: Option<usize> = flag(&args, "--top").map(|v| v.parse().expect("--top is a number"));
-    let resident = Qwen35GgufResident::new(gguf.clone(), devices, cap, tier).with_kv_tier(kv).with_gdn_state(gdn);
+    let resident = Qwen35GgufResident::new(gguf.clone(), devices, cap, tier).with_kv_tier(kv).with_gdn_state(gdn).with_linear_activations(linear_activations);
     let key = resident.instance_key("generate", &capability::Invocation::new());
     let placed: Vec<Device> = resident.estimate_multi(&key).devices().collect();
     let (mut engine, ..) = resident.activate_engine(&placed).expect("activate the checkpoint");

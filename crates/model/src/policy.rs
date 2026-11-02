@@ -26,6 +26,9 @@
 //! - `--gdn-state f32|bf16` ([`ServePolicy::gdn_state`]): the element type the Gated DeltaNet recurrent state and conv
 //!   history are stored in between steps ([`GdnState`]); bf16 halves the bytes a decode step streams, at bf16 rounding of
 //!   the carried state. Default f32.
+//! - `--linear-activations auto|bf16|e4m3` ([`ServePolicy::linear_activations`]): the precision of the activation operand
+//!   that quantized-weight linears (FP4/NVFP4 micro-scaled weights) feed their products ([`LinearActivations`]); `e4m3` is
+//!   the faster, lower-precision W4A8 product, `bf16` the W4A16 one. Where the default points is [`LinearActivations::AUTO`].
 //! - `--gemm auto|fp32` ([`ServePolicy::gemm`]) and `--no-fuse-norm`,
 //!   `--kv-calibration`, `--exact-decode`: arithmetic, calibration and
 //!   batch-independence switches. `--exact-decode` makes a decode row's result
@@ -114,6 +117,60 @@ impl std::fmt::Display for GdnState {
     }
 }
 
+/// The precision of the activation operand a quantized-weight linear feeds its product (`--linear-activations`).
+/// Accumulation is f32 either way. It selects among the products an NVFP4 weight has: `Bf16` reads the activations as bf16
+/// (W4A16, what vLLM runs on Hopper), `E4m3` quantises them to FP8 with one scale per row and runs the FP8 tensor cores
+/// (W4A8, faster and coarser). A weight tier where the setting has no effect (FP8 checkpoints are W8A8 by design, bf16
+/// weights) ignores it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LinearActivations {
+    /// The default precision, [`Self::AUTO`].
+    #[default]
+    Auto,
+    Bf16,
+    E4m3,
+}
+
+impl LinearActivations {
+    /// What `auto` means. The one place the default is decided: change it here and every consumer follows.
+    pub const AUTO: LinearActivations = LinearActivations::E4m3;
+
+    /// Parse the `--linear-activations` value (`auto`, `bf16` or `e4m3`).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "auto" => Some(Self::Auto),
+            "bf16" => Some(Self::Bf16),
+            "e4m3" => Some(Self::E4m3),
+            _ => None,
+        }
+    }
+
+    /// The name a person writes for it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Bf16 => "bf16",
+            Self::E4m3 => "e4m3",
+        }
+    }
+
+    /// `Auto` replaced by [`Self::AUTO`]: always `Bf16` or `E4m3`.
+    pub fn resolved(self) -> Self {
+        if self == Self::Auto { Self::AUTO } else { self }
+    }
+
+    /// Whether the products quantise their activations to E4M3.
+    pub fn is_e4m3(self) -> bool {
+        self.resolved() == Self::E4m3
+    }
+}
+
+impl std::fmt::Display for LinearActivations {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 /// The typed policy. All fields default to "the model's own choice".
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ServePolicy {
@@ -126,6 +183,8 @@ pub struct ServePolicy {
     pub act_precision: Option<gpu_core::ActChoice>,
     /// `--gdn-state`: the recurrent-state storage type; `None` is the model's own (f32).
     pub gdn_state: Option<GdnState>,
+    /// `--linear-activations`: the activation operand of quantized-weight linears; `None` is `auto`.
+    pub linear_activations: Option<LinearActivations>,
     /// `Some(false)` turns the residual-add plus norm fusion off (an A/B switch).
     pub fuse_norm: Option<bool>,
     /// `--exact-decode`: make a decode row's result independent of which other
@@ -136,7 +195,7 @@ pub struct ServePolicy {
 }
 
 /// The public flags that take a value.
-pub const VALUE_FLAGS: &[&str] = &["--weight-format", "--kv-cache", "--gemm", "--act-precision", "--gdn-state", "--ctx", "--max-batch", "--kv-offload-gb", "--itl-target-ms"];
+pub const VALUE_FLAGS: &[&str] = &["--weight-format", "--kv-cache", "--gemm", "--act-precision", "--gdn-state", "--linear-activations", "--ctx", "--max-batch", "--kv-offload-gb", "--itl-target-ms"];
 /// The public switches (no value).
 pub const SWITCH_FLAGS: &[&str] = &["--kv-calibration", "--exact-decode"];
 /// Settings that are derived by default and exist only as the target of a
@@ -164,6 +223,7 @@ impl ServePolicy {
             }
             "--act-precision" => self.act_precision = Some(gpu_core::ActChoice::parse(value.trim().to_ascii_lowercase().as_str()).ok_or_else(|| format!("--act-precision {value:?}: expected auto, f32 or bf16"))?),
             "--gdn-state" => self.gdn_state = Some(GdnState::parse(value.trim().to_ascii_lowercase().as_str()).ok_or_else(|| format!("--gdn-state {value:?}: expected f32 or bf16"))?),
+            "--linear-activations" => self.linear_activations = Some(LinearActivations::parse(value.trim().to_ascii_lowercase().as_str()).ok_or_else(|| format!("--linear-activations {value:?}: expected auto, bf16 or e4m3"))?),
             "--ctx" => self.limits.ctx = Some(count(flag, value)?),
             "--max-batch" => self.limits.max_batch = Some(count(flag, value)?),
             "--itl-target-ms" => match count(flag, value)? {
@@ -204,6 +264,9 @@ impl ServePolicy {
         }
         if let Some(g) = self.gdn_state {
             v.push(format!("gdn-state={}", g.name()));
+        }
+        if let Some(l) = self.linear_activations {
+            v.push(format!("linear-activations={}", l.name()));
         }
         if self.kv_calibration {
             v.push("kv-calibration".into());
@@ -262,6 +325,8 @@ pub struct PolicySupport {
     pub act_precision: bool,
     /// `--gdn-state` honoured: the recurrent state of a Gated DeltaNet layer can be stored in the chosen element type.
     pub gdn_state: bool,
+    /// `--linear-activations` honoured: the model's quantized-weight linears can take their activation operand in the chosen precision.
+    pub linear_activations: bool,
 }
 
 impl PolicySupport {
@@ -301,6 +366,9 @@ impl PolicySupport {
         }
         if policy.gdn_state.is_some() && !self.gdn_state {
             return Err(format!("{}: --gdn-state is not supported", self.model));
+        }
+        if policy.linear_activations.is_some() && !self.linear_activations {
+            return Err(format!("{}: --linear-activations is not supported", self.model));
         }
         Ok(())
     }
@@ -463,6 +531,7 @@ mod tests {
         exact_decode: false,
         act_precision: false,
         gdn_state: false,
+        linear_activations: false,
     };
 
     #[test]
@@ -473,6 +542,7 @@ mod tests {
         p.set("--gemm", "fp32").unwrap();
         p.set("--act-precision", "BF16").unwrap();
         p.set("--gdn-state", "BF16").unwrap();
+        p.set("--linear-activations", "E4M3").unwrap();
         p.set("--ctx", "4096").unwrap();
         p.set("--kv-offload-gb", "1.5").unwrap();
         p.set("--itl-target-ms", "60").unwrap();
@@ -485,6 +555,17 @@ mod tests {
         assert_eq!(p.act_precision, Some(gpu_core::ActChoice::Force(gpu_core::ActPrecision::Bf16)));
         assert_eq!(p.gdn_state, Some(GdnState::Bf16));
         assert!(p.describe().contains("gdn-state=bf16"), "{}", p.describe());
+        assert_eq!(p.linear_activations, Some(LinearActivations::E4m3));
+        assert!(p.describe().contains("linear-activations=e4m3"), "{}", p.describe());
+        let mut lin = ServePolicy::default();
+        lin.set("--linear-activations", "bf16").unwrap();
+        assert!(LLM.check(&lin).unwrap_err().contains("--linear-activations"), "a model that does not declare it refuses the flag");
+        assert!(PolicySupport { linear_activations: true, ..LLM }.check(&lin).is_ok());
+        assert_eq!(ServePolicy::default().linear_activations, None, "unset is the default (auto)");
+        assert_eq!(LinearActivations::parse("auto"), Some(LinearActivations::Auto));
+        assert_eq!(LinearActivations::Auto.resolved(), LinearActivations::AUTO);
+        assert_ne!(LinearActivations::AUTO, LinearActivations::Auto, "auto resolves to a concrete precision");
+        assert!(LinearActivations::E4m3.is_e4m3() && !LinearActivations::Bf16.is_e4m3());
         let mut gdn = ServePolicy::default();
         gdn.set("--gdn-state", "f32").unwrap();
         assert!(LLM.check(&gdn).unwrap_err().contains("--gdn-state"), "a model that does not declare it refuses the flag");
@@ -496,7 +577,7 @@ mod tests {
         assert_eq!((p.limits.ctx, p.limits.kv_offload_gb, p.limits.itl_target_ms), (Some(4096), Some(1.5), Some(60)));
         assert_eq!((p.fuse_norm, p.kv_calibration, p.exact_decode), (Some(false), true, true));
         assert!(p.describe().contains("exact-decode"), "{}", p.describe());
-        for (flag, bad) in [("--ctx", "-1"), ("--kv-cache", "fp4"), ("--gemm", "tf32"), ("--act-precision", "fp16"), ("--gdn-state", "fp16"), ("--kv-offload-gb", "nan"), ("--weight-format", "q9"), ("--itl-target-ms", "0")] {
+        for (flag, bad) in [("--ctx", "-1"), ("--kv-cache", "fp4"), ("--gemm", "tf32"), ("--act-precision", "fp16"), ("--gdn-state", "fp16"), ("--linear-activations", "fp8"), ("--kv-offload-gb", "nan"), ("--weight-format", "q9"), ("--itl-target-ms", "0")] {
             let e = ServePolicy::default().set(flag, bad).unwrap_err();
             assert!(e.contains(flag), "{e}");
         }

@@ -76,3 +76,50 @@ fn an_nvfp4_weight_against_many_rows_runs_on_the_fp8_tensor_cores_and_agrees_to_
         }
     }
 }
+
+/// Names of the kernels one product over `m` rows of `w` launched, by the device's own kernel timing.
+fn kernels_run(ops: &Ops, w: &Weight, m: usize) -> Vec<String> {
+    let (g, k, n) = (ops.gpu(), w.k() as usize, w.n());
+    let mut rng = Lcg::new(data::rng::random_seed());
+    let xb = g.storage_init("x", &rng.vec_scaled(m * k, 1.0));
+    let y = g.storage_init("y", &vec![f32::NAN; m * n as usize]);
+    let act = ops.act_f32(&xb, 0, m as u32, k as u32);
+    let mut steps = Vec::new();
+    ops.matmul_rows(&mut steps, w, (0, n), &act, &y, 0);
+    g.set_kernel_timing(true);
+    g.reset_kernel_times();
+    g.submit(&[], &steps);
+    g.poll_wait();
+    let names = g.kernel_times().expect("the device times its kernels").into_iter().filter(|e| e.2 > 0).map(|e| e.0).collect();
+    g.set_kernel_timing(false);
+    names
+}
+
+#[test]
+fn linear_activations_choose_the_bf16_or_the_e4m3_build_of_an_nvfp4_product() {
+    use model::policy::LinearActivations;
+    let mut ops = Ops::new(Gpu::new(training_kernel_list())).expect("Ops::new");
+    if ops.gpu().kind() != "cuda" || !ops.gpu().has_fused(gpu_core::Fused::MatmulNvfp4MmaE8) || !ops.gpu().has_fused(gpu_core::Fused::MatmulNvfp4Mma8) {
+        return brain_testutil::skip_unavailable("the NVFP4 tensor-core products need a CUDA device");
+    }
+    let w = nvfp4_weight(&ops, 512, 512);
+    let ran = |ops: &Ops, m| kernels_run(ops, &w, m).join(" ");
+    assert_eq!(ops.linear_activations(), LinearActivations::Auto);
+    for (m, bf16_build, e4m3_build) in [(4usize, "native:matmul_nvfp4_mma8", "native:matmul_nvfp4_mmae8"), (12, "native:matmul_nvfp4_mma16", "native:matmul_nvfp4_mmae16")] {
+        ops.set_linear_activations(LinearActivations::Bf16);
+        let bf16 = ran(&ops, m);
+        assert!(bf16.contains(bf16_build) && !bf16.contains("mmae") && !bf16.contains("wgmma"), "bf16 at {m} rows ran: {bf16}");
+        ops.set_linear_activations(LinearActivations::E4m3);
+        let e4m3 = ran(&ops, m);
+        assert!(e4m3.contains(e4m3_build) && !e4m3.contains(bf16_build), "e4m3 at {m} rows ran: {e4m3}");
+        ops.set_linear_activations(LinearActivations::Auto);
+        assert_eq!(ran(&ops, m), e4m3, "auto is today's E4M3 path at {m} rows");
+    }
+    if ops.gpu().has_fused(gpu_core::Fused::MatmulNvfp4Wgmma) {
+        ops.set_linear_activations(LinearActivations::E4m3);
+        assert!(ran(&ops, 130).contains("native:matmul_nvfp4_wgmma"), "e4m3 at 130 rows takes the warpgroup GEMM");
+        ops.set_linear_activations(LinearActivations::Bf16);
+        let bf16 = ran(&ops, 130);
+        assert!(!bf16.contains("wgmma") && !bf16.contains("mmae"), "bf16 at 130 rows (past the mma builds) ran: {bf16}");
+    }
+}
