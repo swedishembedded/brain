@@ -256,6 +256,26 @@ average, 2-2.5 s per view. Host SSIM is ~150 ms per 1024x768 view.
       3.0M gaussians, 1500 iterations, 31 of 251 views held out): train
       21.07 dB / SSIM 0.8024, HELD-OUT raw 20.02 dB / SSIM 0.7719 (LPIPS not
       scored: its weights are not in the model store).
+- [x] Structure from motion on the pool (`sfm::ba`, `sfm::linalg`,
+      `sfm::incremental`): 251 photographs 1247 s on the whole node -> 319 s
+      on 72 cores (focal search 434 -> 178 s, solve 666 -> 63 s), inside
+      `train` 1139 -> 234-248 s; 251/251 placed, 0.68 px rms, same focal
+      length; sfm and recon tests green.
+- [x] Fit: sort chunk by key count (sort + scan 12.3 -> 7.1 s of a 44.8 s
+      device profile, whole pass 52.6 -> 47.0 s), density-round host loops
+      on the pool, whole-fit stage clocks (`BRAIN_SPLAT_PROFILE`).
+      Same held-out photos, same cameras and the 489x273 / 3.0M / 1500
+      iteration config, before -> after: training 21.07 -> 21.05 dB, HELD-OUT
+      raw 20.02 -> 20.25 dB, SSIM 0.7719 -> 0.7750 (one random-seed fit each;
+      LPIPS not scored).
+- [ ] The fit is the ray rasterizer (49 ms a view, 57 % of the profile,
+      instruction-bound: ncu 71 % SM, IPC 2.9, 28 % occupancy) and its
+      backward (74 + 55 ms a view); a density round (95-125 s at 7M) is a
+      full backward per view only to read the colour channel back. Next, in
+      order: a colour-only credit backward, a CUDA radix-sort candidate
+      (a scatter pass is 2.3 ms for 10-25M keys against ~0.1 ms at the
+      bandwidth bound), cheaper rejection of pairs a pixel cannot hit
+      before `ray_pair`'s division and exponential. Knowledge 430.
 
 ### Quality gates
 
