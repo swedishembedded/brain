@@ -197,3 +197,39 @@ fn kernel_times_against_fp8() {
         }
     }
 }
+
+/// Back-to-back launches (knowledge 410): the persistent grid, the tensor maps each block builds in global memory and the ring of barriers
+/// survive 20 launches a batch with the outputs poisoned between batches, at the served shapes (a gate/up round, a down round, a ragged
+/// small round), for `SECONDS` each, every batch bit-identical to the first. Check `dmesg | grep -ci xid` before and after.
+#[test]
+#[ignore = "a minutes-long stress, not a gate"]
+fn back_to_back_launches_are_deterministic_and_do_not_fault() {
+    const SECONDS: u64 = 40;
+    let gpu = gpu_core::testgpu::dev(&[]);
+    if !is_hopper(&gpu) || !gpu.has_fused(Fused::MatmulNvfp4Wgmma) {
+        return brain_testutil::skip_unavailable("the NVFP4 wgmma product needs a CUDA device with warpgroup tensor cores");
+    }
+    for (m, k, n) in [(4096usize, 5120usize, 17408usize), (2048, 17408, 5120), (300, 5120, 4098), (33, 1024, 62)] {
+        let p = problem(m, k, n, data::rng::random_seed(), false);
+        let (xq, w, s, sx) = (upload_u32(&gpu, &words(&p.xq)), upload_u32(&gpu, &p.codes), upload_u32(&gpu, &words(&p.scales)), gpu.storage_init("sx", &p.sx));
+        let y = gpu.storage(m as u64 * n as u64);
+        let params = [m as u32, k as u32, n as u32, p.global.to_bits()];
+        let started = std::time::Instant::now();
+        let mut first: Option<Vec<u32>> = None;
+        let mut batches = 0;
+        while started.elapsed().as_secs() < SECONDS {
+            gpu.write_f32(&y, &vec![f32::NAN; m * n]);
+            let steps: Vec<_> = (0..20).map(|_| gpu.fused_step(Fused::MatmulNvfp4Wgmma, &[&xq, &w, &s, &sx, &y], &params).expect("served shape")).collect();
+            gpu.submit(&[], &steps);
+            gpu.poll_wait();
+            let bits: Vec<u32> = gpu.read(&y, m * n).iter().map(|v| v.to_bits()).collect();
+            assert!(bits.iter().all(|b| f32::from_bits(*b).is_finite()), "m={m} k={k} n={n}: a batch left an element unwritten");
+            match &first {
+                None => first = Some(bits),
+                Some(f) => assert!(f == &bits, "m={m} k={k} n={n}: batch {batches} differs from the first"),
+            }
+            batches += 1;
+        }
+        eprintln!("m={m} k={k} n={n}: {batches} batches of 20 launches, identical");
+    }
+}
