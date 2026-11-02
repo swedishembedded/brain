@@ -40,7 +40,7 @@ fn example(cfg: &BartConfig, t_prompt: u32, max_t: u32, seed: u32) -> Example {
 }
 
 fn build(cfg: &BartConfig, t_prompt: u32, max_t: u32, lora: Option<LoraCfg>, init: &HashMap<String, Vec<f32>>) -> Florence2Trainer {
-    Florence2Trainer::new(gpu_core::testgpu::dev(train::PIPELINES), cfg.clone(), t_prompt, max_t, lora, init)
+    Florence2Trainer::new(gpu_core::testgpu::dev(train::PIPELINES), *cfg, t_prompt, max_t, lora, init)
 }
 
 /// Full fine-tune: every base tensor moves, and the wiring alone (matching
