@@ -145,6 +145,8 @@ const ORACLE_SAMPLES: usize = 24;
 // perf-number: the asserted floor of this gate; the achieved ratio is printed.
 const SPEEDUP_FLOOR: f64 = 4.0;
 const TRIALS: usize = 10;
+/// Back-to-back rounds of a timing report's sustained figure.
+const SUSTAINED_REPS: usize = 400;
 
 struct Rng(u64);
 impl Rng {
@@ -305,6 +307,18 @@ impl Device {
         gpu.poll_wait();
         let ms: f64 = gpu.kernel_times().unwrap_or_default().iter().filter(|(n, _, _)| n.contains(name_part)).map(|(_, ms, _)| ms).sum();
         ms / 3.0
+    }
+
+    /// Mean device ms of `reps` back-to-back submissions of `steps`: the rate the card holds once its clocks have settled
+    /// under the load, which the best of a few short trials (above) does not show.
+    fn sustained_steps_ms(&self, gpu: &Gpu, steps: &[gpu_core::Step], name_part: &str, reps: usize) -> f64 {
+        gpu.reset_kernel_times();
+        for _ in 0..reps {
+            gpu.submit(&[], steps);
+        }
+        gpu.poll_wait();
+        let ms: f64 = gpu.kernel_times().unwrap_or_default().iter().filter(|(n, _, _)| n.contains(name_part)).map(|(_, ms, _)| ms).sum();
+        ms / reps as f64
     }
 
     /// The best device ms of the portable and the native step, `(portable, native)`, their trials INTERLEAVED.
@@ -800,6 +814,13 @@ fn the_compact_cache_prefill_rates_at_short_rounds() {
     }
 }
 
+/// A bf16 cache at the 2048-row chunks a 64-sequence 8K-prompt run prefills in, at the four chunk starts of an 8K prompt.
+#[test]
+#[ignore = "a timing report for kernel work, not a spec"]
+fn the_bf16_cache_prefill_rates_at_the_8k_prompt_chunks() {
+    prefill_rates(Kv::Bf16, &[(4096u32, 0u32), (3968, 3924), (2048, 0), (2048, 6144)]);
+}
+
 fn int8_prefill_rates(cases: &[(u32, u32)]) {
     prefill_rates(Kv::Int8, cases);
 }
@@ -827,7 +848,8 @@ fn prefill_rates(kv: Kv, cases: &[(u32, u32)]) {
             let steps = if wg { d.native_wg(&gpu, &seen).expect("warpgroup step") } else { vec![d.native(&gpu, &seen).expect("native step")] };
             let _ = d.base.run_steps(&gpu, &steps, &seen);
             let ms = (0..TRIALS).map(|_| d.base.trial_steps_ms(&gpu, &steps, name)).fold(f64::MAX, f64::min);
-            eprintln!("cuda_flash_prefill: {kv:?} {label} n={n} ctx={}: {ms:.3} ms ({:.0} TFLOPS causal)", start + n, flops / ms / 1e9);
+            let held = d.base.sustained_steps_ms(&gpu, &steps, name, SUSTAINED_REPS);
+            eprintln!("cuda_flash_prefill: {kv:?} {label} n={n} ctx={}: {ms:.3} ms ({:.0} TFLOPS causal), sustained over {SUSTAINED_REPS} rounds {held:.3} ms ({:.0} TFLOPS)", start + n, flops / ms / 1e9, flops / held / 1e9);
         }
         gpu.set_kernel_timing(false);
     }
