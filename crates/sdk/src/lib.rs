@@ -165,6 +165,10 @@ mod chat_trainer;
 #[cfg(feature = "study")]
 mod finetune;
 #[cfg(feature = "study")]
+mod example_length;
+#[cfg(feature = "study")]
+pub use example_length::ExampleMeter;
+#[cfg(feature = "study")]
 /// The target that masks a position out of [`score_tokens`] (it scores `0.0`).
 pub use model::IGNORE as IGNORE_TARGET;
 #[cfg(feature = "study")]

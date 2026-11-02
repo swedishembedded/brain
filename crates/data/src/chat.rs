@@ -551,14 +551,17 @@ impl ChatSample {
             if line.is_empty() {
                 continue;
             }
-            let record: WireRecord = serde_json::from_str(line).map_err(|e| {
-                io::Error::new(io::ErrorKind::InvalidData, format!("{}:{}: {e}", path.display(), lineno + 1))
-            })?;
-            out.push(sample_from_wire(record, reader).map_err(|e| {
+            out.push(Self::from_json_line_with(line, reader).map_err(|e| {
                 io::Error::new(io::ErrorKind::InvalidData, format!("{}:{}: {e}", path.display(), lineno + 1))
             })?);
         }
         Ok(out)
+    }
+
+    /// One record of a dataset file, as [`Self::from_jsonl_with`] reads each line of it.
+    pub fn from_json_line_with(line: &str, reader: &dyn ImageReader) -> Result<ChatSample, String> {
+        let record: WireRecord = serde_json::from_str(line).map_err(|e| e.to_string())?;
+        sample_from_wire(record, reader)
     }
 }
 

@@ -1812,6 +1812,34 @@ pub(crate) struct Asked<'a> {
 }
 
 impl Asked<'_> {
+    /// The examples one record is trained as: see [`Asked::read`] for which shape each kind of record takes.
+    pub(crate) fn examples_of(&self, record: &ChatSample) -> std::result::Result<Vec<ChatSample>, String> {
+        let invalid = |e: &dyn std::fmt::Display| e.to_string();
+        // Whole-record masking is exact for plain answers in thinking mode
+        // and refuses tool turns; everywhere else each answer is asked for,
+        // and a record supervising only its last message has one boundary.
+        if self.pack && record.messages.iter().filter(|m| m.train).count() > 1 {
+            if let Some(packed) = record.answers_packed(self.tmpl, self.no_think.is_none()).map_err(|e| invalid(&e))? {
+                return Ok(vec![packed]);
+            }
+        }
+        // A rollout's action is the answer as the model is asked for it: what the sampler drew and recorded
+        // log-probabilities of. Only the per-answer rendering supervises exactly that (the whole-conversation mask
+        // also covers the turn's header, which no sampler drew and a negative advantage must not push down).
+        let per_answer = if self.no_think.is_some() || record.supervises_tool_calls() || record.rollout.is_some() {
+            record.answers_as_asked(self.tmpl, self.no_think.is_none()).map_err(|e| invalid(&e))?
+        } else if record.supervises_only_final_turn() && record.context_holds_tool_turns() {
+            record.final_turn_as_asked(self.tmpl, true).map_err(|e| invalid(&e))?.map(|asked| vec![asked])
+        } else {
+            None
+        };
+        Ok(match (per_answer, self.no_think) {
+            (Some(asked), _) => asked,
+            (None, None) => vec![record.clone()],
+            (None, Some(block)) => vec![record.answering_without_thinking(block)],
+        })
+    }
+
     /// The samples of `path` as they are trained on, each checked to encode
     /// against the template and to supervise something. A dialogue is one
     /// example per answer, each as the model is asked for it
@@ -1830,34 +1858,9 @@ impl Asked<'_> {
         // The record each sample came from, so an error about an example names its record.
         let mut origins: Vec<usize> = Vec::with_capacity(records.len());
         for (at, record) in records.iter().enumerate() {
-            let invalid = |e: &dyn std::fmt::Display| Error::Backend(format!("{}: record {} cannot be encoded for training: {e}", path.display(), at + 1));
-            // Whole-record masking is exact for plain answers in thinking mode
-            // and refuses tool turns; everywhere else each answer is asked for,
-            // and a record supervising only its last message has one boundary.
-            if self.pack && record.messages.iter().filter(|m| m.train).count() > 1 {
-                if let Some(packed) = record.answers_packed(self.tmpl, self.no_think.is_none()).map_err(|e| invalid(&e))? {
-                    samples.push(packed);
-                    origins.push(at);
-                    continue;
-                }
-            }
-            // A rollout's action is the answer as the model is asked for it: what the sampler drew and recorded
-            // log-probabilities of. Only the per-answer rendering supervises exactly that (the whole-conversation mask
-            // also covers the turn's header, which no sampler drew and a negative advantage must not push down).
-            let per_answer = if self.no_think.is_some() || record.supervises_tool_calls() || record.rollout.is_some() {
-                record.answers_as_asked(self.tmpl, self.no_think.is_none()).map_err(|e| invalid(&e))?
-            } else if record.supervises_only_final_turn() && record.context_holds_tool_turns() {
-                record.final_turn_as_asked(self.tmpl, true).map_err(|e| invalid(&e))?.map(|asked| vec![asked])
-            } else {
-                None
-            };
-            let before = samples.len();
-            match (per_answer, self.no_think) {
-                (Some(asked), _) => samples.extend(asked),
-                (None, None) => samples.push(record.clone()),
-                (None, Some(block)) => samples.push(record.answering_without_thinking(block)),
-            }
-            origins.extend(std::iter::repeat_n(at, samples.len() - before));
+            let examples = self.examples_of(record).map_err(|e| Error::Backend(format!("{}: record {} cannot be encoded for training: {e}", path.display(), at + 1)))?;
+            origins.extend(std::iter::repeat_n(at, examples.len()));
+            samples.extend(examples);
         }
         for (at, sample) in samples.iter_mut().enumerate() {
             let (ids, mask) = sample
