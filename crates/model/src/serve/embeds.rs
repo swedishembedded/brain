@@ -20,12 +20,80 @@
 //! valid vocabulary id (the scheduler checks every prompt token), and the
 //! decoder never reads its embedding. Its value matters in one place only: the
 //! decoder's prefix reuse. Two prompts with the same tokens and different rows
-//! are different prompts; [`PromptEmbeds::digest`] is the content hash a
-//! decoder keys reuse by (or it keeps embedding spans out of reuse).
+//! are different prompts; [`PromptEmbeds::content_key`] is what a decoder keys
+//! reuse by (or it keeps embedding spans out of reuse): it answers, for every
+//! prefix length, a digest of the rows and rotary positions inside that prefix,
+//! so an image wholly inside a reused prefix is part of the match and an image
+//! beyond it is not.
 //!
 //! A decoder whose rotary position is not a row's index (multi-axis M-RoPE: an
 //! image occupies fewer positions than it has rows) reads the position of every
 //! prompt row from [`PromptEmbeds::rotary_positions`].
+
+use std::sync::Arc;
+
+/// What the embedding rows and rotary positions make of each prefix of a prompt, as one digest per prefix length.
+///
+/// A prefix of `len` tokens is identified by the rows standing before `len` and by the rotary positions that are not
+/// the default `previous + 1` (an image of `h x w` merged rows spans `max(h, w)` positions; the text after it
+/// continues from there): both are events at a prompt position, folded in order into a running digest. A prompt with
+/// no rows and default positions has no events and digest 0 at every length, so a text prefix is the same prefix
+/// whether or not an image follows it. The key holds one event per row and per rotary break, never one per token.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ContentKey {
+    /// `(position, digest after folding in every event up to and including this one)`, ascending by position.
+    events: Vec<(u32, u64)>,
+}
+
+impl ContentKey {
+    /// The key of a prompt without embedding rows.
+    pub const fn none() -> ContentKey {
+        ContentKey { events: Vec::new() }
+    }
+
+    /// Digest of everything this prompt's rows and rotary positions say about its first `len` tokens.
+    pub fn digest_at(&self, len: usize) -> u64 {
+        let before = self.events.partition_point(|&(pos, _)| (pos as usize) < len);
+        before.checked_sub(1).map_or(0, |i| self.events[i].1)
+    }
+
+    fn build(row_hashes: &[u64], positions: &[u32], rotary: Option<&[[u32; 3]]>) -> ContentKey {
+        let breaks: Vec<(u32, [u32; 3])> = rotary.map_or_else(Vec::new, |r| {
+            let mut expected = [0u32; 3];
+            let mut out = Vec::new();
+            for (i, &axes) in r.iter().enumerate() {
+                if axes != expected {
+                    out.push((i as u32, axes));
+                }
+                expected = axes.map(|a| a.wrapping_add(1));
+            }
+            out
+        });
+        let (mut rows, mut brk) = (positions.iter().zip(row_hashes).peekable(), breaks.iter().peekable());
+        let mut events = Vec::with_capacity(positions.len() + breaks.len());
+        let mut digest = 0u64;
+        loop {
+            let next_row = rows.peek().map(|(&p, _)| p);
+            let next_break = brk.peek().map(|(p, _)| *p);
+            let take_row = match (next_row, next_break) {
+                (None, None) => break,
+                (Some(r), Some(b)) => r <= b,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+            };
+            let (pos, event) = if take_row {
+                let (&p, &h) = rows.next().expect("peeked");
+                (p, mix(mix(1, u64::from(p)), h))
+            } else {
+                let &(p, axes) = brk.next().expect("peeked");
+                (p, axes.iter().fold(mix(2, u64::from(p)), |h, &a| mix(h, u64::from(a))))
+            };
+            digest = mix(digest, event);
+            events.push((pos, digest));
+        }
+        ContentKey { events }
+    }
+}
 
 /// The embedding rows of a prompt, at ascending prompt positions.
 #[derive(Clone, Debug, PartialEq)]
@@ -33,9 +101,11 @@ pub struct PromptEmbeds {
     width: usize,
     positions: Vec<u32>,
     rows: Vec<f32>,
+    /// A hash of each row's values, so the key can be rebuilt when rotary positions arrive without touching the rows.
+    row_hashes: Vec<u64>,
     /// The rotary position of every prompt row, on three axes, when it is not the row's index.
     rotary: Option<Vec<[u32; 3]>>,
-    digest: u64,
+    content: Arc<ContentKey>,
 }
 
 impl PromptEmbeds {
@@ -54,8 +124,9 @@ impl PromptEmbeds {
         if let Some(bad) = rows.iter().position(|v| !v.is_finite()) {
             return Err(format!("embedding value {bad} is not finite"));
         }
-        let digest = fingerprint(width, &positions, &rows, None);
-        Ok(PromptEmbeds { width, positions, rows, rotary: None, digest })
+        let row_hashes: Vec<u64> = rows.chunks_exact(width).map(|row| hash_row(width, row)).collect();
+        let content = Arc::new(ContentKey::build(&row_hashes, &positions, None));
+        Ok(PromptEmbeds { width, positions, rows, row_hashes, rotary: None, content })
     }
 
     /// One contiguous run of `rows` (`rows.len() / width` of them) starting at prompt position `start`.
@@ -68,9 +139,9 @@ impl PromptEmbeds {
     }
 
     /// These rows with the rotary position of each of the prompt's rows (all of them, text included) on the three
-    /// axes of a multi-axis rotary embedding. The positions are part of the prompt's identity ([`Self::digest`]).
+    /// axes of a multi-axis rotary embedding. The positions are part of the prompt's identity ([`Self::content_key`]).
     pub fn with_rotary_positions(mut self, rotary: Vec<[u32; 3]>) -> PromptEmbeds {
-        self.digest = fingerprint(self.width, &self.positions, &self.rows, Some(&rotary));
+        self.content = Arc::new(ContentKey::build(&self.row_hashes, &self.positions, Some(&rotary)));
         self.rotary = Some(rotary);
         self
     }
@@ -104,10 +175,14 @@ impl PromptEmbeds {
         &self.positions
     }
 
-    /// A 64-bit hash of the width, positions and row values: equal for equal
-    /// content, so a decoder can key prefix reuse by it.
+    /// A 64-bit hash of the positions, row values and rotary positions of the whole prompt: equal for equal content.
     pub fn digest(&self) -> u64 {
-        self.digest
+        self.content.digest_at(usize::MAX)
+    }
+
+    /// What a decoder keys prefix reuse by: a digest of the content inside each prefix length (see [`ContentKey`]).
+    pub fn content_key(&self) -> Arc<ContentKey> {
+        self.content.clone()
     }
 
     /// The row standing at prompt position `pos`, if any.
@@ -153,34 +228,17 @@ impl PromptEmbeds {
     }
 }
 
-/// FNV-1a over the content, 64 bit. Not cryptographic: it separates prompts
-/// inside one process's cache, where an attacker cannot choose both sides.
-fn fingerprint(width: usize, positions: &[u32], rows: &[f32], rotary: Option<&[[u32; 3]]>) -> u64 {
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut mix = |bytes: &[u8]| {
-        for &b in bytes {
-            h ^= u64::from(b);
-            h = h.wrapping_mul(PRIME);
-        }
-    };
-    mix(&(width as u64).to_le_bytes());
-    mix(&(positions.len() as u64).to_le_bytes());
-    for p in positions {
-        mix(&p.to_le_bytes());
-    }
-    for v in rows {
-        mix(&v.to_bits().to_le_bytes());
-    }
-    if let Some(rotary) = rotary {
-        mix(&(rotary.len() as u64).to_le_bytes());
-        for axes in rotary {
-            for a in axes {
-                mix(&a.to_le_bytes());
-            }
-        }
-    }
-    h
+const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// Fold `v` into `h`. Not cryptographic: it separates prompts inside one process's cache, where an attacker cannot
+/// choose both sides (the rows come out of a vision tower, not from the client).
+fn mix(h: u64, v: u64) -> u64 {
+    (h.rotate_left(23) ^ v).wrapping_mul(PRIME).wrapping_add(0x9e37_79b9_7f4a_7c15)
+}
+
+/// A hash of one row's width and values, a word at a time.
+fn hash_row(width: usize, row: &[f32]) -> u64 {
+    row.iter().fold(mix(0xcbf2_9ce4_8422_2325, width as u64), |h, v| mix(h, u64::from(v.to_bits())))
 }
 
 #[cfg(test)]
@@ -224,6 +282,35 @@ mod tests {
         assert_ne!(with.digest(), moved.digest());
         assert_eq!(with.refusal(4, Some(2)), None);
         assert!(with.refusal(5, Some(2)).unwrap().contains("rotary"), "one position per prompt row");
+    }
+
+    /// A prefix is identified by the rows inside it: the text before an image is the same prefix whatever the image,
+    /// a prefix holding the image is another prefix for another image, and one cut inside the image is too.
+    #[test]
+    fn the_content_key_digests_the_rows_inside_each_prefix() {
+        let image = |v: f32| PromptEmbeds::run(2, 4, vec![v, 1.0, 2.0, 3.0]).unwrap().content_key();
+        let (a, b) = (image(0.5), image(0.75));
+        assert_eq!(a.digest_at(4), 0, "before the image there is nothing to tell prompts apart");
+        assert_eq!(a.digest_at(4), b.digest_at(4));
+        assert_eq!(a.digest_at(4), ContentKey::none().digest_at(4), "a text prefix is a text prefix");
+        assert_ne!(a.digest_at(5), b.digest_at(5), "cut inside the image");
+        assert_ne!(a.digest_at(100), b.digest_at(100), "past the image");
+        assert_eq!(a.digest_at(100), image(0.5).digest_at(100), "equal rows, equal key");
+        assert_ne!(a.digest_at(100), 0);
+    }
+
+    /// Rotary positions that are the default (each row one past the last) say nothing; a break from it does, and
+    /// the text after a break is identified by where it continues from, however many rows follow.
+    #[test]
+    fn default_rotary_positions_are_no_content_and_a_break_is() {
+        let plain = PromptEmbeds::run(2, 1, vec![0.0; 4]).unwrap();
+        let default: Vec<[u32; 3]> = (0..6).map(|i| [i; 3]).collect();
+        assert_eq!(plain.clone().with_rotary_positions(default).content_key().digest_at(6), plain.content_key().digest_at(6));
+        let narrow: Vec<[u32; 3]> = vec![[0; 3], [1; 3], [1, 1, 2], [3; 3], [4; 3], [5; 3]];
+        let wide: Vec<[u32; 3]> = vec![[0; 3], [1; 3], [1, 1, 2], [3; 3], [4; 3], [9; 3]];
+        let (n, w) = (plain.clone().with_rotary_positions(narrow).content_key(), plain.with_rotary_positions(wide).content_key());
+        assert_eq!(n.digest_at(5), w.digest_at(5));
+        assert_ne!(n.digest_at(6), w.digest_at(6), "the last row continues from another position");
     }
 
     #[test]

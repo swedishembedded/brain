@@ -29,7 +29,7 @@ mod speculate;
 pub mod rows;
 pub mod conformance;
 pub use budget::{MixedLimits, StepCost};
-pub use embeds::PromptEmbeds;
+pub use embeds::{ContentKey, PromptEmbeds};
 pub use sampler::{apply_processors, apply_processors_with, ngram_followers, DryParams, NoRepeatNgram, ProcessorState, SampleContext, ThinkingBudget, MAX_DRY_BREAKERS, MAX_NGRAM_ALLOW, MAX_THINK_CLOSE, MAX_THINK_LEAD};
 pub use speculate::{verify_proposals, DraftQuery, Drafter, NgramDrafter, SpecPolicy, SpecStats, Verdict};
 
@@ -113,6 +113,21 @@ pub trait PagedDecoder {
     fn reclaim_prefix_keeping(&mut self, want: u32, prompt: &[u32], adapter: Option<AdapterId>) -> u32 {
         let _ = (prompt, adapter);
         self.reclaim_prefix(want)
+    }
+
+    /// [`Self::cached_prefix_blocks`] for a prompt carrying embedding rows. The placeholder tokens are not the
+    /// content a cache is keyed on, so the default (a decoder whose prefix cache ignores rows) adopts none and the
+    /// prompt is charged in full; a decoder that keys reuse by [`PromptEmbeds::content_key`] answers like for text.
+    fn cached_prefix_blocks_embedded(&self, prompt: &[u32], adapter: Option<AdapterId>, embeds: &PromptEmbeds) -> u32 {
+        let _ = (prompt, adapter, embeds);
+        0
+    }
+
+    /// [`Self::reclaim_prefix_keeping`] for a prompt carrying embedding rows; the default spares what the same
+    /// tokens without rows would.
+    fn reclaim_prefix_keeping_embedded(&mut self, want: u32, prompt: &[u32], adapter: Option<AdapterId>, embeds: &PromptEmbeds) -> u32 {
+        let _ = embeds;
+        self.reclaim_prefix_keeping(want, prompt, adapter)
     }
 
     /// Release a finished/cancelled sequence's blocks back to the pool.
@@ -1731,14 +1746,13 @@ impl<D: PagedDecoder> Scheduler<D> {
     }
 
     /// Blocks a fresh prefill of `prompt` will adopt from the prefix cache
-    /// ([`PagedDecoder::cached_prefix_blocks`]). A prompt carrying embedding
-    /// rows is charged in full: its placeholder ids are not the content the
-    /// cache is keyed on, so the decoder's peek would overstate the hit.
-    fn adopted_blocks(&self, prompt: &[u32], adapter: Option<AdapterId>, embeds: bool) -> u32 {
-        if embeds {
-            return 0;
+    /// ([`PagedDecoder::cached_prefix_blocks`], or its embedded form for a prompt carrying embedding rows: the
+    /// placeholder ids are not the content a cache is keyed on, so only a decoder that keys by the rows answers).
+    fn adopted_blocks(&self, prompt: &[u32], adapter: Option<AdapterId>, embeds: Option<&PromptEmbeds>) -> u32 {
+        match embeds {
+            Some(e) => self.dec.cached_prefix_blocks_embedded(prompt, adapter, e),
+            None => self.dec.cached_prefix_blocks(prompt, adapter),
         }
-        self.dec.cached_prefix_blocks(prompt, adapter)
     }
 
     /// Blocks this iteration has already spoken for: one more token for every
@@ -2067,7 +2081,7 @@ impl<D: PagedDecoder> Scheduler<D> {
         // its own history occupies, forever when nothing else is running.
         let cached = {
             let w = &self.waiting[pos];
-            self.adopted_blocks(&w.req.prompt, w.adapter, w.embeds.is_some())
+            self.adopted_blocks(&w.req.prompt, w.adapter, w.embeds.as_deref())
         };
         let want = self.dec.blocks_for(need as u32 + 1).saturating_sub(cached) + self.dec.sequence_state_blocks() + self.committed_blocks();
         let free = self.dec.free_blocks();
@@ -2075,7 +2089,10 @@ impl<D: PagedDecoder> Scheduler<D> {
             // Cached prefix blocks are reclaimable capacity: live sequences always
             // outrank the cache, but not the cache this very request reuses.
             let waiting = &self.waiting[pos];
-            self.dec.reclaim_prefix_keeping(want - free, &waiting.req.prompt, waiting.adapter);
+            match waiting.embeds.as_deref() {
+                Some(e) => self.dec.reclaim_prefix_keeping_embedded(want - free, &waiting.req.prompt, waiting.adapter, e),
+                None => self.dec.reclaim_prefix_keeping(want - free, &waiting.req.prompt, waiting.adapter),
+            };
         }
         if self.dec.free_blocks() < want {
             return false;

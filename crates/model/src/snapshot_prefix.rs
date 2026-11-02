@@ -42,11 +42,53 @@
 //! `table`'s): K/V computed under one adapter are not the base's or another
 //! adapter's, so a prompt only ever resumes from an entry of its own namespace.
 
+use std::sync::Arc;
+
 use crate::paged::{BlockTable, KvNamespace};
+use crate::serve::ContentKey;
+
+/// A prompt as the cache sees it: its tokens, and what the embedding rows inside it make of each prefix
+/// ([`ContentKey`]). Placeholder tokens at embedding positions say nothing about the rows, so two prompts with the
+/// same tokens and other images are other prompts. A slice of token ids is a prompt without rows.
+#[derive(Clone, Copy)]
+pub struct Prompt<'a> {
+    pub tokens: &'a [u32],
+    pub content: &'a ContentKey,
+}
+
+static NO_CONTENT: ContentKey = ContentKey::none();
+
+impl<'a> Prompt<'a> {
+    /// `tokens` with the rows `content` describes.
+    pub fn new(tokens: &'a [u32], content: &'a ContentKey) -> Prompt<'a> {
+        Prompt { tokens, content }
+    }
+}
+
+impl<'a> From<&'a [u32]> for Prompt<'a> {
+    fn from(tokens: &'a [u32]) -> Prompt<'a> {
+        Prompt { tokens, content: &NO_CONTENT }
+    }
+}
+
+impl<'a> From<&'a Vec<u32>> for Prompt<'a> {
+    fn from(tokens: &'a Vec<u32>) -> Prompt<'a> {
+        Prompt::from(tokens.as_slice())
+    }
+}
+
+impl<'a, const N: usize> From<&'a [u32; N]> for Prompt<'a> {
+    fn from(tokens: &'a [u32; N]) -> Prompt<'a> {
+        Prompt::from(&tokens[..])
+    }
+}
 
 /// One cached prompt.
 pub struct Entry<P> {
     pub tokens: Vec<u32>,
+    /// The embedding rows of the prompt this entry was filed from (none for text); only the part inside `tokens`
+    /// is compared, so the key of the whole prompt serves its checkpoints.
+    content: Arc<ContentKey>,
     /// Owns the physical block holding KV rows `0..tokens.len()`.
     pub table: BlockTable,
     pub snap_row: u32,
@@ -62,7 +104,14 @@ pub struct Entry<P> {
 
 impl<P> Entry<P> {
     pub fn new(tokens: Vec<u32>, table: BlockTable, snap_row: u32, payload: P) -> Entry<P> {
-        Entry { tokens, table, snap_row, payload, stamp: 0, branch: false }
+        Entry { tokens, content: Arc::new(ContentKey::none()), table, snap_row, payload, stamp: 0, branch: false }
+    }
+
+    /// This entry as the prefix of a prompt with embedding rows `content` describes: only prompts with the same
+    /// rows inside the prefix resume from it.
+    pub fn with_content(mut self, content: Arc<ContentKey>) -> Entry<P> {
+        self.content = content;
+        self
     }
 
     /// This entry as a branch point: the prompts that extend it are other
@@ -77,9 +126,15 @@ impl<P> Entry<P> {
     /// Whether `self` is a cached prefix of `prompt` in `namespace` that a turn
     /// extending it replaces. A branch point is replaced only by the same prefix
     /// filed again (two prompts that left one document at once both file it).
-    fn superseded_by(&self, namespace: KvNamespace, prompt: &[u32]) -> bool {
-        let prefix = self.table.kv_namespace() == namespace && self.tokens.len() <= prompt.len() && prompt[..self.tokens.len()] == self.tokens[..];
-        prefix && (!self.branch || self.tokens.len() == prompt.len())
+    fn superseded_by(&self, namespace: KvNamespace, prompt: Prompt<'_>) -> bool {
+        self.is_prefix_of(namespace, prompt) && (!self.branch || self.tokens.len() == prompt.tokens.len())
+    }
+
+    /// Whether `self` is a cached prefix of `prompt` in `namespace`: its tokens begin the prompt and the embedding
+    /// rows inside them are the prompt's.
+    fn is_prefix_of(&self, namespace: KvNamespace, prompt: Prompt<'_>) -> bool {
+        let n = self.tokens.len();
+        self.table.kv_namespace() == namespace && n <= prompt.tokens.len() && prompt.tokens[..n] == self.tokens[..] && self.content.digest_at(n) == prompt.content.digest_at(n)
     }
 }
 
@@ -104,11 +159,12 @@ impl<P> SnapshotPrefixCache<P> {
     }
 
     /// The entry [`Self::lookup`] would pick, without counting the lookup or refreshing the entry.
-    pub fn peek(&self, namespace: KvNamespace, prompt: &[u32]) -> Option<usize> {
+    pub fn peek<'p>(&self, namespace: KvNamespace, prompt: impl Into<Prompt<'p>>) -> Option<usize> {
+        let prompt = prompt.into();
         self.entries
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.table.kv_namespace() == namespace && e.tokens.len() <= prompt.len() && prompt[..e.tokens.len()] == e.tokens[..])
+            .filter(|(_, e)| e.is_prefix_of(namespace, prompt))
             .max_by_key(|(_, e)| e.tokens.len())
             .map(|(i, _)| i)
     }
@@ -116,8 +172,9 @@ impl<P> SnapshotPrefixCache<P> {
     /// The entry holding the longest cached prefix of `prompt` (an entry equal
     /// to the whole prompt qualifies), refreshed as most recently used.
     /// Counts the lookup for [`Self::stats`].
-    pub fn lookup(&mut self, namespace: KvNamespace, prompt: &[u32]) -> Option<usize> {
-        self.lookup_tokens += prompt.len() as u64;
+    pub fn lookup<'p>(&mut self, namespace: KvNamespace, prompt: impl Into<Prompt<'p>>) -> Option<usize> {
+        let prompt = prompt.into();
+        self.lookup_tokens += prompt.tokens.len() as u64;
         let best = self.peek(namespace, prompt)?;
         self.tick += 1;
         self.entries[best].stamp = self.tick;
@@ -131,8 +188,10 @@ impl<P> SnapshotPrefixCache<P> {
 
     /// The payload of the entry for exactly `tokens` in `namespace`, to update
     /// what became true of it after it was filed (`None` once it is gone).
-    pub fn payload_mut(&mut self, namespace: KvNamespace, tokens: &[u32]) -> Option<&mut P> {
-        self.entries.iter_mut().find(|e| e.table.kv_namespace() == namespace && e.tokens == tokens).map(|e| &mut e.payload)
+    /// `prompt`'s tokens are the entry's exactly (its rows, inside them, too).
+    pub fn payload_mut<'p>(&mut self, namespace: KvNamespace, prompt: impl Into<Prompt<'p>>) -> Option<&mut P> {
+        let prompt = prompt.into();
+        self.entries.iter_mut().find(|e| e.tokens.len() == prompt.tokens.len() && e.is_prefix_of(namespace, prompt)).map(|e| &mut e.payload)
     }
 
     /// Where `prompt` leaves the cached prompt it shares the most with, floored
@@ -145,16 +204,21 @@ impl<P> SnapshotPrefixCache<P> {
     /// entry ends inside its own continuation. A prefill that files the state
     /// at the branch point as an entry ([`Entry::branch`]) turns the document
     /// into a prefix every later such prompt resumes from.
-    pub fn branch_point(&self, namespace: KvNamespace, prompt: &[u32], align: usize, min: usize) -> Option<usize> {
+    pub fn branch_point<'p>(&self, namespace: KvNamespace, prompt: impl Into<Prompt<'p>>, align: usize, min: usize) -> Option<usize> {
+        let prompt = prompt.into();
         let resumable = self.peek(namespace, prompt).map_or(0, |i| self.entries[i].tokens.len());
         let shared = self
             .entries
             .iter()
             .filter(|e| e.table.kv_namespace() == namespace)
-            .map(|e| e.tokens.iter().zip(prompt).take_while(|(a, b)| a == b).count())
+            .map(|e| {
+                let n = e.tokens.iter().zip(prompt.tokens).take_while(|(a, b)| a == b).count();
+                // Rows that differ inside the shared tokens leave a text prefix and nothing a branch could keep.
+                if e.content.digest_at(n) == prompt.content.digest_at(n) { n } else { 0 }
+            })
             .max()?;
         let at = shared / align.max(1) * align.max(1);
-        (at >= min && at > resumable && at < prompt.len()).then_some(at)
+        (at >= min && at > resumable && at < prompt.tokens.len()).then_some(at)
     }
 
     /// A snapshot row for a prefill of `prompt` (in `namespace`) that is about
@@ -171,10 +235,11 @@ impl<P> SnapshotPrefixCache<P> {
     ///
     /// The evicted entry's block table is returned for the caller to release;
     /// `None` row when every row is held by a prefill still in flight.
-    pub fn take_row(&mut self, namespace: KvNamespace, prompt: &[u32]) -> (Option<u32>, Option<BlockTable>) {
+    pub fn take_row<'p>(&mut self, namespace: KvNamespace, prompt: impl Into<Prompt<'p>>) -> (Option<u32>, Option<BlockTable>) {
         if let Some(row) = self.free_rows.pop() {
             return (Some(row), None);
         }
+        let prompt = prompt.into();
         let superseded = self.entries.iter().position(|e| e.superseded_by(namespace, prompt));
         let victim = superseded.or_else(|| self.entries.iter().enumerate().min_by_key(|(_, e)| e.stamp).map(|(i, _)| i));
         match victim {
@@ -194,7 +259,7 @@ impl<P> SnapshotPrefixCache<P> {
         let mut retired = Vec::new();
         let mut i = 0;
         while i < self.entries.len() {
-            if self.entries[i].superseded_by(entry.table.kv_namespace(), &entry.tokens) {
+            if self.entries[i].superseded_by(entry.table.kv_namespace(), Prompt::new(&entry.tokens, &entry.content)) {
                 let e = self.entries.remove(i);
                 self.free_rows.push(e.snap_row);
                 retired.push(e.table);
@@ -225,7 +290,7 @@ impl<P> SnapshotPrefixCache<P> {
 
     /// [`Self::evict_lru`] sparing the entry [`Self::lookup`] would pick for `prompt` in `namespace`: the
     /// admission of that prompt is about to resume from it. `None` when nothing else is cached.
-    pub fn evict_lru_keeping(&mut self, namespace: KvNamespace, prompt: &[u32]) -> Option<BlockTable> {
+    pub fn evict_lru_keeping<'p>(&mut self, namespace: KvNamespace, prompt: impl Into<Prompt<'p>>) -> Option<BlockTable> {
         let keep = self.peek(namespace, prompt);
         self.evict_lru_sparing(keep)
     }
@@ -387,6 +452,36 @@ mod tests {
         assert_eq!(c.evict_namespace(1).len(), 1);
         assert!(c.lookup(1, &[1, 2, 3]).is_none() && c.lookup(2, &[1, 2, 3]).is_some());
         assert!(c.take_row(BASE_KV_NAMESPACE, &[]).0.is_some(), "the dropped entry's snapshot row is free again");
+    }
+
+    /// A prompt with an image is another prompt for another image, though every token is the same placeholder:
+    /// an entry serves a prompt only when the rows inside the entry's tokens are the prompt's. The text before the
+    /// image is shared whatever the image.
+    #[test]
+    fn an_entry_serves_only_prompts_with_the_same_rows_inside_it() {
+        use crate::serve::PromptEmbeds;
+        let key = |v: f32| PromptEmbeds::run(1, 2, vec![v, v]).unwrap().content_key();
+        let (cat, dog) = (key(1.0), key(2.0));
+        let tokens = [1u32, 2, 9, 9, 3, 4];
+        let mut c = SnapshotPrefixCache::<u32>::new(4);
+        let r = c.take_row(BASE_KV_NAMESPACE, Prompt::new(&tokens, &cat)).0.unwrap();
+        c.insert(entry(&tokens, r).with_content(cat.clone()));
+        let longer = [1u32, 2, 9, 9, 3, 4, 5];
+        assert!(c.lookup(BASE_KV_NAMESPACE, Prompt::new(&longer, &cat)).is_some(), "the same image hits");
+        assert!(c.lookup(BASE_KV_NAMESPACE, Prompt::new(&longer, &dog)).is_none(), "another image at the same place misses");
+        assert!(c.lookup(BASE_KV_NAMESPACE, &longer).is_none(), "the placeholders as plain text miss");
+        assert!(c.peek(BASE_KV_NAMESPACE, Prompt::new(&tokens[..2], &dog)).is_none(), "an entry longer than the prompt never serves it");
+        // An entry that ends before the image serves every prompt that has the same text before it.
+        let r = c.take_row(BASE_KV_NAMESPACE, Prompt::new(&tokens[..2], &cat)).0.unwrap();
+        c.insert(entry(&tokens[..2], r).with_content(cat.clone()));
+        let hit = c.lookup(BASE_KV_NAMESPACE, Prompt::new(&longer, &dog)).expect("the text before the image is shared");
+        assert_eq!(c.entry(hit).tokens.len(), 2);
+        // Filing the same tokens with another image supersedes the shared text prefix, not the other image's entry.
+        let r = c.take_row(BASE_KV_NAMESPACE, Prompt::new(&tokens, &dog)).0.unwrap();
+        assert_eq!(c.insert(entry(&tokens, r).with_content(dog.clone())).len(), 1);
+        assert_eq!(c.stats().2, 2);
+        assert!(c.payload_mut(BASE_KV_NAMESPACE, Prompt::new(&tokens, &dog)).is_some());
+        assert!(c.payload_mut(BASE_KV_NAMESPACE, &tokens).is_none(), "plain text names neither entry");
     }
 
     /// Reclaiming for a waiting prompt spares the entry that prompt resumes from, however old it is.

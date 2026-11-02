@@ -27,17 +27,18 @@
 //! `[batch, vocab]` logits block.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use gpu_core::DeviceStats;
 use model::adapter::bank::{AdapterBankConfig, AdapterError, AdapterInfo, BankedEngine, UnloadStatus, VerifiedAdapter};
 use model::dispatch::LORA_SLOT_NONE;
 use model::paged::{BlockAllocator, BlockTable, KvNamespace, BASE_KV_NAMESPACE};
-use model::serve::{AdapterAvailability, AdapterId, DraftQuery, MixedLimits, MixedOutcome, MixedVerifyOutcome, PagedDecoder, PrefillJob, PrefillProgress, PromptEmbeds};
+use model::serve::{AdapterAvailability, AdapterId, DraftQuery, MixedLimits, MixedOutcome, MixedVerifyOutcome, ContentKey, PagedDecoder, PrefillJob, PrefillProgress, PromptEmbeds};
 use qwen3vl::mrope::PromptRope;
 
 use crate::adapter_serving as adapters;
 
-use model::snapshot_prefix::{Entry as CacheEntry, SnapshotPrefixCache};
+use model::snapshot_prefix::{Entry as CacheEntry, Prompt, SnapshotPrefixCache};
 
 use super::mtp::HiddenRows;
 
@@ -327,6 +328,8 @@ struct PartialPrefill {
     /// (`SnapshotPrefixCache::branch_point`): the state there is filed too, so the
     /// next prompt sharing that prefix resumes from it.
     branch: Option<usize>,
+    /// What the prompt's embedding rows make of its prefixes (none for text): the cache key beside the tokens.
+    content: Arc<ContentKey>,
 }
 
 /// What a sequence's prefill leaves for the cache once the sequence is over.
@@ -334,6 +337,7 @@ struct Pending {
     /// A branch point ([`PartialPrefill::branch`]) rather than the prompt's checkpoint.
     branch: bool,
     tokens: Vec<u32>,
+    content: Arc<ContentKey>,
     snap_row: u32,
     last_hidden: Vec<f32>,
     /// The head's KV rows of this prompt were filled (see [`Resume::mtp_valid`]).
@@ -701,16 +705,18 @@ impl Qwen35GgufEngine {
     /// computing and the sequence is already complete; otherwise its progress is
     /// recorded for [`Self::forward_slice`].
     ///
-    /// A prompt with `embeds` (a vision tower's rows) is never looked up in the prefix cache and never filed in
-    /// it: its placeholder tokens say nothing about the rows, so the same tokens with other rows would resume from
-    /// the wrong state. It does not feed the MTP head either, whose rows would be those of the placeholders.
+    /// A prompt with `embeds` (a vision tower's rows) is keyed by its tokens AND the rows inside the prefix
+    /// ([`PromptEmbeds::content_key`]): its placeholder tokens say nothing about the rows, so the same tokens with
+    /// other rows must not resume from this state. It does not feed the MTP head, whose rows would be those of the
+    /// placeholders, nor take part in branch points; its entries are therefore never valid for the head.
     fn begin_prefill(&mut self, table: &mut BlockTable, prompt: &[u32], embeds: Option<&PromptEmbeds>) -> Option<Vec<f32>> {
         assert!(prompt.len() <= self.inst.cap as usize, "{MODEL}: prompt of {} tokens exceeds the per-sequence capacity of {}", prompt.len(), self.inst.cap);
         if let Some(&bad) = prompt.iter().find(|&&t| t >= self.inst.cfg.vocab) {
             panic!("{MODEL}: prompt token {bad} is outside the model vocabulary ({})", self.inst.cfg.vocab);
         }
-        let cacheable = embeds.is_none() && prompt.len() >= MIN_CACHED_TOKENS && self.cache.enabled();
-        let hit = if cacheable { self.cache.lookup(table.kv_namespace(), prompt) } else { None };
+        let cacheable = prompt.len() >= MIN_CACHED_TOKENS && self.cache.enabled();
+        let content = embeds.map_or_else(|| Arc::new(ContentKey::none()), PromptEmbeds::content_key);
+        let hit = if cacheable { self.cache.lookup(table.kv_namespace(), Prompt::new(prompt, &content)) } else { None };
         // The paged layout resumes by sharing the entry's blocks; the one-block layout copies the rows into
         // the sequence's own window below.
         if let (Some(i), KvLayout::Paged { block_rows, .. }) = (hit, self.inst.kv_layout) {
@@ -761,14 +767,14 @@ impl Qwen35GgufEngine {
         // A branch point needs the entry to share the sequence's blocks, which only the paged layout does.
         let paged = matches!(self.inst.kv_layout, KvLayout::Paged { .. });
         let branch = (cacheable && paged)
-            .then(|| self.cache.branch_point(table.kv_namespace(), prompt, CHECKPOINT_ALIGN, MIN_CACHED_TOKENS))
+            .then(|| self.cache.branch_point(table.kv_namespace(), Prompt::new(prompt, &content), CHECKPOINT_ALIGN, MIN_CACHED_TOKENS))
             .flatten()
             .into_iter()
             .chain(self.take_hints(table.kv_namespace(), prompt))
             .filter(|&b| embeds.is_none() && b > start && b < checkpoint_len(prompt.len()))
             .min();
         let mtp_feed = embeds.is_none() && self.spec_prefill && seed_valid;
-        self.partial.insert(slot, PartialPrefill { start, done: start, fresh: true, cacheable, prefix_hidden, rows_hidden: Vec::new(), mtp_feed, branch });
+        self.partial.insert(slot, PartialPrefill { start, done: start, fresh: true, cacheable, prefix_hidden, rows_hidden: Vec::new(), mtp_feed, branch, content });
         None
     }
 
@@ -819,9 +825,9 @@ impl Qwen35GgufEngine {
             // The checkpoint is cached in place of the whole prompt. Its MTP head rows are filled once the whole
             // prompt is in (below), so it is filed without them and marked once they are.
             if p.cacheable && end == checkpoint_len(prompt.len()) {
-                self.file_prefix(slot, table, &prompt[..end], &hidden, state_in_pool, false);
+                self.file_prefix(slot, table, &prompt[..end], &p.content, &hidden, state_in_pool, false);
             } else if p.branch == Some(end) {
-                self.file_prefix(slot, table, &prompt[..end], &hidden, state_in_pool, true);
+                self.file_prefix(slot, table, &prompt[..end], &p.content, &hidden, state_in_pool, true);
             }
             self.partial.insert(slot, p);
             return PrefillProgress::Partial { consumed };
@@ -854,7 +860,7 @@ impl Qwen35GgufEngine {
             self.inst.mtp_skip_prefill(slot);
             false
         };
-        self.mark_head_rows(slot, table.kv_namespace(), prompt, head_rows_filled);
+        self.mark_head_rows(slot, table.kv_namespace(), Prompt::new(prompt, &p.content), head_rows_filled);
         PrefillProgress::Done(hidden)
     }
 
@@ -869,12 +875,12 @@ impl Qwen35GgufEngine {
     /// `slice_end`): a prompt that resumed from a checkpoint of its own length or later leaves that entry as it
     /// is. The feed filled the head's rows of every position before the prompt's end, theirs among them, so a
     /// prompt resuming from either drafts with the head (`valid`).
-    fn mark_head_rows(&mut self, slot: u32, namespace: KvNamespace, prompt: &[u32], valid: bool) {
+    fn mark_head_rows(&mut self, slot: u32, namespace: KvNamespace, prompt: Prompt<'_>, valid: bool) {
         for pending in self.pending.get_mut(&slot).into_iter().flatten() {
             pending.mtp_valid = valid;
         }
         for len in self.filed.remove(&slot).unwrap_or_default() {
-            if let Some(resume) = self.cache.payload_mut(namespace, &prompt[..len]) {
+            if let Some(resume) = self.cache.payload_mut(namespace, Prompt::new(&prompt.tokens[..len], prompt.content)) {
                 resume.mtp_valid = valid;
             }
         }
@@ -894,7 +900,7 @@ impl Qwen35GgufEngine {
         if step == FeedStep::Done {
             self.observe_feed_secs(secs);
         }
-        self.mark_head_rows(feed.slot(), namespace, &prompt, step == FeedStep::Done);
+        self.mark_head_rows(feed.slot(), namespace, Prompt::from(&prompt), step == FeedStep::Done);
     }
 
     /// Where a slice of at most `budget` tokens ends: a slice that would run past the prompt's branch point or its
@@ -911,15 +917,16 @@ impl Qwen35GgufEngine {
     /// resumes from it (its MTP head rows are marked valid once the whole prompt is in); the one-block layout keeps
     /// the entry pending until the sequence ends and its block can be handed over. `hidden` is the last of
     /// `tokens`' rows. `state_in_pool`: the state is in the slot's pool row and not in the working copy.
-    fn file_prefix(&mut self, slot: u32, table: &BlockTable, tokens: &[u32], hidden: &[f32], state_in_pool: bool, branch: bool) {
-        let (row, evicted) = self.cache.take_row(table.kv_namespace(), tokens);
+    #[allow(clippy::too_many_arguments)]
+    fn file_prefix(&mut self, slot: u32, table: &BlockTable, tokens: &[u32], content: &Arc<ContentKey>, hidden: &[f32], state_in_pool: bool, branch: bool) {
+        let (row, evicted) = self.cache.take_row(table.kv_namespace(), Prompt::new(tokens, content));
         self.release_retired(evicted);
         let Some(row) = row else { return };
         if state_in_pool {
             self.inst.load_work_state(slot);
         }
         self.inst.snapshot_prefill_state(row);
-        let pending = Pending { branch, tokens: tokens.to_vec(), snap_row: row, last_hidden: hidden.to_vec(), mtp_valid: false };
+        let pending = Pending { branch, tokens: tokens.to_vec(), content: content.clone(), snap_row: row, last_hidden: hidden.to_vec(), mtp_valid: false };
         if matches!(self.inst.kv_layout, KvLayout::Paged { .. }) {
             let mut shared = table.fork(&mut self.alloc);
             shared.truncate(tokens.len() as u32, &mut self.alloc);
@@ -965,7 +972,7 @@ impl Qwen35GgufEngine {
 
     /// Hand a pending record to the cache as an entry over `table`.
     fn file_entry(&mut self, p: Pending, table: BlockTable) {
-        let entry = CacheEntry::new(p.tokens, table, p.snap_row, Resume { last_hidden: p.last_hidden, mtp_valid: p.mtp_valid });
+        let entry = CacheEntry::new(p.tokens, table, p.snap_row, Resume { last_hidden: p.last_hidden, mtp_valid: p.mtp_valid }).with_content(p.content);
         let retired = self.cache.insert(if p.branch { entry.branch() } else { entry });
         self.release_retired(retired);
     }
@@ -1122,7 +1129,8 @@ impl Qwen35GgufEngine {
             Some(p) => job.prompt.len() - p.done,
             None => {
                 let namespace = job.table.kv_namespace();
-                let cached = if job.prompt.len() >= MIN_CACHED_TOKENS { self.cache.peek(namespace, job.prompt).map_or(0, |i| self.cache.entry(i).tokens.len()) } else { 0 };
+                let content = job.embeds.map_or_else(|| Arc::new(ContentKey::none()), PromptEmbeds::content_key);
+                let cached = if job.prompt.len() >= MIN_CACHED_TOKENS { self.cache.peek(namespace, Prompt::new(job.prompt, &content)).map_or(0, |i| self.cache.entry(i).tokens.len()) } else { 0 };
                 job.prompt.len() - cached
             }
         }
@@ -1215,6 +1223,32 @@ impl Qwen35GgufEngine {
 }
 
 impl Qwen35GgufEngine {
+    /// The blocks [`Self::adopt_cached_blocks`] shares from the entry `prompt` would resume from, less the one it
+    /// copies before the sequence writes into it. The one-block layout copies rows into the sequence's own block,
+    /// so it adopts none.
+    fn adoptable_blocks(&self, prompt: Prompt<'_>, adapter: Option<AdapterId>) -> u32 {
+        let KvLayout::Paged { block_rows, .. } = self.inst.kv_layout else { return 0 };
+        if prompt.tokens.len() < MIN_CACHED_TOKENS || !self.cache.enabled() {
+            return 0;
+        }
+        let namespace = adapter.map_or(BASE_KV_NAMESPACE, |a| a.kv_namespace());
+        let Some(i) = self.cache.peek(namespace, prompt) else { return 0 };
+        let rows = self.cache.entry(i).tokens.len() as u32;
+        let copied = !rows.is_multiple_of(block_rows) || self.inst.has_mtp();
+        rows.div_ceil(block_rows) - u32::from(copied)
+    }
+
+    /// Evict least recently used cached prompts until `want` blocks are freed, sparing the entry `prompt` resumes from.
+    fn reclaim_keeping(&mut self, want: u32, prompt: Prompt<'_>, adapter: Option<AdapterId>) -> u32 {
+        let namespace = adapter.map_or(BASE_KV_NAMESPACE, |a| a.kv_namespace());
+        let before = self.alloc.free_blocks();
+        while self.alloc.free_blocks() - before < want {
+            let Some(table) = self.cache.evict_lru_keeping(namespace, prompt) else { break };
+            self.release_retired([table]);
+        }
+        self.alloc.free_blocks() - before
+    }
+
     /// Run the next slice of every job of `jobs` that carries embedding rows, one sequence at a time on the
     /// one-sequence path (rows that are not tokens cannot be gathered by token id, resumed from a cached prefix or
     /// carried in a forward with other sequences' rows), and return their answers in job order (`None` for a text
@@ -1283,19 +1317,12 @@ impl PagedDecoder for Qwen35GgufEngine {
     fn sequence_state_blocks(&self) -> u32 {
         self.unified.as_ref().map_or(0, super::unipool::StateLedger::sequence_blocks)
     }
-    /// The blocks [`Self::adopt_cached_blocks`] shares from the entry `prompt` would resume from, less the one it
-    /// copies before the sequence writes into it. The one-block layout copies rows into the sequence's own block,
-    /// so it adopts none.
+    /// See [`Self::adoptable_blocks`].
     fn cached_prefix_blocks(&self, prompt: &[u32], adapter: Option<AdapterId>) -> u32 {
-        let KvLayout::Paged { block_rows, .. } = self.inst.kv_layout else { return 0 };
-        if prompt.len() < MIN_CACHED_TOKENS || !self.cache.enabled() {
-            return 0;
-        }
-        let namespace = adapter.map_or(BASE_KV_NAMESPACE, |a| a.kv_namespace());
-        let Some(i) = self.cache.peek(namespace, prompt) else { return 0 };
-        let rows = self.cache.entry(i).tokens.len() as u32;
-        let copied = !rows.is_multiple_of(block_rows) || self.inst.has_mtp();
-        rows.div_ceil(block_rows) - u32::from(copied)
+        self.adoptable_blocks(Prompt::from(prompt), adapter)
+    }
+    fn cached_prefix_blocks_embedded(&self, prompt: &[u32], adapter: Option<AdapterId>, embeds: &PromptEmbeds) -> u32 {
+        self.adoptable_blocks(Prompt::new(prompt, &embeds.content_key()), adapter)
     }
     /// Evict least recently used cached prompts until `want` blocks are freed.
     fn reclaim_prefix(&mut self, want: u32) -> u32 {
@@ -1307,13 +1334,10 @@ impl PagedDecoder for Qwen35GgufEngine {
         self.alloc.free_blocks() - before
     }
     fn reclaim_prefix_keeping(&mut self, want: u32, prompt: &[u32], adapter: Option<AdapterId>) -> u32 {
-        let namespace = adapter.map_or(BASE_KV_NAMESPACE, |a| a.kv_namespace());
-        let before = self.alloc.free_blocks();
-        while self.alloc.free_blocks() - before < want {
-            let Some(table) = self.cache.evict_lru_keeping(namespace, prompt) else { break };
-            self.release_retired([table]);
-        }
-        self.alloc.free_blocks() - before
+        self.reclaim_keeping(want, Prompt::from(prompt), adapter)
+    }
+    fn reclaim_prefix_keeping_embedded(&mut self, want: u32, prompt: &[u32], adapter: Option<AdapterId>, embeds: &PromptEmbeds) -> u32 {
+        self.reclaim_keeping(want, Prompt::new(prompt, &embeds.content_key()), adapter)
     }
     fn hint_shared_prefix(&mut self, table: &mut BlockTable, prompt: &[u32], at: usize) -> bool {
         self.hint_branch(table, prompt, at)

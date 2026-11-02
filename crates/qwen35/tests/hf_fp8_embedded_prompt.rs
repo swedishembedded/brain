@@ -15,20 +15,24 @@
 //!     relative), and so are the tokens decoded after it: the shift reaches prefill and decode alike;
 //!   * positions that differ in more than a shift (an image of 2x2 merged tokens spans two positions, not four)
 //!     change the distribution: the positions are read, not ignored;
-//!   * two sequences of a batch decode with their own positions, a text one beside an embedded one.
+//!   * two sequences of a batch decode with their own positions, a text one beside an embedded one;
+//!   * a conversation's next turn with the same image resumes from the prefix cache over the image's span and
+//!     decodes as a cold prefill does; another image at the same place, or the same placeholders as plain text,
+//!     resume from nothing.
 //!
-//! Run with `-- --device gpu1 --backend cuda`; without `--device` the binary reports the tests skipped.
+//! Run with `-- --device gpu1 --backend cuda`, or on the host's cores with `-- --device cpu --backend cpu`; without
+//! `--device` the binary reports the tests skipped.
 
 use model::kv_tier::KvTier;
 use model::paged::BlockTable;
 use model::serve::{PagedDecoder, PrefillProgress, PromptEmbeds};
 use qwen35::config::Qwen35Config;
-use qwen35::int8_gguf_resident::{budgeted_gpus, held_tiers_at, Qwen35GgufEngine, Qwen35GgufResident};
+use qwen35::int8_gguf_resident::{budgeted_gpus, checkpoint_len, held_tiers_at, Qwen35GgufEngine, Qwen35GgufResident};
 
 mod common;
 use common::hf_fixture::{fp8_resident_cfg, write_checkpoint_conditioned, write_tokenizer};
 
-const CAP: u32 = 256;
+const CAP: u32 = 384;
 const PROMPT: usize = 40;
 const IMAGE: std::ops::Range<usize> = 10..14;
 
@@ -38,9 +42,15 @@ fn engine() -> Qwen35GgufEngine {
     write_tokenizer(&dir);
     let path = dir.to_string_lossy().into_owned();
     let tier = held_tiers_at(&path).expect("the directory is a servable checkpoint");
-    let devices = budgeted_gpus(&gpu_core::devices::ambient_compute_set().gpus, 2 << 30);
-    let device = devices.first().expect("the test needs a GPU").0;
-    let resident = Qwen35GgufResident::new(path, devices, CAP, tier).with_max_batch(4).with_prefix_slots(2).with_kv_block_rows(16).with_kv_tier(KvTier::F32);
+    let set = gpu_core::devices::ambient_compute_set();
+    let mut devices = budgeted_gpus(&set.gpus, 2 << 30);
+    if devices.is_empty() && set.backend == gpu_core::devices::Backend::Cpu {
+        // `--device cpu --backend cpu`: the kernels run on the host's cores and no card is opened, so card 0 stands
+        // only as the resident's placement label.
+        devices.push((memauth::Device::Gpu(0), 2 << 30));
+    }
+    let device = devices.first().expect("the test needs a GPU, or `--device cpu --backend cpu`").0;
+    let resident = Qwen35GgufResident::new(path, devices, CAP, tier).with_max_batch(4).with_prefix_slots(4).with_kv_block_rows(16).with_kv_tier(KvTier::F32);
     let (engine, _, _) = resident.activate_engine(&[device]).expect("the tiny FP8 directory loads");
     std::fs::remove_dir_all(dir).ok();
     engine
@@ -177,7 +187,87 @@ fn a_text_sequence_and_an_embedded_one_share_a_batch() {
     e.release_table(&mut embedded);
 }
 
+/// Tokens of a conversation `len` long: every turn begins with the previous turn's tokens.
+fn conversation(vocab: usize, len: usize) -> Vec<u32> {
+    (0..len).map(|i| ((i * 7 + 3) % (vocab - 2)) as u32).collect()
+}
+
+/// `len` prompt tokens with a 2x2 image (rows `seed`-dependent) at [`IMAGE`]: the four rows sit at the positions an
+/// image of that grid gets, and the text after them resumes two positions early.
+fn picture_rows(e: &Qwen35GgufEngine, len: usize, seed: f32) -> PromptEmbeds {
+    let width = e.embed_width().expect("the engine takes rows");
+    let rows: Vec<f32> = (0..IMAGE.len() * width).map(|i| seed * (((i * 31 + 7) % 17) as f32 - 8.0) / 8.0).collect();
+    let mut rotary: Vec<[u32; 3]> = (0..len as u32).map(|i| [i; 3]).collect();
+    for (row, p) in IMAGE.zip([[10, 10, 10], [10, 10, 11], [10, 11, 10], [10, 11, 11]]) {
+        rotary[row] = p;
+    }
+    for (i, r) in rotary.iter_mut().enumerate().skip(IMAGE.end) {
+        *r = [i as u32 - 2; 3];
+    }
+    PromptEmbeds::new(width, IMAGE.map(|p| p as u32).collect(), rows).expect("rows").with_rotary_positions(rotary)
+}
+
+/// Prefill all of `prompt` (with `embeds` if any), as the scheduler does: a slice stops at the prompt's checkpoint to
+/// file it. The sequence is kept for the caller to release.
+fn prefill_whole(e: &mut Qwen35GgufEngine, prompt: &[u32], embeds: Option<&PromptEmbeds>) -> (BlockTable, Vec<f32>) {
+    let mut table = BlockTable::new();
+    loop {
+        let progress = match embeds {
+            Some(x) => e.prefill_chunk_embeds(&mut table, prompt, x, usize::MAX),
+            None => e.prefill_chunk(&mut table, prompt, usize::MAX),
+        };
+        if let PrefillProgress::Done(hidden) = progress {
+            return (table, hidden);
+        }
+    }
+}
+
+/// The agent's pattern: turn 1 files its prompt, turn 2 repeats it and adds more. With the same image turn 2 resumes
+/// from the checkpoint of turn 1, which lies past the image, and is the prompt a cold prefill reads; another image,
+/// or the same placeholder tokens as text, have nothing to resume from.
+fn a_conversation_with_an_image_resumes_from_its_prefix() {
+    let (mut warm, mut cold) = (engine(), engine());
+    let vocab = warm.vocab();
+    let (turn1, turn2) = (conversation(vocab, 200), conversation(vocab, 280));
+    let checkpoint = checkpoint_len(turn1.len());
+    assert!(checkpoint > IMAGE.end, "the checkpoint lies past the image");
+
+    let image1 = picture_rows(&warm, turn1.len(), 1.0);
+    let (mut first, _) = prefill_whole(&mut warm, &turn1, Some(&image1));
+    assert_eq!(first.cached_rows(), 0, "nothing was cached for the first turn");
+    warm.release_table(&mut first);
+
+    let same = picture_rows(&warm, turn2.len(), 1.0);
+    let (mut second, hidden) = prefill_whole(&mut warm, &turn2, Some(&same));
+    assert_eq!(second.cached_rows() as usize, checkpoint, "the next turn resumes from the previous turn's checkpoint, image included");
+    let (mut reference, want) = prefill_whole(&mut cold, &turn2, Some(&same));
+    assert_eq!(reference.cached_rows(), 0);
+    assert!(close(&warm.logits(&hidden), &cold.logits(&want), 2e-3), "the resumed prompt must be the cold prompt");
+    let next = |e: &mut Qwen35GgufEngine, t: &mut BlockTable, h: &[f32]| {
+        let first = e.logits(h).iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i as u32).unwrap();
+        let mut out = vec![first];
+        for _ in 0..6 {
+            out.push(e.forward_batched_topk(&mut [&mut *t], &[*out.last().unwrap()], 1)[0][0].0);
+        }
+        out
+    };
+    assert_eq!(next(&mut warm, &mut second, &hidden), next(&mut cold, &mut reference, &want), "decoding after a resumed prompt");
+    warm.release_table(&mut second);
+    cold.release_table(&mut reference);
+
+    let other = picture_rows(&warm, turn2.len(), -1.0);
+    let (mut b, hidden_b) = prefill_whole(&mut warm, &turn2, Some(&other));
+    assert_eq!(b.cached_rows(), 0, "another image at the same place must not resume from the first image's state");
+    assert!(!close(&warm.logits(&hidden_b), &warm.logits(&hidden), 1e-3), "the image reaches the distribution");
+    warm.release_table(&mut b);
+
+    let (mut text, _) = prefill_whole(&mut warm, &turn2, None);
+    assert_eq!(text.cached_rows(), 0, "the placeholders read as text are another prompt");
+    warm.release_table(&mut text);
+}
+
 gpu_core::card_tests!(
+    a_conversation_with_an_image_resumes_from_its_prefix,
     rows_equal_to_the_token_embeddings_are_the_token_prompt,
     a_constant_shift_of_the_rotary_positions_changes_nothing,
     positions_that_are_not_a_shift_are_read,
