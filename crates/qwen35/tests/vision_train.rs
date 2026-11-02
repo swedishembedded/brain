@@ -24,7 +24,7 @@ use model::ops::TierPolicy;
 use model::{Batch, Model, Split};
 use qwen35::config::Qwen35Config;
 use qwen35::model::{pipelines, Qwen35};
-use qwen35::vision_frontend::prompt_embeds;
+use qwen35::vision_frontend::{prompt_embeds, prompt_embeds_remembering, EncodedImages};
 use qwen35::vision_sft::{attach_for_dataset, check_prepared, VisionFeed, VisionReader};
 use qwen35::vision_tower::VisionTower;
 use qwen3vl::mrope::PromptRope;
@@ -201,6 +201,37 @@ fn each_row_of_a_wider_batch_trains_as_it_would_alone() {
     let together = two.forward();
     let want = (l_image * c_image + l_text * c_text) / (c_image + c_text);
     assert!((together - want).abs() < 1e-4 * want.abs().max(1.0), "batch loss {together}, the rows alone give {want}");
+}
+
+/// An agent resends the same picture every turn: the tower reads it once, the next turn's prompt gets the rows it
+/// would have computed (the same key for the decoder's prefix cache), and another picture is read by the tower.
+#[test]
+fn a_picture_seen_before_does_not_go_through_the_tower_again() {
+    let rig = Rig::new();
+    let tower = rig.tower();
+    let seen = EncodedImages::new(2);
+    let ids = prompt();
+    let (cat, dog) = (picture(8, 8, 21), picture(8, 8, 22));
+    let embeds = |image: &imaging::pixels::Rgb8| prompt_embeds_remembering(&tower, &seen, &ids, std::slice::from_ref(image), &|| false).unwrap();
+
+    let first = embeds(&cat);
+    assert_eq!(seen.encodes(), 1);
+    let again = embeds(&cat);
+    assert_eq!(seen.encodes(), 1, "the same picture is not encoded again");
+    assert_eq!(first, again);
+    assert_eq!(first, prompt_embeds(&tower, &ids, std::slice::from_ref(&cat), &|| false).unwrap(), "remembered rows are the tower's rows");
+
+    let other = embeds(&dog);
+    assert_eq!(seen.encodes(), 2, "another picture goes through the tower");
+    assert_ne!(first.content_key().digest_at(ids.len()), other.content_key().digest_at(ids.len()));
+
+    // Capacity 2: the cat was used before the dog, a third picture pushes out the least recently used (the cat).
+    embeds(&picture(8, 8, 23));
+    assert_eq!(seen.encodes(), 3);
+    embeds(&dog);
+    assert_eq!(seen.encodes(), 3, "the dog is still remembered");
+    embeds(&cat);
+    assert_eq!(seen.encodes(), 4, "the cat was pushed out");
 }
 
 #[test]

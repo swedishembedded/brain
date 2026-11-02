@@ -48,9 +48,7 @@ structurally and never parity-claimed here.
   they do alone. Latency of a one-token reply on a quiet card (fast profile, tower on float32 kernels): 1200 x 1000 (1178 tokens)
   0.79 s of which the tower 0.58 s; 1500 x 1000 (1.5 MP, 1457 tokens) 1.04 s of which the tower 0.79 s; the decoder's prefill
   of those rows is the remaining 0.2 s (about 6 000 rows/s with the tower's activations resident beside it).
-  Open: (1) the tower is the larger share of an image's prefill (8 patches per ms on float32 kernels, about 12 TFLOP/s by a rough count, far under the tensor-core peak): bf16 tensor-core ViT kernels are the next lever; (2) a prompt with images does not use the prefix cache (so
-  a conversation re-encodes and re-prefills its pictures every turn): a cache keyed by the image digest in the engine's namespace
-  and a store of encoded rows would give it back; (3) a prompt with images does not draft with the MTP head; (4) `nvidia/Qwen3.8-27B-NVFP4`
+  Open: (1) the tower is the larger share of an image's prefill (8 patches per ms on float32 kernels, about 12 TFLOP/s by a rough count, far under the tensor-core peak): bf16 tensor-core ViT kernels are the next lever; (2) a prompt with images resumes from the prefix cache keyed by tokens plus the rows inside the prefix (finding 429) and the front end remembers the rows of its 8 latest pictures; real-weight validation of the cached-token counts on a card is open; (3) a prompt with images does not draft with the MTP head; (4) `nvidia/Qwen3.8-27B-NVFP4`
   carries the same bf16 tower (same tensor names) but this build has no resident tier for its linears, so only the FP8 directory
   was served end to end; (5) the serving bound on an image is 4 MP (the checkpoint's own is 16.7 MP, 16384 rows), a flag away.
   Found on the way: the embedded-prompt conformance property (`model::serve::conformance`) placed its rows early in the prompt,

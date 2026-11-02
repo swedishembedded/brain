@@ -18,7 +18,7 @@
 //! (or the reverse), a content part this model does not read, the placeholder tokens typed by hand into text, an
 //! image or a set of images the context cannot hold.
 
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 
 use capability::{failure::tag, FailureClass, Invocation};
 use data::qwen_tokenizer::QwenBpe;
@@ -27,7 +27,7 @@ use llmserve::{Encoding, Frontend, ParsedRequest, TextFrontend};
 use model::serve::PromptEmbeds;
 use serde_json::{json, Value};
 
-use crate::vision_tower::VisionTower;
+use crate::vision_tower::{ImageRows, VisionTower};
 
 /// The literal placeholder strings the chat template writes for an image; the tokenizer turns each into one token.
 const IMAGE_START: &str = "<|vision_start|>";
@@ -138,6 +138,55 @@ pub enum EmbedRefusal {
     Invalid(String),
 }
 
+/// The rows the tower made for the images it saw lately, found again by the decoded image itself.
+///
+/// An agent resends its whole history every turn, the same attached picture in it, and its rows are the same every
+/// time: the tower is deterministic in the pixels. Serving them from here keeps the tower off a picture it has
+/// already read, and gives the decoder rows equal to the ones its prefix cache was filed under, so the picture's
+/// span of the prompt is reused with the text around it. The image is compared byte for byte (a hash of client
+/// bytes could be chosen to collide), so one client's picture can never be served another's rows.
+pub struct EncodedImages {
+    capacity: usize,
+    /// Least recently used first.
+    recent: Mutex<Vec<(Rgb8, Arc<ImageRows>)>>,
+    encodes: std::sync::atomic::AtomicU64,
+}
+
+impl EncodedImages {
+    /// A cache of the rows of the `capacity` most recently used images (0 keeps none).
+    pub fn new(capacity: usize) -> EncodedImages {
+        EncodedImages { capacity, recent: Mutex::new(Vec::new()), encodes: std::sync::atomic::AtomicU64::new(0) }
+    }
+
+    /// The rows of `image`: remembered ones, else `encode`'s, which are remembered. The lock is not held while
+    /// encoding, so a picture two requests bring at once may be encoded twice, never wrongly.
+    pub fn rows_of(&self, image: &Rgb8, encode: impl FnOnce(&Rgb8) -> ImageRows) -> Arc<ImageRows> {
+        let mut recent = self.recent.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(i) = recent.iter().position(|(seen, _)| seen == image) {
+            let hit = recent.remove(i);
+            let rows = hit.1.clone();
+            recent.push(hit);
+            return rows;
+        }
+        drop(recent);
+        let rows = Arc::new(encode(image));
+        self.encodes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if self.capacity > 0 {
+            let mut recent = self.recent.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if recent.len() >= self.capacity {
+                recent.remove(0);
+            }
+            recent.push((image.clone(), rows.clone()));
+        }
+        rows
+    }
+
+    /// How many images went through the tower because they were not remembered.
+    pub fn encodes(&self) -> u64 {
+        self.encodes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 /// The rows and rotary positions of a prompt holding `images`, as the decoder takes them ([`PromptEmbeds`]): each
 /// image through the vision tower, standing at its run of placeholder tokens in `ids`, and the three-axis rotary
 /// position of every prompt token. Serving builds a request's embeds with this, and training a record's: the rows and
@@ -146,6 +195,11 @@ pub enum EmbedRefusal {
 /// `ids` must hold one run of `tower.tokens_for(image)` placeholder tokens per image, in order. `cancelled` is polled
 /// between images.
 pub fn prompt_embeds(tower: &VisionTower, ids: &[u32], images: &[Rgb8], cancelled: &dyn Fn() -> bool) -> Result<PromptEmbeds, EmbedRefusal> {
+    prompt_embeds_remembering(tower, &EncodedImages::new(0), ids, images, cancelled)
+}
+
+/// [`prompt_embeds`] reading the rows of an image `seen` already has from it instead of running the tower.
+pub fn prompt_embeds_remembering(tower: &VisionTower, seen: &EncodedImages, ids: &[u32], images: &[Rgb8], cancelled: &dyn Fn() -> bool) -> Result<PromptEmbeds, EmbedRefusal> {
     let tokens = tower.spec().tokens;
     let sizes: Vec<(u32, (u32, u32))> = images.iter().map(|i| tower.tokens_for(i.h, i.w)).collect();
     let runs = placeholder_runs(ids, tokens.image);
@@ -161,7 +215,7 @@ pub fn prompt_embeds(tower: &VisionTower, ids: &[u32], images: &[Rgb8], cancelle
         if cancelled() {
             return Err(EmbedRefusal::Cancelled);
         }
-        let encoded = tower.encode(image);
+        let encoded = seen.rows_of(image, |i| tower.encode(i));
         debug_assert_eq!(encoded.grid, grid, "the tower and the prompt agree on the grid");
         rows.extend_from_slice(&encoded.rows);
         grids.push((1, grid.0, grid.1));
@@ -173,10 +227,15 @@ pub fn prompt_embeds(tower: &VisionTower, ids: &[u32], images: &[Rgb8], cancelle
 /// What a request for the image worker carries and where its result goes.
 type Job = (Invocation, mpsc::Sender<Result<(ParsedRequest, Option<PromptEmbeds>), String>>);
 
+/// Images whose rows the front end keeps: a conversation's pictures and a few concurrent ones, a few tens of MB each.
+const REMEMBERED_IMAGES: usize = 8;
+
 /// Everything building an image request needs.
 struct ImageBuild {
     tok: QwenBpe,
     tower: Arc<VisionTower>,
+    /// The rows of the pictures the tower read lately.
+    seen: EncodedImages,
     /// The most prompt tokens the scheduler can hold for one sequence.
     context: usize,
     parse: fn(&QwenBpe, &Invocation) -> Result<ParsedRequest, String>,
@@ -218,7 +277,7 @@ impl ImageBuild {
         let req = (self.parse)(&self.tok, &rendered)?;
 
         let prepared = started.elapsed();
-        let embeds = prompt_embeds(&self.tower, &req.ids, &images, &|| inv.cancel.is_cancelled()).map_err(|refusal| match refusal {
+        let embeds = prompt_embeds_remembering(&self.tower, &self.seen, &req.ids, &images, &|| inv.cancel.is_cancelled()).map_err(|refusal| match refusal {
             EmbedRefusal::Cancelled => "cancelled".to_string(),
             EmbedRefusal::Invalid(why) => invalid(why),
         })?;
@@ -250,7 +309,7 @@ impl VisionFrontend {
                 return Err(format!("the tokenizer's {literal} is not token {id}, which the checkpoint's config names"));
             }
         }
-        let build = Arc::new(ImageBuild { tok, tower: Arc::new(tower), context, parse });
+        let build = Arc::new(ImageBuild { tok, tower: Arc::new(tower), seen: EncodedImages::new(REMEMBERED_IMAGES), context, parse });
         let (queue, jobs) = mpsc::channel::<Job>();
         let worker_build = build.clone();
         let worker = std::thread::Builder::new()
