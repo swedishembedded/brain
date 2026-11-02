@@ -289,3 +289,26 @@ fn a_supervised_trainer_refuses_a_dataset_that_carries_advantages() {
     assert!(err.to_string().contains("advantages") && err.to_string().contains("policy_gradient"), "{err}");
     assert!(model::load_rollout_dataset(dir.path(), &opts(1, 1, 1e-2)).is_ok());
 }
+
+/// Every optimiser step reports finite statistics, and the line the step log prints carries them: the KL to the
+/// reference, the clip fraction and the importance ratio, so a run shows how far it moved without the record.
+#[test]
+fn every_step_reports_finite_statistics_and_the_step_log_line_carries_them() {
+    let mut m = lora_model(data::rng::random_seed());
+    let rows = [Row::new(&[1, 2, 3, 4, 5, 6], 3, Some(1.0)), Row::new(&[2, 3, 4, 5, 6, 7], 3, Some(-1.0))];
+    let cfg = PolicyGradientConfig { reference: ReferencePolicy::StartOfRun, loss_agg: LossAgg::TokenSum, ..Default::default() };
+    let (mut obj, _dir) = started(&rows, cfg, &mut m);
+    assert_eq!(Objective::<Qwen35>::step_log(&obj), None, "nothing to say before the first step");
+    for _ in 0..3 {
+        one_step(&mut obj, &m);
+        let step = obj.stats().steps.last().unwrap();
+        assert!((0.0..=1.0).contains(&step.clip_fraction));
+        assert!(step.loss.is_finite() && step.ratio_mean.is_finite() && step.ratio_min <= step.ratio_max);
+        assert!(step.kl.expect("log_kl is on by default").is_finite());
+        let line = Objective::<Qwen35>::step_log(&obj).expect("a step was taken");
+        assert!(line.contains(&format!("kl {:.4}", step.kl.unwrap())), "{line}");
+        assert!(line.contains(&format!("clip {:.3}", step.clip_fraction)), "{line}");
+        assert!(line.contains(&format!("ratio {:.3}", step.ratio_mean)), "{line}");
+    }
+    assert!(obj.stats().steps[0].kl.unwrap().abs() < 1e-6, "the first step sits on its own reference");
+}

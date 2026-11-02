@@ -141,6 +141,12 @@ pub trait Objective<M: Model> {
         Vec::new()
     }
 
+    /// What the optimiser step just taken measured beyond its loss, as text for the end of its log line
+    /// (default: nothing). Read from numbers the step already computed.
+    fn step_log(&self) -> Option<String> {
+        None
+    }
+
     /// Char-tokenizer vocab to embed in the checkpoint via
     /// [`Model::save_with_itos`], if this objective's dataset carries one
     /// (default: none). The training loop always asks for this and always
@@ -216,6 +222,9 @@ impl<M: Model, O: Objective<M> + ?Sized> Objective<M> for Box<O> {
     fn metrics(&self) -> Vec<(&'static str, f32)> {
         (**self).metrics()
     }
+    fn step_log(&self) -> Option<String> {
+        (**self).step_log()
+    }
     fn itos(&self) -> Option<&[char]> {
         (**self).itos()
     }
@@ -256,6 +265,9 @@ impl<M: Model, O: Objective<M> + ?Sized> Objective<M> for &mut O {
     }
     fn metrics(&self) -> Vec<(&'static str, f32)> {
         (**self).metrics()
+    }
+    fn step_log(&self) -> Option<String> {
+        (**self).step_log()
     }
     fn itos(&self) -> Option<&[char]> {
         (**self).itos()

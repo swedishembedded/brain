@@ -1822,7 +1822,8 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
             eprintln!("fit: device memory after step {}: live {} B, reserved {} B, peak live {} B", step + 1, m.live, m.reserved, m.peak_live);
         }
         if let Some(norm) = grad_norm {
-            eprintln!("step {:>6}  loss {loss:.4}  grad_norm {norm:.4}  lr {lr:.2e}", step + 1);
+            let extra = obj.step_log().map(|text| format!("  {text}")).unwrap_or_default();
+            eprintln!("step {:>6}  loss {loss:.4}  grad_norm {norm:.4}  lr {lr:.2e}{extra}", step + 1);
         }
         last_train = Some(loss);
         completed = step + 1;

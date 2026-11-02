@@ -98,7 +98,9 @@ pub struct PolicyGradientConfig {
     pub loss_agg: LossAgg,
     /// The temperature the collector sampled with; the policy trained is `softmax(logits / temperature)`.
     pub temperature: f32,
-    /// Measure and report the KL to the reference even when `kl_beta` is zero (one more forward pass over the data).
+    /// Measure and report the KL to the reference even when `kl_beta` is zero. Cost: one forward pass over the dataset
+    /// before the first step (none per step; the per-token KL comes from the step's own forward), and a second one only
+    /// when a run that continues an adapter is measured against the base.
     pub log_kl: bool,
 }
 
@@ -529,6 +531,12 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
         let batch = PgBatch { targets: &laid.targets, old_lp: &laid.old_lp, ref_lp: laid.has_ref.then_some(&laid.ref_lp[..]), advantage: &laid.advantage };
         let (_, terms) = weigh(&training::objectives(model).batch_token_logprobs(), &batch, &self.spec());
         terms.loss / terms.supervised.max(1) as f32
+    }
+
+    fn step_log(&self) -> Option<String> {
+        let last = self.stats.steps.last()?;
+        let kl = last.kl.map(|kl| format!("kl {kl:.4}  ")).unwrap_or_default();
+        Some(format!("{kl}clip {:.3}  ratio {:.3}", last.clip_fraction, last.ratio_mean))
     }
 
     fn metrics(&self) -> Vec<(&'static str, f32)> {
