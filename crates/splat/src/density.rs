@@ -63,6 +63,7 @@
 //! threshold happens to fire. If your team needs that, you can procure our
 //! services by sending an email to info@swedishembedded.com.
 
+use backend_cpu::par;
 use crate::geometry::axis;
 use crate::mcmc::{relocation, sh_stride};
 use crate::opt::jitter;
@@ -130,16 +131,26 @@ impl Evidence {
     /// Fold in one view's credit-assignment pass: the colour gradient of a
     /// backward run with upstream `(1, r, e·r)`, `[N*3]`.
     pub fn add_view(&mut self, credit: &[f32]) {
-        for (i, c) in credit.as_chunks::<3>().0.iter().enumerate() {
-            self.contribution[i] += c[0];
-            self.residual[i] += c[1];
-            self.edge[i] += c[2];
-            if c[0] > 1e-6 {
-                self.views[i] += 1;
-            }
-        }
+        // one pass per statistic, each parallel over disjoint chunks: the
+        // gaussians number in the millions and a view is folded in per frame
+        let credit = credit.as_chunks::<3>().0;
+        par::chunks_mut(&mut self.contribution, ADD_CHUNK, |ci, out| {
+            out.iter_mut().zip(&credit[ci * ADD_CHUNK..]).for_each(|(o, c)| *o += c[0]);
+        });
+        par::chunks_mut(&mut self.residual, ADD_CHUNK, |ci, out| {
+            out.iter_mut().zip(&credit[ci * ADD_CHUNK..]).for_each(|(o, c)| *o += c[1]);
+        });
+        par::chunks_mut(&mut self.edge, ADD_CHUNK, |ci, out| {
+            out.iter_mut().zip(&credit[ci * ADD_CHUNK..]).for_each(|(o, c)| *o += c[2]);
+        });
+        par::chunks_mut(&mut self.views, ADD_CHUNK, |ci, out| {
+            out.iter_mut().zip(&credit[ci * ADD_CHUNK..]).for_each(|(o, c)| *o += u32::from(c[0] > 1e-6));
+        });
     }
 }
+
+/// Gaussians per task when a view's credit is folded into the evidence.
+const ADD_CHUNK: usize = 1 << 16;
 
 /// The per-pixel upstream of a credit-assignment pass, `[W*H*4]`:
 /// `(m, m·r, m·e·r, 0)` with `r` the mean absolute residual over channels
@@ -147,15 +158,19 @@ impl Evidence {
 /// ([`range_residual`]), `e` the edge strength of the target and `m` the
 /// supervision weight.
 pub fn credit_upstream(pred: &[f32], target: &[f32], edges: &[f32], weights: Option<&[f32]>, geometry: Option<&[f32]>) -> Vec<f32> {
+    const PIXELS: usize = 1 << 13;
     let px = edges.len();
     let mut out = vec![0.0f32; px * 4];
-    for p in 0..px {
-        let m = weights.map_or(1.0, |w| w[p]);
-        let r = (0..3).map(|c| (pred[p * 3 + c] - target[p * 3 + c]).abs()).sum::<f32>() / 3.0 + geometry.map_or(0.0, |g| g[p]);
-        out[p * 4] = m;
-        out[p * 4 + 1] = m * r;
-        out[p * 4 + 2] = m * edges[p] * r;
-    }
+    par::chunks_mut(&mut out, PIXELS * 4, |ci, chunk| {
+        for (k, o) in chunk.chunks_exact_mut(4).enumerate() {
+            let p = ci * PIXELS + k;
+            let m = weights.map_or(1.0, |w| w[p]);
+            let r = (0..3).map(|c| (pred[p * 3 + c] - target[p * 3 + c]).abs()).sum::<f32>() / 3.0 + geometry.map_or(0.0, |g| g[p]);
+            o[0] = m;
+            o[1] = m * r;
+            o[2] = m * edges[p] * r;
+        }
+    });
     out
 }
 

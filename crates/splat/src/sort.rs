@@ -17,8 +17,24 @@ use crate::Kernels;
 /// a parameter so it can be tuned without a WGSL change.
 pub const SCAN_BLOCK_LEN: usize = 256;
 
-/// Keys per `sort_hist`/`sort_scatter` chunk (one invocation each).
+/// Fewest keys per `sort_hist`/`sort_scatter` chunk (one invocation each): the
+/// chunk size of a small sort, and what the histogram buffer is sized for.
 pub const SORT_CHUNK_LEN: usize = 256;
+
+/// Most keys per chunk. A chunk is walked by one thread, so a sort of millions
+/// of keys with 256-key chunks launches tens of thousands of threads that each
+/// stream 256 keys and keep a 256-bin table in local memory, and the scan of
+/// the `256 * chunks` histogram grows with them. Measured on a GH200 over the
+/// 10-25M-key frames of a truck capture, the sort passes took 12.3 s of device
+/// time per profile run at 256, 8.9 s at 512, 7.3 s at 1024, 7.0 s at 2048
+/// and 8.8 s at 4096.
+pub const SORT_CHUNK_MAX: usize = 2048;
+
+/// Keys per chunk for a sort of `n` keys: about 8192 chunks' worth of work
+/// per thread count, between [`SORT_CHUNK_LEN`] and [`SORT_CHUNK_MAX`].
+fn sort_chunk_len(n: usize) -> usize {
+    (n / 8192).next_power_of_two().clamp(SORT_CHUNK_LEN, SORT_CHUNK_MAX)
+}
 
 /// Per-level block-sum buffers for an exclusive scan of up to `max_n`
 /// elements. The last level always has a single element: after the recorded
@@ -129,12 +145,13 @@ pub fn record_sort_pairs(
     assert!(n >= 1 && n <= scratch.max_n, "sort n={n} exceeds scratch max {}", scratch.max_n);
     assert!((1..=32).contains(&key_bits));
     let passes = key_bits.div_ceil(8);
-    let n_chunks = n.div_ceil(SORT_CHUNK_LEN);
+    let chunk = sort_chunk_len(n);
+    let n_chunks = n.div_ceil(chunk);
     let hist_n = 256 * n_chunks;
     let mut src = (keys_a, vals_a);
     let mut dst = (keys_b, vals_b);
     for pass in 0..passes {
-        let params = [n as u32, 8 * pass, n_chunks as u32, SORT_CHUNK_LEN as u32];
+        let params = [n as u32, 8 * pass, n_chunks as u32, chunk as u32];
         steps.push(gpu.step(ks.sort_hist, &[src.0, &scratch.hist], &params, n_chunks as u32));
         record_scan(gpu, ks, &scratch.hist, hist_n, &scratch.hist_scan, steps);
         steps.push(gpu.step(

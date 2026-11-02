@@ -952,10 +952,16 @@ impl<'a> Fit<'a> {
         // What the scene as handed in scores over every view at full
         // resolution: the floor the fit has to beat to have been worth
         // running.
+        let tm = std::time::Instant::now();
         let full = self.level(0);
+        self.prof.add("level build", tm.elapsed());
+        let tm = std::time::Instant::now();
         let first_loss = self.dataset_loss(&scene, &mut scr, &full);
+        self.prof.add("loss over every view", tm.elapsed());
         gpu_core::reclaiming(gpu, || drop(full));
+        let tm = std::time::Instant::now();
         let mut level = self.level(self.halvings_at(0));
+        self.prof.add("level build", tm.elapsed());
         let mut starved: Vec<f32> = Vec::new();
         let mut absgrad = vec![0.0f32; scene.n];
         let mut smooth = f64::NAN;
@@ -971,7 +977,9 @@ impl<'a> Fit<'a> {
             let it = done;
             let halvings = self.halvings_at(it);
             if halvings != level.halvings {
+                let tm = std::time::Instant::now();
                 let next = self.level(halvings);
+                self.prof.add("level build", tm.elapsed());
                 gpu_core::reclaiming(gpu, || drop(std::mem::replace(&mut level, next)));
                 // a finer level measures a different loss: its trend starts
                 // over
@@ -1073,10 +1081,12 @@ impl<'a> Fit<'a> {
             if cfg.densify_every > 0 && (it + 1) % cfg.densify_every + 4 * epoch >= cfg.densify_every {
                 // the positional-gradient statistic over the epochs before a
                 // round
+                let tm = std::time::Instant::now();
                 let ag = gpu.read(&scene.grads.d_absgrad, scene.n);
                 for (a, b) in absgrad.iter_mut().zip(&ag) {
                     *a += b;
                 }
+                self.prof.add("absgrad readback", tm.elapsed());
             }
 
             // an epoch-length average of the batch losses
@@ -1116,6 +1126,7 @@ impl<'a> Fit<'a> {
             if cfg.log_every > 0 && (it.is_multiple_of(cfg.log_every) || it + 1 == cfg.iters) {
                 let c = level.targets[0].cam;
                 println!("fit iter {it:5}: loss {last_loss:.6}, {} gaussians at {}x{}", scene.n, c.width, c.height);
+                self.prof.report(done, scene.n);
             }
             done += 1;
             if !on_step(it, last_loss) {
@@ -1125,7 +1136,9 @@ impl<'a> Fit<'a> {
             if cfg.densify_every > 0 && done >= first_round && done < until && done.is_multiple_of(cfg.densify_every) {
                 let round = (done - first_round) / cfg.densify_every;
                 // the round replaces the scene (and may replace view weights)
+                let tm = std::time::Instant::now();
                 scene = gpu_core::reclaiming(gpu, || self.densify(scene, &mut scr, &mut level, &absgrad, &mut starved, round, rounds, it));
+                self.prof.add("density round (all of it)", tm.elapsed());
                 absgrad = vec![0.0; scene.n];
                 if scene.n > scr.cap {
                     // unbudgeted growth: the scratch sized for the start has
@@ -1140,11 +1153,15 @@ impl<'a> Fit<'a> {
                 (window_sum, window_n, grace) = (0.0, 0, true);
             }
         }
-        self.prof.report(done, scene.n);
         // Never hand back something worse than what came in, judged the same
         // way both times: every view, full resolution.
+        let tm = std::time::Instant::now();
         let full = self.level(0);
+        self.prof.add("level build", tm.elapsed());
+        let tm = std::time::Instant::now();
         let final_loss = self.dataset_loss(&scene, &mut scr, &full);
+        self.prof.add("loss over every view", tm.elapsed());
+        self.prof.report(done, scene.n);
         let filter3d = gpu.read(&scene.filter3d, scene.n);
         let out = scene.download(gpu);
         if cfg.log_every > 0 {
@@ -1398,6 +1415,7 @@ impl<'a> Fit<'a> {
         let mut measured: Vec<Vec<f32>> = Vec::new();
         for (vi, t) in level.targets.iter().enumerate() {
             let cam = t.cam;
+            let tm = std::time::Instant::now();
             scene.shade(gpu, &self.ks, cam.eye(), skip);
             let gs = scene.splats();
             scr.renderer.render(gpu, &gs, &cam, &o);
@@ -1405,6 +1423,8 @@ impl<'a> Fit<'a> {
                 e.dev.composite(gpu, &self.ks, &scr.renderer.img, &cam, &o);
             }
             let rgba = scr.renderer.read_rgba(gpu, cam.width, cam.height);
+            self.prof.add("credit: render", tm.elapsed());
+            let tm = std::time::Instant::now();
             let rgb = crate::renderer::rgba_to_rgb(&rgba);
             let pred = match (self.isp.as_deref(), &scr.isp) {
                 (Some(model), Some(dev)) => {
@@ -1445,8 +1465,7 @@ impl<'a> Fit<'a> {
                 let diag = scr.renderer.diagnose(gpu, &cam, &o);
                 let dw = crate::renderer::Renderer::DIAG_WORDS;
                 measured.push(
-                    (0..rendered.len())
-                        .map(|p| {
+                    backend_cpu::par::map(rendered.len(), |p| {
                             let prior = t.depth.as_ref().map_or(0.0, |d| d[p]);
                             let conf = t.depth_conf.as_ref().map_or(1.0, |c| c[p]);
                             let d = &diag[p * dw..p * dw + dw];
@@ -1457,19 +1476,26 @@ impl<'a> Fit<'a> {
                             } else {
                                 0.0
                             }
-                        })
-                        .collect(),
+                    }),
                 );
             }
+            self.prof.add("credit: host residual + diagnose", tm.elapsed());
+            let tm = std::time::Instant::now();
             let up = density::credit_upstream(&pred, &t.rgb, &edges, weights.as_deref(), geom.as_deref());
             gpu.write_f32(&scr.dimg, &up);
             gpu.submit(&[&scene.grads.d_colors], &[]);
             scr.renderer.render_bwd_ray(gpu, &gs, &cam, &o, &scr.dimg, None, &mut scr.bscr, &scene.grads, false).unwrap_or_else(|e| panic!("{e}"));
             let credit = gpu.read(&scene.grads.d_colors, 3 * n);
+            self.prof.add("credit: backward + readback", tm.elapsed());
+            let tm = std::time::Instant::now();
             // a gaussian a view composited half a pixel's worth of has been
             // seen by it
-            seen.push(credit.as_chunks::<3>().0.iter().map(|c| c[0] > 0.5).collect());
+            seen.push(
+                backend_cpu::par::map(n.div_ceil(1 << 16), |ci| credit.as_chunks::<3>().0[ci << 16..((ci + 1) << 16).min(n)].iter().map(|c| c[0] > 0.5).collect::<Vec<bool>>())
+                    .concat(),
+            );
             ev.add_view(&credit);
+            self.prof.add("credit: host accumulate", tm.elapsed());
         }
         ev.absgrad = absgrad.to_vec();
         ev.site_share = if total > 0.0 { (unexplained / total) as f32 } else { 0.0 };

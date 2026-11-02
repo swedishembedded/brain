@@ -156,3 +156,17 @@ fn scan_4m_cpu() {
     let ks = Kernels::at(0);
     check_scan(&g, &ks, 4_000_000, 0xbead);
 }
+
+/// Sorts of millions of keys use chunks of 512 to 2048 keys per thread
+/// (`SORT_CHUNK_MAX`), not the 256 of a small sort: still stable, still exact.
+#[test]
+fn sort_with_large_chunks_gpu() {
+    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        return;
+    }
+    let g = gpu_core::testgpu::dev(splat::PIPELINES);
+    let ks = Kernels::at(0);
+    for (i, &n) in [2_500_000usize, 17_000_000].iter().enumerate() {
+        check_sort(&g, &ks, n, 32, 0x1a49e + i as u64);
+    }
+}

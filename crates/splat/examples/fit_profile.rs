@@ -7,8 +7,11 @@
 //! run spends most of its hours in.
 //!
 //! ```text
-//! fit_profile <scene.ply> <cameras.json> <photos dir> [iters]
+//! fit_profile <scene.ply> <cameras.json> <photos dir> [iters] [--densify]
 //! ```
+//!
+//! `--densify` runs density control (a round every iters/4
+//! steps, until 60% of them), so its rounds are in the account too.
 //!
 //! Prints the per-kernel DEVICE times (`gpu_core::profile::profile_live`),
 //! and with `BRAIN_SPLAT_PROFILE=1` the fit's own per-stage wall clock, which
@@ -18,7 +21,9 @@ use gpu_core::profile::profile_live;
 use splat::opt::{fit_full, Densify, FitCfg, TargetView};
 
 fn main() {
-    let a: Vec<String> = std::env::args().skip(1).collect();
+    let mut a: Vec<String> = std::env::args().skip(1).collect();
+    let densify = a.iter().any(|v| v == "--densify");
+    a.retain(|v| v != "--densify");
     if a.len() < 3 {
         eprintln!("usage: fit_profile <scene.ply> <cameras.json> <photos dir> [iters]");
         std::process::exit(2);
@@ -45,8 +50,8 @@ fn main() {
 
     let cfg = FitCfg {
         iters,
-        densify_every: 0,
-        strategy: Densify::Heuristic,
+        densify_every: if densify { (iters / 4).max(1) } else { 0 },
+        strategy: if densify { Densify::Hybrid } else { Densify::Heuristic },
         geometry_after: 0.0,
         coarse: 0.0,
         log_every: 0,
