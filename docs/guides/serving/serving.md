@@ -129,6 +129,18 @@ quantises - an adapter is trained on the release and served on the
 quantisation, so the digest of the GGUF is not the one the card records. An
 adapter of the other family is refused by family.
 
+`--checkpoint` naming a released Qwen3.8 (for example `Qwen/Qwen3.8-27B-FP8`)
+makes that release the host of `--adapter`, `--adapter-manifest` and
+`--watch-adapters`: the adapter is served as its own model id over the
+release's weights, beside the base under the base's id. A vision-language
+release serves image prompts under the adapter exactly as under the base - the
+vision tower's rows enter the decoder and the adapter's deltas apply to its
+linear layers, as in `brain qwen35 finetune` training on such prompts. The
+prefix cache keeps a namespace per adapter: the base and each adapter never
+adopt one another's cached prompts, even for identical images and text, so the
+first request to an adapter after the base served the same prompt reports no
+cached tokens, and later turns of that adapter's conversation do.
+
 ### The adapter bank
 
 The adapters run from a fixed-size bank of device memory built beside the base
@@ -195,7 +207,7 @@ it, and the engine unloads it afterwards. A swap interrupts nothing. A client
 that follows "the latest" reads the model list for the current id. A release
 that keeps its card id under a new digest replaces the adapter under that id.
 
-The adapter flags need a served Qwen3 (`--checkpoint`) behind an HTTP or
+The adapter flags need a served Qwen3 or released Qwen3.8 (`--checkpoint`) behind an HTTP or
 D-Bus surface; `--adapter` and `--adapter-manifest` without one stop the
 server, and the stdio controller refuses all three.
 

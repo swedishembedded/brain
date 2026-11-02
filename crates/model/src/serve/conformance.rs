@@ -129,6 +129,9 @@ pub fn run_all<D: PagedDecoder>(c: &Conformance<D>) {
         adapters_never_share_kv_with_the_base(c);
     }
     embedded_prompts_batch_and_never_share_a_prefix(c);
+    if c.load_adapter.is_some() {
+        adapters_serve_embedded_prompts_apart_from_the_base(c);
+    }
     speculation_equals_plain_greedy(c);
 }
 
@@ -361,4 +364,52 @@ pub fn embedded_prompts_batch_and_never_share_a_prefix<D: PagedDecoder>(c: &Conf
     assert_eq!(complete(&mut seq, plain), out_tokens, "a token-only prompt adopted K/V computed from embedding rows");
     let again = seq.submit_embedded(request(prompt, 6), ea, SampleParams::greedy(), 0);
     assert_eq!(complete(&mut seq, again), out_a, "the same rows must still decode the same after other prompts ran");
+}
+
+/// An adapter serves a prompt carrying embedding rows (a vision request) as it serves a token prompt: its deltas
+/// apply to whatever rows enter the decoder, so the answer differs from the base's on the same rows, is the same
+/// alone and batched with the base, and neither the base nor another adapter adopts its cached K/V (or the reverse).
+pub fn adapters_serve_embedded_prompts_apart_from_the_base<D: PagedDecoder>(c: &Conformance<D>) {
+    let load = c.load_adapter.expect("an adapter loader");
+    let mut sched = Scheduler::new((c.make)(), 4);
+    let Some(width) = sched.decoder_mut().embed_width() else { return };
+    let adapter = load(sched.decoder_mut());
+    let other = load(sched.decoder_mut());
+    let vocab = sched.decoder_mut().vocab();
+    let len = c.prefix_prompt_tokens.max(24);
+    let prompt = tokens(vocab, 8, len);
+    let positions: Vec<u32> = (4..16u32).chain(len as u32 - 12..len as u32).collect();
+    let e = PromptEmbeds::new(width, positions.clone(), rows(width, positions.len(), 3)).expect("rows");
+    let hits = |sched: &Scheduler<D>| sched.prefix_stats().0;
+    let embedded = |sched: &mut Scheduler<D>, adapter: Option<AdapterId>| {
+        let id = sched.submit_embedded_for(request(prompt.clone(), 6), e.clone(), adapter, SampleParams::greedy(), 0);
+        complete_with_meta(sched, id)
+    };
+
+    let (base_out, base_meta) = embedded(&mut sched, None);
+    assert_eq!(base_meta.cached_tokens, 0, "the first request had nothing to adopt");
+    let before = hits(&sched);
+    let (adapter_out, adapter_meta) = embedded(&mut sched, Some(adapter));
+    assert_eq!(hits(&sched), before, "an adapter request adopted K/V the base computed from the same rows");
+    assert_eq!(adapter_meta.cached_tokens, 0, "an adapter request reported cached tokens the base filed");
+    assert_ne!(adapter_out, base_out, "the adapter did not change the answer on embedding rows (its deltas ignored?)");
+    embedded(&mut sched, Some(other));
+    assert_eq!(hits(&sched), before, "an adapter request adopted K/V another adapter computed");
+    if c.prefix_reuse {
+        let (again, meta) = embedded(&mut sched, Some(adapter));
+        assert_eq!(again, adapter_out, "an adapter's repeated embedded prompt changed its answer");
+        assert!(meta.cached_tokens > 0, "an adapter's repeated embedded prompt found none of its own cached K/V");
+    }
+    let (base_again, _) = embedded(&mut sched, None);
+    assert_eq!(base_again, base_out, "the base's answer changed after adapter requests ran");
+
+    // Batched with the base, each decodes as it does alone (the adapter's alone-answer is taken on this scheduler).
+    let mut batch = Scheduler::new((c.make)(), 4);
+    let a = load(batch.decoder_mut());
+    let solo = batch.submit_embedded_for(request(prompt.clone(), 6), e.clone(), Some(a), SampleParams::greedy(), 0);
+    let solo_out = complete(&mut batch, solo);
+    let ids = [None, Some(a)].map(|ad| batch.submit_embedded_for(request(prompt.clone(), 6), e.clone(), ad, SampleParams::greedy(), 0));
+    let done = batch.run();
+    assert_eq!(done[&ids[0]], base_out, "a base embedded request batched with an adapter's differs from alone");
+    assert_eq!(done[&ids[1]], solo_out, "an adapter's embedded request batched with the base differs from alone");
 }

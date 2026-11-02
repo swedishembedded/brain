@@ -1372,13 +1372,20 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// [`RejectReason::InvalidEmbeds`] and never queued. The rows travel with the
     /// request through chunked prefill and preemption by recompute.
     pub fn submit_embedded(&mut self, req: Request, embeds: PromptEmbeds, sample: SampleParams, seed: u64) -> u64 {
+        self.submit_embedded_for(req, embeds, None, sample, seed)
+    }
+
+    /// [`Self::submit_embedded`] for a request that may run under `adapter` ([`Self::submit_for_adapter`]): the
+    /// adapter's deltas apply to the decoder's linear layers whatever the input rows are, and the prompt's cached
+    /// K/V lives in the adapter's namespace, never the base's.
+    pub fn submit_embedded_for(&mut self, req: Request, embeds: PromptEmbeds, adapter: Option<AdapterId>, sample: SampleParams, seed: u64) -> u64 {
         if let Some(why) = embeds.refusal(req.prompt.len(), self.dec.embed_width()) {
             let id = self.next_id;
             self.next_id += 1;
             self.pending_rejects.push((id, RejectReason::InvalidEmbeds { why }));
             return id;
         }
-        self.enqueue_embedded(req, Some(std::sync::Arc::new(embeds)), None, sample, seed)
+        self.enqueue_embedded(req, Some(std::sync::Arc::new(embeds)), adapter, sample, seed)
     }
 
     fn enqueue_embedded(&mut self, req: Request, embeds: Option<std::sync::Arc<PromptEmbeds>>, adapter: Option<AdapterId>, sample: SampleParams, seed: u64) -> u64 {

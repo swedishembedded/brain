@@ -12,9 +12,10 @@
 
 use data::qwen_tokenizer::QwenBpe;
 use model::paged::{BlockAllocator, BlockTable};
-use model::serve::PagedDecoder;
+use model::serve::{AdapterAvailability, AdapterId, PagedDecoder, PrefillProgress, PromptEmbeds};
 
 pub const VOCAB: usize = 64;
+pub const EMBED_WIDTH: usize = 4;
 
 /// A decoder whose next token is the previous one plus one. Its prefix cache "holds" the first `cached` tokens of
 /// every prompt.
@@ -63,6 +64,17 @@ impl PagedDecoder for Toy {
         let mut l = vec![0.0; VOCAB];
         l[(hidden[0] as usize + 1) % VOCAB] = 1.0;
         l
+    }
+    /// Rows the toy accepts and ignores; with the adapter answer below, it lets a spec drive the admission of
+    /// adapter requests that carry rows without a model.
+    fn embed_width(&self) -> Option<usize> {
+        Some(EMBED_WIDTH)
+    }
+    fn prefill_chunk_embeds(&mut self, table: &mut BlockTable, prompt: &[u32], _embeds: &PromptEmbeds, _budget: usize) -> PrefillProgress {
+        PrefillProgress::Done(self.prefill(table, prompt))
+    }
+    fn adapter_availability(&mut self, _adapter: AdapterId) -> AdapterAvailability {
+        AdapterAvailability::Resident
     }
     fn forward_batched_greedy(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<u32> {
         for t in tables.iter_mut() {

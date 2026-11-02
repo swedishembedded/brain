@@ -254,8 +254,8 @@ struct Group<'a, D: PagedDecoder> {
     jobs: Vec<Job>,
     /// Indices of jobs still running in the scheduler.
     open: std::collections::HashSet<usize>,
-    /// Jobs whose request is still being built in the background, in arrival order.
-    encoding: Vec<(usize, Encoding)>,
+    /// Jobs whose request is still being built in the background, in arrival order, with the adapter each runs under.
+    encoding: Vec<(usize, Encoding, Option<model::serve::AdapterId>)>,
 }
 
 /// How [`run_open_scheduled`] ended.
@@ -301,13 +301,11 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
             }
         };
         // A request whose encoder runs in the background is queued behind it and admitted when its rows
-        // exist (an adapter never carries embedding rows, so the inline path serves those).
-        if adapter.is_none() {
-            if let Some(rx) = self.front.parse_in_background(inv) {
-                self.jobs.push(job);
-                self.encoding.push((bi, rx));
-                return (bi, None);
-            }
+        // exist, under its adapter if it has one.
+        if let Some(rx) = self.front.parse_in_background(inv) {
+            self.jobs.push(job);
+            self.encoding.push((bi, rx, adapter));
+            return (bi, None);
         }
         let parsed = self.front.parse_embedded(inv);
         self.submit(bi, job, adapter, parsed, progress)
@@ -333,14 +331,12 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
                 // `ignore_eos` generates to the token budget: the end-of-sequence ids are not stop tokens for this request.
                 let stop = if inv.get_bool("ignore_eos").unwrap_or(false) { Vec::new() } else { self.front.stop().to_vec() };
                 let request = Request { prompt: req.ids, max_new, stop };
-                let id = match (adapter, embeds) {
-                    (Some(adapter), None) => self.sched.submit_for_adapter(request, adapter, sample, seed),
-                    (None, None) => self.sched.submit_sampled(request, sample, seed),
-                    (None, Some(embeds)) => self.sched.submit_embedded(request, embeds, sample, seed),
-                    (Some(_), Some(_)) => {
-                        self.set_job(bi, job);
-                        return (bi, Some(Err(format!("{}: an adapter cannot serve a prompt with embedding rows", self.front.label()))));
-                    }
+                let id = match embeds {
+                    Some(embeds) => self.sched.submit_embedded_for(request, embeds, adapter, sample, seed),
+                    None => match adapter {
+                        Some(adapter) => self.sched.submit_for_adapter(request, adapter, sample, seed),
+                        None => self.sched.submit_sampled(request, sample, seed),
+                    },
                 };
                 progress(bi, Progress::step(0, max_new as u32, "generating"));
                 job.seq = Some(seq);
@@ -385,9 +381,9 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
                 i += 1;
                 continue;
             };
-            let (bi, _) = self.encoding.remove(i);
+            let (bi, _, adapter) = self.encoding.remove(i);
             let job = std::mem::replace(&mut self.jobs[bi], Job::placeholder());
-            if let (_, Some(result)) = self.submit(bi, job, None, parsed, progress) {
+            if let (_, Some(result)) = self.submit(bi, job, adapter, parsed, progress) {
                 done.push((bi, result));
             }
         }
