@@ -73,18 +73,20 @@ pub fn mrope_tables_scaled(
         assert_eq!(inv_freq.len(), half, "scaled inv_freq must have head_dim/2 entries");
     }
     let amap = axis_map(mrope_section, half);
+    // The frequencies depend on the channel alone: computed once, not once a row (a served prefill round builds this for
+    // thousands of rows on the host while the device waits).
+    let (inv_freq, attention_factor): (Vec<f32>, f32) = match scaling {
+        Some((table, af)) => (table.to_vec(), af),
+        None => ((0..half).map(|d| theta.powf(-2.0 * d as f32 / head_dim as f32)).collect(), 1.0),
+    };
     let seq = positions.len();
     let mut cos = vec![0f32; seq * half];
     let mut sin = vec![0f32; seq * half];
     for (t, p) in positions.iter().enumerate() {
         for d in 0..half {
-            let (inv_freq, attention_factor) = match scaling {
-                Some((table, af)) => (table[d], af),
-                None => (theta.powf(-2.0 * d as f32 / head_dim as f32), 1.0),
-            };
-            let angle = p[amap[d]] as f32 * inv_freq;
-            cos[t * half + d] = angle.cos() * attention_factor;
-            sin[t * half + d] = angle.sin() * attention_factor;
+            let (s, c) = (p[amap[d]] as f32 * inv_freq[d]).sin_cos();
+            cos[t * half + d] = c * attention_factor;
+            sin[t * half + d] = s * attention_factor;
         }
     }
     (cos, sin)
