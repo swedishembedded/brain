@@ -146,7 +146,7 @@ impl HfQuant {
     fn is_excluded(&self, module: &str) -> bool {
         self.excluded.iter().any(|pat| match pat.strip_suffix('*') {
             Some(head) => module.starts_with(head),
-            None => module == pat || module.ends_with(&format!(".{pat}")),
+            None => module.strip_suffix(pat.as_str()).is_some_and(|head| head.is_empty() || head.ends_with('.')),
         })
     }
 
