@@ -1242,6 +1242,31 @@ pub struct Act {
     e4m3: std::cell::RefCell<Option<(DeviceBuffer, DeviceBuffer)>>,
 }
 
+thread_local! {
+    static ROW_COUNT_INVARIANT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` with every int8-weight product dispatched from this thread on arithmetic that does not depend on how many
+/// rows the product has: the packed int8 activations, whose integer dot products are exact under any tiling, never the
+/// dequantize-in-register candidates that read bf16 rows (float accumulation, tuned per row count). A prefill uses
+/// it: a prompt that resumes from a cached prefix runs fewer rows than the cold prefill of the same prompt, and must
+/// produce its bits. Thread-scoped like `gpu_core::lane`, so a prefill on a background lane leaves the decode
+/// thread's choice alone.
+pub fn row_count_invariant<R>(f: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            ROW_COUNT_INVARIANT.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = Restore(ROW_COUNT_INVARIANT.with(|c| c.replace(true)));
+    f()
+}
+
+fn row_count_invariant_active() -> bool {
+    ROW_COUNT_INVARIANT.with(std::cell::Cell::get)
+}
+
 /// A model-facing façade over `backend_api::select`'s kernel selector,
 /// `model::int8`/`model::int4`'s quantizers, and `model::dispatch::I8Scratch`.
 /// See this module's doc comment.
@@ -1452,13 +1477,19 @@ impl Ops {
     /// registers and the activations are the bf16 rows of `act` (rounded once, shared by every product that reads
     /// them), so no activation quantisation is read at all. `false` leaves the packed int8 form to the caller.
     /// Only whole matrices of group-32 weights.
+    /// Whether the int8-weight linear of `params` (`[m, k/4, n]`) runs on a dequantize-in-register candidate that reads
+    /// bf16 rows: the tuned table names one, the CUDA provider runs, and no [`row_count_invariant`] scope is open.
+    fn int8_reads_bf16(&self, params: &[u32]) -> bool {
+        !row_count_invariant_active() && self.providers.runs("cuda") && self.gpu.int8_linear_bf16_input(params)
+    }
+
     fn dequant_forward(&self, s: &mut Vec<Step>, w: &Weight, act: &Act, y: &DeviceBuffer, yoff: u64) -> bool {
         let Weight::I8 { w: wb, s: sw, n, k } = w else { return false };
         let (m, n, k) = (act.m, *n, *k);
         let params = [m, k / 4, n];
         // The bf16 candidates are the CUDA provider's native tier: a registry without it (or with it disabled) stays on
         // the reference kernels.
-        if w.group() != 32 || !self.providers.runs("cuda") || !self.gpu.int8_linear_bf16_input(&params) {
+        if w.group() != 32 || !self.int8_reads_bf16(&params) {
             return false;
         }
         let mut prep = Vec::new();
@@ -1636,7 +1667,7 @@ impl Ops {
         // The packed form is made only where some linear of this width reads it: when this device's tuned table has
         // every int8 linear of these rows and this width on a candidate that reads bf16 rows, the two quantisation
         // dispatches (and the scratch) are skipped and a stray product that does need them makes them then.
-        let deferred = self.providers.runs("cuda") && self.gpu.int8_packed_unneeded(rows, k / 4);
+        let deferred = !row_count_invariant_active() && self.providers.runs("cuda") && self.gpu.int8_packed_unneeded(rows, k / 4);
         let quant = (!deferred).then(|| self.quantize_rows(s, x, xr0, rows, k));
         Act { x: x.clone(), xr0, m: rows, k, quant: std::cell::RefCell::new(quant), quant_deferred: deferred, xgs: Default::default(), bf16: Default::default(), e4m3: Default::default() }
     }
@@ -2540,7 +2571,7 @@ impl Ops {
                 return None;
             }
             // A member the tuned table puts on a dequantize-in-register candidate runs as its own product.
-            if matches!(w, Weight::I8 { .. }) && self.providers.runs("cuda") && self.gpu.int8_linear_bf16_input(&[m, k / 4, *n]) {
+            if matches!(w, Weight::I8 { .. }) && self.int8_reads_bf16(&[m, k / 4, *n]) {
                 return None;
             }
             params.push(*n);

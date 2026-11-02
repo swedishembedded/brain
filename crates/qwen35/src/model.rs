@@ -5909,6 +5909,12 @@ impl Qwen35 {
     /// input rows, the round's position tables), left for [`Self::advance_prefill_chunk`] to carry through the
     /// layers a few at a time. A short round that runs as decode steps is finished here.
     pub(crate) fn begin_prefill_chunk(&self, tokens: &[u32], pos_start: u32, caches: &DecodeCaches, input_override: Option<StageRows<'_>>) -> ChunkRound {
+    // A prefill's int8 products stay on row-count-invariant arithmetic: a prompt resumed from a cached prefix runs fewer
+    // rows than its cold prefill and must produce the same bits.
+        model::ops::row_count_invariant(|| self.begin_prefill_chunk_rows(tokens, pos_start, caches, input_override))
+    }
+
+    fn begin_prefill_chunk_rows(&self, tokens: &[u32], pos_start: u32, caches: &DecodeCaches, input_override: Option<StageRows<'_>>) -> ChunkRound {
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
@@ -6027,6 +6033,12 @@ impl Qwen35 {
     /// `caches` are the ones the round began with. The device time a call puts on the card is its layer count
     /// times a layer's cost, which a caller that also has latency-bound work to issue bounds with `budget`.
     pub(crate) fn advance_prefill_chunk(&self, round: &mut ChunkRound, caches: &DecodeCaches, budget: Option<usize>) -> Option<DeviceBuffer> {
+    // A prefill's int8 products stay on row-count-invariant arithmetic: a prompt resumed from a cached prefix runs fewer
+    // rows than its cold prefill and must produce the same bits.
+        model::ops::row_count_invariant(|| self.advance_prefill_chunk_rows(round, caches, budget))
+    }
+
+    fn advance_prefill_chunk_rows(&self, round: &mut ChunkRound, caches: &DecodeCaches, budget: Option<usize>) -> Option<DeviceBuffer> {
         let r = match round {
             ChunkRound::Exact(r) => return self.advance_exact_round(r, caches, budget),
             ChunkRound::Layers(r) => r,
@@ -6124,6 +6136,18 @@ impl Qwen35 {
     /// the sequence in `verify.slots[i]` (`decode`'s sequences are the rows, a sequence's slot repeated and its
     /// positions consecutive), their recurrent states snapshotted between rows for [`Self::commit_verify_stage`].
     pub(crate) fn run_mixed_stage(
+        &self,
+        decode: Option<(&[u32], &BatchDecodeCaches<'_>)>,
+        verify: Option<&verify::VerifyBatch<'_>>,
+        segs: &[PrefillSeg<'_>],
+        caches: &PooledCaches<'_>,
+        input_override: Option<StageRows<'_>>,
+    ) -> DeviceBuffer {
+        // Prompt rows: row-count-invariant int8 arithmetic, as in [`Self::begin_prefill_chunk`].
+        model::ops::row_count_invariant(|| self.run_mixed_stage_rows(decode, verify, segs, caches, input_override))
+    }
+
+    fn run_mixed_stage_rows(
         &self,
         decode: Option<(&[u32], &BatchDecodeCaches<'_>)>,
         verify: Option<&verify::VerifyBatch<'_>>,
