@@ -839,6 +839,11 @@ fn serves_nvfp4_gemv(p: &[u32]) -> bool {
     matches!(p, [m, k, count, ..] if (1..=8).contains(m) && *count >= 1 && *k >= 64 && k % 64 == 0)
 }
 
+/// [`serves_nvfp4_gemv`] for one activation row whose `k` floats fit the staged build's shared memory.
+fn serves_nvfp4_gemv_xs(p: &[u32]) -> bool {
+    serves_nvfp4_gemv(p) && p[0] == 1 && p[1] <= kernels_cuda::NVFP4_GEMV_XS_MAX_K
+}
+
 /// One block per 16 weight rows.
 fn qgemv_blocks(p: &[u32], _tile: (u32, u32)) -> u32 {
     p[2].div_ceil(QGEMV_COLS)
@@ -1569,6 +1574,17 @@ pub(crate) const ROWS: &[Row] = &[
         align_words: 1,
         input: Input::PACKED,
         launch: CudaLaunch::NONE,
+    },
+    Row {
+        slow: "matmul_nvfp4_gemv#MAXM=1",
+        target: Target::Named("matmul_nvfp4_gemv_m1_xs"),
+        bindings: QGEMV_BINDINGS,
+        serves: serves_nvfp4_gemv_xs,
+        blocks: qgemv_blocked_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 1,
+        input: Input::PACKED,
+        launch: CudaLaunch { dynamic_shared_bytes: kernels_cuda::NVFP4_GEMV_XS_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..CudaLaunch::NONE },
     },
     Row {
         slow: "matmul_nvfp4_gemv#MAXM=1",

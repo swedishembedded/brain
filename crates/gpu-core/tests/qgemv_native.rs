@@ -173,6 +173,8 @@ fn run_fp4(gpu: &Gpu, c: &Fp4Case, seed: u64) {
     let params = [m as u32, k as u32, count as u32, first as u32, xr0 as u32, global.to_bits(), 1, 0];
     let (native, reference) = (gpu.storage((m * count) as u64), gpu.storage((m * count) as u64));
     let (kind, expect) = match m {
+        // Rows short enough to stage in shared memory take the staged build; longer ones the one that reads them in place.
+        1 if k <= kernels_cuda::NVFP4_GEMV_XS_MAX_K as usize => (FP4_M1, "matmul_nvfp4_gemv_m1_xs"),
         1 => (FP4_M1, "matmul_nvfp4_gemv_m1"),
         2 => (FP4_M2, "matmul_nvfp4_gemv_m2"),
         3 | 4 => (FP4_M4, "matmul_nvfp4_gemv_m4"),
@@ -265,6 +267,10 @@ fn the_native_nvfp4_gemv_matches_the_oracle_at_every_row_count_and_window() {
         Fp4Case { m: 2, k: 5120, count: 3, first: 1 },
         Fp4Case { m: 1, k: 64, count: 1, first: 0 },
         Fp4Case { m: 3, k: 2048, count: 77, first: 2 },
+        // The staged one-row build at the down projection's width and at its limit, and the in-place build past it.
+        Fp4Case { m: 1, k: 17408, count: 37, first: 3 },
+        Fp4Case { m: 1, k: 18432, count: 16, first: 0 },
+        Fp4Case { m: 1, k: 18496, count: 19, first: 1 },
     ]
     .iter()
     .enumerate()
@@ -413,4 +419,38 @@ fn the_tensor_core_nvfp4_product_matches_the_oracle_of_the_bf16_activations() {
     assert!(!Fused::MatmulNvfp4Mma64.serves(&[65, 128, 64, 0, 0, 0, 0, 0]), "past 64 activation rows");
     assert!(!Fused::MatmulNvfp4Mma8.serves(&[9, 128, 64, 0, 0, 0, 0, 0]), "past the build's rows");
     assert!(!Fused::MatmulNvfp4Mma64.serves(&[8, 192, 64, 0, 0, 0, 0, 0]), "k not a whole number of 128-weight groups");
+}
+
+/// Device time of the one-row NVFP4 GEMV at the 27B's decode shapes (gate/up, down, lm_head), as bytes moved per second.
+/// The weights are streamed once a call, so the roof is the card's DRAM rate. Run with `--ignored --nocapture`; for ncu,
+/// filter `--kernel-name brain_matmul_nvfp4_gemv_m1`.
+#[test]
+#[ignore]
+fn nvfp4_gemv_m1_device_time_at_decode_shapes() {
+    let gpu = gpu_core::testgpu::dev(kernel_list());
+    if !is_cuda(&gpu) || !gpu.caps().workgroup_reductions {
+        return brain_testutil::skip_unavailable("the native stored-format GEMVs need a CUDA device");
+    }
+    for (what, k, count) in [("gate/up", 5120usize, 17408usize), ("down", 17408, 5120), ("lm_head", 5120, 248320)] {
+        let mut r = Lcg::new(7);
+        let codes: Vec<u32> = (0..count * k / 8).map(|_| r.next_u32()).collect();
+        let scales = scale_bytes(count * k / 16, 8);
+        let x = Lcg::new(9).vec_scaled(k, 1.0);
+        let (xb, wb, sb) = (gpu.storage_init("x", &x), upload_u32(&gpu, &codes), upload_u32(&gpu, &words_of(&scales)));
+        let params = [1u32, k as u32, count as u32, 0, 0, 0.007f32.to_bits(), 1, 0];
+        let kernel = gpu.native_kernel_for(FP4_M1, &params).expect("a native one-row NVFP4 GEMV serves the shape");
+        let y = gpu.storage(count as u64);
+        let blocks = count.div_ceil(16) as u32;
+        let step = || gpu.dispatch(FP4_M1, &[&xb, &wb, &sb, &y], &params, Dispatch::Workgroups(blocks));
+        gpu.submit(&[], &[step()]);
+        gpu.poll_wait();
+        let reps = 50;
+        let steps: Vec<_> = (0..reps).map(|_| step()).collect();
+        let t = std::time::Instant::now();
+        gpu.submit(&[], &steps);
+        gpu.poll_wait();
+        let us = t.elapsed().as_secs_f64() * 1e6 / reps as f64;
+        let bytes = (count * k / 2 + count * k / 16) as f64;
+        println!("{kernel} {what:8} k={k:6} n={count:6}: {us:8.1} us  {:5.2} TB/s", bytes / us / 1e6);
+    }
 }

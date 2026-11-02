@@ -572,6 +572,88 @@ __device__ __forceinline__ void brain_matmul_nvfp4_gemv_staged_rb(const unsigned
     }
 }
 
+// The longest reduction `brain_matmul_nvfp4_gemv_m1_xs` stages whole: its activation row is `k` floats of dynamic shared memory.
+#define BRAIN_FP4_XS_MAX_K 18432
+
+// `brain_matmul_nvfp4_gemv_rb_body<1>` with the activation row staged in shared memory once per block, transposed (float4 `t` of
+// chunk `j` at `t * chunks + j`). Read from global memory, lane `j` takes the 128 bytes of chunk `j`, so one warp-wide float4 load
+// touches 32 lines and the L1 was 84 % busy at 28 % of the DRAM rate (gate projection, k = 5120). From the staged row the 32 lanes
+// read 32 consecutive float4: free of bank conflicts, one wavefront per eight lanes. Same products and order as the global build.
+template <int RT, int UNROLL>
+__device__ __forceinline__ void brain_matmul_nvfp4_gemv_m1_xs_body(const unsigned int* params, const float* x, const unsigned int* w, const unsigned int* s, float* y) {
+    extern __shared__ float4 brain_fp4_xs[];
+    const unsigned int k = params[1], count = params[2], first = params[3], xr0 = params[4];
+    const float global = __uint_as_float(params[5]);
+    const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
+    const unsigned int col0 = blk * ((BRAIN_QG_THREADS / BRAIN_FP4_LANES) * RT) + (threadIdx.x / BRAIN_FP4_LANES) * RT;
+    const unsigned int lane = threadIdx.x % BRAIN_FP4_LANES;
+    const unsigned int chunks = k >> 5;
+    const float4* x4 = reinterpret_cast<const float4*>(x) + static_cast<unsigned long long>(xr0) * (k >> 2);
+    for (unsigned int c = threadIdx.x; c < (k >> 2); c += BRAIN_QG_THREADS) { brain_fp4_xs[(c & 7u) * chunks + (c >> 3)] = __ldg(x4 + c); }
+    const uint4* wrow[RT];
+    const unsigned int* srow[RT];
+    bool live[RT];
+#pragma unroll
+    for (int r = 0; r < RT; ++r) {
+        live[r] = col0 + r < count;
+        const unsigned long long row = first + (live[r] ? col0 + r : 0u);
+        wrow[r] = reinterpret_cast<const uint4*>(w) + row * chunks;
+        srow[r] = s + row * (k >> 6);
+    }
+    float acc[RT];
+#pragma unroll
+    for (int r = 0; r < RT; ++r) { acc[r] = 0.0f; }
+    __syncthreads();
+    for (unsigned int j0 = lane; j0 < chunks; j0 += UNROLL * BRAIN_FP4_LANES) {
+        uint4 wv[UNROLL][RT];
+        unsigned int sw[UNROLL][RT];
+#pragma unroll
+        for (int u = 0; u < UNROLL; ++u) {
+            const unsigned int j = j0 + u * BRAIN_FP4_LANES;
+#pragma unroll
+            for (int r = 0; r < RT; ++r) {
+                if (live[r] && j < chunks) {
+                    wv[u][r] = brain_qg_ld_stream(wrow[r] + j);
+                    sw[u][r] = __ldg(srow[r] + (j >> 1)) >> ((j & 1u) * 16u);
+                } else {
+                    wv[u][r] = make_uint4(0u, 0u, 0u, 0u);
+                    sw[u][r] = 0u;
+                }
+            }
+        }
+#pragma unroll
+        for (int u = 0; u < UNROLL; ++u) {
+            const unsigned int j = j0 + u * BRAIN_FP4_LANES;
+            if (j < chunks) {
+                float4 xv[8];
+#pragma unroll
+                for (int t = 0; t < 8; ++t) { xv[t] = brain_fp4_xs[t * chunks + j]; }
+#pragma unroll
+                for (int r = 0; r < RT; ++r) {
+                    float wf[32];
+                    brain_fp4_decode32(wv[u][r], wf);
+                    acc[r] += brain_fp4_dot32_reg(wf, sw[u][r], xv);
+                }
+            }
+        }
+    }
+    const float scale = 4194304.0f * global;
+#pragma unroll
+    for (int r = 0; r < RT; ++r) {
+        const float total = brain_fp4_warp_sum(acc[r]) * scale;
+        if (lane == 0u && live[r]) { y[col0 + r] = total; }
+    }
+}
+
+// The staged one-row build at two rows a warp and two chunks of each in flight a lane, three blocks a multiprocessor (79
+// registers). Against four rows a warp at two blocks (128 registers) it keeps half again as many warps resident, which is what
+// the latency-bound loop needs: gate/up 33.5 -> 29.7 us, down 42.8 -> 32.9 us, lm_head 358 -> 340 us on a GH200. One row a
+// warp doubles the shared-memory reads a weight and lost (lm_head 474 us).
+extern "C" __global__ void __launch_bounds__(BRAIN_QG_THREADS, 3)
+brain_matmul_nvfp4_gemv_m1_xs(const unsigned int* params, const float* x, const unsigned int* w, const unsigned int* s, float* y) {
+    brain_matmul_nvfp4_gemv_m1_xs_body<2, 2>(params, x, w, s, y);
+}
+
 extern "C" __global__ void __launch_bounds__(BRAIN_QG_THREADS, 2)
 brain_matmul_nvfp4_gemv_m1(const unsigned int* params, const float* x, const unsigned int* w, const unsigned int* s, float* y) {
     brain_matmul_nvfp4_gemv_rb_body<1>(params, x, w, s, y);

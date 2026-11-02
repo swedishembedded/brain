@@ -132,6 +132,11 @@ pub const FP8_WGMMA_DYNAMIC_SHARED_BYTES: u32 = 4 * (2 * 128 * 128 + 1024) + 102
 /// a 128-row raw int8 weight tile of 64-byte rows and 256 f32 scales: 25600 bytes each), three 128 x 128-byte dequantised weight
 /// tiles and 1 KiB to align the ring to the 128-byte swizzle pattern. A test holds it to the source.
 pub const I8_DQ_WGMMA_DYNAMIC_SHARED_BYTES: u32 = 5 * (128 * 128 + 128 * 64 + 128 * 2 * 4) + 3 * 128 * 128 + 1024;
+/// The longest reduction `matmul_nvfp4_gemv_m1_xs` stages (the source's `BRAIN_FP4_XS_MAX_K`), and its dynamic shared memory per
+/// block: the activation row as f32.
+/// Three blocks of it fit a multiprocessor.
+pub const NVFP4_GEMV_XS_MAX_K: u32 = 18432;
+pub const NVFP4_GEMV_XS_DYNAMIC_SHARED_BYTES: u32 = NVFP4_GEMV_XS_MAX_K * 4;
 /// Dynamic shared memory per block of `matmul_i8_wgstream_*` for `xn` rows of x (the source's
 /// `BRAIN_WGS_STAGES` x `BRAIN_WGS_STAGE_BYTES` + `BRAIN_WGS_XP_BYTES` + 1 KiB to align the ring to the 128-byte swizzle
 /// pattern): per stage a 128-row weight tile and the x tile at 128 bytes of K a row, and their raw group scales.
@@ -3035,6 +3040,24 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/fp8_nvfp4_gemv.cu"),
     },
     CudaKernel {
+        name: "matmul_nvfp4_gemv_m1_xs",
+        // `matmul_nvfp4_gemv_m1` with the activation row staged in shared memory once per block and transposed, so the 32
+        // lanes of a warp read consecutive float4 instead of 32 lines a load; two weight rows a warp, three blocks a multiprocessor.
+        op: Op::MatMul,
+        weight: Dtype::F4E2M1,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_matmul_nvfp4_gemv_m1_xs",
+        what: "the one-activation-row NVFP4 GEMV with its activation row staged in shared memory, transposed for conflict-free lane reads; the same products and order as matmul_nvfp4_gemv_m1",
+        reported: "native:matmul_nvfp4_gemv_m1_xs",
+        block_dim: 256,
+        tile: (1, 16),
+        shared_bytes: 0,
+        programmatic: false,
+        src: include_str!("../cu/fp8_nvfp4_gemv.cu"),
+    },
+    CudaKernel {
         name: "matmul_nvfp4_gemv_m2",
         // The two-activation-row build: the same register blocking, both rows' activations loaded once per chunk.
         op: Op::MatMul,
@@ -4911,6 +4934,16 @@ pub fn check_table(table: &[CudaKernel]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_staged_nvfp4_gemv_source_and_the_rust_constant_agree_on_the_row_it_stages() {
+        let k = get("matmul_nvfp4_gemv_m1_xs").expect("registered");
+        let max_k: u32 = k.src.lines().find_map(|l| l.strip_prefix("#define BRAIN_FP4_XS_MAX_K ")).and_then(|v| v.trim().parse().ok()).expect("the source defines BRAIN_FP4_XS_MAX_K");
+        assert_eq!(max_k, NVFP4_GEMV_XS_MAX_K);
+        assert_eq!(NVFP4_GEMV_XS_DYNAMIC_SHARED_BYTES, max_k * 4, "the row is staged as f32");
+        assert!(3 * NVFP4_GEMV_XS_DYNAMIC_SHARED_BYTES <= 227 * 1024, "three blocks fit a multiprocessor's shared memory");
+        assert_eq!(k.tile, (1, 16), "two rows a warp, eight warps a block");
+    }
+
     #[test]
     fn the_wgmma_source_and_the_rust_constant_agree_on_the_ring() {
         let k = get("matmul_i8_wgmma").expect("registered");
