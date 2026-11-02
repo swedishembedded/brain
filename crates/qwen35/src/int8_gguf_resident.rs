@@ -2955,6 +2955,23 @@ impl Qwen35GgufInstance {
     /// ([`Self::head_logits_rows`]), and `adapter_slot` is the bank slot every
     /// row of the prefill runs under ([`LORA_SLOT_NONE`] for the base).
     pub fn teacher_forced_scores(&self, tokens: &[u32], adapter_slot: u32) -> Result<Vec<crate::score::TokenScore>, String> {
+        let mut out = Vec::with_capacity(tokens.len().saturating_sub(1));
+        self.teacher_forced_rows(tokens, adapter_slot, |position, row| out.push(crate::score::readout(position, row, tokens[position as usize])))?;
+        Ok(out)
+    }
+
+    /// The `k` most likely next tokens and their log-probabilities at positions `1..tokens.len()` of one teacher-forced
+    /// scoring prefill ([`Self::teacher_forced_scores`]'s pass), most likely first: what an OpenAI-style `prompt_logprobs`
+    /// request reports, and what two engines' numerics are compared by along the same token stream.
+    pub fn teacher_forced_top(&self, tokens: &[u32], k: usize, adapter_slot: u32) -> Result<Vec<Vec<(u32, f32)>>, String> {
+        let mut out = Vec::with_capacity(tokens.len().saturating_sub(1));
+        self.teacher_forced_rows(tokens, adapter_slot, |_, row| out.push(model::logprobs::row_top_logprobs(row, k)))?;
+        Ok(out)
+    }
+
+    /// One scoring prefill of `tokens` and the head's `[vocab]` logits row predicting each position `1..tokens.len()`,
+    /// handed to `each` in order with that position.
+    fn teacher_forced_rows(&self, tokens: &[u32], adapter_slot: u32, mut each: impl FnMut(u32, &[f32])) -> Result<(), String> {
         if tokens.len() < 2 {
             return Err(format!("{MODEL}: a scored record needs at least two tokens, got {}", tokens.len()));
         }
@@ -2969,15 +2986,13 @@ impl Qwen35GgufInstance {
         self.prefill_adapter_slot.set(LORA_SLOT_NONE);
         prefilled?;
         assert_eq!(hidden.len(), tokens.len() * d, "{MODEL}: the prefill collected {} hidden values for {} rows", hidden.len() / d, tokens.len());
-        let mut out = Vec::with_capacity(tokens.len() - 1);
         for (first, rows) in (0..tokens.len() - 1).step_by(SCORE_HEAD_ROWS).map(|r| (r, SCORE_HEAD_ROWS.min(tokens.len() - 1 - r))) {
             let logits = self.head_logits_rows(&hidden[first * d..(first + rows) * d], rows as u32);
             for (i, row) in logits.chunks(self.cfg.vocab as usize).enumerate() {
-                let position = (first + i + 1) as u32;
-                out.push(crate::score::readout(position, row, tokens[position as usize]));
+                each((first + i + 1) as u32, row);
             }
         }
-        Ok(out)
+        Ok(())
     }
 
     /// [`Self::teacher_forced_logits`] for several sequences decoded TOGETHER: sequence `i` is prefilled into slot

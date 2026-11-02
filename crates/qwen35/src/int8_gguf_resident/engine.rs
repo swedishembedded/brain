@@ -537,6 +537,14 @@ impl Qwen35GgufEngine {
         Ok(scored?.into_iter().filter(|s| mask[s.position as usize]).collect())
     }
 
+    /// The `k` most likely next tokens and their log-probabilities at every position `1..ids.len()` of one record under the
+    /// base, from the same scoring prefill [`Self::score_supervised`] runs (row `p - 1` predicts `ids[p]`).
+    pub fn score_top(&mut self, ids: &[u32], k: usize) -> Result<Vec<Vec<(u32, f32)>>, String> {
+        // The scoring prefill resets the instance's KV rows and recurrent state, as in `score_supervised`.
+        self.clear_prefix_cache();
+        self.inst.teacher_forced_top(ids, k, LORA_SLOT_NONE)
+    }
+
     /// Drop every cached prompt and give its retained block back to the allocator.
     fn clear_prefix_cache(&mut self) {
         while let Some(table) = self.cache.evict_lru() {

@@ -19,7 +19,11 @@
 //!
 //! Usage: `qwen35_gguf_score <Q8_0.gguf|hf-dir> <records.jsonl> [--adapter FILE]
 //!        [--adapter-slots N] [--adapter-rank-cap N] [--cap N] [--kv int8|bf16|f32] [--tier stored|bf16]
-//!        [--device D] [--backend B] [--limit N] [--out FILE]`
+//!        [--gdn-state f32|bf16] [--top K] [--device D] [--backend B] [--limit N] [--out FILE]`
+//!
+//! `--top K` adds `"top"`: for every position `1..tokens` (all of them, not only the supervised ones), the K most likely
+//! next tokens as `[id, logprob]` pairs, most likely first - an engine's numerics compared with another's along the same
+//! token stream, as OpenAI-style `prompt_logprobs` report them.
 //!
 //! The records are the form [`qwen35::score`] documents: one JSONL object per
 //! line, either `{"ids": [...], "mask": [...]}` or a chat record (encoded with
@@ -59,7 +63,8 @@ fn main() {
     let (Some(gguf), Some(records_path)) = (args.get(1), args.get(2)) else {
         eprintln!(
             "usage: qwen35_gguf_score <Q8_0.gguf> <records.jsonl> [--adapter FILE] [--adapter-slots N] \
-             [--adapter-rank-cap N] [--cap N] [--kv int8|bf16|f32] [--device D] [--backend B] [--limit N] [--out FILE]"
+             [--adapter-rank-cap N] [--cap N] [--kv int8|bf16|f32] [--tier stored|bf16] [--gdn-state f32|bf16] [--top K] \
+             [--device D] [--backend B] [--limit N] [--out FILE]"
         );
         std::process::exit(2);
     };
@@ -94,7 +99,9 @@ fn main() {
         Some("bf16") => model::ops::TierPolicy::uniform(gpu_core::select::Dtype::BF16),
         Some(other) => panic!("--tier is stored or bf16, not {other:?}"),
     };
-    let resident = Qwen35GgufResident::new(gguf.clone(), devices, cap, tier).with_kv_tier(kv);
+    let gdn = flag(&args, "--gdn-state").map_or(model::policy::GdnState::default(), |v| model::policy::GdnState::parse(v).unwrap_or_else(|| panic!("--gdn-state is f32 or bf16, not {v:?}")));
+    let top_k: Option<usize> = flag(&args, "--top").map(|v| v.parse().expect("--top is a number"));
+    let resident = Qwen35GgufResident::new(gguf.clone(), devices, cap, tier).with_kv_tier(kv).with_gdn_state(gdn);
     let key = resident.instance_key("generate", &capability::Invocation::new());
     let placed: Vec<Device> = resident.estimate_multi(&key).devices().collect();
     let (mut engine, ..) = resident.activate_engine(&placed).expect("activate the checkpoint");
@@ -129,8 +136,16 @@ fn main() {
         // between two sides must not be limited by this file's formatting.
         let logprob: Vec<String> = scores.iter().map(|s| format!("{}", s.logprob)).collect();
         let argmax: Vec<String> = scores.iter().map(|s| s.argmax.to_string()).collect();
+        let top = match top_k {
+            None => String::new(),
+            Some(k) => {
+                let rows = engine.score_top(&record.ids, k).unwrap_or_else(|e| panic!("record {}: {e}", at + 1));
+                let rows: Vec<String> = rows.iter().map(|row| format!("[{}]", row.iter().map(|(id, lp)| format!("[{id},{lp}]")).collect::<Vec<_>>().join(","))).collect();
+                format!(",\"top\":[{}]", rows.join(","))
+            }
+        };
         out.push_str(&format!(
-            "{{\"record\":{at},\"tokens\":{},\"positions\":[{}],\"logprob\":[{}],\"argmax\":[{}]}}\n",
+            "{{\"record\":{at},\"tokens\":{},\"positions\":[{}],\"logprob\":[{}],\"argmax\":[{}]{top}}}\n",
             record.ids.len(),
             ids.join(","),
             logprob.join(","),

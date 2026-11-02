@@ -23,6 +23,43 @@ pub fn row_logprob(row: &[f32], idx: usize) -> f32 {
     row[idx] - max - sum_exp.ln()
 }
 
+/// The `k` largest entries of `row`'s log-softmax as `(index, logprob)`, most likely first (ties toward the lower
+/// index). O(vocab) for the normaliser plus O(vocab log k) for the selection.
+pub fn row_top_logprobs(row: &[f32], k: usize) -> Vec<(u32, f32)> {
+    let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let lse = max + row.iter().map(|&v| (v - max).exp()).sum::<f32>().ln();
+    let k = k.min(row.len());
+    if k == 0 {
+        return Vec::new();
+    }
+    // A min-heap of the k best seen so far: (value, Reverse(index)) orders equal values toward the lower index.
+    let mut heap: std::collections::BinaryHeap<std::cmp::Reverse<(OrdF32, std::cmp::Reverse<u32>)>> = std::collections::BinaryHeap::with_capacity(k + 1);
+    for (i, &v) in row.iter().enumerate() {
+        heap.push(std::cmp::Reverse((OrdF32(v), std::cmp::Reverse(i as u32))));
+        if heap.len() > k {
+            heap.pop();
+        }
+    }
+    let mut top: Vec<(u32, f32)> = heap.into_iter().map(|std::cmp::Reverse((OrdF32(v), std::cmp::Reverse(i)))| (i, v - lse)).collect();
+    top.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    top
+}
+
+/// An `f32` ordered by [`f32::total_cmp`], for heaps.
+#[derive(Clone, Copy, PartialEq)]
+struct OrdF32(f32);
+impl Eq for OrdF32 {}
+impl PartialOrd for OrdF32 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for OrdF32 {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.total_cmp(&other.0)
+    }
+}
+
 /// Per-position `log p(targets[i])` for one sequence, computed via
 /// [`Model::logits_all`] plus a host log-softmax. Correct for any
 /// token-classification model, at the cost of a full `[len * vocab]`
@@ -72,7 +109,19 @@ pub fn token_logprobs_scaled<M: Model>(m: &M, tokens: &[u32], targets: &[u32], l
 
 #[cfg(test)]
 mod tests {
-    use super::row_logprob;
+    use super::{row_logprob, row_top_logprobs};
+
+    #[test]
+    fn row_top_logprobs_are_the_k_largest_log_softmax_entries_most_likely_first() {
+        let row = [1.0f32, 3.0, 2.0, 3.0, -1.0];
+        let top = row_top_logprobs(&row, 3);
+        assert_eq!(top.iter().map(|t| t.0).collect::<Vec<_>>(), vec![1, 3, 2], "ties go to the lower index");
+        for &(i, lp) in &top {
+            assert!((lp - row_logprob(&row, i as usize)).abs() < 1e-6);
+        }
+        assert_eq!(row_top_logprobs(&row, 9).len(), 5, "k is capped at the row");
+        assert!(row_top_logprobs(&row, 0).is_empty());
+    }
 
     #[test]
     fn row_logprob_matches_definition() {
