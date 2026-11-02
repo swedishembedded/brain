@@ -37,6 +37,8 @@
 use crate::camera::Pose;
 use crate::linalg::{add, cholesky_solve, cross, exp_so3, inv3_spd, mm, mv, norm, normalize, scale, sub, M3, V3};
 use ::camera::Intrinsics;
+use backend_cpu::par;
+use std::sync::Mutex;
 
 /// One image measurement of one point.
 #[derive(Clone, Copy, Debug)]
@@ -221,6 +223,105 @@ enum Slot {
     Scale(usize),
 }
 
+/// Most columns one observation can touch: six pose columns and the
+/// calibration parameters of its sensor.
+const MAX_OBS_COLS: usize = 24;
+/// Observations per task of the calibration rows' partial sums.
+const OBS_CHUNK: usize = 8192;
+/// Points per task of the calibration rows' Schur partial sums.
+const POINT_CHUNK: usize = 2048;
+
+/// What one observation contributes to the normal equations, apart from its
+/// per-column Jacobians: the columns it touches (camera pose columns first,
+/// then its sensor's calibration), its weight and residual, and the Jacobian
+/// of the residual in the point.
+#[derive(Clone, Copy)]
+struct ObsHead {
+    n: usize,
+    w: f64,
+    r: [f64; 2],
+    jp: [[f64; 3]; 2],
+    cols: [u32; MAX_OBS_COLS],
+}
+
+/// One column of one observation: the residual's Jacobian `j` in it and
+/// `wm = w Jcᵀ Jp`, its coupling to the point.
+#[derive(Clone, Copy, Default)]
+struct ColLin {
+    j: [f64; 2],
+    wm: [f64; 3],
+}
+
+/// Every observation's [`ObsHead`] and [`ColLin`]s, linearized in parallel
+/// into storage that lives across a bundle adjustment's iterations.
+struct Linearized {
+    max_cols: usize,
+    heads: Vec<ObsHead>,
+    cols: Vec<ColLin>,
+}
+
+impl Linearized {
+    fn new(observations: usize, max_cols: usize) -> Linearized {
+        assert!(max_cols <= MAX_OBS_COLS, "an observation touches {max_cols} columns, at most {MAX_OBS_COLS} are supported");
+        let none = ObsHead { n: 0, w: 0.0, r: [0.0; 2], jp: [[0.0; 3]; 2], cols: [0; MAX_OBS_COLS] };
+        Linearized { max_cols, heads: vec![none; observations], cols: vec![ColLin::default(); observations * max_cols] }
+    }
+
+    /// Linearize every observation with `f`, which fills the columns it
+    /// touches and returns the head, or `None` for an observation the lens
+    /// cannot image (it contributes nothing).
+    fn fill(&mut self, obs: &[Observation], f: impl Fn(&Observation, &mut [u32], &mut [ColLin]) -> Option<ObsHead> + Sync) {
+        let max = self.max_cols;
+        par::chunks2_mut(&mut self.heads, 1, &mut self.cols, max, |i, head, cl| {
+            let mut cols = [0u32; MAX_OBS_COLS];
+            head[0] = match f(&obs[i], &mut cols[..max], cl) {
+                Some(mut h) => {
+                    h.cols[..h.n].copy_from_slice(&cols[..h.n]);
+                    h
+                }
+                None => ObsHead { n: 0, w: 0.0, r: [0.0; 2], jp: [[0.0; 3]; 2], cols: [0; MAX_OBS_COLS] },
+            };
+        });
+    }
+
+    fn head(&self, i: usize) -> &ObsHead {
+        &self.heads[i]
+    }
+
+    fn obs(&self, i: usize) -> (&ObsHead, &[u32], &[ColLin]) {
+        let h = &self.heads[i];
+        (h, &h.cols[..h.n], &self.cols[i * self.max_cols..i * self.max_cols + h.n])
+    }
+}
+
+/// Where a camera's columns start.
+fn nslot_start(s: &Slot) -> usize {
+    match *s {
+        Slot::Held => 0,
+        Slot::Free(at) | Slot::Scale(at) => at,
+    }
+}
+
+/// A camera's rows of the system matrix and of the right-hand side.
+type RowBlock<'a> = Mutex<(&'a mut [f64], &'a mut [f64])>;
+
+/// The system's camera rows cut into one block per camera that has any (in
+/// camera order, which is column order), each behind its own lock so a task
+/// per camera can write its rows without touching anyone else's. `matrix` is
+/// the `sum(nslot) x c` camera rows, `vector` the matching right-hand side.
+fn camera_rows<'a>(nslot: &[usize], c: usize, matrix: &'a mut [f64], vector: &'a mut [f64]) -> Vec<(usize, RowBlock<'a>)> {
+    let (mut m, mut v) = (matrix, vector);
+    let mut out = Vec::new();
+    for (cam, &rows) in nslot.iter().enumerate().filter(|(_, &r)| r > 0) {
+        let (mh, mt) = std::mem::take(&mut m).split_at_mut(rows * c);
+        let (vh, vt) = std::mem::take(&mut v).split_at_mut(rows);
+        out.push((cam, Mutex::new((mh, vh))));
+        m = mt;
+        v = vt;
+    }
+    out
+}
+
 /// Refine the calibrations `ks` (one per sensor; `sensor[c]` is camera
 /// `c`'s), `poses` and `points` in place against `obs`.
 pub fn bundle_adjust(ks: &mut [Intrinsics], sensor: &[usize], poses: &mut [Pose], points: &mut [V3], obs: &[Observation], cfg: &BaCfg) -> BaReport {
@@ -270,9 +371,17 @@ pub fn bundle_adjust(ks: &mut [Intrinsics], sensor: &[usize], poses: &mut [Pose]
         _ => None,
     };
     let mut by_point: Vec<Vec<usize>> = vec![Vec::new(); points.len()];
+    let mut by_cam: Vec<Vec<usize>> = vec![Vec::new(); nc];
     for (i, o) in obs.iter().enumerate() {
         by_point[o.point].push(i);
+        by_cam[o.cam].push(i);
     }
+    // The camera columns come first, in camera order; the calibration columns
+    // after them. `kbase` is where the calibration block starts.
+    let kbase = kofs.first().copied().unwrap_or(c);
+    let nslot: Vec<usize> = slot.iter().map(|s| match s { Slot::Held => 0, Slot::Free(_) => 6, Slot::Scale(_) => 5 }).collect();
+    let max_cols = 6 + free.iter().map(|f| f.len()).max().unwrap_or(0);
+    let mut lin = Linearized::new(obs.len(), max_cols);
     let rms_before = rms(ks, sensor, poses, points, obs);
     let mut lambda = 1e-3;
     let total = |ks: &[Intrinsics], poses: &[Pose], points: &[V3]| huber_cost(ks, sensor, poses, points, obs, cfg.huber) + prior_cost(&priors, ks);
@@ -288,25 +397,20 @@ pub fn bundle_adjust(ks: &mut [Intrinsics], sensor: &[usize], poses: &mut [Pose]
             }
             _ => None,
         };
-        // ---- normal equations ----
-        let mut u = vec![0.0f64; c * c];
-        let mut gc = vec![0.0f64; c];
-        let mut vblocks = vec![[0.0f64; 9]; points.len()];
-        let mut gp = vec![[0.0f64; 3]; points.len()];
-        // per observation: local camera-side columns and W = Jcᵀ Jp (cols x 3)
-        let mut local: Vec<(Vec<usize>, Vec<[f64; 3]>)> = Vec::with_capacity(obs.len());
-        for o in obs {
+        // ---- linearization: every observation's residual, weight and Jacobian columns ----
+        lin.fill(obs, |o, cols, cl| {
             let s = sensor[o.cam];
             let pose = &poses[o.cam];
-            let Some(l) = linearize(&ks[s], pose, points[o.point], o.px, !free[s].is_empty()) else {
-                local.push((Vec::new(), Vec::new()));
-                continue;
-            };
+            let l = linearize(&ks[s], pose, points[o.point], o.px, !free[s].is_empty())?;
             let w = huber_weight(&l.r, cfg.huber);
             let jd = l.jd;
             let chain = |d: V3| -> [f64; 2] { [jd[0][0] * d[0] + jd[0][1] * d[1] + jd[0][2] * d[2], jd[1][0] * d[0] + jd[1][1] * d[1] + jd[1][2] * d[2]] };
-            let mut cols = Vec::with_capacity(6 + free[s].len());
-            let mut jrows: Vec<[f64; 2]> = Vec::with_capacity(6 + free[s].len());
+            let mut n = 0;
+            let mut push = |col: usize, row: [f64; 2]| {
+                cols[n] = col as u32;
+                cl[n].j = row;
+                n += 1;
+            };
             // left rotation increment ω: the camera point turns about the
             // camera centre, d c / d ω = −[c − t]ₓ with t held, −[c]ₓ with the
             // centre held
@@ -315,50 +419,99 @@ pub fn bundle_adjust(ks: &mut [Intrinsics], sensor: &[usize], poses: &mut [Pose]
                 Slot::Held => {}
                 Slot::Free(at) => {
                     let q = about(false);
-                    for (j, e) in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]].into_iter().enumerate() {
-                        cols.push(at + j);
-                        jrows.push(chain(cross(e, q)));
+                    for (k, e) in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]].into_iter().enumerate() {
+                        push(at + k, chain(cross(e, q)));
                     }
-                    for (j, e) in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]].into_iter().enumerate() {
-                        cols.push(at + 3 + j);
-                        jrows.push(chain(e));
+                    for (k, e) in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]].into_iter().enumerate() {
+                        push(at + 3 + k, chain(e));
                     }
                 }
                 Slot::Scale(at) => {
                     let q = about(true);
-                    for (j, e) in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]].into_iter().enumerate() {
-                        cols.push(at + j);
-                        jrows.push(chain(cross(e, q)));
+                    for (k, e) in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]].into_iter().enumerate() {
+                        push(at + k, chain(cross(e, q)));
                     }
                     // c = R (X − C): d c / d C = −R
                     let (b1, b2) = across.unwrap();
-                    for (j, b) in [b1, b2].into_iter().enumerate() {
-                        cols.push(at + 3 + j);
-                        jrows.push(chain(scale(mv(&pose.r, b), -1.0)));
+                    for (k, b) in [b1, b2].into_iter().enumerate() {
+                        push(at + 3 + k, chain(scale(mv(&pose.r, b), -1.0)));
                     }
                 }
             }
-            for (j, p) in free[s].iter().enumerate() {
-                cols.push(kofs[s] + j);
-                jrows.push(p.column(&l.jk));
+            for (k, p) in free[s].iter().enumerate() {
+                push(kofs[s] + k, p.column(&l.jk));
             }
             // d c / d X = R
             let jp: [[f64; 3]; 2] = std::array::from_fn(|r| std::array::from_fn(|k| (0..3).map(|m| jd[r][m] * pose.r[m * 3 + k]).sum()));
-            for (a, ja) in cols.iter().zip(&jrows) {
-                gc[*a] += w * (ja[0] * l.r[0] + ja[1] * l.r[1]);
-                for (b, jb) in cols.iter().zip(&jrows) {
-                    u[a * c + b] += w * (ja[0] * jb[0] + ja[1] * jb[1]);
+            for k in 0..n {
+                cl[k].wm = std::array::from_fn(|b| w * (cl[k].j[0] * jp[0][b] + cl[k].j[1] * jp[1][b]));
+            }
+            Some(ObsHead { n, w, r: l.r, jp, cols: [0; MAX_OBS_COLS] })
+        });
+
+        // ---- normal equations ----
+        let (vblocks, gp): (Vec<[f64; 9]>, Vec<[f64; 3]>) = par::map(points.len(), |p| {
+            let (mut v, mut g) = ([0.0f64; 9], [0.0f64; 3]);
+            for &oi in &by_point[p] {
+                let h = lin.head(oi);
+                for a in 0..3 {
+                    g[a] += h.w * (h.jp[0][a] * h.r[0] + h.jp[1][a] * h.r[1]);
+                    for b in 0..3 {
+                        v[a * 3 + b] += h.w * (h.jp[0][a] * h.jp[0][b] + h.jp[1][a] * h.jp[1][b]);
+                    }
                 }
             }
-            let vb = &mut vblocks[o.point];
-            for a in 0..3 {
-                gp[o.point][a] += w * (jp[0][a] * l.r[0] + jp[1][a] * l.r[1]);
-                for b in 0..3 {
-                    vb[a * 3 + b] += w * (jp[0][a] * jp[0][b] + jp[1][a] * jp[1][b]);
+            (v, g)
+        })
+        .into_iter()
+        .unzip();
+        let mut u = vec![0.0f64; c * c];
+        let mut gc = vec![0.0f64; c];
+        {
+            let (u_cams, u_calib) = u.split_at_mut(kbase * c);
+            let (gc_cams, gc_calib) = gc.split_at_mut(kbase);
+            // each camera owns its rows of the matrix
+            let rows = camera_rows(&nslot, c, u_cams, gc_cams);
+            par::map(rows.len(), |ri| {
+                let (cam, block) = &rows[ri];
+                let mut block = block.lock().unwrap();
+                let (urows, grow) = &mut *block;
+                let at = nslot_start(&slot[*cam]);
+                for &oi in &by_cam[*cam] {
+                    let (h, cols, cl) = lin.obs(oi);
+                    for ka in 0..nslot[*cam].min(h.n) {
+                        let ia = cols[ka] as usize - at;
+                        grow[ia] += h.w * (cl[ka].j[0] * h.r[0] + cl[ka].j[1] * h.r[1]);
+                        for kb in 0..h.n {
+                            urows[ia * c + cols[kb] as usize] += h.w * (cl[ka].j[0] * cl[kb].j[0] + cl[ka].j[1] * cl[kb].j[1]);
+                        }
+                    }
+                }
+            });
+            // the calibration rows see every observation: partial sums per
+            // chunk of observations, added in chunk order
+            if c > kbase {
+                let kt = c - kbase;
+                let parts = par::map(obs.len().div_ceil(OBS_CHUNK), |ci| {
+                    let (mut up, mut gp_) = (vec![0.0f64; kt * c], vec![0.0f64; kt]);
+                    for oi in ci * OBS_CHUNK..((ci + 1) * OBS_CHUNK).min(obs.len()) {
+                        let (h, cols, cl) = lin.obs(oi);
+                        let first = nslot[obs[oi].cam];
+                        for ka in first.min(h.n)..h.n {
+                            let ia = cols[ka] as usize - kbase;
+                            gp_[ia] += h.w * (cl[ka].j[0] * h.r[0] + cl[ka].j[1] * h.r[1]);
+                            for kb in 0..h.n {
+                                up[ia * c + cols[kb] as usize] += h.w * (cl[ka].j[0] * cl[kb].j[0] + cl[ka].j[1] * cl[kb].j[1]);
+                            }
+                        }
+                    }
+                    (up, gp_)
+                });
+                for (up, gp_) in &parts {
+                    u_calib.iter_mut().zip(up).for_each(|(x, y)| *x += y);
+                    gc_calib.iter_mut().zip(gp_).for_each(|(x, y)| *x += y);
                 }
             }
-            let wm: Vec<[f64; 3]> = jrows.iter().map(|ja| std::array::from_fn(|b| w * (ja[0] * jp[0][b] + ja[1] * jp[1][b]))).collect();
-            local.push((cols, wm));
         }
         for p in &priors {
             let r = p.residual(ks);
@@ -373,29 +526,67 @@ pub fn bundle_adjust(ks: &mut [Intrinsics], sensor: &[usize], poses: &mut [Pose]
                 s[a * c + a] += lambda * u[a * c + a].max(1e-9);
             }
             let mut rhs: Vec<f64> = gc.iter().map(|v| -v).collect();
-            let mut vinv = vec![[0.0f64; 9]; points.len()];
-            for (p, list) in by_point.iter().enumerate() {
+            // each point's damped 3x3 block inverted, and what it does to
+            // the point's own gradient
+            let inv: Vec<Option<(M3, V3)>> = par::map(points.len(), |p| {
                 let mut v = vblocks[p];
                 for a in 0..3 {
                     v[a * 3 + a] += lambda * v[a * 3 + a].max(1e-9);
                 }
-                let Some(vi) = inv3_spd(&v) else { continue };
-                vinv[p] = vi;
-                let bp = [-gp[p][0], -gp[p][1], -gp[p][2]];
-                let vbp = mv(&vi, bp);
-                for &oa in list {
-                    let (ca, wa) = &local[oa];
-                    for (ia, wr) in ca.iter().zip(wa) {
-                        rhs[*ia] -= wr[0] * vbp[0] + wr[1] * vbp[1] + wr[2] * vbp[2];
-                    }
-                    for &ob in list {
-                        let (cb, wb) = &local[ob];
-                        for (ia, wra) in ca.iter().zip(wa) {
-                            let t = mv(&vi, *wra);
-                            for (ib, wrb) in cb.iter().zip(wb) {
-                                s[ia * c + ib] -= t[0] * wrb[0] + t[1] * wrb[1] + t[2] * wrb[2];
+                let vi = inv3_spd(&v)?;
+                Some((vi, mv(&vi, [-gp[p][0], -gp[p][1], -gp[p][2]])))
+            });
+            {
+                let (s_cams, s_calib) = s.split_at_mut(kbase * c);
+                let (rhs_cams, rhs_calib) = rhs.split_at_mut(kbase);
+                let rows = camera_rows(&nslot, c, s_cams, rhs_cams);
+                par::map(rows.len(), |ri| {
+                    let (cam, block) = &rows[ri];
+                    let mut block = block.lock().unwrap();
+                    let (srows, rrow) = &mut *block;
+                    let at = nslot_start(&slot[*cam]);
+                    for &oa in &by_cam[*cam] {
+                        let Some((vi, vbp)) = &inv[obs[oa].point] else { continue };
+                        let (ha, cols_a, cl_a) = lin.obs(oa);
+                        for ka in 0..nslot[*cam].min(ha.n) {
+                            let ia = cols_a[ka] as usize - at;
+                            rrow[ia] -= cl_a[ka].wm[0] * vbp[0] + cl_a[ka].wm[1] * vbp[1] + cl_a[ka].wm[2] * vbp[2];
+                            let t = mv(vi, cl_a[ka].wm);
+                            for &ob in &by_point[obs[oa].point] {
+                                let (hb, cols_b, cl_b) = lin.obs(ob);
+                                for kb in 0..hb.n {
+                                    srows[ia * c + cols_b[kb] as usize] -= t[0] * cl_b[kb].wm[0] + t[1] * cl_b[kb].wm[1] + t[2] * cl_b[kb].wm[2];
+                                }
                             }
                         }
+                    }
+                });
+                if c > kbase {
+                    let kt = c - kbase;
+                    let parts = par::map(points.len().div_ceil(POINT_CHUNK), |ci| {
+                        let (mut sp, mut rp) = (vec![0.0f64; kt * c], vec![0.0f64; kt]);
+                        for p in ci * POINT_CHUNK..((ci + 1) * POINT_CHUNK).min(points.len()) {
+                            let Some((vi, vbp)) = &inv[p] else { continue };
+                            for &oa in &by_point[p] {
+                                let (ha, cols_a, cl_a) = lin.obs(oa);
+                                for ka in nslot[obs[oa].cam].min(ha.n)..ha.n {
+                                    let ia = cols_a[ka] as usize - kbase;
+                                    rp[ia] -= cl_a[ka].wm[0] * vbp[0] + cl_a[ka].wm[1] * vbp[1] + cl_a[ka].wm[2] * vbp[2];
+                                    let t = mv(vi, cl_a[ka].wm);
+                                    for &ob in &by_point[p] {
+                                        let (hb, cols_b, cl_b) = lin.obs(ob);
+                                        for kb in 0..hb.n {
+                                            sp[ia * c + cols_b[kb] as usize] -= t[0] * cl_b[kb].wm[0] + t[1] * cl_b[kb].wm[1] + t[2] * cl_b[kb].wm[2];
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        (sp, rp)
+                    });
+                    for (sp, rp) in &parts {
+                        s_calib.iter_mut().zip(sp).for_each(|(x, y)| *x += y);
+                        rhs_calib.iter_mut().zip(rp).for_each(|(x, y)| *x += y);
                     }
                 }
             }
@@ -405,19 +596,19 @@ pub fn bundle_adjust(ks: &mut [Intrinsics], sensor: &[usize], poses: &mut [Pose]
                 continue;
             };
             // back-substitute the points
-            let mut np = points.to_vec();
-            for (p, list) in by_point.iter().enumerate() {
+            let np: Vec<V3> = par::map(points.len(), |p| {
+                let Some((vi, _)) = &inv[p] else { return points[p] };
                 let mut b = [-gp[p][0], -gp[p][1], -gp[p][2]];
-                for &oa in list {
-                    let (ca, wa) = &local[oa];
-                    for (ia, wr) in ca.iter().zip(wa) {
+                for &oa in &by_point[p] {
+                    let (h, cols, cl) = lin.obs(oa);
+                    for (k, wr) in cl[..h.n].iter().map(|c| c.wm).enumerate() {
                         for q in 0..3 {
-                            b[q] -= wr[q] * dc[*ia];
+                            b[q] -= wr[q] * dc[cols[k] as usize];
                         }
                     }
                 }
-                np[p] = add(points[p], mv(&vinv[p], b));
-            }
+                add(points[p], mv(vi, b))
+            });
             let mut npose = poses.to_vec();
             for (i, sl) in slot.iter().enumerate() {
                 match *sl {
@@ -434,6 +625,7 @@ pub fn bundle_adjust(ks: &mut [Intrinsics], sensor: &[usize], poses: &mut [Pose]
                     }
                 }
             }
+            let mut np = np;
             let mut nk = ks.to_vec();
             for s in 0..ks.len() {
                 if free[s].is_empty() {

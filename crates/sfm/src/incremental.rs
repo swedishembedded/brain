@@ -403,22 +403,35 @@ pub fn reconstruct_with(photos: &[Photo], cfg: &SfmCfg, nn: &dyn NearestNeighbou
     let descs: Vec<&[f32]> = feats.iter().map(|f| f.1.as_slice()).collect();
     let candidates = select_pairs(&descs, &cfg.pairs, cfg.seed ^ PAIR_SALT);
     log(format!("{} of {} pairs selected for matching", candidates.len(), n * (n - 1) / 2));
-    let mut pairs: Vec<Pair> = Vec::new();
-    for &(a, b) in &candidates {
-        let m = match_with(nn, &feats[a].1, &feats[b].1, cfg.ratio);
-        let m: Vec<(usize, usize)> = m.into_iter().filter(|&(i, j)| rays[a][i].is_some() && rays[b][j].is_some()).collect();
+    // The descriptor search goes through `nn` one pair at a time (a device
+    // owns one queue); the geometric verification of each pair is
+    // independent and runs on the pool.
+    let putative: Vec<Vec<(usize, usize)>> = candidates
+        .iter()
+        .map(|&(a, b)| {
+            let m = match_with(nn, &feats[a].1, &feats[b].1, cfg.ratio);
+            m.into_iter().filter(|&(i, j)| rays[a][i].is_some() && rays[b][j].is_some()).collect()
+        })
+        .collect();
+    let verified: Vec<Option<Vec<(usize, usize)>>> = backend_cpu::par::map(candidates.len(), |ci| {
+        let (a, b) = candidates[ci];
+        let m = &putative[ci];
         if m.len() < cfg.min_inliers {
-            continue;
+            return None;
         }
         let xa: Vec<V3> = m.iter().map(|&(i, _)| rays[a][i].unwrap()).collect();
         let xb: Vec<V3> = m.iter().map(|&(_, j)| rays[b][j].unwrap()).collect();
         let seed = verification_seed(cfg.seed, a, b, n);
         let thresh = pair_threshold(cfg.thresh_px, &guess[sensor[a]], &guess[sensor[b]]);
-        let Some((_, mask)) = ransac_essential(&xa, &xb, thresh, cfg.ransac_iters, seed) else { continue };
-        let inl: Vec<(usize, usize)> = m.iter().zip(&mask).filter(|(_, &ok)| ok).map(|(p, _)| *p).collect();
-        let verified = inl.len() >= cfg.min_inliers;
-        log(format!("pair {a}-{b}: {} matches, {} inliers ({:.0}%){}", m.len(), inl.len(), 100.0 * inl.len() as f64 / m.len() as f64, if verified { "" } else { ", rejected" }));
-        if verified {
+        let (_, mask) = ransac_essential(&xa, &xb, thresh, cfg.ransac_iters, seed)?;
+        Some(m.iter().zip(&mask).filter(|(_, &ok)| ok).map(|(p, _)| *p).collect())
+    });
+    let mut pairs: Vec<Pair> = Vec::new();
+    for ((&(a, b), m), inl) in candidates.iter().zip(&putative).zip(verified) {
+        let Some(inl) = inl else { continue };
+        let ok = inl.len() >= cfg.min_inliers;
+        log(format!("pair {a}-{b}: {} matches, {} inliers ({:.0}%){}", m.len(), inl.len(), 100.0 * inl.len() as f64 / m.len() as f64, if ok { "" } else { ", rejected" }));
+        if ok {
             pairs.push((a, b, inl));
         }
     }
@@ -521,6 +534,7 @@ pub fn reconstruct_with(photos: &[Photo], cfg: &SfmCfg, nn: &dyn NearestNeighbou
     }
 
     let focal_s = clock.elapsed().as_secs_f64();
+    log(format!("focal length search in {focal_s:.1} s"));
 
     // ---- 5. the reconstruction, calibration free ----
     let clock = Instant::now();
@@ -556,7 +570,7 @@ pub fn reconstruct_with(photos: &[Photo], cfg: &SfmCfg, nn: &dyn NearestNeighbou
             }
         },
     };
-    log(format!("initializer: {initializer:?}, {} registered, rms {:.3} px", sv.registered(), sv.rms));
+    log(format!("initializer: {initializer:?}, {} registered, rms {:.3} px, {:.1} s", sv.registered(), sv.rms, clock.elapsed().as_secs_f64()));
     sv.retriangulate(cfg.retriangulate, &log);
 
     // ---- 6. the lens model ----
@@ -571,7 +585,9 @@ pub fn reconstruct_with(photos: &[Photo], cfg: &SfmCfg, nn: &dyn NearestNeighbou
         full_model_views: cfg.full_model_views,
         ba: BaCfg { iters: 100, anchor, scale, ..bcfg.clone() },
     };
+    let lens_clock = Instant::now();
     let fits = fit_lenses(&sv.ks, &cam_sensor, &cam_poses, &xs, &obs, &lcfg);
+    log(format!("lens models fitted in {:.1} s", lens_clock.elapsed().as_secs_f64()));
     let best = fits.iter().enumerate().min_by(|a, b| a.1.fit.bic.total_cmp(&b.1.fit.bic)).map(|(i, _)| i).unwrap();
     for (i, c) in fits.iter().enumerate() {
         let f = &c.fit;
@@ -648,6 +664,7 @@ pub fn reconstruct_with(photos: &[Photo], cfg: &SfmCfg, nn: &dyn NearestNeighbou
         }
     }
     let solve_s = clock.elapsed().as_secs_f64();
+    log(format!("solve (initializer, lens, world) in {solve_s:.1} s"));
     let report = SfmReport { pairs_matched: candidates.len(), pairs_verified: prep.pairs.len(), initializer, features_s, matching_s, focal_s, solve_s, georef_refused, positioning_seed: cfg.positioning.seed, georef_seed: cfg.georef.seed, seed: cfg.seed };
     Ok(Reconstruction {
         intrinsics: ks,

@@ -12,6 +12,8 @@
 //! against unit rotations - so the cost of double precision is nothing and
 //! the conditioning it buys is real.
 
+use backend_cpu::par;
+
 pub type V3 = [f64; 3];
 /// Row-major 3x3.
 pub type M3 = [f64; 9];
@@ -235,9 +237,29 @@ pub fn log_so3(r: &M3) -> V3 {
     scale(w, th / (2.0 * th.sin()))
 }
 
-/// Solve `A x = b` for symmetric positive definite `A` (`n x n`, row-major).
-/// `None` if `A` is not numerically positive definite.
+/// Smallest system the blocked parallel factorization is used for: below
+/// it the pool's fork and join cost more than the arithmetic they share out.
+const PARALLEL_CHOLESKY_MIN: usize = 192;
+/// Columns per panel of the blocked factorization: wide enough that the
+/// trailing update is a dot product long enough to vectorize, narrow enough
+/// that the serial diagonal factor stays a small share of the work.
+const CHOLESKY_PANEL: usize = 64;
+
+/// Solve `A x = b` for symmetric positive definite `A` (`n x n`, row-major;
+/// only the lower triangle is read). `None` if `A` is not numerically
+/// positive definite.
+///
+/// A system of [`PARALLEL_CHOLESKY_MIN`] unknowns or more is factored by
+/// panels on the CPU pool: the reduced camera system of a bundle adjustment
+/// is dense and a thousand unknowns wide, and its factor was the one serial
+/// cubic step in each iteration.
 pub fn cholesky_solve(a: &[f64], b: &[f64], n: usize) -> Option<Vec<f64>> {
+    let l = if n >= PARALLEL_CHOLESKY_MIN { cholesky_factor_blocked(a, n)? } else { cholesky_factor(a, n)? };
+    Some(cholesky_substitute(&l, b, n))
+}
+
+/// The lower factor `L` of `A = L Lᵀ`, one row at a time.
+fn cholesky_factor(a: &[f64], n: usize) -> Option<Vec<f64>> {
     let mut l = vec![0.0f64; n * n];
     for i in 0..n {
         for j in 0..=i {
@@ -255,6 +277,73 @@ pub fn cholesky_solve(a: &[f64], b: &[f64], n: usize) -> Option<Vec<f64>> {
             }
         }
     }
+    Some(l)
+}
+
+/// [`cholesky_factor`] by panels of [`CHOLESKY_PANEL`] columns: factor the
+/// diagonal block, solve the rows below it against that block, then subtract
+/// the panel's outer product from every row of the trailing matrix. The last
+/// two steps are independent per row, so they run on the pool.
+fn cholesky_factor_blocked(a: &[f64], n: usize) -> Option<Vec<f64>> {
+    let nb = CHOLESKY_PANEL;
+    // the lower triangle of A, updated in place into L
+    let mut l = vec![0.0f64; n * n];
+    for i in 0..n {
+        l[i * n..i * n + i + 1].copy_from_slice(&a[i * n..i * n + i + 1]);
+    }
+    let mut k0 = 0;
+    while k0 < n {
+        let k1 = (k0 + nb).min(n);
+        let w = k1 - k0;
+        // the diagonal block, which every earlier panel has already updated
+        for i in k0..k1 {
+            for j in k0..=i {
+                let mut s = l[i * n + j];
+                for k in k0..j {
+                    s -= l[i * n + k] * l[j * n + k];
+                }
+                if i == j {
+                    if s <= 0.0 || !s.is_finite() {
+                        return None;
+                    }
+                    l[i * n + i] = s.sqrt();
+                } else {
+                    l[i * n + j] = s / l[j * n + j];
+                }
+            }
+        }
+        if k1 == n {
+            break;
+        }
+        let (head, tail) = l.split_at_mut(k1 * n);
+        let diag: &[f64] = &head[k0 * n..];
+        // the rows below solved against the diagonal block
+        par::chunks_mut(tail, n, |_, row| {
+            for j in 0..w {
+                let mut s = row[k0 + j];
+                for k in 0..j {
+                    s -= row[k0 + k] * diag[j * n + k0 + k];
+                }
+                row[k0 + j] = s / diag[j * n + k0 + j];
+            }
+        });
+        // the panel, copied out so the trailing rows can be written while
+        // every other row's panel is read
+        let panel: Vec<f64> = tail.chunks(n).flat_map(|row| row[k0..k1].iter().copied()).collect();
+        par::chunks_mut(tail, n, |r, row| {
+            let mine = &panel[r * w..(r + 1) * w];
+            for (j, x) in row[k1..k1 + r + 1].iter_mut().enumerate() {
+                let theirs = &panel[j * w..(j + 1) * w];
+                *x -= mine.iter().zip(theirs).map(|(p, q)| p * q).sum::<f64>();
+            }
+        });
+        k0 = k1;
+    }
+    Some(l)
+}
+
+/// Solve `L Lᵀ x = b`.
+fn cholesky_substitute(l: &[f64], b: &[f64], n: usize) -> Vec<f64> {
     let mut y = vec![0.0f64; n];
     for i in 0..n {
         let mut s = b[i];
@@ -271,7 +360,7 @@ pub fn cholesky_solve(a: &[f64], b: &[f64], n: usize) -> Option<Vec<f64>> {
         }
         x[i] = s / l[i * n + i];
     }
-    Some(x)
+    x
 }
 
 /// Inverse of a symmetric positive definite 3x3, `None` if singular.
@@ -326,5 +415,37 @@ mod tests {
             let r: f64 = (0..3).map(|j| a[i * 3 + j] * x[j]).sum();
             assert!((r - b[i]).abs() < 1e-12);
         }
+    }
+
+    /// The panelled parallel factorization solves what the row-at-a-time one
+    /// does, for a size that is not a multiple of the panel, and refuses a
+    /// matrix that is not positive definite.
+    #[test]
+    fn the_blocked_cholesky_solves_like_the_unblocked_one() {
+        let n = PARALLEL_CHOLESKY_MIN + CHOLESKY_PANEL + 7;
+        let mut state = 12345u64;
+        let mut rnd = move || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((state >> 33) as f64 / (1u64 << 31) as f64) - 0.5
+        };
+        let m: Vec<f64> = (0..n * n).map(|_| rnd()).collect();
+        // A = M Mᵀ + n I is symmetric positive definite
+        let mut a = vec![0.0; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                a[i * n + j] = (0..n).map(|k| m[i * n + k] * m[j * n + k]).sum::<f64>() + if i == j { n as f64 } else { 0.0 };
+            }
+        }
+        let b: Vec<f64> = (0..n).map(|_| rnd()).collect();
+        let blocked = cholesky_solve(&a, &b, n).expect("positive definite");
+        let reference = cholesky_substitute(&cholesky_factor(&a, n).unwrap(), &b, n);
+        let worst = blocked.iter().zip(&reference).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max);
+        assert!(worst < 1e-9, "blocked and unblocked solutions differ by {worst}");
+        for i in 0..n {
+            let r: f64 = (0..n).map(|j| a[i * n + j] * blocked[j]).sum::<f64>() - b[i];
+            assert!(r.abs() < 1e-8, "row {i} residual {r}");
+        }
+        a[(n - 1) * n + n - 1] = -1.0;
+        assert!(cholesky_solve(&a, &b, n).is_none(), "an indefinite matrix has no factor");
     }
 }
