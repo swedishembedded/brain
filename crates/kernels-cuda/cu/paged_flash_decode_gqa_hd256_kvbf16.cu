@@ -38,8 +38,8 @@
 //
 // THE PIPELINE. A chunk's keys (8 KiB) and its values (8 KiB) are two units; a warp's ring holds BRAIN_DECODE_STAGES
 // of them, and the units after the one being computed are in flight by `cp.async` (the keys of chunk i + 1 while the
-// values of chunk i are consumed). A lane reads back only what it copied, so the only synchronisation is the warp's
-// wait on its copies and a `__syncwarp`. Past the live keys a copy of size 0 zero-fills, so dead keys and values are
+// values of chunk i are consumed). A lane reads back the keys it copied itself and the values of its warp (the lanes copy for each other, see the value
+// fetch), so the only synchronisation is the warp's wait on its copies and a `__syncwarp`. Past the live keys a copy of size 0 zero-fills, so dead keys and values are
 // zero. The same bytes hold the merge of the four warps after the loop.
 //
 // NUMERICS. A bf16 key or value is an exact bf16 operand; there is nothing to round. The f32 query and the f32
