@@ -115,6 +115,11 @@ __device__ __forceinline__ void brain_copy16(unsigned int dst, const void* src, 
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(dst), "l"(src), "r"(n) : "memory");
 }
 
+// The 16-byte slot, in a value unit's 512-byte row of slots, that lane (gid, tig) reads its piece from: the pieces of channel
+// groups gid = 2 m and 2 m + 1 of one key pair are neighbours, so the two halves of a 32-byte sector of a value row sit side by
+// side in shared memory.
+__device__ __forceinline__ unsigned int brain_value_slot(unsigned int gid, unsigned int tig) { return ((gid >> 1) * 4u + tig) * 2u + (gid & 1u); }
+
 // The pool row (slot * n_kv + kv head) of key `j` of the sequence whose block table is `bt`.
 __device__ __forceinline__ unsigned int brain_row(const unsigned int* bt, unsigned int j, unsigned int block_size, unsigned int n_kv, unsigned int kvh) {
     return (bt[j / block_size] * block_size + (j % block_size)) * n_kv + kvh;
@@ -149,6 +154,7 @@ extern "C" __global__ void __launch_bounds__(THREADS, BRAIN_BLOCKS_PER_SM) brain
 
     const unsigned int tid = threadIdx.x, lane = tid & 31u, warp = tid >> 5;
     const unsigned int gid = lane >> 2, tig = lane & 3u;
+    const unsigned int vslot = brain_value_slot(gid, tig);
 
     // The query as the first product's B fragments: [k-step][part][lane] -> (b0, b1), the bf16 pairs of head gid at
     // channels 32 (st / 2) + 8 tig + 4 (st mod 2) + 0 .. 1 and + 2 .. 3. Heads past the group are zero and never stored.
@@ -217,13 +223,22 @@ extern "C" __global__ void __launch_bounds__(THREADS, BRAIN_BLOCKS_PER_SM) brain
                     for (int w = 0; w < 8; ++w) { brain_copy16(at + (r * 8 + w) * 512u + lane * 16u, src + w * 64, ok); }
                 }
             } else {
+                // The values are fetched as the keys are: eight rows an instruction, a row's 64 contiguous bytes read by four
+                // adjacent lanes (piece P = 4 w + b of the row's 32 pieces of 16 bytes). Eight lanes of one row reading 128 bytes
+                // made the memory system return every sector twice (ncu: L2 to L1 bytes 2.15 GB for 1.08 GB of values), and so did
+                // a layout that put the two halves of a sector in distant slots; here the two halves of a 32-byte sector (b = 0, 1
+                // and 2, 3) land in ADJACENT slots (`brain_value_slot`), and the lanes read their pieces back from there after the
+                // warp's wait and `__syncwarp`. The piece goes to the slot of its consumer: gid_v = P mod 8 (a channel group),
+                // tig_v = a / 2 (the key pair), p = P / 8, r = 2 h + a mod 2.
+                const unsigned int a = lane >> 2, b = lane & 3u;
+                const unsigned int lane_slot = (a & 1u) * 2048u + (((b >> 1) * 4u + (a >> 1)) * 2u + (b & 1u)) * 16u;
 #pragma unroll
-                for (int r = 0; r < 4; ++r) {
-                    const unsigned int j = c0 + 2u * tig + (r & 1) + 8u * (r >> 1);
+                for (int h = 0; h < 2; ++h) {
+                    const unsigned int j = c0 + 8u * h + a;
                     const bool ok = j < k_end;
-                    const unsigned char* src = ok ? pool_v + static_cast<unsigned long long>(row_of(j - c0)) * ROW_BYTES + gid * 16u : pool_v;
+                    const unsigned char* src = ok ? pool_v + static_cast<unsigned long long>(row_of(j - c0)) * ROW_BYTES + b * 16u : pool_v;
 #pragma unroll
-                    for (int p = 0; p < 4; ++p) { brain_copy16(at + (r * 4 + p) * 512u + lane * 16u, src + p * 128, ok); }
+                    for (int w = 0; w < 8; ++w) { brain_copy16(at + h * 4096u + (w >> 1) * 512u + (w & 1) * 256u + lane_slot, src + w * 64, ok); }
                 }
             }
         }
@@ -328,7 +343,7 @@ extern "C" __global__ void __launch_bounds__(THREADS, BRAIN_BLOCKS_PER_SM) brain
         for (int p = 0; p < 4; ++p) {
             uint4 x[4];
 #pragma unroll
-            for (int r = 0; r < 4; ++r) { x[r] = *reinterpret_cast<const uint4*>(vbuf + (r * 4 + p) * 512u + lane * 16u); }
+            for (int r = 0; r < 4; ++r) { x[r] = *reinterpret_cast<const uint4*>(vbuf + (r * 4 + p) * 512u + vslot * 16u); }
 #pragma unroll
             for (int jj = 0; jj < 4; ++jj) {
                 const unsigned int w0 = jj == 0 ? x[0].x : jj == 1 ? x[0].y : jj == 2 ? x[0].z : x[0].w;

@@ -832,6 +832,33 @@ fn time_decode_parts(g: &Gpu, tier: KvTier, batch: u32, len: u32) -> (f64, Vec<(
     best
 }
 
+/// One served-shape cell, 64 sequences of 8K keys over the bf16 pool, for `ncu -k regex:kvbf16 --launch-skip 2 -c 1` on this binary
+/// (`--ignored decode_attention_profile_cell`).
+#[test]
+#[ignore = "a profiling target for kernel work, not a spec"]
+fn decode_attention_profile_cell() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(g) = cuda_gpu("decode profile: no CUDA device") else { return };
+    let _ = time_decode_parts(&g, KvTier::BF16, 64, 8192);
+}
+
+/// The rate of the bf16 decode attention at the lengths just past a split boundary: a served 8K run decodes at 7.9K to
+/// 8.4K keys, where the cut changes from two splits of 32 tiles to three of 22.
+#[test]
+#[ignore = "a timing report for kernel work, not a spec"]
+fn decode_attention_split_boundary_report() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(g) = cuda_gpu("decode timing: no CUDA device") else { return };
+    for batch in [16u32, 64] {
+        for len in [7936u32, 8192, 8193, 8320, 8448, 8704, 9216, 12_288] {
+            let bytes = 2.0 * batch as f64 * len as f64 * 4.0 * 512.0;
+            let (t, parts) = time_decode_parts(&g, KvTier::BF16, batch, len);
+            let parts: Vec<String> = parts.iter().map(|(name, ms)| format!("{name} {:.1}", ms * 1e3)).collect();
+            eprintln!("bf16 decode attention batch {batch:2} x {len:6} keys: {:8.1} us, {:6.0} GB/s; us per kernel: {}", t * 1e3, bytes / (t * 1e-3) / 1e9, parts.join(", "));
+        }
+    }
+}
+
 #[test]
 #[ignore = "a timing report for kernel work, not a spec"]
 fn decode_attention_timing_report() {
