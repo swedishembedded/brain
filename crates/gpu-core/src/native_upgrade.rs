@@ -646,6 +646,19 @@ fn kv_append_i8_blocks(p: &[u32], tile: (u32, u32)) -> u32 {
     (p[0] * (p[1] / p[3])).div_ceil(tile.0)
 }
 
+/// `paged_kv_append_batched_word.wgsl`'s bindings: params, `src`, `blocks`, `offsets`, `pool`.
+const KV_APPEND_BF16_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
+
+/// `Params { batch, kv_stride, block_size }`: rows of whole four-value quads, so every thread's 8-byte store is aligned.
+fn serves_kv_append_bf16(p: &[u32]) -> bool {
+    matches!(p, [batch, kv_stride, block_size] if *batch >= 1 && *block_size >= 1 && *kv_stride >= 4 && kv_stride % 4 == 0)
+}
+
+/// One thread per quad of a row; `tile.0` quads a block.
+fn kv_append_bf16_blocks(p: &[u32], tile: (u32, u32)) -> u32 {
+    (p[0] * (p[1] / 4)).div_ceil(tile.0)
+}
+
 /// `paged_flash_decode_gqa_hd256.wgsl`'s bindings for a scaled 8-bit tier (int8, FP8): params, `q`, the two pools,
 /// `block_tables`, `seq_lens`, the written partial records, then the key and value row scales.
 const FLASH_DECODE_KV8_BINDINGS: &[BindKind] = &[
@@ -1642,6 +1655,18 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: kv_append_i8_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
+        input: Input::PACKED,
+        launch: CudaLaunch::NONE,
+    },
+    Row {
+        slow: "paged_kv_append_batched_word#pool=bf16",
+        target: Target::Named("kv_append_bf16"),
+        bindings: KV_APPEND_BF16_BINDINGS,
+        serves: serves_kv_append_bf16,
+        blocks: kv_append_bf16_blocks,
+        requires_wgsl_upgrade: false,
+        // 16-byte loads of the source rows and 8-byte stores into the pool.
+        align_words: 4,
         input: Input::PACKED,
         launch: CudaLaunch::NONE,
     },

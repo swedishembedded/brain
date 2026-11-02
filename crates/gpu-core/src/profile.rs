@@ -1065,6 +1065,7 @@ mod arithmetic_tests {
             ("native:paged_flash_decode_gqa_hd256_kv8", Phase::Attention),
             ("native:paged_flash_decode_gqa_combine", Phase::Attention),
             ("native:kv_append_i8_clipped", Phase::Attention),
+            ("native:kv_append_bf16", Phase::Attention),
             ("paged_kv_append_i8_clipped_batched", Phase::Attention),
             ("native:gqa_decode_prep", Phase::Attention),
             ("rope2d_partial", Phase::Attention),

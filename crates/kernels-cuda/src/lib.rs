@@ -1125,6 +1125,24 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/kv_append_i8.cu"),
     },
     CudaKernel {
+        name: "kv_append_bf16",
+        // Redirected to by name from the generated `paged_kv_append_batched_word#pool=bf16` (`gpu_core::native_upgrade`).
+        op: Op::Elementwise,
+        weight: Dtype::BF16,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_kv_append_bf16",
+        what: "bf16 paged-KV append, four values a thread through one 16-byte load and one 8-byte store instead of a read-modify-write of a pool word per value; bit-identical to paged_kv_append_batched_word#pool=bf16",
+        reported: "native:kv_append_bf16",
+        block_dim: 256,
+        // Four values (one thread) per row quad: 256 quads a block.
+        tile: (256, 1),
+        shared_bytes: 0,
+        programmatic: true,
+        src: include_str!("../cu/kv_append_bf16.cu"),
+    },
+    CudaKernel {
         name: "gdn_chunk_loop_f32",
         op: Op::GatedDeltaChunkLoop,
         weight: Dtype::F32,
