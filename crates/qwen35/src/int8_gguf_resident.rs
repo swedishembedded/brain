@@ -152,7 +152,7 @@ pub use engine::{checkpoint_len, PrefillPolicy, Qwen35GgufEngine, SpecTimes};
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use capability::{ActionSpec, BlobSpec, Invocation, Manifest, Media, ParamSpec, ParamType};
 use checkpoint::gguf::MmapGguf;
@@ -1531,7 +1531,7 @@ pub struct Qwen35GgufInstance {
     shards: Vec<DeviceShard>,
     /// Kept open for the instance's lifetime so embedding rows can be read on
     /// demand. This is the header + mapping handle, not data.
-    ckpt: ResidentCheckpoint,
+    ckpt: Arc<ResidentCheckpoint>,
     embed: EmbedTable,
     /// Whether the first stage holds the embedding table on its card ([`ServingShape::embed`]); otherwise `embed`
     /// rows are decoded on the host.
@@ -3894,11 +3894,20 @@ pub struct Qwen35GgufResident {
     vision: OnceLock<Option<crate::vision_tower::VisionSpec>>,
     /// The sampling defaults the GGUF declares, read once (see [`Self::sampling_defaults`]).
     sampling: OnceLock<data::generation::SamplingDefaults>,
+    /// The checkpoint, opened once ([`Self::checkpoint`]).
+    checkpoint: OnceLock<Result<Arc<ResidentCheckpoint>, String>>,
 }
 
 impl Qwen35GgufResident {
     pub fn new(gguf_path: String, devices: Vec<(Device, u64)>, cap: u32, tier: TierPolicy) -> Qwen35GgufResident {
-        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, prefix_slots: 0, kv_tier: KvTier::F32, kv_block_rows: 0, kv_pool_rows: 0, unified_pool: false, unified_pool_always: false, model_cfg: OnceLock::new(), model_id: MODEL.to_string(), bank: None, spec: SpecServing::default(), exact_decode: false, act_choice: gpu_core::ActChoice::Auto, gdn_state: GdnState::F32, linear_activations: LinearActivations::Auto, prefill: PrefillPolicy::default(), plan: OnceLock::new(), vision: OnceLock::new(), sampling: OnceLock::new() }
+        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, prefix_slots: 0, kv_tier: KvTier::F32, kv_block_rows: 0, kv_pool_rows: 0, unified_pool: false, unified_pool_always: false, model_cfg: OnceLock::new(), model_id: MODEL.to_string(), bank: None, spec: SpecServing::default(), exact_decode: false, act_choice: gpu_core::ActChoice::Auto, gdn_state: GdnState::F32, linear_activations: LinearActivations::Auto, prefill: PrefillPolicy::default(), plan: OnceLock::new(), vision: OnceLock::new(), sampling: OnceLock::new(), checkpoint: OnceLock::new() }
+    }
+
+    /// The checkpoint, opened on first use and shared by every later query. Opening one reads and classifies the header of
+    /// every tensor (and, for an HF release, its MTP head's too): the sizing queries a server makes at startup opened it once
+    /// each, and scanning the model directory took ~6 s of a 9.6 s start before the API answered.
+    fn checkpoint(&self) -> Result<Arc<ResidentCheckpoint>, String> {
+        self.checkpoint.get_or_init(|| ResidentCheckpoint::open(&self.gguf_path).map(Arc::new)).clone()
     }
 
     /// How this checkpoint reads images, when it does: an HF directory that declares a vision tower and holds its
@@ -4013,7 +4022,7 @@ impl Qwen35GgufResident {
     /// reported against the real open at activation, and the action's own constants apply meanwhile.
     pub fn sampling_defaults(&self) -> &data::generation::SamplingDefaults {
         self.sampling.get_or_init(|| {
-            let declared = ResidentCheckpoint::open(&self.gguf_path).map_err(|e| format!("cannot open '{}': {e}", self.gguf_path)).and_then(|c| c.sampling_defaults());
+            let declared = self.checkpoint().map_err(|e| format!("cannot open '{}': {e}", self.gguf_path)).and_then(|c| c.sampling_defaults());
             declared.unwrap_or_else(|e| {
                 residency::log::warn(&format!("{MODEL}: ignoring the checkpoint's sampling defaults: {e}"));
                 data::generation::SamplingDefaults::default()
@@ -4136,7 +4145,7 @@ impl Qwen35GgufResident {
     fn model_config(&self) -> Result<&Qwen35Config, String> {
         self.model_cfg
             .get_or_init(|| {
-                let mg = ResidentCheckpoint::open(&self.gguf_path).map_err(|e| format!("cannot open '{}': {e}", self.gguf_path))?;
+                let mg = self.checkpoint().map_err(|e| format!("cannot open '{}': {e}", self.gguf_path))?;
                 mg.config(1).map_err(|e| format!("'{}' is not a servable Qwen3.8 checkpoint: {e}", self.gguf_path))
             })
             .as_ref()
@@ -4196,7 +4205,7 @@ impl Qwen35GgufResident {
     /// Pool rows one sequence's state row takes out of the shared pool; 0 without the unified pool. A context of `ctx` tokens
     /// needs a pool of `ctx` plus this.
     pub fn sequence_state_rows(&self) -> Result<u32, String> {
-        let mg = ResidentCheckpoint::open(&self.gguf_path).map_err(|e| format!("cannot open '{}': {e}", self.gguf_path))?;
+        let mg = self.checkpoint().map_err(|e| format!("cannot open '{}': {e}", self.gguf_path))?;
         let cfg = mg.config(1).map_err(|e| format!("'{}' is not a servable Qwen3.8 checkpoint: {e}", self.gguf_path))?;
         Ok(self.serving_shape(&mg, &cfg).sequence_state_rows)
     }
@@ -4255,7 +4264,7 @@ impl Qwen35GgufResident {
         if let Some(reason) = &self.plan().refusal {
             return Some(reason.clone());
         }
-        match ResidentCheckpoint::open(&self.gguf_path) {
+        match self.checkpoint() {
             Ok(c) if !c.has_tokenizer() => Some(format!("'{}' carries no tokenizer (tokenizer.ggml.* KV, or a sibling tokenizer.json)", self.gguf_path)),
             Ok(_) => None,
             Err(e) => Some(format!("cannot open '{}': {e}", self.gguf_path)),
@@ -4277,7 +4286,7 @@ impl Qwen35GgufResident {
         if self.devices.is_empty() {
             return refused("no GPU is budgeted for it (its weights are device buffers; there is no CPU path)".to_string());
         }
-        let mg = match ResidentCheckpoint::open(&self.gguf_path) {
+        let mg = match self.checkpoint() {
             Ok(mg) => mg,
             Err(e) => return refused(format!("cannot open '{}': {e}", self.gguf_path)),
         };
@@ -4340,7 +4349,7 @@ impl Qwen35GgufResident {
     /// the per-layer profile behind it - for a caller sizing budgets or
     /// reporting "will this fit at all?".
     pub fn total_device_bytes(&self) -> Result<u64, String> {
-        let mg = ResidentCheckpoint::open(&self.gguf_path).map_err(|e| format!("{MODEL}: cannot open '{}': {e}", self.gguf_path))?;
+        let mg = self.checkpoint().map_err(|e| format!("{MODEL}: cannot open '{}': {e}", self.gguf_path))?;
         let cfg = mg.config(self.cap)?;
         Ok(serving_cost(&cfg, &self.serving_shape(&mg, &cfg)).total())
     }
@@ -4351,7 +4360,7 @@ impl Qwen35GgufResident {
     /// In the paged layout ([`Self::with_kv_block_rows`]) the longest context is
     /// the largest pool one sequence may take whole ([`auto_pool_rows`]).
     pub fn longest_cap(&self) -> Result<u32, String> {
-        let mg = ResidentCheckpoint::open(&self.gguf_path).map_err(|e| format!("cannot open '{}': {e}", self.gguf_path))?;
+        let mg = self.checkpoint().map_err(|e| format!("cannot open '{}': {e}", self.gguf_path))?;
         let cfg = mg.config(1).map_err(|e| format!("'{}' is not a servable Qwen3.8 checkpoint: {e}", self.gguf_path))?;
         let shape = self.serving_shape(&mg, &cfg);
         let longest = if self.kv_block_rows > 0 { auto_pool_rows(&cfg, &self.devices, &shape, None) } else { auto_cap(&cfg, &self.devices, &shape) };
@@ -4369,7 +4378,7 @@ impl Qwen35GgufResident {
     /// The largest shared KV pool, in rows, this configuration leaves room for
     /// when every sequence is held to `cap` tokens ([`auto_pool_rows`]).
     pub fn longest_pool(&self, cap: u32) -> Result<u32, String> {
-        let mg = ResidentCheckpoint::open(&self.gguf_path).map_err(|e| format!("cannot open '{}': {e}", self.gguf_path))?;
+        let mg = self.checkpoint().map_err(|e| format!("cannot open '{}': {e}", self.gguf_path))?;
         let cfg = mg.config(1).map_err(|e| format!("'{}' is not a servable Qwen3.8 checkpoint: {e}", self.gguf_path))?;
         auto_pool_rows(&cfg, &self.devices, &self.serving_shape(&mg, &cfg), Some(cap)).ok_or_else(|| format!("a {cap}-token context does not fit the {} budgeted device(s) beside the weights", self.devices.len()))
     }
@@ -4548,7 +4557,7 @@ impl Qwen35GgufResident {
         let instance = sched.decoder_mut().instance();
         let (gpu, d_model) = (instance.stage_gpu(0).share(), instance.config().d_model);
         let tower = crate::vision_tower::VisionTower::open(std::path::Path::new(&self.gguf_path), spec, &gpu, d_model, crate::vision_tower::SERVING_MAX_IMAGE_PIXELS)?;
-        let (tok, _) = ResidentCheckpoint::open(&self.gguf_path)?.tokenizer()?;
+        let (tok, _) = self.checkpoint()?.tokenizer()?;
         eprintln!("brain: {}: reads images: vision tower loaded on the decoder's card (images up to {} pixels)", self.model_id, tower.spec().geometry.max_pixels);
         crate::vision_frontend::VisionFrontend::new(text, tok, tower, context, parse_request).map(Ok)
     }
@@ -4613,7 +4622,7 @@ impl Qwen35GgufResident {
             ));
         }
 
-        let mg = ResidentCheckpoint::open(&self.gguf_path).map_err(|e| format!("{MODEL}: cannot open '{}': {e}", self.gguf_path))?;
+        let mg = self.checkpoint().map_err(|e| format!("{MODEL}: cannot open '{}': {e}", self.gguf_path))?;
         let (tok, eos) = mg.tokenizer().map_err(|e| format!("{MODEL}: '{}': {e}", self.gguf_path))?;
         let (embed_name, norm_name, head_name) = mg.endpoint_names(&cfg)?;
 

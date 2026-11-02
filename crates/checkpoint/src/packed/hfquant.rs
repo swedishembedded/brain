@@ -48,6 +48,10 @@ pub struct HfQuant {
     default: Option<DeclaredWeight>,
     /// ModelOpt `quantized_layers`: module (or module prefix, e.g. a fused-experts parent) to declaration.
     layers: Vec<(String, DeclaredWeight)>,
+    /// `layers` indexed by module: the position of each entry, so a weight's declaration is a lookup per prefix of its
+    /// module name instead of a scan of every entry (a release lists hundreds, and a checkpoint asks for each of its
+    /// thousands of tensors, again at every open).
+    layer_index: std::collections::HashMap<String, usize>,
     /// Module name patterns the release leaves unquantized (`ignore` / `exclude_modules`); a trailing `*`
     /// matches any suffix, `re:` prefixed entries are regular expressions and are matched as plain prefixes of
     /// their literal head.
@@ -103,6 +107,7 @@ impl HfQuant {
                     .iter()
                     .map(|(name, l)| (name.clone(), modelopt_algo(l.get("quant_algo").and_then(Value::as_str).unwrap_or(""), l.get("group_size").and_then(Value::as_u64).or(group))))
                     .collect();
+                out.layer_index = out.layers.iter().enumerate().map(|(i, (m, _))| (m.clone(), i)).rev().collect();
             }
             out.excluded = h.get("exclude_modules").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
             return Some(out);
@@ -152,8 +157,11 @@ impl HfQuant {
             return DeclaredWeight::Native;
         }
         if self.layered {
-            let hit = self.layers.iter().find(|(m, _)| module == m || module.strip_prefix(m.as_str()).is_some_and(|r| r.starts_with('.')));
-            return hit.map_or(DeclaredWeight::Native, |(_, d)| d.clone());
+            // The first listed entry that is the module or a dotted prefix of it: every prefix looked up, the lowest
+            // position kept.
+            let prefixes = std::iter::once(module).chain(module.match_indices('.').map(|(i, _)| &module[..i]));
+            let hit = prefixes.filter_map(|m| self.layer_index.get(m)).min();
+            return hit.map_or(DeclaredWeight::Native, |&i| self.layers[i].1.clone());
         }
         self.default.clone().unwrap_or(DeclaredWeight::Native)
     }
