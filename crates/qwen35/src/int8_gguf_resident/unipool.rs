@@ -305,6 +305,27 @@ impl StateLedger {
         pool.back_state_row(row)
     }
 
+    /// Back `rows` at load and hold them as released rows, as long as the allocator keeps `keep_free` blocks free after
+    /// lending for them. Backing a row is ~30 ms of driver calls on the serving thread, so without this every new high of
+    /// concurrency paid it at admission (the first 64 sequences of a server, ~2 s before their prompts ran). Released rows
+    /// are reclaimable capacity, so the pool loses nothing a sequence could use. Returns the rows backed.
+    pub(crate) fn warm(&mut self, alloc: &mut BlockAllocator, rows: impl IntoIterator<Item = u32>, keep_free: u32) -> Result<u32, String> {
+        let mut backed = 0;
+        for row in rows {
+            let need = {
+                let pool = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+                pool.state_blocks_with(row).saturating_sub(self.lent.len() as u32)
+            };
+            if alloc.free_blocks() < need.saturating_add(keep_free) {
+                break;
+            }
+            self.admit(alloc, row)?;
+            self.release(row);
+            backed += 1;
+        }
+        Ok(backed)
+    }
+
     /// Release state row `row`. It stays backed for the next sequence until [`Self::reclaim`] wants its blocks.
     pub(crate) fn release(&mut self, row: u32) {
         self.retained.push_back(row);

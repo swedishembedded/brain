@@ -367,6 +367,13 @@ impl Qwen35GgufEngine {
                 (if let Some(ledger) = &unified { alloc.with_backing(ledger.backing()) } else { alloc }, (0..inst.max_batch).collect())
             }
         };
+        let (mut alloc, mut unified) = (alloc, unified);
+        if let (Some(ledger), KvLayout::Paged { .. }) = (&mut unified, inst.kv_layout) {
+            // Every state row backed once, now, and held as released: the pool keeps room for one whole-context
+            // sequence besides them, and the rest is reclaimed from them when a sequence needs it.
+            let keep_free = inst.cap.div_ceil(alloc.block_size()) + ledger.sequence_blocks();
+            ledger.warm(&mut alloc, (0..inst.max_batch).rev(), keep_free).unwrap_or_else(|e| panic!("{MODEL}: the state rows cannot be backed at load: {e}"));
+        }
         let cache = PrefixCache::new(inst.prefix_slots);
         let mixed = inst.mixed_available();
         let background_on = !mixed && inst.background_prefill_available();

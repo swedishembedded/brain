@@ -114,6 +114,8 @@ fn a_running_sequence_takes_its_state_row_from_the_block_pool_and_gives_it_back(
     }
     let mut engine = engine(&r);
     let prompt = engine.instance().tokenize("The recurrent state of a sequence takes memory from the cache while it runs.");
+    // The rows the engine backed at load go back first, so the lending is seen from an empty pool.
+    engine.reclaim_prefix(u32::MAX);
     let total = engine.free_blocks();
     let mut tables: Vec<BlockTable> = Vec::new();
     // (sequences running, blocks their f32 state rows take: 48 layers x the granules the rows touch / 32 per block)
@@ -165,4 +167,25 @@ fn a_row_released_while_others_run_stays_backed_for_the_next_sequence() {
     assert_eq!(engine.reclaim_prefix(both.2 as u32), both.2 as u32, "the rows' blocks are reclaimable capacity");
     assert_eq!(engine.free_blocks(), free + both.2 as u32);
     assert_eq!(engine.unified_report().map(|(_, g, l)| (g, l)), Some((0, 0)), "a reclaimed pool holds no state");
+}
+
+#[test]
+fn a_fresh_engine_holds_its_state_rows_backed_so_the_first_sequences_attach_no_memory() {
+    let Some(path) = checkpoint() else { return };
+    let Some(r) = resident(&path, 4, true, 16) else { return };
+    if !r.0.unified() {
+        brain_testutil::skip_unavailable(&format!("no unified pool here: {}", r.0.unified_pool_notice().unwrap_or_default()));
+        return;
+    }
+    let mut engine = engine(&r);
+    let at_load = engine.unified_report().expect("a unified engine reports");
+    assert!(at_load.1 > 0, "the engine backs state rows at load");
+    let prompt = engine.instance().tokenize("A burst of requests after start-up runs without mapping memory first.");
+    let mut table = BlockTable::new();
+    engine.prefill(&mut table, &prompt);
+    assert_eq!(engine.unified_report().map(|(_, g, l)| (g, l)), Some((at_load.1, at_load.2)), "the first sequence takes a row backed at load");
+    engine.release_table(&mut table);
+    engine.reclaim_prefix(u32::MAX);
+    assert_eq!(engine.free_blocks(), engine.alloc_total(), "the rows backed at load are reclaimable capacity");
+    assert_eq!(engine.unified_report().map(|(_, g, l)| (g, l)), Some((0, 0)));
 }
