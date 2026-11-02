@@ -30,7 +30,7 @@ const N: usize = 37;
 const K: usize = 256;
 /// bf16 tensor-core products and int8 activation rounding stay well below this fraction of the term magnitude.
 const REL_TOL: f64 = 3e-2;
-/// An NVFP4 weight against 2 or more rows multiplies E4M3 operands on the FP8 tensor cores (the weight rounded once to E4M3, the activation to E4M3 with a
+/// A product of E4M3 operands on the FP8 tensor cores (an NVFP4 weight rounded once to E4M3, or an FP8 weight, against activations rounded to E4M3 with a
 /// scale a row): about 4 % of the root of the squared terms a sum (rms), 3.5 deviations over the thousand outputs checked (`qops_nvfp4_wgmma`).
 const NVFP4_E4M3_REL_TOL: f64 = 0.2;
 
@@ -57,7 +57,15 @@ fn check(ops: &Ops, w: &Weight, wd: &[f32], label: &str, m: usize, (first, count
     ops.matmul_rows(&mut steps, w, (first as u32, count as u32), &act, &y, 0);
     g.submit(&[], &steps);
     let got = g.read(&y, m * count);
-    let tolerance = if label == "nvfp4" && m >= 2 { NVFP4_E4M3_REL_TOL } else { REL_TOL };
+    // The E4M3 bound only where the product really takes E4M3 operands: an NVFP4 weight when the activations are set to
+    // E4M3 (the bf16 default is held to the bf16 bound), and an FP8 weight past the decode regime, whose GEMM quantises
+    // the activations to E4M3 by design (W8A8).
+    let e4m3_operands = match label {
+        "nvfp4" => m >= 2 && ops.linear_activations().resolved().is_e4m3(),
+        "fp8_e4m3" => m as u32 > gpu_core::select::DECODE_REGIME_MAX_ROWS,
+        _ => false,
+    };
+    let tolerance = if e4m3_operands { NVFP4_E4M3_REL_TOL } else { REL_TOL };
     for (i, (a, (b, scale))) in got.iter().zip(host_product(&x, m, wd, first, count)).enumerate() {
         assert!(
             (*a as f64 - b).abs() <= tolerance * scale + 1e-6,
