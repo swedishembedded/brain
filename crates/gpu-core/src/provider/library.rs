@@ -241,6 +241,23 @@ pub fn quantize_e4m3_rows_into(gpu: &Gpu, steps: &mut Vec<Step>, x: &Operand, ro
     Some(())
 }
 
+/// [`quantize_e4m3_rows`] with ONE scale per row instead of one per 128 elements (`quant_e4m3_row`): the activation operand of the NVFP4
+/// tensor-core GEMM. Returns the bytes (`rows * k / 4` words) and the scales (`rows` floats). `None` when the device declines the
+/// kernel or the window is not one it takes (`k` a multiple of 128, the window 16-byte aligned).
+pub fn quantize_e4m3_row_scaled(gpu: &Gpu, steps: &mut Vec<Step>, x: &Operand, rows: u32, k: u32) -> Option<(DeviceBuffer, DeviceBuffer)> {
+    let elems = u64::from(rows) * u64::from(k);
+    if rows == 0 || !k.is_multiple_of(128) || elems > u64::from(u32::MAX) || !x.range.0.is_multiple_of(4) {
+        return None;
+    }
+    let kernel = kernels_cuda::get("quant_e4m3_row")?;
+    let id = gpu.native_kernel(kernel, QUANT_E4M3_BINDINGS)?;
+    let q = gpu.storage_uninit(elems.div_ceil(4));
+    let s = gpu.storage_uninit(u64::from(rows));
+    let step = gpu.step_native_sliced(id, &[x.buf, &q, &s], &[(x.range.0, elems), (0, 0), (0, 0)], &[rows, k], rows)?;
+    steps.push(step);
+    Some((q, s))
+}
+
 /// Bindings of `silu_mul_quant_e4m3_128`: params, gate rows, up rows, the fp32 product, the E4M3 bytes, the scales.
 const SILU_MUL_QUANT_E4M3_BINDINGS: &[BindKind] =
     &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite, BindKind::StorageReadWrite, BindKind::StorageReadWrite];

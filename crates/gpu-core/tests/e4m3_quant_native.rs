@@ -174,3 +174,43 @@ fn the_gated_norm_matches_its_definition_on_both_input_forms() {
         }
     }
 }
+
+/// `quant_e4m3_row`: one scale a row (`amax / 448` over the whole row), the bytes the IEEE quotient encodes, an all-zero row written as zeros with scale 0;
+/// rows of 128 up to the 17408 of the 27B's MLP down projection, the window of rows starting past zero left untouched below it.
+#[test]
+fn the_row_quantiser_scales_a_whole_row_and_encodes_the_ieee_quotient() {
+    let gpu = gpu_core::testgpu::dev(&[]);
+    if !is_cuda(&gpu) {
+        brain_testutil::skip_unavailable("not a CUDA device");
+        return;
+    }
+    let table = magnitudes();
+    for (rows, k) in [(1u32, 128u32), (5, 640), (7, 5120), (3, 17408)] {
+        let mut x: Vec<f32> = Vec::new();
+        for r in 0..rows {
+            x.extend(block_values(31 * u64::from(r) + u64::from(k), (r as i32) - 2, 3).into_iter().cycle().take(k as usize));
+        }
+        // A row of zeros, and an outlier an order of magnitude past the rest in the last row.
+        for v in &mut x[..k as usize] {
+            *v = if rows > 1 { 0.0 } else { *v };
+        }
+        let last = (rows as usize - 1) * k as usize + 3;
+        x[last] *= 64.0;
+        let xb = gpu.storage_init("x", &x);
+        let mut steps = Vec::new();
+        let x_op = gpu_core::provider::library::Operand { buf: &xb, range: (0, x.len() as u64) };
+        let (q, s) = gpu_core::provider::library::quantize_e4m3_row_scaled(&gpu, &mut steps, &x_op, rows, k).expect("quant_e4m3_row offered");
+        gpu.submit(&[], &steps);
+        gpu.poll_wait();
+        let (words, scales) = (gpu.read(&q, x.len() / 4), gpu.read(&s, rows as usize));
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_bits().to_le_bytes()).collect();
+        for (r, row) in x.chunks(k as usize).enumerate() {
+            let scale = row.iter().fold(0f32, |m, v| if v.abs() > m { v.abs() } else { m }) / 448.0;
+            assert_eq!(scales[r].to_bits(), scale.to_bits(), "rows={rows} k={k} row {r}: scale");
+            for (i, v) in row.iter().enumerate() {
+                let want = if scale > 0.0 { encode(v / scale, &table) } else { 0 };
+                assert_eq!(bytes[r * k as usize + i], want, "rows={rows} k={k} row {r} element {i}: {v:e} / {scale:e}");
+            }
+        }
+    }
+}

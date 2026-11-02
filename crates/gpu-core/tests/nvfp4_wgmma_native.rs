@@ -153,12 +153,12 @@ fn kernel_times_against_fp8() {
     let timing = gpu.set_kernel_timing(true);
     assert!(timing, "device event timing");
     let mut r = Lcg::new(7);
-    for (label, k, n) in [("gate/up", 5120usize, 17408usize)] {
+    for (label, k, n) in [("gate/up", 5120usize, 17408usize), ("down", 17408, 5120), ("lm_head", 5120, 248320)] {
         let weight_bytes = n * k / 2;
         let copies = (192usize << 20).div_ceil(weight_bytes).clamp(1, 4);
         let ws: Vec<_> = (0..copies).map(|_| upload_u32(&gpu, &(0..n * k / 8).map(|_| r.next_u32()).collect::<Vec<_>>())).collect();
         let ss: Vec<_> = (0..copies).map(|_| upload_u32(&gpu, &words(&(0..n * k / 16).map(|_| 0x30 + (r.next_u32() % 0x20) as u8).collect::<Vec<_>>()))).collect();
-        for m in [8192usize] {
+        for m in [16usize, 32, 64, 256, 1024, 4096, 8192] {
             let xq = upload_u32(&gpu, &(0..m * k / 4).map(|_| 0x3838_3838u32 ^ (r.next_u32() & 0x0707_0707)).collect::<Vec<_>>());
             let sx = gpu.storage_init("sx", &vec![0.01f32; m]);
             let xb = upload_u32(&gpu, &(0..m * k / 2).map(|_| 0x3f80_3f80u32).collect::<Vec<_>>());

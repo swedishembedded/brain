@@ -2995,6 +2995,23 @@ pub const ALL: &[CudaKernel] = &[
         src: concat!(include_str!("../cu/e4m3_quant_common.cuh"), include_str!("../cu/quant_e4m3_128.cu")),
     },
     CudaKernel {
+        name: "quant_e4m3_row",
+        op: Op::Elementwise,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: FP8_CVT_MIN_CC,
+        entry: "brain_quant_e4m3_row",
+        what: "fp32 activation rows to E4M3 with one f32 scale (amax / 448) per row, round-to-nearest-even and saturating: the activation operand of the NVFP4 tensor-core GEMM, whose accumulators are not rescaled along K",
+        reported: "native:quant_e4m3_row",
+        block_dim: 256,
+        // A block a row.
+        tile: (1, 1),
+        shared_bytes: 0,
+        programmatic: false,
+        src: concat!(include_str!("../cu/e4m3_quant_common.cuh"), include_str!("../cu/quant_e4m3_row.cu")),
+    },
+    CudaKernel {
         name: "matmul_fp8_gemv",
         // The native twin of `matmul_fp8_gemv.wgsl` (every row-capacity variant), redirected to by name by
         // `gpu_core::native_upgrade`: the decode-regime product of a stored FP8 weight.
