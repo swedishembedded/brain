@@ -4587,6 +4587,14 @@ impl Qwen35GgufResident {
         }
         let embed_resident = self.serving_shape(&mg, &cfg).embed.is_some();
         residency::log::info(&format!("{MODEL}: the embedding table is {}", if embed_resident { "held on the first stage's card" } else { "read from the checkpoint on the host" }));
+        // The memory every stage keeps free for the activations of a prefill round and a decode step: the freed
+        // blocks of those activations may stay in the device's cache up to this much. Under the cache's default bound
+        // (a sixteenth of the card, at most 4 GiB) a 32K round's scratch went back to the driver at every
+        // synchronisation once earlier traffic had shifted the free memory, and each layer's next allocation waited
+        // for the driver to map it again: 32K x 16 after an 8K x 64 cell lost 12 s of 95 to idle gaps (84.5 -> 72.8
+        // tok/s).
+        let workspace = self.serving_shape(&mg, &cfg).stage_workspace(&cfg);
+        residency::log::info(&format!("{MODEL}: freed activation blocks are kept up to the stage workspace, {:.1} GiB", workspace as f64 / (1u64 << 30) as f64));
         let mut shards = Vec::with_capacity(plan.stages.len());
         for (_, placed, _) in &plan.stages {
             // The planner's `embed`/`head` flags say which stage is CHARGED
@@ -4609,6 +4617,9 @@ impl Qwen35GgufResident {
             // instance's per-sequence context.
             qwen35.set_exact_decode(self.exact_decode.then_some(self.cap));
             qwen35.set_act_precision(self.act_choice.resolve(qwen35.gpu.caps().arch.compute_capability));
+            for handle in [&qwen35.gpu, qwen35.ops().gpu()] {
+                handle.retain_freed_blocks(workspace);
+            }
             let caches = ShardCaches::new(&qwen35.gpu, &cfg, shard, self.cap, state_rows, self.prefix_slots, self.snapshots_on_host(), self.kv_tier, layout, self.gdn_state.is_bf16(), unified)?;
             shards.push(DeviceShard { qwen35, caches });
         }
