@@ -1878,30 +1878,55 @@ impl DeviceMem {
         // SAFETY: the context is retained for the life of `self`.
         self.d.check(unsafe { (self.fns.ctx_set_current)(self.ctx) }, "cuCtxSetCurrent")?;
         let access = crate::driver::CuMemAccessDesc { location: b.prop.location, flags: 3 };
-        let mut backed = 0;
-        for g in first..end {
-            if handles[g] != 0 {
-                continue;
-            }
-            let at = self.ptr + (g * b.granule) as CuDevicePtr;
-            let mut handle = 0u64;
-            // SAFETY: `handle` is a valid out-parameter and `prop` describes device memory on this context's device.
-            self.d.check(unsafe { (vmm.create)(&mut handle, b.granule, &b.prop, 0) }, "cuMemCreate")?;
-            // SAFETY: `at .. at + granule` lies inside the reserved range and holds no mapping (its handle slot is 0).
-            let mapped = self.d.check(unsafe { (vmm.map)(at, b.granule, 0, handle, 0) }, "cuMemMap").and_then(|()| self.d.check(unsafe { (vmm.set_access)(at, b.granule, &access, 1) }, "cuMemSetAccess"));
-            if let Err(e) = mapped {
-                // SAFETY: undoes exactly what this iteration did; an unmap of an unmapped range is the error we ignore.
+        // Map every fresh granule first, then grant access once per contiguous run of them: one cuMemSetAccess covers a
+        // fully mapped range of any number of allocations, and a call a granule was 1.5 s of the 3.5 s a 96 GB card's pool
+        // took to back at load (23392 granules).
+        let fresh: Vec<usize> = (first..end).filter(|&g| handles[g] == 0).collect();
+        let at = |g: usize| self.ptr + (g * b.granule) as CuDevicePtr;
+        let mut mapped: Vec<(usize, u64)> = Vec::with_capacity(fresh.len());
+        let undo = |mapped: &[(usize, u64)]| {
+            for &(g, handle) in mapped {
+                // SAFETY: undoes exactly the mapping this call made; an unmap of an unmapped range is the error we ignore.
                 unsafe {
-                    (vmm.unmap)(at, b.granule);
+                    (vmm.unmap)(at(g), b.granule);
                     (vmm.release)(handle);
                 }
+            }
+        };
+        for &g in &fresh {
+            let mut handle = 0u64;
+            // SAFETY: `handle` is a valid out-parameter and `prop` describes device memory on this context's device.
+            if let Err(e) = self.d.check(unsafe { (vmm.create)(&mut handle, b.granule, &b.prop, 0) }, "cuMemCreate") {
+                undo(&mapped);
                 return Err(e);
             }
+            // SAFETY: `at(g) .. + granule` lies inside the reserved range and holds no mapping (its handle slot is 0).
+            if let Err(e) = self.d.check(unsafe { (vmm.map)(at(g), b.granule, 0, handle, 0) }, "cuMemMap") {
+                // SAFETY: the handle was created above and is mapped nowhere.
+                unsafe { (vmm.release)(handle) };
+                undo(&mapped);
+                return Err(e);
+            }
+            mapped.push((g, handle));
+        }
+        let mut run = 0;
+        while run < fresh.len() {
+            let mut stop = run + 1;
+            while stop < fresh.len() && fresh[stop] == fresh[stop - 1] + 1 {
+                stop += 1;
+            }
+            // SAFETY: granules `fresh[run] .. fresh[stop - 1]` are consecutive and every one was just mapped.
+            if let Err(e) = self.d.check(unsafe { (vmm.set_access)(at(fresh[run]), (stop - run) * b.granule, &access, 1) }, "cuMemSetAccess") {
+                undo(&mapped);
+                return Err(e);
+            }
+            run = stop;
+        }
+        for &(g, handle) in &mapped {
             handles[g] = handle;
             crate::live::sparse_backed(b.granule);
-            backed += 1;
         }
-        Ok(backed)
+        Ok(mapped.len())
     }
 
     /// Take the physical memory back from granules `first .. first + count` of a sparse allocation, after waiting

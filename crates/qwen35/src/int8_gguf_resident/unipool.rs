@@ -177,9 +177,20 @@ impl UnifiedPool {
         Ok(())
     }
 
-    /// Attach memory to every block that has none.
+    /// Attach memory to every block that has none: one backing call a plane over the whole range, so the driver grants
+    /// access once a plane instead of once a block (see `back_sparse`).
     pub(crate) fn back_all_blocks(&mut self) -> Result<(), String> {
-        (0..self.block_backed.len() as u32).try_for_each(|b| self.back_block(b))
+        let blocks = self.block_backed.len() as u64;
+        for plane in &self.kv_planes {
+            self.gpu.back_sparse(plane, 0, blocks)?;
+        }
+        for backed in &mut self.block_backed {
+            if !*backed {
+                *backed = true;
+                self.backed_blocks += 1;
+            }
+        }
+        Ok(())
     }
 
     /// Take the memory back from block `block`, once nothing reaches it: it must be free and not about to be handed out.
