@@ -3073,7 +3073,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::F8E4M3,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: BASELINE_MIN_CC,
+        min_cc: (8, 0), // the shared source also holds mma.sync and cp.async kernels (sm_80)
         entry: "brain_matmul_fp8_gemv",
         what: "float-read GEMV of an FP8 E4M3 weight with block or tensor scales against up to 8 f32 activation rows: 16-byte streaming weight loads, codes decoded by integer bit moves, fused multiply-adds, warp-shuffle row sum; f32 rounding of the running sum against the WGSL tier",
         reported: "native:matmul_fp8_gemv",
@@ -3091,7 +3091,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::F8E4M3,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: BASELINE_MIN_CC,
+        min_cc: (8, 0), // the shared source also holds mma.sync and cp.async kernels (sm_80)
         entry: "brain_matmul_fp8_gemv_m1",
         what: "the one-activation-row form of matmul_fp8_gemv: the same FP8 GEMV with a deeper stage of in-flight weight loads, f32 rounding of the running sum against the WGSL tier",
         reported: "native:matmul_fp8_gemv_m1",
@@ -3108,7 +3108,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::F4E2M1,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: BASELINE_MIN_CC,
+        min_cc: (8, 0), // the shared source also holds mma.sync and cp.async kernels (sm_80)
         entry: "brain_matmul_nvfp4_gemv",
         what: "float-read GEMV of an NVFP4 weight (E2M1 codes, E4M3 scale per 16, f32 tensor scale) against up to 8 f32 activation rows: 16-byte streaming weight loads, codes decoded by integer bit moves, four weight rows per warp against activations staged in shared memory, fused multiply-adds, warp-shuffle row sum; f32 rounding of the running sum against the WGSL tier",
         reported: "native:matmul_nvfp4_gemv",
@@ -3126,7 +3126,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::F4E2M1,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: BASELINE_MIN_CC,
+        min_cc: (8, 0), // the shared source also holds mma.sync and cp.async kernels (sm_80)
         entry: "brain_matmul_nvfp4_gemv_m1",
         what: "the one-activation-row form of matmul_nvfp4_gemv: the same NVFP4 GEMV register-blocked over four weight rows per warp so the activation chunk is read once per four rows, f32 rounding of the running sum against the WGSL tier",
         reported: "native:matmul_nvfp4_gemv_m1",
@@ -3144,7 +3144,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::F4E2M1,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: BASELINE_MIN_CC,
+        min_cc: (8, 0), // the shared source also holds mma.sync and cp.async kernels (sm_80)
         entry: "brain_matmul_nvfp4_gemv_m1_xs",
         what: "the one-activation-row NVFP4 GEMV with its activation row staged in shared memory, transposed for conflict-free lane reads; the same products and order as matmul_nvfp4_gemv_m1",
         reported: "native:matmul_nvfp4_gemv_m1_xs",
@@ -3161,7 +3161,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::F4E2M1,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: BASELINE_MIN_CC,
+        min_cc: (8, 0), // the shared source also holds mma.sync and cp.async kernels (sm_80)
         entry: "brain_matmul_nvfp4_gemv_m2",
         what: "the two-activation-row form of matmul_nvfp4_gemv: register-blocked over four weight rows per warp, f32 rounding of the running sum against the WGSL tier",
         reported: "native:matmul_nvfp4_gemv_m2",
@@ -3178,7 +3178,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::F4E2M1,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: BASELINE_MIN_CC,
+        min_cc: (8, 0), // the shared source also holds mma.sync and cp.async kernels (sm_80)
         entry: "brain_matmul_nvfp4_gemv_m4",
         what: "the three-to-four-activation-row form of matmul_nvfp4_gemv: four weight rows per warp against activations staged in shared memory, f32 rounding of the running sum against the WGSL tier",
         reported: "native:matmul_nvfp4_gemv_m4",
@@ -3271,7 +3271,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::F4E2M1,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: BASELINE_MIN_CC,
+        min_cc: (8, 0), // the shared source also holds mma.sync and cp.async kernels (sm_80)
         entry: "brain_moe_nvfp4_gemv_gather",
         what: "sparse-MoE NVFP4 GEMV over a fused expert bank: each slot reads its expert's 4-bit rows with 16-byte streaming loads, f32 activations, per-expert tensor scale; f32 rounding of the running sum against the WGSL tier",
         reported: "native:moe_nvfp4_gemv_gather",
@@ -3290,7 +3290,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::F4E2M1,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: BASELINE_MIN_CC,
+        min_cc: (8, 0), // the shared source also holds mma.sync and cp.async kernels (sm_80)
         entry: "brain_moe_nvfp4_gateup_silu",
         what: "the gate and up NVFP4 expert projections of each slot and silu(gate) * up in one launch: both banks stream through the same block, the activation row is read once, and the gate/up intermediates never reach memory",
         reported: "native:moe_nvfp4_gateup_silu",
@@ -3327,7 +3327,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::F4E2M1,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: BASELINE_MIN_CC,
+        min_cc: (8, 0), // the shared source also holds mma.sync and cp.async kernels (sm_80)
         entry: "brain_moe_nvfp4_grouped",
         what: "sparse-MoE NVFP4 GEMM over a fused expert bank with each expert's slots grouped: every weight chunk is loaded and decoded once and applied to up to 8 slots whose activations are staged in shared memory; fused multiply-adds, f32 rounding of the running sum against the WGSL tier",
         reported: "native:moe_nvfp4_grouped",
@@ -5037,7 +5037,7 @@ mod tests {
         let max_k: u32 = k.src.lines().find_map(|l| l.strip_prefix("#define BRAIN_FP4_XS_MAX_K ")).and_then(|v| v.trim().parse().ok()).expect("the source defines BRAIN_FP4_XS_MAX_K");
         assert_eq!(max_k, NVFP4_GEMV_XS_MAX_K);
         assert_eq!(NVFP4_GEMV_XS_DYNAMIC_SHARED_BYTES, max_k * 4, "the row is staged as f32");
-        assert!(3 * NVFP4_GEMV_XS_DYNAMIC_SHARED_BYTES <= 227 * 1024, "three blocks fit a multiprocessor's shared memory");
+        const { assert!(3 * NVFP4_GEMV_XS_DYNAMIC_SHARED_BYTES <= 227 * 1024, "three blocks fit a multiprocessor's shared memory") };
         assert_eq!(k.tile, (1, 16), "two rows a warp, eight warps a block");
     }
 
