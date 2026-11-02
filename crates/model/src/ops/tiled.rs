@@ -217,6 +217,11 @@ const NVFP4_GEMV_MAX_ROWS_WITH_MMA: u32 = 1;
 /// as bf16 (3.6 times the stored bytes) and reads it back, 215 us per 17408 x 5120 projection at every row count up to 256; the
 /// staged GEMV takes 93 us at four rows and loses at eight.
 const LIBRARY_NVFP4_GEMV_MAX_ROWS: u32 = 4;
+/// Rows from which the NVFP4 product runs on the FP8 tensor cores ([`Ops::nvfp4_wgmma`]) instead of the bf16 `mma.sync` builds ([`Ops::nvfp4_mma`]):
+/// the 17408 x 5120 gate/up projection takes 66 us (mma, 16 rows) against 83 (wgmma) and 139 against 105 at 32 rows, the 5120 x 17408 down
+/// projection 60 against 117 at 16 rows and 112 against 117 at 32, the LM head 635 against 1015 at 16 rows and 1643 against 1015 at 32; past
+/// 32 rows the wgmma build is 2 to 4 times faster at every shape (kernel times in `nvfp4_wgmma_native`).
+const NVFP4_WGMMA_MIN_ROWS: u32 = 17;
 
 /// Activation rows up to which a dense bf16 weight is read by its own GEMV instead of the library's tensor-core product: the
 /// single decode token. The multi-row build is not yet competitive (measured at eight rows: the library is three times faster).
@@ -293,6 +298,48 @@ impl Ops {
         s.push(step);
         if fresh {
             *act.bf16.borrow_mut() = Some(xb);
+        }
+        true
+    }
+
+    /// The product of an NVFP4 weight against `act`'s rows on the Hopper FP8 tensor cores ([`gpu_core::Fused::MatmulNvfp4Wgmma`]): the activations
+    /// quantised to E4M3 with one scale per row (made once for every product that reads these rows), the weight's codes and block scales decoded
+    /// into E4M3 operands in shared memory a tile at a time, so no bf16 copy of the weight exists and the tensor cores run at the FP8 rate. From
+    /// [`NVFP4_WGMMA_MIN_ROWS`] rows (below them [`Ops::nvfp4_mma`] reads less per row). `false` (nothing pushed) when the weight is not NVFP4,
+    /// the device, the shape or the row count is not served; the caller then takes the next form.
+    pub(super) fn nvfp4_wgmma(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), act: &Act, y: &DeviceBuffer, yoff: u64) -> bool {
+        let Weight::Micro { w: wb, s: sb, kind: MicroScaled::Nvfp4, global, .. } = w else { return false };
+        let (first, count) = rows;
+        let (m, k) = (act.m, w.k());
+        if m < NVFP4_WGMMA_MIN_ROWS || !self.providers.runs("cuda") || !self.gpu.has_fused(gpu_core::Fused::MatmulNvfp4Wgmma) {
+            return false;
+        }
+        let params = [m, k, count, global.to_bits()];
+        if !gpu_core::Fused::MatmulNvfp4Wgmma.serves(&params) {
+            return false;
+        }
+        let mut prep = Vec::new();
+        let shared = act.e4m3_row.borrow().clone();
+        let (xq, sx, fresh) = match shared {
+            Some((xq, sx)) => (xq, sx, false),
+            None => {
+                let x_op = library::Operand { buf: &act.x, range: (act.xr0 as u64 * k as u64, m as u64 * k as u64) };
+                let Some((xq, sx)) = library::quantize_e4m3_row_scaled(&self.gpu, &mut prep, &x_op, m, k) else { return false };
+                (xq, sx, true)
+            }
+        };
+        // The window's codes (eight to a word) and block scales (four to a word): whole rows of the stored planes.
+        let (code_words, scale_words) = (u64::from(k) / 8, u64::from(k) / 64);
+        let (code_window, scale_window) = if rows == (0, w.n()) { (WHOLE, WHOLE) } else { ((u64::from(first) * code_words, u64::from(count) * code_words), (u64::from(first) * scale_words, u64::from(count) * scale_words)) };
+        let Some(step) =
+            self.gpu.fused_step_sliced(gpu_core::Fused::MatmulNvfp4Wgmma, &[&xq, wb, sb, &sx, y], &[WHOLE, code_window, scale_window, WHOLE, (yoff, m as u64 * count as u64)], &params)
+        else {
+            return false;
+        };
+        s.append(&mut prep);
+        s.push(step);
+        if fresh {
+            *act.e4m3_row.borrow_mut() = Some((xq, sx));
         }
         true
     }

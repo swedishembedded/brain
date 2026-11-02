@@ -1240,6 +1240,9 @@ pub struct Act {
     /// These rows quantised to E4M3 with a scale per row per 128 of K (the bytes and the scales), made by the first FP8-weight
     /// product whose chosen candidate reads them and shared by the rest, like `bf16`.
     e4m3: std::cell::RefCell<Option<(DeviceBuffer, DeviceBuffer)>>,
+    /// These rows quantised to E4M3 with ONE scale per row (the bytes and the scales): the operand of the NVFP4 tensor-core GEMM, made by the
+    /// first NVFP4-weight product that reads it and shared by the rest (the MLP's gate and up).
+    e4m3_row: std::cell::RefCell<Option<(DeviceBuffer, DeviceBuffer)>>,
 }
 
 thread_local! {
@@ -1669,7 +1672,7 @@ impl Ops {
         // dispatches (and the scratch) are skipped and a stray product that does need them makes them then.
         let deferred = !row_count_invariant_active() && self.providers.runs("cuda") && self.gpu.int8_packed_unneeded(rows, k / 4);
         let quant = (!deferred).then(|| self.quantize_rows(s, x, xr0, rows, k));
-        Act { x: x.clone(), xr0, m: rows, k, quant: std::cell::RefCell::new(quant), quant_deferred: deferred, xgs: Default::default(), bf16: Default::default(), e4m3: Default::default() }
+        Act { x: x.clone(), xr0, m: rows, k, quant: std::cell::RefCell::new(quant), quant_deferred: deferred, xgs: Default::default(), bf16: Default::default(), e4m3: Default::default(), e4m3_row: Default::default() }
     }
 
     /// The packed int8 form of rows `[xr0, xr0 + rows)` of `x`: scratch sized for exactly `[0, xr0 + rows)` and the
@@ -1704,7 +1707,7 @@ impl Ops {
     pub fn act_prequantized(&self, x: &DeviceBuffer, sx: &DeviceBuffer, xq: &DeviceBuffer, rows: u32, k: u32) -> Act {
         assert!(rows > 0, "Ops::act_prequantized: rows must be > 0 (got 0)");
         assert_eq!(k % 4, 0, "int8 K must be a multiple of 4 (got {k})");
-        Act { x: x.clone(), xr0: 0, m: rows, k, quant: std::cell::RefCell::new(Some(Arc::new(I8Scratch::from_parts(sx.clone(), k, xq.clone())))), quant_deferred: false, xgs: Default::default(), bf16: Default::default(), e4m3: Default::default() }
+        Act { x: x.clone(), xr0: 0, m: rows, k, quant: std::cell::RefCell::new(Some(Arc::new(I8Scratch::from_parts(sx.clone(), k, xq.clone())))), quant_deferred: false, xgs: Default::default(), bf16: Default::default(), e4m3: Default::default(), e4m3_row: Default::default() }
     }
 
     /// [`Ops::act`], plus the affine K-quant group-sum prepass
@@ -1740,7 +1743,7 @@ impl Ops {
             xr0 + rows,
             k,
         ));
-        Act { x: x.clone(), xr0, m: rows, k, quant: std::cell::RefCell::new(Some(Arc::new(quant))), quant_deferred: false, xgs: std::cell::RefCell::new(Some(xgs)), bf16: Default::default(), e4m3: Default::default() }
+        Act { x: x.clone(), xr0, m: rows, k, quant: std::cell::RefCell::new(Some(Arc::new(quant))), quant_deferred: false, xgs: std::cell::RefCell::new(Some(xgs)), bf16: Default::default(), e4m3: Default::default(), e4m3_row: Default::default() }
     }
 
     /// [`Ops::act`] for a caller whose weights are ALL fp32-family, so the
@@ -1759,7 +1762,7 @@ impl Ops {
     /// whatever a missing buffer would have held.
     pub fn act_f32(&self, x: &DeviceBuffer, xr0: u32, rows: u32, k: u32) -> Act {
         assert!(rows > 0, "Ops::act_f32: rows must be > 0 (got 0)");
-        Act { x: x.clone(), xr0, m: rows, k, quant: Default::default(), quant_deferred: false, xgs: Default::default(), bf16: Default::default(), e4m3: Default::default() }
+        Act { x: x.clone(), xr0, m: rows, k, quant: Default::default(), quant_deferred: false, xgs: Default::default(), bf16: Default::default(), e4m3: Default::default(), e4m3_row: Default::default() }
     }
 
     /// [`Self::act_f32`] for all `rows` rows of `x` whose bf16 rounding a fused kernel has already produced
@@ -1767,7 +1770,7 @@ impl Ops {
     /// read this activation take it instead of casting it again.
     pub fn act_f32_with_bf16(&self, x: &DeviceBuffer, rows: u32, k: u32, bf16: DeviceBuffer) -> Act {
         assert!(rows > 0, "Ops::act_f32_with_bf16: rows must be > 0 (got 0)");
-        Act { x: x.clone(), xr0: 0, m: rows, k, quant: Default::default(), quant_deferred: false, xgs: Default::default(), bf16: std::cell::RefCell::new(Some(bf16)), e4m3: Default::default() }
+        Act { x: x.clone(), xr0: 0, m: rows, k, quant: Default::default(), quant_deferred: false, xgs: Default::default(), bf16: std::cell::RefCell::new(Some(bf16)), e4m3: Default::default(), e4m3_row: Default::default() }
     }
 
     /// [`Self::act_f32`] for `rows` rows of `x` whose E4M3 quantisation (`xq` bytes, `sx` one scale per row per 128 of K,
@@ -1775,7 +1778,7 @@ impl Ops {
     /// E4M3 take it instead of quantising it again.
     pub fn act_f32_with_e4m3(&self, x: &DeviceBuffer, rows: u32, k: u32, xq: DeviceBuffer, sx: DeviceBuffer) -> Act {
         assert!(rows > 0 && k.is_multiple_of(FP8_BLOCK), "Ops::act_f32_with_e4m3: {rows} rows of {k} (K a multiple of {FP8_BLOCK})");
-        Act { x: x.clone(), xr0: 0, m: rows, k, quant: Default::default(), quant_deferred: false, xgs: Default::default(), bf16: Default::default(), e4m3: std::cell::RefCell::new(Some((xq, sx))) }
+        Act { x: x.clone(), xr0: 0, m: rows, k, quant: Default::default(), quant_deferred: false, xgs: Default::default(), bf16: Default::default(), e4m3: std::cell::RefCell::new(Some((xq, sx))), e4m3_row: Default::default() }
     }
 
     /// Whether an FP8-weight product of `rows` rows against `n` outputs of width `k` reads E4M3 activations on this device
@@ -2716,7 +2719,11 @@ impl Ops {
         assert_eq!(act.k, k, "Ops::matmul_rows: activation width {} does not match weight K {k}", act.k);
         assert!(count > 0 && first as u64 + count as u64 <= n as u64, "Ops::matmul_rows: rows {first}+{count} outside the {n} rows of the weight");
         if matches!(self.linear_plan(w, count), LinearPlan::TileDecode { .. }) {
-            if self.fp8_forward(s, w, rows, act, y, yoff, ActPrecision::F32) || self.small_m_gemv(s, w, rows, act, y, yoff) || self.nvfp4_mma(s, w, rows, act, y, yoff) {
+            if self.fp8_forward(s, w, rows, act, y, yoff, ActPrecision::F32)
+                || self.small_m_gemv(s, w, rows, act, y, yoff)
+                || self.nvfp4_wgmma(s, w, rows, act, y, yoff)
+                || self.nvfp4_mma(s, w, rows, act, y, yoff)
+            {
                 return;
             }
             return self.forward_tiled(s, w, rows, act, y, yoff);
