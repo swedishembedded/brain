@@ -162,7 +162,7 @@ pub fn credit_upstream(pred: &[f32], target: &[f32], edges: &[f32], weights: Opt
     let px = edges.len();
     let mut out = vec![0.0f32; px * 4];
     par::chunks_mut(&mut out, PIXELS * 4, |ci, chunk| {
-        for (k, o) in chunk.chunks_exact_mut(4).enumerate() {
+        for (k, o) in chunk.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let p = ci * PIXELS + k;
             let m = weights.map_or(1.0, |w| w[p]);
             let r = (0..3).map(|c| (pred[p * 3 + c] - target[p * 3 + c]).abs()).sum::<f32>() / 3.0 + geometry.map_or(0.0, |g| g[p]);

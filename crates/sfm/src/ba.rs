@@ -443,8 +443,8 @@ pub fn bundle_adjust(ks: &mut [Intrinsics], sensor: &[usize], poses: &mut [Pose]
             }
             // d c / d X = R
             let jp: [[f64; 3]; 2] = std::array::from_fn(|r| std::array::from_fn(|k| (0..3).map(|m| jd[r][m] * pose.r[m * 3 + k]).sum()));
-            for k in 0..n {
-                cl[k].wm = std::array::from_fn(|b| w * (cl[k].j[0] * jp[0][b] + cl[k].j[1] * jp[1][b]));
+            for c in &mut cl[..n] {
+                c.wm = std::array::from_fn(|b| w * (c.j[0] * jp[0][b] + c.j[1] * jp[1][b]));
             }
             Some(ObsHead { n, w, r: l.r, jp, cols: [0; MAX_OBS_COLS] })
         });
