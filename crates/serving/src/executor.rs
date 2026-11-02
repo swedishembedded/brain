@@ -14,6 +14,8 @@
 
 use std::sync::Arc;
 
+use catalog::adapter_release::ServedBase;
+use catalog::adapter_registry::AdapterHost;
 use catalog::resident_llm::QwenResident;
 use catalog::resident_yolo::YoloResident;
 use catalog::resident_zimage::ZImageResident;
@@ -47,7 +49,8 @@ pub struct Serving {
     pub qwen: Option<Arc<QwenResident>>,
     /// The released Qwen3.8 GGUFs the model scan registered, as concrete
     /// handles for the same reason: an adapter flag (or a watcher) offers its
-    /// adapters on the allocation the executor holds.
+    /// adapters on the allocation the executor holds. When `--checkpoint`
+    /// names one of them, only that one: it is the checkpoint's host.
     pub qwen35: Vec<Arc<catalog::resident_qwen35::Qwen35GgufServed>>,
 }
 
@@ -58,6 +61,14 @@ fn register_qwen(models: &mut Vec<Arc<dyn ResidentModel>>, qwen: Option<QwenResi
     let q = Arc::new(qwen?);
     models.push(q.clone());
     Some(q)
+}
+
+/// The index in `scanned` of the base `checkpoint` (the base `--checkpoint`
+/// named) is: the same store id, else the same checkpoint on disk.
+fn checkpoint_base(checkpoint: &ServedBase, scanned: &[ServedBase]) -> Option<usize> {
+    let same_id = |b: &ServedBase| checkpoint.id().is_some() && checkpoint.id() == b.id();
+    let same_path = |b: &ServedBase| same_checkpoint(&checkpoint.path().to_string_lossy(), &b.path().to_string_lossy());
+    scanned.iter().position(|b| same_id(b) || same_path(b))
 }
 
 /// Whether two weight paths name the same file.
@@ -367,6 +378,8 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     // `register_multi` once the executor runs.
     let mut multi_discovered: Vec<Arc<dyn MultiDeviceResidentModel>> = Vec::new();
     let mut qwen35_discovered: Vec<Arc<catalog::resident_qwen35::Qwen35GgufServed>> = Vec::new();
+    // The released Qwen3.8 `--checkpoint` named, by served id.
+    let mut qwen35_discovered_pick: Option<String> = None;
     if let Some(dir) = models_dir {
         let existing: std::collections::BTreeSet<String> = models.iter().map(|m| m.manifest().model).collect();
         let settings = crate::model_dir::ScanSettings { qwen: qwen_cfg, qwen35: qwen35.clone(), gpus: gpus.clone(), reserved };
@@ -382,6 +395,20 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
                 models.retain(|m| m.manifest().model != env_id);
                 models.push(Arc::new(residency::Alias::new(env_id, shared.clone())));
                 qwen = Some(shared.clone());
+            }
+        }
+        // `--checkpoint` may name a released Qwen3.8 the scan serves as a
+        // model of its own. That release is then the checkpoint's one resident:
+        // the Qwen3 resident built over the same directory is dropped, and the
+        // adapter flags (verified against the host's family) attach to the
+        // release, not to a Qwen3 that is not what is served.
+        if let Some(env) = qwen.clone() {
+            let scanned: Vec<ServedBase> = discovered.qwen35.iter().map(|q| q.served_base()).collect();
+            if let Some(i) = checkpoint_base(&env.served_base(), &scanned) {
+                let env_id = env.manifest().model;
+                models.retain(|m| m.manifest().model != env_id);
+                qwen = None;
+                qwen35_discovered_pick = Some(discovered.qwen35[i].manifest().model);
             }
         }
         for r in discovered.residents {
@@ -465,6 +492,9 @@ pub fn build_executor(machine: &Machine, reserved: u64, models_dir: Option<&std:
     for m in multi_discovered {
         exec.register_multi(m);
     }
+    if let Some(id) = qwen35_discovered_pick {
+        qwen35_discovered.retain(|q| q.manifest().model == id);
+    }
     Serving { executor: exec, qwen, qwen35: qwen35_discovered }
 }
 
@@ -495,5 +525,32 @@ mod tests {
             std::ptr::eq(Arc::as_ptr(&handle) as *const (), Arc::as_ptr(&models[0]) as *const ()),
             "the concrete handle and the registered erased one must be the same allocation, or an adapter is offered where no instance serves it"
         );
+    }
+
+    fn dir_with_config(root: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), "{}").unwrap();
+        dir
+    }
+
+    /// `--checkpoint` names the base `--adapter` rides on. When it names a
+    /// Qwen3.8 release the model scan serves, that release is the host, not a
+    /// Qwen3 resident built over the same directory.
+    #[test]
+    fn a_checkpoint_naming_a_scanned_release_selects_that_release() {
+        use catalog::adapter_release::{ServedBase, QWEN35_FAMILY};
+        let root = std::env::temp_dir().join(format!("brain-exec-ckpt-{}", std::process::id()));
+        let fp8 = dir_with_config(&root, "fp8");
+        let other = dir_with_config(&root, "other");
+        let scanned = [ServedBase::of_family(QWEN35_FAMILY, other.join("."), Some("v/other".into())), ServedBase::of_family(QWEN35_FAMILY, fp8.join("."), Some("v/fp8".into()))];
+
+        let by_dir = ServedBase::new(&fp8, None);
+        assert_eq!(checkpoint_base(&by_dir, &scanned), Some(1), "the same directory, spelled differently");
+        let by_id = ServedBase::new(root.join("elsewhere"), Some("v/other".into()));
+        assert_eq!(checkpoint_base(&by_id, &scanned), Some(0), "the same store id");
+        let unrelated = ServedBase::new(root.join("elsewhere"), Some("v/none".into()));
+        assert_eq!(checkpoint_base(&unrelated, &scanned), None, "a checkpoint the scan does not serve selects nothing");
+        std::fs::remove_dir_all(&root).ok();
     }
 }

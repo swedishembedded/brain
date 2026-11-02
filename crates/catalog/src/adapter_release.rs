@@ -96,6 +96,16 @@ impl ServedBase {
         ServedBase { path: path.into(), id, family, quantized_from: Vec::new(), digest: Arc::new(OnceLock::new()) }
     }
 
+    /// The checkpoint file or directory this base serves.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The id this base is served under, when it has one.
+    pub fn id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
     /// Declare the ids of the sources this base is a quantisation of.
     pub fn quantizing(mut self, sources: &[&str]) -> ServedBase {
         self.quantized_from = sources.iter().map(|s| s.to_string()).collect();
