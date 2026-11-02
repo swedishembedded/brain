@@ -174,6 +174,12 @@ pub const fn fp8_wgmma_tma_dynamic_shared_bytes(stages: u32) -> u32 {
 pub const fn fp8_wgmma_tma_n256_dynamic_shared_bytes(stages: u32) -> u32 {
     stages * (128 * 128 + 256 * 128) + 1024 + 16 * 1024 + 1024
 }
+/// Dynamic shared memory per block of `matmul_nvfp4_wgmma` with `stages` ring stages (per stage a 256-row activation tile and the decoded
+/// weight tile of 128-byte rows, the 64-byte-row code tile and the 16-byte-row scale tile: 43008 bytes), 24 bytes of mbarriers a stage
+/// (256 in all) and 1 KiB to align the ring to the 128-byte swizzle pattern. A test holds it to the source.
+pub const fn nvfp4_wgmma_dynamic_shared_bytes(stages: u32) -> u32 {
+    stages * (256 * 128 + 128 * 128 + 128 * 64 + 128 * 16) + 256 + 1024
+}
 /// Dynamic shared memory per block of `matmul_fp8_wgmma_swap_tma_*` with `bn` weight rows a tile and `stages` ring stages (a 64-row x tile and a
 /// `bn`-row weight tile of 128-byte rows, 512 bytes of scales and two 8-byte mbarriers each) and 1 KiB to align the ring to the 128-byte swizzle
 /// pattern. A test holds it to the source.
@@ -2644,6 +2650,26 @@ pub const ALL: &[CudaKernel] = &[
         shared_bytes: 0,
         programmatic: false,
         src: concat!("#define BRAIN_FWT_ENTRY brain_matmul_fp8_wgmma_tma_n256_bf16o\n#define BRAIN_FWT_OUT_BF16 1\n", include_str!("../cu/fp8_tma_common.cuh"), include_str!("../cu/matmul_fp8_wgmma_tma_n256.cu")),
+    },
+    CudaKernel {
+        name: "matmul_nvfp4_wgmma",
+        // NVFP4 weights against E4M3 activations on the Hopper warpgroup tensor cores: a decoder warpgroup pair turns each stage's 4-bit codes and
+        // block scales into the swizzled E4M3 weight operand in shared memory, the FP8 prefill GEMM's consumers multiply it.
+        op: Op::MatMul,
+        weight: Dtype::F4E2M1,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_matmul_nvfp4_wgmma",
+        what: "NVFP4 weight (E2M1 codes, E4M3 scale per 16, f32 tensor scale) against E4M3 activations (one scale per row) on Hopper warpgroup tensor cores (wgmma m64n128k32, 256x128 tile): the tensor-memory accelerator copies the activation, code and scale tiles into a ring, two decoder warpgroups turn each code tile into E4M3 weights (code times block scale over 8, rounded once to E4M3) in shared memory, the activation row scale applied in the epilogue; agrees with the f64 reference of the E4M3-rounded weights and E4M3 activations to f32 rounding",
+        reported: "native:matmul_nvfp4_wgmma",
+        block_dim: 512,
+        // 256 rows of x x 128 weight rows per tile; the grid is persistent (`FP8_TMA_MAX_CTAS` blocks at most).
+        tile: (256, 128),
+        // The ring and the barriers are dynamic shared memory (`nvfp4_wgmma_dynamic_shared_bytes`); the scale-byte table (2 KiB) and the maps are static.
+        shared_bytes: 0,
+        programmatic: false,
+        src: concat!(include_str!("../cu/fp8_tma_common.cuh"), include_str!("../cu/matmul_nvfp4_wgmma.cu")),
     },
     CudaKernel {
         name: "matmul_fp8_wgmma_swap_n64b64",

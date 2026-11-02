@@ -82,3 +82,16 @@ fn the_n256_kernel_templates_are_what_the_driver_encodes() {
     let output = encode([64, 16], 2).expect("the driver encoded the operand map above");
     assert_eq!(shipped(src, "#define BRAIN_FWT_OUT_TEMPLATE "), output.to_vec(), "regenerate BRAIN_FWT_OUT_TEMPLATE from the driver's encoding");
 }
+
+#[test]
+fn the_nvfp4_kernel_templates_are_what_the_driver_encodes() {
+    let Some(codes) = encode([64, 128], 0) else {
+        brain_testutil::skip_unavailable("a CUDA driver with a device whose context the encoder can borrow");
+        return;
+    };
+    let src = include_str!("../../kernels-cuda/cu/matmul_nvfp4_wgmma.cu");
+    // The code tile (64-byte boxes) and the scale tile (16-byte boxes) have no swizzle.
+    assert_eq!(shipped(src, "#define BRAIN_NW_CODES_TEMPLATE "), codes.to_vec(), "regenerate BRAIN_NW_CODES_TEMPLATE from the driver's encoding");
+    let scales = encode([16, 128], 0).expect("the driver encoded the code map above");
+    assert_eq!(shipped(src, "#define BRAIN_NW_SCALES_TEMPLATE "), scales.to_vec(), "regenerate BRAIN_NW_SCALES_TEMPLATE from the driver's encoding");
+}
