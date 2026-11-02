@@ -113,7 +113,7 @@ fn linear_activations_choose_the_bf16_or_the_e4m3_build_of_an_nvfp4_product() {
         let e4m3 = ran(&ops, m);
         assert!(e4m3.contains(e4m3_build) && !e4m3.contains(bf16_build), "e4m3 at {m} rows ran: {e4m3}");
         ops.set_linear_activations(LinearActivations::Auto);
-        assert_eq!(ran(&ops, m), e4m3, "auto is today's E4M3 path at {m} rows");
+        assert_eq!(ran(&ops, m), bf16, "auto is the bf16 path at {m} rows: precision below the competitors' is opt-in");
     }
     if ops.gpu().has_fused(gpu_core::Fused::MatmulNvfp4Wgmma) {
         ops.set_linear_activations(LinearActivations::E4m3);

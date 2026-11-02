@@ -262,7 +262,7 @@ SERVING POLICY  (one model-agnostic policy for every model that serves it.
                          support it (the Qwen3.8 releases): `e4m3` quantises
                          the activations to FP8 with one scale per row (W4A8,
                          faster, coarser), `bf16` reads them as bf16 (W4A16).
-                         `auto` (default) is e4m3 for now. FP8 and bf16 weights
+                         `auto` (default) is bf16. FP8 and bf16 weights
                          ignore it (the serve log says so once).
   --gemm auto|fp32       `fp32` pins exact fp32 arithmetic for the linears (the
                          reference tier); `auto` (default) uses tensor cores

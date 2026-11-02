@@ -172,7 +172,7 @@ brain --device gpu0,gpu1 serve --openai
 #   --linear-activations auto
 #                            activation operand of the NVFP4-weight linears:
 #                            "e4m3" (W4A8, faster), "bf16" (W4A16) or "auto"
-#                            (e4m3 for now). Ignored by FP8 and bf16 weights
+#                            (bf16). Ignored by FP8 and bf16 weights
 #   --exact-decode    make a decode row's tokens and per-token logits
 #                            independent of which sequences share its step
 #                            (default off; costs one extra weight pass per
