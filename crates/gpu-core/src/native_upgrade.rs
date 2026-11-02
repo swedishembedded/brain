@@ -2528,6 +2528,14 @@ pub enum Fused {
     /// memory. Params `[m, k, n, global_bits]` (`k` a multiple of 256, `n` even); bindings `xq` (E4M3 words `[m, k/4]`), `w`, `s` read, `sx` (f32
     /// `[m]`, one scale a row) read, `y` (`[m, n]` f32) written.
     MatmulNvfp4Wgmma,
+    /// `matmul_nvfp4_mmae8`, `..16`, `..32`: an NVFP4 weight multiplied against up to 8, 16 or 32 E4M3 activation rows (one scale a row) on the FP8
+    /// `mma.sync` tensor cores, the codes decoded in registers (no copy of the weight). Params and bindings as [`Fused::MatmulNvfp4Wgmma`]
+    /// (`k` a whole number of 128-weight groups).
+    MatmulNvfp4MmaE8,
+    /// [`Fused::MatmulNvfp4MmaE8`] for up to 16 activation rows.
+    MatmulNvfp4MmaE16,
+    /// [`Fused::MatmulNvfp4MmaE8`] for up to 32 activation rows.
+    MatmulNvfp4MmaE32,
     /// `matmul_i8_gemv_multi`: up to four int8 matrices that read ONE packed
     /// activation, multiplied in a single launch - each output bit-identical to
     /// the single `matmul_i8_gemv` on that matrix. Params `[m, kg, n0, n1, n2,
@@ -2924,6 +2932,9 @@ impl Fused {
             Fused::MatmulNvfp4Mma32 => "matmul_nvfp4_mma32",
             Fused::MatmulNvfp4Mma64 => "matmul_nvfp4_mma64",
             Fused::MatmulNvfp4Wgmma => "matmul_nvfp4_wgmma",
+            Fused::MatmulNvfp4MmaE8 => "matmul_nvfp4_mmae8",
+            Fused::MatmulNvfp4MmaE16 => "matmul_nvfp4_mmae16",
+            Fused::MatmulNvfp4MmaE32 => "matmul_nvfp4_mmae32",
             Fused::I8GemvMulti => "matmul_i8_gemv_multi",
             Fused::Q4GemvMulti => "matmul_q4_gemv_multi",
             Fused::Bf16GemvMulti => "matmul_bf16_gemv_multi",
@@ -2955,7 +2966,7 @@ impl Fused {
             Fused::GqaDecodePrepI8 => GQA_DECODE_PREP_I8_BINDINGS,
             Fused::MoeNvfp4GateUp => MOE_NVFP4_GATEUP_BINDINGS,
             Fused::MatmulNvfp4Mma8 | Fused::MatmulNvfp4Mma16 | Fused::MatmulNvfp4Mma32 | Fused::MatmulNvfp4Mma64 => NVFP4_MMA_BINDINGS,
-            Fused::MatmulNvfp4Wgmma => NVFP4_WGMMA_BINDINGS,
+            Fused::MatmulNvfp4Wgmma | Fused::MatmulNvfp4MmaE8 | Fused::MatmulNvfp4MmaE16 | Fused::MatmulNvfp4MmaE32 => NVFP4_WGMMA_BINDINGS,
             Fused::I8GemvMulti | Fused::Q4GemvMulti => I8_GEMV_MULTI_BINDINGS,
             Fused::Bf16GemvMulti | Fused::Bf16GemvSplitK => BF16_GEMV_MULTI_BINDINGS,
             Fused::Conv2dDwPartial => CONV2D_DW_PARTIAL_BINDINGS,
@@ -3040,6 +3051,9 @@ impl Fused {
                 matches!(params, [m, k, count, ..] if (1..=self.mma_rows()).contains(m) && *count >= 1 && *k >= 128 && k % 128 == 0)
             }
             Fused::MatmulNvfp4Wgmma => matches!(params, [m, k, n, _] if *m >= 1 && *n >= 2 && n % 2 == 0 && *k >= 256 && k % 256 == 0 && u64::from(*m) * u64::from(*n) <= u64::from(u32::MAX)),
+            Fused::MatmulNvfp4MmaE8 | Fused::MatmulNvfp4MmaE16 | Fused::MatmulNvfp4MmaE32 => {
+                matches!(params, [m, k, n, _] if (1..=self.mma_rows()).contains(m) && *n >= 1 && *k >= 128 && k % 128 == 0 && u64::from(*m) * u64::from(*n) <= u64::from(u32::MAX))
+            }
             Fused::FlashGqaKmask => matches!(params, [bsz, nh, nkv, t, hd, group]
                 if *bsz >= 1 && *nkv >= 1 && *t >= 1 && *hd == FLASH_BIDIR_HEAD_DIM && nh % nkv == 0 && *group == nh / nkv && *group >= 1
                     && u64::from(*bsz) * u64::from(*nh) * u64::from(t.div_ceil(FLASH_BIDIR_ROWS)) <= u64::from(u32::MAX)),
@@ -3061,6 +3075,7 @@ impl Fused {
             // The weight rows a block covers: two row-warps of the registry tile's rows.
             Fused::MatmulNvfp4Mma8 | Fused::MatmulNvfp4Mma16 | Fused::MatmulNvfp4Mma32 | Fused::MatmulNvfp4Mma64 => params[2].div_ceil(self.tile().1),
             Fused::MatmulNvfp4Wgmma => gemm_blocks(params, self.tile()).min(kernels_cuda::FP8_TMA_MAX_CTAS),
+            Fused::MatmulNvfp4MmaE8 | Fused::MatmulNvfp4MmaE16 | Fused::MatmulNvfp4MmaE32 => params[2].div_ceil(self.tile().1),
             Fused::I8GemvMulti | Fused::Q4GemvMulti => {
                 let (rows, cols) = self.tile();
                 params[0].div_ceil(rows) * params[2..6].iter().map(|n| n.div_ceil(cols)).sum::<u32>()
@@ -3147,9 +3162,9 @@ impl Fused {
     /// Activation rows the tensor-core NVFP4 build serves (its accumulators hold `8 * tiles` columns).
     fn mma_rows(self) -> u32 {
         match self {
-            Fused::MatmulNvfp4Mma8 => 8,
-            Fused::MatmulNvfp4Mma16 => 16,
-            Fused::MatmulNvfp4Mma32 => 32,
+            Fused::MatmulNvfp4Mma8 | Fused::MatmulNvfp4MmaE8 => 8,
+            Fused::MatmulNvfp4Mma16 | Fused::MatmulNvfp4MmaE16 => 16,
+            Fused::MatmulNvfp4Mma32 | Fused::MatmulNvfp4MmaE32 => 32,
             _ => 64,
         }
     }

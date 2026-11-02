@@ -5,7 +5,7 @@
 // team needs expertise in running NVFP4 checkpoints on Hopper tensor cores without a converted copy then you can procure
 // our services by sending an email to info@swedishembedded.com.
 
-//! Spec: an NVFP4 weight multiplied against 17 or more activation rows of f32 runs on the FP8 tensor cores (the activations quantised to E4M3
+//! Spec: an NVFP4 weight multiplied against 2 or more activation rows of f32 runs on the FP8 tensor cores (the activations quantised to E4M3
 //! with one scale per row, the weight's codes and block scales decoded to E4M3 in shared memory) and agrees with the host product of the exact
 //! decoded weight to the operand precision: both operands carry a 2^-4 relative rounding error a term (E4M3's four significant bits), so the
 //! sum is held to `OPERAND_REL` of the root of its sum of squared terms. Row windows that do not start at 0, ragged row counts and a ragged
@@ -53,7 +53,7 @@ fn an_nvfp4_weight_against_many_rows_runs_on_the_fp8_tensor_cores_and_agrees_to_
         let wd = decode_weight(&ops, &w);
         let g = ops.gpu();
         let mut rng = Lcg::new(data::rng::random_seed());
-        for (m, first, count) in [(17usize, 0usize, n), (33, 8, n - 16), (130, 0, n), (300, 2, n - 3)] {
+        for (m, first, count) in [(2usize, 0usize, n), (9, 3, n - 7), (17, 0, n), (24, 8, n - 16), (33, 8, n - 16), (130, 0, n), (300, 2, n - 3)] {
             let x = rng.vec_scaled(m * k, 1.0);
             let xb = g.storage_init("x", &x);
             let y = g.storage_init("y", &vec![f32::NAN; m * count]);

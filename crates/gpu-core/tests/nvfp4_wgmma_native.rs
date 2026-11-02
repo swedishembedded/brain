@@ -82,14 +82,34 @@ fn weight(p: &Problem, k: usize, row: usize, i: usize, rounded: bool) -> f64 {
     if rounded { round_e4m3(exact / 8.0) * 8.0 } else { exact }
 }
 
-fn run(gpu: &Gpu, p: &Problem, m: usize, k: usize, n: usize) -> Vec<f32> {
+fn run(gpu: &Gpu, which: Fused, p: &Problem, m: usize, k: usize, n: usize) -> Vec<f32> {
     let (xq, w, s, sx) = (upload_u32(gpu, &words(&p.xq)), upload_u32(gpu, &p.codes), upload_u32(gpu, &words(&p.scales)), gpu.storage_init("sx", &p.sx));
     let y = gpu.storage_init("y", &vec![f32::NAN; m * n]);
     let params = [m as u32, k as u32, n as u32, p.global.to_bits()];
-    let step = gpu.fused_step(Fused::MatmulNvfp4Wgmma, &[&xq, &w, &s, &sx, &y], &params).expect("served shape");
+    let step = gpu.fused_step(which, &[&xq, &w, &s, &sx, &y], &params).expect("served shape");
     gpu.submit(&[], &[step]);
     gpu.poll_wait();
     gpu.read(&y, m * n)
+}
+
+/// The product of `p` against the operands the kernel sees, in f64, sampled; every sampled output within `ACC_REL` of its sum of |terms|.
+fn check_against_oracle(gpu: &Gpu, which: Fused, p: &Problem, m: usize, k: usize, n: usize) {
+    let got = run(gpu, which, p, m, k, n);
+    let (row_step, col_step) = (if m > 64 { 37 } else { 1 }, if n > 64 { 29 } else { 1 });
+    let mut worst = 0.0f64;
+    for a in (0..m).step_by(row_step) {
+        for c in (0..n).step_by(col_step) {
+            let terms: Vec<f64> = (0..k).map(|j| e4m3(p.xq[a * k + j]) * weight(p, k, c, j, true)).collect();
+            let f = f64::from(p.sx[a]) * f64::from(p.global);
+            let (sum, mag) = (terms.iter().sum::<f64>() * f, terms.iter().map(|t| t.abs()).sum::<f64>() * f);
+            let g = f64::from(got[a * n + c]);
+            assert!(got[a * n + c].is_finite(), "{which:?} m={m} k={k} n={n}: output ({a},{c}) not written");
+            let err = (g - sum).abs() / (mag + 1e-30);
+            worst = worst.max(err);
+            assert!(err <= ACC_REL, "{which:?} m={m} k={k} n={n}: output ({a},{c}) is {g}, oracle {sum} (sum of |terms| {mag})");
+        }
+    }
+    eprintln!("{which:?} m={m} k={k} n={n}: worst error {worst:.2e} of the sum of |terms|");
 }
 
 #[test]
@@ -101,24 +121,26 @@ fn the_wgmma_product_matches_the_oracle_of_its_operands() {
     let base = data::rng::random_seed();
     let shapes = [(1usize, 256usize, 2usize), (5, 256, 130), (127, 512, 128), (128, 256, 128), (129, 768, 254), (300, 5120, 300), (33, 1024, 62), (200, 17408, 258), (1000, 1280, 5120)];
     for (i, &(m, k, n)) in shapes.iter().enumerate() {
-        let p = problem(m, k, n, base.wrapping_add(i as u64 * 31), i % 2 == 1);
-        let got = run(&gpu, &p, m, k, n);
-        let mut worst = 0.0f64;
-        let (row_step, col_step) = (if m > 64 { 37 } else { 1 }, if n > 64 { 29 } else { 1 });
-        for a in (0..m).step_by(row_step) {
-            for c in (0..n).step_by(col_step) {
-                let terms: Vec<f64> = (0..k).map(|j| e4m3(p.xq[a * k + j]) * weight(&p, k, c, j, true)).collect();
-                let f = f64::from(p.sx[a]) * f64::from(p.global);
-                let (sum, mag) = (terms.iter().sum::<f64>() * f, terms.iter().map(|t| t.abs()).sum::<f64>() * f);
-                let g = f64::from(got[a * n + c]);
-                assert!(got[a * n + c].is_finite(), "m={m} k={k} n={n}: output ({a},{c}) not written");
-                let err = (g - sum).abs() / (mag + 1e-30);
-                worst = worst.max(err);
-                assert!(err <= ACC_REL, "m={m} k={k} n={n}: output ({a},{c}) is {g}, oracle {sum} (sum of |terms| {mag})");
-            }
-        }
-        eprintln!("m={m} k={k} n={n}: worst error {worst:.2e} of the sum of |terms|");
+        check_against_oracle(&gpu, Fused::MatmulNvfp4Wgmma, &problem(m, k, n, base.wrapping_add(i as u64 * 31), i % 2 == 1), m, k, n);
     }
+}
+
+/// The `mma.sync` E4M3 builds: every row count of their range (whole and ragged 8-row tiles), a K of one 128 group up to the 17408 of the 27B,
+/// a weight whose rows are not a multiple of the 64 a block covers.
+#[test]
+fn the_mma_e4m3_products_match_the_oracle_of_their_operands() {
+    let gpu = gpu_core::testgpu::dev(&[]);
+    if !gpu.caps().arch.compute_capability.is_some_and(|cc| cc >= (8, 9)) || gpu.kind() != "cuda" || !gpu.has_fused(Fused::MatmulNvfp4MmaE32) {
+        return brain_testutil::skip_unavailable("the E4M3 mma builds need a CUDA device of compute capability 8.9 or more");
+    }
+    let base = data::rng::random_seed();
+    for (i, &(m, k, n)) in [(1usize, 128usize, 1usize), (5, 256, 63), (8, 5120, 200), (9, 640, 65), (13, 17408, 130), (16, 5120, 17408), (17, 1024, 130), (32, 5120, 300), (31, 384, 64)].iter().enumerate() {
+        let which = match m { 0..=8 => Fused::MatmulNvfp4MmaE8, 9..=16 => Fused::MatmulNvfp4MmaE16, _ => Fused::MatmulNvfp4MmaE32 };
+        check_against_oracle(&gpu, which, &problem(m, k, n, base.wrapping_add(i as u64 * 37), i % 2 == 0), m, k, n);
+    }
+    assert!(!Fused::MatmulNvfp4MmaE32.serves(&[33, 128, 64, 0]), "past 32 activation rows");
+    assert!(!Fused::MatmulNvfp4MmaE8.serves(&[9, 128, 64, 0]), "past the build's rows");
+    assert!(!Fused::MatmulNvfp4MmaE32.serves(&[8, 192, 64, 0]), "k not a whole number of 128-weight groups");
 }
 
 #[test]
@@ -158,7 +180,7 @@ fn kernel_times_against_fp8() {
         let copies = (192usize << 20).div_ceil(weight_bytes).clamp(1, 4);
         let ws: Vec<_> = (0..copies).map(|_| upload_u32(&gpu, &(0..n * k / 8).map(|_| r.next_u32()).collect::<Vec<_>>())).collect();
         let ss: Vec<_> = (0..copies).map(|_| upload_u32(&gpu, &words(&(0..n * k / 16).map(|_| 0x30 + (r.next_u32() % 0x20) as u8).collect::<Vec<_>>()))).collect();
-        for m in [16usize, 32, 64, 256, 1024, 4096, 8192] {
+        for m in [8usize, 16, 32, 64, 256, 1024, 4096, 8192] {
             let xq = upload_u32(&gpu, &(0..m * k / 4).map(|_| 0x3838_3838u32 ^ (r.next_u32() & 0x0707_0707)).collect::<Vec<_>>());
             let sx = gpu.storage_init("sx", &vec![0.01f32; m]);
             let xb = upload_u32(&gpu, &(0..m * k / 2).map(|_| 0x3f80_3f80u32).collect::<Vec<_>>());
@@ -189,11 +211,15 @@ fn kernel_times_against_fp8() {
             let verdicts = gpu_core::native_time_fp8_shape(&gpu, [m as u32, (k / 4) as u32, n as u32]);
             if verdicts.is_empty() { eprintln!("no FP8 candidate times {m} x {k} x {n}"); }
             for (name, v) in &verdicts { eprintln!("   fp8 {name}: {v:?}"); }
+            let mmae = (m <= 32).then(|| {
+                let (which, name) = match m { 0..=8 => (Fused::MatmulNvfp4MmaE8, "native:matmul_nvfp4_mmae8"), 9..=16 => (Fused::MatmulNvfp4MmaE16, "native:matmul_nvfp4_mmae16"), _ => (Fused::MatmulNvfp4MmaE32, "native:matmul_nvfp4_mmae32") };
+                time(which, &[m as u32, k as u32, n as u32, 0.0071f32.to_bits()], &|i| vec![xq.clone(), ws[i].clone(), ss[i].clone(), sx.clone(), y.clone()], name)
+            }).flatten();
             let fp8 = verdicts
                 .into_iter()
                 .filter_map(|(name, v)| if let gpu_core::NativeVerdict::Timed { us, .. } = v { Some((us, name)) } else { None })
                 .fold(None, |b: Option<(f64, String)>, c| if b.as_ref().is_none_or(|b| c.0 < b.0) { Some(c) } else { b });
-            eprintln!("{label:8} m={m:5}  wgmma {:>9.1} us   mma {:>9}   fp8 best {}", wg.unwrap_or(f64::NAN), mma.map_or("-".into(), |v| format!("{v:.1}")), fp8.map_or("-".into(), |(us, n)| format!("{us:.1} ({n})")));
+            eprintln!("{label:8} m={m:5}  wgmma {:>9.1} us   mma {:>9}   mmae {:>9}   fp8 best {}", wg.unwrap_or(f64::NAN), mma.map_or("-".into(), |v| format!("{v:.1}")), mmae.map_or("-".into(), |v| format!("{v:.1}")), fp8.map_or("-".into(), |(us, n)| format!("{us:.1} ({n})")));
         }
     }
 }

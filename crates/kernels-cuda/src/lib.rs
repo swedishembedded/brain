@@ -2652,6 +2652,60 @@ pub const ALL: &[CudaKernel] = &[
         src: concat!("#define BRAIN_FWT_ENTRY brain_matmul_fp8_wgmma_tma_n256_bf16o\n#define BRAIN_FWT_OUT_BF16 1\n", include_str!("../cu/fp8_tma_common.cuh"), include_str!("../cu/matmul_fp8_wgmma_tma_n256.cu")),
     },
     CudaKernel {
+        name: "matmul_nvfp4_mmae8",
+        // A fused kernel asked for by name (`gpu_core::Fused::MatmulNvfp4MmaE8`): no WGSL twin.
+        op: Op::MatMul,
+        weight: Dtype::F4E2M1,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: (8, 9),
+        entry: "brain_matmul_nvfp4_mmae8",
+        what: "NVFP4 weight against up to 8 E4M3 activation rows (one scale per row) on the FP8 mma.sync tensor cores: the codes and block scales are decoded in registers to E4M3 (code times scale over 8, rounded once) through a table of 256 entries a scale byte and four byte permutes per eight codes, into mma.m16n8k32 operand fragments (weight rows as the 16-row dimension), eight K-slices a block meet in shared memory; no copy of the weight, f32 accumulation",
+        reported: "native:matmul_nvfp4_mmae8",
+        block_dim: 512,
+        // Weight rows per block.
+        tile: (1, 64),
+        shared_bytes: 0,
+        programmatic: false,
+        src: concat!(include_str!("../cu/nvfp4_e4m3_decode.cuh"), include_str!("../cu/matmul_nvfp4_mmae.cu")),
+    },
+    CudaKernel {
+        name: "matmul_nvfp4_mmae16",
+        // A fused kernel asked for by name (`gpu_core::Fused::MatmulNvfp4MmaE16`): no WGSL twin.
+        op: Op::MatMul,
+        weight: Dtype::F4E2M1,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: (8, 9),
+        entry: "brain_matmul_nvfp4_mmae16",
+        what: "NVFP4 weight against up to 16 E4M3 activation rows (one scale per row) on the FP8 mma.sync tensor cores: the codes and block scales are decoded in registers to E4M3 (code times scale over 8, rounded once) through a table of 256 entries a scale byte and four byte permutes per eight codes, into mma.m16n8k32 operand fragments (weight rows as the 16-row dimension), eight K-slices a block meet in shared memory; no copy of the weight, f32 accumulation",
+        reported: "native:matmul_nvfp4_mmae16",
+        block_dim: 512,
+        // Weight rows per block.
+        tile: (1, 64),
+        shared_bytes: 0,
+        programmatic: false,
+        src: concat!(include_str!("../cu/nvfp4_e4m3_decode.cuh"), include_str!("../cu/matmul_nvfp4_mmae.cu")),
+    },
+    CudaKernel {
+        name: "matmul_nvfp4_mmae32",
+        // A fused kernel asked for by name (`gpu_core::Fused::MatmulNvfp4MmaE32`): no WGSL twin.
+        op: Op::MatMul,
+        weight: Dtype::F4E2M1,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: (8, 9),
+        entry: "brain_matmul_nvfp4_mmae32",
+        what: "NVFP4 weight against up to 32 E4M3 activation rows (one scale per row) on the FP8 mma.sync tensor cores: the codes and block scales are decoded in registers to E4M3 (code times scale over 8, rounded once) through a table of 256 entries a scale byte and four byte permutes per eight codes, into mma.m16n8k32 operand fragments (weight rows as the 16-row dimension), eight K-slices a block meet in shared memory; no copy of the weight, f32 accumulation",
+        reported: "native:matmul_nvfp4_mmae32",
+        block_dim: 512,
+        // Weight rows per block.
+        tile: (1, 64),
+        shared_bytes: 0,
+        programmatic: false,
+        src: concat!(include_str!("../cu/nvfp4_e4m3_decode.cuh"), include_str!("../cu/matmul_nvfp4_mmae.cu")),
+    },
+    CudaKernel {
         name: "matmul_nvfp4_wgmma",
         // NVFP4 weights against E4M3 activations on the Hopper warpgroup tensor cores: a decoder warpgroup pair turns each stage's 4-bit codes and
         // block scales into the swizzled E4M3 weight operand in shared memory, the FP8 prefill GEMM's consumers multiply it.
@@ -2669,7 +2723,7 @@ pub const ALL: &[CudaKernel] = &[
         // The ring and the barriers are dynamic shared memory (`nvfp4_wgmma_dynamic_shared_bytes`); the scale-byte table (2 KiB) and the maps are static.
         shared_bytes: 0,
         programmatic: false,
-        src: concat!(include_str!("../cu/fp8_tma_common.cuh"), include_str!("../cu/matmul_nvfp4_wgmma.cu")),
+        src: concat!(include_str!("../cu/fp8_tma_common.cuh"), include_str!("../cu/nvfp4_e4m3_decode.cuh"), include_str!("../cu/matmul_nvfp4_wgmma.cu")),
     },
     CudaKernel {
         name: "matmul_fp8_wgmma_swap_n64b64",

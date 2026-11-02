@@ -2721,7 +2721,7 @@ impl Ops {
         if matches!(self.linear_plan(w, count), LinearPlan::TileDecode { .. }) {
             if self.fp8_forward(s, w, rows, act, y, yoff, ActPrecision::F32)
                 || self.small_m_gemv(s, w, rows, act, y, yoff)
-                || self.nvfp4_wgmma(s, w, rows, act, y, yoff)
+                || self.nvfp4_e4m3(s, w, rows, act, y, yoff)
                 || self.nvfp4_mma(s, w, rows, act, y, yoff)
             {
                 return;
