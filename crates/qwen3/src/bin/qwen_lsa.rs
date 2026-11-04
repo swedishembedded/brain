@@ -23,7 +23,8 @@
 //!          [--held-docs 6] [--skip-docs 48] [--pca-corpus DIR] [--queries 32]
 //!          [--tail 256] [--seed N]
 //! qwen_lsa prefill --indexer FILE [--tokens 4096,8192,16384,32768] [--corpus DIR]
-//!          [--kv-cache int8|f32|fp8] [--dense-until N] [--tree SPEC] [--profile]
+//!          [--kv-cache int8|f32|fp8] [--weights f32|int8] [--dense-until N]
+//!          [--tree SPEC] [--profile]
 //! ```
 //!
 //! `prefill --indexer random` times a random-projection indexer built for the
@@ -32,6 +33,8 @@
 //! the device timing every kernel: the per-kernel table, the time in the
 //! index (index keys and Ward), the read, sparse and dense attention, and the
 //! wall time beyond the device's (host work: page tables, node pages).
+//! `--weights` holds the linears in f32 or int8; by default int8 from the
+//! parameter count up that serving quantizes.
 //!
 //! `--tree size=4,blocks=1024:4096,beam=2048:2048,page=4096,growth=1024[,start=N]`
 //! reads through node bucket levels (`model::lsa::tree`): node buckets of
@@ -161,15 +164,19 @@ enum Kv {
 }
 
 fn engine(path: &str, max_tokens: u32) -> Result<(Engine, IndexGeometry), String> {
-    engine_kv(path, max_tokens, Kv::F32)
+    engine_kv(path, max_tokens, Kv::F32, Some(false))
 }
 
-fn engine_kv(path: &str, max_tokens: u32, kv: Kv) -> Result<(Engine, IndexGeometry), String> {
+/// An engine for prompts of `max_tokens`, its KV cache in `kv`, its linears
+/// int8 when `int8` says so - by default from the parameter count up that
+/// serving quantizes (`qwen3::footprint::int8_by_default`).
+fn engine_kv(path: &str, max_tokens: u32, kv: Kv, int8: Option<bool>) -> Result<(Engine, IndexGeometry), String> {
     let (cfg, src) = qwen3::open_checkpoint(path)?;
+    let tier = if int8.unwrap_or_else(|| qwen3::footprint::int8_by_default(&cfg)) { qwen3::Dtype::I8 } else { qwen3::Dtype::F32 };
     let geometry = IndexGeometry { n_layers: cfg.n_layers as usize, n_heads: cfg.n_heads as usize, n_kv_heads: cfg.n_kv_heads as usize, head_dim: cfg.head_dim as usize, rope_base: cfg.rope_theta };
     let mbt = max_tokens.div_ceil(BLOCK);
     // Room for a warm-up prompt the prefix cache keeps beside the measured one.
-    let mut e = Engine::from_source_tier(cfg, &*src, BLOCK, 2 * mbt + 8, 1, mbt, 512, kv != Kv::F32, qwen3::Dtype::F32);
+    let mut e = Engine::from_source_tier(cfg, &*src, BLOCK, 2 * mbt + 8, 1, mbt, 512, kv != Kv::F32, tier);
     if kv == Kv::Fp8 {
         e.set_kv_fp8()?;
     }
@@ -436,13 +443,19 @@ fn prefill(args: &Args) -> Result<(), String> {
         println!("through a tree: {tree:?}");
         ix.tree = Some(tree);
     }
+    let weights = match args.get("weights") {
+        None => None,
+        Some("f32") => Some(false),
+        Some("int8") => Some(true),
+        Some(other) => return Err(format!("--weights {other:?}: f32 or int8")),
+    };
     let kv = match args.get("kv-cache").unwrap_or("int8") {
         "f32" => Kv::F32,
         "int8" => Kv::Int8,
         "fp8" => Kv::Fp8,
         other => return Err(format!("--kv-cache {other:?}: f32, int8 or fp8")),
     };
-    println!("prefill of one sequence, Qwen3 {} KV, top_k {} top_p {} window {}", args.get("kv-cache").unwrap_or("int8"), cfg.top_k, cfg.top_p, cfg.window);
+    println!("prefill of one sequence, {path}, {} KV, top_k {} top_p {} window {}", args.get("kv-cache").unwrap_or("int8"), cfg.top_k, cfg.top_p, cfg.window);
     for &n in &lens {
         let prompt = &doc[..n];
         // One warm-up prefill of other tokens (pipelines, allocator), then the
@@ -460,10 +473,10 @@ fn prefill(args: &Args) -> Result<(), String> {
             e.release_for_perf(&mut table);
             secs
         };
-        let (mut dense, _) = engine_kv(&path, n as u32, kv)?;
+        let (mut dense, _) = engine_kv(&path, n as u32, kv, weights)?;
         let td = time(&mut dense);
         drop(dense);
-        let (mut sparse, _) = engine_kv(&path, n as u32, kv)?;
+        let (mut sparse, _) = engine_kv(&path, n as u32, kv, weights)?;
         sparse.set_lsa(&ix)?;
         if let Some(v) = args.get("dense-until") {
             sparse.set_lsa_dense_until(v.parse().map_err(|_| format!("--dense-until {v:?} is not a number"))?);
@@ -477,7 +490,7 @@ fn prefill(args: &Args) -> Result<(), String> {
             let other: Vec<u32> = prompt.iter().map(|t| (t + 13) % 20_000 + 200).collect();
             profile(&mut sparse, &format!("sparse T={n}"), &other);
             drop(sparse);
-            let (mut dense, _) = engine_kv(&path, n as u32, kv)?;
+            let (mut dense, _) = engine_kv(&path, n as u32, kv, weights)?;
             profile(&mut dense, &format!("dense T={n}"), &other);
         }
     }
