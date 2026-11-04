@@ -120,6 +120,32 @@ minimize `sum E[i, q_i]` subject to `sum bytes[i, q_i] <= budget`.
 - [x] Host codecs row-parallel (fp8 quantize of a 3072 x 1024 tensor 1.31 s
       serial, 65 ms on 48 threads).
 
+## Any model, any backend
+
+- [x] No architecture in the optimizer: the architecture is read from the
+      checkpoint (`config.json` through the registry, else a brain
+      checkpoint's `model`); a family joins by declaring
+      `Model::{linear_sites, coupled_tensors, prunable_dims}` and
+      `ChatTrainer::{SERVED_WEIGHTS, serving_engine}`.
+- [x] Deployed measurement through any family's engine:
+      `PagedDecoder::hidden_at` (a prefill per position by default; qwen3's
+      whole-sequence pass overrides it) and `model::serve::teacher_forced_loss`;
+      `model::finetune::served_loss` over `ChatTrainer::serving_engine`.
+- [x] qwen3, qwen35 and qwen35moe declare everything; `rl/tests/served_conformance.rs`
+      holds each to: engine at fp32 equals the trainer build, every declared
+      served format applied and near fp32, the search's manifest covering every
+      prunable tensor, a pruned checkpoint measured as its zeroed plan by the
+      trainer and the engine.
+- [x] Backends: the codec, search, pruning, conformance, mixed-tier serving and
+      SDK suites pass on wgpu, native Vulkan and CPU; formats a backend widens
+      are left out of the search and named by the engine.
+- [ ] CUDA: not run (no NVRTC or kernel store where these were tested).
+- [ ] Families without a chat trainer (vision, diffusion, speech) have no
+      front end: the library search runs on any `Model` given batches, but
+      `ModelOptimizer`/`ModelPruner` read chat datasets.
+- [ ] Other paged engines (deepseek2, huginn, ouro) score through the default
+      `hidden_at` once their families declare a trainer and an engine hook.
+
 ## KV precision search
 
 `model::kvcalib` sizes a chosen tier's scale; this chooses the tier per layer

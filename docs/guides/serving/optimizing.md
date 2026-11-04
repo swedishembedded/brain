@@ -130,6 +130,23 @@ dimension's channels (default 0.75), `--keep-channels N` exactly N;
 from the original, as `brain optimize` does. `DIR/prune.json` holds the
 outcome.
 
+## Models and backends
+
+Neither command has code for a particular architecture. The architecture is
+read from the checkpoint (its `config.json`, or a brain checkpoint's own
+config; `--arch` names it otherwise), and a model family takes part through
+what it declares about itself: the linears whose format can be chosen, the
+ones its engine fuses into one product, the dimensions whose channels can be
+removed, the formats its serving engine holds per linear, and how to build
+that engine at a format plan. Today qwen3, qwen35 and qwen35moe declare all
+of it; a family that declares nothing to compress is refused by name.
+
+The search runs on whatever backend `--device` selects (wgpu, native Vulkan,
+CPU, CUDA). A format the device cannot hold as itself (int8 without
+packed-int8 products, bf16 on a backend without bf16 storage) is left out of
+the search and listed, and an engine asked to serve one says what it holds it
+as instead. The timings come from that device.
+
 ## Choosing the data
 
 The estimate and the measurement are only as good as the records. Use
