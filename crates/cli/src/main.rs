@@ -50,6 +50,7 @@ mod placement;
 mod plan_cli;
 mod pull_cli;
 mod optimize_cli;
+mod prune_cli;
 mod quantize_cli;
 mod qwen35_cli;
 mod qwen35moe_cli;
@@ -557,6 +558,10 @@ OPTIMIZE (the weight format of every linear, searched within a byte budget)
       the plan only if it measures better on held-out records, on the
       deployed kernels, than every uniform format that fits. Prints the
       --weight-format policy; `brain optimize --help` for every option.
+  brain prune BASE --dataset FILE --out DIR [--keep F | --keep-channels N]
+      Remove the least important channels of every prunable dimension,
+      ranked on the dataset, and write the narrower model as a checkpoint
+      directory; `brain prune --help` for every option.
 
 OTHER
   brain gradcheck                          # finite-difference backprop check (GPT2)

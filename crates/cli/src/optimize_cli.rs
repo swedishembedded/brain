@@ -227,7 +227,7 @@ fn optimizer(a: &Args) -> brain::ModelOptimizer {
 
 /// One line on stderr per stage; calibration and estimation only at every tenth of the way, so a long search stays
 /// readable.
-fn report_progress(p: &brain::OptimizerProgress) {
+pub(crate) fn report_progress(p: &brain::OptimizerProgress) {
     use brain::OptimizerProgress::{Deployed, Recovering, Search, Teacher};
     use brain::OptimizerSearchProgress::{Calibrated, Estimated, Measuring, Timed};
     let tenth = |i: usize, of: usize| i == of || i.is_multiple_of(of.div_ceil(10).max(1));

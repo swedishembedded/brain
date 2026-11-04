@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use data::preference::EncodedTurn;
 use gpu_core::select::Dtype;
 use model::ops::TierPolicy;
-use modelopt::{Budget, MeasureFit, Progress, Report, SearchFit, Timing};
+use modelopt::{Budget, MeasureFit, Progress, PruneFit, PruneReport, PruneWidth, Report, SearchFit, Timing};
 use rl::fit::{DistillFit, TeacherFit};
 use rl::objective::distill::{DistillConfig, DistillExample};
 use model::finetune::{AdapterLineage, ChatTrainer, LoraRequest, OptimizerState, PreferenceMargins};
@@ -70,6 +70,18 @@ pub(crate) struct SearchJob<'a> {
 pub(crate) type AdapterArg<'a> = Option<(&'a Path, u32, f32)>;
 type MeasureFn = fn(&Path, &Path, &FitOpts, &TierPolicy, AdapterArg<'_>) -> std::io::Result<f64>;
 type ServedFn = fn(&Path, &TierPolicy, Option<&Path>, &Path, &FitOpts) -> Option<std::io::Result<f64>>;
+type PruneFn = for<'j> fn(PruneJob<'j>, &mut dyn FnMut(Progress)) -> std::io::Result<PruneReport>;
+
+/// One structured pruning of a base, on a prepared dataset, the narrower
+/// model written to `out`.
+pub(crate) struct PruneJob<'a> {
+    pub base: &'a Path,
+    pub dir: &'a Path,
+    pub opts: &'a FitOpts,
+    pub width: PruneWidth,
+    pub out: &'a Path,
+}
+
 type TeacherFn = fn(&Path, &Path, &FitOpts, usize) -> std::io::Result<Vec<DistillExample>>;
 type DistillFn = for<'j, 'c> fn(DistillJob<'j>, FitControl<'c>) -> std::io::Result<FitReport>;
 
@@ -108,6 +120,8 @@ pub(crate) struct ChatEntry {
     pub measure: MeasureFn,
     /// The held-out loss of a base at a tier policy through the family's serving engine, where it has one.
     pub served: ServedFn,
+    /// Structured pruning of the base's prunable dimensions, the narrower model saved.
+    pub prune: PruneFn,
     /// The top-K distributions the base (fp32, trainable build) gives a prepared dataset's train split.
     pub teacher: TeacherFn,
     /// A LoRA adapter distilled from teacher examples over a frozen base at a tier policy.
@@ -129,6 +143,7 @@ impl ChatEntry {
             search: search::<T>,
             measure: measure::<T>,
             served: T::served_loss,
+            prune: prune::<T>,
             teacher: teacher::<T>,
             distill: distill::<T>,
         }
@@ -167,6 +182,15 @@ fn measure<T: ChatTrainer>(base: &Path, dir: &Path, opts: &FitOpts, tiers: &Tier
     let (continue_from, rank, alpha) = adapter.map_or((None, 1, 1.0), |(path, rank, alpha)| (Some(path), rank, alpha));
     T::train_lora(base, &LoraRequest { rank, alpha, continue_from, base: tiers }, opts, &mut fit)?;
     fit.loss.ok_or_else(|| std::io::Error::other("the measurement did not run"))
+}
+
+/// Pruning ranks channels by gradients, so it runs on the full-parameter
+/// build; no step is taken, so its optimizer state stays on the host.
+fn prune<T: ChatTrainer>(job: PruneJob<'_>, on_progress: &mut dyn FnMut(Progress)) -> std::io::Result<PruneReport> {
+    let PruneJob { base, dir, opts, width, out } = job;
+    let mut fit = PruneFit { dir, opts, width, out, on_progress, report: None };
+    T::train_full(base, opts, OptimizerState::HostOffload, &mut fit)?;
+    fit.report.ok_or_else(|| std::io::Error::other("the pruning did not run"))
 }
 
 /// The teacher is the base itself, built trainable in fp32 (the build every

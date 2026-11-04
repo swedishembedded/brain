@@ -30,7 +30,7 @@
 //! ([`serving::gguf_import`]), which picks the architecture from the file's own
 //! `general.architecture` header instead of from the command line.
 
-use crate::{caps_cli, optimize_cli, quantize_cli};
+use crate::{caps_cli, optimize_cli, prune_cli, quantize_cli};
 
 type Handler = fn(&[String]);
 
@@ -195,6 +195,8 @@ enum Resolved {
     /// `brain optimize <BASE> --dataset … --out …` -- the weight precision
     /// search; the architecture is a flag of the SDK call, not a token.
     Optimize { rest: Vec<String> },
+    /// `brain prune <BASE> --dataset … --out …` -- structured pruning.
+    Prune { rest: Vec<String> },
     Unknown(String),
     Empty,
 }
@@ -246,6 +248,9 @@ fn resolve(argv: &[String]) -> Resolved {
     if first == "optimize" {
         return Resolved::Optimize { rest: argv[1..].to_vec() };
     }
+    if first == "prune" {
+        return Resolved::Prune { rest: argv[1..].to_vec() };
+    }
     Resolved::Unknown(first.clone())
 }
 
@@ -259,6 +264,7 @@ pub fn dispatch(argv: &[String], help: &str) {
         Resolved::ImportFile { rest } => crate::import_gguf_cli::run_import_gguf(&rest),
         Resolved::QuantizeFile { rest } => quantize_cli::run_quantize(&rest),
         Resolved::Optimize { rest } => optimize_cli::run_optimize(&rest),
+        Resolved::Prune { rest } => prune_cli::run_prune(&rest),
         Resolved::Unknown(tok) => {
             eprintln!("brain: unknown command '{tok}'\n");
             print!("{help}");

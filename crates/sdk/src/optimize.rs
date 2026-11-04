@@ -68,8 +68,8 @@ const RECOVERY_FILE: &str = "recovery.safetensors";
 /// Teacher distribution entries kept per position for recovery.
 const TEACHER_TOP_K: usize = 16;
 /// Where the measurements that decide acceptance ran.
-const ON_ENGINE: &str = "serving engine";
-const ON_TRAINER: &str = "trainer frozen-base build";
+pub(crate) const ON_ENGINE: &str = "serving engine";
+pub(crate) const ON_TRAINER: &str = "trainer frozen-base build";
 
 /// The weight precision search of a chat model. See this module's doc.
 #[derive(Clone, Debug)]
@@ -367,30 +367,22 @@ impl ModelOptimizer {
 
     /// [`Self::run`], reporting each stage to `on_progress`.
     pub fn run_with(&self, mut on_progress: impl FnMut(&OptimizerProgress)) -> Result<ModelOptimizerOutcome> {
-        let chat = crate::full_finetune::chat_entry(&self.arch)?;
-        let dataset = self.dataset.as_deref().ok_or_else(|| Error::MissingArgument("ModelOptimizer: no dataset; call .dataset(path)".to_string()))?;
-        let out_dir = self.out_dir.as_deref().ok_or_else(|| Error::MissingArgument("ModelOptimizer: no out directory; call .out_dir(path)".to_string()))?;
-        let set = crate::device::resolve(&self.device)?;
-        let (tiers, excluded_tiers) = candidates(self.tiers.as_deref(), chat.lora_bases, chat.served_weights, &gpu_core::Gpu::new(&[]).caps().numeric)?;
-        let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
-        let (weights, model_dir, _) = loader::model_dir::resolve_base(&self.base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
-        let open = (chat.checkpoint_path)(&weights, &model_dir);
-
-        let (tok, tmpl) = tokenizer_and_template(&model_dir)?;
-        let no_think = if self.thinking { None } else { tmpl.no_think_block() };
-        let render = data::chat::RenderOpts { keep_reasoning: no_think.is_some() };
-        let asked = Asked { tok: &tok, tmpl: &tmpl, no_think: no_think.as_deref(), render, pack: false, images: &data::chat::TextOnly::TRAINER };
-        let seed = resolve_seed(self.seed, None)?;
-        let (calibration, held_out) = match &self.held_out {
-            Some(path) => (asked.read(dataset)?, asked.read(path)?),
-            None => split(asked.read(dataset)?, seed)?,
-        };
-        let vocab = (chat.vocab)(&open).map_err(Error::Backend)?;
-        let prepared_dir = out_dir.join(PREPARED_DIR);
-        let prepared = data::chat::prepare_chat_samples(&calibration, &held_out, &tok, &tmpl, render, vocab, &prepared_dir).map_err(|e| Error::Backend(format!("preparing the dataset: {e}")))?;
-        let block = block_for(prepared.longest_example, self.max_block)?;
-        crate::full_finetune::plan_before_load(&open, block, &set)?;
-        let opts = model::FitOpts { batch_size: ROWS, ..fit_opts(1, block, 0.0, seed) };
+        let work = prepare(&WorkloadSpec {
+            who: "ModelOptimizer",
+            base: &self.base,
+            arch: &self.arch,
+            models_dir: self.models_dir.as_deref(),
+            dataset: self.dataset.as_deref(),
+            held_out: self.held_out.as_deref(),
+            out_dir: self.out_dir.as_deref(),
+            seed: self.seed,
+            max_block: self.max_block,
+            device: &self.device,
+            thinking: self.thinking,
+        })?;
+        let (tiers, excluded_tiers) = candidates(self.tiers.as_deref(), work.chat.lora_bases, work.chat.served_weights, &gpu_core::Gpu::new(&[]).caps().numeric)?;
+        let Workload { chat, open, prepared_dir, opts, seed, calibration_records, held_out_records, .. } = &work;
+        let (chat, open, prepared_dir, opts, seed) = (*chat, open.clone(), prepared_dir.clone(), opts.clone(), *seed);
 
         let limit = match &self.latency_limit {
             None => None,
@@ -430,68 +422,72 @@ impl ModelOptimizer {
         let frontier = deployed.split_off(first_frontier);
         let plan_loss = deployed[0].loss;
         let accepted = deployed.iter().filter(|d| report.baselines.iter().any(|b| b.tier == d.label)).all(|d| plan_loss < d.loss);
-        let recovery = if self.recover_steps > 0 { Some(self.distill_recovery(&chat, &Prepared { open: &open, dir: &prepared_dir, opts: &opts }, &plan_policy, &mut on_progress)?) } else { None };
+        let recovery = if self.recover_steps > 0 { Some(distill_recovery(
+                &work,
+                &RecoveryRequest { student: &work.open, base_tiers: &plan_policy, steps: self.recover_steps, lr: self.recover_lr, rank: self.recover_rank, regime: "quantization-recovery distillation" },
+                &mut on_progress,
+            )?) } else { None };
 
-        let report_path = out_dir.join(REPORT_FILE);
-        let outcome = ModelOptimizerOutcome { report, deployed, accepted, measured_on, recovery, frontier, excluded_tiers, calibration_records: calibration.len(), held_out_records: held_out.len(), seed, report_path: report_path.clone() };
-        write_report(&report_path, &outcome)?;
+        let report_path = work.out_dir.join(REPORT_FILE);
+        let outcome = ModelOptimizerOutcome { report, deployed, accepted, measured_on, recovery, frontier, excluded_tiers, calibration_records: *calibration_records, held_out_records: *held_out_records, seed, report_path: report_path.clone() };
+        write_json(&report_path, &outcome)?;
         Ok(outcome)
     }
 }
 
-/// A base and the dataset prepared for it: what every step after the search runs on.
-#[derive(Clone, Copy)]
-struct Prepared<'a> {
-    open: &'a Path,
-    dir: &'a Path,
-    opts: &'a model::FitOpts,
+/// A recovery distillation: a LoRA adapter over `student` held at
+/// `base_tiers`, trained toward the workload's base (the teacher) on the
+/// calibration records.
+pub(crate) struct RecoveryRequest<'a> {
+    pub student: &'a Path,
+    pub base_tiers: &'a model::ops::TierPolicy,
+    pub steps: u32,
+    pub lr: f32,
+    pub rank: u32,
+    /// What the adapter's provenance calls the run.
+    pub regime: &'static str,
 }
 
-impl ModelOptimizer {
-    /// Distill the recovery adapter over the base held at `plan`, then measure the plan without and with it on the
-    /// trainer build that trained it.
-    fn distill_recovery(&self, chat: &crate::chat_trainer::ChatEntry, at: &Prepared<'_>, plan: &model::ops::TierPolicy, on_progress: &mut impl FnMut(&OptimizerProgress)) -> Result<Recovery> {
-        let Prepared { open, dir: prepared_dir, opts } = *at;
-        let policy = plan.describe();
-        on_progress(&OptimizerProgress::Teacher);
-        // The teacher reads whole-row logits (`Model::logits_all`), which a model built for one row gives.
-        let one_row = model::FitOpts { batch_size: 1, ..opts.clone() };
-        let examples = (chat.teacher)(open, prepared_dir, &one_row, TEACHER_TOP_K).map_err(|e| Error::Backend(format!("the teacher: {e}")))?;
-        let student = model::FitOpts { batch_size: 1, ..fit_opts(self.recover_steps, opts.block_size, self.recover_lr, opts.seed) };
-        let out_dir = prepared_dir.parent().unwrap_or(prepared_dir);
-        let adapter = out_dir.join(RECOVERY_FILE);
-        let base_id = loader::model_dir::resolve_base(&self.base, loader::model_dir::resolve(self.models_dir.as_deref()).as_deref()).map_err(Error::ModelNotFound)?.2;
-        let card_id = format!("{base_id}:local:recovery:latest");
-        let base_digest = crate::finetune::base_digest(open)?;
-        let provenance = checkpoint::st::TrainingProvenance {
-            code_revision: format!("brain {}", env!("CARGO_PKG_VERSION")),
-            regime: "quantization-recovery distillation".to_string(),
-            seed: student.seed,
-            hyperparams: serde_json::json!({ "rank": self.recover_rank, "steps": self.recover_steps, "lr": self.recover_lr, "top_k": TEACHER_TOP_K, "weight_format": policy, "examples": examples.len() }),
-            environment: gpu_core::backend_name().to_string(),
-            gate: None,
-            trained_from: None,
-            base_digest: Some(base_digest),
-            cycle: 0,
-        };
-        let mut on_step = |s: &model::StepReport| {
-            on_progress(&OptimizerProgress::Recovering { step: s.step, steps: s.steps, loss: s.loss });
-            true
-        };
-        let job = crate::chat_trainer::DistillJob {
-            base: open,
-            lora: model::finetune::LoraRequest { rank: self.recover_rank, alpha: self.recover_rank as f32, continue_from: None, base: plan },
-            opts: &student,
-            examples,
-            adapter: &adapter,
-            lineage: model::finetune::AdapterLineage { card_id: &card_id, base_id: &base_id, dataset_id: None, provenance: Some(provenance) },
-        };
-        (chat.distill)(job, model::FitControl { on_step: Some(&mut on_step), ..Default::default() }).map_err(|e| Error::Backend(format!("recovery: {e}")))?;
-        on_progress(&OptimizerProgress::Deployed { label: "plan with the recovery adapter".into() });
-        let plan_loss = (chat.measure)(open, prepared_dir, opts, plan, None).map_err(|e| Error::Backend(format!("measuring the plan: {e}")))?;
-        let recovered_loss = (chat.measure)(open, prepared_dir, opts, plan, Some((&adapter, self.recover_rank, self.recover_rank as f32))).map_err(|e| Error::Backend(format!("measuring the recovery adapter: {e}")))?;
-        Ok(Recovery { adapter, steps: self.recover_steps, rank: self.recover_rank, plan_loss, recovered_loss })
-    }
+/// Distill the recovery adapter, then measure the student without and with it
+/// on the trainer build that trained it.
+pub(crate) fn distill_recovery(work: &Workload, req: &RecoveryRequest<'_>, on_progress: &mut dyn FnMut(&OptimizerProgress)) -> Result<Recovery> {
+    let (chat, prepared_dir, opts) = (&work.chat, work.prepared_dir.as_path(), &work.opts);
+    on_progress(&OptimizerProgress::Teacher);
+    // The teacher reads whole-row logits (`Model::logits_all`), which a model built for one row gives.
+    let one_row = model::FitOpts { batch_size: 1, ..opts.clone() };
+    let examples = (chat.teacher)(&work.open, prepared_dir, &one_row, TEACHER_TOP_K).map_err(|e| Error::Backend(format!("the teacher: {e}")))?;
+    let student = model::FitOpts { batch_size: 1, ..fit_opts(req.steps, opts.block_size, req.lr, opts.seed) };
+    let adapter = work.out_dir.join(RECOVERY_FILE);
+    let base_id = work.base_id.as_str();
+    let card_id = format!("{base_id}:local:recovery:latest");
+    let provenance = checkpoint::st::TrainingProvenance {
+        code_revision: format!("brain {}", env!("CARGO_PKG_VERSION")),
+        regime: req.regime.to_string(),
+        seed: student.seed,
+        hyperparams: serde_json::json!({ "rank": req.rank, "steps": req.steps, "lr": req.lr, "top_k": TEACHER_TOP_K, "weight_format": req.base_tiers.describe(), "examples": examples.len() }),
+        environment: gpu_core::backend_name().to_string(),
+        gate: None,
+        trained_from: None,
+        base_digest: Some(crate::finetune::base_digest(req.student)?),
+        cycle: 0,
+    };
+    let mut on_step = |s: &model::StepReport| {
+        on_progress(&OptimizerProgress::Recovering { step: s.step, steps: s.steps, loss: s.loss });
+        true
+    };
+    let job = crate::chat_trainer::DistillJob {
+        base: req.student,
+        lora: model::finetune::LoraRequest { rank: req.rank, alpha: req.rank as f32, continue_from: None, base: req.base_tiers },
+        opts: &student,
+        examples,
+        adapter: &adapter,
+        lineage: model::finetune::AdapterLineage { card_id: &card_id, base_id, dataset_id: None, provenance: Some(provenance) },
+    };
+    (chat.distill)(job, model::FitControl { on_step: Some(&mut on_step), ..Default::default() }).map_err(|e| Error::Backend(format!("recovery: {e}")))?;
+    on_progress(&OptimizerProgress::Deployed { label: "the student with the recovery adapter".into() });
+    let plan_loss = (chat.measure)(req.student, prepared_dir, opts, req.base_tiers, None).map_err(|e| Error::Backend(format!("measuring the student: {e}")))?;
+    let recovered_loss = (chat.measure)(req.student, prepared_dir, opts, req.base_tiers, Some((&adapter, req.rank, req.rank as f32))).map_err(|e| Error::Backend(format!("measuring the recovery adapter: {e}")))?;
+    Ok(Recovery { adapter, steps: req.steps, rank: req.rank, plan_loss, recovered_loss })
 }
 
 /// The candidate tiers. Each must be one the trainer holds a frozen base in (so it can be measured on its deployed
@@ -524,6 +520,68 @@ fn candidates(asked: Option<&str>, trainer: model::policy::TrainBases, served: &
             Ok((kept, widened.into_iter().map(|t| ExcludedTier { tier: t.name(), held_as: t.promote(numeric).name() }).collect()))
         }
     }
+}
+
+/// What a compression run is asked to read, before anything is resolved.
+pub(crate) struct WorkloadSpec<'a> {
+    /// The public type's name, for errors.
+    pub who: &'static str,
+    pub base: &'a str,
+    pub arch: &'a str,
+    pub models_dir: Option<&'a str>,
+    pub dataset: Option<&'a Path>,
+    pub held_out: Option<&'a Path>,
+    pub out_dir: Option<&'a Path>,
+    pub seed: Option<u64>,
+    pub max_block: Option<u32>,
+    pub device: &'a Device,
+    pub thinking: bool,
+}
+
+/// A base and a chat dataset prepared for it: the calibration records as the
+/// prepared train split, the held-out records as its validation split.
+pub(crate) struct Workload {
+    pub chat: crate::chat_trainer::ChatEntry,
+    /// The checkpoint the family's trainer opens, and the directory holding its tokenizer.
+    pub open: PathBuf,
+    pub model_dir: PathBuf,
+    pub base_id: String,
+    pub out_dir: PathBuf,
+    pub prepared_dir: PathBuf,
+    /// Rows of [`ROWS`] records, the row the longest record.
+    pub opts: model::FitOpts,
+    pub seed: u64,
+    pub calibration_records: usize,
+    pub held_out_records: usize,
+}
+
+/// Resolve the base, read and split the dataset ([`split`], or the held-out
+/// file), and prepare both splits for the base's tokenizer and template;
+/// refuses a run whose base does not fit the devices before anything loads.
+pub(crate) fn prepare(spec: &WorkloadSpec<'_>) -> Result<Workload> {
+    let chat = crate::full_finetune::chat_entry(spec.arch)?;
+    let dataset = spec.dataset.ok_or_else(|| Error::MissingArgument(format!("{}: no dataset; call .dataset(path)", spec.who)))?;
+    let out_dir = spec.out_dir.ok_or_else(|| Error::MissingArgument(format!("{}: no out directory; call .out_dir(path)", spec.who)))?;
+    let set = crate::device::resolve(spec.device)?;
+    let store_root = loader::model_dir::resolve(spec.models_dir);
+    let (weights, model_dir, base_id) = loader::model_dir::resolve_base(spec.base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
+    let open = (chat.checkpoint_path)(&weights, &model_dir);
+    let (tok, tmpl) = tokenizer_and_template(&model_dir)?;
+    let no_think = if spec.thinking { None } else { tmpl.no_think_block() };
+    let render = data::chat::RenderOpts { keep_reasoning: no_think.is_some() };
+    let asked = Asked { tok: &tok, tmpl: &tmpl, no_think: no_think.as_deref(), render, pack: false, images: &data::chat::TextOnly::TRAINER };
+    let seed = resolve_seed(spec.seed, None)?;
+    let (calibration, held_out) = match spec.held_out {
+        Some(path) => (asked.read(dataset)?, asked.read(path)?),
+        None => split(asked.read(dataset)?, seed)?,
+    };
+    let vocab = (chat.vocab)(&open).map_err(Error::Backend)?;
+    let prepared_dir = out_dir.join(PREPARED_DIR);
+    let prepared = data::chat::prepare_chat_samples(&calibration, &held_out, &tok, &tmpl, render, vocab, &prepared_dir).map_err(|e| Error::Backend(format!("preparing the dataset: {e}")))?;
+    let block = block_for(prepared.longest_example, spec.max_block)?;
+    crate::full_finetune::plan_before_load(&open, block, &set)?;
+    let opts = model::FitOpts { batch_size: ROWS, ..fit_opts(1, block, 0.0, seed) };
+    Ok(Workload { chat, open, model_dir, base_id, out_dir: out_dir.to_path_buf(), prepared_dir, opts, seed, calibration_records: calibration.len(), held_out_records: held_out.len() })
 }
 
 /// Times one product on the device the search runs on, through the ops façade
@@ -559,7 +617,7 @@ impl DeviceTimer {
 /// seeded shuffle, then [`HELD_OUT_SHARE`] of it (at least one record) held out.
 fn split(mut records: Vec<data::chat::ChatSample>, seed: u64) -> Result<(Vec<data::chat::ChatSample>, Vec<data::chat::ChatSample>)> {
     if records.len() < 2 {
-        return Err(Error::Backend(format!("ModelOptimizer: {} record(s) cannot be split into a calibration and a held-out set; name a held-out file", records.len())));
+        return Err(Error::Backend(format!("{} record(s) cannot be split into a calibration and a held-out set; name a held-out file", records.len())));
     }
     let mut rng = data::rng::Rng::new(seed);
     for i in (1..records.len()).rev() {
@@ -570,8 +628,9 @@ fn split(mut records: Vec<data::chat::ChatSample>, seed: u64) -> Result<(Vec<dat
     Ok((records, held_out))
 }
 
-fn write_report(path: &Path, outcome: &ModelOptimizerOutcome) -> Result<()> {
-    let json = serde_json::to_string_pretty(outcome).map_err(|e| Error::Backend(format!("serializing the report: {e}")))?;
+/// `value` as pretty JSON at `path`, through a temporary file and a rename.
+pub(crate) fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
+    let json = serde_json::to_string_pretty(value).map_err(|e| Error::Backend(format!("serializing the report: {e}")))?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, path)).map_err(|e| Error::Backend(format!("{}: {e}", path.display())))
 }

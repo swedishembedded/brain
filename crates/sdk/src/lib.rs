@@ -192,10 +192,14 @@ pub use full_finetune::{merge_adapter, ChatFullFineTune, ChatFullFineTuneOutcome
 #[cfg(feature = "study")]
 mod optimize;
 #[cfg(feature = "study")]
-pub use optimize::{DeployedLoss, ExcludedTier, ModelOptimizer, ModelOptimizerOutcome, OptimizerProgress};
+pub use optimize::{DeployedLoss, ExcludedTier, ModelOptimizer, ModelOptimizerOutcome, OptimizerProgress, Recovery};
+#[cfg(feature = "study")]
+mod prune;
+#[cfg(feature = "study")]
+pub use prune::{ModelPruner, ModelPrunerOutcome};
 /// The model optimizer's report types, for a caller of [`ModelOptimizer`].
 #[cfg(feature = "study")]
-pub use modelopt::{Baseline as OptimizerBaseline, Progress as OptimizerSearchProgress, Report as OptimizerReport, SiteReport as OptimizerSiteReport};
+pub use modelopt::{Baseline as OptimizerBaseline, Progress as OptimizerSearchProgress, PruneReport, Report as OptimizerReport, SiteReport as OptimizerSiteReport};
 #[cfg(feature = "study")]
 mod preference;
 #[cfg(feature = "study")]
