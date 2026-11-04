@@ -16,9 +16,12 @@ use crate::{assign, held_out_loss, measure_policy, sensitivity, sites, Assignmen
 pub enum Budget {
     /// Physical bytes over every searched tensor (packed words plus scales).
     Bytes(u64),
-    /// Mean stored bits per searched weight element, scales included: `8.5`
-    /// is uniform group-scaled int8, `32` is f32.
+    /// Mean stored bits per searched weight element, scales included: `9` is
+    /// uniform group-scaled int8, `32` is f32.
     BitsPerWeight(f64),
+    /// What every searched tensor takes at one tier: a plan at the size of a
+    /// uniform deployment, searched to lose less than it does.
+    Uniform(Dtype),
 }
 
 impl Budget {
@@ -28,6 +31,12 @@ impl Budget {
             Budget::Bytes(b) => Ok(b),
             Budget::BitsPerWeight(bits) if bits.is_finite() && bits > 0.0 => Ok((bits * sites.iter().map(Site::numel).sum::<usize>() as f64 / 8.0) as u64),
             Budget::BitsPerWeight(bits) => Err(format!("a bits-per-weight budget must be finite and positive, got {bits}")),
+            Budget::Uniform(tier) => sites
+                .iter()
+                .flat_map(|s| &s.tensors)
+                .map(|t| Weight::packs(tier, t.n, t.k).then(|| Weight::bytes_for(tier, t.n, t.k)))
+                .sum::<Option<u64>>()
+                .ok_or_else(|| format!("a uniform {} budget: some searched tensor does not pack at that tier", tier.name())),
         }
     }
 }

@@ -35,12 +35,14 @@
 //! kernels also quantize activations (int8) are confirmed by building the
 //! model at the plan on its deployed kernels, which the front end does.
 
+mod fit;
 mod manifest;
 mod measure;
 mod search;
 mod sensitivity;
 mod solve;
 
+pub use fit::{MeasureFit, SearchFit};
 pub use manifest::{sites, Site, Tensor};
 pub use measure::{held_out_loss, measure_policy};
 pub use search::{search_weights, Baseline, Budget, Report, SearchRequest, SiteReport};

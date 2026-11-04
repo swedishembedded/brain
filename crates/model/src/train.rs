@@ -450,7 +450,7 @@ fn load(dir: &Path, opts: &FitOpts) -> std::io::Result<Loaded> {
 /// i32 targets from the loader (`-1` = ignore) reinterpreted as the model's
 /// `u32` IGNORE sentinel.
 #[cfg(not(target_arch = "wasm32"))]
-fn targets_to_u32(y: &[i32]) -> Vec<u32> {
+pub fn targets_to_u32(y: &[i32]) -> Vec<u32> {
     y.iter().map(|&v| if v < 0 { IGNORE } else { v as u32 }).collect()
 }
 

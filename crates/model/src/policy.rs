@@ -220,7 +220,7 @@ impl ServePolicy {
     /// [`VALUE_FLAGS`] first.
     pub fn set(&mut self, flag: &str, value: &str) -> Result<(), String> {
         match flag {
-            "--weight-format" => self.weights = Some(TierPolicy::parse(&canonical_weights(value)).map_err(|e| format!("--weight-format {value:?}: {e}"))?),
+            "--weight-format" => self.weights = Some(parse_weight_format(value).map_err(|e| format!("--weight-format {value:?}: {e}"))?),
             "--kv-cache" => self.kv_cache = Some(KvTier::parse(value).map_err(|e| format!("--kv-cache {value:?}: {e}"))?),
             "--gemm" => {
                 self.gemm = Some(match value.trim().to_ascii_lowercase().as_str() {
@@ -412,6 +412,12 @@ fn pretty(d: Dtype) -> &'static str {
 
 fn names(d: &[Dtype]) -> String {
     d.iter().map(|d| pretty(*d)).collect::<Vec<_>>().join(", ")
+}
+
+/// A `--weight-format` value as people spell it (`int8`, `fp8`, a per-leaf
+/// list `nf4,attn=int8`), parsed into the policy it names.
+pub fn parse_weight_format(spec: &str) -> Result<TierPolicy, String> {
+    TierPolicy::parse(&canonical_weights(spec))
 }
 
 /// `--weight-format` spellings people use (`int8`, `fp32`, ...) rewritten to the

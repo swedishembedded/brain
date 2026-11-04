@@ -13,8 +13,8 @@ path = "src/lib.rs"
 brain-model.workspace = true
 brain-gpu-core.workspace = true
 serde.workspace = true
+brain-data.workspace = true
 
 [dev-dependencies]
-brain-data.workspace = true
 # `tests/autoquant.rs` trains a tiny `qwen3::Qwen` as the model under search.
 brain-qwen3.workspace = true
