@@ -24,7 +24,7 @@
 //!          [--tail 256] [--seed N]
 //! qwen_lsa prefill --indexer FILE [--tokens 4096,8192,16384,32768] [--corpus DIR]
 //!          [--kv-cache int8|f32|fp8] [--weights f32|int8] [--dense-until N]
-//!          [--tree SPEC] [--profile]
+//!          [--yarn FACTOR] [--tree SPEC] [--profile]
 //! ```
 //!
 //! `prefill --indexer random` times a random-projection indexer built for the
@@ -34,7 +34,9 @@
 //! index (index keys and Ward), the read, sparse and dense attention, and the
 //! wall time beyond the device's (host work: page tables, node pages).
 //! `--weights` holds the linears in f32 or int8; by default int8 from the
-//! parameter count up that serving quantizes.
+//! parameter count up that serving quantizes. A prompt past the checkpoint's
+//! native positions rotates under YaRN, by default the smallest power-of-two
+//! factor that covers it; `--yarn FACTOR` sets it.
 //!
 //! `--tree size=4,blocks=1024:4096,beam=2048:2048,page=4096,growth=1024[,start=N]`
 //! reads through node bucket levels (`model::lsa::tree`): node buckets of
@@ -63,6 +65,8 @@ use std::time::Instant;
 /// Keys of the teacher's distribution each query keeps (the paper's 2048).
 const TEACHER_KEEP: usize = 2048;
 const BLOCK: u32 = 16;
+/// Tokens of the warm-up prefill before each timed one.
+const WARM_TOKENS: usize = 1100;
 
 struct Args(HashMap<String, String>);
 
@@ -164,19 +168,29 @@ enum Kv {
 }
 
 fn engine(path: &str, max_tokens: u32) -> Result<(Engine, IndexGeometry), String> {
-    engine_kv(path, max_tokens, Kv::F32, Some(false))
+    engine_kv(path, max_tokens, Kv::F32, Some(false), None)
 }
 
 /// An engine for prompts of `max_tokens`, its KV cache in `kv`, its linears
 /// int8 when `int8` says so - by default from the parameter count up that
-/// serving quantizes (`qwen3::footprint::int8_by_default`).
-fn engine_kv(path: &str, max_tokens: u32, kv: Kv, int8: Option<bool>) -> Result<(Engine, IndexGeometry), String> {
-    let (cfg, src) = qwen3::open_checkpoint(path)?;
+/// serving quantizes (`qwen3::footprint::int8_by_default`). Past the
+/// checkpoint's native positions it rotates under YaRN by `yarn`, by default
+/// the smallest power of two that covers `max_tokens` (a config that already
+/// scales its rotation keeps it).
+fn engine_kv(path: &str, max_tokens: u32, kv: Kv, int8: Option<bool>, yarn: Option<f32>) -> Result<(Engine, IndexGeometry), String> {
+    let (mut cfg, src) = qwen3::open_checkpoint(path)?;
+    let native = cfg.max_position_embeddings;
+    if cfg.rope_scaling.is_none() && (yarn.is_some() || max_tokens > native) {
+        let factor = yarn.unwrap_or_else(|| max_tokens.div_ceil(native).next_power_of_two() as f32);
+        println!("YaRN x{factor} over {native} native positions");
+        cfg.rope_scaling = Some(model::rope_scaling::RopeScaling::Yarn(model::yarn::YarnConfig::new(factor, native)));
+    }
     let tier = if int8.unwrap_or_else(|| qwen3::footprint::int8_by_default(&cfg)) { qwen3::Dtype::I8 } else { qwen3::Dtype::F32 };
     let geometry = IndexGeometry { n_layers: cfg.n_layers as usize, n_heads: cfg.n_heads as usize, n_kv_heads: cfg.n_kv_heads as usize, head_dim: cfg.head_dim as usize, rope_base: cfg.rope_theta };
     let mbt = max_tokens.div_ceil(BLOCK);
-    // Room for a warm-up prompt the prefix cache keeps beside the measured one.
-    let mut e = Engine::from_source_tier(cfg, &*src, BLOCK, 2 * mbt + 8, 1, mbt, 512, kv != Kv::F32, tier);
+    // Room for the warm-up prompt the prefix cache keeps beside the measured one.
+    let pool = mbt + (WARM_TOKENS as u32).div_ceil(BLOCK) + 8;
+    let mut e = Engine::from_source_tier(cfg, &*src, BLOCK, pool, 1, mbt, 512, kv != Kv::F32, tier);
     if kv == Kv::Fp8 {
         e.set_kv_fp8()?;
     }
@@ -443,6 +457,7 @@ fn prefill(args: &Args) -> Result<(), String> {
         println!("through a tree: {tree:?}");
         ix.tree = Some(tree);
     }
+    let yarn = args.get("yarn").map(|v| v.parse::<f32>().map_err(|_| format!("--yarn {v:?} is not a factor"))).transpose()?;
     let weights = match args.get("weights") {
         None => None,
         Some("f32") => Some(false),
@@ -461,7 +476,7 @@ fn prefill(args: &Args) -> Result<(), String> {
         // One warm-up prefill of other tokens (pipelines, allocator), then the
         // timed one: a repeat of the same prompt would be served by the prefix
         // cache and time nothing.
-        let warm: Vec<u32> = prompt[..prompt.len().min(1100)].iter().map(|t| (t + 7) % 20_000 + 200).collect();
+        let warm: Vec<u32> = prompt[..prompt.len().min(WARM_TOKENS)].iter().map(|t| (t + 7) % 20_000 + 200).collect();
         let time = |e: &mut Engine| -> f64 {
             let mut table = model::paged::BlockTable::new();
             e.prefill_for_perf(&mut table, &warm);
@@ -473,10 +488,10 @@ fn prefill(args: &Args) -> Result<(), String> {
             e.release_for_perf(&mut table);
             secs
         };
-        let (mut dense, _) = engine_kv(&path, n as u32, kv, weights)?;
+        let (mut dense, _) = engine_kv(&path, n as u32, kv, weights, yarn)?;
         let td = time(&mut dense);
         drop(dense);
-        let (mut sparse, _) = engine_kv(&path, n as u32, kv, weights)?;
+        let (mut sparse, _) = engine_kv(&path, n as u32, kv, weights, yarn)?;
         sparse.set_lsa(&ix)?;
         if let Some(v) = args.get("dense-until") {
             sparse.set_lsa_dense_until(v.parse().map_err(|_| format!("--dense-until {v:?} is not a number"))?);
@@ -490,7 +505,7 @@ fn prefill(args: &Args) -> Result<(), String> {
             let other: Vec<u32> = prompt.iter().map(|t| (t + 13) % 20_000 + 200).collect();
             profile(&mut sparse, &format!("sparse T={n}"), &other);
             drop(sparse);
-            let (mut dense, _) = engine_kv(&path, n as u32, kv, weights)?;
+            let (mut dense, _) = engine_kv(&path, n as u32, kv, weights, yarn)?;
             profile(&mut dense, &format!("dense T={n}"), &other);
         }
     }
