@@ -2202,9 +2202,12 @@ impl Qwen {
             // Every other tier (NF4, block-scaled FP8, ...) runs the shared quantized-execution
             // contract: a bounded tile decode feeding the dense product.
             Some(w) if !matches!(w, Weight::F32 { .. }) => self.ops.matmul_dx(s, w, d_out, m, dx, acc != 0),
-            _ => {
+            // An fp32 linear: its own buffer in a quantized build (a mixed base holds it beside the packed ones),
+            // the parameter store's otherwise.
+            dense => {
                 let (bk, bt) = dx_kernel_bw(m, k);
-                s.push(self.gpu.dispatch(bk, &[d_out, self.w(wname), dx], &[m, k, nout, acc], bt));
+                let w = dense.and_then(Weight::dense_buffer).unwrap_or_else(|| self.w(wname));
+                s.push(self.gpu.dispatch(bk, &[d_out, w, dx], &[m, k, nout, acc], bt));
             }
         }
     }

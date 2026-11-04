@@ -700,6 +700,15 @@ impl Weight {
         matches!(self, Weight::F32 { .. } | Weight::BF16 { .. } | Weight::F16 { .. } | Weight::FP8 { .. } | Weight::NF4 { .. } | Weight::Micro { .. })
     }
 
+    /// The buffer of an fp32 weight, which a kernel reads as a plain dense
+    /// `[n, k]` matrix; `None` for every packed tier.
+    pub fn dense_buffer(&self) -> Option<&DeviceBuffer> {
+        match self {
+            Weight::F32 { w, .. } => Some(w),
+            _ => None,
+        }
+    }
+
     pub fn dtype(&self) -> Dtype {
         match self {
             Weight::F32 { .. } => Dtype::F32,

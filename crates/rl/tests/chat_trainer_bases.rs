@@ -66,9 +66,11 @@ fn every_declared_base_trains_and_an_undeclared_one_is_refused<Trainer: ChatTrai
     assert_eq!(err.kind(), std::io::ErrorKind::Unsupported, "{err}");
 }
 
-/// The mixed base a family that holds one leaf per tier trains over.
+/// The mixed base a family that holds one leaf per tier trains over: one fp32
+/// linear among packed ones, which a quantized build holds outside its
+/// parameter store.
 fn mixed() -> TierPolicy {
-    TierPolicy::uniform(Dtype::F32).with(&["attn"], Dtype::I8).with(&["mlp"], Dtype::NF4)
+    TierPolicy::uniform(Dtype::F32).with(&["attn"], Dtype::I8).with(&["mlp"], Dtype::NF4).with(&["blocks.1.attn.wo.weight"], Dtype::F32)
 }
 
 
@@ -84,7 +86,8 @@ fn qwen3_trains_over_a_mixed_base_with_every_leaf_at_its_tier() {
     assert!(report.final_loss.is_some_and(f32::is_finite), "{report:?}");
     let qwen3::finetune::Trained::Single(m) = trained else { panic!("a tiny model trains on one card") };
     for l in 0..cfg.n_layers {
-        for (leaf, want) in [("attn.wq.weight", Dtype::I8), ("attn.wo.weight", Dtype::I8), ("mlp.up.weight", Dtype::NF4), ("mlp.down.weight", Dtype::NF4)] {
+        let wo = if l == 1 { Dtype::F32 } else { Dtype::I8 };
+        for (leaf, want) in [("attn.wq.weight", Dtype::I8), ("attn.wo.weight", wo), ("mlp.up.weight", Dtype::NF4), ("mlp.down.weight", Dtype::NF4)] {
             assert_eq!(m.linear_dtype_of(&format!("blocks.{l}.{leaf}")), Some(want), "blocks.{l}.{leaf}");
         }
     }
