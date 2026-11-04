@@ -40,7 +40,9 @@
 pub mod attend;
 pub mod config;
 pub mod device;
+pub mod engine;
 pub mod index;
+pub mod indexer;
 pub mod select;
 pub mod space;
 pub mod ward;
@@ -91,3 +93,6 @@ mod tests;
 
 #[cfg(test)]
 mod device_tests;
+
+#[cfg(test)]
+mod engine_tests;

@@ -52,6 +52,16 @@ head layout; clustering, selection and the sparse read are written once.
       lagging page table widens the window instead of dropping keys. Gated
       against the host index space and `read_scores` (exact, scrambled pages,
       lagging rows, early budget).
+- [x] Engine machinery (`model::lsa::engine`, `model::lsa::indexer`): an
+      `Indexer` artifact (per-layer query/key projections, configuration and
+      the model geometry it is valid for; random and PCA initialisations;
+      safetensors with a strict header) and `LsaAttention`, which records a
+      layer's sparse attention as three shape-only dispatches and keeps each
+      sequence's index pages up to date from the cached keys
+      (`BlockTable::index_pages`). Pages are keyed by cluster block and KV
+      block chain, so a shared prefix shares its pages; truncation and
+      release free them. Gated: device context equals the oracle over the
+      device's selection, page sharing and freeing, artifact round trip.
 - [ ] Device Ward: clustering of a closed block still runs on the host
       (`cluster_block`), one readback per closed block per layer.
 - [ ] Serving: per-sequence, per-layer `BucketIndex` in the paged decoders'
