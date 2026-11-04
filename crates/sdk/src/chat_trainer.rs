@@ -20,6 +20,9 @@
 use std::path::{Path, PathBuf};
 
 use data::preference::EncodedTurn;
+use gpu_core::select::Dtype;
+use model::ops::TierPolicy;
+use modelopt::{Budget, MeasureFit, Report, SearchFit};
 use model::finetune::{AdapterLineage, ChatTrainer, LoraRequest, OptimizerState, PreferenceMargins};
 use model::{FitControl, FitOpts, FitReport};
 use rl::fit::DpoFit;
@@ -48,6 +51,8 @@ pub(crate) type ResidentMargins = Vec<Vec<f64>>;
 type FullFn = for<'c> fn(&Path, &Path, &FitOpts, &Path, OptimizerState, FitControl<'c>) -> std::io::Result<FitReport>;
 type PreferenceFn = for<'j, 'c> fn(PreferenceJob<'j>, FitControl<'c>) -> std::io::Result<(FitReport, ResidentMargins)>;
 type MarginsFn = fn(&Path, Option<&Path>, &Path, &[(EncodedTurn, EncodedTurn)], u32) -> Option<PreferenceMargins>;
+type SearchFn = fn(&Path, &Path, &FitOpts, &[Dtype], Budget) -> std::io::Result<Report>;
+type MeasureFn = fn(&Path, &Path, &FitOpts, &TierPolicy) -> std::io::Result<f64>;
 
 /// What the SDK's full-parameter and preference fine-tuners need of one
 /// architecture, resolved once per table row.
@@ -63,6 +68,10 @@ pub(crate) struct ChatEntry {
     pub lora_bases: model::policy::TrainBases,
     /// The family scores the exported adapter ([`Self::margins`]) rather than the resident model.
     pub scores_exported_pairs: bool,
+    /// The weight precision search over the trainable build of a base, on a prepared dataset.
+    pub search: SearchFn,
+    /// The held-out loss of a base built with its linears at a tier policy, on the deployed kernels.
+    pub measure: MeasureFn,
 }
 
 impl ChatEntry {
@@ -76,6 +85,8 @@ impl ChatEntry {
             margins: T::preference_margins,
             lora_bases: T::LORA_BASES,
             scores_exported_pairs: T::SCORES_EXPORTED_PAIRS,
+            search: search::<T>,
+            measure: measure::<T>,
         }
     }
 }
@@ -91,4 +102,22 @@ fn preference<T: ChatTrainer>(job: PreferenceJob<'_>, control: FitControl<'_>) -
         T::save_adapter(&trained, job.adapter, &job.lineage).map_err(|e| std::io::Error::new(e.kind(), format!("{}: saving the adapter: {e}", job.adapter.display())))?;
     }
     Ok((report, fit.into_margins()))
+}
+
+/// The search runs on the full-parameter build (the estimate needs every
+/// linear's gradient), with the optimizer state on the host since no step is
+/// taken.
+fn search<T: ChatTrainer>(base: &Path, dir: &Path, opts: &FitOpts, tiers: &[Dtype], budget: Budget) -> std::io::Result<Report> {
+    let mut fit = SearchFit { dir, opts, tiers, budget, report: None };
+    T::train_full(base, opts, OptimizerState::HostOffload, &mut fit)?;
+    fit.report.ok_or_else(|| std::io::Error::other("the weight search did not run"))
+}
+
+/// The base built as a LoRA trainer over a frozen base at `tiers`: the family's
+/// own per-leaf build on its deployed kernels. A fresh adapter is a zero delta,
+/// so the loss measured is the base's at those tiers.
+fn measure<T: ChatTrainer>(base: &Path, dir: &Path, opts: &FitOpts, tiers: &TierPolicy) -> std::io::Result<f64> {
+    let mut fit = MeasureFit { dir, opts, loss: None };
+    T::train_lora(base, &LoraRequest { rank: 1, alpha: 1.0, continue_from: None, base: tiers }, opts, &mut fit)?;
+    fit.loss.ok_or_else(|| std::io::Error::other("the measurement did not run"))
 }

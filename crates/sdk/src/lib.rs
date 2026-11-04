@@ -190,6 +190,13 @@ mod full_finetune;
 #[cfg(feature = "study")]
 pub use full_finetune::{merge_adapter, ChatFullFineTune, ChatFullFineTuneOutcome, MergedCheckpoint};
 #[cfg(feature = "study")]
+mod optimize;
+#[cfg(feature = "study")]
+pub use optimize::{DeployedLoss, ExcludedTier, ModelOptimizer, ModelOptimizerOutcome};
+/// The model optimizer's report types, for a caller of [`ModelOptimizer`].
+#[cfg(feature = "study")]
+pub use modelopt::{Baseline as OptimizerBaseline, Report as OptimizerReport, SiteReport as OptimizerSiteReport};
+#[cfg(feature = "study")]
 mod preference;
 #[cfg(feature = "study")]
 pub mod preference_dataset;

@@ -395,7 +395,7 @@ impl ChatFullFineTuneOutcome {
 /// memory ([`model::finetune::OptimizerState::HostOffload`]), so the cards hold the values, the gradients and one
 /// step's activations. The activation term is calibrated on the 27B (`crate::finetune::activation_bytes`) and
 /// included when the checkpoint's config names its depth and width. No selected card (a CPU run) is not checked.
-fn plan_before_load(open: &Path, block: u32, set: &gpu_core::devices::ComputeSet) -> Result<()> {
+pub(crate) fn plan_before_load(open: &Path, block: u32, set: &gpu_core::devices::ComputeSet) -> Result<()> {
     let cards: Vec<u64> = gpu_core::devices::gpus().iter().filter(|d| set.gpus.contains(&d.index)).map(|d| d.identity.vram_bytes).collect();
     if cards.is_empty() {
         return Ok(());
@@ -477,7 +477,7 @@ fn state_fits_on_device(open: &Path, block: u32, precision: model::memplan::Para
     Ok(plan(&demands, Capacity { device_bytes: free, host_bytes: u64::MAX }, &Authorized::none()).is_ok())
 }
 
-fn chat_entry(arch: &str) -> Result<crate::chat_trainer::ChatEntry> {
+pub(crate) fn chat_entry(arch: &str) -> Result<crate::chat_trainer::ChatEntry> {
     let entry = crate::study::arch(arch)?;
     entry.require(Capability::ChatFineTune)?;
     entry.chat.ok_or_else(|| Error::Unsupported(model::training::Unsupported::new(entry.id, Capability::ChatFineTune)))

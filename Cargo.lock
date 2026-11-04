@@ -420,6 +420,7 @@ dependencies = [
  "brain-loader",
  "brain-minimaxmusic3",
  "brain-model",
+ "brain-modelopt",
  "brain-modelref",
  "brain-modelstore",
  "brain-modernbert",
