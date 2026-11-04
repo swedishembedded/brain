@@ -121,6 +121,25 @@ pub(super) struct DecodedWeights {
     windows: std::collections::HashMap<(usize, u32, u32, u32), DeviceBuffer>,
 }
 
+/// The temporaries of the tiled products, one reused buffer per role. A tile is decoded and multiplied in
+/// consecutive steps of one recording, and the work of an [`Ops`] is submitted in the order it is built, so the
+/// next product's decode into the same buffer is ordered after this product's read of it. Allocating them per
+/// call instead would make one recorded forward over a quantized model hold a decoded tile for every linear at
+/// once - about the model's own size in f32 - and drop it all when the recording does.
+#[derive(Clone, Copy)]
+pub(super) enum Scratch {
+    /// The decoded f32 tile of a weight.
+    DecodeF32,
+    /// The decoded bf16 tile of a weight.
+    DecodeBf16,
+    /// One `[m, tile]` product tile (a forward's output tile, or an input gradient's `dy` tile).
+    ProductTile,
+}
+
+/// The buffers of [`Scratch`], each with its size in words; grown on demand, never shrunk.
+#[derive(Default)]
+pub(super) struct ScratchBuffers([Option<(u64, DeviceBuffer)>; 3]);
+
 /// The scope in which [`Ops`] decodes a frozen quantized weight once however many products read it; dropping
 /// the outermost guard releases the decoded copies.
 #[must_use = "the decoded weights are released when this guard drops"]
@@ -153,6 +172,20 @@ impl Ops {
     pub fn decoded_weights(&self) -> DecodedWeightsScope<'_> {
         self.decoded.lock().unwrap_or_else(|e| e.into_inner()).depth += 1;
         DecodedWeightsScope { ops: self }
+    }
+
+    /// The reused buffer of `role`, at least `words` long. A larger request replaces it; a recording that
+    /// already bound the old one keeps it alive until it drops.
+    fn scratch(&self, role: Scratch, words: u64) -> DeviceBuffer {
+        let mut held = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
+        match &held.0[role as usize] {
+            Some((have, buf)) if *have >= words => buf.clone(),
+            _ => {
+                let buf = self.gpu.storage_uninit(words);
+                held.0[role as usize] = Some((words, buf.clone()));
+                buf
+            }
+        }
     }
 
     /// The bf16 decode of rows `first .. first + count` of `w` for the open scope: cached when it was decoded
@@ -518,7 +551,7 @@ impl Ops {
                 return product(s, &Weight::BF16 { w: decoded, n: count, k }, 0, count, tile);
             }
         }
-        let scratch = self.gpu.storage_uninit(tile as u64 * k as u64 / 2);
+        let scratch = self.scratch(Scratch::DecodeBf16, tile as u64 * k as u64 / 2);
         let mut done = 0;
         while done < count {
             let c = tile.min(count - done);
@@ -536,7 +569,7 @@ impl Ops {
         let (first, count) = rows;
         let k = w.k();
         let LinearPlan::TileDecode { tile_rows: tile, .. } = plan_linear(Dtype::I8, count, k, self.tile_budget_bytes, false) else { unreachable!() };
-        let scratch = self.gpu.storage_uninit(tile as u64 * k as u64);
+        let scratch = self.scratch(Scratch::DecodeF32, tile as u64 * k as u64);
         let mut done = 0;
         while done < count {
             let c = tile.min(count - done);
@@ -557,7 +590,7 @@ impl Ops {
             if tile >= count {
                 return self.matmul_rows(s, dense, (0, c), act, y, yoff);
             }
-            let yt = ytile.get_or_insert_with(|| self.gpu.storage_uninit(m as u64 * tile as u64)).clone();
+            let yt = ytile.get_or_insert_with(|| self.scratch(Scratch::ProductTile, m as u64 * tile as u64)).clone();
             self.matmul_rows(s, dense, (0, c), act, &yt, 0);
             let dst_off = u32::try_from(yoff).expect("Ops::forward_tiled: output offset exceeds u32") + done;
             self.copy_cols(s, &yt, y, m, c, c, 0, count, dst_off);
@@ -575,7 +608,7 @@ impl Ops {
             if tile >= count {
                 return self.matmul_dx_rows(s, dense, (0, c), dy, m, dx, dx_row0, acc);
             }
-            let dt = dytile.get_or_insert_with(|| self.gpu.storage_uninit(m as u64 * tile as u64)).clone();
+            let dt = dytile.get_or_insert_with(|| self.scratch(Scratch::ProductTile, m as u64 * tile as u64)).clone();
             self.copy_cols(s, dy, &dt, m, c, count, done, c, 0);
             self.matmul_dx_rows(s, dense, (0, c), &dt, m, dx, dx_row0, acc);
         });

@@ -183,3 +183,47 @@ fn qwen35moe_serves_what_it_trains() {
         <qwen35moe::model::Qwen35 as Model>::new(cfg.clone(), 1, SEQ as u32, &init).save(path.to_str().unwrap());
     });
 }
+
+/// Below what scoring one row of the tiny model through quantized linears
+/// would drop if every product allocated its own decoded tile (72 KiB), above
+/// what it drops with the tiles reused.
+const RECLAIM_CEILING: u64 = 1 << 16;
+
+/// The measurements `brain optimize` makes in turn, the original and then
+/// quantized formats, each scoring every held-out row through an engine. Run
+/// only in a child process (the gate below), so the lowered ceiling reaches no
+/// other test.
+#[test]
+#[ignore = "child-process helper, driven by the test below under a lowered reclaim ceiling"]
+fn repeated_measurements_under_a_lowered_ceiling_helper() {
+    gpu_core::hardware::set_reclaim_ceiling(Some(RECLAIM_CEILING));
+    let cfg = qwen3::QwenConfig { block_size: SEQ as u32, ..qwen3::QwenConfig::tiny_i8() };
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let base = dir.path().join("base.safetensors");
+    qwen3::Qwen::new(cfg.clone(), 1, SEQ as u32, &qwen3::init_weights(&cfg, 7)).save(base.to_str().unwrap());
+    let prepared = dir.path().join("prepared");
+    write_prepared(&prepared, cfg.vocab, 7);
+    let opts = FitOpts { steps: 1, batch_size: 1, block_size: SEQ as u32, seed: 7, ..Default::default() };
+    // The order `brain optimize` measures in: the original, then each baseline format, then the original again.
+    let policies = [Dtype::F32, Dtype::NF4, Dtype::I8, Dtype::F32].map(|t| TierPolicy::uniform(Dtype::F32).with(&["blocks."], t));
+    let losses: Vec<f64> = policies.iter().map(|p| model::finetune::served_loss::<qwen3::finetune::Qwen3Trainer>(&base, p, None, &prepared, &opts).expect("an engine").unwrap_or_else(|e| panic!("{}: {e}", p.describe()))).collect();
+    assert_eq!(losses[0], losses[3], "the same measurement repeated after others: {losses:?}");
+}
+
+/// Scoring through quantized linears reuses its decoded tiles: a per-product
+/// tile made one recorded forward of a 1.3B model at nf4 hold its f32 size in
+/// temporaries, dropped past the device's 4 GB reclaim ceiling.
+#[test]
+fn scoring_quantized_linears_reuses_its_tiles() {
+    if gpu_core::discrete_gpu_count() == 0 {
+        brain_testutil::skip_unavailable("served_conformance: needs a real device whose reclaim is deferred");
+        return;
+    }
+    let helper = "repeated_measurements_under_a_lowered_ceiling_helper";
+    let out = std::process::Command::new(std::env::current_exe().expect("current_exe"))
+        .args(["--exact", helper, "--ignored", "--nocapture", "--test-threads=1"])
+        .output()
+        .expect("spawn the helper");
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "{helper} must complete under a {RECLAIM_CEILING}-byte reclaim ceiling; output:\n{text}");
+}

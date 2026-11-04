@@ -1371,6 +1371,8 @@ pub struct Ops {
     uploads: std::sync::OnceLock<StreamedUploads>,
     /// Weights decoded for the products of the open [`Ops::decoded_weights`] scope.
     decoded: std::sync::Mutex<tiled::DecodedWeights>,
+    /// The reused temporaries of the tiled products ([`tiled::Scratch`]).
+    scratch: std::sync::Mutex<tiled::ScratchBuffers>,
 }
 
 /// A transfer [`Gpu`] handle (own stream, bounded pinned staging ring) and the pinned-pool lease that pays for
@@ -1478,7 +1480,7 @@ impl Ops {
             idx.insert(name, i);
         }
         let gemm = LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Auto);
-        Ok(Ops { gpu, caps, idx, selector, providers, gemm, linear_activations: Default::default(), tile_budget_bytes: DEFAULT_TILE_BUDGET_BYTES, decode_dummy: std::sync::OnceLock::new(), uploads: std::sync::OnceLock::new(), decoded: Default::default() })
+        Ok(Ops { gpu, caps, idx, selector, providers, gemm, linear_activations: Default::default(), tile_budget_bytes: DEFAULT_TILE_BUDGET_BYTES, decode_dummy: std::sync::OnceLock::new(), uploads: std::sync::OnceLock::new(), decoded: Default::default(), scratch: Default::default() })
     }
 
     /// Choose the arithmetic of the GEMMs against bf16 weights: `Auto` takes
