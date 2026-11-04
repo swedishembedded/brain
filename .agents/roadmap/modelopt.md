@@ -60,7 +60,9 @@ minimize `sum E[i, q_i]` subject to `sum bytes[i, q_i] <= budget`.
       codec every uploadable tier packs with, decoded back to f32, held equal
       to the device's own decode (`model/tests/weight_round_trip.rs`).
 - [x] `modelopt::sites`: the stored tensors behind `Model::adapter_sites`,
-      with `[n, k]`, layer and roles.
+      with `[n, k]`, layer and roles, joined into the groups a deployed engine
+      fuses (`Model::coupled_tensors`; qwen3's Q/K/V and gate/up), which take
+      one tier.
 - [x] `modelopt::sensitivity`: diagonal-Fisher sensitivity per site and tier.
 - [x] `modelopt::assign`: greedy multiple-choice knapsack under a byte
       budget (`Plan::policy` is the `TierPolicy`, f32 outside the plan).
@@ -76,9 +78,22 @@ minimize `sum E[i, q_i]` subject to `sum bytes[i, q_i] <= budget`.
 - [ ] Runtime cost: per-tier GEMM time from `model::probe` at each site's
       shape as a second constraint (`min_memory` with a latency cap, and
       `min_latency` with a memory cap).
-- [ ] Front end: one verb through the SDK that the CLI calls, writing the
-      policy and a JSON report (sites, tiers, estimated and measured deltas,
-      baselines, calibration fingerprint, device).
+- [x] `modelopt::search_weights` and its `Report`: estimate, solve, then
+      measure the plan, the original and every uniform tier that fits the
+      budget; calibration and held-out batches must not overlap.
+- [x] Measurement on the deployed kernels: `LoraRequest::base` is a
+      `TierPolicy`, so the trainer builds the base at a mixed plan (qwen3
+      `Qwen::new_lora_tiers`, qwen35 `StreamedRun::base`); a zero-delta
+      adapter leaves the base's loss. This also measures int8's activation
+      quantization, which weight simulation does not.
+- [x] Front end: `brain::ModelOptimizer` (`crates/sdk/src/optimize.rs`) over
+      `ChatEntry::{search, measure}`, and `brain optimize` over it; accepted
+      only on the deployed measurements; `optimize.json` holds the outcome.
+      Candidates are trainable bases (measurable), `ChatTrainer::SERVED_WEIGHTS`
+      (servable per linear) and held by the device as themselves.
+- [x] Serving a plan: qwen3's engine takes a per-leaf `TierPolicy`
+      (`Engine::check_tiers` refuses a split fused group);
+      `serve::tests::mixed_tiers_serve_each_linear_at_its_own_tier`.
 - [ ] A real checkpoint: Qwen3-0.6B, searched against uniform int8 and bf16 on
       held-out text, with the served policy re-measured through `brain serve`.
 

@@ -44,13 +44,13 @@ pub struct SiteChoices {
 /// Runs one forward and backward per calibration batch and holds one f32 per
 /// site element on the host. A loss or gradient that is not finite is an error
 /// naming where, never a silently zero sensitivity.
-pub fn sensitivity<M: Model>(m: &M, sites: &[Site], tiers: &[Dtype], calibration: &[Batch]) -> Result<Vec<SiteChoices>, String> {
+pub fn sensitivity<M: Model>(m: &M, sites: &[Site], tiers: &[Dtype], calibration: &[Batch], on_progress: &mut dyn FnMut(crate::Progress)) -> Result<Vec<SiteChoices>, String> {
     if calibration.is_empty() {
         return Err("sensitivity needs at least one calibration batch".into());
     }
     let tensors: Vec<&crate::Tensor> = sites.iter().flat_map(|s| &s.tensors).collect();
     let mut fisher: Vec<Vec<f32>> = tensors.iter().map(|t| vec![0f32; t.n * t.k]).collect();
-    for &batch in calibration {
+    for (i, &batch) in calibration.iter().enumerate() {
         m.zero_grads();
         m.set_batch(batch);
         let loss = m.forward();
@@ -70,43 +70,39 @@ pub fn sensitivity<M: Model>(m: &M, sites: &[Site], tiers: &[Dtype], calibration
                 *fj += gj * gj;
             }
         }
+        on_progress(crate::Progress::Calibrated { batch: i + 1, of: calibration.len() });
     }
     m.zero_grads();
     let scale = 0.5 / calibration.len() as f64;
-    // error[tensor][tier], for the tiers the tensor packs.
-    let per_tensor: Vec<Vec<Option<f64>>> = tensors
-        .iter()
-        .zip(&fisher)
-        .map(|(t, f)| {
-            let w = m.read_weight(&t.name);
-            tiers
-                .iter()
-                .map(|&tier| {
-                    Weight::packs(tier, t.n, t.k).then(|| {
-                        let q = Weight::round_trip(&w, t.n, t.k, tier);
-                        f.iter().zip(w.iter().zip(&q)).map(|(&fj, (&wj, &qj))| fj as f64 * ((wj - qj) as f64).powi(2)).sum::<f64>() * scale
-                    })
+    // The estimated error of one tensor at every tier, `None` where a tier does not pack it: one read of the weight.
+    let errors = |t: &crate::Tensor, f: &[f32]| -> Vec<Option<f64>> {
+        let w = m.read_weight(&t.name);
+        tiers
+            .iter()
+            .map(|&tier| {
+                Weight::packs(tier, t.n, t.k).then(|| {
+                    let q = Weight::round_trip(&w, t.n, t.k, tier);
+                    f.iter().zip(w.iter().zip(&q)).map(|(&fj, (&wj, &qj))| fj as f64 * ((wj - qj) as f64).powi(2)).sum::<f64>() * scale
                 })
-                .collect()
-        })
-        .collect();
-    let mut next = 0;
-    Ok(sites
-        .iter()
-        .map(|site| {
-            let rows = &per_tensor[next..next + site.tensors.len()];
-            next += site.tensors.len();
-            let mut choices: Vec<Choice> = tiers
-                .iter()
-                .enumerate()
-                .filter_map(|(q, &tier)| {
-                    let error = rows.iter().map(|r| r[q]).sum::<Option<f64>>()?;
-                    let bytes = site.tensors.iter().map(|t| Weight::bytes_for(tier, t.n, t.k)).sum();
-                    Some(Choice { tier, bytes, error })
-                })
-                .collect();
-            choices.sort_by(|a, b| a.bytes.cmp(&b.bytes).then(a.error.total_cmp(&b.error)));
-            SiteChoices { site: site.clone(), choices }
-        })
-        .collect())
+            })
+            .collect()
+    };
+    let mut fisher = fisher.into_iter();
+    let mut out = Vec::with_capacity(sites.len());
+    for (i, site) in sites.iter().enumerate() {
+        let per_tensor: Vec<Vec<Option<f64>>> = site.tensors.iter().zip(fisher.by_ref()).map(|(t, f)| errors(t, &f)).collect();
+        let mut choices: Vec<Choice> = tiers
+            .iter()
+            .enumerate()
+            .filter_map(|(q, &tier)| {
+                let error = per_tensor.iter().map(|e| e[q]).sum::<Option<f64>>()?;
+                let bytes = site.tensors.iter().map(|t| Weight::bytes_for(tier, t.n, t.k)).sum();
+                Some(Choice { tier, bytes, error })
+            })
+            .collect();
+        choices.sort_by(|a, b| a.bytes.cmp(&b.bytes).then(a.error.total_cmp(&b.error)));
+        out.push(SiteChoices { site: site.clone(), choices });
+        on_progress(crate::Progress::Estimated { site: i + 1, of: sites.len() });
+    }
+    Ok(out)
 }

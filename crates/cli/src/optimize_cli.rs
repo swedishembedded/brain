@@ -156,6 +156,21 @@ fn optimizer(a: &Args) -> brain::ModelOptimizer {
     o
 }
 
+/// One line on stderr per stage; calibration and estimation only at every tenth of the way, so a long search stays
+/// readable.
+fn report_progress(p: &brain::OptimizerProgress) {
+    use brain::OptimizerProgress::{Deployed, Search};
+    use brain::OptimizerSearchProgress::{Calibrated, Estimated, Measuring};
+    let tenth = |i: usize, of: usize| i == of || i.is_multiple_of(of.div_ceil(10).max(1));
+    match p {
+        Search(Calibrated { batch, of }) if tenth(*batch, *of) => eprintln!("calibrating: batch {batch}/{of}"),
+        Search(Estimated { site, of }) if tenth(*site, *of) => eprintln!("estimating: site {site}/{of}"),
+        Search(Measuring { label }) => eprintln!("measuring {label} (simulated weights)"),
+        Deployed { label } => eprintln!("measuring {label} (deployed kernels)"),
+        _ => {}
+    }
+}
+
 pub fn run_optimize(argv: &[String]) -> ! {
     let args = match parse(argv) {
         Ok(a) => a,
@@ -167,7 +182,7 @@ pub fn run_optimize(argv: &[String]) -> ! {
             std::process::exit(if msg.is_empty() { 0 } else { 2 });
         }
     };
-    let outcome = match optimizer(&args).run() {
+    let outcome = match optimizer(&args).run_with(report_progress) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("brain optimize: {e}");

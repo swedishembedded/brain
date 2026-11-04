@@ -41,6 +41,19 @@ impl Budget {
     }
 }
 
+/// Where a search is, for a caller showing progress: it runs a forward and
+/// backward per calibration batch, round-trips every site through every
+/// candidate codec, then runs the held-out batches once per measured plan.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub enum Progress {
+    /// Calibration batch `batch` (1-based) of `of` has been read.
+    Calibrated { batch: usize, of: usize },
+    /// The codec errors of site `site` (1-based) of `of` are estimated.
+    Estimated { site: usize, of: usize },
+    /// A plan (`"plan"`, `"original"`, a uniform tier's name) is about to be measured on the held-out batches.
+    Measuring { label: String },
+}
+
 /// What to search: the candidate tiers, the budget, and two disjoint batch
 /// sets, one the estimate ranks on and one that measures the result.
 pub struct SearchRequest<'a, 'b> {
@@ -115,7 +128,7 @@ impl Report {
 ///
 /// The calibration and held-out sets must not be the same batches: a search
 /// that is accepted on the data it ranked on has not been checked.
-pub fn search_weights<M: Model>(m: &M, req: &SearchRequest) -> Result<Report, String> {
+pub fn search_weights<M: Model>(m: &M, req: &SearchRequest, on_progress: &mut dyn FnMut(Progress)) -> Result<Report, String> {
     if req.tiers.is_empty() {
         return Err("no candidate tiers to search".into());
     }
@@ -127,9 +140,11 @@ pub fn search_weights<M: Model>(m: &M, req: &SearchRequest) -> Result<Report, St
     }
     let sites = sites(m)?;
     let budget_bytes = req.budget.bytes(&sites)?;
-    let table = sensitivity(m, &sites, req.tiers, req.calibration)?;
+    let table = sensitivity(m, &sites, req.tiers, req.calibration, on_progress)?;
     let plan = assign(&table, budget_bytes)?;
+    on_progress(Progress::Measuring { label: "original".into() });
     let original_loss = held_out_loss(m, req.held_out);
+    on_progress(Progress::Measuring { label: "plan".into() });
     let plan_loss = measure_policy(m, &sites, &plan.assignments, req.held_out);
     let bytes_at = |tier: Dtype| -> Option<u64> { sites.iter().flat_map(|s| &s.tensors).map(|t| Weight::packs(tier, t.n, t.k).then(|| Weight::bytes_for(tier, t.n, t.k))).sum() };
     let baselines = req
@@ -138,6 +153,7 @@ pub fn search_weights<M: Model>(m: &M, req: &SearchRequest) -> Result<Report, St
         .filter_map(|&tier| bytes_at(tier).filter(|&b| b <= budget_bytes).map(|bytes| (tier, bytes)))
         .map(|(tier, bytes)| {
             let uniform: Vec<Assignment> = sites.iter().map(|s| Assignment { site: s.name.clone(), tier }).collect();
+            on_progress(Progress::Measuring { label: tier.name().into() });
             Baseline { tier: tier.name(), bytes, loss: measure_policy(m, &sites, &uniform, req.held_out) }
         })
         .collect();

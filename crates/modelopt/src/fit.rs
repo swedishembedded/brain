@@ -14,7 +14,7 @@ use gpu_core::select::Dtype;
 use model::finetune::ModelFit;
 use model::{Batch, FitOpts, FitReport, Model};
 
-use crate::{held_out_loss, search_weights, Budget, Report, SearchRequest};
+use crate::{held_out_loss, search_weights, Budget, Progress, Report, SearchRequest};
 
 /// Every example row of one split of a prepared dataset, `opts.batch_size`
 /// rows a batch, as owned token and target buffers.
@@ -46,6 +46,7 @@ pub struct SearchFit<'a> {
     pub opts: &'a FitOpts,
     pub tiers: &'a [Dtype],
     pub budget: Budget,
+    pub on_progress: &'a mut dyn FnMut(Progress),
     /// The search's report, once the visit has run.
     pub report: Option<Report>,
 }
@@ -55,7 +56,7 @@ impl ModelFit for SearchFit<'_> {
         let (train, val, cfg, _) = model::load_dataset(self.dir, self.opts)?;
         let (calibration, held_out) = (rows_of(&train, &cfg), rows_of(&val, &cfg));
         let req = SearchRequest { tiers: self.tiers, budget: self.budget, calibration: &lm(&calibration), held_out: &lm(&held_out) };
-        let report = search_weights(&model, &req).map_err(std::io::Error::other)?;
+        let report = search_weights(&model, &req, self.on_progress).map_err(std::io::Error::other)?;
         let fit = no_steps(report.original_loss);
         self.report = Some(report);
         Ok((fit, model))

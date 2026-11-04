@@ -101,6 +101,15 @@ pub struct ExcludedTier {
     pub held_as: &'static str,
 }
 
+/// Where a [`ModelOptimizer`] run is.
+#[derive(Clone, Debug, PartialEq)]
+pub enum OptimizerProgress {
+    /// The search on the trainable build: calibration, estimates, simulated measurements.
+    Search(modelopt::Progress),
+    /// A plan (`"plan"`, `"original"`, a uniform format) is about to be built and measured on the deployed kernels.
+    Deployed { label: String },
+}
+
 /// One measurement on the deployed kernels.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct DeployedLoss {
@@ -239,6 +248,11 @@ impl ModelOptimizer {
 
     /// Search, measure on the deployed kernels, write the report.
     pub fn run(&self) -> Result<ModelOptimizerOutcome> {
+        self.run_with(|_| {})
+    }
+
+    /// [`Self::run`], reporting each stage to `on_progress`.
+    pub fn run_with(&self, mut on_progress: impl FnMut(&OptimizerProgress)) -> Result<ModelOptimizerOutcome> {
         let chat = crate::full_finetune::chat_entry(&self.arch)?;
         let dataset = self.dataset.as_deref().ok_or_else(|| Error::MissingArgument("ModelOptimizer: no dataset; call .dataset(path)".to_string()))?;
         let out_dir = self.out_dir.as_deref().ok_or_else(|| Error::MissingArgument("ModelOptimizer: no out directory; call .out_dir(path)".to_string()))?;
@@ -264,8 +278,9 @@ impl ModelOptimizer {
         crate::full_finetune::plan_before_load(&open, block, &set)?;
         let opts = model::FitOpts { batch_size: ROWS, ..fit_opts(1, block, 0.0, seed) };
 
-        let report = (chat.search)(&open, &prepared_dir, &opts, &tiers, self.budget.resolve()?).map_err(|e| Error::Backend(format!("searching: {e}")))?;
-        let measure = |label: String, bytes: u64, policy: &model::ops::TierPolicy| -> Result<DeployedLoss> {
+        let report = (chat.search)(&open, &prepared_dir, &opts, &tiers, self.budget.resolve()?, &mut |p| on_progress(&OptimizerProgress::Search(p))).map_err(|e| Error::Backend(format!("searching: {e}")))?;
+        let mut measure = |label: String, bytes: u64, policy: &model::ops::TierPolicy| -> Result<DeployedLoss> {
+            on_progress(&OptimizerProgress::Deployed { label: label.clone() });
             let loss = (chat.measure)(&open, &prepared_dir, &opts, policy).map_err(|e| Error::Backend(format!("measuring {label}: {e}")))?;
             Ok(DeployedLoss { label, bytes, loss })
         };

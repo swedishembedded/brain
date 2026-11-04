@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use data::preference::EncodedTurn;
 use gpu_core::select::Dtype;
 use model::ops::TierPolicy;
-use modelopt::{Budget, MeasureFit, Report, SearchFit};
+use modelopt::{Budget, MeasureFit, Progress, Report, SearchFit};
 use model::finetune::{AdapterLineage, ChatTrainer, LoraRequest, OptimizerState, PreferenceMargins};
 use model::{FitControl, FitOpts, FitReport};
 use rl::fit::DpoFit;
@@ -51,7 +51,7 @@ pub(crate) type ResidentMargins = Vec<Vec<f64>>;
 type FullFn = for<'c> fn(&Path, &Path, &FitOpts, &Path, OptimizerState, FitControl<'c>) -> std::io::Result<FitReport>;
 type PreferenceFn = for<'j, 'c> fn(PreferenceJob<'j>, FitControl<'c>) -> std::io::Result<(FitReport, ResidentMargins)>;
 type MarginsFn = fn(&Path, Option<&Path>, &Path, &[(EncodedTurn, EncodedTurn)], u32) -> Option<PreferenceMargins>;
-type SearchFn = fn(&Path, &Path, &FitOpts, &[Dtype], Budget) -> std::io::Result<Report>;
+type SearchFn = fn(&Path, &Path, &FitOpts, &[Dtype], Budget, &mut dyn FnMut(Progress)) -> std::io::Result<Report>;
 type MeasureFn = fn(&Path, &Path, &FitOpts, &TierPolicy) -> std::io::Result<f64>;
 
 /// What the SDK's full-parameter and preference fine-tuners need of one
@@ -110,8 +110,8 @@ fn preference<T: ChatTrainer>(job: PreferenceJob<'_>, control: FitControl<'_>) -
 /// The search runs on the full-parameter build (the estimate needs every
 /// linear's gradient), with the optimizer state on the host since no step is
 /// taken.
-fn search<T: ChatTrainer>(base: &Path, dir: &Path, opts: &FitOpts, tiers: &[Dtype], budget: Budget) -> std::io::Result<Report> {
-    let mut fit = SearchFit { dir, opts, tiers, budget, report: None };
+fn search<T: ChatTrainer>(base: &Path, dir: &Path, opts: &FitOpts, tiers: &[Dtype], budget: Budget, on_progress: &mut dyn FnMut(Progress)) -> std::io::Result<Report> {
+    let mut fit = SearchFit { dir, opts, tiers, budget, on_progress, report: None };
     T::train_full(base, opts, OptimizerState::HostOffload, &mut fit)?;
     fit.report.ok_or_else(|| std::io::Error::other("the weight search did not run"))
 }

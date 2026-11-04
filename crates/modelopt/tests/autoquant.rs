@@ -25,7 +25,7 @@
 
 use gpu_core::select::Dtype;
 use model::{Batch, Model, IGNORE};
-use modelopt::{held_out_loss, measure_policy, search_weights, sites, Assignment, Budget, SearchRequest};
+use modelopt::{held_out_loss, measure_policy, search_weights, sites, Assignment, Budget, Progress, SearchRequest};
 
 const ROWS: u32 = 8;
 
@@ -113,7 +113,13 @@ fn searched_policy_beats_every_uniform_tier_within_its_budget() {
     let bytes_at = |tier: Dtype| sites.iter().flat_map(|s| &s.tensors).map(|t| model::ops::Weight::bytes_for(tier, t.n, t.k)).sum::<u64>();
     let budget = (bytes_at(Dtype::I8) + bytes_at(Dtype::Q4)) / 2;
     let original = held_out_loss(&m, &held_out);
-    let report = search_weights(&m, &SearchRequest { tiers: &TIERS, budget: Budget::Bytes(budget), calibration: &calibration, held_out: &held_out }).expect("search");
+    let mut progress = Vec::new();
+    let report = search_weights(&m, &SearchRequest { tiers: &TIERS, budget: Budget::Bytes(budget), calibration: &calibration, held_out: &held_out }, &mut |p| progress.push(p)).expect("search");
+    let count = |f: fn(&Progress) -> bool| progress.iter().filter(|p| f(p)).count();
+    assert_eq!(count(|p| matches!(p, Progress::Calibrated { .. })), calibration.len(), "one event per calibration batch");
+    assert_eq!(count(|p| matches!(p, Progress::Estimated { .. })), sites.len(), "one event per site");
+    let measured: Vec<&str> = progress.iter().filter_map(|p| if let Progress::Measuring { label } = p { Some(label.as_str()) } else { None }).collect();
+    assert_eq!(measured.len(), 2 + report.baselines.len(), "the original, the plan and every baseline: {measured:?}");
     assert_eq!(held_out_loss(&m, &held_out), original, "a search must leave every weight as it was");
     assert!(report.plan_bytes <= budget, "plan {} bytes over its budget {budget}", report.plan_bytes);
     assert_eq!(report.original_loss, original);
@@ -141,6 +147,6 @@ fn a_search_refuses_to_accept_on_the_data_it_ranked_on() {
     let m = qwen3::Qwen::new(cfg.clone(), ROWS, cfg.block_size, &qwen3::init_weights(&cfg, rng.next_u64()));
     let owned = batches(&mut rng, 2, cfg.vocab, cfg.block_size);
     let both = as_batches(&owned);
-    let err = search_weights(&m, &SearchRequest { tiers: &TIERS, budget: Budget::BitsPerWeight(8.5), calibration: &both, held_out: &both[1..] }).expect_err("overlapping sets are refused");
+    let err = search_weights(&m, &SearchRequest { tiers: &TIERS, budget: Budget::BitsPerWeight(8.5), calibration: &both, held_out: &both[1..] }, &mut |_| {}).expect_err("overlapping sets are refused");
     assert!(err.contains("held-out"), "{err}");
 }
