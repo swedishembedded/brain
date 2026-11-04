@@ -58,6 +58,26 @@ head layout; clustering, selection and the sparse read are written once.
       than dense tiles while the selection holds most causal keys anyway.
       Index pages are built by the device Ward, one dispatch per closed
       block for every layer.
+- [x] Across the Qwen3 family (`qwen_lsa prefill --model Qwen/Qwen3-* --indexer
+      random`, upstream safetensors where the store has them; int8 KV, top_k
+      1024, top_p 256, window 512, one sequence, P40; 8B and 14B with int8
+      linears, as serving loads them). Speedup of sparse over dense prefill:
+      | model | 8k | 16k | 32k |
+      |---|---|---|---|
+      | Qwen3-0.6B | 1.06x | 1.52x | 2.46x |
+      | Qwen3-1.7B | 1.03x | 1.38x | 2.10x |
+      | Qwen3-4B | 1.10x | 1.41x | 2.14x |
+      | Qwen3-8B | 1.08x | 1.49x | - |
+      | Qwen3-14B | 1.00x | 1.02x | - |
+      Profiles at 16k (`--profile`): sparse replaces 21 s of dense attention
+      with 11 s (0.6B, 1.7B) and 47 s with 23 s (4B, 8B); index keys, Ward and
+      the read together cost under 1.5 s; everything else is the same in
+      both, so larger models gain a little less. 14B's 40 query heads have no
+      whole-row sparse kernel (the heads must divide its 64 threads), so its
+      sparse attention is slow and its crossover sits at 12800 tokens.
+      Past the native context (YaRN, 0.6B): 128k tokens dense 1411.57 s,
+      sparse 204.79 s (6.89x); 256k tokens sparse 545.63 s (dense not timed),
+      the flat read's per-query bucket scoring growing with the context.
 - [x] Device indexing (`model::lsa::device`): `lsa_index_vectors` turns
       post-RoPE heads (a chunk's queries or a cached key's pool slot) into
       unit index vectors (un-rotate with the forward kernels' own angle, sum
@@ -241,6 +261,13 @@ head layout; clustering, selection and the sparse read are written once.
 
 ## Not yet done
 
+- [ ] Whole-row sparse prefill kernel for query-head counts that do not
+      divide 64 (Qwen3-14B's 40): a templated workgroup size.
+- [ ] Tensor-core sparse attention: a native (`gpu_core::provider::cuda`)
+      kernel over a block of consecutive queries and the union of their
+      selections, offered like the native flash prefill and picked up by the
+      on-device crossover; needs a tensor-core card to validate (the P40 has
+      none).
 - [ ] Sparse prefill bandwidth: bf16 KV tier for the sparse read, the
       shared window as a dense sliding tile (it is a fifth of every
       selection), and more bytes in flight per workgroup.
