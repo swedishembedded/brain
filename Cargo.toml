@@ -500,6 +500,17 @@ tempfile = "3"
 # the literal a third time.
 libc = "0.2"
 
+# Line tables only: a panic or backtrace still names file and line, but no
+# variable or type information is kept. Full debug info made each test binary
+# hundreds of MB and most of its link time. Third-party crates get none at all:
+# nobody steps through them, and they are most of every binary. (Tests use
+# this profile too.)
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 opt-level = 3
 # Thin, not fat: `cargo test --release` links a separate binary per test
@@ -544,7 +555,7 @@ debug = "line-tables-only"
 # Uploading N bytes of weights costs N bytes of VRAM for the destination plus N
 # more: an exact, reproducible 2.00x, measured through `nvidia-smi` deltas.
 # With the fix, 1.00x - equal to a native Vulkan backend on the same
-# card. The gate is `crates/gpu-core/tests/vram_overhead.rs`; the full
+# card. The gate is `crates/gpu-core/tests/it/vram_overhead.rs`; the full
 # root-cause ledger is `.agents/roadmap/backend-vulkan.md`.
 #
 # Steering staging into host memory made uploads slower at first, badly enough
