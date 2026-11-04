@@ -66,11 +66,21 @@ impl Limits {
     pub fn bytes(bytes: u64) -> Limits {
         Limits { bytes, seconds: None }
     }
+}
 
-    /// A choice's cost as a share of the limits, summed over the limited
-    /// dimensions: the one scale an upgrade's error reduction is weighed by.
+/// How a choice's cost weighs the limits: each dimension's share of its
+/// limit, times a weight that grows while the starting plan breaks that limit.
+#[derive(Clone, Copy)]
+struct Scale {
+    limits: Limits,
+    bytes_weight: f64,
+    seconds_weight: f64,
+}
+
+impl Scale {
+    /// The one scale an upgrade's error reduction is weighed by.
     fn cost(&self, c: &Choice) -> f64 {
-        c.bytes as f64 / self.bytes.max(1) as f64 + self.seconds.map_or(0.0, |t| c.seconds / t)
+        self.bytes_weight * c.bytes as f64 / self.limits.bytes.max(1) as f64 + self.limits.seconds.map_or(0.0, |t| self.seconds_weight * c.seconds / t)
     }
 }
 
@@ -102,7 +112,7 @@ impl Ord for Upgrade {
 
 /// The choices of one site that are worth having: cheapest first by
 /// [`Limits::cost`], each strictly more accurate than every cheaper one.
-fn frontier(choices: &[Choice], limits: &Limits) -> Vec<Choice> {
+fn frontier(choices: &[Choice], limits: &Scale) -> Vec<Choice> {
     let mut sorted = choices.to_vec();
     sorted.sort_by(|a, b| limits.cost(a).total_cmp(&limits.cost(b)).then(a.error.total_cmp(&b.error)));
     let mut out: Vec<Choice> = Vec::new();
@@ -134,7 +144,7 @@ impl Room {
 }
 
 /// The best upgrade of `site` from choice `from` that fits in `room`.
-fn best_upgrade(site: usize, front: &[Choice], from: usize, room: &Room, limits: &Limits) -> Option<Upgrade> {
+fn best_upgrade(site: usize, front: &[Choice], from: usize, room: &Room, limits: &Scale) -> Option<Upgrade> {
     let here = front[from];
     (from + 1..front.len())
         .filter(|&to| room.fits(&here, &front[to]))
@@ -157,27 +167,41 @@ fn best_upgrade(site: usize, front: &[Choice], from: usize, room: &Room, limits:
 /// A site with no candidate tier, or limits below the cheapest plan, is an
 /// error naming what is missing.
 pub fn assign(table: &[SiteChoices], limits: Limits) -> Result<Plan, String> {
-    let fronts: Vec<Vec<Choice>> = table.iter().map(|s| frontier(&s.choices, &limits)).collect();
-    if let Some(empty) = table.iter().zip(&fronts).find(|(_, f)| f.is_empty()) {
-        return Err(format!("{}: no candidate tier packs every tensor of the site", empty.0.site.name));
+    if let Some(empty) = table.iter().find(|s| s.choices.is_empty()) {
+        return Err(format!("{}: no candidate tier packs every tensor of the site", empty.site.name));
     }
+    let least_bytes: u64 = table.iter().map(|s| s.choices.iter().map(|c| c.bytes).min().unwrap_or(0)).sum();
+    let least_seconds: f64 = table.iter().map(|s| s.choices.iter().map(|c| c.seconds).fold(f64::INFINITY, f64::min)).sum();
+    if least_bytes > limits.bytes {
+        return Err(format!("the budget of {} bytes is below the smallest plan, {least_bytes} bytes with every site at its smallest tier", limits.bytes));
+    }
+    if let Some(t) = limits.seconds.filter(|&t| least_seconds > t) {
+        return Err(format!("the latency limit of {t:.6} s is below the fastest plan's {least_seconds:.6} s"));
+    }
+    // Start every site at its cheapest choice; while that plan breaks a limit, weigh that limit more and start
+    // again, until the start fits both or the weights show the limits cannot be met together.
+    let mut scale = Scale { limits, bytes_weight: 1.0, seconds_weight: 1.0 };
+    let (fronts, floor_bytes, floor_seconds) = loop {
+        let fronts: Vec<Vec<Choice>> = table.iter().map(|s| frontier(&s.choices, &scale)).collect();
+        let floor_bytes: u64 = fronts.iter().map(|f| f[0].bytes).sum();
+        let floor_seconds: f64 = fronts.iter().map(|f| f[0].seconds).sum();
+        let (over_bytes, over_seconds) = (floor_bytes > limits.bytes, limits.seconds.is_some_and(|t| floor_seconds > t));
+        if !over_bytes && !over_seconds {
+            break (fronts, floor_bytes, floor_seconds);
+        }
+        if scale.bytes_weight.max(scale.seconds_weight) > 1e12 {
+            return Err(format!("no plan meets {} bytes and {:.6} s together; the closest start takes {floor_bytes} bytes and {floor_seconds:.6} s", limits.bytes, limits.seconds.unwrap_or(f64::INFINITY)));
+        }
+        if over_bytes {
+            scale.bytes_weight *= 2.0;
+        }
+        if over_seconds {
+            scale.seconds_weight *= 2.0;
+        }
+    };
     let mut at: Vec<usize> = vec![0; fronts.len()];
-    let floor_bytes: u64 = fronts.iter().map(|f| f[0].bytes).sum();
-    let floor_seconds: f64 = fronts.iter().map(|f| f[0].seconds).sum();
-    if floor_bytes > limits.bytes || limits.seconds.is_some_and(|t| floor_seconds > t) {
-        // Name the limit no plan can meet, each judged by its own minimum; else the two cannot be met together.
-        let least_bytes: u64 = table.iter().map(|s| s.choices.iter().map(|c| c.bytes).min().unwrap_or(0)).sum();
-        let least_seconds: f64 = table.iter().map(|s| s.choices.iter().map(|c| c.seconds).fold(f64::INFINITY, f64::min)).sum();
-        if least_bytes > limits.bytes {
-            return Err(format!("the budget of {} bytes is below the smallest plan, {least_bytes} bytes with every site at its smallest tier", limits.bytes));
-        }
-        if let Some(t) = limits.seconds.filter(|&t| least_seconds > t) {
-            return Err(format!("the latency limit of {t:.6} s is below the fastest plan's {least_seconds:.6} s"));
-        }
-        return Err(format!("no plan meets {} bytes and {:.6} s together; the cheapest plan by their shares takes {floor_bytes} bytes and {floor_seconds:.6} s", limits.bytes, limits.seconds.unwrap_or(f64::INFINITY)));
-    }
     let mut room = Room { bytes: (limits.bytes - floor_bytes) as i128, seconds: limits.seconds.map_or(f64::INFINITY, |t| t - floor_seconds) };
-    let mut heap: BinaryHeap<Upgrade> = fronts.iter().enumerate().filter_map(|(i, f)| best_upgrade(i, f, 0, &room, &limits)).collect();
+    let mut heap: BinaryHeap<Upgrade> = fronts.iter().enumerate().filter_map(|(i, f)| best_upgrade(i, f, 0, &room, &scale)).collect();
     while let Some(up) = heap.pop() {
         if at[up.site] != up.from {
             continue;
@@ -185,12 +209,12 @@ pub fn assign(table: &[SiteChoices], limits: Limits) -> Result<Plan, String> {
         let (from, to) = (&fronts[up.site][up.from], &fronts[up.site][up.to]);
         if !room.fits(from, to) {
             // The room shrank since this upgrade was queued; a smaller one may still fit.
-            heap.extend(best_upgrade(up.site, &fronts[up.site], up.from, &room, &limits));
+            heap.extend(best_upgrade(up.site, &fronts[up.site], up.from, &room, &scale));
             continue;
         }
         room.take(from, to);
         at[up.site] = up.to;
-        heap.extend(best_upgrade(up.site, &fronts[up.site], up.to, &room, &limits));
+        heap.extend(best_upgrade(up.site, &fronts[up.site], up.to, &room, &scale));
     }
     let mut plan = Plan { assignments: Vec::with_capacity(table.len()), bytes: 0, seconds: 0.0, estimated_error: 0.0 };
     for ((s, f), &i) in table.iter().zip(&fronts).zip(&at) {
@@ -267,6 +291,10 @@ mod tests {
         assert_eq!(tiers(&plan), [Dtype::I8, Dtype::I8]);
         let err = assign(&table, Limits { bytes: 40, seconds: Some(1.5) }).unwrap_err();
         assert!(err.contains("latency"), "{err}");
+        // The cheapest start by shares (nf4 here: small, and the latency limit loose enough to weigh little) breaks
+        // the limit; the solver weighs latency up until a start fits rather than refusing a feasible plan.
+        let plan = assign(&table, Limits { bytes: 80, seconds: Some(9.0) }).unwrap();
+        assert!(plan.seconds <= 9.0 && plan.bytes <= 80, "{plan:?}");
         // A tight latency limit with room in bytes buys the fast tier.
         let plan = assign(&table, Limits { bytes: 80, seconds: Some(2.0) }).unwrap();
         assert_eq!(tiers(&plan), [Dtype::BF16, Dtype::BF16], "{plan:?}");
