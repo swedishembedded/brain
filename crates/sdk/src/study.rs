@@ -208,6 +208,14 @@ impl ArchEntry {
         self
     }
 
+    /// This row under another registry id: an architecture the registry
+    /// serves with the same crate as a config variant (`llama` and `qwen2` are
+    /// variants of `qwen3`), so it takes that crate's study, trainer and engine.
+    pub(crate) const fn with_id(mut self, id: &'static str) -> ArchEntry {
+        self.id = id;
+        self
+    }
+
     /// Refuse, at configuration time, a run that needs a capability this
     /// architecture does not provide.
     pub(crate) fn require(&self, capability: Capability) -> Result<()> {
@@ -234,6 +242,9 @@ impl ArchEntry {
 /// `DocumentCurriculum` names `QwenBpe`.
 const ARCHS: &[ArchEntry] = &[
     ArchEntry::of::<Qwen3>().with_chat_trainer::<qwen3::finetune::Qwen3Trainer>(),
+    // The registry serves these with brain-qwen3 as config variants (`brain_arch` rows `llama`, `qwen2`).
+    ArchEntry::of::<Qwen3>().with_chat_trainer::<qwen3::finetune::Qwen3Trainer>().with_id("llama"),
+    ArchEntry::of::<Qwen3>().with_chat_trainer::<qwen3::finetune::Qwen3Trainer>().with_id("qwen2"),
     ArchEntry::of::<Qwen35>().with_chat_trainer::<qwen35::finetune::Qwen35Trainer>(),
     ArchEntry::of::<Qwen35Moe>().with_chat_trainer::<qwen35moe::finetune::Qwen35MoeTrainer>(),
 ];
@@ -899,6 +910,9 @@ mod tests {
         }
         let claims = [
             (Qwen3::ID, Qwen3::TOKEN_OBJECTIVES, offered::<Qwen3>(qwen3::config::QwenConfig::tiny())),
+            // The config variants on the qwen3 crate: Qwen2 (attention bias, no QK-norm) and Llama (neither).
+            ("qwen2", Qwen3::TOKEN_OBJECTIVES, offered::<Qwen3>(qwen3::config::QwenConfig { qk_norm: false, attn_bias: true, ..qwen3::config::QwenConfig::tiny() })),
+            ("llama", Qwen3::TOKEN_OBJECTIVES, offered::<Qwen3>(qwen3::config::QwenConfig { qk_norm: false, ..qwen3::config::QwenConfig::tiny() })),
             (Qwen35::ID, Qwen35::TOKEN_OBJECTIVES, offered::<Qwen35>(qwen35::config::Qwen35Config::tiny())),
             (Qwen35Moe::ID, Qwen35Moe::TOKEN_OBJECTIVES, offered::<Qwen35Moe>(qwen35moe::config::Qwen35Config::tiny())),
         ];
@@ -928,6 +942,9 @@ mod tests {
         assert_eq!(named("q35", Some(r#"{"architectures":["Qwen3_5ForConditionalGeneration"],"model_type":"qwen3_5"}"#)), Some("qwen35"));
         assert_eq!(named("q35-type", Some(r#"{"model_type":"qwen3_5"}"#)), Some("qwen35"));
         assert_eq!(named("q3", Some(r#"{"architectures":["Qwen3ForCausalLM"]}"#)), Some("qwen3"));
+        // The config variants of qwen3 the registry routes to its crate resolve to rows of their own.
+        assert_eq!(named("q2", Some(r#"{"architectures":["Qwen2ForCausalLM"]}"#)), Some("qwen2"));
+        assert_eq!(named("llama", Some(r#"{"architectures":["LlamaForCausalLM"]}"#)), Some("llama"));
         assert_eq!(named("unregistered", Some(r#"{"architectures":["GPT2LMHeadModel"]}"#)), None);
         assert_eq!(named("no-config", None), None);
         assert_eq!(named("garbled", Some("{")), None);
