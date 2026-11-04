@@ -24,7 +24,7 @@
 //!          [--tail 256] [--seed N]
 //! qwen_lsa prefill --indexer FILE [--tokens 4096,8192,16384,32768] [--corpus DIR]
 //!          [--kv-cache int8|f32|fp8] [--weights f32|int8] [--dense-until N]
-//!          [--yarn FACTOR] [--tree SPEC] [--profile]
+//!          [--yarn FACTOR] [--tree SPEC] [--profile] [--sparse-only]
 //! ```
 //!
 //! `prefill --indexer random` times a random-projection indexer built for the
@@ -36,7 +36,8 @@
 //! `--weights` holds the linears in f32 or int8; by default int8 from the
 //! parameter count up that serving quantizes. A prompt past the checkpoint's
 //! native positions rotates under YaRN, by default the smallest power-of-two
-//! factor that covers it; `--yarn FACTOR` sets it.
+//! factor that covers it; `--yarn FACTOR` sets it. `--sparse-only` skips the
+//! dense prefill (at contexts where it takes hours).
 //!
 //! `--tree size=4,blocks=1024:4096,beam=2048:2048,page=4096,growth=1024[,start=N]`
 //! reads through node bucket levels (`model::lsa::tree`): node buckets of
@@ -71,7 +72,7 @@ const WARM_TOKENS: usize = 1100;
 struct Args(HashMap<String, String>);
 
 /// Flags that take no value.
-const SWITCHES: [&str; 1] = ["profile"];
+const SWITCHES: [&str; 2] = ["profile", "sparse-only"];
 
 impl Args {
     fn parse(raw: &[String]) -> Result<Args, String> {
@@ -488,9 +489,13 @@ fn prefill(args: &Args) -> Result<(), String> {
             e.release_for_perf(&mut table);
             secs
         };
-        let (mut dense, _) = engine_kv(&path, n as u32, kv, weights, yarn)?;
-        let td = time(&mut dense);
-        drop(dense);
+        let skip_dense = args.flag("sparse-only");
+        let td = if skip_dense {
+            None
+        } else {
+            let (mut dense, _) = engine_kv(&path, n as u32, kv, weights, yarn)?;
+            Some(time(&mut dense))
+        };
         let (mut sparse, _) = engine_kv(&path, n as u32, kv, weights, yarn)?;
         sparse.set_lsa(&ix)?;
         if let Some(v) = args.get("dense-until") {
@@ -498,15 +503,20 @@ fn prefill(args: &Args) -> Result<(), String> {
         }
         let crossover = sparse.lsa_dense_until();
         let ts = time(&mut sparse);
-        println!("T={n:>6}  dense {:>8.2} s  sparse {:>8.2} s  speedup {:>5.2}x  ({:.0} vs {:.0} tok/s)  dense below {crossover}", td, ts, td / ts, n as f64 / td, n as f64 / ts);
+        match td {
+            Some(td) => println!("T={n:>6}  dense {:>8.2} s  sparse {:>8.2} s  speedup {:>5.2}x  ({:.0} vs {:.0} tok/s)  dense below {crossover}", td, ts, td / ts, n as f64 / td, n as f64 / ts),
+            None => println!("T={n:>6}  sparse {:>8.2} s  ({:.0} tok/s)  dense below {crossover}; dense not timed", ts, n as f64 / ts),
+        }
         if args.flag("profile") {
             // Other tokens of the same length: the timed prompt sits in the
             // prefix cache.
             let other: Vec<u32> = prompt.iter().map(|t| (t + 13) % 20_000 + 200).collect();
             profile(&mut sparse, &format!("sparse T={n}"), &other);
             drop(sparse);
-            let (mut dense, _) = engine_kv(&path, n as u32, kv, weights, yarn)?;
-            profile(&mut dense, &format!("dense T={n}"), &other);
+            if !skip_dense {
+                let (mut dense, _) = engine_kv(&path, n as u32, kv, weights, yarn)?;
+                profile(&mut dense, &format!("dense T={n}"), &other);
+            }
         }
     }
     Ok(())
