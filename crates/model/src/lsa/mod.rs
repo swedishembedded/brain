@@ -40,6 +40,7 @@
 pub mod attend;
 pub mod config;
 pub mod device;
+pub mod distill;
 pub mod engine;
 pub mod index;
 pub mod indexer;
@@ -96,3 +97,6 @@ mod device_tests;
 
 #[cfg(test)]
 mod engine_tests;
+
+#[cfg(test)]
+mod distill_tests;

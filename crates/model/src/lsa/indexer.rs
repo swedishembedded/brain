@@ -168,6 +168,22 @@ impl Indexer {
         Ok(indexer)
     }
 
+    /// Host index vectors of `layer`: `inputs` (`[rows, input_dim]` index
+    /// inputs) projected by the layer's query (`query`) or key map and
+    /// normalised - what the device computes, for evaluation and oracles.
+    pub fn index_vectors(&self, layer: usize, inputs: &[f32], query: bool) -> Result<Vec<f32>, String> {
+        let p = self.layers.get(layer).and_then(Option::as_ref).ok_or_else(|| format!("LSA indexer: layer {layer} is dense"))?;
+        let (din, d) = (self.geometry.input_dim(), self.cfg.index_dim);
+        let w = if query { &p.wq } else { &p.wk };
+        Ok(inputs
+            .chunks_exact(din)
+            .flat_map(|row| {
+                let v: Vec<f32> = (0..d).map(|c| row.iter().enumerate().map(|(i, x)| *x as f64 * w[i * d + c] as f64).sum::<f64>() as f32).collect();
+                crate::hostmath::l2_normalize(&v)
+            })
+            .collect())
+    }
+
     /// Write the indexer to `path` (safetensors).
     pub fn save(&self, path: &str) -> Result<(), String> {
         self.validate()?;

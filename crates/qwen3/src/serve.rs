@@ -261,6 +261,7 @@ fn pipelines() -> &'static [(&'static str, &'static str)] {
         }
         v.extend(model::kv_tier::fp8_pool_pipelines());
         v.extend(model::lsa::device::KERNELS);
+        v.push(("splice", kernels::SPLICE));
         v.push(model::paged_sparse::KERNEL);
         for kv in [model::paged_sparse::PackedKv::Int8, model::paged_sparse::PackedKv::Fp8] {
             v.push(model::lsa::device::index_keys_kernel(kv).expect("lsa_index_keys_i8 marks its byte decode"));
@@ -284,6 +285,16 @@ fn pipelines() -> &'static [(&'static str, &'static str)] {
 /// 4B/8B: 4, 14B: 5, 32B: 8) whose per-KV-head sparse attention kernel is
 /// compiled in; another group reads through the per-head kernel.
 const LSA_GQA_GROUPS: [u32; 4] = [2, 4, 5, 8];
+
+/// One layer's attention inputs from [`Engine::capture_attention`], rotated
+/// as attention read them.
+#[derive(Clone, Debug)]
+pub struct LayerCapture {
+    /// `[T, q_dim]` queries.
+    pub q: Vec<f32>,
+    /// `[T, kv_dim]` keys.
+    pub k: Vec<f32>,
+}
 
 /// `(query heads, KV heads)` of the Qwen3 family (head width 128) whose
 /// whole-row packed-pool prefill kernel is compiled in: 0.6B/1.7B and 4B/8B.
@@ -1033,6 +1044,9 @@ pub struct Engine {
     /// Latent sparse attention ([`Engine::set_lsa`]): the layers it covers
     /// read a per-query selection of keys instead of every cached key.
     lsa: Option<model::lsa::engine::LsaAttention>,
+    /// [`Engine::capture_attention`]'s per-layer `[T, q_dim]` query buffers and
+    /// the first row of the chunk being recorded; `None` outside a capture.
+    capture: Option<(Vec<DeviceBuffer>, std::cell::Cell<u32>)>,
     /// The per-row-adapter LoRA bank, when [`Engine::enable_adapters`] made
     /// one. `None` keeps every path below exactly as it was without adapters.
     bank: Option<AdapterBank>,
@@ -1545,6 +1559,7 @@ impl Engine {
             topk_idx_dev,
             tape_cache: HashMap::new(),
             lsa: None,
+            capture: None,
             bank: None,
             warned_calib_with_adapters: false,
             host_kv: HostKvPool::new(block_words, 0),
@@ -1705,6 +1720,76 @@ impl Engine {
         self.lsa = Some(model::lsa::engine::LsaAttention::new(&self.gpu, indexer, kernels, kv, rows, pages)?);
         self.tape_cache.clear();
         Ok(())
+    }
+
+    /// The teacher material of latent sparse attention's distillation: a dense
+    /// prefill of `prompt` (not added to the prefix cache) that keeps, per
+    /// layer, every position's rotated queries `[T, q_dim]` and keys
+    /// `[T, kv_dim]` as attention read them. Sparse attention, if attached,
+    /// is set aside for the pass: the teacher is the model's own attention.
+    pub fn capture_attention(&mut self, prompt: &[u32]) -> Result<Vec<LayerCapture>, String> {
+        if self.kv_int8 {
+            return Err("capturing attention needs an f32 KV cache".into());
+        }
+        if prompt.is_empty() || prompt.len() > self.max_seq_len() {
+            return Err(format!("capture of {} tokens: the engine holds 1..={}", prompt.len(), self.max_seq_len()));
+        }
+        if let Some(&bad) = prompt.iter().find(|&&t| t >= self.cfg.vocab) {
+            return Err(format!("prompt token {bad} is outside the vocabulary ({})", self.cfg.vocab));
+        }
+        let c = self.cfg.clone();
+        let (t, hq, hkv) = (prompt.len() as u32, c.q_dim(), c.kv_dim());
+        let queries = (0..c.n_layers).map(|_| self.gpu.storage(t as u64 * hq as u64)).collect();
+        self.capture = Some((queries, std::cell::Cell::new(0)));
+        let lsa = self.lsa.take();
+        let mut table = BlockTable::new();
+        let chunk = self.max_prefill.max(1);
+        let mut start = 0u32;
+        while start < t {
+            let cc = (t - start).min(chunk);
+            table.reserve(cc, &mut self.alloc).map_err(|e| format!("capture: {e}"))?;
+            let meta = self.chunk_meta(&table, start, cc);
+            if let Some((_, base)) = &self.capture {
+                base.set(start);
+            }
+            self.run_batched(&meta, Input::Tokens(&prompt[start as usize..(start + cc) as usize]), true);
+            start += cc;
+        }
+        let (queries, _) = self.capture.take().expect("set above");
+        self.lsa = lsa;
+        let kv_row = hkv as usize;
+        let mut out = Vec::with_capacity(c.n_layers as usize);
+        for (l, q) in queries.iter().enumerate() {
+            let pool = self.gpu.read(&self.pool_k[l], self.alloc.num_blocks() as usize * self.block_size as usize * kv_row);
+            let k: Vec<f32> = (0..t)
+                .flat_map(|p| {
+                    let (block, offset) = table.locate(p, self.block_size);
+                    pool[(block * self.block_size + offset) as usize * kv_row..][..kv_row].to_vec()
+                })
+                .collect();
+            out.push(LayerCapture { q: self.gpu.read(q, (t * hq) as usize), k });
+        }
+        table.release(&mut self.alloc);
+        Ok(out)
+    }
+
+    /// The log-probability the model gives each next token of `prompt` at
+    /// positions `from..len - 1` (`out[i]` scores `prompt[from + i + 1]` given
+    /// everything before it), through this engine's attention - dense or
+    /// sparse - and its own head on the device. Bypasses the prefix cache.
+    pub fn position_logprobs(&mut self, prompt: &[u32], from: usize) -> Vec<f32> {
+        let d = self.cfg.d_model as usize;
+        let mut table = BlockTable::new();
+        let hidden = self.score_positions(&mut table, prompt);
+        self.release_table(&mut table);
+        (from..prompt.len().saturating_sub(1))
+            .map(|p| {
+                let logits = self.logits(&hidden[p * d..][..d]);
+                let m = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let log_total = m as f64 + logits.iter().map(|&z| ((z - m) as f64).exp()).sum::<f64>().ln();
+                (logits[prompt[p + 1] as usize] as f64 - log_total) as f32
+            })
+            .collect()
     }
 
     /// Latent sparse attention's device bytes, index pages in use and built,
@@ -2677,6 +2762,10 @@ impl Engine {
             // `ROPE_PAGED` dispatches this used to be - see that method's own
             // doc for the derivation and the `workgroup_reductions` gate.
             self.qk_norm_rope(&mut s, q_src, q_norm, &sc.q, hd, nh, b * nh, theta);
+            if let Some((queries, base)) = &self.capture {
+                let splice = g.kernel_index("splice").expect("splice is registered");
+                s.push(g.step(splice, &[&sc.q, &queries[l]], &[b * hq, base.get() * hq], b * hq));
+            }
             if self.kv_int8 {
                 // K's fused pass stops at norm+RoPE here - the int8 append
                 // below needs the whole per-head row for its own absmax
@@ -3416,6 +3505,11 @@ impl Engine {
     /// the scheduler.
     pub fn prefill_for_perf(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Vec<f32> {
         self.prefill(table, prompt)
+    }
+
+    /// Release a sequence [`Self::prefill_for_perf`] filled.
+    pub fn release_for_perf(&mut self, table: &mut BlockTable) {
+        self.release_table(table)
     }
 
     /// The dispatches of one served step, in submit order, WITHOUT submitting.

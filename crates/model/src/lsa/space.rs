@@ -121,3 +121,43 @@ fn normalise(row: &mut [f32]) {
     let unit = crate::hostmath::l2_normalize(row);
     row.copy_from_slice(&unit);
 }
+
+/// Undo half-split RoPE in place: every `head_dim` head of `row` was rotated
+/// at `pos` with base `rope_base` (`0` for none), with the forward kernels'
+/// own angle `pos * rope_base^(-2m / head_dim)`.
+pub fn unrotate_heads(row: &mut [f32], head_dim: usize, pos: u32, rope_base: f32) {
+    if rope_base == 0.0 {
+        return;
+    }
+    let half = head_dim / 2;
+    for head in row.chunks_exact_mut(head_dim) {
+        for m in 0..half {
+            let angle = pos as f32 * rope_base.powf(-((2 * m) as f32) / head_dim as f32);
+            let (sn, cs) = angle.sin_cos();
+            let (o0, o1) = (head[m], head[m + half]);
+            head[m] = o0 * cs + o1 * sn;
+            head[m + half] = o1 * cs - o0 * sn;
+        }
+    }
+}
+
+/// The index input of rotated attention rows: each row's heads un-rotated at
+/// its position and summed over each KV group (`n_heads / n_kv_heads` heads;
+/// keys pass `n_heads == n_kv_heads`). `rows` is `[R, n_heads * head_dim]`;
+/// returns `[R, n_kv_heads * head_dim]`, not normalised.
+pub fn index_inputs(rows: &[f32], positions: &[u32], n_heads: usize, n_kv_heads: usize, head_dim: usize, rope_base: f32) -> Vec<f32> {
+    let width = n_heads * head_dim;
+    let group = n_heads / n_kv_heads;
+    let mut out = vec![0f32; positions.len() * n_kv_heads * head_dim];
+    for (r, &pos) in positions.iter().enumerate() {
+        let mut row = rows[r * width..][..width].to_vec();
+        unrotate_heads(&mut row, head_dim, pos, rope_base);
+        let dst = &mut out[r * n_kv_heads * head_dim..][..n_kv_heads * head_dim];
+        for h in 0..n_heads {
+            for (o, x) in dst[(h / group) * head_dim..][..head_dim].iter_mut().zip(&row[h * head_dim..][..head_dim]) {
+                *o += *x;
+            }
+        }
+    }
+    out
+}

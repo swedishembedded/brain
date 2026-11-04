@@ -92,9 +92,18 @@ head layout; clustering, selection and the sparse read are written once.
       32k / 64k against whole-row sparse 787 / 1610 ms (2.8x / 6.4x);
       crossover near 12k.
 - [ ] YaRN: the index-vector kernel un-rotates plain RoPE only.
-- [ ] D-LSA: PCA initialisation, loading the released distilled maps, the
-      distillation objective (forward KL against head-averaged teacher
-      attention, top-2048 targets) on the generic trainer.
+- [x] D-LSA training (`model::lsa::distill`): teacher targets (head-averaged
+      attention over the keys outside sink and window, top 2048,
+      renormalised), the forward-KL objective with analytic gradients of both
+      projections and the temperature through the row normalisation, Adam,
+      layers in parallel; `Engine::capture_attention` keeps each layer's
+      rotated queries and keys of a dense prefill as teacher material;
+      `qwen_lsa distill | eval | prefill` drives it on a real checkpoint (PCA
+      initialisation, retention of dense attention, held-out loss, prefill
+      timing). Gates: gradients against central differences; held-out KL
+      2.14 -> 0.0006 on a learnable teacher, recovering its temperature.
+- [ ] D-LSA on the generic trainer (`ModelFit`) and device kernels for the
+      distillation arithmetic, which is host math today.
 - [ ] N-LSA: sparse attention backward (selection inverted per key group, no
       atomics) and its gradient check with the selection held fixed.
 - [ ] Tree search (node-bucket levels and beam descent) after flat accuracy
