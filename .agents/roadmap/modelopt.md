@@ -75,17 +75,22 @@ minimize `sum E[i, q_i]` subject to `sum bytes[i, q_i] <= budget`.
       same-shape sites. Held over 13 random seeds.
 - [ ] Bounded host memory: `sensitivity` holds one f32 per site element; a
       model whose linears do not fit host RAM in fp32 needs it per layer.
-- [ ] Runtime cost: per-tier GEMM time from `model::probe` at each site's
-      shape as a second constraint (`min_memory` with a latency cap, and
-      `min_latency` with a memory cap).
+- [x] Runtime cost: every distinct site product timed per tier on the
+      device (`Timing`, `model::probe::gemm` in the SDK) at decode rows; the
+      solver limits bytes and, optionally, summed product seconds
+      (`Limits`); reported for the plan, f32 and each baseline.
+- [ ] Time a product on the serving engine's own kernel selection (the
+      engine's tuned int8 GEMV, fused groups) rather than the ops façade's.
 - [x] `modelopt::search_weights` and its `Report`: estimate, solve, then
       measure the plan, the original and every uniform tier that fits the
       budget; calibration and held-out batches must not overlap.
-- [x] Measurement on the deployed kernels: `LoraRequest::base` is a
-      `TierPolicy`, so the trainer builds the base at a mixed plan (qwen3
-      `Qwen::new_lora_tiers`, qwen35 `StreamedRun::base`); a zero-delta
-      adapter leaves the base's loss. This also measures int8's activation
-      quantization, which weight simulation does not.
+- [x] Measurement as deployed: through the family's serving engine where it
+      has a scoring path (`ChatTrainer::served_loss`; qwen3
+      `eval::served_loss` over `serve::Engine` at the policy, int8 activation
+      quantization included), else on the trainer's frozen-base build
+      (`LoraRequest::base` is a `TierPolicy`; a zero-delta adapter leaves the
+      base's loss). The trainer build decodes packed weights to fp32 products,
+      so it does not see activation quantization; the outcome says which ran.
 - [x] Front end: `brain::ModelOptimizer` (`crates/sdk/src/optimize.rs`) over
       `ChatEntry::{search, measure}`, and `brain optimize` over it; accepted
       only on the deployed measurements; `optimize.json` holds the outcome.
@@ -94,8 +99,14 @@ minimize `sum E[i, q_i]` subject to `sum bytes[i, q_i] <= budget`.
 - [x] Serving a plan: qwen3's engine takes a per-leaf `TierPolicy`
       (`Engine::check_tiers` refuses a split fused group);
       `serve::tests::mixed_tiers_serve_each_linear_at_its_own_tier`.
-- [ ] A real checkpoint: Qwen3-0.6B, searched against uniform int8 and bf16 on
-      held-out text, with the served policy re-measured through `brain serve`.
+- [ ] A real checkpoint: Qwen3-0.6B on ARC-Easy chat records. At the uniform
+      int8 budget the only feasible plan was all-int8 (f32/bf16/int8
+      candidates), which is why the default budget is midway; the midway run
+      and serving its policy through `brain serve` are next.
+- [ ] qwen35: no engine scoring path yet (`served_loss` is `None`), so its
+      plans are accepted on the trainer build.
+- [ ] Faster host codecs: fp8 and nf4 round trips are serial and dominate a
+      search that offers them on a 0.6B model.
 
 ## KV precision search
 
@@ -109,13 +120,18 @@ minimize `sum E[i, q_i]` subject to `sum bytes[i, q_i] <= budget`.
 
 ## Quantization-aware training and distillation (QAT/QAD)
 
-- [ ] Fake-quantized forward with a straight-through backward, through the
-      generic trainer, using `Weight::round_trip` (no model-crate code).
-- [ ] QAD: the student is the quantized model, the teacher the original, with
-      `rl::objective::distill`'s top-K KL plus the task loss.
-- [ ] Acceptance: QAT/QAD recovers measured held-out loss over PTQ at the same
-      policy, the packed export reloads, and served logits match the simulated
-      ones within the tier's tolerance.
+- [x] Recovery by distillation over the quantized base: `rl::fit::TeacherFit`
+      collects the original's top-K distributions on the calibration split,
+      `DistillFit` trains a LoRA adapter over the base held at the plan
+      (`ChatEntry::distill`), and the plan is measured without and with it on
+      the same trainer build (`ModelOptimizer::recover`, `--recover-steps`).
+- [ ] Measure the recovered plan on the serving engine with the adapter as an
+      overlay (the engine scoring path folds an adapter into the weights
+      before quantizing, which is not how a quantized base serves one).
+- [ ] Full QAT: fake-quantized forward with a straight-through backward
+      through the generic trainer, updating the base weights themselves.
+- [ ] Acceptance on a real checkpoint: recovery lowers the plan's held-out
+      loss, and the adapter serves beside the policy.
 
 ## Structured pruning and distillation
 
