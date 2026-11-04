@@ -324,6 +324,7 @@ impl PreferenceFineTune {
             Some(spec) => chat.lora_bases.parse(spec).map_err(Error::Backend)?,
             None => gpu_core::select::Dtype::F32,
         };
+        let base_tiers = model::ops::TierPolicy::uniform(base_format);
         let (rank, alpha, parent) = lora_shape(self.continue_from.as_deref(), self.rank, self.alpha, Default::default())?;
         let block = block_for(longest(&train), self.max_block)?;
         let seq_len = block as usize;
@@ -403,7 +404,7 @@ impl PreferenceFineTune {
         };
         let job = PreferenceJob {
             base: &weights,
-            lora: model::finetune::LoraRequest { rank, alpha, continue_from: self.continue_from.as_deref(), base: base_format },
+            lora: model::finetune::LoraRequest { rank, alpha, continue_from: self.continue_from.as_deref(), base: &base_tiers },
             opts: &opts,
             dpo: rl::objective::dpo::DpoConfig { beta: self.beta, seq_len, nll_weight: self.nll_weight },
             pairs: packed,

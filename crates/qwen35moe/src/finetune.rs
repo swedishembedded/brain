@@ -109,7 +109,7 @@ impl model::finetune::ChatTrainer for Qwen35MoeTrainer {
     }
 
     fn train_lora(base: &Path, lora: &LoraRequest<'_>, opts: &FitOpts, fit: &mut impl ModelFit) -> std::io::Result<(FitReport, Qwen35)> {
-        lora.checked::<Self>()?;
+        lora.checked_uniform::<Self>()?;
         if lora.continue_from.is_some() {
             return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "qwen35moe does not continue an adapter yet"));
         }

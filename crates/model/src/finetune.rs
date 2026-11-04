@@ -33,6 +33,7 @@ use std::path::{Path, PathBuf};
 
 use gpu_core::select::Dtype;
 
+use crate::ops::TierPolicy;
 use crate::train::{causal_lm, load_dataset_with_itos, FitControl, FitOpts, FitReport};
 use crate::Model;
 
@@ -140,16 +141,29 @@ pub struct LoraRequest<'a> {
     /// An adapter file whose factors training continues; `None`: a fresh
     /// zero-delta adapter drawn from the run's seed.
     pub continue_from: Option<&'a Path>,
-    /// How the frozen base is held on the device; one of the trainer's
-    /// [`ChatTrainer::LORA_BASES`]. The generic fine-tuners refuse any other
-    /// before a checkpoint is opened ([`LoraRequest::checked`]).
-    pub base: Dtype,
+    /// How the frozen base is held on the device, per linear: every tier it
+    /// names is one of the trainer's [`ChatTrainer::LORA_BASES`]. The generic
+    /// fine-tuners refuse any other before a checkpoint is opened
+    /// ([`LoraRequest::checked`]).
+    pub base: &'a TierPolicy,
 }
 
-impl LoraRequest<'_> {
-    /// The base format, if `T` can train over it.
-    pub fn checked<T: ChatTrainer>(&self) -> std::io::Result<Dtype> {
-        T::LORA_BASES.check(self.base).map_err(|why| std::io::Error::new(std::io::ErrorKind::Unsupported, why))
+impl<'a> LoraRequest<'a> {
+    /// The base policy, if `T` can hold every tier it names.
+    pub fn checked<T: ChatTrainer>(&self) -> std::io::Result<&'a TierPolicy> {
+        for tier in self.base.dtypes() {
+            T::LORA_BASES.check(tier).map_err(|why| std::io::Error::new(std::io::ErrorKind::Unsupported, why))?;
+        }
+        Ok(self.base)
+    }
+
+    /// The one base tier of a family that holds its frozen base uniformly: a
+    /// mixed base is refused by name, never held at one of its tiers.
+    pub fn checked_uniform<T: ChatTrainer>(&self) -> std::io::Result<Dtype> {
+        let policy = self.checked::<T>()?;
+        policy.uniform_dtype().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::Unsupported, format!("{}: a mixed LoRA base ({}) is not supported; hold the base at one tier", T::LORA_BASES.model, policy.describe()))
+        })
     }
 }
 

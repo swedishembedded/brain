@@ -157,6 +157,20 @@ pub fn build_for_training_with(cfg: QwenConfig, opts: &FitOpts, init: &dyn Tenso
     .map_err(std::io::Error::other)
 }
 
+/// A LoRA build over a frozen base holding each linear at the tier `tiers` names
+/// ([`Qwen::new_lora_tiers`]), on one card: placed by its widest tier, an upper
+/// bound on what the mixed base holds. A base that fits one card only as a
+/// pipeline of stages is held at one tier ([`build_trainer`]).
+pub fn build_mixed_for_training(cfg: QwenConfig, opts: &FitOpts, init: &dyn TensorSource, tiers: &model::ops::TierPolicy) -> std::io::Result<Qwen> {
+    let widest = tiers.dtypes().min_by_key(|dt| dt.per_word()).unwrap_or(Dtype::F32);
+    let shard = crate::model::Shard::whole(cfg.n_layers as usize);
+    crate::footprint::place_and_build(&cfg.clone(), &shard, widest, opts.batch_size, opts.block_size, true, false, "qwen3 finetune", || {
+        Ok::<_, String>(Qwen::new_lora_tiers(cfg, opts.batch_size, opts.block_size, init, tiers, opts.gemm_precision))
+    })
+    .map_err(std::io::Error::other)?
+    .map_err(std::io::Error::other)
+}
+
 /// What a full fine-tune of `cfg` at `opts`' batch and context asks of the device, as the planner's categories: the
 /// weights and gradients, the AdamW state in the requested format (on the host when `offload`) and one step's
 /// activations.
@@ -836,9 +850,16 @@ impl model::finetune::ChatTrainer for Qwen3Trainer {
             Some(path) => LoraStart::Continue(path_str(path).map_err(std::io::Error::other)?),
             None => LoraStart::Fresh,
         };
-        let base_dtype = lora.checked::<Self>()?;
+        let tiers = lora.checked::<Self>()?;
         let (cfg, init) = lora_start(path_str(base).map_err(std::io::Error::other)?, lora.rank, lora.alpha, opts.seed, &start)?;
-        lora_trained(cfg, &init, opts, base_dtype, fit)
+        match tiers.uniform_dtype() {
+            Some(dt) => lora_trained(cfg, &init, opts, dt, fit),
+            None => {
+                let m = model::finetune::OptimizerState::Device.scope(|| build_mixed_for_training(cfg, opts, &init, tiers))?;
+                let (report, m) = fit.fit(m)?;
+                Ok((report, Trained::Single(Box::new(m))))
+            }
+        }
     }
 
     fn save_adapter(trained: &Trained, path: &Path, lineage: &model::finetune::AdapterLineage<'_>) -> std::io::Result<()> {

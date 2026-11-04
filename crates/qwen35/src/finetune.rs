@@ -450,7 +450,7 @@ impl model::finetune::ChatTrainer for Qwen35Trainer {
     }
 
     fn train_lora(base: &Path, lora: &model::finetune::LoraRequest<'_>, opts: &FitOpts, fit: &mut impl model::finetune::ModelFit) -> std::io::Result<(model::FitReport, Qwen35)> {
-        let run = StreamedRun { dtype: lora.checked::<Self>()?, recompute: false, long: LongSeqOverrides::default() };
+        let run = StreamedRun { dtype: lora.checked_uniform::<Self>()?, recompute: false, long: LongSeqOverrides::default() };
         let m = model::finetune::OptimizerState::Device.scope(|| build_lora_model(base, opts, lora.rank, lora.alpha, AdapterTuning::default(), lora.continue_from, &run))?;
         fit.fit(m)
     }

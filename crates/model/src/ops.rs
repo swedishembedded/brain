@@ -1068,6 +1068,11 @@ impl TierPolicy {
         self.rules.iter().rev().find(|(pat, _)| name.contains(pat.as_str())).map(|(_, dt)| *dt)
     }
 
+    /// The one tier every leaf takes, `None` when rules put some leaf at another.
+    pub fn uniform_dtype(&self) -> Option<Dtype> {
+        self.rules.iter().all(|(_, dt)| *dt == self.default).then_some(self.default)
+    }
+
     /// The tier every leaf without a rule takes.
     pub fn default_dtype(&self) -> Dtype {
         self.default
