@@ -286,6 +286,22 @@ fn pipelines() -> &'static [(&'static str, &'static str)] {
 /// compiled in; another group reads through the per-head kernel.
 const LSA_GQA_GROUPS: [u32; 4] = [2, 4, 5, 8];
 
+/// Index pages an engine allocates for latent sparse attention over a pool of
+/// `num_blocks` KV blocks: shared prefixes share pages, and sequences that
+/// diverge inside a cluster block each need their own, hence the margin over
+/// one page per pool cluster block.
+fn lsa_page_capacity(num_blocks: u32, block_size: u32, cluster_block: u32) -> u32 {
+    2 * (num_blocks * block_size).div_ceil(cluster_block) + 1
+}
+
+/// The device bytes [`Engine::set_lsa`] allocates for `indexer` on an engine
+/// of this pool geometry: what a memory planner charges before loading.
+pub fn lsa_device_bytes(indexer: &model::lsa::indexer::Indexer, block_size: u32, num_blocks: u32, max_blocks_per_seq: u32, max_batch: u32, max_prefill: u32) -> u64 {
+    let kv = model::lsa::engine::KvGeometry { block_size, max_blocks_per_seq };
+    let pages = lsa_page_capacity(num_blocks, block_size, indexer.cfg.cluster_block as u32);
+    model::lsa::engine::LsaAttention::device_bytes_for(indexer, kv, max_prefill.max(max_batch), pages)
+}
+
 /// One layer's attention inputs from [`Engine::capture_attention`], rotated
 /// as attention read them.
 #[derive(Clone, Debug)]
@@ -1711,11 +1727,7 @@ impl Engine {
         let (attend, layout) = whole_row.map_or((few, layout_few), |k| (k, Layout::PerRow));
         let kernels = model::lsa::engine::LsaKernels { index_vectors: name(model::lsa::device::KERNELS[0].0)?, read: name(model::lsa::device::KERNELS[1].0)?, attend, layout, attend_few: few, layout_few, index_keys_packed };
         let kv = model::lsa::engine::KvGeometry { block_size: self.block_size, max_blocks_per_seq: self.max_blocks_per_seq };
-        let cluster = indexer.cfg.cluster_block as u32;
-        // Shared prefixes share pages; sequences that diverge inside a cluster
-        // block each need their own, hence the margin over one page per pool
-        // cluster block.
-        let pages = 2 * (self.alloc.num_blocks() * self.block_size).div_ceil(cluster) + 1;
+        let pages = lsa_page_capacity(self.alloc.num_blocks(), self.block_size, indexer.cfg.cluster_block as u32);
         let rows = self.max_prefill.max(self.max_batch);
         self.lsa = Some(model::lsa::engine::LsaAttention::new(&self.gpu, indexer, kernels, kv, rows, pages)?);
         self.tape_cache.clear();

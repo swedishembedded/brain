@@ -101,3 +101,19 @@ fn qwen3_with_latent_sparse_attention_conforms() {
 fn qwen3_with_latent_sparse_attention_over_int8_kv_conforms() {
     conformance::run_all(&Conformance { make: || sparse_engine_on(true), prefix_reuse: true, prefix_prompt_tokens: 24, load_adapter: Some(load_adapter) });
 }
+
+/// What a memory planner charges for sparse attention before loading is what
+/// the engine allocates.
+#[test]
+fn the_planned_sparse_attention_bytes_are_the_allocated_ones() {
+    let e = sparse_engine_on(false);
+    let cfg = QwenConfig::tiny();
+    let geometry = model::lsa::indexer::IndexGeometry { n_layers: cfg.n_layers as usize, n_heads: cfg.n_heads as usize, n_kv_heads: cfg.n_kv_heads as usize, head_dim: cfg.head_dim as usize, rope_base: cfg.rope_theta };
+    let lsa = model::lsa::LsaConfig { index_dim: 4, pool_size: 1, bucket_size: 2, bucket_cap: 4, cluster_block: 8, top_p: 2, top_k: 3, sink: 1, window: 8, early: None };
+    // seed: the same fixture indexer as `sparse_engine_on`.
+    let indexer = model::lsa::indexer::Indexer::random(lsa, geometry, 11).unwrap();
+    let planned = qwen3::serve::lsa_device_bytes(&indexer, BLOCK, 96, (MIN_SEQ_TOKENS as u32).div_ceil(BLOCK), 4, 16);
+    let (allocated, _, _) = e.lsa_stats().unwrap();
+    assert_eq!(planned, allocated);
+    assert!(planned > 0);
+}

@@ -89,9 +89,11 @@ head layout; clustering, selection and the sparse read are written once.
 - [x] Serving surface: `--sparse-attention FILE` (`model::policy`), honoured
       by the Qwen3 resident (`Engine::set_lsa`) and refused by name by every
       model that does not declare it.
-- [ ] Memory accounted in `memplan` (index pages and scratch:
-      `LsaAttention::device_bytes`) and selected-key metrics in the stats
-      snapshot.
+- [x] Memory planning: the Qwen3 resident charges `--sparse-attention`'s
+      projections, index pages and scratch as a `memplan` demand before
+      loading (`qwen3::serve::lsa_device_bytes`, the formula `set_lsa`
+      allocates by; gated equal on the tiny engine).
+- [ ] Selected-key counts and page use in the stats snapshot.
 - [x] Packed (int8/fp8) KV, the served default: `paged_sparse_flash_gqa_i8`
       (per KV head, decode) and `paged_sparse_flash_rows_i8` (one workgroup
       per query row and every head: each selected key resolved once and its

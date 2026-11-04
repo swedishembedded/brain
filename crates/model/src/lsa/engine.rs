@@ -198,13 +198,24 @@ impl LsaAttention {
 
     /// Device bytes held: projections, index pages and scratch.
     pub fn device_bytes(&self) -> u64 {
-        let d = self.cfg.index_dim as u64;
-        let input = self.heads.n_kv_heads as u64 * self.heads.head_dim as u64;
-        let sparse = self.layers.iter().filter(|l| l.is_some()).count() as u64;
-        let per_layer = 2 * input * d * 4 + IndexPool::bytes(&self.cfg, self.pages.num_blocks()) + self.cfg.cluster_block as u64 * d * 4;
-        let rows = self.max_rows as u64;
-        let scratch = 4 * rows * (1 + d + self.read.score_stride() as u64 + self.read.row_stride() as u64 + self.read.max_pages as u64 + 1) + 8 * self.cfg.cluster_block as u64;
-        sparse * per_layer + scratch
+        let sparse = self.layers.iter().filter(|l| l.is_some()).count();
+        Self::bytes(&self.cfg, self.heads.n_kv_heads * self.heads.head_dim, sparse, self.kv, self.max_rows, self.pages.num_blocks())
+    }
+
+    /// The device bytes [`Self::new`] allocates for `indexer` with these
+    /// arguments, before allocating: what a memory planner charges.
+    pub fn device_bytes_for(indexer: &Indexer, kv: KvGeometry, max_rows: u32, page_capacity: u32) -> u64 {
+        let sparse = indexer.layers.iter().filter(|l| l.is_some()).count();
+        Self::bytes(&indexer.cfg, indexer.geometry.input_dim() as u32, sparse, kv, max_rows, page_capacity)
+    }
+
+    fn bytes(cfg: &LsaConfig, input: u32, sparse: usize, kv: KvGeometry, max_rows: u32, page_capacity: u32) -> u64 {
+        let d = cfg.index_dim as u64;
+        let read = ReadGeometry { cfg: *cfg, max_pages: (kv.max_blocks_per_seq * kv.block_size) / cfg.cluster_block as u32 };
+        let per_layer = 2 * input as u64 * d * 4 + IndexPool::bytes(cfg, page_capacity) + cfg.cluster_block as u64 * d * 4;
+        let rows = max_rows as u64;
+        let scratch = 4 * rows * (1 + d + read.score_stride() as u64 + read.row_stride() as u64 + read.max_pages as u64 + 1) + 8 * cfg.cluster_block as u64;
+        sparse as u64 * per_layer + scratch
     }
 
     /// Index pages built since the engine started (page reuse excluded).

@@ -721,6 +721,9 @@ struct PoolProfile {
     /// pool so that demoting a sequence can never need memory the budget did
     /// not count.
     swap_staging_bytes: u64,
+    /// Latent sparse attention's projections, index pages and scratch
+    /// (`0` without `--sparse-attention`).
+    sparse_attention_bytes: u64,
     /// The largest single storage binding this sizing implies.
     ///
     /// The KV term is `qwen3::serve::kv_binding_bytes` (that crate owns the
@@ -738,13 +741,18 @@ impl PoolProfile {
         // the real device limit, so this pre-flight and that authoritative
         // check cannot disagree about the size of the buffer in question.
         let per_layer_kv = qwen3::serve::kv_binding_bytes(cfg, block_size, num_blocks, kv_int8);
-        PoolProfile { kv_bytes, scratch_bytes, swap_staging_bytes: 0, largest_binding: per_layer_kv.max(scratch_bytes / 2) }
+        PoolProfile { kv_bytes, scratch_bytes, swap_staging_bytes: 0, sparse_attention_bytes: 0, largest_binding: per_layer_kv.max(scratch_bytes / 2) }
     }
 
     /// This sizing with the swap staging a host-RAM KV offload needs counted
     /// in `total`.
     fn with_swap_staging(mut self, cfg: &qwen3::config::QwenConfig, block_size: u32, num_blocks: u32, kv_int8: bool) -> PoolProfile {
         self.swap_staging_bytes = qwen3::serve::kv_swap_staging_bytes(cfg, block_size, num_blocks, kv_int8);
+        self
+    }
+
+    fn with_sparse_attention(mut self, bytes: u64) -> PoolProfile {
+        self.sparse_attention_bytes = bytes;
         self
     }
 
@@ -771,6 +779,7 @@ impl PoolProfile {
             Demand::fixed(Category::Kv, "paged pool", self.kv_bytes),
             Demand::fixed(Category::Activations, "attention scratch", self.scratch_bytes),
             Demand::fixed(Category::Transfers, "kv swap staging", self.swap_staging_bytes),
+            Demand::fixed(Category::Kv, "sparse attention index", self.sparse_attention_bytes),
         ]
     }
 
@@ -1399,9 +1408,14 @@ impl ResidentModel for QwenResident {
             // Refuse BEFORE loading when the whole footprint (weights, adapter bank, KV pool, attention
             // scratch, swap staging) cannot fit the card this server was told it may use, with the
             // planner's per-category arithmetic. `estimate()` charged the same demands for placement.
+            let indexer = match &self.sparse_attention {
+                Some(path) => Some(model::lsa::indexer::Indexer::load(path).map_err(|e| format!("qwen: --sparse-attention: {e}"))?),
+                None => None,
+            };
             if let Some(card) = self.card_budget_bytes.filter(|&b| b > 0) {
                 let profile = PoolProfile::new(&checkpoint_cfg, block_size, num_blocks, max_batch, max_prefill, cap, kv_int8, fused);
                 let profile = if self.kv_offload_bytes > 0 { profile.with_swap_staging(&checkpoint_cfg, block_size, num_blocks, kv_int8) } else { profile };
+                let profile = profile.with_sparse_attention(indexer.as_ref().map_or(0, |ix| qwen3::serve::lsa_device_bytes(ix, block_size, num_blocks, max_blocks_per_seq, max_batch, max_prefill)));
                 let bank_bytes = self.adapters.settings().map_or(0, |bank| bank.device_bytes(&checkpoint_cfg, max_batch.max(max_prefill)));
                 profile.plan(self.weight_bytes(&checkpoint_cfg), bank_bytes, card).map_err(|e| format!("qwen: {}: refusing to load, {e}; lower --ctx, --max-batch or the KV pool size", self.path))?;
             }
@@ -1440,9 +1454,8 @@ impl ResidentModel for QwenResident {
                     eprintln!("serve: {}: --kv-cache fp8 needs the packed KV pools but the KV cache is fp32; ignoring", self.path);
                 }
             }
-            if let Some(path) = &self.sparse_attention {
-                let indexer = model::lsa::indexer::Indexer::load(path).map_err(|e| format!("qwen: --sparse-attention: {e}"))?;
-                eng.set_lsa(&indexer).map_err(|e| format!("qwen: --sparse-attention {path}: {e}"))?;
+            if let (Some(path), Some(indexer)) = (&self.sparse_attention, &indexer) {
+                eng.set_lsa(indexer).map_err(|e| format!("qwen: --sparse-attention {path}: {e}"))?;
             }
             eng.set_gemm_precision(self.gemm_precision);
             eng.set_fuse_residual_norm(self.fuse_residual_norm);
