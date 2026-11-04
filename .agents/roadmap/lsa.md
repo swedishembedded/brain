@@ -163,25 +163,50 @@ head layout; clustering, selection and the sparse read are written once.
       Distillation closes 90% of the random indexer's loss gap and 62% of
       PCA's: +1.1% perplexity while each query reads about a third of its
       keys.
-- [x] N-LSA training (`Qwen::enable_native_lsa`): every layer's queries read
-      only their selection, built each forward from the layer's own rotated
-      queries and keys (identity index space, no learned projection), held
-      fixed while gradients flow exactly through the selected entries; the
-      mask is added to the materialised scores before the softmax and the
-      backward's recompute reuses it. `long_range: false` is the
-      window-only baseline. Gate: at a full budget a training step's loss
-      equals dense and its gradients agree to 1e-8 (largest 2.8e-2);
-      window-only changes them. Experiment (`lsa_native`, run by hand): a
-      2-layer, 128-wide model trained from scratch for 3000 steps on recall
-      whose key/value pairs sit over 200 tokens before their queries, past a
-      16-key window (top_k 16, top_p 8): held-out answer loss dense 0.930,
-      native sparse 1.050, window only 3.083 (chance 3.466; an earlier run
-      0.946 / 1.024 / 3.143) - sparse attention learns the retrieval a window
-      cannot. The sparse model, saved and served by the engine reading
-      sparsely through the identity indexer, gives its answers the training
-      model's loss (1.0154 both, largest single answer 3.3e-6 apart; a
-      near-tie bucket can flip between the host and device arithmetic and
-      move one answer a few hundredths).
+- [x] N-LSA training (`Qwen::enable_native_lsa`, `model::lsa::native`):
+      every layer's queries read only their selection, made each forward on
+      the device from the layer's own rotated queries and keys (identity
+      index space, no learned projection: the index kernels take index
+      widths up to 1024 and an unprojected mode, Ward clusters every block of
+      every sequence in one dispatch) and held fixed while gradients flow
+      exactly through the selected entries. Attention runs over the
+      selection only - `lsa_native_fwd` keeps each row's log-sum-exp,
+      `lsa_native_bwd_dq` rebuilds the probabilities per query,
+      `lsa_native_bwd_dkv` gathers per key over the queries that selected it
+      - a workgroup per (row, KV head) sharing each K/V row across the group.
+      The per-key inverse is a stable radix sort of (key, query) pairs
+      (`gpu_core::sort`), so it is deterministic and needs no atomics; the
+      whole selection is recorded on the training tape (no readback) and the
+      backward's recompute reuses it. Memory is linear in the context: the
+      index is `b * t * (2 * row width + 4)` words a layer, no `[t, t]`
+      buffer. `long_range: false` is the window-only baseline. Gates: the
+      kernels match an f64 oracle of attention over random selections and
+      its gradients to 7e-7 (grouped heads 1 to 8, head_dim 8 to 256); the
+      device inverse is the host packing word for word; at a full budget a
+      training step's loss equals dense and its gradients agree to 1e-8
+      (largest 3.3e-2); window-only changes them. Training step, 4 layers,
+      d_model 512, 8 heads over 2 KV heads, top_k 512, window 512, P40,
+      dense the flash kernels:
+      | t | dense | native sparse | speedup |
+      |---|---|---|---|
+      | 2048 | 234 ms | 443 ms | 0.53x |
+      | 4096 | 731 ms | 1075 ms | 0.68x |
+      | 8192 | 2584 ms | 2699 ms | 0.96x |
+      | 16384 | 9775 ms | 6285 ms | 1.56x |
+      | 32768 | 38437 ms | 14376 ms | 2.67x |
+      Dense grows 3.9x a doubling, sparse 2.3x (the flat read's bucket
+      scoring is the superlinear part). Below about 8k the gathers cost more
+      than dense tiles; training semantics need the sparse read there.
+      Experiment (`lsa_native`, run by hand): a 2-layer, 128-wide model
+      trained from scratch for 3000 steps on recall whose key/value pairs sit
+      over 200 tokens before their queries, past a 16-key window (top_k 16,
+      top_p 8): held-out answer loss dense 1.047, native sparse 1.001,
+      window only 3.103 (chance 3.466; with the earlier masked-dense
+      training 0.930 / 1.050 / 3.083) - sparse attention learns the
+      retrieval a window cannot. The sparse model, saved and served by the
+      engine reading sparsely through the identity indexer, gives its answers
+      the training model's loss (0.8361 both, largest single answer 2.7e-6
+      apart).
 
 ## Not yet done
 
@@ -190,9 +215,9 @@ head layout; clustering, selection and the sparse read are written once.
       selection), and more bytes in flight per workgroup.
 - [ ] D-LSA on the generic trainer (`ModelFit`) and device kernels for the
       distillation arithmetic, which is host math today.
-- [ ] N-LSA with a sub-quadratic training kernel (the selection inverted per
-      key group for dK/dV, no atomics); training today runs materialised
-      `[b, heads, t, t]` attention under the mask.
+- [ ] N-LSA at short contexts: the window as a dense banded tile in the
+      training kernels (it is half of every selection), so training below
+      8k stops paying gathers for it.
 - [ ] Tree search (node-bucket levels and beam descent) after flat accuracy
       is proven at long context.
 - [ ] Quantized index storage (bf16 centroids, fp8 tree nodes) gated on

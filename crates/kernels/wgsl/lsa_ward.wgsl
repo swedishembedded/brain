@@ -40,12 +40,16 @@
 // against the host's f64, so a near-tie may merge differently; well-separated
 // keys merge identically (the gate).
 //
-// One dispatch builds one block's page for every sparse layer: workgroup `w`
-// is layer slot `w`, reads its keys at `keys[w * cluster_block ..]`, owns
-// scratch slab `w` (`pools * index_dim + pools * pools` floats) and writes
-// page `page` of its slot (bucket rows from `(w * pages + page) *
-// buckets_per_block`), so the layers cluster concurrently. Limits: pools
-// (cluster_block / pool_size) <= 256, buckets_per_block <= 128.
+// One dispatch clusters many blocks at once: workgroup `w` reads its keys at
+// `keys[w * cluster_block ..]`, owns scratch slab `w` (`pools * index_dim +
+// pools * pools` floats) and writes page `page` of slot `w` (bucket rows from
+// `(w * pages + page) * buckets_per_block`). Serving gives each sparse layer
+// a slot and clusters one block of a sequence for every layer (`seq_blocks`
+// 0: every slot's block starts at `base`); training gives every block of
+// `b` sequences of `seq_blocks` blocks a slot of one page, block `w %
+// seq_blocks` of its sequence starting at `base + (w % seq_blocks) *
+// cluster_block`. Limits: pools (cluster_block / pool_size) <= 256,
+// buckets_per_block <= 128, index_dim <= 1024 (64-channel chunks).
 
 const WG: u32 = 64u;
 const MAX_POOLS: u32 = 256u;
@@ -61,6 +65,7 @@ struct Params {
     page: u32,
     base: u32,       // position of the block's first key
     pages: u32,      // pages per layer slot
+    seq_blocks: u32, // blocks per sequence when every slot is a block (0: none)
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -79,7 +84,7 @@ var<workgroup> pick_i:  array<u32, 128>;      // mutual pairs, cheapest first
 var<workgroup> pick_c:  array<f32, 128>;
 var<workgroup> n_pick:  u32;
 var<workgroup> n_live:  u32;
-var<workgroup> ta:      array<f32, 1024>;     // a 16-pool tile of sums (index_dim <= 64)
+var<workgroup> ta:      array<f32, 1024>;     // a 16-pool tile of sums, 64 channels
 var<workgroup> tb:      array<f32, 1024>;
 
 @compute @workgroup_size(64)
@@ -114,32 +119,44 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     storageBarrier();
     workgroupBarrier();
 
-    // The Gram matrix of the pool sums, 16 x 16 pool tiles at a time.
+    // The Gram matrix of the pool sums, 16 x 16 pool tiles at a time, each
+    // accumulated over 64-channel chunks (a thread owns 4 of a tile's 256
+    // entries).
     let tiles = (np + 15u) / 16u;
     for (var ti = 0u; ti < tiles; ti = ti + 1u) {
         for (var tj = ti; tj < tiles; tj = tj + 1u) {
-            for (var e = lt; e < 16u * d; e = e + WG) {
-                let r = e / d;
-                let c = e % d;
-                let pa = ti * 16u + r;
-                let pb = tj * 16u + r;
-                ta[r * 64u + c] = select(0.0, scratch[sums + pa * d + c], pa < np);
-                tb[r * 64u + c] = select(0.0, scratch[sums + pb * d + c], pb < np);
+            var g: array<f32, 4>;
+            for (var k = 0u; k < 4u; k = k + 1u) { g[k] = 0.0; }
+            for (var c0 = 0u; c0 < d; c0 = c0 + 64u) {
+                let cw = min(64u, d - c0);
+                for (var e = lt; e < 16u * 64u; e = e + WG) {
+                    let r = e / 64u;
+                    let c = e % 64u;
+                    let pa = ti * 16u + r;
+                    let pb = tj * 16u + r;
+                    ta[e] = select(0.0, scratch[sums + pa * d + c0 + c], pa < np && c < cw);
+                    tb[e] = select(0.0, scratch[sums + pb * d + c0 + c], pb < np && c < cw);
+                }
+                workgroupBarrier();
+                for (var k = 0u; k < 4u; k = k + 1u) {
+                    let e = lt + k * WG;
+                    var acc = g[k];
+                    for (var c = 0u; c < cw; c = c + 1u) {
+                        acc = acc + ta[(e / 16u) * 64u + c] * tb[(e % 16u) * 64u + c];
+                    }
+                    g[k] = acc;
+                }
+                workgroupBarrier();
             }
-            workgroupBarrier();
-            for (var e = lt; e < 256u; e = e + WG) {
+            for (var k = 0u; k < 4u; k = k + 1u) {
+                let e = lt + k * WG;
                 let i = ti * 16u + e / 16u;
                 let j = tj * 16u + e % 16u;
-                var g = 0.0;
-                for (var c = 0u; c < d; c = c + 1u) {
-                    g = g + ta[(e / 16u) * 64u + c] * tb[(e % 16u) * 64u + c];
-                }
                 if (i < np && j < np) {
-                    scratch[gram + i * np + j] = g;
-                    scratch[gram + j * np + i] = g;
+                    scratch[gram + i * np + j] = g[k];
+                    scratch[gram + j * np + i] = g[k];
                 }
             }
-            workgroupBarrier();
         }
     }
     storageBarrier();
@@ -247,27 +264,37 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     }
     workgroupBarrier();
 
-    // Centroids: the normalised sum of each bucket's keys.
+    // Centroids: the normalised sum of each bucket's keys, summed 64
+    // channels at a time into the page, then scaled in place.
     let page_row = (w * p.pages + p.page) * p.buckets_per_block;
+    var base = p.base;
+    if (p.seq_blocks > 0u) { base = base + (w % p.seq_blocks) * p.cluster_block; }
     for (var bkt = lt; bkt < p.buckets_per_block; bkt = bkt + WG) {
-        var acc: array<f32, 64>;
-        for (var c = 0u; c < d; c = c + 1u) { acc[c] = 0.0; }
-        for (var key = 0u; key < p.cluster_block; key = key + 1u) {
-            if (best[key / p.pool_size] == bkt) {
-                for (var c = 0u; c < d; c = c + 1u) { acc[c] = acc[c] + keys[kbase + key * d + c]; }
+        let crow = (page_row + bkt) * d;
+        var norm2 = 0.0;
+        for (var c0 = 0u; c0 < d; c0 = c0 + 64u) {
+            let cw = min(64u, d - c0);
+            var acc: array<f32, 64>;
+            for (var c = 0u; c < cw; c = c + 1u) { acc[c] = 0.0; }
+            for (var key = 0u; key < p.cluster_block; key = key + 1u) {
+                if (best[key / p.pool_size] == bkt) {
+                    for (var c = 0u; c < cw; c = c + 1u) { acc[c] = acc[c] + keys[kbase + key * d + c0 + c]; }
+                }
+            }
+            for (var c = 0u; c < cw; c = c + 1u) {
+                centroids[crow + c0 + c] = acc[c];
+                norm2 = norm2 + acc[c] * acc[c];
             }
         }
-        var norm2 = 0.0;
-        for (var c = 0u; c < d; c = c + 1u) { norm2 = norm2 + acc[c] * acc[c]; }
         let inv = 1.0 / max(sqrt(norm2), 1e-30);
         for (var c = 0u; c < d; c = c + 1u) {
-            centroids[(page_row + bkt) * d + c] = acc[c] * inv;
+            centroids[crow + c] = centroids[crow + c] * inv;
         }
         // Members in ascending position, padded.
         var n = 0u;
         for (var key = 0u; key < p.cluster_block; key = key + 1u) {
             if (best[key / p.pool_size] == bkt && n < p.bucket_cap) {
-                members[(page_row + bkt) * p.bucket_cap + n] = p.base + key;
+                members[(page_row + bkt) * p.bucket_cap + n] = base + key;
                 n = n + 1u;
             }
         }

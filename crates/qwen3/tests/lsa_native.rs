@@ -205,3 +205,44 @@ fn native_sparse_attention_learns_long_range_recall_and_serves_sparsely() {
     // loss must agree.
     assert!((served_nll - trained_nll).abs() < 0.02, "served sparse answer loss {served_nll} vs training {trained_nll}");
 }
+
+/// One training step (forward and backward) over `t` tokens timed dense
+/// (the flash kernels) and with native sparse attention at a fixed budget:
+/// dense grows quadratically with the context, sparse linearly, so past a
+/// few thousand tokens sparse training is faster and the gap widens.
+#[test]
+#[ignore = "measurement: trains a small model at contexts up to 16k tokens"]
+fn native_sparse_training_scales_linearly_with_the_context() {
+    let lsa = LsaConfig { index_dim: 0, pool_size: 4, bucket_size: 8, bucket_cap: 16, cluster_block: 512, top_p: 64, top_k: 512, sink: 4, window: 512, early: None };
+    let mut rng = Lcg::random();
+    let mut ratios = Vec::new();
+    for t in [2048u32, 4096, 8192, 16384, 32768] {
+        let cfg = QwenConfig { n_layers: 4, n_heads: 8, n_kv_heads: 2, ..small(1000, t, 512, 64) };
+        let init = qwen3::init_weights(&cfg, rng.next_u64());
+        let x: Vec<u32> = (0..t).map(|_| rng.next_u32() % cfg.vocab).collect();
+        let y: Vec<u32> = (0..t).map(|_| rng.next_u32() % cfg.vocab).collect();
+        let time = |m: &Qwen| {
+            let step = || {
+                m.zero_grads();
+                m.set_batch(&x, &y);
+                m.forward();
+                m.backward();
+                m.read_grad("blocks.0.attn.wq.weight");
+            };
+            step();
+            let start = std::time::Instant::now();
+            for _ in 0..3 {
+                step();
+            }
+            start.elapsed().as_secs_f64() / 3.0
+        };
+        let dense = time(&Qwen::new(cfg.clone(), 1, t, &init));
+        let mut sparse_model = Qwen::new(cfg.clone(), 1, t, &init);
+        sparse_model.enable_native_lsa(lsa, true).unwrap();
+        let sparse = time(&sparse_model);
+        println!("t {t:>6}: dense {:>8.1} ms  native sparse {:>8.1} ms  speedup {:.2}x", 1e3 * dense, 1e3 * sparse, dense / sparse);
+        ratios.push(dense / sparse);
+    }
+    assert!(ratios.windows(2).all(|w| w[1] > w[0]), "sparse training's advantage must grow with the context: {ratios:?}");
+    assert!(*ratios.last().unwrap() > 1.0, "at 16k tokens sparse training must be faster than dense: {ratios:?}");
+}

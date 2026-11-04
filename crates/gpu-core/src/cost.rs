@@ -683,6 +683,51 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let rounds = u64::from((np / bpb).max(1).ilog2()) + 1;
             f(slots * (2 * np * np * d + 8 * np * np * rounds + 2 * bpb * cb * d), 4 * slots * (2 * cb * d + 2 * np * np * (rounds + 1) + bpb * (d + cb)))
         }
+        // Native sparse attention training: params [b, n_heads, n_kv_heads,
+        // t, head_dim, group, sel_stride], costed at full selection rows
+        // (`sel_stride - 3` keys). A workgroup per (row, KV head) reads each
+        // selected key's K and V rows once for the group's heads; the forward
+        // scores and accumulates (4 * head_dim + 6 a pair), the query half
+        // rebuilds p and dP and accumulates dQ, the key half reads each
+        // selecting query's q and dO twice (dot products, then accumulation).
+        "lsa_native_fwd" | "lsa_native_bwd_dq" | "lsa_native_bwd_dkv" => {
+            let (b, nh, nkv, t, hd, stride) = (p(0)?, p(1)?, p(2)?, p(3)?, p(4)?, p(6)?);
+            let (rows, width) = (b * t, stride.saturating_sub(3));
+            let pairs = rows * nh * width;
+            let gathered = rows * nkv * width * hd * 4;
+            match base {
+                "lsa_native_fwd" => f(pairs * (4 * hd + 6), 2 * gathered + 8 * rows * nh * hd + 4 * rows * stride),
+                "lsa_native_bwd_dq" => f(pairs * (6 * hd + 4), 3 * gathered + 16 * rows * nh * hd + 4 * rows * stride),
+                _ => f(pairs * (8 * hd + 6), 16 * pairs * hd + 8 * rows * nkv * hd + 4 * rows * (width + 1)),
+            }
+        }
+        // The native selection's inversion: params [rows, t, stride, emit] -
+        // a (key, query) pair per selection slot - then [rows, pairs, stride,
+        // _] - each sorted pair read once, its query and the offsets written.
+        "lsa_native_pairs" => {
+            let (rows, stride, emit) = (p(0)?, p(2)?, p(3)?);
+            c(0, rows * emit, 4 * rows * (stride + 2 * emit))
+        }
+        "lsa_native_offsets" => {
+            let (rows, pairs) = (p(0)?, p(1)?);
+            c(0, pairs + rows, 4 * (3 * pairs + rows + 1))
+        }
+        // The device scan (params [n, block]) and the radix sort's passes
+        // (params [n, shift, n_chunks, chunk]): one read and write per element
+        // a scan level; a sort pass reads the keys for its histogram, then
+        // reads and writes every (key, value) pair.
+        "scan_block" | "scan_add" => {
+            let n = p(0)?;
+            c(0, n, 8 * n)
+        }
+        "sort_hist" => {
+            let (n, chunks) = (p(0)?, p(2)?);
+            c(0, 2 * n, 4 * n + 4 * 256 * chunks)
+        }
+        "sort_scatter" => {
+            let (n, chunks) = (p(0)?, p(2)?);
+            c(0, 2 * n, 16 * n + 4 * 256 * chunks)
+        }
         // Index vectors: params [rows, heads, n_kv_heads, head_dim, index_dim,
         // rope_base]. A row's heads are read once (f32, or packed bytes plus
         // per-KV-head scales), summed over the group, projected and normalised.
@@ -2033,6 +2078,8 @@ mod tests {
             "paged_sparse_flash_decode", "paged_sparse_flash_gqa", "paged_sparse_flash_gqa_i8", "paged_sparse_flash_rows_i8",
             // the latent-sparse-attention index
             "lsa_read", "lsa_ward", "lsa_index_vectors", "lsa_index_keys_i8", "add_index_mask",
+            "lsa_native_fwd", "lsa_native_bwd_dq", "lsa_native_bwd_dkv", "lsa_native_pairs", "lsa_native_offsets",
+            "scan_block", "scan_add", "sort_hist", "sort_scatter",
         ] {
             assert!(covers(k), "kernel `{k}` has no cost formula");
         }

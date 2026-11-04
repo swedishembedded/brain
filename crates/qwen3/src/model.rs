@@ -426,9 +426,12 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
             }
         }
         model::adapter::exec::add_kernels(&mut v);
-        // Native latent sparse attention's selection mask on the scores.
-        if !v.iter().any(|(have, _)| *have == "add_index_mask") {
-            v.push(("add_index_mask", kernels::ADD_INDEX_MASK));
+        // Native latent sparse attention: the device selection and attention
+        // over each query's selection.
+        for (name, src) in model::lsa::device::KERNELS.into_iter().chain(model::lsa::native::KERNELS).chain(gpu_core::sort::KERNELS) {
+            if !v.iter().any(|(have, _)| *have == name) {
+                v.push((name, src));
+            }
         }
         v
     })
@@ -518,16 +521,17 @@ pub(crate) fn attn_score_elems(decode_only: bool, b: u32, n_heads: u32, t: u32) 
 /// Native latent sparse attention's state on a training build.
 struct NativeLsa {
     cfg: model::lsa::LsaConfig,
-    /// `false`: window and sinks only (the sliding-window baseline).
-    long_range: bool,
-    /// `add_index_mask`.
-    kernel: usize,
-    /// Per layer `[b, t, t]` additive selection masks (0 or -3.4e38).
-    masks: Vec<DeviceBuffer>,
-    /// Recording scratch: `(step index, layer)` of each mask point.
-    marks: std::cell::RefCell<Vec<(usize, usize)>>,
-    /// The forward tape's `(segment, layer)` mask points.
-    segments: std::cell::RefCell<Vec<(usize, usize)>>,
+    /// The attention kernels.
+    kernels: model::lsa::native::NativeKernels,
+    /// The device selection (index, Ward, read) and its kernels; `None` for
+    /// the window-and-sinks baseline, whose selection never changes.
+    selector: Option<(model::lsa::native::NativeSelector, model::lsa::native::SelectKernels)>,
+    /// Per layer, its selection and the selection inverted per key, packed
+    /// (`NativeShape::pack`): filled by the forward, read by the backward.
+    index: Vec<DeviceBuffer>,
+    /// The row log-sum-exp and the backward's `dO . O`; the backward's
+    /// recompute of a layer rewrites them before that layer's backward.
+    stats: DeviceBuffer,
 }
 
 /// The window-and-sinks selection of `t` queries (no long-range keys).
@@ -2395,21 +2399,9 @@ impl Qwen {
             s.extend(self.splice.fwd(&self.gpu, SPLICE, &self.res[0], 0, n));
         }
         let mut tape = Tape { steps: s, ends: Vec::new() };
-        if let Some(nl) = &self.nlsa {
-            nl.marks.borrow_mut().clear();
-            nl.segments.borrow_mut().clear();
-        }
         self.round_trip_boundary(&mut tape.steps, self.shard.start, n);
         for l in self.shard.start..self.shard.end {
             self.layer_fwd_steps(&mut tape.steps, l, b_use, t_use, false, Attend::Causal);
-            // A native sparse layer's forward ends a segment right before its
-            // scores, where the host fills the layer's selection mask.
-            if let Some(nl) = &self.nlsa {
-                for (at, layer) in nl.marks.borrow_mut().drain(..) {
-                    tape.ends.push(at);
-                    nl.segments.borrow_mut().push((tape.ends.len() - 1, layer));
-                }
-            }
             self.round_trip_boundary(&mut tape.steps, l + 1, n);
             tape.mark();
         }
@@ -2513,6 +2505,18 @@ impl Qwen {
                 };
                 match (self.flash, self.kmask_on.get()) {
                     _ if fused.is_some() => s.extend(fused),
+                    // Native sparse attention: each query attends its own
+                    // selection, made on the device from this layer's
+                    // rotated queries and keys right before; the backward's
+                    // recompute reuses the selection the forward made.
+                    (_, false) if self.nlsa.is_some() => {
+                        let nl = self.nlsa.as_ref().expect("checked");
+                        if let (Some((selector, ids)), false) = (&nl.selector, recompute) {
+                            s.extend(selector.record(&self.gpu, ids, q_buf, k_buf, &nl.index[l]).unwrap_or_else(|e| panic!("qwen3 layer {l}: {e}")));
+                        }
+                        let shape = Self::native_shape(&nl.cfg, &ga);
+                        s.push(shape.forward(&self.gpu, &nl.kernels, q_buf, k_buf, &lb.v, &nl.index[l], &lb.ctx, &nl.stats).unwrap_or_else(|e| panic!("qwen3 layer {l}: {e}")));
+                    }
                     (Some(fl), false) => s.push(block::flash_gqa_causal_fwd(&self.gpu, &fl, &ga, q_buf, k_buf, &lb.v, &lb.ctx, &self.attn_lse)),
                     // The padded-key mask is an encoder path the flash kernel
                     // does not take; a training build serves it on
@@ -2526,23 +2530,7 @@ impl Qwen {
                         s.extend(self.gqa_kmask_steps(&ga, q_buf, k_buf, &lb.v, scores, probs, &lb.ctx));
                     }
                     (None, true) => s.extend(self.gqa_kmask_steps(&ga, q_buf, k_buf, &lb.v, &self.scores, &lb.probs, &lb.ctx)),
-                    (None, false) => {
-                        let mut steps = block::gqa_fwd(&self.gpu, &ids, &ga, q_buf, k_buf, &lb.v, &self.scores, &lb.probs, &lb.ctx);
-                        // Native sparse attention: the layer's selection mask is
-                        // added to the scores before the softmax, so every key
-                        // outside a query's selection gets probability 0 and no
-                        // gradient. The forward pauses before the scores (a
-                        // segment end) while the host selects from this layer's
-                        // own rotated queries and keys; the backward's recompute
-                        // reuses the mask the forward filled.
-                        if let Some(nl) = &self.nlsa {
-                            if !recompute {
-                                nl.marks.borrow_mut().push((s.len(), l));
-                            }
-                            steps.insert(1, self.gpu.step(nl.kernel, &[&nl.masks[l], &self.scores], &[ga.b, nh, ga.t], ga.b * nh * ga.t * ga.t));
-                        }
-                        s.extend(steps);
-                    }
+                    (None, false) => s.extend(block::gqa_fwd(&self.gpu, &ids, &ga, q_buf, k_buf, &lb.v, &self.scores, &lb.probs, &lb.ctx)),
                 }
             }
         }
@@ -2629,17 +2617,6 @@ impl Qwen {
     /// Submit the batched forward; a layer-streamed build loads each layer's weights into its device slots as the
     /// forward reaches it.
     fn submit_forward(&self) {
-        if let Some(nl) = &self.nlsa {
-            let segments = nl.segments.borrow().clone();
-            self.fwd_steps.submit_hooked(&self.gpu, &mut |edge| {
-                if let SegmentEdge::After(seg) = edge {
-                    if let Some(&(_, layer)) = segments.iter().find(|(at, _)| *at == seg) {
-                        self.native_lsa_mask(layer).unwrap_or_else(|e| panic!("qwen3 native sparse attention, layer {layer}: {e}"));
-                    }
-                }
-            });
-            return;
-        }
         if !self.layer_streamed() {
             self.fwd_steps.submit(&self.gpu);
             return;
@@ -2750,6 +2727,11 @@ impl Qwen {
             let (q_buf, k_buf): (&DeviceBuffer, &DeviceBuffer) =
                 if self.cfg.qk_norm { (&lb.q, &lb.k) } else { (&lb.q_pre, &lb.k_pre) };
             match &self.flash {
+                _ if self.nlsa.is_some() => {
+                    let nl = self.nlsa.as_ref().expect("checked");
+                    let bufs = model::lsa::native::NativeBackward { q: q_buf, k: k_buf, v: &lb.v, ctx: &lb.ctx, d_ctx: &self.d_ctx, index: &nl.index[l], stats: &nl.stats, d_q: &self.d_q, d_k: &self.d_k, d_v: &self.d_v };
+                    s.extend(Self::native_shape(&nl.cfg, &ga).backward(&self.gpu, &nl.kernels, &bufs).unwrap_or_else(|e| panic!("qwen3 layer {l}: {e}")));
+                }
                 Some(fl) => s.extend(block::flash_gqa_causal_bwd(&self.gpu, fl, &ga, q_buf, k_buf, &lb.v, &lb.ctx, &self.attn_lse, &self.d_ctx, &self.attn_dsum, &self.d_q, &self.d_k, &self.d_v)),
                 None => s.extend(block::gqa_bwd(&self.gpu, &ids, &ga, q_buf, k_buf, &lb.v, &lb.probs, &self.d_ctx, &self.d_scores, &self.d_q, &self.d_k, &self.d_v)),
             }
@@ -3042,13 +3024,8 @@ impl Qwen {
         self.splice.read_grad(&self.gpu)
     }
 
-    // ---- interleaved M-RoPE seam (Qwen3-VL) ----
+    // ---- native latent sparse attention (N-LSA) ----
 
-    /// Switch q/k to the table-driven `rope2d` M-RoPE path (from the analytic
-    /// rope_base). Allocates the `[b·t, head_dim/2]` cos/sin tables and rebuilds
-    /// the fwd/bwd graphs - call once after construction, then supply the tables
-    /// each batch via [`Self::write_mrope_tables`] (computed by
-    /// `qwen3vl::mrope::{get_rope_index, mrope_tables}`).
     /// Train (and run) with native latent sparse attention (N-LSA): every
     /// layer's queries read only their LSA selection - sinks, window and the
     /// expanded best buckets of the layer's own keys - with the selection held
@@ -3061,8 +3038,10 @@ impl Qwen {
     /// `long_range: false` keeps only the window and sinks (a sliding-window
     /// baseline under the same machinery).
     ///
-    /// Attention runs materialised (scores, softmax, context) with
-    /// `b * n_heads * t * t` scratch per build; refused on decode-only and
+    /// Attention runs over each query's selection only
+    /// ([`model::lsa::native`]): time and memory linear in the context, with
+    /// a per-layer index of `b * t * (2 * selection width + 2)` words in
+    /// place of any `[t, t]` scores or masks. Refused on decode-only and
     /// layer-streamed builds.
     pub fn enable_native_lsa(&mut self, cfg: model::lsa::LsaConfig, long_range: bool) -> Result<(), String> {
         if self.decode_only || self.layer_streamed() {
@@ -3071,21 +3050,30 @@ impl Qwen {
         let c = &self.cfg;
         let cfg = model::lsa::LsaConfig { index_dim: (c.n_kv_heads * c.head_dim) as usize, ..cfg };
         cfg.validate()?;
-        let kernel = self.gpu.kernel_index("add_index_mask").ok_or("native sparse attention: add_index_mask is not registered")?;
-        let elems = attn_score_elems(false, self.b, c.n_heads, self.t);
-        if self.flash.take().is_some() || self.score_elems != elems {
-            self.scores = self.gpu.storage(elems);
-            for lb in &mut self.layers {
-                lb.probs = self.gpu.storage(elems);
+        let name = |k: usize| {
+            let n = model::lsa::native::KERNELS[k].0;
+            self.gpu.kernel_index(n).ok_or_else(|| format!("native sparse attention: {n} is not registered"))
+        };
+        let kernels = model::lsa::native::NativeKernels { fwd: name(0)?, bwd_dq: name(1)?, bwd_dkv: name(2)? };
+        let shape = Self::native_shape(&cfg, &self.gqa(self.b, self.t));
+        let index: Vec<DeviceBuffer> = (0..c.n_layers).map(|_| self.gpu.storage(shape.index_words())).collect();
+        let stats = self.gpu.storage(shape.stats_words());
+        let selector = if long_range {
+            let pipe = |n: &str| self.gpu.kernel_index(n).ok_or_else(|| format!("native sparse attention: {n} is not registered"));
+            let [vectors, read, ward] = model::lsa::device::KERNELS.map(|(n, _)| n);
+            let [scan_block, scan_add, sort_hist, sort_scatter] = gpu_core::sort::KERNELS.map(|(n, _)| n);
+            let sort = gpu_core::sort::SortKernels { scan: gpu_core::sort::ScanKernels { scan_block: pipe(scan_block)?, scan_add: pipe(scan_add)? }, sort_hist: pipe(sort_hist)?, sort_scatter: pipe(sort_scatter)? };
+            let ids = model::lsa::native::SelectKernels { index_vectors: pipe(vectors)?, read: pipe(read)?, ward: pipe(ward)?, pairs: name(3)?, offsets: name(4)?, sort };
+            Some((model::lsa::native::NativeSelector::new(&self.gpu, cfg, shape, c.rope_theta)?, ids))
+        } else {
+            // The window and sinks never change: packed once.
+            let packed = shape.pack(&vec![window_selection(&cfg, self.t as usize); self.b as usize])?;
+            for buf in &index {
+                self.gpu.write(buf, &packed);
             }
-            if !self.bwd_steps.steps.is_empty() {
-                self.d_scores = self.gpu.storage(elems);
-            }
-            self.score_elems = elems;
-        }
-        let mask_len = self.b as u64 * self.t as u64 * self.t as u64;
-        let masks = (0..c.n_layers).map(|_| self.gpu.storage(mask_len)).collect();
-        self.nlsa = Some(NativeLsa { cfg, long_range, kernel, masks, marks: Default::default(), segments: Default::default() });
+            None
+        };
+        self.nlsa = Some(NativeLsa { cfg, kernels, selector, index, stats });
         self.fwd_steps = self.forward_steps(self.b, self.t);
         if !self.bwd_steps.steps.is_empty() {
             self.bwd_steps = self.build_backward_steps();
@@ -3093,41 +3081,18 @@ impl Qwen {
         Ok(())
     }
 
-    /// Fill layer `l`'s selection mask from its rotated queries and keys.
-    fn native_lsa_mask(&self, l: usize) -> Result<(), String> {
-        let nl = self.nlsa.as_ref().expect("native sparse attention is on");
-        let c = &self.cfg;
-        let (b, t) = (self.b as usize, self.t as usize);
-        let (nh, nkv, hd) = (c.n_heads as usize, c.n_kv_heads as usize, c.head_dim as usize);
-        let lb = &self.layers[l];
-        let (q_buf, k_buf) = if c.qk_norm { (&lb.q, &lb.k) } else { (&lb.q_pre, &lb.k_pre) };
-        let q = self.gpu.read(q_buf, b * t * nh * hd);
-        let k = self.gpu.read(k_buf, b * t * nkv * hd);
-        let positions: Vec<u32> = (0..t as u32).collect();
-        let unit = |rows: Vec<f32>| -> Vec<f32> { rows.chunks_exact(nkv * hd).flat_map(model::hostmath::l2_normalize).collect() };
-        let mut mask = vec![-3.4e38f32; b * t * t];
-        for row in 0..b {
-            let rows_q = &q[row * t * nh * hd..][..t * nh * hd];
-            let rows_k = &k[row * t * nkv * hd..][..t * nkv * hd];
-            let selection = if nl.long_range {
-                let keys = unit(model::lsa::space::index_inputs(rows_k, &positions, nkv, nkv, hd, c.rope_theta));
-                let queries = unit(model::lsa::space::index_inputs(rows_q, &positions, nh, nkv, hd, c.rope_theta));
-                let index = model::lsa::BucketIndex::build(nl.cfg, &keys)?;
-                model::lsa::select(&index, &queries, &positions)?
-            } else {
-                window_selection(&nl.cfg, t)
-            };
-            let m = &mut mask[row * t * t..][..t * t];
-            for (i, ids) in (0..t).map(|i| (i, selection.row(i))) {
-                for &j in ids {
-                    m[i * t + j as usize] = 0.0;
-                }
-            }
-        }
-        self.gpu.write_f32(&nl.masks[l], &mask);
-        Ok(())
+    /// The native sparse attention shape of `ga` under `cfg`.
+    fn native_shape(cfg: &model::lsa::LsaConfig, ga: &Gqa) -> model::lsa::native::NativeShape {
+        model::lsa::native::NativeShape { b: ga.b, t: ga.t, n_heads: ga.n_heads, n_kv_heads: ga.n_kv_heads, head_dim: ga.head_dim, width: model::lsa::native::row_width(cfg) }
     }
 
+    // ---- interleaved M-RoPE seam (Qwen3-VL) ----
+
+    /// Switch q/k to the table-driven `rope2d` M-RoPE path (from the analytic
+    /// rope_base). Allocates the `[b·t, head_dim/2]` cos/sin tables and rebuilds
+    /// the fwd/bwd graphs - call once after construction, then supply the tables
+    /// each batch via [`Self::write_mrope_tables`] (computed by
+    /// `qwen3vl::mrope::{get_rope_index, mrope_tables}`).
     pub fn enable_mrope(&mut self) {
         let sz = (self.b * self.t * self.cfg.head_dim / 2) as u64;
         self.mrope_cos = self.gpu.storage(sz);

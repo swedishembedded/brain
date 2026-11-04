@@ -39,14 +39,22 @@ fn rotate(row: &mut [f32], head_dim: usize, pos: u32, base: f32) {
 }
 
 /// Index vectors from rotated heads scattered over a buffer equal the host
-/// index space's from the same heads before rotation, then projected.
+/// index space's from the same heads before rotation, then projected - to a
+/// narrow index, to one wider than a workgroup, or not at all (the native
+/// index space).
 #[test]
 fn index_vectors_unrotate_sum_groups_and_project() {
     static PIPES: &[(&str, &str)] = &KERNELS;
     let Some(g) = barrier_gpu(PIPES) else { return };
-    let (nh, nkv, hd, dim) = (8usize, 2usize, 16usize, 12usize);
+    let (nh, nkv, hd) = (8usize, 2usize, 16usize);
+    for (dim, identity) in [(12usize, false), (100, false), (nkv * hd, true)] {
+        index_vectors_case(&g, nh, nkv, hd, dim, identity);
+    }
+}
+
+fn index_vectors_case(g: &gpu_core::Gpu, nh: usize, nkv: usize, hd: usize, dim: usize, identity: bool) {
     let base = 10000.0f32;
-    let heads = IndexHeads { n_kv_heads: nkv as u32, head_dim: hd as u32, rope: Rope::Base(base), index_dim: dim as u32 };
+    let heads = IndexHeads { n_kv_heads: nkv as u32, head_dim: hd as u32, rope: Rope::Base(base), index_dim: dim as u32, identity };
     let unused = g.storage(1);
     let mut rng = Lcg::random();
     let w: Vec<f32> = (0..nkv * hd * dim).map(|_| rng.signed()).collect();
@@ -55,7 +63,7 @@ fn index_vectors_unrotate_sum_groups_and_project() {
         let mut out = vec![0f32; rows * dim];
         for r in 0..rows {
             for c in 0..dim {
-                out[r * dim + c] = (0..nkv * hd).map(|i| v[r * nkv * hd + i] * w[i * dim + c]).sum();
+                out[r * dim + c] = if identity { v[r * nkv * hd + c] } else { (0..nkv * hd).map(|i| v[r * nkv * hd + i] * w[i * dim + c]).sum() };
             }
         }
         out.chunks_exact(dim).flat_map(crate::hostmath::l2_normalize).collect()
@@ -93,11 +101,11 @@ fn index_vectors_unrotate_sum_groups_and_project() {
         g.write(&pos, &positions);
         let wb = g.storage_init("w", &w);
         let out = g.storage((rows * dim) as u64);
-        let step = heads.step(&g, 0, n_heads as u32, rows as u32, &IndexVectorBuffers { x: &xb, row_off: &off, pos: &pos, w: &wb, out: &out, inv_freq: &unused, out0: 0 }).unwrap();
+        let step = heads.step(g, 0, n_heads as u32, rows as u32, &IndexVectorBuffers { x: &xb, row_off: &off, pos: &pos, w: &wb, out: &out, inv_freq: &unused, out0: 0 }).unwrap();
         g.submit(&[], &[step]);
         let got = g.read(&out, rows * dim);
         let worst = got.iter().zip(&want).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
-        assert!(worst < 1e-4, "{n_heads}-head rows: device index vectors differ from the host by {worst}");
+        assert!(worst < 1e-4, "{n_heads}-head rows into {dim} channels (identity {identity}): device index vectors differ from the host by {worst}");
     }
 }
 
@@ -108,13 +116,20 @@ fn index_vectors_unrotate_sum_groups_and_project() {
 fn the_device_read_matches_the_host_read() {
     static PIPES: &[(&str, &str)] = &KERNELS;
     let Some(g) = barrier_gpu(PIPES) else { return };
-    let cfg = LsaConfig { index_dim: 16, pool_size: 2, bucket_size: 4, bucket_cap: 8, cluster_block: 32, top_p: 5, top_k: 13, sink: 2, window: 32, early: Some(EarlyBudget { position: 70, top_k: 6, top_p: 2 }) };
+    // A narrow index, and one wider than a workgroup.
+    for index_dim in [16, 160] {
+        read_case(&g, index_dim);
+    }
+}
+
+fn read_case(g: &gpu_core::Gpu, index_dim: usize) {
+    let cfg = LsaConfig { index_dim, pool_size: 2, bucket_size: 4, bucket_cap: 8, cluster_block: 32, top_p: 5, top_k: 13, sink: 2, window: 32, early: Some(EarlyBudget { position: 70, top_k: 6, top_p: 2 }) };
     let mut rng = Lcg::random();
     let t = 6 * cfg.cluster_block + 11;
     let index = BucketIndex::build(cfg, &unit_rows(&mut rng, t, cfg.index_dim)).unwrap();
     let blocks = index.closed_blocks();
     let max_pages = 8u32;
-    let pool = IndexPool::new(&g, cfg, max_pages, 1).unwrap();
+    let pool = IndexPool::new(g, cfg, max_pages, 1).unwrap();
     // Block b lives in page (b * 3 + 1) % max_pages.
     let page_of = |b: usize| ((b * 3 + 1) % max_pages as usize) as u32;
     let bpb = cfg.buckets_per_block();
@@ -124,7 +139,7 @@ fn the_device_read_matches_the_host_read() {
             members: index.members()[b * bpb * cfg.bucket_cap..][..bpb * cfg.bucket_cap].to_vec(),
             sizes: index.sizes()[b * bpb..][..bpb].to_vec(),
         };
-        pool.write(&g, page_of(b), 0, &block).unwrap();
+        pool.write(g, page_of(b), 0, &block).unwrap();
     }
     let positions: Vec<u32> = vec![0, 1, 31, 32, 40, 63, 64, 69, 70, 100, 150, 191, 192, t as u32 - 1, t as u32 - 2];
     let rows = positions.len();
@@ -154,13 +169,13 @@ fn the_device_read_matches_the_host_read() {
     let sel = g.storage((rows * width) as u64);
     let stats = g.storage(ReadStats::WORDS);
     let bufs = ReadBuffers { iq: &iq, centroids: &pool.centroids, members: &pool.members, page_tab: &page_tab, seqlen: &sl, scores: &scores, sel: &sel, row0: 0, stats: &stats };
-    let step = geom.step(&g, 1, rows as u32, &bufs).unwrap();
+    let step = geom.step(g, 1, rows as u32, &bufs).unwrap();
     // Twice: the counters accumulate across reads.
     g.submit(&[], &[step.clone(), step]);
     let dev_scores = g.read(&scores, rows * geom.score_stride() as usize);
     let dev_sel: Vec<u32> = g.read(&sel, rows * width).iter().map(|x| x.to_bits()).collect();
 
-    let counted = ReadStats::read(&g, &stats);
+    let counted = ReadStats::read(g, &stats);
     let selected: u64 = (0..rows).map(|r| u64::from(dev_sel[r * width])).sum();
     let live: u64 = seqlen.iter().map(|&n| u64::from(n)).sum();
     assert_eq!(counted, ReadStats { rows: 2 * rows as u64, selected_keys: 2 * selected, causal_keys: 2 * live }, "the read's counters");
@@ -188,7 +203,7 @@ fn packed_index_keys_match_the_dequantised_pool() {
         let pipes: &'static [(&str, &str)] = Box::leak(vec![KERNELS[0], index_keys_kernel(kv).unwrap()].into_boxed_slice());
         let Some(g) = barrier_gpu(pipes) else { return };
         let (nkv, hd, dim, slots) = (2usize, 16usize, 8usize, 40usize);
-        let heads = IndexHeads { n_kv_heads: nkv as u32, head_dim: hd as u32, rope: Rope::Base(10000.0), index_dim: dim as u32 };
+        let heads = IndexHeads { n_kv_heads: nkv as u32, head_dim: hd as u32, rope: Rope::Base(10000.0), index_dim: dim as u32, identity: false };
         let unused = g.storage(1);
         let mut rng = Lcg::random();
         let bytes: Vec<u8> = (0..slots * nkv * hd).map(|_| {
@@ -231,7 +246,7 @@ fn index_vectors_unrotate_a_frequency_table() {
     static PIPES: &[(&str, &str)] = &KERNELS;
     let Some(g) = barrier_gpu(PIPES) else { return };
     let (nkv, hd, dim, rows) = (2usize, 16usize, 8usize, 6usize);
-    let heads = IndexHeads { n_kv_heads: nkv as u32, head_dim: hd as u32, rope: Rope::Table, index_dim: dim as u32 };
+    let heads = IndexHeads { n_kv_heads: nkv as u32, head_dim: hd as u32, rope: Rope::Table, index_dim: dim as u32, identity: false };
     let mut rng = Lcg::random();
     let table: Vec<f32> = (0..hd / 2).map(|m| 0.7f32.powi(m as i32) * (0.5 + rng.unit())).collect();
     let factor = 1.3f32;
@@ -284,7 +299,7 @@ fn the_device_ward_builds_the_host_page() {
     let bpb = cfg.buckets_per_block();
     let run = |keys: &[f32], page: u32, base: u32| -> (Vec<f32>, Vec<u32>) {
         let kb = g.storage_init("keys", keys);
-        let step = pool.ward_step(&g, 2, &kb, &scratch, page, base).unwrap();
+        let step = pool.ward_step(&g, 2, &kb, &scratch, page, base, 0).unwrap();
         g.submit(&[], &[step]);
         let c = g.read(&pool.centroids, 4 * bpb * d);
         let m: Vec<u32> = g.read(&pool.members, 4 * bpb * cfg.bucket_cap).iter().map(|x| x.to_bits()).collect();
@@ -332,5 +347,43 @@ fn the_device_ward_builds_the_host_page() {
             }
         }
         assert!(seen.iter().all(|&n| n == 1), "{name} keys: {} keys are in no bucket or in two", seen.iter().filter(|&&n| n != 1).count());
+    }
+}
+
+/// Training's clustering: every block of two sequences in one dispatch, keys
+/// wider than a 64-channel chunk, each block's members numbered from its own
+/// position in its sequence - the host's buckets for each block.
+#[test]
+fn the_device_ward_clusters_every_block_of_wide_keys() {
+    static PIPES: &[(&str, &str)] = &KERNELS;
+    let Some(g) = barrier_gpu(PIPES) else { return };
+    let cfg = LsaConfig { index_dim: 160, pool_size: 2, bucket_size: 4, bucket_cap: 8, cluster_block: 32, top_p: 4, top_k: 16, sink: 2, window: 32, early: None };
+    let (d, cb, seq_blocks, seqs) = (cfg.index_dim, cfg.cluster_block, 3u32, 2u32);
+    let slots = seq_blocks * seqs;
+    let mut rng = Lcg::random();
+    let pool = IndexPool::new(&g, cfg, 1, slots).unwrap();
+    let scratch = g.storage(slots as u64 * IndexPool::ward_scratch_words(&cfg));
+    // Twin pools per direction, so the merges are unambiguous.
+    let directions = cfg.pools_per_block() - cfg.buckets_per_block();
+    let mut keys = Vec::new();
+    for _ in 0..slots {
+        let centers = unit_rows(&mut rng, directions, d);
+        for k in 0..cb {
+            let row: Vec<f32> = centers[((k / cfg.pool_size) % directions) * d..][..d].iter().map(|c| c + 0.01 * rng.signed()).collect();
+            keys.extend(crate::hostmath::l2_normalize(&row));
+        }
+    }
+    let kb = g.storage_init("keys", &keys);
+    g.submit(&[], &[pool.ward_step(&g, 2, &kb, &scratch, 0, 0, seq_blocks).unwrap()]);
+    let bpb = cfg.buckets_per_block();
+    let centroids = g.read(&pool.centroids, slots as usize * bpb * d);
+    let members: Vec<u32> = g.read(&pool.members, slots as usize * bpb * cfg.bucket_cap).iter().map(|x| x.to_bits()).collect();
+    for w in 0..slots as usize {
+        let base = (w % seq_blocks as usize) * cb;
+        let host = cluster_block(&cfg, &keys[w * cb * d..][..cb * d], base).unwrap();
+        let host_members: Vec<u32> = host.members.iter().map(|&m| if m < 0 { NO_KEY } else { m as u32 }).collect();
+        assert_eq!(&members[w * bpb * cfg.bucket_cap..][..bpb * cfg.bucket_cap], &host_members[..], "slot {w}: device buckets differ from the host's");
+        let worst = centroids[w * bpb * d..][..bpb * d].iter().zip(&host.centroids).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+        assert!(worst < 1e-4, "slot {w}: centroids differ by {worst}");
     }
 }

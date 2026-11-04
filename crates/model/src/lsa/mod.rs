@@ -31,6 +31,7 @@
 //! | [`index`] | the append-only bucket index of one sequence's keys |
 //! | [`select`] | a query's read: score, pick, expand, add window and sinks |
 //! | [`attend`] | attention restricted to a selection, the numerical oracle |
+//! | [`native`] | training attention over a selection (N-LSA), forward and backward |
 //!
 //! A [`select::Selection`] is the contract between the index and attention:
 //! per query, the complete set of logical key positions it reads, unique and
@@ -44,6 +45,7 @@ pub mod distill;
 pub mod engine;
 pub mod index;
 pub mod indexer;
+pub mod native;
 pub mod select;
 pub mod space;
 pub mod ward;
@@ -100,3 +102,6 @@ mod engine_tests;
 
 #[cfg(test)]
 mod distill_tests;
+
+#[cfg(test)]
+mod native_tests;

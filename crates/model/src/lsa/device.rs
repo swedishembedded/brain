@@ -38,7 +38,7 @@ pub fn index_keys_kernel(kv: crate::paged_sparse::PackedKv) -> Result<(&'static 
 /// Most buckets a query may pick on the device (the read kernel's `P_MAX`).
 pub const MAX_TOP_P: usize = 1024;
 /// Widest index vector the device kernels hold.
-pub const MAX_INDEX_DIM: usize = 64;
+pub const MAX_INDEX_DIM: usize = 1024;
 /// Widest head-summed input the index-vector kernel holds (its `MAX_IN`).
 pub const MAX_INDEX_INPUT: usize = 2048;
 /// A member slot past a bucket's size.
@@ -67,6 +67,10 @@ pub struct IndexHeads {
     pub rope: Rope,
     /// Index vector width.
     pub index_dim: u32,
+    /// No projection: the KV-group-summed, un-rotated heads are the index
+    /// vector (`index_dim` is their width, `n_kv_heads * head_dim`), the
+    /// native index space; the projection buffer is not read.
+    pub identity: bool,
 }
 
 /// The buffers one index-vector dispatch binds.
@@ -111,6 +115,9 @@ impl IndexHeads {
         if self.index_dim == 0 || self.index_dim as usize > MAX_INDEX_DIM {
             return Err(format!("LSA index vectors: index_dim {} is outside 1..={MAX_INDEX_DIM}", self.index_dim));
         }
+        if self.identity && self.index_dim != self.n_kv_heads * self.head_dim {
+            return Err(format!("LSA index vectors: an unprojected index is {} wide, not {}", self.n_kv_heads * self.head_dim, self.index_dim));
+        }
         Ok(())
     }
 
@@ -120,7 +127,7 @@ impl IndexHeads {
     pub fn step(&self, g: &Gpu, kernel: usize, heads: u32, rows: u32, b: &IndexVectorBuffers) -> Result<Step, String> {
         self.check(heads)?;
         let [base, mode] = self.rope_params();
-        let params = [rows, heads, self.n_kv_heads, self.head_dim, self.index_dim, base, mode, b.out0];
+        let params = [rows, heads, self.n_kv_heads, self.head_dim, self.index_dim, base, mode, b.out0, u32::from(self.identity)];
         Ok(g.dispatch(kernel, &[b.x, b.row_off, b.pos, b.w, b.out, b.inv_freq], &params, gpu_core::Dispatch::Workgroups(rows)))
     }
 }
@@ -154,7 +161,7 @@ impl IndexHeads {
             return Err(format!("LSA index keys: a packed pool needs head_dim % 4 == 0, got {}", self.head_dim));
         }
         let [base, mode] = self.rope_params();
-        let params = [rows, self.n_kv_heads, self.n_kv_heads, self.head_dim, self.index_dim, base, mode, b.out0];
+        let params = [rows, self.n_kv_heads, self.n_kv_heads, self.head_dim, self.index_dim, base, mode, b.out0, u32::from(self.identity)];
         Ok(g.dispatch(kernel, &[b.pool, b.slots, b.pos, b.w, b.out, b.scales, b.inv_freq], &params, gpu_core::Dispatch::Workgroups(rows)))
     }
 }
@@ -209,21 +216,30 @@ impl IndexPool {
         pools * cfg.index_dim as u64 + pools * pools
     }
 
-    /// Record the device Ward of one closed block in every layer slot at
-    /// once: `keys` holds each slot's `[cluster_block, index_dim]` unit index
-    /// keys, slot after slot (the first key at position `base`), and the
-    /// buckets are written into `page` of each slot. `kernel` is the caller's
+    /// Record the device Ward of one closed block in every slot at once:
+    /// `keys` holds each slot's `[cluster_block, index_dim]` unit index keys,
+    /// slot after slot, and the buckets are written into `page` of each slot.
+    /// With `seq_blocks` 0 every slot's block starts at position `base` (a
+    /// layer per slot, serving); otherwise the slots are `seq_blocks`
+    /// consecutive blocks of each sequence, slot `w`'s starting at `base +
+    /// (w % seq_blocks) * cluster_block` (training). `kernel` is the caller's
     /// index of `lsa_ward`; `scratch` holds `slots *`
     /// [`Self::ward_scratch_words`].
-    pub fn ward_step(&self, g: &Gpu, kernel: usize, keys: &DeviceBuffer, scratch: &DeviceBuffer, page: u32, base: u32) -> Result<Step, String> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn ward_step(&self, g: &Gpu, kernel: usize, keys: &DeviceBuffer, scratch: &DeviceBuffer, page: u32, base: u32, seq_blocks: u32) -> Result<Step, String> {
         let c = &self.cfg;
         if page >= self.pages {
             return Err(format!("LSA index page {page} is outside the pool's {}", self.pages));
         }
-        if c.pools_per_block() > 256 || c.buckets_per_block() > 128 {
-            return Err(format!("LSA device Ward: {} pools into {} buckets exceeds 256 / 128", c.pools_per_block(), c.buckets_per_block()));
+        if c.pools_per_block() > 256 || c.buckets_per_block() > 128 || c.index_dim > MAX_INDEX_DIM {
+            return Err(format!(
+                "LSA device Ward: {} pools into {} buckets of {}-wide keys exceeds 256 / 128 / {MAX_INDEX_DIM}",
+                c.pools_per_block(),
+                c.buckets_per_block(),
+                c.index_dim
+            ));
         }
-        let params = [c.index_dim as u32, c.cluster_block as u32, c.pool_size as u32, c.buckets_per_block() as u32, c.bucket_cap as u32, page, base, self.pages];
+        let params = [c.index_dim as u32, c.cluster_block as u32, c.pool_size as u32, c.buckets_per_block() as u32, c.bucket_cap as u32, page, base, self.pages, seq_blocks];
         Ok(g.dispatch(kernel, &[keys, scratch, &self.centroids, &self.members], &params, gpu_core::Dispatch::Workgroups(self.slots)))
     }
 

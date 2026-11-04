@@ -726,6 +726,16 @@ pub const LORA_XA_ROWS_SERIAL: &str = include_str!("../wgsl/lora_xa_rows_serial.
 pub const LSA_INDEX_KEYS_I8: &str = include_str!("../wgsl/lsa_index_keys_i8.wgsl");
 /// `wgsl/lsa_index_vectors.wgsl`
 pub const LSA_INDEX_VECTORS: &str = include_str!("../wgsl/lsa_index_vectors.wgsl");
+/// `wgsl/lsa_native_bwd_dkv.wgsl`
+pub const LSA_NATIVE_BWD_DKV: &str = include_str!("../wgsl/lsa_native_bwd_dkv.wgsl");
+/// `wgsl/lsa_native_bwd_dq.wgsl`
+pub const LSA_NATIVE_BWD_DQ: &str = include_str!("../wgsl/lsa_native_bwd_dq.wgsl");
+/// `wgsl/lsa_native_fwd.wgsl`
+pub const LSA_NATIVE_FWD: &str = include_str!("../wgsl/lsa_native_fwd.wgsl");
+/// `wgsl/lsa_native_offsets.wgsl`
+pub const LSA_NATIVE_OFFSETS: &str = include_str!("../wgsl/lsa_native_offsets.wgsl");
+/// `wgsl/lsa_native_pairs.wgsl`
+pub const LSA_NATIVE_PAIRS: &str = include_str!("../wgsl/lsa_native_pairs.wgsl");
 /// `wgsl/lsa_read.wgsl`
 pub const LSA_READ: &str = include_str!("../wgsl/lsa_read.wgsl");
 /// `wgsl/lsa_ward.wgsl`
@@ -1731,6 +1741,11 @@ pub const ALL: &[(&str, &str)] = &[
     ("lora_xa_rows_serial", LORA_XA_ROWS_SERIAL),
     ("lsa_index_keys_i8", LSA_INDEX_KEYS_I8),
     ("lsa_index_vectors", LSA_INDEX_VECTORS),
+    ("lsa_native_bwd_dkv", LSA_NATIVE_BWD_DKV),
+    ("lsa_native_bwd_dq", LSA_NATIVE_BWD_DQ),
+    ("lsa_native_fwd", LSA_NATIVE_FWD),
+    ("lsa_native_offsets", LSA_NATIVE_OFFSETS),
+    ("lsa_native_pairs", LSA_NATIVE_PAIRS),
     ("lsa_read", LSA_READ),
     ("lsa_ward", LSA_WARD),
     ("lstm_gates", LSTM_GATES),

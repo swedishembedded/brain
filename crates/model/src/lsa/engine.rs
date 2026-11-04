@@ -194,7 +194,7 @@ impl LsaAttention {
             None if geo.rope_base == 0.0 => Rope::None,
             None => Rope::Base(geo.rope_base),
         };
-        let heads = IndexHeads { n_kv_heads: geo.n_kv_heads as u32, head_dim: geo.head_dim as u32, rope, index_dim: cfg.index_dim as u32 };
+        let heads = IndexHeads { n_kv_heads: geo.n_kv_heads as u32, head_dim: geo.head_dim as u32, rope, index_dim: cfg.index_dim as u32, identity: false };
         heads.check(geo.n_heads as u32)?;
         if kv.block_size == 0 || !cfg.cluster_block.is_multiple_of(kv.block_size as usize) {
             return Err(format!("LSA: cluster_block {} is not a whole number of KV blocks of {}", cfg.cluster_block, kv.block_size));
@@ -525,7 +525,7 @@ impl LsaAttention {
             }
         }
         // Every layer's block clusters in one dispatch, a workgroup a layer.
-        steps.push(self.pool.ward_step(g, self.k.ward, &self.keys, &self.ward_scratch, page, base)?);
+        steps.push(self.pool.ward_step(g, self.k.ward, &self.keys, &self.ward_scratch, page, base, 0)?);
         g.submit(&[], &steps);
         Ok(())
     }

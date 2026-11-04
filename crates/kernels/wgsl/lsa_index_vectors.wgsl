@@ -27,7 +27,9 @@
 //   2. sum the `heads / n_kv_heads` heads of each KV group (one head each for
 //      keys), giving `n_kv_heads * head_dim` channels - the head-summed logit
 //      `sum_h q_h . k_(h/G)` is exactly the dot product of these;
-//   3. project by `w` (`[n_kv_heads * head_dim, index_dim]`, row-major);
+//   3. project by `w` (`[n_kv_heads * head_dim, index_dim]`, row-major), or
+//      with `identity` set keep the summed heads as they are (`index_dim`
+//      is then `n_kv_heads * head_dim`: a model's native index space);
 //   4. normalise to unit length (a zero row stays zero).
 //
 // `rope_mode` names the rotation: 0 none (step 1 skipped), 1 half-split RoPE
@@ -38,7 +40,7 @@
 // Rotation is linear and the same for every head of a row, so summing the
 // group before un-rotating gives the same result with a fraction of the work.
 //
-// Limits: `n_kv_heads * head_dim <= MAX_IN`, `index_dim <= 64`.
+// Limits: `n_kv_heads * head_dim <= MAX_IN`, `index_dim <= MAX_IN`.
 
 const MAX_IN: u32 = 2048u;
 const WG: u32 = 64u;
@@ -52,6 +54,7 @@ struct Params {
     rope_base: f32,
     rope_mode: u32,
     out0: u32,         // first output row (a layer's slot in a shared buffer)
+    identity: u32,     // 1: no projection, the summed heads are the index vector
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -104,14 +107,24 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     }
     workgroupBarrier();
 
+    // Each thread owns channels `lt`, `lt + 64`, ...: written unnormalised,
+    // then scaled by the row's norm (its own writes, so no barrier between).
     let in_dim = p.n_kv_heads * hd;
-    var acc = 0.0;
-    if (lt < p.index_dim) {
-        for (var i = 0u; i < in_dim; i = i + 1u) {
-            acc = acc + u[i] * w[i * p.index_dim + lt];
+    let orow = (p.out0 + r) * p.index_dim;
+    var part = 0.0;
+    for (var o = lt; o < p.index_dim; o = o + WG) {
+        var acc = 0.0;
+        if (p.identity == 1u) {
+            acc = u[o];
+        } else {
+            for (var i = 0u; i < in_dim; i = i + 1u) {
+                acc = acc + u[i] * w[i * p.index_dim + o];
+            }
         }
+        out[orow + o] = acc;
+        part = part + acc * acc;
     }
-    sq[lt] = acc * acc;
+    sq[lt] = part;
     workgroupBarrier();
     if (lt == 0u) {
         var total = 0.0;
@@ -120,7 +133,7 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     }
     workgroupBarrier();
     let norm = sqrt(sq[0]);
-    if (lt < p.index_dim) {
-        out[(p.out0 + r) * p.index_dim + lt] = select(0.0, acc / norm, norm > 0.0);
+    for (var o = lt; o < p.index_dim; o = o + WG) {
+        out[orow + o] = select(0.0, out[orow + o] / norm, norm > 0.0);
     }
 }

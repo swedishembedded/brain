@@ -111,7 +111,7 @@ var<workgroup> pick_key: array<u32, 1024>; // P_MAX
 var<workgroup> pick_idx: array<u32, 1024>; // P_MAX
 var<workgroup> part_a:   array<u32, 64>;   // WG
 var<workgroup> part_b:   array<u32, 64>;   // WG
-var<workgroup> qsh:      array<f32, 64>;   // index_dim <= 64
+var<workgroup> qsh:      array<f32, 1024>; // index_dim <= 1024
 var<workgroup> total_a:  u32;
 var<workgroup> total_b:  u32;
 
