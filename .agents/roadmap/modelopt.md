@@ -105,8 +105,8 @@ minimize `sum E[i, q_i]` subject to `sum bytes[i, q_i] <= budget`.
       and serving its policy through `brain serve` are next.
 - [ ] qwen35: no engine scoring path yet (`served_loss` is `None`), so its
       plans are accepted on the trainer build.
-- [ ] Faster host codecs: fp8 and nf4 round trips are serial and dominate a
-      search that offers them on a 0.6B model.
+- [x] Host codecs row-parallel (fp8 quantize of a 3072 x 1024 tensor 1.31 s
+      serial, 65 ms on 48 threads).
 
 ## KV precision search
 
@@ -135,11 +135,22 @@ minimize `sum E[i, q_i]` subject to `sum bytes[i, q_i] <= budget`.
 
 ## Structured pruning and distillation
 
-- [ ] Importance of heads, MLP channels and whole layers from the same Fisher
-      statistics; the pruned config, tensors and site list rebuilt consistently.
-- [ ] Recovery by distillation from the original.
-- [ ] Acceptance: the smaller model runs smaller dense shapes (no masked
-      compute) and its measured objective improves at equal quality.
+- [x] `Model::prunable_dims` (`model::prunable`): the slices each channel owns
+      and the config key holding the width; qwen3 declares each layer's MLP
+      hidden channels.
+- [x] Importance from the same Fisher statistics (`channel_importance`), a
+      plan at one width (`plan_prune`), exact measurement by zeroing what it
+      drops (`measure_pruned`), and the narrower config and weights
+      (`pruned_weights`). Acceptance (`modelopt/tests/prune.rs`): keeping half
+      of a trained tiny qwen3's MLP channels by importance beats the median
+      of random choices, and the exported model computes what the zeroed one
+      did.
+- [x] Front end: `brain::ModelPruner` / `brain prune` write a checkpoint
+      directory with the base's tokenizer, measured through the serving
+      engine; `--recover-steps` distills an adapter over it.
+- [ ] Attention heads and whole layers (a qwen3 config has one head count and
+      depth for every layer: both need a per-layer config to prune unevenly).
+- [ ] Recovery by full fine-tune distillation, not only an adapter.
 
 ## Speculative draft training
 
@@ -148,6 +159,8 @@ minimize `sum E[i, q_i]` subject to `sum bytes[i, q_i] <= budget`.
 
 ## Variant selection
 
-- [ ] Pareto set over weight policy, KV policy and draft across devices, each
-      variant content-addressed with its source digest, manifest and
-      validation results.
+- [x] A frontier on one device: plans at budgets across the candidates'
+      range, each measured simulated and as deployed, efficient points marked
+      (`SearchRequest::frontier_points`, `--frontier N`).
+- [ ] Across devices, each variant content-addressed with its source digest,
+      manifest and validation results.

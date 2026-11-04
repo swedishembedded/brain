@@ -75,6 +75,7 @@ held-out measurement.
 | `--budget FORMAT` | the bytes every linear takes in one format; by default the budget is halfway between the two smallest candidates' uniform sizes |
 | `--bits-per-weight B` | mean stored bits per weight, scales included (`int8` is 9) |
 | `--max-bytes N` | bytes over every searched linear |
+| `--frontier N` | also solve N plans across the candidates' range and measure each, to show the trade-off |
 | `--latency-rows N` | the rows each product is timed at (default 1, single-stream decode) |
 | `--max-latency-like FORMAT` | no slower, summed over the linears' products, than every linear in FORMAT |
 | `--max-latency-ms MS` | the linears' summed product time in milliseconds |
@@ -105,6 +106,29 @@ The printed policy is a `--weight-format` value (see
 ```
 brain serve --weight-format "$(jq -r .report.policy runs/optimize/optimize.json)"
 ```
+
+## Removing channels - `brain prune`
+
+`brain prune` makes the model itself smaller: it removes the least important
+channels of every dimension the architecture lets it narrow (for qwen3, each
+layer's MLP hidden channels) and writes the narrower model as a checkpoint
+directory with the base's tokenizer, which every brain command opens like any
+other.
+
+```
+brain prune Qwen/Qwen3-0.6B --dataset domain.jsonl --out runs/prune --keep 0.75
+brain serve --checkpoint runs/prune/checkpoint
+```
+
+Each channel is ranked by how much removing it would raise the loss on the
+calibration records (the same estimate the format search uses, with the
+channel's weights as the error). The original and the pruned model are then
+measured on the held-out records, through the serving engine where the
+architecture has a scoring path. `--keep F` keeps that share of each
+dimension's channels (default 0.75), `--keep-channels N` exactly N;
+`--recover-steps N` distills a recovery adapter over the pruned checkpoint
+from the original, as `brain optimize` does. `DIR/prune.json` holds the
+outcome.
 
 ## Choosing the data
 
