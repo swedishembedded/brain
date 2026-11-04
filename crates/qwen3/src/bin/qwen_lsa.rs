@@ -18,13 +18,16 @@
 //!          [--epochs 3] [--queries 64] [--lr 1e-3] [--top-k 1024] [--top-p 256]
 //!          [--seed N]
 //! qwen_lsa eval    --corpus DIR --indexer FILE[,FILE...] [--tokens 8192]
-//!          [--held-docs 6] [--queries 32] [--tail 256] [--seed N]
+//!          [--held-docs 6] [--skip-docs 48] [--pca-corpus DIR] [--queries 32]
+//!          [--tail 256] [--seed N]
 //! qwen_lsa prefill --indexer FILE [--tokens 4096,8192,16384,32768] [--corpus DIR]
 //!          [--kv-cache int8|f32|fp8]
 //! ```
 //!
 //! `--indexer random` or `pca` in `eval` builds that training-free indexer
-//! in place (PCA from the training documents' keys). The corpus is every
+//! in place (PCA from the first two documents of `--pca-corpus`, by default
+//! the evaluation corpus; point it at the training corpus to keep the
+//! held-out documents out of every fit). The corpus is every
 //! text file under `DIR` (sorted by path), tokenised and concatenated; the
 //! first documents train, the last are held out.
 
@@ -271,8 +274,12 @@ fn eval(args: &Args) -> Result<(), String> {
         let ix = match spec {
             "random" => Indexer::random(cfg, geometry, rng.next_u64())?,
             "pca" => {
+                let fit = match args.get("pca-corpus") {
+                    Some(dir) => documents(dir, &tok, tokens, 2)?,
+                    None => all[..2].to_vec(),
+                };
                 let mut keys: Vec<Vec<f32>> = vec![Vec::new(); geometry.n_layers];
-                for doc in all.iter().take(2) {
+                for doc in &fit {
                     for (acc, k) in keys.iter_mut().zip(capture(&mut e, &geometry, doc, &[])?.key_inputs) {
                         acc.extend(k);
                     }

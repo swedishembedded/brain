@@ -2315,22 +2315,7 @@ mod tests {
         if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("qwen-resident-hf-dir-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let config = r#"{"architectures":["LlamaForCausalLM"],"vocab_size":256,"hidden_size":16,"num_hidden_layers":2,
-            "num_attention_heads":4,"num_key_value_heads":2,"intermediate_size":32,"rope_theta":10000,
-            "rms_norm_eps":1e-5,"tie_word_embeddings":false,"max_position_embeddings":64}"#;
-        std::fs::write(dir.join("config.json"), config).unwrap();
-        let cfg = qwen3::hf::decoder_config(config).unwrap();
-        let init = qwen3::init_weights(&cfg, 17);
-        let names = qwen3::hf::HfNames::CAUSAL_LM;
-        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> =
-            cfg.param_list().into_iter().map(|(n, numel)| (names.from_brain(&n).unwrap(), vec![numel as u64], init[&n].clone())).collect();
-        checkpoint::st::save_safetensors(dir.join("model.safetensors").to_str().unwrap(), &tensors, &serde_json::Value::Null, None).unwrap();
-        let vocab: serde_json::Map<String, serde_json::Value> = data::bpe::bytes_to_unicode().iter().enumerate().map(|(i, c)| (c.to_string(), json!(i))).collect();
-        let tokenizer = json!({"model": {"vocab": vocab, "merges": []}, "pre_tokenizer": {"type": "ByteLevel", "add_prefix_space": false, "use_regex": true}});
-        std::fs::write(dir.join("tokenizer.json"), tokenizer.to_string()).unwrap();
+        let (dir, cfg, init) = write_tiny_hf_dir("hf-dir", 17, 64);
         let before: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
 
         let card = checkpoint::st::ModelCard::new("test/tiny-llama", "llama");
@@ -2346,6 +2331,73 @@ mod tests {
         let after: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
         assert_eq!(after, before, "serving writes nothing beside the checkpoint");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A tiny Llama-shaped Hugging Face directory (byte-level tokenizer) the
+    /// resident serves as downloaded, its decoder config and its weights.
+    fn write_tiny_hf_dir(tag: &str, seed: u64, max_positions: u32) -> (std::path::PathBuf, qwen3::config::QwenConfig, std::collections::HashMap<String, Vec<f32>>) {
+        let dir = std::env::temp_dir().join(format!("qwen-resident-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = format!(
+            r#"{{"architectures":["LlamaForCausalLM"],"vocab_size":256,"hidden_size":16,"num_hidden_layers":2,
+            "num_attention_heads":4,"num_key_value_heads":2,"intermediate_size":32,"rope_theta":10000,
+            "rms_norm_eps":1e-5,"tie_word_embeddings":false,"max_position_embeddings":{max_positions}}}"#
+        );
+        std::fs::write(dir.join("config.json"), &config).unwrap();
+        let cfg = qwen3::hf::decoder_config(&config).unwrap();
+        let init = qwen3::init_weights(&cfg, seed);
+        let names = qwen3::hf::HfNames::CAUSAL_LM;
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> =
+            cfg.param_list().into_iter().map(|(n, numel)| (names.from_brain(&n).unwrap(), vec![numel as u64], init[&n].clone())).collect();
+        checkpoint::st::save_safetensors(dir.join("model.safetensors").to_str().unwrap(), &tensors, &serde_json::Value::Null, None).unwrap();
+        let vocab: serde_json::Map<String, serde_json::Value> = data::bpe::bytes_to_unicode().iter().enumerate().map(|(i, c)| (c.to_string(), json!(i))).collect();
+        let tokenizer = json!({"model": {"vocab": vocab, "merges": []}, "pre_tokenizer": {"type": "ByteLevel", "add_prefix_space": false, "use_regex": true}});
+        std::fs::write(dir.join("tokenizer.json"), tokenizer.to_string()).unwrap();
+        (dir, cfg, init)
+    }
+
+    /// `--sparse-attention` through the resident: an indexer at a budget past
+    /// the context generates exactly what the dense resident generates over a
+    /// prompt that closes several cluster blocks, and an indexer built for
+    /// another model's attention is refused at activation, naming the flag.
+    #[test]
+    fn sparse_attention_is_served_through_the_resident_and_a_foreign_indexer_is_refused() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let (dir, cfg, _) = write_tiny_hf_dir("sparse", 23, 256);
+        let tok = dir.join("tokenizer.json");
+        let card = checkpoint::st::ModelCard::new("test/tiny-llama", "llama");
+        let geometry = model::lsa::indexer::IndexGeometry { n_layers: cfg.n_layers as usize, n_heads: cfg.n_heads as usize, n_kv_heads: cfg.n_kv_heads as usize, head_dim: cfg.head_dim as usize, rope_base: cfg.rope_theta };
+        let lsa = model::lsa::LsaConfig { index_dim: 4, pool_size: 1, bucket_size: 2, bucket_cap: 4, cluster_block: 16, top_p: 1024, top_k: 4096, sink: 1, window: 16, early: None };
+        // Indexers live outside the checkpoint directory: the directory's
+        // reader takes every safetensors file in it as model weights.
+        let indexers = std::env::temp_dir().join(format!("qwen-resident-indexers-{}", std::process::id()));
+        std::fs::create_dir_all(&indexers).unwrap();
+        let write = |name: &str, geometry| {
+            let path = indexers.join(name);
+            // seed: a fixture indexer; any projection reads every key at this budget.
+            model::lsa::indexer::Indexer::random(lsa, geometry, 7).unwrap().save(path.to_str().unwrap()).unwrap();
+            path.to_string_lossy().into_owned()
+        };
+        let own = write("indexer.safetensors", geometry);
+        let foreign = write("foreign.safetensors", model::lsa::indexer::IndexGeometry { n_kv_heads: 4, n_heads: 8, ..geometry });
+        let prompt: String = (0..60).map(|i| char::from(b'a' + (i * 7 % 26) as u8)).collect();
+        let inv = Invocation::new().set("prompt", json!(prompt)).set("chat", json!(false)).set("max_new", json!(8)).set("temp", json!(0.0));
+        let generate = |sparse: Option<String>| -> Result<String, String> {
+            let serve = QwenServeConfig { kv_int8: false, sparse_attention: sparse, ..QwenServeConfig::default() };
+            let resident = QwenResident::from_card_configured(dir.to_str().unwrap(), &card, tok.to_str(), serve);
+            let mut inst = resident.activate(&InstanceKey::new("test/tiny-llama", "default"), Device::Gpu(0)).map_err(|e| e.to_string())?;
+            let got = inst.run("generate", &inv, &mut |_| {}).map_err(|e| e.to_string())?;
+            Ok(got.outputs.get("text").and_then(|t| t.as_str()).unwrap_or_default().to_string())
+        };
+        let dense = generate(None).unwrap();
+        assert_eq!(generate(Some(own)).unwrap(), dense, "every-key sparse attention served something other than dense attention");
+        let err = generate(Some(foreign)).unwrap_err();
+        assert!(err.contains("--sparse-attention"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&indexers);
     }
 
     fn write_tiny_checkpoint(seed: u64, tag: &str) -> std::path::PathBuf {

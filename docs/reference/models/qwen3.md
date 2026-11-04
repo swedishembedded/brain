@@ -264,7 +264,8 @@ above. Everything about HOW to serve it is a `brain serve` flag:
   prefix-cache hit reuses or rebuilds them without recomputing a token), and
   the read works over every KV cache tier (f32, int8, fp8) and past the
   model's native context (YaRN). The indexer is made for one checkpoint and
-  refused on another. Off by default. Make an
+  refused on another; keep it outside the checkpoint's directory, whose
+  reader takes every safetensors file there as model weights. Off by default. Make an
   indexer with the `qwen_lsa` tool built beside `brain`:
   `qwen_lsa distill --checkpoint DIR --corpus TEXTDIR --out indexer.safetensors`
   trains it against the model's own attention (D-LSA);
