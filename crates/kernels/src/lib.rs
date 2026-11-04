@@ -738,6 +738,8 @@ pub const LSA_NATIVE_OFFSETS: &str = include_str!("../wgsl/lsa_native_offsets.wg
 pub const LSA_NATIVE_PAIRS: &str = include_str!("../wgsl/lsa_native_pairs.wgsl");
 /// `wgsl/lsa_read.wgsl`
 pub const LSA_READ: &str = include_str!("../wgsl/lsa_read.wgsl");
+/// `wgsl/lsa_read_tree.wgsl`
+pub const LSA_READ_TREE: &str = include_str!("../wgsl/lsa_read_tree.wgsl");
 /// `wgsl/lsa_ward.wgsl`
 pub const LSA_WARD: &str = include_str!("../wgsl/lsa_ward.wgsl");
 /// `wgsl/lstm_gates.wgsl`
@@ -1747,6 +1749,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("lsa_native_offsets", LSA_NATIVE_OFFSETS),
     ("lsa_native_pairs", LSA_NATIVE_PAIRS),
     ("lsa_read", LSA_READ),
+    ("lsa_read_tree", LSA_READ_TREE),
     ("lsa_ward", LSA_WARD),
     ("lstm_gates", LSTM_GATES),
     ("lstm_gates_bwd", LSTM_GATES_BWD),

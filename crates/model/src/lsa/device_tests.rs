@@ -387,3 +387,96 @@ fn the_device_ward_clusters_every_block_of_wide_keys() {
         assert!(worst < 1e-4, "slot {w}: centroids differ by {worst}");
     }
 }
+
+/// The device tree read selects what the host tree selects: three levels of
+/// node buckets in a scrambled node pool, beaming from the top and from the
+/// lowest level of at most `start_nodes` node buckets, over queries at every
+/// growth stage.
+#[test]
+fn the_device_tree_read_matches_the_host_tree() {
+    use super::tree::{build_hierarchy, growth_at, select_tree, TreeConfig};
+    use super::tree_device::{NodePool, TreeReadBuffers, TreeReadGeometry, KERNEL};
+    static PIPES: [(&str, &str); 1] = [KERNEL];
+    let Some(g) = barrier_gpu(&PIPES) else { return };
+    let cfg = LsaConfig { top_p: 24, top_k: 96, ..LsaConfig::default() };
+    let d = cfg.index_dim;
+    let mut rng = Lcg::random();
+    let t = 12 * cfg.cluster_block + 100;
+    let centers = unit_rows(&mut rng, 12, d);
+    let keys: Vec<f32> = (0..t)
+        .flat_map(|_| {
+            let c = &centers[(rng.next_u32() % 12) as usize * d..][..d];
+            let row: Vec<f32> = c.iter().map(|x| x + 0.35 * rng.signed()).collect();
+            crate::hostmath::l2_normalize(&row)
+        })
+        .collect();
+    let index = BucketIndex::build(cfg, &keys).unwrap();
+    let blocks = index.closed_blocks();
+    let bpb = cfg.buckets_per_block();
+    let positions: Vec<u32> = [0u32, 511, 512, 1023, 1024, 2047, 2048, 4095, 4096, 5000, 6143, 6144, t as u32 - 1].into_iter().chain((0..19).map(|_| rng.next_u32() % t as u32)).collect();
+    let rows = positions.len();
+    let queries = unit_rows(&mut rng, rows, d);
+    for start_nodes in [None, Some(40)] {
+        let tree = TreeConfig { node_bucket_size: 2, node_cluster_block: vec![32, 8, 4], beam_width: vec![6, 4, 3], start_nodes, page_size: 1024, growth_buckets: 64 };
+        let h = build_hierarchy(&index, &keys, &tree).unwrap();
+        let want = select_tree(&index, &h, &tree, &queries, &positions).unwrap();
+
+        let geom = TreeReadGeometry { cfg, tree: tree.clone(), max_pages: blocks as u32 };
+        // Index pages and node pages in scrambled order.
+        let max_pages = blocks as u32;
+        let pool = IndexPool::new(&g, cfg, max_pages, 1).unwrap();
+        let page_of = |b: usize| ((b * 5 + 3) % blocks) as u32;
+        for b in 0..blocks {
+            let block = ClosedBlock {
+                centroids: index.centroids()[b * bpb * d..][..bpb * d].to_vec(),
+                members: index.members()[b * bpb * cfg.bucket_cap..][..bpb * cfg.bucket_cap].to_vec(),
+                sizes: index.sizes()[b * bpb..][..bpb].to_vec(),
+            };
+            pool.write(&g, page_of(b), 0, &block).unwrap();
+        }
+        let node_pages: Vec<u32> = (1..=tree.top_level()).map(|l| geom.max_node_pages(l)).collect();
+        let nodes = NodePool::new(&g, geom.clone(), node_pages.clone(), 1).unwrap();
+        // A permutation of each level's pages (5 is coprime to their counts).
+        assert!(node_pages.iter().all(|&n| n % 5 != 0));
+        let node_page_of = |l: usize, p: usize| ((p * 5 + 3) % node_pages[l - 1] as usize) as u32;
+        let size = tree.node_bucket_size;
+        for l in 1..=h.children.len() {
+            let npp = geom.nodes_per_page(l) as usize;
+            for p in 0..h.children[l - 1].len() / size / npp {
+                let c = &h.node_centroids[l - 1][p * npp * d..][..npp * d];
+                let k = &h.children[l - 1][p * npp * size..][..npp * size];
+                nodes.write(&g, 0, l, node_page_of(l, p), c, k).unwrap();
+            }
+        }
+        let page_buckets = tree.page_size / cfg.cluster_block * bpb;
+        let stride = geom.table_stride() as usize;
+        let mut tables = vec![0u32; rows * stride];
+        for (r, &pos) in positions.iter().enumerate() {
+            let growth = growth_at(&tree, pos as usize / tree.page_size * page_buckets, page_buckets);
+            let pages: Vec<u32> = (0..blocks).map(page_of).collect();
+            let held: Vec<Vec<u32>> = (1..=tree.top_level()).map(|l| (0..growth.made[l - 1].div_ceil(geom.nodes_per_page(l) as usize)).map(|p| node_page_of(l, p)).collect()).collect();
+            geom.write_row(&mut tables[r * stride..][..stride], pos + 1, &pages, &growth, &held).unwrap();
+        }
+        let tb = g.storage(tables.len() as u64);
+        g.write(&tb, &tables);
+        let iq = g.storage_init("iq", &queries);
+        let cand = g.storage(super::tree_device::cand_words(&geom, rows as u32));
+        let width = geom.row_stride() as usize;
+        let sel = g.storage((rows * width) as u64);
+        let stats = g.storage(ReadStats::WORDS);
+        let level_row0 = nodes.level_row0(0);
+        let bufs = TreeReadBuffers { iq: &iq, centroids: &pool.centroids, members: &pool.members, nodes: &nodes.nodes, tables: &tb, cand: &cand, sel: &sel, stats: &stats, row0: 0, level_row0: &level_row0 };
+        g.submit(&[], &[geom.step(&g, 0, rows as u32, &bufs).unwrap()]);
+        let got: Vec<u32> = g.read(&sel, rows * width).iter().map(|x| x.to_bits()).collect();
+        for r in 0..rows {
+            let row = &got[r * width..][..width];
+            let n = row[0] as usize;
+            let host: Vec<u32> = want.row(r).iter().map(|&k| k as u32).collect();
+            if row[3..3 + n] != host[..] {
+                let only_dev: Vec<u32> = row[3..3 + n].iter().copied().filter(|k| !host.contains(k)).collect();
+                let only_host: Vec<u32> = host.iter().copied().filter(|k| !row[3..3 + n].contains(k)).collect();
+                panic!("start_nodes {start_nodes:?}: row {r} (position {}) selects differently: device only {only_dev:?}, host only {only_host:?}", positions[r]);
+            }
+        }
+    }
+}

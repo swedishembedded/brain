@@ -670,6 +670,15 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (rows, stride, d, width) = (p(0)?, p(1)?, p(3)?, p(11)?);
             f(rows * stride * (2 * d + 64), rows * stride * (4 * d + 4 * 34) + 4 * rows * (d + width))
         }
+        // The tree read: params [rows, index_dim, ..., top_level at 13, ...,
+        // cand_stride at 16]. Costed at a full candidate list at every level
+        // and at the buckets: each candidate scored once, then its id and
+        // key read by the 65 counting passes of the two-key radix select.
+        "lsa_read_tree" => {
+            let (rows, d, levels, cand) = (p(0)?, p(1)?, p(13)?, p(16)?);
+            let scored = rows * cand * (levels + 1);
+            f(scored * (2 * d + 130), scored * (4 * d + 8 + 8 * 65))
+        }
         // Ward clustering of one closed block for every layer slot (a
         // 64-thread workgroup each): params [index_dim, cluster_block,
         // pool_size, buckets_per_block, ...]. The pools' Gram matrix, then
@@ -2077,7 +2086,7 @@ mod tests {
             "paged_flash_decode_split_i8", "paged_flash_decode_combine", "paged_flash_decode_combine_i8",
             "paged_sparse_flash_decode", "paged_sparse_flash_gqa", "paged_sparse_flash_gqa_i8", "paged_sparse_flash_rows_i8",
             // the latent-sparse-attention index
-            "lsa_read", "lsa_ward", "lsa_index_vectors", "lsa_index_keys_i8", "add_index_mask",
+            "lsa_read", "lsa_read_tree", "lsa_ward", "lsa_index_vectors", "lsa_index_keys_i8", "add_index_mask",
             "lsa_native_fwd", "lsa_native_bwd_dq", "lsa_native_bwd_dkv", "lsa_native_pairs", "lsa_native_offsets",
             "scan_block", "scan_add", "sort_hist", "sort_scatter",
         ] {
