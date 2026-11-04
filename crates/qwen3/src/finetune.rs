@@ -864,12 +864,17 @@ impl model::finetune::ChatTrainer for Qwen3Trainer {
         }
     }
 
-    fn served_loss(base: &Path, tiers: &model::ops::TierPolicy, adapter: Option<&Path>, dir: &Path, opts: &FitOpts) -> Option<std::io::Result<f64>> {
+    /// The paged serving engine at `tiers`, the adapter folded into the base tensors as the scoring path folds it,
+    /// with an fp32 KV cache so the measurement is the weights' alone.
+    fn serving_engine(base: &Path, tiers: &model::ops::TierPolicy, adapter: Option<&Path>, max_seq_len: u32) -> Option<std::io::Result<Box<dyn model::serve::PagedDecoder>>> {
         Some((|| {
-            let (_, val, cfg, _) = model::load_dataset(dir, opts)?;
-            let rows = model::example_rows(&val, &data::loader::BatchConfig { batch_size: 1, ..cfg });
             let adapter = adapter.map(path_str).transpose().map_err(std::io::Error::other)?;
-            crate::eval::served_loss(path_str(base).map_err(std::io::Error::other)?, adapter, tiers, &rows).map_err(std::io::Error::other)
+            let (cfg, src) = crate::eval::scored_source(path_str(base).map_err(std::io::Error::other)?, adapter);
+            crate::serve::Engine::check_tiers(&cfg, tiers).map_err(std::io::Error::other)?;
+            let block_size = 16u32;
+            let max_blocks_per_seq = max_seq_len.div_ceil(block_size).max(1);
+            let engine = crate::serve::Engine::from_source_tiers(cfg, &*src, block_size, max_blocks_per_seq + 1, 1, max_blocks_per_seq, max_seq_len.max(1), false, tiers);
+            Ok(Box::new(engine) as Box<dyn model::serve::PagedDecoder>)
         })())
     }
 

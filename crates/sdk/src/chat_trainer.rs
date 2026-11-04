@@ -142,7 +142,7 @@ impl ChatEntry {
             served_weights: T::SERVED_WEIGHTS,
             search: search::<T>,
             measure: measure::<T>,
-            served: T::served_loss,
+            served: model::finetune::served_loss::<T>,
             prune: prune::<T>,
             teacher: teacher::<T>,
             distill: distill::<T>,

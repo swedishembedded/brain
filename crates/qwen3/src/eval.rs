@@ -48,7 +48,7 @@ pub struct ChatScore {
 /// `weights` is on disk (a brain checkpoint, a GGUF or a `transformers` directory), with `adapter`'s LoRA delta
 /// folded into each targeted linear as it is read: the same zero-inference-overhead fold a resident serves a named
 /// adapter with, and no whole-model host map. A folded model has no separate adapter parameters (`cfg.lora` is `None`).
-fn scored_source(weights: &str, adapter: Option<&str>) -> (QwenConfig, Box<dyn checkpoint::TensorSource>) {
+pub(crate) fn scored_source(weights: &str, adapter: Option<&str>) -> (QwenConfig, Box<dyn checkpoint::TensorSource>) {
     let (mut cfg, src) = crate::open_checkpoint(weights).unwrap_or_else(|e| panic!("{e}"));
     let Some(a) = adapter else { return (cfg, src) };
     let folded = model::lora::device_adapter::FoldedSource::open(src, a).expect("fold adapter into base tensors");
@@ -314,37 +314,6 @@ pub fn score_chat_paged(weights: &str, adapter: Option<&str>, tok: &QwenBpe, tmp
         samples: samples.len() - skipped,
         skipped,
     }
-}
-
-/// The mean loss over the supervised positions of prepared `rows` (`(tokens,
-/// targets)`, one example a row, [`model::IGNORE`] where unsupervised), scored
-/// through the serving engine (`crate::serve::Engine`) with each linear and the
-/// head at the tier `tiers` names, an adapter folded in when given: what
-/// `brain serve --weight-format` computes, int8 activation quantization
-/// included. The KV cache is fp32, so the number measures the weights alone.
-pub fn served_loss(weights: &str, adapter: Option<&str>, tiers: &model::ops::TierPolicy, rows: &[(Vec<u32>, Vec<u32>)]) -> Result<f64, String> {
-    let (cfg, src) = scored_source(weights, adapter);
-    crate::serve::Engine::check_tiers(&cfg, tiers)?;
-    let longest = rows.iter().map(|(x, _)| x.len()).max().ok_or("no rows to score")? as u32;
-    let block_size = 16u32;
-    let max_blocks_per_seq = longest.div_ceil(block_size).max(1);
-    let mut eng = crate::serve::Engine::from_source_tiers(cfg.clone(), &*src, block_size, max_blocks_per_seq + 1, 1, max_blocks_per_seq, longest.max(1), false, tiers);
-    let d = cfg.d_model as usize;
-    let (mut nll, mut positions) = (0f64, 0usize);
-    for (tokens, targets) in rows {
-        let Some(last) = targets.iter().rposition(|&t| t != model::IGNORE) else { continue };
-        let mut table = model::paged::BlockTable::new();
-        let hidden = eng.score_positions(&mut table, &tokens[..=last]);
-        eng.release_table(&mut table);
-        for (t, &target) in targets[..=last].iter().enumerate().filter(|(_, &y)| y != model::IGNORE) {
-            nll -= model::logprobs::row_logprob(&eng.logits(&hidden[t * d..(t + 1) * d]), target as usize) as f64;
-            positions += 1;
-        }
-    }
-    if positions == 0 {
-        return Err("no supervised position to score".into());
-    }
-    Ok(nll / positions as f64)
 }
 
 #[cfg(test)]

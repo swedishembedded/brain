@@ -137,6 +137,23 @@ pub trait PagedDecoder {
     /// (from which the caller samples the first token).
     fn prefill(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Vec<f32>;
 
+    /// The final hidden state at each of `positions` of `prompt` run as a
+    /// fresh sequence (teacher forcing: position `t` has read `prompt[..=t]`),
+    /// what scoring a held-out record reads. The default prefills each prefix
+    /// on its own table and keeps its last state, so it is correct for every
+    /// engine; an engine with a whole-sequence pass overrides it.
+    fn hidden_at(&mut self, prompt: &[u32], positions: &[usize]) -> Vec<Vec<f32>> {
+        positions
+            .iter()
+            .map(|&t| {
+                let mut table = BlockTable::new();
+                let hidden = self.prefill(&mut table, &prompt[..=t]);
+                self.release_table(&mut table);
+                hidden
+            })
+            .collect()
+    }
+
     /// `logits = hidden @ head^T` for [`prefill`](Self::prefill)'s hidden
     /// state - a full `[vocab]` vector. [`admit_greedy`](Self::admit_greedy)/
     /// [`admit_topk`](Self::admit_topk) are what admission actually calls;
@@ -2629,6 +2646,29 @@ impl<D: PagedDecoder> Scheduler<D> {
     }
 }
 
+/// The mean loss over the supervised positions of `rows` (`(tokens, targets)`,
+/// one record a row, `targets[t]` the token after `tokens[t]` or
+/// [`crate::IGNORE`]) scored through `engine`: what serving computes for
+/// those tokens, the engine's kernels and storage tiers included.
+pub fn teacher_forced_loss(engine: &mut dyn PagedDecoder, rows: &[(Vec<u32>, Vec<u32>)]) -> Result<f64, String> {
+    let (mut nll, mut positions) = (0f64, 0usize);
+    for (tokens, targets) in rows {
+        let at: Vec<usize> = targets.iter().enumerate().filter(|(_, &y)| y != crate::IGNORE).map(|(t, _)| t).collect();
+        let Some(&last) = at.last() else { continue };
+        if last >= engine.max_seq_len() {
+            return Err(format!("a record of {} tokens is past the engine's {}", last + 1, engine.max_seq_len()));
+        }
+        for (hidden, &t) in engine.hidden_at(&tokens[..=last], &at).iter().zip(&at) {
+            nll -= crate::logprobs::row_logprob(&engine.logits(hidden), targets[t] as usize) as f64;
+            positions += 1;
+        }
+    }
+    if positions == 0 {
+        return Err("no supervised position to score".into());
+    }
+    Ok(nll / positions as f64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2933,3 +2973,4 @@ mod tests {
         assert_eq!(table_logits[128822], 0.0, "</td> must survive inside its own real table");
     }
 }
+

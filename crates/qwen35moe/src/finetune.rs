@@ -108,6 +108,9 @@ impl model::finetune::ChatTrainer for Qwen35MoeTrainer {
         fit.fit(m)
     }
 
+    /// What the serving engine holds per leaf (`serve::EngineOptions::tier`): the f32 and int8 tiers.
+    const SERVED_WEIGHTS: &'static [gpu_core::select::Dtype] = &[gpu_core::select::Dtype::F32, gpu_core::select::Dtype::I8];
+
     fn train_lora(base: &Path, lora: &LoraRequest<'_>, opts: &FitOpts, fit: &mut impl ModelFit) -> std::io::Result<(FitReport, Qwen35)> {
         lora.checked_uniform::<Self>()?;
         if lora.continue_from.is_some() {
@@ -116,6 +119,23 @@ impl model::finetune::ChatTrainer for Qwen35MoeTrainer {
         check_before_load(base, Some(lora), OptimizerState::Device)?;
         let m = OptimizerState::Device.scope(|| Ok::<_, std::io::Error>(Qwen35::load_with_adapter(path_str(base)?, opts.batch_size, opts.block_size, Some((lora_cfg(lora.rank, lora.alpha), opts.seed)))))?;
         fit.fit(m)
+    }
+
+    /// The paged serving engine at `tiers` over the brain checkpoint at `base` (an adapter folded into the base
+    /// tensors), read one tensor at a time as the file stores it, with an fp32 KV cache.
+    fn serving_engine(base: &Path, tiers: &model::ops::TierPolicy, adapter: Option<&Path>, max_seq_len: u32) -> Option<std::io::Result<Box<dyn model::serve::PagedDecoder>>> {
+        Some((|| {
+            let name = path_str(base)?;
+            let reader = checkpoint::weightio::WeightReader::open(name).map_err(|e| std::io::Error::other(format!("open {name}: {e}")))?;
+            let cfg = <crate::config::Qwen35Config as model::ModelConfig>::from_json(&reader.config());
+            let src = checkpoint::packed::stored_source(reader);
+            let src: Box<dyn checkpoint::TensorSource> = match adapter {
+                Some(a) => Box::new(model::lora::device_adapter::FoldedSource::open(src, path_str(a)?).map_err(std::io::Error::other)?),
+                None => src,
+            };
+            let engine = crate::serve::Engine::from_source(cfg, &*src, crate::serve::EngineOptions::new(max_seq_len.max(1), 1).with_tier(tiers.clone()));
+            Ok(Box::new(engine) as Box<dyn model::serve::PagedDecoder>)
+        })())
     }
 
     /// The adapter file carries no training provenance: this architecture's

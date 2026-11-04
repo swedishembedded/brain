@@ -198,8 +198,9 @@ pub trait ChatTrainer {
 
     /// The weight formats this family's serving engine holds a linear in, one
     /// linear at a time (a per-leaf `--weight-format`). A precision search
-    /// offers only these, so every plan it accepts can be served. Empty (the
-    /// default): the family serves no per-leaf policy.
+    /// offers only these, so every plan it accepts can be served, and measures
+    /// them through [`Self::serving_engine`], which a family declaring any must
+    /// offer. Empty (the default): the family serves no per-leaf policy.
     const SERVED_WEIGHTS: &'static [Dtype] = &[];
 
     /// The vocabulary of the checkpoint at `open`.
@@ -226,13 +227,11 @@ pub trait ChatTrainer {
     /// is folded in when given.
     fn export_checkpoint(trained: &Path, tokenizer_dir: &Path, out: &Path, adapter: Option<&Path>) -> Result<(), String>;
 
-    /// The held-out loss of the base at `base` scored through the family's
-    /// serving engine with each linear at the tier `tiers` names (and
-    /// `adapter` applied when given), over the validation split of the
-    /// prepared dataset at `dir`: what serving the policy computes, kernels and
-    /// activation quantization included. `None` when the family has no engine
-    /// scoring path, so a caller measures on a trainer build instead.
-    fn served_loss(_base: &Path, _tiers: &TierPolicy, _adapter: Option<&Path>, _dir: &Path, _opts: &FitOpts) -> Option<std::io::Result<f64>> {
+    /// The family's serving engine over the base at `base` with each linear
+    /// at the tier `tiers` names (an `adapter` folded in when given), sized for
+    /// one sequence of `max_seq_len` tokens: what [`served_loss`] scores
+    /// through. `None` when the family has no paged serving engine.
+    fn serving_engine(_base: &Path, _tiers: &TierPolicy, _adapter: Option<&Path>, _max_seq_len: u32) -> Option<std::io::Result<Box<dyn crate::serve::PagedDecoder>>> {
         None
     }
 
@@ -279,4 +278,22 @@ pub fn export_brain_checkpoint(family: &str, trained: &Path, tokenizer_dir: &Pat
         }
     }
     Ok(())
+}
+
+/// The held-out loss of the base at `base` with each linear at `tiers` (and
+/// `adapter` applied), scored through the family's serving engine
+/// ([`ChatTrainer::serving_engine`]) over the validation split of the prepared
+/// dataset at `dir`: what serving the policy computes, kernels and activation
+/// quantization included. `None` when the family has no serving engine.
+pub fn served_loss<T: ChatTrainer>(base: &Path, tiers: &TierPolicy, adapter: Option<&Path>, dir: &Path, opts: &FitOpts) -> Option<std::io::Result<f64>> {
+    let rows = match crate::load_dataset(dir, opts) {
+        Ok((_, val, cfg, _)) => crate::example_rows(&val, &data::loader::BatchConfig { batch_size: 1, ..cfg }),
+        Err(e) => return Some(Err(e)),
+    };
+    let longest = rows.iter().map(|(x, _)| x.len()).max().unwrap_or(1) as u32;
+    let mut engine = match T::serving_engine(base, tiers, adapter, longest)? {
+        Ok(engine) => engine,
+        Err(e) => return Some(Err(e)),
+    };
+    Some(crate::serve::teacher_forced_loss(&mut *engine, &rows).map_err(std::io::Error::other))
 }

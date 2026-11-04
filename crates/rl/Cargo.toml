@@ -207,3 +207,8 @@ required-features = ["qwen3"]
 name = "chat_trainer_bases"
 path = "tests/chat_trainer_bases.rs"
 required-features = ["qwen3"]
+
+[[test]]
+name = "served_conformance"
+path = "tests/served_conformance.rs"
+required-features = ["qwen3"]

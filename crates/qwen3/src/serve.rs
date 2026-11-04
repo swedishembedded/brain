@@ -4236,6 +4236,15 @@ impl model::serve::PagedDecoder for Engine {
     fn release_table(&mut self, t: &mut BlockTable) {
         self.release_table(t)
     }
+    /// One whole-sequence pass ([`Engine::score_positions`]) instead of a prefill per position.
+    fn hidden_at(&mut self, prompt: &[u32], positions: &[usize]) -> Vec<Vec<f32>> {
+        let mut table = BlockTable::new();
+        let hidden = self.score_positions(&mut table, prompt);
+        self.release_table(&mut table);
+        let d = self.cfg.d_model as usize;
+        positions.iter().map(|&t| hidden[t * d..(t + 1) * d].to_vec()).collect()
+    }
+
     fn prefill(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Vec<f32> {
         Engine::prefill(self, table, prompt)
     }

@@ -380,7 +380,7 @@ impl ModelOptimizer {
             device: &self.device,
             thinking: self.thinking,
         })?;
-        let (tiers, excluded_tiers) = candidates(self.tiers.as_deref(), work.chat.lora_bases, work.chat.served_weights, &gpu_core::Gpu::new(&[]).caps().numeric)?;
+        let (tiers, excluded_tiers) = candidates(self.tiers.as_deref(), work.chat.lora_bases.model, work.chat.served_weights, &gpu_core::Gpu::new(&[]).caps().numeric)?;
         let Workload { chat, open, prepared_dir, opts, seed, calibration_records, held_out_records, .. } = &work;
         let (chat, open, prepared_dir, opts, seed) = (*chat, open.clone(), prepared_dir.clone(), opts.clone(), *seed);
 
@@ -491,21 +491,22 @@ pub(crate) fn distill_recovery(work: &Workload, req: &RecoveryRequest<'_>, on_pr
     Ok(Recovery { adapter, steps: req.steps, rank: req.rank, plan_loss, recovered_loss })
 }
 
-/// The candidate tiers. Each must be one the trainer holds a frozen base in (so it can be measured on its deployed
-/// kernels), one the family serves per linear (so an accepted plan can be served) and one the device holds as itself
-/// (so its bytes and loss are what the search assumed). The caller's list is refused by the first that is not; the
-/// default is every tier that is all three, with those the device would widen returned with what it would hold.
-fn candidates(asked: Option<&str>, trainer: model::policy::TrainBases, served: &[Dtype], numeric: &gpu_core::NumericSupport) -> Result<(Vec<Dtype>, Vec<ExcludedTier>)> {
+/// The candidate tiers. Each must be one the family serves per linear (so an accepted plan can be served, and is
+/// measured on that serving engine) and one the device holds as itself (so its bytes and loss are what the search
+/// assumed). The caller's list is refused by the first that is not; the default is every served tier the device holds,
+/// with those it would widen returned with what it would hold.
+fn candidates(asked: Option<&str>, family: &str, served: &[Dtype], numeric: &gpu_core::NumericSupport) -> Result<(Vec<Dtype>, Vec<ExcludedTier>)> {
+    let names = |tiers: &[Dtype]| tiers.iter().map(|t| t.name()).collect::<Vec<_>>().join(", ");
     if served.is_empty() {
-        return Err(Error::Backend(format!("ModelOptimizer: {} serves no per-linear weight format, so no searched plan could be served", trainer.model)));
+        return Err(Error::Backend(format!("ModelOptimizer: {family} serves no per-linear weight format, so no searched plan could be served")));
     }
     match asked {
         Some(list) => {
             let mut tiers = Vec::new();
             for spec in list.split(',').map(str::trim) {
-                let tier = trainer.parse(spec).map_err(|why| Error::Backend(format!("ModelOptimizer: candidate {spec:?} cannot be measured on its deployed kernels: {why}")))?;
+                let tier = model::policy::parse_weight_format(spec).ok().and_then(|p| p.uniform_dtype()).ok_or_else(|| Error::Backend(format!("ModelOptimizer: candidate {spec:?} is not a weight format")))?;
                 if !served.contains(&tier) {
-                    return Err(Error::Backend(format!("ModelOptimizer: candidate {}: {} does not serve it per linear; it serves {}", tier.name(), trainer.model, served.iter().map(|t| t.name()).collect::<Vec<_>>().join(", "))));
+                    return Err(Error::Backend(format!("ModelOptimizer: candidate {}: {family} does not serve it per linear; it serves {}", tier.name(), names(served))));
                 }
                 let held = tier.promote(numeric);
                 if held != tier {
@@ -516,8 +517,7 @@ fn candidates(asked: Option<&str>, trainer: model::policy::TrainBases, served: &
             Ok((tiers, Vec::new()))
         }
         None => {
-            let servable = trainer.bases.iter().filter(|t| served.contains(t));
-            let (kept, widened): (Vec<Dtype>, Vec<Dtype>) = servable.partition(|&&t| t.promote(numeric) == t);
+            let (kept, widened): (Vec<Dtype>, Vec<Dtype>) = served.iter().partition(|&&t| t.promote(numeric) == t);
             Ok((kept, widened.into_iter().map(|t| ExcludedTier { tier: t.name(), held_as: t.promote(numeric).name() }).collect()))
         }
     }
