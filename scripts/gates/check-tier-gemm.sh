@@ -15,7 +15,7 @@
 #   - a row names a kernel file that does not exist;
 #   - a gap (no gemv, no tensor core, or a scratch-tile library path for a non-dense format) is
 #     missing from scripts/gates/tier-gemm.allow, or an allowed gap has been closed (shrink-only).
-# Behaviour is verified by crates/model/tests/qops_tier_coverage.rs.
+# Behaviour is verified by crates/model/tests/it/qops_tier_coverage.rs.
 #
 # Usage: scripts/gates/check-tier-gemm.sh [--root DIR] [--map FILE] [--allow FILE]
 set -u

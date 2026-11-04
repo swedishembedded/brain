@@ -4,7 +4,7 @@ Scope: The Intel NPU export and runtime path (`crates/npu`).
 
 ## Real bug: `npu_model_parity` test hangs under a full `make test` run, not seen when tests run to completion in isolation
 
-`crates/catalog/tests/npu_model_parity.rs` hung during a full `make test` run on
+`crates/catalog/tests/it/npu_model_parity.rs` hung during a full `make test` run on
 this box (real OpenVINO NPU compiler libraries ARE present -
 `libopenvino_intel_npu_compiler.so` under `/usr/lib/x86_64-linux-gnu/` - so
 its `_when_openvino_available` tests run for real rather than skipping): 2 of

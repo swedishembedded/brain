@@ -24,7 +24,7 @@ The general shape, and why it matters beyond one backend:
   a temporary env var and took minutes.
 * **Allocation is the recurring culprit in this workspace, in BOTH
   directions.** Upload staging on non-ReBAR cards was the same class
-  (`crates/gpu-core/tests/vram_overhead.rs`); this is the read direction, and
+  (`crates/gpu-core/tests/it/vram_overhead.rs`); this is the read direction, and
   the destination half of it is still open because `read`'s contract is to
   return a fresh `Vec`.
 * **A rate that is wildly asymmetric between two directions of the same link
@@ -44,5 +44,5 @@ shape allocate exactly one buffer") before a gate could exist at all.
 So: when a change is "the same answer, computed with less work", ask what in
 the process state proves the work was skipped, and expose that. A wall clock
 is not a gate - nobody watches it, and it is the first thing a noisy machine
-takes away. `crates/backend-wgpu/tests/read_staging_reuse.rs`, and the numbers
+takes away. `crates/backend-wgpu/tests/it/read_staging_reuse.rs`, and the numbers
 in `.agents/roadmap/ltxv.md` phase 36.

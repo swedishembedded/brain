@@ -67,7 +67,7 @@ changes an item. Dated measurements live in `.agents/knowledge/` (240, 250-252, 
 - Move qwen3's int8 frozen-base input gradient into the shared `Ops::matmul_dx`, delete the
   local copy; double quantisation of the NF4 scale plane (skipped).
 - `make test/parity` is diagnosed (knowledge 300): the Vulkan failures are a concurrency race
-  on the shared pooled device (open; reproducer `crates/vulkan/tests/shared_device_two_threads.rs`),
+  on the shared pooled device (open; reproducer `crates/vulkan/tests/it/shared_device_two_threads.rs`),
   so the gate runs Vulkan serially and `bf16_train` stays CPU-only; the four qwen3 fused-attention
   dispatch-count tests were fixed for the CPU backend; the `random_shared_prefixes_stay_exact`
   flake is knowledge 301.

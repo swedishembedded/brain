@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-"""Dump the Qwen3-TTS Talker logit golden for `crates/qwen3tts/tests/parity.rs`.
+"""Dump the Qwen3-TTS Talker logit golden for `crates/qwen3tts/tests/it/parity.rs`.
 
 The reference is the UPSTREAM `qwen-tts` package's `Qwen3TTSTalkerModel` (see
 `qwen3tts_ref.py` for why it cannot come from a released `transformers`), driven

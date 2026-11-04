@@ -79,7 +79,7 @@
 // `8 * 127 * 7`), so the per-word integer sum is IDENTICAL regardless of
 // grouping order (integer addition is associative and lossless at this
 // magnitude) - gated by an exact (not tolerance) comparison against
-// `matmul_q4_gemv` in `crates/model/tests/matmul_q4_gemm.rs`. The f32
+// `matmul_q4_gemv` in `crates/model/tests/it/matmul_q4_gemm.rs`. The f32
 // accumulation ACROSS words (`acc[m] += f32(...) * s`) is unchanged in
 // order from `matmul_q4_gemv`'s own `partial[...] + f32(local) * s`, so the
 // two kernels are bit-identical end to end.

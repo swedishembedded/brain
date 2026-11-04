@@ -90,7 +90,7 @@ every-20th-step summary is compatible with divergence. If the trajectory
 oscillates, the honest options are to fix the hyperparameter until it does not
 (preferred - it usually tightens the gate by orders of magnitude, as here) or
 to assert on a statistic the phase cannot move (`min` and a hold bound, the
-shape `crates/flux2/tests/lora_train.rs` and `supir::lora` already use, and
+shape `crates/flux2/tests/it/lora_train.rs` and `supir::lora` already use, and
 which each says in-line WHY it is a floor-and-hold rather than an endpoint).
 Never re-fit the threshold to the endpoint the unstable run happened to land
 on.

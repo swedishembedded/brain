@@ -38,7 +38,7 @@ The general shape:
   in a different subsystem, several minutes into a run.
 
 A second, unrelated hazard was confirmed while chasing this and is worth
-recording separately: `crates/backend-wgpu/tests/upload_flush.rs` **hangs at
+recording separately: `crates/backend-wgpu/tests/it/upload_flush.rs` **hangs at
 100% CPU** when its two tests run concurrently (`--test-threads` > 1), because
 each builds its own `WgpuBackend` and two Vulkan devices in one process is the
 documented deadlock this driver has. Reproduced on unmodified `main`, so it is

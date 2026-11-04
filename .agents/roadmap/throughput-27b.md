@@ -284,7 +284,7 @@ the risk, the correctness gates and the benchmark. "W4" is the 4-layer probe and
   `poll_wait`s and about 16 x 64 x 20 launches (DERIVED).
 - **Risk.** Low.
 - **Gates.** Gradients must be bit-identical, because the removed work feeds a buffer
-  nothing reads. Keep `crates/qwen35/tests/lora_recompute.rs`, `lora_bf16_residuals.rs`,
+  nothing reads. Keep `crates/qwen35/tests/it/lora_recompute.rs`, `lora_bf16_residuals.rs`,
   `lora_nf4_base.rs` and `lora_bf16_base.rs` green. Add a fast unit test asserting that
   `backward` with `mlp_rows` produces bit-identical LoRA gradients before and after on a tiny
   config, on CPU and CUDA.
@@ -312,7 +312,7 @@ the risk, the correctness gates and the benchmark. "W4" is the 4-layer probe and
   MLP launch count 4x.
 - **Risk.** Low (memory). At 8K, NF4 has room: a 64-layer run at 8K measured 35.9 GiB at
   seg 128. bf16 at 16K and above must stay at small segments.
-- **Gates.** `crates/qwen35/tests/lora_gdn_segments.rs`, `lora_seq_len.rs`,
+- **Gates.** `crates/qwen35/tests/it/lora_gdn_segments.rs`, `lora_seq_len.rs`,
   `finetune_streamed_guard.rs`, plus a unit test of the sizing function (monotone in free
   memory, never above the 4 GiB binding cap, never below `conv_kernel - 1`).
 
@@ -322,7 +322,7 @@ the risk, the correctness gates and the benchmark. "W4" is the 4-layer probe and
   them where `caps.workgroup_reductions` holds, as `matmul_reg3` is.
 - **Gain.** Small today (norms are 1% of launches) but needed for the 120 us glue budget.
 - **Risk.** Low.
-- **Gates.** `crates/qwen35/tests/rmsnorm_variant_agreement.rs`.
+- **Gates.** `crates/qwen35/tests/it/rmsnorm_variant_agreement.rs`.
 
 **Q5. Make the probe a benchmark instrument.**
 - **Change.** In `crates/qwen35/src/bin/qwen35_train_probe.rs`:
@@ -379,9 +379,9 @@ This is the single largest item and gates every milestone past 100.
   row-window offsets are already 256-byte aligned, finding 216), and the 4 GiB binding logic
   not applying to raw pointers.
 - **Correctness.**
-  - Keep `crates/model/tests/ops_nf4_weight.rs`, `matmul_rows.rs`,
+  - Keep `crates/model/tests/it/ops_nf4_weight.rs`, `matmul_rows.rs`,
     `ops_matmul_step_identity.rs` and `crates/gpu-core/tests/cuda_provider_matmul.rs` green.
-  - New `crates/gpu-core/tests/cuda_library_gemm.rs`: bf16 x bf16 to f32 against the fp32
+  - New `crates/gpu-core/tests/it/cuda_library_gemm.rs`: bf16 x bf16 to f32 against the fp32
     reference on random shapes covering the 27B set (m in {1, 7, 64, 512, 8192}; (n, k) from
     the projection table), at 1e-2 of output RMS. Also against an f64 oracle at small size,
     and a decline-is-recorded test with the library forced absent.
@@ -404,7 +404,7 @@ This is the single largest item and gates every milestone past 100.
 - **Risk.** Low.
 - **Gates.** A new unit test that the dequant is bit-exact against
   `model::lut4` host decode on a whole 5120 x 17408 matrix, plus `ops_nf4_weight.rs`, plus
-  `crates/qwen35/tests/lora_nf4_base.rs`.
+  `crates/qwen35/tests/it/lora_nf4_base.rs`.
 
 **K3. LoRA on the library GEMMs, with shared-input A concatenation.**
 - **What changes.**
@@ -424,7 +424,7 @@ This is the single largest item and gates every milestone past 100.
   offset, not by re-storing, so `lora_adapter_file.rs`, `lora_roundtrip.rs` and
   `lora_resume_gate.rs` stay green.
 - **Gates.** `gradcheck::check_qwen35_lora` (CPU, fp32 reference tier) and
-  `crates/model/tests/lora_runtime_delta.rs`, plus a new test that LoRA gradients on the
+  `crates/model/tests/it/lora_runtime_delta.rs`, plus a new test that LoRA gradients on the
   tensor-core tier agree with the reference tier within 1e-2 relative on a tiny config.
 
 **K4. Fused head CE gradient in the forward.**
@@ -440,8 +440,8 @@ This is the single largest item and gates every milestone past 100.
 - **Risk.** Medium. A per-token weight or logit scale set after the forward (the
   `TokenObjectives` hooks of `training-27b.md`) must still be honoured. Keep the old path for
   objectives that set weights after the forward.
-- **Gates.** `crates/model/tests/head_ce.rs` (chunked equals unchunked) and
-  `crates/qwen35/tests/lora_head.rs`.
+- **Gates.** `crates/model/tests/it/head_ce.rs` (chunked equals unchunked) and
+  `crates/qwen35/tests/it/lora_head.rs`.
 
 **K5. Tensor-core flash attention for training at head_dim 256.**
 - **What changes.** New native `flash_gqa_train_bf16_hd256.cu` with three entries: forward
@@ -461,8 +461,8 @@ This is the single largest item and gates every milestone past 100.
   60 s and 1.5 s per step.
 - **Risk.** Medium-high. The backward is the hard part (dS = P ∘ (dP - D) with
   D = rowsum(dO ∘ O), atomics-free dK/dV accumulation by iterating q-tiles per k-tile).
-- **Gates.** Keep `crates/model/tests/flash_gqa_train.rs` (portable trio as reference) and
-  `crates/qwen35/tests/lora_flash.rs` green. Add a new
+- **Gates.** Keep `crates/model/tests/it/flash_gqa_train.rs` (portable trio as reference) and
+  `crates/qwen35/tests/it/lora_flash.rs` green. Add a new
   `crates/gpu-core/tests/cuda_flash_gqa_train.rs`: forward, dQ, dK and dV against the fp32
   trio and an f64 oracle at T in {64, 257, 1024, 4096}, on causal ragged tails, with the
   tolerance of the existing prefill gate (1.2e-2 of output RMS). Mutation-verify it by
@@ -489,9 +489,9 @@ This is the single largest item and gates every milestone past 100.
   GDN time from about 7 s (exclusive card; minutes on a shared one) to about 0.6-0.8 s.
 - **Risk.** Medium. The forward kernel exists and is bit-identical to the walk; the backward
   kernel is new.
-- **Gates.** Keep `crates/model/tests/gdn_chunk_bwd.rs` (including `gdn_chunk_bwd_gradcheck`,
+- **Gates.** Keep `crates/model/tests/it/gdn_chunk_bwd.rs` (including `gdn_chunk_bwd_gradcheck`,
   f64 FD), `gdn_chunk_fwd.rs`, `gdn_chunk_fwd_fast.rs`, `gdn_mixer_segmented.rs`,
-  `gdn_mixer_equivalence.rs` and `crates/qwen35/tests/lora_gdn_segments.rs` green. Add new
+  `gdn_mixer_equivalence.rs` and `crates/qwen35/tests/it/lora_gdn_segments.rs` green. Add new
   tests:
   - the native training forward is bit-identical to the walk (state history included) at chunk
     lengths 64..1 and at a ragged last chunk;
@@ -499,7 +499,7 @@ This is the single largest item and gates every milestone past 100.
     contraction), as `gdn_chunk_loop_f32.cu` is to its walk;
   - mutation-verify by perturbing the decay index.
 
-  `crates/model/tests/gdn_mixer_train_cost.rs` (ignored, CUDA) records launches and peak
+  `crates/model/tests/it/gdn_mixer_train_cost.rs` (ignored, CUDA) records launches and peak
   before and after.
 
 **K7. Fused elementwise epilogues (the glue budget).** These are native kernels in
@@ -534,7 +534,7 @@ Each one replaces 2-5 launches and 2-4 tensor passes.
 - **Gain (DERIVED).** After K6 there are about 25 K launches at 5-10 us, which is 0.12-0.25 s
   per step (15-30 us/token). Graphs bring that to a few us/token. It is the last 3-10%.
 - **Risk.** High (backend internals, a shared engine used by every model).
-- **Gates.** `crates/backend-cuda/tests/block_cache.rs`, `crates/qwen35/tests/cuda_leaks.rs`,
+- **Gates.** `crates/backend-cuda/tests/it/block_cache.rs`, `crates/qwen35/tests/it/cuda_leaks.rs`,
   the CUDA graph tests in `crates/backend-cuda`, and the trajectory gate with graphs on and off
   (`BRAIN_CUDA_GRAPHS=0`), which must be bit-identical.
 
@@ -614,7 +614,7 @@ These run in the same commit as each item. Build through the Makefile; never run
 `cargo test -p` (each integration binary is about 470 MB).
 - **Gradient truth (fp32 reference tier).** `make test/gradcheck`, which includes
   `gradcheck::check_qwen35`, `check_qwen35_lora` and `check_qwen35_mtp`, and
-  `crates/model/tests/gdn_chunk_bwd.rs` (`gdn_chunk_bwd_gradcheck`, f64 FD).
+  `crates/model/tests/it/gdn_chunk_bwd.rs` (`gdn_chunk_bwd_gradcheck`, f64 FD).
 - **Tier tolerance.** `make test/conformance` ("each frozen-base tier within tolerance of
   f32"; LoRA B = 0 leaves logits bit-identical; chunked head equals unchunked), plus the qwen35
   tests `lora_bf16_base.rs`, `lora_nf4_base.rs`, `lora_bf16_residuals.rs`, `lora_recompute.rs`,
@@ -624,7 +624,7 @@ These run in the same commit as each item. Build through the Makefile; never run
   `ops_nf4_weight.rs` and `matmul_rows.rs`, plus each new kernel's test (K1-K7) against both
   the portable kernel and an f64 oracle.
 - **New trajectory gate**, the one that catches a drifted reduction (§E.4).
-  `crates/qwen35/tests/train_tier_trajectory.rs` runs 30 steps of a tiny real-shape-ratio
+  `crates/qwen35/tests/it/train_tier_trajectory.rs` runs 30 steps of a tiny real-shape-ratio
   config (2 GDN + 1 GQA layers at d = 256, head_dim 256, vocab 4096, rank 8) on fixed data
   and seed, CUDA only, skip-if-absent. It asserts:
   - the tensor-core tier's loss curve stays within 2% relative of the fp32 reference tier

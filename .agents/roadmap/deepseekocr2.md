@@ -160,7 +160,7 @@ dumps `testdata/deepseekocr2/tiny/{ckpt/model.safetensors,golden.safetensors}`
 encoder (taps per view: concat input, per-layer pre/post-mask scores,
 softmax probs, layer output, query slice, projector output), and the final
 row-gather (local tiles row-major, then the global view, then the
-separator), consumed by `crates/deepseekocr2/tests/tiny_ref.rs` (M3).
+separator), consumed by `crates/deepseekocr2/tests/it/tiny_ref.rs` (M3).
 
 M1 (GGUF import for the mmproj) done: `crates/gguf/src/deepseekocr2_vision.rs`
 classifies all 473 real mmproj tensors - SAM reuses `deepseek_ocr_vision::
@@ -168,7 +168,7 @@ SamConfig` verbatim under the same `vision.sam.*` names `crates/sam1` already
 reads, the new Qwen2 resampler lands under `vision.encoder.*` plus
 `vision.query_{local,global}` and `vision.projector.fc.*`/
 `vision.view_separator` - with full two-way coverage proven against the real
-checkpoint (`crates/gguf/tests/deepseekocr2.rs`). The LM half needed no new
+checkpoint (`crates/gguf/tests/it/deepseekocr2.rs`). The LM half needed no new
 code (see above). Registry wiring (`crates/arch`, `crates/cli/src/
 gguf_import.rs`'s `IMPORTERS` table, the modelstore recipe) is deferred to
 M7, once `crates/deepseekocr2` exists for `check-arch-names.sh` to point at.
@@ -292,8 +292,8 @@ finding almost exactly): `make check/scripts` fails on `check-env-docs.sh`
 - 9 undocumented `BRAIN_*` vars across `flux2`/`ltxv`/`qwen35`/the hub
 endpoint, none read anywhere in this crate. `make check/clippy` fails on 6
 pre-existing warnings in `crates/model/src/adapter/*`,
-`crates/model/tests/adapter_lora_fa.rs`, `crates/cli/src/resolver_cli.rs`,
-and `crates/flux2/tests/resolve_layout.rs` - `cargo clippy -p
+`crates/model/tests/it/adapter_lora_fa.rs`, `crates/cli/src/resolver_cli.rs`,
+and `crates/flux2/tests/it/resolve_layout.rs` - `cargo clippy -p
 brain-deepseekocr2 --all-targets` is itself warning-free. `make test/gradcheck`
 (the full workspace suite, not just this crate) is green.
 
@@ -423,7 +423,7 @@ so no `IMPORTERS` table entry was needed either. `ARCH_TO_MODEL`
 `resident_ctor_for` patch + `every_patched_id_is_a_real_catalog_entry` row
 (`crates/catalog/src/lib.rs`), a `mod resident_deepseekocr2;` line (no
 `main.rs` match arm - forbidden), and a reserved-vendor carve-out in
-`crates/cli/tests/model_ids.rs` (widened from v1's single `const` to a
+`crates/cli/tests/it/model_ids.rs` (widened from v1's single `const` to a
 slice, since two case-exact upstream ids now need one).
 
 **Residency, single-device (CPU), unlike v1's wgpu/CPU split**: this
@@ -496,7 +496,7 @@ zero tolerance adjustment.
 **Verified for real on this hardware**: the single-device path (every
 existing test, unchanged). **Structurally implemented, gated to skip
 without a second GPU, NOT verified on this box**: the 2-device bit-identity
-test, `crates/deepseek2/tests/shard_parity.rs` (mirrors
+test, `crates/deepseek2/tests/it/shard_parity.rs` (mirrors
 `gpt2`/`qwen35moe`'s own `shard_parity.rs` exactly - `model::Pipeline`
 auto-placement, loss + per-tensor gradient comparison at `rel<1e-3`). This
 box's one GPU is an integrated Intel Arc part; `gpu_core::discrete_gpu_count()`
@@ -526,7 +526,7 @@ passed), and the full workspace `cargo test -p brain-gradcheck` all green.
 M9 (LoRA + full fine-tune, with overfit proofs) done. Full fine-tune needed
 zero new plumbing beyond `train:true, lora:None` already giving every
 parameter `Role::Trainable` - `full_finetune_overfits_a_single_example`/
-`_a_small_batch` (`crates/deepseekocr2/tests/train_overfit.rs`) drive loss
+`_a_small_batch` (`crates/deepseekocr2/tests/it/train_overfit.rs`) drive loss
 from ~2.93 (uniform-guess, `ln(19)`) to 7e-6 / 1e-4 on the shared tiny
 fixture. LoRA needed real new work: `crates/deepseekocr2/src/{config,encoder,init}.rs`
 add `DeepseekOcr2VisionConfig::lora: Option<qwen3::LoraCfg>`, seven
@@ -627,7 +627,7 @@ directed) done for the resampler, honestly incomplete for the decoder:
   --weights DIR --seq S --out-dir out` wire both into the CLI, reusing
   `deepseekocr2::import`'s existing real-checkpoint expansion so this export
   reads the same tensors every other real-weight test in this campaign does.
-- `crates/npu/tests/deepseekocr2_onnx.rs`: structural tests (tiny fixture,
+- `crates/npu/tests/it/deepseekocr2_onnx.rs`: structural tests (tiny fixture,
   no OpenVINO/hardware needed) pass for BOTH the resampler (both view
   sizes) and the decoder (asserting a real `TopK` node appears, so the MoE
   path is provably exercised, not silently skipped).

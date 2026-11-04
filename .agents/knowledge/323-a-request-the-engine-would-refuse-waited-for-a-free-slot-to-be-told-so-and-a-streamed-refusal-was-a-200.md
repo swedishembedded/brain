@@ -28,9 +28,9 @@ out (`EventStream::settle_start`): a refusal within that window is the HTTP stat
 request would get (400 `context_length_exceeded` for length), anything else streams as before.
 
 Evidence: `crates/residency` `a_job_the_full_group_cannot_serve_is_refused_without_waiting_for_a_slot`
-(a 600 ms running job, the refusal answered within 300 ms), `crates/catalog/tests/scheduled_batch.rs`
+(a 600 ms running job, the refusal answered within 300 ms), `crates/catalog/tests/it/scheduled_batch.rs`
 `a_request_that_cannot_run_is_refused_while_the_group_is_full` (real tiny engine: the refusal is
-the first event, before the running request finishes), `crates/apiserve/tests/api.rs`
+the first event, before the running request finishes), `crates/apiserve/tests/it/api.rs`
 `an_engine_refusal_is_an_immediate_http_error_streamed_or_not` (four engine refusal wordings,
 streamed and not: HTTP 400, OpenAI error body, no internal prefix; red with the settle step removed:
 the streamed body is not JSON) and the socket-level `tests/e2e/api_conformance.bats` over-context case.

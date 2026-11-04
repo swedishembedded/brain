@@ -390,7 +390,7 @@ existing caller. Assume nothing about units.
   the accumulator array is a different body, and `gpu_core::upgrade` only
   selects it where `workgroup_reductions` holds. Outside that subset (atomics,
   `switch`, float `%`, most of the rarer builtins) the JIT fails hard at
-  compile time, which `crates/wgsl-cpu/tests/compile_all.rs` turns into a test
+  compile time, which `crates/wgsl-cpu/tests/it/compile_all.rs` turns into a test
   failure for every registered kernel. Two WGSL guarantees it does NOT give: a
   function-scope array (stack-backed) is not zero-filled - write it before you
   read it, as every in-tree kernel does - and a per-invocation local may not
@@ -601,7 +601,7 @@ one. Three consequences, all paid for:
   GFLOP/s fp32 and 11.3 GB/s DRAM while `matmul_reg2` - a real memory-fed GEMM,
   which cannot exceed the silicon - was measured at 1243 GFLOP/s on the same
   device. **A roof below a real kernel's measured rate is the signature**, and
-  `crates/gpu-core/tests/roofline.rs` now asserts against it.
+  `crates/gpu-core/tests/it/roofline.rs` now asserts against it.
 * **On a shared power budget, the CPU is part of the measurement.** This part
   reports `throttle_reason_pl1 = 1` under load and clamps `punit_req_freq_mhz`
   to its 800 MHz floor; a trivial `bash` polling loop on the host was enough to
@@ -967,8 +967,8 @@ Two rules fall out, both paid for:
   before designing around it.
 * **Allocation is the recurring culprit at both ends of the wire in this
   engine** - upload staging on non-ReBAR cards
-  (`crates/gpu-core/tests/vram_overhead.rs`), read staging and the read's
-  destination (`crates/gpu-core/tests/pcie_handoff.rs`). Reuse beats every
+  (`crates/gpu-core/tests/it/vram_overhead.rs`), read staging and the read's
+  destination (`crates/gpu-core/tests/it/pcie_handoff.rs`). Reuse beats every
   transfer-side tuning that has been tried here.
 
 And the baseline any device split must beat is not the single-card run - it is

@@ -38,5 +38,5 @@ Three things worth separating, because only the first is obvious:
 3. **A default trait method is a silent opt-out.** `fn stats(&self) -> Option<_>
    { None }` reads as a courtesy to backends that cannot count; in practice it
    is how two backends went a long time without counting while the API looked
-   complete. `crates/gpu-core/tests/device_stats.rs` now asserts the contract on
+   complete. `crates/gpu-core/tests/it/device_stats.rs` now asserts the contract on
    whatever backend `BRAIN_DEVICE` selects, so the default cannot creep back.

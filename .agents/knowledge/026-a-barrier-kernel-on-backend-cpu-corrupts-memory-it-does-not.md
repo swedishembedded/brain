@@ -5,7 +5,7 @@
 
 `DeviceCaps::workgroup_reductions` is false on the CPU JIT because it cannot
 compile `workgroupBarrier`. What it does with one is worse than an error:
-`crates/gradcheck/tests/layernorm2d_kernels.rs` recorded `layernorm_rows`
+`crates/gradcheck/tests/it/layernorm2d_kernels.rs` recorded `layernorm_rows`
 (2 barriers) there and the process died with
 
     munmap_chunk(): invalid pointer

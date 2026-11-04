@@ -208,7 +208,7 @@ pub fn noised_initial_latent(latent: &[f32], noise: &[f32], clean: &[f32], denoi
 /// one `[h_pix * w_pix]` pixel frame at a time and never holds the sequence.
 ///
 /// Bit-for-bit identical to the whole-buffer function (gated in
-/// `crates/ltxv/tests/maskcond_parity.rs`), because the accumulation order is
+/// `crates/ltxv/tests/it/maskcond_parity.rs`), because the accumulation order is
 /// the same: an `f64` area average per pixel frame rounded to `f32`, then an
 /// `f64` mean of those `f32` values over each latent frame's run, rounded to
 /// `f32`. The causal split is the same too - latent frame 0 is the FIRST pixel

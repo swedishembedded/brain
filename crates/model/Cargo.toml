@@ -60,13 +60,13 @@ pollster.workspace = true
 [dev-dependencies]
 brain-testutil.workspace = true
 brain-gradcheck.workspace = true
-# Test-only: `crates/model/tests/causal_conv1d_step.rs` gates
+# Test-only: `crates/model/tests/it/causal_conv1d_step.rs` gates
 # `gdn::gdn_causal_conv1d_step` against `audio::conv::conv1d_fwd`'s
 # whole-sequence causal conv (the existing oracle the porting task named).
 # `brain-audio` does not depend on `brain-model`, so this is a plain
 # dev-dependency, not the "test crate depends on the crate under test" cycle
 # shape `brain-gradcheck` above is.
 brain-audio.workspace = true
-# Test-only: `crates/model/tests/gdn_mixer_train_cost.rs` reads the CUDA
+# Test-only: `crates/model/tests/it/gdn_mixer_train_cost.rs` reads the CUDA
 # backend's exact live-allocation counter to report a layer's peak device bytes.
 brain-backend-cuda.workspace = true

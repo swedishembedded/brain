@@ -29,7 +29,7 @@
 // cross-token edge case `kernels::template::rewrite_packed_stores`'s own doc
 // comment describes, a plain consequence of ANY 2-per-word packing dispatched
 // per-element. This is a genuine data race a real GPU exposes: this repo's
-// own dual-backend KV-cache test (`crates/model/tests/kv_bf16_roundtrip.rs`)
+// own dual-backend KV-cache test (`crates/model/tests/it/kv_bf16_roundtrip.rs`)
 // caught EXACTLY this - green on the CPU JIT's serial execution (which runs
 // a dispatch's threads one after another, so whichever "wins" the race is
 // deterministic there), red on real wgpu hardware (genuine parallel

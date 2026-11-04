@@ -37,5 +37,5 @@ by logits, never by "the base reply must equal the earlier base reply" under loa
 
 Where it lives. `crates/catalog/src/adapter_registry.rs` (the registry and the
 views), `crates/qwen3/src/serve/adapters.rs` (the bank),
-`crates/catalog/tests/multi_adapter.rs` (the exactness-versus-folded gate, which
+`crates/catalog/tests/it/multi_adapter.rs` (the exactness-versus-folded gate, which
 runs on the CPU backend in the test suite).

@@ -1048,7 +1048,7 @@ impl DeepseekV2 {
     /// device and this shape want it (`block::gemv_tier`), otherwise exactly
     /// what `block::pick_gemm`'s measured rule picked before - the naive
     /// `matmul` or the register-tiled `matmul_reg3`. Every tier computes the
-    /// same math (`crates/model/tests/ops_matmul_step_identity.rs` holds that
+    /// same math (`crates/model/tests/it/ops_matmul_step_identity.rs` holds that
     /// contract), so this only changes speed.
     ///
     /// One decode row through this decoder is 94 of these per layer stack

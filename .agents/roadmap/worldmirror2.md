@@ -52,7 +52,7 @@ internal shape cache instead of using it.
 The honest caveat: `Built` is `Option<Built>`, so exactly ONE shape's buffers
 are cached at a time. A workload that keeps ALTERNATING between two shapes on
 this one instance pays a full rebuild on every single call - a latency cost,
-not a correctness bug. `crates/worldmirror2/tests/t9_caps_matches_direct.rs`'s
+not a correctness bug. `crates/worldmirror2/tests/it/t9_caps_matches_direct.rs`'s
 `shape_cycle_one_instance_matches_independent_single_shape_runs` test proves
 this is still CORRECT (every result in an A→B→A cycle on one instance is
 bit-identical to the equivalent freshly-built single-shape run), which is
@@ -68,8 +68,8 @@ resident `Instance` holding a built model across calls with nothing else
 keeping the `Gpu` alive. `Mirror::new` now takes `gpu: Gpu` and holds it
 (`Mirror::gpu(&self) -> &Gpu` for callers that need it back, e.g.
 `gaussians::assemble`). The three call sites that construct a `Mirror`
-(`crates/cli/src/mirror_cli.rs`, `crates/worldmirror2/tests/t1_t2_encode.rs`,
-`crates/worldmirror2/tests/t8_multiframe_tiny.rs`) were updated accordingly.
+(`crates/cli/src/mirror_cli.rs`, `crates/worldmirror2/tests/it/t1_t2_encode.rs`,
+`crates/worldmirror2/tests/it/t8_multiframe_tiny.rs`) were updated accordingly.
 Re-ran this crate's five pre-existing `t*_*.rs` tests before and after the
 refactor - identical pass/skip output both times (`MIRROR_CKPT`/
 `MIRROR_DPT_TINY`/`MIRROR_BICUBIC_REFS` are all unset in this environment, so

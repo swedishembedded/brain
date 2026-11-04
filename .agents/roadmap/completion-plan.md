@@ -74,7 +74,7 @@ entry **and** (except where noted) an `examples/` client:
 `codeformer.md` additionally claims "Backward pass / gradcheck for the
 transformer and CFT" is outstanding. It is not: `gradcheck::check_codeformer`
 and `check_codeformer_one_layer` exist and are wired in
-`crates/gradcheck/tests/imaging_models.rs:66,69`.
+`crates/gradcheck/tests/it/imaging_models.rs:66,69`.
 
 The residual truth in each of the five - batching, backward, full-depth parity,
 end-to-end fixtures - is real and is carried forward into Phases 2-4 below. Only
@@ -191,7 +191,7 @@ observed in the debug lane.
 
 ### 1.1b The two hangs are probably one bug
 
-`crates/catalog/tests/npu_model_parity.rs` hung for 26+ minutes under a full
+`crates/catalog/tests/it/npu_model_parity.rs` hung for 26+ minutes under a full
 `make test`, with **exactly one thread pinned at 100 %** and the rest idle -
 the signature of a busy-poll on a completion that never signals. That is
 frame-for-frame the same signature as the `kernel_timing` hang recorded in

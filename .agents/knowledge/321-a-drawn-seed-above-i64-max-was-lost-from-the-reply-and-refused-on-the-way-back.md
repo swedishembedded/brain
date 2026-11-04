@@ -6,7 +6,7 @@
 Question: the server draws a fresh seed for an unseeded request and echoes it in the reply's `brain` object so
 the decode can be reproduced by sending it back. Does that hold for every seed it can draw? It did not.
 **VERIFIED-BY-TEST** (`crates/apiserve/src/sampling.rs`, `a_seed_the_model_drew_is_accepted_back_over_the_whole_u64_range`;
-`crates/catalog/tests/scheduled_batch.rs`).
+`crates/catalog/tests/it/scheduled_batch.rs`).
 
 ## What was wrong
 

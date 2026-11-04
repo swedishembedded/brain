@@ -276,7 +276,7 @@ pub struct SpikingNet {
     /// arithmetic is exactly the uniform model's.
     ///
     /// One buffer rather than two because `lif_step` is on the eight-storage-
-    /// buffer budget (`crates/kernels/tests/binding_budget.rs`); they pair
+    /// buffer budget (`crates/kernels/tests/it/binding_budget.rs`); they pair
     /// naturally, being written together and read together for the same
     /// neuron.
     cell: DeviceBuffer,

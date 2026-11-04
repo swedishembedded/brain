@@ -3,7 +3,7 @@
 
 # 339. Concurrent device creation in one test binary livelocks the NVIDIA driver at thread exit
 
-Symptom: `crates/model/tests/ops_kquant.rs` ran at 100% CPU for 1 h 29 min and had to be killed by hand (a killed cargo
+Symptom: `crates/model/tests/it/ops_kquant.rs` ran at 100% CPU for 1 h 29 min and had to be killed by hand (a killed cargo
 leaves its test child running). Reproduced on 2026-10-20: 3 tests, `--test-threads=4`, wgpu/Vulkan on a GH200, one run in
 fourteen did not finish within 120 s (13 runs took 6-7 s each).
 

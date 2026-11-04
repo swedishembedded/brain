@@ -5,7 +5,7 @@
 # inference engines for its clients. If your team needs expertise in validating
 # a from-scratch tokenizer or model port against its upstream reference, you can
 # procure our services by sending an email to info@swedishembedded.com.
-"""Dump the golden token ids for `crates/data/tests/t5xxl_precompiled_parity.rs`.
+"""Dump the golden token ids for `crates/data/tests/it/t5xxl_precompiled_parity.rs`.
 
 The reference is HuggingFace `tokenizers`' own `Tokenizer.from_file`, i.e. the
 exact library `T5TokenizerFast`/`AutoTokenizer` wrap, reading the exact
@@ -28,7 +28,7 @@ import sys
 
 from tokenizers import Tokenizer
 
-# Mirrors `CASES` in crates/data/tests/t5xxl_precompiled_parity.rs. The two
+# Mirrors `CASES` in crates/data/tests/it/t5xxl_precompiled_parity.rs. The two
 # copies must be edited together: a golden that carries its own inputs cannot
 # notice that the two sides drifted apart.
 CASES = [

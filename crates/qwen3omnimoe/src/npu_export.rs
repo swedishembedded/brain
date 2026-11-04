@@ -107,7 +107,7 @@ pub fn export_codec_onnx(reader: &WeightReader, oc: &Code2WavConfig, out_path: &
 mod tests {
     /// Structural check against a real checkpoint: all three graphs build and
     /// emit valid ONNX. The vision-tower MATH itself is numerically verified
-    /// against the host reference in `crates/npu/tests/qwenvl_onnx.rs`
+    /// against the host reference in `crates/npu/tests/it/qwenvl_onnx.rs`
     /// (synthetic weights, OpenVINO CPU); this test proves the omni-specific
     /// wiring (weight loading + naming, config mapping) holds against a real
     /// checkpoint's actual tensor shapes/names. Run:

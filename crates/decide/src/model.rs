@@ -189,7 +189,7 @@ pub struct Encoder {
     reverse_stale: bool,
     /// How many times each graph has been recorded. A decision loop pays this
     /// on the host, per decision, and the two conditions that trigger it are
-    /// different - see `crates/decide/tests/graph_records.rs`.
+    /// different - see `crates/decide/tests/it/graph_records.rs`.
     records: (u64, u64),
     /// What the backward keeps of the forward ([`Encoder::set_saved_policy`]): every layer's intermediates, or
     /// (recompute) the residual stream `x` only, every layer sharing one set of intermediates that its replay

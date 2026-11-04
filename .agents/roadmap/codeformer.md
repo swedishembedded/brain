@@ -13,7 +13,7 @@ sweep, and the serving contract (`codeformer::caps` `restore_face`,
 Backward is done and gated: `gradcheck::check_codeformer` (the
 code-prediction Transformer under the CFT, with the VQ autoencoder frozen -
 its own backward is `check_vqgan`) and `check_codeformer_one_layer`, wired in
-`crates/gradcheck/tests/imaging_models.rs`.
+`crates/gradcheck/tests/it/imaging_models.rs`.
 
 ## Not yet done
 

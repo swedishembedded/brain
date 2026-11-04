@@ -59,7 +59,7 @@ any decision-capable model can reach it without a model-to-model dependency:
   (`adamw_step`/`adamw_step_scaled`, Laya M6), built on the same `ParamStore`
   + `optim::Optim` primitive `decide::model::Encoder` uses, verified on both
   backends via a real training-convergence check
-  (`crates/gradcheck/tests/modernbert_adamw.rs`) alongside the existing
+  (`crates/gradcheck/tests/it/modernbert_adamw.rs`) alongside the existing
   finite-difference gate on its backward.
 
 ## Not yet done

@@ -26,7 +26,7 @@ _ap.add_argument("--seed", type=int, required=True, help="seed of the random inp
 _ARGS = _ap.parse_args()
 COMFY = _ARGS.comfy
 # testdata/golden/zimage/... by default -- where
-# crates/s3dit/tests/real_parity.rs's testdata("golden/zimage/zimage_real.safetensors")
+# crates/s3dit/tests/it/real_parity.rs's testdata("golden/zimage/zimage_real.safetensors")
 # actually looks.
 _TESTDATA = os.environ.get("BRAIN_TESTDATA") or str(Path(__file__).resolve().parents[2] / "testdata")
 OUT = _ARGS.out or str(Path(_TESTDATA) / "golden" / "zimage" / "zimage_real.safetensors")

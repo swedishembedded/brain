@@ -38,7 +38,7 @@
 //! bytes it would have computed on its own, and the fold that consumes them
 //! runs on the host in the same order either way. Two identical GP102 cards
 //! running identical WGSL over identical inputs must therefore agree bit for
-//! bit, and `crates/ltxv/tests/cfg_parallel.rs` gates that rather than
+//! bit, and `crates/ltxv/tests/it/cfg_parallel.rs` gates that rather than
 //! assuming it - a disagreement would be a real bug (a kernel reading
 //! uninitialised memory, a nondeterministic reduction) and is worth failing
 //! on, not worth widening a tolerance for.

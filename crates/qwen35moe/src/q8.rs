@@ -58,7 +58,7 @@
 //! more demanding tiling reasons than this one. `Qwen35Config::tiny()`'s
 //! deliberately tiny, deliberately ODD toy dimensions do NOT all clear this
 //! bar (`moe_intermediate_size=10`, feeding every expert's `down`), so
-//! `crates/qwen35moe/tests/model_i8_smoke.rs` exercises this module against a
+//! `crates/qwen35moe/tests/it/model_i8_smoke.rs` exercises this module against a
 //! bespoke small-but-int8-shaped config instead of `tiny()` verbatim - see
 //! that test's own doc for why that is the right call rather than adding
 //! silent per-tensor fp32-fallback logic here for a toy-scale-only edge case

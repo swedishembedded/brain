@@ -20,7 +20,7 @@
 // `backend_api::select`'s `Op::LoraBankProject` hands those devices this one;
 // on a GPU it is the wrong kernel (one thread walks a whole `k` row, checklist
 // C2) and `lora_xa_rows` is selected instead. The parity gate for the pair is
-// `crates/model/tests/lora_bank_rows.rs`, which runs on both.
+// `crates/model/tests/it/lora_bank_rows.rs`, which runs on both.
 //
 // Dispatch: rows * r_max threads.
 

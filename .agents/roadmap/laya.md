@@ -93,7 +93,7 @@ point the same `--encoder` flag at a Laya checkpoint instead.
       (`{state, questions{type, instructions, criteria}}`) endpoint on stdin/
       stdout built on it, with `--model` now a reusable `appopts::ModelChoice`
       group. Real-weight gated on both checkpoints
-      (`crates/sdk/tests/decision_pipeline.rs`); the documented Jev routing
+      (`crates/sdk/tests/it/decision_pipeline.rs`); the documented Jev routing
       example answers `billing` at 0.9840 zero-shot.
 - [x] **The Laya arm is calibrated the way its own serving reference is.**
       `rl_agent_config.json` carries TWO tables and `rl_agent_api.py` reads
@@ -206,7 +206,7 @@ normally across conversations.
       the remaining gap to the published loop's effective batch of 64 is a
       joint (batch, rate, steps) re-fit, and each point on it is a ~750 s
       run. The accumulation itself is gated
-      (`crates/modernbert/tests/train_convergence.rs::
+      (`crates/modernbert/tests/it/train_convergence.rs::
       accumulating_a_minibatch_sums_its_examples_gradients`).
 
       **`crates/modernbert` gained the composition it was missing**:

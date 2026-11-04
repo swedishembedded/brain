@@ -7,7 +7,7 @@
 Single-source-of-truth policy: brain has at most TWO sources of truth -
 its code, and the *vendored upstream* provider specs under
 `crates/apiserve/tests/specs/` (a cached copy of what the providers publish). The
-jsonschema conformance tests in `crates/apiserve/tests/api.rs` validate brain's
+jsonschema conformance tests in `crates/apiserve/tests/it/api.rs` validate brain's
 emitted/accepted bodies against those vendored specs. There is NO separately
 hand-maintained "brain spec".
 

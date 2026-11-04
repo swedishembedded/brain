@@ -24,7 +24,7 @@
 // diagonal is 0. Thread `j` owns column `j`: it sums `k` ASCENDING from its own
 // initial `attn0[i,j]`, exactly the operation order of the kernel this
 // replaces, so the result is BIT-IDENTICAL to the loop on any backend that
-// rounds the same way (`crates/model/tests/gdn_ut_fwd.rs` holds that to
+// rounds the same way (`crates/model/tests/it/gdn_ut_fwd.rs` holds that to
 // zero ulps).
 //
 // Only the strictly-lower triangle ever exists in workgroup memory: two

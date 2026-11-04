@@ -45,7 +45,7 @@
 // accumulator, the running max, the running sum and the output are fp32. That
 // is the standard fp16 flash-attention recipe and it is NOT bit-identical to the
 // fp32 portable kernel: the agreement bar is stated by
-// `crates/gpu-core/tests/cuda_flash_prefill.rs` as an absolute error relative
+// `crates/gpu-core/tests/it/cuda_flash_prefill.rs` as an absolute error relative
 // to the output scale. The softmax scale 1/sqrt(256) = 1/16 is an exact power of
 // two, so folding it into Q before the fp16 rounding costs no precision.
 //

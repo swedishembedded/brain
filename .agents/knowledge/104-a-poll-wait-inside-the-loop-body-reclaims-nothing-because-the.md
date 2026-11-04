@@ -44,7 +44,7 @@ paths that looked "obviously drained".
 unit tests use tiny synthetic configs whose entire weight set is a few
 megabytes, so the ceiling is unreachable. Both real incidents surfaced only
 under real 12B/22B checkpoints. A test of this mechanism has to be a test of
-the MECHANISM (`crates/gpu-core/tests/transient_reclaim.rs`: observe
+the MECHANISM (`crates/gpu-core/tests/it/transient_reclaim.rs`: observe
 `pending_reclaim_bytes` directly, and lower the ceiling with
 `BRAIN_GPU_RECLAIM_CEILING` so a megabyte loop can cross it), never a bigger
 model test.

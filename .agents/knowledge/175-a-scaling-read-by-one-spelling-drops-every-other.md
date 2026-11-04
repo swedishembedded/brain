@@ -35,7 +35,7 @@ Consumers take the result as one inverse-frequency table
 (`RopeScaling::inv_freq`, through each config's `rope_table()`), so a new
 scheme is one match arm here and not three.
 
-Tolerance of the table: `crates/model/tests/rope_scaling_golden.rs` compares
+Tolerance of the table: `crates/model/tests/it/rope_scaling_golden.rs` compares
 it with the `rotary_emb.inv_freq` buffer that transformers builds for each
 DeepSeek text checkpoint. The bound is 2 f32 ULP. A wrong formula misses by
 orders of magnitude more than that.

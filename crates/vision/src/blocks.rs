@@ -68,7 +68,7 @@ fn use_tiled_conv() -> bool {
 /// few channels under-fills the GEMM tile); at/above it, im2col + matmul_reg3
 /// wins by a wide margin per layer, and enough of a YOLOv8n@640 forward sits
 /// above the threshold that the whole-network time moves with it. Re-sweep on
-/// another card with `crates/backend-wgpu/tests/bench_conv.rs` (`--ignored`).
+/// another card with `crates/backend-wgpu/tests/it/bench_conv.rs` (`--ignored`).
 fn gemm_conv_min_cout() -> u32 {
     use std::sync::OnceLock;
     static V: OnceLock<u32> = OnceLock::new();
@@ -2452,7 +2452,7 @@ impl Ln2dNames {
 /// `layernorm2d` exists (`crates/kernels/wgsl/layernorm2d.wgsl`): one invocation
 /// per spatial position, walking `C` at stride `H*W`, barrier-free so
 /// `backend-cpu` JITs it. Gated against a host oracle in
-/// `crates/gradcheck/tests/layernorm2d_kernels.rs`. Measured against this same
+/// `crates/gradcheck/tests/it/layernorm2d_kernels.rs`. Measured against this same
 /// composition it wins at every shape tried, by a margin that grows with `H*W`
 /// (widest at `[1,32,65536]`, down to roughly break-even at `[1,96,1024]`),
 /// exactly as the bandwidth reasoning above predicts.

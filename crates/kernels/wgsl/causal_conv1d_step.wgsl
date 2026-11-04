@@ -22,7 +22,7 @@
 // Running this once per token, threading the SAME `hist` buffer, reproduces
 // `conv1d.wgsl`'s whole-sequence causal conv (`pad = K-1`, `stride = 1`,
 // `dilation = 1`, `groups = Cin`) bit-for-bit -- gated by
-// `crates/model/tests/causal_conv1d_step.rs`, which runs both and compares.
+// `crates/model/tests/it/causal_conv1d_step.rs`, which runs both and compares.
 // `hist` must start ZEROED for a fresh sequence: that is the same implicit
 // left zero-pad `conv1d.wgsl` applies via its own `pad` parameter for the
 // first `K-1` tokens.

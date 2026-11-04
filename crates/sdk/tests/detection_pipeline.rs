@@ -221,7 +221,7 @@ fn a_yolov8_checkpoint_still_resolves_to_yolov8() {
 }
 
 /// The real Rockchip ReLU export through the facade, against the onnxruntime
-/// goldens (see `crates/yolov5/tests/parity.rs` for the fixtures).
+/// goldens (see `crates/yolov5/tests/it/parity.rs` for the fixtures).
 #[test]
 fn the_real_yolov5s_relu_checkpoint_detects_what_onnxruntime_detects() {
     let ckpt = std::path::PathBuf::from(brain_testutil::model_dir("local/yolov5s-relu").unwrap_or_default()).join("model.safetensors");

@@ -40,4 +40,4 @@ Enter/reset is done - `diamond::play`'s `reset` snapshots the seed context
 (`init_obs`/`init_act`) and re-seeds `NormalRng::new(self.seed)`, and
 `reset_initial` restores both, so the interactive Enter key rewinds to the
 exact original context and noise stream rather than a random continuation.
-Gated bit-exactly by `crates/diamond/tests/reset.rs`.
+Gated bit-exactly by `crates/diamond/tests/it/reset.rs`.

@@ -255,7 +255,7 @@ mod tests {
         rx.recv().ok();
     }
 
-    /// Regression guard for the exact scenario `crates/dbus/tests/roundtrip.rs`'s
+    /// Regression guard for the exact scenario `crates/dbus/tests/it/roundtrip.rs`'s
     /// `admit_deadline_sheds_a_saturated_lane` exercises: a SECOND request for a
     /// model that is already warm and simply busy running a slow action must NOT
     /// be mistaken for a cold build -- it has to keep shedding at the short

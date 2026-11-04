@@ -45,7 +45,7 @@ only the instance is permanent, and it owns no VRAM. And an adapter-enumeration
 fallback must be *loud*, because a software adapter computes correct answers
 slowly right up until an allocation exceeds its much smaller limits - which is
 why the churn tests that already existed
-(`crates/gpu-core/tests/device_churn.rs`) passed all the way through this bug:
+(`crates/gpu-core/tests/it/device_churn.rs`) passed all the way through this bug:
 they asserted the arithmetic was right and never asserted **which card ran it**.
 A device-lifecycle test has to gate placement, not just results.
 

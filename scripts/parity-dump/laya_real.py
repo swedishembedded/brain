@@ -7,7 +7,7 @@
 this script's own `build_model` would construct, kept in sync by hand rather
 than importing the checkpoint's own copy so this script has no path
 dependency on where `rl_common.py` happens to live) on a real
-`(state, question)` pair, for `crates/modernbert/tests/laya_real_parity.rs`
+`(state, question)` pair, for `crates/modernbert/tests/it/laya_real_parity.rs`
 to compare against `modernbert::import_dir` + `ModernBert` + `LayaHead`.
 
 Runs the RAW forward (option logits, act logits) - not `rl_agent_api.py`'s
@@ -134,7 +134,7 @@ class DecisionModel(nn.Module):
 
 
 # A handful of real (state, question) pairs, the same shapes
-# `crates/modernbert/tests/laya_real_parity.rs` builds independently in Rust
+# `crates/modernbert/tests/it/laya_real_parity.rs` builds independently in Rust
 # via `modernbert::build_sequence` - kept small since this runs the real
 # 28-layer encoder on CPU.
 CASES = [

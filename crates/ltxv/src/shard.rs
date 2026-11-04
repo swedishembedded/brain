@@ -41,7 +41,7 @@
 //!
 //! # What is real here, and what is an explicit, tracked gap
 //!
-//! Real and tested (`crates/ltxv/tests/shard_parity.rs`):
+//! Real and tested (`crates/ltxv/tests/it/shard_parity.rs`):
 //! * [`shard_cost`](Shardable::shard_cost) - a FLOP-shaped per-block cost
 //!   (self-attention QKVO + its O(T²) score/weighted-sum term, text
 //!   cross-attention's own QKVO, the four-times-width FFN), fed to `plan_balanced`

@@ -39,7 +39,7 @@ redistributable) - see `docs/reference/models/timesfm3.md`.
 
       The gate is `gradcheck::check_timesfm3{,_one_layer,_lora}` plus the two
       per-ENTRY fold checks and two measured eps sweeps, wired into
-      `crates/gradcheck/tests/timesfm3_fd.rs`; all six run on the default
+      `crates/gradcheck/tests/it/timesfm3_fd.rs`; all six run on the default
       (Vulkan) backend AND on `BRAIN_DEVICE=cpu`. The sweep covers all 71
       tensors of the tiny config at `v != n` (variate attention is the
       sequence graph with a `[b,v,n,D] <-> [b,n,v,D]` swap around it, and at
@@ -129,7 +129,7 @@ redistributable) - see `docs/reference/models/timesfm3.md`.
       low-rank anything (for `out = 1` the product B.A has more parameters
       than the tensor it replaces), and the fold makes those two a product of
       live tensors rather than a linear map.
-      `crates/timesfm3/tests/lora.rs` covers what a gradcheck cannot see - a
+      `crates/timesfm3/tests/it/lora.rs` covers what a gradcheck cannot see - a
       fresh adapter is a BITWISE no-op, descent lowers the loss while every
       base tensor stays bit-for-bit unmoved, and folding reproduces the live
       adapted forward. That last one agrees numerically rather than bitwise,
@@ -161,7 +161,7 @@ redistributable) - see `docs/reference/models/timesfm3.md`.
       than a "KEEP BASE" verdict: the embargoed split clears a band on both
       sides of each calendar cut, so a universe of short series can train and
       still have nothing to be judged on.
-      `crates/cli/tests/forecast_finetune_timesfm3.rs` runs the real compiled
+      `crates/cli/tests/it/forecast_finetune_timesfm3.rs` runs the real compiled
       binary against a tiny checkpoint it writes itself, so it needs no large
       fixture: 3 names, 200 bars, context 8, horizon 4, one epoch, batch 2
       gives base_val 1.1449 -> ft_val 0.5431 over 189 steps, PROMOTE.

@@ -59,7 +59,7 @@ pub fn init_weights(cfg: &Qwen35Config, seed: u64) -> HashMap<String, Vec<f32>> 
 /// Like [`init_weights`] but produces ONLY the `.lora_a`/`.lora_b` adapter
 /// tensors — every base tensor is skipped entirely (not generated, not
 /// allocated). For a real checkpoint's LoRA smoke test
-/// (`crates/qwen35moe/tests/lora_real_weight_smoke.rs`): merging real weights
+/// (`crates/qwen35moe/tests/it/lora_real_weight_smoke.rs`): merging real weights
 /// into a FULL `init_weights(&lora_cfg, seed)` map would transiently hold two
 /// full-size base copies at once (the freshly random one, and the real one
 /// about to overwrite it) before the merge settles — at the real 35B-A3B

@@ -38,7 +38,7 @@
 //! only buffer that outlives a scope here is the CHAINED ACTIVATION and it is
 //! already dead by the time the next block's last dispatch rewrites its slot.
 //! The guard is defending a property this model does not currently depend on;
-//! `crates/gpu-core/tests/scratch_arena.rs` is what holds it.
+//! `crates/gpu-core/tests/it/scratch_arena.rs` is what holds it.
 
 use ltxv::block::{GenerationCache, QTier};
 use ltxv::dit::{forward_q_streamed, load_head_tensors_from_source, random_tiny_weights};

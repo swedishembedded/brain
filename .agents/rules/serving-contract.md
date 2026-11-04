@@ -50,7 +50,7 @@ Implement `capability::Action` for each action and advertise them in a
   refuses it as an unknown param through `ActionSpec::validate_served`; the
   local `brain do` still takes it. Content a remote caller should supply
   travels as an input blob instead (`qwen3::caps` `lora_train` takes its
-  dataset as a JSONL blob). `crates/catalog/tests/served_paths.rs` reads every
+  dataset as a JSONL blob). `crates/catalog/tests/it/served_paths.rs` reads every
   catalog manifest and fails on a served param whose name or help text says
   path, file, folder or directory.
 - **A checkpoint location is resolved from the model store, never a plain

@@ -71,7 +71,7 @@
 //! Gated against a dependency-free host reference over the same bytes,
 //! `tools/goldens/dflash2_reference_forward.py`, which re-implements the
 //! published `dflash/model.py` and is what every claim above was checked
-//! against - see `crates/qwen35/tests/dflash2_real.rs`.
+//! against - see `crates/qwen35/tests/it/dflash2_real.rs`.
 //!
 //! Swedish Embedded AB implements speculative decoding - drafters, verifiers
 //! and the state rollback a hybrid recurrent stack needs - for clients serving

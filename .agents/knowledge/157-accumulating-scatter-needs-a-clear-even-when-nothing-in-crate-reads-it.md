@@ -66,6 +66,6 @@ from a single step.
 Fixed by clearing in `accumulate_kept` when it is passed a seed buffer - once
 per call, unlike `accumulate_batch`'s once-per-pass, because this path carries a
 single example and has no sibling whose gradient a clear could erase. Regression
-test: `crates/decide/tests/frozen_encoder.rs`'s
+test: `crates/decide/tests/it/frozen_encoder.rs`'s
 `the_kept_path_leaves_this_steps_gradient_not_a_running_sum`, plus the
 `no stale gradient` check in `samples/learning/visualclick --validate`.

@@ -933,7 +933,7 @@ Op::PagedAttentionFused selector call into model::block::
 paged_attention_fused, mirroring paged_scores_variant's own shape exactly;
 run_batched_steps now only calls it by name. No behavior change - verified
 by re-running the full brain-qwen3 suite (104 passed, 1 ignored) and
-crates/qwen3/tests/no_kernel_names.rs (3 passed) after the move. ([f7c2a34d](https://github.com/swedishembedded/brain/commit/f7c2a34d314cca91bb8487f8928888ed93268dc1))
+crates/qwen3/tests/it/no_kernel_names.rs (3 passed) after the move. ([f7c2a34d](https://github.com/swedishembedded/brain/commit/f7c2a34d314cca91bb8487f8928888ed93268dc1))
 
 - Move admission's greedy/top-k pick onto PagedDecoder ([9a806208](https://github.com/swedishembedded/brain/commit/9a806208a27dfd7396500a590d75d55cffcfc85e))
 
@@ -1048,7 +1048,7 @@ inference-only caller that never dispatches backward still fails loudly
 instead of silently corrupting the forward's group-masking scratch) and in
 glmdsa's own guard.
 
-New crates/model/tests/router_gate_sigmoid_expert_cap.rs (mirrors
+New crates/model/tests/it/router_gate_sigmoid_expert_cap.rs (mirrors
 router_bwd_expert_cap.rs's/router_gate_expert_cap.rs's own shape: a real
 host oracle, not a same-composition one, at 8/65/256 experts - 65 is the
 exact boundary the former array<*,64> corrupts at, 256 is GLM-5.2's real
@@ -1817,8 +1817,8 @@ field (the video-timestamp work earlier in this branch). A full
 literals live in OTHER crates' test/integration files that construct
 a VisionConfig by hand rather than through Qwen3VlConfig::qwen3_vl_4b()
 or ::from_hf() - turned up three more struct literals missing the new
-field: crates/npu/tests/qwenvl_onnx.rs, crates/qwen35/tests/vl.rs,
-crates/qwen35moe/tests/vl.rs. All three now set it to 2, matching every
+field: crates/npu/tests/it/qwenvl_onnx.rs, crates/qwen35/tests/it/vl.rs,
+crates/qwen35moe/tests/it/vl.rs. All three now set it to 2, matching every
 other synthetic VisionConfig fixture in the workspace. ([61ed68b1](https://github.com/swedishembedded/brain/commit/61ed68b165cae5967fe240eeff5c8230faba22a4))
 
 - Fix a self-invalidating test in the unknown-architecture check ([b2bb016b](https://github.com/swedishembedded/brain/commit/b2bb016b026c4abffe71e0c0b762f02f9dcde01b))
@@ -1881,7 +1881,7 @@ per-row-index accounting didn't need (the per-DISPATCH cost is now
 bhc*(c_len-1) adds, not bhc).
 
 Bit-identical, not just "close enough": the arithmetic is unchanged,
-only its dispatch granularity - crates/model/tests/gdn_chunk_fwd.rs
+only its dispatch granularity - crates/model/tests/it/gdn_chunk_fwd.rs
 (gdn_chunk_fwd_matches_host_oracle) and gdn_chunk_bwd.rs
 (gdn_chunk_bwd_gradcheck) both stay green on this exact assertion, on
 BOTH BRAIN_DEVICE=gpu and BRAIN_DEVICE=cpu. Each test also gained a
@@ -2024,9 +2024,9 @@ convenience, and this change does not touch that reasoning.
 Bit-identical: every element's AdamW update depends only on its own
 (g, m, v, w), never a neighbour's, so flattening the storage layout
 does not reassociate any computation - concatenation order cannot
-change a single computed value. crates/gpt2/tests/dp_parity.rs,
-crates/qwen3/tests/dp_parity.rs and
-crates/toyautoencoder/tests/dp_parity.rs (the existing multi-GPU-vs-
+change a single computed value. crates/gpt2/tests/it/dp_parity.rs,
+crates/qwen3/tests/it/dp_parity.rs and
+crates/toyautoencoder/tests/it/dp_parity.rs (the existing multi-GPU-vs-
 single-GPU gradient parity gates) all stay green, BRAIN_DEVICE=gpu and
 BRAIN_DEVICE=cpu. A new test,
 adamw_step_flattens_replica_transfers_into_one_buffer_per_direction
@@ -2276,7 +2276,7 @@ deliberately does not build a Weight::NF4/Weight::F4E2M1 this session (same
 scope boundary B4/B5 drew for bf16/f16's own storage tiers) - its assert
 refuses both loudly, a clearly-scoped follow-up.
 
-Gated by lut4.rs's 6 unit tests plus crates/model/tests/matmul_lut4_gemm.rs
+Gated by lut4.rs's 6 unit tests plus crates/model/tests/it/matmul_lut4_gemm.rs
 (3 tests, real wgpu hardware - Intel Arc iGPU, confirmed via the printed
 adapter string, not skipped): both kernels' device output against a host
 oracle built from the EXACT LUT-dequantized weight (only on-device int8
@@ -2351,7 +2351,7 @@ build a Weight::F8E4M3/Weight::F8E5M2 this session, same scope boundary as
 NF4/F4E2M1 - refused loudly by its own assert, a clearly-scoped follow-up.
 
 Gated by the exhaustive byte-pattern tests above plus
-crates/model/tests/matmul_fp8_gemm.rs (5 tests, real wgpu hardware - Intel
+crates/model/tests/it/matmul_fp8_gemm.rs (5 tests, real wgpu hardware - Intel
 Arc iGPU, confirmed via the printed adapter string, not skipped): both
 formats at a 128x128-block-aligned shape (n=128,k=256) and a non-aligned one
 (n=200,k=192 - partial last row-block AND partial last col-block, the
@@ -2507,7 +2507,7 @@ coopmat::NativeEntry::wgsize's doc). Correct by construction and compiles
 (glslc is on PATH here); unvalidated against a real dispatch - no
 cooperative-matrix hardware on this box, see the next commit's gate test.
 
-Gate: crates/vulkan/tests/pipeline_cache.rs (updated - it used to exercise
+Gate: crates/vulkan/tests/it/pipeline_cache.rs (updated - it used to exercise
 matmul.rs's own build_pipeline, now exercises ctx.pipeline_cache() the same
 way every real dispatch does, via an ordinary catalogue kernel) green,
 cargo test -p brain-backend-vulkan --lib (6/6, the coopmat module's own
@@ -2641,7 +2641,7 @@ are correct per design and are reported as observed, not cherry-picked.
 Gates: crates/gpu-core/src/provider/native_f16.rs's 6 unit tests (synthetic
 ArchDesc, no GPU - the measured-fast gate at every level, backward-declines,
 non-F32-declines, the tile-formula regression guard, kernel() wrapping) all
-green; crates/gpu-core/tests/native_f16_provider.rs's 3 real-hardware tests
+green; crates/gpu-core/tests/it/native_f16_provider.rs's 3 real-hardware tests
 (measured-speedup report, forward parity against the WGSL reference at a
 numeric tolerance across four shapes, the documented subnormal
 flush-to-zero case) all green on this box's real adapter. cargo clippy -p
@@ -3635,7 +3635,7 @@ training half would ingest. ([82411cf0](https://github.com/swedishembedded/brain
 
 - Qwen35, qwen35moe: one tokens_per_second, not two - plus the 21 warnings that compile error was hiding
 
-`crates/qwen35/tests/vl.rs` and `crates/qwen35moe/tests/vl.rs` each set
+`crates/qwen35/tests/it/vl.rs` and `crates/qwen35moe/tests/it/vl.rs` each set
 `tokens_per_second: 2` TWICE in one `VisionConfig` literal, so both test
 binaries failed to compile (E0062) on HEAD. 61ed68b16 and fa2425f94 each added
 that missing field independently, at different lines of the same literal, and
@@ -4120,8 +4120,8 @@ gpu.kernel_index instead of positionally, so a wrong or missing kernel
 list fails by naming the kernel instead of corrupting a bind group; bind
 groups are also now labelled with their kernel's registered name so this
 class of error self-identifies. crates/cli/src/wan_report.rs and
-crates/wan/tests/finetune_ab.rs already built EvaVision correctly and only
-needed a doc update. Regression test: crates/clip/tests/vision_kernel_ids.rs.
+crates/wan/tests/it/finetune_ab.rs already built EvaVision correctly and only
+needed a doc update. Regression test: crates/clip/tests/it/vision_kernel_ids.rs.
 
 Separately, Flux1::n_max only counted image tokens ("no txt/refs headroom
 yet"), but Flux1Model::run asserts nt + ni <= n_max over the JOINT
@@ -4176,7 +4176,7 @@ neighboring process is not fatal. Full accounting, including what remains
 partial (cross-process reservation) or deferred (executor job aging,
 cancellation), is in the new lessons.md entries #96-99.
 
-25/25 tests in crates/residency/tests/plan.rs pass (8 were the review's own
+25/25 tests in crates/residency/tests/it/plan.rs pass (8 were the review's own
 scratchpad repros, red before this change); new crates/gpu-core/tests/
 host_tier.rs covers Home::Cpu actually executing on the CPU backend. ([385fe403](https://github.com/swedishembedded/brain/commit/385fe4034efe1e0e4ce8724806b4b92edb2c7d3a))
 
@@ -5552,7 +5552,7 @@ checkpoint, 1731-token prompt, two Tesla P40s, one sample each:
   repeated squaring    22.83 s  75.84 tok/s  (and wrong: "-regexp-regexp...")
   forward substitution 21.78 s  79.48 tok/s  (" Paris. It is")
 
-crates/model/tests/gdn_chunk_fwd.rs gains
+crates/model/tests/it/gdn_chunk_fwd.rs gains
 gdn_chunk_fwd_matches_host_oracle_with_near_parallel_keys: the same f64 host
 oracle at the PRODUCTION chunk width c=64 (the existing case runs c=4, where
 the series never squares far enough to diverge) with keys that all point in
@@ -6087,7 +6087,7 @@ No KV cache (recomputes the full decoder prefix every step) - correct and
 cheap enough for ground's short outputs, tracked as an intentional
 optimization gap in the roadmap rather than deferred silently.
 
-Validated by crates/florence2/tests/text_lm_parity.rs: encoder output and
+Validated by crates/florence2/tests/it/text_lm_parity.rs: encoder output and
 one decoder step's teacher-forced logits at cosine >=0.999 against
 tools/goldens/florence2_dump_reference.py's encdec golden, plus a direct
 argmax cross-check on generate()'s first token that specifically catches a
@@ -6231,13 +6231,13 @@ draw when both name sets were sorted and walked together, so a LoRA
 and a full-fine-tune config at the same seed produced DIFFERENT base
 weights (breaking the "fresh B=0 adapter is an exact no-op" gate).
 
-New crates/florence2/tests/train_overfit.rs: full fine-tune drives a
+New crates/florence2/tests/it/train_overfit.rs: full fine-tune drives a
 single example's loss to ~1e-5 and a two-example batch to ~5e-5 (both
 from a random init); LoRA against a real (full-fine-tuned) base makes
 large real progress on a second example (16.2 -> 0.0005); a fresh
 (B=0) LoRA adapter is bit-identical to the unadapted forward.
 
-Re-verified: crates/gradcheck/tests/florence2_fd.rs's full-fine-tune
+Re-verified: crates/gradcheck/tests/it/florence2_fd.rs's full-fine-tune
 and LoRA gradcheck both pass cleanly post-fix (previously masked by
 the init_weights bug above). Full florence2 test suite green. ([10560a9c](https://github.com/swedishembedded/brain/commit/10560a9cddfbe291e936e8ff00e72ebb4deaf189))
 
@@ -7649,7 +7649,7 @@ the raw form rather than let a caller mean one and write the other.
 Nothing had caught it because the cooperative variant is only selected at
 certain shapes, and nothing dispatched one at such a shape until a decision
 batch made `rows` large enough for the selector to choose it. The failure
-was loud when it came - four of `crates/decide/tests/minibatch.rs`'s
+was loud when it came - four of `crates/decide/tests/it/minibatch.rs`'s
 accumulation tests panicking inside `gpu-core` - which is the refusal doing
 exactly its job.
 
@@ -7783,7 +7783,7 @@ compares the two builds' logits. qwen3 overrides it onto the `train=false`
 path whose per-layer scratch is already pooled; qwen35 and qwen35moe are
 inference-only builds already and the default is right for them.
 
-`crates/qwen3/tests/mem_budget_inference.rs` already gated the concrete
+`crates/qwen3/tests/it/mem_budget_inference.rs` already gated the concrete
 constructor. It now also gates the SEAM, which is what a generic consumer
 can actually reach - the concrete path was never the one that was broken.
 Its two device-heavy children are serialised: run concurrently, the second
@@ -11274,7 +11274,7 @@ ever been exported from this tree, so there is no existing block walk to
 adapt - recorded honestly in the roadmap rather than implied.
 
 All weight-free and gated; a real end-to-end run is expected to hit the
-device-memory ceiling crates/supir/tests/parity.rs already documents. ([23915066](https://github.com/swedishembedded/brain/commit/2391506609b1146be0dfb5d4ead82c8e1c119bd3))
+device-memory ceiling crates/supir/tests/it/parity.rs already documents. ([23915066](https://github.com/swedishembedded/brain/commit/2391506609b1146be0dfb5d4ead82c8e1c119bd3))
 
 - Cli, catalog, imgpipe, docs: serve SUPIR (CLI verb, D-Bus, GGUF stub, imgpipe stage)
 

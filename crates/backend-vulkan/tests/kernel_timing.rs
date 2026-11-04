@@ -24,7 +24,7 @@ use backend_vulkan::VulkanBackend;
 /// does not apply here) - under `cargo test`'s default multi-threaded run
 /// they can run concurrently and race their own independent device builds
 /// against each other on the same physical card, the exact driver hazard
-/// `crates/gpu-core/tests/device_sharing.rs`'s `DEVICE_SERIAL` (and its
+/// `crates/gpu-core/tests/it/device_sharing.rs`'s `DEVICE_SERIAL` (and its
 /// copies elsewhere) exist to prevent. This is the actual root cause of a
 /// hang this file caused under a full `make test` run that was previously
 /// attributed to unproven cross-process contention - it was cross-thread

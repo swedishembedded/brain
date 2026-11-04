@@ -43,7 +43,7 @@ card without quantization or sharding).
    and produce a hollow-but-passing check).
 2. **INT8 frozen base before NF4.** NF4 is a strictly harder version of the
    same problem and int8 is the one with a real measurement behind it
-   (`crates/flux2/tests/int8_base_grads.rs`). (Status 2026-10-20: both exist
+   (`crates/flux2/tests/it/int8_base_grads.rs`). (Status 2026-10-20: both exist
    now. `Weight::NF4` is a first-class variant with float-read forward and
    input-gradient kernels, and the 27B LLM trains on an NF4 base; the int8
    frozen base trains through the flux2 device trainer,
@@ -146,7 +146,7 @@ qwen35moe and deepseek2 alike.
      trainable set and the per-tensor learning-rate multiplier from the kind's
      parameter groups (`AdapterOptimization::groups`), and the backward skips
      the frozen `A`'s weight gradient. Gated by
-     `crates/gradcheck/tests/adapter_kinds_fd.rs`. The high-level fine-tune
+     `crates/gradcheck/tests/it/adapter_kinds_fd.rs`. The high-level fine-tune
      entry points (`Mode::Lora`, `LoraStart`) still take only rank/alpha/targets;
      exposing the three flags there is the sdk lane's wiring.
    - **LoRA dropout on the device family** - the host path now hard-errors
@@ -208,7 +208,7 @@ linear).
 
 ### M2.0 - Measure the ACTIVATION-quantization term on its own. KILL GATE.
 
-`crates/flux2/tests/int8_base_grads.rs` already measures the *weight*-
+`crates/flux2/tests/it/int8_base_grads.rs` already measures the *weight*-
 quantization term (worst adapter-gradient cosine 0.999530, rel_l2 3.076e-2)
 but explicitly does not cover activation quantization - and the existing
 roadmap note said this number is missing and required before an int8

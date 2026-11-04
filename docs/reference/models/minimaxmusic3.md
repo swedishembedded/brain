@@ -141,7 +141,7 @@ are pre-existing framework limits this port's own testing was the first
 to exercise at whole-8B-model scale; see this repo's own roadmap ledger's
 Phase 10 for the full diagnosis. A machine with more RAM, a real
 int8-capable CPU path, or a discrete GPU can run `brain minimaxmusic3
-generate` (or `crates/minimaxmusic3/tests/e2e_short_generation.rs`
+generate` (or `crates/minimaxmusic3/tests/it/e2e_short_generation.rs`
 directly) as-is - every piece of the pipeline is real, tested code, not a
 stub.
 

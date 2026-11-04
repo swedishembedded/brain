@@ -23,7 +23,7 @@ of the two tensors:
 A ±1 projection of a gradient with one use missing is still a projection of
 something the right shape and sign. Taking the best of four projections
 favours whichever one hides the gap. This is the same blindness the windowed
-pad rows showed for `attn.qkv.bias` in `crates/sam1/tests/gradcheck.rs`.
+pad rows showed for `attn.qkv.bias` in `crates/sam1/tests/it/gradcheck.rs`.
 
 Rule: a weight read at more than one site (shared, tied, applied twice) gets
 an `elementwise_check`, not only a directional one. Run the check at a

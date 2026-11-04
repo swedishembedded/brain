@@ -25,7 +25,7 @@ _ap.add_argument("--seed", type=int, required=True, help="seed of the random inp
 _ARGS = _ap.parse_args()
 VAE_DIR = _ARGS.vae_dir
 # testdata/golden/vae/... by default -- where
-# crates/vae/tests/decode_parity.rs's testdata("golden/vae/zimage_vae_decode.safetensors")
+# crates/vae/tests/it/decode_parity.rs's testdata("golden/vae/zimage_vae_decode.safetensors")
 # actually looks.
 _TESTDATA = os.environ.get("BRAIN_TESTDATA") or str(Path(__file__).resolve().parents[2] / "testdata")
 OUT = _ARGS.out or str(Path(_TESTDATA) / "golden" / "vae" / "zimage_vae_decode.safetensors")

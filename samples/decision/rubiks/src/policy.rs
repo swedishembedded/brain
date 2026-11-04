@@ -39,7 +39,7 @@ use crate::search::Solver;
 /// shifts row, and the learned position embedding, which is the only thing
 /// that says which sticker is which, is reading a different sticker at every
 /// row. The model is then being asked to read a cube it structurally cannot
-/// see. That is measured, not argued: `crates/decide/tests/state_tokenization.rs`
+/// see. That is measured, not argued: `crates/decide/tests/it/state_tokenization.rs`
 /// holds both halves of it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Encoding {
@@ -242,7 +242,7 @@ mod tests {
     /// only depend on the SDK, and the SDK does not publish a tokenizer. The
     /// step from "lone whitespace-separated symbols" to "one token each" is
     /// the tokenizer's own, and it is pinned where the tokenizer lives:
-    /// `crates/decide/tests/state_tokenization.rs`.
+    /// `crates/decide/tests/it/state_tokenization.rs`.
     #[test]
     fn the_grid_encoding_writes_one_lone_symbol_per_sticker() {
         let mut lengths = std::collections::BTreeSet::new();

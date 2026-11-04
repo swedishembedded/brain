@@ -37,7 +37,7 @@
 //!
 //! # What is real here, and what is an explicit, tracked gap
 //!
-//! Real and tested (`crates/minimaxmusic3/tests/dit_shard_parity.rs`):
+//! Real and tested (`crates/minimaxmusic3/tests/it/dit_shard_parity.rs`):
 //! * [`shard_cost`](Shardable::shard_cost) - a FLOP-shaped per-block cost
 //!   (QKVO + the O(T^2) score/weighted-sum term, the fused gated FFN's two
 //!   projections), fed to `model::plan_balanced`.

@@ -44,7 +44,7 @@ new shared primitive (`model::block::gqa_fwd_win`,
 exactly when `window >= t` - so `Codec::transformer` now dispatches it
 unconditionally, with no `Option<u32>` branch and no risk of the old
 plain-causal call site quietly coming back at the next edit. Proven two ways
-in `crates/model/tests/gqa_fwd_win.rs` (no real checkpoint available in this
+in `crates/model/tests/it/gqa_fwd_win.rs` (no real checkpoint available in this
 environment - see that file's own doc for why): window-covers-sequence
 matches plain causal exactly, and window-narrower-than-sequence matches an
 independent host-computed masked-attention oracle AND provably diverges from

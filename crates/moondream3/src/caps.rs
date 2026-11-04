@@ -62,7 +62,7 @@ use crate::model::{MoondreamModel, Precision};
 /// "whatever is configured" rather than naming one specific release.
 /// `deepseek-ai/DeepSeek-OCR` is the one catalog id that does name its
 /// upstream repo, and only because its weights are exactly one shipped GGUF
-/// pair or nothing - a distinction `crates/cli/tests/model_ids.rs` enforces.
+/// pair or nothing - a distinction `crates/cli/tests/it/model_ids.rs` enforces.
 /// The upstream repo to FETCH from is a separate field, `crates/arch`'s
 /// `default_ref`.
 pub const MODEL: &str = "brain/moondream3";

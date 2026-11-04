@@ -131,7 +131,7 @@ this port:
 - [x] **Video-stream DiT** (`LTXModelType::VideoOnly`) - `config.rs`/`rope.rs`/
       `block.rs`/`dit.rs`, tiny (2-layer) config, every real-LTX-2.5 flag set
       correctly. Parity against the tiny golden at cosine >= 0.999999 on every
-      tap, most at 1.000000000 (`crates/ltxv/tests/dit_parity.rs`). RoPE's
+      tap, most at 1.000000000 (`crates/ltxv/tests/it/dit_parity.rs`). RoPE's
       exact construction (fractional position -> [-1,1], geometric bands,
       front zero-pad, band-major/axis-minor, per-head sequential chunking of
       one shared table) was verified against the golden's real `rope_cos`/
@@ -245,7 +245,7 @@ this port:
       construction to axis-count-generic, since audio's 1-axis self RoPE
       and the shared cross-modal time-only RoPE are both instances of the
       same math, not a separate construction. Parity: every new tap >=
-      0.999999951 cosine (`crates/ltxv/tests/av_dit_parity.rs`) against a
+      0.999999951 cosine (`crates/ltxv/tests/it/av_dit_parity.rs`) against a
       new golden (`tools/goldens/ltxv_av_dit_dump_reference.py`, a sibling
       of the video-only dumper, not a modification of it). One open
       judgment call, flagged inline rather than silently assumed:
@@ -301,7 +301,7 @@ this port:
       any Rust was written. Real weights
       (`ltx-2.5-video-vae-bf16.safetensors`'s `decoder.*` tree - a DIFFERENT
       file from the conv decoder's `-conv-bf16`), real parity at cosine
-      1.000000000 on every tap (`crates/ltxv/tests/na_decoder_parity.rs`):
+      1.000000000 on every tap (`crates/ltxv/tests/it/na_decoder_parity.rs`):
       stages 1-4 (the deterministic context path: `NA(RMSNorm) -> SwiGLU`
       pre-norm blocks x4 stages + `LinearPixelShuffleUpsample`, at a
       (3,7,7) latent - the smallest volume stage 0's own kernel allows,
@@ -454,7 +454,7 @@ this port:
       `audio_`/`av_ca_`-prefixed twins, matched by the same substring since
       the prefix sits in front of it) by substring match against the REAL
       tensor names `dit_tensor_manifest` emits, pinned by a test against
-      exact real names (`crates/ltxv/tests/int8_storage.rs`).
+      exact real names (`crates/ltxv/tests/it/int8_storage.rs`).
       `quantize_tensors`/`dequantize_tensors` split/rejoin a `Tensors` weight
       map; every eligible `[n,k]` projection (`to_q`/`to_k`/`to_v`/`to_out.0`,
       `ff.net.0.proj`/`ff.net.2`) round-trips at a worst per-tensor cosine of
@@ -494,7 +494,7 @@ this port:
       `Model::set_batch` is a documented no-op and the real seam is
       `LtxDit::load_shard_batch` - the same shortcut `s3dit::train::
       ZTrainModel` already takes for its own diffusion batch. Tested
-      (`crates/ltxv/tests/shard_parity.rs` + `crates/ltxv/src/shard.rs`'s own
+      (`crates/ltxv/tests/it/shard_parity.rs` + `crates/ltxv/src/shard.rs`'s own
       unit tests): `shard_cost` fed to `plan_balanced` produces a well-formed
       partition (contiguous, complete, exactly one embed/one head stage, no
       empty stage) for both the tiny test config AND the real 22B config's
@@ -618,7 +618,7 @@ this port:
          `max_abs == 0.0` on every tensor, both dtypes.
       2. **Port correctness, reduced depth** (new golden dumper `tools/
          goldens/ltxv_real_dit_dump_reference.py`, sibling of the tiny
-         dumpers; extends `crates/ltxv/tests/dit_parity.rs` with
+         dumpers; extends `crates/ltxv/tests/it/dit_parity.rs` with
          `real_weight::ltxv_real_dit_tiny_layers_matches_reference`) - the
          official `LTXModel(model_type=VideoOnly, num_layers=2)` at REAL
          width (`inner_dim=4096`, 32 heads x 128, gated attention ON), its
@@ -698,7 +698,7 @@ this port:
       Verified, not assumed: the dumper's own self-check reported
       `max_abs == 0.0` between the shim and its primary computation (i.e.
       bit-exact agreement with the algorithm the shim stands in for), and
-      all 6 `crates/ltxv/tests/audio_parity.rs` tests (previously silently
+      all 6 `crates/ltxv/tests/it/audio_parity.rs` tests (previously silently
       skipping - the golden was simply absent, a lesson-#1-shaped gap of its
       own) now pass for real under `BRAIN_REQUIRE_FIXTURES=1`.
 - [x] **Int8/int4 compute path + AV pipeline-parallel sharding, run for real
@@ -713,7 +713,7 @@ this port:
       quantizing model already uses; modelled on `wan::block`'s `QTier`,
       adapted to this crate's 10-linear block shape). `crate::int8::
       is_never_quantized` stays the single authoritative exclusion list.
-      Verified at tiny scale (`crates/ltxv/tests/int8_compute.rs::
+      Verified at tiny scale (`crates/ltxv/tests/it/int8_compute.rs::
       dit_forward_stays_close_with_int8_compute_dispatch`) AND against one
       real block (block 0) of the actual Q8_0 checkpoint
       (`real_q8_0_block0_int8_compute_matches_fp32`).
@@ -730,11 +730,11 @@ this port:
       (`crates/ltxv/src/shard.rs`) - the A<->V coupling means BOTH streams'
       residuals cross a stage boundary together, not one. Same proof ladder
       `LtxDit`'s own `Shardable` impl already established, single-process
-      first (`crates/ltxv/tests/av_shard_parity.rs`): single-shard
+      first (`crates/ltxv/tests/it/av_shard_parity.rs`): single-shard
       degenerate case bit-exact, a genuine two-stage block-range split
       boundary-handed-off correctly.
 
-      Then run for real (`crates/ltxv/tests/av_shard_2gpu_real.rs`): stage 0
+      Then run for real (`crates/ltxv/tests/it/av_shard_2gpu_real.rs`): stage 0
       pinned to `gpu0`, stage 1 to `gpu1` via `gpu_core::devices::with_gpu`
       (the same thread-local placement mechanism `model::shard::Pipeline`
       already uses for construction-time placement, applied here to
@@ -1322,7 +1322,7 @@ this port:
       of the checkpoint's own immutable weight bytes, so a cached result and
       a freshly recomputed one are the same bytes by construction - caching
       skips redundant work, it does not change any number. Gated by a new
-      `crates/ltxv/tests/block_weight_cache.rs` (4 tests, all green): a
+      `crates/ltxv/tests/it/block_weight_cache.rs` (4 tests, all green): a
       synthetic (`LtxDitConfig::tiny()`, always-runs, no fixture) forward
       that populates an empty cache is asserted `max_abs == 0.0` against an
       independent cache-free forward, then a SECOND call on the SAME
@@ -2165,7 +2165,7 @@ glossed:
    dominated by activation buffers that follow the latent token count, and
    deriving that honestly is its own piece of work (tracked below).
 
-**Correctness gates** (`crates/ltxv/tests/block_weight_cache.rs`, extending the
+**Correctness gates** (`crates/ltxv/tests/it/block_weight_cache.rs`, extending the
 4 tests Phase 9 left, now 8; plus 5 in `weightcache`'s own module and 7 in
 `resident_ltxv`):
 
@@ -2535,7 +2535,7 @@ milliseconds on every `cargo test` and the real one costs eight minutes:
 - `pipeline::tests::the_cfg_step_routes_through_the_pair_method` counts pair
   dispatches, so a refactor that quietly went back to two bare `forward` calls
   fails instead of silently making the placement dead code.
-- `crates/ltxv/tests/cfg_parallel.rs` (`#[ignore]`d), the real-weight half: two
+- `crates/ltxv/tests/it/cfg_parallel.rs` (`#[ignore]`d), the real-weight half: two
   full 22B generations, same seed/prompt/shape, differing only in the plan,
   compared byte for byte over every decoded frame - plus an assertion that the
   clip is not frozen, since any two runs of a frozen generator agree.
@@ -2667,7 +2667,7 @@ Building a streaming int8 shard loader for the real 22B weights would have been
 a large piece of engineering aimed at a constraint that no longer exists.
 
 The MECHANISM is not in doubt and does not need re-proving:
-`crates/ltxv/tests/av_shard_2gpu_real.rs` already runs a real two-GPU sharded
+`crates/ltxv/tests/it/av_shard_2gpu_real.rs` already runs a real two-GPU sharded
 forward with real cross-device residual handoff at the synthetic `tiny_gated`
 config, and `qwen3omnimoe`'s int8 layer-sharded Thinker does it against a real
 30B checkpoint. What was missing was a REASON, and the measurement says there
@@ -3277,7 +3277,7 @@ always predicted and which nothing in the reference says should not happen.
 * `pipeline::tests::to_denoised_is_per_token_and_collapses_to_the_scalar_form_when_nothing_is_frozen`
   - pins both halves of the contract, including that the unconditioned path
   is unchanged.
-* `crates/ltxv/tests/anchor_real.rs` (new, `#[ignore]`d, ~6 min) - the
+* `crates/ltxv/tests/it/anchor_real.rs` (new, `#[ignore]`d, ~6 min) - the
   perceptual half: two real 22B generations at 384x192 / 9f (one
   unconditioned to produce the anchor, the same way `motion_real.rs` builds
   its own, so no image fixture and no resize can be blamed; one conditioned
@@ -3515,7 +3515,7 @@ land. Known traps already identified from reading (not yet test-pinned):
      dim=4096, 8 layers, 128 registers, gated attention ON, loaded straight
      off the real Q8_0 GGUF, `tools/goldens/ltxv_real_connector_dump_
      reference.py` instantiating the reference's own `Embeddings1DConnector`
-     directly) - `crates/ltxv/tests/connector_real_parity.rs`: cosine
+     directly) - `crates/ltxv/tests/it/connector_real_parity.rs`: cosine
      0.999999973 against the reference on a synthetic-but-real-shaped
      `[128, 4096]` input (20 real + 108 register-substituted positions,
      right-padded). Every block's cross-attention routes through this
@@ -3527,7 +3527,7 @@ land. Known traps already identified from reading (not yet test-pinned):
      every other real-weight gate in this crate replays against the EAGER
      `LtxDit::forward`/`forward_q`; `forward_q_streamed`'s only prior
      coverage (`block_weight_cache.rs`) used `random_tiny_weights`.
-     `crates/ltxv/tests/streamed_vs_eager_real.rs` runs both paths on the
+     `crates/ltxv/tests/it/streamed_vs_eager_real.rs` runs both paths on the
      SAME real Q8_0 weights, SAME config (gated attention + embeddings
      connector both ON, int8 compute tier), SAME inputs: bit-identical
      (cosine=1.000000000, max_abs=0.0).
@@ -3542,7 +3542,7 @@ land. Known traps already identified from reading (not yet test-pinned):
   only) on the first 6 of the real checkpoint's 48 layers (5 sliding + 1
   full, the real 5:1 `sliding_window_pattern`'s minimal instance), loaded
   from the real 26 GB bf16 checkpoint (`gemma4-12b-with-proj-ltx-2.5-bf16.
-  safetensors`). `crates/gemma4/tests/real_weight_parity.rs` replays the
+  safetensors`). `crates/gemma4/tests/it/real_weight_parity.rs` replays the
   golden's own `input_ids` through `gemma4::Gemma4Model::forward`: BOTH RoPE
   tables, BOTH attention types' own self-attention output (sliding/GQA AND
   full/MQA+k_eq_v, the two structurally different paths), EVERY one of the 7
@@ -3602,7 +3602,7 @@ land. Known traps already identified from reading (not yet test-pinned):
   throughput the same second card already returns as an independent-request
   lane). Read that phase before picking this up. The "int8/int4 compute + AV
   sharding" milestone above ran `LtxAvDit`'s two-stage split on two REAL
-  physical GPUs for the first time (`crates/ltxv/tests/av_shard_2gpu_real.rs`)
+  physical GPUs for the first time (`crates/ltxv/tests/it/av_shard_2gpu_real.rs`)
   and it agreed with the single-process reference - but only at a small
   synthetic `tiny_gated` config, not real checkpoint weights (that needs a
   GGUF-streaming int8 shard loader, a tracked gap of its own). `LtxDit`'s own
@@ -3680,8 +3680,8 @@ land. Known traps already identified from reading (not yet test-pinned):
   never residency-specific: any code that opens a device per forward call
   hits it, which is why `brain ltxv t2v` reproduced it too once the run was
   long enough. See those crates' `shared_instance`/`instance` doc comments
-  for the mechanism and `crates/gpu-core/tests/device_churn.rs` +
-  `crates/backend-wgpu/tests/adapter_enumeration.rs` for the gates.
+  for the mechanism and `crates/gpu-core/tests/it/device_churn.rs` +
+  `crates/backend-wgpu/tests/it/adapter_enumeration.rs` for the gates.
   `scripts/gates/ltxv-perf-gate.sh` still runs `--device cpu`, now by
   choice of measurement target rather than to sidestep a bug.
 - `brain perf`'s `ltxv:` target measures only the tiny random-weight
@@ -3838,7 +3838,7 @@ the concurrent CFG pair gets two sessions on two cards and `Single` gets one;
 **Device residency of the weights is NOT where the win is on this hardware, and
 the number that says so is a wgpu defect this repo had already measured.**
 
-`crates/gpu-core/tests/vram_overhead.rs` records that on a non-ReBAR Pascal
+`crates/gpu-core/tests/it/vram_overhead.rs` records that on a non-ReBAR Pascal
 card under the default wgpu backend every uploaded storage buffer costs
 **2.00x** its size resident, and that brain's own native Vulkan backend
 measures 1.00x. `.agents/rules/kernels.md` sec D records the other half: that
@@ -3968,7 +3968,7 @@ bytes reach the card, never what a kernel reads. `adaln_row` reproduces
 exactly - one f32 add, then one more - so it is bit-identical rather than
 close.
 
-New: `crates/ltxv/tests/device_residency.rs` (5 + 1 `#[ignore]`d real-weight),
+New: `crates/ltxv/tests/it/device_residency.rs` (5 + 1 `#[ignore]`d real-weight),
 4 in `ltxv::devres`. Compared on BIT PATTERNS, never `==` on `f32`:
 
 * `a_device_resident_forward_is_bit_identical_to_the_streaming_one` - three
@@ -4604,7 +4604,7 @@ split into anything runnable is refused before a single weight is read.
 
 #### 2 - what is gated, and what deliberately is not
 
-Two claims, in `crates/ltxv/tests/upscale.rs`:
+Two claims, in `crates/ltxv/tests/it/upscale.rs`:
 
 1. **The segment plan**, weight-free and always running: a clip that fits is
    exactly one segment; a clip that does not splits into segments that are
@@ -4822,7 +4822,7 @@ windows of one clip refining with the same noise would repeat each other.
 
 Weight-free, always run:
 
-* `crates/ltxv/tests/longform.rs` - `the_carried_context_is_the_references_own_eight_latent_frames`
+* `crates/ltxv/tests/it/longform.rs` - `the_carried_context_is_the_references_own_eight_latent_frames`
   (K and its pixel spelling are the reference's, not drift);
   `a_clip_that_fits_one_window_carries_no_context` (13200 tokens is one
   window, nothing carried, no seam);
@@ -5318,7 +5318,7 @@ one that is not "hope".
 
 #### gates
 
-Weight-free, always run (`crates/ltxv/tests/longform.rs`):
+Weight-free, always run (`crates/ltxv/tests/it/longform.rs`):
 
 * `a_multi_scene_plan_resets_the_carried_context_at_every_scene_boundary` -
   three scenes at 1280x704 (481 + 241 + 113 frames, the last deliberately short
@@ -5519,7 +5519,7 @@ a measurement, neither of which this phase had.
 
 #### gates
 
-Weight-free, always run (`crates/ltxv/tests/upscale.rs`):
+Weight-free, always run (`crates/ltxv/tests/it/upscale.rs`):
 
 * `a_clip_too_long_to_refine_in_one_pass_carries_real_latent_context_across_every_seam` -
   the exact shape that produced the defect (217 frames, 44 x 80 out). Every
@@ -5757,7 +5757,7 @@ Weight-free, always run:
   sequence leaves the old prefix assertion green and fails this one.
 
 Real weights, minutes (real conv VAE, tiny random-weight DiT, CPU -
-`crates/ltxv/tests/anchors.rs`):
+`crates/ltxv/tests/it/anchors.rs`):
 
 * `three_simultaneous_anchors_each_reach_the_denoiser` - 17 frames at 64x64,
   four generations off one seed. Changing the middle still's PIXELS changes the
@@ -5965,7 +5965,7 @@ and names what it nests.
   per_row_form`, extended from four shapes to four shapes x three timestep
   patterns, comparing bit patterns against the per-row
   `dit::timestep::pixart_timestep_embed` loop.
-* `crates/gpu-core/tests/adaln_row_gather.rs` (new): the kernel itself against
+* `crates/gpu-core/tests/it/adaln_row_gather.rs` (new): the kernel itself against
   the host arithmetic, over a distinct-count ladder, on BOTH backends. It
   lives in `gpu-core` because `ltxv`'s only production caller of this kernel
   is int8, which the CPU JIT cannot dispatch at all (`matmul_i8_dyn` has more
@@ -6415,7 +6415,7 @@ all.
 
 #### 2 - what the gates are, and what each mutation proved
 
-`crates/ltxv/tests/audio_seam.rs`, 8 tests, all arithmetic on the SAME
+`crates/ltxv/tests/it/audio_seam.rs`, 8 tests, all arithmetic on the SAME
 functions the pipeline calls - `audio::positions`, `pipeline::
 real_pixel_positions`, `audio::audio_plan`, `longform::window_plan_aligned` -
 over a sweep of 4 frame rates x 8 multi-window lengths at the real 22 x 40
@@ -7627,7 +7627,7 @@ more than all of them together is listed in section 5.
 
 #### 4 - the gates, and which mutation caught which
 
-`crates/gpu-core/tests/scratch_arena.rs` gates the arena's five structural
+`crates/gpu-core/tests/it/scratch_arena.rs` gates the arena's five structural
 properties on `DeviceBuffer::alloc_id`; `crates/ltxv/tests/scratch_pool.rs`
 gates the forward's OUTPUT BITS in both arms, at the tiny config and - when
 the checkpoint is present - at the real 22B block's own allocation sequence.
@@ -8092,7 +8092,7 @@ the block loop's own phases is what found it:
 | dropping the block (untimed by any stage) | 96 ms | 9801 ms |
 
 Only the LAST handle on a device resolves from `Drop` now. Both properties are
-gated in `crates/backend-wgpu/tests/kernel_timing.rs`.
+gated in `crates/backend-wgpu/tests/it/kernel_timing.rs`.
 
 #### 2 - measured, both arms, same binary, one idle P40 (gpu0)
 
@@ -8254,7 +8254,7 @@ block loop. Residency is a warm-path win that costs the first forward.
 
 #### 2 - what a stage boundary costs, on two real cards
 
-`crates/gpu-core/tests/pcie_handoff.rs` (new, `#[ignore]`d hardware probe):
+`crates/gpu-core/tests/it/pcie_handoff.rs` (new, `#[ignore]`d hardware probe):
 one real `[13200, 4096]` fp32 activation - 206 MiB, exactly what crosses a
 pipeline cut - through the paths this engine actually uses, best of 3 with a
 warm-up, both cards idle.
@@ -8362,7 +8362,7 @@ card, with no transfer to hide and no second device to occupy.
 
 #### 5 - gates, and which mutation caught which
 
-`crates/backend-wgpu/tests/read_staging_reuse.rs` (5 tests) covers the reuse.
+`crates/backend-wgpu/tests/it/read_staging_reuse.rs` (5 tests) covers the reuse.
 Both arms of `BRAIN_GPU_NO_READ_STAGING_REUSE` are green.
 
 | mutation | what went red | what stayed green |
@@ -8392,7 +8392,7 @@ the sending card's bytes, so a handoff cannot measure fast by moving nothing.
 * **`Gpu::read`'s destination allocation** (section 3) is the single highest
   leverage item for any future multi-device split, and is untouched.
 * **A pre-existing hang, found while running the suite and reproduced on
-  unmodified `main`**: `crates/backend-wgpu/tests/upload_flush.rs` spins at
+  unmodified `main`**: `crates/backend-wgpu/tests/it/upload_flush.rs` spins at
   100% CPU forever when its two tests run concurrently, because each builds
   its own `WgpuBackend` and two Vulkan devices in one process is the deadlock
   this driver has. `--test-threads=1` passes in under a second. The default
@@ -8487,7 +8487,7 @@ DiT it can be pinned down exactly on this box, which is the point.
   the real `iclora_utils` source - not a transcription. `torchaudio`'s native
   library is broken here, so the one unrelated import that drags it in is
   stubbed; the function bodies that produce the goldens are the reference's own.
-* `crates/ltxv/tests/refcond_parity.rs` asserts **cosine AND rel_l2** on every
+* `crates/ltxv/tests/it/refcond_parity.rs` asserts **cosine AND rel_l2** on every
   tap. Cosine alone is scale-invariant and this path multiplies by
   `downscale_factor` and divides by `fps / S` - a wrong scale is the likeliest
   defect here and precisely the one cosine cannot see, the same trap

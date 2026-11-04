@@ -576,7 +576,7 @@ struct DeviceShared {
     /// `Cargo.toml`'s dependency-override notes). The READ direction had kept
     /// allocating, and it is the direction with no recycler underneath it:
     /// `read` creates the staging buffer itself. Reproduce the before/after
-    /// with `crates/gpu-core/tests/pcie_handoff.rs`, which times one real
+    /// with `crates/gpu-core/tests/it/pcie_handoff.rs`, which times one real
     /// activation in each direction.
     ///
     /// Guarded by the same [`Self::io`] lock every read already takes, so the
@@ -1883,7 +1883,7 @@ impl WgpuBackend {
         // Exposed-f16 is not fast-f16 (Pascal: 1/64 rate). B11 built the
         // actual measurement (`f16_worth_enabling`, the real
         // native-f16-vs-f32 roofline comparison in
-        // `crates/backend-wgpu/tests/native_f16.rs`) but deliberately does
+        // `crates/backend-wgpu/tests/it/native_f16.rs`) but deliberately does
         // NOT call it here: `query_caps` runs on every device construction,
         // and a roofline-grade timing measurement (calibrated dispatches,
         // `poll_wait`-bracketed, the same discipline `gpu_core::roof` uses)
@@ -2062,7 +2062,7 @@ impl WgpuBackend {
             // workload by far - never submitted at all, so it held every
             // staging buffer it had ever allocated live simultaneously, and
             // the driver held the pinned host pages behind each of them.
-            // Measured through `crates/gpu-core/tests/vram_overhead.rs` with
+            // Measured through `crates/gpu-core/tests/it/vram_overhead.rs` with
             // the Vulkan staging allocator traced underneath: all 1536 staging
             // buffers of a 1 GiB chunked upload were created before the first
             // was released.
@@ -2838,7 +2838,7 @@ impl WgpuBackend {
     /// "re-allocated", which is otherwise invisible from outside.
     ///
     /// Pinning host pages is the expensive half of a readback (measured:
-    /// `crates/gpu-core/tests/pcie_handoff.rs`), so a loop that reads one
+    /// `crates/gpu-core/tests/it/pcie_handoff.rs`), so a loop that reads one
     /// shape repeatedly must move this counter exactly once.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn read_staging_allocations(&self) -> u64 {

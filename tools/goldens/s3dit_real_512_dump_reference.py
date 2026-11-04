@@ -9,7 +9,7 @@ the real `layers.*` shape brain's text2image CLI runs).
 `tools/goldens/s3dit_real_dump_reference.py`'s existing golden uses a tiny
 16x16 latent (64 image tokens) - cheap, but too small to expose corruption
 that only shows up once attention runs over the realistic joint sequence
-length (see `crates/s3dit/tests/real_parity.rs`'s
+length (see `crates/s3dit/tests/it/real_parity.rs`'s
 `zimage_real_dit_matches_diffusers_at_512` for the concrete regression this
 caught: a `flip_sin_to_cos` sign/order bug in the timestep embedding that a
 64-token forward could not distinguish from noise, but a 1088-token one

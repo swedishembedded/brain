@@ -17,7 +17,7 @@ Run the OFFICIAL `ltx_core.model.transformer.model.LTXModel` on tensors
 dequantized by THIS SCRIPT'S OWN independent Q8_0 decoder (below), not by
 loading a pre-converted brain checkpoint and not by calling into brain's own
 Rust code at all. That is what makes this a PORT-correctness gate separate
-from `crates/ltxv/tests/gguf_quant_real.rs`'s QUANTIZATION-correctness gate:
+from `crates/ltxv/tests/it/gguf_quant_real.rs`'s QUANTIZATION-correctness gate:
 this script's `deq_q8_0` and brain's `checkpoint::gguf::deq_q8_0` are two
 independent implementations of the same 34-byte-block arithmetic, and
 `gguf_quant_real.rs` already proves they agree byte-for-byte on real tensors
@@ -46,7 +46,7 @@ alongside its taps, because the tiny Rust test has no other way to get them.
 Here the weights are REAL - dequantizing even this reduced 2-layer subset is
 ~2.7 GB fp32 - so re-dumping them as a committed golden fixture would be
 absurd. Instead: brain's Rust replay test
-(`crates/ltxv/tests/dit_parity.rs::ltxv_real_dit_tiny_layers_matches_reference`)
+(`crates/ltxv/tests/it/dit_parity.rs::ltxv_real_dit_tiny_layers_matches_reference`)
 reads the SAME 2-layer weight subset directly off the SAME real GGUF file
 (via `checkpoint::gguf::MmapGguf`, gated on the file's presence exactly like
 every other real-weight test in this crate) - so only the small INPUT
@@ -212,7 +212,7 @@ def _tensor_nbytes(ty, numel):
 def deq_q8_0(raw: bytes, numel: int):
     """From-spec GGUF Q8_0 dequant: 34-byte blocks, `[f16 le scale][32 int8]`,
     `value = int8 * scale` - independently re-derived from the format
-    definition, the SAME algorithm `crates/ltxv/tests/gguf_quant_real.rs`'s
+    definition, the SAME algorithm `crates/ltxv/tests/it/gguf_quant_real.rs`'s
     `independent_deq_q8_0` implements in Rust (two independent
     implementations of the same arithmetic; that Rust test is what proves
     THIS function agrees with brain's own `checkpoint::gguf::deq_q8_0` on

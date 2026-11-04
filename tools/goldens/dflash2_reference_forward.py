@@ -28,7 +28,7 @@ itself (tap order in `*_conv_base`, the `[2, kernel, hidden]` split, which of
 
 What is deliberately NOT here: the target model. Its 27B forward is already
 gated by `qwen35_gguf_reference_forward.py` and by
-`crates/qwen35/tests/gguf_reference_parity_real.rs`; running it again in
+`crates/qwen35/tests/it/gguf_reference_parity_real.rs`; running it again in
 Python would cost hours and prove nothing new. The target's contribution -
 the concatenated hidden states of layers `target_layer_ids` - is an INPUT
 here, read from a raw f32 dump the Rust side writes.
@@ -41,7 +41,7 @@ Usage:
         --hidden $BRAIN_DFLASH2_DUMP/target_hidden.f32 \\
         --anchor 8993 --start 7 --digest
 
-`--hidden` is the dump `crates/qwen35/tests/dflash2_real.rs` writes when
+`--hidden` is the dump `crates/qwen35/tests/it/dflash2_real.rs` writes when
 `BRAIN_DFLASH2_DUMP` names a directory: `[ctx_len, 5 * 5120]` little-endian
 f32, and for each context token the target's residual leaving layers
 `target_layer_ids`, concatenated in that order. `--start` is the absolute position of the anchor token (the context

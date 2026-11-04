@@ -5,7 +5,7 @@
 """Regenerate crates/splat/tests/golden/gradcheck.json — the float64
 torch-autograd oracle for the rasterizer-backward gradcheck.
 
-The scene/loss replicate crates/splat/tests/s5_bwd_fit.rs bit-for-bit (same
+The scene/loss replicate crates/splat/tests/it/s5_bwd_fit.rs bit-for-bit (same
 LCG). Finite differences are deliberately NOT used as the oracle: the 1/255
 truncation boundary makes them biased for scale/mean gradients.
 

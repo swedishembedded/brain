@@ -6,7 +6,7 @@
 Question: what does an FP8 E4M3 KV cache (one byte per element, one f32 scale per (token, kv-head) row, scale = absmax
 / 448, the int8 tier's footprint) cost in accuracy and in decode time against f32, bf16 and int8?
 
-Accuracy (CPU JIT and GH200, random mixed-magnitude rows, `crates/model/tests/kv_tier.rs`, `qwen35/tests/kv_tier.rs`):
+Accuracy (CPU JIT and GH200, random mixed-magnitude rows, `crates/model/tests/it/kv_tier.rs`, `qwen35/tests/kv_tier.rs`):
 - every finite E4M3 value round-trips exactly through append and the scores kernel (254 codes, scale 1);
 - attention output (scores, softmax, apply) against the original f32 rows, relative L2: bf16 3.1e-3, int8 1.4e-2,
   fp8 3.4e-2 (one sequence of 120 keys, 4 heads, head_dim 64);

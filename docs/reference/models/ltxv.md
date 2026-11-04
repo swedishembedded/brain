@@ -158,7 +158,7 @@ brain -v --device gpu0 ltxv t2v --dit-config ltx25_22b \
 * **`--conditioning-strength`** (default `1.0`) applies to every still given.
 * **Two identical anchors make a static clip.** Passing the same image to
   `--start-frame` and `--end-frame` asks for "start here, end here", which has
-  a correct trivial answer; see `crates/ltxv/tests/motion_real.rs` for the
+  a correct trivial answer; see `crates/ltxv/tests/it/motion_real.rs` for the
   measured table. A middle anchor is subject to the same logic - anchor
   *different* instants.
 * **Not supported for a multi-window or multi-scene clip.** `--mid-frame` names
@@ -251,7 +251,7 @@ One command, one file, 299 frames.
   scene with nothing carried between the runs, and the decoded frames
   concatenated - so scene *n*'s pixels do not depend on scene *n-1* at all
   (gated:
-  `crates/ltxv/tests/longform.rs::a_two_scene_request_is_one_clip_whose_second_scene_owes_nothing_to_its_first`).
+  `crates/ltxv/tests/it/longform.rs::a_two_scene_request_is_one_clip_whose_second_scene_owes_nothing_to_its_first`).
 * **It is also how a scene ends deliberately.** Long single-prompt
   autoregressive generation is documented to degrade - drift and error
   accumulation, and a strong clean history makes "copy the last frame" a cheap

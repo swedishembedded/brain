@@ -33,10 +33,10 @@ goldens under `testdata/golden/edgerock/{tiny_text,tiny_ties}/`.
   `Qwen35::logits_all` (windowed `gqa_mixer_fwd_windowed`, memory added before the
   residual add); paths that implement neither the window nor the memory refuse the
   config loudly (`Qwen35Config::require_plain_decoder`).
-  Gates: `crates/qwen35/tests/edgerock_golden_parity.rs` (both variants, CPU and
+  Gates: `crates/qwen35/tests/it/edgerock_golden_parity.rs` (both variants, CPU and
   default backend), `edgerock_config.rs`, `edgerock_hf_fixture.rs` (the release
   layout through config, lazy source, eager import and a forward),
-  `crates/model/tests/anchor_memory.rs` (selection and indexed read against host
+  `crates/model/tests/it/anchor_memory.rs` (selection and indexed read against host
   definitions), the import and init unit tests.
 
 Parity at the tiny dims (`edgerock_golden_parity`, per stage cosine / max_abs /
@@ -338,7 +338,7 @@ reference exactly in both variants on both backends; flipping the tie rule in
 - [x] M5 (forward part): the released weights against the independent reference
   forward (`tools/goldens/edgerock_dump_real_reference.py`, fp32 CPU torch, a
   1400-token prompt that slides the window and commits five blocks, then asks about
-  a fact stated at its start). `crates/qwen35/tests/edgerock_real_weights.rs`
+  a fact stated at its start). `crates/qwen35/tests/it/edgerock_real_weights.rs`
   (ignored: needs the store checkpoint and the dumped golden), bf16 weight tier on
   the CPU backend: every `layer{i}.out` cosine >= 0.9999999997 (worst max_abs
   1.9e-3 at layer 26, rel_l2 <= 2.3e-5), tail logits rel_l2 4.1e-6, the same greedy

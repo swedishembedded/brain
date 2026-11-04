@@ -4766,7 +4766,7 @@ mod decode_sparse_moe_tests {
 /// two genuinely different kernels (`moe_linear_gated.wgsl`'s per-row-gated
 /// naive accumulation vs `matmul_reg3_grouped.wgsl`'s tiled register GEMM) -
 /// the SAME "mathematically equivalent, not textually identical" tolerance
-/// category `crates/model/tests/moe_grouped_parity.rs` already establishes
+/// category `crates/model/tests/it/moe_grouped_parity.rs` already establishes
 /// for `expert_fwd_grouped` itself (see [`TOLERANCE`]'s own doc for the
 /// measured numbers this crate's wiring adds on top).
 #[cfg(test)]

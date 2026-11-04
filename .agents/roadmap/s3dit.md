@@ -69,7 +69,7 @@ model.rs`'s wrapper was passing `false` when this model's real (diffusers)
 reference requires `true`. Confirmed by a from-scratch real-checkpoint
 diffusers parity dump at full 512×512/1088-token scale
 (`tools/goldens/s3dit_real_512_dump_reference.py`,
-`crates/s3dit/tests/real_parity.rs`'s `zimage_real_dit_matches_diffusers_at_512`)
+`crates/s3dit/tests/it/real_parity.rs`'s `zimage_real_dit_matches_diffusers_at_512`)
 - cosine similarity against the Python reference went from clearly-wrong to a
 perfect `1.000000` once the flag flipped. Not a RoPE/axes-length bug (the
 `axes_lens: [1536,512,512]` correction that accompanied this fix was a
@@ -155,7 +155,7 @@ into one more blob - about 74 GB live at once for a 24.6 GB fp32 model, on an
 input that arrives as an `MmapGguf` precisely to avoid the first copy. Measured
 peak RSS for the full `z-image-turbo-Q2_K.gguf` -> 521-tensor / 24.6 GB
 conversion after the fix: **3.55 GiB in 175 s**, most of it the GGUF's own
-file-backed mapping. `crates/s3dit/tests/gguf_import_real.rs` runs that whole
+file-backed mapping. `crates/s3dit/tests/it/gguf_import_real.rs` runs that whole
 path against the released file (`#[ignore]`d, since it writes the 24.6 GB).
 
 **Not wired into `brain s3dit text2image`'s own auto-fetch.** The GGUF release

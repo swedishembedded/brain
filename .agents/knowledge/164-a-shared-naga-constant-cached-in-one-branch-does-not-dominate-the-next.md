@@ -26,7 +26,7 @@ evaluates are memoised (`inline::Frame::emitted`); everything else is
 re-materialised at each use, where it trivially dominates, and Cranelift's
 egraph pass merges the duplicate constants again. The regression test is
 `a_shared_constant_is_usable_across_non_dominating_blocks` in
-`crates/wgsl-cpu/tests/aggregates.rs` (`let c = 2.0;` and a `const K` used in
+`crates/wgsl-cpu/tests/it/aggregates.rs` (`let c = 2.0;` and a `const K` used in
 a loop body and then in both arms of two later `if`s), which failed with the
 verifier error above before the change.
 

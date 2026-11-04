@@ -28,10 +28,10 @@ records an orchestrator collected outside brain (a record per model call, the ad
 same `pg_batch::backward_weighted` step `Grpo` uses, so the clipped surrogate and the k3 KL exist once. Format, objective
 and call: `docs/reference/sdk.md`. Gated on the CPU with a tiny `qwen35` LoRA model: finite differences of the adapters
 on text rows (positive, negative, zero and no advantage, KL on) and on rows holding an image
-(`crates/rl/tests/external_policy_gradient_gradcheck.rs`); the advantage's direction, the clip per side, the KL against
+(`crates/rl/tests/it/external_policy_gradient_gradcheck.rs`); the advantage's direction, the clip per side, the KL against
 its definition, the on-policy first step and the supervised parity of a record without an advantage
 (`external_policy_gradient.rs`); the SDK run end to end on a qwen35 checkpoint, continuing an adapter
-(`crates/sdk/tests/chat_finetune_policy_gradient.rs`).
+(`crates/sdk/tests/it/chat_finetune_policy_gradient.rs`).
 
 - [ ] A real-weight check, on a card, which has not run: Qwen3.8-27B-FP8 as a bf16 base with a rank-16 adapter, the
       records of a few rollout groups with and without images and with the sampler's log-probabilities. It should

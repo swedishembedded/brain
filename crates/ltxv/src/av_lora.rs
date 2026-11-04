@@ -207,7 +207,7 @@ pub struct LoraAdapter {
 impl LoraAdapter {
     /// Fresh adapter sized for `cfg`. `B = 0`, so it is an **exact no-op at
     /// init** - `apply` returns weights bit-identical to the base, the same
-    /// bar `crates/ltxv/tests/av_lora_train.rs` asserts.
+    /// bar `crates/ltxv/tests/it/av_lora_train.rs` asserts.
     pub fn new(cfg: &AvCfg, lc: LoraCfg) -> LoraAdapter {
         let sites = linear_sites(cfg);
         let hp = TargetHp::from(lc);

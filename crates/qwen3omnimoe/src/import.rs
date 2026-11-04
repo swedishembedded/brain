@@ -317,7 +317,7 @@ pub fn map_code_predictor(hf: &str) -> Option<String> {
 /// 507-552) was never given that convention; it reads the untouched HF leaf
 /// names straight off its `ParamStore`. That rename made this unified
 /// checkpoint's code2wav tensors unloadable by their own consumer.
-/// `crates/qwen3omnimoe/tests/code2wav_parity.rs`
+/// `crates/qwen3omnimoe/tests/it/code2wav_parity.rs`
 /// already validated `Codec`'s forward pass against real Omni weights read
 /// this exact (prefix-stripped, otherwise untouched) way.
 pub fn map_code2wav(hf: &str) -> Option<String> {

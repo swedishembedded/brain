@@ -2502,7 +2502,7 @@ impl Qwen35 {
     /// kernel was measured at rather than the batched tensor-core block's, so
     /// the projection weight time grows by roughly 2.4-3x and batch-8 aggregate
     /// throughput falls to about the batch-4 level
-    /// (`crates/gpu-core/tests/i8_gemv_batched_variants.rs` has the rates).
+    /// (`crates/gpu-core/tests/it/i8_gemv_batched_variants.rs` has the rates).
     /// A speculative verify pass is not grouped
     /// (its rows are a sequence's consecutive tokens, not unrelated
     /// sequences); a serving caller turns speculation off in this regime.
@@ -7631,7 +7631,7 @@ impl Qwen35 {
     /// than [`Self::debug_res`] for localizing exactly where
     /// `tools/goldens/qwen35_gguf_reference_forward.py`'s independent
     /// CPython re-implementation diverges from this one on real weights
-    /// (see `crates/qwen35/tests/gguf_reference_parity_real.rs`'s doc
+    /// (see `crates/qwen35/tests/it/gguf_reference_parity_real.rs`'s doc
     /// comment for why that comparison exists and what it has already
     /// ruled out).
     ///
@@ -8189,7 +8189,7 @@ mod tests {
     /// `#[ignore]`d helper, with a generous ceiling published on both memory
     /// classes so [`gpu_core::Gpu::charged_bytes`] is populated regardless of
     /// which backend the ambient device selection resolves to here. Mirrors
-    /// `crates/qwen3/tests/mem_budget_inference.rs`'s own helper exactly.
+    /// `crates/qwen3/tests/it/mem_budget_inference.rs`'s own helper exactly.
     fn measure_charged_bytes(helper: &str) -> u64 {
         let exe = std::env::current_exe().expect("current_exe");
         let mut cmd = std::process::Command::new(exe);

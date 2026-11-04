@@ -3,7 +3,7 @@
 
 //! bf16/f16 host-side pack/unpack - the CPU half of B4's/B5's storage tiers
 //! (`kernels::template::dtype_variant`'s device-side decode is the other
-//! half; `crates/model/tests/bf16_roundtrip.rs`/`f16_roundtrip.rs` prove the
+//! half; `crates/model/tests/it/bf16_roundtrip.rs`/`f16_roundtrip.rs` prove the
 //! two agree end to end).
 //!
 //! **Bit layout - must match `dtype_variant`'s decode exactly.** A bf16 value

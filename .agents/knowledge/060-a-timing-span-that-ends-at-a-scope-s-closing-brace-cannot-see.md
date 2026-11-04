@@ -31,7 +31,7 @@ The general shape:
   call site, so a profile built from hand-placed spans will systematically
   under-count it. This is the second time device-buffer lifetime has cost this
   workspace real wall clock (the first was staging buffers on non-ReBAR cards,
-  `crates/gpu-core/tests/vram_overhead.rs`).
+  `crates/gpu-core/tests/it/vram_overhead.rs`).
 
 The corroborating check is cheap and was decisive: an external sampling
 profiler (`perf record --call-graph dwarf`, `--delay` past the cold phase)

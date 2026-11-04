@@ -61,7 +61,7 @@ hostile to the driver" (`gpu_core::Gpu::share`'s own doc comment) - already
 had an established fix pattern in this codebase before this session:
 `gpu_core::testgpu::dev()` (a per-test-binary, mutex-guarded shared-device
 pool) for tests that can share ONE device, and a local `DEVICE_SERIAL:
-Mutex<()>` (first established in `crates/gpu-core/tests/device_sharing.rs`)
+Mutex<()>` (first established in `crates/gpu-core/tests/it/device_sharing.rs`)
 for tests that must each build their OWN independent device and therefore
 cannot share via `testgpu::dev`. Most GPU-testing crates (`kronos`,
 `deepseek2`, `gpt2`, `glmdsa`, `qwen3`, `qwen35moe`, ...) already followed
@@ -79,24 +79,24 @@ multi-minute hang:
   `--test-threads=8` (the default) hung indefinitely. Fixed (3 call sites).
 - `crates/chronos2/src/model.rs` - the same pattern, found by the same sweep
   before it independently caused its own hang (3 call sites, fixed).
-- `crates/gpu-core/tests/device_churn.rs` - all 4 tests intentionally build
+- `crates/gpu-core/tests/it/device_churn.rs` - all 4 tests intentionally build
   several independent real devices in a loop (that IS the churn under test,
   so `testgpu::dev` sharing does not apply), but had no `DEVICE_SERIAL`
   guard, unlike its sibling `device_sharing.rs`. Reproduced: hung 15+
   minutes under the default `make test` run. Fixed by adding the same
   `DEVICE_SERIAL` lock `device_sharing.rs` already uses, held for each
   test's whole body.
-- `crates/lfm2/tests/chunked_equiv.rs` - both tests call `Lfm::new`/`new_
+- `crates/lfm2/tests/it/chunked_equiv.rs` - both tests call `Lfm::new`/`new_
   chunked`, which have no `_on(gpu, ...)` variant at all (every `lfm2`
   constructor builds its own device internally), so `testgpu::dev` sharing
   isn't available here either. Reproduced: hung 15+ minutes. Fixed with the
   same `DEVICE_SERIAL` pattern.
-- `crates/model/tests/conv_dtype_roundtrip.rs` - the three `_on_gpu` tests
+- `crates/model/tests/it/conv_dtype_roundtrip.rs` - the three `_on_gpu` tests
   each call `Gpu::new_wgpu` directly (deliberately bypassing the ambient
   backend selection to force a specific one, so `testgpu::dev` - which
   shares whatever backend the FIRST caller happened to build - is the wrong
   tool here too). Reproduced: hung 15+ minutes. Fixed with `DEVICE_SERIAL`.
-- `crates/catalog/tests/npu_model_parity.rs` - `tiny_chronos2()`/`tiny_fincast()`
+- `crates/catalog/tests/it/npu_model_parity.rs` - `tiny_chronos2()`/`tiny_fincast()`
   (each called from 3 different `#[test]` fns) used the same buggy
   `Chronos2::from_weights`/`Fincast::from_weights` fincast/chronos2's OWN
   tests had (above) - a SEPARATE call site in a different crate, so fixing
@@ -130,11 +130,11 @@ or a driver-side resource that both share.
 **Verification**: a full `make test` run (this session, after the fixes
 above landed) completed with zero failures and no hang, more than once. Two
 more instances of the identical pattern turned up later in the same sweep -
-`crates/backend-vulkan/tests/perf_contract.rs` (this crate's other
+`crates/backend-vulkan/tests/it/perf_contract.rs` (this crate's other
 `VulkanBackend::try_new`-direct file) and `crates/zipdepth/tests/
 p3_fused_eval.rs` (`Gpu::new_wgpu`, two non-`#[ignore]`d tests) - both fixed
 the same way, bringing the total to nine files across this session.
-`crates/gpu-core/tests/device_sharing.rs`'s own doc comment already named
+`crates/gpu-core/tests/it/device_sharing.rs`'s own doc comment already named
 this exact hazard and its fix - this sweep is that convention being applied
 everywhere it was missing, not a new idea. Worth a lint/CI grep (`Gpu::new(`/
 `Gpu::new_wgpu(`/`VulkanBackend::try_new(` outside `testgpu`/production
@@ -203,7 +203,7 @@ Two findings fall out of this, both surprising relative to the existing
    mechanism; the existing causal story is likely incomplete or wrong.
 2. **Neither extra settle time nor skipping destruction entirely helped -
    both made the observed rate measurably worse**, not better, at this
-   sample size. This corroborates `crates/gpu-core/tests/device_churn.rs`'s
+   sample size. This corroborates `crates/gpu-core/tests/it/device_churn.rs`'s
    own already-committed, already-`#[ignore]`d finding from a separate
    investigation: even a 1.5s delay between tearing down one device and
    building the next did not prevent this box's driver from destabilizing
@@ -275,7 +275,7 @@ passes clean without changing anything.
 version-specific driver bug is the most likely explanation given
 `nvidia-smi`'s reported 570.195.03 and the closed-source, symbol-free crash
 site), or file a driver bug report with the captured backtrace above and a
-minimal Vulkan repro extracted from `crates/gpu-core/tests/device_churn.rs`
+minimal Vulkan repro extracted from `crates/gpu-core/tests/it/device_churn.rs`
 (which already demonstrates the same instability class without any of
 brain's own model code involved).
 
@@ -337,7 +337,7 @@ set, not counted globally, so a caller-held `step_buf` step pins only its own
 operands instead of switching reclaim off device-wide - the omni streaming and
 per-token reclaim paths keep working unchanged.
 
-**Gate.** `crates/backend-vulkan/tests/deferred_reclaim.rs`. It asserts the
+**Gate.** `crates/backend-vulkan/tests/it/deferred_reclaim.rs`. It asserts the
 invariant directly - a still-named buffer is observably not destroyed
 (`buried_bytes`), the dispatch that names it computes the right answer, and an
 unreferenced sibling IS still reclaimed - rather than gating on "the process
@@ -445,7 +445,7 @@ Two further gaps found while measuring, both real and both open:
 sec35 recorded the effect and correctly attributed it to the wgpu backend. The
 mechanism is now identified, with hardware evidence.
 
-Re-confirmed unchanged (`crates/gpu-core/tests/vram_overhead.rs`, this pass):
+Re-confirmed unchanged (`crates/gpu-core/tests/it/vram_overhead.rs`, this pass):
 wgpu 2.00x with upload at both 256 MiB and 1024 MiB, 2.00x with 64 MiB
 chunking, 1.00x allocate-only, and native Vulkan 1.00x.
 
@@ -646,7 +646,7 @@ rather than reasoned about:
 
 ### The gate
 
-`crates/gpu-core/tests/vram_overhead.rs` keeps its shape and gains one probe:
+`crates/gpu-core/tests/it/vram_overhead.rs` keeps its shape and gains one probe:
 **host-to-device upload throughput**, best of three 1 GiB uploads with
 allocation excluded. Where staging lives decides the resident cost and the
 upload cost at once - host memory costs no VRAM but adds a DMA hop - and a
@@ -808,7 +808,7 @@ Fixed in `crates/backend-wgpu/src/lib.rs`: a `writes_pending` flag on
 them), and `flush` submits when writes are outstanding and no dispatch is.
 An idle flush still submits nothing, because `poll_wait` calls flush once per
 step and a queue round trip in each would be its own regression. Both halves
-are pinned by `crates/backend-wgpu/tests/upload_flush.rs`, which was confirmed
+are pinned by `crates/backend-wgpu/tests/it/upload_flush.rs`, which was confirmed
 red before the fix and green after.
 
 ### What was built in the fork
@@ -870,7 +870,7 @@ Design points that took the actual thought:
 
 ### The numbers
 
-**`crates/gpu-core/tests/vram_overhead.rs`, 1 GiB, best of three** - the
+**`crates/gpu-core/tests/it/vram_overhead.rs`, 1 GiB, best of three** - the
 project's own gate, so this is the row that counts. Final column taken on a
 **completely idle box**, both cards at 0 MiB / 0% util:
 

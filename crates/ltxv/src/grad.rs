@@ -60,7 +60,7 @@
 //!
 //! Generic over [`Fp`], same discipline as `wan::grad`: the `f64`
 //! instantiation is the finite-difference gradcheck oracle
-//! (`gradcheck::check_ltxv`, `crates/ltxv/tests/block_grad.rs`), the `f32`
+//! (`gradcheck::check_ltxv`, `crates/ltxv/tests/it/block_grad.rs`), the `f32`
 //! instantiation is the host trainer `crate::finetune` drives. One
 //! implementation, so the oracle and the trainer cannot drift apart.
 //!

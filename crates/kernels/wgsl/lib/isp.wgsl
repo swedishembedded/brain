@@ -3,7 +3,7 @@
 
 // The photometric camera model on the device: the WGSL twin of the per-pixel
 // chain in `crates/splat/src/isp.rs`, which is its test oracle
-// (`crates/splat/tests/s17_camera_model.rs` holds the two to each other).
+// (`crates/splat/tests/it/s17_camera_model.rs` holds the two to each other).
 // Imported with `// @import isp`.
 //
 //   radiance L

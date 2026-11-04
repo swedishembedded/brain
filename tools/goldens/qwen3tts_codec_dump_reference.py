@@ -9,12 +9,12 @@ The reference is the upstream `qwen-tts` package's `Qwen3TTSTokenizerV2Model`
 CPU against the released `Qwen3-TTS-Tokenizer-12Hz` checkpoint. Two dumps:
 
   `codec_ref/`      decode side: `codes.bin` [T,16] u32 -> `waveform.bin` f32,
-                    read by `crates/mimi/tests/decode.rs`. The codes are the
+                    read by `crates/mimi/tests/it/decode.rs`. The codes are the
                     reference ENCODER's own output on a real speech clip, not a
                     random draw, so the decode gate runs on a code sequence the
                     model actually produces.
   `codec_enc_ref/`  encode side: `wav.bin` f32 -> `codes.bin` [T,16] u32, read
-                    by `crates/mimi/tests/encode.rs`.
+                    by `crates/mimi/tests/it/encode.rs`.
 
 Both `.bin` files are `<u64 LE element count><payload LE>`, the format those
 two suites already parse.

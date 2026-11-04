@@ -85,7 +85,7 @@ down: `VulkanBackend`'s command-buffer recording and `VkContext::run_cmd`/
 and the Vulkan spec requires host access to both to be externally
 synchronized - two threads sharing a device via the newly-working `share()`
 reproduced a REAL `ERROR_DEVICE_LOST` within seconds
-(`crates/gpu-core/tests/device_sharing.rs::concurrent_shared_handles_do_not_deadlock`,
+(`crates/gpu-core/tests/it/device_sharing.rs::concurrent_shared_handles_do_not_deadlock`,
 unreliable before a fix, clean after adding `VkContext::queue_lock`, held
 across every allocate-record-submit-wait-free sequence).
 

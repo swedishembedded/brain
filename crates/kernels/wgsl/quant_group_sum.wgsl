@@ -49,7 +49,7 @@
 // = 32, model::int8::WORDS_PER_GROUP = 8), so one thread reads exactly 8
 // words. |S| <= 32*127 = 4064, far inside f32's exact-integer range (2^24),
 // so `f32(sum)` loses nothing - the whole kernel is bit-exact by construction,
-// no tolerance ever applies to it (crates/model/tests/quant_group_sum.rs
+// no tolerance ever applies to it (crates/model/tests/it/quant_group_sum.rs
 // gates that with assert_eq! against a host-computed integer oracle).
 //
 // K must be a multiple of 32 (one thread's whole group). One invocation per

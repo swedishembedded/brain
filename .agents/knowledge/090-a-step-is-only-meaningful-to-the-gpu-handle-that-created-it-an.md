@@ -10,7 +10,7 @@ DiT's own `Step`s do (`flux1::inject`'s module doc states the contract
 outright: "the steps an implementor pushes MUST be built from the SAME
 `gpu_core::Gpu` handle the model was built with"). The only caller of
 `joint_kernels()` in the whole workspace was a test
-(`crates/pulid/tests/parity.rs`). Production code - `pulid::caps::Bundle::load`
+(`crates/pulid/tests/it/parity.rs`). Production code - `pulid::caps::Bundle::load`
 - built the DiT from `Flux1::load`'s own internal `Gpu::new(flux1::KERNELS)`
 and built `PulidCa` on a *different* `Gpu::new_like(crate::model::KERNELS)` -
 two independent kernel lists, hence two independent index spaces, feeding one

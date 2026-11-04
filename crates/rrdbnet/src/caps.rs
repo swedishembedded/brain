@@ -39,7 +39,7 @@ use crate::model::Rrdb;
 ///
 /// A BARE name, like its siblings in the imaging stack (`sam2`, `scrfd`,
 /// `arcface`, `vqgan`, `restore`, `clip`, `imgpipe`) - which resolve under the reserved
-/// `brain` vendor. `crates/cli/tests/model_ids.rs` requires every static
+/// `brain` vendor. `crates/cli/tests/it/model_ids.rs` requires every static
 /// catalog id to sit under a reserved vendor, so the upstream-repo spelling
 /// (`ai-forever/Real-ESRGAN`) is NOT usable here: that vendor is fetchable, and
 /// this model is served from a locally-configured checkpoint, not fetched.

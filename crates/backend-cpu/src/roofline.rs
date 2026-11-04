@@ -60,7 +60,7 @@ const SHAPES: [(usize, usize, usize, usize, usize, usize, usize); 3] = [
 /// Timed repeats per shape; the contention-robust minimum is kept, same as
 /// `bench_conv_gflops`. Lower than that ignored bench's `n=30` on purpose -
 /// this must run in well under a second, and a min-of-6 is already stable on
-/// real hardware (see `crates/backend-cpu/tests/roofline.rs` for the
+/// real hardware (see `crates/backend-cpu/tests/it/roofline.rs` for the
 /// cross-check against the full ignored bench's real output).
 const REPEATS: usize = 6;
 

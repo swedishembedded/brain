@@ -15,6 +15,6 @@ Cause: with a bf16 base the library GEMM tier rounds the activation operand of e
 
 ## Fix and rule
 
-`check_qwen35_lora_on` pins `GemmPrecision::Fp32Reference`; it then passes on CUDA and CPU. The tensor-core tier is held to the reference on training signal by `crates/qwen35/tests/lora_gemm_precision.rs` (loss and gradient cosine 0.999), which is where a wrong tensor-core backward would show.
+`check_qwen35_lora_on` pins `GemmPrecision::Fp32Reference`; it then passes on CUDA and CPU. The tensor-core tier is held to the reference on training signal by `crates/qwen35/tests/it/lora_gemm_precision.rs` (loss and gradient cosine 0.999), which is where a wrong tensor-core backward would show.
 
 Rule: a finite-difference check needs a smooth forward. Before reading an FD mismatch on a new backend as a backward defect, (1) repeat the forward at a perturbation ladder and see whether the loss change is monotone, (2) compare the analytic gradient at identical weights with another backend's analytic gradient, and (3) check which rounding tiers the backend's default turns on. A mismatch that persists with a smooth forward is a defect; one that disappears when the rounding tier is pinned is a property of the check.

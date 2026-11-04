@@ -231,7 +231,7 @@ impl View {
 /// handedness nor the zero of `mjvCamera`'s azimuth), and a function that
 /// needs a window and a GPU to run cannot be asserted about. The convention
 /// this is built on is MEASURED, in
-/// `crates/mujoco/tests/render.rs::moving_the_lookat_towards_plus_y_sweeps_the_subject_right`:
+/// `crates/mujoco/tests/it/render.rs::moving_the_lookat_towards_plus_y_sweeps_the_subject_right`:
 /// at azimuth 0 the camera is on -x looking towards +x, world +y is on the
 /// LEFT of the frame, and pushing the look-at point towards +y sweeps the
 /// subject right.

@@ -47,7 +47,7 @@ from golden_source import source_block  # noqa: E402
 def dequant_block128(raw: torch.Tensor, scale_inv: torch.Tensor, block: int = 128) -> torch.Tensor:
     """`out[r,c] = raw[r,c] * scale_inv[r//block, c//block]` - byte-identical
     semantics to `model::fp8::dequant_block128` (Rust side), checked directly
-    against it by `crates/qwen35/tests/real_weight_streaming.rs`."""
+    against it by `crates/qwen35/tests/it/real_weight_streaming.rs`."""
     rows, cols = raw.shape
     w = raw.to(torch.float32)
     s = scale_inv.to(torch.float32)

@@ -30,7 +30,7 @@ head layout; clustering, selection and the sparse read are written once.
       (row, KV head) serves the whole query-head group from each staged row,
       16-key tiles, no redundant P.V work; matches the per-head kernel at
       groups 1, 2, 4, 8. Measured one Qwen3-0.6B-shaped layer on a P40 (wgpu,
-      f32 KV, `crates/model/tests/lsa_prefill_bench.rs`, k=2048, w=512):
+      f32 KV, `crates/model/tests/it/lsa_prefill_bench.rs`, k=2048, w=512):
       dense `paged_flash_prefill` 45 / 143 / 569 / 2249 / 9011 ms at
       4k / 8k / 16k / 32k / 64k tokens against sparse 556 / 1371 / 2957 /
       6312 / 12869 ms - linear against quadratic, but the per-query gather

@@ -85,7 +85,7 @@ fn import(args: &[String]) {
 /// its `.lora_a`/`.lora_b` deltas are folded into the loaded base tensors
 /// once, before `Qwen35::new_on` ever runs (`qwen35::lora::
 /// fold_adapter_into`, gated exact against the live unfolded forward by
-/// `crates/qwen35/tests/lora_adapter_file.rs`) - so every downstream stage
+/// `crates/qwen35/tests/it/lora_adapter_file.rs`) - so every downstream stage
 /// (KV cache, sampling) sees a plain adapted model at zero extra per-token
 /// cost, with no other code path in this function aware an adapter was even
 /// involved. A plain local file path (unlike `qwen_cli::finetune_lora`'s

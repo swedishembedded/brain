@@ -12,7 +12,7 @@ Scope: Running one training job as ranks across machines - the job plan every ra
       `CollectiveResult`; a lost peer or a rejected payload leaves the
       replica's weights and optimiser state untouched, so a driver can stop at
       the last committed step instead of losing the process. Tests:
-      `crates/model/tests/collective_errors.rs`.
+      `crates/model/tests/it/collective_errors.rs`.
 - [x] **A job plan every rank validates.** `model::job::JobPlan` names the job,
       the world size, the tp/pp/dp grid and the coordinator; it is a value the
       launcher writes, never something brain reads from a scheduler. Every
@@ -25,7 +25,7 @@ Scope: Running one training job as ranks across machines - the job plan every ra
       rank the reason, and each op carries a timeout from the plan, so no rank
       waits forever for a payload that will not come. Join announcements and
       aborts are length-bounded.
-- [x] **A cluster can be simulated without a scheduler.** `crates/model/tests/distributed_job.rs`
+- [x] **A cluster can be simulated without a scheduler.** `crates/model/tests/it/distributed_job.rs`
       starts one OS process per rank on loopback, with the same plan file, and
       covers: a three-rank reduction across processes, a rank that exits after
       joining (its peers get an error inside the plan's bound instead of
@@ -63,7 +63,7 @@ Scope: Running one training job as ranks across machines - the job plan every ra
       the checkpoint (the replicas are bit-identical); every rank reads it to
       resume. Tests: the disjoint-shard/union and one-rank-identity cases in
       `crates/model/src/train.rs`, and
-      `crates/gpt2/tests/distributed_train.rs`, which starts two OS processes
+      `crates/gpt2/tests/it/distributed_train.rs`, which starts two OS processes
       over loopback and asserts their trained replicas are bit-identical.
 
 - [x] **A train verb takes a job plan.** `brain gpt2 train <data_dir>
@@ -111,7 +111,7 @@ Scope: Running one training job as ranks across machines - the job plan every ra
       run needs no device and no environment variable. Tests: the collective
       unit tests (accounting, dtype widths, percentile ranks, the link's
       latency/bandwidth/seeded-jitter properties, and the failure firing
-      point), and `crates/bench/tests/distributed_profile.rs`, which runs the
+      point), and `crates/bench/tests/it/distributed_profile.rs`, which runs the
       profile small and parses its report.
 
 - [x] **A distributed run reports its own collective cost.**

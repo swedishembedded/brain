@@ -14,7 +14,7 @@ every row for every state.
 Separating the symbols with whitespace fixes it structurally: the
 pre-tokenizer cuts on whitespace before WordPiece runs and a lone letter is in
 every vocabulary of this family, so the stream is one token per symbol at a
-fixed index for every state. `crates/decide/tests/state_tokenization.rs` holds
+fixed index for every state. `crates/decide/tests/it/state_tokenization.rs` holds
 both halves.
 
 HONEST SCOPE, because this is the more useful half of the lesson. Fixing this

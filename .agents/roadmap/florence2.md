@@ -197,7 +197,7 @@ self-consistent.
   plain read-only operand) for the position-embedding add specifically,
   since that one case has a legitimate two-buffer-only shape.
 
-  **Validation**: `crates/florence2/tests/text_lm_parity.rs` - encoder
+  **Validation**: `crates/florence2/tests/it/text_lm_parity.rs` - encoder
   output and one decoder step's teacher-forced logits (fixed `PROMPT_IDS`/
   `DECODER_IDS`, not real tokenizer output - see the dump script's own doc)
   against `tools/goldens/florence2_dump_reference.py::dump_encdec`'s golden,
@@ -254,7 +254,7 @@ self-consistent.
   since it is the one shaped for "here is a short phrase, give me one
   box" - the UI-grounding need this whole initiative is scoped around.
 
-  **Validated**: `crates/florence2/tests/ground_smoke.rs` runs the FULL
+  **Validated**: `crates/florence2/tests/it/ground_smoke.rs` runs the FULL
   `ground` action against the real checkpoint end to end (image decode,
   resize/normalize, vision tower, tokenizer encode, encoder,
   `Florence2Lm::generate`'s multi-step loop - never exercised anywhere
@@ -297,7 +297,7 @@ self-consistent.
   everything) builds clean. A real, unrelated pre-existing gap was found and
   fixed along the way: `wan`/`flux2` both dispatch the `lora_delta` kernel
   but `gpu-core`'s cost-formula table never gained an entry for it, so
-  `crates/cli/tests/flops_coverage.rs`'s coverage gate was failing on a
+  `crates/cli/tests/it/flops_coverage.rs`'s coverage gate was failing on a
   clean build before this session touched anything - fixed on the spot
   (own commit, unrelated to florence2 itself) rather than left broken.
 - **M6 (done)**: LoRA + full fine-tune training for the BART text side,
@@ -364,7 +364,7 @@ self-consistent.
   a foreign trait directly on `Florence2Trainer` against this crate's own
   blanket `model::Model` impl), both passing at the workspace-standard
   `(4e-3, 8e-2)` tolerance with zero dead gradients, over every trainable
-  tensor in both configurations. `crates/florence2/tests/train_overfit.rs`:
+  tensor in both configurations. `crates/florence2/tests/it/train_overfit.rs`:
   full fine-tune drives a single random-init example's loss to ~1e-5 and a
   two-example batch to ~5e-5; LoRA against a real (full-fine-tuned) base
   makes large real progress on a second, different example (16.2 -> 0.0005);

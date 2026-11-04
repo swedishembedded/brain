@@ -18,13 +18,13 @@
 //!
 //! **Scope of B3/B4/B5.** B3 built the façade and proved it reproduces
 //! today's `dispatch.rs`/`int8.rs`/`int4.rs` numeric behaviour exactly
-//! (`crates/model/tests/ops_facade_parity.rs`) for `F32`, `I8` (DP4A,
+//! (`crates/model/tests/it/ops_facade_parity.rs`) for `F32`, `I8` (DP4A,
 //! `model::int8`), `Q4` (W4A8, `model::int4`). B4 added the fourth tier,
 //! `BF16` (`model::half::pack_bf16` + the `#w=bf16` kernel variants
 //! `kernels::template::dtype_variant` produces - see `crates/model/tests/
 //! bf16_roundtrip.rs`). B5 adds the fifth, `F16` (`model::half::pack_f16` +
 //! the `#w=f16` kernel variants, magic-multiply decode - see
-//! `crates/model/tests/f16_roundtrip.rs`). **No model crate's call sites were
+//! `crates/model/tests/it/f16_roundtrip.rs`). **No model crate's call sites were
 //! migrated by any of these phases** - `crates/qwen3`, `crates/flux1`,
 //! `crates/flux2` etc. are untouched; that migration is a later phase (B7).
 //!
@@ -2984,7 +2984,7 @@ mod tests {
     /// one-thread-per-output `matmul_q4_dyn` this arm used to bind (see this
     /// module's own kernel-performance ledger entry: faster at every
     /// measured shape, the gain growing with m, and bit-identical to `matmul_q4_dyn`,
-    /// `crates/model/tests/matmul_q4_gemm.rs::
+    /// `crates/model/tests/it/matmul_q4_gemm.rs::
     /// matmul_q4_dyn_reg_matches_fp32_oracle_and_is_bit_identical_to_dyn`).
     /// The sibling `(PackedInt8, Dtype::I8)` arm already binds its own tiled
     /// kernel (`matmul_i8_dyn`); this pins that `Q4` now gets the same

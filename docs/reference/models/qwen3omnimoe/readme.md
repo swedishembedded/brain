@@ -116,7 +116,7 @@ Two limits worth knowing before you point it at real weights:
 
 - **Use `--device vulkan`.** On the default wgpu backend a non-ReBAR Pascal
   card holds roughly double each uploaded buffer resident, measured by the
-  committed regression test `crates/gpu-core/tests/vram_overhead.rs`; brain's
+  committed regression test `crates/gpu-core/tests/it/vram_overhead.rs`; brain's
   own Vulkan backend does not carry that overhead. At the real Thinker shape
   the difference decides whether the model fits two 24 GB cards at all.
 - **This path is Thinker text only.** It has no multimodal splice and no

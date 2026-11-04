@@ -1839,7 +1839,7 @@ pub fn chunked_bidir_fwd_win(
 /// correctly-windowed `probs` naturally produces a zero gradient at every
 /// masked position with no windowing logic of its own. This is a real,
 /// verified property, not an assumed one - see
-/// `crates/model/tests/chunked_bidir_bwd_win.rs`'s own finite-difference
+/// `crates/model/tests/it/chunked_bidir_bwd_win.rs`'s own finite-difference
 /// check, which is what actually proves it rather than the reasoning above.
 ///
 /// Every parameter matches [`chunked_bidir_bwd`] except the added `window`,

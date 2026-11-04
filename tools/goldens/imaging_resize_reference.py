@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-"""Print the reference resizes `crates/imaging/tests/resize_reference.rs`
+"""Print the reference resizes `crates/imaging/tests/it/resize_reference.rs`
 embeds: PIL's fixed-point bicubic on uint8 RGB (what torchvision's resize does
 to a PIL image), torch's antialiased bicubic on a uint8 tensor (what
 torchvision's resize does to a tensor image), and torch's antialiased

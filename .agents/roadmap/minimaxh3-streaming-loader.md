@@ -33,7 +33,7 @@ make that a single command.
 
 ## Hypotheses killed, with the probe that killed each
 
-`crates/gpu-core/tests/bench_upload_cadence.rs` - per-CALL fixed costs of
+`crates/gpu-core/tests/it/bench_upload_cadence.rs` - per-CALL fixed costs of
 the upload primitives on a real P40. Every timed region ends in a real
 readback, never a bare `write`/`submit` return (see `vram_overhead.rs`'s own
 history of probes that measured nothing because `write_buffer` had not been
@@ -64,7 +64,7 @@ warm, so the `write_at` path was never where a large missing time could hide.
 
 ## The retraction
 
-A first version of `crates/minimaxh3/tests/bench_block_load.rs` compared
+A first version of `crates/minimaxh3/tests/it/bench_block_load.rs` compared
 whole-tensor decode against bounded chunked decode and reported whole-tensor
 several times slower, which pointed convincingly at
 `TensorSource::with_tensor` materialization as the root cause (every DiT
@@ -105,8 +105,8 @@ not the code.
 
 ## What was kept
 
-* `crates/gpu-core/tests/bench_upload_cadence.rs` - the three probes above.
-* `crates/minimaxh3/tests/bench_block_load.rs` - the corrected host-decode
+* `crates/gpu-core/tests/it/bench_upload_cadence.rs` - the three probes above.
+* `crates/minimaxh3/tests/it/bench_block_load.rs` - the corrected host-decode
   comparison, with the `.to_vec()` trap documented in place so the next
   person does not re-dig it.
 * `crates/minimaxh3/src/model.rs`:

@@ -27,7 +27,7 @@
 //!
 //! `data::qwen_tokenizer::QwenBpe` (unlike `ClipBpe`) accepts a merge-free
 //! byte-level `tokenizer.json` - the exact synthetic fixture
-//! `crates/sdk/tests/document_study.rs::write_base_dir` builds, reused here
+//! `crates/sdk/tests/it/document_study.rs::write_base_dir` builds, reused here
 //! (via a local `write_qwen3_embed_base`) with no real checkpoint or network
 //! access needed at all.
 
@@ -168,7 +168,7 @@ fn download_policy_offline_never_touches_the_network() {
 
 /// A tiny, randomly initialised Qwen3 checkpoint plus a merge-free byte-level
 /// `tokenizer.json` (every input byte is its own token - the same fixture
-/// shape `crates/sdk/tests/document_study.rs::write_base_dir` builds), so the
+/// shape `crates/sdk/tests/it/document_study.rs::write_base_dir` builds), so the
 /// Qwen3 backend can be driven end to end with no real checkpoint and no
 /// network access. `vocab` only needs to cover the 256-entry byte alphabet -
 /// unlike `document_study.rs`'s fixture, nothing here runs through

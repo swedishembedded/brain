@@ -138,7 +138,7 @@ for the full how-to.
   bars it loses by 50%; at 24 bars, by 74%.
 - On a single series, point accuracy is a tie with persistence at best: the
   model's own published metric is cross-sectional rank IC across a universe of
-  instruments (`crates/kronos/tests/rankic_eval.rs`), which is a different
+  instruments (`crates/kronos/tests/it/rankic_eval.rs`), which is a different
   question from level accuracy on one name.
 - The KV-cached rollout (`--samples`, the D-Bus path, the resident server) is
   **exact against the upstream implementation only while `context + horizon

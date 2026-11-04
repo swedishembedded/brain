@@ -5,7 +5,7 @@
 """Dump LTX-2.5 AUDIO+VIDEO DiT stream reference goldens (tiny random weights).
 
 Sibling of `ltxv_dit_dump_reference.py` (that script and its golden output
-are NOT modified - `crates/ltxv/tests/dit_parity.rs` depends on them
+are NOT modified - `crates/ltxv/tests/it/dit_parity.rs` depends on them
 unchanged). Runs the OFFICIAL `ltx_core.model.transformer.model.LTXModel`
 (CPU, fp32), built with `model_type=LTXModelType.AudioVideo` (the same
 construction `LTXModelConfigurator` uses for the real 22B+audio checkpoint -

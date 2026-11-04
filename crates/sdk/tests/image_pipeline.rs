@@ -24,7 +24,7 @@
 //! `flux2::Flux2Config::from_name`, which answers with exactly one of four
 //! REAL FLUX.2 variants (klein-4b/9b, base-4b/9b) -- there is no "tiny"
 //! variant available through this API, unlike the DiT-only smoke tests
-//! elsewhere in this workspace (`crates/flux2/tests/model_smoke.rs`), which
+//! elsewhere in this workspace (`crates/flux2/tests/it/model_smoke.rs`), which
 //! build a hand-shrunk `Flux2Config` that this facade is never handed. Even
 //! the smallest real variant (klein-4b) is a several-billion-parameter
 //! model; a fixture carrying its full, real tensor set would be multiple
@@ -54,7 +54,7 @@
 //! which then fails CLEANLY (a typed `brain::Error`, never a panic, never a
 //! silent partial success) on a deliberately-incomplete weight-tensor set,
 //! the same "just the classification tensors, not the full manifest"
-//! fixture shape `crates/flux2/tests/resolve_layout.rs`/`crates/s3dit/src/
+//! fixture shape `crates/flux2/tests/it/resolve_layout.rs`/`crates/s3dit/src/
 //! spec.rs`'s own `turbo_fixture` test helper already use for exactly this
 //! reason. `Image::save`'s own reuse of the shared `imaging` codec,
 //! `Image::from_hwc_unit`'s float-HWC normalization, and
@@ -111,7 +111,7 @@ fn f32_tensor(name: &str, shape: Vec<usize>) -> TensorOut {
 }
 
 /// Only the five tensors `flux2::dit_config_from_shapes` actually reads for
-/// CLASSIFICATION (mirrors `crates/flux2/tests/resolve_layout.rs`'s own
+/// CLASSIFICATION (mirrors `crates/flux2/tests/it/resolve_layout.rs`'s own
 /// `write_dit_gguf`) -- not the full real tensor manifest, which at real
 /// klein-4b dimensions would be several gigabytes of weights for a fixture
 /// that only needs its own shape read back. This is also exactly what makes

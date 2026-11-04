@@ -312,7 +312,7 @@ golden_tree "timesfm3"     "golden/timesfm3"
 
 # --- SAM 2.1 stage goldens (promptable segmentation, image path) -------------
 # The CHECKPOINTS come from the store above (`facebook/sam2.1-hiera-*`), which is
-# where `crates/sam2/tests/parity.rs` looks when `testdata/sam2/<variant>/` has
+# where `crates/sam2/tests/it/parity.rs` looks when `testdata/sam2/<variant>/` has
 # no local copy. Only the stage goldens
 # (`{input,trunk,neck,case_*}.safetensors`, ~1 GB per variant) belong here, and
 # they are NOT mirrored anywhere: regenerate them with
@@ -320,7 +320,7 @@ golden_tree "timesfm3"     "golden/timesfm3"
 #       --config <sam2 repo>/sam2/configs/sam2.1/sam2.1_hiera_t.yaml \
 #       --ckpt   <models-dir>/facebook/sam2.1-hiera-tiny/sam2.1_hiera_tiny.pt \
 #       --out    testdata/sam2/hiera-tiny --seed 42
-# `crates/sam2/tests/parity.rs` skips itself while they are absent.
+# `crates/sam2/tests/it/parity.rs` skips itself while they are absent.
 
 # --- Face recognition (insightface antelopev2: SCRFD + ArcFace) --------------
 # The two released ONNX files the face crates import - `crates/scrfd` reads the
@@ -396,7 +396,7 @@ fi
 # variable would ever be set for them.
 #
 # The tokenizer is all-MiniLM-L6-v2's `tokenizer.json` alone - ~470 kB, read by
-# `crates/data/tests/wordpiece_parity.rs`. The model's WEIGHTS are not here:
+# `crates/data/tests/it/wordpiece_parity.rs`. The model's WEIGHTS are not here:
 # they are a checkpoint and come from the store via
 # `brain pull sentence-transformers/all-MiniLM-L6-v2`.
 #

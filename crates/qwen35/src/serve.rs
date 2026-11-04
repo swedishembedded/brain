@@ -96,7 +96,7 @@
 //! causal-conv input tail (`model::gdn_mixer::GdnStream`). The invariant that
 //! matters to this engine is that a completed prefill leaves EXACTLY the
 //! state a per-token replay would have: `decode_batch` then continues with no
-//! special case at all. `crates/qwen35/tests/chunked_prefill.rs` gates that
+//! special case at all. `crates/qwen35/tests/it/chunked_prefill.rs` gates that
 //! against the per-token path directly.
 //!
 //! What is still deferred here is the ATTENTION MEMORY at very long context -

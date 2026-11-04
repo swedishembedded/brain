@@ -17,7 +17,7 @@ wrong number at the end:
   pooled_mean    mask-aware mean pooling, which is the sentence-transformer head
 
 Token ids are fixed rather than tokenized, so forward parity is isolated from
-tokenizer parity (`crates/data/tests/wordpiece_parity.rs` owns the other half).
+tokenizer parity (`crates/data/tests/it/wordpiece_parity.rs` owns the other half).
 
 The batch deliberately exercises, in one dump, the three things an explicit
 forward gets wrong independently of the arithmetic: BOTH token_type ids (row 0

@@ -31,7 +31,7 @@ whether it loads - see #4 on degenerate test setups hiding a whole bug
 class), (2) **save, then load in a fresh process/struct** rather than
 comparing against the live trained model still sitting in memory, (3) assert
 the reloaded logits *differ from the base* by a real margin, not merely
-"didn't get worse". `crates/qwen3/tests/lora_roundtrip.rs` does all three;
-`crates/qwen3/tests/lora_learning_gate.rs` (Gate A) goes one further and
+"didn't get worse". `crates/qwen3/tests/it/lora_roundtrip.rs` does all three;
+`crates/qwen3/tests/it/lora_learning_gate.rs` (Gate A) goes one further and
 reintroduces this exact defect on purpose as its own verification that the
 gate has teeth, rather than trusting the story that it would have caught it.

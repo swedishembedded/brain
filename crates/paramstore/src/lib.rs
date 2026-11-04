@@ -54,7 +54,7 @@ pub const DEVICE_INT8_BLOCK: u32 = 64;
 /// elements, never a whole tensor (relevant tensors run up to ~1.5 GB as
 /// f32) — see [`ParamStore::new_with_roles_src`]. This is a distinct fix
 /// from wgpu's own per-buffer device-side staging overhead (lesson #35,
-/// `crates/gpu-core/tests/vram_overhead.rs`): that one is backend-level and
+/// `crates/gpu-core/tests/it/vram_overhead.rs`): that one is backend-level and
 /// chunking write CALLS does not change it; this constant only bounds what
 /// this crate allocates on the host to produce those calls.
 pub const UPLOAD_CHUNK_WORDS: usize = 1 << 20;

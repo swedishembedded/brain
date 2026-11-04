@@ -346,7 +346,7 @@ mod tests {
     //
     // Mirrors `s3dit::spec`'s own `turbo_fixture` test helper (same tensor
     // names/shapes `S3ditSpec::classify`/`validate` actually read) and
-    // `crates/flux2/tests/resolve_layout.rs`'s HF-checkpoint fixture (a real
+    // `crates/flux2/tests/it/resolve_layout.rs`'s HF-checkpoint fixture (a real
     // `config.json` + one shard + its index - `hfdir_record` in
     // `brain_modelstore::inventory` refuses to collapse a directory with no
     // real shard file into an `HfDir` record at all), so the resolver's own
@@ -435,7 +435,7 @@ mod tests {
         // for the tokenizer role at all - `brain_modelstore::inventory::
         // walk_vendor_dir` only recognizes `tokenizer.json` by filename one
         // level deeper, inside a repo-shaped directory (see
-        // `crates/flux2/tests/resolve_layout.rs`'s own tokenizer fixture,
+        // `crates/flux2/tests/it/resolve_layout.rs`'s own tokenizer fixture,
         // which notes the same rule). A real fetched tokenizer always sits
         // in its own repo directory, so this is what makes the fixture real.
         let tok_dir = vendor.join("Qwen3-4B-tokenizer");

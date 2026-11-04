@@ -15,7 +15,7 @@ Plain bf16 decode (`brain_gdn_decode_pool_stream_bf16`) keeps a head's state til
 
 ## Evidence (gpu1)
 
-- `crates/model/tests/gdn_verify_native.rs`: every verified row (layer output), the pool after the last row, every snapshot and the bf16 commit are bit-identical to repeated plain bf16 decode steps, at 1..16 key heads, 1..3 value heads a key head, 1..8 rows, ragged batches. Red first (the staged path could not run it), green after. compute-sanitizer memcheck and racecheck on that test: 0 errors.
+- `crates/model/tests/it/gdn_verify_native.rs`: every verified row (layer output), the pool after the last row, every snapshot and the bf16 commit are bit-identical to repeated plain bf16 decode steps, at 1..16 key heads, 1..3 value heads a key head, 1..8 rows, ragged batches. Red first (the staged path could not run it), green after. compute-sanitizer memcheck and racecheck on that test: 0 errors.
 - `crates/qwen35/tests/hf_fp8_speculative.rs`: greedy speculation over bf16 pools token-identical to plain greedy, request for request (the tiny fixture does not discriminate: the strict assertion also passes on the staged path, so the kernel test above is the gate that bites).
 - nsys, 8K x 4 `--speculative mtp`, GPU time of verify + staging + commit kernels a verify round (48 linear layers): staged 9.7 ms (141 rounds, 1368 ms) -> 1.57 ms (319 rounds, 501 ms: verify 21 us a layer, commit 12 us).
 

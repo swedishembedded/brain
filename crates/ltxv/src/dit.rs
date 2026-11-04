@@ -1576,7 +1576,7 @@ pub struct AvStreamedStep<'a> {
 /// fixed context, so a cached routing IS the recomputed one; and residency
 /// changes WHEN bytes move, never what any kernel reads. What is NOT exact
 /// against the fp32 arm is the quantization itself - int8 is a lossy tier,
-/// gated by `crates/ltxv/tests/av_dit_parity.rs` on cosine AND relative L2
+/// gated by `crates/ltxv/tests/it/av_dit_parity.rs` on cosine AND relative L2
 /// against the fp32 AV block on real weights.
 #[allow(clippy::too_many_arguments)]
 pub fn av_forward_q_streamed(

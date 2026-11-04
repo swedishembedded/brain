@@ -215,7 +215,7 @@ irregular, longitudinal}`) return the truth a score needs, and
 `survival_longitudinal`). Each trains a small horizon model on the device
 `BRAIN_BACKEND` selects and scores it against the generator's truth with
 `brain-survival` (integrated squared-error probability score, concordance/Uno C, time-dependent AUC,
-calibration at a horizon); the tests in `crates/bench/tests/survival_bench.rs`
+calibration at a horizon); the tests in `crates/bench/tests/it/survival_bench.rs`
 hold them to:
 
 - `survival_single`: covariates give one absorbing event under censoring; the
@@ -304,7 +304,7 @@ Two kinds of calibrator, selected with `CalibrationSpec::kind` (`kind` of the
 
 The default was chosen by measurement, on populations whose true risk is known
 per subject (a large independent test population, several validation sizes,
-models trained apart; `crates/horizon/tests/calibration_measure.rs`). An
+models trained apart; `crates/horizon/tests/it/calibration_measure.rs`). An
 isotonic fit is a free-form step function; fitted on a few hundred events it
 chases noise, so its output is more spread than the truth. The recalibration
 slope measured on new data then falls below one - on a model that was already
@@ -572,7 +572,7 @@ open), not the Venn-Abers interval (what the calibration data leave open): the
 two answer different questions and are reported separately.
 
 What was measured (synthetic populations with known truth,
-`crates/sdk/tests/ensemble.rs`, `ensemble_comparison`, two seeded data sets): the
+`crates/sdk/tests/it/ensemble.rs`, `ensemble_comparison`, two seeded data sets): the
 mean risk of both kinds of ensemble was closer to the true risk than one model's
 on the population they were trained on, and calibrated at least as well in most
 cases (neither kind was consistently better calibrated than the other); the

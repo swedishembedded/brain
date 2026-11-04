@@ -335,11 +335,11 @@ deltas sum exactly. A linear headed for an **fp32** upload still folds - that
 is exact, and free per forward - which covers the double blocks' `mlp.2`, the
 three boundary linears, and anything held back by `BRAIN_FLUX2_I8_KEEP_F32`.
 
-Gated exactly, one linear at a time, in `crates/model/tests/lora_runtime_delta.rs`
+Gated exactly, one linear at a time, in `crates/model/tests/it/lora_runtime_delta.rs`
 (the activation quantization is held identical across the two deployments, so
 the comparison is noise-free): the delta delivered at runtime is **rel_l2
 5.1e-6** against an f64 oracle; the same delta folded is **rel_l2 7.4e-1**.
-`crates/flux2/tests/lora_runtime_int8.rs` gates the wiring end to end and that
+`crates/flux2/tests/it/lora_runtime_int8.rs` gates the wiring end to end and that
 the runtime description matches the fold's rectangles bit for bit.
 
 **Route consequence**: brain's own `.brain` container now takes the streamed

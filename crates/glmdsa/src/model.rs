@@ -2203,7 +2203,7 @@ mod rmsnorm_variant_agreement {
 
 /// `router_gate_sigmoid.wgsl`'s array-free rewrite (kernel-performance
 /// M5.7) is gated at the kernel level in
-/// `crates/model/tests/router_gate_sigmoid_expert_cap.rs` (host-oracle
+/// `crates/model/tests/it/router_gate_sigmoid_expert_cap.rs` (host-oracle
 /// correctness at 8/65/256 experts, grouped and ungrouped). This is the
 /// model-level half: the config the old `assert!` forbade outright must now
 /// actually build.

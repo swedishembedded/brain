@@ -60,7 +60,7 @@
 //!
 //! One implementation, two instantiations, same discipline as
 //! [`crate::grad`]: `f64` is the finite-difference gradcheck oracle
-//! (`crates/ltxv/tests/av_block_grad.rs`), `f32` is the host trainer
+//! (`crates/ltxv/tests/it/av_block_grad.rs`), `f32` is the host trainer
 //! [`crate::av_modelgrad`] drives.
 
 use crate::grad::{

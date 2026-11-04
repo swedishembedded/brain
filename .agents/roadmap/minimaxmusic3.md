@@ -161,7 +161,7 @@ against EVERY one of the vocoder's ~38 named parameters (every conv/
 conv-transpose weight and bias across all 4 blocks x 3 residual units,
 every Snake alpha), and every one passes with relative error under 8e-4 -
 an order of magnitude inside the workspace's `(4e-3, 8e-2)` gate. Wired
-into `make test/gradcheck` via `crates/gradcheck/tests/imaging_models.rs`'s
+into `make test/gradcheck` via `crates/gradcheck/tests/it/imaging_models.rs`'s
 `check!` macro, same as every other model's gate.
 
 The loss used to gradcheck is a plain MSE reconstruction loss - enough to
@@ -489,7 +489,7 @@ already landed in Phases 2-9):
 All of the above is unit/structurally tested (no numerical reference
 exists for a multi-stage composition like this - same reasoning
 `pipeline::generate_frames`'s own tests already used) and passes.
-`crates/minimaxmusic3/tests/e2e_short_generation.rs` wires all five real
+`crates/minimaxmusic3/tests/it/e2e_short_generation.rs` wires all five real
 components together end to end (AR stage -> denoise -> stitch -> WAV),
 gated behind all six `BRAIN_MINIMAXMUSIC3_*` env vars, with an explicit
 sequential-stage RAM discipline (the AR stage's two Global LLM instances
@@ -1009,7 +1009,7 @@ different kernel variants) and is worth failing on.
   both (it prints the placement it resolved); on one card or none it
   degenerates to the same thing twice and still gates the fold and the
   plumbing.
-- `crates/minimaxmusic3/tests/cfg_parallel.rs` (`#[ignore]`d - it is the only
+- `crates/minimaxmusic3/tests/it/cfg_parallel.rs` (`#[ignore]`d - it is the only
   test here that wants BOTH cards to itself) - the real-weight half: a full
   200-frame (689-latent) chunk of the real 2.4B DiT, same seed and weights,
   differing only in the placement, compared bit for bit, plus an assertion
@@ -1497,7 +1497,7 @@ row in `gpu_core::upgrade`. No model crate changed at all.
 * It is a genuine second FILE, not a template variant of `matmul_gemv`, because
   a function-local accumulator array is a different body. Both are `@cpu yes`
   (the CPU JIT runs such an array as a per-invocation stack slot, and
-  `crates/wgsl-cpu/tests/aggregates.rs` holds the two bit-identical there),
+  `crates/wgsl-cpu/tests/it/aggregates.rs` holds the two bit-identical there),
   but only `matmul_gemv` is ever selected on the CPU backend. Each header
   points at the other and says "edit the two together".
 * Selection is `gpu_core::upgrade` - the seam `.agents/rules/kernels.md` §A.4
@@ -1536,7 +1536,7 @@ Cost is a function of `MREG`, essentially not of `m`, so "wins at every shape"
 
 Same k-stride (`k = t; k += 64`), one accumulator per output, the same 64
 partials folded in the same ascending order. Nothing reassociates, so
-`crates/gpu-core/tests/gemv_reg_upgrade.rs` asserts `to_bits()` equality - not
+`crates/gpu-core/tests/it/gemv_reg_upgrade.rs` asserts `to_bits()` equality - not
 cosine, not rel_l2 - for **every `m` in 1..=32 across four shapes**
 (`k,n` = 512,384 / 384,512 / 517,129 (ragged `k`) / 64,71), against
 `kernels::MATMUL_GEMV` registered under a second name so one handle runs both
@@ -1830,7 +1830,7 @@ as a defect any more: the top one is a GEMM at 43% of the compute roof.
 ### The threshold was NOT the 2D one, and copying it would have cost a win
 
 `vae::blocks`'s `GEMM_CONV_MIN_COUT` is 32 for the same `matmul_reg3`. Swept
-here (`crates/audio/tests/bench_conv1d_lowering.rs`, `--ignored`, best of 5,
+here (`crates/audio/tests/it/bench_conv1d_lowering.rs`, `--ignored`, best of 5,
 `BRAIN_CONV1D_GEMM=force` to reach the sub-threshold side - without it the
 selector answers "direct" for both columns and the ratio reads a meaningless
 1.0x):

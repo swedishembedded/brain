@@ -4,7 +4,7 @@
 //! Finite-difference gate for the SAM tower's **HD branch and neck resize**
 //! (DeepSeek-VL's `sam_b_downsample`), on [`sam1::SamViTConfig::tiny_hd`].
 //!
-//! Two things are new relative to the plain tower `crates/sam1/tests/gradcheck.rs`
+//! Two things are new relative to the plain tower `crates/sam1/tests/it/gradcheck.rs`
 //! already gates, and each gets its own check:
 //!
 //!  * the scalar `hd_alpha`, whose gradient is a whole-output reduction
@@ -13,7 +13,7 @@
 //!    read them, so their gradient is the sum of two conv backwards. A
 //!    backward that dropped either use still produces a plausible, nonzero
 //!    gradient, and a single ±1 direction contracts a missing share into
-//!    near-invisibility (the same blindness `crates/sam1/tests/gradcheck.rs`
+//!    near-invisibility (the same blindness `crates/sam1/tests/it/gradcheck.rs`
 //!    measured for the windowed pad rows), so those tensors are checked PER
 //!    ENTRY.
 //!
@@ -48,7 +48,7 @@ use crate::{directional_check, elementwise_check, CheckModel, Report};
 /// The HD-branch scale the checks run at; see the module header.
 const ALPHA: f32 = 0.7;
 
-/// Orphan-rule wrapper, as in `crates/sam1/tests/gradcheck.rs`.
+/// Orphan-rule wrapper, as in `crates/sam1/tests/it/gradcheck.rs`.
 struct Check(SamEncoder);
 
 impl CheckModel for Check {

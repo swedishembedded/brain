@@ -1314,7 +1314,7 @@ const OPTIONAL_KERNELS: &[&str] = &["matmul_reg3", "region_copy"];
 /// **Where [`ClipVision`]'s patch tokens come from.** The tower is IDENTICAL
 /// downstream of this point in both cases - same class-token prepend (CLIP
 /// stem), same position embedding, same blocks - which is what
-/// `crates/clip/tests/vision.rs::pixels_and_tokens_paths_are_bit_identical`
+/// `crates/clip/tests/it/vision.rs::pixels_and_tokens_paths_are_bit_identical`
 /// proves rather than asserts.
 ///
 /// This is a first-class seam, not a DeepSeek-OCR branch: any producer of

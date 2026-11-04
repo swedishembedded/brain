@@ -228,7 +228,7 @@ Measured, in-repo, and binding on every threshold this gauntlet sets:
 
 | Source | Finding |
 |---|---|
-| `crates/qwen3/tests/lora_learning_gate.rs` (doc comment) | a tiny qwen3 LoRA **plateaued at ~40% *training-set* accuracy** on an algorithmic rule across 800-3000 steps, d_model 16-64, and every learning rate tried, with predictions collapsing onto a handful of attractor classes. **Do not build a gate on a tiny LoRA learning an algorithmic rule - it's already been tried and it doesn't work in a test budget.** |
+| `crates/qwen3/tests/it/lora_learning_gate.rs` (doc comment) | a tiny qwen3 LoRA **plateaued at ~40% *training-set* accuracy** on an algorithmic rule across 800-3000 steps, d_model 16-64, and every learning rate tried, with predictions collapsing onto a handful of attractor classes. **Do not build a gate on a tiny LoRA learning an algorithmic rule - it's already been tried and it doesn't work in a test budget.** |
 | `crates/bench/src/toolcall.rs` | 2-layer / d_model-64 full-parameter GPT, 800 steps: exact-match **1.00** across seeds {1337, 7, 42}, chance 0.0017, minutes on CPU |
 | `crates/bench/src/dyck.rs` | same size, 600 steps: **~0.99**, chance 0.333 |
 | `crates/bench/src/parity.rs` | same size, 500 steps: **1.00**, chance 0.5 |

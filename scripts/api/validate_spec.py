@@ -7,7 +7,7 @@
     validate_spec.py <provider-spec.json> <SchemaName> <body.json|->
 
 Loads the vendored OpenAPI 3.x document at <provider-spec.json>, sanitizes it into a
-strict JSON-Schema Draft 2020-12 document the SAME way `crates/apiserve/tests/api.rs`'s
+strict JSON-Schema Draft 2020-12 document the SAME way `crates/apiserve/tests/it/api.rs`'s
 `spec()`/`sanitize()`/`allow_null()` do, then validates the instance in <body.json>
 (or stdin when the path is "-") against `#/components/schemas/<SchemaName>`.
 

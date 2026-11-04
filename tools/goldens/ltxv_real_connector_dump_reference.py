@@ -6,7 +6,7 @@
 `video_embeddings_connector` reference output, at real width, from the
 actual Q8_0 GGUF - the one real-generation component whose real-weight
 forward has never been checked against the reference at all (tracked gap,
-`crates/ltxv/tests/dit_parity.rs`'s real-weight test explicitly runs with
+`crates/ltxv/tests/it/dit_parity.rs`'s real-weight test explicitly runs with
 `use_embeddings_connector: false`).
 
 Reuses `ltxv_real_dit_dump_reference.py`'s GgufLite/deq_q8_0 machinery

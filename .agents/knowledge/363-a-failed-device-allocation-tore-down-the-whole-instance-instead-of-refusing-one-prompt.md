@@ -18,7 +18,7 @@ prompt in, asks the decoder to drop its prefill work (`PagedDecoder::
 abandon_prefill`), returns the prefilling sequences' blocks and refuses them with
 `RejectReason::DeviceOutOfMemory`, which a frontend delivers as a
 `backend-failure` classed error. Decoding sequences, the prefix cache and the
-instance stay. `crates/model/tests/serve_device_oom.rs` is the contract.
+instance stay. `crates/model/tests/it/serve_device_oom.rs` is the contract.
 
 Limits: an allocation failing inside a decode or verify step is still a panic
 (the step's tensors are half written, and every sequence in it is affected); the

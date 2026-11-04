@@ -46,7 +46,7 @@ pub fn export_qwen35_fp32(weights_path: &str, out_path: &str, seq_len: usize) ->
 /// file as it's produced rather than accumulating them all in `Graph::
 /// initializers` first — real, larger graph-builder surgery, explicitly out
 /// of scope for this best-effort pass (verified correct and exercised only at
-/// `Qwen35Config::tiny()`'s scale, see `crates/npu/tests/qwen35moe_onnx.rs`).
+/// `Qwen35Config::tiny()`'s scale, see `crates/npu/tests/it/qwen35moe_onnx.rs`).
 pub fn export_qwen35_fp32_external(weights_path: &str, out_path: &str, seq_len: usize) -> std::io::Result<()> {
     let reader = checkpoint::weightio::WeightReader::open(weights_path)?;
     let cfg = Qwen35Config::from_json(&reader.config());

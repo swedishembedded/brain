@@ -272,7 +272,7 @@ fn force_vulkan_backend_once() {
 /// bypasses `BRAIN_DEVICE` entirely. On this repo's own non-ReBAR P40s, the
 /// default wgpu backend leaves a SAME-SIZE staging allocation permanently
 /// resident on every large upload - measured as an exact doubling in
-/// `crates/gpu-core/tests/vram_overhead.rs`, independent of upload chunk
+/// `crates/gpu-core/tests/it/vram_overhead.rs`, independent of upload chunk
 /// size. At 14B, int8's real packed weight bytes are ~14.4 GiB (see
 /// `crates/catalog/src/resident_wan.rs::dit_weight_bytes`) - doubled by wgpu
 /// that is ~28.8 GiB, which does NOT fit a 24 GiB card even though the real
@@ -306,7 +306,7 @@ fn build_and_forward(cfg: &WanConfig, src: &dyn checkpoint::TensorSource, f: u32
 ///
 /// NOT indexed by `BRAIN_GPU_INDEX` alone: brain's own device registry order
 /// is not guaranteed to match `nvidia-smi`'s enumeration order (this repo's
-/// `crates/gpu-core/tests/vram_overhead.rs` hit exactly this - "brain's
+/// `crates/gpu-core/tests/it/vram_overhead.rs` hit exactly this - "brain's
 /// native Vulkan backend put its buffer on index 1" relative to what the
 /// caller expected). Querying every index and reporting whichever one
 /// actually changed (`dominant_delta`) is the same fix that test applies,

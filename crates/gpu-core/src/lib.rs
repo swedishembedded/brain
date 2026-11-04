@@ -1905,7 +1905,7 @@ mod native_facade {
         /// for why this exists: on this engine's non-ReBAR discrete GPUs, one
         /// `write`/`write_f32` call sized to a whole multi-GB tensor leaves a
         /// same-size wgpu staging allocation permanently resident (measured as
-        /// an exact doubling, `crates/gpu-core/tests/vram_overhead.rs`). A caller streaming
+        /// an exact doubling, `crates/gpu-core/tests/it/vram_overhead.rs`). A caller streaming
         /// a large upload should chunk through this (or [`Self::write_f32_chunked`])
         /// instead of one `write_f32` for the whole tensor.
         pub fn write_at(&self, buf: &DeviceBuffer, offset_words: u64, data: &[u32]) {

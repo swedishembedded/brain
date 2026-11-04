@@ -19,7 +19,7 @@ copy of the class rather than a new pip dependency - runs it on a synthetic
 packed batch with real marker positions and qtypes, and dumps the head's own
 weights, `marker_pos`/`marker_mask`/`qtype`, and both `logits` (option
 scores) and `act_logits` under the manifest's `head_weights`/`head_inputs`/
-`head_output` sections, read by `crates/modernbert/tests/laya_parity.rs`.
+`head_output` sections, read by `crates/modernbert/tests/it/laya_parity.rs`.
 
 This script is resource-prep tooling: it is NEVER part of brain's build/test
 path. Fixtures are NOT committed (`brain-never-commit-goldens` - see

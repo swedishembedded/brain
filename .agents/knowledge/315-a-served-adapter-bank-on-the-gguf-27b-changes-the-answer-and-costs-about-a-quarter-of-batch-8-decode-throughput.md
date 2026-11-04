@@ -64,6 +64,6 @@ the id had to be rewritten to the adapter reference grammar for serving.
   exact-decode tape a base prompt of that length uses (the exact tape splits the round into groups
   of 8 and the bank is set for the whole round). Its arithmetic differs from the base's at the
   tolerance `tests/decode_step.rs` gates; the parity gate for adapter rows is the training
-  forward (`crates/qwen35/tests/adapter_bank.rs`, CPU and CUDA), not the decode tape.
+  forward (`crates/qwen35/tests/it/adapter_bank.rs`, CPU and CUDA), not the decode tape.
 * One adapter, one run. Eviction under slot pressure on the real model was not exercised; the
   lifecycle is gated on the tiny config with a one-slot bank.

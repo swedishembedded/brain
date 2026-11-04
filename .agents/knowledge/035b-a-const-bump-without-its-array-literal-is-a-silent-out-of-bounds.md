@@ -10,7 +10,7 @@ shader body's actual scratch storage, `var prob: array<f32, 64>` / `var used:
 array<bool, 64>`, was a second, independent literal that the bump did not
 touch. Both compiled cleanly (WGSL fixed-size arrays are just a length
 literal, unrelated to `MAX_EXPERTS` unless something cross-checks them), and
-every existing test kept passing, because `crates/model/tests/moe_sparse_parity.rs`
+every existing test kept passing, because `crates/model/tests/it/moe_sparse_parity.rs`
 exercises `router_gate.wgsl` at a synthetic `n_experts: 8` - nowhere near 64.
 
 The result: for any router with more than 64 experts, every expert index ≥ 64

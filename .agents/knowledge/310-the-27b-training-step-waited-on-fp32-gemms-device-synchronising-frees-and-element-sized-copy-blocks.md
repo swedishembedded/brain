@@ -42,7 +42,7 @@ for the new binary (the old binary has no `--seed`). W8K: `--layers 64 --tokens 
    attention matrix products now run through `libcublas` (`cublasGemmEx`,
    `cublasGemmStridedBatchedEx`, bf16 operands, fp32 accumulation). Component rates, the
    minimum over 8 runs of the whole step including the activation cast (VERIFIED-BY-RUN,
-   `crates/gpu-core/tests/cuda_library_bench.rs`, shared card): 8192x17408x5120 643
+   `crates/gpu-core/tests/it/cuda_library_bench.rs`, shared card): 8192x17408x5120 643
    TFLOP/s; 8192x5120x17408 439; 8192x12288x5120 819; 8192x10240x5120 343; the
    2048-row MLP chunk 759; the head tile 1024x62080x5120 294; the n = 1024 k/v
    projection only 54 (4% of the FLOPs).

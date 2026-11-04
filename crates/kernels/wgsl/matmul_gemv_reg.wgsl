@@ -52,7 +52,7 @@
 //
 // ## Bit-identity with `matmul_gemv`
 //
-// Deliberate, and gated (`crates/gpu-core/tests/gemv_reg_upgrade.rs`): the
+// Deliberate, and gated (`crates/gpu-core/tests/it/gemv_reg_upgrade.rs`): the
 // k-stride is the same (`k = t; k += 64`), each output keeps its own
 // accumulator, and the final fold sums the same 64 partials in the same
 // ascending order. Nothing is reassociated, so the results are byte-identical

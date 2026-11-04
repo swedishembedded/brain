@@ -6,7 +6,7 @@
 //! Purpose: the fp32 Qwen3-4B encoder is ~16 GB of weights, but the default
 //! wgpu backend's Vulkan HAL on a non-ReBAR Pascal card DOUBLES the resident
 //! cost of every uploaded storage buffer (measured; not a hardware limit - see
-//! `crates/gpu-core/tests/vram_overhead.rs`: brain's own native Vulkan backend,
+//! `crates/gpu-core/tests/it/vram_overhead.rs`: brain's own native Vulkan backend,
 //! `--device vulkan`, measures no such overhead on the same
 //! card), so under the default backend the fp32 encoder needs ~30 GB and does
 //! not fit one 24 GB P40 (nor split alongside the 13 GB int8 DiT). Quantizing

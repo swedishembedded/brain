@@ -11,7 +11,7 @@ CUDA backend. How, and what to remember:
 - `qwen35` keeps the chunked head: the weighted loss is `RowWeights` on the
   head's recorded backward, the readout is the negated `ce_buf`, the logit scale
   is `HeadCe::set_scale_buffer` plus the scale folded into the gradient factor.
-  `crates/qwen35/tests/objectives.rs` checks that a two-chunk head and a
+  `crates/qwen35/tests/it/objectives.rs` checks that a two-chunk head and a
   one-chunk head give the same weighted, scaled loss, log-probabilities and
   gradients, and that the gradient is the derivative of the reported loss.
 - `qwen35moe` has no chunked head (it materialises `[n, vocab]` logits), so it
@@ -42,7 +42,7 @@ Resolved, VERIFIED-BY-RUN: the conv1d input-gradient buffer in
 `gdn_mixer_bwd` was sized for one sequence (`t` rows per channel) while the
 `conv1d_dx` kernel writes `b * t`. A canary after each CPU dispatch named
 `conv1d_dx`. The buffer is now sized for the whole batch;
-`crates/qwen35/tests/lora_batch.rs` checks a two-sequence batch against the mean
+`crates/qwen35/tests/it/lora_batch.rs` checks a two-sequence batch against the mean
 of its two sequences' gradients, the bf16 CLI fine-tune test is enabled again,
 and the qwen35 and qwen35moe conformance subjects pass on the CPU backend.
 

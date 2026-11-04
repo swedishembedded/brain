@@ -160,26 +160,6 @@ required-features = ["qwen3"]
 # separator every
 # `data::chat::prepare_chat_samples` dataset carries), so its greedy decodes
 # dominate its wall clock - minutes, one device, run it alone.
-[[test]]
-name = "document_study"
-path = "tests/document_study.rs"
-required-features = ["qwen3"]
-
-# `rl::reader::ModelLearner` against a real checkpoint: the four Learner
-# methods the continual reader drives, plus the incumbent/candidate file
-# contract that makes a promotion survive into the next process.
-[[test]]
-name = "reader_learner"
-path = "tests/reader_learner.rs"
-required-features = ["qwen3"]
-
-# The runnable demos/diagnostics over that harness. `cargo run --release -p
-# brain-rl --features qwen3 --example <name>`; all of them train real models on
-# a real GPU and print the trajectory they actually measured, including when it
-# is negative. Every one MUST be declared here with `required-features`: an
-# auto-discovered example carries no feature requirement, so `cargo check -p
-# brain-rl --all-targets` (no features) would try to build it against the
-# then-unlinked optional `brain-qwen3` and fail.
 [[example]]
 name = "continual_learning"
 path = "examples/continual_learning.rs"
@@ -195,22 +175,3 @@ name = "oracle_capacity_check"
 path = "examples/oracle_capacity_check.rs"
 required-features = ["qwen3"]
 
-[[test]]
-name = "objective_fits"
-path = "tests/objective_fits.rs"
-required-features = ["qwen3"]
-
-[[test]]
-name = "lora_acceptance"
-path = "tests/lora_acceptance.rs"
-required-features = ["qwen3"]
-
-[[test]]
-name = "chat_trainer_bases"
-path = "tests/chat_trainer_bases.rs"
-required-features = ["qwen3"]
-
-[[test]]
-name = "served_conformance"
-path = "tests/served_conformance.rs"
-required-features = ["qwen3"]

@@ -128,7 +128,7 @@ impl Supir {
 
     /// [`Supir::new`], but every weight `tensors` doesn't carry falls back to
     /// `packed` (`supir::int8::quantize_tensors`'s output) - the ACTUAL fix
-    /// for the measured OOM `crates/supir/tests/parity.rs`'s full-forward
+    /// for the measured OOM `crates/supir/tests/it/parity.rs`'s full-forward
     /// test documents: `tensors` here is the SMALL residual
     /// (`supir::int8::QuantizedTensors::full` - never-quantized names,
     /// biases, norm gains, every conv), not the whole ~15.6 GB manifest, and

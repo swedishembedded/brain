@@ -566,7 +566,7 @@ mod tests {
     /// documents, at `Qwen35Config::tiny()`'s shapes - the classify/validate
     /// pipeline is fully testable without a real checkpoint, since it only
     /// depends on the NAMING convention being right (see
-    /// `crates/qwen35/tests/real_weight_streaming.rs` for the real-checkpoint
+    /// `crates/qwen35/tests/it/real_weight_streaming.rs` for the real-checkpoint
     /// counterpart).
     fn synthetic(cfg: &Qwen35Config) -> Tensors {
         let d = cfg.d_model as usize;
@@ -663,7 +663,7 @@ mod tests {
     /// on-disk safetensors file - a synthetic stand-in for one real
     /// `layers-{l}.safetensors` shard, letting [`import_layer`] be tested
     /// through an actual [`checkpoint::mmap::MmapSafetensors`] without a real
-    /// checkpoint (see `crates/qwen35/tests/real_weight_streaming.rs` for the
+    /// checkpoint (see `crates/qwen35/tests/it/real_weight_streaming.rs` for the
     /// real-checkpoint counterpart).
     fn write_one_layer_shard(cfg: &Qwen35Config, l: usize) -> std::path::PathBuf {
         let all = synthetic(cfg);

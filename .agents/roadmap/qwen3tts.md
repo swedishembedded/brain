@@ -563,7 +563,7 @@ discovers capabilities generically.
           own tests only compared the streaming back against ITSELF at a
           different chunk size, which cannot catch a systematic difference in
           the shared front/back math. It is correct:
-          `crates/mimi/tests/decode_stream_parity.rs` shows chunk sizes
+          `crates/mimi/tests/it/decode_stream_parity.rs` shows chunk sizes
           0/2/3 producing byte-identical output (no drift with chunk count at
           all) within 1.62% of peak and 0.03% RMS of the one-shot decode, the
           residual being device backend vs host `hostmath`.
@@ -612,7 +612,7 @@ discovers capabilities generically.
 
 ### Phase 6 - Parity/gradcheck completeness
 
-- [x] `crates/qwen3tts/tests/parity.rs` (Talker golden-logit parity) and
+- [x] `crates/qwen3tts/tests/it/parity.rs` (Talker golden-logit parity) and
       `tests/talker.rs` (Talker gradcheck) both exist and are real; the
       parity test used to be gated on a PyTorch golden dump
       (`testdata/tts/dumps/talker_ref/{tokens.u32,logits.f32}`) that had
@@ -727,7 +727,7 @@ discovers capabilities generically.
       because every forward-slot const indexes both tables and appending to
       one only would silently shift the backward slots under the training tape.
 
-      **`crates/qwen3tts/tests/mtp.rs`** gained three tests alongside the
+      **`crates/qwen3tts/tests/it/mtp.rs`** gained three tests alongside the
       existing checkpoint-gated forward smoke:
       `mtp_analytic_grads_match_finite_differences` (the Talker's mirror, run
       at BOTH `MtpConfig::tiny` and `MtpConfig::tiny_projected`, so the 1.7B
@@ -764,7 +764,7 @@ discovers capabilities generically.
       the finite-difference step is 1e-3 rather than 5e-3, with the sweep
       table recorded in the test so the choice is evidence, not tuning.
 - [x] A cheap end-to-end quality signal that doesn't need a PyTorch reference:
-      `crates/qwen3tts/tests/asr_roundtrip.rs` round-trips `pipeline::synth`
+      `crates/qwen3tts/tests/it/asr_roundtrip.rs` round-trips `pipeline::synth`
       output through `nemotronasr` (real checkpoint,
       `nvidia/nemotron-3.5-asr-streaming-0.6b`, ~2.4 GB, fetched for this
       audit) and asserts word error rate against the input text is below
@@ -869,7 +869,7 @@ discovers capabilities generically.
         zero-probability entries and falls through to the last surviving
         candidate.
 
-      Evidence/regression: `crates/qwen3tts/tests/sampled_decode.rs`
+      Evidence/regression: `crates/qwen3tts/tests/it/sampled_decode.rs`
       (`default_sampled_decode_does_not_collapse_to_silence`) runs the exact
       documented repro - `synth("The quick brown fox jumps over the lazy
       dog.", seed=0, max_frames=200)` with `GenOpts::default()` - and asserts
@@ -1455,7 +1455,7 @@ attended over context the reference never exposed to them, and the streamed
 waveform drifted further from the reference the longer the clip ran. A
 silent-divergence failure mode, not a crash.
 
-**Test that caught it** (`crates/mimi/tests/long_form_window.rs`, three
+**Test that caught it** (`crates/mimi/tests/it/long_form_window.rs`, three
 tests, no external checkpoint needed - a structurally complete tiny codec at
 `sliding_window = 4`, decoded through both BRAIN implementations on the same
 synthetic weights, so the witness is independent rather than a self-check):
@@ -1475,7 +1475,7 @@ the same fp noise floor as the in-window case (5.96e-6) - i.e. what is left
 is WGSL-vs-host reassociation, not a mask difference.
 
 The ONNX export has its own red-then-green test
-(`crates/npu/tests/codec_onnx.rs::codec_onnx_attention_mask_is_sliding_window_causal`):
+(`crates/npu/tests/it/codec_onnx.rs::codec_onnx_attention_mask_is_sliding_window_causal`):
 OpenVINO is absent in this environment so the graph cannot be RUN, but the
 mask is a materialized initializer, so the test builds the graph, decodes the
 serialized proto back, and asserts the real exported `tf_mask` bytes
@@ -1547,7 +1547,7 @@ longer the form, the more the fix saves rather than costs. No new
 allocation, no new dispatch, no new kernel, and **no change to
 `crates/model/src/block.rs`**: the shared windowed-attention builder
 (`block::gqa_fwd_win` over `kernels::GQA_SCORES_WIN`, with its own
-independent-oracle tests in `crates/model/tests/gqa_fwd_win.rs`) already
+independent-oracle tests in `crates/model/tests/it/gqa_fwd_win.rs`) already
 existed and was already what the codec's device path dispatched. The fix
 was to make the other two implementations obey the same mask - so nothing
 changed in an engine module ~20 other models depend on.

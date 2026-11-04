@@ -20,7 +20,7 @@ How it was found (each step measured, not reasoned):
 
 Action: the three two-consumer candidates (bn80, bn96, bn136) and the kernel's two-consumer path are removed; the one-consumer
 forms were within ~1 % of them at the served shapes (64-row gate/up 63.1 vs 62.4 us). Reproducer:
-`swap_tma_back_to_back_stress` (ignored test in `crates/gpu-core/tests/fp8_linear_native.rs`): a new swap candidate must survive
+`swap_tma_back_to_back_stress` (ignored test in `crates/gpu-core/tests/it/fp8_linear_native.rs`): a new swap candidate must survive
 it before it joins. Open: the root cause in the two-consumer design (alternate K blocks on an odd-depth ring, the combine
 hand-off, `setmaxnreg` 40/232) is not identified.
 

@@ -57,7 +57,7 @@
 //! trunk maps them all to nearly the same hidden state and the head has
 //! nothing to tell the options apart by. That is a measured property of this
 //! architecture, not a hypothesis - see
-//! `crates/modernbert/tests/train_convergence.rs`.
+//! `crates/modernbert/tests/it/train_convergence.rs`.
 //!
 //! ## What is NOT trained
 //!

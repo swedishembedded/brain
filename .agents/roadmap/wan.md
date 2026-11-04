@@ -24,7 +24,7 @@ opinion, ComfyUI-GGUF = arch detection) is cloned under
       on), and the direct form binds only the natural tensors, so the fallback
       split is over N. Per-axis kernel extent, per-axis stride, symmetric
       spatial pad, one-sided temporal low-pad `pt` (already doubled, as in
-      `dwconv3d`), bias, and groups. Gate: `crates/gradcheck/tests/conv3d_kernels.rs`,
+      `dwconv3d`), bias, and groups. Gate: `crates/gradcheck/tests/it/conv3d_kernels.rs`,
       including two structural causality probes -- an output frame may not move
       when a future input frame does, and `_dx` may not push gradient forward in
       time. Both were mutation-verified against a symmetric-pad kernel.
@@ -139,7 +139,7 @@ opinion, ComfyUI-GGUF = arch detection) is cloned under
       too** rather than being deferred: once the flow `(alpha, sigma)` pair and
       the schedule plumbing existed it was ~70 lines, and it is the only way to
       prove that the two solvers do *not* share a schedule (see below).
-      Gate: `crates/diffusion/tests/wan_schedule_parity.rs` against
+      Gate: `crates/diffusion/tests/it/wan_schedule_parity.rs` against
       `tools/goldens/wan_schedule_dump_reference.py` (no weights needed - it
       imports the two scheduler classes only). Sigmas and timesteps are
       **bit-exact** over 16 (solver, shift, steps) combinations; the `step()`
@@ -781,7 +781,7 @@ opinion, ComfyUI-GGUF = arch detection) is cloned under
       the graph" result is not a measurement artifact.
 
       **Run 2 was NOT an isolated measurement, and that is the finding.** It
-      ran while a second process (`crates/wan/tests/lora_train.rs`'s new
+      ran while a second process (`crates/wan/tests/it/lora_train.rs`'s new
       held-out-loss gate, this same validation effort's own finetune-validation
       work) was doing real host CPU training at 2000-2800% CPU across the
       box's 48 threads. Text encode and DiT load are BOTH CPU/host-bound
@@ -883,7 +883,7 @@ opinion, ComfyUI-GGUF = arch detection) is cloned under
         checkpoint and is refused by name rather than imported into a pipeline
         that does not exist. Both name spaces resolve, since the diffusers
         export renames every leaf but that one tensor.
-      **Covered on real bytes**: `crates/wan/tests/gguf_import_real.rs`
+      **Covered on real bytes**: `crates/wan/tests/it/gguf_import_real.rs`
       (`BRAIN_WAN_GGUF`, `brain_testutil::skip` when absent) runs the whole
       dequantize -> `import_dit` -> safetensors path against the released
       `city96/Wan2.1-T2V-14B-gguf` Q3_K_S file - 1095 tensors, set-equal to

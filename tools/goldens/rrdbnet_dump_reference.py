@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-"""Bake the Real-ESRGAN parity goldens for `crates/rrdbnet/tests/parity.rs`.
+"""Bake the Real-ESRGAN parity goldens for `crates/rrdbnet/tests/it/parity.rs`.
 
 Imports the UPSTREAM `RRDBNet` (basicsr's `rrdbnet_arch`) when it is importable
 and otherwise reconstructs it from the paper's definition here, so the goldens

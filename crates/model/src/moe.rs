@@ -1438,7 +1438,7 @@ pub fn shared_expert_fwd_i8(
 // (checked, not assumed): the one real caller of [`expert_fwd_compact`] is
 // `crates/glmdsa::model::Glm::forward_compact`, migrated onto
 // [`expert_fwd_compact_layer`] in the same change that added it.
-// [`expert_fwd_compact`] itself stays - `crates/model/tests/moe_compact_parity.rs`
+// [`expert_fwd_compact`] itself stays - `crates/model/tests/it/moe_compact_parity.rs`
 // still exercises it directly as the simpler, still-correct per-expert
 // primitive the layer version is built from.
 

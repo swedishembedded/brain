@@ -356,7 +356,7 @@ that is actively decoding still needs its whole KV in VRAM, because causal
 attention reads all of it on every token - there is no cache tier that helps
 there, and a design that streamed blocks in per token would be far slower
 than not extending the context at all (the host bus is one to two orders of
-magnitude slower than the card's own memory; `crates/gpu-core/tests/pcie_handoff.rs`
+magnitude slower than the card's own memory; `crates/gpu-core/tests/it/pcie_handoff.rs`
 measures both on your hardware). What offload removes is the requirement that
 every ADMITTED session be resident simultaneously.
 

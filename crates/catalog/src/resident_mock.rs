@@ -24,7 +24,7 @@
 //! * **`text2image`**: returns an `image` blob in brain's raw HWC-f32 wire format
 //!   (`capability::blob::image_blob`) after a couple of denoise-`step` ticks,
 //!   polling the cancel token between them (so `Cancel` has a runnable action to
-//!   exercise beyond `crates/dbus/tests/roundtrip.rs`'s synthetic `slow` action).
+//!   exercise beyond `crates/dbus/tests/it/roundtrip.rs`'s synthetic `slow` action).
 //! * **`forecast`**: a deterministic last-value-plus-drift extrapolation, returned
 //!   in the same `[levels, horizon]` quantile-major f32-LE wire shape chronos2
 //!   uses - pinning the forecast contract
@@ -217,7 +217,7 @@ pub const OVER_CONTEXT_TRIGGER: &str = "__mock_over_context__";
 /// shapes a real model's `qwen_chat::ChatScanner` emits (see
 /// `crates/catalog/src/resident_llm.rs::emit_chat_events`): `tool_call_start` →
 /// `tool_call_args`* → `tool_call_end`. No weights/GPU are involved, so
-/// `crates/apiserve/tests/api.rs` can exercise the full OpenAI/Anthropic/OpenRouter
+/// `crates/apiserve/tests/it/api.rs` can exercise the full OpenAI/Anthropic/OpenRouter
 /// tool-calling pipe against a real HTTP server. See [`FAIL_TRIGGER`] for the
 /// sibling error-hygiene trigger and its naming convention (there was no existing
 /// mock trigger-string convention to match beyond "double-underscore-wrapped",
@@ -227,7 +227,7 @@ pub const TOOL_CALL_TRIGGER: &str = "__MOCK_TOOL_CALL__";
 /// The scripted tool calls [`TOOL_CALL_TRIGGER`] emits, in order: `(name,
 /// arguments)`. A repeated trigger in the user text requests more than one
 /// (clamped to this list's length) — the sequential-index test in
-/// `crates/apiserve/tests/api.rs` covers exactly this "parallel calls" shape.
+/// `crates/apiserve/tests/it/api.rs` covers exactly this "parallel calls" shape.
 const MOCK_TOOL_CALLS: [(&str, &str); 2] = [("get_weather", r#"{"location": "Paris"}"#), ("set_timer", r#"{"minutes": 5}"#)];
 
 /// The reasoning text streamed (as a single `Progress::event(kind:"reasoning")`)
@@ -319,7 +319,7 @@ use capability::last_user_text;
 /// to prove an attached image/audio actually REACHED the model, not merely that
 /// the request parsed - the mock has no weights to look at the content with, so
 /// the shape of what arrived is the observable. Format matches the
-/// `image:{w}x{h}` string `crates/apiserve/tests/api.rs`'s tool-call fake
+/// `image:{w}x{h}` string `crates/apiserve/tests/it/api.rs`'s tool-call fake
 /// already echoes, deliberately: one descriptor shape across the test surfaces.
 /// Image first, then audio, so a request carrying both has one fixed rendering.
 fn media_suffix(inv: &Invocation) -> String {

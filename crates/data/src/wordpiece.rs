@@ -37,7 +37,7 @@
 //! **on** - `café` and `cafe\u{301}` must produce the same ids. Reading null as
 //! "off" yields a tokenizer that is correct on ASCII and wrong on everything
 //! else, which no downstream accuracy metric would obviously show; see
-//! `crates/data/tests/wordpiece_parity.rs`.
+//! `crates/data/tests/it/wordpiece_parity.rs`.
 //!
 //! Padding and truncation are deliberately NOT implemented here even though the
 //! checkpoint's file declares both. They are caller policy, not tokenization:

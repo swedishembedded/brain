@@ -372,7 +372,7 @@ over the `Model` trait so every model gets it:
   serving engines build on.
 
 Tensor parallelism's mechanic (col/row-parallel MLP + attention, fwd+bwd) is
-validated in `crates/model/tests/tensor_parallel.rs`. See
+validated in `crates/model/tests/it/tensor_parallel.rs`. See
 [overview](../../docs/concepts/scaling/overview.md), [data parallel](../../docs/concepts/scaling/data-parallel.md),
 [pipeline sharding](../../docs/concepts/scaling/pipeline.md),
 [tensor parallel](../../docs/concepts/scaling/tensor-parallel.md).

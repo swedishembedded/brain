@@ -4,7 +4,7 @@
 //! Finite-difference gate for `crates/deepseekocr2`'s resampler - the
 //! prefix-LM-masked Qwen2 GQA tower plus linear projector that DeepSeek-OCR-2
 //! substitutes for v1's CLIP tower. SAM's own gradients are v1's concern
-//! ([`crate::deepseekocr`], `crates/sam1/tests/gradcheck.rs`) and the decoder
+//! ([`crate::deepseekocr`], `crates/sam1/tests/it/gradcheck.rs`) and the decoder
 //! is unchanged from v1's ([`crate`]'s `check_deepseek2*` family) - this file
 //! covers exactly the new surface: every trainable weight/bias/norm/query-bank
 //! tensor in the tower, AND the SAM-token-grid input the tower's own gradient

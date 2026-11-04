@@ -164,7 +164,7 @@ The CPU JIT keeps the materialised chain. Gates run without a device:
 `footprint::tests::inference_memory_is_linear_in_the_context_on_the_flash_path`.
 Still to run on a card: `model::kv_tests::inference_flash_forward_matches_the_materialised_chain`
 (flash against the chain on the device) and
-`crates/sdk/tests/score_long_record_real.rs` (a multi-thousand-token record on
+`crates/sdk/tests/it/score_long_record_real.rs` (a multi-thousand-token record on
 Qwen3-0.6B completes).
 
 ## Tensor cores by default (serving and LoRA training)

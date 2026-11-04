@@ -748,7 +748,7 @@ pub struct Builder<'a> {
     /// high-water set rather than the sum of everything it ever touched.
     ///
     /// It exists to be the ground truth a placement ESTIMATE is gated against
-    /// (`crates/vae/tests/footprint.rs`). An estimate that under-reports is
+    /// (`crates/vae/tests/it/footprint.rs`). An estimate that under-reports is
     /// not a slightly-wrong number, it is a plan that says a card has room
     /// and then a driver out-of-memory.
     allocated: u64,

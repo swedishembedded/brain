@@ -83,7 +83,7 @@ file, 476 tensors):
   halves by slicing them back out (`findings.vision_concat`), and llama.cpp's
   own consumer of this GGUF does `ggml_concat(ctx0, clip_out, sam_out, 0)`
   (`tools/mtmd/models/deepseekocr.cpp`), concatenating along the row width with
-  CLIP first. `crates/deepseek2ocr/tests/tiny_ref.rs` asserts each half against
+  CLIP first. `crates/deepseek2ocr/tests/it/tiny_ref.rs` asserts each half against
   its own source tap at widths 14 and 11; mutation-verified (swapping the two
   drops `vision_concat` to cosine 0.064 and trips the explicit half assertion).
 - **CLIP `pre_ln`: CLOSED, and it was a real fixture defect.** The tower applies
@@ -223,7 +223,7 @@ llama.cpp running them - not inferred from a config or a reimplementation.
   `crates/catalog/src/resident_deepseekocr.rs` was NOT lifted:**
 
   * A minimal, seconds-not-minutes checkpoint-free reproduction exists:
-    `crates/sam1/tests/wgpu_block_count_corruption.rs`. Two `SamEncoder`s share
+    `crates/sam1/tests/it/wgpu_block_count_corruption.rs`. Two `SamEncoder`s share
     an identical block-0/1 prefix (same `SamViTConfig::deepseek_ocr()` geometry,
     same `init_dense` seed - its sequential draw over `param_list()` gives
     blocks 0/1 the same weights regardless of `n_layers`) and differ only in
@@ -250,7 +250,7 @@ llama.cpp running them - not inferred from a config or a reimplementation.
     the matching reduced width), cutting the real shape's dispatch to
     1 572 864 threads / 24 576 workgroups - clear of the tiling threshold at
     every SAM-1 config this repo defines. Gradient-checked green on both
-    backends (`crates/sam1/tests/gradcheck.rs`, unchanged pass/fail), no
+    backends (`crates/sam1/tests/it/gradcheck.rs`, unchanged pass/fail), no
     "not JIT-compiled" fallback on `backend-cpu`.
   * **This change does NOT reliably fix the checkpoint-free reproduction.**
     Measured by running `wgpu_backend_block0_is_unaffected_by_a_third_block`
@@ -267,7 +267,7 @@ llama.cpp running them - not inferred from a config or a reimplementation.
     consistent with a scheduling/timing-sensitive race, not proof any of them
     is a red herring.
   * **A separate real-weight, full-12-layer, checkpoint-free-independent
-    confirmation** lives in `crates/sam1/tests/wgpu_real_weight_parity.rs`
+    confirmation** lives in `crates/sam1/tests/it/wgpu_real_weight_parity.rs`
     (loads the real mmproj, compares `backend-cpu` vs `backend-wgpu` forward
     tap for tap - no llama.cpp golden needed) and a further checkpoint-free
     variant at 5 layers
@@ -383,7 +383,7 @@ llama.cpp running them - not inferred from a config or a reimplementation.
     file's own lessons demand.
   * **Test additions**: `wgpu_backend_block0_is_unaffected_by_a_third_
     block_repeated_10x` and `wgpu_backend_block0_is_unaffected_at_full_
-    twelve_layers` in `crates/sam1/tests/wgpu_block_count_corruption.rs`,
+    twelve_layers` in `crates/sam1/tests/it/wgpu_block_count_corruption.rs`,
     both `#[ignore]`d with a doc comment pointing back here - kept as
     reproductions for the next session, not strengthened into gates, since
     a clean run here proves nothing about whether the underlying race
@@ -439,12 +439,12 @@ llama.cpp running them - not inferred from a config or a reimplementation.
   * **Documentation updated to match reality**, all within this pass's
     scope (`crates/sam1`, `crates/model/src/vit.rs`,
     `crates/catalog/src/resident_deepseekocr.rs`):
-    - `crates/sam1/tests/wgpu_real_weight_parity.rs`'s test is **no longer
+    - `crates/sam1/tests/it/wgpu_real_weight_parity.rs`'s test is **no longer
       `#[ignore]`d** - like `tests/parity.rs`'s own real-weight tests, it
       self-skips on a missing checkpoint rather than needing a manual
       opt-in, and it is no longer failing, so ignoring it was only hiding a
       real regression gate.
-    - `crates/sam1/tests/wgpu_block_count_corruption.rs`'s four wgpu tests
+    - `crates/sam1/tests/it/wgpu_block_count_corruption.rs`'s four wgpu tests
       **stay `#[ignore]`d**, but the reason changed: not suspected
       flakiness, but that they build a real `wgpu` adapter with no
       GPU-absence self-skip beyond the manual `MOE_SKIP_GPU_TESTS`
@@ -496,7 +496,7 @@ llama.cpp running them - not inferred from a config or a reimplementation.
 Read off `DeepSeek-OCR-Q8_0.gguf`'s own `tokenizer.ggml.*` KV, and cross-checked
 against `deepseek-ai/DeepSeek-OCR`'s published `tokenizer.json` and
 `modeling_deepseekocr.py`. All of it is asserted by
-`crates/deepseek2ocr/tests/prompt_real.rs`, which enumerates the file rather than
+`crates/deepseek2ocr/tests/it/prompt_real.rs`, which enumerates the file rather than
 looking single strings up, so a re-quantized checkpoint that renumbers a control
 token fails loudly.
 
@@ -663,7 +663,7 @@ token fails loudly.
       (`chunked_bidir_{fwd,bwd}` with the rel-pos `Option`, `LayerNormIds`)
       and `vision::blocks` (`Conv`, `LayerNorm2d`) compose the whole thing.
       Forward AND a full explicit backward, gradient-checked over **all 39
-      tensors, none frozen** (`crates/sam1/tests/gradcheck.rs`): worst rel
+      tensors, none frozen** (`crates/sam1/tests/it/gradcheck.rs`): worst rel
       **1.359e-3** on an Intel Arc (Vulkan) and **1.245e-3** on the CPU
       Cranelift JIT, with **no `not JIT-compiled` fallback** for any kernel
       including all six `attn_relpos_*`. Tiny fixture mirrors the golden
@@ -716,7 +716,7 @@ token fails loudly.
       `gradcheck::check_clip_vision` was NOT
       added to `crates/gradcheck` (would require editing a crate outside this
       change's scope while sibling work was in flight there) - the gate lives
-      self-contained in `crates/clip/tests/vision.rs` instead; lifting it into
+      self-contained in `crates/clip/tests/it/vision.rs` instead; lifting it into
       `gradcheck::clip` is a small follow-up.
 - [x] `crates/deepseek2` (MHA-only DeepSeek-V2 decoder) - modeled on
       `qwen35moe`'s shape (tape-built `Vec<Step>` fwd/bwd, `model::Model`),

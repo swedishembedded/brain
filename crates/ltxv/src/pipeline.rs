@@ -410,7 +410,7 @@ pub struct GenOpts {
     /// clip, and that is the model answering the question rather than a
     /// defect.** "Start at this image and end at this same image" has a
     /// correct trivial solution. Measured on the real 22B checkpoint with
-    /// `crates/ltxv/tests/motion_real.rs`'s metric (peak excursion from
+    /// `crates/ltxv/tests/it/motion_real.rs`'s metric (peak excursion from
     /// frame 0; anything >= 18 visibly animates, anything <= 9 is the
     /// pinned still repeated): 7.3 at 640x320/25 frames, and 40.0 for the
     /// same shape, seed, prompt and code with only the end still changed to
@@ -474,7 +474,7 @@ pub struct GenOpts {
     /// It affects placement and nothing else: the two forwards are
     /// independent computations over independent inputs, so the folded
     /// velocity is bit-identical either way (gated by
-    /// `crates/ltxv/tests/cfg_parallel.rs`).
+    /// `crates/ltxv/tests/it/cfg_parallel.rs`).
     pub devices: crate::devplan::DevicePlan,
 }
 
@@ -1571,7 +1571,7 @@ struct ConditionedLatent {
 ///   **The one deliberate deviation from the reference is the interior
 ///   anchor's mechanism.** The reference would append the mid still as a
 ///   third guide like any other; measured on the real 22B checkpoint
-///   (`crates/ltxv/tests/longform_mid_real.rs`), a guide BENDS the
+///   (`crates/ltxv/tests/it/longform_mid_real.rs`), a guide BENDS the
 ///   trajectory toward its instant (delta 11.62 at the mid still, against
 ///   25-29 everywhere else) but never REALISES its content - attention-only
 ///   pull lets the model compromise, which reads on screen as "the motion
@@ -1587,7 +1587,7 @@ struct ConditionedLatent {
 ///   content across the slot's whole pixel span, so the trajectory must pass
 ///   through the mid image rather than merely bend toward it. Two further
 ///   variants were MEASURED and rejected against the plain pin
-///   (`crates/ltxv/tests/longform_mid_real.rs`, real 22B checkpoint, mid
+///   (`crates/ltxv/tests/it/longform_mid_real.rs`, real 22B checkpoint, mid
 ///   delta at its instant): the still also appended as a guide at the
 ///   owner's instant changed nothing (9.25 either way - the pinned latent's
 ///   decode dominates its pixel span, so the guide's attention-only pull has
@@ -1620,7 +1620,7 @@ struct ConditionedLatent {
 /// mechanism and 4.64 with this one - both frozen, both reproducing the
 /// still in every frame. What decides that is whether the two anchors are
 /// the same picture; see `GenOpts::end_frame` and
-/// `crates/ltxv/tests/motion_real.rs`'s table.
+/// `crates/ltxv/tests/it/motion_real.rs`'s table.
 ///
 /// **Which of the two runs is decided by how many stills were given, not by
 /// which ones.** One still at frame 0 and nothing else is image-to-video and
@@ -6607,7 +6607,7 @@ mod tests {
     /// it one. It is the half of the continuity chain that lives in the
     /// sampler; the other half - that what goes in is a verbatim slice of the
     /// previous window's own final latent - is
-    /// `crates/ltxv/tests/longform.rs`'s
+    /// `crates/ltxv/tests/it/longform.rs`'s
     /// `the_carried_tail_is_the_previous_windows_own_last_latent_frames`.
     /// Together: window `n`'s last K latent frames ARE window `n + 1`'s first
     /// K, with no decode, no re-encode and no drift, which is what

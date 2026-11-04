@@ -237,8 +237,8 @@ pub struct LowRank<'a> {
 /// that map. INT8 has 256 levels and a trained LoRA delta is typically a
 /// fraction of one, so `round((w + δ)/s)` returned the BASE code for most
 /// weights and the adapter was discarded - silently, on a run that reported
-/// the adapter as loaded (`crates/flux2/tests/lora_requant_int8.rs` and
-/// `crates/wan/tests/lora_int8_delivery.rs` measure it).
+/// the adapter as loaded (`crates/flux2/tests/it/lora_requant_int8.rs` and
+/// `crates/wan/tests/it/lora_int8_delivery.rs` measure it).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BaseStorage {
     /// The base weights reach the device as the floats they already are

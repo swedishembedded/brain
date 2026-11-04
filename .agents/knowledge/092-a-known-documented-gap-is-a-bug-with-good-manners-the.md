@@ -32,7 +32,7 @@ the output: `U+FF76 U+FF9E` is exactly 6 bytes, so it decomposes to
 `U+30AB U+3099` instead of folding to `U+30AC`, while the 5-byte
 `U+1E9B U+0323` folds whole to `U+1E61`. HuggingFace's own `spm_precompiled`
 carries a comment daring the reader to "simplify" it and then check XNLI.
-Both cases are now in `crates/data/tests/t5xxl_precompiled_parity.rs`
+Both cases are now in `crates/data/tests/it/t5xxl_precompiled_parity.rs`
 precisely because they are the only lines in an English prompt where a
 plausible-looking simplification diverges.
 

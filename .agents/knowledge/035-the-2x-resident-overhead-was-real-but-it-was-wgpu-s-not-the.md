@@ -9,7 +9,7 @@ was measured correctly but attributed too broadly - it is a property of
 **the wgpu backend's Vulkan HAL on this class of hardware**, not of the
 hardware or of Vulkan itself.
 
-Direct measurement (`crates/gpu-core/tests/vram_overhead.rs`, `nvidia-smi`
+Direct measurement (`crates/gpu-core/tests/it/vram_overhead.rs`, `nvidia-smi`
 deltas around known allocations):
 
 * Allocation alone (`gpu.storage(n)`, never written): **1.00x**, every time.

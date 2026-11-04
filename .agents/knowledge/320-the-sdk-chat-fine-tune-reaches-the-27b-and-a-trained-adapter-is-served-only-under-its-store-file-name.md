@@ -16,11 +16,11 @@ change):
   exact resume, record and digests) is the one shared path. `Qwen35` now exposes its AdamW moments
   through `model::Model` (`optimized_params`, `read_moments`, `write_moments`), which is what exact
   resume needs; a cancelled qwen35 run continues to the byte-identical adapter
-  (`crates/sdk/tests/chat_finetune_qwen35.rs`, tiny qwen35, CPU).
+  (`crates/sdk/tests/it/chat_finetune_qwen35.rs`, tiny qwen35, CPU).
 * Real 27B, NF4 base, one card: 20 invented fact records, rank 16, 12 steps, loss 2.599 to 0.499,
   467 MB adapter written with its card, base digest and dataset digest.
 * Served logits equal the training forward for a file the trainer wrote
-  (`crates/qwen35/tests/adapter_bank.rs`, `an_adapter_the_trainer_wrote_is_served`).
+  (`crates/qwen35/tests/it/adapter_bank.rs`, `an_adapter_the_trainer_wrote_is_served`).
 
 The trap: `brain serve` finds an adapter only as `<models-dir>/<vendor>/<repo>/adapters/<owner>/<name>/<tag>/adapter.brain.safetensors`.
 The SDK writes `adapter.safetensors` into the run's out directory; a server pointed at a store where the

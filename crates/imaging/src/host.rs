@@ -22,7 +22,7 @@
 //! [`crate::AlignCorners::HalfPixel`]: both compute
 //! `s = clamp((o + 0.5)*in/out - 0.5, 0)` with `i1 = min(i0 + 1, in - 1)`, and
 //! the extra high-side clamp here is provably inert once `i1` is clamped.
-//! `crates/imaging/tests/device_ops.rs` pins that equivalence.
+//! `crates/imaging/tests/it/device_ops.rs` pins that equivalence.
 //!
 //! Anything that *does* hold a `Gpu` must call [`crate::Ctx::resize`]. A host
 //! loop is invisible to `--device` and reports host numbers under a device
@@ -39,7 +39,7 @@
 //!   align_corners=False)` (what `transforms.Resize(antialias=True)` does to a
 //!   tensor), bilinear or bicubic.
 //!
-//! `crates/imaging/tests/resize_reference.rs` pins both against goldens.
+//! `crates/imaging/tests/it/resize_reference.rs` pins both against goldens.
 
 
 use crate::Rgb8;

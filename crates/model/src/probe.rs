@@ -18,7 +18,7 @@
 //! [`crate::ops::Weight`] tier promotion, the same physical kernel a real
 //! forward pass would run at that shape. Timed as min-of-`reps` around
 //! `submit` + `poll_wait`, after one discarded warm-up, exactly the way
-//! `crates/gpu-core/tests/bench_matmul.rs` already times a GEMM.
+//! `crates/gpu-core/tests/it/bench_matmul.rs` already times a GEMM.
 //!
 //! Before any of that, the device is brought to its **operating point** by
 //! [`warm_up`] - an idle GPU is parked at its frequency floor and a probe
@@ -548,7 +548,7 @@ fn one_shape(
 
     // Deterministic, small-magnitude inputs: an ill-conditioned fp32
     // accumulation would not change the TIMING, but using the same fill
-    // `crates/gpu-core/tests/bench_matmul.rs` uses means a number here can be
+    // `crates/gpu-core/tests/it/bench_matmul.rs` uses means a number here can be
     // cross-checked against that table without wondering whether the data
     // differed.
     let x_host = fill((m as usize) * (k as usize), 1);
@@ -644,7 +644,7 @@ pub fn sweep_ramped(ops: &Ops, plan: &Plan) -> (Option<WarmUp>, Vec<Outcome>) {
 }
 
 /// Deterministic, bounded fill - the same generator
-/// `crates/gpu-core/tests/bench_matmul.rs` uses, so two tables built from
+/// `crates/gpu-core/tests/it/bench_matmul.rs` uses, so two tables built from
 /// these two entry points are comparable.
 fn fill(n: usize, seed: usize) -> Vec<f32> {
     (0..n).map(|i| (((i * 37 + seed * 17) % 97) as f32 / 97.0) - 0.5).collect()

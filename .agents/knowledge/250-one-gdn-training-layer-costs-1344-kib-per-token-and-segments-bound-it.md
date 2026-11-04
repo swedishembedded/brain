@@ -3,7 +3,7 @@
 
 # 250. One Gated DeltaNet training layer costs about 1.3 MiB per token, so the whole-sequence pair caps the sequence length; segments make the cost a constant
 
-What was measured. `crates/model/tests/gdn_mixer_train_cost.rs` (ignored, CUDA)
+What was measured. `crates/model/tests/it/gdn_mixer_train_cost.rs` (ignored, CUDA)
 runs one layer's `gdn_mixer_fwd` + `gdn_mixer_bwd` at the Qwen3.5-27B linear
 attention width (48 value heads, 16 key heads, dk = dv = 128, conv kernel 4,
 chunk 64) and reports the peak of the CUDA backend's exact outstanding-byte

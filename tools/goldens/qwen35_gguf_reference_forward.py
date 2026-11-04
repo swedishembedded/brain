@@ -53,7 +53,7 @@ Usage (positions are decoded one token at a time, exactly as
 
 `--digest` prints the per-position `rms`/`sum`/first values of the residual
 leaving the last requested layer - the numbers
-`crates/qwen35/tests/gguf_reference_parity_real.rs` pins. `--head` also runs
+`crates/qwen35/tests/it/gguf_reference_parity_real.rs` pins. `--head` also runs
 the final norm and the `output.weight` projection and prints the top-10
 logits, which is how the whole 64-layer stack's actual prediction was
 obtained. `--procs` splits every mat-vec row range over a process pool;
@@ -512,7 +512,7 @@ def main():
         action="store_true",
         help="dump layer 0's own GDN intermediates (xn1..y, in forward order) for the FIRST token only, "
         "instead of running the full --layers stack - the companion of "
-        "crates/qwen35/tests/gdn_intermediate_trace.rs, for localizing a divergence to one step",
+        "crates/qwen35/tests/it/gdn_intermediate_trace.rs, for localizing a divergence to one step",
     )
     args = ap.parse_args()
 

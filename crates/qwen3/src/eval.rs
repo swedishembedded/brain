@@ -5,7 +5,7 @@
 //! accuracy over [`data::chat::ChatSample`], for a base checkpoint alone or
 //! with a named LoRA adapter folded in. This is Gate B of the Definition of
 //! Done's "a way to validate that model has learned ideas from the
-//! dataset" -- unlike `crates/qwen3/tests/lora_learning_gate.rs` (Gate A,
+//! dataset" -- unlike `crates/qwen3/tests/it/lora_learning_gate.rs` (Gate A,
 //! synthetic, no checkpoint needed), this runs against a REAL base
 //! checkpoint and a REAL bench-exported dataset, so it lives behind
 //! `brain qwen eval` rather than as an always-on test.

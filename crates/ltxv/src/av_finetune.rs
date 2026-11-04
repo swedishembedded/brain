@@ -5,7 +5,7 @@
 //! finetune`'s AV twin, over either pure-random synthetic data (the
 //! "practical entry point" shape that module's own doc explains) or a
 //! caller-supplied list of clips with REAL exact ground truth (the phase-7
-//! concept-learning gate, `crates/ltxv/tests/av_concept_learning.rs`, which
+//! concept-learning gate, `crates/ltxv/tests/it/av_concept_learning.rs`, which
 //! builds its own clips from `data::gen_clips` and passes them in here -
 //! this module stays agnostic to where a [`SyntheticAvClip`] came from).
 //!
@@ -158,7 +158,7 @@ mod tests {
     /// End-to-end wiring: the loop runs, saves an adapter with the right
     /// tensor count (`28 leaves * 2 (A,B) * num_layers`), and the loss
     /// trends down over the run - the AV "practical entry point" complement
-    /// to `crates/ltxv/tests/av_overfit.rs`'s stronger, dedicated proof.
+    /// to `crates/ltxv/tests/it/av_overfit.rs`'s stronger, dedicated proof.
     #[test]
     fn the_synthetic_av_finetune_loop_runs_and_the_loss_descends() {
         let cfg = AvCfg::tiny();

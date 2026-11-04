@@ -111,7 +111,7 @@ impl ModernBertConfig {
     /// attention bind group slices `qkv` at each chunk's row offset and the
     /// device requires that offset 256-byte aligned, which only holds for
     /// every row when `d_model` is a multiple of 64 (see
-    /// `crates/model/tests/chunked_bidir_fwd_win.rs`'s own note on the same
+    /// `crates/model/tests/it/chunked_bidir_fwd_win.rs`'s own note on the same
     /// constraint).
     pub fn tiny() -> ModernBertConfig {
         ModernBertConfig {

@@ -5,7 +5,7 @@
 """Sharded full-universe OOS sweep: build once, fan the ticker universe across
 N processes (OOS_SHARD=i/n), merge the date-keyed shard dumps, score.
 
-The harness (crates/cli/tests/oos_skill_eval.rs) is single-threaded per
+The harness (crates/cli/tests/it/oos_skill_eval.rs) is single-threaded per
 process with warm in-process weights; name-sharding across cores is what
 turns a ~45 h serial full-SP500 sweep into a few hours of wall clock.
 

@@ -973,7 +973,7 @@ pub fn te_bytes(te_cfg: &qwen3::QwenConfig, layers: usize, seq: u64, int8: bool)
 /// output size it needs several times the old constant. `vae::
 /// decoder_device_bytes_for_pixels` is the architecture-derived figure,
 /// calibrated against the builder's own account of what it allocates and
-/// gated in `crates/vae/tests/footprint.rs`.
+/// gated in `crates/vae/tests/it/footprint.rs`.
 ///
 /// `n_out_max` is the pipeline's GENERATED-token ceiling (not the joint
 /// sequence's, which also carries reference conditioning that is encoded but

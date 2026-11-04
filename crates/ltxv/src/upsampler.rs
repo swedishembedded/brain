@@ -8,7 +8,7 @@
 //! pixel_shuffle,spatial_rational_resampler}`
 //! (`scratchpad/reference/ltxv/packages/ltx-core/src/ltx_core/model/upsampler/`),
 //! real weights (`ltx-2.5-latent-{spatial,temporal}-upscaler-x2-bf16-1.0.
-//! safetensors`), real parity (`crates/ltxv/tests/upsampler_parity.rs`).
+//! safetensors`), real parity (`crates/ltxv/tests/it/upsampler_parity.rs`).
 //!
 //! Both real checkpoints carry `dims: 3` - `initial_conv`/`res_blocks`/
 //! `post_upsample_res_blocks`/`final_conv` are ALL real `nn.Conv3d` for

@@ -6,7 +6,7 @@
 
 Random seeded weights with the REAL channel widths but a 4x4 patch grid
 (56x56 image) — runs in seconds. Dumps per-stage intermediates so the Rust
-test (crates/worldmirror2/tests/t3_dpt_tiny.rs) can pinpoint the first divergence:
+test (crates/worldmirror2/tests/it/t3_dpt_tiny.rs) can pinpoint the first divergence:
 rn[0..3] (post projects/pos/resize/rn-conv), fused (post refinenet1),
 full (post output_conv1+bilinear+pos), out (post output_conv2).
 

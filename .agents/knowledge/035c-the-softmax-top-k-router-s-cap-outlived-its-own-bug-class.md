@@ -25,7 +25,7 @@ top-k selection loop that excludes already-picked experts via an `n_experts`-
 sized `used[]` bool array has the identical failure shape as caching the
 probabilities themselves; both are "an array sized by the wrong dimension").
 
-Caught by `crates/model/tests/router_gate_expert_cap.rs`, mirroring
+Caught by `crates/model/tests/it/router_gate_expert_cap.rs`, mirroring
 `router_bwd_expert_cap.rs`'s own shape: a real (non-same-composition) host
 oracle at `n_experts` values below, one past, and far past the former cap
 (8, 129, 256) - the class of test `35b` itself says is the only thing that

@@ -170,7 +170,7 @@ pub fn e5m2_to_f32(b: u8) -> f32 {
 /// so they cannot drift.
 ///
 /// Real per-layer profiling of `qwen35::stream::generate`'s streaming decode
-/// path (`crates/qwen35/tests/stream_profile.rs`) found this exact loop -
+/// path (`crates/qwen35/tests/it/stream_profile.rs`) found this exact loop -
 /// even with the O(1) LUT above, which already cut the PER-ELEMENT cost by an
 /// order of magnitude over the branches+`powi` scalar path - to still be the
 /// single largest real stage of a decode step, most of the per-layer total on

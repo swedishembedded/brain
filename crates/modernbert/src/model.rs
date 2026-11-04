@@ -101,7 +101,7 @@
 //! **Windowed attention's backward needs ONE new Rust function
 //! (`block::chunked_bidir_bwd_win`) and ZERO new kernels** - confirmed by a
 //! dedicated finite-difference test
-//! (`crates/model/tests/chunked_bidir_bwd_win.rs`), not just the plan's own
+//! (`crates/model/tests/it/chunked_bidir_bwd_win.rs`), not just the plan's own
 //! reasoning: it recomputes scores/probs through the WINDOWED forward kernel
 //! and feeds them into the SAME unwindowed `CrossBwdIds` gradient kernels
 //! `chunked_bidir_bwd` uses, which is sound because softmax's adjoint is

@@ -72,7 +72,7 @@
 //! `Timesfm3Train::backward` takes `d_logits` FROM the caller, so the
 //! objective is outside the graph under test; `mean_pinball_grad` and its
 //! `pinball_grad_w` kernel are gated against each other directly in
-//! `crates/gradcheck/tests/glue.rs`, which is where an objective belongs.
+//! `crates/gradcheck/tests/it/glue.rs`, which is where an objective belongs.
 //!
 //! ## Epsilon
 //!

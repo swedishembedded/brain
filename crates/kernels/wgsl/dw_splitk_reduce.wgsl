@@ -23,7 +23,7 @@
 // taking `num_workgroups`. Without that arg the CPU JIT
 // refuses the kernel outright (`kernel missing num_workgroups arg`), so the
 // claim in this comment was false for as long as it was written, and
-// `crates/wgsl-cpu/tests/compile_all.rs` was red on exactly this one kernel.
+// `crates/wgsl-cpu/tests/it/compile_all.rs` was red on exactly this one kernel.
 //
 // The same omission was a silent CORRECTNESS bug on the GPU. `gid.x` alone is
 // only the flat invocation id while the grid is 1D; past

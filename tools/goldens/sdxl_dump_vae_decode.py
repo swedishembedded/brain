@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-"""Bake the SDXL VAE decode golden for `crates/vae/tests/sdxl_decode_parity.rs`.
+"""Bake the SDXL VAE decode golden for `crates/vae/tests/it/sdxl_decode_parity.rs`.
 
 Writes `<mirror>/vae/sdxl_vae_decode.safetensors`, which `make testdata/fetch`
 links to `testdata/golden/vae/`: a fixed `[1,4,16,16]` latent and

@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 """Compute honest out-of-sample cross-sectional skill metrics from the model-agnostic
-eval dump written by `crates/cli/tests/oos_skill_eval.rs`.
+eval dump written by `crates/cli/tests/it/oos_skill_eval.rs`.
 
 Per model (+ a shuffled-prediction NEGATIVE CONTROL and a naive last-value baseline):
   - per-week cross-sectional RankIC (Spearman) -> mean +/- stderr + t-stat

@@ -1100,7 +1100,7 @@ fn bf16_decode_expr(binding: &str, ident: &str) -> String {
 /// `0x0080_0000` (f32's own normal/subnormal boundary), i.e. the shifted
 /// bit pattern is ITSELF A SUBNORMAL f32. Some real GPU hardware flushes
 /// subnormal float OPERANDS to zero in compute shaders (confirmed on this
-/// repo's own Intel Arc iGPU, via `crates/model/tests/f16_roundtrip.rs`'s
+/// repo's own Intel Arc iGPU, via `crates/model/tests/it/f16_roundtrip.rs`'s
 /// dedicated subnormal-weight-row edge case: the naive multiply decoded a
 /// real subnormal f16 weight to exactly `0.0` on real wgpu/Vulkan hardware,
 /// while the CPU JIT - Rust float math, no FTZ - got it right, so this was
@@ -1234,10 +1234,10 @@ fn rewrite_workgroup_size(src: &str, value: u32) -> Result<String, String> {
 /// lattice, it now just fails loudly instead of silently, and
 /// `caps.numeric.f16` staying structurally `false` on `backend-cpu`
 /// (unconditionally, independent of anything wgpu measures - see
-/// `crates/backend-wgpu/tests/native_f16.rs`'s
+/// `crates/backend-wgpu/tests/it/native_f16.rs`'s
 /// `numeric_f16_never_entangles_across_backends`) remains the belt to that
 /// fix's suspenders, not a lone line of defense any more. See
-/// `crates/backend-wgpu/tests/native_f16.rs`'s
+/// `crates/backend-wgpu/tests/it/native_f16.rs`'s
 /// `native_f16_kernel_is_rejected_by_the_cpu_jit_rather_than_silently_
 /// diverging` for the real compile-and-refuse proof.
 pub fn native_f16_variant(name: &'static str, body: &'static str) -> Variant {
@@ -1989,7 +1989,7 @@ fn main() { let v = w[base + i]; }
     /// subnormals) - that property was verified by hand (see
     /// [`f16_decode_expr`]'s doc comment: every intermediate's exponent field
     /// is provably nonzero by construction) and confirmed empirically by
-    /// `crates/model/tests/f16_roundtrip.rs` actually running on real GPU
+    /// `crates/model/tests/it/f16_roundtrip.rs` actually running on real GPU
     /// hardware.
     fn f16_decode_bits_wgsl_mirror(h: u16) -> u32 {
         let h = h as u32;

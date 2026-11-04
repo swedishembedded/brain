@@ -31,7 +31,7 @@ The sample exercising it needed an optional native dependency and some
 assets, so nobody had started it since the kernel changed. A rule with no
 gate is only as good as the last time someone happened to exercise it.
 
-`crates/kernels/tests/binding_budget.rs` now counts, over `kernels::ALL`, and
+`crates/kernels/tests/it/binding_budget.rs` now counts, over `kernels::ALL`, and
 names the kernel and its count instead of letting wgpu name itself. Across 489
 kernels it flags exactly one, so the invariant genuinely held everywhere else -
 the gate is precise, not a net that needs exceptions.

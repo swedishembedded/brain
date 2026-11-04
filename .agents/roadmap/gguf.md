@@ -309,7 +309,7 @@ review of this codebase assumed:
       operation, unlike an affine fold would be. Legacy scales are routinely
       negative (Q4_0's especially) and Q6_K's per-16-group sub-scale is
       signed (`i8`); neither is special-cased because nothing here assumes a
-      sign. Gated (`crates/gguf/tests/kquant.rs`, new): one round-trip test
+      sign. Gated (`crates/gguf/tests/it/kquant.rs`, new): one round-trip test
       per format building a real temp GGUF via `checkpoint::quantize::
       convert(&src, Tier::*, ..)` (not hand-assembled bytes) and asserting
       `assert_eq!` (never a tolerance) that reconstructing `(wq, wsz)` with
@@ -347,7 +347,7 @@ review of this codebase assumed:
       now passes `src` straight into `Gemma4Layer::on`, with the
       `load_layer_tensors` call and its error plumbing removed from this
       path entirely - `load_layer_tensors` itself stays (public, still used
-      by `crates/gemma4/tests/int8_compute_real.rs`); the non-streamed
+      by `crates/gemma4/tests/it/int8_compute_real.rs`); the non-streamed
       `Gemma4Model::new` path keeps passing `&self.w` (an owned `Tensors`),
       which still satisfies the new `&dyn TensorSource` parameter via the
       blanket impl with no behavior change. Added `brain-paramstore` as a
@@ -376,7 +376,7 @@ All three M7 slices (s3dit, ltxv, gemma4) are now done - M7 is closed.
       passes `xgs: None` and keeps the byte-identical two-step dispatch;
       only `.to_vec()`-shaped call sites needed a mechanical one-line update
       for the new struct field, nothing behavioural. Gated
-      (`crates/model/tests/quant_group_sum.rs`, new, 3 test functions):
+      (`crates/model/tests/it/quant_group_sum.rs`, new, 3 test functions):
       `quant_group_sum_matches_host_exact_integer_sum` - `assert_eq!`
       against a host-computed exact integer sum of the SAME packed bytes
       (never a tolerance, since the kernel's whole claim is bit-exactness),
@@ -403,7 +403,7 @@ All three M7 slices (s3dit, ltxv, gemma4) are now done - M7 is closed.
       WPG: u32 = 8u;` each - exactly the `const NAME: u32 = <lit>u;` shape
       `kernels::template::specialize`'s existing rewrite already handles,
       so `WPG=4` (group=16) needed no source edit at all, only a test
-      proving it. Gated (`crates/model/tests/kquant_group16_knobs.rs`, new):
+      proving it. Gated (`crates/model/tests/it/kquant_group16_knobs.rs`, new):
       (a) `matmul_i8_dyn_qpg2_default_is_bit_identical_to_pre_qpg_kernel` -
       `assert_eq!`, not a tolerance, since this touches the production
       prefill GEMM every existing int8 model already depends on; (b) every
@@ -438,7 +438,7 @@ All three M7 slices (s3dit, ltxv, gemma4) are now done - M7 is closed.
       EXACTLY one thread per group
       (`select(0.0, dm, (g % WPGK) == 0u)` - a naive per-quad application
       would land the correction 8 times, since 8 threads visit each
-      group's 8 quads). Gated (`crates/model/tests/matmul_kq.rs`, new,
+      group's 8 quads). Gated (`crates/model/tests/it/matmul_kq.rs`, new,
       11 test functions): rung (b) device vs an f64 host oracle built
       directly from int8 codes (never a lossy float-quantize step) at both
       `CODE_BITS`, both kernels; rung (c) seven adversarial cases -
@@ -554,7 +554,7 @@ All three M7 slices (s3dit, ltxv, gemma4) are now done - M7 is closed.
       `kname` string literals against `kernels::template::interned`'s real
       output, same discipline the B4/B8/B9/B10 storage-tier literals
       already have) - all in `crates/model/src/ops.rs`'s own test module;
-      plus a new `crates/model/tests/ops_kquant.rs`: a REAL device-level
+      plus a new `crates/model/tests/it/ops_kquant.rs`: a REAL device-level
       test building `Weight::KQuant` directly (there is no
       `Weight::upload` path for it - that function explicitly refuses
       `Q4K`/`Q8K`, since K-quant's whole point is reaching the device
@@ -700,13 +700,13 @@ All three M7 slices (s3dit, ltxv, gemma4) are now done - M7 is closed.
       `kq_gemv_reg_resolves_independently_per_code_bits` - the two
       `CODE_BITS` rows activate and pick buckets independently, never
       conflating one's ladder with the other's); a new
-      `crates/gpu-core/tests/kq_gemv_reg_upgrade.rs` (device-level, both
+      `crates/gpu-core/tests/it/kq_gemv_reg_upgrade.rs` (device-level, both
       `CODE_BITS`): the upgrade is active with the full 6-bucket `MREG`
       ladder, and `matmul_kq_gemv`/`matmul_kq_gemv_reg` are `assert_eq!`
       BIT-IDENTICAL across `m in {1,2,3,8,17,32}` at two `(k, n)` shapes -
       real `assert_eq!` on the raw output bits, not a tolerance, since these
       two are supposed to compute identically by construction; a new
-      `crates/model/tests/moe_linear_gated_kq.rs` (device-level): rung (b)
+      `crates/model/tests/it/moe_linear_gated_kq.rs` (device-level): rung (b)
       `moe_linear_gated_kq` with every row routed to one expert (out of
       three, exercising `e_idx` addressing) matches BOTH `matmul_kq_dyn` and
       `matmul_kq_gemv` at M11's own tolerance (`rel_l2 <= 1e-6`, `cosine >=
@@ -721,7 +721,7 @@ All three M7 slices (s3dit, ltxv, gemma4) are now done - M7 is closed.
       smoke test could not. `make test --release --offline -p brain-kernels
       -p brain-model -p brain-gpu-core -p brain-backend-api`: every test in
       scope green on a real device (Intel Arc iGPU, Meteor Lake, Vulkan).
-      **Measured speedup** (`crates/gpu-core/tests/kq_gemv_reg_speed_bench.rs`,
+      **Measured speedup** (`crates/gpu-core/tests/it/kq_gemv_reg_speed_bench.rs`,
       `#[ignore]`d, `gpu_core::profile::best_of` bracketed by `poll_wait()`,
       preceded by a 3-second continuous-dispatch DVFS ramp per checklist
       §E.0b): at `k=n=2048` across `m in {1,2,4,8,16,32}`, both `CODE_BITS`,
@@ -802,7 +802,7 @@ All three M7 slices (s3dit, ltxv, gemma4) are now done - M7 is closed.
       produces a `(wsm, wd)` pair for all six formats uniformly (for the
       lossless-relayout/round-trip-test contract every format shares), but
       only Q4_K/Q5_K's device kernels actually bind it.
-      **Gating.** (a) `crates/gguf/tests/kquant.rs`'s round-trip test is
+      **Gating.** (a) `crates/gguf/tests/it/kquant.rs`'s round-trip test is
       still a real `assert_eq!` against the SAME oracle
       (`checkpoint::gguf`'s private `deq_*` functions), re-derived for the
       packed encoding rather than weakened - reconstructing `(wq, wsm, wd)`
@@ -991,7 +991,7 @@ this box yet.
       GGUF file per element of `tensors` via the existing eager `write`,
       injecting `split.no`/`split.count`/`split.tensors.count` into every
       part's KV itself so a test never hand-assembles split metadata bytes.
-      Gated (`crates/checkpoint/tests/gguf_split.rs`, new, 7 tests): a
+      Gated (`crates/checkpoint/tests/it/gguf_split.rs`, new, 7 tests): a
       3-part split opens correctly from EITHER part 1's path or a
       non-first part's path and reads one real tensor from each of the
       three parts by value (not just checking names - proves cross-part

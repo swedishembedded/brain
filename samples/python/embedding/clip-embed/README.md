@@ -28,7 +28,7 @@ BRAIN_CLIP_DIR=/path/to/stable-diffusion-xl-base-1.0 \
 * Verified end to end against HuggingFace on the released checkpoint -
   string in, BPE, tower, pooling - at **cosine 1.0000000000 / max_abs 1.5e-5**
   (CLIP-L) and **0.9999998212 / 1.0e-5** (OpenCLIP-bigG);
-  `crates/clip/tests/serving.rs` is the standing gate.
+  `crates/clip/tests/it/serving.rs` is the standing gate.
 
 ## What it needs
 

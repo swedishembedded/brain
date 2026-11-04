@@ -58,7 +58,7 @@
 //! sliced per tile - is independent, sizeable work this module leaves for a
 //! follow-up. Every call here runs the whole image through one graph, which
 //! is also why a real end-to-end call on this machine is expected to hit the
-//! device-memory ceiling `crates/supir/tests/parity.rs` already documents.
+//! device-memory ceiling `crates/supir/tests/it/parity.rs` already documents.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

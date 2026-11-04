@@ -7,7 +7,7 @@
 Runs the real `tokenizers` library over `TOKENIZER_STRINGS` using a BERT-family
 `tokenizer.json` (`BertNormalizer` + `BertPreTokenizer` + `WordPiece` +
 `TemplateProcessing`) and prints a Rust `&[(&str, &[u32])]` literal ready to
-paste into `crates/data/tests/wordpiece_parity.rs`'s `CASES` constant - the same
+paste into `crates/data/tests/it/wordpiece_parity.rs`'s `CASES` constant - the same
 "pin the ids the real tokenizer produced" gate `llava_tokenizer_dump_reference.py`
 uses for `data::llama_bpe`.
 
@@ -47,7 +47,7 @@ import unicodedata
 
 from tokenizers import Tokenizer
 
-# Mirrors `strings()` in `crates/data/tests/wordpiece_parity.rs` - the two
+# Mirrors `strings()` in `crates/data/tests/it/wordpiece_parity.rs` - the two
 # copies must be edited together, or a drift in one side goes undetected.
 TOKENIZER_STRINGS = [
     # --- plain paths -------------------------------------------------------

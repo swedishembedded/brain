@@ -268,7 +268,7 @@ ratio from 4.14 to 26.34 - large flat blades that look right from the training
 cameras and render as fur at a grazing angle.
 
 Two properties are worth knowing before turning it on, both measured in
-`crates/splat/tests/s13_depth_supervision.rs`:
+`crates/splat/tests/it/s13_depth_supervision.rs`:
 
 * **Confidence is a relative weight between pixels, not a volume knob.** AdamW's
   step is normalized per parameter, and along the viewing ray there is no RGB

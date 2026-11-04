@@ -10,7 +10,7 @@
 //! `sam1::init_dense` (random weights at the real geometry) instead of the
 //! ~450 MB mmproj checkpoint -- seconds to build, correctness is not the
 //! question this binary answers (the wgpu backend's known corruption,
-//! `crates/sam1/tests/wgpu_block_count_corruption.rs`, is a VALUES bug, not a
+//! `crates/sam1/tests/it/wgpu_block_count_corruption.rs`, is a VALUES bug, not a
 //! hang, so its forward's wall time is still representative for comparison
 //! purposes even though its output cannot be trusted).
 //!
@@ -194,7 +194,7 @@ fn main() {
         return;
     }
     // wgpu is known to CORRUPT this tower's output at 3+ blocks
-    // (crates/sam1/tests/wgpu_block_count_corruption.rs) -- not shipped, not
+    // (crates/sam1/tests/it/wgpu_block_count_corruption.rs) -- not shipped, not
     // used for anything but this timing reference. This model is served on the
     // CPU backend regardless of what this number shows.
     bench_backend("wgpu (NOT shipped -- known output corruption, timing reference only)", Gpu::new_gpu(PIPELINES), reps);

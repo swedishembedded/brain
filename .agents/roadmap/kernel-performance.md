@@ -57,7 +57,7 @@ faking a measurement.
 | `select::Op` has **8 variants**; attention, paged attention, softmax, conv2d, embed and MoE are entirely outside the selection seam | `crates/backend-api/src/select.rs:33-59` |
 | `AutoTuner` searches **at most 3 candidates** and picks an implementation *family* - no tile size, workgroup size or pipeline depth is searchable | `crates/backend-api/src/select.rs:590-649` |
 | `kernels::template` **can** rewrite `@workgroup_size` and any `const`, but **no call site does** - the only numeric knob in production use is `MREG` on two GEMV kernels via a fixed bucket ladder | `crates/kernels/src/template.rs`; `crates/gpu-core/src/upgrade.rs:130-192` |
-| `Ops::matmul` resolves through a **fixed internal** `CachedSelector<DefaultSelector>` with no injection point, so the measured tuner reaches only `qwen3::serve` | `crates/qwen3/tests/no_kernel_names.rs`'s own scope note |
+| `Ops::matmul` resolves through a **fixed internal** `CachedSelector<DefaultSelector>` with no injection point, so the measured tuner reaches only `qwen3::serve` | `crates/qwen3/tests/it/no_kernel_names.rs`'s own scope note |
 | Q4 uses **zero `dot4I8Packed`** - 8 scalar MACs per weight word - and `matmul_q4_gemv` still has the `array<f32,2048>` shared-memory occupancy bug that `matmul_i8_gemv_reg` already fixed for int8 | `crates/kernels/wgsl/matmul_q4_{dyn,gemv}.wgsl` |
 | MoE is `5 x n_experts` dispatches per layer (**1280/layer** at 256 experts); the compact path is host-scanned with **one submit per expert** (~6100/forward at GLM scale); no indirect dispatch exists anywhere in the engine | `crates/model/src/moe.rs:255-284, 964-976, 1065-1131` |
 | Storage tiers only: BF16/F16 decode to f32 inline (f16 costs a ~10-op decode **per weight element**); FP8 is host-side checkpoint decode, not a `DType`; FP4/NF4 absent; native-f16 compute exists as an **unwired proof-of-concept** | `crates/model/src/ops.rs:378-407`; `crates/kernels/src/template.rs:705-766` |
@@ -766,7 +766,7 @@ own milestone, not a rename of this one.
 ### M1.3 - `check-kernel-selection.sh`, a workspace-wide gate, and the inventory it produced
 
 Checked the brief's premise against source rather than following it literally:
-"generalize `crates/qwen3/tests/no_kernel_names.rs`" reads as "replace it",
+"generalize `crates/qwen3/tests/it/no_kernel_names.rs`" reads as "replace it",
 but that test's check 1 (banning `crate::q8::Q8`/`Lin8` INSTANCE inspection
 anywhere in the crate) polices an internal-API-design invariant with no
 kernel-catalogue analogue at all - a generic name-vs-catalogue gate cannot
@@ -800,7 +800,7 @@ already has (`model::ops::Ops::bind`, `optim::Optim::coop_gradnorm`,
 (`("name", kernels::NAME)`) or a `const NAME: usize = …` index declaration is
 not itself a selection and is correctly never flagged - it is the identifier
 comparison rule (`[A-Z][A-Z0-9_]*` only) that keeps a lowercase local
-binding of the same word (`crates/model/tests/moe_compact_parity.rs`'s
+binding of the same word (`crates/model/tests/it/moe_compact_parity.rs`'s
 `matmul: &Op` parameter, seen and fixed during the same pass) from being
 mistaken for a kernel index.
 
@@ -825,7 +825,7 @@ campaign's top target, now confirmed present in two more model crates.
 `minimaxmusic3::discriminator`'s `conv2d` dispatch is outside `Op::Conv2d`'s
 deliberately narrow scope (`vae::blocks::Builder::conv_s` only), the same
 category as `vision::blocks::Conv`'s already-documented exemption.
-`crates/model/tests/tensor_parallel.rs`'s raw `matmul`/`matmul_dw`/
+`crates/model/tests/it/tensor_parallel.rs`'s raw `matmul`/`matmul_dw`/
 `matmul_dx` steps are a dp/shard-parity test harness by design, never through
 `model::ops::Ops`.
 
@@ -914,7 +914,7 @@ back as a `shape: &[u32]` probe, reaching `upgrade::apply`'s existing
 itself is untouched - same signature, same `None` probe, same fallback to the
 registered kernel.
 
-TDD: `crates/gpu-core/tests/gemv_reg_upgrade_step_buf.rs` went RED first
+TDD: `crates/gpu-core/tests/it/gemv_reg_upgrade_step_buf.rs` went RED first
 (`step_buf_shaped` did not exist) then GREEN, on real Tesla P40 hardware via
 `Gpu::kernel_times()` (the same per-pipeline device-timing table
 `BRAIN_PROFILE` prints) as the oracle for which PHYSICAL kernel actually ran:
@@ -1464,7 +1464,7 @@ tiny()`'s `head_dim` is 40, `tiny_i8()`'s is 32 - neither is 128 or 256, so
 the fused branch was structurally unreachable from every existing test in
 that crate, and this change could not have regressed anything there (nor,
 conversely, could anything there have proven it correct). New file
-`crates/model/tests/gqa_chunk_step_hd256.rs` calls `gqa_chunk_step` directly
+`crates/model/tests/it/gqa_chunk_step_hd256.rs` calls `gqa_chunk_step` directly
 at `head_dim=256` (same shape `paged.rs`'s own kernel-level gate uses -
 `start=17, n=130`, spanning three `BR=64` query tiles) twice - once with
 `fused_prefill_hd256: Some(...)`, once with `None` to force the triad on
@@ -1680,7 +1680,7 @@ reverting restores the green result. `cargo clippy --release --offline -p
 brain-kernels -p brain-model -p brain-qwen3 -p brain-backend-api -p
 brain-gpu-core --all-targets --all-features -- -D warnings` clean - catching
 and fixing, on the spot, one genuinely pre-existing `clippy::type_
-complexity` violation in `crates/gpu-core/tests/step_cache.rs` (a file this
+complexity` violation in `crates/gpu-core/tests/it/step_cache.rs` (a file this
 milestone otherwise never touches) that `--all-targets` on `brain-gpu-core`
 surfaced only because this milestone's own new speed-bench test lives in
 that same crate. `python3 scripts/spdx/check.py` clean on every new/touched
@@ -2803,7 +2803,7 @@ overloaded `MAX_E`. Removed the now-dead `n_experts <= 64` assert in both
 abstraction); the one bound that remains, `n_group <= 64`, is now asserted
 in `router_fwd_kind` itself (moved from `router_bwd` alone, so an
 inference-only caller still fails loudly) and in `glmdsa`'s own guard. New
-`crates/model/tests/router_gate_sigmoid_expert_cap.rs` mirrors
+`crates/model/tests/it/router_gate_sigmoid_expert_cap.rs` mirrors
 `router_bwd_expert_cap.rs`/`router_gate_expert_cap.rs`'s own shape: a real
 host oracle at 8/65/256 experts (65 is the exact boundary the former array
 corrupts at, 256 is GLM-5.2's real scale with `n_group=4`/`topk_group=2`
@@ -3190,7 +3190,7 @@ compacted contributions itself, via `moe_group_perm_emit.wgsl`'s inverse
 permutation (`pos_for_slot`) - the standard one-thread-per-output-element
 reduction shape, no cross-thread write ever shared.
 
-TDD: `crates/model/tests/moe_grouped_parity.rs` (4 tests, all red against
+TDD: `crates/model/tests/it/moe_grouped_parity.rs` (4 tests, all red against
 the pre-change tree - `expert_fwd_grouped` did not exist, so nothing in the
 file compiled). `grouped_matches_dense_oracle_ragged_tail`/`_multi_tile_
 scale` compare against a dense-eval-then-mask oracle built through `model::
@@ -3318,7 +3318,7 @@ width, ~520 MB at 64 experts x a 512-row round) for a `GroupedExpertScratch`
 sized by `rows * top_k` (~65 MB), and the decoder's parameter store went from
 2234 buffers to 155. That is where the halved cold-page time comes from.
 
-**Gates**: `crates/deepseek2/tests/generate.rs::real_lm_greedy_decode_
+**Gates**: `crates/deepseek2/tests/it/generate.rs::real_lm_greedy_decode_
 matches_llamacpp` (real Q8_0 weights, token-for-token vs llama.cpp, and it
 drives BOTH the recompute path - per-expert, through the bank - and the
 KV-cached path - grouped - and demands identical ids);
@@ -3387,7 +3387,7 @@ exact multiple is not, and is not repeated here for that reason. `Ops::bind`'s
 new arm and `Ops::matmul_kernel`'s resolved name are covered by
 `crates/model/src/ops.rs`'s own
 `bind_packed_int8_q4_dispatches_the_register_tiled_kernel_not_the_naive_one`
-and `crates/model/tests/ops_facade_parity.rs`'s existing `check_q4` (bit-
+and `crates/model/tests/it/ops_facade_parity.rs`'s existing `check_q4` (bit-
 identical to the `dispatch.rs`-driven oracle at m ∈ {1, 8, 64, 512}, already
 GREEN before this follow-up and unchanged by it since `matmul_q4_dyn_reg` is
 bit-identical to `matmul_q4_dyn`).
@@ -3397,7 +3397,7 @@ NOT wired in - a killed hypothesis, not a silent drop.** The kernel was
 first wired into `gpu_core::upgrade`'s zero-edit seam exactly like its
 `matmul_gemv_reg`/`matmul_i8_gemv_reg` siblings (same `MREG` bucket ladder,
 same knob index), and its own correctness test
-(`crates/gpu-core/tests/q4_gemv_reg_upgrade.rs`, bit-identical to
+(`crates/gpu-core/tests/it/q4_gemv_reg_upgrade.rs`, bit-identical to
 `matmul_q4_gemv` across m=1..32 at four shapes) passed cleanly on real
 Tesla P40 hardware. The SPEED measurement did not: dispatched against
 `matmul_q4_gemv` at k=n=2048, the un-templated `MREG = 32` build measured
@@ -3407,7 +3407,7 @@ specialisation is a regression at small parameters" mistake this module's
 own header already documents for the fp32 sibling, since the raw
 `matmul_q4_gemv_reg` name (not the per-`m`-bucket template variant) is what
 got measured. A corrected per-bucket re-measurement
-(`crates/model/tests/matmul_q4_speed_bench.rs`, dispatching the exact
+(`crates/model/tests/it/matmul_q4_speed_bench.rs`, dispatching the exact
 `kernels::template::interned` variant the real bucket ladder would pick per
 `m`) was built and queued but could not complete before this milestone's
 time closed, on a box saturated by concurrent campaign work (sustained
@@ -3417,7 +3417,7 @@ the only completed hardware measurement shows a real, consistent loss
 across most of the decode regime, the `gpu_core::upgrade` wiring and its
 test were reverted rather than shipped unverified. The kernel itself, and
 its own bit-identical-to-`matmul_q4_gemv` correctness test in
-`crates/model/tests/matmul_q4_gemm.rs`, stay - it is available by name for
+`crates/model/tests/it/matmul_q4_gemm.rs`, stay - it is available by name for
 a caller with a verified shape, just not silently substituted everywhere.
 **Follow-up**: re-run `matmul_q4_speed_bench.rs`'s `gemv_vs_gemv_reg_
 across_decode_rows` test (per-bucket, not the plain registered name) once
@@ -3868,7 +3868,7 @@ guarantee, not on same-queue submission order alone, matching the
 correctness discipline `VkContext::download`'s own doc already established
 for this file's other driver-adjacent decisions.
 
-**Gate**: `crates/backend-vulkan/tests/async_submit.rs` (new) pins the
+**Gate**: `crates/backend-vulkan/tests/it/async_submit.rs` (new) pins the
 contract directly rather than by proxy: `Backend::flush()` alone leaves the
 batch outstanding (`async_inflight_count() == 1`, not 0, which would mean it
 drained); exactly `RING_SIZE` flushes with no intervening read stay
@@ -3893,7 +3893,7 @@ own rule: an audit/report finding - here, a hang encountered while testing -
 is a hypothesis until checked against source, so both were confirmed to
 reproduce identically on a clean tree with this milestone's own changes
 stashed out before being called pre-existing):
-`crates/gpu-core/tests/device_open.rs` built several real Vulkan/wgpu
+`crates/gpu-core/tests/it/device_open.rs` built several real Vulkan/wgpu
 devices across its 4 tests with no serialisation against `cargo test`'s
 default concurrent-within-a-binary execution, reproducing the same "one
 thread pinned near 100% CPU, GPUs idle" hang signature
@@ -4145,7 +4145,7 @@ for the row-length factor the old per-row-index accounting didn't need (the
 per-DISPATCH cost is now `bhc*(c_len-1)` adds, not `bhc`).
 
 **Bit-identical, not just "close enough"**: the arithmetic is unchanged,
-only its dispatch granularity - `crates/model/tests/gdn_chunk_fwd.rs`
+only its dispatch granularity - `crates/model/tests/it/gdn_chunk_fwd.rs`
 (`gdn_chunk_fwd_matches_host_oracle`) and `gdn_chunk_bwd.rs`
 (`gdn_chunk_bwd_gradcheck`) both stay green on this exact assertion, on
 BOTH `BRAIN_DEVICE=gpu` and `BRAIN_DEVICE=cpu`. Each test also gained a
@@ -4239,7 +4239,7 @@ already accumulates into it; there is nothing to merge.
 `crates/vulkan/src/pipeline_cache.rs`'s own `#[cfg(test)]` module covers the
 pure logic (header acceptance/rejection on vendor/device/uuid mismatch and
 truncation, a load/persist round-trip, path uniqueness). The new
-`crates/vulkan/tests/pipeline_cache.rs` is the end-to-end contract: a first
+`crates/vulkan/tests/it/pipeline_cache.rs` is the end-to-end contract: a first
 `VkContext` builds the crate's one real pipeline (`matmul.rs`'s scalar
 kernel, the actual changed call site, not a bespoke test pipeline), asserts
 its own `vkGetPipelineCacheData` is non-empty, drops (persisting), then
@@ -4338,7 +4338,7 @@ partial), and a run where hardware corruption happens to claim every batch is
 a soft skip, not a failure (observed in practice, not hypothetical).
 
 **New test**: `a_corrupted_timestamp_readback_is_discarded_not_reported`
-(`crates/backend-wgpu/tests/kernel_timing.rs`) drives several separate small
+(`crates/backend-wgpu/tests/it/kernel_timing.rs`) drives several separate small
 flushes of `axpy` and asserts every `kernel_times()` row stays under
 `IMPLAUSIBLE_DISPATCH_MS` per call - a real device test, not a synthetic
 unit test of `fold_ticks` in isolation, because the corruption needs real
@@ -4365,7 +4365,7 @@ in `crates/modelstore/src/inventory.rs` blocking the gate via a transitive
 dependency - two lines, no behaviour change, fixed on the spot per this
 repo's own standing rule). `qwen35_bench all 128 3` run 10+ times
 post-fix: zero corrupted numbers, every discard reported loudly. A
-pre-existing, box-noise-driven flake in `crates/gpu-core/tests/roofline.rs`
+pre-existing, box-noise-driven flake in `crates/gpu-core/tests/it/roofline.rs`
 (`measuring_twice_agrees`) was investigated and confirmed unrelated -
 reproduces identically on unmodified `main` via `git stash`, matching this
 campaign's own already-documented thermal-drift caveat, not a regression
@@ -4781,9 +4781,9 @@ and this milestone does not touch that reasoning.
 **Bit-identical**: every element's AdamW update depends only on its own
 `(g, m, v, w)`, never a neighbour's, so flattening the storage layout
 does not reassociate any computation - concatenation order cannot change
-a single computed value. `crates/gpt2/tests/dp_parity.rs`,
-`crates/qwen3/tests/dp_parity.rs` and
-`crates/toyautoencoder/tests/dp_parity.rs` (the existing multi-GPU-vs-
+a single computed value. `crates/gpt2/tests/it/dp_parity.rs`,
+`crates/qwen3/tests/it/dp_parity.rs` and
+`crates/toyautoencoder/tests/it/dp_parity.rs` (the existing multi-GPU-vs-
 single-GPU gradient parity gates) all stay green, `BRAIN_DEVICE=gpu` and
 `BRAIN_DEVICE=cpu`. A new test,
 `adamw_step_flattens_replica_transfers_into_one_buffer_per_direction`
@@ -4827,7 +4827,7 @@ SwiGLU MLP (`mlp.{gate,up,down}.weight`, the same tensor names/shapes
 `crates/qwen3/src/model.rs` loads - `gate`/`up` are `[d_ff, d_model]`,
 `down` is `[d_model, d_ff]`, row-major) split Megatron-style (Shoeybi et
 al., arXiv:1909.08053 §3 - the same authoritative source
-`crates/model/tests/tensor_parallel.rs`'s existing generic TP proof cites):
+`crates/model/tests/it/tensor_parallel.rs`'s existing generic TP proof cites):
 `gate`/`up` column-parallel (each rank owns a contiguous `d_ff/world_size`
 slice of output rows, so `SiLU`/elementwise-multiply need no
 communication), `down` row-parallel on the matching contracting dimension
@@ -4839,7 +4839,7 @@ then shards and executes at `plan.degree` - the degree used to run is
 `plan_tp`'s own prediction, not a hardcoded test parameter.
 
 **What was already there, and what's new relative to it**:
-`crates/model/tests/tensor_parallel.rs` already proved the generic TP
+`crates/model/tests/it/tensor_parallel.rs` already proved the generic TP
 mechanic (column+row split, `Collective::all_reduce`) on a toy MLP/attention
 shape across two real GPUs - it predates this milestone and is unrelated to
 `plan_tp`. This milestone's addition is narrower and different: a real
@@ -4942,7 +4942,7 @@ branch that provably never fires at any tested shape).
 The first implementation computed `n` as `c.trailing_zeros()` on the
 assumption "`gdn_chunk_size` only ever returns a power of two" (true in
 production, and true of every shape this repo's other GDN tests use).
-`crates/model/tests/gdn_mixer_stream.rs` - already in the tree, unmodified
+`crates/model/tests/it/gdn_mixer_stream.rs` - already in the tree, unmodified
 by this milestone - deliberately drives one of its two streamed rounds at
 `chunk=5`, a non-power-of-two, exactly to exercise a ragged final prefill
 round. `trailing_zeros()` returns `0` for any odd `c > 1`, which silently
@@ -4959,7 +4959,7 @@ for `c>1`, `0` for `c<=1`), which is identical to `trailing_zeros()` at
 every power-of-two `c` (no change to the production dispatch count) and
 correct at every other `c` too. Re-ran the full suite after the fix: green.
 
-**Correctness**: `crates/model/tests/gdn_chunk_fwd.rs`
+**Correctness**: `crates/model/tests/it/gdn_chunk_fwd.rs`
 (`gdn_chunk_fwd_matches_host_oracle`, tolerance `1e-4`),
 `gdn_chunk_bwd.rs` (`gdn_chunk_bwd_gradcheck`, tolerance `abs<1e-3 ||
 rel<1e-3`), `gdn_recurrent_step.rs`, `gdn_mixer_equivalence.rs` (2 tests)
@@ -5121,7 +5121,7 @@ regression" rather than as a win - but the direction is the mechanism's own
 prediction, and it rules out the trade M5.9 believed it was making.
 
 **Regression test**, and the reason the old one could not catch this:
-`crates/model/tests/gdn_chunk_fwd.rs` gained
+`crates/model/tests/it/gdn_chunk_fwd.rs` gained
 `gdn_chunk_fwd_matches_host_oracle_with_near_parallel_keys` - the same f64
 host oracle, at the PRODUCTION chunk width `c = 64` (the existing case runs
 `c = 4`, where `n_factors = 2` and the series never squares far enough to
@@ -5180,7 +5180,7 @@ only carried `kind`/`convert: Option<width>` separately and now constructs
 the full `Scalar` from those two before calling through) pass the complete
 scalar through instead of just `.kind`.
 
-TDD: `crates/backend-wgpu/tests/native_f16.rs` already had exactly the
+TDD: `crates/backend-wgpu/tests/it/native_f16.rs` already had exactly the
 red-flag test this milestone's brief asked for -
 `native_f16_kernel_silently_diverges_on_the_cpu_jit_rather_than_being_
 rejected` - which had been asserting the bug's behaviour as a documented,
@@ -5322,7 +5322,7 @@ packed-int8 kernels genuinely executing there (naga's polyfill) - is
 pinned separately by `vulkan_no_dp4a_still_executes_i8_unlike_the_old_
 formula`, which asserts the NEW, honest `true` and names the old `false`
 explicitly as the bug this milestone fixes.
-`crates/backend-wgpu/tests/arch_desc_int8_not_a_speed_claim.rs`'s
+`crates/backend-wgpu/tests/it/arch_desc_int8_not_a_speed_claim.rs`'s
 `int8_dot_is_not_a_speed_claim_on_wgpu` opens a real wgpu device and
 asserts `tier(I8).level == Emulated && !is_fast(I8)` directly.
 
@@ -5331,7 +5331,7 @@ Real-hardware proof (this sandbox's only adapter is an Intel Arc iGPU
 `backend-vulkan` directly - this campaign's own P40/Xeon numbers were
 measured on a different physical box than this agent's sandbox, so this
 entry's hardware differs from the rest of the ledger's by necessity, not
-by choice): `crates/gpu-core/tests/arch_desc_real_divergence.rs`'s
+by choice): `crates/gpu-core/tests/it/arch_desc_real_divergence.rs`'s
 `wgpu_and_vulkan_report_different_i8_tiers_on_the_same_real_card` opened
 both backends on this machine and printed:
 
@@ -5349,7 +5349,7 @@ true` and a selector had no way to prefer the real hardware path.
 
 Verification: `cargo test -p brain-backend-api -p brain-backend-wgpu -p
 brain-backend-vulkan -p brain-backend-cpu` green end to end, plus
-`crates/model/tests/ops_facade_parity.rs` green - confirming no live
+`crates/model/tests/it/ops_facade_parity.rs` green - confirming no live
 selector decision moved for anything this milestone does not deliberately
 change. `cargo clippy -p brain-backend-api -p brain-backend-wgpu -p
 brain-backend-vulkan -p brain-backend-cpu --all-targets` clean.
@@ -5425,9 +5425,9 @@ provider therefore does not speed up any of those simply by existing; each
 needs its own migration onto the seam first.
 
 **Gate - the no-regression proof, twice over**:
-- `crates/model/tests/ops_facade_parity.rs` passes completely UNCHANGED
+- `crates/model/tests/it/ops_facade_parity.rs` passes completely UNCHANGED
   (both its tests, output-bit-identical across tiers and row offsets).
-- A new, STRONGER test, `crates/model/tests/ops_matmul_step_identity.rs`:
+- A new, STRONGER test, `crates/model/tests/it/ops_matmul_step_identity.rs`:
   for a representative shape/tier sweep, the exact `StepMeta` (kernel index,
   params, thread count) `Ops::matmul` records THROUGH
   `ProviderRegistry::dispatch` matches `Ops::matmul_kernel`'s own
@@ -5546,7 +5546,7 @@ not attempted half-done.
 
 **Gate**: `crates/model/src/lut4.rs`'s 6 unit tests (codebook shape/
 round-trip/every-code-reachable/the Gaussian-vs-Q4 comparison above), plus
-`crates/model/tests/matmul_lut4_gemm.rs` (3 tests, REAL wgpu hardware -
+`crates/model/tests/it/matmul_lut4_gemm.rs` (3 tests, REAL wgpu hardware -
 Intel Arc iGPU, confirmed via the adapter string printed at test time, not
 skipped): both kernels' device output against a host oracle built from the
 EXACT LUT-dequantized weight (not a re-quantization - only the on-device
@@ -5657,7 +5657,7 @@ F8E4M3`/`Weight::F8E5M2` this session (same scope boundary as M8.5's `NF4`/
 `F4E2M1`) - refused loudly by its own `assert!`, a clearly-scoped follow-up.
 
 **Gate**: the exhaustive byte-pattern tests above, plus
-`crates/model/tests/matmul_fp8_gemm.rs` (5 tests, REAL wgpu hardware - Intel
+`crates/model/tests/it/matmul_fp8_gemm.rs` (5 tests, REAL wgpu hardware - Intel
 Arc iGPU, confirmed via the printed adapter string, not skipped): both
 formats at a 128x128-block-ALIGNED shape (`n=128,k=256`) AND a NON-aligned
 one (`n=200,k=192` - partial last row-block of 72 rows AND partial last
@@ -5881,7 +5881,7 @@ already-packed-f16 tile-aligned operands today.
 
 **Gate - proven, not assumed, on THIS box's real Vulkan device (Intel Arc
 (MTL) iGPU, `crates/backend-vulkan`'s real `query_caps`, no mocks):**
-`crates/gpu-core/tests/coopmat_provider_declines_on_this_box.rs`'s
+`crates/gpu-core/tests/it/coopmat_provider_declines_on_this_box.rs`'s
 `coopmat_provider_requires_is_unsatisfied_by_this_boxs_real_vulkan_caps`
 opens a real `VulkanBackend`, confirms `caps.arch.matrix` is `None` (no
 `VK_KHR_cooperative_matrix` shapes on this hardware), and asserts
@@ -6340,7 +6340,7 @@ below-margin, the positive fast-accept case, backward-declines-even-when-
 fast, non-F32-shape-declines-even-when-fast, the tile-formula regression
 guard, the `kernel()` name/wrapping pin - all synthetic `ArchDesc`s, per the
 milestone's own "construct one, don't require real slow hardware"
-instruction) plus `crates/gpu-core/tests/native_f16_provider.rs` (3 tests,
+instruction) plus `crates/gpu-core/tests/it/native_f16_provider.rs` (3 tests,
 REAL wgpu hardware - Intel Arc iGPU (MTL), confirmed via the printed adapter
 string): the measured-speedup report, forward-pass parity against the WGSL
 reference at a numeric tolerance across the same four shapes `provider::
@@ -6862,7 +6862,7 @@ not all of it. `matmul_reg4`'s stride of 132 floats (= 4 mod 32) gives bank
 changes its shared footprint and it is the kernel every model currently
 dispatches; the finding is recorded here and in `matmul_reg4`'s header.
 
-**Harness changes.** `crates/gpu-core/tests/bench_matmul.rs` now registers
+**Harness changes.** `crates/gpu-core/tests/it/bench_matmul.rs` now registers
 `matmul_reg3` and `matmul_reg4` (it stopped at `reg2` before, so the
 kernel every model actually dispatches was not in its own benchmark),
 interleaves all arms round-robin under one `time_arms`, parity-checks
@@ -7284,7 +7284,7 @@ pipeline index in that file, a mistake caught and corrected before it ever
 compiled.
 
 **Correctness gate, before any measurement** (this milestone's own explicit
-order): `crates/gpu-core/tests/kernel_catalog_validation.rs`'s `matmul_
+order): `crates/gpu-core/tests/it/kernel_catalog_validation.rs`'s `matmul_
 family_is_correct_and_lands_on_gpu_when_hardware_available` extended with a
 `matmul_reg3_64` case, a `[37, 64, 41]` shape (not a multiple of 64 on any of
 `m`/`k`/`n`, so a masking or stride slip on the smaller tile would show)
@@ -7462,7 +7462,7 @@ resource tracking probably makes this safe anyway," rather than gamble
 correctness for a guessed speedup on hardware already shown to violate
 textbook barrier semantics in at least one case.
 
-**Correctness gate**: `crates/qwen35/tests/chunked_prefill.rs`'s existing
+**Correctness gate**: `crates/qwen35/tests/it/chunked_prefill.rs`'s existing
 three tests (`chunked_prefill_matches_token_by_token_replay_cpu`,
 `_default_backend`, `whole_prompt_single_chunk_matches_token_by_token_
 replay`) - unchanged, still green. This is the right gate un-modified: 8

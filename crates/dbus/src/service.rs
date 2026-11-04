@@ -917,7 +917,7 @@ mod tests {
     }
 
     /// A stub [`residency::ModelSupplier`] mirroring the one in
-    /// `crates/apiserve/tests/api.rs`: `"vendor/fetchable"` classifies as
+    /// `crates/apiserve/tests/it/api.rs`: `"vendor/fetchable"` classifies as
     /// fetchable and "fetching" it registers a minimal resident under that exact
     /// name; every other model is `Unknown`. Counts `ensure` calls.
     struct StubSupplier {

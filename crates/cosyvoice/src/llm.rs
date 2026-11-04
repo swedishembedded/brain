@@ -202,7 +202,7 @@ impl CosyVoiceLm {
     /// **Not bit-exact with the reference sampler** - see `crate::sampling`'s
     /// module doc. `seed` selects brain's OWN reproducible RNG stream, so the
     /// SAME seed always yields the SAME token sequence on this implementation
-    /// (verified in `crates/cosyvoice/tests/llm_parity.rs`), but that sequence
+    /// (verified in `crates/cosyvoice/tests/it/llm_parity.rs`), but that sequence
     /// will not match `torch.manual_seed`'s.
     pub fn generate(&self, last_hidden: &[f32], max_tokens: usize, min_len: usize, seed: u64) -> Vec<u32> {
         assert_eq!(last_hidden.len(), self.d());

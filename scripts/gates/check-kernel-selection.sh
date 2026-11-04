@@ -4,7 +4,7 @@
 
 # Kernel-selection gate (`make check/scripts`, folded into `make test/full`).
 #
-# `crates/qwen3/tests/no_kernel_names.rs` (still in place, unchanged -- see
+# `crates/qwen3/tests/it/no_kernel_names.rs` (still in place, unchanged -- see
 # below) polices ONE crate's ONE migrated fork: qwen3's fp32-vs-int8 linear
 # dispatch. The kernel catalogue (`docs/reference/kernels/index.md`) is
 # workspace-wide, and so is the class of bug it was written to catch -- a
@@ -108,7 +108,7 @@ emb_bwd	crates/toymoe/src/train.rs	Two-stage replacement emb_bwd_part + dw_split
 emb_bwd	crates/toypid/src/model.rs	Two-stage replacement emb_bwd_part + dw_splitk_reduce exists (horizon uses it: the token tables of a small vocabulary over tens of thousands of rows); not a drop-in single dispatch (needs a block scratch), migrating this model is backlog.
 emb_bwd	crates/toyseq2seq/src/model.rs	Two-stage replacement emb_bwd_part + dw_splitk_reduce exists (horizon uses it: the token tables of a small vocabulary over tens of thousands of rows); not a drop-in single dispatch (needs a block scratch), migrating this model is backlog.
 layernorm_dgamma	crates/minimaxmusic3/src/dit_train.rs	Two-stage replacement layernorm_dgamma_part + bias_grad_final exists (horizon uses it); not a drop-in single dispatch (needs a chunk scratch), migrating this model is backlog.
-matmul	crates/model/tests/tensor_parallel.rs	Test harness for dp/shard-parity checks constructs raw GPU steps directly by design, never through model::ops::Ops - not a served/trained model path.
+matmul	crates/model/tests/it/tensor_parallel.rs	Test harness for dp/shard-parity checks constructs raw GPU steps directly by design, never through model::ops::Ops - not a served/trained model path.
 matmul	crates/qwen35/src/model.rs	Not yet migrated onto the existing Op::MatMul/model::ops::Ops seam - Phase 1 M1.4 / Phase 5 backlog item, not fixed here.
 matmul	crates/qwen35moe/src/model.rs	Not yet migrated onto the existing Op::MatMul/model::ops::Ops seam - Phase 1 M1.4 / Phase 5 backlog item, not fixed here.
 matmul	crates/qwen3omnimoe/src/talker.rs	Not yet migrated onto the existing Op::MatMul/model::ops::Ops seam - Phase 1 M1.4 / Phase 5 backlog item, not fixed here.
@@ -120,7 +120,7 @@ matmul	crates/toyseq2seq/src/model.rs	Not yet migrated onto the existing Op::Mat
 matmul_dw	crates/deepseek2/src/model.rs	No select::Op covers the backward GEMMs (matmul_dw vs matmul_dw_reg) at all yet - a gap Phase 5's family table does not currently itemise; tracked via this gate's M1.3 inventory, not fixed here.
 matmul_dw	crates/glmdsa/src/model.rs	No select::Op covers the backward GEMMs (matmul_dw vs matmul_dw_reg) at all yet - a gap Phase 5's family table does not currently itemise; tracked via this gate's M1.3 inventory, not fixed here.
 matmul_dw	crates/kronos/src/train.rs	No select::Op covers the backward GEMMs (matmul_dw vs matmul_dw_reg) at all yet - a gap Phase 5's family table does not currently itemise; tracked via this gate's M1.3 inventory, not fixed here.
-matmul_dw	crates/model/tests/tensor_parallel.rs	Test harness for dp/shard-parity checks constructs raw GPU steps directly by design, never through model::ops::Ops - not a served/trained model path.
+matmul_dw	crates/model/tests/it/tensor_parallel.rs	Test harness for dp/shard-parity checks constructs raw GPU steps directly by design, never through model::ops::Ops - not a served/trained model path.
 matmul_dw	crates/qwen35/src/model.rs	No select::Op covers the backward GEMMs (matmul_dw vs matmul_dw_reg) at all yet - a gap Phase 5's family table does not currently itemise; tracked via this gate's M1.3 inventory, not fixed here.
 matmul_dw	crates/qwen35moe/src/model.rs	No select::Op covers the backward GEMMs (matmul_dw vs matmul_dw_reg) at all yet - a gap Phase 5's family table does not currently itemise; tracked via this gate's M1.3 inventory, not fixed here.
 matmul_dw	crates/qwen3tts/src/mtp.rs	@opt 2/5, faster sibling matmul_dw_reg exists - not yet migrated onto it, MTP-specific backward path, backlog.
@@ -131,7 +131,7 @@ matmul_dw	crates/toyseq2seq/src/model.rs	No select::Op covers the backward GEMMs
 matmul_dx	crates/deepseek2/src/model.rs	No select::Op covers the backward GEMMs (matmul_dx vs matmul_dx_reg) at all yet - a gap Phase 5's family table does not currently itemise; tracked via this gate's M1.3 inventory, not fixed here.
 matmul_dx	crates/glmdsa/src/model.rs	No select::Op covers the backward GEMMs (matmul_dx vs matmul_dx_reg) at all yet - a gap Phase 5's family table does not currently itemise; tracked via this gate's M1.3 inventory, not fixed here.
 matmul_dx	crates/kronos/src/train.rs	No select::Op covers the backward GEMMs (matmul_dx vs matmul_dx_reg) at all yet - a gap Phase 5's family table does not currently itemise; tracked via this gate's M1.3 inventory, not fixed here.
-matmul_dx	crates/model/tests/tensor_parallel.rs	Test harness for dp/shard-parity checks constructs raw GPU steps directly by design, never through model::ops::Ops - not a served/trained model path.
+matmul_dx	crates/model/tests/it/tensor_parallel.rs	Test harness for dp/shard-parity checks constructs raw GPU steps directly by design, never through model::ops::Ops - not a served/trained model path.
 matmul_dx	crates/qwen35/src/model.rs	No select::Op covers the backward GEMMs (matmul_dx vs matmul_dx_reg) at all yet - a gap Phase 5's family table does not currently itemise; tracked via this gate's M1.3 inventory, not fixed here.
 matmul_dx	crates/qwen35moe/src/model.rs	No select::Op covers the backward GEMMs (matmul_dx vs matmul_dx_reg) at all yet - a gap Phase 5's family table does not currently itemise; tracked via this gate's M1.3 inventory, not fixed here.
 matmul_dx	crates/qwen3tts/src/mtp.rs	@opt 2/5, faster sibling matmul_dx_reg exists - not yet migrated onto it, MTP-specific backward path, backlog.

@@ -28,7 +28,7 @@
 //! samples from torch's global Mersenne-Twister-derived CPU generator; this
 //! port draws from `data::rng::Rng` (brain's own PRNG). The two streams are
 //! algorithmically unrelated, so a shared seed does not reproduce the same
-//! token sequence - see `crates/cosyvoice/tests/llm_parity.rs` for how the
+//! token sequence - see `crates/cosyvoice/tests/it/llm_parity.rs` for how the
 //! parity suite treats this (a documented, honestly-reported gap; the
 //! prefill hidden-state/logits parity rungs are the primary gate, not this
 //! one). What IS reproduced faithfully is the sampling *algorithm* itself

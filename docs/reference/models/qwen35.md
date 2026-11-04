@@ -273,9 +273,9 @@ What it does differently:
   scores/softmax/apply triad it replaced (`.agents/roadmap/qwen35.md` M30). The
   recurrent state of the 48 GDN layers (150 MiB per sequence) is not part of the
   cache and stays f32. Default stays `f32`. Gates: per-kernel rounding bounds in
-  `crates/model/tests/kv_tier.rs`, logits agreement through chunked prefill and
-  batched decode in `crates/qwen35/tests/kv_tier.rs`, and top-1 agreement over
-  20 real prompts x 64 steps in `crates/qwen35/tests/gguf_kv_tier_real.rs`. `brain perf run
+  `crates/model/tests/it/kv_tier.rs`, logits agreement through chunked prefill and
+  batched decode in `crates/qwen35/tests/it/kv_tier.rs`, and top-1 agreement over
+  20 real prompts x 64 steps in `crates/qwen35/tests/it/gguf_kv_tier_real.rs`. `brain perf run
   longctx` reports the tier as `kv_precision`.
 
 - **No fp32 intermediate anywhere.** `checkpoint::gguf::MmapGguf` is a
@@ -350,7 +350,7 @@ What it does differently:
 - **Text only, per-token prefill when chunking is not profitable** - same
   shape as `crate::serve::Engine` and for the same reasons.
 
-Gated by `crates/qwen35/tests/gguf_resident_real.rs` (real file + real cards,
+Gated by `crates/qwen35/tests/it/gguf_resident_real.rs` (real file + real cards,
 self-skipping loudly without either).
 
 ## Fine-tuning on conversations with images
@@ -561,7 +561,7 @@ reading claims below, they have very different capabilities:
   replays the prompt one token at a time rather than a fast batched forward.
   No LoRA adapter folding into this path yet. No multi-GPU sharding wired in
   either (the underlying `model::Shardable` capability exists and is gated
-  by its own test, `crates/qwen35/tests/shard_parity.rs`, which self-skips
+  by its own test, `crates/qwen35/tests/it/shard_parity.rs`, which self-skips
   without 2+ discrete GPUs - not available on every box). At the real 27B
   shape this path cannot load the real checkpoint on a 24 GB card at all: its
   fp32 `tok.weight`/`lm_head.weight` are each over `max_buffer_size`. Use the

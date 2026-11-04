@@ -240,7 +240,7 @@ pub(crate) const UPGRADES: &[Upgrade] = &[
         // `matmul_gemv_reg`'s own bucket ladder exists to avoid, and exactly
         // what running the WORST-CASE build at every m would produce. Re-run
         // with the per-m bucket the production dispatch actually picks
-        // (`crates/model/tests/matmul_q4_speed_bench.rs::
+        // (`crates/model/tests/it/matmul_q4_speed_bench.rs::
         // gemv_vs_gemv_reg_at_qwen35_decode_shapes`), at qwen35's own real
         // decode shapes (not a generic stand-in), `_reg` won at every one:
         // 1.55-1.88x, m=1. Bit-identity is `tests/q4_gemv_reg_upgrade.rs`

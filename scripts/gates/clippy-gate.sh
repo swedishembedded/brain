@@ -86,7 +86,7 @@ cd "$ROOT"
 # Bumped 259 -> 262 after `origin/main` was force-pushed mid-session (a
 # separate, concurrent line of work rewritten upstream): the new tip carries
 # 3 pre-existing warnings this repo's own history didn't have at 259
-# (crates/model/tests/router_gate_expert_cap.rs, crates/cli/src/npu_cli.rs,
+# (crates/model/tests/it/router_gate_expert_cap.rs, crates/cli/src/npu_cli.rs,
 # crates/catalog/src/resident_asr.rs) -- confirmed byte-identical to `origin/main`
 # itself (same content, same lints, untouched by this session), not
 # attributable to anything reconstructed here.
@@ -115,8 +115,8 @@ cd "$ROOT"
 #
 # Lowered 294 -> 292: a later session's real-bug sweep fixed two more
 # pre-existing `doc_lazy_continuation`/`needless_range_loop` warnings
-# (`crates/bench/tests/capscale.rs`, `crates/yolov8/tests/common/p7.rs`,
-# `crates/yolov8/tests/p7_unit.rs`) it found alongside its own work, rather
+# (`crates/bench/tests/it/capscale.rs`, `crates/yolov8/tests/common/p7.rs`,
+# `crates/yolov8/tests/it/p7_unit.rs`) it found alongside its own work, rather
 # than leaving them as unrelated drift.
 #
 # Lowered 291 -> 285: the six `doc_lazy_continuation` warnings in

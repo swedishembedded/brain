@@ -638,7 +638,7 @@ pub const GEMM_TILE_MIN_COLS: u32 = 128;
 /// bottleneck as a kernel, so each pair earns its own measured crossover
 /// rather than inheriting another pair's.
 ///
-/// Swept by `crates/audio/tests/bench_conv1d_lowering.rs` (`--ignored`), best
+/// Swept by `crates/audio/tests/it/bench_conv1d_lowering.rs` (`--ignored`), best
 /// of 5, warm-up excluded, box otherwise idle; that test is what to re-run on
 /// another card. `lowered` is the WHOLE lowering including its im2col and
 /// epilogue passes. The sub-threshold half needs `set_conv1d_gemm(Some(true))` (`--conv1d-gemm force`):
@@ -923,7 +923,7 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         // element count, the cooperative variant wins at EVERY width, by the
         // widest margin at the narrow-row end where the per-element kernel's
         // reads are most scattered and by the least where a row is long
-        // enough to amortise them (`crates/gpu-core/tests/bench_layernorm.rs`
+        // enough to amortise them (`crates/gpu-core/tests/it/bench_layernorm.rs`
         // runs the same comparison for the LayerNorm half). The old
         // `m <= DECODE_REGIME_MAX_ROWS` gate was therefore leaving that win
         // on the table for every prefill/encoder shape.
@@ -1206,7 +1206,7 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         // iGPU (decision-4: stale results from different hardware are not a
         // blocker), interleaved min-of-N against both the triad and the
         // unsplit kernel with a DVFS ramp
-        // (`crates/gpu-core/tests/paged_flash_decode_split_speed_bench.rs`),
+        // (`crates/gpu-core/tests/it/paged_flash_decode_split_speed_bench.rs`),
         // found the SPLIT-key two-pass kernel (`paged_flash_decode_split` ->
         // `paged_flash_decode_combine`) a real, repeatable win over the
         // triad ONLY at `batch (shape.m) == 1`, confirmed across three

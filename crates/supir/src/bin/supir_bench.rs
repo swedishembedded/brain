@@ -20,7 +20,7 @@
 //! headroom this bench's `full` subcommand replays it verbatim. But on THIS
 //! machine (one Intel iGPU, no discrete card) the combined weight set - SDXL
 //! backbone 10.27 GB + `GLVControl` trunk 4.97 GB + adaptors 0.22 GB, ~15.5 GB
-//! fp32 - is already measured, in `crates/supir/tests/parity.rs`, to hit
+//! fp32 - is already measured, in `crates/supir/tests/it/parity.rs`, to hit
 //! `wgpu error: Out of Memory` recording the graph, taps off, even under int8
 //! HOST storage (the device buffers stay fp32-sized regardless - see that
 //! module's own doc). That OOM is driven by total resident weight bytes, not
@@ -287,7 +287,7 @@ fn synthetic_control_tensors(gpu: &Gpu, cfg: &SupirConfig, h: u32, w: u32) -> Ve
 /// The TRUE one-graph `Supir::new` dispatch, verbatim - what `supir::model`
 /// actually records for a real restoration call. Gated behind
 /// `BRAIN_SUPIR_ALLOW_FULL_MEMORY=1`, same convention as
-/// `crates/supir/tests/parity.rs`'s own full-forward tests: on THIS box it is
+/// `crates/supir/tests/it/parity.rs`'s own full-forward tests: on THIS box it is
 /// measured to hit `wgpu error: Out of Memory` recording the combined ~15.5 GB
 /// weight set regardless of `h`/`w` (see the module doc), so it is not run by
 /// default - a `full` invocation without the env var costs nothing rather
@@ -299,7 +299,7 @@ fn run_full(h: u32, w: u32, reps: usize) {
              device-resident weight buffers (~15.5 GB fp32) are measured to hit \
              `wgpu error: Out of Memory` on this box's Intel iGPU (2047 MiB per-buffer cap, one \
              Intel iGPU sharing 30 GB system RAM, no discrete card) regardless of latent size - \
-             see `crates/supir/tests/parity.rs`'s own full-forward tests and this bench's module \
+             see `crates/supir/tests/it/parity.rs`'s own full-forward tests and this bench's module \
              doc. Use `supir_bench trunk`/`supir_bench fused` (the default, no subcommand) for a \
              profile that fits this hardware, or set BRAIN_SUPIR_ALLOW_FULL_MEMORY=1 on a machine \
              with enough device memory to attempt the real combined graph."

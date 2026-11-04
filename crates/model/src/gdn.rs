@@ -128,7 +128,7 @@
 //! ## Backward
 //!
 //! **Implemented** - [`gdn_chunk_bwd`], gradient-checked at this module's own
-//! tiny shape by `crates/model/tests/gdn_chunk_bwd.rs` (finite-difference,
+//! tiny shape by `crates/model/tests/it/gdn_chunk_bwd.rs` (finite-difference,
 //! f64 host oracle, both backends). It needs every chunk's OWN version of the
 //! five small per-chunk buffers ([`GdnScratch::q_scaled`] and friends) that
 //! [`gdn_chunk_fwd`] overwrites each loop iteration, plus the full recurrent
@@ -139,7 +139,7 @@
 //! own doc for the exact promotion from `[bh,c,d]` overwritten-in-place to
 //! `[bhc,c,d]` saved-per-chunk). [`gdn_chunk_fwd`] itself is UNCHANGED -
 //! still the inference-only entry point, still what
-//! `crates/model/tests/gdn_chunk_fwd.rs` gates.
+//! `crates/model/tests/it/gdn_chunk_fwd.rs` gates.
 //!
 //! [`gdn_chunk_bwd`]'s own doc covers the two-phase structure (a reverse
 //! sweep over chunks threading the recurrent state's gradient backward, then
@@ -1077,7 +1077,7 @@ fn gdn_chunk_fwd_prefix(
     // not in the precision it is evaluated at.) Forward substitution never
     // forms a power of `attn0` at all: every intermediate it holds is already
     // an entry of the bounded answer, so it is accurate to ~1e-7 across the
-    // whole range. `crates/model/tests/gdn_chunk_fwd.rs`'s
+    // whole range. `crates/model/tests/it/gdn_chunk_fwd.rs`'s
     // `gdn_chunk_fwd_matches_host_oracle_with_near_parallel_keys` pins this.
     match ids.fast.filter(|_| c <= GDN_UT_FWD_MAX_CHUNK && use_fast_kernels(g)) {
         // One workgroup per matrix; the kernel writes the whole `t_mat`
@@ -1229,7 +1229,7 @@ pub fn gdn_chunk_fwd(
 /// Kernel indices [`gdn_chunk_fwd_train`] and [`gdn_chunk_bwd`] dispatch,
 /// beyond [`GdnIds`]. Kept as a SEPARATE struct rather than new fields on
 /// `GdnIds` so that struct's existing field set (and
-/// `crates/model/tests/gdn_chunk_fwd.rs`'s own `GdnIds { ... }` literal)
+/// `crates/model/tests/it/gdn_chunk_fwd.rs`'s own `GdnIds { ... }` literal)
 /// keeps compiling unmodified - the same "forward ids vs backward ids" split
 /// [`crate::moe`]'s `MoeIds`/`MoeIdsBwd` already established.
 #[derive(Clone, Copy)]
@@ -2290,7 +2290,7 @@ pub fn gdn_chunk_bwd(
 // (`T_mat` collapses to the 1x1 identity, `decay_mask`'s only cell is `1`, so
 // `u = v_beta`, `w = k_beta*exp(g)`, and the chunk loop's `v_prime`/`v_new`
 // become precisely this function's `kv_mem`/`delta`) -- which is the oracle
-// `crates/model/tests/gdn_recurrent_step.rs` checks this function against,
+// `crates/model/tests/it/gdn_recurrent_step.rs` checks this function against,
 // rather than re-deriving a second independent host reference: running
 // [`gdn_chunk_fwd`] with `chunk=1` over T one-token "chunks" and running this
 // function T times in a row, state threaded between calls, must agree to
@@ -2444,7 +2444,7 @@ pub fn gdn_recurrent_step(
 // the same way [`gdn_recurrent_step`]'s `state` is, and must start ZEROED for
 // a fresh sequence (matching `conv1d_fwd`'s own implicit left zero-pad for a
 // whole sequence's first `K-1` tokens). Validated against `conv1d_fwd` by
-// `crates/model/tests/causal_conv1d_step.rs`: running `conv1d_fwd` once over a
+// `crates/model/tests/it/causal_conv1d_step.rs`: running `conv1d_fwd` once over a
 // short sequence and running this function once per token over the same
 // input (with the SAME zeroed `hist` start) must agree to fp32 tolerance.
 

@@ -34,6 +34,6 @@ Two more facts the composite depends on:
   `forward` ignores them. `deepseekvl::import::UNUSED` lists them by name, so
   any other tensor that no component reads still fails the coverage check.
 
-The gate is `crates/deepseekvl/tests/composite_parity.rs`. It checks each
+The gate is `crates/deepseekvl/tests/it/composite_parity.rs`. It checks each
 stage on the real checkpoint and requires 16 greedy tokens identical to the
 fp32 reference's.

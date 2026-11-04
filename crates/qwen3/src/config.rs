@@ -264,7 +264,7 @@ impl QwenConfig {
         });
         // A LoRA checkpoint must round-trip its adapter shape, or `param_list()`
         // rebuilds without the `.lora_a`/`.lora_b` names on load and the trained
-        // adapters are silently dropped (see crates/qwen3/tests/lora_roundtrip.rs).
+        // adapters are silently dropped (see crates/qwen3/tests/it/lora_roundtrip.rs).
         if let Some(l) = &self.lora {
             v["lora"] = l.to_json();
         }

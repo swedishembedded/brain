@@ -315,7 +315,7 @@ fn lfm_flops(weights: Option<&str>, b: u32, block: Option<u32>, train: bool, run
 // assertion about the model, not about the arithmetic, so every run CHECKS it
 // at a point the basis does not contain - the (1,1) build, where the double ->
 // single transition first appears - and refuses to print a total it could not
-// verify. `crates/cli/tests/flops_stage_model.rs` gates the same property, plus
+// verify. `crates/cli/tests/it/flops_stage_model.rs` gates the same property, plus
 // the one that decides whether the model can predict at all: attention comes
 // out quadratic in tokens and the projections linear.
 

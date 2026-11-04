@@ -185,7 +185,7 @@ pub struct VkContext {
     /// for its whole allocate/reset-record-submit sequence. Confirmed load-
     /// bearing, not theoretical: omitting it reproduced a real
     /// `ERROR_DEVICE_LOST` on P40 hardware within seconds of 8 threads sharing
-    /// one device (`crates/gpu-core/tests/device_sharing.rs`'s
+    /// one device (`crates/gpu-core/tests/it/device_sharing.rs`'s
     /// `concurrent_shared_handles_do_not_deadlock`).
     ///
     /// **No longer implies a synchronous fence wait.** This lock used to be

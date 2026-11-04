@@ -15,7 +15,7 @@
 //! * a lightweight EVA-CLIP image-tower score table (`s_base`, `s_adapted`,
 //!   `delta`) when `BRAIN_CLIP_DIR` names an EVA-CLIP checkpoint directory -
 //!   the FULL statistically-controlled comparison (random-adapter control,
-//!   paired significance test) is `crates/wan/tests/finetune_ab.rs`'s job,
+//!   paired significance test) is `crates/wan/tests/it/finetune_ab.rs`'s job,
 //!   not this report's; this table is a quick visual/numeric sanity check.
 
 use std::collections::HashMap;
@@ -34,7 +34,7 @@ use wan::WanConfig;
 // This report's own wall-clock is `2 * len(HELD_OUT_PROMPTS)`
 // full generations, so it stays at the minimum that still shows a real base
 // vs. adapted pair; the statistically powered comparison across many
-// (prompt, seed) pairs is `crates/wan/tests/finetune_ab.rs`'s job, which
+// (prompt, seed) pairs is `crates/wan/tests/it/finetune_ab.rs`'s job, which
 // amortises the umT5 reload to ONE session for everything it needs.
 const HELD_OUT_PROMPTS: [&str; 1] = ["a magenta triangle circling a white dot on a black background"];
 
@@ -136,7 +136,7 @@ impl EvaSession {
         let (init, _report) = clip::import::import_eva_visual(tensors, &cfg).ok()?;
         let map: HashMap<String, Vec<f32>> = init.into_iter().map(|(k, (_, d))| (k, d)).collect();
         // EVA's own kernels (conv2d/bidir-attention/rope2d/...) live in
-        // `VISION_PIPELINES`, not `TEXT_PIPELINES` (`crates/clip/tests/parity.rs`
+        // `VISION_PIPELINES`, not `TEXT_PIPELINES` (`crates/clip/tests/it/parity.rs`
         // builds `EvaVision` against `VISION_PIPELINES` for exactly this reason);
         // `imaging::PIPELINES` is added for the resize this struct's own `embed`
         // dispatches. Both sets resolve BY NAME, so a Gpu missing either half
@@ -306,7 +306,7 @@ pub fn write_report(
         md.push_str(&format!("| {p} | {seed} | [{bm}]({bm}) | [{am}]({am}) | ![base]({bp}) | ![adapted]({ap}) |\n"));
     }
     if scores.is_empty() {
-        md.push_str("\n_G2 score table omitted: set `BRAIN_CLIP_DIR` to an EVA-CLIP checkpoint directory and keep a sibling `distractor/` set next to `--data` to compute it. The statistically-controlled A/B comparison (random-adapter control, significance test) is `crates/wan/tests/finetune_ab.rs`._\n");
+        md.push_str("\n_G2 score table omitted: set `BRAIN_CLIP_DIR` to an EVA-CLIP checkpoint directory and keep a sibling `distractor/` set next to `--data` to compute it. The statistically-controlled A/B comparison (random-adapter control, significance test) is `crates/wan/tests/it/finetune_ab.rs`._\n");
     } else {
         md.push_str("\n## G2 sanity scores (EVA-CLIP image tower; concept-centroid vs distractor-centroid margin)\n\n");
         md.push_str("| prompt | seed | s_base | s_adapted | delta |\n|---|---|---|---|---|\n");

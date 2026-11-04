@@ -59,7 +59,7 @@ module does not match the type being constructed. Related: lesson #90, a
 `Step` is only meaningful to the `Gpu` handle that created it - same family,
 an index or a handle crossing a boundary it was never valid across.
 
-The regression test (`crates/clip/tests/vision_kernel_ids.rs`) reproduces the
+The regression test (`crates/clip/tests/it/vision_kernel_ids.rs`) reproduces the
 original 1.1 GiB-checkpoint crash in 0.35 s from a 2-block synthetic tower, by
 A/B-ing the same tower on the bare vision list and on the shared union. A
 whole class of "wrong device/wrong list" bug is reachable this cheaply.

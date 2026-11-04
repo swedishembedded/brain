@@ -61,7 +61,7 @@ engine: brain loads a brain checkpoint, compiles it for the NPU itself and serve
   graph) into a brain `.safetensors` with a `brain.config` header. fp32 forward through
   `gpu_core` for any multiple-of-32 input; anchor decode and NMS on the host (NMS hoisted
   into `imaging::nms`, shared with YOLOv8); `DetectionPipeline` resolves YOLOv5 from the
-  checkpoint. Parity against onnxruntime (`crates/yolov5/tests/parity.rs`, goldens from
+  checkpoint. Parity against onnxruntime (`crates/yolov5/tests/it/parity.rs`, goldens from
   `tools/goldens/yolov5_dump_reference.py`), max abs diff of the post-sigmoid heads: noise
   320 3.7e-6, noise 640 4.4e-6, photo 320 9.4e-6, photo 640 1.8e-5 (gate 1e-4).
   Int8 quantization lives in `crates/rknpu` (M3), not here.
@@ -75,7 +75,7 @@ engine: brain loads a brain checkpoint, compiles it for the NPU itself and serve
   YOLOv5-at-320 layer shape and the whole YOLOv5s topology byte-exact against the
   plan's host simulation on the board (`make crates/rknpu/board/check/run`); the int8
   network tracks float onnxruntime on the golden photograph
-  (`crates/yolov5/tests/npu_int8.rs`).
+  (`crates/yolov5/tests/it/npu_int8.rs`).
 - [x] M4: still-image mode. `sample-npu-rockchip --model local/yolov5s-relu --image
   FILE` prints JSON boxes. COCO val2017 #139 on the board: ten detections (tv 0.89,
   person 0.62, chair 0.56, ...) identical to `yolov5::npu::simulate_detect` on the host.

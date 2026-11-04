@@ -255,7 +255,7 @@ const WGPU_MAX_REPORTABLE_BINDING_BYTES: u64 = 2047 * (1 << 20);
 /// startup, still resolving to the SAME GPU residency just decided this part
 /// could not have) - the exact "`Home::Cpu` was a label, not a placement"
 /// defect `gpu_core::devices::Homes::run` was already fixed for (see that
-/// function's own doc and `crates/gpu-core/tests/host_tier.rs`). This
+/// function's own doc and `crates/gpu-core/tests/it/host_tier.rs`). This
 /// resident path had never adopted the fix, so a residency fallback to the
 /// host tier double-booked the GPU it was falling back FROM instead of
 /// relieving it, and panicked with a `wgpu` OOM on a thread literally named
@@ -1745,7 +1745,7 @@ mod tests {
     /// `Gpu::new` inside `f` bound to whatever card was ambient - the same
     /// "`Home::Cpu` was a label, not a placement" defect
     /// `gpu_core::devices::Homes::run` was already fixed for (see
-    /// `crates/gpu-core/tests/host_tier.rs`). `Device::Gpu`/`Device::Npu`
+    /// `crates/gpu-core/tests/it/host_tier.rs`). `Device::Gpu`/`Device::Npu`
     /// must be unaffected: a GPU assignment still scopes to that card, and
     /// NPU is still refused here (never silently built as wgpu).
     #[test]
@@ -2275,7 +2275,7 @@ mod tests {
     /// of the same shared RAM while the box is also running everything else.
     ///
     /// Gated on `QWEN3_DIR` (needs `qwen.brain.safetensors`), skips loudly if
-    /// unset -- same convention as `crates/cli/tests/qwen_eval.rs`.
+    /// unset -- same convention as `crates/cli/tests/it/qwen_eval.rs`.
     #[test]
     #[ignore = "slow: real checkpoint"]
     fn kv_pool_bytes_at_the_new_ctx_default_fits_the_igpu_budget() {

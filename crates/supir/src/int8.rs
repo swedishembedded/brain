@@ -5,7 +5,7 @@
 //! checkpoint - the actual fix for a real, measured OOM, not an
 //! optimisation.
 //!
-//! `crates/supir/tests/parity.rs`'s own full-forward test measured the
+//! `crates/supir/tests/it/parity.rs`'s own full-forward test measured the
 //! problem directly: the merged host import (frozen SDXL backbone, ~10.27
 //! GB fp32, plus the SUPIR delta - trunk + adaptors - ~5.33 GB fp32) is
 //! 15.6 GB resident, and `Supir::new`'s device-side upload while that map is
@@ -79,7 +79,7 @@ fn is_eligible(name: &str, shape: &[usize]) -> bool {
 /// split, over the MERGED tensor map (frozen backbone + trunk + adaptors,
 /// however the caller assembled it - `crate::import::remap`'s output
 /// extended with `sdxlunet::import::load`/`load_ldm`'s, exactly what
-/// `crates/supir/tests/parity.rs` already builds for `Supir::new`).
+/// `crates/supir/tests/it/parity.rs` already builds for `Supir::new`).
 pub struct QuantizedTensors {
     pub full: Tensors,
     pub packed: PackedTensors,

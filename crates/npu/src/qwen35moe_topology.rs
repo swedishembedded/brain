@@ -113,7 +113,7 @@
 //! but doubling the file's size to add it was judged out of scope for a
 //! "compiles + best-effort compile attempt" pass). "Compiles to valid ONNX +
 //! best-effort OpenVINO compile" is the explicit stopping point - see
-//! `crates/npu/tests/qwen35moe_onnx.rs` for exactly the same
+//! `crates/npu/tests/it/qwen35moe_onnx.rs` for exactly the same
 //! structural-always / `BRAIN_OV_PROBE`-gated split every other topology
 //! file's own tests use, not a new verification mechanism.
 
@@ -522,7 +522,7 @@ impl<'a> Topo<'a> {
         // (there as a forward substitution, which suits a per-row kernel
         // dispatch the way Horner suits a statically unrolled graph); see
         // `gdn_chunk_fwd_prefix`'s comment there for the full argument and
-        // `crates/model/tests/gdn_chunk_fwd.rs`'s near-parallel-keys case for
+        // `crates/model/tests/it/gdn_chunk_fwd.rs`'s near-parallel-keys case for
         // the regression test that pins it.
         let mut t_mat = ident.clone();
         for _ in 1..chunk {

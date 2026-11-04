@@ -225,7 +225,7 @@ including the `samples/imagegen/*` samples that link `crates/sdk` directly.
       `crates/fly`'s own suite has no synthetic connectome/body fixture
       either - every one of its tests gates on real `BRAIN_CONNECTOME_DIR`/
       `BRAIN_FLYBODY_XML` data with a clean skip (`crates/fly/tests/
-      loop_closes.rs`'s `rig()`), so `crates/sdk/tests/creature.rs` follows
+      loop_closes.rs`'s `rig()`), so `crates/sdk/tests/it/creature.rs` follows
       the same convention rather than inventing a fixture this workspace has
       never needed before. Two tests need no real data at all (the missing
       `.connectome()`/`.body()` argument errors, always-green); two need the
@@ -347,7 +347,7 @@ including the `samples/imagegen/*` samples that link `crates/sdk` directly.
       remaining call sites either way, which is what mattered.
       Not separately regression-tested beyond the existing suites passing:
       `effective_dit_precision` itself already has full branch coverage in
-      `crates/flux2/tests/placement.rs`, and proving these two NEW call
+      `crates/flux2/tests/it/placement.rs`, and proving these two NEW call
       sites build a real `Pipeline` at the corrected precision would need a
       real `.gguf` DiT checkpoint to sniff and build against, which doesn't
       exist in this workspace's fixtures (same class of gap as

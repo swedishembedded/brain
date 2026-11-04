@@ -242,7 +242,7 @@ impl Qwen35Config {
     ///
     /// `head_dim` 40 -> 32 also halves `rotary_dim` from 10 to 8, so
     /// `mrope_section` (which must sum to `rotary_dim/2`) goes from `[2,2,1]`
-    /// to `[2,1,1]`. `crates/qwen35/tests/model_i8_smoke.rs` asserts every one
+    /// to `[2,1,1]`. `crates/qwen35/tests/it/model_i8_smoke.rs` asserts every one
     /// of those group constraints against this fixture directly.
     pub fn tiny_i8() -> Qwen35Config {
         Qwen35Config {

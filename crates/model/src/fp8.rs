@@ -26,7 +26,7 @@
 //! layout resident on the device and decode inline, the same "storage tier"
 //! shape `BF16`/`F16` already have. See `matmul_gemv_f8e4m3.wgsl`/
 //! `matmul_gemv_f8e5m2.wgsl`'s own headers for the device kernel and
-//! `crates/model/tests/matmul_fp8_gemm.rs` for its parity test against THIS
+//! `crates/model/tests/it/matmul_fp8_gemm.rs` for its parity test against THIS
 //! module's `dequant_block128`. Still out of scope, and still needing
 //! hardware this repo's own boxes do not have: a NATIVE tensor-core FP8 GEMM
 //! (Hopper+/Blackwell) - a precision change is not automatically a speed

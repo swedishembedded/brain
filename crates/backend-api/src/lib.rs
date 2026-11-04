@@ -1293,7 +1293,7 @@ pub trait Backend: Send + Sync {
     /// and sized to the largest single write ever issued, so one giant `write`
     /// per tensor leaves a same-size staging buffer permanently resident
     /// (measured: exactly double the logical size, see
-    /// `crates/gpu-core/tests/vram_overhead.rs`).
+    /// `crates/gpu-core/tests/it/vram_overhead.rs`).
     /// Chunking through this method instead caps that resident staging cost at
     /// the chunk size, regardless of tensor count or size.
     fn write_at(&self, buf: &DeviceBuffer, offset_words: u64, data: &[u32]);
@@ -1900,7 +1900,7 @@ pub trait Backend: Send + Sync {
     /// uncaptured-error handler, per `backend-wgpu::from_adapter`'s own doc),
     /// not a graceful `Result` - so `M8.7`'s `gpu_core::provider::native_f16
     /// ::NativeF16Provider` MUST check this before ever attempting that
-    /// compile, the same way `crates/backend-wgpu/tests/native_f16.rs`'s own
+    /// compile, the same way `crates/backend-wgpu/tests/it/native_f16.rs`'s own
     /// tests already check `WgpuBackend::supports_shader_f16()` first. Only
     /// `backend-wgpu` overrides it today - deliberately wgpu-only, matching
     /// `kernels::template::native_f16_variant`'s own scope (`backend-vulkan`'s

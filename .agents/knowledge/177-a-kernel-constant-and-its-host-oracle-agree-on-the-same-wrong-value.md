@@ -17,7 +17,7 @@ Every glmdsa test stayed green because every one of them compares one of
 these against another: the KV-cache decode against the full recompute, and
 the indexer against the dense model. Both sides of each comparison rotated
 at the same wrong base. Only an oracle that takes θ from somewhere else can
-fail. `crates/model/tests/interleaved_rope_theta.rs` rotates on the host at
+fail. `crates/model/tests/it/interleaved_rope_theta.rs` rotates on the host at
 the caller's θ; the kernels missed it by 1.13 at θ=8e6 before the fix.
 
 θ is now a Params field (`theta: f32`, the last slot) in all three shared

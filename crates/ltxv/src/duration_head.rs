@@ -7,7 +7,7 @@
 //! `ltx_core.duration_head.{duration_head,model_configurator}`
 //! (`scratchpad/reference/ltxv/packages/ltx-core/src/ltx_core/duration_head/`),
 //! real weights (`ltx-2.5-duration-head-bf16.safetensors`, 15 tensors,
-//! ~4MB), real parity (`crates/ltxv/tests/duration_head_parity.rs`).
+//! ~4MB), real parity (`crates/ltxv/tests/it/duration_head_parity.rs`).
 //!
 //! # Eager host math, not a device graph
 //!

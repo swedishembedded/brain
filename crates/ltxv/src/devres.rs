@@ -153,7 +153,7 @@ pub fn activation_reserve_bytes(t: usize, backend: &str) -> u64 {
     /// and descriptor sets explicitly at every flush (`crates/vulkan`'s
     /// `VkContext` reclaim path) instead of growing an opportunistic pool, and
     /// it does not carry the doubled per-uploaded-buffer resident cost wgpu
-    /// measured (`crates/gpu-core/tests/vram_overhead.rs`). Its churn is
+    /// measured (`crates/gpu-core/tests/it/vram_overhead.rs`). Its churn is
     /// therefore close to the working set rather than to the card.
     ///
     /// DERIVED, not measured - there is no Vulkan plateau to fit, and this
@@ -274,7 +274,7 @@ pub fn slots_for(per_block: u64, num_layers: u32, t: usize, device: memauth::Dev
     // reserve above is tiny, the policy granted all 48 blocks (~13 GB), the
     // denoise loop finished, and the VAE decode's own device then aborted with
     // `wgpu error: Out of Memory` at 24211 MiB of a 24576 MiB card
-    // (`crates/ltxv/tests/cfg_parallel.rs`, 9 frames at 64x64 - a shape with
+    // (`crates/ltxv/tests/it/cfg_parallel.rs`, 9 frames at 64x64 - a shape with
     // no memory problem of its own at all). The VAE decode alone needs up to
     // ~16.5 GiB at the shapes this pipeline supports.
     //

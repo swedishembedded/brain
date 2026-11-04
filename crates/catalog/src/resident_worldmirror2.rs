@@ -22,7 +22,7 @@
 //! two shapes on this one instance pays a full rebuild on every single call.
 //! That is a latency cost, not a correctness bug, and is not something this
 //! adapter (or `Mirror` itself) needs to fix - see
-//! `crates/worldmirror2/tests/t9_caps_matches_direct.rs`'s `shape_cycle_*`
+//! `crates/worldmirror2/tests/it/t9_caps_matches_direct.rs`'s `shape_cycle_*`
 //! test, which drives exactly that alternating pattern on one instance and
 //! checks every result is bit-identical to the equivalent single-shape run
 //! (proving correctness survives the rebuild-churn, not that the churn is

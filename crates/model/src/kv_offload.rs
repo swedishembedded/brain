@@ -25,7 +25,7 @@
 //! whole KV across the host bus once per token.
 //!
 //! That is not a close call, on measured numbers from the box this was built
-//! on (two Tesla P40 cards, `crates/gpu-core/tests/pcie_handoff.rs` for the bus,
+//! on (two Tesla P40 cards, `crates/gpu-core/tests/it/pcie_handoff.rs` for the bus,
 //! `gpu_core::roof` for the card; rerun both rather than trusting a figure
 //! printed here):
 //!

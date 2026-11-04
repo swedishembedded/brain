@@ -323,7 +323,7 @@ mod tests {
     /// alternative to a real 36 GB checkpoint (not present in this
     /// environment), proving the STREAMING/NAMING/UPLOAD machinery is
     /// correct rather than re-proving `quantize_weight`'s own math (already
-    /// covered by `crates/model/tests/moe_sparse_i8_parity.rs`).
+    /// covered by `crates/model/tests/it/moe_sparse_i8_parity.rs`).
     fn write_synthetic_checkpoint(path: &str, cfg: &MoeTextConfig, layers: &[usize], seed: u64) -> HashMap<(usize, usize, &'static str), Vec<f32>> {
         let mut rng = Lcg::new(seed);
         let (d, ff) = (cfg.hidden as usize, cfg.moe_intermediate as usize);

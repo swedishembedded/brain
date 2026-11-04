@@ -147,5 +147,5 @@ stream sizes:
 
 The detector's int8 results match the float network: on the YOLOv5 golden
 photograph, the same people are found with confidence within 0.012
-(`crates/yolov5/tests/npu_int8.rs`). The board's detections equal the host
+(`crates/yolov5/tests/it/npu_int8.rs`). The board's detections equal the host
 simulation of the same integers exactly.

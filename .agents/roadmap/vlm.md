@@ -147,7 +147,7 @@ blocker; the pieces a `caps.rs` would have to call did not exist.
       `crates/arch` row gained `default_ref` and `weights_env`.
 
       The catalog id is `brain/moondream3`, NOT the upstream repo name.
-      `crates/cli/tests/model_ids.rs` caught the first attempt at
+      `crates/cli/tests/it/model_ids.rs` caught the first attempt at
       `moondream/moondream3-preview` and was right to: a catalog id names an
       upstream repo only when the weights are exactly that release or nothing
       (`deepseek-ai/DeepSeek-OCR`, one shipped GGUF pair). `BRAIN_MOONDREAM3_WEIGHTS`
@@ -397,7 +397,7 @@ not the engine's - so it stays a flag with a published cost curve.
 
 `--precision int8` on `brain label images`, `precision` on the served action.
 Opt-in, never a default, and gated in its own file
-(`crates/qwen3vl/tests/int8_tier.rs`) which asserts nothing about caption
+(`crates/qwen3vl/tests/it/int8_tier.rs`) which asserts nothing about caption
 equality - the exact-output claim this crate makes is about the fp32 path and
 must stay unqualified.
 
@@ -538,7 +538,7 @@ which exists for exactly that.
 
 ### Cosine is not a gate. This is the fifth independent reproduction.
 
-`crates/qwen3vl/tests/vision_tower_parity.rs` mutates one weight by a
+`crates/qwen3vl/tests/it/vision_tower_parity.rs` mutates one weight by a
 relative 5e-4 and re-runs the tower. The mutant scores **cosine
 0.999999998** against the reference - it passes a 0.9999999 cosine floor -
 and is rejected only by rel_l2 at 5.7e-5 against a 1e-5 ceiling. The fused

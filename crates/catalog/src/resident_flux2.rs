@@ -370,7 +370,7 @@ impl Instance for Flux2Instance {
     /// scheduler grouped share ONE denoise loop, each step of which is a single
     /// batched MMDiT forward over all their latents
     /// (`flux2::Flux2Model::forward_batch`, bit-identical to N single
-    /// forwards — `crates/flux2/tests/batch_parity.rs`).
+    /// forwards - `crates/flux2/tests/it/batch_parity.rs`).
     ///
     /// Per-request **seed, steps, guidance and prompt** are honoured inside the
     /// batch: the instance key already fixes variant/precision/size/refs/adapter

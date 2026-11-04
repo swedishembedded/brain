@@ -152,7 +152,7 @@ impl NativeEntry {
 /// authoritative gate is `Requirement.matrix` (checked by
 /// `gpu_core::provider::ProviderRegistry::resolve` BEFORE a real caller ever
 /// reaches `register_native`), not whether pipeline creation happened to
-/// succeed. See `crates/gpu-core/tests/coopmat_provider_declines_on_this_box.rs`
+/// succeed. See `crates/gpu-core/tests/it/coopmat_provider_declines_on_this_box.rs`
 /// for the measurement.
 pub(crate) fn build_pipeline(ctx: &VkContext, spec: &NativeSpec) -> Result<NativeEntry, String> {
     let NativeSpec::SpirV { code, entry, bindings } = spec else {

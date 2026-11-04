@@ -38,7 +38,7 @@
 //! `self.f0_predictor` to `float64` for the duration of `inference()`
 //! ("f0_predictor precision is crucial for causal inference" - the
 //! reference's own comment). This port runs the f0 predictor in `f32`
-//! throughout; `crates/cosyvoice/tests/cv3_hift_parity.rs` reports the
+//! throughout; `crates/cosyvoice/tests/it/cv3_hift_parity.rs` reports the
 //! actual resulting numeric delta against the real f64 reference rather than
 //! assuming it is negligible.
 //!
@@ -338,7 +338,7 @@ pub struct HiftOutput {
 }
 
 /// Full forward given an explicit NSF noise draw - the entry point
-/// `crates/cosyvoice/tests/cv3_hift_parity.rs` uses with the captured
+/// `crates/cosyvoice/tests/it/cv3_hift_parity.rs` uses with the captured
 /// per-instance noise buffer (see this module's doc). [`forward_seeded`] is
 /// the production entry point.
 pub fn forward(mel: &[f32], t_mel: usize, cfg: &Cv3HiftConfig, w: &HiftWeights, randn_noise: &[f32]) -> HiftOutput {

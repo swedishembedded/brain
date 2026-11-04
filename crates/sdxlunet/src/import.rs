@@ -222,7 +222,7 @@ const LDM_PREFIX: &str = "model.diffusion_model.";
 /// it. This is exactly the streaming discipline
 /// `tools/goldens/supir_dump_reference.py`'s own `load_state_dict_streaming`
 /// uses on the Python side of this port - found to be missing here while
-/// chasing `crates/supir/tests/parity.rs`'s real-checkpoint OOM (see
+/// chasing `crates/supir/tests/it/parity.rs`'s real-checkpoint OOM (see
 /// `crates/supir/src/int8.rs`'s module doc for the rest of that story).
 pub fn load_ldm(path: &str, cfg: &UNetConfig) -> Result<Tensors, String> {
     let mm = checkpoint::mmap::MmapSafetensors::open(path)?;

@@ -954,7 +954,7 @@ is not on disk is fetched by brain's own model handler, and `brain pull` works
 against it unchanged. There is no `--weights` flag and no path parameter.
 
 Per samples rule 5 it runs with **no model downloaded** by default, against the
-tiny CPU-runnable Qwen3 fixture that `crates/sdk/tests/document_study.rs`
+tiny CPU-runnable Qwen3 fixture that `crates/sdk/tests/it/document_study.rs`
 already uses. In that mode it proves the machinery: every control fires when it
 should and stays silent when it should, and every verdict matches its lane
 label. It does NOT produce a learning claim, and the report says so the way the
@@ -1045,7 +1045,7 @@ Control-integrity cases, the ones that check the checker:
 - `a_seed_repeat_produces_a_bit_identical_adapter`
 - `reserve_anchors_and_gated_anchors_diverge_when_the_gated_set_is_overfit`
 
-**Surface** (`crates/sdk/tests/continual_reader.rs`, mirroring
+**Surface** (`crates/sdk/tests/it/continual_reader.rs`, mirroring
 `document_study.rs`): a report is always written; an adapter is published only
 on a promote, under the name `improve::latest_adapter` returns; a malformed
 corpus is refused before any training; an unregistered architecture is refused

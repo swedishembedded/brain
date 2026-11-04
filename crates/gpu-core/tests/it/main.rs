@@ -1,0 +1,105 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+//
+//! The crate's integration tests, linked as one binary rather than one per
+//! file: each links the whole dependency tree, so a binary per file
+//! multiplied build time and disk for nothing. A test here must not change
+//! process-wide state (the current directory, environment variables): the
+//! others run beside it; `bn_native`, `ce_stats_native`, `conv2d_native`, `cuda_impl_policy`, `cuda_provider_matmul`, `cuda_provider_matmul_i8`, `elementwise_native`, `f32_reg_native`, `flash_attn_f16_native`, `flash_bidir_native`, `flash_bidir_native_bench`, `flash_gqa_kmask_native`, `gdn_bwd_sweep_native`, `gdn_chunk_fwd_tc`, `gdn_dscale_native`, `gdn_qk_bwd_native`, `gn_apply_native`, `i8_dyn_native`, `i8w_dx_native`, `perf_floor`, `plumb_native`, `rmsnorm_fused_native`, `softmax_rows_native`, `swiglu_bwd_native` keep binaries of their own.
+
+mod adaln_row_gather;
+mod add_rms_quant_native;
+mod arch_desc_real_divergence;
+mod auto_placement;
+mod bench_attn_bwd_dscores;
+mod bench_backward;
+mod bench_layernorm;
+mod bench_matmul;
+mod bench_max_abs_row;
+mod bench_moe_grouped;
+mod bench_qgemv;
+mod bench_rmsnorm_dw;
+mod bench_rmsnorm_dx;
+mod bench_upload_cadence;
+mod bf16_gemv_native;
+mod bf16_gemv_splitk_native;
+mod conv2d_native_bench;
+mod coopmat_provider_declines_on_this_box;
+mod cpu_isa_provider_zero_delta;
+mod cuda_arena_reuse;
+mod cuda_decode_attn_batched;
+mod cuda_device_identity;
+mod cuda_flash_attn_bwd;
+mod cuda_flash_attn_fwd;
+mod cuda_flash_prefill;
+mod cuda_flash_prefill_hd128;
+mod cuda_library_attention;
+mod cuda_library_bench;
+mod cuda_library_gemm;
+mod cuda_placement;
+mod cuda_placement_tier;
+mod cuda_silu_mul_bf16;
+mod cuda_uninit_storage;
+mod device_churn;
+mod device_grammar;
+mod device_group;
+mod device_open;
+mod device_sharing;
+mod device_stats;
+mod dry_run_recording;
+mod e4m3_quant_native;
+mod fp8_linear_native;
+mod fused_native_bench;
+mod gate_mul_quant_e4m3_native;
+mod gemv_reg_upgrade;
+mod gemv_reg_upgrade_step_buf;
+mod glue_roof_bench;
+mod gqa_qk_prep_native;
+mod host_tier;
+mod i8_decode_batch_bench;
+mod i8_dequant_native;
+mod i8_dyn_native_bench;
+mod i8_gemv_batched_variants;
+mod i8_gemv_multi_native;
+mod i8_gemv_native;
+mod i8_gemv_native_bench;
+mod i8_gemv_native_leak;
+mod i8_gemv_reg_upgrade;
+mod kernel_catalog_validation;
+mod kernel_upgrade;
+mod kq_gemv_reg_speed_bench;
+mod kq_gemv_reg_upgrade;
+mod kq_native;
+mod kv_append_bf16_native;
+mod kv_append_i8_native;
+mod matmul_tile16;
+mod memory_limit;
+mod memory_usage;
+mod moe_i8_grouped;
+mod moe_i8_grouped_native;
+mod moe_i8_pipeline;
+mod moe_nvfp4;
+mod native_f16_provider;
+mod native_helpers_decline_off_cuda;
+mod nvfp4_wgmma_native;
+mod paged_flash_decode_split_speed_bench;
+mod params_guard_per_handle;
+mod pcie_handoff;
+mod peer_copy;
+mod pool_rows;
+mod q4_gemv_native;
+mod q4_gemv_native_bench;
+mod q4_gemv_reg_upgrade;
+mod qgemv_native;
+mod qkv_split_native;
+mod quant_crossover_bench;
+mod quant_epilogue_native;
+mod roofline;
+mod scan_sort;
+mod scratch_arena;
+mod silu_mul_quant_e4m3_native;
+mod step_cache;
+mod tape;
+mod transient_reclaim;
+mod urgent_lane;
+mod vram_overhead;

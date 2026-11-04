@@ -182,7 +182,7 @@ pub fn check_clip(seed: u64) -> Report {
 /// OpenCLIP-bigG's shape at gradcheck scale: the **exact-erf** MLP activation
 /// (`gelu_erf_bwd`) and the `text_projection` head on top of EOS pooling. The
 /// two activations are NOT interchangeable — see
-/// `crates/gradcheck/tests/quick_gelu_fd.rs`.
+/// `crates/gradcheck/tests/it/quick_gelu_fd.rs`.
 pub fn check_clip_bigg(seed: u64) -> Report {
     let h = TextHarness::new(gpu_core::testgpu::dev(TEXT_PIPELINES), tiny(TextAct::GeluErf, Some(12)), 2, 8, seed);
     directional_check(&h, 5e-3, 4, seed ^ 0x1234)

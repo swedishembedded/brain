@@ -30,7 +30,7 @@ partial-record slab is `storage_uninit` (every record is written).
 Measured (ncu, card 1 shared with another job, so ranges, split pass only; generated -> native): batch 1 at 12.8k keys
 127.9 -> 28.8 us (0.93 TB/s on the KV bytes), batch 1 at 48k 276.6 -> 57.1 us (1.75 TB/s), batch 8 at 12.8k 372.6 ->
 131.0 us, batch 8 at 48k 988.1 -> 371.2 us (2.17 TB/s, 55 percent of the 4.0 TB/s spec). Gate:
-`native_decode_of_every_tier_is_exact_at_agent_contexts_over_a_shared_prefix_on_cuda` (crates/model/tests/kv_tier.rs, CUDA opened
+`native_decode_of_every_tier_is_exact_at_agent_contexts_over_a_shared_prefix_on_cuda` (crates/model/tests/it/kv_tier.rs, CUDA opened
 explicitly - the ambient `Gpu::new_gpu` may be another backend, on which the test's nativity assertion would never run);
 timing report `int8_decode_attention_timing_report` (ignored).
 

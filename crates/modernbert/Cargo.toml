@@ -24,7 +24,7 @@ serde_json.workspace = true
 
 [dev-dependencies]
 # `testutil::skip` - a parity fixture absent from this checkout is a skip,
-# not a failure; see `crates/diamond/tests/parity.rs` for the precedent.
+# not a failure; see `crates/diamond/tests/it/parity.rs` for the precedent.
 brain-testutil.workspace = true
 # `rlcd::reinforce` - the objective `tests/train_convergence.rs` drives
 # `LayaDecision`'s loop with. A dev-dependency deliberately: `crates/rlcd` is

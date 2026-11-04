@@ -143,7 +143,7 @@ pin (`gpu_core::devices::set_ambient_gpu` was never called on that path).
   subcommand now goes through the same `--device`/`BRAIN_DEVICE` resolution
   path as everything else.
 
-**Tests.** `crates/gpu-core/tests/device_grammar.rs`: a table test asserting
+**Tests.** `crates/gpu-core/tests/it/device_grammar.rs`: a table test asserting
 `--device <token>` and `BRAIN_DEVICE=<token>` (nothing published) resolve to
 IDENTICAL `ComputeSet`s, adapted at run time to the real machine's GPU/CPU/NPU
 counts (confirmed RED first, by temporarily reproducing the old weak-ladder
@@ -291,7 +291,7 @@ numbers found"). Full program from the approved plan, not just the gate:
   yet exist": `crates/cli/src/glm_cli.rs` dispatches it to
   `npu::glm_decode::generate` today (fp32 greedy decode, real). Also found
   `brain glmdsa export --int8` is implemented and tested
-  (`crates/npu/tests/glm_onnx.rs::glm_onnx_int8_runs`) but `infer --device
+  (`crates/npu/tests/it/glm_onnx.rs::glm_onnx_int8_runs`) but `infer --device
   npu` hardcodes `int8: false` and exposes no `--int8` flag - so INT8 is
   reachable via `export` today, not via `infer` end to end. Doc now states
   both precisely instead of a blanket "does not exist."
@@ -833,7 +833,7 @@ resident's own file, not a new module).
   fits comfortably in one protobuf buffer, matching the old
   `Chronos2Session::load_bytes` path).
 - Both structs get a `pub(crate) fn new(...)` constructor (fields stay
-  private) specifically so `crates/catalog/tests/npu_model_parity.rs` can
+  private) specifically so `crates/catalog/tests/it/npu_model_parity.rs` can
   construct one directly - see that test file's own module doc for why.
 
 `Chronos2NpuInstance`/`FincastNpuInstance`'s compiled-graph caches changed
@@ -859,7 +859,7 @@ read-only reference for this task, and deleting a still-tested public type is
 a separate, deliberate cleanup call for whoever owns that file next, not a
 side effect of a residency-adapter migration.
 
-**TDD**: `crates/catalog/tests/npu_model_parity.rs` (new). `brain-cli` is a
+**TDD**: `crates/catalog/tests/it/npu_model_parity.rs` (new). `brain-cli` is a
 **bin-only** crate (no `[lib]` target), so an external integration test
 cannot `use brain_cli::...`; the test pulls `resident_forecast.rs` in
 directly via `#[path = "../src/resident_forecast.rs"] mod resident_forecast;`
@@ -1086,7 +1086,7 @@ here; the gate below uses `--device npu5` (out of range regardless of how
 many accel nodes exist) instead, which reliably hits
 `DeviceSpec::resolve`'s NPU error path on any machine.
 
-**TDD.** `crates/cli/tests/device_routing.rs` (new):
+**TDD.** `crates/cli/tests/it/device_routing.rs` (new):
 
 - `device_npu_out_of_range_index_reports_clear_diagnostic_and_exits_nonzero` -
   `brain devices --device npu5` exits non-zero with `status.code()` set (never
@@ -1246,7 +1246,7 @@ and overrides the thread count to `m*n` for that slot, rather than trusting
 is now correct for a future B7 caller to adopt directly (independent of
 `Ops`).
 
-**TDD.** `crates/model/tests/ops_facade_parity.rs` (new), written first -
+**TDD.** `crates/model/tests/it/ops_facade_parity.rs` (new), written first -
 confirmed RED by temporarily commenting `pub mod ops;` out of `lib.rs`
 (`error[E0432]: unresolved import 'model::ops'`), then restored once `Ops`/
 `Weight` existed:
@@ -1279,7 +1279,7 @@ confirmed RED by temporarily commenting `pub mod ops;` out of `lib.rs`
   LOUDLY, never silently at dispatch time" requirement, checked directly.
 
 This is also **Q4's first real model-facing dispatch exercise** outside
-`crates/model/tests/matmul_q4_gemm.rs` (which only drives the raw kernel by
+`crates/model/tests/it/matmul_q4_gemm.rs` (which only drives the raw kernel by
 hand, not a `Weight`/`Ops`-shaped call) - a real milestone per the plan, and
 exactly what surfaced bug 2 above (nothing had exercised `GemmVariants`-routed
 q4 dispatch before).
@@ -1566,7 +1566,7 @@ layout" rationale, unrelated to the kernel templater), so it needed no flip;
 follow-up for whoever wants the storage tier on that backend too - the WGSL
 itself would need no change, only the caps literal).
 
-**Dual-backend roundtrip** (`crates/model/tests/bf16_roundtrip.rs`, new).
+**Dual-backend roundtrip** (`crates/model/tests/it/bf16_roundtrip.rs`, new).
 Three shapes chosen to route through all three templatized kernels via
 `select::candidates`'s real crossover constants (`DECODE_REGIME_MAX_ROWS=32`,
 `GEMM_TILE_MIN_COLS=128`): `m=8,n=128` -> `WorkgroupPerOutput`/
@@ -1680,7 +1680,7 @@ sufficient on its own.
 not: GPU flush-to-zero (FTZ) on subnormal f16 decode.** The phase brief's
 literal magic-multiply formula, ported unchanged into
 `kernels::template::f16_decode_expr` and run through
-`crates/model/tests/f16_roundtrip.rs`'s dual-backend test (which deliberately
+`crates/model/tests/it/f16_roundtrip.rs`'s dual-backend test (which deliberately
 includes an injected subnormal-magnitude weight row - see that file's
 `inject_f16_edge_case_rows`), passed on the CPU JIT but FAILED on real wgpu
 hardware (this sandbox's Intel Arc iGPU): a real subnormal f16 weight decoded
@@ -1816,7 +1816,7 @@ path" - two different, independently-gated facts, per B1's own `NumericSupport`
 doc comment. `backend-cpu`/`backend-vulkan` untouched, out of scope (same as
 B4 left them for bf16).
 
-**Dual-backend roundtrip** (`crates/model/tests/f16_roundtrip.rs`, new,
+**Dual-backend roundtrip** (`crates/model/tests/it/f16_roundtrip.rs`, new,
 following `bf16_roundtrip.rs`'s structure exactly). Same three shapes as B4
 (`m=8,n=128` -> `matmul_gemv#w=f16`; `m=64,n=128` -> `matmul_reg3#w=f16`;
 `m=64,n=64` -> `matmul#w=f16`), tolerance derived the same way but with f16's
@@ -1860,7 +1860,7 @@ the same three `dtype_variant(.., DType::F16)` registrations B4 already added
 for bf16, or `Ops::new` would fail loudly (confirmed RED first: ran `cargo
 test -p brain-model --test ops_facade_parity` before this fix and got
 `Ops::new: kernel 'matmul#w=f16' is not registered`). Fixed in
-`crates/model/tests/ops_facade_parity.rs` and `crates/model/tests/
+`crates/model/tests/it/ops_facade_parity.rs` and `crates/model/tests/
 bf16_roundtrip.rs` (both mechanical, additive - three more `dtype_variant`
 calls in each file's own `kernel_list()`, same pattern already used for the
 bf16 trio) - neither file's own test LOGIC changed, both still exercise
@@ -1993,7 +1993,7 @@ live off the same `counts` dict the other column summaries already use, so
 they cannot drift from the real numbers). `docs/reference/kernels/index.md`
 regenerated; `gen-kernel-table.py --check` passes clean (0 stale, 0 invalid).
 
-**`crates/wgsl-cpu/tests/compile_all.rs`** extended with a second test,
+**`crates/wgsl-cpu/tests/it/compile_all.rs`** extended with a second test,
 `dtype_tiers_compile_or_fail_only_for_the_documented_barrier_reason` - the
 cross-product this phase's brief asked for. For every kernel whose `@dtype`
 declares a tier beyond `f32`/`n/a`, it parses the binding name off the
@@ -2121,7 +2121,7 @@ above, left for whoever next touches those specific files' prose).
 ## B7 - qwen3 migrated to Ops, hand-numbered tables deleted
 
 **Scope actually touched**, per the task's own boundary: `crates/qwen3/src/
-model.rs`, `crates/qwen3/src/serve.rs`, `crates/qwen3/tests/flops.rs` (one
+model.rs`, `crates/qwen3/src/serve.rs`, `crates/qwen3/tests/it/flops.rs` (one
 pre-existing test's assumption broke as a DIRECT, necessary consequence of
 the migration - fixed, not left red, see "Real finding #1" below), and this
 entry. `crates/qwen3/src/q8.rs` and `crates/qwen3/src/lib.rs` were **not**
@@ -2256,7 +2256,7 @@ JIT's own `dot4I8Packed` lowering - see `matmul_q4_dyn.wgsl`'s header comment
 - runs the packed-dot kernels correctly, just without hardware acceleration).
 `crates/qwen3/src/q8.rs`'s PRE-B7 design never had this gate: `Q8::build`
 quantized unconditionally on ANY backend, and this crate's own tests
-DEPEND on that - `crates/qwen3/tests/flops.rs::i8_model_reports_int_ops`
+DEPEND on that - `crates/qwen3/tests/it/flops.rs::i8_model_reports_int_ops`
 (module doc: "CPU backend (deterministic; runs on CI without a GPU)") force-
 built an int8 model with `set_default_backend(Backend::Cpu)` and asserted
 `int_ops > 0`. First draft of this migration routed `model.rs`'s I8
@@ -2462,7 +2462,7 @@ policy (not something this phase invented), just never actually EXERCISED by
 `model.rs` before because nothing there ever consulted the selector for the
 int8 tier prior to this migration.
 
-### TDD: `crates/qwen3/tests/no_kernel_names.rs`
+### TDD: `crates/qwen3/tests/it/no_kernel_names.rs`
 
 Written first, confirmed RED against the pre-B7 source (`git stash` on just
 `model.rs`/`serve.rs`, keeping the new test file - not a re-derivation, the
@@ -2764,7 +2764,7 @@ reasons below, not silence.
 kernel had exactly ONE templatable binding (`emb` or `w`), so the existing
 single-binding signature (`dtype_variant(name, src, binding, dt)`) covered
 all 6 - the "two separate weight bindings in one kernel" extension case the
-task brief anticipated never came up. `crates/wgsl-cpu/tests/compile_all.rs`
+task brief anticipated never came up. `crates/wgsl-cpu/tests/it/compile_all.rs`
 needed NO changes either - confirmed it is genuinely `@dtype`-header-driven
 (`declared_dtype_tiers`/`tpl_binding` parse every kernel's own header, not a
 hardcoded 3-kernel list), so it picked up all 6 new kernels' cross-product
@@ -2814,7 +2814,7 @@ an `Ops`; fixed, re-ran, GREEN).
 
 ### TDD
 
-**`crates/model/tests/embed_moe_roundtrip.rs`** (new) - `bf16_roundtrip.rs`/
+**`crates/model/tests/it/embed_moe_roundtrip.rs`** (new) - `bf16_roundtrip.rs`/
 `f16_roundtrip.rs`'s exact dual-backend structure, for `Ops::embed`,
 `embed_tile` (dispatched directly - see below), and `Ops::moe_linear`, each
 across BOTH the `BF16` and `F16` tier in one file (unlike the matmul family's
@@ -2834,7 +2834,7 @@ shares the `emb` decode correctly, the same "prove the templated KERNEL
 itself round-trips" standard applied without forcing an `Ops` wrapper it
 does not need.
 
-**`crates/model/tests/conv_dtype_roundtrip.rs`** (new) - `conv2d`/`conv1d`/
+**`crates/model/tests/it/conv_dtype_roundtrip.rs`** (new) - `conv2d`/`conv1d`/
 `conv_bias`, dispatched directly (no `Ops::conv2d` facade exists - see the
 `Ops` extension section above for why one was not built). Host references
 mirror the kernel's OWN zero-pad boundary loop tap-for-tap (not a closed-form
@@ -3109,13 +3109,13 @@ driven" finding).
 `paged_kv_append_batched.wgsl` and the new `paged_kv_append_batched_word.wgsl`
 (WRITE direction) DELIBERATELY kept `@dtype f32` (undeclared) - checked, not
 assumed, that declaring `f32|bf16` here would be WRONG given today's tooling:
-`crates/wgsl-cpu/tests/compile_all.rs`'s automatic cross-product and
+`crates/wgsl-cpu/tests/it/compile_all.rs`'s automatic cross-product and
 `kernelmeta.py`'s seeder both only know how to call the READ-direction
 `dtype_variant` for a declared tier, never `dtype_variant_store` - pointing
 either at a write-only binding would either silently generate INVALID WGSL
 (assigning to a decoded r-value expression) or require teaching that tooling
 about a second rewrite direction, both outside this phase's scoped file list
-(`scripts/build/kernelmeta.py`, `crates/wgsl-cpu/tests/compile_all.rs` are not
+(`scripts/build/kernelmeta.py`, `crates/wgsl-cpu/tests/it/compile_all.rs` are not
 in it). Documented in both kernels' own header comments and here, not silently
 left inconsistent - a precise, scoped follow-up for whoever next touches that
 tooling, matching B8's own "moe_linear_gated_i8.wgsl's stale @dtype, flagged
@@ -3140,7 +3140,7 @@ repeated for embed/moe_linear. `crates/qwen3/` was NOT touched by this phase;
 `cargo test -p brain-qwen3` was correctly NOT run (per the task's own scoped
 verification list).
 
-### TDD: `crates/model/tests/kv_bf16_roundtrip.rs`
+### TDD: `crates/model/tests/it/kv_bf16_roundtrip.rs`
 
 **Long-context parity** (`kv_bf16_long_context_parity_on_{cpu,gpu}`): a REAL
 `model::paged::{BlockAllocator, BlockTable}` sequence of 37 tokens at
@@ -3236,7 +3236,7 @@ run, not before it).
 
 ### What's left (follow-ups, not this phase's job)
 
-- Teaching `scripts/build/kernelmeta.py`/`crates/wgsl-cpu/tests/compile_all.rs`
+- Teaching `scripts/build/kernelmeta.py`/`crates/wgsl-cpu/tests/it/compile_all.rs`
   about the write direction (`dtype_variant_store`) so `paged_kv_append_
   batched_word.wgsl` can honestly declare `@dtype f32|bf16` and be swept by
   the automatic cross-product - flagged, not fixed, out of this phase's scoped
@@ -3623,7 +3623,7 @@ have gone either direction; it did not go the P40 direction (see Results).
    the phase brief's own explicit allowance ("if [roof.rs] doesn't fit, this
    is a sign to scope down and measure inline in a test"), the actual timing
    is a self-calibrating `calibrated_seconds_per_iter` reimplemented locally
-   in `crates/backend-wgpu/tests/native_f16.rs`, mirroring
+   in `crates/backend-wgpu/tests/it/native_f16.rs`, mirroring
    `roof::measure_compute`'s own discipline (grow `iters` until the timed
    region clears a floor, `poll_wait`-bracketed so host-side recording is
    never mistaken for device time).
@@ -3645,7 +3645,7 @@ have gone either direction; it did not go the P40 direction (see Results).
 ### Correctness - real hardware, both directions checked
 
 `native_f16_elementwise_fma_matches_f32_reference_on_real_gpu`
-(`crates/backend-wgpu/tests/native_f16.rs`), run for real on this sandbox's
+(`crates/backend-wgpu/tests/it/native_f16.rs`), run for real on this sandbox's
 adapter (`Intel(R) Arc(tm) Graphics (MTL) (IntegratedGpu, Vulkan)`, printed on
 every run, `MOE_SKIP_GPU_TESTS` never set), skips cleanly if
 `supports_shader_f16()` is false (checked here, not assumed available).

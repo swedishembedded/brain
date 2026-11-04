@@ -206,8 +206,8 @@ The decoder is correct on both, and gated as such:
 `crates/deepseek2/tests/{parity,generate}.rs` gate the real 2.9 B decoder
 against the SAME llama.cpp reference on each backend (it reproduces
 llama.cpp's continuation token for token on both),
-`crates/deepseek2/tests/backend_parity.rs` gates the two against each other at
-the fp32 noise floor, and `crates/deepseek2/tests/decode_throughput.rs`
+`crates/deepseek2/tests/it/backend_parity.rs` gates the two against each other at
+the fp32 noise floor, and `crates/deepseek2/tests/it/decode_throughput.rs`
 asserts they decode the same ids at the served `ctx = 8192`/`chunk = 512`
 shape while reporting each one's cost.
 

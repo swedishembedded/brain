@@ -1260,7 +1260,7 @@ mod tests {
     }
 
     /// A tiny checkpoint-free `Timesfm3Instance`, deterministic synthetic
-    /// weights - mirrors `crates/timesfm3/tests/forecaster.rs`'s own helper,
+    /// weights - mirrors `crates/timesfm3/tests/it/forecaster.rs`'s own helper,
     /// needing neither the golden manifest nor a real checkpoint. Built on
     /// the POOLED test device (`gpu_core::testgpu::dev`): this helper is
     /// called once per test in this file, and `Timesfm3::from_weights`'s own

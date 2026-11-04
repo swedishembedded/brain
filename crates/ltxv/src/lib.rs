@@ -23,7 +23,7 @@
 //! alternative to the conv decoder [`vae3d`] uses.)
 //!
 //! Only the tiny-config op sequence is proven for the DiT itself
-//! (`config::LtxDitConfig::tiny`, `crates/ltxv/tests/dit_parity.rs`) -
+//! (`config::LtxDitConfig::tiny`, `crates/ltxv/tests/it/dit_parity.rs`) -
 //! real-22B-checkpoint weight import is a separate, tracked gap
 //! (`dit::load_tiny_weights` is a simple name-keyed loader for the golden's
 //! OWN tiny weights only, not a real-checkpoint importer;
@@ -42,7 +42,7 @@
 //! tables, a cross-modality-sigma-driven gate, a shared time-only cross-modal
 //! RoPE space - see `block`'s and `rope`'s module docs). Tiny-config
 //! op-sequence parity only, same bar and same real-checkpoint-import gap as
-//! the video-only stream (`crates/ltxv/tests/dit_parity.rs`).
+//! the video-only stream (`crates/ltxv/tests/it/dit_parity.rs`).
 //!
 //! **Training for the video-only DiT** ([`grad`]/[`modelgrad`]/
 //! [`lora`]/[`finetune`]) is implemented as a from-scratch, float-type-generic

@@ -315,7 +315,7 @@ mod tests {
     use super::*;
 
     // `fold_weight_norm`'s own correctness gate now lives with the hoisted
-    // implementation: `crates/audio/tests/weight_norm.rs`.
+    // implementation: `crates/audio/tests/it/weight_norm.rs`.
 
     #[test]
     fn even_stride_transposed_conv_output_length_is_exactly_l_times_stride() {

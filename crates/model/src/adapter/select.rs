@@ -91,7 +91,7 @@ impl TargetSelector {
 /// run including `.`; `?` matches exactly one character; `{a,b,c}` matches
 /// any one literal alternative. Anything else must match literally.
 /// Iterative (no backtracking blowup) - see the property test in
-/// `crates/model/tests/adapter_basics.rs` for a brute-force cross-check.
+/// `crates/model/tests/it/adapter_basics.rs` for a brute-force cross-check.
 pub fn glob_match(pattern: &str, text: &str) -> bool {
     let pat = expand_braces(pattern);
     pat.iter().any(|p| glob_match_one(p, text))

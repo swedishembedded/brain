@@ -90,7 +90,7 @@ cards without resizable BAR, so retiring those tokens is a change of its own.
 
 ### Gate - device identity
 
-`crates/gpu-core/tests/cuda_device_identity.rs` -
+`crates/gpu-core/tests/it/cuda_device_identity.rs` -
 `cuda_uuid_matches_vulkan_device_uuid`: every CUDA-enumerated device UUID must
 match a Vulkan/wgpu-enumerated device for the same physical card, and the
 canonical index must resolve back to that CUDA ordinal. Skip-if-absent via
@@ -230,7 +230,7 @@ is removed (verified by removing it, not by inspection):
 
 ### Gate - golden agreement against the CPU reference
 
-`crates/backend-cuda/tests/wgsl_cuda_golden.rs`: one WGSL source, two
+`crates/backend-cuda/tests/it/wgsl_cuda_golden.rs`: one WGSL source, two
 independent code generators - `wgsl-cpu`'s Cranelift JIT and `wgsl-cuda` ->
 NVRTC -> a real device - compared per kernel and per shape, at a whole-workgroup
 shape and at one with a partial tail. Elementwise and packed-int8 results are
@@ -275,7 +275,7 @@ emitter has to handle:
 - `var<workgroup>` was a stack slot allocated once and reused, so the second
   work-group read the first one's values. Fixed by zeroing it per work-group.
 
-Both are pinned by `crates/wgsl-cpu/tests/workgroup_semantics.rs`, which fails
+Both are pinned by `crates/wgsl-cpu/tests/it/workgroup_semantics.rs`, which fails
 on the unfixed compiler. Neither was reachable from a model run today (the CPU
 backend dispatches exactly `n_wg` work-groups, and the kernels in the tree
 write every slot they read), which is why they survived.
@@ -343,7 +343,7 @@ so no f16 arithmetic runs here whatever the card could do.
 
 ### Gate - one model's forward, on every backend this box has
 
-`crates/gpt2/tests/cuda_backend_parity.rs` -
+`crates/gpt2/tests/it/cuda_backend_parity.rs` -
 `the_cuda_forward_agrees_with_every_other_backend_on_this_box`. A dense GPT
 decoder at `GptConfig::tiny()` (vocab 65, 2 layers, d_model 32, 4 heads, ff
 128) over `b=1, t=6`, forward logits only, compared CPU vs CUDA and Vulkan vs
@@ -370,7 +370,7 @@ does mean breadth is now a validation problem rather than an emitter problem.
 
 ### Gate - the plumbing the model test cannot see
 
-`crates/backend-cuda/tests/backend_contract.rs`, five assertions, added because
+`crates/backend-cuda/tests/it/backend_contract.rs`, five assertions, added because
 the model test above was MEASURED to be blind to four separate mutations of
 this backend (see lessons #116). Four have verified teeth - each fails when the
 mechanism it names is removed:
@@ -625,7 +625,7 @@ every sibling handle shares, so each `Gpu` built over an int8 model would have
 loaded one more module for the life of the device - registration is now
 idempotent per spec.
 
-**Gates.** `crates/gpu-core/tests/i8_gemv_native.rs`: the redirect fires exactly
+**Gates.** `crates/gpu-core/tests/it/i8_gemv_native.rs`: the redirect fires exactly
 for the shapes it serves; raw-bit equality with the WGSL tier over tails, ragged
 `n`, unaligned and aligned binding windows (the scalar-load path), sentinels
 around every window, 60 seeded random shapes, and the real 27B projection
@@ -694,7 +694,7 @@ the bookkeeping - it allocates per step, per submission - is where the next
 host-cost work is, and it would benefit both paths.
 
 Four things had to be true, and each is asserted in
-`crates/backend-cuda/tests/cuda_graphs.rs` rather than argued for:
+`crates/backend-cuda/tests/it/cuda_graphs.rs` rather than argued for:
 
 1. **A per-step parameter change must not move a device address.** The uniform
    allocation is keyed on `(kind, buffers+offsets, parameter word count)` -
@@ -737,7 +737,7 @@ stream.
 
 Capture is **on by default** where the driver exposes the entry points, and
 `CudaBackend::with_graph_capture(false)` turns it off. It is validated end to
-end, not only in isolation: `crates/gpt2/tests/cuda_backend_parity.rs` runs a
+end, not only in isolation: `crates/gpt2/tests/it/cuda_backend_parity.rs` runs a
 real forward through this path and still reports `maxabs 8.940697e-8` against
 both the CPU and the Vulkan backends, unchanged from before graphs existed.
 
@@ -1047,7 +1047,7 @@ tuned kernel are deferred.**
   gradcheck package - that would demand the full catalogue and backward
   kernels, which this backend does not have.
 
-- **Forward only, and one model.** `crates/gpt2/tests/cuda_backend_parity.rs`
+- **Forward only, and one model.** `crates/gpt2/tests/it/cuda_backend_parity.rs`
   is the whole of what has been proved against a model: `GptConfig::tiny()`,
   `b=1, t=6`, forward logits. No backward pass, no decode/KV tape, no MoE, no
   attention variant beyond `attn_scores`/`attn_softmax`/`attn_apply`, no
@@ -1331,7 +1331,7 @@ again at the point it is used.
 - Pre-existing and NOT caused by this work, so a run that shows them is still
   clean: `brain-backend-api`'s
   `select::tests::paged_attention_fused_only_offers_the_fused_kernel_at_causal_chunk_f32`
-  fails on the base commit too, and `crates/gpu-core/tests/native_f16_provider.rs`'s
+  fails on the base commit too, and `crates/gpu-core/tests/it/native_f16_provider.rs`'s
   three tests fail with "the `f16` extension is not supported in the current
   environment" on hardware without it.
 

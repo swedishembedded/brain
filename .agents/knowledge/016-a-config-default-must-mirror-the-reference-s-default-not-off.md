@@ -30,5 +30,5 @@ Three things let it ship:
 Read the reference's constructor signature, not just the checkpoint's JSON. Any
 model that genuinely wants these off says so explicitly (FLUX.1-Kontext and
 Z-Image both write `false`); the ones that say nothing are the ones that need
-`true`. Gated by `crates/vae/tests/sdxl_decode_parity.rs`, now at cosine
+`true`. Gated by `crates/vae/tests/it/sdxl_decode_parity.rs`, now at cosine
 1.000000 / PSNR 121 dB.

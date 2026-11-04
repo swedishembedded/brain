@@ -141,7 +141,7 @@ CONTEXT_LEN = 6    # fake text token count
 # ---------------------------------------------------------------------------
 # Gated-attention + embeddings-connector tiny config (Phase 2) - a SECOND,
 # independent dump alongside TINY_CONFIG's (that run/its output files are
-# UNCHANGED by this addition - `crates/ltxv/tests/dit_parity.rs`'s existing
+# UNCHANGED by this addition - `crates/ltxv/tests/it/dit_parity.rs`'s existing
 # no-gating test keeps replaying `dit_tiny.safetensors` untouched). Every
 # dimension differs from TINY_CONFIG's AND from every other dimension in
 # THIS config - a degenerate or repeated dim would let a transpose/off-by-one

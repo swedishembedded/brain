@@ -17,7 +17,7 @@ log-hazards, and what PyTorch computes:
   exponential of the competing-risks generator of each piece (a different
   method from the closed form horizon uses).
 
-crates/horizon/tests/reference.rs holds the encoder, the loss kernels (on
+crates/horizon/tests/it/reference.rs holds the encoder, the loss kernels (on
 the CPU backend) and `survival::Curves` to every number. No checkpoint is
 involved, so the inputs are in the file.
 

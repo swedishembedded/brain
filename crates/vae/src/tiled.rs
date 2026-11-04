@@ -129,7 +129,7 @@ impl Tiling {
     /// Let every tile normalise over itself - the single-pass behaviour, and
     /// what `diffusers`' own `tiled_decode` does. Half the work and visibly
     /// worse; kept reachable so the two arms can be compared
-    /// (`crates/vae/tests/tiled_parity.rs` measures the difference, which it
+    /// (`crates/vae/tests/it/tiled_parity.rs` measures the difference, which it
     /// could not do if the losing arm were unreachable).
     pub fn local_gn(self) -> Tiling {
         Tiling { global_gn: false, ..self }

@@ -140,7 +140,7 @@ Placement:
   shared by both branches does not move to a second card, and two concurrent
   branches contend for the same cores. Measure your own by running the same
   request twice, once with BRAIN_LTXV_CFG_PARALLEL=0, or run
-  crates/ltxv/tests/cfg_parallel.rs, which times both placements and proves
+  crates/ltxv/tests/it/cfg_parallel.rs, which times both placements and proves
   the two outputs identical. Set
   BRAIN_LTXV_CFG_PARALLEL=0 to force the old single-card behaviour; --device
   gpu0 also confines the run to one card, since placement never leaves the

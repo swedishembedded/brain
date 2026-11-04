@@ -2398,7 +2398,7 @@ impl LtxBlockQ {
     ///
     /// Bit-identical to [`Self::forward_timed`] by construction - same kernels,
     /// same operands, same order; only the ROUTE the modulation bytes take to
-    /// the card changes. Gated by `crates/ltxv/tests/device_residency.rs`.
+    /// the card changes. Gated by `crates/ltxv/tests/it/device_residency.rs`.
     ///
     /// Takes and returns HOST floats. A stack of blocks should use
     /// [`Self::forward_prod_dev`] instead and keep the activation on the card;
@@ -2444,7 +2444,7 @@ impl LtxBlockQ {
     /// `write_buffer` staging and dropped buffers are only retired by a
     /// BLOCKING readback, and an uploaded storage buffer otherwise costs twice
     /// its size resident (measured directly by
-    /// `crates/gpu-core/tests/vram_overhead.rs`). Left unretired the
+    /// `crates/gpu-core/tests/it/vram_overhead.rs`). Left unretired the
     /// allocator's pool grows several-fold and the resident weight window
     /// loses more blocks than the saved traffic is worth - which is why an
     /// earlier pass measured chaining as a NET LOSS and kept the round trip.

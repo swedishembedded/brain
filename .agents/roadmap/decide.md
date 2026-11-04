@@ -195,7 +195,7 @@ Two things follow that a caller can measure:
 measurement rather than a rule because which of the two dominates is a property
 of the card and of the shape.
 
-**The gradient is the same gradient**, and `crates/decide/tests/minibatch.rs`
+**The gradient is the same gradient**, and `crates/decide/tests/it/minibatch.rs`
 holds a batched pass against `B` sequential `accumulate` calls buffer by
 buffer, in both halves, with the encoder LIVE. A loss curve cannot make that
 distinction: a shared pass that dropped every example but the last would still
@@ -299,7 +299,7 @@ trains the head alone and the run's head is writable;
 the default is unchanged, still fine-tunes the encoder, and `save_head` still
 refuses after it - which is what keeps this arm's published accuracies
 meaning what they say. Gated by
-`crates/sdk/tests/decision_pipeline.rs::a_frozen_encoder_run_can_save_its_head_and_a_fine_tuned_one_still_cannot`,
+`crates/sdk/tests/it/decision_pipeline.rs::a_frozen_encoder_run_can_save_its_head_and_a_fine_tuned_one_still_cannot`,
 which holds BOTH directions: the default run's refusal names the encoder, and
 the frozen run's file loads back and reproduces its answer.
 

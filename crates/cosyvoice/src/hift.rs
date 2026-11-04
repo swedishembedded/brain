@@ -49,7 +49,7 @@
 //! exact values captured from a real, reseeded `hift.inference()` run
 //! (`testdata/golden/cosyvoice/hift_real_nsf_noise.f32`, captured by an
 //! ad-hoc script against the real checkpoint - see
-//! `crates/cosyvoice/tests/hift_parity.rs`'s module doc for exactly how),
+//! `crates/cosyvoice/tests/it/hift_parity.rs`'s module doc for exactly how),
 //! which lets the conv-trunk + NSF-source + ISTFT math be verified
 //! bit-exactly without reimplementing PyTorch's Mersenne-Twister transform in
 //! Rust. [`forward_seeded`] (the production entry point) draws its own
@@ -456,7 +456,7 @@ pub struct HiftOutput {
 /// Full forward: `mel [in_channels, T_mel]` -> waveform, given an explicit
 /// NSF noise draw (see this module's doc for why it is a parameter rather
 /// than an internal RNG call - this is the entry point
-/// `crates/cosyvoice/tests/hift_parity.rs` uses with the captured golden
+/// `crates/cosyvoice/tests/it/hift_parity.rs` uses with the captured golden
 /// noise). [`forward_seeded`] is the production entry point.
 pub fn forward(mel: &[f32], t_mel: usize, cfg: &HiftConfig, w: &HiftWeights, randn_noise: &[f32]) -> HiftOutput {
     assert_eq!(mel.len(), cfg.in_channels as usize * t_mel, "forward: mel length != in_channels*T_mel");

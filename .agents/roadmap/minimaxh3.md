@@ -1103,7 +1103,7 @@ user-visible half and went first.
   dispatch. The 3 WGSL files themselves needed only a header-tag fix
   (`@cpu yes` -> `@cpu native`); they are not redundant/removable - they
   remain the real GPU dispatch source and the CPU JIT fallback. Remaining
-  gap: `crates/backend-cpu/tests/matmul_family_native_fastpath.rs` guards
+  gap: `crates/backend-cpu/tests/it/matmul_family_native_fastpath.rs` guards
   only the multi-barrier hard-panic case; nothing yet guards this silent
   "JIT-compilable but no native path" case in general, so the same class of
   bug (a new kernel name a model adopts, with no matching `FastIdx` entry)

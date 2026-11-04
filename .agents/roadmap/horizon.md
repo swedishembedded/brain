@@ -280,7 +280,7 @@ New, each with a CPU and GPU path, a kernel header and a gradient check:
    closed-form curves (`Prediction::cif`/`survival`), exposes the summary
    state, saves and loads (weights with the configuration in the header, the
    vocabulary beside them), and re-exports `brain::survival` and the
-   synthetic population; `crates/sdk/tests/timeline.rs` trains, saves,
+   synthetic population; `crates/sdk/tests/it/timeline.rs` trains, saves,
    reloads and predicts identically. Serving done: `horizon::saved` owns the
    saved-model directory (the SDK delegates to it), `horizon::caps` the one
    `predict` action, a catalog entry and resident adapter

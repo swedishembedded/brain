@@ -277,7 +277,7 @@ impl DeepseekV2Config {
         // A LoRA checkpoint must round-trip its adapter shape, or `param_list()`
         // rebuilds without the `.lora_a`/`.lora_b` names on load and the trained
         // adapters are silently dropped on the next load -- the same defect
-        // `crates/qwen3/tests/lora_roundtrip.rs` gates for that crate's own
+        // `crates/qwen3/tests/it/lora_roundtrip.rs` gates for that crate's own
         // `LoraCfg` field.
         if let Some(l) = &self.lora {
             v["lora"] = l.to_json();
@@ -361,7 +361,7 @@ mod tests {
 
     /// A LoRA config must round-trip too, or a reloaded checkpoint silently
     /// drops the trained adapter -- the same defect
-    /// `crates/qwen3/tests/lora_roundtrip.rs` gates for `qwen3::QwenConfig`.
+    /// `crates/qwen3/tests/it/lora_roundtrip.rs` gates for `qwen3::QwenConfig`.
     #[test]
     fn lora_config_round_trips() {
         let cfg = DeepseekV2Config { lora: Some(lora_cfg(4, 8.0)), ..DeepseekV2Config::tiny() };

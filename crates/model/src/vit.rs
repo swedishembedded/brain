@@ -242,7 +242,7 @@ pub fn flash_ids(g: &Gpu) -> Option<crate::block::FlashIds> {
 /// native path at all, so the swap moves the linears off Cranelift-compiled
 /// WGSL onto the AVX2 kernel - a large win there too, but a different
 /// summation order. A model adopting this re-certifies its own parity;
-/// `crates/qwen3vl/tests/vision_tower_parity.rs` is what that looks like.
+/// `crates/qwen3vl/tests/it/vision_tower_parity.rs` is what that looks like.
 ///
 /// The tile threshold is a floor, not a swept crossover: one full 128x128 tile
 /// in each dimension is the point below which the tiled kernel is provably
@@ -391,7 +391,7 @@ pub struct VitBwdIds {
     /// kernel rule: `Params { total: u32 }` + `(x, dout, dx)`. It MUST be the
     /// adjoint of the forward slot's kernel; `gelu_bwd` standing in for
     /// `gelu_erf_bwd` is a real, gradcheck-invisible bug (see
-    /// `crates/gradcheck/tests/gelu_erf_fd.rs`).
+    /// `crates/gradcheck/tests/it/gelu_erf_fd.rs`).
     pub mlp_act_bwd: usize,
     pub scale_chan_dg: usize,
     pub ln_head_dx: usize,
@@ -2099,7 +2099,7 @@ impl RelPos<'_> {
     /// and confirmed (real-weight full-depth parity clean 5/5, and a
     /// checkpoint-free reproduction clean 32/32 under induced heavy
     /// contention matching the original bisection) - see
-    /// `crates/sam1/tests/wgpu_block_count_corruption.rs`'s doc comment for
+    /// `crates/sam1/tests/it/wgpu_block_count_corruption.rs`'s doc comment for
     /// the record. DeepSeek-OCR's vision tower runs on wgpu as a result;
     /// only its decoder stays on the CPU backend.
     pub fn add_step(&self, g: &Gpu, heads: u32, qn: u32, kn: u32, q0: u32, scores: &DeviceBuffer) -> Step {

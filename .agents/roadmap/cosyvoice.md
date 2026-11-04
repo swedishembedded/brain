@@ -337,7 +337,7 @@ S3Tokenizer's own Whisper-style mel front end (`audio::asr_frontend::
 qwen_logmel`) needed no new code at all - it already matches
 `s3tokenizer.log_mel_spectrogram` exactly when called unpadded.
 
-Verification, `crates/cosyvoice/tests/pipeline_e2e.rs`:
+Verification, `crates/cosyvoice/tests/it/pipeline_e2e.rs`:
 
 - `mel_frontend_matches_the_reference_mel`: `pipeline::extract_prompt_mel`
   against the real `mel_real_*` golden - cosine **0.9999999999**, `rel_l2`
@@ -450,7 +450,7 @@ reachable from this crate's training path.
 
 Gates (`crates/gradcheck/src/lib.rs`'s `check_cosyvoice_lm_block`/
 `check_cosyvoice_lm`, `crates/cosyvoice/src/lmlora.rs`'s and
-`crates/cosyvoice/tests/lm_overfit.rs`'s own tests), at tiny, deliberately
+`crates/cosyvoice/tests/it/lm_overfit.rs`'s own tests), at tiny, deliberately
 non-degenerate dims (`n_heads=6 ≠ head_dim=4`, `d_model=20 ≠
 n_heads·head_dim=24`), covering BOTH `SpecialTokenSource` branches (CosyVoice
 2's dedicated `llm_embedding` table and CosyVoice 3's
@@ -470,7 +470,7 @@ n_heads·head_dim=24`), covering BOTH `SpecialTokenSource` branches (CosyVoice
   with the base provably unmoved) - `crates/cosyvoice/src/lmlora.rs`'s tests.
 - Single-example overfit: loss 2.196 -> 0.00054 over 400 Adam steps.
   Batch-of-4 overfit: mean loss 2.224 -> 0.00034 over 500 Adam steps
-  (`crates/cosyvoice/tests/lm_overfit.rs`).
+  (`crates/cosyvoice/tests/it/lm_overfit.rs`).
 - **Both backends**: this module dispatches no `gpu_core` step, no WGSL, no
   `Backend` at all (confirmed by grep) - there is no kernel here for the
   documented `backend-cpu` workgroup-reduction bug class to hide in, so

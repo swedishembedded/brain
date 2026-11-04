@@ -59,7 +59,7 @@ Training forward path (TF32 GEMMs, fp32 attention) over 2048 positions of real t
 `qwen_bench gemm-accuracy --t 512 --windows 4`): max |dlogit| 0.22, relative RMS 6.8e-4, top-1 agreement
 2048/2048, KL mean 3.6e-7, mean next-token NLL 3.5974 in both tiers (n = 2044). The LoRA step's loss on the
 real weights is 11.653 in the fp32 and the default tier alike (`lora-8b-*.log`). The gradients are gated on tiny
-and head_dim-128 models (`crates/qwen3/tests/lora_gemm_precision.rs`: loss to 2e-3, every adapter gradient at
+and head_dim-128 models (`crates/qwen3/tests/it/lora_gemm_precision.rs`: loss to 2e-3, every adapter gradient at
 cosine above 0.999 against `Fp32Reference`) and the native attention kernels against the portable ones and an f64
 oracle (`crates/gpu-core/tests/cuda_flash_{prefill_hd128,attn_fwd,attn_bwd}.rs`; the backward reaches cosine
 1.000000 and a worst error of 1.7 percent of the gradient's RMS, also for a gradient a million times below unit scale).

@@ -48,10 +48,10 @@ checked for it.
   budget cuts short, so a slow device is unaffected.
 * `gpu_core::roof::warm_up` (default 2 s, `BRAIN_ROOF_WARMUP_S=0` restores the
   old behaviour) before any rung.
-* `crates/gpu-core/tests/roofline.rs::real_work_can_never_beat_the_roof` pins
+* `crates/gpu-core/tests/it/roofline.rs::real_work_can_never_beat_the_roof` pins
   the invariant that would have caught it: `matmul_reg2`'s measured rate
   against the measured roof, on the same device, both ramped.
-* `crates/model/tests/probe_gemm.rs::the_probe_reports_the_operating_point_not_the_idle_clock`
+* `crates/model/tests/it/probe_gemm.rs::the_probe_reports_the_operating_point_not_the_idle_clock`
   pins the probe side: where the device demonstrably climbed during the ramp,
   the published number must be above the cold first dispatch.
 

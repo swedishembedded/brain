@@ -280,7 +280,7 @@ pub const LTX2_TDP_DISTILLED_SIGMAS: [f32; 3] = [0.625, 0.4, 0.0];
 /// (`ltxv_schedule_dump_reference.py`'s `expected_sigmas`) - only the
 /// reference's OWN torch execution runs in f32, and the two are asserted to
 /// agree to `< 1e-6` relative there, which is the bound
-/// `crates/diffusion/tests/ltxv_schedule_parity.rs` re-checks against the
+/// `crates/diffusion/tests/it/ltxv_schedule_parity.rs` re-checks against the
 /// dumped golden.
 pub fn ltx2_sigmas(token_count: usize, steps: usize, base_shift: f64, max_shift: f64, stretch: bool, terminal: f64) -> Vec<f64> {
     assert!(steps >= 1, "ltx2_sigmas: steps must be >= 1");

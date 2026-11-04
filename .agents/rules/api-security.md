@@ -14,7 +14,7 @@ time a route changes. The tests live in two places, and a new route or field add
 its assertions to both: the socket-level `tests/e2e/api_conformance.bats` (against
 the `BRAIN_MOCK` model: auth matrix including no enumeration, no key leak, 413,
 error hygiene, input-bound 400s, admission 429) and the in-process
-`crates/apiserve/tests/api.rs`. These surfaces are internet-reachable when the operator binds
+`crates/apiserve/tests/it/api.rs`. These surfaces are internet-reachable when the operator binds
 them, so treat all request input as hostile.
 
 ## Checklist
@@ -46,7 +46,7 @@ them, so treat all request input as hostile.
       `.host_env(..)`/`.host_resolved()`; `/v1/run`, `/v1/jobs` and D-Bus
       `Run`/`Subscribe`/`Plan` validate through `ActionSpec::validate_served`,
       which refuses it as unknown, and `/v1/capabilities` and D-Bus `Manifests`
-      list `for_serving` manifests. `crates/catalog/tests/served_paths.rs` pins
+      list `for_serving` manifests. `crates/catalog/tests/it/served_paths.rs` pins
       this over every catalog manifest.
 - [ ] Sampling parameters go through `crates/apiserve/src/sampling.rs` on every text
       surface (chat and `/completions`): an omitted `seed`/`top_k` is NOT filled in (the action's own default

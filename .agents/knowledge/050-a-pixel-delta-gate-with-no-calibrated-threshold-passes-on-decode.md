@@ -19,7 +19,7 @@ separates them is **peak excursion from frame 0**, `max_i mean|frame_i -
 frame_0|`: the same two runs score **5.1** and **26.6**. A static clip cannot
 accumulate - its wobble is uncorrelated noise around one image - while real
 motion walks away from frame 0 and stays away. (Not `|frame_last - frame_0|`
-either: a loop is supposed to come back.) `crates/ltxv/tests/motion_real.rs`.
+either: a loop is supposed to come back.) `crates/ltxv/tests/it/motion_real.rs`.
 
 **Then localize by neighbouring request, not by reading the port.** Sixteen
 real-weight runs, one variable each, peak excursion, seed 42:

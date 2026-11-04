@@ -44,7 +44,7 @@
 // of a missing synchronization barrier somewhere in how many large dispatches
 // queued in one submit get scheduled, not of an index formula that is simply
 // wrong. Narrowing this dispatch's width changed the failure rate but did not
-// eliminate it (`crates/sam1/tests/wgpu_block_count_corruption.rs` measured
+// eliminate it (`crates/sam1/tests/it/wgpu_block_count_corruption.rs` measured
 // 2/5 clean runs after this change landed). `backend-cpu` has no per-dimension
 // dispatch-count limit, never took the tiled path, and has never shown the
 // defect in any run - consistent with, but not sole proof of, a wgpu/driver

@@ -102,6 +102,6 @@ first. Python: `BrainDBus.cancel(job)`.
 - **No inference on the bus thread**: a dedicated worker thread owns the registry and
   runs the blocking `Registry::run`; D-Bus methods only validate, enqueue, and reply.
   One worker => jobs serialize, which is correct for a single-GPU engine.
-- **Automated test**: `crates/dbus/tests/roundtrip.rs` (run under `dbus-run-session
+- **Automated test**: `crates/dbus/tests/it/roundtrip.rs` (run under `dbus-run-session
   -- cargo test -p brain-dbus --test roundtrip`) round-trips a result
   and an input both through fds.

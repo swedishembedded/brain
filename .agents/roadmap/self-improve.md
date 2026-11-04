@@ -1020,13 +1020,13 @@ across the resume boundary; each cycle is kept deliberately short (8 steps)
 so cycle 1 alone does not already reach this tiny task's loss floor, which
 is where the norm stops moving monotonically.
 
-**Verified**: `crates/qwen3/tests/lora_resume_gate.rs` (new) -
+**Verified**: `crates/qwen3/tests/it/lora_resume_gate.rs` (new) -
 `lora_resume_continues_the_same_adapter_instead_of_resetting_it` (cycle 1
 init `3.0993` -> 30-batch eval `2.9287`, control init `3.0993` matching
 cycle 1's initial loss exactly, cycle 2 resumed init `2.9287` -> 30-batch
 eval `2.9178`, `‖B·A‖` `0.294 -> 0.420`) and
 `resume_with_mismatched_lora_rank_panics` - `cargo test -p brain-qwen3
---test lora_resume_gate` 2 passed. `crates/qwen35/tests/lora_resume_gate.rs`
+--test lora_resume_gate` 2 passed. `crates/qwen35/tests/it/lora_resume_gate.rs`
 (new), the same gate for the hybrid GDN/attention decoder (cycle 1 init
 `3.2180` -> 30-batch eval `2.3981`, control matching exactly, cycle 2
 resumed -> 30-batch eval `2.3411`, `‖B·A‖` `3.051 -> 8.031`) - `cargo test

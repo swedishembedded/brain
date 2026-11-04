@@ -13,7 +13,7 @@ first row of a window is almost never a legal offset.
 What the kernels do instead. Every buffer is bound whole, and the window
 (`row0`, `rows`) travels as a uniform parameter that the kernel adds to its
 row index. `model::dispatch::lora_bank_rows` documents this at its binding
-site, and `crates/model/tests/lora_bank_rows.rs` exercises a window that
+site, and `crates/model/tests/it/lora_bank_rows.rs` exercises a window that
 starts inside a larger batch.
 
 Consequence for callers. A per-row index that must be addressable from any

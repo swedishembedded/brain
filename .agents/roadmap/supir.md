@@ -480,7 +480,7 @@ the shape of the work:
   storage with a dequantizing GEMM - the shape `crates/flux1`/`crates/s3dit`
   already have - threaded through `vae::blocks::Builder`, the shared block
   recorder ~10 architectures depend on. Both int8 full-forward tests in
-  `crates/supir/tests/parity.rs` are gated behind `BRAIN_SUPIR_ALLOW_FULL_MEMORY=1`
+  `crates/supir/tests/it/parity.rs` are gated behind `BRAIN_SUPIR_ALLOW_FULL_MEMORY=1`
   (same as the fp32 sibling) and skip themselves honestly rather than claim
   a false pass. Filed as Phase 8 (optimisation) or a dedicated follow-up.
 - Batch > 1 (the SDXL graph is recorded at batch 1; CFG is two `run()` calls).

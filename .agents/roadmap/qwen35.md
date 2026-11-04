@@ -117,7 +117,7 @@ structurally and never parity-claimed here.
   decoder layer reusing `layer_gqa_fwd`/`mlp_fwd` unchanged via weight-name-prefix
   parameterization, unlike glmdsa's position-wise-only MTP block). Gated by
   `gradcheck::check_qwen35_mtp` (every `mtp.*` tensor, seed 8, zero tolerance
-  failures) plus `crates/qwen35/tests/mtp_convergence.rs` (a real training loop
+  failures) plus `crates/qwen35/tests/it/mtp_convergence.rs` (a real training loop
   still reduces the combined loss; zeroing `mtp.fc_e`/`mtp.fc_h` moves the loss,
   proving the head is load-bearing rather than merely wired). Structural only -
   no reference oracle available here, see below.
@@ -263,7 +263,7 @@ structurally and never parity-claimed here.
   int8) local; `GdnLayerActs`/`GqaLayerActs` in both crates slimmed to a thin
   wrapper around the hoisted `GdnMixerActs`/`GqaMixerActs` plus the one
   locally-needed buffer (`gated`/`ctx_gated`). Gated by new
-  `crates/model/tests/gdn_mixer_equivalence.rs`: since `model` cannot depend
+  `crates/model/tests/it/gdn_mixer_equivalence.rs`: since `model` cannot depend
   on either downstream crate, it proves the real cross-crate risk instead -
   the same shared function resolved through two INDEPENDENTLY, DIFFERENTLY
   ORDERED pipeline registrations (mirroring the fact that `qwen35`'s and
@@ -283,7 +283,7 @@ structurally and never parity-claimed here.
   shard via `checkpoint::mmap::MmapSafetensors`, dequantizing only that
   layer's own FP8 tensors (never the whole checkpoint, never a full-model
   `HashMap` - ~108 GB dequantized, impossible on this box regardless of
-  streaming). `crates/qwen35/tests/real_weight_streaming.rs` (4 `#[ignore]`d
+  streaming). `crates/qwen35/tests/it/real_weight_streaming.rs` (4 `#[ignore]`d
   tests, self-skip loudly without `BRAIN_QWEN35_DIR`) drives the
   already-hoisted `model::gdn_mixer`/`model::gqa_mixer` (M12) directly on a
   standalone `Gpu` - never constructs a `Qwen35` (that path still assumes
@@ -397,7 +397,7 @@ structurally and never parity-claimed here.
     below) - `int8_real_weight_sanity.rs`'s 2 tests self-skip (`ignored`)
     without `BRAIN_QWEN35_DIR`, `real_weight_streaming.rs`'s pre-existing 4
     likewise.
-  - `crates/qwen35/tests/model_i8_smoke.rs` (fresh tiny-init weights, no
+  - `crates/qwen35/tests/it/model_i8_smoke.rs` (fresh tiny-init weights, no
     real checkpoint needed) - `--nocapture` output:
     `tiny_cfg_clears_the_int8_packing_bar` ok;
     `int8_model_excludes_quantized_names_from_the_fp32_param_store` ok;
@@ -408,7 +408,7 @@ structurally and never parity-claimed here.
     to fp32, so this is a same-arithmetic sanity check, not a quantization
     check): cosine=1.000000000 rel_l2=0.000000000;
     `int8_forward_covers_the_mtp_head_when_mtp_is_enabled`: cosine=0.999999999.
-  - `crates/qwen35/tests/int8_real_weight_sanity.rs`, run against the REAL
+  - `crates/qwen35/tests/it/int8_real_weight_sanity.rs`, run against the REAL
     `Qwen/Qwen3.8-27B-FP8` checkpoint (`BRAIN_QWEN35_DIR=[path/to/qwen3.8]
     cargo test -p brain-qwen35 --test
     int8_real_weight_sanity -- --ignored --nocapture`): both
@@ -512,7 +512,7 @@ structurally and never parity-claimed here.
     WEIGHTS still transforms this input exactly as it would a real embedded
     token row - what this milestone's gates actually check.
   **Verification, exact test names and measured numbers:**
-  - `crates/qwen35/tests/streaming_forward.rs`, run against the real
+  - `crates/qwen35/tests/it/streaming_forward.rs`, run against the real
     checkpoint (`BRAIN_QWEN35_DIR=[path/to/qwen3.8] cargo
     test -p brain-qwen35 --test streaming_forward -- --ignored --nocapture
     --test-threads=1`), all 4 pass in 4488.19 s total (dominated by the full
@@ -769,7 +769,7 @@ byte-for-byte unchanged. No "hot" resident-model cache for the streaming
 path - every call re-streams every layer regardless, so there is nothing
 to keep warm.
 
-**Real generated transcripts** (`crates/qwen35/tests/generate_streaming.rs`,
+**Real generated transcripts** (`crates/qwen35/tests/it/generate_streaming.rs`,
 `#[ignore]`d, `BRAIN_QWEN35_DIR`-gated, run with `BRAIN_QWEN35_DIR=
 [path/to/qwen3.8] cargo test -p brain-qwen35 --test
 generate_streaming -- --ignored --nocapture --test-threads=1`), prompt
@@ -879,7 +879,7 @@ synthetic weights since M7.
   + `import_mtp_missing_fc_weight_errors_by_name` (fast, synthetic fixture,
   real on-disk safetensors via `checkpoint::mmap::MmapSafetensors`, no real
   checkpoint needed) plus a new `#[ignore]`d, `BRAIN_QWEN35_DIR`-gated
-  `crates/qwen35/tests/import_mtp_real_weight.rs`.
+  `crates/qwen35/tests/it/import_mtp_real_weight.rs`.
   **Real-checkpoint result** (`mtp.safetensors`, `BRAIN_QWEN35_DIR=
   [path/to/qwen3.8] cargo test -p brain-qwen35 --test
   import_mtp_real_weight -- --ignored --nocapture`): all 16 expected
@@ -941,7 +941,7 @@ synthetic weights since M7.
   norm + project to vocab logits" for either path to possibly diverge on),
   not just by argument.
 
-**Phase 4 gates** (`crates/qwen35/tests/generate_streaming_mtp.rs`,
+**Phase 4 gates** (`crates/qwen35/tests/it/generate_streaming_mtp.rs`,
 `#[ignore]`d, `BRAIN_QWEN35_DIR`-gated, `BRAIN_QWEN35_DIR=
 [path/to/qwen3.8] cargo test -p brain-qwen35 --test
 generate_streaming_mtp -- --ignored --nocapture --test-threads=1`), same
@@ -1083,7 +1083,7 @@ property; documented as a deliberate, judgment-call deviation, not
 silently done.
 
 **Step 1 - tiny-scale equivalence gate (the hard correctness gate).**
-`crates/qwen35/tests/stream_train_equivalence.rs`, fast, NOT `#[ignore]`d
+`crates/qwen35/tests/it/stream_train_equivalence.rs`, fast, NOT `#[ignore]`d
 (part of the default `cargo test -p brain-qwen35` run), `Qwen35Config::
 tiny()` scale (4 layers, 3 GDN + 1 GQA), CPU JIT backend for BOTH trainers
 (no cross-backend floating-point-order noise), `window_budget=2` (forces a
@@ -1139,7 +1139,7 @@ sibling of this repo, matching M15's own `resources/qwen3.8/` convention),
 not inside this git repo.
 
 **Step 3 - a real short streamed LoRA fine-tune on the real checkpoint.**
-`crates/qwen35/tests/stream_train_real.rs` (`#[ignore]`d, `BRAIN_QWEN35_DIR`-
+`crates/qwen35/tests/it/stream_train_real.rs` (`#[ignore]`d, `BRAIN_QWEN35_DIR`-
 gated) is the checked-in gate; a new standalone binary,
 `crates/qwen35/src/bin/stream_train_step.rs`, was ALSO built and is what
 this milestone's own real numbers below came from - the interactive
@@ -1389,7 +1389,7 @@ qwen35-stream-latency-cpu22-gpu0.json` via `brain perf gate <candidate>
 
 **A real, measured performance fix found investigating that number.** The
 18-minute figure prompted profiling ONE real layer's own load breakdown
-(`crates/qwen35/tests/stream_profile.rs`, new, `#[ignore]`d, real checkpoint):
+(`crates/qwen35/tests/it/stream_profile.rs`, new, `#[ignore]`d, real checkpoint):
 mmap open ~1-5 ms, `import_layer` (host FP8 dequant) ~11-23 s, quantize+GPU
 upload ~4-7 s, GPU forward compute ~0.05-1 s - `import_layer` was ~70-83% of
 a real layer's ~16-28 s total, utterly dwarfing GPU compute (consistent with,
@@ -1405,7 +1405,7 @@ new `checkpoint::safetensors::decode_e4m3_bytes`, native builds route through
 `backend_cpu::par::each_mut` (the same pool/policy `dequant_block128`/
 `quantize_weight` already use), wasm32 keeps the sequential loop (no thread
 pool there). Validated with an isolated, disk-I/O-free in-memory
-micro-benchmark (`crates/checkpoint/tests/e4m3_decode_bench.rs`, new,
+micro-benchmark (`crates/checkpoint/tests/it/e4m3_decode_bench.rs`, new,
 `#[ignore]`d, no checkpoint needed): **10.58x speedup** (1909 ms -> 180 ms,
 380 MB synthetic buffer, 22 cores), output verified bit-identical (via
 `.to_bits()`, not `==`, since E4M3's one reserved NaN encoding makes a plain
@@ -1528,11 +1528,11 @@ themselves; see lesson 64 in `.agents/knowledge/`.
 **Status, plainly: the PLUMBING works and is gated green, the LOADING is now
 proven correct against an external oracle and gated green, and the OUTPUT is
 still wrong and is gated RED.** The first two gates live in
-`crates/qwen35/tests/gguf_resident_real.rs`
+`crates/qwen35/tests/it/gguf_resident_real.rs`
 (`a_real_two_card_load_runs_end_to_end` and
 `the_two_card_stack_continues_a_factual_prompt_correctly`), kept separate so
 a reader can tell which question is settled; the loading gate is
-`crates/qwen35/tests/gguf_reference_parity_real.rs` (see "An external oracle
+`crates/qwen35/tests/it/gguf_reference_parity_real.rs` (see "An external oracle
 now exists" below).
 
 Composed, not written: `checkpoint::gguf::MmapGguf` (already a
@@ -1809,8 +1809,8 @@ milestone ran the decisive experiment M21 named but could not: a direct,
 per-tensor diff against the Qwen3.8-27B **FP8 safetensors** checkpoint - the
 KNOWN-GOOD side, since the same INT8 tier over 64 real layers already
 produced `" Paris."` from FP8 (M16) - refetched once disk space and a working
-HF login made that possible (`crates/qwen35/tests/gguf_vs_fp8_weights_real.rs`,
-a permanent diagnostic; `crates/qwen35/tests/gguf_vs_fp8_permutation_search.rs`,
+HF login made that possible (`crates/qwen35/tests/it/gguf_vs_fp8_weights_real.rs`,
+a permanent diagnostic; `crates/qwen35/tests/it/gguf_vs_fp8_permutation_search.rs`,
 the exploratory harness that found and confirmed the exact transform).
 
 **The finding.** llama.cpp's GGUF conversion stores EVERY GDN leaf indexed by
@@ -1918,11 +1918,11 @@ benchmark found `matmul_q4_gemv_reg` losing to the plain `matmul_q4_gemv` at
 m=1..16 - the same occupancy pathology `matmul_i8_gemv_reg` was built to
 fix, appearing to recur for Q4. Re-measured at qwen35's OWN real decode
 shapes with the correct per-`m` `MREG`-bucketed build
-(`crates/model/tests/matmul_q4_speed_bench.rs::
+(`crates/model/tests/it/matmul_q4_speed_bench.rs::
 gemv_vs_gemv_reg_at_qwen35_decode_shapes`): `_reg` won at every one of the
 five shapes, 1.55-1.88x. Wired into `gpu_core::upgrade`'s transparent seam,
 gated by a fresh bit-identity + integer-oracle test
-(`crates/gpu-core/tests/q4_gemv_reg_upgrade.rs`) mirroring the I8 row's own.
+(`crates/gpu-core/tests/it/q4_gemv_reg_upgrade.rs`) mirroring the I8 row's own.
 
 **The wiring.** `TierPolicy` (`model::ops`) - a per-leaf substring-matched
 `Dtype`, generalizing the single `Dtype` `qwen3::Qwen::new_shard_dt` takes -
@@ -1947,7 +1947,7 @@ artifact's `target` field.
 | Policy C (Q4 MLP, F32 GDN gates) | **1** | 15.79 GiB | 10.89 / 12.44 | **1.46-1.65x** |
 
 Both real-`generate` numbers come from
-`crates/qwen35/tests/gguf_resident_real.rs::
+`crates/qwen35/tests/it/gguf_resident_real.rs::
 the_q4_tier_continues_the_same_factual_prompt_on_one_card`, which ALSO
 checks output correctness: both policies produce the byte-identical
 `" Paris. Paris is the largest city in"` the I8 tier does. Policy C - the
@@ -2079,7 +2079,7 @@ M26 for why the drain is worth that.)
 **Correctness.** Two new gates, both spec-level, and the bounds in both are
 measured against deliberately broken implementations rather than picked:
 
-* `crates/qwen35/tests/chunked_prefill.rs` -
+* `crates/qwen35/tests/it/chunked_prefill.rs` -
   `chunked_prefill_matches_token_by_token_replay_{cpu,default_backend}` and
   `whole_prompt_single_chunk_matches_token_by_token_replay`. A 14-token prompt
   at chunk 4/8/16, then three further single-token `step` calls on each path:
@@ -2090,7 +2090,7 @@ measured against deliberately broken implementations rather than picked:
   1.4e-3. The bound is 1e-5. Note the third one: `decode_step.rs`'s own 2e-3
   logits bound would have PASSED a wrong-RoPE-position prefill, which is why
   this file does not reuse that number.
-* `crates/model/tests/gdn_mixer_stream.rs` -
+* `crates/model/tests/it/gdn_mixer_stream.rs` -
   `threading_the_stream_state_across_rounds_matches_the_whole_sequence_forward`.
   Rounds of 3+5 (with different internal chunk sizes) against one 8-row
   forward, comparing the mixer's own output. Correct: 2.0e-7. Dropped
@@ -2218,7 +2218,7 @@ stages stay built at `b = t = 1`.
   to seed itself with zeros instead of `input_override` measures 1.86. Stage 1
   is fed a deliberately WRONG `token_id` throughout, so "it used the seam and
   not the token" is a checked fact rather than an assumption.
-* `crates/qwen35/tests/gguf_resident_real.rs::prefill_throughput_at_a_real_long_context`
+* `crates/qwen35/tests/it/gguf_resident_real.rs::prefill_throughput_at_a_real_long_context`
   \- the measurement above, and a real-weight correctness gate in the same
   run: the 1731-token prompt ends on M23's factual cue, and the answer must
   still be Paris after 14 rounds of chunked prefill. It is (`" Paris. It
@@ -2310,7 +2310,7 @@ checkpoint stays unscaled until that is wired too; the HF-style
 Regression proof that an unconfigured checkpoint (every checkpoint that
 exists today) is untouched: `golden_parity.rs`'s real-`transformers`
 reference comparison still passes at the same tolerance, and the new
-`crates/qwen35/tests/yarn_rope_scaling.rs` adds a config with
+`crates/qwen35/tests/it/yarn_rope_scaling.rs` adds a config with
 `rope_scaling: Some(YarnConfig::new(1.0, ..))` - the YaRN code path is
 genuinely exercised, just requesting no real extension - and asserts its
 `logits_all` output is bit-for-bit identical to `rope_scaling: None`. The
@@ -2332,7 +2332,7 @@ answers it with a real port of
 `Qwen35GgufInstance::generate_speculative` with its contract untouched.
 
 **Measured, 2x Tesla P40, both checkpoints Q8_0 served INT8, greedy, one load
-per test** (`crates/qwen35/tests/dflash2_real.rs`):
+per test** (`crates/qwen35/tests/it/dflash2_real.rs`):
 
 | drafter | free-form tok/s | vs plain | acc/round | repetition tok/s | vs plain | acc/round |
 |---|---:|---:|---:|---:|---:|---:|
@@ -2744,11 +2744,11 @@ the fused head_dim-256 prefill gains bf16/int8 variants by template
 | int8 |  4.06 GiB ( 4.36 GB) | 0.15 GiB | **15** |
 
 **Accuracy.** Gated three ways, each against a bound that means something:
-* per kernel (`crates/model/tests/kv_tier.rs`, CPU and GPU): what the device
+* per kernel (`crates/model/tests/it/kv_tier.rs`, CPU and GPU): what the device
   stored is within the format's rounding bound (bf16 `2^-8` relative, int8
   `scale/2`), and every read kernel equals the f32 kernel over the plane's own
   decoded values (decode scores/apply 1e-4, fused prefill bit-identical here);
-* through the model at random weights (`crates/qwen35/tests/kv_tier.rs`, chunked
+* through the model at random weights (`crates/qwen35/tests/it/kv_tier.rs`, chunked
   prefill over two rounds then batched decode of two sequences in one pool):
   logits rel-L2 vs f32 at the real attention dims bf16 2.1e-4, int8 8.6e-4;
 * on the real checkpoint (`gguf_kv_tier_real.rs`, 1795-token prompt, 24 forced
@@ -2878,7 +2878,7 @@ Two changes make it a measured quantity:
   step, and the training record gains additive `step_work` (one object per
   step) and `work` (the totals and the two rates) blocks. The evaluation a
   step is due and the run's initial loss probe are not part of a step's
-  phases. `crates/sdk/tests/chat_finetune_qwen35.rs` pins that every step
+  phases. `crates/sdk/tests/it/chat_finetune_qwen35.rs` pins that every step
   emits the fields, that the phases partition the step, and that the totals
   are the sum of the steps. The record a real-corpus run writes carries the
   s/step, useful tok/s and padded tok/s an A/B is read from.
@@ -2893,7 +2893,7 @@ Two changes make it a measured quantity:
   `b` blocks of `run` positions is what the packed rows read, and a later
   full-length batch puts the `t`-row table back. One-row builds (the 27B
   recipe) never rewrite it, so their behaviour is unchanged.
-  `crates/qwen35/tests/lora_head.rs::a_multi_row_batch_runs_only_as_far_as_its_longest_row_needs`
+  `crates/qwen35/tests/it/lora_head.rs::a_multi_row_batch_runs_only_as_far_as_its_longest_row_needs`
   holds it exact: two rows supervised to 100 and 140 tokens of a 256-token
   block run 192 tokens each with the same loss and the same every-gradient as
   a build sized to 192 whose tails are padding, under the default and the

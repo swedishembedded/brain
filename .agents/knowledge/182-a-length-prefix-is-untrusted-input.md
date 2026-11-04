@@ -20,7 +20,7 @@ reader calls before it sizes anything by the prefix. A length is refused
 with `HeaderLenError` (file, claimed length, file size) if it is longer than
 what follows the prefix in the file, or longer than `MAX_HEADER_BYTES`
 (100 MB, the cap the format's reference implementation enforces).
-`crates/checkpoint/tests/corrupt_header.rs` drives every reader with
+`crates/checkpoint/tests/it/corrupt_header.rs` drives every reader with
 `u64::MAX`, `file_size + 1` and `cap + 1`.
 
 The same audit found that `toymoe`'s inference loader parsed a pre-safetensors

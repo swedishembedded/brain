@@ -39,6 +39,6 @@ char, and emits it as raw UTF-8 otherwise, whether or not it is an added
 token. coder v1 registers `ü` as an added token, so `tokenizers` decodes
 "über" to `"\u{FFFD}ber"`, and brain now does too.
 
-`crates/data/tests/deepseek_tokenizer_parity.rs` pins all 13 DeepSeek text
+`crates/data/tests/it/deepseek_tokenizer_parity.rs` pins all 13 DeepSeek text
 tokenizers, encode and decode, to the library's output on a corpus chosen to
 separate the four shapes.

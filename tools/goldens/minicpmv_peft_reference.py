@@ -9,7 +9,7 @@
 """Golden for `crates/minicpmv`'s PEFT export: what `transformers` computes
 with brain's exported adapter applied to the real `openbmb/MiniCPM-V-4.6`.
 
-`crates/minicpmv/tests/peft_export.rs` writes a deterministic tune's PEFT
+`crates/minicpmv/tests/it/peft_export.rs` writes a deterministic tune's PEFT
 export to `<out>/adapter/` (decoder LoRA, tower LoRA at a different rank and
 scale, the connector trained in full). This script applies it to the HF model
 in fp32 on CPU and records, for one synthetic image and question:

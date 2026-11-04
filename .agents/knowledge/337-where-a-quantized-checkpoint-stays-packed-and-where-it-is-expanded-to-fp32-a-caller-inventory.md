@@ -57,7 +57,7 @@ at a time on the host as f32, then uploaded at a chosen tier); **W** whole-model
   F32 tensors are copied word for word in bounded writes (`UPLOAD_CHUNK_WORDS`).
 - `gguf::kquant::try_kq_rect` builds the canonical K-quant device layout (host relayout, no
   arithmetic on weights) and `Weight::KQuant` executes it, but NO model loader calls it: it is used
-  by `crates/gguf/tests/kquant.rs`, `model/tests/matmul_kq.rs` and `ops_kquant.rs` only. The
+  by `crates/gguf/tests/it/kquant.rs`, `model/tests/matmul_kq.rs` and `ops_kquant.rs` only. The
   comments in `qwen3`, `qwen35`, `qwen35moe` model constructors say the same ("this crate never
   builds a `Weight::KQuant`"). Q4_K/Q5_K/Q6_K GGUF tensors therefore reach the device only by
   decode to f32 and requantize.

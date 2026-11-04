@@ -251,7 +251,7 @@ average, 2-2.5 s per view. Host SSIM is ~150 ms per 1024x768 view.
 - [x] Crash at step ~900 of the default run (69.5M instances, 4.4 GiB of
       gradient records against a 4095 MiB "binding"): the CUDA byte binding
       limit stood in for a word buffer's; knowledge 427,
-      `crates/splat/tests/s29_large_frame.rs`.
+      `crates/splat/tests/it/s29_large_frame.rs`.
 - [x] A truck scene end to end (stopgap run: `photo_holdout`, 489x273,
       3.0M gaussians, 1500 iterations, 31 of 251 views held out): train
       21.07 dB / SSIM 0.8024, HELD-OUT raw 20.02 dB / SSIM 0.7719 (LPIPS not

@@ -9,7 +9,7 @@ byte-fallback BPE tokenizer unchanged. This script runs the real
 `tokenizers` library's `Tokenizer.encode` (the same engine
 `LlamaTokenizerFast` wraps) over `TOKENIZER_STRINGS` and prints a Rust
 `&[(&str, &[u32])]` literal ready to paste into
-`crates/data/tests/llama_bpe_parity.rs`'s `CASES` constant - the same
+`crates/data/tests/it/llama_bpe_parity.rs`'s `CASES` constant - the same
 "pin the ids the real tokenizer produced" gate `clip_dump_reference.py`
 uses for `data::clip_bpe`.
 
@@ -32,7 +32,7 @@ the identical tokenizer). Requires the `tokenizers` package
 import argparse
 import json
 
-# Mirrors `strings()` in `crates/data/tests/llama_bpe_parity.rs` - the two
+# Mirrors `strings()` in `crates/data/tests/it/llama_bpe_parity.rs` - the two
 # copies must be edited together, or a drift in one side goes undetected.
 TOKENIZER_STRINGS = [
     "Describe this image and its style in a very detailed manner.",
