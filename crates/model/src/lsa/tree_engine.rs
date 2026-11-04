@@ -125,6 +125,18 @@ impl TreeEngine {
     /// underlying pages changed (a truncated or diverged sequence) is let
     /// go, a missing one reused from another sequence or built.
     pub fn grow(&mut self, g: &Gpu, pool: &IndexPool, table: &mut BlockTable, growth: &Growth) -> Result<(), String> {
+        // The bucket sums of every level-1 page this growth builds, read back
+        // together: a readback waits for the device, one per page stalled it
+        // once per index page.
+        let want = growth.made[0] / self.geom.nodes_per_page(1) as usize;
+        let mut needed: Vec<u32> = (table.node_pages(1).len().min(want)..want)
+            .map(|p| self.key(table, 1, p))
+            .filter(|key| !self.levels[0].page_of.contains_key(key))
+            .flat_map(|(_, under)| under)
+            .collect();
+        needed.sort_unstable();
+        needed.dedup();
+        self.read_bucket_sums(g, pool, &needed)?;
         for level in 1..=self.geom.tree.top_level() {
             let want = growth.made[level - 1] / self.geom.nodes_per_page(level) as usize;
             // Keep the leading pages whose key still matches.
@@ -193,15 +205,7 @@ impl TreeEngine {
         let first = p * block;
         let mut child: Vec<&[f32]> = Vec::with_capacity(under.len());
         if level == 1 {
-            for &ip in under {
-                if !self.bucket_sums.contains_key(&ip) {
-                    let sums = pool.sums.as_ref().ok_or("LSA tree: the index keeps no bucket sums")?;
-                    let words = self.slots as usize * per * d;
-                    let mut host = vec![0f32; words];
-                    g.read_into(sums, u64::from(ip) * words as u64, &mut host);
-                    self.bucket_sums.insert(ip, host);
-                }
-            }
+            self.read_bucket_sums(g, pool, under)?;
             child.extend(under.iter().map(|ip| &self.bucket_sums[ip][..]));
         } else {
             let below = &self.levels[level - 2].sums;
@@ -231,6 +235,33 @@ impl TreeEngine {
             sums[slot * npp * d..][..npp * d].copy_from_slice(&node.sums);
         }
         self.levels[level - 1].sums.insert(page, sums);
+        Ok(())
+    }
+
+    /// Read back the bucket sums of the index `pages` not held yet, each run
+    /// of consecutive pages in one read.
+    fn read_bucket_sums(&mut self, g: &Gpu, pool: &IndexPool, pages: &[u32]) -> Result<(), String> {
+        let mut missing: Vec<u32> = pages.iter().copied().filter(|p| !self.bucket_sums.contains_key(p)).collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        missing.sort_unstable();
+        missing.dedup();
+        let sums = pool.sums.as_ref().ok_or("LSA tree: the index keeps no bucket sums")?;
+        let words = self.slots as usize * self.geom.cfg.buckets_per_block() * self.geom.cfg.index_dim;
+        let mut start = 0;
+        while start < missing.len() {
+            let mut end = start + 1;
+            while end < missing.len() && missing[end] == missing[end - 1] + 1 {
+                end += 1;
+            }
+            let mut host = vec![0f32; (end - start) * words];
+            g.read_into(sums, u64::from(missing[start]) * words as u64, &mut host);
+            for (i, chunk) in host.chunks_exact(words).enumerate() {
+                self.bucket_sums.insert(missing[start + i], chunk.to_vec());
+            }
+            start = end;
+        }
         Ok(())
     }
 
