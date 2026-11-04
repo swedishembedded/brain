@@ -215,13 +215,18 @@ impl TreeEngine {
         // Each slot's block of rows, pairing them into node buckets.
         let npp = block / size;
         let mut sums = vec![0f32; self.slots as usize * npp * d];
-        for slot in 0..self.slots as usize {
+        // The layers pair independently: in parallel, then uploaded in order.
+        let mut pages: Vec<Option<Result<super::tree::NodePage, String>>> = vec![None; self.slots as usize];
+        backend_cpu::par::chunks_mut(&mut pages, 1, |slot, out| {
             let mut rows = Vec::with_capacity(block * d);
             for r in first..first + block {
                 let (pg, off) = (r / per - first / per, r % per);
                 rows.extend_from_slice(&child[pg][(slot * per + off) * d..][..d]);
             }
-            let node = node_page(&rows, d, size, first as u32)?;
+            out[0] = Some(node_page(&rows, d, size, first as u32));
+        });
+        for (slot, node) in pages.into_iter().enumerate() {
+            let node = node.expect("every slot was paired")?;
             self.nodes.write(g, slot as u32, level, page, &node.centroids, &node.children)?;
             sums[slot * npp * d..][..npp * d].copy_from_slice(&node.sums);
         }
