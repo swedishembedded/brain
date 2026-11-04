@@ -11,9 +11,8 @@
 //! declares (`ChatTrainer::LORA_BASES`) really trains through `train_lora`, here under a
 //! distillation visitor, and a format it does not declare is refused by name before the
 //! checkpoint is read. The test logic is generic over the trainer; a family adds a base writer.
-//! A base can also be mixed, each linear at its own tier (`TierPolicy` rules): a family that holds
-//! one trains over it with every leaf at its tier, and one that holds a uniform base only refuses it
-//! by name.
+//! A base can also be mixed, each linear at its own tier (`TierPolicy` rules): a family trains over
+//! it with every leaf at its tier.
 
 mod grpo_common;
 
@@ -72,19 +71,6 @@ fn mixed() -> TierPolicy {
     TierPolicy::uniform(Dtype::F32).with(&["attn"], Dtype::I8).with(&["mlp"], Dtype::NF4)
 }
 
-fn mixed_base_is_refused_by_name<Trainer: ChatTrainer>(write_base: impl Fn(&Path)) {
-    let dir = tempfile::tempdir().expect("a scratch directory");
-    let base = dir.path().join("base.safetensors");
-    write_base(&base);
-    let opts = FitOpts { steps: 1, batch_size: 1, block_size: T as u32, lr: 1e-2, seed: data::rng::random_seed(), ..Default::default() };
-    let mut fit = DistillFit::new(DistillConfig { seq_len: T }, vec![example()], &opts, FitControl::default());
-    let declared = Trainer::LORA_BASES.bases;
-    assert!(declared.len() >= 2, "{}: a mixed base needs two declared tiers", Trainer::LORA_BASES.model);
-    let mixed_declared = TierPolicy::uniform(declared[0]).with(&["mlp"], declared[declared.len() - 1]);
-    let err = Trainer::train_lora(&base, &lora(&mixed_declared), &opts, &mut fit).err().expect("a mixed base is refused");
-    assert_eq!(err.kind(), std::io::ErrorKind::Unsupported, "{err}");
-    assert!(err.to_string().contains(Trainer::LORA_BASES.model) && err.to_string().contains("mixed"), "{err}");
-}
 
 #[test]
 fn qwen3_trains_over_a_mixed_base_with_every_leaf_at_its_tier() {
@@ -123,8 +109,28 @@ fn qwen35_trains_over_every_base_it_declares() {
 }
 
 #[test]
-fn qwen35_refuses_a_mixed_base_by_name() {
-    mixed_base_is_refused_by_name::<qwen35::finetune::Qwen35Trainer>(write_qwen35);
+fn qwen35_trains_over_a_mixed_base_with_every_leaf_at_its_tier() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let base = dir.path().join("base.safetensors");
+    write_qwen35(&base);
+    let opts = FitOpts { steps: 2, batch_size: 1, block_size: T as u32, lr: 1e-2, seed: data::rng::random_seed(), ..Default::default() };
+    let mixed = TierPolicy::uniform(Dtype::F32).with(&["mlp."], Dtype::NF4).with(&["self_attn."], Dtype::BF16);
+    let mut fit = DistillFit::new(DistillConfig { seq_len: T }, vec![example()], &opts, FitControl::default());
+    let (report, m) = qwen35::finetune::Qwen35Trainer::train_lora(&base, &lora(&mixed), &opts, &mut fit).expect("qwen35 holds a mixed base");
+    assert!(report.final_loss.is_some_and(f32::is_finite), "{report:?}");
+    let cfg = qwen35::config::Qwen35Config::tiny_i8();
+    let mut seen = (false, false);
+    for l in 0..cfg.n_layers {
+        if let Some(t) = m.linear_dtype(&format!("blocks.{l}.mlp.up.weight")) {
+            assert_eq!(t, Dtype::NF4, "blocks.{l}.mlp.up.weight");
+            seen.0 = true;
+        }
+        if let Some(t) = m.linear_dtype(&format!("blocks.{l}.self_attn.q_proj.weight")) {
+            assert_eq!(t, Dtype::BF16, "blocks.{l}.self_attn.q_proj.weight");
+            seen.1 = true;
+        }
+    }
+    assert!(seen.0 && seen.1, "the tiny model has MLP and full-attention linears held as asked");
 }
 
 #[test]

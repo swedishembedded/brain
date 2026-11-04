@@ -599,7 +599,7 @@ fn run_finetune(ft: &FinetuneArgs) -> std::io::Result<(f32, f32)> {
     if ft.base_dtype == Dtype::F32 && !base.is_dir() {
         qwen35::finetune::finetune(&ft.base, data, &ft.opts, &ft.mode, &ft.out)
     } else {
-        qwen35::finetune::finetune_streamed_named(base, data, &ft.opts, &ft.mode, &ft.out, false, &qwen35::finetune::StreamedRun { dtype: ft.base_dtype, recompute: ft.recompute, long: ft.long }, &ft.naming)
+        qwen35::finetune::finetune_streamed_named(base, data, &ft.opts, &ft.mode, &ft.out, false, &qwen35::finetune::StreamedRun::uniform(ft.base_dtype, ft.recompute, ft.long), &ft.naming)
     }
 }
 

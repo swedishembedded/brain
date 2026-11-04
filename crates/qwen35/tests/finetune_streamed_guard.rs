@@ -17,7 +17,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 
 fn nf4_recompute() -> StreamedRun {
-    StreamedRun { dtype: Dtype::NF4, recompute: true, long: LongSeqOverrides::default() }
+    StreamedRun::uniform(Dtype::NF4, true, LongSeqOverrides::default())
 }
 
 fn opts(batch: u32, block: u32, accum: u32) -> model::FitOpts {

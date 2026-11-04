@@ -276,7 +276,7 @@ impl ChatFamily {
                 Ok((report, TrainedLora::Qwen3(trained), Vec::new()))
             }
             ChatFamily::Qwen35(dtype) => {
-                let run = qwen35::finetune::StreamedRun { dtype: *dtype, recompute: qwen35_recompute(*dtype, opts.precision.activations)?, long: qwen35::finetune::LongSeqOverrides::default() };
+                let run = qwen35::finetune::StreamedRun::uniform(*dtype, qwen35_recompute(*dtype, opts.precision.activations)?, qwen35::finetune::LongSeqOverrides::default());
                 let (report, trained, scored) = qwen35::finetune::finetune_lora_scored_tuned(open, prepared_dir, opts, rank, alpha, tuning, continue_from, &run, control, held_out)?;
                 Ok((report, TrainedLora::Qwen35(Box::new(trained)), scored))
             }
@@ -302,7 +302,7 @@ impl ChatFamily {
         match self {
             ChatFamily::Qwen3(_) => Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "policy-gradient training on rollouts is wired for qwen35 bases; this base is qwen3")),
             ChatFamily::Qwen35(dtype) => {
-                let run = qwen35::finetune::StreamedRun { dtype: *dtype, recompute: qwen35_recompute(*dtype, opts.precision.activations)?, long: qwen35::finetune::LongSeqOverrides::default() };
+                let run = qwen35::finetune::StreamedRun::uniform(*dtype, qwen35_recompute(*dtype, opts.precision.activations)?, qwen35::finetune::LongSeqOverrides::default());
                 let mut fit = rl::fit::PolicyGradientFit::new(prepared_dir, config, opts, control);
                 let (report, trained) = qwen35::finetune::finetune_lora_visited(open, prepared_dir, opts, rank, alpha, tuning, continue_from, &run, &mut fit)?;
                 Ok((report, TrainedLora::Qwen35(Box::new(trained)), fit.into_stats().unwrap_or_default()))
@@ -1528,7 +1528,7 @@ pub fn score_tokens_qwen35(base: &str, adapter: Option<&Path>, records: &Path, t
     let block = u32::try_from(longest).map_err(|_| Error::Backend(format!("the longest record is {longest} tokens, past the largest supported row")))?.max(MIN_BLOCK);
     let seed = resolve_seed(None, None)?;
     let opts = fit_opts(0, block, SCORE_LR, seed);
-    let run = qwen35::finetune::StreamedRun { dtype: qwen3::Dtype::BF16, recompute: true, long: qwen35::finetune::LongSeqOverrides::default() };
+    let run = qwen35::finetune::StreamedRun::uniform(qwen3::Dtype::BF16, true, qwen35::finetune::LongSeqOverrides::default());
     let scored = qwen35::finetune::score_records_streamed(&open, adapter, tuning, &read, &opts, &run).map_err(|e| Error::Backend(format!("scoring {}: {e}", records.display())))?;
     let positions = scored.positions;
     let sum: f64 = scored.records.iter().flatten().map(|s| s.logprob as f64).sum();

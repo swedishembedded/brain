@@ -47,7 +47,7 @@ fn run_as(base: &std::path::Path, data: &std::path::Path, out: &std::path::Path,
     // seed: the runs compared start from the same adapter
     let opts = model::FitOpts { steps: 10, batch_size: 1, block_size: 12, lr: 5e-2, min_lr: 5e-2, warmup: 0, checkpoint_secs: 0, eval_interval: 0, eval_batches: 0, seed: 3, ..Default::default() };
     let mode = Mode::Lora { rank: 2, alpha: 4.0, tuning: Default::default() };
-    finetune_streamed(base, data, &opts, &mode, out.to_str().unwrap(), false, &StreamedRun { dtype, recompute: dtype != Dtype::F32, long: LongSeqOverrides::default() })
+    finetune_streamed(base, data, &opts, &mode, out.to_str().unwrap(), false, &StreamedRun::uniform(dtype, dtype != Dtype::F32, LongSeqOverrides::default()))
 }
 
 #[test]

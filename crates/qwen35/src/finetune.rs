@@ -215,10 +215,11 @@ pub struct LongSeqOverrides {
 }
 
 /// How a streamed-base run holds and trains its frozen base.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct StreamedRun {
-    /// Device storage tier of the frozen base.
-    pub dtype: Dtype,
+    /// Device storage tier of each linear of the frozen base (one tier, or a
+    /// per-leaf policy such as a searched `--weight-format`).
+    pub base: TierPolicy,
     /// Rebuild each layer's activations in the backward instead of keeping them.
     pub recompute: bool,
     /// Explicit long-sequence settings.
@@ -281,11 +282,24 @@ pub fn adapter_card(base: &Path, naming: &AdapterNaming) -> Result<(String, Stri
 /// The trainer settings a streamed run builds with: the automatic
 /// long-sequence ones unless `run.long` names a value. Refuses settings the
 /// trainer cannot honour instead of building something else.
+impl StreamedRun {
+    /// A run holding the whole base at one tier.
+    pub fn uniform(dtype: Dtype, recompute: bool, long: LongSeqOverrides) -> StreamedRun {
+        StreamedRun { base: TierPolicy::uniform(dtype), recompute, long }
+    }
+
+    /// The widest tier the base holds: what the long-sequence settings and the
+    /// memory a run needs are sized by.
+    pub fn dtype(&self) -> Dtype {
+        self.base.dtypes().min_by_key(|t| t.per_word()).unwrap_or(Dtype::F32)
+    }
+}
+
 fn streamed_train_opts(run: &StreamedRun, batch: u32, block: u32, mtp: bool) -> Result<TrainOpts, String> {
     let auto = run.recompute && batch == 1 && block >= LONG_SEQ_TOKENS;
     let nonzero = |v: u32| (v > 0).then_some(v);
-    let gdn_segment_tokens = run.long.gdn_segment.map_or(auto.then_some(long_settings(run.dtype).0), nonzero);
-    let mlp_rows = run.long.mlp_rows.map_or(auto.then_some(long_settings(run.dtype).1), nonzero);
+    let gdn_segment_tokens = run.long.gdn_segment.map_or(auto.then_some(long_settings(run.dtype()).0), nonzero);
+    let mlp_rows = run.long.mlp_rows.map_or(auto.then_some(long_settings(run.dtype()).1), nonzero);
     let bf16_residuals = run.long.bf16_residuals.unwrap_or(auto && !mtp);
     if gdn_segment_tokens.is_some() && batch != 1 {
         return Err(format!("a Gated-DeltaNet segment needs a batch of one (batch is {batch}); use --batch 1 with --grad-accum"));
@@ -301,12 +315,12 @@ fn streamed_train_opts(run: &StreamedRun, batch: u32, block: u32, mtp: bool) -> 
         (true, false) => SavedPolicy::Recompute,
         (true, true) => SavedPolicy::Quantized(SavedFormat::Bf16),
     };
-    Ok(TrainOpts { base: TierPolicy::uniform(run.dtype), saved, gdn_segment_tokens, mlp_rows, ..TrainOpts::default() })
+    Ok(TrainOpts { base: run.base.clone(), saved, gdn_segment_tokens, mlp_rows, ..TrainOpts::default() })
 }
 
 /// LoRA fine-tune on a frozen base that is STREAMED from `base` (a
 /// HuggingFace checkpoint directory, FP8 release included, or a brain-native
-/// file) and held on the device at `run.dtype`, so the base never exists on the
+/// file) and held on the device at `run.base`, so the base never exists on the
 /// host as a whole. `out` is an ADAPTER file (`crate::lora::save_adapter`),
 /// never a copy of the base; with `resume` and an existing `out` the run
 /// continues that adapter's factors instead of starting from zero delta.
@@ -327,7 +341,7 @@ pub fn finetune_streamed(base: &Path, dir: &Path, opts: &FitOpts, mode: &Mode, o
 pub fn finetune_streamed_named(base: &Path, dir: &Path, opts: &FitOpts, mode: &Mode, out: &str, resume: bool, run: &StreamedRun, naming: &AdapterNaming) -> std::io::Result<(f32, f32)> {
     let (card_id, base_id) = adapter_card(base, naming).map_err(|why| std::io::Error::new(std::io::ErrorKind::InvalidInput, why))?;
     let Mode::Lora { rank, alpha, tuning } = mode else {
-        return Err(unsupported(format!("a {} base is frozen: only LoRA trains on it", model::policy::format_name(run.dtype))));
+        return Err(unsupported(format!("a {} base is frozen: only LoRA trains on it", model::policy::format_name(run.dtype()))));
     };
     let resume_from = resume.then(|| Path::new(out)).filter(|p| p.exists());
     let mut progress = step_progress();
@@ -378,10 +392,10 @@ pub fn finetune_lora_tuned(
 }
 
 /// The LoRA model of the base at `base`, its frozen linears held at
-/// `run.dtype` and streamed from disk, sized for `opts`' rows.
+/// `run.base` and streamed from disk, sized for `opts`' rows.
 fn build_lora_model(base: &Path, opts: &FitOpts, rank: u32, alpha: f32, tuning: AdapterTuning, resume_from: Option<&Path>, run: &StreamedRun) -> std::io::Result<Qwen35> {
     // The streamed base is never held as fp32 on the device, whatever its format.
-    let (dtype, recompute) = (run.dtype, run.recompute);
+    let (dtype, recompute) = (run.dtype(), run.recompute);
     // One micro-step of more than a few thousand tokens only fits the card with
     // the long-sequence settings (segmented Gated-DeltaNet layers, a bf16
     // residual stream, an MLP run in token chunks), which need a batch of one:
@@ -403,7 +417,7 @@ fn build_lora_model(base: &Path, opts: &FitOpts, rank: u32, alpha: f32, tuning: 
     let m = Qwen35::new_train_opts_on(Gpu::new(pipelines()), cfg, opts.batch_size, opts.block_size, &src, &train);
     eprintln!(
         "qwen35 finetune: base loaded as {} in {:.1}s (gdn segment {:?}, mlp rows {:?}, saved activations {})",
-        model::policy::format_name(dtype),
+        run.base.summary(),
         t_load.elapsed().as_secs_f64(),
         train.gdn_segment_tokens,
         train.mlp_rows,
@@ -450,7 +464,7 @@ impl model::finetune::ChatTrainer for Qwen35Trainer {
     }
 
     fn train_lora(base: &Path, lora: &model::finetune::LoraRequest<'_>, opts: &FitOpts, fit: &mut impl model::finetune::ModelFit) -> std::io::Result<(model::FitReport, Qwen35)> {
-        let run = StreamedRun { dtype: lora.checked_uniform::<Self>()?, recompute: false, long: LongSeqOverrides::default() };
+        let run = StreamedRun { base: lora.checked::<Self>()?.clone(), recompute: false, long: LongSeqOverrides::default() };
         let m = model::finetune::OptimizerState::Device.scope(|| build_lora_model(base, opts, lora.rank, lora.alpha, AdapterTuning::default(), lora.continue_from, &run))?;
         fit.fit(m)
     }
@@ -564,7 +578,7 @@ pub fn adapter_shape(path: &Path, tuning: AdapterTuning) -> Result<(u32, f32), S
 }
 
 /// Teacher-forced per-position readouts of `records` from the training forward:
-/// the frozen base at `run.dtype` with `adapter`'s factors loaded (or a fresh
+/// the frozen base at `run.base` with `adapter`'s factors loaded (or a fresh
 /// zero-delta adapter, which leaves the base's logits unchanged exactly) and NO
 /// optimizer step.
 ///
@@ -601,7 +615,7 @@ mod tests {
     use super::*;
 
     fn run(recompute: bool, long: LongSeqOverrides) -> StreamedRun {
-        StreamedRun { dtype: Dtype::NF4, recompute, long }
+        StreamedRun::uniform(Dtype::NF4, recompute, long)
     }
 
     fn bf16_residuals(o: &TrainOpts) -> bool {
@@ -612,7 +626,7 @@ mod tests {
     fn long_rows_at_batch_one_default_to_the_long_sequence_settings() {
         let o = streamed_train_opts(&run(true, LongSeqOverrides::default()), 1, 2048, false).unwrap();
         assert_eq!((o.gdn_segment_tokens, o.mlp_rows, bf16_residuals(&o)), (Some(2048), Some(2048), true));
-        let bf16 = StreamedRun { dtype: Dtype::BF16, recompute: true, long: LongSeqOverrides::default() };
+        let bf16 = StreamedRun::uniform(Dtype::BF16, true, LongSeqOverrides::default());
         let o = streamed_train_opts(&bf16, 1, 8192, false).unwrap();
         assert_eq!((o.gdn_segment_tokens, o.mlp_rows), (Some(2048), Some(2048)), "the bf16 base fits the same settings (67.1 GiB peak at 64 layers, 8K)");
         let short = streamed_train_opts(&run(true, LongSeqOverrides::default()), 1, 2047, false).unwrap();
