@@ -45,6 +45,11 @@ jobs:
             runner: windows-latest
             targets: ""
     steps:
+      # Some .agents/knowledge file names put the checkout path past Windows'
+      # 260-character limit; without long paths the checkout itself fails.
+      - name: Allow long paths
+        if: runner.os == 'Windows'
+        run: git config --system core.longpaths true
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
