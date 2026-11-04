@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1300" height="650" viewBox="0 0 1300 650" font-family="'Helvetica Neue',Helvetica,Arial,'DejaVu Sans',sans-serif">
+  <desc>A chart of bytes against held-out loss for Qwen3-0.6B as deployed: the original at 1762 MB, uniform nf4 at 275 MB, the accepted plan at 385 MB with loss close to the original, and frontier plans in between.</desc>
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#52514e"/></marker>
+    <marker id="arrB" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#2a78d6"/></marker>
+    <marker id="arrO" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#d95926"/></marker>
+  </defs>
+  <rect width="1300" height="650" fill="#ffffff"/>
+  <text x="40" y="52" font-size="28" fill="#0b0b0b" font-weight="700" text-anchor="start">The trade-off: bytes against held-out loss (Qwen3-0.6B, as deployed)</text>
+  <text x="40" y="80" font-size="16" fill="#52514e" font-weight="400" text-anchor="start">--frontier N solves and measures N plans across the formats&#x27; range; a point is efficient when no smaller plan measured lower.</text>
+  <rect x="140" y="120" width="1100" height="420" fill="#ffffff" stroke="#d6d4cc"/>
+  <line x1="140" y1="540.0" x2="1240" y2="540.0" stroke="#d6d4cc" stroke-dasharray="3 5"/>
+  <text x="128" y="545.0" font-size="14" fill="#52514e" font-weight="400" text-anchor="end">3.20</text>
+  <line x1="140" y1="400.0" x2="1240" y2="400.0" stroke="#d6d4cc" stroke-dasharray="3 5"/>
+  <text x="128" y="405.0000000000004" font-size="14" fill="#52514e" font-weight="400" text-anchor="end">3.25</text>
+  <line x1="140" y1="260.0" x2="1240" y2="260.0" stroke="#d6d4cc" stroke-dasharray="3 5"/>
+  <text x="128" y="265.0000000000008" font-size="14" fill="#52514e" font-weight="400" text-anchor="end">3.30</text>
+  <line x1="140" y1="120.0" x2="1240" y2="120.0" stroke="#d6d4cc" stroke-dasharray="3 5"/>
+  <text x="128" y="125.0" font-size="14" fill="#52514e" font-weight="400" text-anchor="end">3.35</text>
+  <text x="140.0" y="564" font-size="14" fill="#52514e" font-weight="400" text-anchor="middle">0 MB</text>
+  <text x="288.6737171268247" y="564" font-size="14" fill="#52514e" font-weight="400" text-anchor="middle">250 MB</text>
+  <text x="437.3474342536494" y="564" font-size="14" fill="#52514e" font-weight="400" text-anchor="middle">500 MB</text>
+  <text x="586.0211513804741" y="564" font-size="14" fill="#52514e" font-weight="400" text-anchor="middle">750 MB</text>
+  <text x="734.6948685072988" y="564" font-size="14" fill="#52514e" font-weight="400" text-anchor="middle">1000 MB</text>
+  <text x="883.3685856341234" y="564" font-size="14" fill="#52514e" font-weight="400" text-anchor="middle">1250 MB</text>
+  <text x="1032.0423027609481" y="564" font-size="14" fill="#52514e" font-weight="400" text-anchor="middle">1500 MB</text>
+  <text x="1180.7160198877727" y="564" font-size="14" fill="#52514e" font-weight="400" text-anchor="middle">1750 MB</text>
+  <text x="690.0" y="594" font-size="15" fill="#52514e" font-weight="700" text-anchor="middle">bytes of the linears&#x27; weights</text>
+  <text x="40" y="106" font-size="15" fill="#52514e" font-weight="700" text-anchor="start">held-out loss (lower is better)</text>
+  <polyline points="303.7,186.8 663.8,511.7" fill="none" stroke="#52514e" stroke-width="2" stroke-dasharray="6 5"/>
+  <circle cx="368.9" cy="424.7" r="11" fill="#2a78d6"/>
+  <text x="352.8548752834467" y="454.7166099853003" font-size="15" fill="#2a78d6" font-weight="700" text-anchor="end">accepted plan: 385 MB, 3.2412</text>
+  <circle cx="1187.6" cy="511.7" r="9" fill="#52514e"/>
+  <text x="1171.6190476190475" y="497.65198950817825" font-size="15" fill="#52514e" font-weight="700" text-anchor="end">original f32: 1762 MB, 3.2101</text>
+  <circle cx="303.7" cy="186.8" r="9" fill="#d95926"/>
+  <text x="319.69047619047615" y="172.77025003875184" font-size="15" fill="#d95926" font-weight="700" text-anchor="start">every linear nf4: 275 MB, 3.3262</text>
+  <circle cx="303.7" cy="186.8" r="6" fill="#0b0b0b"/>
+  <circle cx="663.8" cy="511.7" r="6" fill="#0b0b0b"/>
+  <text x="150" y="630" font-size="14.5" fill="#52514e" font-weight="400" text-anchor="start">Black points: the frontier&#x27;s plans, joined in order of size. 881 MB already measures within 0.001 of the original.</text>
+
+</svg>

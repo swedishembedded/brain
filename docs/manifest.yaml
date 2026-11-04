@@ -46,6 +46,7 @@ navigation:
     pages:
       - docs/concepts/architecture.md
       - docs/concepts/execution/performance.md
+      - docs/concepts/model-optimizer.md
       - docs/concepts/scaling/overview.md
       - docs/concepts/scaling/data-parallel.md
       - docs/concepts/scaling/pipeline.md

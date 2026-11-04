@@ -20,6 +20,9 @@ It prints the measurements and the policy to serve, and writes
 brain serve --weight-format 'f32,blocks.0.attn.wq.weight=i8,...'
 ```
 
+[How the model optimizer works](../../concepts/model-optimizer.md) explains
+the method with diagrams and a worked result.
+
 The same search is `brain::ModelOptimizer` in the SDK:
 
 ```rust
@@ -80,7 +83,7 @@ held-out measurement.
 | `--max-latency-like FORMAT` | no slower, summed over the linears' products, than every linear in FORMAT |
 | `--max-latency-ms MS` | the linears' summed product time in milliseconds |
 | `--formats LIST` | candidate formats, comma separated |
-| `--arch ID` | the model's architecture (default `qwen3`) |
+| `--arch ID` | the model's architecture (default: what its config names) |
 | `--seed N` | the split's seed (default random, reported) |
 | `--max-block N` | the longest record, in tokens |
 | `--no-thinking` | render records without the reasoning block |
@@ -138,7 +141,8 @@ config; `--arch` names it otherwise), and a model family takes part through
 what it declares about itself: the linears whose format can be chosen, the
 ones its engine fuses into one product, the dimensions whose channels can be
 removed, the formats its serving engine holds per linear, and how to build
-that engine at a format plan. Today qwen3, qwen35 and qwen35moe declare all
+that engine at a format plan. Today qwen3 (with the Llama and Qwen2
+checkpoints it serves as config variants), qwen35 and qwen35moe declare all
 of it; a family that declares nothing to compress is refused by name.
 
 The search runs on whatever backend `--device` selects (wgpu, native Vulkan,

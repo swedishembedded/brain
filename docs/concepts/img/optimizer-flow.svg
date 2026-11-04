@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1580" height="560" viewBox="0 0 1580 560" font-family="'Helvetica Neue',Helvetica,Arial,'DejaVu Sans',sans-serif">
+  <desc>The model optimizer&#x27;s pipeline: split the chat dataset, compute per-weight sensitivity from gradients, estimate every linear&#x27;s error in every format with the real codec, time each product, solve a multiple-choice knapsack for one format per linear, measure the plan against the original and every uniform format on held-out data through the serving engine, accept or refuse, and serve the plan as a --weight-format policy.</desc>
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#52514e"/></marker>
+    <marker id="arrB" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#2a78d6"/></marker>
+    <marker id="arrO" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#d95926"/></marker>
+  </defs>
+  <rect width="1580" height="560" fill="#ffffff"/>
+  <text x="40" y="52" font-size="28" fill="#0b0b0b" font-weight="700" text-anchor="start">brain optimize: from a chat dataset to a per-linear weight format</text>
+  <text x="40" y="80" font-size="16" fill="#52514e" font-weight="400" text-anchor="start">Estimates choose what to measure; only the held-out measurement accepts a plan.</text>
+  <rect x="40" y="120" width="330" height="150" rx="10" fill="#f4f3ef" stroke="#52514e" stroke-width="2"/>
+  <text x="56" y="150" font-size="18" fill="#0b0b0b" font-weight="700" text-anchor="start">1. Split the data</text>
+  <text x="56" y="176" font-size="14.5" fill="#52514e" font-weight="400" text-anchor="start">chat records, rendered and tokenized</text>
+  <text x="56" y="197" font-size="14.5" fill="#52514e" font-weight="400" text-anchor="start">3/4 calibrate, 1/4 held out</text>
+  <text x="56" y="218" font-size="14.5" fill="#52514e" font-weight="400" text-anchor="start">(or --held-out FILE); never shared</text>
+  <rect x="430" y="120" width="330" height="150" rx="10" fill="#f4f3ef" stroke="#2a78d6" stroke-width="2"/>
+  <text x="446" y="150" font-size="18" fill="#0b0b0b" font-weight="700" text-anchor="start">2. Sensitivity</text>
+  <text x="446" y="176" font-size="14.5" fill="#52514e" font-weight="400" text-anchor="start">forward + backward on calibration</text>
+  <text x="446" y="197" font-size="14.5" fill="#52514e" font-weight="400" text-anchor="start">F = mean squared gradient</text>
+  <text x="446" y="218" font-size="14.5" fill="#52514e" font-weight="400" text-anchor="start">of every weight (Fisher diagonal)</text>
+  <rect x="820" y="120" width="330" height="150" rx="10" fill="#f4f3ef" stroke="#2a78d6" stroke-width="2"/>
+  <text x="836" y="150" font-size="18" fill="#0b0b0b" font-weight="700" text-anchor="start">3. Estimate</text>
+  <text x="836" y="176" font-size="14.5" fill="#52514e" font-weight="400" text-anchor="start">every linear x every candidate format:</text>
+  <text x="836" y="197" font-size="14.5" fill="#52514e" font-weight="400" text-anchor="start">error = 1/2 sum F (w - Q(w))^2</text>
+  <text x="836" y="218" font-size="14.5" fill="#52514e" font-weight="400" text-anchor="start">Q = the format&#x27;s real codec</text>
+  <rect x="1210" y="120" width="330" height="150" rx="10" fill="#f4f3ef" stroke="#52514e" stroke-width="2"/>
+  <text x="1226" y="150" font-size="18" fill="#0b0b0b" font-weight="700" text-anchor="start">4. Time</text>
+  <text x="1226" y="176" font-size="14.5" fill="#52514e" font-weight="400" text-anchor="start">each linear&#x27;s matrix product in each</text>
+  <text x="1226" y="197" font-size="14.5" fill="#52514e" font-weight="400" text-anchor="start">format on this device&#x27;s kernels</text>
+  <text x="1226" y="218" font-size="14.5" fill="#52514e" font-weight="400" text-anchor="start">(optional latency limit)</text>
+  <rect x="1210" y="340" width="330" height="150" rx="10" fill="#f4f3ef" stroke="#d95926" stroke-width="2"/>
+  <text x="1226" y="370" font-size="18" fill="#0b0b0b" font-weight="700" text-anchor="start">5. Solve</text>
+  <text x="1226" y="396" font-size="14.5" fill="#52514e" font-weight="400" text-anchor="start">one format per linear (fused Q/K/V and</text>
+  <text x="1226" y="417" font-size="14.5" fill="#52514e" font-weight="400" text-anchor="start">gate/up share one) minimizing the</text>
+  <text x="1226" y="438" font-size="14.5" fill="#52514e" font-weight="400" text-anchor="start">summed error within bytes (+ time)</text>
+  <rect x="820" y="340" width="330" height="150" rx="10" fill="#f4f3ef" stroke="#2e8b57" stroke-width="2"/>
+  <text x="836" y="370" font-size="18" fill="#0b0b0b" font-weight="700" text-anchor="start">6. Measure</text>
+  <text x="836" y="396" font-size="14.5" fill="#52514e" font-weight="400" text-anchor="start">held-out loss of the plan, the original</text>
+  <text x="836" y="417" font-size="14.5" fill="#52514e" font-weight="400" text-anchor="start">and every uniform format that fits:</text>
+  <text x="836" y="438" font-size="14.5" fill="#52514e" font-weight="400" text-anchor="start">rounded weights, then the serving engine</text>
+  <rect x="430" y="340" width="330" height="150" rx="10" fill="#f4f3ef" stroke="#2e8b57" stroke-width="2"/>
+  <text x="446" y="370" font-size="18" fill="#0b0b0b" font-weight="700" text-anchor="start">7. Decide</text>
+  <text x="446" y="396" font-size="14.5" fill="#52514e" font-weight="400" text-anchor="start">accepted when the plan&#x27;s deployed loss</text>
+  <text x="446" y="417" font-size="14.5" fill="#52514e" font-weight="400" text-anchor="start">beats every uniform format that fits</text>
+  <text x="446" y="438" font-size="14.5" fill="#52514e" font-weight="400" text-anchor="start">the budget (exit 0), else exit 3</text>
+  <rect x="40" y="340" width="330" height="150" rx="10" fill="#f4f3ef" stroke="#52514e" stroke-width="2"/>
+  <text x="56" y="370" font-size="18" fill="#0b0b0b" font-weight="700" text-anchor="start">8. Serve</text>
+  <text x="56" y="396" font-size="14.5" fill="#52514e" font-weight="400" text-anchor="start">the plan is a --weight-format policy:</text>
+  <text x="56" y="417" font-size="14.5" fill="#52514e" font-weight="400" text-anchor="start">f32,blocks.0.attn.wq.weight=i8,...</text>
+  <text x="56" y="438" font-size="14.5" fill="#52514e" font-weight="400" text-anchor="start">optional: a recovery LoRA adapter</text>
+  <line x1="370" y1="195" x2="428" y2="195" stroke="#52514e" stroke-width="2.5" marker-end="url(#arr)"/>
+  <line x1="760" y1="195" x2="818" y2="195" stroke="#52514e" stroke-width="2.5" marker-end="url(#arr)"/>
+  <line x1="1150" y1="195" x2="1208" y2="195" stroke="#52514e" stroke-width="2.5" marker-end="url(#arr)"/>
+  <line x1="1375" y1="270" x2="1375" y2="338" stroke="#52514e" stroke-width="2.5" marker-end="url(#arr)"/>
+  <line x1="1210" y1="415" x2="1152" y2="415" stroke="#52514e" stroke-width="2.5" marker-end="url(#arr)"/>
+  <line x1="820" y1="415" x2="762" y2="415" stroke="#52514e" stroke-width="2.5" marker-end="url(#arr)"/>
+  <line x1="430" y1="415" x2="372" y2="415" stroke="#52514e" stroke-width="2.5" marker-end="url(#arr)"/>
+  <path d="M 205 270 L 205 305 L 985 305 L 985 336" fill="none" stroke="#2e8b57" stroke-width="2.5" stroke-dasharray="7 6" marker-end="url(#arr)"/>
+  <text x="420" y="298" font-size="14" fill="#2e8b57" font-weight="400" text-anchor="start">held-out records: only ever measured on</text>
+  <text x="40" y="540" font-size="14" fill="#52514e" font-weight="400" text-anchor="start">Blue: computed once per model on calibration data.  Orange: the plan.  Green: measured on held-out data.</text>
+
+</svg>

@@ -35,6 +35,7 @@ PDF (`make docs/pdf`).
 
 - [Architecture](concepts/architecture.md) - the crate layers, the backends and the model registry.
 - [Performance](concepts/execution/performance.md) - profiling, kernel selection, INT8.
+- [The model optimizer](concepts/model-optimizer.md) - how `brain optimize` and `brain prune` compress a model and prove the result.
 - [Scaling across GPUs](concepts/scaling/overview.md): [data parallel](concepts/scaling/data-parallel.md),
   [pipeline parallel](concepts/scaling/pipeline.md), [tensor parallel](concepts/scaling/tensor-parallel.md).
 

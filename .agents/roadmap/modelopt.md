@@ -145,6 +145,9 @@ minimize `sum E[i, q_i]` subject to `sum bytes[i, q_i] <= budget`.
       `ModelOptimizer`/`ModelPruner` read chat datasets.
 - [ ] Other paged engines (deepseek2, huginn, ouro) score through the default
       `hidden_at` once their families declare a trainer and an engine hook.
+- [ ] EdgeRock (a qwen35 config variant) needs its sliding window and anchor
+      memory in qwen35's layer-streamed trainer and f32 serving engine, which
+      refuse it today, before it can take a study row like llama and qwen2.
 
 ## KV precision search
 

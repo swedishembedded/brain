@@ -1,0 +1,174 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1540" height="748" viewBox="0 0 1540 748" font-family="'Helvetica Neue',Helvetica,Arial,'DejaVu Sans',sans-serif">
+  <desc>The accepted Qwen3-0.6B plan as a grid of 28 layers by four linear groups, int8 in blue and nf4 in orange: early layers and the last layer stay int8, later layers move to nf4. Bars compare the linears&#x27; bytes and held-out loss of the original, uniform nf4 and the plan as served.</desc>
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#52514e"/></marker>
+    <marker id="arrB" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#2a78d6"/></marker>
+    <marker id="arrO" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#d95926"/></marker>
+  </defs>
+  <rect width="1540" height="748" fill="#ffffff"/>
+  <text x="40" y="52" font-size="28" fill="#0b0b0b" font-weight="700" text-anchor="start">What changes in the model: Qwen3-0.6B, budget 385 MB, the accepted plan</text>
+  <text x="40" y="80" font-size="16" fill="#52514e" font-weight="400" text-anchor="start">Every linear of every layer gets its own format; embeddings, norms and the output head keep theirs.</text>
+  <text x="40" y="104" font-size="16" fill="#52514e" font-weight="400" text-anchor="start">Measured on WikiText chat records, held out from the 240 calibration records (80 held out).</text>
+  <text x="272.0" y="180" font-size="13" fill="#52514e" font-weight="400" text-anchor="middle">0</text>
+  <text x="316.0" y="180" font-size="13" fill="#52514e" font-weight="400" text-anchor="middle">1</text>
+  <text x="360.0" y="180" font-size="13" fill="#52514e" font-weight="400" text-anchor="middle">2</text>
+  <text x="404.0" y="180" font-size="13" fill="#52514e" font-weight="400" text-anchor="middle">3</text>
+  <text x="448.0" y="180" font-size="13" fill="#52514e" font-weight="400" text-anchor="middle">4</text>
+  <text x="492.0" y="180" font-size="13" fill="#52514e" font-weight="400" text-anchor="middle">5</text>
+  <text x="536.0" y="180" font-size="13" fill="#52514e" font-weight="400" text-anchor="middle">6</text>
+  <text x="580.0" y="180" font-size="13" fill="#52514e" font-weight="400" text-anchor="middle">7</text>
+  <text x="624.0" y="180" font-size="13" fill="#52514e" font-weight="400" text-anchor="middle">8</text>
+  <text x="668.0" y="180" font-size="13" fill="#52514e" font-weight="400" text-anchor="middle">9</text>
+  <text x="712.0" y="180" font-size="13" fill="#52514e" font-weight="400" text-anchor="middle">10</text>
+  <text x="756.0" y="180" font-size="13" fill="#52514e" font-weight="400" text-anchor="middle">11</text>
+  <text x="800.0" y="180" font-size="13" fill="#52514e" font-weight="400" text-anchor="middle">12</text>
+  <text x="844.0" y="180" font-size="13" fill="#52514e" font-weight="400" text-anchor="middle">13</text>
+  <text x="888.0" y="180" font-size="13" fill="#52514e" font-weight="400" text-anchor="middle">14</text>
+  <text x="932.0" y="180" font-size="13" fill="#52514e" font-weight="400" text-anchor="middle">15</text>
+  <text x="976.0" y="180" font-size="13" fill="#52514e" font-weight="400" text-anchor="middle">16</text>
+  <text x="1020.0" y="180" font-size="13" fill="#52514e" font-weight="400" text-anchor="middle">17</text>
+  <text x="1064.0" y="180" font-size="13" fill="#52514e" font-weight="400" text-anchor="middle">18</text>
+  <text x="1108.0" y="180" font-size="13" fill="#52514e" font-weight="400" text-anchor="middle">19</text>
+  <text x="1152.0" y="180" font-size="13" fill="#52514e" font-weight="400" text-anchor="middle">20</text>
+  <text x="1196.0" y="180" font-size="13" fill="#52514e" font-weight="400" text-anchor="middle">21</text>
+  <text x="1240.0" y="180" font-size="13" fill="#52514e" font-weight="400" text-anchor="middle">22</text>
+  <text x="1284.0" y="180" font-size="13" fill="#52514e" font-weight="400" text-anchor="middle">23</text>
+  <text x="1328.0" y="180" font-size="13" fill="#52514e" font-weight="400" text-anchor="middle">24</text>
+  <text x="1372.0" y="180" font-size="13" fill="#52514e" font-weight="400" text-anchor="middle">25</text>
+  <text x="1416.0" y="180" font-size="13" fill="#52514e" font-weight="400" text-anchor="middle">26</text>
+  <text x="1460.0" y="180" font-size="13" fill="#52514e" font-weight="400" text-anchor="middle">27</text>
+  <text x="250" y="158" font-size="14" fill="#52514e" font-weight="700" text-anchor="start">layer</text>
+  <text x="236" y="222.0" font-size="15" fill="#0b0b0b" font-weight="400" text-anchor="end">Q/K/V (fused)</text>
+  <rect x="252" y="190" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="296" y="190" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="340" y="190" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="384" y="190" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="428" y="190" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="472" y="190" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="516" y="190" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="560" y="190" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="604" y="190" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="648" y="190" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="692" y="190" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="736" y="190" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="780" y="190" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="824" y="190" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="868" y="190" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="912" y="190" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="956" y="190" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="1000" y="190" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="1044" y="190" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="1088" y="190" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="1132" y="190" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="1176" y="190" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1220" y="190" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1264" y="190" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1308" y="190" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1352" y="190" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1396" y="190" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1440" y="190" width="40" height="54" rx="4" fill="#d95926"/>
+  <text x="236" y="284.0" font-size="15" fill="#0b0b0b" font-weight="400" text-anchor="end">attention out</text>
+  <rect x="252" y="252" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="296" y="252" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="340" y="252" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="384" y="252" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="428" y="252" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="472" y="252" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="516" y="252" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="560" y="252" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="604" y="252" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="648" y="252" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="692" y="252" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="736" y="252" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="780" y="252" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="824" y="252" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="868" y="252" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="912" y="252" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="956" y="252" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1000" y="252" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="1044" y="252" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1088" y="252" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1132" y="252" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1176" y="252" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1220" y="252" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1264" y="252" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1308" y="252" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1352" y="252" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1396" y="252" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1440" y="252" width="40" height="54" rx="4" fill="#d95926"/>
+  <text x="236" y="346.0" font-size="15" fill="#0b0b0b" font-weight="400" text-anchor="end">MLP gate/up (fused)</text>
+  <rect x="252" y="314" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="296" y="314" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="340" y="314" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="384" y="314" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="428" y="314" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="472" y="314" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="516" y="314" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="560" y="314" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="604" y="314" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="648" y="314" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="692" y="314" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="736" y="314" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="780" y="314" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="824" y="314" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="868" y="314" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="912" y="314" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="956" y="314" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1000" y="314" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1044" y="314" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1088" y="314" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1132" y="314" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1176" y="314" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1220" y="314" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1264" y="314" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1308" y="314" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1352" y="314" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1396" y="314" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1440" y="314" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <text x="236" y="408.0" font-size="15" fill="#0b0b0b" font-weight="400" text-anchor="end">MLP down</text>
+  <rect x="252" y="376" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="296" y="376" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="340" y="376" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="384" y="376" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="428" y="376" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="472" y="376" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="516" y="376" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="560" y="376" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="604" y="376" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="648" y="376" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="692" y="376" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="736" y="376" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="780" y="376" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="824" y="376" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="868" y="376" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="912" y="376" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="956" y="376" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1000" y="376" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1044" y="376" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1088" y="376" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1132" y="376" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1176" y="376" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1220" y="376" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1264" y="376" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1308" y="376" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1352" y="376" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1396" y="376" width="40" height="54" rx="4" fill="#d95926"/>
+  <rect x="1440" y="376" width="40" height="54" rx="4" fill="#2a78d6"/>
+  <rect x="250" y="468" width="22" height="22" rx="4" fill="#2a78d6"/>
+  <text x="282" y="485" font-size="15" fill="#0b0b0b" font-weight="400" text-anchor="start">int8 (9 bits with scales)</text>
+  <rect x="580" y="468" width="22" height="22" rx="4" fill="#d95926"/>
+  <text x="612" y="485" font-size="15" fill="#0b0b0b" font-weight="400" text-anchor="start">nf4 (5 bits with scales)</text>
+  <text x="40" y="538" font-size="17" fill="#0b0b0b" font-weight="700" text-anchor="start">The linears&#x27; weights, as deployed through the serving engine:</text>
+  <text x="40" y="588" font-size="15" fill="#0b0b0b" font-weight="400" text-anchor="start">original (f32)</text>
+  <rect x="250" y="572" width="700.0" height="22" rx="3" fill="#52514e" opacity="0.85"/>
+  <text x="960.0" y="589" font-size="15" fill="#0b0b0b" font-weight="400" text-anchor="start">1762 MB   held-out loss 3.2101</text>
+  <text x="40" y="622" font-size="15" fill="#0b0b0b" font-weight="400" text-anchor="start">every linear nf4</text>
+  <rect x="250" y="606" width="109.4" height="22" rx="3" fill="#d95926" opacity="0.85"/>
+  <text x="369.375" y="623" font-size="15" fill="#0b0b0b" font-weight="400" text-anchor="start">275 MB   held-out loss 3.3262</text>
+  <text x="40" y="656" font-size="15" fill="#0b0b0b" font-weight="400" text-anchor="start">the plan</text>
+  <rect x="250" y="640" width="152.9" height="22" rx="3" fill="#2a78d6" opacity="0.85"/>
+  <text x="412.91666666666663" y="657" font-size="15" fill="#0b0b0b" font-weight="400" text-anchor="start">385 MB   held-out loss 3.2412</text>
+  <text x="40" y="698" font-size="15" fill="#52514e" font-weight="400" text-anchor="start">Every linear stays int8 in layer 0 and goes to nf4 in layers 21-26; the other layers mix the two:</text>
+  <text x="40" y="720" font-size="15" fill="#52514e" font-weight="400" text-anchor="start">22% of the f32 bytes, and a loss +0.0310 from the original where uniform nf4 is +0.1160.</text>
+
+</svg>

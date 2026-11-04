@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1580" height="650" viewBox="0 0 1580 650" font-family="'Helvetica Neue',Helvetica,Arial,'DejaVu Sans',sans-serif">
+  <desc>How the estimate works: each weight&#x27;s rounding error under a format&#x27;s codec is weighted by the Fisher diagonal F, the mean squared gradient, so rounding costs most where the loss is sensitive. Every linear in every candidate format becomes a cell with bytes and estimated loss increase; a greedy multiple-choice knapsack picks one format per linear within the byte budget.</desc>
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#52514e"/></marker>
+    <marker id="arrB" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#2a78d6"/></marker>
+    <marker id="arrO" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#d95926"/></marker>
+  </defs>
+  <rect width="1580" height="650" fill="#ffffff"/>
+  <text x="40" y="52" font-size="28" fill="#0b0b0b" font-weight="700" text-anchor="start">Estimate and solve: one choice per linear, the least summed error that fits</text>
+  <text x="40" y="80" font-size="16" fill="#52514e" font-weight="400" text-anchor="start">Each cell is one linear stored in one format, with its estimated loss increase; the header gives each format&#x27;s bytes per weight.</text>
+  <rect x="40" y="110" width="560" height="330" rx="10" fill="#ffffff" stroke="#2a78d6" stroke-width="2"/>
+  <text x="56" y="140" font-size="18" fill="#0b0b0b" font-weight="700" text-anchor="start">Why a linear&#x27;s error depends on where it sits</text>
+  <text x="70" y="170" font-size="14" fill="#52514e" font-weight="400" text-anchor="start">w  (trained weight)</text>
+  <text x="70" y="330" font-size="14" fill="#52514e" font-weight="400" text-anchor="start">F  (how much the loss reacts to it)</text>
+  <line x1="100" y1="260" x2="100" y2="216.6" stroke="#52514e" stroke-width="10"/>
+  <line x1="86" y1="216.2" x2="114" y2="216.2" stroke="#d95926" stroke-width="3"/>
+  <rect x="88" y="396.4" width="24" height="3.6" fill="#2a78d6"/>
+  <line x1="160" y1="260" x2="160" y2="281.7" stroke="#52514e" stroke-width="10"/>
+  <line x1="146" y1="277.5" x2="174" y2="277.5" stroke="#d95926" stroke-width="3"/>
+  <rect x="148" y="344.2" width="24" height="55.8" fill="#2a78d6"/>
+  <line x1="220" y1="260" x2="220" y2="247.4" stroke="#52514e" stroke-width="10"/>
+  <line x1="206" y1="246.9" x2="234" y2="246.9" stroke="#d95926" stroke-width="3"/>
+  <rect x="208" y="392.8" width="24" height="7.2" fill="#2a78d6"/>
+  <line x1="280" y1="260" x2="280" y2="313.9" stroke="#52514e" stroke-width="10"/>
+  <line x1="266" y1="312.5" x2="294" y2="312.5" stroke="#d95926" stroke-width="3"/>
+  <rect x="268" y="398.2" width="24" height="1.8" fill="#2a78d6"/>
+  <line x1="340" y1="260" x2="340" y2="256.5" stroke="#52514e" stroke-width="10"/>
+  <line x1="326" y1="260.0" x2="354" y2="260.0" stroke="#d95926" stroke-width="3"/>
+  <rect x="328" y="353.2" width="24" height="46.8" fill="#2a78d6"/>
+  <line x1="400" y1="260" x2="400" y2="229.2" stroke="#52514e" stroke-width="10"/>
+  <line x1="386" y1="229.4" x2="414" y2="229.4" stroke="#d95926" stroke-width="3"/>
+  <rect x="388" y="394.6" width="24" height="5.4" fill="#2a78d6"/>
+  <line x1="460" y1="260" x2="460" y2="268.4" stroke="#52514e" stroke-width="10"/>
+  <line x1="446" y1="268.8" x2="474" y2="268.8" stroke="#d95926" stroke-width="3"/>
+  <rect x="448" y="383.8" width="24" height="16.2" fill="#2a78d6"/>
+  <line x1="520" y1="260" x2="520" y2="239.7" stroke="#52514e" stroke-width="10"/>
+  <line x1="506" y1="238.1" x2="534" y2="238.1" stroke="#d95926" stroke-width="3"/>
+  <rect x="508" y="396.4" width="24" height="3.6" fill="#2a78d6"/>
+  <line x1="70" y1="260" x2="570" y2="260" stroke="#d6d4cc"/>
+  <line x1="70" y1="400" x2="570" y2="400" stroke="#d6d4cc"/>
+  <text x="370" y="170" font-size="14" fill="#d95926" font-weight="400" text-anchor="start">orange tick: Q(w), the 4-bit codec</text>
+  <text x="60" y="470" font-size="15" fill="#0b0b0b" font-weight="700" text-anchor="start">error = 1/2 sum F (w - Q(w))^2 : rounding matters only</text>
+  <text x="60" y="492" font-size="15" fill="#0b0b0b" font-weight="700" text-anchor="start">where the loss is sensitive, so equal rounding costs</text>
+  <text x="60" y="514" font-size="15" fill="#0b0b0b" font-weight="700" text-anchor="start">different linears very different amounts.</text>
+  <text x="660" y="140" font-size="15" fill="#52514e" font-weight="700" text-anchor="start">linear</text>
+  <text x="947.5" y="140" font-size="14" fill="#52514e" font-weight="700" text-anchor="middle">f32  (4 B/weight)</text>
+  <text x="1122.5" y="140" font-size="14" fill="#7a4fc4" font-weight="700" text-anchor="middle">bf16  (2 B/weight)</text>
+  <text x="1297.5" y="140" font-size="14" fill="#2a78d6" font-weight="700" text-anchor="middle">int8  (1.125 B/weight)</text>
+  <text x="1472.5" y="140" font-size="14" fill="#d95926" font-weight="700" text-anchor="middle">nf4  (0.625 B/weight)</text>
+  <text x="660" y="198" font-size="15" fill="#0b0b0b" font-weight="400" text-anchor="start">layer 0  Q/K/V</text>
+  <rect x="866" y="160" width="163" height="62" rx="8" fill="#f4f3ef" stroke="#d6d4cc" stroke-width="1.5"/>
+  <text x="947.5" y="198" font-size="16" fill="#52514e" font-weight="400" text-anchor="middle">0</text>
+  <rect x="1041" y="160" width="163" height="62" rx="8" fill="#f4f3ef" stroke="#d6d4cc" stroke-width="1.5"/>
+  <text x="1122.5" y="198" font-size="16" fill="#52514e" font-weight="400" text-anchor="middle">1e-09</text>
+  <rect x="1216" y="160" width="163" height="62" rx="8" fill="#eaf2fc" stroke="#2a78d6" stroke-width="3"/>
+  <text x="1297.5" y="198" font-size="16" fill="#0b0b0b" font-weight="700" text-anchor="middle">3e-07</text>
+  <rect x="1391" y="160" width="163" height="62" rx="8" fill="#f4f3ef" stroke="#d6d4cc" stroke-width="1.5"/>
+  <text x="1472.5" y="198" font-size="16" fill="#52514e" font-weight="400" text-anchor="middle">9e-05</text>
+  <text x="660" y="270" font-size="15" fill="#0b0b0b" font-weight="400" text-anchor="start">layer 0  MLP down</text>
+  <rect x="866" y="232" width="163" height="62" rx="8" fill="#f4f3ef" stroke="#d6d4cc" stroke-width="1.5"/>
+  <text x="947.5" y="270" font-size="16" fill="#52514e" font-weight="400" text-anchor="middle">0</text>
+  <rect x="1041" y="232" width="163" height="62" rx="8" fill="#f4f3ef" stroke="#d6d4cc" stroke-width="1.5"/>
+  <text x="1122.5" y="270" font-size="16" fill="#52514e" font-weight="400" text-anchor="middle">2e-09</text>
+  <rect x="1216" y="232" width="163" height="62" rx="8" fill="#eaf2fc" stroke="#2a78d6" stroke-width="3"/>
+  <text x="1297.5" y="270" font-size="16" fill="#0b0b0b" font-weight="700" text-anchor="middle">6e-07</text>
+  <rect x="1391" y="232" width="163" height="62" rx="8" fill="#f4f3ef" stroke="#d6d4cc" stroke-width="1.5"/>
+  <text x="1472.5" y="270" font-size="16" fill="#52514e" font-weight="400" text-anchor="middle">4e-04</text>
+  <text x="660" y="342" font-size="15" fill="#0b0b0b" font-weight="400" text-anchor="start">layer 21  Q/K/V</text>
+  <rect x="866" y="304" width="163" height="62" rx="8" fill="#f4f3ef" stroke="#d6d4cc" stroke-width="1.5"/>
+  <text x="947.5" y="342" font-size="16" fill="#52514e" font-weight="400" text-anchor="middle">0</text>
+  <rect x="1041" y="304" width="163" height="62" rx="8" fill="#f4f3ef" stroke="#d6d4cc" stroke-width="1.5"/>
+  <text x="1122.5" y="342" font-size="16" fill="#52514e" font-weight="400" text-anchor="middle">1e-10</text>
+  <rect x="1216" y="304" width="163" height="62" rx="8" fill="#f4f3ef" stroke="#d6d4cc" stroke-width="1.5"/>
+  <text x="1297.5" y="342" font-size="16" fill="#52514e" font-weight="400" text-anchor="middle">2e-08</text>
+  <rect x="1391" y="304" width="163" height="62" rx="8" fill="#fff4ec" stroke="#d95926" stroke-width="3"/>
+  <text x="1472.5" y="342" font-size="16" fill="#0b0b0b" font-weight="700" text-anchor="middle">3e-06</text>
+  <text x="660" y="414" font-size="15" fill="#0b0b0b" font-weight="400" text-anchor="start">layer 21  MLP down</text>
+  <rect x="866" y="376" width="163" height="62" rx="8" fill="#f4f3ef" stroke="#d6d4cc" stroke-width="1.5"/>
+  <text x="947.5" y="414" font-size="16" fill="#52514e" font-weight="400" text-anchor="middle">0</text>
+  <rect x="1041" y="376" width="163" height="62" rx="8" fill="#f4f3ef" stroke="#d6d4cc" stroke-width="1.5"/>
+  <text x="1122.5" y="414" font-size="16" fill="#52514e" font-weight="400" text-anchor="middle">3e-10</text>
+  <rect x="1216" y="376" width="163" height="62" rx="8" fill="#f4f3ef" stroke="#d6d4cc" stroke-width="1.5"/>
+  <text x="1297.5" y="414" font-size="16" fill="#52514e" font-weight="400" text-anchor="middle">4e-08</text>
+  <rect x="1391" y="376" width="163" height="62" rx="8" fill="#fff4ec" stroke="#d95926" stroke-width="3"/>
+  <text x="1472.5" y="414" font-size="16" fill="#0b0b0b" font-weight="700" text-anchor="middle">7e-06</text>
+  <text x="660" y="486" font-size="15" fill="#0b0b0b" font-weight="400" text-anchor="start">layer 27  gate/up</text>
+  <rect x="866" y="448" width="163" height="62" rx="8" fill="#f4f3ef" stroke="#d6d4cc" stroke-width="1.5"/>
+  <text x="947.5" y="486" font-size="16" fill="#52514e" font-weight="400" text-anchor="middle">0</text>
+  <rect x="1041" y="448" width="163" height="62" rx="8" fill="#f4f3ef" stroke="#d6d4cc" stroke-width="1.5"/>
+  <text x="1122.5" y="486" font-size="16" fill="#52514e" font-weight="400" text-anchor="middle">2e-09</text>
+  <rect x="1216" y="448" width="163" height="62" rx="8" fill="#eaf2fc" stroke="#2a78d6" stroke-width="3"/>
+  <text x="1297.5" y="486" font-size="16" fill="#0b0b0b" font-weight="700" text-anchor="middle">5e-07</text>
+  <rect x="1391" y="448" width="163" height="62" rx="8" fill="#f4f3ef" stroke="#d6d4cc" stroke-width="1.5"/>
+  <text x="1472.5" y="486" font-size="16" fill="#52514e" font-weight="400" text-anchor="middle">2e-04</text>
+  <text x="660" y="540" font-size="14.5" fill="#52514e" font-weight="400" text-anchor="start">Start every linear at its smallest format, then repeatedly take the upgrade that removes the</text>
+  <text x="660" y="562" font-size="14.5" fill="#52514e" font-weight="400" text-anchor="start">most estimated error per added byte (and, with a latency limit, per added millisecond) until</text>
+  <text x="660" y="584" font-size="14.5" fill="#52514e" font-weight="400" text-anchor="start">nothing more fits. Values are illustrative; the real table has 112 rows for Qwen3-0.6B.</text>
+
+</svg>
