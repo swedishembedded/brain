@@ -181,7 +181,10 @@ pub fn run_prune(argv: &[String]) -> ! {
     };
     let r = &outcome.report;
     println!("calibration records {}, held-out records {}, seed {}", outcome.calibration_records, outcome.held_out_records, outcome.seed);
-    println!("{}: {} -> {} channels per dimension; parameters {} -> {}", r.config_key, r.width_before, r.width_after, r.params_before, r.params_after);
+    for (key, before, after) in &r.widths {
+        println!("{key}: {before} -> {after} channels per dimension");
+    }
+    println!("parameters {} -> {}", r.params_before, r.params_after);
     println!("trainer build: held-out loss {:.6} -> {:.6}", r.original_loss, r.pruned_loss);
     println!("measured on the {}:", outcome.measured_on);
     for d in &outcome.deployed {

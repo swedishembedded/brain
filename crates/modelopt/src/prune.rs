@@ -28,12 +28,31 @@ use model::{Batch, Model, ModelConfig};
 use crate::sensitivity::fisher;
 use crate::Progress;
 
-/// Which channels of each dimension stay, all narrowed to one width.
+/// How narrow a pruned dimension becomes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PruneWidth {
+    /// This share of each dimension's channels, rounded to the nearest channel.
+    Fraction(f64),
+    Channels(usize),
+}
+
+impl PruneWidth {
+    /// The channels a dimension `width` wide keeps.
+    pub fn channels(self, width: usize) -> Result<usize, String> {
+        match self {
+            PruneWidth::Channels(n) => Ok(n),
+            PruneWidth::Fraction(f) if f > 0.0 && f <= 1.0 => Ok(((width as f64 * f).round() as usize).max(1)),
+            PruneWidth::Fraction(f) => Err(format!("a kept fraction must be in (0, 1], got {f}")),
+        }
+    }
+}
+
+/// Which channels of each dimension stay, and the width each config key
+/// narrows to (dimensions sharing a key share it).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrunePlan {
-    /// The config key the dimensions share ([`PrunableDim::config_key`]).
-    pub config_key: &'static str,
-    pub width: usize,
+    /// Per config key: its width before and after, in first-seen order.
+    pub widths: Vec<(&'static str, usize, usize)>,
     /// Per dimension, in [`Model::prunable_dims`] order: the kept channels, ascending.
     pub keep: Vec<Vec<usize>>,
 }
@@ -80,27 +99,38 @@ pub fn channel_importance<M: Model>(m: &M, dims: &[PrunableDim], calibration: &[
         .collect()
 }
 
-/// Keep the `width` most important channels of every dimension. All the
-/// dimensions must share one config key, so the pruned config has one width.
-pub fn plan_prune(dims: &[PrunableDim], importance: &[Vec<f64>], width: usize) -> Result<PrunePlan, String> {
-    let config_key = dims.first().ok_or("the model declares no prunable dimension")?.config_key;
-    if let Some(other) = dims.iter().find(|d| d.config_key != config_key) {
-        return Err(format!("{} is sized by {}, the others by {config_key}; prune one config key at a time", other.name, other.config_key));
+/// Keep the most important channels of every dimension, `width` of each.
+/// Dimensions with one config key must be one width, so the pruned config
+/// has one value per key.
+pub fn plan_prune(dims: &[PrunableDim], importance: &[Vec<f64>], width: PruneWidth) -> Result<PrunePlan, String> {
+    if dims.is_empty() {
+        return Err("the model declares no prunable dimension".into());
     }
-    if let Some(narrow) = dims.iter().find(|d| width == 0 || width > d.width) {
-        return Err(format!("cannot keep {width} channels of {}, which has {}", narrow.name, narrow.width));
+    let mut widths: Vec<(&'static str, usize, usize)> = Vec::new();
+    for d in dims {
+        let kept = width.channels(d.width)?;
+        if kept == 0 || kept > d.width {
+            return Err(format!("cannot keep {kept} channels of {}, which has {}", d.name, d.width));
+        }
+        match widths.iter().find(|(key, _, _)| *key == d.config_key) {
+            Some(&(_, before, _)) if before != d.width => return Err(format!("{} is {} wide, other dimensions sized by {} are {before}", d.name, d.width, d.config_key)),
+            Some(_) => {}
+            None => widths.push((d.config_key, d.width, kept)),
+        }
     }
-    let keep = importance
+    let keep = dims
         .iter()
-        .map(|scores| {
+        .zip(importance)
+        .map(|(d, scores)| {
+            let kept = widths.iter().find(|(key, _, _)| *key == d.config_key).map_or(0, |w| w.2);
             let mut order: Vec<usize> = (0..scores.len()).collect();
             order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]).then(a.cmp(&b)));
-            order.truncate(width);
+            order.truncate(kept);
             order.sort_unstable();
             order
         })
         .collect();
-    Ok(PrunePlan { config_key, width, keep })
+    Ok(PrunePlan { widths, keep })
 }
 
 /// The held-out loss of `m` with every channel `plan` drops zeroed, which is
@@ -137,13 +167,15 @@ pub struct PrunedModel<C> {
     pub weights: HashMap<String, Vec<f32>>,
 }
 
-/// The pruned model: its config, with `plan.config_key` set to `plan.width`,
+/// The pruned model: its config, with each of `plan.widths`' keys set,
 /// and every parameter of `m`, each prunable slice keeping only its plan's
 /// channels. Build it with [`Model::new`] and save it as any checkpoint.
 pub fn pruned_weights<M: Model>(m: &M, dims: &[PrunableDim], plan: &PrunePlan) -> Result<PrunedModel<M::Config>, String> {
     let mut json = m.config_json();
-    json.get_mut(plan.config_key).ok_or_else(|| format!("the model's config has no {} to narrow", plan.config_key))?;
-    json[plan.config_key] = serde_json::json!(plan.width);
+    for &(key, _, after) in &plan.widths {
+        json.get_mut(key).ok_or_else(|| format!("the model's config has no {key} to narrow"))?;
+        json[key] = serde_json::json!(after);
+    }
     let config = M::Config::from_json(&json);
     let mut slices: HashMap<&str, (usize, Axis, &[usize])> = HashMap::new();
     for (dim, keep) in dims.iter().zip(&plan.keep) {

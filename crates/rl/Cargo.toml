@@ -54,6 +54,8 @@ libc.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+# `tests/served_conformance.rs` prunes every family through `modelopt::PruneFit`.
+brain-modelopt.workspace = true
 tempfile.workspace = true
 brain-testutil.workspace = true
 # `tests/grpo_gradcheck.rs` - GRPO's local `CheckModel` harness (self-improve

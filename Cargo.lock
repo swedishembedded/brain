@@ -2491,6 +2491,7 @@ dependencies = [
  "brain-gpu-core",
  "brain-gradcheck",
  "brain-model",
+ "brain-modelopt",
  "brain-modelstore",
  "brain-promote",
  "brain-qwen3",

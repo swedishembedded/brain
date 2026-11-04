@@ -43,10 +43,10 @@ mod search;
 mod sensitivity;
 mod solve;
 
-pub use fit::{MeasureFit, PruneFit, PruneReport, PruneWidth, SearchFit};
+pub use fit::{MeasureFit, PruneFit, PruneReport, SearchFit};
 pub use manifest::{sites, Site, Tensor};
 pub use measure::{held_out_loss, measure_policy};
-pub use prune::{channel_importance, measure_pruned, plan_prune, pruned_weights, PrunePlan, PrunedModel};
+pub use prune::{channel_importance, measure_pruned, plan_prune, pruned_weights, PrunePlan, PruneWidth, PrunedModel};
 pub use search::{search_weights, Baseline, Budget, FrontierPoint, LatencyLimit, Progress, Report, SearchRequest, SiteReport, Timer, Timing};
 pub use sensitivity::{sensitivity, Choice, SiteChoices};
 pub use solve::{assign, policy_of, Assignment, Limits, Plan};

@@ -56,7 +56,7 @@ fn a_pruned_checkpoint_is_narrower_servable_and_recoverable() {
         .run()
         .expect("the pruning runs");
     let r = &outcome.report;
-    assert_eq!((r.config_key, r.width_before, r.width_after), ("d_ff", 96, 48));
+    assert_eq!(r.widths, [("d_ff", 96, 48)]);
     assert!(r.params_after < r.params_before, "{r:?}");
     for file in ["model.safetensors", "config.json", "tokenizer.json"] {
         assert!(outcome.checkpoint.join(file).is_file(), "{file} is part of the pruned checkpoint");

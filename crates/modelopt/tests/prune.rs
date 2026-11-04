@@ -17,7 +17,7 @@
 //! * A width the dimensions cannot take is refused by name.
 
 use model::Model;
-use modelopt::{channel_importance, measure_pruned, plan_prune, pruned_weights, PrunePlan};
+use modelopt::{channel_importance, measure_pruned, plan_prune, pruned_weights, PrunePlan, PruneWidth};
 
 mod common;
 use common::{as_batches, batches, trained, ROWS};
@@ -35,7 +35,8 @@ fn importance_pruning_keeps_what_the_model_needs_and_exports_a_narrower_model() 
     assert_eq!(dims.len(), m.config().n_layers as usize, "one MLP dimension per layer");
     let importance = channel_importance(&m, &dims, &calibration, &mut |_| {}).expect("importance");
     let width = d_ff / 2;
-    let plan = plan_prune(&dims, &importance, width).expect("a plan");
+    let plan = plan_prune(&dims, &importance, PruneWidth::Channels(width)).expect("a plan");
+    assert_eq!(plan.widths, [("d_ff", d_ff, width)]);
     assert!(plan.keep.iter().all(|k| k.len() == width && k.windows(2).all(|w| w[0] < w[1])));
 
     let pruned = measure_pruned(&m, &dims, &plan, &held_out).expect("measured");
@@ -70,6 +71,7 @@ fn importance_pruning_keeps_what_the_model_needs_and_exports_a_narrower_model() 
     assert!((exported - pruned).abs() <= 1e-4 * pruned.abs(), "the narrower model computes what the zeroed one did: {exported} vs {pruned}");
     eprintln!("original {original}, pruned to {width}/{d_ff}: {pruned}, random median {}", random[3]);
 
-    assert!(plan_prune(&dims, &importance, d_ff + 1).unwrap_err().contains("cannot keep"));
-    assert!(plan_prune(&dims, &importance, 0).unwrap_err().contains("cannot keep"));
+    assert!(plan_prune(&dims, &importance, PruneWidth::Channels(d_ff + 1)).unwrap_err().contains("cannot keep"));
+    assert!(plan_prune(&dims, &importance, PruneWidth::Channels(0)).unwrap_err().contains("cannot keep"));
+    assert!(plan_prune(&dims, &importance, PruneWidth::Fraction(1.5)).unwrap_err().contains("(0, 1]"));
 }

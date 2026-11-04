@@ -14,7 +14,7 @@ use gpu_core::select::Dtype;
 use model::finetune::ModelFit;
 use model::{Batch, FitOpts, FitReport, Model};
 
-use crate::{held_out_loss, search_weights, Budget, Progress, Report, SearchRequest, Timing};
+use crate::{held_out_loss, search_weights, Budget, Progress, PruneWidth, Report, SearchRequest, Timing};
 
 fn lm(owned: &[(Vec<u32>, Vec<u32>)]) -> Vec<Batch<'_>> {
     owned.iter().map(|(tokens, targets)| Batch::Lm { tokens, targets }).collect()
@@ -74,30 +74,11 @@ impl ModelFit for MeasureFit<'_> {
     }
 }
 
-/// How narrow a pruned dimension becomes.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum PruneWidth {
-    /// This share of each dimension's channels, rounded to the nearest channel.
-    Fraction(f64),
-    Channels(usize),
-}
-
-impl PruneWidth {
-    fn channels(self, width: usize) -> Result<usize, String> {
-        match self {
-            PruneWidth::Channels(n) => Ok(n),
-            PruneWidth::Fraction(f) if f > 0.0 && f <= 1.0 => Ok(((width as f64 * f).round() as usize).max(1)),
-            PruneWidth::Fraction(f) => Err(format!("a kept fraction must be in (0, 1], got {f}")),
-        }
-    }
-}
-
 /// What a pruning run decided and measured on the trainable build.
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct PruneReport {
-    pub config_key: &'static str,
-    pub width_before: usize,
-    pub width_after: usize,
+    /// Per config key the pruned dimensions share: its width before and after.
+    pub widths: Vec<(&'static str, usize, usize)>,
     pub params_before: usize,
     pub params_after: usize,
     pub original_loss: f64,
@@ -127,11 +108,11 @@ impl ModelFit for PruneFit<'_> {
         let (train, val, cfg, _) = model::load_dataset(self.dir, self.opts)?;
         let (calibration, held_out) = (model::example_rows(&train, &cfg), model::example_rows(&val, &cfg));
         let dims = model.prunable_dims();
-        let first = dims.first().ok_or_else(|| std::io::Error::other("the model declares no prunable dimension"))?;
-        let (config_key, width_before) = (first.config_key, first.width);
-        let width = self.width.channels(width_before).map_err(std::io::Error::other)?;
+        if dims.is_empty() {
+            return Err(std::io::Error::other("the model declares no prunable dimension (Model::prunable_dims)"));
+        }
         let importance = crate::channel_importance(&model, &dims, &lm(&calibration), self.on_progress).map_err(std::io::Error::other)?;
-        let plan = crate::plan_prune(&dims, &importance, width).map_err(std::io::Error::other)?;
+        let plan = crate::plan_prune(&dims, &importance, self.width).map_err(std::io::Error::other)?;
         (self.on_progress)(Progress::Measuring { label: "original".into() });
         let original_loss = held_out_loss(&model, &lm(&held_out));
         (self.on_progress)(Progress::Measuring { label: "pruned".into() });
@@ -141,8 +122,9 @@ impl ModelFit for PruneFit<'_> {
         let params_after = narrow.weights.values().map(Vec::len).sum();
         let out = self.out.to_str().ok_or_else(|| std::io::Error::other(format!("{}: not a UTF-8 path", self.out.display())))?;
         M::new_inference(narrow.config, 1, self.opts.block_size, &narrow.weights).save(out);
+        let widths = plan.widths.clone();
         let kept = dims.iter().zip(plan.keep).map(|(d, k)| (d.name.clone(), k)).collect();
-        self.report = Some(PruneReport { config_key, width_before, width_after: width, params_before, params_after, original_loss, pruned_loss, kept });
+        self.report = Some(PruneReport { widths, params_before, params_after, original_loss, pruned_loss, kept });
         Ok((no_steps(original_loss), model))
     }
 }
