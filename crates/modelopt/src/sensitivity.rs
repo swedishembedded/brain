@@ -48,34 +48,8 @@ pub struct SiteChoices {
 /// site element on the host. A loss or gradient that is not finite is an error
 /// naming where, never a silently zero sensitivity.
 pub fn sensitivity<M: Model>(m: &M, sites: &[Site], tiers: &[Dtype], calibration: &[Batch], on_progress: &mut dyn FnMut(crate::Progress)) -> Result<Vec<SiteChoices>, String> {
-    if calibration.is_empty() {
-        return Err("sensitivity needs at least one calibration batch".into());
-    }
-    let tensors: Vec<&crate::Tensor> = sites.iter().flat_map(|s| &s.tensors).collect();
-    let mut fisher: Vec<Vec<f32>> = tensors.iter().map(|t| vec![0f32; t.n * t.k]).collect();
-    for (i, &batch) in calibration.iter().enumerate() {
-        m.zero_grads();
-        m.set_batch(batch);
-        let loss = m.forward();
-        if !loss.is_finite() {
-            return Err(format!("a calibration batch has a non-finite loss ({loss})"));
-        }
-        m.backward();
-        for (t, f) in tensors.iter().zip(&mut fisher) {
-            let grad = m.read_grad(&t.name);
-            if grad.len() != f.len() {
-                return Err(format!("{}: gradient has {} elements, the tensor {}", t.name, grad.len(), f.len()));
-            }
-            for (fj, gj) in f.iter_mut().zip(&grad) {
-                if !gj.is_finite() {
-                    return Err(format!("{}: non-finite gradient on calibration data", t.name));
-                }
-                *fj += gj * gj;
-            }
-        }
-        on_progress(crate::Progress::Calibrated { batch: i + 1, of: calibration.len() });
-    }
-    m.zero_grads();
+    let tensors: Vec<(&str, usize)> = sites.iter().flat_map(|s| &s.tensors).map(|t| (t.name.as_str(), t.n * t.k)).collect();
+    let fisher = fisher(m, &tensors, calibration, on_progress)?;
     let scale = 0.5 / calibration.len() as f64;
     // The estimated error of one tensor at every tier, `None` where a tier does not pack it: one read of the weight.
     let errors = |t: &crate::Tensor, f: &[f32]| -> Vec<Option<f64>> {
@@ -108,4 +82,39 @@ pub fn sensitivity<M: Model>(m: &M, sites: &[Site], tiers: &[Dtype], calibration
         on_progress(crate::Progress::Estimated { site: i + 1, of: sites.len() });
     }
     Ok(out)
+}
+
+/// The summed squared gradient of each named tensor (`(name, elements)`) over
+/// the calibration batches, one forward and backward per batch: the diagonal
+/// empirical Fisher times the batch count. A loss or gradient that is not
+/// finite is an error naming where. Gradients are zeroed afterwards.
+pub(crate) fn fisher<M: Model>(m: &M, tensors: &[(&str, usize)], calibration: &[Batch], on_progress: &mut dyn FnMut(crate::Progress)) -> Result<Vec<Vec<f32>>, String> {
+    if calibration.is_empty() {
+        return Err("the curvature estimate needs at least one calibration batch".into());
+    }
+    let mut fisher: Vec<Vec<f32>> = tensors.iter().map(|&(_, len)| vec![0f32; len]).collect();
+    for (i, &batch) in calibration.iter().enumerate() {
+        m.zero_grads();
+        m.set_batch(batch);
+        let loss = m.forward();
+        if !loss.is_finite() {
+            return Err(format!("a calibration batch has a non-finite loss ({loss})"));
+        }
+        m.backward();
+        for (&(name, _), f) in tensors.iter().zip(&mut fisher) {
+            let grad = m.read_grad(name);
+            if grad.len() != f.len() {
+                return Err(format!("{name}: gradient has {} elements, the tensor {}", grad.len(), f.len()));
+            }
+            for (fj, gj) in f.iter_mut().zip(&grad) {
+                if !gj.is_finite() {
+                    return Err(format!("{name}: non-finite gradient on calibration data"));
+                }
+                *fj += gj * gj;
+            }
+        }
+        on_progress(crate::Progress::Calibrated { batch: i + 1, of: calibration.len() });
+    }
+    m.zero_grads();
+    Ok(fisher)
 }

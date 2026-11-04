@@ -93,6 +93,7 @@ pub mod netcollective;
 pub mod parallel;
 pub mod plan;
 pub mod projector;
+pub mod prunable;
 /// Real per-device, per-dtype GEMM throughput measurement - see the module doc.
 pub mod probe;
 pub mod hostopt;
@@ -463,6 +464,13 @@ pub trait Model {
     /// every tensor is held on its own. A precision search assigns a group one
     /// tier; a serving policy that split a group would be refused by the engine.
     fn coupled_tensors(&self) -> Vec<Vec<String>> {
+        Vec::new()
+    }
+
+    /// The dimensions whose channels a structured-pruning search may remove
+    /// ([`prunable::PrunableDim`]). Empty (the default) when the model declares
+    /// none.
+    fn prunable_dims(&self) -> Vec<prunable::PrunableDim> {
         Vec::new()
     }
 
