@@ -128,10 +128,8 @@ every weight path is both a flag (`--dit`, `--vae`, `--t5`, `--tokenizer`) and
 an environment variable, with the flag winning. `make wan/t2v` runs the small
 command above.
 
-Writing the container needs the `ffmpeg` CLI. Without it the frames are still
-written, as numbered PPMs in `<output-path>.frames/`, and the exact `ffmpeg`
-command that assembles them is printed - a generation is never thrown away for
-want of an encoder.
+brain writes the clip itself, as AV1 video in `.mp4`, `.mov`, `.mkv` or
+`.webm`, or as an animated `.gif`; no external encoder is involved.
 
 Wan also declares one action, `t2v`, through the generalized capability
 interface - the same schema `brain caps` prints and the D-Bus and event

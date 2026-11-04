@@ -18,6 +18,5 @@ brain-wm-display.workspace = true
 # encoder. All pure and host-side, which is what lets a headless run produce
 # the same image a window shows.
 brain-imaging.workspace = true
-
-[dev-dependencies]
-brain-testutil.workspace = true
+# Recordings (`record`) are coded as AV1 in process.
+brain-videocodec.workspace = true

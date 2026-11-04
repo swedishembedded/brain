@@ -39,7 +39,10 @@ brain-audio.workspace = true
 # workspace and it is `events::ppm`. `tiff` is what 16-bit and linear captures
 # arrive as (`photo::load_photo`); it adds `tiff`, `fax`, `weezl` and
 # `quick-error`, all MIT or MIT/Apache-2.0.
-image = { workspace = true, features = ["jpeg", "png", "tiff"] }
+# Animated .gif output of `video::encode_frames`.
+image = { workspace = true, features = ["jpeg", "png", "tiff", "gif"] }
+# Video files written and read in process (`video`): AV1 + Opus, WebM/MKV/MP4.
+brain-videocodec.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true

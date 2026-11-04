@@ -397,12 +397,9 @@ brain -v --device gpu0 ltxv t2v --dit-config ltx25_22b --audio   --prompt "a bla
 * **16 kHz stereo.** The bandwidth-extension stage that lifts the base
   vocoder to 48 kHz (`vocoder.bwe_generator.*`) is present in the checkpoint
   and not implemented - it needs an ISTFT this port does not have.
-* **Muxed, or handed back.** `.mp4`/`.mkv`/`.mov` get an AAC track,
-  `.webm` an Opus one; a `.gif` is written silent with a line on stderr since
-  the container holds no audio stream. Without `ffmpeg` the sound is written
-  as `audio.wav` beside the numbered frames and the printed command muxes
-  both - the same "never throw away a generation for want of an encoder"
-  contract the video path already had.
+* **Muxed in process.** brain writes the clip itself: AV1 video and an Opus
+  sound track in `.mp4`, `.mov`, `.mkv` or `.webm`. A `.gif` is written
+  silent with a line on stderr, since the container holds no audio stream.
 * **A clip longer than one denoising window keeps its sound.** Past the
   window ceiling the audio latent crosses each seam exactly as the video
   latent does: the previous window's own last audio tokens are sliced out of

@@ -187,15 +187,8 @@ fn gather(spec: &str, sel: &FrameSel, mask: Option<&str>) -> Vec<imaging::Rgb8> 
 fn gather_unmasked(spec: &str, sel: &FrameSel) -> Vec<imaging::Rgb8> {
     let p = std::path::Path::new(spec);
     if p.is_file() && VIDEO_EXTS.contains(&ext_of(p).as_str()) {
-        if !imaging::video::ffmpeg_available() {
-            eprintln!("reading {spec} needs the ffmpeg CLI on PATH (Debian/Ubuntu: apt-get install ffmpeg)");
-            std::process::exit(1);
-        }
-        // Selection happens INSIDE ffmpeg: `spread` asks for N frames spaced
-        // over the whole clip, so the frames nobody wants are dropped before
-        // they are converted and nothing is staged on disk. Decoding the clip
-        // and thinning afterwards cost a full decode and a temp file per
-        // frame to keep a couple of dozen.
+        // `spread` asks the decoder for N frames spaced over the whole clip,
+        // so nothing is kept but the frames used and nothing is staged on disk.
         let opts = imaging::video::VideoDecodeOpts {
             fps: if sel.fps > 0.0 { Some(sel.fps) } else { None },
             max_frames: 0,

@@ -1,56 +1,38 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Video file → RGB frames, via the `ffmpeg` CLI (subprocess, not a build
-//! dependency). The workspace has no video-container/codec crate at all
-//! (`qwen3omnimoe::mm::encode_video_frames` already took already-decoded frames, but
-//! nothing turned a real video FILE into them until this) -- pure-Rust
-//! demuxers/decoders for real containers are
-//! immature or absent, and this repo is deliberately dependency-light
-//! (`AGENTS.md`), so this follows the same subprocess pattern already used
-//! elsewhere (`crates/perf/src/env.rs`, `crates/npu/src/openvino/real.rs`).
+//! Video files <-> RGB frames, in process.
 //!
-//! Frames are written by `ffmpeg` to numbered PPM (P6) files in a fresh temp
-//! directory, then read back through [`crate::codec::load`] — NOT parsed from
-//! one concatenated stdout stream: `events::ppm::decode_p6` tolerates
-//! trailing bytes but does not report how many it consumed, so multi-frame
-//! stream-splitting would need a second PPM parser tracking byte offsets.
-//! One frame per file reuses the existing, already-tested decoder instead.
+//! **Writing** ([`encode_frames`]) is always brain's own: AV1 video, and Opus
+//! sound when there is a track, in WebM (`.webm`), Matroska (`.mkv`) or MP4
+//! (`.mp4`, `.mov`, `.m4v`), through `videocodec`; or an animated `.gif`. No
+//! external tool is involved, so a generation is never left as loose frames.
 //!
-//! [`ffmpeg_available`] lets a caller skip cleanly when the binary is absent
-//! (the pattern `samples/python/qwen3omnimoe/omni/omni.py`'s PyAV path already documents for
-//! its own optional dependency) rather than making `ffmpeg` a hard
-//! requirement of every brain build.
+//! **Reading** ([`decode_frames`], [`decode_frames_at`], [`probe_video`] and
+//! the `probe_*` helpers) decodes AV1 in those containers itself. A file in
+//! another codec or container (H.264 from a phone, say) is handed to the
+//! `ffmpeg`/`ffprobe` CLIs when they are installed, and refused with that
+//! advice when they are not: brain needs no ffmpeg for anything it writes.
 //!
-//! [`encode_frames`] is the mirror image: RGB frames -> numbered PPMs ->
-//! one `ffmpeg` invocation. When `ffmpeg` is absent it still writes the
-//! numbered PPMs (to a directory beside the requested output) and hands back
-//! the exact command that finishes the job, because a video model that
-//! produced 81 good frames and then found no encoder has not failed - it has
-//! one step left, and the user needs to be told which.
+//! Frame selection (`fps`, `spread`, `max_frames`) is done on the stream's
+//! own timestamps: an output instant takes the source frame nearest to it.
 
 use std::path::{Path, PathBuf};
-use std::io::Write;
-use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::process::Command;
 
 use crate::pixels::Rgb8;
 
-/// True if the `ffmpeg` CLI is on `PATH` and runs. Cheap (`ffmpeg -version`,
-/// no video touched) — call this before [`decode_frames`] to skip cleanly
-/// with a caller-chosen message, rather than parsing [`decode_frames`]'s
-/// error string to detect the same condition.
+/// True if the `ffmpeg` CLI is on `PATH` and runs - the decoder of input
+/// videos brain does not read itself.
 pub fn ffmpeg_available() -> bool {
     Command::new("ffmpeg").arg("-version").output().map(|o| o.status.success()).unwrap_or(false)
 }
 
 /// Frame-selection knobs for [`decode_frames`].
 pub struct VideoDecodeOpts {
-    /// Resample to this many frames per second before selecting frames.
-    /// `None` keeps the source's native frame rate.
+    /// Sample at this many frames per second. `None` keeps every frame.
     pub fps: Option<f64>,
-    /// Stop after this many frames. `0` means unbounded (still implicitly
-    /// capped by the clip's own duration at the chosen `fps`).
+    /// Stop after this many frames. `0` means unbounded.
     ///
     /// This TRUNCATES: it keeps the first N frames and stops. For a capture
     /// that has to be covered rather than sampled from its opening seconds -
@@ -59,12 +41,6 @@ pub struct VideoDecodeOpts {
     /// Ask for about this many frames spaced evenly across the WHOLE clip,
     /// `0` to disable. Overrides `fps`, which it derives from the clip's
     /// duration.
-    ///
-    /// The distinction from `max_frames` is the difference between covering a
-    /// rotation and covering its first few degrees. It is also what lets a
-    /// long capture be decoded cheaply: ffmpeg drops the unwanted frames
-    /// before they are ever converted, so asking for 24 frames from a
-    /// ten-minute clip costs 24 frames of work, not the clip.
     pub spread: u32,
 }
 
@@ -80,51 +56,110 @@ impl Default for VideoDecodeOpts {
 /// Decode a video file to RGB frames: one `(hwc_f32_unit, w, h)` tuple per
 /// frame, in order - the exact shape `qwen3omnimoe::mm::encode_video_frames` takes
 /// (`Rgb8::to_hwc_unit`'s output, `capability::blob::decode_video`'s wire
-/// convention). Returns a clear error (not a panic) when `ffmpeg` is absent,
-/// the path doesn't exist, ffmpeg fails, or it produces zero frames.
+/// convention).
 pub fn decode_frames(path: &Path, opts: &VideoDecodeOpts) -> Result<Vec<(Vec<f32>, u32, u32)>, String> {
     Ok(decode_frames_rgb8(path, opts)?.into_iter().map(|img| (img.to_hwc_unit(), img.w, img.h)).collect())
 }
 
-/// The same decode, kept as [`Rgb8`].
-///
-/// [`decode_frames`]' `f32` unit form is what a model PREPROCESSOR wants; a
-/// caller that will hand the frames straight back to a codec (`brain ltxv
-/// upscale` re-encoding what it decoded) wants the bytes ffmpeg actually
-/// produced, without a `u8 -> f32 -> u8` round trip in the middle.
+/// The same decode, kept as [`Rgb8`]: what a caller handing the frames back
+/// to a codec wants, without a `u8 -> f32 -> u8` round trip.
 pub fn decode_frames_rgb8(path: &Path, opts: &VideoDecodeOpts) -> Result<Vec<Rgb8>, String> {
-    if !ffmpeg_available() {
-        return Err("imaging::video: ffmpeg not found on PATH -- video file decoding needs the ffmpeg CLI (install it, or supply already-decoded frames directly)".to_string());
-    }
     if !path.exists() {
         return Err(format!("imaging::video: {} does not exist", path.display()));
     }
-
-    let (w, h) = probe_size(path).ok_or_else(|| {
-        format!("imaging::video: ffprobe could not read the frame size of {}", path.display())
-    })?;
-
     // `spread` needs the clip's length to turn "about N frames" into a rate.
-    let fps = match (opts.spread, probe_duration(path)) {
-        (n, Some(d)) if n > 0 && d > 0.0 => Some((n as f64 - 0.5).max(1.0) / d),
-        (n, None) if n > 0 => {
-            return Err(format!(
-                "imaging::video: spread={n} needs the duration of {}, which ffprobe did not report",
-                path.display()
-            ))
+    let rate = |duration: Option<f64>| -> Result<Option<f64>, String> {
+        match (opts.spread, duration) {
+            (n, Some(d)) if n > 0 && d > 0.0 => Ok(Some((n as f64 - 0.5).max(1.0) / d)),
+            (n, _) if n > 0 => Err(format!("imaging::video: spread={n} needs the duration of {}, which it does not record", path.display())),
+            _ => Ok(opts.fps),
         }
-        _ => opts.fps,
     };
-
-    let mut out = Vec::new();
-    stream_frames(path, w, h, fps.map(|f| format!("fps={f}")), opts.max_frames, &mut |_, px| {
-        out.push(Rgb8 { w, h, px: px.to_vec() });
-        true
-    })?;
-    if out.is_empty() {
-        return Err(format!("imaging::video: ffmpeg produced no frames for {}", path.display()));
+    let native = videocodec::probe(path).and_then(|info| {
+        let fps = rate(info.duration).map_err(videocodec::Error::Invalid)?;
+        let mut picker = Picker::new(fps, opts.max_frames);
+        videocodec::decode(path, &mut |f| picker.push(f))?;
+        Ok(picker.finish())
+    });
+    let frames = match native {
+        Ok(frames) => frames,
+        Err(videocodec::Error::Invalid(m)) | Err(videocodec::Error::Io(m)) => return Err(format!("imaging::video: {m}")),
+        Err(e) => {
+            let fallback = external(path, &e)?;
+            let fps = rate(Some(fallback.duration))?;
+            ffmpeg::decode(path, fallback.w, fallback.h, fps, opts.max_frames)?
+        }
+    };
+    if frames.is_empty() {
+        return Err(format!("imaging::video: {} holds no frames", path.display()));
     }
-    Ok(out)
+    Ok(frames)
+}
+
+/// How close to the midpoint of two frames an instant counts as a tie.
+const TIE_SECONDS: f64 = 1e-3;
+
+/// The output instants of a frame-rate resample, each taking the source frame
+/// nearest to it; or every frame when no rate is asked for.
+struct Picker {
+    fps: Option<f64>,
+    max: usize,
+    out: Vec<Rgb8>,
+    /// The previous source frame and its time.
+    prev: Option<(f64, Rgb8)>,
+    /// The interval between the last two source frames: how long the last one is shown.
+    interval: Option<f64>,
+    /// The time of the first source frame (output instants count from it).
+    start: Option<f64>,
+}
+
+impl Picker {
+    fn new(fps: Option<f64>, max_frames: u32) -> Picker {
+        Picker { fps, max: if max_frames == 0 { usize::MAX } else { max_frames as usize }, out: Vec::new(), prev: None, interval: None, start: None }
+    }
+
+    fn full(&self) -> bool {
+        self.out.len() >= self.max
+    }
+
+    /// The next output instant, relative to the stream's own clock.
+    fn next_instant(&self, fps: f64) -> f64 {
+        self.start.unwrap_or(0.0) + self.out.len() as f64 / fps
+    }
+
+    /// Take one decoded frame; whether more are wanted.
+    fn push(&mut self, f: videocodec::Frame) -> bool {
+        let frame = Rgb8 { w: f.w, h: f.h, px: f.rgb };
+        let Some(fps) = self.fps else {
+            self.out.push(frame);
+            return !self.full();
+        };
+        self.start.get_or_insert(f.time);
+        if let Some((prev_time, prev)) = &self.prev {
+            self.interval = Some(f.time - prev_time);
+            // Every instant nearer the previous frame than this one belongs to it, and so does a tie (as
+            // ffmpeg's `fps` filter fills a gap with the frame before it). A tie is judged to the precision of
+            // the coarsest common container clock, Matroska's millisecond, which rounds frame times.
+            let midpoint = (prev_time + f.time) / 2.0;
+            while !self.full() && self.next_instant(fps) <= midpoint + TIE_SECONDS {
+                self.out.push(prev.clone());
+            }
+        }
+        self.prev = Some((f.time, frame));
+        !self.full()
+    }
+
+    /// The instants the last frame covers: those before the end of its display,
+    /// one source interval after it starts (a lone frame covers one output instant).
+    fn finish(mut self) -> Vec<Rgb8> {
+        if let (Some(fps), Some((time, last))) = (self.fps, self.prev.take()) {
+            let shown_until = time + self.interval.unwrap_or(1.0 / fps) - 1e-9;
+            while !self.full() && self.next_instant(fps) < shown_until {
+                self.out.push(last.clone());
+            }
+        }
+        self.out
+    }
 }
 
 /// A video stream's metadata, as the container reports it.
@@ -132,426 +167,143 @@ pub fn decode_frames_rgb8(path: &Path, opts: &VideoDecodeOpts) -> Result<Vec<Rgb
 pub struct VideoMeta {
     pub w: u32,
     pub h: u32,
-    /// Average frame rate (`avg_frame_rate`, the exact rational evaluated).
+    /// Average frame rate.
     pub fps: f64,
-    /// Frames in the stream (`nb_frames`, counted by decoding when the
-    /// container does not record it).
+    /// Frames in the stream (counted when the container does not record it).
     pub frames: u64,
-    /// The stream's duration in seconds (the container's when the stream has
-    /// none, `frames / fps` when neither does).
+    /// The stream's duration in seconds.
     pub duration: f64,
 }
 
-/// The first video stream's [`VideoMeta`], via `ffprobe`.
+/// The first video stream's [`VideoMeta`].
 pub fn probe_video(path: &Path) -> Result<VideoMeta, String> {
-    let probe = |entries: &str, count: bool| -> Result<serde_json::Value, String> {
-        let mut cmd = Command::new("ffprobe");
-        cmd.args(["-v", "error", "-select_streams", "v:0"]);
-        if count {
-            cmd.arg("-count_frames");
+    match videocodec::probe(path) {
+        Ok(info) => {
+            let fps = info.fps.filter(|f| *f > 0.0).ok_or_else(|| format!("imaging::video: {} reports no frame rate", path.display()))?;
+            let frames = info.frames.unwrap_or(0);
+            if frames == 0 {
+                return Err(format!("imaging::video: {} has no frames", path.display()));
+            }
+            Ok(VideoMeta { w: info.w, h: info.h, fps, frames, duration: info.duration.filter(|d| *d > 0.0).unwrap_or(frames as f64 / fps) })
         }
-        let out = cmd.args(["-show_entries", entries, "-of", "json"]).arg(path).output().map_err(|e| format!("imaging::video: running ffprobe: {e}"))?;
-        if !out.status.success() {
-            return Err(format!("imaging::video: ffprobe could not read {}: {}", path.display(), String::from_utf8_lossy(&out.stderr).trim()));
-        }
-        serde_json::from_slice(&out.stdout).map_err(|e| format!("imaging::video: ffprobe output for {}: {e}", path.display()))
-    };
-    let v = probe("stream=width,height,avg_frame_rate,nb_frames,duration:format=duration", false)?;
-    let stream = &v["streams"][0];
-    let num = |x: &serde_json::Value| x.as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| x.as_f64());
-    let w = stream["width"].as_u64().ok_or_else(|| format!("imaging::video: {} has no video stream", path.display()))? as u32;
-    let h = stream["height"].as_u64().unwrap_or(0) as u32;
-    let fps = stream["avg_frame_rate"]
-        .as_str()
-        .and_then(|r| r.split_once('/'))
-        .and_then(|(a, b)| Some((a.parse::<f64>().ok()?, b.parse::<f64>().ok()?)))
-        .filter(|(a, b)| *a > 0.0 && *b > 0.0)
-        .map(|(a, b)| a / b)
-        .ok_or_else(|| format!("imaging::video: {} reports no frame rate", path.display()))?;
-    let frames = match num(&stream["nb_frames"]).filter(|n| *n > 0.0) {
-        Some(n) => n as u64,
-        None => num(&probe("stream=nb_read_frames", true)?["streams"][0]["nb_read_frames"]).filter(|n| *n > 0.0).ok_or_else(|| format!("imaging::video: {} has no frames", path.display()))? as u64,
-    };
-    let duration = num(&stream["duration"]).or_else(|| num(&v["format"]["duration"])).filter(|d| *d > 0.0).unwrap_or(frames as f64 / fps);
-    Ok(VideoMeta { w, h, fps, frames, duration })
+        Err(videocodec::Error::Io(m)) => Err(format!("imaging::video: {m}")),
+        Err(e) => external(path, &e),
+    }
+}
+
+/// [`probe_video`] for a file brain does not read itself: through `ffprobe`,
+/// or the reason it cannot be read at all.
+fn external(path: &Path, native: &videocodec::Error) -> Result<VideoMeta, String> {
+    if !ffmpeg_available() {
+        return Err(format!(
+            "imaging::video: {native}. brain reads AV1 video in WebM, Matroska and MP4 itself; install ffmpeg to read other formats"
+        ));
+    }
+    ffmpeg::probe_video(path)
 }
 
 /// Decode exactly the frames at `indices` (0-based, in decode order), in the
-/// order asked - an index may repeat. Frames are streamed and only the ones
-/// asked for are kept, and decoding stops after the last one, so a few
-/// frames of a long clip cost a few frames of memory. An index past the
-/// clip's end is an error naming it.
+/// order asked - an index may repeat. Only the asked frames are kept and
+/// decoding stops after the last one. An index past the clip's end is an
+/// error naming it.
 pub fn decode_frames_at(path: &Path, indices: &[u64]) -> Result<Vec<Rgb8>, String> {
-    if !ffmpeg_available() {
-        return Err("imaging::video: ffmpeg not found on PATH -- video file decoding needs the ffmpeg CLI".to_string());
-    }
-    let (w, h) = probe_size(path).ok_or_else(|| format!("imaging::video: ffprobe could not read the frame size of {}", path.display()))?;
     let Some(&last) = indices.iter().max() else { return Ok(Vec::new()) };
-    let mut kept: std::collections::BTreeMap<u64, Vec<u8>> = indices.iter().map(|&i| (i, Vec::new())).collect();
-    stream_frames(path, w, h, None, 0, &mut |i, px| {
-        if let Some(slot) = kept.get_mut(&i) {
-            *slot = px.to_vec();
+    let mut kept: std::collections::BTreeMap<u64, Option<Rgb8>> = indices.iter().map(|&i| (i, None)).collect();
+    let native = videocodec::decode(path, &mut |f| {
+        if let Some(slot) = kept.get_mut(&f.index) {
+            *slot = Some(Rgb8 { w: f.w, h: f.h, px: f.rgb.clone() });
         }
-        i < last
-    })?;
-    indices
-        .iter()
-        .map(|i| match &kept[i] {
-            px if px.is_empty() => Err(format!("imaging::video: {} has no frame {i}", path.display())),
-            px => Ok(Rgb8 { w, h, px: px.clone() }),
-        })
-        .collect()
-}
-
-/// Run ffmpeg over `path` and hand each decoded `w x h` RGB frame to
-/// `on_frame(index, bytes)` until the stream ends, `max_frames` (if non-zero)
-/// are produced, or `on_frame` returns `false`. `vf` is an optional ffmpeg
-/// filter graph applied before conversion.
-fn stream_frames(path: &Path, w: u32, h: u32, vf: Option<String>, max_frames: u32, on_frame: &mut dyn FnMut(u64, &[u8]) -> bool) -> Result<(), String> {
-    let mut cmd = Command::new("ffmpeg");
-    cmd.arg("-v").arg("error").arg("-i").arg(path);
-    match vf {
-        Some(vf) => {
-            cmd.arg("-vf").arg(vf);
-        }
-        // Unfiltered: every decoded frame exactly once, so a frame's position
-        // in the pipe is its decode index.
-        None => {
-            cmd.args(["-fps_mode", "passthrough"]);
-        }
-    }
-    if max_frames > 0 {
-        cmd.arg("-frames:v").arg(max_frames.to_string());
-    }
-    // Raw RGB straight down a pipe: no container, no per-frame encode, and
-    // nothing written to disk. The frame size is fixed and known, so the
-    // stream is self-delimiting.
-    cmd.args(["-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]);
-    cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
-
-    let mut child = cmd.spawn().map_err(|e| format!("imaging::video: spawning ffmpeg: {e}"))?;
-    let mut stdout = child.stdout.take().expect("piped");
-    let frame_bytes = (w as usize) * (h as usize) * 3;
-    let mut buf = vec![0u8; frame_bytes];
-    let mut index = 0u64;
-    let mut stopped = false;
-    loop {
-        match read_exact_or_eof(&mut stdout, &mut buf)? {
-            0 => break,
-            n if n == frame_bytes => {
-                let more = on_frame(index, &buf);
-                index += 1;
-                if !more {
-                    stopped = true;
-                    break;
+        f.index < last
+    });
+    match native {
+        Ok(_) => {}
+        Err(videocodec::Error::Io(m)) => return Err(format!("imaging::video: {m}")),
+        Err(e) => {
+            let meta = external(path, &e)?;
+            ffmpeg::stream_frames(path, meta.w, meta.h, None, 0, &mut |i, px| {
+                if let Some(slot) = kept.get_mut(&i) {
+                    *slot = Some(Rgb8 { w: meta.w, h: meta.h, px: px.to_vec() });
                 }
-            }
-            n => return Err(format!("imaging::video: {} ended mid-frame ({n} of {frame_bytes} bytes)", path.display())),
+                i < last
+            })?;
         }
     }
-    if stopped {
-        // The rest of the stream is not wanted: stop ffmpeg rather than read it.
-        let _ = child.kill();
-        let _ = child.wait();
-        return Ok(());
-    }
-    let status = child.wait().map_err(|e| format!("imaging::video: waiting for ffmpeg: {e}"))?;
-    if !status.success() {
-        let mut err = String::new();
-        if let Some(mut e) = child.stderr.take() {
-            use std::io::Read;
-            let _ = e.read_to_string(&mut err);
-        }
-        return Err(format!("imaging::video: ffmpeg exited {status}: {err}"));
-    }
-    Ok(())
+    indices.iter().map(|i| kept[i].clone().ok_or_else(|| format!("imaging::video: {} has no frame {i}", path.display()))).collect()
 }
 
-/// Fill `buf`, returning how many bytes were read: `buf.len()` normally, `0`
-/// at a clean end of stream, anything else for a truncated final frame.
-fn read_exact_or_eof(r: &mut impl std::io::Read, buf: &mut [u8]) -> Result<usize, String> {
-    let mut got = 0;
-    while got < buf.len() {
-        match r.read(&mut buf[got..]) {
-            Ok(0) => break,
-            Ok(n) => got += n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(format!("imaging::video: reading ffmpeg output: {e}")),
-        }
-    }
-    Ok(got)
-}
-
-/// The video's pixel dimensions, via `ffprobe`.
+/// The video's pixel dimensions.
 pub fn probe_size(path: &Path) -> Option<(u32, u32)> {
-    let out = Command::new("ffprobe")
-        .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x"])
-        .arg(path)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let (w, h) = text.trim().split_once('x')?;
-    Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+    probe_video(path).ok().map(|m| (m.w, m.h))
 }
 
-/// The video's duration in seconds, via `ffprobe`.
+/// The video's duration in seconds.
 pub fn probe_duration(path: &Path) -> Option<f64> {
-    let out = Command::new("ffprobe")
-        .args(["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1"])
-        .arg(path)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&out.stdout).trim().parse::<f64>().ok().filter(|d| *d > 0.0)
+    probe_video(path).ok().map(|m| m.duration)
 }
 
-/// The video's own average frame rate, via `ffprobe`.
-///
-/// `None` when `ffprobe` is absent (it ships with `ffmpeg` but is a separate
-/// binary and can be packaged apart from it), when the stream reports no
-/// rate, or when the rate is not a positive number - every one of which is a
+/// The video's own average frame rate; `None` when it cannot be read - an
 /// "ask the caller instead" case, not an error worth failing a run over.
-/// Returned as the exact `num/den` rational ffmpeg carries, evaluated, so
-/// 24000/1001 comes back as 23.976 rather than 24.
 pub fn probe_fps(path: &Path) -> Option<f64> {
-    let out = Command::new("ffprobe")
-        .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=avg_frame_rate", "-of", "default=nw=1:nk=1"])
-        .arg(path)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let (num, den) = text.trim().split_once('/')?;
-    let (num, den) = (num.parse::<f64>().ok()?, den.parse::<f64>().ok()?);
-    (den > 0.0 && num > 0.0).then_some(num / den)
+    probe_video(path).ok().map(|m| m.fps)
 }
 
 // ---------------------------------------------------------------- encoding
 
-/// A sound track to mux alongside the picture, one plane per channel.
-///
-/// Planar rather than interleaved because that is how every generator in this
-/// workspace produces multi-channel audio, and [`audio::wav::write_multi`]
-/// takes it in exactly that shape.
-#[derive(Clone, Debug, PartialEq)]
-pub struct AudioTrack {
-    /// One `Vec<f32>` per channel, samples in `[-1, 1]`, all the same length.
-    pub channels: Vec<Vec<f32>>,
-    pub sample_rate: u32,
-}
+/// A sound track to carry with the picture: one plane per channel, samples in
+/// `[-1, 1]`.
+pub use videocodec::Audio as AudioTrack;
 
-impl AudioTrack {
-    pub fn samples_per_channel(&self) -> usize {
-        self.channels.first().map(Vec::len).unwrap_or(0)
-    }
-
-    /// Nothing to mux: no channels, or channels with no samples.
-    fn is_empty(&self) -> bool {
-        self.channels.is_empty() || self.samples_per_channel() == 0
-    }
-}
-
-/// Container/codec knobs for [`encode_frames`].
+/// Container and codec settings for [`encode_frames`].
+#[derive(Default)]
 pub struct VideoEncodeOpts {
-    /// x264 constant-rate factor: 0 lossless, 18 visually near-lossless, 51
-    /// worst. Ignored for containers that do not take an x264 stream (`.gif`).
-    pub crf: u32,
-    /// Where the numbered PPMs go when `ffmpeg` is missing or fails. `None` derives
-    /// `<output>.frames/` so the frames land beside the file the caller asked
-    /// for, not in a temp directory that the next reboot deletes.
-    pub frames_dir: Option<PathBuf>,
-    /// A sound track to carry in the same container.
-    ///
-    /// `None` writes a silent file, which is what every caller that has no
-    /// audio wants. `Some` adds a second input and an AAC stream - except for
-    /// `.gif`, which cannot hold sound at all and is left silent with a line
-    /// on stderr rather than failing a generation over a container choice.
-    ///
-    /// On the no-ffmpeg path the samples are NOT thrown away: they are
-    /// written as a WAV beside the numbered frames, and the printed command
-    /// muxes both. A generation that took an hour must not lose its audio
-    /// because the machine had no encoder.
+    /// The AV1 encoder's size/quality/time trade-off.
+    pub settings: videocodec::EncodeSettings,
+    /// A sound track to carry in the same file, coded as Opus. A `.gif`
+    /// cannot hold one; it is written silent with a line on stderr rather
+    /// than failing a generation over a container choice.
     pub audio: Option<AudioTrack>,
 }
 
-impl Default for VideoEncodeOpts {
-    fn default() -> VideoEncodeOpts {
-        VideoEncodeOpts { crf: 18, frames_dir: None, audio: None }
-    }
-}
-
-/// What [`encode_frames`] actually produced.
-///
-/// The two arms are both successes: a caller with `ffmpeg` gets a container, a
-/// caller without one gets the frames plus the command line. Returning an
-/// error for the second case would throw away a generation that may have taken
-/// an hour.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Encoded {
-    /// `ffmpeg` wrote the container at this path.
-    Video(PathBuf),
-    /// `ffmpeg` was not on `PATH`, or could not write the requested file. The
-    /// numbered PPMs are in `dir`; `command` is the invocation that turns them
-    /// into the requested file.
-    ///
-    /// `audio` is the WAV that was written beside them, or `None` when the
-    /// clip is silent - including when a track was generated but the
-    /// requested container carries no audio stream. It is the encoder's own
-    /// answer, so a caller telling a user where their sound went reports what
-    /// happened rather than what was attempted.
-    Frames { dir: PathBuf, command: String, audio: Option<PathBuf> },
-}
-
-/// Write `frames` as `frame_00001.ppm`, `frame_00002.ppm`, … into `dir`
-/// (created if needed) and return the `ffmpeg` command that would assemble
-/// them into `out` at `fps`.
-///
-/// Public and separately tested because it is the no-ffmpeg path: on a machine
-/// that HAS ffmpeg, [`encode_frames`] never reaches it, so a test that only
-/// drives `encode_frames` would leave the fallback unexercised exactly where it
-/// matters.
-pub fn write_frame_dir(frames: &[Rgb8], dir: &Path, out: &Path, fps: f64, crf: u32) -> Result<String, String> {
-    write_frame_dir_with_audio(frames, dir, out, fps, crf, None).map(|(command, _)| command)
-}
-
-/// [`write_frame_dir`] plus the sound track, written as `audio.wav` in the
-/// same directory and referenced by the returned command.
-///
-/// Returns `(command, the WAV it wrote)`. The second half is what it actually
-/// put on disk, not an echo of `audio`: a caller reporting to a user cannot
-/// otherwise distinguish "a track was offered" from "a file exists", and the
-/// two differ whenever [`encode_frames`] filtered the track against a
-/// container that carries no audio stream.
-///
-/// Separate from [`write_frame_dir`] so the long-standing no-audio signature
-/// keeps working unchanged for every caller that has no audio to write.
-pub fn write_frame_dir_with_audio(frames: &[Rgb8], dir: &Path, out: &Path, fps: f64, crf: u32, audio: Option<&AudioTrack>) -> Result<(String, Option<PathBuf>), String> {
-    let (w, h) = check_frames(frames)?;
-    std::fs::create_dir_all(dir).map_err(|e| format!("imaging::video: creating {}: {e}", dir.display()))?;
-    for (i, f) in frames.iter().enumerate() {
-        crate::codec::save_ppm(dir.join(format!("frame_{:05}.ppm", i + 1)), f)?;
-    }
-    let wav = audio.map(|_| dir.join("audio.wav"));
-    if let (Some(a), Some(p)) = (audio, wav.as_ref()) {
-        write_wav(a, p)?;
-    }
-    let args = ffmpeg_args(Frames::Dir(dir), out, fps, crf, w, h, wav.as_deref());
-    let command = std::iter::once("ffmpeg".to_string())
-        .chain(args.into_iter().map(|a| shell_quote(&a)))
-        .collect::<Vec<_>>()
-        .join(" ");
-    Ok((command, wav))
-}
-
-/// Write an [`AudioTrack`] as a WAV through the workspace's own writer.
-fn write_wav(a: &AudioTrack, path: &Path) -> Result<(), String> {
-    let planes: Vec<&[f32]> = a.channels.iter().map(Vec::as_slice).collect();
-    audio::wav::write_multi(path, &planes, a.sample_rate).map_err(|e| format!("imaging::video: writing {}: {e}", path.display()))
-}
-
-/// Encode RGB frames into a video file at `fps`.
-///
-/// Every frame must have the same non-zero dimensions. `-pix_fmt yuv420p` is
-/// forced for the H.264/VP9 containers, because the default for RGB input is
-/// `yuv444p`, which Safari, QuickTime and most browsers refuse to play - a
-/// file that "works" only in the tool that wrote it.
-///
-/// **Odd dimensions are padded, loudly.** 4:2:0 chroma subsampling needs even
-/// width and height; without the pad, libx264 rejects the stream outright and
-/// with some other encoders the last row/column is quietly dropped. One black
-/// row/column plus a line on stderr is the honest version of both.
-pub fn encode_frames(frames: &[Rgb8], path: &Path, fps: f64, opts: &VideoEncodeOpts) -> Result<Encoded, String> {
+/// Write `frames` at `fps` to `path`: AV1 (and Opus sound) in the container
+/// its extension names, or an animated GIF. Every frame must have the same
+/// non-zero dimensions.
+pub fn encode_frames(frames: &[Rgb8], path: &Path, fps: f64, opts: &VideoEncodeOpts) -> Result<PathBuf, String> {
     let (w, h) = check_frames(frames)?;
     if !(fps.is_finite() && fps > 0.0) {
         return Err(format!("imaging::video: fps must be finite and positive (got {fps})"));
     }
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    if ext == "gif" {
+        if opts.audio.is_some() {
+            eprintln!("imaging::video: a .gif carries no sound; the clip is written silent (use .mp4, .webm or .mkv to keep it)");
+        }
+        write_gif(frames, path, fps)?;
+        return Ok(path.to_path_buf());
+    }
+    let named = |e: videocodec::Error| format!("imaging::video: {}: {e}", path.display());
+    let mut writer = videocodec::VideoWriter::create(path, w, h, fps, opts.settings).map_err(named)?;
+    for f in frames {
+        writer.push(&f.px).map_err(named)?;
+    }
+    writer.finish(opts.audio.as_ref()).map_err(named)?;
+    Ok(path.to_path_buf())
+}
+
+fn write_gif(frames: &[Rgb8], path: &Path, fps: f64) -> Result<(), String> {
+    use image::codecs::gif::{GifEncoder, Repeat};
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(|e| format!("imaging::video: creating {}: {e}", dir.display()))?;
     }
-
-    // A container that cannot hold sound gets none, loudly - a `.gif` request
-    // is a container choice, not a reason to fail a generation that produced
-    // good audio.
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-    let audio = opts.audio.as_ref().filter(|a| !a.is_empty());
-    let audio = match (audio, audio_codec_for(&ext)) {
-        (Some(a), Some(_)) => Some(a),
-        (Some(_), None) => {
-            // An extensionless path renders `.{ext}` as a bare ".", which
-            // reads as a typo rather than as the reason the sound went away.
-            let container = if ext.is_empty() {
-                "an output path with no extension".to_string()
-            } else {
-                format!(".{ext}")
-            };
-            eprintln!("imaging::video: {container} carries no audio stream; the clip is written silent (use .mp4/.mkv/.mov/.webm to keep the sound)");
-            None
-        }
-        (None, _) => None,
-    };
-
-    if !ffmpeg_available() {
-        let dir = opts.frames_dir.clone().unwrap_or_else(|| frames_dir_for(path));
-        let (command, audio) = write_frame_dir_with_audio(frames, &dir, path, fps, opts.crf, audio)?;
-        return Ok(Encoded::Frames { dir, command, audio });
+    let file = std::fs::File::create(path).map_err(|e| format!("imaging::video: {}: {e}", path.display()))?;
+    let mut enc = GifEncoder::new_with_speed(std::io::BufWriter::new(file), 10);
+    enc.set_repeat(Repeat::Infinite).map_err(|e| format!("imaging::video: {}: {e}", path.display()))?;
+    let delay = image::Delay::from_saturating_duration(std::time::Duration::from_secs_f64(1.0 / fps));
+    for f in frames {
+        let rgba: Vec<u8> = f.px.as_chunks::<3>().0.iter().flat_map(|&[r, g, b]| [r, g, b, 255]).collect();
+        let buf = image::RgbaImage::from_raw(f.w, f.h, rgba).expect("the frame was checked");
+        enc.encode_frame(image::Frame::from_parts(buf, 0, 0, delay)).map_err(|e| format!("imaging::video: {}: {e}", path.display()))?;
     }
-
-    // Only the sound goes through a file; the picture is streamed.
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("brain-video-encode-{}-{n}", std::process::id()));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("imaging::video: creating {}: {e}", dir.display()))?;
-    let _cleanup = TempDirGuard(&dir);
-    let wav = audio.map(|_| dir.join("audio.wav"));
-    if let (Some(a), Some(p)) = (audio, wav.as_ref()) {
-        write_wav(a, p)?;
-    }
-    if !w.is_multiple_of(2) || !h.is_multiple_of(2) {
-        eprintln!("imaging::video: {w}x{h} has an odd dimension; padding to {}x{} so 4:2:0 chroma is representable", w.next_multiple_of(2), h.next_multiple_of(2));
-    }
-
-    let mut child = Command::new("ffmpeg")
-        .args(ffmpeg_args(Frames::RawStdin, path, fps, opts.crf, w, h, wav.as_deref()))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("imaging::video: spawning ffmpeg: {e}"))?;
-    let mut stdin = child.stdin.take().expect("stdin was piped");
-    // Written from a second thread while this one drains stderr, so neither pipe can fill and stall the other. A
-    // write error means ffmpeg stopped reading, which its exit status reports.
-    let out = std::thread::scope(|scope| {
-        scope.spawn(move || {
-            for f in frames {
-                if stdin.write_all(&f.px).is_err() {
-                    break;
-                }
-            }
-        });
-        child.wait_with_output()
-    })
-    .map_err(|e| format!("imaging::video: waiting for ffmpeg: {e}"))?;
-    if !out.status.success() {
-        // The frames and the sound are the expensive part; an encoder that cannot write this container (a build
-        // without the codec, a container it has no muxer for) gets the same answer as a missing one.
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let last = stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
-        eprintln!("imaging::video: ffmpeg exited {} writing {}: {last}; keeping the frames instead", out.status, path.display());
-        let dir = opts.frames_dir.clone().unwrap_or_else(|| frames_dir_for(path));
-        let (command, audio) = write_frame_dir_with_audio(frames, &dir, path, fps, opts.crf, audio)?;
-        return Ok(Encoded::Frames { dir, command, audio });
-    }
-    if !path.exists() {
-        return Err(format!("imaging::video: ffmpeg reported success but {} does not exist", path.display()));
-    }
-    Ok(Encoded::Video(path.to_path_buf()))
+    Ok(())
 }
 
 /// Same dimensions on every frame, at least one frame, nothing degenerate.
@@ -569,109 +321,134 @@ fn check_frames(frames: &[Rgb8]) -> Result<(u32, u32), String> {
     Ok((w, h))
 }
 
-/// `out.mp4` -> `out.mp4.frames`. Deliberately keeps the full file name rather
-/// than the stem, so two requests differing only in extension cannot collide.
-fn frames_dir_for(path: &Path) -> PathBuf {
-    let mut name = path.file_name().unwrap_or_else(|| std::ffi::OsStr::new("video")).to_os_string();
-    name.push(".frames");
-    path.parent().map(|p| p.join(&name)).unwrap_or_else(|| PathBuf::from(name))
-}
+/// The external decoder for input videos brain does not read itself.
+mod ffmpeg {
+    use std::path::Path;
+    use std::process::Command;
 
-/// The audio codec a container takes, or `None` for one that holds no sound.
-///
-/// Kept as an explicit table rather than letting `ffmpeg` pick a default,
-/// because its defaults differ by build: a WebM asked for AAC fails outright
-/// on some builds and silently drops the track on others, and "the clip came
-/// out silent on that machine" is exactly the failure this whole path exists
-/// to prevent.
-fn audio_codec_for(ext: &str) -> Option<&'static str> {
-    match ext {
-        "mp4" | "mov" | "m4v" | "mkv" => Some("aac"),
-        "webm" => Some("libopus"),
-        _ => None,
-    }
-}
+    use super::VideoMeta;
+    use crate::pixels::Rgb8;
 
-/// The one place the command line is built, so the fallback's printed command
-/// and the command this module runs itself cannot drift.
-///
-/// `audio_wav` is the sound track's file, already written. It becomes a
-/// SECOND `-i` input, which is why the video filter and codec flags below are
-/// all stream-qualified: an unqualified `-vf` with two inputs present is
-/// ambiguous.
-fn ffmpeg_args(input: Frames<'_>, out: &Path, fps: f64, crf: u32, w: u32, h: u32, audio_wav: Option<&Path>) -> Vec<String> {
-    let ext = out.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-    let acodec = audio_wav.and_then(|_| audio_codec_for(&ext));
-    let mut v: Vec<String> = vec!["-y".into()];
-    match input {
-        Frames::Dir(dir) => v.extend(["-framerate".into(), format!("{fps}"), "-i".into(), dir.join("frame_%05d.ppm").to_string_lossy().into_owned()]),
-        Frames::RawStdin => v.extend(
-            ["-f", "rawvideo", "-pix_fmt", "rgb24", "-s", &format!("{w}x{h}"), "-framerate", &format!("{fps}"), "-i", "-"].map(String::from),
-        ),
+    /// Every frame (or `fps` of them, nearest-sampled by ffmpeg's `fps` filter), at most `max_frames` (0: all).
+    pub(super) fn decode(path: &Path, w: u32, h: u32, fps: Option<f64>, max_frames: u32) -> Result<Vec<Rgb8>, String> {
+        let mut out = Vec::new();
+        stream_frames(path, w, h, fps.map(|f| format!("fps={f}")), max_frames, &mut |_, px| {
+            out.push(Rgb8 { w, h, px: px.to_vec() });
+            true
+        })?;
+        Ok(out)
     }
-    if let (Some(wav), Some(_)) = (audio_wav, acodec) {
-        v.push("-i".into());
-        v.push(wav.to_string_lossy().into_owned());
+
+    pub(super) fn probe_video(path: &Path) -> Result<VideoMeta, String> {
+        let probe = |entries: &str, count: bool| -> Result<serde_json::Value, String> {
+            let mut cmd = Command::new("ffprobe");
+            cmd.args(["-v", "error", "-select_streams", "v:0"]);
+            if count {
+                cmd.arg("-count_frames");
+            }
+            let out = cmd.args(["-show_entries", entries, "-of", "json"]).arg(path).output().map_err(|e| format!("imaging::video: running ffprobe: {e}"))?;
+            if !out.status.success() {
+                return Err(format!("imaging::video: ffprobe could not read {}: {}", path.display(), String::from_utf8_lossy(&out.stderr).trim()));
+            }
+            serde_json::from_slice(&out.stdout).map_err(|e| format!("imaging::video: ffprobe output for {}: {e}", path.display()))
+        };
+        let v = probe("stream=width,height,avg_frame_rate,nb_frames,duration:format=duration", false)?;
+        let stream = &v["streams"][0];
+        let num = |x: &serde_json::Value| x.as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| x.as_f64());
+        let w = stream["width"].as_u64().ok_or_else(|| format!("imaging::video: {} has no video stream", path.display()))? as u32;
+        let h = stream["height"].as_u64().unwrap_or(0) as u32;
+        let fps = stream["avg_frame_rate"]
+            .as_str()
+            .and_then(|r| r.split_once('/'))
+            .and_then(|(a, b)| Some((a.parse::<f64>().ok()?, b.parse::<f64>().ok()?)))
+            .filter(|(a, b)| *a > 0.0 && *b > 0.0)
+            .map(|(a, b)| a / b)
+            .ok_or_else(|| format!("imaging::video: {} reports no frame rate", path.display()))?;
+        let frames = match num(&stream["nb_frames"]).filter(|n| *n > 0.0) {
+            Some(n) => n as u64,
+            None => num(&probe("stream=nb_read_frames", true)?["streams"][0]["nb_read_frames"]).filter(|n| *n > 0.0).ok_or_else(|| format!("imaging::video: {} has no frames", path.display()))? as u64,
+        };
+        let duration = num(&stream["duration"]).or_else(|| num(&v["format"]["duration"])).filter(|d| *d > 0.0).unwrap_or(frames as f64 / fps);
+        Ok(VideoMeta { w, h, fps, frames, duration })
     }
-    if !w.is_multiple_of(2) || !h.is_multiple_of(2) {
-        // `pad` keeps the pixels the model produced and adds at most one black
-        // row/column; `scale` would resample every frame instead.
-        v.push("-vf".into());
-        v.push(format!("pad={}:{}:0:0", w.next_multiple_of(2), h.next_multiple_of(2)));
-    }
-    if ext != "gif" {
-        if matches!(ext.as_str(), "mp4" | "mov" | "m4v" | "mkv") {
-            v.push("-c:v".into());
-            v.push("libx264".into());
-            v.push("-crf".into());
-            v.push(crf.to_string());
+
+    /// Run ffmpeg over `path` and hand each decoded `w x h` RGB frame to
+    /// `on_frame(index, bytes)` until the stream ends, `max_frames` (if non-zero)
+    /// are produced, or `on_frame` returns `false`. `vf` is an optional ffmpeg
+    /// filter graph applied before conversion.
+    pub(super) fn stream_frames(path: &Path, w: u32, h: u32, vf: Option<String>, max_frames: u32, on_frame: &mut dyn FnMut(u64, &[u8]) -> bool) -> Result<(), String> {
+        let mut cmd = Command::new("ffmpeg");
+        cmd.arg("-v").arg("error").arg("-i").arg(path);
+        match vf {
+            Some(vf) => {
+                cmd.arg("-vf").arg(vf);
+            }
+            // Unfiltered: every decoded frame exactly once, so a frame's position
+            // in the pipe is its decode index.
+            None => {
+                cmd.args(["-fps_mode", "passthrough"]);
+            }
         }
-        v.push("-pix_fmt".into());
-        v.push("yuv420p".into());
+        if max_frames > 0 {
+            cmd.arg("-frames:v").arg(max_frames.to_string());
+        }
+        // Raw RGB straight down a pipe: no container, no per-frame encode, and
+        // nothing written to disk. The frame size is fixed and known, so the
+        // stream is self-delimiting.
+        cmd.args(["-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]);
+        cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    
+        let mut child = cmd.spawn().map_err(|e| format!("imaging::video: spawning ffmpeg: {e}"))?;
+        let mut stdout = child.stdout.take().expect("piped");
+        let frame_bytes = (w as usize) * (h as usize) * 3;
+        let mut buf = vec![0u8; frame_bytes];
+        let mut index = 0u64;
+        let mut stopped = false;
+        loop {
+            match read_exact_or_eof(&mut stdout, &mut buf)? {
+                0 => break,
+                n if n == frame_bytes => {
+                    let more = on_frame(index, &buf);
+                    index += 1;
+                    if !more {
+                        stopped = true;
+                        break;
+                    }
+                }
+                n => return Err(format!("imaging::video: {} ended mid-frame ({n} of {frame_bytes} bytes)", path.display())),
+            }
+        }
+        if stopped {
+            // The rest of the stream is not wanted: stop ffmpeg rather than read it.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(());
+        }
+        let status = child.wait().map_err(|e| format!("imaging::video: waiting for ffmpeg: {e}"))?;
+        if !status.success() {
+            let mut err = String::new();
+            if let Some(mut e) = child.stderr.take() {
+                use std::io::Read;
+                let _ = e.read_to_string(&mut err);
+            }
+            return Err(format!("imaging::video: ffmpeg exited {status}: {err}"));
+        }
+        Ok(())
     }
-    if let Some(codec) = acodec {
-        v.push("-c:a".into());
-        v.push(codec.into());
-        // Deliberately no `-shortest`: the caller has already made the two
-        // tracks the same length, and `-shortest` would let a sound track
-        // that came out a few samples short silently drop a video FRAME -
-        // trading an inaudible tail for a visible one.
-        v.push("-map".into());
-        v.push("0:v:0".into());
-        v.push("-map".into());
-        v.push("1:a:0".into());
-    }
-    v.push(out.to_string_lossy().into_owned());
-    v
-}
-
-/// Where `ffmpeg` reads the picture from.
-#[derive(Clone, Copy)]
-enum Frames<'a> {
-    /// The numbered PPMs of a frame directory: the printed fallback command,
-    /// run later by whoever has an encoder.
-    Dir(&'a Path),
-    /// Raw RGB on stdin: what [`encode_frames`] feeds, needing no frame files
-    /// and no image decoder in the `ffmpeg` build.
-    RawStdin,
-}
-
-/// Minimal POSIX single-quote quoting - the printed fallback command has to be
-/// copy-pasteable even when a path has a space in it.
-fn shell_quote(s: &str) -> String {
-    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./%=:,+".contains(c)) {
-        return s.to_string();
-    }
-    format!("'{}'", s.replace('\'', r"'\''"))
-}
-
-/// Removes the temp frame directory on drop, success or error alike — so a
-/// mid-decode failure never leaks numbered PPM files into the system temp
-/// directory.
-struct TempDirGuard<'a>(&'a std::path::Path);
-impl Drop for TempDirGuard<'_> {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(self.0);
+    
+    /// Fill `buf`, returning how many bytes were read: `buf.len()` normally, `0`
+    /// at a clean end of stream, anything else for a truncated final frame.
+    fn read_exact_or_eof(r: &mut impl std::io::Read, buf: &mut [u8]) -> Result<usize, String> {
+        let mut got = 0;
+        while got < buf.len() {
+            match r.read(&mut buf[got..]) {
+                Ok(0) => break,
+                Ok(n) => got += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(format!("imaging::video: reading ffmpeg output: {e}")),
+            }
+        }
+        Ok(got)
     }
 }
 
@@ -679,296 +456,93 @@ impl Drop for TempDirGuard<'_> {
 mod tests {
     use super::*;
 
-    /// Real, not mocked: encodes a tiny synthetic clip with `ffmpeg` itself
-    /// (`-f lavfi -i testsrc`, a built-in test-pattern source — no fixture
-    /// file needed), then decodes it back through THIS module and checks the
-    /// frame count and shape are exactly what was asked for. Skips cleanly
-    /// if `ffmpeg` is not installed in this environment, matching
-    /// [`ffmpeg_available`]'s own contract.
-    #[test]
-    fn round_trips_a_real_synthetic_clip() {
-        if !ffmpeg_available() {
-            brain_testutil::skip_unavailable("ffmpeg not installed");
-            return;
-        }
-        let dir = std::env::temp_dir().join("brain-imaging-video-test");
-        let _ = std::fs::create_dir_all(&dir);
-        let clip = dir.join("tiny.mp4");
-        let enc = Command::new("ffmpeg")
-            .args(["-y", "-f", "lavfi", "-i", "testsrc=size=32x16:rate=4:duration=2", "-pix_fmt", "yuv420p"])
-            .arg(&clip)
-            .output()
-            .expect("spawning ffmpeg to encode the test clip");
-        assert!(enc.status.success(), "encoding the test clip failed: {}", String::from_utf8_lossy(&enc.stderr));
-
-        let frames = decode_frames(&clip, &VideoDecodeOpts { fps: Some(2.0), max_frames: 3, spread: 0 }).expect("decode_frames on a real clip must succeed");
-        assert_eq!(frames.len(), 3, "fps=2 duration=2 max_frames=3 must yield exactly 3 frames");
-        for (hwc, w, h) in &frames {
-            assert_eq!((*w, *h), (32, 16), "frame dims must match the encoded clip");
-            assert_eq!(hwc.len(), 32 * 16 * 3, "HWC f32 buffer must be w*h*3");
-            assert!(hwc.iter().all(|v| (0.0..=1.0).contains(v)), "HWC values must be in [0,1]");
-        }
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A synthetic clip whose frames all differ: a moving bright block on a
-    /// ramp. "All frames identical" is the failure mode a video pipeline hides
-    /// behind "it ran", so the fixture itself has to be non-constant.
-    fn moving_block(n: usize, w: u32, h: u32) -> Vec<Rgb8> {
+    /// A ramp that brightens with time under a moving bar: every frame differs.
+    fn moving(n: usize, w: u32, h: u32) -> Vec<Rgb8> {
         (0..n)
-            .map(|f| {
-                let mut px = vec![0u8; (w * h * 3) as usize];
-                for y in 0..h {
-                    for x in 0..w {
-                        let i = ((y * w + x) * 3) as usize;
-                        let on = (x as usize + f).is_multiple_of(w as usize);
-                        px[i] = if on { 255 } else { (x * 255 / w.max(1)) as u8 };
-                        px[i + 1] = (y * 255 / h.max(1)) as u8;
-                        px[i + 2] = (f * 20) as u8;
-                    }
-                }
-                Rgb8::new(w, h, px).unwrap()
+            .map(|i| {
+                let px = (0..h)
+                    .flat_map(|y| (0..w).flat_map(move |x| if (x as usize + 3 * i).is_multiple_of(w as usize) { [255, 255, 255] } else { [(i * 8) as u8 + 20, (y * 255 / h) as u8, (x * 255 / w) as u8] }))
+                    .collect();
+                Rgb8 { w, h, px }
             })
             .collect()
     }
 
-    /// The real path: encode with the real `ffmpeg`, then decode the result
-    /// back through this module's own [`decode_frames`] and check the count,
-    /// the dimensions, and that the frames are not all the same picture.
-    #[test]
-    fn encodes_a_real_playable_clip() {
-        if !ffmpeg_available() {
-            brain_testutil::skip_unavailable("ffmpeg not installed");
-            return;
-        }
-        let dir = std::env::temp_dir().join("brain-imaging-video-encode-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        let out = dir.join("clip.mp4");
-        let frames = moving_block(8, 32, 16);
-        let got = encode_frames(&frames, &out, 8.0, &VideoEncodeOpts::default()).expect("encode");
-        assert_eq!(got, Encoded::Video(out.clone()));
-        assert!(out.metadata().expect("output exists").len() > 0);
-
-        let back = decode_frames(&out, &VideoDecodeOpts { fps: Some(8.0), max_frames: 8, spread: 0 }).expect("decode back");
-        assert_eq!(back.len(), 8, "8 frames in, 8 frames out");
-        assert_eq!((back[0].1, back[0].2), (32, 16));
-        let d: f32 = back[0].0.iter().zip(&back[7].0).map(|(a, b)| (a - b).abs()).sum();
-        assert!(d > 1.0, "first and last decoded frames are identical - the clip is static");
-        let _ = std::fs::remove_dir_all(&dir);
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("brain-imaging-video-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(name)
     }
 
-    /// A 440 Hz sine on the left channel and a 660 Hz one on the right, so
-    /// the two channels are genuinely different signals. A mux test fed the
-    /// SAME samples to both channels could not tell a working stereo path
-    /// from one that copied channel 0 twice.
-    fn stereo_tone(seconds: f32, rate: u32) -> AudioTrack {
-        let n = (seconds * rate as f32) as usize;
-        let tone = |hz: f32| -> Vec<f32> { (0..n).map(|i| (std::f32::consts::TAU * hz * i as f32 / rate as f32).sin() * 0.5).collect() };
-        AudioTrack { channels: vec![tone(440.0), tone(660.0)], sample_rate: rate }
-    }
-
-    /// The real mux path, verified by asking `ffprobe` what streams the file
-    /// actually ended up with - not by trusting `ffmpeg`'s exit code.
-    ///
-    /// The whole defect this guards against is a clip that encodes fine and
-    /// plays silent, which every "did the command succeed" check passes.
+    /// What brain writes it reads back without any external tool: every
+    /// container, every frame, at the size written, in order.
     #[test]
-    fn a_muxed_clip_really_carries_an_audio_stream() {
-        if !ffmpeg_available() {
-            brain_testutil::skip_unavailable("ffmpeg not installed");
-            return;
-        }
-        let dir = std::env::temp_dir().join("brain-imaging-video-audio-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        let out = dir.join("clip.mp4");
-        let frames = moving_block(16, 32, 16);
-        let opts = VideoEncodeOpts { audio: Some(stereo_tone(2.0, 16_000)), ..Default::default() };
-        let got = encode_frames(&frames, &out, 8.0, &opts).expect("encode with audio");
-        assert_eq!(got, Encoded::Video(out.clone()));
-
-        let probe = Command::new("ffprobe")
-            .args(["-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_type,channels,sample_rate", "-of", "default=nw=1"])
-            .arg(&out)
-            .output()
-            .expect("spawning ffprobe");
-        let text = String::from_utf8_lossy(&probe.stdout);
-        assert!(text.contains("codec_type=audio"), "the muxed clip has no audio stream at all (ffprobe said: {text:?})");
-        assert!(text.contains("channels=2"), "the muxed clip is not stereo (ffprobe said: {text:?})");
-
-        // The picture must survive the second input: an unqualified filter or
-        // a missing `-map` can drop the video stream instead of the audio.
-        let back = decode_frames(&out, &VideoDecodeOpts { fps: Some(8.0), max_frames: 16, spread: 0 }).expect("decode the muxed clip back");
-        assert_eq!(back.len(), 16, "muxing audio must not change the frame count");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Without `ffmpeg` the samples must still reach the disk, and the printed
-    /// command must reference the WAV that holds them - the "never throw away
-    /// a generation for want of an encoder" contract, extended to sound.
-    #[test]
-    fn the_no_ffmpeg_fallback_writes_the_audio_and_names_it_in_the_command() {
-        let dir = std::env::temp_dir().join("brain-imaging-video-audio-fallback");
-        let _ = std::fs::remove_dir_all(&dir);
-        let frames = moving_block(4, 8, 8);
-        let track = stereo_tone(0.5, 16_000);
-        let (cmd, _) = write_frame_dir_with_audio(&frames, &dir, Path::new("out.mp4"), 8.0, 18, Some(&track)).expect("fallback write");
-
-        let wav = dir.join("audio.wav");
-        assert!(wav.exists(), "the fallback must write the sound track, not discard it");
-        assert!(cmd.contains("audio.wav"), "the printed command must mux the WAV it just wrote: {cmd}");
-        assert!(cmd.contains("-c:a"), "the printed command must select an audio codec: {cmd}");
-
-        // Round trip the WAV through the workspace reader: a file of the right
-        // NAME holding the wrong samples would pass every check above.
-        // `wav::read` downmixes to mono, so the CHANNEL COUNT is read from the
-        // fmt chunk (a fixed offset in this writer's own canonical header) and
-        // the sample count from the mono frames it returns, which is the
-        // per-channel length either way.
-        let raw = std::fs::read(&wav).expect("read the wav bytes");
-        assert_eq!(u16::from_le_bytes([raw[22], raw[23]]), 2, "the written wav must be stereo");
-        let back = audio::wav::read(&wav).expect("parse the written wav");
-        assert_eq!(back.sample_rate, 16_000);
-        assert_eq!(back.samples.len(), track.samples_per_channel(), "every sample must reach the file");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The fallback must report the WAV it actually wrote, and report nothing
-    /// when there was no sound.
-    ///
-    /// A caller cannot otherwise tell: the track it handed in was already
-    /// filtered against the container by [`encode_frames`], so "I passed
-    /// audio" and "a WAV reached the disk" are different questions. `ltxv`
-    /// prints "the generated sound is <path> - it is NOT lost" off this
-    /// answer, and answering from the first question prints that
-    /// reassurance for a file that does not exist.
-    #[test]
-    fn the_fallback_reports_the_wav_it_wrote_and_nothing_when_silent() {
-        let base = std::env::temp_dir().join("brain-imaging-video-audio-reported");
-        let _ = std::fs::remove_dir_all(&base);
-        let frames = moving_block(4, 8, 8);
-        let track = stereo_tone(0.5, 16_000);
-
-        let loud = base.join("loud");
-        let (cmd, wav) =
-            write_frame_dir_with_audio(&frames, &loud, Path::new("out.mp4"), 8.0, 18, Some(&track)).expect("fallback write");
-        let wav = wav.expect("a sound track that was written must be reported");
-        assert!(wav.exists(), "the reported path must be the file that was written, not a guess: {}", wav.display());
-        assert_eq!(wav, loud.join("audio.wav"));
-        assert!(cmd.contains("audio.wav"), "the printed command must mux the WAV it reported: {cmd}");
-
-        let silent = base.join("silent");
-        let (cmd, wav) =
-            write_frame_dir_with_audio(&frames, &silent, Path::new("out.mp4"), 8.0, 18, None).expect("fallback write");
-        assert!(wav.is_none(), "no sound track means there is nothing to report");
-        assert!(!cmd.contains("audio.wav"), "a silent clip's command must not name a WAV: {cmd}");
-        assert!(!silent.join("audio.wav").exists(), "a silent clip must not leave a stray WAV behind");
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    /// An `ffmpeg` that is present but fails to write the file (here: a
-    /// container it has no muxer for) must not take the generation with it:
-    /// the frames and the sound land in `<output>.frames/` with the command,
-    /// exactly as when `ffmpeg` is missing.
-    #[test]
-    fn a_failing_ffmpeg_keeps_the_frames_and_the_sound() {
-        if !ffmpeg_available() {
-            brain_testutil::skip_unavailable("ffmpeg not installed");
-            return;
-        }
-        let base = std::env::temp_dir().join(format!("brain-imaging-video-failing-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let out = base.join("clip.nosuchcontainer");
-        let frames = moving_block(4, 8, 8);
-        let opts = VideoEncodeOpts { audio: Some(stereo_tone(0.5, 16_000)), ..Default::default() };
-        match encode_frames(&frames, &out, 8.0, &opts).expect("a failed encode is not a lost generation") {
-            Encoded::Frames { dir, command, .. } => {
-                assert_eq!(dir, frames_dir_for(&out));
-                assert!(dir.join("frame_00004.ppm").exists(), "every frame must be kept in {}", dir.display());
-                assert!(command.starts_with("ffmpeg "), "{command}");
+    fn written_clips_read_back_in_process() {
+        let frames = moving(12, 48, 32);
+        for name in ["c.mp4", "c.webm", "c.mkv"] {
+            let path = scratch(name);
+            let track = AudioTrack { channels: vec![vec![0.1; 8000]], sample_rate: 16_000 };
+            encode_frames(&frames, &path, 24.0, &VideoEncodeOpts { audio: Some(track), ..Default::default() }).expect("encode");
+            let meta = probe_video(&path).expect("probe");
+            assert_eq!((meta.w, meta.h, meta.frames), (48, 32, 12), "{name}: {meta:?}");
+            assert!((meta.fps - 24.0).abs() < 1e-9, "{name}: {meta:?}");
+            let back = decode_frames_rgb8(&path, &VideoDecodeOpts { fps: None, max_frames: 0, spread: 0 }).expect("decode");
+            assert_eq!(back.len(), 12, "{name}");
+            let d = |a: &Rgb8, b: &Rgb8| a.px.iter().zip(&b.px).map(|(x, y)| x.abs_diff(*y) as u64).sum::<u64>();
+            // Each decoded frame is nearest the frame written at its place.
+            for (i, f) in back.iter().enumerate() {
+                let nearest = (0..frames.len()).min_by_key(|&j| d(f, &frames[j])).unwrap();
+                assert_eq!(nearest, i, "{name}: decoded frame {i} looks like written frame {nearest}");
             }
-            other => panic!("ffmpeg cannot write a .nosuchcontainer file, yet the encode reported {other:?}"),
         }
-        let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// yuv420p cannot represent odd dimensions, so the encoder pads. The
-    /// contract is that the file EXISTS and decodes at the padded size, not
-    /// that it silently keeps the odd one.
+    /// Resampling takes, at each output instant, the source frame nearest it;
+    /// `max_frames` truncates.
     #[test]
-    fn odd_dimensions_are_padded_not_dropped() {
-        if !ffmpeg_available() {
-            brain_testutil::skip_unavailable("ffmpeg not installed");
-            return;
+    fn resampling_picks_the_nearest_frame_and_stops_at_the_cap() {
+        let frames = moving(24, 32, 16);
+        let path = scratch("rate.webm");
+        encode_frames(&frames, &path, 24.0, &VideoEncodeOpts::default()).expect("encode");
+        let all = decode_frames_rgb8(&path, &VideoDecodeOpts { fps: None, max_frames: 0, spread: 0 }).expect("all");
+        let four = decode_frames_rgb8(&path, &VideoDecodeOpts { fps: Some(4.0), max_frames: 0, spread: 0 }).expect("4 fps");
+        // One second at 4 fps: the instants 0, 0.25, 0.5 and 0.75 s are source frames 0, 6, 12 and 18.
+        assert_eq!(four.len(), 4);
+        for (k, f) in four.iter().enumerate() {
+            assert!(f.px == all[k * 6].px, "the {k}th 4 fps frame is not source frame {}", k * 6);
         }
-        let dir = std::env::temp_dir().join("brain-imaging-video-odd-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        let out = dir.join("odd.mp4");
-        encode_frames(&moving_block(4, 7, 5), &out, 4.0, &VideoEncodeOpts::default()).expect("encode odd dims");
-        let back = decode_frames(&out, &VideoDecodeOpts { fps: Some(4.0), max_frames: 4, spread: 0 }).expect("decode back");
-        assert_eq!((back[0].1, back[0].2), (8, 6), "odd dims must be padded up, not truncated");
-        let _ = std::fs::remove_dir_all(&dir);
+        let capped = decode_frames_rgb8(&path, &VideoDecodeOpts { fps: Some(48.0), max_frames: 5, spread: 0 }).expect("capped");
+        assert_eq!(capped.len(), 5);
+        // At twice the source rate every source frame is shown twice.
+        assert!(capped[0].px == capped[1].px && capped[2].px == capped[3].px && capped[1].px != capped[2].px);
     }
 
-    /// The no-ffmpeg path, driven directly so it is covered on a machine that
-    /// DOES have ffmpeg: every frame on disk as a numbered PPM, and a command
-    /// string that actually runs.
     #[test]
-    fn the_frame_directory_fallback_writes_frames_and_a_runnable_command() {
-        let root = std::env::temp_dir().join("brain-imaging-video-fallback-test");
-        let _ = std::fs::remove_dir_all(&root);
-        let out = root.join("clip.mp4");
-        let frames = moving_block(5, 16, 8);
-        let dir = root.join("clip.mp4.frames");
-        let cmd = write_frame_dir(&frames, &dir, &out, 12.0, 18).expect("fallback write");
-
-        let mut names: Vec<String> = std::fs::read_dir(&dir)
-            .expect("frames dir")
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect();
-        names.sort();
-        assert_eq!(names, ["frame_00001.ppm", "frame_00002.ppm", "frame_00003.ppm", "frame_00004.ppm", "frame_00005.ppm"]);
-        // The frames must be the real pictures, readable by the normal loader.
-        let img = crate::codec::load(dir.join("frame_00003.ppm")).expect("load a fallback frame");
-        assert_eq!((img.w, img.h), (16, 8));
-        assert_eq!(img.px, frames[2].px);
-
-        // The printed command must name the input pattern, the frame rate and
-        // the output - a fallback message that does not actually work is worse
-        // than none.
-        assert!(cmd.starts_with("ffmpeg "), "{cmd}");
-        assert!(cmd.contains("frame_%05d.ppm"), "{cmd}");
-        assert!(cmd.contains("-framerate 12"), "{cmd}");
-        assert!(cmd.contains("yuv420p"), "{cmd}");
-        assert!(cmd.ends_with(&out.to_string_lossy().into_owned()), "{cmd}");
-        if ffmpeg_available() {
-            let st = Command::new("sh").arg("-c").arg(&cmd).output().expect("run the printed command");
-            assert!(st.status.success(), "the printed fallback command failed: {}", String::from_utf8_lossy(&st.stderr));
-            assert!(out.exists(), "the printed fallback command produced no file");
-        }
-        let _ = std::fs::remove_dir_all(&root);
+    fn a_gif_is_an_animated_gif() {
+        let path = scratch("anim.gif");
+        encode_frames(&moving(5, 16, 8), &path, 10.0, &VideoEncodeOpts::default()).expect("gif");
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[..6], b"GIF89a");
+        let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).unwrap();
+        use image::AnimationDecoder;
+        assert_eq!(decoder.into_frames().count(), 5);
     }
 
-    /// Mismatched frame sizes are the classic way a frame list turns into a
-    /// corrupt container, and ffmpeg's own error for it is unreadable.
     #[test]
     fn mismatched_frames_and_empty_input_are_clean_errors() {
-        let mut frames = moving_block(2, 8, 8);
-        frames.push(Rgb8::new(4, 4, vec![0; 48]).unwrap());
-        let never = std::env::temp_dir().join("brain-never-written.mp4");
+        let mut frames = moving(2, 8, 8);
+        frames.push(Rgb8 { w: 4, h: 4, px: vec![0; 48] });
+        let never = scratch("never.mp4");
         let e = encode_frames(&frames, &never, 8.0, &VideoEncodeOpts::default()).unwrap_err();
         assert!(e.contains("frame 2 is 4x4"), "{e}");
         let e = encode_frames(&[], &never, 8.0, &VideoEncodeOpts::default()).unwrap_err();
         assert!(e.contains("no frames"), "{e}");
+        let e = encode_frames(&moving(1, 8, 8), &scratch("x.avi"), 8.0, &VideoEncodeOpts::default()).unwrap_err();
+        assert!(e.contains(".webm"), "{e}");
     }
 
     #[test]
     fn missing_file_is_a_clean_error() {
-        if !ffmpeg_available() {
-            brain_testutil::skip_unavailable("ffmpeg not installed");
-            return;
-        }
         let err = decode_frames(Path::new("/nonexistent/brain-video-test.mp4"), &VideoDecodeOpts::default()).unwrap_err();
         assert!(err.contains("does not exist"), "expected a clear missing-file error, got: {err}");
     }

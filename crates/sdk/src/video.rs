@@ -79,11 +79,10 @@ impl Video {
         &self.frames
     }
 
-    /// Encode and write the clip (`imaging::video::encode_frames` - `ffmpeg`
-    /// when available, else numbered PPM frames beside `path`; see that
-    /// function's own doc for the no-`ffmpeg` fallback contract). The
-    /// extension picks the container the same way [`crate::Image::save`]
-    /// picks an image codec.
+    /// Encode and write the clip (`imaging::video::encode_frames`): AV1 in
+    /// `.mp4`, `.mov`, `.mkv` or `.webm`, or an animated `.gif`, written by
+    /// brain itself. The extension picks the container the same way
+    /// [`crate::Image::save`] picks an image codec.
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
         let rgb8: Vec<imaging::Rgb8> =
             self.frames.iter().map(|px| imaging::Rgb8::new(self.width, self.height, px.clone())).collect::<std::result::Result<_, String>>().map_err(Error::Backend)?;

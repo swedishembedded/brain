@@ -39,9 +39,8 @@ Required (one of):
                            that changes scene part way through (see Scenes).
                            --scene carries its own length and prompt, so it
                            cannot be combined with --prompt/--frames
-  --output-path <file>     .mp4 / .mkv / .webm / .gif; without ffmpeg the
-                           frames are written to <file>.frames/ and the
-                           command that finishes the job is printed
+  --output-path <file>     .mp4 / .mov / .mkv / .webm (AV1 video, Opus
+                           sound) or .gif, written by brain itself
 
 Sampling (defaults are a small smoke-test clip, see ltxv::pipeline::GenOpts):
   --frames <N>              video frames, must be 1 + 8k (default 9). Any
@@ -202,11 +201,9 @@ Audio:
   re-uploads it per forward, so expect most of a large machine's RAM and
   several times the wall clock. The banner names whichever arm is running.
 
-  Output is 16 kHz stereo, muxed into .mp4/.mkv/.mov/.webm. A .gif is written
-  silent with a line on stderr, since the container holds no audio stream.
-  Without ffmpeg the sound is written as audio.wav beside the numbered frames
-  and the printed command muxes both - a generation is never thrown away for
-  want of an encoder.
+  Output is 16 kHz stereo, coded as Opus in .mp4/.mov/.mkv/.webm. A .gif is
+  written silent with a line on stderr, since the container holds no audio
+  stream.
 
   Any --frames length works. Past one denoising window the audio latent
   crosses each seam exactly as the video latent does - the previous window's
@@ -302,13 +299,13 @@ It is NOT a pixel-space resampler: the refinement is a diffusion pass, so it
 adds detail the source frames do not contain, and it answers to --prompt.
 
 Required:
-  --input <file>             the clip to upscale (anything ffmpeg reads). Its
+  --input <file>             the clip to upscale (AV1 in .mp4/.mkv/.webm, or
+                             anything an installed ffmpeg reads). Its
                              width and height must be multiples of 32 and its
                              frame count of the form 1 + 8k, which is what
                              this pipeline's own output always is
-  --output-path <file>       .mp4 / .mkv / .webm / .gif; without ffmpeg the
-                             frames are written to <file>.frames/ and the
-                             command that finishes the job is printed
+  --output-path <file>       .mp4 / .mov / .mkv / .webm (AV1) or .gif, written
+                             by brain itself
 
 Refinement:
   --prompt <text>            what the clip shows. STRONGLY recommended: the
@@ -481,7 +478,8 @@ a 32-pixel grid - and it is refused rather than trimmed, because trimming
 would desync it from a mask sequence produced by a separate run.
 
 Required:
-  --input <file>            the clip to edit (anything ffmpeg reads)
+  --input <file>            the clip to edit (AV1 in .mp4/.mkv/.webm, or
+                            anything an installed ffmpeg reads)
   --mask <dir>              a `brain/sam2-maskseq/1` mask-sequence directory:
                             one 8-bit PNG per source frame at the source
                             resolution, plus a masks.json giving the file
@@ -500,8 +498,8 @@ Required:
                             the regenerated region in the context of the
                             carried one. Identity comes from the prompt; no
                             face crop or per-subject embedding enters here.
-  --output-path <file>      .mp4 / .mkv / .webm / .gif; without ffmpeg the
-                            frames are written as numbered PPMs
+  --output-path <file>      .mp4 / .mov / .mkv / .webm (AV1) or .gif, written
+                            by brain itself
 
 Sampling:
   --strength <S>            how hard the mask's conditioning region is pinned
@@ -782,29 +780,12 @@ fn t2v(args: &[String]) -> Result<(), String> {
         .as_ref()
         .map(|a| format!(", {:.2}s of {} Hz audio in {} channels", a.seconds(), a.sample_rate, a.channels.len()))
         .unwrap_or_default();
-    let has_audio = video.audio.is_some();
     let track = video.audio.map(|a| imaging::video::AudioTrack { channels: a.channels, sample_rate: a.sample_rate });
     let (width, height) = (video.width, video.height);
     let frames: Vec<imaging::Rgb8> = video.frames.into_iter().map(|px| imaging::Rgb8::new(width, height, px)).collect::<Result<_, _>>()?;
     let enc_opts = imaging::video::VideoEncodeOpts { audio: track, ..Default::default() };
-    match imaging::video::encode_frames(&frames, std::path::Path::new(&out), video.fps as f64, &enc_opts)? {
-        imaging::video::Encoded::Video(p) => {
-            eprintln!("ltxv: wrote {} ({}x{}, {} frames at {} fps{audio_desc})", p.display(), video.width, video.height, frames.len(), video.fps);
-        }
-        imaging::video::Encoded::Frames { dir, command, audio } => {
-            eprintln!("ltxv: ffmpeg is not on PATH, so the {} frames are numbered PPMs in {}", frames.len(), dir.display());
-            // Reported from what the encoder WROTE, never from whether the
-            // pipeline produced sound: a container that carries no audio
-            // stream drops the track, and reassuring the user it is "NOT
-            // lost" is then the one moment they would stop looking for it.
-            match &audio {
-                Some(wav) => eprintln!("ltxv: the generated sound is {} - it is NOT lost, the command below muxes it in", wav.display()),
-                None if has_audio => eprintln!("ltxv: the generated sound was DROPPED - re-run with an --output-path ending in .mp4/.mkv/.mov/.webm to keep it"),
-                None => {}
-            }
-            eprintln!("ltxv: finish the job with:\n  {command}");
-        }
-    }
+    let written = imaging::video::encode_frames(&frames, std::path::Path::new(&out), video.fps as f64, &enc_opts)?;
+    eprintln!("ltxv: wrote {} ({}x{}, {} frames at {} fps{audio_desc})", written.display(), video.width, video.height, frames.len(), video.fps);
     crate::run_record::write_run_record(
         &out,
         "ltxv t2v",
@@ -934,15 +915,8 @@ fn upscale(args: &[String]) -> Result<(), String> {
     // and are the largest buffer this command holds; see `t2v`'s own note.
     let (out_w, out_h, out_fps) = (video.width, video.height, video.fps);
     let frames: Vec<imaging::Rgb8> = video.frames.into_iter().map(|px| imaging::Rgb8::new(out_w, out_h, px)).collect::<Result<_, _>>()?;
-    match imaging::video::encode_frames(&frames, std::path::Path::new(&out), out_fps as f64, &Default::default())? {
-        imaging::video::Encoded::Video(p) => {
-            eprintln!("ltxv upscale: wrote {} ({out_w}x{out_h}, {} frames at {out_fps} fps)", p.display(), frames.len());
-        }
-        imaging::video::Encoded::Frames { dir, command, audio: _ } => {
-            eprintln!("ltxv upscale: ffmpeg is not on PATH, so the {} frames are numbered PPMs in {}", frames.len(), dir.display());
-            eprintln!("ltxv upscale: finish the job with:\n  {command}");
-        }
-    }
+    let written = imaging::video::encode_frames(&frames, std::path::Path::new(&out), out_fps as f64, &Default::default())?;
+    eprintln!("ltxv upscale: wrote {} ({out_w}x{out_h}, {} frames at {out_fps} fps)", written.display(), frames.len());
     crate::run_record::write_run_record(
         &out,
         "ltxv upscale",
@@ -958,7 +932,7 @@ fn upscale(args: &[String]) -> Result<(), String> {
 /// Masked video-to-video: the clip and its mask sequence in, the same clip
 /// with one region redrawn out.
 ///
-/// Shaped like [`upscale`] - decode the input with ffmpeg, hand the pipeline a
+/// Shaped like [`upscale`] - decode the input, hand the pipeline a
 /// `Video`, encode what comes back - because the difference between the two is
 /// entirely in what the pipeline does with the latent, not in the file
 /// handling.
@@ -1047,15 +1021,8 @@ fn v2v(args: &[String]) -> Result<(), String> {
 
     let (out_w, out_h, out_fps) = (video.width, video.height, video.fps);
     let frames: Vec<imaging::Rgb8> = video.frames.into_iter().map(|px| imaging::Rgb8::new(out_w, out_h, px)).collect::<Result<_, _>>()?;
-    match imaging::video::encode_frames(&frames, std::path::Path::new(&out), out_fps as f64, &Default::default())? {
-        imaging::video::Encoded::Video(p) => {
-            eprintln!("ltxv v2v: wrote {} ({out_w}x{out_h}, {} frames at {out_fps} fps, no sound - see --help)", p.display(), frames.len());
-        }
-        imaging::video::Encoded::Frames { dir, command, audio: _ } => {
-            eprintln!("ltxv v2v: ffmpeg is not on PATH, so the {} frames are numbered PPMs in {}", frames.len(), dir.display());
-            eprintln!("ltxv v2v: finish the job with:\n  {command}");
-        }
-    }
+    let written = imaging::video::encode_frames(&frames, std::path::Path::new(&out), out_fps as f64, &Default::default())?;
+    eprintln!("ltxv v2v: wrote {} ({out_w}x{out_h}, {} frames at {out_fps} fps, no sound - see --help)", written.display(), frames.len());
     crate::run_record::write_run_record(
         &out,
         "ltxv v2v",
@@ -1158,15 +1125,8 @@ fn dfr(args: &[String]) -> Result<(), String> {
     );
 
     let frames: Vec<imaging::Rgb8> = video.frames.iter().map(|px| imaging::Rgb8::new(video.width, video.height, px.clone())).collect::<Result<_, _>>()?;
-    match imaging::video::encode_frames(&frames, std::path::Path::new(&out), video.fps as f64, &Default::default())? {
-        imaging::video::Encoded::Video(p) => {
-            eprintln!("ltxv dfr: wrote {} ({}x{}, {} frames at {} fps)", p.display(), video.width, video.height, frames.len(), video.fps);
-        }
-        imaging::video::Encoded::Frames { dir, command, audio: _ } => {
-            eprintln!("ltxv dfr: ffmpeg is not on PATH, so the {} frames are numbered PPMs in {}", frames.len(), dir.display());
-            eprintln!("ltxv dfr: finish the job with:\n  {command}");
-        }
-    }
+    let written = imaging::video::encode_frames(&frames, std::path::Path::new(&out), video.fps as f64, &Default::default())?;
+    eprintln!("ltxv dfr: wrote {} ({}x{}, {} frames at {} fps)", written.display(), video.width, video.height, frames.len(), video.fps);
     crate::run_record::write_run_record(
         &out,
         "ltxv dfr",

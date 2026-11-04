@@ -1,30 +1,39 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Decoding a video must not stage it on disk first.
-//!
-//! The decoder wrote every frame of the source as a PPM into a temp directory
-//! and then read them back, so pulling 24 frames out of a ten-second clip
-//! wrote 321 files and a few hundred megabytes to get them - and a caller
-//! asking for a handful of frames from a long capture paid for the whole
-//! thing, twice, in disk and in a `u8 -> file -> u8` round trip.
+//! Decoding a video streams it: frames go from the decoder to the caller
+//! without being staged on disk, a few frames of a long capture cost a few
+//! frames of work, a spread selection covers the whole clip, and frames are
+//! found by index exactly as a full decode orders them.
 //!
 //! Swedish Embedded AB implements media pipelines that stream rather than
 //! stage. If your team needs video decoding that scales to long captures on
 //! constrained machines, you can procure our services by sending an email to
 //! info@swedishembedded.com.
 
-use imaging::video::{decode_frames_rgb8, ffmpeg_available, VideoDecodeOpts};
+use imaging::video::{decode_frames_rgb8, encode_frames, VideoDecodeOpts, VideoEncodeOpts};
+use imaging::Rgb8;
 
-/// Make a clip with ffmpeg itself, so the test needs no committed fixture.
-fn synth(path: &std::path::Path, secs: u32, fps: u32, w: u32, h: u32) -> bool {
-    std::process::Command::new("ffmpeg")
-        .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i"])
-        .arg(format!("testsrc=size={w}x{h}:rate={fps}:duration={secs}"))
-        .arg(path)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+/// Write a clip with brain's own encoder, so the test needs no fixture and no
+/// external tool: a ramp that brightens frame by frame under a moving bar, so
+/// any two frames differ and late frames are far from early ones.
+fn synth(path: &std::path::Path, secs: u32, fps: u32, w: u32, h: u32) {
+    let n = secs * fps;
+    let frames: Vec<Rgb8> = (0..n)
+        .map(|i| {
+            let px = (0..h)
+                .flat_map(|y| {
+                    (0..w).flat_map(move |x| {
+                        let bar = (x + 4 * i) % w < w / 8;
+                        let level = (40 + 180 * i / n.max(1)) as u8;
+                        if bar { [250, 250, 250] } else { [level, (y * 200 / h) as u8 + 20, level / 2] }
+                    })
+                })
+                .collect();
+            Rgb8 { w, h, px }
+        })
+        .collect();
+    encode_frames(&frames, path, fps as f64, &VideoEncodeOpts::default()).expect("encode a test clip");
 }
 
 fn temp_dir_entry_count(dir: &std::path::Path) -> usize {
@@ -33,16 +42,9 @@ fn temp_dir_entry_count(dir: &std::path::Path) -> usize {
 
 #[test]
 fn decoding_a_clip_leaves_nothing_on_disk_and_spreads_its_picks() {
-    if !ffmpeg_available() {
-        brain_testutil::skip("ffmpeg not on PATH");
-        return;
-    }
     let tmp = std::env::temp_dir();
     let clip = tmp.join(format!("brain-vidstream-{}.mp4", std::process::id()));
-    if !synth(&clip, 6, 30, 160, 120) {
-        brain_testutil::skip("ffmpeg could not synthesise a test clip");
-        return;
-    }
+    synth(&clip, 6, 30, 160, 120);
     let before = temp_dir_entry_count(&tmp);
 
     // 8 frames out of 180, wanted evenly across the whole clip
@@ -77,18 +79,11 @@ fn decoding_a_clip_leaves_nothing_on_disk_and_spreads_its_picks() {
 /// orbit capped to its first N frames covers a fraction of the rotation.
 #[test]
 fn the_spread_reaches_the_end_of_the_clip() {
-    if !ffmpeg_available() {
-        brain_testutil::skip("ffmpeg not on PATH");
-        return;
-    }
     let clip = std::env::temp_dir().join(format!("brain-vidspan-{}.mp4", std::process::id()));
-    if !synth(&clip, 8, 30, 160, 120) {
-        brain_testutil::skip("ffmpeg could not synthesise a test clip");
-        return;
-    }
+    synth(&clip, 8, 30, 160, 120);
     let few = decode_frames_rgb8(&clip, &VideoDecodeOpts { fps: None, max_frames: 0, spread: 4 }).expect("decode");
     let all = decode_frames_rgb8(&clip, &VideoDecodeOpts { fps: Some(1.0), max_frames: 0, spread: 0 }).expect("decode");
-    // `testsrc` animates a counter, so the last spread frame should resemble
+    // The ramp brightens with time, so the last spread frame should resemble
     // the last of a dense sample far more than it resembles the first.
     let d = |a: &imaging::Rgb8, b: &imaging::Rgb8| -> u64 {
         a.px.iter().zip(&b.px).map(|(x, y)| x.abs_diff(*y) as u64).sum()
@@ -105,19 +100,12 @@ fn the_spread_reaches_the_end_of_the_clip() {
 /// returns exactly the frames at the asked indices - in the asked order,
 /// repeats included - equal to the same frames of a full decode, and refuses
 /// an index past the end. Covers a container that records its frame count
-/// (mp4) and one that does not (mkv, counted by decoding).
+/// (mp4) and one that does not (mkv, counted without decoding).
 #[test]
 fn frames_are_decoded_by_index_and_the_metadata_is_the_containers() {
-    if !ffmpeg_available() {
-        brain_testutil::skip("ffmpeg not on PATH");
-        return;
-    }
     for ext in ["mp4", "mkv"] {
         let clip = std::env::temp_dir().join(format!("brain-vidindex-{}.{ext}", std::process::id()));
-        if !synth(&clip, 3, 10, 64, 48) {
-            brain_testutil::skip("ffmpeg could not synthesise a test clip");
-            return;
-        }
+        synth(&clip, 3, 10, 64, 48);
         let meta = imaging::video::probe_video(&clip).expect("probe");
         assert_eq!((meta.w, meta.h, meta.frames), (64, 48, 30), "{ext}: {meta:?}");
         assert!((meta.fps - 10.0).abs() < 1e-9 && (meta.duration - 3.0).abs() < 0.05, "{ext}: {meta:?}");

@@ -2,8 +2,8 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Real end-to-end smoke test for the `video` capability, file to generation:
-//! a real video FILE (ffmpeg-encoded on the fly) -> `imaging::video::
-//! decode_frames` (real ffmpeg subprocess decode) -> `capability::blob::
+//! a real video FILE (AV1, encoded on the fly) -> `imaging::video::
+//! decode_frames` (the real decode) -> `capability::blob::
 //! video_blob` (the wire encoder) -> `capability::blob::decode_video`
 //! (the wire decoder) -> `OmniInner::generate_multimodal`'s `video`
 //! parameter -> `crate::mm::encode_video_frames` (real 2-frame temporal-
@@ -24,8 +24,7 @@
 //! test's own assertion (non-empty text) cannot check that without a
 //! reference.
 //!
-//! Real-weight-adjacent: skips cleanly when `BRAIN_QWEN3OMNIMOE_HF_DIR` is unset, or
-//! when `ffmpeg` is not installed (`imaging::video::ffmpeg_available`).
+//! Real-weight-adjacent: skips cleanly when `BRAIN_QWEN3OMNIMOE_HF_DIR` is unset.
 //! Expected to be slow (`crate::generate`'s own doc: every layer's weights
 //! stream fresh per token) -- kept to 2 tiny 32x32 frames and 2 new tokens to
 //! stay a smoke test, not a benchmark. Marked `#[ignore]`, matching every
@@ -34,11 +33,9 @@
 //! usage: `BRAIN_QWEN3OMNIMOE_HF_DIR=[path/to/Qwen3-Omni-30B-A3B-Instruct] \
 //!         cargo test --release -p brain-omni --test video_generate_e2e -- --ignored --nocapture`
 
-use std::process::Command;
-
 use capability::blob::decode_video;
 use capability::{Invocation, Provider};
-use imaging::video::{decode_frames, ffmpeg_available, VideoDecodeOpts};
+use imaging::video::{decode_frames, encode_frames, VideoDecodeOpts, VideoEncodeOpts};
 use qwen3omnimoe::caps::OmniProvider;
 
 #[test]
@@ -48,24 +45,15 @@ fn video_blob_generates_real_text_end_to_end() {
         brain_testutil::skip("BRAIN_QWEN3OMNIMOE_HF_DIR unset");
         return;
     };
-    if !ffmpeg_available() {
-        brain_testutil::skip_unavailable("ffmpeg not installed");
-        return;
-    }
 
-    // A real 2-second, 2fps synthetic clip via ffmpeg's built-in testsrc --
-    // 32x32 is the smallest size that clears one merged vision token
-    // (patch_size=16 x spatial_merge_size=2). Two color-changing halves so
-    // the two SAMPLED frames are visibly distinct.
+    // A real 1-second, 2fps clip - 32x32 is the smallest size that clears one
+    // merged vision token (patch_size=16 x spatial_merge_size=2). The two
+    // frames are different colours so the two SAMPLED frames are distinct.
     let dir = std::env::temp_dir().join("brain-omni-video-e2e-test");
     let _ = std::fs::create_dir_all(&dir);
     let clip = dir.join("clip.mp4");
-    let enc = Command::new("ffmpeg")
-        .args(["-y", "-f", "lavfi", "-i", "testsrc=size=32x32:rate=2:duration=1", "-pix_fmt", "yuv420p"])
-        .arg(&clip)
-        .output()
-        .expect("spawning ffmpeg to encode the test clip");
-    assert!(enc.status.success(), "encoding the test clip failed: {}", String::from_utf8_lossy(&enc.stderr));
+    let frames: Vec<imaging::Rgb8> = [[220u8, 40, 40], [40, 60, 220]].iter().map(|c| imaging::Rgb8 { w: 32, h: 32, px: c.repeat(32 * 32) }).collect();
+    encode_frames(&frames, &clip, 2.0, &VideoEncodeOpts::default()).expect("encode the test clip");
 
     let frames = decode_frames(&clip, &VideoDecodeOpts { fps: Some(2.0), max_frames: 2, spread: 0 }).expect("decode_frames on a real clip must succeed");
     assert_eq!(frames.len(), 2, "expected exactly 2 sampled frames");

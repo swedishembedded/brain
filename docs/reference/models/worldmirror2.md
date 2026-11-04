@@ -96,7 +96,8 @@ viewpoints, optimise it afterwards with [`splat fit`](splat.md).
 ## Options
 
 `--images` takes a directory, a comma-separated list, or a **video file**
-(`.mp4/.mov/.mkv/.webm/.avi/.m4v`, needs `ffmpeg` on `PATH`). A directory is
+(`.mp4/.mov/.mkv/.webm/.avi/.m4v`; AV1 is read in process, any other codec
+through `ffmpeg` when it is on `PATH`). A directory is
 read in sorted order, so a capture's own frame numbering is the order the
 model sees. PPM, PNG, JPEG, BMP and TIFF all decode; any aspect ratio is fine,
 since non-square inputs are resized and cropped automatically.

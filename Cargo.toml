@@ -55,6 +55,7 @@ default-members = [
     "crates/decide",
     "crates/decisions",
     "crates/audio",
+    "crates/videocodec",
     "crates/model",
     "crates/fly",
     "crates/flybody",
@@ -225,6 +226,7 @@ brain-data = { path = "crates/data" }
 brain-decide = { path = "crates/decide" }
 brain-decisions = { path = "crates/decisions" }
 brain-audio = { path = "crates/audio" }
+brain-videocodec = { path = "crates/videocodec" }
 brain-model = { path = "crates/model" }
 brain-connectome = { path = "crates/connectome" }
 brain-fly = { path = "crates/fly" }
@@ -467,6 +469,12 @@ tokio-stream = "0.1"
 opus = "0.4"
 ogg = "0.9"
 matroska-demuxer = "0.8"
+# Video (crates/videocodec): AV1 encoded by rav1e and decoded by rav1d, the
+# Rust port of dav1d - both BSD-2-Clause, both built without their assembly
+# (which needs nasm) so a build has no system dependency. AV1 is royalty-free
+# under the AOM patent license.
+rav1e = { version = "0.8", default-features = false, features = ["threading"] }
+rav1d = { version = "1.1", default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
 futures = "0.3"
 async-stream = "0.3"
 uuid = { version = "1", features = ["v4"] }
@@ -510,6 +518,16 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
+
+# The AV1 codecs and brain's colour conversion around them are optimized in
+# every profile: unoptimized, coding one small frame takes seconds, which makes
+# a debug test or `cargo run` of anything that writes video unusable.
+[profile.dev.package.rav1e]
+opt-level = 3
+[profile.dev.package.rav1d]
+opt-level = 3
+[profile.dev.package.brain-videocodec]
+opt-level = 3
 
 [profile.release]
 opt-level = 3

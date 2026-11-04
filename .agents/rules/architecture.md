@@ -55,8 +55,8 @@ layer 2 - accelerator seam: backends and the gpu-core facade
 layer 3 - training substrate and shared contracts
     atif, audio, audit, camera, capability, checkpoint, data, diffusion, dit, events, forecast,
     gguf, model, modelref, modelstore, neuro, onnx, optim, paramstore, promote, residency, rlcd,
-    search, shutdown, solve, stats, survival, testutil, timeseries, trace, vae, vision,
-    weightset
+    search, shutdown, solve, stats, survival, testutil, timeseries, trace, vae, videocodec,
+    vision, weightset
 layer 4 - models
     arcface, bisenet, campplus, captioner, chronos2, clip, codeformer, connectome, controlnet,
     cosyvoice, decide, decisions, deepseek2, deepseek2ocr, deepseekocr2, deepseekvl, diamond,

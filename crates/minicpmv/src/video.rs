@@ -105,13 +105,10 @@ mod tests {
 
     #[test]
     fn a_file_that_is_not_a_video_is_an_error_not_an_empty_clip() {
-        if !imaging::video::ffmpeg_available() {
-            return;
-        }
         let path = std::env::temp_dir().join(format!("brain-minicpmv-notavideo-{}.mp4", std::process::id()));
         std::fs::write(&path, b"this is not a video container").unwrap();
         let e = load_clip(&path, MAX_NUM_FRAMES, 1).unwrap_err();
-        assert!(e.contains("ffprobe"), "{e}");
+        assert!(e.contains("not a WebM, Matroska or MP4 file") || e.contains("ffprobe"), "{e}");
         std::fs::remove_file(&path).ok();
     }
 

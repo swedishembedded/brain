@@ -89,7 +89,7 @@ sequence, which is full of occlusion.
 
 | Flag | Effect |
 |---|---|
-| `--video` / `--frames` | a clip (needs ffmpeg), or a directory of numbered images |
+| `--video` / `--frames` | a clip (AV1 read in process, other codecs need ffmpeg), or a directory of numbered images |
 | `--point x,y` | the click that picks the object, in source pixels |
 | `--label 0\|1` | 0 = background click, 1 = foreground (default) |
 | `--prompt-frame n` | which frame the click sits on (default 0) |

@@ -7,7 +7,9 @@ The hard prerequisites are a **Rust toolchain** (install via
 `sudo apt install cmake build-essential`). brain is a self-contained Cargo
 workspace: no Python, no PyTorch, and one C library, libopus, which the
 build compiles from its bundled source so the speech-to-text API can decode
-Opus recordings (the format browsers record).
+Opus recordings (the format browsers record) and generated video carries Opus
+sound. Video is written and read in process: AV1 (royalty-free) in `.mp4`,
+`.mov`, `.mkv` and `.webm`, coded by the pure-Rust rav1e and rav1d.
 
 A few things are optional, needed only for specific paths:
 
@@ -15,6 +17,9 @@ A few things are optional, needed only for specific paths:
   required: brain also runs entirely on CPU (see [Hardware](../guides/hardware/choosing-hardware.md)).
 - **Node.js 18+ and a WebGPU-capable browser** (Chrome/Edge 113+) — only for
   the in-browser WebGPU demo (`make web/dev`).
+- **ffmpeg** - only to read an input video in a codec other than AV1 (an
+  H.264 phone clip, say); brain hands such a file to the `ffmpeg` CLI when it
+  is on `PATH`. Nothing brain writes needs it.
 - **Python + OpenVINO** — only for the Intel NPU export/run path
   (`brain npu …`) and a couple of benchmark reference scripts. `make
   environment/requirements` installs this tooling; the Rust engine itself never needs it,

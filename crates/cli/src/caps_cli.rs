@@ -446,14 +446,8 @@ fn save_blob(b: &Blob, path: &str) -> Result<(), String> {
                 .iter()
                 .map(|(hwc, w, h)| imaging::pixels::hwc_to_rgb8(hwc, *w, *h, 3, imaging::ChannelPolicy::ReplicateFirst))
                 .collect::<Result<_, _>>()?;
-            match imaging::video::encode_frames(&rgb, std::path::Path::new(path), fps, &Default::default())? {
-                imaging::video::Encoded::Video(_) => Ok(()),
-                imaging::video::Encoded::Frames { dir, command, audio: _ } => {
-                    eprintln!("brain: ffmpeg is not on PATH, so the {} frames are numbered PPMs in {}", rgb.len(), dir.display());
-                    eprintln!("brain: finish the job with:\n  {command}");
-                    Ok(())
-                }
-            }
+            imaging::video::encode_frames(&rgb, std::path::Path::new(path), fps, &Default::default())?;
+            Ok(())
         }
         Media::Image | Media::Mask => {
             let w = b.meta["w"].as_u64().ok_or("image blob missing w")? as u32;

@@ -299,15 +299,8 @@ fn t2v(args: &[String]) -> Result<(), String> {
         .iter()
         .map(|px| imaging::Rgb8::new(video.width, video.height, px.clone()))
         .collect::<Result<_, _>>()?;
-    match imaging::video::encode_frames(&frames, std::path::Path::new(&out), video.fps as f64, &Default::default())? {
-        imaging::video::Encoded::Video(p) => {
-            eprintln!("wan: wrote {} ({}x{}, {} frames at {} fps)", p.display(), video.width, video.height, frames.len(), video.fps);
-        }
-        imaging::video::Encoded::Frames { dir, command, audio: _ } => {
-            eprintln!("wan: ffmpeg is not on PATH, so the {} frames are numbered PPMs in {}", frames.len(), dir.display());
-            eprintln!("wan: finish the job with:\n  {command}");
-        }
-    }
+    let written = imaging::video::encode_frames(&frames, std::path::Path::new(&out), video.fps as f64, &Default::default())?;
+    eprintln!("wan: wrote {} ({}x{}, {} frames at {} fps)", written.display(), video.width, video.height, frames.len(), video.fps);
     crate::run_record::write_run_record(
         &out,
         "wan t2v",
