@@ -99,15 +99,22 @@ minimize `sum E[i, q_i]` subject to `sum bytes[i, q_i] <= budget`.
 - [x] Serving a plan: qwen3's engine takes a per-leaf `TierPolicy`
       (`Engine::check_tiers` refuses a split fused group);
       `serve::tests::mixed_tiers_serve_each_linear_at_its_own_tier`.
-- [x] A real checkpoint: Qwen3-0.6B, 240 ARC-Easy chat records calibrating
-      and 80 held out, on a P40 (wgpu). Midway budget (int8 to bf16, 12.5
-      bits/weight): serving-engine held-out loss plan 4.6848, f32 4.6974,
-      uniform int8 4.6789, so the plan was correctly not accepted: int8 is
-      lossless on this data and qwen3 serves no format below it, leaving
-      mixed precision nothing to win without a latency limit. The searched
-      per-leaf policy serves through `brain serve --weight-format` and answers
-      chat requests. A 100-step recovery adapter raised the trainer-build loss
-      (4.683 to 4.706): the teacher measures worse than the plan here.
+- [x] A real checkpoint, accepted: Qwen3-0.6B on WikiText-103 test
+      paragraphs as chat records (240 calibrating, 80 held out, no-think
+      template; held-out loss about 3.2 nats), P40 over wgpu, candidates f32,
+      bf16, int8 and nf4, midway budget. On the serving engine: plan 385 MB
+      (6.99 bits/weight, 92 nf4 and 104 int8 linears) 3.2412, uniform nf4 on
+      the same linears 275 MB 3.3262, f32 1762 MB 3.2101: accepted, three
+      quarters of nf4's loss for 40% more bytes. The frontier's 647 MB plan
+      measures 3.2111 with its products faster than f32's (14.6 ms against
+      19.4 ms at one row). Under `--max-latency-like int8` every plan but
+      all-int8 is too slow (nf4's tile decode is ~13x f32 on this card), so
+      that run correctly accepts nothing. The accepted plan serves through
+      `brain serve --weight-format` and writes fluent text.
+- [x] Evaluation data matters: on ARC-Easy chat records the base's held-out
+      loss is about 4.7 nats, the model is confidently wrong on that format,
+      and narrowing it lowers the loss (a 50% MLP prune measured 4.33). Search
+      on data the model predicts well.
 - [ ] qwen35: no engine scoring path yet (`served_loss` is `None`), so its
       plans are accepted on the trainer build.
 - [x] Host codecs row-parallel (fp8 quantize of a 3072 x 1024 tensor 1.31 s
@@ -154,10 +161,13 @@ minimize `sum E[i, q_i]` subject to `sum bytes[i, q_i] <= budget`.
       directory with the base's tokenizer, measured through the serving
       engine; `--recover-steps` distills an adapter over it.
 - [x] A real checkpoint: Qwen3-0.6B at 75% MLP width (d_ff 3072 to 2304,
-      596M to 530M parameters) on the ARC-Easy split above: held-out loss
-      4.6974 to 4.7235 on the serving engine, matching the trainer's zeroed
-      estimate to 1e-5; the pruned checkpoint serves through `brain serve
-      --checkpoint` and answers chat requests.
+      596M to 530M parameters) on the WikiText records above: held-out loss
+      3.2101 to 3.5217 on the serving engine, matching the trainer's zeroed
+      estimate; a 40-step recovery adapter brings it to 3.5038 (6% of the
+      gap). The pruned checkpoint serves through `brain serve --checkpoint`.
+- [ ] Real-weight control for the ranking (importance against random
+      channels at the same width; the tiny-model test holds it), and longer
+      recovery: 40 top-K distillation steps take about 20 minutes on a P40.
 - [ ] Attention heads and whole layers (a qwen3 config has one head count and
       depth for every layer: both need a per-layer config to prune unevenly).
 - [ ] Recovery by full fine-tune distillation, not only an adapter.
