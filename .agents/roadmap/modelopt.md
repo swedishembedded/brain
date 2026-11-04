@@ -115,8 +115,23 @@ minimize `sum E[i, q_i]` subject to `sum bytes[i, q_i] <= budget`.
       loss is about 4.7 nats, the model is confidently wrong on that format,
       and narrowing it lowers the loss (a 50% MLP prune measured 4.33). Search
       on data the model predicts well.
-- [ ] qwen35: no engine scoring path yet (`served_loss` is `None`), so its
-      plans are accepted on the trainer build.
+- [x] qwen35 and qwen35moe score through their serving engines
+      (`ChatTrainer::serving_engine`; `rl/tests/served_conformance.rs`).
+- [x] Llama and Qwen2 checkpoints (qwen3 config variants with their own
+      study rows) run end to end. deepseek-coder-1.3b-instruct on the same
+      WikiText records: uniform nf4 3.6068 measures BELOW f32 3.6146 and the
+      midway plan 3.6401, so the plan is refused. A code model scored on
+      prose sits far from a minimum of that loss, where the second-order
+      estimate (which assumes the gradient's mean is zero) misjudges
+      rounding; the measurement, not the estimate, decided.
+- [ ] Add the first-order term (`sum_j g_j (Q(w_j) - w_j)`, the mean
+      gradient over calibration batches) to the estimate, and accept it only
+      if it orders plans better on such off-distribution data.
+- [x] Tiled products reuse one scratch per role (`ops::tiled::Scratch`): one
+      recorded forward at nf4 no longer holds an f32 tile per linear (a 1.3B
+      model's scoring passed the 4 GB reclaim ceiling). Measured on the same
+      Qwen3-0.6B search, summed products at one row: nf4 198 ms -> 68 ms,
+      the plan 108 ms -> 43 ms, f32 18 ms.
 - [x] Host codecs row-parallel (fp8 quantize of a 3072 x 1024 tensor 1.31 s
       serial, 65 ms on 48 threads).
 
