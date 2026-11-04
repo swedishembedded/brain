@@ -5184,9 +5184,12 @@ mod tests {
         );
         // The m=1 KV-cache decode is a SEPARATE step list and a different
         // kernel variant - cover it too, or half the tier stays unproven.
+        // A bf16 linear at one row reads through the dense bf16 GEMV
+        // (`matmul_bf16_gemv`), which decodes the packed weight itself.
         let dec_names = kernel_names(&tierm, &tierm.decode_steps(Some(1), 0, None, None));
+        let tier_dispatch = |n: &&String| n.ends_with(tag) || (dt == Dtype::BF16 && n.starts_with("matmul_bf16_gemv"));
         assert_eq!(
-            dec_names.iter().filter(|n| n.ends_with(tag)).count(),
+            dec_names.iter().filter(tier_dispatch).count(),
             want,
             "the KV-cache decode path must dispatch {dt:?} too: {dec_names:?}"
         );
