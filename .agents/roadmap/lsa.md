@@ -20,6 +20,12 @@ head layout; clustering, selection and the sparse read are written once.
       bucket membership and selected keys against the reference's own output
       (`tools/goldens/lsa_dump_reference.py` -> `testdata/lsa/`); a budget
       past the context reproduces dense causal attention.
+- [x] Sparse attention over the paged KV cache (`paged_sparse_flash_decode`,
+      `model::paged_sparse`): each query row reads an explicit list of logical
+      positions through its block table, f32 or bf16 pools. Selecting every
+      key in order reproduces `paged_flash_decode` bit for bit; an LSA
+      selection matches the host oracle; a position past the sequence's live
+      keys is refused when packing and masked by the kernel (wgpu and Vulkan).
 
 ## Not yet done
 

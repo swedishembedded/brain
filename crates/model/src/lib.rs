@@ -45,6 +45,7 @@ pub mod finetune;
 pub mod flow;
 pub mod session;
 pub mod paged;
+pub mod paged_sparse;
 pub mod policy;
 pub mod readout;
 pub mod rowemit;

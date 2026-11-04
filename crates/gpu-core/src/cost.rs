@@ -636,6 +636,15 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
                 8 * rows * nh * hd + 2 * kv_elem_bytes * sequences * nkv * cap * hd,
             )
         }
+        // Paged attention over per-row selected key lists: params [rows,
+        // n_heads, n_kv_heads, head_dim, group, block_size, max_bt,
+        // sel_width]. The selected count lives in a storage buffer, so a row
+        // is costed at its selection width. One workgroup per (row, head)
+        // reads its own K/V rows, so K/V traffic is per head, not per KV head.
+        "paged_sparse_flash_decode" => {
+            let (rows, nh, hd, width) = (p(0)?, p(1)?, p(3)?, p(7)?);
+            f(rows * nh * width * (4 * hd + 6), 8 * rows * nh * hd + 8 * rows * nh * width * hd + 4 * rows * width)
+        }
         // Merge of the split-KV partials: params [batch, n_heads, head_dim,
         // n_splits]; a rescaled weighted sum of n_splits partial contexts.
         "paged_flash_decode_combine" | "paged_flash_decode_combine_i8" => {
@@ -1975,6 +1984,7 @@ mod tests {
             "paged_flash_prefill", "paged_flash_prefill_hd256", "paged_flash_prefill_i8",
             "paged_flash_decode", "paged_flash_decode_i8", "paged_flash_decode_split",
             "paged_flash_decode_split_i8", "paged_flash_decode_combine", "paged_flash_decode_combine_i8",
+            "paged_sparse_flash_decode",
         ] {
             assert!(covers(k), "kernel `{k}` has no cost formula");
         }
