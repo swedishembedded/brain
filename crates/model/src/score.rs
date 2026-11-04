@@ -45,6 +45,21 @@ pub fn score_dataset<M: Model>(m: &M, set: &Path, opts: &FitOpts) -> std::io::Re
     Ok(obj.eval(m, &mut data::rng::Rng::new(data::rng::random_seed()), 0))
 }
 
+/// Every example of a prepared split as owned `(tokens, targets)` buffers,
+/// `cfg.batch_size` examples a buffer (padding rows past the last example),
+/// targets in the model's `u32` form ([`crate::IGNORE`] where unsupervised).
+pub fn example_rows(split: &data::loader::TokenDataset, cfg: &data::loader::BatchConfig) -> Vec<(Vec<u32>, Vec<u32>)> {
+    let count = split.example_count().unwrap_or(0);
+    let mut out = Vec::new();
+    let mut first = 0;
+    while first < count {
+        let Some((x, y)) = split.example_rows(cfg, first) else { break };
+        out.push((x, crate::train::targets_to_u32(&y)));
+        first += cfg.batch_size.max(1);
+    }
+    out
+}
+
 /// `(records, supervised positions)` of the validation split of the prepared
 /// dataset in `set`, counted the way the evaluation walks it.
 pub fn supervised_positions(set: &Path, opts: &FitOpts) -> std::io::Result<(usize, usize)> {

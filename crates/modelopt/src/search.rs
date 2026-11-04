@@ -22,21 +22,30 @@ pub enum Budget {
     /// What every searched tensor takes at one tier: a plan at the size of a
     /// uniform deployment, searched to lose less than it does.
     Uniform(Dtype),
+    /// Halfway between the two smallest candidate tiers' uniform sizes: the
+    /// plan must beat the smaller uniform deployment by spending the extra
+    /// bytes where they buy the most.
+    Midway,
 }
 
 impl Budget {
-    /// The budget in bytes for `sites`.
-    pub fn bytes(self, sites: &[Site]) -> Result<u64, String> {
+    /// The budget in bytes for `sites` searched over `tiers`.
+    pub fn bytes(self, sites: &[Site], tiers: &[Dtype]) -> Result<u64, String> {
+        let uniform = |tier: Dtype| -> Option<u64> { sites.iter().flat_map(|s| &s.tensors).map(|t| Weight::packs(tier, t.n, t.k).then(|| Weight::bytes_for(tier, t.n, t.k))).sum() };
         match self {
             Budget::Bytes(b) => Ok(b),
             Budget::BitsPerWeight(bits) if bits.is_finite() && bits > 0.0 => Ok((bits * sites.iter().map(Site::numel).sum::<usize>() as f64 / 8.0) as u64),
             Budget::BitsPerWeight(bits) => Err(format!("a bits-per-weight budget must be finite and positive, got {bits}")),
-            Budget::Uniform(tier) => sites
-                .iter()
-                .flat_map(|s| &s.tensors)
-                .map(|t| Weight::packs(tier, t.n, t.k).then(|| Weight::bytes_for(tier, t.n, t.k)))
-                .sum::<Option<u64>>()
-                .ok_or_else(|| format!("a uniform {} budget: some searched tensor does not pack at that tier", tier.name())),
+            Budget::Uniform(tier) => uniform(tier).ok_or_else(|| format!("a uniform {} budget: some searched tensor does not pack at that tier", tier.name())),
+            Budget::Midway => {
+                let mut sizes: Vec<u64> = tiers.iter().filter_map(|&t| uniform(t)).collect();
+                sizes.sort_unstable();
+                sizes.dedup();
+                match sizes[..] {
+                    [smallest, next, ..] => Ok(smallest + (next - smallest) / 2),
+                    _ => Err("a midway budget needs two candidate tiers of different sizes that pack every searched tensor".into()),
+                }
+            }
         }
     }
 }
@@ -139,7 +148,7 @@ pub fn search_weights<M: Model>(m: &M, req: &SearchRequest, on_progress: &mut dy
         return Err("a calibration batch is also a held-out batch; the set that accepts a plan must not be the set it was ranked on".into());
     }
     let sites = sites(m)?;
-    let budget_bytes = req.budget.bytes(&sites)?;
+    let budget_bytes = req.budget.bytes(&sites, req.tiers)?;
     let table = sensitivity(m, &sites, req.tiers, req.calibration, on_progress)?;
     let plan = assign(&table, budget_bytes)?;
     on_progress(Progress::Measuring { label: "original".into() });

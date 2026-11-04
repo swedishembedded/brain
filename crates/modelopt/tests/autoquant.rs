@@ -111,16 +111,18 @@ fn searched_policy_beats_every_uniform_tier_within_its_budget() {
     let (calibration, held_out) = (as_batches(&calibration), as_batches(&held_out));
 
     let bytes_at = |tier: Dtype| sites.iter().flat_map(|s| &s.tensors).map(|t| model::ops::Weight::bytes_for(tier, t.n, t.k)).sum::<u64>();
-    let budget = (bytes_at(Dtype::I8) + bytes_at(Dtype::Q4)) / 2;
+    // `Budget::Midway`: halfway between the smallest uniform size (q4 and nf4 tie) and the next (int8).
+    let budget = bytes_at(Dtype::Q4) + (bytes_at(Dtype::I8) - bytes_at(Dtype::Q4)) / 2;
     let original = held_out_loss(&m, &held_out);
     let mut progress = Vec::new();
-    let report = search_weights(&m, &SearchRequest { tiers: &TIERS, budget: Budget::Bytes(budget), calibration: &calibration, held_out: &held_out }, &mut |p| progress.push(p)).expect("search");
+    let report = search_weights(&m, &SearchRequest { tiers: &TIERS, budget: Budget::Midway, calibration: &calibration, held_out: &held_out }, &mut |p| progress.push(p)).expect("search");
     let count = |f: fn(&Progress) -> bool| progress.iter().filter(|p| f(p)).count();
     assert_eq!(count(|p| matches!(p, Progress::Calibrated { .. })), calibration.len(), "one event per calibration batch");
     assert_eq!(count(|p| matches!(p, Progress::Estimated { .. })), sites.len(), "one event per site");
     let measured: Vec<&str> = progress.iter().filter_map(|p| if let Progress::Measuring { label } = p { Some(label.as_str()) } else { None }).collect();
     assert_eq!(measured.len(), 2 + report.baselines.len(), "the original, the plan and every baseline: {measured:?}");
     assert_eq!(held_out_loss(&m, &held_out), original, "a search must leave every weight as it was");
+    assert_eq!(report.budget_bytes, budget, "a midway budget");
     assert!(report.plan_bytes <= budget, "plan {} bytes over its budget {budget}", report.plan_bytes);
     assert_eq!(report.original_loss, original);
     let fitting: Vec<&str> = TIERS.iter().filter(|&&t| bytes_at(t) <= budget).map(|t| t.name()).collect();

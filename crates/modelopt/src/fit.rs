@@ -16,20 +16,6 @@ use model::{Batch, FitOpts, FitReport, Model};
 
 use crate::{held_out_loss, search_weights, Budget, Progress, Report, SearchRequest};
 
-/// Every example row of one split of a prepared dataset, `opts.batch_size`
-/// rows a batch, as owned token and target buffers.
-fn rows_of(split: &data::loader::TokenDataset, cfg: &data::loader::BatchConfig) -> Vec<(Vec<u32>, Vec<u32>)> {
-    let count = split.example_count().unwrap_or(0);
-    let mut out = Vec::new();
-    let mut first = 0;
-    while first < count {
-        let Some((x, y)) = split.example_rows(cfg, first) else { break };
-        out.push((x, model::train::targets_to_u32(&y)));
-        first += cfg.batch_size.max(1);
-    }
-    out
-}
-
 fn lm(owned: &[(Vec<u32>, Vec<u32>)]) -> Vec<Batch<'_>> {
     owned.iter().map(|(tokens, targets)| Batch::Lm { tokens, targets }).collect()
 }
@@ -54,7 +40,7 @@ pub struct SearchFit<'a> {
 impl ModelFit for SearchFit<'_> {
     fn fit<M: Model>(&mut self, model: M) -> std::io::Result<(FitReport, M)> {
         let (train, val, cfg, _) = model::load_dataset(self.dir, self.opts)?;
-        let (calibration, held_out) = (rows_of(&train, &cfg), rows_of(&val, &cfg));
+        let (calibration, held_out) = (model::example_rows(&train, &cfg), model::example_rows(&val, &cfg));
         let req = SearchRequest { tiers: self.tiers, budget: self.budget, calibration: &lm(&calibration), held_out: &lm(&held_out) };
         let report = search_weights(&model, &req, self.on_progress).map_err(std::io::Error::other)?;
         let fit = no_steps(report.original_loss);
@@ -76,7 +62,7 @@ pub struct MeasureFit<'a> {
 impl ModelFit for MeasureFit<'_> {
     fn fit<M: Model>(&mut self, model: M) -> std::io::Result<(FitReport, M)> {
         let (_, val, cfg, _) = model::load_dataset(self.dir, self.opts)?;
-        let held_out = rows_of(&val, &cfg);
+        let held_out = model::example_rows(&val, &cfg);
         if held_out.is_empty() {
             return Err(std::io::Error::other("the prepared dataset has no held-out rows to measure on"));
         }
