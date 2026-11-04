@@ -159,10 +159,14 @@ fn a_latency_limit_holds_the_plan_to_a_uniform_format_s_speed() {
         .out_dir(model.join("run"))
         .budget_like("bf16")
         .max_latency_like("int8")
+        .frontier(3)
         .run()
         .expect("the search runs");
     let r = &outcome.report;
     let limit = r.latency_limit_seconds.expect("a limit like uniform int8");
     assert!(r.plan_seconds.is_some_and(|s| s <= limit * (1.0 + 1e-9)), "plan {:?} s over its limit {limit} s", r.plan_seconds);
     assert!(r.baselines.iter().all(|b| b.seconds.is_some_and(|s| s <= limit * (1.0 + 1e-9))), "{:?}", r.baselines);
+    assert!(!r.frontier.is_empty(), "a frontier was asked for");
+    assert_eq!(outcome.frontier.len(), r.frontier.len(), "every frontier plan is measured as deployed");
+    assert!(r.frontier.iter().all(|p| p.plan_seconds.is_some_and(|s| s <= limit * (1.0 + 1e-9))), "the frontier honours the latency limit: {:?}", r.frontier);
 }

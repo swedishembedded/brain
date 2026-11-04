@@ -115,7 +115,7 @@ fn searched_policy_beats_every_uniform_tier_within_its_budget() {
     let budget = bytes_at(Dtype::Q4) + (bytes_at(Dtype::I8) - bytes_at(Dtype::Q4)) / 2;
     let original = held_out_loss(&m, &held_out);
     let mut progress = Vec::new();
-    let report = search_weights(&m, &SearchRequest { tiers: &TIERS, budget: Budget::Midway, calibration: &calibration, held_out: &held_out, timing: None }, &mut |p| progress.push(p)).expect("search");
+    let report = search_weights(&m, &SearchRequest { tiers: &TIERS, budget: Budget::Midway, calibration: &calibration, held_out: &held_out, timing: None, frontier_points: 0 }, &mut |p| progress.push(p)).expect("search");
     let count = |f: fn(&Progress) -> bool| progress.iter().filter(|p| f(p)).count();
     assert_eq!(count(|p| matches!(p, Progress::Calibrated { .. })), calibration.len(), "one event per calibration batch");
     assert_eq!(count(|p| matches!(p, Progress::Estimated { .. })), sites.len(), "one event per site");
@@ -149,7 +149,7 @@ fn a_search_refuses_to_accept_on_the_data_it_ranked_on() {
     let m = qwen3::Qwen::new(cfg.clone(), ROWS, cfg.block_size, &qwen3::init_weights(&cfg, rng.next_u64()));
     let owned = batches(&mut rng, 2, cfg.vocab, cfg.block_size);
     let both = as_batches(&owned);
-    let err = search_weights(&m, &SearchRequest { tiers: &TIERS, budget: Budget::BitsPerWeight(8.5), calibration: &both, held_out: &both[1..], timing: None }, &mut |_| {}).expect_err("overlapping sets are refused");
+    let err = search_weights(&m, &SearchRequest { tiers: &TIERS, budget: Budget::BitsPerWeight(8.5), calibration: &both, held_out: &both[1..], timing: None, frontier_points: 0 }, &mut |_| {}).expect_err("overlapping sets are refused");
     assert!(err.contains("held-out"), "{err}");
 }
 
@@ -178,7 +178,7 @@ fn a_latency_limit_keeps_a_slow_tier_out_of_the_plan() {
         Ok(rows as f64 * n as f64 * k as f64 * per_element(tier) * 1e-9)
     };
     let timing = modelopt::Timing { rows: 1, limit: Some(modelopt::LatencyLimit::Uniform(Dtype::I8)), time: &timer };
-    let report = search_weights(&m, &SearchRequest { tiers: &TIERS, budget: Budget::Midway, calibration: &calibration, held_out: &held_out, timing: Some(timing) }, &mut |_| {}).expect("search");
+    let report = search_weights(&m, &SearchRequest { tiers: &TIERS, budget: Budget::Midway, calibration: &calibration, held_out: &held_out, timing: Some(timing), frontier_points: 0 }, &mut |_| {}).expect("search");
     let limit = report.latency_limit_seconds.expect("a latency limit");
     let plan_seconds = report.plan_seconds.expect("the plan is timed");
     assert!(plan_seconds <= limit * (1.0 + 1e-9), "plan {plan_seconds} s over its limit {limit} s");
@@ -186,4 +186,29 @@ fn a_latency_limit_keeps_a_slow_tier_out_of_the_plan() {
     assert!(report.baselines.iter().all(|b| b.seconds.is_some_and(|s| s <= limit * (1.0 + 1e-9))), "a baseline fits both limits: {:?}", report.baselines);
     // tiny_i8 products: fused Q/K/V, wo, fused gate/up, down - four shapes, each at every tier it packs.
     assert_eq!(calls.get(), 4 * TIERS.len(), "every distinct shape is timed once per tier");
+}
+
+/// A frontier spans the candidates' range: its plans run smallest first,
+/// each within its own budget, the efficient ones are exactly those no
+/// smaller plan beats, and spending the largest budget measures no worse than
+/// the smallest.
+#[test]
+fn a_frontier_spans_the_trade_off_between_bytes_and_loss() {
+    let mut rng = data::rng::Rng::random();
+    let m = trained(&mut rng);
+    let (vocab, seq) = (m.config().vocab, m.config().block_size);
+    let calibration = batches(&mut rng, 2, vocab, seq);
+    let held_out = batches(&mut rng, 4, vocab, seq);
+    let (calibration, held_out) = (as_batches(&calibration), as_batches(&held_out));
+    let report = search_weights(&m, &SearchRequest { tiers: &TIERS, budget: Budget::Midway, calibration: &calibration, held_out: &held_out, timing: None, frontier_points: 6 }, &mut |_| {}).expect("search");
+    let f = &report.frontier;
+    assert!(f.len() >= 3, "distinct plans across the range: {f:?}");
+    assert!(f.windows(2).all(|w| w[0].plan_bytes < w[1].plan_bytes), "smallest first, no repeats: {f:?}");
+    assert!(f.iter().all(|p| p.plan_bytes <= p.budget_bytes));
+    for p in f {
+        let beaten = f.iter().any(|q| q.plan_bytes <= p.plan_bytes && q.loss < p.loss);
+        assert_eq!(p.efficient, !beaten, "{p:?}");
+    }
+    assert!(f.last().unwrap().loss <= f.first().unwrap().loss, "the largest plan measures no worse than the smallest: {f:?}");
+    assert!(f.first().unwrap().efficient, "nothing is smaller than the smallest plan");
 }

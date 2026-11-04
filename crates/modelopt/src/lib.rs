@@ -45,6 +45,6 @@ mod solve;
 pub use fit::{MeasureFit, SearchFit};
 pub use manifest::{sites, Site, Tensor};
 pub use measure::{held_out_loss, measure_policy};
-pub use search::{search_weights, Baseline, Budget, LatencyLimit, Progress, Report, SearchRequest, SiteReport, Timer, Timing};
+pub use search::{search_weights, Baseline, Budget, FrontierPoint, LatencyLimit, Progress, Report, SearchRequest, SiteReport, Timer, Timing};
 pub use sensitivity::{sensitivity, Choice, SiteChoices};
 pub use solve::{assign, policy_of, Assignment, Limits, Plan};

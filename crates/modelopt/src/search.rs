@@ -61,7 +61,8 @@ pub enum Progress {
     Estimated { site: usize, of: usize },
     /// Distinct product shape `shape` (1-based) of `of` is timed at every candidate tier.
     Timed { shape: usize, of: usize },
-    /// A plan (`"plan"`, `"original"`, a uniform tier's name) is about to be measured on the held-out batches.
+    /// A plan (`"plan"`, `"original"`, a uniform tier's name, `"frontier N"`) is about to be measured on the
+    /// held-out batches.
     Measuring { label: String },
 }
 
@@ -74,6 +75,23 @@ pub struct SearchRequest<'a, 'b> {
     pub held_out: &'a [Batch<'b>],
     /// Time every site's product on the device, and optionally limit the plan by it.
     pub timing: Option<Timing<'a>>,
+    /// Also solve and measure this many plans at budgets spread evenly from the
+    /// smallest candidate's uniform size to the largest's (0: none), for the
+    /// trade-off between bytes and loss ([`Report::frontier`]).
+    pub frontier_points: usize,
+}
+
+/// One plan of a frontier: its budget, what it takes and what it measured.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct FrontierPoint {
+    pub budget_bytes: u64,
+    pub plan_bytes: u64,
+    pub plan_seconds: Option<f64>,
+    pub loss: f64,
+    /// No other point of the frontier is both no larger and lower in loss.
+    pub efficient: bool,
+    /// The plan as a `--weight-format` value.
+    pub policy: String,
 }
 
 /// Seconds of one `rows x k` by `n x k` product at a tier on the target device.
@@ -145,6 +163,8 @@ pub struct Report {
     pub plan_loss: f64,
     /// Every candidate tier that fits the budget uniformly.
     pub baselines: Vec<Baseline>,
+    /// Plans at budgets across the candidates' range, smallest first, when asked for.
+    pub frontier: Vec<FrontierPoint>,
     pub calibration_batches: usize,
     pub held_out_batches: usize,
 }
@@ -217,6 +237,7 @@ pub fn search_weights<M: Model>(m: &M, req: &SearchRequest, on_progress: &mut dy
             Baseline { tier: tier.name(), bytes, seconds: seconds_at(tier), loss: measure_policy(m, &sites, &uniform, req.held_out) }
         })
         .collect();
+    let frontier = frontier(m, &sites, &table, req, latency_limit_seconds, bytes_at, on_progress);
     let elements: usize = sites.iter().map(Site::numel).sum();
     let site_reports = table
         .iter()
@@ -251,6 +272,7 @@ pub fn search_weights<M: Model>(m: &M, req: &SearchRequest, on_progress: &mut dy
         original_loss,
         plan_loss,
         baselines,
+        frontier,
         calibration_batches: req.calibration.len(),
         held_out_batches: req.held_out.len(),
     })
@@ -297,4 +319,31 @@ fn time_sites(sites: &[Site], tiers: &[Dtype], timing: &Timing, on_progress: &mu
         .iter()
         .map(|site| tiers.iter().filter_map(|&tier| products(site).iter().map(|&(n, k)| timed.get(&(n, k, tier)).copied()).sum::<Option<f64>>().map(|s| (tier, s))).collect())
         .collect())
+}
+
+/// [`SearchRequest::frontier_points`] plans, solved from the same estimates at
+/// budgets spread from the smallest candidate's uniform size to the largest's,
+/// each measured on the held-out batches. A budget whose plan repeats the one
+/// before is skipped, and so is one no plan meets within the latency limit.
+fn frontier<M: Model>(m: &M, sites: &[Site], table: &[crate::SiteChoices], req: &SearchRequest, latency: Option<f64>, bytes_at: impl Fn(Dtype) -> Option<u64>, on_progress: &mut dyn FnMut(Progress)) -> Vec<FrontierPoint> {
+    let sizes: Vec<u64> = req.tiers.iter().filter_map(|&t| bytes_at(t)).collect();
+    let (Some(&low), Some(&high)) = (sizes.iter().min(), sizes.iter().max()) else { return Vec::new() };
+    let n = req.frontier_points;
+    let mut points: Vec<FrontierPoint> = Vec::new();
+    for i in 0..n {
+        let budget = if n == 1 { high } else { low + (high - low) * i as u64 / (n as u64 - 1) };
+        let Ok(plan) = assign(table, crate::Limits { bytes: budget, seconds: latency }) else { continue };
+        let policy = plan.policy(sites).describe();
+        if points.last().is_some_and(|p| p.policy == policy) {
+            continue;
+        }
+        on_progress(Progress::Measuring { label: format!("frontier {}", points.len() + 1) });
+        let loss = measure_policy(m, sites, &plan.assignments, req.held_out);
+        points.push(FrontierPoint { budget_bytes: budget, plan_bytes: plan.bytes, plan_seconds: req.timing.is_some().then_some(plan.seconds), loss, efficient: false, policy });
+    }
+    let snapshot: Vec<(u64, f64)> = points.iter().map(|p| (p.plan_bytes, p.loss)).collect();
+    for p in &mut points {
+        p.efficient = !snapshot.iter().any(|&(bytes, loss)| bytes <= p.plan_bytes && loss < p.loss);
+    }
+    points
 }

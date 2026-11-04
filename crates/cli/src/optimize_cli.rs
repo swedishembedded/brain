@@ -34,6 +34,9 @@ brain optimize BASE --dataset FILE --out DIR [options]
   --max-latency-like FORMAT  no slower, summed over the linears' products,
                      than every linear at FORMAT.
   --max-latency-ms MS  the linears' summed product time, in milliseconds.
+  --frontier N       also solve N plans at budgets spread from the smallest
+                     candidate's uniform size to the largest's, each measured,
+                     to show the trade-off between bytes and loss.
   --formats LIST     candidate formats, comma separated (default: every
                      frozen-base format the architecture's trainer holds that
                      the device holds as itself).
@@ -79,6 +82,7 @@ struct Args {
     recover_rank: Option<u32>,
     latency_rows: Option<u32>,
     latency: Option<LatencyArg>,
+    frontier: usize,
 }
 
 /// How the latency limit was given; at most one form.
@@ -89,7 +93,7 @@ enum LatencyArg {
 }
 
 fn parse(argv: &[String]) -> Result<Args, String> {
-    let mut a = Args { base: String::new(), dataset: None, out: None, held_out: None, budget: None, formats: None, arch: None, models_dir: None, seed: None, max_block: None, thinking: true, recover_steps: 0, recover_lr: None, recover_rank: None, latency_rows: None, latency: None };
+    let mut a = Args { base: String::new(), dataset: None, out: None, held_out: None, budget: None, formats: None, arch: None, models_dir: None, seed: None, max_block: None, thinking: true, recover_steps: 0, recover_lr: None, recover_rank: None, latency_rows: None, latency: None, frontier: 0 };
     let mut i = 0;
     let need = |i: &mut usize, flag: &str| -> Result<String, String> {
         *i += 1;
@@ -132,6 +136,10 @@ fn parse(argv: &[String]) -> Result<Args, String> {
                 a.max_block = Some(v.parse().map_err(|_| number(&v, "--max-block"))?);
             }
             "--no-thinking" => a.thinking = false,
+            "--frontier" => {
+                let v = need(&mut i, "--frontier")?;
+                a.frontier = v.parse().map_err(|_| number(&v, "--frontier"))?;
+            }
             "--latency-rows" => {
                 let v = need(&mut i, "--latency-rows")?;
                 a.latency_rows = Some(v.parse().map_err(|_| number(&v, "--latency-rows"))?);
@@ -207,7 +215,7 @@ fn optimizer(a: &Args) -> brain::ModelOptimizer {
         Some(LatencyArg::Ms(ms)) => o.max_latency_seconds(ms / 1000.0),
         None => o,
     };
-    o = o.recover(a.recover_steps);
+    o = o.recover(a.recover_steps).frontier(a.frontier);
     if let Some(lr) = a.recover_lr {
         o = o.recover_lr(lr);
     }
@@ -273,6 +281,13 @@ pub fn run_optimize(argv: &[String]) -> ! {
         };
         println!("{:<10} {:>14} {:>12} {:>16} {:>16.6}", d.label, d.bytes, ms(seconds), simulated.map_or("-".to_string(), |l| format!("{l:.6}")), d.loss);
     }
+    if !r.frontier.is_empty() {
+        println!("frontier (* efficient: no smaller plan measured lower):");
+        println!("  {:>14} {:>12} {:>16} {:>16}", "bytes", "product ms", "simulated loss", "deployed loss");
+        for (p, d) in r.frontier.iter().zip(&outcome.frontier) {
+            println!("{} {:>14} {:>12} {:>16.6} {:>16.6}", if p.efficient { "*" } else { " " }, p.plan_bytes, ms(p.plan_seconds), p.loss, d.loss);
+        }
+    }
     println!("--weight-format {}", r.policy);
     if let Some(rec) = &outcome.recovery {
         println!(
@@ -315,7 +330,8 @@ mod tests {
 
     #[test]
     fn one_latency_limit_form_at_most() {
-        let a = parse(&s(&["base", "--latency-rows", "8", "--max-latency-like", "int8"])).unwrap();
+        let a = parse(&s(&["base", "--latency-rows", "8", "--max-latency-like", "int8", "--frontier", "5"])).unwrap();
+        assert_eq!(a.frontier, 5);
         assert_eq!((a.latency_rows, a.latency), (Some(8), Some(LatencyArg::Like("int8".into()))));
         assert!(parse(&s(&["base", "--max-latency-ms", "2", "--max-latency-like", "int8"])).unwrap_err().contains("one of"));
     }

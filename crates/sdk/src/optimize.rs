@@ -91,6 +91,7 @@ pub struct ModelOptimizer {
     recover_rank: u32,
     latency_rows: u32,
     latency_limit: Option<LatencySpec>,
+    frontier_points: usize,
 }
 
 /// The latency limit as the caller stated it.
@@ -186,6 +187,8 @@ pub struct ModelOptimizerOutcome {
     pub measured_on: &'static str,
     /// The recovery adapter, when [`ModelOptimizer::recover`] asked for one.
     pub recovery: Option<Recovery>,
+    /// The frontier's plans ([`Report::frontier`], same order) measured as deployed.
+    pub frontier: Vec<DeployedLoss>,
     /// Default candidates left out because the device would hold them at a wider tier, so neither their bytes nor
     /// their loss would be what the search assumed.
     pub excluded_tiers: Vec<ExcludedTier>,
@@ -219,6 +222,7 @@ impl ModelOptimizer {
             recover_rank: 16,
             latency_rows: 1,
             latency_limit: None,
+            frontier_points: 0,
         }
     }
 
@@ -323,6 +327,14 @@ impl ModelOptimizer {
         self
     }
 
+    /// Also solve `points` plans at budgets spread across the candidates'
+    /// range, each measured simulated and as deployed (default 0: none): the
+    /// trade-off between bytes and loss, in [`ModelOptimizerOutcome::frontier`].
+    pub fn frontier(mut self, points: usize) -> Self {
+        self.frontier_points = points;
+        self
+    }
+
     /// After the search, distill a LoRA adapter over the base held at the plan
     /// for `steps` steps, the original model as the teacher (default 0: none).
     pub fn recover(mut self, steps: u32) -> Self {
@@ -392,7 +404,8 @@ impl ModelOptimizer {
         let timer = DeviceTimer::new();
         let time = |rows: u32, n: usize, k: usize, tier: Dtype| timer.time(rows, n, k, tier);
         let timing = modelopt::Timing { rows: self.latency_rows, limit, time: &time };
-        let report = (chat.search)(&open, &prepared_dir, &opts, &tiers, self.budget.resolve()?, Some(timing), &mut |p| on_progress(&OptimizerProgress::Search(p))).map_err(|e| Error::Backend(format!("searching: {e}")))?;
+        let job = crate::chat_trainer::SearchJob { base: &open, dir: &prepared_dir, opts: &opts, tiers: &tiers, budget: self.budget.resolve()?, timing: Some(timing), frontier_points: self.frontier_points };
+        let report = (chat.search)(job, &mut |p| on_progress(&OptimizerProgress::Search(p))).map_err(|e| Error::Backend(format!("searching: {e}")))?;
         let plan_policy = model::ops::TierPolicy::parse(&report.policy).map_err(Error::Backend)?;
         let mut measured_on = ON_ENGINE;
         let mut deployed = Vec::new();
@@ -400,6 +413,10 @@ impl ModelOptimizer {
         for b in &report.baselines {
             let tier = Dtype::from_name(b.tier).ok_or_else(|| Error::Backend(format!("unknown tier {}", b.tier)))?;
             plans.push((b.tier.to_string(), b.bytes, model::ops::TierPolicy::uniform(tier)));
+        }
+        let first_frontier = plans.len();
+        for (i, p) in report.frontier.iter().enumerate() {
+            plans.push((format!("frontier {}", i + 1), p.plan_bytes, model::ops::TierPolicy::parse(&p.policy).map_err(Error::Backend)?));
         }
         for (label, bytes, policy) in plans {
             on_progress(&OptimizerProgress::Deployed { label: label.clone() });
@@ -410,22 +427,32 @@ impl ModelOptimizer {
             let loss = served.unwrap_or_else(|| (chat.measure)(&open, &prepared_dir, &opts, &policy, None)).map_err(|e| Error::Backend(format!("measuring {label}: {e}")))?;
             deployed.push(DeployedLoss { label, bytes, loss });
         }
+        let frontier = deployed.split_off(first_frontier);
         let plan_loss = deployed[0].loss;
         let accepted = deployed.iter().filter(|d| report.baselines.iter().any(|b| b.tier == d.label)).all(|d| plan_loss < d.loss);
-        let recovery = if self.recover_steps > 0 { Some(self.distill_recovery(&chat, &open, &prepared_dir, &opts, &plan_policy, &report.policy, &mut on_progress)?) } else { None };
+        let recovery = if self.recover_steps > 0 { Some(self.distill_recovery(&chat, &Prepared { open: &open, dir: &prepared_dir, opts: &opts }, &plan_policy, &mut on_progress)?) } else { None };
 
         let report_path = out_dir.join(REPORT_FILE);
-        let outcome = ModelOptimizerOutcome { report, deployed, accepted, measured_on, recovery, excluded_tiers, calibration_records: calibration.len(), held_out_records: held_out.len(), seed, report_path: report_path.clone() };
+        let outcome = ModelOptimizerOutcome { report, deployed, accepted, measured_on, recovery, frontier, excluded_tiers, calibration_records: calibration.len(), held_out_records: held_out.len(), seed, report_path: report_path.clone() };
         write_report(&report_path, &outcome)?;
         Ok(outcome)
     }
 }
 
+/// A base and the dataset prepared for it: what every step after the search runs on.
+#[derive(Clone, Copy)]
+struct Prepared<'a> {
+    open: &'a Path,
+    dir: &'a Path,
+    opts: &'a model::FitOpts,
+}
+
 impl ModelOptimizer {
     /// Distill the recovery adapter over the base held at `plan`, then measure the plan without and with it on the
     /// trainer build that trained it.
-    #[allow(clippy::too_many_arguments)]
-    fn distill_recovery(&self, chat: &crate::chat_trainer::ChatEntry, open: &Path, prepared_dir: &Path, opts: &model::FitOpts, plan: &model::ops::TierPolicy, policy: &str, on_progress: &mut impl FnMut(&OptimizerProgress)) -> Result<Recovery> {
+    fn distill_recovery(&self, chat: &crate::chat_trainer::ChatEntry, at: &Prepared<'_>, plan: &model::ops::TierPolicy, on_progress: &mut impl FnMut(&OptimizerProgress)) -> Result<Recovery> {
+        let Prepared { open, dir: prepared_dir, opts } = *at;
+        let policy = plan.describe();
         on_progress(&OptimizerProgress::Teacher);
         // The teacher reads whole-row logits (`Model::logits_all`), which a model built for one row gives.
         let one_row = model::FitOpts { batch_size: 1, ..opts.clone() };

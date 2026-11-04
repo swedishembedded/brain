@@ -34,6 +34,7 @@ pub struct SearchFit<'a> {
     pub budget: Budget,
     pub on_progress: &'a mut dyn FnMut(Progress),
     pub timing: Option<Timing<'a>>,
+    pub frontier_points: usize,
     /// The search's report, once the visit has run.
     pub report: Option<Report>,
 }
@@ -42,7 +43,7 @@ impl ModelFit for SearchFit<'_> {
     fn fit<M: Model>(&mut self, model: M) -> std::io::Result<(FitReport, M)> {
         let (train, val, cfg, _) = model::load_dataset(self.dir, self.opts)?;
         let (calibration, held_out) = (model::example_rows(&train, &cfg), model::example_rows(&val, &cfg));
-        let req = SearchRequest { tiers: self.tiers, budget: self.budget, calibration: &lm(&calibration), held_out: &lm(&held_out), timing: self.timing.as_ref().map(|t| Timing { rows: t.rows, limit: t.limit, time: t.time }) };
+        let req = SearchRequest { tiers: self.tiers, budget: self.budget, calibration: &lm(&calibration), held_out: &lm(&held_out), timing: self.timing.as_ref().map(|t| Timing { rows: t.rows, limit: t.limit, time: t.time }), frontier_points: self.frontier_points };
         let report = search_weights(&model, &req, self.on_progress).map_err(std::io::Error::other)?;
         let fit = no_steps(report.original_loss);
         self.report = Some(report);
