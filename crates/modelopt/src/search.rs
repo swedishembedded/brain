@@ -134,6 +134,9 @@ pub struct SiteReport {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Baseline {
     pub tier: &'static str,
+    /// The searched linears at the tier and everything else as it is: the
+    /// `--weight-format` that holds the same tensors the plan does.
+    pub policy: String,
     pub bytes: u64,
     pub seconds: Option<f64>,
     pub loss: f64,
@@ -234,7 +237,7 @@ pub fn search_weights<M: Model>(m: &M, req: &SearchRequest, on_progress: &mut dy
         .map(|(tier, bytes)| {
             let uniform: Vec<Assignment> = sites.iter().map(|s| Assignment { site: s.name.clone(), tier }).collect();
             on_progress(Progress::Measuring { label: tier.name().into() });
-            Baseline { tier: tier.name(), bytes, seconds: seconds_at(tier), loss: measure_policy(m, &sites, &uniform, req.held_out) }
+            Baseline { tier: tier.name(), policy: crate::policy_of(&uniform, &sites).describe(), bytes, seconds: seconds_at(tier), loss: measure_policy(m, &sites, &uniform, req.held_out) }
         })
         .collect();
     let frontier = frontier(m, &sites, &table, req, latency_limit_seconds, bytes_at, on_progress);

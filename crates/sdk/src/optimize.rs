@@ -402,9 +402,10 @@ impl ModelOptimizer {
         let mut measured_on = ON_ENGINE;
         let mut deployed = Vec::new();
         let mut plans: Vec<(String, u64, model::ops::TierPolicy)> = vec![("plan".into(), report.plan_bytes, plan_policy.clone()), ("original".into(), report.f32_bytes, model::ops::TierPolicy::uniform(Dtype::F32))];
+        // A baseline holds the searched linears at its tier and nothing else (not the embedding or a tied head),
+        // the same tensors the plan places, so the two compare.
         for b in &report.baselines {
-            let tier = Dtype::from_name(b.tier).ok_or_else(|| Error::Backend(format!("unknown tier {}", b.tier)))?;
-            plans.push((b.tier.to_string(), b.bytes, model::ops::TierPolicy::uniform(tier)));
+            plans.push((b.tier.to_string(), b.bytes, model::ops::TierPolicy::parse(&b.policy).map_err(Error::Backend)?));
         }
         let first_frontier = plans.len();
         for (i, p) in report.frontier.iter().enumerate() {

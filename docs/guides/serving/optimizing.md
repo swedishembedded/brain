@@ -91,7 +91,7 @@ The candidates default to every format that the architecture can (a) hold a
 frozen base in, which is what lets each be measured on its deployed kernels,
 (b) serve one linear at a time, so the accepted plan can be served as printed,
 and (c) hold on this device as itself (int8 needs packed-int8 products). For
-qwen3 that is `f32`, `bf16` and `int8`. Formats left out by (c) are listed. A
+qwen3 that is `f32`, `bf16`, `int8` and `nf4`. Formats left out by (c) are listed. A
 format named in `--formats` that fails any of the three is refused before the
 model loads.
 

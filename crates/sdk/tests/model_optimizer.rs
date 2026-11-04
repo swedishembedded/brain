@@ -74,6 +74,10 @@ fn a_search_reports_a_plan_measured_on_the_deployed_kernels() {
     for b in &report.baselines {
         assert!(labels.contains(&b.tier), "uniform {} fits the budget, so it is measured on its kernels: {labels:?}", b.tier);
     }
+    for b in &report.baselines {
+        let p = model::ops::TierPolicy::parse(&b.policy).expect("a baseline's policy parses");
+        assert_eq!((p.want("tok.weight"), p.want("blocks.0.mlp.up.weight").name()), (gpu_core::select::Dtype::F32, b.tier), "a baseline places the searched linears only: {}", b.policy);
+    }
     assert!(!report.baselines.is_empty(), "uniform int8 fits a budget of its own size");
     let plan = outcome.deployed[0].loss;
     let beats = outcome.deployed.iter().filter(|d| report.baselines.iter().any(|b| b.tier == d.label)).all(|d| plan < d.loss);
