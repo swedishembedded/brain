@@ -11,9 +11,11 @@ sending an email to info@swedishembedded.com.
 
 The reference is the authors' own torch implementation
 (github.com/Prefrontal-AI/latent-sparse-attention, Apache-2.0,
-`src/lsa/core/reference.py`), imported from a checkout given by `--lsa-src`
-and run unmodified: `build_buckets` clusters the closed blocks of fixed index
-keys, and `read` selects each query's keys. Nothing here re-implements it.
+`src/lsa/core/reference.py` and `src/lsa/core/hierarchy.py`), imported from a
+checkout given by `--lsa-src` and run unmodified: `build_buckets` clusters the
+closed blocks of fixed index keys, `read` selects each query's keys, and
+`build_hierarchy` / `read_hierarchy` build node bucket levels over the
+buckets and select through a beam down them. Nothing here re-implements it.
 
 The keys are drawn around a handful of directions plus noise, so Ward has real
 clusters to find rather than only near-ties between random vectors.
@@ -30,6 +32,18 @@ Written under `--out` (default `testdata/lsa`):
     bucket_members    [rows, bucket_cap]  -1 padded
     selected          [Q, top_k + window + sink]  -1 padded
     lengths           [Q]
+
+  tree_reference_<case>.safetensors  (case: beam, start)
+    config            [8]  as above
+    tree              [7]  node_bucket_size, top_level, page_size,
+                           growth_buckets, start_nodes (0: none), then the
+                           node cluster block and beam width of every level
+                           packed as [top_level, 2] in `levels`
+    levels            [top_level, 2]
+    keys, queries, positions
+    node_centroids_<l> [nodes, d]   level l from 1
+    children_<l>       [nodes, node_bucket_size]
+    selected, lengths  as above
 
 Everything is f32 (brain's safetensors reader is F32/F16/BF16-only); every
 integer here is below 2^24 and exact. Fixed seed, CPU only.
@@ -106,6 +120,40 @@ def main() -> None:
         },
     )
     print(f"wrote {out / 'flat_reference.safetensors'} (torch {torch.__version__})")
+
+    # The tree: more keys, so three levels grow; once beaming from the top
+    # level, once from the lowest level of at most `start_nodes` node buckets.
+    from lsa.core.hierarchy import build_hierarchy, read_hierarchy
+
+    tree_keys_count = 12 * 512 + 100
+    pick = torch.randint(0, centers.shape[0], (tree_keys_count,))
+    tree_keys = torch.nn.functional.normalize(centers[pick] + 0.35 * torch.randn(tree_keys_count, index_dim), dim=1)
+    tree_queries = torch.nn.functional.normalize(torch.randn(query_count, index_dim), dim=1)
+    tree_edges = [0, 511, 512, 1023, 1024, 2047, 2048, 4095, 4096, 6143, 6144, tree_keys_count - 1]
+    tree_positions = torch.tensor(tree_edges + torch.randint(0, tree_keys_count, (query_count - len(tree_edges),)).tolist())
+    tree_buckets = build_buckets(tree_keys, pool_size, bucket_size, bucket_cap, cluster_block)
+    node_bucket_size, blocks, page_size, growth_buckets = 2, [32, 8, 4], 1024, 64
+    for case, beams, start_nodes in (("beam", [6, 4, 3], None), ("start", [5, 3, 2], 40)):
+        hierarchy = build_hierarchy(tree_keys, tree_buckets, len(blocks), node_bucket_size, blocks)
+        selected, lengths = read_hierarchy(
+            tree_queries, tree_positions, tree_buckets, hierarchy, beams, start_nodes,
+            top_p, top_k, sink, window, page_size, growth_buckets,
+        )
+        tensors = {
+            "config": config,
+            "tree": torch.tensor([node_bucket_size, len(blocks), page_size, growth_buckets, start_nodes or 0]),
+            "levels": torch.tensor([blocks, beams]).T.contiguous(),
+            "keys": tree_keys,
+            "queries": tree_queries,
+            "positions": tree_positions,
+            "selected": selected,
+            "lengths": lengths,
+        }
+        for level, (centroids, children) in enumerate(zip(hierarchy.node_centroids, hierarchy.children), start=1):
+            tensors[f"node_centroids_{level}"] = centroids
+            tensors[f"children_{level}"] = children
+        save_safetensors(out / f"tree_reference_{case}.safetensors", tensors)
+        print(f"wrote {out / f'tree_reference_{case}.safetensors'}")
 
 
 if __name__ == "__main__":

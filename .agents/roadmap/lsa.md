@@ -134,6 +134,16 @@ head layout; clustering, selection and the sparse read are written once.
       over two reads; a budget past the context selects exactly the causal
       keys over a real generation; chunks below the crossover read and index
       nothing.
+- [x] Tree read, host reference (`model::lsa::tree`): node bucket levels
+      over the buckets (Ward pairs every full node cluster block's rows, then
+      the pairs, into node buckets of `node_bucket_size`), growth replayed at
+      page ends, and the beam down the levels (from the top or from the
+      lowest level of at most `start_nodes` node buckets) before flat's
+      expansion. Gate: the authors' `build_hierarchy` / `read_hierarchy` on
+      fixed inputs (`tools/goldens/lsa_dump_reference.py`): three levels of
+      node buckets, their centroids and all 64 selections exactly, beaming
+      from the top and from `start_nodes`; 48 of the 64 queries read other
+      keys than the flat read.
 - [x] D-LSA training (`model::lsa::distill`): teacher targets (head-averaged
       attention over the keys outside sink and window, top 2048,
       renormalised), the forward-KL objective with analytic gradients of both

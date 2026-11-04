@@ -226,3 +226,64 @@ fn matches_the_reference_implementation() {
     let want_ids: Vec<i32> = get("selected").data.iter().map(|&x| x as i32).collect();
     assert_eq!(selection.ids, want_ids, "selected keys differ from the reference");
 }
+
+/// The reference's node bucket levels and beam read on fixed inputs, beaming
+/// from the top level and from the lowest level of at most `start_nodes`
+/// node buckets: `tools/goldens/lsa_dump_reference.py` writes them.
+#[test]
+fn the_tree_matches_the_reference_implementation() {
+    for case in ["beam", "start"] {
+        let path = brain_testutil::testdata(&format!("lsa/tree_reference_{case}.safetensors"));
+        if !std::path::Path::new(&path).exists() {
+            brain_testutil::skip(&format!("LSA tree golden absent: {path} (tools/goldens/lsa_dump_reference.py)"));
+            return;
+        }
+        let tensors = checkpoint::safetensors::read(&path).unwrap();
+        let get = |name: &str| tensors.iter().find(|t| t.name == name);
+        let need = |name: &str| get(name).unwrap_or_else(|| panic!("golden lacks {name}"));
+        let c = &need("config").data;
+        let cfg = LsaConfig {
+            index_dim: need("keys").shape[1],
+            pool_size: c[0] as usize,
+            bucket_size: c[1] as usize,
+            bucket_cap: c[2] as usize,
+            cluster_block: c[3] as usize,
+            top_p: c[4] as usize,
+            top_k: c[5] as usize,
+            sink: c[6] as usize,
+            window: c[7] as usize,
+            early: None,
+        };
+        let t = &need("tree").data;
+        let (levels, _) = need("levels").data.as_chunks::<2>();
+        let tree = tree::TreeConfig {
+            node_bucket_size: t[0] as usize,
+            node_cluster_block: levels.iter().map(|l| l[0] as usize).collect(),
+            beam_width: levels.iter().map(|l| l[1] as usize).collect(),
+            start_nodes: (t[4] > 0.0).then_some(t[4] as usize),
+            page_size: t[2] as usize,
+            growth_buckets: t[3] as usize,
+        };
+        let keys = &need("keys").data;
+        let index = BucketIndex::build(cfg, keys).unwrap();
+        let h = tree::build_hierarchy(&index, keys, &tree).unwrap();
+        for (l, (centroids, children)) in h.node_centroids.iter().zip(&h.children).enumerate() {
+            let want: Vec<u32> = need(&format!("children_{}", l + 1)).data.iter().map(|&x| x as u32).collect();
+            assert_eq!(children, &want, "{case}: level {} node buckets differ from the reference", l + 1);
+            let worst = centroids.iter().zip(&need(&format!("node_centroids_{}", l + 1)).data).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+            assert!(worst < 1e-5, "{case}: level {} centroids differ by {worst}", l + 1);
+        }
+        assert!(get(&format!("children_{}", h.children.len() + 1)).is_none(), "{case}: the reference built more levels");
+        let positions: Vec<u32> = need("positions").data.iter().map(|&x| x as u32).collect();
+        let selection = tree::select_tree(&index, &h, &tree, &need("queries").data, &positions).unwrap();
+        let want_lens: Vec<u32> = need("lengths").data.iter().map(|&x| x as u32).collect();
+        assert_eq!(selection.lens, want_lens, "{case}: selection lengths differ");
+        let want_ids: Vec<i32> = need("selected").data.iter().map(|&x| x as i32).collect();
+        assert_eq!(selection.ids, want_ids, "{case}: selected keys differ from the reference");
+        // The beam prunes: some queries read differently from the flat read.
+        let flat = select(&index, &need("queries").data, &positions).unwrap();
+        let pruned = (0..positions.len()).filter(|&r| flat.row(r) != selection.row(r)).count();
+        assert!(pruned > 0, "{case}: the beam read exactly what the flat read reads");
+        println!("{case}: {} levels of {:?} node buckets match the reference; {pruned} of {} queries read otherwise than flat", h.children.len(), h.nodes(), positions.len());
+    }
+}

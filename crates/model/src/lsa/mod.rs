@@ -30,6 +30,7 @@
 //! | [`ward`] | Ward merging of one block's pools into buckets |
 //! | [`index`] | the append-only bucket index of one sequence's keys |
 //! | [`select`] | a query's read: score, pick, expand, add window and sinks |
+//! | [`tree`] | node bucket levels over the buckets and a beam down them |
 //! | [`attend`] | attention restricted to a selection, the numerical oracle |
 //! | [`native`] | training attention over a selection (N-LSA), forward and backward |
 //!
@@ -48,6 +49,7 @@ pub mod indexer;
 pub mod native;
 pub mod select;
 pub mod space;
+pub mod tree;
 pub mod ward;
 
 pub use config::{EarlyBudget, LsaConfig};

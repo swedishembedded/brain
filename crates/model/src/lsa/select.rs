@@ -108,30 +108,39 @@ pub fn read_scores(index: &BucketIndex, scores: &[f32], stride: usize, positions
         ranked[..picked].sort_unstable_by(order);
 
         let window_start = (position + 1).saturating_sub(cfg.window).min(built * cfg.cluster_block);
-        let row = &mut ids[r * width..][..width];
-        let mut n = 0usize;
-        'expand: for &(_, bucket) in &ranked[..picked] {
-            let members = &index.members()[bucket * cfg.bucket_cap..][..index.sizes()[bucket] as usize];
-            for &key in members {
-                if n == top_k {
-                    break 'expand;
-                }
-                let key_pos = key as usize;
-                if key_pos >= cfg.sink && key_pos < window_start {
-                    row[n] = key;
-                    n += 1;
-                }
-            }
-        }
-        for key in window_start..=position {
-            row[n] = key as i32;
-            n += 1;
-        }
-        for key in 0..cfg.sink.min(window_start) {
-            row[n] = key as i32;
-            n += 1;
-        }
-        lens[r] = n as u32;
+        let picked: Vec<usize> = ranked[..picked].iter().map(|&(_, bucket)| bucket).collect();
+        lens[r] = expand(index, &picked, position, window_start, top_k, &mut ids[r * width..][..width]) as u32;
     }
     Ok(Selection { width, ids, lens })
+}
+
+/// Write the keys a query at `position` reads into `row` and return their
+/// count: the members of the `picked` buckets, best first, in `[sink,
+/// window_start)` up to `top_k` of them, then the window `window_start..=
+/// position`, then the sinks below the window.
+pub(crate) fn expand(index: &BucketIndex, picked: &[usize], position: usize, window_start: usize, top_k: usize, row: &mut [i32]) -> usize {
+    let cfg = index.config();
+    let mut n = 0usize;
+    'expand: for &bucket in picked {
+        let members = &index.members()[bucket * cfg.bucket_cap..][..index.sizes()[bucket] as usize];
+        for &key in members {
+            if n == top_k {
+                break 'expand;
+            }
+            let key_pos = key as usize;
+            if key_pos >= cfg.sink && key_pos < window_start {
+                row[n] = key;
+                n += 1;
+            }
+        }
+    }
+    for key in window_start..=position {
+        row[n] = key as i32;
+        n += 1;
+    }
+    for key in 0..cfg.sink.min(window_start) {
+        row[n] = key as i32;
+        n += 1;
+    }
+    n
 }
