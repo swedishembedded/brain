@@ -67,7 +67,7 @@ fn a_search_reports_a_plan_measured_on_the_deployed_kernels() {
         assert!(qkv.windows(2).all(|w| w[0] == w[1]) && gate_up[0] == gate_up[1], "a fused projection takes one format: {}", report.policy);
     }
 
-    let served = [gpu_core::select::Dtype::F32, gpu_core::select::Dtype::BF16, gpu_core::select::Dtype::I8];
+    let served = [gpu_core::select::Dtype::F32, gpu_core::select::Dtype::BF16, gpu_core::select::Dtype::I8, gpu_core::select::Dtype::NF4];
     assert!(policy.dtypes().all(|t| served.contains(&t)), "every planned format is one qwen3 serves per linear: {}", report.policy);
     let labels: Vec<&str> = outcome.deployed.iter().map(|d| d.label.as_str()).collect();
     assert_eq!(&labels[..2], ["plan", "original"]);
@@ -97,8 +97,8 @@ fn a_candidate_that_cannot_be_measured_is_refused_before_anything_loads() {
     let base = model.join("model.safetensors");
     let err = ModelOptimizer::from_pretrained(base.to_str().unwrap()).dataset(&dataset).out_dir(model.join("run")).tiers("int8,q4").run().expect_err("q4 has no frozen-base build to measure");
     assert!(err.to_string().contains("q4"), "{err}");
-    let err = ModelOptimizer::from_pretrained(base.to_str().unwrap()).dataset(&dataset).out_dir(model.join("run")).tiers("int8,nf4").run().expect_err("qwen3 does not serve nf4 per linear");
-    assert!(err.to_string().contains("nf4") && err.to_string().contains("serve"), "{err}");
+    let err = ModelOptimizer::from_pretrained(base.to_str().unwrap()).dataset(&dataset).out_dir(model.join("run")).tiers("int8,fp8").run().expect_err("qwen3 trains over fp8 but does not serve it per linear");
+    assert!(err.to_string().contains("f8e4m3") && err.to_string().contains("serve"), "{err}");
 
     let err = ModelOptimizer::from_pretrained(base.to_str().unwrap()).dataset(&dataset).out_dir(model.join("run")).tiers("int8").device(cpu()).run().expect_err("the CPU backend holds int8 as f32");
     assert!(err.to_string().contains("i8") && err.to_string().contains("f32"), "{err}");

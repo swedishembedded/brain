@@ -172,6 +172,7 @@ pub fn weights_bytes_at(cfg: &qwen3::config::QwenConfig, tiers: &model::ops::Tie
             match tiers.want(&name) {
                 Dtype::I8 => elems + (elems / 32) * 4,
                 Dtype::BF16 | Dtype::F16 => elems * 2,
+                Dtype::NF4 | Dtype::Q4 => elems / 2 + (elems / 32) * 4,
                 _ => elems * 4,
             }
         })
@@ -596,7 +597,7 @@ pub struct QwenServeConfig {
 /// What the Qwen3 paged engine honours of a [`model::policy::ServePolicy`].
 pub const QWEN3_POLICY: model::policy::PolicySupport = model::policy::PolicySupport {
     model: "qwen3",
-    weights: &[gpu_core::select::Dtype::F32, gpu_core::select::Dtype::BF16, gpu_core::select::Dtype::I8],
+    weights: &[gpu_core::select::Dtype::F32, gpu_core::select::Dtype::BF16, gpu_core::select::Dtype::I8, gpu_core::select::Dtype::NF4, gpu_core::select::Dtype::Q4],
     weight_rules: true,
     kv_cache: &["f32", "int8", "fp8"],
     gemm: true,
@@ -620,7 +621,8 @@ impl QwenServeConfig {
         }
         if let Some(w) = &p.weights {
             use gpu_core::select::Dtype;
-            self.weight_tiers = (w.rule_count() > 0).then(|| w.clone());
+            // A per-leaf policy, or a tier only the per-leaf build holds (the 4-bit codes), is kept whole.
+            self.weight_tiers = (w.rule_count() > 0 || matches!(w.default_dtype(), Dtype::NF4 | Dtype::Q4)).then(|| w.clone());
             let (int8, bf16) = match w.default_dtype() {
                 Dtype::I8 => (Some(true), false),
                 Dtype::BF16 => (None, true),
@@ -1694,9 +1696,15 @@ mod tests {
         assert!(weights_int8_bytes(&shape) < bytes && bytes < weights_fp32_bytes(&shape) * 10 / 13, "between all-int8 and fp32: {bytes}");
 
         let mut p = model::policy::ServePolicy::default();
-        p.set("--weight-format", "f32,mlp.=nf4").unwrap();
+        p.set("--weight-format", "nf4").unwrap();
+        let mut cfg = QwenServeConfig::default();
+        cfg.apply_policy(&p).unwrap();
+        assert_eq!(cfg.weight_tiers.map(|t| t.default_dtype()), Some(Dtype::NF4), "uniform nf4 is built per leaf, never widened to f32");
+
+        let mut p = model::policy::ServePolicy::default();
+        p.set("--weight-format", "f32,mlp.=fp8").unwrap();
         let e = QwenServeConfig::default().apply_policy(&p).unwrap_err();
-        assert!(e.contains("qwen3") && e.contains("nf4"), "{e}");
+        assert!(e.contains("qwen3") && e.contains("fp8"), "{e}");
     }
 
     /// `--checkpoint` naming a Hugging Face repo directory serves the
