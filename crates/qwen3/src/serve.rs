@@ -1296,6 +1296,13 @@ impl Engine {
         if weights_int8 && !w8_on {
             eprintln!("serve: int8 weights requested but this device has no packed-int8 path; using fp32 weights");
         }
+        // Every other tier `Weight::upload` widens where the device cannot hold it; say which, never silently.
+        let mut widened: Vec<Dtype> = tiers.dtypes().filter(|&t| t != Dtype::I8 && t.promote(&caps.numeric) != t).collect();
+        widened.sort_by_key(|t| t.name());
+        widened.dedup();
+        for t in widened {
+            eprintln!("serve: {} weights requested but this device holds them as {}", t.name(), t.promote(&caps.numeric).name());
+        }
         // The half tiers decode inline in the GEMM (`#w=bf16`/`#w=f16`), which
         // every backend runs; they need only the kernels [`pipelines`] adds.
         let half_gemm = half_tier.map(|tier| {
@@ -5133,8 +5140,10 @@ mod tests {
         };
         let int8 = gpu_core::testgpu::dev(pipelines()).caps().numeric.int8_dot;
         let i8_or_f32 = if int8 { Dtype::I8 } else { Dtype::F32 };
+        // What this device holds bf16 as: a backend without bf16 storage widens it (and says so).
+        let bf16_held = Dtype::BF16.promote(&gpu_core::testgpu::dev(pipelines()).caps().numeric);
         for (label, tiers, attn, mlp) in [
-            ("int8 attention, bf16 mlp", TierPolicy::uniform(Dtype::F32).with(&["attn."], Dtype::I8).with(&["mlp."], Dtype::BF16), i8_or_f32, Dtype::BF16),
+            ("int8 attention, bf16 mlp", TierPolicy::uniform(Dtype::F32).with(&["attn."], Dtype::I8).with(&["mlp."], Dtype::BF16), i8_or_f32, bf16_held),
             ("fp32 attention, int8 mlp", TierPolicy::uniform(Dtype::F32).with(&["mlp."], Dtype::I8), Dtype::F32, i8_or_f32),
         ] {
             let (eng, h) = hidden(&tiers);
