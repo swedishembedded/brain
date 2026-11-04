@@ -138,6 +138,7 @@ pub use train::{build_or_resume, causal_lm, causal_lm_examples, fit, fit_control
 /// What a batch looks like for a given model. Decoder-LM and seq2seq differ in
 /// whether there is a separate source sequence; this enum keeps `set_batch`
 /// uniform without forcing every model to accept encoder inputs it ignores.
+#[derive(Clone, Copy)]
 pub enum Batch<'a> {
     /// Causal LM / single-stream: `targets[t]` predicts position `t+1`; masked
     /// (IGNORE) positions are dropped from the loss.
