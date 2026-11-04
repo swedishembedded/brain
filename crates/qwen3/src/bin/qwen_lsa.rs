@@ -11,7 +11,9 @@
 //! and long-context evaluation, you can procure our services by sending an
 //! email to info@swedishembedded.com.
 //!
-//! Usage (every mode takes `--checkpoint <file or dir>`):
+//! Usage (every mode takes `--model REPO` - a checkout in the model store,
+//! `Qwen/Qwen3-4B` - or `--checkpoint <file or dir>`, and `--device gpu1` to
+//! pick the card, `gpu` by default):
 //!
 //! ```text
 //! qwen_lsa distill --corpus DIR --out FILE [--tokens 8192] [--train-docs 48]
@@ -21,8 +23,15 @@
 //!          [--held-docs 6] [--skip-docs 48] [--pca-corpus DIR] [--queries 32]
 //!          [--tail 256] [--seed N]
 //! qwen_lsa prefill --indexer FILE [--tokens 4096,8192,16384,32768] [--corpus DIR]
-//!          [--kv-cache int8|f32|fp8] [--dense-until N] [--tree SPEC]
+//!          [--kv-cache int8|f32|fp8] [--dense-until N] [--tree SPEC] [--profile]
 //! ```
+//!
+//! `prefill --indexer random` times a random-projection indexer built for the
+//! checkpoint (the speed of a read does not depend on what the projection
+//! learned). `--profile` adds, per length, one more prefill of each kind with
+//! the device timing every kernel: the per-kernel table, the time in the
+//! index (index keys and Ward), the read, sparse and dense attention, and the
+//! wall time beyond the device's (host work: page tables, node pages).
 //!
 //! `--tree size=4,blocks=1024:4096,beam=2048:2048,page=4096,growth=1024[,start=N]`
 //! reads through node bucket levels (`model::lsa::tree`): node buckets of
@@ -54,12 +63,19 @@ const BLOCK: u32 = 16;
 
 struct Args(HashMap<String, String>);
 
+/// Flags that take no value.
+const SWITCHES: [&str; 1] = ["profile"];
+
 impl Args {
     fn parse(raw: &[String]) -> Result<Args, String> {
         let mut map = HashMap::new();
         let mut it = raw.iter();
         while let Some(k) = it.next() {
             let key = k.strip_prefix("--").ok_or_else(|| format!("expected a --flag, got {k:?}"))?;
+            if SWITCHES.contains(&key) {
+                map.insert(key.to_string(), String::new());
+                continue;
+            }
             let v = it.next().ok_or_else(|| format!("--{key} needs a value"))?;
             map.insert(key.to_string(), v.clone());
         }
@@ -67,6 +83,9 @@ impl Args {
     }
     fn get(&self, k: &str) -> Option<&str> {
         self.0.get(k).map(String::as_str)
+    }
+    fn flag(&self, k: &str) -> bool {
+        self.0.contains_key(k)
     }
     fn req(&self, k: &str) -> Result<&str, String> {
         self.get(k).ok_or_else(|| format!("--{k} is required"))
@@ -81,6 +100,9 @@ fn main() {
     let run = || -> Result<(), String> {
         let mode = raw.get(1).ok_or("a mode is required: distill, eval or prefill")?;
         let args = Args::parse(&raw[2..])?;
+        let set = gpu_core::select_compute(args.get("device").unwrap_or("gpu"), args.get("backend"))?;
+        set.apply()?;
+        gpu_core::publish_compute_set(set);
         match mode.as_str() {
             "distill" => distill(&args),
             "eval" => eval(&args),
@@ -94,10 +116,26 @@ fn main() {
     }
 }
 
+/// The checkpoint to load: `--checkpoint`, or `--model`'s checkout in the
+/// model store. A directory holding the upstream safetensors loads as it is;
+/// only a checkout that holds nothing but a converted file loads that.
 fn checkpoint(args: &Args) -> Result<String, String> {
-    let p = args.req("checkpoint")?;
-    let brain_file = std::path::Path::new(p).join("model.brain.safetensors");
-    Ok(if brain_file.exists() { brain_file.to_string_lossy().into_owned() } else { p.to_string() })
+    let dir = match (args.get("checkpoint"), args.get("model")) {
+        (Some(p), None) => std::path::PathBuf::from(p),
+        (None, Some(m)) => {
+            let reference = brain_modelref::ModelRef::parse(m).map_err(|e| format!("--model {m:?}: {e}"))?;
+            let root = brain_modelstore::default_root().ok_or("no model store: pass --checkpoint")?;
+            let dir = brain_modelstore::Store::new(root).repo_dir(&reference);
+            if !dir.is_dir() {
+                return Err(format!("--model {m}: no checkout at {}", dir.display()));
+            }
+            dir
+        }
+        _ => return Err("pass exactly one of --model and --checkpoint".into()),
+    };
+    let upstream = dir.join("model.safetensors").exists() || dir.join("model.safetensors.index.json").exists();
+    let converted = dir.join("model.brain.safetensors");
+    Ok(if !upstream && converted.exists() { converted } else { dir }.to_string_lossy().into_owned())
 }
 
 fn tokenizer_dir(path: &str) -> String {
@@ -384,7 +422,14 @@ fn prefill(args: &Args) -> Result<(), String> {
         Some(dir) => documents(dir, &tok, max, 1)?.remove(0),
         None => (0..max).map(|_| 200 + rng.next_u32() % 20_000).collect(),
     };
-    let mut ix = Indexer::load(args.req("indexer")?)?;
+    let mut ix = match args.req("indexer")? {
+        "random" => {
+            let (c, _) = qwen3::open_checkpoint(&path)?;
+            let geometry = IndexGeometry { n_layers: c.n_layers as usize, n_heads: c.n_heads as usize, n_kv_heads: c.n_kv_heads as usize, head_dim: c.head_dim as usize, rope_base: c.rope_theta };
+            Indexer::random(cfg, geometry, rng.next_u64())?
+        }
+        file => Indexer::load(file)?,
+    };
     ix.cfg.top_k = cfg.top_k;
     ix.cfg.top_p = cfg.top_p;
     if let Some(tree) = tree_config(args)? {
@@ -426,6 +471,54 @@ fn prefill(args: &Args) -> Result<(), String> {
         let crossover = sparse.lsa_dense_until();
         let ts = time(&mut sparse);
         println!("T={n:>6}  dense {:>8.2} s  sparse {:>8.2} s  speedup {:>5.2}x  ({:.0} vs {:.0} tok/s)  dense below {crossover}", td, ts, td / ts, n as f64 / td, n as f64 / ts);
+        if args.flag("profile") {
+            // Other tokens of the same length: the timed prompt sits in the
+            // prefix cache.
+            let other: Vec<u32> = prompt.iter().map(|t| (t + 13) % 20_000 + 200).collect();
+            profile(&mut sparse, &format!("sparse T={n}"), &other);
+            drop(sparse);
+            let (mut dense, _) = engine_kv(&path, n as u32, kv)?;
+            profile(&mut dense, &format!("dense T={n}"), &other);
+        }
     }
     Ok(())
+}
+
+/// One prefill of `prompt` with the device timing every kernel: the
+/// per-kernel table, then the time by part of attention and the wall time the
+/// device did not account for (host work between dispatches).
+fn profile(e: &mut Engine, label: &str, prompt: &[u32]) {
+    if !e.gpu().set_kernel_timing(true) {
+        println!("{label}: this backend does not time kernels");
+        return;
+    }
+    // The earlier prompts' cached blocks go: the pool holds about two.
+    model::serve::PagedDecoder::reclaim_prefix(e, u32::MAX);
+    e.gpu().reset_kernel_times();
+    let mut table = model::paged::BlockTable::new();
+    let t = Instant::now();
+    e.prefill_for_perf(&mut table, prompt);
+    let wall_ms = t.elapsed().as_secs_f64() * 1e3;
+    e.release_for_perf(&mut table);
+    let rows = e.gpu().kernel_times().unwrap_or_default();
+    e.gpu().set_kernel_timing(false);
+    // `+ 0.0` turns an empty sum's -0.0 into 0.
+    let part = |pred: &dyn Fn(&str) -> bool| rows.iter().filter(|(n, _, _)| pred(n)).map(|(_, ms, _)| ms).sum::<f64>() + 0.0;
+    let device: f64 = rows.iter().map(|(_, ms, _)| ms).sum();
+    let index = part(&|n| n.starts_with("lsa_index") || n.starts_with("lsa_ward"));
+    let read = part(&|n| n.starts_with("lsa_read"));
+    let sparse = part(&|n| n.starts_with("paged_sparse"));
+    let dense = part(&|n| n.contains("flash_prefill") || n.contains("flash_decode"));
+    gpu_core::profile::print_device_table(label, wall_ms, Some(rows));
+    println!(
+        "{label}: wall {:.0} ms, device {:.0} ms (host {:.0} ms); index {:.0} ms, read {:.0} ms, sparse attention {:.0} ms, dense attention {:.0} ms, everything else {:.0} ms",
+        wall_ms,
+        device,
+        (wall_ms - device).max(0.0),
+        index,
+        read,
+        sparse,
+        dense,
+        (device - index - read - sparse - dense).max(0.0)
+    );
 }

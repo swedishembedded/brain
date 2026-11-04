@@ -26,12 +26,15 @@ fn device() -> std::sync::MutexGuard<'static, ()> {
 
 fn checkpoint() -> Option<String> {
     let dir = brain_testutil::model_dir("Qwen/Qwen3-0.6B").unwrap_or_default();
-    // The store keeps either the converted brain file or the upstream directory.
-    let brain_file = std::path::Path::new(&dir).join("model.brain.safetensors");
-    if brain_file.exists() {
+    // The upstream safetensors load as they are; a checkout holding only a
+    // converted file loads that.
+    let d = std::path::Path::new(&dir);
+    let upstream = d.join("model.safetensors").exists() || d.join("model.safetensors.index.json").exists();
+    let brain_file = d.join("model.brain.safetensors");
+    if !upstream && brain_file.exists() {
         return Some(brain_file.to_string_lossy().into_owned());
     }
-    if !std::path::Path::new(&dir).join("config.json").exists() {
+    if !d.join("config.json").exists() {
         brain_testutil::skip(&format!("Qwen/Qwen3-0.6B is not in the model store ({dir})"));
         return None;
     }

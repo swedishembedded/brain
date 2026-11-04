@@ -288,9 +288,14 @@ above. Everything about HOW to serve it is a `brain serve` flag:
   trains it against the model's own attention (D-LSA);
   `qwen_lsa eval --checkpoint DIR --corpus TEXTDIR --indexer FILE` reports
   the share of dense attention it keeps and the held-out loss, and
-  `qwen_lsa prefill --checkpoint DIR --indexer FILE` times prefill dense
-  against sparse and prints the measured crossover (`--dense-until N`
-  overrides it; `0` reads every chunk sparsely).
+  `qwen_lsa prefill --model Qwen/Qwen3-4B --indexer FILE` times prefill
+  dense against sparse and prints the measured crossover (`--dense-until N`
+  overrides it; `0` reads every chunk sparsely); `--indexer random` times a
+  random projection built for the checkpoint, `--profile` prints each run's
+  per-kernel device time and its split into index, read, sparse and dense
+  attention and host work, and `--device gpu1` picks the card. `--model`
+  resolves a checkout in the model store (`--checkpoint DIR` takes a path)
+  and loads the upstream safetensors as they are.
 - `--kv-offload-gb N` - host RAM the serving engine may use to park
   preempted sessions' KV cache (default `0`, off). See below.
 - `--weight-format int8` / `--weight-format f32` - quantize the 7

@@ -26,6 +26,8 @@ brain-kernels.workspace = true
 brain-data.workspace = true
 brain-promote.workspace = true
 brain-modelstore.workspace = true
+# `ModelRef` - `qwen_lsa --model REPO` resolves the store's checkout.
+brain-modelref.workspace = true
 brain-arch.workspace = true
 serde.workspace = true
 serde_json.workspace = true
