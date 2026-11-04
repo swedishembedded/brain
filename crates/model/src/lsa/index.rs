@@ -131,36 +131,61 @@ impl BucketIndex {
 
     /// Ward-merge the full open block into buckets and publish them.
     fn close_block(&mut self) -> Result<(), String> {
-        let cfg = self.cfg;
-        let dim = cfg.index_dim;
-        let base = self.closed_blocks() * cfg.cluster_block;
-        let bpb = cfg.buckets_per_block();
-        let pools = ward::pool_keys(&self.open, dim, cfg.pool_size);
-        let pool_sizes = vec![cfg.pool_size as u32; cfg.pools_per_block()];
-        let labels = ward::ward_labels(&pools, &pool_sizes, dim, bpb, cfg.bucket_cap as u32)?;
-
-        // Centroids are the normalised sum of the bucket's KEYS (not its pool
-        // sums, which hold the same total but in a different addition order).
-        let mut sums = vec![0f64; bpb * dim];
-        let mut members = vec![-1i32; bpb * cfg.bucket_cap];
-        let mut sizes = vec![0u32; bpb];
-        for key in 0..cfg.cluster_block {
-            let bucket = labels[key / cfg.pool_size] as usize;
-            let row = &self.open[key * dim..][..dim];
-            for (s, x) in sums[bucket * dim..][..dim].iter_mut().zip(row) {
-                *s += *x as f64;
-            }
-            let slot = sizes[bucket] as usize;
-            members[bucket * cfg.bucket_cap + slot] = (base + key) as i32;
-            sizes[bucket] += 1;
-        }
-        for sum in sums.chunks_exact(dim) {
-            let norm = sum.iter().map(|x| x * x).sum::<f64>().sqrt().max(1e-30);
-            self.centroids.extend(sum.iter().map(|x| (x / norm) as f32));
-        }
-        self.members.extend_from_slice(&members);
-        self.sizes.extend_from_slice(&sizes);
+        let base = self.closed_blocks() * self.cfg.cluster_block;
+        let block = cluster_block(&self.cfg, &self.open, base)?;
+        self.centroids.extend_from_slice(&block.centroids);
+        self.members.extend_from_slice(&block.members);
+        self.sizes.extend_from_slice(&block.sizes);
         self.open.clear();
         Ok(())
     }
+}
+
+/// The buckets of one closed cluster block.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClosedBlock {
+    /// Unit centroids, `[buckets_per_block, index_dim]`.
+    pub centroids: Vec<f32>,
+    /// Absolute member positions in ascending order,
+    /// `[buckets_per_block, bucket_cap]`, `-1` padded.
+    pub members: Vec<i32>,
+    /// Keys in each bucket, `[buckets_per_block]`.
+    pub sizes: Vec<u32>,
+}
+
+/// Ward-merge one full cluster block of index keys (`[cluster_block,
+/// index_dim]`, unit rows, the first at position `base`) into its buckets.
+///
+/// A closed block depends on its own keys alone, which is what lets the
+/// host index and the device's paged index build the same block the same
+/// way, and lets blocks close independently of each other.
+pub fn cluster_block(cfg: &LsaConfig, keys: &[f32], base: usize) -> Result<ClosedBlock, String> {
+    let dim = cfg.index_dim;
+    if keys.len() != cfg.cluster_block * dim {
+        return Err(format!("LSA cluster block: {} values for {} keys of width {dim}", keys.len(), cfg.cluster_block));
+    }
+    let bpb = cfg.buckets_per_block();
+    let pools = ward::pool_keys(keys, dim, cfg.pool_size);
+    let pool_sizes = vec![cfg.pool_size as u32; cfg.pools_per_block()];
+    let labels = ward::ward_labels(&pools, &pool_sizes, dim, bpb, cfg.bucket_cap as u32)?;
+
+    // Centroids are the normalised sum of the bucket's KEYS (not its pool
+    // sums, which hold the same total but in a different addition order).
+    let mut sums = vec![0f64; bpb * dim];
+    let mut members = vec![-1i32; bpb * cfg.bucket_cap];
+    let mut sizes = vec![0u32; bpb];
+    for key in 0..cfg.cluster_block {
+        let bucket = labels[key / cfg.pool_size] as usize;
+        for (s, x) in sums[bucket * dim..][..dim].iter_mut().zip(&keys[key * dim..][..dim]) {
+            *s += *x as f64;
+        }
+        members[bucket * cfg.bucket_cap + sizes[bucket] as usize] = (base + key) as i32;
+        sizes[bucket] += 1;
+    }
+    let mut centroids = Vec::with_capacity(bpb * dim);
+    for sum in sums.chunks_exact(dim) {
+        let norm = sum.iter().map(|x| x * x).sum::<f64>().sqrt().max(1e-30);
+        centroids.extend(sum.iter().map(|x| (x / norm) as f32));
+    }
+    Ok(ClosedBlock { centroids, members, sizes })
 }

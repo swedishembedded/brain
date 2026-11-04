@@ -42,9 +42,18 @@ head layout; clustering, selection and the sparse read are written once.
 - [ ] Sparse prefill bandwidth: bf16 KV tier for the sparse read, the
       shared window as a dense sliding tile (it is a fifth of every
       selection), and more bytes in flight per workgroup.
-- [ ] Device indexing: index-key projection, pooling, Ward and centroid
-      scoring, top-p and expansion as WGSL kernels gated against the host
-      reference; selection stays device-resident so decode needs no readback.
+- [x] Device indexing (`model::lsa::device`): `lsa_index_vectors` turns
+      post-RoPE heads (a chunk's queries or a cached key's pool slot) into
+      unit index vectors (un-rotate with the forward kernels' own angle, sum
+      each KV group, project, normalise); `lsa_read` scores a query's visible
+      paged centroids, radix-selects the top-p, sorts and expands them, and
+      writes the sparse attention rows, reading positions from the live
+      lengths so a device-advanced decode window needs no host write. A
+      lagging page table widens the window instead of dropping keys. Gated
+      against the host index space and `read_scores` (exact, scrambled pages,
+      lagging rows, early budget).
+- [ ] Device Ward: clustering of a closed block still runs on the host
+      (`cluster_block`), one readback per closed block per layer.
 - [ ] Serving: per-sequence, per-layer `BucketIndex` in the paged decoders'
       lifecycle (fork shares closed blocks, release, prefix cache, speculative
       rollback within the open block), memory accounted in `memplan`, a flag

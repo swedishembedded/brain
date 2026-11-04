@@ -218,11 +218,11 @@ fn the_bf16_pool_variant_matches_the_oracle_on_rounded_kv() {
 }
 
 /// The per-KV-head kernel agrees with the per-head kernel at the group sizes
-/// models use (1, 2, 4, 8), on ragged rows over two sequences, to float
+/// models use (1, 2, 3, 4, 5, 8), on ragged rows over two sequences, to float
 /// reassociation: its tiles are 16 keys, the per-head kernel's 8.
 #[test]
 fn the_per_kv_head_kernel_matches_the_per_head_kernel() {
-    for (nh, nkv) in [(16u32, 8u32), (8, 2), (4, 4), (16, 2)] {
+    for (nh, nkv) in [(16u32, 8u32), (8, 2), (4, 4), (16, 2), (40, 8), (12, 4)] {
         let gqa = gqa_kernel(nh / nkv).unwrap();
         let pipes: &'static [(&str, &str)] = Box::leak(vec![KERNEL, gqa].into_boxed_slice());
         let Some(g) = barrier_gpu(pipes) else { return };

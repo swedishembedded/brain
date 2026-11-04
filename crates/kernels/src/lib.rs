@@ -722,6 +722,10 @@ pub const LORA_DELTA_ROWS_MULTI: &str = include_str!("../wgsl/lora_delta_rows_mu
 pub const LORA_XA_ROWS: &str = include_str!("../wgsl/lora_xa_rows.wgsl");
 /// `wgsl/lora_xa_rows_serial.wgsl`
 pub const LORA_XA_ROWS_SERIAL: &str = include_str!("../wgsl/lora_xa_rows_serial.wgsl");
+/// `wgsl/lsa_index_vectors.wgsl`
+pub const LSA_INDEX_VECTORS: &str = include_str!("../wgsl/lsa_index_vectors.wgsl");
+/// `wgsl/lsa_read.wgsl`
+pub const LSA_READ: &str = include_str!("../wgsl/lsa_read.wgsl");
 /// `wgsl/lstm_gates.wgsl`
 pub const LSTM_GATES: &str = include_str!("../wgsl/lstm_gates.wgsl");
 /// `wgsl/lstm_gates_bwd.wgsl`
@@ -1717,6 +1721,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("lora_delta_rows_multi", LORA_DELTA_ROWS_MULTI),
     ("lora_xa_rows", LORA_XA_ROWS),
     ("lora_xa_rows_serial", LORA_XA_ROWS_SERIAL),
+    ("lsa_index_vectors", LSA_INDEX_VECTORS),
+    ("lsa_read", LSA_READ),
     ("lstm_gates", LSTM_GATES),
     ("lstm_gates_bwd", LSTM_GATES_BWD),
     ("masked_l1", MASKED_L1),

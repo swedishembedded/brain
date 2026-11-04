@@ -1,0 +1,222 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+//! The device side of latent sparse attention: index vectors from cached
+//! attention heads, the paged bucket index, and the read that turns a query
+//! into the key positions sparse attention reads.
+//!
+//! The index is a cache derived from the KV cache. A closed cluster block's
+//! buckets are computed from the keys already in the paged pool (un-rotated,
+//! projected, Ward-merged on the host) into one *index page*; a sequence's
+//! pages are listed in its [`crate::paged::BlockTable`] and live in an
+//! [`IndexPool`] shared by all sequences. Nothing about a token is ever
+//! recomputed to build or rebuild its page, so a prefix-cache hit, a forked
+//! or truncated table, or a released page is repaired from the KV cache
+//! alone, and cached-token accounting is untouched.
+//!
+//! Per layer, the device holds: projections `[n_kv_heads * head_dim,
+//! index_dim]` for queries and keys, and per page `buckets_per_block`
+//! centroids and member lists - about 40 bytes per cached token per layer
+//! against kilobytes of K/V.
+
+use super::{ClosedBlock, LsaConfig};
+use gpu_core::{DeviceBuffer, Gpu, Step};
+
+/// The kernels, for a caller's pipeline list.
+pub const KERNELS: [(&str, &str); 2] = [("lsa_index_vectors", kernels::LSA_INDEX_VECTORS), ("lsa_read", kernels::LSA_READ)];
+
+/// Most buckets a query may pick on the device (the read kernel's `P_MAX`).
+pub const MAX_TOP_P: usize = 1024;
+/// Widest index vector the device kernels hold.
+pub const MAX_INDEX_DIM: usize = 64;
+/// Widest head-summed input the index-vector kernel holds (its `MAX_IN`).
+pub const MAX_INDEX_INPUT: usize = 2048;
+/// A member slot past a bucket's size.
+pub const NO_KEY: u32 = u32::MAX;
+
+/// The attention heads index vectors are computed from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct IndexHeads {
+    /// Key/value heads; the index input is `n_kv_heads * head_dim` wide.
+    pub n_kv_heads: u32,
+    /// Channels per head.
+    pub head_dim: u32,
+    /// Half-split RoPE base the heads were rotated with, `0` for none.
+    pub rope_base: f32,
+    /// Index vector width.
+    pub index_dim: u32,
+}
+
+/// The buffers one index-vector dispatch binds.
+pub struct IndexVectorBuffers<'a> {
+    /// Rows of `heads` rotated heads, anywhere in this buffer.
+    pub x: &'a DeviceBuffer,
+    /// `[rows]` element offset of each row in `x`.
+    pub row_off: &'a DeviceBuffer,
+    /// `[rows]` position each row was rotated at.
+    pub pos: &'a DeviceBuffer,
+    /// `[n_kv_heads * head_dim, index_dim]` projection.
+    pub w: &'a DeviceBuffer,
+    /// `[rows, index_dim]` unit index vectors out.
+    pub out: &'a DeviceBuffer,
+}
+
+impl IndexHeads {
+    /// Refuse a geometry the kernel cannot run.
+    pub fn check(&self, heads: u32) -> Result<(), String> {
+        if self.n_kv_heads == 0 || !heads.is_multiple_of(self.n_kv_heads) {
+            return Err(format!("LSA index vectors: {heads} heads do not group over {} KV heads", self.n_kv_heads));
+        }
+        if self.head_dim == 0 || !self.head_dim.is_multiple_of(2) {
+            return Err(format!("LSA index vectors: head_dim {} must be even and positive", self.head_dim));
+        }
+        if (self.n_kv_heads * self.head_dim) as usize > MAX_INDEX_INPUT {
+            return Err(format!("LSA index vectors: {} input channels exceed {MAX_INDEX_INPUT}", self.n_kv_heads * self.head_dim));
+        }
+        if self.index_dim == 0 || self.index_dim as usize > MAX_INDEX_DIM {
+            return Err(format!("LSA index vectors: index_dim {} is outside 1..={MAX_INDEX_DIM}", self.index_dim));
+        }
+        Ok(())
+    }
+
+    /// Record index vectors for `rows` rows of `heads` heads each (query rows:
+    /// every query head; key rows: the KV heads). `kernel` is the caller's
+    /// pipeline index of `lsa_index_vectors`.
+    pub fn step(&self, g: &Gpu, kernel: usize, heads: u32, rows: u32, b: &IndexVectorBuffers) -> Result<Step, String> {
+        self.check(heads)?;
+        let params = [rows, heads, self.n_kv_heads, self.head_dim, self.index_dim, self.rope_base.to_bits()];
+        Ok(g.dispatch(kernel, &[b.x, b.row_off, b.pos, b.w, b.out], &params, gpu_core::Dispatch::Workgroups(rows)))
+    }
+}
+
+/// One layer's index pages on the device: `pages * buckets_per_block` rows
+/// of centroids and member lists.
+pub struct IndexPool {
+    cfg: LsaConfig,
+    pages: u32,
+    /// `[pages * buckets_per_block, index_dim]` f32.
+    pub centroids: DeviceBuffer,
+    /// `[pages * buckets_per_block, bucket_cap]` u32 positions, [`NO_KEY`]
+    /// padded.
+    pub members: DeviceBuffer,
+}
+
+impl IndexPool {
+    /// Pages for `pages` closed cluster blocks.
+    pub fn new(g: &Gpu, cfg: LsaConfig, pages: u32) -> Result<IndexPool, String> {
+        cfg.validate()?;
+        let rows = pages as u64 * cfg.buckets_per_block() as u64;
+        Ok(IndexPool {
+            cfg,
+            pages,
+            centroids: g.storage((rows * cfg.index_dim as u64).max(1)),
+            members: g.storage((rows * cfg.bucket_cap as u64).max(1)),
+        })
+    }
+
+    /// Pages the pool holds.
+    pub fn pages(&self) -> u32 {
+        self.pages
+    }
+
+    /// Device bytes of `pages` pages of one layer under `cfg`.
+    pub fn bytes(cfg: &LsaConfig, pages: u32) -> u64 {
+        pages as u64 * cfg.buckets_per_block() as u64 * (cfg.index_dim + cfg.bucket_cap) as u64 * 4
+    }
+
+    /// Upload one closed block's buckets into `page`.
+    pub fn write(&self, g: &Gpu, page: u32, block: &ClosedBlock) -> Result<(), String> {
+        if page >= self.pages {
+            return Err(format!("LSA index page {page} is outside the pool's {}", self.pages));
+        }
+        let bpb = self.cfg.buckets_per_block() as u64;
+        let centroids: Vec<u32> = block.centroids.iter().map(|x| x.to_bits()).collect();
+        let members: Vec<u32> = block.members.iter().map(|&m| if m < 0 { NO_KEY } else { m as u32 }).collect();
+        g.write_at(&self.centroids, page as u64 * bpb * self.cfg.index_dim as u64, &centroids);
+        g.write_at(&self.members, page as u64 * bpb * self.cfg.bucket_cap as u64, &members);
+        Ok(())
+    }
+}
+
+/// The geometry of a read: the configuration and the per-row page tables.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReadGeometry {
+    /// Index configuration.
+    pub cfg: LsaConfig,
+    /// Row stride of the page tables, in pages (each row is `1 + max_pages`
+    /// words: the count of built pages, then the pages).
+    pub max_pages: u32,
+}
+
+/// The buffers one read binds.
+pub struct ReadBuffers<'a> {
+    /// `[rows, index_dim]` index queries.
+    pub iq: &'a DeviceBuffer,
+    /// The layer's [`IndexPool::centroids`].
+    pub centroids: &'a DeviceBuffer,
+    /// The layer's [`IndexPool::members`].
+    pub members: &'a DeviceBuffer,
+    /// `[rows, 1 + max_pages]`: built pages, then each closed block's page.
+    pub page_tab: &'a DeviceBuffer,
+    /// `[rows]` live keys of each row's sequence (its position plus one).
+    pub seqlen: &'a DeviceBuffer,
+    /// `[rows, score_stride]` scratch.
+    pub scores: &'a DeviceBuffer,
+    /// `[rows, selection_width]` out.
+    pub sel: &'a DeviceBuffer,
+    /// `[rows, 3]` out, the sparse attention row metadata.
+    pub row_meta: &'a DeviceBuffer,
+}
+
+impl ReadGeometry {
+    /// Widest selection row: long-range keys, the window, one cluster block
+    /// whose page is not built yet (read through the widened window), sinks.
+    pub fn selection_width(&self) -> u32 {
+        (self.cfg.selection_width() + self.cfg.cluster_block) as u32
+    }
+
+    /// Scores a row holds: every bucket of every page it may list.
+    pub fn score_stride(&self) -> u32 {
+        self.max_pages * self.cfg.buckets_per_block() as u32
+    }
+
+    /// Refuse a configuration the read kernel cannot run.
+    pub fn check(&self) -> Result<(), String> {
+        self.cfg.validate()?;
+        let early_p = self.cfg.early.map_or(0, |e| e.top_p);
+        if self.cfg.top_p.max(early_p) > MAX_TOP_P {
+            return Err(format!("LSA device read: top_p {} exceeds {MAX_TOP_P}", self.cfg.top_p.max(early_p)));
+        }
+        if self.cfg.index_dim > MAX_INDEX_DIM {
+            return Err(format!("LSA device read: index_dim {} exceeds {MAX_INDEX_DIM}", self.cfg.index_dim));
+        }
+        Ok(())
+    }
+
+    /// Record the read of `rows` query rows. `kernel` is the caller's pipeline
+    /// index of `lsa_read`.
+    pub fn step(&self, g: &Gpu, kernel: usize, rows: u32, b: &ReadBuffers) -> Result<Step, String> {
+        self.check()?;
+        let c = &self.cfg;
+        let (early_position, early_top_p, early_top_k) = c.early.map_or((0, 0, 0), |e| (e.position as u32, e.top_p as u32, e.top_k as u32));
+        let params = [
+            rows,
+            self.score_stride(),
+            self.max_pages,
+            c.index_dim as u32,
+            c.bucket_cap as u32,
+            c.cluster_block as u32,
+            c.buckets_per_block() as u32,
+            c.top_p as u32,
+            c.top_k as u32,
+            c.sink as u32,
+            c.window as u32,
+            self.selection_width(),
+            early_position,
+            early_top_p,
+            early_top_k,
+        ];
+        let bufs = [b.iq, b.centroids, b.members, b.page_tab, b.seqlen, b.scores, b.sel, b.row_meta];
+        Ok(g.dispatch(kernel, &bufs, &params, gpu_core::Dispatch::Workgroups(rows)))
+    }
+}

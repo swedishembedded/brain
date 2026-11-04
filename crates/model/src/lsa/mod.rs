@@ -39,14 +39,15 @@
 
 pub mod attend;
 pub mod config;
+pub mod device;
 pub mod index;
 pub mod select;
 pub mod space;
 pub mod ward;
 
 pub use config::{EarlyBudget, LsaConfig};
-pub use index::BucketIndex;
-pub use select::{select, Selection};
+pub use index::{cluster_block, BucketIndex, ClosedBlock};
+pub use select::{read_scores, select, Selection};
 
 /// How far from unit length an index row may be before it is refused.
 ///
@@ -87,3 +88,6 @@ pub(crate) fn dot(a: &[f32], b: &[f32]) -> f64 {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod device_tests;

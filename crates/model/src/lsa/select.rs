@@ -48,7 +48,8 @@ impl Selection {
 ///
 /// `queries` is `[Tq, index_dim]` unit rows and `positions[r]` is query `r`'s
 /// position, which must already be in the index (its own key appended), since
-/// a query always reads itself through its window.
+/// a query always reads itself through its window. Scores are the f64 dot
+/// products of query and centroid, rounded to f32 as a device computes them.
 pub fn select(index: &BucketIndex, queries: &[f32], positions: &[u32]) -> Result<Selection, String> {
     let cfg = *index.config();
     let dim = cfg.index_dim;
@@ -56,35 +57,60 @@ pub fn select(index: &BucketIndex, queries: &[f32], positions: &[u32]) -> Result
     if queries.len() / dim != positions.len() {
         return Err(format!("LSA select: {} queries but {} positions", queries.len() / dim, positions.len()));
     }
+    let stride = index.rows();
+    let mut scores = vec![0f32; positions.len() * stride];
+    for (r, row) in scores.chunks_exact_mut(stride.max(1)).enumerate().take(positions.len()) {
+        let query = &queries[r * dim..][..dim];
+        for (b, s) in row.iter_mut().enumerate() {
+            *s = dot(query, &index.centroids()[b * dim..][..dim]) as f32;
+        }
+    }
+    read_scores(index, &scores, stride, positions, index.closed_blocks())
+}
+
+/// Select from given centroid scores: `scores[r * stride + b]` is query `r`'s
+/// score of bucket `b`, for at least every bucket the query may see.
+///
+/// Only the first `built` closed blocks are read from buckets; the keys of a
+/// closed block past them are read through the window, which then reaches
+/// back to `built * cluster_block` - how the device reads while a block's
+/// index page is still being built.
+///
+/// The device read takes its scores from a kernel; given the same f32 scores
+/// and `built` this is its oracle, position for position.
+pub fn read_scores(index: &BucketIndex, scores: &[f32], stride: usize, positions: &[u32], built: usize) -> Result<Selection, String> {
+    let cfg = *index.config();
     if let Some(&p) = positions.iter().find(|&&p| p as usize >= index.len()) {
         return Err(format!("LSA select: query position {p} is past the {} keys in the index", index.len()));
     }
-
-    let width = cfg.selection_width();
+    let built = built.min(index.closed_blocks());
+    let width = cfg.selection_width() + if built < index.closed_blocks() { cfg.cluster_block } else { 0 };
     let mut ids = vec![-1i32; positions.len() * width];
     let mut lens = vec![0u32; positions.len()];
-    let mut scores: Vec<(f64, usize)> = Vec::new();
+    let mut ranked: Vec<(f32, usize)> = Vec::new();
     for (r, &position) in positions.iter().enumerate() {
         let position = position as usize;
         let (top_k, top_p) = cfg.budget_at(position);
-        let visible = (position / cfg.cluster_block * cfg.buckets_per_block()).min(index.rows());
-        let query = &queries[r * dim..][..dim];
+        let visible = (position / cfg.cluster_block).min(built) * cfg.buckets_per_block();
+        if visible > stride || (visible > 0 && scores.len() < r * stride + visible) {
+            return Err(format!("LSA select: row {r} sees {visible} buckets but the scores hold {stride} a row"));
+        }
 
-        scores.clear();
-        scores.extend((0..visible).map(|b| (dot(query, &index.centroids()[b * dim..][..dim]), b)));
+        ranked.clear();
+        ranked.extend((0..visible).map(|b| (scores[r * stride + b], b)));
         // Best score first, a tie to the lower bucket; only the top `top_p`
         // need an order.
-        let order = |a: &(f64, usize), b: &(f64, usize)| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1));
-        let picked = top_p.min(scores.len());
-        if picked > 0 && picked < scores.len() {
-            scores.select_nth_unstable_by(picked - 1, order);
+        let order = |a: &(f32, usize), b: &(f32, usize)| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1));
+        let picked = top_p.min(ranked.len());
+        if picked > 0 && picked < ranked.len() {
+            ranked.select_nth_unstable_by(picked - 1, order);
         }
-        scores[..picked].sort_unstable_by(order);
+        ranked[..picked].sort_unstable_by(order);
 
-        let window_start = (position + 1).saturating_sub(cfg.window);
+        let window_start = (position + 1).saturating_sub(cfg.window).min(built * cfg.cluster_block);
         let row = &mut ids[r * width..][..width];
         let mut n = 0usize;
-        'expand: for &(_, bucket) in &scores[..picked] {
+        'expand: for &(_, bucket) in &ranked[..picked] {
             let members = &index.members()[bucket * cfg.bucket_cap..][..index.sizes()[bucket] as usize];
             for &key in members {
                 if n == top_k {

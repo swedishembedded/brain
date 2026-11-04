@@ -2,14 +2,14 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 // @what  Sparse paged attention over per-query selected key positions, one KV head's whole query-head group per workgroup
-// @how   64-thread workgroup per (query row, kv head): 16-key tiles, K then V through one tile buffer, split dot products, owned output channels
+// @how   64-thread workgroup per (query row, kv head): 16-key tiles, K then V through one tile buffer, split dot products, per-head softmax in workgroup memory
 // @opt   4
 // @cpu   no
 // @gpu   yes
 // @npu   no
 // @quant none
 // @dtype f32|bf16
-// @tpl   GROUP -> query heads per KV head (1, 2, 4 or 8; default 2);
+// @tpl   GROUP -> query heads per KV head (any; default 2);
 //        pool_k,pool_v -> bf16 storage variant via
 //        `kernels::template::dtype_variant`.
 //
@@ -29,8 +29,10 @@
 //   * a tile is BC = 16 selected keys; their pool slots are resolved once
 //     per tile into shared memory, not once per staged element;
 //   * the GROUP x BC score dot products are split over the 64 threads with
-//     no thread repeating another's work, and each thread then owns
-//     GROUP*HD/64 output channels of one head for the softmax-weighted V sum.
+//     no thread repeating another's work; one thread per head folds its
+//     scores into the online softmax (weights and rescale in workgroup
+//     memory) while the others stage V, and each thread then owns every
+//     64th output channel of the group for the softmax-weighted V sum.
 //
 // K and V take turns in one 8 KiB tile buffer (V is staged after the scores
 // no longer need K), keeping the kernel inside WebGPU's guaranteed 16 KiB of
@@ -48,9 +50,9 @@ const WG: u32 = 64u;
 
 const NDOT: u32 = GROUP * BC;              // score dot products per tile
 const TPD: u32 = max(1u, WG / NDOT);       // threads per dot product
-const DPT: u32 = max(1u, NDOT / WG);       // dot products per thread
+const DPT: u32 = (NDOT + WG - 1u) / WG;    // dot products per thread
 const CPT: u32 = HD / TPD;                 // channels per thread per dot
-const OPT: u32 = GROUP * HD / WG;          // output channels per thread
+const OPT: u32 = (GROUP * HD + WG - 1u) / WG; // output channels per thread
 const NO_SLOT: u32 = 0xFFFFFFFFu;
 
 struct Params {
@@ -77,6 +79,10 @@ var<workgroup> qsh:   array<f32, GROUP * HD>;
 var<workgroup> tile:  array<f32, BC * HD>;
 var<workgroup> part:  array<f32, NDOT * TPD>;
 var<workgroup> kslot: array<u32, BC>;
+var<workgroup> pw:    array<f32, GROUP * BC>;  // scores, then softmax weights
+var<workgroup> corr_sh: array<f32, GROUP>;
+var<workgroup> m_sh:  array<f32, GROUP>;
+var<workgroup> l_sh:  array<f32, GROUP>;
 
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wgid: vec3<u32>,
@@ -105,14 +111,16 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
         qsh[e] = select(0.0, q[q_base + (e / HD) * hd + d], d < hd);
     }
 
-    // This thread's output channels: OPT consecutive channels of one head.
-    let out0 = lt * OPT;
-    let gh = out0 / HD;
-    let d0 = out0 % HD;
+    // Running softmax state per head lives in workgroup memory, owned by
+    // thread `gh` during the softmax phase.
+    if (lt < GROUP) {
+        m_sh[lt] = -3.4e38;
+        l_sh[lt] = 0.0;
+    }
+    // This thread's outputs are `lt + u * WG` over the group's GROUP * HD
+    // channels: any head, so OPT need not divide a head.
     var o: array<f32, OPT>;
     for (var u = 0u; u < OPT; u = u + 1u) { o[u] = 0.0; }
-    var m = -3.4e38;
-    var l = 0.0;
 
     let ntiles = (count + BC - 1u) / BC;
     for (var kt = 0u; kt < ntiles; kt = kt + 1u) {
@@ -148,6 +156,7 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
         // Score dot products, each split over TPD threads.
         for (var s = 0u; s < DPT; s = s + 1u) {
             let dot = lt / TPD + s * (WG / TPD);
+            if (dot >= NDOT) { break; }
             let piece = lt % TPD;
             let g = dot / BC;
             let j = dot % BC;
@@ -159,7 +168,39 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
         }
         workgroupBarrier();
 
-        // Stage V over K, which the scores no longer need.
+        // Thread gh < GROUP folds its head's scores into the online softmax:
+        // the tile's weights, the rescale of what came before, the new
+        // running max and sum. The rest stage V over K meanwhile.
+        if (lt < GROUP) {
+            let gh = lt;
+            var tile_max = -3.4e38;
+            for (var j = 0u; j < BC; j = j + 1u) {
+                var v = -3.4e38;
+                if (kslot[j] != NO_SLOT) {
+                    var acc = 0.0;
+                    for (var piece = 0u; piece < TPD; piece = piece + 1u) {
+                        acc = acc + part[(gh * BC + j) * TPD + piece];
+                    }
+                    v = acc * scale;
+                }
+                pw[gh * BC + j] = v;
+                tile_max = max(tile_max, v);
+            }
+            let m_old = m_sh[gh];
+            let m_new = max(m_old, tile_max);
+            var tile_l = 0.0;
+            for (var j = 0u; j < BC; j = j + 1u) {
+                // A masked key weighs nothing, even in a tile where every key
+                // is masked and the running max is still the -inf stand-in.
+                let e = select(0.0, exp(pw[gh * BC + j] - m_new), kslot[j] != NO_SLOT);
+                pw[gh * BC + j] = e;
+                tile_l = tile_l + e;
+            }
+            let corr = exp(m_old - m_new);
+            corr_sh[gh] = corr;
+            l_sh[gh] = l_sh[gh] * corr + tile_l;
+            m_sh[gh] = m_new;
+        }
         for (var e = lt; e < BC * HD; e = e + WG) {
             let base = kslot[e / HD];
             let d = e % HD;
@@ -172,47 +213,28 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
         }
         workgroupBarrier();
 
-        // Online softmax for this thread's head, then its channels of P.V.
-        var sc: array<f32, BC>;
-        var tile_max = -3.4e38;
-        for (var j = 0u; j < BC; j = j + 1u) {
-            var v = -3.4e38;
-            if (kslot[j] != NO_SLOT) {
-                var acc = 0.0;
-                for (var piece = 0u; piece < TPD; piece = piece + 1u) {
-                    acc = acc + part[(gh * BC + j) * TPD + piece];
-                }
-                v = acc * scale;
-            }
-            sc[j] = v;
-            tile_max = max(tile_max, v);
-        }
-        let m_new = max(m, tile_max);
-        let corr = exp(m - m_new);
-        var tile_l = 0.0;
-        for (var j = 0u; j < BC; j = j + 1u) {
-            // A masked key weighs nothing, even in a tile where every key is
-            // masked and the running max is still the -inf stand-in.
-            let e = select(0.0, exp(sc[j] - m_new), kslot[j] != NO_SLOT);
-            sc[j] = e;
-            tile_l = tile_l + e;
-        }
-        l = l * corr + tile_l;
-        m = m_new;
         for (var u = 0u; u < OPT; u = u + 1u) {
-            var acc = 0.0;
-            for (var j = 0u; j < BC; j = j + 1u) {
-                acc = acc + sc[j] * tile[j * HD + d0 + u];
+            let e = lt + u * WG;
+            if (e < GROUP * HD) {
+                let gh = e / HD;
+                let d = e % HD;
+                var acc = 0.0;
+                for (var j = 0u; j < BC; j = j + 1u) {
+                    acc = acc + pw[gh * BC + j] * tile[j * HD + d];
+                }
+                o[u] = o[u] * corr_sh[gh] + acc;
             }
-            o[u] = o[u] * corr + acc;
         }
         workgroupBarrier(); // done reading the tile before it is overwritten
     }
 
-    let inv = select(0.0, 1.0 / l, l > 0.0);
-    let o_base = r * q_row + (hkv * GROUP + gh) * hd;
     for (var u = 0u; u < OPT; u = u + 1u) {
-        let d = d0 + u;
-        if (d < hd) { ctx[o_base + d] = o[u] * inv; }
+        let e = lt + u * WG;
+        if (e < GROUP * HD) {
+            let gh = e / HD;
+            let d = e % HD;
+            let l = l_sh[gh];
+            if (d < hd) { ctx[r * q_row + (hkv * GROUP + gh) * hd + d] = select(0.0, o[u] / l, l > 0.0); }
+        }
     }
 }
