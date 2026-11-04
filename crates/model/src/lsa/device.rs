@@ -43,6 +43,18 @@ pub const MAX_INDEX_INPUT: usize = 2048;
 /// A member slot past a bucket's size.
 pub const NO_KEY: u32 = u32::MAX;
 
+/// How the heads an index reads were rotated.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Rope {
+    /// Not rotated.
+    None,
+    /// Half-split RoPE at this base.
+    Base(f32),
+    /// Half-split RoPE by a per-channel inverse-frequency table bound with
+    /// the dispatch (YaRN).
+    Table,
+}
+
 /// The attention heads index vectors are computed from.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct IndexHeads {
@@ -50,8 +62,8 @@ pub struct IndexHeads {
     pub n_kv_heads: u32,
     /// Channels per head.
     pub head_dim: u32,
-    /// Half-split RoPE base the heads were rotated with, `0` for none.
-    pub rope_base: f32,
+    /// The rotation to undo.
+    pub rope: Rope,
     /// Index vector width.
     pub index_dim: u32,
 }
@@ -68,9 +80,20 @@ pub struct IndexVectorBuffers<'a> {
     pub w: &'a DeviceBuffer,
     /// `[rows, index_dim]` unit index vectors out.
     pub out: &'a DeviceBuffer,
+    /// `[head_dim / 2]` inverse frequencies for [`Rope::Table`] (any buffer
+    /// otherwise; it is not read).
+    pub inv_freq: &'a DeviceBuffer,
 }
 
 impl IndexHeads {
+    fn rope_params(&self) -> [u32; 2] {
+        match self.rope {
+            Rope::None => [0f32.to_bits(), 0],
+            Rope::Base(base) => [base.to_bits(), 1],
+            Rope::Table => [0f32.to_bits(), 2],
+        }
+    }
+
     /// Refuse a geometry the kernel cannot run.
     pub fn check(&self, heads: u32) -> Result<(), String> {
         if self.n_kv_heads == 0 || !heads.is_multiple_of(self.n_kv_heads) {
@@ -93,8 +116,9 @@ impl IndexHeads {
     /// pipeline index of `lsa_index_vectors`.
     pub fn step(&self, g: &Gpu, kernel: usize, heads: u32, rows: u32, b: &IndexVectorBuffers) -> Result<Step, String> {
         self.check(heads)?;
-        let params = [rows, heads, self.n_kv_heads, self.head_dim, self.index_dim, self.rope_base.to_bits()];
-        Ok(g.dispatch(kernel, &[b.x, b.row_off, b.pos, b.w, b.out], &params, gpu_core::Dispatch::Workgroups(rows)))
+        let [base, mode] = self.rope_params();
+        let params = [rows, heads, self.n_kv_heads, self.head_dim, self.index_dim, base, mode];
+        Ok(g.dispatch(kernel, &[b.x, b.row_off, b.pos, b.w, b.out, b.inv_freq], &params, gpu_core::Dispatch::Workgroups(rows)))
     }
 }
 
@@ -112,6 +136,8 @@ pub struct PackedKeyBuffers<'a> {
     pub w: &'a DeviceBuffer,
     /// `[rows, index_dim]` out.
     pub out: &'a DeviceBuffer,
+    /// As [`IndexVectorBuffers::inv_freq`].
+    pub inv_freq: &'a DeviceBuffer,
 }
 
 impl IndexHeads {
@@ -122,8 +148,9 @@ impl IndexHeads {
         if !self.head_dim.is_multiple_of(4) {
             return Err(format!("LSA index keys: a packed pool needs head_dim % 4 == 0, got {}", self.head_dim));
         }
-        let params = [rows, self.n_kv_heads, self.n_kv_heads, self.head_dim, self.index_dim, self.rope_base.to_bits()];
-        Ok(g.dispatch(kernel, &[b.pool, b.slots, b.pos, b.w, b.out, b.scales], &params, gpu_core::Dispatch::Workgroups(rows)))
+        let [base, mode] = self.rope_params();
+        let params = [rows, self.n_kv_heads, self.n_kv_heads, self.head_dim, self.index_dim, base, mode];
+        Ok(g.dispatch(kernel, &[b.pool, b.slots, b.pos, b.w, b.out, b.scales, b.inv_freq], &params, gpu_core::Dispatch::Workgroups(rows)))
     }
 }
 

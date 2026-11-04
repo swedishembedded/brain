@@ -30,7 +30,11 @@
 //   3. project by `w` (`[n_kv_heads * head_dim, index_dim]`, row-major);
 //   4. normalise to unit length (a zero row stays zero).
 //
-// `rope_base == 0` means the heads carry no rotation and step 1 is skipped.
+// `rope_mode` names the rotation: 0 none (step 1 skipped), 1 half-split RoPE
+// at `rope_base` (the angle computed exactly as the plain forward kernels
+// compute it), 2 a per-channel inverse-frequency table `inv_freq[half]` (YaRN:
+// `rope_paged_yarn`'s angle; its uniform attention factor scales the whole
+// vector, which the normalisation removes).
 // Rotation is linear and the same for every head of a row, so summing the
 // group before un-rotating gives the same result with a fraction of the work.
 //
@@ -46,6 +50,7 @@ struct Params {
     head_dim: u32,
     index_dim: u32,
     rope_base: f32,
+    rope_mode: u32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -54,6 +59,7 @@ struct Params {
 @group(0) @binding(3) var<storage, read>       pos:     array<u32>;
 @group(0) @binding(4) var<storage, read>       w:       array<f32>;
 @group(0) @binding(5) var<storage, read_write> out:     array<f32>;
+@group(0) @binding(6) var<storage, read>       inv_freq: array<f32>;
 
 var<workgroup> u:  array<f32, MAX_IN>;
 var<workgroup> sq: array<f32, WG>;
@@ -83,8 +89,12 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
         }
         var cs = 1.0;
         var sn = 0.0;
-        if (p.rope_base != 0.0) {
+        if (p.rope_mode == 1u) {
             let angle = fpos * pow(p.rope_base, -f32(2u * m) / f32(hd));
+            cs = cos(angle);
+            sn = sin(angle);
+        } else if (p.rope_mode == 2u) {
+            let angle = fpos * inv_freq[m];
             cs = cos(angle);
             sn = sin(angle);
         }

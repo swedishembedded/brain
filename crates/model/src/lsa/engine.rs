@@ -21,7 +21,7 @@
 //! words (20 KiB at the paper's sizes, for 512 tokens), plus bounded scratch
 //! sized by the engine's widest forward.
 
-use super::device::{IndexHeads, IndexPool, IndexVectorBuffers, PackedKeyBuffers, ReadBuffers, ReadGeometry};
+use super::device::{IndexHeads, IndexPool, IndexVectorBuffers, PackedKeyBuffers, ReadBuffers, ReadGeometry, Rope};
 use super::indexer::Indexer;
 use super::{cluster_block, ClosedBlock, LsaConfig};
 use crate::paged::{BlockAllocator, BlockTable};
@@ -128,18 +128,30 @@ pub struct LsaAttention {
     key_off: DeviceBuffer,
     key_pos: DeviceBuffer,
     keys: Vec<DeviceBuffer>,
+    /// The YaRN inverse-frequency table the heads were rotated by, or a
+    /// one-word placeholder under plain RoPE.
+    inv_freq: DeviceBuffer,
     built_pages: u64,
 }
 
 impl LsaAttention {
     /// Attach `indexer` to an engine: upload its projections and allocate
     /// pages for `page_capacity` closed cluster blocks and scratch for
-    /// forwards of up to `max_rows` rows.
-    pub fn new(g: &Gpu, indexer: &Indexer, kernels: LsaKernels, kv: KvGeometry, max_rows: u32, page_capacity: u32) -> Result<LsaAttention, String> {
+    /// forwards of up to `max_rows` rows. `yarn_inv_freq` is the engine's
+    /// `[head_dim / 2]` inverse-frequency table when its heads are rotated
+    /// under YaRN (plain RoPE at the indexer's base otherwise): the index
+    /// un-rotates by what rotated them, so an indexer built at native
+    /// context reads the same position-free vectors past it.
+    pub fn new(g: &Gpu, indexer: &Indexer, kernels: LsaKernels, kv: KvGeometry, max_rows: u32, page_capacity: u32, yarn_inv_freq: Option<&DeviceBuffer>) -> Result<LsaAttention, String> {
         indexer.validate()?;
         let cfg = indexer.cfg;
         let geo = indexer.geometry;
-        let heads = IndexHeads { n_kv_heads: geo.n_kv_heads as u32, head_dim: geo.head_dim as u32, rope_base: geo.rope_base, index_dim: cfg.index_dim as u32 };
+        let rope = match yarn_inv_freq {
+            Some(_) => Rope::Table,
+            None if geo.rope_base == 0.0 => Rope::None,
+            None => Rope::Base(geo.rope_base),
+        };
+        let heads = IndexHeads { n_kv_heads: geo.n_kv_heads as u32, head_dim: geo.head_dim as u32, rope, index_dim: cfg.index_dim as u32 };
         heads.check(geo.n_heads as u32)?;
         if kv.block_size == 0 || !cfg.cluster_block.is_multiple_of(kv.block_size as usize) {
             return Err(format!("LSA: cluster_block {} is not a whole number of KV blocks of {}", cfg.cluster_block, kv.block_size));
@@ -182,6 +194,7 @@ impl LsaAttention {
             key_off: g.storage(block),
             key_pos: g.storage(block),
             keys,
+            inv_freq: yarn_inv_freq.cloned().unwrap_or_else(|| g.storage(1)),
             built_pages: 0,
         })
     }
@@ -236,7 +249,7 @@ impl LsaAttention {
         if rows > self.max_rows {
             return Err(format!("LSA: a forward of {rows} rows exceeds the {} the scratch holds", self.max_rows));
         }
-        s.push(self.heads.step(g, self.k.index_vectors, self.n_heads, rows, &IndexVectorBuffers { x: b.q, row_off: &self.q_off, pos: b.pos, w: &l.wq, out: &self.iq })?);
+        s.push(self.heads.step(g, self.k.index_vectors, self.n_heads, rows, &IndexVectorBuffers { x: b.q, row_off: &self.q_off, pos: b.pos, w: &l.wq, out: &self.iq, inv_freq: &self.inv_freq })?);
         s.push(self.read.step(
             g,
             self.k.read,
@@ -376,9 +389,9 @@ impl LsaAttention {
                 steps.push(match (pools.scales, self.k.index_keys_packed) {
                     (Some(scales), Some(kernel)) => {
                         let sk = scales.get(l).ok_or_else(|| format!("LSA: no key scales for layer {l}"))?;
-                        self.heads.step_packed_keys(g, kernel, cb, &PackedKeyBuffers { pool: pk, scales: sk, slots: &self.key_off, pos: &self.key_pos, w: &layer.wk, out: &self.keys[l] })?
+                        self.heads.step_packed_keys(g, kernel, cb, &PackedKeyBuffers { pool: pk, scales: sk, slots: &self.key_off, pos: &self.key_pos, w: &layer.wk, out: &self.keys[l], inv_freq: &self.inv_freq })?
                     }
-                    (None, None) => self.heads.step(g, self.k.index_vectors, self.heads.n_kv_heads, cb, &IndexVectorBuffers { x: pk, row_off: &self.key_off, pos: &self.key_pos, w: &layer.wk, out: &self.keys[l] })?,
+                    (None, None) => self.heads.step(g, self.k.index_vectors, self.heads.n_kv_heads, cb, &IndexVectorBuffers { x: pk, row_off: &self.key_off, pos: &self.key_pos, w: &layer.wk, out: &self.keys[l], inv_freq: &self.inv_freq })?,
                     _ => return Err("LSA: the KV pool's packing does not match the kernels the engine resolved".into()),
                 });
             }

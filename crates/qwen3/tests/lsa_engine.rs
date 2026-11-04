@@ -125,3 +125,30 @@ fn the_budget_decides_what_prefill_reads() {
     assert!(full_err < 1e-3, "a budget past the context should reproduce dense attention: {full_err}");
     assert!(tiny_err > 10.0 * full_err.max(1e-6), "an 8-key budget changed nothing ({tiny_err}): the sparse path is not running");
 }
+
+/// Past the native context the engine rotates under YaRN; the index
+/// un-rotates by the engine's own frequency table, so a budget past the
+/// context still reproduces dense attention.
+#[test]
+fn yarn_positions_read_sparsely_like_dense() {
+    let Some(path) = checkpoint() else { return };
+    let mut rng = Lcg::random();
+    let p = prompt(&mut rng, 3 * 512 + 100);
+    let yarn_engine = |path: &str| {
+        let (mut cfg, src) = qwen3::open_checkpoint(path).expect("open Qwen3-0.6B");
+        cfg.rope_scaling = Some(model::rope_scaling::RopeScaling::Yarn(model::yarn::YarnConfig::new(2.0, cfg.max_position_embeddings)));
+        let mbt = 4096u32.div_ceil(BLOCK);
+        Engine::from_source_tier(cfg, &*src, BLOCK, 2 * mbt + 8, 2, mbt, MAX_PREFILL, false, qwen3::Dtype::F32)
+    };
+    let hidden = |e: &mut Engine| {
+        let mut table = model::paged::BlockTable::new();
+        e.prefill_for_perf(&mut table, &p)
+    };
+    let dense = hidden(&mut yarn_engine(&path));
+    let mut sparse = yarn_engine(&path);
+    sparse.set_lsa(&Indexer::random(LsaConfig { top_p: 1024, top_k: 4096, ..LsaConfig::default() }, geometry(&path), rng.next_u64()).unwrap()).unwrap();
+    let got = hidden(&mut sparse);
+    let rel = (got.iter().zip(&dense).map(|(x, y)| (x - y) * (x - y)).sum::<f32>() / dense.iter().map(|y| y * y).sum::<f32>()).sqrt();
+    println!("YaRN x2, every-key sparse vs dense: relative error {rel:.2e}");
+    assert!(rel < 1e-3, "sparse attention under YaRN differs from dense by {rel}");
+}

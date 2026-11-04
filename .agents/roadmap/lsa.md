@@ -37,8 +37,6 @@ head layout; clustering, selection and the sparse read are written once.
       runs at ~155 GB/s and only crosses dense past 64k. The decode-shaped
       per-head kernel was 1.6-1.8x slower still.
 
-## Not yet done
-
 - [x] End-to-end prefill, Qwen3-0.6B, every layer sparse, int8 KV (the
       served default), one sequence, 512-row chunks, P40 (wgpu), top_k 1024,
       top_p 256, window 512 (`qwen_lsa prefill --kv-cache int8`):
@@ -51,9 +49,6 @@ head layout; clustering, selection and the sparse read are written once.
       Dense throughput falls 1721 -> 357 tok/s (quadratic); sparse stays
       1052 -> 836 tok/s (linear). Below ~12k the selection holds most causal
       keys anyway and the per-query gather costs more than dense tiles.
-- [ ] Sparse prefill bandwidth: bf16 KV tier for the sparse read, the
-      shared window as a dense sliding tile (it is a fifth of every
-      selection), and more bytes in flight per workgroup.
 - [x] Device indexing (`model::lsa::device`): `lsa_index_vectors` turns
       post-RoPE heads (a chunk's queries or a cached key's pool slot) into
       unit index vectors (un-rotate with the forward kernels' own angle, sum
@@ -74,8 +69,6 @@ head layout; clustering, selection and the sparse read are written once.
       block chain, so a shared prefix shares its pages; truncation and
       release free them. Gated: device context equals the oracle over the
       device's selection, page sharing and freeing, artifact round trip.
-- [ ] Device Ward: clustering of a closed block still runs on the host
-      (`cluster_block`), one readback per closed block per layer.
 - [x] Qwen3 serving engine (`Engine::set_lsa`): the covered layers record
       the sparse path; prefill chunks are cut at cluster boundaries and every
       forward (prefill, scoring, decode windows, speculative verify) brings
@@ -85,7 +78,9 @@ head layout; clustering, selection and the sparse read are written once.
       1.2e-6 at that budget against 0.29 at 8 keys; on the tiny model the
       scheduler conformance suite passes with LSA on (batched = single,
       prefix hits prefill only the suffix and report their cached tokens,
-      speculation = greedy). Refused on int8/fp8 KV and under YaRN.
+      speculation = greedy). Under YaRN (past the native context) the index
+      un-rotates by the engine's own frequency table: a full budget is within
+      1.2e-6 of dense on Qwen3-0.6B at factor 2.
 - [x] Serving surface: `--sparse-attention FILE` (`model::policy`), honoured
       by the Qwen3 resident (`Engine::set_lsa`) and refused by name by every
       model that does not declare it.
@@ -93,7 +88,6 @@ head layout; clustering, selection and the sparse read are written once.
       projections, index pages and scratch as a `memplan` demand before
       loading (`qwen3::serve::lsa_device_bytes`, the formula `set_lsa`
       allocates by; gated equal on the tiny engine).
-- [ ] Selected-key counts and page use in the stats snapshot.
 - [x] Packed (int8/fp8) KV, the served default: `paged_sparse_flash_gqa_i8`
       (per KV head, decode) and `paged_sparse_flash_rows_i8` (one workgroup
       per query row and every head: each selected key resolved once and its
@@ -109,7 +103,6 @@ head layout; clustering, selection and the sparse read are written once.
       (indicative): dense `paged_flash_prefill_i8` 2238 / 10284 ms at
       32k / 64k against whole-row sparse 787 / 1610 ms (2.8x / 6.4x);
       crossover near 12k.
-- [ ] YaRN: the index-vector kernel un-rotates plain RoPE only.
 - [x] D-LSA training (`model::lsa::distill`): teacher targets (head-averaged
       attention over the keys outside sink and window, top 2048,
       renormalised), the forward-KL objective with analytic gradients of both
@@ -120,8 +113,6 @@ head layout; clustering, selection and the sparse read are written once.
       initialisation, retention of dense attention, held-out loss, prefill
       timing). Gates: gradients against central differences; held-out KL
       2.14 -> 0.0006 on a learnable teacher, recovering its temperature.
-- [ ] D-LSA on the generic trainer (`ModelFit`) and device kernels for the
-      distillation arithmetic, which is host math today.
 - [x] N-LSA training (`Qwen::enable_native_lsa`): every layer's queries read
       only their selection, built each forward from the layer's own rotated
       queries and keys (identity index space, no learned projection), held
@@ -131,6 +122,17 @@ head layout; clustering, selection and the sparse read are written once.
       window-only baseline. Gate: at a full budget a training step's loss
       equals dense and its gradients agree to 1e-8 (largest 2.8e-2);
       window-only changes them.
+
+## Not yet done
+
+- [ ] Sparse prefill bandwidth: bf16 KV tier for the sparse read, the
+      shared window as a dense sliding tile (it is a fifth of every
+      selection), and more bytes in flight per workgroup.
+- [ ] Device Ward: clustering of a closed block still runs on the host
+      (`cluster_block`), one readback per closed block per layer.
+- [ ] Selected-key counts and page use in the stats snapshot.
+- [ ] D-LSA on the generic trainer (`ModelFit`) and device kernels for the
+      distillation arithmetic, which is host math today.
 - [ ] N-LSA with a sub-quadratic training kernel (the selection inverted per
       key group for dK/dV, no atomics); training today runs materialised
       `[b, heads, t, t]` attention under the mask.

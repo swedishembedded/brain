@@ -46,7 +46,8 @@ fn index_vectors_unrotate_sum_groups_and_project() {
     let Some(g) = barrier_gpu(PIPES) else { return };
     let (nh, nkv, hd, dim) = (8usize, 2usize, 16usize, 12usize);
     let base = 10000.0f32;
-    let heads = IndexHeads { n_kv_heads: nkv as u32, head_dim: hd as u32, rope_base: base, index_dim: dim as u32 };
+    let heads = IndexHeads { n_kv_heads: nkv as u32, head_dim: hd as u32, rope: Rope::Base(base), index_dim: dim as u32 };
+    let unused = g.storage(1);
     let mut rng = Lcg::random();
     let w: Vec<f32> = (0..nkv * hd * dim).map(|_| rng.signed()).collect();
     let project = |v: &[f32]| -> Vec<f32> {
@@ -92,7 +93,7 @@ fn index_vectors_unrotate_sum_groups_and_project() {
         g.write(&pos, &positions);
         let wb = g.storage_init("w", &w);
         let out = g.storage((rows * dim) as u64);
-        let step = heads.step(&g, 0, n_heads as u32, rows as u32, &IndexVectorBuffers { x: &xb, row_off: &off, pos: &pos, w: &wb, out: &out }).unwrap();
+        let step = heads.step(&g, 0, n_heads as u32, rows as u32, &IndexVectorBuffers { x: &xb, row_off: &off, pos: &pos, w: &wb, out: &out, inv_freq: &unused }).unwrap();
         g.submit(&[], &[step]);
         let got = g.read(&out, rows * dim);
         let worst = got.iter().zip(&want).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
@@ -180,7 +181,8 @@ fn packed_index_keys_match_the_dequantised_pool() {
         let pipes: &'static [(&str, &str)] = Box::leak(vec![KERNELS[0], index_keys_kernel(kv).unwrap()].into_boxed_slice());
         let Some(g) = barrier_gpu(pipes) else { return };
         let (nkv, hd, dim, slots) = (2usize, 16usize, 8usize, 40usize);
-        let heads = IndexHeads { n_kv_heads: nkv as u32, head_dim: hd as u32, rope_base: 10000.0, index_dim: dim as u32 };
+        let heads = IndexHeads { n_kv_heads: nkv as u32, head_dim: hd as u32, rope: Rope::Base(10000.0), index_dim: dim as u32 };
+        let unused = g.storage(1);
         let mut rng = Lcg::random();
         let bytes: Vec<u8> = (0..slots * nkv * hd).map(|_| {
             let b = rng.next_u32() as u8;
@@ -202,14 +204,59 @@ fn packed_index_keys_match_the_dequantised_pool() {
         let off = g.storage(rows as u64);
         g.write(&off, &key_slots.iter().map(|s| s * (nkv * hd) as u32).collect::<Vec<_>>());
         let out_f32 = g.storage((rows * dim) as u64);
-        let s1 = heads.step(&g, 0, nkv as u32, rows as u32, &IndexVectorBuffers { x: &f32_pool, row_off: &off, pos: &posb, w: &wb, out: &out_f32 }).unwrap();
+        let s1 = heads.step(&g, 0, nkv as u32, rows as u32, &IndexVectorBuffers { x: &f32_pool, row_off: &off, pos: &posb, w: &wb, out: &out_f32, inv_freq: &unused }).unwrap();
         let packed = g.storage(words.len() as u64);
         g.write(&packed, &words);
         let (sb, slotb, out_p) = (g.storage_init("s", &scales), g.storage(rows as u64), g.storage((rows * dim) as u64));
         g.write(&slotb, &key_slots);
-        let s2 = heads.step_packed_keys(&g, 1, rows as u32, &PackedKeyBuffers { pool: &packed, scales: &sb, slots: &slotb, pos: &posb, w: &wb, out: &out_p }).unwrap();
+        let s2 = heads.step_packed_keys(&g, 1, rows as u32, &PackedKeyBuffers { pool: &packed, scales: &sb, slots: &slotb, pos: &posb, w: &wb, out: &out_p, inv_freq: &unused }).unwrap();
         g.submit(&[], &[s1, s2]);
         let bits = |v: Vec<f32>| v.into_iter().map(f32::to_bits).collect::<Vec<_>>();
         assert_eq!(bits(g.read(&out_p, rows * dim)), bits(g.read(&out_f32, rows * dim)), "{kv:?} index keys differ from the dequantised f32 pool's");
     }
+}
+
+/// Heads rotated by a per-channel inverse-frequency table (YaRN), with its
+/// uniform attention factor, un-rotate to the index vectors of the unrotated
+/// heads.
+#[test]
+fn index_vectors_unrotate_a_frequency_table() {
+    static PIPES: &[(&str, &str)] = &KERNELS;
+    let Some(g) = barrier_gpu(PIPES) else { return };
+    let (nkv, hd, dim, rows) = (2usize, 16usize, 8usize, 6usize);
+    let heads = IndexHeads { n_kv_heads: nkv as u32, head_dim: hd as u32, rope: Rope::Table, index_dim: dim as u32 };
+    let mut rng = Lcg::random();
+    let table: Vec<f32> = (0..hd / 2).map(|m| 0.7f32.powi(m as i32) * (0.5 + rng.unit())).collect();
+    let factor = 1.3f32;
+    let w: Vec<f32> = (0..nkv * hd * dim).map(|_| rng.signed()).collect();
+    let pre: Vec<f32> = (0..rows * nkv * hd).map(|_| rng.signed()).collect();
+    let positions: Vec<u32> = (0..rows as u32).map(|r| 1000 + 977 * r).collect();
+    let mut rotated = pre.clone();
+    for (r, row) in rotated.chunks_exact_mut(nkv * hd).enumerate() {
+        for head in row.chunks_exact_mut(hd) {
+            for m in 0..hd / 2 {
+                let (sn, cs) = (positions[r] as f32 * table[m]).sin_cos();
+                let (x0, x1) = (head[m], head[m + hd / 2]);
+                head[m] = factor * (x0 * cs - x1 * sn);
+                head[m + hd / 2] = factor * (x1 * cs + x0 * sn);
+            }
+        }
+    }
+    let want: Vec<f32> = pre
+        .chunks_exact(nkv * hd)
+        .flat_map(|row| crate::hostmath::l2_normalize(&(0..dim).map(|c| (0..nkv * hd).map(|i| row[i] * w[i * dim + c]).sum::<f32>()).collect::<Vec<_>>()))
+        .collect();
+    let (xb, wb, tb) = (g.storage_init("x", &rotated), g.storage_init("w", &w), g.storage_init("t", &table));
+    let off = g.storage(rows as u64);
+    g.write(&off, &(0..rows as u32).map(|r| r * (nkv * hd) as u32).collect::<Vec<_>>());
+    let pos = g.storage(rows as u64);
+    g.write(&pos, &positions);
+    let out = g.storage((rows * dim) as u64);
+    let step = heads.step(&g, 0, nkv as u32, rows as u32, &IndexVectorBuffers { x: &xb, row_off: &off, pos: &pos, w: &wb, out: &out, inv_freq: &tb }).unwrap();
+    g.submit(&[], &[step]);
+    let got = g.read(&out, rows * dim);
+    let worst = got.iter().zip(&want).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+    // Angles reach ~9000 rad, where f32 sin/cos of the host and of the device
+    // differ in the fourth decimal; the un-rotation itself adds nothing.
+    assert!(worst < 1e-3, "table un-rotation differs from the unrotated heads by {worst}");
 }

@@ -1701,13 +1701,10 @@ impl Engine {
     /// and continuous batching are unchanged.
     ///
     /// Reads f32, int8 and fp8 KV caches (the packed ones a quarter of the
-    /// bytes per key). Refused under YaRN position scaling, which the index
-    /// does not un-rotate yet.
+    /// bytes per key), and positions under YaRN scaling past the model's
+    /// native context (the index un-rotates by the engine's own table).
     pub fn set_lsa(&mut self, indexer: &model::lsa::indexer::Indexer) -> Result<(), String> {
         let c = &self.cfg;
-        if self.yarn.is_some() {
-            return Err("latent sparse attention does not read YaRN-scaled positions yet; serve within the model's native context".into());
-        }
         let geometry = model::lsa::indexer::IndexGeometry { n_layers: c.n_layers as usize, n_heads: c.n_heads as usize, n_kv_heads: c.n_kv_heads as usize, head_dim: c.head_dim as usize, rope_base: c.rope_theta };
         indexer.check_model(&geometry)?;
         let group = c.n_heads / c.n_kv_heads;
@@ -1729,7 +1726,8 @@ impl Engine {
         let kv = model::lsa::engine::KvGeometry { block_size: self.block_size, max_blocks_per_seq: self.max_blocks_per_seq };
         let pages = lsa_page_capacity(self.alloc.num_blocks(), self.block_size, indexer.cfg.cluster_block as u32);
         let rows = self.max_prefill.max(self.max_batch);
-        self.lsa = Some(model::lsa::engine::LsaAttention::new(&self.gpu, indexer, kernels, kv, rows, pages)?);
+        let yarn = self.yarn.as_ref().map(|(inv_freq, _)| inv_freq);
+        self.lsa = Some(model::lsa::engine::LsaAttention::new(&self.gpu, indexer, kernels, kv, rows, pages, yarn)?);
         self.tape_cache.clear();
         Ok(())
     }

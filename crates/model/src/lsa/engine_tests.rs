@@ -71,7 +71,7 @@ fn a_decode_step_reads_its_selection_and_matches_the_oracle() {
     let Some(mut f) = fixture(&mut rng) else { return };
     let indexer = Indexer::random(cfg(), geometry(), rng.next_u64()).unwrap();
     let kv = KvGeometry { block_size: BS, max_blocks_per_seq: MBT };
-    let mut lsa = LsaAttention::new(&f.g, &indexer, kernels(), kv, 8, 16).unwrap();
+    let mut lsa = LsaAttention::new(&f.g, &indexer, kernels(), kv, 8, 16, None).unwrap();
     let lens = [150u32, 70];
     let mut tables: Vec<BlockTable> = lens.iter().map(|&n| {
         let mut t = BlockTable::new();

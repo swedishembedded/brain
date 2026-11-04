@@ -262,9 +262,9 @@ above. Everything about HOW to serve it is a `brain serve` flag:
   long prompt's attention cost grows linearly rather than quadratically.
   Index pages are built from the cached keys as each 512-key block fills (a
   prefix-cache hit reuses or rebuilds them without recomputing a token), and
-  the read works over every KV cache tier (f32, int8, fp8). The indexer is
-  made for one checkpoint and refused on another; positions past the
-  model's native context (YaRN) are refused. Off by default. Make an
+  the read works over every KV cache tier (f32, int8, fp8) and past the
+  model's native context (YaRN). The indexer is made for one checkpoint and
+  refused on another. Off by default. Make an
   indexer with the `qwen_lsa` tool built beside `brain`:
   `qwen_lsa distill --checkpoint DIR --corpus TEXTDIR --out indexer.safetensors`
   trains it against the model's own attention (D-LSA);
