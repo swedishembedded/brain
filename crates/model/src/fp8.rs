@@ -173,25 +173,27 @@ pub fn quantize_weight_fp8(raw: &[f32], n: usize, k: usize, fmt: Fp8Format, bloc
     assert!(k.is_multiple_of(4) && block > 0, "quantize_weight_fp8: k must be a multiple of 4 and block positive (k={k}, block={block})");
     let (rb, cb) = scale_shape(n, k, block);
     let mut scales = vec![0f32; rb * cb];
-    for br in 0..rb {
-        for bc in 0..cb {
+    // Parallel over row blocks, then over rows: each output reads only its own inputs, so the result is the serial
+    // one.
+    backend_cpu::par::chunks_mut(&mut scales, cb.max(1), |br, row_scales| {
+        for (bc, scale) in row_scales.iter_mut().enumerate() {
             let mut amax = 0f32;
             for r in br * block..((br + 1) * block).min(n) {
                 for c in bc * block..((bc + 1) * block).min(k) {
                     amax = amax.max(raw[r * k + c].abs());
                 }
             }
-            scales[br * cb + bc] = if amax > 0.0 { amax / fmt.max_finite() } else { 1.0 };
+            *scale = if amax > 0.0 { amax / fmt.max_finite() } else { 1.0 };
         }
-    }
+    });
     let mut packed = vec![0u32; n * k / 4];
-    for r in 0..n {
+    backend_cpu::par::chunks_mut(&mut packed, (k / 4).max(1), |r, words| {
         for c in 0..k {
             let s = scales[(r / block) * cb + c / block];
             let byte = fmt.encode(raw[r * k + c] / s) as u32;
-            packed[(r * k + c) / 4] |= byte << (8 * (c % 4));
+            words[c / 4] |= byte << (8 * (c % 4));
         }
-    }
+    });
     (packed, scales)
 }
 
@@ -199,13 +201,15 @@ pub fn quantize_weight_fp8(raw: &[f32], n: usize, k: usize, fmt: Fp8Format, bloc
 pub fn dequantize_weight_fp8(packed: &[u32], scales: &[f32], n: usize, k: usize, fmt: Fp8Format, block: usize) -> Vec<f32> {
     let (_, cb) = scale_shape(n, k, block);
     assert_eq!(packed.len(), n * k / 4, "dequantize_weight_fp8: packed len");
-    (0..n * k)
-        .map(|i| {
-            let (r, c) = (i / k, i % k);
+    let mut w = vec![0f32; n * k];
+    backend_cpu::par::chunks_mut(&mut w, k.max(1), |r, row| {
+        for (c, v) in row.iter_mut().enumerate() {
+            let i = r * k + c;
             let byte = (packed[i / 4] >> (8 * (i % 4))) as u8;
-            fmt.decode(byte) * scales[(r / block) * cb + c / block]
-        })
-        .collect()
+            *v = fmt.decode(byte) * scales[(r / block) * cb + c / block];
+        }
+    });
+    w
 }
 
 #[cfg(test)]

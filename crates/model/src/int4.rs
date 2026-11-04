@@ -96,7 +96,8 @@ pub fn dequantize_weight_q4(packed: &[u32], sw: &[f32], n: usize, k: usize) -> V
     assert_eq!(packed.len(), n * kg, "packed len {} != n*(k/8) {}", packed.len(), n * kg);
     assert_eq!(sw.len(), n * gs, "scale len {} != n*(k/{GROUP}) {}", sw.len(), n * gs);
     let mut w = vec![0f32; n * k];
-    for r in 0..n {
+    // Row-parallel: each output row reads only its own words and scales, so the result is the serial one.
+    backend_cpu::par::chunks_mut(&mut w, k.max(1), |r, row| {
         for g in 0..kg {
             let s = sw[r * gs + g / WORDS_PER_GROUP_Q4];
             let word = packed[r * kg + g];
@@ -109,10 +110,10 @@ pub fn dequantize_weight_q4(packed: &[u32], sw: &[f32], n: usize, k: usize) -> V
                 // `sign_extend_nibble_trick_is_correct` below, not just
                 // asserted inline.
                 let signed = ((raw as u8) << 4) as i8 >> 4;
-                w[r * k + g * 8 + b] = signed as f32 * s;
+                row[g * 8 + b] = signed as f32 * s;
             }
         }
-    }
+    });
     w
 }
 

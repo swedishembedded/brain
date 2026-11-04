@@ -93,16 +93,17 @@ pub fn dequantize_weight_lut4(packed: &[u32], sw: &[f32], n: usize, k: usize, lu
     assert_eq!(packed.len(), n * kg, "packed len {} != n*(k/8) {}", packed.len(), n * kg);
     assert_eq!(sw.len(), n * gs, "scale len {} != n*(k/{GROUP}) {}", sw.len(), n * gs);
     let mut w = vec![0f32; n * k];
-    for r in 0..n {
+    // Row-parallel: each output row reads only its own words and scales, so the result is the serial one.
+    backend_cpu::par::chunks_mut(&mut w, k.max(1), |r, row| {
         for g in 0..kg {
             let s = sw[r * gs + g / (GROUP / 8)];
             let word = packed[r * kg + g];
             for b in 0..8 {
                 let code = ((word >> (4 * b)) & 0xF) as usize;
-                w[r * k + g * 8 + b] = lut[code] * s;
+                row[g * 8 + b] = lut[code] * s;
             }
         }
-    }
+    });
     w
 }
 

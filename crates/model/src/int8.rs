@@ -170,16 +170,17 @@ pub fn dequantize_weight(packed: &[u32], sw: &[f32], n: usize, k: usize) -> Vec<
     assert_eq!(sw.len(), scale_len(n, k), "scale len {} != n*(k/{GROUP}) {}", sw.len(), scale_len(n, k));
     let mut w = vec![0f32; n * k];
     let gs = k / GROUP;
-    for r in 0..n {
+    // Row-parallel: each output row reads only its own words and scales, so the result is the serial one.
+    backend_cpu::par::chunks_mut(&mut w, k.max(1), |r, row| {
         for g in 0..kg {
             let s = sw[r * gs + g / WORDS_PER_GROUP];
             let word = packed[r * kg + g];
             for b in 0..4 {
                 let q = ((word >> (8 * b)) as u8) as i8;
-                w[r * k + g * 4 + b] = q as f32 * s;
+                row[g * 4 + b] = q as f32 * s;
             }
         }
-    }
+    });
     w
 }
 
