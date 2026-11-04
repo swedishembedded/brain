@@ -670,6 +670,19 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (rows, stride, d, width) = (p(0)?, p(1)?, p(3)?, p(11)?);
             f(rows * stride * (2 * d + 64), rows * stride * (4 * d + 4 * 34) + 4 * rows * (d + width))
         }
+        // Ward clustering of one closed block for every layer slot (a
+        // 64-thread workgroup each): params [index_dim, cluster_block,
+        // pool_size, buckets_per_block, ...]. The pools' Gram matrix, then
+        // merge rounds each scanning every pool pair - costed at the
+        // halving-per-round count mutual merges typically reach - then a
+        // centroid sweep of the block per bucket.
+        "lsa_ward" => {
+            let (d, cb, pool, bpb) = (p(0)?, p(1)?, p(2)?.max(1), p(3)?.max(1));
+            let slots = (threads as u64 / 64).max(1);
+            let np = (cb / pool).max(1);
+            let rounds = u64::from((np / bpb).max(1).ilog2()) + 1;
+            f(slots * (2 * np * np * d + 8 * np * np * rounds + 2 * bpb * cb * d), 4 * slots * (2 * cb * d + 2 * np * np * (rounds + 1) + bpb * (d + cb)))
+        }
         // Index vectors: params [rows, heads, n_kv_heads, head_dim, index_dim,
         // rope_base]. A row's heads are read once (f32, or packed bytes plus
         // per-KV-head scales), summed over the group, projected and normalised.
@@ -2019,7 +2032,7 @@ mod tests {
             "paged_flash_decode_split_i8", "paged_flash_decode_combine", "paged_flash_decode_combine_i8",
             "paged_sparse_flash_decode", "paged_sparse_flash_gqa", "paged_sparse_flash_gqa_i8", "paged_sparse_flash_rows_i8",
             // the latent-sparse-attention index
-            "lsa_read", "lsa_index_vectors", "lsa_index_keys_i8", "add_index_mask",
+            "lsa_read", "lsa_ward", "lsa_index_vectors", "lsa_index_keys_i8", "add_index_mask",
         ] {
             assert!(covers(k), "kernel `{k}` has no cost formula");
         }

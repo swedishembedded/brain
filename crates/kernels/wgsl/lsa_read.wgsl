@@ -22,8 +22,9 @@
 // (`1 + max_pages` words): `built` closed cluster blocks have index pages.
 // It may read the buckets of the blocks closed before its own whose pages
 // are built: `visible = min(pos / cluster_block, built) * buckets_per_block`.
-// Bucket `b` lives in row `b % buckets_per_block` of page
-// `page_(b / buckets_per_block)`. A closed block whose page is not built yet is read
+// Bucket `b` lives in row `row0 + page_(b / buckets_per_block) *
+// buckets_per_block + b % buckets_per_block` of the pool (`row0` is the
+// layer's slot in a pool shared by every sparse layer). A closed block whose page is not built yet is read
 // through the window, which then reaches back to `built * cluster_block`: a
 // lagging index widens the read, it never drops a key. The selection row has
 // room for one such block; the engine keeps the lag within it, and the window
@@ -83,6 +84,7 @@ struct Params {
     early_position: u32,   // 0 = no early budget
     early_top_p: u32,
     early_top_k: u32,
+    row0: u32,             // the layer's first bucket row in the shared pool
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -104,7 +106,7 @@ var<workgroup> total_b:  u32;
 
 // The centroid/member row of visible bucket `b` of the row whose page table starts at `ptab`.
 fn bucket_row(ptab: u32, b: u32) -> u32 {
-    return page_tab[ptab + 1u + b / p.buckets_per_block] * p.buckets_per_block + b % p.buckets_per_block;
+    return p.row0 + page_tab[ptab + 1u + b / p.buckets_per_block] * p.buckets_per_block + b % p.buckets_per_block;
 }
 
 // Order-preserving image of an f32 in u32: larger float, larger key.

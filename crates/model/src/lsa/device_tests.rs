@@ -93,7 +93,7 @@ fn index_vectors_unrotate_sum_groups_and_project() {
         g.write(&pos, &positions);
         let wb = g.storage_init("w", &w);
         let out = g.storage((rows * dim) as u64);
-        let step = heads.step(&g, 0, n_heads as u32, rows as u32, &IndexVectorBuffers { x: &xb, row_off: &off, pos: &pos, w: &wb, out: &out, inv_freq: &unused }).unwrap();
+        let step = heads.step(&g, 0, n_heads as u32, rows as u32, &IndexVectorBuffers { x: &xb, row_off: &off, pos: &pos, w: &wb, out: &out, inv_freq: &unused, out0: 0 }).unwrap();
         g.submit(&[], &[step]);
         let got = g.read(&out, rows * dim);
         let worst = got.iter().zip(&want).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
@@ -114,7 +114,7 @@ fn the_device_read_matches_the_host_read() {
     let index = BucketIndex::build(cfg, &unit_rows(&mut rng, t, cfg.index_dim)).unwrap();
     let blocks = index.closed_blocks();
     let max_pages = 8u32;
-    let pool = IndexPool::new(&g, cfg, max_pages).unwrap();
+    let pool = IndexPool::new(&g, cfg, max_pages, 1).unwrap();
     // Block b lives in page (b * 3 + 1) % max_pages.
     let page_of = |b: usize| ((b * 3 + 1) % max_pages as usize) as u32;
     let bpb = cfg.buckets_per_block();
@@ -124,7 +124,7 @@ fn the_device_read_matches_the_host_read() {
             members: index.members()[b * bpb * cfg.bucket_cap..][..bpb * cfg.bucket_cap].to_vec(),
             sizes: index.sizes()[b * bpb..][..bpb].to_vec(),
         };
-        pool.write(&g, page_of(b), &block).unwrap();
+        pool.write(&g, page_of(b), 0, &block).unwrap();
     }
     let positions: Vec<u32> = vec![0, 1, 31, 32, 40, 63, 64, 69, 70, 100, 150, 191, 192, t as u32 - 1, t as u32 - 2];
     let rows = positions.len();
@@ -152,7 +152,7 @@ fn the_device_read_matches_the_host_read() {
     let scores = g.storage((rows as u64) * geom.score_stride() as u64);
     let width = geom.row_stride() as usize;
     let sel = g.storage((rows * width) as u64);
-    let bufs = ReadBuffers { iq: &iq, centroids: &pool.centroids, members: &pool.members, page_tab: &page_tab, seqlen: &sl, scores: &scores, sel: &sel };
+    let bufs = ReadBuffers { iq: &iq, centroids: &pool.centroids, members: &pool.members, page_tab: &page_tab, seqlen: &sl, scores: &scores, sel: &sel, row0: 0 };
     let step = geom.step(&g, 1, rows as u32, &bufs).unwrap();
     g.submit(&[], &[step]);
     let dev_scores = g.read(&scores, rows * geom.score_stride() as usize);
@@ -204,12 +204,12 @@ fn packed_index_keys_match_the_dequantised_pool() {
         let off = g.storage(rows as u64);
         g.write(&off, &key_slots.iter().map(|s| s * (nkv * hd) as u32).collect::<Vec<_>>());
         let out_f32 = g.storage((rows * dim) as u64);
-        let s1 = heads.step(&g, 0, nkv as u32, rows as u32, &IndexVectorBuffers { x: &f32_pool, row_off: &off, pos: &posb, w: &wb, out: &out_f32, inv_freq: &unused }).unwrap();
+        let s1 = heads.step(&g, 0, nkv as u32, rows as u32, &IndexVectorBuffers { x: &f32_pool, row_off: &off, pos: &posb, w: &wb, out: &out_f32, inv_freq: &unused, out0: 0 }).unwrap();
         let packed = g.storage(words.len() as u64);
         g.write(&packed, &words);
         let (sb, slotb, out_p) = (g.storage_init("s", &scales), g.storage(rows as u64), g.storage((rows * dim) as u64));
         g.write(&slotb, &key_slots);
-        let s2 = heads.step_packed_keys(&g, 1, rows as u32, &PackedKeyBuffers { pool: &packed, scales: &sb, slots: &slotb, pos: &posb, w: &wb, out: &out_p, inv_freq: &unused }).unwrap();
+        let s2 = heads.step_packed_keys(&g, 1, rows as u32, &PackedKeyBuffers { pool: &packed, scales: &sb, slots: &slotb, pos: &posb, w: &wb, out: &out_p, inv_freq: &unused, out0: 0 }).unwrap();
         g.submit(&[], &[s1, s2]);
         let bits = |v: Vec<f32>| v.into_iter().map(f32::to_bits).collect::<Vec<_>>();
         assert_eq!(bits(g.read(&out_p, rows * dim)), bits(g.read(&out_f32, rows * dim)), "{kv:?} index keys differ from the dequantised f32 pool's");
@@ -252,11 +252,78 @@ fn index_vectors_unrotate_a_frequency_table() {
     let pos = g.storage(rows as u64);
     g.write(&pos, &positions);
     let out = g.storage((rows * dim) as u64);
-    let step = heads.step(&g, 0, nkv as u32, rows as u32, &IndexVectorBuffers { x: &xb, row_off: &off, pos: &pos, w: &wb, out: &out, inv_freq: &tb }).unwrap();
+    let step = heads.step(&g, 0, nkv as u32, rows as u32, &IndexVectorBuffers { x: &xb, row_off: &off, pos: &pos, w: &wb, out: &out, inv_freq: &tb, out0: 0 }).unwrap();
     g.submit(&[], &[step]);
     let got = g.read(&out, rows * dim);
     let worst = got.iter().zip(&want).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
     // Angles reach ~9000 rad, where f32 sin/cos of the host and of the device
     // differ in the fourth decimal; the un-rotation itself adds nothing.
     assert!(worst < 1e-3, "table un-rotation differs from the unrotated heads by {worst}");
+}
+
+/// The device Ward builds the page the host reference builds - identical
+/// buckets, members and centroids - on keys gathered around well-separated
+/// directions, and a valid partition (every key once, sizes within the cap,
+/// every bucket used) on random keys.
+#[test]
+fn the_device_ward_builds_the_host_page() {
+    static PIPES: &[(&str, &str)] = &KERNELS;
+    let Some(g) = barrier_gpu(PIPES) else { return };
+    let cfg = LsaConfig::default();
+    let d = cfg.index_dim;
+    let mut rng = Lcg::random();
+    let pool = IndexPool::new(&g, cfg, 4, 1).unwrap();
+    let scratch = g.storage(IndexPool::ward_scratch_words(&cfg));
+    let bpb = cfg.buckets_per_block();
+    let run = |keys: &[f32], page: u32, base: u32| -> (Vec<f32>, Vec<u32>) {
+        let kb = g.storage_init("keys", keys);
+        let step = pool.ward_step(&g, 2, &kb, &scratch, page, base).unwrap();
+        g.submit(&[], &[step]);
+        let c = g.read(&pool.centroids, 4 * bpb * d);
+        let m: Vec<u32> = g.read(&pool.members, 4 * bpb * cfg.bucket_cap).iter().map(|x| x.to_bits()).collect();
+        (c[page as usize * bpb * d..][..bpb * d].to_vec(), m[page as usize * bpb * cfg.bucket_cap..][..bpb * cfg.bucket_cap].to_vec())
+    };
+    // Each direction is shared by exactly two pools, so the merges are
+    // unambiguous: every pool's cheapest partner is its twin, by far.
+    let directions = cfg.pools_per_block() - bpb;
+    let centers = unit_rows(&mut rng, directions, d);
+    let mut keys = Vec::with_capacity(cfg.cluster_block * d);
+    for k in 0..cfg.cluster_block {
+        let center = &centers[((k / cfg.pool_size) % directions) * d..][..d];
+        let row: Vec<f32> = center.iter().map(|c| c + 0.01 * rng.signed()).collect();
+        keys.extend(crate::hostmath::l2_normalize(&row));
+    }
+    let base = 3 * cfg.cluster_block as u32;
+    let host = cluster_block(&cfg, &keys, base as usize).unwrap();
+    let (centroids, members) = run(&keys, 2, base);
+    let host_members: Vec<u32> = host.members.iter().map(|&m| if m < 0 { NO_KEY } else { m as u32 }).collect();
+    assert_eq!(members, host_members, "device buckets differ from the host's on unambiguous keys");
+    let worst = centroids.iter().zip(&host.centroids).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+    assert!(worst < 1e-4, "centroids differ by {worst}");
+
+    // Spread keys, and keys all near one direction as a model's keys often
+    // are (costs nearly tied): every key lands in exactly one bucket.
+    let shared = unit_rows(&mut rng, 1, d);
+    let correlated: Vec<f32> = (0..cfg.cluster_block)
+        .flat_map(|_| {
+            let row: Vec<f32> = shared.iter().map(|c| c + 0.08 * rng.signed()).collect();
+            crate::hostmath::l2_normalize(&row)
+        })
+        .collect();
+    // Repeated tokens give repeated keys: exact ties everywhere.
+    let few = unit_rows(&mut rng, 3, d);
+    let repeated: Vec<f32> = (0..cfg.cluster_block).flat_map(|_| few[(rng.next_u32() % 3) as usize * d..][..d].to_vec()).collect();
+    for (name, keys) in [("spread", unit_rows(&mut rng, cfg.cluster_block, d)), ("correlated", correlated), ("repeated", repeated)] {
+        let (_, members) = run(&keys, 0, 0);
+        let mut seen = vec![0u32; cfg.cluster_block];
+        for row in members.chunks_exact(cfg.bucket_cap) {
+            let held: Vec<u32> = row.iter().copied().take_while(|&m| m != NO_KEY).collect();
+            assert!(!held.is_empty(), "{name} keys: an empty bucket");
+            assert!(held.windows(2).all(|w| w[0] < w[1]), "{name} keys: members out of order");
+            for &m in &held {
+                seen[m as usize] += 1;
+            }
+        }
+        assert!(seen.iter().all(|&n| n == 1), "{name} keys: {} keys are in no bucket or in two", seen.iter().filter(|&&n| n != 1).count());
+    }
 }

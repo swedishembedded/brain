@@ -58,6 +58,7 @@ struct Params {
     index_dim: u32,
     rope_base: f32,
     rope_mode: u32,
+    out0: u32,         // first output row (a layer's slot in a shared buffer)
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -141,6 +142,6 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     workgroupBarrier();
     let norm = sqrt(sq[0]);
     if (lt < p.index_dim) {
-        out[r * p.index_dim + lt] = select(0.0, acc / norm, norm > 0.0);
+        out[(p.out0 + r) * p.index_dim + lt] = select(0.0, acc / norm, norm > 0.0);
     }
 }

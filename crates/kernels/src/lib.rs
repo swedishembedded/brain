@@ -728,6 +728,8 @@ pub const LSA_INDEX_KEYS_I8: &str = include_str!("../wgsl/lsa_index_keys_i8.wgsl
 pub const LSA_INDEX_VECTORS: &str = include_str!("../wgsl/lsa_index_vectors.wgsl");
 /// `wgsl/lsa_read.wgsl`
 pub const LSA_READ: &str = include_str!("../wgsl/lsa_read.wgsl");
+/// `wgsl/lsa_ward.wgsl`
+pub const LSA_WARD: &str = include_str!("../wgsl/lsa_ward.wgsl");
 /// `wgsl/lstm_gates.wgsl`
 pub const LSTM_GATES: &str = include_str!("../wgsl/lstm_gates.wgsl");
 /// `wgsl/lstm_gates_bwd.wgsl`
@@ -1730,6 +1732,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("lsa_index_keys_i8", LSA_INDEX_KEYS_I8),
     ("lsa_index_vectors", LSA_INDEX_VECTORS),
     ("lsa_read", LSA_READ),
+    ("lsa_ward", LSA_WARD),
     ("lstm_gates", LSTM_GATES),
     ("lstm_gates_bwd", LSTM_GATES_BWD),
     ("masked_l1", MASKED_L1),

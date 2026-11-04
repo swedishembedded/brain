@@ -34,7 +34,7 @@ struct Fixture {
 }
 
 fn fixture(rng: &mut Lcg) -> Option<Fixture> {
-    let pipes: &'static [(&str, &str)] = Box::leak(vec![device::KERNELS[0], device::KERNELS[1], gqa_kernel(NH / NKV).unwrap(), KERNEL].into_boxed_slice());
+    let pipes: &'static [(&str, &str)] = Box::leak(vec![device::KERNELS[0], device::KERNELS[1], gqa_kernel(NH / NKV).unwrap(), KERNEL, device::KERNELS[2]].into_boxed_slice());
     let g = gpu_core::testgpu::dev(pipes);
     if !g.caps().workgroup_reductions {
         brain_testutil::skip_unavailable("LSA engine: workgroup-barrier kernels need a GPU");
@@ -50,7 +50,7 @@ fn fixture(rng: &mut Lcg) -> Option<Fixture> {
 }
 
 fn kernels() -> LsaKernels {
-    LsaKernels { index_vectors: 0, read: 1, attend: 2, layout: crate::paged_sparse::Layout::PerKvHead, attend_few: 2, layout_few: crate::paged_sparse::Layout::PerKvHead, index_keys_packed: None }
+    LsaKernels { index_vectors: 0, read: 1, ward: 4, attend: 2, layout: crate::paged_sparse::Layout::PerKvHead, attend_few: 2, layout_few: crate::paged_sparse::Layout::PerKvHead, index_keys_packed: None }
 }
 
 /// A sequence's contiguous K or V rows gathered from a pool.

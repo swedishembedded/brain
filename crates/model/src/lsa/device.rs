@@ -22,8 +22,9 @@
 use super::{ClosedBlock, LsaConfig};
 use gpu_core::{DeviceBuffer, Gpu, Step};
 
-/// The kernels, for a caller's pipeline list.
-pub const KERNELS: [(&str, &str); 2] = [("lsa_index_vectors", kernels::LSA_INDEX_VECTORS), ("lsa_read", kernels::LSA_READ)];
+/// The kernels, for a caller's pipeline list: index vectors, the read, and
+/// the device Ward that builds an index page.
+pub const KERNELS: [(&str, &str); 3] = [("lsa_index_vectors", kernels::LSA_INDEX_VECTORS), ("lsa_read", kernels::LSA_READ), ("lsa_ward", kernels::LSA_WARD)];
 
 /// The index-key kernel over a packed KV pool ([`crate::paged_sparse::PackedKv`]).
 pub fn index_keys_kernel(kv: crate::paged_sparse::PackedKv) -> Result<(&'static str, &'static str), String> {
@@ -83,6 +84,8 @@ pub struct IndexVectorBuffers<'a> {
     /// `[head_dim / 2]` inverse frequencies for [`Rope::Table`] (any buffer
     /// otherwise; it is not read).
     pub inv_freq: &'a DeviceBuffer,
+    /// Row of `out` the first vector is written to.
+    pub out0: u32,
 }
 
 impl IndexHeads {
@@ -117,7 +120,7 @@ impl IndexHeads {
     pub fn step(&self, g: &Gpu, kernel: usize, heads: u32, rows: u32, b: &IndexVectorBuffers) -> Result<Step, String> {
         self.check(heads)?;
         let [base, mode] = self.rope_params();
-        let params = [rows, heads, self.n_kv_heads, self.head_dim, self.index_dim, base, mode];
+        let params = [rows, heads, self.n_kv_heads, self.head_dim, self.index_dim, base, mode, b.out0];
         Ok(g.dispatch(kernel, &[b.x, b.row_off, b.pos, b.w, b.out, b.inv_freq], &params, gpu_core::Dispatch::Workgroups(rows)))
     }
 }
@@ -138,6 +141,8 @@ pub struct PackedKeyBuffers<'a> {
     pub out: &'a DeviceBuffer,
     /// As [`IndexVectorBuffers::inv_freq`].
     pub inv_freq: &'a DeviceBuffer,
+    /// As [`IndexVectorBuffers::out0`].
+    pub out0: u32,
 }
 
 impl IndexHeads {
@@ -149,16 +154,18 @@ impl IndexHeads {
             return Err(format!("LSA index keys: a packed pool needs head_dim % 4 == 0, got {}", self.head_dim));
         }
         let [base, mode] = self.rope_params();
-        let params = [rows, self.n_kv_heads, self.n_kv_heads, self.head_dim, self.index_dim, base, mode];
+        let params = [rows, self.n_kv_heads, self.n_kv_heads, self.head_dim, self.index_dim, base, mode, b.out0];
         Ok(g.dispatch(kernel, &[b.pool, b.slots, b.pos, b.w, b.out, b.scales, b.inv_freq], &params, gpu_core::Dispatch::Workgroups(rows)))
     }
 }
 
-/// One layer's index pages on the device: `pages * buckets_per_block` rows
-/// of centroids and member lists.
+/// The index pages of every sparse layer on the device: `slots` layer slots
+/// of `pages * buckets_per_block` rows of centroids and member lists, one
+/// buffer each, so one dispatch can build a block's page for every layer.
 pub struct IndexPool {
     cfg: LsaConfig,
     pages: u32,
+    slots: u32,
     /// `[pages * buckets_per_block, index_dim]` f32.
     pub centroids: DeviceBuffer,
     /// `[pages * buckets_per_block, bucket_cap]` u32 positions, [`NO_KEY`]
@@ -167,21 +174,27 @@ pub struct IndexPool {
 }
 
 impl IndexPool {
-    /// Pages for `pages` closed cluster blocks.
-    pub fn new(g: &Gpu, cfg: LsaConfig, pages: u32) -> Result<IndexPool, String> {
+    /// Pages for `pages` closed cluster blocks in each of `slots` layers.
+    pub fn new(g: &Gpu, cfg: LsaConfig, pages: u32, slots: u32) -> Result<IndexPool, String> {
         cfg.validate()?;
-        let rows = pages as u64 * cfg.buckets_per_block() as u64;
+        let rows = slots as u64 * pages as u64 * cfg.buckets_per_block() as u64;
         Ok(IndexPool {
             cfg,
             pages,
+            slots,
             centroids: g.storage((rows * cfg.index_dim as u64).max(1)),
             members: g.storage((rows * cfg.bucket_cap as u64).max(1)),
         })
     }
 
-    /// Pages the pool holds.
+    /// Pages each layer slot holds.
     pub fn pages(&self) -> u32 {
         self.pages
+    }
+
+    /// The first bucket row of layer `slot`.
+    pub fn row0(&self, slot: u32) -> u32 {
+        slot * self.pages * self.cfg.buckets_per_block() as u32
     }
 
     /// Device bytes of `pages` pages of one layer under `cfg`.
@@ -189,12 +202,38 @@ impl IndexPool {
         pages as u64 * cfg.buckets_per_block() as u64 * (cfg.index_dim + cfg.bucket_cap) as u64 * 4
     }
 
-    /// Upload one closed block's buckets into `page`.
-    pub fn write(&self, g: &Gpu, page: u32, block: &ClosedBlock) -> Result<(), String> {
+    /// Words of scratch one [`Self::ward_step`] dispatch needs: the block's
+    /// pool sums and their Gram matrix.
+    pub fn ward_scratch_words(cfg: &LsaConfig) -> u64 {
+        let pools = cfg.pools_per_block() as u64;
+        pools * cfg.index_dim as u64 + pools * pools
+    }
+
+    /// Record the device Ward of one closed block in every layer slot at
+    /// once: `keys` holds each slot's `[cluster_block, index_dim]` unit index
+    /// keys, slot after slot (the first key at position `base`), and the
+    /// buckets are written into `page` of each slot. `kernel` is the caller's
+    /// index of `lsa_ward`; `scratch` holds `slots *`
+    /// [`Self::ward_scratch_words`].
+    pub fn ward_step(&self, g: &Gpu, kernel: usize, keys: &DeviceBuffer, scratch: &DeviceBuffer, page: u32, base: u32) -> Result<Step, String> {
+        let c = &self.cfg;
         if page >= self.pages {
             return Err(format!("LSA index page {page} is outside the pool's {}", self.pages));
         }
+        if c.pools_per_block() > 256 || c.buckets_per_block() > 128 {
+            return Err(format!("LSA device Ward: {} pools into {} buckets exceeds 256 / 128", c.pools_per_block(), c.buckets_per_block()));
+        }
+        let params = [c.index_dim as u32, c.cluster_block as u32, c.pool_size as u32, c.buckets_per_block() as u32, c.bucket_cap as u32, page, base, self.pages];
+        Ok(g.dispatch(kernel, &[keys, scratch, &self.centroids, &self.members], &params, gpu_core::Dispatch::Workgroups(self.slots)))
+    }
+
+    /// Upload one closed block's buckets into `page` of layer `slot`.
+    pub fn write(&self, g: &Gpu, page: u32, slot: u32, block: &ClosedBlock) -> Result<(), String> {
+        if page >= self.pages || slot >= self.slots {
+            return Err(format!("LSA index page {page} of slot {slot} is outside the pool's {} x {}", self.slots, self.pages));
+        }
         let bpb = self.cfg.buckets_per_block() as u64;
+        let page = page + slot * self.pages;
         let centroids: Vec<u32> = block.centroids.iter().map(|x| x.to_bits()).collect();
         let members: Vec<u32> = block.members.iter().map(|&m| if m < 0 { NO_KEY } else { m as u32 }).collect();
         g.write_at(&self.centroids, page as u64 * bpb * self.cfg.index_dim as u64, &centroids);
@@ -229,6 +268,8 @@ pub struct ReadBuffers<'a> {
     pub scores: &'a DeviceBuffer,
     /// `[rows, row_stride]` out: each row's header, then its positions.
     pub sel: &'a DeviceBuffer,
+    /// The layer's first bucket row in the pool ([`IndexPool::row0`]).
+    pub row0: u32,
 }
 
 impl ReadGeometry {
@@ -284,6 +325,7 @@ impl ReadGeometry {
             early_position,
             early_top_p,
             early_top_k,
+            b.row0,
         ];
         let bufs = [b.iq, b.centroids, b.members, b.page_tab, b.seqlen, b.scores, b.sel];
         Ok(g.dispatch(kernel, &bufs, &params, gpu_core::Dispatch::Workgroups(rows)))

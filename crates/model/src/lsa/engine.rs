@@ -23,7 +23,7 @@
 
 use super::device::{IndexHeads, IndexPool, IndexVectorBuffers, PackedKeyBuffers, ReadBuffers, ReadGeometry, Rope};
 use super::indexer::Indexer;
-use super::{cluster_block, ClosedBlock, LsaConfig};
+use super::LsaConfig;
 use crate::paged::{BlockAllocator, BlockTable};
 use crate::paged_sparse::{SparseAttention, SparseBuffers};
 use gpu_core::{DeviceBuffer, Gpu, Step};
@@ -36,6 +36,8 @@ pub struct LsaKernels {
     pub index_vectors: usize,
     /// `lsa_read`.
     pub read: usize,
+    /// `lsa_ward`.
+    pub ward: usize,
     /// The sparse attention kernel for forwards of at least
     /// [`MANY_ROWS`] rows (prefill chunks).
     pub attend: usize,
@@ -98,7 +100,8 @@ pub struct LayerBuffers<'a> {
 struct Layer {
     wq: DeviceBuffer,
     wk: DeviceBuffer,
-    pool: IndexPool,
+    /// The layer's slot in the shared index pool.
+    slot: u32,
 }
 
 /// Index pages per page key: a cluster block and the KV blocks holding it.
@@ -113,6 +116,10 @@ pub struct LsaAttention {
     kv: KvGeometry,
     k: LsaKernels,
     layers: Vec<Option<Layer>>,
+    /// Every sparse layer's index pages, a slot each.
+    pool: IndexPool,
+    /// The device Ward's pool sums and Gram matrices, a slab per slot.
+    ward_scratch: DeviceBuffer,
     read: ReadGeometry,
     max_rows: u32,
     pages: BlockAllocator,
@@ -124,10 +131,10 @@ pub struct LsaAttention {
     scores: DeviceBuffer,
     sel: DeviceBuffer,
     page_tab: DeviceBuffer,
-    // Index-page build scratch: one cluster block's keys per layer.
+    // Index-page build scratch: one cluster block's keys, a slot per layer.
     key_off: DeviceBuffer,
     key_pos: DeviceBuffer,
-    keys: Vec<DeviceBuffer>,
+    keys: DeviceBuffer,
     /// The YaRN inverse-frequency table the heads were rotated by, or a
     /// one-word placeholder under plain RoPE.
     inv_freq: DeviceBuffer,
@@ -160,12 +167,15 @@ impl LsaAttention {
         let read = ReadGeometry { cfg, max_pages };
         read.check()?;
         let mut layers = Vec::with_capacity(indexer.layers.len());
+        let mut slots = 0u32;
         for p in &indexer.layers {
-            layers.push(match p {
-                Some(p) => Some(Layer { wq: g.storage_init("lsa.wq", &p.wq), wk: g.storage_init("lsa.wk", &p.wk), pool: IndexPool::new(g, cfg, page_capacity)? }),
-                None => None,
-            });
+            layers.push(p.as_ref().map(|p| {
+                slots += 1;
+                Layer { wq: g.storage_init("lsa.wq", &p.wq), wk: g.storage_init("lsa.wk", &p.wk), slot: slots - 1 }
+            }));
         }
+        let pool = IndexPool::new(g, cfg, page_capacity, slots)?;
+        let ward_scratch = g.storage(slots as u64 * IndexPool::ward_scratch_words(&cfg));
         let rows = max_rows as u64;
         let d = cfg.index_dim as u64;
         let q_row = geo.n_heads as u64 * geo.head_dim as u64;
@@ -173,7 +183,7 @@ impl LsaAttention {
         let q_off_buf = g.storage(rows.max(1));
         g.write(&q_off_buf, &q_off);
         let block = cfg.cluster_block as u64;
-        let keys = layers.iter().map(|l| g.storage(if l.is_some() { block * d } else { 1 })).collect();
+        let keys = g.storage(slots as u64 * block * d);
         Ok(LsaAttention {
             cfg,
             heads,
@@ -181,6 +191,8 @@ impl LsaAttention {
             kv,
             k: kernels,
             layers,
+            pool,
+            ward_scratch,
             read,
             max_rows,
             pages: BlockAllocator::new(page_capacity, 1),
@@ -225,7 +237,7 @@ impl LsaAttention {
     fn bytes(cfg: &LsaConfig, input: u32, sparse: usize, kv: KvGeometry, max_rows: u32, page_capacity: u32) -> u64 {
         let d = cfg.index_dim as u64;
         let read = ReadGeometry { cfg: *cfg, max_pages: (kv.max_blocks_per_seq * kv.block_size) / cfg.cluster_block as u32 };
-        let per_layer = 2 * input as u64 * d * 4 + IndexPool::bytes(cfg, page_capacity) + cfg.cluster_block as u64 * d * 4;
+        let per_layer = 2 * input as u64 * d * 4 + IndexPool::bytes(cfg, page_capacity) + cfg.cluster_block as u64 * d * 4 + 4 * IndexPool::ward_scratch_words(cfg);
         let rows = max_rows as u64;
         let scratch = 4 * rows * (1 + d + read.score_stride() as u64 + read.row_stride() as u64 + read.max_pages as u64 + 1) + 8 * cfg.cluster_block as u64;
         sparse as u64 * per_layer + scratch
@@ -249,12 +261,12 @@ impl LsaAttention {
         if rows > self.max_rows {
             return Err(format!("LSA: a forward of {rows} rows exceeds the {} the scratch holds", self.max_rows));
         }
-        s.push(self.heads.step(g, self.k.index_vectors, self.n_heads, rows, &IndexVectorBuffers { x: b.q, row_off: &self.q_off, pos: b.pos, w: &l.wq, out: &self.iq, inv_freq: &self.inv_freq })?);
+        s.push(self.heads.step(g, self.k.index_vectors, self.n_heads, rows, &IndexVectorBuffers { x: b.q, row_off: &self.q_off, pos: b.pos, w: &l.wq, out: &self.iq, inv_freq: &self.inv_freq, out0: 0 })?);
         s.push(self.read.step(
             g,
             self.k.read,
             rows,
-            &ReadBuffers { iq: &self.iq, centroids: &l.pool.centroids, members: &l.pool.members, page_tab: &self.page_tab, seqlen: b.seqlen, scores: &self.scores, sel: &self.sel },
+            &ReadBuffers { iq: &self.iq, centroids: &self.pool.centroids, members: &self.pool.members, page_tab: &self.page_tab, seqlen: b.seqlen, scores: &self.scores, sel: &self.sel, row0: self.pool.row0(l.slot) },
         )?);
         let attn = SparseAttention { n_heads: self.n_heads, n_kv_heads: self.heads.n_kv_heads, head_dim: self.heads.head_dim, block_size: self.kv.block_size, max_bt: self.kv.max_blocks_per_seq };
         if b.scales.is_some() != self.k.index_keys_packed.is_some() {
@@ -265,6 +277,7 @@ impl LsaAttention {
         s.push(attn.step(g, kernel, layout, rows, self.read.row_stride(), &bufs)?);
         Ok(())
     }
+
 
     /// Read back the last recorded layer's selection of `rows` rows: per row
     /// its selected positions, and the `[rows, 3]` row headers (count,
@@ -365,8 +378,8 @@ impl LsaAttention {
     }
 
     /// Compute cluster block `c`'s index keys from the pool on every sparse
-    /// layer, Ward-merge them on the host (layers in parallel) and upload the
-    /// buckets into `page`.
+    /// layer and Ward-merge them into `page`, all on the device: no readback,
+    /// nothing waits.
     fn build_page(&self, g: &Gpu, table: &BlockTable, c: usize, page: u32, pools: KeyPools) -> Result<(), String> {
         let cb = self.cfg.cluster_block as u32;
         let bs = self.kv.block_size;
@@ -389,26 +402,16 @@ impl LsaAttention {
                 steps.push(match (pools.scales, self.k.index_keys_packed) {
                     (Some(scales), Some(kernel)) => {
                         let sk = scales.get(l).ok_or_else(|| format!("LSA: no key scales for layer {l}"))?;
-                        self.heads.step_packed_keys(g, kernel, cb, &PackedKeyBuffers { pool: pk, scales: sk, slots: &self.key_off, pos: &self.key_pos, w: &layer.wk, out: &self.keys[l], inv_freq: &self.inv_freq })?
+                        self.heads.step_packed_keys(g, kernel, cb, &PackedKeyBuffers { pool: pk, scales: sk, slots: &self.key_off, pos: &self.key_pos, w: &layer.wk, out: &self.keys, inv_freq: &self.inv_freq, out0: layer.slot * cb })?
                     }
-                    (None, None) => self.heads.step(g, self.k.index_vectors, self.heads.n_kv_heads, cb, &IndexVectorBuffers { x: pk, row_off: &self.key_off, pos: &self.key_pos, w: &layer.wk, out: &self.keys[l], inv_freq: &self.inv_freq })?,
+                    (None, None) => self.heads.step(g, self.k.index_vectors, self.heads.n_kv_heads, cb, &IndexVectorBuffers { x: pk, row_off: &self.key_off, pos: &self.key_pos, w: &layer.wk, out: &self.keys, inv_freq: &self.inv_freq, out0: layer.slot * cb })?,
                     _ => return Err("LSA: the KV pool's packing does not match the kernels the engine resolved".into()),
                 });
             }
         }
+        // Every layer's block clusters in one dispatch, a workgroup a layer.
+        steps.push(self.pool.ward_step(g, self.k.ward, &self.keys, &self.ward_scratch, page, base)?);
         g.submit(&[], &steps);
-        let d = self.cfg.index_dim;
-        let sparse: Vec<usize> = (0..self.layers.len()).filter(|&l| self.sparse(l)).collect();
-        let keys: Vec<Vec<f32>> = sparse.iter().map(|&l| g.read(&self.keys[l], cb as usize * d)).collect();
-        let mut blocks: Vec<Option<Result<ClosedBlock, String>>> = vec![None; sparse.len()];
-        let cfg = self.cfg;
-        backend_cpu::par::chunks_mut(&mut blocks, 1, |i, slot| {
-            slot[0] = Some(cluster_block(&cfg, &keys[i], base as usize));
-        });
-        for (&l, block) in sparse.iter().zip(blocks) {
-            let block = block.expect("every layer was clustered")?;
-            self.layers[l].as_ref().expect("sparse layer").pool.write(g, page, &block)?;
-        }
         Ok(())
     }
 }
