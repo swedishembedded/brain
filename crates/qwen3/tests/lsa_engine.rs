@@ -17,6 +17,13 @@ use qwen3::serve::Engine;
 const BLOCK: u32 = 16;
 const MAX_PREFILL: u32 = 512;
 
+/// The tests take turns on the device: each holds several engines of the
+/// model, and run together they outgrow a 24 GiB card.
+fn device() -> std::sync::MutexGuard<'static, ()> {
+    static DEVICE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    DEVICE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn checkpoint() -> Option<String> {
     let dir = brain_testutil::model_dir("Qwen/Qwen3-0.6B").unwrap_or_default();
     // The store keeps either the converted brain file or the upstream directory.
@@ -54,6 +61,7 @@ fn prompt(rng: &mut Lcg, n: usize) -> Vec<u32> {
 /// built as blocks close mid-generation).
 #[test]
 fn a_budget_past_the_context_generates_what_dense_attention_does() {
+    let _device = device();
     let Some(path) = checkpoint() else { return };
     let mut rng = Lcg::random();
     let p = prompt(&mut rng, 3 * 512 + 500);
@@ -64,6 +72,8 @@ fn a_budget_past_the_context_generates_what_dense_attention_does() {
     let indexer = Indexer::random(cfg, geometry(&path), rng.next_u64()).unwrap();
     let mut sparse_engine = engine(&path, 4096);
     sparse_engine.set_lsa(&indexer).unwrap();
+    // Every prefill chunk sparse, whatever the measured crossover.
+    sparse_engine.set_lsa_dense_until(0);
     let sparse = sparse_engine.generate_greedy(std::slice::from_ref(&p), new, None);
     let (_, (pages, _), built) = sparse_engine.lsa_stats().unwrap();
     println!("dense  {:?}\nsparse {:?}\npages in use {pages}, built {built}", dense[0], sparse[0]);
@@ -78,6 +88,7 @@ fn a_budget_past_the_context_generates_what_dense_attention_does() {
 /// the same dequantised values in different orders, ~1e-2 apart).
 #[test]
 fn an_int8_kv_cache_reads_sparsely_as_accurately_as_dense() {
+    let _device = device();
     let Some(path) = checkpoint() else { return };
     let mut rng = Lcg::random();
     let p = prompt(&mut rng, 3 * 512 + 200);
@@ -94,6 +105,7 @@ fn an_int8_kv_cache_reads_sparsely_as_accurately_as_dense() {
     let dense = hidden(&mut int8_engine(&path));
     let mut sparse = int8_engine(&path);
     sparse.set_lsa(&Indexer::random(LsaConfig { top_p: 1024, top_k: 4096, ..LsaConfig::default() }, geometry(&path), rng.next_u64()).unwrap()).unwrap();
+    sparse.set_lsa_dense_until(0);
     let got = hidden(&mut sparse);
     let rel = |a: &[f32], b: &[f32]| (a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum::<f32>() / b.iter().map(|y| y * y).sum::<f32>()).sqrt();
     let (dense_err, sparse_err) = (rel(&dense, &reference), rel(&got, &reference));
@@ -106,6 +118,7 @@ fn an_int8_kv_cache_reads_sparsely_as_accurately_as_dense() {
 /// away from it when the budget reads only a few long-range keys.
 #[test]
 fn the_budget_decides_what_prefill_reads() {
+    let _device = device();
     let Some(path) = checkpoint() else { return };
     let mut rng = Lcg::random();
     let p = prompt(&mut rng, 4 * 512 + 300);
@@ -116,11 +129,13 @@ fn the_budget_decides_what_prefill_reads() {
     let dense = hidden(&mut engine(&path, 4096));
     let geo = geometry(&path);
     let rel = |a: &[f32]| (a.iter().zip(&dense).map(|(x, y)| (x - y) * (x - y)).sum::<f32>() / dense.iter().map(|y| y * y).sum::<f32>()).sqrt();
-    let mut full = engine(&path, 4096);
-    full.set_lsa(&Indexer::random(LsaConfig { top_p: 1024, top_k: 4096, ..LsaConfig::default() }, geo, rng.next_u64()).unwrap()).unwrap();
-    let mut tiny = engine(&path, 4096);
-    tiny.set_lsa(&Indexer::random(LsaConfig { top_p: 2, top_k: 8, ..LsaConfig::default() }, geo, rng.next_u64()).unwrap()).unwrap();
-    let (full_err, tiny_err) = (rel(&hidden(&mut full)), rel(&hidden(&mut tiny)));
+    let mut sparse_err = |top_p: usize, top_k: usize| {
+        let mut e = engine(&path, 4096);
+        e.set_lsa(&Indexer::random(LsaConfig { top_p, top_k, ..LsaConfig::default() }, geo, rng.next_u64()).unwrap()).unwrap();
+        e.set_lsa_dense_until(0);
+        rel(&hidden(&mut e))
+    };
+    let (full_err, tiny_err) = (sparse_err(1024, 4096), sparse_err(2, 8));
     println!("relative error of the last hidden state: full budget {full_err:.2e}, 8-key budget {tiny_err:.2e}");
     assert!(full_err < 1e-3, "a budget past the context should reproduce dense attention: {full_err}");
     assert!(tiny_err > 10.0 * full_err.max(1e-6), "an 8-key budget changed nothing ({tiny_err}): the sparse path is not running");
@@ -131,6 +146,7 @@ fn the_budget_decides_what_prefill_reads() {
 /// context still reproduces dense attention.
 #[test]
 fn yarn_positions_read_sparsely_like_dense() {
+    let _device = device();
     let Some(path) = checkpoint() else { return };
     let mut rng = Lcg::random();
     let p = prompt(&mut rng, 3 * 512 + 100);
@@ -147,8 +163,36 @@ fn yarn_positions_read_sparsely_like_dense() {
     let dense = hidden(&mut yarn_engine(&path));
     let mut sparse = yarn_engine(&path);
     sparse.set_lsa(&Indexer::random(LsaConfig { top_p: 1024, top_k: 4096, ..LsaConfig::default() }, geometry(&path), rng.next_u64()).unwrap()).unwrap();
+    sparse.set_lsa_dense_until(0);
     let got = hidden(&mut sparse);
     let rel = (got.iter().zip(&dense).map(|(x, y)| (x - y) * (x - y)).sum::<f32>() / dense.iter().map(|y| y * y).sum::<f32>()).sqrt();
     println!("YaRN x2, every-key sparse vs dense: relative error {rel:.2e}");
     assert!(rel < 1e-3, "sparse attention under YaRN differs from dense by {rel}");
+}
+
+/// The engine measures where sparse attention starts to pay: prefill chunks
+/// below that position read densely, which there is exact, so a short prompt
+/// reproduces dense attention bit for bit even at an 8-key budget.
+#[test]
+fn chunks_below_the_measured_crossover_read_densely() {
+    let _device = device();
+    let Some(path) = checkpoint() else { return };
+    let mut rng = Lcg::random();
+    let mut e = engine(&path, 4096);
+    e.set_lsa(&Indexer::random(LsaConfig { top_p: 2, top_k: 8, ..LsaConfig::default() }, geometry(&path), rng.next_u64()).unwrap()).unwrap();
+    let crossover = e.lsa_dense_until();
+    println!("measured crossover: prefill chunks ending at or below {crossover} read densely");
+    if crossover < 1024 {
+        brain_testutil::skip_unavailable("sparse attention wins from the first measured position on this device");
+        return;
+    }
+    let p = prompt(&mut rng, crossover.min(2048) as usize);
+    let hidden = |e: &mut Engine| {
+        let mut table = model::paged::BlockTable::new();
+        e.prefill_for_perf(&mut table, &p)
+    };
+    let dense = hidden(&mut engine(&path, 4096));
+    assert_eq!(hidden(&mut e), dense, "a prompt below the crossover must read densely");
+    let (_, _, built) = e.lsa_stats().unwrap();
+    assert_eq!(built, 0, "dense chunks build no index pages");
 }

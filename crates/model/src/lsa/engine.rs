@@ -253,10 +253,19 @@ impl LsaAttention {
         (self.pages.num_blocks() - self.pages.free_blocks(), self.pages.num_blocks())
     }
 
+
     /// Record `layer`'s attention for `rows` query rows: index queries, the
     /// read, sparse attention into `b.ctx`. The rows' page tables must have
     /// been written by [`Self::prepare`] for this forward.
     pub fn record_layer(&self, g: &Gpu, s: &mut Vec<Step>, layer: usize, rows: u32, b: &LayerBuffers) -> Result<(), String> {
+        self.record_read(g, s, layer, rows, b)?;
+        s.push(self.attend_step(g, rows, b)?);
+        Ok(())
+    }
+
+    /// The selecting half of [`Self::record_layer`]: index queries and the
+    /// read, which leave each row's selection in the scratch.
+    pub fn record_read(&self, g: &Gpu, s: &mut Vec<Step>, layer: usize, rows: u32, b: &LayerBuffers) -> Result<(), String> {
         let l = self.layers.get(layer).and_then(Option::as_ref).ok_or_else(|| format!("LSA: layer {layer} is dense"))?;
         if rows > self.max_rows {
             return Err(format!("LSA: a forward of {rows} rows exceeds the {} the scratch holds", self.max_rows));
@@ -268,16 +277,57 @@ impl LsaAttention {
             rows,
             &ReadBuffers { iq: &self.iq, centroids: &self.pool.centroids, members: &self.pool.members, page_tab: &self.page_tab, seqlen: b.seqlen, scores: &self.scores, sel: &self.sel, row0: self.pool.row0(l.slot) },
         )?);
+        Ok(())
+    }
+
+    /// The attending half of [`Self::record_layer`]: sparse attention over
+    /// the selection in the scratch.
+    pub fn attend_step(&self, g: &Gpu, rows: u32, b: &LayerBuffers) -> Result<Step, String> {
         let attn = SparseAttention { n_heads: self.n_heads, n_kv_heads: self.heads.n_kv_heads, head_dim: self.heads.head_dim, block_size: self.kv.block_size, max_bt: self.kv.max_blocks_per_seq };
         if b.scales.is_some() != self.k.index_keys_packed.is_some() {
             return Err("LSA: the KV pool's packing does not match the kernels the engine resolved".into());
         }
         let bufs = SparseBuffers { q: b.q, pool_k: b.pool_k, pool_v: b.pool_v, block_tables: b.block_tables, sel: &self.sel, scales: b.scales, ctx: b.ctx };
         let (kernel, layout) = if rows >= MANY_ROWS { (self.k.attend, self.k.layout) } else { (self.k.attend_few, self.k.layout_few) };
-        s.push(attn.step(g, kernel, layout, rows, self.read.row_stride(), &bufs)?);
-        Ok(())
+        attn.step(g, kernel, layout, rows, self.read.row_stride(), &bufs)
     }
 
+    /// A full-width selection for a timing measurement of `rows` rows at
+    /// positions `start..start + rows`, as LSA reads: `top_k` long-range keys
+    /// in whole pools spread over the keys below the window, the window, the
+    /// sinks. Never for a forward whose result is used.
+    pub fn write_selection_for_timing(&self, g: &Gpu, rows: u32, start: u32) {
+        let c = &self.cfg;
+        let stride = self.read.row_stride() as usize;
+        let rows = rows.min(self.max_rows);
+        let mut sel = vec![0u32; rows as usize * stride];
+        for r in 0..rows as usize {
+            let p = start as usize + r;
+            let row = &mut sel[r * stride..][..stride];
+            let window_start = (p + 1).saturating_sub(c.window);
+            let far = window_start.saturating_sub(c.sink);
+            let mut n = 0usize;
+            let pools = far / c.pool_size;
+            let take = (c.top_k / c.pool_size).min(pools);
+            for i in 0..take {
+                let first = c.sink + (i * pools / take.max(1)) * c.pool_size;
+                for key in first..first + c.pool_size {
+                    row[3 + n] = key as u32;
+                    n += 1;
+                }
+            }
+            for key in window_start..=p {
+                row[3 + n] = key as u32;
+                n += 1;
+            }
+            for key in 0..c.sink.min(window_start) {
+                row[3 + n] = key as u32;
+                n += 1;
+            }
+            row[..3].copy_from_slice(&[n as u32, r as u32, p as u32 + 1]);
+        }
+        g.write(&self.sel, &sel);
+    }
 
     /// Read back the last recorded layer's selection of `rows` rows: per row
     /// its selected positions, and the `[rows, 3]` row headers (count,
@@ -324,6 +374,24 @@ impl LsaAttention {
         }
         g.write(&self.page_tab, &tab);
         Ok(())
+    }
+
+    /// Page tables for a timing measurement: `rows` rows each listing
+    /// `built` closed blocks (clamped to the table) on distinct pages - shapes
+    /// a read of that many blocks without any sequence. Never for a forward
+    /// whose result is used.
+    pub fn write_page_tables_for_timing(&self, g: &Gpu, rows: u32, built: u32) {
+        let width = self.read.max_pages as usize + 1;
+        let built = built.min(self.read.max_pages);
+        let pages = self.pool.pages().max(1);
+        let mut tab = vec![0u32; rows.min(self.max_rows) as usize * width];
+        for row in tab.chunks_exact_mut(width) {
+            row[0] = built;
+            for (i, page) in row[1..=built as usize].iter_mut().enumerate() {
+                *page = i as u32 % pages;
+            }
+        }
+        g.write(&self.page_tab, &tab);
     }
 
     /// Release a finished sequence's pages (before its KV blocks are released).

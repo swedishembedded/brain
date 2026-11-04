@@ -263,7 +263,12 @@ above. Everything about HOW to serve it is a `brain serve` flag:
   Index pages are built from the cached keys as each 512-key block fills (a
   prefix-cache hit reuses or rebuilds them without recomputing a token), and
   the read works over every KV cache tier (f32, int8, fp8) and past the
-  model's native context (YaRN). The indexer is made for one checkpoint and
+  model's native context (YaRN). Short contexts gain nothing from a sparse
+  read, so on enabling it the engine times one layer dense against sparse
+  at growing positions on the device in use, and prefill chunks ending
+  below that crossover read densely and leave the index for the first
+  sparse chunk or decode step to build: a short prompt runs at dense speed.
+  The indexer is made for one checkpoint and
   refused on another; keep it outside the checkpoint's directory, whose
   reader takes every safetensors file there as model weights. Off by default. Make an
   indexer with the `qwen_lsa` tool built beside `brain`:
@@ -272,7 +277,8 @@ above. Everything about HOW to serve it is a `brain serve` flag:
   `qwen_lsa eval --checkpoint DIR --corpus TEXTDIR --indexer FILE` reports
   the share of dense attention it keeps and the held-out loss, and
   `qwen_lsa prefill --checkpoint DIR --indexer FILE` times prefill dense
-  against sparse.
+  against sparse and prints the measured crossover (`--dense-until N`
+  overrides it; `0` reads every chunk sparsely).
 - `--kv-offload-gb N` - host RAM the serving engine may use to park
   preempted sessions' KV cache (default `0`, off). See below.
 - `--weight-format int8` / `--weight-format f32` - quantize the 7

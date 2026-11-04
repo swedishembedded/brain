@@ -21,7 +21,7 @@
 //!          [--held-docs 6] [--skip-docs 48] [--pca-corpus DIR] [--queries 32]
 //!          [--tail 256] [--seed N]
 //! qwen_lsa prefill --indexer FILE [--tokens 4096,8192,16384,32768] [--corpus DIR]
-//!          [--kv-cache int8|f32|fp8]
+//!          [--kv-cache int8|f32|fp8] [--dense-until N]
 //! ```
 //!
 //! `--indexer random` or `pca` in `eval` builds that training-free indexer
@@ -382,8 +382,12 @@ fn prefill(args: &Args) -> Result<(), String> {
         drop(dense);
         let (mut sparse, _) = engine_kv(&path, n as u32, kv)?;
         sparse.set_lsa(&ix)?;
+        if let Some(v) = args.get("dense-until") {
+            sparse.set_lsa_dense_until(v.parse().map_err(|_| format!("--dense-until {v:?} is not a number"))?);
+        }
+        let crossover = sparse.lsa_dense_until();
         let ts = time(&mut sparse);
-        println!("T={n:>6}  dense {:>8.2} s  sparse {:>8.2} s  speedup {:>5.2}x  ({:.0} vs {:.0} tok/s)", td, ts, td / ts, n as f64 / td, n as f64 / ts);
+        println!("T={n:>6}  dense {:>8.2} s  sparse {:>8.2} s  speedup {:>5.2}x  ({:.0} vs {:.0} tok/s)  dense below {crossover}", td, ts, td / ts, n as f64 / td, n as f64 / ts);
     }
     Ok(())
 }

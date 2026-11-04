@@ -1060,6 +1060,11 @@ pub struct Engine {
     /// Latent sparse attention ([`Engine::set_lsa`]): the layers it covers
     /// read a per-query selection of keys instead of every cached key.
     lsa: Option<model::lsa::engine::LsaAttention>,
+    /// Prefill chunks ending at or below this position read densely
+    /// ([`Engine::measure_lsa_crossover`]).
+    lsa_dense_until: u32,
+    /// Set while recording a prefill chunk that reads densely.
+    lsa_dense_now: std::cell::Cell<bool>,
     /// [`Engine::capture_attention`]'s per-layer `[T, q_dim]` query buffers and
     /// the first row of the chunk being recorded; `None` outside a capture.
     capture: Option<(Vec<DeviceBuffer>, std::cell::Cell<u32>)>,
@@ -1575,6 +1580,8 @@ impl Engine {
             topk_idx_dev,
             tape_cache: HashMap::new(),
             lsa: None,
+            lsa_dense_until: 0,
+            lsa_dense_now: std::cell::Cell::new(false),
             capture: None,
             bank: None,
             warned_calib_with_adapters: false,
@@ -1729,6 +1736,7 @@ impl Engine {
         let yarn = self.yarn.as_ref().map(|(inv_freq, _)| inv_freq);
         self.lsa = Some(model::lsa::engine::LsaAttention::new(&self.gpu, indexer, kernels, kv, rows, pages, yarn)?);
         self.tape_cache.clear();
+        self.lsa_dense_until = self.measure_lsa_crossover();
         Ok(())
     }
 
@@ -1802,16 +1810,119 @@ impl Engine {
             .collect()
     }
 
+    /// Layer `l`'s fused causal-chunk attention over `b` rows of one sequence
+    /// (`paged_flash_prefill`, its int8/fp8 twin, or the native tensor-core
+    /// kernel where the device has one): the dense prefill read, shared by the
+    /// forward and the sparse-attention crossover measurement.
+    fn dense_chunk_attention(&self, l: usize, b: u32) -> Step {
+        let (g, sc, c) = (&self.gpu, &self.sc, &self.cfg);
+        let (nh, nkv, hd) = (c.n_heads, c.n_kv_heads, c.head_dim);
+        // BR = 64 is the kernels' own query tile, @workgroup_size(256) their
+        // launch shape (both pinned in their WGSL headers).
+        let ntiles_q = b.div_ceil(64);
+        let params = [b, nh, nkv, hd, nh / nkv, self.block_size, self.max_blocks_per_seq];
+        let native = !self.gemm.is_reference_pinned();
+        if self.kv_int8 {
+            let bufs = [&sc.q, &self.pool_k[l], &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx, &self.scales_k[l], &self.scales_v[l]];
+            let tc = native
+                .then(|| if self.kv_fp8.is_some() { block::native_paged_flash_prefill_kvfp8(g, hd, &bufs, &params, nh * ntiles_q) } else { block::native_paged_flash_prefill_kv8(g, hd, &bufs, &params, nh * ntiles_q) })
+                .flatten();
+            tc.unwrap_or_else(|| {
+                g.dispatch(
+                    self.kv_fp8.map_or(PAGED_FLASH_PREFILL_I8, |k| k.prefill),
+                    &[&sc.q, &self.pool_k[l], &self.pool_v[l], &self.scales_k[l], &self.scales_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx],
+                    &params,
+                    gpu_core::Dispatch::Workgroups(nh * ntiles_q),
+                )
+            })
+        } else {
+            let bufs = [&sc.q, &self.pool_k[l], &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx];
+            let tc = native.then(|| block::native_paged_flash_prefill(g, hd, &bufs, &params, nh * ntiles_q)).flatten();
+            tc.unwrap_or_else(|| g.dispatch(PAGED_FLASH_PREFILL, &bufs, &params, gpu_core::Dispatch::Workgroups(nh * ntiles_q)))
+        }
+    }
+
+    /// Measure where sparse attention starts to pay on this device: for a
+    /// prefill chunk of the engine's chunk rows starting at a growing
+    /// position, time one layer's dense chunk attention against its sparse
+    /// read (index queries, the read over that many closed blocks, the
+    /// selected keys), on the engine's own buffers. Returns the last chunk
+    /// end at which dense was still faster - prefill chunks ending at or
+    /// below it read densely, which there is both faster and exact - or 0
+    /// when sparse wins from the start or the device has no fused dense
+    /// prefill to compare.
+    fn measure_lsa_crossover(&mut self) -> u32 {
+        let Some(lsa) = self.lsa.as_ref() else { return 0 };
+        let layer = (0..self.cfg.n_layers as usize).find(|&l| lsa.sparse(l)).unwrap_or(0);
+        if !fused_paged_attention(&self.gpu, true, self.kv_int8, self.cfg.head_dim, self.max_prefill) {
+            return 0;
+        }
+        let cb = lsa.config().cluster_block as u32;
+        let rows = self.max_prefill.min(cb).max(1);
+        let mbt = self.max_blocks_per_seq;
+        let blocks = self.alloc.num_blocks().max(1);
+        let bt: Vec<u32> = (0..rows).flat_map(|_| (0..mbt).map(|j| j % blocks)).collect();
+        let g = &self.gpu;
+        g.write(&self.sc.bt_buf, &bt);
+        let mut dense_until = 0;
+        let mut start = 1024u32;
+        while start + rows <= self.max_seq_len() as u32 {
+            let seqlens: Vec<u32> = (0..rows).map(|i| start + i + 1).collect();
+            let positions: Vec<u32> = (0..rows).map(|i| start + i).collect();
+            g.write(&self.sc.seqlen_buf, &seqlens);
+            g.write(&self.sc.pos_buf, &positions);
+            let dense = gpu_core::profile::best_of(g, &[self.dense_chunk_attention(layer, rows)], 2);
+            // The sparse side as a real chunk reads it: index queries and the
+            // read over `start / cb` closed blocks, then attention over a
+            // full-width selection spread over the cached keys (a selection
+            // of the read's own garbage output would hit a few cached rows).
+            lsa.write_page_tables_for_timing(g, rows, start / cb);
+            let scales = self.kv_int8.then(|| (&self.scales_k[layer], &self.scales_v[layer]));
+            let bufs = model::lsa::engine::LayerBuffers { q: &self.sc.q, pos: &self.sc.pos_buf, seqlen: &self.sc.seqlen_buf, block_tables: &self.sc.bt_buf, pool_k: &self.pool_k[layer], pool_v: &self.pool_v[layer], scales, ctx: &self.sc.ctx };
+            let mut read = Vec::new();
+            let Ok(attend) = lsa.record_read(g, &mut read, layer, rows, &bufs).and_then(|()| lsa.attend_step(g, rows, &bufs)) else {
+                return dense_until;
+            };
+            let read_time = gpu_core::profile::best_of(g, &read, 2);
+            lsa.write_selection_for_timing(g, rows, start);
+            let sparse = read_time + gpu_core::profile::best_of(g, &[attend], 2);
+            if sparse < dense {
+                break;
+            }
+            dense_until = start + rows;
+            // Positions about a quarter apart, in whole chunks.
+            start += (start / 4).div_ceil(rows) * rows;
+        }
+        dense_until
+    }
+
+    /// The prefill position up to which chunks read densely (the measured
+    /// crossover; 0 without sparse attention).
+    pub fn lsa_dense_until(&self) -> u32 {
+        self.lsa_dense_until
+    }
+
+    /// Override the measured crossover: prefill chunks ending at or below
+    /// `position` read densely (0: every chunk reads sparsely).
+    pub fn set_lsa_dense_until(&mut self, position: u32) {
+        self.lsa_dense_until = position;
+    }
+
     /// Latent sparse attention's device bytes, index pages in use and built,
     /// or `None` when every layer reads densely.
     pub fn lsa_stats(&self) -> Option<(u64, (u32, u32), u64)> {
         self.lsa.as_ref().map(|a| (a.device_bytes(), a.page_usage(), a.built_pages()))
     }
 
-    /// Bring `table`'s sparse-attention index up to date for a forward of
-    /// `rows` consecutive positions starting after its `cached` written keys.
+    /// Set up a prefill chunk of `rows` consecutive positions starting after
+    /// `table`'s `cached` written keys: a chunk ending at or below the
+    /// measured crossover reads densely (and leaves the index alone - the
+    /// first sparse chunk or decode step builds every closed block's page it
+    /// lacks); any other brings the index up to date for a sparse read.
     fn lsa_prepare_chunk(&mut self, table: &mut BlockTable, cached: u32, rows: u32) {
-        if let Some(lsa) = self.lsa.as_mut() {
+        let dense = cached + rows <= self.lsa_dense_until;
+        self.lsa_dense_now.set(dense);
+        if let Some(lsa) = self.lsa.as_mut().filter(|_| !dense) {
             let pools = model::lsa::engine::KeyPools { keys: &self.pool_k, scales: self.kv_int8.then_some(&self.scales_k[..]) };
             lsa.prepare(&self.gpu, &mut [(table, cached, rows)], pools).unwrap_or_else(|e| panic!("qwen3: latent sparse attention: {e}"));
         }
@@ -2797,7 +2908,7 @@ impl Engine {
                 // serves decode at every batch size, so `fused` answers
                 // `true` in both regimes; asking once and branching mirrors
                 // the fp32 arm.
-                if let Some(lsa) = self.lsa.as_ref().filter(|a| a.sparse(l)) {
+                if let Some(lsa) = self.lsa.as_ref().filter(|a| a.sparse(l) && !self.lsa_dense_now.get()) {
                     // Latent sparse attention over the packed pool: the same three
                     // shape-only dispatches as the f32 arm, the sparse read
                     // dequantising each selected key against its scale.
@@ -2806,32 +2917,7 @@ impl Engine {
                 } else {
                     let fused = fused_paged_attention(g, causal_chunk, true, hd, b);
                     if fused && causal_chunk {
-                        // One dispatch per (head, query-tile), no `scores`/`probs`
-                        // at all - BR=64 is the kernel's own tile size,
-                        // @workgroup_size(256) its own launch shape (both pinned
-                        // in its own WGSL header), identical to the fp32 twin.
-                        let ntiles_q = b.div_ceil(64);
-                        let params = [b, nh, nkv, hd, group, bs, mbt];
-                        // fp16 tensor cores where the device has them and the fp32 tier was not pinned
-                        // (same buffers, uniform and launch geometry as the portable kernel).
-                        let native = (!self.gemm.is_reference_pinned())
-                            .then(|| {
-                                let bufs = [&sc.q, &self.pool_k[l], &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx, &self.scales_k[l], &self.scales_v[l]];
-                                if self.kv_fp8.is_some() {
-                                    block::native_paged_flash_prefill_kvfp8(g, hd, &bufs, &params, nh * ntiles_q)
-                                } else {
-                                    block::native_paged_flash_prefill_kv8(g, hd, &bufs, &params, nh * ntiles_q)
-                                }
-                            })
-                            .flatten();
-                        s.push(native.unwrap_or_else(|| {
-                            g.dispatch(
-                                self.kv_fp8.map_or(PAGED_FLASH_PREFILL_I8, |k| k.prefill),
-                                &[&sc.q, &self.pool_k[l], &self.pool_v[l], &self.scales_k[l], &self.scales_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx],
-                                &params,
-                                gpu_core::Dispatch::Workgroups(nh * ntiles_q),
-                            )
-                        }));
+                        s.push(self.dense_chunk_attention(l, b));
                     } else if fused {
                         // Batched GQA split-key decode: one workgroup per
                         // (row, kv head, 4-head slab, split) reads each K/V byte
@@ -2894,7 +2980,7 @@ impl Engine {
                 // than asking twice, since the selector is pure per
                 // `(Op, OpShape)` but a call still costs a `DeviceCaps`
                 // filter.
-                if let Some(lsa) = self.lsa.as_ref().filter(|a| a.sparse(l)) {
+                if let Some(lsa) = self.lsa.as_ref().filter(|a| a.sparse(l) && !self.lsa_dense_now.get()) {
                     // Latent sparse attention: index queries from the rotated
                     // queries, the read over this layer's index pages, and
                     // attention over the selected keys of the paged pool. Shapes
@@ -2904,15 +2990,7 @@ impl Engine {
                 } else {
                     let fused = fused_paged_attention(g, causal_chunk, false, hd, b);
                     if fused && causal_chunk {
-                        // `paged_flash_prefill` (M2.3): one dispatch per (head,
-                        // query-tile), no `scores`/`probs` at all - BR=64 is the
-                        // kernel's own tile size, @workgroup_size(256) its own
-                        // launch shape (both pinned in its own WGSL header).
-                        let ntiles_q = b.div_ceil(64);
-                        let bufs = [&sc.q, &self.pool_k[l], &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx];
-                        let params = [b, nh, nkv, hd, group, bs, mbt];
-                        let native = (!self.gemm.is_reference_pinned()).then(|| block::native_paged_flash_prefill(g, hd, &bufs, &params, nh * ntiles_q)).flatten();
-                        s.push(native.unwrap_or_else(|| g.dispatch(PAGED_FLASH_PREFILL, &bufs, &params, gpu_core::Dispatch::Workgroups(nh * ntiles_q))));
+                        s.push(self.dense_chunk_attention(l, b));
                     } else if fused {
                         // M2.7: split-key FlashDecode - the selector's decode
                         // arm only ever answers `true` at `bsz == 1` (`Op::
@@ -3384,6 +3462,7 @@ impl Engine {
             }
             let input = if embeds { Input::Embeds(&rows) } else { Input::Tokens(&tokens) };
             let hidden = self.run_batched(&meta, input, true);
+            self.lsa_dense_now.set(false);
             last = hidden[(run - 1) * d..run * d].to_vec();
             start += cc;
         }
@@ -3428,6 +3507,7 @@ impl Engine {
             table.reserve(cc, &mut self.alloc).expect("KV pool exhausted");
             let meta = self.chunk_meta(table, start, cc);
             let hidden = self.run_batched(&meta, Input::Tokens(&prompt[start as usize..(start + cc) as usize]), true);
+            self.lsa_dense_now.set(false);
             out[start as usize * d..(start + cc) as usize * d].copy_from_slice(&hidden[..cc as usize * d]);
             start += cc;
         }

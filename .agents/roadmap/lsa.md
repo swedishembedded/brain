@@ -43,14 +43,21 @@ head layout; clustering, selection and the sparse read are written once.
       1024, top_p 256, window 512 (`qwen_lsa prefill --kv-cache int8`):
       | T | dense | sparse | speedup |
       |---|---|---|---|
-      | 4096 | 2.35 s | 3.91 s | 0.60x |
-      | 8192 | 7.34 s | 8.71 s | 0.84x |
-      | 16384 | 25.20 s | 18.70 s | 1.35x |
-      | 32768 | 92.25 s | 39.81 s | 2.32x |
-      | 65536 | 357.54 s | 87.88 s | 4.07x |
-      Dense throughput falls 1744 -> 183 tok/s (quadratic); sparse stays
-      1048 -> 746 tok/s (linear). Below ~12k the selection holds most causal
-      keys anyway and the per-query gather costs more than dense tiles.
+      | 2048 | 0.85 s | 0.85 s | 0.99x |
+      | 4096 | 2.35 s | 2.35 s | 1.00x |
+      | 8192 | 7.34 s | 6.96 s | 1.05x |
+      | 16384 | 25.07 s | 16.59 s | 1.51x |
+      | 32768 | 92.61 s | 37.21 s | 2.49x |
+      | 65536 | 357.41 s | 83.59 s | 4.28x |
+      Dense throughput falls 2414 -> 183 tok/s (quadratic); sparse stays
+      near 800-1200 tok/s past the crossover (linear). The engine measured
+      its crossover at 5120 (chunks ending there or below read densely and
+      build no index; the first sparse chunk builds the backlog), so short
+      prompts run at dense speed. With every chunk sparse the same prompts
+      ran 0.60x at 4k and 0.84x at 8k, the per-query gather costing more
+      than dense tiles while the selection holds most causal keys anyway.
+      Index pages are built by the device Ward, one dispatch per closed
+      block for every layer.
 - [x] Device indexing (`model::lsa::device`): `lsa_index_vectors` turns
       post-RoPE heads (a chunk's queries or a cached key's pool slot) into
       unit index vectors (un-rotate with the forward kernels' own angle, sum
@@ -105,6 +112,20 @@ head layout; clustering, selection and the sparse read are written once.
       (indicative): dense `paged_flash_prefill_i8` 2238 / 10284 ms at
       32k / 64k against whole-row sparse 787 / 1610 ms (2.8x / 6.4x);
       crossover near 12k.
+- [x] Device Ward (`lsa_ward`): every sparse layer's index pages in one
+      pool, a slot per layer; a closed block's index keys for every layer and
+      one Ward dispatch (a workgroup per layer) write the page with no
+      readback. The pools' Gram matrix is kept current by linearity and read
+      from one triangle, so a merge cost is the same both ways (costs that
+      differed by rounding stalled merging on real Qwen3 keys and dropped
+      keys from the index; the real-model full-budget gates caught it).
+      Gates: twin-direction keys bucket exactly as the host does; spread,
+      correlated and repeated keys each land in exactly one bucket.
+- [x] Measured dense crossover (`Engine::set_lsa`): one layer's dense chunk
+      attention timed against the sparse read and attention at growing
+      positions on the device in use; prefill chunks ending at or below the
+      crossover read densely and skip index building
+      (`set_lsa_dense_until` overrides it, `qwen_lsa prefill --dense-until`).
 - [x] D-LSA training (`model::lsa::distill`): teacher targets (head-averaged
       attention over the keys outside sink and window, top 2048,
       renormalised), the forward-KL objective with analytic gradients of both
@@ -156,14 +177,9 @@ head layout; clustering, selection and the sparse read are written once.
 
 ## Not yet done
 
-- [ ] Dense attention for prefill chunks below the measured crossover (about
-      12k tokens at the 0.6B shape on a P40), so short prompts do not pay the
-      sparse read: measure the crossover per device and chunk position.
 - [ ] Sparse prefill bandwidth: bf16 KV tier for the sparse read, the
       shared window as a dense sliding tile (it is a fifth of every
       selection), and more bytes in flight per workgroup.
-- [ ] Device Ward: clustering of a closed block still runs on the host
-      (`cluster_block`), one readback per closed block per layer.
 - [ ] Selected-key counts and page use in the stats snapshot.
 - [ ] D-LSA on the generic trainer (`ModelFit`) and device kernels for the
       distillation arithmetic, which is host math today.
