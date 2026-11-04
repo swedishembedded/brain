@@ -182,3 +182,56 @@ fn pca_projections_are_orthonormal_leading_directions() {
         assert!(outside < 1e-3, "direction {a} leaks {outside} outside the key subspace");
     }
 }
+
+/// At serving sizes (512-key cluster blocks, a 64-wide index) the index is
+/// deterministic: two engines over the same keys build the same pages and
+/// read alike, over a prefill chunk whose rows see 256 buckets.
+#[test]
+fn serving_sized_indexes_are_deterministic() {
+    let mut rng = Lcg::random();
+    let pipes: &'static [(&str, &str)] = Box::leak(vec![device::KERNELS[0], device::KERNELS[1], gqa_kernel(NH / NKV).unwrap(), KERNEL, device::KERNELS[2]].into_boxed_slice());
+    let g = gpu_core::testgpu::dev(pipes);
+    if !g.caps().workgroup_reductions {
+        brain_testutil::skip_unavailable("LSA engine: workgroup-barrier kernels need a GPU");
+        return;
+    }
+    const MAX_BT: u32 = 300;
+    let n = (MAX_BT * BS * NKV * HD) as usize;
+    let pool_k: Vec<_> = (0..2).map(|_| g.storage_init("pk", &(0..n).map(|_| rng.signed()).collect::<Vec<f32>>())).collect();
+    let mut alloc = BlockAllocator::new(MAX_BT, BS);
+    let kv = KvGeometry { block_size: BS, max_blocks_per_seq: MAX_BT };
+    let flat = Indexer::random(LsaConfig { top_p: 24, top_k: 256, ..LsaConfig::default() }, geometry(), rng.next_u64()).unwrap();
+    let len = 2100u32;
+    let mut t = BlockTable::new();
+    t.reserve(len, &mut alloc).unwrap();
+    let rows = 52u32;
+    let positions: Vec<u32> = (len - rows..len).collect();
+    let q = g.storage_init("q", &(0..rows * NH * HD).map(|_| rng.signed()).collect::<Vec<f32>>());
+    let pos = g.storage(rows as u64);
+    g.write(&pos, &positions);
+    let seqlen = g.storage(rows as u64);
+    g.write(&seqlen, &positions.iter().map(|p| p + 1).collect::<Vec<u32>>());
+    let mut bt = vec![0u32; (rows * MAX_BT) as usize];
+    for r in 0..rows as usize {
+        bt[r * MAX_BT as usize..][..t.blocks().len()].copy_from_slice(t.blocks());
+    }
+    let block_tables = g.storage(bt.len() as u64);
+    g.write(&block_tables, &bt);
+    let ctx = g.storage((rows * NH * HD) as u64);
+    let read = |indexer: &Indexer| {
+        let mut lsa = LsaAttention::new(&g, indexer, kernels(), kv, 64, 16, None).unwrap();
+        let mut table = t.clone();
+        lsa.prepare(&g, &mut [(&mut table, len - rows, rows)], KeyPools { keys: &pool_k, scales: None }).unwrap();
+        let mut s = Vec::new();
+        let b = LayerBuffers { q: &q, pos: &pos, seqlen: &seqlen, block_tables: &block_tables, pool_k: &pool_k[0], pool_v: &pool_k[0], scales: None, ctx: &ctx };
+        lsa.record_layer(&g, &mut s, 0, rows, &b).unwrap();
+        g.submit(&[], &s);
+        let sel = lsa.read_selection(&g, rows).0;
+        lsa.release(&mut table);
+        sel
+    };
+    let first = read(&flat);
+    for _ in 0..3 {
+        assert_eq!(read(&flat), first, "two engines over the same keys selected differently: the index is not deterministic");
+    }
+}

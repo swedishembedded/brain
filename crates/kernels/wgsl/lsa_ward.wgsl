@@ -70,9 +70,16 @@ struct Params {
 
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read>       keys:      array<f32>;
-@group(0) @binding(2) var<storage, read_write> scratch:   array<f32>;
+@group(0) @binding(2) var<storage, read_write> scratch:   array<atomic<u32>>;
 @group(0) @binding(3) var<storage, read_write> centroids: array<f32>;
 @group(0) @binding(4) var<storage, read_write> members:   array<u32>;
+
+// The scratch is read back by other threads after it changes (the Gram
+// matrix is merged in place every round), so every access is an atomic load
+// or store: a plain load may return a value the thread saw before another
+// thread's store.
+fn ld(i: u32) -> f32 { return bitcast<f32>(atomicLoad(&scratch[i])); }
+fn st(i: u32, v: f32) { atomicStore(&scratch[i], bitcast<u32>(v)); }
 
 var<workgroup> alive:   array<u32, MAX_POOLS>;
 var<workgroup> size:    array<u32, MAX_POOLS>;
@@ -108,7 +115,7 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
         for (var k = 0u; k < p.pool_size; k = k + 1u) {
             acc = acc + keys[kbase + (pool * p.pool_size + k) * d + c];
         }
-        scratch[sums + e] = acc;
+        st(sums + e, acc);
     }
     for (var i = lt; i < np; i = i + WG) {
         alive[i] = 1u;
@@ -134,8 +141,8 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
                     let c = e % 64u;
                     let pa = ti * 16u + r;
                     let pb = tj * 16u + r;
-                    ta[e] = select(0.0, scratch[sums + pa * d + c0 + c], pa < np && c < cw);
-                    tb[e] = select(0.0, scratch[sums + pb * d + c0 + c], pb < np && c < cw);
+                    ta[e] = select(0.0, ld(sums + pa * d + c0 + c), pa < np && c < cw);
+                    tb[e] = select(0.0, ld(sums + pb * d + c0 + c), pb < np && c < cw);
                 }
                 workgroupBarrier();
                 for (var k = 0u; k < 4u; k = k + 1u) {
@@ -153,8 +160,8 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
                 let i = ti * 16u + e / 16u;
                 let j = tj * 16u + e % 16u;
                 if (i < np && j < np) {
-                    scratch[gram + i * np + j] = g[k];
-                    scratch[gram + j * np + i] = g[k];
+                    st(gram + i * np + j, g[k]);
+                    st(gram + j * np + i, g[k]);
                 }
             }
         }
@@ -171,13 +178,13 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
             var bj = NO_KEY;
             var bc = INF;
             if (alive[i] == 1u) {
-                let gii = scratch[gram + i * np + i];
+                let gii = ld(gram + i * np + i);
                 let ai = sqrt(max(gii, 0.0));
                 for (var j = 0u; j < np; j = j + 1u) {
                     if (j != i && alive[j] == 1u && size[i] + size[j] <= p.bucket_cap) {
-                        let gjj = scratch[gram + j * np + j];
+                        let gjj = ld(gram + j * np + j);
                         // One triangle: the cost is the same both ways.
-                        let gij = scratch[gram + min(i, j) * np + max(i, j)];
+                        let gij = ld(gram + min(i, j) * np + max(i, j));
                         let merged = sqrt(max(gii + gjj + 2.0 * gij, 0.0));
                         let cost = ai + sqrt(max(gjj, 0.0)) - merged;
                         if (cost < bc) {
@@ -222,7 +229,7 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
             let kept = pick_i[e / np];
             let gone = best[kept];
             let j = e % np;
-            scratch[gram + kept * np + j] = scratch[gram + kept * np + j] + scratch[gram + gone * np + j];
+            st(gram + kept * np + j, ld(gram + kept * np + j) + ld(gram + gone * np + j));
         }
         storageBarrier();
         workgroupBarrier();
@@ -230,7 +237,7 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
             let kept = pick_i[e / np];
             let gone = best[kept];
             let i = e % np;
-            scratch[gram + i * np + kept] = scratch[gram + i * np + kept] + scratch[gram + i * np + gone];
+            st(gram + i * np + kept, ld(gram + i * np + kept) + ld(gram + i * np + gone));
         }
         storageBarrier();
         workgroupBarrier();
