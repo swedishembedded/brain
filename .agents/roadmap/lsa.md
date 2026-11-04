@@ -64,12 +64,20 @@ head layout; clustering, selection and the sparse read are written once.
       device's selection, page sharing and freeing, artifact round trip.
 - [ ] Device Ward: clustering of a closed block still runs on the host
       (`cluster_block`), one readback per closed block per layer.
-- [ ] Serving: per-sequence, per-layer `BucketIndex` in the paged decoders'
-      lifecycle (fork shares closed blocks, release, prefix cache, speculative
-      rollback within the open block), memory accounted in `memplan`, a flag
-      to turn it on per model, metrics for selected-key counts.
-- [ ] A model adapter: the first decoder (Qwen3 GQA) supplying pre-RoPE Q/K
-      and its rotary layout; dense attention stays the default.
+- [x] Qwen3 serving engine (`Engine::set_lsa`): the covered layers record
+      the sparse path; prefill chunks are cut at cluster boundaries and every
+      forward (prefill, scoring, decode windows, speculative verify) brings
+      its sequences' pages up to date first; release frees them. Gates on the
+      real Qwen3-0.6B: a budget past the context generates exactly the dense
+      continuation (pages built mid-decode), last-hidden relative error
+      1.2e-6 at that budget against 0.29 at 8 keys; on the tiny model the
+      scheduler conformance suite passes with LSA on (batched = single,
+      prefix hits prefill only the suffix and report their cached tokens,
+      speculation = greedy). Refused on int8/fp8 KV and under YaRN.
+- [ ] Serving surface: a policy flag to attach an indexer, memory accounted
+      in `memplan`, selected-key metrics.
+- [ ] int8/fp8 KV for the sparse kernels (the served default is int8 KV).
+- [ ] YaRN: the index-vector kernel un-rotates plain RoPE only.
 - [ ] D-LSA: PCA initialisation, loading the released distilled maps, the
       distillation objective (forward KL against head-averaged teacher
       attention, top-2048 targets) on the generic trainer.

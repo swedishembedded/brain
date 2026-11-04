@@ -77,3 +77,22 @@ fn qwen3_with_fp32_kv_conforms() {
 fn qwen3_with_int8_kv_conforms() {
     conformance::run_all(&Conformance { make: || engine(true), prefix_reuse: true, prefix_prompt_tokens: 24, load_adapter: Some(load_adapter) });
 }
+
+/// The engine reading sparsely: a tiny latent-sparse-attention configuration
+/// whose cluster blocks close every 8 tokens and whose 3-key budget drops keys,
+/// so index pages are built, adopted with cached prefixes and freed throughout.
+fn sparse_engine() -> Engine {
+    let mut e = engine(false);
+    let cfg = QwenConfig::tiny();
+    let geometry = model::lsa::indexer::IndexGeometry { n_layers: cfg.n_layers as usize, n_heads: cfg.n_heads as usize, n_kv_heads: cfg.n_kv_heads as usize, head_dim: cfg.head_dim as usize, rope_base: cfg.rope_theta };
+    let lsa = model::lsa::LsaConfig { index_dim: 4, pool_size: 1, bucket_size: 2, bucket_cap: 4, cluster_block: 8, top_p: 2, top_k: 3, sink: 1, window: 8, early: None };
+    // seed: the indexer is a fixture; every engine of the suite must index alike.
+    let indexer = model::lsa::indexer::Indexer::random(lsa, geometry, 11).unwrap();
+    e.set_lsa(&indexer).unwrap();
+    e
+}
+
+#[test]
+fn qwen3_with_latent_sparse_attention_conforms() {
+    conformance::run_all(&Conformance { make: sparse_engine, prefix_reuse: true, prefix_prompt_tokens: 24, load_adapter: Some(load_adapter) });
+}

@@ -260,9 +260,19 @@ fn pipelines() -> &'static [(&'static str, &'static str)] {
             }
         }
         v.extend(model::kv_tier::fp8_pool_pipelines());
+        v.extend(model::lsa::device::KERNELS);
+        v.push(model::paged_sparse::KERNEL);
+        for group in LSA_GQA_GROUPS {
+            v.push(model::paged_sparse::gqa_kernel(group).expect("paged_sparse_flash_gqa declares the GROUP knob"));
+        }
         v
     })
 }
+
+/// The query-heads-per-KV-head groups of the Qwen3 family (0.6B/1.7B: 2,
+/// 4B/8B: 4, 14B: 5, 32B: 8) whose per-KV-head sparse attention kernel is
+/// compiled in; another group reads through the per-head kernel.
+const LSA_GQA_GROUPS: [u32; 4] = [2, 4, 5, 8];
 
 /// Output columns per thread of the int8 prefill tile: 4 gives a 128x64
 /// workgroup tile whose register block fits two workgroups per SM, faster
@@ -1004,6 +1014,9 @@ pub struct Engine {
     /// rebuilding via `Self::run_batched_steps`, unchanged from before this
     /// cache existed.
     tape_cache: HashMap<(u32, bool), Vec<Step>>,
+    /// Latent sparse attention ([`Engine::set_lsa`]): the layers it covers
+    /// read a per-query selection of keys instead of every cached key.
+    lsa: Option<model::lsa::engine::LsaAttention>,
     /// The per-row-adapter LoRA bank, when [`Engine::enable_adapters`] made
     /// one. `None` keeps every path below exactly as it was without adapters.
     bank: Option<AdapterBank>,
@@ -1515,6 +1528,7 @@ impl Engine {
             topk_vals_dev,
             topk_idx_dev,
             tape_cache: HashMap::new(),
+            lsa: None,
             bank: None,
             warned_calib_with_adapters: false,
             host_kv: HostKvPool::new(block_words, 0),
@@ -1632,6 +1646,69 @@ impl Engine {
     }
 
     /// True when the packed pools hold FP8 E4M3 ([`Self::set_kv_fp8`]).
+    /// Read the layers `indexer` covers through latent sparse attention: each
+    /// query attends its sinks, its window and the `top_k` keys of its best
+    /// buckets instead of every cached key. The indexer must have been built
+    /// for this model's attention. Index pages are built from the cached keys
+    /// as cluster blocks close, so prefix-cache hits, cached-token accounting
+    /// and continuous batching are unchanged.
+    ///
+    /// Refused on an int8/fp8 KV cache and under YaRN position scaling, which
+    /// the sparse kernels do not read yet.
+    pub fn set_lsa(&mut self, indexer: &model::lsa::indexer::Indexer) -> Result<(), String> {
+        let c = &self.cfg;
+        if self.kv_int8 {
+            return Err("latent sparse attention reads an f32 KV cache; serve with --kv-cache f32".into());
+        }
+        if self.yarn.is_some() {
+            return Err("latent sparse attention does not read YaRN-scaled positions yet; serve within the model's native context".into());
+        }
+        let geometry = model::lsa::indexer::IndexGeometry { n_layers: c.n_layers as usize, n_heads: c.n_heads as usize, n_kv_heads: c.n_kv_heads as usize, head_dim: c.head_dim as usize, rope_base: c.rope_theta };
+        indexer.check_model(&geometry)?;
+        let group = c.n_heads / c.n_kv_heads;
+        let name = |n: &str| self.gpu.kernel_index(n).ok_or_else(|| format!("latent sparse attention: kernel {n} is not registered"));
+        let (attend, per_kv_head) = if LSA_GQA_GROUPS.contains(&group) {
+            (name(model::paged_sparse::gqa_kernel(group)?.0)?, true)
+        } else {
+            (name(model::paged_sparse::KERNEL.0)?, false)
+        };
+        let kernels = model::lsa::engine::LsaKernels { index_vectors: name(model::lsa::device::KERNELS[0].0)?, read: name(model::lsa::device::KERNELS[1].0)?, attend, per_kv_head };
+        let kv = model::lsa::engine::KvGeometry { block_size: self.block_size, max_blocks_per_seq: self.max_blocks_per_seq };
+        let cluster = indexer.cfg.cluster_block as u32;
+        // Shared prefixes share pages; sequences that diverge inside a cluster
+        // block each need their own, hence the margin over one page per pool
+        // cluster block.
+        let pages = 2 * (self.alloc.num_blocks() * self.block_size).div_ceil(cluster) + 1;
+        let rows = self.max_prefill.max(self.max_batch);
+        self.lsa = Some(model::lsa::engine::LsaAttention::new(&self.gpu, indexer, kernels, kv, rows, pages)?);
+        self.tape_cache.clear();
+        Ok(())
+    }
+
+    /// Latent sparse attention's device bytes, index pages in use and built,
+    /// or `None` when every layer reads densely.
+    pub fn lsa_stats(&self) -> Option<(u64, (u32, u32), u64)> {
+        self.lsa.as_ref().map(|a| (a.device_bytes(), a.page_usage(), a.built_pages()))
+    }
+
+    /// Bring `table`'s sparse-attention index up to date for a forward of
+    /// `rows` consecutive positions starting after its `cached` written keys.
+    fn lsa_prepare_chunk(&mut self, table: &mut BlockTable, cached: u32, rows: u32) {
+        if let Some(lsa) = self.lsa.as_mut() {
+            lsa.prepare(&self.gpu, &mut [(table, cached, rows)], &self.pool_k).unwrap_or_else(|e| panic!("qwen3: latent sparse attention: {e}"));
+        }
+    }
+
+    /// The longest chunk starting at `start` that stays inside one sparse
+    /// attention cluster block, so every query's closed blocks are indexed
+    /// before it runs (no limit without sparse attention).
+    fn lsa_chunk_limit(&self, start: u32) -> u32 {
+        self.lsa.as_ref().map_or(u32::MAX, |a| {
+            let cb = a.config().cluster_block as u32;
+            cb - start % cb
+        })
+    }
+
     pub fn kv_fp8(&self) -> bool {
         self.kv_fp8.is_some()
     }
@@ -1719,6 +1796,16 @@ impl Engine {
         let bsz = tables.len() as u32;
         assert!(bsz <= self.max_batch);
         let slots = self.row_slots(tables.iter().map(|t| t.kv_namespace()));
+        if let Some(lsa) = self.lsa.as_mut() {
+            let mut rows: Vec<(&mut BlockTable, u32, u32)> = tables
+                .iter_mut()
+                .map(|t| {
+                    let cached = t.len();
+                    (&mut **t, cached, 1)
+                })
+                .collect();
+            lsa.prepare(&self.gpu, &mut rows, &self.pool_k).unwrap_or_else(|e| panic!("qwen3: latent sparse attention: {e}"));
+        }
         let (mut positions, mut seqlens, mut blocks, mut offsets) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let mut bt = vec![0u32; bsz as usize * mbt];
         for (i, table) in tables.iter_mut().enumerate() {
@@ -2676,54 +2763,63 @@ impl Engine {
                 // than asking twice, since the selector is pure per
                 // `(Op, OpShape)` but a call still costs a `DeviceCaps`
                 // filter.
-                let fused = fused_paged_attention(g, causal_chunk, false, hd, b);
-                if fused && causal_chunk {
-                    // `paged_flash_prefill` (M2.3): one dispatch per (head,
-                    // query-tile), no `scores`/`probs` at all - BR=64 is the
-                    // kernel's own tile size, @workgroup_size(256) its own
-                    // launch shape (both pinned in its own WGSL header).
-                    let ntiles_q = b.div_ceil(64);
-                    let bufs = [&sc.q, &self.pool_k[l], &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx];
-                    let params = [b, nh, nkv, hd, group, bs, mbt];
-                    let native = (!self.gemm.is_reference_pinned()).then(|| block::native_paged_flash_prefill(g, hd, &bufs, &params, nh * ntiles_q)).flatten();
-                    s.push(native.unwrap_or_else(|| g.dispatch(PAGED_FLASH_PREFILL, &bufs, &params, gpu_core::Dispatch::Workgroups(nh * ntiles_q))));
-                } else if fused {
-                    // M2.7: split-key FlashDecode - the selector's decode
-                    // arm only ever answers `true` at `bsz == 1` (`Op::
-                    // PagedAttentionFused`'s own doc has the measured A/B:
-                    // a real, repeatable win there, a clear loss at
-                    // `bsz >= 4`), so `sc.part_{m,l,o}` (sized for `bsz == 1`
-                    // at construction, `Engine::decode_split_shape`) are
-                    // always wide enough here. Two dispatches replace the
-                    // triad's three, and neither materialises a
-                    // `[bsz, nh, cap]` scores/probs slab.
-                    let (n_splits, tiles_per_split) = decode_split_shape(cap);
-                    s.push(g.dispatch(
-                        PAGED_FLASH_DECODE_SPLIT,
-                        &[&sc.q, &self.pool_k[l], &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.part_m, &sc.part_l, &sc.part_o],
-                        &[b, nh, nkv, hd, group, bs, mbt, n_splits, tiles_per_split],
-                        gpu_core::Dispatch::Workgroups(b * nh * n_splits),
-                    ));
-                    s.push(g.step(PAGED_FLASH_DECODE_COMBINE, &[&sc.part_m, &sc.part_l, &sc.part_o, &sc.ctx], &[b, nh, hd, n_splits], b * nh * 128));
-                } else if let Some(step) = (!causal_chunk && !self.gemm.is_reference_pinned())
-                    .then(|| block::native_paged_decode_batched(g, false, &[&sc.q, &self.pool_k[l], &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx], &[b, nh, nkv, hd, group, bs, mbt]))
-                    .flatten()
-                {
-                    s.push(step);
+                if let Some(lsa) = self.lsa.as_ref().filter(|a| a.sparse(l)) {
+                    // Latent sparse attention: index queries from the rotated
+                    // queries, the read over this layer's index pages, and
+                    // attention over the selected keys of the paged pool. Shapes
+                    // only, so a cached decode tape stays valid.
+                    let bufs = model::lsa::engine::LayerBuffers { q: &sc.q, pos: &sc.pos_buf, seqlen: &sc.seqlen_buf, block_tables: &sc.bt_buf, pool_k: &self.pool_k[l], pool_v: &self.pool_v[l], ctx: &sc.ctx };
+                    lsa.record_layer(g, &mut s, l, b, &bufs).unwrap_or_else(|e| panic!("qwen3: latent sparse attention: {e}"));
                 } else {
-                    // One workgroup per score where the device runs workgroup
-                    // reductions: the per-element kernel's lanes are `kv_stride`
-                    // floats apart (4 KB at 0.6B), so a fetched sector serves one
-                    // useful float in eight: measured at a small fraction of the
-                    // bandwidth roof while taking about half of a served step.
-                    // Gated via `model::block::paged_scores_variant`
-                    // (`Op::PagedAttention`), not an ad-hoc
-                    // `caps.workgroup_reductions` check - this engine registers
-                    // both kernels unconditionally, so `coop` is always `Some`.
-                    let (sk, st) = model::block::paged_scores_variant(g, SCORES_B, Some(SCORES_B_WG), b * nh, cap);
-                    s.push(g.dispatch(sk, &[&sc.q, &self.pool_k[l], &sc.bt_buf, &sc.seqlen_buf, &sc.scores], &[b, nh, group, hd, bs, hkv, cap, mbt, fb(scale)], st));
-                    s.push(g.step(SOFTMAX_B, &[&sc.scores, &sc.seqlen_buf, &sc.probs], &[b, nh, cap], b * nh));
-                    s.push(g.step(APPLY_B, &[&sc.probs, &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx], &[b, nh, group, hd, bs, hkv, cap, mbt], b * nh * hd));
+                    let fused = fused_paged_attention(g, causal_chunk, false, hd, b);
+                    if fused && causal_chunk {
+                        // `paged_flash_prefill` (M2.3): one dispatch per (head,
+                        // query-tile), no `scores`/`probs` at all - BR=64 is the
+                        // kernel's own tile size, @workgroup_size(256) its own
+                        // launch shape (both pinned in its own WGSL header).
+                        let ntiles_q = b.div_ceil(64);
+                        let bufs = [&sc.q, &self.pool_k[l], &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx];
+                        let params = [b, nh, nkv, hd, group, bs, mbt];
+                        let native = (!self.gemm.is_reference_pinned()).then(|| block::native_paged_flash_prefill(g, hd, &bufs, &params, nh * ntiles_q)).flatten();
+                        s.push(native.unwrap_or_else(|| g.dispatch(PAGED_FLASH_PREFILL, &bufs, &params, gpu_core::Dispatch::Workgroups(nh * ntiles_q))));
+                    } else if fused {
+                        // M2.7: split-key FlashDecode - the selector's decode
+                        // arm only ever answers `true` at `bsz == 1` (`Op::
+                        // PagedAttentionFused`'s own doc has the measured A/B:
+                        // a real, repeatable win there, a clear loss at
+                        // `bsz >= 4`), so `sc.part_{m,l,o}` (sized for `bsz == 1`
+                        // at construction, `Engine::decode_split_shape`) are
+                        // always wide enough here. Two dispatches replace the
+                        // triad's three, and neither materialises a
+                        // `[bsz, nh, cap]` scores/probs slab.
+                        let (n_splits, tiles_per_split) = decode_split_shape(cap);
+                        s.push(g.dispatch(
+                            PAGED_FLASH_DECODE_SPLIT,
+                            &[&sc.q, &self.pool_k[l], &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.part_m, &sc.part_l, &sc.part_o],
+                            &[b, nh, nkv, hd, group, bs, mbt, n_splits, tiles_per_split],
+                            gpu_core::Dispatch::Workgroups(b * nh * n_splits),
+                        ));
+                        s.push(g.step(PAGED_FLASH_DECODE_COMBINE, &[&sc.part_m, &sc.part_l, &sc.part_o, &sc.ctx], &[b, nh, hd, n_splits], b * nh * 128));
+                    } else if let Some(step) = (!causal_chunk && !self.gemm.is_reference_pinned())
+                        .then(|| block::native_paged_decode_batched(g, false, &[&sc.q, &self.pool_k[l], &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx], &[b, nh, nkv, hd, group, bs, mbt]))
+                        .flatten()
+                    {
+                        s.push(step);
+                    } else {
+                        // One workgroup per score where the device runs workgroup
+                        // reductions: the per-element kernel's lanes are `kv_stride`
+                        // floats apart (4 KB at 0.6B), so a fetched sector serves one
+                        // useful float in eight: measured at a small fraction of the
+                        // bandwidth roof while taking about half of a served step.
+                        // Gated via `model::block::paged_scores_variant`
+                        // (`Op::PagedAttention`), not an ad-hoc
+                        // `caps.workgroup_reductions` check - this engine registers
+                        // both kernels unconditionally, so `coop` is always `Some`.
+                        let (sk, st) = model::block::paged_scores_variant(g, SCORES_B, Some(SCORES_B_WG), b * nh, cap);
+                        s.push(g.dispatch(sk, &[&sc.q, &self.pool_k[l], &sc.bt_buf, &sc.seqlen_buf, &sc.scores], &[b, nh, group, hd, bs, hkv, cap, mbt, fb(scale)], st));
+                        s.push(g.step(SOFTMAX_B, &[&sc.scores, &sc.seqlen_buf, &sc.probs], &[b, nh, cap], b * nh));
+                        s.push(g.step(APPLY_B, &[&sc.probs, &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx], &[b, nh, group, hd, bs, hkv, cap, mbt], b * nh * hd));
+                    }
                 }
             }
             self.quant_once(&mut s, &sc.ctx, hq, b);
@@ -3141,8 +3237,10 @@ impl Engine {
         let mut start = matched as u32 * bs;
         while start < n {
             let embeds = matches!(inputs[start as usize], PrefillInput::Embed(_));
-            let run = inputs[start as usize..].iter().take(chunk as usize).take_while(|i| matches!(i, PrefillInput::Embed(_)) == embeds).count();
+            let limit = chunk.min(self.lsa_chunk_limit(start)) as usize;
+            let run = inputs[start as usize..].iter().take(limit).take_while(|i| matches!(i, PrefillInput::Embed(_)) == embeds).count();
             let cc = run as u32;
+            self.lsa_prepare_chunk(table, start, cc);
             table.reserve(cc, &mut self.alloc).expect("KV pool exhausted");
             let meta = self.chunk_meta(table, start, cc);
             let part = &inputs[start as usize..start as usize + run];
@@ -3194,7 +3292,8 @@ impl Engine {
         let mut out = vec![0f32; prompt.len() * d];
         let mut start = 0u32;
         while start < n {
-            let cc = (n - start).min(chunk);
+            let cc = (n - start).min(chunk).min(self.lsa_chunk_limit(start));
+            self.lsa_prepare_chunk(table, start, cc);
             table.reserve(cc, &mut self.alloc).expect("KV pool exhausted");
             let meta = self.chunk_meta(table, start, cc);
             let hidden = self.run_batched(&meta, Input::Tokens(&prompt[start as usize..(start + cc) as usize]), true);
@@ -3332,6 +3431,9 @@ impl Engine {
         tokens.div_ceil(self.block_size)
     }
     pub(crate) fn release_table(&mut self, t: &mut BlockTable) {
+        if let Some(lsa) = self.lsa.as_mut() {
+            lsa.release(t);
+        }
         t.release(&mut self.alloc);
     }
 
@@ -3623,6 +3725,7 @@ impl Engine {
             let base = table.len();
             let inputs: Vec<u32> = std::iter::once(pending).chain(props.iter().copied()).collect();
             let rows = kk + 1;
+            self.lsa_prepare_chunk(&mut table, base, rows);
             table.reserve(rows, &mut self.alloc).expect("KV pool exhausted");
             let meta = self.chunk_meta(&table, base, rows);
             // `causal_chunk = false`: this verify-forward structurally
@@ -3757,6 +3860,7 @@ impl model::serve::rows::RowsForward for Engine {
                 let n = inputs.len() as u32;
                 assert!(n >= 1 && n <= self.max_batch, "forward_rows: {n} rows for a decoder sized for {} rows per step", self.max_batch);
                 let base = table.len();
+                self.lsa_prepare_chunk(table, base, n);
                 table.reserve(n, &mut self.alloc).expect("KV pool exhausted");
                 let meta = self.chunk_meta(table, base, n);
                 self.run_batched_submit(&meta, Input::Tokens(inputs), false);
